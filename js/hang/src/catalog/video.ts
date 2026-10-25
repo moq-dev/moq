@@ -139,6 +139,12 @@ export const VideoConfigSchema = z.object({
 	// The maximum frame rate of the video in frames per second.
 	framerate: z.optional(z.number()),
 
+	// The most frames that can precede a frame in decode order and follow it in presentation order,
+	// as H.264 max_num_reorder_frames and HEVC sps_max_num_reorder_pics count them. 0 declares that
+	// presentation order is decode order. Absent declares nothing: a consumer that authors decode
+	// times infers them from the timestamps instead. Once declared, it holds for the track's life.
+	reorder: z.optional(u8Schema),
+
 	// The maximum bitrate of the video in bits per second.
 	// TODO: Support up to Number.MAX_SAFE_INTEGER
 	bitrate: z.optional(u53Schema),

@@ -383,7 +383,7 @@ impl<E: DeserializeOwned + Default> Catalog<E> {
 	///
 	/// Fails with [`Error::UnsupportedVersion`](crate::Error::UnsupportedVersion) if the catalog
 	/// needs a newer moq-hang draft than this crate reads.
-	pub fn from_value(value: serde_json::Value) -> Result<Self> {
+	pub(crate) fn from_value(value: serde_json::Value) -> Result<Self> {
 		check_version(value.get("version").and_then(serde_json::Value::as_u64))?;
 		Ok(serde_json::from_value(value)?)
 	}
@@ -701,6 +701,7 @@ mod test {
 				enabled: true,
 				preference: 0,
 				framerate: None,
+				reorder: None,
 				optimize_for_latency: None,
 				container: Container::Legacy,
 				warmup: None,

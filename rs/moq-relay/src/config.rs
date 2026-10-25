@@ -20,6 +20,7 @@ use crate::{auth, cache, cluster, internal, stats, web};
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
+#[derive(Default)]
 pub struct Config {
 	/// Request and transport limits grouped by client and cluster-peer role.
 	#[usage(flatten)]
@@ -89,7 +90,8 @@ pub struct Config {
 	#[serde(default)]
 	pub acme: crate::acme::Config,
 
-	/// Optional public STUN Binding listener for application-selected ICE servers.
+	/// Optional public STUN Binding listener, available with the `stun` feature.
+	#[cfg(feature = "stun")]
 	#[usage(flatten)]
 	#[serde(default)]
 	pub stun: crate::stun::Config,
@@ -117,18 +119,14 @@ pub struct Config {
 	/// them, exiting as soon as they have all left; a second signal exits
 	/// immediately. Zero closes them at once, with no GOAWAY
 	/// they would have no time to act on. Defaults to 10 seconds.
-	#[usage(skip)]
-	#[serde(with = "humantime_serde")]
-	pub drain_timeout: std::time::Duration,
-
 	#[usage(
 		name = "drain-timeout",
 		long = "drain-timeout",
 		env = "MOQ_DRAIN_TIMEOUT",
 		setting = "drain_timeout"
 	)]
-	#[serde(default, rename = "__cli_drain_timeout", skip_serializing_if = "Option::is_none")]
-	drain_timeout_arg: Option<moq_tokio::cli::Duration>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub drain_timeout: Option<moq_tokio::cli::Duration>,
 
 	/// If provided, load the configuration from this file.
 	#[serde(default)]
@@ -145,37 +143,6 @@ pub struct Config {
 	#[serde(default)]
 	#[cfg(feature = "iroh")]
 	pub iroh: moq_tokio::iroh::Config,
-}
-
-impl Default for Config {
-	fn default() -> Self {
-		Self {
-			limits: Default::default(),
-			legacy_session: None,
-			legacy_peer: None,
-			listen: Default::default(),
-			server: None,
-			connect: Default::default(),
-			client: None,
-			quic: Default::default(),
-			log: Default::default(),
-			runtime: Default::default(),
-			cluster: Default::default(),
-			auth: Default::default(),
-			web: Default::default(),
-			acme: Default::default(),
-			stun: Default::default(),
-			stats: Default::default(),
-			cache: Default::default(),
-			internal: Default::default(),
-			drain_timeout: crate::DEFAULT_DRAIN_TIMEOUT,
-			drain_timeout_arg: None,
-			file: None,
-			origins: None,
-			#[cfg(feature = "iroh")]
-			iroh: Default::default(),
-		}
-	}
 }
 
 /// Top-level relay configuration, loadable from CLI arguments, environment
@@ -214,7 +181,9 @@ pub fn spec() -> &'static usage_rs::spec::Spec<'static> {
 impl Config {
 	/// Resolve the shutdown grace period after command-line overrides.
 	pub(crate) fn drain_timeout(&self) -> std::time::Duration {
-		self.drain_timeout_arg.map(Into::into).unwrap_or(self.drain_timeout)
+		self.drain_timeout
+			.map(Into::into)
+			.unwrap_or(crate::DEFAULT_DRAIN_TIMEOUT)
 	}
 
 	/// Parses configuration from CLI arguments, optionally merging with a
@@ -311,6 +280,12 @@ impl Config {
 		env: &usage_rs::config::EnvLayer,
 		file: Option<moq_tokio::cli::FileSource<'_>>,
 	) -> anyhow::Result<()> {
+		#[cfg(not(feature = "stun"))]
+		anyhow::ensure!(
+			env.get("MOQ_STUN_BIND").is_none(),
+			"MOQ_STUN_BIND requires a moq-relay build with the stun feature"
+		);
+
 		#[cfg(not(feature = "iroh"))]
 		for name in [
 			"MOQ_IROH_ENABLED",
@@ -397,8 +372,6 @@ impl Config {
 		self.quic
 			.max_streams
 			.get_or_insert(moq_tokio::quic::DEFAULT_MAX_STREAMS);
-		self.drain_timeout = self.drain_timeout();
-		self.drain_timeout_arg = None;
 		Ok(())
 	}
 }
@@ -514,6 +487,7 @@ mod tests {
 		assert!(config.connect.extensions.auth);
 	}
 
+	#[cfg(feature = "stun")]
 	#[test]
 	fn stun_binding_merges_file_and_cli() {
 		if !test_env::Env::without(&["MOQ_STUN_BIND"]).isolate() {
@@ -534,6 +508,18 @@ mod tests {
 		assert!(toml::from_str::<Config>("[stun]\nrate = 10").is_err());
 	}
 
+	#[cfg(not(feature = "stun"))]
+	#[test]
+	fn a_stun_listener_requires_the_feature() {
+		assert!(toml::from_str::<Config>("[stun]\nbind = \"127.0.0.1:3478\"").is_err());
+		assert!(Config::parse_and_merge(["moq-relay", "--stun-bind=127.0.0.1:3478"]).is_err());
+		let cli = usage_rs::config::CliLayer::new(std::iter::empty::<(String, String)>());
+		let env = usage_rs::config::EnvLayer::new([("MOQ_STUN_BIND".to_string(), "127.0.0.1:3478".to_string())]);
+		let error = Config::default().merge_into(&cli, &env, None).unwrap_err();
+		assert!(error.to_string().contains("MOQ_STUN_BIND requires"), "{error}");
+	}
+
+	#[cfg(feature = "stun")]
 	#[test]
 	fn stun_binding_merges_the_environment() {
 		if !test_env::Env::default().set("MOQ_STUN_BIND", "[::1]:3478").isolate() {
@@ -913,6 +899,24 @@ root = ["ca.pem"]
 		}
 	}
 
+	/// Stats enabled from the CLI alone build at the producer's default interval:
+	/// the parser fills a field it skips with its type's zero, not `Default`.
+	#[tokio::test]
+	async fn cli_stats_build_without_an_interval() {
+		if !test_env::Env::without(&["MOQ_STATS_ENABLED", "MOQ_STATS_INTERVAL"]).isolate() {
+			return;
+		}
+
+		let args = [
+			std::ffi::OsString::from("moq-relay"),
+			std::ffi::OsString::from("--stats-enabled"),
+		];
+		let config = Config::parse_and_merge(args).expect("config load");
+		assert!(config.stats.enabled);
+		let cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster");
+		config.stats.build(cluster.origin.clone()).expect("stats build");
+	}
+
 	/// Bare defaults loaded from TOML survive when the CLI does not mention them.
 	#[test]
 	fn cli_does_not_clobber_toml_stats_enabled() {
@@ -940,7 +944,7 @@ linger = "2m"
 			config.stats.enabled,
 			"TOML's stats.enabled=true must not be clobbered by CLI defaults"
 		);
-		assert_eq!(config.stats.interval(), std::time::Duration::from_secs(5));
+		assert_eq!(config.stats.interval(), Some(std::time::Duration::from_secs(5)));
 		assert_eq!(config.stats.node.as_deref(), Some("localhost"));
 		assert_eq!(config.stats.depth, 2);
 		assert_eq!(config.stats.linger(), Some(std::time::Duration::from_secs(120)));
@@ -953,7 +957,7 @@ linger = "2m"
 		];
 		let config = Config::parse_and_merge(args).expect("config load");
 		assert_eq!(config.stats.linger(), Some(std::time::Duration::from_secs(30)));
-		assert_eq!(config.stats.interval(), std::time::Duration::from_millis(250));
+		assert_eq!(config.stats.interval(), Some(std::time::Duration::from_millis(250)));
 	}
 
 	/// Bare runtime defaults loaded from TOML survive when the CLI omits them.
@@ -1026,7 +1030,7 @@ ws = false
 	#[test]
 	fn cache_duration_serde_round_trip() {
 		let set: cache::Config = toml::from_str(r#"duration = "30s""#).expect("deserialize Some");
-		assert_eq!(set.duration, Some(std::time::Duration::from_secs(30)));
+		assert_eq!(set.duration, Some(std::time::Duration::from_secs(30).into()));
 
 		let unset: cache::Config = toml::from_str("").expect("deserialize absent");
 		assert_eq!(unset.duration, None);
@@ -1300,7 +1304,7 @@ ws = false
 				toml: "[cache]\nduration = \"30s\"\n",
 				cli: &[],
 				key: "cache.duration",
-				check: |config| assert_eq!(config.cache.duration, Some(std::time::Duration::from_secs(30))),
+				check: |config| assert_eq!(config.cache.duration, Some(std::time::Duration::from_secs(30).into())),
 				source: "duration",
 			},
 			Case {
@@ -1308,7 +1312,7 @@ ws = false
 				toml: "[connect]\ntimeout = \"2m\"\n",
 				cli: &[],
 				key: "connect.timeout",
-				check: |config| assert_eq!(config.connect.timeout, Some(std::time::Duration::from_secs(120))),
+				check: |config| assert_eq!(config.connect.timeout, Some(std::time::Duration::from_secs(120).into())),
 				source: "timeout",
 			},
 			Case {
@@ -1588,8 +1592,8 @@ ws = false
 		}
 	}
 
-	/// A QUIC-LB nonce with no server id stops startup from TOML, and `lb_id` no
-	/// longer hides `load_balancer`.
+	/// A QUIC-LB nonce with no server id stops startup from TOML, and CLI
+	/// assignments override the same nested fields.
 	///
 	/// The CLI flag pair already requires `--listen-quic-lb-id`, so this does not
 	/// add a second command-line error for that spelling.
@@ -1605,21 +1609,9 @@ ws = false
 
 		refuse_quic_lb(
 			"nonce.toml",
-			"[listen]\nlb_nonce = 8\n",
+			"[listen.lb]\nnonce = 8\n",
 			&[],
 			"requires --listen-quic-lb-id",
-		);
-		refuse_quic_lb(
-			"both.toml",
-			"[listen]\nlb_id = \"ab\"\nload_balancer = { id = \"cd\", nonce = 4 }\n",
-			&[],
-			"cannot be combined",
-		);
-		refuse_quic_lb(
-			"cli-id.toml",
-			"[listen]\nload_balancer = { id = \"cd\", nonce = 4 }\n",
-			&["--listen-quic-lb-id", "ee"],
-			"cannot be combined",
 		);
 
 		#[cfg(feature = "quic")]
@@ -1627,11 +1619,22 @@ ws = false
 			let dir = std::env::temp_dir().join("moq-relay-lb-refusals");
 			std::fs::create_dir_all(&dir).unwrap();
 			let path = dir.join("typed.toml");
-			std::fs::write(&path, "[listen]\nload_balancer = { id = \"ab\", nonce = 8 }\n").unwrap();
-			let config = Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), path.into()]).expect("typed");
-			let load_balancer = config.listen.load_balancer().expect("typed load_balancer");
-			assert_eq!(load_balancer.id, "ab".parse().unwrap());
-			assert_eq!(load_balancer.nonce, 8);
+			std::fs::write(&path, "[listen.lb]\nid = \"ab\"\nnonce = 8\n").unwrap();
+			let config =
+				Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), path.clone().into()]).expect("typed");
+			let load_balancer = config.listen.lb;
+			assert_eq!(load_balancer.id, Some("ab".parse().unwrap()));
+			assert_eq!(load_balancer.nonce, Some(8));
+			let config = Config::parse_and_merge([
+				std::ffi::OsString::from("moq-relay"),
+				path.into(),
+				"--listen-quic-lb-id".into(),
+				"ee".into(),
+			])
+			.expect("CLI overrides the same nested config field");
+			let load_balancer = config.listen.lb;
+			assert_eq!(load_balancer.id, Some("ee".parse().unwrap()));
+			assert_eq!(load_balancer.nonce, Some(8));
 		}
 	}
 
@@ -1646,22 +1649,5 @@ ws = false
 		}
 		let err = Config::parse_and_merge(["moq-relay"]).expect_err("env nonce without id");
 		assert!(err.to_string().contains("--listen-quic-lb-id"), "{err}");
-	}
-
-	/// A server id from the environment cannot be combined with a file's `load_balancer`.
-	#[test]
-	fn quic_lb_env_id_conflicts_with_the_file() {
-		if !test_env::Env::without(QUIC_LB_ENV)
-			.set("MOQ_LISTEN_QUIC_LB_ID", "ab")
-			.isolate()
-		{
-			return;
-		}
-		refuse_quic_lb(
-			"env-id.toml",
-			"[listen]\nload_balancer = { id = \"cd\", nonce = 4 }\n",
-			&[],
-			"cannot be combined",
-		);
 	}
 }

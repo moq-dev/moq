@@ -1,6 +1,7 @@
 //! Credit through the io_uring driver: leases keep the connection window spent
-//! until consumed, a stuck window evicts the lowest-priority stream, and a
-//! chunked write takes no more from its buffer than the peer's window admits.
+//! until consumed, a stuck window evicts the lowest-priority stream, a chunked
+//! write takes no more from its buffer than the peer's window admits, and a tiny
+//! frame keeps no more memory than its own bytes.
 //!
 //! Unsupported local kernels skip loudly; CI_STRICT makes CI refuse them.
 
@@ -325,4 +326,65 @@ fn chunked_writes_stop_at_the_window() {
 				.expect("finished");
 		})
 		.expect("worker");
+}
+
+/// A tiny datagram, and a tiny stream frame taken from a lease, each reach the
+/// application in an allocation of their own rather than as a slice of the
+/// receive completion they arrived in, which their credit does not pay for.
+#[test]
+fn tiny_frames_do_not_pin_receive_buffers() {
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+	let (server, client, dial) = endpoints(&handle, WINDOW, WINDOW);
+
+	worker
+		.block_on(async move {
+			let mut dialed = client.connect(&dial).await.expect("dial");
+			let mut accepted = server.accept().await.expect("accept");
+
+			dialed
+				.send_datagram(Bytes::from_static(b"x"), Default::default())
+				.expect("send_datagram");
+			let datagram = within(
+				&handle,
+				"the datagram",
+				std::future::poll_fn(|cx| accepted.poll_recv_datagram(cx)),
+			)
+			.await
+			.expect("recv_datagram");
+			assert!(owns_exactly(datagram));
+
+			let send = std::future::poll_fn(|cx| dialed.poll_open_uni(cx))
+				.await
+				.expect("open_uni");
+			write(&handle, send, 1);
+			let mut recv = within(
+				&handle,
+				"the stream",
+				std::future::poll_fn(|cx| accepted.poll_accept_uni(cx)),
+			)
+			.await
+			.expect("accept_uni");
+			let taken = within(
+				&handle,
+				"stream data",
+				std::future::poll_fn(|cx| {
+					recv.poll_lease(cx, 1).map_ok(|mut lease| {
+						let len = lease.chunk().len();
+						lease.copy_to_bytes(len)
+					})
+				}),
+			)
+			.await
+			.expect("lease");
+			assert_eq!(taken, &[7][..]);
+			assert!(owns_exactly(taken));
+		})
+		.expect("worker");
+}
+
+/// Whether `bytes` is the only handle on an allocation of exactly its own size.
+fn owns_exactly(bytes: Bytes) -> bool {
+	let len = bytes.len();
+	bytes.try_into_mut().is_ok_and(|bytes| bytes.capacity() == len)
 }

@@ -137,6 +137,15 @@ class CatalogProducer:
         """Remove an application catalog section if present."""
         self._inner.remove_section(name)
 
+    def finish(self) -> None:
+        """Finish the catalog, which ends the broadcast's content.
+
+        Finish every track first. The broadcast stays announced and keeps serving its
+        finished tracks to late subscribers until its ``close`` takes it offline; how long
+        to keep it up is yours to decide.
+        """
+        self._inner.finish()
+
 
 class TrackProducer:
     """Publish encoded media frames on a single track, one payload at a time.

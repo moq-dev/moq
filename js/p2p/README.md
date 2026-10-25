@@ -1,5 +1,7 @@
 # @moq/p2p
 
+Private workspace package, exercised by `test/p2p`; it is not published.
+
 A WebTransport-shaped MoQ transport over one reliable ordered WebRTC data channel.
 Applications own signaling, ICE configuration, admission, and the `RTCPeerConnection`.
 The transport owns its data channel. Closing it leaves the peer connection open.

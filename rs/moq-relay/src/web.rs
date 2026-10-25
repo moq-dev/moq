@@ -191,12 +191,18 @@ pub struct Addrs {
 	pub https: Option<net::SocketAddr>,
 }
 
+/// The implementation WebSocket sessions advertise in SETUP, or `None` for the library's.
+#[derive(Clone, Default)]
+#[cfg_attr(not(feature = "websocket"), allow(dead_code, reason = "websocket-only"))]
+pub(crate) struct Implementation(pub Option<String>);
+
 /// Run a HTTP server using Axum
 pub struct Web {
 	state: Arc<WebState>,
 	config: Config,
 	versions: moq_net::Versions,
 	extensions: moq_net::setup::Extensions,
+	implementation: Implementation,
 	health: moq_tokio::accept::Health,
 	http_listener: Option<net::TcpListener>,
 	https_listener: Option<net::TcpListener>,
@@ -229,6 +235,7 @@ impl Web {
 			config,
 			versions: moq_net::Versions::all(),
 			extensions: Default::default(),
+			implementation: Default::default(),
 			health: moq_tokio::accept::Health::new("web"),
 			http_listener: None,
 			https_listener: None,
@@ -311,6 +318,12 @@ impl Web {
 	/// Choose which moq-transport extensions WebSocket sessions offer in SETUP.
 	pub(crate) fn with_extensions(mut self, extensions: moq_net::setup::Extensions) -> Self {
 		self.extensions = extensions;
+		self
+	}
+
+	/// Set the implementation WebSocket sessions advertise in SETUP; empty advertises nothing.
+	pub fn with_implementation(mut self, implementation: impl Into<String>) -> Self {
+		self.implementation = Implementation(Some(implementation.into()));
 		self
 	}
 
@@ -405,6 +418,7 @@ impl Web {
 
 		app.layer(Extension(self.versions.clone()))
 			.layer(Extension(self.extensions))
+			.layer(Extension(self.implementation.clone()))
 			.with_state(self.state.clone())
 	}
 
@@ -574,11 +588,12 @@ fn build_acme_config(
 	root: &[PathBuf],
 ) -> anyhow::Result<Arc<rustls::ServerConfig>> {
 	let mut tls = moq_tokio::tls::Listen::default();
-	tls.resolver = Some(resolver);
 	tls.root = root.to_vec();
 
 	let alpn = vec![b"h2".to_vec(), b"http/1.1".to_vec(), b"acme-tls/1".to_vec()];
-	tls.server_config(alpn).context("failed to build https TLS config")
+	moq_tokio::tls::Serve::resolver(resolver, &tls)?
+		.config(alpn)
+		.context("failed to build https TLS config")
 }
 
 fn https_watch_paths(cert: &[PathBuf], key: &[PathBuf], root: &[PathBuf]) -> Vec<PathBuf> {
@@ -2337,10 +2352,10 @@ mod tests {
 				let (ca, cert, key) = make_certs(&certs);
 				let mut config = crate::Config::default();
 				config.listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
-				config.listen.timeout = Some(std::time::Duration::ZERO);
+				config.listen.timeout = Some((std::time::Duration::ZERO).into());
 				config.web.ws = true;
 				config.auth.public = vec![moq_auth::Pattern::all()];
-				config.drain_timeout = DRAIN_WINDOW;
+				config.drain_timeout = Some((DRAIN_WINDOW).into());
 				if tls {
 					config.web.https.listen = Some("127.0.0.1:0".parse().unwrap());
 					config.web.https.cert = vec![cert];

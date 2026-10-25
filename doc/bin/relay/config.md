@@ -19,6 +19,7 @@ Precedence is CLI, then env, then file, then defaults.
 bind = "[::]:443"                    # QUIC (UDP), as --listen. Omit for a stream-only relay.
 version = ["moq-lite-05"]            # Restrict accepted versions. Omit for all.
 timeout = "10s"                      # Handshake deadline. "0" waits forever.
+implementation = "edge/1"            # SETUP name for the relay. Omit for moq-relay/<v> moq-net-rs/<v>, "" to send none.
 
 [listen.reset]
 secret = "/etc/moq/reset.key"        # File holding 64 hex chars. Omit for a random key.
@@ -49,20 +50,26 @@ admission, so a peer that connects and never speaks, or whose admission never
 gets an answer, is closed instead of held open by keep-alives. An HTTP read's
 admission is bounded by the same value from the request's arrival.
 
+`implementation` names the relay in its SETUP, on accepted sessions and cluster dials
+alike. A client that advertises its own name (moq-lite-05+ or any moq-transport draft)
+reaches the [auth server](/bin/relay/auth#the-contract) with it as `implementation`,
+which is where to count client versions; older clients arrive without one.
+
 `reset.secret` lets a relay restarted on the same address reset its
 predecessor's QUIC connections, so clients reconnect at once instead of
 waiting out the idle timeout. Keep it secret, and give it to one relay
 only: any holder resets every other holder's connections, so live relays behind
 one address would reset each other's clients unless the load balancer routes by
-connection ID (`lb_id`, QUIC-LB). Relays on different addresses gain nothing from sharing
+connection ID (`[listen.lb] id`, QUIC-LB). Relays on different addresses gain nothing from sharing
 it, since a client accepts a reset only from its relay's address.
 Create one with `openssl rand -hex 32 > reset.key`.
 
 A setting no configured listener reads stops startup rather than being ignored.
-A stream-only relay refuses `preferred_v4`, `preferred_v6`, `lb_id` (or `load_balancer`), and
+A stream-only relay refuses `preferred_v4`, `preferred_v6`, `lb.id`, and
 `reset.secret`, which only QUIC reads, and a `[listen.tls]` `cert`, `key`, or `generate` unless
 `tcp.tls` serves it.
-`lb_nonce` needs `lb_id`. `lb_id` and `lb_nonce` cannot be combined with `load_balancer`.
+`[listen.lb] nonce` needs an `id` in the same table; unset nonce uses 8.
+The `--listen-quic-lb-id` and `--listen-quic-lb-nonce` flags update that table.
 `unix.allow` needs `unix.bind`.
 
 ## \[quic]
@@ -74,21 +81,24 @@ Transport tuning, applied to accepted and dialed connections alike.
 congestion_control = "delay"         # "delay" (BBR, the default), "loss" (CUBIC), or "none".
 max_streams = 10000                  # Concurrent streams per connection, bidi and uni; 0 is refused. Default.
 idle_timeout = "10s"                 # Drop a connection after this long with nothing on it. Default.
-keep_alive = "3s"                    # Ping interval; "0s" disables it. iroh still pings at least every 5s. Default.
+keep_alive = "3s"                    # Ping interval; "0s" disables it. iroh refuses zero and keeps a separate 5s path heartbeat. Default.
 gso = true                           # UDP segmentation offload. iroh cannot turn it off.
 mtu_discovery = false                # Path MTU discovery. Default.
 receive_window = 134217728           # Whole-connection window, in bytes. Default (128 MiB).
 stream_receive_window = 4194304      # Per-stream window, in bytes. Default (4 MiB).
 send_window = 16777216               # Unacknowledged outgoing data, in bytes. Default (16 MiB).
 qlog = "/var/log/moq/qlog"           # Existing directory. Needs the `qlog` build feature.
-keylog = false                       # Write TLS secrets to the file SSLKEYLOGFILE names. Default.
+# keylog = "/private/keys.log"       # Explicit secret log path; unset is off.
 ```
 
 `congestion_control = "none"` runs no congestion control and no pacing. It is
 meant for tests and controlled links, where nothing else shares the path.
 
-`SSLKEYLOGFILE` alone writes nothing: set `keylog = true` too, and only while
-debugging, since the file decrypts every captured session.
+Set `keylog` only while debugging, since the file decrypts every captured session.
+Tokio and io\_uring open the configured path at initialization. New Unix files are
+mode 0600; an existing file readable by group or others is refused without changing
+its permissions. `SSLKEYLOGFILE` does not configure native relay logging.
+Iroh currently refuses an explicit keylog path when enabled.
 
 `idle_timeout` is how long a peer that vanished without a close keeps its
 sessions, and so its [cluster routes](/bin/relay/cluster#failure-detection).
@@ -138,12 +148,12 @@ not throttled by `[quic]` limits sized for one viewer, for example
 their transport's own limits.
 
 These are the defaults. Each subscription and FETCH holds a stream on moq-lite
-and on moq-transport draft 17 and later, so `[quic]` or `[limits.peer.quic]`
-`max_streams` bounds them there, and a peer past it waits rather than fails.
+and on moq-transport draft 17 and later, as does each PUBLISH a peer's track
+listing gets, so `[quic]` or `[limits.peer.quic]` `max_streams` bounds them
+there, and a peer past it waits rather than fails.
 On drafts 14 to 16, `announces` and `requests` together size the request
 window instead, which every request counts against, so very small values can
-prevent other requests from progressing. On later drafts `requests` bounds the
-PUBLISHes a peer's track listings hold; the rest are skipped. Size peer limits
+prevent other requests from progressing. Size peer limits
 for the combined traffic they carry, and use session peak counters to check
 announcement and subscription headroom. Exceeding `announces` closes the session
 with `TOO_MANY_REQUESTS`; reconnecting with the same load will exceed it again.
@@ -225,15 +235,19 @@ With no usable certificate in `cache` (missing, expired, missing a domain, or
 from another directory), startup answers only the challenge until one is
 issued; QUIC, the other routes, and readiness wait for it, and startup fails
 with the ACME error once `timeout` runs out. It also fails after 3 failed
-validations within an hour, counting earlier starts recorded in `cache`, so a
-restart loop stops short of Let's Encrypt's limit of 5 per hostname per hour. Renewal runs in the background
-well before expiry and reaches every listener on its next handshake. A failed
-renewal keeps the current certificate serving and retries.
+validations within an hour, counting earlier starts and renewals recorded in
+`cache`, so a restart loop stops short of Let's Encrypt's limit of 5 per
+hostname per hour. Renewal runs in the background well before expiry and
+reaches every listener on its next handshake. A failed renewal keeps the
+current certificate serving and retries, pausing once the same budget is spent
+until the oldest failure is an hour old; a restart in the meantime still serves
+the cached certificate.
 
 ## \[stun]
 
-Applications can use the relay as an explicitly selected STUN server for WebRTC
-ICE. The listener has its own UDP port and is disabled unless configured:
+Build with `cargo install moq-relay --features stun` to use the relay as an
+explicitly selected STUN server for WebRTC ICE. This feature is off by default.
+The listener has its own UDP port and is disabled unless configured:
 
 ```toml
 [stun]

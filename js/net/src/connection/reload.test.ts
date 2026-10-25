@@ -10,6 +10,7 @@ import * as Lite from "../lite/index.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
+import { nextTask } from "../util/yield.ts";
 import { wireOf } from "../wire.ts";
 import { type AcceptProps, accept as acceptSession } from "./index.ts";
 import { pumpAnnounced, Redirects, Reload, type ReloadProps } from "./reload.ts";
@@ -246,46 +247,49 @@ test("an announced request follows the reconnect on the same handle", async () =
 	}
 });
 
-test("a reload that gives up keeps requests pending until it is disposed", async () => {
+test("an ended auth handle gives up instead of retrying", async () => {
 	const original = globalThis.WebTransport;
 	const url = new URL("https://example.com/");
+	const servers: Promise<{ abort(): void }>[] = [];
 	const stub = function StubWebTransport() {
 		const pair = createMockTransportPair(Lite.ALPN_06);
-		void accept(pair.server, url).then(() => {
-			pair.server.close({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" });
-		});
+		servers.push(accept(pair.server, url));
 		return pair.client;
 	};
 	globalThis.WebTransport = stub as unknown as typeof WebTransport;
+	const clock = new Manual();
+	const installed = clock.install();
+	// Bounded by task turns rather than wall time, advancing the clock a millisecond per turn
+	// so a reconnect, if the loop tried one, would be dialed well within the bound.
+	const until = async (done: () => boolean) => {
+		for (let i = 0; i < 100 && !done(); i++) {
+			await nextTask();
+			await clock.advance(Nano.fromMilli(Milli(1)));
+		}
+		expect(done()).toBe(true);
+	};
 
-	const origin = new OriginProducer();
+	// An unbounded retry window, so only the ended handle can stop the loop.
 	const reload = new Reload({
 		enabled: true,
 		url,
 		websocket: { enabled: false },
 		delay: { initial: Milli(1), multiplier: 2, max: Milli(1), timeout: Milli(0) },
-		consume: origin,
 	});
-
-	let request = origin.consume().request(Path.from("wanted"));
-
+	const warned = spyOn(console, "warn").mockImplementation(() => {});
 	try {
-		// These credentials will never work, but a new URL can recover the same loop, so a
-		// request stays pending through the gap rather than going unroutable. One a refused
-		// session answered before it closed ended with it, so ask afresh.
-		await waitUntil(() => reload.error.peek() !== undefined);
-		expect(reload.closed.peek()).toBeUndefined();
-		request.close();
-		request = origin.consume().request(Path.from("wanted"));
-		expect(request.unroutable.peek()).toBe(false);
+		await until(() => reload.established.peek() !== undefined);
+		const aborted = new Error("auth handle aborted");
+		reload.auth.abort(aborted);
+		(await servers[0])?.abort();
 
-		reload.close();
-		await waitUntil(() => request.unroutable.peek() === true);
-		expect(request.unroutable.peek()).toBe(true);
+		await until(() => reload.error.peek() !== undefined);
+		expect(reload.error.peek()).toBe(aborted);
+		expect(servers.length).toBe(1);
 	} finally {
-		request.close();
+		warned.mockRestore();
 		reload.close();
-		origin.close();
+		installed.close();
 		globalThis.WebTransport = original;
 	}
 });

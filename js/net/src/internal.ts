@@ -16,7 +16,7 @@ import type { Frame, Consumer as GroupConsumer, Producer as GroupProducer } from
 import { isAnonymous, type Route } from "./hop.ts";
 import * as Path from "./path.ts";
 import type { Timestamp } from "./time.ts";
-import type { Groups, Info, Location, Producer, Request, Subscriber, Subscription } from "./track.ts";
+import type { Demand, Groups, Info, Position, Producer, Request, Subscriber, Subscription } from "./track.ts";
 import type { Advertised, Advertisements } from "./wire.ts";
 
 /** Normalize public group bounds into an inclusive start and exclusive end. */
@@ -183,16 +183,14 @@ export type Recv =
 	/** The track aborted. */
 	| { kind: "error"; error: Error };
 
-/** A package-internal frame read the wire publisher completes once written. */
+/** A package-internal frame read as the group stores it. */
 export interface ReadGroupFrame {
 	/** Frame sequence within the group. */
 	sequence: number;
-	/** Frame returned to the publisher. */
+	/** The frame, holding its DEFLATE slice on a compressed read. */
 	frame: Frame;
-	/** The stored slice's declared plain size, on compressed wire reads. */
+	/** The stored slice's declared plain size, on compressed reads. */
 	inflated?: number;
-	/** Mark the frame delivered or deliberately skipped by the wire publisher. */
-	complete(): void;
 }
 
 /** One past the highest sequence written under a broadcast track's name, by any of its producers. */
@@ -347,18 +345,18 @@ export interface ResumeSource {
 	/** The serving copy's declared start, raised to its cursor floor, or `"pending"` until resolved. */
 	start(): number | "pending" | undefined;
 	/** The logical track's declared exclusive end, as the first copy to know it declared it. */
-	end(): Location | undefined;
+	end(): Position | undefined;
 	/** Resolve with the logical track's exclusive end once known. */
-	finished(): Promise<Location>;
+	finished(): Promise<Position>;
 	/** The serving copy's newest buffered frame, which a wire answer names as its edge. */
-	bufferedLargest(): Location | undefined;
+	bufferedLargest(): Position | undefined;
 	/** The serving copy's largest location now, and whether it can still advance. */
-	peekLargest(): { largest?: Location; ended: boolean };
+	peekLargest(): { largest?: Position; ended: boolean };
 	/**
 	 * The serving copy's largest location once within the reader's cursor and newer than `seen`,
 	 * or undefined once the logical track ends.
 	 */
-	largest(seen: Location | undefined): Promise<Location | undefined>;
+	largest(seen: Position | undefined): Promise<Position | undefined>;
 	/** An independent subscriber to the serving copy. */
 	fork(options?: Subscription): Subscriber;
 	/** Let go of every copy. */
@@ -381,7 +379,7 @@ export interface TrackRequestOptions {
 export const MAX_DATAGRAMS = 64;
 
 /** The first group an exclusive track end excludes whole: one past the last group that may exist. */
-export function finalSequence(end: Location): number {
+export function finalSequence(end: Position): number {
 	return end.group + (end.frame === 0 ? 0 : 1);
 }
 
@@ -394,7 +392,7 @@ export const hooks: {
 	 * past the grace, or the track closes, since QUIC may deliver a lower group's stream after
 	 * a higher one. Mirrors the Rust `finish_at` on a `received()` copy; assigned by `track.ts`.
 	 */
-	endTrack: (producer: Producer, end: Location) => void;
+	endTrack: (producer: Producer, end: Position) => void;
 	/**
 	 * End a wire subscription's copy cleanly without declaring an end, for a session closed
 	 * locally: a dead route, not finished content, so a resumed reader's replacement route
@@ -402,7 +400,7 @@ export const hooks: {
 	 */
 	releaseTrack: (producer: Producer) => void;
 	/** The producer's largest reported location and its subsequent changes. */
-	producerLargest: (producer: Producer) => Getter<Location | undefined>;
+	producerLargest: (producer: Producer) => Getter<Position | undefined>;
 
 	/** Re-evaluate a live-edge join at this subscriber's copy. */
 	joinSubscriber: (subscriber: Subscriber) => void;
@@ -422,14 +420,11 @@ export const hooks: {
 	/** Have a producer write through a broadcast's sequence namespace for its name. */
 	bindSequence: (producer: Producer, sequence: TrackSequence) => void;
 	/** The newest frame a producer's cache holds, read without subscribing; assigned by `track.ts`. */
-	cachedLargest: (producer: Producer) => Location | undefined;
-	/**
-	 * How long a broadcast finishing now keeps this track servable: its max-age capped by the
-	 * cache window once it closed cleanly, else zero; assigned by `track.ts`.
-	 */
-	linger: (producer: Producer) => Milli;
+	cachedLargest: (producer: Producer) => Position | undefined;
+	/** The publisher priority from a demanded track's committed {@link Info}; assigned by `track.ts`. */
+	demandPriority: (demand: Demand) => number;
 	/** Seed a received track from the publisher's reported edge; assigned by `track.ts`. */
-	reportedLargest: (producer: Producer, largest: Location | undefined) => void;
+	reportedLargest: (producer: Producer, largest: Position | undefined) => void;
 	/** Snapshot the latest group sequence for wire positioning; assigned by `track.ts`. */
 	latestSequence: (subscriber: Subscriber) => number | undefined;
 	/**
@@ -438,7 +433,7 @@ export const hooks: {
 	 */
 	sourceStart: (subscriber: Subscriber) => number | "pending" | undefined;
 	/** The newest frame buffered for a subscriber, which wire answers name; assigned by `track.ts`. */
-	bufferedLargest: (subscriber: Subscriber) => Location | undefined;
+	bufferedLargest: (subscriber: Subscriber) => Position | undefined;
 	/** Call `fn` with a group's frame count now and on every change; assigned by `group.ts`. */
 	groupProgress: (group: GroupProducer, fn: (total: number) => void) => Dispose;
 	/**
@@ -479,7 +474,7 @@ export const hooks: {
 	/** Whether a group may still land on the live feed of the subscriber's track; see {@link Land}. */
 	mayLand: (subscriber: Subscriber, land: Land) => boolean;
 	/** A subscriber's largest location now, and whether it can still advance. */
-	peekLargest: (subscriber: Subscriber) => { largest?: Location; ended: boolean };
+	peekLargest: (subscriber: Subscriber) => { largest?: Position; ended: boolean };
 	/** Wake once a subscriber's largest location or its end may have changed; fires at most once. */
 	largestChanged: (subscriber: Subscriber, fn: () => void) => Dispose;
 	/** A subscriber that reads its routes' copies through `source` instead of a buffer of its own. */
@@ -488,16 +483,10 @@ export const hooks: {
 		subscription: Subscription | undefined,
 		source: (shell: ResumeShell) => ResumeSource,
 	) => Subscriber;
-	/** Wake once a subscriber's group cursor may read differently; assigned by `track.ts`. */
+	/** Wake once a subscriber's group cursor may read differently, including when the track declares its end; assigned by `track.ts`. */
 	groupChanged: (subscriber: Subscriber, fn: () => void) => Dispose;
 	/** Apply a FETCH reader budget without inheriting SUBSCRIBE's zero default. */
 	fetchBudget: (subscriber: Subscriber, maxDelay: Milli | undefined) => void;
-	/**
-	 * Replace a serving cursor. An omitted start keeps the current floor; a provided start
-	 * can lower it. Wire publishers apply SUBSCRIBE_UPDATE here rather than through
-	 * `setGroups`, which never rewinds.
-	 */
-	replaceGroups: (subscriber: Subscriber, groups: Groups) => void;
 	/**
 	 * Bind a group to its track's timedness, so a frame whose timestamp disagrees is refused.
 	 * Throws `TimestampMismatch` if a buffered frame already disagrees.
@@ -543,10 +532,8 @@ export const hooks: {
 	expireGroup: (group: GroupConsumer, expiry: Expiry) => void;
 	/** Carry a handed-out group across its logical track's route changes. */
 	recoverGroup: (group: GroupConsumer, recover: GroupRecover) => void;
-	/** Start a group operation unless the handed-out group has expired, and stop it if the group expires mid-flight. */
-	guardGroup: <T>(group: GroupConsumer, operation: () => Promise<T>) => Promise<T>;
-	/** Read a frame the wire publisher completes (or skips) once written. */
-	readGroupFrame: (group: GroupConsumer, from?: number, compressed?: boolean) => Promise<ReadGroupFrame | undefined>;
+	/** Read the next frame, as its stored DEFLATE slice when `compressed`, so a lite-07 publisher forwards it without inflating. */
+	readGroupFrame: (group: GroupConsumer, compressed: boolean) => Promise<ReadGroupFrame | undefined>;
 	/** Make an evicted mirror terminal while its track timeline still contains it. */
 	evictGroup: (group: GroupConsumer) => void;
 	/** Attach the origin advertisement of a created broadcast. */
@@ -594,7 +581,7 @@ export const hooks: {
 	cachedLargest: () => {
 		throw new Error("track.ts not loaded");
 	},
-	linger: () => {
+	demandPriority: () => {
 		throw new Error("track.ts not loaded");
 	},
 	reportedLargest: () => {
@@ -669,9 +656,6 @@ export const hooks: {
 	fetchBudget: () => {
 		throw new Error("track.ts not loaded");
 	},
-	replaceGroups: () => {
-		throw new Error("track.ts not loaded");
-	},
 	writeDatagram: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -724,9 +708,6 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	recoverGroup: () => {
-		throw new Error("group.ts not loaded");
-	},
-	guardGroup: () => {
 		throw new Error("group.ts not loaded");
 	},
 	readGroupFrame: () => {

@@ -36,8 +36,8 @@ export { Credential } from "./credential.ts";
 export * as Datagram from "./datagram.ts";
 export type { Name } from "./derive.ts";
 export { type Code, Failure } from "./failure.ts";
-/** Producing generations mint an epoch; consuming generations bind a discovered one. */
-export * as Generation from "./generation.ts";
+/** Producing generations mint an epoch; consuming generations bind a discovered one. Types only: a {@link Credential} makes them. */
+export type * as Generation from "./generation.ts";
 /** Grouped-frame producer and consumer for one group identity. */
 export * as Group from "./group.ts";
 export { MAX_DATAGRAM_PLAINTEXT, MAX_GROUPED_PLAINTEXT, SECRET_LEN } from "./limits.ts";

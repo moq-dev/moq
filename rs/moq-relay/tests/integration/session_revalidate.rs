@@ -239,10 +239,12 @@ impl Fixture {
 fn client_at(bind: &str) -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
-	config.once = Some(true);
-	config.websocket.delay = Some(Duration::ZERO);
+	config.websocket.delay = Some((Duration::ZERO).into());
 	config.bind = Some(bind.parse().expect("parse bind"));
-	config.init(Default::default()).expect("client init")
+	config
+		.init(Default::default())
+		.expect("client init")
+		.with_reconnect(false)
 }
 
 async fn connect(url: url::Url, bind: &str) -> moq_tokio::Connection {

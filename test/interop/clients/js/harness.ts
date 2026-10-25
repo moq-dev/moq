@@ -79,9 +79,10 @@ export const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve
  * Serve the prebuilt page on localhost, a secure context so WebTransport and WebCodecs are enabled.
  *
  * `interop.sh` builds the page into its run directory, so a concurrent run's rebuild cannot empty
- * it mid-load; outside a harness run, it is vite's default `dist/`.
+ * it mid-load; outside a harness run, it is vite's default `dist/`. `files` serves each path from a
+ * file of its own.
  */
-export function serve(): { origin: string; stop: () => void } {
+export function serve(files: Record<string, string> = {}): { origin: string; stop: () => void } {
 	const run = process.env.HARNESS_RUN_DIR;
 	const root = run ? join(run, "js-dist") : join(new URL(".", import.meta.url).pathname, "dist");
 	const server = Bun.serve({
@@ -89,7 +90,7 @@ export function serve(): { origin: string; stop: () => void } {
 		async fetch(req) {
 			let path = new URL(req.url).pathname;
 			if (path === "/") path = "/index.html";
-			const file = Bun.file(join(root, path));
+			const file = Bun.file(files[path] ?? join(root, path));
 			if (await file.exists()) return new Response(file);
 			return new Response(Bun.file(join(root, "index.html"))); // SPA fallback
 		},
