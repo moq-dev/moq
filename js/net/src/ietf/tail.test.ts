@@ -13,7 +13,7 @@ import { Subscribe, SubscribeOk } from "./subscribe.ts";
 import { Subscriber } from "./subscriber.ts";
 import { ALPN, Version } from "./version.ts";
 
-const VERSION = Version.DRAFT_19;
+const VERSION = Version.DRAFT_18;
 const ALIAS = 9n;
 const TRACK_ENDED = 0x2;
 const INTERNAL_ERROR = 0x0;
@@ -53,7 +53,7 @@ function groupStream(subscriber: Subscriber, groupId: number, flags = FLAGS) {
 
 /** A subscriber with one track subscribed and answered; the test plays the publisher. */
 async function subscribed(largest?: number) {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const session = new NativeSession(pair.server, VERSION, true);
 	const subscriber = new Subscriber({ session });
 	const reader = subscriber

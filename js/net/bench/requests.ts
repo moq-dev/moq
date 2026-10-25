@@ -271,7 +271,7 @@ for (const survivor of [false, true])
 console.log("namespace_update,draft,namespaces,subscribers,update_us");
 for (const [version, alpn] of [
 	[Version.DRAFT_18, ALPN.DRAFT_18],
-	[Version.DRAFT_21, ALPN.DRAFT_21],
+	[Version.DRAFT_22, ALPN.DRAFT_22],
 ] as const)
 	for (const namespaces of [1, 32, 128])
 		for (const subscribers of [1, 8]) {

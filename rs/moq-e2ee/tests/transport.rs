@@ -105,7 +105,7 @@ async fn grouped_over_lite() {
 #[tokio::test]
 async fn grouped_over_ietf() {
 	tokio::time::timeout(TEST_TIMEOUT, async {
-		let mut fixture = connect_protected("moq-transport-21".parse().unwrap(), "video").await;
+		let mut fixture = connect_protected("moq-transport-22".parse().unwrap(), "video").await;
 		let mut group = fixture.producer.append_group().unwrap();
 		group
 			.write_frame(Timestamp::from_millis(1).unwrap(), b"ietf-frame")
@@ -145,5 +145,5 @@ async fn datagrams_over_lite() {
 
 #[tokio::test]
 async fn datagrams_over_ietf() {
-	datagram_roundtrip("moq-transport-21").await;
+	datagram_roundtrip("moq-transport-22").await;
 }

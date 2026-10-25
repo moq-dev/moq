@@ -75,7 +75,6 @@ export interface OriginProducer {
 /** The protocol-facing operations behind an origin consumer. */
 export interface OriginConsumer {
 	routes(path: Path.Valid): boolean;
-	readonly broadcasts: Getter<ReadonlyMap<Path.Valid, broadcast.Consumer> | undefined>;
 	readonly advertised: Getter<Advertisements | undefined>;
 	/** The announced local broadcast at `path`, when it is the route peers are offered there.
 	 * A request naming an `epoch` only matches a route serving it. */

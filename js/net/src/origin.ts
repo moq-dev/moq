@@ -1637,8 +1637,6 @@ export class Consumer {
 		);
 		registerWire(this, {
 			routes: (path) => this.#routes(scope.path(path)),
-			broadcasts:
-				scope === Scope.all ? state.local : new Derived([state.local], (local) => scope.projectPaths(local)),
 			advertised:
 				scope === Scope.all
 					? state.originated
