@@ -44,12 +44,13 @@ export type SourceType = "camera" | "screen" | "file";
 /**
  * When to announce the broadcast. Nobody can see or subscribe to it until it is announced.
  *
- * `always` announces immediately, `never` never announces, and `source` waits until media is
- * actually being captured. A camera source waits for every enabled track, so a refused microphone
+ * `always` announces immediately, and `source` waits until media is actually being captured. A camera source waits for every enabled track, so a refused microphone
  * cannot advertise a partial broadcast. `source` also waits until every captured track's config
  * resolves or fails, so a subscriber's first catalog lists every rendition. Defaults to `source`.
+ * To keep a broadcast out of discovery, give it a hidden name with a `.`-prefixed path segment
+ * instead; it is still subscribable by name.
  */
-export type AnnounceMode = "always" | "source" | "never";
+export type AnnounceMode = "always" | "source";
 
 /**
  * Parse a boolean attribute: absent uses `defaultValue`, bare presence is true, and an explicit
@@ -73,8 +74,8 @@ function parseSource(value: string | null): SourceType | undefined {
 
 function parseAnnounce(value: string | null): AnnounceMode {
 	if (value === null) return "source";
-	if (value === "source" || value === "always" || value === "never") return value;
-	console.warn(`moq-publish: invalid announce="${value}", expected "source", "always", or "never"`);
+	if (value === "source" || value === "always") return value;
+	console.warn(`moq-publish: invalid announce="${value}", expected "source" or "always"`);
 	return "source";
 }
 
@@ -115,7 +116,7 @@ export default class MoqPublish extends HTMLElement {
 		preview: new Signal<Preview.Mode>("source"),
 		// Which graphics API draws a <canvas> preview.
 		backend: new Signal<Preview.Backend>("auto"),
-		// When to advertise the broadcast: always, never, or only once a source is live.
+		// When to advertise the broadcast: always, or only once a source is live.
 		announce: new Signal<AnnounceMode>("source"),
 	};
 
