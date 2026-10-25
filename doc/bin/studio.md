@@ -19,8 +19,10 @@ cargo run --release -p moq-studio --features capture,openh264 -- \
 - Without `--connect`, the studio composes and previews but publishes nothing,
   and broadcast sources stay offline.
 - `capture` adds camera, display, window, microphone, and system-audio sources.
-  On Linux it links ALSA; add `pipewire` for Wayland screen capture. `openh264`
+  On Linux it links ALSA; add `pipewire` for PipeWire cameras. `openh264`
   is the software H.264 fallback for a machine without a hardware encoder.
+- On Linux, display and window sources capture X11 and XWayland only; a
+  Wayland screen or window cannot be picked yet.
 - The `--connect-*`, `--quic-*`, and `--log-level` flags are moq-cli's; see
   `moq-studio --help`.
 
