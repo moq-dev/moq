@@ -185,7 +185,7 @@ int main() {
         results.push_back({std::string("call/") + name, "ns", seconds(start) * 1e9 / calls});
     };
     call("sequence", [&] { group->sequence(); });
-    call("info", [&] { ok(consumer->info()); });
+    call("info", [&] { (void)consumer->info(); });
     std::filesystem::create_directories(out);
     std::ofstream file(std::filesystem::path(out) / "cpp.json");
     file.exceptions(std::ios::failbit | std::ios::badbit);

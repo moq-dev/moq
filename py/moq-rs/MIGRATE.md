@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Audio frame duration is optional
+
+`audio.EncoderOutput.frame_duration` defaults to `None` for the codec's own frame. Pass `None` where you passed `timedelta(0)`.
+`FetchGroupOptions.max_delay` is a `timedelta` instead of `max_delay_us` microseconds, and `Track.info()` no longer raises.
+
 ### Connection state
 
 Client entry returns a connecting native session. Replace `Session.status()`, `connects()`, and both `failure()` polls with `state()` and `await state_changed(state.revision)`. The `ConnectionState` fields include `phase`, `connects`, `failure`, and `version`; `ConnectionPhase` replaces `ConnectionStatus`. Wait for `CONNECTED` when work requires an established transport, or await `closed()` for the terminal result.
