@@ -40,7 +40,7 @@ async function isPending(promise: Promise<unknown>): Promise<boolean> {
 function serve(origin: Producer, source: BroadcastProducer, cost: bigint) {
 	const handle = wireOf(origin).receive(path, Route.normalize({ epoch: EPOCH, cost }));
 	void (async () => {
-		for await (const request of handle.requested()) request.accept(source.consume());
+		for await (const request of handle.requested()) hooks.acceptRequest(request, source.consume());
 	})();
 	return () => handle.close();
 }
@@ -823,7 +823,7 @@ test("between routes a reader keeps reading the copy it has", async () => {
 	expect(drain(sub)).toEqual([1]);
 
 	const { value: pending } = await asked.next();
-	pending?.accept(b.consume());
+	hooks.acceptRequest(pending, b.consume());
 	await settle();
 	await settle();
 	tb.write(1);
@@ -1035,6 +1035,7 @@ for (const fails of [true, false]) {
 for (const [field, first, second] of [
 	["priority", { priority: 1 }, { priority: 2 }],
 	["compression", { compress: true }, { compress: false }],
+	["refresh", { refresh: 4 }, {}],
 ] as const) {
 	test(`track info keeps one ${field} answer across routes`, async () => {
 		const front = new Front();
@@ -2592,6 +2593,34 @@ test.each([
 		front.consumer.close();
 		a.close();
 		b.close();
+	}
+});
+
+// A source that finished a track and closed just before the front concluded ended its listing
+// after that finish, so the front's listing ends after it too.
+test("a concluded front's listing keeps its closed source's finishes", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const from = a.consume();
+	const answer = wireOf(from).lister();
+	answer.add("seq", { priority: 0 });
+	answer.add("live", { priority: 0 });
+	answer.synced();
+	front.serve(from);
+	const tracks = front.consumer.tracks();
+	try {
+		for (const event of [{ kind: "added", name: "seq" }, { kind: "added", name: "live" }, { kind: "synced" }])
+			expect(await tracks.next()).toMatchObject(event);
+		answer.finish("seq");
+		a.close();
+		front.conclude();
+		expect(await tracks.next()).toMatchObject({ kind: "finished", name: "seq" });
+		expect(await tracks.next()).toBeUndefined();
+	} finally {
+		tracks.close();
+		answer.close();
+		front.consumer.close();
+		a.close();
 	}
 });
 

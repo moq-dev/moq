@@ -779,7 +779,7 @@ mod tests {
 	}
 
 	fn worker_with(config: Config) -> Option<Worker> {
-		worker_result(Worker::new(config), std::env::var_os("MOQ_STRICT").is_some())
+		worker_result(Worker::new(config), std::env::var_os("CI_STRICT").is_some())
 	}
 
 	/// A worker on a manual clock, which only `advance` moves.

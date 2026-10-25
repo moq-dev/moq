@@ -10,6 +10,7 @@ import {
 	SubscribeNamespaceEntryDone,
 } from "../src/ietf/subscribe_namespace";
 import { ALPN, Version } from "../src/ietf/version";
+import { hooks } from "../src/internal";
 import { createMockTransportPair } from "../src/mock";
 import { Producer } from "../src/origin";
 import * as Path from "../src/path";
@@ -111,7 +112,8 @@ for (const failovers of [0, 1, 16, 128])
 				const held = origin.request(path);
 				const source = new Broadcast();
 				sources.push(source);
-				(await ar.next()).value?.accept(source);
+				const answer = (await ar.next()).value;
+				if (answer) hooks.acceptRequest(answer, source);
 				await settle();
 				entries.push({ primary, ar, br, held });
 			}
@@ -148,7 +150,7 @@ for (const failovers of [0, 1, 16, 128])
 				for (let i = 0; i < entries.length; i++) {
 					const source = new Broadcast();
 					sources.push(source);
-					pending[i].accept(source);
+					hooks.acceptRequest(pending[i], source);
 					await settle();
 					if (!readsFrom(entries[i].held.active.peek(), source)) throw new Error("lost failover");
 				}

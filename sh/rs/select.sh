@@ -20,7 +20,7 @@ select_packages() {
         echo ALL
         return
     fi
-    if [[ "$list" == --all ]] || grep -qE '^(Cargo\.(toml|lock)|rust-toolchain\.toml|rs/justfile|sh/rs/(select|platform|nextest|(net|tokio|media)-features)\.sh|\.config/nextest\.toml)$' "$list"; then
+    if [[ "$list" == --all ]] || grep -qE '^(sh/local\.(sh|ts)|Cargo\.(toml|lock)|rust-toolchain\.toml|rs/justfile|sh/rs/(select|platform|nextest|(net|tokio|media)-features)\.sh|\.config/nextest\.toml)$' "$list"; then
         echo ALL
         return
     fi
@@ -112,6 +112,12 @@ case "$packages" in
     ALL) echo "rs: selecting the workspace" ;;
     *) echo "rs: selecting $names" ;;
 esac
+
+# Selection and empty crate sets stay outside admission. The paths are
+# root-relative because the `cd` above invalidates a relative `$0`.
+if [[ "${GITHUB_ACTIONS:-}" != true && "${LOCAL_SUPERVISED:-}" != 1 ]]; then
+    exec bash sh/local.sh bash sh/rs/select.sh "$@"
+fi
 
 # The `*-fuzz` crates need a nightly toolchain; only `just rs fuzz` compiles them.
 if [[ "$packages" == ALL ]]; then

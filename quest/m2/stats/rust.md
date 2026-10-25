@@ -9,17 +9,18 @@
   received, decoded, and played.
 - The gateway imports (`hls`, `rtmp`, `srt`, `rtsp`, `rtc`) and `archive` take
   `--report`.
-- `moq import --echo-path <path>` solicits feedback: it sets the catalog's
-  `echo` section, named apart from the viewer's `--echo <name>`.
+- Capture, the gateways, and `archive` take `--echo-path`, which sets the
+  catalog's `echo` section as it does for the stdin imports.
 
 ## Plan
 
 - `moq import --report` for the stdin imports, `moq export --echo`, and the
   `export report` and `export echo` sinks already report what the `moq-mux`
   importers write and exporters read (`rs/moq-mux/src/stats.rs`,
-  `rs/moq-cli/src/report.rs`). This quest adds the counters they lack and
-  reuses the rest; `import --report` refuses capture and the gateways until it
-  lands.
+  `rs/moq-cli/src/report.rs`), and `import --echo-path` solicits feedback for
+  the stdin imports. This quest adds the counters they lack and reuses the
+  rest; `import --report` and `--echo-path` refuse capture and the gateways
+  until it lands.
 - Counters come from the source, per track, as cumulative `stats()`
   snapshots: no callback, no per-frame lock.
   - Publisher: the `moq-video` and `moq-audio` encode producers create their
@@ -29,7 +30,9 @@
     stalled, underruns, and errors. `underruns` in
     `rs/moq-audio/src/playback` is already counted privately.
 - The gateways build their catalogs in their own crates, so each needs a way
-  to name the stats track before its first catalog.
+  to name the stats track and the echo path before its first catalog.
+  Capture publishes its catalog as its encoders start, so both sections reach
+  it before they do.
 - `moq play --echo` reconciles each watched catalog's `echo` section as
   `export --echo` does, and refuses `--catalog-format msf` the same way: the
   MSF catalog does not carry an `echo` solicitation.

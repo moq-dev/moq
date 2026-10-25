@@ -160,6 +160,16 @@ struct Request {
 	live: kio::Consumer<()>,
 }
 
+/// Why a listed broadcast's route closed.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Route {
+	/// Another instance took the path: the PUBLISHes of this one end now.
+	Replaced,
+	/// Nothing serves the path any more, so its broadcast ends soon too: its listing is read
+	/// to that end, which says which tracks finished.
+	Withdrawn,
+}
+
 /// One listed broadcast's tracks, by how far each got toward the peer.
 #[derive(Default)]
 struct Entries {
@@ -197,15 +207,20 @@ impl Entries {
 		}
 	}
 
-	/// Every track is no longer listed.
-	fn unlist(&mut self, skips: &Skips, suffix: &crate::PathOwned) {
+	/// Nothing more is PUBLISHed or skipped, while the PUBLISHes already sent stay listed.
+	fn halt(&mut self, skips: &Skips, suffix: &crate::PathOwned) {
 		self.pending.clear();
 		self.staged = None;
-		self.listed.clear();
 		let mut skips = skips.lock();
 		for name in self.skipped.drain() {
 			skips.remove(&(suffix.clone(), name));
 		}
+	}
+
+	/// Every track is no longer listed.
+	fn unlist(&mut self, skips: &Skips, suffix: &crate::PathOwned) {
+		self.halt(skips, suffix);
+		self.listed.clear();
 	}
 }
 
@@ -349,8 +364,15 @@ impl Publisher {
 			skips: Skips::default(),
 			live: live.consume(),
 		};
-		// Each listed broadcast's route: dropping it ends that broadcast's listing.
-		let mut routes: HashMap<crate::PathOwned, kio::Producer<()>> = HashMap::new();
+		// Each listed broadcast's route, closed once its announcement goes; see [`Route`].
+		let mut routes: HashMap<crate::PathOwned, kio::Producer<Route>> = HashMap::new();
+		let withdraw = |routes: &mut HashMap<crate::PathOwned, kio::Producer<Route>>, prefix: &crate::PathOwned| {
+			if let Some(route) = routes.remove(prefix)
+				&& let Ok(mut route) = route.write()
+			{
+				*route = Route::Withdrawn;
+			}
+		};
 		let mut broadcasts = TaskSet::owned();
 		let mut session = self.session.clone();
 		let mut finished = false;
@@ -396,14 +418,14 @@ impl Publisher {
 					crate::announce::Event::Start(announce) | crate::announce::Event::Restart(announce),
 				) => announce,
 				Event::Announce(crate::announce::Event::End(announce)) => {
-					routes.remove(&announce.prefix);
+					withdraw(&mut routes, &announce.prefix);
 					continue;
 				}
 				// A new hop or cost changes nothing listed.
 				Event::Announce(crate::announce::Event::Update(_)) => continue,
 			};
 			// A restart is a new instance: the old one's listing ends with its route.
-			let route = kio::Producer::new(());
+			let route = kio::Producer::new(Route::Replaced);
 			let task = self.clone().run_listed_broadcast(
 				request.clone(),
 				announce.prefix.clone(),
@@ -465,7 +487,8 @@ impl Publisher {
 			})
 			.await;
 			match event {
-				Some(crate::announce::Event::End(announce) | crate::announce::Event::Restart(announce)) => {
+				Some(crate::announce::Event::End(announce)) => withdraw(&mut routes, &announce.prefix),
+				Some(crate::announce::Event::Restart(announce)) => {
 					routes.remove(&announce.prefix);
 				}
 				Some(_) => {}
@@ -577,7 +600,7 @@ impl Publisher {
 		request: Request,
 		suffix: crate::PathOwned,
 		epoch: Option<crate::Epoch>,
-		route: kio::Consumer<()>,
+		route: kio::Consumer<Route>,
 	) {
 		let namespace = request.prefix.join(&suffix).to_owned();
 		let absolute = self.origin.absolute(&namespace).to_owned();
@@ -605,8 +628,9 @@ impl Publisher {
 		let mut entries = Entries::default();
 		let mut publishes = TaskSet::owned();
 		let mut session = self.session.clone();
-		// The listing ended, or the request did: nothing more to add.
+		// The listing ended, the request did, or the route was withdrawn: nothing more to add.
 		let mut adding = true;
+		let mut withdrawn = false;
 		// The broadcast's listing, held only while our publish permit covers it: a track
 		// it does not cover is not revealed at all, and one it comes to cover is listed
 		// from scratch.
@@ -628,8 +652,10 @@ impl Publisher {
 			Opened(Result<Stream<Transport, Version>, Error>),
 			/// Our publish permit may have changed.
 			Regrant(crate::auth::Permit),
-			/// The broadcast ended or its route went: every track it listed is gone.
+			/// The broadcast ended or another instance replaced it: every track it listed is gone.
 			Ended,
+			/// The route was withdrawn: nothing more is listed, and the broadcast ends soon.
+			Withdrawn,
 			/// The request was cancelled.
 			Cancelled,
 		}
@@ -680,8 +706,11 @@ impl Publisher {
 				if adding && request.live.poll_closed(waiter).is_ready() {
 					return Poll::Ready(Some(Event::Cancelled));
 				}
-				if route.poll_closed(waiter).is_ready() {
-					return Poll::Ready(Some(Event::Ended));
+				if !withdrawn && route.poll_closed(waiter).is_ready() {
+					return Poll::Ready(Some(match *route.read() {
+						Route::Replaced => Event::Ended,
+						Route::Withdrawn => Event::Withdrawn,
+					}));
 				}
 				if let Poll::Ready(permit) =
 					self.auth
@@ -754,6 +783,14 @@ impl Publisher {
 					adding = false;
 					entries.pending.clear();
 					entries.staged = None;
+				}
+				// Its listing ends once the front serving it sees the route go, after the
+				// tracks its source finished last, so the PUBLISHes already sent end by it.
+				// The tracks not yet PUBLISHed or skipped are no longer announced.
+				Event::Withdrawn => {
+					withdrawn = true;
+					adding = false;
+					entries.halt(&request.skips, &suffix);
 				}
 				Event::Opened(Err(err)) => {
 					tracing::debug!(broadcast = %absolute, %err, "publish stream did not open");
@@ -1335,7 +1372,7 @@ mod tests {
 		publisher: Publisher,
 		session: memory::Session,
 		peer: memory::Session,
-		broadcast: crate::broadcast::Producer,
+		broadcast: crate::origin::Publication,
 		tracks: HashMap<&'static str, track::Producer>,
 		_origin: origin::Producer,
 	}
@@ -1556,6 +1593,43 @@ mod tests {
 				ietf::PublishDoneStatus::TrackEnded.code(version),
 				"{version}"
 			);
+		}
+	}
+
+	/// A broadcast closing right after a track finished ends that track's PUBLISH with
+	/// TRACK_ENDED, whether its producer is still held or not, while a track left unfinished
+	/// still ends in error.
+	#[moq_clock::test]
+	async fn a_clean_end_keeps_its_finishes() {
+		for version in DRAFTS {
+			for held in [false, true] {
+				let case = format!("{version}: held={held}");
+				let mut h = harness(version);
+				let mut request = h.request(&listing(false)).await;
+				assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{case}");
+				let mut published = HashMap::new();
+				for _ in 0..2 {
+					let (mut stream, _, name, _) = h.publish().await;
+					publish_ok(&mut stream).await;
+					published.insert(name, stream);
+				}
+				moq_clock::sleep(Duration::from_millis(10)).await;
+
+				let video = h.tracks.remove("video").unwrap();
+				video.finish().unwrap();
+				let video = held.then_some(video);
+				h.broadcast.close();
+				for (name, status) in [
+					("video", ietf::PublishDoneStatus::TrackEnded),
+					("audio", ietf::PublishDoneStatus::InternalError),
+				] {
+					let (id, body) = next(published.get_mut(name).unwrap()).await;
+					assert_eq!(id, ietf::PublishDone::ID, "{case}: {name}");
+					let done: ietf::PublishDone = body.message(version).unwrap();
+					assert_eq!(done.status_code, status.code(version), "{case}: {name}");
+				}
+				drop(video);
+			}
 		}
 	}
 
@@ -1839,7 +1913,7 @@ mod tests {
 					.collect();
 				let skips = Skips::default();
 				let live = kio::Producer::new(());
-				let route = kio::Producer::new(());
+				let route = kio::Producer::new(Route::Replaced);
 				let request = Request {
 					origin: h._origin.consume(),
 					prefix: crate::Path::new("").to_owned(),

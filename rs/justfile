@@ -29,7 +29,7 @@ default:
 # Compile, lint, format-check, doc-check, and verify dependency hygiene.
 [positional-arguments]
 check *args:
-    cargo clippy --locked --all-targets "$@" -- -D warnings
+    bash sh/local.sh cargo clippy --locked --all-targets "$@" -- -D warnings
     just rs lint "$@"
 
 # `check` with clippy enforced by the `test` build. A selection can hold
@@ -51,14 +51,14 @@ lint *args:
     cargo fmt --all --check
     # quinn-udp and quinn keep quinn's formatting; cargo fmt skips them (see moq-sock's lib.rs, moq-tokio's quic.rs).
     rustfmt --edition 2024 --check rs/moq-sock/src/udp/mod.rs rs/moq-tokio/src/quic/driver/mod.rs
-    RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps "$@"
+    RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked --no-deps "$@"
     cargo shear
     cargo sort --workspace --check --no-format
 
 # Auto-fix clippy/format/shear/sort.
 [positional-arguments]
 fix *args:
-    cargo clippy --locked --fix --allow-staged --allow-dirty --all-targets "$@"
+    bash sh/local.sh cargo clippy --locked --fix --allow-staged --allow-dirty --all-targets "$@"
     cargo fmt --all
     rustfmt --edition 2024 rs/moq-sock/src/udp/mod.rs rs/moq-tokio/src/quic/driver/mod.rs
     cargo shear --fix
@@ -114,7 +114,7 @@ uring-changed base="":
     bash sh/rs/select.sh uring "$changed"
 
 # Compile and test the io_uring relay path, which is off the default feature set.
-# Linux-only; MOQ_STRICT requires a supported kernel instead of skipping tests.
+# Linux-only; CI_STRICT requires a supported kernel instead of skipping tests.
 [positional-arguments]
 uring *args:
     just rs uring-check "$@"
@@ -123,13 +123,13 @@ uring *args:
     cargo test --locked -p moq-relay --test integration
     # Needs a second IPv6 address on lo, which the io_uring CI lanes add.
     bash sh/rs/nextest.sh cargo nextest run --locked -p moq-uring --test integration --run-ignored only -E 'test(=local_addr::a_v6_wildcard_answers_from_the_address_reached)' "$@"
-    cargo clippy --locked -p moq-uring -p moq-relay --features moq-relay/io-uring,moq-relay/qlog --all-targets "$@" -- -D warnings
+    bash sh/local.sh cargo clippy --locked -p moq-uring -p moq-relay --features moq-relay/io-uring,moq-relay/qlog --all-targets "$@" -- -D warnings
     bash sh/rs/nextest.sh cargo nextest run --locked -p moq-uring --features qlog --tests "$@"
 
 # Compile the io_uring relay path, off the default feature set.
 [positional-arguments]
 uring-check *args:
-    cargo clippy --locked -p moq-uring -p moq-relay --features moq-relay/io-uring --all-targets "$@" -- -D warnings
+    bash sh/local.sh cargo clippy --locked -p moq-uring -p moq-relay --features moq-relay/io-uring --all-targets "$@" -- -D warnings
 
 # The Apple-gated code in moq-video, moq-audio, and moq-sock, which
 # platform.yml compiles on a Mac runner alongside `windows`.
@@ -148,7 +148,7 @@ macos-test:
 # Compile and lint the capture and playback features, which the default check skips.
 [positional-arguments]
 capture *args:
-    cargo clippy --locked -p moq-video -p moq-audio --all-targets --features moq-video/capture,moq-audio/capture,moq-audio/playback "$@" -- -D warnings
+    bash sh/local.sh cargo clippy --locked -p moq-video -p moq-audio --all-targets --features moq-video/capture,moq-audio/capture,moq-audio/playback "$@" -- -D warnings
 
 # The capture and playback tests drive synthetic devices, so they need no hardware.
 
@@ -187,8 +187,8 @@ x11-bench-ci:
 # moq-ffi library links logcat: `Log::init` is silent on Android without it.
 [positional-arguments]
 android *args:
-    cargo ndk -t arm64-v8a --platform 26 check --locked -p moq-video --all-targets "$@"
-    cargo ndk -t arm64-v8a --platform 26 -o target/android-jni build --locked -p moq-ffi --features openh264 "$@"
+    bash sh/local.sh cargo ndk -t arm64-v8a --platform 26 check --locked -p moq-video --all-targets "$@"
+    bash sh/local.sh cargo ndk -t arm64-v8a --platform 26 -o target/android-jni build --locked -p moq-ffi --features openh264 "$@"
     nm -D --undefined-only target/android-jni/arm64-v8a/libmoq_ffi.so | grep -q __android_log_
 
 # moq-wasm's crate root is `#![cfg(target_arch = "wasm32")]`, so only a wasm32
@@ -201,23 +201,23 @@ android *args:
 # Compile and lint the browser/WASM bindings, which the host-target check skips.
 [positional-arguments]
 wasm *args:
-    cargo clippy --locked -p moq-wasm -p moq-mux -p moq-ffi -p moq-clock --target wasm32-unknown-unknown --lib "$@" -- -D warnings
+    bash sh/local.sh cargo clippy --locked -p moq-wasm -p moq-mux -p moq-ffi -p moq-clock --target wasm32-unknown-unknown --lib "$@" -- -D warnings
 
 # Run the browser clock backend on the root devShell's Playwright Chromium,
 # with the runtime and with reads alone.
 wasm-test:
-    CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="bun {{ justfile_directory() }}/test/wasm/rust.ts" cargo test --locked -p moq-clock --lib --target wasm32-unknown-unknown
-    CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="bun {{ justfile_directory() }}/test/wasm/rust.ts" cargo test --locked -p moq-clock --lib --target wasm32-unknown-unknown --no-default-features
+    CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="bun {{ justfile_directory() }}/test/wasm/rust.ts" bash sh/local.sh cargo test --locked -p moq-clock --lib --target wasm32-unknown-unknown
+    CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="bun {{ justfile_directory() }}/test/wasm/rust.ts" bash sh/local.sh cargo test --locked -p moq-clock --lib --target wasm32-unknown-unknown --no-default-features
 
 # Auto-fix the browser/WASM bindings.
 [positional-arguments]
 wasm-fix *args:
-    cargo clippy --locked --fix --allow-staged --allow-dirty -p moq-wasm -p moq-mux -p moq-ffi -p moq-clock --target wasm32-unknown-unknown --lib "$@"
+    bash sh/local.sh cargo clippy --locked --fix --allow-staged --allow-dirty -p moq-wasm -p moq-mux -p moq-ffi -p moq-clock --target wasm32-unknown-unknown --lib "$@"
     cargo fmt -p moq-wasm -p moq-mux -p moq-ffi -p moq-clock
 
 # Audit dependencies against deny.toml. Nightly: advisories land without a diff.
 audit:
-    cargo deny check --show-stats
+    bash sh/local.sh cargo deny check --show-stats
 
 # Verify relay startup validation without a QUIC backend.
 relay-minimal:
@@ -235,8 +235,8 @@ c-tests:
 # Compile and lint the selected packages at their feature extremes.
 [positional-arguments]
 feature-shapes *args:
-    cargo clippy --locked --tests --no-default-features "$@" -- -D warnings
-    cargo clippy --locked --tests --all-features "$@" -- -D warnings
+    bash sh/local.sh cargo clippy --locked --tests --no-default-features "$@" -- -D warnings
+    bash sh/local.sh cargo clippy --locked --tests --all-features "$@" -- -D warnings
 
 # Compile the full feature matrix, including isolated combinations and their tests.
 features:
@@ -244,18 +244,18 @@ features:
     just rs quic-features --all
     just rs tokio-features --all
     just rs media-features --all
-    cargo check --locked --workspace {{ no_fuzz }} --all-targets --no-default-features
-    cargo hack check --locked -p moq-tokio --each-feature --exclude-features _transport --features aws-lc-rs
-    cargo check --locked -p moq-relay --no-default-features
+    bash sh/local.sh cargo check --locked --workspace {{ no_fuzz }} --all-targets --no-default-features
+    bash sh/local.sh cargo hack check --locked -p moq-tokio --each-feature --exclude-features _transport --features aws-lc-rs
+    bash sh/local.sh cargo check --locked -p moq-relay --no-default-features
     just rs relay-minimal
-    cargo check --locked -p moq-cli --no-default-features
+    bash sh/local.sh cargo check --locked -p moq-cli --no-default-features
     just rs test -p moq-cli --no-default-features --features capture,websocket -E 'test(capture_window)'
     just rs test -p moq-cli --no-default-features --features capture,pipewire,websocket -E 'test(capture_window)'
-    cargo check --locked -p moq-bench --no-default-features
-    cargo check --locked -p moq-boy --no-default-features
-    cargo check --locked -p moq-hls -p moq-rtmp -p moq-rtc --no-default-features --all-targets
-    cargo clippy --locked --workspace {{ no_fuzz }} --all-targets --all-features -- -D warnings
-    RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace {{ no_fuzz }} --all-features --no-deps
+    bash sh/local.sh cargo check --locked -p moq-bench --no-default-features
+    bash sh/local.sh cargo check --locked -p moq-boy --no-default-features
+    bash sh/local.sh cargo check --locked -p moq-hls -p moq-rtmp -p moq-rtc --no-default-features --all-targets
+    bash sh/local.sh cargo clippy --locked --workspace {{ no_fuzz }} --all-targets --all-features -- -D warnings
+    RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked --workspace {{ no_fuzz }} --all-features --no-deps
     bash sh/rs/nextest.sh cargo nextest run --locked --workspace {{ no_fuzz }} --all-targets --all-features
 
 # Compile and test the explicit-time model without async helpers or sessions.
@@ -280,7 +280,7 @@ quic-features *args:
         echo "moq-quic must not depend on a native runtime" >&2
         exit 1
     fi
-    cargo clippy --locked -p moq-quic "${targets[@]}" --no-default-features -- -D warnings
+    bash sh/local.sh cargo clippy --locked -p moq-quic "${targets[@]}" --no-default-features -- -D warnings
 
 # Compile media boundaries (--all isolates every mode) and prove expensive
 # native/render dependencies are absent when their features are excluded.
@@ -317,7 +317,7 @@ play *args:
 # Compile and run the `/// ```` examples, which nextest skips.
 [positional-arguments]
 doctest *args:
-    cargo test --locked --doc "$@"
+    bash sh/local.sh cargo test --locked --doc "$@"
 
 # `--cfg loom` swaps kio's primitives for loom's, so it rebuilds the world and
 # stays out of `check`. `--release` because a model check runs the body once
@@ -331,8 +331,9 @@ doctest *args:
 loom *args:
     RUSTFLAGS="--cfg loom" cargo test --locked --release -p kio --lib loom:: "$@"
     RUSTFLAGS="--cfg loom" cargo test --locked --release -p moq-net --test loom "$@"
+    RUSTFLAGS="--cfg loom" cargo test --locked --release -p moq-net --test expiry-loom "$@"
 
-# Run the moq-quic simulation's random workloads from a fresh seed, printing the settings that replay it.
+# Run the moq-quic simulation's random workloads from a fresh seed, printing the settings that replay it, then the bandwidth probe's acceptance suite.
 quic-sim:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -342,6 +343,8 @@ quic-sim:
     # Release keeps the sweep inside nextest's hang budget; the checks stay on so it still catches what a debug run would.
     export CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=true
     bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-quic --lib -E 'test(/^tests::sim::/)'
+    # The bandwidth probe's acceptance suite, over fixed seeds: the merge gate runs only its short cases.
+    bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-quic --lib --run-ignored only -E 'test(/^tests::probe::/)'
 
 # Prove downstream futures are Send at the default recursion limit on nightly.
 send-depth:
@@ -372,7 +375,7 @@ multicast:
     just rs test -p moq-tokio --features mdns --lib --run-ignored only -E 'test(=mdns::tests::apps_partition_discovery) | test(/^mdns::tests::daemon_/)'
     just rs test -p moq-relay --features cluster-lan --run-ignored only -E 'test(/^lan_mesh::/)'
 
-# Run the long TS recovery arms; a failing arm keeps its export and ledgers under $MOQ_TEST_RUNS.
+# Run the long TS recovery arms; a failing arm keeps its export and ledgers under $HARNESS_RUNS.
 ts-recovery:
     just rs test -p moq-mux --lib --run-ignored only -E 'test(/^container::ts::recovery_test::long_/)'
 
@@ -389,6 +392,7 @@ audio-devices:
 # crate's own tests instead. See rs/moq-net/fuzz/README.md and rs/moq-quic/fuzz/README.md.
 
 # Fuzz a moq-net or moq-quic target by name: `just rs fuzz lite -- -max_total_time=300`.
+# `just rs fuzz --minimize lite` shrinks its corpus instead.
 [positional-arguments]
 fuzz target *args:
     sh/rs/fuzz.sh "$@"
@@ -402,26 +406,26 @@ coverage crate="workspace":
 
 # Build the default workspace members.
 build:
-    cargo build --locked
+    bash sh/local.sh cargo build --locked
 
 # Run the comparable epoll and io_uring UDP matrices.
 [positional-arguments]
 bench-udp *args:
-    cargo bench -p moq-uring --bench udp_tokio -- "$@"
-    cargo bench -p moq-uring --bench udp_uring -- "$@"
+    bash sh/local.sh cargo bench -p moq-uring --bench udp_tokio -- "$@"
+    bash sh/local.sh cargo bench -p moq-uring --bench udp_uring -- "$@"
 
 # Measure a QUIC echo through the io_uring worker, ablating receive
 # batching, GRO, and GSO one at a time. Linux 6.12+ (skips loudly otherwise).
 [positional-arguments]
 bench-echo *args:
-    cargo bench -p moq-uring --bench echo_quic -- "$@"
+    bash sh/local.sh cargo bench -p moq-uring --bench echo_quic -- "$@"
 
 # Measure a full moq-lite session (publisher to subscriber) through the
 # io_uring worker, same ablations and per-iteration unit as bench-echo.
 # Linux 6.12+ (skips loudly otherwise).
 [positional-arguments]
 bench-session *args:
-    cargo bench -p moq-uring --bench session_lite -- "$@"
+    bash sh/local.sh cargo bench -p moq-uring --bench session_lite -- "$@"
 
 # Create release PRs and publish crates via release-plz.
 release:
@@ -479,17 +483,17 @@ bench-playback:
 # Sweep retained RTMP chunk-stream IDs independently of message and chunk sizes.
 [positional-arguments]
 bench-rtmp *args:
-    cargo bench --locked -p moq-rtmp --bench chunk_interleaving -- "$@"
+    bash sh/local.sh cargo bench --locked -p moq-rtmp --bench chunk_interleaving -- "$@"
 
 # Refresh one credential across unrelated sessions and held token counts.
 [positional-arguments]
 bench-relay-auth *args:
-    cargo bench --locked -p moq-relay --bench auth -- "$@"
+    bash sh/local.sh cargo bench --locked -p moq-relay --bench auth -- "$@"
 
 # One relay's stats tick, plus the decode and aggregate tables. `--test` runs each tick once; the tables ignore it and print every configuration.
 [positional-arguments]
 bench-stats *args:
-    cargo bench --locked -p moq-stats --features bench --bench producer_tick --bench decode --bench aggregate -- "$@"
+    bash sh/local.sh cargo bench --locked -p moq-stats --features bench --bench producer_tick --bench decode --bench aggregate -- "$@"
 
 # Sweep latency observations against writer count and report density.
 bench-latency:
@@ -498,14 +502,14 @@ bench-latency:
 # Exact TS receiver scheduling across PID and queued-unit fanout.
 [positional-arguments]
 bench-ts-schedule *args:
-    cargo bench --locked -p moq-mux --bench ts_schedule -- "$@"
+    bash sh/local.sh cargo bench --locked -p moq-mux --bench ts_schedule -- "$@"
 
 # Sweep container export tracks and queued frames independently.
 [positional-arguments]
 bench-export *args:
-    cargo bench --locked -p moq-mux --bench export -- "$@"
+    bash sh/local.sh cargo bench --locked -p moq-mux --bench export -- "$@"
 
 # Requested-pad catalog gating and resolved EOS lookup across renditions x touched pads.
 [positional-arguments]
 bench-gst-catalog *args:
-    cargo bench -p moq-gst --bench catalog "$@"
+    bash sh/local.sh cargo bench -p moq-gst --bench catalog "$@"

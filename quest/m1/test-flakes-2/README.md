@@ -41,10 +41,8 @@ Public API: none. Wire: none.
 ## Required
 
 - [Media resource instrumentation](/quest/m1/test-flakes-2/resource-instrumentation.md) - the media test stops seeing a playing player report nothing to release
-- [Tone check grace](/quest/m1/test-flakes-2/tone-grace.md) - the interop tone check charges its grace only for audible playback, so a refilling ring under CPU starvation is not a failure
 - [IETF22 fallback](/quest/m1/test-flakes-2/ietf22-fallback.md) - an IETF22 browser viewer follows a fallback within the media lane's bound, keeping its session and its audio
 - [macOS receive credit](/quest/m1/test-flakes-2/macos-receive-credit.md) - `partial_control_requests_give_way` passes on the macOS lane, after checking for a shared platform cause
-- [moq-mux missing sequence](/quest/m1/test-flakes-2/mux-missing-sequence.md) - `missing_sequence_skips_on_live_track` runs on a paused clock
 - [moq-rtsp stall timers](/quest/m1/test-flakes-2/rtsp-stall-timers.md) - the 200 ms stall and keyframe tests run on a mocked clock
 - [moq-gst sibling resume](/quest/m1/test-flakes-2/gst-sibling-resume.md) - an idle pad reads its named epoch again after a sibling restart, a likely liveness bug fixed before the test
 - [moq-gst pinned replay](/quest/m1/test-flakes-2/gst-pinned-replay.md) - the pinned-instance finish test waits on events instead of sleep loops
