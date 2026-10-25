@@ -281,8 +281,11 @@ export interface Land {
 export interface ResumeSource {
 	/** Re-evaluate a live-edge join at the serving copy. */
 	join(): void;
-	/** The next group not in `delivered`, in arrival or sequence order, without waiting. */
-	tryGroup(ordered: boolean, delivered: Delivered): Recv;
+	/**
+	 * The next group not in `delivered`, in arrival or sequence order, without waiting. With
+	 * `dispositions`, a run no copy may still deliver is reported once as a `drop`.
+	 */
+	tryGroup(ordered: boolean, delivered: Delivered, dispositions: boolean): Recv;
 	/**
 	 * The next datagram in arrival order, without waiting. `delivered` is the group record, so a
 	 * copy that still holds a group for a later group read is kept.
@@ -392,6 +395,12 @@ export const hooks: {
 	 * the cursor gives up is reported once as a `drop`.
 	 */
 	tryRecvGroup: (subscriber: Subscriber, dispositions: boolean) => Recv;
+	/**
+	 * The next run the subscriber's cursor gave up and has not reported, without taking a group.
+	 * From the first call on, the budget skips of {@link tryRecvGroup} without dispositions are
+	 * kept for it, so a resumed reader takes groups the plain way and drops from here.
+	 */
+	tryDrop: (subscriber: Subscriber) => (Recv & { kind: "drop" }) | undefined;
 	/** The sequence {@link tryNextGroup} (`ordered`) or {@link tryRecvGroup} would take next, without taking it. */
 	peekGroup: (subscriber: Subscriber, ordered: boolean) => number | undefined;
 	/** Take the next group in sequence order without waiting, as {@link tryRecvGroup} does in arrival order. */
@@ -550,6 +559,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	tryRecvGroup: () => {
+		throw new Error("track.ts not loaded");
+	},
+	tryDrop: () => {
 		throw new Error("track.ts not loaded");
 	},
 	tryNextGroup: () => {

@@ -1032,6 +1032,106 @@ for (const fails of [true, false]) {
 	});
 }
 
+/** What a resumed read with dispositions found: a group's sequence, or a drop's run and code. */
+function recvDisposition(sub: track.Subscriber): number | [number, number, number] | string {
+	const recv = hooks.tryRecvGroup(sub, true);
+	if (recv.kind === "group") {
+		recv.group.close();
+		return recv.group.sequence;
+	}
+	if (recv.kind === "drop") return [recv.start, recv.end, (recv.error as StreamError).code];
+	return recv.kind;
+}
+
+test("a resumed reader reports what its serving copy gives up, once, and never serves it", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	ta.write(0);
+	expect(recvDisposition(sub)).toBe(0);
+	// A route failing is no verdict: another route may still deliver the group.
+	ta.producer.dropGroups(1, 2, new StreamError(StreamCode.SessionClosed));
+	expect(recvDisposition(sub)).toBe("idle");
+	ta.producer.dropGroups(2, 4, new StreamError(StreamCode(70), { message: "cut" }));
+	expect(recvDisposition(sub)).toEqual([2, 4, 70]);
+	expect(recvDisposition(sub)).toBe("idle");
+	// Re-created under a run already reported dropped.
+	ta.write(3);
+	ta.write(4);
+	expect(recvDisposition(sub)).toBe(4);
+	expect(recvDisposition(sub)).toBe("idle");
+
+	sub.close();
+	front.consumer.close();
+	a.close();
+});
+
+test("a resumed reader reports a group its serving copy skipped past the budget", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		const front = new Front();
+		const a = new BroadcastProducer();
+		const ta = copy(a);
+		front.serve(a.consume());
+		const sub = front.consumer.track("seq").subscribe({ maxDelay: Milli(1_000) });
+		expect(recvDisposition(sub)).toBe("idle");
+		ta.write(0);
+		ta.write(1);
+		await clock.advance(Nano(2_000_000_000));
+		expect(recvDisposition(sub)).toBe(1);
+		expect(recvDisposition(sub)).toEqual([0, 1, StreamCode.Old]);
+		expect(recvDisposition(sub)).toBe("idle");
+
+		sub.close();
+		front.consumer.close();
+		a.close();
+	} finally {
+		installed.close();
+	}
+});
+
+test("a drop waits while a copy the serving one replaced may still deliver it", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		const front = new Front();
+		const a = new BroadcastProducer();
+		const b = new BroadcastProducer();
+		const ta = copy(a);
+		const tb = copy(b);
+		front.serve(a.consume());
+		const sub = front.consumer.track("seq").subscribe({ maxDelay: Milli(1_000) });
+		ta.write(0);
+		expect(recvDisposition(sub)).toBe(0);
+		front.serve(b.consume());
+		await settle();
+		// Only the new route gave groups 1 and 2 up; the old one is not yet bounded.
+		tb.producer.dropGroups(1, 3, new StreamError(StreamCode(70), { message: "cut" }));
+		expect(recvDisposition(sub)).toBe("idle");
+		ta.write(1);
+		expect(recvDisposition(sub)).toBe(1);
+		// The new route's first group bounds the old one just below it, which may still get 2.
+		tb.write(3);
+		expect(recvDisposition(sub)).toBe(3);
+		expect(recvDisposition(sub)).toBe("idle");
+		// Once the old copy is past the reader's budget, nothing delivers 2.
+		await clock.advance(Nano(1_000_000_000));
+		expect(recvDisposition(sub)).toEqual([2, 3, 70]);
+		ta.write(2);
+		expect(recvDisposition(sub)).toBe("idle");
+
+		sub.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+	} finally {
+		installed.close();
+	}
+});
+
 for (const [field, first, second] of [
 	["priority", { priority: 1 }, { priority: 2 }],
 	["compression", { compress: true }, { compress: false }],
