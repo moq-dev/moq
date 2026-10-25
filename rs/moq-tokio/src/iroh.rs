@@ -422,25 +422,16 @@ pub(crate) async fn accept(
 	}
 }
 
-/// Which transport binding an `iroh://` dial negotiated.
+/// Dial `url`, returning the session and where its request target travels.
 ///
-/// Unlike the other schemes, this isn't known until the ALPN is chosen, and it decides
-/// where the request target travels: H3 puts it in the CONNECT URL, raw QUIC has nowhere
-/// to put it but the SETUP.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Binding {
-	/// Raw QUIC over an iroh connection, carrying no request URI.
-	Raw,
-	/// WebTransport over HTTP/3, carrying the request URI in its CONNECT.
-	H3,
-}
-
+/// Unlike the other schemes, that isn't known until the ALPN is chosen: H3 puts it in
+/// the CONNECT URL, raw QUIC has nowhere to put it but the SETUP.
 pub(crate) async fn connect(
 	endpoint: &Endpoint,
 	url: Url,
 	addrs: impl IntoIterator<Item = std::net::SocketAddr>,
 	versions: &moq_net::Versions,
-) -> Result<(web_transport_iroh::Session, Binding)> {
+) -> Result<(web_transport_iroh::Session, moq_net::transport::Address)> {
 	let alpns = versions.alpns();
 	let (primary, rest) = alpns.split_first().ok_or(Error::NoVersions)?;
 
@@ -479,12 +470,12 @@ pub(crate) async fn connect(
 
 			(
 				web_transport_iroh::Session::connect_h3(conn, request).await?,
-				Binding::H3,
+				moq_net::transport::Address::Uri,
 			)
 		}
 		alpn if alpns.contains(&alpn) => {
 			let conn = connecting.await?;
-			(web_transport_iroh::Session::raw(conn), Binding::Raw)
+			(web_transport_iroh::Session::raw(conn), moq_net::transport::Address::Setup)
 		}
 		_ => return Err(Error::UnsupportedAlpn(alpn)),
 	};

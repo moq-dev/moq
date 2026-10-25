@@ -97,7 +97,7 @@ fn lite_session_over_the_worker() {
 				moq_net::time::Instant::now(),
 				moq_uring::transport::Local::new(moq_uring::transport::Session::new(
 					quic::web::Session::raw(conn),
-					moq_net::transport::Binding::InBand,
+					moq_net::transport::Address::Setup,
 				)),
 			)
 			.await
@@ -123,7 +123,7 @@ fn lite_session_over_the_worker() {
 					moq_net::time::Instant::now(),
 					moq_uring::transport::Local::new(moq_uring::transport::Session::new(
 						quic::web::Session::raw(conn),
-						moq_net::transport::Binding::InBand,
+						moq_net::transport::Address::Setup,
 					)),
 				)
 				.await
@@ -235,7 +235,7 @@ fn two_lite_sessions_share_the_server_socket() {
 						moq_net::time::Instant::now(),
 						moq_uring::transport::Local::new(moq_uring::transport::Session::new(
 							quic::web::Session::raw(conn),
-							moq_net::transport::Binding::InBand,
+							moq_net::transport::Address::Setup,
 						)),
 					)
 					.await
@@ -264,7 +264,7 @@ fn two_lite_sessions_share_the_server_socket() {
 						moq_net::time::Instant::now(),
 						moq_uring::transport::Local::new(moq_uring::transport::Session::new(
 							quic::web::Session::raw(conn),
-							moq_net::transport::Binding::InBand,
+							moq_net::transport::Address::Setup,
 						)),
 					)
 					.await

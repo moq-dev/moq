@@ -754,13 +754,13 @@ async fn serve_connection(
 	deadline.close = Some(transport.clone());
 	let conn = transport.clone();
 	let server = serve.moq.clone();
-	let binding = match url {
-		Some(_) => moq_net::transport::Binding::Uri,
-		None => moq_net::transport::Binding::InBand,
+	let address = match url {
+		Some(_) => moq_net::transport::Address::Uri,
+		None => moq_net::transport::Address::Setup,
 	};
 	// moq-net boxes the transport with a native `Send` bound, which only a `Local`
 	// session meets; it still never leaves this worker.
-	let session = moq_uring::transport::Local::new(moq_uring::transport::Session::new(transport, binding));
+	let session = moq_uring::transport::Local::new(moq_uring::transport::Session::new(transport, address));
 	let now = moq_net::time::Instant::now();
 	let mut accepted = Accepted {
 		handle,

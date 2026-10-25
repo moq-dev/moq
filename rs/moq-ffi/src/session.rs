@@ -651,13 +651,14 @@ impl Client {
 
 		let versions = self.versions.clone();
 		let fingerprints = self.fingerprints.clone();
+		let client = moq_net::Client::new().with_url(url.clone());
 		let transport = async move {
 			match fingerprints.is_empty() {
 				true => crate::transport::connect(url, &versions).await,
 				false => crate::transport::connect_with_hashes(url, &versions, fingerprints).await,
 			}
 		};
-		let client = moq_net::Client::new()
+		let client = client
 			.with_versions(self.versions.clone())
 			.with_implementation(implementation())
 			.with_publisher(&publish.inner)

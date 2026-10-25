@@ -47,6 +47,20 @@ so the cut waits for it. hang's
 `Archive::replay_epoch` goes with the root `archive` section in
 [catalog HLS](/quest/m1/archive/catalog-hls.md).
 
+Kept public though only moq-transport uses them (decided 2026-10-23), so an
+audit skips them:
+
+- moq-transport-only error variants (`Error::{InvalidJoiningRequestId,
+  InvalidRange, Remote, UnsupportedExtension}`, the `DecodeError` auth-token
+  variants) and the session error codes the lite draft registers with
+  moq-transport's meaning. Errors are fine; only dead ones go.
+- `setup::Extensions::{auth, solicit, epoch}` and the relay's
+  `[listen|connect.extensions]` TOML, as interop knobs documented as
+  affecting moq-transport only.
+- `setup::Token` and `server::Handshake::token`:
+  [token in band](/quest/m1/auth/token-in-band.md) gives lite-07 a SETUP
+  token, which makes them shared.
+
 Rejected in planning:
 
 - Restoring `track::Demand::{used, unused}`: refresh
@@ -70,7 +84,6 @@ Rejected in planning:
 - [Pinned consumers adopt the CLI flag names](/quest/m1/api-audit/cli-flags-consumers.md) - pinned downstream deployments move past the flag rename and use its spellings
 - [Session-only items stay private](/quest/m1/api-audit/model-private.md) - model items only the built-in sessions use are private
 - [A request's source enforces its validity](/quest/m1/api-audit/answer.md) - a stale source refuses new track requests by itself, with no public additions
-- [moq-transport stays private](/quest/m1/api-audit/ietf-private.md) - no public moq-net item exists only for moq-transport, and a client names its request target once as a URL
 - [One lifecycle vocabulary](/quest/m1/api-audit/lifecycle.md) - finish, abort, closed, and close mean one thing on every handle, and Rust and JS observers fire alike
 - [moq-net names say one thing](/quest/m1/api-audit/net-names.md) - demand says `wanted`, colliding stats and transport names are renamed, and Rust and JS info lookups mirror
 - [Request handlers are named requests](/quest/m1/api-audit/requests.md) - `dynamic()` and `Dynamic` become `requests()` and `Requests` at every layer

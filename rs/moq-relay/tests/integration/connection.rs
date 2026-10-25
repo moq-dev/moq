@@ -214,7 +214,7 @@ async fn the_setup_path_reaches_the_decider_and_roots_the_grant() {
 	let (origin, _broadcast, _track) = publish("cam");
 	let publisher = moq_net::Client::new()
 		.with_publisher(origin.consume())
-		.with_path("/room?jwt=token");
+		.with_url("moql://relay.example.com/room?jwt=token".parse().unwrap());
 	let _publisher = connect(publisher, newest(), &cluster, &auth)
 		.await
 		.expect("publisher connects");

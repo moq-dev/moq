@@ -31,8 +31,8 @@ local (`!Send`) task set, and the UDP sockets bound through it.
   HTTP/3 CONNECT handshake (SETTINGS, subprotocol selection, capsule close)
   over the same adapter via `web-transport-proto`. `quic::web::Session` is
   a raw or web transport (`Session::raw`). Wrap it with
-  `transport::Session::new(session, binding)`, using `moq_net::transport::Binding::Uri`
-  for WebTransport or `InBand` for raw QUIC. moq-net boxes the transport with a
+  `transport::Session::new(session, address)`, using `moq_net::transport::Address::Uri`
+  for WebTransport or `Setup` for raw QUIC. moq-net boxes the transport with a
   native `Send` bound, so wrap the session once more in `transport::Local`, which
   checks the thread on every use, before `connect`/`accept`. They return the
   session and its driver; poll the driver or await it inside a `Handle::spawn`
