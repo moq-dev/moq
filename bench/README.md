@@ -224,9 +224,9 @@ to the performance cores wherever the kernel lists them
 already allowed, so an outer `taskset` or cpuset still narrows it. The run prints the pinned cores beside its result and records
 them as `affinity` in the metadata. A CPU with one core type runs unpinned.
 
-BASE comparisons run paired rounds (default three, `MOQ_BENCH_RUNTIME_ROUNDS`),
+BASE comparisons run paired rounds (default three, `BENCH_RUNTIME_ROUNDS`),
 alternating base/current order. Startup remains outside the final five-second
-throughput window. `MOQ_BENCH_ARTIFACTS` chooses the evidence parent (default
+throughput window. `BENCH_ARTIFACTS` chooses the evidence parent (default
 the current worktree's `.scratch/bench`), which must be outside the repository,
 or git-ignored and outside `bench/`; each invocation retains a new run directory even on failure.
 It contains raw load/host JSONL, process diagnostics, Criterion statistics,
@@ -460,7 +460,7 @@ The latter two write `target/bench/nightly/{rust-bench,js}/report.json`. For a f
 measured Rust run using the same evidence lifecycle:
 
 ```bash
-nix develop --command env MOQ_BENCH_LABEL=pattern MOQ_BENCH_RUNS=/tmp/criterion-runs.txt just gh criterion -p moq-pattern --bench matching
+nix develop --command env BENCH_LABEL=pattern BENCH_RUNS=/tmp/criterion-runs.txt just gh criterion -p moq-pattern --bench matching
 nix develop --command just gh benchmark-report rust /tmp /tmp/rust-report.json
 ```
 
@@ -501,10 +501,30 @@ Reproduce a paired group locally against any revision; `previous-nightly`
 resolves the last scheduled Nightly's commit through `gh`:
 
 ```bash
-nix develop --command env MOQ_BENCH_BASE=previous-nightly just gh nightly rust-bench
+nix develop --command env BENCH_BASE=previous-nightly just gh nightly rust-bench
 nix develop --command just gh benchmark-report gate target/bench/nightly/rust-bench
 ```
 
 Each run's evidence directory keeps both builds' estimates (`criterion` and
 `criterion-base`), the confirmation rounds under `confirm/`, and the run's
 `paired.json`.
+
+## Local check capacity
+
+Prepare the same warm dependencies and artifacts in each isolated checkout, then
+compare solo and concurrent suites with their actual worker counts:
+
+```bash
+just bench-local --checkout "$PWD" --checkout /path/to/another/checkout \
+  --workers 1 4 8 24 --samples 3 --cache warm -- \
+  cargo nextest run --locked -p moq-net --lib
+```
+
+Each JSON record retains host load, configured workers and lanes, admission
+delay, work wall time, total wall time, and child CPU time. Logs stay under each
+checkout's `.scratch/local-bench/`. To compare Bun workspace fanout, repeat with
+the same `bun run --filter=... test` command, then add `--sequential`. To compare
+the module lanes `just check` runs at once, sweep `--jobs 1 3` over
+`bash sh/dispatch.sh check BASE`, which is then admitted once as a whole.
+Admission remains outside the suite's timeout clocks. Use separate checkouts to
+avoid measuring Cargo's artifact lock instead of competing work.

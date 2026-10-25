@@ -68,7 +68,7 @@ export class Connection implements Established {
 
 	/** Our tokens and grants, when the peer negotiated MoQ Auth; see {@link Established.auth}. */
 	get auth(): Auth.Handle {
-		return this.#auth;
+		return this.#auth.handle;
 	}
 
 	// Our tokens and grants, and the answers to the peer's (MoQ Auth).
@@ -137,6 +137,7 @@ export class Connection implements Established {
 		activeCount = false,
 		cluster,
 		auth = false,
+		handle,
 		epoch = false,
 		early = [],
 		requestWindow,
@@ -170,6 +171,8 @@ export class Connection implements Established {
 		cluster?: Cluster.Hops;
 		/** Whether MoQ Auth is negotiated (draft-17+): offered by both SETUPs. */
 		auth?: boolean;
+		/** The auth handle to build the session on, or undefined for one of its own. */
+		handle?: Auth.Handle;
 		/** Whether MoQ Epoch is negotiated (draft-17+): offered by both SETUPs. */
 		epoch?: boolean;
 		/** Uni streams that arrived before the peer's SETUP, type unread (v17+). */
@@ -227,7 +230,13 @@ export class Connection implements Established {
 				publish: new Path.Patterns([Path.Pattern.all()]),
 				subscribe: new Path.Patterns(publish ? [Path.Pattern.all()] : []),
 			},
+			handle,
+			draining: () => this.#goaway.peek() !== undefined || this.#closing !== undefined,
 		});
+		// Left before anything observes the close, so a successor on the same handle never
+		// finds this session still active.
+		const leave = () => this.#auth.close();
+		void quic.closed.then(leave, leave);
 		this.#client = client;
 
 		this.#auth.violated.subscribe((err) => {
@@ -264,7 +273,11 @@ export class Connection implements Established {
 			grant: this.#auth.scope,
 			auth: this.#auth,
 		});
-		registerWire(this, { consume: (path) => this.#subscriber.consume(path), goaway: this.#goaway });
+		registerWire(this, {
+			consume: (path) => this.#subscriber.consume(path),
+			goaway: this.#goaway,
+			auth: this.#auth,
+		});
 
 		void this.#run(early);
 	}

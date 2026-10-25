@@ -15,7 +15,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 
 const LITE: &[&str] = &["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"];
 
-/// Draft-20 and later are left out: the first subscriber's absolute start goes upstream
+/// Draft-22 and later are left out: the first subscriber's absolute start goes upstream
 /// in the SUBSCRIBE filter, and the subscriber never widens it when a live one joins
 /// (`quest/m1/subscribe-ranges/ietf.md`), so group 3 never arrives.
 const TRANSPORT: &[&str] = &["moq-transport-14", "moq-transport-17"];
@@ -105,7 +105,7 @@ async fn ahead_then_live(version: Option<&str>, relay: bool) -> (Vec<u64>, Vec<u
 		}
 	};
 
-	let mut ahead = subscribe(&remote, Subscription::default().with_groups(4..)).await;
+	let mut ahead = subscribe(&remote, Subscription::default().with_range(4..)).await;
 	moq_clock::timeout(TIMEOUT, crate::support::wanted(track.demand()))
 		.await
 		.expect("no subscriber appeared")

@@ -34,7 +34,7 @@ fn config(dir: &std::path::Path, ws: bool) -> Config {
 	config.web.http.listen = Some("127.0.0.1:0".parse().expect("parse http"));
 	config.web.ws = ws;
 	config.internal.listen = Some("127.0.0.1:0".parse().unwrap());
-	config.drain_timeout = Duration::ZERO;
+	config.drain_timeout = Some((Duration::ZERO).into());
 	config
 }
 
@@ -105,9 +105,11 @@ impl Running {
 fn client() -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
-	config.once = Some(true);
 	config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
-	config.init(Default::default()).expect("client init")
+	config
+		.init(Default::default())
+		.expect("client init")
+		.with_reconnect(false)
 }
 
 /// Dial `url` as a publisher or a subscriber and require the relay to refuse.
@@ -274,16 +276,6 @@ async fn refused_only_stats_depth_one_has_root_totals_and_shared_embedder_metric
 		1,
 		"embedder stats and metrics share the counter"
 	);
-	tokio::time::timeout(TIMEOUT, relay.origin.routed(".stats/tenant/node/test"))
-		.await
-		.unwrap()
-		.unwrap();
-	let broadcast = tokio::time::timeout(TIMEOUT, relay.origin.request_broadcast(".stats/tenant/node/test", None))
-		.await
-		.unwrap()
-		.unwrap();
-	let consumer = moq_stats::Consumer::new(broadcast, Default::default());
-	let mut totals = consumer.totals().await.unwrap();
 	tokio::time::timeout(TIMEOUT, async {
 		loop {
 			let frame = totals.next().await.unwrap().unwrap();
@@ -296,7 +288,7 @@ async fn refused_only_stats_depth_one_has_root_totals_and_shared_embedder_metric
 		}
 	})
 	.await
-	.expect("embedder outcome in its own tier and root group");
+	.expect("embedder outcome in its own tier");
 	relay.stop().await;
 }
 

@@ -22,7 +22,7 @@ class SelectTest(unittest.TestCase):
             just.chmod(0o755)
             changed = scratch / "changed"
             changed.write_text("\n".join(paths) + "\n")
-            env = dict(os.environ, PATH=f"{scratch}:{os.environ['PATH']}",
+            env = dict(os.environ, LOCAL_SUPERVISED="1", PATH=f"{scratch}:{os.environ['PATH']}",
                        SELECT_CALLS=str(calls), BASH_ENV=os.devnull,
                        GITHUB_ACTIONS=str(github_actions).lower())
             subprocess.run(["bash", "sh/rs/select.sh", action, str(changed)],
@@ -33,7 +33,7 @@ class SelectTest(unittest.TestCase):
         for github_actions in (False, True):
             for action in ("check", "check-test", "lint", "test"):
                 with self.subTest(action=action, github_actions=github_actions):
-                    suffix = f" --features {DEVICE_FEATURES}" if action == "test" else ""
+                    suffix = f" --features {DEVICE_FEATURES} moq-tokio/webrtc" if action == "test" else ""
                     suffix += " --timings" if github_actions and action == "test" else ""
                     self.assertIn(f"rs {action} --workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz{suffix}",
                                   self.selected("sh/rs/nextest.sh", action=action,
@@ -60,6 +60,10 @@ class SelectTest(unittest.TestCase):
                 calls = self.selected(path, action="test")
                 self.assertEqual(len(calls), 1, calls)
                 self.assertTrue(calls[0].endswith(f" --features {features}"), calls)
+        # moq-tokio's WebRTC module is off by default too.
+        calls = self.selected("rs/moq-tokio/src/webrtc.rs", action="test")
+        self.assertEqual(len(calls), 1, calls)
+        self.assertIn(" moq-tokio/webrtc", calls[0])
         # A dependency of the media crates still runs both their device tests.
         calls = self.selected("rs/moq-audio/src/lib.rs", action="test")
         self.assertIn("--package moq-video --package moq-audio", calls[0])
@@ -104,7 +108,7 @@ class RecipeTest(unittest.TestCase):
                 (scratch / "benches/unexecuted.rs").write_text(
                     'compile_error!("nextest must not compile a benchmark it never runs");\nfn main() {}\n'
                 )
-                env = dict(os.environ, BASH_ENV=os.devnull, TMPDIR="/tmp",
+                env = dict(os.environ, LOCAL_SUPERVISED="1", BASH_ENV=os.devnull, TMPDIR="/tmp",
                            NEXTEST_PROFILE="default")
                 result = subprocess.run(
                     ["just", "rs", "test", "--manifest-path", str(scratch / "Cargo.toml")],
@@ -121,7 +125,7 @@ class FeatureTest(unittest.TestCase):
             cargo = scratch / "cargo"
             cargo.write_text(CARGO_STUB)
             cargo.chmod(0o755)
-            env = dict(os.environ, PATH=f"{scratch}:{os.environ['PATH']}",
+            env = dict(os.environ, LOCAL_SUPERVISED="1", PATH=f"{scratch}:{os.environ['PATH']}",
                        FEATURE_CALLS=str(calls), BASH_ENV=os.devnull)
             result = subprocess.run(["bash", f"sh/rs/{owner}-features.sh", *args],
                                     cwd=ROOT, env=env, capture_output=True, text=True)

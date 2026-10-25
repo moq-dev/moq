@@ -2255,13 +2255,14 @@ mod session_tests {
 		let _pad_ids = pad_ids();
 		let element = element();
 		let origin = origin();
-		let mut catalog_broadcast = origin.create_broadcast("room/catalog").unwrap();
+		let catalog_broadcast = origin.create_broadcast("room/catalog").unwrap();
 		let mut local = catalog_broadcast.dynamic();
 		let left = origin.create_broadcast("room/left").unwrap();
 		let mut remote = left.dynamic();
 		let right = origin.create_broadcast("room/right").unwrap();
 		let mut replacement = right.dynamic();
-		let mut catalog = moq_mux::catalog::Producer::new(&mut catalog_broadcast, Default::default()).unwrap();
+		let mut catalog =
+			moq_mux::catalog::Producer::new(&mut catalog_broadcast.broadcast().clone(), Default::default()).unwrap();
 		let mut config = video_rendition();
 		config.broadcast = Some("./left".into());
 		config.track = Some("encoded".into());
@@ -2995,7 +2996,11 @@ mod session_tests {
 	#[test]
 	fn the_source_retries_without_a_budget() {
 		let config = super::connect_config(&unreachable());
-		assert_eq!(config.backoff.timeout, Some(Duration::ZERO), "zero is unlimited");
+		assert_eq!(
+			config.backoff.timeout,
+			Some((Duration::ZERO).into()),
+			"zero is unlimited"
+		);
 	}
 
 	/// `quic-keylog` reaches the client's QUIC config, which refuses it without `SSLKEYLOGFILE`.
@@ -3004,8 +3009,12 @@ mod session_tests {
 		if !test_env::Env::without(&["SSLKEYLOGFILE"]).isolate() {
 			return;
 		}
-		let mut keylog = unreachable();
-		keylog.quic.keylog = Some(true);
+		let mut connection = crate::connection::Settings::default();
+		connection.set("quic-keylog", &true.to_value());
+		let keylog = ResolvedSettings {
+			quic: connection.resolve().unwrap().1,
+			..unreachable()
+		};
 		let err = super::connect(&keylog)
 			.err()
 			.expect("a keylog without SSLKEYLOGFILE must be refused");
@@ -3048,6 +3057,7 @@ mod session_tests {
 
 	/// A broadcast with one video rendition, and what feeds it.
 	struct Publisher {
+		publication: Option<moq_net::origin::Publication>,
 		broadcast: moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer,
 		video: moq_mux::container::Producer<moq_mux::catalog::hang::Container>,
@@ -3057,21 +3067,20 @@ mod session_tests {
 	impl Publisher {
 		/// Publish at `room` on `origin` under `route`.
 		fn new(origin: &moq_net::origin::Producer, route: moq_net::origin::Route, config: VideoConfig) -> Self {
-			let publisher = Self::build(origin.create_broadcast("room").unwrap(), config);
-			publisher.broadcast.announce(route).unwrap();
+			let publication = origin.create_broadcast("room").unwrap();
+			let mut publisher = Self::build(publication.broadcast().clone(), config);
+			publication.announce(route).unwrap();
+			publisher.publication = Some(publication);
 			publisher
 		}
 
 		/// The `cam` broadcast a rendition of `room` references as `./cam`, under `route`.
 		fn sibling(origin: &moq_net::origin::Producer, route: moq_net::origin::Route) -> Self {
-			let publisher = Self::build(origin.create_broadcast("cam").unwrap(), video_rendition());
-			publisher.broadcast.announce(route).unwrap();
+			let publication = origin.create_broadcast("cam").unwrap();
+			let mut publisher = Self::build(publication.broadcast().clone(), video_rendition());
+			publication.announce(route).unwrap();
+			publisher.publication = Some(publication);
 			publisher
-		}
-
-		/// A broadcast at no path, for a covering route to serve.
-		fn standalone(config: VideoConfig) -> Self {
-			Self::build(moq_net::broadcast::Info::new().produce(), config)
 		}
 
 		fn build(mut broadcast: moq_net::broadcast::Producer, config: VideoConfig) -> Self {
@@ -3089,6 +3098,7 @@ mod session_tests {
 				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
 			);
 			Self {
+				publication: None,
 				broadcast,
 				catalog,
 				video,
@@ -3305,7 +3315,7 @@ mod session_tests {
 	/// Records what reaches the element's video pads. A new pad's first stream-start and caps
 	/// precede its pad-added, so only a kept pad's later ones show.
 	#[derive(Clone, Default)]
-	struct Recorder(std::sync::Arc<Mutex<Vec<Seen>>>);
+	struct Recorder(std::sync::Arc<(Mutex<Vec<Seen>>, std::sync::Condvar)>);
 
 	impl Recorder {
 		fn attach(element: &super::super::MoqSrc) -> Self {
@@ -3348,11 +3358,30 @@ mod session_tests {
 		}
 
 		fn push(&self, seen: Seen) {
-			self.0.lock().unwrap().push(seen);
+			let (list, pushed) = &*self.0;
+			list.lock().unwrap().push(seen);
+			pushed.notify_all();
 		}
 
 		fn seen(&self) -> Vec<Seen> {
-			self.0.lock().unwrap().clone()
+			self.0.0.lock().unwrap().clone()
+		}
+
+		/// Block until `tag` reaches a pad, returning that pad.
+		fn reached(&self, tag: u8) -> String {
+			let reached = |seen: &[Seen]| {
+				seen.iter().find_map(|seen| match seen {
+					Seen::Buffer(pad, seen) if *seen == tag => Some(pad.clone()),
+					_ => None,
+				})
+			};
+			let (list, pushed) = &*self.0;
+			let (seen, _) = pushed
+				.wait_timeout_while(list.lock().unwrap(), Duration::from_secs(10), |seen| {
+					reached(seen).is_none()
+				})
+				.unwrap();
+			reached(&seen).unwrap_or_else(|| panic!("{tag} never reached a pad: {seen:?}"))
 		}
 
 		fn count(&self, matches: impl Fn(&Seen) -> bool) -> usize {
@@ -3416,6 +3445,15 @@ mod session_tests {
 			.expect("the announcement never arrived");
 	}
 
+	/// Block until someone reads the publisher's video, or until nobody does once `wanted` is false.
+	fn await_demand(publisher: &Publisher, wanted: bool) {
+		let mut demand = publisher.video.demand();
+		let changed = async { while demand.wanted_changed().await.expect("the track closed").is_some() != wanted {} };
+		super::RUNTIME
+			.block_on(async { tokio::time::timeout(Duration::from_secs(10), changed).await })
+			.expect("the demand never changed");
+	}
+
 	/// Follow `room` on `origin` past its start. A follower folds everything on hand while nothing
 	/// serves the path, so one first polled after the next change would never report it.
 	fn announced(origin: &moq_net::origin::Producer) -> moq_net::announce::Follow {
@@ -3471,8 +3509,8 @@ mod session_tests {
 		restart(moq_net::origin::Route::default);
 	}
 
-	/// The route serving the path can be a prefix covering it, here the root, and its restart
-	/// switches too.
+	/// The route serving the path can be a prefix covering it, here the root, and a restart of
+	/// its answer switches too.
 	#[test]
 	fn a_covering_route_restart_switches_on_the_same_pad() {
 		let _pad_ids = pad_ids();
@@ -3480,22 +3518,24 @@ mod session_tests {
 		let recorder = Recorder::attach(&element);
 		let origin = origin();
 
-		let mut old = Publisher::standalone(video_rendition());
-		let serving = std::sync::Arc::new(Mutex::new(old.broadcast.consume()));
-		let pool = std::sync::Arc::new(origin.dynamic_route("", epoch()).unwrap());
-		let (handler, answer) = (pool.clone(), serving.clone());
+		let claim = origin.dynamic("").unwrap();
+		let (answers, answered) = std::sync::mpsc::channel();
 		let handler = super::RUNTIME.spawn(async move {
-			while let Ok(request) = handler.requested_broadcast().await {
-				request.accept(answer.lock().unwrap().clone());
+			while let Ok(request) = claim.requested_broadcast().await {
+				let prepared = request.prepare(moq_net::Epoch::mint()).unwrap();
+				let answer = Publisher::build(prepared.broadcast().clone(), video_rendition());
+				prepared.publish().unwrap();
+				answers.send(answer).unwrap();
 			}
 		});
 
 		let session = follow(&element, &origin);
+		let mut old = answered
+			.recv_timeout(Duration::from_secs(5))
+			.expect("the claim answered");
 		let pad = recorder.written(&mut old, 1);
 
-		let mut new = Publisher::standalone(video_rendition());
-		*serving.lock().unwrap() = new.broadcast.consume();
-		pool.update_route(epoch()).unwrap();
+		let mut new = Publisher::new(&origin, epoch(), video_rendition());
 		assert_eq!(recorder.written(&mut new, 2), pad, "the restart moved to another pad");
 
 		stop(session);
@@ -3503,15 +3543,15 @@ mod session_tests {
 		recorder.assert_one_pad_held();
 	}
 
-	/// A route that never answers must not hold the reader on a stale resolution once a
-	/// replacement serves the path. An answer arriving late cannot replace the chosen run.
+	/// A claim that never answers must not hold the reader on a stale resolution once a
+	/// replacement serves the path. Its late refusal cannot end the chosen run.
 	#[test]
 	fn a_replacement_supersedes_a_pending_broadcast_request() {
 		let _pad_ids = pad_ids();
 		let element = element();
 		let recorder = Recorder::attach(&element);
 		let origin = origin();
-		let pool = origin.dynamic_route("", epoch()).unwrap();
+		let pool = origin.dynamic("").unwrap();
 		let session = follow(&element, &origin);
 		let pending = super::RUNTIME.block_on(async {
 			tokio::time::timeout(Duration::from_secs(10), pool.requested_broadcast())
@@ -3521,12 +3561,9 @@ mod session_tests {
 		});
 		let mut new = Publisher::new(&origin, epoch(), video_rendition());
 		recorder.written(&mut new, 2);
-		let mut old = Publisher::standalone(video_rendition());
-		pending.accept(old.broadcast.consume());
-		old.write(1);
+		pending.reject(moq_net::Error::Unauthorized);
 		recorder.written(&mut new, 3);
 		stop(session);
-		assert!(!recorder.seen().iter().any(|seen| matches!(seen, Seen::Buffer(_, 1))));
 		recorder.assert_one_pad_held();
 	}
 
@@ -3645,9 +3682,9 @@ mod session_tests {
 		first.video.finish().unwrap();
 		await_finished(&first);
 		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
-		first.broadcast.unannounce();
+		first.publication.as_ref().unwrap().unannounce();
 		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::End(_)));
-		first.broadcast.announce(route).unwrap();
+		first.publication.as_ref().unwrap().announce(route).unwrap();
 		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
 
 		let mut second = Publisher::sibling(&origin, epoch());
@@ -4173,25 +4210,28 @@ mod session_tests {
 		let _room = referencing(&origin, Some(named.clone()));
 		let mut old = Publisher::sibling(&origin, moq_net::origin::Route::default().with_epoch(named));
 		let session = follow(&element, &origin);
-		let pad = recorder.written(&mut old, 1);
+		await_demand(&old, true);
+		old.write(1);
+		let pad = recorder.reached(1);
 
+		// The reference lets the old instance go once another wins its path, and only then
+		// does the new one leave, so the return is a resume rather than a missed restart.
 		let mut follow = origin.consume().follow("cam").unwrap();
 		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
 		let mut new = Publisher::sibling(&origin, epoch());
 		await_event(&mut follow, |event| {
 			matches!(event, moq_net::announce::Event::Restart(_))
 		});
+		await_demand(&old, false);
 		new.write(2);
 		drop(new);
 		await_event(&mut follow, |event| {
 			matches!(event, moq_net::announce::Event::Restart(_))
 		});
 
-		assert_eq!(
-			recorder.written(&mut old, 3),
-			pad,
-			"the named instance moved to another pad"
-		);
+		await_demand(&old, true);
+		old.write(3);
+		assert_eq!(recorder.reached(3), pad, "the named instance moved to another pad");
 		stop(session);
 		assert!(
 			!recorder.seen().contains(&Seen::Buffer(pad, 2)),
@@ -4283,7 +4323,12 @@ mod session_tests {
 		let session = follow(&element, &origin);
 		recorder.written(&mut publisher, 1);
 
-		publisher.broadcast.announce(route.with_cost(5)).unwrap();
+		publisher
+			.publication
+			.as_ref()
+			.unwrap()
+			.announce(route.with_cost(5))
+			.unwrap();
 		await_event(&mut announced, |event| {
 			matches!(event, moq_net::announce::Event::Update(_))
 		});
@@ -4422,7 +4467,7 @@ mod session_tests {
 		let session = follow(&element, &origin);
 		let pad = recorder.written(&mut old, 1);
 
-		old.broadcast.unannounce();
+		old.publication.as_ref().unwrap().unannounce();
 		await_event(&mut announced, |event| {
 			matches!(event, moq_net::announce::Event::End(_))
 		});
@@ -4509,7 +4554,7 @@ mod session_tests {
 								let admit = *admitting.lock().unwrap();
 								match admit {
 									Admit::Serve => {
-										if let Ok((session, _driver)) = request.with_publisher(&serving).with_subscriber(serving.clone()).ok().await {
+										if let Ok(session) = request.with_publisher(&serving).with_subscriber(serving.clone()).ok().await {
 											sessions.push(session);
 										}
 									}
@@ -4517,7 +4562,7 @@ mod session_tests {
 										drop(request);
 										dropping.send_modify(|dropped| *dropped += 1);
 									}
-									Admit::Refuse => request.reject(moq_tokio::server::Reject::Forbidden).await.unwrap(),
+									Admit::Refuse => request.reject(moq_net::SessionError::Unauthorized).await.unwrap(),
 								}
 							}
 						}

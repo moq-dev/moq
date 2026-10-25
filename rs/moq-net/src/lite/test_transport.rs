@@ -11,7 +11,7 @@
 use std::{
 	sync::{
 		Arc, Mutex,
-		atomic::{AtomicBool, AtomicUsize, Ordering},
+		atomic::{AtomicUsize, Ordering},
 	},
 	task::{Context, Poll},
 };
@@ -592,6 +592,9 @@ pub struct SinkSession {
 	/// Set by [`Self::accepted_bi`]. `None` parks `accept_bi` forever, which is what
 	/// every session that only ever opens its own streams expects.
 	accept_gate: Option<kio::Consumer<bool>>,
+	/// Set by [`Self::with_open_bi_gate`] to withhold bidi stream credit.
+	bi_open_gate: Option<kio::Consumer<bool>>,
+	bi_open_park: kio::Park,
 	/// Set by [`Self::gated_uni`] to hold unidirectional stream writes.
 	uni_gate: Option<kio::Consumer<bool>>,
 	/// Set by [`Self::gated_open_uni`] to withhold unidirectional stream credit.
@@ -714,6 +717,12 @@ impl SinkSession {
 		self.uni_open_gate = Some(gate);
 		self
 	}
+
+	/// Also hold bidi stream opens until `gate` grants stream credit.
+	pub fn with_open_bi_gate(mut self, gate: kio::Consumer<bool>) -> Self {
+		self.bi_open_gate = Some(gate);
+		self
+	}
 }
 
 impl poll::Session for SinkSession {
@@ -736,12 +745,19 @@ impl poll::Session for SinkSession {
 
 	fn poll_open_bi(
 		&mut self,
-		_cx: &mut Context<'_>,
+		cx: &mut Context<'_>,
 		options: poll::SendOptions<'_, SinkGroup>,
 	) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
 		let Some(gate) = self.bi_gate.clone() else {
 			return Poll::Pending;
 		};
+		if let Some(credit) = &self.bi_open_gate {
+			let waiter = self.bi_open_park.hold(cx);
+			match credit.poll(waiter, |open| (**open).then_some(()).map_or(Poll::Pending, Poll::Ready)) {
+				Poll::Ready(Ok(())) => {}
+				Poll::Ready(Err(_)) | Poll::Pending => return Poll::Pending,
+			}
+		}
 		self.log.bi_opens.fetch_add(1, Ordering::Relaxed);
 
 		let mut send = SinkSend::gated(self.log.clone(), gate).opened(options);
@@ -926,7 +942,7 @@ pub struct ScriptedSession {
 	/// Set by [`Self::gated_open`]: parks `poll_open_bi` until the gate opens, standing in
 	/// for a transport header blocked on send capacity.
 	open_gate: Option<kio::Consumer<bool>>,
-	credit: Arc<AtomicBool>,
+	credit: kio::Producer<bool>,
 	/// Keeps the gate registration alive between `poll_open_bi` calls.
 	park: kio::Park,
 	/// Scripts the peer pushes at us on unidirectional streams, popped by `accept_uni`
@@ -944,12 +960,12 @@ pub struct ScriptedSession {
 
 impl ScriptedSession {
 	pub fn without_credit(self) -> Self {
-		self.credit.store(false, Ordering::Relaxed);
+		*self.credit.write().ok().expect("credit is live") = false;
 		self
 	}
 
 	pub fn grant_credit(&self) {
-		self.credit.store(true, Ordering::Relaxed);
+		*self.credit.write().ok().expect("credit is live") = true;
 	}
 
 	pub fn with_stats(mut self, stats: SinkStats) -> Self {
@@ -970,7 +986,7 @@ impl ScriptedSession {
 			script: Arc::new(Mutex::new(script)),
 			queue: None,
 			open_gate: None,
-			credit: Arc::new(AtomicBool::new(true)),
+			credit: kio::Producer::new(true),
 			park: kio::Park::default(),
 			incoming_unis: Arc::new(Mutex::new(std::collections::VecDeque::new())),
 			incoming_bidis: Arc::new(Mutex::new(std::collections::VecDeque::new())),
@@ -1113,6 +1129,15 @@ impl poll::Session for ScriptedSession {
 		cx: &mut Context<'_>,
 		options: poll::SendOptions<'_, SinkGroup>,
 	) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
+		let credit = self.credit.consume();
+		if credit
+			.poll(self.park.hold(cx), |credit| {
+				if **credit { Poll::Ready(()) } else { Poll::Pending }
+			})
+			.is_pending()
+		{
+			return Poll::Pending;
+		}
 		if let Some(gate) = self.open_gate.clone() {
 			let waiter = self.park.hold(cx);
 			// A closed gate reads as open: the test dropped the producer, so nothing is
@@ -1152,7 +1177,7 @@ impl poll::Session for ScriptedSession {
 		>,
 	) -> std::task::Poll<Result<Option<crate::transport::poll::BiStreams<Self>>, Self::Error>> {
 		self.log.request_attempts.fetch_add(1, Ordering::Relaxed);
-		if !self.credit.load(Ordering::Relaxed) {
+		if !*self.credit.read() {
 			return Poll::Ready(Ok(None));
 		}
 		self.poll_open_bi(cx, options).map_ok(Some)

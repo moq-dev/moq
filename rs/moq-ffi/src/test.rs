@@ -406,7 +406,16 @@ async fn announced_route_keeps_static_cost_on_reannounce() {
 			epoch: route.epoch.clone(),
 		})
 		.unwrap();
-	let current = broadcast.state.lock().unwrap().as_ref().unwrap().broadcast.route();
+	let current = broadcast
+		.state
+		.lock()
+		.unwrap()
+		.as_ref()
+		.unwrap()
+		.publication
+		.as_ref()
+		.unwrap()
+		.route();
 	assert_eq!(current.map(MoqRoute::from), Some(route));
 
 	broadcast.close().unwrap();
@@ -565,7 +574,6 @@ async fn raw_audio_activity() {
 				channels: None,
 				bitrate: None,
 				frame_duration_us: FRAME_DURATION_US,
-				preset: None,
 			},
 			track: Some("microphone".into()),
 			bandwidth: None,
@@ -693,7 +701,6 @@ async fn audio_raw_publish_from_many_threads() {
 		channels: None,
 		bitrate: None,
 		frame_duration_us: 20_000,
-		preset: None,
 	};
 	let audio = MoqAudioProducer::new(
 		&catalog,
@@ -781,7 +788,6 @@ async fn audio_raw_publish_rejects_bad_frames() {
 				channels: None,
 				bitrate: None,
 				frame_duration_us: 20_000,
-				preset: None,
 			},
 			track: None,
 			bandwidth: None,
@@ -831,7 +837,6 @@ async fn raw_audio_decode_delay() {
 				channels: None,
 				bitrate: None,
 				frame_duration_us: FRAME_US as u32,
-				preset: None,
 			},
 			track: Some("microphone".into()),
 			bandwidth: None,
@@ -923,7 +928,6 @@ async fn raw_audio_frame_durations() {
 		channels: None,
 		bitrate: None,
 		frame_duration_us,
-		preset: None,
 	};
 
 	let audio = MoqAudioProducer::new(
@@ -982,7 +986,6 @@ async fn raw_audio_codec_default_frame() {
 		channels: None,
 		bitrate: None,
 		frame_duration_us: 0,
-		preset: None,
 	};
 
 	let opus = MoqAudioProducer::new(
@@ -1108,7 +1111,7 @@ async fn raw_track_update_does_not_wait_for_pending_read() {
 			priority: 10,
 			max_delay_us: Some(25_000),
 			ranges: Some(vec![MoqRange {
-				start: MoqAnchor::Absolute { group: 0, frame: 0 },
+				start: MoqAnchor::Absolute { group: 0 },
 				end: None,
 			}]),
 			order: None,
@@ -2460,14 +2463,18 @@ async fn dynamic_track_serves_fetch_miss_and_priority() {
 			.await
 	});
 
-	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_group())
+	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_fill())
 		.await
-		.expect("timed out waiting for group request")
+		.expect("timed out waiting for fill")
 		.unwrap();
-	assert_eq!(request.sequence(), 5);
+	assert_eq!(
+		(request.start_group(), request.start_frame(), request.end_group()),
+		(5, 0, 6)
+	);
 	assert_eq!(request.priority(), 11);
+	assert_eq!(request.next(), Some(5));
 
-	let group = request.accept().unwrap();
+	let group = request.accept(5).unwrap();
 	group
 		.write_frame(MoqFrame {
 			payload: b"fetched".to_vec(),
@@ -2488,6 +2495,35 @@ async fn dynamic_track_serves_fetch_miss_and_priority() {
 }
 
 #[tokio::test]
+async fn fill_goes_unused_when_the_fetcher_leaves() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("events".into(), None).unwrap();
+	let dynamic = track.dynamic().unwrap();
+	let consumer = broadcast.consume().unwrap();
+
+	let fetch = tokio::spawn(async move { consumer.fetch_group("events".into(), 5, None).await });
+	let fill = tokio::time::timeout(TIMEOUT, dynamic.requested_fill())
+		.await
+		.expect("timed out waiting for fill")
+		.unwrap();
+	assert!(fill.is_used());
+	assert!(fill.is_wanted(5));
+	assert!(!fill.is_wanted(6), "outside the fill");
+
+	fetch.abort();
+	tokio::time::timeout(TIMEOUT, fill.unused())
+		.await
+		.expect("timed out waiting for the abandoned fetch to become unused")
+		.unwrap();
+	assert!(!fill.is_used());
+	tokio::time::timeout(TIMEOUT, fill.unwanted(5))
+		.await
+		.expect("an unused fill wants none of its groups")
+		.unwrap();
+	assert!(!fill.is_wanted(5));
+}
+
+#[tokio::test]
 async fn dynamic_track_rejects_fetch_miss() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast.publish_track("events".into(), None).unwrap();
@@ -2495,26 +2531,19 @@ async fn dynamic_track_rejects_fetch_miss() {
 	let consumer = broadcast.consume().unwrap();
 
 	let fetch = tokio::spawn(async move { consumer.fetch_group("events".into(), 5, None).await });
-	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_group())
+	let fill = tokio::time::timeout(TIMEOUT, dynamic.requested_fill())
 		.await
-		.expect("timed out waiting for group request")
+		.expect("timed out waiting for fill")
 		.unwrap();
-	request.abort(404).unwrap();
+	fill.drop_groups(5, 6);
+	assert_eq!(fill.next(), None, "the dropped group is answered");
 
 	let result = tokio::time::timeout(TIMEOUT, fetch)
 		.await
 		.expect("timed out waiting for rejected fetch")
 		.expect("fetch task panicked");
-	match result {
-		Err(MoqError::Protocol { details: protocol }) => {
-			assert_eq!(protocol.scope, crate::error::MoqErrorScope::Stream);
-			assert_eq!(protocol.code, 64 + 404);
-			assert_eq!(protocol.kind, crate::error::MoqProtocolKind::App);
-		}
-		Err(other) => panic!("expected Protocol App(404), got {other:?}"),
-		Ok(_) => panic!("expected Protocol App(404), got a group"),
-	}
-	assert!(matches!(request.accept(), Err(MoqError::Closed)));
+	assert!(matches!(result, Err(MoqError::NotFound)), "got {:?}", result.err());
+	assert!(fill.accept(5).is_err(), "a dropped group is answered already");
 }
 
 #[tokio::test]
@@ -2550,12 +2579,12 @@ async fn requested_track_dynamic_survives_accept() {
 	let track_dynamic = request.dynamic().unwrap();
 	let _track = request.accept(Some(timed_info())).unwrap();
 
-	let group_request = tokio::time::timeout(TIMEOUT, track_dynamic.requested_group())
+	let fill = tokio::time::timeout(TIMEOUT, track_dynamic.requested_fill())
 		.await
-		.expect("timed out waiting for group request")
+		.expect("timed out waiting for fill")
 		.unwrap();
-	assert_eq!(group_request.sequence(), 9);
-	let group = group_request.accept().unwrap();
+	assert_eq!(fill.start_group(), 9);
+	let group = fill.accept(9).unwrap();
 	group
 		.write_frame(MoqFrame {
 			payload: b"archive".to_vec(),
@@ -4075,14 +4104,6 @@ fn close_twice_is_a_noop() {
 	);
 }
 
-/// A raw track with a millisecond max age, which is what a finish lingers for.
-fn aged_info(max_age_ms: u64) -> MoqTrackInfo {
-	MoqTrackInfo {
-		max_age_us: Some(max_age_ms * 1_000),
-		..timed_info()
-	}
-}
-
 /// Wait for the announcement of `path` to end, failing the test if it doesn't.
 async fn await_unannounced(announced: &MoqAnnounceConsumer) {
 	match next_event(announced).await {
@@ -4092,35 +4113,27 @@ async fn await_unannounced(announced: &MoqAnnounceConsumer) {
 }
 
 /// A finished broadcast stays announced and serves its finished tracks to a late subscriber,
-/// lingering for the longest max age among them; a live track adds nothing.
+/// even once their handles are released, until it closes.
 #[tokio::test]
-async fn finish_serves_finished_tracks_to_a_late_subscriber() {
+async fn finish_serves_finished_tracks_until_close() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
 	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
 	let broadcast = create_announced(&origin, "finish");
 	next_announced(&announced).await;
 
-	let video = broadcast.publish_track("video".into(), Some(aged_info(2_000))).unwrap();
-	let audio = broadcast.publish_track("audio".into(), Some(aged_info(5_000))).unwrap();
-	let live = broadcast.publish_track("live".into(), Some(aged_info(60_000))).unwrap();
-	for track in [&video, &audio, &live] {
-		track
-			.write_frame(MoqFrame {
-				payload: b"tail".to_vec(),
-				timestamp_us: Some(0),
-			})
-			.unwrap();
-	}
-	video.finish().unwrap();
+	let audio = broadcast.publish_track("audio".into(), Some(timed_info())).unwrap();
+	audio
+		.write_frame(MoqFrame {
+			payload: b"tail".to_vec(),
+			timestamp_us: Some(0),
+		})
+		.unwrap();
 	audio.finish().unwrap();
-	// A binding's garbage collector may release a finished handle before the broadcast finishes.
-	drop((video, audio));
-
-	let finish = broadcast.finish().unwrap();
-	assert_eq!(finish.linger_us(), 5_000_000);
-	assert!(matches!(broadcast.consume(), Err(MoqError::Closed)));
-	broadcast.close().unwrap();
+	// A binding's garbage collector may release a finished handle before the broadcast closes.
+	drop(audio);
+	let catalog = crate::media::MoqMediaCatalogProducer::new(broadcast.clone()).unwrap();
+	catalog.finish().unwrap();
 
 	let late = await_announced(&consumer, "finish").await;
 	let track = late.subscribe_track("audio".into(), None).await.unwrap();
@@ -4131,104 +4144,9 @@ async fn finish_serves_finished_tracks_to_a_late_subscriber() {
 		.expect("expected the finished track's frame");
 	assert_eq!(frame.payload, b"tail");
 
-	finish.close();
+	broadcast.close().unwrap();
 	await_unannounced(&announced).await;
-	finish.close();
-	assert!(matches!(finish.wait().await, Err(MoqError::Closed)));
-	live.finish().unwrap();
-}
-
-/// Media tracks finish through their importer handles, which a finish must still hold.
-#[tokio::test]
-async fn finish_holds_finished_media_tracks() {
-	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let media = MoqMediaTrackProducer::audio(
-		&broadcast,
-		MoqMediaTarget::Named { name: None },
-		audio_init(MoqAudioFormat::Opus, opus_head()),
-	)
-	.unwrap();
-	media
-		.write_frame(MoqFrame {
-			payload: b"opus frame".to_vec(),
-			timestamp_us: Some(0),
-		})
-		.unwrap();
-	media.finish().unwrap();
-	drop(media);
-
-	let finish = broadcast.finish().unwrap();
-	assert!(finish.linger_us() > 0, "the finished media track was not held");
-	finish.close();
-}
-
-/// Without a max age nothing lingers: the wait closes the broadcast at once.
-#[tokio::test]
-async fn finish_without_a_max_age_closes_on_wait() {
-	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
-	let consumer = origin.consume();
-	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
-	let broadcast = create_announced(&origin, "finish");
-	next_announced(&announced).await;
-	let track = broadcast.publish_track("status".into(), Some(timed_info())).unwrap();
-	track.finish().unwrap();
-
-	let finish = broadcast.finish().unwrap();
-	assert_eq!(finish.linger_us(), 0);
-	tokio::time::timeout(TIMEOUT, finish.wait())
-		.await
-		.expect("the wait outlived a zero linger")
-		.unwrap();
-	await_unannounced(&announced).await;
-}
-
-/// Closing the handle, the interrupt, ends a wait in progress and the broadcast with it.
-#[tokio::test]
-async fn closing_finish_ends_the_wait() {
-	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
-	let consumer = origin.consume();
-	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
-	let broadcast = create_announced(&origin, "finish");
-	next_announced(&announced).await;
-	let track = broadcast
-		.publish_track("status".into(), Some(aged_info(3_600_000)))
-		.unwrap();
-	track.finish().unwrap();
-
-	let finish = broadcast.finish().unwrap();
-	let wait = spawn_parked({
-		let finish = finish.clone();
-		async move { finish.wait().await }
-	})
-	.await;
-	finish.close();
-	tokio::time::timeout(TIMEOUT, wait)
-		.await
-		.expect("the wait outlived the close")
-		.expect("the wait panicked")
-		.unwrap();
-	await_unannounced(&announced).await;
-}
-
-/// Dropping a wait in progress, as a cancelled foreign future does, closes the broadcast.
-#[tokio::test]
-async fn cancelling_the_wait_closes_the_broadcast() {
-	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
-	let consumer = origin.consume();
-	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
-	let broadcast = create_announced(&origin, "finish");
-	next_announced(&announced).await;
-	let track = broadcast
-		.publish_track("status".into(), Some(aged_info(3_600_000)))
-		.unwrap();
-	track.finish().unwrap();
-
-	let finish = broadcast.finish().unwrap();
-	let mut wait = Box::pin(finish.wait());
-	let first = std::future::poll_fn(|cx| std::task::Poll::Ready(wait.as_mut().poll(cx))).await;
-	assert!(first.is_pending());
-	drop(wait);
-	await_unannounced(&announced).await;
+	assert!(matches!(catalog.finish(), Err(MoqError::Closed)));
 }
 
 #[tokio::test]
@@ -4271,7 +4189,8 @@ async fn dynamic_broadcast_request() {
 		.unwrap();
 	assert_eq!(request.path().unwrap(), "dynamic/broadcast");
 
-	let prepared = request.prepare(moq_net::Epoch::mint().to_string()).unwrap();
+	let epoch = moq_net::Epoch::mint().to_string();
+	let prepared = request.prepare(epoch.clone()).unwrap();
 	let served = prepared.broadcast();
 	let track = served.publish_track("status".into(), Some(timed_info())).unwrap();
 	// Only publish announces the answer, under its epoch and after admission.
@@ -4280,6 +4199,12 @@ async fn dynamic_broadcast_request() {
 		Err(MoqError::Closed)
 	));
 	prepared.publish().unwrap();
+	served
+		.announce(MoqAnnounceRoute {
+			epoch: Some(epoch),
+			cost: 7,
+		})
+		.unwrap();
 	assert!(matches!(request.path(), Err(MoqError::Closed)));
 
 	let broadcast = tokio::time::timeout(TIMEOUT, request_broadcast)
@@ -4656,7 +4581,7 @@ async fn raw_track_update_during_pending_group_still_reads_datagram() {
 			priority: 10,
 			max_delay_us: Some(25_000),
 			ranges: Some(vec![MoqRange {
-				start: MoqAnchor::Absolute { group: 0, frame: 0 },
+				start: MoqAnchor::Absolute { group: 0 },
 				end: None,
 			}]),
 			order: None,
@@ -5487,9 +5412,9 @@ async fn announced_broadcast_hands_out_a_held_takeover_once() {
 	announced_broadcast_hands_out_a_takeover_once("live").await;
 }
 
-/// An end is a gap that ended every request on the old route, even when a route above the path
-/// with the same epoch carries the instance on. So the instance serving the path afterwards is
-/// handed out again, though it is the one the caller still holds.
+/// An end is a gap that ended every request on the old route, even when a claim above the path
+/// answers under the same epoch. So the instance serving the path afterwards is handed out
+/// again, though its epoch is the one the caller still holds.
 #[tokio::test]
 async fn announced_broadcast_hands_out_the_instance_again_after_an_end() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
@@ -5505,29 +5430,26 @@ async fn announced_broadcast_hands_out_the_instance_again_after_an_end() {
 		.expect("timed out waiting for the broadcast")
 		.unwrap();
 
-	// A peer's covering route under the same epoch, which the public claim cannot express.
-	let dynamic = origin
-		.inner()
-		.inner
-		.dynamic_route("", route.clone().try_into().unwrap())
-		.unwrap();
+	// A covering claim answering under the same epoch.
+	let dynamic = origin.inner().inner.dynamic("").unwrap();
 	broadcast.unannounce().unwrap();
 	let again = tokio::spawn(async move { followed.available().await });
 	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_broadcast())
 		.await
 		.expect("the instance never asked the route above the path")
 		.unwrap();
-	let served = moq_net::broadcast::Info::new().produce();
-	request.accept(served.consume());
+	let epoch = route.epoch.clone().unwrap().parse().unwrap();
+	let served = request.prepare(epoch).unwrap().publish().unwrap();
 
 	let again = tokio::time::timeout(TIMEOUT, again)
 		.await
 		.expect("the instance was never handed out again")
 		.unwrap()
 		.unwrap();
-	assert!(
-		again.inner().is_clone(first.inner()),
-		"the route above did not carry the instance on"
+	assert_eq!(
+		again.inner().info().epoch,
+		first.inner().info().epoch,
+		"the claim above did not answer the same instance"
 	);
 	drop((served, dynamic));
 	broadcast.close().unwrap();
@@ -5730,7 +5652,10 @@ async fn client_defaults_are_what_an_unset_config_dials_with() {
 	assert_eq!(quic.idle_timeout, unset.idle_timeout);
 	assert_eq!(quic.keep_alive, unset.keep_alive);
 	assert_eq!(defaults.websocket.enabled, Some(true));
-	assert!(defaults.backoff.initial_us.is_some() && defaults.backoff.max_us.is_some());
+	let backoff = moq_tokio::connection::Backoff::default();
+	assert_eq!(defaults.backoff.initial_us, micros(backoff.initial()));
+	assert_eq!(defaults.backoff.max_us, micros(backoff.max()));
+	assert_eq!(defaults.backoff.timeout_us, micros(backoff.timeout()));
 
 	// The backend picks these, so there is no single value to report.
 	assert_eq!(defaults.tls.system_roots, None);
@@ -7386,15 +7311,6 @@ async fn data_track_names_cannot_collide() {
 
 /// In-memory sessions whose protocol and origin drivers use the paused test clock.
 async fn memory_shutdown_pair() -> (Arc<MoqSession>, Arc<MoqSession>) {
-	async fn drive(driver: impl moq_net::time::Driver) -> moq_tokio::Result<()> {
-		match moq_net::time::run(driver).await {
-			moq_net::Error::Closed
-			| moq_net::Error::Cancel
-			| moq_net::Error::Session(moq_net::SessionError::Cancel) => Ok(()),
-			error => Err(error.into()),
-		}
-	}
-
 	fn origin() -> crate::origin::Origin {
 		let mut config = moq_net::origin::Config::default();
 		config.pool = moq_net::cache::Pool::unbounded();
@@ -7419,8 +7335,8 @@ async fn memory_shutdown_pair() -> (Arc<MoqSession>, Arc<MoqSession>) {
 			.connect(moq_clock::Instant::now(), client)
 			.await
 			.unwrap();
-		let driver = tokio::spawn(drive(driver));
-		Arc::new(MoqSession::accepted(session, a.clone(), a, driver))
+		tokio::spawn(moq_net::time::run(driver));
+		Arc::new(MoqSession::accepted(session, a.clone(), a))
 	};
 	let accept = async {
 		let (session, driver) = moq_net::Server::new()
@@ -7429,8 +7345,8 @@ async fn memory_shutdown_pair() -> (Arc<MoqSession>, Arc<MoqSession>) {
 			.accept(moq_clock::Instant::now(), server)
 			.await
 			.unwrap();
-		let driver = tokio::spawn(drive(driver));
-		Arc::new(MoqSession::accepted(session, b.clone(), b, driver))
+		tokio::spawn(moq_net::time::run(driver));
+		Arc::new(MoqSession::accepted(session, b.clone(), b))
 	};
 	tokio::join!(connect, accept)
 }
@@ -7795,7 +7711,7 @@ async fn auth_tokens_join_and_leave_the_union() {
 	let serving = tokio::spawn(async move {
 		let mut request = listener.accept().await.expect("accept");
 		let mut requests = request.requests();
-		let (session, driver) = request.ok().await.unwrap();
+		let session = request.ok().await.unwrap();
 		let mut issued = Vec::new();
 		while let Some(request) = requests.next().await {
 			match request.token().as_ref() {
@@ -7809,7 +7725,7 @@ async fn auth_tokens_join_and_leave_the_union() {
 				_ => request.reject(moq_net::SessionError::Unauthorized, "unknown token"),
 			}
 		}
-		drop((session, driver, issued));
+		drop((session, issued));
 	});
 
 	let client = MoqClient::new(MoqClientConfig {

@@ -168,7 +168,7 @@ async fn connect_test(config: ConnectTest<'_>) {
 		if let Some(expect_authority) = expect_authority {
 			assert_eq!(request.authority(), expect_authority.as_deref());
 		}
-		let (session, _driver) = request.with_publisher(&pub_origin).ok().await?;
+		let session = request.with_publisher(&pub_origin).ok().await?;
 
 		let _broadcast = broadcast;
 		let _track = track;
@@ -461,7 +461,7 @@ async fn mtls_test(scheme: &str, reject: bool) {
 	// One shared tuning, handed to both roles the way a binary would.
 	let mut quic = moq_tokio::quic::Config::default();
 	quic.gso = Some(false);
-	quic.keep_alive = Some(Duration::from_secs(1));
+	quic.keep_alive = Some((Duration::from_secs(1)).into());
 
 	let server = server_config.init(quic.clone()).expect("failed to init server");
 	let mut server = server.listen().await.expect("failed to listen");
@@ -486,10 +486,10 @@ async fn mtls_test(scheme: &str, reject: bool) {
 		let has_cert = request.peer_identity().is_some();
 		let _ = identity_tx.send(has_cert);
 		if reject {
-			request.reject(moq_tokio::server::Reject::Forbidden).await?;
+			request.reject(moq_net::SessionError::Unauthorized).await?;
 			return Ok::<_, anyhow::Error>(has_cert);
 		}
-		let (session, _driver) = request.with_publisher(pub_origin.consume()).ok().await?;
+		let session = request.with_publisher(pub_origin.consume()).ok().await?;
 		let _ = session.closed().await;
 		Ok::<_, anyhow::Error>(has_cert)
 	});
@@ -682,7 +682,7 @@ async fn iroh_connect_test(version: Option<&str>) {
 		if let Some(version) = version.first() {
 			assert_eq!(request.alpn(), Some(version.alpn()));
 		}
-		let (session, _driver) = request.with_publisher(&pub_origin).ok().await?;
+		let session = request.with_publisher(&pub_origin).ok().await?;
 
 		let _broadcast = broadcast;
 		let _track = track;
@@ -746,7 +746,7 @@ async fn iroh_connect_test(version: Option<&str>) {
 async fn quic_client_close_reaches_server() {
 	// An idle timeout inside TIMEOUT would hide a lost close.
 	let mut quic = moq_tokio::quic::Config::default();
-	quic.idle_timeout = Some(TIMEOUT * 3);
+	quic.idle_timeout = Some((TIMEOUT * 3).into());
 
 	let mut server_config = moq_tokio::listen::Config::default();
 	server_config.bind = Some("127.0.0.1:0".parse().unwrap());
@@ -787,7 +787,7 @@ async fn quic_client_close_reaches_server() {
 		.await
 		.expect("accept timed out")
 		.expect("no incoming connection");
-	let (session, _driver) = request.ok().await.expect("server handshake failed");
+	let session = request.ok().await.expect("server handshake failed");
 	accepted.send(()).expect("client waiting for the accepted session");
 	tokio::task::spawn_blocking(move || client.join())
 		.await
@@ -868,7 +868,7 @@ async fn quic_client_close_drains_finished_track() {
 	let origin = moq_tokio::origin::spawn();
 	let consumer = origin.consume();
 	let mut announcements = consumer.announced();
-	let (_session, _driver) = request
+	let _session = request
 		.with_subscriber(origin)
 		.ok()
 		.await
@@ -989,7 +989,7 @@ async fn quic_client_close_drains_migrated_predecessor() {
 	let origin = moq_tokio::origin::spawn();
 	let consumer = origin.consume();
 	let mut announcements = consumer.announced();
-	let (first, _driver) = request
+	let first = request
 		.with_subscriber(origin)
 		.ok()
 		.await
@@ -1097,7 +1097,7 @@ async fn quic_client_close_keeps_predecessor_handover() {
 			config.tls.insecure = Some(true);
 			config.bind = Some("127.0.0.1:0".parse().unwrap());
 			// Well under the one second close window.
-			config.goaway.handover = Some(Duration::from_millis(500));
+			config.goaway.handover = Some((Duration::from_millis(500)).into());
 			let client = config
 				.init(quic)
 				.expect("failed to init client")
@@ -1126,7 +1126,7 @@ async fn quic_client_close_keeps_predecessor_handover() {
 	let origin = moq_tokio::origin::spawn();
 	let consumer = origin.consume();
 	let mut announcements = consumer.announced();
-	let (first, _driver) = request
+	let first = request
 		.with_subscriber(origin)
 		.ok()
 		.await

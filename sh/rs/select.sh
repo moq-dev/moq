@@ -20,7 +20,7 @@ select_packages() {
         echo ALL
         return
     fi
-    if [[ "$list" == --all ]] || grep -qE '^(Cargo\.(toml|lock)|rust-toolchain\.toml|rs/justfile|sh/rs/(select|platform|nextest)\.sh|\.config/nextest\.toml)$' "$list"; then
+    if [[ "$list" == --all ]] || grep -qE '^(sh/local\.(sh|ts)|Cargo\.(toml|lock)|rust-toolchain\.toml|rs/justfile|sh/rs/(select|platform|nextest)\.sh|\.config/nextest\.toml)$' "$list"; then
         echo ALL
         return
     fi
@@ -113,6 +113,12 @@ case "$packages" in
     *) echo "rs: selecting $names" ;;
 esac
 
+# Selection and empty crate sets stay outside admission. The paths are
+# root-relative because the `cd` above invalidates a relative `$0`.
+if [[ "${GITHUB_ACTIONS:-}" != true && "${LOCAL_SUPERVISED:-}" != 1 ]]; then
+    exec bash sh/local.sh bash sh/rs/select.sh "$@"
+fi
+
 # The `*-fuzz` crates need a nightly toolchain; only `just rs fuzz` compiles them.
 if [[ "$packages" == ALL ]]; then
     flags=(--workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz)
@@ -163,6 +169,8 @@ case "$action" in
             features+=(moq-video/capture moq-audio/capture moq-audio/playback)
         fi
         if wants moq-cli; then features+=(moq-cli/play moq-cli/openh264); fi
+        # The WebRTC module's hostile-input tests, such as mDNS backpressure.
+        if wants moq-tokio; then features+=(moq-tokio/webrtc); fi
         if ((${#features[@]})); then flags+=(--features "${features[*]}"); fi
         just rs test "${flags[@]}" ${timings[@]+"${timings[@]}"}
         ;;

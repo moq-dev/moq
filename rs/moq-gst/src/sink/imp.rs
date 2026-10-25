@@ -67,7 +67,7 @@ impl TryFrom<Settings> for ResolvedSettings {
 /// Live state for one READY to PAUSED run.
 struct State {
 	session: Session,
-	broadcast: moq_net::broadcast::Producer,
+	broadcast: moq_net::origin::Publication,
 	catalog: Option<moq_mux::catalog::Producer>,
 	wall: std::sync::Arc<super::wall::Wall>,
 	/// How long a clean end keeps the finished broadcast up before its EOS.
@@ -1051,7 +1051,8 @@ impl MoqSink {
 			None if completion.finish() => {
 				// The closed renditions and the catalog hold the finished tracks, so they go only
 				// once the broadcast closes.
-				let finished = moq_mux::Linger::new([state.broadcast.clone()], (closed, catalog), state.linger);
+				let finished =
+					moq_mux::Linger::new([state.broadcast.broadcast().clone()], (closed, catalog), state.linger);
 				self.linger_locked(control, finished)
 			}
 			None => Posted::Nothing,
@@ -2041,7 +2042,7 @@ mod tests {
 		let (broadcast, session) = {
 			let control = sink.imp().control.lock().unwrap();
 			let state = control.live.as_ref().expect("live session");
-			(state.broadcast.clone(), state.session.completion())
+			(state.broadcast.broadcast().clone(), state.session.completion())
 		};
 		let consumer = broadcast.consume();
 		let track = broadcast.create_track("video", None).unwrap();
@@ -2198,7 +2199,7 @@ mod tests {
 		assert_eq!(quic.idle_timeout, Duration::from_secs(15));
 		assert_eq!(quic.keep_alive, Some(Duration::from_secs(3)));
 		assert!(!sink.property::<bool>("quic-keylog"));
-		assert!(!quic.keylog);
+		assert!(quic.keylog.is_none());
 
 		sink.set_property("quic-keep-alive", 0u64);
 		sink.set_property("quic-idle-timeout", 0u64);
@@ -2207,7 +2208,7 @@ mod tests {
 		let quic = super::super::session::quic_config(&resolved).resolve();
 		assert_eq!(quic.idle_timeout, Duration::ZERO);
 		assert_eq!(quic.keep_alive, None);
-		assert!(quic.keylog);
+		assert!(quic.keylog.is_some());
 	}
 
 	/// The sink retries without a budget, so an outage of any length is ridden out
@@ -2220,7 +2221,11 @@ mod tests {
 		sink.set_property("broadcast", "test");
 		let resolved = ResolvedSettings::try_from(sink.imp().settings.lock().unwrap().clone()).unwrap();
 		let config = super::super::session::connect_config(&resolved);
-		assert_eq!(config.backoff.timeout, Some(Duration::ZERO), "zero is unlimited");
+		assert_eq!(
+			config.backoff.timeout,
+			Some((Duration::ZERO).into()),
+			"zero is unlimited"
+		);
 	}
 
 	#[test]

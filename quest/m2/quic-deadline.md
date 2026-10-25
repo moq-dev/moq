@@ -54,7 +54,7 @@ reordering, and probe overhead versus the default PTO. A proactive probe that
 raises loss or latency under any profile stays off by default.
 
 Decided in the 2026-09-30 audit: moved to m2. No m1 quest needs it:
-[native probing](/quest/m1/probe-native.md) learns of expiry from the stream
+native probing ([moq-dev/moq#6635](https://github.com/moq-dev/moq/pull/6635)) learns of expiry from the stream
 reset moq-net already sends.
 
 ## Related
@@ -62,5 +62,3 @@ reset moq-net already sends.
 - [QUIC receive-timestamps spike](/quest/m2/quic-realtime/receive-ts.md) - measures whether
   receive-time differences improve an explicit delay estimator over half-RTT
 - [ACK hook](/quest/m2/quic-ack-hook.md) - the same pattern for a moq-net method backed by `moq-quic`
-- [Native probing](/quest/m1/probe-native.md) - retransmits in-flight data
-  to probe, and must not resend what a deadline has expired

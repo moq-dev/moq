@@ -30,18 +30,6 @@ pub enum Error {
 	#[error("mux: {0}")]
 	Mux(#[from] moq_mux::Error),
 
-	/// History mode found no first group on this timeline, as in a retained (DVR) recording.
-	#[error("history needs timeline {0} from its first group; retained recordings are not supported")]
-	HistoryPruned(String),
-
-	/// A range playlist was requested from a timeline whose media is not durable.
-	#[error("range playlists require a durable timeline")]
-	RangeNotDurable,
-
-	/// A requested range is invalid or no longer fully retained.
-	#[error("requested range is unavailable: {0}")]
-	RangeUnavailable(String),
-
 	/// An import resource or redirect hop left the playlist's origin, or the playlist uses an unsupported scheme.
 	#[error("resource is outside the playlist's origin")]
 	ResourceRefused,
@@ -91,7 +79,7 @@ pub enum Error {
 		url: url::Url,
 		/// The requested byte count.
 		expected: u64,
-		/// The returned byte count.
+		/// The returned byte count, or the count read when an overrun was refused.
 		actual: usize,
 	},
 
@@ -104,6 +92,16 @@ pub enum Error {
 		start: u64,
 		/// The last requested byte, inclusive.
 		end: u64,
+	},
+
+	/// An HTTP origin answered a byte range request with a status other than `206 Partial Content`,
+	/// such as a `200` carrying the whole resource.
+	#[error("byte range for {url} was answered with status {status}, expected 206 Partial Content")]
+	ByteRangeIgnored {
+		/// The ranged resource.
+		url: url::Url,
+		/// The status the origin answered with.
+		status: u16,
 	},
 
 	/// An HLS media or discontinuity sequence was too large to pack into a MoQ group sequence.
@@ -137,6 +135,14 @@ pub enum Error {
 		/// The timeline's track name.
 		track: String,
 		/// Why the timeline failed.
+		source: Box<Error>,
+	},
+
+	/// The catalog failed before it finished, so every rendition's listings refuse and its
+	/// recording cursors end, rather than read as a finished recording or a transient fetch error.
+	#[error("catalog failed: {source}")]
+	CatalogFailed {
+		/// Why the catalog failed.
 		source: Box<Error>,
 	},
 

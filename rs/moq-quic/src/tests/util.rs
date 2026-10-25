@@ -318,6 +318,8 @@ impl Default for Pair {
 #[derive(Debug, Clone)]
 pub(super) struct Bottleneck {
     time_per_byte: Duration,
+    /// The bytes the queue holds before it tail-drops
+    buffer_size: u32,
     /// The queueing delay past which packets are tail-dropped
     max_queue: Duration,
     /// Whether packets are marked CE once the queue is half full, as a classic AQM does
@@ -333,11 +335,21 @@ impl Bottleneck {
         let time_per_byte = Duration::from_nanos(1_000_000_000 / bytes_per_second);
         Self {
             time_per_byte,
+            buffer_size,
             max_queue: buffer_size * time_per_byte,
             marks_ce,
             busy_until: None,
             stats: QueueStats::default(),
         }
+    }
+
+    /// Serve at `bytes_per_second` from now on, keeping the queue's size in bytes
+    ///
+    /// Packets already queued still leave when they were due, as if the link stepped once they
+    /// had been served.
+    pub(super) fn set_rate(&mut self, bytes_per_second: u64) {
+        self.time_per_byte = Duration::from_nanos(1_000_000_000 / bytes_per_second);
+        self.max_queue = self.buffer_size * self.time_per_byte;
     }
 
     /// Queues `bytes` arriving at `now`, returning when they leave the link and whether they
@@ -812,12 +824,7 @@ impl Write for SharedBuffer {
 pub(super) fn server_config() -> ServerConfig {
     let mut config = ServerConfig::with_crypto(Arc::new(server_crypto()));
     config.transport = Arc::new(TransportConfig::default());
-    if !cfg!(feature = "bloom") {
-        config
-            .validation_token
-            .sent(2)
-            .log(Arc::new(SimpleTokenLog::default()));
-    }
+
     config
 }
 

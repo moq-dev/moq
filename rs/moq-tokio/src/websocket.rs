@@ -121,7 +121,7 @@ pub struct Options {
 	pub identity: Option<crate::tls::PeerIdentity>,
 	/// The socket measurements captured before the HTTP server erased its descriptor.
 	pub socket_stats: Option<qmux::SharedSocketStats>,
-	/// The SETUP deadline, including its reply; defaults to ten seconds.
+	/// The SETUP deadline, including its reply; unset uses ten seconds, zero disables it.
 	pub timeout: Option<time::Duration>,
 }
 
@@ -135,7 +135,7 @@ impl Options {
 			link: Default::default(),
 			identity: None,
 			socket_stats: None,
-			timeout: Some(crate::listen::DEFAULT_TIMEOUT),
+			timeout: None,
 		}
 	}
 }
@@ -166,9 +166,10 @@ where
 		+ Unpin
 		+ 'static,
 {
-	let deadline = options
-		.timeout
-		.and_then(|timeout| moq_clock::now().checked_add(timeout));
+	let timeout = options.timeout.unwrap_or(crate::listen::DEFAULT_TIMEOUT);
+	let deadline = (!timeout.is_zero())
+		.then(|| moq_clock::now().checked_add(timeout))
+		.flatten();
 	// A vanished peer sends no FIN. Ping and timeout bound the same stale-session
 	// lifetime that QUIC's idle timeout bounds on the native path.
 	// The subprotocol names the QMux version; an upgrade without one has no wire format.
@@ -221,7 +222,7 @@ pub(crate) fn won(url: &Url) -> bool {
 }
 
 /// WebSocket configuration for the client.
-#[derive(Clone, Debug, usage_rs::Args, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, usage_rs::Args, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
@@ -243,36 +244,20 @@ pub struct Config {
 
 	/// Head start given to the QUIC dial before the WebSocket fallback joins the
 	/// race. Defaults to 200ms, and drops to zero for a server WebSocket already won.
-	/// `None` uses the default; an explicit command-line flag or environment variable wins.
-	#[usage(skip)]
-	#[serde(default, with = "humantime_serde", skip_serializing_if = "Option::is_none")]
-	pub delay: Option<time::Duration>,
-
-	/// Head start given to the QUIC dial before the WebSocket fallback joins the race. Defaults to 200ms.
+	/// `None` uses the default; zero disables this duration.
 	#[usage(
 		name = "connect-websocket-delay",
 		long = "connect-websocket-delay",
 		env = "MOQ_CONNECT_WEBSOCKET_DELAY",
 		setting = "connect.websocket.delay"
 	)]
-	#[serde(default, rename = "__cli_delay", skip_serializing_if = "Option::is_none")]
-	delay_arg: Option<CliDuration>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub delay: Option<crate::cli::Duration>,
 
 	/// The released `MOQ_CLIENT_WEBSOCKET_*` env vars, named by [`Config::deprecated`].
 	#[usage(flatten)]
 	#[serde(skip)]
 	pub(crate) legacy: Legacy,
-}
-
-impl Default for Config {
-	fn default() -> Self {
-		Self {
-			enabled: None,
-			delay: Some(DEFAULT_DELAY),
-			delay_arg: None,
-			legacy: Default::default(),
-		}
-	}
 }
 
 /// The released spellings for this section, which moved to `--connect-websocket-*`
@@ -332,7 +317,7 @@ impl Config {
 	pub fn resolve(&self) -> Resolved {
 		Resolved {
 			enabled: self.enabled.unwrap_or(true),
-			delay: self.delay_arg.map(Into::into).or(self.delay).unwrap_or(DEFAULT_DELAY),
+			delay: self.delay.map(Into::into).unwrap_or(DEFAULT_DELAY),
 		}
 	}
 }
@@ -543,7 +528,7 @@ async fn connect_tls_override(
 /// moq-transport-18 and newer require qmux-01, so we never pair them with qmux-00.
 /// This mirrors the policy in `js/net`'s `connect.ts`. Every other ALPN returns
 /// `&[]`, which qmux expands to every draft it knows about.
-const QMUX01_ONLY_ALPNS: &[&str] = &["moqt-18", "moqt-19", "moqt-20", "moqt-21", "moqt-22"];
+const QMUX01_ONLY_ALPNS: &[&str] = &["moqt-18", "moqt-22"];
 
 fn qmux_versions_for(alpn: &str) -> &'static [qmux::Version] {
 	if QMUX01_ONLY_ALPNS.contains(&alpn) {
@@ -989,13 +974,7 @@ mod tests {
 				.iter()
 				.map(|&a| moq_net::Version::from_alpn(a).map(|v| v.code()))
 				.collect::<Vec<_>>(),
-			vec![
-				Some(0xff000012),
-				Some(0xff000013),
-				Some(0xff000014),
-				Some(0xff000015),
-				Some(0xff000016)
-			]
+			vec![Some(0xff000012), Some(0xff000016)]
 		);
 		for &alpn in QMUX01_ONLY_ALPNS {
 			assert_eq!(qmux_versions_for(alpn), &[qmux::Version::QMux01]);
@@ -1068,4 +1047,52 @@ mod duration_tests {
 		|c: &Config| c.resolve().delay,
 		|d| d
 	);
+}
+
+#[cfg(test)]
+mod timeout_tests {
+	use super::*;
+	use futures::FutureExt;
+	use moq_net::transport::poll::Session as _;
+
+	#[tokio::test(start_paused = true)]
+	async fn unset_timeout_uses_the_default_and_zero_disables_it() {
+		const ALPN: &str = "qmux-01.moq-lite-06";
+		for (timeout, expires) in [(None, true), (Some(time::Duration::ZERO), false)] {
+			let activity = moq_net::server::Activity::default();
+			let mut options = Options::new(
+				"ws://localhost/".parse().unwrap(),
+				Default::default(),
+				activity.enter().unwrap(),
+			);
+			options.link.alpn = Some(ALPN.into());
+			options.timeout = timeout;
+			// Complete QMux over an in-memory WebSocket, then withhold MoQ SETUP.
+			// A silent transport would expire QMux's own parameter deadline first.
+			let (server, peer) = tokio::io::duplex(4096);
+			let server =
+				tokio_tungstenite::WebSocketStream::from_raw_socket(server, tungstenite::protocol::Role::Server, None)
+					.await;
+			let peer =
+				tokio_tungstenite::WebSocketStream::from_raw_socket(peer, tungstenite::protocol::Role::Client, None)
+					.await;
+			let mut peer = qmux::ws::Upgraded::new(peer, ALPN).connect().unwrap();
+			let mut accept = Box::pin(accept(server, options));
+			assert!(accept.as_mut().now_or_never().is_none());
+			let _stream = futures::future::poll_fn(|cx| peer.poll_open_bi(cx, Default::default()))
+				.await
+				.unwrap();
+			tokio::time::advance(crate::listen::DEFAULT_TIMEOUT).await;
+			let result = accept.as_mut().now_or_never();
+			if expires {
+				assert!(
+					matches!(result, Some(Err(crate::Error::MoqNet(moq_net::Error::Timeout)))),
+					"accept outcome: {:?}",
+					result.map(|outcome| outcome.map(|_| ()))
+				);
+			} else {
+				assert!(result.is_none(), "zero must keep waiting for SETUP");
+			}
+		}
+	}
 }

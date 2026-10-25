@@ -558,9 +558,8 @@ struct Publisher {
 	importer: FlvImport,
 	// Finished at a clean end, so the finished broadcast keeps serving the catalog.
 	catalog: moq_mux::catalog::Producer,
-	// A clone of the importer's producer, so an end can close the broadcast
-	// (prompt unannounce) even though the importer owns it.
-	broadcast: moq_net::broadcast::Producer,
+	// Controls publication so an end can retract before the importer's fill clone drops.
+	broadcast: moq_net::origin::Publication,
 	// This pull's publisher instance, so pulling again replaces it rather than resuming into it.
 	epoch: moq_net::Epoch,
 }
@@ -568,12 +567,12 @@ struct Publisher {
 impl Publisher {
 	fn new(origin: &origin::Producer, path: &str, config: moq_mux::catalog::Config) -> anyhow::Result<Self> {
 		let epoch = moq_net::Epoch::mint();
-		let mut broadcast = origin
+		let broadcast = origin
 			.publish(path, moq_net::origin::Route::default().with_epoch(epoch.clone()))
 			.map_err(|err| anyhow::anyhow!("broadcast '{path}' could not be published: {err}"))?;
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config)?;
 		let handle = broadcast.clone();
-		let mut importer = FlvImport::new(broadcast, catalog.reserve());
+		let mut importer = FlvImport::new(broadcast.broadcast().clone(), catalog.reserve());
 
 		// Feed the FLV file header once up front; media tags follow per message.
 		importer.decode(&flv::file_header())?;
@@ -600,12 +599,13 @@ impl Publisher {
 	fn finish(mut self, linger: Duration) -> anyhow::Result<moq_mux::Linger<Self>> {
 		self.importer.finish()?;
 		self.catalog.finish()?;
-		Ok(moq_mux::Linger::new([self.broadcast.clone()], self, linger))
+		Ok(moq_mux::Linger::new([self.broadcast.broadcast().clone()], self, linger))
 	}
 
-	/// Flush any buffered media, then end the broadcast so the origin unannounces it at once.
+	/// Flush any buffered media and finish the catalog, then end the broadcast so the origin unannounces it at once.
 	fn close(mut self) -> anyhow::Result<()> {
 		self.importer.finish()?;
+		self.catalog.finish()?;
 		self.broadcast.close();
 		Ok(())
 	}
@@ -615,6 +615,7 @@ impl Publisher {
 	///
 	/// Consumes the publisher and closes the broadcast.
 	fn abort(self, err: moq_net::Error) {
+		self.catalog.abort(err.clone());
 		self.importer.abort(err);
 		self.broadcast.close();
 	}
@@ -687,17 +688,19 @@ mod tests {
 
 	/// A broadcast with one AVC keyframe at `live/cam0` and its tracks finished, with the
 	/// importer that keeps them listed and the catalog to finish it with.
-	fn source(origin: &origin::Producer) -> (moq_net::broadcast::Producer, moq_mux::catalog::Producer, FlvImport) {
+	fn source(origin: &origin::Producer) -> (moq_net::origin::Publication, moq_mux::catalog::Producer, FlvImport) {
 		let mut vseq = vec![0x17, 0x00, 0x00, 0x00, 0x00];
 		vseq.extend_from_slice(&[0x01, 0x42, 0xc0, 0x1f, 0xff, 0xe1, 0x00, 0x04, 0x67, 0x42, 0xc0, 0x1f]);
 		vseq.extend_from_slice(&[0x01, 0x00, 0x04, 0x68, 0xce, 0x3c, 0x80]);
 		let mut vframe = vec![0x17, 0x01, 0x00, 0x00, 0x00];
 		vframe.extend_from_slice(&[0, 0, 0, 5, 0x65, 0x88, 0x84, 0x21, 0x00]);
 
-		let mut broadcast = origin.create_broadcast("live/cam0").unwrap();
+		let broadcast = origin.create_broadcast("live/cam0").unwrap();
 		broadcast.announce(Default::default()).unwrap();
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
-		let mut importer = FlvImport::new(broadcast.clone(), catalog.reserve());
+		let catalog =
+			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), moq_mux::catalog::Config::default())
+				.unwrap();
+		let mut importer = FlvImport::new(broadcast.broadcast().clone(), catalog.reserve());
 		importer.decode(&flv::file_header()).unwrap();
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vseq)).unwrap();
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vframe)).unwrap();
@@ -765,6 +768,100 @@ mod tests {
 		}
 	}
 
+	/// Contains `needle` somewhere in `haystack`.
+	fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+		haystack.windows(needle.len()).any(|window| window == needle)
+	}
+
+	/// A push stays on the instance it resolved: a publisher taking over the path never reaches
+	/// the remote, so the push never splices in another timeline or codec state, and it fails
+	/// once its instance's route dies.
+	#[tokio::test(start_paused = true)]
+	async fn a_push_stays_on_its_instance_until_the_route_dies() {
+		const OLD_IDR: &[u8] = &[0x65, 0x88, 0x84, 0x21, 0x00];
+		const OLD_DELTA: &[u8] = &[0x41, 0x9a, 0x02, 0x03];
+		const NEW_IDR: &[u8] = &[0x65, 0x99, 0x99, 0x99, 0x99];
+		let publish = |origin: &origin::Producer, epoch: &moq_net::Epoch, idr: &[u8]| {
+			let mut vseq = vec![0x17, 0x00, 0x00, 0x00, 0x00];
+			vseq.extend_from_slice(&[0x01, 0x42, 0xc0, 0x1f, 0xff, 0xe1, 0x00, 0x04, 0x67, 0x42, 0xc0, 0x1f]);
+			vseq.extend_from_slice(&[0x01, 0x00, 0x04, 0x68, 0xce, 0x3c, 0x80]);
+			let mut vframe = vec![0x17, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, idr.len() as u8];
+			vframe.extend_from_slice(idr);
+			let broadcast = origin.create_broadcast("live/cam0").unwrap();
+			broadcast
+				.announce(origin::Route::default().with_epoch(epoch.clone()))
+				.unwrap();
+			let catalog = moq_mux::catalog::Producer::new(
+				&mut broadcast.broadcast().clone(),
+				moq_mux::catalog::Config::default(),
+			)
+			.unwrap();
+			let mut importer = FlvImport::new(broadcast.broadcast().clone(), catalog.reserve());
+			importer.decode(&flv::file_header()).unwrap();
+			importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vseq)).unwrap();
+			importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vframe)).unwrap();
+			(importer, catalog)
+		};
+
+		let upstream = moq_tokio::origin::spawn();
+		let downstream = moq_tokio::origin::spawn();
+		let (mut old, old_catalog) = publish(&upstream, &moq_net::Epoch::mint(), OLD_IDR);
+		let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+		let ingest = downstream.clone();
+		let server = tokio::spawn(async move {
+			let Some(Request::Publish(publish)) = accept_stream(server_io, "127.0.0.1:1935".parse().unwrap())
+				.await
+				.unwrap()
+			else {
+				panic!("expected a publish request");
+			};
+			let _ = publish.accept(&ingest, "live/cam0").await;
+		});
+		let exported = upstream.consume();
+		let pushed = tokio::spawn(async move {
+			let client = Client::with_stream(client_io, "live").await.unwrap();
+			client.publish("cam0", exported, "live/cam0").await
+		});
+
+		// Read what reaches the remote back out as FLV.
+		let consumer = downstream.consume();
+		consumer.routed("live/cam0").await.unwrap();
+		let copy = consumer.request_broadcast("live/cam0", None).await.unwrap();
+		let source = moq_mux::Source::new(consumer, copy);
+		let catalog = source
+			.catalog::<()>(moq_mux::catalog::CatalogFormat::default())
+			.await
+			.unwrap();
+		let mut remote = FlvExport::new(source, catalog);
+		let mut received = Vec::new();
+		let mut until = async |needle: &[u8]| {
+			while !contains(&received, needle) {
+				let chunk = remote.next().await.unwrap().expect("the remote copy ended");
+				received.extend_from_slice(&chunk);
+			}
+		};
+		until(OLD_IDR).await;
+
+		let epoch = moq_net::Epoch::mint();
+		let mut instances = moq_mux::follow::Instances::new(&upstream.consume(), "live/cam0", Some(&epoch)).unwrap();
+		let (_new, _new_catalog) = publish(&upstream, &epoch, NEW_IDR);
+		tokio::time::timeout(Duration::from_secs(5), instances.next())
+			.await
+			.expect("the new publisher takes over")
+			.unwrap();
+
+		let mut delta = vec![0x27, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, OLD_DELTA.len() as u8];
+		delta.extend_from_slice(OLD_DELTA);
+		old.decode(&flv::tag(flv::TAG_VIDEO, 40, &delta)).unwrap();
+		until(OLD_DELTA).await;
+		assert!(!contains(&received, NEW_IDR), "the push left its instance");
+
+		old.abort(moq_net::Error::Transport("connection lost".into()));
+		drop(old_catalog);
+		assert!(pushed.await.unwrap().is_err(), "the push ended cleanly");
+		server.abort();
+	}
+
 	/// Loopback: dial the crate's own server and pull a broadcast the server plays
 	/// out of a populated origin. Exercises the client handshake, connect, play
 	/// request, and the receive -> FLV-demux -> republish path end to end.
@@ -785,10 +882,12 @@ mod tests {
 		vframe.extend_from_slice(&[0, 0, 0, 5, 0x65, 0x88, 0x84, 0x21, 0x00]);
 
 		let server_origin = moq_tokio::origin::spawn();
-		let mut broadcast = server_origin.create_broadcast("live/cam0").unwrap();
+		let broadcast = server_origin.create_broadcast("live/cam0").unwrap();
 		broadcast.announce(Default::default()).unwrap();
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
-		let mut importer = FlvImport::new(broadcast, catalog.reserve());
+		let catalog =
+			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), moq_mux::catalog::Config::default())
+				.unwrap();
+		let mut importer = FlvImport::new(broadcast.broadcast().clone(), catalog.reserve());
 		importer.decode(&flv::file_header()).unwrap();
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vseq)).unwrap();
 		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vframe)).unwrap();

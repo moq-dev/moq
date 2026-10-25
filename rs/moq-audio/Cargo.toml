@@ -54,7 +54,7 @@ capture = [
 # Device playback. Mixes any number of `playback::Sink`s into one cpal output
 # stream (CoreAudio / WASAPI / ALSA). Same libasound build dependency on Linux
 # as `capture`.
-playback = ["dep:cpal", "dep:fixed-resample", "dep:tokio", "dep:tracing"]
+playback = ["dep:cpal", "dep:fixed-resample", "dep:kio", "dep:tokio", "dep:tracing"]
 # Reach devices through the Linux sound server rather than its ALSA plugin, for
 # the server's own device names and routing. These customize cpal only when
 # `capture` or `playback` activates it, so a host flag alone pulls no audio I/O.

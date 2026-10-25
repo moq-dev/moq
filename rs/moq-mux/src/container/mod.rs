@@ -13,6 +13,7 @@
 use bytes::Bytes;
 
 mod consumer;
+mod declared;
 mod decode;
 mod group;
 mod producer;

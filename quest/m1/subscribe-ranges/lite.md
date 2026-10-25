@@ -19,15 +19,15 @@ not yet stale); any other lite-06 pair is an absolute start. When merged
 ranges can't be expressed on an older upstream wire, subscribe from group 0
 and filter locally; lite-03 to 05 must send an explicit group 0, since the
 codec folds 0 to absent (`encode_start_group`), which they read as the latest
-group. moq-transport's relative offsets differ by one: draft-20
+group. moq-transport's relative offsets differ by one: draft-22
 `Relative(0)` is the next group and `Relative(1)` the current one, so an
-open-ended `Relative(n)..` maps to draft-20 `Relative(n + 1)`, saturating
+open-ended `Relative(n)..` maps to draft-22 `Relative(n + 1)`, saturating
 (an offset past the track's start clamps to group 0 either way). Older
 drafts only encode a relative 0, so there it is SUBSCRIBE plus a relative
 joining FETCH n groups back, as the live join already does. That filter
 has no end, so a range with a bounded end resolves both bounds against the
 Largest Object and goes upstream as an absolute range. Live keeps today's
-join, `NextObject` plus a `Relative(1)` fill on draft-20+ or a relative
+join, `NextObject` plus a `Relative(1)` fill on draft-22 or a relative
 joining FETCH on older drafts (`ietf::subscriber::subscribe_join`), so the
 current group's existing prefix still arrives. A relative end resolves
 against the latest group the answering hop knows. Behind an IETF upstream
@@ -54,8 +54,7 @@ list.
 
 Update `drafts/draft-lcurley-moq-lite.md` in the same PR: the SUBSCRIBE and
 SUBSCRIBE_UPDATE fields, the Group Order section (the order is now a field),
-the removal of FETCH, and the lite-07 changelog. Fix the stale "offset by 1"
-sentence on Group Start while there. This quest also owns the Order row of
+the removal of FETCH, and the lite-07 changelog. This quest also owns the Order row of
 the priority table in `doc/concept/moq-lite.md`: it now describes the field
 (decided 2026-10-08, since subscribe ranges owns group order). Published versions (lite-03..06) keep
 FETCH, answered through the model's ranges. Run `just drafts check` and
@@ -64,10 +63,6 @@ FETCH, answered through the model's ranges. Run `just drafts check` and
 Decided 2026-10-22 (maintainer): SUBSCRIBE_OK carries the resolved start for
 a relative range start, so a reader's ordered cursor takes its floor from it
 ([Container reads drop backfill](/quest/m1/read-backfill.md)).
-
-## Required
-
-- [Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md) - the misses a relay fills upstream by range
 
 ## Related
 

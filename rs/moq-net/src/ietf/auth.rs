@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 
-use crate::auth::{Grant, Handle, Issue, Reply, Request, Serving};
+use crate::auth::{Grant, Issue, Link, Reply, Request, Serving};
 use crate::coding::{Decode, DecodeError, Decoder, Encode, EncodeError, Encoder};
 use crate::{Error, Patterns, SessionError};
 
@@ -171,15 +171,18 @@ impl Message for AuthError {
 /// The REQUEST_ERROR codes AUTH_ERROR carries.
 const UNAUTHORIZED: u64 = 0x1;
 const NOT_SUPPORTED: u64 = 0x3;
+const MALFORMED_AUTH_TOKEN: u64 = 0x4;
 const EXPIRED_AUTH_TOKEN: u64 = 0x5;
 /// Draft-17 assigned it, the first draft this extension negotiates on.
 const GOING_AWAY: u64 = 0x6;
 
 /// The AUTH_ERROR code for a refusal. The public API speaks session codes, and the
-/// actionable distinctions this registry carries are unsupported, expired, and unauthorized.
+/// actionable distinctions this registry carries are unsupported, malformed, expired, and
+/// unauthorized.
 fn to_code(code: SessionError) -> u64 {
 	match code {
 		SessionError::Version | SessionError::Unsupported => NOT_SUPPORTED,
+		SessionError::MalformedAuthToken => MALFORMED_AUTH_TOKEN,
 		SessionError::Expired => EXPIRED_AUTH_TOKEN,
 		_ => UNAUTHORIZED,
 	}
@@ -189,6 +192,7 @@ fn to_code(code: SessionError) -> u64 {
 fn from_code(code: u64) -> Error {
 	match code {
 		NOT_SUPPORTED => Error::Unsupported,
+		MALFORMED_AUTH_TOKEN => Error::Session(SessionError::MalformedAuthToken),
 		EXPIRED_AUTH_TOKEN => Error::Expired,
 		GOING_AWAY => Error::GoingAway,
 		_ => Error::Session(SessionError::Unauthorized),
@@ -225,18 +229,13 @@ pub(super) fn peer_grant(
 /// says it negotiated the extension. Never returns: a session without it just fails
 /// the tokens as unsupported.
 #[cfg(feature = "async")]
-#[expect(
-	clippy::too_many_arguments,
-	reason = "the presenting task owns each piece of session state it drives"
-)]
 pub(super) async fn run_present(
 	runtime: crate::time::Deadlines,
 	session: Transport,
 	control: Control,
-	handle: Handle,
+	handle: Link,
 	peer_setup: peer::PeerSetup,
 	version: Version,
-	going_away: crate::goaway::GoingAway,
 	stats: crate::stats::Session,
 ) -> Result<(), Error> {
 	if !peer_setup.get().await.auth {
@@ -267,13 +266,13 @@ pub(super) async fn run_present(
 			version,
 			id,
 		};
-		let going_away = going_away.clone();
 		let violation = violation.clone();
 		tasks.push(async move {
-			// After a GOAWAY the peer must not see new requests.
-			let err = match going_away.is_set() {
-				true => Error::GoingAway,
-				false => present.run(token).await,
+			// After a GOAWAY, sent or received, the peer must not see new requests. AUTH_ERROR
+			// carries no code that may pass, so unlike moq-lite a refusal is never presented again.
+			let err = match present.handle.active() {
+				true => present.run(token).await,
+				false => Error::GoingAway,
 			};
 			let err = crate::auth::protocol_error(err);
 			if matches!(err, Error::ProtocolViolation) {
@@ -299,7 +298,7 @@ struct Present {
 	runtime: crate::time::Deadlines,
 	session: Transport,
 	control: Control,
-	handle: Handle,
+	handle: Link,
 	version: Version,
 	id: u64,
 }
@@ -410,7 +409,7 @@ fn decode_reply<T: Message>(body: &super::Body, version: Version) -> Result<T, E
 #[derive(Clone)]
 pub(super) struct Serve {
 	pub runtime: crate::time::Deadlines,
-	pub handle: Handle,
+	pub handle: Link,
 	/// What the peer's connection credential earns by default.
 	pub peer_grant: Grant,
 }
@@ -590,7 +589,7 @@ mod tests {
 	#[cfg(feature = "async")]
 	#[moq_clock::test]
 	async fn auth_refused_without_credit_spends_no_request_id() {
-		for version in [Version::Draft17, Version::Draft19] {
+		for version in [Version::Draft17, Version::Draft18] {
 			for client in [false, true] {
 				let first = if client { 0 } else { 1 };
 				let control = Control::new(Some(RequestId(first + 1)), client);
@@ -601,7 +600,7 @@ mod tests {
 						crate::lite::test_transport::ScriptedSession::new(Vec::new()).without_credit(),
 					),
 					control: control.clone(),
-					handle: Handle::new(false),
+					handle: Link::new(false),
 					version,
 					id: 0,
 				};
@@ -638,14 +637,7 @@ mod tests {
 	/// before the unified SETUP carry none.
 	#[test]
 	fn setup_option_round_trips_on_supported_drafts() {
-		for version in [
-			Version::Draft17,
-			Version::Draft18,
-			Version::Draft19,
-			Version::Draft20,
-			Version::Draft21,
-			Version::Draft22,
-		] {
+		for version in [Version::Draft17, Version::Draft18, Version::Draft22] {
 			let mut params = super::super::Parameters::default();
 			assert_eq!(from_setup(&params, version), None);
 			into_setup(&mut params, version);
@@ -788,5 +780,10 @@ mod tests {
 		assert_eq!(to_code(SessionError::Unauthorized), UNAUTHORIZED);
 		assert!(matches!(from_code(EXPIRED_AUTH_TOKEN), Error::Expired));
 		assert_eq!(to_code(SessionError::Expired), EXPIRED_AUTH_TOKEN);
+		assert!(matches!(
+			from_code(MALFORMED_AUTH_TOKEN),
+			Error::Session(SessionError::MalformedAuthToken)
+		));
+		assert_eq!(to_code(SessionError::MalformedAuthToken), MALFORMED_AUTH_TOKEN);
 	}
 }

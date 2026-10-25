@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use hang::moq_net::{self, Epoch, Timestamp, announce, broadcast, origin, track};
+use hang::moq_net::{self, Epoch, Timestamp, announce, origin, track};
 use moq_mux::catalog::Stream;
 
 const LITE_07: &str = "moq-lite-07-wip";
@@ -34,7 +34,7 @@ impl Drop for Relay {
 async fn relay() -> Relay {
 	let _ = moq_tokio::crypto::install_default();
 	let mut config = moq_relay::Config::default();
-	config.drain_timeout = Duration::ZERO;
+	config.drain_timeout = Some(Duration::ZERO.into());
 	config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.listen.tls.generate = vec!["localhost".into()];
 	config.listen.version = std::iter::once(LITE_07.parse().unwrap())
@@ -52,10 +52,9 @@ async fn relay() -> Relay {
 fn client(version: &str) -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
-	config.once = Some(true);
 	config.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.version = vec![version.parse().unwrap()];
-	config.init(Default::default()).unwrap()
+	config.init(Default::default()).unwrap().with_reconnect(false)
 }
 
 fn write(track: &track::Producer, tag: &str) {
@@ -76,14 +75,14 @@ async fn read(subscription: &mut track::Subscriber) -> String {
 
 struct Published {
 	catalog: moq_mux::catalog::Producer,
-	_catalog_broadcast: broadcast::Producer,
-	sibling: broadcast::Producer,
+	_catalog_broadcast: origin::Publication,
+	sibling: origin::Publication,
 	media: track::Producer,
 }
 
 fn publish(origin: &origin::Producer, epoch: &Epoch, tag: &str) -> Published {
 	let route = origin::Route::default().with_epoch(epoch.clone());
-	let mut broadcast = origin.publish("live/catalog.hang", route.clone()).unwrap();
+	let broadcast = origin.publish("live/catalog.hang", route.clone()).unwrap();
 	let sibling = origin.publish("live/media", route).unwrap();
 	let media = sibling
 		.create_track(
@@ -92,7 +91,7 @@ fn publish(origin: &origin::Producer, epoch: &Epoch, tag: &str) -> Published {
 		)
 		.unwrap();
 	write(&media, &format!("{tag}:0"));
-	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
 	catalog
 		.mutate(|catalog| {
 			let mut audio = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);

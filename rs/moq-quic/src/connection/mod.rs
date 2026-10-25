@@ -43,6 +43,9 @@ use ack_frequency::AckFrequencyState;
 mod assembler;
 pub use assembler::Chunk;
 
+mod bandwidth_probe;
+use bandwidth_probe::BandwidthProbe;
+
 mod cid_state;
 use cid_state::CidState;
 
@@ -62,7 +65,6 @@ mod packet_crypto;
 use packet_crypto::{PrevCrypto, ZeroRttCrypto};
 
 mod paths;
-pub use paths::RttEstimator;
 use paths::{PathData, PathResponses};
 
 pub(crate) mod qlog;
@@ -253,6 +255,8 @@ pub struct Connection {
     /// Whether the last `poll_transmit` call ran out of data because there was
     /// no outgoing application data.
     app_limited: bool,
+    /// Resends in-flight data to probe for bandwidth while `app_limited`
+    bandwidth_probe: BandwidthProbe,
 
     streams: StreamsState,
     /// Surplus remote CIDs for future use on new paths
@@ -371,6 +375,7 @@ impl Connection {
             probe_when_heard: false,
 
             app_limited: false,
+            bandwidth_probe: BandwidthProbe::new(&config, now),
             receiving_ecn: false,
 
             streams: StreamsState::new(
@@ -625,7 +630,35 @@ impl Connection {
 
             // Is there data or a close message to send in this space?
             let can_send = self.space_can_send(space_id, frame_space_1rtt);
-            if (can_send.is_empty() && (!close || self.spaces[space_id].crypto.is_none()))
+            // The packet still being built isn't in flight yet; assume it gets padded to fill
+            // the segment
+            let untracked_bytes = if let Some(builder) = &builder_storage {
+                buf_capacity - builder.partial_encode.start
+            } else {
+                0
+            } as u64;
+            // With nothing else to send, resend in-flight data while the controller probes
+            let bandwidth_probe = space_id == SpaceId::Data
+                && can_send.is_empty()
+                && !close
+                && match self.bandwidth_probe_ready(
+                    now,
+                    &controller_metrics,
+                    segment_size as u64 + untracked_bytes,
+                ) {
+                    bandwidth_probe::Ready::Idle => false,
+                    bandwidth_probe::Ready::Blocked(until) => {
+                        if let Some(until) = until {
+                            self.timers.set(Timer::Pacing, until);
+                        }
+                        send_blocked = true;
+                        false
+                    }
+                    bandwidth_probe::Ready::Send => true,
+                };
+            if (can_send.is_empty()
+                && !bandwidth_probe
+                && (!close || self.spaces[space_id].crypto.is_none()))
                 || (finish_first && space_id == SpaceId::Initial)
             {
                 space_idx += 1;
@@ -636,7 +669,7 @@ impl Connection {
                 || self.spaces[space_id].ping_pending
                 || self.spaces[space_id].immediate_ack_pending;
             if space_id == SpaceId::Data {
-                ack_eliciting |= self.can_send_1rtt(frame_space_1rtt);
+                ack_eliciting |= self.can_send_1rtt(frame_space_1rtt) || bandwidth_probe;
             }
 
             pad_datagram_to_mtu |= space_id == SpaceId::Data && self.config.pad_to_mtu;
@@ -690,12 +723,6 @@ impl Connection {
                 // longer processes ACKs, so the window could never drain
                 // (see https://github.com/quinn-rs/quinn/issues/2785)
                 if ack_eliciting && self.spaces[space_id].loss_probes == 0 && !close {
-                    // Assume the current packet will get padded to fill the segment
-                    let untracked_bytes = if let Some(builder) = &builder_storage {
-                        buf_capacity - builder.partial_encode.start
-                    } else {
-                        0
-                    } as u64;
                     debug_assert!(untracked_bytes <= segment_size as u64);
 
                     let bytes_to_send = segment_size as u64 + untracked_bytes;
@@ -794,7 +821,8 @@ impl Connection {
                         // segment size before the original call to `space_can_send`, because at
                         // that time we haven't determined whether we're going to coalesce with the
                         // first datagram or potentially pad it to `min_mtu`.
-                        if space_id == SpaceId::Data {
+                        // A probe's duplicates split to fit any segment.
+                        if space_id == SpaceId::Data && !bandwidth_probe {
                             let frame_space_1rtt =
                                 segment_size.saturating_sub(self.predict_1rtt_overhead(Some(pn)));
                             if self.space_can_send(space_id, frame_space_1rtt).is_empty() {
@@ -1001,8 +1029,14 @@ impl Connection {
                 });
             }
 
-            let sent =
-                self.populate_packet(now, space_id, buf, builder.max_size, builder.exact_number);
+            let sent = self.populate_packet(
+                now,
+                space_id,
+                buf,
+                builder.max_size,
+                builder.exact_number,
+                bandwidth_probe,
+            );
 
             // ACK-only packets should only be sent when explicitly allowed. If we write them due to
             // any other reason, there is a bug which leads to one component announcing write
@@ -1456,6 +1490,12 @@ impl Connection {
         self.streams.leased(id)
     }
 
+    /// Assert that the receive lease books balance, for the fuzz target.
+    #[cfg(any(test, feature = "fuzz"))]
+    pub(crate) fn check_leases(&self) {
+        self.streams.check_leases();
+    }
+
     /// Ping the remote endpoint
     ///
     /// Causes an ACK-eliciting packet to be transmitted.
@@ -1570,6 +1610,21 @@ impl Connection {
     /// Current state of this connection's congestion controller, for debugging purposes
     pub fn congestion_state(&self) -> &dyn Controller {
         self.path.congestion.as_ref()
+    }
+
+    /// Probe the path's bandwidth up to `bytes_per_second` while the application sends less
+    ///
+    /// A congestion controller stops raising its estimate once the application sends less than
+    /// the path carries. While the controller probes for bandwidth below this target, the sender
+    /// fills the inflight it allows
+    /// ([`probe_inflight`](crate::congestion::ControllerMetrics::probe_inflight)) with duplicates
+    /// of STREAM data still in flight, sending no more than the target in all, so the probe
+    /// measures the path. Duplicates count against congestion control, as
+    /// [`PathStats::sent_bandwidth_probe_bytes`]. A reset stream's data is never sent again. A
+    /// controller that never probes ([`Controller::probes`]) ignores the target, and zero, the
+    /// default, never probes.
+    pub fn set_probe_target(&mut self, bytes_per_second: u64) {
+        self.bandwidth_probe.set_target(bytes_per_second);
     }
 
     /// Resets path-specific settings.
@@ -1715,7 +1770,7 @@ impl Connection {
             self.path.in_flight.bytes,
             self.app_limited,
             self.spaces[space].largest_acked_packet,
-            space,
+            space.into(),
         );
 
         if new_largest && ack_eliciting_acked {
@@ -1839,7 +1894,7 @@ impl Connection {
                     true,
                     0,
                     largest_sent,
-                    space,
+                    space.into(),
                 );
             }
         }
@@ -1857,9 +1912,9 @@ impl Connection {
                 info.time_sent,
                 info.size.into(),
                 pn,
-                space,
+                space.into(),
                 self.app_limited,
-                &self.path.rtt,
+                &moq_congestion::RttEstimator::new(self.path.rtt.get()),
             );
         }
 
@@ -2049,7 +2104,7 @@ impl Connection {
                 let info = self.spaces[pn_space].take(packet).unwrap(); // safe: lost_packets is populated just above
                 self.path
                     .congestion
-                    .on_packet_lost(info.size, packet, pn_space, now);
+                    .on_packet_lost(info.size, packet, pn_space.into(), now);
                 self.config.qlog_sink.emit_packet_lost(
                     packet,
                     &info,
@@ -2060,8 +2115,11 @@ impl Connection {
                 );
 
                 self.remove_in_flight(&info);
-                for frame in info.stream_frames {
-                    self.streams.retransmit(frame);
+                // A probe's duplicates leave the loss of their data to the originals
+                if !info.bandwidth_probe {
+                    for frame in info.stream_frames {
+                        self.streams.retransmit(frame);
+                    }
                 }
                 self.spaces[pn_space].pending |= info.retransmits;
                 self.path.mtud.on_non_probe_lost(packet, info.size);
@@ -2094,7 +2152,7 @@ impl Connection {
                     false,
                     size_of_lost_packets,
                     largest_lost,
-                    pn_space,
+                    pn_space.into(),
                 );
             }
         }
@@ -3548,6 +3606,7 @@ impl Connection {
         buf: &mut Vec<u8>,
         max_size: usize,
         pn: u64,
+        bandwidth_probe: bool,
     ) -> SentFrames {
         let mut sent = SentFrames::default();
         let space = &mut self.spaces[space_id];
@@ -3788,6 +3847,19 @@ impl Connection {
             );
             sent.stream_frames = written.streams;
             sent.non_retransmits |= written.datagrams > 0;
+            // Only a packet with nothing new to send probes, so its STREAM frames are all
+            // duplicates
+            if bandwidth_probe {
+                debug_assert!(sent.stream_frames.is_empty());
+                sent.stream_frames =
+                    self.bandwidth_probe
+                        .write(&space.sent_packets, &self.streams, buf, max_size);
+                debug_assert!(
+                    !sent.stream_frames.is_empty(),
+                    "a probe found no in-flight data to resend"
+                );
+                sent.bandwidth_probe = true;
+            }
             self.stats.frame_tx.stream += sent.stream_frames.len() as u64;
             self.stats.frame_tx.datagram += written.datagrams;
         }
@@ -4527,6 +4599,8 @@ struct SentFrames {
     retransmits: ThinRetransmits,
     largest_acked: Option<u64>,
     stream_frames: StreamMetaVec,
+    /// Whether `stream_frames` only resend in-flight data, to probe for bandwidth
+    bandwidth_probe: bool,
     /// Whether the packet contains non-retransmittable frames (like datagrams)
     non_retransmits: bool,
     requires_padding: bool,
@@ -4562,7 +4636,7 @@ fn negotiate_max_idle_timeout(x: Option<VarInt>, y: Option<VarInt>) -> Option<Du
 mod tests {
     use super::*;
 
-    #[cfg(feature = "rustls-ring")]
+    #[cfg(feature = "ring")]
     #[test]
     fn large_initial_token_leaves_room_for_close() {
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();

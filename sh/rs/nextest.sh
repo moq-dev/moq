@@ -10,4 +10,4 @@ if [[ "$(uname -s)" == Linux ]]; then
         ulimit -Sl "$(ulimit -Hl)"
     fi
 fi
-exec "$@"
+exec bash "$(dirname "$0")/../local.sh" "$@"

@@ -28,7 +28,7 @@ impl Message for GoAway<'_> {
 		if !matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
 			w.varint(self.timeout)?;
 		}
-		// Draft-18 (#1559) added the Request ID; draft-19 removed it again (#1623).
+		// Draft-18 (#1559) added the Request ID; draft-22 removed it again (#1623).
 		if version == Version::Draft18
 			&& let Some(request_id) = self.request_id
 		{
@@ -156,7 +156,7 @@ mod tests {
 		assert_eq!(decoded.request_id, Some(RequestId(1)));
 	}
 
-	/// Draft-19 (#1623) removed the Request ID again: the body is just URI + timeout,
+	/// Draft-22 (#1623) removed the Request ID again: the body is just URI + timeout,
 	/// same bytes we already emit. Round-trip to lock that in.
 	#[test]
 	fn test_goaway_v19_timeout() {
@@ -167,11 +167,11 @@ mod tests {
 		};
 
 		let mut buf = Vec::new();
-		msg.encode_msg(&mut Encoder::new(&mut buf, Version::Draft19.into()), Version::Draft19)
+		msg.encode_msg(&mut Encoder::new(&mut buf, Version::Draft18.into()), Version::Draft18)
 			.unwrap();
 
 		let mut bytes = bytes::Bytes::from(buf.to_vec());
-		let decoded: GoAway = crate::coding::decode_buf(&mut bytes, Version::Draft19, GoAway::decode_msg).unwrap();
+		let decoded: GoAway = crate::coding::decode_buf(&mut bytes, Version::Draft18, GoAway::decode_msg).unwrap();
 
 		assert_eq!(decoded.new_session_uri, "moqt://relay.example/");
 		assert_eq!(decoded.timeout, 5000);

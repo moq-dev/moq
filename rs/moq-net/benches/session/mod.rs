@@ -405,7 +405,7 @@ struct Cluster<B: Backend> {
 	relays: Vec<B::Relay>,
 	/// One track per broadcast, indexed like [`path`].
 	tracks: Vec<track::Producer>,
-	_broadcasts: Vec<broadcast::Producer>,
+	_broadcasts: Vec<origin::Publication>,
 	_origins: Vec<origin::Producer>,
 	_pairs: Vec<Pair>,
 	next_hop: u64,
@@ -955,7 +955,7 @@ impl Dash {
 struct DashRoom<B: Backend> {
 	_cluster: Cluster<B>,
 	tracks: Vec<track::Producer>,
-	_broadcasts: Vec<broadcast::Producer>,
+	_broadcasts: Vec<origin::Publication>,
 	dash: Viewer,
 	payload: Bytes,
 }

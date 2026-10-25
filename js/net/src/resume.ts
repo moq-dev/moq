@@ -26,6 +26,10 @@
  * subscriber already handed out, the same record that keeps a direct reader from taking a
  * re-created group twice.
  *
+ * A reader asked for dispositions reports what the serving copy gave up, other than a route
+ * failure, once no copy it replaced may still deliver it, and counts it as handed out so no copy
+ * serves it later.
+ *
  * The logical track ends cleanly once its serving copy does and no group the reader lacks may
  * still land below that end on a copy it replaced. Its `closed` settles and the reader leaves the
  * route, keeping each copy only while it holds something left to read, as a direct reader keeps
@@ -41,16 +45,21 @@ import { Delivered } from "./delivered.ts";
 import { NotFound, SessionError, StreamCode, StreamError, sessionClosed } from "./error.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
 import {
+	type DropRun,
 	finalSequence,
 	type GroupRecover,
 	groupBounds,
 	hooks,
+	insertDrop,
+	insertRun,
 	MAX_DATAGRAMS,
 	type Recv,
 	type RecvDatagram,
 	type Replacement,
 	type ResumeShell,
 	type ResumeSource,
+	type Run,
+	runGaps,
 } from "./internal.ts";
 import { grace } from "./ledger.ts";
 import type { Lister, Tracks, TracksEvent } from "./listing.ts";
@@ -87,14 +96,20 @@ export function routeFailed(err: Error): boolean {
 	return err instanceof SessionError || sessionClosed(err);
 }
 
-/** Two copies claiming the same content must agree on what it is. */
+// Every `track.Info` field, so one added later fails to compile until it is listed here.
+const INFO_FIELDS = Object.keys({
+	compress: true,
+	timescale: true,
+	maxAge: true,
+	priority: true,
+	refresh: true,
+	ietf: true,
+} satisfies Record<keyof track.Info, true>) as (keyof track.Info)[];
+
+/** Two copies claiming the same content must agree on all of it, like Rust's `Info` equality. */
 function compatible(a: track.Info, b: track.Info): boolean {
-	return (
-		a.timescale === b.timescale &&
-		a.maxAge === b.maxAge &&
-		a.priority === b.priority &&
-		!!a.compress === !!b.compress
-	);
+	const [x, y] = [track.infoDefaults(a), track.infoDefaults(b)];
+	return INFO_FIELDS.every((field) => x[field] === y[field]);
 }
 
 /**
@@ -293,6 +308,8 @@ class Reader implements ResumeSource {
 	#declared?: track.Position;
 	/** The subscriber's record of groups handed out, as the last read passed it. */
 	#delivered = new Delivered();
+	/** Runs the serving copy gave up and the reader has yet to report; see {@link #tryDrop}. */
+	#drops: DropRun[] = [];
 	/** Whether groups were ever asked for; until then the reader keeps no replaced copy. */
 	#groupsRead = false;
 	/** The groups handed out and still read, which other copies may back; see {@link #backs}. */
@@ -343,6 +360,8 @@ class Reader implements ResumeSource {
 		const route = this.route;
 		if (this.#generation === route.generation) return;
 		this.#generation = route.generation;
+		// What a former route gave up is no verdict on the one that serves now.
+		this.#drops = [];
 		const source = route.source;
 		if (!source) return;
 		// The replaced copies keep delivering until the new one delivers its first group: a
@@ -455,7 +474,7 @@ class Reader implements ResumeSource {
 		const start = Math.max(cursor.start, copy.floor ?? 0);
 		const replaced = copyEnd(copy);
 		const end = replaced === undefined ? cursor.end : Math.min(cursor.end ?? replaced, replaced);
-		hooks.replaceGroups(copy.sub, {
+		copy.sub.withRange({
 			start: { included: start },
 			end: end === undefined ? undefined : { excluded: end },
 		});
@@ -504,13 +523,17 @@ class Reader implements ResumeSource {
 		return (end === undefined || sequence < end) && !delivered.has(sequence);
 	}
 
-	tryGroup(ordered: boolean, delivered: Delivered): Recv {
+	tryGroup(ordered: boolean, delivered: Delivered, dispositions: boolean): Recv {
 		this.#delivered = delivered;
 		this.sync();
 		// Before anything is handed out, so a copy claiming other content hands out none of it.
 		this.#learnEnd();
 		if (this.#closed) return this.#refused ? { kind: "error", error: this.#refused } : { kind: "done" };
 		this.#groupsRead = true;
+		if (dispositions) {
+			const dropped = this.#tryDrop(delivered);
+			if (dropped) return dropped;
+		}
 		// The lowest group any copy holds next, in either order: a replaced copy's buffered group
 		// comes before a later one the serving copy already has. Arrival order still delivers a
 		// lower group that truly arrives later.
@@ -544,7 +567,54 @@ class Reader implements ResumeSource {
 			}
 		}
 		this.#letGo(delivered);
+		// A copy that ran out or was let go no longer holds back a drop.
+		if (dispositions) {
+			const dropped = this.#tryDrop(delivered);
+			if (dropped) return dropped;
+		}
 		return this.#end((copy) => copy.done);
+	}
+
+	tryDrop(delivered: Delivered): (Recv & { kind: "drop" }) | undefined {
+		this.#delivered = delivered;
+		this.sync();
+		this.#learnEnd();
+		return this.#tryDrop(delivered);
+	}
+
+	/**
+	 * The next run the serving copy gave up that `delivered` lacks and no other copy may still
+	 * deliver. Only the serving copy's verdicts count; a copy it replaced may still deliver what
+	 * is under its bound, so a run there waits until that copy no longer feeds. Mirrors the
+	 * Rust `Reader::poll_drop`.
+	 */
+	#tryDrop(delivered: Delivered): (Recv & { kind: "drop" }) | undefined {
+		if (this.#closed) return undefined;
+		const serving = this.#serving();
+		if (serving) {
+			for (let dropped = hooks.tryDrop(serving.sub); dropped; dropped = hooks.tryDrop(serving.sub)) {
+				// A route failing is no verdict: another route may still deliver the group, and
+				// one it failed while buffered is handed out to continue through its recovery.
+				if (routeFailed(dropped.error)) continue;
+				this.#drops = insertDrop(this.#drops, dropped.start, dropped.end, dropped.error);
+			}
+		}
+		this.#drops = this.#drops.filter((run) => !delivered.covers(run.start, run.end));
+		const cursor = this.#shell.cursor.peek();
+		const feeding: Run[] = [];
+		for (const copy of this.#copies) {
+			if (copy === serving || !this.#feeds(copy)) continue;
+			const start = Math.max(cursor.start, copy.floor ?? 0);
+			insertRun(feeding, start, copyEnd(copy) ?? Number.POSITIVE_INFINITY);
+		}
+		for (const run of this.#drops) {
+			const end = Math.min(run.end, cursor.end ?? run.end);
+			for (const gap of delivered.gaps(Math.max(run.start, cursor.start), end)) {
+				const [open] = runGaps(feeding, gap.start, gap.end);
+				if (open) return { kind: "drop", ...open, error: run.error };
+			}
+		}
+		return undefined;
 	}
 
 	// Whether `copy` may still feed groups: its channel has not run out, and what it holds is
@@ -1348,6 +1418,22 @@ export class Front {
 			listing?.reader?.close();
 			listing = undefined;
 		};
+		const read = (reader: Tracks): Promise<{ event?: TracksEvent; err?: Error }> =>
+			reader.next().then(
+				(event) => ({ event }),
+				(err: unknown) => ({ err: err instanceof Error ? err : new Error(String(err)) }),
+			);
+		// Forwarded as the source reported it, finished or not.
+		const unlist = (
+			listed: Set<string>,
+			stale: Set<string>,
+			event: { kind: "removed" | "finished"; name: string },
+		) => {
+			stale.delete(event.name);
+			if (!listed.delete(event.name)) return;
+			if (event.kind === "finished") lister.finish(event.name);
+			else lister.remove(event.name);
+		};
 		try {
 			for (;;) {
 				if (closed.peek() !== undefined) return;
@@ -1360,7 +1446,15 @@ export class Front {
 					continue;
 				}
 				if (this.#concluded) {
-					// No route will serve it again, so nothing more will be listed.
+					// No route will serve it again, so nothing more will be listed. A source that
+					// closed ended its listing after the tracks it finished last: those go first.
+					while (listing?.reader && listing.source?.from.closed.peek() !== undefined) {
+						const { event } = await (listing.next ?? read(listing.reader));
+						listing.next = undefined;
+						if (!event) break;
+						if (event.kind === "removed" || event.kind === "finished")
+							unlist(listing.listed, listing.stale, event);
+					}
 					stop();
 					lister.end();
 					continue;
@@ -1390,10 +1484,7 @@ export class Front {
 					await wait();
 					continue;
 				}
-				listing.next ??= reader.next().then(
-					(event) => ({ event }),
-					(err: unknown) => ({ err: err instanceof Error ? err : new Error(String(err)) }),
-				);
+				listing.next ??= read(reader);
 				const result = await race([listing.next, wait().then(() => undefined)]);
 				if (!result) continue;
 				listing.next = undefined;
@@ -1420,11 +1511,7 @@ export class Front {
 						lister.add(event.name, event.info);
 					}
 				} else if (event.kind === "removed" || event.kind === "finished") {
-					// Forwarded as the source reported it, finished or not.
-					listing.stale.delete(event.name);
-					if (!listing.listed.delete(event.name)) continue;
-					if (event.kind === "finished") lister.finish(event.name);
-					else lister.remove(event.name);
+					unlist(listing.listed, listing.stale, event);
 				} else {
 					// What the new source still lacks at its SYNCED is gone.
 					for (const name of listing.stale) {

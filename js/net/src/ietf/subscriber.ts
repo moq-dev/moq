@@ -278,7 +278,7 @@ export class Subscriber {
 	}
 
 	// Whether the peer has sent GOAWAY. Requests keep opening here until a replacement
-	// session's route outranks this one, deliberately past draft-19 section 10.4's SHOULD
+	// session's route outranks this one, deliberately past draft-22 section 9.2's SHOULD
 	// NOT: refusing them would fail requests that land before the replacement is up.
 	#goingAway(): boolean {
 		return this.#goaway?.peek() !== undefined;
@@ -563,7 +563,7 @@ export class Subscriber {
 					// For v14/v15: send UnsubscribeNamespace before closing
 					if (version === Version.DRAFT_14 || version === Version.DRAFT_15) {
 						try {
-							const unsub = new UnsubscribeNamespace({ requestId });
+							const unsub = new UnsubscribeNamespace({ prefix, requestId });
 							await Message.write(request.writer, UnsubscribeNamespace.id, unsub, version);
 						} catch {
 							// Stream might already be closed
@@ -1559,7 +1559,7 @@ export class Subscriber {
 
 		try {
 			// The alias binds after SUBSCRIBE_OK commits the track property; an omitted
-			// header priority inherits it (draft-21 section 10.4).
+			// header priority inherits it (draft-22 section 10.4).
 			if (!group.flags.hasPriority) group.publisherPriority = toWire((await track.info()).priority);
 
 			const timescale = this.#timescales.get(group.trackAlias);

@@ -70,14 +70,13 @@ For MPEG-TS output, opt into following replacements:
 ```bash
 moq --connect https://edge.example.com/anon \
     --connect-version moq-transport-17 --broadcast event.hang \
-    export ts --stitch --linger 10s > event.ts
+    export ts --stitch --follow 10s > event.ts
 ```
 
 `--stitch` follows a replacement as a program switch: its catalog supplies a
 new PMT and every PID flags the discontinuity. Starting a backup can cause
-this switch too. `--linger 10s` bounds waiting after an end and waiting for a
-replacement's first catalog; choose that window for your application. It does
-not make the switch hitless. Without `--stitch`, the TS export stays on the
+this switch too. `--follow 10s` bounds waiting for a publisher after an end;
+choose that window for your application. It does not make the switch hitless. Without `--stitch`, the TS export stays on the
 old instance while it is up, then fails on a replacement. Other stdout export
 formats end with their broadcast; they do not follow a replacement. TS
 passthrough also cannot stitch. See [CLI retention and latency](/bin/cli#retention-and-latency).
@@ -111,7 +110,8 @@ and rank its links. Do not start a second importer to create the second copy.
 
 When the serving route fails or another route with the same epoch wins, the
 subscription resumes from the first frame it lacks. This needs an explicit
-matching epoch across every hop and a surviving route that can still serve
+matching epoch across every hop, routes whose copies report identical track
+info (so the same protocol and draft on each), and a surviving route that can still serve
 those frames within the broadcast's retention. It preserves broadcast
 continuity, but a late recovery can still miss playback deadlines. Losing the
 only publisher cannot be repaired by adding routes to it.

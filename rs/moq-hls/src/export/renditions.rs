@@ -19,6 +19,7 @@ use std::time::Duration;
 use moq_mux::catalog::hang::Catalog;
 use moq_mux::timeline::Entry;
 
+use super::master;
 use super::rendition::{Kind, Rendition};
 use super::segments::{self, Discontinuities, Reference};
 
@@ -77,10 +78,8 @@ struct Feed {
 	/// The publisher run every segment URL carries; late-created renditions inherit it.
 	generation: Option<Arc<str>>,
 	/// The playlist window duration applied on every push (see
-	/// [`Config::window`](super::Config::window)), or `None` in
-	/// [`Config::history`](super::Config::history) mode, where only the source timeline's pops
-	/// trim the playlists.
-	window: Option<Duration>,
+	/// [`Config::window`](super::Config::window)).
+	window: Duration,
 }
 
 impl Feed {
@@ -141,7 +140,7 @@ impl Producer {
 					closed: false,
 					anchor: None,
 					generation: None,
-					window: Some(window),
+					window,
 				}),
 			},
 		}
@@ -152,9 +151,8 @@ impl Producer {
 		self.fanout.clone()
 	}
 
-	/// The playlist window duration every rendition's window is trimmed to, or `None` when
-	/// only the source timeline trims them.
-	pub fn window(&self) -> Option<Duration> {
+	/// The playlist window duration every rendition's window is trimmed to.
+	pub fn window(&self) -> Duration {
 		self.fanout.feed.read().window
 	}
 
@@ -236,7 +234,10 @@ impl Producer {
 	/// Record the catalog's end before closing its change stream.
 	pub fn finish(&self, result: crate::Result<()>) {
 		if let Err(err) = &result {
-			self.fanout.fail(None, err.clone());
+			let failed = crate::Error::CatalogFailed {
+				source: Box::new(err.clone()),
+			};
+			self.fanout.fail(None, failed);
 		}
 		if let Ok(mut state) = self.state.write() {
 			state.finished = Some(result);
@@ -255,15 +256,6 @@ impl Producer {
 }
 
 impl Fanout {
-	/// List every record the source timeline retains, trimming only on its pops, instead of
-	/// a window. Call before the first record.
-	pub fn unbound(&self) {
-		self.feed
-			.write()
-			.unwrap_or_else(|_| unreachable!("fanout is open"))
-			.window = None;
-	}
-
 	/// Select the next reference, whose records list only past the last advertised one.
 	pub fn select(&self, reference: Option<Reference>) {
 		let mut feed = self.feed.write().unwrap_or_else(|_| unreachable!("fanout is open"));
@@ -335,7 +327,7 @@ impl Fanout {
 		feed.last = Some(row.clone());
 		feed.history.push_back(row.clone());
 		let window = feed.window;
-		while let Some(window) = window {
+		loop {
 			let rest = feed.history.get(1).map_or(Duration::ZERO, |second| {
 				feed.history.back().unwrap().end.saturating_sub(second.pts.into())
 			});
@@ -455,17 +447,12 @@ impl Fanout {
 		true
 	}
 
-	/// Fail every window with `err` when `reference`'s timeline failed, so no playlist reads as
-	/// finished. A superseded reader counts only in history mode while rows it must pop are still
-	/// listed; a live window trims a superseded reference's rows on its own. `None` fails the
-	/// whole source when the catalog fails.
+	/// Fail every window with `err` when the selected `reference`'s timeline failed, so no
+	/// playlist reads as finished. A live window trims a superseded reference's rows on its own.
+	/// `None` fails the whole source when the catalog fails.
 	pub fn fail(&self, reference: Option<&Reference>, err: crate::Error) -> bool {
 		let mut feed = self.feed.write().unwrap_or_else(|_| unreachable!("fanout is open"));
-		let listed = reference.is_none_or(|reference| {
-			feed.accepts(reference)
-				|| (feed.window.is_none() && feed.history.iter().any(|row| row.reference == *reference))
-		});
-		if feed.failed.is_some() || !listed {
+		if feed.failed.is_some() || !reference.is_none_or(|reference| feed.accepts(reference)) {
 			return false;
 		}
 		feed.failed = Some(err.clone());
@@ -535,8 +522,7 @@ impl Producer {
 			.write()
 			.unwrap_or_else(|_| unreachable!("fanout is open"));
 		rendition.label(feed.generation.clone());
-		// An unwindowed feed is history mode: every rendition reads its timeline from the start.
-		rendition.watch(feed.window.is_none());
+		rendition.watch();
 		for row in &feed.history {
 			rendition.push(row.clone(), feed.window);
 		}
@@ -574,7 +560,9 @@ impl Producer {
 	/// `source` holds the broadcast the snapshot was read from, so each rendition serves media
 	/// from that same broadcast rather than whatever is at the path by the time it is asked. A
 	/// rendition whose `broadcast` reference escapes above the origin root names no broadcast at
-	/// all, so it is dropped with a warning rather than served.
+	/// all, so it is dropped with a warning rather than served. So is a rendition named `""`, `.`, or
+	/// `..`, which no URL path segment can address, so the master playlist, the DASH manifest, and
+	/// the router agree on what is served.
 	pub fn sync(&self, source: &moq_mux::Source, catalog: &Catalog) {
 		use hang::catalog::Reference as _;
 
@@ -619,6 +607,13 @@ impl Producer {
 		}
 
 		for (name, video) in &catalog.video.renditions {
+			if !master::is_path_segment(name) {
+				tracing::warn!(
+					rendition = name,
+					"ignoring video rendition not named as a URL path segment"
+				);
+				continue;
+			}
 			let key = (Kind::Video, name.clone());
 			if let Some(rendition) = current.renditions.get(&key) {
 				// Survived the stale pass, so it decodes the same: keep its window, its cached
@@ -641,6 +636,13 @@ impl Producer {
 			current.renditions.insert(key, rendition);
 		}
 		for (name, audio) in &catalog.audio.renditions {
+			if !master::is_path_segment(name) {
+				tracing::warn!(
+					rendition = name,
+					"ignoring audio rendition not named as a URL path segment"
+				);
+				continue;
+			}
 			let key = (Kind::Audio, name.clone());
 			if let Some(rendition) = current.renditions.get(&key) {
 				rendition.refresh(audio.bitrate, None, audio.enabled);
@@ -910,30 +912,14 @@ mod tests {
 	}
 
 	#[test]
-	fn only_a_reader_of_listed_rows_fails_the_feed() {
+	fn only_the_selected_reader_fails_the_feed() {
 		let err = || crate::Error::NoVariants;
-		// Live: a superseded reader's rows trim with the window, so its failure changes nothing.
+		// A superseded reader's rows trim with the window, so its failure changes nothing.
 		let (fanout, new) = handed_off(5);
 		let old = fanout.feed.read().history[0].reference.clone();
 		assert!(!fanout.fail(Some(&old), err()));
 		assert!(fanout.fail(Some(&new), err()));
 		assert!(!fanout.finish(Some(&new)), "a failed feed never finishes");
-
-		// History: a retained reader fails the feed while rows it must pop stay listed.
-		let history = |popped: bool| {
-			let fanout = Producer::new(Duration::from_secs(30)).fanout();
-			fanout.unbound();
-			let old = Arc::new((Kind::Video, "old".into(), "old".into()));
-			fanout.select(Some(old.clone()));
-			fanout.push(0, entry(0, 0), &old);
-			fanout.select(Some(Arc::new((Kind::Video, "new".into(), "new".into()))));
-			if popped {
-				fanout.pop(0..1, &old);
-			}
-			fanout.fail(Some(&old), err())
-		};
-		assert!(history(false));
-		assert!(!history(true));
 	}
 
 	#[test]

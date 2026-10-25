@@ -8,6 +8,7 @@ default-members = [
     # "rs/moq-c",     # requires C toolchain
     "rs/moq-clock",
     "rs/moq-clock/macros",
+    "rs/moq-congestion",
     "rs/moq-archive",
     "rs/moq-auth",
     "rs/moq-boy",
@@ -125,6 +126,7 @@ moq-audio = { version = "0.1.10", path = "rs/moq-audio", default-features = fals
 moq-auth = { version = "0.2.1", path = "rs/moq-auth" }
 moq-clock = { version = "0.11.0", path = "rs/moq-clock" }
 moq-clock-macros = { version = "0.1.0", path = "rs/moq-clock/macros" }
+moq-congestion = { version = "0.1.0", path = "rs/moq-congestion" }
 moq-flate = { version = "0.2.0", path = "rs/moq-flate" }
 moq-hls = { version = "0.5.11", path = "rs/moq-hls", default-features = false }
 moq-ice = { version = "0.1.0", path = "rs/moq-ice" }
@@ -190,6 +192,7 @@ pollster = "1.0"
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }
 qmux = { version = "0.7.0", path = "rs/qmux", default-features = false }
 rand = "0.10.1"
+rand_pcg = "0.10"
 rangemap = "1.8"
 # default-features off so each consumer picks its crypto provider.
 rcgen = { version = "0.14", default-features = false }

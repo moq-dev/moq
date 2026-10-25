@@ -639,27 +639,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
-name = "aws-lc-fips-sys"
-version = "0.14.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "03367707e92796b190a4207d4d39b0a4271d574503d2969c2b0cfbf5c87658ee"
-dependencies = [
- "bindgen 0.72.1",
- "cc",
- "cmake",
- "dunce",
- "fs_extra",
- "pkg-config",
- "regex",
-]
-
-[[package]]
 name = "aws-lc-rs"
 version = "1.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faac5829c2b74c28f830747e7818ccfb684261b5f48a1118b1e2a13d36dfab13"
 dependencies = [
- "aws-lc-fips-sys",
  "aws-lc-sys",
  "untrusted 0.7.1",
  "zeroize",
@@ -861,8 +845,6 @@ dependencies = [
  "cexpr",
  "clang-sys",
  "itertools 0.13.0",
- "log",
- "prettyplease",
  "proc-macro2",
  "quote",
  "regex",
@@ -1804,9 +1786,9 @@ checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
 name = "crypto-bigint"
-version = "0.7.5"
+version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a52aa3fcda4e6302a9f48734f234d35d4721b96f8fe07d073f07ce9df4f0271"
+checksum = "d726facc8b27e604391b232b970cdc19b5468c69f08b466b9734c759216c7415"
 dependencies = [
  "cpubits",
  "ctutils",
@@ -3128,9 +3110,9 @@ dependencies = [
 
 [[package]]
 name = "h2"
-version = "0.4.19"
+version = "0.4.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef8e5e5a340588f4452631496976cf8636d4a7ecf600239fdc27615d2530bc16"
+checksum = "7d29020232d6aa3fb1daca64c1127cf662cf97f254ae16c18c05b8ab635fc118"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -4248,9 +4230,9 @@ dependencies = [
 
 [[package]]
 name = "libc"
-version = "0.2.190"
+version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
+checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "libfuzzer-sys"
@@ -4587,10 +4569,8 @@ dependencies = [
  "bytes",
  "criterion",
  "futures",
- "hang",
  "kio 0.6.2",
  "moq-clock",
- "moq-json",
  "moq-net",
  "object_store",
  "percent-encoding",
@@ -4846,6 +4826,17 @@ name = "moq-clock-macros"
 version = "0.1.0"
 
 [[package]]
+name = "moq-congestion"
+version = "0.1.0"
+dependencies = [
+ "cpu-time",
+ "moq-clock",
+ "rand 0.10.3",
+ "rand_pcg",
+ "stats_alloc",
+]
+
+[[package]]
 name = "moq-e2ee"
 version = "0.0.11"
 dependencies = [
@@ -5017,6 +5008,7 @@ dependencies = [
  "criterion",
  "futures",
  "h264-parser",
+ "h264-reader 0.9.0",
  "hang",
  "kio 0.6.2",
  "memchr",
@@ -5063,6 +5055,7 @@ dependencies = [
  "loom",
  "moq-clock",
  "moq-json",
+ "moq-net",
  "moq-pattern 0.1.2",
  "num_enum",
  "rand 0.10.3",
@@ -5129,6 +5122,7 @@ dependencies = [
  "indexmap 2.14.2",
  "lru-slab",
  "moq-clock",
+ "moq-congestion",
  "moq-quic",
  "proptest",
  "qlog",
@@ -5139,9 +5133,7 @@ dependencies = [
  "rustc-hash 2.1.3",
  "rustls",
  "rustls-pki-types",
- "rustls-platform-verifier",
  "slab",
- "stats_alloc",
  "thiserror 2.0.21",
  "tinyvec",
  "tracing",
@@ -5175,12 +5167,12 @@ dependencies = [
  "http-body",
  "http-cache-reqwest",
  "humantime",
- "humantime-serde",
  "hyper-util",
  "kio 0.6.2",
  "libc",
  "moq-auth 0.2.1",
  "moq-clock",
+ "moq-congestion",
  "moq-net",
  "moq-quic",
  "moq-shaper",
@@ -5360,6 +5352,7 @@ dependencies = [
  "moq-net",
  "serde",
  "serde_json",
+ "serde_with",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -5405,6 +5398,7 @@ dependencies = [
  "libc",
  "mdns-sd",
  "moq-clock",
+ "moq-congestion",
  "moq-ice",
  "moq-net",
  "moq-quic",
@@ -5430,7 +5424,6 @@ dependencies = [
  "stun-types",
  "subtle",
  "tempfile",
- "test-env",
  "thiserror 2.0.21",
  "tikv-jemalloc-ctl",
  "tikv-jemallocator",
@@ -5483,6 +5476,7 @@ dependencies = [
  "kio 0.6.2",
  "libc",
  "moq-clock",
+ "moq-congestion",
  "moq-net",
  "moq-quic",
  "moq-sock",
@@ -6914,9 +6908,9 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "openh264"
-version = "0.9.8"
+version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fcc9071a0b5f9c501ddd01066c2600d922cc799dc450a52975222bcda7755a08"
+checksum = "e54411f498088327bf5c45d2de7e5b0ed25875ee3be5800485afe45da7206bff"
 dependencies = [
  "openh264-sys2",
  "wide",
@@ -6924,9 +6918,9 @@ dependencies = [
 
 [[package]]
 name = "openh264-sys2"
-version = "0.9.8"
+version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ada29a4cadc13d4d326737af87c13e224210d7d99fe47594e9f3f9b0102fd70"
+checksum = "414f5bd53da84e126dc9449eb6f0003bb6994b2de63c48119b0c9b7a8b28086a"
 dependencies = [
  "cc",
  "nasm-rs",
@@ -10863,9 +10857,9 @@ checksum = "5c3082ca00d5a5ef149bb8b555a72ae84c9c59f7250f013ac822ac2e49b19c64"
 
 [[package]]
 name = "vt100"
-version = "0.16.2"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "054ff75fb8fa83e609e685106df4faeffdf3a735d3c74ebce97ec557d5d36fd9"
+checksum = "6e8e54ec9993c500979d6771157fc4a8b47e460fddc430dd5c66a74fc6865b07"
 dependencies = [
  "itoa",
  "unicode-width",

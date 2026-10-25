@@ -32,9 +32,10 @@ use crate::quic::driver::{
     send_stream::SendStream,
     udp_transmit,
 };
+use moq_congestion::Controller;
 use moq_quic::{
     ConnectionError, ConnectionHandle, ConnectionStats, Dir, EndpointEvent, Side, StreamEvent,
-    StreamId, TransportError, TransportErrorCode, congestion::Controller,
+    StreamId, TransportError, TransportErrorCode,
 };
 
 /// In-progress connection attempt future
@@ -60,6 +61,14 @@ impl Connecting {
         sender: Pin<Box<dyn UdpSender>>,
     ) -> Self {
         let (on_handshake_data_send, on_handshake_data_recv) = oneshot::channel();
+        let shared = Shared {
+            #[cfg(feature = "net")]
+            probe: conn
+                .congestion_state()
+                .probes()
+                .then(moq_net::transport::Probe::new),
+            ..Shared::default()
+        };
 
         let conn = ConnectionRef(Arc::new(ConnectionInner {
             state: Mutex::new(State::new(
@@ -70,7 +79,7 @@ impl Connecting {
                 on_handshake_data_send,
                 sender,
             )),
-            shared: Shared::default(),
+            shared,
         }));
         let connected = Box::pin(conn.shared.connected.clone().notified_owned());
 
@@ -270,6 +279,12 @@ impl Future for ConnectionDriver {
         if let Err(e) = conn.process_conn_events(&self.conn.shared, cx) {
             conn.terminate(e, &self.conn.shared);
             return Poll::Ready(Ok(()));
+        }
+        // A new target waits for the next poll: probing only resends data in flight, so it has
+        // nothing to send until a write or an ACK polls anyway.
+        #[cfg(feature = "net")]
+        if let Some(probe) = &self.conn.shared.probe {
+            conn.inner.set_probe_target(probe.target().as_bps() / 8);
         }
         let mut keep_going = conn.drive_transmit(cx).inspect_err(|_| {
             // Transmit failed, so close the connection and clean state before returning the error.
@@ -675,6 +690,12 @@ impl Connection {
     #[cfg(feature = "net")]
     pub(crate) fn wire(&self) -> moq_net::transport::Wire {
         self.0.shared.wire.clone()
+    }
+
+    /// The target the driver probes up to, or `None` when the congestion controller cannot probe.
+    #[cfg(feature = "net")]
+    pub(crate) fn probe(&self) -> Option<moq_net::transport::Probe> {
+        self.0.shared.probe.clone()
     }
 
     /// Current state of the congestion control algorithm, for debugging purposes
@@ -1103,6 +1124,9 @@ pub(crate) struct Shared {
     /// Only moq-net reads them, so a driver-only build skips the per-poll stats.
     #[cfg(feature = "net")]
     wire: moq_net::transport::Wire,
+    /// The session's probe target, read by every driver poll
+    #[cfg(feature = "net")]
+    probe: Option<moq_net::transport::Probe>,
 }
 
 pub(crate) struct State {

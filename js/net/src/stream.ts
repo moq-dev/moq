@@ -101,8 +101,11 @@ export function asIetf(version: StreamVersion): IetfVersion | undefined {
 	return isLite(version) ? undefined : version;
 }
 
-// Every draft newer than these counts leading ones, so a new version falls forward.
-function isLeadingOnes(version: StreamVersion): boolean {
+/**
+ * Whether `version` writes leading-ones varints, which carry the full u64; older versions use QUIC's, which stop at 2^62-1.
+ * Every draft newer than these counts leading ones, so a new version falls forward.
+ */
+export function isLeadingOnes(version: StreamVersion): boolean {
 	switch (version) {
 		case Version.DRAFT_14:
 		case Version.DRAFT_15:

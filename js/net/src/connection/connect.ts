@@ -1,6 +1,8 @@
 import { Elapsed, Milli, Nano, sleep, timeout } from "@moq/clock";
 import Session, { type Version as QmuxVersion } from "@moq/qmux";
 import { race } from "@moq/signals";
+import type * as Auth from "../auth.ts";
+import { vacant } from "../auth_session.ts";
 import { ConnectTimeout, error, fromClose, ProtocolViolation, sessionCause } from "../error.ts";
 import * as Ietf from "../ietf/index.ts";
 import * as Message from "../ietf/message.ts";
@@ -98,9 +100,6 @@ const VERSIONS: Record<string, { alpn: string; setup?: SetupVersion }> = {
 	"moq-lite-02": { alpn: Lite.ALPN, setup: Lite.Version.DRAFT_02 },
 	"moq-lite-01": { alpn: Lite.ALPN, setup: Lite.Version.DRAFT_01 },
 	"moq-transport-22": { alpn: Ietf.ALPN.DRAFT_22 },
-	"moq-transport-21": { alpn: Ietf.ALPN.DRAFT_21 },
-	"moq-transport-20": { alpn: Ietf.ALPN.DRAFT_20 },
-	"moq-transport-19": { alpn: Ietf.ALPN.DRAFT_19 },
 	"moq-transport-18": { alpn: Ietf.ALPN.DRAFT_18 },
 	"moq-transport-17": { alpn: Ietf.ALPN.DRAFT_17 },
 	"moq-transport-16": { alpn: Ietf.ALPN.DRAFT_16 },
@@ -116,9 +115,6 @@ const DEFAULT_VERSIONS = Object.keys(VERSIONS).filter((name) => name !== "moq-li
 // it knows and the server pick one.
 const QMUX: Record<string, QmuxVersion | QmuxVersion[] | null> = {
 	[Ietf.ALPN.DRAFT_22]: "qmux-01",
-	[Ietf.ALPN.DRAFT_21]: "qmux-01",
-	[Ietf.ALPN.DRAFT_20]: "qmux-01",
-	[Ietf.ALPN.DRAFT_19]: "qmux-01",
 	[Ietf.ALPN.DRAFT_18]: "qmux-01",
 };
 
@@ -223,6 +219,16 @@ export interface ConnectProps {
 	extensions?: Extensions.Extensions;
 
 	/**
+	 * Build the session on `auth`, so it presents every token the handle holds and a route
+	 * naming one of its `Auth`s keeps it across a reconnect. Omit to give the session a handle
+	 * of its own, which ends with it.
+	 *
+	 * The handle backs one active session at a time, plus the ones draining after a GOAWAY or a
+	 * `close()`: connecting another while one is still active rejects with {@link Auth.Duplicate}.
+	 */
+	auth?: Auth.Handle;
+
+	/**
 	 * The implementation this side advertises in SETUP. Defaults to {@link IMPLEMENTATION};
 	 * a wrapper prepends its own token, like `my-app/1.0 moq-net-js/0.4.2`. Empty sends nothing.
 	 */
@@ -246,6 +252,8 @@ export interface ConnectProps {
 /** The per-session wiring shared by every negotiated protocol path. */
 type SessionProps = {
 	publish?: OriginConsumer;
+	/** The auth handle the session is built on, or undefined for one of its own. */
+	handle?: Auth.Handle;
 	/** Whether this side dialed; only the dialing side aborts on a publication its grant does not cover. */
 	client: boolean;
 	/** The moq-transport extensions this side offers. */
@@ -273,6 +281,8 @@ export async function connect({ url, ...props }: ConnectProps): Promise<Establis
 	if (props.transport && props.versions) throw new TypeError("versions cannot reconfigure a supplied transport");
 	const signal = props.signal ?? NEVER_ABORTED;
 	signal.throwIfAborted();
+	// Fail before dialing; the session checks again when it attaches.
+	if (props.auth) vacant(props.auth);
 	const limit = props.timeout ?? DEFAULT_TIMEOUT;
 	// Checked before anything is armed, so an invalid value throws here, in the caller's unit.
 	const deadline = Nano.fromMilli(Milli(limit));
@@ -325,6 +335,7 @@ async function connectInner(raw: URL, props: Omit<ConnectProps, "url">, abort: P
 	const url = dialable(raw);
 	const wiring: SessionProps = {
 		publish: props.publish,
+		handle: props.auth,
 		client: true,
 		extensions: Extensions.offered(props.extensions),
 		implementation: props.implementation ?? IMPLEMENTATION,
@@ -455,17 +466,11 @@ async function negotiate(
 	const modernVersion =
 		protocol === Ietf.ALPN.DRAFT_22
 			? Ietf.Version.DRAFT_22
-			: protocol === Ietf.ALPN.DRAFT_21
-				? Ietf.Version.DRAFT_21
-				: protocol === Ietf.ALPN.DRAFT_20
-					? Ietf.Version.DRAFT_20
-					: protocol === Ietf.ALPN.DRAFT_19
-						? Ietf.Version.DRAFT_19
-						: protocol === Ietf.ALPN.DRAFT_18
-							? Ietf.Version.DRAFT_18
-							: protocol === Ietf.ALPN.DRAFT_17
-								? Ietf.Version.DRAFT_17
-								: undefined;
+			: protocol === Ietf.ALPN.DRAFT_18
+				? Ietf.Version.DRAFT_18
+				: protocol === Ietf.ALPN.DRAFT_17
+					? Ietf.Version.DRAFT_17
+					: undefined;
 	if (modernVersion !== undefined) {
 		return await handshakeAlpn(url, session, modernVersion, wiring);
 	} else if (protocol === Ietf.ALPN.DRAFT_16) {
