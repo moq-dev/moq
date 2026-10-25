@@ -179,8 +179,8 @@ struct PreparedFetch {
 /// Resolve a FETCH's range against `track` and read its highest group, or the refusal
 /// to answer with. `largest_filter` is a draft-22 filter ending at the Largest Object.
 ///
-/// The range is capped at the Largest Object, known while a live feed writes the track
-/// or once it ended, so the answer never waits on the live group. A range spanning several
+/// The range ends at the Largest Object's group, known while a live feed writes the track
+/// or once it ended, and reads that group whole even while it is open. A range spanning several
 /// groups first fills what the cache misses, which on a relay is one upstream FETCH per
 /// run of missing groups, then answers from the groups the cache holds.
 async fn prepare_fetch(
@@ -225,7 +225,7 @@ async fn prepare_fetch(
 			},
 			Filter::Absolute { start, .. } => start,
 		};
-		// Past every object, so the cap below ends it at the Largest Object.
+		// Past every group, so the cap below ends it with the Largest Object's group.
 		range.end = Location {
 			group: u64::MAX,
 			object: 0,
@@ -246,14 +246,16 @@ async fn prepare_fetch(
 				false => failed(Error::NotFound),
 			});
 		}
-		// A finished track's last group is whole, so asking for all of it stays as asked.
-		let past = Location {
-			group: largest.group,
-			object: largest.object.saturating_add(1),
-		};
-		let open = finished.is_none() && range.end.object == 0;
-		if range.end.group > past.group || (range.end.group == past.group && (open || range.end.object > past.object)) {
-			range.end = past;
+		// The groups past the Largest Object's do not exist yet. That group itself is never
+		// cut, though draft-22 section 9.11 ends a FETCH at the Largest Object: the cache does
+		// not know an open group's real Largest Object, a peer has no way to enforce the cap,
+		// and a downstream cache would take a cut group as complete. So the answer waits for
+		// an open group to finish.
+		if range.end.group > largest.group {
+			range.end = Location {
+				group: largest.group,
+				object: 0,
+			};
 		}
 	}
 
@@ -3101,6 +3103,8 @@ impl Publisher {
 			Some(Err((err, reason))) => return self.reject_fetch(stream, msg.request_id, &err, &reason).await,
 			None => return Ok(()),
 		};
+		// The range ended short of the requested group, at the Largest Object's.
+		let capped = range.end != end;
 		let end = range.end;
 		let group = group.for_version(self.version);
 		// FETCH keeps each object's Timestamp, in the units FETCH_OK declares wherever the
@@ -3138,8 +3142,8 @@ impl Publisher {
 			}
 			end
 		} else if draft22 {
-			// Draft-22's End Location is inclusive: the end, already capped at Largest Object
-			// (section 10.14). Objects missing before it do not exist. A whole-group end has no
+			// Draft-22's End Location is inclusive: the end, already capped at the Largest
+			// Object's group (section 10.14). Objects missing before it do not exist. A whole-group end has no
 			// End Object to report, so it covers what the finished group holds, and at least
 			// the start an empty answer covered.
 			let object = match range.until(group.sequence) {
@@ -3152,11 +3156,11 @@ impl Publisher {
 				group: group.sequence,
 				object,
 			}
-		} else if (end_of_track && end.object > 0) || group.sequence < end.group {
+		} else if (end_of_track && end.object > 0) || group.sequence < end.group || capped {
 			// Cap a bounded response at the track's last object, or at the last object sent
-			// when the end group is not held: before draft-22 the End Location promises every
-			// object before it. A whole-group response keeps Object 0 rather than claiming
-			// that the next group is covered.
+			// when the end group is not held or the range was capped: before draft-22 the End
+			// Location promises every object before it. A whole-group response to a request
+			// for that group keeps Object 0 rather than claiming that the next group is covered.
 			Location {
 				group: group.sequence,
 				object: group.end(),
@@ -11338,14 +11342,14 @@ mod serve_tests {
 	}
 
 	/// On draft 22, an End Object past a finished group's last object is still the End
-	/// Location reported (section 10.14), unless the group holds Largest Object, which caps
-	/// it. A relay's idle copy does not know Largest Object, so it echoes the request.
+	/// Location reported (section 10.14), even in the group holding Largest Object, unless
+	/// the track ends there.
 	#[moq_clock::test]
 	async fn a_draft22_fetch_past_a_group_end_reports_the_requested_end() {
 		let version = Version::Draft22;
 		for (group, largest, reported) in [
 			(2, Largest::Live, 7),
-			(4, Largest::Live, 1),
+			(4, Largest::Live, 7),
 			(4, Largest::Finished, 1),
 			(4, Largest::Idle, 7),
 			(4, Largest::IdleEnded, 7),
@@ -11613,10 +11617,11 @@ mod serve_tests {
 		}
 	}
 
-	/// A range reaching past a live track's Largest Object stops there rather than waiting on
-	/// the group still being written, and never claims the track ends.
+	/// A range reaching past a live track's Largest Object ends with its group, which it
+	/// waits on until the group finishes rather than cutting it at the Largest Object, and
+	/// never claims the track ends.
 	#[moq_clock::test]
-	async fn a_standalone_fetch_stops_at_the_largest_object() {
+	async fn a_standalone_fetch_waits_for_the_largest_object_group() {
 		for version in FETCH_DRAFTS {
 			let mut h = serve(version);
 			publish_pairs(&mut h, 4, None);
@@ -11624,19 +11629,22 @@ mod serve_tests {
 			live.write_frame(timestamp(), b"4-0".to_vec()).unwrap();
 			settle().await;
 
-			let buf = standalone_fetch(
+			let fetch = standalone_fetch(
 				&h,
 				Location { group: 3, object: 0 },
 				Location { group: 9, object: 0 },
 				GroupOrder::Ascending,
-			)
-			.await;
+			);
+			let finish = async {
+				settle().await;
+				live.write_frame(timestamp(), b"4-1".to_vec()).unwrap();
+				live.finish().unwrap();
+			};
+			let (buf, ()) = futures::join!(fetch, finish);
 			let (ok, objects) = fetch_answer(buf, version);
-			assert_eq!(ok.end_location, end_location(version, 4, 0), "{version}");
+			assert_eq!(ok.end_location, end_location(version, 4, 1), "{version}");
 			assert!(!ok.end_of_track, "{version}");
-			let mut expected = pairs([3]);
-			expected.push((4, 0, "4-0".into()));
-			assert_eq!(objects, expected, "{version}");
+			assert_eq!(objects, pairs([3, 4]), "{version}");
 		}
 	}
 

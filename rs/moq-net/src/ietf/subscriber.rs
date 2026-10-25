@@ -5385,8 +5385,9 @@ impl Subscriber {
 
 	/// Serve a fill a run at a time, newest run first for a descending reader, until it is
 	/// answered or nobody waits on it. Each run is one FETCH, except that the source's live
-	/// group always goes alone: a FETCH stops at the Largest Object, so a run including the
-	/// group its source is still writing would cut that group short.
+	/// group always goes alone: a run including the group its source is still writing would
+	/// hold the earlier groups until it finishes, or be cut short at the Largest Object by a
+	/// publisher following draft-22 section 9.11.
 	async fn serve_fill(self, broadcast: PathOwned, name: String, fill: track::Fill, timescale: Option<Timescale>) {
 		let fill = std::sync::Arc::new(fill);
 		let mut last = None;
@@ -5591,8 +5592,8 @@ impl Subscriber {
 		// group past it still pass the exclusive comparison below.
 		let whole_last = !draft22 && end.group == last && end.object == 0;
 
-		// Draft-22's answer stops at the Largest Object, which is at or after its start and
-		// never past the requested end. Validate before accepting a group or letting End of
+		// Draft-22's answer ends at or after its start and never past the requested end, which
+		// a publisher following section 9.11 cuts at the Largest Object. Validate before accepting a group or letting End of
 		// Track mark where the track ends.
 		if draft22 && (end.group < run.start || end.group > last || (end.group == run.start && end.object <= start)) {
 			let err = Error::ProtocolViolation;
@@ -5631,7 +5632,7 @@ impl Subscriber {
 			_ if end.group > last => (last, None),
 			object => (end.group, Some(object)),
 		};
-		// A publisher stops at the Largest Object, so the groups past it are not answered.
+		// A publisher may stop at the Largest Object, so the groups past it are not answered.
 		// They are refused for now rather than named dropped: they may still be written.
 		if covered < last {
 			fill.reject_groups(covered + 1..run.end, Error::NotFound);

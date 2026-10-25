@@ -9,8 +9,12 @@ included, and resolves a `Time(pts)` end before it goes upstream.
 ## Plan
 
 Range fills already go upstream as one FETCH per run of missing groups, and
-our publisher serves multi-group FETCHes capped at the Largest Object. What
-remains is the subscription side.
+our publisher serves multi-group FETCHes ending at the Largest Object's group.
+That group is never cut at the Largest Object (maintainer, 2026-10-25,
+departing from draft-22 section 9.11): the cache cannot know an open group's
+real Largest Object, so the answer waits for it to finish rather than handing a
+downstream cache a truncated group as complete. What remains is the
+subscription side.
 
 Upstream range changes ride `write_update` in `ietf/subscriber.rs`.
 Narrowing is allowed from draft-15 on. Widening is a bug today: on draft-22

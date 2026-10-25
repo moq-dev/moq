@@ -42,8 +42,9 @@ relay bounds a sparse FETCH only if the model can request ranges:
   upstream's live group (which arrives via SUBSCRIBE), so it never blocks.
   moq-transport caps a FETCH at the Largest Object, so it can return the live
   group's existing prefix but never wait for its future objects. Downstream,
-  an IETF FETCH is served from the model's ranges, capped at the Largest
-  Object.
+  an IETF FETCH is served from the model's ranges, ending at the Largest
+  Object's group, which it reads whole even while open (maintainer,
+  2026-10-25): the cache cannot know an open group's real Largest Object.
 - **Relative ends** (maintainer, 2026-10-11, superseding the 10-07 `Live`
   flag and closing #5085). Each range end is `Absolute(group)` or
   `Relative(n)`, naming the group n before the latest; either end may be
