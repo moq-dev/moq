@@ -1,7 +1,6 @@
 // Answer Rust-encoded TRACK_STATUS requests with the JS publisher, returning each response.
 import assert from "node:assert/strict";
 import { Milli } from "@moq/clock";
-import { Producer as GroupProducer } from "../../js/net/src/group.ts";
 import { NativeSession } from "../../js/net/src/ietf/adapter.ts";
 import { Publisher } from "../../js/net/src/ietf/publisher.ts";
 import { TrackStatusRequest } from "../../js/net/src/ietf/track.ts";
