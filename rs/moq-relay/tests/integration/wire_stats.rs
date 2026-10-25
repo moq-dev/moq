@@ -36,8 +36,8 @@ async fn wire_sources(io_uring: bool) {
 	config.auth.public = vec![moq_auth::Pattern::all()];
 	config.stats.enabled = true;
 	config.internal.listen = Some("127.0.0.1:0".parse().unwrap());
-	config.stats.interval = Some(Duration::from_secs(3600));
-	config.drain_timeout = Duration::ZERO;
+	config.stats.interval = Some(Duration::from_secs(3600).into());
+	config.drain_timeout = Some(Duration::ZERO.into());
 	if io_uring {
 		config.runtime.workers = Some(1);
 		config.runtime.pin = false;

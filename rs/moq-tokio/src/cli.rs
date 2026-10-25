@@ -216,9 +216,6 @@ fn overlay_unoccupied(base: &mut toml::Value, overlay: &toml::Value, path: &str,
 				} else {
 					format!("{path}.{key}")
 				};
-				if !occupied.contains(child.as_str()) {
-					base.remove(&format!("__cli_{key}"));
-				}
 				match base.get_mut(key) {
 					Some(existing) => overlay_unoccupied(existing, value, &child, occupied),
 					None if occupied.contains(child.as_str()) => {}

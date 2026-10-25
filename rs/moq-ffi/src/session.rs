@@ -165,13 +165,20 @@ impl From<MoqQuicConfig> for moq_tokio::quic::Config {
 	fn from(config: MoqQuicConfig) -> Self {
 		let mut quic = Self::default();
 		quic.max_streams = config.max_streams;
-		quic.idle_timeout = config.idle_timeout_us.map(std::time::Duration::from_micros);
-		quic.keep_alive = config.keep_alive_us.map(std::time::Duration::from_micros);
+		quic.idle_timeout = config
+			.idle_timeout_us
+			.map(|us| std::time::Duration::from_micros(us).into());
+		quic.keep_alive = config
+			.keep_alive_us
+			.map(|us| std::time::Duration::from_micros(us).into());
 		quic.gso = config.gso;
 		quic.mtu_discovery = config.mtu_discovery;
 		quic.congestion_control = config.congestion_control.map(Into::into);
 		quic.qlog = config.qlog.map(Into::into);
-		quic.keylog = config.keylog;
+		quic.keylog = config
+			.keylog
+			.filter(|enabled| *enabled)
+			.map(|_| std::env::var_os("SSLKEYLOGFILE").unwrap_or_default().into());
 		quic
 	}
 }
@@ -193,17 +200,18 @@ pub struct MoqWebSocketConfig {
 ///
 /// The delay starts at `initial_us`, multiplies by `multiplier` after each failed attempt,
 /// and caps at `max_us`. After `timeout_us` of consecutive failures the connection gives up
-/// for good; the window resets whenever a session stays up past `initial_us`. Each null
-/// field uses moq-tokio's default: 1s, x2, 5s, and a 10s window.
+/// for good; the window resets whenever a session stays up past 1s. Each null field uses
+/// moq-tokio's default: 1s, x2, 5s, and a 10s window. Zero means off: no wait, no growth,
+/// no cap, or no give-up.
 #[derive(Clone, Debug, Default, PartialEq, Eq, uniffi::Record)]
 pub struct MoqBackoff {
-	/// Delay before the first reconnect attempt, in microseconds.
+	/// Delay before the first reconnect attempt, in microseconds. 0 retries at once.
 	#[uniffi(default = None)]
 	pub initial_us: Option<u64>,
 	/// Multiplier applied to the delay after each failure.
 	#[uniffi(default = None)]
 	pub multiplier: Option<u32>,
-	/// Maximum delay between reconnect attempts, in microseconds.
+	/// Maximum delay between reconnect attempts, in microseconds. 0 leaves it uncapped.
 	#[uniffi(default = None)]
 	pub max_us: Option<u64>,
 	/// Time spent retrying before giving up, in microseconds. 0 retries forever.
@@ -249,10 +257,10 @@ pub fn moq_client_defaults() -> MoqClientConfig {
 				delay_us: Some(micros(websocket.delay)),
 			},
 			backoff: MoqBackoff {
-				initial_us: backoff.initial.map(micros),
+				initial_us: Some(micros(backoff.initial())),
 				multiplier: Some(backoff.multiplier),
-				max_us: backoff.max.map(micros),
-				timeout_us: backoff.timeout.map(micros),
+				max_us: Some(micros(backoff.max())),
+				timeout_us: Some(micros(backoff.timeout())),
 			},
 			..Default::default()
 		}
@@ -312,9 +320,11 @@ impl Client {
 			connect.bind = Some(bind);
 		}
 		connect.version = parse_versions(&config.versions)?;
-		connect.timeout = config.timeout_us.map(std::time::Duration::from_micros);
-		connect.race = config.race_us.map(std::time::Duration::from_micros);
-		connect.resolution_delay = config.resolution_delay_us.map(std::time::Duration::from_micros);
+		connect.timeout = config.timeout_us.map(|us| std::time::Duration::from_micros(us).into());
+		connect.race = config.race_us.map(|us| std::time::Duration::from_micros(us).into());
+		connect.resolution_delay = config
+			.resolution_delay_us
+			.map(|us| std::time::Duration::from_micros(us).into());
 
 		let tls = config.tls;
 		connect.tls.insecure = Some(tls.insecure);
@@ -327,32 +337,33 @@ impl Client {
 
 		connect.websocket.enabled = config.websocket.enabled;
 		if let Some(delay) = config.websocket.delay_us {
-			connect.websocket.delay = Some(std::time::Duration::from_micros(delay));
+			connect.websocket.delay = Some((std::time::Duration::from_micros(delay)).into());
 		}
-
-		connect.once = Some(config.once);
 
 		let backoff = config.backoff;
 		if let Some(initial) = backoff.initial_us {
-			connect.backoff.initial = Some(std::time::Duration::from_micros(initial));
+			connect.backoff.initial = Some((std::time::Duration::from_micros(initial)).into());
 		}
 		if let Some(multiplier) = backoff.multiplier {
 			connect.backoff.multiplier = multiplier;
 		}
 		if let Some(max) = backoff.max_us {
-			connect.backoff.max = Some(std::time::Duration::from_micros(max));
+			connect.backoff.max = Some((std::time::Duration::from_micros(max)).into());
 		}
 		if let Some(timeout) = backoff.timeout_us {
-			connect.backoff.timeout = Some(std::time::Duration::from_micros(timeout));
+			connect.backoff.timeout = Some((std::time::Duration::from_micros(timeout)).into());
 		}
 
 		let quic = config.quic.into();
 
 		// Building the endpoint here, not at connect, is what surfaces an unreadable
 		// certificate or a half-configured mTLS identity from `new`.
-		let client = connect.init(quic).map_err(|err| MoqError::Config {
-			reason: format!("{err}"),
-		})?;
+		let client = connect
+			.init(quic)
+			.map_err(|err| MoqError::Config {
+				reason: format!("{err}"),
+			})?
+			.with_reconnect(!config.once);
 
 		Ok(Self {
 			client,
@@ -860,7 +871,6 @@ enum Inner {
 #[derive(Clone)]
 struct Accepted {
 	session: moq_net::Session,
-	driver: crate::ffi::Background,
 }
 
 impl std::ops::Deref for Accepted {
@@ -891,17 +901,11 @@ impl Accepted {
 	}
 
 	async fn closed<T>(&self) -> Result<T, MoqError> {
-		self.driver.check()?;
-		#[cfg(not(target_arch = "wasm32"))]
-		self.driver.finished().await?;
 		Err(self.session.closed().await.into())
 	}
 
 	async fn close(self) -> Result<(), MoqError> {
-		self.driver.check()?;
 		let result = self.session.close().await;
-		#[cfg(not(target_arch = "wasm32"))]
-		self.driver.finished().await?;
 		result.map_err(Into::into)
 	}
 }
@@ -962,16 +966,8 @@ impl MoqSession {
 		session: moq_net::Session,
 		publish: crate::origin::Origin,
 		subscribe: crate::origin::Origin,
-		driver: tokio::task::JoinHandle<moq_tokio::Result<()>>,
 	) -> Self {
-		let driver = crate::ffi::Background::new(async move {
-			match driver.await {
-				Ok(result) => result,
-				Err(error) if error.is_cancelled() => Err(moq_net::Error::Cancel.into()),
-				Err(_) => Err(moq_tokio::Error::Panic),
-			}
-		});
-		Self::build(Inner::Session(Accepted { session, driver }), publish, subscribe)
+		Self::build(Inner::Session(Accepted { session }), publish, subscribe)
 	}
 
 	fn mint_allocator(inner: &Inner) -> moq_net::bandwidth::Allocator {
