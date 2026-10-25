@@ -6,6 +6,7 @@
 
 import { ProtocolViolation } from "../error.ts";
 import { concat, type Reader } from "../stream.ts";
+import type { Order } from "../track.ts";
 import * as Varint from "../varint.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
@@ -310,6 +311,9 @@ function expectEmpty(rest: Uint8Array): void {
  * fetch stream, the draft's fill-failure signal.
  */
 export interface Fill {
+	/** The filled groups' order, or the subscription's order when omitted. */
+	groupOrder?: Order;
+
 	/**
 	 * The range to fill. `undefined` means the Location Filter was omitted, which inherits
 	 * the subscription's own filter; `unfiltered` (a zero length filter, or type 0x00 from
@@ -325,7 +329,7 @@ export interface Fill {
 	rangeFilters: boolean;
 }
 
-/** LOCATION_FILTER, the only parameter we act on inside a fill. */
+/** LOCATION_FILTER, the parameter that selects the fill's objects. */
 const FILL_LOCATION_FILTER = 0x21n;
 
 type Framing = "byte" | "varint" | "bytes";
@@ -356,21 +360,21 @@ const FILL_ALLOWED = new Map<bigint, Framing>([
  * The value is a nested parameter scope, encoded like a message's parameters.
  */
 export function encodeFill(fill: Fill, version: IetfVersion): Uint8Array {
-	// An omitted filter inherits the subscription's, so the scope is empty. An explicit
-	// unfiltered still encodes, as a zero length filter (type 0x00 from draft-22) meaning
-	// the whole track.
-	if (fill.filter === undefined) {
-		return varint(0n, version);
+	const parts = [varint(BigInt(Number(fill.filter !== undefined) + Number(fill.groupOrder !== undefined)), version)];
+	if (fill.filter !== undefined) {
+		parts.push(varint(FILL_LOCATION_FILTER, version), encodeParam(fill.filter, version));
 	}
-	return concat([
-		varint(1n, version),
-		// The first type in a scope is not delta encoded, so this is the raw id.
-		varint(FILL_LOCATION_FILTER, version),
-		encodeParam(fill.filter, version),
-	]);
+	if (fill.groupOrder !== undefined) {
+		// Parameters sort by id; GROUP_ORDER follows LOCATION_FILTER by one.
+		parts.push(
+			varint(fill.filter !== undefined ? 1n : 0x22n, version),
+			new Uint8Array([fill.groupOrder === "ascending" ? 1 : 2]),
+		);
+	}
+	return concat(parts);
 }
 
-/** Decode FILL_PARAMETERS, returning the range it asks to fill. */
+/** Decode FILL_PARAMETERS, including its inherited or explicit group order. */
 export function decodeFill(data: Uint8Array, version: IetfVersion): Fill {
 	const [count, afterCount] = unvarint(data, version);
 	if (count > 64n) {
@@ -379,6 +383,7 @@ export function decodeFill(data: Uint8Array, version: IetfVersion): Fill {
 
 	let rest = afterCount;
 	let filter: Filter | undefined;
+	let groupOrder: Order | undefined;
 	let rangeFilters = false;
 	let prev = 0n;
 	for (let i = 0n; i < count; i++) {
@@ -411,16 +416,19 @@ export function decodeFill(data: Uint8Array, version: IetfVersion): Fill {
 		// recorded even though its value is not interpreted.
 		rangeFilters ||= key >= 0x25n && key <= 0x28n;
 
-		// The rest are parameters we do not act on, but their bytes still have to be
-		// consumed or the remaining keys desync.
+		// Each parameter must consume its own value or the remaining keys desync.
 		if (framing === "varint") {
 			[, rest] = unvarint(rest, version);
 			continue;
 		}
 		if (framing === "byte") {
 			if (rest.length < 1) throw new Error("truncated value inside FILL_PARAMETERS");
-			if (key === 0x22n && rest[0] !== 1 && rest[0] !== 2) {
-				throw new ProtocolViolation(`invalid group order: ${rest[0]}`);
+			if (key === 0x22n) {
+				if (groupOrder !== undefined) throw new Error("duplicate GROUP_ORDER inside FILL_PARAMETERS");
+				if (rest[0] !== 1 && rest[0] !== 2) {
+					throw new ProtocolViolation(`invalid group order: ${rest[0]}`);
+				}
+				groupOrder = rest[0] === 1 ? "ascending" : "descending";
 			}
 			rest = rest.slice(1);
 			continue;
@@ -433,7 +441,7 @@ export function decodeFill(data: Uint8Array, version: IetfVersion): Fill {
 		throw new Error("trailing bytes in FILL_PARAMETERS");
 	}
 
-	return { filter, rangeFilters };
+	return { filter, groupOrder, rangeFilters };
 }
 
 /** Split a length-prefixed value off the front of `data`, returning it and what follows. */
