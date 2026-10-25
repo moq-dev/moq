@@ -387,6 +387,23 @@ async fn a_pruned_start_reads_as_dropped() {
 	not_found(fetch(&broadcast, "video", 7).await);
 }
 
+/// A GET that fails while the store still lists the object refuses its group only for now, so
+/// a later read asks again once the store recovers.
+#[tokio::test(start_paused = true)]
+async fn a_failed_get_refuses_its_group_for_now() {
+	let archive = Archive::new();
+	archive.track("video", 0, true).await;
+	archive.object("video", 0, vec![frames(true, 0, 0..2)]).await;
+	archive.object("video", 0, vec![frames(true, 1, 0..1)]).await;
+
+	let (broadcast, _run) = serve(&archive.store).await;
+	archive.store.inner().fail_gets("rec/video/0000000000000000000-");
+	let err = fetch(&broadcast, "video", 0).await.unwrap_err();
+	assert!(!matches!(err, moq_net::Error::NotFound), "{err}");
+	archive.store.inner().heal_gets();
+	assert_eq!(fetch(&broadcast, "video", 0).await.unwrap(), expected(true, 0, 0..2));
+}
+
 /// A growing archive is followed through each track's own cursor, a key sorting before
 /// another track's cursor included, and a track added mid-recording joins.
 #[tokio::test(start_paused = true)]

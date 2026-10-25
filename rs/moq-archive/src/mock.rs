@@ -31,6 +31,8 @@ struct State {
 	fail_puts: Vec<String>,
 	/// GETs whose path contains any of these return Not Found.
 	hide_gets: Vec<String>,
+	/// GETs whose path contains any of these fail, as a store outage would.
+	fail_gets: Vec<String>,
 	/// GETs whose path contains the pattern wait for a permit before reading.
 	stall_gets: Vec<(String, Arc<tokio::sync::Semaphore>)>,
 	/// Deletes whose path contains any of these fail.
@@ -96,6 +98,17 @@ impl Mock {
 
 	pub fn hide_gets(&self, pattern: &str) -> &Self {
 		self.state().hide_gets.push(pattern.to_string());
+		self
+	}
+
+	pub fn fail_gets(&self, pattern: &str) -> &Self {
+		self.state().fail_gets.push(pattern.to_string());
+		self
+	}
+
+	/// End every [`fail_gets`](Self::fail_gets) outage.
+	pub fn heal_gets(&self) -> &Self {
+		self.state().fail_gets.clear();
 		self
 	}
 
@@ -235,6 +248,12 @@ impl ObjectStore for Mock {
 			return Err(object_store::Error::NotFound {
 				path: location.to_string(),
 				source: "hidden".into(),
+			});
+		}
+		if self.state().fail_gets.iter().any(|p| location.as_ref().contains(p)) {
+			return Err(object_store::Error::Generic {
+				store: "mock",
+				source: "outage".into(),
 			});
 		}
 		let stall = self

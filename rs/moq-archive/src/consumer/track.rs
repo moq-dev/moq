@@ -149,8 +149,8 @@ pub(super) async fn serve<S: ObjectStore>(shared: Arc<Shared<S>>, index: Arc<Mut
 	}
 }
 
-/// Answer group `sequence` of `fill` from the objects holding it, or drop the run of sequences
-/// around it that the archive does not hold.
+/// Answer group `sequence` of `fill` from the objects holding it, drop the run of sequences
+/// around it that the archive does not hold, or refuse it for now when the store fails.
 async fn serve_group<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, fill: &Fill, sequence: u64) {
 	let frame = fill.frame_start(sequence);
 	let (holding, after, timed, timescale) = {
@@ -171,14 +171,17 @@ async fn serve_group<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, f
 		};
 		match loaded {
 			Ok(object) => objects.push(object),
-			Err(err) => {
-				if let Error::NotFound(_) = err {
-					// Pruned since it was listed.
-					index.lock().unwrap().forget(*start);
-				} else {
-					tracing::warn!(%path, sequence, %err, "archived group is unavailable");
-				}
+			Err(Error::NotFound(_)) => {
+				// Pruned since it was listed.
+				index.lock().unwrap().forget(*start);
 				fill.drop_groups(sequence..sequence + 1);
+				return;
+			}
+			Err(err) => {
+				// The store still lists it, so a later reader asks again.
+				tracing::warn!(%path, sequence, %err, "archived group is unavailable");
+				let err = moq_net::Error::Stream(moq_net::StreamError::Internal);
+				fill.refuse_groups(sequence..sequence + 1, err);
 				return;
 			}
 		}
