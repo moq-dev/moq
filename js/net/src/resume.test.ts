@@ -1035,6 +1035,7 @@ for (const fails of [true, false]) {
 for (const [field, first, second] of [
 	["priority", { priority: 1 }, { priority: 2 }],
 	["compression", { compress: true }, { compress: false }],
+	["refresh", { refresh: 4 }, {}],
 ] as const) {
 	test(`track info keeps one ${field} answer across routes`, async () => {
 		const front = new Front();
@@ -1710,13 +1711,13 @@ test("the largest honours the reader's bounds on the serving copy", async () => 
 	const capped = front.consumer
 		.track("seq")
 		.subscribe()
-		.withGroups({ end: { excluded: 3 } });
+		.withRange({ end: { excluded: 3 } });
 	const floored = front.consumer.track("seq").subscribe({ groups: { start: { included: 8 } } });
 	for (let sequence = 0; sequence < 5; sequence++) ta.write(sequence);
 
 	const next = capped.largest();
 	expect(await isPending(next)).toBe(true);
-	capped.setGroups({});
+	capped.withRange({});
 	expect(await next).toEqual({ group: 4, frame: 0 });
 
 	const floor = floored.largest();
@@ -1821,6 +1822,58 @@ test.each(["lands", "dropped", "expired"])(
 		}
 	},
 );
+
+test("a group read whole still expires once the reader lets go of its copy", async () => {
+	const { clock, installed } = manual();
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe({ maxDelay: SECOND });
+	try {
+		ta.write(0);
+		const group = sub.tryRecvGroup();
+		if (!group) throw new Error("expected group 0");
+		// Read whole and released, as a publisher does before it drains the stream it wrote it to.
+		expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+		expect(await group.readFrame()).toBeUndefined();
+		group.close();
+
+		front.serve(b.consume());
+		await settle();
+		tb.write(2);
+		expect(drain(sub)).toEqual([2]);
+		// Its successor lands on the replaced copy, starting the budget there.
+		const half = Nano.fromMilli(Milli(SECOND / 2));
+		await clock.advance(half);
+		ta.write(1);
+		drain(sub);
+
+		let expired: Error | undefined;
+		void group.expired.then((err) => {
+			expired = err;
+		});
+		// A budget after the swap, the next read lets go of the replaced copy, closing its subscription.
+		await clock.advance(half);
+		expect(drain(sub)).toEqual([]);
+		await settle();
+		expect(ta.producer.demand().wanted.peek()).toBeUndefined();
+		expect(expired).toBeUndefined();
+
+		await clock.advance(half);
+		await settle();
+		expect(expired).toBeInstanceOf(StreamError);
+		expect((expired as StreamError).code).toBe(StreamCode.Old);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+		installed.close();
+	}
+});
 
 test("an ordered reader keeps no copy for a group it passed", async () => {
 	const front = new Front();
@@ -1983,7 +2036,7 @@ test.each([false, true])(
 		copy(b);
 		front.serve(a.consume());
 		const sub = front.consumer.track("seq").subscribe({ maxDelay: Milli(10_000) });
-		expect(sub.tryRecvGroup()).toBeUndefined();
+		expect(hooks.tryRecvGroup(sub, false).kind).toBe("idle");
 		expect(hooks.tryRecvDatagram(sub).kind).toBe("idle");
 		ta.write(0);
 		front.serve(b.consume());
@@ -2297,7 +2350,7 @@ test("a datagram below the group floor does not keep a finite track's copy", asy
 	ta.producer.appendDatagram(undefined, enc.encode("d"));
 	await settle();
 	// The floor passes the datagram: a datagram read would only discard it.
-	sub.setGroups({ start: { included: 1 } });
+	sub.withRange({ start: { included: 1 } });
 	ta.write(1);
 	ta.producer.finishAt({ group: 2, frame: 0 });
 	expect(drain(sub)).toEqual([1]);
@@ -2540,6 +2593,34 @@ test.each([
 		front.consumer.close();
 		a.close();
 		b.close();
+	}
+});
+
+// A source that finished a track and closed just before the front concluded ended its listing
+// after that finish, so the front's listing ends after it too.
+test("a concluded front's listing keeps its closed source's finishes", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const from = a.consume();
+	const answer = wireOf(from).lister();
+	answer.add("seq", { priority: 0 });
+	answer.add("live", { priority: 0 });
+	answer.synced();
+	front.serve(from);
+	const tracks = front.consumer.tracks();
+	try {
+		for (const event of [{ kind: "added", name: "seq" }, { kind: "added", name: "live" }, { kind: "synced" }])
+			expect(await tracks.next()).toMatchObject(event);
+		answer.finish("seq");
+		a.close();
+		front.conclude();
+		expect(await tracks.next()).toMatchObject({ kind: "finished", name: "seq" });
+		expect(await tracks.next()).toBeUndefined();
+	} finally {
+		tracks.close();
+		answer.close();
+		front.consumer.close();
+		a.close();
 	}
 });
 

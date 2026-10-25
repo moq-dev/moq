@@ -53,12 +53,12 @@ pub struct ExportArgs {
 	#[usage(flatten)]
 	pub endpoint: Args,
 
-	/// How long to wait for the same publisher instance to come back once it ends (e.g. `10s`),
-	/// then carry on with the same stream. A replacement ends the stream unless `--stitch`
-	/// is passed.
-	/// Also bounds a stitched replacement through its first catalog; zero requires it already available.
+	/// How long to wait for the same publisher instance, or with `--stitch` a replacement, to
+	/// come back once the broadcast ends (e.g. `10s`), then carry on with the same stream.
+	/// Zero follows only an instance already serving. A replacement ends the stream unless
+	/// `--stitch` is passed.
 	#[usage(long, default = "0s")]
-	pub linger: moq_tokio::cli::Duration,
+	pub follow: moq_tokio::cli::Duration,
 
 	/// Follow another publisher instance that replaces the broadcast, as a full program switch
 	/// on the same SRT connection.
@@ -146,7 +146,7 @@ pub async fn listen_export(
 	args: ExportArgs,
 ) -> anyhow::Result<()> {
 	let mut server = Server::bind(addr, Duration::from(args.endpoint.latency)).await?;
-	let (follow, stitch) = (args.linger.into(), args.stitch);
+	let (follow, stitch) = (args.follow.into(), args.stitch);
 	tracing::info!(%addr, %name, "SRT listening (export)");
 	notify_ready();
 
@@ -208,7 +208,7 @@ pub async fn connect_export(
 
 	let client = moq_srt::Client::new(addr, resource)
 		.with_max_delay(args.endpoint.latency.into())
-		.with_follow(args.linger.into())
+		.with_follow(args.follow.into())
 		.with_stitch(args.stitch);
 	Ok(client.publish(&origin, &name).await?)
 }

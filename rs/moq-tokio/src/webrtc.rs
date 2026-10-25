@@ -18,10 +18,9 @@
 //! the peer's SCTP message limit. Ordered delivery means one lost chunk stalls
 //! every stream until SCTP retransmits it.
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::Arc;
 
 use bytes::Bytes;
 use str0m::Rtc;
@@ -31,6 +30,9 @@ use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
 
 mod channel;
+mod resolver;
+
+use resolver::Resolver;
 
 /// The data channel label, as `@moq/p2p` creates it.
 const LABEL: &str = "moq";
@@ -53,10 +55,6 @@ const SEND_WINDOW: usize = RECORD_SIZE as usize * 4;
 /// honors flow control with reasonably full records stays under it; one that
 /// ignores it has the channel closed instead of growing memory without limit.
 const READ_SLACK: u64 = 16 * RECORD_SIZE;
-
-/// How long to wait for a `.local` name to resolve: mdns-sd's first query plus its
-/// retransmissions at one and two seconds (RFC 6762 section 5.2).
-const MDNS_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The default STUN port (RFC 8489 section 18.10).
 const STUN_PORT: u16 = 3478;
@@ -96,10 +94,6 @@ pub enum Error {
 	/// No interface has an address to offer as a host candidate.
 	#[error("no network interface address to offer as a host candidate")]
 	NoHost,
-
-	/// A `.local` candidate could not be resolved.
-	#[error("mDNS resolution failed: {0}")]
-	Mdns(String),
 
 	/// The data channel was already taken by a session.
 	#[error("the data channel is already in use")]
@@ -255,7 +249,8 @@ text!(Candidate);
 /// A background task drives the connection from creation, so ICE checks and STUN
 /// replies are answered while signaling is still in progress. It runs until both
 /// this handle and any session over its data channel are gone. Dropping the handle
-/// stops signaling but leaves a running session alone.
+/// stops signaling, including any remote `.local` candidates still resolving, but
+/// leaves a running session alone.
 pub struct Offerer {
 	peer: Peer,
 	/// The MoQ ALPN the channel carries.
@@ -295,15 +290,14 @@ impl Offerer {
 
 	/// Apply the remote peer's answer to this offer.
 	pub async fn accept(&self, answer: &Answer) -> Result<(), Error> {
-		let (sdp, mdns) = split_mdns(answer.as_str());
+		let (sdp, mdns) = split_mdns(answer.as_str())?;
 		let max_message = max_message_size(answer.as_str())?;
 		let parsed = SdpAnswer::from_sdp_string(&sdp).map_err(|err| Error::Sdp(err.to_string()))?;
 
 		let (tx, rx) = oneshot::channel();
-		self.peer.send(Command::Answer(parsed, max_message, tx))?;
+		self.peer.send(Command::Answer(parsed, max_message, tx)).await?;
 		rx.await.map_err(|_| Error::Closed)??;
-		self.peer.resolve(mdns);
-		Ok(())
+		self.peer.resolver.add(mdns).await
 	}
 
 	/// The next local candidate to send the remote peer, or `None` once gathering is done.
@@ -314,9 +308,13 @@ impl Offerer {
 		self.peer.candidates.recv().await
 	}
 
-	/// Add a candidate the remote peer sent, resolving a `.local` address over mDNS first.
+	/// Add a candidate the remote peer sent.
 	///
-	/// An empty candidate, which a browser sends to mark the end of its candidates, is ignored.
+	/// This waits while the connection is still taking earlier candidates. A `.local`
+	/// address is resolved over mDNS first, one name at a time, so this also waits
+	/// while earlier names are still resolving. One that does not resolve is
+	/// dropped. An empty candidate, which a browser sends to mark the end of its
+	/// candidates, is ignored.
 	pub async fn add_candidate(&self, candidate: &Candidate) -> Result<(), Error> {
 		self.peer.add_candidate(candidate).await
 	}
@@ -357,7 +355,7 @@ impl Answerer {
 		hosts: Vec<IpAddr>,
 	) -> Result<(Self, Answer), Error> {
 		let protocol = negotiated(protocol)?;
-		let (sdp, mdns) = split_mdns(offer.as_str());
+		let (sdp, mdns) = split_mdns(offer.as_str())?;
 		let max_message = max_message_size(offer.as_str())?;
 		let parsed = SdpOffer::from_sdp_string(&sdp).map_err(|err| Error::Sdp(err.to_string()))?;
 
@@ -369,7 +367,7 @@ impl Answerer {
 			.map_err(|err| Error::Sdp(err.to_string()))?;
 
 		let peer = Peer::spawn(config, rtc, socket, Role::Answerer, Some(max_message)).await?;
-		peer.resolve(mdns);
+		peer.resolver.add(mdns).await?;
 		Ok((Self { peer, protocol }, Answer(answer.to_sdp_string())))
 	}
 
@@ -381,9 +379,13 @@ impl Answerer {
 		self.peer.candidates.recv().await
 	}
 
-	/// Add a candidate the remote peer sent, resolving a `.local` address over mDNS first.
+	/// Add a candidate the remote peer sent.
 	///
-	/// An empty candidate, which a browser sends to mark the end of its candidates, is ignored.
+	/// This waits while the connection is still taking earlier candidates. A `.local`
+	/// address is resolved over mDNS first, one name at a time, so this also waits
+	/// while earlier names are still resolving. One that does not resolve is
+	/// dropped. An empty candidate, which a browser sends to mark the end of its
+	/// candidates, is ignored.
 	pub async fn add_candidate(&self, candidate: &Candidate) -> Result<(), Error> {
 		self.peer.add_candidate(candidate).await
 	}
@@ -407,11 +409,16 @@ fn negotiated(protocol: &str) -> Result<String, Error> {
 	}
 }
 
-/// The signaling handle both roles share: commands to the driver task and the
-/// candidates it gathers.
+/// The signaling handle both roles share: commands to the driver task, the
+/// candidates it gathers, and the resolver for the remote peer's `.local` ones.
+///
+/// The driver takes one command at a time, so a peer that trickles candidates
+/// faster than the connection applies them holds up its own signaling instead
+/// of queueing them.
 struct Peer {
-	commands: mpsc::UnboundedSender<Command>,
+	commands: mpsc::Sender<Command>,
 	candidates: mpsc::UnboundedReceiver<Candidate>,
+	resolver: Resolver,
 }
 
 impl Peer {
@@ -429,7 +436,7 @@ impl Peer {
 			agent = agent.awaiting_answer();
 		}
 
-		let (commands, rx) = mpsc::unbounded_channel();
+		let (commands, rx) = mpsc::channel(1);
 		let (candidates_tx, candidates) = mpsc::unbounded_channel();
 		let driver = Driver {
 			agent,
@@ -444,7 +451,12 @@ impl Peer {
 		use tracing::Instrument;
 		tokio::spawn(driver.run().instrument(tracing::Span::current()));
 
-		Ok(Self { commands, candidates })
+		let resolver = Resolver::spawn(commands.clone(), resolver::Mdns);
+		Ok(Self {
+			commands,
+			candidates,
+			resolver,
+		})
 	}
 
 	async fn add_candidate(&self, candidate: &Candidate) -> Result<(), Error> {
@@ -453,36 +465,24 @@ impl Peer {
 		if line.is_empty() {
 			return Ok(());
 		}
-		let candidate = parse_candidate(line).await?;
-		self.send(Command::Candidate(candidate))
+		if mdns_host(line)?.is_some() {
+			return self.resolver.add(vec![line.to_string()]).await;
+		}
+		let candidate = str0m::Candidate::from_sdp_string(line).map_err(|err| Error::Candidate(err.to_string()))?;
+		self.send(Command::Candidate(candidate)).await
 	}
 
 	async fn channel(&self) -> Result<Opened, Error> {
 		let (tx, rx) = oneshot::channel();
-		self.send(Command::Channel(tx))?;
+		self.send(Command::Channel(tx)).await?;
 		let mut opened = rx.await.map_err(|_| Error::Closed)??;
 		// The session keeps the driver alive once this handle is gone.
 		opened.channel.writer._driver = Some(self.commands.clone());
 		Ok(opened)
 	}
 
-	fn send(&self, command: Command) -> Result<(), Error> {
-		self.commands.send(command).map_err(|_| Error::Closed)
-	}
-
-	/// Add the `.local` candidates a description carried once mDNS resolves them.
-	fn resolve(&self, lines: Vec<String>) {
-		for line in lines {
-			let commands = self.commands.clone();
-			tokio::spawn(async move {
-				match parse_candidate(&line).await {
-					Ok(candidate) => {
-						let _ = commands.send(Command::Candidate(candidate));
-					}
-					Err(err) => tracing::debug!(%err, "dropped a remote candidate"),
-				}
-			});
-		}
+	async fn send(&self, command: Command) -> Result<(), Error> {
+		self.commands.send(command).await.map_err(|_| Error::Closed)
 	}
 }
 
@@ -537,7 +537,7 @@ struct Open {
 /// Owns the connection and runs it on its own task.
 struct Driver {
 	agent: moq_ice::Agent,
-	commands: mpsc::UnboundedReceiver<Command>,
+	commands: mpsc::Receiver<Command>,
 	/// Dropped once gathering finishes, ending [`Offerer::candidate`] and [`Answerer::candidate`].
 	candidates: Option<mpsc::UnboundedSender<Candidate>>,
 	role: Role,
@@ -885,20 +885,30 @@ fn max_message_size(sdp: &str) -> Result<u64, Error> {
 }
 
 /// Split a description's `.local` candidates out, since str0m only parses IP addresses.
-fn split_mdns(sdp: &str) -> (String, Vec<String>) {
+fn split_mdns(sdp: &str) -> Result<(String, Vec<String>), Error> {
 	let mut kept = String::with_capacity(sdp.len());
 	let mut mdns = Vec::new();
 	for line in sdp.split_inclusive('\n') {
 		if let Some(candidate) = line.trim_end().strip_prefix("a=")
 			&& candidate.starts_with("candidate:")
-			&& candidate_address(candidate).is_some_and(|addr| addr.ends_with(".local"))
+			&& mdns_host(candidate)?.is_some()
 		{
 			mdns.push(candidate.to_string());
 			continue;
 		}
 		kept.push_str(line);
 	}
-	(kept, mdns)
+	Ok((kept, mdns))
+}
+
+/// The `.local` host name a `candidate:` line connects to, if any. The rest of the
+/// line is checked now, so a malformed candidate fails before it costs a query.
+fn mdns_host(line: &str) -> Result<Option<&str>, Error> {
+	let Some(host) = candidate_address(line).filter(|host| host.ends_with(".local")) else {
+		return Ok(None);
+	};
+	with_address(line, IpAddr::V4(Ipv4Addr::UNSPECIFIED))?;
+	Ok(Some(host))
 }
 
 /// The connection address of a `candidate:` line (RFC 8839 section 5.1).
@@ -906,52 +916,15 @@ fn candidate_address(line: &str) -> Option<&str> {
 	line.split_whitespace().nth(4)
 }
 
-/// Parse a `candidate:` line, resolving a `.local` address over mDNS first.
-async fn parse_candidate(line: &str) -> Result<str0m::Candidate, Error> {
-	let line = match candidate_address(line) {
-		Some(host) if host.ends_with(".local") => {
-			let ip = mdns(host).await?;
-			let mut fields: Vec<String> = line.split_whitespace().map(str::to_string).collect();
-			fields[4] = ip.to_string();
-			fields.join(" ")
-		}
-		_ => line.to_string(),
+/// Parse a `candidate:` line with `ip` as its connection address.
+fn with_address(line: &str, ip: IpAddr) -> Result<str0m::Candidate, Error> {
+	let ip = ip.to_string();
+	let mut fields: Vec<&str> = line.split_whitespace().collect();
+	let Some(addr) = fields.get_mut(4) else {
+		return Err(Error::Candidate(line.to_string()));
 	};
-	str0m::Candidate::from_sdp_string(&line).map_err(|err| Error::Candidate(err.to_string()))
-}
-
-/// The process-wide mDNS daemon, started on the first `.local` candidate.
-static MDNS: Mutex<Option<mdns_sd::ServiceDaemon>> = Mutex::new(None);
-
-/// Resolve a browser's `.local` host name, preferring an IPv4 address.
-async fn mdns(host: &str) -> Result<IpAddr, Error> {
-	let daemon = {
-		let mut daemon = MDNS.lock().unwrap();
-		match daemon.as_ref() {
-			Some(daemon) => daemon.clone(),
-			None => daemon
-				.insert(mdns_sd::ServiceDaemon::new().map_err(|err| Error::Mdns(err.to_string()))?)
-				.clone(),
-		}
-	};
-
-	let name = format!("{host}.");
-	let timeout = MDNS_TIMEOUT.as_millis() as u64;
-	let events = daemon
-		.resolve_hostname(&name, Some(timeout))
-		.map_err(|err| Error::Mdns(err.to_string()))?;
-	let found = loop {
-		match events.recv_async().await {
-			Ok(mdns_sd::HostnameResolutionEvent::AddressesFound(_, addrs)) if !addrs.is_empty() => {
-				let addrs: Vec<IpAddr> = addrs.iter().map(|addr| addr.to_ip_addr()).collect();
-				break addrs.iter().find(|ip| ip.is_ipv4()).or(addrs.first()).copied();
-			}
-			Ok(mdns_sd::HostnameResolutionEvent::SearchTimeout(_)) | Err(_) => break None,
-			Ok(_) => {}
-		}
-	};
-	let _ = daemon.stop_resolve_hostname(&name);
-	found.ok_or_else(|| Error::Mdns(format!("{host} did not resolve")))
+	*addr = &ip;
+	str0m::Candidate::from_sdp_string(&fields.join(" ")).map_err(|err| Error::Candidate(err.to_string()))
 }
 
 #[cfg(test)]

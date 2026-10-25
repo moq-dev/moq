@@ -741,7 +741,7 @@ impl Server {
 							let Accepted { session, url, identity, authority, mut link } = within(deadline, crate::quic::accept(_conn, alpns)).await?;
 							link.local = local;
 							let binding = match url { Some(_) => moq_net::transport::Binding::Uri, None => moq_net::transport::Binding::InBand };
-							let quic = Some(crate::quic::Connection::new((*session).clone()));
+							let quic = Some((*session).clone());
 							let session = crate::transport::Session::new(session, binding);
 							let (request, deadline) = accept_request(&setup.server, session, deadline).await?;
 							// Only WebTransport carries a request URL; raw QUIC puts the path in the SETUP.
@@ -1008,8 +1008,7 @@ impl Drop for Listener {
 
 /// Complete one accepted [`Request`] and wait for the session to close.
 async fn serve_session(request: Request) -> crate::Result<()> {
-	let (session, driver) = request.ok().await?;
-	driver.await.map_err(|_| Error::Panic)??;
+	let session = request.ok().await?;
 	Err(session.closed().await.into())
 }
 
@@ -1642,7 +1641,7 @@ pub struct Request {
 	handshake: Box<moq_net::server::Handshake>,
 	/// The connection under a QUIC or WebTransport request, for [`Request::quic`].
 	#[cfg(feature = "quic")]
-	quic: Option<crate::quic::Connection>,
+	quic: Option<crate::quic::driver::Connection>,
 	/// What remains of the handshake deadline, which also bounds [`Request::ok`].
 	deadline: Option<Deadline>,
 }
@@ -1707,7 +1706,7 @@ impl Request {
 	/// The QUIC connection under this request, to change its limits before answering
 	/// SETUP. `None` on a transport moq-quic does not drive (qmux streams, iroh).
 	#[cfg(feature = "quic")]
-	pub fn quic(&self) -> Option<&crate::quic::Connection> {
+	pub fn quic(&self) -> Option<&crate::quic::driver::Connection> {
 		self.quic.as_ref()
 	}
 
@@ -1722,14 +1721,14 @@ impl Request {
 		Deadline::bound(self.deadline.as_ref(), async { Ok(work.await) }).await
 	}
 
-	/// Accept the session and return its supervised driver task.
+	/// Accept the session, driving it until it closes.
 	///
-	/// Await the driver before classifying the session close so a panic cannot look like cancellation.
+	/// A driver panic is reported through [`Session::closed`].
 	///
 	/// Bounded by what remains of the handshake deadline: answering SETUP can wait
 	/// on a peer that withholds flow-control credit, which keep-alives would
 	/// otherwise hold open.
-	pub async fn ok(self) -> crate::Result<(Session, tokio::task::JoinHandle<crate::Result<()>>)> {
+	pub async fn ok(self) -> crate::Result<Session> {
 		let Request {
 			handshake,
 			deadline,
@@ -1743,7 +1742,7 @@ impl Request {
 		}
 		let (session, driver) = handshake.ok().await?;
 		use tracing::Instrument;
-		let driver = tokio::spawn(
+		tokio::spawn(
 			async move {
 				crate::panic::isolate(async move {
 					let _active = active;
@@ -1755,7 +1754,7 @@ impl Request {
 			}
 			.instrument(tracing::Span::current()),
 		);
-		Ok((session, driver))
+		Ok(session)
 	}
 
 	/// Returns the network transport carrying this session.
@@ -2823,7 +2822,7 @@ mod tests {
 		let connection = client.with_reconnect(false).connect(url);
 
 		let request = listener.accept().await.expect("no incoming connection");
-		let (session, _driver) = request.with_publisher(&origin).ok().await.expect("server handshake");
+		let session = request.with_publisher(&origin).ok().await.expect("server handshake");
 
 		listener.close().await;
 		std::net::UdpSocket::bind(addr).expect("close must release the QUIC socket");

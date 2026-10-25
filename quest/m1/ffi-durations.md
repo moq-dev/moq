@@ -17,14 +17,13 @@ breaks these options this release, so binding users migrate them once.
 Checked 2026-10-23 against the pinned generators: UniFFI's builtin
 `Duration` maps to `time.Duration` in Go, Dart's `Duration`, and
 `std::chrono` nanoseconds in C++, and Python, Swift, and Kotlin are built
-into UniFFI. Only the generated C refuses it, which the C prerequisite below
-fixes.
+into UniFFI. The generated C renders it as `moq_duration`, `int64_t`
+nanoseconds like C++, since `uniffi-bindgen-cpp` `v0.11.0-kixelated.7`.
+C and C++ abort on a duration past `INT64_MAX` nanoseconds (about 292
+years), so moq-ffi must not hand out a saturated `Duration::MAX` where it
+clamps to `u64::MAX` microseconds today (`auth.rs`, `session.rs`).
 
 Public API: moq-ffi, moq-c, every wrapper breaking. Wire: none.
-
-## Required
-
-- [Durations in generated C](/quest/m1/c/duration.md) - the C backend renders UniFFI's `Duration` instead of refusing it
 
 ## Related
 

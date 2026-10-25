@@ -12,7 +12,7 @@ import moq_ffi
 import pytest
 
 # Every group from the first, rather than only what the live edge still reaches.
-FROM_GROUP_0 = [moq.Range(start=cast(moq.Anchor, moq.Anchor.ABSOLUTE(group=0, frame=0)))]
+FROM_GROUP_0 = [moq.Range(start=cast(moq.Anchor, moq.Anchor.ABSOLUTE(group=0)))]
 
 
 async def until_wanted(demand: moq.TrackDemand, wanted: bool = True) -> None:
@@ -102,25 +102,20 @@ def h264_init() -> bytes:
     return sps + pps
 
 
-async def test_fetch_abort_is_a_stream_app_code():
+async def test_fetch_of_a_dropped_group_is_not_found():
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("events")
     dynamic = track.dynamic()
     consumer = broadcast.consume()
 
     async def reject():
-        request = await dynamic.requested_group()
-        request.abort(404)
+        fill = await dynamic.requested_fill()
+        fill.drop_groups(5, 6)
 
     task = asyncio.create_task(reject())
-    with pytest.raises(moq.Error.Protocol) as raised:
+    with pytest.raises(moq.Error.NotFound):
         await consumer.fetch_group("events", 5)
     await task
-    protocol = moq.protocol_error(raised.value)
-    assert protocol is not None
-    assert protocol.scope == moq.ErrorScope.STREAM
-    assert protocol.code == 64 + 404
-    assert protocol.kind == moq.ProtocolKind.APP
 
 
 def test_protocol_error_helper_covers_known_app_and_unknown():
@@ -411,54 +406,26 @@ async def test_announced_epoch_restarts():
     broadcast.close()
 
 
-async def test_finish_lingers_until_closed():
+async def test_finish_serves_until_closed():
     origin = moq.OriginProducer()
     consumer = origin.consume()
     announced = consumer.announced()
     broadcast = create_announced(origin, "finish")
     assert isinstance(await next_route(announced), moq.AnnounceEventStart)
 
-    track = broadcast.publish_track("status", moq.TrackInfo(max_age=timedelta(hours=1)))
+    track = broadcast.publish_track("status")
     track.write_frame(b"tail")
     track.finish()
-    finish = broadcast.finish()
-    assert finish.linger == timedelta(hours=1)
-    with pytest.raises(moq.Error.Closed):
-        broadcast.consume()
+    moq.media.CatalogProducer(broadcast).finish()
 
-    # Cancelling the wait is the interrupt: the broadcast closes at once.
-    wait = asyncio.ensure_future(finish.wait())
-    await asyncio.sleep(0)
-    wait.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await wait
+    # A late subscriber still drains the finished track while the broadcast is up.
+    late = await consumer.request_broadcast("finish")
+    reader = await late.subscribe_track("status")
+    frame = await asyncio.wait_for(reader.read_frame(), timeout=5)
+    assert frame is not None and frame.payload == b"tail"
+
+    broadcast.close()
     assert isinstance(await next_route(announced), moq.AnnounceEventEnd)
-    finish.close()
-
-
-async def test_finish_wait_cancelled_before_it_starts_closes():
-    origin = moq.OriginProducer()
-    consumer = origin.consume()
-    announced = consumer.announced()
-    broadcast = create_announced(origin, "finish")
-    assert isinstance(await next_route(announced), moq.AnnounceEventStart)
-
-    broadcast.publish_track("status", moq.TrackInfo(max_age=timedelta(hours=1))).finish()
-    finish = broadcast.finish()
-    # Cancelled before the loop first steps it, so the wait's body never runs.
-    wait = asyncio.create_task(finish.wait())
-    wait.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await wait
-    assert isinstance(await next_route(announced), moq.AnnounceEventEnd)
-
-
-async def test_finish_without_a_max_age_closes_on_wait():
-    broadcast = moq.BroadcastProducer()
-    broadcast.publish_track("status").finish()
-    finish = broadcast.finish()
-    assert finish.linger == timedelta(0)
-    await asyncio.wait_for(finish.wait(), timeout=5.0)
 
 
 def test_publish_lifecycle():
@@ -516,11 +483,15 @@ async def test_fetch_group_and_serve_dynamic_miss():
 
     dynamic = track.dynamic()
     pending = asyncio.create_task(consumer.fetch_group("events", 7, moq.FetchGroupOptions(priority=11)))
-    request = await asyncio.wait_for(dynamic.requested_group(), timeout=5.0)
-    assert request.sequence == 7
-    assert request.priority == 11
+    fill = await asyncio.wait_for(dynamic.requested_fill(), timeout=5.0)
+    assert (fill.start_group, fill.start_frame, fill.end_group) == (7, 0, 8)
+    assert fill.priority == 11
+    assert fill.next() == 7
+    assert fill.is_used()
+    assert fill.is_wanted(7)
+    assert not fill.is_wanted(8)
 
-    produced = request.accept()
+    produced = fill.accept(7)
     produced.write_frame(b"archive", timedelta(microseconds=140_000))
     produced.finish()
 
@@ -1432,10 +1403,10 @@ def test_audio_encoder_returns_namespaced_records():
     assert isinstance(finish, moq.audio.EncoderFinish)
 
 
-def test_audio_encoder_preset_init_and_bitrate():
-    """A preset sets the frame size, the encoder reports its OpusHead, and the bitrate retunes live."""
+def test_audio_encoder_frame_init_and_bitrate():
+    """A frame duration sets the frame size, the encoder reports its OpusHead, and the bitrate retunes live."""
     output = moq.audio.EncoderOutput(
-        codec=moq.AudioCodec.opus(), sample_rate=48000, channels=1, preset=moq.audio.Preset.LOW_LATENCY
+        codec=moq.AudioCodec.opus(), sample_rate=48000, channels=1, frame_duration=timedelta(milliseconds=10)
     )
     encoder = moq.audio.Encoder(output)
     assert encoder.frame_size == 480
@@ -1446,7 +1417,7 @@ def test_audio_encoder_preset_init_and_bitrate():
     assert encoder.encode([0.0] * encoder.frame_size).data
 
     with pytest.raises(moq.Error.Audio):
-        moq.audio.Encoder(replace(output, frame_duration=timedelta(milliseconds=20)))
+        moq.audio.Encoder(replace(output, frame_duration=timedelta(milliseconds=15)))
 
 
 def test_video_namespace_names_its_configuration_types():
@@ -1670,7 +1641,7 @@ async def test_dynamic_and_json_handles_are_async_context_managers():
     track = broadcast.publish_track("events")
     async with track.dynamic() as track_dynamic:
         pass
-    await assert_cancelled(track_dynamic.requested_group())
+    await assert_cancelled(track_dynamic.requested_fill())
 
     snapshot = moq.json.SnapshotProducer(broadcast, broadcast.publish_track("state"))
     async with moq.json.SnapshotConsumer(await broadcast.consume().subscribe_track("state")) as snapshot_consumer:

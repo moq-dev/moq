@@ -68,45 +68,5 @@ fn bench(c: &mut Criterion) {
 	group.finish();
 }
 
-/// An outgoing request reads the counted aggregate and checks only its named group,
-/// independent of the audience beside it and the cache's unrelated groups.
-fn compressed_request(c: &mut Criterion) {
-	use moq_net::{broadcast, track};
-	use std::hint::black_box;
-	let mut bench = c.benchmark_group("codec_compressed_request");
-	for groups in [1, 64, 1024] {
-		for readers in [1, 64, 1024] {
-			for held in [false, true] {
-				let broadcast = broadcast::Info::default().produce();
-				let track = broadcast
-					.create_track("compressed", track::Info::default().with_compress(true))
-					.unwrap();
-				for _ in 0..groups {
-					let mut group = track.append_group().unwrap();
-					group.write_frame(None, bytes::Bytes::from_static(b"prefix")).unwrap();
-					group.finish().unwrap();
-				}
-				let sequence = if held { groups - 1 } else { groups };
-				let subscription = track::Subscription::default().with_ranges([track::Range {
-					start: track::Anchor::Absolute(track::Position {
-						group: sequence,
-						frame: 1,
-					}),
-					end: None,
-				}]);
-				let _readers: Vec<_> = (0..readers).map(|_| track.subscribe(subscription.clone())).collect();
-				bench.bench_function(BenchmarkId::new(format!("held_{held}_{readers}r"), groups), |b| {
-					b.iter(|| {
-						let mut subscription = track.subscription().unwrap();
-						moq_net::fuzz::widen_compressed(&track, &mut subscription);
-						black_box(subscription);
-					});
-				});
-			}
-		}
-	}
-	bench.finish();
-}
-
-criterion_group!(benches, bench, compressed_request);
+criterion_group!(benches, bench);
 criterion_main!(benches);

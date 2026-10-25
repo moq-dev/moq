@@ -294,7 +294,7 @@ enum Source {
 	Capture {
 		broadcast: moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer,
-		video: Option<(moq_video::capture::Config, moq_video::encode::Options)>,
+		video: Option<moq_video::encode::Capture>,
 		audio: Option<(moq_audio::capture::Config, moq_audio::encode::Options)>,
 	},
 }
@@ -467,7 +467,7 @@ impl Publish {
 		let video = if args.no_video {
 			None
 		} else {
-			Some((args.video_config()?, args.video_encode(bandwidth.clone())))
+			Some(args.video_capture(bandwidth.clone())?)
 		};
 		let audio = (!args.no_audio).then(|| (args.audio_config(), args.audio_encode(bandwidth)));
 		anyhow::ensure!(video.is_some() || audio.is_some(), "nothing to capture");
@@ -501,6 +501,23 @@ impl Publish {
 			PublishCatalog::TsPrograms => anyhow::bail!("`import ts --program all` builds a catalog per program"),
 		};
 		self.report = Some(report);
+		Ok(self)
+	}
+
+	/// Solicit viewer feedback under `echo` in the catalog.
+	///
+	/// Call it before the importer declares its tracks, so the section rides the first catalog.
+	pub fn with_echo(mut self, echo: hang::catalog::Echo) -> anyhow::Result<Self> {
+		let catalog = match &mut self.source {
+			Source::Stream { catalog, .. } => catalog,
+			#[cfg(feature = "capture")]
+			Source::Capture { .. } => anyhow::bail!("--echo-path solicits feedback in a stdin import's one catalog"),
+		};
+		match catalog {
+			PublishCatalog::Media(catalog) => catalog.mutate(|catalog| catalog.echo = Some(echo))?,
+			PublishCatalog::Ts(catalog) => catalog.mutate(|catalog| catalog.echo = Some(echo))?,
+			PublishCatalog::TsPrograms => anyhow::bail!("`import ts --program all` builds a catalog per program"),
+		}
 		Ok(self)
 	}
 
@@ -561,14 +578,9 @@ impl Publish {
 					let catalog = catalog.clone();
 					async move {
 						match video {
-							Some((config, encode)) => {
-								let mut options = moq_video::encode::Capture::default();
-								options.capture = config;
-								options.encode = encode;
-								moq_video::encode::publish_capture(broadcast, catalog, options)
-									.await
-									.map_err(anyhow::Error::from)
-							}
+							Some(options) => moq_video::encode::publish_capture(broadcast, catalog, options)
+								.await
+								.map_err(anyhow::Error::from),
 							None => Ok(()),
 						}
 					}
@@ -780,8 +792,9 @@ impl CaptureArgs {
 		Ok(config)
 	}
 
-	fn video_encode(&self, bandwidth: moq_net::bandwidth::Allocator) -> moq_video::encode::Options {
-		let mut options = moq_video::encode::Options::default();
+	fn video_capture(&self, bandwidth: moq_net::bandwidth::Allocator) -> anyhow::Result<moq_video::encode::Capture> {
+		let mut options = moq_video::encode::Capture::default();
+		options.capture = self.video_config()?;
 		options.bitrate = self.bitrate.map(moq_net::bandwidth::Rate::from_bps);
 		options.codec = self.codec.into();
 		options.kind = if self.software {
@@ -792,7 +805,7 @@ impl CaptureArgs {
 			moq_video::encode::Kind::Auto
 		};
 		options.bandwidth = bandwidth;
-		options
+		Ok(options)
 	}
 
 	/// The audio source named by the flags, defaulting to the default
@@ -818,7 +831,7 @@ impl CaptureArgs {
 	/// names its track; consumers find it through the catalog either way.
 	fn audio_encode(&self, bandwidth: moq_net::bandwidth::Allocator) -> moq_audio::encode::Options {
 		let mut options = moq_audio::encode::Options::default();
-		options.settings.bitrate = self
+		options.config.bitrate = self
 			.audio_bitrate
 			.map(|bps| moq_net::bandwidth::Rate::from_bps(bps.into()));
 		options.bandwidth = bandwidth;
@@ -1474,6 +1487,50 @@ pub(crate) mod tests {
 			before - skew <= wall && wall <= after + skew,
 			"the first frame is live on arrival"
 		);
+	}
+
+	/// A solicitation waits for the input's tracks rather than publishing a catalog, which
+	/// would announce a stdin import before it can serve anything.
+	#[tokio::test]
+	async fn echo_rides_the_first_catalog() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let echo = hang::catalog::Echo::new("viewers".to_string());
+		let mut publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default())
+			.unwrap()
+			.with_echo(echo.clone())
+			.unwrap();
+		let mut track = consumer.track(Catalog::DEFAULT_NAME).unwrap();
+		let mut published = || {
+			matches!(
+				track.poll_largest(&moq_net::kio::Waiter::noop()),
+				std::task::Poll::Ready(Some(_))
+			)
+		};
+		assert!(!published(), "a catalog went out before the input declared a track");
+
+		#[cfg_attr(
+			not(feature = "capture"),
+			expect(
+				irrefutable_let_patterns,
+				reason = "`Source::Capture` exists only with the capture feature"
+			)
+		)]
+		let Source::Stream { decoder, .. } = &mut publish.source else {
+			panic!("expected a stream source");
+		};
+		decoder.decode_chunk(BBB).unwrap();
+		decoder.finish().unwrap();
+		assert!(published(), "the input's tracks release the catalog");
+		let catalog = Catalog::<()>::subscribe(&consumer)
+			.await
+			.unwrap()
+			.next()
+			.await
+			.unwrap()
+			.expect("a catalog");
+		assert_eq!(catalog.echo, Some(echo));
+		assert!(!catalog.video.renditions.is_empty(), "beside the tracks");
 	}
 
 	/// A ready TS packet is consumed in one read, without splitting it into blocking

@@ -73,11 +73,6 @@ pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, tr
 	(broadcast, track, group)
 }
 
-/// Normalize a compressed wire request for the private requesting-model benchmark.
-pub fn widen_compressed(track: &track::Producer, subscription: &mut track::Subscription) {
-	track.widen_compressed(subscription);
-}
-
 /// Every target, keyed by the name of its `fuzz_targets/<name>.rs` shim.
 pub const TARGETS: &[(&str, Target)] = &[
 	("lite", lite_wire),
@@ -116,7 +111,7 @@ const IETF_VERSIONS: &[ietf::Version] = &[
 const LITE_KINDS: u8 = 22;
 
 /// How many types [`ietf_wire`] dispatches over.
-const IETF_KINDS: u8 = 41;
+const IETF_KINDS: u8 = 44;
 
 /// Split the two selector bytes off the input: a version and a type.
 fn select(data: &[u8], versions: usize) -> Option<(usize, u8, &[u8])> {
@@ -602,7 +597,7 @@ pub fn ietf_wire(data: &[u8]) -> bool {
 		24 => roundtrip::<ietf::SubscribeNamespaceLegacy<'static>, _>(rest, version),
 		25 => roundtrip::<ietf::SubscribeNamespaceOk, _>(rest, version),
 		26 => roundtrip::<ietf::SubscribeNamespaceError<'static>, _>(rest, version),
-		27 => roundtrip::<ietf::UnsubscribeNamespace, _>(rest, version),
+		27 => roundtrip::<ietf::UnsubscribeNamespace<'static>, _>(rest, version),
 		28 => roundtrip::<ietf::Namespace<'static>, _>(rest, version),
 		29 => roundtrip::<ietf::NamespaceDone<'static>, _>(rest, version),
 		30 => roundtrip::<ietf::MaxRequestId, _>(rest, version),
@@ -616,8 +611,42 @@ pub fn ietf_wire(data: &[u8]) -> bool {
 		38 => roundtrip::<ietf::PublishNamespaceUpdate, _>(rest, version),
 		39 => roundtrip::<ietf::ObjectDatagram, _>(rest, version),
 		40 => roundtrip::<ietf::SubscribeTracks<'static>, _>(rest, version),
+		// The unified SETUP replaced the client/server pair at draft-17. The pair refuses a
+		// later draft itself, but the unified one treats an earlier draft as unreachable.
+		41 if matches!(
+			version,
+			ietf::Version::Draft14 | ietf::Version::Draft15 | ietf::Version::Draft16
+		) =>
+		{
+			false
+		}
+		41 => setup::<crate::setup::Setup>(rest, version, |setup| &setup.parameters),
+		42 => setup::<crate::setup::Client>(rest, version, |setup| &setup.parameters),
+		43 => setup::<crate::setup::Server>(rest, version, |setup| &setup.parameters),
 		_ => unreachable!("kind is taken modulo IETF_KINDS"),
 	}
+}
+
+/// [`roundtrip`] for a SETUP envelope, plus the Setup Options inside it read the way a
+/// session reads them.
+///
+/// A server may not send PATH or AUTHORITY but is otherwise held to the same options, so
+/// any block a client accepts from its server, a server accepts from its client.
+fn setup<T>(data: &[u8], version: ietf::Version, parameters: fn(&T) -> &Bytes) -> bool
+where
+	T: Decode<crate::Version> + Encode<crate::Version>,
+{
+	let outer = crate::Version::Ietf(version);
+	if let Ok((message, _)) = T::decode_slice(data, outer) {
+		let parameters = parameters(&message);
+		if ietf::decode_peer_setup(parameters.clone(), version, true).is_ok() {
+			assert!(
+				ietf::decode_peer_setup(parameters.clone(), version, false).is_ok(),
+				"a server's Setup Options are refused from a client"
+			);
+		}
+	}
+	roundtrip::<T, _>(data, outer)
 }
 
 /// Decode a varint with whichever codec the selected version uses.
@@ -1031,6 +1060,44 @@ pub fn seeds() -> Vec<Seed> {
 					});
 				}
 			}
+		}
+	}
+
+	// SETUP has its own type prefix, which uniform bodies cannot synthesize.
+	for (index, version) in IETF_VERSIONS.iter().enumerate() {
+		let outer = crate::Version::Ietf(*version);
+		let parameters = ietf::Parameters::default().encode_bytes(*version).unwrap();
+		let messages = match version {
+			ietf::Version::Draft14 | ietf::Version::Draft15 | ietf::Version::Draft16 => vec![
+				(
+					42,
+					crate::setup::Client {
+						versions: coding::Versions::from([outer.into()]),
+						parameters: parameters.clone(),
+					}
+					.encode_bytes(outer)
+					.unwrap(),
+				),
+				(
+					43,
+					crate::setup::Server {
+						version: outer.into(),
+						parameters,
+					}
+					.encode_bytes(outer)
+					.unwrap(),
+				),
+			],
+			_ => vec![(41, crate::setup::Setup { parameters }.encode_bytes(outer).unwrap())],
+		};
+		for (kind, message) in messages {
+			let mut data = vec![index as u8, kind];
+			data.extend(message);
+			seeds.push(Seed {
+				target: "ietf",
+				kind,
+				data,
+			});
 		}
 	}
 

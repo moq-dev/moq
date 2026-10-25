@@ -14,7 +14,7 @@ import { Stream, Writer } from "./stream.ts";
 import type { Limits } from "./util/limits.ts";
 
 // Small caps keep each case fast.
-const limits: Limits = { announces: 8, requests: 4 };
+const limits: Limits = { announces: 8 };
 
 test.each(["lite", "ietf"] as const)("%s closes on the first advertisement beyond its cap", async (protocol) => {
 	const pair = createMockTransportPair();

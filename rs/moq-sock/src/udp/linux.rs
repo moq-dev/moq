@@ -84,14 +84,16 @@ impl LinuxError {
             return None;
         }
 
-        let required =
-            unsafe { libc::CMSG_LEN(size_of::<libc::sock_extended_err>() as _) as usize };
-
+        // The offender's address trails the error, so each read below is bounded by the
+        // payload the message declares rather than by the type it reads.
         #[allow(
             clippy::unnecessary_cast,
             reason = "`cmsg_len` is `size_t` on glibc but narrower on other libcs"
         )]
-        if (cmsg.cmsg_len as usize) < required {
+        let payload =
+            (cmsg.cmsg_len as usize).saturating_sub(unsafe { libc::CMSG_LEN(0) as usize });
+        let ee_len = size_of::<libc::sock_extended_err>();
+        if payload < ee_len + size_of::<libc::sa_family_t>() {
             return None;
         }
 
@@ -111,6 +113,9 @@ impl LinuxError {
             libc::AF_UNSPEC => return Some(Self { ee, offender: None }),
             _ => return None,
         };
+        if payload < ee_len + len {
+            return None;
+        }
 
         unsafe {
             ptr::copy_nonoverlapping(
@@ -397,5 +402,14 @@ mod tests {
             transport.payload,
             TransportErrorPayload::TooBig { mtu: 1420 }
         ));
+
+        // An offender cut short by the declared length is not read past it.
+        unsafe {
+            (*(control as *mut libc::cmsghdr)).cmsg_len = (cmsg_len - 1) as _;
+        }
+        let cmsg = unsafe { cmsg::Iter::new(&hdr) }
+            .next()
+            .expect("no control message");
+        assert!(LinuxError::decode(cmsg).is_none());
     }
 }

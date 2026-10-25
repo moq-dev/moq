@@ -449,25 +449,27 @@ and writes its packets back out unchanged, from its first group on, each run
 between two PCRs `--delay` after the first one's time on the source clock. The
 output is exactly as conformant as the source, and two exporters emit the same
 bytes. A run that arrives after its deadline is dropped and counted, leaving a
-continuity error, and the rest carry on. It takes neither `--linger`,
+continuity error, and the rest carry on. It takes neither `--follow`,
 `--stitch` nor `--mux-rate`. Only the hang catalog names the track, so an
 `.msf` broadcast needs `--catalog-format hang`.
 
-A stdout export ends with the broadcast. `export ts --linger 10s` waits that
+A stdout export ends with the broadcast. `export ts --follow 10s` waits that
 long for the same publisher instance to come back, and carries on with the same
-stream. A return that cannot be read yet, such as one still routed through a
-dead session, keeps it waiting for the next announcement; if the linger runs
-out first, it exits 1 with that error. A replacement (a restarted publisher, under a new
+stream. A return that refuses its catalog keeps it waiting for the next
+announcement; if the follow runs out first, it exits 1 with that refusal. One
+that goes before serving, such as one still routed through a dead session, is
+no return. A replacement (a restarted publisher, under a new
 [epoch](/concept/moq-lite#publisher-epochs)) exits 1 unless `--stitch` follows
 it as a full program switch: a new PMT from its catalog, with every PID flagging
-the break. `--linger` also bounds a mid-stream stitch from the replacement
-announcement through its first catalog snapshot; expiry exits 1. The default
-`--linger 0s` follows only a replacement whose catalog is already available.
-Without `--stitch` the export stays on the old publisher while it is
+the break. A stitch waits for the replacement's first catalog snapshot until it
+arrives or the replacement goes, keeping the old publisher playing meanwhile,
+so even the default `--follow 0s` switches to a replacement that is still
+starting. Without `--stitch` the export stays on the old publisher while it is
 up. Only lite-07 and moq-transport draft 17+ sessions carry epochs, so on the
-default version every return is a replacement. An export that fails while the broadcast stays up, such as on
-a codec TS cannot carry, exits 1 without lingering. Only `ts` can mark a break,
-so the other formats refuse `--linger`.
+default version every return is a replacement. A failure other than the
+publisher leaving, such as a codec TS cannot carry, exits 1 at once. Only `ts`
+can mark a break, so the other formats refuse `--linger`, the released spelling
+of `--follow`.
 
 ## Reports and feedback
 
@@ -476,11 +478,15 @@ what each rendition has written, about once a second while someone subscribes,
 with the connection's RTT, estimated send rate, and loss. It covers the stdin imports;
 capture, the gateways, `archive`, and `ts --program all` refuse it.
 
-`export --echo <name>` answers a publisher that solicits feedback: under the
-catalog's `echo` path it publishes `<name>.echo`, reporting what each rendition
-the export reads has received and its newest arrival, until the export ends.
-It covers the stdout container exports and needs a hang catalog, so MSF
-refuses it.
+`import --echo-path <path>` solicits feedback from the same imports: it sets
+the catalog's `echo` path, resolved against the broadcast like a relative URL,
+so `viewers` from `room/event` is `room/viewers`. A path above the connection
+root is refused, since readers would refuse the catalog, and so is one no
+viewer could publish beneath: a segment holding `*`, or past 32 segments.
+`export --echo <name>` answers: under the catalog's `echo` path it publishes
+`<name>.echo`, reporting what each rendition the export reads has received and
+its newest arrival, until the export ends. It covers the stdout container
+exports and needs a hang catalog, so MSF refuses it.
 
 The `report` and `echo` sinks print reports as JSON lines. `export report`
 follows one broadcast's report track until the broadcast ends; `export echo`
@@ -489,7 +495,7 @@ prints `{"broadcast", "feedback"}` for every `.echo` broadcast under
 final report. Either sink stops reading a report that grows past 1 MiB.
 
 ```bash
-moq ... --broadcast event import --report ts < feed.ts
+moq ... --broadcast event import --report --echo-path viewers ts < feed.ts
 moq ... --broadcast event export report
 moq ... --broadcast event export --echo alice ts > out.ts
 moq ... --broadcast viewers export echo

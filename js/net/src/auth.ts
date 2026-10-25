@@ -8,15 +8,21 @@
  * undefined. There {@link Handle.add} rejects with {@link Unsupported} on moq-lite, and on
  * moq-transport keeps the token, with no grant, for the announcements whose route names it.
  * {@link Handle.grant} is the union of every token this side presented, and {@link Handle.add}
- * presents another without reconnecting, returning its {@link Auth}. Mirrors the Rust
- * `moq_net::auth`.
+ * presents another without reconnecting, returning its {@link Auth}.
+ *
+ * A {@link Handle} passed to `connect` as `auth`, or the one a reconnecting `Connection` owns,
+ * outlives its sessions: each presents every token it holds, so a route naming one of its
+ * {@link Auth}s keeps it across a reconnect. Only the peer's verdict ends such a token; a
+ * session ending leaves it for the next. Mirrors the Rust `moq_net::auth`.
  *
  * @module
  */
 
 import type { Getter } from "@moq/signals";
-import { SessionCode } from "./error.ts";
+import type { SessionCode } from "./error.ts";
 import type * as Path from "./path.ts";
+
+export { Duplicate, Handle, Unsupported } from "./auth_session.ts";
 
 /**
  * What a peer lets this side do, in this side's own paths (relative to the session).
@@ -32,21 +38,21 @@ export interface Grant {
 	expires?: number;
 }
 
-/** The session or peer carries no AUTH exchange, or takes no tokens in band. */
-export class Unsupported extends Error {
-	/** The moq-lite session code for this condition. */
-	readonly code = SessionCode.Unsupported;
-	constructor(message = "auth unsupported") {
-		super(message);
-		this.name = "Unsupported";
-	}
-}
-
-/** A token this side presented, which a route can name. {@link Auth.close} withdraws it. */
+/**
+ * A token this side presented, which a route can name, on every session of its handle.
+ * {@link Auth.close} withdraws it.
+ */
 export interface Auth {
-	/** This token's own grant: undefined until the peer answers, and again once it ends. */
+	/**
+	 * This token's own grant on the live session: undefined until its peer answers, while no
+	 * session is live, and again once it ends.
+	 */
 	readonly grant: Getter<Grant | undefined>;
-	/** Settles when the token ends: the peer's revocation, or its withdrawal. */
+	/**
+	 * Settles when the token ends for good: the peer's refusal or revocation, `null` when the
+	 * peer closed it without one or it was withdrawn, or the handle's end. A session ending is
+	 * not one: the next session presents it again.
+	 */
 	readonly closed: PromiseLike<Error | null>;
 	/** Withdraw the token, removing its grant from the union and remaking any request that carries it without it. */
 	close(): void;
@@ -95,36 +101,8 @@ export interface Issued {
  * @internal See {@link Request}.
  */
 export interface Requests {
-	/** The next token the peer presents, or undefined once the session ends. */
+	/** The next token the peer presents, or undefined once the handle ends. */
 	next(): Promise<Request | undefined>;
 	/** Refuse every later token. */
 	close(): void;
-}
-
-/** A session's tokens and grants. See the module docs. */
-export interface Handle {
-	/** The union of every grant this side holds: undefined until the peer first answers. */
-	readonly grant: Getter<Grant | undefined>;
-
-	/**
-	 * Present another token, resolving once the peer answers it. Rejects with
-	 * {@link Unsupported} when the session or the peer takes no tokens in band, or with the
-	 * peer's refusal as an `Error.Session`. On moq-transport without AUTH it resolves at
-	 * once with no grant: only a request whose route names it carries it.
-	 */
-	add(token: string | Uint8Array): Promise<Auth>;
-
-	/**
-	 * Answer every token the peer presents, instead of the default: granting what this side
-	 * publishes and consumes for the connection's own credential and refusing any other.
-	 *
-	 * Call it as soon as connect or accept resolves, in the same task: whoever answers is
-	 * decided once, right after. Throws once that has happened.
-	 *
-	 * The peer's stream credit bounds how many tokens wait unanswered, since each holds its
-	 * stream open until answered or withdrawn. A withdrawn token leaves the queue.
-	 *
-	 * @internal See {@link Request}.
-	 */
-	requests(): Requests;
 }

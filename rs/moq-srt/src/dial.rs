@@ -134,10 +134,9 @@ impl Client {
 		self
 	}
 
-	/// Wait up to `follow` for the same publisher instance to come back once the broadcast
-	/// [`publish`](Self::publish) reads ends, carrying on with the same stream. Zero (the
-	/// default) ends the push at the broadcast's end.
-	/// A stitched replacement must also supply its first catalog within this bound.
+	/// Wait up to `follow` for the same publisher instance, or when stitching a replacement, to
+	/// come back once the broadcast [`publish`](Self::publish) reads ends, carrying on with the
+	/// same stream. Zero (the default) follows only an instance already serving.
 	pub fn with_follow(mut self, follow: Duration) -> Self {
 		self.follow = follow;
 		self
