@@ -6,6 +6,7 @@
 // which lags package.nix until the next release.
 import { chmodSync, cpSync, readdirSync, rmSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
+import { checkReports } from "../common/api.ts";
 
 const dir = import.meta.dir;
 const dist = join(dir, "dist");
@@ -57,3 +58,6 @@ if (Bun.which("nix")) {
 	}
 	console.log(`unpacked ${name}@${version} from npm into dist/; Nix is not on PATH`);
 }
+
+// Its API is the hand-written index.d.ts, reported like every other package's.
+checkReports(dir);

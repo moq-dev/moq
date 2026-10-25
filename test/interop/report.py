@@ -65,7 +65,7 @@ def steps(text):
 def passed(records, suites):
     """Cases were recorded, nothing failed or went unreached, and something passed.
 
-    A run that recorded no case (a lost MOQ_TEST_RESULTS) or skipped every step is not green.
+    A run that recorded no case (a lost HARNESS_RESULTS) or skipped every step is not green.
     """
     outcomes = [record['outcome'] for record in records] + list(suites.values())
     return bool(records) and 'pass' in outcomes and all(outcome in ('pass', 'skip') for outcome in outcomes)

@@ -27,6 +27,28 @@ pub(super) struct SendBuffer {
     retransmits: RangeSet,
 }
 
+/// The end of the part of `range` a STREAM frame carries in `max_len` bytes, and whether the
+/// frame encodes its length, which it omits when the data fills the rest of the packet
+///
+/// `max_len` includes the space for the frame's offset and length. The caller has to guarantee
+/// that there is at least enough space available to write maximum-sized metadata (8 byte offset +
+/// 8 byte length).
+fn fit(range: Range<u64>, mut max_len: usize) -> (u64, bool) {
+    debug_assert!(max_len >= 8 + 8);
+    let mut encode_length = false;
+    // When the offset is known, we know how many bytes are required to encode it.
+    // Offset 0 requires no space
+    if range.start != 0 {
+        max_len -= VarInt::size(unsafe { VarInt::from_u64_unchecked(range.start) });
+    }
+    if range.end - range.start < max_len as u64 {
+        encode_length = true;
+        max_len -= 8;
+    }
+    let end = range.end.min((max_len as u64).saturating_add(range.start));
+    (end, encode_length)
+}
+
 /// One application write, still retained
 #[derive(Debug)]
 struct Segment {
@@ -59,6 +81,8 @@ impl SendBuffer {
             return;
         }
 
+        // A bandwidth probe's duplicate can deliver a range already queued for retransmission
+        self.retransmits.remove(range.clone());
         self.acks.insert(range);
 
         while self.acks.min() == Some(self.offset - self.unacked_len as u64) {
@@ -103,24 +127,10 @@ impl SendBuffer {
     /// - The second return value indicates whether the length needs to be encoded
     ///   in the STREAM frames metadata (`true`), or whether it can be omitted
     ///   since the selected range will fill the whole packet.
-    pub(super) fn poll_transmit(&mut self, mut max_len: usize) -> (Range<u64>, bool) {
-        debug_assert!(max_len >= 8 + 8);
-        let mut encode_length = false;
-
+    pub(super) fn poll_transmit(&mut self, max_len: usize) -> (Range<u64>, bool) {
         if let Some(range) = self.retransmits.pop_min() {
             // Retransmit sent data
-
-            // When the offset is known, we know how many bytes are required to encode it.
-            // Offset 0 requires no space
-            if range.start != 0 {
-                max_len -= VarInt::size(unsafe { VarInt::from_u64_unchecked(range.start) });
-            }
-            if range.end - range.start < max_len as u64 {
-                encode_length = true;
-                max_len -= 8;
-            }
-
-            let end = range.end.min((max_len as u64).saturating_add(range.start));
+            let (end, encode_length) = fit(range.clone(), max_len);
             if end != range.end {
                 self.retransmits.insert(end..range.end);
             }
@@ -128,23 +138,32 @@ impl SendBuffer {
         }
 
         // Transmit new data
-
-        // When the offset is known, we know how many bytes are required to encode it.
-        // Offset 0 requires no space
-        if self.unsent != 0 {
-            max_len -= VarInt::size(unsafe { VarInt::from_u64_unchecked(self.unsent) });
-        }
-        if self.offset - self.unsent < max_len as u64 {
-            encode_length = true;
-            max_len -= 8;
-        }
-
-        let end = self
-            .offset
-            .min((max_len as u64).saturating_add(self.unsent));
+        let (end, encode_length) = fit(self.unsent..self.offset, max_len);
         let result = self.unsent..end;
         self.unsent = end;
         (result, encode_length)
+    }
+
+    /// Whether part of sent `range` lies past the acknowledged prefix
+    pub(super) fn unacked(&self, range: Range<u64>) -> bool {
+        range.start.max(self.acked()) < range.end.min(self.offset)
+    }
+
+    /// The part of sent `range` past the acknowledged prefix, sized like [`Self::poll_transmit`]
+    /// to send again without queueing a retransmission, or `None` if none of it is left
+    pub(super) fn duplicate(
+        &self,
+        range: Range<u64>,
+        max_len: usize,
+    ) -> Option<(Range<u64>, bool)> {
+        let start = range.start.max(self.acked());
+        // Truncation abandons data past it
+        let end = range.end.min(self.offset);
+        if start >= end {
+            return None;
+        }
+        let (end, encode_length) = fit(start..end, max_len);
+        Some((start..end, encode_length))
     }
 
     /// Returns the data in a range of unacknowledged offsets, one slice per write it spans
@@ -206,15 +225,23 @@ impl SendBuffer {
         self.retransmits.remove(end..u64::MAX);
     }
 
-    /// Queue a range of sent but unacknowledged data to be retransmitted
+    /// Queue a range of sent data to be retransmitted, skipping whatever was acknowledged
+    ///
+    /// A bandwidth probe's duplicate can deliver the data before its original is declared lost.
     pub(super) fn retransmit(&mut self, mut range: Range<u64>) {
         // Data past a truncation is abandoned rather than lost
+        range.start = range.start.max(self.acked());
         range.end = range.end.min(self.offset);
         if range.is_empty() {
             return;
         }
         debug_assert!(range.end <= self.unsent, "unsent data can't be lost");
-        self.retransmits.insert(range);
+        self.retransmits.insert(range.clone());
+        // Only the acknowledged ranges this one overlaps, so a loss costs what it spans rather
+        // than every gap a peer's ACKs left below it
+        for acked in self.acks.overlapping(range) {
+            self.retransmits.remove(acked);
+        }
     }
 
     pub(super) fn retransmit_all_for_0rtt(&mut self) {
@@ -425,6 +452,38 @@ mod tests {
         // Lose the second frame
         buf.retransmit(16..23);
         assert_eq!(buf.poll_transmit(16), (16..23, true));
+    }
+
+    /// A duplicate can deliver data before its original is declared lost, so a loss resends
+    /// only what no copy delivered
+    #[test]
+    fn retransmit_skips_acked() {
+        let mut buf = SendBuffer::new();
+        const MSG: &[u8] = b"Hello, world with extra data!";
+        buf.write(MSG.into());
+        assert_eq!(buf.poll_transmit(64), (0..29, true));
+        buf.ack(0..4);
+        buf.ack(10..20);
+        buf.retransmit(0..29);
+        assert_eq!(buf.poll_transmit(64), (4..10, true));
+        assert_eq!(buf.poll_transmit(64), (20..29, true));
+        assert_eq!(buf.poll_transmit(64), (29..29, true));
+    }
+
+    #[test]
+    fn duplicate() {
+        let mut buf = SendBuffer::new();
+        const MSG: &[u8] = b"Hello, world with extra data!";
+        buf.write(MSG.into());
+        assert_eq!(buf.poll_transmit(64), (0..29, true));
+        buf.ack(0..4);
+        // Starts past the acknowledged prefix and leaves nothing queued to retransmit
+        assert_eq!(buf.duplicate(0..29, 16), Some((4..19, false)));
+        assert_eq!(buf.poll_transmit(64), (29..29, true));
+        // Nothing past a truncation or the acknowledged prefix is sent again
+        buf.truncate(20);
+        assert_eq!(buf.duplicate(16..29, 64), Some((16..20, true)));
+        assert_eq!(buf.duplicate(0..4, 64), None);
     }
 
     #[test]
