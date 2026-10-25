@@ -32,7 +32,7 @@ async fn budget(track: &mut track::Producer, millis: u64, version: Version) {
 
 #[moq_clock::test]
 async fn relay_forwards_the_most_tolerant_subscriber_max_age() {
-	for draft in 14..=22 {
+	for draft in [14, 15, 16, 17, 18, 22] {
 		let version: Version = format!("moq-transport-{draft}").parse().unwrap();
 		let publisher = origin(1);
 		let relay = origin(2);

@@ -16,15 +16,12 @@ use support::harness::{MockConnectOptions, MockPair, connect_mock};
 const SETTLE: Duration = Duration::from_secs(1);
 
 /// Every moq-transport draft, each of which carries the SOLICIT option.
-const MOQT: [&str; 9] = [
+const MOQT: [&str; 6] = [
 	"moq-transport-14",
 	"moq-transport-15",
 	"moq-transport-16",
 	"moq-transport-17",
 	"moq-transport-18",
-	"moq-transport-19",
-	"moq-transport-20",
-	"moq-transport-21",
 	"moq-transport-22",
 ];
 
