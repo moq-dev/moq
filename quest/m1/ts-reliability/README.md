@@ -67,7 +67,7 @@ refused means an error or a counted drop.
 | Private and unknown PES types, LATM (0x11), metadata (0x15) | Preserved: `pesPacket`, PTS and DTS rebased | landed |
 | PES clock fields (ESCR, pack header, TREF), PES scrambling | Refused, counted in `refused` | landed |
 | Private sections (0x05), SCTE-35 (0x86 + `CUEI`) | Preserved: `verbatim` section, `pts_adjustment` rebased | landed |
-| MPEG-1/2 video (0x01/0x02) | Preserved: `pesPacket`, keeping its clock role | landed |
+| MPEG-1/2 video (0x01/0x02) | Preserved: `pesPacket` grouped from one sequence header to the next, keeping its clock role | landed |
 | DSM-CC types (0x0A to 0x0D), 0x86 without `CUEI` | DSM-CC preserved as a `verbatim` section; 0x86 without `CUEI` refused, counted in `refused` | landed |
 | CAT, EMM/ECM, ATSC PSIP, other SI PIDs, unlisted PIDs, TS scrambling | Outside the profile, raw lane; counted in `refused`, unclaimed PIDs when the import reads every program | landed |
 | DVB SI on 0x0010, 0x0011, 0x0012, 0x0014 | Preserved: snapshot track per PID and `table_id` | landed |

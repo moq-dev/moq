@@ -2177,14 +2177,35 @@ fn adjust_splice(section: &mut [u8], offset: Offset) {
 /// catalog clock and every other byte as received, timestamped with its placement on the program
 /// clock. A PES without a PTS keeps none. See [`Import`] for when one is held, dropped, or refuses
 /// its stream.
+///
+/// Each PES is a group of its own, except MPEG-1/2 video's: a PES carrying a sequence header opens
+/// a group, where a decoder can start, and the pictures after it join that group. Those before the
+/// first sequence header, or after a loss until the next, are dropped, since they depend on
+/// pictures a subscriber never gets.
 struct PesPacketStream<E: catalog::Catalog> {
 	track: crate::container::Producer<crate::catalog::hang::Container>,
 	/// Held for its `Drop`, which clears this track's catalog entry.
 	_entry: VerbatimEntry<E>,
 	/// The PMT `stream_type`, which says whether an unbounded PES is video.
 	stream_type: u8,
-	/// Whole PES waiting for the PCR after them or the timebase's offset, in input order.
-	held: VecDeque<Held>,
+	/// Whole PES waiting for the PCR after them or the timebase's offset, in input order, each
+	/// with where it falls in the groups.
+	held: VecDeque<(Held, Join)>,
+	/// The stream lost a unit since the last PES held, so the next joins no group.
+	lost: bool,
+}
+
+/// Where a whole PES falls in its track's groups.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Join {
+	/// It opens a group: every PES of a stream other than MPEG-1/2 video, and one of that video
+	/// carrying a sequence header.
+	Opens,
+	/// It joins the group open before it.
+	Continues,
+	/// It follows a loss, so the group before it ends and it is dropped with the PES after it
+	/// until one opens a group.
+	Resyncs,
 }
 
 /// A whole PES or section waiting to be placed.
@@ -2230,38 +2251,53 @@ impl<E: catalog::Catalog> PesPacketStream<E> {
 			_entry: entry,
 			stream_type,
 			held: VecDeque::new(),
+			lost: false,
 		})
 	}
 
 	/// Hold one complete PES until it can be placed: [`Self::release`] publishes it.
 	fn hold(&mut self, pending: Pending) {
 		let span = pending.span.expect("a whole PES is spanned at its start");
-		self.held.push_back(Held {
+		let join = match mpeg_video(self.stream_type) {
+			false => Join::Opens,
+			true if sequence_header(&pending.data) => Join::Opens,
+			true if self.lost => Join::Resyncs,
+			true => Join::Continues,
+		};
+		self.lost = false;
+		let held = Held {
 			payload: pending.data,
 			span,
 			_retained: pending.retained,
-		});
+		};
+		self.held.push_back((held, join));
+	}
+
+	/// The unit in progress was lost: an MPEG-1/2 picture after it may reference it.
+	fn lost(&mut self) {
+		self.lost = true;
 	}
 
 	/// The PCR `after` arrived on timebase `generation`: every PES held since the last is
 	/// bracketed.
 	fn bracket(&mut self, generation: u64, after: Sample) {
-		for held in &mut self.held {
+		for (held, _) in &mut self.held {
 			held.span.bracket(generation, after);
 		}
 	}
 
 	/// The timebase of `placement` ends: extrapolate the PES held past its last PCR.
 	fn settle(&mut self, placement: &Placement) {
-		for held in &mut self.held {
+		for (held, _) in &mut self.held {
 			held.span.settle(placement);
 		}
 	}
 
-	/// Publish the placed PES at the front, each in its own group, once `timebase` has its
+	/// Publish the placed PES at the front, grouped as [`Join`] says, once `timebase` has its
 	/// offset, and drop those no PCR on their own timebase can place: one ended before them, now
 	/// that `generation` is the timebase running. `pts` is the program's PTS history, which
-	/// picks each PCR's wrap. Returns how many went each way.
+	/// picks each PCR's wrap. Returns how many went each way; a picture no group takes is
+	/// neither.
 	fn release(
 		&mut self,
 		timebase: &crate::catalog::Timebase<E>,
@@ -2275,23 +2311,32 @@ impl<E: catalog::Catalog> PesPacketStream<E> {
 		while let Some(timestamp) = self
 			.held
 			.front()
-			.and_then(|held| held.timestamp(pts, offset, generation))
+			.and_then(|(held, _)| held.timestamp(pts, offset, generation))
 		{
-			let mut held = self.held.pop_front().expect("a front");
+			let (mut held, join) = self.held.pop_front().expect("a front");
 			let Some(timestamp) = timestamp else {
 				unplaced += 1;
 				continue;
 			};
 			rebase(&mut held.payload, offset);
+			if join == Join::Resyncs {
+				self.track.cut(None)?;
+			}
 			let frame = crate::container::Frame {
 				timestamp,
 				duration: None,
 				payload: bytes::Bytes::from(held.payload),
-				keyframe: true,
+				keyframe: join == Join::Opens,
 			};
-			self.track.write(frame)?;
-			self.track.cut(None)?;
-			published += 1;
+			match self.track.write(frame) {
+				Ok(()) => published += 1,
+				// A picture with no group open: before the first sequence header, or after a loss.
+				Err(crate::Error::MissingKeyframe(_)) => continue,
+				Err(err) => return Err(err.into()),
+			}
+			if !mpeg_video(self.stream_type) {
+				self.track.cut(None)?;
+			}
 		}
 		Ok((published, unplaced))
 	}
@@ -2905,6 +2950,18 @@ fn mpeg_video(stream_type: u8) -> bool {
 	matches!(stream_type, 0x01 | 0x02)
 }
 
+/// Whether the whole PES `pes` carries an MPEG-1/2 `sequence_header_code` (ISO 13818-2 6.2.2.1),
+/// where a decoder can start. Start codes never occur inside coded data, so any match is one.
+fn sequence_header(pes: &[u8]) -> bool {
+	const SEQUENCE_HEADER: [u8; 4] = [0x00, 0x00, 0x01, 0xb3];
+	let header = match pes.get(3) {
+		Some(&stream_id) if psi::has_optional_header(stream_id) => 9 + usize::from(pes.get(8).copied().unwrap_or(0)),
+		_ => 6,
+	};
+	pes.get(header..)
+		.is_some_and(|payload| memchr::memmem::find(payload, &SEQUENCE_HEADER).is_some())
+}
+
 /// One elementary stream's codec importer.
 enum Stream<E: catalog::Catalog = ()> {
 	H264 {
@@ -3053,6 +3110,7 @@ impl<E: catalog::Catalog> Stream<E> {
 		match self {
 			Stream::H264 { import, .. } => import.cut(None)?,
 			Stream::H265 { import, .. } => import.cut(None)?,
+			Stream::PesPacket(stream) => stream.lost(),
 			_ => {}
 		}
 		Ok(())
@@ -5044,7 +5102,8 @@ pub(super) mod test {
 			true,
 		));
 		bytes.extend_from_slice(&pcr_packet(VIDEO, 24_300_000));
-		bytes.extend_from_slice(&pes_packet(VIDEO, 90_000));
+		// A sequence header, so the picture opens a group rather than waiting for one.
+		bytes.extend_from_slice(&video_pes(VIDEO, 0, 90_000, None, &[0, 0, 1, 0xb3, 0, 0, 1, 0]));
 		bytes.extend_from_slice(&packet(true, 0, 0, &CUE));
 		bytes.extend_from_slice(&pcr_packet(VIDEO, 27_000_000));
 		import.decode(&bytes).unwrap();

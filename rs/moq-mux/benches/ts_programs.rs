@@ -1,7 +1,8 @@
 //! `--program all` TS ingest across program count and per-program bitrate, over one second of
 //! a generated multiplex. Throughput is the whole input, so a parse that repeats per program
 //! shows as a falling rate with program count. A PAT that also names programs no PMT
-//! describes shows what a program costs before it starts.
+//! describes shows what a program costs before it starts. Stray PIDs no table lists sweep the
+//! unclaimed-PID accounting, against the same packets sent as null stuffing, which skips it.
 
 use std::time::Duration;
 
@@ -57,6 +58,13 @@ fn video_pid(program: u16) -> u16 {
 fn undescribed_pid(program: u16) -> u16 {
 	0x1000 + program
 }
+
+/// A PID no table lists, clear of every other.
+fn stray_pid(stray: u16) -> u16 {
+	0x1800 + stray
+}
+
+const NULL_PID: u16 = 0x1fff;
 
 #[derive(Default)]
 struct Mux {
@@ -131,10 +139,25 @@ impl Mux {
 	}
 }
 
+/// What the multiplex carries besides its described programs.
+#[derive(Clone, Copy)]
+struct Extra {
+	/// Programs the PAT names whose PMT never arrives.
+	undescribed: u16,
+	/// PIDs no table lists, one packet each per frame.
+	strays: u16,
+	/// Send the strays' packets as null stuffing instead.
+	null: bool,
+}
+
 /// One second of `programs` H.264 programs at `bitrate` bits per second each, interleaved
-/// frame by frame, each program carrying its PCR on its video PID. The PAT also names
-/// `undescribed` programs whose PMT never arrives.
-fn multiplex(programs: u16, undescribed: u16, bitrate: u64) -> Vec<u8> {
+/// frame by frame, each program carrying its PCR on its video PID, beside `extra`.
+fn multiplex(programs: u16, extra: Extra, bitrate: u64) -> Vec<u8> {
+	let Extra {
+		undescribed,
+		strays,
+		null,
+	} = extra;
 	let packets = (bitrate / FPS / 8).div_ceil(188) as usize;
 	let mut mux = Mux::default();
 	let entries: Vec<u8> = (1..=programs)
@@ -176,6 +199,12 @@ fn multiplex(programs: u16, undescribed: u16, bitrate: u64) -> Vec<u8> {
 		for program in 1..=programs {
 			mux.frame(video_pid(program), packets, pts * 300, pts, frame % GOP == 0);
 		}
+		for stray in 0..strays {
+			let pid = if null { NULL_PID } else { stray_pid(stray) };
+			mux.header(pid, false, false);
+			let end = mux.out.len() + 184;
+			mux.out.resize(end, 0xff);
+		}
 	}
 	mux.out
 }
@@ -201,34 +230,59 @@ fn programs(c: &mut Criterion) {
 	group.measurement_time(Duration::from_secs(2));
 	group.warm_up_time(Duration::from_millis(300));
 	group.sample_size(10);
+	let mut cases = Vec::new();
 	for programs in [1u16, 4, 16] {
 		for undescribed in [0u16, 1000] {
 			for mbps in [1u64, 4] {
-				let input = multiplex(programs, undescribed, mbps * 1_000_000);
-				let (stats, _driver) = ingest(programs, &input);
-				assert!(
-					stats.streams.len() == usize::from(programs) && stats.streams.values().all(|s| s.units == FPS),
-					"every program delivers every frame"
-				);
-				group.throughput(Throughput::Bytes(input.len() as u64));
+				let extra = Extra {
+					undescribed,
+					strays: 0,
+					null: false,
+				};
 				let name = match undescribed {
 					0 => format!("{programs}"),
 					_ => format!("{programs}+{undescribed}"),
 				};
-				group.bench_function(BenchmarkId::new(name, format!("{mbps}mbps")), |b| {
-					b.iter_batched(
-						setup,
-						|(mut programs, driver)| {
-							for chunk in input.chunks(188 * 7) {
-								programs.decode(chunk).unwrap();
-							}
-							(programs, driver)
-						},
-						BatchSize::PerIteration,
-					)
-				});
+				cases.push((programs, extra, mbps, name));
 			}
 		}
+		for strays in [16u16, 256] {
+			for (lane, null) in [("null", true), ("stray", false)] {
+				let extra = Extra {
+					undescribed: 0,
+					strays,
+					null,
+				};
+				cases.push((programs, extra, 1, format!("{programs}-{lane}{strays}")));
+			}
+		}
+	}
+	for (programs, extra, mbps, name) in cases {
+		let input = multiplex(programs, extra, mbps * 1_000_000);
+		let (stats, _driver) = ingest(programs, &input);
+		let (media, strays): (Vec<_>, Vec<_>) = stats.streams.values().partition(|s| !s.track.is_empty());
+		assert!(
+			media.len() == usize::from(programs) && media.iter().all(|s| s.units == FPS),
+			"every program delivers every frame"
+		);
+		let counted = if extra.null { 0 } else { usize::from(extra.strays) };
+		assert!(
+			strays.len() == counted && strays.iter().all(|s| s.refused == FPS),
+			"every stray packet is counted"
+		);
+		group.throughput(Throughput::Bytes(input.len() as u64));
+		group.bench_function(BenchmarkId::new(name, format!("{mbps}mbps")), |b| {
+			b.iter_batched(
+				setup,
+				|(mut programs, driver)| {
+					for chunk in input.chunks(188 * 7) {
+						programs.decode(chunk).unwrap();
+					}
+					(programs, driver)
+				},
+				BatchSize::PerIteration,
+			)
+		});
 	}
 	group.finish();
 }

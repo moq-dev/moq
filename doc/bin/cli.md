@@ -94,7 +94,8 @@ or use [`import srt`](/bin/srt).
 MPEG-TS import carries H.264/H.265 and AAC/MP2/AC-3/E-AC-3/Opus, and passes
 SCTE-35, DSM-CC sections, and every other stream it does not decode (MPEG-2
 video, LATM AAC, KLV, subtitles, DVB AC-3) through as tracks. MPEG-2 video still
-paces the program by its timestamps. Each such PES goes through whole, at its place on the program clock
+paces the program by its timestamps, and a subscriber joins it at a sequence
+header. Each such PES goes through whole, at its place on the program clock
 (PCR); one before the first PCR is dropped. A stream it cannot carry unaltered
 is refused with a warning: any in a program with no PCR, and one whose PES carry
 an ESCR, pack header or TREF, are scrambled, leave a non-video PES unbounded,

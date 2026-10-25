@@ -29,11 +29,14 @@ fn pts_field(ticks: u64) -> [u8; 5] {
 	]
 }
 
-/// An MPEG-2 video PES presenting at `pts`, its length left unbounded as video may: a picture
-/// start code, then `len` bytes of `fill`.
-fn picture(pts: u64, fill: u8, len: usize) -> Vec<u8> {
+/// An MPEG-2 video PES presenting at `pts`, its length left unbounded as video may: a sequence
+/// header start code when `sequence`, a picture start code, then `len` bytes of `fill`.
+fn picture(pts: u64, sequence: bool, fill: u8, len: usize) -> Vec<u8> {
 	let mut pes = vec![0, 0, 1, 0xe0, 0, 0, 0x80, 0x80, 5];
 	pes.extend_from_slice(&pts_field(pts));
+	if sequence {
+		pes.extend_from_slice(&[0, 0, 1, 0xb3]);
+	}
 	pes.extend_from_slice(&[0, 0, 1, 0x00]);
 	pes.resize(pes.len() + len, fill);
 	pes
@@ -132,21 +135,34 @@ impl Imported {
 }
 
 /// MPEG-2 video rides whole while its PTS still paces the program, and a TS round trip keeps
-/// every PES byte of it.
+/// every PES byte of it. A sequence header opens each group, so the picture joined mid-GOP is
+/// dropped, and so is the picture after one lost to scrambling, until the next sequence header.
 #[tokio::test(start_paused = true)]
 async fn mpeg2_video_rides_whole_and_survives_a_round_trip() {
 	let mut mux = Mux::default();
 	mux.pat(&[(1, PMT)]).pmt(PMT, 1, CLOCK, &[(0x02, VIDEO)], 0);
 	let start = 2_000 * MS;
 	let mut pictures = Vec::new();
-	for i in 0..8u64 {
+	for i in 0..9u64 {
 		let ticks = start + i * 40 * MS;
 		mux.packet(CLOCK, Flags::pcr(ticks));
-		let pes = picture(ticks / 300 + LEAD, i as u8, 300 + i as usize * 50);
+		// Picture 6 is still open, its length unbounded, when the scrambled packet loses it.
+		if i == 7 {
+			scrambled(&mut mux, VIDEO);
+		}
+		let pes = picture(
+			ticks / 300 + LEAD,
+			matches!(i, 1 | 5 | 8),
+			i as u8,
+			300 + i as usize * 50,
+		);
 		mux.whole(VIDEO, &pes);
 		pictures.push(pes);
 	}
-	mux.packet(CLOCK, Flags::pcr(start + 8 * 40 * MS));
+	mux.packet(CLOCK, Flags::pcr(start + 9 * 40 * MS));
+	// What a subscriber gets, and which pictures open a group.
+	let carried: Vec<_> = [1, 2, 3, 4, 5, 8].map(|i| pictures[i].clone()).into();
+	let opens = [true, false, false, false, true, true];
 
 	let imported = Imported::all(&mux.bytes());
 	let (_, entry) = imported.entry(VIDEO).expect("the video is in the catalog");
@@ -158,11 +174,13 @@ async fn mpeg2_video_rides_whole_and_survives_a_round_trip() {
 	);
 	let frames = imported.frames(VIDEO).await;
 	let payloads: Vec<_> = frames.iter().map(|frame| frame.payload.to_vec()).collect();
-	assert_eq!(payloads, pictures);
+	assert_eq!(payloads, carried);
+	let keyframes: Vec<_> = frames.iter().map(|frame| frame.keyframe).collect();
+	assert_eq!(keyframes, opens);
 	assert!(frames.windows(2).all(|pair| pair[0].timestamp < pair[1].timestamp));
 	let row = imported.row(VIDEO);
 	assert_eq!((row.track.as_str(), row.class), (".ts", Class::Video));
-	assert_eq!((row.units, row.refused, row.damaged), (8, 0, 0));
+	assert_eq!((row.units, row.refused, row.damaged), (6, 1, 0));
 
 	let ts = super::export_test::drain_with(
 		super::export_test::open_ts(
@@ -176,13 +194,11 @@ async fn mpeg2_video_rides_whole_and_survives_a_round_trip() {
 	let again = Imported::all(&ts);
 	let (_, entry) = again.entry(VIDEO).expect("the export lists the video");
 	assert_eq!(entry.pes_packet.as_ref().map(|pes| pes.stream_type), Some(0x02));
-	let payloads: Vec<_> = again
-		.frames(VIDEO)
-		.await
-		.iter()
-		.map(|frame| frame.payload.to_vec())
-		.collect();
-	assert_eq!(payloads, pictures, "the round trip keeps every PES byte");
+	let frames = again.frames(VIDEO).await;
+	let payloads: Vec<_> = frames.iter().map(|frame| frame.payload.to_vec()).collect();
+	assert_eq!(payloads, carried, "the round trip keeps every PES byte");
+	let keyframes: Vec<_> = frames.iter().map(|frame| frame.keyframe).collect();
+	assert_eq!(keyframes, opens, "and its groups");
 }
 
 /// Each ISO 13818-6 DSM-CC type rides DSM-CC sections, so each is reassembled as sections

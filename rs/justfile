@@ -488,7 +488,7 @@ bench-latency:
 bench-ts-schedule *args:
     cargo bench --locked -p moq-mux --bench ts_schedule -- "$@"
 
-# Split an MPTS across program count and stray PIDs, against null packets that skip the accounting.
+# Ingest an MPTS across program count, bitrate and stray PIDs, the strays against null packets that skip the accounting.
 [positional-arguments]
 bench-ts-programs *args:
     cargo bench --locked -p moq-mux --bench ts_programs -- "$@"
