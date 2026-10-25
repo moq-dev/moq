@@ -120,7 +120,7 @@ impl SetupAccept {
 				None => return Poll::Pending,
 			},
 		};
-		if session.binding() == crate::transport::Binding::Uri && setup.path.is_some() {
+		if session.address() == crate::transport::Address::Uri && setup.path.is_some() {
 			return Poll::Ready(Err(Error::ProtocolViolation));
 		}
 		// A stream need not have delivered even its type yet. Keep it intact for the
@@ -278,7 +278,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 	// When the caller already read it (a gated server accept), seed the slot so the
 	// Setup stream isn't expected on the wire again.
 	let peer_implementation = crate::setup::PeerImplementation::default();
-	let peer_setup_slot = PeerSetup::new(client, session.binding())
+	let peer_setup_slot = PeerSetup::new(client, session.address())
 		.offer_ietf(our_setup.ietf)
 		.with_implementation(peer_implementation.clone());
 	// A version without a Setup Stream advertises nothing, so there is nothing to wait for.

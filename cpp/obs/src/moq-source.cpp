@@ -75,6 +75,8 @@ namespace {
 struct moq_source;
 
 enum class Decoded { Pending, Ready, Failed };
+// Full: the decoder refused the packet until its pending pictures are taken.
+enum class Sent { Accepted, Full, Failed };
 
 // A track owns its codec and converted output, including while it is only a candidate.
 struct VideoDecoder {
@@ -215,7 +217,8 @@ static void moq_source_subscribe_video(struct moq_source *ctx, const std::shared
 static void moq_source_clear_audio_locked(struct moq_source *ctx);
 static void moq_source_subscribe_audio(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
 				       const moq::Catalog &catalog);
-static Decoded moq_source_decode_frame(VideoDecoder &decoder, const moq::MediaFrame &frame_data);
+static Sent moq_source_send_packet(VideoDecoder &decoder, const moq::MediaFrame &frame_data);
+static Decoded moq_source_receive_frame(VideoDecoder &decoder);
 
 // Wraps a continuation so it runs under ctx->mutex, and only while `conn` is still
 // the source's connection. Dropping a connection cancels its calls, but a result
@@ -618,6 +621,27 @@ static void moq_source_read_track(struct moq_source *ctx, const std::shared_ptr<
 						ctx, conn, track, moq_source_on_frame));
 }
 
+// Hands OBS every picture the decoder has ready, in presentation order. False when a
+// picture failed to decode or convert.
+static bool moq_source_output_video(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
+				    const std::shared_ptr<Track> &track)
+{
+	for (;;) {
+		switch (moq_source_receive_frame(*track->video_decoder)) {
+		case Decoded::Pending:
+			return true;
+		case Decoded::Failed:
+			return false;
+		case Decoded::Ready:
+			// Commit only after decode and conversion succeed, under the same lock as output.
+			if (track == conn->pending_video)
+				conn->video = std::move(conn->pending_video);
+			obs_source_output_video(ctx->source, &track->video_decoder->frame);
+			break;
+		}
+	}
+}
+
 static void moq_source_on_frame(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
 				const std::shared_ptr<Track> &track,
 				moq::expected<std::optional<moq::MediaFrame>> result)
@@ -629,19 +653,35 @@ static void moq_source_on_frame(struct moq_source *ctx, const std::shared_ptr<Co
 	}
 	if (!*result) {
 		LOG_DEBUG("%s track closed cleanly", track->kind);
+		// An ended candidate must not replace playback that may still be live.
+		if (track == conn->pending_video && conn->video) {
+			moq_source_discard_candidate(conn, track);
+			return;
+		}
+		// The decoder holds reordered pictures back until it learns the stream ended. Like a
+		// packet, the end is refused while pictures are pending, so take them first.
+		AVCodecContext *codec = track->video_decoder->codec_ctx;
+		int ended = avcodec_send_packet(codec, nullptr);
+		if (ended == AVERROR(EAGAIN)) {
+			moq_source_output_video(ctx, conn, track);
+			ended = avcodec_send_packet(codec, nullptr);
+		}
+		if (ended == 0)
+			moq_source_output_video(ctx, conn, track);
 		moq_source_discard_candidate(conn, track);
 		return;
 	}
-	const auto decoded = moq_source_decode_frame(*track->video_decoder, **result);
-	if (decoded == Decoded::Failed && track == conn->pending_video) {
+	Sent sent = moq_source_send_packet(*track->video_decoder, **result);
+	bool drained = true;
+	if (sent == Sent::Full) {
+		// A drain that failed partway left pictures behind; take them so the packet fits.
+		drained = moq_source_output_video(ctx, conn, track);
+		sent = moq_source_send_packet(*track->video_decoder, **result);
+	}
+	const bool decoded = sent == Sent::Accepted && moq_source_output_video(ctx, conn, track) && drained;
+	if (!decoded && track == conn->pending_video) {
 		moq_source_discard_candidate(conn, track);
 		return;
-	}
-	if (decoded == Decoded::Ready) {
-		// Commit only after decode and conversion succeed, under the same lock as output.
-		if (track == conn->pending_video)
-			conn->video = std::move(conn->pending_video);
-		obs_source_output_video(ctx->source, &track->video_decoder->frame);
 	}
 	moq_source_read_track(ctx, conn, track);
 }
@@ -984,6 +1024,10 @@ static std::unique_ptr<VideoDecoder> moq_source_prepare_decoder(const moq::Video
 		}
 	}
 
+	// Packets carry the frame's microsecond timestamp, which the decoder hands back on the
+	// picture it belongs to.
+	decoder->codec_ctx->pkt_timebase = AVRational{1, 1'000'000};
+
 	// Open codec
 	if (avcodec_open2(decoder->codec_ctx, codec, NULL) < 0) {
 		LOG_ERROR("Failed to open codec");
@@ -993,12 +1037,13 @@ static std::unique_ptr<VideoDecoder> moq_source_prepare_decoder(const moq::Video
 	return decoder;
 }
 
+// Feeds one frame to the decoder.
+//
 // NOTE: Caller must hold ctx->mutex when calling this function.
-static Decoded moq_source_decode_frame(VideoDecoder &decoder, const moq::MediaFrame &frame_data)
+static Sent moq_source_send_packet(VideoDecoder &decoder, const moq::MediaFrame &frame_data)
 {
-	// Conversion buffers are allocated when the decoder first produces a frame.
 	if (!decoder.codec_ctx)
-		return Decoded::Failed;
+		return Sent::Failed;
 
 	// Skip non-keyframes until we get the first one
 	if (!decoder.got_keyframe && !frame_data.keyframe) {
@@ -1007,7 +1052,7 @@ static Decoded moq_source_decode_frame(VideoDecoder &decoder, const moq::MediaFr
 			LOG_INFO("Waiting for keyframe... (skipped %u frames so far)",
 				 decoder.frames_waiting_for_keyframe);
 		}
-		return Decoded::Pending;
+		return Sent::Accepted;
 	}
 
 	// Mark that we've received a keyframe from the stream
@@ -1026,13 +1071,14 @@ static Decoded moq_source_decode_frame(VideoDecoder &decoder, const moq::MediaFr
 	// Create AVPacket from frame data
 	AVPacket *packet = av_packet_alloc();
 	if (!packet) {
-		return Decoded::Failed;
+		return Sent::Failed;
 	}
 
 	packet->data = const_cast<uint8_t *>(frame_data.payload.data());
 	packet->size = static_cast<int>(frame_data.payload.size());
-	packet->pts = frame_data.timestamp_us / 1000; // Convert to milliseconds
-	packet->dts = packet->pts;
+	// The decoder hands this back on the picture it belongs to. Decode order has no
+	// timestamp of its own here, so dts stays unset.
+	packet->pts = static_cast<int64_t>(frame_data.timestamp_us);
 
 	// Send packet to decoder
 	int ret = avcodec_send_packet(decoder.codec_ctx, packet);
@@ -1055,18 +1101,28 @@ static Decoded moq_source_decode_frame(VideoDecoder &decoder, const moq::MediaFr
 				LOG_ERROR("Error sending packet to decoder: %s", errbuf);
 			}
 		}
-		return ret == AVERROR(EAGAIN) ? Decoded::Pending : Decoded::Failed;
+		return ret == AVERROR(EAGAIN) ? Sent::Full : Sent::Failed;
 	}
+	return Sent::Accepted;
+}
 
+// Takes the decoder's next picture into decoder.frame, stamped with that picture's own
+// timestamp: with B-frames it belongs to an earlier packet than the one just sent.
+// Pending once the decoder needs more input or has drained.
+//
+// NOTE: Caller must hold ctx->mutex when calling this function.
+static Decoded moq_source_receive_frame(VideoDecoder &decoder)
+{
 	// Receive decoded frames
 	AVFrame *frame = av_frame_alloc();
 	if (!frame) {
 		return Decoded::Failed;
 	}
 
-	ret = avcodec_receive_frame(decoder.codec_ctx, frame);
+	int ret = avcodec_receive_frame(decoder.codec_ctx, frame);
 	if (ret < 0) {
-		if (ret != AVERROR(EAGAIN)) {
+		const bool done = ret == AVERROR(EAGAIN) || ret == AVERROR_EOF;
+		if (!done) {
 			decoder.consecutive_decode_errors++;
 			char errbuf[AV_ERROR_MAX_STRING_SIZE];
 			av_strerror(ret, errbuf, sizeof(errbuf));
@@ -1084,11 +1140,17 @@ static Decoded moq_source_decode_frame(VideoDecoder &decoder, const moq::MediaFr
 			}
 		}
 		av_frame_free(&frame);
-		return ret == AVERROR(EAGAIN) ? Decoded::Pending : Decoded::Failed;
+		return done ? Decoded::Pending : Decoded::Failed;
 	}
 
 	// Successfully decoded a frame - reset error counter
 	decoder.consecutive_decode_errors = 0;
+
+	if (frame->best_effort_timestamp == AV_NOPTS_VALUE) {
+		LOG_ERROR("Decoded video frame has no timestamp");
+		av_frame_free(&frame);
+		return Decoded::Failed;
+	}
 
 	// Check if we need to (re)initialize the scaler - either first frame, dimension change, or pixel format change
 	enum AVPixelFormat decoded_pix_fmt = (enum AVPixelFormat)frame->format;
@@ -1182,9 +1244,8 @@ static Decoded moq_source_decode_frame(VideoDecoder &decoder, const moq::MediaFr
 		return Decoded::Failed;
 	}
 
-	// Update OBS frame timestamp and output. OBS expects nanoseconds; frames
-	// carry microseconds.
-	decoder.frame.timestamp = frame_data.timestamp_us * 1000;
+	// OBS expects nanoseconds; packets carry microseconds.
+	decoder.frame.timestamp = static_cast<uint64_t>(frame->best_effort_timestamp) * 1000;
 	decoder.frame.format = VIDEO_FORMAT_RGBA;
 	av_frame_free(&frame);
 	return Decoded::Ready;
