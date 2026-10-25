@@ -2,6 +2,7 @@ import 'package:moq_ffi/moq_ffi.dart';
 
 import 'aliases.dart';
 import 'stream.dart';
+import 'version.dart';
 
 /// Everything [Server.listen] can be told.
 ///
@@ -95,6 +96,7 @@ final class Server {
           maxStreams: options.maxStreams,
           keylog: options.keylog,
         ),
+        implementation: implementation,
         publish: publishOrigin,
         consume: options.consume ?? shared,
       ),

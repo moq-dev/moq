@@ -196,10 +196,14 @@ fn suppress(clip: &[u8], pid: u16, from: f64, to: f64) -> Vec<u8> {
 }
 
 /// Each PID's access units in `first` fell short of `last`'s: the rows advance while it runs.
+/// An SI row counts only the sections the program clock could not place, so it has none.
 fn assert_advancing(first: &ts::stats::Snapshot, last: &ts::stats::Snapshot) {
 	assert!(!last.streams.is_empty(), "no elementary stream reported");
 	let first = units(first);
 	for (pid, units) in units(last) {
+		if last.streams[&pid].track == ".si" {
+			continue;
+		}
 		let before = first.get(&pid).copied().unwrap_or(0);
 		assert!(before < units, "PID {pid}: {before} access units, then {units}");
 	}

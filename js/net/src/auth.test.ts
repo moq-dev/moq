@@ -134,6 +134,99 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", 
 		second.server.abort();
 	});
 
+	test("a shared handle presents a token whose stream is lost again on the same session", async () => {
+		const clock = new Manual();
+		const installed = clock.install();
+		const warned = spyOn(console, "warn").mockImplementation(() => {});
+		// The server's side of each AUTH stream carrying our token, in arrival order.
+		const Wire = protocol === Lite.ALPN_07_WIP ? LiteAuthWire : IetfAuthWire;
+		const original = Wire.prototype.accept;
+		const streams: Stream[] = [];
+		const accepted = spyOn(Wire.prototype, "accept").mockImplementation(async function (
+			this: InstanceType<typeof Wire>,
+			stream: Stream,
+		) {
+			const token = await original.call(this, stream);
+			if (new TextDecoder().decode(token) === "token") streams.push(stream);
+			return token;
+		});
+		const handle = new Handle();
+		const { client, server } = await connect({ publish: new OriginProducer(), protocol, auth: handle });
+		answer(server.auth.requests(), (token) => (token ? grant(["a"], []) : grant([], [])));
+		try {
+			const token = await handle.add("token");
+			await waitFor(token.grant, (g) => g?.publish.equals(patterns("a")) === true);
+			let ended = false;
+			void token.closed.then(() => {
+				ended = true;
+			});
+
+			streams[0]?.abort(new StreamError(StreamCode.Internal, { message: "lost" }));
+			await waitFor(token.grant, (g) => g === undefined);
+			await clock.advance(Nano.fromMilli(Milli(999)));
+			for (let i = 0; i < 10; i++) await nextTask();
+			expect(streams.length).toBe(1);
+			await clock.advance(Nano.fromMilli(Milli(1)));
+			await waitFor(token.grant, (g) => g?.publish.equals(patterns("a")) === true);
+			expect(streams.length).toBe(2);
+			expect(ended).toBe(false);
+		} finally {
+			accepted.mockRestore();
+			warned.mockRestore();
+			client.abort();
+			server.abort();
+			installed.close();
+		}
+	});
+
+	test("a token whose peer resets only its sending half ends that stream before presenting again", async () => {
+		const clock = new Manual();
+		const installed = clock.install();
+		const warned = spyOn(console, "warn").mockImplementation(() => {});
+		const Wire = protocol === Lite.ALPN_07_WIP ? LiteAuthWire : IetfAuthWire;
+		const original = Wire.prototype.accept;
+		const streams: Stream[] = [];
+		const accepted = spyOn(Wire.prototype, "accept").mockImplementation(async function (
+			this: InstanceType<typeof Wire>,
+			stream: Stream,
+		) {
+			const token = await original.call(this, stream);
+			if (new TextDecoder().decode(token) === "token") streams.push(stream);
+			return token;
+		});
+		const handle = new Handle();
+		const { client, server } = await connect({ publish: new OriginProducer(), protocol, auth: handle });
+		answer(server.auth.requests(), (token) => (token ? grant(["a"], []) : grant([], [])));
+		try {
+			const token = await handle.add("token");
+			await waitFor(token.grant, (g) => g?.publish.equals(patterns("a")) === true);
+			const first = streams[0];
+			if (!first) throw new Error("the token was never presented");
+			let abandoned: unknown;
+			first.reader.closed.then(
+				() => {
+					abandoned = "finished";
+				},
+				(err: unknown) => {
+					abandoned = err;
+				},
+			);
+
+			first.writer.reset(new StreamError(StreamCode.Internal, { message: "lost" }));
+			await waitFor(token.grant, (g) => g === undefined);
+			await clock.advance(Nano.fromMilli(Milli(1000)));
+			await waitFor(token.grant, (g) => g?.publish.equals(patterns("a")) === true);
+			expect(streams.length).toBe(2);
+			expect(abandoned).toBeInstanceOf(Error);
+		} finally {
+			accepted.mockRestore();
+			warned.mockRestore();
+			client.abort();
+			server.abort();
+			installed.close();
+		}
+	});
+
 	test("a handle backs one active session", async () => {
 		const handle = new Handle();
 		const first = await connect({ publish: new OriginProducer(), protocol, auth: handle });
@@ -693,8 +786,9 @@ test("lite-07 presents a transiently refused token again after a backoff", async
 	}
 });
 
-// The peer replied to the first presentation, so it knows AUTH: a reset is a lost stream.
-test("lite-07 keeps a shared token whose retry stream is reset", async () => {
+// The peer replied to the first presentation, so it knows AUTH: a reset is a lost stream,
+// presented again after the doubled backoff.
+test("lite-07 presents a shared token again when its retry stream is reset", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
 	const warned = spyOn(console, "warn").mockImplementation(() => {});
@@ -725,6 +819,10 @@ test("lite-07 keeps a shared token whose retry stream is reset", async () => {
 		await clock.advance(Nano.fromMilli(Milli(1000)));
 		await settles(() => logged("auth token ended") > 0);
 		for (let i = 0; i < 10; i++) await nextTask();
+		expect(rejected).toBeUndefined();
+
+		await clock.advance(Nano.fromMilli(Milli(2000)));
+		await settles(() => logged("auth token ended") > 1);
 		expect(rejected).toBeUndefined();
 	} finally {
 		read?.mockRestore();

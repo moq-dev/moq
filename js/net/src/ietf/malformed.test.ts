@@ -20,7 +20,7 @@ import { ALPN, type IetfVersion, Version } from "./version.ts";
 
 const DRAFTS = [
 	[Version.DRAFT_18, ALPN.DRAFT_18],
-	[Version.DRAFT_21, ALPN.DRAFT_21],
+	[Version.DRAFT_22, ALPN.DRAFT_22],
 ] as const;
 
 /** A leading-ones varint, enough for the lengths below. */
