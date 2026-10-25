@@ -58,10 +58,7 @@ const MALFORMED_TRACK: u32 = 0x12;
 /// Draft-16 and 17 assign it to UNKNOWN_OBJECT_STATUS, which draft-18 moved to 0x6 when it
 /// took 0x4 for this. Draft-14 and 15 assign it nothing.
 fn has_going_away(version: Version) -> bool {
-	matches!(
-		version,
-		Version::Draft18 | Version::Draft19 | Version::Draft20 | Version::Draft21 | Version::Draft22
-	)
+	matches!(version, Version::Draft18 | Version::Draft22)
 }
 
 /// Whether the draft assigns TOO_FAR_BEHIND. Added in draft-17.
@@ -216,10 +213,10 @@ pub(crate) mod request {
 	/// and later; draft-15 gave 0x33 another meaning.
 	const UNSUPPORTED_EXTENSION: u64 = 0x33;
 
-	/// A Range Filter exceeds MAX_FILTER_RANGES (draft-19 and later).
+	/// A Range Filter exceeds MAX_FILTER_RANGES (draft-22 and later).
 	pub(crate) const INVALID_FILTER: u64 = 0x36;
 
-	/// A joining FETCH named no active subscription. Removed from the registry in draft-20.
+	/// A joining FETCH named no active subscription. Removed from the registry in draft-22.
 	const INVALID_JOINING_REQUEST_ID_14: u64 = 0x7;
 	const INVALID_JOINING_REQUEST_ID: u64 = 0x32;
 
@@ -279,7 +276,7 @@ pub(crate) mod request {
 		}
 		match version {
 			Version::Draft14 => Some(INVALID_JOINING_REQUEST_ID_14),
-			Version::Draft15 | Version::Draft16 | Version::Draft17 | Version::Draft18 | Version::Draft19 => {
+			Version::Draft15 | Version::Draft16 | Version::Draft17 | Version::Draft18 => {
 				Some(INVALID_JOINING_REQUEST_ID)
 			}
 			_ => None,
@@ -427,15 +424,12 @@ pub(crate) mod request {
 	mod tests {
 		use super::*;
 
-		const ALL: [Version; 9] = [
+		const ALL: [Version; 6] = [
 			Version::Draft14,
 			Version::Draft15,
 			Version::Draft16,
 			Version::Draft17,
 			Version::Draft18,
-			Version::Draft19,
-			Version::Draft20,
-			Version::Draft21,
 			Version::Draft22,
 		];
 
@@ -502,15 +496,15 @@ pub(crate) mod request {
 			}
 
 			// A broadcast with no route is, to the peer that asked for it, not here either.
-			assert_eq!(to_code(&Error::Unroutable, Kind::Subscribe, Version::Draft20), 0x10);
+			assert_eq!(to_code(&Error::Unroutable, Kind::Subscribe, Version::Draft22), 0x10);
 
 			// So is a datagram group: never cached, so a FETCH reaching one finds nothing, and
 			// NOT_SUPPORTED would say the endpoint has no FETCH at all.
 			assert_eq!(to_code(&Error::NotFetchable, Kind::Fetch, Version::Draft14), 0x4);
-			assert_eq!(to_code(&Error::NotFetchable, Kind::Fetch, Version::Draft20), 0x10);
+			assert_eq!(to_code(&Error::NotFetchable, Kind::Fetch, Version::Draft22), 0x10);
 			// Including a lite-07 upstream's NOT_FETCHABLE, bridged by a relay.
 			assert_eq!(
-				to_code(&Error::Stream(StreamError::NotFetchable), Kind::Fetch, Version::Draft20),
+				to_code(&Error::Stream(StreamError::NotFetchable), Kind::Fetch, Version::Draft22),
 				0x10
 			);
 		}
@@ -577,14 +571,7 @@ pub(crate) mod request {
 					assert!(matches!(from_code(GOING_AWAY, kind, version), Error::Remote(0x6)));
 				}
 
-				for version in [
-					Version::Draft17,
-					Version::Draft18,
-					Version::Draft19,
-					Version::Draft20,
-					Version::Draft21,
-					Version::Draft22,
-				] {
+				for version in [Version::Draft17, Version::Draft18, Version::Draft22] {
 					assert_eq!(to_code(&Error::GoingAway, kind, version), GOING_AWAY);
 					assert!(matches!(from_code(GOING_AWAY, kind, version), Error::GoingAway));
 				}
@@ -620,9 +607,7 @@ pub(crate) mod request {
 				assert!(matches!(from_code(range, Kind::Fetch, version), Error::InvalidRange));
 				let joining = match version {
 					Version::Draft14 => Some(0x7),
-					Version::Draft15 | Version::Draft16 | Version::Draft17 | Version::Draft18 | Version::Draft19 => {
-						Some(0x32)
-					}
+					Version::Draft15 | Version::Draft16 | Version::Draft17 | Version::Draft18 => Some(0x32),
 					_ => None,
 				};
 				assert_eq!(
@@ -661,7 +646,7 @@ pub(crate) mod request {
 
 		/// Every code we put in a rejection has to be one the negotiated draft registers for
 		/// that request. The table is transcribed from the drafts (draft-14 section 13.1
-		/// through draft-20 section 15.11.2), not derived from the mapping, so a mistake in
+		/// through draft-22 section 16.11.2), not derived from the mapping, so a mistake in
 		/// the mapping cannot talk the assertion into agreeing with it.
 		#[test]
 		fn only_registered_codes_reach_the_wire() {
@@ -707,7 +692,7 @@ pub(crate) mod request {
 			for err in [Error::Duplicate, Error::Cancel, Error::ProtocolViolation, Error::Closed] {
 				for kind in KINDS {
 					assert_eq!(
-						to_code(&err, kind, Version::Draft20),
+						to_code(&err, kind, Version::Draft22),
 						INTERNAL_ERROR,
 						"{err} is not internal on {kind:?}"
 					);
@@ -715,7 +700,7 @@ pub(crate) mod request {
 			}
 
 			assert!(matches!(
-				from_code(INTERNAL_ERROR, Kind::Subscribe, Version::Draft20),
+				from_code(INTERNAL_ERROR, Kind::Subscribe, Version::Draft22),
 				Error::Remote(0)
 			));
 		}
@@ -727,15 +712,12 @@ mod tests {
 	use super::*;
 	use crate::Error;
 
-	const ALL: [Version; 9] = [
+	const ALL: [Version; 6] = [
 		Version::Draft14,
 		Version::Draft15,
 		Version::Draft16,
 		Version::Draft17,
 		Version::Draft18,
-		Version::Draft19,
-		Version::Draft20,
-		Version::Draft21,
 		Version::Draft22,
 	];
 
@@ -832,13 +814,7 @@ mod tests {
 			assert_eq!(from_stream_code(GOING_AWAY, version), StreamError::Unknown(GOING_AWAY));
 		}
 
-		for version in [
-			Version::Draft18,
-			Version::Draft19,
-			Version::Draft20,
-			Version::Draft21,
-			Version::Draft22,
-		] {
+		for version in [Version::Draft18, Version::Draft22] {
 			assert_eq!(to_stream_code(&StreamError::GoingAway, version), GOING_AWAY);
 			assert_eq!(from_stream_code(GOING_AWAY, version), StreamError::GoingAway);
 		}
@@ -882,7 +858,7 @@ mod tests {
 
 	/// Conditions this registry has no value for say INTERNAL_ERROR rather than borrowing
 	/// moq-lite's own 48-63 range or its application offset. A peer treats an unregistered
-	/// code as INTERNAL_ERROR anyway (draft-20 section 14), so the borrowed value would
+	/// code as INTERNAL_ERROR anyway, so the borrowed value would
 	/// carry no more meaning while looking like a registration.
 	#[test]
 	fn unregistered_conditions_are_internal() {
@@ -902,7 +878,7 @@ mod tests {
 			StreamError::Unknown(0x1234),
 		] {
 			assert_eq!(
-				to_stream_code(&err, Version::Draft20),
+				to_stream_code(&err, Version::Draft22),
 				INTERNAL_ERROR,
 				"{err:?} has no value in this registry"
 			);
@@ -927,9 +903,9 @@ mod tests {
 			0x3b,
 			64 + 7,
 		] {
-			assert_eq!(from_stream_code(code, Version::Draft20), StreamError::Unknown(code));
+			assert_eq!(from_stream_code(code, Version::Draft22), StreamError::Unknown(code));
 			assert!(matches!(
-				Error::from(from_stream_code(code, Version::Draft20)),
+				Error::from(from_stream_code(code, Version::Draft22)),
 				Error::Stream(StreamError::Unknown(remote)) if remote == code
 			));
 		}
@@ -965,7 +941,7 @@ mod tests {
 	/// application codes past 64, neither of which this registry has a range for,
 	/// and it assigns 0x4 and 0x5 meanings the earlier drafts give to something else.
 	///
-	/// The table is transcribed from the drafts (draft-14 section 13.1.8 through draft-20
+	/// The table is transcribed from the drafts (draft-14 section 13.1.8 through draft-22
 	/// section 15.11.4), not derived from the mapping, so a mistake in the mapping cannot
 	/// talk the assertion into agreeing with it.
 	#[test]

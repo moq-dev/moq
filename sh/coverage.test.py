@@ -44,7 +44,7 @@ for arg in sys.argv:
             target.chmod(0o755)
         self.calls = self.root / "calls"
         self.env = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}",
-                        COVERAGE_CALLS=str(self.calls), BASH_ENV="/dev/null", GITHUB_ACTIONS="", MOQ_LOCAL_SUPERVISED="1")
+                        COVERAGE_CALLS=str(self.calls), BASH_ENV="/dev/null", GITHUB_ACTIONS="", LOCAL_SUPERVISED="1")
 
     def javascript(self, name="", fail=False):
         directories = ["js/first", "js/second", "js/empty"]

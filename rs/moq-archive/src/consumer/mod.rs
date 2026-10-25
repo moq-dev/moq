@@ -18,7 +18,7 @@
 //!
 //! let store = moq_archive::Store::new(InMemory::new(), "recordings/demo");
 //! let consumer = moq_archive::Consumer::open(store, broadcast, Default::default()).await?;
-//! // Every stored track exists now: announce the broadcast, then serve it.
+//! // Every stored track exists now: announce its publication, then serve it.
 //! consumer.run().await?;
 //! # Ok(())
 //! # }

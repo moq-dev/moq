@@ -26,8 +26,8 @@ impl Drop for Fixture {
 async fn prepare(tracks: usize, frames: usize) -> (moq_mux::Source, moq_mux::catalog::Consumer, Fixture) {
 	let (origin, driver) = moq_net::origin::Producer::new(Default::default());
 	let driver = tokio::spawn(moq_net::time::run(driver));
-	let mut broadcast = origin.create_broadcast("bench").unwrap();
-	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let broadcast = origin.create_broadcast("bench").unwrap();
+	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
 	let stream = moq_mux::catalog::Consumer::from(catalog.consume().unwrap());
 	let mut publishers = Vec::new();
 	for index in 0..tracks {
@@ -169,8 +169,8 @@ async fn prepare_video(
 ) -> (moq_mux::Source, moq_mux::catalog::Consumer, Fixture) {
 	let (origin, driver) = moq_net::origin::Producer::new(Default::default());
 	let driver = tokio::spawn(moq_net::time::run(driver));
-	let mut broadcast = origin.create_broadcast("bench").unwrap();
-	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let broadcast = origin.create_broadcast("bench").unwrap();
+	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
 	let stream = moq_mux::catalog::Consumer::from(catalog.consume().unwrap());
 	let track = broadcast
 		.create_track("video", catalog.track_info(hang::catalog::PRIORITY.video))
