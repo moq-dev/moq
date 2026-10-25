@@ -3471,35 +3471,37 @@ fn position_group(group: group::Consumer, frames: &Frames) -> Option<group::Cons
 /// it reads whole groups.
 ///
 /// A frame bound qualifies the group its range starts or ends at, so everything in between
-/// is served whole. Ranges naming the same group widen to the widest bound among them; a
-/// bound still applies where another range covers its group whole, which a subscriber
-/// only asks for by overlapping its own ranges.
+/// is served whole. Ranges naming the same group serve the span covering all of their
+/// frames in it; a bound still applies where another range covers its group whole, which a
+/// subscriber only asks for by overlapping its own ranges.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Frames {
-	/// `(group, first frame)` for each range starting partway through a group.
-	starts: Vec<(u64, u64)>,
-	/// `(group, last frame)`, inclusive, for each range ending partway through a group.
-	ends: Vec<(u64, u64)>,
+	/// `(group, first frame, last frame)` for each range starting or ending partway through
+	/// a group: what that range serves of it, with an inclusive last frame, or `None` for
+	/// the rest of the group.
+	parts: Vec<(u64, u64, Option<u64>)>,
 }
 
 impl Frames {
-	/// The first frame to serve of `group`: 0 unless a range starts partway through it.
+	/// The first frame to serve of `group`: 0 unless every range naming it starts partway.
 	fn start(&self, group: u64) -> u64 {
-		self.starts
+		self.parts
 			.iter()
-			.filter(|(start, _)| *start == group)
-			.map(|(_, frame)| *frame)
+			.filter(|(part, ..)| *part == group)
+			.map(|(_, first, _)| *first)
 			.min()
 			.unwrap_or(0)
 	}
 
-	/// The last frame to serve of `group`, inclusive, or `None` for all of it.
+	/// The last frame to serve of `group`, inclusive, or `None` for all of it: a range
+	/// naming it with no end bound there runs to its end.
 	fn end(&self, group: u64) -> Option<u64> {
-		self.ends
-			.iter()
-			.filter(|(end, _)| *end == group)
-			.map(|(_, frame)| *frame)
-			.max()
+		let mut end = None;
+		for (_, _, last) in self.parts.iter().filter(|(part, ..)| *part == group) {
+			let last = (*last)?;
+			end = Some(end.map_or(last, |end: u64| end.max(last)));
+		}
+		end
 	}
 }
 
@@ -3543,23 +3545,36 @@ impl Bounds {
 				None => Range::oldest().start,
 				Some(start) => anchor(start)?,
 			};
-			if let Some(lite::Anchor::Absolute(start)) = range.start
-				&& start.frame != 0
-			{
-				bounds.frames.starts.push((start.group, start.frame));
-			}
+			let first = match range.start {
+				Some(lite::Anchor::Absolute(start)) if start.frame != 0 => Some((start.group, start.frame)),
+				_ => None,
+			};
+			let mut last = None;
 			let end = match range.end {
 				None => None,
 				// A mid-group end includes its group, up to the frame before it.
 				Some(lite::Anchor::Absolute(end)) => Some(Anchor::Absolute(match end.frame.checked_sub(1) {
 					Some(frame) => {
-						bounds.frames.ends.push((end.group, frame));
+						last = Some((end.group, frame));
 						end.group.checked_add(1).ok_or(Error::ProtocolViolation)?
 					}
 					None => end.group,
 				})),
 				Some(end) => Some(anchor(end)?),
 			};
+			match (first, last) {
+				(Some((group, first)), Some((end, last))) if group == end => {
+					bounds.frames.parts.push((group, first, Some(last)));
+				}
+				_ => {
+					if let Some((group, first)) = first {
+						bounds.frames.parts.push((group, first, None));
+					}
+					if let Some((group, last)) = last {
+						bounds.frames.parts.push((group, 0, Some(last)));
+					}
+				}
+			}
 			bounds.ranges.push(Range { start, end });
 		}
 		Ok(bounds)
@@ -4826,15 +4841,49 @@ mod serve_group_test {
 		);
 	}
 
-	/// Ranges naming the same group widen to the widest frame bound among them.
+	/// Ranges naming the same group serve the span covering all of their frames in it.
 	#[test]
 	fn frames_widen_across_ranges() {
 		let frames = Frames {
-			starts: vec![(3, 5), (3, 2), (4, 1)],
-			ends: vec![(7, 1), (7, 3)],
+			parts: vec![
+				(3, 5, None),
+				(3, 2, None),
+				(4, 1, Some(6)),
+				(7, 0, Some(1)),
+				(7, 0, Some(3)),
+			],
 		};
 		assert_eq!((frames.start(3), frames.start(4), frames.start(5)), (2, 1, 0));
-		assert_eq!((frames.end(7), frames.end(6)), (Some(3), None));
+		assert_eq!(
+			(frames.end(3), frames.end(4), frames.end(7), frames.end(6)),
+			(None, Some(6), Some(3), None)
+		);
+
+		// Disjoint ranges meeting partway through group 5 serve all of it between them.
+		let group = |group, frame| Some(lite::Anchor::Absolute(track::Position { group, frame }));
+		let ranges = [
+			lite::Range {
+				start: group(4, 0),
+				end: group(5, 2),
+			},
+			lite::Range {
+				start: group(5, 2),
+				end: group(6, 0),
+			},
+		];
+		let abutting = Bounds::new(&ranges, None).unwrap();
+		assert_eq!((abutting.frames.start(5), abutting.frames.end(5)), (0, None));
+
+		// A range inside one group keeps both of its bounds there.
+		let inside = Bounds::new(
+			&[lite::Range {
+				start: group(5, 2),
+				end: group(5, 4),
+			}],
+			None,
+		)
+		.unwrap();
+		assert_eq!((inside.frames.start(5), inside.frames.end(5)), (2, Some(3)));
 	}
 
 	/// A group whose head the publisher no longer holds is skipped, not served short:
@@ -4850,8 +4899,7 @@ mod serve_group_test {
 		group.start_at(5).unwrap();
 		group.write_frame(Timestamp::ZERO, b"tail".to_vec()).unwrap();
 		let starting = |frame| Frames {
-			starts: vec![(3, frame)],
-			ends: Vec::new(),
+			parts: vec![(3, frame, None)],
 		};
 
 		// Asked for whole groups, so the missing frames 0..5 make this unservable.
@@ -4885,8 +4933,7 @@ mod serve_group_test {
 		}
 		group.finish().unwrap();
 		let ending = |group, frame| Frames {
-			starts: Vec::new(),
-			ends: vec![(group, frame)],
+			parts: vec![(group, 0, Some(frame))],
 		};
 
 		let mut consumer = position_group(group.consume(), &ending(7, 1)).unwrap();
