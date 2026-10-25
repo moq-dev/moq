@@ -5933,12 +5933,14 @@ impl Subscriber {
 
 		// A clean FIN short of the promised end would otherwise cache a truncated group as
 		// a complete one. Draft-20's End Location is the range covered, not the last object
-		// sent: objects missing before it do not exist (section 10.13).
+		// sent: objects missing before it do not exist (section 10.13). Before draft-20 the
+		// stream must reach the bounded group at all, not just its objects.
 		if !Filter::is_draft20(self.version)
-			&& let Some(sequence) = writer.sequence()
-			&& writer.bound(sequence).is_some_and(|end| next < end)
+			&& let Some(end) = writer.fetch.end
+			&& (writer.sequence() != Some(writer.fetch.last) || next < end)
 		{
-			tracing::warn!(sequence, next, "a group fetch ended before FETCH_OK's End Location");
+			let sequence = writer.sequence();
+			tracing::warn!(?sequence, next, "a group fetch ended before FETCH_OK's End Location");
 			return Err(Error::ProtocolViolation);
 		}
 
@@ -15624,6 +15626,52 @@ mod stitch_tests {
 				match complete {
 					true => assert_eq!(end.expect("a complete group"), count as u64, "{version}"),
 					false => assert!(end.is_err(), "{version} {count} objects: the group must fail, not end"),
+				}
+			}
+		}
+	}
+
+	/// A stream that FINs before the group its End Location bounds, with no objects or after
+	/// an earlier group, is short before draft-20. From draft-20 the bounded group is refused
+	/// for now, since objects past the bound may still be written.
+	#[moq_clock::test]
+	async fn a_range_fetch_must_reach_its_bounded_group() {
+		let last = SEQUENCE + 2;
+		for version in [Version::Draft19, VERSION] {
+			for objects in [Vec::new(), group_fetch_objects(SEQUENCE, 0, &[b"a"])] {
+				let empty = objects.is_empty();
+				let mut run = GroupFetchRun::new(version, objects).await;
+				let dynamic = run.track.dynamic();
+				let consumer = run.track.consume();
+				let mut filling = Box::pin(consumer.fill_groups(SEQUENCE..last + 1, 0));
+				assert!(futures::poll!(filling.as_mut()).is_pending());
+				let fill = dynamic.requested_fill().await.unwrap();
+				let bounded = consumer.fetch_group(last, None);
+				let slot = kio::Producer::new(GroupFetch::Ready(RangeFetch {
+					fill: std::sync::Arc::new(fill),
+					timescale: None,
+					first: SEQUENCE,
+					last,
+					start: 0,
+					end: Some(2),
+				}));
+				let res = run.subscriber.recv_group_fetch(&mut run.stream, slot).await;
+				match Filter::is_draft20(version) {
+					false => assert!(
+						matches!(res, Err(Error::ProtocolViolation)),
+						"{version} empty={empty}: {res:?}"
+					),
+					true => {
+						assert!(res.is_ok(), "{version} empty={empty}: {res:?}");
+						let bounded = moq_clock::timeout(Duration::from_secs(1), bounded)
+							.await
+							.expect("refused");
+						assert!(
+							matches!(bounded, Err(Error::NotFound)),
+							"{version} empty={empty}: {:?}",
+							bounded.err()
+						);
+					}
 				}
 			}
 		}

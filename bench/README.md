@@ -23,8 +23,8 @@ Measure small-group session cost over independent publisher and viewer counts,
 for SUBSCRIBE and FETCH:
 
 ```bash
-nix develop --command cargo bench --locked -p moq-net --bench session -- session_delivery_group_cost
-nix develop --command env SESSION_CPU=1 cargo bench --locked -p moq-net --bench session -- session_delivery_group_cost_cpu
+nix develop --command cargo bench --locked -p moq-net --features fuzz --bench session -- session_delivery_group_cost
+nix develop --command env SESSION_CPU=1 cargo bench --locked -p moq-net --features fuzz --bench session -- session_delivery_group_cost_cpu
 ```
 
 The CPU mode requires Unix and measures the benchmark's current thread, including

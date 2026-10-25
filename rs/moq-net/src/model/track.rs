@@ -4658,18 +4658,24 @@ impl Consumer {
 	/// [`Dynamic`] once per run of misses so it fetches each run at once, and resolve once
 	/// every run is answered. The returned guard keeps the fills wanted, so the groups they
 	/// accepted stay cached while the caller reads them. A track with no handler resolves at
-	/// once, and a front's logical track fills through the copy serving it, if any.
+	/// once, and a front's logical track fills through the copy the front assigns it.
 	#[cfg(feature = "async")]
 	pub(crate) async fn fill_groups(&self, span: ops::Range<u64>, priority: i8) -> Filled {
-		if let Some(serving) = self.serving() {
-			return Box::pin(serving.fill_groups(span, priority)).await;
-		}
+		// Held while waiting: a front assigns its logical track a copy only while it is read.
 		let state = self.resolve(None).0;
+		let routes = state.read().routes.clone();
+		if let Some(routes) = routes {
+			let joins = match kio::wait(|waiter| routes.poll_serving(waiter)).await {
+				Some(serving) => Box::pin(serving.fill_groups(span, priority)).await.joins,
+				None => Vec::new(),
+			};
+			return Filled {
+				joins,
+				_read: Some(state),
+			};
+		}
 		let (fills, holes) = {
 			let state = state.read();
-			if state.routes.is_some() {
-				return Filled { joins: Vec::new() };
-			}
 			let holes: Vec<ops::Range<u64>> = miss::holes(&state, span)
 				.into_iter()
 				.flat_map(|hole| state.drops.gaps(&hole).collect::<Vec<_>>())
@@ -4695,7 +4701,7 @@ impl Consumer {
 			Poll::Ready(())
 		})
 		.await;
-		Filled { joins }
+		Filled { joins, _read: None }
 	}
 
 	/// The sequences of `span` the cache holds, lowest first.
@@ -4970,8 +4976,10 @@ fn queue(fills: &kio::Shared<FillState>, sequence: u64, options: &group::Fetch) 
 /// The fills a [`Consumer::fill_groups`] asked, kept wanted until it drops.
 #[cfg(feature = "async")]
 pub(crate) struct Filled {
-	#[expect(dead_code, reason = "held only to keep the fills wanted")]
+	/// Held to keep the fills wanted.
 	joins: Vec<fill::Join>,
+	/// A front's logical track, held read so the front keeps the filled copy serving it.
+	_read: Option<kio::Consumer<TrackState>>,
 }
 
 /// The pollable state of a [`Consumer::fetch_group`].
