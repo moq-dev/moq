@@ -41,7 +41,7 @@ from .publish import (
     TrackRequest,
 )
 from .server import Request, Server, Transport
-from .session import Auth, AuthToken, Bandwidth, Reservation, Session
+from .session import Auth, Bandwidth, Credential, Reservation, Session
 from .subscribe import (
     BroadcastConsumer,
     GroupConsumer,
@@ -95,7 +95,6 @@ __all__ = [
     "AudioEncoderInput",
     "AudioSampleFormat",
     "Auth",
-    "AuthToken",
     "Backoff",
     "Bandwidth",
     "BroadcastConsumer",
@@ -109,6 +108,7 @@ __all__ = [
     "ConnectionStats",
     "ConnectionPhase",
     "ConnectionState",
+    "Credential",
     "Datagram",
     "Error",
     "ErrorScope",

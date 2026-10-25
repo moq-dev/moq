@@ -513,7 +513,7 @@ pub struct Route {
 	/// REQUEST_UPDATE from draft 16, or ends and makes it again before. A handle passed to
 	/// `Client::with_auth` presents it on every session it backs, so the route keeps it
 	/// across a reconnect. Local, like [`Self::source`]: a relay never forwards it.
-	pub auth: Option<crate::auth::Auth>,
+	pub auth: Option<crate::auth::Credential>,
 
 	/// The announcing session's declared or assigned identity.
 	///
@@ -574,7 +574,7 @@ impl Route {
 	}
 
 	/// Set the credential the advertising request carries; see [`Self::auth`].
-	pub fn with_auth(mut self, auth: crate::auth::Auth) -> Self {
+	pub fn with_auth(mut self, auth: crate::auth::Credential) -> Self {
 		self.auth = Some(auth);
 		self
 	}
@@ -698,7 +698,7 @@ fn route_order<'a>(
 
 /// The `(hops, cost, source, epoch, auth)` metadata an announce cursor delivers alongside a
 /// prefix.
-type RouteMeta = (Hops, Cost, Source, Option<crate::Epoch>, Option<crate::auth::Auth>);
+type RouteMeta = (Hops, Cost, Source, Option<crate::Epoch>, Option<crate::auth::Credential>);
 
 /// The earlier of two optional deadlines.
 fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
@@ -1230,7 +1230,7 @@ struct RouteEntry {
 	hops: Hops,
 	cost: Cost,
 	/// The auth the request advertising the route carries; see [`Route::auth`].
-	auth: Option<crate::auth::Auth>,
+	auth: Option<crate::auth::Credential>,
 	/// The rank of the link the entry arrived on; see [`Producer::with_preference`].
 	preference: Preference,
 	/// The announcing session's declared or assigned identity. Split-horizon

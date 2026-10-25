@@ -534,7 +534,7 @@ bool MoQOutput::PresentToken(const std::string &token)
 	// Replacing `presenting` cancels a presentation still in flight, which the
 	// newer token supersedes.
 	attempt->presenting = attempt->session->auth()->add(token).then(
-		worker.Executor(), Current<moq::expected<std::shared_ptr<moq::AuthToken>>>(
+		worker.Executor(), Current<moq::expected<std::shared_ptr<moq::Credential>>>(
 					   attempt, [this](const std::shared_ptr<Attempt> &current, auto result) {
 						   if (!result) {
 							   const std::string reason = result.error().to_string();

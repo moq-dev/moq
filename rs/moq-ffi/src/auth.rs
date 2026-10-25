@@ -33,7 +33,7 @@ impl From<moq_net::auth::Grant> for MoqGrant {
 }
 
 /// Present `token` on every session of `handle`, resolving once a peer accepts it.
-async fn add(handle: moq_net::auth::Handle, token: String) -> Result<moq_net::auth::Auth, MoqError> {
+async fn add(handle: moq_net::auth::Handle, token: String) -> Result<moq_net::auth::Credential, MoqError> {
 	// Without AUTH, moq-transport accepts a token only for the requests that name it, but
 	// nothing here can name one, so it would never be sent. The answer says how the peer
 	// accepted it, which a grant missing after its session drops cannot.
@@ -104,17 +104,17 @@ impl MoqAuth {
 
 	/// Present another token, resolving once the peer accepts it.
 	///
-	/// Its grant joins the union until [`MoqAuthToken::cancel`]. A client session presents it
+	/// Its grant joins the union until [`MoqCredential::cancel`]. A client session presents it
 	/// again on every reconnect. The peer's refusal is a [`MoqError::Protocol`] carrying its code.
 	///
 	/// # Errors
 	///
 	/// [`MoqError::Unsupported`] when the session cannot carry another token: a version
 	/// without AUTH, or moq-transport without the MoQ Auth extension.
-	pub async fn add(&self, token: String) -> Result<Arc<MoqAuthToken>, MoqError> {
+	pub async fn add(&self, token: String) -> Result<Arc<MoqCredential>, MoqError> {
 		let handle = self.handle.clone();
 		let token = crate::ffi::detached(add(handle, token)).await?;
-		Ok(Arc::new(MoqAuthToken::new(token)))
+		Ok(Arc::new(MoqCredential::new(token)))
 	}
 }
 
@@ -122,14 +122,14 @@ impl MoqAuth {
 ///
 /// It stays presented until [`cancel`](Self::cancel), or until the handle is released.
 #[derive(uniffi::Object)]
-pub struct MoqAuthToken {
+pub struct MoqCredential {
 	/// The watch behind [`grant`](Self::grant), which does not keep the token presented.
 	peek: moq_net::auth::Watch,
-	token: Task<moq_net::auth::Auth>,
+	token: Task<moq_net::auth::Credential>,
 }
 
-impl MoqAuthToken {
-	fn new(token: moq_net::auth::Auth) -> Self {
+impl MoqCredential {
+	fn new(token: moq_net::auth::Credential) -> Self {
 		Self {
 			peek: token.grant(),
 			token: Task::new(token),
@@ -138,7 +138,7 @@ impl MoqAuthToken {
 }
 
 #[uniffi::export]
-impl MoqAuthToken {
+impl MoqCredential {
 	/// This token's own grant, or `None` while the peer has not answered it or after it ended.
 	pub fn grant(&self) -> Option<MoqGrant> {
 		let _guard = crate::ffi::enter();

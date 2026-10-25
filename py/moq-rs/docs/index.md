@@ -45,7 +45,7 @@ asyncio.run(main())
    Request
    Transport
    Auth
-   AuthToken
+   Credential
    Grant
 ```
 

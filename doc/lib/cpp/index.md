@@ -205,7 +205,7 @@ Obtain a dynamic track request’s `demand()` before accepting it to watch subsc
 
 ## Authorization
 
-On `moq-lite-07-wip` (opt in with `ClientConfig::versions`) and on moq-transport draft-17+ with the [MoQ Auth extension](/draft/moq-auth), `session->auth()->grant()` is the `Grant` the relay sent back, empty until it answers and while a client session reconnects; `grant_changed()` waits for the next one. `add(token)` presents a fresh token without reconnecting and resolves to an `AuthToken` whose grant joins the union until `cancel()`; it is presented again on every reconnect. A refusal resolves to an `Error` carrying the relay's code.
+On `moq-lite-07-wip` (opt in with `ClientConfig::versions`) and on moq-transport draft-17+ with the [MoQ Auth extension](/draft/moq-auth), `session->auth()->grant()` is the `Grant` the relay sent back, empty until it answers and while a client session reconnects; `grant_changed()` waits for the next one. `add(token)` presents a fresh token without reconnecting and resolves to a `Credential` whose grant joins the union until `cancel()`; it is presented again on every reconnect. A refusal resolves to an `Error` carrying the relay's code.
 
 ## Stats
 

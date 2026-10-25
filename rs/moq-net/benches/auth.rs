@@ -188,7 +188,7 @@ fn renewal(c: &mut Criterion) {
 						let broadcasts: Vec<_> = (0..routes)
 							.map(|route| origin.create_broadcast(format!("room/{route}").as_str()).unwrap())
 							.collect();
-						let mut swap = |auth: &auth::Auth, touched: usize| {
+						let mut swap = |auth: &auth::Credential, touched: usize| {
 							for broadcast in broadcasts.iter().take(touched) {
 								broadcast
 									.announce(origin::Route::default().with_auth(auth.clone()))

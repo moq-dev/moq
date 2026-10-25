@@ -118,7 +118,7 @@ impl Client {
 	}
 
 	/// Build every session on `auth`, so each presents the tokens it holds and a route
-	/// naming one of its [`Auth`](crate::auth::Auth)s keeps it across a reconnect. Omit to
+	/// naming one of its [`Credential`](crate::auth::Credential)s keeps it across a reconnect. Omit to
 	/// give each session a handle of its own, which ends with it.
 	///
 	/// The handle backs one active session at a time, plus the ones draining after a

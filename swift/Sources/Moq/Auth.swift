@@ -27,20 +27,20 @@ public final class Auth: Sendable {
 
     /// Present another token, returning once the peer accepts it.
     ///
-    /// Its grant joins the union until `AuthToken.cancel()`; a client session presents
+    /// Its grant joins the union until `Credential.cancel()`; a client session presents
     /// it again on every reconnect. The peer's refusal throws `MoqError.Protocol`
     /// carrying its code, and a session that cannot carry another token throws
     /// `MoqError.Unsupported`.
-    public func add(token: String) async throws -> AuthToken {
-        AuthToken(try await ffi.add(token: token))
+    public func add(token: String) async throws -> Credential {
+        Credential(try await ffi.add(token: token))
     }
 }
 
 /// One token presented with `Auth.add(token:)`, withdrawn by `cancel()`.
-public final class AuthToken: Sendable {
-    let ffi: MoqAuthToken
+public final class Credential: Sendable {
+    let ffi: MoqCredential
 
-    init(_ ffi: MoqAuthToken) { self.ffi = ffi }
+    init(_ ffi: MoqCredential) { self.ffi = ffi }
 
     /// This token's own grant, or `nil` after it ended.
     public func grant() -> Grant? { ffi.grant() }

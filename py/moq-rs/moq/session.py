@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from moq_ffi import MoqAuth, MoqAuthToken, MoqBandwidth, MoqBandwidthConsumer, MoqReservation, MoqSession
+from moq_ffi import MoqAuth, MoqCredential, MoqBandwidth, MoqBandwidthConsumer, MoqReservation, MoqSession
 
 from .origin import OriginConsumer, OriginProducer
 from .publish import TrackDemand
@@ -143,19 +143,19 @@ class Auth:
         session ended. A reconnect is not an end."""
         return Grant._from_ffi(await self._inner.grant_changed())
 
-    async def add(self, token: str) -> AuthToken:
+    async def add(self, token: str) -> Credential:
         """Present another token, returning once the peer accepts it.
 
-        Its grant joins the union until :meth:`AuthToken.cancel`. The peer's refusal
+        Its grant joins the union until :meth:`Credential.cancel`. The peer's refusal
         raises ``moq.Error`` carrying its code; a session that cannot carry another
         token raises ``moq.Error.Unsupported``."""
-        return AuthToken(await self._inner.add(token))
+        return Credential(await self._inner.add(token))
 
 
-class AuthToken:
+class Credential:
     """One token presented with :meth:`Auth.add`, withdrawn by :meth:`cancel`."""
 
-    def __init__(self, inner: MoqAuthToken) -> None:
+    def __init__(self, inner: MoqCredential) -> None:
         self._inner = inner
 
     def grant(self) -> Grant | None:

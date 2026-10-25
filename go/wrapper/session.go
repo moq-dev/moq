@@ -105,35 +105,35 @@ func (a *Auth) GrantChanged(ctx context.Context) (*Grant, error) {
 // ProtocolError carrying its code; a session that cannot carry another token
 // returns an error for which errors.Is(err, ErrUnsupported) holds. Cancelling ctx
 // withdraws the token.
-func (a *Auth) Add(ctx context.Context, token string) (*AuthToken, error) {
-	inner, err := bridge.CallHandle(ctx, nil, func(ctx context.Context) (*ffi.MoqAuthToken, error) {
+func (a *Auth) Add(ctx context.Context, token string) (*Credential, error) {
+	inner, err := bridge.CallHandle(ctx, nil, func(ctx context.Context) (*ffi.MoqCredential, error) {
 		return a.inner.Add(ctx, token)
 	})
 	if err != nil {
 		return nil, err
 	}
-	return &AuthToken{inner: inner}, nil
+	return &Credential{inner: inner}, nil
 }
 
-// AuthToken is one token presented with Auth.Add.
-type AuthToken struct {
-	inner *ffi.MoqAuthToken
+// Credential is one token presented with Auth.Add.
+type Credential struct {
+	inner *ffi.MoqCredential
 }
 
 // Grant returns this token's own grant, or nil after it ended.
-func (t *AuthToken) Grant() *Grant {
+func (t *Credential) Grant() *Grant {
 	return grantFromFFI(t.inner.Grant())
 }
 
 // Closed blocks until the token ends, returning the peer's revocation or the end
 // of a client's connection or a server's session, or nil when the peer closed it
 // without an error. A reconnect does not end it.
-func (t *AuthToken) Closed(ctx context.Context) error {
+func (t *Credential) Closed(ctx context.Context) error {
 	return bridge.CallErr(ctx, nil, t.inner.Closed)
 }
 
 // Close withdraws the token, removing its grant from the union.
-func (t *AuthToken) Close() { t.inner.Cancel() }
+func (t *Credential) Close() { t.inner.Cancel() }
 
 // Bandwidth divides one connection's send estimate among the tracks sharing it.
 type Bandwidth struct {

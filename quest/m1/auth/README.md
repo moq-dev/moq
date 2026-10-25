@@ -132,7 +132,7 @@ Decisions settled while planning, recorded so review does not relitigate them:
   the IETF binding of lite's routing.
 - **Naming.** Messages are AUTH / AUTH_OK / AUTH_ERROR like SUBSCRIBE /
   SUBSCRIBE_OK. Rust is `moq_net::auth` with `auth::Grant`, `auth::Handle`,
-  `auth::Token`, and `auth::Request`; JS mirrors as `connection.auth`.
+  `auth::Credential`, and `auth::Request`; JS mirrors as `connection.auth`.
 
 `Session::auth()` is additive. The relay derives the grant
 from the origin handles it already scopes. Decided 2026-10-05: wire

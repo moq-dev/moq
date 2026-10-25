@@ -107,7 +107,7 @@ private:
 		// The latest token PresentToken() got accepted, presented on every reconnect
 		// until it is replaced or the attempt is dropped, and the call presenting the
 		// next one.
-		std::shared_ptr<moq::AuthToken> token;
+		std::shared_ptr<moq::Credential> token;
 		std::optional<moq::Continuation> presenting;
 	};
 

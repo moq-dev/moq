@@ -515,7 +515,7 @@ struct Present {
 	/// Whether the first poll decided who answers the peer's tokens.
 	started: bool,
 	/// The connection's own credential, held for the life of the session.
-	_setup: Option<crate::auth::Auth>,
+	_setup: Option<crate::auth::Credential>,
 }
 
 impl Present {

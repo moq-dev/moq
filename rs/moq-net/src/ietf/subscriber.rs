@@ -7299,7 +7299,7 @@ mod tests {
 		Subscriber,
 		crate::lite::test_transport::Log,
 		crate::auth::Link,
-		Vec<crate::auth::Auth>,
+		Vec<crate::auth::Credential>,
 		crate::util::TaskSet,
 	) {
 		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
@@ -7472,7 +7472,7 @@ mod tests {
 
 	/// A subscriber whose grant from the peer covers everything until `auth.ended(0, ..)`
 	/// revokes it, with the token handle to hold meanwhile.
-	fn revocable_auth() -> (crate::auth::Link, crate::auth::Auth) {
+	fn revocable_auth() -> (crate::auth::Link, crate::auth::Credential) {
 		let auth = crate::auth::Link::new(true);
 		let cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
 		auth.granted(0, crate::auth::Grant::all());
@@ -10731,7 +10731,7 @@ mod tests {
 	) -> (
 		Subscriber,
 		crate::auth::Requests,
-		crate::auth::Auth,
+		crate::auth::Credential,
 		origin::Consumer,
 		crate::lite::test_transport::ScriptedSession,
 	) {
@@ -10749,7 +10749,7 @@ mod tests {
 	) -> (
 		Subscriber,
 		crate::auth::Requests,
-		crate::auth::Auth,
+		crate::auth::Credential,
 		origin::Consumer,
 		S,
 	) {

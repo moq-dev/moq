@@ -8,7 +8,9 @@ import "dart:ffi";
 import "dart:io" show Platform, File, Directory;
 import "dart:isolate";
 import "dart:typed_data";
+
 import "package:ffi/ffi.dart";
+
 import "uniffi_runtime.dart";
 export "uniffi_runtime.dart";
 
@@ -8525,7 +8527,7 @@ class FfiConverterMoqAudioProducer {
 }
 
 abstract class MoqAuthInterface {
-  UniffiRustFuture<MoqAuthToken> add({required String token});
+  UniffiRustFuture<MoqCredential> add({required String token});
   MoqGrant? grant();
   UniffiRustFuture<MoqGrant?> grantChanged();
 }
@@ -8559,7 +8561,7 @@ class MoqAuth implements MoqAuthInterface {
     rustCall((status) => uniffi_moq_ffi_fn_free_moqauth(_ptr, status));
   }
 
-  UniffiRustFuture<MoqAuthToken> add({required String token}) {
+  UniffiRustFuture<MoqCredential> add({required String token}) {
     return uniffiRustCallAsync(
       () => uniffi_moq_ffi_fn_method_moqauth_add(
         uniffiClonePointer(),
@@ -8569,7 +8571,7 @@ class MoqAuth implements MoqAuthInterface {
       ffi_moq_ffi_rust_future_complete_u64,
       ffi_moq_ffi_rust_future_cancel_u64,
       ffi_moq_ffi_rust_future_free_u64,
-      (ptr) => FfiConverterMoqAuthToken.lift(Pointer<Void>.fromAddress(ptr)),
+      (ptr) => FfiConverterMoqCredential.lift(Pointer<Void>.fromAddress(ptr)),
       moqExceptionErrorHandler,
     );
   }
@@ -8623,31 +8625,31 @@ class FfiConverterMoqAuth {
   }
 }
 
-abstract class MoqAuthTokenInterface {
+abstract class MoqCredentialInterface {
   void cancel();
   UniffiRustFuture<void> closed();
   MoqGrant? grant();
 }
 
-final _MoqAuthTokenFinalizer = Finalizer<Pointer<Void>>((ptr) {
-  rustCall((status) => uniffi_moq_ffi_fn_free_moqauthtoken(ptr, status));
+final _MoqCredentialFinalizer = Finalizer<Pointer<Void>>((ptr) {
+  rustCall((status) => uniffi_moq_ffi_fn_free_moqcredential(ptr, status));
 });
 
-class MoqAuthToken implements MoqAuthTokenInterface {
+class MoqCredential implements MoqCredentialInterface {
   late final Pointer<Void> _ptr;
   bool _isDisposed = false;
-  MoqAuthToken._(this._ptr) {
-    _MoqAuthTokenFinalizer.attach(this, _ptr, detach: this);
+  MoqCredential._(this._ptr) {
+    _MoqCredentialFinalizer.attach(this, _ptr, detach: this);
   }
-  factory MoqAuthToken.lift(Pointer<Void> ptr) {
-    return MoqAuthToken._(ptr);
+  factory MoqCredential.lift(Pointer<Void> ptr) {
+    return MoqCredential._(ptr);
   }
   Pointer<Void> uniffiClonePointer() {
     if (_isDisposed) {
       throw StateError("Object has already been disposed");
     }
     return rustCall(
-      (status) => uniffi_moq_ffi_fn_clone_moqauthtoken(_ptr, status),
+      (status) => uniffi_moq_ffi_fn_clone_moqcredential(_ptr, status),
     );
   }
 
@@ -8656,13 +8658,13 @@ class MoqAuthToken implements MoqAuthTokenInterface {
       return;
     }
     _isDisposed = true;
-    _MoqAuthTokenFinalizer.detach(this);
-    rustCall((status) => uniffi_moq_ffi_fn_free_moqauthtoken(_ptr, status));
+    _MoqCredentialFinalizer.detach(this);
+    rustCall((status) => uniffi_moq_ffi_fn_free_moqcredential(_ptr, status));
   }
 
   void cancel() {
     return rustCall((status) {
-      uniffi_moq_ffi_fn_method_moqauthtoken_cancel(
+      uniffi_moq_ffi_fn_method_moqcredential_cancel(
         uniffiClonePointer(),
         status,
       );
@@ -8671,7 +8673,7 @@ class MoqAuthToken implements MoqAuthTokenInterface {
 
   UniffiRustFuture<void> closed() {
     return uniffiRustCallAsync(
-      () => uniffi_moq_ffi_fn_method_moqauthtoken_closed(uniffiClonePointer()),
+      () => uniffi_moq_ffi_fn_method_moqcredential_closed(uniffiClonePointer()),
       ffi_moq_ffi_rust_future_poll_void,
       ffi_moq_ffi_rust_future_complete_void,
       ffi_moq_ffi_rust_future_cancel_void,
@@ -8683,7 +8685,7 @@ class MoqAuthToken implements MoqAuthTokenInterface {
 
   MoqGrant? grant() {
     return rustCallWithLifter(
-      (status) => uniffi_moq_ffi_fn_method_moqauthtoken_grant(
+      (status) => uniffi_moq_ffi_fn_method_moqcredential_grant(
         uniffiClonePointer(),
         status,
       ),
@@ -8693,26 +8695,26 @@ class MoqAuthToken implements MoqAuthTokenInterface {
   }
 }
 
-class FfiConverterMoqAuthToken {
-  static MoqAuthToken lift(Pointer<Void> ptr) {
-    return MoqAuthToken.lift(ptr);
+class FfiConverterMoqCredential {
+  static MoqCredential lift(Pointer<Void> ptr) {
+    return MoqCredential.lift(ptr);
   }
 
-  static Pointer<Void> lower(MoqAuthToken value) {
+  static Pointer<Void> lower(MoqCredential value) {
     return value.uniffiClonePointer();
   }
 
-  static int allocationSize(MoqAuthToken value) {
+  static int allocationSize(MoqCredential value) {
     return 8;
   }
 
-  static LiftRetVal<MoqAuthToken> read(Uint8List buf) {
+  static LiftRetVal<MoqCredential> read(Uint8List buf) {
     final handle = buf.buffer.asByteData(buf.offsetInBytes).getInt64(0);
     final pointer = Pointer<Void>.fromAddress(handle);
-    return LiftRetVal(MoqAuthToken.lift(pointer), 8);
+    return LiftRetVal(MoqCredential.lift(pointer), 8);
   }
 
-  static int write(MoqAuthToken value, Uint8List buf) {
+  static int write(MoqCredential value, Uint8List buf) {
     final handle = lower(value);
     buf.buffer.asByteData(buf.offsetInBytes).setInt64(0, handle.address);
     return 8;
@@ -16631,7 +16633,7 @@ external Pointer<Void> uniffi_moq_ffi_fn_method_moqauth_grant_changed(
 @Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
-external Pointer<Void> uniffi_moq_ffi_fn_clone_moqauthtoken(
+external Pointer<Void> uniffi_moq_ffi_fn_clone_moqcredential(
   Pointer<Void> handle,
   Pointer<RustCallStatus> uniffiStatus,
 );
@@ -16639,7 +16641,7 @@ external Pointer<Void> uniffi_moq_ffi_fn_clone_moqauthtoken(
 @Native<Void Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
-external void uniffi_moq_ffi_fn_free_moqauthtoken(
+external void uniffi_moq_ffi_fn_free_moqcredential(
   Pointer<Void> handle,
   Pointer<RustCallStatus> uniffiStatus,
 );
@@ -16647,20 +16649,20 @@ external void uniffi_moq_ffi_fn_free_moqauthtoken(
 @Native<Void Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
-external void uniffi_moq_ffi_fn_method_moqauthtoken_cancel(
+external void uniffi_moq_ffi_fn_method_moqcredential_cancel(
   Pointer<Void> ptr,
   Pointer<RustCallStatus> uniffiStatus,
 );
 
 @Native<Pointer<Void> Function(Pointer<Void>)>(assetId: _uniffiAssetId)
-external Pointer<Void> uniffi_moq_ffi_fn_method_moqauthtoken_closed(
+external Pointer<Void> uniffi_moq_ffi_fn_method_moqcredential_closed(
   Pointer<Void> ptr,
 );
 
 @Native<RustBuffer Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
-external RustBuffer uniffi_moq_ffi_fn_method_moqauthtoken_grant(
+external RustBuffer uniffi_moq_ffi_fn_method_moqcredential_grant(
   Pointer<Void> ptr,
   Pointer<RustCallStatus> uniffiStatus,
 );
@@ -19451,13 +19453,13 @@ external int uniffi_moq_ffi_checksum_method_moqauth_grant();
 external int uniffi_moq_ffi_checksum_method_moqauth_grant_changed();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
-external int uniffi_moq_ffi_checksum_method_moqauthtoken_cancel();
+external int uniffi_moq_ffi_checksum_method_moqcredential_cancel();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
-external int uniffi_moq_ffi_checksum_method_moqauthtoken_closed();
+external int uniffi_moq_ffi_checksum_method_moqcredential_closed();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
-external int uniffi_moq_ffi_checksum_method_moqauthtoken_grant();
+external int uniffi_moq_ffi_checksum_method_moqcredential_grant();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqbandwidth_reserve();
@@ -20150,7 +20152,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqaudioproducer_write() != 48796) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqauth_add() != 1074) {
+  if (uniffi_moq_ffi_checksum_method_moqauth_add() != 56582) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqauth_grant() != 14588) {
@@ -20159,13 +20161,13 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqauth_grant_changed() != 38858) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqauthtoken_cancel() != 59324) {
+  if (uniffi_moq_ffi_checksum_method_moqcredential_cancel() != 47778) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqauthtoken_closed() != 40912) {
+  if (uniffi_moq_ffi_checksum_method_moqcredential_closed() != 21378) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqauthtoken_grant() != 31654) {
+  if (uniffi_moq_ffi_checksum_method_moqcredential_grant() != 23328) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqbandwidth_reserve() != 27807) {

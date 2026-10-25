@@ -1,6 +1,6 @@
 import { Instant, Milli, Nano, now, sleep } from "@moq/clock";
 import { type Dispose, type Getter, Once, race, Signal } from "@moq/signals";
-import type { Auth, Grant } from "../auth.ts";
+import type { Credential, Grant } from "../auth.ts";
 import { Gate } from "../auth_gate.ts";
 import type { AuthSession } from "../auth_session.ts";
 import { enforceGrant } from "../auth_session.ts";
@@ -128,7 +128,7 @@ interface Reprice {
 	from?: Cluster.Advert;
 	to?: Cluster.Advert;
 	/** The token the request should carry instead, when it changed. */
-	token?: Auth;
+	token?: Credential;
 }
 
 /** Whether two hop paths list the same hops in the same order. */
@@ -170,7 +170,7 @@ type NamespaceRequest = {
 	path: Path.Valid;
 	requestId: bigint;
 	stream: RequestStream;
-	auth?: Auth;
+	auth?: Credential;
 	reply?: Promise<Framed | undefined>;
 	updating?: boolean;
 };
@@ -192,7 +192,7 @@ interface Namespaces {
 
 /** The bytes a request carries for a token this session issued. */
 interface Carrier {
-	carried(token: Auth | undefined): Uint8Array | undefined;
+	carried(token: Credential | undefined): Uint8Array | undefined;
 	/** Bumps whenever one of the session's tokens ends, so a request carrying it drops it. */
 	readonly ended: Getter<number>;
 }
@@ -216,10 +216,10 @@ interface Target {
 	withdraw(key: Path.Valid): Promise<void>;
 
 	/** The token the peer holds a namespace under, or undefined when its advertisement carries none. */
-	held(key: Path.Valid): Auth | undefined;
+	held(key: Path.Valid): Credential | undefined;
 
 	/** The token an advertisement naming `auth` carries: only a request can carry one. */
-	carry(auth: Auth | undefined): Auth | undefined;
+	carry(auth: Credential | undefined): Credential | undefined;
 }
 
 /** What {@link Publisher.runGroup} needs to serve one group. */
@@ -1872,7 +1872,7 @@ export class Publisher {
 	}
 
 	/** `auth` when a request of this session can carry it. */
-	#carry(auth: Auth | undefined): Auth | undefined {
+	#carry(auth: Credential | undefined): Credential | undefined {
 		return this.#auth?.carried(auth) === undefined ? undefined : auth;
 	}
 

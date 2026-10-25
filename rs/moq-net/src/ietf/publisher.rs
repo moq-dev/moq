@@ -3500,7 +3500,7 @@ impl Publisher {
 		path: &crate::PathOwned,
 		suffix: crate::PathOwned,
 		params: ietf::AdvertParams,
-		auth: Option<crate::auth::Auth>,
+		auth: Option<crate::auth::Credential>,
 	) -> Result<Refused, Error> {
 		// Bounded, because an advertisement holds its stream for as long as the namespace
 		// lives: a peer whose concurrent-stream limit we have filled refuses this open, and
@@ -3620,7 +3620,7 @@ impl Publisher {
 		ns: &Namespaces,
 		suffix: &crate::PathOwned,
 		path: &crate::PathOwned,
-	) -> Option<(Advert, Option<crate::auth::Auth>)> {
+	) -> Option<(Advert, Option<crate::auth::Credential>)> {
 		let watch = ns.watched.get(suffix)?;
 		let advert = match ns.permitted(path) {
 			true => self.select(&watch.route, &ns.peer, ns.epochs),
@@ -3639,7 +3639,7 @@ impl Publisher {
 	}
 
 	/// The `AUTHORIZATION TOKEN` a request names `auth` with, by value.
-	fn request_token(&self, auth: &crate::auth::Auth) -> Option<super::token::RequestToken> {
+	fn request_token(&self, auth: &crate::auth::Credential) -> Option<super::token::RequestToken> {
 		let token = self.auth.token(auth)?;
 		Some(super::token::RequestToken(crate::setup::Token {
 			kind: crate::setup::Token::OUT_OF_BAND,
@@ -5731,7 +5731,7 @@ struct NamespaceRequest {
 	messages: super::request_stream::Messages,
 	/// The auth the peer holds the request under: the one it opened with, or the one
 	/// its last update carried. Held, so the credential stays presented while it does.
-	auth: Option<crate::auth::Auth>,
+	auth: Option<crate::auth::Credential>,
 	/// Waiting in [`Namespaces::updates`] for a request ID.
 	queued: bool,
 	/// When to give up on the update in flight, which has no answer yet.
@@ -12467,8 +12467,8 @@ mod serve_tests {
 
 	/// An auth handle whose session grant covers only `other`, so a SUBSCRIBE for `room`
 	/// falls to its request token. The presented credential is kept alive by the returned
-	/// [`crate::auth::Auth`].
-	fn auth_covering_other() -> (crate::auth::Link, crate::auth::Requests, crate::auth::Auth) {
+	/// [`crate::auth::Credential`].
+	fn auth_covering_other() -> (crate::auth::Link, crate::auth::Requests, crate::auth::Credential) {
 		let auth = crate::auth::Link::new(true);
 		let requests = auth.handle().requests();
 		let cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();

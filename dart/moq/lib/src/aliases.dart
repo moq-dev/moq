@@ -154,7 +154,7 @@ typedef ConnectionStats = MoqConnectionStats;
 typedef Auth = MoqAuth;
 
 /// One token presented with [Auth.add]; cancel it to withdraw the token.
-typedef AuthToken = MoqAuthToken;
+typedef Credential = MoqCredential;
 
 /// What the peer lets this side do: publish and subscribe patterns, and an expiry.
 typedef Grant = MoqGrant;
