@@ -395,9 +395,12 @@ fn a_log_append_wakes_a_reader_parked_on_its_channel() {
 		let mut index = 0;
 		let mut read = Vec::new();
 		block_on(wait(|waiter| {
-			while let Ok(Some(value)) = reader.get(index) {
-				read.push(*value);
-				index += 1;
+			{
+				let mut log = reader.read();
+				while let Ok(Some(value)) = log.get(index) {
+					read.push(*value);
+					index += 1;
+				}
 			}
 			if index == 2 {
 				return Poll::Ready(());
@@ -409,7 +412,8 @@ fn a_log_append_wakes_a_reader_parked_on_its_channel() {
 			};
 			consumer.poll(waiter, committed).map(|_| ())
 		}));
-		while let Ok(Some(value)) = reader.get(index) {
+		let mut log = reader.read();
+		while let Ok(Some(value)) = log.get(index) {
 			read.push(*value);
 			index += 1;
 		}
@@ -419,40 +423,40 @@ fn a_log_append_wakes_a_reader_parked_on_its_channel() {
 }
 
 /// A reader racing front eviction reads each entry correctly or learns it was evicted,
-/// across a segment boundary, whether it reaches a segment by link or by the list.
+/// and never touches a segment the collector freed: the free writes every slot, so a
+/// read it isn't ordered after fails the model. The reader keeps a hint into the first
+/// segment from an earlier read, which the eviction may free before its next one.
+///
+/// The collector's own atomics run under loom too (`crossbeam_loom`), which makes the
+/// full search intractable, so this one bounds preemptions like moq-net's models.
 #[test]
-fn a_log_reader_racing_eviction_never_misreads() {
-	loom::model(|| {
+fn a_log_reader_racing_eviction_never_touches_freed_memory() {
+	let mut builder = loom::model::Builder::new();
+	builder.preemption_bound.get_or_insert(3);
+	builder.check(|| {
 		let mut writer = crate::log::Writer::new(0);
-		for i in 0..5u64 {
+		for i in 0..2u64 {
 			writer.push(i);
 		}
-		// Pin every segment here, so each is dropped after the join: loom can't see
-		// through the std refcount that orders a drop after another thread's reads.
-		let pins: Vec<_> = [0, 1, 3]
-			.into_iter()
-			.map(|first| {
-				let mut pin = writer.reader();
-				assert_eq!(pin.get(first), Ok(Some(&first)));
-				pin
-			})
-			.collect();
-
 		let mut reader = writer.reader();
+		assert_eq!(reader.read().get(0), Ok(Some(&0)));
+
 		let racer = thread::spawn(move || {
-			for i in 0..5u64 {
-				match reader.get(i) {
+			for i in [0, 1] {
+				match reader.read().get(i) {
 					Ok(Some(value)) => assert_eq!(*value, i, "misread entry {i}"),
 					Ok(None) => panic!("entry {i} was committed"),
 					Err(_) => {}
 				}
 			}
-			reader
 		});
 
+		writer.evict(1);
 		writer.evict(2);
-		writer.evict(5);
-		drop(racer.join().unwrap());
-		drop(pins);
+		// Advance the collector so it may free the segments while the reader runs.
+		for _ in 0..2 {
+			crossbeam_epoch::pin().flush();
+		}
+		racer.join().unwrap();
 	});
 }

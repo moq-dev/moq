@@ -350,13 +350,15 @@ fn bench_log_lockfree(c: &mut Criterion) {
 						.collect();
 					Box::new(move || {
 						for (reader, log) in &mut set {
-							let Ok(Some(frame)) = log.get(reader.seen) else {
-								panic!("an appended frame must be ready");
-							};
-							black_box(frame.clone());
-							reader.seen += 1;
-
-							assert_eq!(log.get(reader.seen), Ok(None));
+							{
+								let mut read = log.read();
+								let Ok(Some(frame)) = read.get(reader.seen) else {
+									panic!("an appended frame must be ready");
+								};
+								black_box(frame.clone());
+								reader.seen += 1;
+								assert_eq!(read.get(reader.seen), Ok(None));
+							}
 							let cursor = reader.seen;
 							let next = |log: &kio::Ref<'_, kio::log::Writer<Frame>>| match log.end() > cursor {
 								true => Poll::Ready(()),

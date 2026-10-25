@@ -4,25 +4,27 @@
 //! and lock operation so the model checker can permute the interleavings. Normal
 //! builds get `std::sync` and this module compiles away.
 //!
-//! Loom's `Arc` has no `downgrade`, so the places that need a `Weak` keep std's:
-//! [`crate::lock`] (for `WeakLock`), [`crate::waiter`] (whose list holds weak waker
-//! handles), and [`crate::log`] (whose segments link to the next by `Weak`). They
-//! still hold loom's `Mutex` and atomics, which are what order one handle against
+//! Loom's `Arc` has no `downgrade`, so the two places that need a `Weak` keep std's:
+//! [`crate::lock`] (for `WeakLock`) and [`crate::waiter`] (whose list holds weak waker
+//! handles). Both still hold loom's `Mutex`, which is what orders one handle against
 //! another; only the refcount itself goes unpermuted. The `Arc<Counts>` that carries
 //! the producer/consumer counts is loom's.
+//!
+//! [`crate::log`] frees segments through `crossbeam-epoch`, which `--cfg crossbeam_loom`
+//! puts under loom as well.
 
 #[cfg(loom)]
 pub(crate) use loom::{
 	cell::UnsafeCell,
 	sync::{
 		Arc, Mutex, MutexGuard,
-		atomic::{AtomicBool, AtomicU64, AtomicUsize},
+		atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize},
 	},
 };
 #[cfg(not(loom))]
 pub(crate) use std::sync::{
 	Arc, Mutex, MutexGuard,
-	atomic::{AtomicBool, AtomicU64, AtomicUsize},
+	atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize},
 };
 
 /// `std::cell::UnsafeCell` behind loom's closure API, so loom can check every access.

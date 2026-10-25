@@ -883,8 +883,8 @@ impl GroupState {
 	/// With `salvage`, the committed frames move to the readers that could resume the
 	/// group elsewhere, if any are left, instead of being dropped.
 	///
-	/// A cursor reading the log keeps the segment it last read until its next read sees
-	/// the release, so a cursor that stopped reading pins at most one segment of frames.
+	/// The log frees its frames once no read already running can reach them, whether or
+	/// not a cursor ever reads again.
 	fn release(&mut self, salvage: bool) {
 		let handoff = match salvage && !self.is_empty() && !self.sparse() {
 			true => self.handoff.lock().unwrap_or_else(PoisonError::into_inner).upgrade(),
@@ -2349,9 +2349,10 @@ impl Prefetch {
 	/// group inflates under the guard instead, through [`Self::fill`].
 	fn fill_log(&mut self, log: &mut kio::log::Reader<Entry>, index: usize, budget: usize, compressed: bool) -> usize {
 		self.reset(compressed);
+		let mut read = log.read();
 		for index in (index as u64..).take(budget.min(Self::CAP)) {
 			// Evicted or not yet committed: the guard resolves which.
-			let Ok(Some(entry)) = log.get(index) else {
+			let Ok(Some(entry)) = read.get(index) else {
 				break;
 			};
 			self.push(entry, compressed);
@@ -3112,6 +3113,7 @@ impl Cursor {
 		let committed = match !self.compressed || raw {
 			true => self
 				.log
+				.read()
 				.get(index as u64)
 				.ok()
 				.flatten()
