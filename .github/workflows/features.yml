@@ -36,4 +36,4 @@ jobs:
         run: nix develop --command just ${{ matrix.recipe }}
         env:
           NEXTEST_PROFILE: ci
-          MOQ_STRICT: 1
+          CI_STRICT: 1

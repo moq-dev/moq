@@ -631,8 +631,9 @@ impl SubscriberDriver {
 		self.cleanup.close();
 	}
 
-	/// Read only the closed transport's buffered uni streams. Control machines
-	/// stay owned, so their cancellation guards cannot remove subscription state.
+	/// Read what the closed transport already delivered: the buffered uni streams, then
+	/// the subscribe responses. Serve machines wait for the group streams, since ending a
+	/// subscription removes the state their tails are delivered into.
 	pub fn poll_drain(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		let closed = self.uni.poll(waiter).is_ready();
 		let _ = self.uni.children.poll(waiter);
@@ -640,11 +641,14 @@ impl SubscriberDriver {
 		// them can deliver it: the peer can open no more.
 		let stuck = self.subscriber.peer_setup.ietf().is_none()
 			&& self.uni.children.len() == self.subscriber.setup_waits.load(atomic::Ordering::Relaxed);
-		if closed && (self.uni.children.is_empty() || stuck) {
-			Poll::Ready(())
-		} else {
-			Poll::Pending
+		if !closed || !(self.uni.children.is_empty() || stuck) {
+			return Poll::Pending;
 		}
+		// The peer's close can win the race against a SUBSCRIBE FIN it sent first, and on
+		// Lite03/04 that FIN is the only end: read it, so the track finishes rather than
+		// aborts. Each source reads its streams once, then retires on the closed session.
+		let _ = self.sources.poll(waiter);
+		Poll::Ready(())
 	}
 
 	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
@@ -1831,7 +1835,6 @@ impl AnnouncePrefix {
 
 /// A source the announce half minted for one requested path, for the driver to serve.
 struct MintedSource {
-	validity: crate::model::broadcast::RequestValidity,
 	path: PathOwned,
 	/// The publisher instance the route announced, asked for on every request.
 	epoch: Option<crate::Epoch>,
@@ -1843,12 +1846,12 @@ struct MintedSource {
 }
 
 /// Serves the origin's track requests for one minted source until it closes: its
-/// route goes, nothing holds it any more, or the session dies. A closed source
+/// route goes, the peer stops selecting its instance, nothing holds it any more, or
+/// the session dies. A closed source
 /// takes no new tracks but lets those in flight run to their own end (moq-lite:
 /// retraction does not disturb subscriptions already in flight); the session
 /// dying drops them.
 struct SourceServe {
-	validity: crate::model::broadcast::RequestValidity,
 	subscriber: Subscriber,
 	path: PathOwned,
 	epoch: Option<crate::Epoch>,
@@ -1966,7 +1969,6 @@ impl SourceServe {
 				.expect("only the source answers its broadcast's listings"),
 			listing: None,
 			subscriber,
-			validity: minted.validity,
 			path: minted.path,
 			epoch: minted.epoch,
 			source: minted.source,
@@ -2005,7 +2007,7 @@ impl SourceServe {
 							crate::auth::Direction::Subscribe,
 						),
 						admitted: false,
-						validity: self.validity.start(),
+						validity: self.dynamic.validity().start(),
 					});
 				}
 				Some(_) if self.lister.poll_unused(waiter).is_ready() => {
@@ -2057,7 +2059,7 @@ impl kio::Task for SourceServe {
 			match self.dynamic.poll_requested_track(waiter) {
 				Poll::Ready(Ok(request)) => {
 					let serve = TrackServe {
-						validity: self.validity.clone(),
+						validity: self.dynamic.validity().clone(),
 						route: Some(self.route.clone()),
 						subscriber: self.subscriber.clone(),
 						path: self.path.clone(),
@@ -3856,6 +3858,58 @@ mod tests {
 		}
 	}
 
+	#[moq_clock::test]
+	async fn a_claimed_fetch_waits_only_while_wanted() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			for end in ["credit", "unused", "retired"] {
+				let session = crate::lite::test_transport::ScriptedSession::new(Vec::new()).without_credit();
+				let subscriber = Subscriber::new(SubscriberConfig {
+					runtime: crate::time::sim(),
+					session: crate::driver::Transport::new(session.clone()),
+					origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+					recv_bandwidth: None,
+					version,
+					peer_setup: lite::PeerSetup::new(false, crate::transport::Binding::InBand),
+					peer_hop: None,
+					cost: None,
+					going_away: Default::default(),
+					auth: crate::auth::Link::new(false),
+				});
+				let route = kio::Producer::new(());
+				let serve = TrackServe {
+					validity: crate::model::broadcast::RequestValidity::token(Some(route.consume())),
+					route: None,
+					subscriber,
+					path: Path::new("room").to_owned(),
+					epoch: None,
+					name: "video".into(),
+				};
+				let info = track::Info::default().with_timescale(None);
+				let track = track::Producer::new(Arc::new(crate::broadcast::Info::default()), "video", info.clone());
+				let dynamic = track.dynamic();
+				let fetch = track.consume().fetch_group(4, None);
+				let request = dynamic.requested_fill_group().await.unwrap();
+				let mut run = FetchServeRun::new(serve, request, info);
+				let waiter = kio::Waiter::noop();
+				assert!(kio::Task::poll(&mut run, &waiter).is_pending(), "{version}: {end}");
+				assert_eq!(session.log.bi_opens(), 0);
+				if end == "credit" {
+					session.grant_credit();
+					assert!(kio::Task::poll(&mut run, &waiter).is_pending());
+					assert_eq!(session.log.bi_opens(), 1, "credit releases the FETCH");
+				}
+				if end == "retired" {
+					drop(route);
+					assert!(kio::Task::poll(&mut run, &waiter).is_ready());
+					assert!(matches!(fetch.await, Err(Error::Unroutable)));
+				} else {
+					drop(fetch);
+					assert!(kio::Task::poll(&mut run, &waiter).is_ready(), "{version}: {end}");
+				}
+			}
+		}
+	}
+
 	/// A track still waiting on TRACK_INFO ends once nobody wants it, whether its TRACK
 	/// transport header never finished, its request is stuck in
 	/// send, or its peer never answers.
@@ -3938,14 +3992,13 @@ mod tests {
 			going_away: Default::default(),
 			auth,
 		});
-		let broadcast = crate::broadcast::Info::new().produce();
+		let broadcast = crate::broadcast::Info::new().produce().with_validity(validity);
 		let consumer = broadcast.consume();
 		let dynamic = broadcast.dynamic();
 		let route = kio::Producer::new(());
 		let serve = SourceServe::new(
 			subscriber,
 			MintedSource {
-				validity,
 				path: Path::new("room").to_owned(),
 				epoch: None,
 				source: crate::model::broadcast::SourceGuard::new(broadcast),
@@ -3984,7 +4037,7 @@ mod tests {
 	}
 
 	/// An instance retired while its listing waits for a token lists nothing: a TRACKS
-	/// request without an epoch would list its replacement.
+	/// request without an epoch would list its replacement. The source ends with it.
 	#[moq_clock::test]
 	async fn a_listing_of_a_retired_instance_never_reaches_the_wire() {
 		let auth = crate::auth::Link::new(true);
@@ -3999,7 +4052,7 @@ mod tests {
 		assert!(kio::Task::poll(&mut serve, &kio::Waiter::noop()).is_pending());
 		drop(selected);
 		drop(token);
-		assert!(kio::Task::poll(&mut serve, &kio::Waiter::noop()).is_pending());
+		assert!(kio::Task::poll(&mut serve, &kio::Waiter::noop()).is_ready());
 		assert!(matches!(tracks.next().now_or_never(), Some(Err(Error::Unroutable))));
 		assert_eq!(session.log.bi_opens(), 0);
 	}
@@ -6091,20 +6144,21 @@ impl Announced {
 					continue;
 				};
 				let path = path.to_owned();
-				let source = subscriber.origin.create_source(&path);
-				// The handler exists before the requester sees the source, so a track it
-				// asks for before the serve machine first runs queues instead of failing
-				// `NotFound`. Accepted before the push, so the requester holds the source
-				// before its serve machine can see it unheld.
-				let dynamic = source.dynamic();
+				// A request naming the epoch reaches only that instance, so only a source
+				// without one must stop once the peer no longer selects what minted it.
 				let validity = if entry.route.epoch.is_some() {
 					Default::default()
 				} else {
 					crate::model::broadcast::RequestValidity::for_source(&entry.dynamic, request.path())
 				};
+				let source = subscriber.origin.create_source(&path, validity);
+				// The handler exists before the requester sees the source, so a track it
+				// asks for before the serve machine first runs queues instead of failing
+				// `NotFound`. Accepted before the push, so the requester holds the source
+				// before its serve machine can see it unheld.
+				let dynamic = source.dynamic();
 				request.accept(&source);
 				let _ = subscriber.sources.try_push(MintedSource {
-					validity,
 					path,
 					epoch: entry.route.epoch.clone(),
 					source: crate::model::broadcast::SourceGuard::new(source),
@@ -6722,7 +6776,18 @@ impl kio::Task for TrackServeRun {
 		}
 		ready!(self.gate.poll_ready(waiter));
 		// A finished track only waits for its FIN to be acknowledged: nothing is left to revoke.
-		if !matches!(self.state, TrackRunState::Finish(_)) && self.gate.poll_denied(waiter).is_ready() {
+		// Nor on a closed session, whose grants end with it: the session's end decides how
+		// its tracks end.
+		if !matches!(self.state, TrackRunState::Finish(_))
+			&& self.gate.poll_denied(waiter).is_ready()
+			&& self
+				.serve
+				.subscriber
+				.session
+				.clone()
+				.poll_closed(&mut waiter.context())
+				.is_pending()
+		{
 			self.revoke();
 			return Poll::Ready(());
 		}
@@ -7745,7 +7810,9 @@ impl kio::Task for FetchServeRun {
 			match &mut self.state {
 				FetchRunState::Open { request } => {
 					ready!(self.gate.poll_ready(waiter));
-					let mut stream = match ready!(Stream::poll_open_request(
+					// The fill already has readers holding its demand. Backpressure keeps their
+					// owned request alive; abandoning it above releases this wait too.
+					let mut stream = match ready!(Stream::poll_open(
 						&mut self.session,
 						self.serve.subscriber.version,
 						&mut cx
@@ -7759,7 +7826,7 @@ impl kio::Task for FetchServeRun {
 						}
 					};
 
-					// Only once the stream opens: its header can wait for send capacity and
+					// Only once the stream opens: credit and its header can wait, and
 					// re-polls this state, so logging before it repeats per poll.
 					tracing::debug!(broadcast = %self.serve.subscriber.log_path(&self.serve.path), track = %self.serve.name, group = self.group, "fetch started");
 

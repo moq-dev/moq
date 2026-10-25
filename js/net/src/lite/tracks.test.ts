@@ -7,6 +7,7 @@ import { accept, connect } from "../connection/index.ts";
 import * as Epoch from "../epoch.ts";
 import { fromTransport, NotFound, SessionCode, StreamCode, StreamError } from "../error.ts";
 import { randomHop } from "../hop.ts";
+import { hooks } from "../internal.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -412,7 +413,7 @@ test("a path served through a covering prefix route is NOT_FOUND", async () => {
 		for await (const request of dynamic.requested()) {
 			const served = new BroadcastProducer();
 			served.createTrack("video");
-			request.accept(served);
+			hooks.acceptRequest(request, served);
 		}
 	})();
 	const { list } = publisher(origin);
@@ -429,7 +430,7 @@ test("a local read through a covering prefix route is NOT_FOUND, and through its
 			for await (const request of dynamic.requested()) {
 				const served = new BroadcastProducer();
 				served.createTrack("video");
-				request.accept(served);
+				hooks.acceptRequest(request, served);
 			}
 		})();
 	}
@@ -529,7 +530,7 @@ test("an epoch-pinned front served through a covering prefix route is NOT_FOUND"
 		for await (const request of dynamic.requested()) {
 			const served = new BroadcastProducer();
 			served.createTrack("video");
-			request.accept(served);
+			hooks.acceptRequest(request, served);
 		}
 	})();
 	const request = origin.consume().request(Path.from("room/alice"));
