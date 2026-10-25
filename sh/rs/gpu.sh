@@ -47,10 +47,11 @@ for vendor in "${!vendors[@]}"; do
             esac
             LD_LIBRARY_PATH="$loader/lib" VK_DRIVER_FILES="${icd[0]}" MOQ_GPU_VENDOR="$vendor" \
                 just rs test -p moq-video --run-ignored only -E 'test(vulkan_gpu_device)'
-            # A real driver exports memory where Mesa's software one cannot.
+            # A real driver exports memory where Mesa's software one cannot, so an
+            # encoder that cannot read the export is passed over after it opens.
             LD_LIBRARY_PATH="$loader/lib" VK_DRIVER_FILES="${icd[0]}" \
-                just rs test -p moq-video --features render --lib --run-ignored only \
-                -E 'test(=render::export::vulkan::tests::vulkan_export_round_trips)'
+                just rs test -p moq-video --features render,openh264 --lib --run-ignored only \
+                -E 'test(=render::export::vulkan::tests::vulkan_export_round_trips) | test(/^render::export::tests::(choosing_passes_over|a_named_encoder)_/)'
             echo "GPU $vendor: Vulkan driver verified; encoder hardware tests arrive with its backend"
             ;;
     esac

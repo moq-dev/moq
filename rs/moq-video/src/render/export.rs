@@ -6,9 +6,10 @@
 //! so the caller keeps drawing into its texture; [`Pending::wait`] then waits for
 //! the GPU on whatever thread encodes, and hands back the frame.
 //!
-//! [`Exporter::new`] settles the [`Route`] once, from the encoder it probes.
-//! An encoder that reads this platform's GPU surface in place takes
-//! [`Route::Gpu`], where a slot is that surface:
+//! [`Exporter::new`] settles the encoder and the [`Route`] once, probing each
+//! encoder the config allows with a frame this device exports. An encoder that
+//! reads this platform's GPU surface in place takes [`Route::Gpu`], where a slot
+//! is that surface:
 //!
 //! - Linux, on a Vulkan device: an exportable image and timeline semaphore,
 //!   handed over as `Surface::Vulkan`. NVENC imports it on the same GPU.
@@ -21,9 +22,10 @@
 //!
 //! Every other encoder reads frames on the CPU, so it takes
 //! [`Route::Readback`]: each slot is a staging buffer and the frame is read back
-//! as I420. Neither route falls back to the other. A device that cannot export
-//! the surface its encoder reads fails [`Exporter::new`], and a copy that fails
-//! on the GPU is an error.
+//! as I420. An encoder never switches routes. Choosing among encoders passes over
+//! one that cannot read this device's surface (NVENC with the device on another
+//! GPU), but one asked for by name fails [`Exporter::new`] instead, and a copy
+//! that fails on the GPU is an error.
 // The variants are deliberately not doc links: each exists on one platform, so
 // a link fails the `-D warnings` rustdoc build on every other.
 
@@ -44,6 +46,14 @@ mod vulkan;
 
 fn err(message: impl std::fmt::Display) -> Error {
 	Error::Render(anyhow::anyhow!("{message}"))
+}
+
+/// An encoder [`Exporter::new`] may settle on.
+struct Candidate {
+	name: &'static str,
+	hardware: bool,
+	/// Whether it reads this platform's GPU surface, so it takes [`Route::Gpu`].
+	gpu: bool,
 }
 
 /// How an [`Exporter`] hands frames to the encoder.
@@ -80,54 +90,135 @@ impl Exporter {
 	/// spare so a slow encode does not drop the very next picture.
 	pub const DEPTH: usize = 3;
 
-	/// Export textures drawn on `device` to the encoder `config` opens, and
+	/// Export textures drawn on `device` to an encoder `config` allows, and
 	/// return the rendition it produces.
 	///
-	/// Probes the encoder as [`encode::Config::probe`](crate::encode::Config::probe)
-	/// does, and takes [`Route::Gpu`] when it reads this platform's GPU surface,
-	/// [`Route::Readback`] otherwise. Textures are `config`'s size. On Linux this
-	/// sets [`encode::Config::input`](crate::encode::Config::input) to the
-	/// exported image's device, or clears it for a readback, so open the encoder
-	/// with `config` as this leaves it.
+	/// Tries the encoders [`encode::Config::kind`](crate::encode::Config::kind)
+	/// allows in priority order, probing each as
+	/// [`encode::Config::probe`](crate::encode::Config::probe) does but with a
+	/// frame exported from `device`. One that reads this platform's GPU surface
+	/// takes [`Route::Gpu`], and only when it encodes `device`'s export; one that
+	/// reads frames on the CPU takes [`Route::Readback`]. So on a machine with two
+	/// GPUs, [`Kind::Auto`](crate::encode::Kind::Auto) passes over NVENC when
+	/// `device` is not on the NVIDIA GPU and settles on an encoder that reads
+	/// frames back, rather than failing.
+	///
+	/// Textures are `config`'s size. This leaves `config.kind` naming the
+	/// encoder it settled on, and on Linux
+	/// [`encode::Config::input`](crate::encode::Config::input) naming the device
+	/// that encoder reads, so open the encoder with `config` as this leaves it.
 	///
 	/// # Errors
 	///
-	/// Fails when no encoder takes `config`, or when the encoder reads GPU
-	/// surfaces and `device` cannot export one, naming what is missing. On Linux
-	/// open the device with [`request_device`](super::request_device), since
-	/// wgpu leaves out the extension that shares a semaphore.
+	/// Fails when no encoder `config` allows takes this export. One named in
+	/// [`Kind::Named`](crate::encode::Kind::Named) that reads GPU surfaces fails
+	/// when it cannot read `device`'s, naming what is missing: on Linux open the
+	/// device with [`request_device`](super::request_device), which enables the
+	/// extension that shares a semaphore, on the GPU the encoder runs on. Also
+	/// fails for an [`encode::Config::color`](crate::encode::Config::color) other
+	/// than [`Color::infer`](crate::Color::infer)'s, the space this converts to.
 	pub async fn new(
 		device: &wgpu::Device,
 		queue: &wgpu::Queue,
 		config: &mut crate::encode::Config,
 	) -> Result<(Self, hang::catalog::VideoConfig), Error> {
-		#[cfg(target_os = "linux")]
-		{
-			config.input = None;
+		let candidates = crate::encode::backend::candidates(config.codec, &config.kind);
+		if candidates.is_empty() {
+			return Err(crate::encode::backend::missing(config.codec, &config.kind));
 		}
-		let (rendition, sink) = config.probe_sink().await?;
-		let encoder = sink.name().to_owned();
-		// Only one encoder session at a time, as `probe` asks.
-		drop(sink);
-		if !crate::encode::backend::reads_export(&encoder) {
-			return Ok((Self::open(device, queue, config.size(), Route::Readback)?, rendition));
+		let candidates = candidates.into_iter().map(|(name, hardware)| Candidate {
+			name,
+			hardware,
+			gpu: crate::encode::backend::reads_export(name),
+		});
+		Self::settle(device, queue, config, candidates).await
+	}
+
+	/// [`new`](Self::new) over `candidates` in priority order, which a test
+	/// supplies rather than hoping the host has the right GPUs.
+	async fn settle(
+		device: &wgpu::Device,
+		queue: &wgpu::Queue,
+		config: &mut crate::encode::Config,
+		candidates: impl IntoIterator<Item = Candidate>,
+	) -> Result<(Self, hang::catalog::VideoConfig), Error> {
+		let color = crate::Color::infer(config.size());
+		if let Some(configured) = config.color
+			&& configured != color
+		{
+			return Err(Error::Unsupported(format!(
+				"the export converts to {color:?}, not the configured {configured:?}; leave encode::Config::color unset"
+			)));
 		}
 
-		let exporter = Self::open(device, queue, config.size(), Route::Gpu).map_err(|e| {
-			err(format!(
-				"{encoder} encodes GPU frames, but this device cannot export them: {e}"
-			))
-		})?;
-		// The encoder opens on the image's GPU, which need not be the one it
-		// picked for CPU frames, so it is probed again there.
+		let auto = matches!(config.kind, crate::encode::Kind::Auto);
+		let mut refused = Vec::new();
+		for candidate in candidates {
+			let name = candidate.name;
+			let mut attempt = config.clone();
+			attempt.kind = crate::encode::Kind::Named(name.to_owned());
+			let route = match candidate.gpu {
+				true => Route::Gpu,
+				false => Route::Readback,
+			};
+			match Self::probe(device, queue, &mut attempt, route).await {
+				Ok((exporter, rendition)) => {
+					// Pinned by name, the encoder no longer warns about this itself.
+					if auto && !candidate.hardware && !refused.is_empty() {
+						tracing::warn!(
+							encoder = name,
+							refused = %refused.join("; "),
+							"no hardware encoder takes the export, falling back to software"
+						);
+					}
+					tracing::info!(encoder = name, ?route, "exporting to the encoder");
+					*config = attempt;
+					return Ok((exporter, rendition));
+				}
+				Err(e) if candidate.gpu => {
+					tracing::debug!(
+						encoder = name,
+						error = %e,
+						"encoder cannot read this device's export, trying next"
+					);
+					refused.push(format!(
+						"{name} cannot encode this device's export ({e}); if {name} runs on another \
+						 GPU, open the device there with moq_video::render::request_device, or pick \
+						 an encoder that reads CPU frames"
+					));
+				}
+				Err(e) => {
+					tracing::debug!(encoder = name, error = %e, "encoder unavailable, trying next");
+					refused.push(format!("{name}: {e}"));
+				}
+			}
+		}
+		Err(Error::NoEncoder(refused.join("; ")))
+	}
+
+	/// Export over `route` to the encoder `config` names, proving it encodes a
+	/// frame this exports.
+	async fn probe(
+		device: &wgpu::Device,
+		queue: &wgpu::Queue,
+		config: &mut crate::encode::Config,
+		route: Route,
+	) -> Result<(Self, hang::catalog::VideoConfig), Error> {
+		let size = config.size();
+		let mut exporter = Self::open(device, queue, size, route)?;
 		#[cfg(target_os = "linux")]
-		let rendition = {
+		{
 			config.input = exporter.input();
-			config
-				.probe()
-				.await
-				.map_err(|e| err(format!("{encoder} cannot encode the exported image: {e}")))?
-		};
+		}
+		// Mid-gray, as the encoder's own probe draws.
+		let gray = texture(device, queue, size, [0x80, 0x80, 0x80, 0xff]);
+		let frame = exporter
+			.copy(&gray, Timestamp::ZERO)?
+			.ok_or_else(|| err("a new exporter had no free slot"))?
+			.wait()?;
+		let (rendition, sink) = config.probe_frame(frame).await?;
+		// Only one encoder session at a time, as `probe` asks.
+		drop(sink);
 		Ok((exporter, rendition))
 	}
 
@@ -411,6 +502,32 @@ fn extent(size: Size) -> wgpu::Extent3d {
 	}
 }
 
+/// A `size` texture an exporter takes, filled with `rgba` in every pixel.
+fn texture(device: &wgpu::Device, queue: &wgpu::Queue, size: Size, rgba: [u8; 4]) -> wgpu::Texture {
+	let texture = device.create_texture(&wgpu::TextureDescriptor {
+		label: Some("moq-video export"),
+		size: extent(size),
+		mip_level_count: 1,
+		sample_count: 1,
+		dimension: wgpu::TextureDimension::D2,
+		format: wgpu::TextureFormat::Rgba8Unorm,
+		usage: wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+		view_formats: &[],
+	});
+	let pixels: Vec<u8> = rgba.repeat((size.width * size.height) as usize);
+	queue.write_texture(
+		texture.as_image_copy(),
+		&pixels,
+		wgpu::TexelCopyBufferLayout {
+			offset: 0,
+			bytes_per_row: Some(size.width * 4),
+			rows_per_image: Some(size.height),
+		},
+		extent(size),
+	);
+	texture
+}
+
 /// Draws a texture into a same-sized render target of another format, pixel
 /// for pixel, for the routes whose slots are not RGBA.
 #[cfg(target_os = "windows")]
@@ -552,32 +669,6 @@ pub(crate) mod tests {
 		)
 	}
 
-	/// A `size` texture an exporter takes, filled with `rgba` in every pixel.
-	pub(crate) fn texture(device: &wgpu::Device, queue: &wgpu::Queue, size: Size, rgba: [u8; 4]) -> wgpu::Texture {
-		let texture = device.create_texture(&wgpu::TextureDescriptor {
-			label: Some("moq-video export test"),
-			size: extent(size),
-			mip_level_count: 1,
-			sample_count: 1,
-			dimension: wgpu::TextureDimension::D2,
-			format: wgpu::TextureFormat::Rgba8Unorm,
-			usage: wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-			view_formats: &[],
-		});
-		let pixels: Vec<u8> = rgba.repeat((size.width * size.height) as usize);
-		queue.write_texture(
-			texture.as_image_copy(),
-			&pixels,
-			wgpu::TexelCopyBufferLayout {
-				offset: 0,
-				bytes_per_row: Some(size.width * 4),
-				rows_per_image: Some(size.height),
-			},
-			extent(size),
-		);
-		texture
-	}
-
 	/// Tightly packed RGBA rows of a `COPY_SRC` texture.
 	#[cfg(target_os = "linux")]
 	pub(crate) fn pixels(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Texture) -> Vec<u8> {
@@ -644,6 +735,7 @@ pub(crate) mod tests {
 			"{} was handed the wrong route",
 			encoder.name()
 		);
+		assert_eq!(config.kind, crate::encode::Kind::Named(encoder.name().into()));
 		#[cfg(target_os = "linux")]
 		assert_eq!(config.input, exporter.input());
 
@@ -652,6 +744,70 @@ pub(crate) mod tests {
 		let mut encoded = encoder.encode(&frame).unwrap();
 		encoded.extend(encoder.finish().unwrap());
 		assert!(encoded.first().is_some_and(|encoded| encoded.keyframe));
+	}
+
+	/// OpenH264 standing in for NVENC with the device on another GPU: an encoder
+	/// that reads Vulkan images, but cannot read this device's, since it imports
+	/// none (and Mesa's software driver exports none).
+	#[cfg(target_os = "linux")]
+	const FOREIGN: Candidate = Candidate {
+		name: "openh264",
+		hardware: true,
+		gpu: true,
+	};
+
+	/// Choosing an encoder passes over one that cannot read this device's export
+	/// and settles on one that reads frames back, the hybrid-GPU laptop's default.
+	#[cfg(all(target_os = "linux", feature = "openh264"))]
+	#[tokio::test]
+	#[ignore = "needs a GPU and OpenH264; run by just rs render-sw"]
+	async fn choosing_passes_over_an_encoder_that_cannot_read_this_device() {
+		let (device, queue) = gpu().await.expect("a GPU adapter");
+		let mut config = crate::encode::Config::new(64, 64, crate::FrameRate::new(30, 1).unwrap());
+		let readback = Candidate {
+			name: "openh264",
+			hardware: false,
+			gpu: false,
+		};
+		let (exporter, _) = Exporter::settle(&device, &queue, &mut config, [FOREIGN, readback])
+			.await
+			.unwrap();
+		assert_eq!(exporter.route(), Route::Readback);
+		assert_eq!(config.kind, crate::encode::Kind::Named("openh264".into()));
+		assert_eq!(config.input, None);
+	}
+
+	/// An encoder asked for by name that cannot read this device's export fails
+	/// at setup, naming the fix, rather than reading back.
+	#[cfg(target_os = "linux")]
+	#[tokio::test]
+	#[ignore = "needs a GPU; run by just rs render-sw"]
+	async fn a_named_encoder_that_cannot_read_this_device_fails_at_setup() {
+		let (device, queue) = gpu().await.expect("a GPU adapter");
+		let mut config = crate::encode::Config::new(64, 64, crate::FrameRate::new(30, 1).unwrap());
+		config.kind = crate::encode::Kind::Named(FOREIGN.name.into());
+		let Err(err) = Exporter::settle(&device, &queue, &mut config, [FOREIGN]).await else {
+			panic!("exported to an encoder that cannot read this device");
+		};
+		let err = err.to_string();
+		assert!(
+			err.contains("open the device there with moq_video::render::request_device"),
+			"{err}"
+		);
+	}
+
+	/// The export converts to the space a player assumes for its size, so a
+	/// config labelled otherwise is refused before any encoder opens.
+	#[tokio::test]
+	#[ignore = "needs a GPU; run by just rs render-sw"]
+	async fn refuses_a_color_it_does_not_convert_to() {
+		let (device, queue) = gpu().await.expect("a GPU adapter");
+		let mut config = crate::encode::Config::new(640, 480, crate::FrameRate::new(30, 1).unwrap());
+		config.color = Some(crate::Color::BT709);
+		let Err(err) = Exporter::new(&device, &queue, &mut config).await else {
+			panic!("exported BT.601 pixels under a BT.709 label");
+		};
+		assert!(matches!(err, Error::Unsupported(_)), "{err}");
 	}
 
 	/// A texture of another size or format is refused rather than misread.

@@ -188,7 +188,8 @@ mod tests {
 	use super::*;
 	use crate::Size;
 	use crate::render::export::extent;
-	use crate::render::export::tests::{gpu, texture};
+	use crate::render::export::tests::gpu;
+	use crate::render::export::texture;
 
 	/// Every pixel of a `format` texture, in tightly packed rows.
 	async fn read(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Texture) -> Vec<u8> {

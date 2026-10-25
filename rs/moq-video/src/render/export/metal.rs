@@ -293,7 +293,8 @@ mod tests {
 
 	use super::*;
 	use crate::render::export::Route;
-	use crate::render::export::tests::{center, gpu, near, texture};
+	use crate::render::export::tests::{center, gpu, near};
+	use crate::render::export::texture;
 
 	/// VideoToolbox takes the export as the IOSurface it was drawn into, and the
 	/// picture survives the conversion to NV12.

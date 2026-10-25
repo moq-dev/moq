@@ -342,6 +342,16 @@ pub(crate) fn always_cuts(codec: Codec, kind: &Kind) -> bool {
 	!attempts.is_empty() && attempts.iter().all(|attempt| attempt.candidate.cuts)
 }
 
+/// The encoders [`open`] tries for `codec` + `kind`, in order: each name, and
+/// whether it is hardware.
+#[cfg_attr(not(feature = "render"), allow(dead_code, reason = "only the render export asks"))]
+pub(crate) fn candidates(codec: Codec, kind: &Kind) -> Vec<(&'static str, bool)> {
+	attempts(codec, kind)
+		.iter()
+		.map(|attempt| (attempt.candidate.name, attempt.hardware))
+		.collect()
+}
+
 /// The candidates [`open`] tries for `codec` + `kind`, in order.
 fn attempts(codec: Codec, kind: &Kind) -> Vec<Attempt<'static>> {
 	let supports = move |c: &Candidate| c.codecs.contains(&codec);
@@ -427,22 +437,25 @@ fn select(attempts: Vec<Attempt>, config: &Config) -> Result<Box<dyn Backend>, E
 		)));
 	}
 	if tried.is_empty() {
-		let available = available_names(config.codec);
-		return match &config.kind {
-			Kind::Named(name) => Err(Error::UnknownEncoder {
-				name: name.clone(),
-				codec: config.codec,
-				available: available.join(", "),
-			}),
-			kind => Err(Error::NoEncoder(format!(
-				"nothing compiled in for {:?} at {kind:?} (this build has: {})",
-				config.codec,
-				available.join(", "),
-			))),
-		};
+		return Err(missing(config.codec, &config.kind));
 	}
 
 	Err(Error::NoEncoder(tried.join(", ")))
+}
+
+/// Why no encoder this build has answers `codec` + `kind`, naming those it has.
+pub(crate) fn missing(codec: Codec, kind: &Kind) -> Error {
+	let available = available_names(codec).join(", ");
+	match kind {
+		Kind::Named(name) => Error::UnknownEncoder {
+			name: name.clone(),
+			codec,
+			available,
+		},
+		kind => Error::NoEncoder(format!(
+			"nothing compiled in for {codec:?} at {kind:?} (this build has: {available})"
+		)),
+	}
 }
 
 /// Returns the encoders this build has for `codec`, in priority order.

@@ -601,7 +601,8 @@ mod tests {
 
 	use moq_net::Timestamp;
 
-	use super::super::tests::{gpu, pixels, texture};
+	use super::super::tests::{gpu, pixels};
+	use super::super::texture;
 	use super::super::{Exporter, Route};
 	use super::*;
 

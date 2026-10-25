@@ -274,7 +274,8 @@ mod tests {
 
 	use super::*;
 	use crate::render::export::Route;
-	use crate::render::export::tests::{center, near, texture};
+	use crate::render::export::tests::{center, near};
+	use crate::render::export::texture;
 
 	/// A Direct3D12 device on the default adapter, or on the software one (WARP)
 	/// every Windows host has.
