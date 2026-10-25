@@ -5,7 +5,7 @@
 //! paused PUBLISH per track, which carries the track's properties and an error PUBLISH_DONE
 //! once the track is no longer listed; the subscriber resumes one with REQUEST_UPDATE to get its
 //! data, served from the cache as a SUBSCRIBE would be. A FORWARD=1 request asks for every
-//! track's data, which no draft lets us downgrade, so from draft-19 each track is answered
+//! track's data, which no draft lets us downgrade, so from draft-22 each track is answered
 //! with PUBLISH_SKIPPED and the subscriber SUBSCRIBEs to what it wants. Draft-18 has no such
 //! skip, so there the request is refused.
 
@@ -127,7 +127,7 @@ impl Drop for Subscribed {
 }
 
 /// The subscription parameters a PUBLISH subscription has, starting from those of the
-/// SUBSCRIBE_TRACKS that made it (draft-19 section 10.19.1) and moved by each update.
+/// SUBSCRIBE_TRACKS that made it (draft-22 section 3.6.2) and moved by each update.
 #[derive(Clone, Copy)]
 struct Params {
 	priority: u8,
@@ -255,7 +255,7 @@ struct Listed {
 
 /// How a paused PUBLISH subscription resumes forwarding.
 struct Resume {
-	/// FILL_PARAMETERS (draft-20+) for the objects before the join.
+	/// FILL_PARAMETERS (draft-22) for the objects before the join.
 	fill: Option<ietf::Fill>,
 	/// NEW_GROUP_REQUEST, counted as a join as on a SUBSCRIBE.
 	new_group: Option<u64>,
@@ -888,7 +888,7 @@ impl Publisher {
 		};
 
 		// A joining FETCH needs the subscription forwarding.
-		let join = (!Filter::is_draft20(self.version)).then(|| self.register_join(request_id));
+		let join = (!Filter::is_draft22(self.version)).then(|| self.register_join(request_id));
 		self.pause_join(join.as_ref());
 
 		tracing::debug!(id = %request_id, broadcast = %absolute, track = %name, "publish started");
@@ -900,7 +900,7 @@ impl Publisher {
 			largest_location: live_edge(&track).largest,
 			forward: false,
 			properties,
-			// Draft-20 and later state the listing's subscription parameters on each PUBLISH;
+			// Draft-22 and later state the listing's subscription parameters on each PUBLISH;
 			// earlier drafts carry them on PUBLISH_OK.
 			subscriber_priority: Some(params.priority),
 			group_order: params.order,
@@ -962,9 +962,9 @@ impl Publisher {
 					let ok = body
 						.message::<ietf::PublishOk>(self.version)
 						.map_err(|err| goaways.failed(err.into()))?;
-					// Through draft-19 the answer sets the Forward State and the parameters it
+					// Through draft-18 the answer sets the Forward State and the parameters it
 					// carries, an absent FORWARD meaning 1; an absent parameter keeps the one the
-					// SUBSCRIBE_TRACKS set. Draft-20 moved them off PUBLISH_OK, leaving it paused.
+					// SUBSCRIBE_TRACKS set. Draft-22 moved them off PUBLISH_OK, leaving it paused.
 					if let Some(priority) = ok.subscriber_priority {
 						params.priority = priority;
 					}
@@ -977,7 +977,7 @@ impl Publisher {
 						refused = Some(Served::UpdateFailed(Error::Unsupported));
 					}
 					new_group = ok.new_group.or(params.new_group.filter(|_| dynamic));
-					(ok.forward && !Filter::is_draft20(self.version)).then(|| Resume {
+					(ok.forward && !Filter::is_draft22(self.version)).then(|| Resume {
 						fill: None,
 						new_group: new_group.take(),
 						answer: false,
@@ -1277,7 +1277,7 @@ impl Publisher {
 		}
 		let fill = how
 			.fill
-			.filter(|_| Filter::is_draft20(self.version))
+			.filter(|_| Filter::is_draft22(self.version))
 			.map(|fill| fill_range(fill, params.filter, edge.largest));
 
 		if how.answer
@@ -1357,13 +1357,7 @@ mod tests {
 
 	const TIMEOUT: Duration = Duration::from_secs(10);
 
-	const DRAFTS: [Version; 5] = [
-		Version::Draft18,
-		Version::Draft19,
-		Version::Draft20,
-		Version::Draft21,
-		Version::Draft22,
-	];
+	const DRAFTS: [Version; 2] = [Version::Draft18, Version::Draft22];
 
 	/// A publisher whose origin holds broadcast `room/cam` listing `video` and `audio`, and
 	/// the peer's end of its session.
@@ -1372,7 +1366,7 @@ mod tests {
 		publisher: Publisher,
 		session: memory::Session,
 		peer: memory::Session,
-		broadcast: crate::broadcast::Producer,
+		broadcast: crate::origin::Publication,
 		tracks: HashMap<&'static str, track::Producer>,
 		_origin: origin::Producer,
 	}
@@ -1419,7 +1413,6 @@ mod tests {
 			subscriber_priority: None,
 			group_order: None,
 			filter: None,
-			fill: None,
 			properties_wanted: true,
 			new_group: None,
 			range_filters: false,
@@ -1487,7 +1480,7 @@ mod tests {
 		body.message::<ietf::RequestError>(version).unwrap().error_code
 	}
 
-	/// Answer a PUBLISH with a PUBLISH_OK leaving it paused, which draft-20 on cannot
+	/// Answer a PUBLISH with a PUBLISH_OK leaving it paused, which draft-22 on cannot
 	/// change. From draft-18 it is sent as REQUEST_OK.
 	async fn publish_ok(stream: &mut Stream<Transport, Version>) {
 		stream.writer.varint(ietf::RequestOk::ID).await.unwrap();
@@ -1513,7 +1506,7 @@ mod tests {
 			end_group: 0,
 			subscriber_priority: None,
 			forward: Some(forward),
-			// Join at the live edge: draft-20 moved the filter off PUBLISH_OK.
+			// Join at the live edge: draft-22 moved the filter off PUBLISH_OK.
 			filter: forward.then_some(Filter::NextObject),
 			authorization_token: None,
 			new_group: None,
@@ -1760,7 +1753,7 @@ mod tests {
 	}
 
 	/// FORWARD=1 asks for every track's objects, which we never push unasked: from
-	/// draft-19 each track is skipped, and draft-18, with no way to skip, refuses it.
+	/// draft-22 each track is skipped, and draft-18, with no way to skip, refuses it.
 	#[moq_clock::test]
 	async fn a_forwarding_listing_skips_every_track() {
 		for version in DRAFTS {
@@ -1901,7 +1894,7 @@ mod tests {
 	/// are listed.
 	#[moq_clock::test]
 	async fn a_forwarding_listing_reads_only_as_skips_go_out() {
-		for version in [Version::Draft19, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft22] {
 			for catalog in CATALOGS {
 				let h = harness(version);
 				let _extra: Vec<_> = (h.tracks.len()..catalog)
@@ -1988,71 +1981,69 @@ mod tests {
 	/// again.
 	#[moq_clock::test]
 	async fn a_relisting_skips_tracks_still_published_on_draft_18() {
-		for version in [Version::Draft18, Version::Draft19] {
-			let mut h = harness(version);
-			let mut request = h.request(&listing(false)).await;
-			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
-			let (mut first, ..) = h.publish().await;
-			let (mut second, ..) = h.publish().await;
-			publish_ok(&mut first).await;
-			publish_ok(&mut second).await;
-			request.writer.abort(&Error::Cancel);
-			moq_clock::sleep(Duration::from_millis(10)).await;
+		let version = Version::Draft18;
+		let mut h = harness(version);
+		let mut request = h.request(&listing(false)).await;
+		assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
+		let (mut first, ..) = h.publish().await;
+		let (mut second, ..) = h.publish().await;
+		publish_ok(&mut first).await;
+		publish_ok(&mut second).await;
+		request.writer.abort(&Error::Cancel);
+		moq_clock::sleep(Duration::from_millis(10)).await;
 
-			let relisting = ietf::SubscribeTracks {
-				request_id: RequestId(2),
-				..listing(false)
-			};
-			let mut relisting = h.request(&relisting).await;
-			assert_eq!(next(&mut relisting).await.0, ietf::RequestOk::ID, "{version}");
-			if version == Version::Draft18 {
-				for _ in 0..2 {
-					assert_eq!(next(&mut relisting).await.0, ietf::PublishSkipped::ID);
-				}
-				let opened = futures::poll!(std::pin::pin!(Stream::accept(
-					&mut crate::driver::Transport::new(h.peer.clone()),
-					version
-				)));
-				assert!(opened.is_pending(), "PUBLISHed a track twice");
-			} else {
-				let _publishes = [h.publish().await, h.publish().await];
+		let relisting = ietf::SubscribeTracks {
+			request_id: RequestId(2),
+			..listing(false)
+		};
+		let mut relisting = h.request(&relisting).await;
+		assert_eq!(next(&mut relisting).await.0, ietf::RequestOk::ID, "{version}");
+		if version == Version::Draft18 {
+			for _ in 0..2 {
+				assert_eq!(next(&mut relisting).await.0, ietf::PublishSkipped::ID);
 			}
+			let opened = futures::poll!(std::pin::pin!(Stream::accept(
+				&mut crate::driver::Transport::new(h.peer.clone()),
+				version
+			)));
+			assert!(opened.is_pending(), "PUBLISHed a track twice");
+		} else {
+			let _publishes = [h.publish().await, h.publish().await];
 		}
 	}
 
-	/// On drafts 18 and 19 a PUBLISH_OK may ask for a new group only if the PUBLISH sent
+	/// On draft 18 a PUBLISH_OK may ask for a new group only if the PUBLISH sent
 	/// DYNAMIC_GROUPS; one that asks anyway ends the PUBLISH in error.
 	#[moq_clock::test]
 	async fn a_publish_ok_new_group_needs_dynamic_groups() {
-		for version in [Version::Draft18, Version::Draft19] {
-			let mut h = harness(version);
-			let mut request = h.request(&listing(false)).await;
-			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
-			let (mut stream, ..) = h.publish().await;
-			stream.writer.varint(ietf::RequestOk::ID).await.unwrap();
-			stream
-				.writer
-				.encode(&ietf::PublishOk {
-					request_id: None,
-					forward: true,
-					subscriber_priority: None,
-					group_order: None,
-					filter: Some(Filter::NextObject),
-					new_group: Some(0),
-				})
-				.await
-				.unwrap();
-			let (id, body) = next(&mut stream).await;
-			assert_eq!(id, ietf::PublishDone::ID, "{version}");
-			let done: ietf::PublishDone = body.message(version).unwrap();
-			assert!(done.end(version).is_err(), "{version}: ended cleanly");
-		}
+		let version = Version::Draft18;
+		let mut h = harness(version);
+		let mut request = h.request(&listing(false)).await;
+		assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
+		let (mut stream, ..) = h.publish().await;
+		stream.writer.varint(ietf::RequestOk::ID).await.unwrap();
+		stream
+			.writer
+			.encode(&ietf::PublishOk {
+				request_id: None,
+				forward: true,
+				subscriber_priority: None,
+				group_order: None,
+				filter: Some(Filter::NextObject),
+				new_group: Some(0),
+			})
+			.await
+			.unwrap();
+		let (id, body) = next(&mut stream).await;
+		assert_eq!(id, ietf::PublishDone::ID, "{version}");
+		let done: ietf::PublishDone = body.message(version).unwrap();
+		assert!(done.end(version).is_err(), "{version}: ended cleanly");
 	}
 
-	/// Draft-18 and 19 let PUBLISH_OK forward at once, with no update to answer.
+	/// Draft-18 lets PUBLISH_OK forward at once, with no update to answer.
 	#[moq_clock::test]
 	async fn a_forwarding_publish_ok_resumes() {
-		for version in [Version::Draft18, Version::Draft19] {
+		for version in [Version::Draft18] {
 			let mut h = harness(version);
 			let video = h.tracks.remove("video").unwrap();
 			let mut request = h.request(&listing(false)).await;
@@ -2114,7 +2105,7 @@ mod tests {
 		}
 	}
 
-	/// A REQUEST_UPDATE on the listing is answered with REQUEST_ERROR. From draft-20 it may
+	/// A REQUEST_UPDATE on the listing is answered with REQUEST_ERROR. From draft-22 it may
 	/// carry FORWARD, which is refused the same way rather than closing the session.
 	#[moq_clock::test]
 	async fn a_listing_update_is_refused() {
@@ -2124,7 +2115,7 @@ mod tests {
 			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
 			let refused = ietf::SubscribeUpdate {
 				filter: None,
-				forward: Filter::is_draft20(version).then_some(false),
+				forward: Filter::is_draft22(version).then_some(false),
 				..update(2, false)
 			};
 			send(&mut request, &refused).await;
@@ -2156,18 +2147,10 @@ mod tests {
 	}
 
 	/// NEW_GROUP_REQUEST resuming a paused PUBLISH is a join under the track's refresh
-	/// ratio, as on a SUBSCRIBE, even when the filter's fixed start is not. The listing's
-	/// own is each PUBLISH's default.
+	/// ratio, as on a SUBSCRIBE, even when the filter's fixed start is not.
 	#[moq_clock::test]
 	async fn a_resume_asks_for_a_new_group() {
-		for on_listing in [false, true] {
-			resume_asks_for_a_new_group(on_listing).await;
-		}
-	}
-
-	async fn resume_asks_for_a_new_group(on_listing: bool) {
-		// Draft-22 sends no NEW_GROUP_REQUEST on SUBSCRIBE_TRACKS.
-		let version = Version::Draft21;
+		let version = Version::Draft22;
 		let mut h = harness(version);
 		let live = h
 			.broadcast
@@ -2177,11 +2160,7 @@ mod tests {
 		group.write_frame(crate::Timestamp::ZERO, b"key".as_slice()).unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"delta".as_slice()).unwrap();
 
-		let request = ietf::SubscribeTracks {
-			new_group: on_listing.then_some(0),
-			..listing(false)
-		};
-		let mut request = h.request(&request).await;
+		let mut request = h.request(&listing(false)).await;
 		assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID);
 		let mut stream = loop {
 			let (stream, _, name, _) = h.publish().await;
@@ -2197,24 +2176,20 @@ mod tests {
 					start: Location { group: 4, object: 0 },
 					end: None,
 				}),
-				new_group: (!on_listing).then_some(0),
+				new_group: Some(0),
 				..update(2, true)
 			},
 		)
 		.await;
 		assert_eq!(next(&mut stream).await.0, ietf::RequestOk::ID);
-		assert_eq!(
-			live.demand().wanted(),
-			Some(5),
-			"on_listing={on_listing}: the join never reached the track"
-		);
+		assert_eq!(live.demand().wanted(), Some(5), "the join never reached the track");
 	}
 
-	/// From draft-20 an update may ask for a new group only if its PUBLISH sent
+	/// On draft-22 an update may ask for a new group only if its PUBLISH sent
 	/// DYNAMIC_GROUPS, which INCLUDE_PROPERTIES=0 leaves out even for a dynamic track.
 	#[moq_clock::test]
 	async fn a_new_group_needs_the_advertised_dynamic_groups() {
-		for version in [Version::Draft20, Version::Draft21, Version::Draft22] {
+		for version in [Version::Draft22] {
 			let mut h = harness(version);
 			let live = h
 				.broadcast
@@ -2352,110 +2327,52 @@ mod tests {
 		}
 	}
 
-	/// A paused listing's FILL_PARAMETERS (draft-20 and draft-21; draft-22 sends none on
-	/// SUBSCRIBE_TRACKS) open no fill, even once a PUBLISH resumes without its own
-	/// (draft-22 section 3.4.1).
-	#[moq_clock::test]
-	async fn a_listing_fill_opens_nothing() {
-		for version in [Version::Draft20, Version::Draft21] {
-			let mut h = harness(version);
-			let video = h.tracks.remove("video").unwrap();
-			let mut group = video.append_group().unwrap();
-			group.write_frame(crate::Timestamp::ZERO, b"cached".as_slice()).unwrap();
-
-			let request = ietf::SubscribeTracks {
-				filter: Some(Filter::NextObject),
-				fill: Some(ietf::Fill {
-					filter: Some(Filter::Relative(1)),
-					range_filters: false,
-				}),
-				..listing(false)
-			};
-			let mut request = h.request(&request).await;
-			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
-			let mut stream = loop {
-				let (stream, _, name, _) = h.publish().await;
-				if name == "video" {
-					break stream;
-				}
-			};
-			publish_ok(&mut stream).await;
-			let resume = ietf::SubscribeUpdate {
-				filter: None,
-				..update(2, true)
-			};
-			send(&mut stream, &resume).await;
-			assert_eq!(next(&mut stream).await.0, ietf::RequestOk::ID, "{version}");
-
-			// The joined group's own stream carries only what follows the join; a fill would
-			// carry the cached object.
-			group.finish().unwrap();
-			moq_clock::sleep(Duration::from_millis(10)).await;
-			while let Poll::Ready(recv) = futures::poll!(std::future::poll_fn(|cx| h.peer.poll_accept_uni(cx))) {
-				let mut reader =
-					crate::coding::Reader::new(crate::transport::boxed::RecvStream::new(recv.unwrap()), version);
-				let mut bytes = Vec::new();
-				while let Some(chunk) = timeout(std::future::poll_fn(|cx| reader.poll_read_chunk(cx, 1024)))
-					.await
-					.unwrap()
-				{
-					bytes.extend_from_slice(&chunk);
-				}
-				assert!(
-					!bytes.windows(6).any(|w| w == b"cached"),
-					"{version}: the listing's fill opened"
-				);
-			}
-		}
-	}
-
 	/// On draft-18 a track the peer already SUBSCRIBEd to is skipped rather than PUBLISHed
 	/// a second time; later drafts PUBLISH it.
 	#[moq_clock::test]
 	async fn a_subscribed_track_is_skipped_on_draft_18() {
-		for version in [Version::Draft18, Version::Draft19] {
-			let mut h = harness(version);
-			let subscribe = ietf::Subscribe {
-				request_id: RequestId(0),
-				track_namespace: crate::Path::new("room/cam"),
-				track_name: "video".into(),
-				subscriber_priority: 128,
-				group_order: GroupOrder::Descending,
-				filter: Filter::NextObject,
-				fill: None,
-				properties_wanted: true,
-				forward: true,
-				rendezvous: false,
-				range_filters: false,
-				authorization_token: None,
-				epoch: None,
-				max_age: None,
-				new_group: None,
-			};
-			let mut subscription = h.request(&subscribe).await;
-			assert_eq!(next(&mut subscription).await.0, ietf::SubscribeOk::ID, "{version}");
+		let version = Version::Draft18;
+		let mut h = harness(version);
+		let subscribe = ietf::Subscribe {
+			request_id: RequestId(0),
+			track_namespace: crate::Path::new("room/cam"),
+			track_name: "video".into(),
+			subscriber_priority: 128,
+			group_order: GroupOrder::Descending,
+			filter: Filter::NextObject,
+			fill: None,
+			properties_wanted: true,
+			forward: true,
+			rendezvous: false,
+			range_filters: false,
+			authorization_token: None,
+			epoch: None,
+			max_age: None,
+			new_group: None,
+		};
+		let mut subscription = h.request(&subscribe).await;
+		assert_eq!(next(&mut subscription).await.0, ietf::SubscribeOk::ID, "{version}");
 
-			let request = ietf::SubscribeTracks {
-				request_id: RequestId(2),
-				..listing(false)
-			};
-			let mut request = h.request(&request).await;
-			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
-			let (_audio, _, name, _) = h.publish().await;
-			if version == Version::Draft18 {
-				assert_eq!(name, "audio");
-				let (id, body) = next(&mut request).await;
-				assert_eq!(id, ietf::PublishSkipped::ID);
-				let skip: ietf::PublishSkipped = body.message(version).unwrap();
-				assert_eq!(skip.track_name, "video");
-			} else {
-				let (_, _, other, _) = h.publish().await;
-				assert!([name, other].contains(&"video".to_string()), "{version}");
-			}
+		let request = ietf::SubscribeTracks {
+			request_id: RequestId(2),
+			..listing(false)
+		};
+		let mut request = h.request(&request).await;
+		assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
+		let (_audio, _, name, _) = h.publish().await;
+		if version == Version::Draft18 {
+			assert_eq!(name, "audio");
+			let (id, body) = next(&mut request).await;
+			assert_eq!(id, ietf::PublishSkipped::ID);
+			let skip: ietf::PublishSkipped = body.message(version).unwrap();
+			assert_eq!(skip.track_name, "video");
+		} else {
+			let (_, _, other, _) = h.publish().await;
+			assert!([name, other].contains(&"video".to_string()), "{version}");
 		}
 	}
 
-	/// From draft-20 each PUBLISH states the listing's subscription parameters, which the
+	/// From draft-22 each PUBLISH states the listing's subscription parameters, which the
 	/// subscriber otherwise takes as the defaults; earlier drafts carry them on PUBLISH_OK.
 	/// Draft-22 sends none of them on SUBSCRIBE_TRACKS.
 	#[moq_clock::test]
@@ -2479,7 +2396,7 @@ mod tests {
 			assert_eq!(stream.reader.varint().await.unwrap(), ietf::Publish::ID);
 			let body: ietf::Body = stream.reader.decode().await.unwrap();
 			let publish: ietf::Publish = body.message(version).unwrap();
-			let stated = Filter::is_draft20(version);
+			let stated = Filter::is_draft22(version);
 			assert_eq!(publish.subscriber_priority, stated.then_some(7), "{version}");
 			assert_eq!(
 				publish.group_order,
@@ -2494,7 +2411,7 @@ mod tests {
 	/// than this stack's unset 127.
 	#[moq_clock::test]
 	async fn a_listing_without_a_priority_states_the_default() {
-		for version in DRAFTS.into_iter().filter(|version| Filter::is_draft20(*version)) {
+		for version in DRAFTS.into_iter().filter(|version| Filter::is_draft22(*version)) {
 			let mut h = harness(version);
 			let mut request = h.request(&listing(false)).await;
 			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");

@@ -107,7 +107,7 @@ void audio_roundtrip() {
     moq::AudioEncoderInput input{moq::AudioSampleFormat::kF32, 48000, 2};
     moq::AudioEncoderOutput output{};
     output.codec = moq::AudioCodec::opus();
-    output.frame_duration_us = 20000;
+    output.frame_duration = std::chrono::milliseconds(20);
     auto audio = ok(moq::AudioProducer::init(catalog, {input, output, "tone", nullptr}), "audio producer");
     auto snapshot = ok(catalogs->next().get(), "audio catalog");
     CHECK(snapshot.has_value());
@@ -115,7 +115,7 @@ void audio_roundtrip() {
     decoded.format = moq::AudioSampleFormat::kF32;
     // The track's whole retention: reading starts only after finish, and the budget ages
     // groups by wall clock, so a stalled host would otherwise skip the start.
-    decoded.max_delay_us = 30000000;
+    decoded.max_delay = std::chrono::seconds(30);
     auto consumer = ok(moq::AudioConsumer::subscribe(receiver, "tone", snapshot->audio.at("tone"), decoded).get(), "audio consumer");
     for (size_t packet = 0; packet < 8; packet++) {
         std::vector<uint8_t> data(960 * 2 * sizeof(float));
@@ -217,11 +217,15 @@ int main() {
     // thread blocks on one at a time.
     moq::ClientConfig client_config;
     client_config.tls.insecure = true;
+    client_config.implementation = moq::IMPLEMENTATION;
     auto client = ok(moq::Client::init(client_config), "client init");
     auto accepting = server->accept();
     auto connecting = client->connect("https://" + addr);
     auto request = ok(accepting.get(), "accept");
     CHECK(request != nullptr);
+    // The package names itself ahead of moq-ffi, so a server can tell bindings apart.
+    auto implementation = request->peer_implementation();
+    CHECK(implementation && implementation->rfind("moq-cpp/", 0) == 0);
     auto served = ok(request->accept(nullptr, nullptr).get(), "request accept");
     auto session = ok(connecting.get(), "connect");
 

@@ -754,13 +754,13 @@ async fn serve_connection(
 	deadline.close = Some(transport.clone());
 	let conn = transport.clone();
 	let server = serve.moq.clone();
-	let binding = match url {
-		Some(_) => moq_net::transport::Binding::Uri,
-		None => moq_net::transport::Binding::InBand,
+	let address = match url {
+		Some(_) => moq_net::transport::Address::Uri,
+		None => moq_net::transport::Address::Setup,
 	};
 	// moq-net boxes the transport with a native `Send` bound, which only a `Local`
 	// session meets; it still never leaves this worker.
-	let session = moq_uring::transport::Local::new(moq_uring::transport::Session::new(transport, binding));
+	let session = moq_uring::transport::Local::new(moq_uring::transport::Session::new(transport, address));
 	let now = moq_net::time::Instant::now();
 	let mut accepted = Accepted {
 		handle,
@@ -848,15 +848,7 @@ async fn serve_request(
 	let (admitted, registration) = match decided {
 		Ok(admitted) => admitted,
 		Err(err) => {
-			// The status is what separates "your credential is bad" from "the auth
-			// server is down". Collapsing both into Unauthorized tells a client to
-			// stop reconnecting through an outage it could have waited out.
-			request.close(match err.status {
-				axum::http::StatusCode::UNAUTHORIZED | axum::http::StatusCode::FORBIDDEN => {
-					moq_net::Error::Unauthorized
-				}
-				other => moq_net::Error::App(other.as_u16()),
-			});
+			request.close(err.code.into());
 			return Err(err.source);
 		}
 	};
@@ -1025,7 +1017,7 @@ mod tests {
 	async fn a_group_stopped_before_serving_joins() {
 		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 		if let Err(moq_uring::Error::Unsupported(reason)) = moq_uring::Worker::new(Default::default())
-			&& std::env::var_os("MOQ_STRICT").is_none()
+			&& std::env::var_os("CI_STRICT").is_none()
 		{
 			eprintln!("skipping io_uring relay test: {reason}");
 			return;
@@ -1052,7 +1044,7 @@ mod tests {
 	async fn pending_admission_is_abandoned_at_the_deadline() {
 		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 		if let Err(moq_uring::Error::Unsupported(reason)) = moq_uring::Worker::new(Default::default())
-			&& std::env::var_os("MOQ_STRICT").is_none()
+			&& std::env::var_os("CI_STRICT").is_none()
 		{
 			eprintln!("skipping io_uring relay test: {reason}");
 			return;
@@ -1109,7 +1101,7 @@ mod tests {
 	async fn pending_admission_is_abandoned_at_the_handshake_deadline() {
 		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 		if let Err(moq_uring::Error::Unsupported(reason)) = moq_uring::Worker::new(Default::default())
-			&& std::env::var_os("MOQ_STRICT").is_none()
+			&& std::env::var_os("CI_STRICT").is_none()
 		{
 			eprintln!("skipping io_uring relay test: {reason}");
 			return;

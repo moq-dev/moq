@@ -249,10 +249,11 @@ JSON snapshot). Groups can also be fetched by sequence number, which is how the
 [HLS gateway](/bin/hls) and the relay's [HTTP fetch](/bin/relay/http) serve
 history.
 
-Native Rust subscriptions, track queries, fetches, and announcement interest on
+Native Rust subscriptions, track queries, and announcement interest on
 QUIC, WebTransport, or qmux fail locally when the peer has granted no stream
-credit, without retrying. Iroh still waits; browser-backed Rust retains the
-browser's behavior. Once admitted, these requests have no answer deadline:
+credit, without retrying. Group fills on an accepted track and a subscription's
+joining FETCH wait for credit while their readers still want them. Iroh still
+waits; browser-backed Rust retains the browser's behavior. Once admitted, these requests have no answer deadline:
 each lasts until answered, its demand leaves, or its session closes.
 Announcement-interest refusal is logged and releases discovery sync. The merged
 announcement listing keeps its existing event and sync API, with no per-source
@@ -284,10 +285,10 @@ as a fill, which a relay serves by fetching upstream one group at a time, skippi
 a group once every subscriber that asked for it narrows past it; with
 no handler it is reported as dropped once the feed stops waiting for it. One
 evicted after the subscriber saw it cached, but before it read it, is skipped. A relay merges its subscribers' ranges into one upstream request, which
-today's wire versions carry as the single span covering them. A relative or time
-anchor resolves on the hop that publishes the track, and over moq-lite-07, which
-reports the live edge and media time and asks upstream for every group the budget
-allows. Over an older lite or any moq-transport version, a subscriber gets every
+moq-lite-07 carries range by range and older wire versions as the single span
+covering them. A relative or time anchor resolves on the hop that publishes the
+track, and over moq-lite-07, which carries a relative or time start upstream and
+reports the live edge and media time, so a copy resolves the ends itself. Over an older lite or any moq-transport version, a subscriber gets every
 anchor but the live and default starts refused as unsupported, and an untimed
 track refuses a time anchor. At the live edge, a time end
 may let one group through before its first frame shows it starts past the end:

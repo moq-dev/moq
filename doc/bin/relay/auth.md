@@ -30,6 +30,8 @@ certificate. Nothing is parsed on the server's behalf: the `jwt` query parameter
 `subscribe` pattern unions and optionally a `root` alias, read-only `mounts`,
 `expires`, a `revalidate` cadence, a stats `tier` and `label`, and `peer` / `upstream` to
 mark another relay and an [upstream link](/bin/relay/cluster#upstream-links).
+A `tier` is `/`-joined segments of ASCII letters, digits, `.`, `_`, and `-`, such as `region/sjc`,
+because it becomes a metrics label: a grant naming any other tier is an auth server error, and a refusal naming one reads as unattributed.
 The fields are documented on `moq_auth::Request` and `moq_auth::Grant`
 ([Rust](/lib/rs/moq-auth), [TypeScript](/lib/js/auth)).
 
@@ -41,7 +43,8 @@ credential, not to `server_name` alone.
 
 **Connect.** A 2xx with a grant admits. A 403 can carry JSON such as
 `{"reason":"expired","root":"rooms/123","tier":"edge"}`. The reason is
-`refused`, `forbidden`, or `expired`; unknown reason strings read as `refused`.
+`refused`, `forbidden`, `expired`, or `malformed` (the token does not parse);
+unknown reason strings read as `refused`.
 A legacy plain-text 401 or 403 still reads as `refused`. Optional `root` and
 `tier` attribute refusal counters, with an absent tier using the default.
 Only name a root from a verified credential, including an expired token whose
@@ -53,9 +56,9 @@ nothing is admitted because the server was down. A grant that names nothing
 refuses, and so does one already expired: expiry is exact, with no grace for
 clock skew, so keep the auth server's clock in sync. WebSocket admission
 happens after SETUP, just like QUIC, so auth never fails the upgrade: rejected
-credentials (401 or 403) close the session as `Unauthorized`, which stops the
-client's reconnect loop, and an unreachable auth server closes it with
-application code 502.
+credentials (401 or 403) close the session as `Unauthorized`, or as `Expired`
+or `MalformedAuthToken` for those reasons, which stops the client's reconnect
+loop, and an unreachable auth server closes it with application code 502.
 
 **Revalidate.** On the grant's cadence the relay asks again. A grant with the
 same `root` and `mounts` resizes the live session in place, narrower or wider,

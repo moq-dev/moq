@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Client::with_url` replaces `with_path` and `with_authority`
+
+Pass the URL you dial: `Client::new().with_url(url)` instead of `.with_path(path).with_authority(authority)`.
+The client derives what SETUP carries from it and from the transport's `address()`: the path and query when SETUP carries the target, plus the authority for `moqt://`, and nothing when the transport's own URI does.
+A `unix://` URL names its target in its `?path=` query.
+
 ### `stats::Refusal` is `stats::RefusalKind`, and `time::now` is gone (#6510)
 
 Rename `moq_net::stats::Refusal` to `moq_net::stats::RefusalKind`, so it no longer shares a name with `moq_auth::Refusal`; its variants and `Refusals` are unchanged.
@@ -52,9 +58,9 @@ Pass `Position::group(n)` where you passed `n`, or a position within the last gr
 
 ### IETF whole-group FETCH answers name the requested group ([#6199](https://github.com/moq-dev/moq/issues/6199))
 
-On moq-transport drafts 14 through 19, a whole-group `FETCH_OK` now names `{g, 0}` instead of `{g+1, 0}`.
+On moq-transport drafts 14 through 18, a whole-group `FETCH_OK` now names `{g, 0}` instead of `{g+1, 0}`.
 Readers accept both forms and set End Of Track to the sequence after the fetched group.
-An older moq-net reader can reject the new answer; upgrade it before pairing it with a new publisher, or use draft 20 and later, whose inclusive End Location is unchanged.
+An older moq-net reader can reject the new answer; upgrade it before pairing it with a new publisher, or use draft 22, whose inclusive End Location is unchanged.
 No Rust API changes.
 
 ### Receive streams are read through leases (#5878)
@@ -174,7 +180,7 @@ Treat a failed group read as the loss of that group and keep reading the track, 
 Answer each `origin::Request` with `request.prepare(epoch)?` (a fresh `Epoch::mint()` per output run), fill `prepared.broadcast()`, then `prepared.publish()?`, which announces the broadcast at the exact path under that epoch and returns its producer.
 Only `publish` announces it: `prepared.broadcast().announce(..)` fails with `Error::Closed`.
 `Dynamic::update` is gone: drop the claim and claim again to change it, and close an answer's producer to end that output.
-`Request::accept` is no longer part of the public API and panics on a request from `dynamic`.
+`Request::accept`, `Producer::dynamic_route`, and `Dynamic::update_route` are crate-private (#6496): only the built-in sessions answer with a broadcast they already hold.
 Dropping a `Prepared` unpublished refuses the request, as dropping a `Request` does, and `publish` fails with `Error::Unroutable` once the claim went away.
 
 ### Anchors can name a time (#6074)
@@ -396,12 +402,12 @@ A `group::Request` is withdrawn once its last `fetch_group` caller leaves, so a 
 
 `moq_net::web_transport_trait` is gone.
 `transport::poll::{Session, SendStream, RecvStream}` carry their own `poll_*` methods, `transport::Error`, and `transport::Stats`, and `Error::from_transport` takes a `transport::Error`.
-A custom transport implements these traits and reports `binding()`: `transport::Binding::Uri` when its handshake carries the request URI, or `InBand` when SETUP carries it.
+A custom transport implements these traits and reports `address()`: `transport::Address::Uri` when its handshake carries the request URI, or `Setup` when SETUP carries it.
 
 ```rust
 impl moq_net::transport::poll::Session for MySession {
-	fn binding(&self) -> moq_net::transport::Binding {
-		moq_net::transport::Binding::Uri
+	fn address(&self) -> moq_net::transport::Address {
+		moq_net::transport::Address::Uri
 	}
 	// poll_accept_bi, poll_open_uni, ...
 }

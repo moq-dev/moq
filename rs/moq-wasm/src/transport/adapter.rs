@@ -122,8 +122,8 @@ impl<S: backend::Session<SendStream: 'static, RecvStream: 'static> + Clone + 'st
 	fn max_datagram_size(&self) -> usize {
 		backend::Session::max_datagram_size(&self.0)
 	}
-	fn binding(&self) -> moq::Binding {
-		moq::Binding::Uri
+	fn address(&self) -> moq::Address {
+		moq::Address::Uri
 	}
 	fn protocol(&self) -> Option<&str> {
 		backend::Session::protocol(&self.0)

@@ -59,9 +59,10 @@ impl<S: wt::Stats> moq::Stats for Stats<S> {
 /// through [`GroupedSend`]. The module is private and the trait is not re-exported, so
 /// other crates can neither name nor implement it.
 ///
-/// The backend interface has no groups or wire counters, so moq-net's
-/// [`send_group`](poll::Session::send_group) and [`wire`](poll::Session::wire) reach a
-/// backend through this. A backend without either implements it empty.
+/// The backend interface has no groups, wire counters, or probe target, so moq-net's
+/// [`send_group`](poll::Session::send_group), [`wire`](poll::Session::wire), and
+/// [`probe`](poll::Session::probe) reach a backend through this. A backend without them
+/// implements it empty.
 pub trait Grouped: backend::Session<SendStream: GroupedSend> {
 	/// The receive stream moq-net reads: the backend's own lease where it has one, or
 	/// [`Buffered`](poll::Buffered) reads otherwise.
@@ -80,6 +81,11 @@ pub trait Grouped: backend::Session<SendStream: GroupedSend> {
 
 	/// The wire counters the backend updates as it sends and receives, or `None` when it has none.
 	fn wire(&self) -> Option<moq::Wire> {
+		None
+	}
+
+	/// The target the backend's sender probes up to, or `None` when it cannot probe.
+	fn probe(&self) -> Option<moq::Probe> {
 		None
 	}
 
@@ -129,11 +135,11 @@ pub trait GroupedSend: backend::SendStream {
 
 /// A WebTransport session adapted to moq-net.
 #[derive(Clone)]
-pub struct Session<S>(S, moq::Binding);
+pub struct Session<S>(S, moq::Address);
 impl<S> Session<S> {
 	/// Wrap a backend poll session.
-	pub fn new(session: S, binding: moq::Binding) -> Self {
-		Self(session, binding)
+	pub fn new(session: S, address: moq::Address) -> Self {
+		Self(session, address)
 	}
 }
 impl<S: Grouped<SendStream: 'static, RecvStream: 'static> + Clone + 'static> poll::Session for Session<S> {
@@ -196,7 +202,7 @@ impl<S: Grouped<SendStream: 'static, RecvStream: 'static> + Clone + 'static> pol
 	fn max_datagram_size(&self) -> usize {
 		backend::Session::max_datagram_size(&self.0)
 	}
-	fn binding(&self) -> moq::Binding {
+	fn address(&self) -> moq::Address {
 		self.1
 	}
 	fn protocol(&self) -> Option<&str> {
@@ -216,6 +222,9 @@ impl<S: Grouped<SendStream: 'static, RecvStream: 'static> + Clone + 'static> pol
 	}
 	fn wire(&self) -> Option<moq::Wire> {
 		Grouped::wire(&self.0)
+	}
+	fn probe(&self) -> Option<moq::Probe> {
+		Grouped::probe(&self.0)
 	}
 }
 /// An outgoing WebTransport stream adapted to moq-net.
@@ -415,7 +424,7 @@ mod tests {
 	fn forwards_thread_local_streams_and_keeps_error_codes() {
 		use moq_net::transport::Stats as _;
 		let state = Rc::new(Cell::new(0));
-		let mut session = Session::new(Backend(state.clone()), moq::Binding::InBand);
+		let mut session = Session::new(Backend(state.clone()), moq::Address::Setup);
 		let mut cx = Context::from_waker(std::task::Waker::noop());
 		assert_eq!(poll::Session::protocol(&session), Some("moq-lite-06"));
 		assert_eq!(

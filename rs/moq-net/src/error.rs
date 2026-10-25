@@ -61,12 +61,16 @@ pub enum SessionError {
 	#[error("version negotiation failed")]
 	Version,
 
+	/// The peer's token could not be parsed. Retrying with the same token will fail again.
+	#[error("malformed auth token")]
+	MalformedAuthToken,
+
 	/// A token named an alias that was never registered.
 	#[error("unknown auth token alias")]
 	UnknownAuthTokenAlias,
 
 	/// The peer left more unacknowledged REQUEST_UPDATEs outstanding on one request stream
-	/// than the MAX_REQUEST_UPDATES it was advertised (draft-19 section 10.3.1.7).
+	/// than the MAX_REQUEST_UPDATES it was advertised (draft-22 section 9.1.7).
 	#[error("too many request updates")]
 	TooManyRequestUpdates,
 
@@ -112,6 +116,7 @@ impl SessionError {
 			Self::Timeout => 0x11,
 			Self::AuthTokenCacheOverflow => 0x13,
 			Self::Version => 0x15,
+			Self::MalformedAuthToken => 0x16,
 			Self::UnknownAuthTokenAlias => 0x17,
 			Self::InvalidAuthority => 0x19,
 			Self::Unsupported => 0x1,
@@ -141,6 +146,7 @@ impl SessionError {
 			0x11 => Self::Timeout,
 			0x13 => Self::AuthTokenCacheOverflow,
 			0x15 => Self::Version,
+			0x16 => Self::MalformedAuthToken,
 			0x17 => Self::UnknownAuthTokenAlias,
 			0x19 => Self::InvalidAuthority,
 			0x1B => Self::TooManyRequestUpdates,
@@ -328,7 +334,7 @@ impl StreamError {
 /// in [`Self::Session`] or [`Self::Stream`], preserving the registry and the numeric
 /// value. A stream also reads its session ending cleanly, whichever side closed it, as
 /// `Session(SessionError::Cancel)`: to the stream that is the session failing under it,
-/// while [`crate::Session::closed`] reports the clean close itself as [`Self::Cancel`].
+/// while `Session::closed` reports the clean close itself as [`Self::Cancel`].
 /// [`Self::Remote`] is an unrecognized request-rejection code (the IETF
 /// request registry), not a session or stream unknown.
 ///
@@ -378,7 +384,7 @@ pub enum Error {
 	Duplicate,
 
 	/// Nobody is reading any more, so the producer stopped; or the session closed cleanly,
-	/// by either side, as [`crate::Session::closed`] reports it. Not a failure.
+	/// by either side, as `Session::closed` reports it. Not a failure.
 	#[error("cancelled")]
 	Cancel,
 
@@ -512,7 +518,7 @@ pub enum Error {
 	/// The peer did not close the session within the GOAWAY drain deadline.
 	///
 	/// Sent as the session termination code when the draining side force-closes
-	/// after the advertised deadline expires (see [`crate::goaway::Goaway::timeout`]).
+	/// after the advertised drain deadline expires.
 	#[error("goaway timeout")]
 	GoawayTimeout,
 
@@ -785,6 +791,7 @@ mod tests {
 			(SessionError::Timeout, 0x11),
 			(SessionError::AuthTokenCacheOverflow, 0x13),
 			(SessionError::Version, 0x15),
+			(SessionError::MalformedAuthToken, 0x16),
 			(SessionError::UnknownAuthTokenAlias, 0x17),
 			(SessionError::Expired, 0x18),
 			(SessionError::InvalidAuthority, 0x19),

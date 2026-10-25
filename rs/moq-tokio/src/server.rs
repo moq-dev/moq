@@ -740,9 +740,9 @@ impl Server {
 							// (like the stream bindings).
 							let Accepted { session, url, identity, authority, mut link } = within(deadline, crate::quic::accept(_conn, alpns)).await?;
 							link.local = local;
-							let binding = match url { Some(_) => moq_net::transport::Binding::Uri, None => moq_net::transport::Binding::InBand };
+							let address = match url { Some(_) => moq_net::transport::Address::Uri, None => moq_net::transport::Address::Setup };
 							let quic = Some((*session).clone());
-							let session = crate::transport::Session::new(session, binding);
+							let session = crate::transport::Session::new(session, address);
 							let (request, deadline) = accept_request(&setup.server, session, deadline).await?;
 							// Only WebTransport carries a request URL; raw QUIC puts the path in the SETUP.
 							let transport = match url { Some(_) => Transport::WebTransport, None => Transport::Quic };
@@ -761,8 +761,8 @@ impl Server {
 						};
 						self.accept.push(async move {
 							let Accepted { session, url, identity, authority, link } = within(deadline, super::iroh::accept(_conn, alpns)).await?;
-							let binding = match url { Some(_) => moq_net::transport::Binding::Uri, None => moq_net::transport::Binding::InBand };
-							let session = crate::transport::Session::new(session, binding);
+							let address = match url { Some(_) => moq_net::transport::Address::Uri, None => moq_net::transport::Address::Setup };
+							let session = crate::transport::Session::new(session, address);
 							let (request, deadline) = accept_request(&setup.server, session, deadline).await?;
 							Ok(Request {
 								transport: Transport::Iroh,
@@ -1646,28 +1646,11 @@ pub struct Request {
 	deadline: Option<Deadline>,
 }
 
-/// Why an incoming session was rejected.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum Reject {
-	/// The request supplied no acceptable credentials.
-	Unauthorized,
-	/// The credentials do not grant the requested operation.
-	Forbidden,
-	/// An application-defined HTTP-style status code.
-	App(u16),
-}
-
 impl Request {
 	/// Reject the session. The transport is already accepted, so this closes the
-	/// just-established MoQ session rather than answering the transport handshake:
-	/// the `code` (an HTTP-style status the caller passes) maps to a MoQ close reason.
-	pub async fn reject(self, reject: Reject) -> crate::Result<()> {
-		let err = match reject {
-			Reject::Unauthorized | Reject::Forbidden => moq_net::Error::Unauthorized,
-			Reject::App(code) => moq_net::Error::App(code),
-		};
-		self.handshake.close(err);
+	/// just-established MoQ session with `code` rather than answering the transport handshake.
+	pub async fn reject(self, code: moq_net::SessionError) -> crate::Result<()> {
+		self.handshake.close(code.into());
 		Ok(())
 	}
 
@@ -2400,7 +2383,7 @@ mod tests {
 		let start = tokio::time::Instant::now();
 		let Err(err) = accept_request(
 			&setup.server,
-			crate::transport::Session::new(peer.clone(), moq_net::transport::Binding::Uri),
+			crate::transport::Session::new(peer.clone(), moq_net::transport::Address::Uri),
 			setup.deadline(),
 		)
 		.await
@@ -2425,7 +2408,7 @@ mod tests {
 		// reply that never comes.
 		let recorder = Scripted::new("moq-00");
 		let client = tokio::spawn({
-			let recorder = crate::transport::Session::new(recorder.clone(), moq_net::transport::Binding::Uri);
+			let recorder = crate::transport::Session::new(recorder.clone(), moq_net::transport::Address::Uri);
 			async move {
 				let _ = moq_net::Client::new()
 					.connect(moq_net::time::Instant::now(), recorder)
@@ -2448,7 +2431,7 @@ mod tests {
 		let start = tokio::time::Instant::now();
 		let Ok((request, deadline)) = accept_request(
 			&setup.server,
-			crate::transport::Session::new(peer.clone(), moq_net::transport::Binding::Uri),
+			crate::transport::Session::new(peer.clone(), moq_net::transport::Address::Uri),
 			setup.deadline(),
 		)
 		.await

@@ -25,7 +25,7 @@ class NightlyTest(unittest.TestCase):
                 stub.write_text(
                     '#!/usr/bin/env bash\n'
                     'printf "%s %s\n" "${0##*/}" "$*" >> "$NIGHTLY_CALLS"\n'
-                    'printf "%s\n" "${MOQ_BENCH_BASE:-}" >> "$NIGHTLY_CALLS.base"\n'
+                    'printf "%s\n" "${BENCH_BASE:-}" >> "$NIGHTLY_CALLS.base"\n'
                     '[[ "$*" != "$NIGHTLY_FAIL" ]]\n'
                 )
                 stub.chmod(0o755)
@@ -35,8 +35,8 @@ class NightlyTest(unittest.TestCase):
                           'printf "%s" "$NIGHTLY_RUNS" | jq -r "$2"\n')
             gh.chmod(0o755)
             env = dict(os.environ, PATH=f"{scratch}:{os.environ['PATH']}",
-                       MOQ_BENCH_RESULTS=str(scratch / "results"), NIGHTLY_CALLS=str(calls), NIGHTLY_FAIL=fail, BASH_ENV="/dev/null")
-            env.pop("MOQ_BENCH_BASE", None)
+                       BENCH_RESULTS=str(scratch / "results"), NIGHTLY_CALLS=str(calls), NIGHTLY_FAIL=fail, BASH_ENV="/dev/null")
+            env.pop("BENCH_BASE", None)
             env.update(environment)
             result = subprocess.run(["bash", ROOT / "sh/gh/nightly.sh", group], cwd=cwd,
                                     env=env, capture_output=True, text=True)
@@ -55,23 +55,23 @@ class NightlyTest(unittest.TestCase):
                                            check=True).stdout.strip() for revision in ("HEAD", "HEAD~1"))
             # This run is the newest scheduled one; the previous run's commit is the base.
             runs = json.dumps([{"databaseId": 2, "headSha": parent}, {"databaseId": 1, "headSha": head}])
-            result, _ = self.run_group("rust-uring", cwd=repo, MOQ_BENCH_BASE="previous-nightly", GITHUB_RUN_ID="2",
+            result, _ = self.run_group("rust-uring", cwd=repo, BENCH_BASE="previous-nightly", GITHUB_RUN_ID="2",
                                        NIGHTLY_RUNS=runs)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(self.bases, {head})
             # A named revision reaches the runner as its commit.
-            result, _ = self.run_group("rust-uring", cwd=repo, MOQ_BENCH_BASE="HEAD~1")
+            result, _ = self.run_group("rust-uring", cwd=repo, BENCH_BASE="HEAD~1")
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(self.bases, {parent})
-            result, calls = self.run_group("rust-uring", cwd=repo, MOQ_BENCH_BASE="previous-nightly",
+            result, calls = self.run_group("rust-uring", cwd=repo, BENCH_BASE="previous-nightly",
                                            GITHUB_RUN_ID="1", NIGHTLY_RUNS=json.dumps([{"databaseId": 1, "headSha": head}]))
             self.assertEqual(result.returncode, 1)
             self.assertIn("no previous scheduled Nightly", result.stderr)
             self.assertEqual(calls, [])
 
     def test_paired_base_applies_only_to_rust_bench_groups(self):
-        for group in ("js", "rust-test"):
-            result, calls = self.run_group(group, MOQ_BENCH_BASE="HEAD")
+        for group in ("js", "rust-test", "bindings"):
+            result, calls = self.run_group(group, BENCH_BASE="HEAD")
             self.assertEqual(result.returncode, 2, group)
             self.assertEqual(calls, [])
 
@@ -81,6 +81,15 @@ class NightlyTest(unittest.TestCase):
         self.assertIn("just js bench frames", calls)
         self.assertEqual(calls[-1], "just js clock-bench")
         self.assertIn("failed: just js bench reader", result.stderr)
+
+    def test_binding_runner_fails_without_its_report(self):
+        # The stubs write no reports, so every runner fails the group, a crash included.
+        result, calls = self.run_group("bindings", "py bench")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(calls[-1], "just dart bench")
+        self.assertIn("failed: just py bench", result.stderr)
+        for runner in ("rust-ffi", "rust-net", "go", "python", "kotlin", "cpp", "dart"):
+            self.assertIn(f"/{runner}.json", result.stderr)
 
     def test_bench_targets_share_one_invocation(self):
         result, calls = self.run_group("rust-bench")

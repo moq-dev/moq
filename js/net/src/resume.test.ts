@@ -40,7 +40,7 @@ async function isPending(promise: Promise<unknown>): Promise<boolean> {
 function serve(origin: Producer, source: BroadcastProducer, cost: bigint) {
 	const handle = wireOf(origin).receive(path, Route.normalize({ epoch: EPOCH, cost }));
 	void (async () => {
-		for await (const request of handle.requested()) request.accept(source.consume());
+		for await (const request of handle.requested()) hooks.acceptRequest(request, source.consume());
 	})();
 	return () => handle.close();
 }
@@ -823,7 +823,7 @@ test("between routes a reader keeps reading the copy it has", async () => {
 	expect(drain(sub)).toEqual([1]);
 
 	const { value: pending } = await asked.next();
-	pending?.accept(b.consume());
+	hooks.acceptRequest(pending, b.consume());
 	await settle();
 	await settle();
 	tb.write(1);
@@ -1031,6 +1031,163 @@ for (const fails of [true, false]) {
 		b.close();
 	});
 }
+
+/** What a resumed read with dispositions found: a group's sequence, or a drop's run and code. */
+function recvDisposition(sub: track.Subscriber): number | [number, number, number] | string {
+	const recv = hooks.tryRecvGroup(sub, true);
+	if (recv.kind === "group") {
+		recv.group.close();
+		return recv.group.sequence;
+	}
+	if (recv.kind === "drop") return [recv.start, recv.end, (recv.error as StreamError).code];
+	return recv.kind;
+}
+
+test("a resumed reader reports what its serving copy gives up, once, and never serves it", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	ta.write(0);
+	expect(recvDisposition(sub)).toBe(0);
+	// A route failing is no verdict: another route may still deliver the group.
+	ta.producer.dropGroups(1, 2, new StreamError(StreamCode.SessionClosed));
+	expect(recvDisposition(sub)).toBe("idle");
+	ta.producer.dropGroups(2, 4, new StreamError(StreamCode(70), { message: "cut" }));
+	expect(recvDisposition(sub)).toEqual([2, 4, 70]);
+	expect(recvDisposition(sub)).toBe("idle");
+	// Re-created under a run already reported dropped.
+	ta.write(3);
+	ta.write(4);
+	expect(recvDisposition(sub)).toBe(4);
+	expect(recvDisposition(sub)).toBe("idle");
+
+	sub.close();
+	front.consumer.close();
+	a.close();
+});
+
+test("a resumed reader reports a group its serving copy skipped past the budget", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		const front = new Front();
+		const a = new BroadcastProducer();
+		const ta = copy(a);
+		front.serve(a.consume());
+		const sub = front.consumer.track("seq").subscribe({ maxDelay: Milli(1_000) });
+		expect(recvDisposition(sub)).toBe("idle");
+		ta.write(0);
+		ta.write(1);
+		await clock.advance(Nano(2_000_000_000));
+		expect(recvDisposition(sub)).toBe(1);
+		expect(recvDisposition(sub)).toEqual([0, 1, StreamCode.Old]);
+		expect(recvDisposition(sub)).toBe("idle");
+
+		sub.close();
+		front.consumer.close();
+		a.close();
+	} finally {
+		installed.close();
+	}
+});
+
+test("a drop waits while a copy the serving one replaced may still deliver it", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		const front = new Front();
+		const a = new BroadcastProducer();
+		const b = new BroadcastProducer();
+		const ta = copy(a);
+		const tb = copy(b);
+		front.serve(a.consume());
+		const sub = front.consumer.track("seq").subscribe({ maxDelay: Milli(1_000) });
+		ta.write(0);
+		expect(recvDisposition(sub)).toBe(0);
+		front.serve(b.consume());
+		await settle();
+		// Only the new route gave groups 1 and 2 up; the old one is not yet bounded.
+		tb.producer.dropGroups(1, 3, new StreamError(StreamCode(70), { message: "cut" }));
+		expect(recvDisposition(sub)).toBe("idle");
+		ta.write(1);
+		expect(recvDisposition(sub)).toBe(1);
+		// The new route's first group bounds the old one just below it, which may still get 2.
+		tb.write(3);
+		expect(recvDisposition(sub)).toBe(3);
+		expect(recvDisposition(sub)).toBe("idle");
+		// Once the old copy is past the reader's budget, nothing delivers 2.
+		await clock.advance(Nano(1_000_000_000));
+		expect(recvDisposition(sub)).toEqual([2, 3, 70]);
+		ta.write(2);
+		expect(recvDisposition(sub)).toBe("idle");
+
+		sub.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+	} finally {
+		installed.close();
+	}
+});
+
+test("a drop a replaced route held back is no verdict on the route serving next", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const c = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	const tc = copy(c);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	ta.write(0);
+	expect(recvDisposition(sub)).toBe(0);
+	front.serve(b.consume());
+	await settle();
+	// Held back: the copy b replaced may still deliver group 1.
+	tb.producer.dropGroups(1, 2, new StreamError(StreamCode(70), { message: "cut" }));
+	expect(recvDisposition(sub)).toBe("idle");
+	front.serve(c.consume());
+	await settle();
+	ta.producer.close(new StreamError(StreamCode.SessionClosed));
+	tb.producer.close(new StreamError(StreamCode.SessionClosed));
+	await settle();
+	expect(recvDisposition(sub)).toBe("idle");
+	tc.write(1);
+	expect(recvDisposition(sub)).toBe(1);
+
+	sub.close();
+	front.consumer.close();
+	a.close();
+	b.close();
+	c.close();
+});
+
+test("a front serving another front reports the inner serving route's drop", async () => {
+	const inner = new Front();
+	const outer = new Front();
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	inner.serve(a.consume());
+	outer.serve(inner.consumer);
+	const sub = outer.consumer.track("seq").subscribe();
+	ta.write(0);
+	expect(recvDisposition(sub)).toBe(0);
+	ta.producer.dropGroups(1, 3, new StreamError(StreamCode(70), { message: "cut" }));
+	expect(recvDisposition(sub)).toEqual([1, 3, 70]);
+	expect(recvDisposition(sub)).toBe("idle");
+	// Re-created under a run already reported dropped.
+	ta.write(2);
+	ta.write(3);
+	expect(recvDisposition(sub)).toBe(3);
+
+	sub.close();
+	outer.consumer.close();
+	inner.consumer.close();
+	a.close();
+});
 
 for (const [field, first, second] of [
 	["priority", { priority: 1 }, { priority: 2 }],
@@ -2331,6 +2488,71 @@ test.each(["lands", "expired"])(
 			expect(await sub.recvGroup()).toBeUndefined();
 			await settle();
 			expect(ta.producer.demand().wanted.peek()).toBeUndefined();
+		} finally {
+			sub.close();
+			front.consumer.close();
+			a.close();
+			b.close();
+			installed.close();
+		}
+	},
+);
+
+// Lowering a resumed reader's floor offers the groups below the old floor that only a copy it
+// already let go cached: the serving route is asked for just those, whether it caches them or
+// gets them once asked. An ordered reader never goes back, so it asks for nothing.
+test.each([
+	[true, false],
+	[false, false],
+	[true, true],
+])(
+	"a lowered floor asks the serving route for a released copy's groups (cached=%p, ordered=%p)",
+	async (cached, ordered) => {
+		const clock = new Manual();
+		const installed = clock.install();
+		const front = new Front();
+		const a = new BroadcastProducer();
+		const b = new BroadcastProducer();
+		const ta = copy(a);
+		const tb = copy(b);
+		front.serve(a.consume());
+		const sub = front.consumer.track("seq").subscribe({ maxDelay: Milli(3_600_000) });
+		const inOrder = ordered ? sub.ordered() : undefined;
+		const read = () => {
+			const sequences: number[] = [];
+			const next = () => (inOrder ? inOrder.tryNextGroup() : sub.tryRecvGroup());
+			for (let group = next(); group; group = next()) {
+				sequences.push(group.sequence);
+				group.close();
+			}
+			return sequences;
+		};
+		const asked = () => tb.producer.subscription.peek()?.groups?.start?.included;
+		try {
+			sub.withRange({ start: { included: 4 } });
+			await clock.advance(Nano.zero);
+			for (let sequence = 0; sequence < 6; sequence++) ta.write(sequence);
+			expect(read()).toEqual([4, 5]);
+
+			if (cached) for (let sequence = 0; sequence < 6; sequence++) tb.write(sequence);
+			front.serve(b.consume());
+			await clock.advance(Nano.zero);
+			tb.write(6);
+			expect(read()).toEqual([6]);
+			await clock.advance(Nano.zero);
+			expect(ta.producer.demand().wanted.peek()).toBeUndefined();
+			expect(asked()).toBe(5);
+
+			sub.withRange({ start: { included: 1 } });
+			await clock.advance(Nano.zero);
+			expect(asked()).toBe(ordered ? 5 : 1);
+			if (!cached) {
+				expect(read()).toEqual([]);
+				for (let sequence = 1; sequence < 4; sequence++) tb.write(sequence);
+			}
+			expect(read()).toEqual(ordered ? [] : [1, 2, 3]);
+			tb.write(7);
+			expect(read()).toEqual([7]);
 		} finally {
 			sub.close();
 			front.consumer.close();

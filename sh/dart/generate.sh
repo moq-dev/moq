@@ -37,15 +37,23 @@ shopt -u nocasematch
 host=$(rustc -vV | sed -n 's/^host: //p')
 # Checkouts use a dev build; benchmark and release staging opt into release.
 profile=${MOQ_FFI_PROFILE:-debug}
+# The debug features match the hook's checkout build, test hooks included; the release
+# build is benchmarked, so it leaves out the counting allocator.
 case "$profile" in
-    debug) profile_args=() ;;
-    release) profile_args=(--release) ;;
+    debug)
+        profile_args=()
+        features=openh264,testing
+        ;;
+    release)
+        profile_args=(--release)
+        features=openh264
+        ;;
     *)
         echo "error: unsupported MOQ_FFI_PROFILE: $profile" >&2
         exit 1
         ;;
 esac
-env -i "${hook_env[@]}" cargo build --locked ${profile_args[@]+"${profile_args[@]}"} --package moq-ffi --features openh264 \
+env -i "${hook_env[@]}" cargo build --locked ${profile_args[@]+"${profile_args[@]}"} --package moq-ffi --features "$features" \
     --target "$host" \
     --manifest-path "$WORKSPACE_DIR/Cargo.toml"
 

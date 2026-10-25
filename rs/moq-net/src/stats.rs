@@ -823,11 +823,9 @@ impl Presence {
 /// etc. traffic. Each tracked broadcast keeps a per-tier counter set on both its
 /// publisher and subscriber sides.
 ///
-/// The default tier ([`Tier::default`]) is unprefixed: its published tracks are
-/// `publisher.json`, `subscriber.json`, and `sessions.json`. A named tier
-/// prefixes every track with its label, so `Tier::new("region/sjc")` records on
-/// `region/sjc/publisher.json`. The label is an arbitrary path chosen by business
-/// logic; an empty label is the default tier.
+/// Published stats frames key each tier's counters by its label, so
+/// `Tier::new("region/sjc")` records under `"region/sjc"`. The label is an
+/// arbitrary path chosen by business logic; an empty label is the default tier.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Tier(PathOwned);
 
@@ -847,20 +845,8 @@ impl Tier {
 		self.0.is_empty()
 	}
 
-	/// Track name for this tier: `name` on the default tier, else `<tier>/<name>`.
-	/// This is the naming rule the published stats tracks follow.
-	pub fn track_name(&self, name: &str) -> String {
-		if self.0.is_empty() {
-			name.to_string()
-		} else {
-			format!("{}/{}", self.0.as_str(), name)
-		}
-	}
-
 	/// The tier label as used in metrics: empty (`""`) for the default tier,
-	/// otherwise the label (e.g. `"region/sjc"`). Mirrors the
-	/// wire convention, where the default tier is unprefixed and named
-	/// tiers are `<label>/`-prefixed.
+	/// otherwise the label (e.g. `"region/sjc"`), as stats frames key it.
 	pub fn as_str(&self) -> &str {
 		self.0.as_str()
 	}
@@ -878,7 +864,7 @@ impl fmt::Display for Tier {
 /// side statically, so this only surfaces on the aggregate read side.
 ///
 /// This is the direction traffic flowed, not the session role a client advertises
-/// in its SETUP ([`crate::setup::Role`]): one session records on both sides.
+/// in its SETUP: one session records on both sides.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Role {
 	/// Egress: bytes this node published to a peer.
@@ -1703,6 +1689,7 @@ impl Session {
 	///
 	/// Only a context from [`Handle::session`] has an end to classify: on one from
 	/// [`Handle::request`] this records nothing.
+	#[cfg(any(feature = "async", test))]
 	pub(crate) fn end(&self, err: &crate::Error) {
 		let Some(inner) = &self.inner else { return };
 		if !inner.connected {
@@ -2304,7 +2291,6 @@ mod tests {
 		let tier = Tier::default();
 		assert_eq!(tier.as_str(), "");
 		assert_eq!(tier.to_string(), "");
-		assert_eq!(tier.track_name("publisher.json"), "publisher.json");
 	}
 
 	/// Counters for `(path, tier)`, creating the tier slot if absent.

@@ -116,7 +116,7 @@ const NOT_SUPPORTED = 0x3;
 /** A draining session. Draft-17 and later. */
 const GOING_AWAY = 0x6;
 
-/** FETCH-only errors. INVALID_JOINING_REQUEST_ID was removed in draft-20. */
+/** FETCH-only errors. Draft-22 has no INVALID_JOINING_REQUEST_ID. */
 const INVALID_RANGE_14 = 0x5;
 const INVALID_RANGE = 0x11;
 const INVALID_JOINING_REQUEST_ID_14 = 0x7;
@@ -130,7 +130,7 @@ function invalidRange(kind: RequestKind, version: IetfVersion): number | undefin
 function invalidJoiningRequestId(kind: RequestKind, version: IetfVersion): number | undefined {
 	if (kind !== "fetch") return undefined;
 	if (version === Version.DRAFT_14) return INVALID_JOINING_REQUEST_ID_14;
-	return version <= Version.DRAFT_19 ? INVALID_JOINING_REQUEST_ID : undefined;
+	return version <= Version.DRAFT_18 ? INVALID_JOINING_REQUEST_ID : undefined;
 }
 
 /** Draft-14 calls it TRACK_DOES_NOT_EXIST; draft-15 renamed it and moved it off 0x4. */
@@ -202,7 +202,7 @@ function goingAway(version: IetfVersion): number | undefined {
 export function toRequestCode(condition: RequestCondition, kind: RequestKind, version: IetfVersion): number {
 	switch (condition) {
 		case "invalid_filter":
-			return version >= Version.DRAFT_19 ? 0x36 : INTERNAL_ERROR;
+			return version >= Version.DRAFT_22 ? 0x36 : INTERNAL_ERROR;
 		case "internal":
 			return INTERNAL_ERROR;
 		case "unauthorized":
@@ -253,7 +253,7 @@ export function fromRequestCode(code: number, kind: RequestKind, version: IetfVe
 			return "not_supported";
 	}
 
-	if (code === 0x36 && version >= Version.DRAFT_19) return "invalid_filter";
+	if (code === 0x36 && version >= Version.DRAFT_22) return "invalid_filter";
 	if (code === doesNotExist(kind, version)) return "does_not_exist";
 	if (code === invalidRange(kind, version)) return "invalid_range";
 	if (code === invalidJoiningRequestId(kind, version)) return "invalid_joining_request_id";
