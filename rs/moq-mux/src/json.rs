@@ -90,7 +90,7 @@ use crate::catalog::{IntoRendition, Listing, RenditionConfig};
 /// Start from [`default`](Default::default) and chain the setters. The mode is not in here: it is
 /// fixed by which producer you create. To list the track in an application's own catalog section
 /// instead of `json`, pass that section's entry (see [`IntoRendition`]).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct Config {
 	/// DEFLATE-compress the track's frames, advertised as
@@ -101,24 +101,6 @@ pub struct Config {
 
 	/// An optional identifier for the shape of each value, typically a JSON Schema URL.
 	pub schema: Option<String>,
-
-	/// Whether the snapshot encoder emits merge-patch deltas (see
-	/// [`moq_json::snapshot::Config::deltas`]). Only a [`Snapshot`] reads it: a stream has no
-	/// deltas. Defaults to `true`.
-	///
-	/// Not part of the catalog entry: deltas are a property of the frames, which every consumer
-	/// decodes the same way, so a reader needs nothing from the entry to follow them.
-	pub deltas: bool,
-}
-
-impl Default for Config {
-	fn default() -> Self {
-		Self {
-			compression: false,
-			schema: None,
-			deltas: true,
-		}
-	}
 }
 
 impl Config {
@@ -133,7 +115,28 @@ impl Config {
 		self.schema = Some(schema.into());
 		self
 	}
+}
 
+/// How a [`Snapshot`] encodes its frames, beyond what its catalog entry declares.
+///
+/// Start from [`default`](Default::default) and chain the setters. None of this is written into
+/// the catalog entry: every consumer decodes the frames the same way, so a reader needs nothing
+/// from the entry to follow them.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct Options {
+	/// Whether changes ride as merge-patch deltas (see [`moq_json::snapshot::Config::deltas`]).
+	/// Defaults to `true`.
+	pub deltas: bool,
+}
+
+impl Default for Options {
+	fn default() -> Self {
+		Self { deltas: true }
+	}
+}
+
+impl Options {
 	/// Set [`deltas`](Self::deltas) (a builder, since the struct is `#[non_exhaustive]`).
 	pub fn with_deltas(mut self, deltas: bool) -> Self {
 		self.deltas = deltas;
@@ -166,16 +169,6 @@ fn prepare(config: &mut impl AsMut<JsonConfig>, mode: Mode) -> crate::Result<boo
 	crate::compression(json.compression.as_ref())
 }
 
-/// Whether the snapshot encoder emits deltas: the [`Config`] builder's choice, if `config` is one.
-///
-/// [`IntoRendition`] only returns the catalog entry, and this switch is not a catalog field.
-/// Downcast keeps it on the existing builder instead of a new trait method.
-fn deltas_of<C: std::any::Any>(config: &C) -> bool {
-	(config as &dyn std::any::Any)
-		.downcast_ref::<Config>()
-		.is_none_or(|config| config.deltas)
-}
-
 /// Publishes a latest-value JSON track, advertised in the catalog for as long as this handle lives.
 ///
 /// Every [`update`](Self::update) supersedes the last, so a consumer reads only the newest value.
@@ -186,19 +179,13 @@ pub struct Snapshot<T> {
 }
 
 impl<T: Serialize> Snapshot<T> {
-	pub(crate) fn new<C, E: CatalogExt>(
+	pub(crate) fn new<E: CatalogExt, C: RenditionConfig<E> + AsMut<JsonConfig>>(
 		track: moq_net::track::Producer,
-		rendition: crate::catalog::Rendition<E, C::Config>,
-		config: C,
-	) -> crate::Result<Self>
-	where
-		C: IntoRendition<E, JsonConfig> + std::any::Any,
-	{
-		// Read before `into_rendition` consumes the builder. Only [`Config`] carries the switch;
-		// a custom section entry has none, and the encoder default applies.
-		let deltas = deltas_of(&config);
-		let mut config = config.into_rendition();
-		let mut json = moq_json::snapshot::Config::default().with_deltas(deltas);
+		rendition: crate::catalog::Rendition<E, C>,
+		mut config: C,
+		options: Options,
+	) -> crate::Result<Self> {
+		let mut json = moq_json::snapshot::Config::default().with_deltas(options.deltas);
 		if prepare(&mut config, Mode::Snapshot)? {
 			json.compression = moq_json::Compression::Deflate;
 		}
@@ -563,7 +550,7 @@ mod test {
 	fn a_snapshot_track_roundtrips() {
 		let (mut broadcast, catalog) = catalog();
 		let mut status = catalog
-			.json_snapshot::<Value>(track(&mut broadcast, "status"), Config::default())
+			.json_snapshot::<Value>(track(&mut broadcast, "status"), Config::default(), Options::default())
 			.unwrap();
 
 		let track = status.consume();
@@ -584,7 +571,11 @@ mod test {
 	fn an_importer_joins_the_data_tracks_clock() {
 		let (mut broadcast, catalog) = catalog();
 		let mut status = catalog
-			.json_snapshot::<Value>(timed_track(&mut broadcast, "status"), Config::default())
+			.json_snapshot::<Value>(
+				timed_track(&mut broadcast, "status"),
+				Config::default(),
+				Options::default(),
+			)
 			.unwrap();
 		let mut chat = catalog
 			.json_stream::<Value>(timed_track(&mut broadcast, "chat"), Config::default())
@@ -624,16 +615,21 @@ mod test {
 		}
 	}
 
-	/// `deltas` is an encoder setting on [`Config`], not a catalog field. Without deltas
-	/// each value is its own group; with them the next value joins that group.
+	/// `deltas` reaches the encoder whatever the catalog entry, including one that is not a
+	/// [`Config`]. Without deltas each value is its own group; with them the next value joins
+	/// that group.
 	#[test]
-	fn a_config_deltas_switch_reaches_the_encoder() {
+	fn the_deltas_option_reaches_the_encoder() {
 		let (mut broadcast, catalog) = catalog();
 		let mut full = catalog
-			.json_snapshot::<Value>(track(&mut broadcast, "full"), Config::default().with_deltas(false))
+			.json_snapshot::<Value>(
+				track(&mut broadcast, "full"),
+				JsonConfig::new(Mode::Snapshot),
+				Options::default().with_deltas(false),
+			)
 			.unwrap();
 		let mut delta = catalog
-			.json_snapshot::<Value>(track(&mut broadcast, "delta"), Config::default())
+			.json_snapshot::<Value>(track(&mut broadcast, "delta"), Config::default(), Options::default())
 			.unwrap();
 
 		let mut full_track = full.consume();
@@ -746,7 +742,7 @@ mod test {
 		let mut supplied = JsonConfig::new(Mode::Stream);
 		supplied.bitrate = Some(4_200);
 		let mut status = catalog
-			.json_snapshot::<Value>(track(&mut broadcast, "status"), supplied)
+			.json_snapshot::<Value>(track(&mut broadcast, "status"), supplied, Options::default())
 			.unwrap();
 
 		// 40ms records of 500 bytes: 100 kbps, over more than the bitrate window.
@@ -770,7 +766,11 @@ mod test {
 			.json_stream::<Value>(timed_track(&mut broadcast, "gps"), Config::default())
 			.unwrap();
 		let mut status = catalog
-			.json_snapshot::<Value>(timed_track(&mut broadcast, "status"), Config::default())
+			.json_snapshot::<Value>(
+				timed_track(&mut broadcast, "status"),
+				Config::default(),
+				Options::default(),
+			)
 			.unwrap();
 		let now = catalog.clock().now();
 		let value = serde_json::json!({ "armed": true });
@@ -799,7 +799,7 @@ mod test {
 			.json_stream::<Value>(track(&mut broadcast, "chat"), Config::default())
 			.unwrap();
 		let _status = catalog
-			.json_snapshot::<Value>(track(&mut broadcast, "status"), Config::default())
+			.json_snapshot::<Value>(track(&mut broadcast, "status"), Config::default(), Options::default())
 			.unwrap();
 
 		let snapshot = catalog.snapshot();

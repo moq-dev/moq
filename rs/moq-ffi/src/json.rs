@@ -228,11 +228,11 @@ impl MoqJsonSnapshotProducer {
 		config: MoqJsonSnapshotConfig,
 	) -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::enter();
-		let config = moq_mux::json::Config::default()
-			.with_compression(config.compression)
-			.with_deltas(config.deltas);
+		let options = moq_mux::json::Options::default().with_deltas(config.deltas);
+		let config = moq_mux::json::Config::default().with_compression(config.compression);
 		let this = track.adopt(|track| {
-			let producer = broadcast.with_state(|state| Ok(state.catalog.json_snapshot::<Value>(track, config)?))?;
+			let producer =
+				broadcast.with_state(|state| Ok(state.catalog.json_snapshot::<Value>(track, config, options)?))?;
 			Ok(Self {
 				inner: Arc::new(std::sync::Mutex::new(Some(producer))),
 				alive: kio::Producer::new(()),
@@ -323,7 +323,7 @@ impl MoqJsonSnapshotConsumer {
 
 	/// Get the next state in order. Returns `None` once the track ends.
 	///
-	/// Groups older than the subscription's `max_delay_us` are skipped, so a playhead
+	/// Groups older than the subscription's `max_delay` are skipped, so a playhead
 	/// reader sets that budget to its distance behind live.
 	pub async fn next(&self) -> Result<Option<MoqJsonValue>, MoqError> {
 		self.task

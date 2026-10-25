@@ -363,7 +363,7 @@ func (f *Fill) Priority() int8 {
 // MaxDelay is the most tolerant age budget among its readers, or nil for the
 // publisher's max age alone.
 func (f *Fill) MaxDelay() *time.Duration {
-	return optFromMicros(f.inner.MaxDelayUs())
+	return f.inner.MaxDelay()
 }
 
 // Order is which end to fill first.
