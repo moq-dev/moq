@@ -1,6 +1,6 @@
 /// How loud a stretch of audio was, for drawing a meter.
 ///
-/// Reported by a capture [`Control`](crate::encode::Control) and by a mixing
+/// Reported by a capture `encode::Control` and by a mixing
 /// bus and its strips. Read it at whatever rate the meter draws at.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Level {

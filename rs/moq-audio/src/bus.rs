@@ -29,7 +29,7 @@
 //! # }
 //! ```
 //!
-//! Enabled by the default-on `bus` feature; [`Bus::capture`] also needs `capture`.
+//! Enabled by the default-on `bus` feature; `Bus::capture` also needs `capture`.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
