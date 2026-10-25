@@ -264,6 +264,8 @@ export class Reload {
 
 	// True after the browser freezes or hides the page until it visibly resumes.
 	#suspended = new Signal(false);
+	// Watches the page for #suspended, outliving the loop until the sessions it ended settle.
+	#suspension = new Effect();
 
 	// Use the serialized URL as the reactive connection key. URL objects use identity
 	// equality, but replacing one with an equivalent instance should not reconnect.
@@ -307,14 +309,14 @@ export class Reload {
 		const win = globalThis.window;
 		const doc = globalThis.document;
 		if (typeof win !== "undefined" && typeof doc !== "undefined") {
-			this.#signals.event(win, "pagehide", () => this.#suspended.set(true));
-			this.#signals.event(win, "pageshow", () => this.#suspended.set(false));
-			this.#signals.event(win, "unload", () => this.#suspended.set(true));
-			this.#signals.event(doc, "visibilitychange", () => {
+			this.#suspension.event(win, "pagehide", () => this.#suspended.set(true));
+			this.#suspension.event(win, "pageshow", () => this.#suspended.set(false));
+			this.#suspension.event(win, "unload", () => this.#suspended.set(true));
+			this.#suspension.event(doc, "visibilitychange", () => {
 				if (!doc.hidden) this.#suspended.set(false);
 			});
 			// Nothing would run to finish a drain begun before the page went away either.
-			this.#signals.run((effect) => {
+			this.#suspension.run((effect) => {
 				if (!effect.get(this.#suspended)) return;
 				for (const connection of this.#ending.keys()) connection.abort();
 				this.#ending.clear();
@@ -733,10 +735,14 @@ export class Reload {
 		this.#signals.close();
 		this.#retire();
 		// No session will present the tokens again, so they end with the loop, once the sessions
-		// still draining no longer need their grants to finish.
+		// still draining no longer need their grants or a page hide to cut them short.
 		const err = abort ?? new Error("connection closed");
-		if (this.#ending.size === 0) this.auth.abort(err);
-		else void Promise.all(this.#ending.values()).then(() => this.auth.abort(err));
+		const done = () => {
+			this.auth.abort(err);
+			this.#suspension.close();
+		};
+		if (this.#ending.size === 0) done();
+		else void Promise.all(this.#ending.values()).then(done);
 		if (this.#closed.peek() === undefined) this.#closed.set(abort ?? null);
 	}
 }

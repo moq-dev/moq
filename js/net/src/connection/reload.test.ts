@@ -586,30 +586,42 @@ function holdFins(transport: MockTransport) {
 // final group, whether the session is serving or a predecessor still draining after a GOAWAY.
 // A page going away aborts: nothing would run to finish the drain. `linger` is how long after
 // `end` the session starts closing: the pool's default window, or at once for a private loop.
+// `hide` then sends the page away mid-drain, after the loop itself has closed.
 const teardowns = {
 	"release of the last handle": {
 		drains: true,
 		goaway: false,
 		linger: Milli(2000),
+		hide: false,
 		end: (handle: Connection) => handle.close(),
 	},
 	disable: {
 		drains: true,
 		goaway: false,
 		linger: Milli(2000),
+		hide: false,
 		end: (handle: Connection) => handle.enabled.set(false),
 	},
 	"release after a GOAWAY": {
 		drains: true,
 		goaway: true,
 		linger: Milli(0),
+		hide: false,
 		end: (handle: Connection) => handle.close(),
 	},
 	pagehide: {
 		drains: false,
 		goaway: false,
 		linger: Milli(0),
+		hide: false,
 		end: (_: Connection, win: EventTarget) => win.dispatchEvent(new Event("pagehide")),
+	},
+	"pagehide during a release's drain": {
+		drains: false,
+		goaway: false,
+		linger: Milli(2000),
+		hide: true,
+		end: (handle: Connection) => handle.close(),
 	},
 };
 
@@ -678,6 +690,7 @@ for (const [name, teardown] of Object.entries(teardowns)) {
 			producer.close();
 			teardown.end(handle, win);
 			await clock.advance(Nano.fromMilli(teardown.linger));
+			if (teardown.hide) win.dispatchEvent(new Event("pagehide"));
 
 			if (teardown.drains) {
 				expect(await (await track.nextGroup())?.readString()).toBe("last");
