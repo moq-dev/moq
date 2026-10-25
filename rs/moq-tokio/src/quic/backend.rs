@@ -84,27 +84,11 @@ fn apply_windows(transport: &mut driver::TransportConfig, quic: &Resolved) {
 }
 
 /// The controller factory for a congestion control family. moq-quic's BBR is v3.
-fn congestion_factory(family: CongestionControl) -> Arc<dyn driver::congestion::ControllerFactory + Send + Sync> {
+fn congestion_factory(family: CongestionControl) -> Arc<dyn moq_congestion::ControllerFactory + Send + Sync> {
 	match family {
-		CongestionControl::Loss => Arc::new(driver::congestion::CubicConfig::default()),
-		CongestionControl::Delay => Arc::new(driver::congestion::Bbr3Config::default()),
-		CongestionControl::None => Arc::new(driver::congestion::Unlimited),
-	}
-}
-
-/// A live QUIC connection under a session, for tuning it once the peer is known.
-pub struct Connection(driver::Connection);
-
-impl Connection {
-	pub(crate) fn new(conn: driver::Connection) -> Self {
-		Self(conn)
-	}
-
-	/// Change the flow-control limits `limits` sets; a raise reaches the peer on the next packet.
-	///
-	/// Errors, changing nothing, on limits [`Limits::validate`](crate::quic::Limits::validate) refuses.
-	pub fn set_limits(&self, limits: crate::quic::Limits) -> Result<()> {
-		Ok(self.0.set_limits(limits)?)
+		CongestionControl::Loss => Arc::new(moq_congestion::CubicConfig::default()),
+		CongestionControl::Delay => Arc::new(moq_congestion::Bbr3Config::default()),
+		CongestionControl::None => Arc::new(moq_congestion::Unlimited),
 	}
 }
 
@@ -331,8 +315,8 @@ pub(crate) struct Client {
 	/// whether an IPv4 destination is reachable at all. Captured here because the
 	/// endpoint owns the socket from here on and `local_addr` can't tell us.
 	dual_stack: bool,
-	/// Whether to write session secrets to `SSLKEYLOGFILE` (see [`crate::quic::Config::keylog`]).
-	keylog: bool,
+	/// A private log opened before this client can start a handshake.
+	keylog: Option<Arc<crate::tls::KeyLog>>,
 }
 
 impl Client {
@@ -346,7 +330,12 @@ impl Client {
 		apply_transport(&mut transport, &quic);
 		apply_qlog(&mut transport, &quic, "client")?;
 		let transport = Arc::new(transport);
-		let keylog = quic.keylog;
+		let keylog = quic
+			.keylog
+			.as_deref()
+			.map(crate::tls::KeyLog::open)
+			.transpose()?
+			.map(Arc::new);
 
 		// There's a bit more boilerplate to make a generic endpoint.
 		// The driver spawns its tasks on the current tokio runtime.
@@ -455,8 +444,8 @@ impl Client {
 		};
 
 		config.alpn_protocols = alpns;
-		if self.keylog {
-			config.key_log = Arc::new(rustls::KeyLogFile::new());
+		if let Some(keylog) = &self.keylog {
+			config.key_log = keylog.clone();
 		}
 
 		let config: driver::crypto::rustls::QuicClientConfig = config.try_into()?;
@@ -776,7 +765,12 @@ impl Server {
 		let quic = quic.resolve();
 		apply_transport(&mut transport, &quic);
 		apply_qlog(&mut transport, &quic, "server")?;
-		let keylog = quic.keylog;
+		let keylog = quic
+			.keylog
+			.as_deref()
+			.map(crate::tls::KeyLog::open)
+			.transpose()?
+			.map(Arc::new);
 		let transport = Arc::new(transport);
 
 		// H3 is last because it requires WebTransport framing which not all H3 endpoints support.
@@ -789,8 +783,8 @@ impl Server {
 		alpns.push(web::ALPN.as_bytes().to_vec());
 
 		let mut tls = (*served.config(alpns)?).clone();
-		if keylog {
-			tls.key_log = Arc::new(rustls::KeyLogFile::new());
+		if let Some(keylog) = keylog {
+			tls.key_log = keylog;
 		}
 
 		let tls: driver::crypto::rustls::QuicServerConfig = tls.try_into()?;
@@ -1247,13 +1241,13 @@ mod tests {
 		let mtu = 1200;
 
 		let loss = congestion_factory(CongestionControl::Loss).build(now, mtu);
-		assert!(loss.into_any().downcast::<driver::congestion::Cubic>().is_ok());
+		assert!(loss.into_any().downcast::<moq_congestion::Cubic>().is_ok());
 
 		let delay = congestion_factory(CongestionControl::Delay).build(now, mtu);
-		assert!(delay.into_any().downcast::<driver::congestion::Bbr3>().is_ok());
+		assert!(delay.into_any().downcast::<moq_congestion::Bbr3>().is_ok());
 
 		let none = congestion_factory(CongestionControl::None).build(now, mtu);
-		assert!(none.into_any().downcast::<driver::congestion::Unlimited>().is_ok());
+		assert!(none.into_any().downcast::<moq_congestion::Unlimited>().is_ok());
 	}
 
 	/// Loopback regression test: with the knob unset, live QUIC connections must run
@@ -1326,7 +1320,7 @@ mod tests {
 	fn is_bbr3(conn: &driver::Connection) -> bool {
 		conn.congestion_state()
 			.into_any()
-			.downcast::<driver::congestion::Bbr3>()
+			.downcast::<moq_congestion::Bbr3>()
 			.is_ok()
 	}
 }

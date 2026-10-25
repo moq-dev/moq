@@ -37,7 +37,8 @@ and its trait-versus-bridge comparison:
   `insert_datagram`, `write_frame`, `create_frame`, `write`, `finish`,
   `abort(self, Error)`, `closed`, `track(name)` then `.subscribe(..)`,
   `recv_group`, `recv_datagram`, `read_frame`, `next_frame`, `read_chunk`,
-  and their `poll_*` forms. A wrapper adapts
+  the broadcast consumer's `tracks` listing (maintainer, 2026-10-24), and
+  their `poll_*` forms. A wrapper adapts
   to moq-net, not the other way around: moq-e2ee's error converts into
   `moq_net::Error`.
 - **Terminal propagation crosses the wrapper.** Finish, typed aborts (such

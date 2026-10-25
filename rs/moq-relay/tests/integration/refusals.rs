@@ -34,7 +34,7 @@ fn config(dir: &std::path::Path, ws: bool) -> Config {
 	config.web.http.listen = Some("127.0.0.1:0".parse().expect("parse http"));
 	config.web.ws = ws;
 	config.internal.listen = Some("127.0.0.1:0".parse().unwrap());
-	config.drain_timeout = Duration::ZERO;
+	config.drain_timeout = Some((Duration::ZERO).into());
 	config
 }
 
@@ -105,9 +105,11 @@ impl Running {
 fn client() -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
-	config.once = Some(true);
 	config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
-	config.init(Default::default()).expect("client init")
+	config
+		.init(Default::default())
+		.expect("client init")
+		.with_reconnect(false)
 }
 
 /// Dial `url` as a publisher or a subscriber and require the relay to refuse.

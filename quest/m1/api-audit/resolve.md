@@ -72,5 +72,4 @@ Wire: none.
 
 ## Related
 
-- [Readers follow restarts](/quest/m1/sink-restart-follow.md) - moves readers to `follow`; whichever lands second adopts the other's names
 - [Origin fronts park](/quest/m2/origin-front-parks.md) - touches the same retry

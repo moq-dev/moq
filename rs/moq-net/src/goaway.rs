@@ -376,6 +376,11 @@ impl Handle {
 	pub fn consumer(&self) -> Consumer {
 		self.consumer.clone()
 	}
+
+	/// Whether either side sent a GOAWAY, so the session is draining.
+	pub fn draining(&self) -> bool {
+		self.trigger.read().is_some() || self.consumer.state.read().is_some()
+	}
 }
 
 #[cfg(test)]

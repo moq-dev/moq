@@ -4,8 +4,11 @@ pub(crate) const PROFILE: &str = "moq-e2ee-00";
 /// HKDF info prefix for opaque broadcast paths.
 pub(crate) const PATH_LABEL: &[u8] = b"moq-e2ee-00 path";
 
-/// HKDF info prefix for physical names.
-pub(crate) const NAME_LABEL: &[u8] = b"moq-e2ee-00 name";
+/// HKDF info prefix for the HMAC-SHA-256 key that derives physical name nonces.
+pub(crate) const NAME_MAC_LABEL: &[u8] = b"moq-e2ee-00 name-mac";
+
+/// HKDF info prefix for the AES-128-GCM key that seals physical names.
+pub(crate) const NAME_KEY_LABEL: &[u8] = b"moq-e2ee-00 name-key";
 
 /// HKDF info prefix for AEAD keys.
 pub(crate) const KEY_LABEL: &[u8] = b"moq-e2ee-00 key";
@@ -16,11 +19,17 @@ pub(crate) const TAG_LEN: usize = 16;
 /// Derived AEAD key length in bytes.
 pub(crate) const KEY_LEN: usize = 16;
 
-/// Physical name and opaque path material length in bytes.
-pub(crate) const NAME_LEN: usize = 16;
+/// Opaque path material length in bytes.
+pub(crate) const PATH_LEN: usize = 16;
 
-/// Unpadded base64url length of 16 bytes, in ASCII characters.
-pub(crate) const NAME_TEXT_LEN: usize = 22;
+/// HMAC-SHA-256 name key length in bytes.
+pub(crate) const NAME_MAC_LEN: usize = 32;
+
+/// Leading HMAC bytes a physical name uses as its AES-GCM nonce.
+pub(crate) const NAME_NONCE_LEN: usize = 12;
+
+/// Padded semantic names are a multiple of this many bytes.
+pub(crate) const NAME_BLOCK: usize = 16;
 
 /// Broadcast secret length in bytes.
 pub const SECRET_LEN: usize = 32;

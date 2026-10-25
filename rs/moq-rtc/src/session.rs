@@ -45,8 +45,9 @@ pub trait MediaSink: Send {
 	/// loop has already converted the timestamp to microseconds.
 	fn on_frame(&mut self, mid: str0m::media::Mid, frame: codec::Frame) -> Result<()>;
 
-	/// Called once when the session ends with a genuine failure, so the sink can
-	/// abort its tracks with the real cause instead of a bare `Error::Dropped`.
+	/// Called once when the session ends other than by the peer's clean end, so the sink can
+	/// abort its tracks, the catalog included, with the real cause instead of a bare
+	/// `Error::Dropped`.
 	fn abort(&mut self, err: moq_net::Error);
 
 	/// Called once when the peer ends the session cleanly after its final media: finish
@@ -93,6 +94,9 @@ pub struct Session {
 	/// sessions; pumps send frames here, the main loop forwards them into
 	/// str0m's [`Writer`](str0m::media::Writer).
 	writes_rx: Option<mpsc::Receiver<WriteRequest>>,
+	/// Why the egress source's catalog stopped. `Some` only for [`MediaRole::Egress`] sessions,
+	/// until it does.
+	catalog_end: Option<tokio::task::JoinHandle<Result<()>>>,
 	/// Rebases each ingested track's raw RTP timestamps onto one session
 	/// timeline so audio and video stay in sync. Unused by egress sessions.
 	ingest_clock: IngestClock,
@@ -110,6 +114,7 @@ impl Session {
 			role: MediaRole::Ingest(sink),
 			opened_media: HashSet::new(),
 			writes_rx: None,
+			catalog_end: None,
 			ingest_clock: IngestClock::default(),
 			egress_clock: EgressClock::default(),
 		})
@@ -119,11 +124,13 @@ impl Session {
 	/// `inbound` comes from the server mux, or [`moq_ice::reader`] for a 1:1 client socket.
 	pub fn egress(rtc: Rtc, socket: moq_ice::Socket, mut source: EgressSource) -> Result<Self> {
 		let writes_rx = source.take_writes();
+		let catalog_end = source.take_catalog_end();
 		Ok(Self {
 			agent: moq_ice::Agent::new(rtc, socket)?,
 			role: MediaRole::Egress(Box::new(source)),
 			opened_media: HashSet::new(),
 			writes_rx: Some(writes_rx),
+			catalog_end: Some(catalog_end),
 			ingest_clock: IngestClock::default(),
 			egress_clock: EgressClock::default(),
 		})
@@ -148,11 +155,10 @@ impl Session {
 
 	pub async fn run(&mut self) -> Result<()> {
 		let result = self.run_loop().await;
-		// A genuine failure (not a normal peer disconnect or an unconnected offer)
-		// propagates to subscribers as the real cause; the normal ends just let the
-		// sink's tracks close as Dropped.
+		// Any end but the peer's DELETE, a disconnect or an offer that never connected
+		// included, ends the sink's tracks with its cause, so subscribers see the publisher
+		// go rather than its tracks dropped unfinished.
 		if let Err(err) = &result
-			&& !matches!(err, Error::SessionClosed | Error::IceTimeout)
 			&& let MediaRole::Ingest(sink) = &mut self.role
 		{
 			sink.abort(moq_net::Error::Transport(err.to_string()));
@@ -165,6 +171,22 @@ impl Session {
 			tokio::select! {
 				// Egress writes get drained promptly; `Agent::next` is cancel safe.
 				biased;
+
+				// A failed catalog, as every subscription fails once the source's route dies,
+				// means nothing more will flow, so fail rather than idle. A clean end keeps
+				// serving what the pumps still hold. Polled before the writes, which could
+				// otherwise stay ready and starve it; it completes once.
+				ended = async {
+					match self.catalog_end.as_mut() {
+						Some(end) => end.await,
+						None => std::future::pending().await,
+					}
+				} => {
+					self.catalog_end = None;
+					if let Ok(Err(err)) = ended {
+						return Err(err);
+					}
+				}
 
 				Some(req) = async {
 					match self.writes_rx.as_mut() {
@@ -426,17 +448,20 @@ fn to_u64(value: i128) -> u64 {
 	value.clamp(0, u64::MAX as i128) as u64
 }
 
-/// Log a finished session at the right level: an ordinary peer disconnect
-/// ([`Error::SessionClosed`]) is debug, a genuine failure is a warning. Keeps
-/// normal WebRTC churn out of the warning stream. `role` labels the path
-/// (e.g. `"whip server"`).
-pub(crate) fn log_session_end(role: &str, result: &Result<()>) {
-	match result {
+/// Log a finished session at the right level, then fold an ordinary peer disconnect
+/// ([`Error::SessionClosed`]) into `Ok` so only genuine failures error. Keeps normal
+/// WebRTC churn out of the warning stream. `role` labels the path (e.g. `"whip server"`).
+pub(crate) fn end(role: &str, result: Result<()>) -> Result<()> {
+	match &result {
 		Ok(()) | Err(Error::SessionClosed) => tracing::debug!(role, "session ended"),
 		// An abandoned offer (peer answered but never connected) is normal churn, not
 		// a failure: keep it out of the warning stream.
 		Err(Error::IceTimeout) => tracing::debug!(role, "session ended: ICE never connected"),
 		Err(err) => tracing::warn!(%err, role, "session ended"),
+	}
+	match result {
+		Ok(()) | Err(Error::SessionClosed) => Ok(()),
+		Err(err) => Err(err),
 	}
 }
 

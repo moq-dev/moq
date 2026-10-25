@@ -345,17 +345,16 @@ pub unsafe extern "C" fn moq_encode_audio(
 		let codec = codec_str
 			.parse()
 			.map_err(|_| Error::UnknownFormat(codec_str.to_string()))?;
-		options.settings = moq_audio::encode::Settings::from_input(codec, &encoder_input);
+		options.config = moq_audio::encode::Config::from_input(codec, &encoder_input);
 		if let Some(sample_rate) = zeroable(raw_output.sample_rate) {
-			options.settings.sample_rate = sample_rate;
+			options.config.sample_rate = sample_rate;
 		}
 		if let Some(channels) = zeroable(raw_output.channels) {
-			options.settings.layout = moq_audio::Layout::from_channels(channels)?;
+			options.config.layout = moq_audio::Layout::from_channels(channels)?;
 		}
-		options.settings.bitrate =
-			zeroable(raw_output.bitrate).map(|bps| moq_net::bandwidth::Rate::from_bps(bps.into()));
+		options.config.bitrate = zeroable(raw_output.bitrate).map(|bps| moq_net::bandwidth::Rate::from_bps(bps.into()));
 		if let Some(micros) = zeroable(raw_output.frame_duration_us) {
-			options.settings.frame_duration = Duration::from_micros(micros.into());
+			options.config.frame_duration = Duration::from_micros(micros.into());
 		}
 
 		let bandwidth = ffi::parse_id_optional(bandwidth)?;
@@ -446,8 +445,8 @@ pub unsafe extern "C" fn moq_encode_audio_frame(producer: u32, frame: *const moq
 
 /// Flush any pending samples and finalize an audio producer.
 ///
-/// The broadcast keeps the finished track, catalog rendition included, until it closes or its
-/// `moq_publish_finish` linger ends, so a late subscriber can still drain it.
+/// The broadcast keeps the finished track, catalog rendition included, until it closes, so a
+/// late subscriber can still drain it.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_encode_audio_finish(producer: u32) -> i32 {
 	ffi::enter(move || {

@@ -19,8 +19,8 @@ moq commit access to noq's BBR3 or an external crate:
 
 - **Home.** `rs/moq-congestion` in this monorepo, published by release-plz
   like every other crate, so it shares CI, moq-shaper, and the QUIC sim.
-- **Two steps in moq.** A move with no behavior change, then the trait
-  redesign, so the rename diff and the design diff are reviewed separately.
+- **Trait redesign.** The controllers now live in the crate with their existing
+  callbacks. Redesign that trait separately from the mechanical move.
 - **Followers land in the crate.** GCC, SCReAM, the BBR3 delay bound, the
   BBR media study, L4S, and careful resume build on the redesigned trait, and
   the redesign checks its shape against each of them.
@@ -29,13 +29,13 @@ moq commit access to noq's BBR3 or an external crate:
 
 ## Required
 
-- [Move the controllers](/quest/m1/congestion/move.md) - BBR3, Cubic, and Unlimited live in `moq-congestion` and `moq-quic` consumes them, unchanged
 - [Portable controller trait](/quest/m1/congestion/trait.md) - an s2n-style trait with crate-owned per-packet state and pacing, independent of any transport's types
 
 ## Related
 
 - [noq adopts moq-congestion](/quest/m2/noq-congestion.md) - the external consumer, after the m1 cut publishes the crate
 - [Realtime uplink congestion control](/quest/m2/quic-realtime/README.md) - GCC, SCReAM, and the BBR3 delay bound
-- [BBR media study](/quest/m2/quic-bbr-natural-drain.md) - BBR3 behavior changes measured against media traffic
+- [BBR media study](/quest/m2/quic-bbr-study.md) - BBR3 behavior changes measured against media traffic
+- [Skip ProbeRTT after a near-floor RTT](/quest/m1/bbr-probe-rtt-skip.md) - BBR3 behavior change for app-limited media
 - [L4S on the backbone](/quest/m3/quic-ecn.md) - an ECT(1) codepoint choice and a scalable CE response
 - [Careful resume on reconnect](/quest/m3/quic-careful-resume.md) - seeding a controller from a previous connection

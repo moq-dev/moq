@@ -184,7 +184,7 @@ fn renewal(c: &mut Criterion) {
 						let (session, _, requests) = &mut publishers[0];
 						let handle = session.auth();
 						let auths = runtime
-							.block_on(async { [handle.add("a").await.unwrap(), handle.add("b").await.unwrap()] });
+							.block_on(async { [handle.add("a").await.unwrap().0, handle.add("b").await.unwrap().0] });
 						let broadcasts: Vec<_> = (0..routes)
 							.map(|route| origin.create_broadcast(format!("room/{route}").as_str()).unwrap())
 							.collect();

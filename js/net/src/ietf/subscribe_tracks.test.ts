@@ -1,7 +1,9 @@
 import { expect, onTestFinished, spyOn, test } from "bun:test";
 import { Manual, Nano } from "@moq/clock";
+import Qmux from "@moq/qmux";
 import { Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
+import { Tracks } from "../broadcast.ts";
 import { StreamCode, StreamError } from "../error.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as Origin } from "../origin.ts";
@@ -20,8 +22,43 @@ import { ALPN, type IetfVersion, Version } from "./version.ts";
 
 const drafts = [Version.DRAFT_18, Version.DRAFT_19, Version.DRAFT_20, Version.DRAFT_21, Version.DRAFT_22];
 
-function fixture(version: IetfVersion, requests = 10, grant = new Signal<Grant | undefined>(undefined)) {
-	const pair = createMockTransportPair(ALPN.DRAFT_22);
+/** A client and server WebTransport, connected to each other. */
+type Pair = { client: WebTransport; server: WebTransport };
+
+/**
+ * A qmux session pair over an in-memory socket, which, unlike the mock transport, holds each
+ * bidi stream against the receiver's stream credit until both its halves end. The client
+ * grants the server `credit` such streams at once.
+ */
+function qmuxPair(credit: bigint): Pair {
+	const socket = (readable: ReadableStream<Uint8Array>, writable: WritableStream<Uint8Array>) => {
+		const closed = Promise.withResolvers<{ closeCode: number; reason: string }>();
+		return {
+			url: "",
+			opened: Promise.resolve({ readable, writable, extensions: "", protocol: "qmux-01" }),
+			closed: closed.promise,
+			close: () => closed.resolve({ closeCode: 1000, reason: "" }),
+		};
+	};
+	// Copied, since a sender may reuse its buffer once a write resolves.
+	const pipe = () =>
+		new TransformStream<Uint8Array, Uint8Array>({ transform: (chunk, c) => c.enqueue(chunk.slice()) });
+	const up = pipe();
+	const down = pipe();
+	const client = new Qmux(socket(down.readable, up.writable), {
+		config: { idleTimeout: null, maxStreamsBidi: credit },
+	});
+	const server = Qmux.accept(socket(up.readable, down.writable), { config: { idleTimeout: null } });
+	return { client, server };
+}
+
+function fixture(
+	version: IetfVersion,
+	{
+		grant = new Signal<Grant | undefined>(undefined),
+		pair = createMockTransportPair(ALPN.DRAFT_22),
+	}: { grant?: Signal<Grant | undefined>; pair?: Pair } = {},
+) {
 	const origin = new Origin();
 	const session = new NativeSession(pair.server, version, false);
 	const publisher = new Publisher({
@@ -30,7 +67,6 @@ function fixture(version: IetfVersion, requests = 10, grant = new Signal<Grant |
 		publish: origin.consume(),
 		requiresSolicitation: true,
 		grant,
-		limits: { announces: 10, requests },
 	});
 	const tasks: Promise<void>[] = [];
 	const streams: Stream[] = [];
@@ -38,6 +74,7 @@ function fixture(version: IetfVersion, requests = 10, grant = new Signal<Grant |
 		for (const stream of streams) stream.abort(new StreamError(StreamCode.Cancel, { message: "test ended" }));
 		origin.close();
 		pair.server.close();
+		pair.client.close();
 		publisher.close();
 		await Promise.all(tasks);
 	});
@@ -50,11 +87,19 @@ function fixture(version: IetfVersion, requests = 10, grant = new Signal<Grant |
 		streams,
 		async list(prefix = "room", forward = false, parameters = new Parameters()) {
 			const client = await Stream.open(pair.client, { version });
-			const server = await Stream.accept(pair.server, version);
-			if (!server) throw new Error("missing listing stream");
 			streams.push(client);
 			parameters.forward = forward;
-			tasks.push(publisher.runSubscribeTracks(new SubscribeTracks(0n, Path.from(prefix), parameters), server));
+			// Sent, since a transport that opens a stream lazily shows the peer none until then.
+			await Message.write(
+				client.writer,
+				SubscribeTracks.id,
+				new SubscribeTracks(0n, Path.from(prefix), parameters),
+				version,
+			);
+			const server = await Stream.accept(pair.server, version);
+			if (!server) throw new Error("missing listing stream");
+			expect(await server.reader.u53()).toBe(SubscribeTracks.id);
+			tasks.push(publisher.runSubscribeTracks(await SubscribeTracks.decode(server.reader, version), server));
 			return client;
 		},
 		/** The next PUBLISH, answered with a paused PUBLISH_OK unless `answer` is false. */
@@ -213,19 +258,14 @@ for (const version of drafts) {
 		expect(done.statusCode).toBe(PublishDoneStatus.TRACK_ENDED);
 	});
 
-	test(`track listing skips beyond the cap and rejects overlapping prefixes (${version})`, async () => {
-		const fx = fixture(version, 1);
+	test(`track listing rejects overlapping prefixes (${version})`, async () => {
+		const fx = fixture(version);
 		const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
 		broadcast.announce();
 		broadcast.createTrack("video");
-		broadcast.createTrack("audio");
 		const listing = await fx.list();
 		await ok(listing, version);
 		await fx.offered();
-		expect(await listing.reader.u53()).toBe(PublishSkipped.id);
-		const skipped = await PublishSkipped.decode(listing.reader, version);
-		expect(skipped.suffix).toBe(Path.from("live"));
-		expect(skipped.trackName).toBe("audio");
 		for (const prefix of ["room/live", "", "room"]) {
 			const overlap = await fx.list(prefix);
 			expect(await overlap.reader.u53()).toBe(RequestError.id);
@@ -245,7 +285,9 @@ for (const version of drafts) {
 		} else {
 			await ok(listing, version);
 			expect(await listing.reader.u53()).toBe(PublishSkipped.id);
-			expect((await PublishSkipped.decode(listing.reader, version)).trackName).toBe("video");
+			const skipped = await PublishSkipped.decode(listing.reader, version);
+			expect(skipped.suffix).toBe(Path.from("live"));
+			expect(skipped.trackName).toBe("video");
 		}
 	});
 }
@@ -309,7 +351,7 @@ test("grants hide tracks, revoke PUBLISHes and relist when broadened", async () 
 	const clock = new Manual();
 	const installed = clock.install();
 	using _installed = { [Symbol.dispose]: () => installed.close() };
-	const fx = fixture(version, 10, grant);
+	const fx = fixture(version, { grant });
 	const listing = await fx.list();
 	await ok(listing, version);
 	const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
@@ -381,47 +423,6 @@ test("an update ends only its listing and frees its prefix", async () => {
 	await ok(replacement, version);
 });
 
-test("paused updates keep one slot and release it when the PUBLISH ends", async () => {
-	const version = Version.DRAFT_22;
-	const fx = fixture(version, 1);
-	const clock = new Manual();
-	const installed = clock.install();
-	using _installed = { [Symbol.dispose]: () => installed.close() };
-	const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
-	broadcast.announce();
-	broadcast.createTrack("video");
-	const listing = await fx.list();
-	await ok(listing, version);
-	const offered = await fx.offered();
-	for (let i = 0; i < 32; i++) await update(offered.stream, version, BigInt(2 * (i + 1)), false);
-	broadcast.createTrack("skipped");
-	expect(await listing.reader.u53()).toBe(PublishSkipped.id);
-	expect((await PublishSkipped.decode(listing.reader, version)).trackName).toBe("skipped");
-	offered.stream.abort(new StreamError(StreamCode.Cancel));
-	await clock.advance(Nano.zero);
-	broadcast.createTrack("available");
-	expect((await fx.offered()).publish.trackName).toBe("available");
-});
-
-test("a failed PUBLISH stream open returns its subscription slot", async () => {
-	const version = Version.DRAFT_22;
-	const fx = fixture(version, 1);
-	const clock = new Manual();
-	const installed = clock.install();
-	using _installed = { [Symbol.dispose]: () => installed.close() };
-	const open = spyOn(fx.session, "openBi").mockRejectedValue(new StreamError(StreamCode.Cancel));
-	const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
-	broadcast.announce();
-	broadcast.createTrack("video");
-	const listing = await fx.list();
-	await ok(listing, version);
-	await clock.advance(Nano.zero);
-	expect(open).toHaveBeenCalledTimes(1);
-	open.mockRestore();
-	broadcast.createTrack("available");
-	expect((await fx.offered()).publish.trackName).toBe("available");
-});
-
 test("session shutdown releases listing tasks while the local origin stays open", async () => {
 	const version = Version.DRAFT_22;
 	const fx = fixture(version);
@@ -481,5 +482,115 @@ for (const version of [Version.DRAFT_20, Version.DRAFT_22]) {
 		expect(done.statusCode).toBe(PublishDoneStatus.UPDATE_FAILED);
 		expect(done.streamCount).toBe(1n);
 		uni.releaseLock();
+	});
+}
+
+/** Listed broadcast sizes to sweep: what a listing holds must not grow with them. */
+const CATALOGS = [4, 64, 512];
+
+/** A broadcast under `room` listing `catalog` tracks. */
+function catalogOf(fx: ReturnType<typeof fixture>, catalog: number) {
+	const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
+	broadcast.announce();
+	for (let i = 0; i < catalog; i++) broadcast.createTrack(`t${i}`);
+}
+
+// Each PUBLISH opens only as the peer's stream credit admits it: a peer that withholds credit and
+// reads nothing leaves one stream open waiting, however many tracks are listed, and each track is
+// PUBLISHed once credit returns.
+for (const version of drafts) {
+	test(`a listing publishes only as credit admits (${version})`, async () => {
+		const credit = 2;
+		const clock = new Manual();
+		const installed = clock.install();
+		using _installed = { [Symbol.dispose]: () => installed.close() };
+		for (const catalog of CATALOGS) {
+			const pair = qmuxPair(BigInt(credit));
+			const open = pair.server.createBidirectionalStream.bind(pair.server);
+			let waiting = 0;
+			spyOn(pair.server, "createBidirectionalStream").mockImplementation((options) => {
+				waiting += 1;
+				const opened = open(options);
+				const done = () => {
+					waiting -= 1;
+				};
+				opened.then(done, done);
+				return opened;
+			});
+			const fx = fixture(version, { pair });
+			catalogOf(fx, catalog);
+			const listing = await fx.list();
+			await ok(listing, version);
+			const held = [];
+			for (let i = 0; i < credit; i++) held.push(await fx.offered(false));
+			await clock.advance(Nano.zero);
+			expect(waiting, `catalog=${catalog}`).toBeLessThanOrEqual(1);
+
+			// Refusing each PUBLISH returns its credit, which opens the next.
+			const published = new Set(held.map(({ publish }) => publish.trackName));
+			for (const { stream } of held) stream.abort(new StreamError(StreamCode.Cancel));
+			while (published.size < catalog) {
+				const { stream, publish } = await fx.offered(false);
+				expect(published.has(publish.trackName), "PUBLISHed a track twice").toBe(false);
+				published.add(publish.trackName);
+				stream.abort(new StreamError(StreamCode.Cancel));
+				expect(waiting, `catalog=${catalog}`).toBeLessThanOrEqual(1);
+			}
+		}
+	});
+}
+
+// A FORWARD=1 listing reads its next track only once the request stream has taken the last
+// skip, so a peer that stops reading leaves one skip queued, however many tracks are listed.
+for (const version of [Version.DRAFT_19, Version.DRAFT_22]) {
+	test(`a forwarding listing reads only as skips go out (${version})`, async () => {
+		const clock = new Manual();
+		const installed = clock.install();
+		using _installed = { [Symbol.dispose]: () => installed.close() };
+		// Hold each skip's write until the test lets it out, as a peer that stops reading would.
+		const gates: (() => void)[] = [];
+		let arrived = Promise.withResolvers<void>();
+		const write = Message.write;
+		const writes = spyOn(Message, "write").mockImplementation(async (writer, id, msg, version) => {
+			if (id === PublishSkipped.id)
+				await new Promise<void>((resolve) => {
+					gates.push(resolve);
+					arrived.resolve();
+				});
+			return write(writer, id, msg, version);
+		});
+		const gate = async () => {
+			while (!gates.length) {
+				await arrived.promise;
+				arrived = Promise.withResolvers();
+			}
+			return gates.shift() as () => void;
+		};
+		const reads = spyOn(Tracks.prototype, "next");
+		onTestFinished(() => {
+			writes.mockRestore();
+			reads.mockRestore();
+		});
+		for (const catalog of CATALOGS) {
+			reads.mockClear();
+			const fx = fixture(version);
+			catalogOf(fx, catalog);
+			const listing = await fx.list("room", true);
+			await ok(listing, version);
+			const skipped = new Set<string>();
+			while (skipped.size < catalog) {
+				const release = await gate();
+				await clock.advance(Nano.zero);
+				// The skip being written, one queued, and the listing's SYNCED or next read.
+				expect(reads.mock.calls.length, `catalog=${catalog}`).toBeLessThanOrEqual(skipped.size + 3);
+				release();
+				expect(await listing.reader.u53()).toBe(PublishSkipped.id);
+				const { trackName } = await PublishSkipped.decode(listing.reader, version);
+				expect(skipped.has(trackName), "skipped a track twice").toBe(false);
+				skipped.add(trackName);
+			}
+			await clock.advance(Nano.zero);
+			expect(gates.length, "skipped past the listing").toBe(0);
+		}
 	});
 }

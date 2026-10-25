@@ -281,17 +281,11 @@ A track received over moq-lite-05/06 arrives untimed, since its timestamps may b
 One received over moq-transport keeps its timestamps unchecked, and a relay serves it to moq-lite untimed.
 A publisher whose timeline restarts, such as an HLS `EXT-X-DISCONTINUITY` that resets decode times, publishes a new broadcast instead.
 
-### Broadcast `finish` returns a linger handle (#5795)
+### Broadcast `finish` is gone
 
-`finish()` ends the broadcast cleanly and returns a `Finish` that keeps its finished tracks servable until their media is stale.
-Dropping the `Finish` closes the broadcast, so `close()` still ends it now.
-
-```rust
-// Close now
-producer.close();
-// Serve late subscribers until the media is stale
-producer.finish().wait().await;
-```
+`broadcast::Producer::finish()`, a deprecated alias for `close()`, is removed: a broadcast has no finished state.
+Call `close()` where you called `finish()`.
+To end content cleanly, finish each track, keep the producer for as long as late readers should find it, then close it; `moq_mux::Linger` does this for a hang broadcast.
 
 ### `auth::Token` is `auth::Auth` (#5695)
 

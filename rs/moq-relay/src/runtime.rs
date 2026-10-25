@@ -59,7 +59,9 @@ impl Config {
 	/// to switch the mode off from a config file that already has the section.
 	pub fn workers(&self) -> Option<moq_tokio::worker::Config> {
 		let count = self.workers.filter(|count| *count > 0)?;
-		Some(moq_tokio::worker::Config::new(count).with_pin(self.pin))
+		let mut config = moq_tokio::worker::Config::new(count);
+		config.pin = self.pin;
+		Some(config)
 	}
 
 	/// Whether the workers should run on io_uring instead of tokio.

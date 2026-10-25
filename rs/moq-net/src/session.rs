@@ -28,20 +28,24 @@ struct Ended {
 	drain: Option<Result<(), Error>>,
 }
 
-/// How this side closed the transport, shared by a session's supervisor and its protocol.
+/// How this side closed the transport, shared by every clone of it.
+///
+/// Every close goes through the boxed transport, so the first one is recorded whichever
+/// task sent it, including one ending the session from inside a single request.
 #[derive(Default)]
 pub(crate) struct Closing {
 	/// The handles closed it by dropping or draining, so received streams are not drained.
 	local: std::sync::atomic::AtomicBool,
-	/// Why this side closed it, from whichever closed it first.
-	cause: std::sync::Mutex<Option<Error>>,
+	/// The first close this side sent: its code, and the error behind it when the closer had one.
+	sent: std::sync::Mutex<Option<(u32, Option<Error>)>>,
 }
 
 impl Closing {
-	/// Remember why this side is closing the transport, unless it already gave a reason.
-	pub(crate) fn record(&self, err: &Error) {
-		let mut cause = self.cause.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-		cause.get_or_insert_with(|| err.clone());
+	/// Remember that this side closed the transport with `code`, over `cause` when known,
+	/// unless it already closed it.
+	pub(crate) fn sent(&self, code: u32, cause: Option<&Error>) {
+		let mut sent = self.sent.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+		sent.get_or_insert_with(|| (code, cause.cloned()));
 	}
 
 	/// Whether the handles closed the transport by dropping or draining.
@@ -49,11 +53,15 @@ impl Closing {
 		self.local.load(std::sync::atomic::Ordering::Relaxed)
 	}
 
-	fn cause(&self) -> Option<Error> {
-		self.cause
-			.lock()
-			.unwrap_or_else(std::sync::PoisonError::into_inner)
-			.clone()
+	/// Why this side closed the transport, reading a bare code with `version`'s registry.
+	fn cause(&self, version: Version) -> Option<Error> {
+		let sent = self.sent.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+		let (code, cause) = sent.as_ref()?;
+		Some(
+			cause
+				.clone()
+				.unwrap_or_else(|| version.decode_session_code(*code).into()),
+		)
 	}
 }
 
@@ -202,6 +210,7 @@ impl Session {
 	/// Returns a consumer for the estimated send bitrate (from the congestion controller).
 	///
 	/// Returns `None` if the QUIC backend doesn't support bandwidth estimation.
+	/// Otherwise it holds an estimate from the start, the session's first sample.
 	pub fn send_bandwidth(&self) -> Option<bandwidth::Consumer> {
 		self.send_bandwidth.as_ref().map(bandwidth::Weak::consume)
 	}
@@ -304,7 +313,8 @@ impl Session {
 	/// A close carrying no application code is otherwise [`Error::IdleTimeout`] for an
 	/// idle timeout and [`Error::Transport`] for anything else. See
 	/// [`Error::from_transport`]. If the runtime drops the driver instead of running it to
-	/// completion, this resolves with [`Error::Cancel`].
+	/// completion, this resolves with [`Error::Cancel`]. A panic while polling the driver is
+	/// a transport failure instead.
 	pub async fn closed(&self) -> Error {
 		match self
 			.closed
@@ -353,6 +363,9 @@ impl Session {
 	/// The tokens this side presented and the grant they earned, plus the tokens
 	/// the peer presents. See [`auth`].
 	///
+	/// The handle passed to [`Client::with_auth`](crate::Client::with_auth), or else one
+	/// this session created for itself, which ends with it.
+	///
 	/// On moq-lite-07-wip, and on moq-transport draft-17+ when both sides negotiate the
 	/// MoQ Auth extension, each side presents its connection's credential right after
 	/// setup. Older versions, and peers that do not negotiate it, leave the grant `None`.
@@ -365,7 +378,7 @@ impl Session {
 pub(super) struct Handles {
 	pub stats: crate::stats::Session,
 	pub goaway: goaway::Handle,
-	pub auth: auth::Handle,
+	pub auth: auth::Link,
 	/// Where the driver publishes [`Estimate`] changes, for a protocol that reports
 	/// them to the peer (moq-lite PROBE). Sampled only while a consumer exists.
 	pub estimate: Option<kio::Producer<Estimate>>,
@@ -392,6 +405,8 @@ impl Session {
 			bandwidth,
 			peer_implementation,
 		} = handles;
+		let goaway = Arc::new(goaway);
+		auth.drain_with(goaway.clone());
 		let wire = session.wire().map(|counters| context.wire(counters));
 		let sample = snapshot(&session);
 		if let Some(estimate) = &estimate
@@ -401,8 +416,11 @@ impl Session {
 		}
 
 		// Send bandwidth is version-agnostic: it depends on QUIC backend support.
+		// Seeded with the first sample, so a consumer taken before the sampler
+		// first runs reads the estimate instead of `None`.
 		let (send_bandwidth, send_producer) = if sample.estimated_send_rate.is_some() {
 			let producer = bandwidth::Producer::new();
+			let _ = producer.set(sample.estimated_send_rate);
 			(Some(producer.weak()), Some(producer))
 		} else {
 			(None, None)
@@ -422,7 +440,6 @@ impl Session {
 		let supervisor = Supervisor {
 			goaway: Some(goaway.deadline(&runtime)),
 			version,
-			closing: protocol.closing(),
 			context: context.clone(),
 			runtime: runtime.clone(),
 			closed_watch: session.clone(),
@@ -437,6 +454,7 @@ impl Session {
 			sampled: None,
 			mode: SamplerMode::Idle,
 			drain: Drain::Idle,
+			auth: auth.clone(),
 		};
 
 		let session = Self {
@@ -448,8 +466,8 @@ impl Session {
 			send_bandwidth,
 			recv_bandwidth,
 			bandwidth,
-			goaway: Arc::new(goaway),
-			auth,
+			goaway,
+			auth: auth.handle().clone(),
 		};
 		let driver = crate::Driver::new(
 			runtime.clone(),
@@ -473,7 +491,6 @@ impl Session {
 pub(crate) struct Supervisor {
 	goaway: Option<goaway::Deadline>,
 	version: Version,
-	closing: Arc<Closing>,
 	/// Where the session's outcome is recorded.
 	context: crate::stats::Session,
 	runtime: crate::time::Deadlines,
@@ -501,6 +518,9 @@ pub(crate) struct Supervisor {
 	drain: Drain,
 	/// The transport's wire counters, registered under the session's root; dropping records the last reading.
 	wire: Option<crate::stats::Wire>,
+	/// This session's side of its auth handle, closed before the end is published so a
+	/// replacement session built on the same handle never finds this one still active.
+	auth: auth::Link,
 }
 
 /// A [`Session::close`] waiting for the protocol to deliver what it queued.
@@ -525,6 +545,20 @@ enum SamplerMode {
 }
 
 impl Supervisor {
+	pub(crate) fn panicked(&mut self, error: Error) {
+		self.session
+			.closing()
+			.local
+			.store(true, std::sync::atomic::Ordering::Relaxed);
+		if let Ok(mut closed) = self.closed.write() {
+			*closed = Some(Ended {
+				err: error.clone(),
+				drain: Some(Err(error.clone())),
+			});
+		}
+		let code = self.version.session_code(&SessionError::Internal);
+		self.session.abort(&error, code, "session driver panicked");
+	}
 	const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 	pub(crate) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
@@ -544,7 +578,7 @@ impl Supervisor {
 			let err = match err.close_kind() {
 				// The transport only knows this side closed it, so the reason is ours.
 				crate::transport::CloseKind::Closed if err.session_error().is_none() => {
-					self.closing.cause().unwrap_or(Error::Cancel)
+					self.session.closing().cause(self.version).unwrap_or(Error::Cancel)
 				}
 				_ => self.version.transport_error(err),
 			};
@@ -554,6 +588,7 @@ impl Supervisor {
 				SessionError::Cancel => Error::Cancel,
 				_ => err,
 			};
+			self.auth.close(err.clone());
 			self.context.end(&err);
 			if let Ok(mut closed) = self.closed.write() {
 				*closed = Some(Ended { err, drain });
@@ -589,7 +624,10 @@ impl Supervisor {
 			match request {
 				// The last handle dropped without asking for anything: the implicit cancel.
 				None => {
-					self.closing.local.store(true, std::sync::atomic::Ordering::Relaxed);
+					self.session
+						.closing()
+						.local
+						.store(true, std::sync::atomic::Ordering::Relaxed);
 					self.close(Error::Cancel, "dropped");
 					self.drain = Drain::Idle;
 					self.close = None;
@@ -628,9 +666,8 @@ impl Supervisor {
 
 	/// Close the transport over `cause`, this side's reason for ending the session.
 	fn close(&mut self, cause: Error, reason: &str) {
-		self.closing.record(&cause);
-		self.session
-			.close(self.version.session_code(&SessionError::from(&cause)), reason);
+		let code = self.version.session_code(&SessionError::from(&cause));
+		self.session.abort(&cause, code, reason);
 	}
 
 	/// Finish a requested drain once the protocol owes the peer nothing, or at
@@ -647,7 +684,10 @@ impl Supervisor {
 			false if deadline.poll(waiter).is_ready() => Err(Error::Timeout),
 			false => return false,
 		};
-		self.closing.local.store(true, std::sync::atomic::Ordering::Relaxed);
+		self.session
+			.closing()
+			.local
+			.store(true, std::sync::atomic::Ordering::Relaxed);
 		self.close(Error::Cancel, "");
 		self.drain = Drain::Done(res);
 		// The transport is closed, so no later request can change anything.
