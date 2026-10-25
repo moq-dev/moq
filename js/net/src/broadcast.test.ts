@@ -112,7 +112,7 @@ test("a replacement producer starts over", async () => {
 	const group = new GroupProducer(8);
 	first.writeGroup(group);
 	group.writeFrame(textFrame("a", Timestamp.fromMillis(1000)));
-	group.close();
+	group.finish();
 	firstSubscriber.close();
 	first.finish();
 	first.close();
@@ -425,6 +425,25 @@ test("a consumer clone shares the broadcast until every handle closes", () => {
 	clone.close();
 	expect(consumer.closed.peek()).toBeDefined();
 	expect(clone.closed.peek()).toBeDefined();
+});
+
+test("closing every consumer leaves a produced broadcast to its producer", async () => {
+	const producer = new BroadcastProducer();
+	const track = producer.createTrack("video");
+	const consumer = producer.consume();
+	const subscriber = consumer.track("video").subscribe();
+	consumer.close();
+	expect(producer.closed.peek()).toBeUndefined();
+
+	// The producer watches demand instead: the last subscriber leaving is what it sees.
+	const unused = producer.demand().unused();
+	subscriber.close();
+	await unused;
+	expect(producer.closed.peek()).toBeUndefined();
+
+	track.close();
+	producer.close();
+	expect(producer.closed.peek()).toBeNull();
 });
 
 test("double-closing a consumer handle does not prematurely close the broadcast", () => {

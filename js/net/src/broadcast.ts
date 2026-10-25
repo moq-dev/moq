@@ -62,9 +62,11 @@ class BroadcastState {
 	// publisher that has started pulling them. The counterpart of a live Rust `broadcast::Dynamic`;
 	// without one, a track nobody publishes is `NotFound` rather than a request nobody will answer.
 	served = false;
-	// Live consumer handles sharing this state (see {@link Consumer.clone}). The broadcast
-	// closes once the last one closes, so a shared consumer can be handed to several callers.
+	// Live consumer handles sharing this state (see {@link Consumer.clone}).
 	consumers = 0;
+	// A wire layer's broadcast, which has no producer: it ends once no consumer holds it, as a
+	// Rust session retires a source nothing holds. A produced broadcast ends only on its close.
+	unheld = false;
 	used = new Signal(false);
 	active = 0;
 	// The demand watcher of each open track, disposed when it closes or leaves the broadcast.
@@ -326,9 +328,9 @@ function adopt(state: BroadcastState, producer: track.Producer, info: track.Info
 let makeDemand: (state: BroadcastState) => Demand;
 
 /**
- * A watch-only view of demand for any track in a broadcast.
+ * A watch-only view of demand for any track in a broadcast, mirroring the Rust `broadcast::Demand`.
  *
- * @internal Tests only; nothing outside the package consumes it.
+ * @public
  */
 export class Demand {
 	#state: BroadcastState;
@@ -411,9 +413,8 @@ export class Producer {
 	}
 
 	/**
-	 * Watch demand for the broadcast's tracks.
-	 *
-	 * @internal Tests only; nothing outside the package consumes it.
+	 * Watch demand for the broadcast's tracks: a publisher that should stop once nobody reads
+	 * waits on its {@link Demand.unused}, since closing every consumer leaves the broadcast open.
 	 */
 	demand(): Demand {
 		return this.#demand;
@@ -569,6 +570,7 @@ export class Consumer {
 			// A standalone consumer is a wire layer's, which serves every track on demand.
 			this.#state = new BroadcastState();
 			this.#state.served = true;
+			this.#state.unheld = true;
 		}
 		this.#state.consumers++;
 		registerWire(this, {
@@ -623,8 +625,9 @@ export class Consumer {
 	 * Settles with `null` once the broadcast closes; a broadcast end carries no cause.
 	 * Peek it synchronously (`undefined` while open), observe it reactively, or `await` it.
 	 *
-	 * Shared by every {@link clone}: it settles once the last handle closes. The subscribing
-	 * wire layer peeks it to evict a closed entry from its per-path consume cache.
+	 * Shared by every {@link clone}. A produced broadcast settles once its producer closes; a
+	 * broadcast consumed from a session, once the session ends it or the last handle closes.
+	 * The subscribing wire layer peeks it to evict a closed entry from its per-path consume cache.
 	 */
 	get closed(): GetPromise<null> {
 		return this.#state.closed;
@@ -634,7 +637,7 @@ export class Consumer {
 	 * Return another handle to the same broadcast, reference-counted with this one.
 	 *
 	 * Both handles read the same tracks, carry the same {@link path}, and share one {@link closed}
-	 * state; the broadcast closes only once *every* handle has {@link close}d. Used by the connection's per-path
+	 * state. Used by the connection's per-path
 	 * consume cache to share one subscription across callers. Subclasses that resolve info over
 	 * the wire override this to preserve their type (see the wire layer's consumed broadcast).
 	 */
@@ -679,13 +682,13 @@ export class Consumer {
 	}
 
 	/**
-	 * Release this handle. The broadcast is closed once this was the last live handle;
-	 * while other {@link clone}s remain open it stays live.
+	 * Release this handle, like dropping a Rust handle. A produced broadcast stays open until
+	 * its producer closes; one consumed from a session ends once no {@link clone} holds it.
 	 */
 	close(): void {
 		if (this.#closed) return;
 		this.#closed = true;
-		if (--this.#state.consumers > 0) return;
+		if (--this.#state.consumers > 0 || !this.#state.unheld) return;
 		closeState(this.#state);
 	}
 }

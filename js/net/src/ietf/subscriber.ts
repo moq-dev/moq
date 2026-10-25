@@ -355,13 +355,19 @@ export class Subscriber {
 			});
 		}
 		this.#announcedConsumers.set(announced, filter);
+		const consumer = announced.consume();
+		// The last reader leaving ends the stream, which cancels the request.
+		void announced.unused().then(
+			() => announced.close(),
+			() => {},
+		);
 
 		void this.#runAnnounced(announced, prefix, filter.hidden && this.#hidden).finally(() => {
 			this.#announcedConsumers.delete(announced);
 			announced.close();
 		});
 
-		return announced.consume();
+		return consumer;
 	}
 
 	/**

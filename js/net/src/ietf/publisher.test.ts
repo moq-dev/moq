@@ -8,7 +8,7 @@ import { error, ProtocolViolation, SessionCode, SessionError, StreamCode, unauth
 import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "../group.ts";
 import { type Hop, HopSchema } from "../hop.ts";
 import { hooks } from "../internal.ts";
-import { createMockTransportPair } from "../mock.ts";
+import { createMockTransportPair, SessionBroadcast } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
@@ -435,7 +435,7 @@ test("a cancelled TRACK_STATUS releases its demand on every draft", async () => 
 		await resolving;
 		expect(early.written).toEqual([]);
 		// Withdrawn, so a late answer is closed rather than served.
-		const answer = new BroadcastProducer().consume();
+		const answer = new SessionBroadcast();
 		hooks.acceptRequest(pending, answer);
 		expect(answer.closed.peek()).toBeNull();
 
@@ -485,7 +485,7 @@ test("a SUBSCRIBE withdrawn during setup releases its demand on every draft", as
 		await resolving;
 		expect(early.written).toEqual([]);
 		// Withdrawn, so a late answer is closed rather than served.
-		const answer = new BroadcastProducer().consume();
+		const answer = new SessionBroadcast();
 		if (pending) hooks.acceptRequest(pending, answer);
 		expect(answer.closed.peek()).toBeNull();
 

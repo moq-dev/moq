@@ -124,6 +124,7 @@ declare namespace Broadcast {
     export {
         Tracks,
         TracksEvent,
+        Demand_3 as Demand,
         Producer_3 as Producer,
         Consumer_4 as Consumer
     }
@@ -133,6 +134,7 @@ declare namespace Broadcast_2 {
     export {
         Tracks,
         TracksEvent,
+        Demand_3 as Demand,
         Producer_3 as Producer,
         Consumer_4 as Consumer
     }
@@ -243,14 +245,14 @@ class ConnectTimeout extends Error {
 
 class Consumer {
     [Symbol.asyncIterator](): AsyncGenerator<Event_2, void, undefined>;
-    close(abort?: Error): void;
+    close(): void;
     get closed(): GetPromise<Error | null>;
     next(): Promise<Event_2 | undefined>;
     get synced(): Getter<boolean>;
 }
 
 class Consumer_2 {
-    close(abort?: Error): void;
+    close(): void;
     get closed(): GetPromise<Error | null>;
     get done(): boolean;
     get frameCount(): number;
@@ -341,6 +343,12 @@ class Demand {
 class Demand_2 {
     get closed(): GetPromise<Error | null>;
     readonly sequence: number;
+    unused(): Promise<void>;
+    get used(): Getter<boolean>;
+}
+
+class Demand_3 {
+    get closed(): GetPromise<null>;
     unused(): Promise<void>;
     get used(): Getter<boolean>;
 }
@@ -608,7 +616,6 @@ type Order = "ascending" | "descending";
 class Ordered {
     close(abort?: Error): void;
     get closed(): GetPromise<Error | null>;
-    end(): Position_2 | undefined;
     finished(): Promise<Position_2>;
     info(): Promise<Info>;
     largest(): Promise<Position_2 | undefined>;
@@ -737,13 +744,15 @@ interface Probe {
 
 class Producer {
     constructor(name: string);
+    abort(error: Error): void;
     accept(info?: Partial<Info>): this;
     appendDatagram(timestamp: Timestamp | undefined, payload: Uint8Array): number;
     appendGroup(): Producer_2;
-    close(abort?: Error): void;
+    close(): void;
     get closed(): GetPromise<Error | null>;
     demand(): Demand;
     dropGroups(start: number, end: number, error: Error): void;
+    finish(): void;
     finishAt(end: Position_2): void;
     info(): Promise<Info>;
     insertDatagram(sequence: number, timestamp: Timestamp | undefined, payload: Uint8Array): void;
@@ -758,10 +767,11 @@ class Producer {
 
 class Producer_2 {
     constructor(sequence: number);
-    close(abort?: Error): void;
+    abort(error: Error): void;
     get closed(): GetPromise<Error | null>;
     consume(): Consumer_2;
     demand(): Demand_2;
+    finish(): void;
     get isClosed(): boolean;
     readonly sequence: number;
     writeFrame(frame: Frame): void;
@@ -779,6 +789,7 @@ class Producer_3 {
     get closed(): GetPromise<null>;
     consume(): Consumer_4;
     createTrack(name: string, info?: Partial<track.Info>): track.Producer;
+    demand(): Demand_3;
     removeTrack(name: string): void;
     get route(): Route | undefined;
     track(name: string): track.Consumer;
@@ -790,6 +801,7 @@ class Producer_4 {
     close(abort?: Error): void;
     get closed(): GetPromise<Error | null>;
     consume(): Consumer;
+    unused(): Promise<void>;
 }
 
 class Producer_5 implements Table {
@@ -1073,7 +1085,6 @@ function stripPrefix(prefix: Valid, path: Valid): Valid | null;
 class Subscriber {
     close(abort?: Error): void;
     get closed(): GetPromise<Error | null>;
-    end(): Position_2 | undefined;
     finished(): Promise<Position_2>;
     info(): Promise<Info>;
     largest(): Promise<Position_2 | undefined>;

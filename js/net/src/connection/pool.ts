@@ -354,7 +354,11 @@ export class Connection {
 			pumpAnnounced(effect, origin.announced(scope, options), producer);
 		});
 
-		void consumer.closed.then(stop);
+		void producer.unused().then(
+			() => producer.close(),
+			() => {},
+		);
+		void producer.closed.then(stop);
 
 		return consumer;
 	}

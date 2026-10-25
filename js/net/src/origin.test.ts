@@ -7,6 +7,7 @@ import { StreamCode, StreamError } from "./error.ts";
 import { Producer as GroupProducer } from "./group.ts";
 import { HopSchema, Route } from "./hop.ts";
 import { hooks, spreadHash } from "./internal.ts";
+import { SessionBroadcast } from "./mock.ts";
 import type { Consumer, Table } from "./origin.ts";
 import { Producer } from "./origin.ts";
 import * as Path from "./path.ts";
@@ -239,25 +240,32 @@ test("a republish closes the superseded broadcast", async () => {
 	origin.close();
 });
 
-test("a consumer clone keeps a superseded broadcast alive", async () => {
+test("a subscriber keeps a superseded broadcast alive", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
 	const path = Path.from("room");
 
 	const first = publish(origin, path);
+	const track = first.createTrack("video");
 	const mine = await routed(consumer, path);
-	expect(mine).toBeDefined();
+	const subscriber = mine?.track("video").subscribe();
+	expect(subscriber).toBeDefined();
+	// Demand lands a microtask after the subscribe.
+	await settle();
 
 	publish(origin, path);
 	await settle();
 
-	// The application's clone holds the old broadcast open even though it is unpublished.
+	// The subscriber holds the old broadcast open even though it is unpublished.
 	expect(first.closed.peek()).toBeUndefined();
 
-	mine?.close();
+	// A handle alone is no demand: the last subscriber leaving closes it.
+	subscriber?.close();
 	await settle();
-	expect(first.closed.peek()).not.toBeUndefined();
+	expect(first.closed.peek()).toBeNull();
 
+	mine?.close();
+	track.close();
 	origin.close();
 });
 
@@ -481,10 +489,10 @@ test("a request resolves once a front answers, and survives its withdrawal", asy
 	expect(request.active.peek()).toBeUndefined();
 
 	// A session answers (simulated): the slot's front resolves the request.
-	const upstream = new BroadcastProducer();
+	const upstream = new SessionBroadcast();
 	const slot = wireOf(origin).requests.peek()?.get(path);
 	expect(slot).toBeDefined();
-	expect(wireOf(origin).answer(path, upstream.consume())).toBeDefined();
+	expect(wireOf(origin).answer(path, upstream)).toBeDefined();
 	expect(request.active.peek()).toBeDefined();
 
 	// A second request for the same path shares the answer, each through a handle of its
@@ -1971,16 +1979,21 @@ test("a broadcast a derived handle released cannot announce again", async () => 
 	const scoped = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.all()]));
 	const path = Path.from("room");
 	const broadcast = publish(scoped, path);
+	const track = broadcast.createTrack("video");
 	const held = await routed(consumer, path);
+	const subscriber = held?.track("video").subscribe();
+	await settle();
 
 	scoped.close();
 
-	// The application's clone keeps the broadcast open, but the released handle no longer routes it.
+	// A subscriber keeps the broadcast open, but the released handle no longer routes it.
 	expect(broadcast.closed.peek()).toBeUndefined();
 	expect(() => broadcast.announce()).toThrow("broadcast is closed");
 	expect((await announcedView(origin)).peek().has(path)).toBe(false);
 
+	subscriber?.close();
 	held?.close();
+	track.close();
 	origin.close();
 });
 
@@ -2516,7 +2529,7 @@ test("an unread resolved request retains its broadcast until its last handle clo
 	const dynamic = origin.dynamicRoute(Path.from("live"), { epoch: EPOCH });
 	const requests = dynamic.requested();
 	const held = origin.consume().request(path);
-	const old = new BroadcastProducer();
+	const old = new SessionBroadcast();
 	hooks.acceptRequest((await requests.next()).value, old);
 	// Change epochs before the active getter or its subscription can clone the answer.
 	dynamic.updateRoute({ epoch: NEWER });
@@ -2527,7 +2540,6 @@ test("an unread resolved request retains its broadcast until its last handle clo
 	expect(held.active.peek()).toBeUndefined();
 	await requests.return?.();
 	dynamic.close();
-	old.close();
 	origin.close();
 });
 

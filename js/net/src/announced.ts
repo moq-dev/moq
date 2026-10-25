@@ -68,6 +68,8 @@ class AnnounceState {
 	// A reader holds the last event it took before syncing until it asks for the next
 	// one, so whatever it does with that event lands before synced flips.
 	reading = false;
+	// Open consumer handles. The stream is unused once the last one closes.
+	consumers = new Signal(0);
 }
 
 // Synced once nothing is owed and the reader has come back for more.
@@ -107,6 +109,20 @@ export class Producer {
 	/** A read handle for this announcement stream. */
 	consume(): Consumer {
 		return makeConsumer(this.#state);
+	}
+
+	/**
+	 * Resolves once no consumer holds the stream: the last one {@link Consumer.close}d. Rejects
+	 * once the stream closes.
+	 */
+	async unused(): Promise<void> {
+		const state = this.#state;
+		for (;;) {
+			const closed = state.closed.peek();
+			if (closed !== undefined) throw closed ?? new Error("announcements are closed");
+			if (state.consumers.peek() === 0) return;
+			await Signal.race(state.consumers, state.closed);
+		}
 	}
 
 	/** Writes an event to the queue. */
@@ -162,9 +178,12 @@ let makeConsumer: (state: AnnounceState) => Consumer;
  */
 export class Consumer {
 	#state: AnnounceState;
+	// Guards against a double close() on this handle over-decrementing the consumer count.
+	#released = false;
 
 	private constructor(state: AnnounceState) {
 		this.#state = state;
+		state.consumers.update((count) => count + 1);
 	}
 
 	/** Settles once the stream closes; see {@link Producer.closed}. */
@@ -198,12 +217,13 @@ export class Consumer {
 		}
 	}
 
-	/** Returns the next event, or undefined once the stream closes. */
+	/** Returns the next event, or undefined once the stream or this handle closes. */
 	async next(): Promise<Event | undefined> {
 		const state = this.#state;
 		state.reading = false;
 		settle(state);
 		for (;;) {
+			if (this.#released) return undefined;
 			const announce = state.queue.peek().shift();
 			if (announce) {
 				if (state.owed) state.owed -= 1;
@@ -215,12 +235,17 @@ export class Consumer {
 			if (closed instanceof Error) throw closed;
 			if (closed !== undefined) return undefined;
 
-			await Signal.race(this.#state.queue, this.#state.closed);
+			await Signal.race(state.queue, state.closed, state.consumers);
 		}
 	}
 
-	/** Closes the reader. Idempotent. */
-	close(abort?: Error) {
-		closeState(this.#state, abort);
+	/**
+	 * Release this handle, like dropping a Rust handle: other consumers keep reading, and the
+	 * producer sees the stream {@link Producer.unused} once the last one closes. Idempotent.
+	 */
+	close() {
+		if (this.#released) return;
+		this.#released = true;
+		this.#state.consumers.update((count) => count - 1);
 	}
 }

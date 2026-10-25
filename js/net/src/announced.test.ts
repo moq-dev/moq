@@ -65,6 +65,33 @@ test("closing resolves next with undefined", async () => {
 	expect(await consumer.next()).toBeUndefined();
 });
 
+test("closing a consumer releases only that handle", async () => {
+	const producer = new Announce.Producer();
+	const first = producer.consume();
+	const second = producer.consume();
+	const unused = producer.unused();
+
+	first.close();
+	first.close();
+	expect(await first.next()).toBeUndefined();
+	expect(producer.closed.peek()).toBeUndefined();
+
+	// The other reader keeps the stream: an event still reaches it.
+	const route = Route.default;
+	producer.append({ prefix: p("a"), captures: undefined, kind: "start", route });
+	expect((await second.next())?.prefix).toBe(p("a"));
+
+	// The last one leaving is what the producer watches for, and a reader parked on next() ends.
+	const parked = second.next();
+	second.close();
+	expect(await parked).toBeUndefined();
+	await unused;
+	expect(producer.closed.peek()).toBeUndefined();
+
+	producer.close();
+	await expect(producer.unused()).rejects.toThrow("closed");
+});
+
 test("aborting rejects next", async () => {
 	const producer = new Announce.Producer();
 	const consumer = producer.consume();

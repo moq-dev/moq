@@ -258,8 +258,14 @@ export class Subscriber {
 	announced(scope: Path.Pattern = Path.Pattern.all(), options?: announce.Options): announce.Consumer {
 		const announced = new announce.Producer();
 		// The wire speaks announce interest by prefix, and echoes suffixes beneath it.
+		const consumer = announced.consume();
+		// The last reader leaving ends the stream, which cancels the request.
+		void announced.unused().then(
+			() => announced.close(),
+			() => {},
+		);
 		void this.#runAnnounced(announced, scopeHead(scope), scope, options?.hidden ?? false);
-		return announced.consume();
+		return consumer;
 	}
 
 	async #runAnnounced(

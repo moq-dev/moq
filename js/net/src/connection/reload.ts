@@ -719,7 +719,11 @@ export class Reload {
 		});
 
 		this.#signals.cleanup(() => pump.close());
-		void consumer.closed.then(() => pump.close());
+		void producer.unused().then(
+			() => producer.close(),
+			() => {},
+		);
+		void producer.closed.then(() => pump.close());
 
 		return consumer;
 	}
