@@ -1155,8 +1155,8 @@ test("a drop a replaced route held back is no verdict on the route serving next"
 	expect(recvDisposition(sub)).toBe("idle");
 	front.serve(c.consume());
 	await settle();
-	ta.producer.close(new StreamError(StreamCode.SessionClosed));
-	tb.producer.close(new StreamError(StreamCode.SessionClosed));
+	ta.producer.abort(new StreamError(StreamCode.SessionClosed));
+	tb.producer.abort(new StreamError(StreamCode.SessionClosed));
 	await settle();
 	expect(recvDisposition(sub)).toBe("idle");
 	tc.write(1);
