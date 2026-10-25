@@ -69,7 +69,6 @@ Rejected in planning:
 - [Bindings read gaps and ends](/quest/m1/api-audit/decode-read-bindings.md) - moq-ffi and every wrapper surface `Gap` and `End` instead of discarding them
 - [Pinned consumers adopt the CLI flag names](/quest/m1/api-audit/cli-flags-consumers.md) - pinned downstream deployments move past the flag rename and use its spellings
 - [Session-only items stay private](/quest/m1/api-audit/model-private.md) - model items only the built-in sessions use are private
-- [A request's source enforces its validity](/quest/m1/api-audit/answer.md) - a stale source refuses new track requests by itself, with no public additions
 - [moq-transport stays private](/quest/m1/api-audit/ietf-private.md) - no public moq-net item exists only for moq-transport, and a client names its request target once as a URL
 - [One lifecycle vocabulary](/quest/m1/api-audit/lifecycle.md) - finish, abort, closed, and close mean one thing on every handle, and Rust and JS observers fire alike
 - [moq-net names say one thing](/quest/m1/api-audit/net-names.md) - demand says `wanted`, colliding stats and transport names are renamed, and Rust and JS info lookups mirror

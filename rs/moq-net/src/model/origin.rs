@@ -2237,8 +2237,13 @@ impl Producer {
 	/// is *not* entered into the route table. Sessions answer
 	/// [`Dynamic`] requests with one of these; the requester already holds
 	/// the request's result channel, so the table never needs to resolve it.
+	/// The source takes new tracks only while `validity` holds.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn create_source(&self, path: impl AsPath) -> broadcast::Producer {
+	pub(crate) fn create_source(
+		&self,
+		path: impl AsPath,
+		validity: crate::model::broadcast::RequestValidity,
+	) -> broadcast::Producer {
 		let path = path.as_path();
 		let full = self.root.join(&path).to_owned();
 		let ingress = self.stats.ingress(&full);
@@ -2251,6 +2256,7 @@ impl Producer {
 		}
 		.produce()
 		.with_stats(ingress)
+		.with_validity(validity)
 	}
 
 	/// Advertise a route without serving it: a claim that paths under `prefix`

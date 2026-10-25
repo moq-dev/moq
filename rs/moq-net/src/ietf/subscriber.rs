@@ -2650,12 +2650,9 @@ impl Subscriber {
 				Some(requested) => requested.to_owned(),
 				None => continue,
 			};
-			let source = crate::model::broadcast::SourceGuard::new(self.origin.create_source(&requested));
-			// The handler exists before the requester sees the source, so a track it asks
-			// for before `run_broadcast` first polls queues instead of failing `NotFound`.
-			let dynamic = source.dynamic();
 			// The source serves the instance the route names now: every request for it names
-			// that epoch, so the peer refuses one that would reach another instance.
+			// that epoch when the peer can read one, and the source takes new tracks only
+			// while the peer still selects that instance.
 			let (validity, epoch) = {
 				let state = self.state.lock();
 				let entry = state
@@ -2670,6 +2667,10 @@ impl Subscriber {
 					});
 				(validity, entry.and_then(|entry| entry.route.epoch.clone()))
 			};
+			let source = crate::model::broadcast::SourceGuard::new(self.origin.create_source(&requested, validity));
+			// The handler exists before the requester sees the source, so a track it asks
+			// for before `run_broadcast` first polls queues instead of failing `NotFound`.
+			let dynamic = source.dynamic();
 			request.accept(&*source);
 
 			// The namespace's token closes the source as it is retracted. If it was
@@ -2687,7 +2688,7 @@ impl Subscriber {
 			}
 
 			let mut this = self.clone();
-			this.validity = validity;
+			this.validity = dynamic.validity().clone();
 			this.epoch = epoch;
 			broadcasts.push(async move {
 				if let Err(err) = this.run_broadcast(requested.borrow(), source, dynamic, route).await {
@@ -2718,8 +2719,8 @@ impl Subscriber {
 	}
 
 	/// Serve one minted source's track requests, taken through its `broadcast` handler,
-	/// until it closes: its namespace is retracted (`route` closes), nothing holds it any
-	/// more, or the session dies.
+	/// until it closes: its namespace is retracted (`route` closes), the peer stops
+	/// selecting its instance, nothing holds it any more, or the session dies.
 	async fn run_broadcast(
 		&self,
 		path: Path<'_>,
@@ -9644,7 +9645,7 @@ mod tests {
 	async fn a_minted_source_closes_unheld_or_retracted() {
 		let (subscriber, origin) = cluster_subscriber(crate::Hop::new(1).unwrap());
 		let run = |route: &kio::Producer<()>| {
-			let source = crate::model::broadcast::SourceGuard::new(origin.create_source("pool/p"));
+			let source = crate::model::broadcast::SourceGuard::new(origin.create_source("pool/p", Default::default()));
 			let (holder, dynamic) = (source.consume(), source.dynamic());
 			let (this, route) = (subscriber.clone(), route.consume());
 			let task = moq_clock::sim::spawn(async move {
