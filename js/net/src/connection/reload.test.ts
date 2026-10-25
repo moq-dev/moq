@@ -703,6 +703,64 @@ for (const [name, teardown] of Object.entries(teardowns)) {
 	});
 }
 
+// A live track holds the old session's close until the deadline. The auth handle backs one
+// active session at a time, so the closing one must give it up for the replacement to dial.
+test("a URL change connects the replacement while the old session drains", async () => {
+	const original = globalThis.WebTransport;
+	const clock = new Manual();
+	const installed = clock.install();
+	const dials: { server: Promise<Established>; closed: boolean }[] = [];
+	const stub = function StubWebTransport(dialed: string | URL) {
+		const pair = createMockTransportPair(Lite.ALPN_06);
+		const dial = { server: accept(pair.server, new URL(dialed)), closed: false };
+		void pair.client.closed.then(() => {
+			dial.closed = true;
+		});
+		dials.push(dial);
+		return pair.client;
+	};
+	globalThis.WebTransport = stub as unknown as typeof WebTransport;
+
+	const origin = new OriginProducer();
+	const broadcast = origin.createBroadcast(Path.from("room"));
+	broadcast.announce();
+	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const reload = new Reload({
+		url: new URL("https://example.com/a"),
+		websocket: { enabled: false },
+		publish: origin.consume(),
+	});
+
+	await waitUntil(() => dials.length > 0);
+	const first = dials[0];
+	if (!first) throw new Error("no first dial");
+	const remote = wireOf(await first.server).consume(Path.from("room"));
+	const track = remote.track("video").subscribe().ordered();
+	try {
+		// The group stays open, so the old session's drain waits out its deadline.
+		producer.appendGroup().writeFrame(textFrame("live"));
+		expect(await (await track.nextGroup())?.readString()).toBe("live");
+
+		reload.url.set(new URL("https://example.com/b"));
+		await waitUntil(() => dials.length === 2 && reload.status.peek() === "connected");
+		expect(reload.error.peek()).toBeUndefined();
+		expect(dials[0]?.closed).toBe(false);
+
+		await clock.advance(Nano.fromMilli(Milli(1000)));
+		await waitUntil(() => dials[0]?.closed === true);
+	} finally {
+		track.close();
+		remote.close();
+		reload.close();
+		for (const dial of dials) (await dial.server).abort();
+		producer.close();
+		broadcast.close();
+		origin.close();
+		installed.close();
+		globalThis.WebTransport = original;
+	}
+});
+
 test("closing an announce consumer during upstream teardown does not append retractions", async () => {
 	const { Producer } = await import("../announced.ts");
 	const upstream = new Producer();
