@@ -67,6 +67,11 @@ impl Skipped {
 		widened
 	}
 
+	/// Whether no run is recorded.
+	pub fn is_empty(&self) -> bool {
+		self.0.as_ref().is_none_or(|skipped| skipped.runs.is_empty())
+	}
+
 	/// The lowest sequence skipped.
 	pub fn lowest(&self) -> Option<u64> {
 		let skipped = self.0.as_ref()?;

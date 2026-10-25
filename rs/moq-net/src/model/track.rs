@@ -5830,6 +5830,10 @@ impl Cursor {
 
 	/// Forget the skipped runs no cached group is left in: nothing can offer them again.
 	fn prune_skipped(&mut self) {
+		// Most cursors never skip, and this runs on every hand-out.
+		if self.skipped.is_empty() {
+			return;
+		}
 		let state = self.state.read();
 		self.skipped.prune(state.lookup.len(), |run| {
 			!state.lookup.range(run.clone()).any(|(_, slot)| slot.is_read())
