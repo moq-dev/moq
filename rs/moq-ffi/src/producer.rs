@@ -714,7 +714,7 @@ impl MoqTrackProducer {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
 		let track = guard.as_mut().ok_or(MoqError::Closed)?;
-		if track.end().is_none() {
+		if track.finished().is_none() {
 			track.finish()?;
 		}
 		if let Some(finished) = self.finished.lock().unwrap().take() {

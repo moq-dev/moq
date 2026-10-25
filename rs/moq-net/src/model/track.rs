@@ -14,7 +14,7 @@
 //! The track is closed with [Error] when all writers or readers are dropped.
 
 use crate::sync::Mutex;
-use crate::{Error, Result, SessionError, StreamError, Timescale, Timestamp, coding};
+use crate::{Error, Result, StreamError, Timescale, Timestamp, coding};
 use crate::{broadcast, cache, group, stats};
 
 use super::Datagram;
@@ -442,8 +442,7 @@ pub(crate) struct TrackState {
 	// cache, so an evicted last group does not lose where the track ended.
 	end: Option<Position>,
 
-	// Nothing more can arrive: the last producer dropped after a declared boundary,
-	// or the receiving session closed locally without declaring an end.
+	// Nothing more can arrive: the last producer dropped after a declared boundary.
 	sealed: bool,
 
 	// Set once a received copy's end is declared, ahead of group streams below it that QUIC
@@ -2310,8 +2309,8 @@ impl TrackState {
 	/// An abort before the end settled wins over it: a group below the boundary was
 	/// still open, so the track was cut off rather than ended.
 	fn is_complete(&self) -> bool {
-		// `sealed` also ends a locally closed receive track without a declared end.
-		// An abort still wins unless that end had already settled: a group below it was still open.
+		// `sealed` is a declared end the last producer dropped short of. An abort still wins
+		// unless that end had already settled: a group below it was still open.
 		let reached = self.sealed
 			|| self
 				.final_sequence()
@@ -2546,8 +2545,6 @@ impl TrackState {
 			Poll::Ready(Ok(end))
 		} else if let Some(err) = &self.abort {
 			Poll::Ready(Err(err.clone()))
-		} else if self.sealed {
-			Poll::Ready(Err(Error::Closed))
 		} else {
 			Poll::Pending
 		}
@@ -3036,22 +3033,6 @@ impl Producer {
 		Ok(())
 	}
 
-	/// End the track without declaring where it ends, as a closed session does.
-	///
-	/// Consumers drain the groups that finished and then end cleanly. The open groups are
-	/// aborted with [`StreamError::Session`], so a consumer that already pulled one ends
-	/// with it and their writers fail. A reader following the track's routes resumes from
-	/// another one where this copy stopped. Use [`Self::finish`] or [`Self::finish_at`]
-	/// when the end is known.
-	pub fn close(self) -> Result<()> {
-		let mut state = self.modify()?;
-		state.sealed = true;
-		let open = state.tear_down(Error::Stream(StreamError::Session(SessionError::Cancel)));
-		state.close();
-		open.abort();
-		Ok(())
-	}
-
 	/// Mark the track as finished after the last appended group.
 	///
 	/// Ends the track at the head of the group after the largest one written to its name,
@@ -3251,7 +3232,7 @@ impl Producer {
 	///
 	/// `None` while the track is still open ended. Both methods reject a second end, so
 	/// callers that may have already declared one check here first.
-	pub fn end(&self) -> Option<Position> {
+	pub fn finished(&self) -> Option<Position> {
 		self.state.read().end
 	}
 
@@ -4748,15 +4729,15 @@ impl Consumer {
 	/// Poll for the track reaching a terminal state: `Ok(())` once it is complete
 	/// (the final group was produced), `Err` once it closed or aborted before
 	/// completing. This tells a track that truly ended from one whose serving route
-	/// died mid-stream. A session closed locally, on purpose, is [`Error::Closed`].
+	/// died mid-stream. A session closed locally, on purpose, aborts its tracks with
+	/// [`StreamError::Session`] carrying [`crate::SessionError::Cancel`].
 	pub(super) fn poll_complete(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
 		self.with_state(|state| {
 			let Some(state) = state else {
 				return Poll::Ready(Err(Error::Dropped));
 			};
 			match ready!(state.poll(waiter, |state| {
-				// A local close without a declared end is a dead route, not finished content.
-				if state.end.is_some() && state.is_complete() {
+				if state.is_complete() {
 					Poll::Ready(())
 				} else {
 					state.watch_tail(waiter);
@@ -4766,11 +4747,7 @@ impl Consumer {
 				Ok(_) => Poll::Ready(Ok(())),
 				// Closed before completing. Read through the returned guard: it holds
 				// the lock, so re-locking the channel here would deadlock.
-				Err(closed) => Poll::Ready(Err(match (&closed.abort, closed.sealed) {
-					(Some(err), _) => err.clone(),
-					(None, true) => Error::Closed,
-					(None, false) => Error::Dropped,
-				})),
+				Err(closed) => Poll::Ready(Err(closed.abort.clone().unwrap_or(Error::Dropped))),
 			}
 		})
 	}
@@ -12222,33 +12199,6 @@ mod test {
 		assert!(matches!(write, Err(Error::Cancel)), "{write:?}");
 	}
 
-	/// Closing a track aborts its open groups like [`Producer::abort`], with
-	/// [`StreamError::Session`].
-	#[test]
-	#[cfg(feature = "async")]
-	fn close_ends_a_pulled_open_group() {
-		let producer = track_producer("test", Info::timed());
-		let mut consumer = producer.subscribe(None);
-		let mut writer = producer.append_group().unwrap();
-		writer
-			.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"x"))
-			.unwrap();
-		let mut group = consumer.assert_group();
-		assert!(group.read_frame().now_or_never().unwrap().unwrap().is_some());
-
-		producer.close().unwrap();
-		let read = group.read_frame().now_or_never().expect("should not block");
-		assert!(
-			matches!(read, Err(Error::Stream(StreamError::Session(SessionError::Cancel)))),
-			"{read:?}"
-		);
-		let write = writer.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"y"));
-		assert!(
-			matches!(write, Err(Error::Stream(StreamError::Session(SessionError::Cancel)))),
-			"{write:?}"
-		);
-	}
-
 	/// Aborting an unused track aborts an open group whose reader outlived the track's
 	/// consumers.
 	#[test]
@@ -12451,7 +12401,7 @@ mod test {
 		assert!(producer.finish_at(Position::group(5)).is_err());
 		assert!(producer.finish_at(Position::group(6)).is_ok());
 
-		assert_eq!(producer.end(), Some(Position::group(6)));
+		assert_eq!(producer.finished(), Some(Position::group(6)));
 
 		// Repeating the end is a no-op, moving it is rejected, and no group at or above the
 		// boundary can be created.
@@ -12494,7 +12444,7 @@ mod test {
 		producer.finish_at(Position::group(6)).unwrap();
 		producer.finish_at(Position { group: 5, frame: 5 }).unwrap();
 		producer.finish_at(Position { group: 5, frame: 5 }).unwrap();
-		assert_eq!(producer.end(), Some(Position { group: 5, frame: 5 }));
+		assert_eq!(producer.finished(), Some(Position { group: 5, frame: 5 }));
 		for moved in [Position { group: 5, frame: 4 }, Position::group(6), Position::group(5)] {
 			assert!(matches!(producer.finish_at(moved), Err(Error::ProtocolViolation)));
 		}
@@ -12513,7 +12463,7 @@ mod test {
 			producer.finish_at(Position { group: 5, frame: 5 }),
 			Err(Error::ProtocolViolation)
 		));
-		assert_eq!(producer.end(), None, "a refused end declares nothing");
+		assert_eq!(producer.finished(), None, "a refused end declares nothing");
 		producer.finish_at(Position { group: 5, frame: 6 }).unwrap();
 	}
 
@@ -12559,13 +12509,13 @@ mod test {
 	#[test]
 	fn end_reports_the_declared_end() {
 		let mut producer = track_producer("test", Info::timed());
-		assert_eq!(producer.end(), None);
+		assert_eq!(producer.finished(), None);
 
 		let _open = producer.create_group(group::Info { sequence: 5 }).unwrap();
-		assert_eq!(producer.end(), None, "a group does not declare an end");
+		assert_eq!(producer.finished(), None, "a group does not declare an end");
 
 		producer.finish_at(Position::group(9)).unwrap();
-		assert_eq!(producer.end(), Some(Position::group(9)));
+		assert_eq!(producer.finished(), Some(Position::group(9)));
 
 		// finish() would try to declare a second boundary, so callers check first.
 		assert!(producer.finish().is_err());
@@ -12576,7 +12526,7 @@ mod test {
 		let producer = track_producer("test", Info::timed());
 		let _open = producer.create_group(group::Info { sequence: 5 }).unwrap();
 		producer.finish().unwrap();
-		assert_eq!(producer.end(), Some(Position::group(6)));
+		assert_eq!(producer.finished(), Some(Position::group(6)));
 	}
 
 	#[test]
@@ -13045,7 +12995,7 @@ mod test {
 			matches!(producer.finish_at(Position::group(2)), Err(Error::ProtocolViolation)),
 			"a second end is refused"
 		);
-		assert_eq!(producer.end(), Some(Position::group(3)), "the first end stands");
+		assert_eq!(producer.finished(), Some(Position::group(3)), "the first end stands");
 
 		let mut _low = Vec::new();
 		for sequence in [0, 1] {
@@ -13074,55 +13024,10 @@ mod test {
 		assert!(matches!(res, Err(Error::Timeout)));
 	}
 
-	#[moq_clock::test]
-	#[cfg(feature = "async")]
-	async fn local_close_keeps_finished_groups_without_declaring_an_end() {
-		let producer = track_producer("local", Info::timed());
-		let mut consumer = producer.consume().subscribe(None).await.unwrap();
-		producer.append_group().unwrap().finish().unwrap();
-		producer.clone().close().unwrap();
-		assert!(producer.end().is_none());
-		assert!(matches!(consumer.finished().await, Err(Error::Closed)));
-		assert!(consumer.recv_group().await.unwrap().is_some());
-		assert!(consumer.recv_group().await.unwrap().is_none());
-	}
-
-	#[moq_clock::test]
-	#[cfg(feature = "async")]
-	async fn local_close_cannot_mask_an_abort_before_declared_end_settles() {
-		let mut producer = track_producer("local", Info::timed());
-		let mut consumer = producer.consume().subscribe(None).await.unwrap();
-		let _group = producer.append_group().unwrap();
-		producer.finish_at(Position::group(2)).unwrap();
-		producer.clone().abort(Error::Timeout).unwrap();
-		assert!(producer.close().is_err());
-		assert!(matches!(consumer.recv_group().await, Err(Error::Timeout)));
-	}
-
-	/// A close drops a group still open that no reader pulled: readers drain the finished
-	/// groups, then end without a declared end.
-	#[moq_clock::test]
-	#[cfg(feature = "async")]
-	async fn local_close_drops_an_unpulled_open_group() {
-		let producer = track_producer("local", Info::timed());
-		let mut consumer = producer.consume().subscribe(None).await.unwrap();
-		producer.append_group().unwrap().finish().unwrap();
-		let mut open = producer.append_group().unwrap();
-		open.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"x"))
-			.unwrap();
-		producer.clone().close().unwrap();
-		assert_eq!(
-			consumer.recv_group().await.unwrap().map(|group| group.sequence),
-			Some(0)
-		);
-		assert!(consumer.recv_group().await.unwrap().is_none());
-		assert!(matches!(consumer.finished().await, Err(Error::Closed)));
-	}
-
-	/// A local close is a dead route to the origin, not finished content, so a
+	/// A local session closing is a dead route to the origin, not finished content, so a
 	/// replacement route can take over where it left off.
 	#[test]
-	fn local_close_is_not_completion_and_keeps_the_resume_position() {
+	fn session_close_is_not_completion_and_keeps_the_resume_position() {
 		let producer = track_producer("local", Info::timed());
 		let consumer = producer.consume();
 		producer.append_group().unwrap().finish().unwrap();
@@ -13133,7 +13038,7 @@ mod test {
 		group
 			.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"b"))
 			.unwrap();
-		producer.close().unwrap();
+		producer.abort(Error::Stream(StreamError::Session(crate::SessionError::Cancel))).unwrap();
 		assert!(matches!(
 			consumer.poll_complete(&kio::Waiter::noop()),
 			Poll::Ready(Err(_))
@@ -14745,7 +14650,7 @@ mod test {
 			producer.finish_at(Position { group: 0, frame: 2 }),
 			Err(Error::ProtocolViolation)
 		));
-		assert_eq!(producer.end(), None);
+		assert_eq!(producer.finished(), None);
 		live.write_frame(Timestamp::ZERO, b"delta".as_slice()).unwrap();
 	}
 

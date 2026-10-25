@@ -88,7 +88,7 @@ async fn empty_replacement_ends_after_the_cached_group(version: &str) {
 	// before writing anything.
 	let (second, mut subscriber) = serve(&remote, &mut dynamic, "feed").await;
 	second.finish().unwrap();
-	assert_eq!(second.end(), Some(track::Position::group(1)), "{version:?}");
+	assert_eq!(second.finished(), Some(track::Position::group(1)), "{version:?}");
 
 	// Its own readers end at once: the earlier producer's groups never arrive here.
 	let mut local = second.subscribe(None);

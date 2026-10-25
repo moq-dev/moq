@@ -565,7 +565,7 @@ impl SubscriptionCleanup {
 		for (_, entry) in self.0.lock().drain() {
 			let _ = match entry.tail.read().is_ended() {
 				true => entry.producer.finish(),
-				false => entry.producer.close(),
+				false => entry.producer.abort(Error::Stream(crate::StreamError::Session(crate::SessionError::Cancel))),
 			};
 		}
 	}

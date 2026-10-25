@@ -934,7 +934,7 @@ impl Publish {
 	/// boundary and only releases the handle; the broadcast keeps the track.
 	pub fn track_finish(&mut self, track: Id) -> Result<(), Error> {
 		let track = self.tracks.remove(track).ok_or(Error::TrackNotFound)?;
-		if track.end().is_none() {
+		if track.finished().is_none() {
 			track.finish()?;
 		}
 		track.keep();

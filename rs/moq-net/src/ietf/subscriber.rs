@@ -242,11 +242,11 @@ impl State {
 				request.reject(Error::Cancel);
 			}
 			if let Some(producer) = track.producer {
-				let _ = producer.close();
+				let _ = producer.abort(Error::Stream(crate::StreamError::Session(SessionError::Cancel)));
 			}
 		}
 		for (_, producer) in self.lingering.drain() {
-			let _ = producer.close();
+			let _ = producer.abort(Error::Stream(crate::StreamError::Session(SessionError::Cancel)));
 		}
 	}
 }
@@ -14675,7 +14675,7 @@ mod stitch_tests {
 
 		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
 		assert_eq!(
-			h.track.end(),
+			h.track.finished(),
 			Some(track::Position {
 				group: SEQUENCE,
 				frame: 1
@@ -14697,7 +14697,7 @@ mod stitch_tests {
 		let h = Harness::new(Fill::Done, vec![marker]);
 		let mut stream = h.stream().await;
 		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
-		assert_eq!(h.track.end(), Some(track::Position { group: 5, frame: 5 }));
+		assert_eq!(h.track.finished(), Some(track::Position { group: 5, frame: 5 }));
 		assert_eq!(
 			h.track.latest_sequence(),
 			None,
@@ -14734,7 +14734,7 @@ mod stitch_tests {
 		let mut stream = h.stream().await;
 
 		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
-		assert_eq!(h.track.end(), Some(track::Position::group(SEQUENCE)));
+		assert_eq!(h.track.finished(), Some(track::Position::group(SEQUENCE)));
 		assert_eq!(h.track.latest_sequence(), None, "no group was created");
 	}
 
