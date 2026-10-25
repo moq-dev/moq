@@ -8,7 +8,9 @@ import "dart:ffi";
 import "dart:io" show Platform, File, Directory;
 import "dart:isolate";
 import "dart:typed_data";
+
 import "package:ffi/ffi.dart";
+
 import "uniffi_runtime.dart";
 export "uniffi_runtime.dart";
 
@@ -16338,17 +16340,6 @@ void moqLogLevel({required String level}) {
   }, moqExceptionErrorHandler);
 }
 
-int moqEpochTimeMs({required String epoch}) {
-  return rustCallWithLifter(
-    (status) => uniffi_moq_ffi_fn_func_moq_epoch_time_ms(
-      FfiConverterString.lower(epoch),
-      status,
-    ),
-    FfiConverterUInt64.lift,
-    moqExceptionErrorHandler,
-  );
-}
-
 String moqMintEpoch() {
   return rustCallWithLifter(
     (status) => uniffi_moq_ffi_fn_func_moq_mint_epoch(status),
@@ -19032,14 +19023,6 @@ external void uniffi_moq_ffi_fn_func_moq_log_level(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
-@Native<Uint64 Function(RustBuffer, Pointer<RustCallStatus>)>(
-  assetId: _uniffiAssetId,
-)
-external int uniffi_moq_ffi_fn_func_moq_epoch_time_ms(
-  RustBuffer epoch,
-  Pointer<RustCallStatus> uniffiStatus,
-);
-
 @Native<RustBuffer Function(Pointer<RustCallStatus>)>(assetId: _uniffiAssetId)
 external RustBuffer uniffi_moq_ffi_fn_func_moq_mint_epoch(
   Pointer<RustCallStatus> uniffiStatus,
@@ -19386,9 +19369,6 @@ external void ffi_moq_ffi_rust_future_complete_void(
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_func_moq_log_level();
-
-@Native<Uint16 Function()>(assetId: _uniffiAssetId)
-external int uniffi_moq_ffi_checksum_func_moq_epoch_time_ms();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_func_moq_mint_epoch();
@@ -20094,9 +20074,6 @@ void _checkApiVersion() {
 
 void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_func_moq_log_level() != 24625) {
-    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
-  }
-  if (uniffi_moq_ffi_checksum_func_moq_epoch_time_ms() != 13125) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_func_moq_mint_epoch() != 34550) {

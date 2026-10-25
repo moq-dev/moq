@@ -383,19 +383,10 @@ mod tests {
 	fn supported_subprotocols_lists_full_matrix() {
 		// Guard the literals: they must stay the IETF draft-18-and-newer ALPNs
 		// (wire 0xff000012 through 0xff000016).
-		assert_eq!(
-			QMUX01_ONLY_ALPNS
-				.iter()
-				.map(|&a| moq_net::Version::from_alpn(a).map(|v| v.code()))
-				.collect::<Vec<_>>(),
-			vec![
-				Some(0xff000012),
-				Some(0xff000013),
-				Some(0xff000014),
-				Some(0xff000015),
-				Some(0xff000016)
-			]
-		);
+		let drafts: Vec<_> = (0xff000012..=0xff000016)
+			.map(|code| moq_net::Version::from_code(code).unwrap().alpn())
+			.collect();
+		assert_eq!(QMUX01_ONLY_ALPNS, drafts);
 
 		let list = supported_subprotocols(moq_net::ALPNS);
 

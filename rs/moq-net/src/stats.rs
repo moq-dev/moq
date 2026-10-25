@@ -641,11 +641,6 @@ impl Traffic {
 		self.stale.add(other.stale);
 	}
 
-	/// True while the broadcast is announced (an announce guard is open).
-	pub fn is_announced(&self) -> bool {
-		self.announces_started > self.announces_ended
-	}
-
 	/// Distinct sessions currently subscribed (viewers on the egress side).
 	pub fn active_broadcasts(&self) -> u64 {
 		self.broadcasts_started.saturating_sub(self.broadcasts_ended)
@@ -654,13 +649,6 @@ impl Traffic {
 	/// Track subscriptions currently open.
 	pub fn active_subscriptions(&self) -> u64 {
 		self.subscriptions_started.saturating_sub(self.subscriptions_ended)
-	}
-
-	/// All bytes attributable to this slice: payload plus announce overhead.
-	/// Both inputs are monotonic, so the sum regresses only when the entry was
-	/// garbage collected and re-created.
-	pub fn total_bytes(&self) -> u64 {
-		self.bytes.saturating_add(self.announced_bytes)
 	}
 
 	/// True once every started counter equals its ended counterpart: no guard is
@@ -840,11 +828,6 @@ impl Tier {
 	/// The tier label, empty for the default tier.
 	pub fn label(&self) -> &PathOwned {
 		&self.0
-	}
-
-	/// True for the default (unprefixed) tier.
-	pub fn is_default(&self) -> bool {
-		self.0.is_empty()
 	}
 
 	/// Track name for this tier: `name` on the default tier, else `<tier>/<name>`.
@@ -1195,11 +1178,6 @@ impl Registry {
 		self.shared.is_some()
 	}
 
-	/// The excluded patterns. See [`Config::exclude`].
-	pub fn exclude(&self) -> &Patterns {
-		&self.exclude
-	}
-
 	/// The shared state, panicking for a disabled registry. Tests build enabled
 	/// registries so this is always present.
 	#[cfg(test)]
@@ -1418,16 +1396,6 @@ impl Handle {
 				.counter(reason)
 				.fetch_add(1, Ordering::Relaxed);
 		}
-	}
-
-	/// The registry this handle is tied to.
-	pub fn parent(&self) -> &Registry {
-		&self.stats
-	}
-
-	/// The tier this handle bumps into.
-	pub fn tier(&self) -> &Tier {
-		&self.tier
 	}
 
 	/// Record a connected session under `label` on this tier. Hold

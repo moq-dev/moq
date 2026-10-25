@@ -2554,7 +2554,12 @@ mod tests {
 		}
 
 		let help = Cli::render_help(Cli::command(), true).unwrap();
-		for name in moq_net::Version::names() {
+		// Every wire code this crate parses, including the opt-in `-wip` drafts.
+		let codes = (0xff0dad00..=0xff0dadff).chain(0xff000000..=0xff0000ff);
+		for name in codes
+			.filter_map(moq_net::Version::from_code)
+			.map(|version| version.as_str())
+		{
 			assert!(help.contains(name), "missing {name} from --server-version help");
 		}
 	}

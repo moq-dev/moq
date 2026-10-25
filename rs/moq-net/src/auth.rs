@@ -51,7 +51,6 @@ pub(crate) fn protocol_error(err: Error) -> Error {
 		Error::Decode(_)
 		| Error::BoundsExceeded(_)
 		| Error::WrongSize
-		| Error::TooManyParameters
 		| Error::UnexpectedMessage
 		| Error::UnexpectedStream => Error::ProtocolViolation,
 		err => err,
@@ -2969,7 +2968,7 @@ mod request_token_tests {
 	async fn a_typed_request_token_is_unsupported() {
 		let handle = Link::new(true);
 		let mut requests = handle.handle().requests();
-		let verdict = handle.verify_request(token(b"cat", crate::setup::Token::CAT), None);
+		let verdict = handle.verify_request(token(b"cat", 1), None);
 		let err = verdict.grant().await.expect_err("a typed token");
 		assert!(matches!(err.error, Error::Unsupported), "{err:?}");
 		assert!(

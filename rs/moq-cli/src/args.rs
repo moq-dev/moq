@@ -3071,9 +3071,13 @@ mod tests {
 			}
 		}
 
-		// As a set: `names()` is preference-ordered (newest first) while a choice
-		// list reads ascending, and that ordering is a presentation call.
-		let mut expected: Vec<&str> = hang::moq_net::Version::names().collect();
+		// As a set: a choice list reads ascending, and that ordering is a presentation call.
+		// Every wire code moq-net parses, including the opt-in `-wip` drafts.
+		let codes = (0xff0dad00..=0xff0dadff).chain(0xff000000..=0xff0000ff);
+		let mut expected: Vec<&str> = codes
+			.filter_map(hang::moq_net::Version::from_code)
+			.map(|version| version.as_str())
+			.collect();
 		expected.sort_unstable();
 		let mut found = Vec::new();
 		walk(Cli::spec().root, &mut found);

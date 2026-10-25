@@ -1674,17 +1674,6 @@ impl Producer {
 		self.handle.frame_count()
 	}
 
-	/// Abort with `err` only while nothing consumes the group, returning whether it is
-	/// closed. Consumer creation and the check share a lock, so a reader arriving after
-	/// [`poll_unused`](Self::poll_unused) keeps the group alive instead of reading the abort.
-	#[allow(
-		dead_code,
-		reason = "the answering API retains these on the writer as well as the session observer"
-	)]
-	pub(crate) fn abort_unused(&self, err: Error) -> bool {
-		self.handle.abort_unused(err)
-	}
-
 	/// Whether the group has been aborted (including pool eviction). The track's
 	/// read paths treat an aborted cached group as absent.
 	///
@@ -1710,15 +1699,6 @@ impl Producer {
 	/// Watch reader demand without keeping the group alive.
 	pub fn demand(&self) -> Demand {
 		self.handle.demand()
-	}
-
-	/// Poll for the group becoming unused (every consumer dropped).
-	#[allow(
-		dead_code,
-		reason = "the answering API retains these on the writer as well as the session observer"
-	)]
-	pub(crate) fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<()> {
-		self.handle.poll_unused(waiter)
 	}
 }
 
@@ -3586,12 +3566,12 @@ mod test {
 
 		let consumer = producer.handle.try_consume().expect("open");
 		assert!(
-			!producer.abort_unused(crate::Error::Cancel),
+			!producer.handle.abort_unused(crate::Error::Cancel),
 			"a reader declines the abort"
 		);
 		drop(consumer);
 
-		assert!(producer.abort_unused(crate::Error::Cancel));
+		assert!(producer.handle.abort_unused(crate::Error::Cancel));
 		assert!(
 			producer.handle.try_consume().is_none(),
 			"an aborted group mints no reader"

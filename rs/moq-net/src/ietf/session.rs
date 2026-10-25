@@ -3736,7 +3736,7 @@ mod tests {
 			.expect_err("a second GOAWAY is fatal");
 			assert_eq!(SessionError::from(&err), SessionError::ProtocolViolation, "{version:?}");
 			assert!(
-				handle.consumer().peek().is_none(),
+				handle.consumer().poll(&kio::Waiter::noop()).is_pending(),
 				"{version:?}: the first GOAWAY surfaced"
 			);
 		}

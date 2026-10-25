@@ -377,14 +377,6 @@ export class Parameters {
 		this.vars.set(MSG_PARAM_EXPIRES, v);
 	}
 
-	get deliveryTimeout(): bigint | undefined {
-		return this.vars.get(MSG_PARAM_DELIVERY_TIMEOUT);
-	}
-
-	set deliveryTimeout(v: bigint) {
-		this.vars.set(MSG_PARAM_DELIVERY_TIMEOUT, v);
-	}
-
 	get maxCacheDuration(): bigint | undefined {
 		return this.vars.get(MSG_PARAM_MAX_CACHE_DURATION);
 	}

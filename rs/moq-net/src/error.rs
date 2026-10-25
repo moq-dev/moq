@@ -456,10 +456,6 @@ pub enum Error {
 	#[error(transparent)]
 	Encode(#[from] coding::EncodeError),
 
-	/// A message carried more parameters than this endpoint accepts.
-	#[error("too many parameters")]
-	TooManyParameters,
-
 	/// The peer went past this session's `crate::session::Limits`: too many announcements, or
 	/// too many requests on moq-transport drafts 14 to 16.
 	#[error("too many requests")]
@@ -638,7 +634,6 @@ impl From<&Error> for SessionError {
 			Error::Expired => Self::Expired,
 			Error::Unsupported => Self::Unsupported,
 			Error::Version | Error::UnknownAlpn(_) => Self::Version,
-			Error::TooManyParameters => Self::KeyValueFormatting,
 			Error::TooManyRequests => Self::TooManyRequests,
 			Error::GoawayTimeout => Self::GoawayTimeout,
 			Error::Timeout => Self::Timeout,
@@ -727,7 +722,6 @@ impl From<&Error> for StreamError {
 			Error::UnexpectedStream | Error::NoStreamCredit => Self::Internal,
 			Error::Version
 			| Error::UnknownAlpn(_)
-			| Error::TooManyParameters
 			| Error::TooManyRequests
 			| Error::Duplicate
 			| Error::GoawayTimeout

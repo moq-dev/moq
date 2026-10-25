@@ -117,8 +117,6 @@ pub struct Token {
 impl Token {
 	/// Token Type 0: a format the endpoints agreed on out of band, such as a JWT.
 	pub const OUT_OF_BAND: u64 = 0x0;
-	/// Token Type 1: a Common Access Token (draft-ietf-moq-c4m).
-	pub const CAT: u64 = 0x1;
 }
 
 /// Draft-17+ unified SETUP message, with the same encoding for both client and server.

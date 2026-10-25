@@ -28,8 +28,8 @@ Recorded exceptions, so the next audit skips them:
 - moq-transport-only error variants (`Error::{InvalidJoiningRequestId,
   InvalidRange, Remote, UnsupportedExtension}`, the `DecodeError` auth-token
   variants) and the session error codes the lite draft registers with
-  moq-transport's meaning stay public. Errors are fine; only dead ones go
-  ([net-exports](/quest/m1/api-audit/net-exports.md)).
+  moq-transport's meaning stay public. Errors are fine; only dead ones go,
+  which is done.
 - `setup::Extensions::{auth, solicit, epoch}` stay as interop knobs, and so
   does the relay's `[listen|connect.extensions]` TOML. Document each field
   as affecting moq-transport only.

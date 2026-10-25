@@ -1146,7 +1146,12 @@ mod tests {
 	#[test]
 	fn test_cli_version_help_lists_every_parseable_name() {
 		let help = Cli::render_help(Cli::command(), true).expect("long help");
-		for name in moq_net::Version::names() {
+		// Every wire code this crate parses, including the opt-in `-wip` drafts.
+		let codes = (0xff0dad00..=0xff0dadff).chain(0xff000000..=0xff0000ff);
+		for name in codes
+			.filter_map(moq_net::Version::from_code)
+			.map(|version| version.as_str())
+		{
 			assert!(help.contains(name), "missing {name} from --connect-version help");
 		}
 	}

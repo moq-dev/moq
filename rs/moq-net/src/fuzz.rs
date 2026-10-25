@@ -675,7 +675,7 @@ where
 /// ones, and the two disagree about which byte sequences are even legal.
 ///
 /// The leading-ones form spans the full `u64`, while the QUIC form stops at
-/// [`crate::coding::varint::MAX_QUIC`]; a value always re-encodes in the form it was read in.
+/// `2^62 - 1`; a value always re-encodes in the form it was read in.
 pub fn varint(data: &[u8]) -> bool {
 	let Some((&selector, rest)) = data.split_first() else {
 		return false;

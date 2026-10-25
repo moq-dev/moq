@@ -107,11 +107,6 @@ impl Server {
 		self
 	}
 
-	/// Set both publish and subscribe from one shared [`origin::Producer`].
-	pub fn with_origin(self, origin: origin::Producer) -> Self {
-		self.with_publisher(&origin).with_subscriber(origin)
-	}
-
 	/// Cap what each client can make its session hold. Defaults to [`session::Limits::default`](crate::session::Limits::default).
 	pub fn with_limits(mut self, limits: crate::session::Limits) -> Self {
 		self.limits = limits;

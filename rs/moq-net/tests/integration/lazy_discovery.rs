@@ -98,7 +98,7 @@ impl Lazy {
 /// Read until the stream syncs, returning the prefixes it then holds.
 async fn synced(announced: &mut announce::Consumer) -> Vec<String> {
 	let mut seen = Vec::new();
-	while !announced.is_synced() {
+	while !announced.poll_synced(&moq_net::kio::Waiter::noop()).is_ready() {
 		let event = moq_clock::timeout(SETTLE, announced.next())
 			.await
 			.expect("synced in time")
