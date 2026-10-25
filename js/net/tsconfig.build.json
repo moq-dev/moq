@@ -3,5 +3,5 @@
 	// out of dist/, so they are neither published nor discovered by `bun test` at
 	// the package root. `tsc --noEmit` still uses tsconfig.json, so they stay type-checked.
 	"extends": "./tsconfig.json",
-	"exclude": ["src/**/*.test.ts", "src/**/*.test.tsx", "src/mock.ts", "src/lite/identity.fixture.ts"]
+	"exclude": ["src/**/*.test.ts", "src/**/*.test.tsx", "src/mock.ts"]
 }

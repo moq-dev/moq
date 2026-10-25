@@ -57,8 +57,8 @@ export class Renderer {
 		timestamp: Getter<Milli | undefined>;
 		// Whether the canvas should currently download per the configured distance and tab focus.
 		visible: Getter<boolean>;
-		// Why drawing stopped, or undefined while healthy. See {@link Video.RendererError}.
-		error: Getter<Video.RendererError | undefined>;
+		// Why drawing stopped, or undefined while healthy. See {@link Video.RendererOutput.error}.
+		error: Getter<Error | undefined>;
 	}>;
 
 	#signals = new Effect();
@@ -75,7 +75,10 @@ export class Renderer {
 			canvas: this.in.canvas,
 			frame: this.decoder.out.frame,
 			display: this.decoder.out.display,
-			presentation: this.decoder.source.out.catalog,
+			presentation: new Derived(
+				[this.decoder.source.out.catalog, this.decoder.out.interlaced],
+				(catalog, interlaced) => ({ rotation: catalog?.rotation, flip: catalog?.flip, interlaced }),
+			),
 			backend: this.in.backend,
 		});
 		this.#signals.cleanup(() => this.#video.close());

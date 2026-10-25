@@ -9,20 +9,20 @@ earlier ones. Rewrite the import and consumer quests around that contract.
 ## Plan
 
 The 2026-10-11 TS audit found the proposed catalog duration is not yet a
-sufficient guarantee. `h264-import` rounds a measured recovery duration down
-to milliseconds and raises the global value after observing a longer sweep.
+sufficient guarantee. `h264-import` raises the global value after observing
+a longer sweep.
 `consumer-warmup` sizes the transcoder's decode history from that duration. A
-rounded value can leave the history short of the recovery picture, and a later catalog update cannot
+later catalog update cannot
 recall pictures a subscriber has already displayed using the old value.
 
 Decided 2026-10-22 (maintainer): precision is settled; the hang draft rounds a
 fractional-millisecond `warmup` up
-([#5212](https://github.com/moq-dev/moq/pull/5212)). This quest amends the
-draft's `warmup` rule so a consumer running a parallel max-delay decoder MAY
-present min-delay pictures before the group start plus `warmup`, which keeps
-the merged dual decoder in `decode::Consumer`
-([#5842](https://github.com/moq-dev/moq/pull/5842)). Publication ordering for
-a later, longer sweep remains to settle.
+([#5212](https://github.com/moq-dev/moq/pull/5212)). The draft's `warmup` rule
+is amended so a consumer running a parallel max-delay decoder MAY present
+min-delay pictures before the group start plus `warmup`, which keeps the
+merged dual decoder in `decode::Consumer`
+([#5842](https://github.com/moq-dev/moq/pull/5842)), and the draft now says
+so. Publication ordering for a later, longer sweep remains to settle.
 
 Ask the maintainer to choose between an exact per-group boundary and a safe
 bound known and published before the affected content, including the latency

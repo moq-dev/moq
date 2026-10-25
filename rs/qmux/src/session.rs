@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Buf, Bytes};
 use moq_clock::Instant;
 use moq_net::transport::{self as net, Binding, poll};
 use moq_quic::{Dir, Side, StreamId, TransportError, TransportErrorCode, VarInt, mux};
@@ -20,19 +20,13 @@ use rustc_hash::FxHashMap;
 use crate::transport::{Reader, Transport, Writer};
 use crate::{Config, Error, SharedSocketStats};
 
-/// How long a closing session keeps writing to deliver its close frame before it drops the
-/// transport anyway, like QUIC's draining period. A peer that stopped reading cannot hold the
-/// transport open past it.
+/// How long a closing session keeps the transport open to deliver its close and finish graceful
+/// shutdown, like QUIC's draining period. A peer that stopped reading or never finishes its send
+/// half cannot hold the transport open past it.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// The most bytes gathered before the writer flushes the transport.
 const BATCH_BYTES: usize = 64 * 1024;
-
-/// How far [`RecvStream::poll_closed`] reads ahead of the application before it waits for
-/// the backlog to drain.
-const READ_AHEAD: usize = 64 * 1024;
-/// How much to ask for per read-ahead chunk.
-const READ_CHUNK: usize = 8 * 1024;
 
 /// Everything the handles and the tasks share.
 struct Inner {
@@ -332,7 +326,7 @@ impl Timer {
 }
 
 /// Drain the connection into `writer` until it has nothing left to say.
-async fn run_writer<W: Writer>(inner: Arc<Inner>, mut writer: W) {
+async fn run_writer<W: Writer>(inner: Arc<Inner>, mut writer: W, reader: tokio::task::JoinHandle<()>) {
 	let mut timer = Timer::default();
 	let result = async {
 		loop {
@@ -378,12 +372,17 @@ async fn run_writer<W: Writer>(inner: Arc<Inner>, mut writer: W) {
 	.await;
 
 	// Shut the transport down gracefully, unless it already failed, within what is left of
-	// the close bound.
+	// the close bound. The drained connection has already woken the reader; waiting for it to
+	// drop its half lets the close drain the peer instead of leaving that to the reader.
 	if result.is_ok() {
 		let bound = timer
 			.closing
 			.map_or(CLOSE_TIMEOUT, |at| at.saturating_duration_since(moq_clock::now()));
-		let _ = moq_clock::timeout(bound, writer.close()).await;
+		let close = async {
+			let _ = reader.await;
+			writer.close().await
+		};
+		let _ = moq_clock::timeout(bound, close).await;
 	}
 	inner.writer_done(result);
 }
@@ -502,9 +501,9 @@ impl Session {
 			binding: transport.binding(),
 		});
 
-		let (writer, reader) = transport.split();
-		tokio::spawn(run_writer(inner.clone(), writer));
-		tokio::spawn(run_reader(inner.clone(), reader));
+		let (writer, reader) = transport.split(&config);
+		let reader = tokio::spawn(run_reader(inner.clone(), reader));
+		tokio::spawn(run_writer(inner.clone(), writer, reader));
 
 		Ok(Self {
 			guard: Arc::new(Guard(inner.clone())),
@@ -549,7 +548,7 @@ impl Session {
 	/// Open a send group at `priority`, for streams to join with
 	/// [`SendStream::set_group`](poll::SendStream::set_group) and datagrams with
 	/// [`SendOptions`](poll::SendOptions).
-	pub fn send_group(&self, priority: i64) -> SendGroup {
+	fn send_group(&self, priority: i64) -> SendGroup {
 		let id = self.inner.lock().conn.send_groups().open(priority);
 		SendGroup(Arc::new(GroupInner {
 			inner: self.inner.clone(),
@@ -661,6 +660,35 @@ impl poll::Session for Session {
 				RecvStream::new(self.inner.clone(), id),
 			)
 		})
+	}
+
+	fn poll_open_request(
+		&mut self,
+		cx: &mut Context<'_>,
+		options: poll::SendOptions<'_, SendGroup>,
+	) -> Poll<Result<Option<poll::BiStreams<Self>>, Error>> {
+		let waiter = self.park.hold(cx);
+		let mut state = self.inner.lock();
+		if let Some(err) = &state.closed {
+			return Poll::Ready(Err(err.clone()));
+		}
+		// A session started on an out-of-band protocol (a WebSocket subprotocol) runs before
+		// the peer's transport parameters arrive. Until then its credit is unknown, not spent.
+		if !state.established {
+			waiter.register(&mut state.establish_waiters);
+			return Poll::Pending;
+		}
+		let id = state.conn.streams().open(Dir::Bi, to_quic(options));
+		if id.is_some() {
+			state.driver.wake();
+		}
+		drop(state);
+		Poll::Ready(Ok(id.map(|id| {
+			(
+				SendStream::new(self.inner.clone(), id),
+				RecvStream::new(self.inner.clone(), id),
+			)
+		})))
 	}
 
 	fn send_group(&mut self, priority: i64) -> Option<SendGroup> {
@@ -843,23 +871,14 @@ impl SendStream {
 		}
 	}
 
-	/// Reset the stream with `code`, still delivering the first `offset` bytes written, as
-	/// RESET_STREAM_AT does on draft-02. Elsewhere the prefix is not guaranteed.
-	pub fn reset_at(&mut self, offset: u64, code: u32) {
-		self.reset_with(code, Some(offset));
-	}
-
-	fn reset_with(&mut self, code: u32, offset: Option<u64>) {
+	fn reset_with(&mut self, code: u32) {
 		if self.reset {
 			return;
 		}
 		let code = VarInt::from_u32(code);
 		let mut state = self.inner.lock();
 		// Err means the stream is already gone, which is what we wanted.
-		let _ = match offset {
-			Some(offset) => state.conn.send_stream(self.id).reset_at(offset, code),
-			None => state.conn.send_stream(self.id).reset(code),
-		};
+		let _ = state.conn.send_stream(self.id).reset(code);
 		state.driver.wake();
 		self.reset = true;
 	}
@@ -938,7 +957,7 @@ impl poll::SendStream for SendStream {
 	}
 
 	fn reset(&mut self, code: u32) {
-		self.reset_with(code, None);
+		self.reset_with(code);
 	}
 
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
@@ -993,46 +1012,68 @@ enum Read {
 }
 
 /// An incoming stream. Dropping it unfinished sends STOP_SENDING with code 0.
-pub struct RecvStream {
-	inner: Arc<Inner>,
-	id: StreamId,
-	park: kio::Park,
-	/// Every byte up to the FIN was read out of the connection; reads report the end once
-	/// `backlog` is drained too.
-	finished: bool,
-	/// The peer reset the stream with this code. Reading it frees the connection's stream
-	/// state, so later reads and `poll_closed` report it from here.
-	reset: Option<u64>,
-	/// We stopped the stream; no more reads matter.
-	stopped: bool,
-	/// Bytes `poll_closed` read ahead, handed to `poll_read` before the connection's.
-	backlog: BytesMut,
-	/// The connection credit for `backlog`, kept until the application reads it, as if it
-	/// were still in the reassembly buffer.
-	backlog_credit: moq_quic::Credit,
-}
+///
+/// Reading returns the peer's connection credit as it goes, so incomplete messages are
+/// bounded by the largest message each rather than by `receive_window`, and nothing is evicted.
+pub struct RecvStream(poll::Buffered<RecvChunks>);
 
 impl RecvStream {
 	fn new(inner: Arc<Inner>, id: StreamId) -> Self {
-		Self {
+		Self(poll::Buffered::new(RecvChunks {
 			inner,
 			id,
 			park: kio::Park::default(),
 			finished: false,
 			reset: None,
 			stopped: false,
-			backlog: BytesMut::new(),
-			backlog_credit: moq_quic::Credit::default(),
-		}
+		}))
+	}
+}
+
+impl poll::RecvStream for RecvStream {
+	type Error = Error;
+	type Lease<'a> = poll::BufferedLease<'a>;
+
+	fn poll_lease(&mut self, cx: &mut Context<'_>, want: usize) -> Poll<Result<Self::Lease<'_>, Error>> {
+		self.0.poll_lease(cx, want)
 	}
 
-	fn poll_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Error>> {
+	fn set_priority(&mut self, priority: i64) {
+		self.0.set_priority(priority);
+	}
+
+	fn stop(&mut self, code: u32) {
+		self.0.stop(code);
+	}
+}
+
+impl std::fmt::Debug for RecvStream {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("RecvStream").field("id", &self.0.get_ref().id).finish()
+	}
+}
+
+/// Reads a [`RecvStream`] out of the connection's reassembly buffer.
+struct RecvChunks {
+	inner: Arc<Inner>,
+	id: StreamId,
+	park: kio::Park,
+	/// Every byte up to the FIN was read out of the connection.
+	finished: bool,
+	/// The peer reset the stream with this code. Reading it frees the connection's stream
+	/// state, so later reads report it from here.
+	reset: Option<u64>,
+	/// We stopped the stream; no more reads matter.
+	stopped: bool,
+}
+
+impl poll::Chunks for RecvChunks {
+	type Error = Error;
+
+	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Error>> {
 		let waiter = self.park.hold(cx);
 		if max == 0 {
 			return Poll::Ready(Ok(Some(Bytes::new())));
-		}
-		if !self.backlog.is_empty() {
-			return Poll::Ready(Ok(Some(self.drain(max))));
 		}
 		if let Some(code) = self.reset {
 			return Poll::Ready(Err(Error::StreamReset(code)));
@@ -1041,7 +1082,7 @@ impl RecvStream {
 			return Poll::Ready(Ok(None));
 		}
 		let mut state = self.inner.lock();
-		match read(&mut state, self.id, max, None) {
+		match read(&mut state, self.id, max) {
 			Read::Chunk(bytes) => Poll::Ready(Ok(Some(bytes))),
 			Read::Finished => {
 				self.finished = true;
@@ -1061,28 +1102,11 @@ impl RecvStream {
 		}
 	}
 
-	/// Take up to `max` read-ahead bytes out of the backlog, returning their credit.
-	///
-	/// Wakes a `poll_closed` parked at the read-ahead cap: the room it was waiting for is
-	/// what this just made.
-	fn drain(&mut self, max: usize) -> Bytes {
-		let chunk = self.backlog.split_to(max.min(self.backlog.len())).freeze();
-		let credit = self.backlog_credit.split(chunk.len() as u64);
-		let mut state = self.inner.lock();
-		release(&mut state, credit);
-		if !chunk.is_empty() {
-			wake(&mut state.readable, self.id);
-		}
-		chunk
-	}
-
-	fn stop_with(&mut self, code: u32) {
-		let mut state = self.inner.lock();
-		release(&mut state, std::mem::take(&mut self.backlog_credit));
-		self.backlog.clear();
+	fn stop(&mut self, code: u32) {
 		if self.stopped || self.finished || self.reset.is_some() {
 			return;
 		}
+		let mut state = self.inner.lock();
 		// Err means the stream is already gone, which is what we wanted.
 		let _ = state.conn.recv_stream(self.id).stop(VarInt::from_u32(code));
 		state.driver.wake();
@@ -1093,9 +1117,8 @@ impl RecvStream {
 /// Take up to `max` bytes out of the reassembly buffer.
 ///
 /// Reading is what returns the peer's flow control credit, so a read that owes it a frame
-/// kicks the writer. The connection credit for the bytes read moves into `held` instead,
-/// when given.
-fn read(state: &mut State, id: StreamId, max: usize, held: Option<&mut moq_quic::Credit>) -> Read {
+/// kicks the writer.
+fn read(state: &mut State, id: StreamId, max: usize) -> Read {
 	let mut recv = state.conn.recv_stream(id);
 	let mut chunks = match recv.read(true) {
 		Ok(chunks) => chunks,
@@ -1108,100 +1131,20 @@ fn read(state: &mut State, id: StreamId, max: usize, held: Option<&mut moq_quic:
 		Err(moq_quic::ReadError::Blocked) => Read::Blocked,
 		Err(moq_quic::ReadError::Reset(code)) => Read::Reset(code.into_inner()),
 	};
-	if let Some(held) = held {
-		held.merge(chunks.hold());
-	}
 	if chunks.finalize().should_transmit() {
 		state.driver.wake();
 	}
 	read
 }
 
-/// Return `credit` to the peer, kicking the writer if the peer should hear.
-fn release(state: &mut State, credit: moq_quic::Credit) {
-	if !credit.is_empty() && state.conn.release(credit).should_transmit() {
-		state.driver.wake();
-	}
-}
-
-impl poll::RecvStream for RecvStream {
-	type Error = Error;
-
-	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Error>> {
-		let Some(chunk) = std::task::ready!(self.poll_chunk(cx, dst.len()))? else {
-			return Poll::Ready(Ok(None));
-		};
-		dst[..chunk.len()].copy_from_slice(&chunk);
-		Poll::Ready(Ok(Some(chunk.len())))
-	}
-
-	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Error>> {
-		self.poll_chunk(cx, max)
-	}
-
-	fn stop(&mut self, code: u32) {
-		// Giving up on the read side abandons whatever was read ahead, even when the FIN is
-		// already in and only the backlog is left.
-		self.stop_with(code);
-	}
-
-	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
-		let waiter = self.park.hold(cx);
-		if let Some(code) = self.reset {
-			return Poll::Ready(Err(Error::StreamReset(code)));
-		}
-		if self.finished || self.stopped {
-			return Poll::Ready(Ok(()));
-		}
-		// The FIN sits behind whatever the peer sent before it, and the connection only
-		// reports the stream finished once that is read out. Read ahead into the backlog
-		// `poll_read` serves first, so this watch resolves without the application draining
-		// the stream, and without losing what it might still want.
-		let mut state = self.inner.lock();
-		loop {
-			if self.backlog.len() >= READ_AHEAD {
-				// Enough held: the memory bound wins over watch liveness here. `drain` wakes
-				// this once the application takes some.
-				waiter.register(state.readable.entry(self.id).or_default());
-				return Poll::Pending;
-			}
-			match read(&mut state, self.id, READ_CHUNK, Some(&mut self.backlog_credit)) {
-				Read::Chunk(bytes) => self.backlog.extend_from_slice(&bytes),
-				Read::Finished => {
-					self.finished = true;
-					return Poll::Ready(Ok(()));
-				}
-				Read::Blocked => {
-					if let Some(err) = &state.closed {
-						return Poll::Ready(Err(err.clone()));
-					}
-					waiter.register(state.readable.entry(self.id).or_default());
-					return Poll::Pending;
-				}
-				Read::Reset(code) => {
-					self.reset = Some(code);
-					return Poll::Ready(Err(Error::StreamReset(code)));
-				}
-			}
-		}
-	}
-}
-
-impl Drop for RecvStream {
+impl Drop for RecvChunks {
 	fn drop(&mut self) {
 		let mut state = self.inner.lock();
-		release(&mut state, std::mem::take(&mut self.backlog_credit));
 		state.readable.remove(&self.id);
 		if !self.finished && !self.stopped && self.reset.is_none() {
 			let _ = state.conn.recv_stream(self.id).stop(VarInt::from_u32(0));
 			state.driver.wake();
 		}
-	}
-}
-
-impl std::fmt::Debug for RecvStream {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		f.debug_struct("RecvStream").field("id", &self.id).finish()
 	}
 }
 

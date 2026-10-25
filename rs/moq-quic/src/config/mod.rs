@@ -5,21 +5,18 @@ use std::{
     sync::Arc,
 };
 
-#[cfg(any(feature = "rustls-aws-lc-rs", feature = "rustls-ring"))]
+#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
 use rustls::client::WebPkiServerVerifier;
-#[cfg(any(feature = "rustls-aws-lc-rs", feature = "rustls-ring"))]
+#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use thiserror::Error;
 
-#[cfg(feature = "bloom")]
 use crate::BloomTokenLog;
-#[cfg(not(feature = "bloom"))]
-use crate::NoneTokenLog;
-#[cfg(any(feature = "rustls-aws-lc-rs", feature = "rustls-ring"))]
+#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
 use crate::crypto::rustls::{QuicServerConfig, configured_provider};
 use crate::{
-    DEFAULT_SUPPORTED_VERSIONS, Duration, MAX_CID_SIZE, RandomConnectionIdGenerator, SystemTime,
-    TokenLog, TokenMemoryCache, TokenStore, VarInt, VarIntBoundsExceeded,
+    DEFAULT_SUPPORTED_VERSIONS, Duration, MAX_CID_SIZE, RandomConnectionIdGenerator, TokenLog,
+    TokenMemoryCache, TokenStore, VarInt, VarIntBoundsExceeded, Wall,
     cid_generator::{ConnectionIdGenerator, HashedConnectionIdGenerator},
     crypto::{self, HandshakeTokenKey, HmacKey},
     shared::ConnectionId,
@@ -401,7 +398,7 @@ impl ServerConfig {
         self
     }
 
-    /// Object to get current [`SystemTime`]
+    /// Object to get current [`Wall`]
     ///
     /// This exists to allow system time to be mocked in tests, or wherever else desired.
     ///
@@ -416,7 +413,7 @@ impl ServerConfig {
     }
 }
 
-#[cfg(any(feature = "rustls-aws-lc-rs", feature = "rustls-ring"))]
+#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
 impl ServerConfig {
     /// Create a server config with the given certificate chain to be presented to clients
     ///
@@ -538,15 +535,14 @@ impl ValidationTokenConfig {
         self
     }
 
-    #[allow(rustdoc::redundant_explicit_links)] // which links are redundant depends on features
+    #[allow(
+        rustdoc::redundant_explicit_links,
+        reason = "which links are redundant depends on features"
+    )]
     /// Set a custom [`TokenLog`]
     ///
-    /// If the `bloom` feature is enabled (which it is by default), defaults to a default
-    /// [`BloomTokenLog`][crate::BloomTokenLog], which is suitable for most internet applications.
-    ///
-    /// If the `bloom` feature is disabled, defaults to [`NoneTokenLog`][crate::NoneTokenLog],
-    /// which makes the server ignore all address validation tokens (that is, tokens originating
-    /// from NEW_TOKEN frames--retry tokens are not affected).
+    /// Defaults to [`BloomTokenLog`][crate::BloomTokenLog], suitable for internet applications.
+    /// Set [`NoneTokenLog`][crate::NoneTokenLog] to ignore NEW_TOKEN address validation tokens.
     pub fn log(&mut self, log: Arc<dyn TokenLog>) -> &mut Self {
         self.log = log;
         self
@@ -556,8 +552,7 @@ impl ValidationTokenConfig {
     ///
     /// This refers only to tokens sent in NEW_TOKEN frames, in contrast to retry tokens.
     ///
-    /// If the `bloom` feature is enabled (which it is by default), defaults to 2. Otherwise,
-    /// defaults to 0.
+    /// Defaults to 2, including builds without default crypto features.
     pub fn sent(&mut self, value: u32) -> &mut Self {
         self.sent = value;
         self
@@ -566,14 +561,11 @@ impl ValidationTokenConfig {
 
 impl Default for ValidationTokenConfig {
     fn default() -> Self {
-        #[cfg(feature = "bloom")]
         let log = Arc::new(BloomTokenLog::default());
-        #[cfg(not(feature = "bloom"))]
-        let log = Arc::new(NoneTokenLog);
         Self {
             lifetime: Duration::from_secs(2 * 7 * 24 * 60 * 60),
             log,
-            sent: if cfg!(feature = "bloom") { 2 } else { 0 },
+            sent: 2,
         }
     }
 }
@@ -661,16 +653,8 @@ impl ClientConfig {
     }
 }
 
-#[cfg(any(feature = "rustls-aws-lc-rs", feature = "rustls-ring"))]
+#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
 impl ClientConfig {
-    /// Create a client configuration that trusts the platform's native roots
-    #[cfg(feature = "platform-verifier")]
-    pub fn try_with_platform_verifier() -> Result<Self, rustls::Error> {
-        Ok(Self::new(Arc::new(
-            crypto::rustls::QuicClientConfig::with_platform_verifier()?,
-        )))
-    }
-
     /// Create a client configuration that trusts specified trust anchors
     pub fn with_root_certificates(
         roots: Arc<rustls::RootCertStore>,
@@ -713,12 +697,12 @@ impl From<VarIntBoundsExceeded> for ConfigError {
     }
 }
 
-/// Object to get current [`SystemTime`]
+/// Object to get current [`Wall`]
 ///
 /// This exists to allow system time to be mocked in tests, or wherever else desired.
 pub trait TimeSource: Send + Sync {
-    /// Get [`SystemTime::now()`](SystemTime::now) or the mocked equivalent
-    fn now(&self) -> SystemTime;
+    /// Get [`Wall::now()`](Wall::now) or the mocked equivalent
+    fn now(&self) -> Wall;
 }
 
 /// Default implementation of [`TimeSource`]
@@ -727,7 +711,7 @@ pub trait TimeSource: Send + Sync {
 pub struct StdSystemTime;
 
 impl TimeSource for StdSystemTime {
-    fn now(&self) -> SystemTime {
-        moq_clock::wall().into()
+    fn now(&self) -> Wall {
+        moq_clock::wall()
     }
 }

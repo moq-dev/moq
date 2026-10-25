@@ -5,6 +5,7 @@ import type { Reader, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import { decodeEpoch, encodeEpoch } from "./epoch.ts";
 import * as Message from "./message.ts";
+import { fromWire, toWire } from "./priority.ts";
 import { hasCompression, hasGroupOrder, hasRefresh, hasTrackStream, Version, wireTimescale } from "./version.ts";
 
 // TRACK_INFO `Compression` codec ids: none, or per-group DEFLATE (draft-lcurley-moq-flate).
@@ -107,8 +108,8 @@ export class TrackInfo {
 		refresh?: number;
 		compress?: boolean;
 	}) {
-		if (!Number.isInteger(priority) || priority < 0 || priority > 255) {
-			throw new RangeError(`priority must be an integer in 0..=255: ${priority}`);
+		if (!Number.isInteger(priority) || priority < -128 || priority > 127) {
+			throw new RangeError(`priority must be an integer in -128..=127: ${priority}`);
 		}
 		if (maxAge !== undefined && (!Number.isSafeInteger(maxAge) || maxAge < 0)) {
 			throw new RangeError(`maxAge must be a safe non-negative integer: ${maxAge}`);
@@ -123,7 +124,7 @@ export class TrackInfo {
 	}
 
 	async #encode(w: Writer, version: Version) {
-		await w.u8(this.priority);
+		await w.u8(toWire(this.priority));
 		// The retired `Ordered` byte: lite-05 keeps it in its layout, written as 0.
 		if (hasGroupOrder(version)) await w.bool(false);
 		const legacy = version === Version.DRAFT_05 || version === Version.DRAFT_06;
@@ -135,7 +136,7 @@ export class TrackInfo {
 	}
 
 	static async #decode(r: Reader, version: Version): Promise<TrackInfo> {
-		const priority = await r.u8();
+		const priority = fromWire(await r.u8());
 		if (hasGroupOrder(version)) await r.bool();
 		const encoded = await r.u62();
 		const legacy = version === Version.DRAFT_05 || version === Version.DRAFT_06;
@@ -167,8 +168,8 @@ export class TrackInfo {
 		guardTrack(version);
 		// Re-check after construction: fields are public, and a mutated value must not
 		// reach the length-prefixed writer.
-		if (!Number.isInteger(this.priority) || this.priority < 0 || this.priority > 255) {
-			throw new RangeError(`priority must be an integer in 0..=255: ${this.priority}`);
+		if (!Number.isInteger(this.priority) || this.priority < -128 || this.priority > 127) {
+			throw new RangeError(`priority must be an integer in -128..=127: ${this.priority}`);
 		}
 		if (this.maxAge !== undefined && (!Number.isSafeInteger(this.maxAge) || this.maxAge < 0)) {
 			throw new RangeError(`maxAge must be a safe non-negative integer: ${this.maxAge}`);

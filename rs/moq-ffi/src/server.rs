@@ -155,6 +155,7 @@ async fn serve(
 impl ServerState {
 	fn new(config: MoqServerConfig) -> Result<Self, MoqError> {
 		let mut listen = moq_tokio::listen::Config::default();
+		listen.implementation = Some(crate::session::implementation());
 		if let Some(bind) = config.bind {
 			let parsed = bind.parse().map_err(|_| MoqError::Config {
 				reason: format!("invalid bind address: {bind}"),
@@ -482,24 +483,28 @@ impl MoqRequest {
 		publish: Option<Arc<MoqOriginProducer>>,
 		consume: Option<Arc<MoqOriginProducer>>,
 	) -> Result<Arc<MoqSession>, MoqError> {
+		// Foreign runtime threads can have a 512 KiB stack. Keep the transport
+		// handshake out of the nested Task::run futures polled on that stack.
 		self.task
-			.run(move |mut state| async move {
-				let request = state.request.take().ok_or(MoqError::AlreadyResponded)?;
-				// Materialize both origin sides so the session can publish/subscribe and the
-				// FFI can hand back a publisher/consumer.
-				let (publish, subscribe) = crate::origin::resolve_pair(
-					publish.as_ref().or(state.publish.as_ref()),
-					consume.as_ref().or(state.consume.as_ref()),
-				);
-				let (session, driver) = request
-					.with_publisher(&publish.inner)
-					.with_subscriber(subscribe.inner.clone())
-					.ok()
-					.await
-					.map_err(|err| MoqError::Connect {
-						reason: format!("{err}"),
-					})?;
-				Ok(Arc::new(MoqSession::accepted(session, publish, subscribe, driver)))
+			.run(move |mut state| {
+				Box::pin(async move {
+					let request = state.request.take().ok_or(MoqError::AlreadyResponded)?;
+					// Materialize both origin sides so the session can publish/subscribe and the
+					// FFI can hand back a publisher/consumer.
+					let (publish, subscribe) = crate::origin::resolve_pair(
+						publish.as_ref().or(state.publish.as_ref()),
+						consume.as_ref().or(state.consume.as_ref()),
+					);
+					let session = request
+						.with_publisher(&publish.inner)
+						.with_subscriber(subscribe.inner.clone())
+						.ok()
+						.await
+						.map_err(|err| MoqError::Connect {
+							reason: format!("{err}"),
+						})?;
+					Ok(Arc::new(MoqSession::accepted(session, publish, subscribe)))
+				})
 			})
 			.await
 	}
@@ -533,5 +538,62 @@ impl MoqRequest {
 	/// rejects the session.
 	pub fn cancel(&self) {
 		self.task.cancel();
+	}
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+	use super::*;
+
+	/// A server can complete a real handshake on an Apple-sized foreign thread.
+	#[test]
+	fn accept_on_a_foreign_thread() {
+		std::thread::Builder::new()
+			.name("foreign-session".into())
+			.stack_size(512 * 1024)
+			.spawn(|| {
+				let server = MoqServer::new(MoqServerConfig {
+					bind: Some("127.0.0.1:0".into()),
+					versions: vec!["moq-lite-07-wip".into()],
+					tls: MoqServerTls {
+						generate: vec!["localhost".into()],
+						..Default::default()
+					},
+					..Default::default()
+				})
+				.unwrap();
+				let addr = pollster::block_on(server.listen()).unwrap();
+				let client = crate::session::MoqClient::new(crate::session::MoqClientConfig {
+					bind: Some("127.0.0.1:0".into()),
+					versions: vec!["moq-lite-07-wip".into()],
+					tls: crate::session::MoqClientTls {
+						insecure: true,
+						..Default::default()
+					},
+					..Default::default()
+				})
+				.unwrap();
+				let connect =
+					crate::ffi::runtime().spawn(async move { client.connect(format!("https://{addr}")).await });
+				let request = pollster::block_on(server.accept()).unwrap().unwrap();
+				let peer = pollster::block_on(request.accept(None, None)).unwrap();
+				let session = pollster::block_on(connect).unwrap().unwrap();
+				let everything = crate::auth::MoqGrant {
+					publish: vec!["**".into()],
+					subscribe: vec!["**".into()],
+					expires_us: None,
+				};
+				for auth in [peer.auth(), session.auth()] {
+					while auth.grant().as_ref() != Some(&everything) {
+						pollster::block_on(auth.grant_changed()).unwrap();
+					}
+				}
+				peer.cancel(0);
+				session.cancel(0);
+				server.cancel();
+			})
+			.unwrap()
+			.join()
+			.unwrap();
 	}
 }

@@ -422,7 +422,7 @@ impl Message for PublishOk {
 		match version {
 			Version::Draft14 => {
 				w.bool(self.forward);
-				w.u8(self.subscriber_priority.unwrap_or(128));
+				w.u8(self.subscriber_priority.unwrap_or(super::priority::DEFAULT_WIRE));
 				self.group_order.unwrap_or(GroupOrder::Descending).encode(w, version)?;
 				// Same as SUBSCRIBE: the Location an absolute filter carries is dropped on
 				// decode, so encoding one would truncate the message.

@@ -103,4 +103,4 @@ pre-accepted streams can stand behind.
 
 - [UDP demux](/quest/m2/p2p/udp-demux.md) - one socket carries QUIC, with a WebRTC hook for embedders; owned by deferred native P2P in m2
 - [One port on the io_uring workers](/quest/m2/uring-demux.md) - the io_uring workers host the UDP demux
-- [Stream sessions](/quest/m3/uring-tcp/README.md) - the io_uring workers that would host the TCP acceptor later
+- [Stream transports](/quest/m2/perf/stream/README.md) - the io_uring workers that would host the TCP acceptor later

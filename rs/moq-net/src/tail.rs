@@ -12,9 +12,9 @@
 
 use std::{ops::Range, task::Poll, time::Duration};
 
-pub(crate) use crate::model::ledger::{GRACE, grace};
+pub(crate) use crate::ledger::{GRACE, grace};
 use crate::{
-	model::ledger::Ledger,
+	ledger::Ledger,
 	time::{Deadline, Instant},
 };
 
@@ -25,6 +25,9 @@ pub(crate) struct Tail {
 	streams: u64,
 	// Streams whose header arrived and that are still being read.
 	active: u64,
+	// The publisher ended the subscription, so the track is over even if the session
+	// dies before the tail settles.
+	ended: bool,
 }
 
 impl Default for Tail {
@@ -40,7 +43,18 @@ impl Tail {
 			ledger: Ledger::new(grace),
 			streams: 0,
 			active: 0,
+			ended: false,
 		}
+	}
+
+	/// Record that the publisher ended the subscription.
+	pub fn end(&mut self) {
+		self.ended = true;
+	}
+
+	/// Whether the publisher ended the subscription.
+	pub fn is_ended(&self) -> bool {
+		self.ended
 	}
 
 	/// Change the grace, for a subscription whose max delay changed.

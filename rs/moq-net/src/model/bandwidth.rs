@@ -54,8 +54,8 @@ impl Rate {
 
 	/// This rate scaled by `factor`, saturating at both ends.
 	///
-	/// For the fractional arithmetic rate control does (a ramp allowance, a hysteresis
-	/// band) without spreading `as` casts across the callers.
+	/// For fractional arithmetic, such as halving a rate, without spreading `as`
+	/// casts across the callers.
 	pub fn scaled(self, factor: f64) -> Self {
 		let scaled = self.0 as f64 * factor.max(0.0);
 		if scaled >= u64::MAX as f64 {
@@ -109,7 +109,7 @@ impl Producer {
 	}
 
 	/// A handle that mints consumers without being one, so holding it is not demand.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn weak(&self) -> Weak {
 		Weak(self.state.weak())
 	}
@@ -176,12 +176,12 @@ impl Default for Producer {
 
 /// Mints [`Consumer`]s on demand without counting as one, nor keeping the channel open.
 #[derive(Clone)]
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub struct Weak(kio::ProducerWeak<State>);
 
 impl Weak {
 	/// A new consumer, which reports the closure once the producer is gone.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn consume(&self) -> Consumer {
 		Consumer {
 			inner: Inner::Whole(self.0.consume()),
@@ -205,7 +205,7 @@ impl Weak {
 /// The reservations also set the session's probe target: the sum of every live
 /// reservation's ceiling, demanded or not, so a sender that stopped for lack of
 /// bandwidth keeps asking the connection for its room. A session probes for its own
-/// allocator, so take it from [`Session::bandwidth`](crate::Session::bandwidth) rather
+/// allocator, so take it from `Session::bandwidth` (with the `async` feature) rather
 /// than building one: an allocator from [`new`](Self::new) divides an estimate but
 /// probes for nothing.
 ///
@@ -221,7 +221,7 @@ impl Allocator {
 	///
 	/// For an estimate that is not a session's, such as a test's or another
 	/// reservation's slice. A session's own comes from
-	/// [`Session::bandwidth`](crate::Session::bandwidth).
+	/// `Session::bandwidth` with the `async` feature.
 	pub fn new(estimate: Consumer) -> Self {
 		Self {
 			estimate,
@@ -230,7 +230,7 @@ impl Allocator {
 	}
 
 	/// The same registry dividing `estimate` instead, or nothing when it is `None`.
-	// private: capability gap
+	#[cfg(feature = "async")]
 	// Sessions follow their allocator's target; a custom session has no public way to yet.
 	pub(crate) fn with_estimate(&self, estimate: Option<Consumer>) -> Self {
 		Self {
@@ -256,7 +256,7 @@ impl Allocator {
 	}
 
 	/// Follow the probe target, for the session that probes on the reservations' behalf.
-	// private: capability gap
+	#[cfg(any(feature = "async", test))]
 	// Sessions follow their allocator's target; a custom session has no public way to yet.
 	pub(crate) fn target(&self) -> Target {
 		Target {
@@ -294,12 +294,13 @@ impl Allocator {
 	/// bit; within a tier the split is max-min fair, so a share asking for less
 	/// than an even cut takes all of it and leaves the difference to the others.
 	///
-	/// That is the *publisher's* priority, which is not what orders the local send
-	/// queue: that ranks by each subscription's own priority, so a subscriber
-	/// asking for video ahead of audio is served that way whatever this decides.
-	/// The publisher's is still the right one to divide by, since allocation is a
-	/// decision about what to *produce*, and there is no single subscriber
-	/// priority to read when several are watching one track.
+	/// That is the *publisher's* priority, which the send order only falls back on:
+	/// it ranks by each subscription's own priority first, so a subscriber asking for
+	/// video ahead of audio is served that way whatever this decides, and this one
+	/// breaks the ties (or alone orders a broadcast's tracks on a session scheduled
+	/// per broadcast). The publisher's is still the right one to divide by, since
+	/// allocation is a decision about what to *produce*, and there is no single
+	/// subscriber priority to read when several are watching one track.
 	///
 	/// That last part carries a publisher that leaves `priority` at its default:
 	/// one tier of audio and video still serves audio's small reservation in full
@@ -466,6 +467,7 @@ impl Registry {
 	}
 
 	/// What the session probes up to.
+	#[cfg(any(feature = "async", test))]
 	fn target(&self) -> Rate {
 		self.target
 			.unwrap_or_else(|| Rate::from_bps(u64::try_from(self.reserved).unwrap_or(u64::MAX)))
@@ -475,12 +477,12 @@ impl Registry {
 /// One registered track's standing reservation.
 struct Entry {
 	demand: track::Demand,
-	priority: u8,
+	priority: i8,
 	max: Rate,
 }
 
 /// An [`Allocator`]'s probe target, followed by the session that probes for it.
-// private: capability gap
+#[cfg(any(feature = "async", test))]
 // Sessions follow their allocator's target; a custom session has no public way to yet.
 pub(crate) struct Target {
 	/// `None` once every allocator is gone.
@@ -488,11 +490,11 @@ pub(crate) struct Target {
 	last: Option<Rate>,
 }
 
+#[cfg(any(feature = "async", test))]
 impl Target {
 	/// The target once it differs from the last one returned, arming `waiter` otherwise.
 	///
 	/// Zero once every allocator is gone, since nothing is left reserving.
-	// private: capability gap
 	// Sessions follow their allocator's target; a custom session has no public way to yet.
 	pub(crate) fn poll_changed(&mut self, waiter: &kio::Waiter) -> Poll<Rate> {
 		let Some(registry) = &self.registry else {
@@ -535,7 +537,7 @@ struct Share {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 struct Want {
 	id: u64,
-	priority: u8,
+	priority: i8,
 	max: Rate,
 }
 
@@ -755,15 +757,15 @@ mod tests {
 	use crate::broadcast;
 
 	/// Priorities matching `hang`'s, which is what the allocator sees in practice.
-	const AUDIO: u8 = 80;
-	const VIDEO: u8 = 60;
+	const AUDIO: i8 = 80;
+	const VIDEO: i8 = 60;
 
 	/// Bits per second, so the tables below stay readable.
 	fn bps(bps: u64) -> Rate {
 		Rate::from_bps(bps)
 	}
 
-	fn want(id: u64, priority: u8, max: u64) -> Want {
+	fn want(id: u64, priority: i8, max: u64) -> Want {
 		Want {
 			id,
 			priority,
@@ -772,7 +774,7 @@ mod tests {
 	}
 
 	/// A standalone track at `priority`, plus the broadcast keeping it alive.
-	fn track(priority: u8) -> (broadcast::Producer, track::Producer) {
+	fn track(priority: i8) -> (broadcast::Producer, track::Producer) {
 		let broadcast = broadcast::Info::default().produce();
 		let track = broadcast
 			.create_track("t", track::Info::timed().with_priority(priority))
@@ -1127,6 +1129,41 @@ mod tests {
 		// And back down, which has to release the difference rather than hold it.
 		small_reserved.update(bps(1_000_000));
 		assert_eq!(large_reserved.peek(), Some(bps(5_000_000)));
+	}
+
+	/// Collected-language callers can relinquish a ceiling before their retained
+	/// handle is finalized, without ending the track or waiting for its subscribers.
+	#[test]
+	fn zero_ceiling_releases_share_and_probe_target() {
+		let estimate = Producer::new();
+		let allocator = Allocator::new(estimate.consume());
+		estimate.set(Some(bps(3_000_000))).unwrap();
+		let mut target = allocator.target();
+		let waiter = kio::Waiter::noop();
+
+		let (_encoder_broadcast, encoder) = track(VIDEO);
+		let _encoder_sub = encoder.subscribe(None);
+		let retired = allocator.reserve(&encoder.demand(), bps(4_000_000));
+		let replacement = allocator.reserve(&encoder.demand(), bps(4_000_000));
+		let (_sibling_broadcast, sibling) = track(VIDEO);
+		let _sibling_sub = sibling.subscribe(None);
+		let sibling = allocator.reserve(&sibling.demand(), bps(4_000_000));
+		assert_eq!(sibling.peek(), Some(bps(1_000_000)));
+		assert_eq!(target.poll_changed(&waiter), Poll::Ready(bps(12_000_000)));
+
+		retired.update(Rate::ZERO);
+		assert_eq!(retired.peek(), Some(Rate::ZERO));
+		assert_eq!(replacement.peek(), Some(bps(1_500_000)));
+		assert_eq!(sibling.peek(), Some(bps(1_500_000)));
+		assert_eq!(target.poll_changed(&waiter), Poll::Ready(bps(8_000_000)));
+		retired.update(Rate::ZERO);
+		assert!(target.poll_changed(&waiter).is_pending());
+
+		// The registration remains usable, so an encoder may resume in place.
+		retired.update(bps(4_000_000));
+		assert_eq!(sibling.peek(), Some(bps(1_000_000)));
+		assert_eq!(target.poll_changed(&waiter), Poll::Ready(bps(12_000_000)));
+		assert!(encoder.demand().is_used());
 	}
 
 	/// A reader parked on `changed` has to be woken by its own reservation moving, not

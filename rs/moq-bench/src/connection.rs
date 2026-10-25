@@ -1,7 +1,8 @@
+use moq_clock::Wall;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use moq_tokio::Status;
 use moq_tokio::moq_net::{self, bytes::Bytes};
@@ -261,9 +262,8 @@ async fn produce(
 			group_size: rolled.group_size,
 			broadcasts: rolled.broadcasts,
 			subscribe: rolled.subscribe,
-			timestamp_ms: SystemTime::from(moq_clock::wall())
-				.duration_since(UNIX_EPOCH)
-				.unwrap_or_default()
+			timestamp_ms: moq_clock::wall()
+				.saturating_duration_since(Wall::UNIX_EPOCH)
 				.as_millis(),
 			pad: String::new(),
 		};
@@ -657,7 +657,11 @@ impl Drop for Gauge<'_> {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests {
 	use super::*;
 

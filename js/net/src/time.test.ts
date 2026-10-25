@@ -54,3 +54,15 @@ test("Timestamp.as rejects conversions past the safe integer range", () => {
 	// Source value and destination scale are each legal; the converted wire value is not.
 	expect(() => Timestamp.fromMillis(2000).as(Timescale(Number.MAX_SAFE_INTEGER))).toThrow(RangeError);
 });
+
+test("Timestamp.isBefore orders across scales exactly", () => {
+	expect(Timestamp.fromMillis(1).isBefore(Timestamp.fromMicros(1_001))).toBe(true);
+	expect(Timestamp.fromMillis(1).isBefore(Timestamp.fromMicros(1_000))).toBe(false);
+	expect(Timestamp.fromMicros(1_000).isBefore(Timestamp.fromMillis(1))).toBe(false);
+	// Products past 2^53 still compare exactly.
+	const micros = new Timestamp(Number.MAX_SAFE_INTEGER, Timescale.MICRO);
+	const millis = new Timestamp(Number.MAX_SAFE_INTEGER - 1, Timescale.MILLI);
+	expect(micros.isBefore(millis)).toBe(true);
+	expect(millis.isBefore(micros)).toBe(false);
+	expect(new Timestamp(0.5, Timescale.SECOND).isBefore(Timestamp.fromMillis(501))).toBe(true);
+});

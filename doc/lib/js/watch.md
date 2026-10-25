@@ -44,11 +44,10 @@ Every attribute is also a reactive property. The
 The overlay adds play/pause, volume, fullscreen, a quality selector, a
 buffering indicator, and a stats panel.
 
-`el.error` (also `el.player.error`) reports a fatal audio or video decode error.
+`el.audio.out.error` and `el.video.out.error` report a fatal decode error.
 The failing track closes its subscription and stops decoding. Select another
 source or rendition to clear the failure; the player does not resubscribe to
-broken media automatically. Individual decoder errors are available at
-`el.audio.out.error` and `el.video.out.error`.
+broken media automatically.
 
 `el.broadcast.out.status` is `offline`, `loading`, `live`, `error`, or `unsupported`.
 On `unsupported`, update the player to read the broadcast's newer catalog; the overlay shows this notice.
@@ -141,7 +140,7 @@ const player = new Watch.Player({
     origin: connection.origin,
     probe: connection.probe,
     name: Moq.Path.from("alice.hang"),
-    canvas,
+    video: { canvas },
 });
 // player.broadcast, player.video, player.audio, player.text, player.sync,
 // player.renderer, and player.emitter expose the pipeline.
@@ -149,11 +148,11 @@ const player = new Watch.Player({
 ```
 
 Pass a signal from [`@moq/signals`](/lib/js/signals) for any control you want
-to change later, such as `muted` or `delay`. `Player` is the pipeline inside
+to change later, such as `audio.muted` or `delay`. `Player` is the pipeline inside
 `<moq-watch>`; its parts are exported for custom composition.
 
-To chart when each frame arrived against when it plays, open an `arrivals()`
-handle on a decoder. It yields every frame received while it is open, stamped
+To chart when each audio frame arrived against when it plays, open an
+`arrivals()` handle on the audio decoder. It yields every frame received while it is open, stamped
 when the frame came off the transport, and a gap wherever media after an earlier
 frame will never arrive (a latency skip, a hole):
 
@@ -174,7 +173,7 @@ last frame's timestamp, and it covers any pause the publisher declared.
 
 Unread frames queue on the handle, so keep reading and keep your own window.
 Leaving the loop or calling `arrivals.close()` stops observing and releases
-them; nothing is retained without an open handle. Video reports the rendition on screen.
+them; nothing is retained without an open handle.
 
 ## Buffered playback
 
@@ -189,8 +188,10 @@ response emitted in one burst with future timestamps, wants the opposite. Set
 
 Durations need a unit; a bare number is rejected. Audio holds the buffer as
 encoded frames, so a large one is cheap; video waits as decoded pictures, which
-hold decoder memory, so a long video buffer is not. `el.reset()` flushes and re-anchors at the
-next frame, which is how a producer interrupts an utterance.
+hold decoder memory, so a long video buffer is not. The first video frame shows
+as a poster at once, and playback starts once every enabled track has buffered
+the delay. `el.reset()` flushes and re-anchors at the next frame, which is how a
+producer interrupts an utterance.
 
 ## Strict CSP
 

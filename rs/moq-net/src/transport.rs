@@ -3,11 +3,14 @@
 //! Implement these traits for a transport, or wrap a backend at the application
 //! boundary. `moq-tokio`, `moq-wasm`, and `moq-uring` provide their own adapters, and
 //! [`memory`] links two peers in one process.
-//! The async helpers only drive the required poll methods. Thread-local transports
-//! stay supported; [`poll::Boxable`] adds native thread bounds for boxed drivers.
+//! The async helpers only drive the required poll methods. Sessions take a
+//! [`poll::Boxable`] transport, which adds native thread bounds; wrap a thread-local
+//! transport in a type that checks the thread on use (`moq-uring` has one).
 
 use std::time::Duration;
 
+#[cfg(feature = "async")]
+pub(crate) mod boxed;
 pub mod memory;
 
 /// A trait that is Send on native targets and empty on WASM.
@@ -162,11 +165,29 @@ pub trait Stats {
 	fn estimated_send_rate(&self) -> Option<u64> {
 		None
 	}
+
+	/// Total receive streams evicted because incomplete messages exhausted the receive window.
+	fn streams_evicted(&self) -> Option<u64> {
+		None
+	}
 }
 
 /// Default stats implementation that returns `None` for all metrics.
 pub struct StatsUnavailable;
 impl Stats for StatsUnavailable {}
+
+/// The smallest connection receive window a transport that leases may offer.
+///
+/// A session keeps each unit it is still assembling leased, and a unit larger than the
+/// window can never complete, so the window has to fit the largest one with its framing:
+/// a legacy announcement set, past any frame payload.
+pub const MIN_RECEIVE_WINDOW: u64 = {
+	// A type and a size prefix, each a varint of at most 8 bytes.
+	const PREFIXES: u64 = 16;
+	let message = <crate::lite::AnnounceInit<'static> as crate::lite::Message>::MAX_SIZE as u64 + PREFIXES;
+	let frame = crate::group::MAX_CACHE_BYTES;
+	if message > frame { message } else { frame }
+};
 
 /// The typed transport condition when no application code was received.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -179,6 +200,9 @@ pub enum CloseKind {
 	IdleTimeout,
 	/// This endpoint closed the connection locally.
 	Closed,
+	/// The transport evicted this stream: incomplete messages had spent the receive window,
+	/// and this stream ranked lowest.
+	Evicted,
 }
 
 /// A transport failure with optional session and stream application codes.
@@ -206,9 +230,10 @@ pub mod poll {
 	pub type BiStreams<S> = (<S as Session>::SendStream, <S as Session>::RecvStream);
 	use std::task::{Context, Poll, ready};
 
+	use std::collections::VecDeque;
+
 	use super::{Error, MaybeSend, MaybeSync, Stats};
-	use bytes::BytesMut;
-	use bytes::{Buf, BufMut, Bytes};
+	use bytes::{Buf, Bytes, BytesMut};
 
 	/// A cloneable transport session with independent progress on each handle.
 	///
@@ -217,12 +242,10 @@ pub mod poll {
 	/// operations release retained resources; shared resources must not be held
 	/// across a wait. Implementations register the supplied waker before Pending.
 	pub trait Session: Clone + 'static {
-		/// The outgoing stream type. Only the poll half is required, so a `!Send`
-		/// session can hang `!Send` streams off it.
+		/// The outgoing stream type.
 		type SendStream: SendStream;
 
-		/// The incoming stream type. Only the poll half is required, so a `!Send`
-		/// session can hang `!Send` streams off it.
+		/// The incoming stream type.
 		type RecvStream: RecvStream;
 
 		/// The error type for every operation on this session.
@@ -249,6 +272,18 @@ pub mod poll {
 			cx: &mut Context<'_>,
 			options: SendOptions<'_, <Self::SendStream as SendStream>::Group>,
 		) -> Poll<Result<BiStreams<Self>, Self::Error>>;
+
+		/// Open a request stream without waiting for stream credit.
+		///
+		/// `None` refuses the request before opening a stream. `Pending` means the stream
+		/// already has credit but its transport header is waiting for send capacity.
+		/// Native QUIC and qmux implement this admission check. Iroh retains its waiting
+		/// open behavior, and browser-backed sessions retain their browser's behavior.
+		fn poll_open_request(
+			&mut self,
+			cx: &mut Context<'_>,
+			options: SendOptions<'_, <Self::SendStream as SendStream>::Group>,
+		) -> Poll<Result<Option<BiStreams<Self>>, Self::Error>>;
 
 		/// Open a send group at `priority`, or `None` when the transport orders streams by
 		/// their own priority alone.
@@ -427,18 +462,17 @@ pub mod poll {
 	poll_future!(
 		/// A pending [`SendStream::closed`].
 		SendClosed, SendStream, poll_closed, Result<(), S::Error>);
-	poll_future!(
-		/// A pending [`RecvStream::closed`].
-		RecvClosed, RecvStream, poll_closed, Result<(), S::Error>);
 
-	/// A transport whose session, streams, and errors can be captured by the
-	/// boxed drivers (`Send` boxes on native): what the moq-transport path
-	/// requires until it too becomes named machines. Implemented automatically.
+	/// A transport that the async client and server can box:
+	/// the session, its streams, send groups, and errors are thread-safe on native.
+	/// Implemented automatically.
+	///
+	/// Boxing is what compiles the session code once per binary rather than once per
+	/// transport.
 	pub trait Boxable:
 		Session<
-			SendStream: MaybeSend + SendStream<Group: MaybeSend + MaybeSync>,
-			RecvStream: MaybeSend,
-			Error: MaybeSend,
+			SendStream: MaybeSend + MaybeSync + SendStream<Group: MaybeSend + MaybeSync>,
+			RecvStream: MaybeSend + MaybeSync,
 		> + MaybeSend
 		+ MaybeSync
 	{
@@ -446,9 +480,8 @@ pub mod poll {
 
 	impl<S> Boxable for S where
 		S: Session<
-				SendStream: MaybeSend + SendStream<Group: MaybeSend + MaybeSync>,
-				RecvStream: MaybeSend,
-				Error: MaybeSend,
+				SendStream: MaybeSend + MaybeSync + SendStream<Group: MaybeSend + MaybeSync>,
+				RecvStream: MaybeSend + MaybeSync,
 			> + MaybeSend
 			+ MaybeSync
 	{
@@ -656,149 +689,88 @@ pub mod poll {
 		}
 	}
 
-	/// An incoming stream with reads, stop codes, and closure notification.
+	/// An incoming stream, read through leases of the bytes its transport buffers.
+	///
+	/// Leased bytes stay in the transport, counted against its flow control, until
+	/// [`Lease::release`] returns the credit of those read, so an incomplete message holds
+	/// receive credit rather than memory of its own. When incomplete messages leave no credit for
+	/// any of them to finish, a transport that bounds them evicts the lowest
+	/// [priority](Self::set_priority) holder, whose next lease fails. A transport that returns
+	/// credit as it reads, adapted with [`Buffered`], is not bounded this way.
 	pub trait RecvStream: 'static {
 		/// The error type for every operation on this stream.
 		type Error: Error;
 
-		/// Poll to read some data into the provided slice.
+		/// The unreleased bytes borrowed from this stream.
+		type Lease<'a>: Lease
+		where
+			Self: 'a;
+
+		/// Poll until at least `want` bytes are leased, or the peer finished the stream with
+		/// fewer.
 		///
-		/// Returns the number of bytes read, or `None` once the peer has finished the
-		/// stream. An empty `dst` reads nothing and returns `Some(0)`: asking for no
-		/// bytes is not end of stream.
-		fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>>;
-
-		/// Poll to read some data into the provided buffer, advancing it by the number
-		/// of bytes read.
+		/// Reading the lease as a [`Buf`] moves past bytes for good, but they keep their
+		/// flow-control credit until [`Lease::release`]. Bytes not read stay for the next lease.
+		/// A `want` the stream's receive window can never hold is an error rather than a wait, and
+		/// a `want` of 0 never waits.
 		///
-		/// Override this to avoid a copy when the underlying transport already owns the
-		/// bytes as a [`Bytes`], which can be handed to [`BufMut::put`] directly.
-		fn poll_read_buf<B: BufMut>(
-			&mut self,
-			cx: &mut Context<'_>,
-			buf: &mut B,
-		) -> Poll<Result<Option<usize>, Self::Error>> {
-			// Cap the slice: it is zeroed on every poll, Pending included, and a
-			// read may be partial anyway.
-			let len = buf.chunk_mut().len().min(64 * 1024);
+		/// A lease may borrow the transport's connection state, so release it before
+		/// touching any other stream of the session.
+		fn poll_lease(&mut self, cx: &mut Context<'_>, want: usize) -> Poll<Result<Self::Lease<'_>, Self::Error>>;
 
-			// A destination with no room is not a closed stream. Collapsing the two
-			// would turn "buffer full" into "stream ended", which reads as truncation.
-			if len == 0 {
-				return Poll::Ready(Ok(Some(0)));
-			}
-
-			// `poll_read` is safe and may inspect its input, so initialize spare
-			// capacity before exposing it as a byte slice.
-			let chunk = buf.chunk_mut();
-			let dst = unsafe {
-				chunk.as_mut_ptr().write_bytes(0, len);
-				std::slice::from_raw_parts_mut(chunk.as_mut_ptr(), len)
-			};
-
-			let size = match ready!(self.poll_read(cx, dst))? {
-				Some(size) if size > 0 => size,
-				Some(_) => return Poll::Ready(Ok(Some(0))),
-				None => return Poll::Ready(Ok(None)),
-			};
-
-			assert!(size <= len, "transport read exceeded its destination");
-			unsafe { buf.advance_mut(size) };
-
-			Poll::Ready(Ok(Some(size)))
-		}
-
-		/// Poll for the next chunk of data, up to `max` bytes.
+		/// Rank this stream for eviction when incomplete messages exhaust the receive window.
 		///
-		/// Override this when the transport can hand over a [`Bytes`] it already owns;
-		/// the default allocates and copies.
-		fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
-			// As in `poll_read_buf`: asking for nothing is not end of stream.
-			if max == 0 {
-				return Poll::Ready(Ok(Some(Bytes::new())));
-			}
-
-			// Don't allocate too much. Override this to avoid the copy, or to use a
-			// larger per-poll buffer.
-			let capacity = max.min(8 * 1024);
-			let mut buf = BytesMut::zeroed(capacity);
-
-			let size = match ready!(self.poll_read(cx, &mut buf))? {
-				Some(size) if size > 0 => size,
-				Some(_) => return Poll::Ready(Ok(Some(Bytes::new()))),
-				None => return Poll::Ready(Ok(None)),
-			};
-
-			assert!(size <= capacity, "transport read exceeded its destination");
-			buf.truncate(size);
-
-			Poll::Ready(Ok(Some(buf.freeze())))
-		}
+		/// Higher keeps it longer, the convention of [`SendStream::set_priority`]. A stream
+		/// starts at 0, and ties evict the newest stream first. A transport without eviction
+		/// ignores it.
+		fn set_priority(&mut self, priority: i64);
 
 		/// Send a `STOP_SENDING` QUIC code, informing the peer that no more data will be
-		/// read.
+		/// read, and discard what is buffered.
 		///
 		/// An implementation MUST do this on Drop otherwise flow control will be leaked.
 		/// Call this method manually if you want to specify a code yourself.
 		fn stop(&mut self, code: u32);
 
-		/// Poll until the stream has been closed by either side.
+		/// Poll for the next chunk, up to `max` bytes, or `None` once the peer finished the
+		/// stream. Its credit returns as it is read.
 		///
-		/// This includes:
-		/// - We received a RESET_STREAM via [`SendStream::reset`]
-		/// - We sent a STOP_SENDING via [`stop`](Self::stop)
-		/// - We received a FIN via [`SendStream::finish`] and read all data.
-		fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>>;
-
-		/// Read some bytes into the slice, or `None` once the stream is finished.
-		fn read<'a>(&'a mut self, dst: &'a mut [u8]) -> Read<'a, Self> {
-			Read { stream: self, dst }
+		/// An empty `max` reads nothing and returns an empty chunk: asking for no bytes is
+		/// not end of stream.
+		fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
+			if max == 0 {
+				return Poll::Ready(Ok(Some(Bytes::new())));
+			}
+			let mut lease = ready!(self.poll_lease(cx, 1))?;
+			if !lease.has_remaining() {
+				return Poll::Ready(Ok(None));
+			}
+			let chunk = lease.copy_to_bytes(lease.chunk().len().min(max));
+			lease.release();
+			Poll::Ready(Ok(Some(chunk)))
 		}
 
-		/// Read some bytes into the buffer, advancing it, or `None` once finished.
-		fn read_buf<'a, B: BufMut>(&'a mut self, buf: &'a mut B) -> ReadBuf<'a, Self, B> {
-			ReadBuf { stream: self, buf }
-		}
-
-		/// Read the next chunk of data, up to `max` bytes, or `None` once finished.
+		/// Read the next chunk, up to `max` bytes, or `None` once finished.
 		fn read_chunk(&mut self, max: usize) -> ReadChunk<'_, Self> {
 			ReadChunk { stream: self, max }
 		}
-
-		/// Wait until the stream is closed by either side.
-		fn closed(&mut self) -> RecvClosed<'_, Self> {
-			RecvClosed(self)
-		}
 	}
 
-	/// A pending [`RecvStream::read`].
-	pub struct Read<'a, S: ?Sized> {
-		stream: &'a mut S,
-		dst: &'a mut [u8],
-	}
+	/// Unreleased bytes borrowed from a [`RecvStream`] by [`poll_lease`](RecvStream::poll_lease),
+	/// read as a [`Buf`].
+	///
+	/// Bytes read keep their credit until [`release`](Self::release), which is how a frame
+	/// reaches its consumer before the whole of it has arrived. Implementations override
+	/// [`Buf::copy_to_bytes`] to hand out bytes within one chunk without copying.
+	pub trait Lease: Buf {
+		/// The bytes not yet read, in order, one contiguous chunk at a time, without reading them.
+		fn chunks(&self) -> impl Iterator<Item = &[u8]>;
 
-	impl<S: RecvStream> Future for Read<'_, S> {
-		type Output = Result<Option<usize>, S::Error>;
+		/// Whether the peer finished the stream right after the leased bytes.
+		fn is_fin(&self) -> bool;
 
-		fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-			let this = &mut *self;
-			this.stream.poll_read(cx, this.dst)
-		}
-	}
-
-	/// A pending [`RecvStream::read_buf`].
-	pub struct ReadBuf<'a, S: ?Sized, B> {
-		stream: &'a mut S,
-		buf: &'a mut B,
-	}
-
-	impl<S: RecvStream, B: BufMut> Future for ReadBuf<'_, S, B> {
-		type Output = Result<Option<usize>, S::Error>;
-
-		fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-			let this = &mut *self;
-			this.stream.poll_read_buf(cx, this.buf)
-		}
+		/// Return the credit of every byte read so far, by this lease or an earlier one.
+		fn release(self);
 	}
 
 	/// A pending [`RecvStream::read_chunk`].
@@ -815,87 +787,298 @@ pub mod poll {
 			this.stream.poll_read_chunk(cx, this.max)
 		}
 	}
+
+	/// A receive stream read as plain chunks, whose flow-control credit returns as it reads.
+	///
+	/// [`Buffered`] turns one into a [`RecvStream`].
+	pub trait Chunks: 'static {
+		/// The error type for every operation on this stream.
+		type Error: Error;
+
+		/// Poll for the next chunk, up to `max` bytes, or `None` once the peer finished the
+		/// stream.
+		fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>>;
+
+		/// Send a `STOP_SENDING` code. See [`RecvStream::stop`].
+		///
+		/// An implementation MUST also do this on Drop: [`Buffered`] forwards an explicit stop
+		/// but leaves the drop to the wrapped stream.
+		fn stop(&mut self, code: u32);
+	}
+
+	/// Leases over a transport that cannot keep bytes unconsumed, buffering what it reads.
+	///
+	/// The transport returns credit as it reads, so incomplete messages are bounded by the
+	/// largest message each, not by its receive window, and nothing is evicted.
+	pub struct Buffered<S> {
+		inner: S,
+		chunks: VecDeque<Bytes>,
+		len: usize,
+		fin: bool,
+	}
+
+	impl<S> Buffered<S> {
+		/// Lease over `inner`.
+		pub fn new(inner: S) -> Self {
+			Self {
+				inner,
+				chunks: VecDeque::new(),
+				len: 0,
+				fin: false,
+			}
+		}
+
+		/// The wrapped stream.
+		pub fn get_ref(&self) -> &S {
+			&self.inner
+		}
+
+		/// The wrapped stream.
+		pub fn get_mut(&mut self) -> &mut S {
+			&mut self.inner
+		}
+	}
+
+	impl<S: Chunks> RecvStream for Buffered<S> {
+		type Error = S::Error;
+		type Lease<'a>
+			= BufferedLease<'a>
+		where
+			S: 'a;
+
+		fn poll_lease(&mut self, cx: &mut Context<'_>, want: usize) -> Poll<Result<BufferedLease<'_>, S::Error>> {
+			while self.len < want && !self.fin {
+				// Whatever the transport has in one piece: a transport handing over whole
+				// messages, like the memory one, keeps a large frame in a single chunk, so it
+				// reaches the consumer without a copy. Each read still ends at what has arrived.
+				match ready!(self.inner.poll_read_chunk(cx, usize::MAX))? {
+					Some(chunk) if chunk.is_empty() => {}
+					Some(chunk) => {
+						self.len += chunk.len();
+						self.chunks.push_back(chunk);
+					}
+					None => self.fin = true,
+				}
+			}
+			Poll::Ready(Ok(BufferedLease {
+				chunks: &mut self.chunks,
+				len: &mut self.len,
+				fin: self.fin,
+			}))
+		}
+
+		fn set_priority(&mut self, _priority: i64) {}
+
+		fn stop(&mut self, code: u32) {
+			self.chunks.clear();
+			self.len = 0;
+			self.inner.stop(code);
+		}
+	}
+
+	/// A [`Lease`] of a [`Buffered`] stream.
+	pub struct BufferedLease<'a> {
+		chunks: &'a mut VecDeque<Bytes>,
+		len: &'a mut usize,
+		fin: bool,
+	}
+
+	impl Buf for BufferedLease<'_> {
+		fn remaining(&self) -> usize {
+			*self.len
+		}
+
+		fn chunk(&self) -> &[u8] {
+			self.chunks.front().map_or(&[], |chunk| &chunk[..])
+		}
+
+		fn advance(&mut self, mut n: usize) {
+			assert!(n <= *self.len, "advanced {n} past {} leased bytes", *self.len);
+			*self.len -= n;
+			while n > 0 {
+				let front = self.chunks.front_mut().expect("counted above");
+				if front.len() > n {
+					front.advance(n);
+					return;
+				}
+				n -= front.len();
+				self.chunks.pop_front();
+			}
+		}
+
+		fn copy_to_bytes(&mut self, n: usize) -> Bytes {
+			assert!(n <= *self.len, "copied {n} of {} leased bytes", *self.len);
+			let Some(front) = self.chunks.front_mut().filter(|front| front.len() >= n) else {
+				// Spans chunks, so it needs a contiguous copy.
+				let mut bytes = BytesMut::with_capacity(n);
+				while bytes.len() < n {
+					let take = self.chunk().len().min(n - bytes.len());
+					bytes.extend_from_slice(&self.chunk()[..take]);
+					self.advance(take);
+				}
+				return bytes.freeze();
+			};
+			*self.len -= n;
+			match front.len() > n {
+				true => front.split_to(n),
+				false => self.chunks.pop_front().expect("front exists"),
+			}
+		}
+	}
+
+	impl Lease for BufferedLease<'_> {
+		fn chunks(&self) -> impl Iterator<Item = &[u8]> {
+			self.chunks.iter().map(|chunk| &chunk[..])
+		}
+
+		fn is_fin(&self) -> bool {
+			self.fin
+		}
+
+		// The transport returned the credit as it read.
+		fn release(self) {}
+	}
 }
 
 #[cfg(test)]
 mod tests {
-	use super::poll::RecvStream as _;
-	use bytes::{Bytes, BytesMut};
+	use super::poll::{Buffered, Chunks, Lease as _, RecvStream as _};
+	use bytes::{Buf, Bytes};
+	use std::collections::VecDeque;
 	use std::task::{Context, Poll};
-	struct Read;
-	impl super::poll::RecvStream for Read {
-		type Error = crate::Error;
-		fn poll_read(&mut self, _: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
-			// A safe transport may read its destination before overwriting it.
-			assert!(dst.iter().all(|byte| *byte == 0));
-			let size = dst.len().min(2);
-			dst[..size].copy_from_slice(&b"hi"[..size]);
-			Poll::Ready(Ok(Some(size)))
-		}
-		fn stop(&mut self, _: u32) {}
-		fn poll_closed(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-			Poll::Ready(Ok(()))
-		}
-	}
-	#[test]
-	fn default_reads_initialize_spare_capacity_and_respect_limits() {
-		let mut read = Read;
-		let mut cx = Context::from_waker(std::task::Waker::noop());
-		let mut buf = BytesMut::with_capacity(8);
-		assert!(matches!(
-			read.poll_read_buf(&mut cx, &mut buf),
-			Poll::Ready(Ok(Some(2)))
-		));
-		assert_eq!(buf, b"hi"[..]);
-		let Poll::Ready(Ok(Some(chunk))) = read.poll_read_chunk(&mut cx, 1) else {
-			panic!("missing chunk")
-		};
-		assert_eq!(chunk, Bytes::from_static(b"h"));
-		let Poll::Ready(Ok(Some(chunk))) = read.poll_read_chunk(&mut cx, 0) else {
-			panic!("missing empty chunk")
-		};
-		assert!(chunk.is_empty());
-		let mut empty: &mut [u8] = &mut [];
-		assert!(matches!(
-			read.poll_read_buf(&mut cx, &mut empty),
-			Poll::Ready(Ok(Some(0)))
-		));
+
+	/// Hands back one queued chunk per poll, then blocks, or finishes once told to.
+	#[derive(Default)]
+	struct Queue {
+		chunks: VecDeque<&'static [u8]>,
+		fin: bool,
+		stopped: Option<u32>,
 	}
 
-	#[test]
-	fn default_read_buf_caps_the_initialized_slice_on_ready_and_pending() {
-		struct ReadSpan(bool);
-		impl super::poll::RecvStream for ReadSpan {
-			type Error = crate::Error;
-			fn poll_read(&mut self, _: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
-				assert_eq!(
-					dst.len(),
-					64 * 1024,
-					"one poll must not initialize the whole spare capacity"
-				);
-				assert!(dst.iter().all(|byte| *byte == 0));
-				if self.0 {
-					return Poll::Pending;
+	impl Chunks for Queue {
+		type Error = crate::Error;
+		fn poll_read_chunk(&mut self, _: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
+			match self.chunks.pop_front() {
+				Some(chunk) => {
+					let n = chunk.len().min(max);
+					if n < chunk.len() {
+						self.chunks.push_front(&chunk[n..]);
+					}
+					Poll::Ready(Ok(Some(Bytes::from_static(&chunk[..n]))))
 				}
-				dst.fill(7);
-				Poll::Ready(Ok(Some(dst.len())))
-			}
-			fn stop(&mut self, _: u32) {}
-			fn poll_closed(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-				Poll::Pending
+				None if self.fin => Poll::Ready(Ok(None)),
+				None => Poll::Pending,
 			}
 		}
-		for pending in [false, true] {
-			let mut buf = BytesMut::with_capacity(256 * 1024);
+		fn stop(&mut self, code: u32) {
+			self.stopped = Some(code);
+		}
+	}
+
+	fn buffered(chunks: &[&'static [u8]], fin: bool) -> Buffered<Queue> {
+		Buffered::new(Queue {
+			chunks: chunks.iter().copied().collect(),
+			fin,
+			stopped: None,
+		})
+	}
+
+	/// A lease waits for `want` across chunks, and dropping it keeps every unread byte for the next.
+	#[test]
+	fn lease_waits_for_want_and_drop_keeps_unread() {
+		let mut cx = Context::from_waker(std::task::Waker::noop());
+		let mut stream = buffered(&[b"ab", b"cd"], false);
+
+		{
+			let Poll::Ready(Ok(lease)) = stream.poll_lease(&mut cx, 3) else {
+				panic!("both chunks were ready")
+			};
+			assert_eq!(lease.remaining(), 4);
+			assert_eq!(lease.chunk(), b"ab");
+			assert_eq!(lease.chunks().collect::<Vec<_>>(), [b"ab", b"cd"]);
+		}
+
+		assert!(stream.poll_lease(&mut cx, 5).is_pending(), "nothing more arrived");
+		let Poll::Ready(Ok(lease)) = stream.poll_lease(&mut cx, 1) else {
+			panic!("the dropped lease's bytes are still there")
+		};
+		let mut lease = lease;
+		assert_eq!(lease.remaining(), 4);
+		lease.advance(3);
+		lease.release();
+
+		let Poll::Ready(Ok(lease)) = stream.poll_lease(&mut cx, 0) else {
+			panic!("want 0 never waits")
+		};
+		assert_eq!(lease.chunk(), b"d");
+		assert!(!lease.is_fin());
+	}
+
+	/// Bytes within a chunk are handed out without a copy, bytes across chunks are joined, and a
+	/// finished stream leases what is left with its FIN.
+	#[test]
+	fn copy_to_bytes_and_fin_ends_short() {
+		let mut cx = Context::from_waker(std::task::Waker::noop());
+		let mut stream = buffered(&[b"abc", b"de"], true);
+
+		let Poll::Ready(Ok(mut lease)) = stream.poll_lease(&mut cx, 10) else {
+			panic!("a finished stream leases short")
+		};
+		assert!(lease.is_fin());
+		assert_eq!(lease.copy_to_bytes(2), Bytes::from_static(b"ab"));
+		assert_eq!(
+			lease.copy_to_bytes(2),
+			Bytes::from_static(b"cd"),
+			"joined across chunks"
+		);
+		assert_eq!(lease.remaining(), 1);
+		lease.release();
+
+		assert_eq!(
+			stream.read_chunk(10).now_or_never_ready(),
+			Some(Bytes::from_static(b"e"))
+		);
+		assert_eq!(stream.read_chunk(10).now_or_never_ready(), None);
+		assert_eq!(stream.read_chunk(0).now_or_never_ready(), Some(Bytes::new()));
+	}
+
+	/// A large chunk the transport hands over whole reaches the reader as that same
+	/// allocation, so a frame from the memory transport is never copied.
+	#[test]
+	fn a_large_chunk_is_leased_whole() {
+		static FRAME: [u8; 1 << 20] = [7; 1 << 20];
+		let mut cx = Context::from_waker(std::task::Waker::noop());
+		let mut stream = buffered(&[&FRAME], true);
+
+		let Poll::Ready(Ok(mut lease)) = stream.poll_lease(&mut cx, 1) else {
+			panic!("the chunk was ready")
+		};
+		let chunk = lease.copy_to_bytes(FRAME.len());
+		assert_eq!(chunk.len(), FRAME.len());
+		assert_eq!(chunk.as_ptr(), FRAME.as_ptr(), "the chunk was not copied");
+	}
+
+	/// Stopping discards what was buffered and stops the transport.
+	#[test]
+	fn stop_discards_the_buffer() {
+		let mut cx = Context::from_waker(std::task::Waker::noop());
+		let mut stream = buffered(&[b"abc"], false);
+		assert!(stream.poll_lease(&mut cx, 1).is_ready());
+		stream.stop(7);
+		assert_eq!(stream.get_ref().stopped, Some(7));
+		assert!(stream.poll_lease(&mut cx, 1).is_pending());
+	}
+
+	trait NowOrNever {
+		fn now_or_never_ready(self) -> Option<Bytes>;
+	}
+
+	impl<F: Future<Output = Result<Option<Bytes>, crate::Error>>> NowOrNever for F {
+		fn now_or_never_ready(self) -> Option<Bytes> {
 			let mut cx = Context::from_waker(std::task::Waker::noop());
-			let result = ReadSpan(pending).poll_read_buf(&mut cx, &mut buf);
-			if pending {
-				assert!(result.is_pending());
-				assert!(buf.is_empty());
-			} else {
-				assert!(matches!(result, Poll::Ready(Ok(Some(65536)))));
-				assert_eq!(buf.len(), 64 * 1024);
-				assert!(buf.iter().all(|byte| *byte == 7));
+			match std::pin::pin!(self).poll(&mut cx) {
+				Poll::Ready(res) => res.unwrap(),
+				Poll::Pending => panic!("pending"),
 			}
 		}
 	}

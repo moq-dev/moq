@@ -13,6 +13,7 @@ import {
 	error,
 	ProtocolViolation,
 	reason,
+	SessionCode,
 	StreamCode,
 	Stream as StreamError,
 	sessionCause,
@@ -29,6 +30,7 @@ import {
 	scopeHead,
 	scopeOverlaps,
 } from "../internal.ts";
+import type { Lister } from "../listing.ts";
 import * as Path from "../path.ts";
 import { type Cursor, Reader, type Stream } from "../stream.ts";
 import { Tail } from "../tail.ts";
@@ -44,6 +46,7 @@ import { DuplicateTrackAlias, RetiredTrackAlias, TrackAliases } from "./aliases.
 import * as Cluster from "./cluster.ts";
 import { ObjectDatagram } from "./datagram.ts";
 import { requestReason, toRequestCode } from "./error.ts";
+import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
 import {
 	decodeObjectTime,
@@ -54,7 +57,7 @@ import {
 	ObjectIdGap,
 } from "./object.ts";
 import { Parameters } from "./parameters.ts";
-import { fromWire, toWire } from "./priority.ts";
+import { DEFAULT_WIRE, fromWire, toWire } from "./priority.ts";
 import { type Publish, PublishDone, PublishDoneStatus, publishDoneClean } from "./publish.ts";
 import {
 	type AdvertParams,
@@ -100,6 +103,8 @@ type Subscription = {
 // before the setup promise settles.
 type SubscribeSetupState = {
 	stream?: RequestStream;
+	// The accepted subscription, which a registered alias names.
+	subscription?: Subscription;
 	registeredAlias?: bigint;
 	/**
 	 * Whether the caller has given up. Setup checks this once the stream exists so a request
@@ -462,11 +467,11 @@ export class Subscriber {
 		}
 	}
 
-	// The peer broke the protocol: close with the violation's code before the session's own
-	// close, which would send a clean one, as the connection does for its own violations.
-	#violated(err: ProtocolViolation) {
+	// Close with this code before the session's own close, which would send a clean one, as
+	// the connection does for its own violations.
+	#fail(code: SessionCode, reason: string) {
 		try {
-			this.#quic?.close({ closeCode: err.code, reason: err.message });
+			this.#quic?.close({ closeCode: code, reason });
 		} catch {
 			// Already closed.
 		}
@@ -485,10 +490,11 @@ export class Subscriber {
 		if (legacy && prefix.length === 0 && this.#solicit === undefined) {
 			// Nothing marks where what it tells unasked starts or ends, so there is nothing to wait for.
 			announced.synced();
-			// No request stream ends this wait, so the session's end has to.
+			// No request stream ends this wait, so the session's end has to. `race`, so a
+			// consumer that ends first leaves no reaction on the session's close behind.
 			const ends: PromiseLike<unknown>[] = [announced.closed];
-			if (this.#quic) ends.push(this.#quic.closed.catch(() => undefined));
-			await Promise.race(ends);
+			if (this.#quic) ends.push(this.#quic.closed);
+			await race(ends).catch(() => undefined);
 			return;
 		}
 
@@ -545,17 +551,11 @@ export class Subscriber {
 					version === Version.DRAFT_16 ||
 					version === Version.DRAFT_17
 				) {
-					await request.writer.u53(SubscribeNamespaceLegacy.id);
-					await new SubscribeNamespaceLegacy({ namespace: prefix, requestId, hidden }).encode(
-						request.writer,
-						version,
-					);
+					const msg = new SubscribeNamespaceLegacy({ namespace: prefix, requestId, hidden });
+					await Message.write(request.writer, SubscribeNamespaceLegacy.id, msg, version);
 				} else {
-					await request.writer.u53(SubscribeNamespace.id);
-					await new SubscribeNamespace({ namespace: prefix, requestId, hidden }).encode(
-						request.writer,
-						version,
-					);
+					const msg = new SubscribeNamespace({ namespace: prefix, requestId, hidden });
+					await Message.write(request.writer, SubscribeNamespace.id, msg, version);
 				}
 				console.debug(`subscribe_namespace written: requestId=${requestId}`);
 
@@ -563,9 +563,8 @@ export class Subscriber {
 					// For v14/v15: send UnsubscribeNamespace before closing
 					if (version === Version.DRAFT_14 || version === Version.DRAFT_15) {
 						try {
-							await request.writer.u53(UnsubscribeNamespace.id);
-							const unsub = new UnsubscribeNamespace({ requestId });
-							await unsub.encode(request.writer, version);
+							const unsub = new UnsubscribeNamespace({ prefix, requestId });
+							await Message.write(request.writer, UnsubscribeNamespace.id, unsub, version);
 						} catch {
 							// Stream might already be closed
 						}
@@ -726,6 +725,8 @@ export class Subscriber {
 	#createConsume(path: Path.Valid, instance: ReturnType<BroadcastCache["instance"]>): broadcast.Consumer {
 		// moq-transport resolves metadata through SUBSCRIBE and has no one-shot group fetch here.
 		const consumer = new ConsumeBroadcast();
+		// Registered before anyone can list the broadcast, so no reader syncs on an empty answer.
+		void this.#refuseListing(wireOf(consumer).lister());
 		void (async () => {
 			for (;;) {
 				const request = await wireOf(consumer).requested();
@@ -736,6 +737,22 @@ export class Subscriber {
 			}
 		})();
 		return this.#consumes.insert(path, instance, consumer);
+	}
+
+	// moq-transport lists no tracks here: refuse each listing until the broadcast closes, since an
+	// empty answer would claim the peer lists nothing.
+	async #refuseListing(lister: Lister): Promise<void> {
+		try {
+			for (;;) {
+				while (!lister.used.peek()) {
+					if (lister.ended.peek() !== undefined) return;
+					await race([Signal.race(lister.used, lister.ended)]);
+				}
+				lister.abort(new Error("track listing requires moq-lite-07 or newer"));
+			}
+		} finally {
+			lister.close();
+		}
 	}
 
 	// The adapter is gone. If the transport has already closed, that close is the
@@ -793,26 +810,24 @@ export class Subscriber {
 
 		// Keep the request pending until SUBSCRIBE_OK supplies immutable track metadata.
 		// Group streams already wait on the alias, so early data stays behind this response.
-		const producer = hooks.pendingTrackProducer(request);
-		const subscription: Subscription = { track: producer, tail: new Tail() };
-
 		// Open the stream and wait for SUBSCRIBE_OK under a timeout. State
 		// flows back via `state` so the timeout path can clean up the stream
 		// and any registration if setup eventually finishes.
 		const state: SubscribeSetupState = {};
 		const deadline = new Deadline();
-		const setup = this.#openSubscribe(state, broadcast, request, subscription, requestId, deadline, epoch);
+		const setup = this.#openSubscribe(state, broadcast, request, requestId, deadline, epoch);
 
 		// The publisher can be serving before it answers, so waiting only on the response
 		// would miss the local side going away and leave it serving a track nobody reads.
 		// Demand returning before we commit is not abandonment, matching the serving loop.
-		const demand = producer.demand();
+		const demand = request.demand();
 		const waitAbandoned = async (): Promise<null> => {
 			await demandAbandoned(demand);
 			return null;
 		};
 
 		let stream: RequestStream;
+		let subscription: Subscription;
 		let trackAlias: bigint;
 		// The SUBSCRIBER_PRIORITY the request went out with.
 		let priority: number;
@@ -825,6 +840,7 @@ export class Subscriber {
 				const result = await untilAborted(race([accepted, waitAbandoned()]), valid);
 				if (result !== null) {
 					stream = result.stream;
+					subscription = result.subscription;
 					trackAlias = result.alias;
 					priority = result.priority;
 					maxAge = result.maxAge;
@@ -850,7 +866,11 @@ export class Subscriber {
 			const cleanup = async (afterSetup: boolean) => {
 				state.cancelled = true;
 
-				if (state.registeredAlias !== undefined && this.#aliases.retire(state.registeredAlias, subscription)) {
+				if (
+					state.registeredAlias !== undefined &&
+					state.subscription &&
+					this.#aliases.retire(state.registeredAlias, state.subscription)
+				) {
 					this.#timescales.delete(state.registeredAlias);
 				}
 
@@ -884,6 +904,7 @@ export class Subscriber {
 			return;
 		}
 
+		const producer = subscription.track;
 		let disposeGrant: Dispose | undefined;
 		try {
 			// Which terminal fired decides whether we owe the publisher a cancellation, so
@@ -953,7 +974,8 @@ export class Subscriber {
 		} catch (err) {
 			stream.abort(err);
 			const e = await sessionCause(this.#quic, err);
-			producer.close(this.#localClose ? undefined : e);
+			if (this.#localClose) hooks.releaseTrack(producer);
+			else producer.close(e);
 			console.warn(
 				`subscribe error: id=${requestId} broadcast=${broadcast} track=${request.name} error=${reason(e)}`,
 			);
@@ -1042,10 +1064,12 @@ export class Subscriber {
 		void stopped.then(() => stop.abort());
 
 		for (;;) {
+			// With no subscriber left there is nothing to follow: the subscription is ending, or
+			// keeps what it last asked for until one returns, as on lite and in Rust.
 			const subscription = producer.subscription.peek();
 			const wanted = toWire(subscription?.priority ?? 0);
-			const wantedMaxAge = this.#maxAge ? (subscription?.maxDelay ?? Number.MAX_SAFE_INTEGER) : undefined;
-			if ((wanted === sent && wantedMaxAge === sentMaxAge) || unanswered.peek() > 0) {
+			const wantedMaxAge = this.#maxAge ? subscription?.maxDelay : undefined;
+			if (!subscription || (wanted === sent && wantedMaxAge === sentMaxAge) || unanswered.peek() > 0) {
 				const disposes: Dispose[] = [];
 				const wake = new Promise<void>((resolve) => {
 					disposes.push(
@@ -1073,11 +1097,24 @@ export class Subscriber {
 			const update = legacy
 				? new SubscribeUpdate({ requestId, ownRequestId: own, parameters })
 				: new SubscribeUpdate({ requestId: own, parameters });
+			let message: Uint8Array;
+			try {
+				message = await Message.frame(stream.writer.version, SubscribeUpdate.id, update, version);
+			} catch (err) {
+				// Nothing reached the wire, but the track can no longer follow its subscribers.
+				console.warn(`subscribe update failed: id=${requestId} error=${reason(error(err))}`);
+				producer.close(error(err));
+				// Drafts 14 and 15 require the next request ID, so one spent and never sent would
+				// stall every later request: as in Rust, that ends the session.
+				if (version === Version.DRAFT_14 || version === Version.DRAFT_15) {
+					this.#fail(SessionCode.Internal, "subscribe update failed to encode");
+				}
+				return;
+			}
 			// Counted before writing: the answer can be read before the write's promise resolves.
 			if (answered) unanswered.update((count) => count + 1);
 			try {
-				await stream.writer.u53(SubscribeUpdate.id);
-				await update.encode(stream.writer, version);
+				await stream.writer.write(message);
 			} catch {
 				// The publisher stopped reading; its responses decide how the track ends.
 				return;
@@ -1102,8 +1139,7 @@ export class Subscriber {
 		if (version !== Version.DRAFT_14 && version !== Version.DRAFT_15 && version !== Version.DRAFT_16) return;
 
 		try {
-			await stream.writer.u53(Unsubscribe.id);
-			await new Unsubscribe({ requestId }).encode(stream.writer, version);
+			await Message.write(stream.writer, Unsubscribe.id, new Unsubscribe({ requestId }), version);
 		} catch {
 			// The stream may already be gone; there is nothing further to tell the peer.
 		}
@@ -1117,11 +1153,16 @@ export class Subscriber {
 		state: SubscribeSetupState,
 		broadcast: Path.Valid,
 		request: track.Request,
-		subscription: Subscription,
 		requestId: bigint,
 		deadline: Deadline,
 		epoch: Epoch.Valid | undefined,
-	): Promise<{ stream: RequestStream; alias: bigint; priority: number; maxAge?: number }> {
+	): Promise<{
+		stream: RequestStream;
+		subscription: Subscription;
+		alias: bigint;
+		priority: number;
+		maxAge?: number;
+	}> {
 		const version = this.#session.version;
 
 		const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16;
@@ -1141,7 +1182,6 @@ export class Subscriber {
 		// won the await above. No response data is released from the canceled setup.
 		if (state.cancelled && !legacy) throw new Error("subscribe cancelled before it was sent");
 
-		await state.stream.writer.u53(Subscribe.id);
 		const msg = new Subscribe({
 			requestId,
 			trackNamespace: broadcast,
@@ -1160,7 +1200,7 @@ export class Subscriber {
 			filter: joinFilter(version),
 			epoch,
 		});
-		await msg.encode(state.stream.writer, version);
+		await Message.write(state.stream.writer, Subscribe.id, msg, version);
 		state.sent = true;
 
 		// The caller may have given up while that write was in flight. It deliberately left
@@ -1194,31 +1234,39 @@ export class Subscriber {
 		if (maxCacheDuration !== undefined && maxCacheDuration > BigInt(Number.MAX_SAFE_INTEGER)) {
 			throw new RangeError("max cache duration exceeds safe milliseconds");
 		}
-		request.accept({
+		if (ok.largest && ok.largest.groupId > BigInt(Number.MAX_SAFE_INTEGER)) {
+			throw new RangeError("largest group exceeds safe integers");
+		}
+		// Staged until the answer is written in below, so no reader sees the track before its
+		// Largest and start.
+		const staged = request.stage({
 			// No TIMESCALE (always so on drafts 14-16, which can't carry it) means no timeline,
 			// and the track must not claim one when served onward.
 			timescale: ok.properties.timescale,
-			priority: fromWire(ok.properties.priority ?? 128),
+			// Drafts 14 and 15 carry only per-subgroup priorities, which the model does not keep,
+			// so they get the later drafts' default too.
+			priority: fromWire(ok.properties.priority ?? DEFAULT_WIRE),
 			maxAge: maxCacheDuration === undefined ? undefined : Milli(Number(maxCacheDuration)),
 			// A moq-transport peer may stamp arrival times, and nothing on the wire says it didn't.
-			unchecked: ok.properties.timescale != null,
+			ietf: version,
 		});
-		if (ok.largest && ok.largest.groupId > BigInt(Number.MAX_SAFE_INTEGER)) {
-			throw new RangeError("largest group exceeds safe integers");
+		const producer = staged.producer;
+		const subscription: Subscription = { track: producer, tail: new Tail() };
+		state.subscription = subscription;
+		if (ok.largest) {
+			// Object IDs can start past zero or skip, while readers see frame ordinals, so only
+			// the group carries over: its first frame is the edge a reader can count on.
+			hooks.reportedLargest(producer, { group: Number(ok.largest.groupId), frame: 0 });
 		}
 		// The live join starts at the publisher's edge, whatever floor the demand asked for.
 		// With no Largest it skips nothing, so every group is owed: a lower one's stream may
 		// still arrive after a higher one's.
 		const groups = request.subscription.groups;
-		hooks.startTrack(subscription.track, {
+		hooks.startTrack(producer, {
 			start: ok.largest ? Number(ok.largest.groupId) : 0,
 			requested: groups?.start === undefined ? undefined : groupBounds(groups).start,
 		});
-		if (ok.largest) {
-			// Object IDs can start past zero or skip, while readers see frame ordinals, so only
-			// the group carries over: its first frame is the edge a reader can count on.
-			hooks.reportedLargest(subscription.track, { group: Number(ok.largest.groupId), frame: 0 });
-		}
+		staged.commit();
 
 		try {
 			this.#aliases.set(ok.trackAlias, subscription, { broadcast, name: request.name, epoch });
@@ -1234,7 +1282,13 @@ export class Subscriber {
 			throw err;
 		}
 		state.registeredAlias = ok.trackAlias;
-		return { stream: state.stream, alias: ok.trackAlias, priority: msg.subscriberPriority, maxAge: msg.maxAge };
+		return {
+			stream: state.stream,
+			subscription,
+			alias: ok.trackAlias,
+			priority: msg.subscriberPriority,
+			maxAge: msg.maxAge,
+		};
 	}
 
 	/**
@@ -1302,15 +1356,13 @@ export class Subscriber {
 			// because consumers may trigger Subscribe writes that would
 			// interleave with our OK on the control stream.
 			if (version === Version.DRAFT_14) {
-				await request.writer.u53(PublishNamespaceOk.id);
 				const ok = new PublishNamespaceOk({ requestId: msg.requestId });
-				await ok.encode(request.writer, version);
+				await Message.write(request.writer, PublishNamespaceOk.id, ok, version);
 			} else {
-				await request.writer.u53(RequestOk.id);
 				const ok = new RequestOk({
 					requestId: version === Version.DRAFT_15 || version === Version.DRAFT_16 ? msg.requestId : undefined,
 				});
-				await ok.encode(request.writer, version);
+				await Message.write(request.writer, RequestOk.id, ok, version);
 			}
 
 			// Only now is the advertisement ours to announce, for the reason above: a
@@ -1376,12 +1428,12 @@ export class Subscriber {
 					});
 					// Draft-16's advertisement outlives its stream, so withdraw it explicitly.
 					if (keyed) {
-						await request.writer.u53(PublishNamespaceCancel.id);
-						await new PublishNamespaceCancel({
+						const cancel = new PublishNamespaceCancel({
 							requestId: msg.requestId,
 							errorCode: toRequestCode("malformed_auth_token", "publish_namespace", version),
 							reasonPhrase: err.message,
-						}).encode(request.writer, version);
+						});
+						await Message.write(request.writer, PublishNamespaceCancel.id, cancel, version);
 					}
 					request.close();
 					break;
@@ -1419,11 +1471,8 @@ export class Subscriber {
 				// Nothing here can fail to apply, so every update is acknowledged. A leaf
 				// routes nothing, so a repricing changes nothing it holds; consumers still
 				// hear the new route so a forwarder can reprice.
-				await request.writer.u53(RequestOk.id);
-				await new RequestOk({ requestId: keyed ? update.requestId : undefined }).encode(
-					request.writer,
-					version,
-				);
+				const ok = new RequestOk({ requestId: keyed ? update.requestId : undefined });
+				await Message.write(request.writer, RequestOk.id, ok, version);
 			}
 		} finally {
 			if (legacy) this.#legacyRequests.delete(path);
@@ -1475,7 +1524,7 @@ export class Subscriber {
 			// The control message establishing this alias can arrive after the data stream.
 			subscription = await this.#aliases.get(group.trackAlias);
 		} catch (err: unknown) {
-			if (err instanceof ProtocolViolation) this.#violated(err);
+			if (err instanceof ProtocolViolation) this.#fail(err.code, err.message);
 			const e = await sessionCause(this.#quic, err);
 			// Ours: we cancelled the subscription and the publisher has not stopped yet.
 			// Anything else on this alias is the publisher sending data for a track it never
@@ -1573,7 +1622,7 @@ export class Subscriber {
 			// A group with no objects still exists.
 			open().close();
 		} catch (err: unknown) {
-			if (err instanceof ProtocolViolation) this.#violated(err);
+			if (err instanceof ProtocolViolation) this.#fail(err.code, err.message);
 			const e = await sessionCause(this.#quic, err);
 			// The compact form names the subgroup by its first Object ID, so a nonzero one is
 			// subgroup N: stop the stream before any group exists for it.
@@ -1713,15 +1762,13 @@ export class Subscriber {
 
 /**
  * A broadcast consumed from a moq-transport session. Track info is resolved by the
- * subscribe path (the inherited `resolveTrackInfo`), but the protocol has no one-shot
- * group fetch, so `track.Consumer.fetchGroup()` is rejected.
+ * subscribe path (the inherited `resolveTrackInfo`), but this client has no one-shot
+ * group fetch, so the wire offers none and `track.Consumer.fetchGroup()` is rejected.
  */
 class ConsumeBroadcast extends broadcast.Consumer {
 	constructor(state?: never) {
 		super(state);
-		overrideBroadcastWire(this, {
-			fetchGroup: () => Promise.reject(new Error("fetch group is not supported for moq-transport")),
-		});
+		overrideBroadcastWire(this, { fetchGroup: undefined });
 	}
 
 	// Preserve the subclass when the consume cache shares this broadcast across callers.

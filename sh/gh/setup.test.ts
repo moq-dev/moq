@@ -31,8 +31,16 @@ for (const name of ["check"]) {
 		const setup = job.steps.slice(scopeIndex + 1);
 		expect(setup.some((step) => step.uses === "./.github/actions/nix")).toBe(true);
 		expect(setup.some((step) => step.uses === "./.github/actions/rust-cache")).toBe(true);
-		expect(setup.at(-1)?.name).toBe(job.name);
-		for (const step of setup) {
+		expect(setup.filter((step) => step.run).at(-1)?.name).toBe(job.name);
+		const checkIndex = setup.findIndex((step) => step.name === job.name);
+		for (const [index, step] of setup.entries()) {
+			if (step.uses?.startsWith("actions/upload-artifact@")) {
+				expect(index).toBeGreaterThan(checkIndex);
+				expect(step.if?.replace(/^\$\{\{\s*|\s*\}\}$/g, "")).toBe(
+					"!cancelled() && steps.scope.outputs.rust == 'true'",
+				);
+				continue;
+			}
 			const output = step.uses === "./.github/actions/rust-cache" ? "rust" : "needed";
 			const hosted = step.uses === "./.github/actions/nix" ? " && runner.environment != 'self-hosted'" : "";
 			expect(step.if).toBe(`steps.scope.outputs.${output} == 'true'${hosted}`);
@@ -85,4 +93,29 @@ test("one job runs one CI dispatch with one checkout and cache restore", () => {
 	expect(steps.filter((step) => step.uses === "./.github/actions/nix")).toHaveLength(1);
 	expect(steps.filter((step) => step.uses === "./.github/actions/rust-cache")).toHaveLength(1);
 	expect(steps.filter((step) => step.run?.includes("nix develop"))).toHaveLength(1);
+});
+
+test("nightly fuzzing restores and saves minimized target-specific corpora", async () => {
+	const nightly = Bun.YAML.parse(await Bun.file(".github/workflows/nightly.yml").text());
+	const steps = nightly.jobs.fuzz.steps;
+	const restore = steps.findIndex((step: Step) => step.uses?.startsWith("actions/cache/restore@"));
+	const run = steps.findIndex((step: Step) => step.name === "Fuzz");
+	const minimize = steps.findIndex((step: Step) => step.name === "Minimize corpus");
+	const save = steps.findIndex((step: Step) => step.uses?.startsWith("actions/cache/save@"));
+	expect(restore).toBeGreaterThan(0);
+	expect(run).toBeGreaterThan(restore);
+	expect(minimize).toBeGreaterThan(run);
+	expect(save).toBeGreaterThan(minimize);
+	const cached = steps[restore].with;
+	expect(cached.path).toBe("rs/*/fuzz/corpus/${{ matrix.target }}");
+	expect(cached.key).toContain("${{ matrix.target }}");
+	expect(cached.key).toContain("${{ github.run_id }}-${{ github.run_attempt }}");
+	expect(cached.key).toStartWith(cached["restore-keys"].trim());
+	expect(steps[save].with.path).toBe(cached.path);
+	expect(steps[save].with.key).toBe(cached.key);
+	// Default success guards preserve the last healthy corpus after a crash or failed minimization.
+	expect(steps[minimize].if).toBeUndefined();
+	expect(steps[save].if).toBeUndefined();
+	expect(steps[minimize].run).toBe("nix develop --command just rs fuzz --minimize ${{ matrix.target }}");
+	expect(steps.find((step: Step) => step.name === "Preserve failure inputs").if).toBe("${{ failure() }}");
 });

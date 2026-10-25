@@ -4,9 +4,8 @@
 
 Seven scheduled nightlies on `main` after the estimator began capping how much
 weight one observation takes show the AAC `bursty` browser rows discarding
-about as much audio a minute as the Opus `bursty` rows, on both rings, and
-the Opus `near-zero` `isolated` row holding the same 60 ms target as the
-`plain` row with no underrun episodes. `test/audio-quality/budgets.json`
+about as much audio a minute as the Opus `bursty` rows, and the Opus
+`near-zero` row holding a 60 ms target with no underrun episodes. `test/audio-quality/budgets.json`
 carries every browser row's ceilings re-measured from them.
 
 ## Plan
@@ -14,15 +13,25 @@ carries every browser row's ceilings re-measured from them.
 Waits on the nightlies: check the `audio-quality-run` artifacts of the
 scheduled Nightly runs on `main` (`gh run download <id> -n audio-quality-run`)
 once seven have run since the change merged. Never dispatch the nightly by
-hand. Re-measure by the rule in the budgets note, and drop the note's sentences
-that budget the AAC bursty discards against Opus's and the isolated row's
-one-second drops as measured.
+hand. Re-measure by the rule in the budgets note, and drop the note's sentence
+that budgets the AAC bursty discards against Opus's as measured. Nightlies
+from before the one-ring removal also carry `-isolated` rows; grade only the
+`-plain` rows, which are the browser rows now.
 
 Decided 2026-10-22 (maintainer): the Opus near-zero budgets quest folded in
 here, so one pass over the same seven nightlies covers both. The cap
 ([#6164](https://github.com/moq-dev/moq/pull/6164)) merged 2026-10-22T00:10Z,
-after the build flush, so post-cap nightlies are also post-flush; none had run
-yet.
+after the build flush, so post-cap nightlies are also post-flush.
+
+The first post-cap scheduled run, [2026-10-22 nightly](https://github.com/moq-dev/moq/actions/runs/39779729461),
+failed only the browser Opus `wide` target ceilings: `isolated` p95 was
+380 ms against 270 ms, and `plain` was 400 ms against 300 ms. In the
+`audio-quality-run` artifact, both `chromium-opus-48000-wide-*.ndjson`
+series hold their startup target until about 21 s, then settle at 200 to
+220 ms; both matching `.longtasks.json` arrays are empty. The isolated
+row has zero underruns, stalls, and silence; plain has 2.2 underruns a
+minute, 0 stalls, and 0 silence. This supplies one of the seven required
+scheduled runs, not a reason to change the estimator or recalibrate early.
 
 The near-zero stall was never the isolated ring. That row is simply the
 matrix's first, and a cold `cargo build` left about 800 MB dirty when it

@@ -76,6 +76,7 @@ mod util;
 #[cfg(feature = "watch")]
 pub mod watch;
 #[cfg(feature = "webrtc")]
+#[doc(hidden)]
 pub mod webrtc;
 #[cfg(feature = "websocket")]
 pub mod websocket;
@@ -100,7 +101,7 @@ pub use client::Client;
 #[cfg(feature = "net")]
 pub use connect::{Addrs, ConnectError};
 #[cfg(feature = "net")]
-pub use connection::{Backoff, Connection, Redirect, Status};
+pub use connection::{Backoff, Connection, Redirect, Restart, Status};
 pub use error::{Error, Result};
 pub use log::{Log, RedactedUrl};
 #[cfg(feature = "_transport")]

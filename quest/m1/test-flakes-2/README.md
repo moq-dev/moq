@@ -21,7 +21,8 @@ Rules every child keeps:
   slow, fix that.
 - A paused clock auto-advances while the runtime idles, so it can fire a
   timer before a real socket delivers. Where real sockets fight the paused
-  clock, make the timers mockable or move the test off real sockets.
+  clock, drive the timers with a `moq_clock::Manual` clock or the sim (every
+  crate's timers run on `moq-clock`), or move the test off real sockets.
 - A mocked clock still flakes when the code jitters its timers with `rand`
   (the draft-16 cancel race was a retry sweep jittered past a fixed settle
   budget). Wait out the jitter's whole window, not a count of small steps.
@@ -32,16 +33,19 @@ times on a loaded machine, as the first round did.
 The redundant failover drift moved to m0 on 2026-10-20 (maintainer) and is
 fixed by [moq-dev/moq#6113](https://github.com/moq-dev/moq/pull/6113).
 
-Added 2026-10-21 (maintainer): small flakes from the m0/m1 merge run, kept
-in one child; only the OBS stop drain remains.
+Added 2026-10-21 and 2026-10-22 (maintainer): failures from the m0/m1
+merge runs, one child each.
 
 Public API: none. Wire: none.
 
 ## Required
 
-- [OBS drain under load](/quest/m1/test-flakes-2/three-flakes.md) - verify the existing close-tail fix against the reproduced OBS stop-drain failure; the merged JS allocation replacement passed under load
-
-## Related
-
-- [Controlled time](/quest/m1/time/README.md) - the systemic fix these rules ask for: every crate on a controlled clock
-- [Publish channel count](/quest/m1/publish-audio-channel-count.md) - tracks the media fixture's cold-start audio-tone flake, a player stall it shares with the mono pin
+- [Media resource instrumentation](/quest/m1/test-flakes-2/resource-instrumentation.md) - the media test stops seeing a playing player report nothing to release
+- [Tone check grace](/quest/m1/test-flakes-2/tone-grace.md) - the interop tone check charges its grace only for audible playback, so a refilling ring under CPU starvation is not a failure
+- [IETF22 fallback](/quest/m1/test-flakes-2/ietf22-fallback.md) - an IETF22 browser viewer follows a fallback within the media lane's bound, keeping its session and its audio
+- [macOS receive credit](/quest/m1/test-flakes-2/macos-receive-credit.md) - `partial_control_requests_give_way` passes on the macOS lane, after checking for a shared platform cause
+- [moq-mux missing sequence](/quest/m1/test-flakes-2/mux-missing-sequence.md) - `missing_sequence_skips_on_live_track` runs on a paused clock
+- [moq-rtsp stall timers](/quest/m1/test-flakes-2/rtsp-stall-timers.md) - the 200 ms stall and keyframe tests run on a mocked clock
+- [moq-gst sibling resume](/quest/m1/test-flakes-2/gst-sibling-resume.md) - an idle pad reads its named epoch again after a sibling restart, a likely liveness bug fixed before the test
+- [moq-gst pinned replay](/quest/m1/test-flakes-2/gst-pinned-replay.md) - the pinned-instance finish test waits on events instead of sleep loops
+- [Dart leak RSS](/quest/m1/test-flakes-2/dart-leak-rss.md) - the leak tests measure what moq owns, not process RSS

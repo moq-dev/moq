@@ -5,7 +5,6 @@ use crate::format::FourCC;
 use crate::sys::*;
 
 bitflags! {
-	#[allow(clippy::unreadable_literal)]
 	#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 	pub struct Flags : u32 {
 		const COMPRESSED            = 0x0001;

@@ -116,14 +116,13 @@ async fn subscribe_tracks(pair: &MockPair, len: usize) -> Vec<u8> {
 	send.write(SUBSCRIBE_TRACKS).await.expect("write");
 
 	let mut reply = Vec::new();
-	let mut buf = [0u8; 64];
 	while reply.len() < len
-		&& let Some(n) = moq_clock::timeout(TIMEOUT, recv.read(&mut buf))
+		&& let Some(chunk) = moq_clock::timeout(TIMEOUT, recv.read_chunk(len - reply.len()))
 			.await
 			.expect("reply timed out")
 			.expect("read")
 	{
-		reply.extend_from_slice(&buf[..n]);
+		reply.extend_from_slice(&chunk);
 	}
 	reply
 }

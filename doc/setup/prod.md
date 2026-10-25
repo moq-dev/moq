@@ -26,7 +26,7 @@ listen = "[::]:443"
 [acme]
 domains = ["relay.example.com"]
 contact = ["mailto:ops@example.com"]
-dir = "/var/lib/moq-relay/acme"
+cache = "/var/lib/moq-relay/acme"
 
 [auth]
 url = "http://127.0.0.1:4440/"

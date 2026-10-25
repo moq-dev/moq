@@ -34,8 +34,9 @@ Decided:
   `moq-c` (`rs/moq-c`), and the generated package takes over that name
   and `moq::c` target, so C users migrate once. Its first release is 0.8.0, a
   minor bump over the hand-written 0.7.x.
-- Docs change inline: the consumer quest rewrites `doc/lib/c`, and the
-  package's `MIGRATE.md` carries the move. No separate guide.
+- Docs change inline: the consumer quest rewrites `doc/lib/c`, and its
+  Impact bullet carries the move for the package's `MIGRATE.md`. No separate
+  guide.
 
 The line owns the pre-cut check: every `doc/lib/c` sample and the C interop
 client build and run against the built release archive, not only in-tree.
@@ -48,20 +49,24 @@ and fetch quests were abandoned for this line, and hidden is done.
 Decided in the quest audit: [claim epochs](https://github.com/moq-dev/moq/pull/5678)
 is a narrow correctness exception. Its existing claim API migrates with
 Rust and JS so C cannot retain the unsafe accept path while this line waits.
-That change owns its C tests and `MIGRATE.md` entries; other API reshaping stays here.
+That change owns its C tests and migration notes; other API reshaping stays here.
 
 Decided 2026-10-20 (maintainer): m1 quests that change the C API
-([exact binding timestamps](/quest/m1/binding-timestamps.md),
-[scope track priority](/quest/m1/track-priority-scope.md),
+([exact binding timestamps](/quest/m1/binding-timestamps.md)
 and [Rust identity enforcement](/quest/m1/catalog-identity-rs.md)) Require this
 line and land their C half on the generated package, so C users break once.
-[Dynamic subscribe ranges](/quest/m1/subscribe-ranges/dynamic.md) is the
-settled exception from its later plan in
-[moq-dev/moq#6123](https://github.com/moq-dev/moq/pull/6123): if generation
-has not landed, the frozen C crate splits fills into its existing per-group
-requests internally and keeps its ABI, so that quest does not wait here.
+Signed priorities already reached the hand-written ABI as `int8_t` in
+[moq-dev/moq#6142](https://github.com/moq-dev/moq/pull/6142).
+Dynamic subscribe ranges ([moq-dev/moq#6171](https://github.com/moq-dev/moq/pull/6171))
+was the settled exception from its later plan in
+[moq-dev/moq#6123](https://github.com/moq-dev/moq/pull/6123): generation
+had not landed, so the frozen C crate splits fills into its existing per-group
+requests internally and keeps its ABI.
 
 ## Required
 
+- [One C name per moq-ffi item](/quest/m1/c/name-clash.md) - rust2's C generator derives collision-free names, so `MoqAudioEncoder::finish` and `MoqAudioEncoderFinish` stop sharing `moq_audio_encoder_finish`
 - [moq-c package](/quest/m1/c/package.md) - the generated header ships as `moq-c` 0.8.0 with `moq::c`, pkg-config, and a release workflow
 - [C consumers](/quest/m1/c/consumers.md) - the C interop client and `doc/lib/c` samples move onto the generated API
+- [Async failure contract](/quest/m1/c/async-failure-contract.md) - a generated async call that fails early fires no callback, and one that started always delivers its terminal callback
+- [Refuse only waiting readers](/quest/m1/c/request-refuse.md) - freeing or aborting a group request refuses its readers instead of dropping the group for everyone

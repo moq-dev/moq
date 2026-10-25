@@ -503,7 +503,7 @@ pub(crate) fn skip_unlisted(r: &mut Decoder<'_>, version: Version, key: u64) -> 
 /// ```
 macro_rules! encode_params {
 	($w:expr, $version:expr, $($key:expr => $val:expr),* $(,)?) => {{
-		#[allow(unused)]
+		#[allow(unused, reason = "a compile-time key order check")]
 		const _: () = {
 			let _keys: &[u64] = &[$($key),*];
 			let mut _i = 1;
@@ -515,14 +515,14 @@ macro_rules! encode_params {
 
 		let _version: $crate::ietf::Version = $version;
 
-		#[allow(unused_mut)]
+		#[allow(unused_mut, reason = "a call with no parameters never counts one")]
 		let mut _count: usize = 0;
 		$(_count += if $crate::ietf::Param::param_present(&$val) { 1 } else { 0 };)*
 		$w.varint(_count as u64)?;
 
-		#[allow(unused_mut, unused_assignments)]
+		#[allow(unused_mut, unused_assignments, reason = "a call with no parameters never tracks a key")]
 		let mut _prev_key: u64 = 0;
-		#[allow(unused_mut, unused_assignments)]
+		#[allow(unused_mut, unused_assignments, reason = "a call with no parameters never tracks a key")]
 		let mut _first: bool = true;
 		$(
 			if $crate::ietf::Param::param_present(&$val) {
@@ -560,11 +560,11 @@ macro_rules! encode_params {
 ///     0x20 => subscriber_priority: Option<u8>,
 /// );
 /// // forward: Option<bool> and subscriber_priority: Option<u8> are now in scope
-/// let subscriber_priority = subscriber_priority.unwrap_or(128);
+/// let subscriber_priority = subscriber_priority.unwrap_or(super::priority::DEFAULT_WIRE);
 /// ```
 macro_rules! decode_params {
 	($r:expr, $version:expr, $($key:expr => $name:ident: $ty:ty $(where $gate:expr)?),* $(,)?) => {
-		#[allow(unused)]
+		#[allow(unused, reason = "a compile-time key order check")]
 		const _: () = {
 			let _keys: &[u64] = &[$($key),*];
 			let mut _i = 1;
@@ -575,7 +575,7 @@ macro_rules! decode_params {
 		};
 
 		// Use internal Option wrapper for duplicate detection, then shadow with Default.
-		$(#[allow(unused_mut, non_snake_case)] let mut $name: Option<$ty> = None;)*
+		$(#[allow(unused_mut, non_snake_case, reason = "names come from the call site, and an absent parameter is never assigned")] let mut $name: Option<$ty> = None;)*
 
 		{
 			let _version: $crate::ietf::Version = $version;
@@ -584,7 +584,7 @@ macro_rules! decode_params {
 				return Err($crate::coding::DecodeError::TooMany);
 			}
 
-			#[allow(unused_mut, unused_assignments)]
+			#[allow(unused_mut, unused_assignments, reason = "a call with no parameters never tracks a key")]
 			let mut _prev_key: u64 = 0;
 			for _i in 0.._count {
 				let _wire = $r.varint()?;
@@ -617,7 +617,7 @@ macro_rules! decode_params {
 		}
 
 		// Shadow with unwrap_or_default: Option<T> defaults to None, T defaults to T::default()
-		$(#[allow(unused_variables)] let $name: $ty = $name.unwrap_or_default();)*
+		$(#[allow(unused_variables, reason = "a caller may decode a parameter it never reads")] let $name: $ty = $name.unwrap_or_default();)*
 	};
 }
 

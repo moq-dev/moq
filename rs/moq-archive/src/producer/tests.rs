@@ -569,6 +569,20 @@ async fn changed_properties_fail_the_resume() {
 	);
 }
 
+/// A reader still reads a version 2 `.info`, but a producer never appends to one.
+#[tokio::test(start_paused = true)]
+async fn an_older_version_fails_the_resume() {
+	let store = store();
+	let info = object_store::path::Path::from("rec/video/.info");
+	let v2 = br#"{"version":2,"priority":128,"timescale":1000}"#;
+	store.inner().put(&info, v2.as_ref().into()).await.unwrap();
+	let broadcast = broadcast::Info::new().produce();
+	let _video = broadcast.create_track("video", timed()).unwrap();
+	let err = spawn(&store, &broadcast, config()).await.unwrap().unwrap_err();
+	assert!(matches!(err, Error::Version(2)), "{err}");
+	assert_eq!(get(&store, "video/.info").await.as_deref(), Some(&v2[..]));
+}
+
 #[tokio::test(start_paused = true)]
 async fn track_names_stay_one_segment_through_a_resume() {
 	let store = store();

@@ -24,8 +24,8 @@ pub trait Transport: Send + 'static {
 	/// The independently-owned receive half.
 	type Reader: Reader;
 
-	/// Split into send and receive halves.
-	fn split(self) -> (Self::Writer, Self::Reader);
+	/// Bind the session framing and split into send and receive halves.
+	fn split(self, config: &crate::Config) -> (Self::Writer, Self::Reader);
 
 	/// Statistics for the connection underneath, if it exposes any.
 	///
@@ -62,7 +62,9 @@ pub trait Writer: Send + 'static {
 		std::future::ready(Ok(()))
 	}
 
-	/// Gracefully close the transport.
+	/// Gracefully close the transport. Drop the [`Reader`] first so a byte stream also drains
+	/// the peer until it finishes, which only the peer bounds, so bound or cancel the wait;
+	/// otherwise this closes only the send half.
 	fn close(&mut self) -> impl std::future::Future<Output = Result<(), Error>> + Send;
 
 	/// Perform any timer-driven background work and resolve once it's done. The
@@ -92,12 +94,14 @@ pub trait Reader: Send + 'static {
 // `recv_record`/`recv_qmux00_frame` are safe to keep as-is.
 #[cfg(any(feature = "tcp", all(unix, feature = "uds")))]
 mod stream_transport {
+	use std::sync::Arc;
+
 	use bytes::{BufMut, Bytes, BytesMut};
 	use moq_quic::VarInt;
 	use moq_quic::coding::Codec;
 	use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
 	use tokio::sync::mpsc;
-	use tokio::task::JoinHandle;
+	use tokio::task::{AbortHandle, JoinHandle};
 
 	use super::{Reader, Transport, Writer};
 	use crate::{Error, MAX_FRAME_SIZE, Version};
@@ -122,14 +126,13 @@ mod stream_transport {
 	/// use qmux::{Config, Session, Version};
 	///
 	/// let config = Config::new(Version::QMux01);
-	/// let transport = Stream::new(stream, config.version, config.max_record_size);
+	/// let transport = Stream::new(stream);
 	/// let session = Session::connect(transport, config).await?;
 	/// # let _ = session; Ok(())
 	/// # }
 	/// ```
 	pub struct Stream<T> {
-		writer: StreamWriter<T>,
-		reader: StreamReader,
+		stream: T,
 		socket_stats: Option<crate::SharedSocketStats>,
 	}
 
@@ -137,37 +140,30 @@ mod stream_transport {
 	pub struct StreamWriter<T> {
 		writer: BufWriter<tokio::io::WriteHalf<T>>,
 		version: Version,
+		reader_task: Option<JoinHandle<()>>,
+		reader_lifetime: Arc<ReaderTask>,
 	}
 
-	/// The receive half of a byte-stream [`Stream`]. Owns the reader task's
-	/// abort handle so the task can't outlive the receive half.
+	/// The receive half of a byte-stream [`Stream`].
 	pub struct StreamReader {
 		rx: mpsc::Receiver<Result<Bytes, Error>>,
-		/// Aborted on drop so the reader task can't outlive the transport.
-		reader_task: JoinHandle<()>,
+		_reader_lifetime: Arc<ReaderTask>,
+	}
+
+	// Either half can outlive the other; the last owner cancels the socket read.
+	struct ReaderTask(AbortHandle);
+
+	impl Drop for ReaderTask {
+		fn drop(&mut self) {
+			self.0.abort();
+		}
 	}
 
 	impl<T: AsyncRead + AsyncWrite + Send + 'static> Stream<T> {
-		/// Wrap a byte stream speaking QMux `version`.
-		///
-		/// `our_max_record_size` bounds incoming records (use
-		/// [`Config::max_record_size`](crate::Config::max_record_size)); it is
-		/// ignored for draft-00, whose frames are bounded by `max_frame_size`.
-		pub fn new(stream: T, version: Version, our_max_record_size: u64) -> Self {
-			let (read, write) = tokio::io::split(stream);
-			let (tx, rx) = mpsc::channel(RECV_CHANNEL_CAPACITY);
-			let reader_task = tokio::spawn(reader_loop(
-				BufReader::new(read),
-				version,
-				usize::try_from(our_max_record_size).unwrap_or(usize::MAX),
-				tx,
-			));
+		/// Wrap a byte stream; session establishment binds its framing and starts I/O.
+		pub fn new(stream: T) -> Self {
 			Self {
-				writer: StreamWriter {
-					writer: BufWriter::new(write),
-					version,
-				},
-				reader: StreamReader { rx, reader_task },
+				stream,
 				socket_stats: None,
 			}
 		}
@@ -187,20 +183,32 @@ mod stream_transport {
 		type Writer = StreamWriter<T>;
 		type Reader = StreamReader;
 
-		fn split(self) -> (StreamWriter<T>, StreamReader) {
-			(self.writer, self.reader)
+		fn split(self, config: &crate::Config) -> (StreamWriter<T>, StreamReader) {
+			let (read, write) = tokio::io::split(self.stream);
+			let (tx, rx) = mpsc::channel(RECV_CHANNEL_CAPACITY);
+			let reader_task = tokio::spawn(reader_loop(
+				BufReader::new(read),
+				config.version,
+				usize::try_from(config.max_record_size).unwrap_or(usize::MAX),
+				tx,
+			));
+			let reader_lifetime = Arc::new(ReaderTask(reader_task.abort_handle()));
+			(
+				StreamWriter {
+					writer: BufWriter::new(write),
+					version: config.version,
+					reader_task: Some(reader_task),
+					reader_lifetime: reader_lifetime.clone(),
+				},
+				StreamReader {
+					rx,
+					_reader_lifetime: reader_lifetime,
+				},
+			)
 		}
 
 		fn socket_stats(&self) -> Option<crate::SharedSocketStats> {
 			self.socket_stats.clone()
-		}
-	}
-
-	impl Drop for StreamReader {
-		fn drop(&mut self) {
-			// Make sure the reader task doesn't outlive the transport; otherwise
-			// it would hold the read half open until the connection drops.
-			self.reader_task.abort();
 		}
 	}
 
@@ -233,6 +241,17 @@ mod stream_transport {
 
 		async fn close(&mut self) -> Result<(), Error> {
 			self.writer.shutdown().await?;
+			// A retained receive half owns frame delivery and can leave the channel full.
+			// Closing only the send half must neither wait for it nor discard its frames.
+			if Arc::strong_count(&self.reader_lifetime) > 1 {
+				return Ok(());
+			}
+			// Closing a TCP socket with unread peer data can reset it and discard our close.
+			if let Some(task) = self.reader_task.as_mut() {
+				let result = task.await;
+				self.reader_task = None;
+				result.map_err(std::io::Error::other)?;
+			}
 			Ok(())
 		}
 	}
@@ -247,8 +266,8 @@ mod stream_transport {
 	}
 
 	/// Reader task: pull complete frames off the wire and ship them through `tx`.
-	/// On parse error, send the error and exit. If `tx` is closed (the transport
-	/// was dropped), exit silently.
+	/// After a parse error or receiver drop, drain the peer until EOF so the writer
+	/// can close gracefully.
 	async fn reader_loop<R: AsyncRead + Unpin>(
 		mut reader: BufReader<R>,
 		version: Version,
@@ -261,10 +280,11 @@ mod stream_transport {
 				false => recv_qmux00_frame(&mut reader).await,
 			};
 			let stop = result.is_err();
-			if tx.send(result).await.is_err() {
-				return;
-			}
-			if stop {
+			if tx.send(result).await.is_err() || stop {
+				drop(tx);
+				// The session no longer reads records, but the peer can still be finishing
+				// its send half. Discard without buffering; the writer owns cancellation.
+				let _ = tokio::io::copy(&mut reader, &mut tokio::io::sink()).await;
 				return;
 			}
 		}
@@ -461,6 +481,134 @@ mod stream_transport {
 		use crate::transport::{Reader, Transport};
 		use tokio::io::AsyncWriteExt;
 
+		#[test]
+		fn wrapping_a_stream_does_not_start_io() {
+			let (io, _peer) = tokio::io::duplex(64);
+			let _transport = Stream::new(io);
+		}
+
+		#[tokio::test(start_paused = true)]
+		async fn graceful_close_drains_the_peer_after_our_send_half_ends() {
+			for &version in Version::ALL {
+				let (stream, mut peer) = tokio::io::duplex(64);
+				let (mut writer, reader) = Stream::new(stream).split(&crate::Config {
+					max_record_size: 16 * 1024,
+					..crate::Config::new(version)
+				});
+				drop(reader);
+
+				let mut close = Box::pin(writer.close());
+				let mut extra = [0];
+				tokio::select! {
+					biased;
+					result = &mut close => panic!("{version:?}: closed before the peer finished: {result:?}"),
+					result = peer.read(&mut extra) => assert_eq!(result.unwrap(), 0),
+				}
+
+				// The peer can still have data in flight after it reads our FIN. More than the
+				// pipe holds proves the receiver is draining it rather than merely staying alive.
+				peer.write_all(&[0; 1024]).await.expect("drain peer data");
+				peer.shutdown().await.expect("peer FIN");
+				close.as_mut().await.expect("graceful close");
+				drop(close);
+				writer.close().await.expect("already closed");
+			}
+		}
+
+		#[tokio::test(start_paused = true)]
+		async fn closing_the_send_half_preserves_a_full_receive_channel() {
+			for &version in Version::ALL {
+				let (stream, mut peer) = tokio::io::duplex(1);
+				let (mut writer, mut reader) = Stream::new(stream).split(&crate::Config {
+					max_record_size: 16 * 1024,
+					..crate::Config::new(version)
+				});
+				let (frame, payload): (&[u8], &[u8]) = if version.uses_records() {
+					(&[1, 42], &[42])
+				} else {
+					(&[0], &[0]) // PADDING
+				};
+				// The one-byte pipe cannot accept the last frame until all preceding
+				// frames have filled the channel. The receive half stays unpolled.
+				for _ in 0..=RECV_CHANNEL_CAPACITY {
+					peer.write_all(frame).await.expect("peer frame");
+				}
+				peer.shutdown().await.expect("peer FIN");
+				assert_eq!(reader.rx.len(), RECV_CHANNEL_CAPACITY);
+
+				tokio::select! {
+					biased;
+					result = writer.close() => result.expect("send half closed"),
+					_ = std::future::ready(()) => panic!("{version:?}: send close waited for the retained receive half"),
+				}
+				let mut extra = [0];
+				assert_eq!(peer.read(&mut extra).await.unwrap(), 0);
+				drop(writer);
+				for _ in 0..=RECV_CHANNEL_CAPACITY {
+					assert_eq!(reader.recv().await.expect("preserved peer frame"), payload);
+				}
+			}
+		}
+
+		#[tokio::test(start_paused = true)]
+		async fn a_framing_error_still_drains_peer_data_during_close() {
+			let (stream, mut peer) = tokio::io::duplex(64);
+			let (mut writer, mut reader) = Stream::new(stream).split(&crate::Config {
+				max_record_size: 4,
+				..crate::Config::new(Version::QMux02)
+			});
+			peer.write_all(&[5]).await.expect("oversized record header");
+			assert!(matches!(reader.recv().await, Err(Error::FrameTooLarge)));
+			drop(reader);
+
+			let close = writer.close();
+			tokio::pin!(close);
+			let mut extra = [0];
+			tokio::select! {
+				biased;
+				result = &mut close => panic!("closed before the malformed peer finished: {result:?}"),
+				result = peer.read(&mut extra) => assert_eq!(result.unwrap(), 0),
+			}
+			peer.write_all(&[0; 1024]).await.expect("drain malformed peer data");
+			peer.shutdown().await.expect("peer FIN");
+			close.await.expect("graceful close");
+		}
+
+		#[tokio::test(start_paused = true)]
+		async fn cancelling_graceful_close_releases_the_receive_half() {
+			let (stream, mut peer) = tokio::io::duplex(64);
+			let (mut writer, reader) = Stream::new(stream).split(&crate::Config {
+				max_record_size: 16 * 1024,
+				..crate::Config::new(Version::QMux02)
+			});
+			drop(reader);
+
+			let mut close = Box::pin(writer.close());
+			let mut extra = [0];
+			tokio::select! {
+				biased;
+				result = &mut close => panic!("closed before the peer finished: {result:?}"),
+				result = peer.read(&mut extra) => assert_eq!(result.unwrap(), 0),
+			}
+			drop(close);
+			drop(writer);
+
+			// A detached drain would let this write finish, or park it once the pipe fills.
+			peer.write_all(&[0; 1024]).await.expect_err("receive half released");
+		}
+
+		#[tokio::test(start_paused = true)]
+		async fn dropping_the_send_half_keeps_the_receive_half_usable() {
+			let (stream, mut peer) = tokio::io::duplex(64);
+			let (writer, mut reader) = Stream::new(stream).split(&crate::Config {
+				max_record_size: 16 * 1024,
+				..crate::Config::new(Version::QMux02)
+			});
+			drop(writer);
+			peer.write_all(&[1, 42]).await.expect("peer record");
+			assert_eq!(reader.recv().await.expect("receive half remains open"), &[42][..]);
+		}
+
 		// Drip a frame in one byte at a time, racing each `recv` against an
 		// immediate yield so the recv future is dropped every iteration. With
 		// a cancel-safe `recv`, the final call must still return the whole
@@ -468,7 +616,10 @@ mod stream_transport {
 		#[tokio::test]
 		async fn recv_is_cancel_safe_across_partial_writes() {
 			let (client, mut server) = tokio::io::duplex(64 * 1024);
-			let (_writer, mut transport) = Stream::new(client, Version::QMux00, 16 * 1024).split();
+			let (_writer, mut transport) = Stream::new(client).split(&crate::Config {
+				max_record_size: 16 * 1024,
+				..crate::Config::new(Version::QMux00)
+			});
 
 			// STREAM frame, type 0x0a (len bit set), id=4, length=5, payload="hello".
 			let mut frame = Vec::new();
@@ -496,7 +647,10 @@ mod stream_transport {
 		#[tokio::test]
 		async fn recv_qmux01_record_is_cancel_safe() {
 			let (client, mut server) = tokio::io::duplex(64 * 1024);
-			let (_writer, mut transport) = Stream::new(client, Version::QMux01, 16 * 1024).split();
+			let (_writer, mut transport) = Stream::new(client).split(&crate::Config {
+				max_record_size: 16 * 1024,
+				..crate::Config::new(Version::QMux01)
+			});
 
 			// 1-byte varint length (0x08) followed by 8 bytes of payload.
 			let mut record = vec![0x08];
@@ -524,7 +678,10 @@ mod stream_transport {
 		#[tokio::test]
 		async fn recv_returns_consecutive_frames_in_order() {
 			let (client, mut server) = tokio::io::duplex(64 * 1024);
-			let (_writer, mut transport) = Stream::new(client, Version::QMux00, 16 * 1024).split();
+			let (_writer, mut transport) = Stream::new(client).split(&crate::Config {
+				max_record_size: 16 * 1024,
+				..crate::Config::new(Version::QMux00)
+			});
 
 			// Two STREAM frames (type 0x0a) for stream ids 4 and 8.
 			let frame_a: Vec<u8> = [0x0a, 0x04, 0x05].into_iter().chain(*b"hello").collect();
@@ -546,7 +703,10 @@ mod stream_transport {
 		#[tokio::test]
 		async fn recv_propagates_parse_error_then_closes() {
 			let (client, mut server) = tokio::io::duplex(64 * 1024);
-			let (_writer, mut transport) = Stream::new(client, Version::QMux00, 16 * 1024).split();
+			let (_writer, mut transport) = Stream::new(client).split(&crate::Config {
+				max_record_size: 16 * 1024,
+				..crate::Config::new(Version::QMux00)
+			});
 
 			// Frame type 0x02 isn't a recognized QMux00 frame type.
 			server.write_all(&[0x02]).await.unwrap();
@@ -566,7 +726,10 @@ mod stream_transport {
 		#[tokio::test]
 		async fn recv_record_exceeding_max_returns_frame_too_large() {
 			let (client, mut server) = tokio::io::duplex(64 * 1024);
-			let (_writer, mut transport) = Stream::new(client, Version::QMux01, 4).split();
+			let (_writer, mut transport) = Stream::new(client).split(&crate::Config {
+				max_record_size: 4,
+				..crate::Config::new(Version::QMux01)
+			});
 
 			// 1-byte varint length = 5, which exceeds the configured max of 4.
 			server.write_all(&[0x05]).await.unwrap();
@@ -595,7 +758,10 @@ mod stream_transport {
 			assert_eq!(over_limit.len(), MAX_FRAME_SIZE + 1);
 
 			let (client, mut server) = tokio::io::duplex(64 * 1024);
-			let (_writer, mut transport) = Stream::new(client, Version::QMux00, 0).split();
+			let (_writer, mut transport) = Stream::new(client).split(&crate::Config {
+				max_record_size: 0,
+				..crate::Config::new(Version::QMux00)
+			});
 
 			server.write_all(&at_limit).await.unwrap();
 			server.flush().await.unwrap();
@@ -634,7 +800,7 @@ mod stream_session {
 				validate_protocol(protocol)?;
 			}
 		}
-		let mut transport = Stream::new(stream, config.version, config.max_record_size);
+		let mut transport = Stream::new(stream);
 		if let Some(stats) = socket_stats {
 			transport = transport.with_socket_stats(stats);
 		}
@@ -652,19 +818,18 @@ pub(crate) use stream_session::build as build_stream_session;
 // WsTransport: message I/O over WebSocket.
 #[cfg(feature = "ws")]
 mod ws_transport {
-	use std::pin::Pin;
 	use std::time::Duration;
 
 	use bytes::Bytes;
 	use futures::stream::SplitSink;
+	use moq_clock::{Interval, MissedTickBehavior, Sleep};
 	use tokio::sync::mpsc;
 	use tokio::task::JoinHandle;
-	use tokio::time::{Instant, Interval, MissedTickBehavior, Sleep};
 	use tokio_tungstenite::tungstenite;
 
 	use super::{Reader, Transport, Writer};
 	use crate::ws::KeepAlive;
-	use crate::{Error, MAX_FRAME_SIZE, Version};
+	use crate::{Error, MAX_FRAME_SIZE};
 
 	type Message = tungstenite::Message;
 
@@ -695,26 +860,15 @@ mod ws_transport {
 	pub(crate) struct WsTransport<T> {
 		ws: T,
 		keep_alive: Option<KeepAlive>,
-		/// Largest inbound message we accept, or `None` when nothing bounds it.
-		recv_limit: usize,
 		socket_stats: Option<crate::SharedSocketStats>,
 		binding: moq_net::transport::Binding,
 	}
 
 	impl<T> WsTransport<T> {
-		pub fn new(ws: T, version: Version, max_record_size: u64, binding: moq_net::transport::Binding) -> Self {
-			// A message is a record on the record-framed drafts, bounded by the
-			// `max_record_size` we advertised; on draft-00 it is a single frame,
-			// bounded by `max_frame_size` (§5.2), which we never advertise above
-			// its initial value.
-			let recv_limit = match version.uses_records() {
-				true => usize::try_from(max_record_size).unwrap_or(usize::MAX),
-				false => MAX_FRAME_SIZE,
-			};
+		pub fn new(ws: T, binding: moq_net::transport::Binding) -> Self {
 			Self {
 				ws,
 				keep_alive: None,
-				recv_limit,
 				socket_stats: None,
 				binding,
 			}
@@ -747,11 +901,10 @@ mod ws_transport {
 
 	impl PingState {
 		fn new(config: KeepAlive) -> Self {
+			// The first tick is one interval out, so we don't ping on connect.
+			let mut interval = moq_clock::interval_at(moq_clock::now() + config.interval, config.interval);
 			// Skip catch-up bursts after a long pause; we just want one Ping per tick.
-			let mut interval = tokio::time::interval(config.interval);
 			interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-			// First tick fires immediately by default; consume it so we don't ping on connect.
-			interval.reset();
 			Self { interval }
 		}
 	}
@@ -759,7 +912,7 @@ mod ws_transport {
 	/// Reader-side keep-alive: close the session if no frame arrives within `timeout`.
 	struct DeadlineState {
 		// Resets every time we receive a frame. If it elapses, the peer is gone.
-		deadline: Pin<Box<Sleep>>,
+		deadline: Sleep,
 		timeout: Duration,
 	}
 
@@ -767,13 +920,13 @@ mod ws_transport {
 		fn new(config: KeepAlive) -> Self {
 			let timeout = config.timeout;
 			Self {
-				deadline: Box::pin(tokio::time::sleep(timeout)),
+				deadline: moq_clock::sleep(timeout),
 				timeout,
 			}
 		}
 
 		fn observe_recv(&mut self) {
-			self.deadline.as_mut().reset(Instant::now() + self.timeout);
+			self.deadline.reset(moq_clock::now() + self.timeout);
 		}
 	}
 
@@ -815,7 +968,7 @@ mod ws_transport {
 			self.binding
 		}
 
-		fn split(self) -> (WsWriter<T>, WsReader) {
+		fn split(self, config: &crate::Config) -> (WsWriter<T>, WsReader) {
 			use futures::StreamExt;
 			// BiLock-backed halves: the sink and stream can be polled concurrently
 			// on separate tasks, briefly serializing on the shared socket.
@@ -825,7 +978,12 @@ mod ws_transport {
 				None => (None, None),
 			};
 			let (tx, rx) = mpsc::channel(WS_RECV_CHANNEL_CAPACITY);
-			let pump = tokio::spawn(ws_pump(stream, deadline, self.recv_limit, tx));
+			let recv_limit = if config.version.uses_records() {
+				usize::try_from(config.max_record_size).unwrap_or(usize::MAX)
+			} else {
+				MAX_FRAME_SIZE
+			};
+			let pump = tokio::spawn(ws_pump(stream, deadline, recv_limit, tx));
 			(WsWriter { sink, ping }, WsReader { rx, pump })
 		}
 	}
@@ -918,7 +1076,7 @@ mod ws_transport {
 				Some(d) => tokio::select! {
 					biased;
 					msg = stream.next() => msg,
-					_ = d.deadline.as_mut() => {
+					_ = &mut d.deadline => {
 						tracing::debug!("websocket keep_alive timeout");
 						let _ = tx.send(Err(Error::Closed)).await;
 						return;
@@ -1039,7 +1197,7 @@ mod ws_transport {
 
 			// Model a session wedged on a full accept channel: don't read for well
 			// over the 50ms keep-alive timeout while the pump is parked on delivery.
-			tokio::time::sleep(Duration::from_millis(150)).await;
+			moq_clock::sleep(Duration::from_millis(150)).await;
 
 			assert_eq!(
 				rx.recv().await.expect("channel open").expect("no timeout"),
@@ -1065,7 +1223,7 @@ mod ws_transport {
 			let (tx, mut rx) = mpsc::channel(4);
 			let pump = tokio::spawn(ws_pump(stream, Some(DeadlineState::new(ka)), usize::MAX, tx));
 
-			let result = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+			let result = moq_clock::timeout(Duration::from_secs(1), rx.recv())
 				.await
 				.expect("keep-alive deadline should fire on a silent peer");
 			assert!(
@@ -1087,7 +1245,7 @@ mod ws_transport {
 			let pump = tokio::spawn(ws_pump(stream, None, usize::MAX, tx));
 
 			// No deadline, so recv stays pending well past any keep-alive window.
-			let pending = tokio::time::timeout(Duration::from_millis(100), rx.recv()).await;
+			let pending = moq_clock::timeout(Duration::from_millis(100), rx.recv()).await;
 			assert!(pending.is_err(), "recv must not resolve without activity");
 
 			pump.abort();

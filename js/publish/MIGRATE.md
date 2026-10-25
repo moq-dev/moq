@@ -4,15 +4,23 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### `BroadcastInput` has a `linger` input
+### Time units come from `Clock`
 
-Code that builds a complete `BroadcastInput` adds `linger`, such as `new Signal(false)` to keep turning `announce` off unannouncing at once.
-`new Broadcast({ ... })` defaults it to `false`, so constructor calls need no change.
+`Net.Time.Milli` and the other duration units moved to `@moq/clock`, which `@moq/publish` re-exports as `Clock`.
+Replace `Net.Time.Milli` with `Clock.Milli`, or import from `@moq/clock` directly.
 
-### `Encoder.cut()` is not rate limited, and video tracks advertise refresh (#6048)
+### `Broadcast.net` is read-only
 
-`Encoder.cut()` no longer spaces keyframes 500 ms apart: every call forces one on the next frame, so frequent calls produce all-keyframe video.
-Debounce your own calls if you relied on the spacing.
+`Broadcast.net` is a `Getter` instead of a writable `Signal`.
+Read it with `get` or `peek` as before; the broadcast alone replaces the producer.
+
+### AAC encoding support is a `Level`
+
+`Support.Audio.aac` is `"full" | "none"` like `opus`, instead of a boolean.
+Replace `aac === true` with `aac === "full"`.
+
+### Video tracks advertise refresh (#6048)
+
 Every `Broadcast.video()` track now advertises a refresh ratio of 2, so a producer registered there must open a group with a keyframe whenever `track.demand().wanted` passes the largest group.
 The bundled `Encoder` already does; a custom producer has to as well.
 

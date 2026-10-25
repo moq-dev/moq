@@ -53,6 +53,8 @@ export default defineConfig({
 				text: "Libraries",
 				link: "/lib/",
 				items: [
+					{ text: "Choose a library", link: "/lib/" },
+					{ text: "Examples", link: "/setup/examples" },
 					{ text: "Rust", link: "/lib/rs/" },
 					{ text: "TypeScript", link: "/lib/js/" },
 					{ text: "Swift", link: "/lib/swift/" },
@@ -74,8 +76,11 @@ export default defineConfig({
 					link: "/setup/",
 					items: [
 						{ text: "Quick start", link: "/setup/" },
+						{ text: "Examples", link: "/setup/examples" },
 						{ text: "Install", link: "/setup/install" },
 						{ text: "Development", link: "/setup/dev" },
+						{ text: "Repository map", link: "/setup/repository" },
+						{ text: "Troubleshooting", link: "/setup/troubleshooting" },
 						{ text: "Production", link: "/setup/prod" },
 						{ text: "Redundant ingest", link: "/setup/redundancy" },
 						{ text: "Upgrade", link: "/setup/upgrade" },
@@ -166,6 +171,8 @@ export default defineConfig({
 					text: "Libraries",
 					link: "/lib/",
 					items: [
+						{ text: "Choose a library", link: "/lib/" },
+						{ text: "Examples", link: "/setup/examples" },
 						{
 							text: "Rust",
 							link: "/lib/rs/",

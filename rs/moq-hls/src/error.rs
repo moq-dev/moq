@@ -18,15 +18,6 @@ impl std::fmt::Display for SequenceKind {
 	}
 }
 
-/// Whether an HTTP response status means "ask again later".
-///
-/// A response that arrived is the server's answer, and only this narrow set invites another
-/// attempt: request timeout, rate limit, and the gateway/overload statuses. Every other status,
-/// `404` and `403` included, is settled.
-pub(crate) fn status_retryable(status: u16) -> bool {
-	matches!(status, 408 | 429 | 502 | 503 | 504)
-}
-
 /// Errors produced by the HLS <-> MoQ gateway (import and export).
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
@@ -39,17 +30,9 @@ pub enum Error {
 	#[error("mux: {0}")]
 	Mux(#[from] moq_mux::Error),
 
-	/// History mode found no first group on this timeline, as in a retained (DVR) recording.
-	#[error("history needs timeline {0} from its first group; retained recordings are not supported")]
-	HistoryPruned(String),
-
-	/// A range playlist was requested from a timeline whose media is not durable.
-	#[error("range playlists require a durable timeline")]
-	RangeNotDurable,
-
-	/// A requested range is invalid or no longer fully retained.
-	#[error("requested range is unavailable: {0}")]
-	RangeUnavailable(String),
+	/// An import resource or redirect hop left the playlist's origin, or the playlist uses an unsupported scheme.
+	#[error("resource is outside the playlist's origin")]
+	ResourceRefused,
 
 	/// A `file://` URL could not be turned back into a filesystem path.
 	#[error("invalid file URL")]
@@ -144,6 +127,42 @@ pub enum Error {
 		/// Why the timeline failed.
 		source: Box<Error>,
 	},
+
+	/// The catalog failed before it finished, so every rendition's listings refuse and its
+	/// recording cursors end, rather than read as a finished recording or a transient fetch error.
+	#[error("catalog failed: {source}")]
+	CatalogFailed {
+		/// Why the catalog failed.
+		source: Box<Error>,
+	},
+
+	/// A media playlist already carried `EXT-X-ENDLIST` when import first saw it; import follows live playlists only.
+	#[error("playlist already ended (EXT-X-ENDLIST); HLS import follows live playlists only")]
+	PlaylistEnded,
+
+	/// Import refused a rendition whose timestamps went backwards, such as a reset at an
+	/// `EXT-X-DISCONTINUITY` under the same init segment. A restarted source is a new broadcast.
+	#[error("rendition {rendition} rewound its timestamps; HLS import refuses a timestamp reset: {source}")]
+	Rewind {
+		/// The rendition's label.
+		rendition: String,
+		/// The rewind the importer refused.
+		source: moq_mux::Error,
+	},
+	/// A recording source closed without confirming its complete end.
+	#[error("recording closed before finishing")]
+	IncompleteRecording,
+
+	/// A recording cursor missed rows that left its window or were reset.
+	#[error("recording cursor missed segments")]
+	RecordingLagged,
+
+	/// A listed recording segment no longer has all its media available.
+	#[error("recording segment {segment} is unavailable")]
+	SegmentUnavailable {
+		/// The segment whose media cannot be recorded.
+		segment: u64,
+	},
 }
 
 impl Error {
@@ -156,6 +175,21 @@ impl Error {
 		match self {
 			Self::Reqwest(err) => err.status().map(|status| status.as_u16()),
 			_ => None,
+		}
+	}
+
+	/// Whether this is the source's settled answer, which another import pass cannot change.
+	///
+	/// A response that arrived is the server's answer, and only a narrow set of statuses invites
+	/// another attempt: request timeout, rate limit, and the gateway/overload statuses. Every other
+	/// status, `404` and `403` included, is settled, as is a playlist that had already ended when
+	/// the import joined it. A failure with no answer at all is left to the backoff budget.
+	pub(crate) fn settled(&self) -> bool {
+		match self {
+			Self::PlaylistEnded => true,
+			_ => self
+				.status()
+				.is_some_and(|status| !matches!(status, 408 | 429 | 502 | 503 | 504)),
 		}
 	}
 }

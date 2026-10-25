@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use moq_mux::catalog::hang::Extra;
 use moq_mux::import;
@@ -24,10 +25,19 @@ struct TrackRequest {
 }
 
 /// A request a handler pulled, before it has a handle. A track request is boxed: it is
-/// several times the size of a group request.
+/// several times the size of a fill.
 enum Request {
 	Track(Box<TrackRequest>),
-	Group(moq_net::group::Request),
+	Fill(moq_net::track::Fill),
+}
+
+/// One group of a fill, handed to C as a group request: the frozen ABI answers fills a
+/// group at a time.
+struct GroupRequest {
+	fill: Arc<moq_net::track::Fill>,
+	sequence: u64,
+	/// Dropped once the request is answered or freed, so its fill's next group follows.
+	_pending: oneshot::Sender<()>,
 }
 
 /// What a request handler serves.
@@ -50,6 +60,8 @@ struct Broadcast {
 	video: BTreeMap<String, hang::catalog::VideoConfig>,
 	audio: BTreeMap<String, hang::catalog::AudioConfig>,
 	finished: Finished,
+	/// Set by [`Publish::catalog_finish`]: the catalog is final, so a close leaves it alone.
+	ended: bool,
 }
 
 impl Drop for Broadcast {
@@ -63,9 +75,9 @@ type Keeping = Option<Vec<Box<dyn Send>>>;
 
 /// Finished producers a broadcast keeps until it ends.
 ///
-/// A track unlists once its last producer drops, and a finish holds only listed tracks. A
-/// `*_finish` call frees its handle, so the broadcast keeps the finished producer here instead,
-/// and [`Publish::finish`] still holds the track.
+/// A finished track stops being served once its last producer drops. A `*_finish` call frees
+/// its handle, so the broadcast keeps the finished producer here instead, and a subscriber
+/// arriving after the end still finds the track until [`Publish::close`].
 #[derive(Clone)]
 pub struct Finished(std::sync::Arc<std::sync::Mutex<Keeping>>);
 
@@ -136,6 +148,14 @@ struct Data<T> {
 	clock: moq_mux::Clock,
 }
 
+/// A JSON snapshot producer, kept beside the signal that stops its refresh task.
+struct JsonSnapshot {
+	data: Data<moq_mux::json::Snapshot<serde_json::Value>>,
+
+	/// Closed when the entry is removed, which wakes the refresh task to stop.
+	_alive: kio::Producer<()>,
+}
+
 struct Container {
 	inner: import::Container<Extra>,
 	driver: crate::ffi::Background,
@@ -164,16 +184,16 @@ pub struct Publish {
 
 	/// JSON snapshot producers (lossy latest-value tracks), each advertised in its broadcast's
 	/// catalog for as long as it lives.
-	json_snapshot: NonZeroSlab<Data<moq_mux::json::Snapshot<serde_json::Value, Extra>>>,
+	json_snapshot: NonZeroSlab<JsonSnapshot>,
 
 	/// JSON stream producers (lossless append-log tracks), advertised the same way.
-	json_stream: NonZeroSlab<Data<moq_mux::json::Stream<serde_json::Value, Extra>>>,
+	json_stream: NonZeroSlab<Data<moq_mux::json::Stream<serde_json::Value>>>,
 
 	/// Binary snapshot producers (lossy latest-value tracks of opaque bytes), advertised the same way.
-	binary_snapshot: NonZeroSlab<Data<moq_mux::binary::Snapshot<Extra>>>,
+	binary_snapshot: NonZeroSlab<Data<moq_mux::binary::Snapshot>>,
 
 	/// Binary stream producers (lossless append-log tracks of opaque bytes), advertised the same way.
-	binary_stream: NonZeroSlab<Data<moq_mux::binary::Stream<Extra>>>,
+	binary_stream: NonZeroSlab<Data<moq_mux::binary::Stream>>,
 
 	/// Demand watchers. Close signals shutdown; the task delivers a final callback, then removes itself.
 	demand: NonZeroSlab<DemandEntry>,
@@ -186,10 +206,7 @@ pub struct Publish {
 	track_request: NonZeroSlab<TrackRequest>,
 
 	/// Group requests delivered to a handler, freed on accept, abort, or free.
-	group_request: NonZeroSlab<moq_net::group::Request>,
-
-	/// Finished broadcasts, serving their finished tracks until closed.
-	finishes: NonZeroSlab<moq_net::broadcast::Finish>,
+	group_request: NonZeroSlab<GroupRequest>,
 }
 
 impl Publish {
@@ -222,6 +239,7 @@ impl Publish {
 			video: BTreeMap::new(),
 			audio: BTreeMap::new(),
 			finished: Finished::default(),
+			ended: false,
 		})?;
 		Ok(id)
 	}
@@ -276,6 +294,10 @@ impl Publish {
 	/// End the broadcast for good and release it, finalizing the catalog stream.
 	pub fn close(&mut self, broadcast: Id) -> Result<(), Error> {
 		let mut broadcast = self.broadcasts.remove(broadcast).ok_or(Error::BroadcastNotFound)?;
+		if broadcast.ended {
+			broadcast.producer.close();
+			return broadcast.driver.check();
+		}
 		let result = (|| {
 			// Retire caller-authored entries while the catalog track is still open.
 			{
@@ -297,30 +319,14 @@ impl Publish {
 		result
 	}
 
-	/// End the broadcast cleanly and release it, returning a finish handle and its linger.
-	///
-	/// The catalog finishes with its entries still listed, so a late subscriber finds the
-	/// finished tracks the handle holds.
-	pub fn finish(&mut self, broadcast: Id) -> Result<(Id, std::time::Duration), Error> {
-		let mut broadcast = self.broadcasts.remove(broadcast).ok_or(Error::BroadcastNotFound)?;
-		// On failure the handle is gone, so close the broadcast rather than leave a dynamic holding it.
-		let ready = broadcast.catalog.finish().map_err(Error::from);
-		if let Err(err) = ready.and_then(|()| broadcast.driver.check()) {
-			broadcast.producer.close();
-			return Err(err);
-		}
-		// Released only once the finish holds their tracks.
-		let finished = broadcast.finished.release();
-		let finish = broadcast.producer.clone().finish();
-		drop(finished);
-		let linger = finish.linger();
-		Ok((self.finishes.insert(finish)?, linger))
-	}
-
-	/// Close a finished broadcast, ending its linger.
-	pub fn finish_close(&mut self, finish: Id) -> Result<(), Error> {
-		self.finishes.remove(finish).ok_or(Error::BroadcastNotFound)?;
-		Ok(())
+	/// End the broadcast's content by finishing its catalog, with its entries still listed, so
+	/// a late subscriber finds the finished tracks until [`Self::close`].
+	pub fn catalog_finish(&mut self, broadcast: Id) -> Result<(), Error> {
+		let broadcast = self.broadcast_mut(broadcast)?;
+		let result = broadcast.catalog.finish();
+		broadcast.ended |= result.is_ok();
+		broadcast.driver.check()?;
+		Ok(result?)
 	}
 
 	/// Where a broadcast keeps the producers finished on it.
@@ -392,14 +398,6 @@ impl Publish {
 		Ok(())
 	}
 
-	/// Record a locally encoded frame's transport handoff. Generic imports remain clock-free
-	/// unless their caller explicitly identifies the frame as encoder output.
-	pub fn media_flush(&mut self, media: Id, timestamp: hang::container::Timestamp) -> Result<(), Error> {
-		let track = self.media.get_mut(media).ok_or(Error::MediaNotFound)?;
-		track.flush(timestamp, moq_net::time::now())?;
-		Ok(())
-	}
-
 	/// Mark a timeline break on this media importer.
 	pub fn media_discontinuity(&mut self, media: Id) -> Result<(), Error> {
 		let track = self.media.get_mut(media).ok_or(Error::MediaNotFound)?;
@@ -452,8 +450,9 @@ impl Publish {
 	pub fn container_cut(&mut self, container: Id) -> Result<(), Error> {
 		let container = self.containers.get_mut(container).ok_or(Error::MediaNotFound)?;
 		container.driver.check()?;
-		container.inner.cut();
-		container.driver.check()
+		let result = container.inner.cut();
+		container.driver.check()?;
+		Ok(result?)
 	}
 
 	/// Start a new segment and number its groups `sequence`.
@@ -709,23 +708,28 @@ impl Publish {
 		mut dynamic: Dynamic,
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
+		// Each fill hands out its groups one at a time, alongside the other fills.
+		let mut fills = kio::Tasks::new();
 		loop {
 			// The handler is owned here, so returning drops it and rejects whatever is pending.
 			// `biased` so a pending close always wins over a ready request.
 			let res = tokio::select! {
 				biased;
 				_ = &mut close => return Ok(()),
-				res = kio::wait(|waiter| match &mut dynamic {
-					Dynamic::Broadcast(dynamic, broadcast, finished) => {
-						dynamic.poll_requested_track(waiter).map_ok(|request| {
-							Request::Track(Box::new(TrackRequest {
-								broadcast: *broadcast,
-								finished: finished.clone(),
-								request,
-							}))
-						})
+				res = kio::wait(|waiter| {
+					let _ = fills.poll(waiter);
+					match &mut dynamic {
+						Dynamic::Broadcast(dynamic, broadcast, finished) => {
+							dynamic.poll_requested_track(waiter).map_ok(|request| {
+								Request::Track(Box::new(TrackRequest {
+									broadcast: *broadcast,
+									finished: finished.clone(),
+									request,
+								}))
+							})
+						}
+						Dynamic::Track(dynamic) => dynamic.poll_requested_fill(waiter).map_ok(Request::Fill),
 					}
-					Dynamic::Track(dynamic) => dynamic.poll_requested_group(waiter).map_ok(Request::Group),
 				}) => res,
 			};
 
@@ -737,13 +741,45 @@ impl Publish {
 			};
 
 			// Hold the lock only to buffer the request; release it before the callback.
-			let mut state = State::lock();
 			let id = match request {
-				Request::Track(request) => state.publish.track_request.insert(*request)?,
-				Request::Group(request) => state.publish.group_request.insert(request)?,
+				Request::Track(request) => State::lock().publish.track_request.insert(*request)?,
+				Request::Fill(fill) => {
+					let mut serve = Box::pin(Self::serve_fill(callback, Arc::new(fill)));
+					fills.push(move |waiter: &kio::Waiter| waiter.poll_future(serve.as_mut()));
+					continue;
+				}
 			};
-			drop(state);
 			callback.call(id);
+		}
+	}
+
+	/// Hand `fill` to C a group at a time, each once the one before it is answered or nobody
+	/// reads it any more, until every group is answered or nobody waits on the fill.
+	async fn serve_fill(callback: OnStatus, fill: Arc<moq_net::track::Fill>) {
+		let mut last = None;
+		while fill.is_used()
+			&& let Some(sequence) = fill.next()
+			&& last != Some(sequence)
+		{
+			last = Some(sequence);
+			let (pending, answered) = oneshot::channel();
+			let request = GroupRequest {
+				fill: fill.clone(),
+				sequence,
+				_pending: pending,
+			};
+			let Ok(id) = State::lock().publish.group_request.insert(request) else {
+				return;
+			};
+			callback.call(id);
+			let unwanted = kio::wait(|waiter| fill.poll_unwanted(sequence, waiter));
+			tokio::select! {
+				_ = answered => {}
+				// Withdrawn, so answering it fails as not found, and the fill moves on.
+				_ = unwanted => {
+					State::lock().publish.group_request.remove(id);
+				}
+			}
 		}
 	}
 
@@ -816,9 +852,13 @@ impl Publish {
 	}
 
 	/// The sequence, priority, and first frame of a requested group.
-	pub fn group_request_info(&self, request: Id) -> Result<(u64, u8, u64), Error> {
+	pub fn group_request_info(&self, request: Id) -> Result<(u64, i8, u64), Error> {
 		let request = self.group_request.get(request).ok_or(Error::NotFound)?;
-		Ok((request.sequence(), request.priority(), request.frame_start()))
+		Ok((
+			request.sequence,
+			request.fill.priority(),
+			request.fill.frame_start(request.sequence),
+		))
 	}
 
 	/// Accept a group request, returning a group handle like [`Self::track_group`].
@@ -827,25 +867,20 @@ impl Publish {
 	/// indices they have in the group rather than restarting at 0.
 	pub fn group_request_accept(&mut self, request: Id) -> Result<Id, Error> {
 		let request = self.group_request.remove(request).ok_or(Error::NotFound)?;
-		let frame_start = request.frame_start();
-		let mut group = request.accept(None)?;
-		if let Err(err) = group.start_at(frame_start) {
-			let _ = group.abort(err.clone());
-			return Err(err.into());
-		}
+		let group = request.fill.accept(request.sequence, None)?;
 		self.groups.insert(group)
 	}
 
-	/// Reject a group request, failing every fetch waiting on it with `error_code`.
-	pub fn group_request_abort(&mut self, request: Id, error_code: u16) -> Result<(), Error> {
-		let request = self.group_request.remove(request).ok_or(Error::NotFound)?;
-		request.reject(moq_net::Error::App(error_code));
-		Ok(())
+	/// Reject a group request, failing every fetch waiting on it. A fill has no error code
+	/// to carry, so `error_code` is not delivered: the fetches fail as not found.
+	pub fn group_request_abort(&mut self, request: Id, _error_code: u16) -> Result<(), Error> {
+		self.group_request_free(request)
 	}
 
 	/// Drop a group request, which rejects it.
 	pub fn group_request_free(&mut self, request: Id) -> Result<(), Error> {
-		self.group_request.remove(request).ok_or(Error::NotFound)?;
+		let request = self.group_request.remove(request).ok_or(Error::NotFound)?;
+		request.fill.drop_groups(request.sequence..request.sequence + 1);
 		Ok(())
 	}
 
@@ -922,17 +957,19 @@ impl Publish {
 
 	/// Create a track on a broadcast and hand it, with the broadcast's catalog, to `publish`, which
 	/// wraps it in a data producer that advertises the track in that catalog.
+	///
+	/// `refresh` sets the track's [`refresh`](moq_net::track::Info::refresh) ratio.
 	fn data_track<T>(
 		&mut self,
 		broadcast: Id,
 		name: &str,
+		refresh: Option<u32>,
 		publish: impl FnOnce(&moq_mux::catalog::Producer<Extra>, moq_net::track::Producer) -> moq_mux::Result<T>,
 	) -> Result<Data<T>, Error> {
 		let broadcast = self.broadcast_mut(broadcast)?;
-		let track = broadcast.producer.create_track(
-			name,
-			moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
-		)?;
+		let mut info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
+		info.refresh = refresh;
+		let track = broadcast.producer.create_track(name, info)?;
 		let producer = publish(&broadcast.catalog, track)?;
 		Ok(Data {
 			producer,
@@ -945,24 +982,62 @@ impl Publish {
 	/// Values published via [`Self::json_snapshot_update`] reach subscribers as a single latest
 	/// state; a late joiner only sees the newest value. The catalog entry (`json.tracks.<name>`,
 	/// `mode: snapshot`) is written now and retired when the track finishes or fails.
+	///
+	/// With deltas on, the track carries a refresh ratio of 8: a join after more than eight
+	/// snapshots' worth of deltas asks for the value restated in a fresh group, which a task
+	/// answers until the track is finished.
 	pub fn json_snapshot(&mut self, broadcast: Id, name: &str, config: moq_mux::json::Config) -> Result<Id, Error> {
-		let producer = self.data_track(broadcast, name, |catalog, track| catalog.json_snapshot(track, config))?;
-		self.json_snapshot.insert(producer)
+		let refresh = config.deltas.then_some(8);
+		let data = self.data_track(broadcast, name, refresh, |catalog, track| {
+			catalog.json_snapshot(track, config)
+		})?;
+		let alive = kio::Producer::new(());
+		let closed = alive.consume();
+		let id = self.json_snapshot.insert(JsonSnapshot { data, _alive: alive })?;
+		crate::ffi::Background::new(async move {
+			Self::json_snapshot_refresh(id, closed).await;
+			Ok(())
+		});
+		Ok(id)
+	}
+
+	/// Answer joiners of the JSON snapshot `id` until it is removed, or a refresh fails.
+	///
+	/// A failed restatement only stops the refreshes: the error that caused it (a closed track, a
+	/// rejected write) reaches the caller through its next update.
+	async fn json_snapshot_refresh(id: Id, closed: kio::Consumer<()>) {
+		loop {
+			let stop = kio::wait(|waiter| {
+				// Check under the state lock that removes the entry, so a removal never slips between
+				// the check and the lookup.
+				let state = State::lock();
+				if closed.poll_closed(waiter).is_ready() {
+					return std::task::Poll::Ready(true);
+				}
+				match state.publish.json_snapshot.get(id) {
+					Some(json) => json.data.producer.poll_refresh(waiter).map(|res| res.is_err()),
+					None => std::task::Poll::Ready(true),
+				}
+			})
+			.await;
+			if stop {
+				return;
+			}
+		}
 	}
 
 	/// Publish a new value to a JSON snapshot track. A no-op if unchanged.
 	pub fn json_snapshot_update(&mut self, json: Id, value: serde_json::Value) -> Result<(), Error> {
-		let producer = self.json_snapshot.get_mut(json).ok_or(Error::TrackNotFound)?;
-		producer
-			.producer
-			.update(moq_net::Timed::from(&value).at(producer.clock.now()))?;
+		let json = &mut self.json_snapshot.get_mut(json).ok_or(Error::TrackNotFound)?.data;
+		json.producer
+			.update(moq_net::Timed::from(&value).at(json.clock.now()))?;
 		Ok(())
 	}
 
 	/// Finish a JSON snapshot track and retire its catalog entry. No more values can be published.
 	pub fn json_snapshot_finish(&mut self, json: Id) -> Result<(), Error> {
-		let producer = self.json_snapshot.remove(json).ok_or(Error::TrackNotFound)?;
-		producer.producer.finish()?;
+		let json = self.json_snapshot.remove(json).ok_or(Error::TrackNotFound)?;
+		json.data.producer.finish()?;
 		Ok(())
 	}
 
@@ -971,7 +1046,9 @@ impl Publish {
 	/// Every record appended via [`Self::json_stream_append`] is preserved and delivered in order.
 	/// The catalog entry (`json.tracks.<name>`, `mode: stream`) lives as long as the track.
 	pub fn json_stream(&mut self, broadcast: Id, name: &str, config: moq_mux::json::Config) -> Result<Id, Error> {
-		let producer = self.data_track(broadcast, name, |catalog, track| catalog.json_stream(track, config))?;
+		let producer = self.data_track(broadcast, name, None, |catalog, track| {
+			catalog.json_stream(track, config)
+		})?;
 		self.json_stream.insert(producer)
 	}
 
@@ -994,7 +1071,9 @@ impl Publish {
 	/// Create a binary snapshot track (lossy latest-value) on a broadcast, advertised in its catalog
 	/// as `binary.tracks.<name>`, `mode: snapshot`.
 	pub fn binary_snapshot(&mut self, broadcast: Id, name: &str, config: moq_mux::binary::Config) -> Result<Id, Error> {
-		let producer = self.data_track(broadcast, name, |catalog, track| catalog.binary_snapshot(track, config))?;
+		let producer = self.data_track(broadcast, name, None, |catalog, track| {
+			catalog.binary_snapshot(track, config)
+		})?;
 		self.binary_snapshot.insert(producer)
 	}
 
@@ -1017,7 +1096,9 @@ impl Publish {
 	/// Create a binary stream track (lossless append-log) on a broadcast, advertised in its catalog
 	/// as `binary.tracks.<name>`, `mode: stream`.
 	pub fn binary_stream(&mut self, broadcast: Id, name: &str, config: moq_mux::binary::Config) -> Result<Id, Error> {
-		let producer = self.data_track(broadcast, name, |catalog, track| catalog.binary_stream(track, config))?;
+		let producer = self.data_track(broadcast, name, None, |catalog, track| {
+			catalog.binary_stream(track, config)
+		})?;
 		self.binary_stream.insert(producer)
 	}
 
@@ -1088,7 +1169,7 @@ mod supervision_tests {
 	}
 
 	#[tokio::test]
-	async fn a_finish_after_a_driver_panic_closes_the_broadcast() {
+	async fn a_finish_after_a_driver_panic_reports_it_until_the_close() {
 		let (origin, completion, trigger) = crate::ffi::panicking_origin();
 		let mut publish = Publish::default();
 		let broadcast = publish
@@ -1102,7 +1183,10 @@ mod supervision_tests {
 			.write()
 			.unwrap_or_else(|_| unreachable!("test keeps its panic trigger open")) = true;
 		assert!(matches!(completion.finished().await, Err(Error::Panic)));
-		assert!(matches!(publish.finish(broadcast), Err(Error::Panic)));
+		assert!(matches!(publish.catalog_finish(broadcast), Err(Error::Panic)));
+		// The handle stays the caller's to close, and the close still ends the broadcast.
+		assert!(!consumer.is_closed());
+		assert!(matches!(publish.close(broadcast), Err(Error::Panic)));
 		assert!(consumer.is_closed());
 	}
 }

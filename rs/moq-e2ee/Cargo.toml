@@ -1,4 +1,5 @@
 [package]
+publish = false
 name = "moq-e2ee"
 description = "End-to-end encryption for MoQ groups, datagrams, and track names."
 authors = ["Luke Curley <kixelated@gmail.com>"]
@@ -30,3 +31,6 @@ tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 [[bench]]
 name = "protect"
 harness = false
+
+[lints]
+workspace = true

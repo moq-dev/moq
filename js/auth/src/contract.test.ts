@@ -17,10 +17,12 @@ test("a connect request parses with every field", () => {
 		path: "/demo/room",
 		query: "jwt=abc",
 		role: "publisher",
+		implementation: "moq-net-js/0.4.2",
 		tls: { name: "edge0", fingerprint: "ab".repeat(32), expires: 4102444800, issuer: "CN=cluster" },
 	});
 	expect(request.event).toBe("connect");
 	expect(request.tls?.name).toBe("edge0");
+	expect(request.implementation).toBe("moq-net-js/0.4.2");
 });
 
 test("an end request carries its facts beside the rest", () => {
@@ -111,7 +113,7 @@ test("a grant round trips and is validated", () => {
 		tier: "websocket",
 		label: "project/key/123",
 	});
-	expect(grant.publish?.toJSON()).toEqual(["alice/**"]);
+	expect(grant.publish).toEqual(["alice/**"]);
 
 	expect(() => GrantSchema.parse({})).toThrow(/name something/);
 	expect(() => GrantSchema.parse({ publish: ["**"], revalidate: 60 })).toThrow(/must expire/);
@@ -121,11 +123,6 @@ test("a grant round trips and is validated", () => {
 	expect(() => GrantSchema.parse({ publish: ["**"], expires: 4102444800.5 })).toThrow();
 	expect(() => GrantSchema.parse({ publish: ["a/**/b/**"] })).toThrow();
 	expect(() => GrantSchema.parse({ publish: ["**"], label: "project/*" })).toThrow(/invalid path/);
-});
-
-test("an auth endpoint grant accepts a capped role", () => {
-	const grant = GrantSchema.parse({ publish: { path: "alice/**", rate: 8_000_000 } });
-	expect(grant).toHaveProperty("publish.rate", 8_000_000);
 });
 
 test("refusal reasons preserve verified attribution and accept future reasons", () => {

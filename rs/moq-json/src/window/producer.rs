@@ -7,13 +7,18 @@ use moq_net::Timed;
 use serde::Serialize;
 use serde_json::Value;
 
-use super::{Checkpoint, Encoded, Encoder, ProducerConfig};
+use super::{Encoded, Encoder, ProducerConfig};
 use crate::Result;
+use crate::refresh::Refresh;
 
 /// Publishes a sliding window of JSON records over a track.
 ///
 /// An [`Encoder`] that owns its track: it writes each encoded frame and rolls a group whenever the
 /// encoder emits a header. When something else already owns the track, use the [`Encoder`] directly.
+///
+/// A group runs until a joiner wants a fresh one, which [`refresh`](Self::refresh) answers, or until
+/// it reaches the encoder's caps. Set the track's [`refresh`](moq_net::track::Info::refresh) ratio
+/// when creating it, or joins never ask.
 ///
 /// Cheaply clonable: clones share one underlying track and window, like other MoQ producers.
 pub struct Producer<T> {
@@ -33,17 +38,16 @@ impl<T> Clone for Producer<T> {
 impl<T> Producer<T> {
 	/// Create a producer that publishes to the given track.
 	pub fn new(track: moq_net::track::Producer, config: ProducerConfig) -> Self {
-		Self::with_encoder(track, Encoder::new(config))
-	}
-
-	fn with_encoder(track: moq_net::track::Producer, encoder: Encoder<T>) -> Self {
 		Self {
 			inner: Arc::new(Mutex::new(Inner {
+				refresh: Refresh::new(&track),
 				track: Track {
 					inner: track,
 					group: None,
+					largest: None,
 				},
-				encoder,
+				encoder: Encoder::new(config),
+				at: None,
 				finished: false,
 			})),
 			_marker: PhantomData,
@@ -83,6 +87,25 @@ impl<T> Producer<T> {
 		self.inner.lock().unwrap().cut()
 	}
 
+	/// Wait for a joiner to want a fresh group, then restate the window in a header opening one.
+	///
+	/// A join wants one once the open group's ops outweigh the track's
+	/// [`refresh`](moq_net::track::Info::refresh) ratio times its header (see
+	/// [`Demand::wanted`](moq_net::track::Demand::wanted)). It is a soft trigger: that joiner still
+	/// reads the cached group, then the new one. The header carries the newest timestamp written. Nothing happens before
+	/// the first edit, or on a track without a ratio.
+	///
+	/// The producer has no runtime of its own, so the owner drives this: loop on it, or select on it
+	/// beside the edits. Errors once the track is finished or closed.
+	pub async fn refresh(&self) -> Result<()> {
+		kio::wait(|waiter| self.poll_refresh(waiter)).await
+	}
+
+	/// Poll for [`refresh`](Self::refresh), for an owner driving the producer synchronously.
+	pub fn poll_refresh(&self, waiter: &kio::Waiter) -> std::task::Poll<Result<()>> {
+		self.inner.lock().unwrap().poll_refresh(waiter)
+	}
+
 	/// Finish the track, closing any open group.
 	///
 	/// Borrows rather than consumes, matching snapshot and stream, so the handle stays
@@ -94,14 +117,6 @@ impl<T> Producer<T> {
 }
 
 impl<T: Serialize> Producer<T> {
-	/// Create a producer continuing `checkpoint` on the given track.
-	///
-	/// The first edit opens a group restating the checkpoint, so a reader that already holds those
-	/// records sees only what follows. Fails like [`Encoder::resume`].
-	pub fn resume(track: moq_net::track::Producer, config: ProducerConfig, checkpoint: &Checkpoint<T>) -> Result<Self> {
-		Ok(Self::with_encoder(track, Encoder::resume(config, checkpoint)?))
-	}
-
 	/// Append a record at its timestamp, or untimed when absent.
 	pub fn push<'a>(&mut self, value: impl Into<Timed<&'a T>>) -> Result<()>
 	where
@@ -119,6 +134,14 @@ impl<T: Serialize> Producer<T> {
 struct Inner<T> {
 	track: Track,
 	encoder: Encoder<T>,
+
+	/// Watches for a joiner wanting a group past the largest written.
+	refresh: Refresh,
+
+	/// The newest timestamp written, which a refresh restates the window at. An edit may carry an
+	/// older timestamp than its group's first frame, and a new group may not start before that one.
+	at: Option<moq_net::Timestamp>,
+
 	finished: bool,
 }
 
@@ -135,8 +158,21 @@ impl<T> Inner<T> {
 		// new group because the attempted frame advanced the group-local compression state.
 		track.write(count.at, &frame)?;
 		frame.commit();
+		self.at = self.at.max(count.at);
 
 		Ok(())
+	}
+
+	fn poll_refresh(&mut self, waiter: &kio::Waiter) -> std::task::Poll<Result<()>> {
+		// A finished track still has subscribers draining it, so its demand alone never says stop.
+		self.ensure_open()?;
+		std::task::ready!(self.refresh.poll(self.track.largest, waiter))?;
+
+		let Inner { track, encoder, at, .. } = self;
+		let frame = encoder.snapshot()?;
+		track.write(*at, &frame)?;
+		frame.commit();
+		std::task::Poll::Ready(Ok(()))
 	}
 
 	fn cut(&mut self) -> Result<()> {
@@ -174,6 +210,7 @@ impl<T: Serialize> Inner<T> {
 		let frame = encoder.push(value.value)?;
 		track.write(value.at, &frame)?;
 		frame.commit();
+		self.at = self.at.max(value.at);
 
 		Ok(())
 	}
@@ -185,6 +222,9 @@ struct Track {
 
 	/// The group an op would be appended to, open after a header.
 	group: Option<moq_net::group::Producer>,
+
+	/// The sequence of the newest group written, which a refresh has to pass.
+	largest: Option<u64>,
 }
 
 impl Track {
@@ -210,6 +250,7 @@ impl Track {
 		}
 
 		let mut group = self.inner.append_group()?;
+		self.largest = Some(group.sequence);
 		if let Err(err) = group.write_frame(timestamp, payload) {
 			// `append_group` already published this group, and a rejected frame (too large) doesn't
 			// close the track. Dropping the handle does NOT close the group, so leaving it would strand

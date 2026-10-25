@@ -2,7 +2,7 @@
 //!
 //! moq-quic contains a fully deterministic implementation of QUIC protocol logic. It contains
 //! no networking code and does not get any relevant timestamps from the operating system. Most
-//! users may want to use the futures-based quinn API instead.
+//! users can use the Tokio driver in `moq_tokio::quic::driver` instead.
 //!
 //! The moq-quic API might be of interest if you want to use it from a C or C++ project
 //! through C bindings or if you want to use a different event loop than the one tokio provides.
@@ -13,12 +13,10 @@
 //! managing a single connection and all the related state (such as streams).
 
 #![warn(missing_docs)]
-#![cfg_attr(test, allow(dead_code))]
-// Fixes welcome:
-#![warn(unreachable_pub)]
-#![allow(clippy::cognitive_complexity)]
-#![allow(clippy::too_many_arguments)]
-#![warn(clippy::use_self)]
+#![cfg_attr(
+    test,
+    allow(dead_code, reason = "test builds compile helpers only some tests call")
+)]
 
 use std::{
     fmt,
@@ -39,32 +37,30 @@ mod entropy;
 #[doc(hidden)]
 pub mod fuzz;
 mod range_set;
-#[cfg(all(test, any(feature = "rustls-aws-lc-rs", feature = "rustls-ring")))]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[cfg(all(test, any(feature = "aws-lc-rs", feature = "ring")))]
 mod tests;
 pub mod transport_parameters;
 mod varint;
 
 pub use varint::{VarInt, VarIntBoundsExceeded};
 
-#[cfg(feature = "bloom")]
 mod bloom_token_log;
-#[cfg(feature = "bloom")]
 pub use bloom_token_log::BloomTokenLog;
 
 mod connection;
 pub use crate::connection::{
-    Chunk, Chunks, ClosedStream, Connection, ConnectionError, ConnectionStats, Credit, CreditStats,
-    Datagrams, Event, FinishError, FrameStats, PathStats, ReadError, ReadableError, RecvStream,
-    RttEstimator, SendDatagramError, SendGroup, SendGroups, SendOptions, SendStream,
+    Chunk, Chunks, ClosedStream, Connection, ConnectionError, ConnectionStats, CreditStats,
+    Datagrams, Event, FinishError, FrameStats, LeaseError, Leased, PathStats, ReadError,
+    ReadableError, RecvStream, SendDatagramError, SendGroup, SendGroups, SendOptions, SendStream,
     ShouldTransmit, StreamEvent, Streams, UdpStats, WriteError, Written,
 };
 #[cfg(feature = "mux")]
+#[doc(hidden)]
 pub use connection::mux;
 #[cfg(feature = "qlog")]
 pub use connection::qlog::QlogStream;
 
-#[cfg(feature = "rustls")]
+#[cfg(any(feature = "ring", feature = "aws-lc-rs"))]
 pub use rustls;
 
 mod config;
@@ -101,7 +97,7 @@ pub use crate::shared::{ConnectionEvent, ConnectionId, EcnCodepoint, EndpointEve
 mod transport_error;
 pub use crate::transport_error::{Code as TransportErrorCode, Error as TransportError};
 
-pub mod congestion;
+use moq_congestion as congestion;
 
 mod cid_generator;
 pub use crate::cid_generator::{
@@ -117,11 +113,9 @@ pub use token_memory_cache::TokenMemoryCache;
 
 // Deal with time
 // MoQ's clock, so a caller-driven clock (a test's or the simulator's) reaches the state machine.
-pub(crate) use moq_clock::Instant;
-#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
-pub(crate) use std::time::{Duration, SystemTime, UNIX_EPOCH};
-#[cfg(all(target_family = "wasm", target_os = "unknown"))]
-pub(crate) use web_time::{Duration, SystemTime, UNIX_EPOCH};
+pub(crate) use moq_clock::{Instant, Wall};
+pub(crate) use std::time::Duration;
+pub(crate) const UNIX_EPOCH: Wall = Wall::UNIX_EPOCH;
 
 /// The QUIC protocol version implemented.
 pub const DEFAULT_SUPPORTED_VERSIONS: &[u32] = &[

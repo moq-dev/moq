@@ -153,10 +153,20 @@ case "$action" in
         # CI keeps Cargo's per-crate build timings, which check.yml uploads.
         timings=()
         [[ "${GITHUB_ACTIONS:-}" != true ]] || timings=(--timings)
+        # The tests behind the off-by-default device features join this build
+        # rather than compiling the workspace again per feature set. Those
+        # features only add code, so every test still runs. Cargo rejects a
+        # feature of a package outside the selection, hence the explicit picks.
+        features=()
+        if wants '(moq-video|moq-audio)'; then
+            [[ "$packages" == ALL ]] || flags+=(--package moq-video --package moq-audio)
+            features+=(moq-video/capture moq-audio/capture moq-audio/playback)
+        fi
+        if wants moq-cli; then features+=(moq-cli/play moq-cli/openh264); fi
+        # The WebRTC module's hostile-input tests, such as mDNS backpressure.
+        if wants moq-tokio; then features+=(moq-tokio/webrtc); fi
+        if ((${#features[@]})); then flags+=(--features "${features[*]}"); fi
         just rs test "${flags[@]}" ${timings[@]+"${timings[@]}"}
-        # Tests behind the off-by-default `capture` and `play` features.
-        if wants '(moq-video|moq-audio)'; then just rs capture-test ${timings[@]+"${timings[@]}"}; fi
-        if wants moq-cli; then just rs play ${timings[@]+"${timings[@]}"}; fi
         ;;
     platform)
         # moq-gst links GStreamer via pkg-config, which the runners don't have.

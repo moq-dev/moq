@@ -106,8 +106,8 @@ between the relays, and the subscriber's, each with that profile behind a
 100 kbit/s bottleneck with a 50ms queue, which a burst overruns. Its impaired
 lane also grants less QUIC credit than a burst needs at every endpoint: 16
 concurrent streams (each group is a stream, each FETCH another) and receive
-windows of a few groups, so senders wait on `MAX_STREAMS` and `MAX_DATA` that
-the path can lose. The bottleneck sits below the rate those windows allow, so
+windows of a few groups, so senders wait on `MAX_STREAMS` and `MAX_DATA` under
+congestion. The bottleneck sits below the rate those windows allow, so
 both bind, and the drill fails unless some burst overflowed a queue. Its
 loopback lane keeps the defaults.
 
@@ -150,9 +150,14 @@ judge quality, latency or throughput; those run on a congested path (see
 `test/ts/README.md`). Every drill here proves correctness: that a resource is
 released, a failure surfaces, a route or publisher comes back, or every group is
 recovered. The cluster drills' 10s bound on each group is a stall check, a third
-of the 30s stalls of #4349, not a latency target. So the impaired lane keeps its
-loss, which is what drops the `MAX_STREAMS` and `MAX_DATA` frames the cluster
-drills' senders wait on.
+of the 30s stalls of #4349, not a latency target. The lifecycle drills keep their random correctness faults. The cluster drills
+instead use a fixed delay and finite rate-limit queue, with no random loss,
+jitter, or reordering: the forced overflow drops datagrams. Their overflow,
+credit, and per-group completion assertions establish that congestion acted
+without requiring a random impairment to be drawn. The [QUIC flow-control
+tests](../../rs/moq-quic/src/tests/mod.rs) separately drop the first
+`MAX_STREAMS`, `MAX_STREAM_DATA`, and `MAX_DATA` grants, prove the sender stays
+blocked, and require retransmitted grants to restore progress.
 
 The same shaper is a binary, for putting in front of a relay from another
 process. It applies one profile both ways, prints the seed at start and the

@@ -32,7 +32,7 @@
     # The quest CLI, which also serves the quest guide and skills the stubs in
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
-      url = "github:kixelated/quest/a73fb295a3679ff54205af68a1a7bb8ec5bdc7af";
+      url = "github:kixelated/quest/cbd939adf5043f083e24e0302d40f7618c09f427";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
     };
@@ -375,8 +375,11 @@
           # The upstream repository ignores Cargo.lock so cargo installs test
           # the unlocked resolver. Nix still consumes committed lock data.
           cargoLock.lockFile = ./nix/uniffi-dart-Cargo.lock;
-          # Enum fields must use the record's converter name without renaming it.
-          patches = [ ./nix/uniffi-dart-record-error.patch ];
+          # Carry record converter and per-operation cancellation fixes at the source.
+          patches = [
+            ./nix/uniffi-dart-record-error.patch
+            ./nix/uniffi-dart-cancellation.patch
+          ];
           postPatch = ''
             cp ${./nix/uniffi-dart-Cargo.lock} Cargo.lock
           '';
@@ -399,22 +402,22 @@
         #
         # This points at a fork of LiveKit's async branch (livekit/uniffi-bindgen-cpp
         # PR #1): neither LiveKit nor NordSecurity has a uniffi 0.32 generator,
-        # and the fork adds `error_style = "expected"` and `strip_type_prefix`,
-        # which cpp/moq/uniffi.toml turns on. Its tags add a `-kixelated.N`
-        # pre-release so they never collide with upstream's. Move back upstream
-        # once one tags both.
+        # and the fork adds `error_style = "expected"`, `strip_type_prefix`, and
+        # `strip_function_prefix`, which cpp/moq/uniffi.toml turns on. Its tags
+        # add a `-kixelated.N` pre-release so they never collide with upstream's.
+        # Move back upstream once one tags both.
         uniffi-bindgen-cpp = pkgs.rustPlatform.buildRustPackage rec {
           pname = "uniffi-bindgen-cpp";
-          version = "0.11.0-kixelated.5+v0.32.2";
+          version = "0.11.0-kixelated.7+v0.32.2";
 
           src = pkgs.fetchFromGitHub {
             owner = "kixelated";
             repo = "uniffi-bindgen-cpp";
             rev = "v${version}";
-            hash = "sha256-y148irMNOsMrfjbUT/f3jlNmpxT0/z/2LVlP+t1oq8I=";
+            hash = "sha256-nErLn2hQus5omIaFheJWy06wKQS9HiKNtksxaJm9Z8k=";
           };
 
-          cargoHash = "sha256-QBURLIg255O6J4A+wzZVk4cUJPdJb6JepZKofX0fLZg=";
+          cargoHash = "sha256-fz7fn6D12zmFFSVSdySDfNRtQe+n4KCB9bXAsuvq/QY=";
 
           # The workspace's other member is the fixture crate, which pulls the
           # uniffi examples in from git; build only the generator.
@@ -574,6 +577,12 @@
         legacyPackages = {
           inherit (pkgs) gst_all_1;
 
+          # Nightly conformance needs both pinned Moxygen endpoints. Keep this
+          # C++ dependency build out of the default shell and flake checks.
+          moxygen = pkgs.callPackage ./nix/moxygen.nix { };
+
+          runner-userns-profile = import ./nix/runner/unshare.nix { inherit pkgs; };
+
           # `nix develop .#obs`: the default shell plus obs-studio, which linking
           # the plugin on Linux needs (`just obs build`, `just obs ci`). Kept out
           # of the default shell because it pulls in ~3 GB (CEF, mostly) that
@@ -665,8 +674,8 @@
         # test` (see rs/justfile), reaching mbx through the Cargo shim the dev
         # shell puts on PATH. Neither path goes through crane.
         # `nix flake check` is kept -- it still validates flake eval + builds the
-        # dev shell -- but no longer compiles the workspace, so it's cheap
-        # enough that `just check` runs it on any Nix/Rust input change. Release
+        # runner tests. The dispatcher runs it for Nix and packaging inputs;
+        # Rust source changes use the Cargo gate above. Release
         # artifacts still build via crane `buildPackage` (see `packages` above /
         # release-*.yml).
         #

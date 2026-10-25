@@ -4,7 +4,7 @@
 
 The slowest, flakiest, and least valuable tests are sped up, fixed, deleted,
 or planned, so the suite costs what it earns. Workflows and jobs belong to the
-[CI workflow audit](/quest/m1/audit-ci.md).
+[CI workflow audit](/quest/m2/audit-ci.md).
 
 ## Plan
 
@@ -65,13 +65,12 @@ Check first:
   stops counting an unanswered handshake as active immediately while the
   closing period still answers late packets. Do not repeat the old request
   to skip draining. [moq-dev/moq#6240](https://github.com/moq-dev/moq/pull/6240)
-  proposes retiring the silent-peer quest as complete.
+  retired the silent-peer quest as complete.
 - moq-uring: three endpoint tests wait out moq-quic's fixed 10 s handshake
   idle timeout (30 s together). Neither moq-uring's `Transport` nor
   `--quic-idle-timeout` sets it. #6201 does not change that timeout. The
-  [retirement proposal](https://github.com/moq-dev/moq/pull/6240) records
-  keeping it separate with no new knob; follow its maintainer decision
-  rather than independently selecting another API in a cost audit.
+  [retirement](https://github.com/moq-dev/moq/pull/6240) settled keeping it
+  separate with no new knob; do not select another API in a cost audit.
 - CPU-bound simulations in a debug build: five TS export timing cases (3 to
   11 s each) and the jitter buffer's day of drift (6 to 13 s), whose `Steer`
   rebuilds the hull and median over its whole window on every step.

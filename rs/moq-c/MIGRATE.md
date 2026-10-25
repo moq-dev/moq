@@ -4,6 +4,43 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Sessions report a lifecycle snapshot
+
+`moq_session_connect` and `moq_session_request_accept` take a `moq_state_callback` instead of a `moq_status_callback`: `void on_state(void *user_data, const moq_connection_state *state)`.
+Each change delivers a `moq_connection_state` with `phase`, `connects`, `failure`, and the live `protocol`; copy what you keep, since it is valid only during the callback.
+Read `state->connects` where you read a positive status code. A failed dial or dropped connection now fires the callback with a negative `failure`, so drop your `moq_session_failure` polling; `moq_error()` describes it during the callback.
+The terminal call has phase `MOQ_CONNECTION_PHASE_CLOSED`, with `failure` zero after a requested close or the error that ended the session, where the terminal status code used to be. Release `user_data` there, as before.
+
+### Exact encoder rates and publication options
+
+`moq_video_encoder_input.framerate` is now `moq_video_frame_rate { numerator,
+denominator }`, changing the C ABI layout. Replace `30` with `{30, 1}` or use
+`{30000, 1001}` for an exact fractional rate. Both components must be nonzero;
+rates above 1,000,000 fps are refused. Recompile callers with the generated header
+and matching native library. Invalid rational rates return `MOQ_ERROR_INVALID_CONFIG`.
+Audio and publication track arguments are unchanged.
+
+### Video rendition preference
+
+`moq_video_config` gains `int32_t preference`. Initialize it to `0` to keep the default ranking; higher values are preferred and compatibility transcodes use `-1`. Rebuild C consumers against the matching header and library because the struct layout changes.
+
+### A broadcast reference waits for its sibling's announcement (#6254)
+
+`moq_consume_video` and `moq_consume_audio` on a rendition whose catalog `broadcast` field names a sibling now wait for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
+Where you skipped such a rendition on that error, give up on it yourself with `moq_consume_video_cancel` or `moq_consume_audio_cancel`.
+
+### JSON snapshot `delta_ratio` is `deltas`
+
+`moq_json_snapshot_config.delta_ratio` is replaced by `bool deltas`.
+Set `deltas = false` where you set `delta_ratio = 0`, and `deltas = true` for any positive ratio.
+With deltas on, the track carries a refresh ratio of 8 and the producer restates the value in a new group when a joiner asks.
+
+### Priorities are signed (#6142)
+
+`moq_track_info.priority` and `moq_subscription.priority` are `int8_t`, and `moq_group_request_priority` writes an `int8_t`, which changes the ABI.
+Higher is first and 0 is the unset midpoint, so a zeroed `moq_track_info` now uses the default priority rather than the least urgent one.
+To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
+
 ### A client asks only about what it watches (#6165)
 
 On moq-lite, a client session asks its relay for announcements only under paths something watches, through `moq_origin_announced` or `moq_origin_announced_broadcast`, instead of under its whole scope at connect.
@@ -16,9 +53,15 @@ moq-transport and moq-lite-03/04 sessions are unchanged.
 A container import with `MOQ_CONTAINER_FORMAT_FMP4` now publishes one Legacy frame per sample instead of one CMAF frame per fragment.
 Pass the new `MOQ_CONTAINER_FORMAT_CMAF` to keep publishing CMAF.
 
+### Timestamps stop at 2^61 - 1 microseconds (#6168)
+
+Writing a frame, or any other call that takes a timestamp, fails with `MOQ_ERROR_TIMESTAMP_OVERFLOW` past `2^61 - 1` microseconds instead of `2^62 - 1`, the most moq-lite-05/06 can carry.
+A received timestamp past it fails the group as a malformed track.
+Clamp timestamps you build from unbounded input to `2^61 - 1`.
+
 ### Finished tracks stay until the broadcast ends (#6157)
 
-`moq_publish_track_finish`, `moq_publish_media_finish`, `moq_publish_container_finish`, and the encoder finishes now release the handle while the broadcast keeps the finished track listed, with its catalog rendition and demand, until `moq_publish_close` or the new `moq_publish_finish_close`.
+`moq_publish_track_finish`, `moq_publish_media_finish`, `moq_publish_container_finish`, and the encoder finishes now release the handle while the broadcast keeps the finished track listed, with its catalog rendition and demand, until `moq_publish_close`.
 Publish a replacement under a new name, and expect a finished track's demand terminal callback when the broadcast closes rather than at the finish.
 
 ### A claim answers by publishing (#5678)
@@ -156,6 +199,7 @@ if (frame.timestamp_present) use(frame.timestamp_us);
 ### `moq_publish_finish` is removed (#4152)
 
 Close the broadcast with `moq_publish_close`.
+To end its content first, call `moq_publish_catalog_finish`; the broadcast stays up until `moq_publish_close`.
 
 ### A decoded frame can fail on its own (#4094)
 

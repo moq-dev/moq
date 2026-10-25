@@ -10,8 +10,8 @@ pub enum Error {
 	#[error("not found: {0}")]
 	NotFound(String),
 
-	/// The recording format version is not the current one.
-	#[error("unknown version {0}")]
+	/// The recording format version is unknown, or older than the current one when writing.
+	#[error("unsupported version {0}")]
 	Version(u64),
 
 	/// A group ID, segment ID, or frame timestamp is outside 0 through 2^53 - 1.
@@ -26,9 +26,9 @@ pub enum Error {
 	#[error("priority {existing} does not match {intended}")]
 	Priority {
 		/// The priority already recorded.
-		existing: u8,
+		existing: i8,
 		/// The priority the caller wanted to record.
-		intended: u8,
+		intended: i8,
 	},
 
 	/// An existing `.info` has a different timescale, `None` when untimed.
@@ -71,10 +71,6 @@ pub enum Error {
 	/// A backend returned a directory from the flat object listing API.
 	#[error("directory listing is unsupported: {0}")]
 	Directory(String),
-
-	/// A pagination continuation was passed to streaming list.
-	#[error("continuation query requires list_paginated")]
-	Pagination,
 
 	/// A create collided with different object bytes.
 	#[error("conflicting object: {0}")]

@@ -27,6 +27,12 @@ pub(in crate::model) trait Holdings {
 	/// Whether the track carries timestamps at all.
 	fn timed(&self) -> bool;
 
+	/// Whether the groups are a copy received over a wire that can't resolve relative or
+	/// time anchors as the publisher would, so only what [`Range::is_wire`] covers reads.
+	fn drops_anchors(&self) -> bool {
+		false
+	}
+
 	/// Where `pts` falls among the groups with a known start.
 	fn containing(&self, pts: Timestamp) -> Containing;
 
@@ -112,6 +118,8 @@ pub(in crate::model) struct Window {
 	spans: Vec<Span>,
 	/// The groups the spans cover, an unsettled time end through its cap.
 	groups: RangeInclusiveSet<u64>,
+	/// The part of `groups` a miss may ask for: see [`Self::missable`].
+	missable: RangeInclusiveSet<u64>,
 	/// A relative anchor waits on a first group, so nothing is filtered yet.
 	pending: bool,
 	/// Nothing is left to resolve: see [`Self::is_settled`]. Kept so a read checks it once
@@ -128,6 +136,9 @@ struct Span {
 	end: End,
 	/// Whether the start names a group, rather than reaching back to the oldest one.
 	floored: bool,
+	/// The lowest group a miss asks for. A time start before every group held asks none
+	/// below the oldest: which of them it reaches is unknown until they start.
+	reach: u64,
 }
 
 impl Span {
@@ -311,12 +322,14 @@ impl TimeEnd {
 impl Window {
 	/// Resolve `ranges`, counting relative anchors back from `latest`.
 	///
-	/// Refuses a time anchor on an untimed track with [`Error::TimestampMismatch`].
+	/// Refuses a time anchor on an untimed track with [`Error::TimestampMismatch`], and an
+	/// anchor a received copy's wire drops with [`Error::Unsupported`].
 	pub fn new(ranges: &[Range], latest: Option<u64>, holdings: &impl Holdings) -> Result<Self> {
 		let mut window = Self {
 			ranges: ranges.to_vec(),
 			spans: Vec::new(),
 			groups: RangeInclusiveSet::new(),
+			missable: RangeInclusiveSet::new(),
 			pending: false,
 			settled: false,
 		};
@@ -389,37 +402,28 @@ impl Window {
 	}
 
 	/// Whether a datagram is in range, judged on its own and never through a time end's
-	/// settling: its `timestamp` against each range's times, its `sequence` against the
-	/// range's absolute groups and the relative ones resolved so far, and its `object` ID
-	/// against the frames that same range covers in its group.
-	pub fn admits_datagram(&self, sequence: u64, timestamp: Option<Timestamp>, object: u64) -> bool {
-		let framed = |range: &Range| {
-			let (start, end) = frames(range, sequence);
-			object >= start && end.is_none_or(|end| object < end)
-		};
+	/// settling: its `timestamp` against each range's times, and its `sequence` against the
+	/// range's absolute groups and the relative ones resolved so far.
+	pub fn admits_datagram(&self, sequence: u64, timestamp: Option<Timestamp>) -> bool {
 		let Some(timestamp) = timestamp else {
-			return self.pending
-				|| self
-					.spans
-					.iter()
-					.any(|span| span.covers(sequence) && framed(&self.ranges[span.index]));
+			return self.pending || self.spans.iter().any(|span| span.covers(sequence));
 		};
 		self.ranges
 			.iter()
 			.enumerate()
-			.filter(|(_, range)| !range.is_empty() && framed(range))
+			.filter(|(_, range)| !range.is_empty())
 			.any(|(index, range)| {
 				// A relative anchor still waiting on a latest group bounds nothing yet.
 				let span = self.spans.iter().find(|span| span.index == index);
 				let started = match range.start {
 					Anchor::Time(pts) => !later(pts, timestamp),
-					Anchor::Absolute(start) => sequence >= start.group,
+					Anchor::Absolute(start) => sequence >= start,
 					Anchor::Relative(_) => span.is_none_or(|span| sequence >= span.start),
 				};
 				let ended = match range.end {
 					None => true,
 					Some(Anchor::Time(pts)) => !later(timestamp, pts),
-					Some(Anchor::Absolute(end)) => end.final_sequence().is_none_or(|end| sequence < end),
+					Some(Anchor::Absolute(end)) => sequence < end,
 					Some(Anchor::Relative(_)) => {
 						span.is_none_or(|span| !matches!(span.end, End::Before(end) if sequence >= end))
 					}
@@ -476,35 +480,27 @@ impl Window {
 
 	/// The groups in range from `from` on, lowest first.
 	pub fn runs(&self, from: u64) -> impl Iterator<Item = ops::RangeInclusive<u64>> + '_ {
+		self.from(&self.groups, from)
+	}
+
+	/// The groups in range from `from` on that a miss may ask for, lowest first: all of
+	/// them but those below the oldest group held when a time start fell before it.
+	pub fn missable(&self, from: u64) -> impl Iterator<Item = ops::RangeInclusive<u64>> + '_ {
+		self.from(&self.missable, from)
+	}
+
+	fn from<'a>(
+		&'a self,
+		groups: &'a RangeInclusiveSet<u64>,
+		from: u64,
+	) -> impl Iterator<Item = ops::RangeInclusive<u64>> + 'a {
 		let all = self.pending.then_some(from..=u64::MAX);
 		let runs = (!self.pending).then(|| {
-			self.groups
+			groups
 				.overlapping(from..=u64::MAX)
 				.map(move |run| (*run.start()).max(from)..=*run.end())
 		});
 		all.into_iter().chain(runs.into_iter().flatten())
-	}
-
-	/// The frames of group `sequence` in range: from a start frame up to an exclusive end,
-	/// `None` through the group's end.
-	///
-	/// Only an absolute anchor names a frame, so a group a range starts or ends inside reads
-	/// part of itself and every other group reads whole. Ranges that cover a group
-	/// differently read the hull of their frames, since a group is handed out once, as one
-	/// run of frames. Everything while a relative anchor waits.
-	pub fn frames(&self, sequence: u64) -> (u64, Option<u64>) {
-		if self.pending {
-			return (0, None);
-		}
-		let mut hull = None;
-		for span in self.spans.iter().filter(|span| span.covers(sequence)) {
-			let (start, end) = frames(&self.ranges[span.index], sequence);
-			hull = Some(match hull {
-				None => (start, end),
-				Some((low, high)) => (start.min(low), end.zip(high).map(|(end, high)| end.max(high))),
-			});
-		}
-		hull.unwrap_or((0, None))
 	}
 
 	/// The first run of `range` that is in range.
@@ -531,6 +527,9 @@ impl Window {
 		{
 			return Err(Error::TimestampMismatch);
 		}
+		if holdings.drops_anchors() && !self.ranges.iter().all(Range::is_wire) {
+			return Err(Error::Unsupported);
+		}
 		self.spans.clear();
 		self.pending = false;
 		for (index, range) in self.ranges.iter().enumerate().filter(|(_, range)| !range.is_empty()) {
@@ -546,11 +545,16 @@ impl Window {
 				}
 				end => end,
 			};
+			let reach = match range.start {
+				Anchor::Time(_) if !floored => holdings.next_start(0).map_or(start, |(oldest, _)| oldest),
+				_ => start,
+			};
 			self.spans.push(Span {
 				index,
 				start,
 				end,
 				floored,
+				reach,
 			});
 		}
 		self.rebuild();
@@ -560,6 +564,7 @@ impl Window {
 	fn rebuild(&mut self) {
 		self.settled = !self.pending && !self.spans.iter().any(|span| matches!(span.end, End::Time(_)));
 		self.groups = RangeInclusiveSet::new();
+		self.missable = RangeInclusiveSet::new();
 		for span in &self.spans {
 			let last = match span.limit() {
 				Some(end) => match end.checked_sub(1) {
@@ -569,30 +574,18 @@ impl Window {
 				None => u64::MAX,
 			};
 			self.groups.insert(span.start..=last);
+			if span.reach <= last {
+				self.missable.insert(span.reach..=last);
+			}
 		}
 	}
-}
-
-/// The frames of group `sequence` that `range` names, if it covers that group: from a start
-/// frame up to an exclusive end, `None` through the group's end. Only an absolute anchor
-/// names a frame; a head-of-group end covers nothing of its group, so it never gets here.
-fn frames(range: &Range, sequence: u64) -> (u64, Option<u64>) {
-	let start = match range.start {
-		Anchor::Absolute(start) if start.group == sequence => start.frame,
-		_ => 0,
-	};
-	let end = match range.end {
-		Some(Anchor::Absolute(end)) if end.group == sequence => Some(end.frame),
-		_ => None,
-	};
-	(start, end)
 }
 
 /// The first group a range starts at, and whether it names that group rather than
 /// reaching back to the oldest one. `None` while it waits on a latest group.
 fn start(anchor: Anchor, latest: Option<u64>, holdings: &impl Holdings) -> Option<(u64, bool)> {
 	match anchor {
-		Anchor::Absolute(start) => Some((start.group, true)),
+		Anchor::Absolute(start) => Some((start, true)),
 		// Nothing sits below group 0, so the farthest offset needs no latest group.
 		Anchor::Relative(u64::MAX) => Some((0, false)),
 		Anchor::Relative(back) => Some((latest?.saturating_sub(back), true)),
@@ -611,7 +604,7 @@ fn start(anchor: Anchor, latest: Option<u64>, holdings: &impl Holdings) -> Optio
 fn end(anchor: Option<Anchor>, latest: Option<u64>) -> Option<End> {
 	Some(match anchor {
 		None => End::Open,
-		Some(Anchor::Absolute(end)) => end.final_sequence().map_or(End::Open, End::Before),
+		Some(Anchor::Absolute(end)) => End::Before(end),
 		Some(Anchor::Relative(back)) => latest?
 			.saturating_sub(back)
 			.checked_add(1)
@@ -622,7 +615,6 @@ fn end(anchor: Option<Anchor>, latest: Option<u64>) -> Option<End> {
 
 #[cfg(test)]
 mod tests {
-	use super::super::Position;
 	use super::*;
 
 	use std::cell::Cell;
@@ -761,61 +753,10 @@ mod tests {
 			]
 		);
 
-		// A mid-group end includes its group, a head-of-group end excludes it.
-		let window = Window::new(
-			&[range(
-				Anchor::Absolute(Position { group: 1, frame: 2 }),
-				Anchor::Absolute(Position { group: 3, frame: 1 }),
-			)],
-			None,
-			&Untimed,
-		)
-		.unwrap();
-		assert_eq!(covered(&window, 6), vec![1, 2, 3]);
-		assert_eq!(window.end(), Some(4));
-
 		// Nothing asked for is nothing in range, floored nowhere.
 		let window = Window::new(&[], None, &Untimed).unwrap();
 		assert_eq!(covered(&window, 4), Vec::<u64>::new());
 		assert_eq!((window.floor(), window.end()), (Some(0), Some(0)));
-	}
-
-	/// Only a group an absolute anchor falls inside reads part of itself, and overlapping
-	/// ranges read the hull of their frames there.
-	#[test]
-	fn frames_bound_only_the_groups_an_anchor_falls_inside() {
-		let at = |group, frame| Anchor::Absolute(Position { group, frame });
-		let window = Window::new(&[range(at(4, 5), at(6, 3))], None, &Untimed).unwrap();
-		assert_eq!(window.frames(4), (5, None));
-		assert_eq!(window.frames(5), (0, None));
-		assert_eq!(window.frames(6), (0, Some(3)));
-
-		// Within one group, both ends bound it.
-		let window = Window::new(&[range(at(4, 2), at(4, 7))], None, &Untimed).unwrap();
-		assert_eq!(window.frames(4), (2, Some(7)));
-
-		// A second range reaching further either way widens the group to cover both.
-		let window = Window::new(&[range(at(4, 5), at(4, 7)), range(at(4, 2), at(4, 6))], None, &Untimed).unwrap();
-		assert_eq!(window.frames(4), (2, Some(7)));
-		let window = Window::new(&[range(at(4, 5), None), range(at(2, 0), at(4, 3))], None, &Untimed).unwrap();
-		assert_eq!(window.frames(4), (0, None));
-
-		// Relative anchors cover whole groups, and a pending one bounds nothing yet.
-		let window = Window::new(&[range(Anchor::Relative(1), at(9, 2))], Some(9), &Untimed).unwrap();
-		assert_eq!((window.frames(8), window.frames(9)), ((0, None), (0, Some(2))));
-		let window = Window::new(&[range(at(4, 5), None), Range::live()], None, &Untimed).unwrap();
-		assert_eq!(window.frames(4), (0, None));
-
-		// A time end covers whole groups, through its cap while it waits to settle.
-		let groups = Groups::new([Groups::started(4, 4000), Groups::started(5, 5000), (6, Held::Pending)]);
-		let window = Window::new(
-			&[range(at(6, 2), None), range(time(4500), time(5000))],
-			Some(6),
-			&groups,
-		)
-		.unwrap();
-		assert!(!window.is_settled());
-		assert_eq!(window.frames(6), (0, None));
 	}
 
 	/// Relative anchors count back from the latest group, both ends whole groups, and wait
@@ -924,12 +865,7 @@ mod tests {
 	#[test]
 	fn an_unsettled_time_end_reads_one_group_on_speculation() {
 		let mut groups = Groups::new([(3, Held::Pending), (4, Held::Pending), (5, Held::Pending)]);
-		let mut window = Window::new(
-			&[range(Anchor::Absolute(Position::group(3)), time(3500))],
-			Some(5),
-			&groups,
-		)
-		.unwrap();
+		let mut window = Window::new(&[range(Anchor::Absolute(3), time(3500))], Some(5), &groups).unwrap();
 		assert_eq!(covered(&window, 8), vec![3]);
 
 		groups.held.insert(3, Held::Started(at(3000)));
@@ -985,14 +921,9 @@ mod tests {
 	/// A datagram is one frame, so its own timestamp places it against a time end.
 	#[test]
 	fn a_datagram_is_judged_by_its_own_timestamp() {
-		let window = Window::new(
-			&[range(Anchor::Absolute(Position::group(0)), time(3500))],
-			None,
-			&Groups::default(),
-		)
-		.unwrap();
-		assert!(window.admits_datagram(9, Some(at(3500)), 0));
-		assert!(!window.admits_datagram(9, Some(at(3600)), 0));
+		let window = Window::new(&[range(Anchor::Absolute(0), time(3500))], None, &Groups::default()).unwrap();
+		assert!(window.admits_datagram(9, Some(at(3500))));
+		assert!(!window.admits_datagram(9, Some(at(3600))));
 	}
 
 	/// Groups whose `racing` one starts past the end after the first time it is asked
@@ -1040,12 +971,7 @@ mod tests {
 			racing: 1,
 			asked: Cell::new(false),
 		};
-		let window = Window::new(
-			&[range(Anchor::Absolute(Position::group(0)), time(5000))],
-			None,
-			&racing,
-		)
-		.unwrap();
+		let window = Window::new(&[range(Anchor::Absolute(0), time(5000))], None, &racing).unwrap();
 		assert_eq!(window.resolved(), vec![Some(Resolved { start: 0, end: Some(1) })]);
 	}
 
@@ -1069,12 +995,7 @@ mod tests {
 	#[test]
 	fn a_time_end_stops_walking_at_the_last_sequence() {
 		let groups = Groups::new([Groups::started(u64::MAX, 3000)]);
-		let window = Window::new(
-			&[range(Anchor::Absolute(Position::group(u64::MAX)), time(5000))],
-			None,
-			&groups,
-		)
-		.unwrap();
+		let window = Window::new(&[range(Anchor::Absolute(u64::MAX), time(5000))], None, &groups).unwrap();
 		assert_eq!(
 			window.resolved(),
 			vec![Some(Resolved {
@@ -1096,53 +1017,49 @@ mod tests {
 		};
 		let window = Window::new(&[range(time(0), time(5000))], None, &groups).unwrap();
 		assert_eq!(window.resolved(), vec![Some(Resolved { start: 0, end: Some(2) })]);
-		assert!(window.admits_datagram(1, Some(at(4000)), 0));
-		assert!(!window.admits_datagram(1, Some(at(7000)), 0));
+		assert!(window.admits_datagram(1, Some(at(4000))));
+		assert!(!window.admits_datagram(1, Some(at(7000))));
 	}
 
 	#[test]
 	fn a_waiting_window_judges_a_datagram_against_both_times() {
 		let window = Window::new(&[range(time(3000), time(3500))], None, &Groups::default()).unwrap();
 		assert!(window.is_pending(), "no group has started");
-		assert!(!window.admits_datagram(0, Some(at(2900)), 0));
-		assert!(window.admits_datagram(1, Some(at(3000)), 0));
-		assert!(window.admits_datagram(2, Some(at(3500)), 0));
-		assert!(!window.admits_datagram(3, Some(at(3600)), 0));
+		assert!(!window.admits_datagram(0, Some(at(2900))));
+		assert!(window.admits_datagram(1, Some(at(3000))));
+		assert!(window.admits_datagram(2, Some(at(3500))));
+		assert!(!window.admits_datagram(3, Some(at(3600))));
 	}
 
 	#[test]
 	fn a_waiting_window_judges_a_datagram_against_absolute_groups_too() {
 		let window = Window::new(
-			&[range(time(3000), Some(Anchor::Absolute(Position::group(10))))],
+			&[range(time(3000), Some(Anchor::Absolute(10)))],
 			None,
 			&Groups::default(),
 		)
 		.unwrap();
 		assert!(window.is_pending(), "no group has started");
-		assert!(window.admits_datagram(9, Some(at(3500)), 0));
-		assert!(!window.admits_datagram(10, Some(at(3500)), 0));
-		assert!(!window.admits_datagram(9, Some(at(2900)), 0));
+		assert!(window.admits_datagram(9, Some(at(3500))));
+		assert!(!window.admits_datagram(10, Some(at(3500))));
+		assert!(!window.admits_datagram(9, Some(at(2900))));
 	}
 
-	/// A datagram is in range only when one range admits its sequence, time, and Object ID
-	/// together, not when each passes a different range.
+	/// A datagram is in range only when one range admits its sequence and time together,
+	/// not when each passes a different range.
 	#[test]
 	fn a_datagram_is_judged_against_one_range_at_a_time() {
-		let pos = |group, frame| Anchor::Absolute(Position { group, frame });
 		let groups = Groups::new([Groups::started(5, 5000)]);
 		// The time range covers group 5 whole, but only from 5500 on.
-		let window = Window::new(&[range(pos(5, 1), None), range(time(5500), None)], Some(5), &groups).unwrap();
-		assert!(!window.admits_datagram(5, Some(at(5000)), 0));
-		assert!(window.admits_datagram(5, Some(at(5000)), 1));
-		assert!(window.admits_datagram(5, Some(at(5500)), 0));
-
-		// Untimed, two ranges splitting a group admit only the Object IDs each names.
-		let window = Window::new(&[range(pos(4, 1), pos(4, 2)), range(pos(4, 5), None)], None, &Untimed).unwrap();
-		assert_eq!(window.frames(4), (1, None), "a group stream reads the hull");
-		let admitted: Vec<u64> = (0..7)
-			.filter(|object| window.admits_datagram(4, None, *object))
-			.collect();
-		assert_eq!(admitted, vec![1, 5, 6]);
+		let window = Window::new(
+			&[range(Anchor::Absolute(6), None), range(time(5500), None)],
+			Some(5),
+			&groups,
+		)
+		.unwrap();
+		assert!(!window.admits_datagram(5, Some(at(5000))));
+		assert!(window.admits_datagram(5, Some(at(5500))));
+		assert!(window.admits_datagram(6, Some(at(5000))));
 	}
 
 	#[test]

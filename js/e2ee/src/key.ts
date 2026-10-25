@@ -1,6 +1,6 @@
 import type { Epoch } from "@moq/net";
 import type { Credential } from "./credential.ts";
-import { type Domain, keyInfo, type Name, nonce } from "./derive.ts";
+import { type Domain, keyInfo, nonce } from "./derive.ts";
 import { Failure } from "./failure.ts";
 import { MAX_INVOCATIONS, MAX_PLAINTEXT_BYTES, TAG_LEN } from "./limits.ts";
 import { expand } from "./secret.ts";
@@ -76,23 +76,28 @@ export class TrackKey {
 	}
 }
 
-/** The 16 key bytes for one physical name and domain under a generation. */
+/** The 16 key bytes for one semantic name and domain under a generation. */
 export function keyBytes(
 	credential: Credential,
 	epoch: Epoch.Valid,
-	name: Name,
+	semantic: string,
 	domain: Domain,
 ): Promise<Uint8Array<ArrayBuffer>> {
-	return expand(credential, keyInfo(credential.context, epoch, credential.kid, name, domain));
+	return expand(credential, keyInfo(credential.context, epoch, credential.kid, semantic, domain));
 }
 
-/** A fresh accounting handle over a nonextractable AES-128-GCM key for one physical name and domain. */
-export function trackKey(credential: Credential, epoch: Epoch.Valid, name: Name, domain: Domain): TrackKey {
-	return new TrackKey(aesKey(credential, epoch, name, domain));
+/** A fresh accounting handle over a nonextractable AES-128-GCM key for one semantic name and domain. */
+export function trackKey(credential: Credential, epoch: Epoch.Valid, semantic: string, domain: Domain): TrackKey {
+	return new TrackKey(aesKey(credential, epoch, semantic, domain));
 }
 
-async function aesKey(credential: Credential, epoch: Epoch.Valid, name: Name, domain: Domain): Promise<CryptoKey> {
-	const bytes = await keyBytes(credential, epoch, name, domain);
+async function aesKey(
+	credential: Credential,
+	epoch: Epoch.Valid,
+	semantic: string,
+	domain: Domain,
+): Promise<CryptoKey> {
+	const bytes = await keyBytes(credential, epoch, semantic, domain);
 	try {
 		return await crypto.subtle.importKey("raw", bytes, "AES-GCM", false, ["encrypt", "decrypt"]);
 	} finally {

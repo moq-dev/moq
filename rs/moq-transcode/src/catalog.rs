@@ -288,7 +288,7 @@ pub(crate) fn resolve_rungs(ladder: &Ladder, source_name: &str, source: &VideoCo
 
 	let mut resolved: Vec<Resolved> = Vec::new();
 	for rung in ladder.rungs() {
-		let side = u64::from(rung.size);
+		let side = u64::from(rung.short_side);
 		let source_side = source_width.min(source_height);
 		if side > source_side {
 			continue;
@@ -307,8 +307,8 @@ pub(crate) fn resolve_rungs(ladder: &Ladder, source_name: &str, source: &VideoCo
 			continue;
 		}
 		resolved.push(Resolved {
-			name: format!("video/{}p", rung.size),
-			short_side: rung.size,
+			name: format!("video/{}p", rung.short_side),
+			short_side: rung.short_side,
 			size: moq_video::Size::new(width as u32, height as u32),
 			bitrate: rung.bitrate,
 			framerate,
@@ -410,7 +410,6 @@ pub(crate) fn populate(
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use hang::catalog::H264;
 
@@ -966,6 +965,33 @@ mod tests {
 		assert_eq!(decoders.probed, [(Codec::H265, false)]);
 	}
 
+	/// The ladder transcodes video alone: audio is referenced in the source, with every field kept,
+	/// so a player decodes exactly what the source published.
+	#[test]
+	fn populate_passes_audio_through_untouched() {
+		let mut child = moq_mux::catalog::hang::Catalog::<()>::default();
+		let mut audio = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+		audio.description = Some(
+			moq_mux::codec::opus::Config::new(48_000, 2)
+				.with_pre_skip(312)
+				.encode()
+				.unwrap(),
+		);
+		audio.bitrate = Some(128_000);
+		audio.track = Some("1.m4s".to_string());
+		audio.jitter = Some(std::time::Duration::from_millis(20));
+		child.audio.insert("audio", audio.clone()).unwrap();
+
+		let rel = RelativeOwned::from(".".to_string());
+		let mut out = moq_mux::catalog::hang::Catalog::<()>::default();
+		populate(&mut out, &child, &[], Some(&rel)).unwrap();
+
+		let mut expected = audio;
+		expected.broadcast = Some(rel);
+		assert_eq!(out.audio.renditions.get("audio"), Some(&expected));
+		assert_eq!(out.audio.renditions.len(), 1);
+	}
+
 	#[test]
 	fn populate_preserves_the_child_archive() {
 		let mut child = moq_mux::catalog::hang::Catalog::<()>::default();
@@ -994,13 +1020,13 @@ mod tests {
 	/// `modify()`, so the derivative's clock carries that mapping and its data is stamped on it.
 	#[tokio::test(start_paused = true)]
 	async fn a_derivative_stamps_on_its_source_clock() {
-		use std::time::{Duration, SystemTime};
+		use std::time::Duration;
 
 		// A minute in, the source's mapping is far from the one a fresh clock would advertise.
 		let ago = Duration::from_secs(60);
-		let _ = moq_net::time::now();
+		let _ = moq_net::time::Instant::now();
 		tokio::time::advance(ago).await;
-		let clock = moq_mux::Clock::at(moq_net::time::now() - ago, SystemTime::now() - ago).unwrap();
+		let clock = moq_mux::Clock::at(moq_net::time::Instant::now() - ago, moq_clock::wall() - ago).unwrap();
 		let mut input = moq_net::broadcast::Info::default().produce();
 		let source =
 			moq_mux::catalog::Producer::new(&mut input, moq_mux::catalog::Config::default().with_clock(clock)).unwrap();

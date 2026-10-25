@@ -217,14 +217,14 @@ final class SmokeTests: XCTestCase {
 
         let first = mintEpoch()
         XCTAssertEqual(try epochTime("018bcfe5-6800-7000-8000-000000000000"), Date(timeIntervalSince1970: 1_700_000_000))
-        try broadcast.announce(route: Route(epoch: first))
+        try broadcast.announce(route: AnnounceRoute(epoch: first))
         guard case .start(let start) = try await nextRoute(announced) else {
             return XCTFail("expected an announcement")
         }
         XCTAssertEqual(start.route.epoch, first)
 
         let second = mintEpoch()
-        try broadcast.announce(route: Route(epoch: second))
+        try broadcast.announce(route: AnnounceRoute(epoch: second))
         guard case .restart(let restart) = try await nextRoute(announced) else {
             return XCTFail("expected a restart")
         }
@@ -263,19 +263,16 @@ final class SmokeTests: XCTestCase {
         XCTAssertThrowsError(try broadcast.publishTrack(name: "events"))
     }
 
-    func testFinishedBroadcastLingersUntilTheWaitIsCancelled() async throws {
+    func testFinishedCatalogLeavesTheBroadcastUpUntilClosed() throws {
         let broadcast = try BroadcastProducer()
-        let track = try broadcast.publishTrack(name: "status", info: TrackInfo(maxAgeUs: 3_600_000_000))
+        let catalog = try Media.CatalogProducer(broadcast: broadcast)
+        let track = try broadcast.publishTrack(name: "status")
         try track.finish()
-        let finish = try broadcast.finish()
-        XCTAssertEqual(finish.lingerUs, 3_600_000_000)
-        XCTAssertThrowsError(try broadcast.publishTrack(name: "events"))
-        // Cancelling the wait is the interrupt: it ends instead of lingering for an hour.
-        let wait = Task { try await finish.wait() }
-        await Task.yield()
-        wait.cancel()
-        _ = await wait.result
-        finish.close()
+        try catalog.finish()
+        // Finishing the content leaves the broadcast up until it closes.
+        _ = try broadcast.consume()
+        try broadcast.close()
+        XCTAssertThrowsError(try catalog.finish())
     }
 
     func testVideoHintsReachMediaPublishApi() throws {
@@ -377,6 +374,42 @@ final class SmokeTests: XCTestCase {
 
         consumer.cancel()
         try producer.finish()
+        try broadcast.close()
+    }
+
+    func testJsonWindowRoundTrip() async throws {
+        struct Event: Codable, Equatable {
+            let n: Int
+        }
+
+        let broadcast = try BroadcastProducer()
+        let producer = try Json.WindowProducer<Event>(
+            track: try broadcast.publishTrack(name: "log", info: TrackInfo(timescale: 1_000_000)), compression: true)
+        let consumer = try Json.WindowConsumer<Event>(
+            track: try await broadcast.consume().subscribeTrack(name: "log"), compression: true)
+
+        for n in 0..<3 {
+            try producer.push(Event(n: n), timestampUs: UInt64(n) * 1000)
+        }
+        try producer.pop(2, timestampUs: 3000)
+
+        for n in 0..<3 {
+            let event = try await consumer.next()
+            XCTAssertEqual(
+                event, Json.Timed(value: .push(index: UInt64(n), value: Event(n: n)), timestampUs: UInt64(n) * 1000))
+        }
+        let pop = try await consumer.next()
+        XCTAssertEqual(pop, Json.Timed(value: .pop(0..<2), timestampUs: 3000))
+
+        // The cut's new group restates record 2, which this reader already has.
+        try producer.cut()
+        try producer.push(Event(n: 3), timestampUs: 4000)
+        let pushed = try await consumer.next()
+        XCTAssertEqual(pushed, Json.Timed(value: .push(index: 3, value: Event(n: 3)), timestampUs: 4000))
+
+        try producer.finish()
+        let end = try await consumer.next()
+        XCTAssertNil(end)
         try broadcast.close()
     }
 
@@ -516,7 +549,8 @@ final class SmokeTests: XCTestCase {
         let fine = try Audio.Producer(
             catalog: catalog,
             input: input,
-            output: AudioEncoderOutput(codec: AudioCodec.opus(), track: "fine", frameDurationUs: 2_500)
+            output: AudioEncoderOutput(codec: AudioCodec.opus(),  frameDurationUs: 2_500),
+            track: "fine"
         )
         // 2.5 ms of silence at 48 kHz mono f32: exactly one encoded frame.
         try fine.write(AudioFrame(timestampUs: 0, data: Data(count: 120 * 4)))
@@ -526,7 +560,8 @@ final class SmokeTests: XCTestCase {
             try Audio.Producer(
                 catalog: catalog,
                 input: input,
-                output: AudioEncoderOutput(codec: AudioCodec.opus(), track: "coarse", frameDurationUs: 2_000)
+                output: AudioEncoderOutput(codec: AudioCodec.opus(),  frameDurationUs: 2_000),
+                track: "coarse"
             )
         ) { error in
             if let audio = error as? MoqError, case .Audio = audio { return }
@@ -544,7 +579,8 @@ final class SmokeTests: XCTestCase {
         let audio = try Audio.Producer(
             catalog: Media.CatalogProducer(broadcast: broadcast),
             input: AudioEncoderInput(format: .f32, sampleRate: 48_000, channels: 1),
-            output: AudioEncoderOutput(codec: AudioCodec.opus(), track: "mic")
+            output: AudioEncoderOutput(codec: AudioCodec.opus(), ),
+            track: "mic"
         )
         try broadcast.announce()
 
@@ -591,9 +627,9 @@ final class SmokeTests: XCTestCase {
         let broadcast = try origin.createBroadcast(path: "video-decode-frame")
         let video = try Video.Producer(
             catalog: Media.CatalogProducer(broadcast: broadcast),
-            input: VideoEncoderInput(format: .rgba, width: 320, height: 240, framerate: 30),
-            // Software so the encode is deterministic everywhere.
-            output: VideoEncoderOutput(codec: .h264, track: "camera", kind: .software)
+            input: VideoEncoderInput(format: .rgba, width: 320, height: 240, framerate: Video.FrameRate(numerator: 30000, denominator: 1001)),
+            output: VideoEncoderOutput(codec: .h264, kind: .software),
+            track: "camera"
         )
         try broadcast.announce()
 
@@ -644,9 +680,14 @@ final class SmokeTests: XCTestCase {
             var output: AudioEncoderOutput!
             do {
                 let codec = AudioCodec.opus()
-                output = AudioEncoderOutput(codec: codec, track: "mic")
+                output = AudioEncoderOutput(codec: codec)
             }
-            let producer = try Audio.Producer(catalog: Media.CatalogProducer(broadcast: broadcast), input: input, output: output)
+            let producer = try Audio.Producer(
+                catalog: Media.CatalogProducer(broadcast: broadcast),
+                input: input,
+                output: output,
+                track: "mic"
+            )
             try producer.write(silence)
             XCTAssertEqual(try producer.demand().name, "mic")
             try producer.finish()
@@ -659,8 +700,13 @@ final class SmokeTests: XCTestCase {
             let producer: Audio.Producer
             do {
                 let codec = AudioCodec.opus()
-                let output = AudioEncoderOutput(codec: codec, track: "mic")
-                producer = try Audio.Producer(catalog: Media.CatalogProducer(broadcast: broadcast), input: input, output: output)
+                let output = AudioEncoderOutput(codec: codec)
+                producer = try Audio.Producer(
+                    catalog: Media.CatalogProducer(broadcast: broadcast),
+                    input: input,
+                    output: output,
+                    track: "mic"
+                )
             }
             try producer.write(silence)
             try producer.finish()

@@ -83,7 +83,7 @@ const PLAY_RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 /// the interval between probes. Once a connection is publishing or playing it can
 /// block in a `read` indefinitely, so without keepalive a half-open connection (a
 /// peer that vanished without sending a FIN/RST, e.g. a yanked network cable)
-/// would pin its broadcast (and its first-publisher stream-key slot) forever.
+/// would pin its broadcast forever.
 /// Keepalive lets the kernel surface the dead peer as a read error, tearing the
 /// session down. The values are generous enough not to disturb a healthy but
 /// momentarily quiet connection.
@@ -557,6 +557,8 @@ pub struct Publish<S = Conn> {
 	/// Connection allocator each passthrough track claims its peak-hold bitrate on.
 	/// Override with [`with_bandwidth`](Self::with_bandwidth).
 	bandwidth: moq_net::bandwidth::Allocator,
+	/// How long an unpublished broadcast stays up. Override with [`with_linger`](Self::with_linger).
+	linger: Duration,
 }
 
 impl<S: Stream> Publish<S> {
@@ -593,8 +595,8 @@ impl<S: Stream> Publish<S> {
 	/// segmented egress (HLS/DASH) reading the broadcast downstream, which may only
 	/// advertise segments that are still fetchable. Lower it when nothing reads history
 	/// and the memory matters.
-	pub fn with_max_age(mut self, max_age: Option<Duration>) -> Self {
-		self.max_age = max_age;
+	pub fn with_max_age(mut self, max_age: impl Into<Option<Duration>>) -> Self {
+		self.max_age = max_age.into();
 		self
 	}
 
@@ -608,6 +610,14 @@ impl<S: Stream> Publish<S> {
 		self
 	}
 
+	/// Keep the broadcast up for `linger` after the client unpublishes, so a subscriber that
+	/// arrives after the end still gets the tail. Defaults to [`moq_mux::Linger::DEFAULT`];
+	/// zero closes it at once.
+	pub fn with_linger(mut self, linger: Duration) -> Self {
+		self.linger = linger;
+		self
+	}
+
 	/// Accept the publish: announce a broadcast at `path` in `origin` and pump the
 	/// RTMP media into it until the client disconnects.
 	///
@@ -617,10 +627,9 @@ impl<S: Stream> Publish<S> {
 	/// run it on its own task.
 	///
 	/// A client that unpublishes (`deleteStream`) ends cleanly: the finished broadcast
-	/// stays up until its media is stale, so subscribers still catching up drain the tail,
-	/// and the future resolves after that. Dropping the future ends the linger early, as
-	/// does a newer publish at `path`. A connection that drops without unpublishing
-	/// closes the broadcast at once.
+	/// stays up for the [linger](Self::with_linger), and the future resolves after that.
+	/// Dropping the future ends the linger early. A connection that drops without
+	/// unpublishing closes the broadcast at once.
 	pub async fn accept(mut self, origin: &origin::Producer, path: impl moq_net::AsPath) -> Result<()> {
 		let path = path.as_path();
 		// Reserve the broadcast path before telling the client the publish succeeded:
@@ -665,14 +674,14 @@ impl<S: Stream> Publish<S> {
 
 		let peer = self.peer;
 		match result {
-			// A clean end: serve the finished broadcast until its media is stale, so subscribers
-			// still catching up drain the tail. The encoder is done, so hang up on it first.
+			// A clean end: serve the finished broadcast for the linger, so a subscriber that
+			// arrives after the end still gets the tail. The encoder is done, so hang up first.
 			Ok(End::Unpublished) => {
 				drop(self.stream);
-				match publisher.finish() {
-					Ok(finish) => {
-						tracing::info!(%peer, %path, linger = ?finish.linger(), "rtmp publish ended, serving the finished broadcast until its media is stale");
-						finish.wait().await;
+				match publisher.finish(self.linger) {
+					Ok(linger) => {
+						tracing::info!(%peer, %path, linger = ?self.linger, "rtmp publish ended, serving the finished broadcast");
+						linger.wait().await;
 					}
 					Err(err) => tracing::debug!(%peer, %err, "error finishing RTMP publish"),
 				}
@@ -735,9 +744,8 @@ pub struct Play<S = Conn> {
 	tc_url: Option<String>,
 	peer: SocketAddr,
 	/// How long the FLV muxer waits for a stalled group before skipping to a newer
-	/// one. Defaults to [`DEFAULT_MAX_DELAY`](crate::DEFAULT_MAX_DELAY); override with
-	/// [`with_max_delay`](Self::with_max_delay).
-	latency: Duration,
+	/// one; see [`with_max_delay`](Self::with_max_delay).
+	max_delay: Duration,
 	/// Enhanced-RTMP capabilities advertised by the player in its connect object.
 	capabilities: ClientCapabilities,
 }
@@ -768,10 +776,9 @@ impl<S: Stream> Play<S> {
 	}
 
 	/// Set the FLV release delay and stalled-group budget.
-	/// Defaults to [`DEFAULT_MAX_DELAY`](crate::DEFAULT_MAX_DELAY); zero releases
-	/// available frames immediately without deadline drops.
-	pub fn with_max_delay(mut self, latency: Duration) -> Self {
-		self.latency = latency;
+	/// Defaults to 500 ms; zero releases available frames immediately without deadline drops.
+	pub fn with_max_delay(mut self, max_delay: Duration) -> Self {
+		self.max_delay = max_delay;
 		self
 	}
 
@@ -856,7 +863,7 @@ impl<S: Stream> Play<S> {
 			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?
 			.select(select);
 		let mut export = FlvExport::new(source, stream)
-			.with_delay(self.latency)
+			.with_delay(self.max_delay)
 			.with_multitrack(self.capabilities.multitrack);
 
 		// Resolve the catalog and codec headers before Play.Start, too. Otherwise a
@@ -1165,6 +1172,7 @@ async fn accept_until_request<S: Stream>(mut stream: S, peer: SocketAddr) -> any
 							peer,
 							max_age: None,
 							bandwidth: moq_net::bandwidth::Allocator::unlimited(),
+							linger: moq_mux::Linger::DEFAULT,
 						})));
 					}
 					// The client wants to play: hand control back to the caller.
@@ -1185,7 +1193,7 @@ async fn accept_until_request<S: Stream>(mut stream: S, peer: SocketAddr) -> any
 							stream_key,
 							tc_url,
 							peer,
-							latency: crate::DEFAULT_MAX_DELAY,
+							max_delay: crate::DEFAULT_MAX_DELAY,
 							capabilities: client_capabilities.clone(),
 						})));
 					}
@@ -1520,19 +1528,19 @@ impl Publisher {
 		Ok(self.importer.decode(&flv::tag(tag_type, timestamp, body))?)
 	}
 
-	/// Flush any buffered media and finish every track, the catalog included, returning
-	/// the finished broadcast, which stays announced until it is dropped.
-	fn finish(mut self) -> anyhow::Result<moq_net::broadcast::Finish> {
+	/// Flush any buffered media and finish every track, the catalog included, keeping the
+	/// finished broadcast up for `linger`.
+	fn finish(mut self, linger: Duration) -> anyhow::Result<moq_mux::Linger<Self>> {
 		self.importer.finish()?;
 		self.catalog.finish()?;
-		// Taken while the importer is alive, so it holds the tracks just finished.
-		Ok(self.broadcast.finish())
+		Ok(moq_mux::Linger::new([self.broadcast.clone()], self, linger))
 	}
 
-	/// Flush any buffered media, close out the broadcast's open groups, and end
+	/// Flush any buffered media, finish the catalog, close out the broadcast's open groups, and end
 	/// the broadcast so the origin unannounces it immediately.
 	fn close(mut self) -> anyhow::Result<()> {
 		self.importer.finish()?;
+		self.catalog.finish()?;
 		self.broadcast.close();
 		Ok(())
 	}
@@ -1543,13 +1551,18 @@ impl Publisher {
 	///
 	/// Consumes the publisher and closes the broadcast.
 	fn abort(self, err: moq_net::Error) {
+		self.catalog.abort(err.clone());
 		self.importer.abort(err);
 		self.broadcast.close();
 	}
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests {
 	use super::*;
 	#[tokio::test(start_paused = true)]
@@ -1584,7 +1597,7 @@ mod tests {
 		.await
 		.unwrap();
 		assert_eq!(publisher.metadata.count, 2);
-		drop(publisher.finish().unwrap());
+		drop(publisher.finish(Duration::ZERO).unwrap());
 		logs_assert(|lines| {
 			let warnings = lines
 				.iter()
@@ -1722,21 +1735,17 @@ mod tests {
 		}
 	}
 
-	/// Accept the publish arriving on `stream` into `origin` at `live/cam0`, declaring `max_age`.
-	async fn accept_publish(stream: tokio::io::DuplexStream, origin: origin::Producer, max_age: Duration) {
+	/// Accept the publish arriving on `stream` into `origin` at `live/cam0`, lingering for `linger`.
+	async fn accept_publish(stream: tokio::io::DuplexStream, origin: origin::Producer, linger: Duration) {
 		let peer = "127.0.0.1:1935".parse().unwrap();
 		let Some(Request::Publish(publish)) = accept_stream(stream, peer).await.unwrap() else {
 			panic!("expected a publish request");
 		};
-		publish
-			.with_max_age(Some(max_age))
-			.accept(&origin, "live/cam0")
-			.await
-			.unwrap();
+		publish.with_linger(linger).accept(&origin, "live/cam0").await.unwrap();
 	}
 
-	/// An unpublish is a clean end: the finished broadcast keeps serving a late subscriber
-	/// until its media is stale, then closes. A hangup without one closes at once.
+	/// An unpublish is a clean end: the finished broadcast stays up for the linger, then
+	/// closes. A hangup without one closes at once.
 	#[tokio::test(start_paused = true)]
 	async fn an_unpublish_lingers_and_a_hangup_does_not() {
 		for (leave, linger) in [
@@ -1760,10 +1769,38 @@ mod tests {
 		}
 	}
 
-	/// A late subscriber still reads the finished media during the linger, and an encoder
-	/// reconnecting under the same key ends the linger at once.
+	/// A hangup ends the catalog too, so a reader sees the publisher go rather than a
+	/// producer dropped unfinished.
 	#[tokio::test(start_paused = true)]
-	async fn a_reconnect_ends_the_linger() {
+	async fn a_hangup_ends_the_catalog() {
+		let origin = moq_tokio::origin::spawn();
+		let consumer = origin.consume();
+		let (mut client, server) = tokio::io::duplex(64 * 1024);
+		let accept = tokio::spawn(accept_publish(server, origin.clone(), Duration::ZERO));
+		let catalog = async {
+			consumer.routed("live/cam0").await.unwrap();
+			let broadcast = consumer.request_broadcast("live/cam0", None).await.unwrap();
+			let track = broadcast.track(hang::Catalog::DEFAULT_NAME).unwrap();
+			track.subscribe(None).await.unwrap()
+		};
+		// Holding the stream past the publish keeps the hangup until the catalog is subscribed.
+		let (mut catalog, ()) = tokio::join!(catalog, publish_one_keyframe(&mut client, Leave::Hangup));
+		drop(client);
+		accept.await.unwrap();
+
+		let end = loop {
+			match catalog.recv_group().await {
+				Ok(Some(_)) => continue,
+				end => break end.map(|_| ()),
+			}
+		};
+		assert!(end.is_ok(), "the catalog ends cleanly: {end:?}");
+	}
+
+	/// A late subscriber still reads the finished media during the linger, and an encoder
+	/// reconnecting under the same key takes the path without ending it.
+	#[tokio::test(start_paused = true)]
+	async fn a_reconnect_leaves_the_linger_running() {
 		let origin = moq_tokio::origin::spawn();
 		let consumer = origin.consume();
 		let (client, server) = tokio::io::duplex(64 * 1024);
@@ -1779,12 +1816,16 @@ mod tests {
 		);
 		assert!(!accept.is_finished());
 
-		let start = tokio::time::Instant::now();
 		let (client, server) = tokio::io::duplex(64 * 1024);
 		let _reconnect = tokio::spawn(accept_publish(server, origin.clone(), Duration::from_secs(10)));
 		let _encoder = tokio::spawn(publish_one_keyframe(client, Leave::Hangup));
+		tokio::time::sleep(Duration::from_secs(1)).await;
+		assert!(!accept.is_finished(), "the newer publisher leaves the linger running");
+		assert!(!finished.is_closed());
+
+		let start = tokio::time::Instant::now();
 		accept.await.unwrap();
-		assert_eq!(start.elapsed(), Duration::ZERO);
+		assert_eq!(start.elapsed(), Duration::from_secs(4));
 		assert!(finished.is_closed());
 	}
 
@@ -1841,14 +1882,35 @@ mod tests {
 		}
 	}
 
+	/// Drive an RTMP play client over `stream`, collecting media messages until `want` have
+	/// arrived or the server hangs up.
+	async fn play_client_collect<S: Stream>(stream: S, want: usize, caps_ex: u32, fourccs: &[&[u8; 4]]) -> Vec<Media> {
+		let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+		let client = play_client(stream, caps_ex, fourccs, tx);
+		tokio::pin!(client);
+		let mut media = Vec::new();
+		while media.len() < want {
+			tokio::select! {
+				Some(next) = rx.recv() => media.push(next),
+				() = &mut client => break,
+			}
+		}
+		while media.len() < want
+			&& let Ok(next) = rx.try_recv()
+		{
+			media.push(next);
+		}
+		media
+	}
+
 	/// Drive an RTMP play client over `stream` through handshake -> connect(`live`)
-	/// -> play(`cam0`), collecting media messages until `want` have arrived.
-	async fn play_client_collect<S: Stream>(
+	/// -> play(`cam0`), sending each media message to `media` until the server hangs up.
+	async fn play_client<S: Stream>(
 		mut stream: S,
-		want: usize,
 		caps_ex: u32,
 		fourccs: &[&[u8; 4]],
-	) -> Vec<Media> {
+		media: tokio::sync::mpsc::UnboundedSender<Media>,
+	) {
 		// Handshake.
 		let mut handshake = Handshake::new(PeerType::Client);
 		stream
@@ -1884,7 +1946,6 @@ mod tests {
 		set_connect_capabilities(&mut session, caps_ex, fourccs);
 		work.push_back(session.request_connection("live".to_string()).unwrap());
 
-		let mut media = Vec::new();
 		loop {
 			while let Some(result) = work.pop_front() {
 				match result {
@@ -1895,21 +1956,18 @@ mod tests {
 						work.push_back(session.request_playback("cam0".to_string()).unwrap());
 					}
 					ClientSessionResult::RaisedEvent(ClientSessionEvent::VideoDataReceived { data, .. }) => {
-						media.push((true, data));
+						let _ = media.send((true, data));
 					}
 					ClientSessionResult::RaisedEvent(ClientSessionEvent::AudioDataReceived { data, .. }) => {
-						media.push((false, data));
+						let _ = media.send((false, data));
 					}
 					_ => {}
 				}
 			}
-			if media.len() >= want {
-				return media;
-			}
-			let n = stream.read(&mut buffer).await.unwrap();
-			if n == 0 {
-				return media;
-			}
+			let n = match stream.read(&mut buffer).await {
+				Ok(0) | Err(_) => return,
+				Ok(n) => n,
+			};
 			work.extend(session.handle_input(&buffer[..n]).unwrap());
 		}
 	}
@@ -2100,6 +2158,85 @@ mod tests {
 		assert_eq!(media[1].1[1], 0x01);
 
 		server_task.abort();
+	}
+
+	/// Publish an AVC broadcast at `live/cam0` under `epoch`, starting with a keyframe carrying
+	/// `idr`, and return its importer for more tags.
+	fn publish_avc(
+		origin: &origin::Producer,
+		epoch: moq_net::Epoch,
+		idr: &[u8],
+	) -> (FlvImport, moq_mux::catalog::Producer) {
+		let mut vseq = vec![0x17, 0x00, 0x00, 0x00, 0x00];
+		vseq.extend_from_slice(&[0x01, 0x42, 0xc0, 0x1f, 0xff, 0xe1, 0x00, 0x04, 0x67, 0x42, 0xc0, 0x1f]);
+		vseq.extend_from_slice(&[0x01, 0x00, 0x04, 0x68, 0xce, 0x3c, 0x80]);
+		let mut vframe = vec![0x17, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, idr.len() as u8];
+		vframe.extend_from_slice(idr);
+
+		let mut broadcast = origin.create_broadcast("live/cam0").unwrap();
+		broadcast.announce(origin::Route::default().with_epoch(epoch)).unwrap();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let mut importer = FlvImport::new(broadcast, catalog.reserve());
+		importer.decode(&flv::file_header()).unwrap();
+		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vseq)).unwrap();
+		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vframe)).unwrap();
+		(importer, catalog)
+	}
+
+	/// A play stays on the instance it resolved: a publisher taking over the path never reaches
+	/// it, so the session never splices in another timeline or codec state, and the play fails
+	/// once its instance's route dies.
+	#[tokio::test]
+	async fn a_play_stays_on_its_instance_until_the_route_dies() {
+		const OLD_DELTA: &[u8] = &[0x41, 0x9a, 0x02, 0x03];
+		let origin = moq_tokio::origin::spawn();
+		let consumer = origin.consume();
+		let (mut old, old_catalog) = publish_avc(&origin, moq_net::Epoch::mint(), &[0x65, 0x88, 0x84, 0x21, 0x00]);
+
+		let mut server = Server::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+		let addr = server.local_addr().unwrap();
+		let play_origin = consumer.clone();
+		let played = tokio::spawn(async move {
+			let Some(Request::Play(play)) = server.accept().await else {
+				panic!("expected a play request");
+			};
+			play.accept(&play_origin, "live/cam0").await
+		});
+		let (tx, mut media) = tokio::sync::mpsc::unbounded_channel();
+		let client = tokio::spawn(play_client(TcpStream::connect(addr).await.unwrap(), 0, &[], tx));
+		let mut next = async || {
+			tokio::time::timeout(Duration::from_secs(5), media.recv())
+				.await
+				.expect("no media")
+				.expect("the play ended")
+		};
+		// The sequence header, then the keyframe.
+		assert_eq!(next().await.1[..2], [0x17, 0x00]);
+		assert_eq!(next().await.1[..2], [0x17, 0x01]);
+
+		let epoch = moq_net::Epoch::mint();
+		let mut instances = moq_mux::follow::Instances::new(&consumer, "live/cam0", Some(&epoch)).unwrap();
+		let (_new, _new_catalog) = publish_avc(&origin, epoch, &[0x65, 0x99, 0x99, 0x99, 0x99]);
+		tokio::time::timeout(Duration::from_secs(5), instances.next())
+			.await
+			.expect("the new publisher takes over")
+			.unwrap();
+
+		let mut delta = vec![0x27, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, OLD_DELTA.len() as u8];
+		delta.extend_from_slice(OLD_DELTA);
+		old.decode(&flv::tag(flv::TAG_VIDEO, 40, &delta)).unwrap();
+		let (video, body) = next().await;
+		assert!(video && body.starts_with(&[0x27, 0x01]), "{body:?}");
+		assert!(body.ends_with(OLD_DELTA), "the play left its instance: {body:?}");
+
+		old.abort(moq_net::Error::Transport("connection lost".into()));
+		drop(old_catalog);
+		let played = tokio::time::timeout(Duration::from_secs(5), played)
+			.await
+			.expect("the play outlived its route")
+			.unwrap();
+		assert!(played.is_err(), "the play ended cleanly");
+		client.abort();
 	}
 
 	#[tokio::test]

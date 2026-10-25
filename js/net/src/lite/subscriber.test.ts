@@ -1,7 +1,8 @@
 import { expect, jest, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano } from "@moq/clock";
-import { Signal } from "@moq/signals";
+import { type Getter, Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
+import type { AuthSession } from "../auth_session.ts";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
 import * as Epoch from "../epoch.ts";
 import {
@@ -15,8 +16,10 @@ import {
 	TimestampMismatch,
 } from "../error.ts";
 import { HopSchema, isAnonymous, MAX_HOPS, Route, UNKNOWN_HOP } from "../hop.ts";
+import { hooks } from "../internal.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
+import type { Producer } from "../track.ts";
 import { type AnnounceBroadcast, AnnounceInit, AnnounceOk, encodeAnnounceBroadcast } from "./announce.ts";
 import { Group } from "./group.ts";
 import { Probe } from "./probe.ts";
@@ -1448,6 +1451,104 @@ test.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])(
 	},
 );
 
+// A TRACKS request carries no epoch for an epochless route, so it would list the replacement.
+test("a listing of an epochless handle retired while its token waits never reaches the wire", async () => {
+	const { quic, streams, opened } = fakeSession();
+	let release!: () => void;
+	const released = new Promise<void>((resolve) => (release = resolve));
+	const auth = {
+		ready: (_path: Path.Valid, _direction: string, opts?: { signal?: AbortSignal }) =>
+			new Promise<boolean>((resolve, reject) => {
+				void released.then(() => resolve(true));
+				opts?.signal?.addEventListener("abort", () => reject(opts.signal?.reason), { once: true });
+			}),
+	} as unknown as AuthSession;
+	const version = Version.DRAFT_07;
+	const subscriber = new Subscriber(
+		quic,
+		version,
+		HopSchema.parse(1n),
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		auth,
+	);
+	const announced = subscriber.announced();
+	await opened(0);
+	const send = async (encode: (writer: Writer) => Promise<void>) => {
+		const writer = new Writer(
+			new WritableStream<Uint8Array>({
+				write: (chunk) => streams[0].inbound.enqueue(new Uint8Array(chunk)),
+			}),
+			version,
+		);
+		await encode(writer);
+	};
+	const path = Path.from("pool");
+	await send((writer) => new AnnounceOk(PEER, 0).encode(writer, version));
+	await send((writer) =>
+		encodeAnnounceBroadcast(writer, { status: "active", suffix: path, hops: [PUBLISHER_A] }, version),
+	);
+	await announced.next();
+	const held = subscriber.consume(Path.from("pool/job"));
+	const tracks = held.tracks();
+	const event = tracks.next().catch((err: unknown) => err);
+
+	await send((writer) => encodeAnnounceBroadcast(writer, { status: "endedId", id: 0n }, version));
+	await announced.next();
+	await send((writer) =>
+		encodeAnnounceBroadcast(writer, { status: "active", suffix: path, hops: [PUBLISHER_B] }, version),
+	);
+	await announced.next();
+	release();
+
+	const err = await event;
+	expect(err).toBeInstanceOf(StreamError);
+	expect((err as StreamError).code).toBe(StreamCode.Unroutable);
+	expect(streams.length).toBe(1);
+	tracks.close();
+	held.close();
+	announced.close();
+	subscriber.close();
+});
+
+test("a listing whose readers leave as its token settles never reaches the wire", async () => {
+	const { quic, streams } = fakeSession();
+	let release!: () => void;
+	const released = new Promise<void>((resolve) => (release = resolve));
+	let ask!: () => void;
+	const asked = new Promise<void>((resolve) => (ask = resolve));
+	// Ignores `until`, so the wait settles admitted after the readers left.
+	const auth = {
+		ready: () => {
+			ask();
+			return released.then(() => true);
+		},
+	} as unknown as AuthSession;
+	const subscriber = new Subscriber(
+		quic,
+		Version.DRAFT_07,
+		HopSchema.parse(1n),
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		auth,
+	);
+	const held = subscriber.consume(Path.from("room"));
+	const tracks = held.tracks();
+	await asked;
+	release();
+	tracks.close();
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	expect(streams.length).toBe(0);
+	held.close();
+	subscriber.close();
+});
+
 test.each(["track", "fetch", "open"] as const)(
 	"retirement settles coalesced fetches during %s setup",
 	async (stage) => {
@@ -1702,6 +1803,85 @@ test("a local unsubscribe owes no SUBSCRIBE_END", async () => {
 		track.close();
 		broadcast.close();
 		subscriber.close();
+	}
+});
+
+// Count the actual source registrations, including promises whose losing race cannot cancel them.
+function countChanges(source: Getter<unknown>) {
+	const changed = source.changed.bind(source);
+	let listeners = 0;
+	const register = (fn: (value: unknown) => void) => {
+		listeners++;
+		let live = true;
+		const release = () => {
+			if (!live) return;
+			live = false;
+			listeners--;
+		};
+		const dispose = changed((value) => {
+			release();
+			fn(value);
+		});
+		return () => {
+			release();
+			dispose();
+		};
+	};
+	const spy = spyOn(source, "changed").mockImplementation(((fn?: (value: unknown) => void) => {
+		return fn ? register(fn) : new Promise(register);
+	}) as typeof source.changed);
+	return { count: () => listeners, restore: () => spy.mockRestore() };
+}
+
+test.each(
+	[Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07].flatMap((version) =>
+		["unsubscribe", "reset", "session"].map((stop) => [version, stop] as const),
+	),
+)("subscription waits release losing signal listeners on %s after %s", async (version, stop) => {
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const counters: ReturnType<typeof countChanges>[] = [];
+	// Observe the accepted producer before its update loop starts, without exporting a test hook.
+	const internal = subscriber as unknown as {
+		runResponses: (stream: unknown, entry: { track: Producer }) => Promise<void>;
+	};
+	const runResponses = internal.runResponses.bind(internal);
+	const responses = spyOn(internal, "runResponses").mockImplementation((stream, entry) => {
+		counters.push(
+			...[entry.track.subscription, entry.track.demand().wanted, hooks.producerLargest(entry.track)].map(
+				countChanges,
+			),
+		);
+		return runResponses(stream, entry);
+	});
+	const broadcast = subscriber.consume(Path.from("room"));
+	const track = broadcast.track("video").subscribe();
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version);
+		await (await opened(1)).reading;
+		await drainReactions();
+		const before = counters.map((counter) => counter.count());
+		expect(before).toHaveLength(3);
+		expect(before.every((count) => count > 0)).toBe(true);
+		for (let sequence = 0; sequence < 50; sequence++) {
+			await subscriber.runGroup(new Group({ subscribe: 0n, sequence }), await groupStream(sequence, version));
+			await drainReactions();
+		}
+		// Quiet subscription and demand signals must not retain a listener per received group.
+		expect(counters.map((counter) => counter.count())).toEqual(before);
+		if (stop === "unsubscribe") track.close();
+		else if (stop === "reset") streams[1].inbound.error(new Error("peer reset"));
+		else subscriber.close();
+		await drainReactions();
+		expect(counters.map((counter) => counter.count())).toEqual([0, 0, 0]);
+	} finally {
+		track.close();
+		broadcast.close();
+		subscriber.close();
+		await drainReactions();
+		responses.mockRestore();
+		for (const counter of counters) counter.restore();
 	}
 });
 
@@ -2016,7 +2196,7 @@ test("announce init is the initial set", async () => {
 
 test.each(["answer", "credit"] as const)("FETCH shares the TRACK deadline while waiting for %s", async (stage) => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const { quic, streams, opened } = fakeSession(stage === "credit" ? [1] : []);
 	const subscriber = new Subscriber(quic, Version.DRAFT_07, HopSchema.parse(1n));
 	let failure: unknown;
@@ -2043,6 +2223,6 @@ test.each(["answer", "credit"] as const)("FETCH shares the TRACK deadline while 
 		}
 	} finally {
 		subscriber.close();
-		restore();
+		installed.close();
 	}
 });

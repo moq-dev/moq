@@ -30,9 +30,10 @@ Decided 2026-10-14 with the maintainer:
   identities. AUTH_KEYS and AUTH_PEER stay with Peer grants and do not gate
   the cut; the peer grant's `cnf` is this key.
 
-The checkpoint below records the candidate algorithm and full-width identity.
-The exact authenticated proof exchange remains open, with executable replay
-and relay tests before the wire is fixed.
+Open, for the implementer to settle and record: the key algorithm (WebCrypto
+must support it in every target browser), the identity width (at least 64
+bits, so grinding a key to match a targeted identity stays infeasible), and
+the exact proof exchange, with replay tests before the wire is fixed.
 
 Tests: a session proving its key gets that identity; two sessions with one key
 share it; a restart yields a new one; a session claiming another identity as
@@ -51,33 +52,6 @@ ahead of it as a rank, not a block.
 Wire: `drafts/draft-lcurley-moq-lite.md` gains the key and proof messages in
 lite-07-wip; `just drafts check` passes. Public API: likely none beyond
 connection setup; report any key handle that leaks into `moq-ffi`.
-
-Checkpoint 2026-10-22: the draft contains test-only Rust/WebCrypto primitives,
-shared signature/identity vectors and an executable mutual keyless-relay
-counterexample. The candidate settles routine representation choices as
-P-256 ECDSA/SHA-256, canonical 65-byte SEC1 keys, 64-byte P1363 signatures and a
-full 256-bit domain-separated identity. It never truncates to legacy Hop.
-See [candidate and evidence](/test/interop/identity/README.md).
-
-The goal is not complete. Fresh mutual challenges alone permit live AUTH
-relay across two sessions. The fixture demonstrates that acceptance, not an
-implemented ROUTE attack. The draft must choose either a common authenticated
-transport binding, with explicit unsupported-transport policy and measured
-browser/native agreement, or signed ephemeral ECDH plus directional MACs on
-all authority-changing routing controls. The latter is viable in WebCrypto
-but extends the future ROUTE consumer and wire scope. Chromium 156 and the
-existing Node/Bun polyfill expose no exporter; Firefox 157 has method presence
-only, and WebKit capability was not established.
-
-After that choice, integrate per-process/tab identity into every session,
-reserve the session-wide proof slot before asynchronous crypto, specify and
-implement AUTH_CNF/proof ordering in the lite draft and both dispatchers,
-preserve independent token refresh/grant checks, enforce own identity and
-seqno authority on actual controls, and run live Rust/JS interop. Current
-codecs, production crypto dependencies, public API, wire and authentication
-behavior are unchanged. The prototype's IDs 2/3 and byte layout are proposals
-only. This quest remains active and gates routes until that source and
-validation are complete.
 
 ## Related
 

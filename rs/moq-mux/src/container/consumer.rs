@@ -198,6 +198,7 @@ impl<F: Container> Consumer<F> {
 		let start = track.floor();
 		let max_delay = subscription
 			.max_delay
+			.unwrap_or(std::time::Duration::MAX)
 			.min(track.info().max_age.unwrap_or(std::time::Duration::MAX));
 		Self {
 			name: track.name().into(),
@@ -375,19 +376,6 @@ impl<F: Container> Consumer<F> {
 			}
 		}
 
-		// Reap aborted groups the cursor hasn't reached: nothing below settles them
-		// (the read arm only handles the front at the cursor, and neither the skip
-		// target scan nor the empty-group check counts an abort), so one left ahead
-		// of a sequence gap would park the consumer forever. Buffered frames read
-		// before the abort stay deliverable, and a fault found among them waits for
-		// its place in delivery order, so a group holding either is kept; the front
-		// at the cursor keeps the eviction fast path in the read arm below.
-		// poll_aborted registers the waiter on live groups, so a later abort re-polls.
-		let current = self.current;
-		self.discard(|group| {
-			group.sequence > current && group.buffered.is_empty() && group.fault.is_none() && group.poll_aborted(waiter)
-		})?;
-
 		loop {
 			if self.pending.front().is_none_or(|group| group.sequence <= self.current) {
 				self.hole_timer = None;
@@ -481,6 +469,18 @@ impl<F: Container> Consumer<F> {
 					}
 				}
 			}
+
+			// Reap later aborts only when delivery blocks. An aborted group beyond a
+			// sequence gap must not park the reader forever. Buffered frames and faults
+			// stay in delivery order; the current group has its eviction path above.
+			// Live groups register the waiter here so a later abort wakes the reader.
+			let current = self.current;
+			self.discard(|group| {
+				group.sequence > current
+					&& group.buffered.is_empty()
+					&& group.fault.is_none()
+					&& group.poll_aborted(waiter)
+			})?;
 
 			// The current group's furthest presentation point (timestamp + duration).
 			let current_end = if let Some(current) = self.pending.front_mut()
@@ -1195,7 +1195,7 @@ mod tests {
 		let track = track_producer("data", info);
 		let subscription = moq_net::track::Subscription::default()
 			.with_max_delay(hour)
-			.with_groups(0..);
+			.with_range(0..);
 		let mut reader = Consumer::new(
 			track.subscribe(subscription),
 			Container::Legacy(crate::container::Kind::Data),
@@ -1225,7 +1225,7 @@ mod tests {
 		let mut track = track_producer("data", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let subscription = moq_net::track::Subscription::default()
 			.with_max_delay(Duration::from_secs(10))
-			.with_groups(0..);
+			.with_range(0..);
 		let mut reader = Consumer::new(
 			track.subscribe(subscription),
 			Container::Legacy(crate::container::Kind::Data),
@@ -1383,7 +1383,7 @@ mod tests {
 		let mut track = track_producer("data", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let subscription = moq_net::track::Subscription::default()
 			.with_max_delay(Duration::from_secs(10))
-			.with_groups(0..);
+			.with_range(0..);
 		let mut reader = Consumer::new(
 			track.subscribe(subscription),
 			Container::Legacy(crate::container::Kind::Data),
@@ -1443,7 +1443,7 @@ mod tests {
 				let mut track = track_producer("data", hang::container::track_info(hang::catalog::PRIORITY.audio));
 				let subscription = moq_net::track::Subscription::default()
 					.with_max_delay(Duration::from_secs(10))
-					.with_groups(0..);
+					.with_range(0..);
 				let mut reader = Consumer::new(
 					track.subscribe(subscription),
 					Container::Legacy(crate::container::Kind::Data),
@@ -1670,7 +1670,7 @@ mod tests {
 			_ => panic!("the empty group is the largest"),
 		};
 		assert_eq!(edge.group, 1);
-		subscriber.set_groups(edge.group..);
+		subscriber = subscriber.with_range(edge.group..);
 		let mut consumer = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Audio));
 
 		write_group(&mut track, 2, &[ts(1_000_000), ts(1_600_000)]);
@@ -2607,7 +2607,7 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
 			moq_net::track::Subscription::default()
-				.with_groups(0..)
+				.with_range(0..)
 				.with_max_delay(Duration::from_millis(500)),
 		);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));

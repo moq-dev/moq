@@ -6,6 +6,7 @@ import { type OpenOptions, Reader, Stream, type Writer } from "../stream.ts";
 import { untilAborted } from "../util/abort.ts";
 import * as Varint from "../varint.ts";
 import { GoAway } from "./goaway.ts";
+import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
 import { MaxRequestId } from "./request.ts";
 import { refuseUpdate } from "./request_stream.ts";
@@ -110,7 +111,11 @@ interface StreamEntry {
 	controller: ReadableStreamDefaultController<Uint8Array>;
 }
 
-type NamespaceDirection = "incoming" | "outgoing";
+/**
+ * Which request a v14/v15 namespace-keyed message names: an announcement, by the side that
+ * made it, or the peer's namespace subscription (draft 14's UNSUBSCRIBE_NAMESPACE).
+ */
+type NamespaceDirection = "incoming" | "outgoing" | "subscribed";
 
 /** Runs per chunk before it splits, so a split or removal shifts at most one chunk. */
 const RUN_CHUNK = 256;
@@ -251,6 +256,8 @@ export class ControlStreamAdapter implements Session {
 	// may legitimately hold the same namespace in both maps at once.
 	#incomingNamespaces = new Map<string, bigint>();
 	#outgoingNamespaces = new Map<string, bigint>();
+	// The peer's draft-14 SUBSCRIBE_NAMESPACE prefixes, which its UNSUBSCRIBE_NAMESPACE names.
+	#subscribedNamespaces = new Map<string, bigint>();
 
 	// requestId → namespace reverse lookup, one entry per request including a refused
 	// duplicate, so #forget can clean up whichever request goes away.
@@ -759,8 +766,8 @@ export class ControlStreamAdapter implements Session {
 				const max = this.#peerMax;
 				await this.#writeMutex.runExclusive(async () => {
 					if (this.#closed) return;
-					await this.#writer.u53(MaxRequestId.id);
-					await new MaxRequestId({ requestId: max }).encode(this.#writer, this.version);
+					const grant = new MaxRequestId({ requestId: max });
+					await Message.write(this.#writer, MaxRequestId.id, grant, this.version);
 				});
 			}
 		} catch {
@@ -841,12 +848,13 @@ export class ControlStreamAdapter implements Session {
 	}
 
 	/**
-	 * Decode a PublishNamespace body and register its namespace for the v14/v15
-	 * namespace-keyed withdrawals. Returns the request ID it carried.
+	 * Decode a PublishNamespace body, or a draft-14 SubscribeNamespace one, and register its
+	 * namespace for the v14/v15 namespace-keyed messages that end it. Returns the request
+	 * ID it carried.
 	 *
-	 * The one decode site for both directions: outgoing announcements go through
-	 * #tryParseOutgoing and incoming ones through #classify. The direction selects the
-	 * map that the peer's DONE or CANCEL will later consult.
+	 * The one decode site for every direction: outgoing announcements go through
+	 * #tryParseOutgoing and incoming requests through #classify. The direction selects the
+	 * map that the peer's DONE, CANCEL, or UNSUBSCRIBE_NAMESPACE will later consult.
 	 */
 	async #registerNamespace(body: Uint8Array, direction: NamespaceDirection): Promise<bigint> {
 		const r = new Reader(undefined, body, this.version);
@@ -865,7 +873,14 @@ export class ControlStreamAdapter implements Session {
 	}
 
 	#namespaceRequests(direction: NamespaceDirection): Map<string, bigint> {
-		return direction === "incoming" ? this.#incomingNamespaces : this.#outgoingNamespaces;
+		switch (direction) {
+			case "incoming":
+				return this.#incomingNamespaces;
+			case "outgoing":
+				return this.#outgoingNamespaces;
+			case "subscribed":
+				return this.#subscribedNamespaces;
+		}
 	}
 
 	/** Create a WritableStream that buffers and writes complete messages to the control stream under mutex. */
@@ -959,7 +974,7 @@ export class ControlStreamAdapter implements Session {
 			const namespace = await Namespace.decode(r);
 			const namespaces = this.#namespaceRequests(direction);
 			const requestId = namespaces.get(namespace);
-			if (requestId === undefined) console.warn(`adapter: no announcement for namespace: ${namespace}`);
+			if (requestId === undefined) console.warn(`adapter: no request for namespace: ${namespace}`);
 			return requestId;
 		};
 
@@ -993,7 +1008,11 @@ export class ControlStreamAdapter implements Session {
 				if (this.version !== Version.DRAFT_14 && this.version !== Version.DRAFT_15) {
 					throw new Error("unexpected SubscribeNamespace on control stream");
 				}
-				const requestId = await readRequestId();
+				// Draft 14's UNSUBSCRIBE_NAMESPACE names the prefix rather than the request.
+				const requestId =
+					this.version === Version.DRAFT_14
+						? await this.#registerNamespace(body, "subscribed")
+						: await readRequestId();
 				return { route: Route.NewRequest, requestId };
 			}
 
@@ -1054,8 +1073,17 @@ export class ControlStreamAdapter implements Session {
 				if (subNs08 === undefined) throw new Error("unexpected message 0x08: no SubscribeNamespace stream");
 				return { route: Route.FollowUp, requestId: subNs08 };
 			}
+			case 0x0f: {
+				// TRACK_STATUS_ERROR has the SUBSCRIBE_ERROR body on draft 14.
+				if (this.version !== Version.DRAFT_14) throw new Error("unexpected TrackStatusError");
+				return { route: Route.ErrorResponse, requestId: await readRequestId() };
+			}
 			case 0x0e: {
-				if (this.version === Version.DRAFT_14 || this.version === Version.DRAFT_15) {
+				if (this.version === Version.DRAFT_14) {
+					// TRACK_STATUS_OK names its request, unlike draft 16's namespace entry.
+					return { route: Route.Response, requestId: await readRequestId() };
+				}
+				if (this.version === Version.DRAFT_15) {
 					throw new Error("unexpected message 0x0e");
 				}
 				// v16+: NamespaceDone entry (no requestId) — route to SubscribeNamespace stream
@@ -1109,11 +1137,14 @@ export class ControlStreamAdapter implements Session {
 				return { route: Route.CloseStream, requestId };
 			}
 			case 0x14: {
-				// UnsubscribeNamespace (v14/v15 only)
-				if (this.version !== Version.DRAFT_14 && this.version !== Version.DRAFT_15) {
-					throw new Error("unexpected UnsubscribeNamespace");
+				// UnsubscribeNamespace (v14/v15 only): v14 names the prefix, v15 the request.
+				if (this.version === Version.DRAFT_15) {
+					const requestId = await readRequestId();
+					return { route: Route.CloseStream, requestId };
 				}
-				const requestId = await readRequestId();
+				if (this.version !== Version.DRAFT_14) throw new Error("unexpected UnsubscribeNamespace");
+				const requestId = await readNamespaceRequestId("subscribed");
+				if (requestId === undefined) return { route: Route.Ignore, requestId: 0n };
 				return { route: Route.CloseStream, requestId };
 			}
 
@@ -1166,6 +1197,7 @@ export class ControlStreamAdapter implements Session {
 		// Clear namespace mappings
 		this.#incomingNamespaces.clear();
 		this.#outgoingNamespaces.clear();
+		this.#subscribedNamespaces.clear();
 		this.#namespacesByRequestId.clear();
 		this.#subscribeNamespaces.clear();
 

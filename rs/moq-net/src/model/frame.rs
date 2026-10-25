@@ -76,7 +76,6 @@ impl Frame {
 /// A frame with the relay metadata its group keeps beside it, read only by wire egress.
 #[cfg(feature = "async")]
 #[derive(Clone, Debug)]
-// private: passthrough
 pub(crate) struct Object {
 	pub frame: Frame,
 	pub fields: Option<Arc<super::object::Fields>>,
@@ -94,7 +93,6 @@ impl std::ops::Deref for Object {
 }
 
 /// A streamed frame's private header, alongside the unchanged public header.
-// private: passthrough
 pub(crate) struct Header {
 	pub info: Info,
 	pub fields: Option<Arc<super::object::Fields>>,
@@ -195,34 +193,50 @@ impl<const N: usize> Buffer<N> {
 	}
 }
 
-/// Bytes one session may allocate up front for the frames it is still receiving.
+/// Bytes the frames still being written through one origin handle may allocate up front.
 ///
-/// A peer declares each frame's size before sending it, and allocating that size up
-/// front saves a reallocation and copy per doubling as the payload arrives. The
-/// declaration costs the peer nothing, though, so without a bound it could commit up to
+/// A writer declares each frame's size before sending it, and allocating that size up
+/// front saves a reallocation and copy per doubling as the payload arrives. A peer's
+/// declaration costs it nothing, though, so without a bound it could commit up to
 /// [`group::MAX_CACHE_BYTES`] per stream without sending a byte. A frame whose declared
 /// size fits what remains is allocated up front; past that, its buffer grows with the
 /// bytes received. Each frame returns its share once it completes or aborts.
-#[derive(Clone)]
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
-// pending: /quest/m1/public-model/ingest.md
-pub(crate) struct Budget(Arc<AtomicUsize>);
+///
+/// Every broadcast, track, and group minted from an [`crate::origin::Producer`] handle shares
+/// its budget. The built-in sessions each ingest through a handle with its own.
+#[derive(Clone, Default)]
+pub(crate) struct Budget(Arc<Remaining>);
+
+struct Remaining(AtomicUsize);
+
+impl Default for Remaining {
+	fn default() -> Self {
+		Self(AtomicUsize::new(Budget::DEFAULT))
+	}
+}
+
+impl std::fmt::Debug for Budget {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_tuple("Budget")
+			.field(&self.0.0.load(Ordering::Relaxed))
+			.finish()
+	}
+}
 
 impl Budget {
 	/// Enough for a handful of large keyframes in flight at once.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	const DEFAULT: usize = 16 * 1024 * 1024;
 
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/ingest.md
+	/// A budget of `bytes`, for a benchmark sweeping it.
+	#[cfg(any(test, feature = "fuzz"))]
 	pub(crate) fn new(bytes: usize) -> Self {
-		Self(Arc::new(AtomicUsize::new(bytes)))
+		Self(Arc::new(Remaining(AtomicUsize::new(bytes))))
 	}
 
 	/// Take `size` bytes of the budget, or `None` if that is more than remains.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(super) fn reserve(&self, size: usize) -> Option<Reservation> {
 		self.0
+			.0
 			.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| left.checked_sub(size))
 			.ok()?;
 		Some(Reservation {
@@ -232,14 +246,7 @@ impl Budget {
 	}
 }
 
-impl Default for Budget {
-	fn default() -> Self {
-		Self::new(Self::DEFAULT)
-	}
-}
-
 /// A frame's share of a [`Budget`], returned on drop.
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
 pub(super) struct Reservation {
 	budget: Budget,
 	size: usize,
@@ -247,7 +254,7 @@ pub(super) struct Reservation {
 
 impl Drop for Reservation {
 	fn drop(&mut self) {
-		self.budget.0.fetch_add(self.size, Ordering::Relaxed);
+		self.budget.0.0.fetch_add(self.size, Ordering::Relaxed);
 	}
 }
 
@@ -257,7 +264,7 @@ impl Drop for Reservation {
 /// A whole-frame [`Bytes`] write is stored directly. Chunked writes are copied into a
 /// heap [`Segment`], either sized to the declared frame up front or grown as bytes
 /// arrive (see [`Budget`]). The producer writes through the raw pointer (sole writer,
-/// guaranteed by the exclusive borrow of the parent group); `written` provides
+/// guaranteed by the frame owning the group's only writer); `written` provides
 /// happens-before for cross-thread reads.
 #[derive(Clone)]
 pub(super) struct FrameBuf(Arc<FrameBufInner>);
@@ -343,7 +350,6 @@ impl FrameBuf {
 	}
 
 	/// A buffer for a frame of `size` bytes that allocates only as bytes arrive.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(super) fn growing(size: usize) -> Self {
 		Self::with_growth(size, true)
 	}
@@ -388,8 +394,8 @@ impl FrameBuf {
 	/// Append `src` at the current write offset and publish it.
 	///
 	/// Safety relies on the single-producer invariant: only one [`Producer`] exists for
-	/// a frame (it holds the exclusive borrow of the parent group), so this is the sole
-	/// writer even though it takes `&self`.
+	/// a frame (it owns the group's only writer), so this is the sole writer even though
+	/// it takes `&self`.
 	fn append(&self, src: &[u8]) {
 		if src.is_empty() {
 			return;
@@ -463,27 +469,99 @@ impl FrameBuf {
 	}
 }
 
-/// The writer behind [`Producer`] and [`ProducerOwned`], generic over how it
-/// reaches the parent group (an exclusive borrow, or an owned clone).
-struct Raw<G: std::borrow::BorrowMut<group::Producer>> {
-	group: Option<G>,
+/// Writes the payload of a group's single in-flight frame in one or more chunks.
+///
+/// Created by [`group::Producer::create_frame`], which hands it the group's writer: no
+/// other frame can be opened, and the group cannot finish, until [`Self::finish`] returns
+/// the writer. Owned rather than borrowed, so a driver can hold it across polls while
+/// the payload streams in. [`Self::group`] still reads the group meanwhile.
+///
+/// The total bytes written must exactly match [`Info::size`]; call [`Self::finish`] to
+/// commit the frame (or [`Self::abort`] to fail it). Dropping it without either aborts
+/// the group, since an unfinished frame leaves the group's stream broken.
+///
+/// A single whole-frame [`write`](Self::write) keeps the caller's allocation
+/// (zero-copy); chunked writes copy into one buffer sized to the declared frame, or
+/// grown as bytes arrive once the declared sizes in flight pass the origin's budget.
+pub struct Producer {
+	group: Option<group::Producer>,
 	buf: FrameBuf,
 	info: Info,
 	// Set once the frame is committed (finished) or aborted, so Drop is a no-op.
 	done: bool,
-	// An owned receive frame carries its handler's cancellation cleanup across polls.
+	// A receive handler's cancellation cleanup, carried across polls.
 	cancel_on_drop: bool,
 	// Ingress payload meter, inherited from the parent group. Counts each written
 	// chunk's bytes. Empty (no-op) for an untagged group.
 	stats: stats::Meter,
+	// The frame's share of the origin's [`Budget`], if it got one, held until it ends.
+	_reserved: Option<Reservation>,
 }
 
-impl<G: std::borrow::BorrowMut<group::Producer>> Raw<G> {
-	fn remaining(&self) -> usize {
+impl std::ops::Deref for Producer {
+	type Target = Info;
+
+	fn deref(&self) -> &Self::Target {
+		&self.info
+	}
+}
+
+impl Producer {
+	pub(super) fn new(group: group::Producer, buf: FrameBuf, info: Info, reserved: Option<Reservation>) -> Self {
+		Self {
+			group: Some(group),
+			buf,
+			info,
+			done: false,
+			cancel_on_drop: false,
+			stats: stats::Meter::default(),
+			_reserved: reserved,
+		}
+	}
+
+	/// Attach the parent group's ingress meter, so written chunks bump `bytes`.
+	pub(super) fn with_meter(mut self, meter: stats::Meter) -> Self {
+		self.stats = meter;
+		self
+	}
+
+	/// Transfer a receive handler's cancellation cleanup into its in-flight frame.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	// A dropped receive handler cannot name its error; a public driver aborts explicitly.
+	pub(crate) fn cancel_on_drop(mut self) -> Self {
+		self.cancel_on_drop = true;
+		self
+	}
+
+	/// The group this frame belongs to, readable while the frame holds its writer.
+	pub fn group(&self) -> &group::Producer {
+		self.group.as_ref().expect("frame owns its group")
+	}
+
+	/// Bytes still needed to complete the frame.
+	pub fn remaining(&self) -> usize {
 		self.buf.size() - self.buf.written(Ordering::Acquire)
 	}
 
-	fn write<B: IntoBytes>(&mut self, chunk: B) -> Result<()> {
+	/// Write a chunk of data to the frame, waking its readers.
+	///
+	/// Returns [`Error::WrongSize`] if the chunk would exceed the remaining bytes.
+	pub fn write<B: IntoBytes>(&mut self, chunk: B) -> Result<()> {
+		self.write_deferred(chunk)?;
+		self.notify();
+		Ok(())
+	}
+
+	/// Write a chunk of payload *without* waking consumers; pair it with [`Self::notify`].
+	///
+	/// The wake is split out because the wire ingest drains every chunk the transport
+	/// has already buffered in one poll turn, and a consumer parked on the group cannot
+	/// run until that turn yields. Waking per chunk pays a group lock and a clock read
+	/// to publish bytes nobody can observe yet.
+	///
+	/// `coding::Reader::poll_read_frame` owns the pairing and is the only caller.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn write_deferred<B: IntoBytes>(&mut self, chunk: B) -> Result<()> {
 		let len = chunk.as_ref().len();
 		if len > self.remaining() {
 			return Err(Error::WrongSize);
@@ -507,225 +585,65 @@ impl<G: std::borrow::BorrowMut<group::Producer>> Raw<G> {
 		Ok(())
 	}
 
-	fn finish(&mut self) -> Result<()> {
+	/// Publish what has been written so far, waking consumers parked on the group.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn notify(&self) {
+		self.group().frame_notify();
+	}
+
+	/// Commit the frame, verifying that all bytes were written, and return the group's
+	/// writer for its next frame or its finish.
+	///
+	/// Returns [`Error::WrongSize`] if the bytes written don't match [`Info::size`].
+	pub fn finish(mut self) -> Result<group::Producer> {
 		if self.buf.written(Ordering::Acquire) != self.buf.size() {
 			return Err(Error::WrongSize);
 		}
 		let payload = self.buf.freeze();
-		self.group
-			.as_mut()
-			.expect("frame owns its group")
-			.borrow_mut()
-			.frame_commit(Frame::new(self.info.timestamp, payload))?;
+		let mut group = self.group.take().expect("frame owns its group");
+		let committed = group.frame_commit(Frame::new(self.info.timestamp, payload));
 		self.done = true;
-		Ok(())
-	}
-
-	fn abort(&mut self, err: Error) -> Result<()> {
-		self.group
-			.as_mut()
-			.expect("frame owns its group")
-			.borrow_mut()
-			.frame_abort(err);
-		self.done = true;
-		Ok(())
-	}
-}
-
-impl<G: std::borrow::BorrowMut<group::Producer>> Drop for Raw<G> {
-	fn drop(&mut self) {
-		if !self.done {
-			// An unfinished frame leaves the group stream broken; fail the group so
-			// consumers surface an error instead of hanging on the partial forever.
-			// A group already aborted (superseded, evicted, cancelled) carries its own
-			// reason, so cutting its in-flight frame short is expected.
-			let Some(group) = self.group.as_mut() else {
-				return;
-			};
-			let group = group.borrow_mut();
-			if !group.is_aborted() && !self.cancel_on_drop {
-				tracing::warn!(
-					group = group.info().sequence,
-					"frame::Producer dropped before writing all bytes"
-				);
-			}
-			group.frame_abort(if self.cancel_on_drop {
-				Error::Cancel
-			} else {
-				Error::Dropped
-			});
-		}
-	}
-}
-
-/// Writes the payload of the single in-flight frame in one or more chunks.
-///
-/// Borrows the parent [`group::Producer`] exclusively, so no other frame can be
-/// opened while this one is live. The total bytes written must exactly match
-/// [`Info::size`]; call [`Self::finish`] to commit the frame (or [`Self::abort`] to
-/// fail it). Dropping without either aborts the group, since an unfinished frame
-/// leaves the group's stream broken.
-///
-/// A single whole-frame [`write`](Self::write) keeps the caller's allocation
-/// (zero-copy); chunked writes copy into one buffer sized to the declared frame.
-pub struct Producer<'a>(Raw<&'a mut group::Producer>);
-
-impl std::ops::Deref for Producer<'_> {
-	type Target = Info;
-
-	fn deref(&self) -> &Self::Target {
-		&self.0.info
-	}
-}
-
-impl<'a> Producer<'a> {
-	pub(super) fn new(group: &'a mut group::Producer, buf: FrameBuf, info: Info) -> Self {
-		Self(Raw {
-			group: Some(group),
-			buf,
-			info,
-			done: false,
-			cancel_on_drop: false,
-			stats: stats::Meter::default(),
-		})
-	}
-
-	/// Attach the parent group's ingress meter, so written chunks bump `bytes`.
-	pub(super) fn with_meter(mut self, meter: stats::Meter) -> Self {
-		self.0.stats = meter;
-		self
-	}
-
-	/// The parent group this frame belongs to.
-	pub fn group(&self) -> group::Info {
-		self.0.group.as_ref().expect("frame owns its group").info()
-	}
-
-	/// Bytes still needed to complete the frame.
-	pub fn remaining(&self) -> usize {
-		self.0.remaining()
-	}
-
-	/// Write a chunk of data to the frame.
-	///
-	/// Returns [`Error::WrongSize`] if the chunk would exceed the remaining bytes.
-	pub fn write<B: IntoBytes>(&mut self, chunk: B) -> Result<()> {
-		self.0.write(chunk)?;
-		self.0.group.as_mut().expect("frame owns its group").frame_notify();
-		Ok(())
-	}
-
-	/// Commit the frame, verifying that all bytes were written.
-	///
-	/// Returns [`Error::WrongSize`] if the bytes written don't match [`Info::size`].
-	pub fn finish(mut self) -> Result<()> {
-		self.0.finish()
+		committed?;
+		Ok(group)
 	}
 
 	/// Abort the frame (and its group) with the given error.
 	pub fn abort(mut self, err: Error) -> Result<()> {
-		self.0.abort(err)
-	}
-}
-
-/// The owned counterpart of [`Producer`], for the wire drivers that stream a
-/// frame across polls and cannot hold the group borrowed inside their state.
-///
-/// Owns the only group writer until the frame finishes and returns it, so another
-/// frame or a group finish cannot race this frame.
-///
-/// Holds the frame's share of the session's [`Budget`], if it got one, until then.
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
-// pending: /quest/m1/public-model/ingest.md
-pub(crate) struct ProducerOwned {
-	raw: Raw<group::Producer>,
-	_reserved: Option<Reservation>,
-}
-
-impl std::ops::Deref for ProducerOwned {
-	type Target = Info;
-
-	fn deref(&self) -> &Self::Target {
-		&self.raw.info
-	}
-}
-
-impl ProducerOwned {
-	/// Transfer a receive handler's cancellation cleanup into its in-flight frame.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// private: capability gap
-	// Public drivers still borrow frames; the owned public writer belongs to ingest.
-	pub(crate) fn cancel_on_drop(mut self) -> Self {
-		self.raw.cancel_on_drop = true;
-		self
-	}
-
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub(super) fn new(group: group::Producer, buf: FrameBuf, info: Info, reserved: Option<Reservation>) -> Self {
-		Self {
-			raw: Raw {
-				group: Some(group),
-				buf,
-				info,
-				done: false,
-				cancel_on_drop: false,
-				stats: stats::Meter::default(),
-			},
-			_reserved: reserved,
-		}
-	}
-
-	/// Attach the parent group's ingress meter, so written chunks bump `bytes`.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub(super) fn with_meter(mut self, meter: stats::Meter) -> Self {
-		self.raw.stats = meter;
-		self
-	}
-
-	/// Bytes still needed to complete the frame.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub fn remaining(&self) -> usize {
-		self.raw.remaining()
-	}
-
-	/// Write a chunk of payload *without* waking consumers; pair it with [`Self::notify`].
-	///
-	/// The wake is split out because the wire ingest drains every chunk the transport
-	/// has already buffered in one poll turn, and a consumer parked on the group cannot
-	/// run until that turn yields. Waking per chunk pays a group lock and a clock read
-	/// to publish bytes nobody can observe yet.
-	///
-	/// `coding::Reader::poll_read_frame` owns the pairing and is the only caller.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// private: tuning
-	pub(crate) fn write<B: IntoBytes>(&mut self, chunk: B) -> Result<()> {
-		self.raw.write(chunk)
-	}
-
-	/// Publish what has been written so far, waking consumers parked on the group.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// private: tuning
-	pub(crate) fn notify(&self) {
-		self.raw.group.as_ref().expect("frame owns its group").frame_notify();
-	}
-
-	/// Commit the frame, verifying that all bytes were written.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub fn finish(mut self) -> Result<group::Producer> {
-		self.raw.finish()?;
-		Ok(self.raw.group.take().expect("frame owns its group"))
-	}
-
-	/// Abort the frame (and its group) with the given error.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub fn abort(mut self, err: Error) -> Result<()> {
-		self.raw.abort(err)
+		self.group.as_mut().expect("frame owns its group").frame_abort(err);
+		self.done = true;
+		Ok(())
 	}
 
 	/// Heap bytes the frame's buffer currently holds for the payload.
 	#[cfg(test)]
 	pub(super) fn allocated(&self) -> usize {
-		self.raw.buf.allocated()
+		self.buf.allocated()
+	}
+}
+
+impl Drop for Producer {
+	fn drop(&mut self) {
+		if self.done {
+			return;
+		}
+		// An unfinished frame leaves the group stream broken; fail the group so
+		// consumers surface an error instead of hanging on the partial forever.
+		// A group already aborted (superseded, evicted, cancelled) carries its own
+		// reason, so cutting its in-flight frame short is expected.
+		let Some(group) = self.group.as_mut() else {
+			return;
+		};
+		if !group.is_aborted() && !self.cancel_on_drop {
+			tracing::warn!(
+				group = group.info().sequence,
+				"frame::Producer dropped before writing all bytes"
+			);
+		}
+		group.frame_abort(if self.cancel_on_drop {
+			Error::Cancel
+		} else {
+			Error::Dropped
+		});
 	}
 }
 
@@ -779,13 +697,11 @@ pub struct Consumer {
 	// The group's channel, used to park while a partial frame fills.
 	state: kio::Consumer<GroupState>,
 	info: Info,
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// private: passthrough
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fields: Option<Arc<super::object::Fields>>,
 	/// The inflated size of a compressed frame read in its stored form (see
 	/// [`group::Consumer::compressed`]), whose payload is then the DEFLATE slice.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// private: passthrough
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) inflated: Option<u64>,
 	source: Source,
 	// Byte offset consumed so far.

@@ -41,8 +41,12 @@ This supersedes the earlier generated-TypeScript-only decision, the absolute
 no-regression gate, and the codec/model/session translation sequence. Keep
 Rust async, kio, integer representations, and storage unless evidence calls
 for a source change. A batched boundary is an optimization candidate, not a
-reason to require a full sans-IO rewrite. Controlled time remains independently
-useful; source-level `Instant` mappings depend on the chosen backend.
+reason to require a full sans-IO rewrite.
+
+The Rust and JS clocks (`moq-clock` and `@moq/clock`) must agree on origin and
+units under either backend. WASM keeps Rust's time types; a source translator
+chooses its `Instant` mapping with its backend. A JS `number` of nanoseconds is
+exact for 104 days of uptime and only loses sub-microsecond precision after.
 
 Decided with the maintainer on 2026-10-17
 ([#5838](https://github.com/moq-dev/moq/pull/5838)): the WASM binding is moq-ffi
@@ -77,5 +81,5 @@ any necessary breaks. Wire: no changes intended.
 
 - [WASM-to-JS evaluation](/quest/m2/rs2ts-wasm2js.md) - the first JS-only candidate, with source translators as alternatives
 - [JS-only @moq/net](/quest/m2/rs2ts-js.md) - the eventual distribution uses no WASM runtime
+- [rust2's TS translator](https://github.com/kixelated/rust2/blob/main/quest/m2/ts.md) - a parallel research track translating moq-net's codec through an own rustc driver
 - [Browser media report](/quest/m2/rs2ts-browser-report.md) - broader media measurements after adoption
-- [Controlled time](/quest/m1/time/README.md) - coherent Rust and JS clocks regardless of backend

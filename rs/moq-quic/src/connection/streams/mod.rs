@@ -11,13 +11,15 @@ use crate::{
     frame,
 };
 
+mod lease;
+pub use lease::{LeaseError, Leased};
 mod recv;
 use recv::Recv;
 
 #[cfg(test)]
 mod saturated;
 mod schedule;
-pub use recv::{Chunks, Credit, ReadError, ReadableError};
+pub use recv::{Chunks, ReadError, ReadableError};
 use schedule::{Next, Schedule};
 
 mod send;
@@ -34,7 +36,6 @@ pub struct Streams<'a> {
     pub(super) conn_state: &'a super::State,
 }
 
-#[allow(clippy::needless_lifetimes)] // `new` names the lifetime, under the fuzz harness
 impl<'a> Streams<'a> {
     /// Drive a bare `StreamsState` without a connection, for the `streams` fuzz target
     #[cfg(any(test, feature = "fuzz"))]
@@ -148,17 +149,26 @@ impl RecvStream<'_> {
 
     /// Stop accepting data on the given receive stream
     ///
-    /// Discards unread data and notifies the peer to stop transmitting. Once stopped, further
-    /// attempts to operate on a stream will yield `ClosedStream` errors.
+    /// Discards unread and leased data, returning its credit, and notifies the peer to stop
+    /// transmitting. Once stopped, further attempts to operate on a stream will yield
+    /// `ClosedStream` errors.
     pub fn stop(&mut self, error_code: VarInt) -> Result<(), ClosedStream> {
-        let mut entry = match self.state.recv.entry(self.id) {
-            hash_map::Entry::Occupied(s) => s,
-            hash_map::Entry::Vacant(_) => return Err(ClosedStream { _private: () }),
+        let hash_map::Entry::Occupied(mut entry) = self.state.recv.entry(self.id) else {
+            return Err(ClosedStream { _private: () });
         };
         let stream = get_or_insert_recv(entry.get_mut(), self.state.stream_receive_window);
 
-        let (read_credits, stop_sending) = stream.stop()?;
-        if stop_sending.should_transmit() {
+        // An eviction already discarded the buffer, leaving the peer and the bytes the reader
+        // took to this stop.
+        let (read_credits, stop_sending) = match stream.lease.evicted {
+            true => (0, stream.final_offset_unknown()),
+            false => {
+                let (credits, stop_sending) = stream.stop()?;
+                (credits, stop_sending.should_transmit())
+            }
+        };
+        let mut lease = std::mem::take(&mut stream.lease);
+        if stop_sending {
             self.pending.stop_sending.push(frame::StopSending {
                 id: self.id,
                 error_code,
@@ -170,13 +180,16 @@ impl RecvStream<'_> {
         // state immediately.
         if !stream.final_offset_unknown() {
             let recv = entry.remove().expect("must have recv when stopping");
-            self.state.stream_recv_freed(self.id, recv);
+            // The lease was taken out above, so this returns no credit.
+            let _ = self.state.stream_recv_freed(self.id, recv);
             self.state.queue_max_stream_id(self.pending);
         }
 
-        if self.state.add_read_credits(read_credits).should_transmit() {
-            self.pending.max_data = true;
-        }
+        let leased = self.state.discard_lease(self.id, &mut lease);
+        let transmit = self.state.add_read_credits(read_credits);
+        self.pending.max_data |= leased.should_transmit() || transmit.should_transmit();
+        // The credit returned may only have paid a shrunk window's debt.
+        self.unstick();
 
         Ok(())
     }
@@ -200,11 +213,16 @@ impl RecvStream<'_> {
         };
 
         // Clean up state after application observes the reset, since there's no reason for the
-        // application to attempt to read or stop the stream once it knows it's reset
+        // application to attempt to read or stop the stream once it knows it's reset. A lease still
+        // holding credit returns it here, since nothing is left to release or stop it.
         let (_, recv) = entry.remove_entry();
-        self.state
+        let transmit = self
+            .state
             .stream_recv_freed(self.id, recv.expect("must have recv on reset"));
+        self.pending.max_data |= transmit.should_transmit();
         self.state.queue_max_stream_id(self.pending);
+        // The credit returned may only have paid a shrunk window's debt.
+        self.unstick();
 
         Ok(Some(code))
     }
@@ -218,7 +236,6 @@ pub struct SendStream<'a> {
     pub(super) conn_state: &'a super::State,
 }
 
-#[allow(clippy::needless_lifetimes)] // `new` names the lifetime, under the fuzz harness
 impl<'a> SendStream<'a> {
     /// Drive a bare `StreamsState` without a connection, for the `streams` fuzz target
     #[cfg(any(test, feature = "fuzz"))]
@@ -289,30 +306,24 @@ impl<'a> SendStream<'a> {
             .ok_or(WriteError::ClosedStream)?
             .get_or_insert_with(|| Send::new(max_send_data));
 
-        if limit == 0 {
-            trace!(
-                stream = %self.id, max_data = self.state.max_data, data_sent = self.state.data_sent,
-                "write blocked by connection-level flow control or send window"
-            );
-            if !stream.connection_blocked {
-                stream.connection_blocked = true;
-                self.state.connection_blocked.push(self.id);
-            }
-            // Only report blocking on the peer's limit, not on our own send window
-            if self.state.data_sent == self.state.max_data
-                && self.state.data_blocked_limit != Some(self.state.max_data)
-            {
-                self.state.data_blocked_limit = Some(self.state.max_data);
-                self.pending.data_blocked = true;
-            }
-            return Err(WriteError::Blocked);
-        }
-
         let was_pending = stream.is_pending();
         let written = match stream.write(source, limit) {
             Ok(written) => written,
             Err(WriteError::Blocked) => {
-                if stream.data_blocked_limit != Some(stream.max_data) {
+                if limit == 0 {
+                    trace!(
+                        stream = %self.id, max_data = self.state.max_data, data_sent = self.state.data_sent,
+                        "write blocked by connection-level flow control or send window"
+                    );
+                    self.state.connection_blocked.insert(self.id);
+                    // Only report the peer's limit, not our own send window.
+                    if self.state.data_sent == self.state.max_data
+                        && self.state.data_blocked_limit != Some(self.state.max_data)
+                    {
+                        self.state.data_blocked_limit = Some(self.state.max_data);
+                        self.pending.data_blocked = true;
+                    }
+                } else if stream.data_blocked_limit != Some(stream.max_data) {
                     stream.data_blocked_limit = Some(stream.max_data);
                     self.pending.stream_data_blocked.insert(self.id);
                 }
@@ -356,6 +367,7 @@ impl<'a> SendStream<'a> {
 
         let was_pending = stream.is_pending();
         stream.finish()?;
+        self.state.connection_blocked.swap_remove(&self.id);
         if !was_pending {
             self.state
                 .pending
@@ -457,6 +469,7 @@ impl<'a> SendStream<'a> {
         // credit based on the final offset communicated in the RESET_STREAM frame we send.
         let buffered = stream.pending.buffered();
         let send = stream.reset(error_code, reliable_size, at);
+        self.state.connection_blocked.swap_remove(&self.id);
         self.state.buffered_data -= buffered - stream.pending.buffered();
         if let Some(offset) = stream.take_waiting() {
             self.state.events.push_back(StreamEvent::Acked {
@@ -478,9 +491,10 @@ impl<'a> SendStream<'a> {
 
     /// Set the priority within the stream's send group, or session-wide when ungrouped
     ///
-    /// Higher values go first; equal values share bytes round robin. A queued stream moves to
-    /// its new priority the next time it is requeued, which is after every frame when
-    /// [`TransportConfig::send_fairness`](crate::TransportConfig::send_fairness) is on.
+    /// Higher values go first; equal values share bytes round robin. A queued stream moves at
+    /// once, behind the streams already queued at its new priority. With
+    /// [`TransportConfig::send_fairness`](crate::TransportConfig::send_fairness) off, a stream
+    /// its group is partway through keeps going first until it runs out of data.
     ///
     /// # Panics
     /// - when applied to a receive stream
@@ -494,6 +508,9 @@ impl<'a> SendStream<'a> {
             .get_or_insert_with(|| Send::new(max_send_data));
 
         stream.priority = priority;
+        self.state
+            .pending
+            .set_stream_priority(&mut stream.slot, priority);
         Ok(())
     }
 

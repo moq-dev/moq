@@ -1,8 +1,9 @@
 """JSON tracks, mirroring the ``moq-json`` crate.
 
-Each type wraps a track. A producer takes over a :class:`~moq.TrackProducer` and advertises it
-in its broadcast's catalog (``json.tracks.<name>``) for as long as it lives; a consumer takes over
-a :class:`~moq.TrackConsumer` that has not read a group yet. Either track can come from a request
+Each type wraps a track. A producer takes over a :class:`~moq.TrackProducer`; the snapshot and
+stream producers also advertise it in their broadcast's catalog (``json.tracks.<name>``) for as
+long as they live, while the catalog has no window mode. A consumer takes over a
+:class:`~moq.TrackConsumer` that has not read a group yet. Either track can come from a request
 as well as by name. Values are any JSON-serializable Python object.
 """
 
@@ -21,6 +22,11 @@ from moq_ffi import (
     MoqJsonStreamConsumer,
     MoqJsonStreamProducer,
     MoqJsonValue,
+    MoqJsonWindowConfig,
+    MoqJsonWindowConsumer,
+    MoqJsonWindowEvent,
+    MoqJsonWindowProducer,
+    MoqJsonWindowTimed,
 )
 
 from . import publish, subscribe
@@ -28,7 +34,19 @@ from ._records import _opt_from_us, _opt_us
 from ._stream import _Stream
 from .publish import BroadcastProducer, TrackDemand
 
-__all__ = ["SnapshotConsumer", "SnapshotProducer", "StreamConsumer", "StreamProducer", "Timed"]
+__all__ = [
+    "SnapshotConsumer",
+    "SnapshotProducer",
+    "StreamConsumer",
+    "StreamProducer",
+    "Timed",
+    "WindowConsumer",
+    "WindowEvent",
+    "WindowPop",
+    "WindowProducer",
+    "WindowPush",
+    "WindowSkip",
+]
 
 
 @dataclass(frozen=True)
@@ -54,10 +72,11 @@ class SnapshotProducer:
     """Publish a JSON value that consumers see as a single latest state (lossy).
 
     Each :meth:`update` supersedes the last; a late joiner only sees the newest value, encoded as
-    snapshots and merge-patch deltas automatically. ``delta_ratio`` controls how aggressively
-    deltas replace full snapshots (0 disables them); ``None`` uses the binding's default. Set
-    ``compression`` to DEFLATE-compress each group; the consumer must pass the same flag. A name
-    the catalog already carries is refused.
+    snapshots and merge-patch deltas automatically. Set ``deltas=False`` to publish every update
+    as a full snapshot in its own group. With deltas on, give the track a ``refresh`` ratio so a
+    join after more than that many snapshots' worth of deltas asks for the value restated in a
+    fresh group. Set ``compression`` to DEFLATE-compress each group; the consumer
+    must pass the same flag. A name the catalog already carries is refused.
     """
 
     def __init__(
@@ -65,15 +84,10 @@ class SnapshotProducer:
         broadcast: BroadcastProducer,
         track: publish.TrackProducer,
         *,
-        delta_ratio: int | None = None,
+        deltas: bool = True,
         compression: bool = False,
     ) -> None:
-        # Let the record supply delta_ratio's default rather than restating it here.
-        config = (
-            MoqJsonSnapshotConfig(compression=compression)
-            if delta_ratio is None
-            else MoqJsonSnapshotConfig(delta_ratio=delta_ratio, compression=compression)
-        )
+        config = MoqJsonSnapshotConfig(deltas=deltas, compression=compression)
         self._inner = MoqJsonSnapshotProducer(broadcast._inner, track._inner, config)
 
     def demand(self) -> TrackDemand:
@@ -126,7 +140,7 @@ class SnapshotConsumer(_Stream[Timed]):
     """
 
     def __init__(self, track: subscribe.TrackConsumer, *, compression: bool = False) -> None:
-        # delta_ratio is producer-only, so leave it at its default here.
+        # deltas is producer-only, so leave it at its default here.
         config = MoqJsonSnapshotConfig(compression=compression)
         self._inner = MoqJsonSnapshotConsumer(track._inner, config)
 
@@ -158,6 +172,123 @@ class StreamConsumer(_Stream[Timed]):
 
     async def _next(self) -> Timed | None:
         return Timed._from_ffi(await self._inner.next())
+
+    def cancel(self) -> None:
+        """Cancel all current and future next() calls."""
+        self._inner.cancel()
+
+
+class WindowProducer:
+    """Publish a sliding window of JSON records: pushed at the back, popped from the front.
+
+    Unlike a stream, which keeps every record in one group forever, a window rolls to new groups
+    that restate the records it retains, so a reader can join at any point. Bound what it retains
+    by popping, or with ``checkpoint_records`` for a window that is never popped: a reader that
+    keeps up still sees every record, while one joining later is told the older ones were skipped.
+    Give the track a ``refresh`` ratio so a join past it gets the window restated in a fresh group.
+    Set ``compression`` to DEFLATE-compress each group; the consumer must pass the same flag.
+
+    Not advertised in the broadcast's catalog, which has no window mode; a reader names the track.
+    """
+
+    def __init__(
+        self,
+        track: publish.TrackProducer,
+        *,
+        compression: bool = False,
+        checkpoint_records: int | None = None,
+    ) -> None:
+        config = MoqJsonWindowConfig(compression=compression, checkpoint_records=checkpoint_records)
+        self._inner = MoqJsonWindowProducer(track._inner, config)
+
+    def demand(self) -> TrackDemand:
+        """A watch-only handle to whether this track has subscribers."""
+        return TrackDemand(self._inner.demand())
+
+    def push(self, value: Any, *, timestamp: timedelta | None = None) -> None:
+        """Append one record to the back of the window."""
+        self._inner.push(json.dumps(value), _opt_us(timestamp, "timestamp"))
+
+    def pop(self, count: int, *, timestamp: timedelta | None = None) -> None:
+        """Drop ``count`` records from the front of the window, clamped to what it holds."""
+        self._inner.pop(count, _opt_us(timestamp, "timestamp"))
+
+    def cut(self) -> None:
+        """Close the open group, so the next edit opens one restating the retained window.
+
+        A no-op when no group is open. Cut at a natural boundary, such as the end of an utterance,
+        so every edit so far sits in a group no later frame extends.
+        """
+        self._inner.cut()
+
+    def finish(self) -> None:
+        """Finish the track, closing any open group."""
+        self._inner.finish()
+
+
+@dataclass(frozen=True)
+class WindowPush:
+    """A record joined the window at absolute ``index``."""
+
+    index: int
+    value: Any
+
+
+@dataclass(frozen=True)
+class WindowPop:
+    """The records at these absolute indices left the window."""
+
+    range: range
+
+
+@dataclass(frozen=True)
+class WindowSkip:
+    """The records at these absolute indices will never be delivered.
+
+    They were pushed and dropped while this reader was behind, or fell outside the producer's
+    checkpoint when it joined.
+    """
+
+    range: range
+
+
+WindowEvent = WindowPush | WindowPop | WindowSkip
+"""One change to a window, as a :class:`WindowConsumer` sees it."""
+
+
+def _window_event(timed: MoqJsonWindowTimed | None) -> Timed | None:
+    if timed is None:
+        return None
+    event = timed.event
+    value: WindowEvent
+    if isinstance(event, MoqJsonWindowEvent.PUSH):
+        value = WindowPush(index=event.index, value=json.loads(event.value))
+    elif isinstance(event, MoqJsonWindowEvent.POP):
+        value = WindowPop(range(event.start, event.end))
+    elif isinstance(event, MoqJsonWindowEvent.SKIP):
+        value = WindowSkip(range(event.start, event.end))
+    else:
+        raise TypeError(f"unknown window event: {event!r}")
+    return Timed(value=value, timestamp=_opt_from_us(timed.timestamp_us))
+
+
+class WindowConsumer(_Stream[Timed]):
+    """Async iterator over a JSON window track, yielding each change in order.
+
+    Each item is a :class:`Timed` whose ``value`` is a :class:`WindowPush`, :class:`WindowPop`, or
+    :class:`WindowSkip`. Group rolls never surface: a restated record this reader already has
+    yields nothing. A record first learned of from a restatement (after a join, or while behind)
+    carries that frame's timestamp, not its original push time. Pass the same ``compression`` the
+    producer used. Usable as an async context manager that cancels on exit.
+    """
+
+    def __init__(self, track: subscribe.TrackConsumer, *, compression: bool = False) -> None:
+        # checkpoint_records is producer-only, so leave it at its default here.
+        config = MoqJsonWindowConfig(compression=compression)
+        self._inner = MoqJsonWindowConsumer(track._inner, config)
+
+    async def _next(self) -> Timed | None:
+        return _window_event(await self._inner.next())
 
     def cancel(self) -> None:
         """Cancel all current and future next() calls."""

@@ -109,7 +109,7 @@ Share `moq::MediaTimebase::init(broadcast)` through `ContainerInit` when several
 use one source timeline; omitting it keeps an independent offset. A timebase belongs to
 its broadcast and does not keep it open. `MediaContainerProducer` takes chunks split
 anywhere, so a raw byte stream needs no other importer.
-`moq::ContainerFormat::kFmp4` splits each fragment into one frame per sample; `kCmaf` republishes it whole.
+`moq::ContainerFormat::kFmp4` splits each fragment into one frame per sample.
 
 ```cpp
 // Publish encoded frames, or raw pixels with the codec inside the binding.
@@ -119,15 +119,17 @@ auto broadcast = ok(session->publish()->create_broadcast("my-stream.hang"));
 auto audio = ok(moq::MediaTrackProducer::audio(broadcast, moq::MediaTarget::kNamed{}, {moq::AudioFormat::kOpus, opus_init}));
 ok(audio->write_frame({packet, 20'000}));
 
-moq::VideoEncoderOutput output{moq::VideoCodec::kH264, "camera", std::nullopt, std::nullopt, moq::VideoEncoderKind::kAuto{}};
+moq::VideoEncoderOutput output{moq::VideoCodec::kH264, std::nullopt, std::nullopt, moq::VideoEncoderKind::kAuto{}};
 auto catalog = ok(moq::MediaCatalogProducer::init(broadcast));
-auto video = ok(moq::VideoProducer::init(catalog, {moq::VideoPixelFormat::kRgba, 1280, 720, 30}, output, nullptr));
+auto video = ok(moq::VideoProducer::init(catalog, {{moq::VideoPixelFormat::kRgba, 1280, 720, {30000, 1001}}, output, "camera", nullptr}));
 ok(video->write({0, rgba}));
-moq::Route route;
+moq::AnnounceRoute route;
 route.epoch = moq::mint_epoch(); // a fresh epoch per run
 ok(broadcast->announce(route));
 ok(broadcast->close());    // keep the producer alive while publishing, then close explicitly
 ```
+
+Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Producer options hold input, codec settings, track naming, and optional session bandwidth ownership; standalone encoders take only codec settings.
 
 ## Futures
 
@@ -185,11 +187,11 @@ future completed, which is the executor thread.
 
 ## Disabled renditions
 
-Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder.
+Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder. Among the video renditions you can decode, prefer the highest `preference`; `0` is the default and `-1` marks a compatibility transcode.
 
 ## Bandwidth estimates
 
-Hold the owned `BandwidthConsumer` returned by `session->recv_bandwidth()` to receive bandwidth estimates. `peek()` reads the current estimate in bits per second and `changed()` waits for a new one. Releasing the last consumer stops PROBE; the session and stats snapshots do not request it. Client consumers survive reconnects and report no estimate while disconnected.
+Hold the owned `BandwidthConsumer` returned by `session->recv_bandwidth()` to receive bandwidth estimates. `rate()` reads the current estimate in bits per second and `rate_changed()` waits for a new one. Releasing the last consumer stops PROBE; the session and stats snapshots do not request it. Client consumers survive reconnects and report no estimate while disconnected.
 
 ## Compressed tracks
 
@@ -207,21 +209,20 @@ On `moq-lite-07-wip` (opt in with `ClientConfig::versions`) and on moq-transport
 
 ## Stats
 
-`session->stats()` reports the transport counters, each a `std::optional` that is empty when the transport does not report it, plus the negotiated protocol in `version`. While a client session reconnects, `session->failure()` returns why as a `moq::Error`, and while its first `connect` is still retrying, `client->failure()` does.
+`session->stats()` reports the transport counters, each a `std::optional` that is empty when the transport does not report it, plus the negotiated protocol in `version`. Connect returns a connecting session. Read `session->state()` and wait with `state_changed(state.revision)` to observe its first-dial failures and reconnects; independent watchers keep their own revisions.
 
 ## Shutdown
 
-`session->shutdown().get()` drains for up to one second and reports any error.
+`session->shutdown()` requests a drain immediately; `session->closed().get()` waits up to one second and reports its result.
 Application delivery requires explicitly selecting `moq-lite-07-wip` on both
 peers; older Lite versions (including default lite-06) and IETF wait only for
 transport ACKs. Finish or abort live tracks first.
 
-To end a broadcast cleanly, finish every track, then call `broadcast->finish()`.
-The returned `moq::BroadcastFinish` keeps the broadcast announced and serving the
-finished tracks for `linger_us()`, their longest max age, so a subscriber still
-catching up can drain them. `finish->wait()` resolves once the linger passes, and
-`finish->close()` closes the broadcast at once, resolving the wait.
-`broadcast->close()` stays the abrupt end.
+To end a broadcast cleanly, finish every track, then call `catalog->finish()` on
+its `moq::MediaCatalogProducer` to finish the catalog, which ends the content.
+The broadcast stays announced and keeps serving the finished tracks, so a
+subscriber still catching up can drain them, until `broadcast->close()` takes it
+offline. How long to keep it up is yours to decide.
 
 `moq::shutdown()` stops the `moq-ffi` runtime workers, then the executor.
 Pending calls resolve `Cancelled`, and every object stays safe to drop. Call

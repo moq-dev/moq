@@ -12,7 +12,7 @@ those buffers with the ring is
 
 Decided in the 2026-09-30 plan: commit to the redesign, but start only after
 a `moq-quic` profile shows where ingress and egress spend their time
-(`just bench-profile cpu`).
+(`just bench-profile cpu` on `io-uring-workers`).
 No current profile is from `moq-quic`, and moq-uring already avoids every
 other copy the current API allows.
 
@@ -25,6 +25,13 @@ Candidates, to be ranked by the profile:
   relying on `Vec` capacity.
 - One `handle` call takes a whole GRO batch.
 
+Received datagrams and leased stream bytes are copied out of their receive
+buffer, since a slice keeps the whole batch alive while the receive budgets
+charge only its bytes. A frame that references a ring slot must keep that
+bound. Per-packet ownership could let large frames skip the copy, which costs
+up to 70% of `wire_decode` (16 datagrams a packet) and 20% of `receive_lease`
+under the benches' plaintext crypto.
+
 Decided 2026-10-08: `SENDMSG_ZC`
 ([#3201](/quest/m3/3201-moq-uring-use-sendmsg-zc-for-large-udp-gso-trains.md))
 and registered TX buffers
@@ -33,6 +40,10 @@ Require this quest and build on its transmit contract, so the contract is
 settled once; registering buffers stays with #3204, which measures whether
 it pays. Report relay CPU per Gbps before and after on
 the same workloads.
+
+## Required
+
+- [Profile the io_uring workers](/quest/m2/perf/uring-profile.md) - the ring profile that ranks the candidates
 
 ## Related
 

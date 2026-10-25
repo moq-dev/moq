@@ -134,7 +134,11 @@ impl DatagramState {
             self.recv();
         }
 
-        self.incoming.push_back(datagram);
+        // The window charges only the payload, but a slice keeps its whole receive buffer alive,
+        // so a peer sending tiny datagrams would otherwise hold a buffer for each.
+        self.incoming.push_back(Datagram {
+            data: Bytes::copy_from_slice(&datagram.data),
+        });
         Ok(was_empty)
     }
 
@@ -190,6 +194,28 @@ mod tests {
                 break;
             }
         }
+    }
+
+    /// The queue charges a datagram its own bytes, so however many tiny datagrams fill it, none
+    /// keeps alive the receive batch it arrived in.
+    #[test]
+    fn tiny_datagrams_do_not_pin_their_batches() {
+        const WINDOW: usize = 1024;
+        let mut state = DatagramState::default();
+        // Far past the window, so stale datagrams are dropped along the way.
+        let batches: Vec<Bytes> = (0..WINDOW).map(|_| Bytes::from(vec![7u8; 4096])).collect();
+        for batch in &batches {
+            let datagram = Datagram {
+                data: batch.slice(..1),
+            };
+            state.received(datagram, &Some(WINDOW)).unwrap();
+        }
+        assert!(
+            batches.into_iter().all(|batch| batch.is_unique()),
+            "a queued datagram still points into its batch"
+        );
+        assert!(state.incoming.memory_used() <= WINDOW);
+        assert_eq!(state.recv().unwrap(), &[7][..]);
     }
 }
 

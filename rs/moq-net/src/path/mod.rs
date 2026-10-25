@@ -138,7 +138,7 @@ impl<'a> Path<'a> {
 		}
 	}
 
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn from_escaped(s: String) -> PathOwned {
 		if s.is_empty() {
 			Path::empty()
@@ -596,6 +596,38 @@ impl<V> Encode<V> for Path<'_> {
 			return Err(EncodeError::BoundsExceeded);
 		}
 		w.string(self.as_str())
+	}
+}
+
+/// A grant's patterns as a count and each one's canonical text, the one encoding both
+/// wires' AUTH_OK share.
+impl<V> Encode<V> for Patterns {
+	fn encode(&self, w: &mut Encoder<'_>, _: V) -> Result<(), EncodeError> {
+		w.varint(self.len() as u64)?;
+		for pattern in self {
+			w.string(pattern.as_str())?;
+		}
+		Ok(())
+	}
+}
+
+impl<V> Decode<V> for Patterns {
+	fn decode(r: &mut Decoder<'_>, _: V) -> Result<Self, DecodeError> {
+		let count = r.varint()?;
+		// No preallocation: the count is peer-controlled, and the message size limit
+		// is what bounds how many patterns actually fit.
+		let mut patterns = Vec::new();
+		for _ in 0..count {
+			let text = r.string()?;
+			let pattern = Pattern::try_from(text.as_str()).map_err(|_| DecodeError::InvalidValue)?;
+			// Only the canonical spelling is valid, so each pattern has one encoding.
+			if pattern.as_str() != text {
+				return Err(DecodeError::InvalidValue);
+			}
+			patterns.push(pattern);
+		}
+		// Reduce once, so a peer's count never turns into quadratic work.
+		Ok(patterns.into_iter().collect())
 	}
 }
 

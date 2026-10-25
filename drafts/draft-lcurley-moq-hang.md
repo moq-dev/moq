@@ -194,7 +194,7 @@ This draft needs `version` 4 for:
 - a `track` ({{field-track}}) other than the entry's ID, which an older consumer subscribes to instead;
 - a video `warmup` ({{field-warmup}}) above zero, since an older consumer starts decoding a group at a picture that is not a keyframe.
 
-Every other catalog change in this draft is safe to ignore: `enabled` ({{field-enabled}}) leaves an older consumer selecting a disabled rendition, which plays nothing; `archive` ({{archive-catalog}}) is ignored when undecodable; `stats` and `echo` ({{media-stats}}) only offer optional tracks; `jitter`, `delay`, audio `warmup`, and the data track estimates are hints.
+Every other catalog change in this draft is safe to ignore: `enabled` ({{field-enabled}}) leaves an older consumer selecting a disabled rendition, which plays nothing; `archive` ({{archive-catalog}}) is ignored when undecodable; `stats` and `echo` ({{media-stats}}) only offer optional tracks; video `reorder` leaves an older consumer inferring decode times from timestamps; `jitter`, `delay`, audio `warmup`, and the data track estimates are hints.
 
 ## Clock {#clock}
 The catalog's root `clock` field is the broadcast's one continuous clock:
@@ -218,7 +218,7 @@ A discontinuity marker is a delivery event, not a new epoch, and a system-clock 
 
 ## Track Identity {#identity}
 A track name always means the same content, so a catalog update never redefines an audio or video track.
-A track's identity is the fields a consumer cannot change without reinitializing its decoder or demuxer: `codec`, `description`, and `container`, plus `displayAspectWidth` and `displayAspectHeight` for video and `sampleRate` and `numberOfChannels` for audio.
+A track's identity is the fields a consumer cannot change without reinitializing its decoder or demuxer: `codec`, `description`, and `container`, plus `displayAspectWidth`, `displayAspectHeight`, and `interlaced` for video and `sampleRate` and `numberOfChannels` for audio.
 A publisher MUST NOT change them for a track once a catalog lists it.
 
 Every other rendition field is live state that MAY change in any update within its own rules (`jitter` and `delay` never fall), as MAY the video section's `display`, `rotation`, and `flip`.
@@ -258,9 +258,11 @@ type VideoDecoderConfigExtensions = {
   "displayAspectWidth": number | undefined,
   "displayAspectHeight": number | undefined,
   "preference": number | undefined,
+  "reorder": number | undefined,
   "color": Color | undefined,
   "projection": Projection | undefined,
   "stereo": string | undefined,
+  "interlaced": boolean | undefined,
 }
 ~~~
 
@@ -274,6 +276,16 @@ If absent, it defaults to 0; a publisher SHOULD only write it when nonzero.
 A consumer selecting a rendition automatically MUST choose among the enabled ({{field-enabled}}) renditions it can decode with the highest `preference`, then by its own criteria, such as size and bitrate, within them.
 A consumer MAY select another rendition at the viewer's explicit request.
 A consumer that carries every rendition, rather than selecting one, ignores the field.
+
+`reorder` is the most frames that can precede a frame in decode order and follow it in presentation order, the unit of H.264 `max_num_reorder_frames` and HEVC `sps_max_num_reorder_pics`, as an integer from 0 to 255.
+`0` declares that presentation order is decode order.
+A publisher that does not know the depth MUST omit the field; absent declares nothing.
+A publisher that declares it MUST NOT send a frame that more than `reorder` earlier frames of its group follow in presentation order, and MUST NOT change or remove it for the track once declared.
+
+A consumer that authors decode times, such as a transmuxer to a container that carries them, derives them from a declared `reorder` and the frames of the current group alone, so consumers that joined at different groups agree.
+The n-th frame of a group in decode order decodes at the group's (n - `reorder`)-th earliest presentation time, counting from zero, and the group's first `reorder` frames decode at successive instants just before its earliest presentation time.
+A consumer MUST refuse a frame reordered deeper than its rendition declares rather than author an invalid decode time, and SHOULD refuse a `reorder` the codec cannot reach: above the level's decoded picture buffer, or nonzero for a codec whose presentation order is its decode order.
+Without `reorder`, a consumer infers decode times from the timestamps it has read.
 
 `color` describes the decoded pixels so a renderer can configure its pipeline without parsing the bitstream:
 
@@ -324,6 +336,10 @@ Its `fov` is the degrees of longitude the picture spans, centred straight ahead:
 
 A consumer MUST treat an unrecognized `projection` kind or `stereo` value as absent, and MUST reject a recognized `projection` kind with a malformed field, such as a `fov` out of range.
 Neither field is part of the track's identity.
+
+`interlaced` is true when each decoded picture weaves two fields, as an H.264 stream with `frame_mbs_only_flag` 0 decodes.
+If absent, it defaults to false; a publisher SHOULD only write it when true.
+A renderer SHOULD deinterlace such a picture, and a consumer MAY choose its decoder by it, since some hardware decoders refuse interlaced streams.
 
 For example:
 
@@ -411,6 +427,8 @@ type AudioDecoderConfigExtensions = {
 `ambisonic` is full-sphere ambisonics in the AmbiX convention: ACN channel order with SN3D normalization, of the order N for which `numberOfChannels` is (N+1)^2.
 A consumer MUST reject `ambisonic` with fewer than 4 channels or a count that is not a square, and MUST treat an unrecognized `layout` as absent.
 `layout` is not part of the track's identity.
+
+An Opus frame timestamp counts the samples the OpusHead pre-skip trims: a consumer presents each decoded sample the pre-skip, at 48 kHz, earlier than its frame timestamp places it, so the first sample kept plays at the first decoded frame's timestamp.
 
 ### PCM {#audio-pcm}
 
@@ -630,9 +648,9 @@ The optional `bitrate` field is the track's maximum bitrate in bits per second.
 The optional `jitter` and `delay` fields carry the same meaning and rules as they do for a media rendition ({{field-jitter}}, {{field-delay}}), with a payload in place of a frame.
 
 A payload's presentation timestamp is its capture time on the broadcast's clock, the one its media renditions use, when the publisher knows it (a datagram's arrival, a sensor read), and otherwise the time the publisher wrote it.
-A publisher measures `jitter` and `delay` only from payloads that carry a capture time, and MUST omit both for a track written without one.
-A publisher MUST NOT use a timestamp on an unrelated clock, such as a device's own uptime, since it would report a meaningless lateness and, through the broadcast-wide minimum, distort every other rendition's `delay`.
-A `snapshot` update that writes no frame, such as an unchanged JSON value, is not a flush and is not measured.
+A publisher measures `delay` only from payloads that carry a capture time, and MUST omit it for a track written without one.
+A publisher MUST NOT use a timestamp on an unrelated clock, such as a device's own uptime, since it would order the payload against the media renditions meaninglessly and distort their `delay`.
+A `snapshot` update that writes no frame, such as an unchanged JSON value, is not measured.
 
 ## Binary Fields {#binary}
 A decoder config field carrying raw bytes, notably `description` (an `AllowSharedBufferSource` in WebCodecs), is carried in the catalog as a hex string ({{!RFC4648, Section 8}}).
@@ -718,50 +736,51 @@ The container used to frame this rendition's media, as described in {{container}
 If absent, it defaults to `{ "kind": "legacy" }`.
 
 ### jitter {#field-jitter}
-The maximum delay, in milliseconds, that a publisher has measured before handing a frame to the transport.
+The maximum media span, in milliseconds, that a publisher hands to the transport behind a frame's presentation timestamp.
 A consumer's jitter buffer SHOULD be at least this large to avoid stalling.
 If absent, a consumer SHOULD assume no publisher delay has been measured.
 
-An encoder compares each frame's flush time with its media timestamp and subtracts the smallest lateness recently observed on the same rendition.
-The field is the spread above that minimum, so neither a constant encoder delay, a fixed clock offset, nor long-term drift counts as jitter.
-A container importer instead estimates the delay from the media span of a batch, such as a run of audio PES packets between video packets in TS or an fMP4 fragment, without measuring the time spent waiting for input.
-A publisher does not count ingest network delay in this field; a consumer measures network delay separately.
+A publisher measures the field from media timestamps alone, never from the time a frame was written.
+It covers the reorder delay of a frame presented after frames decoded behind it, and the media span of a batch written together, such as a run of audio PES packets between video packets in TS or an fMP4 fragment.
+Neither a constant encoder delay, a capture clock, nor ingest network delay counts; a consumer measures network delay separately.
 
 A publisher MUST round the value up to a whole number of milliseconds, so a consumer sizing a buffer against it is never handed a bound below the real one.
-A publisher MUST NOT advertise `0`; a track that flushes each frame immediately omits the field instead.
+A publisher MUST NOT advertise `0`; a track that writes each frame in presentation order omits the field instead.
 A consumer receiving `0` SHOULD treat the field as absent, since it is a publisher rounding down rather than a claim of zero delay.
 A publisher MUST NOT lower a previously advertised value, since a burst it emitted once it may emit again.
 
 For example:
 
-- A frame flushed without extra delay contributes no `jitter`, regardless of frame rate.
-- An encoder that consistently flushes 200 milliseconds late contributes no `jitter`; only variation above its own minimum counts.
-- A fragment or packet batch contributes the media span between its earliest timestamp and flush point.
-- Reordered frames contribute the delay they were held before flushing, without treating a decode-order presentation timestamp gap as delay by itself.
+- A frame written in presentation order contributes no `jitter`, regardless of frame rate or when it was written.
+- A B-frame stream contributes its reorder delay, the presentation timestamp minus the decode timestamp.
+- A fragment or packet batch contributes the media span between its earliest and latest timestamps.
 
 ### warmup {#field-warmup}
 
 An audio or video rendition MAY declare `warmup`, an integer duration in milliseconds after a group start before its decoded output is presentable without decoding the previous group.
 A publisher MUST round a fractional-millisecond warmup up to the next whole millisecond.
 Absent or `0` means every group start is immediately presentable.
-After a non-continuous join, a consumer MUST decode from the group start and MUST NOT present frames stamped before the group's start plus `warmup`.
-It SHOULD join that much earlier to obtain the requested presentation time.
+After a non-continuous join, a consumer MUST decode from the group start.
+It SHOULD join `warmup` earlier to obtain the requested presentation time.
+Unless it also decodes from an earlier group start, it MUST NOT present frames stamped before the group's start plus `warmup`.
+A consumer that does MAY present those frames, which can show decoding artifacts, but MUST switch to the earlier decoder's frames once that decoder reaches the presented timestamp.
 
 For video, `warmup` can describe a refresh cycle during which decoding converges without an initial keyframe.
 For audio, it describes decoder pre-roll, for example 80 milliseconds for Opus, and does not change the group-start rule.
 
 ### delay {#field-delay}
-The maximum amount, in milliseconds, by which a rendition's minimum flush lateness ({{field-jitter}}) has trailed the smallest minimum among the broadcast's renditions that measure it.
+The maximum amount, in milliseconds, by which a frame's presentation timestamp has trailed one that another rendition of the broadcast had already written.
 If absent, a consumer SHOULD assume the rendition does not trail the others.
 
-A publisher measures each rendition's minimum over the same recent window it uses for `jitter`, from one clock shared by every rendition, and advertises the largest difference observed.
-A container importer does not measure `delay`.
+A publisher compares each frame with the highest timestamp written so far by every other rendition on the same clock, and advertises the largest shortfall observed.
+A rendition alone on the broadcast measures no `delay`, and a frame trailing only its own rendition's earlier frames counts toward `jitter` instead.
+A rendition that ends, or breaks its timeline, stops holding the others back.
 The rounding, `0`, and never-lower rules of `jitter` apply unchanged.
 
 A consumer SHOULD hold at least the largest `delay` plus `jitter` among the renditions it plays together.
 A consumer MUST NOT subtract one rendition's `delay` from another's: each is a maximum over the life of the stream, so two values need not share an origin.
 
-For example, a video encoder that flushes 200 milliseconds after the audio encoder for the same media time advertises a video `delay` of 200 and no audio `delay`.
+For example, with video at 20 millisecond intervals and audio at 15 written as video 0, video 20, audio 0, audio 15, video 40, audio 30, video 60, audio 45, audio 60, the audio frame at 0 trails video already written at 20, so audio advertises a `delay` of 20 and video none.
 
 ### enabled {#field-enabled}
 The `enabled` field says whether a consumer may select an audio or video rendition; a text rendition does not carry it.
@@ -992,7 +1011,7 @@ The `store` field, if present, is the object-store URL the recording objects liv
 Authorization for `replay` and `store` is external.
 
 The `version` field is the version of that recording object format.
-It is 2 for this specification.
+It is 3 for this specification.
 A publisher that exposes a store MUST set it; a publisher that does not MUST omit it.
 
 A catalog that composes another broadcast's renditions MUST preserve that child's `archive` entry instead of synthesizing one.
@@ -1189,27 +1208,30 @@ This document has no IANA actions.
 ## moq-hang-04
 {:numbered="false"}
 
+- The archive `version` is 3: the recording format stores a track's `priority` signed, -128 through 127 with 0 unset, instead of its moq-lite byte.
 - A reader refuses a JSON frame in which an object repeats a member name.
 - Added the root `version` ({{catalog-version}}): the oldest draft that reads the catalog, which a consumer refuses when above its own. A `track` other than the entry's ID or a video `warmup` needs 4. Consumers MUST ignore unknown fields.
 - A data track marks a discontinuity with a group of one object with no bytes, since its empty payload is data. An object with no bytes on an audio or video track, or sharing its group, is malformed.
 - Each archive timeline declares its own fixed nominal record duration, omitted for an untimed track; removed the broadcast-wide duration bound.
 - Removed the Recording section: the store layout is a moq-archive format, documented with that crate, not part of this draft.
 - Added the optional video `preference` field: a consumer selects automatically among the highest preference it can decode.
+- Added the optional video `reorder` field: the most frames that can precede one in decode order and follow it in presentation, fixed for the track once declared. A consumer that authors decode times derives them from it and the current group alone, refusing deeper reordering; without it, a consumer infers them from timestamps.
 - Added an optional `epoch` beside every rendition and data track `broadcast` reference, and `replayEpoch` beside the archive's `replay` ({{field-epoch}}). A consumer reads each referenced path from the first broadcast it resolves for a catalog instance; a present `epoch` fails a rendition proven to resolve another instance, and is best effort over a route without an Epoch.
 - Derived HLS and DASH exports hand disabled references to enabled renditions at the first record numbered past the advertised ones, keeping the record `sequence` as the HLS media sequence and starting a DASH period.
 - Added optional `stats` and `echo` catalog sections, publisher/viewer snapshots keyed by rendition ID, and the `.echo` feedback broadcast convention.
+- An Opus frame timestamp counts the OpusHead pre-skip: a consumer presents each decoded sample the pre-skip earlier than its frame timestamp places it.
 
 - Fixed a track's identity for its name ({{identity}}): codec, description, container, display aspect, sample rate, and channel count never change, while every other field, including size, bitrate, and framerate, updates in place. A change of identity takes a new track name, which a rendition may name with `track` while keeping its ID, or a new Epoch.
 - Specified MSF text metadata preservation and refusal of unrepresentable text packaging during gateway conversion.
 - Specified conversion between relative broadcast references and MSF track namespaces without changing track identity, reading a namespace aligned with the catalog path's trailing segments as the catalog itself.
 
-- Added optional audio and video `warmup` durations, rounded up to whole milliseconds, and allowed video groups to start at convergent random access pictures.
-- Defined encoder `jitter` as flush lateness above the rendition's own recent minimum, replacing fixed frame-duration hints; container batches retain media-span estimates.
+- Added optional audio and video `warmup` durations, rounded up to whole milliseconds, and allowed video groups to start at convergent random access pictures. A consumer also decoding from an earlier group start may present frames before `warmup`, switching to that decoder once it reaches the presented timestamp.
+- Defined `jitter` from media timestamps alone, the reorder delay and batch spans a publisher writes, replacing fixed frame-duration hints and wall-clock flush lateness.
 - Timed CMAF samples from the frame timestamp, which is the fragment's earliest presentation time; `tfdt` is only relative within the fragment, and places the samples of an untimed frame. A timed CMAF track counts in its `mdhd` ticks.
 - Allowed a DVR to delete timeline objects no checkpoint recovery needs, oldest first.
 - Replaced the live-edge floor with monotonic group starts: a group may overlap the previous group's content but not start before it.
 - Added optional `bitrate` and `jitter` fields to `json` and `binary` track entries.
-- Added the optional `delay` rendition field: how far a rendition's minimum flush lateness trails the broadcast's earliest rendition, never lowered once advertised and never subtracted across renditions.
+- Added the optional `delay` rendition field: how far a rendition's timestamps trail those other renditions already wrote, never lowered once advertised and never subtracted across renditions.
 - Recommended namespaced keys for application root sections.
 - Added the optional `delay` field to `json` and `binary` track entries, measured only from payloads stamped with their capture time on the broadcast clock.
 - Replaced the video `stalled` field with an optional `enabled` field on audio and video renditions. A consumer MUST NOT select a disabled rendition and ignores `stalled`. A consumer that predates `enabled` keeps selecting a disabled rendition.
@@ -1227,6 +1249,7 @@ This document has no IANA actions.
 - Defined video `displayAspectWidth` and `displayAspectHeight` as the whole picture's display aspect, not the sample aspect.
 - Added the optional video `color` field: H.273 primaries, transfer, matrix, and range, plus the SMPTE ST 2086 mastering display and CTA-861.3 content light levels.
 - Added the optional video `projection` (rectilinear, or equirectangular with a longitude `fov`) and `stereo` (mono, left-right, or top-bottom) fields and the optional audio `layout` field (ambisonic).
+- Added the optional video `interlaced` field, true when each decoded picture weaves two fields, and made it part of the track's identity ({{identity}}).
 
 ## moq-hang-03
 {:numbered="false"}

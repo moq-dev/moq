@@ -23,8 +23,7 @@ use super::{
     spaces::Retransmits,
     stats::FrameStats,
     streams::{
-        Credit, RecvStream, SendGroups, SendOptions, SendStream, ShouldTransmit, StreamEvent,
-        Streams, StreamsState,
+        Leased, RecvStream, SendGroups, SendOptions, SendStream, StreamEvent, Streams, StreamsState,
     },
 };
 use crate::{
@@ -387,14 +386,9 @@ impl Connection {
         Datagrams { conn: self }
     }
 
-    /// Return the connection credit [`Chunks::hold`](crate::Chunks::hold) took
-    ///
-    /// # Panics
-    /// If `credit` came from another connection.
-    pub fn release(&mut self, credit: Credit) -> ShouldTransmit {
-        let transmit = self.streams.release(credit);
-        self.pending.max_data |= transmit.should_transmit();
-        transmit
+    /// The bytes leased from receive stream `id` with [`RecvStream::lease()`], if it has a lease
+    pub fn leased(&self, id: crate::StreamId) -> Option<&Leased> {
+        self.streams.leased(id)
     }
 
     /// The frame space of a record: the peer's `max_record_size`, under the STREAM ceiling
@@ -717,7 +711,7 @@ impl Connection {
             frame::Frame::Close(Close::Connection(close)) => {
                 self.lost(ConnectionError::ConnectionClosed(close));
             }
-            frame::Frame::Datagram(mut datagram) => {
+            frame::Frame::Datagram(datagram) => {
                 let Some(max) = self.config.max_datagram_frame_size else {
                     return Err(TransportError::PROTOCOL_VIOLATION(
                         "unexpected DATAGRAM frame",
@@ -726,11 +720,6 @@ impl Connection {
                 // The limit is on the frame as encoded, with or without its Length field
                 if frame_len as u64 > max.into_inner() {
                     return Err(TransportError::PROTOCOL_VIOLATION("oversized datagram"));
-                }
-                // The receive buffer charges only the payload, so a small one must not pin
-                // its whole record
-                if datagram.data.len() < payload_len / 2 {
-                    datagram.data = Bytes::copy_from_slice(&datagram.data);
                 }
                 if self
                     .datagrams

@@ -45,7 +45,9 @@ check-test *args:
 [positional-arguments]
 lint *args:
     python3 sh/rs/stats-docs.py
-    python3 sh/rs/model-markers.py
+    # The environment is process-wide, so nothing writes it. A text check, because the
+    # clock lint's test allowances also silence clippy's disallowed_methods.
+    git grep --untracked -nE '(^|[^[:alnum:]_])(set_var|remove_var)[[:space:]]*\(' -- 'rs/*.rs'; [ $? -eq 1 ] || { echo "error: a write to the process environment: pass the value down, or run a test in a child with test_env::Env" >&2; exit 1; }
     cargo fmt --all --check
     # quinn-udp and quinn keep quinn's formatting; cargo fmt skips them (see moq-sock's lib.rs, moq-tokio's quic.rs).
     rustfmt --edition 2024 --check rs/moq-sock/src/udp/mod.rs rs/moq-tokio/src/quic/driver/mod.rs
@@ -117,6 +119,10 @@ uring-changed base="":
 uring *args:
     just rs uring-check "$@"
     bash sh/rs/nextest.sh cargo nextest run --locked -p moq-uring -p moq-relay --features moq-relay/io-uring --tests "$@"
+    # Signal ownership and scoped tracing must also survive sharing one process.
+    cargo test --locked -p moq-relay --test integration
+    # Needs a second IPv6 address on lo, which the io_uring CI lanes add.
+    bash sh/rs/nextest.sh cargo nextest run --locked -p moq-uring --test integration --run-ignored only -E 'test(=local_addr::a_v6_wildcard_answers_from_the_address_reached)' "$@"
     cargo clippy --locked -p moq-uring -p moq-relay --features moq-relay/io-uring,moq-relay/qlog --all-targets "$@" -- -D warnings
     bash sh/rs/nextest.sh cargo nextest run --locked -p moq-uring --features qlog --tests "$@"
 
@@ -312,6 +318,7 @@ doctest *args:
 loom *args:
     RUSTFLAGS="--cfg loom" cargo test --locked --release -p kio --lib loom:: "$@"
     RUSTFLAGS="--cfg loom" cargo test --locked --release -p moq-net --test loom "$@"
+    RUSTFLAGS="--cfg loom" cargo test --locked --release -p moq-net --test expiry-loom "$@"
 
 # Run the moq-quic simulation's random workloads from a fresh seed, printing the settings that replay it.
 quic-sim:
@@ -328,7 +335,7 @@ quic-sim:
 send-depth:
     bash sh/rs/send-depth.sh
 
-# Run moq-cli's `moq export` process tests, which feed a real relay and wait out lingers in real time.
+# Run moq-cli's `moq export` process tests, which feed a real relay and wait out follows in real time.
 [positional-arguments]
 cli-export *args:
     just rs test -p moq-cli --test integration --run-ignored only -E 'test(/^export::/)' "$@"
@@ -370,6 +377,7 @@ audio-devices:
 # crate's own tests instead. See rs/moq-net/fuzz/README.md and rs/moq-quic/fuzz/README.md.
 
 # Fuzz a moq-net or moq-quic target by name: `just rs fuzz lite -- -max_total_time=300`.
+# `just rs fuzz --minimize lite` shrinks its corpus instead.
 [positional-arguments]
 fuzz target *args:
     sh/rs/fuzz.sh "$@"
@@ -453,9 +461,9 @@ gst-smoke *args:
 bench-feed-fetch *args:
     bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-net --lib --run-ignored only -E 'test(benchmark_feed_fetch_wakes)' --success-output immediate "$@"
 
-# Device-free mixer cost, swept over sink count and frames per callback.
+# Device-free mixer and resampler cost, swept over fanout, packetization, and layout.
 bench-playback:
-    bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-audio --features playback --run-ignored only -E 'test(benchmark_mixer_callbacks)' --success-output immediate
+    bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-audio --features playback --run-ignored only -E 'test(benchmark_mixer_callbacks) | test(benchmark_resampler)' --success-output immediate
 
 # Sweep retained RTMP chunk-stream IDs independently of message and chunk sizes.
 [positional-arguments]

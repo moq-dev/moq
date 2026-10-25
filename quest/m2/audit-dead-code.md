@@ -20,7 +20,7 @@ independently landable and too large to review alongside the rest becomes a
 follow-up through `/quest-plan`.
 
 Removing a public item is a breaking change and the maintainer's call, so it is
-always a follow-up with its `MIGRATE.md` entry, never an inline fix.
+always a follow-up, never an inline fix.
 
 The m1 run (2026-10-20) removed unused `@moq/signals` dependencies from
 `@moq/json` and the browser bench, the web demo's unused `solid-element`, and
@@ -35,18 +35,18 @@ Start by comparing the live tree against these baselines:
   through `cfg_attr`. The unconditional ones are drop guards, compile-time
   Send assertions, generated settings registries, shared test and benchmark
   harnesses, deserialization fixtures, FFI tables, and two `GroupConsumer`
-  helpers waiting on the [answering API](/quest/m1/public-model/answer.md).
+  helpers waiting on the [answering API](/quest/m1/api-audit/answer.md).
   Once the lint audit lands, every unconditional one is an `expect`, so a
   stale one fails the build; check what the conditional ones still guard.
   `cargo shear` found no unused dependencies.
 - Rustc misses unused `pub` items. Tokenizing the tree and keeping `pub`
   declarations whose name appears exactly once (`.scratch` script, not
   checked in) found, outside generated bindings:
-  - cfg(test) helpers `track::Subscriber::assert_error` and
-    `AnnounceConsumer::assert_next_restarted`/`assert_next_ended` in
-    moq-net's model, left alone because open PRs churned those files.
-  - Public items no consumer calls: `moq_net::Version::uses_setup_negotiation`,
-    `moq_tokio::Server::serve_both`, `quic::web` `ClientBuilder::with_server_certificates`
+  - cfg(test) helper `track::Subscriber::assert_error` in moq-net's model,
+    since removed. `AnnounceConsumer::assert_next_restarted`/`assert_next_ended`
+    also matched, but `model/origin.rs` calls them.
+  - Public items no consumer calls: `moq_net::Version::uses_setup_negotiation`
+    (since removed), `moq_tokio::Server::serve_both`, `quic::web` `ClientBuilder::with_server_certificates`
     and `ServerBuilder::with_certificate`, `hang` `Catalog::to_json_pretty`,
     `moq_audio::Format::is_planar`/`is_float`, and the vendored forks
     (`moq-quic`, `moq-sock`, `moq-v4l`) that keep upstream's surface.
@@ -62,17 +62,16 @@ Start by comparing the live tree against these baselines:
   it.
 - There were 150 Cargo feature declarations across 27 manifests. Only three
   have no in-tree user: the moq-native tombstone's `android-logcat`, the QUIC
-  FIPS crypto feature, and moq-cli's `nvenc`/`nvdec` aliases. moq-video and
-  moq-transcode already dropped their own `nvenc`/`nvdec` aliases, so moq-cli's
-  are the next public removal to propose.
+  FIPS crypto feature, and moq-cli's `nvenc`/`nvdec` aliases, since removed
+  like moq-video's and moq-transcode's.
 - The settings registries declared 120 distinct long flags, 186 counting
   every `usage` declaration. Each one reaches a runtime consumer; the
   `--client-*`/`--server-*` QUIC and TLS spellings and the relay's legacy auth
   fields are hidden deprecated spellings that fail with migration guidance.
   Trace a flag through the config merge, not through prose or examples.
 
-No public removal landed in this run. Propose any public removals
-separately with their migration and consumer evidence. The public model and
+No public removal landed in this run itself; the items marked removed above
+went in a follow-up PR. Propose any public removals separately with their migration and consumer evidence. The public model and
 performance audits own their API and benchmark decisions.
 
 ## Required

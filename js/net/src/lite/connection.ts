@@ -9,6 +9,7 @@ import { type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
 import { closeError, error, fromClose, ProtocolViolation, StreamCode, sessionCause } from "../error.ts";
 import { type Hop, randomHop } from "../hop.ts";
+import { IMPLEMENTATION } from "../implementation.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, Stream, Writer } from "../stream.ts";
@@ -28,13 +29,16 @@ import { DataType, StreamId } from "./stream.ts";
 import { Subscribe } from "./subscribe.ts";
 import { Subscriber } from "./subscriber.ts";
 import { Track as TrackMessage } from "./track.ts";
+import { Tracks as TracksMessage } from "./tracks.ts";
 import {
 	hasAuth,
 	hasDatagrams,
 	hasGoaway,
+	hasPadding,
 	hasProbeRtt,
 	hasSetupStream,
 	hasTrackStream,
+	hasTracks,
 	Version,
 	versionName,
 } from "./version.ts";
@@ -55,12 +59,16 @@ export interface ConnectionProps {
 	session?: Stream;
 	/** The origin whose broadcasts are served to the peer. Omit to publish nothing. */
 	publish?: OriginConsumer;
+	/** The auth handle to build the session on, or undefined for one of its own. */
+	handle?: Auth.Handle;
 	/**
 	 * Whether this side dialed. Only the dialing side aborts on a publication its grant does
 	 * not cover: a server publishes whatever the peer may read, not what it intends to push.
 	 * Defaults to true.
 	 */
 	client?: boolean;
+	/** The implementation our SETUP advertises (lite-05+). Defaults to {@link IMPLEMENTATION}; empty sends nothing. */
+	implementation?: string;
 }
 
 /**
@@ -119,6 +127,13 @@ export class Connection implements Established {
 
 	// Whether we dialed; see {@link ConnectionProps.client}.
 	#client: boolean;
+	// What our SETUP advertises; see {@link ConnectionProps.implementation}.
+	#implementation: string;
+	#peerImplementation = Promise.withResolvers<string | undefined>();
+
+	/** The implementation the peer advertised; see {@link Established.peerImplementation}. */
+	readonly peerImplementation = this.#peerImplementation.promise;
+
 	// The peer's GOAWAY. Lite carries no deadline, so only the URI is set.
 	#goaway = new Once<Drain>();
 
@@ -140,7 +155,16 @@ export class Connection implements Established {
 	 *
 	 * @internal
 	 */
-	constructor({ url, quic, version, session, publish, client = true }: ConnectionProps) {
+	constructor({
+		url,
+		quic,
+		version,
+		session,
+		publish,
+		handle,
+		client = true,
+		implementation = IMPLEMENTATION,
+	}: ConnectionProps) {
 		this.url = url;
 		this.#quic = quic;
 		this.#session = session;
@@ -164,7 +188,13 @@ export class Connection implements Established {
 				publish: new Path.Patterns([Path.Pattern.all()]),
 				subscribe: new Path.Patterns(publish ? [Path.Pattern.all()] : []),
 			},
+			handle,
+			draining: () => this.#goaway.peek() !== undefined,
 		});
+		// Left before anything observes the close, so a successor on the same handle never
+		// finds this session still active.
+		const leave = () => this.#auth.close();
+		void quic.closed.then(leave, leave);
 		this.#auth.violated.subscribe((err) => {
 			if (!err) return;
 			closeViolation(this.#quic, err);
@@ -187,14 +217,21 @@ export class Connection implements Established {
 			this.#auth,
 		);
 		this.#client = client;
-		registerWire(this, { consume: (path) => this.#subscriber.consume(path), goaway: this.#goaway });
+		this.#implementation = implementation;
+		// Only the lite-05+ Setup Stream carries it.
+		if (!hasSetupStream(version)) this.#peerImplementation.resolve(undefined);
+		registerWire(this, {
+			consume: (path) => this.#subscriber.consume(path),
+			goaway: this.#goaway,
+			auth: this.#auth,
+		});
 
 		void this.#run();
 	}
 
 	/** Our tokens and grants; see {@link Established.auth}. */
 	get auth(): Auth.Handle {
-		return this.#auth;
+		return this.#auth.handle;
 	}
 
 	/**
@@ -263,6 +300,8 @@ export class Connection implements Established {
 			fatal = await sessionCause(this.#quic, err);
 		} finally {
 			probes.close();
+			// A session that ends before the peer's SETUP never learns its implementation.
+			this.#peerImplementation.resolve(undefined);
 			// The session died under every track it was receiving, so they end with its
 			// error. A deliberate close() already ended them cleanly, which makes this a no-op.
 			this.#subscriber.close(fatal ?? (await closeError(this.#quic)));
@@ -302,7 +341,10 @@ export class Connection implements Established {
 		try {
 			await writer.u53(DataType.Setup);
 			const probe = await probeLevel(this.#quic, this.#version);
-			await new Setup({ probe, hop: this.hop }).encode(writer, this.#version);
+			await new Setup({ probe, hop: this.hop, implementation: this.#implementation }).encode(
+				writer,
+				this.#version,
+			);
 			writer.close();
 		} catch (err: unknown) {
 			writer.reset(err);
@@ -362,6 +404,10 @@ export class Connection implements Established {
 					await this.#publisher.runTrackInfo(msg, stream);
 				})(),
 			);
+		} else if (typ === StreamId.Tracks) {
+			if (!hasTracks(this.#version)) throw new Error("TRACKS is not supported on this version");
+			const msg = await TracksMessage.decode(stream.reader, this.#version);
+			await this.#publisher.runTracks(msg, stream);
 		} else if (typ === StreamId.Probe) {
 			if (this.#version === Version.DRAFT_01 || this.#version === Version.DRAFT_02)
 				throw new Error("PROBE is not supported on this version");
@@ -404,6 +450,8 @@ export class Connection implements Established {
 		if (typ === DataType.Group) {
 			const msg = await Group.decode(stream, this.#version);
 			await this.#subscriber.runGroup(msg, stream);
+		} else if (typ === DataType.Padding && hasPadding(this.#version)) {
+			await stream.discard();
 		} else if (typ === DataType.Setup) {
 			// Claim the stream before decoding, so two incomplete SETUPs are duplicates too.
 			if (this.#setupSeen) throw new ProtocolViolation("duplicate SETUP");
@@ -421,6 +469,7 @@ export class Connection implements Established {
 				throw new ProtocolViolation("Path on a URI-carrying binding");
 			this.#peerSetup.set(setup);
 			this.#peerRole.set(setup.role);
+			this.#peerImplementation.resolve(setup.implementation);
 		} else {
 			throw new Error(`unknown stream type: ${typ.toString()}`);
 		}

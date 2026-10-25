@@ -18,6 +18,12 @@ tags follow this cut. This planning PR cuts and publishes nothing.
 After publication, re-measure the planned wire-compat breaks against the
 published versions, as CONTRIBUTING.md's release procedure describes.
 
+This cut carries stats epochs, so it drops
+[#4810](https://github.com/moq-dev/moq/pull/4810)'s release-only wall-clock
+group seed: the merge of release into main keeps main's `rs/moq-stats` and
+`doc/concept/stats.md`. MoQ Pro's VOD `storage.json` moves from the same
+seed to its own epoch.
+
 Recurs once per major release (decided 2026-10-19). The PR that finishes the
 cut shifts the milestones up, as the root [questline](/quest/README.md)
 describes. This epic's remaining publication and adoption quests move to m0,
@@ -33,6 +39,7 @@ the new `/quest/m1/README.md`, and the cut also requires both reviews. Only
 ## Required
 
 - [Breaking release readiness](/quest/m1/README.md) - code, protocol and package proofs
-- [API-diff check](/quest/m2/release/migrate-audit.md) - every break on the cut PR has its MIGRATE.md entry
+- [Migration audit](/quest/m2/release/migrate-audit.md) - every break on the cut PR has its MIGRATE.md entry
 - [API shape review](/quest/m2/release/api-review.md) - every new or changed public API was reviewed for a better shape, and approved changes landed
 - [Feature review](/quest/m2/release/feature-review.md) - every major work line since the last release was judged end to end, and its follow-ups landed
+- [Claim new npm names](/quest/m2/release/npm-first-publish.md) - trusted publishing can publish every new `@moq/*` package

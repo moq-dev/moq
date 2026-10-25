@@ -10,8 +10,8 @@ filling over range count and span as separate axes.
 
 ## Plan
 
-Split out of [dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md)
-by the maintainer on 2026-10-20
+Split out of dynamic range requests, which replaced `requested_group` with
+`requested_fill`, by the maintainer on 2026-10-20
 ([moq-dev/moq#6123](https://github.com/moq-dev/moq/pull/6123)), so each PR
 breaks one API once.
 
@@ -27,7 +27,7 @@ breaks one API once.
   `map_fetch_error`, moq-c `NOT_FOUND`); a fetched `Old` becomes a miss too,
   where relay HTTP answers 500 and moq-c reports `OLD` today. Both stay as wire
   stream errors, and `Old` still aborts a cut group mid-read.
-  Each affected package gets a `MIGRATE.md` entry.
+  The Impact bullet says how to migrate each affected package.
 - A one-range subscription for a cached live group missing the frames its
   range starts at needs a head fill. Frame bounds
   ([moq-dev/moq#6129](https://github.com/moq-dev/moq/pull/6129)) hand such a
@@ -36,7 +36,3 @@ breaks one API once.
   2026-10-20). Only `fetch_group` requests a head fill today, so the one-range
   read has to request it instead of letting `Lagged` reach the caller.
 - Benchmark filling beside `track_range_serving`, which covers serving.
-
-## Required
-
-- [Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md) - `requested_fill` and subscriptions filling their misses

@@ -13,8 +13,26 @@ use moq_net::transport::poll::SendOptions;
 /// [`wire`](moq_net::transport::poll::Session::wire) reach a backend through this. A
 /// backend without either implements it empty.
 pub trait Grouped: web_transport_trait::Session<SendStream: GroupedSend> {
+	/// The receive stream moq-net reads: the backend's own lease where it has one, or
+	/// [`Buffered`](moq_net::transport::poll::Buffered) reads otherwise.
+	type Recv: moq_net::transport::poll::RecvStream;
+
+	/// Adapt one of the backend's receive streams, freshly accepted or opened.
+	fn recv(stream: super::RecvStream<Self::RecvStream>) -> Self::Recv;
+
+	/// Open a request; iroh cannot inspect upstream noq credit and keeps waiting.
+	fn open_request(&self) -> impl std::future::Future<Output = super::RequestResult<Self>> + Send {
+		async { self.open_bi().await.map(Some) }
+	}
+
 	/// The wire counters the backend updates as it sends and receives, or `None` when it has none.
 	fn wire(&self) -> Option<moq_net::transport::Wire> {
+		None
+	}
+
+	/// Receive streams evicted to free a stuck receive window, or `None` when the backend never
+	/// evicts.
+	fn streams_evicted(&self) -> Option<u64> {
 		None
 	}
 

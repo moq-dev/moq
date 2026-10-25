@@ -153,14 +153,14 @@ in
       rootUrl = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = null;
-        example = "localhost:4443";
-        description = "Root node URL to connect to (for leaf mode)";
+        example = "https://root.example.com:4443";
+        description = "Root node URL to connect to (for leaf mode); a full URL, since a bare `host:port` is refused";
       };
 
       nodeUrl = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = null;
-        example = "localhost:4444";
+        example = "https://leaf.example.com:4443";
         description = "This node's advertised URL";
       };
 
@@ -212,6 +212,10 @@ in
         assertion = cfg.acme.domains == [ ] || (cfg.tls.certs == [ ] && cfg.tls.generate == [ ]);
         message = "services.moq-relay: acme.domains cannot be combined with tls.certs or tls.generate";
       }
+      {
+        assertion = cfg.cluster.mode != "leaf" || cfg.cluster.rootUrl != null;
+        message = "services.moq-relay: cluster.mode = \"leaf\" needs cluster.rootUrl; a leaf without one runs standalone";
+      }
     ];
 
     # Create user and group
@@ -252,7 +256,7 @@ in
             "${pkgs.moq-cli}/bin/moq auth serve"
             "--listen 127.0.0.1:${toString cfg.auth.port}"
             "--key ${authKey}"
-            "--mtls-publish '**' --mtls-subscribe '**' --mtls-peer"
+            "--mtls-publish '**' --mtls-subscribe '**' --mtls-link peer"
           ]
           ++ lib.optionals (cfg.auth.publicPath != null) [
             "--public-publish '${publicPattern}' --public-subscribe '${publicPattern}'"
@@ -352,7 +356,7 @@ in
       }
       // lib.optionalAttrs (cfg.acme.domains != [ ]) {
         MOQ_ACME_DOMAINS = lib.concatStringsSep "," cfg.acme.domains;
-        MOQ_ACME_DIR = "${cfg.stateDir}/acme";
+        MOQ_ACME_CACHE = "${cfg.stateDir}/acme";
         MOQ_WEB_HTTPS_LISTEN = "[::]:${toString cfg.acme.httpsPort}";
       }
       // lib.optionalAttrs (cfg.acme.contact != [ ]) {
@@ -370,7 +374,7 @@ in
       }
       // lib.optionalAttrs (cfg.cluster.rootUrl != null) {
         # Cluster configuration
-        MOQ_CLUSTER_ROOT = cfg.cluster.rootUrl;
+        MOQ_CLUSTER_CONNECT = cfg.cluster.rootUrl;
       }
       # Public rules refuse a token, so a peer only presents one an auth server will read.
       //

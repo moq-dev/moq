@@ -218,7 +218,7 @@ pub(crate) struct Server {
 }
 
 impl Server {
-	#[cfg(test)]
+	#[cfg(all(test, feature = "stun"))]
 	pub(crate) fn addr(&self) -> SocketAddr {
 		self.socket.local_addr().unwrap()
 	}
@@ -274,7 +274,11 @@ impl Server {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests {
 	use super::*;
 	use stun_types::message::{MessageType, MessageWriteVec};

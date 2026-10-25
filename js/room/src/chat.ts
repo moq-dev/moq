@@ -37,7 +37,7 @@ export class Publisher {
 	/** Publish a chat window over an existing track. */
 	constructor(track: Track.Producer) {
 		// Every edit restates the retained window, so a late reader never replays expired records.
-		this.#producer = new Json.Window.Producer({ track, opRatio: 0 });
+		this.#producer = new Json.Window.Producer({ track, ops: false });
 		this.#signals.run((effect) => {
 			const next = effect.get(this.#expires)[0];
 			if (next === undefined) return;
@@ -88,7 +88,7 @@ export class Subscriber {
 		this.#track = track;
 		this.#consumer = new Json.Window.Consumer({ track });
 		this.#positioned = track.largest().then((largest) => {
-			if (largest) track.setGroups({ start: { included: largest.group } });
+			if (largest) track.withRange({ start: { included: largest.group } });
 		});
 	}
 

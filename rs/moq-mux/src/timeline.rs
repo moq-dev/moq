@@ -51,7 +51,6 @@ use std::time::Duration;
 
 use hang::catalog::{Archive, Timeline};
 use hang::timeline::{Position, Record, RecordExt};
-use moq_json::window::Checkpoint;
 
 use moq_net::{Timescale, Timestamp};
 
@@ -442,6 +441,8 @@ impl Producer {
 		moq_net::track::Info::default()
 			.with_timescale(moq_net::Timescale::MILLI)
 			.with_priority(hang::catalog::PRIORITY.catalog)
+			// A joiner asks for a fresh group once the ops outweigh eight headers.
+			.with_refresh(8)
 	}
 
 	/// Publish onto `track`, starting at record zero.
@@ -449,23 +450,6 @@ impl Producer {
 		Self {
 			sink: moq_json::window::Producer::new(track, Self::config()),
 		}
-	}
-
-	/// Publish onto `track`, continuing `checkpoint`, such as a window recovered from storage.
-	///
-	/// The track's first group restates the checkpoint, and the next record is sequence
-	/// `checkpoint.range.end`. Fails when a checkpoint record is not the sequence at its index or the
-	/// checkpoint is malformed.
-	pub fn resume(track: moq_net::track::Producer, checkpoint: &Checkpoint<Record>) -> crate::Result<Self> {
-		let sink = moq_json::window::Producer::resume(track, Self::config(), checkpoint).map_err(json)?;
-		// The encoder accepted the checkpoint, so the records fit before `range.end`.
-		let start = checkpoint.range.end - checkpoint.records.len() as u64;
-		for (index, record) in (start..).zip(&checkpoint.records) {
-			if record.sequence != index {
-				return Err(crate::Error::TimelineCheckpoint(index));
-			}
-		}
-		Ok(Self { sink })
 	}
 
 	fn config() -> moq_json::window::ProducerConfig {
@@ -488,6 +472,7 @@ impl Producer {
 				actual: record.sequence,
 			});
 		}
+		self.refresh()?;
 		self.sink
 			.push(moq_net::Timed::from(record).at(moq_net::Timestamp::now()))
 			.map_err(json)
@@ -495,22 +480,26 @@ impl Producer {
 
 	/// Remove up to `count` oldest records from the window.
 	pub fn pop(&mut self, count: u64) -> crate::Result<()> {
+		self.refresh()?;
 		self.sink
 			.pop(moq_net::Timed::from(count).at(moq_net::Timestamp::now()))
 			.map_err(json)
 	}
 
-	/// Close the track's open group, so every push and pop so far sits in a complete group.
-	///
-	/// A recorder stores those groups before committing the next record. The next edit opens a
-	/// new group restating the window.
-	pub fn flush(&mut self) -> crate::Result<()> {
-		self.sink.cut().map_err(json)
-	}
-
 	/// Finish the timeline track.
 	pub fn finish(&mut self) -> crate::Result<()> {
 		self.sink.finish().map_err(json)
+	}
+
+	/// Restate the window in a fresh group if a joiner wants one.
+	///
+	/// Checked on each edit rather than driven by a task, since nothing here owns a runtime. A
+	/// timeline gains a record every segment, so a joiner waits at most about one segment.
+	fn refresh(&mut self) -> crate::Result<()> {
+		match self.sink.poll_refresh(&kio::Waiter::noop()) {
+			std::task::Poll::Ready(Err(err)) => Err(json(err)),
+			_ => Ok(()),
+		}
 	}
 }
 
@@ -583,9 +572,6 @@ pub struct Timelines {
 impl Timelines {
 	/// Timelines for tracks of `broadcast`.
 	pub fn new(broadcast: &moq_net::broadcast::Producer) -> Self {
-		// The contents are `Send + Sync` natively; on wasm moq-net's handles are `Rc`-backed, so
-		// clippy sees a pointlessly atomic `Arc`. One type for both targets is worth it.
-		#[allow(clippy::arc_with_non_send_sync)]
 		let registry = Arc::new(Mutex::new(Registry {
 			tracks: BTreeMap::new(),
 			finished: false,
@@ -629,7 +615,6 @@ impl Timelines {
 
 		let timeline = hang::timeline::default_name(name);
 		let track = self.broadcast.create_track(timeline.as_str(), Producer::info())?;
-		#[allow(clippy::arc_with_non_send_sync)]
 		let live = Arc::new(Mutex::new(Live {
 			segmenter: Segmenter::new(config),
 			on_declare: None,
@@ -1465,50 +1450,6 @@ mod test {
 		assert!(matches!(
 			timelines.track("video0", Config::default()),
 			Err(crate::Error::Moq(moq_net::Error::Closed))
-		));
-	}
-
-	#[tokio::test]
-	async fn a_resumed_producer_continues_the_checkpoint() {
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let track = broadcast.create_track("video0.timeline.z", Producer::info()).unwrap();
-		let checkpoint = Checkpoint {
-			range: 1..3,
-			records: vec![
-				Record::new(1, 1_000, 1_000, at(1), at(2)),
-				Record::new(2, 2_000, 1_000, at(2), at(3)),
-			],
-		};
-		let mut producer = Producer::resume(track, &checkpoint).unwrap();
-		assert!(matches!(
-			producer.push(&Record::new(4, 3_000, 1_000, at(3), at(4))),
-			Err(crate::Error::TimelineSequence { expected: 3, actual: 4 })
-		));
-		producer.push(&Record::new(3, 3_000, 1_000, at(3), at(4))).unwrap();
-		producer.finish().unwrap();
-
-		let mut section = Archive::new();
-		section
-			.timelines
-			.insert("video0".to_string(), Timeline::new("video0.timeline.z", 4_000));
-		let entries = read(&broadcast, &section, "video0").await;
-		assert_eq!(
-			entries.iter().map(|entry| entry.sequence).collect::<Vec<_>>(),
-			vec![1, 2, 3]
-		);
-	}
-
-	#[test]
-	fn a_checkpoint_record_must_be_the_sequence_at_its_index() {
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let track = broadcast.create_track("video0.timeline.z", Producer::info()).unwrap();
-		let checkpoint = Checkpoint {
-			range: 0..1,
-			records: vec![Record::new(5, 0, 1_000, at(0), at(1))],
-		};
-		assert!(matches!(
-			Producer::resume(track, &checkpoint),
-			Err(crate::Error::TimelineCheckpoint(0))
 		));
 	}
 

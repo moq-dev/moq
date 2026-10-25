@@ -1,12 +1,12 @@
 //! Drain benchmark for the stats registry: [`stats::Registry::report`] refilling
-//! one reused report, swept over broadcasts and tiers so a per-drain cost that
-//! grows faster than the entries it reports shows up as a slope.
+//! one reused report, swept over broadcasts, tiers, labels, sessions and connections
+//! so a cost that grows faster than the entries it reports shows up as a slope.
 //!
 //! Run with `cargo bench -p moq-net --bench stats`.
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use futures::FutureExt;
-use moq_net::{announce, broadcast, fuzz, origin, stats};
+use moq_net::{announce, broadcast, fuzz, origin, stats, transport};
 
 /// `(broadcasts, tiers)` shapes; every broadcast records under every tier.
 const SHAPES: [(usize, usize); 4] = [(100, 1), (1_000, 1), (100, 10), (1_000, 10)];
@@ -96,23 +96,46 @@ fn write(c: &mut Criterion) {
 	c.bench_function("stats/write/session-bytes", |b| b.iter(|| session.bytes(1)));
 }
 
+/// Include the live transport walk, independently swept over labels, sessions and connections.
 fn session_report(c: &mut Criterion) {
 	let mut group = c.benchmark_group("stats/session-report");
 	for labels in [1, 100, 1_000] {
 		for sessions in [1, 10] {
-			let registry = stats::Registry::new(stats::Config::new());
-			let handle = registry.tier(stats::Tier::default());
-			let contexts: Vec<_> = (0..labels)
-				.flat_map(|label| {
-					let handle = handle.clone();
-					(0..sessions).map(move |_| handle.session(format!("project/key/{label}")))
-				})
-				.collect();
-			let mut report = stats::Report::default();
-			group.bench_function(BenchmarkId::from_parameter(format!("{labels}x{sessions}")), |b| {
-				b.iter(|| registry.report(&mut report));
-			});
-			std::hint::black_box(contexts);
+			for connections in [0, 1, 4] {
+				let registry = stats::Registry::new(stats::Config::new());
+				let handle = registry.tier(stats::Tier::default());
+				let contexts: Vec<_> = (0..labels)
+					.flat_map(|label| {
+						let handle = handle.clone();
+						(0..sessions).map(move |_| handle.session(format!("project/key/{label}")))
+					})
+					.collect();
+				let wires: Vec<_> = contexts
+					.iter()
+					.flat_map(|session| {
+						(0..connections).map(move |_| {
+							let counters = transport::Wire::new();
+							counters.set_sent_bytes(100);
+							counters.set_received_bytes(200);
+							session.wire(counters)
+						})
+					})
+					.collect();
+				let mut report = stats::Report::default();
+				registry.report(&mut report);
+				assert_eq!(report.sessions.len(), labels);
+				for row in &report.sessions {
+					assert_eq!(row.presence.sessions_started, sessions as u64);
+					assert_eq!(row.presence.wire_tx, (sessions * connections * 100) as u64);
+					assert_eq!(row.presence.wire_rx, (sessions * connections * 200) as u64);
+				}
+				group.throughput(Throughput::Elements((labels * sessions) as u64));
+				group.bench_function(
+					BenchmarkId::from_parameter(format!("{labels}x{sessions}/connections={connections}")),
+					|b| b.iter(|| registry.report(&mut report)),
+				);
+				std::hint::black_box((contexts, wires));
+			}
 		}
 	}
 	group.finish();

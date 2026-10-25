@@ -3,8 +3,8 @@
 //! (100 rows at 100%, 10k at 1%) separate a cost that grows with the table from one that grows with
 //! the changed rows.
 //!
-//! Each iteration is one tick against a long-lived encoder, so the periodic snapshots the delta
-//! budget forces are amortized in, as they are in production.
+//! Each iteration is one tick against a long-lived encoder, so the snapshots the frame cap
+//! forces are amortized in, as they are in production without a joiner asking for refreshes.
 //!
 //! Run with `cargo bench -p moq-json --bench table`.
 
@@ -69,7 +69,7 @@ impl Table {
 fn configs() -> [(&'static str, Config); 2] {
 	let mut compressed = Config::default();
 	compressed.compression = moq_json::Compression::Deflate;
-	[("json.z", compressed), ("json", Config::default().with_delta_ratio(0))]
+	[("json.z", compressed), ("json", Config::default().with_deltas(false))]
 }
 
 fn table(c: &mut Criterion) {

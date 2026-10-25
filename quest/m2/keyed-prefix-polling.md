@@ -19,7 +19,3 @@ Decided 2026-10-21 with the maintainer: gated on a measurement.
 - Otherwise key polling by prefix and show the slope flatten.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [IETF lazy discovery](/quest/m2/ietf-lazy-discovery.md) - more prefixes per session once IETF is lazy too

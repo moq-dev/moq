@@ -21,7 +21,7 @@ renames it and publishes it uncompressed, and the
 reader, so this quest lands after both and only sets the flag.
 
 - Delete the `.z` names outright, with no transition release: hangz is opt-in
-  and `main` takes breaking changes. Add the MIGRATE.md entries.
+  and `main` takes breaking changes. The Impact bullet says how to migrate.
 - Publishers: `rs/moq-mux/src/catalog/producer.rs`, `js/publish`
   (`broadcast.ts`, `catalog.ts`), `rs/moq-stats` (drop `TrackPair`), and
   the `hls` track writer (`rs/hang/src/timeline.rs` today) set `compress` on
@@ -58,13 +58,7 @@ reader, so this quest lands after both and only sets the flag.
 Public API: removals listed above. Wire: the hang catalog loses
 `compression` and the `.z` tracks, in its draft too; moq-net none.
 
-Decided 2026-10-22 (maintainer): this waits on
-[Refresh JSON](/quest/m1/refresh/json.md), since both rewrite moq-json's
-`snapshot::Config` and moq-stats' `TrackPair`
-([#6054](https://github.com/moq-dev/moq/pull/6054) implements it).
-
 ## Required
 
 - [Catalog HLS field](/quest/m1/archive/catalog-hls.md) - renames the timeline to `<track>.hls`, which this compresses
 - [Archive consumer](/quest/m1/archive/consumer.md) - replaces the CLI archive reader that reads `.z` timelines
-- [Refresh JSON](/quest/m1/refresh/json.md) - rewrites `snapshot::Config` and moq-stats' `TrackPair` first
