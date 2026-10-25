@@ -368,12 +368,12 @@ publisher_codecs() {
 # decode's timestamps, which fails a misapplied pre-skip. Every publisher's tone starts at
 # timestamp zero except the browser's, which stamps its file from its own page clock. The native-JS
 # subscriber hands WebCodecs raw Opus without the OpusHead, as the player does, which keeps the
-# pre-skip for the player to trim, and its libav fallback stamps milliseconds. AAC waits on the
-# fMP4 importer applying the edit list that carries ffmpeg's 1024 priming samples
-# (quest/m1/fmp4-edit-lists.md).
+# pre-skip for the player to trim, and its libav fallback stamps milliseconds. GStreamer's AAC is
+# skipped for its decoder: `faad`, which decodebin picks, drops the first frame's output and stamps
+# the rest a frame early, so it reads the priming 1024 samples early whatever the timestamps say.
 # shellcheck disable=SC2329  # reached from run_cell, which 'harness_spawn' invokes
 phase_checked() {
-    [[ "$1" != js* && "$2" != js-native-* && "$3" == opus ]]
+    [[ "$1" != js* && "$2" != js-native-* && ("$2" != gst || "$3" == opus) ]]
 }
 
 # Record a case for the CI report: `record <outcome> case=C [field=value...]` (see
