@@ -4,8 +4,8 @@
 
 `moq-studio`'s program reaches moq-video's encoder as a GPU `Surface` on
 NVENC, VideoToolbox, and Media Foundation, instead of the CPU readback every
-frame takes today. Any other backend keeps the readback, which the Output
-panel already counts.
+frame takes today. Any other backend keeps the readback, chosen when the
+encoder opens rather than after a GPU attempt fails.
 
 ## Plan
 
@@ -22,10 +22,10 @@ panel already counts.
 - Shape the export so the Vulkan slot also serves VA-API and AMD Vulkan
   Video later without an API change; wiring those backends is m2 work.
 - **Tests:** extend `just rs render-sw`'s end-to-end test (a red canvas
-  published to a test relay and decoded) to assert the readback count, which
-  is nonzero there. VideoToolbox and Media Foundation assert no readback on
-  their platforms' CI, and NVENC in an ignored hardware test run by
-  `just rs gpu`.
+  published to a test relay and decoded) to assert the encoder opened on the
+  readback path, the only one there. VideoToolbox and Media Foundation assert
+  the GPU path on their platforms' CI, and NVENC in an ignored hardware test
+  run by `just rs gpu`.
 
 ## Related
 

@@ -12,7 +12,7 @@ I420 and re-uploaded.
 The surface is already there and already GPU-resident: `Surface::Texture`
 carries a D3D11 NV12 texture, decode retains it, and GPU resize works. What is
 missing is the import at the other end, which the renderer has for Vulkan
-DMA-BUF and Metal but not here, so Windows falls through to the CPU path.
+DMA-BUF and Metal but not here, so Windows frames take the CPU path.
 
 Import the texture as a wgpu texture through its D3D12 or Vulkan backend
 rather than copying. Like the other import paths, the renderer has no
