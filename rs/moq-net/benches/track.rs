@@ -92,8 +92,8 @@
 //!
 //! `track_fill` has readers miss the same runs below where the feed starts, each asked of the
 //! track's handler as a fill, swept over the readers and the runs: readers share each
-//! fill, so asking, dropping, and settling must cost each reader the same per run, and a
-//! cost that grows with the audience or the runs beyond that shows up as a slope.
+//! fill, so asking, updating, dropping, and settling must cost each reader the same per
+//! run, and a cost that grows with the audience or the runs beyond that shows up as a slope.
 //!
 //! `track_range_filling` has one reader fill disjoint ranges below where the feed starts,
 //! swept over how many ranges and how many groups each spans, the filling counterpart of
@@ -1786,8 +1786,9 @@ impl Fills {
 		}
 	}
 
-	/// Every reader reads what is cached and asks for its misses, the handler drops each
-	/// fill they share, and every reader settles the drops.
+	/// Every reader reads what is cached and asks for its misses, then raises its priority,
+	/// which reaches every fill it waits on. The handler drops each fill they share, and
+	/// every reader settles the drops.
 	fn run(&mut self) {
 		let waiter = kio::Waiter::noop();
 		for reader in &mut self.readers {
@@ -1795,8 +1796,13 @@ impl Fills {
 				black_box(group);
 			}
 		}
+		for reader in &mut self.readers {
+			reader.update(reader.subscription().with_priority(1)).unwrap();
+			assert!(reader.poll_recv_group(&waiter).is_pending());
+		}
 		let mut fills = 0;
 		while let Poll::Ready(Ok(fill)) = self.dynamic.poll_requested_fill(&waiter) {
+			assert_eq!(fill.priority(), 1, "the update reached the fill");
 			fill.drop_groups(fill.start().group..fill.end());
 			fills += 1;
 		}

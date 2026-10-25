@@ -41,6 +41,34 @@ pub struct Refusal {
 	pub reason: Reason,
 	/// A root named by a verified credential, never an unverified request path.
 	pub root: Option<String>,
-	/// The tier resolved by the decider; absent uses the default tier.
+	/// The tier resolved by the decider; absent uses the default tier. A body naming a
+	/// tier that [`tier::validate`](crate::tier::validate) refuses does not parse.
+	#[serde(default, deserialize_with = "tier")]
 	pub tier: Option<String>,
+}
+
+fn tier<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+	let tier = Option::<String>::deserialize(deserializer)?;
+	if let Some(tier) = &tier {
+		crate::tier::validate(tier).map_err(serde::de::Error::custom)?;
+	}
+	Ok(tier)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn parsing_refuses_a_tier_a_metrics_label_would_escape() {
+		for tier in ["a\"b", "a\\b", "a\nb"] {
+			let body = serde_json::json!({"reason": "expired", "tier": tier});
+			assert!(serde_json::from_value::<Refusal>(body).is_err(), "{tier:?}");
+		}
+		let parsed: Refusal = serde_json::from_value(serde_json::json!({"reason": "expired"})).unwrap();
+		assert_eq!(parsed.tier, None);
+		let parsed: Refusal =
+			serde_json::from_value(serde_json::json!({"reason": "expired", "tier": "region/sjc"})).unwrap();
+		assert_eq!(parsed.tier.as_deref(), Some("region/sjc"));
+	}
 }
