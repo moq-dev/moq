@@ -55,7 +55,7 @@ def run():
     # pulse.py gives this process tree its own server, without touching the host's.
     if not os.environ.get("PULSE_SERVER"):
         raise RuntimeError("run under test/lib/pulse.py")
-    root = Path(os.environ["MOQ_TEST_RUN"])
+    root = Path(os.environ["HARNESS_RUN_DIR"])
     with ExitStack() as resources:
         children = []
         resources.callback(lambda: [stop(child) for child in reversed(children)])

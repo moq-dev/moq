@@ -900,9 +900,11 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_moved_rendition_follows_its_new_track() {
 		let origin = produce_origin();
-		let mut live = origin.publish("live", Default::default()).unwrap();
-		let mut other = origin.publish("other", Default::default()).unwrap();
-		let mut catalog = moq_mux::catalog::Producer::new(&mut live, moq_mux::catalog::Config::default()).unwrap();
+		let live = origin.publish("live", Default::default()).unwrap();
+		let other = origin.publish("other", Default::default()).unwrap();
+		let mut catalog =
+			moq_mux::catalog::Producer::new(&mut live.broadcast().clone(), moq_mux::catalog::Config::default())
+				.unwrap();
 		let track = |broadcast: &mut moq_net::broadcast::Producer, name: &str| {
 			let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
 			moq_mux::container::Producer::new(
@@ -910,9 +912,9 @@ mod tests {
 				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
 			)
 		};
-		let mut a = track(&mut live, "a");
-		let mut b = track(&mut live, "b");
-		let mut sibling = track(&mut other, "a");
+		let mut a = track(&mut live.broadcast().clone(), "a");
+		let mut b = track(&mut live.broadcast().clone(), "b");
+		let mut sibling = track(&mut other.broadcast().clone(), "a");
 		let point = |catalog: &mut moq_mux::catalog::Producer, track: &str, broadcast: Option<&str>| {
 			let mut config = VideoConfig::new(VideoCodec::VP8);
 			config.container = hang::catalog::Container::Legacy;
