@@ -46,7 +46,7 @@ else
 
     # These files hold the map and the recipes that call it, and match no
     # module, so a change to them would otherwise validate none of it.
-    if grep -qE '^(justfile|sh/(dispatch|changed)\.sh)$' "$changed"; then
+    if grep -qE '^(justfile|sh/(dispatch|changed)\.sh|sh/local\.(sh|ts))$' "$changed"; then
         echo "$action: root orchestration changed; running everything." >&2
         all=1
     fi
@@ -64,7 +64,7 @@ declare -A scope=(
     [workers]='^(infra/|demo/pub/|sh/js/workers\.sh$)'
     [moq_sh]='^infra/moq-sh/'
     # sh/rs/select.sh widens to the whole workspace for inputs every crate shares.
-    [rs]='^(rs/|demo/carla/bridge/|sh/rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|\.config/nextest\.toml$)'
+    [rs]='^(sh/local\.(sh|ts)$|rs/|demo/carla/bridge/|sh/rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|\.config/nextest\.toml$)'
     [bench]='^bench/'
     # The CARLA demo's simulator worker and launchers. Its player is a JS
     # package and its GPU bridge a Rust crate, so those modules cover them.
@@ -290,12 +290,12 @@ step() {
         check:rs) just rs lint-changed "$rs_list" ;;
         check:bench)
             python3 bench/compare.test.py
-            cargo check --locked --package moq-relay --package moq-bench --features moq-relay/io-uring
+            bash sh/local.sh cargo check --locked --package moq-relay --package moq-bench --features moq-relay/io-uring
             ;;
         check:quest) quest check ;;
         check:drill) just test drill-sensitivity --apply-only ;;
         check:obs_compile) just obs compile ;;
-        check:flake) nix flake check ;;
+        check:flake) bash sh/local.sh nix flake check ;;
         check:ts_paths) python3 sh/gh/ts-paths.py ;;
         check:markdown)
             bun install --frozen-lockfile

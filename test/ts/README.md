@@ -215,9 +215,14 @@ payload twice); only PES bytes of a first copy go on to MB/B. Video access units
 are read from the ES rather than taken from PES boundaries: one opens at the first
 delimiter, parameter set or SEI after the previous picture's slices (H.264
 7.4.1.2.3, H.265 7.4.2.4.4), and H.222.0 requires a delimiter in each. A PES may
-carry several, but only the first takes its timestamp, and deriving the rest from
-the stream's own timing is not modelled, so that layout is refused. Video decode
-times must strictly increase.
+carry several, but only the AU starting in it takes its timestamp once. The model
+can derive later presentation times from anchored POC and explicitly proportional
+VUI timing; AVC also needs the TS timing descriptor's fixed-rate and temporal-POC
+flags. Its frame-only profile supports AVC POC types 0/2 and HEVC without sub-picture
+HRD. Inferred decode times additionally need each picture's HRD DPB output delay;
+PTS is never substituted for DTS. Missing signaling, field/pic-struct timing, AVC
+POC type 1 or MMCO5 with missing timestamps are refused. Video decode times must
+strictly increase.
 
 Audio bytes enter B as they leave TB, so a frame that ends partway through a packet
 is complete once its own last byte has left, not the packet's, and B is checked
@@ -257,6 +262,11 @@ An 8 s FFmpeg AVC Baseline@2.0 clip has no declared NAL HRD, so its MB uses the
 much smaller level defaults. It passes as encoded; restamping only its PCRs at
 4x overflows MB (and TB), closing the separate MB negative-control gap.
 
+Generated AVC and HEVC controls put two AUs in each PES, preserving every ES
+byte's original arrival position. Proportional POC timing and HRD picture timing
+make both pass; removing HRD picture timing makes both refuse their unknown decode
+times. Their no-reordering and B-picture variants exercise separate PTS and DTS.
+
 The packet layouts a capture cannot be edited into are built synthetically: a
 10 Mb/s single-video stream carrying the Kyrion SPS, one access unit per PES, with
 a PCR packet between them. Each case fails without the handling it names:
@@ -264,7 +274,7 @@ a PCR packet between them. Each case fails without the handling it names:
 | Case | Expected |
 |---|---|
 | as built | pass |
-| two access units in one PES | refused |
+| two access units in one PES without a declared clock | refused |
 | four adaptation-only packets after an access unit | TB overflow |
 | an access unit's first packet sent twice | pass |
 | the PMT declares a PCR PID that carries no PCR | `pcr-presence` fails |

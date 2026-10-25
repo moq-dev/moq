@@ -120,7 +120,7 @@ case "$1" in
         # only Criterion estimates enter the trend report.
         criterion extra --no-fail-fast -p moq-e2ee -p moq-json -p moq-archive -p moq-cli -p moq-mux \
             --bench protect --bench codec --bench table --bench allocations --bench window \
-            --bench producer --bench play_buffer --bench jitter --bench decode_clock --bench ts_programs
+            --bench producer --bench play_buffer --bench jitter --bench decode_clock --bench ts_programs --bench ts_video
         ;;
     rust-uring)
         # One run per target makes an unsupported/skipped ring fail report

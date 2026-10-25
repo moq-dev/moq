@@ -4525,7 +4525,7 @@ mod session_tests {
 										drop(request);
 										dropping.send_modify(|dropped| *dropped += 1);
 									}
-									Admit::Refuse => request.reject(moq_tokio::server::Reject::Forbidden).await.unwrap(),
+									Admit::Refuse => request.reject(moq_net::SessionError::Unauthorized).await.unwrap(),
 								}
 							}
 						}

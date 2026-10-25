@@ -47,6 +47,11 @@ dev:
 bench $BASE="":
     bench/run.sh "$BASE"
 
+# Compare admitted suites across checkouts and worker counts; see bench/README.md.
+[positional-arguments]
+bench-local *args:
+    python3 bench/local.py "$@"
+
 # Benchmark selected wrappers against two Rust baselines on this machine.
 [positional-arguments]
 bench-ffi *runners:
