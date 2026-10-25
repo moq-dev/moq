@@ -28,6 +28,7 @@ import {
 } from "./internal.ts";
 import * as Path from "./path.ts";
 import { Front } from "./resume.ts";
+import { closeUnwanted } from "./util/announce.ts";
 import {
 	type Advertised,
 	type Advertisements,
@@ -37,7 +38,6 @@ import {
 	sameInstance,
 	wireOf,
 } from "./wire.ts";
-import { closeUnwanted } from "./util/announce.ts";
 
 export type { Cost, Hop, Route } from "./hop.ts";
 export { isAnonymous } from "./hop.ts";

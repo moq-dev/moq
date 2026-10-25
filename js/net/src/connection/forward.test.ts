@@ -7,10 +7,10 @@ import * as Epoch from "../epoch.ts";
 import { Route } from "../hop.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
+import { closeUnwanted } from "../util/announce.ts";
 import { registerWire, wireOf } from "../wire.ts";
 import type { Established } from "./established.ts";
 import { forwardAnnounced } from "./forward.ts";
-import { closeUnwanted } from "../util/announce.ts";
 
 const LINGER = 2000;
 

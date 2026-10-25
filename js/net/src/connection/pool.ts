@@ -11,6 +11,7 @@ import type * as Auth from "../auth.ts";
 import type { Handle } from "../bandwidth.ts";
 import * as Origin from "../origin.ts";
 import * as Path from "../path.ts";
+import { closeUnwanted } from "../util/announce.ts";
 import { Follow } from "../util/observed.ts";
 import { after } from "../util/timer.ts";
 import { type AcceptProps as AcceptPropsType, accept } from "./accept.ts";
@@ -31,7 +32,6 @@ import type { GoawayProps, Redirect as RedirectType } from "./goaway.ts";
 import { pumpAnnounced, Reload, type ReloadDelay, type ReloadStatus } from "./reload.ts";
 import type { Probe as ProbeType, Stats as StatsType } from "./stats.ts";
 import type { Transport as TransportType } from "./transport.ts";
-import { closeUnwanted } from "../util/announce.ts";
 
 /** How long an unreferenced shared connection lingers before it actually closes. */
 const LINGER_MS = Milli(2000);

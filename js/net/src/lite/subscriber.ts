@@ -32,6 +32,7 @@ import { Tail } from "../tail.ts";
 import * as Time from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
+import { closeUnwanted } from "../util/announce.ts";
 import { Deadline, REQUEST_TIMEOUT_MS, requestOptions } from "../util/deadline.ts";
 import { abandoned, isAbandoned, unwanted } from "../util/demand.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
@@ -80,7 +81,6 @@ import {
 	Version,
 	waitsForSubscriberFin,
 } from "./version.ts";
-import { closeUnwanted } from "../util/announce.ts";
 
 // A peer's buffered TRACKS events decode without reaching a task boundary, and a flood of adds
 // and removals of one name never reaches the announces cap: yield so it cannot starve the host.

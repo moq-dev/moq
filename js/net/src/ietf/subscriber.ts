@@ -37,6 +37,7 @@ import { Tail } from "../tail.ts";
 import type { Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
+import { closeUnwanted } from "../util/announce.ts";
 import { Deadline, requestOptions } from "../util/deadline.ts";
 import { abandoned as demandAbandoned, isAbandoned, unwanted } from "../util/demand.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
@@ -81,7 +82,6 @@ import {
 } from "./subscribe_namespace.ts";
 import { MalformedAuthToken } from "./token.ts";
 import { Version } from "./version.ts";
-import { closeUnwanted } from "../util/announce.ts";
 
 // Wire ceiling (2^62-1). A draining session stamps it on every live route so any other
 // candidate outranks it, while the route stays selectable as the last path. Matches Rust

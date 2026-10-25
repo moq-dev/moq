@@ -7,6 +7,7 @@ import { Allocator } from "../bandwidth.ts";
 import { error, reason, SessionCode, SessionError } from "../error.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
+import { closeUnwanted } from "../util/announce.ts";
 import { Follow } from "../util/observed.ts";
 import { wireOf } from "../wire.ts";
 import {
@@ -20,7 +21,6 @@ import type { Established } from "./established.ts";
 import { DISCOVERY_REMOVED } from "./forward.ts";
 import { DEFAULT_HANDOVER, type Drain, dialed, type GoawayProps, handover, pinnedTransport, target } from "./goaway.ts";
 import type { Probe, Stats } from "./stats.ts";
-import { closeUnwanted } from "../util/announce.ts";
 
 /**
  * Exponential backoff settings for the reconnect loop.

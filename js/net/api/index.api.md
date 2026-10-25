@@ -121,7 +121,6 @@ declare namespace Broadcast {
     export {
         Tracks,
         TracksEvent,
-        Demand_3 as Demand,
         Producer_3 as Producer,
         Consumer_4 as Consumer
     }
@@ -131,7 +130,6 @@ declare namespace Broadcast_2 {
     export {
         Tracks,
         TracksEvent,
-        Demand_3 as Demand,
         Producer_3 as Producer,
         Consumer_4 as Consumer
     }
@@ -340,12 +338,6 @@ class Demand {
 class Demand_2 {
     get closed(): GetPromise<Error | null>;
     readonly sequence: number;
-    unused(): Promise<void>;
-    get used(): Getter<boolean>;
-}
-
-class Demand_3 {
-    get closed(): GetPromise<null>;
     unused(): Promise<void>;
     get used(): Getter<boolean>;
 }
@@ -786,7 +778,6 @@ class Producer_3 {
     get closed(): GetPromise<null>;
     consume(): Consumer_4;
     createTrack(name: string, info?: Partial<track.Info>): track.Producer;
-    demand(): Demand_3;
     removeTrack(name: string): void;
     get route(): Route | undefined;
     track(name: string): track.Consumer;
@@ -798,7 +789,7 @@ class Producer_4 {
     close(abort?: Error): void;
     get closed(): GetPromise<Error | null>;
     consume(): Consumer;
-    unused(): Promise<void>;
+    get wanted(): Getter<boolean>;
 }
 
 class Producer_5 implements Table {
