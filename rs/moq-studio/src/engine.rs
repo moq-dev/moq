@@ -232,7 +232,8 @@ impl Engine {
 
 		let (video, audio) = match publish {
 			Some(Publish { video, audio, config }) => {
-				let (frames, pending) = mpsc::sync_channel(Readback::DEPTH);
+				// One more than the readback pool, for a pause behind a full pool.
+				let (frames, pending) = mpsc::sync_channel(Readback::DEPTH + 1);
 				tokio::spawn(watch(video.demand(), engine.clone()));
 				let encoder = engine.clone();
 				std::thread::Builder::new()
@@ -258,12 +259,13 @@ impl Engine {
 
 	/// Draw a canvas frame per tick of the program clock, and hand the program
 	/// to the encoder while anyone watches.
-	async fn run_program(&self, start: Instant, frames: Option<mpsc::SyncSender<Pending>>) {
+	async fn run_program(&self, start: Instant, frames: Option<mpsc::SyncSender<Video>>) {
 		let canvas = self.state.lock().unwrap().collection.canvas;
 		let mut readback = Readback::new(&self.gpu.device, &self.gpu.queue, canvas);
 		let period = Duration::from_secs(1) / canvas.framerate;
 		let mut clock = moq_clock::interval_at(start, period);
 		clock.set_missed_tick_behavior(moq_clock::MissedTickBehavior::Skip);
+		let mut watched = false;
 
 		loop {
 			let tick = clock.tick().await;
@@ -284,16 +286,22 @@ impl Engine {
 			self.stats.rendered.fetch_add(1, Ordering::Relaxed);
 
 			let Some(frames) = &frames else { continue };
-			if !self.stats.watched.load(Ordering::Relaxed) {
+			let was = std::mem::replace(&mut watched, self.stats.watched.load(Ordering::Relaxed));
+			if !watched {
+				// Behind every frame already sent, so the break lands after them.
+				if was && frames.send(Video::Pause).is_err() {
+					return;
+				}
 				continue;
 			}
 			let Ok(timestamp) = moq_net::Timestamp::try_from(tick.saturating_duration_since(start)) else {
 				continue;
 			};
 			match readback.copy(&program, timestamp) {
-				// The channel holds as many as the pool, so this never blocks.
+				// The pool bounds the frames in flight, so this waits only behind
+				// a pause the encoder has not reached yet.
 				Some(pending) => {
-					if frames.send(pending).is_err() {
+					if frames.send(Video::Frame(pending)).is_err() {
 						return;
 					}
 				}
@@ -409,18 +417,38 @@ async fn watch(mut demand: moq_net::track::Demand, engine: Arc<Engine>) {
 	}
 }
 
+/// What the program clock hands the encoder.
+enum Video {
+	/// A program frame on its way back from the GPU.
+	Frame(Pending),
+	/// The last viewer left, so frames stop until one returns.
+	Pause,
+}
+
 /// Read back and encode program frames until the program clock stops.
 fn encode(
 	engine: &Engine,
-	pending: mpsc::Receiver<Pending>,
+	video: mpsc::Receiver<Video>,
 	mut producer: moq_video::encode::Producer,
 	config: moq_video::encode::Config,
 ) {
 	let stats = &engine.stats;
 	let mut encoder: Option<moq_video::encode::Encoder> = None;
-	let mut watched = false;
+	let mut paused = false;
 
-	while let Ok(pending) = pending.recv() {
+	while let Ok(video) = video.recv() {
+		let pending = match video {
+			Video::Frame(pending) => pending,
+			// Marks the gap, so a viewer arriving during it is not served the
+			// last group before it as if it were live.
+			Video::Pause => {
+				if let Err(err) = producer.discontinuity() {
+					return stats.fail(format!("video: {err}"));
+				}
+				paused = true;
+				continue;
+			}
+		};
 		let start = Instant::now();
 		let frame = match pending.wait() {
 			Ok(frame) => frame,
@@ -444,14 +472,11 @@ fn encode(
 
 		// A viewer arriving after a break starts from a keyframe rather than
 		// waiting out the rest of a group nobody received the start of.
-		let now = stats.watched.load(Ordering::Relaxed);
-		if now
-			&& !watched
+		if std::mem::take(&mut paused)
 			&& let Err(err) = encoder.cut()
 		{
 			return stats.fail(format!("video encoder: {err}"));
 		}
-		watched = now;
 
 		let start = Instant::now();
 		let encoded = match encoder.encode(&frame) {
