@@ -26,8 +26,8 @@ Decided with the maintainer on 2026-10-23:
   exposes when the next packet may leave and how large a burst may be.
   `moq-quic` deletes `connection/pacing.rs`. A transport that keeps its own
   pacer (noq) reads the rate instead.
-- **Crate-owned inputs.** An RTT snapshot struct replaces `RttEstimator`, a
-  crate type replaces `SpaceId` (or packet identity becomes opaque), and time
+- **Crate-owned inputs.** An event struct replaces the interim `RttEstimator`
+  snapshot and QUIC-shaped `SpaceId` (or packet identity becomes opaque), and time
   stays `moq_clock::Instant`.
 - **Exhaustive structs, explicit breaks.** Event structs that transports
   build are not `#[non_exhaustive]`: a new field breaks the transport's
@@ -37,17 +37,10 @@ Decided with the maintainer on 2026-10-23:
   consume. For each follower, sketch here the field it would add and confirm
   it is additive: receive timestamps per acked packet (GCC, SCReAM, BBR3
   delay bound), the controller's ECT codepoint choice and CE counts (L4S),
-  seed state at construction (careful resume), and the ProbeBW_UP signal
-  [native probing](/quest/m1/probe-native.md) reads.
+  seed state at construction (careful resume), and the probe signal
+  native probing reads (`Controller::probes` and
+  `ControllerMetrics::probe_inflight`, from [moq-dev/moq#6635](https://github.com/moq-dev/moq/pull/6635)).
 
 Measure the per-packet cost (the state struct, the removed packet map, the
 pacer move) with a benchmark, alongside the existing cleanup benchmark, and
 run the bufferbloat lanes in `test/ts/README.md` before and after.
-
-## Required
-
-- [Move the controllers](/quest/m1/congestion/move.md) - the crate exists with today's trait
-
-## Related
-
-- [Native probing](/quest/m1/probe-native.md) - also reads BBR3 state from `moq-quic`; whichever lands second adapts

@@ -184,7 +184,7 @@ mod tests {
 			let mut encoder = Encoder::new(&Config {
 				kind: Kind::Software,
 				color: Some(color),
-				..Config::new(size.width, size.height, crate::Rate::new(30, 1).unwrap())
+				..Config::new(size.width, size.height, crate::FrameRate::new(30, 1).unwrap())
 			})
 			.unwrap();
 			encoder.cut().unwrap();

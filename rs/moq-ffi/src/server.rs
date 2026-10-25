@@ -495,7 +495,7 @@ impl MoqRequest {
 						publish.as_ref().or(state.publish.as_ref()),
 						consume.as_ref().or(state.consume.as_ref()),
 					);
-					let (session, driver) = request
+					let session = request
 						.with_publisher(&publish.inner)
 						.with_subscriber(subscribe.inner.clone())
 						.ok()
@@ -503,7 +503,7 @@ impl MoqRequest {
 						.map_err(|err| MoqError::Connect {
 							reason: format!("{err}"),
 						})?;
-					Ok(Arc::new(MoqSession::accepted(session, publish, subscribe, driver)))
+					Ok(Arc::new(MoqSession::accepted(session, publish, subscribe)))
 				})
 			})
 			.await
@@ -520,9 +520,8 @@ impl MoqRequest {
 			.run(move |mut state| async move {
 				let request = state.request.take().ok_or(MoqError::AlreadyResponded)?;
 				let reject = match code {
-					401 => moq_tokio::server::Reject::Unauthorized,
-					403 => moq_tokio::server::Reject::Forbidden,
-					code => moq_tokio::server::Reject::App(code),
+					401 | 403 => moq_net::SessionError::Unauthorized,
+					code => moq_net::SessionError::App(code),
 				};
 				request.reject(reject).await.map_err(|err| MoqError::Reject {
 					reason: format!("{err}"),

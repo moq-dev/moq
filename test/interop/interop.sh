@@ -31,6 +31,10 @@
 # version per pass, such as each even moq-transport draft (`--versions ietf`).
 set -euo pipefail
 
+if [[ "${GITHUB_ACTIONS:-}" != true && "${LOCAL_SUPERVISED:-}" != 1 ]]; then
+    exec bash "$(dirname "$0")/../../sh/local.sh" bash "$0" "$@"
+fi
+
 INTEROP_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 WORKSPACE=$(cd "$INTEROP_DIR/../.." && pwd)
 CLIENTS="$INTEROP_DIR/clients"
@@ -46,7 +50,7 @@ source "$INTEROP_DIR/../lib/harness.sh"
 
 # Captured before the parse below consumes it, so the rerun command carries every
 # flag and every environment override this run was actually given.
-RERUN="$(harness_env INTEROP_TIMEOUT INTEROP_FPS INTEROP_SIZE INTEROP_PORT INTEROP_PROFILE RELAY_BIN MOQ_BIN INTEROP_SUB_MOQ INTEROP_VERSION INTEROP_COMPAT_CLIENT INTEROP_DECODE INTEROP_FETCH_DATA INTEROP_FETCH_TRACK)just test interop$(harness_argv "$@")"
+RERUN="$(harness_env INTEROP_TIMEOUT INTEROP_FPS INTEROP_SIZE INTEROP_PORT INTEROP_PROFILE RELAY_BIN CLI_BIN INTEROP_SUB_MOQ INTEROP_VERSION INTEROP_COMPAT_CLIENT INTEROP_DECODE INTEROP_FETCH_DATA INTEROP_FETCH_TRACK)just test interop$(harness_argv "$@")"
 
 PUBLISHERS="rust"
 SUBSCRIBERS="rust"
@@ -55,7 +59,7 @@ SUBSCRIBERS="rust"
 # can't be held to them: a released client may not close cleanly, a released relay names no
 # connection when one closes, and the tail clients are built from this checkout only.
 IN_TREE=1
-if [[ -n "${RELAY_BIN:-}${MOQ_BIN:-}${INTEROP_SUB_MOQ:-}${INTEROP_COMPAT_CLIENT:-}" ]]; then
+if [[ -n "${RELAY_BIN:-}${CLI_BIN:-}${INTEROP_SUB_MOQ:-}${INTEROP_COMPAT_CLIENT:-}" ]]; then
     IN_TREE=0
 fi
 TIMEOUT="${INTEROP_TIMEOUT:-20}"
@@ -82,9 +86,9 @@ IETF_VERSIONS="moq-transport-14,moq-transport-16,moq-transport-18,moq-transport-
 PROFILE="${INTEROP_PROFILE:-debug}"
 
 # Binaries under test. Built from source below unless overridden to point at a
-# prebuilt (mirrors test/smoke's RELAY_BIN/MOQ_BIN escape hatch).
+# prebuilt (mirrors test/smoke's RELAY_BIN/CLI_BIN escape hatch).
 RELAY="${RELAY_BIN:-}"
-MOQ="${MOQ_BIN:-}"
+MOQ="${CLI_BIN:-}"
 
 require_value() {
     # require_value <flag> "$@": the flag plus the rest of the argv. Ensures a
@@ -327,7 +331,7 @@ COMPRESS_VERSIONS=(moq-lite-07-wip moq-lite-06)
 # checks audio only in its decoding media lanes, and the bindings' clients, which always check it,
 # refuse to run in the rest.
 AUDIO=1
-[[ -z "${MOQ_BIN:-}${INTEROP_SUB_MOQ:-}${INTEROP_COMPAT_CLIENT:-}" || "${INTEROP_DECODE:-0}" == 1 ]] || AUDIO=0
+[[ -z "${CLI_BIN:-}${INTEROP_SUB_MOQ:-}${INTEROP_COMPAT_CLIENT:-}" || "${INTEROP_DECODE:-0}" == 1 ]] || AUDIO=0
 if [[ "$AUDIO" -eq 0 ]]; then
     for sub in "${SUB_LIST[@]}"; do
         case "$sub" in
@@ -336,7 +340,7 @@ if [[ "$AUDIO" -eq 0 ]]; then
             *) sub_needs_audio="$sub" ;;
         esac
         if [[ -n "${sub_needs_audio:-}" ]]; then
-            echo "error: the $sub subscriber always checks audio, which a run with MOQ_BIN, INTEROP_SUB_MOQ, or INTEROP_COMPAT_CLIENT turns off without INTEROP_DECODE" >&2
+            echo "error: the $sub subscriber always checks audio, which a run with CLI_BIN, INTEROP_SUB_MOQ, or INTEROP_COMPAT_CLIENT turns off without INTEROP_DECODE" >&2
             exit 2
         fi
     done
@@ -362,7 +366,7 @@ publisher_codecs() {
 }
 # phase_checked <round> <subscriber> <codec>: whether tone.py also holds the tone's phase to the
 # decode's timestamps, which fails a misapplied pre-skip. Every publisher's tone starts at
-# timestamp zero except the browser's, whose capture clock is not tied to its WAV. The native-JS
+# timestamp zero except the browser's, which stamps its file from its own page clock. The native-JS
 # subscriber hands WebCodecs raw Opus without the OpusHead, as the player does, which keeps the
 # pre-skip for the player to trim, and its libav fallback stamps milliseconds. AAC waits on the
 # fMP4 importer applying the edit list that carries ffmpeg's 1024 priming samples
@@ -981,14 +985,19 @@ ffmpeg_fmp4() {
         -f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer -frag_duration 1000 -
 }
 
-# The browser's microphone: <tone> as a WAV Chromium loops. Ten seconds is a whole number of
-# cycles of any whole-Hz tone, so the loop is seamless.
+# The browser's input: the picture and <tone> as a file it decodes and loops, H.264 beside 16-bit
+# PCM so decoding it loses nothing. Not Chromium's fake devices: their timers skip a late 10 ms
+# tick, and Web Audio then splices the tone without a timestamp gap whenever the runner is short
+# of CPU. Ten seconds is a whole number of cycles of any whole-Hz tone and of video frames, so the
+# loop is seamless.
 # shellcheck disable=SC2329  # reached from a function 'harness_spawn' invokes
-tone_wav() {
-    local wav
-    wav="$HARNESS_RUN/tone-${1//,/-}.wav"
-    [[ -f "$wav" ]] || ffmpeg -hide_banner -loglevel error -f lavfi -i "$(tone_source "$1"):d=10" -c:a pcm_s16le "$wav"
-    printf '%s' "$wav"
+tone_media() {
+    local media
+    media="$HARNESS_RUN/tone-${1//,/-}.mov"
+    [[ -f "$media" ]] || ffmpeg -hide_banner -loglevel error -f lavfi -i "testsrc=size=${SIZE}:rate=${FPS}:duration=10" \
+        -f lavfi -i "$(tone_source "$1"):d=10" -c:v libx264 -profile:v baseline -preset ultrafast -pix_fmt yuv420p \
+        -x264-params "keyint=${FPS}:min-keyint=${FPS}:scenecut=0" -c:a pcm_s16le "$media"
+    printf '%s' "$media"
 }
 
 # The publisher pipeline, run in a process group of its own by `harness_spawn`
@@ -1031,14 +1040,13 @@ run_publisher() {
             exec bun "$INTEROP_COMPAT_CLIENT/client.ts" publish "$url" "$broadcast"
             ;;
         js)
-            # Headless Chromium encodes its own H.264 from a fake camera, and Opus from a
-            # fake microphone playing the tone, via WebCodecs (lazily, once a subscriber
-            # creates demand). exec, so the driver leads the group and `stop_publisher`
-            # waits for its own close.
-            local wav
-            wav=$(tone_wav "$tone")
+            # Headless Chromium decodes the tone file and encodes its own H.264 and Opus
+            # via WebCodecs (lazily, once a subscriber creates demand). exec, so the driver
+            # leads the group and `stop_publisher` waits for its own close.
+            local media
+            media=$(tone_media "$tone")
             cd "$CLIENTS/js" && exec bun driver.ts publish \
-                --url "$url" --broadcast "$broadcast" --audio-file "$wav" ${FLAGS[@]+"${FLAGS[@]}"}
+                --url "$url" --broadcast "$broadcast" --media "$media" ${FLAGS[@]+"${FLAGS[@]}"}
             ;;
         *)
             echo "unknown publisher: $lang" >&2
@@ -2054,8 +2062,8 @@ run_matrix() {
         fi
     done
 
-    # The relay refuses a token on its public rules, and Chromium has to read the close code and
-    # reason it sends. WebSocket must surface Unauthorized and stop reconnecting too.
+    # The relay refuses a token that is not a JWT, and Chromium has to read the close code and
+    # reason it sends. WebSocket must surface MalformedAuthToken and stop reconnecting too.
     # Chromium is the strict peer here, so no Rust client stands in for it. The relay refuses
     # before any version is negotiated, so one pass covers it.
     if [[ "$VERSION" == auto ]] && needs js; then

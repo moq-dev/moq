@@ -20,8 +20,11 @@ decodes it. Python and C++ send a mono 440 Hz tone; the rest send 440 Hz left an
 660 Hz right, so a channel swap fails too. The Rust CLI imports it from ffmpeg in
 fragmented MP4, as both an Opus and an AAC rendition, so AAC import and decode cross
 every subscriber (the wire-compat lanes send Opus alone; see
-[Released wire compatibility](#released-wire-compatibility)). The browser encodes its fake microphone playing the tone from a WAV
-file, and the Python, Go, and C++ clients encode it through `moq-ffi` at a 2.5 ms
+[Released wire compatibility](#released-wire-compatibility)). The browser decodes the picture
+and the tone from a looping file through `<moq-publish>`'s file source and encodes both, rather
+than capturing Chromium's fake camera and microphone: those run on timers that skip a late tick,
+so a runner short of CPU splices the captured tone with no timestamp gap. The Python, Go, and
+C++ clients encode it through `moq-ffi` at a 2.5 ms
 frame duration, so the matrix covers the FFI audio path with a non-default codec config.
 Each subscriber decodes every audio rendition with what it already has: moq-audio for Rust (the
 `interop-audio` example, since the CLI has no PCM output), `moq-ffi` for Python,
@@ -34,8 +37,8 @@ most of its energy by a Goertzel filter. A garbled decode (wrong channel order o
 sample rate), silence, a timestamp gap, or a rendition left undecoded fails the cell.
 Each publisher's tone starts at timestamp zero, so `--phase` also holds every Opus
 rendition's tone to its timestamps within a sample, which fails a decoder that keeps
-or drops the wrong pre-skip. It skips the browser publisher, whose capture clock is
-not tied to its WAV, and the native-JS subscriber, which leaves the pre-skip to the
+or drops the wrong pre-skip. It skips the browser publisher, which stamps its file
+from its own page clock, and the native-JS subscriber, which leaves the pre-skip to the
 player as WebCodecs does and stamps milliseconds. AAC is skipped until the fMP4
 importer applies the edit list holding ffmpeg's priming
 ([quest](/quest/m1/fmp4-edit-lists.md)). The browser plays each rendition in a page
@@ -481,7 +484,7 @@ and any claim about physical playback.
 The relay's port is reserved for the run rather than fixed, so two checkouts can
 run the interop test at once; `INTEROP_PORT` pins one instead. A failing run keeps its
 directory, including a Playwright trace of the failing page, and CI uploads it;
-`MOQ_TEST_KEEP=1` keeps a passing run's too. See [the harness
+`HARNESS_KEEP=1` keeps a passing run's too. See [the harness
 contract](../README.md).
 
 ## Layout
@@ -527,7 +530,7 @@ table of publisher by subscriber for each suite, case, transport, and version, p
 workflow step's outcome. A red cell links to its run and to the failure artifact, and
 its tooltip names the log inside that artifact.
 
-The report reads records, never logs. With `MOQ_TEST_RESULTS` set, `interop.sh` and
+The report reads records, never logs. With `HARNESS_RESULTS` set, `interop.sh` and
 `compat.sh` append one JSON line per case through `harness_result` (`test/lib/harness.sh`):
 suite, case, publisher, subscriber, transport, version, outcome, seconds, detail, and
 log. A run first records every case it will reach as `not run`, before building
@@ -536,7 +539,7 @@ rather than missing ones. Transport and version are `auto` where each client neg
 its own; a pinned pass, the drop lanes, and wire-compat record their version. `report.py` renders the page:
 
 ```bash
-MOQ_TEST_RESULTS=/tmp/results.jsonl just test interop
+HARNESS_RESULTS=/tmp/results.jsonl just test interop
 just test interop-report /tmp/results.jsonl /tmp/interop-report
 ```
 

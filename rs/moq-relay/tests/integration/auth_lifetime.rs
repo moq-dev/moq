@@ -39,6 +39,8 @@ enum Answer {
 	Grant(Grant),
 	Status(u16),
 	Token(Grant, moq_auth::Token),
+	/// A 403 carrying a typed refusal.
+	Refuse(moq_auth::refusal::Reason),
 }
 
 /// A server whose answers the test changes mid-session, recording every request.
@@ -122,6 +124,11 @@ impl Script {
 			Answer::Token(grant, token) if request.token.as_ref() == Some(&token) => Json(grant).into_response(),
 			Answer::Token(..) => StatusCode::UNAUTHORIZED.into_response(),
 			Answer::Status(code) => StatusCode::from_u16(code).unwrap().into_response(),
+			Answer::Refuse(reason) => {
+				let mut refusal = moq_auth::Refusal::default();
+				refusal.reason = reason;
+				(StatusCode::FORBIDDEN, Json(refusal)).into_response()
+			}
 		}
 	}
 
@@ -231,10 +238,12 @@ async fn spawn_ws_relay_with(
 fn client() -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
-	config.once = Some(true);
-	config.websocket.delay = Some(Duration::ZERO);
+	config.websocket.delay = Some((Duration::ZERO).into());
 	config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
-	config.init(Default::default()).expect("client init")
+	config
+		.init(Default::default())
+		.expect("client init")
+		.with_reconnect(false)
 }
 
 fn room_url(scheme: &str, port: u16) -> url::Url {
@@ -1133,11 +1142,13 @@ async fn a_certificate_admits_only_what_the_server_grants() {
 	let mtls_client = || {
 		let mut config = moq_tokio::connect::Config::default();
 		config.tls.insecure = Some(true);
-		config.once = Some(true);
 		config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
 		config.tls.cert = Some(client_cert.clone());
 		config.tls.key = Some(client_key.clone());
-		config.init(Default::default()).expect("client init")
+		config
+			.init(Default::default())
+			.expect("client init")
+			.with_reconnect(false)
 	};
 	// No grant for certificates: refused, over QUIC with a certificate and over
 	// WebSocket without one.
@@ -1464,7 +1475,7 @@ async fn a_relay_without_an_auth_source_is_decided_by_the_embedder() {
 		let mut config = Config::default();
 		config.listen.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
 		// The sessions are gone by the time the trigger fires; no need to wait out the default window.
-		config.drain_timeout = Duration::from_millis(100);
+		config.drain_timeout = Some((Duration::from_millis(100)).into());
 		config
 	};
 
@@ -1505,8 +1516,8 @@ async fn connect_through_embedded_admission(
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 	let mut config = Config::default();
 	config.listen.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
-	config.listen.timeout = Some(timeout);
-	config.drain_timeout = Duration::from_millis(100);
+	config.listen.timeout = Some((timeout).into());
+	config.drain_timeout = Some((Duration::from_millis(100)).into());
 	let mut relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let port = relay.tcp_addr().expect("TCP listener bound").port();
 	let admissions = relay.admissions().expect("an empty [auth] hands over the admissions");
@@ -1642,10 +1653,9 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 		};
 		let client = || {
 			let mut config = moq_tokio::connect::Config::default();
-			config.once = Some(true);
 			config.version = vec!["moq-transport-22".parse().unwrap()];
-			config.websocket.delay = Some(Duration::ZERO);
-			config.init(Default::default()).unwrap()
+			config.websocket.delay = Some((Duration::ZERO).into());
+			config.init(Default::default()).unwrap().with_reconnect(false)
 		};
 		let origin = moq_tokio::origin::spawn();
 		let a = origin.create_broadcast("a/cam").unwrap();
@@ -1801,17 +1811,24 @@ async fn relay_request_limits_distinguish_clients_and_peers() {
 /// Browser-visible policy refusals happen after the WebSocket upgrade, in MoQ's close registry.
 #[tokio::test]
 async fn websocket_refusal_is_in_band() {
+	use moq_auth::refusal::Reason;
 	use moq_net::transport::{
 		Error as _,
 		poll::{SendStream as _, Session as _},
 	};
-	for (status, code) in [
-		(401, moq_net::SessionError::Unauthorized),
-		(403, moq_net::SessionError::Unauthorized),
-		(502, moq_net::SessionError::App(502)),
+	for (answer, code) in [
+		(Answer::Status(401), moq_net::SessionError::Unauthorized),
+		(Answer::Status(403), moq_net::SessionError::Unauthorized),
+		(Answer::Status(502), moq_net::SessionError::App(502)),
+		(Answer::Refuse(Reason::Forbidden), moq_net::SessionError::Unauthorized),
+		(Answer::Refuse(Reason::Expired), moq_net::SessionError::Expired),
+		(
+			Answer::Refuse(Reason::Malformed),
+			moq_net::SessionError::MalformedAuthToken,
+		),
 	] {
 		let script = Script::new(grant(Duration::from_secs(3600)));
-		script.on_connect(Answer::Status(status));
+		script.on_connect(answer);
 		let (port, relay) = spawn_ws_relay(build_auth(script.spawn().await)).await;
 		let mut session = qmux::ws::Client::new()
 			.with_protocol("moq-lite-06", &[qmux::Version::QMux01])

@@ -56,8 +56,11 @@ Failover routes must carry copies of one publisher's broadcast. Independent
 importers use distinct epochs and switch as a restart, even when fed one stream.
 See [Redundant ingest](/setup/redundancy) to choose between publisher switching,
 subscriber selection, and several routes to one publisher.
-A source whose track differs in timescale, retention, publisher priority, or
-group order is refused for that track.
+A source whose track differs in any property, such as timescale, retention,
+publisher priority, compression, or refresh, is refused for that track. A
+moq-transport link records its draft in the track's properties and carries
+refresh only as on or off, so a route crossing one does not fail over to or from
+a route that does not.
 
 A route whose original publisher (its first hop) changes under the same epoch is
 updated in place on both wire protocols, so the broadcast never briefly vanishes

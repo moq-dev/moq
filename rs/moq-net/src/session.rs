@@ -210,6 +210,7 @@ impl Session {
 	/// Returns a consumer for the estimated send bitrate (from the congestion controller).
 	///
 	/// Returns `None` if the QUIC backend doesn't support bandwidth estimation.
+	/// Otherwise it holds an estimate from the start, the session's first sample.
 	pub fn send_bandwidth(&self) -> Option<bandwidth::Consumer> {
 		self.send_bandwidth.as_ref().map(bandwidth::Weak::consume)
 	}
@@ -312,7 +313,8 @@ impl Session {
 	/// A close carrying no application code is otherwise [`Error::IdleTimeout`] for an
 	/// idle timeout and [`Error::Transport`] for anything else. See
 	/// [`Error::from_transport`]. If the runtime drops the driver instead of running it to
-	/// completion, this resolves with [`Error::Cancel`].
+	/// completion, this resolves with [`Error::Cancel`]. A panic while polling the driver is
+	/// a transport failure instead.
 	pub async fn closed(&self) -> Error {
 		match self
 			.closed
@@ -361,6 +363,9 @@ impl Session {
 	/// The tokens this side presented and the grant they earned, plus the tokens
 	/// the peer presents. See [`auth`].
 	///
+	/// The handle passed to [`Client::with_auth`](crate::Client::with_auth), or else one
+	/// this session created for itself, which ends with it.
+	///
 	/// On moq-lite-07-wip, and on moq-transport draft-17+ when both sides negotiate the
 	/// MoQ Auth extension, each side presents its connection's credential right after
 	/// setup. Older versions, and peers that do not negotiate it, leave the grant `None`.
@@ -373,7 +378,7 @@ impl Session {
 pub(super) struct Handles {
 	pub stats: crate::stats::Session,
 	pub goaway: goaway::Handle,
-	pub auth: auth::Handle,
+	pub auth: auth::Link,
 	/// Where the driver publishes [`Estimate`] changes, for a protocol that reports
 	/// them to the peer (moq-lite PROBE). Sampled only while a consumer exists.
 	pub estimate: Option<kio::Producer<Estimate>>,
@@ -400,6 +405,8 @@ impl Session {
 			bandwidth,
 			peer_implementation,
 		} = handles;
+		let goaway = Arc::new(goaway);
+		auth.drain_with(goaway.clone());
 		let wire = session.wire().map(|counters| context.wire(counters));
 		let sample = snapshot(&session);
 		if let Some(estimate) = &estimate
@@ -409,8 +416,11 @@ impl Session {
 		}
 
 		// Send bandwidth is version-agnostic: it depends on QUIC backend support.
+		// Seeded with the first sample, so a consumer taken before the sampler
+		// first runs reads the estimate instead of `None`.
 		let (send_bandwidth, send_producer) = if sample.estimated_send_rate.is_some() {
 			let producer = bandwidth::Producer::new();
+			let _ = producer.set(sample.estimated_send_rate);
 			(Some(producer.weak()), Some(producer))
 		} else {
 			(None, None)
@@ -444,6 +454,7 @@ impl Session {
 			sampled: None,
 			mode: SamplerMode::Idle,
 			drain: Drain::Idle,
+			auth: auth.clone(),
 		};
 
 		let session = Self {
@@ -455,8 +466,8 @@ impl Session {
 			send_bandwidth,
 			recv_bandwidth,
 			bandwidth,
-			goaway: Arc::new(goaway),
-			auth,
+			goaway,
+			auth: auth.handle().clone(),
 		};
 		let driver = crate::Driver::new(
 			runtime.clone(),
@@ -507,6 +518,9 @@ pub(crate) struct Supervisor {
 	drain: Drain,
 	/// The transport's wire counters, registered under the session's root; dropping records the last reading.
 	wire: Option<crate::stats::Wire>,
+	/// This session's side of its auth handle, closed before the end is published so a
+	/// replacement session built on the same handle never finds this one still active.
+	auth: auth::Link,
 }
 
 /// A [`Session::close`] waiting for the protocol to deliver what it queued.
@@ -531,6 +545,20 @@ enum SamplerMode {
 }
 
 impl Supervisor {
+	pub(crate) fn panicked(&mut self, error: Error) {
+		self.session
+			.closing()
+			.local
+			.store(true, std::sync::atomic::Ordering::Relaxed);
+		if let Ok(mut closed) = self.closed.write() {
+			*closed = Some(Ended {
+				err: error.clone(),
+				drain: Some(Err(error.clone())),
+			});
+		}
+		let code = self.version.session_code(&SessionError::Internal);
+		self.session.abort(&error, code, "session driver panicked");
+	}
 	const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 	pub(crate) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
@@ -560,6 +588,7 @@ impl Supervisor {
 				SessionError::Cancel => Error::Cancel,
 				_ => err,
 			};
+			self.auth.close(err.clone());
 			self.context.end(&err);
 			if let Ok(mut closed) = self.closed.write() {
 				*closed = Some(Ended { err, drain });

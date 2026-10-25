@@ -55,6 +55,9 @@ export class Source {
 	};
 	/** The derived outputs, read-only. */
 	readonly out = readonlys(this.#out);
+	#pending = new Signal(false);
+	/** Whether rendition support is still being resolved. @internal */
+	readonly pending: Getter<boolean> = this.#pending;
 
 	#signals = new Effect();
 
@@ -85,25 +88,30 @@ export class Source {
 		const supported = effect.get(this.in.supported);
 		if (!supported) return;
 
+		effect.set(this.#pending, true, false);
 		effect.spawn(async () => {
-			const available: Record<string, Catalog.AudioConfig> = {};
+			try {
+				const available: Record<string, Catalog.AudioConfig> = {};
 
-			for (const [name, config] of Object.entries(renditions)) {
-				// `supported` comes from the consumer, so we cannot assume it ever settles. A rerun
-				// waits for the tasks it spawned, so an unraced probe would hold the next run shut.
-				const isSupported = await effect.race(supported(config));
+				for (const [name, config] of Object.entries(renditions)) {
+					// `supported` comes from the consumer, so we cannot assume it ever settles. A rerun
+					// waits for the tasks it spawned, so an unraced probe would hold the next run shut.
+					const isSupported = await effect.race(supported(config));
 
-				// Torn down: stop probing and publish nothing, since the rerun redoes this.
-				if (effect.abort.aborted) return;
+					// Torn down: stop probing and publish nothing, since the rerun redoes this.
+					if (effect.abort.aborted) return;
 
-				if (isSupported) available[name] = config;
+					if (isSupported) available[name] = config;
+				}
+
+				if (Object.keys(available).length === 0 && Object.keys(renditions).length > 0) {
+					console.warn("no supported audio renditions found:", renditions);
+				}
+
+				this.#out.available.set(available);
+			} finally {
+				this.#pending.set(false);
 			}
-
-			if (Object.keys(available).length === 0 && Object.keys(renditions).length > 0) {
-				console.warn("no supported audio renditions found:", renditions);
-			}
-
-			this.#out.available.set(available);
 		});
 	}
 

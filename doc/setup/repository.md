@@ -18,6 +18,7 @@ wrap the Rust core. [Layers](/lib/layers) maps the binding namespaces.
 | Working on | Start here | Orientation |
 | --- | --- | --- |
 | Broadcast discovery, subscriptions, caching, groups, frames | [`rs/moq-net`](https://github.com/moq-dev/moq/tree/main/rs/moq-net), [`js/net`](https://github.com/moq-dev/moq/tree/main/js/net) | [moq-lite](/concept/moq-lite) |
+| Congestion controllers and controller tests | [`rs/moq-congestion`](https://github.com/moq-dev/moq/tree/main/rs/moq-congestion) | [Transport](/concept/transport) |
 | Connecting, listening, TLS, transport fallback | [`rs/moq-tokio`](https://github.com/moq-dev/moq/tree/main/rs/moq-tokio), [`js/net/src/connection`](https://github.com/moq-dev/moq/tree/main/js/net/src/connection) | [Transport](/concept/transport) |
 | Relay routing, clustering, HTTP, configuration | [`rs/moq-relay`](https://github.com/moq-dev/moq/tree/main/rs/moq-relay) | [Relay](/bin/relay/) |
 | Authorization and path permissions | [`rs/moq-auth`](https://github.com/moq-dev/moq/tree/main/rs/moq-auth), [`js/auth`](https://github.com/moq-dev/moq/tree/main/js/auth) | [Authentication](/bin/relay/auth) |

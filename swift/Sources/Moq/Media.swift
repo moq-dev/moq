@@ -91,6 +91,12 @@ public enum Media {
         public func setSection(name: String, json: String) throws { try ffi.setSection(name: name, json: json) }
         /// Remove an application catalog section if present.
         public func removeSection(name: String) throws { try ffi.removeSection(name: name) }
+        /// Finish the catalog, which ends the broadcast's content.
+        ///
+        /// Finish every track first. The broadcast stays announced and keeps serving its finished
+        /// tracks to late subscribers until its `close()` takes it offline; how long to keep it up
+        /// is yours to decide.
+        public func finish() throws { try ffi.finish() }
     }
 
     /// Read side of a broadcast's catalog. Iterating yields catalog updates as the

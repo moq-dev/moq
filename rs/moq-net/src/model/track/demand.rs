@@ -9,7 +9,7 @@ use std::{
 	time::Duration,
 };
 
-use super::{Order, Sequence, Subscription, TrackState, clamp_combined};
+use super::{Order, Subscription, TrackState, clamp_combined};
 
 mod ranges;
 use ranges::Ranges;
@@ -18,6 +18,7 @@ use ranges::Ranges;
 pub(super) struct Subscriptions {
 	count: usize,
 	priority: BTreeMap<i8, usize>,
+	// Keyed by budget, so `None` counts as the widest of all.
 	max_delay: BTreeMap<Duration, usize>,
 	ranges: Ranges,
 	descending: usize,
@@ -25,14 +26,16 @@ pub(super) struct Subscriptions {
 	/// [`super::Demand::wanted`].
 	wanted: u64,
 	/// A join over the track's refresh ratio asked for a group past every sequence written,
-	/// and no such group has landed yet. Read against the namespace rather than stored as a
-	/// number, so a datagram taking the next sequence can never leave the ask behind.
+	/// and no such group has landed yet. Read against `next` rather than stored as a number,
+	/// so a datagram taking the next sequence can never leave the ask behind.
 	refresh: bool,
+	/// One past the highest sequence written, which a pending refresh asks for.
+	next: u64,
 	waiters: kio::WaiterList,
 }
 
 /// Everything the aggregate holds besides its ranges.
-type Scalars = (i8, Duration, Order);
+type Scalars = (i8, Option<Duration>, Order);
 
 impl Subscriptions {
 	pub(super) fn combined(&self) -> Option<Subscription> {
@@ -56,7 +59,7 @@ impl Subscriptions {
 		(self.count != 0).then(|| {
 			(
 				*self.priority.last_key_value().unwrap().0,
-				*self.max_delay.last_key_value().unwrap().0,
+				Some(*self.max_delay.last_key_value().unwrap().0).filter(|budget| *budget != Duration::MAX),
 				if self.descending == 0 {
 					Order::Ascending
 				} else {
@@ -83,30 +86,18 @@ impl Subscriptions {
 	}
 
 	/// The lowest group consumers want, whether or not anyone consumes now: the next free
-	/// sequence of `namespace` while a refresh is pending.
-	///
-	/// Read under this lock, so a write that moves the namespace after it wakes the waiters
-	/// armed here (see [`Self::wrote`]).
-	pub(super) fn wanted(&self, namespace: &Sequence) -> u64 {
+	/// sequence while a refresh is pending.
+	pub(super) fn wanted(&self) -> u64 {
 		match self.refresh {
-			true => namespace.next().max(self.wanted),
+			true => self.next.max(self.wanted),
 			false => self.wanted,
 		}
 	}
 
 	/// [`Self::wanted`], arming `waiter` for its next change.
-	pub(super) fn poll_wanted(&mut self, namespace: &Sequence, waiter: &kio::Waiter) -> u64 {
+	pub(super) fn poll_wanted(&mut self, waiter: &kio::Waiter) -> u64 {
 		waiter.register(&mut self.waiters);
-		self.wanted(namespace)
-	}
-
-	/// Raise the floor of [`Self::wanted`] to `group`, taking the wakes only when it moved.
-	pub(super) fn want(&mut self, group: u64) -> kio::WaiterList {
-		if group <= self.wanted {
-			return Default::default();
-		}
-		self.wanted = group;
-		self.waiters.take()
+		self.wanted()
 	}
 
 	/// A join over the refresh ratio: ask for a group past every sequence written. Joins
@@ -118,10 +109,12 @@ impl Subscriptions {
 		self.waiters.take()
 	}
 
-	/// Sequence `sequence` was written at or past `next`, the namespace's next free sequence
-	/// before it. A group subscribers receive answers a pending refresh; anything else, such
-	/// as a datagram, moves the sequence it asks for.
-	pub(super) fn wrote(&mut self, sequence: u64, next: u64, answers: bool) -> kio::WaiterList {
+	/// Sequence `sequence` was written. One at or past the next free sequence moves it: a
+	/// group subscribers receive answers a pending refresh, and anything else, such as a
+	/// datagram, moves the sequence it asks for.
+	pub(super) fn wrote(&mut self, sequence: u64, answers: bool) -> kio::WaiterList {
+		let next = self.next;
+		self.next = next.max(sequence.saturating_add(1));
 		if !self.refresh || sequence < next {
 			return Default::default();
 		}
@@ -140,7 +133,7 @@ impl Subscriptions {
 		let moved = old.map(|old| &old.ranges) != new.map(|new| &new.ranges);
 		if let Some(new) = new {
 			add(&mut self.priority, new.priority);
-			add(&mut self.max_delay, new.max_delay);
+			add(&mut self.max_delay, new.budget());
 			if moved {
 				for range in &new.ranges {
 					reshaped |= self.ranges.add(*range);
@@ -151,7 +144,7 @@ impl Subscriptions {
 		}
 		if let Some(old) = old {
 			remove(&mut self.priority, old.priority);
-			remove(&mut self.max_delay, old.max_delay);
+			remove(&mut self.max_delay, old.budget());
 			if moved {
 				for range in &old.ranges {
 					reshaped |= self.ranges.remove(*range);
@@ -288,7 +281,7 @@ impl From<kio::Producer<Subscription>> for Preferences {
 #[cfg(test)]
 mod tests {
 	use super::super::super::subscription::Combined;
-	use super::super::{Anchor, Position, Range};
+	use super::super::{Anchor, Range};
 	use super::*;
 	use rand::{RngExt, SeedableRng};
 	use std::sync::atomic::{AtomicUsize, Ordering};
@@ -305,10 +298,7 @@ mod tests {
 			let anchor = |rng: &mut rand::rngs::StdRng| match rng.random_range(0..4) {
 				0 => Anchor::Relative(rng.random_range(0..3)),
 				1 => Anchor::Relative(u64::MAX),
-				_ => Anchor::Absolute(Position {
-					group: rng.random_range(0..8),
-					frame: rng.random_range(0..4),
-				}),
+				_ => Anchor::Absolute(rng.random_range(0..8)),
 			};
 			let ranges: Vec<Range> = (0..rng.random_range(0..3))
 				.map(|_| Range {
@@ -318,7 +308,7 @@ mod tests {
 				.collect();
 			let next = Subscription {
 				priority: rng.random_range(0..8),
-				max_delay: Duration::from_millis(rng.random_range(0..8)),
+				max_delay: Some(Duration::from_millis(rng.random_range(0..8))),
 				ranges,
 				order: if rng.random_bool(0.5) {
 					Order::Ascending

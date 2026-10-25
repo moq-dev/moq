@@ -79,17 +79,18 @@ export const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve
  * Serve the prebuilt page on localhost, a secure context so WebTransport and WebCodecs are enabled.
  *
  * `interop.sh` builds the page into its run directory, so a concurrent run's rebuild cannot empty
- * it mid-load; outside a harness run, it is vite's default `dist/`.
+ * it mid-load; outside a harness run, it is vite's default `dist/`. `files` serves each path from a
+ * file of its own.
  */
-export function serve(): { origin: string; stop: () => void } {
-	const run = process.env.MOQ_TEST_RUN;
+export function serve(files: Record<string, string> = {}): { origin: string; stop: () => void } {
+	const run = process.env.HARNESS_RUN_DIR;
 	const root = run ? join(run, "js-dist") : join(new URL(".", import.meta.url).pathname, "dist");
 	const server = Bun.serve({
 		port: 0,
 		async fetch(req) {
 			let path = new URL(req.url).pathname;
 			if (path === "/") path = "/index.html";
-			const file = Bun.file(join(root, path));
+			const file = Bun.file(files[path] ?? join(root, path));
 			if (await file.exists()) return new Response(file);
 			return new Response(Bun.file(join(root, "index.html"))); // SPA fallback
 		},
@@ -141,18 +142,18 @@ const traces: Array<{ context: BrowserContext; name: string }> = [];
 /**
  * Start a Playwright trace on the page's context, before it navigates.
  *
- * A no-op outside a harness run: without `MOQ_TEST_RUN` there is no directory to write to, and a
+ * A no-op outside a harness run: without `HARNESS_RUN_DIR` there is no directory to write to, and a
  * trace only survives a failure anyway. See {@link finishTraces}.
  */
 export async function startTrace(page: Page, name: string): Promise<void> {
-	if (!process.env.MOQ_TEST_RUN) return;
+	if (!process.env.HARNESS_RUN_DIR) return;
 	await page.context().tracing.start({ screenshots: true, snapshots: true });
 	traces.push({ context: page.context(), name: `${name}-${randomUUID()}` });
 }
 
 /** Save a trace per started context into the run directory when `failed`, and discard it otherwise. */
 export async function finishTraces(failed: boolean): Promise<void> {
-	const run = process.env.MOQ_TEST_RUN;
+	const run = process.env.HARNESS_RUN_DIR;
 	for (const { context, name } of traces) {
 		try {
 			// `path` is what writes the trace; without it, stop only frees the buffers.

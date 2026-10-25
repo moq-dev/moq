@@ -7,11 +7,16 @@ import { ConnectTimeout, SessionCode, SessionError, StreamCode, toTransport } fr
 import { Route } from "../hop.ts";
 import { ALPN as IetfALPN } from "../ietf/version.ts";
 import * as Lite from "../lite/index.ts";
-import { createMockTransportPair } from "../mock.ts";
+import { createMockTransportPair, type MockTransport, textFrame } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
+import { Stream } from "../stream.ts";
+import { Timescale } from "../time.ts";
+import { nextTask } from "../util/yield.ts";
 import { wireOf } from "../wire.ts";
+import type { Established } from "./established.ts";
 import { type AcceptProps, accept as acceptSession } from "./index.ts";
+import { Connection, resetShared } from "./pool.ts";
 import { pumpAnnounced, Redirects, Reload, type ReloadProps } from "./reload.ts";
 
 function accept(transport: WebTransport, url: URL, props: Omit<AcceptProps, "transport" | "url"> = {}) {
@@ -246,6 +251,53 @@ test("an announced request follows the reconnect on the same handle", async () =
 	}
 });
 
+test("an ended auth handle gives up instead of retrying", async () => {
+	const original = globalThis.WebTransport;
+	const url = new URL("https://example.com/");
+	const servers: Promise<{ abort(): void }>[] = [];
+	const stub = function StubWebTransport() {
+		const pair = createMockTransportPair(Lite.ALPN_06);
+		servers.push(accept(pair.server, url));
+		return pair.client;
+	};
+	globalThis.WebTransport = stub as unknown as typeof WebTransport;
+	const clock = new Manual();
+	const installed = clock.install();
+	// Bounded by task turns rather than wall time, advancing the clock a millisecond per turn
+	// so a reconnect, if the loop tried one, would be dialed well within the bound.
+	const until = async (done: () => boolean) => {
+		for (let i = 0; i < 100 && !done(); i++) {
+			await nextTask();
+			await clock.advance(Nano.fromMilli(Milli(1)));
+		}
+		expect(done()).toBe(true);
+	};
+
+	// An unbounded retry window, so only the ended handle can stop the loop.
+	const reload = new Reload({
+		enabled: true,
+		url,
+		websocket: { enabled: false },
+		delay: { initial: Milli(1), multiplier: 2, max: Milli(1), timeout: Milli(0) },
+	});
+	const warned = spyOn(console, "warn").mockImplementation(() => {});
+	try {
+		await until(() => reload.established.peek() !== undefined);
+		const aborted = new Error("auth handle aborted");
+		reload.auth.abort(aborted);
+		(await servers[0])?.abort();
+
+		await until(() => reload.error.peek() !== undefined);
+		expect(reload.error.peek()).toBe(aborted);
+		expect(servers.length).toBe(1);
+	} finally {
+		warned.mockRestore();
+		reload.close();
+		installed.close();
+		globalThis.WebTransport = original;
+	}
+});
+
 test("a page hide after give-up does not retry the refused URL", async () => {
 	const original = globalThis.WebTransport;
 	const previousWindow = globalThis.window;
@@ -297,7 +349,7 @@ test("a page hide after give-up does not retry the refused URL", async () => {
 	}
 });
 
-for (const code of [SessionCode.Unauthorized, SessionCode.Expired]) {
+for (const code of [SessionCode.Unauthorized, SessionCode.MalformedAuthToken, SessionCode.Expired]) {
 	test(`a session rejected with ${code} surfaces the code and stops retrying`, async () => {
 		const original = globalThis.WebTransport;
 		const url = new URL("https://example.com/");
@@ -497,6 +549,379 @@ test("origins span reconnects: local re-announces, remote re-populates", async (
 		reload.close();
 		publishOrigin.close();
 		subscribeOrigin.close();
+		globalThis.WebTransport = original;
+	}
+});
+
+// Once enabled, hold the FIN acknowledgement of every group stream `transport` opens, after the
+// bytes and FIN reached the peer: a final group whose tail is still in flight.
+function holdFins(transport: MockTransport) {
+	const reached = Promise.withResolvers<void>();
+	const release = Promise.withResolvers<void>();
+	let enabled = false;
+	const create = transport.createUnidirectionalStream.bind(transport);
+	transport.createUnidirectionalStream = async (options) => {
+		const writer = (await create(options)).getWriter();
+		return new WritableStream<Uint8Array>({
+			write: (bytes) => writer.write(bytes),
+			abort: (reason) => writer.abort(reason),
+			async close() {
+				await writer.close();
+				if (!enabled) return;
+				reached.resolve();
+				await release.promise;
+			},
+		});
+	};
+	return {
+		reached: reached.promise,
+		enable: () => {
+			enabled = true;
+		},
+		release: release.resolve,
+	};
+}
+
+// Releasing the last handle is ordinary teardown, so a track that finished just before keeps its
+// final group, whether the session is serving or a predecessor still draining after a GOAWAY.
+// A page going away aborts: nothing would run to finish the drain. `linger` is how long after
+// `end` the session starts closing: the pool's two-second window, or at once for a private loop.
+// `hide` then sends the page away mid-drain, after the loop itself has closed.
+const teardowns = {
+	"release of the last handle": {
+		drains: true,
+		goaway: false,
+		linger: Milli(2000),
+		hide: false,
+		end: (handle: Connection) => handle.close(),
+	},
+	disable: {
+		drains: true,
+		goaway: false,
+		linger: Milli(2000),
+		hide: false,
+		end: (handle: Connection) => handle.enabled.set(false),
+	},
+	"release after a GOAWAY": {
+		drains: true,
+		goaway: true,
+		linger: Milli(0),
+		hide: false,
+		end: (handle: Connection) => handle.close(),
+	},
+	pagehide: {
+		drains: false,
+		goaway: false,
+		linger: Milli(0),
+		hide: false,
+		end: (_: Connection, win: EventTarget) => win.dispatchEvent(new Event("pagehide")),
+	},
+	"pagehide during a release's drain": {
+		drains: false,
+		goaway: false,
+		linger: Milli(2000),
+		hide: true,
+		end: (handle: Connection) => handle.close(),
+	},
+};
+
+for (const [name, teardown] of Object.entries(teardowns)) {
+	test(`teardown by ${name} ${teardown.drains ? "drains" : "aborts"} the session`, async () => {
+		const original = globalThis.WebTransport;
+		const previousWindow = globalThis.window;
+		const previousDocument = globalThis.document;
+		const win = new EventTarget();
+		const doc = Object.assign(new EventTarget(), { hidden: false });
+		Object.assign(globalThis, { window: win, document: doc });
+		// The linger and close deadline pass only when the test advances them, so the held FIN
+		// can't race the deadline.
+		const clock = new Manual();
+		const installed = clock.install();
+
+		// Only the first session matters: the subscription lives on it.
+		const url = new URL("https://example.com/");
+		const dials: { server: Promise<Established>; quic: WebTransport }[] = [];
+		const fin = { hold: undefined as ReturnType<typeof holdFins> | undefined, closed: false };
+		const stub = function StubWebTransport() {
+			const pair = createMockTransportPair(Lite.ALPN_06);
+			if (dials.length === 0) {
+				fin.hold = holdFins(pair.client);
+				void pair.client.closed.then(() => {
+					fin.closed = true;
+				});
+			}
+			dials.push({ server: accept(pair.server, url), quic: pair.server });
+			return pair.client;
+		};
+		globalThis.WebTransport = stub as unknown as typeof WebTransport;
+
+		// GOAWAY tuning takes a private loop; the rest share the pool, closing when the linger ends.
+		const handle = new Connection(
+			teardown.goaway ? { url, delay: { initial: Milli(0) }, goaway: { handover: Milli(60_000) } } : { url },
+		);
+		await waitUntil(() => handle.origin.peek() !== undefined);
+		const origin = handle.origin.peek();
+		if (!origin) throw new Error("no origin");
+		const broadcast = origin.createBroadcast(Path.from("room"));
+		broadcast.announce();
+		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+		await waitUntil(() => dials.length > 0);
+		const first = dials[0];
+		if (!first) throw new Error("no first dial");
+		const server = await first.server;
+		const remote = wireOf(server).consume(Path.from("room"));
+		const track = remote.track("video").subscribe().ordered();
+
+		try {
+			producer.appendGroup().writeFrame(textFrame("first"));
+			expect(await (await track.nextGroup())?.readString()).toBe("first");
+
+			if (teardown.goaway) {
+				const stream = await Stream.open(first.quic, { version: Lite.Version.DRAFT_06 });
+				await stream.writer.u53(Lite.StreamId.Goaway);
+				await new Lite.Goaway("").encode(stream.writer, Lite.Version.DRAFT_06);
+				await waitUntil(() => dials.length === 2 && handle.status.peek() === "connected");
+			}
+
+			fin.hold?.enable();
+			const last = producer.appendGroup();
+			last.writeFrame(textFrame("last"));
+			last.close();
+			producer.close();
+			teardown.end(handle, win);
+			await clock.advance(Nano.fromMilli(teardown.linger));
+			if (teardown.hide) win.dispatchEvent(new Event("pagehide"));
+
+			if (teardown.drains) {
+				expect(await (await track.nextGroup())?.readString()).toBe("last");
+				await fin.hold?.reached;
+				// Just short of the close deadline, the session still waits for the FIN.
+				await clock.advance(Nano.fromMilli(Milli(999)));
+				expect(fin.closed).toBe(false);
+				fin.hold?.release();
+			}
+			await waitUntil(() => fin.closed);
+		} finally {
+			fin.hold?.release();
+			track.close();
+			remote.close();
+			handle.close();
+			resetShared();
+			for (const dial of dials) (await dial.server).abort();
+			broadcast.close();
+			installed.close();
+			globalThis.WebTransport = original;
+			Object.assign(globalThis, { window: previousWindow, document: previousDocument });
+		}
+	});
+}
+
+// A live track holds the old session's close until the deadline. The auth handle backs one
+// active session at a time, so the closing one must give it up for the replacement to dial.
+// The page going away mid-drain aborts it too, since nothing would run to finish it.
+const drainEnds = {
+	"the close deadline": (clock: Manual, _: EventTarget) => clock.advance(Nano.fromMilli(Milli(1000))),
+	pagehide: async (_: Manual, win: EventTarget) => {
+		win.dispatchEvent(new Event("pagehide"));
+	},
+};
+
+for (const [name, drainEnd] of Object.entries(drainEnds)) {
+	test(`a URL change connects the replacement while the old session drains until ${name}`, async () => {
+		const original = globalThis.WebTransport;
+		const previousWindow = globalThis.window;
+		const previousDocument = globalThis.document;
+		const win = new EventTarget();
+		Object.assign(globalThis, { window: win, document: Object.assign(new EventTarget(), { hidden: false }) });
+		const clock = new Manual();
+		const installed = clock.install();
+		const dials: { server: Promise<Established>; closed: boolean }[] = [];
+		const stub = function StubWebTransport(dialed: string | URL) {
+			const pair = createMockTransportPair(Lite.ALPN_06);
+			const dial = { server: accept(pair.server, new URL(dialed)), closed: false };
+			void pair.client.closed.then(() => {
+				dial.closed = true;
+			});
+			dials.push(dial);
+			return pair.client;
+		};
+		globalThis.WebTransport = stub as unknown as typeof WebTransport;
+
+		const origin = new OriginProducer();
+		const broadcast = origin.createBroadcast(Path.from("room"));
+		broadcast.announce();
+		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+		const reload = new Reload({
+			url: new URL("https://example.com/a"),
+			websocket: { enabled: false },
+			publish: origin.consume(),
+		});
+
+		await waitUntil(() => dials.length > 0);
+		const first = dials[0];
+		if (!first) throw new Error("no first dial");
+		const remote = wireOf(await first.server).consume(Path.from("room"));
+		const track = remote.track("video").subscribe().ordered();
+		try {
+			// The group stays open, so the old session's drain waits out its deadline.
+			producer.appendGroup().writeFrame(textFrame("live"));
+			expect(await (await track.nextGroup())?.readString()).toBe("live");
+
+			reload.url.set(new URL("https://example.com/b"));
+			await waitUntil(() => dials.length === 2 && reload.status.peek() === "connected");
+			expect(reload.error.peek()).toBeUndefined();
+			expect(dials[0]?.closed).toBe(false);
+
+			await drainEnd(clock, win);
+			await waitUntil(() => dials[0]?.closed === true);
+		} finally {
+			track.close();
+			remote.close();
+			reload.close();
+			for (const dial of dials) (await dial.server).abort();
+			producer.close();
+			broadcast.close();
+			origin.close();
+			installed.close();
+			globalThis.WebTransport = original;
+			Object.assign(globalThis, { window: previousWindow, document: previousDocument });
+		}
+	});
+}
+
+// Retiring a GOAWAY predecessor early drains it, but never past its handover window.
+test("a retired GOAWAY predecessor still closes by its handover cap", async () => {
+	const original = globalThis.WebTransport;
+	const clock = new Manual();
+	const installed = clock.install();
+	const dials: { server: Promise<Established>; quic: WebTransport; closed: boolean }[] = [];
+	const stub = function StubWebTransport(dialed: string | URL) {
+		const pair = createMockTransportPair(Lite.ALPN_06);
+		const dial = { server: accept(pair.server, new URL(dialed)), quic: pair.server, closed: false };
+		void pair.client.closed.then(() => {
+			dial.closed = true;
+		});
+		dials.push(dial);
+		return pair.client;
+	};
+	globalThis.WebTransport = stub as unknown as typeof WebTransport;
+
+	const origin = new OriginProducer();
+	const broadcast = origin.createBroadcast(Path.from("room"));
+	broadcast.announce();
+	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const reload = new Reload({
+		url: new URL("https://example.com/"),
+		websocket: { enabled: false },
+		publish: origin.consume(),
+		delay: { initial: Milli(0) },
+		goaway: { handover: Milli(100) },
+	});
+
+	await waitUntil(() => dials.length > 0);
+	const first = dials[0];
+	if (!first) throw new Error("no first dial");
+	const remote = wireOf(await first.server).consume(Path.from("room"));
+	const track = remote.track("video").subscribe().ordered();
+	try {
+		// The group stays open, so a graceful close of the predecessor would wait out its deadline.
+		producer.appendGroup().writeFrame(textFrame("live"));
+		expect(await (await track.nextGroup())?.readString()).toBe("live");
+
+		const stream = await Stream.open(first.quic, { version: Lite.Version.DRAFT_06 });
+		await stream.writer.u53(Lite.StreamId.Goaway);
+		await new Lite.Goaway("").encode(stream.writer, Lite.Version.DRAFT_06);
+		await waitUntil(() => dials.length === 2 && reload.status.peek() === "connected");
+
+		await clock.advance(Nano.fromMilli(Milli(90)));
+		reload.close();
+		await clock.advance(Nano.fromMilli(Milli(9)));
+		expect(first.closed).toBe(false);
+		await clock.advance(Nano.fromMilli(Milli(1)));
+		await waitUntil(() => first.closed);
+	} finally {
+		track.close();
+		remote.close();
+		reload.close();
+		for (const dial of dials) (await dial.server).abort();
+		producer.close();
+		broadcast.close();
+		origin.close();
+		installed.close();
+		globalThis.WebTransport = original;
+	}
+});
+
+// A publication only a token's grant covers keeps that grant while the session drains, so
+// closing the loop ends the tokens after the drain rather than cutting the final group.
+test("closing the loop keeps the tokens until the session drains", async () => {
+	const original = globalThis.WebTransport;
+	const clock = new Manual();
+	const installed = clock.install();
+	const url = new URL("https://example.com/");
+	const dials: { server: Promise<Established>; quic: WebTransport }[] = [];
+	const fin = { hold: undefined as ReturnType<typeof holdFins> | undefined, closed: false };
+	const stub = function StubWebTransport() {
+		const pair = createMockTransportPair(Lite.ALPN_07_WIP);
+		fin.hold = holdFins(pair.client);
+		void pair.client.closed.then(() => {
+			fin.closed = true;
+		});
+		// The connection's own credential publishes nothing; the token publishes anything.
+		const server = accept(pair.server, url);
+		void server.then(async (session) => {
+			const requests = session.auth.requests();
+			for (;;) {
+				const request = await requests.next();
+				if (!request) break;
+				const token = new TextDecoder().decode(request.token);
+				request.accept({
+					publish: new Path.Patterns(token === "token" ? [Path.Pattern.all()] : []),
+					subscribe: new Path.Patterns(),
+				});
+			}
+		});
+		dials.push({ server, quic: pair.server });
+		return pair.client;
+	};
+	globalThis.WebTransport = stub as unknown as typeof WebTransport;
+
+	const origin = new OriginProducer();
+	const reload = new Reload({ url, websocket: { enabled: false }, publish: origin.consume() });
+	await reload.auth.add("token");
+	const broadcast = origin.createBroadcast(Path.from("room"));
+	broadcast.announce();
+	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const first = dials[0];
+	if (!first) throw new Error("no first dial");
+	const remote = wireOf(await first.server).consume(Path.from("room"));
+	const track = remote.track("video").subscribe().ordered();
+	try {
+		producer.appendGroup().writeFrame(textFrame("first"));
+		expect(await (await track.nextGroup())?.readString()).toBe("first");
+
+		fin.hold?.enable();
+		const last = producer.appendGroup();
+		last.writeFrame(textFrame("last"));
+		last.close();
+		producer.close();
+		reload.close();
+
+		expect(await (await track.nextGroup())?.readString()).toBe("last");
+		await fin.hold?.reached;
+		await clock.advance(Nano.fromMilli(Milli(999)));
+		expect(fin.closed).toBe(false);
+		fin.hold?.release();
+		await waitUntil(() => fin.closed);
+	} finally {
+		fin.hold?.release();
+		track.close();
+		remote.close();
+		reload.close();
+		for (const dial of dials) (await dial.server).abort();
+		broadcast.close();
+		origin.close();
+		installed.close();
 		globalThis.WebTransport = original;
 	}
 });

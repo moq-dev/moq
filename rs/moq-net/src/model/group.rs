@@ -1940,13 +1940,6 @@ impl Handle {
 		state.abort.is_none().then_some(state.offset)
 	}
 
-	/// Whether this copy still holds every committed frame below `end`, so a compressed
-	/// tail requested there can inflate against it. Sparse object IDs are not ordinals.
-	pub(super) fn holds_prefix(&self, end: u64) -> bool {
-		let state = self.state.read();
-		state.abort.is_none() && state.offset == 0 && !state.sparse() && state.committed as u64 >= end
-	}
-
 	/// One past the last frame committed to an unfinished group, when that is past its
 	/// first: where a replacement route resumes. `None` once the group is finished, or
 	/// while it holds nothing a replacement could continue.
@@ -2167,7 +2160,7 @@ impl Handle {
 	pub(crate) fn demand(&self) -> Demand {
 		Demand {
 			sequence: self.info.sequence,
-			state: DemandSource::Group(self.state.weak()),
+			state: self.state.weak(),
 		}
 	}
 
@@ -2183,41 +2176,25 @@ impl Handle {
 	}
 }
 
-/// A cloneable, watch-only handle to a group's readers or pending fetch callers.
+/// A cloneable, watch-only handle to a group's readers.
 ///
-/// An accepted or dropped request ends waits with [`Error::Dropped`]; a rejected request keeps
-/// its rejection reason.
+/// A finished or dropped group ends waits with [`Error::Dropped`]; an aborted one keeps
+/// its abort reason.
 #[derive(Clone)]
 pub struct Demand {
 	sequence: u64,
-	state: DemandSource,
-}
-
-#[derive(Clone)]
-enum DemandSource {
-	Group(kio::ProducerWeak<GroupState>),
-	Fetch(kio::ProducerWeak<track::FetchOutcome>),
+	state: kio::ProducerWeak<GroupState>,
 }
 
 impl Demand {
-	pub(super) fn fetch(sequence: u64, state: kio::ProducerWeak<track::FetchOutcome>) -> Self {
-		Self {
-			sequence,
-			state: DemandSource::Fetch(state),
-		}
-	}
-
 	/// The group sequence this handle watches.
 	pub fn sequence(&self) -> u64 {
 		self.sequence
 	}
 
-	/// Whether the group or fetch is open and has readers right now.
+	/// Whether the group is open and has readers right now.
 	pub fn is_used(&self) -> bool {
-		match &self.state {
-			DemandSource::Group(state) => !state.is_closed() && state.is_used(),
-			DemandSource::Fetch(state) => !state.is_closed() && state.is_used(),
-		}
+		!self.state.is_closed() && self.state.is_used()
 	}
 
 	/// Wait until at least one reader needs the group.
@@ -2234,38 +2211,23 @@ impl Demand {
 
 	/// Poll until at least one reader needs the group.
 	pub fn poll_used(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
-		match &self.state {
-			DemandSource::Group(state) => state.poll_used(waiter),
-			DemandSource::Fetch(state) => state.poll_used(waiter),
-		}
-		.map_err(|_| self.abort_reason())
+		self.state.poll_used(waiter).map_err(|_| self.abort_reason())
 	}
 
 	/// Poll until no reader needs the group.
 	pub fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
-		match &self.state {
-			DemandSource::Group(state) => state.poll_unused(waiter),
-			DemandSource::Fetch(state) => state.poll_unused(waiter),
-		}
-		.map_err(|_| self.abort_reason())
+		self.state.poll_unused(waiter).map_err(|_| self.abort_reason())
 	}
 
-	/// Wait until the group or fetch closes, returning its cause.
+	/// Wait until the group closes, returning its cause.
 	#[cfg(feature = "async")]
 	pub async fn closed(&self) -> Error {
-		match &self.state {
-			DemandSource::Group(state) => state.closed().await,
-			DemandSource::Fetch(state) => state.closed().await,
-		}
+		self.state.closed().await;
 		self.abort_reason()
 	}
 
 	fn abort_reason(&self) -> Error {
-		match &self.state {
-			DemandSource::Group(state) => state.read().abort.clone(),
-			DemandSource::Fetch(state) => state.read().rejected.clone(),
-		}
-		.unwrap_or(Error::Dropped)
+		self.state.read().abort.clone().unwrap_or(Error::Dropped)
 	}
 }
 
@@ -2535,12 +2497,6 @@ impl Consumer {
 	#[cfg(feature = "async")]
 	pub(crate) fn wire(&self) -> Option<Wire> {
 		self.cursor.state.read().wire().cloned()
-	}
-
-	/// Whether the group was relayed from moq-transport, whose Object IDs may not be its frame
-	/// ordinals.
-	pub(super) fn relayed(&self) -> bool {
-		self.cursor.state.read().wire().is_some()
 	}
 
 	/// Read a compressed group's stored DEFLATE slices instead of plain frames, with each
@@ -3222,15 +3178,14 @@ pub struct Fetch {
 
 	/// Index of the first frame to fetch within the group. Defaults to 0, the whole group.
 	///
-	/// Use this to fill a hole left by a route change: the group's head is already
-	/// cached locally and only the tail is missing.
+	/// Only a route change sets it, filling the hole after a head another route already
+	/// delivered. An application always fetches from a group's first frame, since a group is
+	/// the unit of decodability, and skips frames locally with [`Consumer::with_range`].
 	///
-	/// There is no matching end: a fetch always runs to the end of the group, and a
-	/// caller wanting less caps the returned consumer with [`Consumer::with_range`]. Stopping
-	/// the *fetch* short would put a group in the cache that is indistinguishable from a
-	/// complete one, so a later fetch of the whole group would resolve from it and come
-	/// up short.
-	pub frame_start: u64,
+	/// There is no matching end: stopping the *fetch* short would put a group in the cache
+	/// that is indistinguishable from a complete one, so a later fetch of the whole group
+	/// would resolve from it and come up short.
+	pub(crate) frame_start: u64,
 }
 
 impl Fetch {
@@ -3245,33 +3200,6 @@ impl Fetch {
 		self.max_delay = Some(max_delay);
 		self
 	}
-
-	/// Set the first frame to fetch, returning `self` for chaining.
-	pub fn with_frame_start(mut self, frame_start: u64) -> Self {
-		self.frame_start = frame_start;
-		self
-	}
-}
-
-/// A consumer's request for a single past group, handed to a handler via
-/// [`track::Dynamic::poll_requested_group`].
-///
-/// The handler fulfills it by calling [`Self::accept`], which inserts the group
-/// into the track cache (resolving every [`track::Consumer::fetch_group`] that joined the
-/// attempt) and returns a [`Producer`] to fill. A relay typically opens a wire
-/// FETCH and waits for the publisher to answer before accepting, so a group the
-/// publisher lacks is rejected rather than accepted and then aborted. The request
-/// carries its own producer handle, so it works the same whether or not the track
-/// has been accepted yet.
-pub struct Request {
-	pub(crate) state: kio::Producer<track::TrackState>,
-	pub(super) fetch: kio::Shared<track::FetchState>,
-	pub(super) sequence: u64,
-	pub(super) priority: i8,
-	pub(super) max_delay: Option<std::time::Duration>,
-	pub(super) frame_start: u64,
-	pub(crate) result: kio::Producer<track::FetchOutcome>,
-	pub(super) done: bool,
 }
 
 #[cfg(test)]

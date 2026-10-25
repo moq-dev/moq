@@ -206,7 +206,7 @@ This function may hide any track-shaped name the application wants a relay not t
 
 The nonce is a function of the name, so equal semantic names under one generation share one physical name, and relays deduplicate and cache requests for it.
 A publisher recovers the semantic name of a requested physical name by decoding it, opening the ciphertext under `name_key` with the leading 12 bytes as the nonce, and recomputing `nonce` from the result.
-A name that does not decode, fails to open, has a nonce that differs from the recomputed one, has noncanonical padding, or is not UTF-8 was not issued under the generation; the publisher MUST answer it as a missing track and MUST NOT retain state for it.
+A name that does not decode (`identity`), or that fails to open, has a nonce that differs from the recomputed one, has noncanonical padding, or is not UTF-8 (`authentication`), was not issued under the generation; the publisher MUST answer it as a missing track and MUST NOT retain state for it.
 The nonce check keeps one physical name per semantic name, so two tracks never share the payload keys that semantic name derives.
 
 AEAD keys are 16 bytes, one per semantic name and domain:
@@ -317,7 +317,8 @@ Typed failures:
 - `duplicate`: a receiver has already opened this datagram sequence inside its retained window. Operational, not a cryptographic event.
 
 Authentication failure on a grouped track MUST end that track with `authentication`.
-Authentication failure on a datagram MUST drop that datagram and emit `authentication`; the track continues.
+A datagram that fails to open with `identity`, `oversize`, or `authentication` MUST be dropped with that code; the track continues.
+An `exhausted` open instead fails the read.
 
 Grouped frames need no duplicate window: a transport delivers each frame of a group once, in order, at its index.
 Receivers SHOULD suppress datagram sequences they still retain; the window MUST be bounded, and 1024 sequences below the greatest opened is RECOMMENDED.
@@ -336,7 +337,7 @@ Each negative row specifies an `operation`, its inputs, and its expected typed e
 Non-finite frame inputs use the strings `NaN`, `Infinity`, and `-Infinity`; group inputs in identity tests are decimal strings.
 Implementations whose types cannot represent an invalid input MUST reject it at their input boundary.
 
-The file covers opaque path derivation, key derivation, physical naming, grouped frames, a datagram at the fixed budget, the same identity under two epochs, relocation across every identity dimension, tag failure, malformed physical names, identity bounds, and oversize plaintext.
+The file covers opaque path derivation, key derivation, physical naming and recovery on each side of the padding boundaries, grouped frames, a datagram at the fixed budget, the same identity under two epochs, relocation across every identity dimension, tag failure, malformed physical names, physical names that do not open (forged, from another epoch, sealed under a nonce other than their HMAC, noncanonically padded, or not UTF-8), identity bounds, and oversize plaintext.
 
 The shared verifier is stateless.
 It does not verify `reuse`, `exhausted`, `duplicate`, or failure propagation.
@@ -388,6 +389,7 @@ This document requests no registrations.
 - Keep semantic track names in the decrypted catalog; subscribers derive physical names from them.
 - Forbid applications from relying on group completeness, which is unauthenticated.
 - Derive physical track names by AES-128-GCM encryption of the padded semantic name under an HMAC-SHA-256 nonce, so a publisher recovers any requested name, and bind AEAD keys to the semantic name.
+- Drop a datagram that fails to open with its own `identity`, `oversize`, or `authentication` code; an `exhausted` open still fails the read.
 
 ## draft-lcurley-moq-e2ee-00
 {:numbered="false"}

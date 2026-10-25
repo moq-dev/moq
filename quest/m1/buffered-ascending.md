@@ -11,7 +11,7 @@ sorted. Live playback (`buffer` of zero) stays newest-first.
 
 Not here: the protocol's `Group Order` (landed in
 [moq-dev/moq#5385](https://github.com/moq-dev/moq/pull/5385)), the buffered
-video poster ([Buffered video poster](/quest/m1/buffered-video-poster.md)), and
+video poster (landed in [moq-dev/moq#6609](https://github.com/moq-dev/moq/pull/6609)), and
 ordering for the Python or FFI audio consumers.
 
 ## Plan
@@ -78,6 +78,5 @@ Implementation:
 
 ## Related
 
-- [Buffered video poster](/quest/m1/buffered-video-poster.md) - buffered startup paints the first video frame and holds video until the shared floor
 - [Container reads drop backfill](/quest/m1/read-backfill.md) - the JS consumer stops delivering groups below its cursor
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - owns the wire's `Group Order` and the ordered cursor's floor
