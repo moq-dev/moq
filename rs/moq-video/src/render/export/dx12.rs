@@ -76,7 +76,10 @@ impl Export {
 			unsafe { CreateDXGIFactory1() }.map_err(|e| err(format!("CreateDXGIFactory1: {e}")))?;
 		let adapter: IDXGIAdapter =
 			unsafe { factory.EnumAdapterByLuid(luid) }.map_err(|e| err(format!("EnumAdapterByLuid: {e}")))?;
-		let d3d11 = d3d11::create_device(Some(&adapter))?;
+		// The conversion to NV12 runs on the video processor, which a software
+		// adapter (WARP) does not have.
+		let d3d11 = d3d11::create_device(Some(&adapter))
+			.map_err(|e| err(format!("its adapter cannot open a Direct3D11 video device: {e}")))?;
 
 		let export = Self {
 			device: device.clone(),
@@ -273,26 +276,40 @@ mod tests {
 	use crate::render::export::Route;
 	use crate::render::export::tests::{center, near, texture};
 
-	/// A Direct3D12 device, which every Windows host has, if only in software.
-	async fn dx12() -> (wgpu::Device, wgpu::Queue) {
+	/// A Direct3D12 device on the default adapter, or on the software one (WARP)
+	/// every Windows host has.
+	async fn dx12(software: bool) -> (wgpu::Device, wgpu::Queue) {
 		let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
 			backends: wgpu::Backends::DX12,
 			..wgpu::InstanceDescriptor::new_without_display_handle()
 		});
-		let adapter = instance
-			.request_adapter(&Default::default())
-			.await
-			.expect("a Direct3D12 adapter");
+		let options = wgpu::RequestAdapterOptions {
+			force_fallback_adapter: software,
+			..Default::default()
+		};
+		let adapter = instance.request_adapter(&options).await.expect("a Direct3D12 adapter");
 		crate::render::request_device(&adapter, &Default::default())
 			.await
 			.expect("a Direct3D12 device")
 	}
 
+	/// A software adapter has no video processor to convert with, so the GPU
+	/// route is refused at setup, saying why, rather than on the first copy.
+	#[tokio::test]
+	async fn a_software_adapter_is_refused_at_setup() {
+		let (device, queue) = dx12(true).await;
+		let Err(err) = Exporter::open(&device, &queue, Size::new(64, 48), Route::Gpu) else {
+			panic!("WARP exported shared textures");
+		};
+		assert!(err.to_string().contains("Direct3D11 video device"), "{err}");
+	}
+
 	/// The export reaches the encoder as an NV12 texture, never through the CPU,
 	/// and the picture survives the conversion.
 	#[tokio::test]
+	#[ignore = "needs a hardware Direct3D12 adapter; WARP has no Direct3D11 video device"]
 	async fn exports_an_nv12_texture() {
-		let (device, queue) = dx12().await;
+		let (device, queue) = dx12(false).await;
 		let size = Size::new(64, 48);
 		let mut exporter = Exporter::open(&device, &queue, size, Route::Gpu).unwrap();
 
@@ -329,7 +346,7 @@ mod tests {
 	#[tokio::test]
 	#[ignore = "needs a Media Foundation hardware H.264 encoder"]
 	async fn media_foundation_encodes_the_export_in_place() {
-		let (device, queue) = dx12().await;
+		let (device, queue) = dx12(false).await;
 		let size = Size::new(640, 480);
 		let mut config = crate::encode::Config::new(size.width, size.height, crate::FrameRate::new(30, 1).unwrap());
 		let (mut exporter, _) = Exporter::new(&device, &queue, &mut config).await.unwrap();
