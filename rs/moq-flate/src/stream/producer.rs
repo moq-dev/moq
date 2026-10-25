@@ -98,8 +98,8 @@ impl Inner {
 
 		// A closed track refuses every append, so say so before the budget: `GroupTooLarge` promises
 		// the log is still writable.
-		if let Poll::Ready(err) = self.track.poll_closed(&kio::Waiter::noop()) {
-			return Err(err.into());
+		if let Poll::Ready(outcome) = self.track.poll_closed(&kio::Waiter::noop()) {
+			return Err(outcome.err().unwrap_or(moq_net::Error::Closed).into());
 		}
 
 		// A timestamp that doesn't match the track is refused before anything changes: found by

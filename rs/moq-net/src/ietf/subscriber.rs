@@ -3780,7 +3780,7 @@ impl Subscriber {
 		}
 		let resume = loop {
 			let step = kio::wait(|waiter| {
-				if idle.track.poll_closed(waiter).is_ready() {
+				if idle.track.poll_aborted(waiter).is_ready() {
 					return Poll::Ready(Step::Closed);
 				}
 				if gate.poll_denied(waiter).is_ready() {
@@ -3994,7 +3994,7 @@ impl Subscriber {
 				let mut opening = this.session.clone();
 				let mut stream = kio::wait(|waiter| {
 					validity.check(waiter)?;
-					if let Poll::Ready(err) = track.poll_closed(waiter) {
+					if let Poll::Ready(err) = track.poll_aborted(waiter) {
 						return Poll::Ready(Err(err));
 					}
 					Stream::poll_open_request(&mut opening, this.version, &mut waiter.context())
@@ -4004,7 +4004,7 @@ impl Subscriber {
 				let mut timeout = crate::time::Deadline::after(&this.runtime, Control::REQUEST_ID_TIMEOUT);
 				let fetch_id = kio::wait(|waiter| {
 					validity.check(waiter)?;
-					if let Poll::Ready(err) = track.poll_closed(waiter) {
+					if let Poll::Ready(err) = track.poll_aborted(waiter) {
 						return Poll::Ready(Err(err));
 					}
 					this.control.poll_credit(waiter, &mut timeout)
@@ -4425,7 +4425,7 @@ impl Subscriber {
 				&mut reading
 			)));
 			kio::wait(|waiter| {
-				if let Poll::Ready(err) = track.poll_closed(waiter) {
+				if let Poll::Ready(err) = track.poll_aborted(waiter) {
 					return Poll::Ready(Err(err));
 				}
 				waiter.poll_future(open.as_mut())
@@ -4479,7 +4479,7 @@ impl Subscriber {
 		let mut ingest = GroupIngest::new(self, &group, timescale);
 		let res = {
 			kio::wait(|waiter| {
-				if let Poll::Ready(err) = track.poll_closed(waiter) {
+				if let Poll::Ready(err) = track.poll_aborted(waiter) {
 					return Poll::Ready(Err(err));
 				}
 				if let Poll::Ready(err) = observing.poll_aborted(waiter) {
@@ -4829,7 +4829,7 @@ impl Subscriber {
 	) -> Result<Option<group::Producer>, Error> {
 		reading.park();
 		let settled = kio::wait(|waiter| {
-			if let Poll::Ready(err) = track.poll_closed(waiter) {
+			if let Poll::Ready(err) = track.poll_aborted(waiter) {
 				return Poll::Ready(Err(err));
 			}
 
@@ -4995,7 +4995,7 @@ impl Subscriber {
 			let mut serving = track.clone();
 			let mut serve = std::pin::pin!(crate::util::sendable(self.run_fill(stream, &mut serving, timescale)));
 			kio::wait(|waiter| {
-				if let Poll::Ready(err) = track.poll_closed(waiter) {
+				if let Poll::Ready(err) = track.poll_aborted(waiter) {
 					return Poll::Ready(Err(err));
 				}
 				waiter.poll_future(serve.as_mut())
@@ -5492,7 +5492,7 @@ impl Subscriber {
 					Poll::Pending => {}
 				}
 			}
-			if let Poll::Ready(err) = track::TrackState::poll_closed(&owner, waiter) {
+			if let Poll::Ready(err) = track::TrackState::poll_aborted(&owner, waiter) {
 				// Completed history stays cached. Only this FETCH's unfinished group is
 				// ours to abort; closing a track never cascades into cached siblings.
 				if !matches!(*slot.read(), GroupFetch::Done) {
@@ -13629,7 +13629,7 @@ mod stitch_tests {
 			assert!(
 				matches!(
 					futures::FutureExt::now_or_never(h.track.closed()),
-					Some(Error::Unsupported)
+					Some(Err(Error::Unsupported))
 				),
 				"{objects:?}: the subscription must end with the refusal"
 			);
@@ -14631,7 +14631,7 @@ mod stitch_tests {
 		let mut stream = h.stream().await;
 		let res = h.subscriber.clone().recv_fill(&mut stream).await;
 		assert!(matches!(res, Err(Error::MalformedTrack)), "{res:?}");
-		assert!(matches!(h.track.closed().now_or_never(), Some(Error::MalformedTrack)));
+		assert!(matches!(h.track.closed().now_or_never(), Some(Err(Error::MalformedTrack))));
 	}
 
 	/// A subgroup object without a Timestamp on a timed track makes the whole track
@@ -14660,7 +14660,7 @@ mod stitch_tests {
 		let mut stream = h.stream().await;
 		let res = h.subscriber.clone().recv_group(&mut stream).await;
 		assert!(matches!(res, Err(Error::MalformedTrack)), "{res:?}");
-		assert!(matches!(h.track.closed().now_or_never(), Some(Error::MalformedTrack)));
+		assert!(matches!(h.track.closed().now_or_never(), Some(Err(Error::MalformedTrack))));
 	}
 
 	/// END_OF_TRACK after a group's last object ends the track right after that group.
@@ -14719,7 +14719,7 @@ mod stitch_tests {
 		assert!(matches!(res, Err(Error::ProtocolViolation)), "{res:?}");
 		assert!(matches!(
 			h.track.closed().now_or_never(),
-			Some(Error::ProtocolViolation)
+			Some(Err(Error::ProtocolViolation))
 		));
 	}
 
@@ -15403,7 +15403,7 @@ mod stitch_tests {
 		assert!(matches!(res, Err(Error::MalformedTrack)), "{res:?}");
 		assert!(matches!(
 			futures::FutureExt::now_or_never(track.closed()),
-			Some(Error::MalformedTrack)
+			Some(Err(Error::MalformedTrack))
 		));
 	}
 

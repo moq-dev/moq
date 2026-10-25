@@ -2553,12 +2553,36 @@ impl TrackState {
 		producer.write().map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
 	}
 
-	/// Observe a shared track's terminal cause without extending its publisher lifetime.
+	/// Observe a shared track's abort, or every producer leaving, without extending its
+	/// publisher lifetime. A finish alone does not end it: lower groups may still arrive.
 	// Sessions retain shared state while a FETCH owns its group writer.
-	pub(crate) fn poll_closed(producer: &kio::Producer<Self>, waiter: &kio::Waiter) -> Poll<Error> {
+	pub(crate) fn poll_aborted(producer: &kio::Producer<Self>, waiter: &kio::Waiter) -> Poll<Error> {
 		producer
 			.poll_closed(waiter)
 			.map(|()| producer.read().abort.clone().unwrap_or(Error::Dropped))
+	}
+
+	/// The track's outcome once final: `Ok` once its declared end is reached, which a later
+	/// abort keeps, or the abort error.
+	fn poll_outcome(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
+		if self.is_complete() {
+			Poll::Ready(Ok(()))
+		} else if let Some(err) = &self.abort {
+			Poll::Ready(Err(err.clone()))
+		} else {
+			self.watch_tail(waiter);
+			Poll::Pending
+		}
+	}
+
+	/// [`Self::poll_outcome`] read through a handle: the channel closing short of an
+	/// outcome (every producer gone without an end or abort) reads as [`Error::Dropped`].
+	fn settle(poll: Poll<std::result::Result<Result<()>, kio::Ref<'_, Self>>>) -> Poll<Result<()>> {
+		Poll::Ready(match ready!(poll) {
+			Ok(outcome) => outcome,
+			Err(closed) if closed.is_complete() => Ok(()),
+			Err(closed) => Err(closed.abort.clone().unwrap_or(Error::Dropped)),
+		})
 	}
 
 	/// Abort shared track state without extending its publisher lifetime.
@@ -3292,15 +3316,22 @@ impl Producer {
 		Ok(())
 	}
 
-	/// Block until the track is closed or aborted, returning the cause.
+	/// Block until the track's outcome is final: `Ok` once its declared end is reached, or
+	/// the abort error, or [`Error::Dropped`] once every producer left without either.
 	#[cfg(feature = "async")]
-	pub async fn closed(&self) -> Error {
+	pub async fn closed(&self) -> Result<()> {
 		kio::wait(|waiter| self.poll_closed(waiter)).await
 	}
 
-	/// Poll until the track is closed or aborted; ready with the cause.
-	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
-		TrackState::poll_closed(&self.state, waiter)
+	/// Poll until the track's outcome is final; see [`Self::closed`].
+	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
+		TrackState::settle(self.state.poll_ref(waiter, |state| state.poll_outcome(waiter)))
+	}
+
+	/// Poll until the track is aborted, or every producer left; ready with the cause.
+	// Sessions stop serving on an abort, but keep taking lower groups past a finish.
+	pub(crate) fn poll_aborted(&self, waiter: &kio::Waiter) -> Poll<Error> {
+		TrackState::poll_aborted(&self.state, waiter)
 	}
 
 	/// Return true if the track has been closed.
@@ -3942,11 +3973,17 @@ impl Demand {
 		Poll::Ready(Ok(next))
 	}
 
-	/// Block until the track is closed or aborted, returning the cause.
+	/// Block until the track's outcome is final; see [`Producer::closed`].
 	#[cfg(feature = "async")]
-	pub async fn closed(&self) -> Error {
-		self.state.closed().await;
-		self.abort_reason()
+	pub async fn closed(&self) -> Result<()> {
+		kio::wait(|waiter| {
+			TrackState::settle(
+				self.state
+					.consume_weak()
+					.poll(waiter, |state| state.poll_outcome(waiter)),
+			)
+		})
+		.await
 	}
 
 	/// The publisher's tie-break priority, as set in [`Info::priority`].
@@ -13043,6 +13080,44 @@ mod test {
 			Poll::Ready(Err(_))
 		));
 		assert_eq!(consumer.resume_position(), Some(Position { group: 1, frame: 2 }));
+	}
+
+	/// `closed` settles once the declared end is reached, not when it is declared, and an
+	/// abort after that keeps the clean outcome.
+	#[test]
+	#[cfg(feature = "async")]
+	fn closed_settles_on_a_reached_end() {
+		let waiter = kio::Waiter::noop();
+		let mut producer = track_producer("test", Info::timed());
+		let demand = producer.demand();
+		producer.append_group().unwrap().finish().unwrap();
+		producer.finish_at(Position::group(2)).unwrap();
+		assert!(producer.poll_closed(&waiter).is_pending(), "group 1 is still to come");
+		assert!(demand.closed().now_or_never().is_none());
+
+		producer.append_group().unwrap().finish().unwrap();
+		assert!(matches!(producer.poll_closed(&waiter), Poll::Ready(Ok(()))));
+		assert!(matches!(demand.closed().now_or_never(), Some(Ok(()))));
+		assert!(producer.poll_aborted(&waiter).is_pending(), "lower groups may still arrive");
+
+		producer.clone().abort(Error::Cancel).unwrap();
+		assert!(matches!(producer.poll_closed(&waiter), Poll::Ready(Ok(()))));
+		assert!(matches!(demand.closed().now_or_never(), Some(Ok(()))));
+	}
+
+	/// An abort short of the end, or the last producer leaving without one, is the outcome.
+	#[test]
+	#[cfg(feature = "async")]
+	fn closed_reports_an_unfinished_end() {
+		let waiter = kio::Waiter::noop();
+		let aborted = track_producer("aborted", Info::timed());
+		aborted.clone().abort(Error::Timeout).unwrap();
+		assert!(matches!(aborted.poll_closed(&waiter), Poll::Ready(Err(Error::Timeout))));
+
+		let dropped = track_producer("dropped", Info::timed());
+		let demand = dropped.demand();
+		drop(dropped);
+		assert!(matches!(demand.closed().now_or_never(), Some(Err(Error::Dropped))));
 	}
 
 	/// An abort short of the end keeps the groups that finished for a reader that has not

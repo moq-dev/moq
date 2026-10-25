@@ -980,7 +980,7 @@ impl GroupFill {
 
 	/// Poll until the track closes, with its abort error.
 	pub(crate) fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
-		TrackState::poll_closed(&self.inner.state, waiter)
+		TrackState::poll_aborted(&self.inner.state, waiter)
 	}
 
 	/// Whether a reader still waits on the fill.
