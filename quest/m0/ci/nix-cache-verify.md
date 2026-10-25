@@ -14,15 +14,12 @@ release tag ruleset, both buckets and the Worker, the `cache-write`
 Environment's tag policies and secrets, and the signing key). Check it with
 `curl https://nix.moq.dev/nix-cache-info`.
 
-Decided 2026-10-22 (maintainer):
-[#6040](https://github.com/moq-dev/moq/pull/6040) deleted `cache.yml`, so
-nothing pushes the dev shell to `nix.moq.dev`; only `release-nix.yml` pushes,
-on release tags. First measure one hosted Nightly job's dev-shell entry time,
-no earlier than 2026-11-20: `cache.yml`'s last push to `nix.moq.dev` ran
-2026-10-20, and those paths serve a warm entry until the 30-day expiry
-removes them. If it still compiles `uniffi-bindgen-go`, `uniffi-bindgen-cpp` and `quest`
-(the 12-14 minute baseline below), restore a dev-shell push. Otherwise this
-narrows to release-tag substitution and Cachix retirement.
+[#6588](https://github.com/moq-dev/moq/pull/6588) restored `cache.yml`
+after [#6040](https://github.com/moq-dev/moq/pull/6040) deleted it: every
+merge to `main` pushes the dev shell's build closure for x86 Linux, ARM Linux,
+and ARM macOS to `nix-ci-moq-dev` (`sh/gh/cache.sh`), and `release-nix.yml`
+pushes on release tags. So the dev-shell entry time can be measured on any
+scheduled Nightly now, and the expiry check below applies.
 
 Then confirm it, and record the numbers in the PR that closes this:
 

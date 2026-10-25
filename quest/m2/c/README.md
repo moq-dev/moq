@@ -1,0 +1,53 @@
+# Generated C bindings
+
+## Goal
+
+C programs use moq through a C API generated from moq-ffi, shipped as the
+`moq-c` package with CMake target `moq::c`, so C replaces the hand-written ABI
+and tracks every moq-ffi change the way Go, Swift, Kotlin, Python, Dart, and
+C++ already do. The C++ package (`cpp/moq`) and the OBS plugin are out of
+scope; they already sit on moq-ffi through the generated C++.
+
+## Plan
+
+Decided 2026-10-25 (maintainer): this line ships after the cut, once moq builds
+its bindings from rust2's UniFFI fork. The hand-written crate ships at the cut
+with [parity](/quest/m1/c/README.md) instead. The generator fix for the C name
+clash lands in rust2, not in a `kixelated/uniffi-bindgen-cpp` release.
+
+Decided earlier, still standing:
+
+- Async calls take a completion callback and user data and return a task;
+  freeing the task cancels the call. Callbacks run on moq's dispatcher thread
+  by default, or on the host's own loop through `moq_set_dispatcher` and
+  `moq_work_run`, the C form of `moq::set_executor`. Streams are repeated calls.
+- Errors, records, and names mirror the C++ package: calls return `moq_error *`
+  (NULL on success) with `moq_error_message()`, results come through
+  out-params, records are owned structs with `moq_<type>_free`, and names are
+  the uniffi names in snake case.
+- The header is C11: errors and data enums are a `tag` plus an anonymous union
+  (`err->protocol`). Infallible calls return their value directly, optional
+  scalars are `{has_value, value}`, each async function has its own callback
+  typedef, and unnamed variant fields are `v1`, as in C++.
+- The generated package takes over the `moq-c` name and `moq::c` target at
+  0.8.0, a minor bump over the hand-written 0.7.x.
+- Docs change inline: the consumer quest rewrites `doc/lib/c`, and its Impact
+  bullet carries the move for the package's `MIGRATE.md`.
+
+Generation drifted while unbuilt: the backend refuses the
+`#[uniffi(default = Some(0))]` that #6171 added in `rs/moq-ffi/src/consumer.rs`.
+Build the generated header in CI as soon as this line starts so drift fails
+loud.
+
+The line owns the pre-publication check: every `doc/lib/c` sample and the C
+interop client build and run against the built release archive.
+[Published archive proof](/quest/m2/release/c-publish.md) repeats it after
+publication; [old-crate retirement](/quest/m2/release/c-retire.md) follows.
+
+## Required
+
+- [Switch to rust2's UniFFI](/quest/m2/uniffi-fork.md) - the C generator comes from rust2's fork
+- [One C name per moq-ffi item](/quest/m2/c/name-clash.md) - the generator gives methods an explicit namespace, so `MoqAudioEncoder::finish` and `MoqAudioEncoderFinish` stop sharing `moq_audio_encoder_finish`
+- [moq-c package](/quest/m2/c/package.md) - the generated header ships as `moq-c` 0.8.0 with `moq::c`, pkg-config, and a release workflow
+- [C consumers](/quest/m2/c/consumers.md) - the C interop client and `doc/lib/c` samples move onto the generated API
+- [Async failure contract](/quest/m2/c/async-failure-contract.md) - a generated async call that fails early fires no callback, and one that started always delivers its terminal callback

@@ -18,6 +18,10 @@ BSD-licensed reference (EricssonResearch/scream) to check behavior.
 - SCReAM's queue delay comes from one-way delay samples; use the receive-ts
   forward delay with its basis offset removed (the spike's estimator), not
   absolute time.
+- Implement `Controller::probes` and report `probe_inflight` so moq-quic's
+  native probing still raises the estimate (decided 2026-10-25, maintainer;
+  see the [epic](/quest/m2/quic-realtime/README.md)). Measure that a stopped
+  rung recovers under it.
 - Unit tests drive the controller with mocked time, not wall clock.
 
 ## Required

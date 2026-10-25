@@ -8,7 +8,7 @@ The wire layer. Generic over the transport and media-agnostic: the relay never i
 - The cache is a performance optimization. A relay behaves the same warm or cold: report upstream state (e.g. the largest group), not what the cache happens to hold.
 - Sessions are caller-driven: `connect`/`accept` return `(Session, Driver)`. The `Driver` holds no `Session` clone, so spawning it never keeps the session alive.
 - Version matching: outside the crate branch on `is_lite()` / `is_ietf()` and `alpn()`; inside it match the draft enums. List old drafts explicitly and let the newest behavior be the fallthrough so future drafts fall forward.
-- Interop rule of thumb: respond to every feature a peer may use, but don't request new ones. Never emit or accept partial groups; a group starts at frame 0. Exception: moq-transport passthrough forwards a mid-group start as the publisher sent it.
+- Interop rule of thumb: respond to every feature a peer may use, but don't request new ones.
 - `Timestamp` is an instant with a scale, not a scalar. `checked_add`/`checked_sub` error on mismatched scales; `.convert()` first. `ZERO` is second-scale, so seed a max with `Option`, not `ZERO`. A track's timestamps never rewind. A local write refuses one, but some received tracks skip that check: a peer's rewind must never panic or cost unbounded work, yet results on that track may be wrong, so spend nothing on staying correct after one.
 
 # Testing

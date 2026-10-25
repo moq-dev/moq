@@ -10,9 +10,10 @@ served it are deleted once the generated `moq-c` publishes. The generated
 
 - #4288 renamed libmoq to `moq-c` (`rs/moq-c`); this quest deletes that
   hand-written crate.
-- Decided 2026-10-20 (maintainer): no final hand-written notice release,
-  because the hand-written `moq-c` never published to a registry; the
-  generated package is the first `moq-c` users install.
+- Decided 2026-10-25 (maintainer): the hand-written `moq-c` 0.7 ships at the
+  m1 cut, so it is a published package when the generated 0.8 replaces it.
+  Its `MIGRATE.md` history carries into the generated package. This replaces
+  the 2026-10-20 premise that it never published.
 - The code-free `rs/libmoq` stub left under the old name is
   [Retire the libmoq stub](/quest/m2/release/libmoq-retire.md)'s, separately.
 
@@ -20,7 +21,7 @@ served it are deleted once the generated `moq-c` publishes. The generated
 
 - [Generated C publication](/quest/m2/release/c-publish.md) - the replacement is available and verified
 
-- [C consumers](/quest/m1/c/consumers.md) - nothing in the repository still calls the hand-written ABI
+- [C consumers](/quest/m2/c/consumers.md) - nothing in the repository still calls the hand-written ABI
 
 ## Related
 

@@ -1,4 +1,4 @@
-# [S] Resolve the release audit findings
+# Resolve the release audit findings
 
 ## Goal
 
@@ -76,7 +76,9 @@ indexes, JS IETF timestamp changes, JS datagram range violations, and OBS
 reordered-frame timestamps and missing EOF output. Each owning quest records
 the reproduction's limits. JS reader and publisher datagram paths now enforce
 subscription bounds; the OBS defects moved to an m1 child (2026-10-22, maintainer).
-Go reservation disposal remains an investigation.
+Go reservation disposal was settled by
+[moq-dev/moq#6424](https://github.com/moq-dev/moq/pull/6424): `Update(0)`
+releases a reservation deterministically.
 No platform-wide binding parity, full OBS runtime, fuzzing campaign, or
 network-impairment performance result is implied by these checks.
 

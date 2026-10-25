@@ -41,9 +41,11 @@ inline. Keep generic proofs here and deployments and their operational
 acceptance with the downstream operator.
 
 Keep one owner per shared code area and order prerequisites before consumers
-(re-ranked in the 2026-10-20 audit: auth before cluster routing, the C line
-before the binding breaks, and every lite-07 prerequisite before those
-quests).
+(re-ranked in the 2026-10-20 audit: auth before cluster routing, and every
+lite-07 prerequisite before those quests).
+Decided 2026-10-25 (maintainer): the hand-written `moq-c` ships at this cut
+with parity to moq-ffi for every m1 binding feature, so each binding quest
+lands its C half there; the generated C line moves after the cut.
 The moq-transport passthrough fields remain crate-private: no public moq-net
 item exists only for moq-transport (maintainer, 2026-10-23).
 
@@ -87,7 +89,6 @@ force another major (`announce="never"`, the unused OBS outputs, binding
 durations, and the remaining web-transport-trait adapters) land before the
 cut, as do the small hostile-input and container fixes from the 2026-10-22
 security audit, and the stuck-window scan.
-Binding durations wait on Duration support in the generated C.
 
 Added 2026-10-24 (maintainer, from a moq-hls audit): import and export
 hardening (URL redaction, ranged responses, redirect bases, sequence
@@ -98,6 +99,7 @@ Catalog HLS field.
 ## Required
 
 - [moq-congestion](/quest/m1/congestion/README.md) - one QUIC congestion-control crate with a transport-independent trait, run by `moq-quic` and published for noq
+- [Resume checked against a model](/quest/m1/resume-model-test.md) - a randomized test checks every resumed reader against a one-track reference model in Rust and JS, and passes before the cut
 - [Release audit findings](/quest/m1/release-audit/README.md) - resolve newly identified resource, parser, playback, and interoperability risks before the cut
 - [Cancelled moq-transport requests stop](/quest/m1/ietf-request-cancel.md) - a cancelled request releases its state even when the peer withholds credit
 - [Empty segments refused](/quest/m1/empty-segments.md) - `room//cam` fails loud instead of naming `room/cam`
@@ -106,11 +108,12 @@ Catalog HLS field.
 - [No reused track names](/quest/m1/name-reuse.md) - no first-party publisher re-creates a finished track under its old name
 - [Routing guide](/quest/m1/routing-guide.md) - concepts and practical outbound federation setup
 - [One stuck check per packet](/quest/m1/quic-stuck-scan.md) - a RESET_STREAM storm into a shrunk window costs one stream scan per packet
-- [Generated C bindings](/quest/m1/c/README.md) - C generated from moq-ffi ships as `moq-c` 0.8.0 and replaces the hand-written libmoq
+- [moq-c at parity](/quest/m1/c/README.md) - the hand-written `moq-c` ships at the cut with every m1 binding feature moq-ffi gains
 - [Exact timestamps in every binding](/quest/m1/binding-timestamps.md) - bindings carry `{value, scale}` timestamps instead of lossy microseconds
 - [Binding durations](/quest/m1/ffi-durations.md) - moq-ffi takes and returns durations as a typed duration instead of `_us` integers, so wrappers stop converting by hand
 - [moq-transport passthrough](/quest/m1/ietf-extension/README.md) - object IDs, properties, end status, datagram objects, and unknown track properties survive moq-transport -> moq-relay (and a relay cluster) -> moq-transport; moxygen's moq-test sections 1-7 pass nightly under the relay conformance profile, except cases that use a subgroup other than 0
 - [Announcement takeover](/quest/m1/announce-takeover.md) - a new independent route explicitly continues instances served through its predecessor, with shared Rust/JS semantics and lite-07 wire
+- [The transport may start a group mid-way](/quest/m1/transport-frame-offsets.md) - a hop may deliver a group from frame k when the receiver holds the frames below, while applications still ask for whole groups
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - a lite-07 SUBSCRIBE asks for past and live ranges with absolute or relative ends, in either order, and replaces FETCH; merged ranges never starve a subscriber; relays fill misses by range, including over moq-transport
 - [Updates reach fills](/quest/m1/fill-updates.md) - a reader's new priority, delay, order, or earlier start reaches fills already queued or taken
 - [A widened max age re-offers cached groups](/quest/m1/resolved-demand.md) - a warm relay serves a reader with a wider max age the cached groups a cold relay would, with no wire change
@@ -143,7 +146,7 @@ Catalog HLS field.
 - [Lowered resume floor](/quest/m1/resume-floor.md) - lowering a resumed reader's floor re-offers groups only a released copy cached
 - [WebGPU on Safari](/quest/m1/webgpu-safari.md) - the WebGPU renderer is verified on Safari 26 for macOS and iOS
 - [JSON encoder options without a downcast](/quest/m1/json-encoder-options.md) - moq-mux's `json_snapshot` takes its `deltas` switch through a typed path any custom catalog entry can use, not an `Any` downcast
-- [CI housekeeping](/quest/m1/ci-housekeeping.md) - validate queue nextest at 24 threads and remove the actionlint queue ignore after its release
+- [CI housekeeping](/quest/m1/ci-housekeeping.md) - remove the actionlint queue ignore once a release after 1.7.12 reaches the dev shell
 - [Main is no slower than release](/quest/m1/release-perf/README.md) - every benchmark where main is slower than release is fixed or accepted with a reason, checked by a final paired run before the cut
 - [Drop announce="never"](/quest/m1/publish-announce-never.md) - `@moq/publish` offers only announce modes a watcher can reach
 - [Drop unused OBS outputs](/quest/m1/obs-output-variants.md) - the plugin registers only `moq_output`, so the broken audio-only variant is gone
@@ -165,7 +168,3 @@ Catalog HLS field.
 - [Unbounded groups](/quest/m1/unbounded-groups/README.md) - groups and frames lose their size caps; the cache sheds parts of a group under pressure and refills the holes in place
 - [Clean close reason](/quest/m1/clean-close-reason.md) - a session that closes on its own is never recorded as `Unauthorized` because its in-band credentials closed with it
 - [Metric-safe tiers](/quest/m1/metric-tier.md) - tiers are `[A-Za-z0-9._-]` paths refused where they are set, and every metric label value is escaped
-
-## Related
-
-- [A busy js/net serve yields](https://github.com/moq-dev/moq/pull/5289) - js/net's serve loop leaves the browser its event loop under a fast publisher, if it does not already

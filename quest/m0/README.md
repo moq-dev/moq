@@ -2,8 +2,8 @@
 
 ## Goal
 
-The work in flight now: fixes for the `release` line, CI cost, and the
-recurring audits.
+The work in flight now: a passing Nightly, fixes for the `release` line, the
+quest merge driver, and CI cost and latency.
 
 ## Plan
 
@@ -17,11 +17,6 @@ Routing: Wildcard landed in #4403, so a service claims the prefix it could
 serve instead of enumerating broadcasts. Serving the relay's ingested-only
 view (`origin::Consumer::local()`) to localhost workers belongs to moq.pro's
 edge, which embeds moq-relay; it moved there on 2026-09-28.
-
-Hygiene (decided 2026-10-19): the audits sit at the end of this list.
-Each recurs once per major release: its PR adds the next run to the following
-milestone, gated from m2 onward on the [release cut](/quest/m2/release/cut.md).
-Each lands its fixes in its own PR and plans only what needs a decision.
 
 ## Required
 

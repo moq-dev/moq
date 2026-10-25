@@ -9,8 +9,9 @@ from `deny.toml`; `just rs audit` passes without those exceptions.
 
 ## Plan
 
-Check the upstream [zbus 6 port](https://github.com/bilelmoussaoui/ashpd/pull/491)
-and crates.io releases. Until a stable port is published, report that outside
+The upstream [zbus 6 port](https://github.com/bilelmoussaoui/ashpd/pull/491)
+merged on 2026-10-25, but ashpd 0.13.13 is still the latest stable release.
+Check crates.io for one that carries it. Until a stable port is published, report that outside
 condition without disabling portal capture or adding a local fork.
 
 ## Related
