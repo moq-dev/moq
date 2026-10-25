@@ -7015,6 +7015,26 @@ impl Subscriber {
 		}
 	}
 
+	/// Whether `accounted` holds every group from `from` on that this subscriber's ranges
+	/// and [`Self::with_range`] bounds name, once every range has a resolved end: `false`
+	/// while one stays open, counts back from a group not seen yet, or ends at a time not
+	/// settled yet.
+	///
+	/// A publisher that accounts for each group it serves or drops learns from it that a
+	/// bounded subscription has nothing more to deliver.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn covered(&mut self, from: u64, accounted: &rangemap::RangeSet<u64>) -> bool {
+		let bounds = self.bounds();
+		let from = from.max(bounds.start);
+		match &mut self.inner {
+			Inner::Plain(cursor) => {
+				cursor.sync();
+				cursor.filter.window.covered_by(from, bounds.end, accounted)
+			}
+			Inner::Resume(resume, _) => resume.covered(from, bounds.end, accounted),
+		}
+	}
+
 	/// This subscriber's own ranges, by index, as resolved here: `None` for one empty or
 	/// still waiting, and for every range of a front's reader.
 	pub(super) fn resolved_ranges(&mut self) -> Vec<Option<Resolved>> {

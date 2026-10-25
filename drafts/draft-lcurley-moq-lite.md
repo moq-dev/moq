@@ -532,10 +532,14 @@ The subscriber needs the track's TRACK_INFO (notably its timescale) to interpret
 
 The publisher sends SUBSCRIBE_OK once the absolute start position is resolved, and SUBSCRIBE_END as soon as the exclusive final group is known (see [SUBSCRIBE_OK](#subscribe-ok) and [SUBSCRIBE_END](#subscribe-end)).
 The publisher closes its side of the stream (FIN) after SUBSCRIBE_END, once every Group Stream has finished or been reset.
+A subscription whose every Range has an `End` other than None is covered once every Group in its Ranges has been sent as a Group Stream or a datagram, or named by SUBSCRIBE_DROP.
+The publisher MAY then close its side (FIN) without SUBSCRIBE_END, once every Group Stream has finished or been reset, rather than wait for a SUBSCRIBE_UPDATE to widen it.
+That FIN ends the subscription, not the Track: the subscriber MUST NOT treat it as the Track's end, and opens a new Subscribe Stream to receive more.
+It can arrive after the subscriber widened the Ranges in a SUBSCRIBE_UPDATE that the publisher never read.
 After reading the publisher's FIN, the subscriber MUST close its side (FIN) once its tail accounting has settled: every received Group Stream has been read to its FIN, reset, or dropped, and every sequence in range has arrived, been named by SUBSCRIBE_DROP, or exhausted the subscriber's grace period.
 A publisher closing its session gracefully MUST wait for the subscriber's FIN or reset on every Subscribe Stream before closing the connection; a transport acknowledgement alone does not confirm the subscriber read the tail.
 A subscriber MAY cancel by closing its side (FIN); the publisher then closes its side (FIN) without owing SUBSCRIBE_END.
-Unbounded subscriptions stay open until SUBSCRIBE_END, and either endpoint MAY reset the stream at any time.
+Any other subscription stays open until SUBSCRIBE_END, and either endpoint MAY reset the stream at any time.
 
 ### Fetch
 A subscriber opens a Fetch Stream (0x3) to request a single Group from a Track.
@@ -1838,6 +1842,7 @@ The `Message Length` describes the payload size on the wire.
 - Assigned 0x3A NOT_FETCHABLE in the stream error table: a FETCH for a group delivered only as a datagram.
 - The subscriber FINs its Subscribe Stream after settling its tail; graceful session close waits for that FIN or reset.
 - A subscriber MAY cancel by FIN on its Subscribe Stream, and the publisher then FINs without SUBSCRIBE_END.
+- A publisher MAY FIN a subscription whose every Range has an End, once each Group in them is sent or dropped, without SUBSCRIBE_END. The FIN ends the subscription, not the Track. Earlier versions hold a bounded subscription open until SUBSCRIBE_END, since their subscribers read a FIN as the Track's end.
 - Removed the NO_CAPACITY stream error and its one re-resolution. Every refusal is terminal, including at another route of the same prefix.
 - Assigned 0x3B UNAUTHORIZED in the stream error table: a request reset because the endpoint does not authorize it, or no longer does, distinct from SESSION_CLOSED.
 - A relay resets with UNROUTABLE, rather than INTERNAL_ERROR, a stream served through an upstream session that ended.

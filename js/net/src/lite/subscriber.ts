@@ -71,6 +71,7 @@ import {
 	hasMediaTime,
 	hasOrder,
 	hasProbeRtt,
+	hasRanges,
 	hasRefresh,
 	hasSynced,
 	hasTrackStream,
@@ -136,6 +137,9 @@ interface SubscribeEntry {
 	// (SUBSCRIBE_END), once it declares them.
 	start?: number;
 	end?: number;
+	// Whether the stream ever asked for a bounded range, which a lite-07 publisher FINs without
+	// SUBSCRIBE_END once it covers it.
+	bounded: boolean;
 	// The TRACK stream that answered (lite-05+), held open as interest in the track until
 	// the SUBSCRIBE has its first response, so the publisher's demand never lapses between
 	// the two.
@@ -1046,6 +1050,7 @@ export class Subscriber {
 				grace: () => grace(producer.subscription.peek()?.maxDelay ?? Milli.zero),
 			}),
 			requested: msg.startGroup,
+			bounded: msg.endGroup !== undefined,
 			held: state.track,
 		};
 		this.#subscribes.set(id, entry);
@@ -1387,7 +1392,8 @@ export class Subscriber {
 	// Reads SUBSCRIBE_START/END/DROP on the subscribe stream until FIN (lite-05+), recording
 	// the range the tail is accounted against. SUBSCRIBE_END declares the track's end right
 	// away, so a consumer learns it before the last groups arrive. The publisher must declare
-	// the end before FIN unless we cancelled locally; resets and malformed responses reject.
+	// the end before FIN unless we cancelled locally, or on lite-07 it covered a bounded range;
+	// resets and malformed responses reject.
 	private async runResponses(stream: Stream, entry: SubscribeEntry): Promise<void> {
 		for (;;) {
 			const resp = await decodeSubscribeResponseMaybe(stream.reader, this.version);
@@ -1395,7 +1401,9 @@ export class Subscriber {
 			entry.held?.close();
 			entry.held = undefined;
 			if (!resp) {
-				if (entry.end === undefined && entry.track.closed.peek() === undefined)
+				// A bounded range may have widened since, in an update the publisher never read.
+				const covered = hasRanges(this.version) && entry.bounded;
+				if (entry.end === undefined && !covered && entry.track.closed.peek() === undefined)
 					throw new ProtocolViolation("subscribe stream ended without SUBSCRIBE_END");
 				return;
 			}
@@ -1443,17 +1451,23 @@ export class Subscriber {
 		const { tail, track } = entry;
 
 		const complete = () => {
-			// Without SUBSCRIBE_END (older drafts) nothing says which groups are owed.
-			if (entry.end === undefined) return false;
+			const groups = track.subscription.peek()?.groups;
+			const bounds = groupBounds(groups ?? {});
+			// Without SUBSCRIBE_END (older drafts) nothing says which groups are owed, unless a
+			// lite-07 publisher covered the bounded range.
+			const end =
+				entry.end === undefined
+					? hasRanges(this.version)
+						? bounds.end
+						: undefined
+					: Math.min(entry.end, bounds.end ?? entry.end);
+			if (end === undefined) return false;
 			// Without SUBSCRIBE_START the publisher served no group at all.
 			if (entry.start === undefined) return true;
 			// Owed from the floor the demand last asked for, which an update can move either
 			// way, or where SUBSCRIBE_START resolved a live-edge one. The groups the SUBSCRIBE
 			// asked for below its SUBSCRIBE_START were accounted for when it arrived.
-			const groups = track.subscription.peek()?.groups;
-			const bounds = groupBounds(groups ?? {});
 			const start = groups?.start === undefined ? entry.start : bounds.start;
-			const end = bounds.end === undefined ? entry.end : Math.min(entry.end, bounds.end);
 			return tail.covers(start, end);
 		};
 
@@ -1546,6 +1560,7 @@ export class Subscriber {
 				return;
 			}
 			if (refresh !== undefined) sentWanted = refresh;
+			entry.bounded ||= update.endGroup !== undefined;
 			lastSent = { ...current };
 			console.debug(`subscribe update: id=${id} broadcast=${broadcast} track=${track.name}`);
 		}

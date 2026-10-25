@@ -24,7 +24,7 @@ import { type AnnounceBroadcast, AnnounceInit, AnnounceOk, encodeAnnounceBroadca
 import { Group } from "./group.ts";
 import { Probe } from "./probe.ts";
 import { StreamId } from "./stream.ts";
-import { encodeSubscribeResponse, SubscribeEnd } from "./subscribe.ts";
+import { encodeSubscribeResponse, SubscribeDrop, SubscribeEnd, SubscribeStart } from "./subscribe.ts";
 import { SUBSCRIBE_SETUP_TIMEOUT_MS, Subscriber } from "./subscriber.ts";
 import { Track, TrackInfo } from "./track.ts";
 import { Version } from "./version.ts";
@@ -1983,6 +1983,42 @@ test("a publisher FIN without SUBSCRIBE_END still violates an open subscription"
 		expect((track.closed.peek() as Error).message).toBe("subscribe stream ended without SUBSCRIBE_END");
 		await drainReactions();
 		expect(closes.map((info) => info?.closeCode)).toEqual([SessionCode.ProtocolViolation]);
+	} finally {
+		track.close();
+		broadcast.close();
+		subscriber.close();
+	}
+});
+
+// A lite-07 publisher FINs a bounded subscription without SUBSCRIBE_END once it covered the range,
+// which ends the subscription cleanly rather than violating the protocol.
+test("a lite-07 publisher FIN ends a covered bounded subscription", async () => {
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened, closes } = fakeSession();
+	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const broadcast = subscriber.consume(Path.from("room"));
+	const track = broadcast.track("video").subscribe({ groups: { start: { included: 0 }, end: { excluded: 2 } } });
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version);
+		const stream = await opened(1);
+		await stream.reading;
+		const chunks: Uint8Array[] = [];
+		const writer = new Writer(
+			new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
+			version,
+		);
+		await encodeSubscribeResponse(writer, { start: new SubscribeStart(0) }, version);
+		await encodeSubscribeResponse(
+			writer,
+			{ drop: new SubscribeDrop({ start: 0, end: 1, error: StreamCode.NotFound }) },
+			version,
+		);
+		for (const chunk of chunks) stream.inbound.enqueue(chunk);
+		stream.inbound.close();
+		expect(await track.closed).toBeNull();
+		await drainReactions();
+		expect(closes).toEqual([]);
 	} finally {
 		track.close();
 		broadcast.close();

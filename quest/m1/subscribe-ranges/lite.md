@@ -2,11 +2,10 @@
 
 ## Goal
 
-A relay fills a lite-07 upstream by subscribing to the missing ranges, and a
-covered bounded lite-07 subscription ends without parking. Older wires and
-moq-transport carry the anchors they can, and refuse only the rest. FETCH
-stays on lite-07 until [JS ranges](/quest/m1/subscribe-ranges/js.md) removes
-it from both implementations.
+A relay fills a lite-07 upstream by subscribing to the missing ranges. Older
+wires and moq-transport carry the anchors they can, and refuse only the rest.
+FETCH stays on lite-07 until [JS ranges](/quest/m1/subscribe-ranges/js.md)
+removes it from both implementations.
 
 ## Plan
 
@@ -28,6 +27,13 @@ Decided 2026-10-25 (maintainer, on
   Published lite versions and moq-transport keep parking, since their
   subscribers read a FIN as the track's end. Parking on every wire with a
   separate bounded-fill completion was rejected.
+
+Bounded completion is in place: the lite-07 publisher FINs once
+`track::Subscriber::covered` holds, and the Rust copy settles the tail on the
+covered ranges, then subscribes again only for demand they leave out. A hole
+on a live track counts as dropped only once the feed gives up on it, past the
+arrivals grace; [Fetch as a range](/quest/m1/subscribe-ranges/fetch-range.md)
+owns judging such a miss sooner.
 
 Lite-07 SUBSCRIBE and SUBSCRIBE_UPDATE already carry the range list
 (`lite::Range`, typed anchors), and the publisher serves it from the model.

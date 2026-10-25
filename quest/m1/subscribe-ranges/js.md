@@ -17,8 +17,9 @@ removal of FETCH from lite-07 lands here, in Rust and JS together, once
 subscription. Rust stops sending and serving lite-07 FETCH, and
 `drafts/draft-lcurley-moq-lite.md` drops FETCH from lite-07 with its changelog
 bullets (FETCH max age and epoch). Published versions (lite-03..06) keep FETCH.
-Mirror lite-07 bounded completion too: a covered bounded subscription FINs
-without SUBSCRIBE_END, which ends the subscription and keeps the cached track.
+Mirror lite-07 bounded completion in the publisher too: a covered bounded
+subscription FINs without SUBSCRIBE_END. The JS subscriber already accepts that
+FIN, closing the request's track once its tail settles.
 
 Mirror the Rust names, including `Time(pts)` ends and their refusal on an untimed track.
 Also mirror Rust's optional `Subscription::max_delay`
