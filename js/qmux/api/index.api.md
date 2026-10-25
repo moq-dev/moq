@@ -35,14 +35,18 @@ class Session implements WebTransport {
         reason?: string;
     }): void;
     readonly closed: Promise<WebTransportCloseInfo>;
-    get congestionControl(): string;
+    get congestionControl(): WebTransportCongestionControl;
     createBidirectionalStream(options?: SendStreamOptions): Promise<WebTransportBidirectionalStream>;
     createUnidirectionalStream(options?: SendStreamOptions): Promise<WritableStream<Uint8Array>>;
     readonly datagrams: Datagrams;
+    getStats(): Promise<{
+        datagrams: {};
+    }>;
     readonly incomingBidirectionalStreams: ReadableStream<WebTransportBidirectionalStream>;
     readonly incomingUnidirectionalStreams: ReadableStream<ReadableStream<Uint8Array>>;
     get protocol(): string;
     readonly ready: Promise<void>;
+    get reliability(): "reliable-only";
     setSendBufferSize(bytes: number): void;
 }
 export default Session;
