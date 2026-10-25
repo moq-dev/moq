@@ -2347,7 +2347,9 @@ export class Subscriber {
 	 * omitted end removes the cap. Lowering the floor or raising the cap offers the groups it
 	 * newly covers that the track still caches and this reader never handed out; a group is
 	 * never handed out twice. A local filter, not a request: it leaves the wire subscription
-	 * alone. {@link largest} reports within these bounds.
+	 * alone. One exception: on a track served across route changes, lowering the floor asks the
+	 * serving route again for the groups it newly covers within the subscription's groups, since
+	 * the route that delivered them may be gone. {@link largest} reports within these bounds.
 	 */
 	withRange(groups: Groups): this {
 		const { start, end } = groupBounds(groups);

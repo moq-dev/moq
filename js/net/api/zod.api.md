@@ -57,13 +57,6 @@ class Demand {
     get wanted(): Getter<number | undefined>;
 }
 
-class Demand_2 {
-    get closed(): GetPromise<Error | null>;
-    readonly sequence: number;
-    unused(): Promise<void>;
-    get used(): Getter<boolean>;
-}
-
 interface FetchGroupOptions {
     maxDelay?: Milli;
     priority?: number;
@@ -82,7 +75,6 @@ declare namespace group {
         Frame,
         ReadOptions,
         Info_2 as Info,
-        Demand_2 as Demand,
         Producer_2 as Producer,
         Consumer
     }
@@ -168,7 +160,6 @@ class Producer_2 {
     abort(error: Error): void;
     get closed(): GetPromise<Error | null>;
     consume(): Consumer;
-    demand(): Demand_2;
     finish(): void;
     get isClosed(): boolean;
     readonly sequence: number;

@@ -15,6 +15,10 @@ The last `Broadcast.Consumer.close()` no longer closes a produced broadcast; onl
 The wire layer's `Lister.ended` is `closed`.
 `Track.Subscriber.end()` and `Track.Ordered.end()` are gone; `await finished()` instead.
 
+### `Varint.sizeLeadingOnes` is gone
+
+Take the length of `Varint.encodeLeadingOnes(v)`.
+
 ### Published names refuse navigation segments
 
 Broadcast creation and route publication now refuse literal `.` and `..` segments, including segments in the producer's root.

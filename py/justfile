@@ -19,10 +19,12 @@ default:
 
 # Build moq-ffi (maturin cdylib + bindings) and install the pure-python moq-rs
 # wrapper, both editable into the workspace venv. `--no-deps` on the wrapper
-
 # keeps uv from fetching moq-ffi off PyPI; maturin just installed it locally.
+# The build gets its own target directory because a cdylib's file name carries
+# no feature hash: the test features would otherwise replace the default build
+# that the other bindings read from target/debug, even while they read it.
 _develop *args:
-    cd .. && bash sh/local.sh uv run --no-sync maturin develop --locked --uv {{ args }}
+    cd .. && CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-target}/py" bash sh/local.sh uv run --no-sync maturin develop --locked --uv {{ args }}
     uv pip install --no-deps -e moq-rs
 
 # Lint + format + editable build + pyright + doc samples + docs. `--no-install-workspace`

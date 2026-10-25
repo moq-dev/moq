@@ -21,7 +21,6 @@ function accept(input: AcceptProps): Promise<Established>;
 
 interface AcceptProps {
     consume?: Producer_5;
-    extensions?: Extensions.Extensions;
     implementation?: string;
     publish?: Consumer_5;
     transport: WebTransport;
@@ -35,15 +34,6 @@ class Allocator implements Handle_2 {
     reserve(track: Demand, max: number): Reservation;
     static unlimited(): Allocator;
 }
-
-const ALPN: {
-    readonly DRAFT_14: "moq-00";
-    readonly DRAFT_15: "moqt-15";
-    readonly DRAFT_16: "moqt-16";
-    readonly DRAFT_17: "moqt-17";
-    readonly DRAFT_18: "moqt-18";
-    readonly DRAFT_22: "moqt-22";
-};
 
 declare namespace Announce {
     export {
@@ -86,12 +76,6 @@ interface Auth_2 {
 }
 
 declare namespace Auth_3 {
-    export {
-
-    }
-}
-
-declare namespace Auth_4 {
     export {
         Duplicate,
         Handle,
@@ -142,31 +126,13 @@ interface CertificateHash {
 
 function certificateHash(cert: string | BufferSource): Promise<Uint8Array<ArrayBuffer>>;
 
-class ClientSetup {
-    constructor(input: {
-        versions: number[];
-        parameters?: SetupOptions;
-    });
-    static decode(r: Reader, version: IetfVersion): Promise<ClientSetup>;
-    encode(w: Writer, version: IetfVersion): Promise<void>;
-    static id: number;
-    parameters: SetupOptions;
-    versions: number[];
-}
-
-declare namespace Cluster {
-    export {
-
-    }
-}
-
 function connect(input: ConnectProps): Promise<Established>;
 
 export class Connection {
     constructor(props?: ConnectionProps);
     static readonly accept: typeof accept;
     announced(scope?: Path_2.Pattern, options?: Announce_3.Options): Announce_3.Consumer;
-    readonly auth: Getter<Auth_4.Handle | undefined>;
+    readonly auth: Getter<Auth_3.Handle | undefined>;
     readonly bandwidth: Getter<Handle_2 | undefined>;
     static readonly certificateHash: typeof certificateHash;
     close(abort?: Error): void;
@@ -190,7 +156,7 @@ export namespace Connection {
     export type CertificateHash = CertificateHash;
     export type ConnectProps = ConnectProps;
     export type Established = Established;
-    export type Extensions = Extensions_2;
+    export type Extensions = Extensions;
     export type Goaway = GoawayProps;
     export type Probe = Probe;
     export type Props = ConnectionProps;
@@ -219,9 +185,8 @@ interface ConnectionProps {
 }
 
 interface ConnectProps {
-    auth?: Auth_4.Handle;
+    auth?: Auth_3.Handle;
     consume?: Producer_5;
-    extensions?: Extensions.Extensions;
     implementation?: string;
     publish?: Consumer_5;
     signal?: AbortSignal;
@@ -299,22 +264,6 @@ const Cost: {
     zero: bigint;
 };
 
-class Cursor {
-    constructor(buffer: Uint8Array, version: StreamVersion);
-    bool(): boolean;
-    exact<T>(size: number, decode: (c: Cursor) => T): T;
-    get offset(): number;
-    read(size: number): Uint8Array;
-    get remaining(): number;
-    string(): string;
-    u16(): number;
-    u53(): number;
-    u62(): bigint;
-    u8(): number;
-    varint(): U64;
-    readonly version: StreamVersion;
-}
-
 interface Datagram {
     payload: Uint8Array;
     sequence: number;
@@ -333,13 +282,6 @@ class Demand {
     get closed(): GetPromise<Error | null>;
     readonly name: string;
     get wanted(): Getter<number | undefined>;
-}
-
-class Demand_2 {
-    get closed(): GetPromise<Error | null>;
-    readonly sequence: number;
-    unused(): Promise<void>;
-    get used(): Getter<boolean>;
 }
 
 class Duplicate extends Error {
@@ -369,7 +311,6 @@ declare namespace Epoch {
     export {
         parse,
         mint,
-        time,
         Valid_2 as Valid
     }
 }
@@ -378,14 +319,7 @@ declare namespace Epoch_2 {
     export {
         parse,
         mint,
-        time,
         Valid_2 as Valid
-    }
-}
-
-declare namespace Epoch_3 {
-    export {
-
     }
 }
 
@@ -409,7 +343,7 @@ declare namespace Error_2 {
 interface Established {
     abort(): void;
     announced(scope?: Path_2.Pattern, options?: Announce_3.Options): Announce_3.Consumer;
-    readonly auth: Auth_4.Handle;
+    readonly auth: Auth_3.Handle;
     close(): Promise<void>;
     closed: Promise<Error | null>;
     readonly peerImplementation: Promise<string | undefined>;
@@ -424,16 +358,7 @@ type Event_2 = {
     kind: "start" | "update" | "restart" | "end";
 } & Announce_2;
 
-declare namespace Extensions {
-    export {
-        offered,
-        intoSetup,
-        Extensions_2 as Extensions,
-        Offered
-    }
-}
-
-interface Extensions_2 {
+interface Extensions {
     auth?: boolean;
     epoch?: boolean;
     solicit?: boolean;
@@ -476,7 +401,6 @@ declare namespace Group {
         Frame,
         ReadOptions,
         Info_2 as Info,
-        Demand_2 as Demand,
         Producer_2 as Producer,
         Consumer_2 as Consumer
     }
@@ -510,27 +434,6 @@ type Hop = z.infer<typeof HopSchema>;
 
 const HopSchema: z.core.$ZodBranded<z.ZodMiniBigInt<bigint>, "Hop", "out">;
 
-declare namespace Ietf {
-    export {
-        Auth_3 as Auth,
-        Cluster,
-        Epoch_3 as Epoch,
-        Setup,
-        ClientSetup,
-        ServerSetup,
-        initialMaxRequestId,
-        SetupOption,
-        REQUEST_WINDOW,
-        SetupOptions,
-        versionName,
-        Version,
-        ALPN,
-        IetfVersion
-    }
-}
-
-type IetfVersion = typeof Version.DRAFT_14 | typeof Version.DRAFT_15 | typeof Version.DRAFT_16 | typeof Version.DRAFT_17 | typeof Version.DRAFT_18 | typeof Version.DRAFT_22;
-
 export const IMPLEMENTATION: string;
 
 interface Info {
@@ -546,10 +449,6 @@ interface Info_2 {
 }
 
 function infoDefaults(info?: Partial<Info>): Info;
-
-function initialMaxRequestId(peerClient: boolean, window?: bigint): bigint;
-
-function intoSetup(params: Ietf.SetupOptions, extensions: Offered, version: Ietf.IetfVersion): void;
 
 function isAnonymous(route: Route): boolean;
 
@@ -583,17 +482,6 @@ class NotFound extends Stream {
     constructor(what: string, options?: {
         cause?: unknown;
     });
-}
-
-type Offered = Required<Extensions_2>;
-
-function offered(extensions?: Extensions_2): Offered;
-
-interface OpenOptions {
-    sendOrder?: number;
-    timeout?: number | null;
-    version: StreamVersion;
-    waitUntilAvailable?: boolean;
 }
 
 interface Options {
@@ -759,7 +647,6 @@ class Producer_2 {
     abort(error: Error): void;
     get closed(): GetPromise<Error | null>;
     consume(): Consumer_2;
-    demand(): Demand_2;
     finish(): void;
     get isClosed(): boolean;
     readonly sequence: number;
@@ -813,29 +700,6 @@ class ProtocolViolation extends Error {
     readonly code: SessionCode;
 }
 
-class Reader {
-    constructor(stream: ReadableStream<Uint8Array>, buffer: Uint8Array | undefined, version: StreamVersion);
-    constructor(stream: undefined, buffer: Uint8Array, version: StreamVersion);
-    bool(): Promise<boolean>;
-    get closed(): Promise<void>;
-    decode<T>(decode: (c: Cursor) => T): Promise<T>;
-    decodeMaybe<T>(decode: (c: Cursor) => T): Promise<T | undefined>;
-    discard(): Promise<void>;
-    done(): Promise<boolean>;
-    peekU62(): Promise<bigint>;
-    read(size: number): Promise<Uint8Array>;
-    readAll(): Promise<Uint8Array>;
-    stop(reason: unknown): void;
-    string(): Promise<string>;
-    tryDecode<T extends NonNullable<unknown>>(decode: (c: Cursor) => T): T | undefined;
-    u16(): Promise<number>;
-    u53(): Promise<number>;
-    u62(): Promise<bigint>;
-    u8(): Promise<number>;
-    varint(): Promise<U64>;
-    version: StreamVersion;
-}
-
 interface ReadOptions {
     from?: number;
 }
@@ -856,6 +720,7 @@ type ReloadDelay = {
     initial?: Milli;
     multiplier?: number;
     max?: Milli;
+    healthy?: Milli;
     timeout?: Milli;
 };
 
@@ -876,8 +741,6 @@ class Request_3 {
     prepare(epoch: Epoch_2.Valid): Prepared;
     reject(err: Error): void;
 }
-
-const REQUEST_WINDOW = 240000n;
 
 class Requesting {
     readonly active: Getter<Broadcast_2.Consumer | undefined>;
@@ -918,18 +781,6 @@ const Route: {
     }): Route;
 };
 
-class ServerSetup {
-    constructor(input: {
-        version: number;
-        parameters?: SetupOptions;
-    });
-    static decode(r: Reader, version: IetfVersion): Promise<ServerSetup>;
-    encode(w: Writer, version: IetfVersion): Promise<void>;
-    static id: number;
-    parameters: SetupOptions;
-    version: number;
-}
-
 class Session extends Error {
     constructor(code: SessionCode, options?: {
         cause?: unknown;
@@ -965,53 +816,9 @@ export const SessionCode: ((code: number) => SessionCode) & {
     readonly TooManyRequestUpdates: SessionCode;
 };
 
-class Setup {
-    constructor(input?: {
-        parameters?: SetupOptions;
-    });
-    static decode(r: Reader, version: IetfVersion): Promise<Setup>;
-    encode(w: Writer, version: IetfVersion): Promise<void>;
-    static id: number;
-    parameters: SetupOptions;
-}
-
-const SetupOption: {
-    readonly Path: 1n;
-    readonly MaxRequestId: 2n;
-    readonly AuthorizationToken: 3n;
-    readonly MaxAuthTokenCacheSize: 4n;
-    readonly Authority: 5n;
-    readonly Implementation: 7n;
-    readonly HopId: 0x40b54n;
-    readonly RelayCost: 0x40b56n;
-    readonly Solicit: 0x40b5an;
-    readonly Hidden: 0x40b5cn;
-    readonly MaxAge: 0x915c4n;
-    readonly Auth: 0x40b70n;
-    readonly ActiveCount: 0x40b64n;
-    readonly Epoch: 0x40b68n;
-};
-
-class SetupOptions {
-    constructor();
-    bytes: Map<bigint, Uint8Array>;
-    static decode(r: Reader, version: IetfVersion): Promise<SetupOptions>;
-    encode(w: Writer, version: IetfVersion): Promise<void>;
-    getBytes(id: bigint): Uint8Array | undefined;
-    getVarint(id: bigint): bigint | undefined;
-    removeBytes(id: bigint): boolean;
-    removeVarint(id: bigint): boolean;
-    setBytes(id: bigint, value: Uint8Array): void;
-    setVarint(id: bigint, value: bigint): void;
-    get size(): number;
-    vars: Map<bigint, bigint>;
-}
-
 export { Signals }
 
 function size(v: number): number;
-
-function sizeLeadingOnes(v: number | bigint): number;
 
 class Staged {
     [Symbol.dispose](): void;
@@ -1066,8 +873,6 @@ interface StreamOptions {
     reason?: string;
 }
 
-type StreamVersion = IetfVersion | Version_2;
-
 function stripPrefix(prefix: Valid, path: Valid): Valid | null;
 
 class Subscriber {
@@ -1108,8 +913,6 @@ declare namespace Time {
         Timestamp
     }
 }
-
-function time(epoch: Valid_2): Date;
 
 export interface Timed<T> {
     at?: Timestamp;
@@ -1216,27 +1019,7 @@ type TracksEvent = {
 
 type Transport = "webtransport" | "websocket" | "webrtc";
 
-interface TryOpenOptions extends OpenOptions {
-    cancel: Promise<void>;
-}
-
 function tryResolve(base: Valid, rel: Relative): Valid | undefined;
-
-class U64 {
-    constructor(hi: number, lo: number);
-    add(delta: number): U64;
-    compare(other: U64): number;
-    equals(other: U64): boolean;
-    static fromBigInt(v: bigint): U64;
-    static fromNumber(v: number): U64;
-    readonly hi: number;
-    readonly lo: number;
-    static readonly MAX: U64;
-    toBigInt(): bigint;
-    toNumber(): number;
-    toString(): string;
-    static readonly ZERO: U64;
-}
 
 class Unsupported extends Error {
     constructor(message?: string);
@@ -1253,7 +1036,6 @@ type Valid_2 = string & {
 
 declare namespace Varint {
     export {
-        sizeLeadingOnes,
         encodeLeadingOnesTo,
         encodeLeadingOnes,
         decodeLeadingOnes,
@@ -1269,32 +1051,6 @@ declare namespace Varint {
     }
 }
 
-const Version: {
-    readonly DRAFT_07: 4278190087;
-    readonly DRAFT_14: 4278190094;
-    readonly DRAFT_15: 4278190095;
-    readonly DRAFT_16: 4278190096;
-    readonly DRAFT_17: 4278190097;
-    readonly DRAFT_18: 4278190098;
-    readonly DRAFT_22: 4278190102;
-};
-
-type Version = (typeof Version)[keyof typeof Version];
-
-const Version_2: {
-    readonly DRAFT_01: 4279086337;
-    readonly DRAFT_02: 4279086338;
-    readonly DRAFT_03: 4279086339;
-    readonly DRAFT_04: 4279086340;
-    readonly DRAFT_05: 4279086341;
-    readonly DRAFT_06: 4279086342;
-    readonly DRAFT_07: 4279086343;
-};
-
-type Version_2 = (typeof Version_2)[keyof typeof Version_2];
-
-function versionName(v: Version): string;
-
 interface WebSocketProps {
     delay?: Milli;
     enabled?: boolean;
@@ -1304,27 +1060,6 @@ interface WebSocketProps {
 interface WebTransportProps extends Omit<WebTransportOptions, "serverCertificateHashes" | "protocols"> {
     serverCertificate?: string | BufferSource;
     serverCertificateHashes?: CertificateHash[];
-}
-
-class Writer {
-    constructor(stream: WritableStream<Uint8Array>, version: StreamVersion);
-    bool(v: boolean): Promise<void>;
-    close(): void;
-    get closed(): Promise<void>;
-    static collect(version: StreamVersion, f: (w: Writer) => Promise<void>): Promise<Uint8Array>;
-    i32(v: number): Promise<void>;
-    static open(quic: WebTransport, options: OpenOptions): Promise<Writer>;
-    reset(reason: unknown): void;
-    setPriority(sendOrder: number): void;
-    string(str: string): Promise<void>;
-    static tryOpen(quic: WebTransport, options: TryOpenOptions): Promise<Writer | undefined>;
-    u16(v: number): Promise<void>;
-    u53(v: number): Promise<void>;
-    u62(v: bigint): Promise<void>;
-    u8(v: number): Promise<void>;
-    varint(v: U64): Promise<void>;
-    version: StreamVersion;
-    write(v: Uint8Array): Promise<void>;
 }
 
 
