@@ -53,9 +53,17 @@ impl<F> Read<F> {
 	/// The C kind, plus the gap and end fields a non-frame read fills.
 	pub(crate) fn info(&self) -> (moq_decode_read_kind, moq_decode_gap, u64) {
 		match self {
-			Self::Frame(_) => (moq_decode_read_kind::MOQ_DECODE_READ_FRAME, moq_decode_gap::default(), 0),
+			Self::Frame(_) => (
+				moq_decode_read_kind::MOQ_DECODE_READ_FRAME,
+				moq_decode_gap::default(),
+				0,
+			),
 			Self::Gap(gap) => (moq_decode_read_kind::MOQ_DECODE_READ_GAP, *gap, 0),
-			Self::End { end_us } => (moq_decode_read_kind::MOQ_DECODE_READ_END, moq_decode_gap::default(), *end_us),
+			Self::End { end_us } => (
+				moq_decode_read_kind::MOQ_DECODE_READ_END,
+				moq_decode_gap::default(),
+				*end_us,
+			),
 		}
 	}
 }

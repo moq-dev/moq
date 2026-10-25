@@ -307,11 +307,11 @@ void decode_audio(
         if (std::holds_alternative<moq::AudioRead::kGap>(read->get_variant())) {
             fail("audio gap");
         }
-        const auto *decoded = std::get_if<moq::AudioRead::kFrame>(&read->get_variant());
-        if (!decoded) {
+        const auto *variant = std::get_if<moq::AudioRead::kFrame>(&read->get_variant());
+        if (!variant) {
             fail("audio track ended early");
         }
-        const auto *frame = &decoded->frame;
+        const auto *frame = &variant->frame;
 
         const size_t samples = frame->data.size() / frame_bytes;
         log << frame->timestamp_us << " " << samples << "\n";

@@ -31,7 +31,6 @@ typedef ReadGap = GapMoqVideoRead;
 /// The publisher stopped its encoder; what follows comes from a fresh encoder.
 typedef ReadEnd = EndMoqVideoRead;
 
-
 /// The pixel layout, resolution, and framerate written to a [Producer].
 typedef EncoderInput = MoqVideoEncoderInput;
 
@@ -112,7 +111,6 @@ extension VideoReadEndDuration on EndMoqVideoRead {
 
 /// Duration view over a decoder's latency bound.
 extension VideoDecoderOutputDuration on MoqVideoDecoderOutput {
-
   /// Upper bound on buffering before a stalled group is skipped, or null for the default.
   Duration? get maxDelay =>
       maxDelayUs == null ? null : Duration(microseconds: maxDelayUs!);

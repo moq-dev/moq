@@ -176,7 +176,6 @@ static void on_audio(void *ud, int32_t id) {
     moq_decode_audio_read_free((uint32_t)id);
 }
 
-
 // Whether every audio rendition has decoded enough, once any has started. Called under the lock.
 static int audio_got(ctx_t *c) {
     for (uint32_t i = 0; i < c->audio_count; i++) {

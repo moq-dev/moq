@@ -661,10 +661,10 @@ static void moq_source_read_audio(struct moq_source *ctx, const std::shared_ptr<
 // any failure stops the track. On a frame `audio` points into it, for output once the lock
 // is released. A gap or encoder end needs nothing here: OBS buffers by timestamp, so the
 // next frame resumes wherever its timestamp lands.
-static bool moq_source_on_audio_frame(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
-				      const std::shared_ptr<Track> &track,
-				      const moq::expected<std::optional<moq::AudioRead>> &result,
-				      obs_source_audio &audio)
+static bool moq_source_on_audio_read(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
+				     const std::shared_ptr<Track> &track,
+				     const moq::expected<std::optional<moq::AudioRead>> &result,
+				     obs_source_audio &audio)
 {
 	if (!result) {
 		LOG_ERROR("Audio track error: %s", result.error().to_string().c_str());
@@ -720,7 +720,6 @@ static void moq_source_read_audio(struct moq_source *ctx, const std::shared_ptr<
 		ctx->worker.Executor(),
 		[ctx, weak_conn = std::weak_ptr<Connection>(conn),
 		 weak_track = std::weak_ptr<Track>(track)](moq::expected<std::optional<moq::AudioRead>> result) {
-
 			obs_source_audio audio = {};
 			{
 				std::lock_guard<std::mutex> lock(ctx->mutex);
@@ -728,7 +727,7 @@ static void moq_source_read_audio(struct moq_source *ctx, const std::shared_ptr<
 				if (!conn || conn != ctx->connection)
 					return;
 				auto track = moq_source_track(*conn, weak_track);
-				if (!track || !moq_source_on_audio_frame(ctx, conn, track, result, audio))
+				if (!track || !moq_source_on_audio_read(ctx, conn, track, result, audio))
 					return;
 			}
 			// `result` owns the samples, and OBS copies them before returning. Destroy

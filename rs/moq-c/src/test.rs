@@ -4210,7 +4210,9 @@ fn audio_raw_decode_reads_the_encoder_end() {
 		frame_duration_us: 0,
 	};
 	let producer = id(unsafe { moq_encode_audio(broadcast, c"audio".as_ptr(), 5, &input, &output, 0) });
-	let pcm: Vec<u8> = (0..SAMPLES).flat_map(|i| (i as f32 / SAMPLES as f32).to_le_bytes()).collect();
+	let pcm: Vec<u8> = (0..SAMPLES)
+		.flat_map(|i| (i as f32 / SAMPLES as f32).to_le_bytes())
+		.collect();
 	let frame = moq_audio_frame {
 		timestamp_us: START_US,
 		data: pcm.as_ptr(),
@@ -4920,7 +4922,6 @@ fn video_raw_decode() {
 		let code = frame_cb.recv();
 		if code > 0 {
 			assert_eq!(moq_decode_video_read_free(id(code)), 0);
-
 		} else {
 			assert_eq!(code, 0, "raw video close delivers terminal 0");
 			break;

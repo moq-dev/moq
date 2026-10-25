@@ -404,9 +404,10 @@ class SmokeTest {
      * by the interop test (`just test interop`).
      */
     @Test
-    fun `video consumer exposes a frames flow like audio does`() {
-        val video: (dev.moq.video.Consumer) -> Flow<VideoDecodedFrame> = dev.moq.video.Consumer::frames
-        val audio: (dev.moq.audio.Consumer) -> Flow<dev.moq.audio.Frame> = dev.moq.audio.Consumer::frames
+    fun `video consumer exposes a reads flow like audio does`() {
+        val video: (dev.moq.video.Consumer) -> Flow<dev.moq.video.Read> = dev.moq.video.Consumer::reads
+        val audio: (dev.moq.audio.Consumer) -> Flow<dev.moq.audio.Read> = dev.moq.audio.Consumer::reads
+
         assertNotNull(video)
         assertNotNull(audio)
     }

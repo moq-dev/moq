@@ -721,7 +721,6 @@ void main() {
     expect(await fixed.next().timeout(timeout), isA<moq_audio.ReadFrame>());
     expect(await estimated.next().timeout(timeout), isA<moq_audio.ReadFrame>());
 
-
     expect(fixed.delay, const Duration(milliseconds: 80));
     expect(estimated.delay, isNot(initial));
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import timedelta
+from typing import Union
 
 from moq_ffi import (
     MoqVideoConsumer,
@@ -32,8 +33,8 @@ from .types import VideoEncoderOutput as EncoderOutput
 from .types import VideoGop as Gop
 from .types import VideoPixelFormat as PixelFormat
 
-
-Read = VideoDecodedFrame | Gap | End
+# A Union rather than `|`: the generated frame class does not support `|` with other types.
+Read = Union[VideoDecodedFrame, Gap, End]
 """One item a :class:`Consumer` reads, in delivery order: a decoded picture, or a break between them."""
 
 
@@ -223,4 +224,3 @@ __all__ = [
     "Read",
     "FrameRate",
 ]
-

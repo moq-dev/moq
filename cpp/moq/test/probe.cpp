@@ -134,10 +134,16 @@ void audio_roundtrip() {
     for (;;) {
         auto read = ok(consumer->next().get(), "decoded audio");
         if (!read) break;
-        // Whole 20 ms frames need no end marker, and nothing was lost.
-        const auto *decoded = std::get_if<moq::AudioRead::kFrame>(&read->get_variant());
-        CHECK(decoded != nullptr);
-        const auto *next = &decoded->frame;
+        CHECK(!std::holds_alternative<moq::AudioRead::kGap>(read->get_variant()));
+        // The finish ends the encoder where its eight 20 ms frames stop.
+        if (const auto *end = std::get_if<moq::AudioRead::kEnd>(&read->get_variant())) {
+            CHECK(end->end_us == 250000 + 8 * 20000);
+            continue;
+        }
+        const auto *variant = std::get_if<moq::AudioRead::kFrame>(&read->get_variant());
+        CHECK(variant != nullptr);
+
+        const auto *next = &variant->frame;
 
         CHECK(next->timestamp_us == 250000 + frames * 1000000 / 48000);
         CHECK(next->data.size() % (2 * sizeof(float)) == 0);
