@@ -8,4 +8,4 @@ Apps list it as a camera while the studio runs.
 
 ## Required
 
-- [Studio program encode from the GPU](/quest/m3/studio/app.md) - the studio running on Windows
+- [Studio on macOS and Windows](/quest/m3/studio/app.md) - the studio running on Windows

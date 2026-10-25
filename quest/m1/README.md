@@ -95,6 +95,13 @@ arithmetic, DASH init readiness, dot-only names) and ffprobe segment
 conformance; the audit's segment-finalization redesign is folded into
 Catalog HLS field.
 
+Added 2026-10-25 (maintainer): the studio's
+[GPU encode](/quest/m2/studio-gpu/encode.md) and
+[source import](/quest/m2/studio-gpu/import.md) quests drive moq-video
+improvements, mainly encoders taking a GPU surface and zero-copy texture
+import. They land before the cut when ready but do not gate it, and stay at
+the top of m2.
+
 ## Required
 
 - [moq-congestion](/quest/m1/congestion/README.md) - one QUIC congestion-control crate with a transport-independent trait, run by `moq-quic` and published for noq

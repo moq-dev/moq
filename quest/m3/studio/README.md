@@ -59,9 +59,18 @@ restreams") and its upload savings. Direct push with shared encoders matches
 OBS multistream, and the hosted version is product work outside this
 repository.
 
+Added 2026-10-25 (maintainer): the studio's
+[GPU encode](/quest/m2/studio-gpu/encode.md) and
+[source import](/quest/m2/studio-gpu/import.md) quests drive moq-video
+improvements, mainly encoders taking a GPU surface and zero-copy texture
+import. They land before the next cut when ready, without gating it, and stay
+at the top of m2.
+
 ## Required
 
-- [Studio program encode from the GPU](/quest/m3/studio/app.md) - the program reaches the encoder as a GPU surface instead of a CPU readback, and the studio runs on macOS and Windows
+- [Zero-copy program encode](/quest/m2/studio-gpu/encode.md) - the program reaches the encoder as a GPU surface instead of a CPU readback
+- [Zero-copy source import](/quest/m2/studio-gpu/import.md) - captured and decoded frames reach the compositor as GPU textures instead of a CPU upload
+- [Studio on macOS and Windows](/quest/m3/studio/app.md) - the studio runs on macOS and Windows, not only Linux
 - [Destinations](/quest/m3/studio/destinations.md) - RTMP, RTMPS, and WHIP push with per-destination codecs and shared encoders, on a UI-free egress library a hosted service can reuse
 - [Multiple canvases](/quest/m3/studio/multi-canvas.md) - landscape and portrait canvases composite at once from shared sources
 - [Guests](/quest/m3/studio/guests.md) - remote guests and phone cameras join through a moq-room link or QR code and appear as sources
