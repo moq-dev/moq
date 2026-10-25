@@ -1,13 +1,11 @@
-# [L] BBR media study
+# [M] BBR media study
 
 ## Goal
 
-Measured adopt, retain, or investigate-further decisions on three BBR
-behaviors under media traffic: allowing natural media drains to satisfy
-ProbeRTT, recognizing bandwidth growth within a round, and precautionary
-bandwidth probing. Reduce demonstrated frame deadline interference without
-stale minimum RTT, persistent queues, or unfairness. Application limitation
-alone is not evidence that the path drained, and Google parity is not
+Measured adopt, retain, or investigate-further decisions on two BBR
+behaviors under media traffic: recognizing bandwidth growth within a round,
+and precautionary bandwidth probing. Reduce demonstrated frame deadline
+interference without persistent queues or unfairness. Google parity is not
 assumed to be an improvement. Acceptance and performance use a rate below
 the media bitrate behind a deep but finite queue with verified overflow
 drops. Random loss may prove recovery correctness, but never grades media
@@ -17,39 +15,24 @@ quality or performance.
 
 Decided in the 2026-09-30 audit: the Google BBR comparison merged here as
 one study, since both reuse the same media profiles, harness, and baseline.
+On 2026-10-24 the maintainer split ProbeRTT natural-drain credit out to
+[its own quest](/quest/m1/bbr-probe-rtt-skip.md), which ships QUICHE's
+near-floor skip.
 
-### Natural drains
+### Harness
 
-Use `moq-congestion`'s BBR3, which carries the released fork's corrections, as
-baseline. ProbeRTT targets half the
-estimated BDP, floored at the minimum pipe window; entering the mode need
-not withhold useful bytes. First locate actual cwnd stalls and deadline
-misses using steady low-rate traffic, 30-fps frames with keyframes, and gaps
-shorter and longer than RTT. Include both learned capacity above the media
-rate and a sender that has never measured more than its source rate.
-
-Compare the baseline with Google's explicit idle accounting and bounded
-natural-drain credit. [QUICHE BBR3](https://github.com/google/quiche/blob/535a2730e77d47e0dc03746555cc9c34b17bc9e9/quiche/quic/core/congestion_control/bbr3_sender.cc#L534)
-postpones RTT aging across zero-inflight idle intervals; its
-[tests](https://github.com/google/quiche/blob/535a2730e77d47e0dc03746555cc9c34b17bc9e9/quiche/quic/core/congestion_control/bbr3_simulator_test.cc#L1724)
-cover restart behavior. These source defaults are not deployment evidence.
-In the 2026-09-21 audit, noq's Linux-style idle-restart suppression was
-narrower.
-
-A candidate credits sustained low inflight, a completed sampled round, and
-fresh RTT evidence toward ProbeRTT. Determine the predicate experimentally;
-neither the app-limited label nor a stale BDP threshold is sufficient. Bound
-deferral and retain fallback after stale evidence, increased base RTT, or a
-path change. Blanket skipping is only a diagnostic control. Retain the
-simpler baseline if no material interference is demonstrated.
+Use `moq-congestion`'s BBR3, which carries the released fork's corrections,
+as baseline, with 30-fps frames and keyframes. Include both learned capacity
+above the media rate and a sender that has never measured more than its
+source rate.
 
 Use identical media traces and seeds. Start with short and long RTT paths,
 then test capacity changes, base-RTT changes, competing bulk traffic, queue
 depths, and compressed or delayed ACKs. Use loss-based cross traffic when
 BBR alone does not fill the deep queue; verify actual overflow drops. Keep
 scripted loss bursts as recovery correctness checks only. Record deadlines and
-frame completion, withheld useful bytes, sender backlog separately from
-network queueing, RTT-baseline error, sample labels, and mode residence.
+frame completion, sender backlog separately from network queueing, sample
+labels, and mode residence.
 Set latency and fairness acceptance limits before tuning. Persist the
 harness in CI, with broader network cases at least nightly, and a verdict
 with pinned sources/configurations. Any adopted production policy gets a
@@ -102,8 +85,8 @@ Keep the current 2% `LOSS_THRESH` and baseline controller policy unless a
 candidate improves the shaped-path comparison, including queues and
 fairness. Surviving an independent random-loss percentage is not a reason
 to weaken the congestion response or precautionary probe stop. This study
-still decides natural-drain credit, growth recognition, and probe behavior
-separately; it does not adopt any of them in advance.
+still decides growth recognition and probe behavior separately; it does not
+adopt either in advance.
 
 ## Required
 
@@ -113,3 +96,4 @@ separately; it does not adopt any of them in advance.
 
 - [TS validation](/test/ts/README.md) - shaped paths, whole-group shedding, and measured baselines
 - [Native probing](/quest/m1/probe-native.md) - preserving an estimate and discovering spare capacity are separate problems
+- [Skip ProbeRTT after a near-floor RTT](/quest/m1/bbr-probe-rtt-skip.md) - the ProbeRTT natural-drain decision split out of this study
