@@ -476,3 +476,60 @@ async fn legacy_updates_narrow_then_widen() {
 		}
 	}
 }
+
+/// Empty ranges retire only demand no other reader holds. A later widening reuses
+/// the copy and joins the new live group, without disturbing a sibling reader.
+#[moq_clock::test]
+async fn empty_ranges_retire_the_wire_and_can_widen_again() {
+	for version in ["moq-transport-14", "moq-transport-17", "moq-transport-22"] {
+		for relay in [false, true] {
+			let mut fixture = range_fixture_version(version, relay).await;
+			let live = Subscription::default().with_ranges([Range::live()]);
+			let mut reader = subscribe(&fixture.remote, live.clone()).await;
+			let mut sibling = subscribe(&fixture.remote, live.clone()).await;
+			assert_eq!(next(&mut reader).await, Some(5));
+			assert_eq!(next(&mut sibling).await, Some(5));
+			reader.update(live.clone().with_ranges([])).unwrap();
+			assert!(reader.poll_recv_group(&kio::Waiter::noop()).is_pending());
+			let mut group = fixture
+				.track
+				.create_group(moq_net::group::Info { sequence: 6 })
+				.unwrap();
+			group
+				.write_frame(Timestamp::from_millis(6000).unwrap(), b"sibling".as_slice())
+				.unwrap();
+			group.finish().unwrap();
+			assert_eq!(next(&mut sibling).await, Some(6), "{version} relay={relay}");
+			reader.update(live.clone()).unwrap();
+			assert_eq!(next(&mut reader).await, Some(6));
+			drop(sibling);
+			reader.update(live.clone().with_ranges([])).unwrap();
+			moq_clock::timeout(
+				TIMEOUT,
+				kio::wait(|waiter| {
+					assert!(reader.poll_recv_group(waiter).is_pending());
+					loop {
+						if fixture.track.subscription().is_none() {
+							return std::task::Poll::Ready(());
+						}
+						if fixture.track.poll_subscription_changed(waiter).is_pending() {
+							return std::task::Poll::Pending;
+						}
+					}
+				}),
+			)
+			.await
+			.unwrap_or_else(|_| panic!("{version} relay={relay}: empty demand retained a wire subscription"));
+			let mut group = fixture
+				.track
+				.create_group(moq_net::group::Info { sequence: 7 })
+				.unwrap();
+			group
+				.write_frame(Timestamp::from_millis(7000).unwrap(), b"resumed".as_slice())
+				.unwrap();
+			group.finish().unwrap();
+			reader.update(live).unwrap();
+			assert_eq!(next(&mut reader).await, Some(7), "{version} relay={relay}");
+		}
+	}
+}

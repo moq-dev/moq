@@ -3070,7 +3070,12 @@ impl Subscriber {
 		// one made only to learn the track races the fetches it was for. Draft-17 still
 		// SUBSCRIBEs: its TRACK_STATUS answer cannot say whether the track is timed.
 		let mut target = match request.subscription() {
-			None if ietf::TrackStatusOk::describes_track(self.version) => {
+			subscription
+				if !subscription
+					.as_ref()
+					.is_some_and(|subscription| !subscription.ranges.is_empty())
+					&& ietf::TrackStatusOk::describes_track(self.version) =>
+			{
 				let Some(idle) = self
 					.track_status(&broadcast_path, &track_name, request, &mut gate)
 					.await
@@ -3121,7 +3126,17 @@ impl Subscriber {
 			.subscription()
 			.map(|subscription| match target.producer() {
 				Some(track) => resolved.resolve(track, &subscription),
-				None if needs_resolution(&subscription) => Err(Error::Unsupported),
+				None if needs_resolution(&subscription) => {
+					let time = subscription.ranges.iter().any(|range| {
+						matches!(range.start, track::Anchor::Time(_))
+							|| matches!(range.end, Some(track::Anchor::Time(_)))
+					});
+					Err(if time && !ietf::Properties::sends_timescale(self.version) {
+						Error::TimestampMismatch
+					} else {
+						Error::Unsupported
+					})
+				}
 				None => Ok(subscription),
 			})
 			.transpose();
@@ -3691,7 +3706,9 @@ impl Subscriber {
 		let mut finished = false;
 		let mut demand = track.demand();
 		// Nobody subscribing at all (only fetches asked) needs no subscription.
-		let mut subscribed = track.subscription().is_some();
+		let mut subscribed = track
+			.subscription()
+			.is_some_and(|subscription| !subscription.ranges.is_empty());
 		let idle = {
 			let updating_track = track.clone();
 			let mut done = std::pin::pin!(Self::read_publish_done(
@@ -3748,7 +3765,9 @@ impl Subscriber {
 					// The last subscriber left: the upstream subscription goes with it, as on
 					// lite, and the copy lingers for fetches and a returning subscriber.
 					while let Poll::Ready(Ok(subscription)) = track.poll_subscription_changed(waiter) {
-						subscribed = subscription.is_some();
+						subscribed = subscription
+							.as_ref()
+							.is_some_and(|subscription| !subscription.ranges.is_empty());
 						if let Some(subscription) = subscription {
 							priority = subscription.priority;
 							if self.version != Version::Draft14 {
@@ -4084,7 +4103,10 @@ impl Subscriber {
 			id
 		};
 		let mut linger = crate::time::Deadline::new(&self.runtime);
-		let mut subscribed = idle.track.subscription().is_some();
+		let mut subscribed = idle
+			.track
+			.subscription()
+			.is_some_and(|subscription| !subscription.ranges.is_empty());
 		enum Step {
 			Fill(track::Fill),
 			Subscribe,
@@ -4105,7 +4127,9 @@ impl Subscriber {
 				}
 				let _ = group_fetches.poll(waiter);
 				while let Poll::Ready(Ok(subscription)) = idle.track.poll_subscription_changed(waiter) {
-					subscribed = subscription.is_some();
+					subscribed = subscription
+						.as_ref()
+						.is_some_and(|subscription| !subscription.ranges.is_empty());
 				}
 				if subscribed && !idle.finished {
 					return Poll::Ready(Step::Subscribe);
@@ -5519,7 +5543,7 @@ impl Subscriber {
 					Ok(()) => {}
 					// Widening a range can fill groups the copy already owns. Drain their
 					// objects without replacing their producer or cutting the rest of the fill.
-					Err(Error::Duplicate) => skipped = Some((sequence, 0)),
+					Err(Error::Duplicate) if multiple => skipped = Some((sequence, 0)),
 					Err(err) => return Err(err),
 				}
 			}
@@ -15512,10 +15536,11 @@ mod stitch_tests {
 			.recv_group(&mut whole)
 			.await
 			.expect("the whole group");
-		assert!(
-			h.subscriber.clone().recv_fill(&mut fill).await.is_err(),
-			"the fill cannot create a second producer for a live sequence"
-		);
+		h.subscriber
+			.clone()
+			.recv_fill(&mut fill)
+			.await
+			.expect("overlapping fill is drained without another producer");
 
 		let (sequence, frames) = read_group(&mut consumer).await;
 		assert_eq!(sequence, SEQUENCE);

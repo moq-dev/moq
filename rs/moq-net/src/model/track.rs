@@ -4870,6 +4870,9 @@ impl Subscribing {
 	/// Returns [`Error::Closed`] if the track already ended; the update is
 	/// meaningless at that point and can usually be ignored.
 	pub fn update(&mut self, subscription: Subscription) -> Result<()> {
+		if subscription.ranges != self.subscription.read().ranges {
+			Consumer::new(self.name.clone(), self.state.weak()).refuse_subscription(&subscription)?;
+		}
 		self.subscription.update(subscription)
 	}
 }
@@ -7278,6 +7281,9 @@ impl Subscriber {
 			Inner::Plain(cursor) => &cursor.subscription,
 			Inner::Resume(resume, _) => resume.subscription(),
 		};
+		if subscription.ranges != channel.read().ranges {
+			self.consume().refuse_subscription(&subscription)?;
+		}
 		channel.update(subscription)?;
 		if let Inner::Plain(cursor) = &mut self.inner {
 			cursor.sync();
