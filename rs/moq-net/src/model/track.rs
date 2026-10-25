@@ -4789,10 +4789,12 @@ fn queue(fills: &kio::Shared<FillState>, sequence: u64, options: &group::Fetch) 
 			frame: options.frame_start,
 		},
 		end,
-		priority: options.priority,
-		max_delay: options.max_delay,
-		// One group either way; newest first is the default order.
-		order: Order::default(),
+		asking: fill::Asking {
+			priority: options.priority,
+			max_delay: options.max_delay,
+			// One group either way, so it never turns a wider fill it joins newest first.
+			order: Order::Ascending,
+		},
 	};
 	// The handler gate is atomic with a handler dropping (no fill stranded on a queue
 	// nobody drains); with no handler, `Fetching::poll` fails fast.
@@ -4922,7 +4924,7 @@ impl kio::Task for Fetching {
 		let (err, asked) = match result
 			.outcome()
 			.poll(waiter, |outcome| match outcome.refused(sequence) {
-				Some(err) => Poll::Ready((err.clone(), outcome.asked())),
+				Some((err, asked)) => Poll::Ready((err.clone(), asked)),
 				None if outcome.is_accepted(sequence) => Poll::Ready((Error::NotFound, None)),
 				None => Poll::Pending,
 			}) {
@@ -14811,51 +14813,40 @@ mod test {
 		assert!(pressure_evicts_a_headed_slot(false).await);
 	}
 
-	/// Joining a queued fetch widens its range, and a caller that arrives once the range
-	/// is already on the wire fails cleanly rather than being handed the narrower group.
+	/// Joining a queued fetch widens its range. A caller that arrives once the range is
+	/// already on the wire asks for its own frames rather than being handed the narrower group.
 	#[moq_clock::test]
 	#[cfg(feature = "async")]
-	async fn fetch_widens_or_fails_cleanly() {
+	async fn fetch_widens_or_asks_afresh() {
 		let producer = track_producer("test", Info::timed());
 		let dynamic = producer.dynamic();
 		let consumer = producer.consume();
+		let from = |frame_start| group::Fetch {
+			frame_start,
+			..Default::default()
+		};
 
-		let _narrow = consumer.fetch_group(
-			0,
-			group::Fetch {
-				frame_start: 5,
-				..Default::default()
-			},
-		);
-		let mut narrow = std::pin::pin!(_narrow);
+		let mut narrow = std::pin::pin!(consumer.fetch_group(0, from(5)));
 		assert!(futures::poll!(narrow.as_mut()).is_pending());
 
 		// Still queued: widening is honored, because nothing has read the range yet.
-		let _wider = consumer.fetch_group(
-			0,
-			group::Fetch {
-				frame_start: 2,
-				..Default::default()
-			},
-		);
-		let mut wider = std::pin::pin!(_wider);
+		let mut wider = std::pin::pin!(consumer.fetch_group(0, from(2)));
 		assert!(futures::poll!(wider.as_mut()).is_pending());
 
 		let request = dynamic.requested_fill_group().await.unwrap();
 		assert_eq!(request.frame_start(), 2, "widened while queued");
 
 		// Handed off now: the handler holds its own copy of the range, so a later wider
-		// caller cannot move what is already being served.
-		let _widest = consumer.fetch_group(
-			0,
-			group::Fetch {
-				frame_start: 0,
-				..Default::default()
-			},
-		);
-		let mut widest = std::pin::pin!(_widest);
+		// caller cannot move what is already being served. It asks for its own.
+		let mut widest = std::pin::pin!(consumer.fetch_group(0, from(0)));
 		assert!(futures::poll!(widest.as_mut()).is_pending());
 		assert_eq!(request.frame_start(), 2, "the in-flight range is already on the wire");
+		let whole = dynamic.requested_fill_group().await.unwrap();
+		assert_eq!(
+			(whole.sequence(), whole.frame_start()),
+			(0, 0),
+			"the earlier frames are asked"
+		);
 
 		// A handler may keep tracking the group's readers past the accept, as the lite
 		// subscriber does, which holds the result channel open.
@@ -14868,12 +14859,18 @@ mod test {
 			.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"from2"))
 			.unwrap();
 
-		// The two callers it covers resolve; the one it doesn't fails cleanly rather
-		// than being handed a group that starts above what it asked for, even while
-		// the group is still being written.
+		// The two callers it covers resolve; the one it doesn't waits on its own fill
+		// rather than being handed a group that starts above what it asked for.
 		assert_eq!(narrow.await.unwrap().index(), 5);
 		assert_eq!(wider.await.unwrap().index(), 2);
-		assert!(matches!(widest.await, Err(Error::NotFound)));
+		assert!(futures::poll!(widest.as_mut()).is_pending());
+		group.finish().unwrap();
+
+		let mut group = whole.accept(None).unwrap();
+		group
+			.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"from0"))
+			.unwrap();
+		assert_eq!(widest.await.unwrap().index(), 0);
 		group.finish().unwrap();
 	}
 
@@ -17109,6 +17106,48 @@ mod test {
 			dynamic.poll_requested_fill(&kio::Waiter::noop()).is_pending(),
 			"both readers share the fill"
 		);
+	}
+
+	/// A reader changing its priority, budget, or order moves the fill it waits on, queued
+	/// or taken, so the handler serves the rest under the new values, even ones lower than
+	/// it was asked with.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_reader_update_reaches_its_fill() {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.dynamic();
+		let mut subscriber = producer.subscribe(replay().with_range(0..).with_order(Order::Ascending));
+		producer.start_at(4).unwrap();
+		write_group(&producer, 4);
+		let waiter = kio::Waiter::noop();
+		assert_eq!(drain_groups(&mut subscriber), [4]);
+
+		subscriber.update(subscriber.subscription().with_priority(3)).unwrap();
+		assert!(subscriber.poll_recv_group(&waiter).is_pending());
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the miss below the start is asked");
+		};
+		assert_eq!((fill.start().group, fill.end()), (0, 4));
+		assert_eq!(
+			(fill.priority(), fill.order()),
+			(3, Order::Ascending),
+			"refreshed while queued"
+		);
+		assert_eq!(fill.next(), Some(0));
+		write_filled(fill.accept(0, None), 0);
+
+		let budget = Duration::from_secs(20);
+		let update = subscriber
+			.subscription()
+			.with_priority(-2)
+			.with_max_delay(budget)
+			.with_order(Order::Descending);
+		subscriber.update(update).unwrap();
+		assert_eq!(drain_groups(&mut subscriber), [0]);
+		assert_eq!(fill.priority(), -2);
+		assert_eq!(fill.max_delay(), Some(budget));
+		assert_eq!(fill.order(), Order::Descending);
+		assert_eq!(fill.next(), Some(3), "the rest is served newest first");
 	}
 
 	/// An ordered reader waits on a fill for its miss rather than skipping past it.
