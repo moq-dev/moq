@@ -902,7 +902,7 @@ mod tests {
 	use super::*;
 
 	fn config(width: u32, height: u32, framerate: u32) -> Config {
-		Config::new(width, height, crate::Rate::new(framerate, 1).unwrap())
+		Config::new(width, height, crate::FrameRate::new(framerate, 1).unwrap())
 	}
 
 	fn micros(micros: u64) -> Timestamp {

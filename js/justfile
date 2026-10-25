@@ -97,7 +97,7 @@ build:
 
 # Build browser/WASM bindings into @moq/wasm using the pinned wasm-bindgen toolchain.
 wasm PROFILE="wasm-release":
-    cargo build --locked -p moq-wasm --target wasm32-unknown-unknown --profile {{ PROFILE }}
+    bash ../sh/local.sh cargo build --locked -p moq-wasm --target wasm32-unknown-unknown --profile {{ PROFILE }}
     wasm-bindgen --target web --out-name moq --out-dir wasm/dist "${CARGO_TARGET_DIR:-../target}/wasm32-unknown-unknown/{{ if PROFILE == "dev" { "debug" } else { PROFILE } }}/moq_wasm.wasm"
 
 # Ensure the built public libraries can load without browser globals.

@@ -7,6 +7,10 @@
 # README.md for the profiles, the metric contract, and the void rules.
 set -euo pipefail
 
+if [[ "${GITHUB_ACTIONS:-}" != true && "${MOQ_LOCAL_SUPERVISED:-}" != 1 ]]; then
+    exec bash "$(dirname "$0")/../../sh/local.sh" bash "$0" "$@"
+fi
+
 AQ_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 WORKSPACE=$(cd "$AQ_DIR/../.." && pwd)
 CLIENT="$AQ_DIR/clients/js"

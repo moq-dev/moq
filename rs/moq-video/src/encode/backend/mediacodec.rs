@@ -131,7 +131,7 @@ pub(crate) struct MediaCodec {
 	kind: Codec,
 	width: usize,
 	height: usize,
-	framerate: crate::Rate,
+	framerate: crate::FrameRate,
 	/// The parameter sets (SPS/PPS, plus VPS for H.265) as the codec-config
 	/// buffer delivered them: Annex-B, ahead of the first picture. Kept because
 	/// every keyframe has to carry them for a subscriber joining there.
@@ -689,7 +689,7 @@ mod tests {
 	#[test]
 	#[ignore = "needs an Android device with a MediaCodec H.264 encoder"]
 	fn encodes_a_keyframe_with_parameter_sets_inline() {
-		let config = Config::new(320, 240, crate::Rate::new(30, 1).unwrap());
+		let config = Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap());
 		let mut backend = MediaCodec::open(&config).expect("a MediaCodec encoder");
 
 		let size = config.size();
