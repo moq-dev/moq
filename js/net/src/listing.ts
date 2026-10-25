@@ -119,8 +119,14 @@ class Queue {
 	}
 
 	next(): TracksEvent | undefined {
-		if (this.end !== undefined) {
-			if (this.end) throw this.end;
+		if (this.end) throw this.end;
+		if (this.end === null) {
+			// A clean end still reports each track that left before it, and how; an add the
+			// reader never read is dropped.
+			for (const [name, pending] of this.pending) {
+				this.pending.delete(name);
+				if (pending.kind !== "add") return { kind: pending.finished ? "finished" : "removed", name };
+			}
 			return undefined;
 		}
 		if (!this.synced && this.bound !== undefined && (this.bound === 0 || this.pending.size === 0)) {
@@ -229,8 +235,9 @@ export class Listing {
 		return queue;
 	}
 
-	/** A reader left. A replaced or ended one already did. */
+	/** A reader left, so it reads nothing more. A replaced or ended one already did. */
 	release(queue: Queue, owner?: object) {
+		queue.pending.clear();
 		if (queue.detached) return;
 		queue.finish(null);
 		this.#readers.delete(queue);
@@ -312,6 +319,18 @@ export class Listing {
 		this.#answered = false;
 	}
 
+	/**
+	 * The broadcast ended: so does every listing of it, first unlisting each of its producer's tracks
+	 * that finished. A handler's answer of the same name does not keep it live, since the producer's
+	 * track is what served it.
+	 */
+	close() {
+		for (const [name, entry] of [...this.#live]) {
+			if (entry.own && finished(entry.own)) this.#remove(name, true);
+		}
+		this.detach(null);
+	}
+
 	/** End every reader with `end` and detach them. */
 	detach(end: Error | null) {
 		for (const queue of this.#readers) queue.finish(end);
@@ -336,7 +355,8 @@ export function listTracks(listing: Listing, owner?: object): Tracks {
  * The tracks a broadcast lists, from its consumer's `tracks()`.
  *
  * Reports every track listed when it was created, then `synced`, then each change as it
- * happens, until the broadcast ends. Listing a broadcast never requests a track: subscribe to
+ * happens, until the broadcast ends: a clean end comes after each track that left before it, and
+ * a track still listed then ends unfinished. Listing a broadcast never requests a track: subscribe to
  * each listed one through the consumer's `track(name)`.
  *
  * @public

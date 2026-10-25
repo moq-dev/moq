@@ -48,7 +48,6 @@ timer on main at 1582fdc07d:
 
 - [Closing a binding broadcast ends its media](/quest/m1/broadcast-lifecycle/ffi-close.md) - moq-ffi and moq-c media handles end with a cause on close or drop, never a cause-less drop
 - [lite-03/04 close FIN](/quest/m1/broadcast-lifecycle/lite-close-fin.md) - a graceful relay close delivers pending SUBSCRIBE FINs on lite-03 and lite-04
-- [Timer cleanups](/quest/m1/broadcast-lifecycle/timers.md) - `ConnectionProps.linger` is gone and stale linger references are fixed
 
 ## Related
 

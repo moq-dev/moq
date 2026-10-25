@@ -1,5 +1,4 @@
 import { afterEach, expect, test } from "bun:test";
-import { Milli } from "@moq/clock";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as TrackProducer } from "../track.ts";
@@ -44,7 +43,7 @@ function stubTransport(stats: { estimatedSendRate?: number }): void {
 test("a connection samples the send rate onto the allocator", async () => {
 	stubTransport({ estimatedSendRate: 2_000_000 });
 
-	const connection = new Connection({ url, linger: Milli(20) });
+	const connection = new Connection({ url });
 	try {
 		await waitUntil(() => connection.status.peek() === "connected");
 		const allocator = connection.bandwidth.peek();
@@ -63,7 +62,7 @@ test("a connection samples the send rate onto the allocator", async () => {
 test("two publishers on one connection split the estimate by priority", async () => {
 	stubTransport({ estimatedSendRate: 2_000_000 });
 
-	const first = new Connection({ url, linger: Milli(20) });
+	const first = new Connection({ url });
 	const second = new Connection({ url });
 	try {
 		await waitUntil(() => first.status.peek() === "connected");
@@ -95,7 +94,7 @@ test("two publishers on one connection split the estimate by priority", async ()
 test("an idle track on a live connection claims nothing", async () => {
 	stubTransport({ estimatedSendRate: 2_000_000 });
 
-	const handle = new Connection({ url, linger: Milli(20) });
+	const handle = new Connection({ url });
 	try {
 		await waitUntil(() => handle.status.peek() === "connected");
 		const allocator = handle.bandwidth.peek();

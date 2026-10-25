@@ -1609,7 +1609,7 @@ impl<R: Request> RequestServe<R> {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		match ready!(self.poll_serve(waiter)) {
 			Ok(()) => {
-				tracing::info!(broadcast = %self.absolute, track = %self.track, "{} complete", R::KIND);
+				tracing::debug!(broadcast = %self.absolute, track = %self.track, "{} complete", R::KIND);
 				Poll::Ready(Ok(()))
 			}
 			// The peer's own malformed bytes are a control violation, even after request setup.
@@ -1617,7 +1617,7 @@ impl<R: Request> RequestServe<R> {
 			Err(err) => {
 				match &err {
 					err if is_cancel(err) => {
-						tracing::info!(broadcast = %self.absolute, track = %self.track, "{} cancelled", R::KIND)
+						tracing::debug!(broadcast = %self.absolute, track = %self.track, "{} cancelled", R::KIND)
 					}
 					Error::Unauthorized | Error::Stream(crate::StreamError::Unauthorized) => {
 						tracing::info!(broadcast = %self.absolute, track = %self.track, "{} unauthorized", R::KIND)
@@ -1664,7 +1664,7 @@ impl<R: Request> RequestServe<R> {
 					if R::SUBSCRIPTION {
 						self._subscription = Some(self.shared.subscriptions.hold());
 					}
-					tracing::info!(broadcast = %self.absolute, track = %self.track, request = ?msg, "{} started", R::KIND);
+					tracing::debug!(broadcast = %self.absolute, track = %self.track, request = ?msg, "{} started", R::KIND);
 					// Checked before anything is resolved, so a broadcast the session does not
 					// allow is never served, not just cut off later.
 					let mut gate = self.shared.gate(R::target(&msg).0);
