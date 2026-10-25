@@ -274,12 +274,13 @@ impl ListingState {
 	}
 
 	/// The broadcast ended: so does every listing of it, first unlisting each track its
-	/// producer created that `finished`, as its holder dropping later would have.
+	/// producer created that `finished`, as its holder dropping later would have. A handler's
+	/// answer of the same name does not keep it live, since the producer's track is what served it.
 	pub(super) fn close(&mut self, finished: impl Fn(&str) -> bool) {
 		let done: Vec<Arc<str>> = self
 			.live
 			.iter()
-			.filter(|(name, entry)| entry.own.is_some() && !entry.answered && finished(name))
+			.filter(|(name, entry)| entry.own.is_some() && finished(name))
 			.map(|(name, _)| name.clone())
 			.collect();
 		for name in done {
@@ -825,6 +826,18 @@ mod tests {
 		live.finish().unwrap();
 		broadcast.close();
 		assert_eq!(drain(&mut tracks), ["~a", "-b", "~live", "end"]);
+
+		// The producer's finished track is what a handler's answer of its name served.
+		let broadcast = Info::new().produce();
+		let lister = broadcast.dynamic().lister().unwrap();
+		lister.add("a", track::Info::default()).unwrap();
+		lister.synced();
+		let a = broadcast.create_track("a", None).unwrap();
+		let mut tracks = broadcast.consume().tracks().unwrap();
+		assert_eq!(drain(&mut tracks), ["+a", "synced"]);
+		a.finish().unwrap();
+		broadcast.close();
+		assert_eq!(drain(&mut tracks), ["~a", "end"]);
 
 		// A handler's end is clean too, and its abort is not.
 		for abort in [false, true] {

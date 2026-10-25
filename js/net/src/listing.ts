@@ -319,10 +319,14 @@ export class Listing {
 		this.#answered = false;
 	}
 
-	/** The broadcast ended: so does every listing of it, first unlisting each of its producer's tracks that finished. */
+	/**
+	 * The broadcast ended: so does every listing of it, first unlisting each of its producer's tracks
+	 * that finished. A handler's answer of the same name does not keep it live, since the producer's
+	 * track is what served it.
+	 */
 	close() {
 		for (const [name, entry] of [...this.#live]) {
-			if (entry.own && !entry.answered && finished(entry.own)) this.#remove(name, true);
+			if (entry.own && finished(entry.own)) this.#remove(name, true);
 		}
 		this.detach(null);
 	}

@@ -213,6 +213,18 @@ test("a clean end follows the removals before it", async () => {
 	broadcast.close();
 	expect(await tracks.drain()).toEqual(["~a", "-b", "~live", "end"]);
 
+	// The producer's finished track is what a handler's answer of its name served.
+	const both = new BroadcastProducer();
+	const handler = wireOf(both).lister();
+	handler.add("a", { priority: 0 });
+	handler.synced();
+	const own = both.createTrack("a");
+	const served = list(both);
+	expect(await served.drain()).toEqual(["+a", "synced"]);
+	own.close();
+	both.close();
+	expect(await served.drain()).toEqual(["~a", "end"]);
+
 	// A reader that closes itself reads nothing more, even what was queued before the end.
 	const closing = new BroadcastProducer();
 	const gone = closing.createTrack("gone");
