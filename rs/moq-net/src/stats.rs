@@ -476,8 +476,12 @@ struct DroppedCounters {
 
 impl DroppedCounters {
 	fn record(&self, span: Duration, bytes: u64) {
-		self.nanos
-			.fetch_add(u64::try_from(span.as_nanos()).unwrap_or(u64::MAX), Ordering::Relaxed);
+		let nanos = u64::try_from(span.as_nanos()).unwrap_or(u64::MAX);
+		// Saturating: the span is the peer's timestamps, and a cumulative counter that
+		// wrapped would read as a reset.
+		let _ = self.nanos.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |total| {
+			Some(total.saturating_add(nanos))
+		});
 		self.bytes.fetch_add(bytes, Ordering::Relaxed);
 		self.groups.fetch_add(1, Ordering::Relaxed);
 	}
@@ -2579,26 +2583,13 @@ impl FrontierInner {
 	fn sample(&self, now: Option<Instant>) {
 		let mut state = self.state();
 		let folded = std::mem::take(&mut state.folded);
-		let mut weight = 0u64;
-		let mut newest = None;
-		let mut first: Option<Duration> = None;
-		for source in &mut state.sources {
-			let production = &source.production;
-			// Acquire pairs with `Production::record`: the edges read below cover these bytes.
-			let bytes = production.bytes.load(Ordering::Acquire);
-			weight = weight.saturating_add(bytes.saturating_sub(source.sampled));
-			source.sampled = bytes;
-			newest = newest.max(Production::load(&production.newest));
-			if let Some(at) = Production::load(&production.first) {
-				first = Some(first.map_or(at, |first| first.min(at)));
-			}
-		}
 
 		// Any acknowledgement resets the stall, and an interval in which the sources
 		// produced while none arrived adds to it. Judged by bytes rather than by
 		// timestamps, so a publisher whose timestamps step back cannot hide a viewer
 		// that stopped acknowledging.
-		let produced = weight > 0 || !folded.is_empty();
+		let produced = !folded.is_empty()
+			|| (state.sources.iter()).any(|source| source.production.bytes.load(Ordering::Relaxed) > source.sampled);
 		if state.moved {
 			state.stalled = Duration::ZERO;
 		}
@@ -2614,20 +2605,32 @@ impl FrontierInner {
 
 		// Opened before anything produced: the earliest frame is where it started.
 		if state.acked.is_none() {
+			let first = (state.sources.iter()).filter_map(|source| Production::load(&source.production.first));
 			state.acked = folded.iter().map(|item| item.first).chain(first).min();
 		}
+		// Nothing timed produced yet: whatever lands from here is weighed next time.
 		let Some(acked) = state.acked else {
 			return;
 		};
 		let stalled = state.stalled;
-		let lag = |edge: Duration| edge.saturating_sub(acked).max(stalled);
 		let histogram = &self.counters.publisher.lag;
-		// A retired source's bytes are not the replacement's: each is weighed at its edge.
+		let weigh = |edge: Duration, weight: u64| histogram.record(edge.saturating_sub(acked).max(stalled), weight);
+		// One source's bytes are not another's, a retired copy's nor a live one's: each
+		// is weighed at its own edge.
 		for item in &folded {
-			histogram.record(lag(item.newest), item.weight);
+			weigh(item.newest, item.weight);
 		}
-		if let Some(newest) = newest {
-			histogram.record(lag(newest), weight);
+		for source in &mut state.sources {
+			let production = &source.production;
+			// Acquire pairs with `Production::record`: the edge read below covers these bytes.
+			let bytes = production.bytes.load(Ordering::Acquire);
+			let weight = bytes.saturating_sub(source.sampled);
+			source.sampled = bytes;
+			if weight > 0
+				&& let Some(newest) = Production::load(&production.newest)
+			{
+				weigh(newest, weight);
+			}
 		}
 	}
 }
@@ -4203,6 +4206,23 @@ mod lag_tests {
 		assert_eq!((dropped.groups, dropped.bytes), (1, 40));
 	}
 
+	/// The peer stamps the frames, so a dropped span can pass what the counter holds:
+	/// the duration saturates rather than wrapping to read as a reset.
+	#[test]
+	fn a_dropped_span_past_the_counter_saturates() {
+		let h = Harness::new();
+		let sub = h.subscribe();
+		let last = Timestamp::from_secs((1 << 61) - 1).unwrap();
+		for _ in 0..2 {
+			let mut delivery = sub.delivery();
+			delivery.frame(Some(Timestamp::ZERO));
+			delivery.wrote(1);
+			delivery.frame(Some(last));
+			delivery.wrote(1);
+		}
+		assert_eq!(h.tick().dropped.duration, Duration::from_nanos(u64::MAX));
+	}
+
 	#[test]
 	fn a_frame_written_in_chunks_weighs_what_arrived() {
 		let h = Harness::new();
@@ -4218,6 +4238,48 @@ mod lag_tests {
 		frame.write(vec![0u8; 400]).unwrap();
 		let now = h.tick();
 		assert_eq!(grew(&last, &now), vec![(0, 400)]);
+	}
+
+	/// A compressed track's frame weighs the slice it stores, whether written whole or
+	/// streamed in chunks of plain payload.
+	#[test]
+	fn a_compressed_frame_weighs_its_stored_size_however_written() {
+		let h = Harness::new();
+		let info = track::Info::timed().with_compress(true);
+		let track = h.broadcast.create_track("captions", info).unwrap();
+		let _sub = (h.broadcast.consume().with_stats(h.session.egress(PATH)))
+			.track("captions")
+			.unwrap()
+			.subscribe(None)
+			.now_or_never()
+			.expect("track is live")
+			.expect("subscribed");
+		let payload = vec![7u8; 4000];
+		let mut last = h.tick();
+		let mut weights = Vec::new();
+		for (index, chunked) in [false, true].into_iter().enumerate() {
+			let mut group = track.append_group().unwrap();
+			let timestamp = Timestamp::from_millis(1000 * index as u64).unwrap();
+			if chunked {
+				let info = crate::frame::Info {
+					size: payload.len() as u64,
+					timestamp: Some(timestamp),
+				};
+				let mut frame = group.create_frame(info).unwrap();
+				for chunk in payload.chunks(1000) {
+					frame.write(chunk.to_vec()).unwrap();
+				}
+				group = frame.finish().unwrap();
+			} else {
+				group.write_frame(timestamp, payload.clone()).unwrap();
+			}
+			group.finish().unwrap();
+			let now = h.tick();
+			weights.push(now.lag.total() - last.lag.total());
+			last = now;
+		}
+		assert!(weights[0] < payload.len() as u64, "the frame compressed: {weights:?}");
+		assert_eq!(weights[0], weights[1]);
 	}
 
 	#[test]
@@ -4343,6 +4405,27 @@ mod lag_tests {
 		let counters = h.stats.shared().entries.lock()[&PathOwned::from(PATH.to_string())].tier(&Tier::default());
 		let held = counters.publisher.frontiers.lock().unwrap().len();
 		assert!(held <= 8, "{held} frontiers held with none live");
+	}
+
+	/// Two copies live at once, as a resumed subscription's old and new are until the
+	/// old one drains, each weigh at their own edge: the one far ahead does not drag
+	/// the other's bytes up the buckets.
+	#[test]
+	fn live_copies_weigh_at_their_own_edges() {
+		let h = Harness::new();
+		let subscription = h.session.egress(PATH).subscribe();
+		let (near, far) = (Arc::new(Production::default()), Arc::new(Production::default()));
+		let _watches = (
+			subscription.frontier().watch(&near),
+			subscription.frontier().watch(&far),
+		);
+		let at = |millis| Some(Timestamp::from_millis(millis).unwrap());
+		near.record(at(0), 10);
+		far.record(at(0), 10);
+		let last = h.tick();
+		near.record(at(100), 10);
+		far.record(at(3000), 20);
+		assert_eq!(grew(&last, &h.tick()), vec![(2, 10), (6, 20)]);
 	}
 
 	#[test]

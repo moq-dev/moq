@@ -180,17 +180,35 @@ fn retag(c: &mut Criterion) {
 const SUBSCRIBED: [(usize, usize); 4] = [(100, 1), (1_000, 1), (100, 10), (1_000, 10)];
 
 /// A registry with `subscriptions` tagged egress subscriptions on each of
-/// `broadcasts` live broadcasts, each track holding one frame.
+/// `broadcasts` live broadcasts. The cache has a byte target, as a relay's does, so
+/// producing a group per report evicts old ones rather than growing.
 struct Subscribed {
 	registry: stats::Registry,
 	_driver: origin::Driver,
-	_publishers: Vec<(origin::Publication, track::Producer)>,
+	publishers: Vec<(origin::Publication, track::Producer)>,
 	_subscribers: Vec<track::Subscriber>,
+	/// Milliseconds of media produced so far.
+	produced: std::cell::Cell<u64>,
+}
+
+impl Subscribed {
+	/// One second of media on every track: a group of one 100 byte frame.
+	fn produce(&self) {
+		let at = Timestamp::from_millis(self.produced.get()).unwrap();
+		for (_, track) in &self.publishers {
+			let mut group = track.append_group().unwrap();
+			group.write_frame(at, vec![0u8; 100]).unwrap();
+			group.finish().unwrap();
+		}
+		self.produced.set(self.produced.get() + 1000);
+	}
 }
 
 fn subscribed(broadcasts: usize, subscriptions: usize) -> Subscribed {
 	let registry = stats::Registry::new(stats::Config::new());
-	let (producer, mut driver) = origin::Producer::new(origin::Config::default());
+	let mut config = origin::Config::default();
+	config.pool = moq_net::cache::Pool::new(moq_net::cache::Config::default().with_capacity(16 << 20));
+	let (producer, mut driver) = origin::Producer::new(config);
 	let waiter = kio::Waiter::noop();
 	let timed = track::Info::default().with_timescale(Timescale::MILLI);
 	let mut publishers = Vec::new();
@@ -199,9 +217,6 @@ fn subscribed(broadcasts: usize, subscriptions: usize) -> Subscribed {
 		let path = format!("room/{i}");
 		let broadcast = producer.publish(path.as_str(), origin::Route::default()).unwrap();
 		let track = broadcast.create_track("video", timed.clone()).unwrap();
-		let mut group = track.append_group().unwrap();
-		group.write_frame(Timestamp::ZERO, vec![0u8; 100]).unwrap();
-		group.finish().unwrap();
 		for _ in 0..subscriptions {
 			let session = registry.tier(stats::Tier::default()).session("root");
 			let pending = producer
@@ -219,28 +234,49 @@ fn subscribed(broadcasts: usize, subscriptions: usize) -> Subscribed {
 	Subscribed {
 		registry,
 		_driver: driver,
-		_publishers: publishers,
+		publishers,
 		_subscribers: subscribers,
+		produced: std::cell::Cell::new(0),
 	}
 }
 
+/// A report on a live relay: every subscription's track produced since the last, so
+/// each one's bytes are weighed. Only the report is timed.
 fn sample(c: &mut Criterion) {
 	let mut group = c.benchmark_group("stats/sample");
 	for (broadcasts, subscriptions) in SUBSCRIBED {
 		let fixture = subscribed(broadcasts, subscriptions);
 		let mut report = stats::Report::default();
-		fixture.registry.report(&mut report, moq_net::time::Instant::ZERO);
+		fixture.produce();
+		fixture.registry.report(&mut report, moq_net::time::Instant::now());
 		let subscribed: u64 = report.traffic.iter().map(|e| e.publisher.subscriptions_started).sum();
 		assert_eq!(
 			subscribed,
 			(broadcasts * subscriptions) as u64,
 			"every subscription is tagged"
 		);
+		let weighed: u64 = report.traffic.iter().map(|e| e.publisher.lag.total()).sum();
+		assert_eq!(
+			weighed,
+			(broadcasts * subscriptions * 100) as u64,
+			"every subscription is weighed"
+		);
 
 		group.bench_with_input(
 			BenchmarkId::from_parameter(format!("{broadcasts}x{subscriptions}")),
 			&fixture,
-			|b, fixture| b.iter(|| fixture.registry.report(&mut report, moq_net::time::Instant::ZERO)),
+			|b, fixture| {
+				b.iter_custom(|iters| {
+					let mut spent = std::time::Duration::ZERO;
+					for _ in 0..iters {
+						fixture.produce();
+						let now = moq_net::time::Instant::now();
+						fixture.registry.report(&mut report, now);
+						spent += now.elapsed();
+					}
+					spent
+				})
+			},
 		);
 	}
 	group.finish();

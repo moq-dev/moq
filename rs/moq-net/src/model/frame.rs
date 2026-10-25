@@ -492,8 +492,9 @@ pub struct Producer {
 	// A receive handler's cancellation cleanup, carried across polls.
 	cancel_on_drop: bool,
 	// Ingress payload meter, inherited from the parent group. Counts each written
-	// chunk's bytes. Empty (no-op) for an untagged group.
-	stats: stats::Meter,
+	// chunk's bytes, and the track's production. Empty (no-op) for an untagged group;
+	// `None` for a frame its compressed group deflates on commit, which counts both then.
+	stats: Option<stats::Meter>,
 	// The frame's share of the origin's [`Budget`], if it got one, held until it ends.
 	_reserved: Option<Reservation>,
 }
@@ -514,13 +515,13 @@ impl Producer {
 			info,
 			done: false,
 			cancel_on_drop: false,
-			stats: stats::Meter::default(),
+			stats: Some(stats::Meter::default()),
 			_reserved: reserved,
 		}
 	}
 
 	/// Attach the parent group's ingress meter, so written chunks bump `bytes`.
-	pub(super) fn with_meter(mut self, meter: stats::Meter) -> Self {
+	pub(super) fn with_meter(mut self, meter: Option<stats::Meter>) -> Self {
 		self.stats = meter;
 		self
 	}
@@ -567,8 +568,10 @@ impl Producer {
 			return Err(Error::WrongSize);
 		}
 		// Ingress payload: count the chunk's bytes as they're written.
-		self.stats.bytes(len as u64);
-		self.group().produced(self.info.timestamp, len as u64);
+		if let Some(stats) = &self.stats {
+			stats.bytes(len as u64);
+			self.group().produced(self.info.timestamp, len as u64);
+		}
 		// Fast path: a single whole-frame write keeps the caller's allocation.
 		if len == self.buf.size() && self.buf.written(Ordering::Acquire) == 0 {
 			match self.buf.try_set_bytes(chunk.into_bytes()) {

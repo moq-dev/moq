@@ -1437,13 +1437,13 @@ impl Producer {
 		Ok(frame::Producer::new(self, buf, info, reserved).with_meter(meter))
 	}
 
-	/// The meter a streamed frame's chunks bump: none for a plain frame a compressed group
-	/// compresses on commit, which counts its stored slice then, as `bytes` counts payload
-	/// as stored.
-	fn chunk_meter(&self, inflated: Option<u64>) -> stats::Meter {
+	/// The meter a streamed frame's chunks bump, with the track's production: none for a
+	/// plain frame a compressed group compresses on commit, which counts its stored slice
+	/// then, as both count payload as stored.
+	fn chunk_meter(&self, inflated: Option<u64>) -> Option<stats::Meter> {
 		match self.handle.track.compress && inflated.is_none() {
-			true => stats::Meter::default(),
-			false => self.stats.clone(),
+			true => None,
+			false => Some(self.stats.clone()),
 		}
 	}
 
@@ -1576,7 +1576,7 @@ impl Producer {
 		let mut now = state.charge_partial();
 		let partial = state.partial.take();
 		let mut frame = frame;
-		if partial.as_ref().is_some_and(|partial| partial.scratch) {
+		if let Some(partial) = partial.as_ref().filter(|partial| partial.scratch) {
 			let flate = state.flate.as_mut().expect("scratch only opens on a compressed group");
 			let inflated = frame.payload.len() as u64;
 			frame.payload = flate.deflate(&frame.payload);
@@ -1589,6 +1589,7 @@ impl Producer {
 			state.cache += size;
 			now = state.charge.add(size);
 			self.stats.bytes(size);
+			self.produced(partial.timestamp, size);
 		} else if let (Some(flate), Some(inflated)) = (&mut state.flate, partial.as_ref().and_then(|p| p.inflated)) {
 			// Admitted against the budget when it opened.
 			flate.sizes.push_back(inflated);

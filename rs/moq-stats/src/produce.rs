@@ -239,7 +239,8 @@ impl Task {
 
 		loop {
 			// Scheduled instants are at least an interval apart, even after a late tick,
-			// so each drain gets an interval of its own to open its groups in.
+			// so each drain gets an interval of its own to open its groups in. The lag
+			// sample takes the time it actually ran: a viewer stalls across the delay too.
 			let scheduled = ticker.tick().await;
 
 			if weak.upgrade().is_none() {
@@ -247,7 +248,7 @@ impl Task {
 				return;
 			}
 
-			drain.collect(scheduled);
+			drain.collect(moq_clock::now());
 			drain.publish(scheduled);
 		}
 	}
@@ -2546,6 +2547,42 @@ mod tests {
 		let tier = &group.tiers[""];
 		assert_eq!(tier.publisher.lag.total(), 10);
 		assert!(tier.paths["acme/live"].publisher.lag.is_empty());
+	}
+
+	/// A drain that runs late samples lag at the time it ran, not the tick it was due
+	/// at: a viewer that acknowledged nothing is behind across the delay too.
+	#[tokio::test(start_paused = true)]
+	async fn a_late_drain_charges_the_stall_up_to_when_it_ran() {
+		let (producer, origin) = test_producer(None);
+		let registry = producer.registry();
+		let data = produce_origin();
+		let source = data.publish("acme/live", origin::Route::default()).expect("publish");
+		let video = source.create_track("video", timed()).expect("create_track");
+		let egress = data
+			.consume()
+			.with_stats(registry.tier(Tier::default()).session("viewer"));
+		let broadcast = egress.request_broadcast("acme/live", None).await.expect("resolve");
+		let _sub = broadcast
+			.track("video")
+			.expect("track")
+			.subscribe(None)
+			.await
+			.expect("subscribe");
+		// An idle drain with the subscription open, which the stall is measured from.
+		drive_tick().await;
+
+		let mut group = video.append_group().expect("group");
+		group.write_frame(Timestamp::ZERO, vec![0u8; 100]).expect("write");
+		group.finish().expect("finish");
+		// The next drain, due an interval from now, runs 3s from now.
+		tokio::time::advance(Duration::from_secs(3)).await;
+		for _ in 0..4 {
+			tokio::task::yield_now().await;
+		}
+
+		let (_, stats) = announced(&origin).await;
+		let lag = default_totals(&stats).await.publisher.lag;
+		assert_eq!(lag.buckets(), &[0, 0, 0, 0, 0, 0, 100, 0], "stalled 3s, under 5s");
 	}
 
 	/// Counters follow presence: a prefix held while 300 subscriptions are
