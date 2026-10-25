@@ -29,6 +29,10 @@ impl Grouped for quic::web::Session {
 		Some(quic::web::Session::wire(self))
 	}
 
+	fn probe(&self) -> Option<moq_net::transport::Probe> {
+		quic::web::Session::probe(self)
+	}
+
 	fn streams_evicted(&self) -> Option<u64> {
 		Some(quic::web::Session::streams_evicted(self))
 	}

@@ -406,7 +406,16 @@ async fn announced_route_keeps_static_cost_on_reannounce() {
 			epoch: route.epoch.clone(),
 		})
 		.unwrap();
-	let current = broadcast.state.lock().unwrap().as_ref().unwrap().broadcast.route();
+	let current = broadcast
+		.state
+		.lock()
+		.unwrap()
+		.as_ref()
+		.unwrap()
+		.publication
+		.as_ref()
+		.unwrap()
+		.route();
 	assert_eq!(current.map(MoqRoute::from), Some(route));
 
 	broadcast.close().unwrap();
@@ -4403,7 +4412,8 @@ async fn dynamic_broadcast_request() {
 		.unwrap();
 	assert_eq!(request.path().unwrap(), "dynamic/broadcast");
 
-	let prepared = request.prepare(moq_net::Epoch::mint().to_string()).unwrap();
+	let epoch = moq_net::Epoch::mint().to_string();
+	let prepared = request.prepare(epoch.clone()).unwrap();
 	let served = prepared.broadcast();
 	let track = served.publish_track("status".into(), Some(timed_info())).unwrap();
 	// Only publish announces the answer, under its epoch and after admission.
@@ -4412,6 +4422,12 @@ async fn dynamic_broadcast_request() {
 		Err(MoqError::Closed)
 	));
 	prepared.publish().unwrap();
+	served
+		.announce(MoqAnnounceRoute {
+			epoch: Some(epoch),
+			cost: 7,
+		})
+		.unwrap();
 	assert!(matches!(request.path(), Err(MoqError::Closed)));
 
 	let broadcast = tokio::time::timeout(TIMEOUT, request_broadcast)
@@ -5619,9 +5635,9 @@ async fn announced_broadcast_hands_out_a_held_takeover_once() {
 	announced_broadcast_hands_out_a_takeover_once("live").await;
 }
 
-/// An end is a gap that ended every request on the old route, even when a route above the path
-/// with the same epoch carries the instance on. So the instance serving the path afterwards is
-/// handed out again, though it is the one the caller still holds.
+/// An end is a gap that ended every request on the old route, even when a claim above the path
+/// answers under the same epoch. So the instance serving the path afterwards is handed out
+/// again, though its epoch is the one the caller still holds.
 #[tokio::test]
 async fn announced_broadcast_hands_out_the_instance_again_after_an_end() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
@@ -5637,29 +5653,26 @@ async fn announced_broadcast_hands_out_the_instance_again_after_an_end() {
 		.expect("timed out waiting for the broadcast")
 		.unwrap();
 
-	// A peer's covering route under the same epoch, which the public claim cannot express.
-	let dynamic = origin
-		.inner()
-		.inner
-		.dynamic_route("", route.clone().try_into().unwrap())
-		.unwrap();
+	// A covering claim answering under the same epoch.
+	let dynamic = origin.inner().inner.dynamic("").unwrap();
 	broadcast.unannounce().unwrap();
 	let again = tokio::spawn(async move { followed.available().await });
 	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_broadcast())
 		.await
 		.expect("the instance never asked the route above the path")
 		.unwrap();
-	let served = moq_net::broadcast::Info::new().produce();
-	request.accept(served.consume());
+	let epoch = route.epoch.clone().unwrap().parse().unwrap();
+	let served = request.prepare(epoch).unwrap().publish().unwrap();
 
 	let again = tokio::time::timeout(TIMEOUT, again)
 		.await
 		.expect("the instance was never handed out again")
 		.unwrap()
 		.unwrap();
-	assert!(
-		again.inner().is_clone(first.inner()),
-		"the route above did not carry the instance on"
+	assert_eq!(
+		again.inner().info().epoch,
+		first.inner().info().epoch,
+		"the claim above did not answer the same instance"
 	);
 	drop((served, dynamic));
 	broadcast.close().unwrap();
