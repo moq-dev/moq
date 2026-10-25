@@ -64,7 +64,6 @@ approved posting there on 2026-10-24.
 ## Required
 
 - [Drop moq-transport 14-17](/quest/m1/ietf-drop/d14-17.md) - the legacy control-stream adapter, legacy SETUP negotiation, the request window and its public limit, and the draft-17 varint family are gone in Rust and JS
-- [Drop moq-transport 19-21](/quest/m1/ietf-drop/d19-21.md) - the 18-19 and 20-22 families collapse onto 18 and 22
 
 ## Related
 

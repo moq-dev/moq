@@ -30,7 +30,7 @@ public = "**"
 #
 #   .stats/node/local/host
 #
-# carrying totals.json, publisher.json, subscriber.json, and sessions.json tracks. See
+# carrying totals.json and group.json tracks. See
 # doc/bin/relay/config.md for the field semantics.
 [stats]
 enabled = true

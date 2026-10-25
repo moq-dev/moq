@@ -49,28 +49,5 @@ extension AudioFrameDuration on MoqAudioFrame {
   Duration get timestamp => Duration(microseconds: timestampUs);
 }
 
-/// Duration view over an encoder's frame size.
-extension AudioEncoderOutputDuration on MoqAudioEncoderOutput {
-  /// Encoded frame duration; zero takes the codec's own.
-  Duration get frameDuration => Duration(microseconds: frameDurationUs);
-}
-
-/// Duration view over a decoder's latency bound.
-extension AudioDecoderOutputDuration on MoqAudioDecoderOutput {
-  /// Upper bound on buffering before a stalled group is skipped, or null for the default.
-  Duration? get maxDelay =>
-      maxDelayUs == null ? null : Duration(microseconds: maxDelayUs!);
-
-  /// Fixed playout delay to hold ahead of the playhead, or null to estimate it from arrival timing.
-  Duration? get delay =>
-      delayUs == null ? null : Duration(microseconds: delayUs!);
-}
-
-/// Duration view over a consumer's playout delay.
-extension AudioConsumerDuration on MoqAudioConsumer {
-  /// Playout delay to hold ahead of the playhead: the fixed one, or the estimate from every frame read so far.
-  Duration get delay => Duration(microseconds: delayUs());
-}
-
 /// Input, codec settings, and publication ownership for a producer.
 typedef ProducerOptions = MoqAudioProducerOptions;

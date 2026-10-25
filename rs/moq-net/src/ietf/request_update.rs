@@ -1,4 +1,4 @@
-//! The MAX_REQUEST_UPDATES Setup Option (draft-ietf-moq-transport-19 section 10.3.1.7).
+//! The MAX_REQUEST_UPDATES Setup Option (draft-ietf-moq-transport-22).
 //!
 //! A request stream (SUBSCRIBE, PUBLISH_NAMESPACE, ...) can be refreshed in place with
 //! REQUEST_UPDATE messages. Each is outstanding from when the peer sends it until its
@@ -7,7 +7,7 @@
 //! acceptor holds one renewal unanswered while more pile up behind it; this bound is what
 //! stops that queue from growing without limit.
 //!
-//! The option is draft-19+ (Option Type 0x08). Advertising it lets a conforming peer
+//! The option is draft-22 (Option Type 0x08). Advertising it lets a conforming peer
 //! self-limit, so a peer that exceeds the advertised value broke a negotiated rule, which
 //! the draft answers with a session close ([`SessionError::TooManyRequestUpdates`]). Drafts
 //! below 19 carry no such option, so a peer there agreed to no ceiling: the receiver keeps
@@ -37,7 +37,7 @@ pub const MAX_REQUEST_UPDATES: u64 = 16;
 /// one request, never the session.
 pub const UNNEGOTIATED_GUARD: usize = 64;
 
-/// Whether this version defines MAX_REQUEST_UPDATES. Draft-19 section 10.3.1.7 added it; the
+/// Whether this version defines MAX_REQUEST_UPDATES. Draft-22 section 9.1.7 added it; the
 /// drafts below carry no such Setup Option.
 pub fn supported(version: Version) -> bool {
 	!matches!(
@@ -68,7 +68,7 @@ impl<T> Default for Renewal<T> {
 
 /// An update past the bound on outstanding updates.
 pub(super) enum Overflow {
-	/// Past the MAX_REQUEST_UPDATES we advertised (draft 19+): the session closes.
+	/// Past the MAX_REQUEST_UPDATES we advertised (draft 22): the session closes.
 	Session,
 	/// Past the local guard on a draft without the option: only the request ends.
 	Request,
@@ -92,7 +92,7 @@ impl<T> Renewal<T> {
 		let outstanding = self.queued.len() as u64 + 1;
 		match supported(version) {
 			// We advertised the credit, so a peer with that many outstanding sending another
-			// broke the negotiated limit (draft-19 section 10.3.1.7).
+			// broke the negotiated limit (draft-22 section 9.1.7).
 			true if outstanding >= MAX_REQUEST_UPDATES => return Err(Overflow::Session),
 			false if self.queued.len() >= UNNEGOTIATED_GUARD => return Err(Overflow::Request),
 			_ => {}
@@ -158,16 +158,13 @@ mod tests {
 	/// The option rides SETUP only on the drafts that define it; an older peer sees nothing,
 	/// which is what keeps the bound a negotiated contract rather than a surprise.
 	#[test]
-	fn advertised_only_on_draft_19_plus() {
-		for version in [Version::Draft19, Version::Draft20, Version::Draft21, Version::Draft22] {
-			let mut params = super::super::Parameters::default();
-			into_setup(&mut params, version);
-			assert_eq!(
-				params.get_varint(super::super::ParameterVarInt::MaxRequestUpdates),
-				Some(MAX_REQUEST_UPDATES),
-				"{version} must advertise MAX_REQUEST_UPDATES"
-			);
-		}
+	fn advertised_only_on_draft_22() {
+		let mut params = super::super::Parameters::default();
+		into_setup(&mut params, Version::Draft22);
+		assert_eq!(
+			params.get_varint(super::super::ParameterVarInt::MaxRequestUpdates),
+			Some(MAX_REQUEST_UPDATES)
+		);
 
 		for version in [
 			Version::Draft14,

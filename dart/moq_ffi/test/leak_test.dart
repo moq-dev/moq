@@ -1,15 +1,24 @@
-import 'dart:io';
+import 'dart:ffi';
 import 'dart:typed_data';
 
 import 'package:moq_ffi/moq_ffi.dart';
 import 'package:test/test.dart';
 
 // Each call moves `size` bytes across the FFI boundary, so a leak of that
-// buffer grows resident memory by `iterations * size`. Growth under a quarter of
-// that leaves room for allocator and Dart heap noise without hiding a leak.
+// buffer grows moq's heap by `iterations * size`. Growth under a quarter of
+// that leaves room for buffers moq keeps warm without hiding a leak.
 const size = 64 * 1024;
 const iterations = 2000;
 const leaked = size * iterations;
+
+/// The bytes moq's heap holds, counted by the checkout build's `testing`
+/// feature. Process memory would also count Dart's heap, which grows without
+/// a leak until the next collection.
+@Native<Uint64 Function()>(
+  symbol: 'moq_ffi_test_allocated',
+  assetId: 'package:moq_ffi/uniffi:moq_ffi',
+)
+external int allocated();
 
 void main() {
   test('a returned String is released', () {
@@ -23,11 +32,11 @@ void main() {
       demand.name();
     }
 
-    final before = ProcessInfo.currentRss;
+    final before = allocated();
     for (var i = 0; i < iterations; i++) {
       demand.name();
     }
-    final growth = ProcessInfo.currentRss - before;
+    final growth = allocated() - before;
 
     expect(growth, lessThan(leaked ~/ 4));
     track.dispose();
@@ -54,11 +63,11 @@ void main() {
       await call();
     }
 
-    final before = ProcessInfo.currentRss;
+    final before = allocated();
     for (var i = 0; i < iterations; i++) {
       await call();
     }
-    final growth = ProcessInfo.currentRss - before;
+    final growth = allocated() - before;
 
     expect(growth, lessThan(leaked ~/ 4));
   });
@@ -92,11 +101,11 @@ void main() {
       await roundTrip();
     }
 
-    final before = ProcessInfo.currentRss;
+    final before = allocated();
     for (var i = 0; i < iterations; i++) {
       await roundTrip();
     }
-    final growth = ProcessInfo.currentRss - before;
+    final growth = allocated() - before;
 
     expect(growth, lessThan(leaked ~/ 4));
   });

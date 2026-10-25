@@ -241,7 +241,7 @@ async fn rust_ffi() {
 		let broadcast = origin.create_broadcast("bench".into()).unwrap();
 		let timed = MoqTrackInfo {
 			priority: 0,
-			max_age_us: None,
+			max_age: None,
 			refresh: None,
 			timescale: Some(1_000_000),
 			compress: false,
@@ -267,7 +267,7 @@ async fn rust_ffi() {
 	});
 	let consumer = track.consume(None).unwrap();
 	report.call("info", || {
-		black_box(black_box(&consumer).info().unwrap());
+		black_box(black_box(&consumer).info());
 	});
 	report.write("rust-ffi");
 }

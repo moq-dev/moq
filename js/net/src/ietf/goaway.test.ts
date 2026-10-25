@@ -93,7 +93,6 @@ for (const [version, alpn] of [
 	[Version.DRAFT_15, ALPN.DRAFT_15],
 	[Version.DRAFT_17, ALPN.DRAFT_17],
 	[Version.DRAFT_18, ALPN.DRAFT_18],
-	[Version.DRAFT_21, ALPN.DRAFT_21],
 	[Version.DRAFT_22, ALPN.DRAFT_22],
 ] as const) {
 	for (const end of ["FIN", "reset", "STOP_SENDING"] as const) {
@@ -124,7 +123,7 @@ for (const [version, alpn] of [
 
 for (const [version, alpn] of [
 	[Version.DRAFT_18, ALPN.DRAFT_18],
-	[Version.DRAFT_21, ALPN.DRAFT_21],
+	[Version.DRAFT_22, ALPN.DRAFT_22],
 ] as const) {
 	test(`${alpn} rejects queued duplicate GOAWAYs before exposing a drain`, async () => {
 		const pair = createMockTransportPair(alpn);

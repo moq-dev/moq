@@ -36,7 +36,7 @@
 		"@moq/signals": "workspace:^",
 		"@moq/ui": "workspace:^",
 		"@moq/video": "workspace:^",
-		"mediabunny": "^1.61.4"
+		"mediabunny": "^1.61.6"
 	},
 	"devDependencies": {
 		"@types/audioworklet": "^0.0.100",
