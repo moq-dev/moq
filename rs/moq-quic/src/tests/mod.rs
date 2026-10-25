@@ -1,3 +1,4 @@
+use crate::cid_generator::HashedConnectionIdGenerator;
 use std::{
 	any::Any,
 	collections::{BTreeMap, BTreeSet},
@@ -847,10 +848,10 @@ fn finish_stream_simple() {
 	assert_matches!(pair.server_conn_mut(server_ch).poll(), None);
 
 	let mut recv = pair.server_recv(server_ch, s);
-	let mut chunks = recv.read(false).unwrap();
+	let mut chunks = recv.read().unwrap();
 	assert_matches!(
 		chunks.next(usize::MAX),
-		Ok(Some(chunk)) if chunk.offset == 0 && chunk.bytes == MSG
+		Ok(Some(chunk)) if chunk.bytes == MSG
 	);
 	assert_matches!(chunks.next(usize::MAX), Ok(None));
 	let _ = chunks.finalize();
@@ -882,7 +883,7 @@ fn reset_stream() {
 	);
 	assert_matches!(pair.server_streams(server_ch).accept(Dir::Uni), Some(stream) if stream == s);
 	let mut recv = pair.server_recv(server_ch, s);
-	let mut chunks = recv.read(false).unwrap();
+	let mut chunks = recv.read().unwrap();
 	assert_matches!(chunks.next(usize::MAX), Err(ReadError::Reset(ERROR)));
 	let _ = chunks.finalize();
 	assert_matches!(pair.client_conn_mut(client_ch).poll(), None);
@@ -1115,10 +1116,10 @@ fn zero_rtt_happypath() {
 	);
 
 	let mut recv = pair.server_recv(server_ch, s);
-	let mut chunks = recv.read(false).unwrap();
+	let mut chunks = recv.read().unwrap();
 	assert_matches!(
 		chunks.next(usize::MAX),
-		Ok(Some(chunk)) if chunk.offset == 0 && chunk.bytes == MSG
+		Ok(Some(chunk)) if chunk.bytes == MSG
 	);
 	let _ = chunks.finalize();
 	assert_eq!(pair.client_conn_mut(client_ch).stats().path.lost_packets, 0);
@@ -1189,7 +1190,7 @@ fn zero_rtt_rejection() {
 	// The server discarded its 0-RTT keys, so it never decrypted the STREAM frame and has no
 	// state for `s2`
 	let mut recv = pair.server_recv(server_ch, s2);
-	assert_eq!(recv.read(false).err(), Some(ReadableError::ClosedStream));
+	assert_eq!(recv.read().err(), Some(ReadableError::ClosedStream));
 	assert_eq!(pair.client_conn_mut(client_ch).stats().path.lost_packets, 0);
 
 	// Rejecting early data must release the entire send window for 1-RTT traffic.
@@ -1197,7 +1198,7 @@ fn zero_rtt_rejection() {
 	pair.client_send(client_ch, s2).finish().unwrap();
 	pair.drive();
 	let mut recv = pair.server_recv(server_ch, s2);
-	let mut chunks = recv.read(false).unwrap();
+	let mut chunks = recv.read().unwrap();
 	assert_eq!(chunks.next(usize::MAX).unwrap().unwrap().bytes, MSG);
 	assert_eq!(chunks.next(usize::MAX).unwrap(), None);
 	let _ = chunks.finalize();
@@ -1269,12 +1270,11 @@ fn test_zero_rtt_incoming_limit<F: FnOnce(&mut ServerConfig)>(configure_server: 
 	);
 
 	let mut recv = pair.server_recv(server_ch, s);
-	let mut chunks = recv.read(false).unwrap();
+	let mut chunks = recv.read().unwrap();
 	let mut offset = 0;
 	loop {
 		match chunks.next(usize::MAX) {
 			Ok(Some(chunk)) => {
-				assert_eq!(chunk.offset as usize, offset);
 				offset += chunk.bytes.len();
 			}
 			Err(ReadError::Blocked) => break,
@@ -1636,10 +1636,10 @@ fn stream_id_limit() {
 	assert_matches!(pair.server_streams(server_ch).accept(Dir::Uni), Some(stream) if stream == s);
 
 	let mut recv = pair.server_recv(server_ch, s);
-	let mut chunks = recv.read(false).unwrap();
+	let mut chunks = recv.read().unwrap();
 	assert_matches!(
 		chunks.next(usize::MAX),
-		Ok(Some(chunk)) if chunk.offset == 0 && chunk.bytes == MSG
+		Ok(Some(chunk)) if chunk.bytes == MSG
 	);
 	assert_eq!(chunks.next(usize::MAX), Ok(None));
 	let _ = chunks.finalize();
@@ -1688,7 +1688,7 @@ fn stream_id_limit() {
 	assert_matches!(pair.server_conn_mut(server_ch).poll(), None);
 
 	let mut recv = pair.server_recv(server_ch, s);
-	let mut chunks = recv.read(false).unwrap();
+	let mut chunks = recv.read().unwrap();
 	assert_matches!(chunks.next(usize::MAX), Ok(None));
 	let _ = chunks.finalize();
 }
@@ -1770,7 +1770,7 @@ fn data_blocked() {
 	// Running into the raised limit is reported again
 	assert_matches!(pair.server_streams(server_ch).accept(Dir::Uni), Some(stream) if stream == s);
 	let mut recv = pair.server_recv(server_ch, s);
-	let mut chunks = recv.read(true).unwrap();
+	let mut chunks = recv.read().unwrap();
 	assert_matches!(chunks.next(usize::MAX), Ok(Some(chunk)) if chunk.bytes.len() == 10);
 	let _ = chunks.finalize();
 	pair.drive();
@@ -1814,7 +1814,7 @@ fn stream_data_blocked() {
 	// Running into the raised limit is reported again
 	assert_matches!(pair.server_streams(server_ch).accept(Dir::Uni), Some(stream) if stream == s);
 	let mut recv = pair.server_recv(server_ch, s);
-	let mut chunks = recv.read(true).unwrap();
+	let mut chunks = recv.read().unwrap();
 	assert_matches!(chunks.next(usize::MAX), Ok(Some(chunk)) if chunk.bytes.len() == 10);
 	let _ = chunks.finalize();
 	pair.drive();
@@ -1979,10 +1979,10 @@ fn key_update_simple() {
 	assert_matches!(pair.server_streams(server_ch).accept(Dir::Bi), Some(stream) if stream == s);
 	assert_matches!(pair.server_conn_mut(server_ch).poll(), None);
 	let mut recv = pair.server_recv(server_ch, s);
-	let mut chunks = recv.read(false).unwrap();
+	let mut chunks = recv.read().unwrap();
 	assert_matches!(
 		chunks.next(usize::MAX),
-		Ok(Some(chunk)) if chunk.offset == 0 && chunk.bytes == MSG1
+		Ok(Some(chunk)) if chunk.bytes == MSG1
 	);
 	let _ = chunks.finalize();
 
@@ -1996,10 +1996,10 @@ fn key_update_simple() {
 	assert_matches!(pair.server_conn_mut(server_ch).poll(), Some(Event::Stream(StreamEvent::Readable { id })) if id == s);
 	assert_matches!(pair.server_conn_mut(server_ch).poll(), None);
 	let mut recv = pair.server_recv(server_ch, s);
-	let mut chunks = recv.read(false).unwrap();
+	let mut chunks = recv.read().unwrap();
 	assert_matches!(
 		chunks.next(usize::MAX),
-		Ok(Some(chunk)) if chunk.offset == 6 && chunk.bytes == MSG2
+		Ok(Some(chunk)) if chunk.bytes == MSG2
 	);
 	let _ = chunks.finalize();
 
@@ -2044,7 +2044,7 @@ fn key_update_reordered() {
 	assert_matches!(pair.server_streams(server_ch).accept(Dir::Bi), Some(stream) if stream == s);
 
 	let mut recv = pair.server_recv(server_ch, s);
-	let mut chunks = recv.read(true).unwrap();
+	let mut chunks = recv.read().unwrap();
 	let buf1 = chunks.next(usize::MAX).unwrap().unwrap();
 	assert_matches!(&*buf1.bytes, MSG1);
 	let buf2 = chunks.next(usize::MAX).unwrap().unwrap();
@@ -2454,7 +2454,7 @@ fn test_flow_control(config: TransportConfig, window_size: usize) {
 	pair.drive();
 
 	let mut recv = pair.server_recv(server_ch, s);
-	let mut chunks = recv.read(true).unwrap();
+	let mut chunks = recv.read().unwrap();
 	assert_eq!(chunks.next(usize::MAX).err(), Some(ReadError::Reset(VarInt(42))));
 	let _ = chunks.finalize();
 
@@ -2475,7 +2475,7 @@ fn test_flow_control(config: TransportConfig, window_size: usize) {
 	pair.drive();
 	let mut cursor = 0;
 	let mut recv = pair.server_recv(server_ch, s);
-	let mut chunks = recv.read(true).unwrap();
+	let mut chunks = recv.read().unwrap();
 	loop {
 		match chunks.next(usize::MAX) {
 			Ok(Some(chunk)) => {
@@ -2530,7 +2530,7 @@ fn test_flow_control(config: TransportConfig, window_size: usize) {
 	pair.drive();
 	let mut cursor = 0;
 	let mut recv = pair.server_recv(server_ch, s);
-	let mut chunks = recv.read(true).unwrap();
+	let mut chunks = recv.read().unwrap();
 	loop {
 		match chunks.next(usize::MAX) {
 			Ok(Some(chunk)) => {
@@ -2604,7 +2604,7 @@ fn stop_opens_bidi() {
 	assert_eq!(pair.server_conn_mut(client_ch).streams().send_streams(), 1);
 
 	let mut recv = pair.server_recv(server_ch, s);
-	let mut chunks = recv.read(false).unwrap();
+	let mut chunks = recv.read().unwrap();
 	assert_matches!(chunks.next(usize::MAX), Err(ReadError::Blocked));
 	let _ = chunks.finalize();
 
@@ -2810,10 +2810,10 @@ fn finish_stream_flow_control_reordered() {
 
 	// Issue flow control credit
 	let mut recv = pair.server_recv(server_ch, s);
-	let mut chunks = recv.read(false).unwrap();
+	let mut chunks = recv.read().unwrap();
 	assert_matches!(
 		chunks.next(usize::MAX),
-		Ok(Some(chunk)) if chunk.offset == 0 && chunk.bytes == MSG
+		Ok(Some(chunk)) if chunk.bytes == MSG
 	);
 	let _ = chunks.finalize();
 
@@ -2838,7 +2838,7 @@ fn finish_stream_flow_control_reordered() {
 	assert_matches!(pair.server_streams(server_ch).accept(Dir::Uni), Some(stream) if stream == s);
 
 	let mut recv = pair.server_recv(server_ch, s);
-	let mut chunks = recv.read(false).unwrap();
+	let mut chunks = recv.read().unwrap();
 	assert_matches!(chunks.next(usize::MAX), Ok(None));
 	let _ = chunks.finalize();
 }
@@ -2886,10 +2886,10 @@ fn handshake_1rtt_handling() {
 	// so nothing had to be retransmitted.
 	assert_eq!(pair.client_conn_mut(client_ch).stats().path.lost_packets, 0);
 	let mut recv = pair.server_recv(server_ch, s);
-	let mut chunks = recv.read(false).unwrap();
+	let mut chunks = recv.read().unwrap();
 	assert_matches!(
 		chunks.next(usize::MAX),
-		Ok(Some(chunk)) if chunk.offset == 0 && chunk.bytes == MSG
+		Ok(Some(chunk)) if chunk.bytes == MSG
 	);
 	let _ = chunks.finalize();
 }
@@ -3474,10 +3474,10 @@ fn finish_acked() {
 	assert_matches!(pair.server_streams(server_ch).accept(Dir::Uni), Some(stream) if stream == s);
 
 	let mut recv = pair.server_recv(server_ch, s);
-	let mut chunks = recv.read(false).unwrap();
+	let mut chunks = recv.read().unwrap();
 	assert_matches!(
 		chunks.next(usize::MAX),
-		Ok(Some(chunk)) if chunk.offset == 0 && chunk.bytes == MSG
+		Ok(Some(chunk)) if chunk.bytes == MSG
 	);
 	assert_matches!(chunks.next(usize::MAX), Err(ReadError::Blocked));
 	let _ = chunks.finalize();
@@ -3498,7 +3498,7 @@ fn finish_acked() {
 	);
 
 	let mut recv = pair.server_recv(server_ch, s);
-	let mut chunks = recv.read(false).unwrap();
+	let mut chunks = recv.read().unwrap();
 	assert_matches!(chunks.next(usize::MAX), Ok(None));
 	let _ = chunks.finalize();
 }
@@ -3544,10 +3544,10 @@ fn finish_retransmit() {
 	assert_matches!(pair.server_streams(server_ch).accept(Dir::Uni), Some(stream) if stream == s);
 
 	let mut recv = pair.server_recv(server_ch, s);
-	let mut chunks = recv.read(false).unwrap();
+	let mut chunks = recv.read().unwrap();
 	assert_matches!(
 		chunks.next(usize::MAX),
-		Ok(Some(chunk)) if chunk.offset == 0 && chunk.bytes == MSG
+		Ok(Some(chunk)) if chunk.bytes == MSG
 	);
 	assert_matches!(chunks.next(usize::MAX), Ok(None));
 	let _ = chunks.finalize();
@@ -3582,10 +3582,10 @@ fn repeated_request_response() {
 
 		assert_eq!(pair.server_streams(server_ch).accept(Dir::Bi), Some(s));
 		let mut recv = pair.server_recv(server_ch, s);
-		let mut chunks = recv.read(false).unwrap();
+		let mut chunks = recv.read().unwrap();
 		assert_matches!(
 			chunks.next(usize::MAX),
-			Ok(Some(chunk)) if chunk.offset == 0 && chunk.bytes == REQUEST
+			Ok(Some(chunk)) if chunk.bytes == REQUEST
 		);
 
 		assert_matches!(chunks.next(usize::MAX), Ok(None));
@@ -3596,10 +3596,10 @@ fn repeated_request_response() {
 		pair.drive();
 
 		let mut recv = pair.client_recv(client_ch, s);
-		let mut chunks = recv.read(false).unwrap();
+		let mut chunks = recv.read().unwrap();
 		assert_matches!(
 			chunks.next(usize::MAX),
-			Ok(Some(chunk)) if chunk.offset == 0 && chunk.bytes == RESPONSE
+			Ok(Some(chunk)) if chunk.bytes == RESPONSE
 		);
 		assert_matches!(chunks.next(usize::MAX), Ok(None));
 		let _ = chunks.finalize();
@@ -4816,7 +4816,7 @@ fn ack_frequency_update_max_delay() {
 fn stream_chunks(mut recv: RecvStream<'_>) -> Vec<u8> {
 	let mut buf = Vec::new();
 
-	let mut chunks = recv.read(true).unwrap();
+	let mut chunks = recv.read().unwrap();
 	while let Ok(Some(chunk)) = chunks.next(usize::MAX) {
 		buf.extend(chunk.bytes);
 	}
@@ -5135,7 +5135,7 @@ fn min_mtu_does_not_pad_zero_rtt_batch_tail() {
 		assert!(pair.client_conn_mut(client_ch).accepted_0rtt());
 		let server_ch = pair.server.assert_accept();
 		let mut recv = pair.server_recv(server_ch, stream);
-		let mut chunks = recv.read(true).unwrap();
+		let mut chunks = recv.read().unwrap();
 		let mut received = Vec::new();
 		while let Some(chunk) = chunks.next(usize::MAX).unwrap() {
 			received.extend_from_slice(&chunk.bytes);
@@ -6729,7 +6729,7 @@ fn upload(
 		}
 		if let Some(stream) = server_stream {
 			let mut recv = pair.server_recv(server_ch, stream);
-			let mut chunks = recv.read(false).unwrap();
+			let mut chunks = recv.read().unwrap();
 			while let Ok(Some(chunk)) = chunks.next(usize::MAX) {
 				received += chunk.bytes.len();
 			}

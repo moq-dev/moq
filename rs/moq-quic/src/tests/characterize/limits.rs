@@ -18,7 +18,7 @@ fn finish_all(pair: &mut Pair, client_ch: ConnectionHandle, server_ch: Connectio
 	pair.drive();
 	while let Some(s) = pair.server_streams(server_ch).accept(Dir::Uni) {
 		let mut recv = pair.server_recv(server_ch, s);
-		let mut chunks = recv.read(true).unwrap();
+		let mut chunks = recv.read().unwrap();
 		while chunks.next(usize::MAX).unwrap().is_some() {}
 		let _ = chunks.finalize();
 	}
@@ -68,7 +68,7 @@ fn read_buffered(pair: &mut Pair, ch: ConnectionHandle, streams: &mut Vec<Stream
 	let mut total = 0;
 	for &s in streams.iter() {
 		let mut recv = pair.server_recv(ch, s);
-		let Ok(mut chunks) = recv.read(true) else {
+		let Ok(mut chunks) = recv.read() else {
 			continue;
 		};
 		while let Ok(Some(chunk)) = chunks.next(usize::MAX) {
@@ -178,7 +178,7 @@ fn zero_rtt_window_raise(dir: Dir) {
 			written += n;
 		}
 		let mut recv = pair.server_recv(server_ch, s);
-		let mut chunks = recv.read(true).unwrap();
+		let mut chunks = recv.read().unwrap();
 		while let Ok(Some(chunk)) = chunks.next(usize::MAX) {
 			read += chunk.bytes.len();
 		}

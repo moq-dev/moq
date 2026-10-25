@@ -17,6 +17,10 @@ and record the numbers in the PR that closes this:
   job pays that rebuild.
 - Bucket size and request counts after a month, against the 30-day expiry in
   `infra/mbx/lifecycle.json`. Shorten or lengthen it from that.
+- Across jobs: which compilations one job misses although another job built
+  the same crate at the same version, grouped by what differs (features,
+  profile, `RUSTFLAGS`, target). This is the baseline for
+  [unifying dependency features](/quest/m0/ci/hakari.md).
 
 Use scheduled Nightly runs on `main` only (`gh run list --workflow
 nightly.yml --branch main --event schedule`), never a dispatch on a branch.
