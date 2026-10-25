@@ -8,7 +8,7 @@ import type * as Epoch from "./epoch.ts";
 import { NotFound } from "./error.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
 import { Route } from "./hop.ts";
-import { hooks, TrackSequences } from "./internal.ts";
+import { hooks } from "./internal.ts";
 import { Lister, Listing, listTracks, type Tracks } from "./listing.ts";
 import * as Path from "./path.ts";
 import * as track from "./track.ts";
@@ -62,8 +62,6 @@ class BroadcastState {
 	// publisher that has started pulling them. The counterpart of a live Rust `broadcast::Dynamic`;
 	// without one, a track nobody publishes is `NotFound` rather than a request nobody will answer.
 	served = false;
-	// Each name's sequence namespace, shared by every producer of the name, created or requested.
-	sequences = new TrackSequences();
 	// Live consumer handles sharing this state (see {@link Consumer.clone}). The broadcast
 	// closes once the last one closes, so a shared consumer can be handed to several callers.
 	consumers = 0;
@@ -206,7 +204,7 @@ function logical(state: BroadcastState, name: string): { producer: track.Produce
 	});
 
 	state.requested.mutate((requested) => {
-		requested.push(hooks.makeRequest({ name, producer, sequences: state.sequences, pending: state.pending }));
+		requested.push(hooks.makeRequest({ name, producer, pending: state.pending }));
 	});
 
 	return { producer, requested: true };
@@ -454,7 +452,6 @@ export class Producer {
 		}
 
 		const producer = new track.Producer(name).accept(info);
-		hooks.bindSequence(producer, this.#state.sequences.get(name));
 		adopt(this.#state, producer, track.infoDefaults(info));
 		return producer;
 	}

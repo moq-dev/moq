@@ -69,7 +69,7 @@ const browser = await chromium.launch({
 });
 
 // A failing run keeps its directory, and this trace lands in it. Unset outside the harness.
-const run = process.env.MOQ_TEST_RUN;
+const run = process.env.HARNESS_RUN_DIR;
 
 let code = 1;
 try {

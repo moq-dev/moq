@@ -18,6 +18,10 @@
 # only where obs.yml's path filter reaches; `just obs test` runs nightly.
 set -euo pipefail
 
+if [[ "${GITHUB_ACTIONS:-}" != true && "${LOCAL_SUPERVISED:-}" != 1 ]]; then
+    exec bash "$(dirname "$0")/../local.sh" bash "$0" "$@"
+fi
+
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "$here/../../cpp/obs"
 
@@ -40,9 +44,9 @@ done
 
 # Sources check in parallel under the same bound as the module lanes
 # sh/dispatch.sh runs at once, and with the same default.
-limit=${MOQ_CHECK_JOBS:-3}
+limit=${CHECK_JOBS:-3}
 if [[ ! "$limit" =~ ^[1-9][0-9]*$ ]]; then
-    echo "error: MOQ_CHECK_JOBS must be a positive integer, not '$limit'" >&2
+    echo "error: CHECK_JOBS must be a positive integer, not '$limit'" >&2
     exit 2
 fi
 

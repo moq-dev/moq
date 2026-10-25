@@ -55,3 +55,24 @@ test("forgetBelow closes the gaps under the floor", () => {
 	expect(delivered.add(13)).toBe(true);
 	expect(delivered.runs).toBe(1);
 });
+
+test("a run joins every run it touches, leaving the gaps around it", () => {
+	const delivered = new Delivered();
+	for (const sequence of [2, 5, 9]) delivered.add(sequence);
+	delivered.addRun(4, 9);
+	expect(delivered.runs).toBe(2);
+	expect(delivered.gaps(0, 12)).toEqual([
+		{ start: 0, end: 2 },
+		{ start: 3, end: 4 },
+		{ start: 10, end: 12 },
+	]);
+	delivered.addRun(0, 0);
+	delivered.addRun(11, 12);
+	expect(delivered.gaps(3, 12)).toEqual([
+		{ start: 3, end: 4 },
+		{ start: 10, end: 11 },
+	]);
+	delivered.addRun(0, 20);
+	expect(delivered.runs).toBe(1);
+	expect(delivered.gaps(0, 20)).toEqual([]);
+});
