@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Pinned upstream conformance under the relay profile, subgroup zero, through one
-# relay and through a two-relay cluster.
+# relay, and on draft 18 through a two-relay cluster.
 set -euo pipefail
 
 if [[ "${GITHUB_ACTIONS:-}" != true && "${LOCAL_SUPERVISED:-}" != 1 ]]; then
@@ -115,7 +115,11 @@ run_suite() {
 # The pinned MoQVersions.h supports drafts 16 and 18; this relay supports both.
 failed=0
 for version in 16 18; do
-    for topology in single cluster; do
+    # A draft-16 TRACK_STATUS_OK has no Track Properties, so a cluster's origin
+    # cannot learn the track's priority from it; draft 16 is not a cluster target.
+    topologies=(single)
+    [[ "$version" == 16 ]] || topologies+=(cluster)
+    for topology in "${topologies[@]}"; do
         label="$topology-$version"
         start_relay "$label-origin" "$version"
         ingress="$HARNESS_PORT"
@@ -149,4 +153,4 @@ if ((failed != 0)); then
     echo "Moxygen conformance failed; see each cell's client and endpoint logs" >&2
     exit 1
 fi
-echo "Moxygen conformance: all shared drafts and both topologies passed"
+echo "Moxygen conformance: every draft and topology passed"

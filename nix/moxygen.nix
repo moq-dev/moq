@@ -35,7 +35,8 @@ stdenv.mkDerivation {
     # an END_OF_TRACK directly after the last object. Every other check stays.
     ./moxygen-profile.patch
     # The test origin answers TRACK_STATUS, which a relay cluster's edge sends
-    # before subscribing. Drop at the next pin bump once
+    # before subscribing, without the GROUP_ORDER parameter draft-18 forbids in
+    # TRACK_STATUS_OK. Drop at the next pin bump once
     # https://github.com/facebookexperimental/moxygen/pull/264 lands.
     ./moxygen-track-status.patch
   ];
