@@ -24,15 +24,10 @@ slow test.
   `moq_clock::Manual` clock.
 - Find why the idle pad never reads the named instance again, and fix it in
   moq-gst or moq-net, wherever the resume is lost.
-- Then make the test wait on the announce and pad events instead of the
-  sleep-polled `written()`.
 
-Separate from [gst-pinned-replay](/quest/m1/test-flakes-2/gst-pinned-replay.md)
-by decision: it uses the same `Recorder` fixture, but the cause is likely
-different.
+The test already waits on announce and pad events: since
+[moq-dev/moq#6738](https://github.com/moq-dev/moq/pull/6738),
+`Recorder::written()` writes once and blocks on the pad event, so a missed
+resume fails as `3 never reached a pad` after one write of 3.
 
 Public API: none expected. Wire: none.
-
-## Related
-
-- [moq-gst pinned replay](/quest/m1/test-flakes-2/gst-pinned-replay.md) - the same fixture's sleep-poll race
