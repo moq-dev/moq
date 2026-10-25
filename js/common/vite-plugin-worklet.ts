@@ -47,12 +47,14 @@ export function worklet(alias?: Record<string, string>): Plugin {
 
 		configureServer(server) {
 			server.middlewares.use(async (req, res, next) => {
-				const { pathname } = new URL(req.url ?? "/", "http://localhost");
-				const base = server.config.base;
-				const path = pathname.startsWith(base) ? hosted.get(pathname.slice(base.length)) : undefined;
-				if (!path) return next();
-
+				// A malformed target must reach Connect as an error, not reject the async handler.
 				try {
+					// Undo the percent-encoding the browser applies to a name such as `render worklet.js`.
+					const pathname = decodeURI(new URL(req.url ?? "/", "http://localhost").pathname);
+					const base = server.config.base;
+					const path = pathname.startsWith(base) ? hosted.get(pathname.slice(base.length)) : undefined;
+					if (!path) return next();
+
 					const code = await compile(path);
 					res.setHeader("Content-Type", "text/javascript");
 					res.end(code);
