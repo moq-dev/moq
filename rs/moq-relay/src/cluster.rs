@@ -825,7 +825,8 @@ pub struct Config {
 	pub token: Option<PathBuf>,
 
 	/// Billing tier label that cluster-peer (relay-to-relay) traffic records
-	/// stats under. Defaults to the unprefixed tier.
+	/// stats under: `/`-joined segments of ASCII letters, digits, `.`, `_`, and `-`.
+	/// Defaults to the unprefixed tier.
 	#[usage(
 		name = "cluster-tier",
 		long = "cluster-tier",
@@ -1211,7 +1212,8 @@ impl Cluster {
 	/// [`start`](Self::start) (the mesh half) is ever called.
 	///
 	/// Errors if `config.id` is set to 0. An unset id picks a fresh random origin.
-	/// Errors too if the `peer.quic` receive window does not fit a QUIC varint.
+	/// Errors too if the `peer.quic` receive window does not fit a QUIC varint, or
+	/// `config.tier` is not a valid stats tier.
 	pub fn new(options: Options) -> anyhow::Result<Self> {
 		let Options {
 			config,
@@ -1229,6 +1231,9 @@ impl Cluster {
 		// matching the `--cluster-api-url` validation, instead of silently
 		// keeping the first entry when dials spawn.
 		parse_peer_list(config.connect.clone(), None).context("invalid --cluster-connect peer list")?;
+		if let Some(tier) = &config.tier {
+			moq_auth::tier::validate(tier).context("invalid --cluster-tier")?;
+		}
 		peer.quic.validate()?;
 		let critical = crate::critical::Critical::default();
 		let mut origin_config = origin::Config::new(id);
@@ -2553,6 +2558,13 @@ mod tests {
 		})
 		.expect("cluster");
 		assert_eq!(cluster.cluster_tier(), Tier::new("region/sjc"));
+
+		let quoted = new_cluster(Config {
+			tier: Some("region\"".to_string()),
+			..Default::default()
+		});
+		let err = quoted.err().expect("a tier a metrics label would escape is refused");
+		assert!(format!("{err:#}").contains("--cluster-tier"), "{err:#}");
 	}
 
 	/// Stand-in dial task: never makes progress, exposes an AbortHandle.

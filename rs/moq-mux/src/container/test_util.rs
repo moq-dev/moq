@@ -537,8 +537,8 @@ impl moq_net::transport::poll::Session for Gated {
 		self.inner.protocol()
 	}
 
-	fn binding(&self) -> moq_net::transport::Binding {
-		self.inner.binding()
+	fn address(&self) -> moq_net::transport::Address {
+		self.inner.address()
 	}
 
 	fn close(&mut self, code: u32, reason: &str) {

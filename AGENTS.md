@@ -84,7 +84,7 @@ PRs target `main`, the trunk, where breaking API changes are allowed.
 Wire changes should be backwards compatible for any *published* drafts/versions.
 An unpublished `-wip` version changes freely, so never defer a better wire design to keep it compatible.
 
-Keep scratch files in your worktree's `.scratch/`, not `target/`: build output may live outside the checkout and gets wiped.
+Scratch lives in the checkout's ignored `.tmp/`, not `target/`: build output may live outside the checkout and gets wiped.
 
 Use the Nix dev shell so tooling matches CI.
 direnv loads it automatically, but if not: `nix develop --command ...`.
