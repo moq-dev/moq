@@ -2257,15 +2257,23 @@ test("a request overlapping one on its way out waits for the peer to end it", as
 
 	// Draft 19 cancels with a reset, and the broader request waits on the peer's half.
 	expect(stream.reader.done()).rejects.toMatchObject({ code: StreamCode.Cancel });
-	expect(await nextStream(pair.client)).toBeUndefined();
+	const incoming = pair.client.incomingBidirectionalStreams.getReader();
+	let sent = false;
+	const opened = incoming.read().then((next) => {
+		sent = true;
+		return next;
+	});
 
 	// The closed reader is still registered meanwhile, and hears nothing more.
 	await inlineNamespace(watching, Path.from("y"));
 	expect(await watcher.next()).toMatchObject({ prefix: Path.from("a/b/y"), kind: "start" });
+	expect(sent).toBe(false);
 
 	stream.writer.close();
-	const asked = await nextStream(pair.client);
-	if (!asked) throw new Error("the broader SUBSCRIBE_NAMESPACE never went out");
+	const next = await opened;
+	incoming.releaseLock();
+	if (next.done) throw new Error("the broader SUBSCRIBE_NAMESPACE never went out");
+	const asked = new Stream({ readable: next.value.readable, writable: next.value.writable, version: VERSION });
 	await asked.reader.u53();
 	expect((await SubscribeNamespace.decode(asked.reader, VERSION)).namespace).toBe(Path.from("a"));
 
