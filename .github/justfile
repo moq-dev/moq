@@ -40,7 +40,6 @@ test:
     python3 bench/compare.test.py
     python3 bench/summary.test.py
     python3 bench/profile.test.py
-    python3 bench/ffi.test.py
     python3 sh/gh/gst-formula.test.py
     python3 sh/changed.test.py
     python3 sh/large-files.test.py

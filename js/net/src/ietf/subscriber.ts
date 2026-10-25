@@ -132,6 +132,9 @@ type Announced = { adverts: { id: number; route: Route }[]; route: Route };
 /** A local announce reader's filter: its scope, the prefix it asked for, and its hidden opt-in. */
 type Filter = { scope: Path.Pattern; prefix: Path.Valid; hidden: boolean };
 
+/** A local announce reader: its filter, and what settles once its request is off the wire. */
+type Asking = Filter & { gone?: Promise<void> };
+
 /** Whether a reader with `filter` sees an announcement at `path`. */
 function sees(filter: Filter, path: Path.Valid): boolean {
 	return scopeOverlaps(filter.scope, path) && (filter.hidden || !hiddenBelow(filter.prefix, path));
@@ -191,8 +194,9 @@ export class Subscriber {
 	// Names each advertisement the peer makes, so a later update or withdrawal finds its own.
 	#nextAdvert = 0;
 
-	// Any consumers that want each new announcement, keyed by their local filter.
-	#announcedConsumers = new Map<announce.Producer, Filter>();
+	// Any consumers that want each new announcement, keyed by their local filter, until
+	// their request is off the wire.
+	#announcedConsumers = new Map<announce.Producer, Asking>();
 
 	// Whether the peer understands the HIDDEN parameter (MoQ Hidden).
 	#hidden: boolean;
@@ -339,11 +343,24 @@ export class Subscriber {
 	 * `options.hidden` opts in. The opt-in rides the SUBSCRIBE_NAMESPACE when the peer
 	 * understands it (MoQ Hidden); the rule is also applied here, since an unsolicited
 	 * PUBLISH_NAMESPACE or a peer that never heard of it hides nothing.
+	 *
+	 * The request goes out once every overlapping request already closed here is off the
+	 * wire, so a peer that refuses overlapping requests never sees this one beside them.
 	 */
 	announced(scope: Path.Pattern = Path.Pattern.all(), options?: announce.Options): announce.Consumer {
 		// The wire speaks announce interest by prefix.
 		const prefix = scopeHead(scope);
-		const filter = { scope, prefix, hidden: options?.hidden ?? false };
+		const filter: Asking = { scope, prefix, hidden: options?.hidden ?? false };
+
+		// The overlapping requests on their way out, such as the narrower ones an exclusive
+		// discovery just closed for this one. Those still open overlap it only where the
+		// caller holds both on purpose.
+		const blockers: Promise<void>[] = [];
+		for (const [other, { prefix: asked, gone }] of this.#announcedConsumers) {
+			if (gone === undefined || other.closed.peek() === undefined) continue;
+			if (Path.hasPrefix(asked, prefix) || Path.hasPrefix(prefix, asked)) blockers.push(gone);
+		}
+
 		const announced = new announce.Producer();
 		for (const [active, info] of this.#announced) {
 			if (!sees(filter, active)) continue;
@@ -356,7 +373,7 @@ export class Subscriber {
 		}
 		this.#announcedConsumers.set(announced, filter);
 
-		void this.#runAnnounced(announced, prefix, filter.hidden && this.#hidden).finally(() => {
+		filter.gone = this.#runAnnounced(announced, prefix, filter.hidden && this.#hidden, blockers).finally(() => {
 			this.#announcedConsumers.delete(announced);
 			announced.close();
 		});
@@ -383,7 +400,8 @@ export class Subscriber {
 
 		console.debug(`announced: broadcast=${path} active=true epoch=${route.epoch}`);
 		for (const [consumer, filter] of this.#announcedConsumers) {
-			if (!sees(filter, path)) continue;
+			// A consumer that closed stays registered until its request is off the wire.
+			if (!sees(filter, path) || consumer.closed.peek() !== undefined) continue;
 			const scope = filter.scope;
 			consumer.append({ prefix: path, captures: scopeCaptures(scope, path), kind: "start", route });
 		}
@@ -422,9 +440,8 @@ export class Subscriber {
 		console.debug(`announced: broadcast=${path} ${restart ? `restart=true epoch=${route.epoch}` : "rerouted"}`);
 		const kind = restart ? "restart" : "update";
 		for (const [consumer, filter] of this.#announcedConsumers) {
-			if (!sees(filter, path)) continue;
-			// A consumer that closed stays registered until its reader loop notices.
-			if (consumer.closed.peek() !== undefined) continue;
+			// A consumer that closed stays registered until its request is off the wire.
+			if (!sees(filter, path) || consumer.closed.peek() !== undefined) continue;
 			const scope = filter.scope;
 			consumer.append({ prefix: path, captures: scopeCaptures(scope, path), kind, route });
 		}
@@ -452,18 +469,10 @@ export class Subscriber {
 		console.debug(`announced: broadcast=${path} active=false`);
 
 		for (const [consumer, filter] of this.#announcedConsumers) {
-			if (!sees(filter, path)) continue;
+			// A consumer that closed stays registered until its request is off the wire.
+			if (!sees(filter, path) || consumer.closed.peek() !== undefined) continue;
 			const scope = filter.scope;
-			try {
-				consumer.append({
-					prefix: path,
-					captures: scopeCaptures(scope, path),
-					kind: "end",
-					route: existing.route,
-				});
-			} catch {
-				// Consumer already closed, will be cleaned up
-			}
+			consumer.append({ prefix: path, captures: scopeCaptures(scope, path), kind: "end", route: existing.route });
 		}
 	}
 
@@ -478,7 +487,12 @@ export class Subscriber {
 		this.#session.close();
 	}
 
-	async #runAnnounced(announced: announce.Producer, prefix: Path.Valid, hidden: boolean) {
+	async #runAnnounced(
+		announced: announce.Producer,
+		prefix: Path.Valid,
+		hidden: boolean,
+		blockers: Promise<void>[],
+	): Promise<void> {
 		const version = this.#session.version;
 
 		// A zero-field track namespace was a protocol violation until draft-16 allowed
@@ -504,12 +518,32 @@ export class Subscriber {
 		// route is detached (`id` unset) for looping back through us.
 		const live = new Map<Path.Valid, { id?: number; epoch?: Epoch.Valid }>();
 
-		// Set once the teardown below has given back everything this stream held. The read
-		// loop is not awaited when the local consumer closes first, and closing the stream
-		// cancels the transport without discarding what the reader already buffered, so a
-		// fully buffered entry can still decode afterwards. Attaching one then would take a
-		// reference nobody is left to release, pinning the path for the session.
+		// Set once `release` has given back everything this stream held. The read loop is not
+		// awaited when the local consumer closes first, and the stream keeps delivering what
+		// the peer sends until it ends its half, so an entry can still decode afterwards.
+		// Attaching one then would take a reference nobody is left to release, pinning the
+		// path for the session.
 		let released = false;
+
+		// The stream owns every advertisement it carried, so give them back however it ends:
+		// as the request starts leaving, a decode error, or the peer resetting it. Without
+		// this each namespace keeps its count and the source never detaches, which would pin
+		// the path for the session even after the other source withdrew.
+		const release = () => {
+			released = true;
+			for (const [path, held] of live) {
+				if (held.id !== undefined) this.#detachAnnounce(path, held.id);
+			}
+			live.clear();
+		};
+
+		// A peer that refuses overlapping requests would refuse this one while it still holds
+		// a request this overlaps, so wait for those to leave the wire. A consumer that leaves
+		// meanwhile sends nothing.
+		if (blockers.length > 0) {
+			await race([Promise.allSettled(blockers), announced.closed]);
+			if (announced.closed.peek() !== undefined) return;
+		}
 
 		// v14/v15: SubscribeNamespace on control stream (via adapter virtual stream)
 		// v16+: SubscribeNamespace on its own real bidi stream
@@ -559,15 +593,30 @@ export class Subscriber {
 				}
 				console.debug(`subscribe_namespace written: requestId=${requestId}`);
 
-				const end = async () => {
-					// For v14/v15: send UnsubscribeNamespace before closing
-					if (version === Version.DRAFT_14 || version === Version.DRAFT_15) {
+				// End the request, settling once it is off the wire. `reading` is whatever reads
+				// the stream now, which has to finish before anything else may.
+				const end = async (reading: Promise<unknown>) => {
+					release();
+					// Draft-14/15 adapt the request onto the control stream, so whatever we send
+					// after the UNSUBSCRIBE_NAMESPACE reaches the peer after it.
+					if (legacy) {
 						try {
 							const unsub = new UnsubscribeNamespace({ prefix, requestId });
 							await Message.write(request.writer, UnsubscribeNamespace.id, unsub, version);
 						} catch {
 							// Stream might already be closed
 						}
+						request.close();
+						return;
+					}
+					// A request on another stream can overtake the cancel, so this one is off the
+					// wire only once the peer ends its half. What it sends meanwhile is dropped.
+					request.cancel();
+					await reading.catch(() => undefined);
+					try {
+						while ((await request.next()) !== undefined) {}
+					} catch {
+						// Reset, or the session ended.
 					}
 					request.close();
 				};
@@ -594,7 +643,7 @@ export class Subscriber {
 				// A consumer that leaves before the peer answers ends the request now, not on the answer.
 				const answered = await race([response, announced.closed.then(() => undefined)]);
 				if (answered === undefined) {
-					await end();
+					await end(response);
 					return;
 				}
 				let initial = answered;
@@ -605,6 +654,8 @@ export class Subscriber {
 						if (initial === 0) announced.synced();
 
 						const framed = await request.next();
+						// Ending: `end` drains the rest.
+						if (released) break;
 						if (framed === undefined) {
 							if (initial > 0)
 								throw new ProtocolViolation("namespace stream ended inside the initial set");
@@ -685,7 +736,7 @@ export class Subscriber {
 
 				// Wait for either the read loop or the announced to close
 				await race([readLoop, announced.closed]);
-				await end();
+				await end(readLoop);
 			};
 			await request.serve(run());
 		} catch (err: unknown) {
@@ -698,15 +749,7 @@ export class Subscriber {
 			// that will never be announced. Matches the lite subscriber.
 			announced.close(e);
 		} finally {
-			// The stream owns every advertisement it carried, so release them however it
-			// ends: a clean close, a decode error, or the peer resetting it. Without this
-			// each namespace keeps its count and the source never detaches, which would
-			// pin the path for the session even after the other source withdrew.
-			released = true;
-			for (const [path, held] of live) {
-				if (held.id !== undefined) this.#detachAnnounce(path, held.id);
-			}
-			live.clear();
+			release();
 		}
 	}
 

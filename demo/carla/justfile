@@ -78,16 +78,19 @@ service-status:
 service-logs:
     journalctl --user -u carla-worker.service -u carla-sim.service -f
 
+# The root workspace's dev tools, in an environment of their own: syncing the
+# shared venv would uninstall `just py`'s editable build while its checks run.
+dev := "uv run --project ../../.. --isolated --only-group dev"
+
 # None of these need CARLA or a GPU. `just js` and `just rs` cover the player and
 # the bridge.
 #
 # Lint and test the worker and its launchers.
 check:
-    uv sync --project ../.. --locked --no-install-workspace
-    cd sim && uv run --project ../../.. --no-sync ruff check .
-    cd sim && uv run --project ../../.. --no-sync ruff format --check .
-    cd sim && uv run --project ../../.. --no-sync pyright
-    cd sim && uv run --project ../../.. --no-sync pytest -q
+    cd sim && {{ dev }} --locked ruff check .
+    cd sim && {{ dev }} --locked ruff format --check .
+    cd sim && {{ dev }} --locked pyright
+    cd sim && {{ dev }} --locked pytest -q
     sim/python.test.sh
     sim/server.test.sh
     sim/systemd/install-user-service.test.sh
@@ -95,9 +98,8 @@ check:
 
 # Auto-fix the worker's lint and formatting.
 fix:
-    uv sync --project ../.. --no-install-workspace
-    cd sim && uv run --project ../../.. --no-sync ruff check --fix .
-    cd sim && uv run --project ../../.. --no-sync ruff format .
+    cd sim && {{ dev }} ruff check --fix .
+    cd sim && {{ dev }} ruff format .
 
 # A Vulkan stand-in plays the CARLA plugin. A host with no NVIDIA GPU skips, and
 # one whose NVIDIA driver is not loaded fails.
