@@ -4,7 +4,7 @@ import { Broadcast, Group as NetGroup, Track as NetTrack, Time } from "@moq/net"
 import * as Protected from "./broadcast.ts";
 import { Credential } from "./credential.ts";
 import type * as Datagram from "./datagram.ts";
-import { DATAGRAM, GROUP, parse } from "./derive.ts";
+import { DATAGRAM, GROUP } from "./derive.ts";
 import { Failure } from "./failure.ts";
 import type * as Generation from "./generation.ts";
 import * as Group from "./group.ts";
@@ -44,6 +44,7 @@ function subscribe(net: NetTrack.Producer): NetTrack.Subscriber {
 }
 
 interface Pair {
+	semantic: string;
 	generation: Generation.Producer;
 	consuming: Generation.Consumer;
 	net: NetTrack.Producer;
@@ -54,15 +55,15 @@ interface Pair {
 async function pair(semantic: string): Promise<Pair> {
 	const generation = credential().produce();
 	const net = netTrack(await generation.name(semantic));
-	const producer = await generation.produce(net);
+	const producer = await generation.produce(net, semantic);
 	const consuming = generation.credential.consume(generation.epoch);
-	const consumer = consuming.consume(subscribe(net));
-	return { generation, consuming, net, producer, consumer };
+	const consumer = consuming.consume(subscribe(net), semantic);
+	return { semantic, generation, consuming, net, producer, consumer };
 }
 
 // Ciphertext written straight to the net track, as a relay or attacker would.
 async function sealed(pair: Pair, domain: 0 | 1, group: number, frame: number, plaintext: string, forge = false) {
-	const key = trackKey(pair.consuming.credential, pair.consuming.epoch, parse(pair.net.name), domain);
+	const key = trackKey(pair.consuming.credential, pair.consuming.epoch, pair.semantic, domain);
 	const limit = domain === GROUP ? MAX_GROUPED_PAYLOAD : MAX_DATAGRAM_PAYLOAD;
 	const bytes = text(plaintext);
 	const payload = await key.encrypt(key.admitSeal(group, frame, bytes.byteLength, limit), bytes);
@@ -273,7 +274,7 @@ test("a broadcast refuses a name its generation already claimed elsewhere", asyn
 	);
 	// A refused net track is closed with the failure, so its subscribers see why.
 	const refused = netTrack(await generation.name("video"));
-	expect(await failure(generation.produce(refused))).toBe("reuse");
+	expect(await failure(generation.produce(refused, "video"))).toBe("reuse");
 	expect(refused.closed.peek()).toBeInstanceOf(Failure);
 });
 
@@ -281,25 +282,42 @@ test("a track is produced once per generation", async () => {
 	const generation = credential().produce();
 	const name = await generation.name("video");
 	const net = netTrack(name);
-	expect((await generation.produce(net)).name).toBe(name);
-	expect(await failure(generation.produce(net))).toBe("reuse");
-	expect(await failure(generation.produce(netTrack(name)))).toBe("reuse");
+	expect((await generation.produce(net, "video")).name).toBe(name);
+	expect(await failure(generation.produce(net, "video"))).toBe("reuse");
+	expect(await failure(generation.produce(netTrack(name), "video"))).toBe("reuse");
 
 	// A new epoch is a new publisher instance.
 	const fresh = generation.credential.produce();
-	await fresh.produce(netTrack(await fresh.name("video")));
+	await fresh.produce(netTrack(await fresh.name("video")), "video");
 
 	// Consuming never claims.
 	const consuming = generation.credential.consume(generation.epoch);
-	consuming.consume(subscribe(net));
-	consuming.consume(subscribe(net));
+	consuming.consume(subscribe(net), "video");
+	consuming.consume(subscribe(net), "video");
 });
 
-test("a track name that is not physical is identity", async () => {
+test("a lone surrogate is refused rather than aliasing U+FFFD", async () => {
 	const generation = credential().produce();
-	const net = netTrack("not-a-physical-name");
-	expect(await failure(generation.produce(net))).toBe("identity");
-	expect(thrown(() => generation.credential.consume(generation.epoch).consume(subscribe(net)))).toBe("identity");
+	expect(await failure(generation.name("\ud800"))).toBe("identity");
+	expect(await failure(generation.credential.path("\ud800"))).toBe("identity");
+	const producer = new Protected.Producer(new Broadcast.Producer(), generation);
+	await producer.createTrack("�");
+	expect(await failure(producer.createTrack("\ud800"))).toBe("identity");
+	// Its UTF-8 would be U+FFFD's, so claiming it would share that track's key and nonces.
+	const aliased = netTrack(await generation.name("�"));
+	expect(await failure(generation.produce(aliased, "\ud800"))).toBe("identity");
+	expect(aliased.closed.peek()).toBeInstanceOf(Failure);
+});
+
+test("recovering a name claims nothing", async () => {
+	const generation = credential().produce();
+	const name = await generation.name("video");
+	expect(await generation.open(name)).toBe("video");
+	// Opening a name neither claims it nor derives its payload keys.
+	await generation.produce(netTrack(name), "video");
+	// The same semantic name under another epoch of the same credential does not open.
+	const other = await credential().produce().name("video");
+	expect(await failure(generation.open(other))).toBe("authentication");
 });
 
 test("a new epoch authenticates while the old one does not", async () => {
@@ -309,22 +327,22 @@ test("a new epoch authenticates while the old one does not", async () => {
 	expect(await old.name("video")).not.toBe(await fresh.name("video"));
 
 	const net = netTrack(await fresh.name("video"));
-	const producer = await fresh.produce(net);
+	const producer = await fresh.produce(net, "video");
 	const group = producer.appendGroup();
 	await group.writeFrame(ms(1), text("fresh"));
 	group.close();
 
-	const consumer = cred.consume(fresh.epoch).consume(subscribe(net));
+	const consumer = cred.consume(fresh.epoch).consume(subscribe(net), "video");
 	expect(await readText(await recvGroup(consumer))).toBe("fresh");
 
-	// The old generation derives a different key for the same physical name.
-	const stale = old.consume(subscribe(net));
+	// The old generation derives a different key for the same semantic name.
+	const stale = old.consume(subscribe(net), "video");
 	expect(await failure((await recvGroup(stale)).readFrame())).toBe("authentication");
 });
 
 test("invocation exhaustion", async () => {
 	const generation = credential().produce();
-	const key = trackKey(generation.credential, generation.epoch, await generation.name("video"), GROUP);
+	const key = trackKey(generation.credential, generation.epoch, "video", GROUP);
 	key.invocations = MAX_INVOCATIONS - 1;
 	key.admitSeal(0, 0, 4, MAX_GROUPED_PAYLOAD);
 	expect(thrown(() => key.admitSeal(0, 1, 4, MAX_GROUPED_PAYLOAD))).toBe("exhausted");
@@ -333,7 +351,7 @@ test("invocation exhaustion", async () => {
 
 test("plaintext byte exhaustion", async () => {
 	const generation = credential().produce();
-	const key = trackKey(generation.credential, generation.epoch, await generation.name("video"), GROUP);
+	const key = trackKey(generation.credential, generation.epoch, "video", GROUP);
 	key.plaintextBytes = MAX_PLAINTEXT_BYTES - 3;
 	key.admitSeal(0, 0, 2, MAX_GROUPED_PAYLOAD);
 	expect(thrown(() => key.admitSeal(0, 1, 4, MAX_GROUPED_PAYLOAD))).toBe("exhausted");
@@ -341,8 +359,7 @@ test("plaintext byte exhaustion", async () => {
 
 test("failed opens spend the key", async () => {
 	const generation = credential().produce();
-	const name = await generation.name("video");
-	const key = trackKey(generation.credential, generation.epoch, name, GROUP);
+	const key = trackKey(generation.credential, generation.epoch, "video", GROUP);
 	const plaintext = text("ok");
 	const good = await key.encrypt(key.admitSeal(0, 0, plaintext.byteLength, MAX_GROUPED_PAYLOAD), plaintext);
 	const forged = good.slice();
@@ -518,17 +535,20 @@ test("a forged datagram does not burn the identity", async () => {
 	expect(datagramText(event)).toBe("two");
 });
 
-test("a datagram no publisher could seal is dropped as a bad datagram", async () => {
+test("a datagram no publisher could seal is dropped with its code", async () => {
 	const p = await pair("audio");
 	const sealedAt = await sealed(p, DATAGRAM, 0, 0, "x");
 	p.net.insertDatagram(1, ms(1), new Uint8Array(MAX_DATAGRAM_PAYLOAD + 1));
 	p.net.insertDatagram(2, ms(2), sealedAt.subarray(0, 3));
 	p.net.insertDatagram(2 ** 53, ms(3), sealedAt);
+	p.net.insertDatagram(2 ** 53 + 2, ms(3), sealedAt.subarray(0, 3));
 	await p.producer.insertDatagram(2 ** 53 - 1, ms(4), text("last"));
 
-	expect(await p.consumer.recvDatagram()).toEqual({ kind: "authentication", sequence: 1 });
-	expect(await p.consumer.recvDatagram()).toEqual({ kind: "authentication", sequence: 2 });
-	expect(await p.consumer.recvDatagram()).toEqual({ kind: "authentication", sequence: 2 ** 53 });
+	expect(await p.consumer.recvDatagram()).toEqual({ kind: "oversize", sequence: 1 });
+	expect(await p.consumer.recvDatagram()).toEqual({ kind: "oversize", sequence: 2 });
+	expect(await p.consumer.recvDatagram()).toEqual({ kind: "identity", sequence: 2 ** 53 });
+	// Identity is checked before size, as in every core.
+	expect(await p.consumer.recvDatagram()).toEqual({ kind: "identity", sequence: 2 ** 53 + 2 });
 	expect(datagramText(await p.consumer.recvDatagram())).toBe("last");
 });
 
@@ -546,7 +566,7 @@ test("resubscribing shares a key's budget", async () => {
 		p.consumer.close();
 		opened[0].invocations = MAX_INVOCATIONS;
 
-		const again = p.consuming.consume(subscribe(p.net));
+		const again = p.consuming.consume(subscribe(p.net), p.semantic);
 		await p.producer.appendDatagram(ms(2), text("two"));
 		expect(await failure(again.recvDatagram())).toBe("exhausted");
 	} finally {
@@ -712,8 +732,8 @@ test("a refused timestamp does not burn the frame", async () => {
 test("produce waits for an unaccepted track's timescale", async () => {
 	const generation = credential().produce();
 	const net = new NetTrack.Producer(await generation.name("audio"));
-	const consumer = generation.credential.consume(generation.epoch).consume(subscribe(net));
-	const producing = generation.produce(net);
+	const consumer = generation.credential.consume(generation.epoch).consume(subscribe(net), "audio");
+	const producing = generation.produce(net, "audio");
 	net.accept({ timescale: Time.Timescale.MILLI });
 	const producer = await producing;
 
@@ -730,11 +750,11 @@ test("produce waits for an unaccepted track's timescale", async () => {
 	// A track closed before it is accepted never produces, and leaves its name unclaimed.
 	const video = await generation.name("video");
 	const closed = new NetTrack.Producer(video);
-	const refused = generation.produce(closed);
+	const refused = generation.produce(closed, "video");
 	closed.close(new Error("gone"));
 	await expect(refused).rejects.toThrow("gone");
-	await generation.produce(netTrack(video));
-	expect(await failure(generation.produce(netTrack(video)))).toBe("reuse");
+	await generation.produce(netTrack(video), "video");
+	expect(await failure(generation.produce(netTrack(video), "video"))).toBe("reuse");
 });
 
 test("a timestamp out of range at the track's timescale spends nothing", async () => {
@@ -742,8 +762,8 @@ test("a timestamp out of range at the track's timescale spends nothing", async (
 	const net = new Broadcast.Producer().createTrack(await generation.name("video"), {
 		timescale: Time.Timescale.NANO,
 	});
-	const consumer = generation.credential.consume(generation.epoch).consume(subscribe(net));
-	const producer = await generation.produce(net);
+	const consumer = generation.credential.consume(generation.epoch).consume(subscribe(net), "video");
+	const producer = await generation.produce(net, "video");
 	const huge = new Time.Timestamp(Number.MAX_SAFE_INTEGER, Time.Timescale.MILLI);
 
 	await expect(producer.insertDatagram(0, huge, text("x"))).rejects.toThrow(RangeError);
@@ -805,7 +825,7 @@ test("a group read past the first frame opens at its transport index", async () 
 	const net = await subscribe(p.net).recvGroup();
 	if (!net) throw new Error("expected a net group");
 	expect(net.tryReadFrame()).toBeDefined();
-	const key = trackKey(p.consuming.credential, p.consuming.epoch, parse(p.net.name), GROUP);
+	const key = trackKey(p.consuming.credential, p.consuming.epoch, p.semantic, GROUP);
 	const wrapped = Group.Consumer.make(net, { pump: new Pump(), key, terminal: new Terminal(subscribe(p.net)) });
 	expect(await readText(wrapped)).toBe("one");
 });
@@ -861,7 +881,7 @@ test("secrets stay out of serialization", async () => {
 	const cred = new Credential({ context: encoder.encode("example.com/meeting-123"), kid: 7, secret });
 	const generation = cred.produce();
 	const net = netTrack(await generation.name("video"));
-	const producer = await generation.produce(net);
+	const producer = await generation.produce(net, "video");
 	const marker = "moq-e2ee-00 test secret";
 	for (const value of [cred, generation, producer]) {
 		expect(JSON.stringify(value) ?? "").not.toContain(marker);

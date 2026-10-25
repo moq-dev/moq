@@ -9,10 +9,10 @@ earlier ones. Rewrite the import and consumer quests around that contract.
 ## Plan
 
 The 2026-10-11 TS audit found the proposed catalog duration is not yet a
-sufficient guarantee. `h264-import` rounds a measured recovery duration down
-to milliseconds and raises the global value after observing a longer sweep.
+sufficient guarantee. `h264-import` raises the global value after observing
+a longer sweep.
 `consumer-warmup` sizes the transcoder's decode history from that duration. A
-rounded value can leave the history short of the recovery picture, and a later catalog update cannot
+later catalog update cannot
 recall pictures a subscriber has already displayed using the old value.
 
 Decided 2026-10-22 (maintainer): precision is settled; the hang draft rounds a

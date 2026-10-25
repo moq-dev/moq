@@ -22,7 +22,7 @@ pub struct Producer {
 	next: u64,
 }
 
-/// A physical name's grouped-frame and datagram keys; clones share their accounting.
+/// A semantic name's grouped-frame and datagram keys; clones share their accounting.
 #[derive(Clone, Debug)]
 pub(crate) struct Keys {
 	pub group: Arc<Mutex<TrackKey>>,
@@ -210,14 +210,21 @@ impl fmt::Debug for Request {
 pub struct Subscribing {
 	inner: kio::Pending<moq_net::track::Subscribing>,
 	generation: crate::generation::Consumer,
+	// Keys derive from the name subscribed to, never from the name a relay hands back.
+	semantic: String,
 }
 
 impl Subscribing {
 	pub(crate) fn new(
 		inner: kio::Pending<moq_net::track::Subscribing>,
 		generation: crate::generation::Consumer,
+		semantic: String,
 	) -> Self {
-		Self { inner, generation }
+		Self {
+			inner,
+			generation,
+			semantic,
+		}
 	}
 
 	/// Poll until the track is found, yielding a decrypting [`Consumer`].
@@ -227,7 +234,7 @@ impl Subscribing {
 	/// A net error if the track is aborted or not found.
 	pub fn poll_ok(&self, waiter: &kio::Waiter) -> Poll<Result<Consumer>> {
 		let subscriber = ready!(self.inner.poll_ok(waiter))?;
-		Poll::Ready(self.generation.consume(subscriber))
+		Poll::Ready(self.generation.consume(subscriber, &self.semantic))
 	}
 
 	/// Change the subscription preferences before (or after) it resolves.
@@ -251,8 +258,8 @@ impl kio::Task for Subscribing {
 /// Subscriber for one physical track.
 ///
 /// Grouped authentication failure ends the track and wakes pending reads with
-/// [`Error::Authentication`]. A bad datagram is an [`Event::Authentication`] until
-/// that key is exhausted.
+/// [`Error::Authentication`]. A datagram that fails to open is dropped as an
+/// [`Event::Identity`], [`Event::Oversize`], or [`Event::Authentication`] until that key is exhausted.
 pub struct Consumer {
 	name: String,
 	// Shared with every other subscription to this name under the generation.
@@ -308,8 +315,8 @@ impl Consumer {
 
 	/// Poll for the next datagram event.
 	///
-	/// A bad datagram (a forged tag, or a sequence or size no publisher could seal) and a
-	/// duplicate are events, not track-ending errors.
+	/// A datagram that fails to open (a sequence out of range, a bad size, or a forged tag) and
+	/// a duplicate are events, not track-ending errors.
 	///
 	/// # Errors
 	///
@@ -349,11 +356,10 @@ impl Consumer {
 				}))))
 			}
 			// A bad datagram is not grouped failure: the track, its demand, and any
-			// parked grouped read stay up. No publisher seals a sequence or payload size out
-			// of range, so one is as bad as a forged tag. `exhausted` is this key's own limit.
-			Err(Error::Authentication | Error::Identity | Error::Oversize) => {
-				Poll::Ready(Ok(Some(Event::Authentication { sequence })))
-			}
+			// parked grouped read stay up. `exhausted` is this key's own limit.
+			Err(Error::Authentication) => Poll::Ready(Ok(Some(Event::Authentication { sequence }))),
+			Err(Error::Identity) => Poll::Ready(Ok(Some(Event::Identity { sequence }))),
+			Err(Error::Oversize) => Poll::Ready(Ok(Some(Event::Oversize { sequence }))),
 			Err(err) => Poll::Ready(Err(err)),
 		}
 	}

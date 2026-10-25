@@ -97,10 +97,11 @@ Still red from `main`, ours:
   refuses the new token, so every moq-go cell against our relay fails.
 - moq-dev-js `data-subgroup-basic` against libquicr never sees the track
   end, while moq-dev-rs passes. Not yet traced.
-- moxygen draft-14 over raw QUIC waits on
-  [IETF lazy discovery](/quest/m1/ietf-lazy-discovery.md), and every
-  `js-web` publisher cell behind a joining FETCH (imquic, MOQtail draft-22,
-  aiomoqt, red5) on [JavaScript FETCH](/quest/m1/js-fetch.md).
+- Every `js-web` publisher cell behind a joining FETCH (imquic, MOQtail
+  draft-22, aiomoqt, red5) waits on [JavaScript FETCH](/quest/m1/js-fetch.md).
+  moxygen draft-14 over raw QUIC discovered nothing, since the CLI asked
+  draft-14 for no namespace; it passed live once Rust asked for the watched
+  prefixes ([moq-dev/moq#6530](https://github.com/moq-dev/moq/pull/6530)).
 
 Theirs, reported or waiting on others:
 
@@ -152,5 +153,4 @@ and moqtopus and xquic-draft-18 over WebTransport (raw QUIC only).
 - [Runner teardown](/quest/m3/interop-runner-approval.md) - the runner's moq.dev clients move to the withdrawing `close()` once it ships
 - [Moxygen minimal interop](/quest/m1/smoke-moxygen.md) - Moxygen's filter type, waiting upstream
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - the JS publisher serves FETCH, which most red `js-web` publisher cells need
-- [IETF lazy discovery](/quest/m1/ietf-lazy-discovery.md) - asks for watched prefixes, which the red moxygen draft-14 cell needs
 - [Interop coverage](/quest/m1/interop-coverage/README.md) - the runner cases whose red cells this audit classifies

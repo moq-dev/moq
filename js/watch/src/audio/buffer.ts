@@ -1,7 +1,7 @@
 import { Micro, Milli, type Second } from "@moq/clock";
 import { Effect, type Getter, Signal } from "@moq/signals";
 import { ringHold, ringSamples } from "./latency";
-import type { Data, Init, Latency, Reset, State, Truncate } from "./render";
+import type { Data, Init, Latency, Playing, Reset, State, Truncate } from "./render";
 
 /**
  * Decides when the decode loop may decode a frame, which is how the target delay is split between
@@ -275,6 +275,7 @@ export class AudioBuffer {
 	// Bumped per reset or park. A state message posted before the worklet saw it reports the ring
 	// playing on the old terms, which would open the gate.
 	#epoch = 0;
+	#playing?: Getter<boolean>;
 
 	#signals = new Effect();
 
@@ -287,17 +288,33 @@ export class AudioBuffer {
 			delay: Milli;
 			/** Anchor to the first frame and play through, holding the lookahead upstream. */
 			buffered: boolean;
+			/** Hold consumption until the shared startup floor is ready. */
+			playing?: Getter<boolean>;
 		},
 	) {
-		const { channels, rate, buffered } = props;
+		const { channels, rate, buffered, playing } = props;
+		this.#playing = props.playing;
 		this.#worklet = worklet;
 		this.channels = channels;
 		this.rate = rate;
 
 		this.#backpressure = new Backpressure(rate, buffered, props.delay);
 
-		const msg: Init = { type: "init", channels, rate, latency: this.#latency(), buffered };
+		const msg: Init = {
+			type: "init",
+			channels,
+			rate,
+			latency: this.#latency(),
+			buffered,
+			...(playing && { playing: playing.peek() }),
+		};
 		worklet.port.postMessage(msg);
+		if (playing) {
+			this.#signals.run((effect) => {
+				const msg: Playing = { type: "playing", playing: effect.get(playing), epoch: this.#epoch };
+				worklet.port.postMessage(msg);
+			});
+		}
 
 		this.#signals.event(worklet.port, "message", (ev: Event) => {
 			const data = (ev as MessageEvent<State>).data;
@@ -382,7 +399,11 @@ export class AudioBuffer {
 	/** Flush buffered samples and re-stall, ready to anchor the next utterance (buffered mode). */
 	reset(): void {
 		this.#epoch++;
-		const msg: Reset = { type: "reset", epoch: this.#epoch };
+		const msg: Reset = {
+			type: "reset",
+			epoch: this.#epoch,
+			...(this.#playing && { playing: this.#playing.peek() }),
+		};
 		this.#worklet.port.postMessage(msg);
 		this.#backpressure.reset();
 	}

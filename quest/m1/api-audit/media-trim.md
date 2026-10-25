@@ -17,11 +17,10 @@ Decided 2026-10-22 (API audit). Make `pub(crate)` or delete:
 - moq-video capture `Control`/`Driver` (only `publish_capture` is used),
   `DmaBuf::new`, `DmaBufLayout` (until
   [OBS Linux GPU](/quest/m3/obs-linux-gpu.md)).
-- moq-hls `pub mod master`, range playlists, and `history`: the CLI never
-  sets history, so `?start=` always answers 416 while `doc/bin/hls.md`
-  documents it. Remove the docs with it; see
-  [history floor](/quest/m1/archive/history-floor.md).
-- moq-archive `segment::*`, `Key`, and most of `Store`.
+- moq-hls `pub mod master`. History mode and range playlists stay public:
+  the archive line ([history floor](/quest/m1/archive/history-floor.md),
+  [catalog HLS](/quest/m1/archive/catalog-hls.md)) is their consumer
+  (decided 2026-10-22, maintainer).
 - moq-json `window::Checkpoint`, `Encoder::resume`, `Producer::{resume, cut}`
   and `moq_mux::timeline::Producer::resume`, reached only by tests, unless
   the [archive consumer](/quest/m1/archive/consumer.md) needs them.

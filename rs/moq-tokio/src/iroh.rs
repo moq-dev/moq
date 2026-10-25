@@ -29,7 +29,7 @@ fn congestion_factory(family: CongestionControl) -> Arc<dyn iroh::endpoint::Cont
 
 /// No congestion control: a window that never shrinks, too large for noq to pace.
 ///
-/// noq has no such controller, so this mirrors moq-quic's `congestion::Unlimited`.
+/// noq has no such controller, so this mirrors `moq_congestion::Unlimited`.
 #[derive(Clone, Copy, Debug)]
 struct Unlimited;
 
@@ -262,6 +262,16 @@ impl Config {
 		quic.validate().map_err(Error::Config)?;
 
 		let quic = quic.resolve();
+		if quic.keep_alive.is_none() {
+			return Err(Error::Config(crate::Error::NoBackend(
+				"Iroh cannot disable keep-alive; omit quic.keep_alive or set a positive interval",
+			)));
+		}
+		if quic.keylog.is_some() {
+			return Err(Error::Config(crate::Error::NoBackend(
+				"Iroh does not support an explicit quic.keylog path",
+			)));
+		}
 		if quic.gso_disabled() {
 			return Err(Error::GsoUnsupported);
 		}
@@ -294,7 +304,6 @@ impl Config {
 			Endpoint::builder(iroh::endpoint::presets::N0)
 		}
 		.secret_key(secret_key)
-		.keylog(quic.keylog)
 		.transport_config(transport.build());
 		if let Some(addr) = self.bind_v4 {
 			builder = builder.bind_addr(addr)?;
@@ -313,9 +322,9 @@ impl Config {
 /// The per-connection transport config, shared by both roles.
 ///
 /// `keep_alive` is the value [`crate::quic::Config::resolve`] already produced:
-/// `Some` is the interval, and `None` (`0s`) means disabled. iroh 1.2's setter
+/// `Some` is the interval, and `None` (`0s`) means disabled. iroh 1.4's setter
 /// only stores `Some`, and the builder starts at its own 5s heartbeat, so a
-/// disabled interval cannot be written. A zero duration would rearm the timer
+/// disabled interval is refused at bind. A zero duration would rearm the timer
 /// for immediately and spin, so it is not passed. iroh's separate per-path
 /// heartbeat stays at the 5s it ships with: that setter ignores anything longer
 /// and cannot clear it either.
@@ -507,6 +516,34 @@ fn url_set_scheme(url: Url, scheme: &str) -> Result<Url> {
 )]
 mod tests {
 	use super::*;
+
+	#[tokio::test]
+	async fn zero_keep_alive_is_refused_only_when_iroh_is_enabled() {
+		let mut config = Config::default();
+		let quic = crate::quic::Config {
+			keep_alive: Some(std::time::Duration::ZERO.into()),
+			..Default::default()
+		};
+		assert!(config.clone().bind(&quic).await.unwrap().is_none());
+		config.enabled = Some(true);
+		let err = config.bind(&quic).await.unwrap_err();
+		assert!(
+			matches!(err, Error::Config(crate::Error::NoBackend(reason)) if reason.contains("cannot disable keep-alive"))
+		);
+	}
+
+	#[tokio::test]
+	async fn explicit_keylog_path_is_refused_only_when_iroh_is_enabled() {
+		let mut config = Config::default();
+		let quic = crate::quic::Config {
+			keylog: Some("keys.log".into()),
+			..Default::default()
+		};
+		assert!(config.clone().bind(&quic).await.unwrap().is_none());
+		config.enabled = Some(true);
+		let err = config.bind(&quic).await.unwrap_err();
+		assert!(matches!(err, Error::Config(crate::Error::NoBackend(reason)) if reason.contains("keylog path")));
+	}
 
 	/// A public builder taking a config this crate did not check, so it refuses
 	/// before it touches the key file or a socket.

@@ -19,8 +19,9 @@ It accepts no explicit epoch; its clones share permanent track claims.
 
 The application names tracks by their semantic names. `broadcast::Producer` wraps the
 `moq-net` broadcast and creates each track under its physical name, so only physical names
-reach the relays. A track served on demand is reserved with `reserve_track` and accepted
-once its demand shows a subscriber: physical names cannot be mapped back to semantic ones.
+reach the relays. A physical name is the semantic name encrypted under the generation: a relay
+learns only its length rounded up to 16 bytes. A track served on demand is reserved with
+`reserve_track` and accepted once its demand shows a subscriber.
 
 ```rust
 let credential = Credential::new(credential::Config { context, kid, secret })?;
