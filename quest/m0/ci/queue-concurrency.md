@@ -50,6 +50,11 @@ Remaining (maintainer, on the host):
 - Keep `NEXTEST_TEST_THREADS=24` per entry (48 workers across two entries;
   mbx budgets compiles, not tests) and watch the first day for timing flakes
   rather than guess a lower number.
+- Make the pre-build mbx sweep safe for a concurrent entry first. With
+  [moq-dev/moq#6709](https://github.com/moq-dev/moq/pull/6709), each job runs
+  `mbx gc` before it builds (`.github/actions/rust-cache`), and in a shared
+  home that sweep can evict generated source trees another entry's next
+  build reads.
 - Raise the main ruleset's `max_entries_to_build` from 1 to 2.
 - Measure merged PRs per hour and per-entry wall time for a day against the
   baseline before going past 2.
