@@ -24,8 +24,13 @@ branch:
 - Keep moq-quic's QUIC adapter for graviola (graviola seals packets, RustCrypto
   computes header-protection masks) until
   [rustls-graviola ships QUIC keys](/quest/m1/pure-crypto/graviola-quic.md).
-- rustls-acme refuses to build without ring or aws-lc-rs, so moq carries the
-  spike's patched copy until [provider-neutral ACME](/quest/m1/pure-crypto/acme-upstream.md)
+- Decided by the maintainer on 2026-10-25: rustls-acme refuses to build
+  without ring or aws-lc-rs, and ACME has no released user yet, so the
+  graviola builds leave out moq-relay's `acme` feature and moq carries no
+  patched rustls-acme. `acme` with `graviola` is refused at compile time like
+  `aws-lc-rs` with `graviola`. Without the feature, an `[acme]` config already
+  fails at startup. The relay docs and the packaged `relay.toml` say ACME needs
+  a non-graviola build until [ACME on graviola](/quest/m1/pure-crypto/acme-upstream.md)
   lands.
 - Accept ChaCha20-Poly1305 on graviola being 1.7-3x slower than aws-lc per
   packet, and record it. It only matters for peers that prefer ChaCha20, which
@@ -40,13 +45,12 @@ that reshape deletes.
 graviola panics on its first operation on an x86_64 CPU without AES-NI,
 PCLMULQDQ, BMI1, ADX, or AVX2, and some VPS hypervisors mask ADX
 ([ctz/graviola#222](https://github.com/ctz/graviola/issues/222), on an OVH VPS;
-graviola's maintainer treats it as a hypervisor configuration). The relay must
-fail at startup on such a CPU, not on its first handshake, and the rollout
-checks the relays' own hosts first. Recommendation: touch graviola during
-startup so its own check fires, rather than copying its feature list; a public
-check ([ctz/graviola#227](https://github.com/ctz/graviola/issues/227)) would
-only turn that panic into an error. The alternative, a second x86_64 release
-build on aws-lc-rs, doubles that target's artifacts for hosts we have not seen.
+graviola's maintainer treats it as a hypervisor configuration). Decided by the
+maintainer on 2026-10-25: the relay fails at startup with a clear error naming
+the missing CPU feature, not on its first handshake, and the rollout checks the
+relays' own hosts first. graviola has no public check yet
+([ctz/graviola#227](https://github.com/ctz/graviola/issues/227)), so the relay
+mirrors its mandatory list and links the source it mirrors.
 
 Public API: moq-tokio's and moq-quic's crypto features; moq-relay's TLS provider
 on its release targets. Wire: none.

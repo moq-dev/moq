@@ -1,17 +1,17 @@
-# [M] Provider-neutral ACME
+# [S] ACME on graviola
 
 ## Goal
 
-moq-relay's ACME runs on graviola through a released upstream crate that
-neither requires ring nor aws-lc-rs, and moq deletes its patched rustls-acme
-copy. Check the upstream status below on crates.io and GitHub.
+moq-relay's graviola builds turn ACME back on once an upstream ACME crate
+takes its crypto from something other than ring or aws-lc-rs: a rustls-acme
+release with a provider hook, or instant-acme 0.9, whichever comes first.
+Check the upstream status below on crates.io and GitHub.
 
 ## Plan
 
-Decided with the maintainer on 2026-10-24, from
-[kixelated/rust2#13](https://github.com/kixelated/rust2/pull/13)'s decision 1:
-upstream a provider-neutral crypto hook, and carry the spike's patched copy
-(crypto on graviola and P-256) only until it lands.
+Decided by the maintainer on 2026-10-25: ACME has no released user yet, so
+[moq-relay on graviola](/quest/m1/pure-crypto/relay-graviola.md) builds without
+it, and moq carries no patched rustls-acme. This quest waits for upstream.
 
 Upstream status on 2026-10-25:
 
@@ -20,9 +20,7 @@ Upstream status on 2026-10-25:
   [FlorianUekermann/rustls-acme#62](https://github.com/FlorianUekermann/rustls-acme/issues/62)
   in 2024, with no work since. A rustls `CryptoProvider` alone is not enough:
   rustls-acme also generates account and certificate keys and hashes key
-  authorizations. Outside PRs there wait months
-  ([#102](https://github.com/FlorianUekermann/rustls-acme/pull/102),
-  [#91](https://github.com/FlorianUekermann/rustls-acme/pull/91)).
+  authorizations.
 - instant-acme's `main` already takes its crypto through its own
   `CryptoProvider` traits (signing keys, HMAC, SHA-256), merged in
   [djc/instant-acme#268](https://github.com/djc/instant-acme/pull/268), as
@@ -30,22 +28,12 @@ Upstream status on 2026-10-25:
   instant-acme is only the ACME client: moq-relay would own the renewal loop
   and the TLS-ALPN-01 resolver that rustls-acme provides today.
 
-Open (recommendation: the first, then the second if it stalls):
-
-1. Propose on rustls-acme#62 a hook shaped like instant-acme's traits, and
-   carry the patched copy until a release ships it. Least moq code, but it
-   depends on a slow upstream.
-2. Once instant-acme 0.9 releases, move moq-relay onto it with a graviola
-   provider and drop rustls-acme, which also drops the rcgen 0.13 and
-   async-web-client duplicates the
-   [dependency audit](/quest/m2/audit-deps.md) lists. No upstream code, but
-   moq-relay owns more of the ACME flow.
-
+Optional: propose a hook on rustls-acme#62 shaped like instant-acme's traits.
 Decided by the maintainer on 2026-10-25: posting upstream for this quest is
 approved, so whoever starts it may post without asking.
 
-Public API: none. Wire: none.
+Public API: moq-relay's `acme` feature works with graviola again. Wire: none.
 
 ## Related
 
-- [moq-relay on graviola](/quest/m1/pure-crypto/relay-graviola.md) - carries the patched copy until this lands
+- [moq-relay on graviola](/quest/m1/pure-crypto/relay-graviola.md) - builds without ACME until this lands

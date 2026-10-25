@@ -4,8 +4,7 @@
 
 moq pins a graviola release newer than 0.4.1 that carries ECDSA key generation
 and the faster ChaCha20-Poly1305. moq-tokio generates self-signed keys with
-graviola instead of RustCrypto's `p256`, as does the patched rustls-acme while
-moq carries it, and the ChaCha20-Poly1305 gap recorded in
+graviola instead of RustCrypto's `p256`, and the ChaCha20-Poly1305 gap recorded in
 [moq-relay on graviola](/quest/m1/pure-crypto/relay-graviola.md) is
 re-measured. Check: the newest graviola on crates.io is past 0.4.1.
 

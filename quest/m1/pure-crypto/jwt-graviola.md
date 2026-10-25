@@ -25,13 +25,8 @@ signer and verifier factories. It has only a process-wide default, so moq-auth
 installs its provider only when none is installed, as the spike does, and an
 embedder's choice wins.
 
-Open (recommendation: the first): where the provider lives.
-
-1. Private in moq-auth. moq is its only consumer.
-2. A published crate, which moq then maintains for others.
-3. A `graviola` feature in jsonwebtoken, beside `aws_lc_rs` and `rust_crypto`,
-   if its maintainer wants one. Posting upstream is approved (maintainer,
-   2026-10-25).
+Decided by the maintainer on 2026-10-25: the provider stays private in
+moq-auth, since moq is its only consumer.
 
 Public API: none expected; say so if moq-auth's key types change. Wire: none.
 
