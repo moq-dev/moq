@@ -6896,7 +6896,9 @@ impl Subscriber {
 	/// A local filter, not a request: it tells the publisher nothing, so groups outside it
 	/// are still delivered and simply not returned. To change what is requested, set
 	/// [`Subscription::ranges`] via [`Self::update`]. See [Local cursor vs wire
-	/// preference](Self#local-cursor-vs-wire-preference).
+	/// preference](Self#local-cursor-vs-wire-preference). One exception: on a track served
+	/// across route changes, lowering the floor asks the serving route again for the groups
+	/// it newly covers within those ranges, since the route that delivered them may be gone.
 	pub fn with_range(mut self, groups: impl RangeBounds<u64>) -> Self {
 		self.set_range(groups);
 		self
@@ -6912,7 +6914,7 @@ impl Subscriber {
 				cursor.end_sequence = end;
 				cursor.update_servable();
 			}
-			Inner::Resume(resume, _) => resume.set_range(start, end),
+			Inner::Resume(resume, _) => resume.set_range(start, end, &self.delivered),
 		}
 		self.largest.bounds_moved();
 	}
