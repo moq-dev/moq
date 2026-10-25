@@ -4877,9 +4877,8 @@ class FfiConverterMoqAnchor {
 
 class AbsoluteMoqAnchor extends MoqAnchor {
   final int group;
-  final int frame;
-  AbsoluteMoqAnchor({required int this.group, required int this.frame});
-  AbsoluteMoqAnchor._(int this.group, int this.frame);
+  AbsoluteMoqAnchor(int this.group);
+  AbsoluteMoqAnchor._(int this.group);
   static LiftRetVal<AbsoluteMoqAnchor> read(Uint8List buf) {
     int new_offset = buf.offsetInBytes;
     final group_lifted = FfiConverterUInt64.read(
@@ -4887,12 +4886,7 @@ class AbsoluteMoqAnchor extends MoqAnchor {
     );
     final group = group_lifted.value;
     new_offset += group_lifted.bytesRead;
-    final frame_lifted = FfiConverterUInt64.read(
-      Uint8List.view(buf.buffer, new_offset),
-    );
-    final frame = frame_lifted.value;
-    new_offset += frame_lifted.bytesRead;
-    return LiftRetVal(AbsoluteMoqAnchor._(group, frame), new_offset);
+    return LiftRetVal(AbsoluteMoqAnchor._(group), new_offset);
   }
 
   @override
@@ -4904,9 +4898,7 @@ class AbsoluteMoqAnchor extends MoqAnchor {
 
   @override
   int allocationSize() {
-    return FfiConverterUInt64.allocationSize(group) +
-        FfiConverterUInt64.allocationSize(frame) +
-        4;
+    return FfiConverterUInt64.allocationSize(group) + 4;
   }
 
   @override
@@ -4915,10 +4907,6 @@ class AbsoluteMoqAnchor extends MoqAnchor {
     int new_offset = buf.offsetInBytes + 4;
     new_offset += FfiConverterUInt64.write(
       group,
-      Uint8List.view(buf.buffer, new_offset),
-    );
-    new_offset += FfiConverterUInt64.write(
-      frame,
       Uint8List.view(buf.buffer, new_offset),
     );
     return new_offset;

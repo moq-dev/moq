@@ -1246,21 +1246,19 @@ impl Drop for Rendition {
 /// Fetch one group, mapping "no longer (or not yet) servable" to the error that says so
 /// rather than a bare `None`: a caller abandoning a segment can only explain itself with it.
 ///
-/// Reads from `start` and, when `end` is set, stops before that frame of the group.
+/// Fetches the whole group, since a group is the unit of decodability, and reads from `start`
+/// and, when `end` is set, stops before that frame of the group.
 async fn fetch(
 	track: &moq_net::track::Consumer,
 	start: hang::timeline::Position,
 	end: Option<u64>,
 	broadcast: &moq_net::broadcast::Consumer,
 ) -> Result<std::result::Result<moq_net::group::Consumer, moq_net::Error>> {
-	let options = moq_net::group::Fetch::default().with_frame_start(start.frame);
-	match track.fetch_group(start.group, options).await {
-		Ok(mut group) => {
-			if let Some(end) = end {
-				group = group.with_range(..end);
-			}
-			Ok(Ok(group))
-		}
+	match track.fetch_group(start.group, None).await {
+		Ok(group) => Ok(Ok(match end {
+			Some(end) => group.with_range(start.frame..end),
+			None => group.with_range(start.frame..),
+		})),
 		Err(err) if is_unservable(&err, broadcast) => Ok(Err(err)),
 		Err(err) => Err(err.into()),
 	}
