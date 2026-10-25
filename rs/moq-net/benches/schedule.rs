@@ -14,8 +14,8 @@
 //!
 //! `fanout` sweeps subscriptions against groups in flight per subscription, timing one frame,
 //! so a scheduling cost that grows with the table rather than the touched path is a slope.
-//! `datagram` sweeps send groups, domains, and queued datagrams per group against one
-//! datagram sent and one evicted, for the same reason.
+//! `datagram` sweeps send groups and queued datagrams per group against one datagram sent
+//! and one evicted, for the same reason.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -212,7 +212,7 @@ impl Sim {
 		let groups = workload
 			.tracks
 			.iter()
-			.map(|track| schedule.open_group(track.priority.into(), None))
+			.map(|track| schedule.open_group(track.priority.into()))
 			.collect();
 		let mut sim = Self {
 			kind,
@@ -429,7 +429,7 @@ fn saturated(subscriptions: usize, streams: usize) -> (Schedule<u64, ()>, Vec<Sl
 	let mut schedule = Schedule::new();
 	let mut slots = Vec::with_capacity(subscriptions * streams);
 	for _ in 0..subscriptions {
-		let group = schedule.open_group(0, None);
+		let group = schedule.open_group(0);
 		for seq in 0..streams {
 			let id = slots.len() as u64;
 			let mut slot = Slot::default();
@@ -492,16 +492,11 @@ fn bench_fanout(c: &mut Criterion) {
 	group.finish();
 }
 
-/// A full datagram budget: `groups` send groups at one priority, each in its own domain when
-/// `domains`, with `datagrams` queued in each, one packet apiece.
-fn datagrams(groups: usize, datagrams: usize, domains: bool) -> (Schedule<u64, ()>, Vec<usize>) {
+/// A full datagram budget: `groups` send groups at one priority, with `datagrams` queued in
+/// each, one packet apiece.
+fn datagrams(groups: usize, datagrams: usize) -> (Schedule<u64, ()>, Vec<usize>) {
 	let mut schedule = Schedule::new();
-	let ids: Vec<_> = (0..groups)
-		.map(|_| {
-			let domain = domains.then(|| schedule.open_domain());
-			schedule.open_group(0, domain)
-		})
-		.collect();
+	let ids: Vec<_> = (0..groups).map(|_| schedule.open_group(0)).collect();
 	let budget = groups * datagrams * PACKET;
 	for seq in 0..datagrams {
 		for &group in &ids {
@@ -512,31 +507,28 @@ fn datagrams(groups: usize, datagrams: usize, domains: bool) -> (Schedule<u64, (
 }
 
 fn bench_datagram(c: &mut Criterion) {
-	for (name, domains) in [("groups", false), ("domains", true)] {
-		// A datagram into a full budget, which evicts the oldest of the busiest domain's
-		// lowest-priority group.
-		let mut group = c.benchmark_group(format!("schedule_datagram_evict_{name}"));
-		for groups in [1, 16, 256, 4_096] {
-			for queued in [1, 16, 256] {
-				if groups * queued > 100_000 {
-					continue;
-				}
-				let (mut schedule, ids) = datagrams(groups, queued, domains);
-				let budget = schedule.datagram_bytes();
-				let mut seq = queued as i64;
-				let mut next = 0;
-				group.bench_with_input(BenchmarkId::new(format!("{name}_{groups}"), queued), &(), |b, ()| {
-					b.iter(|| {
-						// Round robin, so every group keeps its share of the budget.
-						schedule.push_datagram(Some(ids[next]), seq, (), PACKET, budget);
-						next = (next + 1) % ids.len();
-						seq += 1;
-					});
-				});
+	// A datagram into a full budget, which evicts the oldest of the lowest-priority group.
+	let mut group = c.benchmark_group("schedule_datagram_evict_groups");
+	for groups in [1, 16, 256, 4_096] {
+		for queued in [1, 16, 256] {
+			if groups * queued > 100_000 {
+				continue;
 			}
+			let (mut schedule, ids) = datagrams(groups, queued);
+			let budget = schedule.datagram_bytes();
+			let mut seq = queued as i64;
+			let mut next = 0;
+			group.bench_with_input(BenchmarkId::new(format!("groups_{groups}"), queued), &(), |b, ()| {
+				b.iter(|| {
+					// Round robin, so every group keeps its share of the budget.
+					schedule.push_datagram(Some(ids[next]), seq, (), PACKET, budget);
+					next = (next + 1) % ids.len();
+					seq += 1;
+				});
+			});
 		}
-		group.finish();
 	}
+	group.finish();
 
 	// A datagram sent and another queued in its place, through every round robin.
 	let mut group = c.benchmark_group("schedule_datagram_send");
@@ -545,7 +537,7 @@ fn bench_datagram(c: &mut Criterion) {
 			if groups * queued > 100_000 {
 				continue;
 			}
-			let (mut schedule, _) = datagrams(groups, queued, false);
+			let (mut schedule, _) = datagrams(groups, queued);
 			let mut seq = queued as i64;
 			group.bench_with_input(BenchmarkId::new(format!("groups_{groups}"), queued), &(), |b, ()| {
 				b.iter(|| {
