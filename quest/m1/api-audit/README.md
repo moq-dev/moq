@@ -63,7 +63,6 @@ Rejected in planning:
 ## Required
 
 - [Two broadcast resolutions](/quest/m1/api-audit/resolve.md) - Rust, JS, and the bindings resolve a broadcast with `request(path, epoch)` or `follow(path, epoch)`, and every racy two-step caller is gone
-- [JS origin publications](/quest/m1/api-audit/js-publication.md) - `@moq/net` origins hand out a `Publication` that announces, so `Prepared` and standalone broadcasts lose methods that always throw
 - [Binding publications](/quest/m1/api-audit/binding-publication.md) - moq-ffi, the C ABI, and every wrapper hand out a publication handle that announces, replacing the private adapters
 - [moq-net exports with a consumer](/quest/m1/api-audit/net-exports.md) - the dead and test-only moq-net, `@moq/net`, and moq-ffi items the follow-up audit found go private or away
 - [Bindings read gaps and ends](/quest/m1/api-audit/decode-read-bindings.md) - moq-ffi and every wrapper surface `Gap` and `End` instead of discarding them
