@@ -10,8 +10,9 @@
 //!
 //! - Linux, on a Vulkan device: an exportable image and timeline semaphore,
 //!   handed over as `Surface::Vulkan`. NVENC imports it on the same GPU.
-//! - macOS and iOS, on a Metal device: an IOSurface-backed `CVPixelBuffer`,
-//!   handed over as `Surface::PixelBuffer`. VideoToolbox reads it directly.
+//! - macOS and iOS, on a Metal device: an IOSurface-backed NV12 `CVPixelBuffer`
+//!   drawn into through Metal, handed over as `Surface::PixelBuffer`.
+//!   VideoToolbox reads it directly.
 //! - Windows, on a Direct3D12 device: a texture shared with a Direct3D11 device,
 //!   converted to NV12 there and handed over as `Surface::Texture`. The Media
 //!   Foundation hardware encoder reads it directly.
@@ -29,12 +30,14 @@ use moq_net::Timestamp;
 
 use crate::{Error, Frame, Size, Surface};
 
-#[cfg(apple)]
-mod metal;
-#[cfg(target_os = "linux")]
-mod vulkan;
 #[cfg(target_os = "windows")]
 mod dx12;
+#[cfg(apple)]
+mod metal;
+#[cfg(any(apple, test))]
+mod nv12;
+#[cfg(target_os = "linux")]
+mod vulkan;
 
 fn err(message: impl std::fmt::Display) -> Error {
 	Error::Render(anyhow::anyhow!("{message}"))
@@ -108,10 +111,7 @@ impl Exporter {
 		})
 	}
 
-	#[allow(
-		unused_variables,
-		reason = "every platform's route is compiled out on the others"
-	)]
+	#[allow(unused_variables, reason = "every platform's route is compiled out on the others")]
 	fn native(device: &wgpu::Device, queue: &wgpu::Queue, size: Size) -> Result<Option<Route>, Error> {
 		#[cfg(target_os = "linux")]
 		if let Some(export) = vulkan::Export::open(device, queue, size)? {
@@ -176,7 +176,10 @@ impl Exporter {
 
 		let (rendition, sink) = config.probe_sink().await?;
 		if self.zero_copy() && crate::encode::backend::software(sink.name()) {
-			tracing::info!(encoder = sink.name(), "a software encoder reads frames on the CPU; reading them back");
+			tracing::info!(
+				encoder = sink.name(),
+				"a software encoder reads frames on the CPU; reading them back"
+			);
 			self.readback();
 		}
 		Ok(rendition)
@@ -425,13 +428,13 @@ fn extent(size: Size) -> wgpu::Extent3d {
 
 /// Draws a texture into a same-sized render target of another format, pixel
 /// for pixel, for the routes whose slots are not RGBA.
-#[cfg(any(apple, target_os = "windows"))]
+#[cfg(target_os = "windows")]
 struct Blit {
 	pipeline: wgpu::RenderPipeline,
 	layout: wgpu::BindGroupLayout,
 }
 
-#[cfg(any(apple, target_os = "windows"))]
+#[cfg(target_os = "windows")]
 impl Blit {
 	const SHADER: &str = r#"
 @group(0) @binding(0) var source: texture_2d<f32>;

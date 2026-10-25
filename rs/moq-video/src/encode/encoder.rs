@@ -1685,7 +1685,7 @@ mod tests {
 		use super::backend::test_util::{BT601_DESCRIBED, BT709_DESCRIBED, declared_color};
 		use crate::frame::d3d11;
 
-		let device = d3d11::create_device().expect("D3D11 hardware device");
+		let device = d3d11::create_device(None).expect("D3D11 hardware device");
 		for (size, declared) in [
 			(Size::new(640, 480), BT601_DESCRIBED),
 			(Size::new(1280, 720), BT709_DESCRIBED),

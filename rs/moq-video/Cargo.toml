@@ -242,7 +242,8 @@ objc2-screen-capture-kit = { workspace = true }
 # that feed a hardware encoder MFT zero-copy; without a GPU it falls back to CPU
 # NV12 deinterleaved to I420 for openh264. Links only system import libs, no
 # vendor SDK. The Direct3D11 / Dxgi features cover the shared D3D11 device and
-# the `IMFDXGIBuffer` surfaces wrapping each captured texture.
+# the `IMFDXGIBuffer` surfaces wrapping each captured texture; Direct3D12 and
+# Security cover the `render` export's textures shared from wgpu's device.
 windows = { version = "0.62", features = [
     "Foundation",
     "Foundation_Metadata",
@@ -252,9 +253,11 @@ windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_System_Com",
     "Win32_Media_MediaFoundation",
+    "Win32_Security",
     "Win32_Graphics_Direct3D",
     "Win32_Graphics_Direct3D10",
     "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Direct3D12",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",

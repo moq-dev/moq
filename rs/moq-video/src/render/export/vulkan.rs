@@ -22,7 +22,9 @@ use crate::frame::vulkan::{self, Completion, Format, Handles, Image, Memory, Slo
 use crate::{Error, Size, Surface};
 
 const USAGE: vk::ImageUsageFlags = vk::ImageUsageFlags::from_raw(
-	vk::ImageUsageFlags::TRANSFER_DST.as_raw() | vk::ImageUsageFlags::SAMPLED.as_raw() | vk::ImageUsageFlags::STORAGE.as_raw(),
+	vk::ImageUsageFlags::TRANSFER_DST.as_raw()
+		| vk::ImageUsageFlags::SAMPLED.as_raw()
+		| vk::ImageUsageFlags::STORAGE.as_raw(),
 );
 
 const SHADER: &str = r#"
@@ -409,7 +411,8 @@ impl Export {
 		};
 
 		let format = wgpu::TextureFormat::Rgba8Unorm;
-		let usage = wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING;
+		let usage =
+			wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING;
 		let descriptor = wgpu::TextureDescriptor {
 			label: Some("moq-video export"),
 			size: extent(self.size),
@@ -451,8 +454,11 @@ impl Export {
 		// SAFETY: as above; the image starts in `UNDEFINED`, which is the
 		// uninitialized state.
 		let texture = unsafe {
-			self.device
-				.create_texture_from_hal::<wgpu::hal::api::Vulkan>(texture, &descriptor, wgpu::TextureUses::UNINITIALIZED)
+			self.device.create_texture_from_hal::<wgpu::hal::api::Vulkan>(
+				texture,
+				&descriptor,
+				wgpu::TextureUses::UNINITIALIZED,
+			)
 		};
 		let target = Target {
 			view: texture.create_view(&Default::default()),
@@ -576,12 +582,10 @@ unsafe fn identity(instance: &ash::Instance, physical: vk::PhysicalDevice) -> Re
 	Ok(vulkan::Device {
 		device_uuid: id.device_uuid,
 		driver_uuid: id.driver_uuid,
-		render_node: (node.has_render == vk::TRUE).then(|| {
-			libc::makedev(node.render_major as libc::c_uint, node.render_minor as libc::c_uint) as u64
-		}),
+		render_node: (node.has_render == vk::TRUE)
+			.then(|| libc::makedev(node.render_major as libc::c_uint, node.render_minor as libc::c_uint) as u64),
 	})
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -616,7 +620,10 @@ mod tests {
 			assert_eq!(image.image().device, identity);
 			assert_eq!(image.size(), size);
 			assert_eq!(image.format(), Format::Rgba8);
-			assert_eq!(import(&device, &queue, image), rgba.repeat((size.width * size.height) as usize));
+			assert_eq!(
+				import(&device, &queue, image),
+				rgba.repeat((size.width * size.height) as usize)
+			);
 			held.push(frame);
 		}
 
@@ -668,7 +675,10 @@ mod tests {
 				unreachable!("checked zero copy above");
 			};
 			export.settle().await;
-			assert!(export.pool.lock().unwrap().allocated <= 1, "a slot was replaced rather than reused");
+			assert!(
+				export.pool.lock().unwrap().allocated <= 1,
+				"a slot was replaced rather than reused"
+			);
 		}
 		encoded.extend(encoder.finish().unwrap());
 		assert_eq!(encoded.len(), Exporter::DEPTH * 4);
@@ -769,7 +779,9 @@ mod tests {
 					sample_count: 1,
 					dimension: wgpu::TextureDimension::D2,
 					format,
-					usage: wgpu::TextureUses::COPY_DST | wgpu::TextureUses::RESOURCE | wgpu::TextureUses::STORAGE_WRITE_ONLY,
+					usage: wgpu::TextureUses::COPY_DST
+						| wgpu::TextureUses::RESOURCE
+						| wgpu::TextureUses::STORAGE_WRITE_ONLY,
 					memory_flags: wgpu::hal::MemoryFlags::empty(),
 					view_formats: Vec::new(),
 				},
