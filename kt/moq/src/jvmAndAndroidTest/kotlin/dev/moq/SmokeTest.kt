@@ -40,7 +40,6 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.milliseconds
-import kotlin.time.Instant
 
 @Serializable
 private data class Status(val state: String)
@@ -529,6 +528,18 @@ class SmokeTest {
     }
 
     @Test
+    fun `sessions advertise the wrapper ahead of moq-ffi`() = runTest {
+        Server.listen(ServerConfig(bind = "127.0.0.1:0", tls = ServerTls(generate = listOf("localhost")))).use { server ->
+            Moq.connect("https://${server.localAddr}", ClientConfig(tls = ClientTls(insecure = true))).use {
+                server.requests().first().use { request ->
+                    val advertised = request.peerImplementation()
+                    assertTrue(advertised?.startsWith("moq-kt/") == true, "advertised: $advertised")
+                }
+            }
+        }
+    }
+
+    @Test
     fun `closing a server releases its port`() = runTest {
         val first = Server.listen(ServerConfig(bind = "127.0.0.1:0", tls = ServerTls(generate = listOf("localhost"))))
         val addr = first.localAddr
@@ -571,7 +582,6 @@ class SmokeTest {
             val announced = origin.consume().announced(AnnounceConfig())
             origin.createBroadcast("epoch").use { broadcast ->
                 val first = mintEpoch()
-                assertEquals(Instant.fromEpochMilliseconds(1_700_000_000_000), epochTime("018bcfe5-6800-7000-8000-000000000000"))
                 broadcast.announce(AnnounceRoute(epoch = first))
                 val start = assertIs<AnnounceEventStart>(announced.nextRoute())
                 assertEquals(first, start.announce.route.epoch)
@@ -581,7 +591,7 @@ class SmokeTest {
                 val restart = assertIs<AnnounceEventRestart>(announced.nextRoute())
                 assertEquals(second, restart.announce.route.epoch)
 
-                assertFailsWith<MoqException> { epochTime("not-an-epoch") }
+                assertFailsWith<MoqException> { broadcast.announce(AnnounceRoute(epoch = "not-an-epoch")) }
             }
         }
     }

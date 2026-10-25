@@ -661,9 +661,9 @@ pub(super) fn poll_requested(
 /// change, so read them as each group is served. The handler calls [`accept`](Self::accept) for each group
 /// it has and [`drop_groups`](Self::drop_groups) for the rest. Dropping the fill names
 /// whatever is left as dropped while a reader still wants it; once nobody does, the fill is
-/// withdrawn and records nothing, so stop serving it when [`unused`](Self::unused) resolves.
+/// withdrawn and records nothing, so stop serving it when [`poll_unused`](Self::poll_unused) is ready.
 /// A reader narrowing its ranges may leave a single group, so stop serving that one when
-/// [`unwanted`](Self::unwanted) resolves and move on to [`next`](Self::next).
+/// [`poll_unwanted`](Self::poll_unwanted) is ready and move on to [`next`](Self::next).
 pub struct Fill {
 	inner: Arc<Inner>,
 }

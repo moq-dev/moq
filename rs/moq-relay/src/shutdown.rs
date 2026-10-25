@@ -569,7 +569,8 @@ mod tests {
 		let (_lease, consumer) = moq_auth::lease::Producer::new(moq_auth::Grant::new(all(), all()));
 		admission.grant(consumer);
 		let connection = connecting.await.unwrap().unwrap();
-		let goaway = connection.draining().unwrap().recv().await.unwrap();
+		let draining = connection.draining().unwrap();
+		let goaway = moq_net::kio::wait(|waiter| draining.poll(waiter)).await.unwrap();
 		assert_eq!(goaway.uri(), "");
 		connection.closed().await.unwrap();
 		running.await.unwrap().unwrap();
