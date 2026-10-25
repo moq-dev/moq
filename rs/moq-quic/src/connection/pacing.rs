@@ -156,7 +156,13 @@ impl Pacer {
 	/// Credit accumulates in `tokens` at `pacing_rate` for the time elapsed since the last
 	/// refill, bounded by a burst budget derived from that same rate. If the credit on hand
 	/// is short, the returned instant is when the shortfall will have been earned.
-	fn delay_at_rate(&mut self, pacing_rate: u64, bytes_to_send: u64, mtu: u16, now: Instant) -> Option<Instant> {
+	pub(super) fn delay_at_rate(
+		&mut self,
+		pacing_rate: u64,
+		bytes_to_send: u64,
+		mtu: u16,
+		now: Instant,
+	) -> Option<Instant> {
 		// An explicit rate is clamped directly. The 1.25 correction in
 		// `rate_limited_window` exists only to cancel out the legacy refill speedup, which
 		// this path does not apply. A rate of zero would divide by zero below.

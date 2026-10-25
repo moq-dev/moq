@@ -41,14 +41,14 @@ publisher-local padding handle:
   players set targets by default, so probing works without an application
   knowing about it.
 - **Native retransmits, the browser pads.** Where moq-quic sends, it
-  retransmits in-flight data during BBR3's ProbeBW_UP phase
-  ([native](/quest/m1/probe-native.md)). A browser over WebTransport can't
+  resends in-flight data during BBR3's Startup and one ProbeBW_UP per probe
+  wait ([moq-dev/moq#6635](https://github.com/moq-dev/moq/pull/6635)). A browser over WebTransport can't
   reach its controller, so a lowest-priority padding stream on an ALR probe
   schedule does ([padding](/quest/m2/probe/padding.md)).
 
 Decided with the maintainer on 2026-10-20:
 
-- The send target, [native](/quest/m1/probe-native.md),
+- The send target, native probing,
   and the native publishers' [rung disable](/quest/m1/simulcast-rung-disable.md)
   moved to m1, so Rust, FFI, and OBS publishers recover a stopped rendition in
   the next breaking release. Their rung disable needs the target and native
@@ -82,7 +82,6 @@ This README's own work, once the children land:
 
 ## Required
 
-- [Native probing](/quest/m1/probe-native.md) - moq-quic retransmits in-flight data during BBR3's ProbeBW_UP so an app-limited sender still validates headroom up to the target
 - [Native rung disable](/quest/m1/simulcast-rung-disable.md) - Rust/FFI and OBS publishers stop encoding the top renditions their grant cannot fund, advertise `enabled: false`, and re-enable with hysteresis
 - [Padding probes](/quest/m2/probe/padding.md) - a browser probes with a lowest-priority padding stream on an ALR schedule
 - [JS rung disable](/quest/m2/probe/rung-disable-js.md) - `@moq/publish` applies the native rung rule, recovering through padding

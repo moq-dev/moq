@@ -192,6 +192,16 @@ impl RangeSet {
 		Iter(self.0.iter())
 	}
 
+	/// The ranges overlapping `x`, in order, without visiting those wholly before it
+	pub(crate) fn overlapping(&self, x: Range<u64>) -> impl Iterator<Item = Range<u64>> + '_ {
+		let first = self
+			.pred(x.start)
+			.filter(|&(_, end)| end > x.start)
+			.map_or(x.start, |(start, _)| start);
+		let end = if x.is_empty() { first } else { x.end };
+		self.0.range(first..end).map(|(&start, &end)| start..end)
+	}
+
 	#[cfg(test)]
 	pub(super) fn elts(&self) -> EltIter<'_> {
 		EltIter {

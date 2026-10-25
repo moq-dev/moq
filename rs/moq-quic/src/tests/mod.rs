@@ -44,6 +44,7 @@ use util::*;
 
 mod acked;
 mod characterize;
+mod probe;
 mod reset_stream_at;
 mod sim;
 mod token;
@@ -5808,6 +5809,7 @@ impl Controller for PacingOnlyController {
 			pacing_rate: Some(125_000),
 			bandwidth_estimate: None,
 			send_quantum: Some(2 * 1200),
+			probe_inflight: None,
 		}
 	}
 
@@ -5904,6 +5906,7 @@ impl Controller for FixedQuantumController {
 			pacing_rate: Some(1_000_000_000),
 			bandwidth_estimate: None,
 			send_quantum: Some(self.send_quantum),
+			probe_inflight: None,
 		}
 	}
 

@@ -22,9 +22,7 @@ with a median entry of 135 s (p90 516 s) and 3 to 12 s of runner wait.
 - Concurrent entries share the local mbx store; confirm that is safe, or give
   each its own.
 - Measure merged PRs per hour and per-entry wall time before and after.
+- Queue entries skip `quest gate`: `sh/local.sh` execs directly under GitHub
+  Actions, so the runner quota, not admission, has to keep entries apart.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [Share local check capacity](/quest/m0/ci/local-gate.md) - admission for the same host

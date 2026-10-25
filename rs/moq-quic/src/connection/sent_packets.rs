@@ -38,6 +38,11 @@ impl SentPackets {
 		self.packets.get(&pn)
 	}
 
+	/// The highest packet number present.
+	pub(super) fn last(&self) -> Option<u64> {
+		self.packets.last_key_value().map(|(&pn, _)| pn)
+	}
+
 	/// Whether any present entry has `size != 0`.
 	pub(super) fn has_in_flight(&self) -> bool {
 		self.in_flight != 0
@@ -218,6 +223,7 @@ mod tests {
 			largest_acked: None,
 			retransmits: Default::default(),
 			stream_frames: Default::default(),
+			bandwidth_probe: false,
 		}
 	}
 
