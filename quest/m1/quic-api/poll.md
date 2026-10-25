@@ -52,8 +52,9 @@ impl send::Stream {
 
 Keep the existing guarantees, such as draining accepted streams and
 datagrams from a closed connection before its error (moq-quic's waits carry
-that now). `handshake_confirmed` and `Endpoint::wait_idle` move off `Notify`
-too, but get no poll form until a caller needs one. Report the public API:
+that now). The `Connecting` handshake, `Endpoint::wait_idle`, and
+`Endpoint::wait_all_draining` move off `Notify` too, but get no poll form
+until a caller needs one. Report the public API:
 new poll methods on `Connection`, `send::Stream` and `Endpoint`, with the
 async forms unchanged.
 
