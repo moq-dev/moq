@@ -237,10 +237,9 @@ impl SendBuffer {
         }
         debug_assert!(range.end <= self.unsent, "unsent data can't be lost");
         self.retransmits.insert(range.clone());
-        for acked in self.acks.iter() {
-            if acked.start >= range.end {
-                break;
-            }
+        // Only the acknowledged ranges this one overlaps, so a loss costs what it spans rather
+        // than every gap a peer's ACKs left below it
+        for acked in self.acks.overlapping(range) {
             self.retransmits.remove(acked);
         }
     }
