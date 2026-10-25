@@ -14,8 +14,7 @@ test("reserved namespaces preserve tuple fields and draft boundaries", () => {
 		[[".sessionish"], false],
 	] as [string[], boolean][]) {
 		const path = fromTuple(fields);
-		expect(reserved(path, Version.DRAFT_21)).toBe(expected);
 		expect(reserved(path, Version.DRAFT_22)).toBe(expected);
-		expect(reserved(path, Version.DRAFT_20)).toBe(false);
+		expect(reserved(path, Version.DRAFT_18)).toBe(false);
 	}
 });

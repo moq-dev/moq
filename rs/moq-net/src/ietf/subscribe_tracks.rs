@@ -30,10 +30,7 @@ pub struct SubscribeTracks<'a> {
 	pub group_order: Option<GroupOrder>,
 	/// The default Location Filter of each PUBLISH subscription.
 	pub filter: Option<Filter>,
-	/// FILL_PARAMETERS (draft-20+). Each PUBLISH starts paused, where a fill opens nothing,
-	/// even once resumed (draft-22 section 3.4.1), so the publisher ignores it.
-	pub fill: Option<super::Fill>,
-	/// INCLUDE_PROPERTIES (draft-20+): whether each PUBLISH carries Track Properties.
+	/// INCLUDE_PROPERTIES (draft-22): whether each PUBLISH carries Track Properties.
 	pub properties_wanted: bool,
 	/// NEW_GROUP_REQUEST, which each PUBLISH applies as it first forwards.
 	pub new_group: Option<u64>,
@@ -57,20 +54,15 @@ impl Message for SubscribeTracks<'_> {
 		self.request_id.encode(w, version)?;
 		encode_namespace(w, &self.prefix)?;
 		// Absent means 1, so only a paused listing writes it.
-		let include_properties = (!self.properties_wanted && Filter::is_draft20(version)).then_some(false);
+		let include_properties = (!self.properties_wanted && Filter::is_draft22(version)).then_some(false);
 		// Draft-18 allows only AUTHORIZATION_TOKEN and FORWARD here. Draft-22 section 9.18
 		// lists GROUP_ORDER but no longer SUBSCRIBER_PRIORITY, LOCATION_FILTER,
 		// FILL_PARAMETERS, or NEW_GROUP_REQUEST, which a resuming REQUEST_UPDATE carries.
 		let defaults = version != Version::Draft18;
-		let subscription = defaults && version != Version::Draft22;
 		encode_params!(w, version,
 			0x03 => self.authorization_token.clone(),
 			0x10 => (!self.forward).then_some(false),
-			0x20 => self.subscriber_priority.filter(|_| subscription),
-			0x21 => self.filter.filter(|_| subscription),
 			0x22 => self.group_order.filter(|_| defaults),
-			0x23 => self.fill.filter(|_| subscription && Filter::is_draft20(version)),
-			0x32 => self.new_group.filter(|_| subscription),
 			0x35 => include_properties,
 		);
 		Ok(())
@@ -82,7 +74,7 @@ impl Message for SubscribeTracks<'_> {
 		}
 		let request_id = RequestId::decode(r, version)?;
 		let prefix = decode_namespace(r)?;
-		// From draft-19 any parameter a SUBSCRIBE takes is legal here (section 10.19.1);
+		// From draft-22 any parameter a SUBSCRIBE takes is legal here (section 3.6.2);
 		// draft-18 allows only AUTHORIZATION_TOKEN and FORWARD. Those that only make sense
 		// on one subscription, such as RENDEZVOUS_TIMEOUT or a delivery timeout, are read
 		// and dropped.
@@ -96,14 +88,16 @@ impl Message for SubscribeTracks<'_> {
 			0x20 => subscriber_priority: Option<u8> where defaults,
 			0x21 => filter: Option<Filter> where defaults,
 			0x22 => group_order: Option<GroupOrder> where defaults,
-			0x23 => fill: Option<super::Fill> where Filter::is_draft20(version),
+			// Each PUBLISH starts paused, where a fill opens nothing, even once resumed
+			// (draft-22 section 3.4.1), so FILL_PARAMETERS is read and dropped.
+			0x23 => _fill: Option<super::Fill> where Filter::is_draft22(version),
 			0x25 => subgroup_filter: Vec<Opaque> where has_range_filters(version),
 			0x26 => object_id_filter: Vec<Opaque> where has_range_filters(version),
 			0x27 => priority_filter: Vec<Opaque> where has_range_filters(version),
 			0x28 => object_property_filter: Vec<Opaque> where has_range_filters(version),
 			0x29 => track_property_filter: Vec<Opaque> where has_range_filters(version),
 			0x32 => new_group: Option<u64> where defaults,
-			0x35 => include_properties: Option<bool> where Filter::is_draft20(version),
+			0x35 => include_properties: Option<bool> where Filter::is_draft22(version),
 		);
 		let range_filters = [
 			subgroup_filter,
@@ -123,7 +117,6 @@ impl Message for SubscribeTracks<'_> {
 			subscriber_priority,
 			group_order,
 			filter,
-			fill,
 			properties_wanted: include_properties.unwrap_or(true),
 			new_group,
 			range_filters,
@@ -145,7 +138,7 @@ pub(crate) fn has_subscribe_tracks(version: Version) -> bool {
 /// not PUBLISH, sent on that request's stream. The subscriber may SUBSCRIBE to it instead.
 ///
 /// Drafts 17 and 18 name it PUBLISH_BLOCKED and send it only when the publisher has run
-/// out of streams for PUBLISH; draft-19 renamed it and allows it for any reason.
+/// out of streams for PUBLISH; draft-22 renamed it and allows it for any reason.
 #[derive(Clone, Debug)]
 pub struct PublishSkipped<'a> {
 	/// The track's namespace below the request's prefix.
@@ -205,7 +198,6 @@ mod tests {
 			subscriber_priority: None,
 			group_order: None,
 			filter: None,
-			fill: None,
 			properties_wanted: true,
 			new_group: None,
 			range_filters: false,
@@ -216,13 +208,7 @@ mod tests {
 
 	#[test]
 	fn a_paused_listing_round_trips() {
-		for version in [
-			Version::Draft18,
-			Version::Draft19,
-			Version::Draft20,
-			Version::Draft21,
-			Version::Draft22,
-		] {
+		for version in [Version::Draft18, Version::Draft22] {
 			let decoded: SubscribeTracks = decode(&encode(&paused(), version), version).unwrap();
 			assert_eq!(decoded.request_id, RequestId(4), "{version}");
 			assert_eq!(decoded.prefix.as_str(), "room", "{version}");
@@ -239,13 +225,13 @@ mod tests {
 		assert!(decoded.forward);
 	}
 
-	/// TRACK_PROPERTY_FILTER (draft-19+) is read so the request can be refused, not served
+	/// TRACK_PROPERTY_FILTER (draft-22) is read so the request can be refused, not served
 	/// with tracks the subscriber excluded.
 	#[test]
 	fn a_track_property_filter_is_noted() {
 		// Request ID 4, prefix "room", one parameter: 0x29 with a two-byte opaque value.
 		let bytes = [0x04, 0x01, 0x04, b'r', b'o', b'o', b'm', 0x01, 0x29, 0x02, 0xaa, 0xbb];
-		let decoded: SubscribeTracks = decode(&bytes, Version::Draft19).unwrap();
+		let decoded: SubscribeTracks = decode(&bytes, Version::Draft22).unwrap();
 		assert!(decoded.track_filter);
 		// Draft-18 has no such parameter, and an unknown even type is malformed there.
 		assert!(decode::<SubscribeTracks>(&bytes, Version::Draft18).is_err());
@@ -263,12 +249,8 @@ mod tests {
 			..paused()
 		};
 		assert_eq!(encode(&listing, Version::Draft18), encode(&paused(), Version::Draft18));
-		let decoded: SubscribeTracks = decode(&encode(&listing, Version::Draft19), Version::Draft19).unwrap();
-		assert_eq!(decoded.subscriber_priority, Some(7));
-		assert_eq!(decoded.new_group, Some(0));
 		// Request ID 4, prefix "room", one parameter: SUBSCRIBER_PRIORITY 7.
 		let bytes = [0x04, 0x01, 0x04, b'r', b'o', b'o', b'm', 0x01, 0x20, 0x07];
-		assert!(decode::<SubscribeTracks>(&bytes, Version::Draft19).is_ok());
 		assert!(decode::<SubscribeTracks>(&bytes, Version::Draft18).is_err());
 	}
 
@@ -280,10 +262,6 @@ mod tests {
 		let listing = SubscribeTracks {
 			subscriber_priority: Some(7),
 			filter: Some(Filter::NextObject),
-			fill: Some(super::super::Fill {
-				filter: Some(Filter::NextObject),
-				range_filters: false,
-			}),
 			new_group: Some(0),
 			..paused()
 		};
@@ -298,9 +276,10 @@ mod tests {
 		let version = Version::Draft22;
 		assert_eq!(encode(&listing, version), encode(&paused(), version));
 		assert_eq!(encode(&with_order, version), encode(&ordered, version));
-		let decoded: SubscribeTracks = decode(&encode(&listing, Version::Draft21), version).unwrap();
+		// Request ID 4, prefix "room", one parameter: SUBSCRIBER_PRIORITY 7.
+		let bytes = [0x04, 0x01, 0x04, b'r', b'o', b'o', b'm', 0x01, 0x20, 0x07];
+		let decoded: SubscribeTracks = decode(&bytes, version).unwrap();
 		assert_eq!(decoded.subscriber_priority, Some(7));
-		assert_eq!(decoded.new_group, Some(0));
 	}
 
 	#[test]
