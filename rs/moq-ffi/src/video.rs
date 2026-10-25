@@ -577,14 +577,9 @@ impl MoqVideoProducer {
 	/// The broadcast keeps the finished track until it ends, so its finish still holds it.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::runtime().enter();
-		let producer = self
-			.inner
-			.lock()
-			.map_err(|_| panic_error())?
-			.take()
-			.ok_or(MoqError::Closed)?;
 		// Stop following and release the share before draining, so siblings can
-		// take the room while the last frames go out.
+		// take the room while the last frames go out. The follower takes the
+		// producer's lock, so it stops before the drain holds it.
 		let followed = self
 			.follow
 			.lock()
@@ -592,6 +587,10 @@ impl MoqVideoProducer {
 			.take()
 			.map_or(Ok(()), |mut follow| follow.stop());
 		self.reservation.lock().unwrap().take();
+		// Held through the drain, so a racing broadcast close waits it out instead of
+		// missing a track that still publishes.
+		let mut inner = self.inner.lock().map_err(|_| panic_error())?;
+		let producer = inner.take().ok_or(MoqError::Closed)?;
 		// A follower panic only stops rate adaptation, so the encoded frames still
 		// end the track cleanly before the panic is reported.
 		producer.finish(&self.children)?;

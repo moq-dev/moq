@@ -417,7 +417,10 @@ impl MoqAudioProducer {
 	/// The broadcast keeps the finished track until it ends, so its finish still holds it.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::runtime().enter();
-		let mut producer = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
+		// Held through the flush, so a racing broadcast close waits it out instead of
+		// missing a track that still publishes.
+		let mut inner = self.inner.lock().unwrap();
+		let mut producer = inner.take().ok_or(MoqError::Closed)?;
 		self.reservation.lock().unwrap().take();
 		producer.finish()?;
 		self.children.keep(producer);
