@@ -28,5 +28,4 @@ Each lands its fixes in its own PR and plans only what needs a decision.
 - [MALFORMED_AUTH_TOKEN session code](/quest/m0/malformed-auth-token-code.md) - a 0x16 close reports a malformed token instead of `unknown code=22`, and moq-net sends it for an unparseable token
 - [Nightly passes on main](/quest/m0/nightly/README.md) - the scheduled Nightly passes end to end, so red means a new break
 - [Release shutdown backport](/quest/m0/ffi-shutdown-backport.md) - `release` publishes a non-breaking moq-ffi with an async `drain()` and qmux sessions on the QUIC stream limit
-- [Adopt quest resolve](/quest/m0/quest-resolve.md) - local merges resolve concurrent quest link-list edits once kixelated/quest ships its merge driver
 - [CI cost and latency](/quest/m0/ci/README.md) - cloud CI runs only in the merge queue as one `just ci` pass, expensive checks run nightly and gate `release`, caches move to R2, and runners are chosen last
