@@ -273,7 +273,12 @@ pub(super) async fn run_present(
 					Ok(_) => Error::GoingAway,
 					Err(err) => err,
 				};
-				let err = crate::auth::protocol_error(err);
+				let err = match err {
+					// The peer negotiated the extension, but a reset before any reply still tells
+					// us nothing about the token: it earns nothing here, as on moq-lite.
+					Error::Stream(_) if !answered => Error::Unsupported,
+					err => crate::auth::protocol_error(err),
+				};
 				// AUTH_ERROR carries no code that may pass, so unlike moq-lite only a lost
 				// request is presented again.
 				if let Some(delay) = present.handle.retry(present.id, &err) {
@@ -333,7 +338,8 @@ impl Present {
 	/// Send the token, then track its grant until either side ends it, resolving with why.
 	///
 	/// `answered` records that the peer replied to the token, on this request or an
-	/// earlier one, so a request it closes before replying is lost rather than unsupported.
+	/// earlier one, so a request it closes or resets before replying is lost rather than
+	/// unsupported.
 	async fn run(&self, token: Bytes, answered: &mut bool) -> Error {
 		let mut stream = match Stream::open_request(&mut self.session.clone(), self.version).await {
 			Ok(stream) => stream,

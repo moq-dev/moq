@@ -1059,7 +1059,10 @@ mod tests {
 	#[moq_clock::test]
 	async fn a_lost_stream_is_presented_again() {
 		let grant = empty_grant(Version::Lite07);
-		let transport = ScriptedSession::per_stream_reset(vec![grant.clone(), grant]);
+		let transport = ScriptedSession::per_stream(vec![grant.clone(), grant]);
+		transport.close(crate::lite::test_transport::Close::ResetStream(
+			crate::StreamError::Internal.to_code(),
+		));
 		let log = transport.log.clone();
 		let token = present_on_shared_handle(transport).await;
 
