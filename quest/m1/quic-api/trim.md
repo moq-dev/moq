@@ -5,7 +5,7 @@
 Every public item of moq-quic, `moq_tokio::quic::driver`, and moq-uring's
 `quic` module has a consumer in this repository, moq.pro, moq.dev, or an m1
 quest, or it is private or deleted. Unordered reads, the duplicate limit
-setters, unused features, and quinn-era docs are gone.
+setters, and quinn-era docs are gone.
 
 ## Plan
 
@@ -52,12 +52,6 @@ driver's `read_chunk(max, ordered)` lose the flag, and `Chunk.offset`,
 `ReadableError::IllegalOrderedRead`, and the assembler's unordered mode are
 deleted. The driver's `read_to_end` is their only caller and reads ordered.
 Two of the upstream fixes ported so far were unordered-mode bugs.
-
-Moved here from [transport config](/quest/m1/api-audit/transport-config.md):
-drop moq-quic's unused features (`rustls-ring`, `tracing-log`, `bloom`,
-`platform-verifier`, fips, log) and the "backwards compat" `rustls` alias;
-gate `pub use rustls` on `any(ring, aws-lc-rs)` so it exists under
-`rustls-aws-lc-rs`.
 
 Docs that still describe quinn: the crate docs (`lib.rs`, "the futures-based
 quinn API" and C bindings) point at `moq_tokio::quic::driver`; "Quinn" in

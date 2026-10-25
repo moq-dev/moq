@@ -91,9 +91,11 @@ fn uring_config(cert: &std::path::Path, key: &std::path::Path) -> Config {
 fn client() -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
-	config.once = Some(true);
 	config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
-	config.init(Default::default()).expect("client init")
+	config
+		.init(Default::default())
+		.expect("client init")
+		.with_reconnect(false)
 }
 
 async fn connect(client: moq_tokio::Client, url: url::Url) -> moq_tokio::Connection {
@@ -211,10 +213,15 @@ async fn uring_workers_serve_every_configured_version() {
 		let version: moq_net::Version = version.parse().expect("known version");
 		let mut config = moq_tokio::connect::Config::default();
 		config.tls.insecure = Some(true);
-		config.once = Some(true);
 		config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
 		config.version = vec![version];
-		(version, config.init(Default::default()).expect("client init"))
+		(
+			version,
+			config
+				.init(Default::default())
+				.expect("client init")
+				.with_reconnect(false),
+		)
 	};
 
 	let dir = tempfile::tempdir().expect("tempdir");
@@ -372,7 +379,7 @@ async fn uring_workers_drain_on_the_trigger() {
 	let (cert, key) = certificate(dir.path());
 
 	let mut config = uring_config(&cert, &key);
-	config.drain_timeout = DRAIN;
+	config.drain_timeout = Some((DRAIN).into());
 	config.auth.public.clear();
 	let mut relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let port = relay.addr().expect("workers bound an address").port();
@@ -487,9 +494,11 @@ async fn workers_publish_their_rotated_certificate_fingerprint() {
 				for scheme in ["moql", "https"] {
 					let mut dial = moq_tokio::connect::Config::default();
 					dial.tls.fingerprint = vec![expected.clone()];
-					dial.once = Some(true);
 					dial.bind = Some("127.0.0.1:0".parse().unwrap());
-					let client = dial.init(Default::default()).expect("pinned client");
+					let client = dial
+						.init(Default::default())
+						.expect("pinned client")
+						.with_reconnect(false);
 					let url = format!("{scheme}://localhost:{port}/rotation").parse().unwrap();
 					let connection = connect(client, url).await;
 					drop(connection);
@@ -538,10 +547,9 @@ async fn workers_share_a_generated_identity() {
 		let fingerprint = http_get(addr, "/certificate.sha256").await;
 		let mut dial = moq_tokio::connect::Config::default();
 		dial.tls.fingerprint = vec![fingerprint];
-		dial.once = Some(true);
 		dial.bind = Some("127.0.0.1:0".parse().unwrap());
 		let url = format!("https://localhost:{port}/generated").parse().unwrap();
-		let connection = connect(dial.init(Default::default()).unwrap(), url).await;
+		let connection = connect(dial.init(Default::default()).unwrap().with_reconnect(false), url).await;
 		drop(connection);
 		trigger.start();
 		tokio::time::timeout(TIMEOUT, running)
@@ -582,11 +590,12 @@ async fn an_mtls_client_authenticates_without_a_token() {
 	let client = || {
 		let mut dial = moq_tokio::connect::Config::default();
 		dial.tls.insecure = Some(true);
-		dial.once = Some(true);
 		dial.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
 		dial.tls.cert = Some(client_cert.clone());
 		dial.tls.key = Some(client_key.clone());
-		dial.init(Default::default()).expect("client init")
+		dial.init(Default::default())
+			.expect("client init")
+			.with_reconnect(false)
 	};
 
 	// The server grants a certificate everything, so one certificate covers
@@ -986,7 +995,6 @@ async fn uring_workers_offer_the_configured_extensions() {
 
 		let mut dial = moq_tokio::connect::Config::default();
 		dial.tls.insecure = Some(true);
-		dial.once = Some(true);
 		dial.bind = Some("127.0.0.1:0".parse().unwrap());
 		dial.version = vec!["moq-transport-22".parse().unwrap()];
 		let client = dial.init(Default::default()).unwrap();
@@ -1006,16 +1014,18 @@ async fn uring_workers_offer_the_configured_extensions() {
 					assert!(admission.attached(), "an AUTH token arrived as a new session");
 					admission.grant(grant());
 				});
-				token
+				let (_, answer) = token
 					.expect("the token was never answered")
 					.expect("the token was refused");
+				assert_eq!(answer, moq_net::auth::Answer::Granted);
 			}
 			false => {
-				let err = presented.await.expect("the token was never answered").err();
-				assert!(
-					matches!(err, Some(moq_tokio::Error::MoqNet(moq_net::Error::Unsupported))),
-					"a token without MoQ Auth: {err:?}"
-				);
+				// Without MoQ Auth no AUTH stream carries it: only a request naming it does.
+				let (_, answer) = presented
+					.await
+					.expect("the token was never answered")
+					.expect("a moq-transport request can carry the token");
+				assert_eq!(answer, moq_net::auth::Answer::Requests, "a token without MoQ Auth");
 			}
 		}
 
@@ -1053,7 +1063,7 @@ fn uring_workers_bound_stalled_handshakes() {
 		let dir = tempfile::tempdir().expect("tempdir");
 		let (cert, key) = certificate(dir.path());
 		let mut config = uring_config(&cert, &key);
-		config.listen.timeout = Some(LISTEN);
+		config.listen.timeout = Some(LISTEN.into());
 		config.quic.congestion_control = Some(moq_tokio::quic::CongestionControl::None);
 		let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 		let port = relay.addr().expect("workers bound an address").port();

@@ -91,7 +91,7 @@ supports them), and the WebSocket fallback race. A rejected value stops the
 stream with the reason in the log rather than silently using a default.
 To decrypt a packet capture, turn on **TLS key log** here or in a MoQ Source's
 properties and start OBS with `SSLKEYLOGFILE` naming the file; the variable
-alone writes nothing, and the toggle without it fails the connection.
+alone writes nothing, and the toggle without it fails the connection. Existing Unix log files must be private (mode 0600); files accessible to group or others are refused.
 
 The plugin is C++ over the [generated C++ bindings](/lib/cpp/) and ships with
 every moq-cpp release. Stopping finishes the tracks and drains for up to one

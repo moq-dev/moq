@@ -32,8 +32,7 @@ the methods exactly as moq-net has them today.
     [E2EE undeclared names](/quest/m2/e2ee/undeclared-names.md) needs). A track
     dynamic's `requested_fill` yields its own `track::Fill`, whose
     `accept` returns its own group producer and whose `drop_groups` names
-    the rest dropped
-    ([dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md)).
+    the rest dropped.
   - Pending operations: `track::Consumer::subscribe` resolves to the
     wrapper's own subscriber, so E2EE decrypts behind it; `Querying` and
     `Fetching` resolve to the wrapper's logical metadata and groups.

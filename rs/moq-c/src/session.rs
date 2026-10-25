@@ -64,7 +64,8 @@ impl Lifecycle {
 enum Link {
 	/// A dialed connection: a loop that redials, so it is offline between connections.
 	Dialed {
-		connection: moq_tokio::Connection,
+		/// Boxed so the accepted variant does not carry its size.
+		connection: Box<moq_tokio::Connection>,
 		/// Reads live connection stats, reporting `None` while reconnecting.
 		monitor: moq_tokio::connection::Monitor,
 	},
@@ -74,7 +75,6 @@ enum Link {
 
 struct Accepted {
 	session: moq_net::Session,
-	driver: ffi::Background,
 }
 
 /// Everything needed to prepare a session without holding the global state lock.
@@ -142,7 +142,7 @@ impl Session {
 		let reconnect = client.connect(url);
 		let monitor = reconnect.monitor();
 		let link = Link::Dialed {
-			connection: reconnect.clone(),
+			connection: Box::new(reconnect.clone()),
 			monitor: monitor.clone(),
 		};
 
@@ -243,8 +243,9 @@ impl Session {
 							accepted.session.clone().close().await?;
 						} else {
 							accepted.session.abort(moq_net::Error::Cancel);
+							let _ = accepted.session.closed().await;
 						}
-						accepted.driver.finished().await
+						Ok(())
 					})
 					.await
 				{
@@ -260,19 +261,11 @@ impl Session {
 
 	/// Establish an accepted session, publish it to the entry, and wait for it to close.
 	async fn serve(id: Id, callback: ffi::OnState, request: moq_tokio::server::Request) -> Result<(), Error> {
-		let (session, driver) = request.ok().await.map_err(map_connect_error)?;
-		let driver = ffi::Background::new(async move {
-			match driver.await {
-				Ok(result) => result.map_err(map_connect_error),
-				Err(error) if error.is_panic() => Err(Error::Panic),
-				Err(_) => Err(moq_net::Error::Cancel.into()),
-			}
-		});
+		let session = request.ok().await.map_err(map_connect_error)?;
 
 		if let Some(entry) = State::lock().session.task.get_mut(id) {
 			entry.link = Link::Accepted(Some(Accepted {
 				session: session.clone(),
-				driver: driver.clone(),
 			}));
 		}
 
@@ -283,7 +276,6 @@ impl Session {
 			failure: None,
 			version: Some(session.version()),
 		});
-		driver.finished().await?;
 		Err(session.closed().await.into())
 	}
 

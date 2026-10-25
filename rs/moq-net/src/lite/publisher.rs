@@ -45,7 +45,7 @@ pub(super) struct PublisherConfig {
 	pub peer_hop: Option<Hop>,
 	/// Our tokens' grants, which bound what we announce and serve, and the app's
 	/// claim on answering the peer's tokens.
-	pub auth: crate::auth::Handle,
+	pub auth: crate::auth::Link,
 	/// What the default acceptor grants the peer's connection credential.
 	pub peer_grant: crate::auth::Grant,
 	/// The supervisor's estimate, which a PROBE stream follows.
@@ -78,7 +78,7 @@ struct Shared {
 	priority: PriorityQueue,
 	version: Version,
 	goaway: crate::goaway::Protocol,
-	auth: crate::auth::Handle,
+	auth: crate::auth::Link,
 	peer_grant: crate::auth::Grant,
 	// Control streams still serving the peer data, which a draining close waits for.
 	owed: AtomicUsize,
@@ -93,20 +93,17 @@ struct Shared {
 }
 
 /// Largest millisecond duration every implementation can carry losslessly.
-const MAX_SAFE_DELAY_MS: u64 = (1_u64 << 53) - 1;
+pub(super) const MAX_SAFE_DELAY_MS: u64 = (1_u64 << 53) - 1;
 
 /// The budget to serve a peer with, given what its wire could tell us.
 ///
 /// A version without the field decodes as [`Duration::ZERO`], which is
 /// indistinguishable from a peer genuinely asking for the live edge. Serving that
-/// as real time would discard backlog a legacy subscriber never declined, so fall
-/// back to a window wide enough not to drop and leave enforcement to the receiver,
-/// exactly as the IETF path does for the same reason.
-fn serving_max_delay(version: Version, requested: Duration) -> Duration {
-	match version.carries_max_delay() {
-		true => requested,
-		false => Duration::from_millis(MAX_SAFE_DELAY_MS),
-	}
+/// as real time would discard backlog a legacy subscriber never declined, so serve the
+/// publisher's max age alone and leave enforcement to the receiver, exactly as the IETF
+/// path does for the same reason.
+fn serving_max_delay(version: Version, requested: Duration) -> Option<Duration> {
+	version.carries_max_delay().then_some(requested)
 }
 
 /// The floor of a subscription's read cursor for the wire serving it.
@@ -275,7 +272,7 @@ impl Publisher {
 		announced: &mut announce::Consumer,
 		self_origin: Hop,
 		version: Version,
-		auth: Option<crate::auth::Handle>,
+		auth: Option<crate::auth::Link>,
 	) -> Result<(), Error> {
 		let mut run = AnnounceRun::new(crate::PathOwned::default(), self_origin, version);
 		run.auth = auth.map(|handle| {
@@ -2648,8 +2645,8 @@ mod announce_test {
 		let mut run = AnnounceRun::new(crate::Path::new("").to_owned(), consumer.hop(), Version::Lite07);
 		let waiter = kio::Waiter::noop();
 		assert!(run.poll(&mut stream, &consumer, &mut announced, &waiter).is_pending());
-		let auth = crate::auth::Handle::new(false);
-		auth.authorize(&crate::auth::Grant {
+		let auth = crate::auth::Link::new(false);
+		auth.handle().authorize(&crate::auth::Grant {
 			subscribe: crate::Pattern::literal("b").unwrap().into(),
 			..Default::default()
 		});
@@ -2690,8 +2687,8 @@ mod announce_test {
 		let mut run = AnnounceRun::new(crate::Path::new("").to_owned(), consumer.hop(), Version::Lite07);
 		let waiter = kio::Waiter::noop();
 		assert!(run.poll(&mut stream, &consumer, &mut announced, &waiter).is_pending());
-		let auth = crate::auth::Handle::new(false);
-		auth.authorize(&crate::auth::Grant::default());
+		let auth = crate::auth::Link::new(false);
+		auth.handle().authorize(&crate::auth::Grant::default());
 		let Poll::Ready(restricted) = auth.poll_permit(crate::auth::Direction::Publish, &mut 0, &waiter) else {
 			panic!("the changed grant is ready");
 		};
@@ -2911,7 +2908,7 @@ mod announce_test {
 	}
 
 	/// [`harness_on`], announcing under `auth`'s grant.
-	async fn harness_with(version: Version, auth: Option<crate::auth::Handle>) -> Harness {
+	async fn harness_with(version: Version, auth: Option<crate::auth::Link>) -> Harness {
 		let origin = Hop::new(1).unwrap().produce();
 		let announcement = origin
 			.announce(
@@ -3115,8 +3112,8 @@ mod announce_test {
 			expires: None,
 		};
 		for anonymous in [false, true] {
-			let auth = crate::auth::Handle::new(false);
-			auth.authorize(&grant(&["cam"]));
+			let auth = crate::auth::Link::new(false);
+			auth.handle().authorize(&grant(&["cam"]));
 			let mut h = harness_with(Version::Lite07, Some(auth.clone())).await;
 
 			// Same chain and cost, so only the instance changed. Both land before the loop polls.
@@ -3127,7 +3124,7 @@ mod announce_test {
 				None => route,
 			};
 			let _newer = h.origin.announce("cam", route).unwrap();
-			auth.authorize(&grant(&["cam", "other"]));
+			auth.handle().authorize(&grant(&["cam", "other"]));
 			moq_clock::sleep(crate::origin::Config::default().update_hold).await;
 			settle().await;
 			match h.wire.take_announces().as_slice() {
@@ -5269,17 +5266,14 @@ mod serve_group_test {
 	fn a_version_without_the_field_serves_a_non_dropping_budget() {
 		for version in [Version::Lite01, Version::Lite02] {
 			let max_delay = serving_max_delay(version, Duration::ZERO);
-			assert!(
-				max_delay >= Duration::from_secs(86_400),
-				"{version:?} must not be served as real time: {max_delay:?}"
-			);
+			assert_eq!(max_delay, None, "{version:?} must not be served as real time");
 		}
 
 		// A version that does carry it is taken at its word, zero included.
-		assert_eq!(serving_max_delay(Version::Lite05, Duration::ZERO), Duration::ZERO);
+		assert_eq!(serving_max_delay(Version::Lite05, Duration::ZERO), Some(Duration::ZERO));
 		assert_eq!(
 			serving_max_delay(Version::Lite05, Duration::from_secs(3)),
-			Duration::from_secs(3)
+			Some(Duration::from_secs(3))
 		);
 	}
 
@@ -5738,9 +5732,9 @@ mod serve_group_test {
 		track.finish().unwrap();
 		run.await.unwrap();
 
-		// SUBSCRIBE_START at 0, SUBSCRIBE_END at 3, and a DROP for the skipped group 1 with
-		// NOT_FOUND (0x33).
-		assert_eq!(*log.writes.lock().unwrap(), [0, 3, 0, 1, 0, 1, 1, 3, 2, 3, 1, 1, 0x33]);
+		// SUBSCRIBE_START at 0, a DROP for the skipped group 1 with NOT_FOUND (0x33), which
+		// the end gives up on at once, and SUBSCRIBE_END at 3.
+		assert_eq!(*log.writes.lock().unwrap(), [0, 3, 0, 1, 0, 2, 3, 1, 1, 0x33, 1, 1, 3]);
 	}
 
 	/// A relay that holds only the first group of a backlog answers with the largest its
@@ -6375,7 +6369,9 @@ mod serve_group_test {
 			drop(track);
 			run.await.unwrap();
 		}
-		assert_eq!(drops(&mut writer, &log, version).await, [(4, 4), (0, 1), (3, 3)]);
+		// The feed gave up on 0, 1 and 3 before the update, so they are misses named as the
+		// cursor judges them, ahead of the stale group.
+		assert_eq!(drops(&mut writer, &log, version).await, [(0, 1), (3, 3), (4, 4)]);
 	}
 
 	/// After a raised start, lowering it again restarts the gaps below the raised floor, not
@@ -6422,7 +6418,8 @@ mod serve_group_test {
 		track.finish_at(track::Position::group(6)).unwrap();
 		drop(track);
 		kio::wait(|waiter| run.poll(&mut writer, waiter)).await.unwrap();
-		assert_eq!(drops(&mut writer, &log, version).await, [(1, 4)]);
+		// The feed gives up on 2..5 once its grace passes, a miss nothing fills.
+		assert_eq!(drops(&mut writer, &log, version).await, [(2, 4), (1, 1)]);
 	}
 
 	/// A raised floor sends no early drop: a later update may lower it again, and the
@@ -6931,7 +6928,7 @@ mod tests {
 			peer_setup,
 			goaway,
 			peer_hop: Some(assigned),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 			peer_grant: Default::default(),
 			client: false,
 			subscriptions: Default::default(),
@@ -7107,7 +7104,7 @@ mod tests {
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Binding::InBand),
 			goaway,
 			peer_hop: None,
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 			peer_grant: Default::default(),
 			client: false,
 			subscriptions: Default::default(),
@@ -7407,7 +7404,7 @@ mod tests {
 			peer_setup,
 			goaway,
 			peer_hop: None,
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 			peer_grant: Default::default(),
 			client: false,
 			subscriptions: Default::default(),
@@ -7540,7 +7537,7 @@ mod tests {
 						goaway,
 						peer_hop: None,
 						subscriptions: Default::default(),
-						auth: crate::auth::Handle::new(false),
+						auth: crate::auth::Link::new(false),
 						peer_grant: Default::default(),
 						client: false,
 					});
@@ -7633,7 +7630,7 @@ mod tests {
 			peer_setup,
 			goaway,
 			peer_hop: None,
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 			peer_grant: Default::default(),
 			client: false,
 			subscriptions: Default::default(),
@@ -7752,7 +7749,7 @@ mod tests {
 			goaway,
 			peer_hop: None,
 			subscriptions: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 			peer_grant: Default::default(),
 			client: false,
 		});
@@ -7877,7 +7874,7 @@ mod tests {
 			peer_setup,
 			goaway,
 			peer_hop: None,
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 			peer_grant: Default::default(),
 			client: false,
 			subscriptions: Default::default(),
@@ -8240,7 +8237,7 @@ mod tests {
 			peer_setup,
 			goaway,
 			peer_hop: None,
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 			peer_grant: Default::default(),
 			client: false,
 			subscriptions: Default::default(),
