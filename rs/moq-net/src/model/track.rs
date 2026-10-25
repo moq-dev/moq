@@ -4557,19 +4557,18 @@ impl Consumer {
 	/// accepted stay cached while the caller reads them. A track with no handler resolves at
 	/// once, and a front's logical track fills through the copy the front assigns it.
 	#[cfg(feature = "async")]
-	pub(crate) async fn fill_groups(&self, span: ops::Range<u64>, priority: i8) -> Filled {
+	pub(crate) fn fill_groups(&self, span: ops::Range<u64>, priority: i8) -> kio::Pending<Filling> {
 		// Held while waiting: a front assigns its logical track a copy only while it is read.
 		let state = self.resolve(None).0;
 		let routes = state.read().routes.clone();
 		if let Some(routes) = routes {
-			let joins = match kio::wait(|waiter| routes.poll_serving(waiter)).await {
-				Some(serving) => Box::pin(serving.fill_groups(span, priority)).await.joins,
-				None => Vec::new(),
-			};
-			return Filled {
-				joins,
-				_read: Some(state),
-			};
+			return kio::Pending::new(Filling(FillStage::Front {
+				routes,
+				read: state,
+				span,
+				priority,
+				serving: None,
+			}));
 		}
 		let (fills, holes) = {
 			let state = state.read();
@@ -4591,14 +4590,7 @@ impl Consumer {
 			};
 			joins.extend(fills.lock().join(&fills, &ask).0);
 		}
-		kio::wait(|waiter| {
-			for join in &joins {
-				ready!(join.poll_answered(waiter));
-			}
-			Poll::Ready(())
-		})
-		.await;
-		Filled { joins, _read: None }
+		kio::Pending::new(Filling(FillStage::Asked(joins)))
 	}
 
 	/// The sequences of `span` the cache holds, lowest first.
@@ -4896,6 +4888,78 @@ impl Filled {
 			.iter()
 			.flat_map(|join| join.outcome().read().refused_in(&span).cloned().collect::<Vec<_>>())
 			.collect()
+	}
+}
+
+/// The pollable state of a [`Consumer::fill_groups`], resolving to the [`Filled`] guard.
+#[cfg(feature = "async")]
+pub(crate) struct Filling(FillStage);
+
+#[cfg(feature = "async")]
+enum FillStage {
+	/// A front's logical track, filling through the copy the front serves it from.
+	Front {
+		routes: super::resume::Consumer,
+		read: kio::Consumer<TrackState>,
+		span: ops::Range<u64>,
+		priority: i8,
+		/// The serving copy's fill, once the front assigned one.
+		serving: Option<Box<FillStage>>,
+	},
+	/// Waiting for each run asked to be answered.
+	Asked(Vec<fill::Join>),
+	/// Resolved.
+	Done,
+}
+
+#[cfg(feature = "async")]
+impl kio::Task for Filling {
+	type Output = Filled;
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Filled> {
+		self.0.poll(waiter)
+	}
+}
+
+#[cfg(feature = "async")]
+impl FillStage {
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Filled> {
+		match self {
+			Self::Front {
+				routes,
+				span,
+				priority,
+				serving,
+				..
+			} => {
+				if serving.is_none() {
+					let fill = match ready!(routes.poll_serving(waiter)) {
+						Some(copy) => copy.fill_groups(span.clone(), *priority).into_inner().0,
+						// The front ended without a copy, so nothing fills.
+						None => Self::Asked(Vec::new()),
+					};
+					*serving = Some(Box::new(fill));
+				}
+				let filled = ready!(serving.as_mut().expect("set above").poll(waiter));
+				let Self::Front { read, .. } = std::mem::replace(self, Self::Done) else {
+					unreachable!("matched above");
+				};
+				Poll::Ready(Filled {
+					joins: filled.joins,
+					_read: Some(read),
+				})
+			}
+			Self::Asked(joins) => {
+				for join in joins.iter() {
+					ready!(join.poll_answered(waiter));
+				}
+				Poll::Ready(Filled {
+					joins: std::mem::take(joins),
+					_read: None,
+				})
+			}
+			Self::Done => panic!("polled after resolving"),
+		}
 	}
 }
 

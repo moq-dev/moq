@@ -5811,12 +5811,16 @@ impl Subscriber {
 				if let Poll::Ready(res) = waiter.poll_future(receive.as_mut()) {
 					return Poll::Ready(res);
 				}
-				// The request gave up on the run, or its group was aborted under it.
+				// The request gave up on the run, or the group being written was aborted under
+				// it, as by eviction while the stream stalls: the rest of the run is refused
+				// rather than left waiting on a stream that may never resume.
+				let mut aborted = Error::Cancel;
 				slot.poll(waiter, |state| match &**state {
 					GroupFetch::Cancelled => Poll::Ready(()),
+					GroupFetch::Receiving(Some(group)) => group.poll_closed(waiter).map(|err| aborted = err),
 					_ => Poll::Pending,
 				})
-				.map(|_| Err(Error::Cancel))
+				.map(|_| Err(aborted))
 			})
 			.await
 		};
@@ -15921,6 +15925,23 @@ mod stitch_tests {
 		buf.to_vec()
 	}
 
+	/// A group aborted under a stalled fetch stream, as by eviction, ends the run with its
+	/// error instead of leaving the run's readers waiting on the stream.
+	#[moq_clock::test]
+	async fn a_group_aborted_under_a_stalled_fetch_ends_the_run() {
+		let mut run = GroupFetchRun::stalled(VERSION, group_fetch_objects(SEQUENCE, 0, &[b"0"])).await;
+		let (slot, _fetch) = run.slot(None, None).await;
+		let mut receiving = run.subscriber.clone();
+		let mut receive = std::pin::pin!(receiving.recv_group_fetch(&mut run.stream, slot.clone()));
+		assert!(futures::poll!(&mut receive).is_pending());
+		let group = match &*slot.read() {
+			GroupFetch::Receiving(Some(group)) => group.clone(),
+			_ => panic!("the group is being written"),
+		};
+		group.abort_open(Error::Evicted);
+		assert!(matches!(receive.await, Err(Error::Evicted)));
+	}
+
 	#[moq_clock::test]
 	async fn internal_group_fetch_setup_cancellation_is_cancel() {
 		let mut run = GroupFetchRun::new(VERSION, Vec::new()).await;
@@ -15943,7 +15964,15 @@ mod stitch_tests {
 
 	impl GroupFetchRun {
 		async fn new(version: Version, objects: Vec<u8>) -> Self {
-			let mut session = ScriptedSession::per_stream_eof(vec![objects]);
+			Self::with_session(version, ScriptedSession::per_stream_eof(vec![objects])).await
+		}
+
+		/// A stream that goes quiet after `objects` rather than ending.
+		async fn stalled(version: Version, objects: Vec<u8>) -> Self {
+			Self::with_session(version, ScriptedSession::per_stream(vec![objects])).await
+		}
+
+		async fn with_session(version: Version, mut session: ScriptedSession) -> Self {
 			let tasks = TaskSet::new();
 			let subscriber = Subscriber::new(
 				crate::time::sim(),
