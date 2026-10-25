@@ -271,7 +271,8 @@ impl TransportConfig {
 
     /// Configures an outbound rate limit (in bytes per second) for each connection.
     ///
-    /// Defaults to `None`, which disables rate limiting.
+    /// The congestion controller's pacer enforces it, so a controller that does not pace, such as
+    /// `Unlimited`, ignores it. Defaults to `None`, which disables rate limiting.
     pub fn max_outgoing_bytes_per_second(&mut self, value: Option<u64>) -> &mut Self {
         self.max_outgoing_bytes_per_second = value;
         self

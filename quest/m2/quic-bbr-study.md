@@ -88,10 +88,6 @@ to weaken the congestion response or precautionary probe stop. This study
 still decides growth recognition and probe behavior separately; it does not
 adopt either in advance.
 
-## Required
-
-- [Portable controller trait](/quest/m1/congestion/trait.md) - followers land in `moq-congestion` on its trait
-
 ## Related
 
 - [TS validation](/test/ts/README.md) - shaped paths, whole-group shedding, and measured baselines

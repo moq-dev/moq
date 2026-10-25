@@ -33,7 +33,7 @@ use super::*;
 use crate::{
     Duration, Instant,
     cid_generator::{ConnectionIdGenerator, RandomConnectionIdGenerator},
-    congestion::{Controller, ControllerFactory, ControllerMetrics},
+    congestion::{self, Controller, ControllerFactory, ControllerMetrics},
     crypto::rustls::QuicServerConfig,
     frame::FrameStruct,
     packet::{Header, InitialHeader, PacketNumber},
@@ -417,22 +417,24 @@ fn stats_include_congestion_controller_bandwidth_estimate() {
     struct TestController;
 
     impl Controller for TestController {
-        fn on_congestion_event(
-            &mut self,
-            _now: Instant,
-            _sent: Instant,
-            _is_persistent_congestion: bool,
-            _is_ecn: bool,
-            _lost_bytes: u64,
-            _largest_lost: u64,
-            _space: moq_congestion::SpaceId,
-        ) {
+        fn on_sent(&mut self, _sent: congestion::Sent) -> congestion::Packet {
+            Default::default()
         }
+
+        fn on_ack(&mut self, _ack: congestion::Ack<'_>) {}
+
+        fn on_loss(&mut self, _loss: congestion::Loss<'_>) {}
+
+        fn on_ce(&mut self, _ce: congestion::Ce) {}
 
         fn on_mtu_update(&mut self, _new_mtu: u16) {}
 
         fn window(&self) -> u64 {
             WINDOW
+        }
+
+        fn pace(&mut self, _now: Instant, _bytes: u64) -> Option<Instant> {
+            None
         }
 
         fn metrics(&self) -> ControllerMetrics {
@@ -447,10 +449,6 @@ fn stats_include_congestion_controller_bandwidth_estimate() {
             Box::new(self.clone())
         }
 
-        fn initial_window(&self) -> u64 {
-            WINDOW
-        }
-
         fn into_any(self: Box<Self>) -> Box<dyn Any> {
             self
         }
@@ -459,7 +457,7 @@ fn stats_include_congestion_controller_bandwidth_estimate() {
     struct TestControllerFactory;
 
     impl ControllerFactory for TestControllerFactory {
-        fn build(self: Arc<Self>, _now: Instant, _current_mtu: u16) -> Box<dyn Controller> {
+        fn build(self: Arc<Self>, _init: congestion::Init) -> Box<dyn Controller> {
             Box::new(TestController)
         }
     }
@@ -6390,30 +6388,54 @@ fn qlog_pacing_rate_is_bits_per_second() {
     assert!(rates.iter().all(|rate| *rate == BYTES_PER_SECOND * 8));
 }
 
-/// A controller whose window is effectively unbounded but which always reports a low pacing
-/// rate, so the only thing that can ever block a send is the pacer. Counts how many times the
-/// connection reports the spec's `C.is_cwnd_limited` signal.
+/// Releases packets at `rate` bytes per second, one at a time, for test controllers.
+#[derive(Debug, Clone, Default)]
+struct TestPacer {
+    /// When the next packet may leave.
+    next: Option<Instant>,
+}
+
+impl TestPacer {
+    fn on_sent(&mut self, now: Instant, bytes: u16, rate: u64) {
+        let start = self.next.map_or(now, |next| next.max(now));
+        self.next = Some(start + Duration::from_secs_f64(f64::from(bytes) / rate as f64));
+    }
+
+    fn pace(&self, now: Instant) -> Option<Instant> {
+        self.next.filter(|&next| next > now)
+    }
+}
+
+/// A controller whose window is effectively unbounded but which always paces at a low rate, so
+/// the only thing that can ever block a send is the pacer. Counts how many times the connection
+/// reports the spec's `C.is_cwnd_limited` signal.
 #[derive(Debug)]
 struct PacingOnlyController {
     cwnd_limited_reports: Arc<AtomicU64>,
+    pacer: TestPacer,
+}
+
+impl PacingOnlyController {
+    /// 1 Mbit/s in bytes/sec: low enough that a bulk transfer is pacing-blocked almost
+    /// continuously.
+    const RATE: u64 = 125_000;
 }
 
 impl Controller for PacingOnlyController {
+    fn on_sent(&mut self, sent: congestion::Sent) -> congestion::Packet {
+        self.pacer.on_sent(sent.now, sent.bytes, Self::RATE);
+        Default::default()
+    }
+
     fn on_cwnd_limited(&mut self) {
         self.cwnd_limited_reports.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn on_congestion_event(
-        &mut self,
-        _now: Instant,
-        _sent: Instant,
-        _is_persistent_congestion: bool,
-        _is_ecn: bool,
-        _lost_bytes: u64,
-        _largest_lost: u64,
-        _space: moq_congestion::SpaceId,
-    ) {
-    }
+    fn on_ack(&mut self, _ack: congestion::Ack<'_>) {}
+
+    fn on_loss(&mut self, _loss: congestion::Loss<'_>) {}
+
+    fn on_ce(&mut self, _ce: congestion::Ce) {}
 
     fn on_mtu_update(&mut self, _new_mtu: u16) {}
 
@@ -6421,26 +6443,23 @@ impl Controller for PacingOnlyController {
         u64::MAX / 2
     }
 
+    fn pace(&mut self, now: Instant, _bytes: u64) -> Option<Instant> {
+        self.pacer.pace(now)
+    }
+
     fn metrics(&self) -> ControllerMetrics {
         ControllerMetrics {
             congestion_window: self.window(),
-            ssthresh: None,
-            // 1 Mbit/s in bytes/sec: low enough that a bulk transfer is pacing-blocked almost
-            // continuously.
-            pacing_rate: Some(125_000),
-            bandwidth_estimate: None,
-            send_quantum: Some(2 * 1200),
+            pacing_rate: Some(Self::RATE),
+            ..Default::default()
         }
     }
 
     fn clone_box(&self) -> Box<dyn Controller> {
         Box::new(Self {
             cwnd_limited_reports: self.cwnd_limited_reports.clone(),
+            pacer: self.pacer.clone(),
         })
-    }
-
-    fn initial_window(&self) -> u64 {
-        u64::MAX / 2
     }
 
     fn into_any(self: Box<Self>) -> Box<dyn Any> {
@@ -6453,9 +6472,10 @@ struct PacingOnlyConfig {
 }
 
 impl ControllerFactory for PacingOnlyConfig {
-    fn build(self: Arc<Self>, _now: Instant, _current_mtu: u16) -> Box<dyn Controller> {
+    fn build(self: Arc<Self>, _init: congestion::Init) -> Box<dyn Controller> {
         Box::new(PacingOnlyController {
             cwnd_limited_reports: self.cwnd_limited_reports.clone(),
+            pacer: TestPacer::default(),
         })
     }
 }
@@ -6494,25 +6514,23 @@ fn cwnd_limited_is_not_reported_when_only_pacing_blocks() {
     );
 }
 
-/// A controller that never limits the window or the rate, but reports a small send quantum, so
-/// the quantum is the only thing that can bound an aggregate handed to the NIC.
+/// A controller that never limits the window or the rate, but reports a small burst, so the
+/// burst is the only thing that can bound an aggregate handed to the NIC.
 #[derive(Debug, Clone)]
 struct FixedQuantumController {
     send_quantum: u64,
 }
 
 impl Controller for FixedQuantumController {
-    fn on_congestion_event(
-        &mut self,
-        _now: Instant,
-        _sent: Instant,
-        _is_persistent_congestion: bool,
-        _is_ecn: bool,
-        _lost_bytes: u64,
-        _largest_lost: u64,
-        _space: moq_congestion::SpaceId,
-    ) {
+    fn on_sent(&mut self, _sent: congestion::Sent) -> congestion::Packet {
+        Default::default()
     }
+
+    fn on_ack(&mut self, _ack: congestion::Ack<'_>) {}
+
+    fn on_loss(&mut self, _loss: congestion::Loss<'_>) {}
+
+    fn on_ce(&mut self, _ce: congestion::Ce) {}
 
     fn on_mtu_update(&mut self, _new_mtu: u16) {}
 
@@ -6520,23 +6538,16 @@ impl Controller for FixedQuantumController {
         u64::MAX / 2
     }
 
-    fn metrics(&self) -> ControllerMetrics {
-        ControllerMetrics {
-            congestion_window: self.window(),
-            ssthresh: None,
-            // 1 GB/s: high enough that the pacer never delays within a single batch.
-            pacing_rate: Some(1_000_000_000),
-            bandwidth_estimate: None,
-            send_quantum: Some(self.send_quantum),
-        }
+    fn pace(&mut self, _now: Instant, _bytes: u64) -> Option<Instant> {
+        None
+    }
+
+    fn burst(&self) -> Option<u64> {
+        Some(self.send_quantum)
     }
 
     fn clone_box(&self) -> Box<dyn Controller> {
         Box::new(self.clone())
-    }
-
-    fn initial_window(&self) -> u64 {
-        u64::MAX / 2
     }
 
     fn into_any(self: Box<Self>) -> Box<dyn Any> {
@@ -6545,7 +6556,7 @@ impl Controller for FixedQuantumController {
 }
 
 impl ControllerFactory for FixedQuantumController {
-    fn build(self: Arc<Self>, _now: Instant, _current_mtu: u16) -> Box<dyn Controller> {
+    fn build(self: Arc<Self>, _init: congestion::Init) -> Box<dyn Controller> {
         Box::new((*self).clone())
     }
 }
@@ -6596,35 +6607,15 @@ fn send_quantum_bounds_the_gso_batch() {
     );
 }
 
-/// A packet as a congestion callback names it: packet numbers restart in each space.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct Packet {
-    space: SpaceId,
-    number: u64,
-}
-
-/// A congestion callback, as the transport reported it.
+/// A congestion callback, as the transport reported it. Packets are named by send time, which
+/// several packets can share.
 #[derive(Debug, Clone, Copy)]
 enum PacketEvent {
-    Sent {
-        at: Instant,
-        packet: Packet,
-    },
-    Acked {
-        sent: Instant,
-        packet: Packet,
-    },
-    Lost {
-        packet: Packet,
-    },
-    Congestion {
-        sent: Instant,
-        largest: Packet,
-        ecn: bool,
-    },
-    AppLimited {
-        in_flight: u64,
-    },
+    Sent { at: Instant },
+    Acked { sent: Instant },
+    Lost { sent: Instant },
+    Congestion { sent: Instant, ecn: bool },
+    AppLimited { in_flight: u64 },
 }
 
 type PacketLog = Arc<Mutex<Vec<PacketEvent>>>;
@@ -6635,6 +6626,7 @@ struct PacketRecorder {
     log: PacketLog,
     window: u64,
     pacing_rate: Option<u64>,
+    pacer: TestPacer,
 }
 
 impl PacketRecorder {
@@ -6644,69 +6636,35 @@ impl PacketRecorder {
 }
 
 impl Controller for PacketRecorder {
-    fn on_packet_sent(
-        &mut self,
-        now: Instant,
-        _bytes: u16,
-        number: u64,
-        space: moq_congestion::SpaceId,
-    ) {
-        let packet = Packet {
-            space: space.into(),
-            number,
-        };
-        self.push(PacketEvent::Sent { at: now, packet });
+    fn on_sent(&mut self, sent: congestion::Sent) -> congestion::Packet {
+        if let Some(rate) = self.pacing_rate {
+            self.pacer.on_sent(sent.now, sent.bytes, rate);
+        }
+        self.push(PacketEvent::Sent { at: sent.now });
+        Default::default()
     }
 
-    fn on_ack(
-        &mut self,
-        _now: Instant,
-        sent: Instant,
-        _bytes: u64,
-        number: u64,
-        space: moq_congestion::SpaceId,
-        _app_limited: bool,
-        _rtt: &moq_congestion::RttEstimator,
-    ) {
-        let packet = Packet {
-            space: space.into(),
-            number,
-        };
-        self.push(PacketEvent::Acked { sent, packet });
+    fn on_ack(&mut self, ack: congestion::Ack<'_>) {
+        for acked in ack.packets {
+            self.push(PacketEvent::Acked { sent: acked.sent });
+        }
     }
 
-    fn on_packet_lost(
-        &mut self,
-        _lost_bytes: u16,
-        number: u64,
-        space: moq_congestion::SpaceId,
-        _now: Instant,
-    ) {
-        let packet = Packet {
-            space: space.into(),
-            number,
-        };
-        self.push(PacketEvent::Lost { packet });
-    }
-
-    fn on_congestion_event(
-        &mut self,
-        _now: Instant,
-        sent: Instant,
-        _is_persistent_congestion: bool,
-        is_ecn: bool,
-        _lost_bytes: u64,
-        largest_lost: u64,
-        space: moq_congestion::SpaceId,
-    ) {
-        let largest = Packet {
-            space: space.into(),
-            number: largest_lost,
-        };
+    fn on_loss(&mut self, loss: congestion::Loss<'_>) {
+        for lost in loss.packets {
+            self.push(PacketEvent::Lost { sent: lost.sent });
+        }
+        let newest = loss.packets.last().expect("a loss names its packets");
         self.push(PacketEvent::Congestion {
-            sent,
-            largest,
-            ecn: is_ecn,
+            sent: newest.sent,
+            ecn: false,
+        });
+    }
+
+    fn on_ce(&mut self, ce: congestion::Ce) {
+        self.push(PacketEvent::Congestion {
+            sent: ce.sent,
+            ecn: true,
         });
     }
 
@@ -6718,6 +6676,10 @@ impl Controller for PacketRecorder {
 
     fn window(&self) -> u64 {
         self.window
+    }
+
+    fn pace(&mut self, now: Instant, _bytes: u64) -> Option<Instant> {
+        self.pacer.pace(now)
     }
 
     fn metrics(&self) -> ControllerMetrics {
@@ -6732,10 +6694,6 @@ impl Controller for PacketRecorder {
         Box::new(self.clone())
     }
 
-    fn initial_window(&self) -> u64 {
-        self.window
-    }
-
     fn into_any(self: Box<Self>) -> Box<dyn Any> {
         self
     }
@@ -6747,63 +6705,57 @@ struct PacketRecorderFactory {
     logs: Mutex<Vec<PacketLog>>,
     /// The congestion window every controller reports; effectively unlimited if unset
     window: Option<u64>,
-    /// The pacing rate in bytes/sec every controller reports; derived from the window if unset
+    /// The rate in bytes/sec every controller paces at; unpaced if unset
     pacing_rate: Option<u64>,
 }
 
 impl ControllerFactory for PacketRecorderFactory {
-    fn build(self: Arc<Self>, _now: Instant, _current_mtu: u16) -> Box<dyn Controller> {
+    fn build(self: Arc<Self>, _init: congestion::Init) -> Box<dyn Controller> {
         let log = PacketLog::default();
         self.logs.lock().unwrap().push(log.clone());
         Box::new(PacketRecorder {
             log,
             window: self.window.unwrap_or(u64::MAX / 2),
             pacing_rate: self.pacing_rate,
+            pacer: TestPacer::default(),
         })
     }
 }
 
-/// Asserts every ACK, loss, and congestion event in one controller's log names a packet that
-/// controller sent, ACKs and congestion events carry that packet's own send time, a loss-driven
-/// congestion event ends with a packet just reported lost, and no packet is resolved twice.
-/// Returns the log for scenario-specific checks.
-fn check_packet_identity(log: &PacketLog) -> Vec<PacketEvent> {
+/// Asserts no packet is resolved twice: every ACK and loss in one controller's log names the send
+/// time of a packet sent and not yet resolved, a loss-driven congestion event names the newest
+/// packet just reported lost, and a CE event names a packet sent. Returns the log for
+/// scenario-specific checks.
+fn check_packet_resolution(log: &PacketLog) -> Vec<PacketEvent> {
     let events = log.lock().unwrap().clone();
-    let mut sent = BTreeMap::new();
-    let mut resolved = BTreeSet::new();
-    let mut lost = BTreeSet::new();
+    let mut outstanding = BTreeMap::<Instant, usize>::new();
+    let mut sent = BTreeSet::new();
+    let mut last_lost = None;
+    let resolve = |outstanding: &mut BTreeMap<Instant, usize>, at: Instant| {
+        let count = outstanding
+            .get_mut(&at)
+            .unwrap_or_else(|| panic!("packet sent at {at:?} resolved but never outstanding"));
+        *count -= 1;
+        if *count == 0 {
+            outstanding.remove(&at);
+        }
+    };
     for event in &events {
         match *event {
-            PacketEvent::Sent { at, packet } => {
-                assert!(sent.insert(packet, at).is_none(), "{packet:?} sent twice");
+            PacketEvent::Sent { at } => {
+                *outstanding.entry(at).or_default() += 1;
+                sent.insert(at);
             }
-            PacketEvent::Acked { sent: at, packet } => {
-                assert_eq!(
-                    sent.get(&packet),
-                    Some(&at),
-                    "{packet:?} acked with another send time"
-                );
-                assert!(resolved.insert(packet), "{packet:?} resolved twice");
+            PacketEvent::Acked { sent: at } => resolve(&mut outstanding, at),
+            PacketEvent::Lost { sent: at } => {
+                resolve(&mut outstanding, at);
+                last_lost = Some(at);
             }
-            PacketEvent::Lost { packet } => {
-                assert!(sent.contains_key(&packet), "{packet:?} lost but never sent");
-                assert!(resolved.insert(packet), "{packet:?} resolved twice");
-                lost.insert(packet);
-            }
-            PacketEvent::Congestion {
-                sent: at,
-                largest,
-                ecn,
-            } => {
-                assert_eq!(
-                    sent.get(&largest),
-                    Some(&at),
-                    "{largest:?} congested with another send time"
-                );
-                assert!(
-                    ecn || lost.contains(&largest),
-                    "{largest:?} congested but not lost"
-                );
+            PacketEvent::Congestion { sent: at, ecn } => {
+                assert!(sent.contains(&at), "congestion names a packet never sent");
+                if !ecn {
+                    assert_eq!(Some(at), last_lost, "loss congestion names another packet");
+                }
             }
             PacketEvent::AppLimited { .. } => {}
         }
@@ -6811,11 +6763,10 @@ fn check_packet_identity(log: &PacketLog) -> Vec<PacketEvent> {
     events
 }
 
-/// Packet numbers restart in each space, so the handshake reuses Initial 0 and Handshake 0 in
-/// one coalesced datagram. Every callback the transport makes must say which one it means, through
-/// a lost server flight, ECN marks on the handshake, key discard, and application data.
+/// The handshake loses a server flight and sees ECN marks, and every packet the transport
+/// resolves through the controller is one it sent and had not resolved yet.
 #[test]
-fn congestion_callbacks_identify_packets_across_spaces() {
+fn congestion_callbacks_resolve_each_packet_once() {
     let _guard = subscribe();
     let factory = Arc::new(PacketRecorderFactory::default());
     let mut transport = TransportConfig::default();
@@ -6851,51 +6802,15 @@ fn congestion_callbacks_identify_packets_across_spaces() {
 
     let logs = factory.logs.lock().unwrap().clone();
     assert_eq!(logs.len(), 2, "one controller per side");
-    let logs: Vec<_> = logs.iter().map(check_packet_identity).collect();
-
-    // The server coalesces its first Initial and Handshake packets, both numbered 0.
-    let coalesced = |events: &Vec<PacketEvent>| {
-        let sent_at = |space| {
-            events.iter().find_map(|e| match *e {
-                PacketEvent::Sent { at, packet } if packet == Packet { space, number: 0 } => {
-                    Some(at)
-                }
-                _ => None,
-            })
-        };
-        sent_at(SpaceId::Initial).is_some()
-            && sent_at(SpaceId::Initial) == sent_at(SpaceId::Handshake)
-    };
+    let events: Vec<_> = logs.iter().flat_map(check_packet_resolution).collect();
     assert!(
-        logs.iter().any(coalesced),
-        "no coalesced Initial 0 and Handshake 0"
-    );
-
-    let events: Vec<_> = logs.into_iter().flatten().collect();
-    for space in [SpaceId::Initial, SpaceId::Handshake, SpaceId::Data] {
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, PacketEvent::Acked { packet, .. } if packet.space == space)),
-            "no ACK reported in {space:?}"
-        );
-    }
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, PacketEvent::Lost { packet } if packet.space != SpaceId::Data)),
+        events.iter().any(|e| matches!(e, PacketEvent::Lost { .. })),
         "no handshake loss reported"
     );
     assert!(
-        events.iter().any(
-            |e| matches!(e, PacketEvent::Congestion { largest, ecn: false, .. } if largest.space != SpaceId::Data)
-        ),
-        "no handshake loss congestion reported"
-    );
-    assert!(
-        events.iter().any(
-            |e| matches!(e, PacketEvent::Congestion { largest, ecn: true, .. } if largest.space != SpaceId::Data)
-        ),
+        events
+            .iter()
+            .any(|e| matches!(e, PacketEvent::Congestion { ecn: true, .. })),
         "no handshake ECN congestion reported"
     );
 }
@@ -6997,7 +6912,7 @@ fn check_starvation_reported_before_resumed_send(send: impl Fn(&mut Pair, Connec
     send(&mut pair, client_ch);
     pair.drive_client();
 
-    let events = check_packet_identity(&log);
+    let events = check_packet_resolution(&log);
     let resumed = events
         .iter()
         .position(|e| matches!(e, PacketEvent::Sent { at, .. } if *at >= resumed_at))
@@ -7263,8 +7178,8 @@ fn receiver_credit_is_starvation() {
     );
 }
 
-/// A Retry acknowledges the client's first Initial packet without an ACK frame. That inferred
-/// ACK must name Initial 0 too, not packet 0 of another space.
+/// A Retry acknowledges the client's first Initial packet without an ACK frame, and the
+/// controller hears of it.
 #[test]
 fn congestion_callbacks_identify_the_initial_a_retry_acks() {
     let _guard = subscribe();
@@ -7280,15 +7195,15 @@ fn congestion_callbacks_identify_the_initial_a_retry_acks() {
 
     let logs = factory.logs.lock().unwrap().clone();
     assert_eq!(logs.len(), 1, "only the client records");
-    let initial_0 = Packet {
-        space: SpaceId::Initial,
-        number: 0,
+    let events = check_packet_resolution(&logs[0]);
+    let Some(PacketEvent::Sent { at: first }) = events.first().copied() else {
+        panic!("the client sent nothing first");
     };
     assert!(
-        check_packet_identity(&logs[0])
+        events
             .iter()
-            .any(|e| matches!(e, PacketEvent::Acked { packet, .. } if *packet == initial_0)),
-        "the Retry did not ack Initial 0"
+            .any(|e| matches!(e, PacketEvent::Acked { sent } if *sent == first)),
+        "the Retry did not ack the first Initial"
     );
 }
 
@@ -7461,6 +7376,11 @@ fn upload(
 #[test]
 fn default_controller_is_bbr3() {
     let factory = TransportConfig::default().congestion_controller_factory;
-    let controller = factory.build(Instant::now(), INITIAL_MTU);
+    let controller = factory.build(congestion::Init {
+        now: Instant::now(),
+        mtu: INITIAL_MTU,
+        rtt: Duration::from_millis(333),
+        max_pacing_rate: None,
+    });
     assert!(controller.into_any().downcast::<congestion::Bbr3>().is_ok());
 }

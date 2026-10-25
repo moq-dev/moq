@@ -45,10 +45,8 @@ natural-drain section:
   reason is unpublished. The half-BDP cap still binds in the cases above.
 - **Always on**, with no `Config` field: no new public API, and if the shaped
   comparison regresses, the PR does not ship.
-- **Not blocked** on the [controller trait](/quest/m1/congestion/trait.md);
-  the change is local to `update_min_rtt` and `check_probe_rtt` in
-  `rs/moq-congestion/src/bbr3/mod.rs`, and whichever lands second resolves the
-  conflict.
+- **Local change**: `update_min_rtt` and `check_probe_rtt` in
+  `rs/moq-congestion/src/bbr3/mod.rs`.
 
 Implementation guidance:
 

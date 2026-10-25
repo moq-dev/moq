@@ -2,7 +2,7 @@
 
 MoQ's sans-IO QUIC state machine, a hard fork of [quinn-proto](https://github.com/quinn-rs/quinn).
 
-BBR3, Cubic, and Unlimited live in [moq-congestion](../moq-congestion); this crate supplies QUIC packet and RTT inputs to them.
+BBR3, Cubic, and Unlimited live in [moq-congestion](../moq-congestion); this crate stores each packet's controller state and hands it back on acknowledgement or loss, and the controller paces the sends.
 
 All credit for the code goes to the quinn developers; it stays under quinn's MIT or Apache-2.0 license.
 
@@ -63,7 +63,7 @@ moq-tokio's `quic::web` module is `web-transport-moq` from moq-dev/noq at [`e27c
 
 Changes on top of the upstream commit, besides the renames:
 
-- **BBR3**, from [quinn#2481](https://github.com/quinn-rs/quinn/pull/2481) at [`55f74c0d`](https://github.com/quinn-rs/quinn/pull/2481/commits/55f74c0dd0738b5ad7d7676c0b2869a547783f83) (open upstream), rebased onto the fork point with authorship kept. It replaces quinn's BBR and is the default controller. It carries the BBR correctness fixes moq-dev/noq shipped in `moq-noq` 1.3.1, and with them the `Controller` changes BBR needs: packets named by number and `SpaceId`, `on_packet_sent`, `on_packet_lost`, `on_cwnd_limited`, `on_app_limited`, `on_ack_frequency_update`, and a `pacing_rate` and `send_quantum` the pacer obeys. `ControllerMetrics` rates are bytes per second.
+- **BBR3**, from [quinn#2481](https://github.com/quinn-rs/quinn/pull/2481) at [`55f74c0d`](https://github.com/quinn-rs/quinn/pull/2481/commits/55f74c0dd0738b5ad7d7676c0b2869a547783f83) (open upstream), rebased onto the fork point with authorship kept. It replaces quinn's BBR and is the default controller. It carries the BBR correctness fixes moq-dev/noq shipped in `moq-noq` 1.3.1, and with them the `Controller` changes BBR needs: per-packet send and loss callbacks, `on_cwnd_limited`, `on_app_limited`, `on_ack_frequency_update`, and controller-owned pacing and burst size. `ControllerMetrics` rates are bytes per second.
 - **BBR3 loss samples**: a lost packet supplies its own inflight, loss, and application-limited state without borrowing or overwriting the ACK sample, including before the first ACK observation. This follows draft-06 and Google Linux BBRv3; upstream submission waits on quinn#2481 for the same callback adaptation as packet retirement.
 - **BBR3 packet retirement**: per-space packet lookup and round-indexed expiry retire completed snapshots incrementally, preserving the extra ACK batch of metadata for late loss callbacks. The bounded indexes handle sparse packet numbers without walking the live flight. Upstream submission is deferred while quinn#2481 remains open: this fork also carries the packet-space and loss callback adaptations, so a port needs to target that implementation after its shape settles.
 - **Classic ECN for BBR3**, ported from [moq-dev/noq#12](https://github.com/moq-dev/noq/pull/12): CE exits Startup, stops a bandwidth probe, or lowers the short-term model, once per recovery episode, instead of counting as a loss.
