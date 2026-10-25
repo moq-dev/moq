@@ -4578,19 +4578,16 @@ impl Consumer {
 				.collect();
 			(state.fills.clone(), holes)
 		};
-		let mut joins = Vec::new();
-		for hole in holes {
-			let ask = fill::Ask {
-				start: Position::group(hole.start),
-				end: hole.end,
-				priority,
-				// A fetch names its groups outright, so only the publisher's max age applies.
-				max_delay: None,
-				order: Order::Ascending,
-			};
-			joins.extend(fills.lock().join(&fills, &ask).0);
-		}
-		kio::Pending::new(Filling(FillStage::Asked(joins)))
+		let joins = holes
+			.into_iter()
+			.flat_map(|hole| ask_span(&fills, hole, priority))
+			.collect();
+		kio::Pending::new(Filling(FillStage::Asked {
+			fills,
+			priority,
+			joins,
+			checked: 0,
+		}))
 	}
 
 	/// The sequences of `span` the cache holds, lowest first.
@@ -4907,7 +4904,13 @@ enum FillStage {
 		serving: Option<Box<FillStage>>,
 	},
 	/// Waiting for each run asked to be answered.
-	Asked(Vec<fill::Join>),
+	Asked {
+		fills: kio::Shared<FillState>,
+		priority: i8,
+		joins: Vec<fill::Join>,
+		/// How many of `joins` were answered and checked for a refusal to ask again.
+		checked: usize,
+	},
 	/// Resolved.
 	Done,
 }
@@ -4933,34 +4936,76 @@ impl FillStage {
 				..
 			} => {
 				if serving.is_none() {
-					let fill = match ready!(routes.poll_serving(waiter)) {
-						Some(copy) => copy.fill_groups(span.clone(), *priority).into_inner().0,
-						// The front ended without a copy, so nothing fills.
-						None => Self::Asked(Vec::new()),
+					// The front ended without a copy, so nothing fills.
+					let Some(copy) = ready!(routes.poll_serving(waiter)) else {
+						return Poll::Ready(self.resolve(Vec::new()));
 					};
-					*serving = Some(Box::new(fill));
+					*serving = Some(Box::new(copy.fill_groups(span.clone(), *priority).into_inner().0));
 				}
 				let filled = ready!(serving.as_mut().expect("set above").poll(waiter));
-				let Self::Front { read, .. } = std::mem::replace(self, Self::Done) else {
-					unreachable!("matched above");
-				};
-				Poll::Ready(Filled {
-					joins: filled.joins,
-					_read: Some(read),
-				})
+				Poll::Ready(self.resolve(filled.joins))
 			}
-			Self::Asked(joins) => {
-				for join in joins.iter() {
+			Self::Asked {
+				fills,
+				priority,
+				joins,
+				checked,
+			} => loop {
+				for join in &joins[*checked..] {
 					ready!(join.poll_answered(waiter));
 				}
-				Poll::Ready(Filled {
-					joins: std::mem::take(joins),
-					_read: None,
-				})
-			}
+				// Joined after a tighter budget went on the wire, which judged a group too old
+				// for that budget, not ours: ask again with ours, as a fetch does. Terminates,
+				// since a new fill asks no budget at all.
+				let retry: Vec<ops::Range<u64>> = joins[*checked..]
+					.iter()
+					.flat_map(|join| {
+						let outcome = join.outcome().read();
+						match outcome.asked() {
+							Some(_) => outcome.old_in(&join.groups),
+							None => Vec::new(),
+						}
+					})
+					.collect();
+				*checked = joins.len();
+				if retry.is_empty() {
+					return Poll::Ready(Filled {
+						joins: std::mem::take(joins),
+						_read: None,
+					});
+				}
+				for run in retry {
+					joins.extend(ask_span(fills, run, *priority));
+				}
+			},
 			Self::Done => panic!("polled after resolving"),
 		}
 	}
+
+	/// Resolve a front's fill with the joins its serving copy asked.
+	fn resolve(&mut self, joins: Vec<fill::Join>) -> Filled {
+		let Self::Front { read, .. } = std::mem::replace(self, Self::Done) else {
+			unreachable!("only a front resolves through its copy");
+		};
+		Filled {
+			joins,
+			_read: Some(read),
+		}
+	}
+}
+
+/// Ask the fills for the groups of `span`, joining any that cover them.
+#[cfg(feature = "async")]
+fn ask_span(fills: &kio::Shared<FillState>, span: ops::Range<u64>, priority: i8) -> Vec<fill::Join> {
+	let ask = fill::Ask {
+		start: Position::group(span.start),
+		end: span.end,
+		priority,
+		// A fetch names its groups outright, so only the publisher's max age applies.
+		max_delay: None,
+		order: Order::Ascending,
+	};
+	fills.lock().join(fills, &ask).0
 }
 
 /// The pollable state of a [`Consumer::fetch_group`].
@@ -18243,6 +18288,31 @@ mod test {
 		evict(&producer, 6);
 		assert_eq!(consumer.cached_groups(0..8), [2, 5]);
 		assert_eq!(filled.accepted(0..8).into_iter().collect::<Vec<_>>(), [5, 6]);
+	}
+
+	/// A span fill that joined after a tighter budget went on the wire is not answered by
+	/// that budget's `Old`: it asks again with its own, as a fetch does.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn a_span_fill_asks_again_after_another_budget_is_too_old() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.dynamic();
+		let consumer = producer.consume();
+
+		let tight = consumer.fetch_group(5, group::Fetch::default().with_max_delay(Duration::from_secs(1)));
+		let req = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
+		let mut filling = Box::pin(consumer.fill_groups(5..6, 0));
+		assert!(futures::poll!(filling.as_mut()).is_pending());
+
+		req.reject(Error::Old);
+		assert!(matches!(tight.await, Err(Error::Old)));
+		assert!(futures::poll!(filling.as_mut()).is_pending());
+
+		let fill = dynamic.requested_fill().now_or_never().unwrap().unwrap();
+		assert_eq!((fill.start().group, fill.end(), fill.max_delay()), (5, 6, None));
+		fill.accept(5, None).unwrap().finish().unwrap();
+		let filled = filling.await;
+		assert_eq!(filled.accepted(5..6).into_iter().collect::<Vec<_>>(), [5]);
 	}
 
 	/// A drop judges the subscription, not a fetch: a fetched head still arriving keeps

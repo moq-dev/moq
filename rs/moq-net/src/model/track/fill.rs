@@ -137,6 +137,16 @@ impl Outcome {
 		self.refused.overlapping(span).map(|(_, refusal)| &refusal.err)
 	}
 
+	/// The runs of `span` refused as too old, lowest first.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(super) fn old_in(&self, span: &ops::Range<u64>) -> Vec<ops::Range<u64>> {
+		self.refused
+			.overlapping(span)
+			.filter(|(_, refusal)| matches!(refusal.err, Error::Old))
+			.map(|(run, _)| run.start.max(span.start)..run.end.min(span.end))
+			.collect()
+	}
+
 	/// What was answered within `wanted`: accepted, or refused with why and the budget
 	/// the fill asked with.
 	#[expect(
