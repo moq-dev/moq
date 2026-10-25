@@ -20,6 +20,9 @@
 //! moq-lite, a whole burst on moq-transport.
 //! `session_delivery_fetch_range` FETCHes a burst of missing groups at once, swept over its
 //! length, so a relay fills each run with one moq-transport FETCH.
+//! `session_range_updates` widens established draft-22 subscriptions over a fresh cached
+//! burst, swept over the burst length and concurrent viewer requests. Narrowing and
+//! writing the next burst happen outside timing; the update and every filled group count.
 //! `session_delivery_credit` grants a viewer one uni stream at a time, swept over its
 //! subscriptions and the backlog each holds, so every group waits for a stream grant. A
 //! publisher that parks state per backlogged group pays for it on each grant, which shows
@@ -837,6 +840,95 @@ fn fetch_range(c: &mut Criterion) {
 	delivery(c, "fetch_range", shapes);
 }
 
+/// Range updates and their fill streams, over groups per fill and concurrent requests.
+fn range_updates(c: &mut Criterion) {
+	if std::env::var_os("SESSION_ALLOCS").is_some() || std::env::var_os("SESSION_EXPIRY_ONLY").is_some() {
+		return;
+	}
+	let rt = runtime();
+	let mut group = c.benchmark_group("session_range_updates");
+	group.sample_size(10);
+	for span in [2u64, 16] {
+		for requests in [1usize, 16] {
+			group.throughput(Throughput::Elements(span * requests as u64));
+			group.bench_function(BenchmarkId::new(format!("groups_{span}"), requests), |b| {
+				let (mut cluster, mut viewers) = rt.block_on(async {
+					let mut cluster = Cluster::new(
+						"moq-transport-22",
+						Shape {
+							publishers: 1,
+							..Shape::BASE
+						},
+					)
+					.await;
+					let mut viewers = Vec::new();
+					for _ in 0..requests {
+						let mut viewer = cluster.join(0).await;
+						viewer
+							.watch(
+								&path(0),
+								&[TRACK],
+								Some(track::Subscription::default().with_range(span..).with_max_delay(None)),
+							)
+							.await;
+						viewers.push(viewer);
+					}
+					(cluster, viewers)
+				});
+				let payload = Bytes::from_static(&[0; 64]);
+				let mut next = 0;
+				b.iter_custom(|iterations| {
+					rt.block_on(async {
+						let mut elapsed = Duration::ZERO;
+						for _ in 0..iterations {
+							let future = next + span;
+							for viewer in &mut viewers {
+								viewer.subscribers[0]
+									.update(track::Subscription::default().with_range(future..).with_max_delay(None))
+									.unwrap();
+							}
+							kio::wait(|waiter| {
+								for viewer in &mut viewers {
+									assert!(viewer.subscribers[0].poll_recv_group(waiter).is_pending());
+								}
+								loop {
+									if cluster.tracks[0].subscription().is_some_and(|subscription| {
+										subscription.ranges == [track::Range::groups(future..)]
+									}) {
+										return std::task::Poll::Ready(());
+									}
+									if cluster.tracks[0].poll_subscription_changed(waiter).is_pending() {
+										return std::task::Poll::Pending;
+									}
+								}
+							})
+							.await;
+							for sequence in next..future {
+								assert_eq!(write_group(&cluster.tracks[0], &payload, 1), sequence);
+							}
+							let started = Instant::now();
+							for viewer in &mut viewers {
+								viewer.subscribers[0]
+									.update(track::Subscription::default().with_range(next..).with_max_delay(None))
+									.unwrap();
+							}
+							for _ in 0..span {
+								for viewer in &mut viewers {
+									assert_eq!(read_group(&mut viewer.subscribers[0]).await, payload.len());
+								}
+							}
+							elapsed += started.elapsed();
+							next = future;
+						}
+						elapsed
+					})
+				});
+			});
+		}
+	}
+	group.finish();
+}
+
 fn join(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Item = Shape>) {
 	let rt = runtime();
 	let shapes: Vec<_> = shapes.into_iter().collect();
@@ -1472,6 +1564,7 @@ criterion_group!(
 	group_cost,
 	fetch_frames,
 	fetch_range,
+	range_updates,
 	withdrawal,
 	idle
 );
