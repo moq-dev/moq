@@ -95,7 +95,10 @@ signals.run((effect) => {
         timescale: Moq.Time.Timescale.MILLI,
         maxAge: Milli(86_400_000),
     });
-    effect.cleanup(() => track.close());
+    effect.cleanup(() => {
+        track.finish();
+        track.close();
+    });
 
     const meta = new Json.Snapshot.Producer<Meta>({ track });
     meta.update({ value: current, at: Moq.Time.Timestamp.now() });

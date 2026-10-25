@@ -4,6 +4,15 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### One lifecycle vocabulary ([#6750](https://github.com/moq-dev/moq/pull/6750))
+
+`Group.Producer.close(abort?)` and `Track.Producer.close(abort?)` split by meaning: call `finish()` for a clean end and `abort(err)` for an error. On a group, `finish()` is terminal and an `abort` after it is a no-op. On a track, `finish()` only declares the end, so groups below it stay writable; then call `close()` to release the producer, which aborts with a `Cancel` stream error if no end was declared. Replace `track.close()` with `track.finish(); track.close();`.
+`Track.Producer.closed` and `Track.Demand.closed` settle once the outcome is final: `null` when the declared end is reached with every group below it finished, even while the producer stays open, or the abort error.
+`Group.Consumer.close()` takes no error and releases only that handle; other readers and the producer are unaffected.
+`Group.Demand.unused()` and `Broadcast.Demand.unused()` reject once the group or broadcast closes, instead of resolving.
+The wire layer's `Lister.ended` is `closed`.
+`Track.Subscriber.end()` and `Track.Ordered.end()` are gone; `await finished()` instead.
+
 ### Published names refuse navigation segments
 
 Broadcast creation and route publication now refuse literal `.` and `..` segments, including segments in the producer's root.
