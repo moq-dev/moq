@@ -906,16 +906,18 @@ impl Publish {
 		self.groups.insert(group)
 	}
 
-	/// Reject a group request, failing every fetch waiting on it. A fill has no error code
-	/// to carry, so `error_code` is not delivered: the fetches fail as not found.
+	/// Reject a group request like [`Self::group_request_free`]; `error_code` is not delivered.
 	pub fn group_request_abort(&mut self, request: Id, _error_code: u16) -> Result<(), Error> {
 		self.group_request_free(request)
 	}
 
-	/// Drop a group request, which rejects it.
+	/// Drop a group request, failing the readers waiting on it as not found. The group is
+	/// refused rather than dropped, so a later reader asks again.
 	pub fn group_request_free(&mut self, request: Id) -> Result<(), Error> {
 		let request = self.group_request.remove(request).ok_or(Error::NotFound)?;
-		request.fill.drop_groups(request.sequence..request.sequence + 1);
+		request
+			.fill
+			.refuse_groups(request.sequence..request.sequence + 1, moq_net::Error::NotFound);
 		Ok(())
 	}
 

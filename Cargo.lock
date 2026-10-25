@@ -4786,6 +4786,7 @@ dependencies = [
  "moq-video",
  "mpeg2ts",
  "object_store",
+ "percent-encoding",
  "pollster",
  "reqwest",
  "rustls",
@@ -5011,6 +5012,7 @@ dependencies = [
  "h264-reader 0.9.0",
  "hang",
  "kio 0.6.2",
+ "libc",
  "memchr",
  "moq-clock",
  "moq-flate",
@@ -5066,6 +5068,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "url",
  "uuid",
  "wasm-bindgen-test",
 ]

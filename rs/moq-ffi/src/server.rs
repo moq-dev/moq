@@ -595,7 +595,7 @@ mod lifecycle_tests {
 				let everything = crate::auth::MoqGrant {
 					publish: vec!["**".into()],
 					subscribe: vec!["**".into()],
-					expires_us: None,
+					expires: None,
 				};
 				for auth in [peer.auth(), session.auth()] {
 					while auth.grant().as_ref() != Some(&everything) {

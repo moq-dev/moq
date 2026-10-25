@@ -43,6 +43,7 @@ serde = { workspace = true }
 slab = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+url = { workspace = true }
 uuid = { workspace = true, features = ["js"] }
 
 # Model-layer locks must yield to Loom whenever kio does. This is compiled only

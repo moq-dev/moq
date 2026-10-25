@@ -84,9 +84,9 @@ final class ConnectOptions {
   MoqClientConfig get _ffi => MoqClientConfig(
     bind: bind,
     versions: versions ?? const [],
-    timeoutUs: _us(timeout, 'timeout'),
-    raceUs: _us(race, 'race'),
-    resolutionDelayUs: _us(resolutionDelay, 'resolutionDelay'),
+    timeout: timeout,
+    race: race,
+    resolutionDelay: resolutionDelay,
     tls: tls ?? ClientTls(),
     quic: (quic ?? const QuicConfig())._ffi,
     websocket: (websocket ?? const WebSocketConfig())._ffi,
@@ -141,8 +141,8 @@ final class QuicConfig {
 
   MoqQuicConfig get _ffi => MoqQuicConfig(
     maxStreams: maxStreams,
-    idleTimeoutUs: _us(idleTimeout, 'idleTimeout'),
-    keepAliveUs: _us(keepAlive, 'keepAlive'),
+    idleTimeout: idleTimeout,
+    keepAlive: keepAlive,
     gso: gso,
     mtuDiscovery: mtuDiscovery,
     congestionControl: congestionControl,
@@ -165,14 +165,7 @@ final class WebSocketConfig {
   const WebSocketConfig({this.enabled, this.delay});
 
   MoqWebSocketConfig get _ffi =>
-      MoqWebSocketConfig(enabled: enabled, delayUs: _us(delay, 'delay'));
-}
-
-int? _us(Duration? value, String name) {
-  if (value != null && value.isNegative) {
-    throw ArgumentError.value(value, name, 'must not be negative');
-  }
-  return value?.inMicroseconds;
+      MoqWebSocketConfig(enabled: enabled, delay: delay);
 }
 
 /// The protocol versions offered by default, most preferred first, spelled the

@@ -456,8 +456,8 @@ bool MoQOutput::TryGetConnectionStats(ConnectionStats *out)
 
 	ConnectionStats snapshot;
 	snapshot.reconnects = GetReconnectCount();
-	snapshot.rtt_valid = raw.rtt_us.has_value();
-	snapshot.rtt_ms = raw.rtt_us ? static_cast<double>(*raw.rtt_us) / 1000.0 : 0;
+	snapshot.rtt_valid = raw.rtt.has_value();
+	snapshot.rtt_ms = raw.rtt ? std::chrono::duration<double, std::milli>(*raw.rtt).count() : 0;
 	snapshot.estimated_send_rate_valid = raw.estimated_send_rate_bps.has_value();
 	snapshot.estimated_send_rate_bps =
 		raw.estimated_send_rate_bps ? static_cast<double>(*raw.estimated_send_rate_bps) : 0;

@@ -3380,6 +3380,76 @@ fn a_group_request_nobody_reads_is_withdrawn() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
+/// Rejecting a group request fails only the readers waiting on it: the group is not named
+/// dropped, so a later subscriber asks again.
+#[test]
+fn a_rejected_group_request_binds_only_its_readers() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"track-dynamic-refused");
+	let name = b"data";
+	let track =
+		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
+	let group_cb = Callback::new();
+	let dynamic = id(unsafe { moq_publish_track_dynamic(track, Some(channel_callback), group_cb.ptr) });
+
+	// The live feed ran from 10 and ended, so only a fill can serve group 6.
+	{
+		let mut state = State::lock();
+		let producer = state.publish.track_producer(Id::try_from(track).unwrap()).unwrap();
+		producer.start_at(10).unwrap();
+		let mut group = producer.create_group(moq_net::group::Info { sequence: 10 }).unwrap();
+		group
+			.write_frame(moq_net::Timestamp::from_millis(10).unwrap(), &b"live"[..])
+			.unwrap();
+		group.finish().unwrap();
+		producer.finish().unwrap();
+	}
+	let subscribe = || {
+		let subscription = moq_net::track::Subscription::default()
+			.with_max_delay(None)
+			.with_range(6..7);
+		let mut state = State::lock();
+		let producer = state.publish.track_producer(Id::try_from(track).unwrap()).unwrap();
+		producer.subscribe(subscription)
+	};
+	let waiter = kio::Waiter::noop();
+
+	let mut sequence = 0u64;
+	for reject in [
+		|request| moq_group_request_abort(request, 9),
+		|request| moq_group_request_free(request),
+	] {
+		let mut reader = subscribe();
+		assert!(reader.poll_recv_group(&waiter).is_pending());
+		let request = id(group_cb.recv());
+		assert_eq!(unsafe { moq_group_request_sequence(request, &mut sequence) }, 0);
+		assert_eq!(sequence, 6);
+		assert_eq!(reject(request), 0);
+	}
+
+	let mut reader = subscribe();
+	assert!(reader.poll_recv_group(&waiter).is_pending());
+	let request = id(group_cb.recv());
+	let group = id(moq_group_request_accept(request));
+	let payload = b"fetched";
+	assert_eq!(
+		unsafe { moq_publish_group_frame(group, payload.as_ptr(), payload.len(), 6_000) },
+		0
+	);
+	assert_eq!(moq_publish_group_finish(group), 0);
+	let std::task::Poll::Ready(Ok(Some(group))) = reader.poll_recv_group(&waiter) else {
+		panic!("the accepted group reaches the reader");
+	};
+	assert_eq!(group.sequence, 6);
+
+	drop(reader);
+	assert_eq!(moq_publish_dynamic_cancel(dynamic), 0);
+	assert_eq!(group_cb.recv_terminal(), 0);
+	assert_eq!(moq_publish_track_finish(track), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
 #[test]
 fn track_request_dynamic_survives_accept() {
 	let origin = id(moq_origin_create());

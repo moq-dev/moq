@@ -278,8 +278,10 @@ async def test_client_websocket_fallback_options():
             except asyncio.CancelledError:
                 pass
 
+    # A negative duration fails on enter, where the native client is built.
     with pytest.raises(ValueError):
-        moq.Client("https://localhost", websocket=moq.WebSocketConfig(delay=timedelta(milliseconds=-1)))
+        async with moq.Client("https://localhost", websocket=moq.WebSocketConfig(delay=timedelta(milliseconds=-1))):
+            pass
 
 
 async def test_client_connection_knobs():
@@ -320,8 +322,10 @@ async def test_client_connection_knobs():
             except asyncio.CancelledError:
                 pass
 
+    # A negative duration fails on enter, where the native client is built.
     with pytest.raises(ValueError):
-        moq.Client("https://localhost", quic=moq.QuicConfig(idle_timeout=timedelta(milliseconds=-1)))
+        async with moq.Client("https://localhost", quic=moq.QuicConfig(idle_timeout=timedelta(milliseconds=-1))):
+            pass
 
 
 async def test_invalid_config_fails_on_enter():
