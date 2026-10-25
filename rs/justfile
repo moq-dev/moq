@@ -317,7 +317,8 @@ doctest *args:
     bash sh/local.sh cargo test --locked --doc "$@"
 
 # `--cfg loom` swaps kio's primitives for loom's, so it rebuilds the world and
-# stays out of `check`. `--release` because a model check runs the body once
+# executes only in Nightly; the selected Rust gate compiles it with `--no-run`.
+# `--release` because a model check runs the body once
 # per interleaving (411s -> 51s); the assertions are plain `assert!`. kio's
 # models search every interleaving; moq-net's cap preemptions (see
 # `tests/loom.rs`, `LOOM_MAX_PREEMPTIONS`). kio's own unit tests are

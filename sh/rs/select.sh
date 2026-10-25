@@ -137,6 +137,7 @@ case "$action" in
         # Workspace feature unification can hide an individual crate's missing
         # gates. Keep the boundary checks isolated and the full matrix nightly.
         just rs feature-shapes "${flags[@]}"
+        if wants '(kio|moq-net)'; then just rs loom --no-run; fi
         if wants moq-net; then just rs net-features; fi
         if wants moq-quic; then just rs quic-features; fi
         if wants moq-tokio; then just rs tokio-features; fi
