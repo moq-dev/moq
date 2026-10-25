@@ -90,7 +90,7 @@ async fn round(name: &str, end: End) -> (Vec<(u64, u64)>, Result<(), Error>) {
 
 	let (ready, active) = futures::channel::oneshot::channel();
 	let reader = moq_clock::sim::spawn(async move {
-		let subscription = Subscription::default().with_max_delay(MAX_DELAY).with_groups(0..);
+		let subscription = Subscription::default().with_max_delay(MAX_DELAY).with_range(0..);
 		let mut sub = remote
 			.track("video")
 			.unwrap()
