@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { Milli } from "@moq/clock";
-import { Group, Time, Track, Varint } from "@moq/net";
+import { Time, Track, Varint } from "@moq/net";
 import { Signal } from "@moq/signals";
 import { Consumer } from "./consumer.ts";
 import { Format } from "./legacy.ts";

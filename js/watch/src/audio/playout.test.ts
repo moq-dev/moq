@@ -1,7 +1,7 @@
 import { describe, expect, it, spyOn } from "bun:test";
 import { Micro, Milli } from "@moq/clock";
 import * as Container from "@moq/hang/container";
-import { Group, Time, Track, Varint } from "@moq/net";
+import { Time, Track, Varint } from "@moq/net";
 import { AUTO_MAX_DELAY, target } from "./latency";
 import { AudioRingBuffer } from "./ring-buffer";
 

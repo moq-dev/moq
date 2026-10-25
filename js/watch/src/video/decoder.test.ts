@@ -1015,8 +1015,8 @@ it("a video track read from another path does not inherit the outgoing delay", a
 it("buffered video holds its poster until its own span reaches the floor", async () => {
 	const clock = manualAt(0);
 	const playback = await guardedPlayback("legacy", [], [], true, 1000);
-	const group = playback.track.createGroup(0);
 	if (!playback.track) throw new Error("missing video track");
+	const group = playback.track.createGroup(0);
 	try {
 		group.writeFrame(legacyFrame(Micro(0)));
 		group.writeFrame(legacyFrame(Micro(40_000)));
