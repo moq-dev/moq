@@ -4569,10 +4569,8 @@ dependencies = [
  "bytes",
  "criterion",
  "futures",
- "hang",
  "kio 0.6.2",
  "moq-clock",
- "moq-json",
  "moq-net",
  "object_store",
  "percent-encoding",
@@ -4925,6 +4923,7 @@ dependencies = [
 name = "moq-hls"
 version = "0.5.11"
 dependencies = [
+ "async-trait",
  "axum",
  "bytes",
  "futures",
@@ -4932,6 +4931,7 @@ dependencies = [
  "humantime",
  "kio 0.6.2",
  "m3u8-rs",
+ "moq-archive",
  "moq-clock",
  "moq-json",
  "moq-mux",
@@ -5351,6 +5351,7 @@ dependencies = [
  "moq-net",
  "serde",
  "serde_json",
+ "serde_with",
  "thiserror 2.0.21",
  "tokio",
  "tracing",

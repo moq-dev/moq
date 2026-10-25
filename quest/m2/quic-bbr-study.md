@@ -95,5 +95,4 @@ adopt either in advance.
 ## Related
 
 - [TS validation](/test/ts/README.md) - shaped paths, whole-group shedding, and measured baselines
-- [Native probing](/quest/m1/probe-native.md) - preserving an estimate and discovering spare capacity are separate problems
 - [Skip ProbeRTT after a near-floor RTT](/quest/m1/bbr-probe-rtt-skip.md) - the ProbeRTT natural-drain decision split out of this study
