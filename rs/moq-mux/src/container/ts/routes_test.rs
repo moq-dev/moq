@@ -203,8 +203,8 @@ async fn mpeg2_video_rides_whole_and_survives_a_round_trip() {
 
 /// A sequence header split across two video PES, at each of its three inner boundaries, opens
 /// its group at the PES it begins in, while a picture start code split the same way opens none.
-/// The last PES, ending in part of a start code with no PES after it, still goes out at the end
-/// of input.
+/// A whole PES ending in part of a start code with no whole PES after it on its clock still goes
+/// out, at a clock break and at the end of input.
 #[tokio::test(start_paused = true)]
 async fn mpeg2_sequence_header_split_across_pes_opens_a_group() {
 	let mut mux = Mux::default();
@@ -212,19 +212,29 @@ async fn mpeg2_sequence_header_split_across_pes_opens_a_group() {
 	let start = 2_000 * MS;
 	// Each PES's payload after the picture start code it opens with, its last bytes completing
 	// in the next PES: a sequence header at `00 00 | 01 b3`, `00 | 00 01 b3`, and `00 00 01 | b3`,
-	// and a picture start code at `00 00 | 01 00`.
-	let tails: [(&[u8], &[u8]); 6] = [
+	// and a picture start code at `00 00 | 01 00`. A clock break cuts the sixth, its length
+	// unbounded, so the fifth is the last whole PES on the old clock. The seventh, carrying a
+	// whole sequence header, ends the input.
+	let tails: [(&[u8], &[u8]); 7] = [
 		(&[], &[0, 0]),
 		(&[1, 0xb3], &[0]),
 		(&[0, 1, 0xb3], &[]),
 		(&[], &[0, 0, 1]),
 		(&[0xb3], &[0, 0]),
 		(&[1, 0], &[0]),
+		(&[0, 0, 1, 0xb3], &[0, 0]),
 	];
+	let restart = 9_000 * MS;
 	let mut pictures = Vec::new();
 	for (i, (head, tail)) in tails.into_iter().enumerate() {
-		let ticks = start + i as u64 * 40 * MS;
-		mux.packet(CLOCK, Flags::pcr(ticks));
+		let ticks = match i {
+			6 => restart,
+			_ => start + i as u64 * 40 * MS,
+		};
+		match i {
+			6 => mux.packet(CLOCK, Flags::pcr(ticks).discontinuity()),
+			_ => mux.packet(CLOCK, Flags::pcr(ticks)),
+		};
 		let mut pes = vec![0, 0, 1, 0xe0, 0, 0, 0x80, 0x80, 5];
 		pes.extend_from_slice(&pts_field(ticks / 300 + LEAD));
 		pes.extend_from_slice(head);
@@ -234,14 +244,21 @@ async fn mpeg2_sequence_header_split_across_pes_opens_a_group() {
 		mux.whole(VIDEO, &pes);
 		pictures.push(pes);
 	}
-	mux.packet(CLOCK, Flags::pcr(start + 6 * 40 * MS));
+	mux.packet(CLOCK, Flags::pcr(restart + 40 * MS));
 
 	let imported = Imported::all(&mux.bytes());
 	let frames = imported.frames(VIDEO).await;
-	let payloads: Vec<_> = frames.iter().map(|frame| frame.payload.to_vec()).collect();
-	assert_eq!(payloads, pictures, "every PES goes out, the last at the end of input");
+	// The PES on the new clock has its PTS rebased, so compare around it.
+	let unstamped = |pes: &[u8]| [&pes[..9], &pes[14..]].concat();
+	let payloads: Vec<_> = frames.iter().map(|frame| unstamped(&frame.payload)).collect();
+	pictures.remove(5);
+	let pictures: Vec<_> = pictures.iter().map(|pes| unstamped(pes)).collect();
+	assert_eq!(
+		payloads, pictures,
+		"every whole PES goes out, at the clock break and the end of input"
+	);
 	let keyframes: Vec<_> = frames.iter().map(|frame| frame.keyframe).collect();
-	assert_eq!(keyframes, [true, true, false, true, false, false]);
+	assert_eq!(keyframes, [true, true, false, true, false, true]);
 }
 
 /// Each ISO 13818-6 DSM-CC type rides DSM-CC sections, so each is reassembled as sections

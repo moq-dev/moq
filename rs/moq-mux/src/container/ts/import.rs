@@ -1570,7 +1570,11 @@ impl<E: catalog::Catalog> Import<E> {
 		for pid in self.streams.keys().copied().collect::<Vec<_>>() {
 			self.salvage(pid)?;
 		}
-		// Whole PES the old clock began go out on its timeline, ahead of the marker.
+		// Whole PES the old clock began go out on its timeline, ahead of the marker, so none waits
+		// for a PES on the new one to complete a start code.
+		for stream in self.streams.values_mut() {
+			stream.end();
+		}
 		self.settle_placement()?;
 		anyhow::ensure!(
 			self.sections.values().all(|section| section.held.is_empty()),
@@ -1778,9 +1782,7 @@ impl<E: catalog::Catalog> Import<E> {
 			self.flush(pid)?;
 		}
 		for stream in self.streams.values_mut() {
-			if let Stream::PesPacket(stream) = stream {
-				stream.end();
-			}
+			stream.end();
 		}
 		self.settle_placement()?;
 		anyhow::ensure!(
@@ -2416,7 +2418,7 @@ impl<E: catalog::Catalog> PesPacketStream<E> {
 		self.straddles = false;
 	}
 
-	/// No PES follows the last held, so a start code its end began completes nothing.
+	/// No PES follows the last held on its clock, so a start code its end began completes nothing.
 	fn end(&mut self) {
 		self.straddles = false;
 	}
@@ -3243,6 +3245,13 @@ impl<E: catalog::Catalog> Stream<E> {
 			_ => {}
 		}
 		Ok(())
+	}
+
+	/// No PES follows the last on this clock or input: see [`PesPacketStream::end`].
+	fn end(&mut self) {
+		if let Stream::PesPacket(stream) = self {
+			stream.end();
+		}
 	}
 
 	/// The program clock restarted: mark the break on this track.
