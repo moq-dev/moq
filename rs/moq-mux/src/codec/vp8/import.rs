@@ -120,11 +120,6 @@ impl Import {
 		self.track.discontinuity()
 	}
 
-	/// Where the next group opens: past every group published so far, or where a seek asked.
-	pub(crate) fn next_sequence(&self) -> u64 {
-		self.track.next_sequence()
-	}
-
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> crate::Result<()> {
 		self.track.seek(sequence)?;

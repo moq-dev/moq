@@ -20,7 +20,7 @@ use gst::prelude::*;
 use gst::subclass::prelude::*;
 use hang::moq_net;
 
-use super::pad::{CapsOutcome, Continuations, ProducerOptions, PushOutcome, caps_supported};
+use super::pad::{CapsOutcome, Names, ProducerOptions, PushOutcome, caps_supported};
 use super::request_pad::{MoqSinkPad, Notifications, PadLifecycle};
 use super::session::{
 	CAT, Completion, CompletionHandle, ConnectionStatus, RUNTIME, ResolvedSettings, Session, SessionRegistration,
@@ -70,8 +70,8 @@ struct State {
 	broadcast: moq_net::broadcast::Producer,
 	catalog: Option<moq_mux::catalog::Producer>,
 	wall: std::sync::Arc<super::wall::Wall>,
-	/// Where each named track this run ended continues, if published again.
-	continuations: Continuations,
+	/// The configured track names this run ended, which it never publishes again.
+	names: Names,
 	/// How long a clean end keeps the finished broadcast up before its EOS.
 	linger: Duration,
 	/// Whether the finished broadcast closed, so the EOS it owes may go out.
@@ -439,7 +439,7 @@ impl ElementImpl for MoqSink {
 			{
 				pad.lifecycle()
 					.media
-					.reserve(catalog, state.wall.clone(), &state.continuations);
+					.reserve(catalog, state.wall.clone(), &state.names);
 			}
 			control.admissions.insert(pad.clone());
 		}
@@ -586,7 +586,7 @@ impl MoqSink {
 				broadcast,
 				catalog: Some(catalog),
 				wall,
-				continuations: Continuations::default(),
+				names: Names::default(),
 				linger,
 				drained: false,
 				lingering: None,
@@ -603,7 +603,7 @@ impl MoqSink {
 						let changes = lifecycle.reset();
 						lifecycle.completion = Some(completion.clone());
 						if !lifecycle.releasing {
-							lifecycle.media.reserve(catalog, wall.clone(), &state.continuations);
+							lifecycle.media.reserve(catalog, wall.clone(), &state.names);
 						}
 						changes
 					};
@@ -892,7 +892,7 @@ impl MoqSink {
 						if let Some(catalog) = &state.catalog {
 							lifecycle
 								.media
-								.reserve(catalog, state.wall.clone(), &state.continuations);
+								.reserve(catalog, state.wall.clone(), &state.names);
 						}
 					}
 				}
@@ -920,7 +920,7 @@ impl MoqSink {
 									if let Some(catalog) = catalog {
 										lifecycle
 											.media
-											.reserve(catalog, state.wall.clone(), &state.continuations);
+											.reserve(catalog, state.wall.clone(), &state.names);
 									}
 									let caps = lifecycle.media.resumable_caps();
 									caps.zip(catalog).and_then(|(caps, catalog)| {
@@ -1216,7 +1216,7 @@ fn observe_caps(
 ) -> (Option<Notifications>, bool) {
 	lifecycle
 		.media
-		.reserve(catalog, state.wall.clone(), &state.continuations);
+		.reserve(catalog, state.wall.clone(), &state.names);
 	let requested = lifecycle.requested().map(str::to_owned);
 	let mut options = ProducerOptions::new(caps).with_container(lifecycle.container().into());
 	if let Some(track) = requested.as_deref() {
@@ -1606,7 +1606,8 @@ mod tests {
 		assert!(completion_of(&run.0).is_open());
 	}
 
-	// GStreamer keeps CAPS sticky across a flush, so a resumed pad gets no new CAPS event.
+	// GStreamer keeps CAPS sticky across a flush, so a resumed pad gets no new CAPS event. EOS ended its
+	// track, so the resumed one takes a fresh name.
 	#[test]
 	fn an_unresolved_pad_resumed_after_eos_publishes_without_new_caps() {
 		use futures::FutureExt;
@@ -1636,7 +1637,7 @@ mod tests {
 			let std::task::Poll::Ready(Ok(Some(next))) = next_catalog(&mut catalog) else {
 				panic!("the resumed pad must publish its rendition ({resume})")
 			};
-			assert!(next.video.renditions.contains_key("video"), "{resume}");
+			assert!(next.video.renditions.contains_key("video/1"), "{resume}");
 			let broadcast = run
 				.0
 				.imp()
@@ -1649,7 +1650,7 @@ mod tests {
 				.broadcast
 				.consume();
 			let mut track = broadcast
-				.track("video")
+				.track("video/1")
 				.expect("the resumed track is published")
 				.subscribe(None)
 				.now_or_never()

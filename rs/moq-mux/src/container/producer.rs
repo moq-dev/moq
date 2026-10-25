@@ -343,15 +343,9 @@ where
 		self.group.is_none()
 	}
 
-	/// Where the next group opens: the sequence a [`seek`](Self::seek) asked for, else one past
-	/// the track's largest group, even an empty one. A replacement under the same track name
-	/// seeks here.
-	pub fn next_sequence(&self) -> u64 {
-		self.pending_sequence.unwrap_or_else(|| self.after_largest())
-	}
-
-	/// One past the track's largest group, even an empty one.
-	fn after_largest(&self) -> u64 {
+	/// One past the track's largest group, even an empty one: where a group continues after
+	/// what the track holds.
+	pub(crate) fn next_sequence(&self) -> u64 {
 		self.inner.largest().map_or(0, |largest| largest.group + 1)
 	}
 
@@ -757,15 +751,6 @@ where
 	/// Finish the track, flushing any buffered frames and closing any open group.
 	pub fn finish(&mut self) -> crate::Result<()> {
 		self.cut(None)?;
-		// A seek no group followed still ends past it, so a track continuing past a predecessor's
-		// groups never declares an end below them. The seek's group opens empty: an end past the
-		// live edge alone would leave readers waiting on the skipped sequences.
-		// A seek at or below the largest group is consumed too, so `next_sequence` stays past it.
-		if let Some(sequence) = self.pending_sequence.take()
-			&& sequence > self.after_largest()
-		{
-			self.inner.create_group(moq_net::group::Info { sequence })?.finish()?;
-		}
 		self.inner.finish()?;
 		self.publish_estimate()?;
 		// A finished track may be kept around, but its media stops holding the other tracks back.
@@ -1447,39 +1432,6 @@ mod tests {
 		producer.finish().unwrap();
 
 		assert_eq!(collect_sequences(consumer).await, vec![5, 6]);
-	}
-
-	/// A track that continues past a predecessor's groups and finishes before writing any still
-	/// ends past them, so a relay holding the predecessor's groups accepts the end.
-	#[tokio::test]
-	async fn finish_after_seek_ends_past_the_seek() {
-		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
-		let consumer = track.subscribe(replay());
-		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Data));
-
-		producer.seek(7).unwrap();
-		assert_eq!(producer.next_sequence(), 7);
-		producer.finish().unwrap();
-
-		assert_eq!(producer.next_sequence(), 8);
-		assert_eq!(collect_sequences(consumer).await, vec![7]);
-	}
-
-	/// A seek below the track's groups that nothing followed adds no group, and still reports
-	/// past the largest one.
-	#[tokio::test]
-	async fn finish_after_stale_seek_ends_past_the_largest() {
-		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
-		let consumer = track.subscribe(replay());
-		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Data));
-
-		producer.seek(5).unwrap();
-		producer.write(frame(0, true)).unwrap(); // seq 5
-		producer.seek(3).unwrap();
-		producer.finish().unwrap();
-
-		assert_eq!(producer.next_sequence(), 6);
-		assert_eq!(collect_sequences(consumer).await, vec![5]);
 	}
 
 	/// Records the frames handed to each `write`, so tests can inspect the
