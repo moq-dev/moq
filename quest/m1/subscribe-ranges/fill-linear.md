@@ -14,8 +14,8 @@ drift edge (`live_edge`) and each candidate's successor search
 filled group is never marked shown, so every scan passes it again.
 `Misses::retain` also rescans every filled group per poll.
 
-That PR recommends landing this before
-[FETCH as a range](/quest/m1/subscribe-ranges/fetch-range.md), since one-range
-reads would put every past read on this path.
+[FETCH as a range](/quest/m1/subscribe-ranges/fetch-range.md) waits on this
+(maintainer, 2026-10-25, on #6722), since one-range reads would put every
+past read on this path.
 
 Public API: none. Wire: none.
