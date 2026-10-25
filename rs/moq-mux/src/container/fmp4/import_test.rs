@@ -1000,6 +1000,58 @@ async fn video_drops_the_samples_before_its_edit() {
 	}
 }
 
+/// A video track joined mid-GOP, at the start or after a `seek`, publishes nothing before its next
+/// sync sample, passthrough or unwrapped, even when that sample sits inside a fragment, so no group
+/// opens on a frame its decoder cannot use.
+#[tokio::test]
+async fn video_joined_mid_gop_starts_at_a_sync_sample() {
+	let (_, (video_id, video_scale), _) = bbb_init();
+	let tick = video_scale.as_u64() / 24;
+	let micros = |ticks: u64| u128::from(ticks) * 1_000_000 / u128::from(video_scale.as_u64());
+	let sample = |ticks: u64, keyframe: bool, byte: u8| (micros(ticks), keyframe, bytes::Bytes::from(vec![byte; 2]));
+	let non_sync = 0x0001_0000;
+
+	let init = bbb_init_with_edits(video_id, vec![media_edit(0)]);
+	let fragments = [
+		video_fragment(video_id, 0, tick, &[(0, non_sync, 0xA), (0, non_sync, 0xB)]),
+		video_fragment(
+			video_id,
+			2 * tick,
+			tick,
+			&[(0, non_sync, 0xC), (0, 0, 0xD), (0, non_sync, 0xE)],
+		),
+		video_fragment(video_id, 5 * tick, tick, &[(0, 0, 0xF), (0, non_sync, 0x10)]),
+	];
+	let after_seek = [
+		video_fragment(video_id, 7 * tick, tick, &[(0, non_sync, 0x11)]),
+		video_fragment(video_id, 8 * tick, tick, &[(0, non_sync, 0x12), (0, 0, 0x13)]),
+	];
+	let expected = vec![
+		sample(3 * tick, true, 0xD),
+		sample(4 * tick, false, 0xE),
+		sample(5 * tick, true, 0xF),
+		sample(6 * tick, false, 0x10),
+		sample(9 * tick, true, 0x13),
+	];
+	for passthrough in [false, true] {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve()).with_passthrough(passthrough);
+		fmp4.decode(&init).unwrap();
+		for fragment in &fragments {
+			fmp4.decode(fragment).unwrap();
+		}
+		fmp4.seek(10).unwrap();
+		for fragment in &after_seek {
+			fmp4.decode(fragment).unwrap();
+		}
+		fmp4.finish().unwrap();
+		let [video, _] = published(&consumer, &catalog).await;
+		assert_eq!(video, expected, "passthrough {passthrough}");
+	}
+}
+
 #[test]
 fn test_bbb_init_roundtrip() {
 	let data = include_bytes!("test_data/bbb.mp4");

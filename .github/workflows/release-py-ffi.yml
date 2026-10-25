@@ -129,7 +129,7 @@ jobs:
       # the workspace lock graph when Maturin packages only the needed members.
       - name: Build wheel from sdist
         shell: bash
-        run: python -m pip wheel --no-deps --wheel-dir .scratch/sdist-wheels dist/*.tar.gz
+        run: python -m pip wheel --no-deps --wheel-dir .tmp/sdist-wheels dist/*.tar.gz
 
       - name: Upload sdist
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
