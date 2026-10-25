@@ -207,7 +207,10 @@ impl Panels {
 	fn preview(&mut self, ui: &mut Ui) {
 		let state = self.engine.state.lock().unwrap();
 		let canvas = state.collection.canvas;
-		ui.label(format!("Preview: {}", state.compositor.preview_scene().unwrap_or("nothing")));
+		ui.label(format!(
+			"Preview: {}",
+			state.compositor.preview_scene().unwrap_or("nothing")
+		));
 		drop(state);
 		picture(ui, self.preview, canvas);
 	}
@@ -223,7 +226,10 @@ impl Panels {
 			if ui.button(format!("Fade ({} ms)", fade.as_millis())).clicked() {
 				state.compositor.fade(fade, moq_clock::Instant::now());
 			}
-			ui.label(format!("Program: {}", state.compositor.program_scene().unwrap_or("nothing")));
+			ui.label(format!(
+				"Program: {}",
+				state.compositor.program_scene().unwrap_or("nothing")
+			));
 			if state.compositor.fading() {
 				ui.weak("fading");
 			}
@@ -310,8 +316,12 @@ impl Panels {
 					let rect = &mut item.rect;
 					edited |= ui.add(egui::DragValue::new(&mut rect.x)).changed();
 					edited |= ui.add(egui::DragValue::new(&mut rect.y)).changed();
-					edited |= ui.add(egui::DragValue::new(&mut rect.width).range(0.0..=f32::MAX)).changed();
-					edited |= ui.add(egui::DragValue::new(&mut rect.height).range(0.0..=f32::MAX)).changed();
+					edited |= ui
+						.add(egui::DragValue::new(&mut rect.width).range(0.0..=f32::MAX))
+						.changed();
+					edited |= ui
+						.add(egui::DragValue::new(&mut rect.height).range(0.0..=f32::MAX))
+						.changed();
 					ui.horizontal(|ui| {
 						if ui.small_button("Fill").clicked() {
 							*rect = Rect::fill(&canvas);
@@ -320,7 +330,10 @@ impl Panels {
 						if ui.add_enabled(index > 0, egui::Button::new("Back").small()).clicked() {
 							moved = Some((index, index - 1));
 						}
-						if ui.add_enabled(index + 1 < count, egui::Button::new("Front").small()).clicked() {
+						if ui
+							.add_enabled(index + 1 < count, egui::Button::new("Front").small())
+							.clicked()
+						{
 							moved = Some((index, index + 1));
 						}
 						if ui.small_button("Remove").clicked() {
@@ -500,16 +513,31 @@ impl Panels {
 			ui.label(format!("{} frames", count(&stats.rendered)));
 			ui.end_row();
 			ui.label("Read back to the CPU");
-			ui.label(format!("{} frames, last {}", count(&stats.read_back), millis(&stats.readback_us)));
+			ui.label(format!(
+				"{} frames, last {}",
+				count(&stats.read_back),
+				millis(&stats.readback_us)
+			));
 			ui.end_row();
 			ui.label("Dropped");
 			ui.label(format!("{} frames", count(&stats.dropped)));
 			ui.end_row();
 			ui.label("Encoder");
-			ui.label(stats.encoder.lock().unwrap().clone().unwrap_or_else(|| "not open".into()));
+			ui.label(
+				stats
+					.encoder
+					.lock()
+					.unwrap()
+					.clone()
+					.unwrap_or_else(|| "not open".into()),
+			);
 			ui.end_row();
 			ui.label("Encoded");
-			ui.label(format!("{} frames, last {}", count(&stats.encoded), millis(&stats.encode_us)));
+			ui.label(format!(
+				"{} frames, last {}",
+				count(&stats.encoded),
+				millis(&stats.encode_us)
+			));
 			ui.end_row();
 		});
 		if let Some(error) = stats.error.lock().unwrap().as_ref() {
@@ -772,44 +800,44 @@ impl Devices {
 			return None;
 		};
 		let mut picked = None;
-		egui::ScrollArea::vertical().show(ui, |ui| {
-			for (kind, devices) in &mut listing.kinds {
-				ui.strong(*kind);
-				match devices {
-					Ok(devices) if devices.is_empty() => {
-						ui.weak("none");
-					}
-					Ok(devices) => {
-						for (index, device) in devices.iter().enumerate() {
-							ui.horizontal(|ui| {
-								if ui.small_button("Add").clicked() {
-									picked = Some(index);
-								}
-								ui.label(&device.name);
-							});
+		egui::ScrollArea::vertical()
+			.show(ui, |ui| {
+				for (kind, devices) in &mut listing.kinds {
+					ui.strong(*kind);
+					match devices {
+						Ok(devices) if devices.is_empty() => {
+							ui.weak("none");
 						}
-						if let Some(index) = picked.take() {
-							return Some(devices.remove(index));
+						Ok(devices) => {
+							for (index, device) in devices.iter().enumerate() {
+								ui.horizontal(|ui| {
+									if ui.small_button("Add").clicked() {
+										picked = Some(index);
+									}
+									ui.label(&device.name);
+								});
+							}
+							if let Some(index) = picked.take() {
+								return Some(devices.remove(index));
+							}
 						}
-					}
-					Err(err) => {
-						ui.colored_label(ui.visuals().error_fg_color, err.as_str());
+						Err(err) => {
+							ui.colored_label(ui.visuals().error_fg_color, err.as_str());
+						}
 					}
 				}
-			}
-			None
-		})
-		.inner
+				None
+			})
+			.inner
 	}
 }
 
 #[cfg(feature = "capture")]
 async fn list() -> Listing {
-	fn picks<T>(
-		result: Result<Vec<T>, impl std::fmt::Display>,
-		pick: impl Fn(T) -> Pick,
-	) -> Result<Vec<Pick>, String> {
-		result.map(|devices| devices.into_iter().map(pick).collect()).map_err(|err| err.to_string())
+	fn picks<T>(result: Result<Vec<T>, impl std::fmt::Display>, pick: impl Fn(T) -> Pick) -> Result<Vec<Pick>, String> {
+		result
+			.map(|devices| devices.into_iter().map(pick).collect())
+			.map_err(|err| err.to_string())
 	}
 
 	let cameras = picks(moq_video::capture::cameras().await, |camera| Pick {

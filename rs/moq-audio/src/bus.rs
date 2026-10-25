@@ -643,7 +643,10 @@ mod tests {
 		assert!(Bus::new(config).is_err());
 
 		let bus = Bus::new(Config::default()).unwrap();
-		assert!(bus.channel(input(48_000, Layout::Discrete(3)), Strip::default()).is_err());
+		assert!(
+			bus.channel(input(48_000, Layout::Discrete(3)), Strip::default())
+				.is_err()
+		);
 	}
 
 	/// A partial trailing frame in the output is zeroed rather than left with

@@ -9,7 +9,7 @@ is verified to launch and list devices on its platform.
 ## Required
 
 - [Signing identities are available](/quest/m3/studio/signing.md) - the credentials signing needs
-- [The studio app](/quest/m3/studio/app.md) - the binary being packaged
+- [Studio program encode from the GPU](/quest/m3/studio/app.md) - the studio running on every platform it packages
 
 ## Related
 

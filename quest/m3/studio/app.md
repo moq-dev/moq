@@ -1,45 +1,32 @@
-# [XL] The studio app
+# [L] Studio program encode from the GPU
 
 ## Goal
 
-`moq-studio` runs on Linux, macOS, and Windows with docked panels:
-- scenes and sources
-- a preview and program pair with cut and fade
-- device pickers
-- an audio bus panel with gain and mute
+`moq-studio`'s program reaches moq-video's encoder as a GPU `Surface`
+wherever the backend accepts one, instead of the CPU readback every frame
+takes today, and the studio is run, not only compiled, on macOS and Windows.
 
-Sources are a camera, display or window capture, a microphone, system audio
-where moq-audio captures it (macOS today; the Linux and Windows capture quests
-add the rest), an image, a solid color, and a subscribed MoQ broadcast. One canvas
-publishes to a MoQ relay. A scene collection saves to a diffable file and
-reloads.
-
-`rs/moq-scene` (scene graph, sources, compositing) and moq-audio's program
-bus land here, with the app as their consumer. Their API surface is only what
-the app uses.
+The Output panel already counts readback frames and time; once this lands it
+shows readback only for a backend that cannot take a GPU surface.
 
 ## Plan
 
-- **Rendering:**
-  - One wgpu device is shared by moq-video's render import paths (dmabuf,
-    Metal) and egui-wgpu.
-  - Preview and program are textures registered with egui, with no readback.
-  - Program frames reach moq-video's encoder as a GPU `Surface` wherever the
-    backend accepts one. Any CPU readback fallback shows in stats.
-- **Timing:** output timestamps come from the program clock, not from source
-  timestamps. A stalled source repeats its last frame rather than stalling
-  the canvas.
-- **Scene file:** choose the format in this quest. It must be diffable and
-  carry a schema version, and loading an unknown version fails loudly. It
-  never holds credentials.
-- **Tests:** compositing tests render on a wgpu fallback adapter (llvmpipe or
-  WARP), so they run in CI without a GPU.
-- **Same-PR updates:**
-  - `doc/bin/studio.md`
-  - an AGENTS.md cross-package row for `rs/moq-studio` and `rs/moq-scene`
-  - the repository map in `doc/setup/repository.md`
-- **Splitting:** if this proves too large for one PR, split along moq-scene
-  versus app, as long as each piece still lands with a consumer.
+- **Zero-copy encode:** the compositor's program texture is allocated as an
+  exportable image on the device the window and sources share, then handed to
+  the encoder without leaving the GPU:
+  - NVENC: a `moq_video::frame::vulkan` slot (opaque-fd memory and a timeline
+    semaphore), the path the NVDEC to NVENC transcode already uses.
+  - VAAPI: a DMA-BUF export of the same image.
+  - VideoToolbox: an IOSurface-backed `CVPixelBuffer` the Metal texture aliases.
+  - Media Foundation: a shared D3D11 texture.
+  This reaches below `wgpu` (its `as_hal` escape hatch), so keep the export in
+  moq-video or moq-scene, never in the app.
+- **Platforms:** run the studio on macOS (camera, display, microphone, system
+  audio) and Windows (camera, display, window, microphone), fixing what only
+  shows up there.
+- **Tests:** extend `just rs render-sw`'s end-to-end test (a red canvas
+  published to a test relay and decoded) to assert no readback where the
+  backend takes a surface.
 
 ## Related
 

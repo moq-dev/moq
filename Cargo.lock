@@ -5739,7 +5739,6 @@ name = "moq-scene"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
- "hang",
  "humantime-serde",
  "image",
  "kio 0.6.2",
@@ -5748,7 +5747,6 @@ dependencies = [
  "moq-mux",
  "moq-net",
  "moq-video",
- "pollster",
  "serde",
  "serde_with",
  "tempfile",

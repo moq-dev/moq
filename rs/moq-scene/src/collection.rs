@@ -123,7 +123,9 @@ impl Collection {
 
 		for (name, audio) in &self.audio {
 			if !self.sources.contains_key(name) {
-				return Err(Error::Invalid(format!("audio settings for `{name}`, which is not a source")));
+				return Err(Error::Invalid(format!(
+					"audio settings for `{name}`, which is not a source"
+				)));
 			}
 			if !audio.gain.is_finite() || audio.gain < 0.0 {
 				return Err(Error::Invalid(format!("`{name}` has gain {}", audio.gain)));
@@ -334,7 +336,10 @@ impl Source {
 
 	/// Whether the source feeds the program audio.
 	pub fn has_audio(&self) -> bool {
-		matches!(self, Self::Microphone { .. } | Self::SystemAudio | Self::Broadcast { .. })
+		matches!(
+			self,
+			Self::Microphone { .. } | Self::SystemAudio | Self::Broadcast { .. }
+		)
 	}
 }
 
@@ -351,7 +356,10 @@ pub struct Audio {
 
 impl Default for Audio {
 	fn default() -> Self {
-		Self { gain: 1.0, muted: false }
+		Self {
+			gain: 1.0,
+			muted: false,
+		}
 	}
 }
 
@@ -394,9 +402,12 @@ mod tests {
 
 	fn example() -> Collection {
 		let mut collection = Collection::new();
-		collection
-			.sources
-			.insert("camera".into(), Source::Camera { id: Some("/dev/video0".into()) });
+		collection.sources.insert(
+			"camera".into(),
+			Source::Camera {
+				id: Some("/dev/video0".into()),
+			},
+		);
 		collection.sources.insert(
 			"logo".into(),
 			Source::Image {
@@ -491,7 +502,13 @@ items = [
 				color: Rgba([255, 0, 0, 128])
 			}
 		);
-		assert_eq!(collection.audio["cam2"], Audio { gain: 2.0, muted: false });
+		assert_eq!(
+			collection.audio["cam2"],
+			Audio {
+				gain: 2.0,
+				muted: false
+			}
+		);
 		let main = collection.scene("Main").unwrap();
 		assert!(main.items[0].visible);
 		assert!(!main.items[1].visible);
@@ -511,7 +528,10 @@ items = [
 	/// next save.
 	#[test]
 	fn refuses_unknown_fields() {
-		let text = example().to_toml().unwrap().replacen("[canvas]", "[canvas]\ndepth = 3", 1);
+		let text = example()
+			.to_toml()
+			.unwrap()
+			.replacen("[canvas]", "[canvas]\ndepth = 3", 1);
 		assert!(matches!(Collection::from_toml(&text), Err(Error::Format(_))));
 
 		let text = example()
@@ -554,7 +574,10 @@ items = [
 				height,
 				framerate,
 			};
-			assert!(matches!(collection.validate(), Err(Error::Invalid(_))), "{width}x{height}@{framerate}");
+			assert!(
+				matches!(collection.validate(), Err(Error::Invalid(_))),
+				"{width}x{height}@{framerate}"
+			);
 		}
 	}
 

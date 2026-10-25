@@ -52,8 +52,7 @@ Decided 2026-10-22 with the maintainer (/quest-plan):
   owns, through a web join link or QR code.
 - **Naming:** quests name no streaming platforms; ingest requirements are
   written as generic constraints.
-- **Docs:** inline. [The app](/quest/m3/studio/app.md) writes
-  `doc/bin/studio.md`, and each later quest extends it.
+- **Docs:** inline. Each quest extends `doc/bin/studio.md`.
 
 Dropped from the first scoping round: relay fan-out ("encode once, the relay
 restreams") and its upload savings. Direct push with shared encoders matches
@@ -62,7 +61,7 @@ repository.
 
 ## Required
 
-- [The studio app](/quest/m3/studio/app.md) - egui studio with a minimal moq-scene and program bus: one canvas, scenes of capture, image, and MoQ sources, published to MoQ
+- [Studio program encode from the GPU](/quest/m3/studio/app.md) - the program reaches the encoder as a GPU surface instead of a CPU readback, and the studio runs on macOS and Windows
 - [Destinations](/quest/m3/studio/destinations.md) - RTMP, RTMPS, and WHIP push with per-destination codecs and shared encoders, on a UI-free egress library a hosted service can reuse
 - [Multiple canvases](/quest/m3/studio/multi-canvas.md) - landscape and portrait canvases composite at once from shared sources
 - [Guests](/quest/m3/studio/guests.md) - remote guests and phone cameras join through a moq-room link or QR code and appear as sources

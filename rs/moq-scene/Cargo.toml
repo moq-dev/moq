@@ -23,7 +23,6 @@ capture = ["moq-video/capture", "moq-audio/capture"]
 
 [dependencies]
 bytemuck = { version = "1", features = ["derive"] }
-hang = { workspace = true }
 humantime-serde = { workspace = true }
 # PNG and JPEG still images. Already in a studio's graph through eframe.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
@@ -43,7 +42,6 @@ toml = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
-pollster = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
 

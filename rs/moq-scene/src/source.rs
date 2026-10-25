@@ -494,7 +494,13 @@ mod tests {
 			start(&sources, drivers).await;
 			let guest = sources.get("guest").unwrap().strip().unwrap().clone();
 
-			collection.audio.insert("guest".into(), Audio { gain: 0.25, muted: true });
+			collection.audio.insert(
+				"guest".into(),
+				Audio {
+					gain: 0.25,
+					muted: true,
+				},
+			);
 			assert!(sources.sync(&collection).is_empty());
 			assert_eq!(guest.gain(), 0.25);
 			assert!(guest.muted());

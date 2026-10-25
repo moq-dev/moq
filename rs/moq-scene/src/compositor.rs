@@ -8,9 +8,9 @@ use std::time::Duration;
 use moq_clock::Instant;
 use moq_video::render::{Renderer, wgpu};
 
+use crate::Error;
 use crate::collection::{Canvas, Collection, Rect};
 use crate::source::{Picture, Sources};
-use crate::Error;
 
 /// The format of every canvas texture: gamma-encoded RGBA, what
 /// `moq_video::render` produces and what an encoder reads back.
@@ -443,7 +443,9 @@ impl Compositor {
 						None => Renderer::new(&self.device, &self.queue, Default::default())
 							.map(|renderer| layer.renderer.insert(renderer)),
 					};
-					renderer.and_then(|renderer| renderer.render(&frame)).map_err(Error::from)
+					renderer
+						.and_then(|renderer| renderer.render(&frame))
+						.map_err(Error::from)
 				}
 				Picture::Rgba { size, pixels } => upload(&self.device, &self.queue, size, &pixels),
 			};
@@ -476,7 +478,12 @@ fn uniform(rect: Rect, canvas: Canvas, opacity: f32) -> Uniform {
 }
 
 /// A texture holding tightly packed RGBA pixels.
-fn upload(device: &wgpu::Device, queue: &wgpu::Queue, size: moq_video::Size, pixels: &[u8]) -> Result<wgpu::Texture, Error> {
+fn upload(
+	device: &wgpu::Device,
+	queue: &wgpu::Queue,
+	size: moq_video::Size,
+	pixels: &[u8],
+) -> Result<wgpu::Texture, Error> {
 	let limit = device.limits().max_texture_dimension_2d;
 	if size.width == 0 || size.height == 0 || size.width > limit || size.height > limit {
 		return Err(Error::Invalid(format!(
@@ -639,8 +646,12 @@ mod tests {
 			height: 8,
 			framerate: 30,
 		};
-		collection.sources.insert("red".into(), Source::Color { color: Rgba(RED) });
-		collection.sources.insert("blue".into(), Source::Color { color: Rgba(BLUE) });
+		collection
+			.sources
+			.insert("red".into(), Source::Color { color: Rgba(RED) });
+		collection
+			.sources
+			.insert("blue".into(), Source::Color { color: Rgba(BLUE) });
 		let item = |source: &str, rect| Item {
 			source: source.into(),
 			rect,

@@ -426,7 +426,9 @@ fn encode(
 			Ok(frame) => frame,
 			Err(err) => return stats.fail(format!("readback: {err}")),
 		};
-		stats.readback_us.store(start.elapsed().as_micros() as u64, Ordering::Relaxed);
+		stats
+			.readback_us
+			.store(start.elapsed().as_micros() as u64, Ordering::Relaxed);
 		stats.read_back.fetch_add(1, Ordering::Relaxed);
 
 		let encoder = match &mut encoder {
@@ -459,7 +461,9 @@ fn encode(
 		if let Err(err) = producer.publish(&encoded) {
 			return stats.fail(format!("video: {err}"));
 		}
-		stats.encode_us.store(start.elapsed().as_micros() as u64, Ordering::Relaxed);
+		stats
+			.encode_us
+			.store(start.elapsed().as_micros() as u64, Ordering::Relaxed);
 		stats.encoded.fetch_add(1, Ordering::Relaxed);
 	}
 }
@@ -467,7 +471,9 @@ fn encode(
 /// Run a source on its own thread until its feed is dropped.
 fn spawn(driver: Driver) {
 	let name = format!("source-{}", driver.name());
-	let spawned = std::thread::Builder::new().name(name).spawn(move || clocked(driver.run()));
+	let spawned = std::thread::Builder::new()
+		.name(name)
+		.spawn(move || clocked(driver.run()));
 	if let Err(err) = spawned {
 		tracing::error!(%err, "cannot start a source thread");
 	}
