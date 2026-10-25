@@ -3522,7 +3522,7 @@ mod tests {
 
 	/// A SUBSCRIBE_DROP ends a group still arriving now, with its Error Code on lite-07.
 	/// Earlier versions carry an application code there, so the same bytes read as
-	/// NOT_FOUND.
+	/// OLD.
 	#[moq_clock::test]
 	async fn a_subscribe_drop_ends_an_arriving_group_with_its_code() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
@@ -3570,6 +3570,7 @@ mod tests {
 			let broadcast = crate::broadcast::Info::new().produce();
 			let request = broadcast.reserve_track("video").unwrap();
 			let serving = ServeLoop::new(&serve, request, crate::track::Info::timed());
+			let producer = serving.serving.clone();
 			let mut arriving = serving.serving.create_group(group::Info { sequence: 2 }).unwrap();
 			arriving.write_frame(crate::Timestamp::ZERO, b"2".as_slice()).unwrap();
 			let mut reader = broadcast
@@ -3592,13 +3593,20 @@ mod tests {
 
 			let expected = match version {
 				Version::Lite07 => crate::StreamError::App(5),
-				_ => crate::StreamError::NotFound,
+				_ => crate::StreamError::Old,
 			};
 			let res = group.read_frame().now_or_never();
 			assert!(
 				matches!(&res, Some(Err(Error::Stream(err))) if *err == expected),
 				"{version:?}: {res:?}"
 			);
+
+			// The track goes on: the next group still reaches the reader.
+			let mut following = producer.create_group(group::Info { sequence: 3 }).unwrap();
+			following.write_frame(crate::Timestamp::ZERO, b"3".as_slice()).unwrap();
+			let mut next = reader.recv_group().now_or_never().expect("the next group").unwrap().unwrap();
+			assert_eq!(next.sequence, 3, "{version:?}");
+			assert_eq!(next.read_frame().await.unwrap().unwrap().payload.as_ref(), b"3");
 		}
 	}
 
