@@ -36,8 +36,7 @@ Rules every child follows:
 - Inherited debt is fixed here only when it is cheap or sits on a surface
   this release breaks anyway. Otherwise it joins the later quest that
   reshapes it (the ordered track reader joins
-  [foreign poll](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-poll-protocol.md); binding durations get
-  [their own quest](/quest/m1/ffi-durations.md)).
+  [foreign poll](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-poll-protocol.md)).
 - Each child lists its public API and wire impact in its PR, and its Impact
   bullet says how to migrate.
 

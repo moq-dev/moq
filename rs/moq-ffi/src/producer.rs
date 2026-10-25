@@ -837,7 +837,11 @@ mod metadata_tests {
 
 	#[test]
 	fn optional_retention_survives_binding_conversion() {
-		for max_age in [None, Some(std::time::Duration::ZERO), Some(std::time::Duration::from_secs(30))] {
+		for max_age in [
+			None,
+			Some(std::time::Duration::ZERO),
+			Some(std::time::Duration::from_secs(30)),
+		] {
 			let info = MoqTrackInfo {
 				priority: 0,
 				max_age,

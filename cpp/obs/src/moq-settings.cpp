@@ -200,13 +200,12 @@ const std::vector<Field> &Fields()
 				 "URL, so a relay can be reached by IP."));
 
 		// Reconnect.
-		f.push_back(Number(BACKOFF_INITIAL, "Reconnect delay (ms)",
-				   Millis(d.backoff.initial, BACKOFF_INITIAL), 1, 60000, 100,
-				   "Delay before the first reconnect attempt; it grows from here."));
+		f.push_back(Number(BACKOFF_INITIAL, "Reconnect delay (ms)", Millis(d.backoff.initial, BACKOFF_INITIAL),
+				   1, 60000, 100, "Delay before the first reconnect attempt; it grows from here."));
 		f.push_back(Number(BACKOFF_MAX, "Reconnect delay cap (ms)", Millis(d.backoff.max, BACKOFF_MAX), 1,
 				   600000, 1000, "Ceiling on the growing reconnect delay."));
-		f.push_back(Number(BACKOFF_TIMEOUT, "Give up after (ms)", Millis(d.backoff.timeout, BACKOFF_TIMEOUT),
-				   0, 3600000, 1000,
+		f.push_back(Number(BACKOFF_TIMEOUT, "Give up after (ms)", Millis(d.backoff.timeout, BACKOFF_TIMEOUT), 0,
+				   3600000, 1000,
 				   "Total time to keep retrying before the stream fails. 0 retries forever."));
 
 		// QUIC transport.

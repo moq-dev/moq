@@ -24,9 +24,9 @@ impl From<moq_net::auth::Grant> for MoqGrant {
 		Self {
 			publish: patterns(&grant.publish),
 			subscribe: patterns(&grant.subscribe),
-			expires: grant.expires.map(|expires| {
-				crate::ffi::duration(expires.saturating_duration_since(moq_net::time::Instant::now()))
-			}),
+			expires: grant
+				.expires
+				.map(|expires| crate::ffi::duration(expires.saturating_duration_since(moq_net::time::Instant::now()))),
 		}
 	}
 }
