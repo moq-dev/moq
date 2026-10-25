@@ -60,10 +60,19 @@ a producer would need per-track memory of its last number.
   the exact ID. Max age means nothing on those tracks. A timed moq-transport
   group that starts at or before its predecessor ends the track with an
   error.
+- **moq-transport mapping.** The Group ID is the start ticks, and the
+  previous-start link rides in the Prior Group ID Gap property. Object IDs
+  stay +1 per frame, so no Prior Object ID Gap is sent; each object's PTS
+  rides in the TIMESTAMP property, and GROUP_END maps to END_OF_GROUP with
+  the end in its TIMESTAMP. Keep it LOC compatible: TIMESTAMP (0x10) and
+  TIMESCALE (0x08) are the MOQ Properties shared with draft-ietf-moq-loc.
+  Rejected: Object ID as a PTS delta, because
+  B-frames run backwards in decode order and open-GOP leading frames present
+  before the group's start.
 - **Extensions are optional.** moq-transport may carry the new information
-  (end times, previous-start links) through a negotiated extension, but
-  moq-transport without it, and lite-01..06, must still work for live
-  playback. Only end precision and gap detection degrade.
+  through properties or a negotiated extension, but moq-transport without
+  them, and lite-01..06, must still work for live playback. Only end
+  precision and gap detection degrade.
 - **Ranges.** [Subscribe ranges](/quest/m1/subscribe-ranges/README.md)
   proceeds in parallel; the cut reworks its `Absolute(group)` ends and
   sequence-range SUBSCRIBE_DROP onto times. `Relative(n)` can stay, since it
