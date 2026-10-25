@@ -83,9 +83,9 @@ final class ConnectOptions {
   MoqClientConfig get _ffi => MoqClientConfig(
     bind: bind,
     versions: versions ?? const [],
-    timeoutUs: _us(timeout, 'timeout'),
-    raceUs: _us(race, 'race'),
-    resolutionDelayUs: _us(resolutionDelay, 'resolutionDelay'),
+    timeout: _nonNegative(timeout, 'timeout'),
+    race: _nonNegative(race, 'race'),
+    resolutionDelay: _nonNegative(resolutionDelay, 'resolutionDelay'),
     tls: tls ?? ClientTls(),
     quic: (quic ?? const QuicConfig())._ffi,
     websocket: (websocket ?? const WebSocketConfig())._ffi,
@@ -139,8 +139,8 @@ final class QuicConfig {
 
   MoqQuicConfig get _ffi => MoqQuicConfig(
     maxStreams: maxStreams,
-    idleTimeoutUs: _us(idleTimeout, 'idleTimeout'),
-    keepAliveUs: _us(keepAlive, 'keepAlive'),
+    idleTimeout: _nonNegative(idleTimeout, 'idleTimeout'),
+    keepAlive: _nonNegative(keepAlive, 'keepAlive'),
     gso: gso,
     mtuDiscovery: mtuDiscovery,
     congestionControl: congestionControl,
@@ -163,14 +163,15 @@ final class WebSocketConfig {
   const WebSocketConfig({this.enabled, this.delay});
 
   MoqWebSocketConfig get _ffi =>
-      MoqWebSocketConfig(enabled: enabled, delayUs: _us(delay, 'delay'));
+      MoqWebSocketConfig(enabled: enabled, delay: _nonNegative(delay, 'delay'));
 }
 
-int? _us(Duration? value, String name) {
+/// The generated converter would wrap a negative duration rather than refuse it.
+Duration? _nonNegative(Duration? value, String name) {
   if (value != null && value.isNegative) {
     throw ArgumentError.value(value, name, 'must not be negative');
   }
-  return value?.inMicroseconds;
+  return value;
 }
 
 /// The protocol versions offered by default, most preferred first, spelled the

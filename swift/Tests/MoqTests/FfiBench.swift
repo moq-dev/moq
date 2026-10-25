@@ -58,7 +58,7 @@ final class FfiBench: XCTestCase {
                           value: (ProcessInfo.processInfo.systemUptime - start) * 1e9 / Double(calls))
         }
         results.append(call("sequence") { _ = group.sequence })
-        results.append(try call("info") { _ = try consumer.info() })
+        results.append(try call("info") { _ = consumer.info() })
         try broadcast.close()
         let directory = URL(fileURLWithPath: dir, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
