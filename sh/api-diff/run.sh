@@ -47,7 +47,7 @@ row() {
     local surface=$1 baseline=$2 result=$3 body=${4:-} lang=${5:-diff}
     printf '| %s | %s | %s |\n' "$surface" "$baseline" "$result" >>"$summary"
     [[ -n "$body" ]] || return 0
-    printf '\n### %s\n\n%s%s\n%s\n%s\n' "$surface" '```' "$lang" "$body" '```' >>"$details"
+    printf '\n### %s\n\n%s%s\n%s\n%s\n' "$surface" '````' "$lang" "$body" '````' >>"$details"
 }
 
 # Whether a full-context diff on stdin breaks the baseline: it removes a line,

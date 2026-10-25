@@ -95,6 +95,7 @@ jobs:
               - "cpp/moq/uniffi.toml"
               - "sh/api-diff/**"
               - "justfile"
+              - ".github/workflows/api-diff.yml"
               - ".github/workflows/release-gate.yml"
             audio-quality:
               - "js/watch/**"
