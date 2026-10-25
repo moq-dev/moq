@@ -52,15 +52,19 @@ def grade(source, capture, gop, rate):
     if errors:
         raise SystemExit(f"error: the source does not decode cleanly: {errors[:3]}")
     theirs, errors = pictures(capture)
-    index = {digest: k for k, digest in enumerate(ours)}
+    known = set(ours)
     # The pictures of the joined GOP before its next I picture may not be the source's.
-    lead = next((j for j, digest in enumerate(theirs) if digest in index), None)
+    lead = next((j for j, digest in enumerate(theirs) if digest in known), None)
     if lead is None:
         raise SystemExit("error: no decoded picture of the capture is the source's")
     if lead > gop:
         raise SystemExit(f"error: the first {lead} pictures are not the source's, past one {gop}-picture GOP")
-    first = index[theirs[lead]]
     run = theirs[lead:]
+    # A picture can repeat in the source, so align the run where it matches, preferring the
+    # alignment that ends on the source's last picture.
+    starts = [k for k, digest in enumerate(ours) if digest == run[0]]
+    matches = [k for k in starts if ours[k : k + len(run)] == run]
+    first = next((k for k in matches if k + len(run) == len(ours)), matches[0] if matches else starts[0])
     if run != ours[first : first + len(run)]:
         miss = next(j for j, digest in enumerate(run) if first + j >= len(ours) or ours[first + j] != digest)
         raise SystemExit(f"error: decoded picture {lead + miss} is not the source's picture {first + miss}")

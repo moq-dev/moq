@@ -564,6 +564,7 @@ def read_programs(ts_path: str) -> list[tuple[int, list[Stream]]]:
             names = {d["#name"] for d in descriptors}
             names |= {f"registration:{d['format_identifier']}" for d in descriptors if "format_identifier" in d}
             names |= {"hrd_management_valid" for d in descriptors if d.get("hrd_management_valid") is True}
+            names |= {"leak_invalid" for d in descriptors if d["#name"] == "STD_descriptor" and d.get("leak_valid") is False}
             names |= {"temporal_poc_clock" for d in descriptors
                       if d.get("fixed_frame_rate") is True and d.get("temporal_poc") is True}
             names |= {
@@ -672,16 +673,25 @@ def _hrd(sps: dict[str, str], prefix: str, value: str) -> tuple[float, float] | 
     return rate, size
 
 
-def mpeg2_params(es: bytes) -> Params:
+def mpeg2_params(es: bytes, descriptors: set[str]) -> Params:
     """H.222.0 2.4.2.3 buffers for H.262 video from its first sequence header and extension.
 
-    Graded by the leak method (Rbx = Rmax), which H.222.0 applies when vbv_delay is 0xFFFF, as
-    a variable-rate encoder codes it.
+    Graded by the leak method, which H.222.0 applies unless an STD_descriptor clears leak_valid
+    and the pictures code a vbv_delay other than 0xFFFF; that vbv_delay method is refused.
+    Rbx is Rmax at Low and Main level, and min(1.05 Res, Rmax) at High-1440 and High.
     """
     head = es.find(b"\x00\x00\x01\xb3")
     ext = es.find(b"\x00\x00\x01\xb5", head)
+    picture = es.find(b"\x00\x00\x01\x00", head)
     if head < 0 or ext < 0 or len(es) < ext + 9 or es[ext + 4] >> 4 != 1:
         raise Refused("no sequence header and sequence extension, which an H.262 stream starts with")
+    if picture < 0 or len(es) < picture + 8:
+        raise Refused("no picture header after the sequence header")
+    # vbv_delay: 16 bits after the 10-bit temporal_reference and 3-bit picture_coding_type. H.262
+    # codes it 0xFFFF in every picture of a sequence or in none, so the first decides.
+    vbv_delay = (es[picture + 5] & 0x07) << 13 | es[picture + 6] << 5 | es[picture + 7] >> 3
+    if "leak_invalid" in descriptors and vbv_delay != 0xFFFF:
+        raise Refused("an STD_descriptor selects the vbv_delay method, which this model does not implement")
     # vbv_buffer_size_value: 10 bits after bit_rate_value and its marker; the extension's 8 bits
     # follow its bit_rate_extension and marker.
     vbv_low = (es[head + 10] & 0x1F) << 5 | es[head + 11] >> 3
@@ -693,6 +703,13 @@ def mpeg2_params(es: bytes) -> Params:
         raise Refused(f"H.262 profile_and_level_indication {indication:#04x} has no Table 8-13 entry")
     rmax, vbv_max = MPEG2_LEVELS[level]
     vbv = (vbv_high << 10 | vbv_low) * 16 * 1024
+    if not vbv:
+        raise Refused("H.262 vbv_buffer_size 0 sizes no EB")
+    # bit_rate_value's 18 bits after frame_rate_code, and the extension's 12-bit
+    # bit_rate_extension above them, in units of 400 bit/s.
+    bit_rate = es[head + 8] << 10 | es[head + 9] << 2 | es[head + 10] >> 6
+    bit_rate |= ((es[ext + 6] & 0x1F) << 7 | es[ext + 7] >> 1) << 18
+    rbx = rmax if level in (10, 8) else min(1.05 * bit_rate * 400, rmax)
     overhead = (0.004 + 1 / 750) * max(rmax, 2_000_000)
     return Params(
         label=f"H.262 {MPEG2_LEVEL_NAMES[level]} level, vbv {vbv / 1e3:.0f} kbit",
@@ -700,7 +717,7 @@ def mpeg2_params(es: bytes) -> Params:
         rx=1.2 * rmax,
         mb=(overhead + vbv_max - vbv) / 8,
         eb=vbv / 8,
-        rbx=rmax,
+        rbx=rbx,
     )
 
 
@@ -888,7 +905,7 @@ def stream_params(kind: str, stream: Stream) -> tuple[Params, object]:
     if kind == "avc":
         return avc_params(stream.sps), None
     if kind == "mpeg2-video":
-        return mpeg2_params(bytes(es)), None
+        return mpeg2_params(bytes(es), stream.descriptors), None
     if kind == "hevc":
         return hevc_params(stream.sps), None
     if kind == "teletext":

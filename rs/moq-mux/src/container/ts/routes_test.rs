@@ -201,6 +201,49 @@ async fn mpeg2_video_rides_whole_and_survives_a_round_trip() {
 	assert_eq!(keyframes, opens, "and its groups");
 }
 
+/// A sequence header split across two video PES, at each of its three inner boundaries, opens
+/// its group at the PES it begins in, while a picture start code split the same way opens none.
+/// The last PES, ending in part of a start code with no PES after it, still goes out at the end
+/// of input.
+#[tokio::test(start_paused = true)]
+async fn mpeg2_sequence_header_split_across_pes_opens_a_group() {
+	let mut mux = Mux::default();
+	mux.pat(&[(1, PMT)]).pmt(PMT, 1, CLOCK, &[(0x02, VIDEO)], 0);
+	let start = 2_000 * MS;
+	// Each PES's payload after the picture start code it opens with, its last bytes completing
+	// in the next PES: a sequence header at `00 00 | 01 b3`, `00 | 00 01 b3`, and `00 00 01 | b3`,
+	// and a picture start code at `00 00 | 01 00`.
+	let tails: [(&[u8], &[u8]); 6] = [
+		(&[], &[0, 0]),
+		(&[1, 0xb3], &[0]),
+		(&[0, 1, 0xb3], &[]),
+		(&[], &[0, 0, 1]),
+		(&[0xb3], &[0, 0]),
+		(&[1, 0], &[0]),
+	];
+	let mut pictures = Vec::new();
+	for (i, (head, tail)) in tails.into_iter().enumerate() {
+		let ticks = start + i as u64 * 40 * MS;
+		mux.packet(CLOCK, Flags::pcr(ticks));
+		let mut pes = vec![0, 0, 1, 0xe0, 0, 0, 0x80, 0x80, 5];
+		pes.extend_from_slice(&pts_field(ticks / 300 + LEAD));
+		pes.extend_from_slice(head);
+		pes.extend_from_slice(&[0, 0, 1, 0x00]);
+		pes.resize(pes.len() + 200, 0x55);
+		pes.extend_from_slice(tail);
+		mux.whole(VIDEO, &pes);
+		pictures.push(pes);
+	}
+	mux.packet(CLOCK, Flags::pcr(start + 6 * 40 * MS));
+
+	let imported = Imported::all(&mux.bytes());
+	let frames = imported.frames(VIDEO).await;
+	let payloads: Vec<_> = frames.iter().map(|frame| frame.payload.to_vec()).collect();
+	assert_eq!(payloads, pictures, "every PES goes out, the last at the end of input");
+	let keyframes: Vec<_> = frames.iter().map(|frame| frame.keyframe).collect();
+	assert_eq!(keyframes, [true, true, false, true, false, false]);
+}
+
 /// Each ISO 13818-6 DSM-CC type rides DSM-CC sections, so each is reassembled as sections
 /// rather than failing a PES start code.
 #[tokio::test(start_paused = true)]

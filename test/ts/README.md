@@ -188,10 +188,13 @@ level defaults too. An `AVC_timing_and_HRD_descriptor` or
 transfer to the HRD's own schedule, which is not modelled, so such a stream is
 refused.
 
-MPEG-2 video takes Rx = 1.2 Rmax and Rbx = Rmax from its level, EB from the
-sequence header's `vbv_buffer_size`, and MB from what the level's VBV leaves over,
-as H.222.0 2.4.2.3 specifies for the leak method a variable-rate encoder signals
-with `vbv_delay` 0xFFFF. Its picture, GOP or sequence header opens each access unit.
+MPEG-2 video takes Rx = 1.2 Rmax from its level, Rbx = Rmax at Low and Main level
+and min(1.05 Res, Rmax) at High-1440 and High, EB from the sequence header's
+`vbv_buffer_size`, and MB from what the level's VBV leaves over, as H.222.0 2.4.2.3
+specifies for the leak method. A stream whose `STD_descriptor` clears `leak_valid`
+while its pictures code a `vbv_delay` other than 0xFFFF takes the `vbv_delay`
+method instead, which is not modelled, so it is refused. Its picture, GOP or
+sequence header opens each access unit.
 
 Opus is graded against ADTS's buffers for the same channel count: the Opus-in-TS
 draft gives Rx (2 Mb/s for 1-2 channels, matching ADTS) but leaves the buffer size

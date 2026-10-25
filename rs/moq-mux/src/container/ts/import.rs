@@ -1118,6 +1118,7 @@ impl<E: catalog::Catalog> Import<E> {
 		if let Some(stream) = self.streams.get_mut(&pid)
 			&& let Stream::PesPacket(stream) = &mut *stream
 		{
+			stream.end();
 			stream.settle(&self.placement);
 			let (published, dropped) = stream.release(&self.timebase, &self.pts, generation)?;
 			units += published;
@@ -1776,6 +1777,11 @@ impl<E: catalog::Catalog> Import<E> {
 		for pid in pids {
 			self.flush(pid)?;
 		}
+		for stream in self.streams.values_mut() {
+			if let Stream::PesPacket(stream) = stream {
+				stream.end();
+			}
+		}
 		self.settle_placement()?;
 		anyhow::ensure!(
 			self.sections.values().all(|section| section.held.is_empty()),
@@ -2289,10 +2295,12 @@ fn adjust_splice(section: &mut [u8], offset: Offset) {
 /// clock. A PES without a PTS keeps none. See [`Import`] for when one is held, dropped, or refuses
 /// its stream.
 ///
-/// Each PES is a group of its own, except MPEG-1/2 video's: a PES carrying a sequence header opens
-/// a group, where a decoder can start, and the pictures after it join that group. Those before the
-/// first sequence header, or after a loss until the next, are dropped, since they depend on
-/// pictures a subscriber never gets.
+/// Each PES is a group of its own, except MPEG-1/2 video's: a PES in which a sequence header
+/// begins opens a group, where a decoder can start, and the pictures after it join that group.
+/// Those before the first sequence header, or after a loss until the next, are dropped, since
+/// they depend on pictures a subscriber never gets. A video PES ending in part of a start code
+/// waits for the next PES on the stream, or for the stream to end, to tell whether a sequence
+/// header begins in it.
 struct PesPacketStream<E: catalog::Catalog> {
 	track: crate::container::Producer<crate::catalog::hang::Container>,
 	/// Held for its `Drop`, which clears this track's catalog entry.
@@ -2304,6 +2312,9 @@ struct PesPacketStream<E: catalog::Catalog> {
 	held: VecDeque<(Held, Join)>,
 	/// The stream lost a unit since the last PES held, so the next joins no group.
 	lost: bool,
+	/// The PES at the back of `held` ends in part of a start code, so whether it opens a group
+	/// waits for the PES after it; [`Self::release`] stops before it meanwhile.
+	straddles: bool,
 }
 
 /// Where a whole PES falls in its track's groups.
@@ -2363,6 +2374,7 @@ impl<E: catalog::Catalog> PesPacketStream<E> {
 			stream_type,
 			held: VecDeque::new(),
 			lost: false,
+			straddles: false,
 		})
 	}
 
@@ -2371,9 +2383,22 @@ impl<E: catalog::Catalog> PesPacketStream<E> {
 		let span = pending.span.expect("a whole PES is spanned at its start");
 		let join = match mpeg_video(self.stream_type) {
 			false => Join::Opens,
-			true if sequence_header(&pending.data) => Join::Opens,
-			true if self.lost => Join::Resyncs,
-			true => Join::Continues,
+			true => {
+				let payload = es_payload(&pending.data);
+				if std::mem::take(&mut self.straddles) {
+					let (before, join) = self.held.back_mut().expect("a straddling PES is held");
+					if straddled_header(es_payload(&before.payload), payload) {
+						*join = Join::Opens;
+					}
+				}
+				let join = match () {
+					_ if memchr::memmem::find(payload, &SEQUENCE_HEADER).is_some() => Join::Opens,
+					_ if self.lost => Join::Resyncs,
+					_ => Join::Continues,
+				};
+				self.straddles = join != Join::Opens && partial_start_code(payload);
+				join
+			}
 		};
 		self.lost = false;
 		let held = Held {
@@ -2384,9 +2409,16 @@ impl<E: catalog::Catalog> PesPacketStream<E> {
 		self.held.push_back((held, join));
 	}
 
-	/// The unit in progress was lost: an MPEG-1/2 picture after it may reference it.
+	/// The unit in progress was lost: an MPEG-1/2 picture after it may reference it, and no
+	/// sequence header continues from the PES before it.
 	fn lost(&mut self) {
 		self.lost = true;
+		self.straddles = false;
+	}
+
+	/// No PES follows the last held, so a start code its end began completes nothing.
+	fn end(&mut self) {
+		self.straddles = false;
 	}
 
 	/// The PCR `after` arrived on timebase `generation`: every PES held since the last is
@@ -2422,6 +2454,7 @@ impl<E: catalog::Catalog> PesPacketStream<E> {
 		while let Some(timestamp) = self
 			.held
 			.front()
+			.filter(|_| !(self.straddles && self.held.len() == 1))
 			.and_then(|(held, _)| held.timestamp(pts, offset, generation))
 		{
 			let (mut held, join) = self.held.pop_front().expect("a front");
@@ -3061,16 +3094,31 @@ fn mpeg_video(stream_type: u8) -> bool {
 	matches!(stream_type, 0x01 | 0x02)
 }
 
-/// Whether the whole PES `pes` carries an MPEG-1/2 `sequence_header_code` (ISO 13818-2 6.2.2.1),
-/// where a decoder can start. Start codes never occur inside coded data, so any match is one.
-fn sequence_header(pes: &[u8]) -> bool {
-	const SEQUENCE_HEADER: [u8; 4] = [0x00, 0x00, 0x01, 0xb3];
+/// An MPEG-1/2 `sequence_header_code` (ISO 13818-2 6.2.2.1), where a decoder can start. Start
+/// codes never occur inside coded data, so any match is one.
+const SEQUENCE_HEADER: [u8; 4] = [0x00, 0x00, 0x01, 0xb3];
+
+/// The elementary stream bytes of the whole PES `pes`, after its header.
+fn es_payload(pes: &[u8]) -> &[u8] {
 	let header = match pes.get(3) {
 		Some(&stream_id) if psi::has_optional_header(stream_id) => 9 + usize::from(pes.get(8).copied().unwrap_or(0)),
 		_ => 6,
 	};
-	pes.get(header..)
-		.is_some_and(|payload| memchr::memmem::find(payload, &SEQUENCE_HEADER).is_some())
+	pes.get(header..).unwrap_or_default()
+}
+
+/// Whether `payload` ends in the first one to three bytes of a start code (`00`, `00 00`, or
+/// `00 00 01`), which the next PES may complete.
+fn partial_start_code(payload: &[u8]) -> bool {
+	matches!(payload, [.., 0x00] | [.., 0x00, 0x00, 0x01])
+}
+
+/// Whether a sequence header begins in `before`'s payload and ends in `after`'s, the next PES
+/// on the stream.
+fn straddled_header(before: &[u8], after: &[u8]) -> bool {
+	let before = &before[before.len().saturating_sub(SEQUENCE_HEADER.len() - 1)..];
+	let after = &after[..after.len().min(SEQUENCE_HEADER.len() - 1)];
+	memchr::memmem::find(&[before, after].concat(), &SEQUENCE_HEADER).is_some()
 }
 
 /// One elementary stream's codec importer.

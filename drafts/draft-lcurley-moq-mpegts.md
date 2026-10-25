@@ -255,7 +255,7 @@ type PesPacket = {
 Each frame MUST be exactly one PES packet, from its start code through its payload, with a `PES_packet_length` that matches the frame, or zero only where {{mpeg2}} lets a video stream leave it unbounded.
 The `stream_id`, the PTS and DTS when present, and every other header field ride in the frame, with the PTS and DTS on the catalog clock; a PES without a PTS carries none.
 The frame's timestamp is the packet's placement: the program clock at its first byte, on the same timeline.
-Each frame MUST be a keyframe in its own group, as for `verbatim`, except on MPEG-1 and MPEG-2 video (0x01 and 0x02), whose pictures depend on earlier ones: there a PES carrying a `sequence_header_code` (0x000001B3) MUST be a keyframe opening a group, and the PES up to the next one MUST join it.
+Each frame MUST be a keyframe in its own group, as for `verbatim`, except on MPEG-1 and MPEG-2 video (0x01 and 0x02), whose pictures depend on earlier ones: there a PES in which a `sequence_header_code` (0x000001B3) begins, including one whose last bytes the next PES completes, MUST be a keyframe opening a group, and the PES up to the next one MUST join it.
 A publisher drops the video PES before the first sequence header, and after a lost one until the next, rather than publish a picture without what it references.
 A consumer MUST refuse a frame that is not one well-formed PES packet.
 The record is a member beside `verbatim` rather than a `framing` value, so a consumer that predates it ignores the track instead of refusing the catalog.
