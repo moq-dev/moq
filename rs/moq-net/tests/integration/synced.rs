@@ -75,9 +75,6 @@ async fn an_exact_boundary_catches_up_with_the_initial_set() {
 		"moq-transport-16",
 		"moq-transport-17",
 		"moq-transport-18",
-		"moq-transport-19",
-		"moq-transport-20",
-		"moq-transport-21",
 		"moq-transport-22",
 	] {
 		assert_eq!(synced(version).await, both(), "{version}");

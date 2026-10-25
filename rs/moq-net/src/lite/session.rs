@@ -1455,11 +1455,14 @@ mod tests {
 	// GOAWAY is not a request: refusing it without credit would leave the peer
 	// unaware that we are draining.
 	#[moq_clock::test]
-	async fn goaway_is_sent_without_request_credit() {
+	async fn goaway_waits_for_stream_credit() {
 		let transport = ScriptedSession::new(Vec::new()).without_credit();
 		let log = transport.log.clone();
-		let mut server = raw_session(transport, Version::Lite07, false, None);
+		let mut server = raw_session(transport.clone(), Version::Lite07, false, None);
 		server.goaway.producer().send(crate::goaway::Goaway::new()).unwrap();
+		let _ = server.driver.poll(&kio::Waiter::noop());
+		assert_eq!(log.bi_opens(), 0, "GOAWAY waits for stream credit");
+		transport.grant_credit();
 		let _ = server.driver.poll(&kio::Waiter::noop());
 		assert_eq!(log.bi_opens(), 1, "GOAWAY stream was not opened");
 		assert!(log.closes().is_empty());

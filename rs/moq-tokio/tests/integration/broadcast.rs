@@ -490,8 +490,8 @@ async fn fetch_moq_transport_18() {
 
 #[tracing_test::traced_test]
 #[tokio::test]
-async fn fetch_moq_transport_20() {
-	transport_fetch_roundtrip("moq-transport-20").await;
+async fn fetch_moq_transport_22() {
+	transport_fetch_roundtrip("moq-transport-22").await;
 }
 
 /// A fetch must be served while a live subscription is active on the same track.
@@ -710,7 +710,7 @@ async fn broadcast_moq_lite_05_untimed_track() {
 		.expect("server task failed");
 }
 
-/// Draft-20's current-group join (section 5.1.6), which splits one group across two
+/// Draft-22's current-group join (section 3.5), which splits one group across two
 /// streams: the subscriber asks for the next Object plus a fill of the current group, and
 /// the publisher serves the head on a fill fetch stream and the rest on the subscription's
 /// own subgroup stream.
@@ -720,7 +720,7 @@ async fn broadcast_moq_lite_05_untimed_track() {
 /// group boundary instead.
 #[tracing_test::traced_test]
 #[tokio::test]
-async fn broadcast_moq_transport_20_current_group_join() {
+async fn broadcast_moq_transport_22_current_group_join() {
 	let pub_origin = moq_tokio::origin::spawn();
 	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce");
@@ -738,7 +738,7 @@ async fn broadcast_moq_transport_20_current_group_join() {
 	let mut server_config = moq_tokio::listen::Config::default();
 	server_config.bind = Some("[::]:0".parse().unwrap());
 	server_config.tls.generate = vec!["localhost".into()];
-	server_config.version = vec!["moq-transport-20".parse().unwrap()];
+	server_config.version = vec!["moq-transport-22".parse().unwrap()];
 	let server = server_config.init(Default::default()).expect("init server");
 	let mut server = server.listen().await.expect("listen");
 	let addr = server.local_addr().expect("local addr");
@@ -749,7 +749,7 @@ async fn broadcast_moq_transport_20_current_group_join() {
 
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
-	client_config.version = vec!["moq-transport-20".parse().unwrap()];
+	client_config.version = vec!["moq-transport-22".parse().unwrap()];
 	let client = client_config.init(Default::default()).expect("init client");
 	let url: url::Url = format!("moqt://localhost:{}", addr.port()).parse().unwrap();
 
@@ -1588,24 +1588,6 @@ async fn broadcast_moq_transport_18() {
 
 #[tracing_test::traced_test]
 #[tokio::test]
-async fn broadcast_moq_transport_19() {
-	broadcast_test("moqt", Some("moq-transport-19"), Some("moq-transport-19")).await;
-}
-
-#[tracing_test::traced_test]
-#[tokio::test]
-async fn broadcast_moq_transport_20() {
-	broadcast_test("moqt", Some("moq-transport-20"), Some("moq-transport-20")).await;
-}
-
-#[tracing_test::traced_test]
-#[tokio::test]
-async fn broadcast_moq_transport_21() {
-	broadcast_test("moqt", Some("moq-transport-21"), Some("moq-transport-21")).await;
-}
-
-#[tracing_test::traced_test]
-#[tokio::test]
 async fn broadcast_moq_transport_22() {
 	broadcast_test("moqt", Some("moq-transport-22"), Some("moq-transport-22")).await;
 }
@@ -1660,12 +1642,6 @@ async fn broadcast_negotiate_server_all_client_transport_18() {
 	broadcast_test("moqt", Some("moq-transport-18"), None).await;
 }
 
-#[tracing_test::traced_test]
-#[tokio::test]
-async fn broadcast_negotiate_server_all_client_transport_19() {
-	broadcast_test("moqt", Some("moq-transport-19"), None).await;
-}
-
 // ── Raw QUIC – client supports all versions, server pins one ─────────
 
 #[tracing_test::traced_test]
@@ -1714,12 +1690,6 @@ async fn broadcast_negotiate_client_all_server_transport_17() {
 #[tokio::test]
 async fn broadcast_negotiate_client_all_server_transport_18() {
 	broadcast_test("moqt", None, Some("moq-transport-18")).await;
-}
-
-#[tracing_test::traced_test]
-#[tokio::test]
-async fn broadcast_negotiate_client_all_server_transport_19() {
-	broadcast_test("moqt", None, Some("moq-transport-19")).await;
 }
 
 // ── Retention window (track::Info::max_age) ─────────────────────
@@ -1888,24 +1858,6 @@ async fn broadcast_webtransport_moq_transport_18() {
 
 #[tracing_test::traced_test]
 #[tokio::test]
-async fn broadcast_webtransport_moq_transport_19() {
-	broadcast_test("https", Some("moq-transport-19"), Some("moq-transport-19")).await;
-}
-
-#[tracing_test::traced_test]
-#[tokio::test]
-async fn broadcast_webtransport_moq_transport_20() {
-	broadcast_test("https", Some("moq-transport-20"), Some("moq-transport-20")).await;
-}
-
-#[tracing_test::traced_test]
-#[tokio::test]
-async fn broadcast_webtransport_moq_transport_21() {
-	broadcast_test("https", Some("moq-transport-21"), Some("moq-transport-21")).await;
-}
-
-#[tracing_test::traced_test]
-#[tokio::test]
 async fn broadcast_webtransport_moq_transport_22() {
 	broadcast_test("https", Some("moq-transport-22"), Some("moq-transport-22")).await;
 }
@@ -1960,12 +1912,6 @@ async fn broadcast_webtransport_negotiate_server_all_client_transport_18() {
 	broadcast_test("https", Some("moq-transport-18"), None).await;
 }
 
-#[tracing_test::traced_test]
-#[tokio::test]
-async fn broadcast_webtransport_negotiate_server_all_client_transport_19() {
-	broadcast_test("https", Some("moq-transport-19"), None).await;
-}
-
 // ── WebTransport – client supports all, server pins one ─────────────
 
 #[tracing_test::traced_test]
@@ -2014,12 +1960,6 @@ async fn broadcast_webtransport_negotiate_client_all_server_transport_17() {
 #[tokio::test]
 async fn broadcast_webtransport_negotiate_client_all_server_transport_18() {
 	broadcast_test("https", None, Some("moq-transport-18")).await;
-}
-
-#[tracing_test::traced_test]
-#[tokio::test]
-async fn broadcast_webtransport_negotiate_client_all_server_transport_19() {
-	broadcast_test("https", None, Some("moq-transport-19")).await;
 }
 
 // ── WebSocket (ws://) ───────────────────────────────────────────────
@@ -3503,15 +3443,15 @@ async fn goaway_moq_transport_17_quic() {
 }
 
 #[tokio::test]
-async fn goaway_moq_transport_19_quic() {
-	goaway_test("moqt", "moq-transport-19", true).await;
+async fn goaway_moq_transport_22_quic() {
+	goaway_test("moqt", "moq-transport-22", true).await;
 }
 
 /// The draining side force-closes an overstaying peer after the deadline, over
 /// a real QUIC transport, on the newest IETF draft.
 #[tokio::test]
-async fn goaway_timeout_force_close_moq_transport_19_quic() {
-	let version: moq_net::Version = "moq-transport-19".parse().unwrap();
+async fn goaway_timeout_force_close_moq_transport_22_quic() {
+	let version: moq_net::Version = "moq-transport-22".parse().unwrap();
 
 	let pub_origin = moq_tokio::origin::spawn();
 
@@ -3638,7 +3578,7 @@ async fn session_close_surfaces_a_rejection_code() {
 
 	let server_handle = tokio::spawn(async move {
 		while let Some(request) = server.accept().await {
-			request.reject(moq_tokio::server::Reject::Forbidden).await?;
+			request.reject(moq_net::SessionError::Unauthorized).await?;
 		}
 		Ok::<_, anyhow::Error>(())
 	});
@@ -3651,39 +3591,49 @@ async fn session_close_surfaces_a_rejection_code() {
 		.await
 		.expect("close timed out")
 		.expect_err("a rejected session must surface as an error");
-	// `Request::reject` maps both 401 and 403 onto the wire's single UNAUTHORIZED.
 	assert_connect_error(&err, moq_tokio::ConnectError::Unauthorized);
 
 	server_handle.abort();
 }
 
-/// The same rejection under the reconnect loop: UNAUTHORIZED is specified, so
+/// The same rejection under the reconnect loop: each auth code is specified, so
 /// the loop treats it as terminal instead of retrying the same credentials with
 /// backoff until the give-up timeout.
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn reconnect_stops_on_a_session_level_rejection() {
-	let (mut server, addr) = test_server().await;
-	let url: url::Url = format!("https://localhost:{}", addr.port()).parse().unwrap();
+	for code in [
+		moq_net::SessionError::Unauthorized,
+		moq_net::SessionError::MalformedAuthToken,
+		moq_net::SessionError::Expired,
+	] {
+		let (mut server, addr) = test_server().await;
+		let url: url::Url = format!("https://localhost:{}", addr.port()).parse().unwrap();
 
-	let server_handle = tokio::spawn(async move {
-		while let Some(request) = server.accept().await {
-			request.reject(moq_tokio::server::Reject::Unauthorized).await?;
-		}
-		Ok::<_, anyhow::Error>(())
-	});
+		let reject = code.clone();
+		let server_handle = tokio::spawn(async move {
+			while let Some(request) = server.accept().await {
+				request.reject(reject.clone()).await?;
+			}
+			Ok::<_, anyhow::Error>(())
+		});
 
-	// Without classification the loop would retry until the backoff give-up (5m by
-	// default), so `closed` resolving within TIMEOUT proves it stopped on the
-	// rejection itself.
-	let connection = test_client().connect(url);
-	let err = tokio::time::timeout(TIMEOUT, connection.closed())
-		.await
-		.expect("a rejected session must stop the reconnect loop promptly")
-		.expect_err("a rejected session must surface as an error");
-	assert_connect_error(&err, moq_tokio::ConnectError::Unauthorized);
+		// Without classification the loop would retry until the backoff give-up (5m by
+		// default), so `closed` resolving within TIMEOUT proves it stopped on the
+		// rejection itself.
+		let connection = test_client().connect(url);
+		let err = tokio::time::timeout(TIMEOUT, connection.closed())
+			.await
+			.expect("a rejected session must stop the reconnect loop promptly")
+			.expect_err("a rejected session must surface as an error");
+		assert!(err.is_auth(), "{code:?} surfaced as {err}");
+		let moq_tokio::Error::MoqNet(closed) = &err else {
+			panic!("{code:?} surfaced as {err}");
+		};
+		assert_eq!(moq_net::SessionError::from(closed), code);
 
-	server_handle.abort();
+		server_handle.abort();
+	}
 }
 
 /// One-shot mode is the other way a caller observes the rejection: with no
@@ -3696,7 +3646,7 @@ async fn one_shot_surfaces_a_session_level_rejection() {
 
 	let server_handle = tokio::spawn(async move {
 		while let Some(request) = server.accept().await {
-			request.reject(moq_tokio::server::Reject::Forbidden).await?;
+			request.reject(moq_net::SessionError::Unauthorized).await?;
 		}
 		Ok::<_, anyhow::Error>(())
 	});

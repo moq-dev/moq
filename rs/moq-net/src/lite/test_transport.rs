@@ -11,7 +11,7 @@
 use std::{
 	sync::{
 		Arc, Mutex,
-		atomic::{AtomicBool, AtomicUsize, Ordering},
+		atomic::{AtomicUsize, Ordering},
 	},
 	task::{Context, Poll},
 };
@@ -959,7 +959,7 @@ pub struct ScriptedSession {
 	/// Set by [`Self::gated_open`]: parks `poll_open_bi` until the gate opens, standing in
 	/// for a transport header blocked on send capacity.
 	open_gate: Option<kio::Consumer<bool>>,
-	credit: Arc<AtomicBool>,
+	credit: kio::Producer<bool>,
 	/// Keeps the gate registration alive between `poll_open_bi` calls.
 	park: kio::Park,
 	/// Scripts the peer pushes at us on unidirectional streams, popped by `accept_uni`
@@ -977,12 +977,12 @@ pub struct ScriptedSession {
 
 impl ScriptedSession {
 	pub fn without_credit(self) -> Self {
-		self.credit.store(false, Ordering::Relaxed);
+		*self.credit.write().ok().expect("credit is live") = false;
 		self
 	}
 
 	pub fn grant_credit(&self) {
-		self.credit.store(true, Ordering::Relaxed);
+		*self.credit.write().ok().expect("credit is live") = true;
 	}
 
 	pub fn with_stats(mut self, stats: SinkStats) -> Self {
@@ -1003,7 +1003,7 @@ impl ScriptedSession {
 			script: Arc::new(Mutex::new(script)),
 			queue: None,
 			open_gate: None,
-			credit: Arc::new(AtomicBool::new(true)),
+			credit: kio::Producer::new(true),
 			park: kio::Park::default(),
 			incoming_unis: Arc::new(Mutex::new(std::collections::VecDeque::new())),
 			incoming_bidis: Arc::new(Mutex::new(std::collections::VecDeque::new())),
@@ -1146,6 +1146,15 @@ impl poll::Session for ScriptedSession {
 		cx: &mut Context<'_>,
 		options: poll::SendOptions<'_, SinkGroup>,
 	) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
+		let credit = self.credit.consume();
+		if credit
+			.poll(self.park.hold(cx), |credit| {
+				if **credit { Poll::Ready(()) } else { Poll::Pending }
+			})
+			.is_pending()
+		{
+			return Poll::Pending;
+		}
 		if let Some(gate) = self.open_gate.clone() {
 			let waiter = self.park.hold(cx);
 			// A closed gate reads as open: the test dropped the producer, so nothing is
@@ -1185,7 +1194,7 @@ impl poll::Session for ScriptedSession {
 		>,
 	) -> std::task::Poll<Result<Option<crate::transport::poll::BiStreams<Self>>, Self::Error>> {
 		self.log.request_attempts.fetch_add(1, Ordering::Relaxed);
-		if !self.credit.load(Ordering::Relaxed) {
+		if !*self.credit.read() {
 			return Poll::Ready(Ok(None));
 		}
 		self.poll_open_bi(cx, options).map_ok(Some)

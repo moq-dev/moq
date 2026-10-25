@@ -73,11 +73,10 @@ Implementation guidance:
 - Docs: none; behavior is internal. Fix any `bbr3` comments the change makes
   stale.
 
-[Native probing](/quest/m1/probe-native.md) shrinks the problem once it
+Native probing ([moq-dev/moq#6635](https://github.com/moq-dev/moq/pull/6635)) shrinks the problem once it
 validates `bw` above the media rate, since the half-BDP cap then binds less,
 but a sender with no probe target still stalls, so this is not redundant.
 
 ## Related
 
 - [BBR media study](/quest/m2/quic-bbr-study.md) - growth recognition and precautionary probing, on the same media harness
-- [Native probing](/quest/m1/probe-native.md) - a validated `bw` above the media rate makes the ProbeRTT cap bind less often

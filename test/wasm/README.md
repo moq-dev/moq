@@ -71,7 +71,7 @@ One per protocol flavour, since negotiation is the part that broke:
 | name    | relay                            | negotiates                             |
 | ------- | -------------------------------- | -------------------------------------- |
 | `lite`  | defaults                         | `moq-lite-06`, over its own ALPN   |
-| `ietf`  | `--listen-version moq-transport-19` | `moq-transport-19`, over its own ALPN  |
+| `ietf`  | `--listen-version moq-transport-22` | `moq-transport-22`, over its own ALPN  |
 | `setup` | `--listen-version moq-lite-02`   | the `moql` ALPN, version chosen by SETUP |
 
 The `setup` relay is as close as a real relay gets to the SETUP fallback path.
