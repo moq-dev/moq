@@ -53,6 +53,23 @@ func Duration(d time.Duration, name string) (uint64, error) {
 	return uint64(d.Microseconds()), nil
 }
 
+// NonNegative refuses a negative duration, which the generated converter
+// would panic on rather than return an error.
+func NonNegative(value *time.Duration, name string) error {
+	if value != nil && *value < 0 {
+		return fmt.Errorf("negative %s: %v", name, *value)
+	}
+	return nil
+}
+
+// Rendition refuses an audio rendition's negative jitter, for the same reason.
+func Rendition(rendition ffi.MoqRendition) error {
+	if audio, ok := rendition.(ffi.MoqRenditionAudio); ok {
+		return NonNegative(audio.Config.Jitter, "jitter")
+	}
+	return nil
+}
+
 // OptionalDuration converts a caller's time to microseconds, preserving absence.
 func OptionalDuration(value *time.Duration, name string) (*uint64, error) {
 	if value == nil {

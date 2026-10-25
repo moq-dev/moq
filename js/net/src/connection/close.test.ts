@@ -50,7 +50,7 @@ function holdFin(transport: MockTransport) {
 	};
 }
 
-for (const protocol of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_19]) {
+for (const protocol of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18]) {
 	for (const outcome of ["acknowledged", "timeout"] as const)
 		test(`graceful close withdrawal ${outcome} over ${protocol}`, async () => {
 			const pair = createMockTransportPair(protocol);

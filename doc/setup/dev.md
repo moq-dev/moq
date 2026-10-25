@@ -8,18 +8,19 @@ description: Build, test, and debug the MoQ repository
 The repository uses [Just](https://github.com/casey/just) as its command
 runner. Run commands inside the Nix dev shell (`nix develop`) so your tools
 match CI. `just check` and `just fix` refuse to run outside it; set
-`MOQ_ALLOW_HOST=1` to use the host toolchain anyway.
+`ALLOW_HOST_TOOLCHAIN=1` to use the host toolchain anyway.
 
 | Command | Purpose |
 | --- | --- |
 | `just` | Start the local relay, test publisher, and web demo. |
 | `just --list` | List recipes; use `just --list test` or another module to narrow the list. |
 | `just ci-select` | Report whether CI and Rust build setup are needed, without running checks. |
-| `just fix` | Format and lint the packages this branch changed. |
+| `just fix` | Format and lint the packages this branch changed, and regenerate their committed JS API reports (`js/*/api/`). |
 | `just check` | Compile, lint, and test the same scope. |
 | `just ci` | Run the merge queue's gate locally, strictly. PRs into `main` get no other CI, so run it before every push. |
 | `just gate` | `just ci` over every package, as nightly and release PRs run it. |
 | `just fix --all`, `just check --all` | The same, over every package. |
+| `just api-diff` | Diff every published API against its last release, the JS reports against `origin/release`'s. PRs into `release` run it; `--deny` fails a backport on any break. |
 | `just pub bbb <url>` | Publish Big Buck Bunny (also `tos`, `clock`, `gst`, `hls`). |
 | `just sub gst bbb <url>` | Play a broadcast through GStreamer. |
 | `just relay` | Run a local relay on its own. |

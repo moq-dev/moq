@@ -71,7 +71,7 @@ struct Fanout {
 	producer: origin::Producer,
 	consumer: origin::Consumer,
 	driver: origin::Driver,
-	_publishers: Vec<broadcast::Producer>,
+	_publishers: Vec<origin::Publication>,
 	subscribers: Vec<announce::Consumer>,
 }
 
@@ -1021,7 +1021,7 @@ struct Watching {
 	pair: MockPair,
 	tracks: Vec<track::Producer>,
 	subscriptions: Vec<track::Subscriber>,
-	_broadcasts: Vec<broadcast::Producer>,
+	_broadcasts: Vec<origin::Publication>,
 	_origins: [origin::Producer; 2],
 }
 
@@ -1337,7 +1337,7 @@ const COPY_WAIT: Duration = Duration::from_secs(5);
 
 /// One generation at [`COPY_PATH`], held so its copies stay subscribed.
 struct Generation {
-	broadcast: broadcast::Producer,
+	broadcast: origin::Publication,
 	tracks: Vec<track::Producer>,
 }
 
@@ -1500,7 +1500,7 @@ const RESUME_OVERLAP: [(usize, usize, usize); 17] = [
 /// groups, each replacement in reverse arrival order.
 struct ResumeOverlap {
 	_producer: origin::Producer,
-	_generations: Vec<(broadcast::Producer, track::Producer)>,
+	_generations: Vec<(origin::Publication, track::Producer)>,
 	readers: Vec<ResumeReader>,
 }
 

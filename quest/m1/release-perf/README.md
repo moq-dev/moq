@@ -159,7 +159,7 @@ A/A of 3 to 8% on the same host. Decided 2026-10-23 (maintainer): browser
 parity accepted on this evidence; the final re-run above checks it again.
 
 The raw report lived in a scratch directory that has since been removed.
-`just bench <base>` now pairs full Criterion IDs; point `MOQ_BENCH_ARTIFACTS`
+`just bench <base>` now pairs full Criterion IDs; point `BENCH_ARTIFACTS`
 outside the worktree to keep the next one.
 
 ## Related
