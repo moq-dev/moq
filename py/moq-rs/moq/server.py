@@ -7,7 +7,7 @@ from collections.abc import Sequence
 
 from moq_ffi import MoqQuicConfig, MoqRequest, MoqServer, MoqServerConfig, MoqServerTls, MoqTransport
 
-from ._records import _strs
+from ._records import _implementation, _strs
 from .origin import OriginProducer
 from .publish import BroadcastProducer
 from .session import Session
@@ -43,6 +43,14 @@ class Request:
     def query(self) -> str | None:
         """The encoded request query without `?`; it may contain credentials."""
         return self._inner.query()
+
+    @property
+    def peer_implementation(self) -> str | None:
+        """The implementation the client advertised, like ``moq-py/0.6.0 moq-ffi/0.4.12 ...``.
+
+        Peer-controlled: use it for logs and rollout counts, never to authorize.
+        """
+        return self._inner.peer_implementation()
 
     @property
     def transport(self) -> Transport:
@@ -146,6 +154,7 @@ class Server:
                 generate=_strs(tls_generate, "tls_generate"),
             ),
             quic=MoqQuicConfig(max_streams=max_streams, keylog=keylog),
+            implementation=_implementation(),
             publish=None if publish is None else publish._inner,
             consume=None if consume is None else consume._inner,
         )

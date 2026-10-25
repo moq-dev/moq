@@ -118,7 +118,8 @@ struct Fmp4Track<E: crate::catalog::hang::CatalogExt> {
 	/// The edit list, applied to every sample's presentation time.
 	edit: Edit,
 
-	/// The edit list dropped the last sync sample, so the samples decoding from it go too.
+	/// No sync sample precedes the next sample, since the import joined mid-GOP or the edit list
+	/// dropped the last one, so the samples decoding from it go too.
 	orphaned: bool,
 
 	// The decode time of the last fragment, which the next one has to advance past.
@@ -425,7 +426,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					defaults: sample::Defaults::from_moov(&moov, track_id),
 					timescale,
 					edit,
-					orphaned: false,
+					// Audio samples decode alone, whatever their sync flags say.
+					orphaned: kind == Kind::Video,
 					last_decode_time: None,
 					sample_duration: None,
 					segment: None,
@@ -966,7 +968,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				None => return Err(Error::UnknownTrack(track_id).into()),
 			};
 
-			// A fragment wholly before the edit, such as one holding only priming samples.
+			// A fragment wholly before the edit or the first sync sample, such as priming samples or
+			// a mid-GOP join. Skipped before the segment is counted as opened, or the next keyframe
+			// would roll a second segment.
 			let Some(run) = track.run(traf, moof_size, header_size, payload.len())? else {
 				continue;
 			};
@@ -988,19 +992,14 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				declared: new_segment && self.declared,
 			};
 
-			let opened = match &mut track.output {
+			match &mut track.output {
 				Output::Passthrough(passthrough) => {
 					let fragment = fragment(traf, &moof, &run, &payload, &track.defaults)?;
 					passthrough.write(fragment, &run, track.kind, placement)?;
-					true
 				}
 				output => unwrap(output, &run, &payload, track.timescale, placement)?,
-			};
-			// A video track joined mid-GOP skips samples until a sync sample, so its segment opens
-			// there; counting a skipped fragment would let the next keyframe roll a second segment.
-			if opened {
-				track.segment = Some(self.segment);
 			}
+			track.segment = Some(self.segment);
 		}
 
 		Ok(())
@@ -1359,15 +1358,13 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 }
 
 /// Write each sample of `run` as its own frame on an unwrapped track.
-///
-/// Returns whether the track now has a group open, which video lacks until its first sync sample.
 fn unwrap<E: crate::catalog::hang::CatalogExt>(
 	output: &mut Output<E>,
 	run: &Run,
 	payload: &Bytes,
 	timescale: moq_net::Timescale,
 	placement: Placement,
-) -> Result<bool> {
+) -> Result<()> {
 	let earliest = placement.offset.apply(run.earliest)?;
 	let end = placement.offset.apply(run.end)?;
 	let video = matches!(output, Output::Video(_));
@@ -1398,16 +1395,12 @@ fn unwrap<E: crate::catalog::hang::CatalogExt>(
 					.map(|duration| Timestamp::new(duration as u64, timescale))
 					.transpose()?,
 			};
-			match producer.write(frame) {
-				// A source joined mid-GOP: skip ahead to the first sync sample.
-				Ok(()) | Err(crate::Error::MissingKeyframe(_)) => {}
-				Err(err) => return Err(err),
-			}
+			producer.write(frame)?;
 		}
 
 		// The fragment arrived at once, so a consumer has to buffer its whole span.
 		producer.burst(end.checked_sub(earliest)?.into())?;
-		Ok(!producer.needs_keyframe())
+		Ok(())
 	}, _ => unreachable!("passthrough tracks write whole fragments"))
 }
 
@@ -1457,13 +1450,18 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// control is intentionally not exposed. Skipping sequences is not a new timeline, so the
 	/// next fragment must still advance past the last decode time; see
 	/// [`discontinuity`](Self::discontinuity). Text spends a group per cue, so a text track that
-	/// is already past `sequence` continues from its own next group instead.
+	/// is already past `sequence` continues from its own next group instead. Video resumes at its
+	/// next sync sample, dropping the samples before it.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		for track in self.text.values_mut() {
 			let next = track.producer.next_sequence();
 			track.producer.seek(sequence.max(next))?;
 		}
 		for track in self.tracks.values_mut() {
+			// The next group opens on a sync sample, so video drops the samples before one.
+			if track.kind == Kind::Video {
+				track.orphaned = true;
+			}
 			media!(&mut track.output, producer => producer.seek(sequence)?, passthrough => {
 				passthrough.close()?;
 				passthrough.pending_sequence = Some(sequence);

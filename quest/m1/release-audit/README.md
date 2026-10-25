@@ -75,7 +75,8 @@ server state after final drop, idle Dart stream cancellation, empty expiry
 indexes, JS IETF timestamp changes, JS datagram range violations, and OBS
 reordered-frame timestamps and missing EOF output. Each owning quest records
 the reproduction's limits. JS reader and publisher datagram paths now enforce
-subscription bounds; the OBS defects moved to an m1 child (2026-10-22, maintainer).
+subscription bounds, and the OBS source now stamps each decoded picture with its
+own timestamp and drains at clean EOF.
 Go reservation disposal remains an investigation.
 No platform-wide binding parity, full OBS runtime, fuzzing campaign, or
 network-impairment performance result is implied by these checks.
@@ -84,14 +85,6 @@ The 2026-10-22 binding and OBS audit at main
 [1f5caa7026](https://github.com/moq-dev/moq/commit/1f5caa7026) added the
 rate recovery child. Its two OBS findings went to m2 next to the other OBS
 work, because obs-moq ships on its own schedule.
-
-## Required
-
-The entries comprise reproduced or source-confirmed findings
-and contract/lifetime investigations. Each
-child records whether its behavior is new on main or inherited from release.
-
-- [OBS decode timing](/quest/m1/release-audit/obs-decode-timing.md) - the shipping OBS source stamps each reordered picture with its own timestamp and drains at clean EOF
 
 ## Related
 

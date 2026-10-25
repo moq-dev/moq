@@ -5135,6 +5135,8 @@ async fn server_client_roundtrip() {
 			.expect("accept returned None");
 		assert_eq!(request.path(), "/test");
 		assert_eq!(request.query().as_deref(), Some("foo=bar"));
+		let core = format!("moq-ffi/{} {}", env!("CARGO_PKG_VERSION"), moq_net::IMPLEMENTATION);
+		assert_eq!(request.peer_implementation(), Some(format!("app/1 wrapper/2 {core}")));
 		request.accept(None, None).await.expect("handshake failed")
 	});
 
@@ -5144,6 +5146,7 @@ async fn server_client_roundtrip() {
 		tls: insecure_tls(),
 		bind: Some("127.0.0.1:0".into()),
 		consume: Some(client_origin.clone()),
+		implementation: Some("app/1 wrapper/2".into()),
 		..Default::default()
 	})
 	.unwrap();
