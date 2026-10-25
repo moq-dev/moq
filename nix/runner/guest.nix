@@ -11,6 +11,23 @@
   ...
 }:
 
+let
+  # Each runner takes one job at a time. They share the home, so concurrent jobs
+  # share mbx's store and compiler budget, and a compilation one job is running
+  # is restored by the other instead of repeated. The first runner keeps the
+  # original unit, name, and work directory, so its registration survives.
+  runners = map (
+    index:
+    let
+      suffix = lib.optionalString (index > 1) "-${toString index}";
+    in
+    {
+      unit = "runner${suffix}";
+      name = "${runner.name}${suffix}";
+      work = "github-runner-work${suffix}";
+    }
+  ) (lib.range 1 runner.count);
+in
 {
   imports = [
     (modulesPath + "/profiles/qemu-guest.nix")
@@ -116,17 +133,23 @@
   };
 
   # Only a short-lived registration token enters the VM. The host's deployment
-  # key and private services are never mounted in the guest.
-  systemd.services.runner-token = {
-    wantedBy = [ "multi-user.target" ];
-    before = [ "github-runner-runner.service" ];
-    serviceConfig.Type = "oneshot";
-    script = ''
-      install -D -m 0600 \
-        /sys/firmware/qemu_fw_cfg/by_name/opt/io.systemd.credentials/runner-token/raw \
-        /var/lib/secrets/github-runner.token
-    '';
-  };
+  # key and private services are never mounted in the guest. Every runner
+  # registers with the same token.
+  systemd.services.runner-token =
+    let
+      units = map (r: "github-runner-${r.unit}.service") runners;
+    in
+    {
+      wantedBy = [ "multi-user.target" ];
+      requiredBy = units;
+      before = units;
+      serviceConfig.Type = "oneshot";
+      script = ''
+        install -D -m 0600 \
+          /sys/firmware/qemu_fw_cfg/by_name/opt/io.systemd.credentials/runner-token/raw \
+          /var/lib/secrets/github-runner.token
+      '';
+    };
 
   # A static user, unlike DynamicUser, gets real cache directories instead of
   # symlinks into /var/cache/private. Builds resolve `..` lexically against
@@ -141,57 +164,59 @@
   };
   users.groups.github-runner = { };
 
-  services.github-runners.runner = {
-    enable = true;
-    user = "github-runner";
-    group = "github-runner";
-    url = runner.url;
-    name = runner.name;
-    extraLabels = runner.labels;
-    tokenFile = "/var/lib/secrets/github-runner.token";
-    tokenType = "registration";
-    replace = true;
-    workDir = "/var/cache/github-runner-work";
-    # Tools a hosted runner's base image provides and jobs call directly.
-    extraPackages = with pkgs; [
-      curl
-      just
-      openssh
-      procps
-      unzip
-      which
-    ];
-    extraEnvironment = {
-      HOME = config.users.users.github-runner.home;
-      MBX_CACHE_DIR = "/var/cache/github-runner-home/.cache/mbx";
-      CARGO_BUILD_JOBS = toString resources.cores;
-    };
-    serviceOverrides = {
-      CacheDirectory = [
-        "github-runner-home"
-        "github-runner-work"
-      ];
-      CacheDirectoryMode = "0700";
-      # The sandbox mounts cache directories noexec, but jobs execute checkout
-      # scripts, build outputs, and tools installed in their persistent home.
-      ExecPaths = [
-        "/var/cache/github-runner-home"
-        "/var/cache/github-runner-work"
-      ];
-      BindPaths = lib.mkForce [ ];
-      ProtectHome = true;
-      RestrictNamespaces = false;
-      PrivateUsers = false;
-      SystemCallFilter = lib.mkForce [ ];
-      TasksMax = 16384;
-      # Concurrent io_uring tests share the runner service's locked-memory budget.
-      LimitMEMLOCK = "64M";
-    };
-  };
-  systemd.services.github-runner-runner = {
-    requires = [ "runner-token.service" ];
-    after = [ "runner-token.service" ];
-  };
+  services.github-runners = lib.listToAttrs (
+    map (r: {
+      name = r.unit;
+      value = {
+        enable = true;
+        user = "github-runner";
+        group = "github-runner";
+        url = runner.url;
+        name = r.name;
+        extraLabels = runner.labels;
+        tokenFile = "/var/lib/secrets/github-runner.token";
+        tokenType = "registration";
+        replace = true;
+        # A runner empties its work directory whenever it starts.
+        workDir = "/var/cache/${r.work}";
+        # Tools a hosted runner's base image provides and jobs call directly.
+        extraPackages = with pkgs; [
+          curl
+          just
+          openssh
+          procps
+          unzip
+          which
+        ];
+        extraEnvironment = {
+          HOME = config.users.users.github-runner.home;
+          MBX_CACHE_DIR = "/var/cache/github-runner-home/.cache/mbx";
+          CARGO_BUILD_JOBS = toString resources.cores;
+        };
+        serviceOverrides = {
+          CacheDirectory = [
+            "github-runner-home"
+            r.work
+          ];
+          CacheDirectoryMode = "0700";
+          # The sandbox mounts cache directories noexec, but jobs execute checkout
+          # scripts, build outputs, and tools installed in their persistent home.
+          ExecPaths = [
+            "/var/cache/github-runner-home"
+            "/var/cache/${r.work}"
+          ];
+          BindPaths = lib.mkForce [ ];
+          ProtectHome = true;
+          RestrictNamespaces = false;
+          PrivateUsers = false;
+          SystemCallFilter = lib.mkForce [ ];
+          TasksMax = 16384;
+          # Concurrent io_uring tests share the runner service's locked-memory budget.
+          LimitMEMLOCK = "64M";
+        };
+      };
+    }) runners
+  );
 
   # Free page reporting hands back only free pages. The disk bypasses the host's
   # cache, so the guest's page cache keeps every file a job touched resident on the

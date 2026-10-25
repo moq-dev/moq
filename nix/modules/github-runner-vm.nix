@@ -255,6 +255,11 @@ in
                 default = [ ];
                 description = "Additional labels advertised to GitHub.";
               };
+              count = lib.mkOption {
+                type = lib.types.ints.positive;
+                default = 1;
+                description = "Runners in the guest, each running one job at a time on shared caches.";
+              };
             };
             network.uplink = lib.mkOption {
               type = lib.types.strMatching "[a-zA-Z0-9_.:-]{1,15}";

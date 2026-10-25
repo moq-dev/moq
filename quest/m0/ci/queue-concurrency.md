@@ -1,4 +1,4 @@
-# [M] Build queue entries concurrently
+# [S] Build queue entries concurrently
 
 ## Goal
 
@@ -15,12 +15,23 @@ Measured 2026-10-23 over 32 merge-queue runs: `max_entries_to_build: 1` with one
 `moq-queue` runner makes the queue fully serial, about 7 merged PRs per hour,
 with a median entry of 135 s (p90 516 s) and 3 to 12 s of runner wait.
 
-- Add queue runner capacity (another instance or container) and raise
-  `max_entries_to_build` to match. The host also runs the `moq-pro` runner
-  under the same `ci.slice` quota and a desktop; split CPU and memory so
-  concurrent entries do not slow each other past the gain.
-- Concurrent entries share the local mbx store; confirm that is safe, or give
-  each its own.
+The runner VM module's `runner.count` registers several runners in one guest.
+They share the home, so concurrent entries share mbx's store, its dedup of
+in-flight compilations, and its compiler CPU and memory budget; each has its own
+work directory. mbx documents concurrent builds on one store as supported, and
+the self-hosted cache step keeps a version stamp per workspace.
+
+Remaining:
+
+- Confirm which runner is intended: the documented `nix/runner` VM, or the
+  `container@moq-ci` systemd-nspawn container deployed on the host (see the
+  [CI epic](/quest/m0/ci/README.md)). Give whichever stays two runners sharing
+  its cache.
+- Deploy with `runner.count = 2`, a fresh registration token, and a VM restart.
+  The host also runs the `moq-pro` runner under the same `ci.slice` quota and a
+  desktop; size the guest's `resources` so concurrent entries do not slow each
+  other past the gain. Each entry runs 24 nextest workers.
+- Raise the main ruleset's `max_entries_to_build` to the runner count.
 - Measure merged PRs per hour and per-entry wall time before and after.
 
 Public API: none. Wire: none.

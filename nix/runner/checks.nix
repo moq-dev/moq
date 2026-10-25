@@ -5,6 +5,7 @@ let
       url = "https://github.com/example/queue";
       name = "test-queue";
       labels = [ "queue" ];
+      count = 2;
     };
     network = {
       hostAddress = "10.231.0.1";

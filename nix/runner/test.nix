@@ -1,6 +1,10 @@
 { pkgs, guestModule }:
 
 let
+  runners = [
+    "github-runner-runner.service"
+    "github-runner-runner-2.service"
+  ];
   hostModule = { lib, ... }: {
     imports = [ ../modules/github-runner-vm.nix ];
     services.github-runner-vms =
@@ -104,8 +108,8 @@ pkgs.testers.runNixOSTest {
         "-device virtio-balloon-pci,free-page-reporting=on"
       ];
       systemd.services.cache-seed-fixture = {
-        requiredBy = [ "github-runner-runner.service" ];
-        before = [ "github-runner-runner.service" ];
+        requiredBy = runners;
+        before = runners;
         unitConfig.ConditionPathExists = "!/var/lib/cache-seeded";
         serviceConfig.Type = "oneshot";
         # Lay out the cache and registration the way DynamicUser left them on
@@ -151,6 +155,26 @@ pkgs.testers.runNixOSTest {
               touch "$MBX_CACHE_DIR/reused"
             fi
             touch "$MBX_CACHE_DIR/marker"
+            exec ${pkgs.coreutils}/bin/sleep infinity
+          ''
+        );
+      };
+      systemd.services.github-runner-runner-2.serviceConfig = {
+        ExecStartPre = lib.mkForce [
+          "+${pkgs.coreutils}/bin/touch /var/lib/github-runner/runner-2/.current-token"
+        ];
+        ExecStart = lib.mkForce (
+          pkgs.writeShellScript "second-runner-probe" ''
+            set -euo pipefail
+            # The first runner empties its own work directory whenever it starts,
+            # so a second runner must not share it.
+            test "$PWD" = /var/cache/github-runner-work-2
+            printf '#!${pkgs.runtimeShell}\necho executable\n' > exec-probe
+            chmod +x exec-probe
+            test "$(./exec-probe)" = executable
+            test "$(cat "$HOME/seeded")" = seeded
+            mkdir -p "$MBX_CACHE_DIR"
+            echo "$PWD" > "$MBX_CACHE_DIR/second"
             exec ${pkgs.coreutils}/bin/sleep infinity
           ''
         );
@@ -257,6 +281,11 @@ pkgs.testers.runNixOSTest {
     with subtest("the runner adopts the registration DynamicUser left behind"):
         guest.succeed("test ! -L /var/lib/github-runner/runner")
         guest.succeed("test $(cat /var/lib/github-runner/runner/.runner) = registered")
+
+    with subtest("a second runner shares the home and mbx store but not the work directory"):
+        guest.wait_for_unit("github-runner-runner-2.service")
+        guest.wait_for_file("/var/cache/github-runner-home/.cache/mbx/second")
+        guest.succeed("test $(cat /var/cache/github-runner-home/.cache/mbx/second) = /var/cache/github-runner-work-2")
 
     with subtest("the uplink stays IPv4-only"):
         guest.succeed("test $(cat /proc/sys/net/ipv6/conf/eth0/disable_ipv6) = 1")

@@ -6,7 +6,7 @@ pkgs.testers.runNixOSTest {
     imports = [ guestModule ];
     environment.systemPackages = [ pkgs.python3 ];
     system.switch.enable = true;
-    services.github-runners.runner.enable = lib.mkForce false;
+    services.github-runners = lib.mkForce { };
     systemd.services.runner-token.enable = false;
     virtualisation = {
       directBoot.enable = false;
