@@ -987,6 +987,8 @@ mod tests {
 		catalog_with(&catalog, 1, 0).await;
 		for _ in 0..4 {
 			session.rtcp(0, 0).await;
+			// A driver turn, so the pull reads the report before the clock moves on.
+			tokio::task::yield_now().await;
 			clock.advance(super::TIMEOUT / 4);
 		}
 		let err = within("the pull", pull).await.unwrap().unwrap_err();
