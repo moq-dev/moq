@@ -2523,8 +2523,8 @@ impl TrackState {
 				&& let Some(fin) = self.final_sequence()
 			{
 				for (_, slot) in self.lookup.range(..fin) {
-					if !slot.group.is_finished() {
-						let _ = slot.group.poll_closed(waiter);
+					// One poll, so a group finishing meanwhile is seen rather than slept on.
+					if !matches!(slot.group.poll_closed(waiter), Poll::Ready(Ok(()))) {
 						return Poll::Pending;
 					}
 				}
