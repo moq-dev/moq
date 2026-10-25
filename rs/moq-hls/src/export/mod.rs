@@ -290,6 +290,8 @@ impl Broadcaster {
 		let mut video = Vec::new();
 		let mut audio = Vec::new();
 		let mut availability_start = None;
+		// An enabled rendition whose init is still building, which a later render lists.
+		let mut pending = false;
 		for rendition in self.renditions.snapshot() {
 			// Every rendition shares the catalog's one root clock, so any of them can
 			// supply the declared wall anchor.
@@ -302,6 +304,7 @@ impl Broadcaster {
 			// Without its init there is nothing to name in `initialization`, so it is left out
 			// of this render.
 			rendition.start_init();
+			pending |= rendition.init_pending();
 			let representations = match rendition.representations() {
 				Ok(representations) => representations,
 				// Its own playlist answers the error, while its siblings stay listed.
@@ -318,8 +321,9 @@ impl Broadcaster {
 		if representations().all(|rep| rep.segments.is_empty()) {
 			return Ok(None);
 		}
-		// Static only once every representation is final, so none stops being refreshed early.
-		let finished = representations().all(|rep| rep.ended);
+		// Static only once every representation is final and no init is still building, so
+		// neither a listed nor a pending rendition stops being refreshed early.
+		let finished = !pending && representations().all(|rep| rep.ended);
 		if !finished {
 			// A dynamic presentation needs pts 0 anchored to the wall clock. The fallback is
 			// set whenever a record has been pushed, which listing a segment implies.
@@ -1755,6 +1759,116 @@ mod tests {
 		open.finish().unwrap();
 		let manifest = listed_in_manifest(&broadcaster).await;
 		assert!(manifest.contains("id=\"video/video0\""), "{manifest}");
+	}
+
+	// A background build parked on an open group holds neither its rendition nor the export's
+	// timeline watcher, so dropping the broadcaster releases both.
+	#[tokio::test(start_paused = true)]
+	async fn a_stuck_init_build_never_outlives_its_rendition() {
+		let (origin, broadcast, _catalog, _timelines) = inline_sibling().await;
+		let media = broadcast.create_track("video1", timed()).unwrap();
+		let mut open = media.create_group(3u64.into()).unwrap();
+		write_keyframe(&mut open, 3);
+
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		broadcaster.advertised().await;
+		let tag = segments::tag(&(Kind::Video, "video0".into(), "video0".into()));
+		listed_under(&broadcaster.rendition(Kind::Video, "video0").unwrap(), &tag, 3).await;
+		let stuck = broadcaster.rendition(Kind::Video, "video1").unwrap();
+		stuck.start_init();
+		tokio::time::sleep(Duration::from_secs(1)).await;
+		assert!(stuck.init_pending(), "the build is parked on the open group");
+		let weak = Arc::downgrade(&stuck);
+		drop(stuck);
+		let watcher = broadcaster.timeline_watcher.clone();
+
+		drop(broadcaster);
+		assert!(weak.upgrade().is_none(), "the build kept its rendition alive");
+		assert!(
+			watcher.lock().unwrap().is_none(),
+			"the build kept the timeline watcher running"
+		);
+		drop(open);
+	}
+
+	// An ended broadcast stays dynamic while an enabled rendition's init is still building, so a
+	// player keeps refreshing until it is listed instead of loading a static presentation
+	// without it.
+	#[tokio::test(start_paused = true)]
+	async fn an_ended_manifest_stays_dynamic_while_an_init_builds() {
+		let (origin, broadcast, mut catalog, mut timelines) = inline_sibling().await;
+		let media = broadcast.create_track("video1", timed()).unwrap();
+		let mut open = media.create_group(3u64.into()).unwrap();
+		write_keyframe(&mut open, 3);
+
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		broadcaster.advertised().await;
+		let rendition = broadcaster.rendition(Kind::Video, "video0").unwrap();
+		let tag = segments::tag(&(Kind::Video, "video0".into(), "video0".into()));
+		listed_under(&rendition, &tag, 3).await;
+		for timeline in &mut timelines {
+			timeline.finish().unwrap();
+		}
+		catalog.finish().unwrap();
+		tokio::time::timeout(Duration::from_secs(5), async {
+			while !rendition.snapshot().finished {
+				tokio::time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("the playlist ends with the source");
+
+		let manifest = broadcaster.manifest(None).unwrap().expect("video0 renders");
+		assert!(!manifest.contains("id=\"video/video1\""), "{manifest}");
+		assert!(!manifest.contains("type=\"static\""), "{manifest}");
+
+		open.finish().unwrap();
+		let manifest = listed_in_manifest(&broadcaster).await;
+		assert!(manifest.contains("type=\"static\""), "{manifest}");
+	}
+
+	// The first manifest waits for a video it can list: not for an init alone, which a sibling
+	// with no listed segment has at once, and not only until the catalog closes.
+	#[tokio::test(start_paused = true)]
+	async fn the_first_video_wait_needs_a_listable_video() {
+		let (origin, broadcast, mut catalog) = timeline_pair().await;
+		catalog
+			.mutate(|catalog| {
+				let config = catalog.video.renditions.get_mut("video0").unwrap();
+				config.coded_width = None;
+				config.coded_height = None;
+			})
+			.unwrap();
+		// The inline reference indexes media; video1's init builds from the catalog alone, but
+		// its timeline resolves no segment.
+		let (_video0_track, mut video0) = timeline_track(&broadcast, "video0");
+		let (_video1_track, _video1) = timeline_track(&broadcast, "video1");
+		for sequence in 0..3 {
+			video0.push(&gop(sequence)).unwrap();
+		}
+		let media = broadcast.create_track("video0", timed()).unwrap();
+		// Its earlier groups already left the cache, so the open one is the only candidate.
+		let mut open = media.create_group(2u64.into()).unwrap();
+		write_keyframe(&mut open, 2);
+
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
+		let tag = segments::tag(&(Kind::Video, "video0".into(), "video0".into()));
+		listed_under(&broadcaster.rendition(Kind::Video, "video0").unwrap(), &tag, 1).await;
+		catalog.finish().unwrap();
+		settle().await;
+
+		let mut waiting = std::pin::pin!(broadcaster.video_init());
+		assert!(
+			tokio::time::timeout(Duration::from_secs(1), waiting.as_mut())
+				.await
+				.is_err(),
+			"resolved without a listable video"
+		);
+		open.finish().unwrap();
+		tokio::time::timeout(Duration::from_secs(1), waiting)
+			.await
+			.expect("video0 is listable once its init is built");
 	}
 
 	// The manifest leaves a disabled rendition out, so it never fetches media for its init.

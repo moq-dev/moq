@@ -196,6 +196,29 @@ impl Media {
 		}
 	}
 
+	/// The media track handle on `binding`, with that bound broadcast so a fetch can tell a
+	/// gone publisher from a live failure.
+	///
+	/// `binding` is the handle captured with the rows being served. Collecting the answer
+	/// never looks the path up ad hoc: a same-path republish installs a new broadcast whose
+	/// group numbering restarts, and those bytes must not be served under rows produced for
+	/// the publisher it replaced.
+	async fn track(
+		&self,
+		binding: &moq_mux::Binding,
+	) -> Result<Option<(moq_net::broadcast::Consumer, moq_net::track::Consumer)>> {
+		let track = kio::wait(|waiter| self.poll_track(binding, waiter)).await;
+		// The bind can be refused while this read waits. Preserve that exact instance's
+		// authorization error; other failed or disconnected references stay missing.
+		if track.is_none()
+			&& let Poll::Ready(Err(err @ moq_mux::Error::Moq(moq_net::Error::Unauthorized))) =
+				binding.poll_broadcast(&kio::Waiter::noop())
+		{
+			return Err(err.into());
+		}
+		Ok(track)
+	}
+
 	fn poll_track(
 		&self,
 		binding: &moq_mux::Binding,
@@ -281,8 +304,8 @@ pub struct Rendition {
 	/// Feeds [`spans`](Self::spans); aborted when the rendition drops.
 	watcher: Mutex<Option<tokio::task::JoinHandle<()>>>,
 	/// The broadcast serving this rendition's media. A sibling is bound when the rendition is
-	/// created, and ends the rendition when it ends.
-	media: Media,
+	/// created, and ends the rendition when it ends. Shared with a background init build.
+	media: Arc<Media>,
 	/// The current publisher run: the embedder's label every segment URL carries (see
 	/// [`Broadcaster::set_generation`](super::Broadcaster::set_generation)) and the init, built
 	/// on first request. A catalog reconfigure rebuilds the whole rendition, while a new
@@ -292,6 +315,8 @@ pub struct Rendition {
 	/// Serializes init builds, so concurrent first requests fetch the keyframe group once. Shared
 	/// so a background build (see [`start_init`](Self::start_init)) holds it for its whole run.
 	building: Arc<tokio::sync::Mutex<()>>,
+	/// The background init build; aborted when the rendition drops.
+	build: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl Rendition {
@@ -377,9 +402,10 @@ impl Rendition {
 			spans: Arc::new(Spans::new()),
 			catalog: source.broadcast(),
 			watcher: Mutex::new(None),
-			media,
+			media: Arc::new(media),
 			run: kio::Producer::default(),
 			building: Arc::new(tokio::sync::Mutex::new(())),
+			build: Mutex::new(None),
 		})
 	}
 
@@ -409,9 +435,10 @@ impl Rendition {
 			spans: Arc::new(Spans::new()),
 			catalog: source.broadcast(),
 			watcher: Mutex::new(None),
-			media,
+			media: Arc::new(media),
 			run: kio::Producer::default(),
 			building: Arc::new(tokio::sync::Mutex::new(())),
+			build: Mutex::new(None),
 		})
 	}
 
@@ -952,29 +979,6 @@ impl Rendition {
 		Poll::Ready(track.map(|(_, track)| track.subscribe(subscription).into_inner()))
 	}
 
-	/// The media track handle on `binding`, with that bound broadcast so a fetch can tell a
-	/// gone publisher from a live failure.
-	///
-	/// `binding` is the handle captured with the rows being served. Collecting the answer
-	/// never looks the path up ad hoc: a same-path republish installs a new broadcast whose
-	/// group numbering restarts, and those bytes must not be served under rows produced for
-	/// the publisher it replaced.
-	async fn track(
-		&self,
-		binding: &moq_mux::Binding,
-	) -> Result<Option<(moq_net::broadcast::Consumer, moq_net::track::Consumer)>> {
-		let track = kio::wait(|waiter| self.media.poll_track(binding, waiter)).await;
-		// The bind can be refused while this read waits. Preserve that exact instance's
-		// authorization error; other failed or disconnected references stay missing.
-		if track.is_none()
-			&& let Poll::Ready(Err(err @ moq_mux::Error::Moq(moq_net::Error::Unauthorized))) =
-				binding.poll_broadcast(&kio::Waiter::noop())
-		{
-			return Err(err.into());
-		}
-		Ok(track)
-	}
-
 	/// The media track's name in its broadcast, which can differ from the rendition's ID.
 	fn track_name(&self) -> &str {
 		match &self.config {
@@ -1025,24 +1029,51 @@ impl Rendition {
 	/// Build the init in the background unless it is built or a build is already running, so a
 	/// later [`representations`](Self::representations) lists this rendition without any render
 	/// waiting on its media.
+	///
+	/// The build never holds the rendition itself, and is aborted when the rendition drops, so
+	/// one stuck on an open group cannot keep a torn-down export's state alive.
 	pub(crate) fn start_init(self: &Arc<Self>) {
 		let Ok(binding) = self.authorize() else {
 			return;
 		};
-		if self.built_init(&self.run()).is_some() {
+		let run = self.run();
+		if self.built_init(&run).is_some() {
 			return;
 		}
 		// Taken before spawning, so renders never queue tasks behind a build stuck on an open group.
 		let Ok(building) = self.building.clone().try_lock_owned() else {
 			return;
 		};
-		let rendition = self.clone();
-		tokio::spawn(async move {
+		let read = match self.muxer().map(|muxer| self.init_read(muxer)) {
+			Ok(Some(read)) => read,
+			Ok(None) => return,
+			Err(err) => {
+				tracing::warn!(rendition = %self.name, %err, "failed to build init segment");
+				return;
+			}
+		};
+		let media = self.media.clone();
+		let rendition = Arc::downgrade(self);
+		let name = self.name.clone();
+		let build = tokio::spawn(async move {
 			let _building = building;
-			if let Err(err) = rendition.bootstrap(&binding).await {
-				tracing::warn!(rendition = %rendition.name, %err, "failed to build init segment");
+			match read.read(&media, &binding).await {
+				Ok(Some(bytes)) => {
+					if let Some(rendition) = rendition.upgrade() {
+						rendition.cache_init(run.epoch, bytes);
+					}
+				}
+				Ok(None) => {}
+				Err(err) => tracing::warn!(rendition = %name, %err, "failed to build init segment"),
 			}
 		});
+		*self.build.lock().expect("build lock poisoned") = Some(build);
+	}
+
+	/// Whether the init is missing while a build of it is running, so a later render may list
+	/// this rendition.
+	pub(crate) fn init_pending(&self) -> bool {
+		self.run().init.is_none() && self.building.try_lock().is_err()
 	}
 
 	async fn load_init(&self) -> Result<Option<Arc<Init>>> {
@@ -1063,39 +1094,30 @@ impl Rendition {
 			return Ok(Some(init));
 		}
 
-		let mut muxer = self.muxer()?;
-
 		// An out-of-band codec builds its init straight from the catalog; an inline one returns
-		// `None` until a keyframe group is read, so bootstrap it from an indexed one: a closed
-		// group first, since reading an open one waits for the publisher to finish it.
+		// `None` until a keyframe group is read.
+		let muxer = self.muxer()?;
 		if let Some(bytes) = muxer.init()? {
 			return Ok(Some(self.cache_init(run.epoch, bytes)));
 		}
+		let Some(read) = self.init_read(muxer) else {
+			return Ok(None);
+		};
+		let Some(bytes) = read.read(&self.media, binding).await? else {
+			return Ok(None);
+		};
+		Ok(Some(self.cache_init(run.epoch, bytes)))
+	}
+
+	/// The indexed keyframe groups an inline-codec init is read from, or `None` while there are
+	/// none.
+	fn init_read(&self, muxer: Muxer) -> Option<InitRead> {
 		let mut groups = self.spans.keyframe_groups();
 		if groups.is_empty() {
 			let reference = (self.kind, self.name.clone(), self.track_name().to_string());
 			groups = self.live.keyframe_groups(&reference);
 		}
-		if groups.is_empty() {
-			return Ok(None);
-		}
-		let Some((broadcast, track)) = self.track(binding).await? else {
-			return Ok(None);
-		};
-		for sequence in groups {
-			// A group gone from the cache, before or mid-read, leaves the next candidate to try.
-			let Ok(mut group) = fetch(&track, hang::timeline::Position::group(sequence), None, &broadcast).await?
-			else {
-				continue;
-			};
-			if read_group(&mut muxer, &mut group, &broadcast).await?.is_err() {
-				continue;
-			}
-			if let Some(bytes) = muxer.init()? {
-				return Ok(Some(self.cache_init(run.epoch, bytes)));
-			}
-		}
-		Ok(None)
+		(!groups.is_empty()).then_some(InitRead { muxer, groups })
 	}
 
 	/// Fetch and transmux the segment a [`Resource::Segment`](super::Resource::Segment) URL names.
@@ -1156,7 +1178,7 @@ impl Rendition {
 			return Ok(None);
 		}
 
-		let Some((broadcast, track)) = self.track(&binding).await? else {
+		let Some((broadcast, track)) = self.media.track(&binding).await? else {
 			return Ok(None);
 		};
 
@@ -1283,10 +1305,45 @@ async fn watch_spans(
 	}
 }
 
+/// An inline-codec init still to be read from media: owned, so a background build waits on it
+/// without holding its rendition.
+struct InitRead {
+	muxer: Muxer,
+	/// Keyframe groups to try in order: a closed group first, since reading an open one waits
+	/// for the publisher to finish it.
+	groups: Vec<u64>,
+}
+
+impl InitRead {
+	/// Read the groups until one yields the init.
+	async fn read(mut self, media: &Media, binding: &moq_mux::Binding) -> Result<Option<Bytes>> {
+		let Some((broadcast, track)) = media.track(binding).await? else {
+			return Ok(None);
+		};
+		for sequence in self.groups {
+			// A group gone from the cache, before or mid-read, leaves the next candidate to try.
+			let Ok(mut group) = fetch(&track, hang::timeline::Position::group(sequence), None, &broadcast).await?
+			else {
+				continue;
+			};
+			if read_group(&mut self.muxer, &mut group, &broadcast).await?.is_err() {
+				continue;
+			}
+			if let Some(bytes) = self.muxer.init()? {
+				return Ok(Some(bytes));
+			}
+		}
+		Ok(None)
+	}
+}
+
 impl Drop for Rendition {
 	fn drop(&mut self) {
 		if let Some(watcher) = self.watcher.lock().expect("watcher lock poisoned").take() {
 			watcher.abort();
+		}
+		if let Some(build) = self.build.lock().expect("build lock poisoned").take() {
+			build.abort();
 		}
 	}
 }

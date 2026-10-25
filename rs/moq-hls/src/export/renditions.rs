@@ -511,27 +511,37 @@ impl Producer {
 		.await;
 	}
 
-	/// Resolve once an enabled video rendition has its init, or none is enabled.
+	/// Resolve once an enabled video rendition has its init and is
+	/// [advertised](Rendition::is_advertised), so a manifest lists it, or none is enabled.
 	#[cfg_attr(
 		not(feature = "server"),
 		allow(dead_code, reason = "only the `server` feature uses it")
 	)]
 	pub(crate) async fn video_init(&self) {
-		let _ = kio::wait(|waiter| {
-			self.state.poll_ref(waiter, |current| {
+		kio::wait(|waiter| {
+			let poll = self.state.poll_ref(waiter, |current| {
 				let mut video = current
 					.renditions
 					.values()
 					.filter(|rendition| rendition.kind == Kind::Video && rendition.is_enabled())
 					.peekable();
-				if video.peek().is_none() || video.any(|rendition| rendition.poll_init(waiter).is_ready()) {
+				if video.peek().is_none()
+					|| video.any(|rendition| {
+						rendition.poll_init(waiter).is_ready() && rendition.poll_advertised(waiter).is_ready()
+					}) {
 					Poll::Ready(())
 				} else {
 					Poll::Pending
 				}
-			})
+			});
+			match poll {
+				Poll::Ready(Ok(())) => Poll::Ready(()),
+				// A closed catalog adds no rendition, but the existing ones' inits keep arriving,
+				// and the predicate registered `waiter` on each of them.
+				Poll::Ready(Err(_)) | Poll::Pending => Poll::Pending,
+			}
 		})
-		.await;
+		.await
 	}
 
 	/// Enroll a freshly-created rendition in the timeline feed, replaying the recent history
