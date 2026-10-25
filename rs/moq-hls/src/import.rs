@@ -218,54 +218,65 @@ impl Fetcher {
 		Ok(Self { client, entry })
 	}
 
-	async fn media_playlist(&self, url: Url) -> Result<MediaPlaylist> {
-		let body = self.fetch_url(url).await?;
+	/// Fetch and parse a media playlist, with the URL its relative URIs resolve against.
+	async fn media_playlist(&self, url: Url) -> Result<(MediaPlaylist, Url)> {
+		let (body, base) = self.playlist(url).await?;
 
 		// Nom errors take ownership of the input, so we need to stringify any error messages.
 		let playlist = m3u8_rs::parse_media_playlist_res(&body).map_err(|e| Error::ParsePlaylist(e.to_string()))?;
 
-		Ok(playlist)
+		Ok((playlist, base))
 	}
 
-	async fn fetch_url(&self, url: Url) -> Result<Bytes> {
-		self.fetch(&Resource { url, range: None }).await
+	/// Fetch a playlist, with the URL its relative URIs resolve against: where any redirects ended.
+	async fn playlist(&self, url: Url) -> Result<(Bytes, Url)> {
+		self.get(&Resource { url, range: None }).await
 	}
 
 	async fn fetch(&self, resource: &Resource) -> Result<Bytes> {
+		Ok(self.get(resource).await?.0)
+	}
+
+	/// Fetch `resource`, with the URL that finally served it after any redirects.
+	async fn get(&self, resource: &Resource) -> Result<(Bytes, Url)> {
 		let url = &resource.url;
 		if !same_origin(&self.entry, url) {
 			return Err(Error::ResourceRefused);
 		}
 		if url.scheme() == "file" {
 			let path = url.to_file_path().map_err(|_| Error::InvalidFileUrl)?;
-			let Some(range) = resource.range else {
-				return tokio::fs::read(&path).await.map(Bytes::from).map_err(Error::from);
+			let bytes = match resource.range {
+				None => tokio::fs::read(&path).await.map(Bytes::from).map_err(Error::from)?,
+				Some(range) => {
+					let mut file = tokio::fs::File::open(&path).await.map_err(Error::from)?;
+					file.seek(SeekFrom::Start(range.start)).await.map_err(Error::from)?;
+					let mut bytes = Vec::new();
+					file.take(range.length)
+						.read_to_end(&mut bytes)
+						.await
+						.map_err(Error::from)?;
+					self.validate_range_length(resource, Bytes::from(bytes))?
+				}
 			};
-
-			let mut file = tokio::fs::File::open(&path).await.map_err(Error::from)?;
-			file.seek(SeekFrom::Start(range.start)).await.map_err(Error::from)?;
-			let mut bytes = Vec::new();
-			file.take(range.length)
-				.read_to_end(&mut bytes)
-				.await
-				.map_err(Error::from)?;
-			self.validate_range_length(resource, Bytes::from(bytes))
+			Ok((bytes, url.clone()))
 		} else {
 			let response = self.request(resource).send().await.map_err(Error::from)?;
 			if response.status().is_redirection() {
 				return Err(Error::ResourceRefused);
 			}
 			let response = response.error_for_status().map_err(Error::from)?;
+			let url = response.url().clone();
 			let partial = response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
 			if partial {
 				self.validate_content_range(resource, response.headers())?;
 			}
 			let bytes = response.bytes().await.map_err(Error::from)?;
-			if resource.range.is_some() && !partial {
-				self.slice_full_response(resource, bytes)
+			let bytes = if resource.range.is_some() && !partial {
+				self.slice_full_response(resource, bytes)?
 			} else {
-				self.validate_range_length(resource, bytes)
-			}
+				self.validate_range_length(resource, bytes)?
+			};
+			Ok((bytes, url))
 		}
 	}
 
@@ -435,12 +446,13 @@ impl TrackState {
 	/// Fetch this track's current media playlist and consume any fresh segments,
 	/// recording the playlist's target duration if not already known.
 	async fn ingest(&mut self, fetcher: &Fetcher, target_duration: &mut Option<u64>) -> Result<usize> {
-		let playlist = fetcher.media_playlist(self.playlist.clone()).await?;
+		// Reloads request the listed URL, so a redirect that moves is followed anew each time.
+		let (playlist, base) = fetcher.media_playlist(self.playlist.clone()).await?;
 		if target_duration.is_none() {
 			*target_duration = Some(playlist.target_duration);
 		}
 
-		let consumed = self.consume_segments(fetcher, &playlist).await?;
+		let consumed = self.consume_segments(fetcher, &playlist, &base).await?;
 		let last = playlist.media_sequence + playlist.segments.len() as u64;
 		self.ended = playlist.end_list && self.next_sequence.is_none_or(|next| next == last);
 		Ok(consumed)
@@ -507,7 +519,8 @@ impl TrackState {
 		self.next_sequence = None;
 	}
 
-	async fn consume_segments(&mut self, fetcher: &Fetcher, playlist: &MediaPlaylist) -> Result<usize> {
+	/// Import `playlist`'s fresh segments, resolving its relative URIs against `base`.
+	async fn consume_segments(&mut self, fetcher: &Fetcher, playlist: &MediaPlaylist, base: &Url) -> Result<usize> {
 		let playlist_seq = playlist.media_sequence;
 		let total_segments = playlist.segments.len();
 
@@ -549,7 +562,7 @@ impl TrackState {
 				map = segment.map.as_ref();
 			}
 			if !segment.uri.is_empty() {
-				let url = resolve_uri(&self.playlist, &segment.uri)?;
+				let url = resolve_uri(base, &segment.uri)?;
 				self.media_range.resolve(url, segment.byte_range.as_ref())?;
 			}
 		}
@@ -567,9 +580,10 @@ impl TrackState {
 			// m3u8-rs only attaches `EXT-X-MAP` to the segment directly after the tag, so
 			// on every segment but that one this is the map carried down from the prefix.
 			if let Some(map) = map {
-				self.ensure_map(fetcher, map).await?;
+				self.ensure_map(fetcher, map, base).await?;
 			}
-			self.push_segment(fetcher, segment, sequence, discontinuity_seq).await?;
+			self.push_segment(fetcher, segment, base, sequence, discontinuity_seq)
+				.await?;
 		}
 
 		info!(label = %self.label, consumed = to_process, "consumed HLS segments");
@@ -577,8 +591,8 @@ impl TrackState {
 	}
 
 	/// Point this track at `map`'s init segment, replacing the importer if it changed.
-	async fn ensure_map(&mut self, fetcher: &Fetcher, map: &Map) -> Result<()> {
-		let url = resolve_uri(&self.playlist, &map.uri)?;
+	async fn ensure_map(&mut self, fetcher: &Fetcher, map: &Map, base: &Url) -> Result<()> {
+		let url = resolve_uri(base, &map.uri)?;
 		let resource = resolve_map(url, map.byte_range.as_ref())?;
 
 		// The resolved resource IS the init segment's identity: same bytes, same generation.
@@ -610,6 +624,7 @@ impl TrackState {
 		&mut self,
 		fetcher: &Fetcher,
 		segment: &MediaSegment,
+		base: &Url,
 		sequence: u64,
 		discontinuity_sequence: u64,
 	) -> Result<()> {
@@ -617,7 +632,7 @@ impl TrackState {
 			return Err(Error::EmptySegmentUri);
 		}
 
-		let url = resolve_uri(&self.playlist, &segment.uri)?;
+		let url = resolve_uri(base, &segment.uri)?;
 		let mut range = self.media_range.clone();
 		let resource = range.resolve(url, segment.byte_range.as_ref())?;
 		let bytes = fetcher.fetch(&resource).await?;
@@ -676,8 +691,8 @@ impl TrackState {
 pub struct Import {
 	sink: Sink,
 	fetcher: Fetcher,
-	/// Parsed base URL for the playlist (file:// or http(s)://).
-	base_url: Url,
+	/// The configured master or media playlist URL (file:// or http(s)://).
+	playlist: Url,
 	/// All discovered video variants (one per HLS rendition).
 	video: Vec<TrackState>,
 	/// Optional audio track shared across variants.
@@ -688,11 +703,10 @@ impl Import {
 	/// Create a new HLS import that will write into the given broadcast.
 	pub fn new(broadcast: moq_net::broadcast::Producer, catalog: CatalogProducer, cfg: Config) -> Result<Self> {
 		let fetcher = Fetcher::new(&cfg)?;
-		let base_url = cfg.playlist;
 		Ok(Self {
 			sink: Sink::new(broadcast, catalog, cfg.passthrough),
 			fetcher,
-			base_url,
+			playlist: cfg.playlist,
 			video: Vec::new(),
 			audio: None,
 		})
@@ -928,10 +942,10 @@ impl Import {
 			return Ok(());
 		}
 
-		let body = self.fetcher.fetch_url(self.base_url.clone()).await?;
+		let (body, base) = self.fetcher.playlist(self.playlist.clone()).await?;
 		if !m3u8_rs::is_master_playlist(&body) {
 			// Fallback: treat the provided URL as a single (muxed) media playlist.
-			let track = self.track("video[0]", self.base_url.clone(), select_muxed());
+			let track = self.track("video[0]", self.playlist.clone(), select_muxed());
 			self.video.push(track);
 			return Ok(());
 		}
@@ -947,7 +961,7 @@ impl Import {
 		if let Some(group_id) = variants.iter().find_map(|v| v.audio.as_deref()) {
 			if let Some(audio_tag) = select_audio(&master, group_id) {
 				if let Some(uri) = &audio_tag.uri {
-					let audio_url = resolve_uri(&self.base_url, uri)?;
+					let audio_url = resolve_uri(&base, uri)?;
 					// Boundaries follow the video variant; audio only reports its groups.
 					self.audio = Some(self.track("audio", audio_url, select_audio_only()));
 				} else {
@@ -966,7 +980,7 @@ impl Import {
 			select_muxed()
 		};
 		for (index, variant) in variants.iter().enumerate() {
-			let video_url = resolve_uri(&self.base_url, &variant.uri)?;
+			let video_url = resolve_uri(&base, &variant.uri)?;
 			let track = self.track(format!("video[{index}]"), video_url, variant_select.clone());
 			self.video.push(track);
 		}
@@ -1328,7 +1342,7 @@ mod tests {
 			let url = resolve_uri(entry, reference).unwrap();
 			let fetcher = fetcher(entry);
 			assert!(
-				matches!(fetcher.fetch_url(url.clone()).await, Err(Error::ResourceRefused)),
+				matches!(fetcher.playlist(url.clone()).await, Err(Error::ResourceRefused)),
 				"{reference} from {entry}"
 			);
 			assert!(matches!(
@@ -1350,7 +1364,9 @@ mod tests {
 				http_response("200 OK", &[], b"moved"),
 			],
 		);
-		assert_eq!(fetcher(&entry).fetch_url(entry.clone()).await.unwrap(), b"moved"[..]);
+		let (body, base) = fetcher(&entry).playlist(entry.clone()).await.unwrap();
+		assert_eq!(body, b"moved"[..]);
+		assert_eq!(base, entry.join("/moved.m3u8").unwrap());
 		server.await.unwrap();
 
 		// A later hop to another origin is refused before it is requested.
@@ -1367,11 +1383,83 @@ mod tests {
 			],
 		);
 		assert!(matches!(
-			fetcher(&entry).fetch_url(entry.clone()).await,
+			fetcher(&entry).playlist(entry.clone()).await,
 			Err(Error::ResourceRefused)
 		));
 		server.await.unwrap();
 		assert_eq!(other.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+	}
+
+	#[tokio::test]
+	async fn redirected_master_resolves_against_its_final_url() {
+		let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let origin = format!("http://{}", listener.local_addr().unwrap());
+		let master = "#EXTM3U\n\
+			#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aac\",NAME=\"en\",DEFAULT=YES,URI=\"audio.m3u8\"\n\
+			#EXT-X-STREAM-INF:BANDWIDTH=1000,CODECS=\"avc1.4d401f,mp4a.40.2\",AUDIO=\"aac\"\nvideo.m3u8\n";
+		let server = serve(
+			listener,
+			vec![
+				http_response("302 Found", &[("Location", "/new/master.m3u8")], b""),
+				http_response("200 OK", &[], master.as_bytes()),
+			],
+		);
+		let sink = sink();
+		let cfg = Config::new(Url::parse(&format!("{origin}/old/master.m3u8")).unwrap());
+		let mut import = Import::new(sink.broadcast, sink.catalog, cfg).unwrap();
+		import.ensure_tracks().await.unwrap();
+		server.await.unwrap();
+
+		assert_eq!(import.video[0].playlist.as_str(), format!("{origin}/new/video.m3u8"));
+		assert_eq!(
+			import.audio.unwrap().playlist.as_str(),
+			format!("{origin}/new/audio.m3u8")
+		);
+	}
+
+	#[tokio::test]
+	async fn redirected_media_playlist_resolves_against_its_final_url() {
+		let (init, fragments) = fmp4_parts(1);
+		let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let origin = format!("http://{}", listener.local_addr().unwrap());
+		let media = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:1,\n0.m4s\n";
+		let moved = http_response("302 Found", &[("Location", "/new/video.m3u8")], b"");
+		let server = serve(
+			listener,
+			vec![
+				moved.clone(),
+				http_response("200 OK", &[], media.as_bytes()),
+				http_response("200 OK", &[], &init),
+				http_response("200 OK", &[], &fragments[0]),
+				// The reload asks the listed URL again, so a moved redirect is followed anew.
+				moved,
+				http_response("200 OK", &[], media.as_bytes()),
+			],
+		);
+		let entry = Url::parse(&format!("{origin}/old/video.m3u8")).unwrap();
+		let fetcher = fetcher(&entry);
+		let mut track = TrackState::new("video[0]".to_string(), entry, select_muxed(), sink());
+		let mut target_duration = None;
+		assert_eq!(track.ingest(&fetcher, &mut target_duration).await.unwrap(), 1);
+		assert_eq!(track.ingest(&fetcher, &mut target_duration).await.unwrap(), 0);
+
+		let paths: Vec<_> = server
+			.await
+			.unwrap()
+			.iter()
+			.map(|r| request_path(r).unwrap().to_string())
+			.collect();
+		assert_eq!(
+			paths,
+			[
+				"/old/video.m3u8",
+				"/new/video.m3u8",
+				"/new/init.mp4",
+				"/new/0.m4s",
+				"/old/video.m3u8",
+				"/new/video.m3u8",
+			]
+		);
 	}
 
 	#[tokio::test]
@@ -1403,7 +1491,10 @@ mod tests {
 		std::fs::write(&path, b"sentinel").unwrap();
 		let url = Url::from_file_path(&path).unwrap();
 		let fetcher = Fetcher::new(&Config::new(url.clone())).unwrap();
-		assert_eq!(fetcher.fetch_url(url.clone()).await.unwrap(), b"sentinel"[..]);
+		assert_eq!(
+			fetcher.playlist(url.clone()).await.unwrap(),
+			(Bytes::from_static(b"sentinel"), url.clone())
+		);
 		assert_eq!(fetcher.fetch(&ranged_resource(url)).await.unwrap(), b"nti"[..]);
 	}
 
@@ -1416,7 +1507,7 @@ mod tests {
 				Fetcher::new(&Config::new(url.clone())),
 				Err(Error::ResourceRefused)
 			));
-			let error = fetcher(&entry).fetch_url(url).await.unwrap_err();
+			let error = fetcher(&entry).playlist(url).await.unwrap_err();
 			assert!(matches!(error, Error::ResourceRefused));
 			assert!(!format!("{error} {error:?}").contains("secret"));
 		}
@@ -2050,7 +2141,8 @@ mod tests {
 		let before = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:1,\n0.m4s\n";
 		let before = m3u8_rs::parse_media_playlist_res(before.as_bytes()).unwrap();
 		let local = fetcher(&track.playlist);
-		track.consume_segments(&local, &before).await.unwrap();
+		let base = track.playlist.clone();
+		track.consume_segments(&local, &before, &base).await.unwrap();
 		let name = |snapshot: &moq_mux::catalog::hang::Catalog| {
 			if video {
 				snapshot.video.renditions.keys().next()
@@ -2073,7 +2165,7 @@ mod tests {
 			"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:1,\n0.m4s\n{tags}#EXTINF:1,\n1.m4s\n"
 		);
 		let after = m3u8_rs::parse_media_playlist_res(after.as_bytes()).unwrap();
-		let result = track.consume_segments(&local, &after).await;
+		let result = track.consume_segments(&local, &after, &base).await;
 		let after_name = name(&catalog.snapshot());
 		let (old_groups, terminal) = group_stamps(&mut old);
 		let new_groups = if before_name != after_name {
