@@ -1074,7 +1074,13 @@ mod tests {
 	#[tokio::test]
 	async fn a_successful_drain_ends_the_track_cleanly() {
 		let (producer, mut track) = track_under_test().await;
-		finalize(producer, Ok(()), &Default::default(), crate::publish::Child::Video(Id::try_from(1u32).unwrap())).unwrap();
+		finalize(
+			producer,
+			Ok(()),
+			&Default::default(),
+			crate::publish::Child::Video(Id::try_from(1u32).unwrap()),
+		)
+		.unwrap();
 		assert!(matches!(track.recv_group().await, Ok(None)), "expected a clean end");
 	}
 
@@ -1085,7 +1091,13 @@ mod tests {
 	async fn a_failed_drain_aborts_the_track() {
 		let (producer, mut track) = track_under_test().await;
 		let err = moq_video::Error::Codec(anyhow::anyhow!("the codec lost the tail"));
-		finalize(producer, Err(err), &Default::default(), crate::publish::Child::Video(Id::try_from(1u32).unwrap())).unwrap_err();
+		finalize(
+			producer,
+			Err(err),
+			&Default::default(),
+			crate::publish::Child::Video(Id::try_from(1u32).unwrap()),
+		)
+		.unwrap_err();
 
 		let Err(err) = track.recv_group().await else {
 			panic!("expected an abort, not a clean end");

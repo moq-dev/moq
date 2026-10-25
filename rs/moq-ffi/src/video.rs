@@ -443,7 +443,12 @@ pub struct MoqVideoProducer {
 impl crate::producer::Child for MoqVideoProducer {
 	fn abort(&self, err: moq_net::Error) {
 		let _guard = crate::ffi::runtime().enter();
-		let Some(producer) = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() else {
+		let Some(producer) = self
+			.inner
+			.lock()
+			.unwrap_or_else(std::sync::PoisonError::into_inner)
+			.take()
+		else {
 			return;
 		};
 		if let Some(mut follow) = self.follow.lock().unwrap().take() {

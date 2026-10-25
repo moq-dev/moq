@@ -195,7 +195,10 @@ impl Abort for Kept<Box<import::Track>> {
 
 impl Abort for Kept<moq_net::track::Producer> {
 	fn abort(self, err: moq_net::Error) {
-		let _ = self.inner.abort(err);
+		// A track with a declared end ends there, as when its last producer drops.
+		if self.inner.end().is_none() {
+			let _ = self.inner.abort(err);
+		}
 	}
 }
 
@@ -1227,7 +1230,11 @@ impl State {
 	/// The children end first, with `Unroutable` as a reader sees a publisher leave, so none
 	/// outlives the broadcast it publishes on.
 	pub fn publish_close(&mut self, broadcast: Id) -> Result<(), Error> {
-		let broadcast = self.publish.broadcasts.remove(broadcast).ok_or(Error::BroadcastNotFound)?;
+		let broadcast = self
+			.publish
+			.broadcasts
+			.remove(broadcast)
+			.ok_or(Error::BroadcastNotFound)?;
 		let err = moq_net::Error::Unroutable;
 		for child in broadcast.children.close() {
 			match child {
@@ -1279,7 +1286,10 @@ mod children_tests {
 		state.publish_close(broadcast).unwrap();
 		for mut reader in readers {
 			let read = moq_clock::timeout(TIMEOUT, reader.recv_group()).await;
-			assert!(matches!(read.expect("the track carried on"), Err(moq_net::Error::Unroutable)));
+			assert!(matches!(
+				read.expect("the track carried on"),
+				Err(moq_net::Error::Unroutable)
+			));
 		}
 		assert!(matches!(state.publish.track_finish(track), Err(Error::TrackNotFound)));
 		assert!(matches!(state.publish.media_finish(media), Err(Error::MediaNotFound)));

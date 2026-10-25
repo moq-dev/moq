@@ -4151,7 +4151,11 @@ async fn finish_serves_finished_tracks_until_close() {
 /// One raw and one media handle on `broadcast`, each with a subscriber reading it.
 async fn children(
 	broadcast: &MoqBroadcastProducer,
-) -> (Arc<MoqTrackProducer>, Arc<MoqMediaTrackProducer>, [Arc<MoqTrackConsumer>; 2]) {
+) -> (
+	Arc<MoqTrackProducer>,
+	Arc<MoqMediaTrackProducer>,
+	[Arc<MoqTrackConsumer>; 2],
+) {
 	let consumer = broadcast.consume().unwrap();
 	let raw = broadcast.publish_track("raw".into(), Some(timed_info())).unwrap();
 	let media = MoqMediaTrackProducer::audio(

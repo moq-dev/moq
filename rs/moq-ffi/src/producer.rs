@@ -108,8 +108,18 @@ impl Drop for BroadcastProducer {
 	}
 }
 
+/// `Send + Sync` natively, where any thread may close a broadcast; nothing on single-threaded wasm.
+#[cfg(not(target_family = "wasm"))]
+pub(crate) trait Shared: Send + Sync {}
+#[cfg(not(target_family = "wasm"))]
+impl<T: Send + Sync + ?Sized> Shared for T {}
+#[cfg(target_family = "wasm")]
+pub(crate) trait Shared {}
+#[cfg(target_family = "wasm")]
+impl<T: ?Sized> Shared for T {}
+
 /// A handle publishing tracks on a broadcast, which its broadcast ends on close.
-pub(crate) trait Child: Send + Sync {
+pub(crate) trait Child: Shared {
 	/// End whatever this handle still publishes with `err`, so later calls fail with `Closed`.
 	///
 	/// A track that already finished ends cleanly instead.
@@ -580,7 +590,6 @@ impl MoqTrackRequest {
 		}
 	}
 
-
 	/// Take the inner request so an importer can accept it (setting the timescale). Used by
 	/// [`crate::media::MoqMediaTrackProducer::audio`].
 	pub(crate) fn take(&self) -> Result<moq_net::track::Request, MoqError> {
@@ -653,8 +662,9 @@ pub struct MoqTrackProducer {
 impl Child for MoqTrackProducer {
 	fn abort(&self, err: moq_net::Error) {
 		let _guard = crate::ffi::enter();
-		// A finished track whose groups all settled still ends cleanly.
-		if let Some(track) = self.inner.lock().unwrap().take() {
+		// A finished track ends at its declared end, as when its handle drops.
+		let track = self.inner.lock().unwrap().take();
+		if let Some(track) = track.filter(|track| track.end().is_none()) {
 			let _ = track.abort(err);
 		}
 	}
