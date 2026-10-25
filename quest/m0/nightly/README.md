@@ -38,4 +38,3 @@ Public API: none. Wire: none.
 - [qmux fallback closes cleanly](/quest/m0/nightly/qmux-fallback-close.md) - the WebSocket fallback startup benchmark stops failing "not cleanly closed"
 - [ts_schedule regression](/quest/m0/nightly/ts-schedule.md) - the moq-mux `ts_schedule` benches return to their old cost
 - [Nightly's base in a shallow checkout](/quest/m0/nightly/shallow-base.md) - `sh/gh/nightly.test.py` passes in Nightly's depth-1 checkout
-- [Advisory bumps](/quest/m0/nightly/advisories.md) - both audits pass on today's advisories
