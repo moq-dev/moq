@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Connection::allocator` ([#6751](https://github.com/moq-dev/moq/pull/6751))
+
+`Connection::bandwidth()` is `Connection::allocator()`, mirroring `moq_net::Session::allocator()`.
+
 ### The connection receive window is 128 MiB, and has a floor (#5878)
 
 `quic::DEFAULT_RECEIVE_WINDOW` is 128 MiB instead of 64 MiB, since incomplete messages now hold connection credit until complete.

@@ -4,6 +4,25 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Names say one thing ([#6751](https://github.com/moq-dev/moq/pull/6751))
+
+Rename these, which kept their behavior:
+
+| Before | After |
+|---|---|
+| `Session::bandwidth()` | `Session::allocator()` |
+| `Client::with_bandwidth` | `Client::with_allocator` |
+| `auth::Auth` | `auth::Credential` |
+| `track::Consumer::query()`, `track::Querying` | `track::Consumer::info()`, `track::Resolving` |
+| `bandwidth::Reservation::consumer()` | `bandwidth::Reservation::consume()` |
+| `stats::Control` | `stats::Message` |
+| `stats::Bytes` | `stats::Totals` |
+| `transport::Stats`, `transport::poll::Session::stats()` | `transport::Metrics`, `transport::poll::Session::metrics()` |
+
+`group::Demand` reads like `track::Demand`: replace `is_used()` with `wanted()`, and `used()`, `unused()`, `poll_used`, and `poll_unused` with a loop over `wanted_changed()` (or `poll_wanted_changed`), which returns the new value each time it changes and errors once the group closes.
+`transport::Metrics` drops `bytes_sent` and `bytes_received`: a transport reports them through the `transport::Wire` it returns from `wire()`, which `session::Stats` now reads.
+`transport::StatsUnavailable` is gone: `metrics()` defaults to reporting nothing, so delete an implementation that returned it.
+
 ### `stats::Refusal` is `stats::RefusalKind`, and `time::now` is gone (#6510)
 
 Rename `moq_net::stats::Refusal` to `moq_net::stats::RefusalKind`, so it no longer shares a name with `moq_auth::Refusal`; its variants and `Refusals` are unchanged.

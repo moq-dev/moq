@@ -152,7 +152,7 @@ export class Reload {
 	 * estimate is `undefined` while disconnected, which tells a sender to hold
 	 * its rate rather than encode at zero.
 	 */
-	readonly bandwidth: Allocator;
+	readonly allocator: Allocator;
 
 	/**
 	 * The auth handle every session of the loop is built on, spanning reconnects.
@@ -328,8 +328,8 @@ export class Reload {
 			effect.set(this.#probeSource, effect.get(this.established)?.probe, undefined);
 		});
 
-		this.bandwidth = new Allocator(this.#estimate);
-		this.#signals.cleanup(() => this.bandwidth.close());
+		this.allocator = new Allocator(this.#estimate);
+		this.#signals.cleanup(() => this.allocator.close());
 
 		// The transport has no event for the send-rate estimate, so sample on our
 		// own schedule and skip a tick while the previous snapshot is outstanding.

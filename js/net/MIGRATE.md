@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Names say one thing ([#6751](https://github.com/moq-dev/moq/pull/6751))
+
+`Auth.Auth` is `Auth.Credential`, and `Reservation.grant` is `Reservation.rate`.
+A connection's `bandwidth` allocator is `allocator`, mirroring Rust's `Session::allocator()`.
+`Track.Producer.writeGroup(group)` is `createGroup(sequence)`, which creates the group and returns it like `appendGroup()`: replace `const group = new Group.Producer(n); track.writeGroup(group);` with `const group = track.createGroup(n);`.
+A group can no longer be written before it joins a track, or join more than one track.
+
 ### Published names refuse navigation segments
 
 Broadcast creation and route publication now refuse literal `.` and `..` segments, including segments in the producer's root.
