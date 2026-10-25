@@ -1651,9 +1651,11 @@ impl Recover {
 		}
 		while self.route.poll_changed(self.generation, waiter).is_ready() {
 			// A route that returned serves the copy being read again, which the reader reuses.
+			// Closed routes stay ready forever, so they end the wait like a conclusion.
 			let route = self.route.state.read();
 			if route.end.is_some()
 				|| route.concluded
+				|| route.is_closed()
 				|| !route.copy.as_ref().is_some_and(|copy| copy.same_channel(&self.copy))
 			{
 				return true;
@@ -2479,6 +2481,31 @@ mod test {
 			sub.recv_group().now_or_never().is_none(),
 			"the group was handed out twice"
 		);
+	}
+
+	/// Routes that close without concluding read like a conclusion: a reader stalled
+	/// mid-group parks on the copy it is reading rather than polling the closed routes
+	/// forever, and finishes the group from that copy.
+	#[moq_clock::test]
+	async fn a_stalled_group_parks_when_the_routes_close() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, Duration::from_secs(10));
+
+		let mut open = a.create_group(group::Info { sequence: 0 }).unwrap();
+		open.write_frame(ts(0), b"a".as_ref()).unwrap();
+		let mut reading = recv(&mut sub);
+		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+
+		drop(routes);
+		assert!(reading.poll_read_frame(&kio::Waiter::noop()).is_pending());
+
+		open.write_frame(ts(1), b"b".as_ref()).unwrap();
+		assert_eq!(read(&mut reading), Some(b"b".to_vec()));
+		open.finish().unwrap();
+		assert_eq!(read(&mut reading), None);
 	}
 
 	/// A plain reader of a compressed group inflates from frame 0, so the replacement that
