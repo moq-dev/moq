@@ -578,26 +578,29 @@ mod tests {
 		let mut decoder = moq_video::decode::Consumer::new(&broadcast, config, video.clone(), options)
 			.await
 			.expect("video decoder");
-		let frame = tokio::time::timeout(TIMEOUT, async {
+		// The canvas is black until the color source delivers its first
+		// picture, so wait for the composed one rather than take the first.
+		tokio::time::timeout(TIMEOUT, async {
 			loop {
-				match decoder.read().await.expect("decode") {
-					Some(moq_video::decode::Read::Frame(frame)) => return frame,
+				let frame = match decoder.read().await.expect("decode") {
+					Some(moq_video::decode::Read::Frame(frame)) => frame,
 					Some(_) => continue,
 					None => panic!("the video ended"),
+				};
+				assert_eq!(frame.size(), moq_video::Size::new(320, 180));
+				let rgba = frame.surface.to_rgba(&Default::default()).expect("rgba");
+				let center = (90 * 320 + 160) * 4;
+				let [r, g, b, _] = rgba.data()[center..center + 4] else {
+					unreachable!()
+				};
+				// H.264 and its 4:2:0 round trip shift a primary a little.
+				if r > 200 && g < 60 && b < 60 {
+					return;
 				}
 			}
 		})
 		.await
-		.expect("a picture arrives");
-
-		assert_eq!(frame.size(), moq_video::Size::new(320, 180));
-		let rgba = frame.surface.to_rgba(&Default::default()).expect("rgba");
-		let center = (90 * 320 + 160) * 4;
-		let [r, g, b, _] = rgba.data()[center..center + 4] else {
-			unreachable!()
-		};
-		// H.264 and its 4:2:0 round trip shift a primary a little.
-		assert!(r > 200 && g < 60 && b < 60, "{:?}", [r, g, b]);
+		.expect("the composed picture arrives");
 
 		let (audio, config) = catalog.audio.enabled().next().expect("an audio rendition");
 		let mut options = moq_audio::decode::Options::new();
