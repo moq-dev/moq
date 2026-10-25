@@ -5,7 +5,7 @@
 //! rendition keeps one continuous media playlist across decoder reconfigurations, so the whole
 //! recording stays playable from its master playlist.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque, btree_map};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -197,7 +197,7 @@ impl Recording {
 		loop {
 			tokio::select! {
 				change = changes.next(), if listing => match change.context("recording failed")? {
-					Some(renditions::Event::Added(rendition)) => steps.extend(self.add(rendition).map(advance)),
+					Some(renditions::Event::Added(rendition)) => steps.extend(self.add(rendition)?.map(advance)),
 					// A removed instance's cursor drains and ends on its own.
 					Some(_) => {}
 					None => listing = false,
@@ -210,34 +210,39 @@ impl Recording {
 	}
 
 	/// Start recording a new instance of a rendition, or queue it behind the one recording.
-	fn add(&mut self, rendition: Arc<Rendition>) -> Option<Read> {
+	fn add(&mut self, rendition: Arc<Rendition>) -> anyhow::Result<Option<Read>> {
 		let key = (rendition.kind, rendition.name.clone());
 		// Subscribe now: the cursor starts at the oldest row retained when it is created.
 		let cursor = rendition.segments();
-		let slot = self.slots.entry(key.clone()).or_insert_with(|| {
-			let name = utf8_percent_encode(&rendition.name, PATH_SEGMENT).to_string();
-			Slot {
-				dir: self.dir.join(rendition.kind.as_str()).join(&name),
-				uri: format!(
-					"{}/{}/media.m3u8",
-					rendition.kind.as_str(),
-					utf8_percent_encode(&name, PATH_SEGMENT)
-				),
-				rendition: None,
-				variant: Variant::of(&rendition),
-				playlist: Playlist::default(),
-				recording: None,
-				queued: VecDeque::new(),
-				instances: 0,
-				last: None,
+		let slot = match self.slots.entry(key.clone()) {
+			btree_map::Entry::Occupied(entry) => entry.into_mut(),
+			btree_map::Entry::Vacant(entry) => {
+				let name = utf8_percent_encode(&rendition.name, PATH_SEGMENT).to_string();
+				let dir = self.dir.join(rendition.kind.as_str()).join(&name);
+				create_slot_dir(&dir)?;
+				entry.insert(Slot {
+					dir,
+					uri: format!(
+						"{}/{}/media.m3u8",
+						rendition.kind.as_str(),
+						utf8_percent_encode(&name, PATH_SEGMENT)
+					),
+					rendition: None,
+					variant: Variant::of(&rendition),
+					playlist: Playlist::default(),
+					recording: None,
+					queued: VecDeque::new(),
+					instances: 0,
+					last: None,
+				})
 			}
-		});
+		};
 		slot.rendition = Some(rendition);
 		slot.queued.push_back(cursor);
-		match slot.recording {
+		Ok(match slot.recording {
 			Some(_) => None,
 			None => slot.begin(key),
-		}
+		})
 	}
 
 	/// Record what one cursor read, returning its next read.
@@ -501,6 +506,24 @@ impl Playlist {
 }
 
 /// Replace `path` with `contents` in one step, so a reader never sees a partial file.
+/// Create a rendition's directory, refusing one that already exists.
+///
+/// Rendition names are case-sensitive, but a filesystem may fold case or trailing dots, so two
+/// renditions can name one directory. The recording starts in an empty directory, so an
+/// existing one is another rendition's.
+fn create_slot_dir(dir: &Path) -> anyhow::Result<()> {
+	let parent = dir.parent().expect("a rendition directory has a kind directory");
+	std::fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+	match std::fs::create_dir(dir) {
+		Ok(()) => Ok(()),
+		Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => anyhow::bail!(
+			"refusing to record into {}: another rendition already records there",
+			dir.display()
+		),
+		Err(err) => Err(err).with_context(|| format!("failed to create {}", dir.display())),
+	}
+}
+
 async fn write(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
 	if let Some(parent) = path.parent() {
 		tokio::fs::create_dir_all(parent)
@@ -816,6 +839,26 @@ mod tests {
 			.unwrap();
 		let master = read(dir.path().join("master.m3u8"));
 		assert!(master.contains("\nvideo/video1/media.m3u8\n"), "{master}");
+	}
+
+	/// A rendition whose directory another rendition already holds, as two names differing only
+	/// in case do on a case-insensitive filesystem, fails the recording instead of mixing files.
+	#[tokio::test]
+	async fn renditions_sharing_a_directory_are_refused() {
+		let mut publisher = Publisher::new(&["video0"]);
+		let broadcaster = publisher.broadcaster();
+		publisher.gop(0);
+		publisher.finish();
+
+		let dir = tempfile::tempdir().unwrap();
+		let recording = Recording::create(dir.path().to_path_buf()).unwrap();
+		// Stands in for the colliding sibling, which a case-sensitive filesystem cannot produce.
+		std::fs::create_dir_all(dir.path().join("video").join("video0")).unwrap();
+		let err = moq_clock::timeout(TIMEOUT, recording.run(&broadcaster))
+			.await
+			.expect("the recording ends")
+			.unwrap_err();
+		assert!(err.to_string().contains("another rendition"), "{err:#}");
 	}
 
 	/// A publisher that drops its session fails the recording, leaving playlists unended.
