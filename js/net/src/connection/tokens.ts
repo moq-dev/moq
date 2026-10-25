@@ -28,6 +28,21 @@ export function credential(url: URL, tokens: readonly string[], setupToken: bool
 	return { url: setupToken ? url : withJwt(url, first), setup: first, connection: first };
 }
 
+/**
+ * Decide what a dial to the WebSocket fallback's own URL presents.
+ *
+ * The fallback presents the credential its URL decides, never one taken from the primary:
+ * its own `jwt`, else the primary URL's `jwt`, else the configured tokens as {@link credential}
+ * decides them.
+ *
+ * @internal
+ */
+export function fallback(primary: URL, url: URL, tokens: readonly string[], setupToken: boolean): Credential {
+	const inherited = primary.searchParams.get("jwt");
+	if (inherited && !url.searchParams.get("jwt")) return credential(withJwt(url, inherited), tokens, setupToken);
+	return credential(url, tokens, setupToken);
+}
+
 /** `url` with `jwt` appended to its query. @internal */
 export function withJwt(url: URL, jwt: string): URL {
 	const next = new URL(url);

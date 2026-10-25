@@ -54,13 +54,12 @@ impl Holder {
 		}
 	}
 
-	/// Hold the tokens `credential` leaves over. Call it before the dial's session is
-	/// published: the new tokens register before this returns, so a request the session
-	/// sends early waits on their answers rather than being refused outside the
-	/// connection credential's grant.
-	pub fn dialed(&self, credential: Credential) {
+	/// Hold the tokens `credential` leaves over. Call it before the dial that presents
+	/// `credential` starts: the new tokens register before this returns, so the session
+	/// presents them from its start.
+	pub fn dialed(&self, credential: &Credential) {
 		let mut state = self.shared.state.lock().unwrap();
-		state.credential = Some(credential);
+		state.credential = Some(credential.clone());
 		state.held.unsupported = false;
 		state.update();
 		drop(state);
@@ -283,7 +282,7 @@ mod tests {
 		let versions = moq_net::Versions::from("moq-lite-07-wip".parse::<moq_net::Version>().unwrap());
 		let credential = Credential::new(&url.parse().unwrap(), &versions, &tokens.snapshot());
 		let holder = Holder::new(pair.auth.clone(), tokens.consume());
-		holder.dialed(credential);
+		holder.dialed(&credential);
 		(tokens, holder)
 	}
 

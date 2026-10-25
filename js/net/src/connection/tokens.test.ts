@@ -6,7 +6,7 @@ import { Reader } from "../stream.ts";
 import type { Established } from "./established.ts";
 import { offered } from "./extensions.ts";
 import { exchangeSetup } from "./handshake.ts";
-import { credential, extra, Held, hold } from "./tokens.ts";
+import { credential, extra, fallback, Held, hold } from "./tokens.ts";
 
 const URL_ = new URL("https://relay.example.com/room");
 
@@ -30,6 +30,21 @@ test("a URL credential sends every other token on AUTH", () => {
 	expect(dial.url.href).toBe(url.href);
 	expect(dial.setup).toBeUndefined();
 	expect(extra(dial, ["a", "peer"])).toEqual(["a"]);
+});
+
+test("a WebSocket fallback presents the credential its own URL decides", () => {
+	const ws = new URL("wss://ws.example.com/room");
+	// Its own `jwt` is its connection credential, so the configured token rides AUTH, not SETUP.
+	const own = fallback(URL_, new URL("wss://ws.example.com/room?jwt=b"), ["a"], true);
+	expect(own.setup).toBeUndefined();
+	expect(extra(own, ["a"])).toEqual(["a"]);
+	// Without one it inherits the primary URL's, or else takes the configured tokens.
+	expect(fallback(new URL("https://relay.example.com/room?jwt=p"), ws, ["a"], true).url.href).toBe(
+		`${ws.href}?jwt=p`,
+	);
+	const configured = fallback(URL_, ws, ["a"], false);
+	expect(configured.url.href).toBe(`${ws.href}?jwt=a`);
+	expect(configured.setup).toBe("a");
 });
 
 test("no tokens present nothing", () => {

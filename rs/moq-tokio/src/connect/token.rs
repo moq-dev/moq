@@ -95,6 +95,7 @@ impl Tokens {
 }
 
 /// What one dial presents, decided from its URL, the offered versions, and the tokens.
+#[derive(Clone)]
 pub(crate) struct Credential {
 	/// The URL to dial, carrying the connection credential in its query when an offered
 	/// version has no SETUP token.

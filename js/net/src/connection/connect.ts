@@ -18,7 +18,7 @@ import type { Established } from "./established.ts";
 import * as Extensions from "./extensions.ts";
 import { DISCOVERY_REMOVED, forwardAnnounced } from "./forward.ts";
 import { exchangeSetup, legacyPeerImplementation } from "./handshake.ts";
-import { type Credential, credential, hold, withJwt } from "./tokens.ts";
+import { type Credential, credential, fallback, hold } from "./tokens.ts";
 
 // Default head start for WebTransport before attempting the WebSocket fallback.
 const DEFAULT_WEBSOCKET_DELAY_MS = Milli(500);
@@ -328,12 +328,12 @@ export async function connect({ url, ...props }: ConnectProps): Promise<Establis
 			: () => {};
 
 	const tokens = props.tokens ?? [];
-	const dial = credential(url, tokens, offer(props.versions).setupToken);
-	const pending = connectInner(dial, props, abort);
+	const pending = connectInner(url, tokens, props, abort);
 	try {
 		// A `pending` rejection propagates unless the abort or timeout beat it to the finish line.
-		const connection = await Promise.race([pending, abort.then(() => undefined)]);
-		if (connection && !signal.aborted && !expired) {
+		const connected = await Promise.race([pending, abort.then(() => undefined)]);
+		if (connected && !signal.aborted && !expired) {
+			const [connection, dial] = connected;
 			if (props.consume) forwardAnnounced(connection, props.consume);
 			// Before the caller sees the session, so its first requests wait on these answers.
 			hold(connection, dial, tokens);
@@ -341,7 +341,7 @@ export async function connect({ url, ...props }: ConnectProps): Promise<Establis
 		}
 
 		// Close a connection that settles after the abort or timeout.
-		pending.then((conn) => conn.abort()).catch(() => {});
+		pending.then(([conn]) => conn.abort()).catch(() => {});
 		// The caller's abort is teardown and wins over the timeout.
 		throw signal.aborted ? signal.reason : expired;
 	} finally {
@@ -361,32 +361,30 @@ function dialable(url: URL): URL {
 	return new URL(`https:${url.href.slice(url.protocol.length)}`);
 }
 
+/** Dial `raw`, resolving with the session and the credential the winning transport presented. */
 async function connectInner(
-	dial: Credential,
+	raw: URL,
+	tokens: readonly string[],
 	props: Omit<ConnectProps, "url">,
 	abort: Promise<void>,
-): Promise<Established> {
+): Promise<[Established, Credential]> {
+	const offered = offer(props.versions);
+	const dial = credential(raw, tokens, offered.setupToken);
 	const url = dialable(dial.url);
-	const wiring: SessionProps = {
+	const fallbackDial = props.websocket?.url && fallback(raw, props.websocket.url, tokens, offered.setupToken);
+	const wiring = (presented: Credential): SessionProps => ({
 		publish: props.publish,
 		handle: props.auth,
 		client: true,
 		extensions: Extensions.offered(props.extensions),
-		token: dial.setup === undefined ? undefined : new TextEncoder().encode(dial.setup),
+		token: presented.setup === undefined ? undefined : new TextEncoder().encode(presented.setup),
 		implementation: props.implementation ?? IMPLEMENTATION,
-	};
-	// A fallback URL needs the credential wherever the primary one does.
-	const fallback =
-		props.websocket?.url && url.searchParams.get("jwt") && !props.websocket.url.searchParams.get("jwt")
-			? withJwt(props.websocket.url, url.searchParams.get("jwt") as string)
-			: props.websocket?.url;
-
-	const offered = offer(props.versions);
+	});
 
 	if (props.transport) {
 		const transport = props.transport;
 		void abort.then(() => transport.close());
-		return connectTransport(url, transport, wiring, offered.setup);
+		return [await connectTransport(url, transport, wiring(dial), offered.setup), dial];
 	}
 
 	// Stop transports after one connects or the caller aborts.
@@ -403,7 +401,7 @@ async function connectInner(
 		!webtransport || websocketWon.has(url.toString()) ? 0 : (props.websocket?.delay ?? DEFAULT_WEBSOCKET_DELAY_MS);
 	const websocket =
 		props.websocket?.enabled !== false
-			? connectWebSocket(fallback ?? url, headstart, cancel, offered.alpns)
+			? connectWebSocket(fallbackDial?.url ?? url, headstart, cancel, offered.alpns)
 			: undefined;
 
 	if (!websocket && !webtransport) {
@@ -450,7 +448,8 @@ async function connectInner(
 		session.close();
 		throw new Error("server negotiated no protocol, and no offered version negotiates in SETUP");
 	}
-	return await connectTransport(url, session as WebTransport, wiring, offered.setup);
+	const won = session instanceof Session && fallbackDial ? fallbackDial : dial;
+	return [await connectTransport(url, session as WebTransport, wiring(won), offered.setup), won];
 }
 
 async function connectTransport(

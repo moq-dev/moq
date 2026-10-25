@@ -370,6 +370,11 @@ impl Client {
 		Ok(session)
 	}
 
+	/// What a dial to `url` presents of `tokens`, given the versions this client offers.
+	pub(crate) fn credential(&self, url: &Url, tokens: &crate::connect::Set) -> crate::connect::Credential {
+		crate::connect::Credential::new(url, &self.versions, tokens)
+	}
+
 	/// Dial the given URL and complete the MoQ handshake.
 	///
 	/// Errors if no transport feature is compiled in.
@@ -383,14 +388,14 @@ impl Client {
 	pub(crate) async fn dial(
 		&self,
 		_addr: crate::connect::Addr,
-		_tokens: &crate::connect::Set,
-	) -> crate::Result<(Dialed, crate::connect::Credential)> {
+		_credential: &crate::connect::Credential,
+	) -> crate::Result<Dialed> {
 		Err(Error::NoBackend(
 			"no backend compiled; enable quic, iroh, websocket, tcp, or uds feature",
 		))
 	}
 
-	/// Dial the given URL and complete the MoQ handshake.
+	/// Dial the given URL and complete the MoQ handshake, presenting `credential`.
 	///
 	/// The scheme picks the transport, and `https://` races QUIC against the
 	/// WebSocket fallback so a blocked UDP path still connects. The session's
@@ -406,13 +411,12 @@ impl Client {
 	pub(crate) async fn dial(
 		&self,
 		addr: crate::connect::Addr,
-		tokens: &crate::connect::Set,
-	) -> crate::Result<(Dialed, crate::connect::Credential)> {
-		let credential = crate::connect::Credential::new(addr.url(), &self.versions, tokens);
+		credential: &crate::connect::Credential,
+	) -> crate::Result<Dialed> {
 		let addr = addr.with_url(credential.url.clone());
 		#[cfg(test)]
 		if let Some(dialer) = &self.dialer {
-			return Ok((dialer(addr).await?, credential));
+			return dialer(addr).await;
 		}
 		let client = match &credential.setup {
 			Some(token) => {
@@ -442,7 +446,7 @@ impl Client {
 		};
 
 		tracing::info!(version = %dialed.session.version(), transport = %dialed.transport, "connected");
-		Ok((dialed, credential))
+		Ok(dialed)
 	}
 
 	/// The moq client builder, advertising `path` in the SETUP when there is one.
@@ -1643,8 +1647,8 @@ mod tests {
 
 		// `dial` rather than `connect`: this is about one attempt's deadline, and
 		// `connect` now hands back a reconnect loop that would redial past it.
-		let tokens = Default::default();
-		let mut attempt = Box::pin(client.dial(url.into(), &tokens));
+		let credential = client.credential(&url, &Default::default());
+		let mut attempt = Box::pin(client.dial(url.into(), &credential));
 		let _silent = tokio::select! {
 			res = &mut attempt => match res {
 				Err(err) => panic!("connect failed before the silent peer accepted it: {err}"),
