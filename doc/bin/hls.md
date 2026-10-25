@@ -6,12 +6,15 @@ description: Serve a broadcast as HLS or DASH, or import an HLS playlist
 # HLS
 
 `moq export hls` serves a MoQ broadcast as HLS and DASH over HTTP for players
-that can't speak MoQ. `moq import hls` pulls a remote HLS master or media
-playlist into a broadcast.
+that can't speak MoQ, records it as HLS files, or both. `moq import hls` pulls
+a remote HLS master or media playlist into a broadcast.
 
 ```bash
 # Serve. Players open http://localhost:8089/my-stream.hang/master.m3u8 (or manifest.mpd for DASH)
 moq --connect https://relay.example.com/anon --broadcast my-stream.hang export hls --listen '[::]:8089'
+
+# Record into ./recording, ending once the broadcast finishes
+moq --connect https://relay.example.com/anon --broadcast my-stream.hang export hls --output ./recording
 
 # Import
 moq --connect https://relay.example.com/anon --broadcast my-stream.hang import hls https://example.com/live/master.m3u8
@@ -62,6 +65,22 @@ moq --connect https://relay.example.com/anon --broadcast event-replay.hang expor
 
 The archived catalog and timelines replay as recorded, so the export lists the
 same window as a live broadcast.
+
+## Record
+
+`--output <dir>` writes `master.m3u8` and each rendition's
+`{video,audio}/{name}/media.m3u8`, init, and `.m4s` segments into an empty or
+absent directory as each segment completes. Recording alone binds no HTTP port;
+add `--listen` to serve and record from one stage, in which case serving goes on
+after the recording completes.
+
+The recording starts at the oldest segment in the `--window` and gets
+`EXT-X-ENDLIST` only once the broadcast finishes cleanly. If the publisher drops
+out, the timeline restarts, or a segment can't be fetched, the export exits with
+an error and leaves the playlists unended. A rendition whose decoder is
+reconfigured keeps one playlist, switching to a new init at an
+`EXT-X-DISCONTINUITY` that every playlist marks at the same segment, so the whole
+recording stays playable from its master playlist.
 
 `--listen-tls-cert`/`--listen-tls-key` or `--listen-tls-generate` serve HTTPS,
 and `--cors-origin` opens it to browsers. HLS TLS reads `MOQ_HLS_TLS_*`;

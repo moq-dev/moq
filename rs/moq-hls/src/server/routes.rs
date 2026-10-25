@@ -506,7 +506,7 @@ mod tests {
 				.unwrap_or_else(|err| panic!("{version}: {err}"))
 				.expect("a segment");
 			assert_eq!(segment.segment, 0, "{version}");
-			assert!(!segment.media.is_empty(), "{version}");
+			assert!(!segment.media.expect("media, not a gap").is_empty(), "{version}");
 
 			pair.accept.abort();
 		}

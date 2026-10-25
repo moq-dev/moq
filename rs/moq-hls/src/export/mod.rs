@@ -31,7 +31,7 @@
 #[cfg(test)]
 #[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod archive_tests;
-pub(crate) mod master;
+pub mod master;
 mod mpd;
 mod playlist;
 mod rendition;
@@ -1748,7 +1748,7 @@ mod tests {
 		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
 		let mut cursor = rendition.segments();
 		let segment = cursor.next().await.unwrap().expect("completed segment");
-		assert!(!segment.media.is_empty());
+		assert!(!segment.media.expect("media, not a gap").is_empty());
 
 		catalog.finish().unwrap();
 		while !rendition.snapshot().finished {
@@ -1791,7 +1791,7 @@ mod tests {
 		);
 
 		let segment = rendition.segments().next().await.unwrap().expect("completed segment");
-		assert!(!segment.media.is_empty());
+		assert!(!segment.media.expect("media, not a gap").is_empty());
 		tokio::time::timeout(Duration::from_secs(1), rendition.latest_init())
 			.await
 			.expect("init must not wait behind the blocked bootstrap")
@@ -3073,8 +3073,9 @@ mod tests {
 			let mut cursor = ended.rendition.segments();
 			let mut drained = Vec::new();
 			while let Some(segment) = cursor.next().await.unwrap() {
-				assert!(contains(&segment.media, OLD));
-				assert!(!contains(&segment.media, NEW));
+				let media = segment.media.expect("old media, not a gap");
+				assert!(contains(&media, OLD));
+				assert!(!contains(&media, NEW));
 				drained.push(segment.segment);
 			}
 			assert_eq!(drained, [0, 1, 2], "the recorder drains the complete retained tail");
@@ -3384,7 +3385,7 @@ mod tests {
 		assert!(contains(&served, OLD));
 		assert!(rendition.snapshot().finished, "the playlist ends with its sibling");
 		while let Some(segment) = early.next().await.unwrap() {
-			assert!(contains(&segment.media, OLD));
+			assert!(contains(&segment.media.expect("old media, not a gap"), OLD));
 		}
 
 		// A publisher serving the path afterwards, with rows recorded for it, is never bound.
@@ -3829,7 +3830,8 @@ mod tests {
 			.unwrap()
 			.expect("a segment, not end");
 		assert_eq!(first.segment, 0);
-		assert_eq!(&first.media[4..8], b"moof", "the segment carries its transmuxed media");
+		let media = first.media.expect("media, not a gap");
+		assert_eq!(&media[4..8], b"moof", "the segment carries its transmuxed media");
 		assert_eq!(first.duration, Duration::from_secs(2));
 		assert_eq!(first.discontinuity, 0, "a clean start is not a discontinuity");
 
@@ -3907,7 +3909,7 @@ mod tests {
 	}
 
 	#[tokio::test(start_paused = true)]
-	async fn a_recording_refuses_missing_media_but_skips_rendition_gaps() {
+	async fn a_recording_refuses_missing_media_but_reports_rendition_gaps() {
 		let test = Timelines::new();
 		let (_, mut video0) = test.publish("video0");
 		let (_, mut video1) = test.publish("video1");
@@ -3944,9 +3946,16 @@ mod tests {
 			Err(crate::Error::SegmentUnavailable { segment: 2 })
 		));
 
+		// The gap keeps its number, so a recorder can tell it from rows it missed.
 		let rendition = test.rendition("video1");
 		let mut cursor = rendition.segments();
-		assert_eq!(cursor.next().await.unwrap().unwrap().segment, 1);
+		let gap = cursor.next().await.unwrap().unwrap();
+		assert_eq!((gap.segment, gap.media.is_none()), (0, true));
+		let covered = cursor.next().await.unwrap().unwrap();
+		assert_eq!((covered.segment, covered.media.is_some()), (1, true));
+		// Its timeline finished before segment 2, which is a gap too.
+		let tail = cursor.next().await.unwrap().unwrap();
+		assert_eq!((tail.segment, tail.media.is_none()), (2, true));
 		assert!(cursor.next().await.unwrap().is_none());
 	}
 

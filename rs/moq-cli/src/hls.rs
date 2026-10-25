@@ -12,6 +12,11 @@ use url::Url;
 
 use crate::moq::{ImportTarget, notify_ready};
 
+mod record;
+
+/// Where `export hls` serves when neither `--listen` nor `--output` is given.
+const LISTEN: SocketAddr = SocketAddr::new(std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED), 8089);
+
 /// HLS import (pull a remote playlist) args.
 #[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
@@ -26,13 +31,19 @@ pub struct ImportArgs {
 	pub passthrough: bool,
 }
 
-/// HLS export (serve over HTTP) args.
+/// HLS export (serve over HTTP, record to a directory) args.
 #[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct ExportArgs {
-	/// HTTP listener for the HLS endpoints.
-	#[usage(long, default = "[::]:8089")]
-	pub listen: SocketAddr,
+	/// HTTP listener for the HLS endpoints. Defaults to `[::]:8089` unless `--output` records
+	/// without serving.
+	#[usage(long, value_name = "ADDR")]
+	pub listen: Option<SocketAddr>,
+
+	/// Record the broadcast's playlists and segments into this directory, which must be empty
+	/// or absent. Fails if the recording ends abruptly or misses a segment.
+	#[usage(long, value_name = "DIR", value_hint = usage_rs::ValueHint::DirPath)]
+	pub output: Option<PathBuf>,
 
 	/// TLS certificates, keys, self-signed generation, and optional mTLS roots.
 	#[usage(flatten)]
@@ -256,23 +267,67 @@ pub async fn export(origin: moq_net::origin::Consumer, args: ExportArgs, name: S
 
 	let mut config = moq_hls::export::Config::default();
 	config.window = args.window.into();
-	let server = moq_hls::Server::new(scoped, config);
-	let app = server.router().layer(args.cors.layer([Method::GET])?);
 
 	let tls = args.tls.into_config()?;
+	let listen = match (args.listen, &args.output) {
+		(None, Some(_)) => None,
+		(listen, _) => Some(listen.unwrap_or(LISTEN)),
+	};
+	let serving = match listen {
+		Some(listen) => Some(serve(scoped.clone(), config.clone(), listen, tls, &args.cors)?),
+		None => {
+			anyhow::ensure!(
+				tls.cert.is_empty() && tls.key.is_empty() && tls.generate.is_empty() && tls.root.is_empty(),
+				"the HLS listener's TLS flags only apply with `export hls --listen`"
+			);
+			anyhow::ensure!(
+				args.cors.origin.is_empty(),
+				"`--cors-origin` only applies to `export hls --listen`"
+			);
+			None
+		}
+	};
+	let recording = args.output.map(record::Recording::create).transpose()?;
+	notify_ready();
+
+	let recording = async {
+		let Some(recording) = recording else {
+			return Ok(());
+		};
+		let broadcast = scoped
+			.request_broadcast(name.as_str(), None)
+			.await
+			.with_context(|| format!("failed to resolve broadcast `{name}`"))?;
+		let source = moq_mux::Source::new(scoped.clone(), broadcast);
+		let broadcaster = moq_hls::export::Broadcaster::new(source, config);
+		tracing::info!(%name, "recording HLS");
+		recording.run(&broadcaster).await
+	};
+	match serving {
+		Some(serving) => tokio::try_join!(serving, recording).map(|_| ()),
+		None => recording.await,
+	}
+}
+
+/// Bind the HLS listener, returning the server to run.
+fn serve(
+	origin: moq_net::origin::Consumer,
+	config: moq_hls::export::Config,
+	listen: SocketAddr,
+	tls: moq_tokio::tls::Listen,
+	cors: &crate::web::Cors,
+) -> anyhow::Result<impl Future<Output = anyhow::Result<()>> + use<>> {
+	let server = moq_hls::Server::new(origin, config);
+	let app = server.router().layer(cors.layer([Method::GET])?);
 	let tls = if tls.cert.is_empty() && tls.generate.is_empty() {
 		None
 	} else {
 		let alpn = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 		Some(tls.server_config(alpn)?)
 	};
-
-	let listener = moq_tokio::bind::tcp(args.listen)?;
-
-	tracing::info!(listen = %args.listen, "serving HLS");
-	notify_ready();
-
-	crate::web::serve(listener, app, tls).await
+	let listener = moq_tokio::bind::tcp(listen)?;
+	tracing::info!(%listen, "serving HLS");
+	Ok(crate::web::serve(listener, app, tls))
 }
 
 #[cfg(test)]
