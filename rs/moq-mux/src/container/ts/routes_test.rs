@@ -235,6 +235,35 @@ async fn dsmcc_types_ride_as_sections() {
 	}
 }
 
+/// Scrambled packets lose the section they interrupt, even when 16 of them wrap the continuity
+/// counter so the clear packet after them looks contiguous with the partial.
+#[tokio::test(start_paused = true)]
+async fn scrambled_packets_lose_a_partial_section() {
+	const DSMCC: u16 = 0x110;
+	let mut mux = Mux::default();
+	mux.pat(&[(1, PMT)]).pmt(PMT, 1, CLOCK, &[(0x0b, DSMCC)], 0);
+	mux.packet(CLOCK, Flags::pcr(0));
+	let at = mux.out.len();
+	mux.section(DSMCC, &psi::section(0x3b, 1, 0, 0, 0, &[0x11; 300]));
+	let tail = mux.out.split_off(at + 188);
+	for cc in 1..=16u8 {
+		let mut pkt = vec![0x47, (DSMCC >> 8) as u8, DSMCC as u8, 0x90 | (cc & 0x0f)];
+		pkt.resize(188, 0xee);
+		mux.out.extend_from_slice(&pkt);
+	}
+	mux.out.extend_from_slice(&tail);
+	let clear = psi::section(0x3b, 2, 0, 0, 0, &[0x22; 40]);
+	mux.section(DSMCC, &clear);
+	mux.packet(CLOCK, Flags::pcr(40 * MS));
+
+	let imported = Imported::all(&mux.bytes());
+	let frames = imported.frames(DSMCC).await;
+	let payloads: Vec<_> = frames.iter().map(|frame| frame.payload.to_vec()).collect();
+	assert_eq!(payloads, [clear]);
+	let row = imported.row(DSMCC);
+	assert_eq!((row.units, row.refused, row.damaged), (1, 16, 0));
+}
+
 /// A 0x86 stream without a CUEI registration is refused once and never PES-parsed, while LATM
 /// AAC, which nothing here decodes, rides whole.
 #[tokio::test(start_paused = true)]

@@ -1442,6 +1442,11 @@ impl<E: catalog::Catalog> Import<E> {
 		if let Some(stream) = self.streams.get_mut(&pid) {
 			stream.lost()?;
 		}
+		// A section's continuity counter never sees the packet, so after 16 the next clear one
+		// would look contiguous and complete the partial with bytes from another section.
+		if let Some(section) = self.sections.get_mut(&pid.as_u16()) {
+			section.reassembler = SectionReassembler::default();
+		}
 		*self.refused.entry(pid.as_u16()).or_default() += 1;
 		if self.scrambled.insert(pid.as_u16()) {
 			tracing::warn!(
