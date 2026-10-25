@@ -1,8 +1,8 @@
-# [M] A quick finish keeps its pre-draft-20 join
+# [M] A quick finish keeps its pre-draft-22 join
 
 ## Goal
 
-On drafts 14 to 19, a joining FETCH that reaches our publisher after its
+On drafts 14 to 18, a joining FETCH that reaches our publisher after its
 subscription finished cleanly is still answered from the subscription's
 saved Largest group. A track that ends within about one RTT of SUBSCRIBE_OK
 then finishes cleanly at the subscriber, head included, instead of losing
@@ -13,7 +13,7 @@ timer constant.
 
 ## Plan
 
-Every pre-draft-20 join is a SUBSCRIBE followed, after SUBSCRIBE_OK, by a
+Every pre-draft-22 join is a SUBSCRIBE followed, after SUBSCRIBE_OK, by a
 `RelativeJoining{0}` FETCH ([moq-dev/moq#6348](https://github.com/moq-dev/moq/pull/6348)).
 A refused one costs the subscriber that group's head and nothing more
 ([moq-dev/moq#6407](https://github.com/moq-dev/moq/pull/6407), decided with
@@ -43,7 +43,7 @@ and other publishers may refuse the same way.
 A finished entry holds a `track::Consumer`, which keeps the track's cache
 alive, so retaining it costs memory a peer controls. Candidate bounds:
 
-- **The request.** Drafts 17 to 19 give each SUBSCRIBE its own request
+- **The request.** Drafts 17 and 18 give each SUBSCRIBE its own request
   stream; keep the entry until the subscriber closes its side, with our
   subscriber holding it open until its joining FETCH resolves. Drafts 14 to 16
   share the control stream and have no such signal.
@@ -67,7 +67,7 @@ evicted from the cache meanwhile stays a loud refusal. The existing wait in
 `joined()` bounds a FETCH whose subscription has not arrived yet; do not
 stretch it to cover this.
 
-Tests, on mocked time with no sleeps, for each of drafts 14 to 19:
+Tests, on mocked time with no sleeps, for each of drafts 14 to 18:
 
 - A track that finishes right after SUBSCRIBE_OK, with the joining FETCH
   delivered an RTT after PUBLISH_DONE: the FETCH returns the Largest group's
@@ -76,7 +76,7 @@ Tests, on mocked time with no sleeps, for each of drafts 14 to 19:
 - More finished subscriptions than the limit with no FETCH: retained entries
   stay at the limit, the oldest are dropped, and their late FETCHes are
   refused. New subscriptions are still admitted.
-- On drafts 17 to 19, closing the subscription's request drops its entry.
+- On drafts 17 and 18, closing the subscription's request drops its entry.
 - A request token that expires (by mocked time) or is revoked after the
   finish drops the entry, and the late FETCH is refused.
 - An unsubscribed subscription's FETCH is refused, and session close frees

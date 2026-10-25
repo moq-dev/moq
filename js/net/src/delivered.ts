@@ -43,23 +43,40 @@ export class Delivered {
 
 	/** Record `sequence` as handed out; `false` when it already was. */
 	add(sequence: number): boolean {
-		const index = this.#below(sequence);
-		const run = this.#runs[index];
-		if (run && sequence <= run[1]) return false;
-		const next = this.#runs[index + 1];
-		const joinsBelow = run !== undefined && run[1] + 1 === sequence;
-		const joinsAbove = next !== undefined && next[0] === sequence + 1;
-		if (joinsBelow && joinsAbove) {
-			run[1] = next[1];
-			this.#runs.splice(index + 1, 1);
-		} else if (joinsBelow) {
-			run[1] = sequence;
-		} else if (joinsAbove) {
-			next[0] = sequence;
-		} else {
-			this.#runs.splice(index + 1, 0, [sequence, sequence]);
-		}
+		if (this.has(sequence)) return false;
+		this.addRun(sequence, sequence + 1);
 		return true;
+	}
+
+	/** Record every sequence in `[start, end)` as handed out. */
+	addRun(start: number, end: number): void {
+		if (start >= end) return;
+		// The runs it overlaps or touches, `first` through `last`, merge into one.
+		let first = this.#below(start - 1);
+		if (first < 0 || this.#runs[first][1] < start - 1) first++;
+		const last = this.#below(end);
+		if (last < first) {
+			this.#runs.splice(first, 0, [start, end - 1]);
+			return;
+		}
+		const merged: [number, number] = [
+			Math.min(start, this.#runs[first][0]),
+			Math.max(end - 1, this.#runs[last][1]),
+		];
+		this.#runs.splice(first, last - first + 1, merged);
+	}
+
+	/** The parts of `[start, end)` not handed out, in order. */
+	gaps(start: number, end: number): { start: number; end: number }[] {
+		const gaps: { start: number; end: number }[] = [];
+		let next = start;
+		for (let index = Math.max(this.#below(start), 0); index < this.#runs.length && next < end; index++) {
+			const [first, last] = this.#runs[index];
+			if (first > next) gaps.push({ start: next, end: Math.min(first, end) });
+			next = Math.max(next, last + 1);
+		}
+		if (next < end) gaps.push({ start: next, end });
+		return gaps;
 	}
 
 	/** Count every sequence below `floor` as handed out. */

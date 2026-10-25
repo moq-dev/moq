@@ -59,17 +59,17 @@
         ]
       },
       "locked": {
-        "lastModified": 1792787654,
-        "narHash": "sha256-JBD+zRwbeSjP7ndq+XeBmv7jbPbMU1t0slgyDg/j6Ac=",
+        "lastModified": 1792888692,
+        "narHash": "sha256-H69+iaQta8etZytbKFS5gERiX3aD+aGvS9pHrBDMhCI=",
         "owner": "kixelated",
         "repo": "quest",
-        "rev": "cbd939adf5043f083e24e0302d40f7618c09f427",
+        "rev": "42c49e898fdfafaf805a28302a7a11013ebb9316",
         "type": "github"
       },
       "original": {
         "owner": "kixelated",
         "repo": "quest",
-        "rev": "cbd939adf5043f083e24e0302d40f7618c09f427",
+        "rev": "42c49e898fdfafaf805a28302a7a11013ebb9316",
         "type": "github"
       }
     },
@@ -89,11 +89,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1792048409,
-        "narHash": "sha256-ZcwtnGWuY65NQ75W1LZ99gIaFBgC0Sm+TCs1ZEabw0U=",
+        "lastModified": 1792307278,
+        "narHash": "sha256-wJgFFtw/vlzsjWrQFmTn40TTkSkqHM4XXN0nh4q4uMk=",
         "owner": "oxalica",
         "repo": "rust-overlay",
-        "rev": "e9d12b9d8266ed9afdc5add5537ec8b5f789645c",
+        "rev": "42076d1c6a0fb405ed04f9a674e4a8f69de62ba3",
         "type": "github"
       },
       "original": {

@@ -19,7 +19,7 @@ Decided with the maintainer on 2026-10-17 (see the
 [epic](/quest/m2/probe/README.md)):
 
 - **Padding is the browser's sender.** Native sessions retransmit in-flight
-  data instead ([native probing](/quest/m1/probe-native.md)). Padding is
+  data instead (native probing, [moq-dev/moq#6635](https://github.com/moq-dev/moq/pull/6635)). Padding is
   ordinary stream data that any controller counts and paces, and it
   implements the sender hook in `js/net`, mirroring Rust's
   `transport::Probe`. Decided 2026-10-20: browser-only. A native session without

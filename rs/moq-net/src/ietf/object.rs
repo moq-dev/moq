@@ -18,7 +18,7 @@ pub(crate) fn same_bytes(a: Version, b: Version) -> bool {
 	form(a) == form(b)
 }
 
-/// Draft-19 assigns property 0x06 to SUBGROUP_DELIVERY_TIMEOUT.
+/// Draft-22 assigns property 0x06 to SUBGROUP_DELIVERY_TIMEOUT.
 pub(crate) fn has_delivery_timeout(version: Version) -> bool {
 	!matches!(
 		version,
@@ -411,7 +411,7 @@ pub(crate) fn write(
 	if block.immutable && !same_bytes(source, version) {
 		return Err(Error::Unsupported);
 	}
-	// Across draft-19, forwarding 0x06 would give it a different meaning.
+	// Between draft-18 and draft-22, forwarding 0x06 would give it a different meaning.
 	// A mutable one is dropped; a sealed one is refused.
 	let flipped = has_delivery_timeout(source) != has_delivery_timeout(version);
 	// The common case: the block is already what this draft would send.
@@ -461,9 +461,6 @@ mod tests {
 			Version::Draft16,
 			Version::Draft17,
 			Version::Draft18,
-			Version::Draft19,
-			Version::Draft20,
-			Version::Draft21,
 			Version::Draft22,
 		] {
 			for bytes in [
@@ -563,7 +560,7 @@ mod tests {
 					&decoded.properties,
 					Some(Version::Draft22),
 					decoded.timestamp,
-					Version::Draft18,
+					Version::Draft22,
 					timescale
 				),
 				Err(Error::Unsupported)
@@ -748,7 +745,7 @@ mod tests {
 		assert!(check(&sealed, Version::Draft14, milli, true).is_ok());
 	}
 
-	/// Draft-19 assigns 0x06 to SUBGROUP_DELIVERY_TIMEOUT, so it cannot cross that boundary.
+	/// Draft-22 assigns 0x06 to SUBGROUP_DELIVERY_TIMEOUT, so it cannot cross that boundary.
 	#[test]
 	fn key_six_follows_its_draft() {
 		let bytes = Bytes::from_static(&[0x06, 42, 0x1a, 7]);
@@ -761,7 +758,7 @@ mod tests {
 					&decoded.properties,
 					Some(Version::Draft22),
 					decoded.timestamp,
-					Version::Draft19,
+					Version::Draft22,
 					timescale
 				)
 				.unwrap(),
@@ -769,7 +766,7 @@ mod tests {
 			);
 		}
 
-		// Across draft-19 neither reading survives: a mutable one is dropped.
+		// Between draft-18 and draft-22 neither reading survives: a mutable one is dropped.
 		let modern = Bytes::from_static(&[0x20, 7]);
 		assert_eq!(
 			write(
@@ -788,7 +785,7 @@ mod tests {
 				&legacy.properties,
 				Some(Version::Draft18),
 				legacy.timestamp,
-				Version::Draft19,
+				Version::Draft22,
 				milli
 			)
 			.unwrap(),
@@ -826,7 +823,7 @@ mod tests {
 				&legacy.properties,
 				Some(Version::Draft18),
 				legacy.timestamp,
-				Version::Draft19,
+				Version::Draft22,
 				milli
 			),
 			Err(Error::Unsupported)

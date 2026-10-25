@@ -64,7 +64,7 @@ const lite: Protocol = {
 // A moq-transport subgroup stream with no properties, through the subscriber that routes it to its
 // track. Every retained group costs each later one a timeline scan (#4246), so a row stays at a
 // few hundred groups.
-const IETF_VERSION = IetfVersion.DRAFT_19;
+const IETF_VERSION = IetfVersion.DRAFT_22;
 const IETF_ALIAS = 9n;
 const IETF_FLAGS = {
 	hasExtensions: false,
@@ -84,7 +84,7 @@ const ietf: Protocol = {
 		new Uint8Array(frameSize).fill(index),
 	],
 	async subscribe() {
-		const pair = createMockTransportPair(ALPN.DRAFT_19);
+		const pair = createMockTransportPair(ALPN.DRAFT_22);
 		const subscriber = new IetfSubscriber({ session: new NativeSession(pair.server, IETF_VERSION, true) });
 		const track = subscriber.consume(Path.from("bench")).track("video").subscribe();
 

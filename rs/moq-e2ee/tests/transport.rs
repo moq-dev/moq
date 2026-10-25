@@ -26,7 +26,7 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 struct Fixture {
 	producer: moq_e2ee::track::Producer,
 	consumer: moq_e2ee::track::Consumer,
-	_broadcast: moq_net::broadcast::Producer,
+	_broadcast: moq_net::origin::Publication,
 	_pair: MockPair,
 }
 
@@ -44,7 +44,7 @@ async fn connect_protected(version: Version, track: &str) -> Fixture {
 	let consumer_origin = produce_origin(2);
 
 	let broadcast = publisher.create_broadcast(&path).unwrap();
-	let protected = moq_e2ee::broadcast::Producer::new(broadcast.clone(), generation.clone());
+	let protected = moq_e2ee::broadcast::Producer::new(broadcast.broadcast().clone(), generation.clone());
 	let producer = protected.create_track(track, timed()).unwrap();
 	broadcast
 		.announce(moq_net::origin::Route::default().with_epoch(generation.epoch().clone()))
@@ -105,7 +105,7 @@ async fn grouped_over_lite() {
 #[tokio::test]
 async fn grouped_over_ietf() {
 	tokio::time::timeout(TEST_TIMEOUT, async {
-		let mut fixture = connect_protected("moq-transport-21".parse().unwrap(), "video").await;
+		let mut fixture = connect_protected("moq-transport-22".parse().unwrap(), "video").await;
 		let mut group = fixture.producer.append_group().unwrap();
 		group
 			.write_frame(Timestamp::from_millis(1).unwrap(), b"ietf-frame")
@@ -145,5 +145,5 @@ async fn datagrams_over_lite() {
 
 #[tokio::test]
 async fn datagrams_over_ietf() {
-	datagram_roundtrip("moq-transport-21").await;
+	datagram_roundtrip("moq-transport-22").await;
 }
