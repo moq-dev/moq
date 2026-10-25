@@ -1221,8 +1221,7 @@ mod tests {
 		let broadcast = origin.create_broadcast("live").unwrap();
 		broadcast.announce(Default::default()).unwrap();
 		settle().await;
-		let catalog =
-			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
 		let reserved = catalog.reserve();
 		let mut first = catalog.test_video("video0");
 		first.set(video_config()).unwrap();
