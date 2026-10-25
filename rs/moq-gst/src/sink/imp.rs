@@ -67,7 +67,7 @@ impl TryFrom<Settings> for ResolvedSettings {
 /// Live state for one READY to PAUSED run.
 struct State {
 	session: Session,
-	broadcast: moq_net::broadcast::Producer,
+	broadcast: moq_net::origin::Publication,
 	catalog: Option<moq_mux::catalog::Producer>,
 	wall: std::sync::Arc<super::wall::Wall>,
 	/// The configured track names this run ended, which it never publishes again.
@@ -1060,7 +1060,8 @@ impl MoqSink {
 			None if completion.finish() => {
 				// The closed renditions and the catalog hold the finished tracks, so they go only
 				// once the broadcast closes.
-				let finished = moq_mux::Linger::new([state.broadcast.clone()], (closed, catalog), state.linger);
+				let finished =
+					moq_mux::Linger::new([state.broadcast.broadcast().clone()], (closed, catalog), state.linger);
 				self.linger_locked(control, finished)
 			}
 			None => Posted::Nothing,
@@ -2053,7 +2054,7 @@ mod tests {
 		let (broadcast, session) = {
 			let control = sink.imp().control.lock().unwrap();
 			let state = control.live.as_ref().expect("live session");
-			(state.broadcast.clone(), state.session.completion())
+			(state.broadcast.broadcast().clone(), state.session.completion())
 		};
 		let consumer = broadcast.consume();
 		let track = broadcast.create_track("video", None).unwrap();

@@ -146,8 +146,8 @@ export class Publish {
 		// v15+: parameters followed by Track Properties (draft-17+)
 		const params = await Parameters.decode(r, version, "publish");
 		const properties = await Properties.decode(r, version);
-		// GROUP_ORDER is legal here in draft-15 and again from draft-20. Draft-16 ignores it.
-		// Draft-17 through draft-19 close the session.
+		// GROUP_ORDER is legal here in draft-15 and draft-22. Draft-16 ignores it.
+		// Draft-17 and draft-18 close the session.
 		const groupOrder = properties.groupOrder ?? params.groupOrder ?? 0x02;
 		const forward = params.forward ?? true;
 		const largest = params.largest;
@@ -211,7 +211,7 @@ export const PublishDoneStatus = {
 	INTERNAL_ERROR: 0x0,
 	UNAUTHORIZED: 0x1,
 	TRACK_ENDED: 0x2,
-	/** Removed in draft-20, where 0x3 is unassigned. */
+	/** Unassigned in draft-22. */
 	SUBSCRIPTION_ENDED: 0x3,
 	UPDATE_FAILED: 0x8,
 } as const;
@@ -229,7 +229,6 @@ export function publishDoneClean(statusCode: number, version: IetfVersion): bool
 		case Version.DRAFT_16:
 		case Version.DRAFT_17:
 		case Version.DRAFT_18:
-		case Version.DRAFT_19:
 			return true;
 		default:
 			return false;

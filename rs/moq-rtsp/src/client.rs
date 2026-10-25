@@ -62,10 +62,8 @@ pub struct Client {
 	/// The URL without its userinfo.
 	url: Url,
 	creds: Option<Credentials>,
-	/// [`TIMEOUT`], shortened by tests.
+	/// [`TIMEOUT`], lengthened by tests so only [`KEYFRAME_TIMEOUT`] fires.
 	timeout: std::time::Duration,
-	/// [`KEYFRAME_TIMEOUT`], shortened by tests.
-	keyframe_timeout: std::time::Duration,
 	/// [`MAX_FORWARD`], shortened by tests.
 	max_forward: std::time::Duration,
 }
@@ -106,7 +104,6 @@ impl Client {
 			url,
 			creds,
 			timeout: TIMEOUT,
-			keyframe_timeout: KEYFRAME_TIMEOUT,
 			max_forward: MAX_FORWARD,
 		})
 	}
@@ -240,8 +237,8 @@ impl Client {
 					tracing::warn!(%url, "RTSP timeline jumped, ending the session");
 					return Ok(End::Jumped);
 				}
-				if ingest.awaiting_keyframe(playing, self.keyframe_timeout) {
-					return Err(Error::Stalled(self.keyframe_timeout));
+				if ingest.awaiting_keyframe(playing, KEYFRAME_TIMEOUT) {
+					return Err(Error::Stalled(KEYFRAME_TIMEOUT));
 				}
 			}
 			Ok(End::Closed)
@@ -543,11 +540,7 @@ impl Ingest {
 }
 
 #[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
+#[expect(clippy::disallowed_methods, reason = "tests bound waits on the host clock")]
 mod tests {
 	use std::time::Duration;
 
@@ -555,14 +548,20 @@ mod tests {
 	use crate::fake::{self, Media, Server};
 
 	/// Real sockets, so a wall-clock bound on every wait instead of paused time.
-	const TIMEOUT: Duration = Duration::from_secs(10);
+	const WAIT: Duration = Duration::from_secs(10);
 	/// 30 fps at the RTP video clock.
 	const FRAME: u32 = 3000;
 
 	async fn within<T>(what: &str, step: impl Future<Output = T>) -> T {
-		tokio::time::timeout(TIMEOUT, step)
+		tokio::time::timeout(WAIT, step)
 			.await
 			.unwrap_or_else(|_| panic!("{what} timed out"))
+	}
+
+	/// Make the test runtime's clock one only the test moves, so a setup step on a loaded runner
+	/// never reaches a deadline. Call it before anything reads the clock.
+	fn manual() -> moq_clock::Installed {
+		moq_clock::Manual::new().install(&tokio::runtime::Handle::current())
 	}
 
 	fn broadcast() -> (moq_net::broadcast::Producer, moq_mux::catalog::Producer) {
@@ -857,8 +856,10 @@ mod tests {
 				for _ in 0..2 {
 					let epoch = moq_net::Epoch::mint();
 					let route = moq_net::origin::Route::default().with_epoch(epoch.clone());
-					let mut broadcast = origin.publish("camera", route).unwrap();
-					let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+					let broadcast = origin.publish("camera", route).unwrap();
+					let mut catalog =
+						moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default())
+							.unwrap();
 					published_tx.send((epoch, broadcast.clone(), catalog.clone())).unwrap();
 					// The first session to return ends the run; dropping the other's pull
 					// finishes its tracks.
@@ -936,51 +937,82 @@ mod tests {
 	/// redials it rather than waiting forever.
 	#[tokio::test]
 	async fn a_silent_session_stalls() {
+		let clock = manual();
 		let server = Server::bind(vec![Media::H264 { sprop: true }]).await;
 		let (broadcast, catalog) = broadcast();
-		let mut client = Client::new(server.url()).unwrap();
-		client.timeout = Duration::from_millis(200);
-		let started = tokio::time::Instant::now();
-		let pull = tokio::spawn(async move { client.pull(&broadcast, &catalog).await });
+		let client = Client::new(server.url()).unwrap();
+		let pull = tokio::spawn({
+			let (broadcast, catalog) = (broadcast.clone(), catalog.clone());
+			async move { client.pull(&broadcast, &catalog).await }
+		});
 
-		let _session = within("PLAY", server.accept(0)).await;
+		let mut session = within("PLAY", server.accept(0)).await;
+		session.video(0, 0, &[fake::H264_IDR]).await;
+		let snapshot = catalog_with(&catalog, 1, 0).await;
+		let mut reader = subscribe(&broadcast, video_track(&snapshot)).await;
+
+		// Just short of the deadline the session is still up, so a frame still publishes.
+		clock.advance(super::TIMEOUT - Duration::from_millis(1));
+		session.video(0, FRAME, &[fake::H264_SLICE]).await;
+		within("both frames", async {
+			let mut frames = 0;
+			while frames < 2 {
+				let read = reader.read().await.unwrap().expect("track open");
+				frames += usize::from(matches!(read, moq_mux::container::Read::Frame { .. }));
+			}
+		})
+		.await;
+
+		clock.advance(super::TIMEOUT);
 		let err = within("the pull", pull).await.unwrap().unwrap_err();
-		assert!(matches!(err, Error::Stalled(_)), "{err}");
-		assert!(started.elapsed() >= Duration::from_millis(200));
+		assert!(
+			matches!(err, Error::Stalled(timeout) if timeout == super::TIMEOUT),
+			"{err}"
+		);
 	}
 
 	/// A camera that stops sending media but keeps sending RTCP reports still stalls.
 	#[tokio::test]
 	async fn rtcp_alone_stalls() {
+		let clock = manual();
 		let server = Server::bind(vec![Media::H264 { sprop: true }]).await;
 		let (broadcast, catalog) = broadcast();
-		let mut client = Client::new(server.url()).unwrap();
-		client.timeout = Duration::from_millis(200);
-		let mut pull = tokio::spawn(async move { client.pull(&broadcast, &catalog).await });
+		let client = Client::new(server.url()).unwrap();
+		let pull = tokio::spawn({
+			let catalog = catalog.clone();
+			async move { client.pull(&broadcast, &catalog).await }
+		});
 
 		let mut session = within("PLAY", server.accept(0)).await;
 		session.video(0, 0, &[fake::H264_IDR]).await;
-		let err = within("the pull", async {
-			loop {
-				session.rtcp(0, 0).await;
-				tokio::select! {
-					result = &mut pull => return result.unwrap().unwrap_err(),
-					_ = tokio::time::sleep(Duration::from_millis(30)) => {}
-				}
-			}
-		})
-		.await;
-		assert!(matches!(err, Error::Stalled(_)), "{err}");
+		// Published once the frame armed the deadline.
+		catalog_with(&catalog, 1, 0).await;
+		for _ in 0..4 {
+			session.rtcp(0, 0).await;
+			// On this current-thread runtime a yield resumes only after the I/O driver polls, so
+			// the pull sees the report as readable before the clock moves. Its timeout polls the
+			// read before the deadline, so it takes the report even when the deadline is due.
+			tokio::task::yield_now().await;
+			clock.advance(super::TIMEOUT / 4);
+		}
+		let err = within("the pull", pull).await.unwrap().unwrap_err();
+		assert!(
+			matches!(err, Error::Stalled(timeout) if timeout == super::TIMEOUT),
+			"{err}"
+		);
 	}
 
 	/// A video stream that never sends a keyframe would withhold the catalog while its audio
 	/// keeps the session alive, so the pull fails rather than idling.
 	#[tokio::test]
 	async fn a_stream_without_keyframes_stalls() {
+		let clock = manual();
 		let server = Server::bind(vec![Media::H264 { sprop: true }, Media::Aac]).await;
 		let (broadcast, catalog) = broadcast();
 		let mut client = Client::new(server.url()).unwrap();
-		client.keyframe_timeout = Duration::from_millis(200);
+		// Lengthened so the clock can run well ahead of the frames read and only the keyframe
+		// deadline fires.
+		client.timeout = 10 * KEYFRAME_TIMEOUT;
 		let mut pull = tokio::spawn(async move { client.pull(&broadcast, &catalog).await });
 
 		let mut session = within("PLAY", server.accept(0)).await;
@@ -988,15 +1020,20 @@ mod tests {
 			for frame in 0.. {
 				session.video(0, frame * FRAME, &[fake::H264_SLICE]).await;
 				session.aac(1, frame * 1600, b"audio").await;
+				clock.advance(Duration::from_secs(1));
 				tokio::select! {
 					result = &mut pull => return result.unwrap().unwrap_err(),
-					_ = tokio::time::sleep(Duration::from_millis(30)) => {}
+					// A driver turn, so the pull can read what was sent.
+					_ = tokio::time::sleep(Duration::ZERO) => {}
 				}
 			}
 			unreachable!()
 		})
 		.await;
-		assert!(matches!(err, Error::Stalled(_)), "{err}");
+		assert!(
+			matches!(err, Error::Stalled(timeout) if timeout == KEYFRAME_TIMEOUT),
+			"{err}"
+		);
 	}
 
 	/// A stream that pauses, such as motion-triggered video beside continuous audio, returns as
@@ -1094,10 +1131,13 @@ mod tests {
 	/// than leaving the broadcast frozen.
 	#[tokio::test]
 	async fn held_video_without_a_keyframe_stalls() {
+		let clock = manual();
 		let server = Server::bind(vec![Media::H264 { sprop: true }]).await;
 		let (broadcast, catalog) = broadcast();
 		let mut client = Client::new(server.url()).unwrap();
-		client.keyframe_timeout = Duration::from_millis(200);
+		// Lengthened so the clock can run well ahead of the frames read and only the keyframe
+		// deadline fires.
+		client.timeout = 10 * KEYFRAME_TIMEOUT;
 		let mut pull = tokio::spawn(async move { client.pull(&broadcast, &catalog).await });
 
 		let mut session = within("PLAY", server.accept(0)).await;
@@ -1106,15 +1146,20 @@ mod tests {
 		let err = within("the pull", async {
 			for frame in 2.. {
 				session.video(0, frame * FRAME, &[fake::H264_SLICE]).await;
+				clock.advance(Duration::from_secs(1));
 				tokio::select! {
 					result = &mut pull => return result.unwrap().unwrap_err(),
-					_ = tokio::time::sleep(Duration::from_millis(30)) => {}
+					// A driver turn, so the pull can read what was sent.
+					_ = tokio::time::sleep(Duration::ZERO) => {}
 				}
 			}
 			unreachable!()
 		})
 		.await;
-		assert!(matches!(err, Error::Stalled(_)), "{err}");
+		assert!(
+			matches!(err, Error::Stalled(timeout) if timeout == KEYFRAME_TIMEOUT),
+			"{err}"
+		);
 	}
 
 	/// A server whose `rtptime` lands well after its packets would never publish anything, so

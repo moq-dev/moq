@@ -16,7 +16,8 @@ func TestClientConfigFfiMapsZeroValuesToNativeDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ClientConfig{}.ffi() failed: %v", err)
 	}
-	if !reflect.DeepEqual(got, ffi.MoqClientConfig{}) {
+	// The wrapper's own product token is the one field it always sets.
+	if !reflect.DeepEqual(got, ffi.MoqClientConfig{Implementation: &implementation}) {
 		t.Errorf("ClientConfig{}.ffi() = %+v, want the native defaults", got)
 	}
 
@@ -24,8 +25,8 @@ func TestClientConfigFfiMapsZeroValuesToNativeDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ffi() failed: %v", err)
 	}
-	if got.TimeoutUs == nil || *got.TimeoutUs != 0 || got.Quic.KeepAliveUs == nil || *got.Quic.KeepAliveUs != 0 {
-		t.Errorf("an explicit zero duration was dropped: timeout %v, keep-alive %v", got.TimeoutUs, got.Quic.KeepAliveUs)
+	if got.Timeout == nil || *got.Timeout != 0 || got.Quic.KeepAlive == nil || *got.Quic.KeepAlive != 0 {
+		t.Errorf("an explicit zero duration was dropped: timeout %v, keep-alive %v", got.Timeout, got.Quic.KeepAlive)
 	}
 
 	if _, err := (ClientConfig{Race: ptr(-time.Millisecond)}).ffi(); err == nil {

@@ -42,7 +42,7 @@ Decided with the maintainer on 2026-10-21:
 
 Both reports run published packages, so a fix turns green only after it
 ships. Verify from `main` instead. For our clients through a third-party
-relay, `MOQ_BIN=target/debug/moq just relays --only <key> --publishers rust
+relay, `CLI_BIN=target/debug/moq just relays --only <key> --publishers rust
 --subscribers rust` from `test/smoke`. For a third-party client through our
 relay, run its published runner image (`RELAY_URL`, `TLS_DISABLE_VERIFY=1`,
 `TESTCASE`) on the host network against a `moq-relay` built from `main`.
@@ -146,6 +146,10 @@ and moqtopus and xquic-draft-18 over WebTransport (raw QUIC only).
 ## Required
 
 - [Release cut](/quest/m2/release/cut.md) - waits for the release in flight to ship
+
+From the 2026-10-25 run: the runner's moq-dev-js `announce-subscribe` case times
+out against imquic on both 0.4.4 and the [moq-dev/moq#6769](https://github.com/moq-dev/moq/pull/6769)
+backport, so it predates that fix. Classify it.
 
 ## Related
 

@@ -569,7 +569,8 @@ type OnDeclare = Box<dyn FnOnce(u64) + Send>;
 
 struct Registry {
 	/// Each enrolled track's timeline, by track name. Kept after its recorder drops, so a finished
-	/// span stays discoverable and a re-enrolled track continues its numbering.
+	/// span stays discoverable and a re-enrolled track continues its numbering, until
+	/// [`Timelines::retire`] says the name is done.
 	tracks: BTreeMap<String, (String, Arc<Mutex<Live>>)>,
 	finished: bool,
 }
@@ -657,6 +658,34 @@ impl Timelines {
 			})
 			.collect();
 		section
+	}
+
+	/// Finish the timeline of `name`, whose recorder dropped and whose owner never enrolls the
+	/// name again, and forget it, so a producer minting a name per track holds only its live ones.
+	///
+	/// Readers already on the timeline track read it to its end. Nothing happens for a name never
+	/// enrolled; a name whose recorder is still alive errors.
+	pub(crate) fn retire(&self, name: &str) -> crate::Result<()> {
+		let mut registry = self.registry.lock().unwrap();
+		let Some((_, live)) = registry.tracks.get(name) else {
+			return Ok(());
+		};
+		let mut live = live.lock().unwrap();
+		if live.recording {
+			return Err(moq_net::Error::Duplicate.into());
+		}
+		// The catalog stops advertising the timeline, so a last declaration must not add it back.
+		live.on_declare = None;
+		live.finish();
+		drop(live);
+		registry.tracks.remove(name);
+		Ok(())
+	}
+
+	/// How many timelines are held, live or kept for a re-enrollment.
+	#[cfg(test)]
+	pub(crate) fn len(&self) -> usize {
+		self.registry.lock().unwrap().tracks.len()
 	}
 
 	/// Close every open record now, publishing any declaration it fixes.

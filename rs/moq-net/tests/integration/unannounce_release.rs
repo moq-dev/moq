@@ -46,7 +46,7 @@ async fn release(version: Version) {
 
 #[moq_clock::test]
 async fn unannounced_remote_track_releases_demand() {
-	for name in Version::names() {
-		release(name.parse().unwrap()).await;
+	for version in support::every_version() {
+		release(version).await;
 	}
 }

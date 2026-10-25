@@ -25,13 +25,13 @@ on:
   workflow_call:
     inputs:
       benchmarks:
-        description: Measure Swift against Rust baselines on this runner
+        description: Smoke-run the Swift binding benchmark runner
         type: boolean
         default: false
   workflow_dispatch:
     inputs:
       benchmarks:
-        description: Measure Swift against Rust baselines on this runner
+        description: Smoke-run the Swift binding benchmark runner
         type: boolean
         default: false
 
@@ -93,7 +93,7 @@ jobs:
       - uses: ./.github/actions/just
       - name: Install nextest
         if: needs.scope.outputs.rs == 'true'
-        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: nextest@0.9.146
       # Nightly writes these platforms; `release` pull requests read.
@@ -141,7 +141,7 @@ jobs:
       - uses: ./.github/actions/just
       - name: Install nextest
         if: needs.scope.outputs.rs == 'true'
-        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: nextest@0.9.146
       - name: Rust cache
@@ -165,18 +165,15 @@ jobs:
       - name: Swift
         if: needs.scope.outputs.swift == 'true'
         run: just swift check
-      - name: Swift binding benchmark
-        id: swift-bench
+      # At a token budget, so the runner keeps working at this commit; rust2's
+      # `just bench-ffi` measures it at its pinned moq revision.
+      - name: Swift binding benchmark runner
         if: inputs.benchmarks
-        run: just bench-ffi swift
-      # Only after the benchmark ran, so an earlier failure stays the job's only error.
-      - name: Preserve Swift benchmark
-        if: ${{ !cancelled() && steps.swift-bench.outcome != 'skipped' }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        with:
-          name: bench-ffi-swift
-          path: target/bench/ffi/
-          if-no-files-found: error
+        env:
+          MOQ_BENCH_SECONDS: "0.05"
+        run: |
+          just swift bench
+          test -s target/bench/ffi/swift.json
       - name: OBS
         if: needs.scope.outputs.obs == 'true'
         run: just obs package --target aarch64-apple-darwin --output "$RUNNER_TEMP/obs"

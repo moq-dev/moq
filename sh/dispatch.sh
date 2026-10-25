@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run `just check`, `just fix`, or `just ci` over one resolved branch diff.
-# check and ci run MOQ_CHECK_JOBS lanes of modules at once (default 3); 1 runs
+# check and ci run CHECK_JOBS lanes of modules at once (default 3); 1 runs
 # them in order and streams their output.
 # `--query` prints the selection before CI installs its toolchain and caches.
 # `ci-platform` exists only as a query for the native platform workflows.
@@ -24,11 +24,11 @@ esac
 
 # A host toolchain fails deep in a build instead: its gcc keeps the
 # _FORTIFY_SOURCE the dev shell disables, which breaks jemalloc's -Werror
-# configure probes. This flake's dev shell sets MOQ_DEV_SHELL. Windows has no
+# configure probes. This flake's dev shell sets IN_MOQ_DEV_SHELL. Windows has no
 # Nix, so it always runs on the host.
-if [[ -z "$query" && -z "${MOQ_DEV_SHELL:-}" && -z "${MOQ_ALLOW_HOST:-}" && "$OSTYPE" != msys && "$OSTYPE" != cygwin ]]; then
+if [[ -z "$query" && -z "${IN_MOQ_DEV_SHELL:-}" && -z "${ALLOW_HOST_TOOLCHAIN:-}" && "$OSTYPE" != msys && "$OSTYPE" != cygwin ]]; then
     echo "error: run inside the Nix dev shell ('nix develop' or direnv) so tools match CI" >&2
-    echo "       or set MOQ_ALLOW_HOST=1 to use the host toolchain anyway" >&2
+    echo "       or set ALLOW_HOST_TOOLCHAIN=1 to use the host toolchain anyway" >&2
     exit 1
 fi
 
@@ -133,7 +133,7 @@ if [[ "$action" == ci-platform ]]; then
 fi
 
 # The tools each module needs. A module missing one is skipped locally, so an
-# incomplete toolchain checks less; under MOQ_STRICT (CI) it is an error, up
+# incomplete toolchain checks less; under CI_STRICT (CI) it is an error, up
 # front, because there a skip is indistinguishable from a pass. swift needs
 # none: it skips off macOS by design, and platform.yml is its real gate.
 declare -A tools=(
@@ -180,7 +180,7 @@ declare -A compiles=(
 # Lanes start in this order, so the slowest come first. dart runs alone (see
 # below), so it waits for the rest.
 case "$action" in
-    check | ci) modules=(rs carla py kt swift go cpp obs_compile js drafts markdown gh flake bench drill workers moq_sh quest obs ts_paths shell large_files toml nix justfile dart) ;;
+    check | ci) modules=(py rs cpp obs_compile js kt flake bench carla swift go drafts markdown gh drill workers moq_sh quest obs ts_paths shell large_files toml nix justfile dart) ;;
     fix) modules=(js rs py carla dart obs markdown shell toml nix justfile) ;;
 esac
 
@@ -193,18 +193,17 @@ declare -A lane=(
     [drafts]=bun
     [markdown]=bun
     [gh]=bun
-    # carla's `uv sync` uninstalls py's editable build from the shared venv.
-    # py builds target/debug/libmoq_ffi.so with its test features, and the
-    # other bindings read their default build from that path after Cargo
-    # exits. cpp and obs_compile also share cpp/moq/build.
-    [carla]=ffi
-    [py]=ffi
-    [kt]=ffi
-    [swift]=ffi
-    [go]=ffi
-    [cpp]=ffi
-    [obs_compile]=ffi
+    # Both build cpp/moq/build.
+    [cpp]=cpp
+    [obs_compile]=cpp
 )
+
+# kt, swift, go, cpp, and obs_compile each build moq-ffi's cdylib with the same
+# features and profile before reading target/debug/libmoq_ffi.so. Cargo runs
+# one build at a time per target directory and leaves a fresh output untouched,
+# so the first of those lanes builds it while the rest wait in Cargo, and none
+# rewrites it while another reads it. py builds its test features into a target
+# directory of its own, and carla runs its tools outside py's venv.
 
 # Lanes that run with no other lane beside them. dart builds moq-ffi with the
 # filtered environment its build hook gets, then checks that the hook finds
@@ -231,7 +230,7 @@ for module in "${modules[@]}"; do
     done
     if ((${#absent[@]} == 0)); then
         selected+=("$module")
-    elif [[ -n "${MOQ_STRICT:-}" ]]; then
+    elif [[ -n "${CI_STRICT:-}" ]]; then
         missing+=("${absent[@]}")
     else
         echo "$action: skipping $module; missing ${absent[*]}" >&2
@@ -253,8 +252,8 @@ if [[ -n "$query" ]]; then
 fi
 
 if ((${#missing[@]})); then
-    echo "error: MOQ_STRICT is set but these tools are missing: $(printf '%s\n' "${missing[@]}" | sort -u | tr '\n' ' ')" >&2
-    echo "       run inside 'nix develop', or unset MOQ_STRICT to skip what isn't installed" >&2
+    echo "error: CI_STRICT is set but these tools are missing: $(printf '%s\n' "${missing[@]}" | sort -u | tr '\n' ' ')" >&2
+    echo "       run inside 'nix develop', or unset CI_STRICT to skip what isn't installed" >&2
     exit 1
 fi
 
@@ -311,6 +310,7 @@ step() {
         test:py) just py test ;;
         test:gh) just gh test ;;
         fix:rs) just rs fix-changed "$rs_list" ;;
+        fix:js) just js fix "$js_list" ;;
         fix:markdown)
             bun install
             sh/markdown.sh fix
@@ -325,10 +325,10 @@ step() {
 
 # Lanes run at most this many at a time. fix stays serial: its fixers rewrite
 # files the others read, such as taplo under `cargo clippy --fix`.
-limit=${MOQ_CHECK_JOBS:-3}
+limit=${CHECK_JOBS:-3}
 [[ "$action" != fix ]] || limit=1
 if [[ ! "$limit" =~ ^[1-9][0-9]*$ ]]; then
-    echo "error: MOQ_CHECK_JOBS must be a positive integer, not '$limit'" >&2
+    echo "error: CHECK_JOBS must be a positive integer, not '$limit'" >&2
     exit 2
 fi
 

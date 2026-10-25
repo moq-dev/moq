@@ -127,9 +127,9 @@ A stream-only listener with `listen.tls.root` returns `Error::MtlsUnsupported` i
 A WebTransport session reports `Transport::WebTransport` (`"webtransport"` in logs); `Quic` now means raw QUIC only, so match both where you meant either.
 `Connection::transport()` reports the live transport.
 
-### Custom sessions declare their request binding
+### Custom sessions declare their request address
 
-`transport::Session::new` takes the session's `moq_net::transport::Binding`: `Uri` when the transport handshake carries the request URI, `InBand` when SETUP does.
+`transport::Session::new` takes the session's `moq_net::transport::Address`: `Uri` when the transport handshake carries the request URI, `Setup` when SETUP does.
 `Client` and `Server` are unchanged.
 
 ### `Redirect::resolve` is removed (#4854)

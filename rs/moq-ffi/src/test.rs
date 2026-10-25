@@ -33,7 +33,7 @@ fn timed() -> moq_net::track::Info {
 fn timed_info() -> MoqTrackInfo {
 	MoqTrackInfo {
 		priority: 0,
-		max_age_us: None,
+		max_age: None,
 		refresh: None,
 		timescale: Some(1_000_000),
 		compress: false,
@@ -103,10 +103,10 @@ fn localhost_tls() -> MoqServerTls {
 /// Retry pacing fast enough for a test, retrying forever.
 fn fast_backoff() -> MoqBackoff {
 	MoqBackoff {
-		initial_us: Some(50_000),
+		initial: Some(Duration::from_millis(50)),
 		multiplier: Some(2),
-		max_us: Some(200_000),
-		timeout_us: Some(0),
+		max: Some(Duration::from_millis(200)),
+		timeout: Some(Duration::ZERO),
 	}
 }
 
@@ -306,7 +306,7 @@ fn sibling_audio(reference: &str) -> crate::media::MoqAudio {
 		bitrate: None,
 		enabled: true,
 		container: MoqContainer::Legacy,
-		jitter_us: None,
+		jitter: None,
 	}
 }
 
@@ -317,8 +317,8 @@ fn audio_output() -> crate::audio::MoqAudioDecoderOutput {
 		format: MoqAudioSampleFormat::F32,
 		sample_rate: None,
 		channels: None,
-		max_delay_us: None,
-		delay_us: None,
+		max_delay: None,
+		delay: None,
 	}
 }
 
@@ -406,7 +406,16 @@ async fn announced_route_keeps_static_cost_on_reannounce() {
 			epoch: route.epoch.clone(),
 		})
 		.unwrap();
-	let current = broadcast.state.lock().unwrap().as_ref().unwrap().broadcast.route();
+	let current = broadcast
+		.state
+		.lock()
+		.unwrap()
+		.as_ref()
+		.unwrap()
+		.publication
+		.as_ref()
+		.unwrap()
+		.route();
 	assert_eq!(current.map(MoqRoute::from), Some(route));
 
 	broadcast.close().unwrap();
@@ -414,18 +423,8 @@ async fn announced_route_keeps_static_cost_on_reannounce() {
 
 #[test]
 fn epoch_helpers_mint_parse_and_refuse() {
-	assert_eq!(
-		moq_epoch_time_ms("ffffffff-ffff-7fff-bfff-ffffffffffff".into()).unwrap(),
-		(1_u64 << 48) - 1
-	);
 	let epoch = moq_mint_epoch();
 	let parsed: moq_net::Epoch = epoch.parse().unwrap();
-	let unix_ms = parsed
-		.time()
-		.unwrap()
-		.saturating_duration_since(moq_clock::Wall::UNIX_EPOCH)
-		.as_millis();
-	assert_eq!(u128::from(moq_epoch_time_ms(epoch.clone()).unwrap()), unix_ms);
 	assert!(moq_mint_epoch() > epoch, "a later mint orders newer");
 
 	// The text the route carries round-trips, and anything but a UUIDv7 is refused.
@@ -439,10 +438,6 @@ fn epoch_helpers_mint_parse_and_refuse() {
 
 	let uuid_v4 = "6ba7b810-9dad-41d1-80b4-00c04fd430c8".to_string();
 	for bad in [uuid_v4, epoch.to_uppercase(), String::new()] {
-		assert!(matches!(
-			moq_epoch_time_ms(bad.clone()),
-			Err(MoqError::InvalidEpoch { .. })
-		));
 		let route = MoqAnnounceRoute {
 			epoch: Some(bad),
 			..Default::default()
@@ -542,8 +537,8 @@ async fn raw_audio_activity() {
 	use crate::audio::*;
 
 	const SAMPLE_RATE: u32 = 48_000;
-	const FRAME_DURATION_US: u32 = 20_000;
-	// FRAME_DURATION_US at SAMPLE_RATE.
+	const FRAME_DURATION: Duration = Duration::from_millis(20);
+	// FRAME_DURATION at SAMPLE_RATE.
 	const FRAME_SAMPLES: usize = 960;
 	const FIRST_TIMESTAMP_US: u64 = 1_000_000;
 	const RESUMED_TIMESTAMP_US: u64 = 2_000_000;
@@ -564,7 +559,7 @@ async fn raw_audio_activity() {
 				sample_rate: None,
 				channels: None,
 				bitrate: None,
-				frame_duration_us: FRAME_DURATION_US,
+				frame_duration: Some(FRAME_DURATION),
 			},
 			track: Some("microphone".into()),
 			bandwidth: None,
@@ -691,7 +686,7 @@ async fn audio_raw_publish_from_many_threads() {
 		sample_rate: None,
 		channels: None,
 		bitrate: None,
-		frame_duration_us: 20_000,
+		frame_duration: Some(Duration::from_millis(20)),
 	};
 	let audio = MoqAudioProducer::new(
 		&catalog,
@@ -715,7 +710,7 @@ async fn audio_raw_publish_from_many_threads() {
 		MoqAudioDecoderOutput {
 			// The track's whole retention: reading starts only after finish, and the budget
 			// ages groups by wall clock, so a stalled host would otherwise skip the start.
-			max_delay_us: Some(30_000_000),
+			max_delay: Some(Duration::from_secs(30)),
 			..audio_output()
 		},
 	)
@@ -778,7 +773,7 @@ async fn audio_raw_publish_rejects_bad_frames() {
 				sample_rate: None,
 				channels: None,
 				bitrate: None,
-				frame_duration_us: 20_000,
+				frame_duration: Some(Duration::from_millis(20)),
 			},
 			track: None,
 			bandwidth: None,
@@ -809,7 +804,7 @@ async fn raw_audio_decode_delay() {
 	// 20 ms of a 400 Hz mono tone at 48 kHz.
 	const FRAME_SAMPLES: usize = 960;
 	const FRAME_US: u64 = 20_000;
-	const FIXED_US: u64 = 80_000;
+	const FIXED: Duration = Duration::from_millis(80);
 
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let consumer = broadcast.consume().unwrap();
@@ -827,7 +822,7 @@ async fn raw_audio_decode_delay() {
 				sample_rate: None,
 				channels: None,
 				bitrate: None,
-				frame_duration_us: FRAME_US as u32,
+				frame_duration: Some(Duration::from_micros(FRAME_US)),
 			},
 			track: Some("microphone".into()),
 			bandwidth: None,
@@ -841,27 +836,27 @@ async fn raw_audio_decode_delay() {
 		.expect("expected a raw audio catalog");
 	let rendition = catalog.audio.get("microphone").unwrap().clone();
 
-	let subscribe = |delay_us| {
+	let subscribe = |delay| {
 		MoqAudioConsumer::subscribe(
 			&consumer,
 			"microphone".into(),
 			rendition.clone(),
 			MoqAudioDecoderOutput {
-				delay_us,
+				delay,
 				..audio_output()
 			},
 		)
 	};
-	let fixed = subscribe(Some(FIXED_US)).await.unwrap();
+	let fixed = subscribe(Some(FIXED)).await.unwrap();
 	let estimated = subscribe(None).await.unwrap();
-	assert_eq!(fixed.delay_us(), FIXED_US);
-	let initial = estimated.delay_us();
+	assert_eq!(fixed.delay(), FIXED);
+	let initial = estimated.delay();
 
 	// Both reads park on the decoder before any audio exists.
 	let read = |decoded: Arc<MoqAudioConsumer>| tokio::spawn(async move { decoded.next().await });
 	let (fixed_read, estimated_read) = (read(fixed.clone()), read(estimated.clone()));
 	tokio::task::yield_now().await;
-	assert_eq!(fixed.delay_us(), FIXED_US, "readable while a read holds the decoder");
+	assert_eq!(fixed.delay(), FIXED, "readable while a read holds the decoder");
 
 	for i in 0..2 {
 		audio
@@ -891,16 +886,16 @@ async fn raw_audio_decode_delay() {
 		);
 	}
 
-	assert_eq!(fixed.delay_us(), FIXED_US, "a fixed delay ignores arrivals");
+	assert_eq!(fixed.delay(), FIXED, "a fixed delay ignores arrivals");
 	// The decoded frame's duration joins the estimate, so the mirror must have moved.
-	assert_ne!(estimated.delay_us(), initial, "the estimate updates as frames are read");
+	assert_ne!(estimated.delay(), initial, "the estimate updates as frames are read");
 
 	audio.finish().unwrap();
 	broadcast.close().unwrap();
 }
 
-/// `frame_duration_us` is microseconds so Opus' 2.5 ms frame survives the trip, where
-/// the old integer millisecond field truncated it to 2 ms and libopus refused to encode.
+/// Opus' 2.5 ms frame survives the trip to the encoder, and a duration Opus can't frame is
+/// refused.
 #[cfg(feature = "audio")]
 #[tokio::test]
 async fn raw_audio_frame_durations() {
@@ -913,19 +908,19 @@ async fn raw_audio_frame_durations() {
 		channels: 1,
 	};
 	let catalog = MoqMediaCatalogProducer::new(broadcast.clone()).unwrap();
-	let output = |frame_duration_us| MoqAudioEncoderOutput {
+	let output = |frame_duration| MoqAudioEncoderOutput {
 		codec: MoqAudioCodec::opus(),
 		sample_rate: None,
 		channels: None,
 		bitrate: None,
-		frame_duration_us,
+		frame_duration: Some(frame_duration),
 	};
 
 	let audio = MoqAudioProducer::new(
 		&catalog,
 		crate::audio::MoqAudioProducerOptions {
 			input: input(),
-			output: output(2_500),
+			output: output(Duration::from_micros(2_500)),
 			track: Some("fine".into()),
 			bandwidth: None,
 		},
@@ -944,7 +939,7 @@ async fn raw_audio_frame_durations() {
 		&catalog,
 		crate::audio::MoqAudioProducerOptions {
 			input: input(),
-			output: output(2_000),
+			output: output(Duration::from_millis(2)),
 			track: Some("coarse".into()),
 			bandwidth: None,
 		},
@@ -957,7 +952,7 @@ async fn raw_audio_frame_durations() {
 	broadcast.close().unwrap();
 }
 
-/// A frame duration of 0 takes the codec's own frame, and AAC, which encodes only
+/// An absent frame duration takes the codec's own frame, and AAC, which encodes only
 /// through a platform encoder, is refused where there is none.
 #[cfg(feature = "audio")]
 #[tokio::test]
@@ -976,7 +971,7 @@ async fn raw_audio_codec_default_frame() {
 		sample_rate: None,
 		channels: None,
 		bitrate: None,
-		frame_duration_us: 0,
+		frame_duration: None,
 	};
 
 	let opus = MoqAudioProducer::new(
@@ -1038,7 +1033,7 @@ async fn raw_track_datagram_roundtrip() {
 			"events".into(),
 			Some(MoqTrackInfo {
 				priority: 0,
-				max_age_us: None,
+				max_age: None,
 				refresh: None,
 				timescale: Some(1_000_000),
 				compress: false,
@@ -1070,7 +1065,7 @@ async fn raw_track_info_reports_publisher_properties() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let info = MoqTrackInfo {
 		priority: 7,
-		max_age_us: Some(2_500_000),
+		max_age: Some(Duration::from_millis(2_500)),
 		refresh: Some(2),
 		timescale: Some(90_000),
 		compress: true,
@@ -1078,9 +1073,9 @@ async fn raw_track_info_reports_publisher_properties() {
 	let track = broadcast.publish_track("status".into(), Some(info)).unwrap();
 	let consumer = track.consume(None).unwrap();
 
-	let got = consumer.info().unwrap();
+	let got = consumer.info();
 	assert_eq!(got.priority, 7);
-	assert_eq!(got.max_age_us, Some(2_500_000));
+	assert_eq!(got.max_age, Some(Duration::from_millis(2_500)));
 	assert_eq!(got.refresh, Some(2));
 	assert_eq!(got.timescale, Some(90_000));
 	assert!(got.compress);
@@ -1100,7 +1095,7 @@ async fn raw_track_update_does_not_wait_for_pending_read() {
 	consumer
 		.update(MoqSubscription {
 			priority: 10,
-			max_delay_us: Some(25_000),
+			max_delay: Some(Duration::from_millis(25)),
 			ranges: Some(vec![MoqRange {
 				start: MoqAnchor::Absolute { group: 0 },
 				end: None,
@@ -1147,7 +1142,7 @@ async fn data_writes_preserve_optional_timestamps() {
 					"data".into(),
 					Some(MoqTrackInfo {
 						priority: 0,
-						max_age_us: None,
+						max_age: None,
 						refresh: None,
 						timescale: timestamp_us.map(|_| 1_000_000),
 						compress: false,
@@ -1212,7 +1207,7 @@ async fn data_writes_preserve_optional_timestamps() {
 			let frame = consumer.read_frame().await.unwrap().unwrap();
 			assert_eq!(frame.payload, payload, "{kind}");
 			assert_eq!(frame.timestamp_us, timestamp_us, "{kind}");
-			assert_eq!(consumer.info().unwrap().timescale, timestamp_us.map(|_| 1_000_000));
+			assert_eq!(consumer.info().timescale, timestamp_us.map(|_| 1_000_000));
 			broadcast.close().unwrap();
 		}
 	}
@@ -1289,7 +1284,7 @@ async fn json_snapshot_roundtrip() {
 	};
 	let info = MoqTrackInfo {
 		priority: 0,
-		max_age_us: None,
+		max_age: None,
 		timescale: Some(1_000_000),
 		refresh: None,
 		compress: false,
@@ -1362,7 +1357,7 @@ async fn json_snapshot_refreshes_for_a_joiner() {
 			"meta".into(),
 			Some(MoqTrackInfo {
 				priority: 127,
-				max_age_us: None,
+				max_age: None,
 				refresh: Some(1),
 				timescale: None,
 				compress: false,
@@ -1599,7 +1594,7 @@ async fn json_window_refreshes_a_bounded_checkpoint_for_a_joiner() {
 			"log".into(),
 			Some(MoqTrackInfo {
 				priority: 127,
-				max_age_us: None,
+				max_age: None,
 				refresh: Some(1),
 				timescale: None,
 				compress: false,
@@ -1907,7 +1902,7 @@ async fn raw_untimed_frames_and_datagrams_roundtrip() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast.publish_track("untimed".into(), None).unwrap();
 	let consumer = track.consume(None).unwrap();
-	assert_eq!(consumer.info().unwrap().timescale, None);
+	assert_eq!(consumer.info().timescale, None);
 	track
 		.write_frame(MoqFrame {
 			payload: b"frame".to_vec(),
@@ -2128,7 +2123,7 @@ async fn fetches_cached_group_without_subscribing() {
 			0,
 			Some(MoqFetchGroupOptions {
 				priority: 7,
-				max_delay_us: None,
+				max_delay: None,
 			}),
 		)
 		.await
@@ -2179,7 +2174,7 @@ async fn fetches_cached_media_group_and_decodes_container() {
 			sequence: 0,
 			options: Some(MoqFetchGroupOptions {
 				priority: 7,
-				max_delay_us: None,
+				max_delay: None,
 			}),
 		},
 	)
@@ -2448,7 +2443,7 @@ async fn dynamic_track_serves_fetch_miss_and_priority() {
 				5,
 				Some(MoqFetchGroupOptions {
 					priority: 11,
-					max_delay_us: None,
+					max_delay: None,
 				}),
 			)
 			.await
@@ -4180,7 +4175,8 @@ async fn dynamic_broadcast_request() {
 		.unwrap();
 	assert_eq!(request.path().unwrap(), "dynamic/broadcast");
 
-	let prepared = request.prepare(moq_net::Epoch::mint().to_string()).unwrap();
+	let epoch = moq_net::Epoch::mint().to_string();
+	let prepared = request.prepare(epoch.clone()).unwrap();
 	let served = prepared.broadcast();
 	let track = served.publish_track("status".into(), Some(timed_info())).unwrap();
 	// Only publish announces the answer, under its epoch and after admission.
@@ -4189,6 +4185,12 @@ async fn dynamic_broadcast_request() {
 		Err(MoqError::Closed)
 	));
 	prepared.publish().unwrap();
+	served
+		.announce(MoqAnnounceRoute {
+			epoch: Some(epoch),
+			cost: 7,
+		})
+		.unwrap();
 	assert!(matches!(request.path(), Err(MoqError::Closed)));
 
 	let broadcast = tokio::time::timeout(TIMEOUT, request_broadcast)
@@ -4563,7 +4565,7 @@ async fn raw_track_update_during_pending_group_still_reads_datagram() {
 	consumer
 		.update(MoqSubscription {
 			priority: 10,
-			max_delay_us: Some(25_000),
+			max_delay: Some(Duration::from_millis(25)),
 			ranges: Some(vec![MoqRange {
 				start: MoqAnchor::Absolute { group: 0 },
 				end: None,
@@ -5119,6 +5121,8 @@ async fn server_client_roundtrip() {
 			.expect("accept returned None");
 		assert_eq!(request.path(), "/test");
 		assert_eq!(request.query().as_deref(), Some("foo=bar"));
+		let core = format!("moq-ffi/{} {}", env!("CARGO_PKG_VERSION"), moq_net::IMPLEMENTATION);
+		assert_eq!(request.peer_implementation(), Some(format!("app/1 wrapper/2 {core}")));
 		request.accept(None, None).await.expect("handshake failed")
 	});
 
@@ -5128,6 +5132,7 @@ async fn server_client_roundtrip() {
 		tls: insecure_tls(),
 		bind: Some("127.0.0.1:0".into()),
 		consume: Some(client_origin.clone()),
+		implementation: Some("app/1 wrapper/2".into()),
 		..Default::default()
 	})
 	.unwrap();
@@ -5622,12 +5627,11 @@ async fn server_new_validates_the_config() {
 #[tokio::test]
 async fn client_defaults_are_what_an_unset_config_dials_with() {
 	let defaults = moq_client_defaults();
-	let micros = |duration: Duration| Some(duration.as_micros() as u64);
 
 	let connect = moq_tokio::connect::Config::default().resolve();
-	assert_eq!(defaults.timeout_us, micros(connect.timeout));
-	assert_eq!(defaults.race_us, micros(connect.race));
-	assert_eq!(defaults.resolution_delay_us, micros(connect.resolution_delay));
+	assert_eq!(defaults.timeout, Some(connect.timeout));
+	assert_eq!(defaults.race, Some(connect.race));
+	assert_eq!(defaults.resolution_delay, Some(connect.resolution_delay));
 
 	// Reading the defaults back through the conversion `new` uses lands on the same values.
 	let quic = moq_tokio::quic::Config::from(defaults.quic.clone()).resolve();
@@ -5637,9 +5641,9 @@ async fn client_defaults_are_what_an_unset_config_dials_with() {
 	assert_eq!(quic.keep_alive, unset.keep_alive);
 	assert_eq!(defaults.websocket.enabled, Some(true));
 	let backoff = moq_tokio::connection::Backoff::default();
-	assert_eq!(defaults.backoff.initial_us, micros(backoff.initial()));
-	assert_eq!(defaults.backoff.max_us, micros(backoff.max()));
-	assert_eq!(defaults.backoff.timeout_us, micros(backoff.timeout()));
+	assert_eq!(defaults.backoff.initial, Some(backoff.initial()));
+	assert_eq!(defaults.backoff.max, Some(backoff.max()));
+	assert_eq!(defaults.backoff.timeout, Some(backoff.timeout()));
 
 	// The backend picks these, so there is no single value to report.
 	assert_eq!(defaults.tls.system_roots, None);
@@ -5705,7 +5709,7 @@ fn keylog_client(fingerprints: Vec<String>) -> Result<Arc<MoqClient>, MoqError> 
 		},
 		websocket: MoqWebSocketConfig {
 			enabled: Some(false),
-			delay_us: None,
+			delay: None,
 		},
 		..Default::default()
 	})
@@ -5802,9 +5806,9 @@ async fn client_connects_with_every_knob_set() {
 
 	let client = MoqClient::new(MoqClientConfig {
 		bind: Some("127.0.0.1:0".into()),
-		timeout_us: Some(5_000_000),
-		race_us: Some(0),
-		resolution_delay_us: Some(0),
+		timeout: Some(Duration::from_secs(5)),
+		race: Some(Duration::ZERO),
+		resolution_delay: Some(Duration::ZERO),
 		tls: MoqClientTls {
 			host_name: Some("localhost".into()),
 			fingerprints: server.cert_fingerprints().unwrap(),
@@ -5812,8 +5816,8 @@ async fn client_connects_with_every_knob_set() {
 		},
 		quic: MoqQuicConfig {
 			max_streams: Some(64),
-			idle_timeout_us: Some(5_000_000),
-			keep_alive_us: Some(0),
+			idle_timeout: Some(Duration::from_secs(5)),
+			keep_alive: Some(Duration::ZERO),
 			gso: Some(false),
 			mtu_discovery: Some(true),
 			congestion_control: Some(MoqCongestionControl::Loss),
@@ -5822,7 +5826,7 @@ async fn client_connects_with_every_knob_set() {
 		},
 		websocket: MoqWebSocketConfig {
 			enabled: Some(false),
-			delay_us: None,
+			delay: None,
 		},
 		..Default::default()
 	})
@@ -6164,7 +6168,7 @@ async fn session_state_names_a_failing_first_dial() {
 	let client = MoqClient::new(MoqClientConfig {
 		tls: insecure_tls(),
 		bind: Some("127.0.0.1:0".into()),
-		timeout_us: Some(100_000),
+		timeout: Some(Duration::from_millis(100)),
 		websocket: MoqWebSocketConfig {
 			enabled: Some(false),
 			..Default::default()
@@ -6815,7 +6819,7 @@ async fn cancelling_a_session_aborts_its_first_dial() {
 		once: true,
 		websocket: MoqWebSocketConfig {
 			enabled: Some(false),
-			delay_us: None,
+			delay: None,
 		},
 		..Default::default()
 	})
@@ -7324,7 +7328,8 @@ async fn memory_shutdown_pair() -> (Arc<MoqSession>, Arc<MoqSession>) {
 	};
 	let accept = async {
 		let (session, driver) = moq_net::Server::new()
-			.with_origin(b.inner.clone())
+			.with_publisher(&b.inner)
+			.with_subscriber(b.inner.clone())
 			.with_versions(version.into())
 			.accept(moq_clock::Instant::now(), server)
 			.await
@@ -7564,7 +7569,7 @@ async fn ascending_subscription_reads_a_cached_backlog_oldest_first() {
 
 	let subscription = MoqSubscription {
 		priority: 0,
-		max_delay_us: Some(10_000_000),
+		max_delay: Some(Duration::from_secs(10)),
 		ranges: Some(vec![MoqRange {
 			start: MoqAnchor::Relative { groups: 2 },
 			end: None,
@@ -7615,7 +7620,7 @@ fn grant(publish: &[&str], subscribe: &[&str]) -> crate::auth::MoqGrant {
 	crate::auth::MoqGrant {
 		publish: patterns(publish),
 		subscribe: patterns(subscribe),
-		expires_us: None,
+		expires: None,
 	}
 }
 
@@ -7803,7 +7808,7 @@ async fn time_anchors_start_at_the_containing_group() {
 
 	let since = |timestamp_us| MoqSubscription {
 		priority: 0,
-		max_delay_us: Some(10_000_000),
+		max_delay: Some(Duration::from_secs(10)),
 		ranges: Some(vec![MoqRange {
 			start: MoqAnchor::Time { timestamp_us },
 			end: None,

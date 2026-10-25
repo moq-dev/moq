@@ -2,14 +2,14 @@
 # Keep benchmark builds together while unrelated Nightly workloads run independently.
 set -euo pipefail
 
-usage='usage: just gh nightly rust-test|rust-bench|rust-shared|rust-extra|rust-uring|js'
+usage='usage: just gh nightly rust-test|rust-bench|rust-shared|rust-extra|rust-uring|js|bindings'
 if [[ $# != 1 ]]; then
     echo "$usage" >&2
     exit 2
 fi
-# The measured groups write a report for the benchmark site; rust-test only runs.
+# The measured groups write a report for the benchmark site; rust-test and bindings only run.
 case "$1" in
-    rust-test) report= ;;
+    rust-test | bindings) report= ;;
     rust-bench | rust-shared | rust-extra | rust-uring) report=rust ;;
     js) report=js ;;
     *)
@@ -18,36 +18,36 @@ case "$1" in
         ;;
 esac
 
-# MOQ_BENCH_BASE pairs every Rust bench target with its build at that revision, run on the
+# BENCH_BASE pairs every Rust bench target with its build at that revision, run on the
 # same machine; `previous-nightly` is the commit of the latest other scheduled Nightly on main.
-if [[ -n ${MOQ_BENCH_BASE:-} ]]; then
+if [[ -n ${BENCH_BASE:-} ]]; then
     if [[ $report != rust ]]; then
-        echo "nightly: MOQ_BENCH_BASE applies only to the Rust bench groups" >&2
+        echo "nightly: BENCH_BASE applies only to the Rust bench groups" >&2
         exit 2
     fi
-    if [[ $MOQ_BENCH_BASE == previous-nightly ]]; then
-        MOQ_BENCH_BASE=$(gh run list --workflow nightly.yml --branch main --event schedule --limit 2 \
+    if [[ $BENCH_BASE == previous-nightly ]]; then
+        BENCH_BASE=$(gh run list --workflow nightly.yml --branch main --event schedule --limit 2 \
             --json databaseId,headSha --jq "map(select(.databaseId != ${GITHUB_RUN_ID:-0}))[0].headSha // empty")
-        if [[ -z $MOQ_BENCH_BASE ]]; then
+        if [[ -z $BENCH_BASE ]]; then
             echo "nightly: no previous scheduled Nightly on main" >&2
             exit 1
         fi
     fi
     # A shallow CI checkout has only its own commit. Fetching a branch name only updates
     # FETCH_HEAD, so the base is exported as the commit it resolved to.
-    if ! base=$(git rev-parse --verify --quiet "$MOQ_BENCH_BASE^{commit}"); then
-        git fetch --no-tags --depth=1 origin "$MOQ_BENCH_BASE"
+    if ! base=$(git rev-parse --verify --quiet "$BENCH_BASE^{commit}"); then
+        git fetch --no-tags --depth=1 origin "$BENCH_BASE"
         base=$(git rev-parse --verify 'FETCH_HEAD^{commit}')
     fi
-    export MOQ_BENCH_BASE=$base
+    export BENCH_BASE=$base
 fi
 
 if [[ -n $report ]]; then
     root=$(git rev-parse --show-toplevel)
-    out=${MOQ_BENCH_RESULTS:-$root/target/bench/nightly/$1}
+    out=${BENCH_RESULTS:-$root/target/bench/nightly/$1}
     mkdir -p "$out"
-    export MOQ_BENCH_RUNS="$out/criterion-runs.txt"
-    : >"$MOQ_BENCH_RUNS"
+    export BENCH_RUNS="$out/criterion-runs.txt"
+    : >"$BENCH_RUNS"
     rm -f "$out/report.json" "$out/paired.json"
 fi
 
@@ -60,7 +60,7 @@ run() {
 criterion() {
     local label=$1
     shift
-    run env MOQ_BENCH_LABEL="$label" MOQ_BENCH_ARTIFACTS="$out/runs" just gh criterion "$@"
+    run env BENCH_LABEL="$label" BENCH_ARTIFACTS="$out/runs" just gh criterion "$@"
 }
 
 javascript() {
@@ -147,6 +147,23 @@ case "$1" in
         javascript jitter just js jitter-bench
         javascript audio-warmup just js audio-warmup-bench
         javascript clock just js clock-bench
+        ;;
+    # The binding benchmark's runners at a token budget, so they keep working at this
+    # commit; rust2's `just bench-ffi` measures them at its pinned moq revision. Swift
+    # runs on macOS in the Platform workflow.
+    bindings)
+        export MOQ_BENCH_SECONDS=0.05
+        MOQ_BENCH_DIR=${BENCH_RESULTS:-$(git rev-parse --show-toplevel)/target/bench/nightly/bindings}
+        export MOQ_BENCH_DIR
+        rm -rf "$MOQ_BENCH_DIR"
+        run just rs test -p moq-ffi --cargo-profile release -E 'test(bench::benchmark_ffi)' --run-ignored only
+        run just go bench -benchtime="${MOQ_BENCH_SECONDS}s"
+        for runner in py kt cpp dart; do
+            run just "$runner" bench
+        done
+        for result in rust-ffi rust-net go python kotlin cpp dart; do
+            if [[ ! -s $MOQ_BENCH_DIR/$result.json ]]; then failed+=("no $MOQ_BENCH_DIR/$result.json"); fi
+        done
         ;;
 esac
 
