@@ -1049,33 +1049,36 @@ impl Rendition {
 		let mut muxer = self.muxer()?;
 
 		// An out-of-band codec builds its init straight from the catalog; an inline one returns
-		// `None` until a keyframe group is read, so bootstrap it from the newest one indexed.
-		let bytes = match muxer.init()? {
-			Some(bytes) => bytes,
-			None => {
-				let reference = (self.kind, self.name.clone(), self.track_name().to_string());
-				let latest = self.spans.latest_keyframe_group();
-				let Some(sequence) = latest.or_else(|| self.live.latest_keyframe_group(&reference)) else {
-					return Ok(None);
-				};
-				let Some((broadcast, track)) = self.track(binding).await? else {
-					return Ok(None);
-				};
-				let Ok(mut group) = fetch(&track, hang::timeline::Position::group(sequence), None, &broadcast).await?
-				else {
-					return Ok(None);
-				};
-				// A cache eviction mid-read leaves the init unbuildable for now, not an error.
-				if read_group(&mut muxer, &mut group, &broadcast).await?.is_err() {
-					return Ok(None);
-				}
-				let Some(bytes) = muxer.init()? else {
-					return Ok(None);
-				};
-				bytes
-			}
+		// `None` until a keyframe group is read, so bootstrap it from an indexed one: a closed
+		// group first, since reading an open one waits for the publisher to finish it.
+		if let Some(bytes) = muxer.init()? {
+			return Ok(Some(self.cache_init(run.epoch, bytes)));
+		}
+		let mut groups = self.spans.keyframe_groups();
+		if groups.is_empty() {
+			let reference = (self.kind, self.name.clone(), self.track_name().to_string());
+			groups = self.live.keyframe_groups(&reference);
+		}
+		if groups.is_empty() {
+			return Ok(None);
+		}
+		let Some((broadcast, track)) = self.track(binding).await? else {
+			return Ok(None);
 		};
-		Ok(Some(self.cache_init(run.epoch, bytes)))
+		for sequence in groups {
+			// A group gone from the cache, before or mid-read, leaves the next candidate to try.
+			let Ok(mut group) = fetch(&track, hang::timeline::Position::group(sequence), None, &broadcast).await?
+			else {
+				continue;
+			};
+			if read_group(&mut muxer, &mut group, &broadcast).await?.is_err() {
+				continue;
+			}
+			if let Some(bytes) = muxer.init()? {
+				return Ok(Some(self.cache_init(run.epoch, bytes)));
+			}
+		}
+		Ok(None)
 	}
 
 	/// Fetch and transmux the segment a [`Resource::Segment`](super::Resource::Segment) URL names.

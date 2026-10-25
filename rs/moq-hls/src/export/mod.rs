@@ -1619,7 +1619,8 @@ mod tests {
 	}
 
 	/// `timeline_pair`, with `video1` learning its geometry from media so its init needs a
-	/// keyframe group, and both timelines indexing four groups.
+	/// keyframe group, and both timelines indexing four groups. `video1`'s last record is split
+	/// inside group 3, as for a group still open past the timeline's ceiling.
 	async fn inline_sibling() -> (
 		moq_net::origin::Producer,
 		moq_net::broadcast::Producer,
@@ -1638,8 +1639,18 @@ mod tests {
 		let (_, mut video1) = timeline_track(&broadcast, "video1");
 		for sequence in 0..4 {
 			video0.push(&gop(sequence)).unwrap();
+		}
+		for sequence in 0..3 {
 			video1.push(&gop(sequence)).unwrap();
 		}
+		let split = hang::timeline::Record::new(
+			3,
+			6_000,
+			2_000,
+			hang::timeline::Position::group(3),
+			hang::timeline::Position::new(3, 1),
+		);
+		video1.push(&split).unwrap();
 		(origin, broadcast, catalog, [video0, video1])
 	}
 
@@ -1669,8 +1680,31 @@ mod tests {
 		.unwrap();
 	}
 
+	// An inline init bootstraps from the newest closed keyframe group, read from cache, rather
+	// than waiting on the newest group the publisher is still writing.
+	#[tokio::test(start_paused = true)]
+	async fn an_init_bootstraps_from_a_closed_group() {
+		let (origin, broadcast, _catalog, _timelines) = inline_sibling().await;
+		let media = broadcast.create_track("video1", timed()).unwrap();
+		for sequence in 0..3 {
+			let mut group = media.create_group(sequence.into()).unwrap();
+			write_keyframe(&mut group, sequence);
+			group.finish().unwrap();
+		}
+		let mut open = media.create_group(3u64.into()).unwrap();
+		write_keyframe(&mut open, 3);
+
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		broadcaster.advertised().await;
+		let tag = segments::tag(&(Kind::Video, "video0".into(), "video0".into()));
+		listed_under(&broadcaster.rendition(Kind::Video, "video0").unwrap(), &tag, 3).await;
+		listed_in_manifest(&broadcaster).await;
+		drop(open);
+	}
+
 	// A rendition whose init bootstraps from a still-open group never holds up the manifest: its
-	// sibling renders at once, and it joins once the group closes.
+	// sibling renders at once, and it joins once the group closes. Its closed groups already
+	// left the cache, so the open one is the only candidate left.
 	#[tokio::test(start_paused = true)]
 	async fn a_stuck_init_leaves_the_manifest_to_its_siblings() {
 		let (origin, broadcast, _catalog, _timelines) = inline_sibling().await;
@@ -1872,41 +1906,66 @@ mod tests {
 		assert_eq!(&init[4..8], b"ftyp");
 	}
 
-	/// An init bootstrap already blocked on the unfinished tail must not hold back a later
-	/// request once a completed segment has cached the init.
+	/// An init bootstrap already blocked on an open group must not hold back a later request
+	/// once a completed segment has cached the init.
 	#[tokio::test(start_paused = true)]
 	async fn a_blocked_init_bootstrap_does_not_hide_a_cached_init() {
-		let origin = produce_origin();
-		let mut broadcast = origin.create_broadcast("live").expect("publish allowed");
-		let (mut catalog, mut registration, _media) = publish_vp8(&mut broadcast);
-		registration
-			.set(hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8))
+		let (origin, broadcast, mut catalog) = timeline_pair().await;
+		catalog
+			.mutate(|catalog| {
+				let config = catalog.video.renditions.get_mut("video1").unwrap();
+				config.coded_width = None;
+				config.coded_height = None;
+			})
 			.unwrap();
-		broadcast.announce(moq_net::origin::Route::default()).unwrap();
-		settle().await;
+		let (_video0_track, mut video0) = timeline_track(&broadcast, "video0");
+		let (_video1_track, mut video1) = timeline_track(&broadcast, "video1");
+		let media = broadcast.create_track("video1", timed()).unwrap();
+		// At first only the open group 0 is indexed, split before it finished.
+		let mut open = media.create_group(0u64.into()).unwrap();
+		write_keyframe(&mut open, 0);
+		video0.push(&gop(0)).unwrap();
+		let split = hang::timeline::Record::new(
+			0,
+			0,
+			2_000,
+			hang::timeline::Position::group(0),
+			hang::timeline::Position::new(0, 1),
+		);
+		video1.push(&split).unwrap();
+
 		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
 		broadcaster.ready().await;
-		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
-
-		catalog.finish().unwrap();
-		while !rendition.snapshot().finished {
-			tokio::task::yield_now().await;
-		}
+		tokio::time::sleep(Duration::from_millis(100)).await;
+		let rendition = broadcaster.rendition(Kind::Video, "video1").expect("rendition");
 		let mut blocked = std::pin::pin!(rendition.latest_init());
 		assert!(
 			tokio::time::timeout(Duration::from_millis(10), blocked.as_mut())
 				.await
 				.is_err(),
-			"the bootstrap reads the unfinished trailing group"
+			"the bootstrap reads the open group"
 		);
 
-		let segment = rendition.segments().next().await.unwrap().expect("completed segment");
-		assert!(!segment.media.is_empty());
+		// Closed groups follow, and transmuxing one caches the init.
+		for sequence in 1..3 {
+			let mut group = media.create_group(sequence.into()).unwrap();
+			write_keyframe(&mut group, sequence);
+			group.finish().unwrap();
+			video1.push(&gop(sequence)).unwrap();
+		}
+		for sequence in 1..4 {
+			video0.push(&gop(sequence)).unwrap();
+		}
+		let tag = segments::tag(&(Kind::Video, "video0".into(), "video0".into()));
+		listed_under(&broadcaster.rendition(Kind::Video, "video0").unwrap(), &tag, 3).await;
+		let segment = rendition.numbered(&tag, 1).await.unwrap().expect("completed segment");
+		assert!(!segment.is_empty());
 		tokio::time::timeout(Duration::from_secs(1), rendition.latest_init())
 			.await
 			.expect("init must not wait behind the blocked bootstrap")
 			.unwrap()
 			.expect("transmuxed segment has an init");
+		drop(open);
 	}
 
 	// A reconfigure that changes the init bytes changes the init URL, and the old URL stops
