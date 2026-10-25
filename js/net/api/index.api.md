@@ -177,6 +177,7 @@ interface ConnectionProps {
     share?: boolean;
     signal?: never;
     timeout?: Milli;
+    tokens?: readonly string[] | Signal<readonly string[]>;
     transport?: never;
     url?: URL | Signal<URL | undefined>;
     versions?: readonly string[] | Signal<readonly string[] | undefined>;
@@ -191,6 +192,7 @@ interface ConnectProps {
     publish?: Consumer_5;
     signal?: AbortSignal;
     timeout?: Milli;
+    tokens?: readonly string[];
     transport?: WebTransport;
     url: URL;
     versions?: readonly string[];
