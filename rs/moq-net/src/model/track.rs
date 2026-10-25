@@ -5147,7 +5147,7 @@ struct Drift {
 /// Keeps one handed-out group tied to the subscription whose cursor selected it.
 struct GroupExpiry {
 	/// Weak so a handed-out group never joins the track's consumer count, which is what
-	/// [`crate::broadcast::Demand`] reads to decide the track still has readers. A group
+	/// [`Demand`] reads to decide the track still has readers. A group
 	/// outlives the cursor that produced it (a relay serves one for the life of its
 	/// stream), and pinning demand on that would hold an upstream subscription open past
 	/// the last real subscriber.

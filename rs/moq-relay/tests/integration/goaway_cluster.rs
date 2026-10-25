@@ -697,9 +697,10 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	);
 	// The async observer must stay pending too (bounded probe: everything
 	// above already synchronized, so 500ms of silence is decisive).
+	let draining = sub_connection.draining().expect("connected");
 	let leaked = tokio::time::timeout(
 		Duration::from_millis(500),
-		moq_net::kio::wait(|waiter| sub_connection.draining().expect("connected").poll(waiter)),
+		moq_net::kio::wait(|waiter| draining.poll(waiter)),
 	)
 	.await;
 	assert!(

@@ -332,9 +332,10 @@ async fn a_session_arriving_mid_drain_gets_what_is_left_inner() {
 	tokio::time::sleep(DRAIN_TIMEOUT / 2).await;
 	let dialed = std::time::Instant::now();
 	let arrival = connect(&client, port).await;
+	let draining = arrival.draining().expect("connected");
 	let goaway = tokio::time::timeout(
 		Duration::from_secs(1),
-		moq_net::kio::wait(|waiter| arrival.draining().expect("connected").poll(waiter)),
+		moq_net::kio::wait(|waiter| draining.poll(waiter)),
 	)
 	.await
 	.expect("an arrival mid-drain was not sent a GOAWAY")

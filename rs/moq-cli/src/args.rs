@@ -3049,7 +3049,7 @@ mod tests {
 		}
 	}
 
-	/// Every `*-version` flag offers exactly the versions [`Version::names`] parses.
+	/// Every `*-version` flag offers exactly the versions moq-net parses.
 	///
 	/// The lists are `choices(...)` literals because Usage reads them at expansion
 	/// time, so they are copies. This is what keeps a new protocol draft from
@@ -3085,7 +3085,7 @@ mod tests {
 		assert!(!found.is_empty(), "no version flag carried a choice list");
 		for (long, choices) in &mut found {
 			choices.sort_unstable();
-			assert_eq!(choices, &expected, "--{long} is out of step with Version::names()");
+			assert_eq!(choices, &expected, "--{long} is out of step with moq-net's versions");
 		}
 	}
 }
