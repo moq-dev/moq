@@ -51,7 +51,7 @@ if (session < 0)
     return fail(moq_error());
 ```
 
-Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Publication track names stay separate from codec settings. For simulcast, give each rendition the next one down as `moq_encode_video`'s `lower` handle: it stops encoding, advertised as disabled, while its bandwidth grant cannot fund it, and resumes once the grant recovers.
+Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Publication track names stay separate from codec settings. For simulcast, give each rendition the next one down as the `lower` handle in its `moq_video_encode_options`: it stops encoding, advertised as disabled, while its bandwidth grant cannot fund it, and resumes once the grant recovers.
 
 ## Things to know
 

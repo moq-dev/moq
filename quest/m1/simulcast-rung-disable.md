@@ -19,7 +19,15 @@ once a session probes for the reservation (`bandwidth::Consumer::probed`).
 An idle reservation reads the share it would get, so recovery does not depend
 on demand. The FFI video producer takes `lower` (the next rendition down),
 sits one track priority below it, drains its encoder while disabled, and
-reopens on a keyframe; `moq_encode_video` takes the same `lower` handle.
+reopens on a keyframe; `moq_encode_video` takes the same `lower` handle in
+its `moq_video_encode_options`.
+
+Depends on BBR3 aging its estimate: the grant this rule reads can stay high
+for 20 s or more after the path drops, since `update_max_bw` in
+`rs/moq-congestion/src/bbr3/mod.rs` never ages an app-limited `max_bw`
+(measured in [moq-dev/moq#6635](https://github.com/moq-dev/moq/pull/6635)),
+so a rung keeps sending into a narrowed path until it does. A separate quest
+fixes that; the shaped-uplink proof needs it to disable on time.
 
 - OBS: each OBS video encoder is its own rendition (`video_tracks` in
   `cpp/obs/src/moq-output.cpp`) publishing pre-encoded packets through a

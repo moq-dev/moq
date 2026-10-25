@@ -117,6 +117,26 @@ pub struct moq_video_encoder_output {
 	pub encoder_len: usize,
 }
 
+/// Rate control for [`moq_encode_video`].
+///
+/// NULL or zeroed holds the configured bitrate regardless of congestion. New fields
+/// always append, so a zeroed struct keeps meaning the defaults.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct moq_video_encode_options {
+	/// A handle from [`crate::moq_session_bandwidth`] whose grant the encoder follows,
+	/// or 0 to hold the configured bitrate.
+	pub bandwidth: u32,
+	/// The [`moq_encode_video`] handle of the next lower rendition of the same source,
+	/// or 0. It makes this encoder a simulcast rung: while its grant cannot fund it, it
+	/// stops encoding (frames published to it are dropped) and advertises itself
+	/// disabled, so the lower renditions keep their share, then resumes on a keyframe
+	/// once the grant recovers. It takes the track priority one below `lower`'s, so the
+	/// allocator fills that one first. It needs a `bandwidth`, and a bitrate above
+	/// `lower`'s.
+	pub lower: u32,
+}
+
 /// One raw frame handed to [`moq_encode_video_frame`].
 ///
 /// Pixel format and resolution are fixed by [`moq_video_encoder_input`] at
@@ -847,27 +867,26 @@ unsafe fn encoder_kind(output: &moq_video_encoder_output) -> Result<moq_video::e
 /// - `input` / `output` must point to fully populated structs.
 /// - `output->encoder` must point to `output->encoder_len` bytes of UTF-8 when
 ///   `output->kind` is `MOQ_VIDEO_ENCODER_KIND_NAMED`.
-/// - `bandwidth` is a handle from [`crate::moq_session_bandwidth`], or 0 to hold the
-///   configured bitrate regardless of congestion.
-/// - `lower` is the handle of the next lower rendition of the same source from this
-///   function, or 0. A non-zero `lower` makes this encoder a simulcast rung: when the
-///   bandwidth grant can no longer fund it, it stops encoding (frames published to it
-///   are dropped) and advertises itself disabled, so the lower renditions keep their
-///   share, and it resumes on a keyframe once the grant recovers. It takes the track
-///   priority one below `lower`'s, so the allocator fills that one first. It needs a
-///   `bandwidth`, and a bitrate above `lower`'s.
+/// - `options` may be NULL, or must point at a readable [`moq_video_encode_options`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_encode_video(
 	broadcast: u32,
 	input: *const moq_video_encoder_input,
 	output: *const moq_video_encoder_output,
-	bandwidth: u32,
-	lower: u32,
+	options: *const moq_video_encode_options,
 ) -> i32 {
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
 		let raw_input = unsafe { input.as_ref() }.ok_or(Error::InvalidPointer)?;
 		let raw_output = unsafe { output.as_ref() }.ok_or(Error::InvalidPointer)?;
+		let options = unsafe { options.as_ref() }.copied().unwrap_or_default();
+		let bandwidth = ffi::parse_id_optional(options.bandwidth)?;
+		let lower = ffi::parse_id_optional(options.lower)?;
+		if lower.is_some() && bandwidth.is_none() {
+			return Err(Error::InvalidConfig(
+				"a lower rendition needs a bandwidth allocator to follow".into(),
+			));
+		}
 
 		let format = pixel_format_from_u32(raw_input.format)?;
 
@@ -891,13 +910,6 @@ pub unsafe extern "C" fn moq_encode_video(
 		let rendition = block_on(config.probe())?;
 		let encoder = block_on(moq_video::encode::Sink::open(&config))?;
 
-		let bandwidth = ffi::parse_id_optional(bandwidth)?;
-		let lower = ffi::parse_id_optional(lower)?;
-		if lower.is_some() && bandwidth.is_none() {
-			return Err(Error::InvalidConfig(
-				"a lower rendition needs a bandwidth allocator to follow".into(),
-			));
-		}
 		let mut state = State::lock();
 		let allocator = bandwidth.map(|id| state.bandwidth.allocator(id)).transpose()?;
 		let State { publish, video, .. } = &mut *state;

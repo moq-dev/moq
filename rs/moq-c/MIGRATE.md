@@ -4,9 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### `moq_encode_video` takes a lower rendition
+### `moq_encode_video` takes a `moq_video_encode_options`
 
-`moq_encode_video` takes a fifth `uint32_t lower` argument. Pass `0` to keep the old behavior, or the handle of the next lower rendition's encoder to disable this one while its bandwidth grant cannot fund it; that needs a `bandwidth` handle and a bitrate above the lower encoder's.
+`moq_encode_video`'s fourth argument is a `const moq_video_encode_options *` instead of a `uint32_t bandwidth`: pass `NULL` where you passed `0`, or `&(moq_video_encode_options){.bandwidth = bandwidth}`.
+Its `lower` field takes the handle of the next lower rendition's encoder, to disable this one while its bandwidth grant cannot fund it; that needs a `bandwidth` and a bitrate above the lower encoder's.
 `moq_reservation_grant` reports the slice the track would get back while nothing subscribes to it, instead of no grant.
 
 ### Sessions report a lifecycle snapshot
