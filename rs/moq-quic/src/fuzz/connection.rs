@@ -9,6 +9,7 @@
 use std::{
 	collections::{HashMap, HashSet, VecDeque},
 	net::{Ipv6Addr, SocketAddr},
+	num::NonZeroU64,
 	sync::Arc,
 };
 
@@ -18,9 +19,10 @@ use bytes::{Bytes, BytesMut};
 use super::plaintext::{Clear, Plaintext, TAG_LEN};
 use crate::{
 	ClientConfig, Connection, ConnectionHandle, DEFAULT_SUPPORTED_VERSIONS, DatagramEvent, Dir, Duration, Endpoint,
-	EndpointConfig, Event, FixedLengthConnectionIdParser, Instant, LeaseError, PartialDecode, ReadError, ServerConfig,
-	Side, StreamId, TransportConfig, VarInt,
+	EndpointConfig, Event, Instant, LeaseError, Limits, ReadError, ServerConfig, Side, StreamId, TransportConfig,
+	VarInt,
 	frame::{self, Frame},
+	packet::{FixedLengthConnectionIdParser, PartialDecode},
 };
 
 /// The connection ID length both endpoints issue, which a captured packet needs to parse.
@@ -120,7 +122,7 @@ enum Op {
 	},
 	MaxStreams {
 		who: Who,
-		uni: bool,
+		_uni: bool,
 		count: u8,
 	},
 	ReceiveWindow {
@@ -606,20 +608,25 @@ impl Pair {
 					let _ = conn.recv_stream(id).stop(code.into());
 				}
 			}
-			Op::MaxStreams { who, uni, count } => {
-				let dir = dir(uni);
+			Op::MaxStreams { who, _uni: _, count } => {
 				if let Some(conn) = self.peer(who).conn() {
-					conn.set_max_concurrent_streams(dir, count.into());
+					let mut limits = Limits::default();
+					limits.max_streams = NonZeroU64::new(count.into());
+					conn.set_limits(limits).unwrap();
 				}
 			}
 			Op::ReceiveWindow { who, window } => {
 				if let Some(conn) = self.peer(who).conn() {
-					conn.set_receive_window(window.into());
+					let mut limits = Limits::default();
+					limits.receive_window = NonZeroU64::new(window.into());
+					conn.set_limits(limits).unwrap();
 				}
 			}
 			Op::SendWindow { who, window } => {
 				if let Some(conn) = self.peer(who).conn() {
-					conn.set_send_window(window.into());
+					let mut limits = Limits::default();
+					limits.send_window = NonZeroU64::new(window.into());
+					conn.set_limits(limits).unwrap();
 				}
 			}
 			Op::Datagram { who, len, priority } => {
@@ -781,7 +788,7 @@ fn read(peer: &mut Peer, sent: &HashMap<(Side, StreamId), Sent>, id: StreamId, m
 		return;
 	};
 	let mut stream = conn.recv_stream(id);
-	let Ok(mut chunks) = stream.read(true) else {
+	let Ok(mut chunks) = stream.read() else {
 		return;
 	};
 
@@ -790,13 +797,12 @@ fn read(peer: &mut Peer, sent: &HashMap<(Side, StreamId), Sent>, id: StreamId, m
 	while budget > 0 {
 		match chunks.next(budget) {
 			Ok(Some(chunk)) => {
-				assert_eq!(chunk.offset, *offset, "ordered read skipped or repeated data");
-				let end = chunk.offset + chunk.bytes.len() as u64;
+				let end = *offset + chunk.bytes.len() as u64;
 				if !forged {
 					let written = sent.get(&(writer, id)).map_or(0, |sent| sent.len);
 					assert!(end <= written, "read past what was written");
 					for (i, &byte) in chunk.bytes.iter().enumerate() {
-						let offset = chunk.offset + i as u64;
+						let offset = *offset + i as u64;
 						assert_eq!(byte, stream_byte(writer, id, offset), "corrupt stream data");
 					}
 				}

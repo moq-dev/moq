@@ -27,8 +27,7 @@ impl Incoming {
 	}
 
 	/// Reject this incoming connection attempt
-	#[cfg(test)]
-	pub(super) fn refuse(mut self) {
+	pub(crate) fn refuse(mut self) {
 		let state = self.0.take().unwrap();
 		state.endpoint.refuse(state.inner);
 	}

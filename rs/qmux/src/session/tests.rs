@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
 use moq_net::transport::poll::{RecvStream as _, SendOptions, SendStream as _, Session as _};
-use moq_quic::coding::Codec;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio::sync::watch;
 

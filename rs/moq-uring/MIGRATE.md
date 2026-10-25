@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### QUIC receive chunks are ordered
+
+The underlying `moq_quic::RecvStream::read()` no longer takes an ordering flag, and `Chunk` contains only `bytes`.
+The uring driver's receive API keeps its existing ordered behavior.
+
 ### `udp::Transmit` is built with `Transmit::new` (#6400)
 
 `udp::Transmit` gains `src_ip`, the local address a send leaves from, and is `#[non_exhaustive]`.

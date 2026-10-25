@@ -1703,7 +1703,7 @@ mod tests {
 			pending: &mut pending,
 		};
 
-		let mut chunks = recv.read(true).unwrap();
+		let mut chunks = recv.read().unwrap();
 		assert_eq!(chunks.next(MESSAGE_SIZE).unwrap().unwrap().bytes.len(), MESSAGE_SIZE);
 		assert!(chunks.next(0).unwrap().is_none());
 		let should_transmit = chunks.finalize();
@@ -1777,7 +1777,7 @@ mod tests {
 			pending: &mut pending,
 		};
 
-		let mut chunks = recv.read(true).unwrap();
+		let mut chunks = recv.read().unwrap();
 		chunks.next(1024).unwrap();
 		let _ = chunks.finalize();
 		assert_eq!(client.local_max_data - initial_max, 1024);
@@ -1802,7 +1802,7 @@ mod tests {
 			state: &mut client,
 			pending: &mut pending,
 		};
-		let mut chunks = recv.read(true).unwrap();
+		let mut chunks = recv.read().unwrap();
 		assert_eq!(chunks.next(1024).unwrap_err(), crate::ReadError::Reset(0u32.into()));
 		let _ = chunks.finalize();
 		assert_eq!(client.data_recvd, 4096);
@@ -1908,8 +1908,7 @@ mod tests {
 		assert!(!recv.pending.max_data);
 
 		assert!(recv.stop(0u32.into()).is_err());
-		assert_eq!(recv.read(true).err(), Some(ReadableError::ClosedStream));
-		assert_eq!(recv.read(false).err(), Some(ReadableError::ClosedStream));
+		assert_eq!(recv.read().err(), Some(ReadableError::ClosedStream));
 
 		assert_eq!(client.local_max_data - initial_max, 32);
 		assert_eq!(
@@ -1928,37 +1927,6 @@ mod tests {
 		);
 		assert_eq!(client.local_max_data - initial_max, 48);
 		assert!(!client.recv.contains_key(&id));
-	}
-
-	/// An ordered read refused after an unordered one leaves the stream readable.
-	#[test]
-	fn illegal_ordered_read_keeps_stream() {
-		let mut client = make(Side::Client);
-		let id = StreamId::new(Side::Server, Dir::Uni, 0);
-		receive(&mut client, id, 0..4);
-
-		let mut pending = Retransmits::default();
-		let mut recv = RecvStream {
-			id,
-			state: &mut client,
-			pending: &mut pending,
-		};
-		let mut chunks = recv.read(false).unwrap();
-		assert_eq!(chunks.next(usize::MAX).unwrap().unwrap().bytes.len(), 4);
-		let _ = chunks.finalize();
-
-		receive(&mut client, id, 4..8);
-		let mut recv = RecvStream {
-			id,
-			state: &mut client,
-			pending: &mut pending,
-		};
-		assert_eq!(recv.read(true).err(), Some(ReadableError::IllegalOrderedRead));
-
-		let mut chunks = recv.read(false).unwrap();
-		let chunk = chunks.next(usize::MAX).unwrap().unwrap();
-		assert_eq!((chunk.offset, chunk.bytes.len()), (4, 4));
-		let _ = chunks.finalize();
 	}
 
 	#[test]
@@ -2765,7 +2733,7 @@ mod tests {
 			state: &mut client,
 			pending: &mut pending,
 		};
-		let mut chunks = recv.read(true).unwrap();
+		let mut chunks = recv.read().unwrap();
 		assert_eq!(chunks.next(4).unwrap().unwrap().bytes.len(), 4);
 		let _ = chunks.finalize();
 	}
@@ -2794,7 +2762,7 @@ mod tests {
 			state: &mut client,
 			pending: &mut pending,
 		};
-		let mut chunks = recv.read(true).unwrap();
+		let mut chunks = recv.read().unwrap();
 		assert_eq!(chunks.next(4).unwrap().unwrap().bytes.len(), 4);
 		assert!(chunks.next(4).unwrap().is_none());
 		let _ = chunks.finalize();
@@ -2843,7 +2811,7 @@ mod tests {
 				state: &mut client,
 				pending: &mut pending,
 			};
-			let mut chunks = recv.read(true).unwrap();
+			let mut chunks = recv.read().unwrap();
 			let _ = chunks.next(1).unwrap();
 			assert!(chunks.next(1).unwrap().is_none());
 			let _ = chunks.finalize();
@@ -3101,14 +3069,14 @@ mod tests {
 	}
 
 	/// Read everything readable, returning the byte count and how the read stopped
-	fn drain(state: &mut StreamsState, id: StreamId, ordered: bool) -> (u64, crate::ReadError) {
+	fn drain(state: &mut StreamsState, id: StreamId) -> (u64, crate::ReadError) {
 		let mut pending = Retransmits::default();
 		let mut recv = RecvStream {
 			id,
 			state,
 			pending: &mut pending,
 		};
-		let mut chunks = recv.read(ordered).unwrap();
+		let mut chunks = recv.read().unwrap();
 		let mut read = 0;
 		let err = loop {
 			match chunks.next(usize::MAX) {
@@ -3136,7 +3104,7 @@ mod tests {
 		// Data past the Reliable Size is dropped without counting twice
 		receive(&mut client, id, 4..20);
 		assert_eq!(client.data_recvd, 100);
-		assert_eq!(drain(&mut client, id, true), (10, crate::ReadError::Reset(7u32.into())));
+		assert_eq!(drain(&mut client, id), (10, crate::ReadError::Reset(7u32.into())));
 		assert_eq!(client.local_max_data - initial_max, 100);
 	}
 
@@ -3147,27 +3115,9 @@ mod tests {
 		let initial_max = client.local_max_data;
 		let _ = client.received_reset(reset_at(id, 7, 20, Some(10))).unwrap();
 		receive(&mut client, id, 4..20);
-		assert_eq!(drain(&mut client, id, true), (0, crate::ReadError::Blocked));
+		assert_eq!(drain(&mut client, id), (0, crate::ReadError::Blocked));
 		receive(&mut client, id, 0..4);
-		assert_eq!(drain(&mut client, id, true), (10, crate::ReadError::Reset(7u32.into())));
-		assert_eq!(client.local_max_data - initial_max, 20);
-	}
-
-	#[test]
-	fn reset_at_unordered_reads() {
-		let mut client = make(Side::Client);
-		let id = StreamId::new(Side::Server, Dir::Uni, 0);
-		let initial_max = client.local_max_data;
-		receive(&mut client, id, 5..10);
-		receive(&mut client, id, 0..2);
-		assert_eq!(drain(&mut client, id, false), (7, crate::ReadError::Blocked));
-
-		// Only 2..4 of the prefix is still owed, though bytes past it were already read
-		let _ = client.received_reset(reset_at(id, 7, 20, Some(4))).unwrap();
-		assert_eq!(client.local_max_data - initial_max, 18);
-		assert_eq!(drain(&mut client, id, false), (0, crate::ReadError::Blocked));
-		receive(&mut client, id, 2..4);
-		assert_eq!(drain(&mut client, id, false), (2, crate::ReadError::Reset(7u32.into())));
+		assert_eq!(drain(&mut client, id), (10, crate::ReadError::Reset(7u32.into())));
 		assert_eq!(client.local_max_data - initial_max, 20);
 	}
 
@@ -3186,7 +3136,7 @@ mod tests {
 		);
 		assert_eq!(client.local_max_data - initial_max, 16);
 		receive(&mut client, id, 0..20);
-		assert_eq!(drain(&mut client, id, true), (4, crate::ReadError::Reset(7u32.into())));
+		assert_eq!(drain(&mut client, id), (4, crate::ReadError::Reset(7u32.into())));
 		assert_eq!(client.local_max_data - initial_max, 20);
 	}
 
@@ -3199,7 +3149,7 @@ mod tests {
 		receive(&mut client, id, 0..2);
 		let _ = client.received_reset(reset_at(id, 7, 20, Some(10))).unwrap();
 		let _ = client.received_reset(reset_at(id, 7, 20, None)).unwrap();
-		assert_eq!(drain(&mut client, id, true), (0, crate::ReadError::Reset(7u32.into())));
+		assert_eq!(drain(&mut client, id), (0, crate::ReadError::Reset(7u32.into())));
 		assert_eq!(client.local_max_data - initial_max, 20);
 	}
 
@@ -4240,7 +4190,7 @@ mod tests {
 		data(&mut client, id, 0, 10, true);
 		recv(&mut client, &mut pending, id).set_priority(1);
 		let mut stream = recv(&mut client, &mut pending, id);
-		let mut chunks = stream.read(true).unwrap();
+		let mut chunks = stream.read().unwrap();
 		assert_eq!(chunks.next(usize::MAX).unwrap().unwrap().bytes.len(), 10);
 		assert_eq!(chunks.next(usize::MAX), Ok(None));
 		let _ = chunks.finalize();
@@ -4330,7 +4280,7 @@ mod tests {
 		// Debt partly paid by a consume before the window grows back.
 		client.set_receive_window(VarInt::from_u64(window / 2).unwrap());
 		data(&mut client, id, 0, 20, false);
-		assert_eq!(drain(&mut client, id, true).0, 20);
+		assert_eq!(drain(&mut client, id).0, 20);
 		assert_eq!(client.local_max_data, initial);
 		client.set_receive_window(VarInt::from_u64(window).unwrap());
 		assert_eq!(client.local_max_data, initial + 20);
@@ -4484,16 +4434,6 @@ mod tests {
 		crate::SendGroups { state: &mut b }.set_priority(&group, 1);
 	}
 
-	#[test]
-	#[should_panic(expected = "send domain used on another connection")]
-	fn send_domain_from_another_connection() {
-		let mut a = make(Side::Client);
-		let mut b = make(Side::Client);
-		let domain = crate::SendGroups { state: &mut a }.open_domain();
-		let _other = crate::SendGroups { state: &mut b }.open_domain();
-		let _ = crate::SendGroups { state: &mut b }.open_in(0, &domain);
-	}
-
 	/// Ingest and read rounds across many streams, with a plain read or a lease released whole.
 	/// The lease cost must stay flat as the stream count grows.
 	#[test]
@@ -4537,7 +4477,7 @@ mod tests {
 								std::hint::black_box(recv.take(usize::MAX));
 								let _ = recv.release();
 							} else {
-								let mut chunks = recv.read(true).unwrap();
+								let mut chunks = recv.read().unwrap();
 								std::hint::black_box(chunks.next(usize::MAX).unwrap());
 								let _ = chunks.finalize();
 							}

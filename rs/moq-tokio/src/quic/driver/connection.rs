@@ -34,8 +34,8 @@ use crate::quic::driver::{
 };
 use moq_congestion::Controller;
 use moq_quic::{
-	ConnectionError, ConnectionHandle, ConnectionStats, Dir, EndpointEvent, Side, StreamEvent, StreamId,
-	TransportError, TransportErrorCode,
+	ConnectionError, ConnectionHandle, ConnectionStats, Dir, EndpointEvent, StreamEvent, StreamId, TransportError,
+	TransportErrorCode,
 };
 
 /// In-progress connection attempt future
