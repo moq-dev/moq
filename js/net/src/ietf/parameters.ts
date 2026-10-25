@@ -118,14 +118,7 @@ function allows(message: ControlMessage, version: IetfVersion, id: bigint): bool
 		case "publish-ok":
 			return (
 				expires ||
-				(!from22 &&
-					(forward ||
-						priority ||
-						filter ||
-						order ||
-						objectTimeout ||
-						subgroupTimeout ||
-						newGroup))
+				(!from22 && (forward || priority || filter || order || objectTimeout || subgroupTimeout || newGroup))
 			);
 		case "subscribe":
 			return (

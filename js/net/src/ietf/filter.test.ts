@@ -9,13 +9,7 @@ const OLD = Version.DRAFT_18;
 const NEW = Version.DRAFT_22;
 
 test("legacy live joins do not exclude the prefix without a joining FETCH", () => {
-	for (const version of [
-		Version.DRAFT_14,
-		Version.DRAFT_15,
-		Version.DRAFT_16,
-		Version.DRAFT_17,
-		Version.DRAFT_18,
-	]) {
+	for (const version of [Version.DRAFT_14, Version.DRAFT_15, Version.DRAFT_16, Version.DRAFT_17, Version.DRAFT_18]) {
 		expect([...Filter.encode(joinFilter(version), version)]).toEqual([3, 0, 0]);
 	}
 	expect([...Filter.encode(joinFilter(NEW), NEW)]).toEqual([0x01, 0x01]);
@@ -150,7 +144,6 @@ test("draft-22 carries the Location Filter Type", () => {
 		expect([...Filter.encodeParam(filter, NEW)]).toEqual(bytes);
 		expect(Filter.decode(new Uint8Array(bytes), NEW)).toEqual(filter);
 	}
-
 });
 
 // With no Length, the type alone says where the value ends, so the bytes after it are left

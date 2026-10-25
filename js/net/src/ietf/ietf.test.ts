@@ -169,11 +169,7 @@ test("Message Parameters: uint8 wire encoding changes in draft 17", async () => 
 		0xff, // QUIC varint 255
 	]);
 
-	for (const version of [
-		Version.DRAFT_17,
-		Version.DRAFT_18,
-		Version.DRAFT_22,
-	]) {
+	for (const version of [Version.DRAFT_17, Version.DRAFT_18, Version.DRAFT_22]) {
 		const expected = new Uint8Array([
 			0x01, // parameter count
 			0x20, // SUBSCRIBER_PRIORITY
@@ -205,11 +201,7 @@ test("Message Parameters: Location loses its length prefix at draft-17", async (
 		0x80, // QUIC varint 128
 	]);
 
-	for (const version of [
-		Version.DRAFT_17,
-		Version.DRAFT_18,
-		Version.DRAFT_22,
-	]) {
+	for (const version of [Version.DRAFT_17, Version.DRAFT_18, Version.DRAFT_22]) {
 		const expected = new Uint8Array([
 			0x01, // parameter count
 			0x09, // LARGEST_OBJECT
@@ -232,13 +224,7 @@ test("Message Parameters: Location preserves bigint precision", async () => {
 
 	expect(params.largest).toEqual(largest);
 
-	for (const version of [
-		Version.DRAFT_14,
-		Version.DRAFT_15,
-		Version.DRAFT_16,
-		Version.DRAFT_17,
-		Version.DRAFT_18,
-	]) {
+	for (const version of [Version.DRAFT_14, Version.DRAFT_15, Version.DRAFT_16, Version.DRAFT_17, Version.DRAFT_18]) {
 		const encoded = await encodeVersioned(params, version);
 		const decoded = await decodeVersioned(encoded, Parameters.decode, version);
 		expect(decoded.largest).toEqual(largest);
@@ -252,11 +238,7 @@ test("Message Parameters: Location preserves full uint64 values in draft 17", as
 
 	expect(params.largest).toEqual(largest);
 
-	for (const version of [
-		Version.DRAFT_17,
-		Version.DRAFT_18,
-		Version.DRAFT_22,
-	]) {
+	for (const version of [Version.DRAFT_17, Version.DRAFT_18, Version.DRAFT_22]) {
 		const encoded = await encodeVersioned(params, version);
 		const decoded = await decodeVersioned(encoded, Parameters.decode, version);
 		expect(decoded.largest).toEqual(largest);
@@ -2187,11 +2169,7 @@ for (const version of [
 	}
 }
 
-for (const version of [
-	Version.DRAFT_17,
-	Version.DRAFT_18,
-	Version.DRAFT_22,
-]) {
+for (const version of [Version.DRAFT_17, Version.DRAFT_18, Version.DRAFT_22]) {
 	test(`SETUP ${version}: known options cannot repeat`, async () => {
 		for (const bytes of [new Uint8Array([4, 1, 0, 2]), new Uint8Array([7, 1, 97, 0, 1, 98])]) {
 			await expect(SetupOptions.decode(new Reader(undefined, bytes, version), version)).rejects.toThrow(

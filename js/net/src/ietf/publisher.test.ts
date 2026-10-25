@@ -595,13 +595,7 @@ test("Range Filters over MAX_FILTER_RANGES zero get INVALID_FILTER", async () =>
 			const request = requestStream(version);
 			try {
 				const name = [1, 4, ...new TextEncoder().encode("test"), 5, ...new TextEncoder().encode("video")];
-				const fields = [
-					7,
-					...name,
-					1,
-					0x25,
-					0,
-				];
+				const fields = [7, ...name, 1, 0x25, 0];
 				const encoded = new Reader(undefined, Uint8Array.from([0, fields.length, ...fields]), version);
 				if (fetch) await pub.runFetch(await Fetch.decode(encoded, version), request.stream);
 				else await pub.runSubscribe(await Subscribe.decode(encoded, version), request.stream);
@@ -2801,9 +2795,6 @@ const ALPNS: Record<IetfVersion, string> = {
 	[Version.DRAFT_16]: ALPN.DRAFT_16,
 	[Version.DRAFT_17]: ALPN.DRAFT_17,
 	[Version.DRAFT_18]: ALPN.DRAFT_18,
-	[Version.DRAFT_18]: ALPN.DRAFT_18,
-	[Version.DRAFT_22]: ALPN.DRAFT_22,
-	[Version.DRAFT_22]: ALPN.DRAFT_22,
 	[Version.DRAFT_22]: ALPN.DRAFT_22,
 };
 
@@ -3033,41 +3024,38 @@ test("draft-22: an absolute filter trims the range it serves", async () => {
 	}
 });
 
-test.each([Version.DRAFT_22])(
-	"IETF %s: datagrams honor the absolute object range",
-	async (version) => {
-		using _clock = manual();
-		const fx = fixture(version);
-		const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
-		const { client } = await runSubscribe(
-			fx,
-			new Subscribe({
-				requestId: 7n,
-				trackNamespace: Path.from("test"),
-				trackName: "video",
-				subscriberPriority: 0,
-				filter: { kind: "absolute", startGroup: 0n, startObject: 1n, endGroup: 1n, endObject: 0n },
-			}),
-		);
-		const reader = fx.pair.client.datagrams.readable.getReader();
-		try {
-			// Datagrams go out in arrival order, so the in-range one arrives last: receiving it
-			// first proves both out-of-range ones ahead of it were dropped.
-			for (const sequence of [0, 2, 1])
-				track.insertDatagram(sequence, Timestamp.fromMillis(sequence), new Uint8Array([sequence]));
-			const next = await reader.read();
-			if (next.done) throw new Error("the in-range datagram was never sent");
-			const datagram = await ObjectDatagram.decode(next.value, version);
-			expect(datagram.trackAlias).toBe(7n);
-			expect(datagram.groupId).toBe(1);
-			expect(datagram.objectId ?? 0).toBe(0);
-		} finally {
-			await reader.cancel();
-			client.close();
-			fx.close();
-		}
-	},
-);
+test.each([Version.DRAFT_22])("IETF %s: datagrams honor the absolute object range", async (version) => {
+	using _clock = manual();
+	const fx = fixture(version);
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "absolute", startGroup: 0n, startObject: 1n, endGroup: 1n, endObject: 0n },
+		}),
+	);
+	const reader = fx.pair.client.datagrams.readable.getReader();
+	try {
+		// Datagrams go out in arrival order, so the in-range one arrives last: receiving it
+		// first proves both out-of-range ones ahead of it were dropped.
+		for (const sequence of [0, 2, 1])
+			track.insertDatagram(sequence, Timestamp.fromMillis(sequence), new Uint8Array([sequence]));
+		const next = await reader.read();
+		if (next.done) throw new Error("the in-range datagram was never sent");
+		const datagram = await ObjectDatagram.decode(next.value, version);
+		expect(datagram.trackAlias).toBe(7n);
+		expect(datagram.groupId).toBe(1);
+		expect(datagram.objectId ?? 0).toBe(0);
+	} finally {
+		await reader.cancel();
+		client.close();
+		fx.close();
+	}
+});
 
 /** An absolute filter has a fixed start, so its SUBSCRIBE is no join even over the refresh ratio. */
 test("draft-22: an absolute subscribe is no join", async () => {
