@@ -6032,10 +6032,7 @@ mod serve_group_test {
 				wanted_group: None,
 				priority: 0,
 				max_delay: Duration::from_secs(10),
-				start_group: None,
-				end_group: None,
-				start_frame: 0,
-				end_frame: None,
+				ranges: vec![lite::Range::span(None, 0, None, None)],
 				order: Order::Descending,
 			});
 			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
