@@ -15,7 +15,7 @@ by default; an application can override or disable them.
 The estimators stop learning once a connection is app-limited. moq-quic's
 BBR3 only raises `max_bw` from an app-limited sample above its current value,
 and only ages its window on a cycle that isn't app-limited (`update_max_bw`
-and `adapt_long_term_model` in `rs/moq-quic/src/congestion/bbr3/mod.rs`).
+and `adapt_long_term_model` in `rs/moq-congestion/src/bbr3/mod.rs`).
 Chromium's QUICHE gates its BBR2 filter the same way, and its Cubic estimate
 stops growing while the sender isn't cwnd-limited. So after a rendition
 stops, the estimate freezes at the value that stopped it, and today nothing
@@ -93,5 +93,5 @@ This README's own work, once the children land:
 ## Related
 
 - [A finished PROBE stops reporting](/quest/m2/probe-end-stale.md) - the receive estimate this epic raises reads unknown once its stream ends
-- [BBR media study](/quest/m2/quic-bbr-natural-drain.md) - preserving an estimate and discovering spare capacity are separate problems
+- [BBR media study](/quest/m2/quic-bbr-study.md) - preserving an estimate and discovering spare capacity are separate problems
 - [Realtime uplink congestion control](/quest/m2/quic-realtime/README.md) - a delay-based alternative to BBR3 on native uplinks, with no ProbeBW_UP phase to ride

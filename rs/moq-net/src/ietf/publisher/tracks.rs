@@ -139,8 +139,9 @@ struct Params {
 }
 
 /// The listed tracks a request answers with PUBLISH_SKIPPED and has not sent yet, keyed by
-/// (suffix, name) in listing order. A track removed before its skip went out cancels it,
-/// so a peer that stops reading holds at most one per listed track.
+/// (suffix, name) in listing order. A track removed before its skip went out cancels it.
+/// A FORWARD=1 listing adds one only once this is empty, so a peer that stops reading
+/// leaves the rest unread in each broadcast's listing.
 type Skips = kio::Shared<LinkedHashMap<(crate::PathOwned, Arc<str>), ()>>;
 
 /// What a request's listing shares with the tasks listing each broadcast.
@@ -159,8 +160,83 @@ struct Request {
 	live: kio::Consumer<()>,
 }
 
+/// Why a listed broadcast's route closed.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Route {
+	/// Another instance took the path: the PUBLISHes of this one end now.
+	Replaced,
+	/// Nothing serves the path any more, so its broadcast ends soon too: its listing is read
+	/// to that end, which says which tracks finished.
+	Withdrawn,
+}
+
+/// One listed broadcast's tracks, by how far each got toward the peer.
+#[derive(Default)]
+struct Entries {
+	/// The tracks waiting their turn for a PUBLISH, in listing order.
+	pending: LinkedHashMap<Arc<str>, track::Info>,
+	/// The next track to PUBLISH, waiting on the peer's stream credit.
+	staged: Option<Staged>,
+	/// Each sent PUBLISH's entry: dropping it says the track is no longer listed.
+	listed: HashMap<Arc<str>, kio::Producer<bool>>,
+	/// The tracks with a skip queued, so the broadcast's end cancels only its own.
+	skipped: HashSet<Arc<str>>,
+}
+
+impl Entries {
+	fn skip(&mut self, skips: &Skips, suffix: &crate::PathOwned, name: Arc<str>) {
+		skips.lock().insert((suffix.clone(), name.clone()), ());
+		self.skipped.insert(name);
+	}
+
+	/// `name` is no longer listed: drop whatever it got to, ending its PUBLISH with
+	/// TRACK_ENDED if it `finished`.
+	fn remove(&mut self, skips: &Skips, suffix: &crate::PathOwned, name: Arc<str>, finished: bool) {
+		if self.staged.as_ref().is_some_and(|staged| staged.name == name) {
+			self.staged = None;
+		}
+		self.pending.remove(&name);
+		if self.skipped.remove(&name) {
+			skips.lock().remove(&(suffix.clone(), name.clone()));
+		}
+		if let Some(entry) = self.listed.remove(&name)
+			&& finished
+			&& let Ok(mut done) = entry.write()
+		{
+			*done = true;
+		}
+	}
+
+	/// Nothing more is PUBLISHed or skipped, while the PUBLISHes already sent stay listed.
+	fn halt(&mut self, skips: &Skips, suffix: &crate::PathOwned) {
+		self.pending.clear();
+		self.staged = None;
+		let mut skips = skips.lock();
+		for name in self.skipped.drain() {
+			skips.remove(&(suffix.clone(), name));
+		}
+	}
+
+	/// Every track is no longer listed.
+	fn unlist(&mut self, skips: &Skips, suffix: &crate::PathOwned) {
+		self.halt(skips, suffix);
+		self.listed.clear();
+	}
+}
+
+/// The next track to PUBLISH, ready but for its stream.
+struct Staged {
+	name: Arc<str>,
+	track: track::Consumer,
+	properties: ietf::Properties,
+	/// On draft-18, claims the track's one subscription from now on.
+	subscribed: Option<Subscribed>,
+}
+
 /// One listed track, handed to its PUBLISH task.
 struct Listed {
+	/// The PUBLISH's stream, opened once the peer's credit admitted it.
+	stream: Stream<Transport, Version>,
 	track: track::Consumer,
 	/// The track's full namespace, as the PUBLISH names it.
 	namespace: crate::PathOwned,
@@ -170,7 +246,7 @@ struct Listed {
 	listed: kio::Consumer<bool>,
 	/// Closes once the request is cancelled, which a PUBLISH not yet sent heeds.
 	live: kio::Consumer<()>,
-	/// The subscription slot the PUBLISH holds for as long as it lives.
+	/// Counts the PUBLISH among the session's subscriptions for as long as it lives.
 	slot: crate::session::Slot,
 	/// On draft-18, claims the track's one subscription for as long as the PUBLISH lives.
 	subscribed: Option<Subscribed>,
@@ -288,8 +364,15 @@ impl Publisher {
 			skips: Skips::default(),
 			live: live.consume(),
 		};
-		// Each listed broadcast's route: dropping it ends that broadcast's listing.
-		let mut routes: HashMap<crate::PathOwned, kio::Producer<()>> = HashMap::new();
+		// Each listed broadcast's route, closed once its announcement goes; see [`Route`].
+		let mut routes: HashMap<crate::PathOwned, kio::Producer<Route>> = HashMap::new();
+		let withdraw = |routes: &mut HashMap<crate::PathOwned, kio::Producer<Route>>, prefix: &crate::PathOwned| {
+			if let Some(route) = routes.remove(prefix)
+				&& let Ok(mut route) = route.write()
+			{
+				*route = Route::Withdrawn;
+			}
+		};
 		let mut broadcasts = TaskSet::owned();
 		let mut session = self.session.clone();
 		let mut finished = false;
@@ -335,14 +418,14 @@ impl Publisher {
 					crate::announce::Event::Start(announce) | crate::announce::Event::Restart(announce),
 				) => announce,
 				Event::Announce(crate::announce::Event::End(announce)) => {
-					routes.remove(&announce.prefix);
+					withdraw(&mut routes, &announce.prefix);
 					continue;
 				}
 				// A new hop or cost changes nothing listed.
 				Event::Announce(crate::announce::Event::Update(_)) => continue,
 			};
 			// A restart is a new instance: the old one's listing ends with its route.
-			let route = kio::Producer::new(());
+			let route = kio::Producer::new(Route::Replaced);
 			let task = self.clone().run_listed_broadcast(
 				request.clone(),
 				announce.prefix.clone(),
@@ -404,7 +487,8 @@ impl Publisher {
 			})
 			.await;
 			match event {
-				Some(crate::announce::Event::End(announce) | crate::announce::Event::Restart(announce)) => {
+				Some(crate::announce::Event::End(announce)) => withdraw(&mut routes, &announce.prefix),
+				Some(crate::announce::Event::Restart(announce)) => {
 					routes.remove(&announce.prefix);
 				}
 				Some(_) => {}
@@ -504,12 +588,19 @@ impl Publisher {
 
 	/// List one broadcast under a SUBSCRIBE_TRACKS: PUBLISH or skip each of its tracks until
 	/// its route goes or the broadcast ends, then let its PUBLISHes run to their end.
+	///
+	/// A PUBLISH starts only once the peer's stream credit opens its stream, one staged at a
+	/// time, so the PUBLISHes a peer holds are bounded by the credit it grants. The listing is
+	/// still read meanwhile, since an unlisted track's PUBLISH_DONE is what returns that
+	/// credit; the tracks read but not yet PUBLISHed wait in `pending`, moved off the
+	/// listing's own queue rather than copied. A FORWARD=1 listing has nothing to unlist, so
+	/// it reads its next track only once the request stream has taken the last skip.
 	async fn run_listed_broadcast(
 		self,
 		request: Request,
 		suffix: crate::PathOwned,
 		epoch: Option<crate::Epoch>,
-		route: kio::Consumer<()>,
+		route: kio::Consumer<Route>,
 	) {
 		let namespace = request.prefix.join(&suffix).to_owned();
 		let absolute = self.origin.absolute(&namespace).to_owned();
@@ -534,14 +625,12 @@ impl Publisher {
 			}
 			None => return,
 		};
-		// Each PUBLISH watches its track's entry here: dropping it says the track is no
-		// longer listed.
-		let mut listed: HashMap<Arc<str>, kio::Producer<bool>> = HashMap::new();
-		// The tracks this broadcast queued a skip for, so its end touches only its own.
-		let mut skipped: HashSet<Arc<str>> = HashSet::new();
+		let mut entries = Entries::default();
 		let mut publishes = TaskSet::owned();
-		// The listing ended, or the request did: nothing more to add.
+		let mut session = self.session.clone();
+		// The listing ended, the request did, or the route was withdrawn: nothing more to add.
 		let mut adding = true;
+		let mut withdrawn = false;
 		// The broadcast's listing, held only while our publish permit covers it: a track
 		// it does not cover is not revealed at all, and one it comes to cover is listed
 		// from scratch.
@@ -559,15 +648,56 @@ impl Publisher {
 
 		enum Event {
 			Track(crate::broadcast::TracksEvent),
+			/// The staged track's PUBLISH stream opened.
+			Opened(Result<Stream<Transport, Version>, Error>),
 			/// Our publish permit may have changed.
 			Regrant(crate::auth::Permit),
-			/// The broadcast ended or its route went: every track it listed is gone.
+			/// The broadcast ended or another instance replaced it: every track it listed is gone.
 			Ended,
+			/// The route was withdrawn: nothing more is listed, and the broadcast ends soon.
+			Withdrawn,
 			/// The request was cancelled.
 			Cancelled,
 		}
 
 		loop {
+			// Stage the next pending track that will be PUBLISHed, skipping those that will
+			// not, so a stream is opened only for a PUBLISH that goes out.
+			while adding
+				&& entries.staged.is_none()
+				&& let Some((name, info)) = entries.pending.pop_front()
+			{
+				// A track this draft cannot describe is skipped rather than PUBLISHed with
+				// its properties rewritten.
+				let Ok(properties) = track_properties(&info, request.properties_wanted, self.version, flate) else {
+					entries.skip(&request.skips, &suffix, name);
+					continue;
+				};
+				let Ok(track) = broadcast.track(&name) else {
+					continue;
+				};
+				// Draft-18 allows one subscription per track (section 5.1), so a track the
+				// peer is subscribed to, by its SUBSCRIBE or a PUBLISH still alive, is
+				// skipped. Held from now, so a SUBSCRIBE cannot slip in before the PUBLISH
+				// goes out.
+				let subscribed = match self.version {
+					Version::Draft18 => match Subscribed::publish(&self.listings, namespace.clone(), name.clone()) {
+						Some(subscribed) => Some(subscribed),
+						None => {
+							entries.skip(&request.skips, &suffix, name);
+							continue;
+						}
+					},
+					_ => None,
+				};
+				entries.staged = Some(Staged {
+					name,
+					track,
+					properties,
+					subscribed,
+				});
+			}
+
 			let event = kio::wait(|waiter| {
 				let drained = publishes.poll(waiter).is_ready();
 				if !adding && drained {
@@ -576,8 +706,11 @@ impl Publisher {
 				if adding && request.live.poll_closed(waiter).is_ready() {
 					return Poll::Ready(Some(Event::Cancelled));
 				}
-				if route.poll_closed(waiter).is_ready() {
-					return Poll::Ready(Some(Event::Ended));
+				if !withdrawn && route.poll_closed(waiter).is_ready() {
+					return Poll::Ready(Some(match *route.read() {
+						Route::Replaced => Event::Ended,
+						Route::Withdrawn => Event::Withdrawn,
+					}));
 				}
 				if let Poll::Ready(permit) =
 					self.auth
@@ -585,9 +718,25 @@ impl Publisher {
 				{
 					return Poll::Ready(Some(Event::Regrant(permit)));
 				}
+				if entries.staged.is_some()
+					&& let Poll::Ready(opened) = Stream::poll_open(&mut session, self.version, &mut waiter.context())
+				{
+					return Poll::Ready(Some(Event::Opened(opened)));
+				}
 				let Some(tracks) = tracks.as_mut() else {
 					return Poll::Pending;
 				};
+				if request.forward
+					&& request
+						.skips
+						.poll(waiter, |skips| match skips.is_empty() {
+							true => Poll::Ready(()),
+							false => Poll::Pending,
+						})
+						.is_pending()
+				{
+					return Poll::Pending;
+				}
 				match tracks.poll_next(waiter) {
 					Poll::Ready(Ok(Some(event))) => Poll::Ready(Some(Event::Track(event))),
 					Poll::Ready(Ok(None)) => Poll::Ready(Some(Event::Ended)),
@@ -603,16 +752,9 @@ impl Publisher {
 			let Some(event) = event else {
 				return;
 			};
-			let unlist = |listed: &mut HashMap<Arc<str>, kio::Producer<bool>>, skipped: &mut HashSet<Arc<str>>| {
-				listed.clear();
-				let mut skips = request.skips.lock();
-				for name in skipped.drain() {
-					skips.remove(&(suffix.clone(), name));
-				}
-			};
 			match event {
 				Event::Ended => {
-					unlist(&mut listed, &mut skipped);
+					entries.unlist(&request.skips, &suffix);
 					// What it already PUBLISHed ends now; wait for that to go out.
 					kio::wait(|waiter| publishes.poll(waiter)).await;
 					return;
@@ -622,13 +764,13 @@ impl Publisher {
 					// cancels the skips not yet sent.
 					(false, true) => {
 						tracks = None;
-						unlist(&mut listed, &mut skipped);
+						entries.unlist(&request.skips, &suffix);
 					}
 					(true, false) if adding => match broadcast.tracks() {
 						Ok(listing) => tracks = Some(listing),
 						Err(err) => {
 							tracing::debug!(broadcast = %absolute, %err, "listed broadcast ended");
-							unlist(&mut listed, &mut skipped);
+							entries.unlist(&request.skips, &suffix);
 							kio::wait(|waiter| publishes.poll(waiter)).await;
 							return;
 						}
@@ -637,85 +779,70 @@ impl Publisher {
 				},
 				// The PUBLISHes already sent still end when their track is unlisted, so keep
 				// reading the listing for them, adding nothing.
-				Event::Cancelled => adding = false,
-				Event::Track(crate::broadcast::TracksEvent::Synced) => {}
-				Event::Track(
-					crate::broadcast::TracksEvent::Removed { name } | crate::broadcast::TracksEvent::Finished { name },
-				) if skipped.remove(&name) => {
-					request.skips.lock().remove(&(suffix.clone(), name));
+				Event::Cancelled => {
+					adding = false;
+					entries.pending.clear();
+					entries.staged = None;
 				}
-				Event::Track(crate::broadcast::TracksEvent::Removed { name }) => {
-					listed.remove(&name);
+				// Its listing ends once the front serving it sees the route go, after the
+				// tracks its source finished last, so the PUBLISHes already sent end by it.
+				// The tracks not yet PUBLISHed or skipped are no longer announced.
+				Event::Withdrawn => {
+					withdrawn = true;
+					adding = false;
+					entries.halt(&request.skips, &suffix);
 				}
-				// Its PUBLISH ends with TRACK_ENDED rather than in error.
-				Event::Track(crate::broadcast::TracksEvent::Finished { name }) => {
-					if let Some(entry) = listed.remove(&name)
-						&& let Ok(mut finished) = entry.write()
-					{
-						*finished = true;
-					}
+				Event::Opened(Err(err)) => {
+					tracing::debug!(broadcast = %absolute, %err, "publish stream did not open");
+					entries.unlist(&request.skips, &suffix);
+					kio::wait(|waiter| publishes.poll(waiter)).await;
+					return;
 				}
-				Event::Track(crate::broadcast::TracksEvent::Added { .. }) if !adding => {}
-				Event::Track(crate::broadcast::TracksEvent::Added { name, info }) => {
-					let mut skip = |name: Arc<str>| {
-						request.skips.lock().insert((suffix.clone(), name.clone()), ());
-						skipped.insert(name);
-					};
-					if request.forward {
-						skip(name);
+				Event::Opened(Ok(stream)) => {
+					let Some(Staged {
+						name,
+						track,
+						properties,
+						subscribed,
+					}) = entries.staged.take()
+					else {
 						continue;
-					}
-					// A track this draft cannot describe is skipped rather than PUBLISHed with
-					// its properties rewritten.
-					let Ok(properties) = track_properties(&info, request.properties_wanted, self.version, flate) else {
-						skip(name);
-						continue;
-					};
-					let Ok(track) = broadcast.track(&name) else {
-						continue;
-					};
-					// Each paused PUBLISH holds a subscription slot. Nothing else bounds how many
-					// a peer's listings hold, so past `Limits::requests` the peer is told the
-					// track exists rather than left without it.
-					let Ok(slot) = self.subscriptions.acquire() else {
-						skip(name);
-						continue;
-					};
-					// Draft-18 allows one subscription per track (section 5.1), so a track the
-					// peer is subscribed to, by its SUBSCRIBE or a PUBLISH still alive, is
-					// skipped. Held from now, so a SUBSCRIBE cannot slip in before the PUBLISH
-					// goes out.
-					let subscribed = match self.version {
-						Version::Draft18 => {
-							match Subscribed::publish(&self.listings, namespace.clone(), name.clone()) {
-								Some(subscribed) => Some(subscribed),
-								None => {
-									skip(name);
-									continue;
-								}
-							}
-						}
-						_ => None,
 					};
 					let entry = kio::Producer::new(false);
 					let task = Listed {
+						stream,
 						track,
 						namespace: namespace.clone(),
 						name: name.clone(),
 						properties,
 						listed: entry.consume(),
 						live: request.live.clone(),
-						slot,
+						slot: self.subscriptions.hold(),
 						subscribed,
 						params: request.params,
 					};
-					listed.insert(name.clone(), entry);
+					entries.listed.insert(name, entry);
 					let this = self.clone();
 					publishes.push(async move {
 						if let Err(err) = this.run_publish(task).await {
 							tracing::debug!(%err, "publish stream error");
 						}
 					});
+				}
+				Event::Track(crate::broadcast::TracksEvent::Synced) => {}
+				Event::Track(crate::broadcast::TracksEvent::Removed { name }) => {
+					entries.remove(&request.skips, &suffix, name, false)
+				}
+				// Its PUBLISH ends with TRACK_ENDED rather than in error.
+				Event::Track(crate::broadcast::TracksEvent::Finished { name }) => {
+					entries.remove(&request.skips, &suffix, name, true)
+				}
+				Event::Track(crate::broadcast::TracksEvent::Added { .. }) if !adding => {}
+				Event::Track(crate::broadcast::TracksEvent::Added { name, .. }) if request.forward => {
+					entries.skip(&request.skips, &suffix, name);
+				}
+				Event::Track(crate::broadcast::TracksEvent::Added { name, info }) => {
+					entries.pending.insert(name, info);
 				}
 			}
 		}
@@ -725,6 +852,7 @@ impl Publisher {
 	/// subscriber cancels or refuses it, or, once resumed, the track ends.
 	async fn run_publish(self, task: Listed) -> Result<(), Error> {
 		let Listed {
+			stream,
 			track,
 			namespace,
 			name,
@@ -742,25 +870,11 @@ impl Publisher {
 		let dynamic = properties.dynamic_groups;
 		let absolute = self.origin.absolute(&namespace).to_owned();
 
-		// Every wait on the peer's credit, for the stream, a Request ID, or the PUBLISH's
-		// bytes, lasts only while the track is listed and the request stands; a peer that
-		// grants none holds only this task and its slot. A Request ID abandoned unsent leaves
-		// a gap, which the drafts with SUBSCRIBE_TRACKS allow: none has MAX_REQUEST_ID.
+		// Every wait on the peer, for a Request ID or the PUBLISH's bytes, lasts only while
+		// the track is listed and the request stands. A Request ID abandoned unsent leaves a
+		// gap, which the drafts with SUBSCRIBE_TRACKS allow: none has MAX_REQUEST_ID.
 		let mut session = self.session.clone();
-		let opened = {
-			let mut opening = std::pin::pin!(Stream::open(&mut session, self.version));
-			kio::wait(|waiter| {
-				if listed.poll_closed(waiter).is_ready() || live.poll_closed(waiter).is_ready() {
-					return Poll::Ready(None);
-				}
-				waiter.poll_future(opening.as_mut()).map(Some)
-			})
-			.await
-		};
-		let Some(opened) = opened else {
-			return Ok(());
-		};
-		let mut stream = super::super::request_stream::with_stats(opened?, self.stats(), self.version);
+		let mut stream = super::super::request_stream::with_stats(stream, self.stats(), self.version);
 		let allocated = kio::wait(|waiter| {
 			if listed.poll_closed(waiter).is_ready() || live.poll_closed(waiter).is_ready() {
 				return Poll::Ready(None);
@@ -1070,7 +1184,7 @@ impl Publisher {
 			subscription = subscription.with_order(order.to_order());
 		}
 		if let Some(max_age) = params.max_age {
-			subscription.max_delay = Duration::from_millis(max_age);
+			subscription.max_delay = Some(Duration::from_millis(max_age));
 		}
 		// A start the live edge does not decide is no join; see `serve_subscribe_stream`.
 		let fixed = subscribe_range(params.filter, LiveEdge::default(), self.version);
@@ -1200,7 +1314,9 @@ impl Publisher {
 		// What an update changed while forwarding outlives a pause.
 		let applied = serve.track.subscription();
 		params.priority = crate::ietf::priority::to_wire(applied.priority);
-		params.max_age = applied.max_delay.as_millis().try_into().ok();
+		params.max_age = applied
+			.max_delay
+			.and_then(|max_delay| max_delay.as_millis().try_into().ok());
 		let served = match served {
 			Ok(Some(served)) => served,
 			Ok(None) => {
@@ -1480,6 +1596,43 @@ mod tests {
 		}
 	}
 
+	/// A broadcast closing right after a track finished ends that track's PUBLISH with
+	/// TRACK_ENDED, whether its producer is still held or not, while a track left unfinished
+	/// still ends in error.
+	#[moq_clock::test]
+	async fn a_clean_end_keeps_its_finishes() {
+		for version in DRAFTS {
+			for held in [false, true] {
+				let case = format!("{version}: held={held}");
+				let mut h = harness(version);
+				let mut request = h.request(&listing(false)).await;
+				assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{case}");
+				let mut published = HashMap::new();
+				for _ in 0..2 {
+					let (mut stream, _, name, _) = h.publish().await;
+					publish_ok(&mut stream).await;
+					published.insert(name, stream);
+				}
+				moq_clock::sleep(Duration::from_millis(10)).await;
+
+				let video = h.tracks.remove("video").unwrap();
+				video.finish().unwrap();
+				let video = held.then_some(video);
+				h.broadcast.close();
+				for (name, status) in [
+					("video", ietf::PublishDoneStatus::TrackEnded),
+					("audio", ietf::PublishDoneStatus::InternalError),
+				] {
+					let (id, body) = next(published.get_mut(name).unwrap()).await;
+					assert_eq!(id, ietf::PublishDone::ID, "{case}: {name}");
+					let done: ietf::PublishDone = body.message(version).unwrap();
+					assert_eq!(done.status_code, status.code(version), "{case}: {name}");
+				}
+				drop(video);
+			}
+		}
+	}
+
 	/// A REQUEST_UPDATE with FORWARD=1 resumes a paused PUBLISH: its answer names where the
 	/// subscription joins, and new groups flow. FORWARD=0 pauses it again.
 	#[moq_clock::test]
@@ -1701,20 +1854,99 @@ mod tests {
 		}
 	}
 
-	/// Each paused PUBLISH holds a subscription slot; past `Limits::requests` the track is
-	/// skipped (PUBLISH_BLOCKED, the same message, on draft-18) rather than held.
+	/// Listed broadcast sizes to sweep: what a listing holds must not grow with them.
+	const CATALOGS: [usize; 3] = [4, 64, 512];
+
+	/// Each PUBLISH opens only as the peer's stream credit admits it: a peer that withholds
+	/// credit and reads nothing holds as many PUBLISHes as it grants, however many tracks are
+	/// listed, and each track is PUBLISHed once credit returns.
 	#[moq_clock::test]
-	async fn past_the_request_limit_a_track_is_skipped() {
+	async fn a_listing_publishes_only_as_credit_admits() {
+		const CREDIT: usize = 2;
 		for version in DRAFTS {
-			let mut h = harness(version);
-			h.publisher.subscriptions = crate::session::Slots::new(1);
-			let mut request = h.request(&listing(false)).await;
-			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
-			let (_stream, _, published, _) = h.publish().await;
-			let (id, body) = next(&mut request).await;
-			assert_eq!(id, ietf::PublishSkipped::ID, "{version}");
-			let skip: ietf::PublishSkipped = body.message(version).unwrap();
-			assert_ne!(skip.track_name, published, "{version}");
+			for catalog in CATALOGS {
+				let config = memory::Config {
+					max_concurrent_bi_streams: Some(CREDIT),
+					..Default::default()
+				};
+				let mut h = harness_with(version, config, peer::Peer::default());
+				let _extra: Vec<_> = (h.tracks.len()..catalog)
+					.map(|i| {
+						h.broadcast
+							.create_track(format!("t{i}"), crate::track::Info::timed())
+							.unwrap()
+					})
+					.collect();
+				let held = |h: &Harness| usize::MAX - h.publisher.subscriptions.available();
+
+				let mut request = h.request(&listing(false)).await;
+				assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
+				moq_clock::sleep(Duration::from_millis(10)).await;
+				assert_eq!(held(&h), CREDIT, "{version} catalog={catalog}");
+
+				// Refusing each PUBLISH returns its credit, which opens the next.
+				let mut published = HashSet::new();
+				while published.len() < catalog {
+					let (stream, _, name, _) = h.publish().await;
+					assert!(published.insert(name), "{version}: PUBLISHed a track twice");
+					drop(stream);
+					assert!(held(&h) <= CREDIT, "{version} catalog={catalog}: {} held", held(&h));
+				}
+			}
+		}
+	}
+
+	/// A FORWARD=1 listing reads its next track only once the request stream has taken the
+	/// last skip, so a peer that stops reading leaves one skip queued, however many tracks
+	/// are listed.
+	#[moq_clock::test]
+	async fn a_forwarding_listing_reads_only_as_skips_go_out() {
+		for version in [Version::Draft19, Version::Draft22] {
+			for catalog in CATALOGS {
+				let h = harness(version);
+				let _extra: Vec<_> = (h.tracks.len()..catalog)
+					.map(|i| {
+						h.broadcast
+							.create_track(format!("t{i}"), crate::track::Info::timed())
+							.unwrap()
+					})
+					.collect();
+				let skips = Skips::default();
+				let live = kio::Producer::new(());
+				let route = kio::Producer::new(Route::Replaced);
+				let request = Request {
+					origin: h._origin.consume(),
+					prefix: crate::Path::new("").to_owned(),
+					forward: true,
+					params: Params {
+						priority: crate::ietf::priority::DEFAULT_WIRE,
+						order: None,
+						filter: Filter::Unfiltered,
+						max_age: None,
+						new_group: None,
+					},
+					properties_wanted: true,
+					skips: skips.clone(),
+					live: live.consume(),
+				};
+				moq_clock::sim::spawn(h.publisher.clone().run_listed_broadcast(
+					request,
+					crate::Path::new("room/cam").to_owned(),
+					None,
+					route.consume(),
+				));
+
+				let mut skipped = HashSet::new();
+				while skipped.len() < catalog {
+					moq_clock::sleep(Duration::from_millis(10)).await;
+					let mut queued = skips.lock();
+					assert_eq!(queued.len(), 1, "{version} catalog={catalog}");
+					let ((_, name), ()) = queued.pop_front().unwrap();
+					assert!(skipped.insert(name), "{version}: skipped a track twice");
+				}
+				moq_clock::sleep(Duration::from_millis(10)).await;
+				assert!(skips.read().is_empty(), "{version}: skipped past the listing");
+			}
 		}
 	}
 
@@ -2364,7 +2596,7 @@ mod tests {
 	async fn a_listing_waits_for_the_setup_answer() {
 		for version in [Version::Draft18, Version::Draft22] {
 			let mut h = harness(version);
-			let auth = crate::auth::Handle::new(true);
+			let auth = crate::auth::Link::new(true);
 			let _cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
 			let setup = peer::PeerSetup::default();
 			setup.set(peer::Peer {
@@ -2414,8 +2646,8 @@ mod tests {
 		};
 		for version in [Version::Draft18, Version::Draft22] {
 			let mut h = harness(version);
-			let auth = crate::auth::Handle::new(false);
-			auth.authorize(&nothing());
+			let auth = crate::auth::Link::new(false);
+			auth.handle().authorize(&nothing());
 			h.publisher = h.publisher.clone().with_auth(auth.clone());
 
 			let mut request = h.request(&listing(false)).await;
@@ -2427,13 +2659,13 @@ mod tests {
 			)));
 			assert!(opened.is_pending(), "{version}: listed a track the grant denies");
 
-			auth.authorize(&crate::auth::Grant::all());
+			auth.handle().authorize(&crate::auth::Grant::all());
 			let (mut first, ..) = h.publish().await;
 			let (mut second, ..) = h.publish().await;
 			publish_ok(&mut first).await;
 			publish_ok(&mut second).await;
 
-			auth.authorize(&nothing());
+			auth.handle().authorize(&nothing());
 			for stream in [&mut first, &mut second] {
 				assert_eq!(next(stream).await.0, ietf::PublishDone::ID, "{version}");
 			}

@@ -19,13 +19,13 @@ use super::{
 };
 use crate::{
 	AsPath, Epoch, Error, InvalidPattern, Path, PathOwned, Pattern, Patterns,
-	coding::{BoundsExceeded, Decode, DecodeError, Decoder, Encode, EncodeError, Encoder},
+	coding::{BoundsExceeded, Decode, DecodeError, Decoder, Encode, EncodeError, Encoder, Form, varint},
 	path::Segment,
 	time::{Deadlines, Instant},
 	util::{Keepalive, SendCell, TaskSet, Tasks, TasksWeak},
 };
 
-/// One relay's identity in a broadcast's hop chain: a 62-bit varint on the wire.
+/// One relay's identity in a broadcast's hop chain: any 64-bit id.
 ///
 /// Names a *hop*, not an [`origin::Producer`](Producer): a relay's routing table is the
 /// origin, and this is the id it stamps into a route's hop chain as an announcement
@@ -36,7 +36,6 @@ use crate::{
 /// on the wire, names nobody, and marks the chain anonymous for route selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Hop {
-	/// 62-bit identifier, so it fits a varint on every wire version.
 	id: u64,
 }
 
@@ -51,11 +50,11 @@ impl Hop {
 
 	/// Build a hop from a stable id.
 	///
-	/// The id must be non-zero and fit in the 62-bit QUIC varint range. Wire
-	/// decode accepts remote id 0 ([`Self::UNKNOWN`]), but a local hop should
-	/// not use it because it cannot be excluded for loop detection.
+	/// The id must be non-zero. Wire decode accepts remote id 0
+	/// ([`Self::UNKNOWN`]), but a local hop should not use it because it cannot be
+	/// excluded for loop detection.
 	pub fn new(id: u64) -> Result<Self, InvalidHop> {
-		if id == 0 || id >= 1u64 << 62 {
+		if id == 0 {
 			return Err(InvalidHop::Range);
 		}
 		Ok(Self { id })
@@ -66,7 +65,7 @@ impl Hop {
 	///
 	/// Older `@moq/lite` clients decode the exclude hop as a JavaScript number
 	/// and reject values above 2^53-1. Keep generated IDs in that range while
-	/// [`Self::new`] accepts the full 62-bit wire range for explicit IDs.
+	/// [`Self::new`] accepts any non-zero 64-bit id.
 	pub fn random() -> Self {
 		let mut rng = rand::rng();
 		let id = rng.random_range(1..(1u64 << 53));
@@ -79,12 +78,20 @@ impl Hop {
 	}
 
 	/// Build a hop from an id read off the wire, where 0 is legal.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn from_wire(id: u64) -> Result<Self, DecodeError> {
-		if id >= 1u64 << 62 {
-			return Err(DecodeError::InvalidValue);
+	pub(crate) const fn from_wire(id: u64) -> Self {
+		Self { id }
+	}
+
+	/// The id this hop carries on a wire whose varints use `form`.
+	///
+	/// A QUIC varint stops at 2^62 - 1, so a larger id travels as [`Self::UNKNOWN`]:
+	/// the route still reaches the peer, losing loop detection through this hop on
+	/// that link only.
+	pub(crate) fn wire_id(self, form: Form) -> u64 {
+		match form {
+			Form::Quic if self.id > varint::MAX_QUIC => Self::UNKNOWN.id,
+			_ => self.id,
 		}
-		Ok(Self { id })
 	}
 }
 
@@ -201,14 +208,13 @@ impl fmt::Display for Hop {
 
 impl<V> Encode<V> for Hop {
 	fn encode(&self, w: &mut Encoder<'_>, _: V) -> Result<(), EncodeError> {
-		w.varint(self.id)?;
-		Ok(())
+		w.varint(self.wire_id(w.form()))
 	}
 }
 
 impl<V> Decode<V> for Hop {
 	fn decode(r: &mut Decoder<'_>, _: V) -> Result<Self, DecodeError> {
-		Self::from_wire(r.varint()?)
+		Ok(Self::from_wire(r.varint()?))
 	}
 }
 
@@ -259,8 +265,8 @@ pub struct Hops(Vec<Hop>);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum InvalidHop {
-	/// The id is zero or outside the 62-bit wire range, so it cannot identify a local
-	/// hop. Only [`Hop::new`] returns this; a chain never holds one.
+	/// The id is zero, so it cannot identify a local hop. Only [`Hop::new`] returns
+	/// this; a chain may still hold the reserved [`Hop::UNKNOWN`].
 	Range,
 
 	/// The list is already at its hop-count cap, which a real path never reaches and a
@@ -276,7 +282,7 @@ pub enum InvalidHop {
 impl fmt::Display for InvalidHop {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
-			Self::Range => write!(f, "local hop id must be non-zero and below 2^62"),
+			Self::Range => write!(f, "local hop id must be non-zero"),
 			Self::TooMany => write!(f, "too many hops (max {MAX_HOPS})"),
 			Self::Duplicate => write!(f, "hop already in the chain"),
 		}
@@ -499,14 +505,14 @@ pub struct Route {
 	/// The credential the request advertising this route carries, from
 	/// [`auth::Handle`](crate::auth::Handle)'s `add`, or `None` for the session's scope.
 	///
-	/// Only a session the auth was presented on carries it, as the token on its
+	/// Only a session built on the handle that issued it carries it, as the token on its
 	/// moq-transport PUBLISH_NAMESPACE: any other session, the inline NAMESPACE answering a
 	/// solicited SUBSCRIBE_NAMESPACE from draft 16 on (drafts 14 and 15 answer with a
 	/// PUBLISH_NAMESPACE, which carries it), and moq-lite (which rides the session's scope)
 	/// advertise the route unnamed. Swapping it is an update that renews the request with
-	/// REQUEST_UPDATE from draft 16, or ends and makes it again before. After a
-	/// reconnect, add the token on the new session and name that. Local, like
-	/// [`Self::source`]: a relay never forwards it.
+	/// REQUEST_UPDATE from draft 16, or ends and makes it again before. A handle passed to
+	/// `Client::with_auth` presents it on every session it backs, so the route keeps it
+	/// across a reconnect. Local, like [`Self::source`]: a relay never forwards it.
 	pub auth: Option<crate::auth::Auth>,
 
 	/// The announcing session's declared or assigned identity.
@@ -2555,7 +2561,6 @@ impl Announcing {
 		}
 
 		let mut entries = Vec::with_capacity(self.prefixes.len());
-		let mut superseded = Vec::new();
 		for (prefix, claim) in &self.prefixes {
 			shared.reannounced(prefix, &route.hops);
 			let id = shared.next_route;
@@ -2582,14 +2587,9 @@ impl Announcing {
 				reach: reach(&self.scope, claim),
 			});
 			shared.sync_route(prefix, claim);
-			superseded.extend(shared.routes.superseded(prefix));
 			entries.push((prefix.clone(), id));
 		}
 		drop(shared);
-		// Outside the table lock, which never nests a broadcast's.
-		for broadcast in superseded {
-			broadcast.supersede();
-		}
 
 		// Ingress announce guard: held while the route is advertised.
 		let guard = serving
@@ -2654,11 +2654,6 @@ impl Announcer {
 	pub(super) fn route(&self) -> Option<Route> {
 		self.entry.route()
 	}
-
-	/// Whether a live route at the broadcast's path carries a newer epoch.
-	pub(super) fn superseded(&self) -> bool {
-		self.entry.superseded()
-	}
 }
 
 /// The write half of an advertisement: a live claim that paths under a
@@ -2708,8 +2703,6 @@ impl AnnounceProducer {
 		// The requests an epoch change released, refused once the table lock is gone: the
 		// refusal wakes their fronts, which read the table.
 		let mut released = Vec::new();
-		// The broadcasts a newer epoch now replaces, told outside the table lock too.
-		let mut superseded = Vec::new();
 		for (prefix, id) in &self.entries {
 			shared.reannounced(prefix, &route.hops);
 			let stale = shared.withdrawn_through(prefix, &route.hops);
@@ -2743,16 +2736,12 @@ impl AnnounceProducer {
 			}
 			shared.sync_route(prefix, &claim);
 			shared.prune_withdrawn(prefix);
-			superseded.extend(shared.routes.superseded(prefix));
 		}
 		drop(shared);
 		for producer in released {
 			if let Ok(mut request) = producer.write() {
 				request.resolved.get_or_insert(Err(Error::Unroutable));
 			}
-		}
-		for broadcast in superseded {
-			broadcast.supersede();
 		}
 		Ok(true)
 	}
@@ -2769,18 +2758,6 @@ impl AnnounceProducer {
 			auth: entry.auth.clone(),
 			via: entry.via,
 			source: entry.entered(),
-		})
-	}
-
-	/// Whether a live route at any of the entries' prefixes carries a newer epoch than theirs.
-	fn superseded(&self) -> bool {
-		let shared = self.shared.lock();
-		self.entries.iter().any(|(prefix, id)| {
-			shared
-				.routes
-				.entry(prefix, *id)
-				.and_then(|entry| entry.epoch.as_ref())
-				.is_some_and(|epoch| shared.routes.newest_epoch(prefix).is_some_and(|newest| epoch < newest))
 		})
 	}
 
@@ -3683,12 +3660,8 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 					Err(_closed) => Err(Error::Unroutable),
 				}));
 			}
-			if let Some(id) = front.serving()
-				&& let Some(source) = sources.get(&id)
-				&& source.poll_closed(waiter).is_ready()
-			{
-				return Poll::Ready(Step::SourceClosed(id));
-			}
+			// The listing first: a source ends its listing before it closes, so this forwards
+			// the tracks it finished last before its close detaches it.
 			match &mut listing {
 				None => {
 					if front.serving().is_some() && matches!(lister.poll_used(waiter), Poll::Ready(Ok(()))) {
@@ -3708,6 +3681,12 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 						return Poll::Ready(Step::Listed(result));
 					}
 				}
+			}
+			if let Some(id) = front.serving()
+				&& let Some(source) = sources.get(&id)
+				&& source.poll_closed(waiter).is_ready()
+			{
+				return Poll::Ready(Step::SourceClosed(id));
 			}
 			while let Poll::Ready(Ok(name)) = ready.poll_pop(waiter) {
 				let Some(io) = tracks.get_mut(&name) else { continue };
@@ -4649,26 +4628,6 @@ impl RouteTable {
 		let mut nodes = Vec::new();
 		self.root.walk(&mut |node| nodes.push(node));
 		nodes.into_iter().flat_map(|node| node.entries.iter())
-	}
-
-	/// The newest epoch a live route at `prefix` carries.
-	fn newest_epoch(&self, prefix: &Path) -> Option<&Epoch> {
-		self.at(prefix)
-			.filter(|entry| entry.live())
-			.filter_map(|entry| entry.epoch.as_ref())
-			.max()
-	}
-
-	/// The broadcasts published exactly at `prefix` under an epoch older than the newest one
-	/// advertised there. See [`broadcast::Finish::poll_closed`].
-	fn superseded(&self, prefix: &Path) -> Vec<broadcast::Consumer> {
-		let Some(newest) = self.newest_epoch(prefix) else {
-			return Vec::new();
-		};
-		self.at(prefix)
-			.filter(|entry| entry.epoch.as_ref().is_some_and(|epoch| epoch < newest))
-			.filter_map(|entry| entry.source.clone())
-			.collect()
 	}
 
 	/// Add a route at its prefix, creating the nodes down to it.
@@ -6151,8 +6110,8 @@ impl Consumer {
 	/// relative to this consumer's root; its patterns only filter visibility.
 	/// Routes with a segment starting with `.` below the literal head of those
 	/// patterns are hidden unless [`with_hidden`](Self::with_hidden) opted in.
-	/// The stream also watches its scope: a moq-lite client session fed by this
-	/// origin asks its peer about the scope while any stream watches it.
+	/// The stream also watches its scope: a client session fed by this origin asks
+	/// its peer about the scope while any stream watches it.
 	/// Drop the returned [`AnnounceConsumer`] to unregister.
 	pub fn announced(&self) -> AnnounceConsumer {
 		let state = kio::Producer::<OriginConsumerState>::default();
@@ -6443,7 +6402,7 @@ impl Consumer {
 	///
 	/// The returned future fails with [`Error::Unroutable`] at once when no
 	/// announced route covers the path, including a broadcast created on this
-	/// origin but not announced. A moq-lite client session only discovers what this
+	/// origin but not announced. A client session only discovers what this
 	/// origin's readers watch, so a path no [`Self::announced`],
 	/// [`Self::routed_broadcast`], or [`Self::announced_broadcast`] watches is
 	/// unroutable on it. A broadcast resolved through a discovered route keeps its
@@ -8153,7 +8112,7 @@ mod tests {
 	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn an_auth_swap_is_an_update() {
-		let handle = crate::auth::Handle::ietf(false);
+		let handle = crate::auth::Link::ietf(false);
 		let first = handle.present(bytes::Bytes::from_static(b"first"), false).unwrap();
 		let second = handle.present(bytes::Bytes::from_static(b"second"), false).unwrap();
 		let producer = origin(1).produce();
@@ -8778,6 +8737,33 @@ mod tests {
 
 		drop(source);
 		assert_eq!(listed(&mut tracks).await, "end");
+	}
+
+	/// A source closing right after its tracks finished, held or not, ends the front's
+	/// listing after those finishes, never ahead of them.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn a_front_forwards_the_finishes_before_its_source_closed() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let source = producer.publish("room/alice", Route::default()).unwrap();
+		let dropped = source.create_track("dropped", None).unwrap();
+		let held = source.create_track("held", None).unwrap();
+		let _live = source.create_track("live", None).unwrap();
+
+		let front = consumer.request_broadcast("room/alice", None).await.unwrap();
+		let mut tracks = front.tracks().unwrap();
+		for event in ["+dropped", "+held", "+live", "synced"] {
+			assert_eq!(listed(&mut tracks).await, event);
+		}
+
+		dropped.finish().unwrap();
+		drop(dropped);
+		held.finish().unwrap();
+		source.close();
+		for event in ["~dropped", "~held", "end"] {
+			assert_eq!(listed(&mut tracks).await, event);
+		}
 	}
 
 	/// A source's handler ending its listing while the source stays, as a session does on
@@ -9453,7 +9439,7 @@ mod tests {
 		let fetched = Arc::new(crate::sync::Mutex::new(Vec::<crate::group::Producer>::new()));
 		let serving = fetched.clone();
 		let _fetching = moq_clock::sim::spawn(async move {
-			while let Ok(request) = fetches.requested_group().await {
+			while let Ok(request) = fetches.requested_fill_group().await {
 				let mut group = request.accept(crate::track::Info::timed()).unwrap();
 				for frame in [b"a", b"b", b"c"] {
 					group.write_frame(crate::Timestamp::ZERO, frame.as_ref()).unwrap();
@@ -11476,99 +11462,6 @@ mod tests {
 		assert!(!replaced.is_clone(&resolved), "rejoined the first instance's front");
 	}
 
-	/// A newer epoch at the path ends a finished broadcast's linger at once, so the finished
-	/// instance neither stands next to its replacement nor returns when the replacement ends.
-	#[moq_clock::test]
-	#[cfg(feature = "async")]
-	async fn a_newer_epoch_ends_the_linger() {
-		let producer = origin(1).produce();
-		let old = producer
-			.publish("room/alice", Route::default().with_epoch(crate::Epoch::mint()))
-			.unwrap();
-		let track = old
-			.create_track("video", track::Info::timed().with_max_age(Duration::from_secs(30)))
-			.unwrap();
-		track.finish().unwrap();
-		let watch = old.consume();
-		let start = moq_clock::now();
-		let wait = moq_clock::sim::spawn(old.finish().wait());
-
-		moq_clock::sleep(Duration::from_secs(1)).await;
-		assert!(!watch.is_closed());
-		let _new = producer
-			.publish("room/alice", Route::default().with_epoch(crate::Epoch::mint()))
-			.unwrap();
-		wait.await.unwrap();
-		assert_eq!(moq_clock::now() - start, Duration::from_secs(1));
-		assert!(watch.is_closed());
-	}
-
-	/// Only a newer epoch ends a linger: an older instance arriving late, or one at
-	/// another path, leaves it to run out.
-	#[moq_clock::test]
-	#[cfg(feature = "async")]
-	async fn an_older_epoch_leaves_the_linger() {
-		let producer = origin(1).produce();
-		let (older, newer) = (crate::Epoch::mint(), crate::Epoch::mint());
-		let finished = producer
-			.publish("room/alice", Route::default().with_epoch(newer))
-			.unwrap();
-		let track = finished
-			.create_track("video", track::Info::timed().with_max_age(Duration::from_secs(5)))
-			.unwrap();
-		track.finish().unwrap();
-		let start = moq_clock::now();
-		let wait = moq_clock::sim::spawn(finished.finish().wait());
-
-		let _late = producer
-			.publish("room/alice", Route::default().with_epoch(older))
-			.unwrap();
-		let _elsewhere = producer
-			.publish("room/bob", Route::default().with_epoch(crate::Epoch::mint()))
-			.unwrap();
-		wait.await.unwrap();
-		assert_eq!(moq_clock::now() - start, Duration::from_secs(5));
-	}
-
-	/// Supersession is decided when the broadcast finishes: a newer epoch that came and went
-	/// while it was live leaves its linger, and one still live cuts it at once.
-	#[moq_clock::test]
-	#[cfg(feature = "async")]
-	async fn a_live_newer_epoch_at_finish_ends_the_linger() {
-		let producer = origin(1).produce();
-		let (older, newer) = (crate::Epoch::mint(), crate::Epoch::mint());
-		let publish = |epoch: &crate::Epoch| {
-			let broadcast = producer
-				.publish("room/alice", Route::default().with_epoch(epoch.clone()))
-				.unwrap();
-			let track = broadcast
-				.create_track("video", track::Info::timed().with_max_age(Duration::from_secs(5)))
-				.unwrap();
-			track.finish().unwrap();
-			(broadcast, track)
-		};
-
-		let (restored, _track) = publish(&older);
-		drop(publish(&newer));
-		let start = moq_clock::now();
-		restored.finish().wait().await;
-		assert_eq!(
-			moq_clock::now() - start,
-			Duration::from_secs(5),
-			"the withdrawn epoch left it"
-		);
-
-		let (cut, _track) = publish(&older);
-		let _live = publish(&newer);
-		let start = moq_clock::now();
-		cut.finish().wait().await;
-		assert_eq!(
-			moq_clock::now() - start,
-			Duration::ZERO,
-			"the live epoch ends it at once"
-		);
-	}
-
 	/// Announce cursors follow the newest epoch over a cheaper one, and deliver a
 	/// change of epoch as a restart: a different broadcast.
 	#[moq_clock::test]
@@ -11738,13 +11631,13 @@ mod tests {
 		let mut handler = replacement.dynamic();
 		queued(&standby).await.accept(&replacement);
 		let request = handler.requested_track().await.unwrap();
-		assert_eq!(request.subscription().unwrap().start(), Some(track::Position::group(5)));
+		assert_eq!(request.subscription().unwrap().start(), Some(5));
 		let track = request.accept(crate::track::Info::timed());
 		let mut preferences = rig.subscription.subscription();
 		preferences.priority = 7;
 		rig.subscription.update(preferences).unwrap();
 		settle(|| track.subscription().is_some_and(|sub| sub.priority == 7)).await;
-		assert_eq!(track.subscription().unwrap().start(), Some(track::Position::group(5)));
+		assert_eq!(track.subscription().unwrap().start(), Some(5));
 	}
 
 	/// A route updated in place to a new first hop still serves the same broadcast:

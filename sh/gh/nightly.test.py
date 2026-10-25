@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import subprocess
 import tempfile
 import tomllib
@@ -180,6 +181,60 @@ class NightlyTest(unittest.TestCase):
     def test_unknown_group_fails_before_running_anything(self):
         result, calls = self.run_group("unknown")
         self.assertEqual(result.returncode, 2)
+        self.assertEqual(calls, [])
+
+
+class FuzzTest(unittest.TestCase):
+    def run_fuzz(self, *args):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            script = root / "sh/rs/fuzz.sh"
+            script.parent.mkdir(parents=True)
+            shutil.copy(ROOT / "sh/rs/fuzz.sh", script)
+            target = root / "rs/moq-net/fuzz/fuzz_targets/lite.rs"
+            target.parent.mkdir(parents=True)
+            target.touch()
+            corpus = root / "rs/moq-net/fuzz/corpus/lite"
+            corpus.mkdir(parents=True)
+            (corpus / "discovery").write_bytes(b"from the previous run")
+            seeds = root / "rs/moq-net/fuzz/seeds/lite"
+            seeds.mkdir(parents=True)
+            (seeds / "generated").write_bytes(b"generated seed")
+            binary = root / "bin"
+            binary.mkdir()
+            rustup = binary / "rustup"
+            rustup.write_text('#!/bin/sh\nif [ "$*" = "run nightly rustc --print sysroot" ]; then printf "%s\\n" "$FUZZ_SYSROOT"; fi\n')
+            rustup.chmod(0o755)
+            cargo = binary / "cargo"
+            cargo.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >>"$FUZZ_CALLS"\n')
+            cargo.chmod(0o755)
+            (binary / "cargo-fuzz").symlink_to(cargo)
+            calls = root / "calls"
+            env = dict(os.environ, PATH=f"{binary}:{os.environ['PATH']}",
+                       FUZZ_SYSROOT=str(root), FUZZ_CALLS=str(calls))
+            result = subprocess.run(["bash", str(script), *args], cwd=root, env=env,
+                                    capture_output=True, text=True)
+            self.assertEqual((corpus / "discovery").read_bytes(), b"from the previous run")
+            self.assertEqual((seeds / "generated").read_bytes(), b"generated seed")
+            return result, calls.read_text().splitlines() if calls.exists() else []
+
+    def test_run_keeps_discoveries_writable_and_seeds_separate(self):
+        result, calls = self.run_fuzz("lite", "--", "-runs=2")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls, [
+            "run --locked -q -p moq-net --features fuzz --example fuzz-seeds -- rs/moq-net/fuzz/seeds",
+            "fuzz run --fuzz-dir rs/moq-net/fuzz lite rs/moq-net/fuzz/corpus/lite rs/moq-net/fuzz/seeds/lite -- -runs=2",
+        ])
+
+    def test_minimization_only_rewrites_the_evolved_corpus(self):
+        result, calls = self.run_fuzz("--minimize", "lite")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls, ["fuzz cmin --fuzz-dir rs/moq-net/fuzz lite rs/moq-net/fuzz/corpus/lite"])
+
+    def test_unknown_target_fails_before_running_cargo(self):
+        result, calls = self.run_fuzz("missing")
+        self.assertNotEqual(result.returncode, 0)
         self.assertEqual(calls, [])
 
 

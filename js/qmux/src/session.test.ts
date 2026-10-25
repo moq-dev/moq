@@ -1647,6 +1647,69 @@ describe("Session integration (scripted peer)", () => {
 		session.close();
 	});
 
+	// Stream credit bounds open streams only if a bidi stream holds it until both halves end.
+	describe("a half-closed bidi stream keeps its stream-count credit", () => {
+		const id = Stream.Id.create(0n, Stream.Dir.Bi, true);
+
+		async function accept() {
+			const { session, peer } = connect({ maxStreamsBidi: 1n });
+			await session.ready;
+			peer.send({ type: "transport_parameters", params: peerParams() });
+			peer.send({ type: "stream", id, data: new Uint8Array([1]), fin: false });
+			const accepted = await session.incomingBidirectionalStreams.getReader().read();
+			if (accepted.done || !accepted.value) throw new Error("expected an incoming stream");
+			return { session, peer, stream: accepted.value };
+		}
+
+		// A ping round trip flushes any MAX_STREAMS the frames before it produced.
+		async function expectCredit(peer: FakePeer, count: number) {
+			const pongs = peer.count("ping_response");
+			peer.send({ type: "ping_request", sequence: BigInt(pongs + 1) });
+			await waitFor(() => peer.count("ping_response") > pongs);
+			expect(peer.count("max_streams_bidi")).toBe(count);
+		}
+
+		test("until our send half finishes", async () => {
+			const { session, peer, stream } = await accept();
+			peer.send({ type: "stream", id, offset: 1n, data: new Uint8Array(), fin: true });
+			await expectCredit(peer, 0);
+
+			await stream.writable.close();
+			await waitFor(() => peer.count("max_streams_bidi") === 1);
+			session.close();
+		});
+
+		test("until the peer's send half finishes", async () => {
+			const { session, peer, stream } = await accept();
+			await stream.writable.close();
+			await expectCredit(peer, 0);
+
+			peer.send({ type: "stream", id, offset: 1n, data: new Uint8Array(), fin: true });
+			await waitFor(() => peer.count("max_streams_bidi") === 1);
+			session.close();
+		});
+
+		test("until our send half is reset", async () => {
+			const { session, peer, stream } = await accept();
+			await stream.readable.cancel();
+			await expectCredit(peer, 0);
+
+			await stream.writable.abort();
+			await waitFor(() => peer.count("max_streams_bidi") === 1);
+			session.close();
+		});
+
+		test("until the peer stops our send half", async () => {
+			const { session, peer } = await accept();
+			peer.send({ type: "reset_stream", id, code: VarInt.from(0), finalSize: 1n });
+			await expectCredit(peer, 0);
+
+			peer.send({ type: "stop_sending", id, code: VarInt.from(0) });
+			await waitFor(() => peer.count("max_streams_bidi") === 1);
+			session.close();
+		});
+	});
+
 	// Regression: a STREAM frame delivered by the read loop after the session has
 	// closed used to hit the already-closed incoming-stream controllers, and the
 	// throw escaped as an unhandled rejection because #handleStreamFrame was an

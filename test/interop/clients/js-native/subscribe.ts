@@ -47,7 +47,8 @@ const MAX_DELAY = Milli(1000);
 
 // Audio is checked for gaps, which a reader skipping behind live would cause itself: the matrix
 // starts every subscriber at once, and a runtime starved by the others can fall a second behind.
-// That is this reader's speed, not the delivery under test, so it gets a wider budget.
+// That is this reader's speed, not the delivery under test, so it gets a wider budget. A track's
+// max-age caps it, so interop.sh's Rust publisher keeps its media at least this long.
 const AUDIO_MAX_DELAY = Milli(5000);
 
 const { positionals, values } = parseArgs({

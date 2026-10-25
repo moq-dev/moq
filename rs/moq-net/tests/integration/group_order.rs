@@ -57,7 +57,7 @@ fn read_arrivals(origin: moq_net::origin::Producer, order: Order) -> moq_clock::
 			.expect("broadcast resolves");
 		let subscription = Subscription::default()
 			.with_max_delay(FOREVER)
-			.with_groups(0..)
+			.with_range(0..)
 			.with_order(order);
 		let mut sub = remote
 			.track("ordered")

@@ -415,13 +415,18 @@ fetchable, which the [HLS gateway](/bin/hls) depends on. `export fmp4`, `export 
 and `export h265` take `--max-delay` (default 500 ms): how far a stalled group
 may fall behind the live edge before *this* consumer skips it. Raising
 `--max-age` never delays playback.
-At stdin EOF, `import` keeps the finished broadcast up for its max-age, so a
-subscriber still catching up can drain it; Ctrl-C ends that early. A gateway
+At stdin EOF, `import` keeps the finished broadcast announced for
+`--linger` (default 30 s) from the end, so a subscriber that arrives late, such
+as a player that read the final catalog after the end, still gets the tail;
+`--linger 0s` closes it at once, and Ctrl-C ends the wait early. A gateway
 import does the same at a clean end: an RTMP unpublish (`deleteStream`) or
 completed play, the end of an SRT stream, a WHIP `DELETE`, or an HLS playlist
 ending with `EXT-X-ENDLIST`. A dropped connection or an error closes the
-broadcast at once, and a reconnect, which publishes a newer
-[epoch](/concept/moq-lite#publisher-epochs) at the same path, ends the wait.
+broadcast at once. A reconnect publishes a newer
+[epoch](/concept/moq-lite#publisher-epochs) at the same path, which takes over
+the path while the old broadcast finishes its linger. `import rtsp` redials
+after every session, so it closes each run at once and refuses `--linger`, as
+do `import archive`, `import capture`, and a WHEP pull (`import rtc --connect`).
 
 `export ts`, `export flv`, `export rtmp`, and `export mkv` take `--delay` instead, like an SRT
 receiver's latency, all tracks in decode order, so two exporters of one broadcast
@@ -444,25 +449,27 @@ and writes its packets back out unchanged, from its first group on, each run
 between two PCRs `--delay` after the first one's time on the source clock. The
 output is exactly as conformant as the source, and two exporters emit the same
 bytes. A run that arrives after its deadline is dropped and counted, leaving a
-continuity error, and the rest carry on. It takes neither `--linger`,
+continuity error, and the rest carry on. It takes neither `--follow`,
 `--stitch` nor `--mux-rate`. Only the hang catalog names the track, so an
 `.msf` broadcast needs `--catalog-format hang`.
 
-A stdout export ends with the broadcast. `export ts --linger 10s` waits that
+A stdout export ends with the broadcast. `export ts --follow 10s` waits that
 long for the same publisher instance to come back, and carries on with the same
-stream. A return that cannot be read yet, such as one still routed through a
-dead session, keeps it waiting for the next announcement; if the linger runs
-out first, it exits 1 with that error. A replacement (a restarted publisher, under a new
+stream. A return that refuses its catalog keeps it waiting for the next
+announcement; if the follow runs out first, it exits 1 with that refusal. One
+that goes before serving, such as one still routed through a dead session, is
+no return. A replacement (a restarted publisher, under a new
 [epoch](/concept/moq-lite#publisher-epochs)) exits 1 unless `--stitch` follows
 it as a full program switch: a new PMT from its catalog, with every PID flagging
-the break. `--linger` also bounds a mid-stream stitch from the replacement
-announcement through its first catalog snapshot; expiry exits 1. The default
-`--linger 0s` follows only a replacement whose catalog is already available.
-Without `--stitch` the export stays on the old publisher while it is
+the break. A stitch waits for the replacement's first catalog snapshot until it
+arrives or the replacement goes, keeping the old publisher playing meanwhile,
+so even the default `--follow 0s` switches to a replacement that is still
+starting. Without `--stitch` the export stays on the old publisher while it is
 up. Only lite-07 and moq-transport draft 17+ sessions carry epochs, so on the
-default version every return is a replacement. An export that fails while the broadcast stays up, such as on
-a codec TS cannot carry, exits 1 without lingering. Only `ts` can mark a break,
-so the other formats refuse `--linger`.
+default version every return is a replacement. A failure other than the
+publisher leaving, such as a codec TS cannot carry, exits 1 at once. Only `ts`
+can mark a break, so the other formats refuse `--linger`, the released spelling
+of `--follow`.
 
 ## Reports and feedback
 
