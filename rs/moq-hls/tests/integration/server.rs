@@ -89,7 +89,7 @@ async fn a_cursor_records_a_publisher_without_fetch() {
 			.unwrap_or_else(|err| panic!("{version}: {err}"))
 			.expect("a segment");
 		assert_eq!(segment.segment, 0, "{version}");
-		assert!(!segment.media.is_empty(), "{version}");
+		assert!(!segment.media.expect("media, not a gap").is_empty(), "{version}");
 	}
 }
 
