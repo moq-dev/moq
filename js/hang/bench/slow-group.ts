@@ -1,7 +1,7 @@
 // Measure warning traffic and catch-up time over the groups a slow consumer skips.
 
 import { Milli } from "@moq/clock";
-import { Group, Time, Track, Varint } from "@moq/net";
+import { Time, Track, Varint } from "@moq/net";
 import { Signal } from "@moq/signals";
 import { Consumer } from "../src/container/consumer.ts";
 import { Format } from "../src/container/legacy.ts";
