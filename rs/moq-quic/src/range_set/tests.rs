@@ -263,3 +263,17 @@ impl RefRangeSet {
             .collect()
     }
 }
+
+#[test]
+fn overlapping() {
+    let mut set = RangeSet::new();
+    set.insert(0..2);
+    set.insert(4..6);
+    set.insert(8..10);
+    let overlapping = |x: Range<u64>| set.overlapping(x).collect::<Vec<_>>();
+    assert_eq!(overlapping(5..9), [4..6, 8..10]);
+    assert_eq!(overlapping(6..8), []);
+    assert_eq!(overlapping(1..5), [0..2, 4..6]);
+    assert_eq!(overlapping(2..9), [4..6, 8..10]);
+    assert_eq!(overlapping(1..1), []);
+}

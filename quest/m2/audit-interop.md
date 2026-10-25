@@ -42,7 +42,7 @@ Decided with the maintainer on 2026-10-21:
 
 Both reports run published packages, so a fix turns green only after it
 ships. Verify from `main` instead. For our clients through a third-party
-relay, `MOQ_BIN=target/debug/moq just relays --only <key> --publishers rust
+relay, `CLI_BIN=target/debug/moq just relays --only <key> --publishers rust
 --subscribers rust` from `test/smoke`. For a third-party client through our
 relay, run its published runner image (`RELAY_URL`, `TLS_DISABLE_VERIFY=1`,
 `TESTCASE`) on the host network against a `moq-relay` built from `main`.

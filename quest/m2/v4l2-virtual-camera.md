@@ -21,7 +21,7 @@ developer's camera.
   name rather than a fixed `/dev/videoN`: enumerate formats and frame sizes,
   stream a few frames in a raw format and in MJPEG, assert their size and
   count, then close and reopen. Select them with a `just rs v4l2` recipe.
-- A missing device fails under `MOQ_STRICT`, the convention the io_uring and
+- A missing device fails under `CI_STRICT`, the convention the io_uring and
   mDNS tests use, and skips otherwise.
 - Nightly only: loading a kernel module is a runner mutation no pull request
   job should make.

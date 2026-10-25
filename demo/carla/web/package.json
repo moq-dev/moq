@@ -23,6 +23,6 @@
 		"rolldown": "^1.2.12",
 		"typescript": "7.0.2",
 		"vite": "^8.3.2",
-		"wrangler": "^4.151.0"
+		"wrangler": "^4.151.1"
 	}
 }

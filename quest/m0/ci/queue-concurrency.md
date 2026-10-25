@@ -33,9 +33,7 @@ Remaining:
   other past the gain. Each entry runs 24 nextest workers.
 - Raise the main ruleset's `max_entries_to_build` to the runner count.
 - Measure merged PRs per hour and per-entry wall time before and after.
+- Queue entries skip `quest gate`: `sh/local.sh` execs directly under GitHub
+  Actions, so the runner quota, not admission, has to keep entries apart.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [Share local check capacity](/quest/m0/ci/local-gate.md) - admission for the same host
