@@ -31,6 +31,10 @@
 # version per pass, such as each even moq-transport draft (`--versions ietf`).
 set -euo pipefail
 
+if [[ "${GITHUB_ACTIONS:-}" != true && "${LOCAL_SUPERVISED:-}" != 1 ]]; then
+    exec bash "$(dirname "$0")/../../sh/local.sh" bash "$0" "$@"
+fi
+
 INTEROP_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 WORKSPACE=$(cd "$INTEROP_DIR/../.." && pwd)
 CLIENTS="$INTEROP_DIR/clients"
@@ -46,7 +50,7 @@ source "$INTEROP_DIR/../lib/harness.sh"
 
 # Captured before the parse below consumes it, so the rerun command carries every
 # flag and every environment override this run was actually given.
-RERUN="$(harness_env INTEROP_TIMEOUT INTEROP_FPS INTEROP_SIZE INTEROP_PORT INTEROP_PROFILE RELAY_BIN MOQ_BIN INTEROP_SUB_MOQ INTEROP_VERSION INTEROP_COMPAT_CLIENT INTEROP_DECODE INTEROP_FETCH_DATA INTEROP_FETCH_TRACK)just test interop$(harness_argv "$@")"
+RERUN="$(harness_env INTEROP_TIMEOUT INTEROP_FPS INTEROP_SIZE INTEROP_PORT INTEROP_PROFILE RELAY_BIN CLI_BIN INTEROP_SUB_MOQ INTEROP_VERSION INTEROP_COMPAT_CLIENT INTEROP_DECODE INTEROP_FETCH_DATA INTEROP_FETCH_TRACK)just test interop$(harness_argv "$@")"
 
 PUBLISHERS="rust"
 SUBSCRIBERS="rust"
@@ -55,7 +59,7 @@ SUBSCRIBERS="rust"
 # can't be held to them: a released client may not close cleanly, a released relay names no
 # connection when one closes, and the tail clients are built from this checkout only.
 IN_TREE=1
-if [[ -n "${RELAY_BIN:-}${MOQ_BIN:-}${INTEROP_SUB_MOQ:-}${INTEROP_COMPAT_CLIENT:-}" ]]; then
+if [[ -n "${RELAY_BIN:-}${CLI_BIN:-}${INTEROP_SUB_MOQ:-}${INTEROP_COMPAT_CLIENT:-}" ]]; then
     IN_TREE=0
 fi
 TIMEOUT="${INTEROP_TIMEOUT:-20}"
@@ -75,16 +79,16 @@ FINISH_ONLY=0
 # except the clients the harness reads a grant from, which offer $AUTH_VERSION alone. Any other
 # entry pins every client in its pass to that version, and `ietf` expands to IETF_VERSIONS.
 VERSIONS="auto"
-IETF_VERSIONS="moq-transport-14,moq-transport-16,moq-transport-18,moq-transport-20,moq-transport-22"
+IETF_VERSIONS="moq-transport-14,moq-transport-16,moq-transport-18,moq-transport-22"
 
 # Cargo profile for the relay/cli/moq-c builds. Debug compiles faster, which is
 # what an interop test wants; the workload (320x240@30) is trivial either way.
 PROFILE="${INTEROP_PROFILE:-debug}"
 
 # Binaries under test. Built from source below unless overridden to point at a
-# prebuilt (mirrors test/smoke's RELAY_BIN/MOQ_BIN escape hatch).
+# prebuilt (mirrors test/smoke's RELAY_BIN/CLI_BIN escape hatch).
 RELAY="${RELAY_BIN:-}"
-MOQ="${MOQ_BIN:-}"
+MOQ="${CLI_BIN:-}"
 
 require_value() {
     # require_value <flag> "$@": the flag plus the rest of the argv. Ensures a
@@ -327,7 +331,7 @@ COMPRESS_VERSIONS=(moq-lite-07-wip moq-lite-06)
 # checks audio only in its decoding media lanes, and the bindings' clients, which always check it,
 # refuse to run in the rest.
 AUDIO=1
-[[ -z "${MOQ_BIN:-}${INTEROP_SUB_MOQ:-}${INTEROP_COMPAT_CLIENT:-}" || "${INTEROP_DECODE:-0}" == 1 ]] || AUDIO=0
+[[ -z "${CLI_BIN:-}${INTEROP_SUB_MOQ:-}${INTEROP_COMPAT_CLIENT:-}" || "${INTEROP_DECODE:-0}" == 1 ]] || AUDIO=0
 if [[ "$AUDIO" -eq 0 ]]; then
     for sub in "${SUB_LIST[@]}"; do
         case "$sub" in
@@ -336,7 +340,7 @@ if [[ "$AUDIO" -eq 0 ]]; then
             *) sub_needs_audio="$sub" ;;
         esac
         if [[ -n "${sub_needs_audio:-}" ]]; then
-            echo "error: the $sub subscriber always checks audio, which a run with MOQ_BIN, INTEROP_SUB_MOQ, or INTEROP_COMPAT_CLIENT turns off without INTEROP_DECODE" >&2
+            echo "error: the $sub subscriber always checks audio, which a run with CLI_BIN, INTEROP_SUB_MOQ, or INTEROP_COMPAT_CLIENT turns off without INTEROP_DECODE" >&2
             exit 2
         fi
     done
@@ -2058,8 +2062,8 @@ run_matrix() {
         fi
     done
 
-    # The relay refuses a token on its public rules, and Chromium has to read the close code and
-    # reason it sends. WebSocket must surface Unauthorized and stop reconnecting too.
+    # The relay refuses a token that is not a JWT, and Chromium has to read the close code and
+    # reason it sends. WebSocket must surface MalformedAuthToken and stop reconnecting too.
     # Chromium is the strict peer here, so no Rust client stands in for it. The relay refuses
     # before any version is negotiated, so one pass covers it.
     if [[ "$VERSION" == auto ]] && needs js; then

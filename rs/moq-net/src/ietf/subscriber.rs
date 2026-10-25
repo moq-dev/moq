@@ -161,7 +161,7 @@ fn rebind_track_alias(aliases: &TrackAliases, alias: u64, request_id: RequestId,
 }
 
 /// Retire an alias, so groups still in flight for it are dropped promptly rather than
-/// reported as unknown (draft-19 section 11.1).
+/// reported as unknown.
 ///
 /// Only retires an alias that still belongs to this request: a later subscription may
 /// already have reclaimed it, and that binding outranks a departing owner.
@@ -262,7 +262,7 @@ impl Drop for State {
 
 /// The head of a joined group, delivered on the subscription's fill fetch stream.
 ///
-/// Draft-20's current-group join (section 5.1.6) splits one group across two streams: the
+/// Draft-22's current-group join (section 3.5) splits one group across two streams: the
 /// fill carries the objects already published when we subscribed, and the subscription
 /// carries everything after them. The model has one producer per group, so the fill owns it
 /// while it writes the head and hands it over here for the live tail to append to.
@@ -306,7 +306,7 @@ enum Fill {
 
 	/// The publisher ended the subscription cleanly, so no tail is coming. Unlike
 	/// [`Fill::Done`], a head still being written is the whole group once it lands: a
-	/// pre-draft-20 joining FETCH is not in PUBLISH_DONE's Stream Count, so the settle can
+	/// draft-18 joining FETCH is not in PUBLISH_DONE's Stream Count, so the settle can
 	/// end before it does.
 	Ended,
 }
@@ -950,7 +950,7 @@ pub(super) struct Subscriber {
 	version: Version,
 	// Set once the peer sends a GOAWAY; this session's routes then cost
 	// Cost::DRAIN, so a replacement session outranks it. Requests keep opening,
-	// deliberately past draft-19 section 10.4's SHOULD NOT: refusing them would
+	// deliberately past draft-22 section 9.2's SHOULD NOT: refusing them would
 	// fail requests that land before the replacement is up.
 	going_away: crate::goaway::GoingAway,
 	// Our grant (MoQ Auth): a subscription it stops covering is cancelled.
@@ -986,7 +986,7 @@ struct Initial {
 /// Resolve the subscription a data stream belongs to.
 ///
 /// SUBSCRIBE_OK can be reordered behind the stream it describes, so an alias we have not
-/// seen is worth waiting on briefly (draft-19 section 11.4.2). Three outcomes:
+/// seen is worth waiting on briefly (draft-22 section 9.9). Three outcomes:
 /// the subscription, [`Error::Cancel`] for an alias we retired, and [`Error::NotFound`]
 /// once the wait expires without any binding at all.
 async fn resolve_track_alias(
@@ -1235,7 +1235,7 @@ impl Subscriber {
 	/// Bind the alias the publisher chose for this subscription.
 	///
 	/// Two failures, and only one of them is the session's. A publisher may hand the same
-	/// alias to several subscriptions of one track, which draft-19 section 5.1 allows and
+	/// alias to several subscriptions of one track, which draft-22 section 3.1.3 allows and
 	/// expects the subscriber to demux by re-applying each subscription's filter. Ours are
 	/// all LargestObject, so they are indistinguishable and we cannot: that costs the one
 	/// subscription ([`Error::Unsupported`]). The same alias naming a *different* track is
@@ -1505,7 +1505,7 @@ impl Subscriber {
 	/// Draft-14 and 15 ride the control stream, whose virtual streams have no close of
 	/// their own, so UNSUBSCRIBE_NAMESPACE is all the peer ever sees, and anything after
 	/// it on that ordered stream reaches the peer later. Later drafts close the stream
-	/// (a FIN until draft-19 makes it a reset) and read until the peer closes its half.
+	/// (a FIN on draft-18, a reset on draft-22) and read until the peer closes its half.
 	async fn unsubscribe_namespace(&self, request: NamespaceRequest) {
 		let NamespaceRequest {
 			stream: Stream { mut writer, mut reader },
@@ -2052,7 +2052,7 @@ impl Subscriber {
 		// pending verdict wait in `renewal`, handled in order once it resolves.
 		let mut renewal = request_update::Renewal::<(u64, ietf::Body)>::default();
 		let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
-		// Draft-19+ only: the peer finished its send direction, which does not withdraw the
+		// Draft-22 only: the peer finished its send direction, which does not withdraw the
 		// advertisement there, so stop reading and keep watching the writer.
 		let mut finished = false;
 
@@ -3096,7 +3096,7 @@ impl Subscriber {
 			}
 		};
 		// A live join delivers nothing below the group SUBSCRIBE_OK names as Largest. Every
-		// pre-draft-20 join is one, since its joining FETCH carries that group alone.
+		// draft-18 join is one, since its joining FETCH carries that group alone.
 		let live = start.is_none() || join.fetch;
 
 		// A listed track's paused subscription is already this track's upstream copy, so
@@ -3491,7 +3491,7 @@ impl Subscriber {
 		} = accepted;
 		// What a pause holds again: the properties the track was listed with.
 		let held_properties = properties.clone();
-		// A resumed copy opts out of the properties from draft-20, so it keeps the units it
+		// A resumed copy opts out of the properties from draft-22, so it keeps the units it
 		// learned. Before that the answer declares them again.
 		let timescale = properties
 			.timescale
@@ -4008,7 +4008,7 @@ impl Subscriber {
 	/// Read the PUBLISH_DONE that ends an Established subscription, as the end it reports
 	/// and, for a clean end, its Stream Count.
 	///
-	/// The publisher must send it before its FIN (draft-19 section 3.3.2), so a FIN
+	/// The publisher must send it before its FIN (draft-22 section 6.4.2.2), so a FIN
 	/// without one is a failed request, not a clean end.
 	/// Read the subscription's PUBLISH_DONE, and on the way the answers to the
 	/// REQUEST_UPDATEs counted in `unanswered`. Any other message is unexpected.
@@ -4089,7 +4089,7 @@ impl Subscriber {
 	/// UNSUBSCRIBE (draft-16 section 9.12) is the only thing the peer ever sees, and
 	/// draft-16 section 5.1.1 makes receiving it what frees the subscription. Draft-17
 	/// removed the message, leaving the stream itself: a FIN is explicitly not a
-	/// cancellation (draft-19 section 3.3.2), so section 3.3.3's pair applies, an endpoint
+	/// cancellation (draft-22 section 6.4.2.2), so section 6.4.2.3's pair applies, an endpoint
 	/// that has already FINed its sending direction cancels with STOP_SENDING on the
 	/// receiving one.
 	async fn cancel_subscribe(&self, stream: Stream<Transport, Version>, request_id: RequestId) {
@@ -4130,14 +4130,14 @@ impl Subscriber {
 		Ok(())
 	}
 
-	/// Send the joining FETCH that follows a pre-draft-20 SUBSCRIBE, and keep reading its
+	/// Send the joining FETCH that follows a draft-18 SUBSCRIBE, and keep reading its
 	/// answer until the subscription ends.
 	///
 	/// It asks for the head of the group SUBSCRIBE_OK names as Largest, and nothing below
 	/// it: an earlier start's groups are the copy's fills, one FETCH per run of them. The
 	/// subscribe's request id names the FETCH. The data
 	/// arrives on its own fetch stream and [`Self::recv_fill`] stitches it. A refusal or a
-	/// failed send settles the fill as [`Fill::Done`], as a failed draft-20 fill does: only
+	/// failed send settles the fill as [`Fill::Done`], as a failed draft-22 fill does: only
 	/// the head is lost, and a whole group still stands alone. A malformed answer closes
 	/// the session.
 	fn start_joining_fetch(&self, subscribe_id: RequestId, track: &track::Producer) -> Option<JoiningTask> {
@@ -5074,8 +5074,8 @@ impl GroupIngest {
 impl Subscriber {
 	/// Read a fill fetch stream: the head of the group a subscription joins part way through.
 	///
-	/// A draft-20 fill answers the FILL_PARAMETERS we sent and is named by the SUBSCRIBE's
-	/// Request ID. A pre-draft-20 joining FETCH has its own request id, mapped back to that
+	/// A draft-22 fill answers the FILL_PARAMETERS we sent and is named by the SUBSCRIBE's
+	/// Request ID. A draft-18 joining FETCH has its own request id, mapped back to that
 	/// subscription. Unlike a subgroup stream it needs no track alias. It writes the objects
 	/// into a group producer of its own and hands that to the subgroup stream carrying the
 	/// rest of the group; see [`Fill`]. A reset stream is the publisher's fill-failure
@@ -5095,7 +5095,7 @@ impl Subscriber {
 
 		let (subscribe_id, fill, _counted) = {
 			let state = self.state.lock();
-			// A draft-20 fill is named by the SUBSCRIBE's request id. A pre-draft-20 joining
+			// A draft-22 fill is named by the SUBSCRIBE's request id. A draft-18 joining
 			// FETCH has its own id, which `fetches` maps back to that subscription.
 			let joined = state.fetches.get(&header.request_id).copied();
 			let subscribe_id = joined.unwrap_or(header.request_id);
@@ -5227,7 +5227,7 @@ impl Subscriber {
 	/// Decode fetch objects into `head`, creating its group from the first object's
 	/// absolute IDs.
 	///
-	/// A joining FETCH and a draft-20 fill are one group, the head the live stream
+	/// A joining FETCH and a draft-22 fill are one group, the head the live stream
 	/// continues. A Prior Object ID Gap must account for every missing ID.
 	async fn run_fill_objects(
 		&mut self,
@@ -5434,7 +5434,7 @@ impl Subscriber {
 	}
 
 	/// Fetch a run of groups from the publisher to fill cache misses, with one standalone
-	/// (or draft-20 filtered) FETCH for this subscription's track. It asks from the frame the
+	/// (or draft-22 filtered) FETCH for this subscription's track. It asks from the frame the
 	/// reader wants in the first group through the end of the last, so a publisher that
 	/// evicted a prefix can still answer.
 	///
@@ -5452,7 +5452,7 @@ impl Subscriber {
 		let validity = self.validity.start();
 		let last = run.end - 1;
 		let start = fill.frame_start(run.start);
-		let draft20 = Filter::is_draft20(self.version);
+		let draft22 = Filter::is_draft22(self.version);
 
 		// The owning subscribe/linger loop enforces its admitted gate, including a
 		// token-authorized announce outside the session scope. Its abort ends this job.
@@ -5494,7 +5494,7 @@ impl Subscriber {
 			group: run.start,
 			object: start,
 		};
-		let fetch_type = match draft20 {
+		let fetch_type = match draft22 {
 			// No End Object includes the whole End Group.
 			true => FetchType::Filtered {
 				namespace,
@@ -5576,9 +5576,9 @@ impl Subscriber {
 			}
 		};
 
-		// Draft-20's End Location is inclusive; older drafts spell a bounded object one past it.
+		// Draft-22's End Location is inclusive; older drafts spell a bounded object one past it.
 		let mut end = ok.end_location;
-		if draft20 {
+		if draft22 {
 			let Some(object) = end.object.checked_add(1) else {
 				fill.reject_groups(run, Error::ProtocolViolation);
 				let _ = stream.writer.close().await;
@@ -5587,14 +5587,14 @@ impl Subscriber {
 			end.object = object;
 		}
 
-		// Before draft-20, Object 0 covers the whole named group. Legacy answers one
+		// Before draft-22, Object 0 covers the whole named group. Legacy answers one
 		// group past it still pass the exclusive comparison below.
-		let whole_last = !draft20 && end.group == last && end.object == 0;
+		let whole_last = !draft22 && end.group == last && end.object == 0;
 
-		// Draft-20's answer stops at the Largest Object, which is at or after its start and
+		// Draft-22's answer stops at the Largest Object, which is at or after its start and
 		// never past the requested end. Validate before accepting a group or letting End of
 		// Track mark where the track ends.
-		if draft20 && (end.group < run.start || end.group > last || (end.group == run.start && end.object <= start)) {
+		if draft22 && (end.group < run.start || end.group > last || (end.group == run.start && end.object <= start)) {
 			let err = Error::ProtocolViolation;
 			tracing::warn!(groups = ?run, ?end, "FETCH_OK's End Location is outside the requested range");
 			self.session.clone().close(
@@ -5615,7 +5615,7 @@ impl Subscriber {
 			fill.finish_track_at(final_sequence);
 		}
 
-		// Before draft-20, an empty answer opens no fetch stream at all.
+		// Before draft-22, an empty answer opens no fetch stream at all.
 		if !whole_last && (end.group, end.object) <= (run.start, start) {
 			fill.reject_groups(run, Error::NotFound);
 			let _ = stream.writer.close().await;
@@ -5623,7 +5623,7 @@ impl Subscriber {
 		}
 
 		// The groups the answer covers: whole up to the End Location's group, and that one up
-		// to its exclusive object bound. Before draft-20, an End Object of 0 covers nothing of
+		// to its exclusive object bound. Before draft-22, an End Object of 0 covers nothing of
 		// a group short of the requested end, and one past the requested end covers it whole.
 		let (covered, bound) = match end.object {
 			_ if whole_last => (last, None),
@@ -5833,7 +5833,7 @@ impl Subscriber {
 	/// Decode a FETCH's objects into the groups of its run, preserving marked gaps and their
 	/// properties, never past FETCH_OK's End Location. A group's objects end where the next
 	/// group's begin, since a FETCH carries every object of its range in order. Before
-	/// draft-20 the stream must also reach an object bound inside the last group.
+	/// draft-22 the stream must also reach an object bound inside the last group.
 	async fn recv_group_fetch_objects(
 		&self,
 		stream: &mut Reader<crate::transport::boxed::RecvStream, Version>,
@@ -5932,10 +5932,10 @@ impl Subscriber {
 		}
 
 		// A clean FIN short of the promised end would otherwise cache a truncated group as
-		// a complete one. Draft-20's End Location is the range covered, not the last object
-		// sent: objects missing before it do not exist (section 10.13). Before draft-20 the
+		// a complete one. Draft-22's End Location is the range covered, not the last object
+		// sent: objects missing before it do not exist (section 9.11). Before draft-22 the
 		// stream must reach the bounded group at all, not just its objects.
-		if !Filter::is_draft20(self.version)
+		if !Filter::is_draft22(self.version)
 			&& let Some(end) = writer.fetch.end
 			&& (writer.sequence() != Some(writer.fetch.last) || next < end)
 		{
@@ -6299,10 +6299,10 @@ mod tests {
 		use crate::transport::poll::Session as _;
 		let mut session = ScriptedSession::eof(responses);
 		let (_, recv) = session.open_bi(Default::default()).await.unwrap();
-		let mut reader = Reader::new(crate::transport::boxed::RecvStream::new(recv), Version::Draft19);
+		let mut reader = Reader::new(crate::transport::boxed::RecvStream::new(recv), Version::Draft18);
 		let result = Subscriber::read_publish_done(
 			&mut reader,
-			Version::Draft19,
+			Version::Draft18,
 			&AtomicU64::new(0),
 			&mut crate::ietf::request_stream::Messages::new(crate::driver::Transport::new(session.clone()), true),
 		)
@@ -6351,18 +6351,18 @@ mod tests {
 		use crate::coding::Encode;
 		let mut responses = Vec::new();
 		if clean {
-			crate::coding::Encoder::new(&mut responses, Version::Draft19.into())
+			crate::coding::Encoder::new(&mut responses, Version::Draft18.into())
 				.varint(ietf::PublishDone::ID)
 				.unwrap();
 			ietf::PublishDone {
 				request_id: None,
-				status_code: ietf::PublishDoneStatus::TrackEnded.code(Version::Draft19),
+				status_code: ietf::PublishDoneStatus::TrackEnded.code(Version::Draft18),
 				stream_count: 0,
 				reason_phrase: "done".into(),
 			}
 			.encode(
-				&mut crate::coding::Encoder::new(&mut responses, Version::Draft19.into()),
-				Version::Draft19,
+				&mut crate::coding::Encoder::new(&mut responses, Version::Draft18.into()),
+				Version::Draft18,
 			)
 			.unwrap();
 		}
@@ -6380,7 +6380,7 @@ mod tests {
 	#[ignore = "requires Bun; run by just test bare-fin in interop CI"]
 	async fn bare_fin_interop() {
 		for clean in [false, true] {
-			let responses = crate::test_interop::fin("moqt-19", false, clean, fin_responses(clean));
+			let responses = crate::test_interop::fin("moqt-18", false, clean, fin_responses(clean));
 			check_publish_fin(responses, clean).await;
 		}
 	}
@@ -7104,7 +7104,7 @@ mod tests {
 
 	/// A cancelled subscription leaves its alias behind, so the groups the publisher is
 	/// still sending are discarded at once instead of stalling out the timeout and being
-	/// reported as unknown (draft-19 section 11.1).
+	/// reported as unknown.
 	#[moq_clock::test]
 	async fn retired_alias_drops_late_groups_immediately() {
 		let aliases = TrackAliases::default();
@@ -7140,7 +7140,7 @@ mod tests {
 			.expect_err("a retired alias resolves to a cancellation");
 
 		assert_eq!(
-			crate::ietf::error::to_stream_code(&crate::StreamError::from(&err), Version::Draft20),
+			crate::ietf::error::to_stream_code(&crate::StreamError::from(&err), Version::Draft22),
 			crate::ietf::error::CANCELLED,
 			"the code the dispatch loop maps this error onto",
 		);
@@ -7193,7 +7193,7 @@ mod tests {
 			peer::PeerSetup::default(),
 			crate::Hop::new(1).unwrap(),
 			None,
-			Version::Draft19,
+			Version::Draft18,
 			tasks,
 			Default::default(),
 		);
@@ -7219,7 +7219,7 @@ mod tests {
 		subscriber
 	}
 
-	/// Draft-19 section 5.1 lets a publisher give several subscriptions to one track the
+	/// Draft-22 section 3.1.3 lets a publisher give several subscriptions to one track the
 	/// same alias. Our filters are all LargestObject, so we cannot re-apply them to tell the
 	/// groups apart, but that is one subscription's problem. Killing the session over a
 	/// legal choice would take every other broadcast down with it.
@@ -7255,10 +7255,10 @@ mod tests {
 		let datagram = |alias: u64, group_id: u64, object_id: Option<u64>, body: ietf::DatagramBody| {
 			let mut properties = Vec::new();
 			ietf::encode_object_time(
-				&mut crate::coding::Encoder::new(&mut properties, Version::Draft19.into()),
+				&mut crate::coding::Encoder::new(&mut properties, Version::Draft18.into()),
 				timestamp,
 				Timescale::MILLI,
-				Version::Draft19,
+				Version::Draft18,
 			)
 			.unwrap();
 			ietf::ObjectDatagram {
@@ -7271,7 +7271,7 @@ mod tests {
 				properties: matches!(body, ietf::DatagramBody::Payload(_)).then_some(properties),
 				body,
 			}
-			.encode_bytes(Version::Draft19)
+			.encode_bytes(Version::Draft18)
 			.unwrap()
 		};
 		let payload = |bytes: &'static [u8]| ietf::DatagramBody::Payload(bytes::Bytes::from_static(bytes));
@@ -7323,10 +7323,10 @@ mod tests {
 		let datagram = |group_id: u64| {
 			let mut properties = Vec::new();
 			ietf::encode_object_time(
-				&mut crate::coding::Encoder::new(&mut properties, Version::Draft19.into()),
+				&mut crate::coding::Encoder::new(&mut properties, Version::Draft18.into()),
 				crate::Timestamp::new(96_000, Timescale::MILLI).unwrap(),
 				Timescale::MILLI,
-				Version::Draft19,
+				Version::Draft18,
 			)
 			.unwrap();
 			ietf::ObjectDatagram {
@@ -7338,7 +7338,7 @@ mod tests {
 				properties: Some(properties),
 				body: ietf::DatagramBody::Payload(bytes::Bytes::from_static(b"d")),
 			}
-			.encode_bytes(Version::Draft19)
+			.encode_bytes(Version::Draft18)
 			.unwrap()
 		};
 
@@ -7381,14 +7381,14 @@ mod tests {
 		));
 	}
 
-	/// A FIN only says we will send nothing further; it is not a cancellation (draft-19
-	/// section 3.3.2). A publisher holding an Established subscription keeps serving it
-	/// until STOP_SENDING arrives on the direction it writes (sections 3.3.3 and 5.1.1),
+	/// A FIN only says we will send nothing further; it is not a cancellation (draft-22
+	/// section 6.4.2.2). A publisher holding an Established subscription keeps serving it
+	/// until STOP_SENDING arrives on the direction it writes (section 6.4.2.3),
 	/// so a subscriber that only finishes leaves it feeding an alias forever. That is what
 	/// turns a routine unsubscribe into an endless "unknown track alias" stream.
 	#[moq_clock::test]
 	async fn cancelling_a_subscription_stops_the_publisher() {
-		for version in [Version::Draft16, Version::Draft20] {
+		for version in [Version::Draft16, Version::Draft22] {
 			let log = cancel_a_subscription(version).await;
 			// CANCELLED, not the moq-lite cancel code: 0 on this wire is INTERNAL_ERROR, so a
 			// routine unsubscribe would read to the publisher as a fault on our side.
@@ -7417,7 +7417,7 @@ mod tests {
 		);
 
 		// Draft-17 removed the message, so sending one would be a protocol violation.
-		let log = cancel_a_subscription(Version::Draft19).await;
+		let log = cancel_a_subscription(Version::Draft18).await;
 		assert_eq!(
 			occurrences(&log, &[ietf::Unsubscribe::ID as u8]),
 			0,
@@ -8482,7 +8482,7 @@ mod tests {
 	/// fallback, so a reset here means the cancellation never landed.
 	#[moq_clock::test]
 	async fn cancelling_does_not_reset_away_the_unsubscribe() {
-		for version in [Version::Draft16, Version::Draft20] {
+		for version in [Version::Draft16, Version::Draft22] {
 			let log = cancel_a_subscription(version).await;
 			assert!(
 				log.resets().is_empty(),
@@ -8601,10 +8601,10 @@ mod tests {
 		log
 	}
 
-	/// Establish a draft-20 subscription against a SUBSCRIBE_OK carrying `largest`, and
+	/// Establish a draft-22 subscription against a SUBSCRIBE_OK carrying `largest`, and
 	/// report whether a fill is still outstanding once it is accepted.
 	async fn fill_after_subscribe_ok(largest: Option<ietf::Location>, priority: Option<u8>) -> bool {
-		let version = Version::Draft20;
+		let version = Version::Draft22;
 
 		let subscribe_ok = {
 			let log = crate::lite::test_transport::Log::default();
@@ -8788,7 +8788,7 @@ mod tests {
 			}
 		}
 
-		for version in [Version::Draft18, Version::Draft19, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft22] {
 			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 			let source = origin.publish("broadcast", Default::default()).unwrap();
 			let resolved = origin.consume().request_broadcast("broadcast", None).await.unwrap();
@@ -8819,7 +8819,6 @@ mod tests {
 			Version::Draft15,
 			Version::Draft16,
 			Version::Draft18,
-			Version::Draft19,
 			Version::Draft22,
 		] {
 			for code in [3, u64::from(u32::MAX)] {
@@ -8904,8 +8903,8 @@ mod tests {
 	#[moq_clock::test]
 	async fn a_resumed_subscribe_opts_out_of_known_properties() {
 		let declared = Timescale::new(90_000).unwrap();
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
-			let opts_out = ietf::Filter::is_draft20(version);
+		for version in [Version::Draft18, Version::Draft22] {
+			let opts_out = ietf::Filter::is_draft22(version);
 			let declares = |yes: bool| ietf::Properties {
 				timescale: yes.then_some(declared),
 				..Default::default()
@@ -8921,7 +8920,7 @@ mod tests {
 			);
 			let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![
 				status_ok,
-				// Empty when opted out. Before draft-20 SUBSCRIBE cannot opt out, so it declares
+				// Empty when opted out. Before draft-22 SUBSCRIBE cannot opt out, so it declares
 				// the units again.
 				message(
 					ietf::SubscribeOk::ID,
@@ -9271,7 +9270,7 @@ mod tests {
 			peer::PeerSetup::default(),
 			self_origin,
 			None,
-			Version::Draft19,
+			Version::Draft18,
 			tasks,
 			Default::default(),
 		);
@@ -9440,7 +9439,7 @@ mod tests {
 	/// replaces the advertisement in place, and the route is never retracted for it.
 	#[moq_clock::test]
 	async fn a_re_sent_namespace_reprices_in_place() {
-		const VERSION: Version = Version::Draft19;
+		const VERSION: Version = Version::Draft18;
 
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
@@ -9553,7 +9552,7 @@ mod tests {
 
 	#[moq_clock::test]
 	async fn publish_namespace_requester_fin_keeps_the_route() {
-		for version in [Version::Draft17, Version::Draft18, Version::Draft19, Version::Draft22] {
+		for version in [Version::Draft17, Version::Draft18, Version::Draft22] {
 			for reset in [false, true] {
 				let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 				let consumer = origin.consume();
@@ -9752,7 +9751,7 @@ mod tests {
 	/// that picked the detach itself would still pass if the stream stopped using it.
 	#[moq_clock::test]
 	async fn a_broken_publish_namespace_stream_closes_the_broadcast() {
-		const VERSION: Version = Version::Draft19;
+		const VERSION: Version = Version::Draft18;
 
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let consumer = origin.consume();
@@ -10202,7 +10201,7 @@ mod tests {
 	}
 
 	async fn publish_namespace_updates(updates: &[cluster::Advert]) -> Vec<u8> {
-		const VERSION: Version = Version::Draft19;
+		const VERSION: Version = Version::Draft18;
 		let log = crate::lite::test_transport::Log::default();
 		let mut writer = crate::coding::Writer::new(
 			crate::transport::boxed::SendStream::new(crate::lite::test_transport::SinkSend::new(log.clone())),
@@ -10243,7 +10242,7 @@ mod tests {
 		crate::origin::Driver,
 		crate::lite::test_transport::Log,
 	) {
-		const VERSION: Version = Version::Draft19;
+		const VERSION: Version = Version::Draft18;
 		let session = crate::lite::test_transport::ScriptedSession::new(script);
 		let log = session.log.clone();
 		let (origin, driver) = crate::origin::Producer::new(crate::origin::Config::new(self_origin));
@@ -10489,7 +10488,7 @@ mod tests {
 			peer::PeerSetup::default(),
 			self_origin,
 			None,
-			Version::Draft19,
+			Version::Draft18,
 			tasks,
 			Default::default(),
 		);
@@ -10521,7 +10520,7 @@ mod tests {
 			.start_announce(path.clone(), advert, Admit::Token(Some(hold)))
 			.unwrap();
 
-		let mut stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), Version::Draft19)
+		let mut stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), Version::Draft18)
 			.await
 			.unwrap();
 		let mut attached = Some(0);
@@ -10559,7 +10558,7 @@ mod tests {
 	/// lands on the path already held, and is answered REQUEST_OK.
 	#[moq_clock::test]
 	async fn an_explicit_zero_reprices_the_held_path() {
-		const VERSION: Version = Version::Draft19;
+		const VERSION: Version = Version::Draft18;
 		let self_origin = crate::Hop::new(5).unwrap();
 		// A free link, so the route cost is exactly what the peer advertised.
 		let peer = cluster::Peer {
@@ -10738,7 +10737,7 @@ mod tests {
 	/// update any more: it is the base draft's duplicate request, a protocol violation.
 	#[moq_clock::test]
 	async fn a_repeated_publish_namespace_is_a_duplicate() {
-		const VERSION: Version = Version::Draft19;
+		const VERSION: Version = Version::Draft18;
 		let self_origin = crate::Hop::new(5).unwrap();
 		let peer = peer_9();
 		let (clean, _) = clean_and_looped();
@@ -10838,7 +10837,7 @@ mod tests {
 	/// into REQUEST_ERROR, so both shapes have to carry NOT_SUPPORTED.
 	#[moq_clock::test]
 	async fn publish_is_rejected_without_announcing() {
-		for version in [Version::Draft14, Version::Draft19] {
+		for version in [Version::Draft14, Version::Draft18] {
 			// An open gate, so the rejection actually reaches the wire.
 			let gate = kio::Producer::new(true);
 			let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
@@ -12049,13 +12048,13 @@ mod tests {
 		);
 	}
 
-	/// Draft-19 advertises MAX_REQUEST_UPDATES, so a peer that leaves more outstanding than that on
-	/// an announce stream broke the negotiated limit: draft-19 section 10.3.1.7 closes the session
+	/// Draft-22 advertises MAX_REQUEST_UPDATES, so a peer that leaves more outstanding than that on
+	/// an announce stream broke the negotiated limit: draft-22 section 9.1.7 closes the session
 	/// with TOO_MANY_REQUEST_UPDATES. run_publish_namespace_updates must close explicitly (the
 	/// dispatcher does not close on an Error::Session), and surface that error too.
 	#[moq_clock::test]
 	async fn announce_renewals_past_the_advertised_limit_close_the_session() {
-		const VERSION: Version = Version::Draft19;
+		const VERSION: Version = Version::Draft22;
 
 		// Exactly one past the limit: the held renewal plus MAX_REQUEST_UPDATES queued behind it.
 		let last = 0x41 + 2 * request_update::MAX_REQUEST_UPDATES;
@@ -12112,11 +12111,11 @@ mod tests {
 	}
 
 	/// Exactly MAX_REQUEST_UPDATES outstanding (the one being verified plus the queue) is within
-	/// the advertised limit, so a draft-19 peer holding that many is not faulted: the announce
+	/// the advertised limit, so a draft-22 peer holding that many is not faulted: the announce
 	/// keeps running and the session stays up.
 	#[moq_clock::test]
 	async fn announce_renewals_at_the_advertised_limit_keep_the_announce() {
-		const VERSION: Version = Version::Draft19;
+		const VERSION: Version = Version::Draft18;
 
 		let last = 0x41 + 2 * (request_update::MAX_REQUEST_UPDATES - 1);
 		let mut script = Vec::new();
@@ -12158,7 +12157,7 @@ mod tests {
 	}
 
 	/// Drafts below 19 carry no MAX_REQUEST_UPDATES option, so a peer there agreed to no ceiling:
-	/// the same flood that closes a draft-19 session must neither end the announce nor close the
+	/// the same flood that closes a draft-22 session must neither end the announce nor close the
 	/// session on draft-18, because a conforming peer must not be stranded for a limit it never saw.
 	#[moq_clock::test]
 	async fn older_drafts_do_not_strand_an_announce_flood() {
@@ -12792,14 +12791,14 @@ struct Join {
 	/// The FILL_PARAMETERS backfill, delivered on its own fetch stream.
 	fill: Option<ietf::Fill>,
 
-	/// A pre-draft-20 joining FETCH, sent as its own request after SUBSCRIBE.
+	/// A draft-18 joining FETCH, sent as its own request after SUBSCRIBE.
 	fetch: bool,
 }
 
 /// What a moq-lite subscription's group range asks for on the wire.
 ///
 /// moq-lite joins a track at the *start* of the current group, which is a decodable point.
-/// Draft-20 spells that as the draft's own current-group join (section 5.1.6): a Next
+/// Draft-22 spells that as the draft's own current-group join (section 3.5): a Next
 /// Object subscription plus a `StartGroup=1` fill, which is the only form a publisher has
 /// to honor. It splits the group across two streams, the fill carrying the head and the
 /// subscription the tail, which `claim_fill` stitches back into one group producer.
@@ -12810,10 +12809,10 @@ struct Join {
 /// later start skips the head locally. A bounded end has no
 /// joining-FETCH spelling, so it is refused rather than left open.
 ///
-/// A start group we already know is absolute on draft-20 and needs no fill: the
+/// A start group we already know is absolute on draft-22 and needs no fill: the
 /// subscription's own range covers it, which is what our publisher serves from its cache.
 fn subscribe_join(start: Option<u64>, end: Option<u64>, version: Version) -> Result<Join, Error> {
-	if !Filter::is_draft20(version) {
+	if !Filter::is_draft22(version) {
 		if end.is_some() {
 			return Err(Error::Unsupported);
 		}
@@ -12905,7 +12904,7 @@ mod filter_tests {
 	#[test]
 	fn live_joins_the_current_group_with_a_fill() {
 		assert_eq!(
-			subscribe_join(None, None, Version::Draft20).unwrap(),
+			subscribe_join(None, None, Version::Draft22).unwrap(),
 			Join {
 				filter: Filter::NextObject,
 				fill: Some(ietf::Fill {
@@ -12922,7 +12921,7 @@ mod filter_tests {
 	#[test]
 	fn a_past_start_is_absolute() {
 		assert_eq!(
-			subscribe_join(Some(7), Some(10), Version::Draft20).unwrap(),
+			subscribe_join(Some(7), Some(10), Version::Draft22).unwrap(),
 			Join {
 				filter: Filter::Absolute {
 					start: ietf::Location { group: 7, object: 0 },
@@ -12938,7 +12937,7 @@ mod filter_tests {
 	#[test]
 	fn the_whole_track_is_unfiltered() {
 		assert_eq!(
-			subscribe_join(Some(0), None, Version::Draft20).unwrap(),
+			subscribe_join(Some(0), None, Version::Draft22).unwrap(),
 			Join {
 				filter: Filter::Unfiltered,
 				fill: None,
@@ -12947,16 +12946,15 @@ mod filter_tests {
 		);
 	}
 
-	const JOINING_DRAFTS: [Version; 6] = [
+	const JOINING_DRAFTS: [Version; 5] = [
 		Version::Draft14,
 		Version::Draft15,
 		Version::Draft16,
 		Version::Draft17,
 		Version::Draft18,
-		Version::Draft19,
 	];
 
-	/// Every pre-draft-20 join is Largest Object plus a joining FETCH, whatever its start,
+	/// Every draft-18 join is Largest Object plus a joining FETCH, whatever its start,
 	/// so the current group's head arrives on the fetch stream and the live tail on the
 	/// subscription.
 	#[test]
@@ -12988,7 +12986,7 @@ mod filter_tests {
 	}
 }
 
-/// Draft-20's current-group join, where one group arrives on two streams: the fill fetch
+/// Draft-22's current-group join, where one group arrives on two streams: the fill fetch
 /// stream carries the head and the subscription's own subgroup stream the tail.
 #[cfg(test)]
 mod stitch_tests {
@@ -13002,7 +13000,7 @@ mod stitch_tests {
 		util::{TaskSet, Tasks},
 	};
 
-	const VERSION: Version = Version::Draft20;
+	const VERSION: Version = Version::Draft22;
 	const ALIAS: u64 = 7;
 	const REQUEST: RequestId = RequestId(1);
 	const SEQUENCE: u64 = 4;
@@ -13180,7 +13178,7 @@ mod stitch_tests {
 		Reader::new(crate::transport::boxed::RecvStream::new(recv), Version::Draft18)
 	}
 
-	/// A subscriber holding one draft-20 subscription, as its SUBSCRIBE_OK left it: the
+	/// A subscriber holding one draft-22 subscription, as its SUBSCRIBE_OK left it: the
 	/// alias bound, the timescale declared, and `fill` waiting on its fetch stream.
 	struct Harness {
 		subscriber: Subscriber,
@@ -13249,7 +13247,7 @@ mod stitch_tests {
 			}
 		}
 
-		/// Bind a pre-draft-20 joining FETCH onto this subscription, so `recv_fill` looks
+		/// Bind a draft-18 joining FETCH onto this subscription, so `recv_fill` looks
 		/// the stream up by the FETCH's own request id.
 		fn with_joining(self, fetch_id: RequestId) -> Self {
 			{
@@ -13485,7 +13483,7 @@ mod stitch_tests {
 		);
 		let mut body = Vec::new();
 		let id = if let Some((start, end)) = fetch {
-			let fetch_type = if Filter::is_draft20(egress) {
+			let fetch_type = if Filter::is_draft22(egress) {
 				ietf::FetchType::Filtered {
 					namespace: Path::new("room"),
 					track: "video".into(),
@@ -13701,7 +13699,7 @@ mod stitch_tests {
 					let ok = ietf::FetchOk::decode(&mut decoder, version).unwrap();
 					assert_eq!(
 						ok.end_location.object,
-						if Filter::is_draft20(version) { 8 } else { 9 },
+						if Filter::is_draft22(version) { 8 } else { 9 },
 						"{version} start={start}"
 					);
 					assert_eq!(decoder.varint().unwrap(), ietf::FetchHeader::TYPE);
@@ -13766,7 +13764,7 @@ mod stitch_tests {
 			let carried = matches!(version, Version::Draft14 | Version::Draft15);
 			let last = match () {
 				_ if carried => terminal.0 + 1,
-				_ if Filter::is_draft20(version) => 8,
+				_ if Filter::is_draft22(version) => 8,
 				_ => 9,
 			};
 			assert_eq!(ok.end_location.object, last, "{version}");
@@ -13774,7 +13772,7 @@ mod stitch_tests {
 			ietf::FetchHeader::decode(&mut decoder, version).unwrap();
 
 			// The next relay reads the same objects into its cache, up to the same end.
-			let end = last + u64::from(Filter::is_draft20(version));
+			let end = last + u64::from(Filter::is_draft22(version));
 			let mut run = GroupFetchRun::new(version, decoder.rest().to_vec()).await;
 			let mut reader = run
 				.recv_cached(Some(end), None)
@@ -14141,13 +14139,13 @@ mod stitch_tests {
 		}
 	}
 
-	/// Draft 19 assigns 0x06 to SUBGROUP_DELIVERY_TIMEOUT. A draft-18 publisher's 0x06 is
-	/// dropped on its way to draft 19 when mutable, and refused when sealed, through a
-	/// moq-lite hop too: drafts 18 and 19 serialize a block alike, so only the track's
+	/// Draft 22 assigns 0x06 to SUBGROUP_DELIVERY_TIMEOUT. A draft-18 publisher's 0x06 is
+	/// dropped on its way to draft 22 when mutable, and refused when sealed, through a
+	/// moq-lite hop too: drafts 18 and 22 serialize a block alike, so only the track's
 	/// carried ingress draft tells them apart.
 	#[moq_clock::test]
-	async fn passthrough_keeps_0x06_from_crossing_draft_19() {
-		let (ingress, egress) = (Version::Draft18, Version::Draft19);
+	async fn passthrough_keeps_0x06_from_crossing_to_draft_22() {
+		let (ingress, egress) = (Version::Draft18, Version::Draft22);
 		// 0x06 = 42 and 0x20 = 7, mutable.
 		let mutable = [0x06, 42, 0x20 - 0x06, 7];
 		let script = object_stream(ingress, true, &[(0, &mutable, None)]);
@@ -14164,7 +14162,7 @@ mod stitch_tests {
 		let (_, log) = relay_passthrough_stream(script, ingress, egress).await;
 		assert!(!log.resets().is_empty(), "the sealed 0x06 crossed");
 
-		// Within a side of draft 19 both cross unchanged.
+		// Between two draft-18 or two draft-22 sides both cross unchanged.
 		for properties in [&mutable[..], &sealed] {
 			let script = object_stream(ingress, true, &[(0, properties, None)]);
 			let (bytes, log) = relay_passthrough_stream(script, ingress, ingress).await;
@@ -14307,9 +14305,6 @@ mod stitch_tests {
 				Version::Draft16,
 				Version::Draft17,
 				Version::Draft18,
-				Version::Draft19,
-				Version::Draft20,
-				Version::Draft21,
 				Version::Draft22,
 			];
 			let pairs = egresses
@@ -15393,7 +15388,7 @@ mod stitch_tests {
 	const FETCH: RequestId = RequestId(3);
 
 	/// A mid-group subscribe stream waits for the joining FETCH's head and stitches onto it,
-	/// the same rendezvous a draft-20 fill uses. The FETCH is named by its own request id.
+	/// the same rendezvous a draft-22 fill uses. The FETCH is named by its own request id.
 	#[moq_clock::test]
 	async fn a_joining_fetch_stitches_a_mid_group_tail() {
 		let h = Harness::new(
@@ -15465,7 +15460,7 @@ mod stitch_tests {
 			Some(8)
 		);
 		assert_eq!(
-			resolve_fetch_group(Version::Draft20, Some(7), Some(0)).unwrap(),
+			resolve_fetch_group(Version::Draft22, Some(7), Some(0)).unwrap(),
 			Some(8)
 		);
 		assert_eq!(
@@ -15595,14 +15590,14 @@ mod stitch_tests {
 	}
 
 	/// FETCH_OK's End Location inside the group bounds the stream: one that runs past it
-	/// fails the group instead of caching it. Before draft-20 the End Location also promises
-	/// every object before it, so a stream that FINs short fails too. From draft-20 it is the
-	/// range covered, and the objects missing before it do not exist (section 10.13).
+	/// fails the group instead of caching it. Before draft-22 the End Location also promises
+	/// every object before it, so a stream that FINs short fails too. From draft-22 it is the
+	/// range covered, and the objects missing before it do not exist (section 9.11).
 	#[moq_clock::test]
 	async fn a_group_fetch_stays_within_its_end_location() {
 		const END: u64 = 3;
-		for version in [Version::Draft19, VERSION] {
-			let short = Filter::is_draft20(version);
+		for version in [Version::Draft18, VERSION] {
+			let short = Filter::is_draft22(version);
 			for (count, complete) in [(2, short), (3, true), (4, false)] {
 				let payloads: Vec<&[u8]> = [b"a", b"b", b"c", b"d"][..count].iter().map(|p| &p[..]).collect();
 				let mut run = GroupFetchRun::new(version, group_fetch_objects(SEQUENCE, 0, &payloads)).await;
@@ -15632,12 +15627,12 @@ mod stitch_tests {
 	}
 
 	/// A stream that FINs before the group its End Location bounds, with no objects or after
-	/// an earlier group, is short before draft-20. From draft-20 the bounded group is refused
+	/// an earlier group, is short before draft-22. From draft-22 the bounded group is refused
 	/// for now, since objects past the bound may still be written.
 	#[moq_clock::test]
 	async fn a_range_fetch_must_reach_its_bounded_group() {
 		let last = SEQUENCE + 2;
-		for version in [Version::Draft19, VERSION] {
+		for version in [Version::Draft18, VERSION] {
 			for objects in [Vec::new(), group_fetch_objects(SEQUENCE, 0, &[b"a"])] {
 				let empty = objects.is_empty();
 				let mut run = GroupFetchRun::new(version, objects).await;
@@ -15656,7 +15651,7 @@ mod stitch_tests {
 					end: Some(2),
 				}));
 				let res = run.subscriber.recv_group_fetch(&mut run.stream, slot).await;
-				match Filter::is_draft20(version) {
+				match Filter::is_draft22(version) {
 					false => assert!(
 						matches!(res, Err(Error::ProtocolViolation)),
 						"{version} empty={empty}: {res:?}"
@@ -15741,7 +15736,7 @@ mod stitch_tests {
 
 			// The FETCH a relay sends for the run 3..=6.
 			let namespace = Path::new("room");
-			let fetch_type = match Filter::is_draft20(version) {
+			let fetch_type = match Filter::is_draft22(version) {
 				true => ietf::FetchType::Filtered {
 					namespace,
 					track: "video".into(),
@@ -16035,13 +16030,12 @@ mod joining_fetch_tests {
 	};
 	use futures::FutureExt;
 
-	const JOINING_DRAFTS: [Version; 6] = [
+	const JOINING_DRAFTS: [Version; 5] = [
 		Version::Draft14,
 		Version::Draft15,
 		Version::Draft16,
 		Version::Draft17,
 		Version::Draft18,
-		Version::Draft19,
 	];
 
 	async fn settle() {
@@ -16372,21 +16366,20 @@ mod joining_fetch_tests {
 	/// on a head that may never finish.
 	#[moq_clock::test]
 	async fn a_request_failing_mid_head_settles_the_fill() {
-		for version in [Version::Draft18, Version::Draft19] {
-			let session = ScriptedSession::per_stream_reset(vec![fetch_ok(version)]);
-			let (subscriber, track, _tasks) = pending_join(crate::driver::Transport::new(session.clone()), version);
-			let fill = subscriber.state.lock().subscribes[&RequestId(99)].fill.clone();
-			// A fetch stream is writing the head.
-			if let Ok(mut state) = fill.write() {
-				*state = Fill::Active;
-			}
-			let mut joining = subscriber.start_joining_fetch(RequestId(99), &track).unwrap();
-			assert!(
-				kio::wait(|waiter| joining.poll(waiter)).await.is_err(),
-				"{version}: the reset request fails"
-			);
-			assert!(matches!(*fill.read(), Fill::Done), "{version}: the head is released");
+		let version = Version::Draft18;
+		let session = ScriptedSession::per_stream_reset(vec![fetch_ok(version)]);
+		let (subscriber, track, _tasks) = pending_join(crate::driver::Transport::new(session.clone()), version);
+		let fill = subscriber.state.lock().subscribes[&RequestId(99)].fill.clone();
+		// A fetch stream is writing the head.
+		if let Ok(mut state) = fill.write() {
+			*state = Fill::Active;
 		}
+		let mut joining = subscriber.start_joining_fetch(RequestId(99), &track).unwrap();
+		assert!(
+			kio::wait(|waiter| joining.poll(waiter)).await.is_err(),
+			"{version}: the reset request fails"
+		);
+		assert!(matches!(*fill.read(), Fill::Done), "{version}: the head is released");
 	}
 
 	#[moq_clock::test]
@@ -16533,7 +16526,7 @@ mod joining_fetch_tests {
 		}
 	}
 
-	/// Every pre-draft-20 live join is Largest Object on the SUBSCRIBE and a relative
+	/// Every draft-18 live join is Largest Object on the SUBSCRIBE and a relative
 	/// joining FETCH at offset 0 that names the subscribe's request id.
 	#[moq_clock::test]
 	async fn a_live_join_is_spelled_as_largest_object_plus_relative_fetch() {
@@ -16591,7 +16584,7 @@ mod joining_fetch_tests {
 	}
 
 	/// A publisher that serves no FETCH refuses the joining FETCH. That costs the head of
-	/// the Largest group and nothing more, as a failed draft-20 fill does: the fill settles,
+	/// the Largest group and nothing more, as a failed draft-22 fill does: the fill settles,
 	/// so a stream starting mid-group no longer waits on it, and the subscription keeps
 	/// delivering whole groups.
 	#[moq_clock::test]
@@ -16985,7 +16978,7 @@ mod joining_fetch_tests {
 	/// Without that, `run_group_fetch` never returns.
 	#[moq_clock::test]
 	async fn a_group_fetch_reset_after_fetch_ok_aborts_the_group() {
-		const VERSION: Version = Version::Draft19;
+		const VERSION: Version = Version::Draft18;
 		const GROUP: u64 = 4;
 
 		let ok = message_bytes(
@@ -17038,88 +17031,87 @@ mod joining_fetch_tests {
 		assert!(fetch.await.is_err(), "the accepted group was aborted");
 	}
 
-	/// From draft-20 an End Location outside the FETCH's range is malformed:
+	/// From draft-22 an End Location outside the FETCH's range is malformed:
 	/// the session closes with PROTOCOL_VIOLATION rather than reading it as an empty answer.
 	#[moq_clock::test]
-	async fn a_draft20_end_location_outside_the_range_closes_the_session() {
+	async fn a_draft22_end_location_outside_the_range_closes_the_session() {
 		const GROUP: u64 = 4;
 		const START: u64 = 3;
 
-		for version in [Version::Draft20, Version::Draft21, Version::Draft22] {
-			for end_location in [
-				ietf::Location {
-					group: GROUP,
-					object: START - 1,
-				},
-				ietf::Location {
-					group: GROUP,
-					object: 0,
-				},
-			] {
-				for end_of_track in [false, true] {
-					let ok = message_bytes(
-						ietf::FetchOk::ID,
-						&ietf::FetchOk {
-							request_id: None,
-							group_order: GroupOrder::Ascending,
-							end_of_track,
-							end_location,
-							properties: Default::default(),
-						},
-						version,
-					);
+		let version = Version::Draft22;
+		for end_location in [
+			ietf::Location {
+				group: GROUP,
+				object: START - 1,
+			},
+			ietf::Location {
+				group: GROUP,
+				object: 0,
+			},
+		] {
+			for end_of_track in [false, true] {
+				let ok = message_bytes(
+					ietf::FetchOk::ID,
+					&ietf::FetchOk {
+						request_id: None,
+						group_order: GroupOrder::Ascending,
+						end_of_track,
+						end_location,
+						properties: Default::default(),
+					},
+					version,
+				);
 
-					let session = ScriptedSession::per_stream_reset(vec![ok]);
-					let (tasks, _task_set) = crate::util::TaskSet::new();
-					let subscriber = Subscriber::new(
-						crate::time::sim(),
-						crate::driver::Transport::new(session.clone()),
-						crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
-						Control::new(None, false),
-						None,
-						peer::PeerSetup::default(),
-						crate::Hop::new(1).unwrap(),
-						None,
-						version,
-						tasks,
-						Default::default(),
-					);
+				let session = ScriptedSession::per_stream_reset(vec![ok]);
+				let (tasks, _task_set) = crate::util::TaskSet::new();
+				let subscriber = Subscriber::new(
+					crate::time::sim(),
+					crate::driver::Transport::new(session.clone()),
+					crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+					Control::new(None, false),
+					None,
+					peer::PeerSetup::default(),
+					crate::Hop::new(1).unwrap(),
+					None,
+					version,
+					tasks,
+					Default::default(),
+				);
 
-					let track = track::Producer::new(
-						std::sync::Arc::new(crate::broadcast::Info::default()),
-						"video",
-						track::Info::default().with_timescale(None),
-					);
-					let dynamic = track.dynamic();
-					let consumer = track.consume();
-					let mut fetch = std::pin::pin!(consumer.fetch_group(
-						GROUP,
-						group::Fetch {
-							frame_start: START,
-							..Default::default()
-						}
-					));
-					assert!(futures::poll!(fetch.as_mut()).is_pending());
-					let request = dynamic.requested_fill().await.expect("no group requested");
+				let track = track::Producer::new(
+					std::sync::Arc::new(crate::broadcast::Info::default()),
+					"video",
+					track::Info::default().with_timescale(None),
+				);
+				let dynamic = track.dynamic();
+				let consumer = track.consume();
+				let mut fetch = std::pin::pin!(consumer.fetch_group(
+					GROUP,
+					group::Fetch {
+						frame_start: START,
+						..Default::default()
+					}
+				));
+				assert!(futures::poll!(fetch.as_mut()).is_pending());
+				let request = dynamic.requested_fill().await.expect("no group requested");
 
-					subscriber
-						.clone()
-						.run_group_fetch(Path::new("broadcast").to_owned(), "video".into(), request, None)
-						.await;
+				subscriber
+					.clone()
+					.run_group_fetch(Path::new("broadcast").to_owned(), "video".into(), request, None)
+					.await;
 
-					assert_eq!(
-						consumer.final_sequence(),
-						None,
-						"{version}: rejected end changed the track"
-					);
-					assert!(matches!(fetch.await, Err(Error::ProtocolViolation)));
-					let violation = SessionError::from(&Error::ProtocolViolation).to_code();
-					assert!(
-						session.log.closes().iter().any(|(code, _)| *code == violation),
-						"{:?}",
-						session.log.closes()
-					);
-				}
+				assert_eq!(
+					consumer.final_sequence(),
+					None,
+					"{version}: rejected end changed the track"
+				);
+				assert!(matches!(fetch.await, Err(Error::ProtocolViolation)));
+				let violation = SessionError::from(&Error::ProtocolViolation).to_code();
+				assert!(
+					session.log.closes().iter().any(|(code, _)| *code == violation),
+					"{:?}",
+					session.log.closes()
+				);
 			}
 		}
 	}
@@ -17128,10 +17120,7 @@ mod joining_fetch_tests {
 	/// numbers what arrives from there, so a publisher that evicted the prefix can answer.
 	#[moq_clock::test]
 	async fn a_group_fetch_asks_from_the_wanted_frame() {
-		for version in JOINING_DRAFTS
-			.into_iter()
-			.chain([Version::Draft20, Version::Draft21, Version::Draft22])
-		{
+		for version in JOINING_DRAFTS.into_iter().chain([Version::Draft22]) {
 			for ended in [false, true] {
 				group_fetch_from_frame(version, false, ended).await;
 			}
@@ -17152,11 +17141,11 @@ mod joining_fetch_tests {
 		const GROUP: u64 = 4;
 		const START: u64 = 2;
 		const LAST: u64 = START + 1;
-		let draft20 = Filter::is_draft20(version);
+		let draft22 = Filter::is_draft22(version);
 
-		// The whole group, as each draft answers it: draft 20 names the last object, and
+		// The whole group, as each draft answers it: draft 22 names the last object, and
 		// older drafts name the whole group with Object 0.
-		let end_location = match draft20 {
+		let end_location = match draft22 {
 			true => ietf::Location {
 				group: GROUP,
 				object: LAST,
@@ -17285,7 +17274,7 @@ mod joining_fetch_tests {
 		};
 		match msg.fetch_type {
 			// No End Object is the whole End Group.
-			FetchType::Filtered { filter, .. } if draft20 => assert_eq!(
+			FetchType::Filtered { filter, .. } if draft22 => assert_eq!(
 				filter,
 				Filter::Absolute {
 					start: from,
@@ -17297,7 +17286,7 @@ mod joining_fetch_tests {
 				"{version}: through the end of the group"
 			),
 			// An End Object of 0 is the whole End Group.
-			FetchType::Standalone { start, end, .. } if !draft20 => {
+			FetchType::Standalone { start, end, .. } if !draft22 => {
 				assert_eq!(start, from, "{version}");
 				assert_eq!(
 					end,

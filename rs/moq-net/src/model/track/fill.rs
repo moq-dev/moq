@@ -121,6 +121,16 @@ impl Outcome {
 		self.asked
 	}
 
+	/// The sequences of `span` accepted, lowest first.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(super) fn accepted_in(&self, span: &ops::Range<u64>) -> impl Iterator<Item = u64> {
+		self.accepted
+			.overlapping(span)
+			.flat_map(|run| run.start.max(span.start)..run.end.min(span.end))
+			.collect::<Vec<_>>()
+			.into_iter()
+	}
+
 	/// What was answered within `wanted`: accepted, or refused with why and the budget
 	/// the fill asked with.
 	#[expect(

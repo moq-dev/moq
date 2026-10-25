@@ -134,7 +134,22 @@ just check --all
 just fix --all
 ```
 
-PRs into `main` get no cloud CI until the merge queue, so run `just ci` before pushing. It runs what the queue runs, the same ground as `just check`, plus two settings: `MOQ_STRICT=1`, which turns a missing tool into an error instead of a skipped check, and `NEXTEST_PROFILE=ci`, which allows a longer hang timeout.
+Expensive checks and test launchers automatically enter `quest gate` locally,
+including direct language recipes and fixture scripts. Admission waits for host
+CPU load and available memory before builds or test timeout clocks start;
+nested checks reuse that admission. Hosted GitHub Actions keeps its runner
+scheduling. Rust builds still use the dev shell's mbx Cargo shim.
+
+`just check` and `just ci` run three module lanes at once, each admitted per
+command; set `CHECK_JOBS` to change that, or to 1 to run them in order.
+Local nextest runs default to at most four test workers; set
+`NEXTEST_TEST_THREADS` to override it. Bun workspace scripts run sequentially
+locally, preserving dependency order, while CI keeps its workspace parallelism.
+Selection and an empty JS selection do not wait for admission. For a build
+outside these entrypoints, use `quest gate COMMAND [ARGS...]`; gate thresholds
+come from the host and have no configuration.
+
+PRs into `main` get no cloud CI until the merge queue, so run `just ci` before pushing. It runs what the queue runs, the same ground as `just check`, plus two settings: `CI_STRICT=1`, which turns a missing tool into an error instead of a skipped check, and `NEXTEST_PROFILE=ci`, which allows a longer hang timeout.
 
 See the [development guide](https://doc.moq.dev/setup/dev) and the [justfile](justfile) for more.
 

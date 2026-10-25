@@ -13,13 +13,13 @@ our publisher serves multi-group FETCHes capped at the Largest Object. What
 remains is the subscription side.
 
 Upstream range changes ride `write_update` in `ietf/subscriber.rs`.
-Narrowing is allowed from draft-15 on. Widening is a bug today: on draft-20
+Narrowing is allowed from draft-15 on. Widening is a bug today: on draft-22
 and later, a subscriber from a future group puts its absolute start in the
 SUBSCRIBE filter, and a live subscriber merged in after it never gets the
-current group. Draft-20 lets an update lower the start with FILL_PARAMETERS
+current group. Draft-22 lets an update lower the start with FILL_PARAMETERS
 for what it missed, which opens a second fill stream on the subscription.
-Draft 14 forbids widening, and 15 to 19 have no fill.
-`rs/moq-net/tests/integration/subscribe_ranges.rs` leaves draft-20+ out for
+Draft 14 forbids widening, and 15 to 18 have no fill.
+`rs/moq-net/tests/integration/subscribe_ranges.rs` leaves draft-22 out for
 that reason; add it back once the update carries the widened filter. Our
 publisher still resets a subscription fill spanning several groups
 (`FillServe::Unsupported` in `ietf/publisher.rs`); serve it from the cache as
@@ -29,7 +29,7 @@ moq-transport has no time filter, so a downstream `Time(pts)` end is
 resolved against the relay's cache before it goes upstream as a group range,
 or refused when the cache cannot resolve it.
 
-A relay's fetch-only copy refuses a draft-20 FETCH relative to the Largest
+A relay's fetch-only copy refuses a draft-22 FETCH relative to the Largest
 Object with Unsupported, since it does not store the Largest that
 TRACK_STATUS reports. Record it on the copy so those filters resolve there
 too.

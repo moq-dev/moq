@@ -2,7 +2,7 @@
 //! accepting at once, version negotiation, the dial-only refusal, and how a
 //! close is reported.
 //!
-//! Unsupported local kernels skip loudly; MOQ_STRICT makes CI refuse them.
+//! Unsupported local kernels skip loudly; CI_STRICT makes CI refuse them.
 
 #![cfg(all(target_os = "linux", feature = "quic"))]
 
@@ -19,7 +19,7 @@ use web_transport_trait::poll::{RecvStream as _, SendStream as _, Session as _};
 fn worker() -> Option<Worker> {
 	match Worker::new(Config::default()) {
 		Ok(worker) => Some(worker),
-		Err(Error::Unsupported(reason)) if std::env::var_os("MOQ_STRICT").is_none() => {
+		Err(Error::Unsupported(reason)) if std::env::var_os("CI_STRICT").is_none() => {
 			eprintln!("skipping io_uring endpoint test: {reason}");
 			None
 		}

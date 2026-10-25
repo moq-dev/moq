@@ -153,14 +153,15 @@ mod tests {
 		origin: &moq_net::origin::Producer,
 		epoch: moq_net::Epoch,
 	) -> (Box<dyn Bridge>, moq_mux::catalog::Producer) {
-		let mut broadcast = origin.create_broadcast("source").expect("create source broadcast");
+		let broadcast = origin.create_broadcast("source").expect("create source broadcast");
 		broadcast
 			.announce(moq_net::origin::Route::default().with_epoch(epoch))
 			.expect("announce source broadcast");
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default())
-			.expect("create source catalog");
-		let bridge =
-			crate::codec::opus::Bridge::new(broadcast, catalog.clone(), 48_000, 2).expect("create Opus bridge");
+		let catalog =
+			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), moq_mux::catalog::Config::default())
+				.expect("create source catalog");
+		let bridge = crate::codec::opus::Bridge::new(broadcast.broadcast().clone(), catalog.clone(), 48_000, 2)
+			.expect("create Opus bridge");
 		(Box::new(bridge), catalog)
 	}
 
@@ -220,7 +221,8 @@ mod tests {
 		let output_consumer = output.consume();
 		let client = Client::new(client::Config::default());
 		let url = format!("http://{address}/whep/source").parse().expect("WHEP URL");
-		let viewer = tokio::spawn(async move { client.subscribe(url, output).await });
+		let fill = output.broadcast().clone();
+		let viewer = tokio::spawn(async move { client.subscribe(url, fill).await });
 		let session = tokio::time::timeout(TIMEOUT, sessions.recv())
 			.await
 			.expect("WHEP negotiation timed out")
@@ -310,15 +312,17 @@ mod tests {
 		let source_origin = moq_tokio::origin::spawn();
 		let source_consumer = source_origin.consume();
 		let mut announcements = source_consumer.announced();
-		let mut source = source_origin
+		let source = source_origin
 			.create_broadcast("source")
 			.expect("create source broadcast");
 		source
 			.announce(moq_net::origin::Route::default())
 			.expect("announce source broadcast");
-		let catalog = moq_mux::catalog::Producer::new(&mut source, moq_mux::catalog::Config::default())
-			.expect("create source catalog");
-		let mut opus = crate::codec::opus::Bridge::new(source, catalog, 48_000, 2).expect("create Opus bridge");
+		let catalog =
+			moq_mux::catalog::Producer::new(&mut source.broadcast().clone(), moq_mux::catalog::Config::default())
+				.expect("create source catalog");
+		let mut opus = crate::codec::opus::Bridge::new(source.broadcast().clone(), catalog, 48_000, 2)
+			.expect("create Opus bridge");
 		Bridge::push(
 			&mut opus,
 			Frame {
@@ -405,7 +409,8 @@ mod tests {
 		let whep = format!("http://user:pass@{address}/whep/ingested?jwt=secret")
 			.parse()
 			.expect("WHEP URL");
-		let whep_client = tokio::spawn(async move { client.subscribe(whep, output).await });
+		let fill = output.broadcast().clone();
+		let whep_client = tokio::spawn(async move { client.subscribe(whep, fill).await });
 		let (whep_id, whep_task) = tokio::time::timeout(TIMEOUT, sources_rx.recv())
 			.await
 			.expect("WHEP negotiation timed out")
