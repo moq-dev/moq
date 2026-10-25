@@ -529,11 +529,11 @@ impl fmt::Debug for TransportConfig {
 /// connection, so it can take them into account when sending acknowledgements (see each parameter's
 /// description for details on how it influences acknowledgement frequency).
 ///
-/// The implementation follows the fourth draft of the
-/// [QUIC Acknowledgement Frequency extension](https://datatracker.ietf.org/doc/html/draft-ietf-quic-ack-frequency-04).
-/// The defaults produce behavior slightly different than the behavior without this extension,
-/// because they change the way reordered packets are handled (see
-/// [`AckFrequencyConfig::reordering_threshold`] for details).
+/// The implementation follows
+/// [draft-ietf-quic-ack-frequency-14](https://www.ietf.org/archive/id/draft-ietf-quic-ack-frequency-14.html),
+/// whose codepoints date from draft-07. The defaults produce behavior slightly different than the
+/// behavior without this extension, because they change the way reordered packets are handled
+/// (see [`AckFrequencyConfig::reordering_threshold`] for details).
 #[derive(Clone, Debug)]
 pub struct AckFrequencyConfig {
 	pub(crate) ack_eliciting_threshold: VarInt,
@@ -551,7 +551,9 @@ impl AckFrequencyConfig {
 	/// ack-eliciting packets have been received. A value of 0 results in a receiver immediately
 	/// acknowledging every ack-eliciting packet.
 	///
-	/// Defaults to 1, which sends ACK frames for every other ack-eliciting packet.
+	/// Defaults to 1, which sends ACK frames for every other ack-eliciting packet. A peer
+	/// following draft-00, or quicly's packet tolerance, acknowledges once this many have arrived
+	/// instead, so it reads 1 as every packet.
 	pub fn ack_eliciting_threshold(&mut self, value: VarInt) -> &mut Self {
 		self.ack_eliciting_threshold = value;
 		self
@@ -583,9 +585,10 @@ impl AckFrequencyConfig {
 	/// immediately acknowledges any packets that are received out of order (this is also the
 	/// behavior when the extension is disabled).
 	///
-	/// It is recommended to set this value to [`TransportConfig::packet_threshold`] minus one.
-	/// Since the default value for [`TransportConfig::packet_threshold`] is 3, this value defaults
-	/// to 2.
+	/// It is recommended to set this value to [`TransportConfig::packet_threshold`], so the ACK a
+	/// gap elicits lets us declare the missing packet lost; a smaller value elicits it a packet
+	/// too early. Since the default value for [`TransportConfig::packet_threshold`] is 3, this
+	/// value defaults to 3.
 	pub fn reordering_threshold(&mut self, value: VarInt) -> &mut Self {
 		self.reordering_threshold = value;
 		self
@@ -597,7 +600,7 @@ impl Default for AckFrequencyConfig {
 		Self {
 			ack_eliciting_threshold: VarInt(1),
 			max_ack_delay: None,
-			reordering_threshold: VarInt(2),
+			reordering_threshold: VarInt(3),
 		}
 	}
 }
