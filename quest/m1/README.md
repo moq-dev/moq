@@ -152,7 +152,6 @@ Binding durations wait on Duration support in the generated C.
 - [API Extractor checks](/quest/m1/api-extractor-checks.md) - API Extractor fails a PR on a forgotten export, an unresolved declaration, or an undocumented export, replacing the hand-rolled `.d.ts` checkers
 - [Generated JS API reference](/quest/m1/js-api-reference.md) - the doc site renders an API reference for every `@moq/*` package from API Extractor's doc model
 - [IETF lazy discovery](/quest/m1/ietf-lazy-discovery.md) - JS moq-transport sessions never hold overlapping SUBSCRIBE_NAMESPACE requests at a peer that refuses them
-- [JS readvertisement hold](/quest/m1/ietf-js-readvertise.md) - a JS IETF session handles a namespace readvertisement only after its withdrawal, as Rust does
 - [Interop coverage](/quest/m1/interop-coverage/README.md) - the riskiest moq-transport features moq-net exposes get cross-implementation tests over drafts 18 and 22
 - [AMF0 exact reads](/quest/m1/rtmp-amf0-exact-reads.md) - a truncated RTMP string fails with `UnexpectedEof` instead of parsing NUL padding
 - [HLS variant area](/quest/m1/hls-variant-area.md) - a hostile `RESOLUTION` cannot panic or misorder variant ranking
