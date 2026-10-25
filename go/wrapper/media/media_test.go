@@ -45,11 +45,22 @@ func TestRequestedTargetRequiresRequest(t *testing.T) {
 }
 
 // The generated converter panics on a negative duration, so it is refused first.
-func TestFetchGroupRefusesNegativeMaxDelay(t *testing.T) {
+func TestRefusesNegativeDurations(t *testing.T) {
+	ctx := context.Background()
 	negative := -time.Millisecond
-	config := media.GroupConfig{Options: &moq.FetchGroupOptions{MaxDelay: &negative}}
-	if _, err := media.FetchGroup(context.Background(), nil, config); err == nil {
+	rendition := media.AudioRendition("audio", media.Audio{Jitter: &negative})
+
+	if _, err := media.FetchGroup(ctx, nil, media.GroupConfig{Options: &moq.FetchGroupOptions{MaxDelay: &negative}}); err == nil {
 		t.Fatal("a negative fetch max delay was accepted, want an error")
+	}
+	if _, err := media.FetchGroup(ctx, nil, media.GroupConfig{Rendition: rendition}); err == nil {
+		t.Fatal("a negative jitter was fetched, want an error")
+	}
+	if _, err := media.NewTrackConsumer(ctx, nil, media.TrackConfig{Rendition: rendition}); err == nil {
+		t.Fatal("a negative jitter was subscribed, want an error")
+	}
+	if _, err := (&moq.BroadcastConsumer{}).Resolve(ctx, rendition); err == nil {
+		t.Fatal("a negative jitter was resolved, want an error")
 	}
 }
 

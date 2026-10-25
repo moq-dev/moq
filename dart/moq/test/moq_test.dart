@@ -101,6 +101,18 @@ void main() {
     broadcast.close();
   });
 
+  test('a negative duration in a raw record is refused', () {
+    final broadcast = BroadcastProducer();
+    final track = broadcast.publishTrack(name: 'negative', info: null);
+    expect(
+      () => track.consume(
+        subscription: Subscription(maxDelay: const Duration(microseconds: -1)),
+      ),
+      throwsArgumentError,
+    );
+    broadcast.close();
+  });
+
   test(
     'an ascending subscription reads a cached backlog oldest first',
     () async {

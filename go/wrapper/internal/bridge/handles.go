@@ -62,6 +62,14 @@ func NonNegative(value *time.Duration, name string) error {
 	return nil
 }
 
+// Rendition refuses an audio rendition's negative jitter, for the same reason.
+func Rendition(rendition ffi.MoqRendition) error {
+	if audio, ok := rendition.(ffi.MoqRenditionAudio); ok {
+		return NonNegative(audio.Config.Jitter, "jitter")
+	}
+	return nil
+}
+
 // OptionalDuration converts a caller's time to microseconds, preserving absence.
 func OptionalDuration(value *time.Duration, name string) (*uint64, error) {
 	if value == nil {

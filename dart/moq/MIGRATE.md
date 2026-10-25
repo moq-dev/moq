@@ -9,7 +9,7 @@ How to update your code for each breaking change, newest first.
 The records carry durations as `Duration` fields instead of `*Us` microsecond integers, so the duration extension getters are gone: read `backoff.initial`, `stats.rtt`, `grant.expires`, `info.maxAge`, `fill.maxDelay()`, and `consumer.delay()` directly.
 `audio.EncoderOutput.frameDuration` is nullable: pass null where you passed `frameDurationUs: 0` for the codec's own frame.
 `Subscription.maxDelay` has no default, so a `MoqSubscription()` that omits it gets no staleness limit instead of moq-net's 0: pass `Duration.zero` for the old default.
-Never pass a negative `Duration` in a raw record; only `ConnectOptions` refuses one.
+A negative `Duration` throws `ArgumentError` wherever it crosses into the native library.
 
 ### Connection state
 

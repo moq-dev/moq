@@ -180,6 +180,9 @@ type Consumer struct{ inner *ffi.MoqAudioConsumer }
 
 // Subscribe subscribes to the catalog rendition id, following its broadcast and track.
 func Subscribe(ctx context.Context, broadcast *moq.BroadcastConsumer, id string, rendition media.Audio, output DecoderOutput) (*Consumer, error) {
+	if err := bridge.NonNegative(rendition.Jitter, "jitter"); err != nil {
+		return nil, err
+	}
 	out, err := output.ffi()
 	if err != nil {
 		return nil, err

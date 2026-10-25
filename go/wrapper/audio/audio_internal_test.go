@@ -1,8 +1,11 @@
 package audio
 
 import (
+	"context"
 	"testing"
 	"time"
+
+	"moq.dev/moq/media"
 )
 
 // Go's zero FrameDuration is the native null, the codec's own frame, and a
@@ -20,5 +23,12 @@ func TestEncoderOutputFrameDuration(t *testing.T) {
 
 	if _, err := (EncoderOutput{FrameDuration: -time.Millisecond}).ffi(); err == nil {
 		t.Fatal("a negative frame duration converted, want an error")
+	}
+}
+
+func TestSubscribeRefusesNegativeJitter(t *testing.T) {
+	negative := -time.Millisecond
+	if _, err := Subscribe(context.Background(), nil, "audio", media.Audio{Jitter: &negative}, DecoderOutput{}); err == nil {
+		t.Fatal("a negative jitter was subscribed, want an error")
 	}
 }

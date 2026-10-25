@@ -64,6 +64,9 @@ func (b *BroadcastConsumer) FetchGroup(
 // Errors if this broadcast came from a local producer rather than an origin, since a
 // standalone broadcast has no sibling to name.
 func (b *BroadcastConsumer) Resolve(ctx context.Context, rendition ffi.MoqRendition) (*BroadcastConsumer, error) {
+	if err := bridge.Rendition(rendition); err != nil {
+		return nil, err
+	}
 	inner, err := b.inner.Resolve(ctx, rendition)
 	if err != nil {
 		return nil, err

@@ -234,6 +234,9 @@ type TrackConfig struct {
 
 // NewTrackConsumer subscribes to and decodes a catalog rendition, following its broadcast and track.
 func NewTrackConsumer(ctx context.Context, broadcast *moq.BroadcastConsumer, config TrackConfig) (*TrackConsumer, error) {
+	if err := bridge.Rendition(config.Rendition); err != nil {
+		return nil, err
+	}
 	sub, err := bridge.Subscription(config.Subscription)
 	if err != nil {
 		return nil, err
@@ -254,6 +257,9 @@ type GroupConfig struct {
 
 // FetchGroup fetches and decodes exactly one group of a catalog rendition, following its broadcast and track.
 func FetchGroup(ctx context.Context, broadcast *moq.BroadcastConsumer, config GroupConfig) (*GroupConsumer, error) {
+	if err := bridge.Rendition(config.Rendition); err != nil {
+		return nil, err
+	}
 	if config.Options != nil {
 		if err := bridge.NonNegative(config.Options.MaxDelay, "max delay"); err != nil {
 			return nil, err
