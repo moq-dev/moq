@@ -98,8 +98,8 @@ check $BASE="":
     sh/dispatch.sh check "$BASE"
 
 # The merge queue runs this gate in one job. The test build also enforces
-# default-feature clippy; distinct feature permutations and optimized binding
-# builds run nightly and on release PRs. Missing tools fail under MOQ_STRICT.
+# default-feature clippy; selected feature extremes run in the gate, while
+# the full feature matrix and optimized bindings run nightly and on release PRs. Missing tools fail under MOQ_STRICT.
 
 # Run the merge queue's Linux gate over the branch diff against BASE.
 ci $BASE="":

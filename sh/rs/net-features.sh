@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+targets=(--tests)
+if [[ $# == 1 && $1 == --all ]]; then
+    targets=(--all-targets)
+elif [[ $# != 0 ]]; then
+    echo 'usage: just rs net-features [--all]' >&2
+    exit 2
+fi
+
 # Build moq-net alone: a workspace build unifies its default features back in.
 # Normal dependencies exclude the simulation executor and bench-only Tokio.
 minimal=$(cargo tree --locked -p moq-net --no-default-features -e normal --prefix none)
@@ -9,7 +17,7 @@ if grep -qE '^(tokio|web-async) ' <<<"$minimal"; then
     exit 1
 fi
 
-cargo clippy --locked -p moq-net --no-default-features --all-targets -- -D warnings
+cargo clippy --locked -p moq-net --no-default-features "${targets[@]}" -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --locked -p moq-net --no-default-features --no-deps
 bash sh/rs/nextest.sh cargo nextest run --locked -p moq-net --no-default-features --tests
 
@@ -35,4 +43,4 @@ pub fn poll(driver: &mut moq_net::origin::Driver, now: moq_net::time::Instant) {
 EOF
 cp Cargo.lock "$consumer/Cargo.lock"
 # The copied lock only needs the temporary leaf's own package entry added.
-cargo check --manifest-path "$consumer/Cargo.toml" --target wasm32-unknown-unknown --target-dir "${CARGO_TARGET_DIR:-target}"
+CARGO_BUILD_WARNINGS=deny cargo check --manifest-path "$consumer/Cargo.toml" --target wasm32-unknown-unknown --target-dir "${CARGO_TARGET_DIR:-target}"

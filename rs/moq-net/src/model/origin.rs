@@ -503,7 +503,7 @@ pub struct Route {
 	pub cost: Cost,
 
 	/// The credential the request advertising this route carries, from
-	/// [`auth::Handle`](crate::auth::Handle)'s `add`, or `None` for the session's scope.
+	/// `auth::Handle::add`, or `None` for the session's scope.
 	///
 	/// Only a session built on the handle that issued it carries it, as the token on its
 	/// moq-transport PUBLISH_NAMESPACE: any other session, the inline NAMESPACE answering a

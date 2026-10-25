@@ -9,9 +9,12 @@ elif [[ $# != 0 ]]; then
     exit 2
 fi
 
+targets=(--tests)
+if ((all)); then targets=(--all-targets); fi
+
 check() {
     echo "media features: cargo check $*"
-    cargo check --locked --all-targets "$@"
+    cargo check --locked "${targets[@]}" "$@"
 }
 
 # Resolved for Linux, the platform every asserted dependency targets: moq-nvenc
