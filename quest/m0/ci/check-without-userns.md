@@ -20,7 +20,9 @@ The same binary succeeds in the host shell but fails to write `uid_map`
 inside the Nix builder, so a shell-only probe would misclassify this host.
 The 24 dispatcher tests, ShellCheck, shfmt, and nixfmt checks passed.
 
-Remaining: run the complete local and strict dispatch, address findings,
-then remove this quest and its links when validation completes.
+Remaining: complete `just check` and `just ci`, address findings, then remove
+this quest and its links. Both full runs were stopped while the initial
+Python, Rust, and C++ lanes still waited for host admission; neither full
+gate passed. Resume those checks when capacity is available.
 
 Public API: none. Wire: none.
