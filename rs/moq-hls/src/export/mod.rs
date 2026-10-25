@@ -15,7 +15,8 @@
 //! handoff continues past the last advertised record sequence, starting a DASH period. Every
 //! other rendition resolves each segment against its own timeline.
 //! An inline-parameter-set codec with no catalog `description` GETs one keyframe
-//! group on the first playlist render to build its init, then caches it.
+//! group on the first playlist render (in the background on a manifest render) to build its
+//! init, then caches it.
 //!
 //! The same machinery serves two kinds of consumer:
 //!
@@ -273,8 +274,10 @@ impl Broadcaster {
 	/// in [`master_playlist`](Self::master_playlist).
 	///
 	/// A disabled rendition is left out, as in the master playlist. Each representation names
-	/// its init by a hash of the bytes, so a rendition is left out until its init is known. An inline-parameter-set codec only learns it from media: await
-	/// each rendition's [`init`](Rendition::init) first.
+	/// its init by a hash of the bytes, so a rendition is left out until its init is known. An
+	/// inline-parameter-set codec only learns it from media, so rendering starts building each
+	/// missing init in the background and a later render lists that rendition; no render waits
+	/// on one.
 	///
 	/// Fails with [`TimelineFailed`](crate::Error::TimelineFailed) once the reference timeline
 	/// failed, or [`CatalogFailed`](crate::Error::CatalogFailed) once the catalog did, rather
@@ -296,8 +299,9 @@ impl Broadcaster {
 			if !rendition.is_enabled() {
 				continue;
 			}
-			// Without its init there is nothing to name in `initialization`; the serve path
-			// builds every init before rendering (see `build_inits`).
+			// Without its init there is nothing to name in `initialization`, so it is left out
+			// of this render.
+			rendition.start_init();
 			let representations = match rendition.representations() {
 				Ok(representations) => representations,
 				// Its own playlist answers the error, while its siblings stay listed.
@@ -337,20 +341,6 @@ impl Broadcaster {
 			},
 			query,
 		)))
-	}
-
-	/// Build every rendition's init segment, so the manifest can name each by its hash. A
-	/// rendition whose init can't be built yet is left out of the render.
-	#[cfg_attr(
-		not(feature = "server"),
-		allow(dead_code, reason = "only the `server` feature uses it")
-	)]
-	pub(crate) async fn build_inits(&self) {
-		for rendition in self.renditions.snapshot() {
-			if let Err(err) = rendition.latest_init().await {
-				tracing::warn!(rendition = %rendition.name, %err, "failed to build init segment");
-			}
-		}
 	}
 
 	/// Resolve once the broadcast has something listable (its first complete segment, or an
@@ -1405,7 +1395,7 @@ mod tests {
 		assert_eq!(after.segments[1].segment, 2);
 		assert!(after.segments[1].discontinuity);
 		assert!(!after.finished);
-		broadcaster.build_inits().await;
+		build_inits(&broadcaster).await;
 		let playlist = sibling.media_playlist(None).unwrap().unwrap();
 		assert_eq!(playlist.matches("#EXT-X-DISCONTINUITY\n").count(), 1, "{playlist}");
 		let mpd = broadcaster.manifest(None).unwrap().unwrap();
@@ -1548,8 +1538,8 @@ mod tests {
 			"one numbering on every edge"
 		);
 		if resumed == 3 {
-			saw.build_inits().await;
-			after.build_inits().await;
+			build_inits(&saw).await;
+			build_inits(&after).await;
 			let saw_playlist = saw_video1.media_playlist(None).unwrap().unwrap();
 			assert!(saw_playlist.contains("#EXT-X-MEDIA-SEQUENCE:4\n"), "{saw_playlist}");
 			assert_eq!(saw_playlist, after_video1.media_playlist(None).unwrap().unwrap());
@@ -1619,6 +1609,126 @@ mod tests {
 		let master = broadcaster.master_playlist(None);
 		assert!(master.contains("video/video0/"), "{master}");
 		assert!(!master.contains("video/video1/"), "{master}");
+	}
+
+	/// Build every rendition's init, as a playlist or segment request does.
+	async fn build_inits(broadcaster: &Broadcaster) {
+		for rendition in broadcaster.renditions.snapshot() {
+			rendition.latest_init().await.unwrap();
+		}
+	}
+
+	/// `timeline_pair`, with `video1` learning its geometry from media so its init needs a
+	/// keyframe group, and both timelines indexing four groups.
+	async fn inline_sibling() -> (
+		moq_net::origin::Producer,
+		moq_net::broadcast::Producer,
+		moq_mux::catalog::Producer,
+		[moq_mux::timeline::Producer; 2],
+	) {
+		let (origin, broadcast, mut catalog) = timeline_pair().await;
+		catalog
+			.mutate(|catalog| {
+				let config = catalog.video.renditions.get_mut("video1").unwrap();
+				config.coded_width = None;
+				config.coded_height = None;
+			})
+			.unwrap();
+		let (_, mut video0) = timeline_track(&broadcast, "video0");
+		let (_, mut video1) = timeline_track(&broadcast, "video1");
+		for sequence in 0..4 {
+			video0.push(&gop(sequence)).unwrap();
+			video1.push(&gop(sequence)).unwrap();
+		}
+		(origin, broadcast, catalog, [video0, video1])
+	}
+
+	/// Render the manifest until it lists `video1`.
+	async fn listed_in_manifest(broadcaster: &Broadcaster) -> String {
+		tokio::time::timeout(Duration::from_secs(5), async {
+			loop {
+				let manifest = broadcaster.manifest(None).unwrap().unwrap();
+				if manifest.contains("id=\"video/video1\"") {
+					return manifest;
+				}
+				tokio::time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("video1 is listed once its init is built")
+	}
+
+	/// Write one VP8 keyframe at `sequence`'s [`gop`] pts into `group`.
+	fn write_keyframe(group: &mut moq_net::group::Producer, sequence: u64) {
+		let frame = vp8_frame(sequence * 2_000_000, true);
+		hang::container::Frame {
+			timestamp: frame.timestamp,
+			payload: frame.payload,
+		}
+		.write_to(group)
+		.unwrap();
+	}
+
+	// A rendition whose init bootstraps from a still-open group never holds up the manifest: its
+	// sibling renders at once, and it joins once the group closes.
+	#[tokio::test(start_paused = true)]
+	async fn a_stuck_init_leaves_the_manifest_to_its_siblings() {
+		let (origin, broadcast, _catalog, _timelines) = inline_sibling().await;
+		let media = broadcast.create_track("video1", timed()).unwrap();
+		let mut open = media.create_group(3u64.into()).unwrap();
+		write_keyframe(&mut open, 3);
+
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		broadcaster.advertised().await;
+		let tag = segments::tag(&(Kind::Video, "video0".into(), "video0".into()));
+		listed_under(&broadcaster.rendition(Kind::Video, "video0").unwrap(), &tag, 3).await;
+		let manifest = broadcaster.manifest(None).unwrap().expect("video0 renders");
+		assert!(manifest.contains("id=\"video/video0\""), "{manifest}");
+		assert!(!manifest.contains("id=\"video/video1\""), "{manifest}");
+
+		// The background build is parked on the open group, and every render stays current.
+		tokio::time::sleep(Duration::from_secs(1)).await;
+		let manifest = broadcaster.manifest(None).unwrap().expect("video0 renders");
+		assert!(!manifest.contains("id=\"video/video1\""), "{manifest}");
+
+		open.finish().unwrap();
+		let manifest = listed_in_manifest(&broadcaster).await;
+		assert!(manifest.contains("id=\"video/video0\""), "{manifest}");
+	}
+
+	// The manifest leaves a disabled rendition out, so it never fetches media for its init.
+	#[tokio::test(start_paused = true)]
+	async fn a_disabled_rendition_never_builds_its_init() {
+		let (origin, broadcast, mut catalog, _timelines) = inline_sibling().await;
+		catalog
+			.mutate(|catalog| catalog.video.renditions.get_mut("video1").unwrap().enabled = false)
+			.unwrap();
+		let media = broadcast.create_track("video1", timed()).unwrap();
+		for sequence in 0..4 {
+			let mut group = media.create_group(sequence.into()).unwrap();
+			write_keyframe(&mut group, sequence);
+			group.finish().unwrap();
+		}
+
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		broadcaster.advertised().await;
+		let tag = segments::tag(&(Kind::Video, "video0".into(), "video0".into()));
+		listed_under(&broadcaster.rendition(Kind::Video, "video0").unwrap(), &tag, 3).await;
+		for _ in 0..3 {
+			assert!(broadcaster.manifest(None).unwrap().is_some());
+			tokio::time::sleep(Duration::from_secs(1)).await;
+		}
+		let disabled = broadcaster.rendition(Kind::Video, "video1").unwrap();
+		assert!(!disabled.snapshot().segments.is_empty());
+		assert!(
+			disabled.media_playlist(None).unwrap().is_none(),
+			"no init was built for the disabled rendition"
+		);
+
+		catalog
+			.mutate(|catalog| catalog.video.renditions.get_mut("video1").unwrap().enabled = true)
+			.unwrap();
+		listed_in_manifest(&broadcaster).await;
 	}
 
 	// With every rendition disabled no reference watcher is left, so the source ending must

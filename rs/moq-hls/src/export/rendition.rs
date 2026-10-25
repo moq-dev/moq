@@ -289,8 +289,9 @@ pub struct Rendition {
 	/// generation drops the init, since a restarted inline-codec publisher may carry new
 	/// parameter sets under the same catalog.
 	run: Mutex<Run>,
-	/// Serializes init builds, so concurrent first requests fetch the keyframe group once.
-	building: tokio::sync::Mutex<()>,
+	/// Serializes init builds, so concurrent first requests fetch the keyframe group once. Shared
+	/// so a background build (see [`start_init`](Self::start_init)) holds it for its whole run.
+	building: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Rendition {
@@ -378,7 +379,7 @@ impl Rendition {
 			watcher: Mutex::new(None),
 			media,
 			run: Mutex::default(),
-			building: tokio::sync::Mutex::new(()),
+			building: Arc::new(tokio::sync::Mutex::new(())),
 		})
 	}
 
@@ -410,7 +411,7 @@ impl Rendition {
 			watcher: Mutex::new(None),
 			media,
 			run: Mutex::default(),
-			building: tokio::sync::Mutex::new(()),
+			building: Arc::new(tokio::sync::Mutex::new(())),
 		})
 	}
 
@@ -989,7 +990,7 @@ impl Rendition {
 		if let Some(init) = &run.init {
 			return Some(init.clone());
 		}
-		// A muxer error surfaces from `init()`, which the serve path awaits before rendering.
+		// A muxer error surfaces from `bootstrap`, which builds from media.
 		let bytes = self.muxer().ok()?.init().ok()??;
 		Some(self.cache_init(run.epoch, bytes))
 	}
@@ -1004,6 +1005,29 @@ impl Rendition {
 		run.init.get_or_insert_with(|| Arc::new(Init::new(bytes))).clone()
 	}
 
+	/// Build the init in the background unless it is built or a build is already running, so a
+	/// later [`representations`](Self::representations) lists this rendition without any render
+	/// waiting on its media.
+	pub(crate) fn start_init(self: &Arc<Self>) {
+		let Ok(binding) = self.authorize() else {
+			return;
+		};
+		if self.built_init(&self.run()).is_some() {
+			return;
+		}
+		// Taken before spawning, so renders never queue tasks behind a build stuck on an open group.
+		let Ok(building) = self.building.clone().try_lock_owned() else {
+			return;
+		};
+		let rendition = self.clone();
+		tokio::spawn(async move {
+			let _building = building;
+			if let Err(err) = rendition.bootstrap(&binding).await {
+				tracing::warn!(rendition = %rendition.name, %err, "failed to build init segment");
+			}
+		});
+	}
+
 	async fn load_init(&self) -> Result<Option<Arc<Init>>> {
 		let binding = self.authorize()?;
 		// A transmuxed segment can cache the init while another bootstrap holds `building`,
@@ -1012,6 +1036,11 @@ impl Rendition {
 			return Ok(Some(init));
 		}
 		let _building = self.building.lock().await;
+		self.bootstrap(&binding).await
+	}
+
+	/// Build and cache the init, holding `building`.
+	async fn bootstrap(&self, binding: &moq_mux::Binding) -> Result<Option<Arc<Init>>> {
 		let run = self.run();
 		if let Some(init) = run.init {
 			return Ok(Some(init));
@@ -1029,7 +1058,7 @@ impl Rendition {
 				let Some(sequence) = latest.or_else(|| self.live.latest_keyframe_group(&reference)) else {
 					return Ok(None);
 				};
-				let Some((broadcast, track)) = self.track(&binding).await? else {
+				let Some((broadcast, track)) = self.track(binding).await? else {
 					return Ok(None);
 				};
 				let Ok(mut group) = fetch(&track, hang::timeline::Position::group(sequence), None, &broadcast).await?

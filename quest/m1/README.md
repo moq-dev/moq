@@ -158,7 +158,6 @@ Catalog HLS field.
 - [HLS URL redaction](/quest/m1/hls-url-redaction.md) - no moq-hls error prints a signed URL's query or userinfo
 - [HLS ranged responses](/quest/m1/hls-range-206.md) - a byte-range segment accepts only a matching `206` and never buffers past its length
 - [HLS redirect base](/quest/m1/hls-redirect-base.md) - relative playlist URIs resolve against a same-origin redirect's final URL
-- [DASH init readiness](/quest/m1/dash-init-ready.md) - a DASH manifest lists the renditions whose init exists instead of waiting on one that is stuck
 - [HLS dot-only names](/quest/m1/hls-dot-names.md) - a `.` or `..` rendition is refused instead of advertising a URL outside its directory
 - [MSF duplicate init](/quest/m1/msf-duplicate-init.md) - an MSF catalog refuses a repeated `initDataList` id instead of resolving it last-wins
 - [Image hardening](/quest/m1/image-hardening.md) - the relay image runs unprivileged and its builder stage is pinned

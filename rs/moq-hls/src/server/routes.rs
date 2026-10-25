@@ -91,8 +91,6 @@ async fn manifest(server: &Server, broadcast: &str, query: Option<&str>) -> Resp
 	// A manifest whose timelines are all empty confuses players; give the broadcast a moment
 	// to index its first complete segment before answering.
 	let _ = moq_clock::timeout(READY_TIMEOUT, broadcaster.playable()).await;
-	// Each representation names its init by hash, which an inline codec only learns from media.
-	broadcaster.build_inits().await;
 	match broadcaster.manifest(query) {
 		Ok(Some(manifest)) => mpd(manifest),
 		Ok(None) => not_found(),
