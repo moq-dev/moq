@@ -6988,7 +6988,7 @@ mod serve_tests {
 		log: Log,
 		track: track::Producer,
 		_origin: origin::Producer,
-		_broadcast: crate::broadcast::Producer,
+		_broadcast: crate::origin::Publication,
 	}
 
 	fn serve(version: Version) -> Serve {
