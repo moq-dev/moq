@@ -2439,7 +2439,11 @@ impl Prefetch {
 			bytes += unsafe { slot.assume_init_ref() }.payload.len() as u64;
 		}
 		if let Some(chains) = &self.chains {
-			bytes += chains[self.pos..self.len].iter().flatten().map(|chain| chain.len() as u64).sum::<u64>();
+			bytes += chains[self.pos..self.len]
+				.iter()
+				.flatten()
+				.map(|chain| chain.len() as u64)
+				.sum::<u64>();
 		}
 		((self.len - self.pos) as u64, bytes)
 	}
@@ -3953,7 +3957,10 @@ mod test {
 			let mut whole = tail.consume();
 			let mut read = Vec::new();
 			while let Poll::Ready(Ok(Some(object))) = whole.poll_read_object(&waiter) {
-				read.push((object.frame.payload.contiguous(0), object.fields.map(|fields| fields.id)));
+				read.push((
+					object.frame.payload.contiguous(0),
+					object.fields.map(|fields| fields.id),
+				));
 			}
 			assert_eq!(
 				read,
@@ -4859,7 +4866,11 @@ mod test {
 		for (i, payload) in payloads.iter().enumerate().skip(1) {
 			let mut frame = mixed.next_frame().now_or_never().unwrap().unwrap().unwrap();
 			let first = frame.read_chunk().now_or_never().unwrap().unwrap().unwrap();
-			assert_eq!(first.len(), payload.len().min(frame::SEGMENT), "streamed frame {i} lost its segments");
+			assert_eq!(
+				first.len(),
+				payload.len().min(frame::SEGMENT),
+				"streamed frame {i} lost its segments"
+			);
 			let rest = frame.read_all().now_or_never().unwrap().unwrap();
 			assert_eq!([first, rest].concat(), payload[..], "streamed frame {i}");
 		}
@@ -4964,7 +4975,9 @@ mod test {
 			};
 			let size = object.inflated.expect("a stored slice carries its size");
 			assert_eq!(size, verbose(index).len() as u64);
-			let frame = decoder.frame(&object.frame.payload.contiguous(0), size as usize).unwrap();
+			let frame = decoder
+				.frame(&object.frame.payload.contiguous(0), size as usize)
+				.unwrap();
 			assert_eq!(frame, verbose(index), "slice {index}");
 		}
 

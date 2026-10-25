@@ -1398,12 +1398,18 @@ mod hop_tests {
 		group.write_frame(ts(5), b"key".to_vec()).unwrap();
 		let mut received = recv(&mut subscriber).await;
 		let frame = next(&mut received).await.unwrap();
-		assert_eq!((frame.timestamp, &frame.payload.contiguous(0)[..]), (Some(ts(5)), &b"key"[..]));
+		assert_eq!(
+			(frame.timestamp, &frame.payload.contiguous(0)[..]),
+			(Some(ts(5)), &b"key"[..])
+		);
 		assert!(frame.fields.is_none() && received.wire().is_none());
 		group.write_frame(ts(6), b"delta".to_vec()).unwrap();
 		group.finish().unwrap();
 		let frame = next(&mut received).await.unwrap();
-		assert_eq!((frame.timestamp, &frame.payload.contiguous(0)[..]), (Some(ts(6)), &b"delta"[..]));
+		assert_eq!(
+			(frame.timestamp, &frame.payload.contiguous(0)[..]),
+			(Some(ts(6)), &b"delta"[..])
+		);
 		assert!(frame.fields.is_none());
 		assert!(next(&mut received).await.is_none());
 		assert!(received.end_object().is_none());

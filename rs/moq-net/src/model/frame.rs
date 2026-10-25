@@ -1343,12 +1343,19 @@ mod tests {
 				buf.append(chunk);
 				let written = buf.written(Ordering::Acquire);
 				let ahead = written.next_multiple_of(SEGMENT).min(SIZE);
-				assert!(buf.allocated() <= ahead, "grow={grow}: {} past {written}", buf.allocated());
+				assert!(
+					buf.allocated() <= ahead,
+					"grow={grow}: {} past {written}",
+					buf.allocated()
+				);
 
 				while read < written {
 					let slice = buf.slice(read, written);
 					assert_eq!(slice, payload[read..read + slice.len()]);
-					assert!(read / SEGMENT == (read + slice.len() - 1) / SEGMENT, "a read crossed a segment");
+					assert!(
+						read / SEGMENT == (read + slice.len() - 1) / SEGMENT,
+						"a read crossed a segment"
+					);
 					read += slice.len();
 				}
 			}
