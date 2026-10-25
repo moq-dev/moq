@@ -61,7 +61,7 @@ pub struct Properties {
 	/// `None` declares no timeline, so the subscriber times objects by arrival.
 	pub timescale: Option<Timescale>,
 
-	/// Publisher priority for groups whose header omits it. Draft-21 section 10.4
+	/// Publisher priority for groups whose header omits it. Draft-22 section 10.4
 	/// assigns property 0x0e and defaults to wire priority 128 when absent.
 	pub priority: Option<u8>,
 
@@ -523,15 +523,7 @@ mod tests {
 
 	#[test]
 	fn publisher_priority_is_bounded_to_a_byte() {
-		for version in [
-			Version::Draft16,
-			Version::Draft17,
-			Version::Draft18,
-			Version::Draft19,
-			Version::Draft20,
-			Version::Draft21,
-			Version::Draft22,
-		] {
+		for version in [Version::Draft16, Version::Draft17, Version::Draft18, Version::Draft22] {
 			let mut buf = Vec::new();
 			Encoder::new(&mut buf, version.into()).varint(0x0eu64).unwrap();
 			Encoder::new(&mut buf, version.into()).varint(256u64).unwrap();

@@ -30,7 +30,9 @@ supported: if a rendition's timestamps go backwards under the same `EXT-X-MAP`,
 such as an encoder restart, the import fails with an error. Import the restarted
 source as a new broadcast. Import fetches only from the playlist's origin
 (scheme, host, and port): a reference or redirect to another origin, such as a
-separate CDN host, fails the import.
+separate CDN host, fails the import. An `EXT-X-BYTERANGE` segment needs an
+origin that honors HTTP `Range`: any answer but a `206` for exactly the
+requested bytes fails the segment.
 
 ## How export works
 
