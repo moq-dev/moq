@@ -2,12 +2,29 @@ package moq
 
 import (
 	"context"
+	"runtime/debug"
+	"strings"
 	"sync"
 	"time"
 
 	ffi "moq.dev/moq-ffi/moq"
 	"moq.dev/moq/internal/bridge"
 )
+
+// implementation is this module's product token, which its sessions advertise
+// ahead of moq-ffi's. The module version comes from the build info Go embeds in
+// every binary; a source-tree build, which has none, reports dev.
+var implementation = func() string {
+	version := "dev"
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, module := range append([]*debug.Module{&info.Main}, info.Deps...) {
+			if module.Path == "moq.dev/moq" && module.Replace == nil && strings.HasPrefix(module.Version, "v") {
+				version = strings.TrimPrefix(module.Version, "v")
+			}
+		}
+	}
+	return "moq-go/" + version
+}()
 
 // ClientConfig configures a client created with Dial, mirroring moq-ffi's
 // MoqClientConfig. The zero value dials with the native defaults: an empty
@@ -167,9 +184,10 @@ func (c ClientConfig) ffi() (ffi.MoqClientConfig, error) {
 			Qlog:              str(c.QUIC.Qlog),
 			Keylog:            keylog,
 		},
-		Websocket: ffi.MoqWebSocketConfig{Enabled: c.WebSocket.Enabled, Delay: c.WebSocket.Delay},
-		Once:      c.Once,
-		Backoff:   backoff,
+		Websocket:      ffi.MoqWebSocketConfig{Enabled: c.WebSocket.Enabled, Delay: c.WebSocket.Delay},
+		Once:           c.Once,
+		Backoff:        backoff,
+		Implementation: &implementation,
 	}
 	if c.Publish != nil {
 		cfg.Publish = &c.Publish.inner
@@ -315,7 +333,7 @@ func (c *Client) Close() error {
 	c.closeOnce.Do(func() {
 		if c.session != nil {
 			c.session.Shutdown()
-            c.closeErr = c.session.Closed(context.Background())
+			c.closeErr = c.session.Closed(context.Background())
 		}
 		if c.inner != nil {
 			c.inner.Cancel()

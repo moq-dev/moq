@@ -59,6 +59,10 @@ pub struct MoqClientConfig {
 	/// Retry pacing for the automatic reconnect.
 	#[uniffi(default)]
 	pub backoff: MoqBackoff,
+	/// Your own `name/version` product tokens, space-separated, advertised in SETUP ahead of
+	/// moq-ffi's: `my-app/1.0` advertises `my-app/1.0 moq-ffi/0.4.12 moq-net-rs/0.3.10`.
+	#[uniffi(default = None)]
+	pub implementation: Option<String>,
 	/// The origin whose broadcasts are published to the remote.
 	///
 	/// With neither `publish` nor `consume` set, each session's two sides share one fresh
@@ -215,9 +219,23 @@ pub struct MoqBackoff {
 	pub timeout: Option<Duration>,
 }
 
-/// What sessions opened through this crate advertise in SETUP: moq-ffi ahead of its core.
-pub(crate) fn implementation() -> String {
-	format!("moq-ffi/{} {}", env!("CARGO_PKG_VERSION"), moq_net::IMPLEMENTATION)
+/// What sessions opened through this crate advertise in SETUP: the caller's `prefix`, then
+/// moq-ffi, then its core.
+pub(crate) fn implementation(prefix: Option<&str>) -> Result<String, MoqError> {
+	let core = format!("moq-ffi/{} {}", env!("CARGO_PKG_VERSION"), moq_net::IMPLEMENTATION);
+	let Some(prefix) = prefix else {
+		return Ok(core);
+	};
+	// An empty token or stray whitespace would corrupt the list every peer splits on spaces.
+	if prefix
+		.split(' ')
+		.any(|token| token.is_empty() || token.contains(|c: char| c.is_whitespace() || c.is_control()))
+	{
+		return Err(MoqError::Config {
+			reason: format!("implementation must be space-separated product tokens: {prefix:?}"),
+		});
+	}
+	Ok(format!("{prefix} {core}"))
 }
 
 /// The settings a default [`MoqClientConfig`] dials with, for a settings UI to show.
@@ -306,7 +324,7 @@ impl Client {
 		let _guard = crate::ffi::enter();
 
 		let mut connect = moq_tokio::connect::Config::default();
-		connect.implementation = Some(implementation());
+		connect.implementation = Some(implementation(config.implementation.as_deref())?);
 		if let Some(bind) = config.bind {
 			let bind = bind.parse().map_err(|err| MoqError::Config {
 				reason: format!("invalid bind address {bind}: {err}"),
@@ -555,6 +573,17 @@ mod tests {
 			..Default::default()
 		};
 		assert!(matches!(MoqClient::new(missing), Err(MoqError::Config { .. })));
+
+		for prefix in ["", " app/1", "app/1 ", "app/1  lib/2", "app/1\tlib/2", "app/1\n"] {
+			let implementation = MoqClientConfig {
+				implementation: Some(prefix.into()),
+				..Default::default()
+			};
+			assert!(
+				matches!(MoqClient::new(implementation), Err(MoqError::Config { .. })),
+				"{prefix:?}"
+			);
+		}
 	}
 
 	#[test]
@@ -584,6 +613,8 @@ struct Client {
 	fingerprints: Vec<Vec<u8>>,
 	/// Offered as ALPNs to WebTransport and then enforced by moq-net, so the two agree.
 	versions: moq_net::Versions,
+	/// What SETUP advertises, with the caller's prefix joined.
+	implementation: String,
 	publish: Option<Arc<MoqOriginProducer>>,
 	consume: Option<Arc<MoqOriginProducer>>,
 }
@@ -603,6 +634,7 @@ impl Client {
 			// A browser session never redials, so it dials once either way.
 			once: _,
 			backoff,
+			implementation: prefix,
 			publish,
 			consume,
 		} = config;
@@ -633,6 +665,7 @@ impl Client {
 				true => moq_net::Versions::default(),
 				false => parse_versions(&versions)?.into(),
 			},
+			implementation: implementation(prefix.as_deref())?,
 			publish,
 			consume,
 		})
@@ -652,7 +685,7 @@ impl Client {
 		};
 		let client = client
 			.with_versions(self.versions.clone())
-			.with_implementation(implementation())
+			.with_implementation(self.implementation.clone())
 			.with_publisher(&publish.inner)
 			.with_subscriber(subscribe.inner.clone());
 

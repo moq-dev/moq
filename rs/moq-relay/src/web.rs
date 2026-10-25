@@ -2479,7 +2479,10 @@ mod tests {
 						}
 						None => socket_step(upgrade_while_draining(web.stream, true)).await,
 					};
-					let goaway = socket_step(session.draining().recv()).await.unwrap();
+					let draining = session.draining();
+					let goaway = socket_step(moq_net::kio::wait(|waiter| draining.poll(waiter)))
+						.await
+						.unwrap();
 					assert_eq!(goaway.uri(), "");
 					session.abort(moq_net::Error::Cancel);
 					socket_step(web.running).await.unwrap().unwrap();
@@ -2583,7 +2586,9 @@ mod tests {
 			web.trigger.start();
 			let session = socket_step(upgrade_while_draining(web.stream, false)).await;
 			drop(pending);
-			assert_eq!(socket_step(session.draining().recv()).await.unwrap().uri(), "");
+			let draining = session.draining();
+			let goaway = socket_step(moq_net::kio::wait(|waiter| draining.poll(waiter))).await;
+			assert_eq!(goaway.unwrap().uri(), "");
 			session.abort(moq_net::Error::Cancel);
 			socket_step(web.running).await.unwrap().unwrap();
 		}

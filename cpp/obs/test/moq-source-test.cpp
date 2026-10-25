@@ -720,6 +720,8 @@ int main()
 		};
 		CHECK(on_grid(g_last_timestamp));
 		CHECK(on_grid(audio.timestamp));
+		// The plugin names itself ahead of the C++ package, so a relay can tell it apart.
+		CHECK(relay.Advertised("moq-obs/dev moq-cpp/"));
 		destroySource(source);
 	}
 	report("plays video and audio");
