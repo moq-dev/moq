@@ -148,6 +148,7 @@ Catalog HLS field.
 - [HLS export tests over a session](/quest/m1/hls-session-tests.md) - an integration suite records and serves through a real moq-net session, so a publisher disconnect, finish, or takeover ends the cursor and playlists as specified
 - [HLS and DASH segment conformance](/quest/m1/hls-conformance.md) - nightly ffprobe checks that advertised timing, sync flags, and bytes match the media served
 - [Unbounded groups](/quest/m1/unbounded-groups/README.md) - groups and frames lose their size caps; the cache sheds parts of a group under pressure and refills the holes in place
+- [Poll-first async](/quest/m1/poll-first/README.md) - library crates compile no coroutines by default: async wrappers are generated from `poll_*` and gated behind an `async` feature
 
 ## Related
 

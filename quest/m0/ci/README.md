@@ -86,6 +86,13 @@ chosen from measurements of the optimized pipeline. Each CI pass costs twice
 per merged PR today (PR and queue), at 13 minutes median and 26 minutes p90 of
 wall time per PR run.
 
+Decided 2026-10-25 (maintainer), from a profile of moq-net: monomorphized
+generics dominate its build (53% of the library's CPU), and its test target
+costs 3x the library. A "thin generics" profile shrinks them: generic entry
+points delegate to non-generic bodies, and BTreeMap instantiations are shared.
+kixelated/rust2's driver lints the rule later. Making IETF support a cargo
+feature was considered and not planned: the churn outweighs the build saving.
+
 Measure each change against a current baseline and record the result in its PR.
 The historical samples locate candidates; they are not controlled benchmarks.
 
@@ -98,3 +105,6 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) - measure the hosted Nightly jobs' hits, restore time, and expiry once the bump lands
 - [Verify the Nix cache](/quest/m0/ci/nix-cache-verify.md) - confirm CI and releases use `nix.moq.dev` and retire Cachix
 - [First shared FFI release](/quest/m0/ci/nightly-ffi-reuse.md) - condition: the backport merges and the next `moq-ffi-v*` tag runs `Release FFI`; verify the wrappers
+- [Thin generic test executors](/quest/m0/ci/thin-executors.md) - `moq_clock::sim::run` and the tokio test executor compile once instead of once per test
+- [Fewer BTreeMap instantiations](/quest/m0/ci/btree-keys.md) - moq-net shares BTreeMap key and value types, kept only if its CPU time drops
+- [Measure moving unit tests out](/quest/m0/ci/test-layout.md) - report what moq-net would save by not compiling its library twice for unit tests

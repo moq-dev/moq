@@ -218,5 +218,6 @@ lite-07; bitrate enforcement is not part of this release.
 - [Upstream unknown-env option in usage-rs](/quest/m2/usage-unknown-env.md) - jdx/usage refuses unknown prefixed env vars, replacing the moq-tokio helper
 - [Artifact size audit](/quest/m2/audit-size.md) - repeat the shipping, native, WASM and browser attribution after the release ships
 - [Compile time audit](/quest/m2/audit-compile-time.md) - build-time hotspots are measured against the m1 baselines, starting with the transport share now that moq-net compiles once, and the worst are fixed or planned
+- [Evaluate bbtree](/quest/m2/bbtree.md) - report whether the bbtree crate, including its concurrent map, should replace std's BTreeMap at any moq site
 - [Lint override and deprecation audit](/quest/m2/audit-lints.md) - repeat the suppression and deprecation audit after the release ships, starting with clippy on the macOS and Windows targets
 - [Interop audit](/quest/m2/audit-interop.md) - our interop runner entries match what we ship, and every red interop cell with a moq.dev side is fixed, reported, or noted as down or unsupported
