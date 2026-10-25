@@ -92,7 +92,7 @@ impl Sources {
 	/// which does nothing until run.
 	///
 	/// Also applies the collection's gain and mute to every audio strip, which
-	/// never restarts a source.
+	/// never restarts a source. Panics on a gain [`Collection::validate`] refuses.
 	pub fn sync(&mut self, collection: &Collection) -> Vec<Driver> {
 		self.feeds
 			.retain(|name, feed| collection.sources.get(name) == Some(&feed.source));

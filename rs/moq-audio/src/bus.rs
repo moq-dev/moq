@@ -343,11 +343,12 @@ impl Default for StripState {
 impl Strip {
 	/// Set the linear gain: `1.0` is unity, `0.0` silent, above `1.0` boosts.
 	///
-	/// A negative or non-finite gain is refused and leaves the gain unchanged.
+	/// # Panics
+	///
+	/// If `gain` is negative or not finite.
 	pub fn set_gain(&self, gain: f32) {
-		if gain.is_finite() && gain >= 0.0 {
-			self.shared.gain.store(gain.to_bits(), Ordering::Relaxed);
-		}
+		assert!(gain.is_finite() && gain >= 0.0, "invalid gain {gain}");
+		self.shared.gain.store(gain.to_bits(), Ordering::Relaxed);
 	}
 
 	/// The linear gain, independent of [`muted`](Self::muted).
@@ -535,16 +536,6 @@ mod tests {
 		channel.strip().set_muted(false);
 		let out = feed(&bus, &mut channel, 0.5, 20);
 		assert!((out.last().unwrap() - 0.4).abs() < 1e-4);
-	}
-
-	#[test]
-	fn refuses_an_invalid_gain() {
-		let strip = Strip::default();
-		strip.set_gain(0.3);
-		strip.set_gain(f32::NAN);
-		strip.set_gain(-1.0);
-		strip.set_gain(f32::INFINITY);
-		assert_eq!(strip.gain(), 0.3);
 	}
 
 	/// A gain change ramps across one block instead of stepping, which would click.
