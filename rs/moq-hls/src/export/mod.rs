@@ -274,7 +274,8 @@ impl Broadcaster {
 	/// each rendition's [`init`](Rendition::init) first.
 	///
 	/// Fails with [`TimelineFailed`](crate::Error::TimelineFailed) once the reference timeline
-	/// failed, rather than turning a truncated presentation `static`. A rendition whose own
+	/// failed, or [`CatalogFailed`](crate::Error::CatalogFailed) once the catalog did, rather
+	/// than turning a truncated presentation `static`. A rendition whose own
 	/// timeline failed is left out instead, and its [`Rendition`] listings fail.
 	pub fn manifest(&self, query: Option<&str>) -> crate::Result<Option<String>> {
 		if let Some(err) = self.renditions.failure() {
@@ -3896,8 +3897,18 @@ mod tests {
 		let test = Timelines::new();
 		let rendition = test.rendition("video0");
 		let mut segments = rendition.segments();
-		test.renditions.finish(Err(crate::Error::NoVariants));
-		assert!(matches!(segments.next().await, Err(crate::Error::NoVariants)));
+		test.renditions
+			.finish(Err(crate::Error::Moq(moq_net::Error::Unroutable)));
+		// Wrapped, so a recorder can tell the final failure from a retryable fetch error.
+		for _ in 0..2 {
+			let Err(err) = segments.next().await else {
+				panic!("a failed catalog ends the cursor");
+			};
+			assert!(
+				matches!(&err, crate::Error::CatalogFailed { source } if matches!(**source, crate::Error::Moq(moq_net::Error::Unroutable))),
+				"{err}"
+			);
+		}
 	}
 
 	#[tokio::test(start_paused = true)]

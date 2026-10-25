@@ -233,7 +233,10 @@ impl Producer {
 	/// Record the catalog's end before closing its change stream.
 	pub fn finish(&self, result: crate::Result<()>) {
 		if let Err(err) = &result {
-			self.fanout.fail(None, err.clone());
+			let failed = crate::Error::CatalogFailed {
+				source: Box::new(err.clone()),
+			};
+			self.fanout.fail(None, failed);
 		}
 		if let Ok(mut state) = self.state.write() {
 			state.finished = Some(result);
