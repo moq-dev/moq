@@ -356,7 +356,7 @@ mod tests {
 	/// to decode while the group is still open.
 	fn write_keyframe(group: &mut moq_net::group::Producer) {
 		let mut encoder = moq_video::encode::Encoder::new(&{
-			let mut config = moq_video::encode::Config::new(320, 240, moq_video::Rate::new(30, 1).unwrap());
+			let mut config = moq_video::encode::Config::new(320, 240, moq_video::FrameRate::new(30, 1).unwrap());
 			config.kind = moq_video::encode::Kind::Software;
 			config
 		})
@@ -401,7 +401,7 @@ mod tests {
 		let track = broadcast.create_track("video", info).unwrap();
 
 		let mut encoder = moq_video::encode::Encoder::new(&{
-			let mut config = moq_video::encode::Config::new(320, 240, moq_video::Rate::new(30, 1).unwrap());
+			let mut config = moq_video::encode::Config::new(320, 240, moq_video::FrameRate::new(30, 1).unwrap());
 			config.kind = moq_video::encode::Kind::Software;
 			config
 		})
@@ -468,7 +468,7 @@ mod tests {
 
 		let task = tokio::spawn(async move {
 			let mut encoder = moq_video::encode::Sink::open(&{
-				let mut config = moq_video::encode::Config::new(320, 240, moq_video::Rate::new(30, 1).unwrap());
+				let mut config = moq_video::encode::Config::new(320, 240, moq_video::FrameRate::new(30, 1).unwrap());
 				config.kind = moq_video::encode::Kind::Software;
 				config
 			})
@@ -633,7 +633,7 @@ mod tests {
 	/// with the NVIDIA driver). Probed through the public API so the hardware
 	/// test skips cleanly on GPU-less CI.
 	fn hardware_available() -> bool {
-		let mut encode = moq_video::encode::Config::new(160, 120, moq_video::Rate::new(30, 1).unwrap());
+		let mut encode = moq_video::encode::Config::new(160, 120, moq_video::FrameRate::new(30, 1).unwrap());
 		encode.kind = moq_video::encode::Kind::Hardware;
 		if moq_video::encode::Encoder::new(&encode).is_err() {
 			return false;
@@ -1535,7 +1535,7 @@ mod tests {
 		// Two frames, so the output's largest moves once both are encoded.
 		let mut group = source._track.create_group(0u64.into()).unwrap();
 		let mut encoder = moq_video::encode::Encoder::new(&{
-			let mut config = moq_video::encode::Config::new(320, 240, moq_video::Rate::new(30, 1).unwrap());
+			let mut config = moq_video::encode::Config::new(320, 240, moq_video::FrameRate::new(30, 1).unwrap());
 			config.kind = moq_video::encode::Kind::Software;
 			config
 		})
@@ -1626,7 +1626,7 @@ mod tests {
 			let _source_fetches = source._track.dynamic();
 
 			let mut encoder = moq_video::encode::Encoder::new(&{
-				let mut config = moq_video::encode::Config::new(320, 240, moq_video::Rate::new(30, 1).unwrap());
+				let mut config = moq_video::encode::Config::new(320, 240, moq_video::FrameRate::new(30, 1).unwrap());
 				config.kind = moq_video::encode::Kind::Software;
 				config
 			})

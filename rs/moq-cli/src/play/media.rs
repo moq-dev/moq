@@ -1949,7 +1949,7 @@ mod tests {
 			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
 		let mut producer = moq_mux::container::Producer::new(track, Container::Legacy(moq_mux::container::Kind::Data));
-		let mut config = moq_video::encode::Config::new(64, 64, moq_video::Rate::new(30, 1).unwrap());
+		let mut config = moq_video::encode::Config::new(64, 64, moq_video::FrameRate::new(30, 1).unwrap());
 		config.kind = moq_video::encode::Kind::Software;
 		config.gop = moq_video::encode::Gop::Keyframe { interval: 120 };
 		let mut encoder = moq_video::encode::Encoder::new(&config).unwrap();

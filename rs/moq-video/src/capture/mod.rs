@@ -13,7 +13,7 @@
 
 use std::sync::Arc;
 
-use crate::{Error, Frame, Rate};
+use crate::{Error, Frame, FrameRate};
 
 mod channel;
 use channel::FrameChannel;
@@ -176,12 +176,12 @@ pub struct Mode {
 	///
 	/// Empty when the driver describes a continuous range instead of listing
 	/// rates, or cannot enumerate intervals for this size.
-	pub framerates: Vec<Rate>,
+	pub framerates: Vec<FrameRate>,
 }
 
 impl Mode {
 	/// The highest rate this mode offers, or `None` when the driver listed none.
-	pub fn max_framerate(&self) -> Option<Rate> {
+	pub fn max_framerate(&self) -> Option<FrameRate> {
 		self.framerates.first().copied()
 	}
 }
@@ -263,7 +263,7 @@ pub struct Config {
 	/// Preferred output height in pixels.
 	pub height: Option<u32>,
 	/// Preferred exact frame rate.
-	pub framerate: Option<Rate>,
+	pub framerate: Option<FrameRate>,
 	/// Draw the mouse cursor into captured frames. Screen/window/app sources
 	/// only; ignored by cameras. Defaults to `true`.
 	pub cursor: bool,
@@ -293,7 +293,7 @@ pub struct Stream {
 	chan: Arc<FrameChannel>,
 	width: u32,
 	height: u32,
-	framerate: Option<Rate>,
+	framerate: Option<FrameRate>,
 	color: Option<crate::Color>,
 	label: String,
 	/// First frame captured during [`open`] (some backends learn their geometry
@@ -310,7 +310,7 @@ impl Stream {
 		chan: Arc<FrameChannel>,
 		width: u32,
 		height: u32,
-		framerate: Option<Rate>,
+		framerate: Option<FrameRate>,
 		label: String,
 		pending: Option<Frame>,
 		backend: Keepalive,
@@ -355,7 +355,7 @@ impl Stream {
 	}
 
 	/// The negotiated frame rate, or `None` if the source doesn't report one.
-	pub fn framerate(&self) -> Option<Rate> {
+	pub fn framerate(&self) -> Option<FrameRate> {
 		self.framerate
 	}
 
@@ -385,7 +385,7 @@ pub(crate) struct Synthetic {
 #[cfg(all(test, feature = "openh264"))]
 impl Synthetic {
 	/// Open a synthetic device with the given geometry, returning it and the stream reading it.
-	pub(crate) fn open(size: crate::Size, framerate: Rate) -> (Self, Stream) {
+	pub(crate) fn open(size: crate::Size, framerate: FrameRate) -> (Self, Stream) {
 		let chan = FrameChannel::new();
 		let stream = Stream::new(
 			chan.clone(),
