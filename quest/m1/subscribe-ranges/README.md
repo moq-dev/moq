@@ -103,3 +103,4 @@ every sequence delivered or dropped.
 ## Related
 
 - [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - bounds upstream waiting independently of content age
+- [Timestamp spike](/quest/m1/time-addressing/spike.md) - the cut reworks `Absolute(group)` ends and sequence-range drops onto times

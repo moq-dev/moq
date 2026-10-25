@@ -16,3 +16,7 @@ SUBSCRIPTION_ENDED path in moq-net. Fix each with a test that a restart
 never repeats a group sequence.
 
 Public API: none expected. Wire: none.
+
+## Related
+
+- [Timestamp spike](/quest/m1/time-addressing/spike.md) - the cut removes the sequence half of this fix; a re-created track then only keeps its PTS moving forward

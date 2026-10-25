@@ -79,6 +79,9 @@ type for the m2 browser [padding probes](/quest/m2/probe/padding.md) landed in
 [#6233](https://github.com/moq-dev/moq/pull/6233).
 The `Time(pts)` range end rides in Subscribe ranges, already Required.
 
+Decided 2026-10-25 (maintainer): addressing groups by timestamp gates the
+cut, since it removes group sequence numbers from the lite-07 wire.
+
 Rust's lite-07 varints already carry the full 64 bits the draft specifies,
 so no codec work waits on the cut.
 
@@ -100,6 +103,7 @@ timestamp bound in [#6168](https://github.com/moq-dev/moq/pull/6168).
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - lite-07 carries the route layer: ROUTE per origin node and path-less ANNOUNCE, with the hop list gone
 - [Drop set](/quest/m1/drop-set.md) - lite-07's SUBSCRIBE_DROP carries `Max Age`, so a widening re-offers groups reported dropped
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - SUBSCRIBE carries ranges and an order and lite FETCH is gone, in Rust and JS
+- [Spike: timestamps replace group sequence numbers](/quest/m1/time-addressing/spike.md) - decides the lite-07 wire without group sequence numbers and adds the implementation quests here
 - [Announcement takeover](/quest/m1/announce-takeover.md) - ANNOUNCE_TAKEOVER preserves a proven instance under a new independent route
 
 ## Related
