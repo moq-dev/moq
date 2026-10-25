@@ -321,6 +321,9 @@ pub(super) struct SentPacket {
     ///
     /// The actual application data is stored with the stream state.
     pub(super) stream_frames: frame::StreamMetaVec,
+    /// Whether `stream_frames` only resend data in flight in other packets, to probe for
+    /// bandwidth, so they are not retransmitted when lost
+    pub(super) bandwidth_probe: bool,
 }
 
 /// Represents one or more packets that are deemed lost.

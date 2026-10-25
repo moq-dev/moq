@@ -231,7 +231,7 @@ export class Connection implements Established {
 				subscribe: new Path.Patterns(publish ? [Path.Pattern.all()] : []),
 			},
 			handle,
-			draining: () => this.#goaway.peek() !== undefined,
+			draining: () => this.#goaway.peek() !== undefined || this.#closing !== undefined,
 		});
 		// Left before anything observes the close, so a successor on the same handle never
 		// finds this session still active.
@@ -276,6 +276,9 @@ export class Connection implements Established {
 		registerWire(this, {
 			consume: (path) => this.#subscriber.consume(path),
 			goaway: this.#goaway,
+			// The drafts refuse overlapping SUBSCRIBE_NAMESPACEs (PREFIX_OVERLAP). A peer that
+			// declared MoQ Solicit is ours and holds both; any other may enforce it.
+			exclusive: solicit === undefined,
 			auth: this.#auth,
 		});
 

@@ -1017,7 +1017,7 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 	// like the never-redialed regression, and a stall still fails the drill.
 	config.connect.backoff.timeout = Some((Duration::ZERO).into());
 	if link == PeerLink::Transport {
-		config.connect.version = vec!["moq-transport-19".parse().expect("parse version")];
+		config.connect.version = vec!["moq-transport-22".parse().expect("parse version")];
 	}
 	config.cluster.connect = vec![moq_relay::cluster::Peer::new(peer_url.to_string())];
 	let edge = RelayHost::start(config).await;

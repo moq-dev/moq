@@ -105,7 +105,14 @@ pub trait Controller: Send + Sync {
             ssthresh: None,
             pacing_rate: None,
             bandwidth_estimate: None,
+            probe_inflight: None,
         }
+    }
+
+    /// Whether the controller ever reports [`ControllerMetrics::probe_inflight`], so an
+    /// application-limited sender can probe for bandwidth through it
+    fn probes(&self) -> bool {
+        false
     }
 
     /// Duplicate the controller's state
@@ -200,6 +207,12 @@ pub struct ControllerMetrics {
     pub pacing_rate: Option<u64>,
     /// Estimated sustainable path bandwidth (bytes/s)
     pub bandwidth_estimate: Option<u64>,
+    /// Bytes in flight up to which an application-limited sender may resend in-flight data,
+    /// while the controller probes for bandwidth (bytes)
+    ///
+    /// `None` when the controller is not probing, or cannot learn from a sender that fills its
+    /// pacing with redundant data.
+    pub probe_inflight: Option<u64>,
 }
 
 /// The path a controller starts on.

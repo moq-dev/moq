@@ -520,9 +520,8 @@ impl MoqRequest {
 			.run(move |mut state| async move {
 				let request = state.request.take().ok_or(MoqError::AlreadyResponded)?;
 				let reject = match code {
-					401 => moq_tokio::server::Reject::Unauthorized,
-					403 => moq_tokio::server::Reject::Forbidden,
-					code => moq_tokio::server::Reject::App(code),
+					401 | 403 => moq_net::SessionError::Unauthorized,
+					code => moq_net::SessionError::App(code),
 				};
 				request.reject(reject).await.map_err(|err| MoqError::Reject {
 					reason: format!("{err}"),
@@ -581,7 +580,7 @@ mod lifecycle_tests {
 				let everything = crate::auth::MoqGrant {
 					publish: vec!["**".into()],
 					subscribe: vec!["**".into()],
-					expires_us: None,
+					expires: None,
 				};
 				for auth in [peer.auth(), session.auth()] {
 					while auth.grant().as_ref() != Some(&everything) {

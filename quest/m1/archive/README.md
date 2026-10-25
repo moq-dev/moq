@@ -84,7 +84,6 @@ from a host. Each child fixes the stale docs it touches.
 
 ## Required
 
-- [Archive consumer](/quest/m1/archive/consumer.md) - `archive::Consumer` serves a stored prefix as a broadcast from its key listing, and `moq export/import archive` use the new pair
 - [Catalog HLS field](/quest/m1/archive/catalog-hls.md) - the root `archive` section is gone; an opt-in per-rendition `hls` field marks each aligned HLS segment's first group and pts and declares its nominal duration
 - [Fixed HLS target duration](/quest/m1/archive/hls-target.md) - one `EXT-X-TARGETDURATION` for the run, from the declared `hls` duration; an overrun is listed with a warning
 

@@ -424,7 +424,7 @@ mod tests {
 	/// the base one has no such field at all.
 	#[test]
 	fn cluster_namespace_round_trips() {
-		let version = Version::Draft19;
+		let version = Version::Draft18;
 		let msg = Namespace {
 			suffix: Path::new("alice.hang"),
 			params: clustered(&[7, 9], 5),
@@ -453,7 +453,7 @@ mod tests {
 	/// ROUTE_COST is optional and absent means 0, so a free path sends nothing.
 	#[test]
 	fn cluster_namespace_omits_zero_cost() {
-		let version = Version::Draft19;
+		let version = Version::Draft18;
 		let free = Namespace {
 			suffix: Path::new("a"),
 			params: clustered(&[7], 0),
@@ -545,7 +545,7 @@ mod tests {
 	/// A negotiated session that omits HOP_PATH is a protocol violation.
 	#[test]
 	fn cluster_namespace_requires_hop_path() {
-		let version = Version::Draft19;
+		let version = Version::Draft18;
 		let mut buf = Vec::new();
 		encode_namespace(&mut Encoder::new(&mut buf, version.into()), &Path::new("a")).unwrap();
 		// Number of Parameters = 0.
@@ -562,7 +562,7 @@ mod tests {
 	/// so a receiver that sees them there rejects the message.
 	#[test]
 	fn cluster_params_rejected_when_not_negotiated() {
-		let version = Version::Draft19;
+		let version = Version::Draft18;
 		let msg = super::super::PublishNamespace {
 			request_id: RequestId(1),
 			track_namespace: Path::new("a"),

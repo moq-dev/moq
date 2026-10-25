@@ -18,20 +18,24 @@ records".
 
 See the [epic](/quest/m1/unbounded-groups/README.md) for the decisions.
 
-- Storage comes from the
-  [group storage benchmark](/quest/m1/group-storage-bench.md) (decided
-  2026-10-20, maintainer): sorted runs of frames in place of one
-  `VecDeque` + `offset`, or the
-  [append-only log](/quest/m2/perf/kio-channel-contention/log.md) or a ring
-  buffer, which the maintainer leans toward because performance matters more
-  than middle eviction. Readers keep one absolute cursor. A sequential
-  reader should hold its position so a lookup stays O(1). The common
-  single-run group must cost what it does today.
+- Storage is the lock-free
+  [append-only log](/quest/m1/unbounded-groups/log.md) (decided 2026-10-24
+  by the maintainer over the group storage benchmark,
+  [moq-dev/moq#6627](https://github.com/moq-dev/moq/pull/6627): land the
+  end-state storage now rather than a mutex layout swapped later; numbers in
+  the [kio contention epic](/quest/m2/perf/kio-channel-contention/README.md)).
+  Frames keep absolute indices. The log is the tail run, from a base that
+  only advances: front eviction raises its base. Refilled frames go into
+  sorted runs below the base, behind their own mutex, and never rejoin the
+  log. Readers keep one absolute cursor, read the log lock-free, and search
+  the refill runs only when the cursor falls below the base. Prototyped this
+  way, the log cost 10 to 40% less per reader across cores and about 15 ns
+  more per append.
 - Pool debt evicts whole cold groups first (`pay_debt` in
   `model/track.rs`, as today). Front frames are shed only from a group
   that is protected or being read.
-- A refill writes a run strictly below `committed`, so it never contends
-  with the tail writer. Coalesce concurrent readers on one hole into a
+- A refill writes a run strictly below the base, so it never races
+  the tail writer. Coalesce concurrent readers on one hole into a
   single request, as `PendingFetch` does. Fold today's `Slot.head` tail copy
   into this.
 - A refill asks for exactly the hole: from the reader's missing frame to the
@@ -98,9 +102,5 @@ groups. A reader that used to see `GroupTooLarge` now refills or sees
 
 ## Required
 
-- [Group storage benchmark](/quest/m1/group-storage-bench.md) - picks the group storage this builds on
 - [Segmented frames](/quest/m1/unbounded-groups/segmented-frames.md) - frame storage the cache can account for without whole-frame preallocation
-
-## Related
-
-- [Append-only log](/quest/m2/perf/kio-channel-contention/log.md) - the other proposal for `GroupState` storage, decided by the same benchmark
+- [Append-only log](/quest/m1/unbounded-groups/log.md) - `GroupState`'s frames in a lock-free kio log with an advancing base, the tail run this builds on

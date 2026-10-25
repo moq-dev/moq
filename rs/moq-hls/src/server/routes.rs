@@ -401,9 +401,10 @@ mod tests {
 	#[tokio::test]
 	async fn respond_serves_a_route_rewritten_into_scope() {
 		let pair = lite_pair().await;
-		let mut broadcast = pair.pub_origin.create_broadcast("live").expect("publish");
+		let broadcast = pair.pub_origin.create_broadcast("live").expect("publish");
 		broadcast.announce(Default::default()).expect("announce");
-		let (_catalog, _registration, _track, mut media) = publish_video(&mut broadcast, video_config(), timed());
+		let (_catalog, _registration, _track, mut media) =
+			publish_video(&mut broadcast.broadcast().clone(), video_config(), timed());
 		write_three_gops(&mut media);
 
 		let server = Server::new(pair.sub_origin.consume(), crate::export::Config::default());
@@ -445,12 +446,12 @@ mod tests {
 			"moq-lite-05",
 		] {
 			let pair = lite_pair_on(version, moq_net::Hop::random()).await;
-			let mut broadcast = pair.pub_origin.create_broadcast("live").expect("publish");
+			let broadcast = pair.pub_origin.create_broadcast("live").expect("publish");
 			broadcast.announce(Default::default()).expect("announce");
 			// A hinted timeline is declared before any media, so the rendition is listed early.
 			let hinted = moq_mux::timeline::Config::default().with_duration_hint(Duration::from_secs(2));
 			let catalog = moq_mux::catalog::Producer::new(
-				&mut broadcast,
+				&mut broadcast.broadcast().clone(),
 				moq_mux::catalog::Config::default().with_timeline(hinted),
 			)
 			.unwrap();
@@ -506,7 +507,7 @@ mod tests {
 				.unwrap_or_else(|err| panic!("{version}: {err}"))
 				.expect("a segment");
 			assert_eq!(segment.segment, 0, "{version}");
-			assert!(!segment.media.is_empty(), "{version}");
+			assert!(!segment.media.expect("media, not a gap").is_empty(), "{version}");
 
 			pair.accept.abort();
 		}
@@ -521,9 +522,10 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn master_answers_404_until_a_rendition_can_start() {
 		let origin = moq_tokio::origin::spawn();
-		let mut broadcast = origin.create_broadcast("live").expect("publish");
+		let broadcast = origin.create_broadcast("live").expect("publish");
 		broadcast.announce(run()).expect("announce");
-		let (_catalog, _registration, _track, mut media) = publish_video(&mut broadcast, video_config(), timed());
+		let (_catalog, _registration, _track, mut media) =
+			publish_video(&mut broadcast.broadcast().clone(), video_config(), timed());
 
 		let app = Server::new(origin.consume(), crate::export::Config::default()).router();
 		assert_eq!(status(&app, "/live/master.m3u8").await, StatusCode::NOT_FOUND);
@@ -538,9 +540,10 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_restart_lists_the_replacement_under_its_own_urls() {
 		let origin = moq_tokio::origin::spawn();
-		let mut old = origin.create_broadcast("live").expect("publish");
+		let old = origin.create_broadcast("live").expect("publish");
 		old.announce(run()).expect("announce");
-		let (old_catalog, _, old_track, mut old_media) = publish_video(&mut old, video_config(), timed());
+		let (old_catalog, _, old_track, mut old_media) =
+			publish_video(&mut old.broadcast().clone(), video_config(), timed());
 		write_three_gops(&mut old_media);
 
 		let app = Server::new(origin.consume(), crate::export::Config::default()).router();
@@ -550,10 +553,11 @@ mod tests {
 		wait_listed(&app, &old_playlist, "seg/656e3d1b.0.m4s").await;
 
 		let next = moq_net::Epoch::mint();
-		let mut new = origin.create_broadcast("live").expect("publish");
+		let new = origin.create_broadcast("live").expect("publish");
 		new.announce(moq_net::origin::Route::default().with_epoch(next.clone()))
 			.expect("announce");
-		let (_new_catalog, _, _new_track, mut new_media) = publish_video(&mut new, video_config(), timed());
+		let (_new_catalog, _, _new_track, mut new_media) =
+			publish_video(&mut new.broadcast().clone(), video_config(), timed());
 		write_three_gops(&mut new_media);
 		let new_playlist = format!("/live/@{}/video/video0/media.m3u8", next.as_str());
 		wait_listed(
@@ -584,9 +588,10 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_failed_timeline_answers_an_uncacheable_error() {
 		let origin = moq_tokio::origin::spawn();
-		let mut broadcast = origin.create_broadcast("live").expect("publish");
+		let broadcast = origin.create_broadcast("live").expect("publish");
 		broadcast.announce(run()).expect("announce");
-		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut catalog =
+			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
 		let name = hang::timeline::default_name("video0");
 		catalog
 			.mutate(|catalog| {
@@ -637,9 +642,10 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn serves_only_versioned_media_urls() {
 		let origin = moq_tokio::origin::spawn();
-		let mut broadcast = origin.create_broadcast("live").expect("publish");
+		let broadcast = origin.create_broadcast("live").expect("publish");
 		broadcast.announce(run()).expect("announce");
-		let (_catalog, _registration, _track, mut media) = publish_video(&mut broadcast, video_config(), timed());
+		let (_catalog, _registration, _track, mut media) =
+			publish_video(&mut broadcast.broadcast().clone(), video_config(), timed());
 		write_three_gops(&mut media);
 
 		let server = Server::new(origin.consume(), crate::export::Config::default());
@@ -712,9 +718,10 @@ mod tests {
 			config
 		})
 		.await;
-		let mut broadcast = pair.pub_origin.create_broadcast("live").expect("publish");
+		let broadcast = pair.pub_origin.create_broadcast("live").expect("publish");
 		broadcast.announce(Default::default()).expect("announce");
-		let (_catalog, _registration, _track, mut media) = publish_video(&mut broadcast, video_config(), timed());
+		let (_catalog, _registration, _track, mut media) =
+			publish_video(&mut broadcast.broadcast().clone(), video_config(), timed());
 		write_three_gops(&mut media);
 
 		let server = Server::new(pair.sub_origin.consume(), crate::export::Config::default());
@@ -737,9 +744,10 @@ mod tests {
 	#[tokio::test]
 	async fn a_disconnected_publisher_on_the_catalog_broadcast_answers_404() {
 		let pair = lite_pair().await;
-		let mut broadcast = pair.pub_origin.create_broadcast("live").expect("publish");
+		let broadcast = pair.pub_origin.create_broadcast("live").expect("publish");
 		broadcast.announce(Default::default()).expect("announce");
-		let (catalog, registration, track, mut media) = publish_video(&mut broadcast, video_config(), timed());
+		let (catalog, registration, track, mut media) =
+			publish_video(&mut broadcast.broadcast().clone(), video_config(), timed());
 		write_three_gops(&mut media);
 
 		let server = Server::new(pair.sub_origin.consume(), crate::export::Config::default());
@@ -836,13 +844,13 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn denied_sibling_media_answers_403_without_poisoning_allowed_siblings() {
 		let origin = moq_tokio::origin::spawn();
-		let mut broadcast = origin.create_broadcast("room/live").unwrap();
+		let broadcast = origin.create_broadcast("room/live").unwrap();
 		broadcast.announce(run()).unwrap();
 		let source = origin.create_broadcast("room/source").unwrap();
 		source.announce(Default::default()).unwrap();
 		let secret = origin.create_broadcast("room/secret").unwrap();
 		secret.announce(Default::default()).unwrap();
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
 		let reserved = catalog.reserve();
 		let mut config = video_config();
 		config.broadcast = Some(moq_net::path::Relative::new("./source").to_owned());
@@ -954,15 +962,18 @@ mod tests {
 	#[tokio::test]
 	async fn a_disconnected_sibling_publisher_answers_404() {
 		let pair = lite_pair().await;
-		let mut catalog_broadcast = pair.pub_origin.create_broadcast("room/live").expect("catalog");
+		let catalog_broadcast = pair.pub_origin.create_broadcast("room/live").expect("catalog");
 		catalog_broadcast
 			.announce(Default::default())
 			.expect("announce catalog");
 		let media_broadcast = pair.pub_origin.create_broadcast("room/source").expect("media");
 		media_broadcast.announce(Default::default()).expect("announce media");
 
-		let catalog =
-			moq_mux::catalog::Producer::new(&mut catalog_broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let catalog = moq_mux::catalog::Producer::new(
+			&mut catalog_broadcast.broadcast().clone(),
+			moq_mux::catalog::Config::default(),
+		)
+		.unwrap();
 		let reserved = catalog.reserve();
 		let mut config = video_config();
 		config.broadcast = Some(moq_net::path::Relative::new("./source").to_owned());

@@ -244,6 +244,7 @@ impl PacketBuilder {
             congestion,
             retransmits: sent.retransmits,
             stream_frames: sent.stream_frames,
+            bandwidth_probe: sent.bandwidth_probe,
         };
 
         conn.path
@@ -262,6 +263,11 @@ impl PacketBuilder {
                 conn.permit_idle_reset = false;
             }
             conn.set_loss_detection_timer(now);
+            conn.bandwidth_probe.on_transmit(size);
+            if sent.bandwidth_probe {
+                conn.stats.path.sent_bandwidth_probes += 1;
+                conn.stats.path.sent_bandwidth_probe_bytes += u64::from(size);
+            }
         }
     }
 

@@ -22,7 +22,7 @@ Docker; see [Install](/setup/install).
 | `import` | `rtsp --connect <url>` | Pull an IP camera's stream. |
 | `import` | `archive <url>` | Replay a recording from an object store. |
 | `export` | `fmp4`, `mkv`, `ts`, `flv`, `h264`, `h265` | Write a container to stdout. |
-| `export` | `hls --listen` | Serve the broadcast as HLS over HTTP. |
+| `export` | `hls --listen`, `hls --output <dir>` | Serve the broadcast as HLS over HTTP, record it to a directory, or both. |
 | `export` | `rtmp`, `srt`, `rtc` | Serve plays (`--listen`) or push to a remote (`--connect`). |
 | `export` | `archive <url>` | Record every broadcast under the prefix into an object store. |
 | `play` | | Decode and play in a native window with sound. |
@@ -60,7 +60,9 @@ the handshake, so `--listen-timeout` bounds it too; `0s` leaves admission withou
 a deadline.
 
 `moq import --help` lists the sources and `moq import rtmp --help` a specific
-one; every flag is documented there. Flags renamed between releases are listed in
+one; every flag is documented there. A `MOQ_*` environment variable `moq` does
+not read, such as a misspelling or one meant for `moq-relay`, stops it at startup
+with the variable named. Flags renamed between releases are listed in
 [MIGRATE.md](https://github.com/moq-dev/moq/blob/main/rs/moq-cli/MIGRATE.md).
 
 ```bash
@@ -93,7 +95,11 @@ or use [`import srt`](/bin/srt).
 
 MPEG-TS import carries H.264/H.265 and AAC/MP2/AC-3/E-AC-3/Opus, and passes
 SCTE-35 and every other stream it does not decode (KLV, subtitles, DVB AC-3)
-through as tracks. Each such PES goes through whole, at its place on the program clock
+through as tracks. Video AUs can span PES, and a PES can contain several. Supply
+a PTS for each AU or declare a proportional POC clock: AVC needs
+`fixed_frame_rate_flag` and `temporal_poc_flag` in the TS timing descriptor plus
+fixed-rate SPS VUI; HEVC needs VUI's `vui_poc_proportional_to_timing_flag`. Missing timing
+ends the import instead of repeating a timestamp. Private and undecoded PES go through whole, at their place on the program clock
 (PCR); one before the first PCR is dropped. A stream it cannot carry unaltered
 is refused with a warning: any in a program with no PCR, and one whose PES carry
 an ESCR, pack header or TREF, are scrambled, leave a non-video PES unbounded,
@@ -307,8 +313,8 @@ equivalents.
 # Record every broadcast announced under `event`
 moq --connect https://relay.example.com/anon --broadcast event export archive s3://recordings
 
-# Replay a timeline recording under another name
-moq --connect https://relay.example.com/anon --broadcast event-replay.hang import archive s3://recordings/event
+# Replay one recorded broadcast under another name
+moq --connect https://relay.example.com/anon --broadcast event-replay.hang import archive s3://recordings/event/@<epoch>
 ```
 
 `export archive` records every broadcast announced at or under `--broadcast`
@@ -325,10 +331,15 @@ or stitches into an older recording. Any recording that fails ends the export.
 `--retention 1h` keeps only the last hour, a DVR, deleting older objects
 `--retention-grace` (default 30 s) after they leave the window.
 
-`import archive` republishes a timeline recording made by an older `moq` as
-live tracks, fetching spans on request. It ends where the recording ends;
-`--follow 2s` keeps polling a recording still being made. It does not yet read
-the per-track layout that `export archive` writes.
+`import archive` republishes one recorded broadcast, the `<broadcast>/@<epoch>`
+prefix `export archive` wrote, as an ordinary broadcast under a new epoch: every
+track, the catalog included, with its original groups, frames, timescale, and
+priority. Each track is live from its newest stored group and serves older
+groups from the store on request, with no max age, so the whole recording stays
+reachable. A recording still being made is followed, checked every `--refresh`
+(default 1 s), until `export archive` marks it complete; one whose export
+stopped early stays live. It refuses a prefix with no recording, or with keys
+`export archive` does not write.
 
 Store URLs are `file:///absolute/path`, `s3://bucket/prefix`,
 `gs://bucket/prefix`, or `az://container/prefix`, with credentials from the

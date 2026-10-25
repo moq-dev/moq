@@ -1,5 +1,5 @@
 //! OBJECT_DATAGRAM: one Object carried in a QUIC datagram (draft-14 section 10.3.1 through
-//! draft-20 section 11.3.1).
+//! draft-22 section 11.2.1).
 //!
 //! Public [`crate::Datagram`] writers emit Object ID 0; private relay metadata preserves
 //! other IDs, properties, and status. The Type is a set of flags; draft-14 lacks the
@@ -214,15 +214,12 @@ mod tests {
 		Ok(datagram)
 	}
 
-	const ALL: [Version; 9] = [
+	const ALL: [Version; 6] = [
 		Version::Draft14,
 		Version::Draft15,
 		Version::Draft16,
 		Version::Draft17,
 		Version::Draft18,
-		Version::Draft19,
-		Version::Draft20,
-		Version::Draft21,
 		Version::Draft22,
 	];
 

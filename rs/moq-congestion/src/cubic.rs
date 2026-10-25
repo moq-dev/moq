@@ -293,6 +293,8 @@ impl Controller for Cubic {
             ssthresh: Some(self.state.ssthresh),
             pacing_rate: None,
             bandwidth_estimate: None,
+            // CUBIC has no probing phase to fill
+            probe_inflight: None,
         }
     }
 

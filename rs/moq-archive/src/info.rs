@@ -19,9 +19,7 @@ pub struct Info {
 	pub timescale: Option<u64>,
 }
 
-/// [`Info`] as stored, before its priority is read in its version's encoding. It also takes the
-/// `epoch` an older `Writer` recorded, so [`Reader`](crate::Reader) still replays those
-/// recordings; that goes when `Reader` does.
+/// [`Info`] as stored, before its priority is read in its version's encoding.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Stored {
@@ -29,8 +27,6 @@ struct Stored {
 	priority: i64,
 	#[serde(default)]
 	timescale: Option<u64>,
-	#[serde(default, rename = "epoch")]
-	_epoch: Option<serde::de::IgnoredAny>,
 }
 
 impl TryFrom<Stored> for Info {
@@ -175,13 +171,11 @@ mod tests {
 	}
 
 	#[test]
-	fn an_older_writers_epoch_is_ignored() {
-		let info = Info::decode(br#"{"version":2,"priority":128,"timescale":1000,"epoch":"x"}"#).unwrap();
-		assert_eq!((info.version, info.priority, info.timescale), (2, 0, Some(1000)));
-	}
-
-	#[test]
 	fn unknown_members_and_missing_fields_are_refused() {
+		assert!(matches!(
+			Info::decode(br#"{"version":2,"priority":128,"timescale":1000,"epoch":"x"}"#),
+			Err(Error::Json(_))
+		));
 		assert!(matches!(
 			Info::decode(br#"{"version":3,"priority":0,"timescale":1,"extra":true}"#),
 			Err(Error::Json(_))
