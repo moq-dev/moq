@@ -444,16 +444,14 @@ impl<E: catalog::Catalog> Import<E> {
 				// The new timebase starts with the PCR the flag rides, if it rides one.
 				if let Some(pcr) = pcr(pkt) {
 					self.place_pcr(pcr, offset)?;
+					self.si.pcr(pcr, packet.count);
 				}
 			} else if let Some(pcr) = pcr(pkt) {
 				self.place_pcr(pcr, offset)?;
 				self.liveness.pcr(pcr);
+				self.si.pcr(pcr, packet.count);
 				if let Some(now) = self.liveness.now() {
 					self.health.tick(now);
-					self.si.advance(
-						std::time::Duration::from_secs(now / PCR_HZ)
-							+ std::time::Duration::from_nanos((now % PCR_HZ) * 1_000 / 27),
-					);
 				}
 				if self.supports_mpegts {
 					let ready = self.mux_rate.ready();
@@ -485,7 +483,9 @@ impl<E: catalog::Catalog> Import<E> {
 		// `table_id`.
 		if self.supports_mpegts && catalog::SI_PIDS.contains(&pid) {
 			for section in packet.sections {
-				self.si.section(pid, section.clone())?;
+				if !self.si.section(pid, section.clone(), packet.count) {
+					*self.unplaced.entry(pid).or_default() += 1;
+				}
 			}
 			return Ok(());
 		}
@@ -604,6 +604,7 @@ impl<E: catalog::Catalog> Import<E> {
 			// A new clock: the intervals straddling the switch measure nothing, and the whole PES
 			// the old one began are placed on its timebase, never between its PCRs and the new.
 			self.liveness.discontinuity();
+			self.si.discontinuity();
 			self.reset_mux_rate()?;
 			self.settle_placement()?;
 		}
@@ -1511,6 +1512,7 @@ impl<E: catalog::Catalog> Import<E> {
 		self.held_edge = None;
 		self.published = false;
 		self.liveness.discontinuity();
+		self.si.discontinuity();
 		if self.mux_rate.discontinuity() {
 			self.record_mux_rate()?;
 		}
@@ -1749,11 +1751,13 @@ impl<E: catalog::Catalog> Import<E> {
 				.or_insert_with(|| stats::Stream::new("", stats::Class::Data))
 				.damaged = damaged;
 		}
-		// A stream refused before it had a track has no row of its own either.
+		// A stream refused before it had a track has no row of its own either, nor does an
+		// SI PID.
 		for (&pid, &unplaced) in &self.unplaced {
+			let track = if catalog::SI_PIDS.contains(&pid) { ".si" } else { ".ts" };
 			streams
 				.entry(pid)
-				.or_insert_with(|| stats::Stream::new(".ts", stats::Class::Data))
+				.or_insert_with(|| stats::Stream::new(track, stats::Class::Data))
 				.unplaced = unplaced;
 		}
 		for (&pid, &refused) in &self.refused {
