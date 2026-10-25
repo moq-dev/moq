@@ -65,7 +65,7 @@ fn events(conn: &mut Connection) -> Vec<Event> {
 /// Read every byte currently available on `id`
 fn read_all(conn: &mut Connection, id: StreamId) -> (Vec<u8>, bool) {
 	let mut recv = conn.recv_stream(id);
-	let mut chunks = recv.read(true).unwrap();
+	let mut chunks = recv.read().unwrap();
 	let mut data = Vec::new();
 	let mut fin = false;
 	loop {
@@ -419,7 +419,7 @@ fn reset_stream_at_delivers_the_prefix() {
 
 	let accepted = pair.server.streams().accept(Dir::Uni).unwrap();
 	let mut recv = pair.server.recv_stream(accepted);
-	let mut chunks = recv.read(true).unwrap();
+	let mut chunks = recv.read().unwrap();
 	let mut data = Vec::new();
 	let err = loop {
 		match chunks.next(usize::MAX) {

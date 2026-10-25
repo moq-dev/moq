@@ -38,6 +38,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [Vulkan Video encode on AMD](/quest/m2/vulkan-encode.md) - H.264 and H.265 from an external Vulkan image on RADV, hand-rolled on ash, proven on an RX 9070
 - [VA-API encodes an external Vulkan image](/quest/m2/vaapi-vulkan-import.md) - an explicit-sync DMA-BUF reaches Intel's encoder, proven on Arrow Lake
 - [C++ FFI reuse](/quest/m2/cpp-ffi-reuse.md) - C++ packages link the shared default-feature FFI build once it is proven compatible
+- [Upstream reports](/quest/m2/upstream-reports.md) - report the faad, retina, and mr-boxington bugs found before the cut
 
 - [Native compression flush](/quest/m2/native-compression-flush.md) - report the per-frame nonfinal flush requirement in existing browser discussions
 - [Native synchronous codecs](/quest/m2/native-compression-sync.md) - report the stateful small-frame synchronous API requirement

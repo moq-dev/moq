@@ -14,6 +14,7 @@ use std::{
 pub(crate) struct RangeSet(BTreeMap<u64, u64>);
 
 impl RangeSet {
+	#[cfg(test)]
 	pub(crate) fn new() -> Self {
 		Default::default()
 	}
@@ -135,25 +136,6 @@ impl RangeSet {
 			}
 		}
 		before || after
-	}
-
-	/// Add a range to the set, returning the intersection of current ranges with the new one
-	pub(crate) fn replace(&mut self, mut range: Range<u64>) -> Replace<'_> {
-		let pred = if let Some((prev_start, prev_end)) = self.pred(range.start).filter(|&(_, end)| end >= range.start) {
-			self.0.remove(&prev_start);
-			let replaced_start = range.start;
-			range.start = range.start.min(prev_start);
-			let replaced_end = range.end.min(prev_end);
-			range.end = range.end.max(prev_end);
-			if replaced_start != replaced_end {
-				Some(replaced_start..replaced_end)
-			} else {
-				None
-			}
-		} else {
-			None
-		};
-		Replace { set: self, range, pred }
 	}
 
 	#[cfg(test)]
@@ -280,134 +262,5 @@ impl DoubleEndedIterator for EltIter<'_> {
 		}
 		self.end -= 1;
 		Some(self.end)
-	}
-}
-
-/// Iterator returned by `RangeSet::replace`
-pub(crate) struct Replace<'a> {
-	set: &'a mut RangeSet,
-	/// Portion of the intersection arising from a range beginning at or before the newly inserted
-	/// range
-	pred: Option<Range<u64>>,
-	/// Union of the input range and all ranges that have been visited by the iterator so far
-	range: Range<u64>,
-}
-
-impl Iterator for Replace<'_> {
-	type Item = Range<u64>;
-	fn next(&mut self) -> Option<Range<u64>> {
-		if let Some(pred) = self.pred.take() {
-			// If a range starting before the inserted range overlapped with it, return the
-			// corresponding overlap first
-			return Some(pred);
-		}
-
-		let (next_start, next_end) = self.set.succ(self.range.start)?;
-		if next_start > self.range.end {
-			// If the next successor range starts after the current range ends, there can be no more
-			// overlaps. This is sound even when `self.range.end` is increased because `RangeSet` is
-			// guaranteed not to contain pairs of ranges that could be simplified.
-			return None;
-		}
-		// Remove the redundant range...
-		self.set.0.remove(&next_start);
-		// ...and handle the case where the redundant range ends later than the new range.
-		let replaced_end = self.range.end.min(next_end);
-		self.range.end = self.range.end.max(next_end);
-		if next_start == replaced_end {
-			// If the redundant range started exactly where the new range ended, there was no
-			// overlap with it or any later range.
-			None
-		} else {
-			Some(next_start..replaced_end)
-		}
-	}
-}
-
-impl Drop for Replace<'_> {
-	fn drop(&mut self) {
-		if self.range.is_empty() {
-			return;
-		}
-		// Ensure we drain all remaining overlapping ranges
-		for _ in &mut *self {}
-		// Insert the final aggregate range
-		self.set.0.insert(self.range.start, self.range.end);
-	}
-}
-
-/// This module contains tests which only apply for this `RangeSet` implementation
-///
-/// Tests which apply for all implementations can be found in the `tests.rs` module
-#[cfg(test)]
-mod tests {
-	#![expect(
-		clippy::single_range_in_vec_init,
-		reason = "a false positive on a list of one range: https://github.com/rust-lang/rust-clippy/issues/11086"
-	)]
-	use super::*;
-
-	#[test]
-	fn replace_contained() {
-		let mut set = RangeSet::new();
-		set.insert(2..4);
-		assert_eq!(set.replace(1..5).collect::<Vec<_>>(), &[2..4]);
-		assert_eq!(set.len(), 1);
-		assert_eq!(set.peek_min().unwrap(), 1..5);
-	}
-
-	#[test]
-	fn replace_contains() {
-		let mut set = RangeSet::new();
-		set.insert(1..5);
-		assert_eq!(set.replace(2..4).collect::<Vec<_>>(), &[2..4]);
-		assert_eq!(set.len(), 1);
-		assert_eq!(set.peek_min().unwrap(), 1..5);
-	}
-
-	#[test]
-	fn replace_pred() {
-		let mut set = RangeSet::new();
-		set.insert(2..4);
-		assert_eq!(set.replace(3..5).collect::<Vec<_>>(), &[3..4]);
-		assert_eq!(set.len(), 1);
-		assert_eq!(set.peek_min().unwrap(), 2..5);
-	}
-
-	#[test]
-	fn replace_succ() {
-		let mut set = RangeSet::new();
-		set.insert(2..4);
-		assert_eq!(set.replace(1..3).collect::<Vec<_>>(), &[2..3]);
-		assert_eq!(set.len(), 1);
-		assert_eq!(set.peek_min().unwrap(), 1..4);
-	}
-
-	#[test]
-	fn replace_exact_pred() {
-		let mut set = RangeSet::new();
-		set.insert(2..4);
-		assert_eq!(set.replace(4..6).collect::<Vec<_>>(), &[]);
-		assert_eq!(set.len(), 1);
-		assert_eq!(set.peek_min().unwrap(), 2..6);
-	}
-
-	#[test]
-	fn replace_exact_succ() {
-		let mut set = RangeSet::new();
-		set.insert(2..4);
-		assert_eq!(set.replace(0..2).collect::<Vec<_>>(), &[]);
-		assert_eq!(set.len(), 1);
-		assert_eq!(set.peek_min().unwrap(), 0..4);
-	}
-
-	#[test]
-	fn replace_empty() {
-		let mut set = RangeSet::new();
-		set.replace(3..3);
-		set.replace(6..10);
-		set.replace(5..5);
-		set.replace(2..7);
-		assert_eq!(set.0, [(2, 10)].into_iter().collect());
 	}
 }

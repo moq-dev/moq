@@ -1432,14 +1432,14 @@ impl Connection {
 	/// Ping the remote endpoint
 	///
 	/// Causes an ACK-eliciting packet to be transmitted.
-	pub fn ping(&mut self) {
+	pub(crate) fn ping(&mut self) {
 		self.spaces[self.highest_space].ping_pending = true;
 	}
 
 	/// Update traffic keys spontaneously
 	///
 	/// This can be useful for testing key updates, as they otherwise only happen infrequently.
-	pub fn force_key_update(&mut self) {
+	pub(crate) fn force_key_update(&mut self) {
 		if !self.state.is_established() {
 			debug!("ignoring forced key update in illegal state");
 			return;
@@ -1502,11 +1502,6 @@ impl Connection {
 		self.zero_rtt_enabled
 	}
 
-	/// Whether there are any pending retransmits
-	pub fn has_pending_retransmits(&self) -> bool {
-		!self.spaces[SpaceId::Data].pending.is_empty(&self.streams)
-	}
-
 	/// Look up whether we're the client or server of this Connection
 	pub fn side(&self) -> Side {
 		self.side.side()
@@ -1517,27 +1512,9 @@ impl Connection {
 		self.path.remote
 	}
 
-	/// The local IP address which was used when the peer established
-	/// the connection
-	///
-	/// This can be different from the address the endpoint is bound to, in case
-	/// the endpoint is bound to a wildcard address like `0.0.0.0` or `::`.
-	///
-	/// This will return `None` for clients, or when no `local_ip` was passed to
-	/// [`Endpoint::handle()`](crate::Endpoint::handle) for the datagrams establishing this
-	/// connection.
-	pub fn local_ip(&self) -> Option<IpAddr> {
-		self.local_ip
-	}
-
 	/// Current best estimate of this connection's latency (round-trip-time)
 	pub fn rtt(&self) -> Duration {
 		self.path.rtt.get()
-	}
-
-	/// Minimum RTT seen on this path, ignoring ack delay
-	pub fn min_rtt(&self) -> Duration {
-		self.path.rtt.min()
 	}
 
 	/// Current state of this connection's congestion controller, for debugging purposes
@@ -1570,7 +1547,8 @@ impl Connection {
 	/// state of these subsystems is no longer valid or optimal. In this case it might be
 	/// faster or reduce loss to settle on optimal values by restarting from the initial
 	/// configuration in the [`TransportConfig`].
-	pub fn path_changed(&mut self, now: Instant) {
+	#[cfg(test)]
+	pub(crate) fn path_changed(&mut self, now: Instant) {
 		self.path.reset(now, &self.config);
 		self.datagrams().drop_oversized();
 	}
@@ -1579,7 +1557,7 @@ impl Connection {
 	///
 	/// No streams may be opened by the peer unless fewer than `count` are already open. Large
 	/// `count`s increase both minimum and worst-case memory consumption.
-	pub fn set_max_concurrent_streams(&mut self, dir: Dir, count: VarInt) {
+	pub(crate) fn set_max_concurrent_streams(&mut self, dir: Dir, count: VarInt) {
 		self.streams.set_max_concurrent(dir, count);
 		// If the limit was reduced, then a flow control update previously deemed insignificant may
 		// now be significant.
@@ -1592,17 +1570,18 @@ impl Connection {
 	/// If the target for this limit is reduced using [`set_max_concurrent_streams`](Self::set_max_concurrent_streams),
 	/// it will not change immediately, even if fewer streams are open. Instead, it will
 	/// decrement by one for each time a remotely initiated stream of matching directionality is closed.
-	pub fn max_concurrent_streams(&self, dir: Dir) -> u64 {
+	#[cfg(test)]
+	pub(crate) fn max_concurrent_streams(&self, dir: Dir) -> u64 {
 		self.streams.max_concurrent(dir)
 	}
 
 	/// See [`TransportConfig::send_window()`]
-	pub fn set_send_window(&mut self, send_window: u64) {
+	pub(crate) fn set_send_window(&mut self, send_window: u64) {
 		self.streams.set_send_window(send_window);
 	}
 
 	/// See [`TransportConfig::receive_window()`]
-	pub fn set_receive_window(&mut self, receive_window: VarInt) {
+	pub(crate) fn set_receive_window(&mut self, receive_window: VarInt) {
 		if self.streams.set_receive_window(receive_window) {
 			self.spaces[SpaceId::Data].pending.max_data = true;
 		}
@@ -2357,7 +2336,7 @@ impl Connection {
 			.insert(crypto.offset, crypto.data.clone(), payload_len)
 			.map_err(|_| TransportError::INTERNAL_ERROR("too many gaps in crypto stream buffer"))?;
 
-		while let Some(chunk) = space.crypto_stream.read(usize::MAX, true) {
+		while let Some(chunk) = space.crypto_stream.read(usize::MAX) {
 			trace!("consumed {} CRYPTO bytes", chunk.bytes.len());
 			if self.crypto.read_handshake(&chunk.bytes)? {
 				self.events.push_back(Event::HandshakeDataReady);
@@ -3613,7 +3592,7 @@ impl Connection {
 			let token = Token::new(
 				TokenPayload::Validation {
 					ip: remote_addr.ip(),
-					issued: server_config.time_source.now(),
+					issued: moq_clock::wall(),
 				},
 				&mut self.rng,
 			);

@@ -1,23 +1,20 @@
 //! The order streams and datagrams with queued data are sent in.
 //!
-//! Streams and datagrams outside any send group go first, in quinn's order: highest priority
-//! first, round robin between equal priorities. Everything else is a hierarchy:
+//! Streams and datagrams outside any send group go first, in priority order: highest priority
+//! first, round robin between equal priorities. Grouped data has two levels:
 //!
-//! 1. Domains share the remaining bytes by deficit round robin.
-//! 2. Inside a domain, a higher-priority send group preempts every lower one.
-//! 3. Send groups of equal priority share their domain's bytes by deficit round robin.
-//! 4. Inside a group, streams and datagrams go in their own order, round robin between tied
+//! 1. Higher-priority send groups preempt lower ones, with deficit round robin among ties.
+//! 2. Inside a group, streams and datagrams go in their own order, round robin between tied
 //!    streams. A datagram goes ahead of a stream of equal order, and tied datagrams oldest
 //!    first.
 //!
-//! Both round robins charge the bytes actually written, so a group of many small streams and a
+//! The round robin charges the bytes actually written, so a group of many small streams and a
 //! group of one large stream get the same rate, and a group's datagrams spend the same credit
 //! as its streams. A turn may overdraw its credit by one frame; the debt carries into the next
 //! turn, so the error stays bounded by a frame.
 //!
-//! Queued datagrams share one byte budget. When it overflows, the domain holding the most
-//! datagram bytes gives up the oldest datagram of its lowest-priority group. Priorities are
-//! only compared inside a domain, so one busy domain cannot evict another's datagrams.
+//! Queued datagrams share one byte budget. When it overflows, the lowest-priority group
+//! gives up its oldest datagram, with ungrouped datagrams protected until no group holds any.
 //!
 //! Self-contained (std and slab only) so the scheduler benchmark can compile it from source.
 
@@ -28,13 +25,10 @@ use std::{
 
 use slab::Slab;
 
-/// Bytes a domain or group may send per turn of its round robin before it yields.
+/// Bytes a group may send per turn of its round robin before it yields.
 ///
 /// One minimum-size QUIC packet, so equal groups interleave about once per packet.
 const QUANTUM: i64 = 1200;
-
-/// The index of the domain every group outside an explicit domain belongs to.
-const DEFAULT_DOMAIN: usize = 0;
 
 /// A stream's place in the schedule, stored with the stream.
 #[derive(Debug, Default)]
@@ -146,7 +140,6 @@ impl<K: Copy, D> Queue<K, D> {
 
 #[derive(Debug)]
 struct Group<K, D> {
-	domain: usize,
 	priority: i64,
 	queue: Queue<K, D>,
 	/// Bytes this group may still send in its current turn; negative after an overdraw.
@@ -165,64 +158,24 @@ struct Group<K, D> {
 	closed: bool,
 }
 
-#[derive(Debug)]
-struct Domain {
-	/// The round robin of groups at each priority. Only the highest level with a backlogged
-	/// group is served.
-	levels: BTreeMap<i64, VecDeque<usize>>,
-	deficit: i64,
-	/// Whether an entry for this domain sits in the domain round robin, as for groups.
-	ringed: bool,
-	/// Groups in this domain with queued items.
-	backlogged: usize,
-	/// Groups in this domain that are not yet freed.
-	groups: usize,
-	closed: bool,
-	/// Datagram bytes queued in the domain.
-	datagram_bytes: usize,
-	/// The counter of every datagram queued in the domain, so the last is its oldest.
-	datagrams: BTreeSet<u64>,
-	/// The order the domain's queues give up datagrams in: groups before the ungrouped queue
-	/// (`None`, in the default domain), lowest priority first, then the oldest datagram.
-	victims: BTreeSet<Victim>,
-}
-
 /// A queue holding datagrams, keyed for eviction: whether it is the ungrouped queue, its
 /// group's priority, its oldest datagram, and the group.
 type Victim = (bool, i64, Reverse<u64>, Option<usize>);
-
-impl Domain {
-	fn new() -> Self {
-		Self {
-			levels: BTreeMap::new(),
-			deficit: 0,
-			ringed: false,
-			backlogged: 0,
-			groups: 0,
-			closed: false,
-			datagram_bytes: 0,
-			datagrams: BTreeSet::new(),
-			victims: BTreeSet::new(),
-		}
-	}
-}
 
 /// Every stream and datagram with data to send, in the order to send it.
 #[derive(Debug)]
 pub(super) struct Schedule<K, D> {
 	ungrouped: Queue<K, D>,
 	groups: Slab<Group<K, D>>,
-	domains: Slab<Domain>,
-	/// The domain round robin.
-	ring: VecDeque<usize>,
-	/// Domains with a backlogged group.
+	/// Group round robins by priority, with only the highest backlogged level served.
+	levels: BTreeMap<i64, VecDeque<usize>>,
+	/// Groups with queued items.
 	backlogged: usize,
 	/// Decreases with every push, so a requeued stream goes behind its equal-priority peers.
 	recency: u64,
-	/// Domains holding datagrams, by their datagram bytes then their oldest datagram, so the
-	/// last gives one up first.
-	hoards: BTreeSet<(usize, u64, usize)>,
-	/// Datagram bytes queued across every domain, held against the budget.
+	/// Queues holding datagrams, lowest priority and oldest datagram first.
+	victims: BTreeSet<Victim>,
+	/// Datagram bytes held against the shared budget.
 	datagram_bytes: usize,
 	/// How many queued datagrams have each frame size, so the smallest is the first.
 	frames: BTreeMap<usize, usize>,
@@ -234,16 +187,13 @@ pub(super) struct Schedule<K, D> {
 
 impl<K: Copy, D> Schedule<K, D> {
 	pub(super) fn new() -> Self {
-		let mut domains = Slab::new();
-		assert_eq!(domains.insert(Domain::new()), DEFAULT_DOMAIN);
 		Self {
 			ungrouped: Queue::new(),
 			groups: Slab::new(),
-			domains,
-			ring: VecDeque::new(),
+			levels: BTreeMap::new(),
 			backlogged: 0,
 			recency: u64::MAX,
-			hoards: BTreeSet::new(),
+			victims: BTreeSet::new(),
 			datagram_bytes: 0,
 			frames: BTreeMap::new(),
 			streams: 0,
@@ -273,34 +223,15 @@ impl<K: Copy, D> Schedule<K, D> {
 		self.ungrouped.len() + self.groups.iter().map(|(_, g)| g.queue.len()).sum::<usize>()
 	}
 
-	/// Whether every group and domain the application released has been freed.
+	/// Whether every group the application released has been freed.
 	#[cfg(test)]
 	pub(super) fn is_clean(&self) -> bool {
-		self.groups.iter().all(|(_, g)| !g.closed) && self.domains.iter().all(|(_, d)| !d.closed)
+		self.groups.iter().all(|(_, g)| !g.closed)
 	}
 
-	/// Create a domain, sharing bytes equally with every other domain.
-	#[cfg(test)]
-	pub(super) fn open_domain(&mut self) -> usize {
-		self.domains.insert(Domain::new())
-	}
-
-	/// Release a domain; it is freed once its last group is.
-	#[cfg(test)]
-	pub(super) fn close_domain(&mut self, domain: usize) {
-		assert_ne!(domain, DEFAULT_DOMAIN, "the default domain is never closed");
-		self.domains[domain].closed = true;
-		self.free_domain(domain);
-	}
-
-	/// Create a send group in `domain`, or the default domain.
-	pub(super) fn open_group(&mut self, priority: i64, domain: Option<usize>) -> usize {
-		let domain = domain.unwrap_or(DEFAULT_DOMAIN);
-		let state = &mut self.domains[domain];
-		assert!(!state.closed, "group opened in a closed domain");
-		state.groups += 1;
+	/// Create a send group at `priority`.
+	pub(super) fn open_group(&mut self, priority: i64) -> usize {
 		self.groups.insert(Group {
-			domain,
 			priority,
 			queue: Queue::new(),
 			deficit: 0,
@@ -330,17 +261,12 @@ impl<K: Copy, D> Schedule<K, D> {
 		self.unindex(Some(group));
 		let state = &mut self.groups[group];
 		let old = std::mem::replace(&mut state.priority, priority);
-		let domain = state.domain;
 		if state.ringed {
-			Self::unring_group(&mut self.domains[domain], group, old);
+			self.unring_group(group, old);
 			let state = &mut self.groups[group];
 			state.ringed = !state.queue.is_empty();
 			if state.ringed {
-				self.domains[domain]
-					.levels
-					.entry(priority)
-					.or_default()
-					.push_back(group);
+				self.levels.entry(priority).or_default().push_back(group);
 			}
 		}
 		self.index(Some(group));
@@ -432,9 +358,8 @@ impl<K: Copy, D> Schedule<K, D> {
 	/// datagrams. Its `frame` bytes are what it sends and holds of the `budget` every queued
 	/// datagram shares.
 	///
-	/// Returns whether it stayed queued: while the budget overflows, the domain holding the
-	/// most datagram bytes evicts the oldest datagram of its lowest-priority group, and this
-	/// datagram is dropped once it is the one to go.
+	/// Returns whether it stayed queued: an overflowing budget evicts the oldest datagram
+	/// of its lowest-priority group, including this one if it is the victim.
 	pub(super) fn push_datagram(
 		&mut self,
 		group: Option<usize>,
@@ -455,21 +380,13 @@ impl<K: Copy, D> Schedule<K, D> {
 			.items
 			.insert((order, true, recency), Item::Datagram(datagram, frame));
 		queue.datagrams.insert(recency, order);
-		let domain = self.domain_of(group);
-		let domain = &mut self.domains[domain];
-		domain.datagram_bytes += frame;
-		domain.datagrams.insert(recency);
 		self.datagram_bytes += frame;
 		*self.frames.entry(frame).or_default() += 1;
 		self.index(group);
 		self.activate(group);
 
 		while self.datagram_bytes > budget {
-			let &(_, _, domain) = self.hoards.last().expect("queued bytes are indexed");
-			let &(_, _, Reverse(oldest), victim) = self.domains[domain]
-				.victims
-				.first()
-				.expect("a domain holding datagram bytes has a victim");
+			let &(_, _, Reverse(oldest), victim) = self.victims.first().expect("queued datagram bytes have a victim");
 			self.remove_datagram(victim, oldest);
 			if oldest == recency {
 				return false;
@@ -491,7 +408,6 @@ impl<K: Copy, D> Schedule<K, D> {
 		if let Some(group) = group {
 			let state = &mut self.groups[group];
 			state.deficit -= frame as i64;
-			self.domains[state.domain].deficit -= frame as i64;
 		}
 		self.remove_datagram(group, recency)
 	}
@@ -561,20 +477,7 @@ impl<K: Copy, D> Schedule<K, D> {
 		}
 
 		loop {
-			let &domain = self.ring.front()?;
-			let state = &mut self.domains[domain];
-			if state.backlogged == 0 {
-				self.ring.pop_front();
-				state.ringed = false;
-				continue;
-			}
-			if state.deficit <= 0 {
-				state.deficit += QUANTUM;
-				self.ring.rotate_left(1);
-				continue;
-			}
-
-			let mut level = state.levels.last_entry().expect("backlogged domain has a level");
+			let mut level = self.levels.last_entry()?;
 			let Some(&group) = level.get().front() else {
 				level.remove();
 				continue;
@@ -606,7 +509,6 @@ impl<K: Copy, D> Schedule<K, D> {
 			let bytes = bytes as i64;
 			let state = &mut self.groups[group];
 			state.deficit -= bytes;
-			self.domains[state.domain].deficit -= bytes;
 		}
 
 		match requeue {
@@ -623,18 +525,10 @@ impl<K: Copy, D> Schedule<K, D> {
 		}
 	}
 
-	fn domain_of(&self, group: Option<usize>) -> usize {
-		group.map_or(DEFAULT_DOMAIN, |group| self.groups[group].domain)
-	}
-
 	/// Dequeue a datagram, leaving the round robin with the group's last item.
 	fn remove_datagram(&mut self, group: Option<usize>, recency: u64) -> D {
 		self.unindex(group);
 		let (datagram, frame) = self.queue(group).take_datagram(recency);
-		let domain = self.domain_of(group);
-		let domain = &mut self.domains[domain];
-		domain.datagram_bytes -= frame;
-		domain.datagrams.remove(&recency);
 		self.datagram_bytes -= frame;
 		if let std::collections::btree_map::Entry::Occupied(mut count) = self.frames.entry(frame) {
 			*count.get_mut() -= 1;
@@ -651,7 +545,7 @@ impl<K: Copy, D> Schedule<K, D> {
 		datagram
 	}
 
-	/// Withdraw a queue and its domain from the eviction order, ahead of changing its
+	/// Withdraw a queue from the eviction order, ahead of changing its
 	/// datagrams or priority; [`Self::index`] puts them back.
 	fn unindex(&mut self, group: Option<usize>) {
 		self.reindex(group, false);
@@ -669,20 +563,11 @@ impl<K: Copy, D> Schedule<K, D> {
 			}
 			None => (&self.ungrouped, i64::MAX),
 		};
-		let index = self.domain_of(group);
-		let domain = &mut self.domains[index];
 		if let Some(oldest) = queue.oldest_datagram() {
 			let victim = (group.is_none(), priority, Reverse(oldest), group);
 			match insert {
-				true => domain.victims.insert(victim),
-				false => domain.victims.remove(&victim),
-			};
-		}
-		if let Some(&oldest) = domain.datagrams.last() {
-			let hoard = (domain.datagram_bytes, oldest, index);
-			match insert {
-				true => self.hoards.insert(hoard),
-				false => self.hoards.remove(&hoard),
+				true => self.victims.insert(victim),
+				false => self.victims.remove(&victim),
 			};
 		}
 	}
@@ -700,28 +585,16 @@ impl<K: Copy, D> Schedule<K, D> {
 
 		// Debt carries over, but unused credit does not, so going idle saves nothing up.
 		state.deficit = state.deficit.min(0) + QUANTUM;
-		let domain = &mut self.domains[state.domain];
 		if !state.ringed {
 			state.ringed = true;
-			domain.levels.entry(state.priority).or_default().push_back(group);
+			self.levels.entry(state.priority).or_default().push_back(group);
 		}
-
-		domain.backlogged += 1;
-		if domain.backlogged > 1 {
-			return;
-		}
-
 		self.backlogged += 1;
-		domain.deficit = domain.deficit.min(0) + QUANTUM;
-		if !domain.ringed {
-			domain.ringed = true;
-			self.ring.push_back(self.groups[group].domain);
-		}
 	}
 
 	/// Account for a group whose queue may have run dry.
 	///
-	/// A group or domain heading its round robin, as one just served does, leaves it now.
+	/// A group heading its round robin, as one just served does, leaves it now.
 	/// Anywhere else its entry stays until the round robin reaches it, since finding it
 	/// would mean a scan.
 	fn deactivate(&mut self, group: Option<usize>) {
@@ -734,27 +607,17 @@ impl<K: Copy, D> Schedule<K, D> {
 		}
 		state.active = false;
 
-		let domain = &mut self.domains[state.domain];
-		if let Some(level) = domain.levels.get_mut(&state.priority)
+		if let Some(level) = self.levels.get_mut(&state.priority)
 			&& level.front() == Some(&group)
 		{
 			level.pop_front();
 			if level.is_empty() {
-				domain.levels.remove(&state.priority);
+				self.levels.remove(&state.priority);
 			}
 			state.ringed = false;
 		}
 
-		domain.backlogged -= 1;
-		if domain.backlogged > 0 {
-			return;
-		}
-
 		self.backlogged -= 1;
-		if self.ring.front() == Some(&state.domain) {
-			self.ring.pop_front();
-			domain.ringed = false;
-		}
 	}
 
 	/// Drop a stream's membership of its group.
@@ -773,32 +636,17 @@ impl<K: Copy, D> Schedule<K, D> {
 
 		// Nothing names or fills the group, but a stale round-robin entry may remain.
 		let state = self.groups.remove(group);
-		let domain = &mut self.domains[state.domain];
 		if state.ringed {
-			Self::unring_group(domain, group, state.priority);
-		}
-		domain.groups -= 1;
-		self.free_domain(state.domain);
-	}
-
-	fn free_domain(&mut self, domain: usize) {
-		let state = &self.domains[domain];
-		if !state.closed || state.groups > 0 {
-			return;
-		}
-
-		if self.domains.remove(domain).ringed {
-			let index = self.ring.iter().position(|&d| d == domain);
-			self.ring.remove(index.expect("ringed domain is in the ring"));
+			self.unring_group(group, state.priority);
 		}
 	}
 
-	fn unring_group(domain: &mut Domain, group: usize, priority: i64) {
-		let level = domain.levels.get_mut(&priority).expect("ringed group has a level");
+	fn unring_group(&mut self, group: usize, priority: i64) {
+		let level = self.levels.get_mut(&priority).expect("ringed group has a level");
 		let index = level.iter().position(|&g| g == group);
 		level.remove(index.expect("ringed group is in its level"));
 		if level.is_empty() {
-			domain.levels.remove(&priority);
+			self.levels.remove(&priority);
 		}
 	}
 }
@@ -885,7 +733,7 @@ mod tests {
 	#[test]
 	fn ungrouped_streams_go_first() {
 		let mut sim = Sim::new();
-		let group = sim.schedule.open_group(i64::MAX, None);
+		let group = sim.schedule.open_group(i64::MAX);
 		let grouped = sim.stream(Some(group), i64::MAX, 100);
 		let ungrouped = sim.stream(None, i64::MIN, 100);
 		assert_eq!(sim.step(1000), Some(ungrouped));
@@ -897,8 +745,8 @@ mod tests {
 	#[test]
 	fn a_dry_group_away_from_the_front_is_skipped() {
 		let mut sim = Sim::new();
-		let a = sim.schedule.open_group(0, None);
-		let b = sim.schedule.open_group(0, None);
+		let a = sim.schedule.open_group(0);
+		let b = sim.schedule.open_group(0);
 		let first = sim.stream(Some(a), 0, 100_000);
 		let second = sim.stream(Some(b), 0, 100_000);
 
@@ -920,27 +768,24 @@ mod tests {
 	}
 
 	#[test]
-	fn closed_groups_and_domains_free_with_their_last_stream() {
+	fn closed_groups_free_with_their_last_stream() {
 		let mut sim = Sim::new();
-		let domain = sim.schedule.open_domain();
-		let group = sim.schedule.open_group(0, Some(domain));
+		let group = sim.schedule.open_group(0);
 		let id = sim.stream(Some(group), 0, 10);
 		sim.schedule.close_group(group);
-		sim.schedule.close_domain(domain);
 		assert!(!sim.schedule.is_clean());
 
 		assert_eq!(sim.step(1000), Some(id));
 		assert!(sim.schedule.is_clean());
 		assert!(sim.schedule.groups.is_empty());
-		assert_eq!(sim.schedule.domains.len(), 1);
-		assert!(sim.schedule.ring.is_empty());
+		assert!(sim.schedule.levels.is_empty());
 	}
 
 	#[test]
 	fn moving_a_queued_stream_keeps_it_queued() {
 		let mut sim = Sim::new();
-		let low = sim.schedule.open_group(0, None);
-		let high = sim.schedule.open_group(1, None);
+		let low = sim.schedule.open_group(0);
+		let high = sim.schedule.open_group(1);
 		let a = sim.stream(Some(low), 0, 10);
 		let b = sim.stream(Some(low), 0, 10);
 
@@ -949,14 +794,14 @@ mod tests {
 		assert_eq!(sim.step(1000), Some(b));
 		assert_eq!(sim.step(1000), Some(a));
 		assert!(sim.schedule.is_empty());
-		assert!(sim.schedule.ring.is_empty());
+		assert!(sim.schedule.levels.is_empty());
 	}
 
 	#[test]
 	fn priority_changes_move_a_backlogged_group() {
 		let mut sim = Sim::new();
-		let a = sim.schedule.open_group(1, None);
-		let b = sim.schedule.open_group(0, None);
+		let a = sim.schedule.open_group(1);
+		let b = sim.schedule.open_group(0);
 		let first = sim.stream(Some(a), 0, 100_000);
 		let second = sim.stream(Some(b), 0, 100_000);
 		assert_eq!(sim.step(1000), Some(first));
@@ -972,7 +817,7 @@ mod tests {
 	#[test]
 	fn datagrams_follow_their_order_and_win_a_tie() {
 		let mut sim = Sim::new();
-		let group = sim.schedule.open_group(0, None);
+		let group = sim.schedule.open_group(0);
 		let older = sim.datagram(Some(group), 10, 100, usize::MAX).0;
 		let stream = sim.stream(Some(group), 11, 100);
 		let tied = sim.stream(Some(group), 10, 100);
@@ -988,7 +833,7 @@ mod tests {
 	#[test]
 	fn a_closed_group_sends_its_datagrams_then_frees() {
 		let mut sim = Sim::new();
-		let group = sim.schedule.open_group(0, None);
+		let group = sim.schedule.open_group(0);
 		let id = sim.datagram(Some(group), 0, 100, usize::MAX).0;
 		sim.schedule.close_group(group);
 		assert!(!sim.schedule.is_clean());
@@ -1001,8 +846,8 @@ mod tests {
 	#[test]
 	fn eviction_takes_the_lowest_priority_oldest_datagram() {
 		let mut sim = Sim::new();
-		let high = sim.schedule.open_group(1, None);
-		let low = sim.schedule.open_group(0, None);
+		let high = sim.schedule.open_group(1);
+		let low = sim.schedule.open_group(0);
 		let low_old = sim.datagram(Some(low), 0, 100, 400).0;
 		let high_old = sim.datagram(Some(high), 0, 100, 400).0;
 		// Newer but higher order: eviction goes by age, not order.
@@ -1020,8 +865,8 @@ mod tests {
 	#[test]
 	fn the_new_datagram_drops_when_it_is_the_victim() {
 		let mut sim = Sim::new();
-		let high = sim.schedule.open_group(1, None);
-		let low = sim.schedule.open_group(0, None);
+		let high = sim.schedule.open_group(1);
+		let low = sim.schedule.open_group(0);
 		let kept = sim.datagram(Some(high), 0, 100, 100).0;
 		assert!(!sim.datagram(Some(low), 0, 100, 100).1);
 		assert_eq!(sim.schedule.datagram_bytes(), 100);
@@ -1030,50 +875,9 @@ mod tests {
 	}
 
 	#[test]
-	fn eviction_stays_inside_the_busiest_domain() {
-		let mut sim = Sim::new();
-		let quiet = sim.schedule.open_domain();
-		let busy = sim.schedule.open_domain();
-		let quiet_low = sim.schedule.open_group(0, Some(quiet));
-		let busy_high = sim.schedule.open_group(9, Some(busy));
-
-		// The quiet domain's low-priority datagram survives a busy high-priority domain.
-		let survivor = sim.datagram(Some(quiet_low), 0, 100, 500).0;
-		let mut busy_ids = Vec::new();
-		for _ in 0..10 {
-			busy_ids.push(sim.datagram(Some(busy_high), 0, 100, 500).0);
-		}
-		let sent = sim.drain();
-		assert!(sent.contains(&survivor), "{sent:?}");
-		// The busy domain kept its newest four.
-		assert_eq!(sent.len(), 5);
-		assert!(busy_ids[6..].iter().all(|id| sent.contains(id)), "{sent:?}");
-	}
-
-	#[test]
-	fn domains_tied_on_bytes_evict_from_the_older() {
-		let mut sim = Sim::new();
-		let groups: Vec<_> = (0..3)
-			.map(|_| {
-				let domain = sim.schedule.open_domain();
-				sim.schedule.open_group(0, Some(domain))
-			})
-			.collect();
-		let ids: Vec<_> = groups
-			.iter()
-			.map(|&group| sim.datagram(Some(group), 0, 100, 250))
-			.collect();
-		// Each domain holds 100 bytes, so the one with the oldest datagram gives it up.
-		assert!(ids.iter().all(|&(_, queued)| queued));
-		let sent = sim.drain();
-		assert!(!sent.contains(&ids[0].0), "{sent:?}");
-		assert_eq!(sent.len(), 2);
-	}
-
-	#[test]
 	fn a_deferred_datagram_keeps_its_place() {
 		let mut sim = Sim::new();
-		let group = sim.schedule.open_group(0, None);
+		let group = sim.schedule.open_group(0);
 		let large = sim.datagram(Some(group), 2, 1000, usize::MAX).0;
 		let small = sim.datagram(Some(group), 1, 10, usize::MAX).0;
 		let stream = sim.stream(Some(group), 0, 100);
@@ -1093,7 +897,7 @@ mod tests {
 	#[test]
 	fn retained_datagrams_drop_what_no_longer_fits() {
 		let mut sim = Sim::new();
-		let group = sim.schedule.open_group(0, None);
+		let group = sim.schedule.open_group(0);
 		let small = sim.datagram(Some(group), 0, 10, usize::MAX).0;
 		sim.datagram(Some(group), 0, 1000, usize::MAX);
 		sim.datagram(None, 0, 1000, usize::MAX);
