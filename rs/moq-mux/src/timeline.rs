@@ -433,6 +433,8 @@ impl Iterator for Segmenter {
 /// Records must be pushed in sequence order, starting at the window's next index.
 pub struct Producer {
 	sink: moq_json::window::Producer<Record>,
+	/// The window's track, kept to abort it with the cause of a failure.
+	track: moq_net::track::Producer,
 }
 
 impl Producer {
@@ -448,8 +450,20 @@ impl Producer {
 	/// Publish onto `track`, starting at record zero.
 	pub fn new(track: moq_net::track::Producer) -> Self {
 		Self {
-			sink: moq_json::window::Producer::new(track, Self::config()),
+			sink: moq_json::window::Producer::new(track.clone(), Self::config()),
+			track,
 		}
+	}
+
+	/// Abort the timeline track with `err`, so its readers see a failure rather than an end.
+	fn abort(self, err: &crate::Error) {
+		// A cause outside moq-net has no wire code, so readers get a generic failure.
+		let reason = match err {
+			crate::Error::Moq(err) => err.clone(),
+			_ => moq_net::StreamError::Internal.into(),
+		};
+		// A track that already closed keeps its first reason.
+		let _ = self.track.abort(reason);
 	}
 
 	fn config() -> moq_json::window::ProducerConfig {
@@ -529,9 +543,10 @@ impl Live {
 				continue;
 			};
 			if let Err(err) = output.push(&record) {
-				tracing::warn!(%err, "timeline publish failed; dropping the timeline track");
-				let _ = output.finish();
-				self.output = None;
+				tracing::warn!(%err, "timeline publish failed; aborting the timeline track");
+				if let Some(output) = self.output.take() {
+					output.abort(&err);
+				}
 			}
 		}
 		if let Some(duration) = self.segmenter.declared_duration()
@@ -691,10 +706,12 @@ impl Recorder {
 	pub fn frame(&mut self, position: Position, pts: Timestamp, keyframe: bool) {
 		let mut live = self.live.lock().unwrap();
 		if let Err(err) = live.segmenter.frame(position, pts, keyframe) {
-			tracing::warn!(%err, "timeline report rejected; dropping the timeline track");
+			tracing::warn!(%err, "timeline report rejected; aborting the timeline track");
 			live.segmenter.close();
-			// Dropped without a finish, so subscribers see the timeline fail rather than end.
-			live.output = None;
+			// Subscribers see the timeline fail rather than end.
+			if let Some(output) = live.output.take() {
+				output.abort(&err);
+			}
 		}
 		live.publish();
 	}
@@ -1392,7 +1409,19 @@ mod test {
 			match consumer.next().await {
 				Ok(Some(_)) => continue,
 				Ok(None) => panic!("the timeline ended cleanly despite omitting a frame"),
-				Err(_) => break,
+				// Aborted with the failure, not left to read as a producer that went away.
+				Err(err) => {
+					assert!(
+						matches!(
+							err,
+							crate::Error::Json(moq_json::Error::Net(moq_net::Error::Stream(
+								moq_net::StreamError::Internal
+							)))
+						),
+						"{err:?}"
+					);
+					break;
+				}
 			}
 		}
 	}
