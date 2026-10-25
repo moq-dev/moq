@@ -9,7 +9,7 @@ const { values, positionals } = parseArgs({
 	allowPositionals: true,
 	options: {
 		bench: { type: "string", default: "frames" },
-		out: { type: "string", default: ".scratch/browser-micro.json" },
+		out: { type: "string", default: ".tmp/browser-micro.json" },
 		rounds: { type: "string", default: "3" },
 	},
 });

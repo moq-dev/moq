@@ -36,6 +36,7 @@ pub mod refusal;
 pub use refusal::Refusal;
 #[cfg(feature = "serve")]
 pub mod serve;
+pub mod tier;
 
 #[cfg(feature = "client")]
 mod client;

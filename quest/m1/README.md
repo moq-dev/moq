@@ -139,19 +139,16 @@ Catalog HLS field.
 - [CI housekeeping](/quest/m1/ci-housekeeping.md) - validate queue nextest at 24 threads and remove the actionlint queue ignore after its release
 - [Main is no slower than release](/quest/m1/release-perf/README.md) - every benchmark where main is slower than release is fixed or accepted with a reason, checked by a final paired run before the cut
 - [Drop announce="never"](/quest/m1/publish-announce-never.md) - `@moq/publish` offers only announce modes a watcher can reach
-- [Drop unused OBS outputs](/quest/m1/obs-output-variants.md) - the plugin registers only `moq_output`, so the broken audio-only variant is gone
 - [API Extractor checks](/quest/m1/api-extractor-checks.md) - API Extractor fails a PR on a forgotten export, an unresolved declaration, or an undocumented export, replacing the hand-rolled `.d.ts` checkers
 - [Generated JS API reference](/quest/m1/js-api-reference.md) - the doc site renders an API reference for every `@moq/*` package from API Extractor's doc model
 - [Interop coverage](/quest/m1/interop-coverage/README.md) - the riskiest moq-transport features moq-net exposes get cross-implementation tests over drafts 18 and 22
 - [AMF0 exact reads](/quest/m1/rtmp-amf0-exact-reads.md) - a truncated RTMP string fails with `UnexpectedEof` instead of parsing NUL padding
-- [HLS URL redaction](/quest/m1/hls-url-redaction.md) - no moq-hls error prints a signed URL's query or userinfo
 - [DASH init readiness](/quest/m1/dash-init-ready.md) - a DASH manifest lists the renditions whose init exists instead of waiting on one that is stuck
 - [Binding peer version](/quest/m1/binding-peer-version.md) - every binding names itself ahead of the Rust core in the SETUP Implementation parameter
 - [Calibrate the paired nightly benchmarks](/quest/m1/bench-ci.md) - A/A and deliberately slowed Nightly runs set the paired comparison's threshold, so its regression alerts can be trusted
 - [HLS export tests over a session](/quest/m1/hls-session-tests.md) - an integration suite records and serves through a real moq-net session, so a publisher disconnect, finish, or takeover ends the cursor and playlists as specified
 - [HLS and DASH segment conformance](/quest/m1/hls-conformance.md) - nightly ffprobe checks that advertised timing, sync flags, and bytes match the media served
 - [Unbounded groups](/quest/m1/unbounded-groups/README.md) - groups and frames lose their size caps; the cache sheds parts of a group under pressure and refills the holes in place
-- [Metric-safe tiers](/quest/m1/metric-tier.md) - tiers are `[A-Za-z0-9._-]` paths refused where they are set, and every metric label value is escaped
 
 ## Related
 

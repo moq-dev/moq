@@ -115,7 +115,7 @@ instantiating the whole map.
 
 ### Method
 
-Per target, `CARGO_TARGET_DIR=.scratch/target CARGO_BUILD_JOBS=2
+Per target, `CARGO_TARGET_DIR=.tmp/target CARGO_BUILD_JOBS=2
 MBX_DISABLE=1 cargo llvm-lines --locked -p <crate> --lib` (or `--bin`; name
 `qmux@<version>` since a dev-dependency pins an older qmux), then group rows
 by the first path segment after stripping crate hashes, and by substrings for
