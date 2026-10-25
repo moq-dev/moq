@@ -75,8 +75,9 @@ jobs:
           access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
           secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
 
-      # The pre-setup query and execution use the same impact map. A runner VM
-      # keeps target/, so drop the previous job's build timings first.
+      # The pre-setup query and execution use the same impact map. A
+      # self-hosted runner keeps target/, so drop the previous job's build
+      # timings first.
       - name: Check
         if: steps.scope.outputs.needed == 'true'
         run: |
