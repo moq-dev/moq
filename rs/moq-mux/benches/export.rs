@@ -167,8 +167,9 @@ async fn prepare_video(
 	size: usize,
 	pattern: &str,
 ) -> (moq_mux::Source, moq_mux::catalog::Consumer, Fixture) {
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let consumer = broadcast.consume();
+	let (origin, driver) = moq_net::origin::Producer::new(Default::default());
+	let driver = tokio::spawn(moq_net::time::run(driver));
+	let mut broadcast = origin.create_broadcast("bench").unwrap();
 	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 	let stream = moq_mux::catalog::Consumer::from(catalog.consume().unwrap());
 	let track = broadcast
@@ -211,14 +212,7 @@ async fn prepare_video(
 	}
 	video.finish().unwrap();
 	catalog.finish().unwrap();
-	let (origin, driver) = moq_net::origin::Producer::new(Default::default());
-	let driver = tokio::spawn(moq_net::time::run(driver));
-	let dynamic = origin.dynamic_route("", Default::default()).unwrap();
-	let requests = tokio::spawn(async move {
-		while let Ok(request) = dynamic.requested_broadcast().await {
-			request.accept(consumer.clone());
-		}
-	});
+	broadcast.announce(Default::default()).unwrap();
 	let resolved = origin.consume().request_broadcast("bench", None).await.unwrap();
 	let source = moq_mux::Source::new(origin.consume(), resolved);
 	(
@@ -228,7 +222,6 @@ async fn prepare_video(
 			_published: Box::new((broadcast, catalog, video)),
 			_origin: origin,
 			driver,
-			requests,
 		},
 	)
 }

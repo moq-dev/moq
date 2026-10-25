@@ -3508,15 +3508,15 @@ mod session_tests {
 		recorder.assert_one_pad_held();
 	}
 
-	/// A route that never answers must not hold the reader on a stale resolution once a
-	/// replacement serves the path. An answer arriving late cannot replace the chosen run.
+	/// A claim that never answers must not hold the reader on a stale resolution once a
+	/// replacement serves the path. Its late refusal cannot end the chosen run.
 	#[test]
 	fn a_replacement_supersedes_a_pending_broadcast_request() {
 		let _pad_ids = pad_ids();
 		let element = element();
 		let recorder = Recorder::attach(&element);
 		let origin = origin();
-		let pool = origin.dynamic_route("", epoch()).unwrap();
+		let pool = origin.dynamic("").unwrap();
 		let session = follow(&element, &origin);
 		let pending = super::RUNTIME.block_on(async {
 			tokio::time::timeout(Duration::from_secs(10), pool.requested_broadcast())
@@ -3526,12 +3526,9 @@ mod session_tests {
 		});
 		let mut new = Publisher::new(&origin, epoch(), video_rendition());
 		recorder.written(&mut new, 2);
-		let mut old = Publisher::standalone(video_rendition());
-		pending.accept(old.broadcast.consume());
-		old.write(1);
+		pending.reject(moq_net::Error::Unauthorized);
 		recorder.written(&mut new, 3);
 		stop(session);
-		assert!(!recorder.seen().iter().any(|seen| matches!(seen, Seen::Buffer(_, 1))));
 		recorder.assert_one_pad_held();
 	}
 
