@@ -7,10 +7,10 @@
 //! by any in-process logic when the embedder decides itself. No trait, no callbacks.
 
 use std::sync::Arc;
-#[cfg(feature = "tokio")]
+#[cfg(feature = "client")]
 use std::sync::Mutex;
 use std::task::Poll;
-#[cfg(feature = "tokio")]
+#[cfg(feature = "client")]
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -106,15 +106,16 @@ struct State {
 }
 
 /// What the grant's clock requires next.
+#[cfg(feature = "client")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Due {
+pub(crate) enum Due {
 	/// Ask the decider for a fresh grant.
 	Revalidate,
 	/// The grant expired before it could be renewed.
 	Expired,
 }
 
-#[cfg(feature = "tokio")]
+#[cfg(feature = "client")]
 #[derive(Debug)]
 struct Clock {
 	next: Option<moq_clock::Instant>,
@@ -124,7 +125,7 @@ struct Clock {
 	revision: u64,
 }
 
-#[cfg(feature = "tokio")]
+#[cfg(feature = "client")]
 impl Clock {
 	fn new(grant: &Grant) -> Self {
 		Self {
@@ -146,16 +147,16 @@ impl Clock {
 #[derive(Debug)]
 pub struct Producer {
 	state: kio::Shared<State>,
-	#[cfg(feature = "tokio")]
+	#[cfg(feature = "client")]
 	clock: Mutex<Clock>,
-	#[cfg(feature = "tokio")]
+	#[cfg(feature = "client")]
 	clock_changed: tokio::sync::Notify,
 }
 
 impl Producer {
 	/// Start a lease on `grant`, returning both handles.
 	pub fn new(grant: Grant) -> (Self, Consumer) {
-		#[cfg(feature = "tokio")]
+		#[cfg(feature = "client")]
 		let clock = Mutex::new(Clock::new(&grant));
 		let state = kio::Shared::new(State {
 			grant,
@@ -166,9 +167,9 @@ impl Producer {
 		(
 			Self {
 				state: state.clone(),
-				#[cfg(feature = "tokio")]
+				#[cfg(feature = "client")]
 				clock,
-				#[cfg(feature = "tokio")]
+				#[cfg(feature = "client")]
 				clock_changed: tokio::sync::Notify::new(),
 			},
 			Consumer::new(state),
@@ -181,7 +182,7 @@ impl Producer {
 		if state.closed.is_some() {
 			return;
 		}
-		#[cfg(feature = "tokio")]
+		#[cfg(feature = "client")]
 		{
 			let mut clock = self.clock.lock().expect("lease clock");
 			let revision = clock.revision.wrapping_add(1);
@@ -191,14 +192,14 @@ impl Producer {
 		state.grant = grant;
 		state.epoch += 1;
 		drop(state);
-		#[cfg(feature = "tokio")]
+		#[cfg(feature = "client")]
 		self.clock_changed.notify_waiters();
 	}
 
 	/// Wait until the grant needs a re-check or expires. A session may request an
 	/// earlier re-check through [`Consumer::revalidate`].
-	#[cfg(feature = "tokio")]
-	pub async fn due(&self) -> Due {
+	#[cfg(feature = "client")]
+	pub(crate) async fn due(&self) -> Due {
 		loop {
 			let changed = self.clock_changed.notified();
 			tokio::pin!(changed);
@@ -243,8 +244,8 @@ impl Producer {
 	}
 
 	/// Keep the current grant after a failed re-check and schedule a jittered retry.
-	#[cfg(feature = "tokio")]
-	pub fn failed(&self) -> Duration {
+	#[cfg(feature = "client")]
+	pub(crate) fn failed(&self) -> Duration {
 		use rand::RngExt;
 		const BACKOFF_MAX: Duration = Duration::from_secs(60);
 		let mut clock = self.clock.lock().expect("lease clock");
@@ -457,7 +458,6 @@ mod tests {
 	use std::future::Future;
 	use std::pin::pin;
 	use std::task::{Context, Waker};
-	use std::time::SystemTime;
 
 	fn grant(publish: &str) -> Grant {
 		Grant::new(
@@ -588,13 +588,13 @@ mod tests {
 		assert_eq!(poll(producer.revalidate_requested()), Poll::Ready(()));
 	}
 
-	#[cfg(feature = "tokio")]
+	#[cfg(feature = "client")]
 	#[tokio::test]
 	async fn due_follows_cadence_nudges_and_backoff() {
 		tokio::time::pause();
 		let mut grant = grant("a/**");
 		grant.revalidate = Some(Duration::from_secs(10));
-		grant.expires = Some(SystemTime::now() + Duration::from_secs(60));
+		grant.expires = Some(moq_clock::wall() + Duration::from_secs(60));
 		let (producer, consumer) = Producer::new(grant.clone());
 		assert!(tokio::time::timeout(Duration::ZERO, producer.due()).await.is_err());
 		tokio::time::advance(Duration::from_secs(10)).await;
@@ -613,13 +613,13 @@ mod tests {
 		assert!(tokio::time::timeout(Duration::ZERO, producer.due()).await.is_err());
 	}
 
-	#[cfg(feature = "tokio")]
+	#[cfg(feature = "client")]
 	#[tokio::test]
 	async fn due_reschedules_an_outstanding_wait_after_update() {
 		tokio::time::pause();
 		let mut grant = grant("a/**");
 		grant.revalidate = Some(Duration::from_secs(30));
-		grant.expires = Some(SystemTime::now() + Duration::from_secs(3600));
+		grant.expires = Some(moq_clock::wall() + Duration::from_secs(3600));
 		let (producer, _consumer) = Producer::new(grant.clone());
 		let producer = std::sync::Arc::new(producer);
 		let waiter = tokio::spawn({
@@ -633,13 +633,13 @@ mod tests {
 		assert_eq!(waiter.await.unwrap(), Due::Revalidate);
 	}
 
-	#[cfg(feature = "tokio")]
+	#[cfg(feature = "client")]
 	#[tokio::test]
 	async fn backoff_grows_and_stays_bounded() {
 		tokio::time::pause();
 		let mut grant = grant("a/**");
 		grant.revalidate = Some(Duration::from_secs(30));
-		grant.expires = Some(SystemTime::now() + Duration::from_secs(3600));
+		grant.expires = Some(moq_clock::wall() + Duration::from_secs(3600));
 		let (producer, _consumer) = Producer::new(grant);
 		let first = producer.failed();
 		assert!(first >= Duration::from_millis(750) && first <= Duration::from_millis(1250));
@@ -650,7 +650,7 @@ mod tests {
 		assert!(later <= Duration::from_secs(30).mul_f64(1.25));
 	}
 
-	#[cfg(feature = "tokio")]
+	#[cfg(feature = "client")]
 	#[tokio::test]
 	async fn an_unschedulable_cadence_never_rechecks() {
 		tokio::time::pause();
@@ -661,12 +661,12 @@ mod tests {
 		assert!(tokio::time::timeout(Duration::ZERO, producer.due()).await.is_err());
 	}
 
-	#[cfg(feature = "tokio")]
+	#[cfg(feature = "client")]
 	#[tokio::test]
 	async fn due_expires_even_without_a_recheck() {
 		tokio::time::pause();
 		let mut grant = grant("a/**");
-		grant.expires = Some(SystemTime::now() - Duration::from_secs(4));
+		grant.expires = Some(moq_clock::wall() - Duration::from_secs(4));
 		let (producer, _consumer) = Producer::new(grant);
 		let task = tokio::spawn(async move { producer.due().await });
 		tokio::task::yield_now().await;

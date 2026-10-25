@@ -1,13 +1,59 @@
-# Non-published workspace root: holds shared dev tooling + uv workspace config.
+[build-system]
+requires = ["maturin>=1.14.1,<2.0"]
+build-backend = "maturin"
+
 [project]
-name = "moq"
-version = "0.0.0"
+name = "moq-ffi"
+# Version is injected at build time from the moq-ffi-v* tag (see
+# .github/workflows/release-py-ffi.yml). For local dev `maturin develop`
+# reads it from rs/moq-ffi/Cargo.toml.
+dynamic = ["version"]
+description = "Raw UniFFI bindings for the Media over QUIC Rust crates. Most callers want the ergonomic `moq` wrapper instead."
+readme = "py/moq-ffi/README.md"
+license = "MIT OR Apache-2.0"
 requires-python = ">=3.10"
+authors = [{ name = "Luke Curley", email = "kixelated@gmail.com" }]
+keywords = ["quic", "http3", "webtransport", "media", "live", "streaming"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: Multimedia :: Sound/Audio",
+    "Topic :: Multimedia :: Video",
+]
+
+[project.urls]
+Homepage = "https://github.com/moq-dev/moq"
+Repository = "https://github.com/moq-dev/moq"
+
+# Maturin builds the rs/moq-ffi crate, runs uniffi-bindgen, and packages
+# the cdylib + generated bindings as a private `moq_ffi._uniffi` subpackage
+# (the leading underscore signals "internal"; moq_ffi/__init__.py re-exports
+# the raw classes). The ergonomic `moq` wrapper depends on this package and
+# is versioned independently.
+[tool.maturin]
+bindings = "uniffi"
+manifest-path = "rs/moq-ffi/Cargo.toml"
+# The OpenH264 software fallback is opt-in in Rust; the wheel ships it.
+features = ["openh264"]
+python-source = "py/moq-ffi"
+module-name = "moq_ffi._uniffi"
+# Cargo resolves optional path dependencies even when Python does not enable them.
+# Maturin also needs the workspace generator to render Python bindings.
+include = [{ path = "rs/moq-v4l/**/*", format = "sdist" }, { path = "rs/uniffi-bindgen/**/*", format = "sdist" }]
+# `maturin develop` writes the bindings into the source tree, where a later wheel build
+# would pick them up again and fail on the duplicate. The build regenerates them anyway.
+exclude = [
+    "**/moq_ffi/_uniffi/**",
+    "**/__pycache__/**",
+    # Native codec conformance corpora are only read by Rust tests.
+    { path = "**/moq-audio/src/decode/test_data/**", format = "sdist" },
+]
 
 # Listed explicitly (not `py/*`) so build output like py/dist isn't mistaken
 # for a workspace member.
 [tool.uv.workspace]
-members = ["py/moq-ffi", "py/moq-rs"]
+members = ["py/moq-rs"]
 
 [dependency-groups]
 dev = ["ruff", "maturin", "pyright", "pytest", "pytest-asyncio"]
@@ -19,12 +65,13 @@ build-constraint-dependencies = ["hatchling==1.32.0", "maturin==1.14.1"]
 [tool.uv.dependency-groups]
 docs = { requires-python = ">=3.12" }
 
-# Tests span both workspace members (py/moq-rs, py/moq-ffi). pytest resolves
+# Tests span the native package and wrapper under py/. pytest resolves
 # its rootdir to this workspace root, so the shared asyncio config lives here.
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 
 [tool.pyright]
+reportUnnecessaryTypeIgnoreComment = "error"
 pythonVersion = "3.10"
 include = ["py"]
 # Skip uniffi-bindgen output: it's regenerated on every build and isn't

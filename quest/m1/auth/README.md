@@ -88,9 +88,9 @@ Decisions settled while planning, recorded so review does not relitigate them:
   root, and every token in a union shares the connection's root. Unscoped
   permission is `**`; an empty union grants nothing. Lite AUTH_OK carries
   those patterns, wildcards and literals alike, from the first release, with
-  no covering-prefix workaround. IETF AUTH_OK carries the same patterns once
-  [IETF AUTH_OK patterns](/quest/m1/auth/ietf-patterns.md) lands (revised
-  2026-10-23 from Track Namespace prefixes, #6566). Announce stays a prefix:
+  no covering-prefix workaround. IETF AUTH_OK carries the same patterns with
+  the same encoding (draft-lcurley-moq-auth-01, revised 2026-10-23 from Track
+  Namespace prefixes, #6566). Announce stays a prefix:
   ANNOUNCE_REQUEST and SUBSCRIBE_NAMESPACE do not gain patterns. The public
   grant type stays pattern-valued.
 - **Fail loud by aborting the session.** A publisher whose origin announces a
@@ -144,12 +144,10 @@ because `main` assigned 0x3A to NOT_FETCHABLE first.
 
 ## Required
 
-- [IETF AUTH_OK patterns](/quest/m1/auth/ietf-patterns.md) - moq-transport's AUTH_OK carries lite's patterns, so an exact or wildcard grant is admitted on draft 17+
-- [Auth outlives its session](/quest/m1/auth/issuer.md) - one `auth::Handle` spans a connection's sessions, so a route's auth survives a reconnect
 - [Token in band](/quest/m1/auth/token-in-band.md) - extra credentials ride
   AUTH streams: a session starts on the token its SETUP or URL carried and its
   AUTH streams add the rest
-- [Binding auth polish](/quest/m1/auth/bindings-polish.md) - OBS reconnects with the presented token, one FFI auth handle, Swift grant sequences
+- [Binding auth polish](/quest/m1/auth/bindings-polish.md) - OBS reconnects with the presented token, Swift grant sequences
 - [Re-present a lost token](/quest/m1/auth/token-represent.md) - a token whose AUTH stream ended without a verdict is presented again on the live session
 
 ## Related

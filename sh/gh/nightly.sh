@@ -78,7 +78,7 @@ case "$1" in
         run just rs test -p moq-bench --release --run-ignored only \
             -E 'test(benchmark_readiness_establishment)' --success-output immediate
         run just rs bench-playback
-        run just rs test --release -p moq-quic -E 'test(benchmark_ack_cleanup)' \
+        run just rs test --release -p moq-congestion -E 'test(benchmark_ack_cleanup)' \
             --run-ignored only --success-output immediate
         run just rs bench-feed-fetch
         run just rs test -p moq-quic --release -E 'test(benchmark_receive_credit)' --run-ignored only --success-output immediate
@@ -120,7 +120,7 @@ case "$1" in
         # only Criterion estimates enter the trend report.
         criterion extra --no-fail-fast -p moq-e2ee -p moq-json -p moq-archive -p moq-cli -p moq-mux \
             --bench protect --bench codec --bench table --bench allocations --bench window \
-            --bench producer --bench play_buffer --bench jitter
+            --bench producer --bench play_buffer --bench jitter --bench decode_clock --bench ts_programs
         ;;
     rust-uring)
         # One run per target makes an unsupported/skipped ring fail report
@@ -130,10 +130,11 @@ case "$1" in
         done
         ;;
     js)
-        for benchmark in broadcasts request-ids requests forward reader frames drift varint lite-varint track resume interests priority subscribe-drop subscribe-tracks refresh observed compression; do
+        for benchmark in broadcasts request-ids requests forward reader frames drift varint lite-varint track resume priority subscribe-drop subscribe-tracks refresh observed compression; do
             javascript "$benchmark" just js bench "$benchmark"
         done
         javascript catalog just js catalog-bench
+        javascript qmux-record just js qmux-record-bench
         javascript cmaf just js cmaf-bench
         javascript arrivals just js arrivals-bench
         javascript p2p just js p2p-bench

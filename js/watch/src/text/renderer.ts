@@ -11,8 +11,20 @@ import type { Source } from "./source";
 // Drop cues whose end is more than this far behind the playhead, to bound memory on a long stream.
 const PRUNE_BEHIND = Milli(30_000);
 
-// How long a `utf8` roll-up cue lingers when no later cue supersedes it.
-const UTF8_LINGER = Milli(30_000);
+// The longest a cue shows. A `utf8` roll-up cue lingers this long when no later cue supersedes it,
+// and a longer declared end is clamped to it, so every cue eventually falls behind the prune horizon.
+const MAX_CUE = Milli(30_000);
+
+/**
+ * The most cues, and separately clear marks, one track retains, evicting the earliest start first.
+ *
+ * The prune horizon keeps an honest stream far below this. It bounds a publisher whose timestamps
+ * run ahead of the playhead, because the renderer rescans every retained cue on each animation frame
+ * and rebuilds them all on each group. Exported for tests.
+ *
+ * @internal
+ */
+export const MAX_RETAINED = 1024;
 
 // How far a VTT payload's own timing may sit from its frame timestamp before we call it a bug.
 // Generous: this is catching a wrong clock, not measuring drift.
@@ -29,7 +41,6 @@ const SKEW_TOLERANCE = Milli(1_000);
  */
 export type CueStore = {
 	cues: VTTCue[];
-	regions: Map<string, VTTRegion>;
 	clears: number[];
 };
 
@@ -62,18 +73,49 @@ export function sanitizeCue(text: string): string {
 		.replaceAll('"', "&amp;quot;");
 }
 
+// Merge `incoming` into `stored`, both sorted by `key`, keeping the latest MAX_RETAINED. Sorting the
+// payload once and merging in one pass keeps a payload of n entries O(n log n); a splice per entry
+// would be quadratic.
+function merge<T>(stored: T[], incoming: T[], key: (value: T) => number): T[] {
+	const merged: T[] = [];
+	let i = 0;
+	// Not `toSorted`: Chrome and Edge 97-109 lack it, and `sort` is stable, so ties keep arrival order.
+	for (const value of [...incoming].sort((a, b) => key(a) - key(b))) {
+		while (i < stored.length && key(stored[i]) <= key(value)) merged.push(stored[i++]);
+		merged.push(value);
+	}
+	while (i < stored.length) merged.push(stored[i++]);
+	return merged.length > MAX_RETAINED ? merged.slice(-MAX_RETAINED) : merged;
+}
+
 /**
- * Insert a cue keeping `cues` sorted by start time.
+ * Add one payload's cues to the store, keeping it sorted by start time.
  *
  * Groups arrive in delivery order rather than sequence order, so a cue can legitimately land
- * before one that is already stored. Exported for tests.
+ * before one that is already stored. Each end is clamped to `MAX_CUE` past its start, so a
+ * declared end cannot hold a cue past the prune horizon. Exported for tests.
  *
  * @internal
  */
-export function insertCue(cues: VTTCue[], cue: VTTCue): void {
-	let i = cues.length;
-	while (i > 0 && cues[i - 1].startTime > cue.startTime) i--;
-	cues.splice(i, 0, cue);
+export function insertCues(store: CueStore, cues: VTTCue[]): void {
+	for (const cue of cues) cue.endTime = Math.min(cue.endTime, cue.startTime + MAX_CUE / 1000);
+	store.cues = merge(store.cues, cues, (cue) => cue.startTime);
+}
+
+/**
+ * The regions the retained cues draw into, so a region lives exactly as long as a cue using it.
+ *
+ * The parser only links a cue to a region declared in the same payload, so a region no retained cue
+ * references can never be used again. Exported for tests.
+ *
+ * @internal
+ */
+export function cueRegions(cues: VTTCue[]): VTTRegion[] {
+	const regions = new Map<string, VTTRegion>();
+	for (const cue of cues) {
+		if (cue.region) regions.set(cue.region.id, cue.region);
+	}
+	return [...regions.values()];
 }
 
 /**
@@ -115,6 +157,8 @@ export function pruneCues(store: CueStore, cutoff: number): boolean {
 export function rollUp(store: CueStore, cue: VTTCue): void {
 	const { cues, clears } = store;
 	const i = cues.indexOf(cue);
+	// Evicted on arrival: it starts before everything a full store retains.
+	if (i < 0) return;
 	const prev = i > 0 ? cues[i - 1] : undefined;
 	if (prev && prev.endTime > cue.startTime) prev.endTime = cue.startTime;
 
@@ -135,13 +179,10 @@ export function rollUp(store: CueStore, cue: VTTCue): void {
  * @internal
  */
 export function clearCue(store: CueStore, time: number): void {
-	const { cues, clears } = store;
-
 	// Remember it first: the cue this clear terminates may not have arrived yet.
-	let at = clears.length;
-	while (at > 0 && clears[at - 1] > time) at--;
-	if (clears[at] !== time) clears.splice(at, 0, time);
+	if (!store.clears.includes(time)) store.clears = merge(store.clears, [time], (t) => t);
 
+	const { cues } = store;
 	for (let i = cues.length - 1; i >= 0; i--) {
 		const cue = cues[i];
 		if (cue.startTime > time) continue;
@@ -263,8 +304,8 @@ export class Renderer {
 				maxDelay: this.sync.out.maxDelay,
 			});
 			if (!sub) return;
-			const store: CueStore = { cues: [], regions: new Map(), clears: [] };
-			const commit = () => renderer.changeTrack({ cues: [...store.cues], regions: [...store.regions.values()] });
+			const store: CueStore = { cues: [], clears: [] };
+			const commit = () => renderer.changeTrack({ cues: store.cues, regions: cueRegions(store.cues) });
 
 			// Drive the caption clock off the shared media clock so cues line up with audio/video, and
 			// prune cues that have scrolled well past the playhead. Reschedules itself each frame.
@@ -327,8 +368,8 @@ export class Renderer {
 				return;
 			}
 
-			const cue = new VTTCue(start, start + UTF8_LINGER / 1000, sanitizeCue(text));
-			insertCue(store.cues, cue);
+			const cue = new VTTCue(start, start + MAX_CUE / 1000, sanitizeCue(text));
+			insertCues(store, [cue]);
 			rollUp(store, cue);
 			return;
 		}
@@ -356,12 +397,9 @@ export class Renderer {
 			);
 		}
 
-		for (const region of parsed.regions) store.regions.set(region.id, region);
-		for (const cue of parsed.cues) {
-			// The payload is untrusted, and the renderer builds HTML out of this text.
-			cue.text = sanitizeCue(cue.text);
-			insertCue(store.cues, cue);
-		}
+		// The payload is untrusted, and the renderer builds HTML out of this text.
+		for (const cue of parsed.cues) cue.text = sanitizeCue(cue.text);
+		insertCues(store, parsed.cues);
 	}
 
 	/** Stop and release everything this holds. */

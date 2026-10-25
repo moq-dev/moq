@@ -1,37 +1,41 @@
-# [L] IETF lazy discovery
+# [M] IETF lazy discovery in JS
 
 ## Goal
 
-A moq-transport session, like a lite one, asks for announcements only under
-the prefixes its origin is watching, and withdraws the ask when nobody
-watches any more, on every draft we support.
+A JS moq-transport session never holds two overlapping SUBSCRIBE_NAMESPACE
+requests at a peer that did not declare MoQ Solicit, so a peer that enforces
+the drafts' PREFIX_OVERLAP rule, such as moxygen, never refuses a broader
+watch and turns the session blind.
 
 ## Plan
 
-[moq-dev/moq#6165](https://github.com/moq-dev/moq/pull/6165) made lite
-discovery lazy and kept IETF eager: lazy SUBSCRIBE_NAMESPACE needs an
-UNSUBSCRIBE_NAMESPACE path on drafts 14 and 15, and peers still push
-unsolicited PUBLISH_NAMESPACE.
+Rust landed in [moq-dev/moq#6530](https://github.com/moq-dev/moq/pull/6530):
+lazy SUBSCRIBE_NAMESPACE on every draft, UNSUBSCRIBE_NAMESPACE on drafts
+14/15 (named by prefix on 14, fixed in both languages), and exclusive
+discovery at a peer that declared no Solicit (`Discovery::exclusive`,
+`rs/moq-net/src/ietf/subscriber/namespaces.rs`). JS
+`connection/forward.ts` already asks only about watched prefixes, but holds a
+narrower request open under a broader one on every version.
 
-In m1 because it owns a red interop cell (decided 2026-10-22): `moq`
-against moxygen on draft-14 discovers nothing. moq-net never asks draft-14
-or 15 for the empty namespace, and moxygen announces nothing unasked. The
-CLI does no scoping of its own: the subtree scope tried for this in
-[moq-dev/moq#6255](https://github.com/moq-dev/moq/pull/6255) lost the
-sibling broadcasts a catalog references, such as a transcode's `.` source.
-Asking for the watched prefixes fixes the cell without that loss; verify
-it with `MOQ_BIN=target/debug/moq just relays --only moxygen` from
-`test/smoke`.
+- At a peer that declared no Solicit, a broader watch closes the narrower
+  requests beneath it, and its SUBSCRIBE_NAMESPACE goes out only once each
+  has left the wire: UNSUBSCRIBE_NAMESPACE written on drafts 14/15, the peer's
+  half closed from draft 16.
+- `forward.ts` needs the session to say when a request is off the wire; the
+  announced consumer reports only its local close today.
 
-- First step: Rust sends UNSUBSCRIBE_NAMESPACE on d14/15. It never does
-  today ([moq-dev/moq#6133](https://github.com/moq-dev/moq/pull/6133)).
-- Then drive SUBSCRIBE_NAMESPACE from the origin's watched prefixes, as the
-  lite path does, in Rust and JS.
-- Decide what an unsolicited PUBLISH_NAMESPACE outside any watched prefix
-  costs the receiver, and bound it.
+Settled in [moq-dev/moq#6530](https://github.com/moq-dev/moq/pull/6530):
 
-Public API: none expected. Wire: no new messages.
+- JS non-overlap is this quest, not that PR: it needs the session signal
+  above, and a refused JS watch only downgrades the session to blind answers.
+- Overlap policy is keyed on MoQ Solicit. Requests are exclusive only at a
+  peer that declared no Solicit, since only foreign peers enforce
+  PREFIX_OVERLAP; our own peers keep overlapping hold semantics, because on
+  drafts 14/15 our publisher withdraws what an unsubscribed request
+  advertised, so exclusive-everywhere would restart routes mid-handover.
+- A PUBLISH_NAMESPACE that outlives an UNSUBSCRIBE_NAMESPACE (drafts 14/15),
+  or arrives unsolicited, is kept until the peer withdraws it. It is bounded
+  by request credit or streams and the `announces` cap, and cancelling it
+  would lose it for good, since the peer does not repeat it.
 
-## Related
-
-- [Keyed prefix polling](/quest/m2/keyed-prefix-polling.md) - the per-wake cost of many open prefixes
+Public API: none expected. Wire: none.

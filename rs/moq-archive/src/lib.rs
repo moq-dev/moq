@@ -69,16 +69,16 @@ mod path;
 pub mod producer;
 pub mod reader;
 /// The binary segment object holding a record's groups and frames.
-pub mod segment;
-/// Put, get, list, and delete recording objects on an object store.
-pub mod store;
+mod segment;
+/// Recording objects on an object store.
+mod store;
 
 pub use error::{Error, Result};
 pub use info::Info;
-pub use path::Key;
+pub(crate) use path::Key;
 pub use producer::Producer;
 pub use reader::Reader;
-pub use segment::{Frame, Group, Object};
+pub(crate) use segment::Object;
 pub use store::Store;
 
 /// Recording format version written into `.info` and the binary envelope.

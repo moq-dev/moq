@@ -153,11 +153,7 @@ pub async fn accept(
 	handle.announce(moq_net::origin::Route::default().with_epoch(epoch.clone()))?;
 
 	let resource_id = sdp::new_resource_id();
-	let socket = moq_ice::Socket {
-		udp: mux.socket(),
-		locals: mux.candidates().to_vec(),
-		inbound,
-	};
+	let socket = moq_ice::Socket::new(mux.socket(), mux.candidates().to_vec(), inbound)?;
 	let session = session::Session::ingest(rtc, socket, sink)?;
 
 	// Register before returning so a DELETE that races the first packet still
@@ -168,7 +164,6 @@ pub async fn accept(
 	Ok(Response {
 		resource_id: resource_id.clone(),
 		answer: sdp::render_answer(&answer),
-		wire: session.wire(),
 		session: crate::server::AcceptedSession {
 			server: server.clone(),
 			resource_id,
@@ -217,6 +212,34 @@ mod tests {
 		api.add_media(MediaKind::Audio, Direction::SendOnly, None, None, None);
 		let (offer, _pending) = api.apply().expect("an offer");
 		offer.to_sdp_string()
+	}
+
+	/// A session that ends without a DELETE, here one that never connects, ends its tracks
+	/// with the transport cause, so a reader sees the publisher go rather than a producer
+	/// dropped unfinished.
+	#[tokio::test(start_paused = true)]
+	async fn a_session_ending_without_a_delete_ends_its_tracks() {
+		let server = Server::new(crate::server::Config::default());
+		let origin = moq_tokio::origin::spawn();
+		let consumer = origin.consume();
+		let session = accept(&server, &origin, "live/cam0", &offer()).await.unwrap();
+		let broadcast = consumer.request_broadcast("live/cam0", None).await.unwrap();
+		let mut catalog = broadcast
+			.track(hang::Catalog::DEFAULT_NAME)
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap();
+
+		let ended = session.run().await;
+		assert!(matches!(ended, Err(crate::Error::IceTimeout)), "{ended:?}");
+		let end = loop {
+			match catalog.recv_group().await {
+				Ok(Some(_)) => continue,
+				end => break end.map(|_| ()),
+			}
+		};
+		assert!(matches!(end, Err(moq_net::Error::Transport(_))), "{end:?}");
 	}
 
 	/// An encoder reconnecting to the same broadcast while its stale session is still

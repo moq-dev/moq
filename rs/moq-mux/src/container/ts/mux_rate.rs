@@ -2,8 +2,8 @@
 //!
 //! A constant-rate multiplexer paces its packets on the PCR clock, so the packets
 //! between two PCRs over the ticks between them is the rate of the whole
-//! multiplex, stuffing included. [`Meter`] takes every packet and every PCR on
-//! the clock PID and decides when that rate is worth recording: a full window
+//! multiplex, stuffing included. [`Meter`] takes every PCR on the clock PID, with
+//! the input's packet count at it, and decides when that rate is worth recording: a full window
 //! whose samples agree on one value publishes it, and a window that no longer
 //! agrees clears it, so a VBR source (whose samples never agree) records nothing
 //! and a rate change lands once rather than as churn.
@@ -66,10 +66,10 @@ fn rate(packets: u64, ticks: u64) -> u64 {
 /// Tracks the multiplex rate and the value currently recorded for it.
 #[derive(Default)]
 pub(super) struct Meter {
-	/// Packets since the last PCR, every PID and null stuffing included.
-	packets: u64,
 	/// The last PCR seen, in 27 MHz ticks.
 	last: Option<u64>,
+	/// The input's packet count at `last`.
+	mark: u64,
 	/// The sample being pooled from PCR intervals.
 	sample: Interval,
 	/// The completed samples of the window being collected.
@@ -91,15 +91,11 @@ impl Meter {
 		self.ready
 	}
 
-	/// One transport packet went by.
-	pub fn packet(&mut self) {
-		self.packets += 1;
-	}
-
-	/// A PCR arrived on the clock PID, carried by the packet just counted. Returns
-	/// whether [`published`](Self::published) changed.
-	pub fn pcr(&mut self, pcr: u64) -> bool {
-		let packets = std::mem::take(&mut self.packets);
+	/// A PCR arrived on the clock PID, carried by packet number `packets` of the input,
+	/// counting every PID and null stuffing. Returns whether [`published`](Self::published)
+	/// changed.
+	pub fn pcr(&mut self, pcr: u64, packets: u64) -> bool {
+		let packets = packets - std::mem::replace(&mut self.mark, packets);
 		let Some(last) = self.last.replace(pcr) else {
 			return false;
 		};
@@ -126,7 +122,6 @@ impl Meter {
 	/// Returns whether [`published`](Self::published) changed.
 	pub fn discontinuity(&mut self) -> bool {
 		self.ready = false;
-		self.packets = 0;
 		self.last = None;
 		self.sample = Interval::default();
 		self.window.clear();
@@ -178,16 +173,15 @@ mod test {
 	fn feed(meter: &mut Meter, intervals: impl IntoIterator<Item = (u64, u64)>) -> Vec<Option<u64>> {
 		let mut changes = Vec::new();
 		let mut pcr = meter.last.unwrap_or(0);
+		let mut count = meter.mark;
 		if meter.last.is_none() {
-			meter.packet();
-			assert!(!meter.pcr(pcr));
+			count += 1;
+			assert!(!meter.pcr(pcr, count));
 		}
 		for (packets, ticks) in intervals {
-			for _ in 0..packets {
-				meter.packet();
-			}
+			count += packets;
 			pcr = (pcr + ticks) % PCR_WRAP;
-			if meter.pcr(pcr) {
+			if meter.pcr(pcr, count) {
 				changes.push(meter.published());
 			}
 		}
@@ -272,8 +266,7 @@ mod test {
 			feed(&mut meter, std::iter::repeat_n(CBR, PER_WINDOW)),
 			vec![Some(2_499_999)]
 		);
-		meter.packet();
-		assert!(meter.pcr(1), "the clock jumped backwards");
+		assert!(meter.pcr(1, meter.mark + 1), "the clock jumped backwards");
 		assert_eq!(meter.published(), None);
 	}
 

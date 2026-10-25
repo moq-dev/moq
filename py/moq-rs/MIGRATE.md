@@ -4,6 +4,17 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Connection state
+
+Client entry returns a connecting native session. Replace `Session.status()`, `connects()`, and both `failure()` polls with `state()` and `await state_changed(state.revision)`. The `ConnectionState` fields include `phase`, `connects`, `failure`, and `version`; `ConnectionPhase` replaces `ConnectionStatus`. Wait for `CONNECTED` when work requires an established transport, or await `closed()` for the terminal result.
+
+### Exact encoder rates and publication options
+
+Raw video input framerates are exact numerator/denominator records, not integers.
+Use `video.FrameRate(numerator=30000, denominator=1001)` and move `track=` from encoder output to `audio.Producer` / `video.Producer`.
+The codec-only output records no longer contain track naming. Rebuild against
+the matching generated bindings and native library.
+
 ### Video rendition preference
 
 `moq.media.Video` gains `preference`, defaulting to `0`. Prefer keyword construction and upgrade `moq-ffi` alongside the wrapper. Higher values are preferred; compatibility transcodes use `-1`.
@@ -17,6 +28,23 @@ How to update your code for each breaking change, newest first.
 
 Resolving a rendition's `broadcast` reference, through `BroadcastConsumer.resolve()` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
 Where you skipped such a rendition on that error, bound the call yourself: cancel the task or wrap it in `asyncio.wait_for`.
+
+### Session shutdown drains
+
+`Session.shutdown()` still returns at once, but it now requests a draining close instead of cancelling.
+`await session.closed()` waits for the drain and raises delivery failures, and a clean `async with` exit now waits for it too.
+Call `session.cancel(0)` to close at once, as `shutdown()` did.
+If you adopted the release line's async `drain()`, call `session.shutdown()` and then `await session.closed()` instead.
+
+### Media track names belong to the target
+
+Audio and video init records no longer carry a track name. Pass that name on the media producer's named target instead; init records describe only the codec and media.
+
+### Broadcast `finish` is removed
+
+`BroadcastProducer.finish()`, a deprecated alias for `close()`, is removed.
+Call `BroadcastProducer.close()` where you called `finish()`.
+To end the content first, call `moq.media.CatalogProducer.finish()`; the broadcast stays up until `close()`.
 
 ### JSON snapshot `delta_ratio` is `deltas`
 
@@ -56,7 +84,7 @@ Clamp timestamps you build from unbounded input to `2^61 - 1`.
 
 ### Finished tracks stay until the broadcast ends (#6157)
 
-A finished track now stays listed, with its catalog rendition and demand, until its broadcast closes or the new `BroadcastProducer.finish()` lets go.
+A finished track now stays listed, with its catalog rendition and demand, until its broadcast closes.
 Publish a replacement under a new name, and expect a finished track's demand watch to end with the broadcast.
 
 ### A claim answers by publishing (#5678)
@@ -139,7 +167,7 @@ The decode consumers' `name` argument is `id`.
 ### Native codecs have `audio` and `video` modules (#5694)
 
 `BroadcastProducer.encode_audio` / `encode_video` are `moq.audio.Producer` / `moq.video.Producer`, built from a `moq.media.CatalogProducer`.
-The audio track name moves into `EncoderOutput(track=...)`, and durations and timestamps are `timedelta` (`frame_duration`, `Frame.timestamp`) instead of `_us` integers; a zero `frame_duration` takes the codec's own frame.
+The audio track name belongs to `Producer(track=...)`, and durations and timestamps are `timedelta` (`frame_duration`, `Frame.timestamp`) instead of `_us` integers; a zero `frame_duration` takes the codec's own frame.
 `BroadcastConsumer.decode_audio` / `decode_video` are `await moq.audio.Consumer.subscribe(broadcast, ...)` / `await moq.video.Consumer.subscribe(broadcast, ...)`.
 Producers expose subscriber state only through `demand()`, and a video `gop` is `moq.video.Gop.KEYFRAME(interval=...)`.
 `moq.audio.Encoder` / `moq.video.Encoder` encode without publishing.
@@ -148,7 +176,8 @@ Producers expose subscriber state only through `demand()`, and a video `gop` is 
 audio = moq.audio.Producer(
     moq.media.CatalogProducer(broadcast),
     moq.audio.EncoderInput(format=moq.audio.SampleFormat.F32, sample_rate=48000, channels=1),
-    moq.audio.EncoderOutput(codec=moq.audio.Codec.opus(), track="audio", frame_duration=timedelta(milliseconds=20)),
+    moq.audio.EncoderOutput(codec=moq.audio.Codec.opus(), frame_duration=timedelta(milliseconds=20)),
+    track="audio",
 )
 audio.write(moq.audio.Frame(timestamp=timedelta(0), data=pcm))
 ```
@@ -211,6 +240,8 @@ A string passed where a list of strings belongs (`tls_roots="ca.pem"`) raises `T
 
 ### Timestamps are optional
 
+An omitted timescale now publishes a raw track untimed instead of selecting microseconds. Explicitly set a microsecond timescale to preserve the released default.
+
 A frame read from an untimed track has `timestamp` set to `None`.
 Raw writes no longer default to zero, so a write to a timed track without a timestamp raises `TimestampMismatch`; whole-frame media writes require one.
 Pass `timestamp=` on every write to a timed track.
@@ -243,10 +274,6 @@ Check for both where you meant any QUIC session.
 A `VideoDecodedFrame`'s fields are methods: `timestamp_us()`, `width()`, `height()`, and `pixels(format)` replacing `data` and `format`.
 `VideoDecoderOutput.format` is gone; set `surface=True` to keep the decoder's native surface.
 Read `frame.pixels(moq.VideoPixelFormat.RGBA)` instead of `frame.data`.
-
-### `BroadcastProducer.finish()` is removed (#4152)
-
-Call `broadcast.close()` instead.
 
 ## 0.4 -> 0.5
 

@@ -136,8 +136,12 @@ returns within the linger keeps its broadcast and epoch, so viewer churn
 doesn't unannounce and re-announce it across the mesh, and its totals
 continue. Once the linger elapses with the group still empty, the broadcast is
 unannounced and its counters dropped; a group that returns later announces a
-new epoch counted from zero. Within one epoch, group numbers keep increasing
-across recreated tracks and may have gaps.
+new epoch counted from zero. Holding a stats track doesn't count as an entry:
+every track ends with the broadcast, including presence, prefix, and requested
+tier tracks a reader still holds, and the reader follows the group's next
+announcement.
+Within one epoch, group numbers keep increasing across recreated tracks and
+may have gaps.
 
 ## Tracks
 
@@ -170,9 +174,10 @@ A presence track exists only while subscribed. Ask for `<label>/presence.json`
 for any stats label in the group (`presence.json` for the empty label). The relay
 answers with the label's current sessions and counts from there, holding a label
 with no sessions open at `{}`, and stops producing it once the last subscriber
-leaves. A prefix track works the same way for any broadcast prefix in the
-group: ask for `<path>/prefix.json` (`prefix.json` for the empty prefix). A
-label or prefix outside the group, or any other name, is refused.
+leaves or, at depth 1 or more, its group lingers out. A prefix track works the
+same way for any broadcast prefix in the group: ask for `<path>/prefix.json`
+(`prefix.json` for the empty prefix). A label or prefix outside the group, or
+any other name, is refused.
 
 ## Frames
 
@@ -335,9 +340,9 @@ UDP bytes, including retransmissions and transport overhead. The transport
 updates a connection's counters as it sends and receives, and a stats tick reads
 them without polling the session or activating its periodic sampler. A retag
 flushes the old tier and label first; closing a session records its final delta.
-An embedder creates a `transport::Wire`, registers it with `stats::Handle::wire`
-or `stats::Session::wire`, records its connection's cumulative totals on it, and
-holds the returned guard. Dropping the guard records the final reading.
+An embedder creates a `transport::Wire`, registers it with `stats::Session::wire`,
+records its connection's cumulative totals on it, and holds the returned guard.
+Dropping the guard records the final reading.
 
 Unsupported transports, including browsers and the current WebSocket/qmux
 adapter, contribute zero. WebSocket wire accounting requires the separate
@@ -357,7 +362,10 @@ ignore `expired`; newer readers default a missing counter to zero.
 subset of `sessions_ended`, so the live count is unchanged. A clean close by
 either side, a drain, or a shutdown is not a failure. A grant that expires
 mid-session counts as `expired`; one revoked or narrowed out from under it
-counts as `application`. A reader treats a missing object as zeros.
+counts as `application`. Each session records how it ended, so a grant revoked
+after its session already closed does not count, and a dialed link that
+reconnects fails only if its last session did. A reader treats a missing object
+as zeros.
 
 `requests` counts admitted request/response exchanges under the token's label and
 tier, including HTTP `/fetch` and `/announced`. They never start or end a session.
@@ -368,9 +376,10 @@ reads it as zero when absent. A request moved to another tier stays counted wher
 it was admitted; later traffic follows the new tier.
 
 `announces_peak` and `subscriptions_peak` are the most broadcasts announced to
-the relay, and subscriptions held on it, by any one session. Compare them with
-the relay's [client or peer session limits](/bin/relay/config#session-and-peer):
-a session that goes past one is closed with `TOO_MANY_REQUESTS`. On
+the relay, and subscriptions held on it, by any one session. Compare announces
+with the relay's [client or peer session limits](/bin/relay/config#session-and-peer),
+past which a session is closed with `TOO_MANY_REQUESTS`, and subscriptions with
+its QUIC `max_streams`, which bounds them. On
 `sessions.json` a peak never goes down while the label has a session; on the
 totals and presence tracks it never goes down while the track lives. Summing
 nodes or labels takes the largest.

@@ -133,6 +133,7 @@ struct Track {
 // settings change, a terminal failure, or destroy drops it whole, which cancels
 // every pending call it holds.
 struct Connection {
+	uint64_t revision = 0;
 	std::string url;
 	std::string broadcast;
 
@@ -145,7 +146,7 @@ struct Connection {
 	std::shared_ptr<moq::BroadcastConsumer> consumer;
 	std::shared_ptr<moq::MediaCatalogConsumer> catalog;
 
-	// The connect, then the session's status transitions.
+	// The connect, then the session's lifecycle revisions.
 	std::optional<moq::Continuation> session_call;
 	// Waiting for the next publisher instance.
 	std::optional<moq::Continuation> available_call;
@@ -201,9 +202,9 @@ static void moq_source_on_broadcast(struct moq_source *ctx, const std::shared_pt
 				    moq::expected<std::shared_ptr<moq::BroadcastConsumer>> result);
 static void moq_source_on_catalogs(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
 				   moq::expected<std::shared_ptr<moq::MediaCatalogConsumer>> result);
-static void moq_source_watch_status(struct moq_source *ctx, const std::shared_ptr<Connection> &conn);
-static void moq_source_on_status(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
-				 moq::expected<moq::ConnectionStatus> result);
+static void moq_source_watch_state(struct moq_source *ctx, const std::shared_ptr<Connection> &conn);
+static void moq_source_on_state(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
+				moq::expected<moq::ConnectionState> result);
 static void moq_source_on_catalog(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
 				  moq::expected<std::optional<moq::Catalog>> result);
 static void moq_source_next_catalog(struct moq_source *ctx, const std::shared_ptr<Connection> &conn);
@@ -402,8 +403,9 @@ static void moq_source_on_connect(struct moq_source *ctx, const std::shared_ptr<
 	}
 
 	conn->session = *result;
-	LOG_INFO("MoQ session connected (connect %llu)", (unsigned long long)conn->session->connects());
-	moq_source_watch_status(ctx, conn);
+	moq_source_on_state(ctx, conn, conn->session->state());
+	if (ctx->connection != conn)
+		return;
 
 	// Wait for the broadcast to be announced. Announcements arrive over the session
 	// after it connects, so resolving against only what is announced *now* would race
@@ -475,15 +477,16 @@ static void moq_source_on_catalogs(struct moq_source *ctx, const std::shared_ptr
 }
 
 // Follows the session's connect and reconnect transitions until it gives up.
-static void moq_source_watch_status(struct moq_source *ctx, const std::shared_ptr<Connection> &conn)
+static void moq_source_watch_state(struct moq_source *ctx, const std::shared_ptr<Connection> &conn)
 {
-	conn->session_call = conn->session->status().then(
-		ctx->worker.Executor(),
-		moq_source_current<moq::expected<moq::ConnectionStatus>>(ctx, conn, moq_source_on_status));
+	conn->session_call =
+		conn->session->state_changed(conn->revision)
+			.then(ctx->worker.Executor(),
+			      moq_source_current<moq::expected<moq::ConnectionState>>(ctx, conn, moq_source_on_state));
 }
 
-static void moq_source_on_status(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
-				 moq::expected<moq::ConnectionStatus> result)
+static void moq_source_on_state(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
+				moq::expected<moq::ConnectionState> result)
 {
 	if (!result) {
 		// Reconnecting gave up (or the relay refused us). Tear down every
@@ -493,19 +496,17 @@ static void moq_source_on_status(struct moq_source *ctx, const std::shared_ptr<C
 		return;
 	}
 
-	switch (*result) {
-	case moq::ConnectionStatus::kConnected:
-		// `available()` hands out the broadcast announced over the new connect; nothing to redo here.
-		LOG_INFO("MoQ session reconnected (connect %llu)", (unsigned long long)conn->session->connects());
-		break;
-	case moq::ConnectionStatus::kDisconnected:
-		LOG_WARNING("MoQ session dropped, reconnecting");
-		break;
-	case moq::ConnectionStatus::kMigrating:
-		LOG_INFO("MoQ session migrating");
-		break;
+	conn->revision = result->revision;
+	if (result->failure)
+		LOG_WARNING("MoQ connection attempt failed: %s", result->failure->to_string().c_str());
+	if (result->phase == moq::ConnectionPhase::kClosed) {
+		moq_source_fail_locked(ctx);
+		return;
 	}
-	moq_source_watch_status(ctx, conn);
+	if (result->phase == moq::ConnectionPhase::kConnected)
+		LOG_INFO("MoQ session connected (connect %llu)", (unsigned long long)result->connects);
+
+	moq_source_watch_state(ctx, conn);
 }
 
 static void moq_source_next_catalog(struct moq_source *ctx, const std::shared_ptr<Connection> &conn)

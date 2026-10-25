@@ -59,11 +59,19 @@ name = "ts_schedule"
 harness = false
 
 [[bench]]
+name = "ts_programs"
+harness = false
+
+[[bench]]
 name = "export"
 harness = false
 
 [[bench]]
 name = "jitter"
+harness = false
+
+[[bench]]
+name = "decode_clock"
 harness = false
 
 [[bench]]

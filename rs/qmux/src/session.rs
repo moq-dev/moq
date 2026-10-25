@@ -662,6 +662,35 @@ impl poll::Session for Session {
 		})
 	}
 
+	fn poll_open_request(
+		&mut self,
+		cx: &mut Context<'_>,
+		options: poll::SendOptions<'_, SendGroup>,
+	) -> Poll<Result<Option<poll::BiStreams<Self>>, Error>> {
+		let waiter = self.park.hold(cx);
+		let mut state = self.inner.lock();
+		if let Some(err) = &state.closed {
+			return Poll::Ready(Err(err.clone()));
+		}
+		// A session started on an out-of-band protocol (a WebSocket subprotocol) runs before
+		// the peer's transport parameters arrive. Until then its credit is unknown, not spent.
+		if !state.established {
+			waiter.register(&mut state.establish_waiters);
+			return Poll::Pending;
+		}
+		let id = state.conn.streams().open(Dir::Bi, to_quic(options));
+		if id.is_some() {
+			state.driver.wake();
+		}
+		drop(state);
+		Poll::Ready(Ok(id.map(|id| {
+			(
+				SendStream::new(self.inner.clone(), id),
+				RecvStream::new(self.inner.clone(), id),
+			)
+		})))
+	}
+
 	fn send_group(&mut self, priority: i64) -> Option<SendGroup> {
 		Some(Session::send_group(self, priority))
 	}

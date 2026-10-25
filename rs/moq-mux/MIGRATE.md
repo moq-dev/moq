@@ -4,18 +4,21 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### TS video timestamps belong to access-unit starts (#6534)
+### `Programs::finish` returns the program broadcasts
 
-`ts::Import` assembles H.264/H.265 across PES boundaries instead of flushing each PES.
-A PES PTS stamps the AU starting there once. Multiple AUs in one PES need anchored
-POC plus declared proportional timing: AVC's TS timing descriptor needs both
-`fixed_frame_rate_flag` and `temporal_poc_flag`, alongside fixed-rate SPS VUI;
-HEVC needs VUI's `vui_poc_proportional_to_timing_flag`. Each field of field-coded video is
-its own AU, so a field pair in one PES needs that clock too. Configure the encoder/muxer to declare that
-clock, or supply each AU's PTS in its own PES. Missing timing now ends the import
-instead of repeating a timestamp. Packet loss discards the unconfirmed AU tail;
-codec-proven completed AUs remain published. Call `finish()` to drain a clean tail.
-Raw elementary, RTSP, and FFI timestamp modes are unchanged.
+`Programs::finish` now returns each program's `broadcast::Producer` instead of `()`.
+Hand them, with the `Programs` that owns their tracks, to the new `moq_mux::Linger` to keep the finished programs up for a fixed time from the end:
+
+```rust
+let broadcasts = programs.finish()?;
+moq_mux::Linger::new(broadcasts, programs, moq_mux::Linger::DEFAULT).wait().await;
+```
+
+### TS service information expires on the program clock
+
+TS import retracts SI sub-tables and incomplete generations that stop repeating within their table's maximum interval (30 seconds for unknown tables).
+Repeat current tables within that interval; stale tables no longer remain advertised indefinitely.
+Host time and stalled PCR do not age SI, and existing readers can finish snapshots they already hold.
 
 ### Passthrough fMP4 refuses a rewound group as `TimestampRewind` (#6426)
 
@@ -98,12 +101,6 @@ Recordings published with `pes` framing no longer export; import their source ag
 
 `container::fmp4::Wire::new` returns `Result<Wire>`, as `Wire::from_init` already did, and refuses any other handler instead of treating it as data.
 Handle the error from `Wire::new`.
-
-### `ts::Programs::finish` returns each program's `Finish` (#5795)
-
-`Programs::finish` returns `anyhow::Result<Vec<moq_net::broadcast::Finish>>` instead of `anyhow::Result<()>`.
-Each handle keeps its program's broadcast servable until its media is stale, and dropping it closes that program.
-Await `Finish::wait` on each handle to linger, or drop the handles to close every program now.
 
 ### Timeline durations are hints (#5715)
 

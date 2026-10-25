@@ -47,16 +47,18 @@ alive, so retaining it costs memory a peer controls. Candidate bounds:
   stream; keep the entry until the subscriber closes its side, with our
   subscriber holding it open until its joining FETCH resolves. Drafts 14 to 16
   share the control stream and have no such signal.
-- **The subscription limit.** A finished entry stays charged to the peer's
-  `session::Limits::subscriptions`, released when its FETCH takes it, the peer
-  cancels, or a new subscription needs the room (oldest finished entry first).
-  This works on every draft, and a peer that never sends the FETCH costs no
-  more than an open subscription.
+- **The request window.** On drafts 14 to 16 a finished entry keeps its
+  SUBSCRIBE's request permit, so it counts against the window that
+  `session::Limits` sizes, released when its FETCH takes it, the peer
+  cancels, or a new request needs the room (oldest finished entry first). A
+  peer that never sends the FETCH costs no more than an open subscription.
+  There is no per-session subscription limit to charge instead: stream credit
+  bounds subscriptions on later drafts.
 - **The session alone.** Grows with every subscription a long-lived relay
   session ever makes, so probably not bounded enough.
 
-Recommendation: the subscription limit, plus the request close where the
-draft has one. Keep only entries that can be answered (`Joined::Group`); an
+Recommendation: the request close where the draft has one, and the request
+window on drafts 14 to 16. Keep only entries that can be answered (`Joined::Group`); an
 unsubscribed or refused subscription still drops its entry at once. The
 entry must not outlive what authorized the subscription: when its request
 token's grant expires or is revoked, or the session grant no longer covers
@@ -87,4 +89,3 @@ refused.
 
 - [JS joining FETCH](/quest/m2/ietf-js-joining-fetch.md) - the JS publisher mirrors the bound settled here
 - [Interop covers late join and FETCH](/quest/m1/interop-coverage/late-join.md) - the cross-implementation joining FETCH case
-- [IETF request order](/quest/m2/ietf-request-order.md) - d14/15 request IDs and their ordering races

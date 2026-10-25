@@ -6,6 +6,7 @@
 //! container; [`Import`] parses external fMP4 streams and [`Export`]
 //! produces them.
 
+mod edit;
 mod export;
 pub mod fragment;
 mod fragmenter;
@@ -303,6 +304,10 @@ pub enum Error {
 	/// delivered the codec configuration their track needs.
 	#[error("renditions {0:?} never delivered their codec configuration")]
 	TrackUndescribed(Vec<String>),
+
+	/// A track's edit list does more than delay the track and start its media at one time.
+	#[error("unsupported edit list: {0}")]
+	UnsupportedEditList(&'static str),
 }
 
 impl From<mp4_atom::Error> for Error {
@@ -491,7 +496,9 @@ pub(crate) fn decode(data: Bytes, timestamp: Option<Timestamp>, track: Track) ->
 		defaults,
 	} = track;
 
-	let mut cursor = std::io::Cursor::new(&data);
+	// A slice cursor like the other fMP4 decodes: mp4-atom's `Any` decoder is large and compiles
+	// once per reader type.
+	let mut cursor = std::io::Cursor::new(data.as_ref());
 	let mut moof = None;
 	let mut mdat = None;
 

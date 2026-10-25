@@ -8,7 +8,7 @@ import { Producer as GroupProducer } from "./group.ts";
 import { HopSchema, Route } from "./hop.ts";
 import { spreadHash } from "./internal.ts";
 import type { Consumer, Table } from "./origin.ts";
-import { Preference, Producer } from "./origin.ts";
+import { Producer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { readsFrom } from "./resume.test-util";
 import { Timescale } from "./time.ts";
@@ -920,88 +920,14 @@ test("a request only wakes for its own path", async () => {
 	origin.close();
 });
 
-test("a request is unroutable only when nothing can answer it", async () => {
-	const origin = new Producer();
-	const consumer = origin.consume();
-	const path = Path.from("nowhere");
-
-	// Nothing published, nothing attached, nothing coming: waiting here is futile.
-	const request = consumer.request(path);
-	expect(request.active.peek()).toBeUndefined();
-	expect(request.unroutable.peek()).toBe(true);
-
-	// A session attaches: now the path is merely unanswered.
-	const detach = wireOf(origin).attach(false);
-	await settle();
-	expect(request.unroutable.peek()).toBe(false);
-
-	// It goes back to unroutable when the session dies with nothing to replace it.
-	detach();
-	await settle();
-	expect(request.unroutable.peek()).toBe(true);
-
-	request.close();
-	origin.close();
-});
-
-test("a reconnecting connection keeps requests pending across the gap", async () => {
-	const origin = new Producer();
-	const consumer = origin.consume();
-	const path = Path.from("later");
-
-	// What a reconnecting connection holds: no session yet, but one is coming. This is the
-	// page-load window, and it must not read as a missing broadcast.
-	const release = wireOf(origin).expect();
-
-	const request = consumer.request(path);
-	expect(request.unroutable.peek()).toBe(false);
-
-	// A session comes and goes; the expectation still covers the gap.
-	const detach = wireOf(origin).attach(true);
-	await settle();
-	detach();
-	await settle();
-	expect(request.unroutable.peek()).toBe(false);
-
-	// Only giving up for good makes it unroutable.
-	release();
-	await settle();
-	expect(request.unroutable.peek()).toBe(true);
-
-	request.close();
-	origin.close();
-});
-
-test("a routed path is never unroutable", async () => {
-	const origin = new Producer();
-	const consumer = origin.consume();
-	const path = Path.from("here");
-
-	const broadcast = publish(origin, path);
-	const request = consumer.request(path);
-
-	// Routed with nothing attached at all: the route is the answer, so no answerer is needed.
-	expect(request.active.peek()).toBeDefined();
-	expect(request.unroutable.peek()).toBe(false);
-
-	// Unpublishing with nothing able to answer flips it.
-	broadcast.close();
-	await settle();
-	expect(request.active.peek()).toBeUndefined();
-	expect(request.unroutable.peek()).toBe(true);
-
-	request.close();
-	origin.close();
-});
-
-test("a request on a closed origin is unroutable", () => {
+test("a request on a closed origin ends at once", () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
 	origin.close();
 
 	const request = consumer.request(Path.from("gone"));
 	expect(request.active.peek()).toBeUndefined();
-	expect(request.unroutable.peek()).toBe(true);
+	expect(request.closed.peek()).toBeNull();
 	request.close();
 });
 
@@ -1034,28 +960,6 @@ test("a seeded route still notifies when it retracts", async () => {
 	request.close();
 	upstream.close();
 	origin.close();
-});
-
-test("closing the origin makes an existing request unroutable", async () => {
-	const origin = new Producer();
-	const path = Path.from("doomed");
-
-	const detach = wireOf(origin).attach(true);
-	const request = origin.consume().request(path);
-	expect(request.unroutable.peek()).toBe(false);
-
-	// The session is still attached, but a closed origin can never answer through it.
-	origin.close();
-	await settle();
-	expect(request.unroutable.peek()).toBe(true);
-
-	// The attached session releasing afterwards must not drive the count below zero and
-	// resurrect the idea that something can answer.
-	detach();
-	await settle();
-	expect(request.unroutable.peek()).toBe(true);
-
-	request.close();
 });
 
 test("createBroadcast is invisible to everyone until announce", async () => {
@@ -1172,85 +1076,6 @@ test("the cheapest received route competes with the local broadcast, not the new
 	cheap();
 	upstream.close();
 	origin.close();
-});
-
-test("a preferred link wins over a cheaper one, fails over, and moves back", async () => {
-	const origin = new Producer();
-	const consumer = origin.consume();
-	const path = Path.from("room");
-	const upstream = new BroadcastProducer();
-	const served: string[] = [];
-	const via = (name: string) => () => {
-		served.push(name);
-		return upstream.consume();
-	};
-	const route = (cost: bigint) => Route.normalize({ epoch: EPOCH, hops: [PEER], cost });
-	const preferred = origin.withPreference(Preference(1));
-	const backup = serve(origin, path, via("secondary"), route(1n));
-	let primary = serve(preferred, path, via("primary"), route(10n));
-
-	expect((await announcedView(consumer)).peek().get(path)).toEqual(route(10n));
-	const request = consumer.request(path);
-	await settle();
-	expect(request.active.peek()).toBeDefined();
-	expect(served).toEqual(["primary"]);
-
-	// Same epoch, so the request resumes on the secondary and back again.
-	primary();
-	await settle();
-	expect(request.active.peek()).toBeDefined();
-	expect(served).toEqual(["primary", "secondary"]);
-	primary = serve(preferred, path, via("primary"), route(10n));
-	await settle();
-	expect(request.active.peek()).toBeDefined();
-	expect(served).toEqual(["primary", "secondary", "primary"]);
-
-	// A newer epoch outranks preference.
-	const newer = Epoch.parse("01900000-0000-7000-8000-000000000002");
-	const fresh = serve(origin, path, via("newer"), Route.normalize({ epoch: newer, hops: [PEER], cost: 1n }));
-	expect((await announcedView(consumer)).peek().get(path)?.epoch).toBe(newer);
-
-	request.close();
-	fresh();
-	primary();
-	backup();
-	upstream.close();
-	origin.close();
-});
-
-test("a demoted link ranks below an unranked one, even when cheaper", async () => {
-	const origin = new Producer();
-	const consumer = origin.consume();
-	const path = Path.from("room");
-	const upstream = new BroadcastProducer();
-	const served: string[] = [];
-	const via = (name: string) => () => {
-		served.push(name);
-		return upstream.consume();
-	};
-	const route = (cost: bigint) => Route.normalize({ epoch: EPOCH, hops: [PEER], cost });
-	const demoted = serve(origin.withPreference(Preference(-1)), path, via("demoted"), route(1n));
-	const unranked = serve(origin, path, via("unranked"), route(10n));
-
-	expect((await announcedView(consumer)).peek().get(path)).toEqual(route(10n));
-	const request = consumer.request(path);
-	await settle();
-	expect(request.active.peek()).toBeDefined();
-	expect(served).toEqual(["unranked"]);
-
-	request.close();
-	unranked();
-	demoted();
-	upstream.close();
-	origin.close();
-});
-
-test("a preference outside a signed byte is refused", () => {
-	expect(Number(Preference(-128))).toBe(-128);
-	expect(Number(Preference(127))).toBe(127);
-	expect(() => Preference(128)).toThrow(RangeError);
-	expect(() => Preference(-129)).toThrow(RangeError);
-	expect(() => Preference(0.5)).toThrow(RangeError);
 });
 
 test("a handle serves a request under live", async () => {
@@ -1500,9 +1325,8 @@ test("a rejected request is not asked of the same route again", async () => {
 	await settle();
 
 	// A refusal is authoritative: the path resolves to nothing rather than landing back on
-	// the queue, so the handler is asked once and the request reads as unroutable.
+	// the queue, so the handler is asked once.
 	expect(request.active.peek()).toBeUndefined();
-	expect(request.unroutable.peek()).toBe(true);
 	const next = it.next();
 	expect(await Promise.race([next.then(() => "queued"), settle().then(() => "idle")])).toBe("idle");
 
@@ -1623,7 +1447,6 @@ test("a request on a replaced instance ends once its source goes", async () => {
 	disposeOlder();
 	await settle();
 	expect(request.active.peek()).toBeUndefined();
-	expect(request.unroutable.peek()).toBe(true);
 	expect(request.closed.peek()).toBeInstanceOf(StreamError);
 
 	request.close();
@@ -1819,7 +1642,6 @@ test("a refusal is terminal, never falling through to a broader route", async ()
 	// The narrow route spoke for the path, so the broader one is never asked.
 	expect(await request.closed).toBe(err);
 	expect(request.active.peek()).toBeUndefined();
-	expect(request.unroutable.peek()).toBe(true);
 	expect(await Promise.race([wideAsked.then(() => "asked"), settle().then(() => "idle")])).toBe("idle");
 
 	request.close();
@@ -2105,6 +1927,120 @@ test("a rooted producer shares the table and enforces its pattern union", async 
 	origin.close();
 });
 
+test("closing a derived handle releases only what it registered", async () => {
+	const origin = new Producer();
+	const owned = publish(origin, Path.from("lobby"));
+	const scoped = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from("room"))]));
+	const wide = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.all()]));
+	const inside = publish(scoped, Path.from("room/alice"));
+	const claim = scoped.dynamic(Path.from("room/claim"));
+	const ranked = wide.dynamic(Path.from("ranked"));
+	const peer = serve(scoped, Path.from("room/peer"), provider(new BroadcastProducer()));
+
+	scoped.close();
+	wide.close();
+
+	expect(origin.closed.peek()).toBeUndefined();
+	expect(owned.closed.peek()).toBeUndefined();
+	expect(inside.closed.peek()).toBeNull();
+	const routes = (await announcedView(origin)).peek();
+	expect([...routes.keys()]).toEqual([Path.from("lobby")]);
+
+	// A released handle refuses new work, so a borrower notices instead of publishing into nothing.
+	expect(() => scoped.createBroadcast(Path.from("room/late"))).toThrow("origin handle is closed");
+	scoped.dynamic(Path.from("room/late")).close();
+	expect((await announcedView(origin)).peek().has(Path.from("room/late"))).toBe(false);
+
+	// The owner and fresh handles keep working.
+	const again = publish(origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.all()])), Path.from("room/bob"));
+	expect((await announcedView(origin)).peek().has(Path.from("room/bob"))).toBe(true);
+
+	// Closing what was already released is a no-op.
+	claim.close();
+	ranked.close();
+	peer();
+	scoped.close();
+	again.close();
+	origin.close();
+	expect(owned.closed.peek()).toBeNull();
+});
+
+test("a broadcast a derived handle released cannot announce again", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const scoped = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.all()]));
+	const path = Path.from("room");
+	const broadcast = publish(scoped, path);
+	const held = await routed(consumer, path);
+
+	scoped.close();
+
+	// The application's clone keeps the broadcast open, but the released handle no longer routes it.
+	expect(broadcast.closed.peek()).toBeUndefined();
+	expect(() => broadcast.announce()).toThrow("broadcast is closed");
+	expect((await announcedView(origin)).peek().has(path)).toBe(false);
+
+	held?.close();
+	origin.close();
+});
+
+test("closing a derived handle withdraws the sessions and answers attached through it", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const scoped = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.all()]));
+	const path = Path.from("blind");
+
+	const request = consumer.request(path);
+	const detach = wireOf(scoped).attach(false);
+	const snapshot = wireOf(scoped).snapshot(Path.empty());
+	const interests: string[] = [];
+	const unlisten = wireOf(scoped).interests((prefix, wanted) => interests.push(`${wanted ? "+" : "-"}${prefix}`));
+	const announced = consumer.announced();
+	const upstream = new BroadcastProducer();
+	const withdraw = wireOf(scoped).answer(path, upstream.consume());
+	expect(withdraw).toBeDefined();
+	await settle();
+	expect(request.active.peek()).toBeDefined();
+	expect(consumer.discovery.peek()).toBe(false);
+	expect(announced.synced.peek()).toBe(false);
+	expect(interests.splice(0)).toEqual(["+"]);
+
+	scoped.close();
+	await settle();
+
+	// The session stops asking its peer for announcements, now and for later watches.
+	expect(interests.splice(0)).toEqual(["-"]);
+	consumer.request(Path.from("later"), { announced: true }).close();
+	expect(interests).toEqual([]);
+
+	// The answer, the attached session, and the initial set in flight went with the handle.
+	expect(request.active.peek()).toBeUndefined();
+	expect(consumer.discovery.peek()).toBeUndefined();
+	expect(announced.synced.peek()).toBe(true);
+	const retry = consumer.request(path);
+
+	// A session still using the released handle cannot answer, count as attached, or
+	// hold readers unsynced.
+	expect(wireOf(scoped).answer(path, new BroadcastProducer().consume())).toBeUndefined();
+	wireOf(scoped).attach(false);
+	wireOf(scoped).snapshot(Path.empty());
+	await settle();
+	expect(retry.active.peek()).toBeUndefined();
+	expect(consumer.discovery.peek()).toBeUndefined();
+	expect(announced.synced.peek()).toBe(true);
+
+	// The session's own teardown afterwards is a no-op.
+	withdraw?.();
+	snapshot();
+	unlisten();
+	expect(interests).toEqual([]);
+	detach();
+	announced.close();
+	retry.close();
+	request.close();
+	origin.close();
+});
+
 test("a scoped dynamic only serves allowed paths and presents relative requests", async () => {
 	const origin = new Producer();
 	const scoped = origin.scope(Path.from("tenant"), new Path.Patterns([Path.Pattern.parse("room/*/chat")]));
@@ -2113,7 +2049,7 @@ test("a scoped dynamic only serves allowed paths and presents relative requests"
 	expect(dynamic.prefix).toBe(Path.from("room"));
 	const denied = origin.request(Path.from("tenant/room/alice/video"));
 	await new Promise<void>((resolve) => setImmediate(resolve));
-	expect(denied.unroutable.peek()).toBe(true);
+	expect(denied.active.peek()).toBeUndefined();
 	const request = origin.request(Path.from("tenant/room/alice/chat"));
 	const requests = dynamic.requested();
 	const pending = await requests.next();
@@ -2415,17 +2351,14 @@ test("a newer epoch ends pinned and unpinned requests on the replaced publisher 
 	const second = origin.createBroadcast(path);
 	second.announce({ epoch: newerEpoch });
 	expect(pinned.active.peek()).toBeUndefined();
-	expect(pinned.unroutable.peek()).toBe(true);
 	// The replaced publisher closed: the unpinned request ends rather than move to the newer one.
 	expect(unpinned.active.peek()).toBeUndefined();
-	expect(unpinned.unroutable.peek()).toBe(true);
 	// A fresh unpinned request names the publisher it actually resolved.
 	const fresh = reader.request(path);
 	expect(fresh.active.peek()?.epoch).toBe(newerEpoch);
 	fresh.close();
 	const stale = reader.request(path, { epoch: EPOCH });
 	expect(stale.active.peek()).toBeUndefined();
-	expect(stale.unroutable.peek()).toBe(true);
 	stale.close();
 	pinned.close();
 	unpinned.close();
@@ -2446,7 +2379,6 @@ test("a request held across an epoch change asks again and never takes the old h
 	old?.accept(new BroadcastProducer().consume());
 	await settle();
 	expect(pinned.active.peek()).toBeUndefined();
-	expect(pinned.unroutable.peek()).toBe(true);
 	expect(unpinned.active.peek()).toBeUndefined();
 	expect(current.active.peek()).toBeUndefined();
 	const next = (await requests.next()).value;
@@ -2503,10 +2435,8 @@ test.each([
 	await settle();
 	expect(held.active.peek()).toBe(resolved);
 	expect(held.closed.peek()).toBeUndefined();
-	expect(held.unroutable.peek()).toBe(false);
 	expect(same.active.peek()?.epoch).toBe(from);
 	expect(pinned.active.peek()?.epoch).toBe(from);
-	expect(pinned.unroutable.peek()).toBe(false);
 
 	// The subscription already open stays on the old answer.
 	oldTrack.appendGroup().close();
@@ -2654,7 +2584,6 @@ test("an update does not override route selection: another claim at the epoch ke
 	(await secondRequests.next()).value?.accept(replacement);
 	await settle();
 	expect(held.active.peek()?.epoch).toBe(EPOCH);
-	expect(held.unroutable.peek()).toBe(false);
 	expect(fresh.active.peek()?.epoch).toBe(EPOCH);
 	const subscription = fresh.active.peek()?.track("video").subscribe();
 	track.writeGroup(new GroupProducer(7));
