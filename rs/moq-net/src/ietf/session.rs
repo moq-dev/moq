@@ -164,7 +164,7 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 	// GOAWAY wiring: the public Session holds one half (drain trigger, received
 	// signal), the protocol tasks below hold the other.
 	// A moq-transport client MUST send an empty New Session URI: it cannot tell a
-	// server to open connections (draft-19 sect 10.4).
+	// server to open connections (draft-22 section 9.2).
 	let (goaway_handle, goaway) = crate::goaway::Handle::new(!client);
 
 	// What the peer's connection credential earns by default, from the caller's real
@@ -754,7 +754,7 @@ pub(crate) fn decode_peer_setup(
 	client: bool,
 ) -> Result<(peer::Peer, Option<String>), Error> {
 	let (params, _) = ietf::Parameters::decode_slice(&parameters, version)?;
-	// A server sends neither PATH nor AUTHORITY (draft-21 sections 9.1.1 and 9.1.2).
+	// A server sends neither PATH nor AUTHORITY (draft-22 sections 9.1.1 and 9.1.2).
 	if client && params.get_bytes(ietf::ParameterBytes::Path).is_some() {
 		return Err(SessionError::InvalidPath.into());
 	}
@@ -762,7 +762,7 @@ pub(crate) fn decode_peer_setup(
 		return Err(SessionError::InvalidAuthority.into());
 	}
 	// Nothing here uses the peer's token, but one that cannot be decoded still closes the
-	// session (draft-21 section 8.9).
+	// session (draft-22 section 8.9).
 	super::token::from_setup(&params, version)?;
 	let implementation = crate::setup::decode_implementation(params.get_bytes(ietf::ParameterBytes::Implementation))?;
 	Ok((peer_from_params(&params, version)?, implementation))
@@ -921,12 +921,12 @@ enum UniType {
 
 impl UniType {
 	/// `None` is a type the draft does not define, which MUST close the session
-	/// (draft-21 section 6.4.1, and its equivalent in every draft we negotiate).
+	/// (draft-22 section 6.4.1, and its equivalent in every draft we negotiate).
 	fn classify(kind: u64, version: Version) -> Option<Self> {
 		// Draft-14-17 use SUBGROUP_HEADER types 0x10-0x1D and 0x30-0x3D; draft-18 adds
 		// 0x40 (FIRST_OBJECT), also covering 0x50-0x5D and 0x70-0x7D. A reserved
 		// SUBGROUP_ID_MODE (0b11) or a bit the draft lacks is invalid, which MUST close the
-		// session too (draft-21 section 11.3.1).
+		// session too (draft-22 section 11.3.1).
 		if ietf::GroupFlags::decode(kind, version).is_ok() {
 			return Some(Self::Subgroup);
 		}
@@ -1133,7 +1133,7 @@ impl Uni {
 				let res = subscriber.recv_group(&mut reader).await;
 				stop_on_error(&mut reader, res)?;
 			}
-			// A fill fetch stream carries the head of the group a draft-20 subscription
+			// A fill fetch stream carries the head of the group a draft-22 subscription
 			// joined part way through. One answering no fill of ours is refused inside.
 			UniType::Fetch => {
 				let mut reader = reader.with_version(version);
@@ -1456,8 +1456,8 @@ pub(super) fn control_stream_error(err: Error) -> Error {
 /// Read every message after SETUP on the peer's SETUP stream, which may only be GOAWAY.
 ///
 /// Reading continues past the first GOAWAY until the peer FINs or the session closes.
-/// Dropping the reader would STOP_SENDING the peer's SETUP uni stream, which draft-19
-/// section 3.3 forbids closing at the transport layer mid-session, so a strict peer would
+/// Dropping the reader would STOP_SENDING the peer's SETUP uni stream, which draft-22
+/// section 6.4.1 forbids closing at the transport layer mid-session, so a strict peer would
 /// tear the session down as a PROTOCOL_VIOLATION in the middle of the drain we are honoring.
 async fn read_goaways<R: crate::transport::poll::RecvStream>(
 	mut reader: Reader<R, Version>,
@@ -2204,8 +2204,8 @@ mod tests {
 	}
 
 	/// From draft-16 each request has a stream of its own, so at a foreign peer the broader
-	/// one waits for the peer to close the narrower one's, which ends with a FIN until
-	/// draft-19 makes it a reset: a peer that never closes it never sees the two overlap.
+	/// one waits for the peer to close the narrower one's, which ends with a FIN on
+	/// draft-18 and a reset on draft-22: a peer that never closes it never sees the two overlap.
 	#[moq_clock::test]
 	async fn a_broader_watch_waits_for_the_narrower_to_leave_the_wire() {
 		for version in [Version::Draft16, Version::Draft17, Version::Draft18, Version::Draft22] {
@@ -3037,7 +3037,7 @@ mod tests {
 		}
 	}
 
-	/// Start a draft-19 session with SETUP already settled, so bidi requests run immediately.
+	/// Start a draft-22 session with SETUP already settled, so bidi requests run immediately.
 	fn bidi_driver(session: crate::lite::test_transport::ScriptedSession, publish: Option<origin::Consumer>) -> Driver {
 		start(Config {
 			runtime: crate::time::sim(),
@@ -3227,7 +3227,7 @@ mod tests {
 				(3, true),
 				(255, true),
 			] {
-				// FILL_PARAMETERS starts in draft-20.
+				// FILL_PARAMETERS starts in draft-22.
 				if nested && version == Version::Draft18 {
 					continue;
 				}
@@ -3590,7 +3590,7 @@ mod tests {
 
 	/// The server's AUTHORIZATION TOKEN is decoded even though a client has no use for it: a
 	/// malformed one closes the session, and a registration overflowing our cache of 0 is
-	/// read as the value it carries (draft-21 section 9.1.4).
+	/// read as the value it carries (draft-22 section 9.1.4).
 	#[moq_clock::test]
 	async fn a_server_setup_token_decodes_by_the_setup_rules() {
 		for version in [Version::Draft18, Version::Draft22] {

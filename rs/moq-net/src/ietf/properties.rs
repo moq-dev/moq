@@ -61,7 +61,7 @@ pub struct Properties {
 	/// `None` declares no timeline, so the subscriber times objects by arrival.
 	pub timescale: Option<Timescale>,
 
-	/// Publisher priority for groups whose header omits it. Draft-21 section 10.4
+	/// Publisher priority for groups whose header omits it. Draft-22 section 10.4
 	/// assigns property 0x0e and defaults to wire priority 128 when absent.
 	pub priority: Option<u8>,
 

@@ -30,10 +30,7 @@ pub struct SubscribeTracks<'a> {
 	pub group_order: Option<GroupOrder>,
 	/// The default Location Filter of each PUBLISH subscription.
 	pub filter: Option<Filter>,
-	/// FILL_PARAMETERS (draft-20+). Each PUBLISH starts paused, where a fill opens nothing,
-	/// even once resumed (draft-22 section 3.4.1), so the publisher ignores it.
-	pub fill: Option<super::Fill>,
-	/// INCLUDE_PROPERTIES (draft-20+): whether each PUBLISH carries Track Properties.
+	/// INCLUDE_PROPERTIES (draft-22): whether each PUBLISH carries Track Properties.
 	pub properties_wanted: bool,
 	/// NEW_GROUP_REQUEST, which each PUBLISH applies as it first forwards.
 	pub new_group: Option<u64>,
@@ -77,7 +74,7 @@ impl Message for SubscribeTracks<'_> {
 		}
 		let request_id = RequestId::decode(r, version)?;
 		let prefix = decode_namespace(r)?;
-		// From draft-19 any parameter a SUBSCRIBE takes is legal here (section 10.19.1);
+		// From draft-22 any parameter a SUBSCRIBE takes is legal here (section 3.6.2);
 		// draft-18 allows only AUTHORIZATION_TOKEN and FORWARD. Those that only make sense
 		// on one subscription, such as RENDEZVOUS_TIMEOUT or a delivery timeout, are read
 		// and dropped.
@@ -91,7 +88,9 @@ impl Message for SubscribeTracks<'_> {
 			0x20 => subscriber_priority: Option<u8> where defaults,
 			0x21 => filter: Option<Filter> where defaults,
 			0x22 => group_order: Option<GroupOrder> where defaults,
-			0x23 => fill: Option<super::Fill> where Filter::is_draft22(version),
+			// Each PUBLISH starts paused, where a fill opens nothing, even once resumed
+			// (draft-22 section 3.4.1), so FILL_PARAMETERS is read and dropped.
+			0x23 => _fill: Option<super::Fill> where Filter::is_draft22(version),
 			0x25 => subgroup_filter: Vec<Opaque> where has_range_filters(version),
 			0x26 => object_id_filter: Vec<Opaque> where has_range_filters(version),
 			0x27 => priority_filter: Vec<Opaque> where has_range_filters(version),
@@ -118,7 +117,6 @@ impl Message for SubscribeTracks<'_> {
 			subscriber_priority,
 			group_order,
 			filter,
-			fill,
 			properties_wanted: include_properties.unwrap_or(true),
 			new_group,
 			range_filters,
@@ -140,7 +138,7 @@ pub(crate) fn has_subscribe_tracks(version: Version) -> bool {
 /// not PUBLISH, sent on that request's stream. The subscriber may SUBSCRIBE to it instead.
 ///
 /// Drafts 17 and 18 name it PUBLISH_BLOCKED and send it only when the publisher has run
-/// out of streams for PUBLISH; draft-19 renamed it and allows it for any reason.
+/// out of streams for PUBLISH; draft-22 renamed it and allows it for any reason.
 #[derive(Clone, Debug)]
 pub struct PublishSkipped<'a> {
 	/// The track's namespace below the request's prefix.
@@ -200,7 +198,6 @@ mod tests {
 			subscriber_priority: None,
 			group_order: None,
 			filter: None,
-			fill: None,
 			properties_wanted: true,
 			new_group: None,
 			range_filters: false,
@@ -265,10 +262,6 @@ mod tests {
 		let listing = SubscribeTracks {
 			subscriber_priority: Some(7),
 			filter: Some(Filter::NextObject),
-			fill: Some(super::super::Fill {
-				filter: Some(Filter::NextObject),
-				range_filters: false,
-			}),
 			new_group: Some(0),
 			..paused()
 		};

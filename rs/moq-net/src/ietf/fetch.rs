@@ -6,7 +6,6 @@ use crate::{
 	ietf::{
 		Filter, GroupOrder, Location, Opaque, Parameters, RequestId,
 		namespace::{decode_track, encode_namespace},
-		subscribe::has_range_filters,
 	},
 };
 
@@ -17,11 +16,11 @@ use super::Version;
 
 /// What a FETCH asks for.
 ///
-/// Through draft-19 a Fetch Type tag picks one of the first three. Draft-20 dropped the
+/// Through draft-18 a Fetch Type tag picks one of the first three. Draft-22 dropped the
 /// tag and the joining forms, leaving [`Self::Filtered`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FetchType<'a> {
-	/// An inclusive range of a track, through draft-19.
+	/// An inclusive range of a track, through draft-18.
 	Standalone {
 		namespace: Path<'a>,
 		track: Cow<'a, str>,
@@ -36,7 +35,7 @@ pub enum FetchType<'a> {
 		subscriber_request_id: RequestId,
 		group_id: u64,
 	},
-	/// A track, with the range as a LOCATION_FILTER, from draft-20 on. Unfiltered is
+	/// A track, with the range as a LOCATION_FILTER, from draft-22 on. Unfiltered is
 	/// everything from `{0, 0}` up to Largest Object.
 	Filtered {
 		namespace: Path<'a>,
@@ -76,7 +75,7 @@ impl Encode<Version> for FetchType<'_> {
 				subscriber_request_id.encode(w, version)?;
 				w.varint(*group_id)?;
 			}
-			// Draft-20 has no Fetch Type tag to write.
+			// Draft-22 has no Fetch Type tag to write.
 			FetchType::Filtered { .. } => return Err(EncodeError::Version),
 		}
 		Ok(())
@@ -135,7 +134,7 @@ pub struct Fetch<'a> {
 	/// left to wait without it. Never encoded; we send no fill timeout.
 	pub fill_timeout: bool,
 	/// Whether the requester wants Track Properties in FETCH_OK (INCLUDE_PROPERTIES,
-	/// draft-20+). Always `true` before draft-20, which has no way to opt out.
+	/// draft-22). Always `true` before draft-22, which has no way to opt out.
 	pub properties_wanted: bool,
 	/// The publisher instance the requester expects (MoQ Epoch, draft-17+). Only on a
 	/// request that names its track: a joining FETCH takes its subscription's.
@@ -316,8 +315,8 @@ pub struct FetchOk {
 	pub request_id: Option<RequestId>,
 	pub group_order: GroupOrder,
 	pub end_of_track: bool,
-	/// Drafts 14-19 use the last object plus one, or Object 0 for the whole End Group;
-	/// draft 20 and later use an inclusive End Location.
+	/// Drafts 14-18 use the last object plus one, or Object 0 for the whole End Group;
+	/// draft 22 and later use an inclusive End Location.
 	pub end_location: Location,
 	/// The track's properties, as SUBSCRIBE_OK carries them: MAX_CACHE_DURATION from the
 	/// draft-14/15 parameters, the Track Properties block from draft-16 on.
@@ -480,7 +479,7 @@ impl Decode<Version> for FetchHeader {
 	}
 }
 
-/// The bits of an Object's Serialization Flags (draft-20 section 11.4.4.1).
+/// The bits of an Object's Serialization Flags (draft-22 section 11.4).
 mod flag {
 	/// The two low bits, which spell the Subgroup ID rather than a presence bit.
 	pub const SUBGROUP: u64 = 0x03;
@@ -511,7 +510,7 @@ pub enum FetchSubgroup {
 }
 
 /// One Object on a fetch stream, from its Serialization Flags through its Properties
-/// (draft-20 section 11.4.4).
+/// (draft-22 section 11.4).
 ///
 /// The Object Payload Length and payload follow on the wire; they are streamed by the
 /// caller rather than buffered here, which is what keeps a large frame off the heap twice.
@@ -1076,7 +1075,7 @@ mod tests {
 	}
 }
 
-/// The Object serialization on a fetch stream (draft-20 section 11.4.4), which a fill's
+/// The Object serialization on a fetch stream (draft-22 section 11.4), which a fill's
 /// head arrives on.
 #[cfg(test)]
 mod object_tests {

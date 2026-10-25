@@ -26,7 +26,7 @@ const MSG_PARAM_PUBLISHER_PRIORITY = 0x0en;
 export const MSG_PARAM_FORWARD = 0x10n;
 export const MSG_PARAM_SUBSCRIBER_PRIORITY = 0x20n;
 const MSG_PARAM_GROUP_ORDER = 0x22n;
-/// INCLUDE_PROPERTIES, draft-20's opt-out from Track Properties.
+/// INCLUDE_PROPERTIES, draft-22's opt-out from Track Properties.
 const MSG_PARAM_INCLUDE_PROPERTIES = 0x35n;
 /// ROUTE_COST, from the MoQ Cluster extension. See `cluster.ts`.
 const MSG_PARAM_ROUTE_COST = 0x40b58n;
@@ -39,7 +39,7 @@ const MSG_PARAM_MAX_AGE = 0x915c6n;
 const MSG_PARAM_AUTHORIZATION_TOKEN = AUTHORIZATION_TOKEN;
 const MSG_PARAM_LARGEST_OBJECT = 0x09n;
 const MSG_PARAM_SUBSCRIPTION_FILTER = 0x21n;
-/// FILL_PARAMETERS, draft-20's request for a backfill.
+/// FILL_PARAMETERS, draft-22's request for a backfill.
 const MSG_PARAM_FILL_PARAMETERS = 0x23n;
 /// HOP_PATH, from the MoQ Cluster extension. See `cluster.ts`.
 const MSG_PARAM_HOP_PATH = 0x40b57n;
@@ -68,10 +68,6 @@ type ControlMessage =
 	| "namespace"
 	| "namespace-update";
 
-function draft20(version: IetfVersion): boolean {
-	return version >= Version.DRAFT_20;
-}
-
 /** True when this draft's definition of `message` includes `id`. */
 function allows(message: ControlMessage, version: IetfVersion, id: bigint): boolean {
 	const d14 = version === Version.DRAFT_14;
@@ -81,7 +77,7 @@ function allows(message: ControlMessage, version: IetfVersion, id: bigint): bool
 	const from16 = version >= Version.DRAFT_16;
 	const from17 = version >= Version.DRAFT_17;
 	const from18 = version >= Version.DRAFT_18;
-	const from19 = version >= Version.DRAFT_19;
+	const from22 = version >= Version.DRAFT_22;
 	const legacyForward = d15 || d16 || d17;
 	const auth = id === MSG_PARAM_AUTHORIZATION_TOKEN;
 	const forward = id === MSG_PARAM_FORWARD;
@@ -92,10 +88,10 @@ function allows(message: ControlMessage, version: IetfVersion, id: bigint): bool
 	const largest = id === MSG_PARAM_LARGEST_OBJECT;
 	const objectTimeout = id === MSG_PARAM_DELIVERY_TIMEOUT;
 	const subgroupTimeout = id === MSG_PARAM_SUBGROUP_DELIVERY_TIMEOUT && from18;
-	const range = id >= 0x25n && id <= 0x28n && from19;
-	const trackRange = id === MSG_PARAM_TRACK_PROPERTY_FILTER && from19;
-	const fill = id === MSG_PARAM_FILL_PARAMETERS && draft20(version);
-	const include = id === MSG_PARAM_INCLUDE_PROPERTIES && draft20(version);
+	const range = id >= 0x25n && id <= 0x28n && from22;
+	const trackRange = id === MSG_PARAM_TRACK_PROPERTY_FILTER && from22;
+	const fill = id === MSG_PARAM_FILL_PARAMETERS && from22;
+	const include = id === MSG_PARAM_INCLUDE_PROPERTIES && from22;
 	const newGroup = id === MSG_PARAM_NEW_GROUP_REQUEST && from16;
 	const epoch = id === MSG_PARAM_EPOCH && from17;
 
@@ -104,7 +100,7 @@ function allows(message: ControlMessage, version: IetfVersion, id: bigint): bool
 			return (
 				auth ||
 				forward ||
-				(from19 &&
+				(from22 &&
 					(objectTimeout ||
 						id === MSG_PARAM_MAX_CACHE_DURATION ||
 						subgroupTimeout ||
@@ -122,11 +118,11 @@ function allows(message: ControlMessage, version: IetfVersion, id: bigint): bool
 		case "publish-ok":
 			return (
 				expires ||
-				(!draft20(version) &&
+				(!from22 &&
 					(forward ||
 						priority ||
 						filter ||
-						(order && !from19) ||
+						order ||
 						objectTimeout ||
 						subgroupTimeout ||
 						newGroup))
@@ -173,15 +169,15 @@ function allows(message: ControlMessage, version: IetfVersion, id: bigint): bool
 			return auth || (forward && legacyForward) || id === MSG_PARAM_HIDDEN;
 		case "publish":
 			return (
-				(objectTimeout && (d15 || draft20(version))) ||
+				(objectTimeout && (d15 || from22)) ||
 				auth ||
-				(subgroupTimeout && draft20(version)) ||
+				(subgroupTimeout && from22) ||
 				expires ||
 				largest ||
 				forward ||
-				(priority && draft20(version)) ||
-				(filter && draft20(version)) ||
-				(order && (d15 || draft20(version)))
+				(priority && from22) ||
+				(filter && from22) ||
+				(order && (d15 || from22))
 			);
 		case "publish-namespace":
 			return auth || id === MSG_PARAM_HOP_PATH || id === MSG_PARAM_ROUTE_COST || epoch;
@@ -190,7 +186,7 @@ function allows(message: ControlMessage, version: IetfVersion, id: bigint): bool
 				auth ||
 				(id === MSG_PARAM_FILL_TIMEOUT && from18) ||
 				priority ||
-				(filter && draft20(version)) ||
+				(filter && from22) ||
 				order ||
 				range ||
 				include ||
@@ -211,7 +207,7 @@ async function skipKvp(r: Reader, id: bigint): Promise<void> {
 	}
 }
 
-/// The object Range Filters (draft-19): SUBGROUP, OBJECTID, PRIORITY and OBJECT_PROPERTY.
+/// The object Range Filters (draft-22): SUBGROUP, OBJECTID, PRIORITY and OBJECT_PROPERTY.
 /// Each is length prefixed whatever the parity of its id.
 const MSG_PARAM_RANGE_FILTERS: readonly bigint[] = [0x25n, 0x26n, 0x27n, 0x28n];
 /// TRACK_PROPERTY_FILTER, the Range Filter legal only on SUBSCRIBE_TRACKS and its updates.
@@ -454,7 +450,7 @@ export class Parameters {
 		this.#filter = v;
 	}
 
-	/** FILL_PARAMETERS: the draft-20 backfill request, as its raw parameter value. */
+	/** FILL_PARAMETERS: the draft-22 backfill request, as its raw parameter value. */
 	get fillParameters(): Uint8Array | undefined {
 		return this.bytes.get(MSG_PARAM_FILL_PARAMETERS);
 	}
@@ -466,7 +462,7 @@ export class Parameters {
 	/** INCLUDE_PROPERTIES: whether the peer wants Track Properties on the response. */
 	get includeProperties(): boolean | undefined {
 		// Draft-16 and earlier frame every parameter as a Key-Value-Pair, so an odd id lands
-		// in `bytes`. It still has to read as present, so the draft-20 gate can refuse it.
+		// in `bytes`. It still has to read as present, so the draft-22 gate can refuse it.
 		const legacy = this.bytes.get(MSG_PARAM_INCLUDE_PROPERTIES);
 		const v = legacy ? (legacy.length === 1 ? BigInt(legacy[0]) : 2n) : this.vars.get(MSG_PARAM_INCLUDE_PROPERTIES);
 		if (v === undefined) return undefined;

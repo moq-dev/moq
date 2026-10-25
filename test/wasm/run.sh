@@ -10,7 +10,7 @@
 #
 # One relay per protocol flavour, because negotiation is the part that broke:
 #   lite   default versions        -> moq-lite-06 over its own ALPN
-#   ietf   --listen-version 19     -> moq-transport-19 over its own ALPN
+#   ietf   --listen-version 22     -> moq-transport-22 over its own ALPN
 #   setup  --listen-version lite-02 -> the "moql" ALPN, version chosen by SETUP
 #
 # The publisher is @moq/net (TypeScript) and the subscriber is @moq/wasm (Rust),
@@ -81,7 +81,7 @@ fi
 # defaults, which is the ALPN both sides prefer.
 FLAVOURS=(
     "lite::moq-lite-06"
-    "ietf:moq-transport-19:moq-transport-19"
+    "ietf:moq-transport-22:moq-transport-22"
     "setup:moq-lite-02:moq-lite-02"
 )
 

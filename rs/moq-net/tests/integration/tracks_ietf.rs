@@ -272,8 +272,8 @@ async fn a_reader_resumes_the_held_publish() {
 }
 
 /// A reader joining a listed track mid-group gets the objects already published in it: on
-/// drafts 18 and 19, whose filters deliver nothing already published, through a Joining
-/// FETCH on the held PUBLISH's Request ID, and from draft-20 through the resume's fill.
+/// draft 18, whose filters deliver nothing already published, through a Joining
+/// FETCH on the held PUBLISH's Request ID, and from draft-22 through the resume's fill.
 #[moq_clock::test]
 async fn a_join_gets_the_current_groups_head() {
 	for version in DRAFTS {

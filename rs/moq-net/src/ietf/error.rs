@@ -213,10 +213,10 @@ pub(crate) mod request {
 	/// and later; draft-15 gave 0x33 another meaning.
 	const UNSUPPORTED_EXTENSION: u64 = 0x33;
 
-	/// A Range Filter exceeds MAX_FILTER_RANGES (draft-19 and later).
+	/// A Range Filter exceeds MAX_FILTER_RANGES (draft-22 and later).
 	pub(crate) const INVALID_FILTER: u64 = 0x36;
 
-	/// A joining FETCH named no active subscription. Removed from the registry in draft-20.
+	/// A joining FETCH named no active subscription. Removed from the registry in draft-22.
 	const INVALID_JOINING_REQUEST_ID_14: u64 = 0x7;
 	const INVALID_JOINING_REQUEST_ID: u64 = 0x32;
 
@@ -646,7 +646,7 @@ pub(crate) mod request {
 
 		/// Every code we put in a rejection has to be one the negotiated draft registers for
 		/// that request. The table is transcribed from the drafts (draft-14 section 13.1
-		/// through draft-20 section 15.11.2), not derived from the mapping, so a mistake in
+		/// through draft-22 section 16.11.2), not derived from the mapping, so a mistake in
 		/// the mapping cannot talk the assertion into agreeing with it.
 		#[test]
 		fn only_registered_codes_reach_the_wire() {
@@ -858,7 +858,7 @@ mod tests {
 
 	/// Conditions this registry has no value for say INTERNAL_ERROR rather than borrowing
 	/// moq-lite's own 48-63 range or its application offset. A peer treats an unregistered
-	/// code as INTERNAL_ERROR anyway (draft-20 section 14), so the borrowed value would
+	/// code as INTERNAL_ERROR anyway, so the borrowed value would
 	/// carry no more meaning while looking like a registration.
 	#[test]
 	fn unregistered_conditions_are_internal() {
@@ -941,7 +941,7 @@ mod tests {
 	/// application codes past 64, neither of which this registry has a range for,
 	/// and it assigns 0x4 and 0x5 meanings the earlier drafts give to something else.
 	///
-	/// The table is transcribed from the drafts (draft-14 section 13.1.8 through draft-20
+	/// The table is transcribed from the drafts (draft-14 section 13.1.8 through draft-22
 	/// section 15.11.4), not derived from the mapping, so a mistake in the mapping cannot
 	/// talk the assertion into agreeing with it.
 	#[test]

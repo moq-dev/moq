@@ -1120,7 +1120,7 @@ pub fn seeds() -> Vec<Seed> {
 	// FETCH is the one arm the sweep above cannot reach: its body ends in a parameter
 	// count, and a uniform fill never lands a zero there. Build it from the encoder
 	// instead, which also means a field change breaks the build rather than the seed.
-	// Draft-20 dropped the joining forms, so each draft gets whichever layout it has.
+	// Draft-22 dropped the joining forms, so each draft gets whichever layout it has.
 	for (index, version) in IETF_VERSIONS.iter().enumerate() {
 		let fetch_types = [
 			ietf::FetchType::AbsoluteJoining {

@@ -5,7 +5,7 @@
 //! paused PUBLISH per track, which carries the track's properties and an error PUBLISH_DONE
 //! once the track is no longer listed; the subscriber resumes one with REQUEST_UPDATE to get its
 //! data, served from the cache as a SUBSCRIBE would be. A FORWARD=1 request asks for every
-//! track's data, which no draft lets us downgrade, so from draft-19 each track is answered
+//! track's data, which no draft lets us downgrade, so from draft-22 each track is answered
 //! with PUBLISH_SKIPPED and the subscriber SUBSCRIBEs to what it wants. Draft-18 has no such
 //! skip, so there the request is refused.
 
@@ -127,7 +127,7 @@ impl Drop for Subscribed {
 }
 
 /// The subscription parameters a PUBLISH subscription has, starting from those of the
-/// SUBSCRIBE_TRACKS that made it (draft-19 section 10.19.1) and moved by each update.
+/// SUBSCRIBE_TRACKS that made it (draft-22 section 3.6.2) and moved by each update.
 #[derive(Clone, Copy)]
 struct Params {
 	priority: u8,
@@ -255,7 +255,7 @@ struct Listed {
 
 /// How a paused PUBLISH subscription resumes forwarding.
 struct Resume {
-	/// FILL_PARAMETERS (draft-20+) for the objects before the join.
+	/// FILL_PARAMETERS (draft-22) for the objects before the join.
 	fill: Option<ietf::Fill>,
 	/// NEW_GROUP_REQUEST, counted as a join as on a SUBSCRIBE.
 	new_group: Option<u64>,
@@ -900,7 +900,7 @@ impl Publisher {
 			largest_location: live_edge(&track).largest,
 			forward: false,
 			properties,
-			// Draft-20 and later state the listing's subscription parameters on each PUBLISH;
+			// Draft-22 and later state the listing's subscription parameters on each PUBLISH;
 			// earlier drafts carry them on PUBLISH_OK.
 			subscriber_priority: Some(params.priority),
 			group_order: params.order,
@@ -962,9 +962,9 @@ impl Publisher {
 					let ok = body
 						.message::<ietf::PublishOk>(self.version)
 						.map_err(|err| goaways.failed(err.into()))?;
-					// Through draft-19 the answer sets the Forward State and the parameters it
+					// Through draft-18 the answer sets the Forward State and the parameters it
 					// carries, an absent FORWARD meaning 1; an absent parameter keeps the one the
-					// SUBSCRIBE_TRACKS set. Draft-20 moved them off PUBLISH_OK, leaving it paused.
+					// SUBSCRIBE_TRACKS set. Draft-22 moved them off PUBLISH_OK, leaving it paused.
 					if let Some(priority) = ok.subscriber_priority {
 						params.priority = priority;
 					}
@@ -1413,7 +1413,6 @@ mod tests {
 			subscriber_priority: None,
 			group_order: None,
 			filter: None,
-			fill: None,
 			properties_wanted: true,
 			new_group: None,
 			range_filters: false,
@@ -1481,7 +1480,7 @@ mod tests {
 		body.message::<ietf::RequestError>(version).unwrap().error_code
 	}
 
-	/// Answer a PUBLISH with a PUBLISH_OK leaving it paused, which draft-20 on cannot
+	/// Answer a PUBLISH with a PUBLISH_OK leaving it paused, which draft-22 on cannot
 	/// change. From draft-18 it is sent as REQUEST_OK.
 	async fn publish_ok(stream: &mut Stream<Transport, Version>) {
 		stream.writer.varint(ietf::RequestOk::ID).await.unwrap();
@@ -1507,7 +1506,7 @@ mod tests {
 			end_group: 0,
 			subscriber_priority: None,
 			forward: Some(forward),
-			// Join at the live edge: draft-20 moved the filter off PUBLISH_OK.
+			// Join at the live edge: draft-22 moved the filter off PUBLISH_OK.
 			filter: forward.then_some(Filter::NextObject),
 			authorization_token: None,
 			new_group: None,
@@ -1754,7 +1753,7 @@ mod tests {
 	}
 
 	/// FORWARD=1 asks for every track's objects, which we never push unasked: from
-	/// draft-19 each track is skipped, and draft-18, with no way to skip, refuses it.
+	/// draft-22 each track is skipped, and draft-18, with no way to skip, refuses it.
 	#[moq_clock::test]
 	async fn a_forwarding_listing_skips_every_track() {
 		for version in DRAFTS {
@@ -2013,7 +2012,7 @@ mod tests {
 		}
 	}
 
-	/// On drafts 18 and 19 a PUBLISH_OK may ask for a new group only if the PUBLISH sent
+	/// On draft 18 a PUBLISH_OK may ask for a new group only if the PUBLISH sent
 	/// DYNAMIC_GROUPS; one that asks anyway ends the PUBLISH in error.
 	#[moq_clock::test]
 	async fn a_publish_ok_new_group_needs_dynamic_groups() {
@@ -2041,7 +2040,7 @@ mod tests {
 		assert!(done.end(version).is_err(), "{version}: ended cleanly");
 	}
 
-	/// Draft-18 and 19 let PUBLISH_OK forward at once, with no update to answer.
+	/// Draft-18 lets PUBLISH_OK forward at once, with no update to answer.
 	#[moq_clock::test]
 	async fn a_forwarding_publish_ok_resumes() {
 		for version in [Version::Draft18] {
@@ -2106,7 +2105,7 @@ mod tests {
 		}
 	}
 
-	/// A REQUEST_UPDATE on the listing is answered with REQUEST_ERROR. From draft-20 it may
+	/// A REQUEST_UPDATE on the listing is answered with REQUEST_ERROR. From draft-22 it may
 	/// carry FORWARD, which is refused the same way rather than closing the session.
 	#[moq_clock::test]
 	async fn a_listing_update_is_refused() {
@@ -2373,7 +2372,7 @@ mod tests {
 		}
 	}
 
-	/// From draft-20 each PUBLISH states the listing's subscription parameters, which the
+	/// From draft-22 each PUBLISH states the listing's subscription parameters, which the
 	/// subscriber otherwise takes as the defaults; earlier drafts carry them on PUBLISH_OK.
 	/// Draft-22 sends none of them on SUBSCRIBE_TRACKS.
 	#[moq_clock::test]

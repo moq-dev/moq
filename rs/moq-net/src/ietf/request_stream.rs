@@ -178,7 +178,7 @@ impl Decode<Version> for Framed {
 }
 
 /// A message following the request on a request stream: `T`, or from draft 18 a GOAWAY
-/// migrating this one request (draft-21 section 9.2).
+/// migrating this one request (draft-22 section 9.2).
 #[derive(Debug)]
 pub(super) enum Next<T> {
 	Message(T),
@@ -212,7 +212,7 @@ impl<T: Decode<Version>> Decode<Version> for Next<T> {
 	}
 }
 
-/// The GOAWAYs the peer sent on one request stream (draft-21 section 9.2).
+/// The GOAWAYs the peer sent on one request stream (draft-22 section 9.2).
 pub(super) struct GoAways {
 	/// Our own role: a client's peer is a server, which may name a new session.
 	client: bool,
@@ -380,7 +380,7 @@ pub(super) struct Update {
 	pub(super) forward: Option<bool>,
 	/// The new Location Filter, which only a paused PUBLISH subscription resuming takes.
 	pub(super) filter: Option<super::Filter>,
-	/// FILL_PARAMETERS (draft-20+), which only a paused PUBLISH subscription resuming takes.
+	/// FILL_PARAMETERS (draft-22), which only a paused PUBLISH subscription resuming takes.
 	pub(super) fill: Option<super::Fill>,
 }
 
@@ -510,8 +510,8 @@ impl Decode<Version> for Update {
 }
 
 /// The namespace-only parameters of a modern REQUEST_UPDATE. `TRACKS` marks one on a
-/// SUBSCRIBE_TRACKS, which from draft-19 may also carry TRACK_PROPERTY_FILTER and from
-/// draft-20 FORWARD.
+/// SUBSCRIBE_TRACKS, which from draft-22 may also carry TRACK_PROPERTY_FILTER and from
+/// draft-22 FORWARD.
 #[derive(Debug)]
 pub(super) struct NamespaceUpdate<const TRACKS: bool = false> {
 	pub(super) request_id: super::RequestId,
@@ -732,7 +732,7 @@ mod tests {
 		);
 	}
 
-	/// From draft-19 a SUBSCRIBE_TRACKS update may carry TRACK_PROPERTY_FILTER (0x29), so it
+	/// From draft-22 a SUBSCRIBE_TRACKS update may carry TRACK_PROPERTY_FILTER (0x29), so it
 	/// decodes there, to be refused per request, while a SUBSCRIBE_NAMESPACE's still closes.
 	#[test]
 	fn track_property_filter_on_listing_update_decodes() {

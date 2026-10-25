@@ -544,7 +544,7 @@ async fn leaving_after_the_cache_window_keeps_the_latest_group() {
 
 /// A rejoin keeps the source's timestamps.
 ///
-/// The returning subscription opts out of the track's properties from draft-20, since the
+/// The returning subscription opts out of the track's properties from draft-22, since the
 /// copy already learned them, so its units must come from that first answer rather than
 /// the empty block the second one carries.
 #[moq_clock::test]

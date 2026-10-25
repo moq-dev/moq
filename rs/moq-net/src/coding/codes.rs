@@ -120,7 +120,7 @@ mod tests {
 		assert_eq!(lite.encode_stream_code(&StreamError::Cancel), ietf::error::CANCELLED);
 		assert_eq!(ietf.encode_stream_code(&StreamError::Cancel), ietf::error::CANCELLED);
 
-		// GOING_AWAY is moq-lite's 0x4 and draft-20's, but draft-17 gives 0x4 to
+		// GOING_AWAY is moq-lite's 0x4 and draft-22's, but draft-17 gives 0x4 to
 		// UNKNOWN_OBJECT_STATUS, so it is not sent there and not read back there.
 		let draft17 = crate::Version::Ietf(ietf::Version::Draft17);
 		assert_eq!(lite.decode_stream_code(0x4), StreamError::GoingAway);

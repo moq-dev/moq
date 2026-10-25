@@ -169,7 +169,7 @@ async fn a_relay_forwards_an_untimed_track_untimed() {
 /// The subscription asks for history the way a resume does, with a budget covering it.
 /// moq-transport before draft
 /// 20 can only join a past group through a joining FETCH, which our publisher refuses for
-/// groups before the live one, so draft 20 stands in for it.
+/// groups before the live one, so draft 22 stands in for it.
 #[moq_clock::test]
 async fn an_explicit_start_holds_on_an_untimed_track() {
 	for version in ["moq-lite-03", "moq-lite-06", "moq-lite-07-wip", "moq-transport-22"] {

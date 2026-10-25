@@ -438,7 +438,6 @@ impl Subscriber {
 				subscriber_priority: None,
 				group_order: None,
 				filter: None,
-				fill: None,
 				properties_wanted: true,
 				new_group: None,
 				range_filters: false,
@@ -506,7 +505,7 @@ impl Subscriber {
 			}
 		}
 
-		// Cancelled: close our half (FIN on draft-18, RESET_STREAM from draft-19, where a
+		// Cancelled: close our half (FIN on draft-18, RESET_STREAM from draft-22, where a
 		// FIN is not a cancel), then read until the peer closes its own. The PUBLISHes it
 		// made stay ours.
 		tracing::debug!(prefix = %self.origin.absolute(prefix), "subscribe_tracks cancelled");
@@ -776,7 +775,7 @@ impl Subscriber {
 			} else if listings.entries.contains_key(&key) {
 				Offer::Refuse(duplicate, "already subscribed")
 			} else if msg.forward && !matches!(self.version, Version::Draft18) {
-				// From draft-20 the PUBLISH sets its own Forward State, and PUBLISH_OK has no
+				// From draft-22 the PUBLISH sets its own Forward State, and PUBLISH_OK has no
 				// FORWARD to pause it: its objects would be refused unseen behind a healthy
 				// listing.
 				listings.fail(&key.0, Error::Unsupported);
@@ -848,8 +847,8 @@ impl Subscriber {
 		);
 		let ok = async {
 			self.bind_alias(request_id, msg.track_alias)?;
-			// PUBLISH_OK is a REQUEST_OK from draft-19. FORWARD=0 holds it paused through
-			// draft-19; from draft-20 the PUBLISH our FORWARD=0 asked for already is.
+			// PUBLISH_OK is a REQUEST_OK on draft-22. FORWARD=0 holds it paused on draft-18;
+			// on draft-22 the PUBLISH our FORWARD=0 asked for already is.
 			let id = match self.version {
 				Version::Draft18 => ietf::PublishOk::ID,
 				_ => ietf::RequestOk::ID,
@@ -963,7 +962,7 @@ impl Subscriber {
 					}
 					_ => break Err(upstream.messages.failed(Error::UnexpectedMessage)),
 				},
-				// PUBLISH_DONE must come before the FIN (draft-19 section 3.3.2).
+				// PUBLISH_DONE must come before the FIN (draft-22 section 6.4.2.2).
 				Step::Message(Ok(None)) => break Err(Error::ProtocolViolation),
 				Step::Message(Err(err)) => break Err(err),
 			}
@@ -1218,7 +1217,7 @@ pub(super) struct Forward {
 	pub(super) forward: bool,
 	/// The Location Filter it resumes with.
 	pub(super) filter: Option<Filter>,
-	/// FILL_PARAMETERS (draft-20+), the backfill it resumes with.
+	/// FILL_PARAMETERS (draft-22), the backfill it resumes with.
 	pub(super) fill: Option<ietf::Fill>,
 	/// The aggregate priority, in the model's higher-first terms.
 	pub(super) priority: Option<i8>,
@@ -1532,7 +1531,7 @@ mod tests {
 	}
 
 	/// A resumed listed track ending any way but TRACK_ENDED fails the listing, even a
-	/// clean SUBSCRIPTION_ENDED (drafts 18-19), which says nothing of the track itself.
+	/// clean SUBSCRIPTION_ENDED (draft 18), which says nothing of the track itself.
 	#[moq_clock::test]
 	async fn a_resumed_track_ending_otherwise_fails_the_listing() {
 		let version = Version::Draft18;
@@ -1544,7 +1543,7 @@ mod tests {
 		let (_track, _reader, _serving) = h.resume(&mut video).await;
 		assert!(h.listening.poll_failed(&kio::Waiter::noop()).is_pending());
 
-		// SUBSCRIPTION_ENDED, which drafts 18 and 19 register.
+		// SUBSCRIPTION_ENDED, which draft 18 registers.
 		let done = ietf::PublishDone {
 			request_id: None,
 			status_code: 0x3,
@@ -1845,8 +1844,8 @@ mod tests {
 		}
 	}
 
-	/// Dropping the listing cancels its SUBSCRIBE_TRACKS: FIN on draft-18, RESET_STREAM from
-	/// draft-19, where a FIN is no cancel. The held PUBLISHes are let go with it.
+	/// Dropping the listing cancels its SUBSCRIBE_TRACKS: FIN on draft-18, RESET_STREAM on
+	/// draft-22, where a FIN is no cancel. The held PUBLISHes are let go with it.
 	#[moq_clock::test]
 	async fn dropping_the_listing_cancels_it() {
 		let version = Version::Draft18;

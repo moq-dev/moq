@@ -17,7 +17,7 @@ pub enum ParameterVarInt {
 	/// Removed in draft-17; only used in draft-14/15/16.
 	MaxRequestId = 2,
 	MaxAuthTokenCacheSize = 4,
-	/// MAX_REQUEST_UPDATES, added in draft-19.
+	/// MAX_REQUEST_UPDATES, added in draft-22.
 	MaxRequestUpdates = super::request_update::OPTION,
 	/// HOP_ID, from the MoQ Cluster extension.
 	HopId = super::cluster::HOP_ID,
@@ -93,10 +93,10 @@ impl Decode<Version> for Parameters {
 			i += 1;
 
 			// Unknown SETUP options may repeat, including GREASE; their values still
-			// have to be well-formed Key-Value-Pairs (draft-21 section 9.1).
+			// have to be well-formed Key-Value-Pairs (draft-22 section 9.1).
 			if kind % 2 == 0 {
 				let kind = match ParameterVarInt::from(kind) {
-					// Undefined before draft 19, so there an unknown option that may repeat.
+					// Undefined before draft 22, so there an unknown option that may repeat.
 					ParameterVarInt::MaxRequestUpdates if !super::request_update::supported(version) => {
 						ParameterVarInt::Unknown(kind)
 					}

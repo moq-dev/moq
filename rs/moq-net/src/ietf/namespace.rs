@@ -67,7 +67,7 @@ const MAX_BYTES: usize = 4096;
 
 /// Decode a namespace tuple, along with the sum of its field lengths.
 ///
-/// Every limit here closes the session as a PROTOCOL_VIOLATION (draft-21 section 8.7):
+/// Every limit here closes the session as a PROTOCOL_VIOLATION (draft-22 section 8.7):
 /// more than 32 fields, an empty field, or more than 4096 bytes.
 fn decode_fields(r: &mut Decoder<'_>) -> Result<(Path<'static>, usize), DecodeError> {
 	let count = r.varint()?;
@@ -260,7 +260,7 @@ mod tests {
 		assert_eq!(encode_path(&decoded), tuple);
 	}
 
-	/// Draft-21 section 8.7: every field holds a byte, and a namespace or a whole Full Track
+	/// Draft-22 section 8.7: every field holds a byte, and a namespace or a whole Full Track
 	/// Name holds at most 4096.
 	#[test]
 	fn names_are_bounded() {

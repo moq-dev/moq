@@ -71,7 +71,7 @@ fn track_properties(
 	if block && track.immutable().is_some() && !super::object::same_bytes(track.version, version) {
 		return Err(Error::Unsupported);
 	}
-	// Across draft-19, forwarding 0x06 would give it a different meaning, as for object
+	// Between draft-18 and draft-22, forwarding 0x06 would give it a different meaning, as for object
 	// properties. A mutable one is dropped; a sealed one is refused.
 	if super::object::has_delivery_timeout(track.version) != super::object::has_delivery_timeout(version) {
 		if block && track.sealed().any(|id| id == 0x06) {
@@ -1316,7 +1316,7 @@ impl Publisher {
 						properties.group_order = Some(msg.group_order.to_order().into());
 					}
 
-					// Draft-20 replaced joining FETCH with subscription fills. Older drafts save
+					// Draft-22 replaced joining FETCH with subscription fills. Older drafts save
 					// the same boundary used by the subscription so the two streams never overlap,
 					// again on every resume.
 					let filter = msg.filter;
@@ -1790,7 +1790,7 @@ impl Publisher {
 					Err(request_update::Overflow::Session) => {
 						return Some(Served::Track(Err(request_update::too_many(&mut self.session.clone()))));
 					}
-					// Below draft 19 no limit is negotiated, so this is a local memory guard: end
+					// Below draft 22 no limit is negotiated, so this is a local memory guard: end
 					// this request, never the session.
 					Err(request_update::Overflow::Request) => {
 						return Some(Served::Track(Err(Error::ProtocolViolation)));
@@ -1871,7 +1871,7 @@ impl Publisher {
 		// objects stay unstamped.
 		let timescale = subscribed.info().timescale;
 
-		// Serve the track while reading updates; only abrupt closure cancels on draft-19+. A
+		// Serve the track while reading updates; only abrupt closure cancels on draft-22. A
 		// fill or joining FETCH ranks in the same subscription as the group it carries.
 		let serve = TrackServe::new(
 			self.session.clone(),
@@ -2187,7 +2187,7 @@ impl Publisher {
 			.await
 	}
 
-	/// Serve a draft-20 fill on its own fetch stream: the requested range, read from the
+	/// Serve a draft-22 fill on its own fetch stream: the requested range, read from the
 	/// group cache, capped at the Largest Object snapshot.
 	///
 	/// A fill is a promise once requested. An empty range opens no stream, but a range we
@@ -2616,7 +2616,7 @@ impl Publisher {
 		// Pinned to the instance it names, if any: another is refused, never served.
 		let epoch = msg.epoch.clone();
 
-		// Draft-20's LOCATION_FILTER is answered as the standalone range it spells.
+		// Draft-22's LOCATION_FILTER is answered as the standalone range it spells.
 		let fetch_type = match msg.fetch_type {
 			FetchType::Filtered {
 				namespace,
@@ -2862,8 +2862,8 @@ impl Publisher {
 		};
 		let draft22 = Filter::is_draft22(self.version);
 		let end_of_track = !joined && group.complete && track.final_sequence() == group.sequence.checked_add(1);
-		// Draft-20 caps the response at Largest Object, and refuses a start past it (section
-		// 10.13). Both only bite when Largest Object is in the fetched group or behind it, so
+		// Draft-22 caps the response at Largest Object, and refuses a start past it (section
+		// 9.11). Both only bite when Largest Object is in the fetched group or behind it, so
 		// this is its Object ID there, or `Some(None)` when the group holds nothing at or
 		// past it. The cache knows it at the track's end, or when a live feed's newest object
 		// it can name is in or behind this group. Otherwise (a relay's copy with no upstream
@@ -2915,7 +2915,7 @@ impl Publisher {
 				false => (end, end_of_track),
 			}
 		};
-		// Draft-20's End Location is inclusive: the requested end, capped at Largest Object
+		// Draft-22's End Location is inclusive: the requested end, capped at Largest Object
 		// (section 10.14). Objects missing before it do not exist. A whole-group request has
 		// no End Object to report, so it covers what the finished group holds, and at least
 		// the start an empty answer covered.
@@ -7136,7 +7136,7 @@ mod serve_tests {
 				request_id: FETCH_ID,
 				subscriber_priority: 128,
 				group_order: GroupOrder::Ascending,
-				// Draft-20 dropped the Fetch Type tag, leaving only the filtered form.
+				// Draft-22 dropped the Fetch Type tag, leaving only the filtered form.
 				fetch_type: match version {
 					Version::Draft22 => FetchType::Filtered {
 						namespace: crate::Path::new("missing"),
@@ -7347,7 +7347,7 @@ mod serve_tests {
 				.map(|(_, at)| at.clone())
 		}
 
-		/// Draft-21 §3.1.1: the publisher "MUST NOT send [PUBLISH_DONE] until it has
+		/// Draft-22 §3.1.1: the publisher "MUST NOT send [PUBLISH_DONE] until it has
 		/// closed all related streams", so each data stream's FIN or reset precedes
 		/// PUBLISH_DONE's first byte.
 		fn assert_streams_closed_before_publish_done(&self) {
@@ -7418,7 +7418,7 @@ mod serve_tests {
 		)
 	}
 
-	/// A track error ends a draft-21 subscription while its group stream waits for the
+	/// A track error ends a draft-22 subscription while its group stream waits for the
 	/// next object. The abort reaches the group, which resets its stream before
 	/// PUBLISH_DONE(INTERNAL_ERROR) is sent.
 	#[moq_clock::test]
@@ -7622,7 +7622,7 @@ mod serve_tests {
 		}
 	}
 
-	/// Draft-21 §9.5: a failed REQUEST_UPDATE is answered with REQUEST_ERROR, then the
+	/// Draft-22 §9.5: a failed REQUEST_UPDATE is answered with REQUEST_ERROR, then the
 	/// subscription ends with PUBLISH_DONE(UPDATE_FAILED).
 	///
 	/// The update asks for a new group on a track without DYNAMIC_GROUPS. It arrives
@@ -7683,7 +7683,7 @@ mod serve_tests {
 			.assert_streams_closed_before_publish_done();
 	}
 
-	/// Draft-21 §9.9: Stream Count is every data stream the publisher opened, "including
+	/// Draft-22 §9.9: Stream Count is every data stream the publisher opened, "including
 	/// any fill fetch streams", or 2^64-1 when it can't be exact.
 	#[moq_clock::test]
 	async fn publish_done_after_a_failed_update_counts_the_open_fill() {
@@ -9012,7 +9012,7 @@ mod serve_tests {
 						..Default::default()
 					},
 					Version::Draft16 | Version::Draft17 => ietf::Properties::default(),
-					// Only draft-20 can carry the opt-out.
+					// Only draft-22 can carry the opt-out.
 					_ if !wanted && Filter::is_draft22(version) => ietf::Properties::default(),
 					_ => track_properties(&track::Info::timed(), true, version, true).unwrap(),
 				};
@@ -9433,7 +9433,7 @@ mod serve_tests {
 	async fn legal_requests_we_do_not_serve_are_refused_per_request() {
 		const NOT_SUPPORTED: u64 = 0x3;
 
-		// Draft-20 bytes from the figures: Request ID 0x2B, Track Namespace ("room"),
+		// Draft-22 bytes from the figures: Request ID 0x2B, Track Namespace ("room"),
 		// Track Name ("video"), then the parameters.
 		let head: &[u8] = &[
 			0x2B, 0x01, 0x04, b'r', b'o', b'o', b'm', 0x05, b'v', b'i', b'd', b'e', b'o',
@@ -9635,7 +9635,7 @@ mod serve_tests {
 		assert!(h.log.resets().is_empty(), "a served fill must not reset");
 	}
 
-	/// moq-lite's own join over draft-20: Relative(1) names the start of the current
+	/// moq-lite's own join over draft-22: Relative(1) names the start of the current
 	/// group, so the cache replays the whole group on the subscription stream.
 	#[moq_clock::test]
 	async fn relative_one_replays_the_current_group() {
@@ -10387,7 +10387,7 @@ mod serve_tests {
 		}
 	}
 
-	/// Every draft, each carrying a standalone FETCH or draft-20's filtered one.
+	/// Every draft, each carrying a standalone FETCH or draft-22's filtered one.
 	const FETCH_DRAFTS: [Version; 6] = [
 		Version::Draft14,
 		Version::Draft15,
@@ -10397,8 +10397,8 @@ mod serve_tests {
 		Version::Draft22,
 	];
 
-	/// A bounded FETCH_OK's End Location: one past `last` before draft 20,
-	/// and the object itself from then on. Whole-group answers use Object 0 before draft 20.
+	/// A bounded FETCH_OK's End Location: one past `last` before draft 22,
+	/// and the object itself from then on. Whole-group answers use Object 0 before draft 22.
 	fn end_location(version: Version, group: u64, last: u64) -> Location {
 		let object = match Filter::is_draft22(version) {
 			true => last,
@@ -10422,8 +10422,8 @@ mod serve_tests {
 
 	/// Run a standalone FETCH of `room/video`, returning what the peer reads back.
 	///
-	/// `end` is spelled as drafts 14 to 19 do: the last object plus one, or 0 for the whole
-	/// End Group. From draft 20 the same range goes out as an inclusive LOCATION_FILTER.
+	/// `end` is spelled as drafts 14 to 18 do: the last object plus one, or 0 for the whole
+	/// End Group. From draft 22 the same range goes out as an inclusive LOCATION_FILTER.
 	async fn standalone_fetch(h: &Serve, start: Location, end: Location, group_order: GroupOrder) -> bytes::Bytes {
 		let fetch_type = fetch_range(h.publisher.version, "video", start, end);
 		run_fetch(h, fetch_type, group_order, true).await
@@ -10624,7 +10624,7 @@ mod serve_tests {
 		let stamp = crate::Timestamp::from_millis(123_456).unwrap();
 
 		for version in FETCH_DRAFTS {
-			// Only draft-20's FETCH can carry the opt-out.
+			// Only draft-22's FETCH can carry the opt-out.
 			let opt_out = Filter::is_draft22(version).then_some(false);
 			for wanted in [Some(true), opt_out].into_iter().flatten() {
 				let h = serve(version);
@@ -10811,7 +10811,7 @@ mod serve_tests {
 		broadcast.track("video").unwrap().query().await.unwrap()
 	}
 
-	/// Draft 19 assigns 0x06 to SUBGROUP_DELIVERY_TIMEOUT, so a track property 0x06 crosses
+	/// Draft 22 assigns 0x06 to SUBGROUP_DELIVERY_TIMEOUT, so a track property 0x06 crosses
 	/// that boundary as an object property does: dropped when mutable, refused when sealed.
 	/// Drafts 18 and 22 serialize alike, so across a relay hop only the track's carried
 	/// ingress draft says which meaning it has.
@@ -10873,7 +10873,7 @@ mod serve_tests {
 		}
 	}
 
-	/// A range ending inside its group stops at its End Object, which draft 20 counts
+	/// A range ending inside its group stops at its End Object, which draft 22 counts
 	/// inclusively and older drafts count as one past.
 	#[moq_clock::test]
 	async fn a_standalone_fetch_stops_at_its_end_object() {
@@ -10896,8 +10896,8 @@ mod serve_tests {
 		}
 	}
 
-	/// A group holding no objects at or past the start is answered empty, on draft 20 with
-	/// an End Location covering the range asked for (section 10.13). The whole group covers
+	/// A group holding no objects at or past the start is answered empty, on draft 22 with
+	/// an End Location covering the range asked for (section 9.11). The whole group covers
 	/// at least its start.
 	#[moq_clock::test]
 	async fn a_standalone_fetch_past_the_last_object_is_empty() {
@@ -10930,7 +10930,7 @@ mod serve_tests {
 		}
 	}
 
-	/// How much a draft-20 publisher knows of Largest Object.
+	/// How much a draft-22 publisher knows of Largest Object.
 	#[derive(Clone, Copy, Debug)]
 	enum Largest {
 		/// The track is finished: its last object.
@@ -10985,7 +10985,7 @@ mod serve_tests {
 		}
 	}
 
-	/// On draft 20, a start past Largest Object is refused INVALID_RANGE (section 10.13),
+	/// On draft 22, a start past Largest Object is refused INVALID_RANGE (section 9.11),
 	/// wherever the publisher knows it. Where it does not, it answers empty. A start beyond
 	/// the final group's last object still finds the track's end there.
 	#[moq_clock::test]
@@ -11036,7 +11036,7 @@ mod serve_tests {
 	}
 
 	/// On a live feed whose newest group finished with no objects, Largest Object sits in the
-	/// group before it, so a draft-20 FETCH of the empty group starts past it.
+	/// group before it, so a draft-22 FETCH of the empty group starts past it.
 	#[moq_clock::test]
 	async fn a_draft22_fetch_of_an_empty_newest_group_is_refused() {
 		let version = Version::Draft22;
@@ -11056,7 +11056,7 @@ mod serve_tests {
 		assert_eq!(fetch_refusal(buf, version), invalid_range(version), "{version}");
 	}
 
-	/// On draft 20, an End Object past a finished group's last object is still the End
+	/// On draft 22, an End Object past a finished group's last object is still the End
 	/// Location reported (section 10.14), unless the group holds Largest Object, which caps
 	/// it. A relay's idle copy does not know Largest Object, so it echoes the request.
 	#[moq_clock::test]
@@ -11097,7 +11097,7 @@ mod serve_tests {
 	}
 
 	/// A track whose cache only ever answered a fetch has no live feed, so its newest
-	/// object is not Largest Object: a draft-20 FETCH past it echoes the requested end.
+	/// object is not Largest Object: a draft-22 FETCH past it echoes the requested end.
 	#[moq_clock::test]
 	async fn a_draft22_fetch_of_a_fetch_only_cache_is_not_capped() {
 		let version = Version::Draft22;
@@ -11179,7 +11179,7 @@ mod serve_tests {
 		}
 	}
 
-	/// A draft-20 filter bounded by Largest Object is refused, even when that bound would
+	/// A draft-22 filter bounded by Largest Object is refused, even when that bound would
 	/// land in the start group: the one-group rule needs it resolved first.
 	#[moq_clock::test]
 	async fn a_draft22_fetch_relative_to_largest_object_is_refused() {
@@ -12966,8 +12966,8 @@ mod serve_tests {
 		);
 	}
 
-	/// Draft-19 advertises MAX_REQUEST_UPDATES, so a peer that leaves more outstanding than that
-	/// broke the negotiated limit: draft-19 section 10.3.1.7 closes the session with
+	/// Draft-22 advertises MAX_REQUEST_UPDATES, so a peer that leaves more outstanding than that
+	/// broke the negotiated limit: draft-22 section 9.1.7 closes the session with
 	/// TOO_MANY_REQUEST_UPDATES.
 	#[moq_clock::test]
 	async fn renewals_past_the_advertised_limit_close_the_session() {
@@ -13023,7 +13023,7 @@ mod serve_tests {
 	}
 
 	/// Exactly MAX_REQUEST_UPDATES outstanding (the one being verified plus the queue) is within
-	/// the advertised limit, so a draft-19 peer holding that many is not faulted: the request
+	/// the advertised limit, so a draft-22 peer holding that many is not faulted: the request
 	/// keeps running and the session stays up.
 	#[moq_clock::test]
 	async fn renewals_at_the_advertised_limit_keep_the_request() {
@@ -13072,7 +13072,7 @@ mod serve_tests {
 	}
 
 	/// Drafts below 19 carry no MAX_REQUEST_UPDATES option, so a peer there agreed to no ceiling:
-	/// the same flood that closes a draft-19 session must neither end the request nor close the
+	/// the same flood that closes a draft-22 session must neither end the request nor close the
 	/// session on draft-18, because a conforming peer must not be stranded for a limit it never saw.
 	#[moq_clock::test]
 	async fn older_drafts_do_not_strand_a_renewal_flood() {
@@ -13159,7 +13159,7 @@ mod serve_tests {
 			settle().await;
 		}
 
-		// Draft-19 answers each with a REQUEST_OK, request id omitted.
+		// Draft-22 answers each with a REQUEST_OK, request id omitted.
 		let one_ok = {
 			let log = crate::lite::test_transport::Log::default();
 			let mut writer = crate::coding::Writer::new(
@@ -17172,7 +17172,7 @@ struct ServeRange {
 	/// The first Location to serve, or `None` for the start of the latest group.
 	start: Option<Location>,
 	/// Where the range ends, inclusive. `None` is open ended. The subscription stays
-	/// open once the range is exhausted; draft-20 removed the notion of a filter ending
+	/// open once the range is exhausted; draft-22 removed the notion of a filter ending
 	/// a subscription.
 	end: Option<EndLocation>,
 }
@@ -17199,11 +17199,11 @@ struct GroupSlice {
 /// Resolve a SUBSCRIBE's Location Filter into the range to serve.
 ///
 /// Next Object is honored on every draft so a joining FETCH owns the cached prefix.
-/// Other pre-draft-20 filters retain their existing serving behavior.
+/// Other draft-18 filters retain their existing serving behavior.
 fn subscribe_range(filter: Filter, edge: LiveEdge, version: Version) -> ServeRange {
 	if !Filter::is_draft22(version) && filter != Filter::NextObject {
 		if !matches!(filter, Filter::NextObject | Filter::Unfiltered) {
-			tracing::warn!(?filter, "filter not supported before draft-20, ignoring");
+			tracing::warn!(?filter, "filter not supported before draft-22, ignoring");
 		}
 		return ServeRange::default();
 	}
@@ -17248,7 +17248,7 @@ fn filter_range(filter: Filter, edge: LiveEdge) -> ServeRange {
 	}
 }
 
-/// What a draft-20 fill request resolves to.
+/// What a draft-22 fill request resolves to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FillServe {
 	/// The range is empty, so no fetch stream is opened at all.

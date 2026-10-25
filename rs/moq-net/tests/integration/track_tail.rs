@@ -30,7 +30,7 @@ const PAYLOAD: &[u8] = b"frame";
 const GRACE: Duration = Duration::from_secs(1);
 
 /// moq-lite drafts with and without SUBSCRIBE_END, and IETF drafts over the control stream
-/// adapter (14), on their own streams (17), and with subscription fills (20+).
+/// adapter (14), on their own streams (17), and with subscription fills (22).
 const VERSIONS: &[&str] = &[
 	"moq-lite-03",
 	"moq-lite-05",
@@ -143,7 +143,7 @@ async fn round(version: &str, late: Late, final_sequence: u64) -> Outcome {
 	moq_clock::timeout(TIMEOUT, support::harness::subscribed(&track))
 		.await
 		.expect("no subscriber appeared");
-	// Let the publisher answer while the track is still empty. Before draft 20, a group
+	// Let the publisher answer while the track is still empty. Before draft 22, a group
 	// written first sits below SUBSCRIBE_OK's Largest Object, so it would arrive as a
 	// joining FETCH, which the track ending first refuses, not as the subscription's own
 	// late stream. Paused time advances only once every task is idle.
@@ -258,7 +258,7 @@ async fn lite07_empty_track_ends_without_the_grace() {
 }
 
 /// IETF drafts over the control stream adapter (14), on their own streams (17), and with
-/// subscription fills (20+).
+/// subscription fills (22).
 const IETF: &[&str] = &["moq-transport-14", "moq-transport-17", "moq-transport-22"];
 
 /// A subscriber that leaves while END_OF_TRACK waits for stream credit ends the publisher's

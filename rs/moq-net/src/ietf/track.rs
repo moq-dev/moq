@@ -24,7 +24,7 @@ pub struct TrackStatus<'a> {
 	pub track_namespace: Path<'a>,
 	pub track_name: Cow<'a, str>,
 	/// Whether the requester wants Track Properties on the answer (INCLUDE_PROPERTIES,
-	/// draft-20).
+	/// draft-22).
 	pub properties_wanted: bool,
 	/// The publisher instance the requester expects (MoQ Epoch, draft-17+).
 	pub epoch: Option<crate::Epoch>,
@@ -360,10 +360,10 @@ mod tests {
 		Version::Draft22,
 	];
 
-	/// INCLUDE_PROPERTIES only exists from draft-20, so the opt-out is dropped before it,
+	/// INCLUDE_PROPERTIES only exists from draft-22, so the opt-out is dropped before it,
 	/// and the default (1) is never written.
 	#[test]
-	fn test_track_status_opts_out_of_properties_from_draft_20() {
+	fn test_track_status_opts_out_of_properties_from_draft_22() {
 		for version in ALL {
 			for wanted in [true, false] {
 				let msg = TrackStatus {

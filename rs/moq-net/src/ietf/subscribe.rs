@@ -27,9 +27,9 @@ pub struct Subscribe<'a> {
 	pub group_order: GroupOrder,
 	/// Which Objects the subscription delivers.
 	pub filter: Filter,
-	/// The draft-20 backfill request, if the subscriber asked for one.
+	/// The draft-22 backfill request, if the subscriber asked for one.
 	pub fill: Option<Fill>,
-	/// Whether the subscriber wants Track Properties on the response (draft-20).
+	/// Whether the subscriber wants Track Properties on the response (draft-22).
 	pub properties_wanted: bool,
 	/// Whether Objects are forwarded (FORWARD); a paused subscription forwards none until resumed.
 	pub forward: bool,
@@ -57,7 +57,7 @@ pub(super) fn has_new_group_request(version: Version) -> bool {
 	version != Version::Draft14
 }
 
-/// The Range Filters (0x25-0x29) arrived in draft-19.
+/// The Range Filters (0x25-0x29) arrived in draft-22.
 pub(super) fn has_range_filters(version: Version) -> bool {
 	!matches!(
 		version,
@@ -195,13 +195,13 @@ impl Message for Subscribe<'_> {
 				);
 			}
 			_ => {
-				// FILL_PARAMETERS arrived in draft-20. Sending it to an older peer would be an
+				// FILL_PARAMETERS arrived in draft-22. Sending it to an older peer would be an
 				// unknown parameter, which is a protocol violation, so it is dropped instead.
 				// A subscriber there simply joins mid-group, which is what it did all along.
 				let fill = self.fill.filter(|_| Filter::is_draft22(version));
 
 				// INCLUDE_PROPERTIES defaults to 1, so only the opt-out is worth bytes. It
-				// arrived in draft-20, and an older peer would read it as an unknown
+				// arrived in draft-22, and an older peer would read it as an unknown
 				// parameter, which is a protocol violation.
 				let include_properties = (!self.properties_wanted && Filter::is_draft22(version)).then_some(false);
 				let new_group = self.new_group.filter(|_| has_new_group_request(version));
@@ -433,8 +433,8 @@ pub struct SubscribeUpdate {
 	pub new_group: Option<u64>,
 	/// Subscriber max age in milliseconds (MoQ Timestamp), if negotiated.
 	pub max_age: Option<u64>,
-	/// FILL_PARAMETERS (0x23, draft-20+): the backfill a paused PUBLISH subscription takes as
-	/// it resumes (draft-20 section 3.6.2).
+	/// FILL_PARAMETERS (0x23, draft-22): the backfill a paused PUBLISH subscription takes as
+	/// it resumes (draft-22 section 3.6.2).
 	pub fill: Option<Fill>,
 }
 
@@ -1593,7 +1593,7 @@ mod tests {
 		assert_eq!(v17.len(), v18.len() + 1);
 	}
 
-	/// The head of a SUBSCRIBE (draft-20 Figure 10) up to its Number of Parameters:
+	/// The head of a SUBSCRIBE (draft-22 Figure 11) up to its Number of Parameters:
 	/// Request ID 1, Track Namespace ("live"), Track Name ("video"). Every value is
 	/// below 128, so each varint is one byte in the drafts before and after 17 alike.
 	const SUBSCRIBE_HEAD: &[u8] = &[
@@ -1604,7 +1604,7 @@ mod tests {
 		[SUBSCRIBE_HEAD, params].concat()
 	}
 
-	/// Every parameter draft-20 lets a SUBSCRIBE carry that we don't act on still decodes,
+	/// Every parameter draft-22 lets a SUBSCRIBE carry that we don't act on still decodes,
 	/// with what we have to refuse recorded rather than failing the session. A second distinct
 	/// token, which the draft allows, refuses only the request.
 	#[test]
@@ -1775,9 +1775,9 @@ mod tests {
 		for (version, params) in [
 			// SUBGROUP_DELIVERY_TIMEOUT arrived in draft-18, and 0x06 is not a draft-16 id.
 			(Version::Draft16, &[0x01, 0x06, 0x00][..]),
-			// The Range Filters arrived in draft-19.
+			// The Range Filters arrived in draft-22.
 			(Version::Draft18, &[0x01, 0x25, 0x00][..]),
-			// INCLUDE_PROPERTIES arrived in draft-20.
+			// INCLUDE_PROPERTIES arrived in draft-22.
 			(Version::Draft18, &[0x01, 0x35, 0x00][..]),
 		] {
 			let body = subscribe_body(params);
@@ -1788,7 +1788,7 @@ mod tests {
 		}
 	}
 
-	/// REQUEST_UPDATE (draft-20 Figure 12) carries a token, NEW_GROUP_REQUEST and the
+	/// REQUEST_UPDATE (draft-22 Figure 10) carries a token, NEW_GROUP_REQUEST and the
 	/// Range Filters, TRACK_PROPERTY_FILTER included, since the update may be for a
 	/// SUBSCRIBE_TRACKS.
 	#[test]

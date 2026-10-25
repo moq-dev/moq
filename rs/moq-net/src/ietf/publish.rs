@@ -143,7 +143,7 @@ impl PublishDoneStatus {
 			| Version::Draft16
 			| Version::Draft17
 			| Version::Draft18
-			// Draft-20 removed SUBSCRIPTION_ENDED (0x3), which this implementation never
+			// Draft-22 removed SUBSCRIPTION_ENDED (0x3), which this implementation never
 			// emitted, and left the rest of the registry alone.
 			| Version::Draft22 => match self {
 				Self::InternalError => 0x0,
@@ -171,7 +171,7 @@ impl PublishDone<'_> {
 			code if code == PublishDoneStatus::TrackEnded.code(version) => Ok(()),
 			code if code == PublishDoneStatus::Unauthorized.code(version) => Err(crate::Error::Unauthorized),
 			// SUBSCRIPTION_ENDED: the subscription reached the end its filter asked for.
-			// Draft-20 removed it and left 0x3 unassigned.
+			// Draft-22 removed it and left 0x3 unassigned.
 			0x3 if matches!(
 				version,
 				Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17 | Version::Draft18
@@ -231,11 +231,11 @@ pub struct Publish<'a> {
 
 	/// Metadata about the track, sent as Track Properties (draft-17+).
 	pub properties: Properties,
-	/// The subscription's SUBSCRIBER_PRIORITY (draft-20+), `None` when absent: 128.
+	/// The subscription's SUBSCRIBER_PRIORITY (draft-22), `None` when absent: 128.
 	pub subscriber_priority: Option<u8>,
-	/// The subscription's GROUP_ORDER (draft-20+), `None` when absent: the track's own.
+	/// The subscription's GROUP_ORDER (draft-22), `None` when absent: the track's own.
 	pub group_order: Option<GroupOrder>,
-	/// The subscription's Location Filter (draft-20+), `None` when absent: unfiltered.
+	/// The subscription's Location Filter (draft-22), `None` when absent: unfiltered.
 	pub filter: Option<Filter>,
 }
 
@@ -270,8 +270,8 @@ impl Message for Publish<'_> {
 			}
 			_ => {
 				// GROUP_ORDER is the publisher's preference on a draft-15 PUBLISH, illegal from
-				// draft-16 to draft-19 (a peer closes the session with PROTOCOL_VIOLATION), and
-				// from draft-20 one of the subscription's parameters, which moved here. The
+				// draft-16 to draft-18 (a peer closes the session with PROTOCOL_VIOLATION), and
+				// from draft-22 one of the subscription's parameters, which moved here. The
 				// publisher's preference is a DEFAULT_PUBLISHER_GROUP_ORDER track property
 				// instead, which we write from draft-17 on. Draft-16 gets neither form; see
 				// Properties::encode.
@@ -336,11 +336,11 @@ impl Message for Publish<'_> {
 				})
 			}
 			_ => {
-				// GROUP_ORDER is legal on PUBLISH in draft-15 and again from draft-20, when
+				// GROUP_ORDER is legal on PUBLISH in draft-15 and again from draft-22, when
 				// the subscription parameters moved here. Draft-16 still knows the id, so one
-				// on this message is ignored. Draft-17 through draft-19 close the session.
+				// on this message is ignored. Draft-17 and draft-18 close the session.
 				//
-				// The draft-20 parameters have to parse even though reverse publishing is
+				// The draft-22 parameters have to parse even though reverse publishing is
 				// unsupported: an unlisted parameter fails the whole message, which would
 				// kill the session instead of letting the request reach NOT_SUPPORTED.
 				// OBJECT_DELIVERY_TIMEOUT is also legal in draft-15. The timeouts are dropped.
@@ -358,7 +358,7 @@ impl Message for Publish<'_> {
 				let mut properties = Properties::decode(r, version)?;
 				// Last, so a malformed field closes the session before a token refusal.
 				super::token::single(authorization_token)?;
-				// Draft-15's GROUP_ORDER is the publisher's preference; draft-20's is the
+				// Draft-15's GROUP_ORDER is the publisher's preference; draft-22's is the
 				// subscription's.
 				let (publisher_order, group_order) = match version {
 					Version::Draft15 => (group_order, None),
@@ -393,9 +393,9 @@ pub struct PublishOk {
 	pub subscriber_priority: Option<u8>,
 	/// GROUP_ORDER (through draft-18), `None` when absent.
 	pub group_order: Option<GroupOrder>,
-	/// The Location Filter (through draft-19), `None` when absent.
+	/// The Location Filter (through draft-18), `None` when absent.
 	pub filter: Option<Filter>,
-	/// NEW_GROUP_REQUEST (drafts 16 to 19), which a dynamic track judges as a join.
+	/// NEW_GROUP_REQUEST (drafts 16 to 18), which a dynamic track judges as a join.
 	pub new_group: Option<u64>,
 }
 
@@ -422,11 +422,11 @@ impl Message for PublishOk {
 				// no parameters
 				w.u8(0);
 			}
-			// Draft-20 moved the subscription parameters out of PUBLISH_OK; they belong to
+			// Draft-22 moved the subscription parameters out of PUBLISH_OK; they belong to
 			// PUBLISH and REQUEST_UPDATE now, so a PUBLISH_OK carries none of them.
 			_ if Filter::is_draft22(version) => encode_params!(w, version,),
 			_ => {
-				// GROUP_ORDER left PUBLISH_OK in draft-19. Sending it there is a parameter
+				// GROUP_ORDER left PUBLISH_OK in draft-22. Sending it there is a parameter
 				// on the wrong message, which closes the session.
 				let group_order = matches!(
 					version,
@@ -478,9 +478,8 @@ impl Message for PublishOk {
 			}
 			_ => {
 				// EXPIRES is ignored, as in SUBSCRIBE_OK. Delivery timeouts are legal on the
-				// drafts that list them and dropped: nothing here acts on a publisher's timeout. Draft-20 moved the
-				// subscription parameters off PUBLISH_OK, and draft-19 already dropped
-				// GROUP_ORDER.
+				// drafts that list them and dropped: nothing here acts on a publisher's timeout. Draft-22 moved the
+				// subscription parameters, GROUP_ORDER included, off PUBLISH_OK.
 				decode_params!(r, version,
 					0x02 => _delivery_timeout: Option<u64> where !Filter::is_draft22(version),
 					0x06 => _subgroup_delivery_timeout: Option<u64> where matches!(version, Version::Draft18),
@@ -537,7 +536,7 @@ impl Message for PublishError<'_> {
 mod tests {
 	use super::*;
 
-	/// Draft-20 moved the subscription parameters into PUBLISH. We refuse the request
+	/// Draft-22 moved the subscription parameters into PUBLISH. We refuse the request
 	/// itself, but the message still has to parse: an unlisted parameter fails the whole
 	/// decode, which kills the session instead of letting the peer get its refusal.
 	#[test]
@@ -558,11 +557,11 @@ mod tests {
 		Properties::default().encode(w, version)?;
 
 		Publish::decode_msg(&mut Decoder::new(&body, version.into()), version)
-			.expect("draft-20 PUBLISH parameters must parse");
+			.expect("draft-22 PUBLISH parameters must parse");
 		Ok(())
 	}
 
-	/// They arrived in draft-20, so an earlier peer sending one is still a violation.
+	/// They arrived in draft-22, so an earlier peer sending one is still a violation.
 	#[test]
 	fn older_drafts_reject_the_relocated_parameters() -> Result<(), EncodeError> {
 		let version = Version::Draft18;
@@ -763,23 +762,23 @@ mod tests {
 		buf
 	}
 
-	/// SUBSCRIBER_PRIORITY is known in draft-16 but not defined for PUBLISH until draft-20.
-	/// OBJECT_DELIVERY_TIMEOUT is legal on PUBLISH again from draft-20.
+	/// SUBSCRIBER_PRIORITY is known in draft-16 but not defined for PUBLISH until draft-22.
+	/// OBJECT_DELIVERY_TIMEOUT is legal on PUBLISH again from draft-22.
 	#[test]
 	fn publish_parameters_follow_the_draft() {
 		decode_message::<Publish>(&publish_with_param(Version::Draft16, 0x20, 1), Version::Draft16)
 			.expect("draft-16 ignores SUBSCRIBER_PRIORITY");
 		assert!(decode_message::<Publish>(&publish_with_param(Version::Draft18, 0x20, 1), Version::Draft18).is_err());
 		decode_message::<Publish>(&publish_with_param(Version::Draft22, 0x02, 1), Version::Draft22)
-			.expect("draft-20 accepts OBJECT_DELIVERY_TIMEOUT");
+			.expect("draft-22 accepts OBJECT_DELIVERY_TIMEOUT");
 	}
 
-	/// PUBLISH_OK carries the delivery timeout through draft-19, and NEW_GROUP_REQUEST from
-	/// draft-16 through draft-19. Draft-20 no longer carries FORWARD.
+	/// PUBLISH_OK carries the delivery timeout through draft-18, and NEW_GROUP_REQUEST from
+	/// draft-16 through draft-18. Draft-22 no longer carries FORWARD.
 	#[test]
 	fn publish_ok_parameters_follow_the_draft() {
 		decode_message::<PublishOk>(&publish_ok_with_param(Version::Draft18, 0x02, 1), Version::Draft18)
-			.expect("draft-19 accepts DELIVERY_TIMEOUT");
+			.expect("draft-18 accepts DELIVERY_TIMEOUT");
 		decode_message::<PublishOk>(&publish_ok_with_param(Version::Draft16, 0x32, 1), Version::Draft16)
 			.expect("draft-16 accepts NEW_GROUP_REQUEST");
 		assert!(
@@ -842,7 +841,7 @@ mod tests {
 			);
 		}
 
-		// SUBSCRIPTION_ENDED is clean until draft-20 unassigned it.
+		// SUBSCRIPTION_ENDED is clean until draft-22 unassigned it.
 		assert!(done(0x3).end(Version::Draft18).is_ok());
 		assert!(matches!(
 			done(0x3).end(Version::Draft22),
@@ -1059,7 +1058,7 @@ mod tests {
 		assert!(decoded.forward);
 	}
 
-	/// An absent parameter stays absent, so the subscription keeps the one it had: draft-19
+	/// An absent parameter stays absent, so the subscription keeps the one it had: draft-22
 	/// has no GROUP_ORDER on PUBLISH_OK at all.
 	#[test]
 	fn test_publish_ok_absent_parameters_stay_absent() {
