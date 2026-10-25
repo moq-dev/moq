@@ -512,9 +512,10 @@ impl Producer {
 		.await;
 	}
 
-	/// Resolve once an enabled video rendition has its init and is
-	/// [advertised](Rendition::is_advertised), so a manifest lists it, or none is left that
-	/// listings do not refuse: a denied or failed one can never be listed.
+	/// Start every enabled video rendition's init build, then resolve once one of them has its
+	/// init and is [advertised](Rendition::is_advertised), so a manifest lists it, or none is left
+	/// that listings do not refuse: a denied or failed one can never be listed. A build that has
+	/// nothing to read from yet starts on the wake that indexes its media.
 	#[cfg_attr(
 		not(feature = "server"),
 		allow(dead_code, reason = "only the `server` feature uses it")
@@ -533,6 +534,9 @@ impl Producer {
 					.peekable();
 				if video.peek().is_none()
 					|| video.any(|rendition| {
+						// Rerun on every wake: `poll_refused` registered `waiter` on both timelines,
+						// so the rows a build needs wake this wait to start it.
+						rendition.start_init();
 						rendition.poll_init(waiter).is_ready() && rendition.poll_advertised(waiter).is_ready()
 					}) {
 					Poll::Ready(())

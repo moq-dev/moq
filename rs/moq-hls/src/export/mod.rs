@@ -347,20 +347,15 @@ impl Broadcaster {
 		)))
 	}
 
-	/// Start every enabled video rendition's init build, then resolve once one of them has its
-	/// init, or none is left that could be listed. A DASH player picks its adaptation sets from the first manifest
-	/// it loads, so that one must not lack video only because no init was built yet, while any
-	/// one built init is enough to render at once. Bounding the wait is the caller's policy.
+	/// Build video inits until one enabled video rendition is listable, or none is left that
+	/// could be. A DASH player picks its adaptation sets from the first manifest it loads, so that
+	/// one must not lack video only because no init was built yet, while any one built init is
+	/// enough to render at once. Bounding the wait is the caller's policy.
 	#[cfg_attr(
 		not(feature = "server"),
 		allow(dead_code, reason = "only the `server` feature uses it")
 	)]
 	pub(crate) async fn video_init(&self) {
-		for rendition in self.renditions.snapshot() {
-			if rendition.kind == Kind::Video && rendition.is_enabled() {
-				rendition.start_init();
-			}
-		}
 		self.renditions.video_init().await;
 	}
 
@@ -1917,6 +1912,46 @@ mod tests {
 		tokio::time::timeout(Duration::from_secs(1), waiting)
 			.await
 			.expect("video0 is listable once its init is built");
+	}
+
+	// An inline video with nothing indexed when the wait starts has nothing to build from yet.
+	// The wait starts its build once the timeline arrives, rather than timing out without video.
+	#[tokio::test(start_paused = true)]
+	async fn the_first_video_wait_builds_an_init_indexed_while_waiting() {
+		let (origin, broadcast, mut catalog) = timeline_pair().await;
+		catalog
+			.mutate(|catalog| {
+				let config = catalog.video.renditions.get_mut("video0").unwrap();
+				config.coded_width = None;
+				config.coded_height = None;
+			})
+			.unwrap();
+		// video1's init builds from the catalog alone, but its timeline resolves no segment.
+		let (_video0_track, mut video0) = timeline_track(&broadcast, "video0");
+		let (_video1_track, _video1) = timeline_track(&broadcast, "video1");
+		let media = broadcast.create_track("video0", timed()).unwrap();
+
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		while broadcaster.rendition(Kind::Video, "video0").is_none() {
+			moq_clock::sleep(Duration::from_millis(10)).await;
+		}
+		let mut waiting = std::pin::pin!(broadcaster.video_init());
+		assert!(
+			moq_clock::timeout(Duration::from_secs(1), waiting.as_mut())
+				.await
+				.is_err(),
+			"resolved without a listable video"
+		);
+
+		for sequence in 0..3 {
+			let mut group = media.create_group(sequence.into()).unwrap();
+			write_keyframe(&mut group, sequence);
+			group.finish().unwrap();
+			video0.push(&gop(sequence)).unwrap();
+		}
+		moq_clock::timeout(Duration::from_secs(1), waiting)
+			.await
+			.expect("the wait builds video0's init once its timeline arrives");
 	}
 
 	// The manifest leaves a disabled rendition out, so it never fetches media for its init.
