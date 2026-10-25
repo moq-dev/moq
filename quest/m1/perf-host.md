@@ -10,10 +10,7 @@ delete this quest once it holds.
 ## Plan
 
 - `bench/profile.py` refuses `lock` and `cpu` captures without it (heap
-  captures need only `jeprof`). The kio log quest and
+  captures need only `jeprof`). The
+  [log lock profile](/quest/m1/unbounded-groups/log-lock-profile.md) and
   [moq-dev/moq#6680](https://github.com/moq-dev/moq/pull/6680) need CPU and lock
   profiles from such a host.
-
-## Related
-
-- [kio append-only log](/quest/m1/unbounded-groups/log.md) - needs a "before" lock profile
