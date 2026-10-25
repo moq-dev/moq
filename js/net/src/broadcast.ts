@@ -147,7 +147,7 @@ async function requested(state: BroadcastState): Promise<track.Request | undefin
 function closeState(state: BroadcastState) {
 	if (state.closed.peek() !== undefined) return;
 	state.closed.set(null);
-	state.listing.detach(null);
+	state.listing.close();
 	for (const cleanup of state.demands.values()) cleanup();
 	for (const request of state.pending) request.reject();
 	state.requested.mutate((requests) => {
