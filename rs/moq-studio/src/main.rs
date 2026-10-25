@@ -56,6 +56,8 @@ fn main() -> anyhow::Result<()> {
 	moq_tokio::cli::check_env(&[Config::spec()], &[])?;
 
 	let runtime = tokio::runtime::Runtime::new()?;
+	// The QUIC client binds its socket on the current runtime.
+	let _runtime = runtime.enter();
 	let gpu = pollster::block_on(engine::Gpu::new())?;
 	let collection = engine::load(&config.scenes)?;
 	let connect = match config.client.url.clone() {

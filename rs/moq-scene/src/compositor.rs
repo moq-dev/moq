@@ -9,7 +9,7 @@ use moq_clock::Instant;
 use moq_video::render::{Renderer, wgpu};
 
 use crate::Error;
-use crate::collection::{Canvas, Collection, Rect};
+use crate::collection::{Canvas, Collection, Rect, Source};
 use crate::source::{Picture, Sources};
 
 /// The format of every canvas texture: gamma-encoded RGBA, what
@@ -106,8 +106,10 @@ struct Target {
 }
 
 /// One source's newest picture on the GPU.
-#[derive(Default)]
 struct Layer {
+	/// What the picture came from. An edited source starts a new layer, so it
+	/// never shows the old source's last picture.
+	source: Source,
 	/// Converts video frames, created on the first one.
 	renderer: Option<Renderer>,
 	/// Samples the newest picture; `None` until the first arrives.
@@ -427,15 +429,24 @@ impl Compositor {
 	}
 
 	/// Pull the newest picture from every source onto the GPU, and forget the
-	/// sources the collection no longer has.
+	/// sources the collection no longer has or has since edited.
 	fn update(&mut self, collection: &Collection, sources: &Sources) {
-		self.layers.retain(|name, _| collection.sources.contains_key(name));
+		self.layers
+			.retain(|name, layer| collection.sources.get(name) == Some(&layer.source));
 
-		for name in collection.sources.keys() {
-			let Some(picture) = sources.get(name).and_then(|feed| feed.take()) else {
+		for (name, source) in &collection.sources {
+			let Some(feed) = sources.get(name).filter(|feed| feed.source() == source) else {
 				continue;
 			};
-			let layer = self.layers.entry(name.clone()).or_default();
+			let Some(picture) = feed.take() else {
+				continue;
+			};
+			let layer = self.layers.entry(name.clone()).or_insert_with(|| Layer {
+				source: source.clone(),
+				renderer: None,
+				bind: None,
+				failed: false,
+			});
 			let texture = match picture {
 				Picture::Frame(frame) => {
 					let renderer = match layer.renderer.as_mut() {
@@ -831,8 +842,8 @@ mod tests {
 		.await;
 	}
 
-	/// A source with no new picture repeats its last one; a removed source
-	/// disappears.
+	/// A source with no new picture repeats its last one; an edited source never
+	/// shows the old one's picture, and a removed source disappears.
 	#[tokio::test]
 	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
 	async fn a_stalled_source_repeats_its_last_picture() {
@@ -844,6 +855,18 @@ mod tests {
 			assert!(studio.sources.get("blue").unwrap().take().is_none(), "drawn once");
 			studio.render(Instant::now());
 			assert_eq!(pixel(&studio.program(), 1, 1), BLUE);
+
+			// An offline broadcast has no picture yet, so it draws nothing.
+			studio.collection.sources.insert(
+				"blue".into(),
+				Source::Broadcast {
+					path: "room/offline".into(),
+				},
+			);
+			let drivers = studio.sources.sync(&studio.collection);
+			start(&studio.sources, drivers).await;
+			studio.render(Instant::now());
+			assert_eq!(pixel(&studio.program(), 1, 1), BLACK);
 
 			studio.collection.sources.remove("blue");
 			studio.collection.scenes.clear();

@@ -289,71 +289,114 @@ impl Driver {
 	}
 
 	/// Decode one instance of a broadcast: the first video and audio renditions
-	/// its first catalog offers, until both end.
+	/// each catalog offers, switching when a catalog update changes them, until
+	/// the catalog ends.
 	async fn play(&self, broadcast: moq_net::broadcast::Consumer, path: &str) -> Result<(), Error> {
 		let format = moq_mux::catalog::CatalogFormat::detect(path).unwrap_or_default();
 		let mut catalogs = moq_mux::catalog::Consumer::<()>::new(&broadcast, format).await?;
-		let Some(catalog) = catalogs.next().await? else {
+
+		let mut video: Option<Rendition<hang::catalog::VideoConfig>> = None;
+		let mut audio: Option<Rendition<hang::catalog::AudioConfig>> = None;
+		let mut video_playing: Playing<'_> = Box::pin(std::future::pending());
+		let mut audio_playing: Playing<'_> = Box::pin(std::future::pending());
+
+		loop {
+			tokio::select! {
+				catalog = catalogs.next() => {
+					let Some(catalog) = catalog? else {
+						return Ok(());
+					};
+					// Renditions served from another broadcast would need that
+					// broadcast's own subscription; the studio's sources are single
+					// broadcasts.
+					let next = catalog
+						.video
+						.enabled()
+						.find(|(_, config)| config.broadcast.is_none())
+						.map(|(name, config)| (name.clone(), config.clone()));
+					if next != video {
+						video = next.clone();
+						video_playing = match next {
+							Some((name, config)) => Box::pin(self.play_video(&broadcast, name, config)),
+							None => Box::pin(std::future::pending()),
+						};
+					}
+					let next = catalog
+						.audio
+						.enabled()
+						.find(|(_, config)| config.broadcast.is_none())
+						.map(|(name, config)| (name.clone(), config.clone()));
+					if next != audio {
+						audio = next.clone();
+						audio_playing = match next {
+							Some((name, config)) => Box::pin(self.play_audio(&broadcast, name, config)),
+							None => Box::pin(std::future::pending()),
+						};
+					}
+				}
+				// A rendition that ends waits for a catalog update to replace it.
+				result = &mut video_playing => {
+					result?;
+					video_playing = Box::pin(std::future::pending());
+				}
+				result = &mut audio_playing => {
+					result?;
+					audio_playing = Box::pin(std::future::pending());
+				}
+			}
+		}
+	}
+
+	async fn play_video(
+		&self,
+		broadcast: &moq_net::broadcast::Consumer,
+		name: String,
+		config: hang::catalog::VideoConfig,
+	) -> Result<(), Error> {
+		let mut options = moq_video::decode::Options::new();
+		options.start = moq_video::decode::Start::Latest;
+		let mut consumer = moq_video::decode::Consumer::new(broadcast, &config, name, options).await?;
+		while let Some(read) = consumer.read().await? {
+			if let moq_video::decode::Read::Frame(frame) = read {
+				self.show(Picture::Frame(frame));
+			}
+		}
+		Ok(())
+	}
+
+	async fn play_audio(
+		&self,
+		broadcast: &moq_net::broadcast::Consumer,
+		name: String,
+		config: hang::catalog::AudioConfig,
+	) -> Result<(), Error> {
+		let Some(strip) = self.strip.clone() else {
 			return Ok(());
 		};
+		let bus = self.context.bus.config().clone();
+		let mut options = moq_audio::decode::Options::new();
+		options.start = moq_audio::decode::Start::Latest;
+		options.output.format = moq_audio::Format::F32;
+		options.output.sample_rate = Some(bus.sample_rate);
+		options.output.layout = Some(bus.layout);
+		let mut consumer = moq_audio::decode::Consumer::new(broadcast, &config, name, options).await?;
 
-		// Renditions served from another broadcast would need that broadcast's
-		// own subscription; the studio's sources are single broadcasts.
-		let video = catalog
-			.video
-			.enabled()
-			.find(|(_, config)| config.broadcast.is_none())
-			.map(|(name, config)| (name.clone(), config.clone()));
-		let audio = catalog
-			.audio
-			.enabled()
-			.find(|(_, config)| config.broadcast.is_none())
-			.map(|(name, config)| (name.clone(), config.clone()));
-
-		let video = async {
-			let Some((name, config)) = video else {
-				return Ok(());
-			};
-			let mut options = moq_video::decode::Options::new();
-			options.start = moq_video::decode::Start::Latest;
-			let mut consumer = moq_video::decode::Consumer::new(&broadcast, &config, name, options).await?;
-			while let Some(read) = consumer.read().await? {
-				if let moq_video::decode::Read::Frame(frame) = read {
-					self.show(Picture::Frame(frame));
-				}
+		let mut input = moq_audio::encode::Input::new(bus.sample_rate, bus.layout);
+		input.format = moq_audio::Format::F32;
+		let mut channel = self.context.bus.channel(input, strip)?;
+		// Gaps and encoder boundaries need nothing: the bus plays what arrives
+		// on its own clock, and silence fills whatever does not.
+		while let Some(read) = consumer.read().await? {
+			if let moq_audio::decode::Read::Frame(frame) = read {
+				channel.write(&frame.data)?;
 			}
-			Ok::<_, Error>(())
-		};
-
-		let audio = async {
-			let (Some((name, config)), Some(strip)) = (audio, self.strip.clone()) else {
-				return Ok(());
-			};
-			let bus = self.context.bus.config().clone();
-			let mut options = moq_audio::decode::Options::new();
-			options.start = moq_audio::decode::Start::Latest;
-			options.output.format = moq_audio::Format::F32;
-			options.output.sample_rate = Some(bus.sample_rate);
-			options.output.layout = Some(bus.layout);
-			let mut consumer = moq_audio::decode::Consumer::new(&broadcast, &config, name, options).await?;
-
-			let mut input = moq_audio::encode::Input::new(bus.sample_rate, bus.layout);
-			input.format = moq_audio::Format::F32;
-			let mut channel = self.context.bus.channel(input, strip)?;
-			// Gaps and encoder boundaries need nothing: the bus plays what arrives
-			// on its own clock, and silence fills whatever does not.
-			while let Some(read) = consumer.read().await? {
-				if let moq_audio::decode::Read::Frame(frame) = read {
-					channel.write(&frame.data)?;
-				}
-			}
-			Ok::<_, Error>(())
-		};
-
-		tokio::try_join!(video, audio)?;
+		}
 		Ok(())
 	}
 }
+
+/// A rendition a broadcast source is playing: its name and configuration.
+type Rendition<C> = (String, C);
 
 /// Start the feed for `source`, and the driver that fills it.
 fn open(name: &str, source: &Source, context: &Context) -> (Feed, Driver) {
@@ -522,6 +565,52 @@ mod tests {
 			collection.sources.remove("red");
 			assert!(sources.sync(&collection).is_empty());
 			assert!(sources.get("red").is_none());
+		})
+		.await;
+	}
+
+	/// A broadcast source follows catalog updates: when a better rendition
+	/// appears, it switches to it without the broadcast restarting.
+	#[tokio::test]
+	async fn a_broadcast_follows_its_catalog() {
+		local(async {
+			let dir = tempfile::tempdir().unwrap();
+			let (context, origin) = context(dir.path());
+			let publication = origin.create_broadcast("room/guest").unwrap();
+			let mut broadcast = publication.broadcast().clone();
+			let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+			// A known bitrate ranks a rendition above one without.
+			let audio = |name: &str, bitrate: Option<u64>| {
+				let track = broadcast
+					.create_track(name, catalog.track_info(hang::catalog::PRIORITY.audio))
+					.unwrap();
+				let mut config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+				config.bitrate = bitrate;
+				catalog
+					.audio(
+						track,
+						moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
+						config,
+					)
+					.unwrap()
+			};
+			let first = audio("first", None);
+			publication
+				.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))
+				.unwrap();
+
+			let mut sources = Sources::new(context);
+			let drivers = sources.sync(&collection());
+			start(&sources, drivers).await;
+
+			let mut first = first.demand();
+			while first.wanted_changed().await.unwrap().is_none() {}
+
+			let second = audio("second", Some(128_000));
+			let mut second = second.demand();
+			while second.wanted_changed().await.unwrap().is_none() {}
+			while first.wanted_changed().await.unwrap().is_some() {}
+			assert_eq!(sources.get("guest").unwrap().status(), Status::Live);
 		})
 		.await;
 	}

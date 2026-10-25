@@ -343,7 +343,10 @@ impl Engine {
 			let data: Vec<u8> = samples.iter().flat_map(|sample| sample.to_le_bytes()).collect();
 			if let Err(err) = publish.write(&moq_audio::Frame::new(Bytes::from(data), timestamp)) {
 				self.stats.fail(format!("audio: {err}"));
-				producer = None;
+				// Viewers see the audio fail rather than go away unfinished.
+				if let Some(producer) = producer.take() {
+					producer.abort(moq_net::StreamError::Internal.into());
+				}
 			}
 		}
 	}
@@ -426,13 +429,31 @@ enum Video {
 }
 
 /// Read back and encode program frames until the program clock stops.
+///
+/// A failure aborts the video track, so viewers see that it failed rather
+/// than a track that went away unfinished.
 fn encode(
 	engine: &Engine,
 	video: mpsc::Receiver<Video>,
 	mut producer: moq_video::encode::Producer,
 	config: moq_video::encode::Config,
 ) {
-	let stats = &engine.stats;
+	let result = encode_frames(&engine.stats, video, &mut producer, &config).and_then(|()| {
+		producer.finish()?;
+		Ok(())
+	});
+	if let Err(err) = result {
+		engine.stats.fail(format!("{err:#}"));
+		producer.abort(moq_net::StreamError::Internal.into());
+	}
+}
+
+fn encode_frames(
+	stats: &Stats,
+	video: mpsc::Receiver<Video>,
+	producer: &mut moq_video::encode::Producer,
+	config: &moq_video::encode::Config,
+) -> anyhow::Result<()> {
 	let mut encoder: Option<moq_video::encode::Encoder> = None;
 	let mut paused = false;
 
@@ -442,18 +463,13 @@ fn encode(
 			// Marks the gap, so a viewer arriving during it is not served the
 			// last group before it as if it were live.
 			Video::Pause => {
-				if let Err(err) = producer.discontinuity() {
-					return stats.fail(format!("video: {err}"));
-				}
+				producer.discontinuity().context("video")?;
 				paused = true;
 				continue;
 			}
 		};
 		let start = Instant::now();
-		let frame = match pending.wait() {
-			Ok(frame) => frame,
-			Err(err) => return stats.fail(format!("readback: {err}")),
-		};
+		let frame = pending.wait().context("readback")?;
 		stats
 			.readback_us
 			.store(start.elapsed().as_micros() as u64, Ordering::Relaxed);
@@ -461,36 +477,28 @@ fn encode(
 
 		let encoder = match &mut encoder {
 			Some(encoder) => encoder,
-			None => match moq_video::encode::Encoder::new(&config) {
-				Ok(opened) => {
-					*stats.encoder.lock().unwrap() = Some(opened.name().to_string());
-					encoder.insert(opened)
-				}
-				Err(err) => return stats.fail(format!("video encoder: {err}")),
-			},
+			None => {
+				let opened = moq_video::encode::Encoder::new(config).context("video encoder")?;
+				*stats.encoder.lock().unwrap() = Some(opened.name().to_string());
+				encoder.insert(opened)
+			}
 		};
 
 		// A viewer arriving after a break starts from a keyframe rather than
 		// waiting out the rest of a group nobody received the start of.
-		if std::mem::take(&mut paused)
-			&& let Err(err) = encoder.cut()
-		{
-			return stats.fail(format!("video encoder: {err}"));
+		if std::mem::take(&mut paused) {
+			encoder.cut().context("video encoder")?;
 		}
 
 		let start = Instant::now();
-		let encoded = match encoder.encode(&frame) {
-			Ok(encoded) => encoded,
-			Err(err) => return stats.fail(format!("video encoder: {err}")),
-		};
-		if let Err(err) = producer.publish(&encoded) {
-			return stats.fail(format!("video: {err}"));
-		}
+		let encoded = encoder.encode(&frame).context("video encoder")?;
+		producer.publish(&encoded).context("video")?;
 		stats
 			.encode_us
 			.store(start.elapsed().as_micros() as u64, Ordering::Relaxed);
 		stats.encoded.fetch_add(1, Ordering::Relaxed);
 	}
+	Ok(())
 }
 
 /// Run a source on its own thread until its feed is dropped.

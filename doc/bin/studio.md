@@ -39,8 +39,8 @@ Every panel is a tab you can drag, split, or stack.
 | Output | See the relay connection, whether anyone is watching, and the encoder's work. |
 
 A broadcast source subscribes through the same relay connection, plays the
-first video and audio its catalog lists, and comes back on its own when the
-publisher restarts. Audio from every source is mixed into the program whether
+best video and audio its catalog lists, switches when the catalog changes, and
+comes back on its own when the publisher restarts. Audio from every source is mixed into the program whether
 or not its scene is live; mute a source to leave it out.
 
 ## Scene file

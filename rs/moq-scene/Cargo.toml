@@ -23,6 +23,8 @@ capture = ["moq-video/capture", "moq-audio/capture"]
 
 [dependencies]
 bytemuck = { version = "1", features = ["derive"] }
+# The catalog's rendition configs, which a broadcast source follows.
+hang = { workspace = true }
 humantime-serde = { workspace = true }
 # PNG and JPEG still images. Already in a studio's graph through eframe.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
