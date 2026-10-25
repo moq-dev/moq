@@ -939,8 +939,13 @@ impl StreamsState {
 
         let id = frame.id;
         let buffered = stream.pending.buffered();
+        let was_pending = stream.is_pending();
         let finished = stream.ack(frame);
         self.buffered_data -= buffered - stream.pending.buffered();
+        if was_pending && !stream.is_pending() {
+            // A duplicate delivered the last of the data queued for retransmission
+            self.pending.remove(&mut stream.slot);
+        }
         if let Some(offset) = stream.take_acked() {
             self.events.push_back(StreamEvent::Acked { id, offset });
         }
@@ -1635,6 +1640,44 @@ mod tests {
         .write(&[7; 24])
         .unwrap();
         assert_eq!(server.write_limit(), 0);
+    }
+
+    /// A bandwidth probe's duplicate can deliver a lost range before its retransmission is sent,
+    /// which then has nothing left to send
+    #[test]
+    fn ack_cancels_queued_retransmit() {
+        let mut server = make(Side::Server);
+        server.set_params(&TransportParameters {
+            initial_max_streams_uni: 1u32.into(),
+            initial_max_data: 1000u32.into(),
+            initial_max_stream_data_uni: 1000u32.into(),
+            ..TransportParameters::default()
+        });
+        let (mut pending, state) = (Retransmits::default(), ConnState::Established);
+        let id = Streams {
+            state: &mut server,
+            conn_state: &state,
+        }
+        .open(Dir::Uni, Default::default())
+        .unwrap();
+        SendStream {
+            id,
+            state: &mut server,
+            pending: &mut pending,
+            conn_state: &state,
+        }
+        .write(&[42; 24])
+        .unwrap();
+        let mut buf = Vec::with_capacity(1000);
+        let sent = server.write_frames(&mut buf, 0..1000, true).streams;
+        assert_eq!(sent.len(), 1);
+
+        server.retransmit(sent[0].clone());
+        assert!(server.can_send_stream_data());
+        server.received_ack_of(sent[0].clone());
+        assert!(!server.can_send_stream_data());
+        buf.clear();
+        assert!(server.write_frames(&mut buf, 0..1000, true).streams.is_empty());
     }
 
     #[test]

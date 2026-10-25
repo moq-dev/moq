@@ -81,6 +81,8 @@ impl SendBuffer {
             return;
         }
 
+        // A bandwidth probe's duplicate can deliver a range already queued for retransmission
+        self.retransmits.remove(range.clone());
         self.acks.insert(range);
 
         while self.acks.min() == Some(self.offset - self.unacked_len as u64) {

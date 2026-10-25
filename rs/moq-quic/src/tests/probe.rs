@@ -635,6 +635,39 @@ fn congested() {
     }
 }
 
+/// A write that fits one packet still gets resent: the probe looks for in-flight data while that
+/// packet is being built, before it is tracked, and the flight drains between writes
+#[test]
+fn single_packet_writes() {
+    let _guard = subscribe();
+    let mut pair = Pair::default();
+    pair.latency = Duration::from_millis(20);
+    let (client_ch, _) = pair.connect();
+    pair.client_conn_mut(client_ch).set_probe_target(TARGET);
+    let id = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
+
+    let end = pair.time + Duration::from_secs(1);
+    let mut next_write = pair.time;
+    while pair.time < end {
+        if pair.time >= next_write {
+            pair.client_send(client_ch, id).write(&[0; 100]).unwrap();
+            next_write += Duration::from_millis(200);
+        }
+        pair.drive_client();
+        pair.drive_server();
+        let wakeups = [
+            pair.client.next_wakeup(),
+            pair.server.next_wakeup(),
+            Some(next_write),
+        ];
+        pair.time = pair.time.max(wakeups.into_iter().flatten().min().unwrap());
+    }
+    assert!(pair.client_conn_mut(client_ch).stats().path.sent_bandwidth_probes > 0);
+}
+
 #[test]
 #[ignore = "nightly: just rs quic-sim"]
 fn steps_keyframes() {

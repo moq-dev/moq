@@ -147,7 +147,11 @@ impl Connection {
         match found {
             Some((pn, _)) => probe.cursor = pn,
             None => {
-                probe.floor = space.next_packet_number;
+                // Not past the next packet number: a packet being built has one but isn't
+                // tracked yet
+                if let Some(last) = space.sent_packets.last() {
+                    probe.floor = last + 1;
+                }
                 probe.cursor = probe.floor;
             }
         }
