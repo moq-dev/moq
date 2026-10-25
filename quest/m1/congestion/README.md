@@ -30,6 +30,8 @@ moq commit access to noq's BBR3 or an external crate:
 ## Required
 
 - [Portable controller trait](/quest/m1/congestion/trait.md) - an s2n-style trait with crate-owned per-packet state and pacing, independent of any transport's types
+- [App-limited estimate ages](/quest/m1/congestion/app-limited-estimate.md) - an app-limited BBR3 estimate falls within seconds after the path drops
+- [Seeded BBR3 in tests](/quest/m1/congestion/bbr-test-seed.md) - unseeded `Bbr3Config::default()` tests replay the same randomness
 
 ## Related
 

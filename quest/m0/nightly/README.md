@@ -39,3 +39,4 @@ Public API: none. Wire: none.
 - [ts_schedule regression](/quest/m0/nightly/ts-schedule.md) - the moq-mux `ts_schedule` benches return to their old cost
 - [Nightly's base in a shallow checkout](/quest/m0/nightly/shallow-base.md) - `sh/gh/nightly.test.py` passes in Nightly's depth-1 checkout
 - [Advisory bumps](/quest/m0/nightly/advisories.md) - both audits pass on today's advisories
+- [moq-net builds without async](/quest/m0/nightly/net-async-free.md) - the no-default-features lane stops pulling `async` back in

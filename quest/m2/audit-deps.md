@@ -132,6 +132,10 @@ deep-equal pair, and duplicated WebVTT stamps and `jwt=` lookups.
 near copies), which is duplication rather than a dependency question.
 The m1 run came a day after m0's and did not re-review it; check code
 added since.
+- When TypeScript 7.1 is stable, delete `TransportStats` in
+  `js/net/src/connection/stats.ts` and type `getStats()` as the DOM's
+  `WebTransportConnectionStats` (from
+  [moq-dev/moq#6625](https://github.com/moq-dev/moq/pull/6625)).
 
 ## Required
 

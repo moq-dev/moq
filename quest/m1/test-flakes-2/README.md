@@ -48,3 +48,6 @@ Public API: none. Wire: none.
 - [moq-gst sibling resume](/quest/m1/test-flakes-2/gst-sibling-resume.md) - an idle pad reads its named epoch again after a sibling restart, a likely liveness bug fixed before the test
 - [moq-gst pinned replay](/quest/m1/test-flakes-2/gst-pinned-replay.md) - the pinned-instance finish test waits on events instead of sleep loops
 - [Dart leak RSS](/quest/m1/test-flakes-2/dart-leak-rss.md) - the leak tests measure what moq owns, not process RSS
+- [moq-cli relay tests under load](/quest/m1/test-flakes-2/cli-relay-load.md) - the fetch and announced tests wait on events, not timing
+- [FFI publisher audio gaps](/quest/m1/test-flakes-2/ffi-audio-gap.md) - interop tone checks stop finding gaps from FFI publishers
+- [moq-uring allocations under load](/quest/m1/test-flakes-2/uring-alloc-load.md) - the steady-state send test and MEMLOCK users pass in a parallel check

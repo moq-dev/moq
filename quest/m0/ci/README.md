@@ -97,3 +97,4 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [mbx on a full disk](/quest/m0/ci/mbx-low-disk.md) - gc never evicts a live build's trees, and the Dart check names the real cause
 - [Verify the Nix cache](/quest/m0/ci/nix-cache-verify.md) - confirm CI and releases use `nix.moq.dev` and retire Cachix
 - [First shared FFI release](/quest/m0/ci/nightly-ffi-reuse.md) - condition: the first `moq-ffi-v*` tag that runs `Release FFI`, and a `Shipping sizes` run; verify the wrappers and size keys
+- [Seed release with API reports](/quest/m0/ci/release-api-seed.md) - the first cut's API diff has a baseline on `release`
