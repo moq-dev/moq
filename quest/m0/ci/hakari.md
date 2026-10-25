@@ -21,6 +21,13 @@ feature set in another job is a miss, however warm the cache.
 - moq publishes crates with release-plz, and a published crate cannot depend on
   an unpublished workspace-hack. Use hakari's supported setup for published
   workspaces, and prove a release-plz dry run still publishes.
+- Keep the feature-contract checks testing each crate's own declarations: the
+  `quic-features` recipe in `rs/justfile` (moq-quic has no native runtime),
+  `sh/rs/media-features.sh` (minimal builds exclude codecs and rendering), and
+  `sh/rs/net-features.sh` and `sh/rs/tokio-features.sh`. A workspace-hack would
+  inject the union into them and hide a missing declaration. Exclude the crates
+  they guard from the hack, or run those checks with it disabled
+  (`cargo hakari disable`), and show each still fails on a planted violation.
 - Unifying features means some packages build features they don't use. Measure
   whether that costs more CPU than the cache hits save; target, profile, and
   `RUSTFLAGS` differences still split keys, and Nix's flags are unified in

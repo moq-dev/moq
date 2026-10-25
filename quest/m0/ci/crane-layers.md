@@ -5,8 +5,9 @@
 moq's Nix packages build their dependencies once, in one crane dependency layer that
 every package reuses as its `cargoArtifacts`. Editing a workspace crate, kio
 included, rebuilds no dependency, and `nix build` of a second package after the
-first compiles only that package's own crates. Record in the PR how many crates
-each case compiles, before and after.
+first compiles only that package's own crates plus any dependency whose resolved
+features differ from the layer's. Record in the PR how many crates each case
+compiles, before and after, and which dependencies still differ.
 
 ## Plan
 
@@ -16,8 +17,14 @@ CPU time. Today `nix/overlay.nix` builds a separate dependency layer per package
 and any change to that package's features, `cargoExtraArgs`, or `RUSTFLAGS`
 rebuilds all of its roughly 330 dependencies.
 
-- One dependency layer, built with the union of the features the packages use,
-  passed to every package as `cargoArtifacts`.
+- One dependency layer, passed to every package as `cargoArtifacts`. Cargo
+  fingerprints each dependency by the features its own invocation resolves, and
+  a `-p` build resolves only that package's, so a union layer is reused only
+  where a package resolves the same features. Build the layer from the packages'
+  own invocations (each package's `cargoExtraArgs`, in one derivation) so every
+  package finds its exact compilations, and count what each package adds.
+  [Unifying dependency features](/quest/m0/ci/hakari.md) later makes those
+  resolutions identical.
 - Move moq-relay's `-C force-frame-pointers=yes` into `.cargo/config.toml` so
   every build, Nix or cargo, compiles with the same flags and shares mbx keys.
   Frame pointers cost little on x86_64; measure aarch64 too.
@@ -35,3 +42,7 @@ and moq adopts the winner in a follow-up.
 
 Public API: none. Release artifacts: built with frame pointers on every target,
 not only moq-relay.
+
+## Related
+
+- [Unify dependency features](/quest/m0/ci/hakari.md) - makes every package resolve the layer's features

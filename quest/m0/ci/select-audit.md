@@ -2,12 +2,12 @@
 
 ## Goal
 
-A report on how well `just ci`'s selection (`sh/dispatch.sh`, `sh/changed.sh`)
-narrows the merge queue's work, from the last month of queue runs: how often an
+A report on how well `just ci`'s selection (`sh/dispatch.sh`, `sh/changed.sh`,
+and Rust's crate selection in `sh/rs/select.sh`) narrows the merge queue's work, from the last month of queue runs: how often an
 entry builds and tests every package, which paths forced it (toolchain, lockfile,
 `flake.nix`, CI files, root manifests), and whether each of those rules is
 needed. It fixes any rule that selects too much, or too little, with a test in
-`sh/changed.test.py` or its neighbors.
+`sh/changed.test.py`, `sh/rs/select.test.py`, or their neighbors.
 
 ## Plan
 
