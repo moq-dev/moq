@@ -114,8 +114,8 @@ struct Layer {
 	renderer: Option<Renderer>,
 	/// Samples the newest picture; `None` until the first arrives.
 	bind: Option<wgpu::BindGroup>,
-	/// Set once a picture failed to draw, so the failure is logged once.
-	failed: bool,
+	/// Why the newest picture failed to draw, logged when it first does.
+	error: Option<String>,
 }
 
 /// A growable uniform buffer holding one [`Uniform`] per draw of a render.
@@ -293,6 +293,11 @@ impl Compositor {
 		self.program_scene.as_deref()
 	}
 
+	/// Why `source`'s newest picture could not be drawn, until one is.
+	pub fn error(&self, source: &str) -> Option<&str> {
+		self.layers.get(source)?.error.as_deref()
+	}
+
 	/// Whether a fade is under way.
 	pub fn fading(&self) -> bool {
 		self.fade.is_some()
@@ -325,8 +330,9 @@ impl Compositor {
 	/// Draw preview and program as of `now`, from the newest picture each of
 	/// `sources` has.
 	///
-	/// A source that fails to draw is left out and logged once; this fails only
-	/// when the canvas itself cannot be drawn.
+	/// A source whose picture fails to draw keeps its last one and reports why
+	/// through [`error`](Self::error); this fails only when the canvas itself
+	/// cannot be drawn.
 	pub fn render(&mut self, collection: &Collection, sources: &Sources, now: Instant) -> Result<(), Error> {
 		self.update(collection, sources);
 
@@ -446,7 +452,7 @@ impl Compositor {
 				source: source.clone(),
 				renderer: None,
 				bind: None,
-				failed: false,
+				error: None,
 			});
 			let texture = match picture {
 				Picture::Frame(frame) => {
@@ -464,15 +470,16 @@ impl Compositor {
 
 			match texture {
 				Ok(texture) => {
-					layer.failed = false;
+					layer.error = None;
 					let view = texture.create_view(&Default::default());
 					layer.bind = Some(image_bind(&self.device, &self.image_layout, &self.sampler, &view));
 				}
-				Err(err) if !layer.failed => {
-					tracing::warn!(source = %name, %err, "cannot draw source");
-					layer.failed = true;
+				Err(err) => {
+					if layer.error.is_none() {
+						tracing::warn!(source = %name, %err, "cannot draw source");
+					}
+					layer.error = Some(err.to_string());
 				}
-				Err(_) => {}
 			}
 		}
 	}
@@ -903,6 +910,35 @@ mod tests {
 			studio.collection.scenes.clear();
 			studio.render(Instant::now());
 			assert_eq!(pixel(&studio.program(), 1, 1), BLACK);
+		})
+		.await;
+	}
+
+	/// A picture the GPU cannot hold says why, rather than leaving its source
+	/// live and missing from the canvas.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn a_picture_that_cannot_draw_reports_why() {
+		local(async {
+			let mut collection = collection();
+			let mut studio = Studio::new(collection.clone()).await;
+			let limit = studio.compositor.device.limits().max_texture_dimension_2d;
+			image::RgbaImage::new(limit + 1, 1)
+				.save(studio._dir.path().join("wide.png"))
+				.unwrap();
+			collection.sources.insert(
+				"red".into(),
+				Source::Image {
+					path: studio._dir.path().join("wide.png"),
+				},
+			);
+			let drivers = studio.sources.sync(&collection);
+			start(&studio.sources, drivers).await;
+			studio.collection = collection;
+			studio.render(Instant::now());
+			let err = studio.compositor.error("red").expect("the picture failed");
+			assert!(err.contains("texture limit"), "{err}");
+			assert!(studio.compositor.error("blue").is_none());
 		})
 		.await;
 	}

@@ -247,8 +247,7 @@ impl Bus {
 	/// controlled by `strip`.
 	///
 	/// Nothing opens until [`Capture::run`] is awaited, and the device's format
-	/// is whatever it offers: the channel adapts to it each time it opens, under
-	/// the same strip.
+	/// is whatever it offers: the channel adapts to it.
 	///
 	/// Requires the `capture` feature.
 	#[cfg(feature = "capture")]
@@ -278,11 +277,17 @@ impl Channel {
 	///
 	/// Never blocks. Audio that arrives before the bus is first read, or that
 	/// overruns the channel's buffer, is dropped to keep the mix live.
+	///
+	/// Refuses a NaN or infinite sample, which would reach the whole mix and
+	/// survive any gain, mute included.
 	pub fn write(&mut self, data: &[u8]) -> Result<(), Error> {
 		let pcm = self
 			.input
 			.format
 			.as_interleaved_f32(data, self.input.layout.channels())?;
+		if pcm.iter().any(|sample| !sample.is_finite()) {
+			return Err(Error::Unsupported("a non-finite PCM sample".into()));
+		}
 		self.push(&pcm);
 		Ok(())
 	}
@@ -392,14 +397,6 @@ impl Meter {
 	}
 }
 
-/// Backoff bounds for reopening a capture device, matching the capture
-/// publication's: a quick first retry covers a USB device re-enumerating, and
-/// the ceiling keeps a missing device from spinning.
-#[cfg(feature = "capture")]
-const RETRY_MIN: Duration = Duration::from_millis(500);
-#[cfg(feature = "capture")]
-const RETRY_MAX: Duration = Duration::from_secs(4);
-
 /// An input device feeding a [`Bus`], built by [`Bus::capture`].
 ///
 /// Requires the `capture` feature.
@@ -412,48 +409,29 @@ pub struct Capture {
 
 #[cfg(feature = "capture")]
 impl Capture {
-	/// Capture into the mix until the device fails for good, or until the future
-	/// is dropped, which releases the device.
+	/// Capture into the mix until the device stops or fails, or until the
+	/// future is dropped, which releases the device.
 	///
-	/// A device that disappears or stops is reopened with backoff; one that can
-	/// never work (a denied permission, an unsupported format, no such device)
-	/// returns its error. On macOS the future is `!Send`, because the permission
+	/// A device that cannot open or stops delivering returns its error rather
+	/// than being reopened behind the caller's back, so a source that went
+	/// silent says why. On macOS the future is `!Send`, because the permission
 	/// prompt and ScreenCaptureKit hold ObjC handles across an await, so run it
 	/// on a local task there.
 	pub async fn run(self) -> Result<(), Error> {
-		let mut backoff = RETRY_MIN;
-		loop {
-			match crate::capture::open(&self.config).await {
-				Ok(mut stream) => {
-					let layout = stream.layout();
-					let mut input = Input::new(layout.sample_rate, Layout::from_channels(layout.channels)?);
-					input.format = crate::Format::F32;
-					let mut channel = self.bus.channel(input, self.strip.clone())?;
-					backoff = RETRY_MIN;
+		let mut stream = crate::capture::open(&self.config)
+			.await
+			.map_err(|failure| failure.into_error())?;
+		let layout = stream.layout();
+		let mut input = Input::new(layout.sample_rate, Layout::from_channels(layout.channels)?);
+		input.format = crate::Format::F32;
+		let mut channel = self.bus.channel(input, self.strip.clone())?;
 
-					loop {
-						match stream.read().await {
-							// A gap needs nothing here: the bus has no timeline of its
-							// own to re-anchor, so the channel just plays on.
-							Ok(Some(samples)) => channel.push(&samples.data),
-							Ok(None) => break,
-							Err(failure) if failure.is_retryable() => {
-								tracing::warn!(err = %failure.into_error(), "audio capture stopped; reopening");
-								break;
-							}
-							Err(failure) => return Err(failure.into_error()),
-						}
-					}
-				}
-				Err(failure) if failure.is_retryable() => {
-					tracing::warn!(err = %failure.into_error(), ?backoff, "audio capture unavailable; retrying");
-				}
-				Err(failure) => return Err(failure.into_error()),
-			}
-
-			moq_clock::sleep(backoff).await;
-			backoff = (backoff * 2).min(RETRY_MAX);
+		// A gap needs nothing here: the bus has no timeline of its own to
+		// re-anchor, so the channel just plays on.
+		while let Some(samples) = stream.read().await.map_err(|failure| failure.into_error())? {
+			channel.push(&samples.data);
 		}
+		Ok(())
 	}
 }
 
@@ -638,6 +616,17 @@ mod tests {
 			bus.channel(input(48_000, Layout::Discrete(3)), Strip::default())
 				.is_err()
 		);
+	}
+
+	/// A NaN survives every gain, mute included, so it is refused before it can
+	/// reach the mix the other channels share.
+	#[test]
+	fn refuses_non_finite_samples() {
+		let bus = Bus::new(Config::default()).unwrap();
+		let mut channel = bus.channel(input(48_000, Layout::Stereo), Strip::default()).unwrap();
+		for bad in [f32::NAN, f32::INFINITY] {
+			assert!(channel.write(&constant(bad, 480, 2)).is_err(), "{bad}");
+		}
 	}
 
 	/// A partial trailing frame in the output is zeroed rather than left with

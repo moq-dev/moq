@@ -233,12 +233,13 @@ impl Engine {
 			_origin: origin,
 		});
 
-		let (video, audio) = match publish {
+		let (video, audio, clock) = match publish {
 			Some(Publish {
 				video,
 				audio,
 				config,
 				exporter,
+				clock,
 			}) => {
 				let zero_copy = exporter.route() == Route::Gpu;
 				engine.stats.zero_copy.store(zero_copy, Ordering::Relaxed);
@@ -249,27 +250,41 @@ impl Engine {
 				std::thread::Builder::new()
 					.name("encode".into())
 					.spawn(move || encode(&encoder, pending, video, config, zero_copy))?;
-				(Some((frames, exporter)), Some(audio))
+				(Some((frames, exporter)), Some(audio), Some(clock))
 			}
-			None => (None, None),
+			None => (None, None, None),
 		};
 
 		let start = Instant::now();
+		// Where the program clock starts on the catalog's, so the wall time the
+		// catalog advertises for a frame is when the program drew it.
+		let epoch = match clock {
+			Some(clock) => Duration::from(clock.capture(start)?),
+			None => Duration::ZERO,
+		};
 		let program = engine.clone();
 		std::thread::Builder::new()
 			.name("program".into())
-			.spawn(move || clocked(program.run_program(start, video)))?;
+			.spawn(move || clocked(program.run_program(start, epoch, video)))?;
 		let mix = engine.clone();
 		std::thread::Builder::new()
 			.name("audio".into())
-			.spawn(move || clocked(mix.run_audio(start, audio)))?;
+			.spawn(move || clocked(mix.run_audio(start, epoch, audio)))?;
 
 		Ok(engine)
 	}
 
 	/// Draw a canvas frame per tick of the program clock, and hand the program
-	/// to the encoder while anyone watches.
-	async fn run_program(&self, start: Instant, mut video: Option<(mpsc::SyncSender<Video>, Exporter)>) {
+	/// to the encoder while anyone watches, stamped `epoch` past `start`.
+	///
+	/// Drawing outlives the encoder: a failed output stops copying the program,
+	/// and the preview and program keep moving.
+	async fn run_program(
+		&self,
+		start: Instant,
+		epoch: Duration,
+		mut video: Option<(mpsc::SyncSender<Video>, Exporter)>,
+	) {
 		let canvas = self.state.lock().unwrap().collection.canvas;
 		let period = Duration::from_secs(1) / canvas.framerate;
 		let mut clock = moq_clock::interval_at(start, period);
@@ -294,24 +309,25 @@ impl Engine {
 			};
 			self.stats.rendered.fetch_add(1, Ordering::Relaxed);
 
-			let Some((frames, exporter)) = &mut video else { continue };
+			let Some((sender, exporter)) = &mut video else { continue };
 			let was = std::mem::replace(&mut watched, self.stats.watched.load(Ordering::Relaxed));
 			if !watched {
 				// Behind every frame already sent, so the break lands after them.
-				if was && frames.send(Video::Pause).is_err() {
-					return;
+				// A send fails only once the encoder stopped, having reported why.
+				if was && sender.send(Video::Pause).is_err() {
+					video = None;
 				}
 				continue;
 			}
-			let Ok(timestamp) = moq_net::Timestamp::try_from(tick.saturating_duration_since(start)) else {
+			let Ok(timestamp) = moq_net::Timestamp::try_from(epoch + tick.saturating_duration_since(start)) else {
 				continue;
 			};
 			match exporter.copy(&program, timestamp) {
 				// The pool bounds the frames in flight, so this waits only behind
 				// a pause the encoder has not reached yet.
 				Ok(Some(pending)) => {
-					if frames.send(Video::Frame(pending)).is_err() {
-						return;
+					if sender.send(Video::Frame(pending)).is_err() {
+						video = None;
 					}
 				}
 				Ok(None) => {
@@ -320,17 +336,18 @@ impl Engine {
 				// The canvas and the exporter share a size and format, so this is
 				// the GPU failing: the video stops, and the canvas keeps drawing.
 				Err(err) => {
-					let _ = frames.send(Video::Failed(err));
+					let _ = sender.send(Video::Failed(err));
 					video = None;
 				}
 			}
 		}
 	}
 
-	/// Read the program bus as the program clock advances, and publish it.
+	/// Read the program bus as the program clock advances, and publish it
+	/// stamped `epoch` past `start`.
 	///
 	/// Runs without a relay too, so the meters move and sources never back up.
-	async fn run_audio(&self, start: Instant, mut producer: Option<moq_audio::encode::Producer>) {
+	async fn run_audio(&self, start: Instant, epoch: Duration, mut producer: Option<moq_audio::encode::Producer>) {
 		let config = self.bus.config().clone();
 		let rate = u128::from(config.sample_rate);
 		let channels = config.layout.channels() as usize;
@@ -350,7 +367,7 @@ impl Engine {
 			}
 			samples.resize(frames * channels, 0.0);
 			self.bus.read(&mut samples);
-			let timestamp = moq_net::Timestamp::from_micros((written * 1_000_000 / rate) as u64);
+			let timestamp = moq_net::Timestamp::from_micros((epoch.as_micros() + written * 1_000_000 / rate) as u64);
 			written = due;
 
 			let Some(publish) = producer.as_mut() else { continue };
@@ -373,6 +390,9 @@ struct Publish {
 	config: moq_video::encode::Config,
 	exporter: Exporter,
 	audio: moq_audio::encode::Producer,
+	/// The catalog's clock, which the codec producers write timestamps
+	/// against verbatim.
+	clock: moq_mux::Clock,
 }
 
 /// Announce the program broadcast and connect to the relay, which also
@@ -389,6 +409,7 @@ async fn publish(
 	let publication = origin.create_broadcast(path).context("cannot create the broadcast")?;
 	let mut broadcast = publication.broadcast().clone();
 	let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default())?;
+	let clock = catalog.clock();
 
 	let mut config = moq_video::encode::Config::new(canvas.width, canvas.height, canvas.framerate());
 	// Opens a throwaway encoder now, so a machine that cannot encode the
@@ -422,13 +443,16 @@ async fn publish(
 		connection,
 		publication,
 	};
-	let publish = Publish {
-		video,
-		config,
-		exporter,
-		audio,
-	};
-	Ok((output, publish))
+	Ok((
+		output,
+		Publish {
+			video,
+			config,
+			exporter,
+			audio,
+			clock,
+		},
+	))
 }
 
 /// Track whether anyone watches the video, so the program is only copied and

@@ -5229,6 +5229,7 @@ dependencies = [
  "moq-video",
  "mpeg2ts",
  "object_store",
+ "percent-encoding",
  "pollster",
  "reqwest",
  "rustls",
@@ -5510,6 +5511,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "url",
  "uuid",
  "wasm-bindgen-test",
 ]

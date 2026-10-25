@@ -52,15 +52,6 @@ bench $BASE="":
 bench-local *args:
     python3 bench/local.py "$@"
 
-# Benchmark selected wrappers against two Rust baselines on this machine.
-[positional-arguments]
-bench-ffi *runners:
-    bench/ffi.sh "$@"
-
-# Compare BoltFFI with UniFFI on one moq-ffi slice. STEPS: build, bench, size, or all.
-bench-ffi-gen *STEPS:
-    bench/ffi-gen/run.sh {{ STEPS }}
-
 # Measure audio group sizes across relay publisher/subscriber and fanout shapes.
 bench-audio:
     bench/run.sh --audio
