@@ -66,3 +66,49 @@ test("a trailing slash resolves to the directory index over a file", () => {
 	]);
 	expect(problems(root, files)).toEqual([]);
 });
+
+test("a name its source declares but the declarations strip is reported", () => {
+	const source = {
+		path: "/src/access.ts",
+		text: [
+			'import { Patterns } from "@moq/pattern";',
+			"/** @internal */ type Input = string | Patterns;",
+			"/** @internal */ const defaults = {};",
+			"/** @internal */ class Base {}",
+			"export const Schema = transform<Access, Input>();",
+			"export class Access extends Base { static defaults: typeof defaults; }",
+		].join("\n"),
+	};
+	const files = new Map([
+		[
+			"/dist/access.d.ts",
+			'import { Patterns } from "@moq/pattern";\nexport declare const Schema: Transform<Access, Input, Patterns>;\nexport declare class Access extends Base {\n    static defaults: typeof defaults.value;\n}\n',
+		],
+	]);
+	expect(problems(root, files, new Map([["/dist/access.d.ts", source]]))).toEqual([
+		"access.d.ts: references Input, which its declarations do not declare",
+		"access.d.ts: references Base, which its declarations do not declare",
+		"access.d.ts: references defaults, which its declarations do not declare",
+	]);
+});
+
+test("globals, type parameters, and names the declarations keep resolve", () => {
+	const source = {
+		path: "/src/element.tsx",
+		text: [
+			'import type { Track } from "./track.ts";',
+			"type Key = string;",
+			"function Render<T>(props: { value: T }) { return <div>{String(props.value)}</div>; }",
+			"export type Map<K> = { [P in Key]: K extends Promise<infer U> ? U : Track };",
+			"export { Render };",
+		].join("\n"),
+	};
+	const files = new Map([
+		[
+			"/dist/element.d.ts",
+			'import type { Track } from "./track.ts";\ntype Key = string;\ndeclare function Render<T>(props: { value: T }): HTMLElement;\nexport type Map<K> = { [P in Key]: K extends Promise<infer U> ? U : Track };\nexport { Render };\n',
+		],
+		["/dist/track.d.ts", "export interface Track {}\n"],
+	]);
+	expect(problems(root, files, new Map([["/dist/element.d.ts", source]]))).toEqual([]);
+});

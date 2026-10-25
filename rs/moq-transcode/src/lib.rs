@@ -814,7 +814,7 @@ mod tests {
 		let origin = moq_tokio::origin::spawn();
 		let output = origin.create_broadcast("room/transcode").unwrap();
 		let consumer = output.consume();
-		let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
+		let transcoder = tokio::spawn(run(source.broadcast.consume(), output.broadcast().clone(), config));
 
 		// The derivative catalog appears before anything is encoded, with the
 		// rung sized against the source and the passthrough reference. Yield

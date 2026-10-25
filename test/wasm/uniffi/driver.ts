@@ -12,10 +12,10 @@ import type { Relay, Report } from "./cases.ts";
 // `--timeout` bounds each page, init and cases and bench together, in seconds. Each case
 // carries its own 15 s bound in the page; this catches a hang outside them.
 const { values } = parseArgs({ options: { relays: { type: "string" }, timeout: { type: "string", default: "300" } } });
-const run = process.env.MOQ_TEST_RUN;
+const run = process.env.HARNESS_RUN_DIR;
 const timeout = Number(values.timeout) * 1000;
 if (!values.relays || !run || !Number.isFinite(timeout) || timeout <= 0)
-	throw new Error("needs --relays, MOQ_TEST_RUN, and a positive --timeout");
+	throw new Error("needs --relays, HARNESS_RUN_DIR, and a positive --timeout");
 const relays = (await Bun.file(values.relays).json()) as Relay[];
 const here = new URL(".", import.meta.url).pathname;
 const dist = join(here, "../dist");

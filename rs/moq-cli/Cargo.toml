@@ -163,7 +163,7 @@ test-env = { path = "../test-env" }
 # exporter drain timeouts instantly instead of waiting on the wall clock.
 tokio = { workspace = true, features = ["test-util"] }
 # Plays the `announced` view's frames on a virtual terminal, scrolling included.
-vt100 = "0.16.2"
+vt100 = "0.17.0"
 
 [target.'cfg(unix)'.dev-dependencies]
 # Sends the signals the `auth serve` shutdown test checks.
