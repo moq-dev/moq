@@ -27,7 +27,7 @@ class ReportTest(unittest.TestCase):
     def harness(self, *args):
         """Record through the real harness_result, as interop.sh does."""
         script = f'source {HERE.parent / "lib" / "harness.sh"}; HARNESS_RUN={self.run}; harness_result "$@"'
-        env = dict(os.environ, MOQ_TEST_RESULTS=str(self.results))
+        env = dict(os.environ, HARNESS_RESULTS=str(self.results))
         return subprocess.run(['bash', '-euo', 'pipefail', '-c', script, 'harness', *args],
                               env=env, capture_output=True, text=True)
 
@@ -97,9 +97,9 @@ class ReportTest(unittest.TestCase):
                      ('pass', 'suite=s', 'case=c', 'outcome=fail'), ('pass', 'suite=s', 'case=c', 'seconds=soon')):
             self.assertNotEqual(self.harness(*args).returncode, 0, args)
         self.assertFalse(self.results.exists())
-        # Without MOQ_TEST_RESULTS the harness records nothing, for any input.
+        # Without HARNESS_RESULTS the harness records nothing, for any input.
         script = f'source {HERE.parent / "lib" / "harness.sh"}; harness_result bogus'
-        env = {k: v for k, v in os.environ.items() if k != 'MOQ_TEST_RESULTS'}
+        env = {k: v for k, v in os.environ.items() if k != 'HARNESS_RESULTS'}
         subprocess.run(['bash', '-euo', 'pipefail', '-c', script], env=env, check=True)
 
     def test_the_report_refuses_malformed_records_and_steps(self):

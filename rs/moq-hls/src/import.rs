@@ -10,7 +10,7 @@ use std::collections::hash_map::Entry;
 use std::io::SeekFrom;
 use std::time::Duration;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use m3u8_rs::{
 	AlternativeMedia, AlternativeMediaType, ByteRange, Map, MasterPlaylist, MediaPlaylist, MediaSegment, Resolution,
 	VariantStream,
@@ -249,23 +249,41 @@ impl Fetcher {
 				.read_to_end(&mut bytes)
 				.await
 				.map_err(Error::from)?;
-			self.validate_range_length(resource, Bytes::from(bytes))
+			Self::validate_range_length(url, range, Bytes::from(bytes))
 		} else {
-			let response = self.request(resource).send().await.map_err(Error::from)?;
+			let response = self.request(resource).send().await?;
 			if response.status().is_redirection() {
 				return Err(Error::ResourceRefused);
 			}
-			let response = response.error_for_status().map_err(Error::from)?;
-			let partial = response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
-			if partial {
-				self.validate_content_range(resource, response.headers())?;
+			let mut response = response.error_for_status()?;
+			let Some(range) = resource.range else {
+				return Ok(response.bytes().await?);
+			};
+
+			// An origin that ignores `Range` sends the whole resource, which would cost every
+			// earlier byte of the file for each segment.
+			if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+				return Err(Error::ByteRangeIgnored {
+					url: url.clone(),
+					status: response.status().as_u16(),
+				});
 			}
-			let bytes = response.bytes().await.map_err(Error::from)?;
-			if resource.range.is_some() && !partial {
-				self.slice_full_response(resource, bytes)
-			} else {
-				self.validate_range_length(resource, bytes)
+			Self::validate_content_range(url, range, response.headers())?;
+
+			// Stream the body so an overrun fails without buffering the excess.
+			let mut body = BytesMut::new();
+			while let Some(chunk) = response.chunk().await? {
+				let read = body.len() + chunk.len();
+				if !u64::try_from(read).is_ok_and(|read| read <= range.length) {
+					return Err(Error::ByteRangeLengthMismatch {
+						url: url.clone(),
+						expected: range.length,
+						actual: read,
+					});
+				}
+				body.extend_from_slice(&chunk);
 			}
+			Self::validate_range_length(url, range, body.freeze())
 		}
 	}
 
@@ -278,35 +296,10 @@ impl Fetcher {
 		request
 	}
 
-	fn slice_full_response(&self, resource: &Resource, bytes: Bytes) -> Result<Bytes> {
-		let Some(range) = resource.range else {
-			return Ok(bytes);
-		};
-		let start = usize::try_from(range.start).ok();
-		let end = range
-			.start
-			.checked_add(range.length)
-			.and_then(|end| usize::try_from(end).ok());
-		match start
-			.zip(end)
-			.and_then(|(start, end)| bytes.get(start..end).map(|_| (start, end)))
-		{
-			Some((start, end)) => Ok(bytes.slice(start..end)),
-			None => Err(Error::ByteRangeLengthMismatch {
-				url: resource.url.clone(),
-				expected: range.length,
-				actual: bytes.len().saturating_sub(start.unwrap_or(bytes.len())),
-			}),
-		}
-	}
-
-	fn validate_range_length(&self, resource: &Resource, bytes: Bytes) -> Result<Bytes> {
-		let Some(range) = resource.range else {
-			return Ok(bytes);
-		};
+	fn validate_range_length(url: &Url, range: ResolvedRange, bytes: Bytes) -> Result<Bytes> {
 		if u64::try_from(bytes.len()).ok() != Some(range.length) {
 			return Err(Error::ByteRangeLengthMismatch {
-				url: resource.url.clone(),
+				url: url.clone(),
 				expected: range.length,
 				actual: bytes.len(),
 			});
@@ -314,10 +307,7 @@ impl Fetcher {
 		Ok(bytes)
 	}
 
-	fn validate_content_range(&self, resource: &Resource, headers: &reqwest::header::HeaderMap) -> Result<()> {
-		let Some(range) = resource.range else {
-			return Ok(());
-		};
+	fn validate_content_range(url: &Url, range: ResolvedRange, headers: &reqwest::header::HeaderMap) -> Result<()> {
 		let end = range.start + range.length - 1;
 		let actual = headers
 			.get(reqwest::header::CONTENT_RANGE)
@@ -331,7 +321,7 @@ impl Fetcher {
 			.and_then(|(start, end)| Some((start.parse().ok()?, end.parse().ok()?)));
 		if bounds != Some((range.start, end)) {
 			return Err(Error::ByteRangeResponseMismatch {
-				url: resource.url.clone(),
+				url: url.clone(),
 				start: range.start,
 				end,
 			});
@@ -1657,13 +1647,36 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn ranged_http_resource_slices_full_response() {
+	async fn ranged_http_resource_refuses_full_response() {
 		let (url, server) = serve_response("200 OK", &[], b"abcdef").await;
 
-		let bytes = fetcher(&url).fetch(&ranged_resource(url.clone())).await.unwrap();
+		let err = fetcher(&url).fetch(&ranged_resource(url.clone())).await.unwrap_err();
 		server.await.unwrap();
 
-		assert_eq!(bytes, b"cde".as_slice());
+		assert!(matches!(err, Error::ByteRangeIgnored { status: 200, .. }));
+	}
+
+	#[tokio::test]
+	async fn ranged_http_resource_refuses_overrun_before_the_body_ends() {
+		// The body promises far more than the range and stays open after the first bytes, so
+		// only a fetch that refuses mid-stream returns before the request timeout.
+		let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let url = Url::parse(&format!("http://{}/media.mp4", listener.local_addr().unwrap())).unwrap();
+		let server = tokio::spawn(async move {
+			let (mut stream, _) = listener.accept().await.unwrap();
+			let mut request = [0; 1024];
+			let _ = stream.read(&mut request).await.unwrap();
+			let head = "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 2-4/6\r\nContent-Length: 1000000\r\n\r\n";
+			stream.write_all(head.as_bytes()).await.unwrap();
+			stream.write_all(b"cdefgh").await.unwrap();
+			// Hold the connection until the client hangs up.
+			let _ = stream.read(&mut request).await;
+		});
+
+		let err = fetcher(&url).fetch(&ranged_resource(url.clone())).await.unwrap_err();
+		server.await.unwrap();
+
+		assert!(matches!(err, Error::ByteRangeLengthMismatch { expected: 3, .. }));
 	}
 
 	#[tokio::test]
@@ -2459,15 +2472,28 @@ video.m3u8
 					.find(|(name, _)| name == path)
 					.map(|(_, body)| body.as_slice())
 					.unwrap_or_else(|| panic!("unexpected request for {path}: {}", String::from_utf8_lossy(&request)));
-				let mut response = format!(
-					"HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-					body.len()
-				)
-				.into_bytes();
-				response.extend_from_slice(body);
+				let response = match request_range(&request) {
+					Some((start, end)) => http_response(
+						"206 Partial Content",
+						&[("Content-Range", &format!("bytes {start}-{end}/{}", body.len()))],
+						&body[start..=end],
+					),
+					None => http_response("200 OK", &[], body),
+				};
 				stream.write_all(&response).await.unwrap();
 			}
 		})
+	}
+
+	/// The inclusive `bytes=start-end` a request asked for, if any.
+	fn request_range(request: &[u8]) -> Option<(usize, usize)> {
+		let request = std::str::from_utf8(request).ok()?;
+		let range = request.lines().find_map(|line| {
+			let (name, value) = line.split_once(':')?;
+			name.eq_ignore_ascii_case("range").then(|| value.trim())
+		})?;
+		let (start, end) = range.strip_prefix("bytes=")?.split_once('-')?;
+		Some((start.parse().ok()?, end.parse().ok()?))
 	}
 
 	fn request_path(request: &[u8]) -> Option<&str> {

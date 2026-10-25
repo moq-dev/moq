@@ -7,7 +7,7 @@
 //! continuation included) on that worker; a wrong prefix stalls the
 //! handshake, so every dial being accepted is what proves the steering.
 //!
-//! Unsupported local kernels skip loudly; MOQ_STRICT makes CI refuse them.
+//! Unsupported local kernels skip loudly; CI_STRICT makes CI refuse them.
 
 #![cfg(all(target_os = "linux", feature = "quic"))]
 
@@ -23,7 +23,7 @@ use moq_uring::{Config, Error, Worker, quic, udp};
 fn worker() -> Option<Worker> {
 	match Worker::new(Config::default()) {
 		Ok(worker) => Some(worker),
-		Err(Error::Unsupported(reason)) if std::env::var_os("MOQ_STRICT").is_none() => {
+		Err(Error::Unsupported(reason)) if std::env::var_os("CI_STRICT").is_none() => {
 			eprintln!("skipping io_uring workers test: {reason}");
 			None
 		}

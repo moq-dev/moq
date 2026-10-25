@@ -1269,13 +1269,13 @@ fn segments<'a>(ts: &[u8], video: &'a Ledger, pids: (u16, u16)) -> Result<Vec<Se
 		.collect())
 }
 
-/// Where an arm leaves its evidence, kept when it fails or `MOQ_TEST_KEEP` is set: under
-/// `$MOQ_TEST_RUNS/ts-recovery/`, by test name.
+/// Where an arm leaves its evidence, kept when it fails or `HARNESS_KEEP` is set: under
+/// `$HARNESS_RUNS/ts-recovery/`, by test name.
 struct Evidence(Option<std::path::PathBuf>);
 
 impl Evidence {
 	fn save(run: &Run) -> Self {
-		let Some(root) = std::env::var_os("MOQ_TEST_RUNS") else {
+		let Some(root) = std::env::var_os("HARNESS_RUNS") else {
 			return Self(None);
 		};
 		// libtest names each test's thread after it; a test run on the main thread has its process.
@@ -1296,7 +1296,7 @@ impl Drop for Evidence {
 	fn drop(&mut self) {
 		if let Some(dir) = &self.0
 			&& !std::thread::panicking()
-			&& std::env::var_os("MOQ_TEST_KEEP").is_none()
+			&& std::env::var_os("HARNESS_KEEP").is_none()
 		{
 			let _ = std::fs::remove_dir_all(dir);
 		}
