@@ -67,6 +67,12 @@ function transient(err: Error | null): boolean {
 	);
 }
 
+// Whether a token's stream ending with `result` is the peer's verdict on it: a refusal that will
+// not pass, Unsupported, or a clean close after a grant. Anything else left the token undecided.
+function isVerdict(refused: boolean, granted: boolean, result: Error | null): boolean {
+	return (refused && !transient(result)) || result instanceof Unsupported || (result === null && granted);
+}
+
 /** A grant as the wire carries it: the expiry is milliseconds from now. @internal */
 export interface WireGrant {
 	publish: Path.Patterns;
@@ -341,7 +347,8 @@ export class Handle {
 	 * Present another token on every session of this handle, resolving once a peer answers it.
 	 *
 	 * With no session live it waits for the next one. A refusal that may pass, such as an
-	 * unreachable auth server, is presented again after a backoff on moq-lite. Rejects with
+	 * unreachable auth server, is presented again after a backoff on moq-lite, and so is a token
+	 * whose stream the peer drops without a verdict. Rejects with
 	 * {@link Unsupported} when a session neither carries AUTH nor lets a request carry a token
 	 * (moq-lite without AUTH), with the peer's refusal as an `Error.Session`, or with the
 	 * handle's end. On moq-transport without AUTH it resolves at once with no grant: only a
@@ -858,7 +865,7 @@ export class AuthSession {
 					if ("grant" in reply) {
 						const expires = reply.grant.expires === undefined ? undefined : wall() + reply.grant.expires;
 						presented.grant = { publish: reply.grant.publish, subscribe: reply.grant.subscribe, expires };
-						answered = granted = true;
+						answered = granted = replied = true;
 						delay = undefined;
 						this.#replied = true;
 						this.#answered(presented);
@@ -895,10 +902,21 @@ export class AuthSession {
 			}
 			presented.stream = undefined;
 
-			// A refusal that may pass, such as an unreachable auth server: present the token
-			// again after a backoff while it is still wanted here. Only moq-lite's AUTH_ERROR
-			// carries such a code.
-			if (!refused || !transient(result) || this.#closed || presented.withdrawn) break;
+			// Present the token again after a backoff while it is still wanted on an active
+			// session: after a refusal that may pass, such as an unreachable auth server (only
+			// moq-lite's AUTH_ERROR carries such a code), or, on a shared handle, after its stream
+			// was lost without a verdict, so the session never runs on without it. A handle of the
+			// session's own ends a lost token instead, which tells the application.
+			if (
+				isVerdict(refused, granted, result) ||
+				closed ||
+				!this.active ||
+				presented.withdrawn ||
+				presented.ended ||
+				result instanceof ProtocolViolation ||
+				(!refused && this.#state.own)
+			)
+				break;
 			presented.grant = undefined;
 			granted = false;
 			// Unanswered again, as on its first presentation: a request or publication the token
@@ -934,7 +952,8 @@ export class AuthSession {
 		if (owner && this.#byToken.get(owner) === presented) this.#byToken.delete(owner);
 		this.#ended.update((n) => n + 1);
 		// Only the peer's verdict ends one of the handle's tokens on every session: a refusal,
-		// Unsupported, or a clean close after a grant. Anything else leaves it for the next.
+		// Unsupported, or a clean close after a grant. Anything else leaves it for the next
+		// session, since an active one presents it again instead.
 		// A draining session's verdict is stale while an active session still presents the
 		// token: that session's own answer decides, even mid-retry with no grant right now.
 		const superseded =
@@ -942,12 +961,12 @@ export class AuthSession {
 			owner !== undefined &&
 			this.#state.sessions.some((session) => session !== this && session.active && session.presents(owner));
 		// A handle of the session's own has no next session to present it, so any end is final.
-		const verdict =
+		const settled =
 			!this.#closed &&
 			!presented.withdrawn &&
 			!superseded &&
-			(this.#state.own || refused || result instanceof Unsupported || (result === null && granted));
-		if (owner && verdict) this.#state.verdict(owner, result);
+			(this.#state.own || isVerdict(refused, granted, result));
+		if (owner && settled) this.#state.verdict(owner, result);
 		// Closed before the union shrinks, so the scope never reads it as a revocation.
 		if (closed) this.close();
 		this.#recompute();

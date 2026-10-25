@@ -1782,6 +1782,57 @@ mod tests {
 		}
 	}
 
+	/// A granted token whose Auth request the peer resets is presented again on the same
+	/// session, backing off while each attempt is lost before a reply: at 0s, 1s, and 3s.
+	#[moq_clock::test]
+	async fn a_lost_auth_request_is_presented_again() {
+		let version = Version::Draft17;
+		let mut grant = Vec::new();
+		let mut encoder = crate::coding::Encoder::new(&mut grant, version.into());
+		encoder.varint(auth::AuthOk::ID).unwrap();
+		encoder.u16(3);
+		grant.extend([0, 0, 0]);
+		let session = crate::lite::test_transport::ScriptedSession::per_stream_reset(vec![grant.clone(), grant]);
+		let log = session.log.clone();
+		let handle = crate::auth::Handle::new();
+		let (driver, _) = start(Config {
+			runtime: crate::time::sim(),
+			stats: Default::default(),
+			session: crate::driver::Transport::new(session.clone()),
+			setup: None,
+			request_id_max: None,
+			limits: Default::default(),
+			client: true,
+			publish: None,
+			subscribe: None,
+			peer_hop: None,
+			cost: None,
+			version,
+			path: None,
+			authority: None,
+			peer_setup_stream: None,
+			peer_declared: Some(peer::Peer {
+				auth: true,
+				..Default::default()
+			}),
+			auth: crate::auth::Link::attach(&handle, true, true).unwrap(),
+			early_unis: Vec::new(),
+			implementation: None,
+			peer_implementation: Default::default(),
+			extensions: Default::default(),
+		})
+		.unwrap();
+		let token = handle.present(bytes::Bytes::from_static(b"token")).unwrap();
+
+		let res = moq_clock::timeout(std::time::Duration::from_secs(5), driver).await;
+		assert!(res.is_err(), "the session ended: {res:?}");
+		assert_eq!(occurrences(&log, b"token"), 3);
+		assert!(
+			futures::FutureExt::now_or_never(token.closed()).is_none(),
+			"a lost request ended the token"
+		);
+	}
+
 	#[moq_clock::test]
 	async fn malformed_presenter_auth_closes_the_session() {
 		for version in [Version::Draft17, Version::Draft22] {
