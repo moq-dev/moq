@@ -79,6 +79,9 @@ takeover; conflicting epochs; equal clamped prefixes; independently ending
 parent/child; late snapshots; multi-hop and diamond relays; mixed versions;
 and held catalog/media pins. Include the actual players and composer-facing
 event, not only route-table checks. Measure route/readers fanout on both axes.
+Remove the cold-start warm-up reads that discard a claim's first subscription
+(`claimed` in moq-net `tests/integration/restart.rs` and the `drained_claim.rs`
+helper) and assert that first subscription succeeds instead.
 Run `just check`, `just test interop --all`, and `just drafts check`; wire
 regressions and benchmarks into existing CI lanes.
 

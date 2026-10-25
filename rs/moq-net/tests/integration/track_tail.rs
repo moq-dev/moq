@@ -69,7 +69,7 @@ struct Pair {
 	track: moq_net::track::Producer,
 	remote: moq_net::broadcast::Consumer,
 	_keep: (
-		moq_net::broadcast::Producer,
+		moq_net::origin::Publication,
 		moq_net::origin::Producer,
 		moq_net::origin::Producer,
 	),

@@ -14,6 +14,7 @@ import type * as Epoch from "./epoch.ts";
 import { toStreamCode } from "./error.ts";
 import type { Frame, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { isAnonymous, type Route } from "./hop.ts";
+import type { Request as OriginRequest } from "./origin.ts";
 import * as Path from "./path.ts";
 import type { Timestamp } from "./time.ts";
 import type { Demand, Groups, Info, Position, Producer, Request, Subscriber, Subscription } from "./track.ts";
@@ -193,55 +194,6 @@ export interface ReadGroupFrame {
 	inflated?: number;
 }
 
-/** One past the highest sequence written under a broadcast track's name, by any of its producers. */
-export interface TrackSequence {
-	next: number;
-	/** Open producers writing through this namespace. */
-	holders: number;
-	/** The open producer the name's newest claim went to; a later claim supersedes it. */
-	owner?: Producer;
-	/**
-	 * The highest-sequence checked group start any producer of the name wrote, which bounds a
-	 * replacement's groups the way the eviction watermark bounds a track's own.
-	 */
-	bound?: { sequence: number; start: Timestamp };
-}
-
-/**
- * Each name's sequence namespace for one broadcast generation, outliving the producers that
- * serve it so a replacement that would append a sequence already written is refused. Written
- * namespaces are kept until the broadcast ends, since forgetting one would let a later producer
- * reuse its sequences. Namespaces nothing holds or wrote are swept as the map grows, like the
- * Rust map at capacity, so requests for names never served stay bounded.
- */
-export class TrackSequences {
-	#map = new Map<string, TrackSequence>();
-	// The size that triggers the next sweep, doubling past what survives so sweeps stay amortized.
-	#sweepAt = 16;
-
-	/** The namespace for `name`, created if the name is new. */
-	get(name: string): TrackSequence {
-		const existing = this.#map.get(name);
-		if (existing) return existing;
-
-		if (this.#map.size >= this.#sweepAt) {
-			for (const [key, sequence] of this.#map) {
-				if (sequence.next === 0 && sequence.holders === 0) this.#map.delete(key);
-			}
-			this.#sweepAt = Math.max(16, this.#map.size * 2);
-		}
-
-		const sequence = { next: 0, holders: 0 };
-		this.#map.set(name, sequence);
-		return sequence;
-	}
-
-	/** How many names hold a namespace. */
-	get size(): number {
-		return this.#map.size;
-	}
-}
-
 /** What a resumed reader's {@link ResumeSource} sees of the subscriber it serves. */
 export interface ResumeShell {
 	/** The reader's own preferences, mirrored into every copy it subscribes. */
@@ -369,8 +321,6 @@ export interface TrackRequestOptions {
 	name: string;
 	/** The producer that will serve the request. */
 	producer: Producer;
-	/** Sequence namespaces shared by the broadcast generation. */
-	sequences: TrackSequences;
 	/** Requests not yet accepted or rejected by the publisher. */
 	pending: Set<Request>;
 }
@@ -417,8 +367,6 @@ export const hooks: {
 	startTrack: (producer: Producer, served: { start?: number; requested?: number }) => void;
 	/** Mint a track {@link Request}; assigned by `track.ts`. */
 	makeRequest: (options: TrackRequestOptions) => Request;
-	/** Have a producer write through a broadcast's sequence namespace for its name. */
-	bindSequence: (producer: Producer, sequence: TrackSequence) => void;
 	/** The newest frame a producer's cache holds, read without subscribing; assigned by `track.ts`. */
 	cachedLargest: (producer: Producer) => Position | undefined;
 	/** The publisher priority from a demanded track's committed {@link Info}; assigned by `track.ts`. */
@@ -558,6 +506,11 @@ export const hooks: {
 	stampEpoch: (target: BroadcastConsumer, epoch: Epoch.Valid | undefined) => void;
 	/** Mark a broadcast handle served through a route claiming a shorter prefix: it lists nothing. */
 	stampUnlisted: (target: BroadcastConsumer) => void;
+	/**
+	 * Resolve a session-forwarded request with its peer's routed broadcast. An application
+	 * claim answers through `prepare` and `publish` instead. Assigned by `origin.ts`.
+	 */
+	acceptRequest: (request: OriginRequest, source: BroadcastProducer | BroadcastConsumer) => void;
 } = {
 	endTrack: () => {
 		throw new Error("track.ts not loaded");
@@ -578,9 +531,6 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	makeRequest: () => {
-		throw new Error("track.ts not loaded");
-	},
-	bindSequence: () => {
 		throw new Error("track.ts not loaded");
 	},
 	cachedLargest: () => {
@@ -741,6 +691,9 @@ export const hooks: {
 	},
 	stampUnlisted: () => {
 		throw new Error("broadcast.ts not loaded");
+	},
+	acceptRequest: () => {
+		throw new Error("origin.ts not loaded");
 	},
 };
 

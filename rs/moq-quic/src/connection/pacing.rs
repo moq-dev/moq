@@ -159,7 +159,7 @@ impl Pacer {
     /// Credit accumulates in `tokens` at `pacing_rate` for the time elapsed since the last
     /// refill, bounded by a burst budget derived from that same rate. If the credit on hand
     /// is short, the returned instant is when the shortfall will have been earned.
-    fn delay_at_rate(
+    pub(super) fn delay_at_rate(
         &mut self,
         pacing_rate: u64,
         bytes_to_send: u64,
