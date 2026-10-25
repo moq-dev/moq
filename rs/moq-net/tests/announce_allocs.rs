@@ -57,7 +57,7 @@ fn peer_route(peer: u64, cost: u64) -> origin::Route {
 /// again, with `cursors` cursors rooted at `root` watching it.
 fn churn_allocs(root: &str, cursors: usize) -> usize {
 	let (producer, _driver) = origin::Producer::new(origin::Config::default());
-	let _winner = producer.dynamic_route("room/a", peer_route(1, 1)).unwrap();
+	let _winner = producer.publish("room/a", peer_route(1, 1)).unwrap();
 	let all = Patterns::from(Pattern::all());
 	let mut cursors: Vec<_> = (0..cursors)
 		.map(|_| producer.consume().scope(root, &all).unwrap().announced())
@@ -66,7 +66,7 @@ fn churn_allocs(root: &str, cursors: usize) -> usize {
 		while cursor.try_next().is_some() {}
 	}
 
-	let cycle = || drop(producer.dynamic_route("room/a", peer_route(2, 5)).unwrap());
+	let cycle = || drop(producer.publish("room/a", peer_route(2, 5)).unwrap());
 	// Reach the steady state first, with every table grown to what it settles at.
 	for _ in 0..4 {
 		cycle();

@@ -332,7 +332,7 @@ mod tests {
 				Error::Stream(crate::StreamError::Unknown(0x4)),
 			),
 			(
-				crate::Version::Ietf(crate::ietf::Version::Draft20),
+				crate::Version::Ietf(crate::ietf::Version::Draft22),
 				Error::Stream(crate::StreamError::GoingAway),
 			),
 			(

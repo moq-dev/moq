@@ -1,4 +1,4 @@
-"""Dart checks build dev libraries while benchmarks pin optimized libraries."""
+"""Dart checks build dev test libraries while benchmarks pin optimized libraries."""
 
 import os
 from pathlib import Path
@@ -12,7 +12,9 @@ ROOT = Path(__file__).resolve().parents[2]
 
 class BuildTest(unittest.TestCase):
     def test_generator_profiles(self):
-        for profile, release in (("debug", False), ("release", True)):
+        # Only the dev build carries the test hooks, which would skew a benchmark.
+        for profile, release, features in (("debug", False, "openh264,testing"),
+                                           ("release", True, "openh264")):
             with self.subTest(profile=profile), tempfile.TemporaryDirectory() as directory:
                 scratch = Path(directory)
                 calls = scratch / "calls"
@@ -34,8 +36,7 @@ class BuildTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 args = calls.read_text().split()
                 self.assertEqual("--release" in args, release)
-                self.assertIn("--features", args)
-                self.assertIn("openh264", args)
+                self.assertEqual(args[args.index("--features") + 1], features)
 
     def test_failed_benchmark_restores_manifest(self):
         with tempfile.TemporaryDirectory() as directory:

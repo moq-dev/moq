@@ -171,15 +171,18 @@ impl Message for AuthError {
 /// The REQUEST_ERROR codes AUTH_ERROR carries.
 const UNAUTHORIZED: u64 = 0x1;
 const NOT_SUPPORTED: u64 = 0x3;
+const MALFORMED_AUTH_TOKEN: u64 = 0x4;
 const EXPIRED_AUTH_TOKEN: u64 = 0x5;
 /// Draft-17 assigned it, the first draft this extension negotiates on.
 const GOING_AWAY: u64 = 0x6;
 
 /// The AUTH_ERROR code for a refusal. The public API speaks session codes, and the
-/// actionable distinctions this registry carries are unsupported, expired, and unauthorized.
+/// actionable distinctions this registry carries are unsupported, malformed, expired, and
+/// unauthorized.
 fn to_code(code: SessionError) -> u64 {
 	match code {
 		SessionError::Version | SessionError::Unsupported => NOT_SUPPORTED,
+		SessionError::MalformedAuthToken => MALFORMED_AUTH_TOKEN,
 		SessionError::Expired => EXPIRED_AUTH_TOKEN,
 		_ => UNAUTHORIZED,
 	}
@@ -189,6 +192,7 @@ fn to_code(code: SessionError) -> u64 {
 fn from_code(code: u64) -> Error {
 	match code {
 		NOT_SUPPORTED => Error::Unsupported,
+		MALFORMED_AUTH_TOKEN => Error::Session(SessionError::MalformedAuthToken),
 		EXPIRED_AUTH_TOKEN => Error::Expired,
 		GOING_AWAY => Error::GoingAway,
 		_ => Error::Session(SessionError::Unauthorized),
@@ -585,7 +589,7 @@ mod tests {
 	#[cfg(feature = "async")]
 	#[moq_clock::test]
 	async fn auth_refused_without_credit_spends_no_request_id() {
-		for version in [Version::Draft17, Version::Draft19] {
+		for version in [Version::Draft17, Version::Draft18] {
 			for client in [false, true] {
 				let first = if client { 0 } else { 1 };
 				let control = Control::new(Some(RequestId(first + 1)), client);
@@ -633,14 +637,7 @@ mod tests {
 	/// before the unified SETUP carry none.
 	#[test]
 	fn setup_option_round_trips_on_supported_drafts() {
-		for version in [
-			Version::Draft17,
-			Version::Draft18,
-			Version::Draft19,
-			Version::Draft20,
-			Version::Draft21,
-			Version::Draft22,
-		] {
+		for version in [Version::Draft17, Version::Draft18, Version::Draft22] {
 			let mut params = super::super::Parameters::default();
 			assert_eq!(from_setup(&params, version), None);
 			into_setup(&mut params, version);
@@ -783,5 +780,10 @@ mod tests {
 		assert_eq!(to_code(SessionError::Unauthorized), UNAUTHORIZED);
 		assert!(matches!(from_code(EXPIRED_AUTH_TOKEN), Error::Expired));
 		assert_eq!(to_code(SessionError::Expired), EXPIRED_AUTH_TOKEN);
+		assert!(matches!(
+			from_code(MALFORMED_AUTH_TOKEN),
+			Error::Session(SessionError::MalformedAuthToken)
+		));
+		assert_eq!(to_code(SessionError::MalformedAuthToken), MALFORMED_AUTH_TOKEN);
 	}
 }
