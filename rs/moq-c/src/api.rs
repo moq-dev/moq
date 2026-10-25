@@ -619,7 +619,7 @@ pub struct moq_range {
 	pub end_present: bool,
 }
 
-/// Where one end of a [moq_range] falls. Zeroing it means group 0, frame 0.
+/// Where one end of a [moq_range] falls. Zeroing it means group 0.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct moq_anchor {
@@ -628,8 +628,6 @@ pub struct moq_anchor {
 	/// The group, or with `MOQ_ANCHOR_RELATIVE` how many groups before the latest one
 	/// (0 is the latest, and an offset past the first group clamps to it).
 	pub group: u64,
-	/// The frame within `group`, read only with `MOQ_ANCHOR_ABSOLUTE`.
-	pub frame: u64,
 	/// The presentation time in microseconds, read only with `MOQ_ANCHOR_TIME`.
 	pub timestamp_us: u64,
 }
@@ -639,7 +637,7 @@ pub struct moq_anchor {
 #[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug)]
 pub enum moq_anchor_kind {
-	/// A fixed group and frame.
+	/// A fixed group, delivered from its first frame.
 	MOQ_ANCHOR_ABSOLUTE = 0,
 	/// A count of groups back from the latest one.
 	MOQ_ANCHOR_RELATIVE = 1,
@@ -660,12 +658,7 @@ pub enum moq_order {
 
 fn parse_anchor(anchor: &moq_anchor) -> Result<moq_net::track::Anchor, Error> {
 	Ok(match anchor.kind {
-		v if v == moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32 => {
-			moq_net::track::Anchor::Absolute(moq_net::track::Position {
-				group: anchor.group,
-				frame: anchor.frame,
-			})
-		}
+		v if v == moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32 => moq_net::track::Anchor::Absolute(anchor.group),
 		v if v == moq_anchor_kind::MOQ_ANCHOR_RELATIVE as u32 => moq_net::track::Anchor::Relative(anchor.group),
 		v if v == moq_anchor_kind::MOQ_ANCHOR_TIME as u32 => {
 			moq_net::track::Anchor::Time(moq_net::Timestamp::from_micros(anchor.timestamp_us)?)
@@ -2189,37 +2182,18 @@ pub extern "C" fn moq_publish_close(broadcast: u32) -> i32 {
 	})
 }
 
-/// End a broadcast cleanly and release its handle, keeping it servable until its media is stale.
+/// Finish a broadcast's catalog, which ends its content.
 ///
-/// Finish every track first: the returned finish handle holds the tracks finished by now and
-/// keeps the broadcast announced, so a subscriber still catching up can drain them. A track still
-/// live is not held. `linger_us` receives how long to keep the handle, in microseconds: the
-/// longest max age among the held tracks, or zero. Keep it that long on your own clock, then
-/// [moq_publish_finish_close]; closing it sooner is how an interrupt ends the linger.
-///
-/// Returns a non-zero finish handle on success, or a negative code on failure.
-///
-/// # Safety
-/// - `linger_us` must be a valid pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_publish_finish(broadcast: u32, linger_us: *mut u64) -> i32 {
-	ffi::enter(move || {
-		let broadcast = ffi::parse_id(broadcast)?;
-		let linger_us = unsafe { linger_us.as_mut() }.ok_or(Error::InvalidPointer)?;
-		let (finish, linger) = State::lock().publish.finish(broadcast)?;
-		*linger_us = u64::try_from(linger.as_micros()).unwrap_or(u64::MAX);
-		Ok(finish)
-	})
-}
-
-/// Close a finished broadcast and release its handle, ending its linger.
+/// Finish every track first. The broadcast stays announced and keeps serving its finished
+/// tracks, so a subscriber that arrives late can still read them, until [moq_publish_close]
+/// takes it offline. How long to keep it up is yours to decide.
 ///
 /// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_publish_finish_close(finish: u32) -> i32 {
+pub extern "C" fn moq_publish_catalog_finish(broadcast: u32) -> i32 {
 	ffi::enter(move || {
-		let finish = ffi::parse_id(finish)?;
-		State::lock().publish.finish_close(finish)
+		let broadcast = ffi::parse_id(broadcast)?;
+		State::lock().publish.catalog_finish(broadcast)
 	})
 }
 
@@ -2349,8 +2323,8 @@ pub extern "C" fn moq_publish_media_seek(media: u32, sequence: u64) -> i32 {
 
 /// Finish a media track, flushing any buffered frames. No more frames can be written.
 ///
-/// The broadcast keeps the finished track, catalog rendition included, until it closes or its
-/// [moq_publish_finish] linger ends, so a late subscriber can still drain it.
+/// The broadcast keeps the finished track, catalog rendition included, until it closes, so a
+/// late subscriber can still drain it.
 ///
 /// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
@@ -2476,8 +2450,8 @@ pub extern "C" fn moq_publish_container_seek(container: u32, sequence: u64) -> i
 
 /// Finish every track the container publishes and release the handle.
 ///
-/// The broadcast keeps the finished tracks, catalog renditions included, until it closes or its
-/// [moq_publish_finish] linger ends, so a late subscriber can still drain them.
+/// The broadcast keeps the finished tracks, catalog renditions included, until it closes, so a
+/// late subscriber can still drain them.
 ///
 /// Returns zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
@@ -2864,8 +2838,8 @@ pub unsafe extern "C" fn moq_publish_track_datagram(
 
 /// Finish a raw track and release its handle. No more groups or frames can be written.
 ///
-/// The broadcast keeps the finished track until it closes or its [moq_publish_finish] linger
-/// ends, so a late subscriber can still drain it.
+/// The broadcast keeps the finished track until it closes, so a late subscriber can still
+/// drain it.
 ///
 /// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]

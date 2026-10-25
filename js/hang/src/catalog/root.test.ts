@@ -3,7 +3,7 @@ import * as z from "@zod/mini";
 import { ARCHIVE_VERSION, ArchiveSchema } from "./archive.ts";
 import { u53 } from "./integers.ts";
 import type { ReferenceEpoch, RelativeBroadcast } from "./path.ts";
-import { checkRenditions, DuplicateRendition, minVersion, RootSchema, UnsupportedVersion, VERSION } from "./root.ts";
+import { checkRenditions, DuplicateRendition, encode, RootSchema, UnsupportedVersion, VERSION } from "./root.ts";
 import { track } from "./track.ts";
 
 // The base catalog carries the media sections (`video`/`audio`) and the data track sections
@@ -324,12 +324,14 @@ test("the catalog version is needed only for misread fields", () => {
 	const root = (hd: object) =>
 		RootSchema.parse({ video: { renditions: { hd } }, audio: { renditions: { en: audio } } });
 
-	expect(minVersion(root(avc))).toBeUndefined();
-	expect(minVersion(root({ ...avc, track: "hd" }))).toBeUndefined();
-	expect(minVersion(root({ ...avc, track: "video" }))).toBe(4);
-	expect(minVersion(root({ ...avc, warmup: 500 }))).toBe(4);
+	expect(encode(root(avc)).version).toBeUndefined();
+	expect(encode(root({ ...avc, track: "hd" })).version).toBeUndefined();
+	expect(encode(root({ ...avc, track: "video" })).version).toBe(4);
+	expect(encode(root({ ...avc, warmup: 500 })).version).toBe(4);
 	const data = RootSchema.parse({ json: { tracks: { chat: { mode: "stream", track: "chat.json" } } } });
-	expect(minVersion(data)).toBe(4);
+	expect(encode(data).version).toBe(4);
+	// A carried version is recomputed, never trusted.
+	expect(encode({ ...root(avc), version: 4 }).version).toBeUndefined();
 });
 
 test("shared stats and echo discovery round trips without changing old catalogs", async () => {

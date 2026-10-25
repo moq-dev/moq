@@ -33,7 +33,7 @@ pub(crate) struct Writer {
 	/// The largest message the peer accepts.
 	pub max: usize,
 	/// Keeps the driver running while the session outlives the signaling handle.
-	pub _driver: Option<mpsc::UnboundedSender<super::Command>>,
+	pub _driver: Option<mpsc::Sender<super::Command>>,
 }
 
 impl qmux::transport::Writer for Writer {

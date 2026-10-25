@@ -45,7 +45,7 @@ relay bounds a sparse FETCH only if the model can request ranges:
   an IETF FETCH is served from the model's ranges, capped at the Largest
   Object.
 - **Relative ends** (maintainer, 2026-10-11, superseding the 10-07 `Live`
-  flag and closing #5085). Each range end is `Absolute(group, frame)` or
+  flag and closing #5085). Each range end is `Absolute(group)` or
   `Relative(n)`, naming the group n before the latest; either end may be
   relative, and an omitted end is live. An offset past the track's start
   clamps to group 0. Before any group exists, relative ends resolve when the
@@ -82,9 +82,10 @@ relay bounds a sparse FETCH only if the model can request ranges:
   its group starts, so a time end settles across a sequence that arrived only
   as a datagram, and a stream copy of that group arriving later is read even
   if it starts past the end.
-- Ranges are frame-precise (`Position`), not whole groups. The IETF joining
-  FETCH for a mid-group SUBSCRIBE's uncached prefix stays, because today's
-  bridge relies on it (maintainer, 09-29).
+- Ranges are whole groups: a range always starts at a group's first frame
+  (maintainer, on [moq-dev/moq#6465](https://github.com/moq-dev/moq/pull/6465)). The IETF joining FETCH for the
+  live group's uncached prefix stays, because today's bridge relies on it
+  (maintainer, 09-29).
 - The relay half of fetch-span moves here; #4558 landed only the no-handler
   skip.
 
@@ -98,7 +99,6 @@ every sequence delivered or dropped.
 - [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - the lite-07 wire, Rust publisher and subscriber, and the draft
 - [moq-transport ranges](/quest/m1/subscribe-ranges/ietf.md) - range FETCH upstream per missing run, and non-blocking FETCH served downstream
 - [JS ranges](/quest/m1/subscribe-ranges/js.md) - `@moq/net` model and lite-07 parity
-- [Bounded tails](/quest/m1/subscribe-ranges/bounded-tail.md) - a copy cut at a request's mid-group end accepts the rest of its group instead of rejecting it as `Duplicate`
 
 ## Related
 

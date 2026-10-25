@@ -218,12 +218,11 @@ Application delivery requires explicitly selecting `moq-lite-07-wip` on both
 peers; older Lite versions (including default lite-06) and IETF wait only for
 transport ACKs. Finish or abort live tracks first.
 
-To end a broadcast cleanly, finish every track, then call `broadcast->finish()`.
-The returned `moq::BroadcastFinish` keeps the broadcast announced and serving the
-finished tracks for `linger_us()`, their longest max age, so a subscriber still
-catching up can drain them. `finish->wait()` resolves once the linger passes, and
-`finish->close()` closes the broadcast at once, resolving the wait.
-`broadcast->close()` stays the abrupt end.
+To end a broadcast cleanly, finish every track, then call `catalog->finish()` on
+its `moq::MediaCatalogProducer` to finish the catalog, which ends the content.
+The broadcast stays announced and keeps serving the finished tracks, so a
+subscriber still catching up can drain them, until `broadcast->close()` takes it
+offline. How long to keep it up is yours to decide.
 
 `moq::shutdown()` stops the `moq-ffi` runtime workers, then the executor.
 Pending calls resolve `Cancelled`, and every object stays safe to drop. Call

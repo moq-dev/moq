@@ -1805,13 +1805,11 @@ fn raw_track_subscription_options_and_update() {
 		start: moq_anchor {
 			kind: moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32,
 			group: 1,
-			frame: 0,
 			timestamp_us: 0,
 		},
 		end: moq_anchor {
 			kind: moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32,
 			group: 2,
-			frame: 0,
 			timestamp_us: 0,
 		},
 		end_present: true,
@@ -1920,13 +1918,11 @@ fn raw_track_time_anchor() {
 		start: moq_anchor {
 			kind: moq_anchor_kind::MOQ_ANCHOR_TIME as u32,
 			group: 0,
-			frame: 0,
 			timestamp_us: 30_000,
 		},
 		end: moq_anchor {
 			kind: moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32,
 			group: 0,
-			frame: 0,
 			timestamp_us: 0,
 		},
 		end_present: false,
@@ -2021,13 +2017,11 @@ fn raw_track_update_refuses_time_on_untimed() {
 		start: moq_anchor {
 			kind: moq_anchor_kind::MOQ_ANCHOR_TIME as u32,
 			group: 0,
-			frame: 0,
 			timestamp_us: 0,
 		},
 		end: moq_anchor {
 			kind: moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32,
 			group: 0,
-			frame: 0,
 			timestamp_us: 0,
 		},
 		end_present: false,
@@ -2088,7 +2082,6 @@ fn raw_track_relative_update_counts_from_the_track_edge() {
 	let anchor = |kind: moq_anchor_kind, group: u64| moq_anchor {
 		kind: kind as u32,
 		group,
-		frame: 0,
 		timestamp_us: 0,
 	};
 	let subscribe = |ranges: &[moq_range]| moq_subscription {
@@ -2310,7 +2303,7 @@ fn close_invalid_or_zero_ids() {
 }
 
 /// A finished broadcast serves its finished tracks to a late subscriber, even after their
-/// handles were freed, and reports the longest max age among them as its linger.
+/// handles were freed, until it closes.
 #[test]
 fn publish_finish_serves_finished_tracks_until_closed() {
 	let origin = id(moq_origin_create());
@@ -2320,8 +2313,8 @@ fn publish_finish_serves_finished_tracks_until_closed() {
 	let name = b"data";
 	let info = moq_track_info {
 		priority: 0,
-		max_age_us: 5_000_000,
-		max_age_present: true,
+		max_age_us: 0,
+		max_age_present: false,
 		timescale: 0,
 		timescale_present: false,
 		refresh: 0,
@@ -2349,16 +2342,7 @@ fn publish_finish_serves_finished_tracks_until_closed() {
 	);
 	assert_eq!(moq_publish_media_finish(media), 0);
 
-	// A NULL out-pointer is refused before the broadcast is consumed.
-	assert!(unsafe { moq_publish_finish(broadcast, std::ptr::null_mut()) } < 0);
-	let mut linger_us = 0;
-	let finish = id(unsafe { moq_publish_finish(broadcast, &mut linger_us) });
-	// The media track's default max age outlasts the raw track's.
-	assert!(linger_us >= 5_000_000, "linger {linger_us}us");
-	assert!(
-		moq_publish_close(broadcast) < 0,
-		"a finished broadcast handle is released"
-	);
+	assert_eq!(moq_publish_catalog_finish(broadcast), 0);
 
 	let consume = request_broadcast(origin, path);
 	let frame_cb = Callback::new();
@@ -2396,9 +2380,9 @@ fn publish_finish_serves_finished_tracks_until_closed() {
 	assert_eq!(frame_cb.recv_terminal(), 0);
 	assert_eq!(moq_consume_close(consume), 0);
 
-	assert_eq!(moq_publish_finish_close(finish), 0);
-	assert!(moq_publish_finish_close(finish) < 0, "a closed finish is released");
-	assert!(request_once(origin, path) < 0, "a closed finish is unroutable");
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert!(moq_publish_close(broadcast) < 0, "a closed broadcast is released");
+	assert!(request_once(origin, path) < 0, "a closed broadcast is unroutable");
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -3269,7 +3253,6 @@ fn fetch_group(
 	name: &str,
 	sequence: u64,
 	priority: i8,
-	frame_start: u64,
 ) -> mpsc::Receiver<Result<(u64, Vec<u8>), moq_net::Error>> {
 	let consumer = State::lock()
 		.publish
@@ -3281,9 +3264,7 @@ fn fetch_group(
 	crate::ffi::RUNTIME.spawn(async move {
 		let res = async {
 			let track = consumer.track(&name)?;
-			let options = moq_net::group::Fetch::default()
-				.with_priority(priority)
-				.with_frame_start(frame_start);
+			let options = moq_net::group::Fetch::default().with_priority(priority);
 			let mut group = track.fetch_group(sequence, options).await?;
 			let index = group.index();
 			let frame = group.read_frame().await?.expect("expected a fetched frame");
@@ -3306,7 +3287,7 @@ fn track_dynamic_serves_a_fetch_miss() {
 	let group_cb = Callback::new();
 	let dynamic = id(unsafe { moq_publish_track_dynamic(track, Some(channel_callback), group_cb.ptr) });
 
-	let fetch = fetch_group(broadcast, "data", 5, 11, 0);
+	let fetch = fetch_group(broadcast, "data", 5, 11);
 	let request = id(group_cb.recv());
 	let mut sequence = 0u64;
 	let mut priority = 0i8;
@@ -3329,7 +3310,7 @@ fn track_dynamic_serves_a_fetch_miss() {
 	assert_eq!(fetch.recv_timeout(TIMEOUT).unwrap().unwrap(), (0, payload.to_vec()));
 
 	// A rejected fetch fails as not found.
-	let fetch = fetch_group(broadcast, "data", 6, 0, 0);
+	let fetch = fetch_group(broadcast, "data", 6, 0);
 	let request = id(group_cb.recv());
 	assert_eq!(moq_group_request_abort(request, 9), 0);
 	let err = fetch
@@ -3400,41 +3381,6 @@ fn a_group_request_nobody_reads_is_withdrawn() {
 }
 
 #[test]
-fn track_dynamic_serves_a_fetch_from_frame_start() {
-	let origin = id(moq_origin_create());
-	let broadcast = publish_broadcast(origin, b"track-dynamic-frame-start");
-	let name = b"data";
-	let track =
-		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
-
-	let group_cb = Callback::new();
-	let dynamic = id(unsafe { moq_publish_track_dynamic(track, Some(channel_callback), group_cb.ptr) });
-
-	let fetch = fetch_group(broadcast, "data", 5, 0, 3);
-	let request = id(group_cb.recv());
-	let mut frame_start = 0u64;
-	assert_eq!(unsafe { moq_group_request_frame_start(request, &mut frame_start) }, 0);
-	assert_eq!(frame_start, 3);
-
-	let group = id(moq_group_request_accept(request));
-	let payload = b"tail";
-	assert_eq!(
-		unsafe { moq_publish_group_frame(group, payload.as_ptr(), payload.len(), 100_000) },
-		0
-	);
-	assert_eq!(moq_publish_group_finish(group), 0);
-	let (index, got) = fetch.recv_timeout(TIMEOUT).unwrap().unwrap();
-	assert_eq!(index, 3, "the consumer resumes at the requested frame");
-	assert_eq!(got, payload);
-
-	assert_eq!(moq_publish_dynamic_cancel(dynamic), 0);
-	assert_eq!(group_cb.recv_terminal(), 0);
-	assert_eq!(moq_publish_track_finish(track), 0);
-	assert_eq!(moq_publish_close(broadcast), 0);
-	assert_eq!(moq_origin_close(origin), 0);
-}
-
-#[test]
 fn track_request_dynamic_survives_accept() {
 	let origin = id(moq_origin_create());
 	let broadcast = publish_broadcast(origin, b"request-dynamic");
@@ -3442,7 +3388,7 @@ fn track_request_dynamic_survives_accept() {
 	let _dynamic = id(unsafe { moq_publish_dynamic(broadcast, Some(channel_callback), request_cb.ptr) });
 
 	// A fetch of a track the broadcast has not declared requests the track first.
-	let fetch = fetch_group(broadcast, "archive", 9, 0, 0);
+	let fetch = fetch_group(broadcast, "archive", 9, 0);
 	let request = id(request_cb.recv());
 	let group_cb = Callback::new();
 	let track_dynamic = id(unsafe { moq_track_request_dynamic(request, Some(channel_callback), group_cb.ptr) });

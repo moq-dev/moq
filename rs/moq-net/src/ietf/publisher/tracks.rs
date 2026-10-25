@@ -1596,44 +1596,39 @@ mod tests {
 		}
 	}
 
-	/// A broadcast ending right after a track finished, by `close()` or a clean `finish()`,
-	/// ends that track's PUBLISH with TRACK_ENDED, whether its producer is still held or
-	/// not, while a track left unfinished still ends in error.
+	/// A broadcast closing right after a track finished ends that track's PUBLISH with
+	/// TRACK_ENDED, whether its producer is still held or not, while a track left unfinished
+	/// still ends in error.
 	#[moq_clock::test]
 	async fn a_clean_end_keeps_its_finishes() {
 		for version in DRAFTS {
-			for finish in [false, true] {
-				for held in [false, true] {
-					let case = format!("{version}: finish={finish} held={held}");
-					let mut h = harness(version);
-					let mut request = h.request(&listing(false)).await;
-					assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{case}");
-					let mut published = HashMap::new();
-					for _ in 0..2 {
-						let (mut stream, _, name, _) = h.publish().await;
-						publish_ok(&mut stream).await;
-						published.insert(name, stream);
-					}
-					moq_clock::sleep(Duration::from_millis(10)).await;
-
-					let video = h.tracks.remove("video").unwrap();
-					video.finish().unwrap();
-					let video = held.then_some(video);
-					match finish {
-						true => drop(h.broadcast.finish()),
-						false => h.broadcast.close(),
-					}
-					for (name, status) in [
-						("video", ietf::PublishDoneStatus::TrackEnded),
-						("audio", ietf::PublishDoneStatus::InternalError),
-					] {
-						let (id, body) = next(published.get_mut(name).unwrap()).await;
-						assert_eq!(id, ietf::PublishDone::ID, "{case}: {name}");
-						let done: ietf::PublishDone = body.message(version).unwrap();
-						assert_eq!(done.status_code, status.code(version), "{case}: {name}");
-					}
-					drop(video);
+			for held in [false, true] {
+				let case = format!("{version}: held={held}");
+				let mut h = harness(version);
+				let mut request = h.request(&listing(false)).await;
+				assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{case}");
+				let mut published = HashMap::new();
+				for _ in 0..2 {
+					let (mut stream, _, name, _) = h.publish().await;
+					publish_ok(&mut stream).await;
+					published.insert(name, stream);
 				}
+				moq_clock::sleep(Duration::from_millis(10)).await;
+
+				let video = h.tracks.remove("video").unwrap();
+				video.finish().unwrap();
+				let video = held.then_some(video);
+				h.broadcast.close();
+				for (name, status) in [
+					("video", ietf::PublishDoneStatus::TrackEnded),
+					("audio", ietf::PublishDoneStatus::InternalError),
+				] {
+					let (id, body) = next(published.get_mut(name).unwrap()).await;
+					assert_eq!(id, ietf::PublishDone::ID, "{case}: {name}");
+					let done: ietf::PublishDone = body.message(version).unwrap();
+					assert_eq!(done.status_code, status.code(version), "{case}: {name}");
+				}
+				drop(video);
 			}
 		}
 	}

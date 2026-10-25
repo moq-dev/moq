@@ -194,21 +194,27 @@ async fn open_with(archive: &Archive, config: Config) -> (broadcast::Producer, R
 	(broadcast, reader)
 }
 
-/// FETCH one group starting at `frame_start`, returning each frame's timestamp and payload.
+/// FETCH one group, returning each frame's timestamp and payload.
 async fn fetch(
 	broadcast: &broadcast::Producer,
 	track: &str,
 	sequence: u64,
-	frame_start: u64,
 ) -> std::result::Result<Vec<(u64, Bytes)>, moq_net::Error> {
 	let track = broadcast.consume().track(track)?;
-	let options = group::Fetch::default().with_frame_start(frame_start);
-	let mut group = track.fetch_group(sequence, options).await?;
+	let mut group = track.fetch_group(sequence, None).await?;
 	let mut frames = Vec::new();
 	while let Some(frame) = group.read_frame().await? {
 		frames.push((frame.timestamp.unwrap().value(), frame.payload));
 	}
 	Ok(frames)
+}
+
+/// Whether reading the whole fetched group from past its `len` frames ends cleanly.
+async fn fetch_past_end(broadcast: &broadcast::Producer, track: &str, sequence: u64, len: usize) -> bool {
+	let track = broadcast.consume().track(track).unwrap();
+	let group = track.fetch_group(sequence, None).await.unwrap();
+	let mut past = group.with_range(len as u64 + 1..);
+	past.read_frame().await.unwrap().is_none()
 }
 
 fn expected(track: &str, sequence: u64, frames: std::ops::Range<u64>) -> Vec<(u64, Bytes)> {
@@ -234,22 +240,9 @@ async fn fetch_replays_original_groups() {
 
 	let (broadcast, _reader) = open(&archive).await;
 
-	assert_eq!(
-		fetch(&broadcast, "video", 0, 0).await.unwrap(),
-		expected("video", 0, 0..3)
-	);
-	assert_eq!(
-		fetch(&broadcast, "video", 2, 0).await.unwrap(),
-		expected("video", 2, 0..2)
-	);
-	assert_eq!(
-		fetch(&broadcast, "audio", 5, 0).await.unwrap(),
-		expected("audio", 5, 0..2)
-	);
-
-	// A requested frame_start keeps the original frame indices and timestamps.
-	let tail = fetch(&broadcast, "video", 1, 1).await.unwrap();
-	assert_eq!(tail, expected("video", 1, 1..3));
+	assert_eq!(fetch(&broadcast, "video", 0).await.unwrap(), expected("video", 0, 0..3));
+	assert_eq!(fetch(&broadcast, "video", 2).await.unwrap(), expected("video", 2, 0..2));
+	assert_eq!(fetch(&broadcast, "audio", 5).await.unwrap(), expected("audio", 5, 0..2));
 
 	let track = broadcast.consume().track("video").unwrap();
 	let info = track.query().await.unwrap();
@@ -270,18 +263,8 @@ async fn a_group_split_across_records_is_served_whole() {
 	archive.commit("video", &tail, 0).await;
 
 	let (broadcast, _reader) = open(&archive).await;
-	assert_eq!(
-		fetch(&broadcast, "video", 7, 0).await.unwrap(),
-		expected("video", 7, 0..5)
-	);
-	assert_eq!(
-		fetch(&broadcast, "video", 7, 4).await.unwrap(),
-		expected("video", 7, 4..5)
-	);
-	assert_eq!(
-		fetch(&broadcast, "video", 8, 0).await.unwrap(),
-		expected("video", 8, 0..5)
-	);
+	assert_eq!(fetch(&broadcast, "video", 7).await.unwrap(), expected("video", 7, 0..5));
+	assert_eq!(fetch(&broadcast, "video", 8).await.unwrap(), expected("video", 8, 0..5));
 }
 
 #[tokio::test]
@@ -366,11 +349,7 @@ async fn an_expired_head_is_not_found() {
 	archive.commit("video", &tail, 1).await;
 
 	let (broadcast, _reader) = open(&archive).await;
-	not_found(fetch(&broadcast, "video", 7, 0).await);
-	assert_eq!(
-		fetch(&broadcast, "video", 7, 3).await.unwrap(),
-		expected("video", 7, 3..5)
-	);
+	not_found(fetch(&broadcast, "video", 7).await);
 }
 
 #[tokio::test]
@@ -384,7 +363,7 @@ async fn requests_download_only_their_object() {
 
 	for sequence in 0..3 {
 		assert_eq!(
-			fetch(&broadcast, "audio", sequence, 0).await.unwrap(),
+			fetch(&broadcast, "audio", sequence).await.unwrap(),
 			expected("audio", sequence, 0..1)
 		);
 	}
@@ -424,18 +403,15 @@ async fn unadvertised_or_unreadable_groups_are_not_found() {
 
 	let (broadcast, _reader) = open(&archive).await;
 
-	not_found(fetch(&broadcast, "audio", 2, 0).await); // between records
-	not_found(fetch(&broadcast, "audio", 5, 0).await); // past the last record
-	not_found(fetch(&broadcast, "video", 0, 0).await); // table disagrees with the record
-	not_found(fetch(&broadcast, "bad", 0, 0).await); // malformed envelope
-	not_found(fetch(&broadcast, "missing", 0, 0).await); // no object
-	not_found(fetch(&broadcast, "chat", 0, 0).await); // a track no timeline indexes
+	not_found(fetch(&broadcast, "audio", 2).await); // between records
+	not_found(fetch(&broadcast, "audio", 5).await); // past the last record
+	not_found(fetch(&broadcast, "video", 0).await); // table disagrees with the record
+	not_found(fetch(&broadcast, "bad", 0).await); // malformed envelope
+	not_found(fetch(&broadcast, "missing", 0).await); // no object
+	not_found(fetch(&broadcast, "chat", 0).await); // a track no timeline indexes
 
 	// Siblings remain usable.
-	assert_eq!(
-		fetch(&broadcast, "audio", 4, 0).await.unwrap(),
-		expected("audio", 4, 0..1)
-	);
+	assert_eq!(fetch(&broadcast, "audio", 4).await.unwrap(), expected("audio", 4, 0..1));
 }
 
 #[tokio::test]
@@ -444,23 +420,20 @@ async fn refresh_follows_new_records_and_pops() {
 	archive.add("video", 0..2, 1).await;
 
 	let (broadcast, mut reader) = open(&archive).await;
-	assert!(fetch(&broadcast, "video", 0, 0).await.is_ok());
+	assert!(fetch(&broadcast, "video", 0).await.is_ok());
 
 	let next = archive.record("video", Position::group(2), Position::group(3), 1).await;
 	// Refreshing before the commit finds nothing new; Not Found is not finality.
 	reader.refresh().await.unwrap();
-	not_found(fetch(&broadcast, "video", 2, 0).await);
+	not_found(fetch(&broadcast, "video", 2).await);
 
 	archive.commit("video", &next, 1).await;
 	reader.refresh().await.unwrap();
-	assert_eq!(
-		fetch(&broadcast, "video", 2, 0).await.unwrap(),
-		expected("video", 2, 0..1)
-	);
+	assert_eq!(fetch(&broadcast, "video", 2).await.unwrap(), expected("video", 2, 0..1));
 
 	// The popped record's groups are gone, although its object is still stored and was cached.
 	archive.store.inner().take();
-	not_found(fetch(&broadcast, "video", 1, 0).await);
+	not_found(fetch(&broadcast, "video", 1).await);
 	assert_eq!(archive.store.inner().gets(), Vec::<String>::new());
 }
 
@@ -472,7 +445,7 @@ async fn a_track_enrolled_after_opening_is_followed() {
 	archive.add("audio", 0..2, 1).await;
 
 	let (broadcast, mut reader) = open(&archive).await;
-	not_found(fetch(&broadcast, "video", 0, 0).await);
+	not_found(fetch(&broadcast, "video", 0).await);
 
 	archive.add("video", 0..2, 2).await;
 	let timelines = archive.store.timelines().await.unwrap();
@@ -484,10 +457,7 @@ async fn a_track_enrolled_after_opening_is_followed() {
 	);
 	reader.refresh().await.unwrap();
 
-	assert_eq!(
-		fetch(&broadcast, "video", 1, 0).await.unwrap(),
-		expected("video", 1, 0..2)
-	);
+	assert_eq!(fetch(&broadcast, "video", 1).await.unwrap(), expected("video", 1, 0..2));
 	let timeline = broadcast.consume().track(&timeline("video")).unwrap();
 	assert!(timeline.subscribe(None).await.is_ok(), "the late timeline replays");
 }
@@ -523,7 +493,7 @@ async fn a_missing_timeline_segment_recovers_from_the_next_checkpoint() {
 	// Record 2's checkpoint restates record 1, so its group is still served.
 	for sequence in 0..3 {
 		assert_eq!(
-			fetch(&broadcast, "video", sequence, 0).await.unwrap(),
+			fetch(&broadcast, "video", sequence).await.unwrap(),
 			expected("video", sequence, 0..1)
 		);
 	}
@@ -539,8 +509,8 @@ async fn a_missing_tail_is_retried_on_the_next_refresh() {
 	archive.store.inner().hide_gets("segments/0000000000000000002");
 
 	let (broadcast, mut reader) = open(&archive).await;
-	assert!(fetch(&broadcast, "video", 1, 0).await.is_ok());
-	not_found(fetch(&broadcast, "video", 2, 0).await);
+	assert!(fetch(&broadcast, "video", 1).await.is_ok());
+	not_found(fetch(&broadcast, "video", 2).await);
 
 	archive.store.inner().heal();
 	archive.store.inner().take();
@@ -556,10 +526,7 @@ async fn a_missing_tail_is_retried_on_the_next_refresh() {
 		],
 		"the cursor stays before the missing tail"
 	);
-	assert_eq!(
-		fetch(&broadcast, "video", 2, 0).await.unwrap(),
-		expected("video", 2, 0..1)
-	);
+	assert_eq!(fetch(&broadcast, "video", 2).await.unwrap(), expected("video", 2, 0..1));
 }
 
 #[tokio::test]
@@ -574,7 +541,7 @@ async fn following_lists_only_new_timeline_keys() {
 			.record("video", Position::group(group), Position::group(group + 1), 1)
 			.await;
 		reader.refresh().await.unwrap();
-		not_found(fetch(&broadcast, "video", group, 0).await);
+		not_found(fetch(&broadcast, "video", group).await);
 
 		archive.commit("video", &record, 0).await;
 		archive.store.inner().take();
@@ -592,7 +559,7 @@ async fn following_lists_only_new_timeline_keys() {
 			"following record {group} touches no media listing"
 		);
 		assert_eq!(
-			fetch(&broadcast, "video", group, 0).await.unwrap(),
+			fetch(&broadcast, "video", group).await.unwrap(),
 			expected("video", group, 0..1)
 		);
 	}
@@ -622,11 +589,11 @@ async fn an_unordered_listing_replays_in_segment_order() {
 	);
 
 	for group in 0..3 {
-		not_found(fetch(&broadcast, "video", group, 0).await);
+		not_found(fetch(&broadcast, "video", group).await);
 	}
 	for group in 3..5 {
 		assert_eq!(
-			fetch(&broadcast, "video", group, 0).await.unwrap(),
+			fetch(&broadcast, "video", group).await.unwrap(),
 			expected("video", group, 0..1)
 		);
 	}
@@ -651,12 +618,9 @@ async fn a_track_without_usable_info_is_not_found() {
 
 	let (broadcast, _reader) = open(&archive).await;
 	for track in ["bare", "future"] {
-		not_found(fetch(&broadcast, track, 0, 0).await);
+		not_found(fetch(&broadcast, track, 0).await);
 	}
-	assert_eq!(
-		fetch(&broadcast, "audio", 0, 0).await.unwrap(),
-		expected("audio", 0, 0..1)
-	);
+	assert_eq!(fetch(&broadcast, "audio", 0).await.unwrap(), expected("audio", 0, 0..1));
 }
 
 #[tokio::test]
@@ -674,7 +638,7 @@ async fn multi_frame_timeline_groups_decode() {
 	archive.timeline("video", 0, groups).await;
 
 	let (broadcast, _reader) = open(&archive).await;
-	assert!(fetch(&broadcast, "video", 1, 0).await.is_ok());
+	assert!(fetch(&broadcast, "video", 1).await.is_ok());
 }
 
 #[tokio::test]
@@ -716,11 +680,8 @@ async fn a_record_contradicting_its_timeline_is_not_indexed() {
 	archive.timeline("video", untimed.sequence, groups).await;
 
 	let (broadcast, _reader) = open(&archive).await;
-	assert_eq!(
-		fetch(&broadcast, "video", 0, 0).await.unwrap(),
-		expected("video", 0, 0..1)
-	);
-	not_found(fetch(&broadcast, "video", 1, 0).await);
+	assert_eq!(fetch(&broadcast, "video", 0).await.unwrap(), expected("video", 0, 0..1));
+	not_found(fetch(&broadcast, "video", 1).await);
 }
 
 #[tokio::test]
@@ -745,20 +706,15 @@ async fn evicted_timeline_groups_remain_fetchable() {
 		.await
 		.unwrap();
 	let serve = tokio::spawn(reader.serve());
-	let expected = fetch(&broadcast, &timeline("video"), 0, 0).await.unwrap();
+	let expected = fetch(&broadcast, &timeline("video"), 0).await.unwrap();
 	let now = moq_net::time::Instant::now();
 	pool.poll(now, &kio::Waiter::noop());
 	pool.poll(now + Duration::from_secs(1), &kio::Waiter::noop());
-	assert_eq!(fetch(&broadcast, &timeline("video"), 0, 0).await.unwrap(), expected);
+	assert_eq!(fetch(&broadcast, &timeline("video"), 0).await.unwrap(), expected);
 	// Past the end of an evicted complete group is EOF, as it is for a cached one.
 	pool.poll(now + Duration::from_secs(2), &kio::Waiter::noop());
 	pool.poll(now + Duration::from_secs(3), &kio::Waiter::noop());
-	assert!(
-		fetch(&broadcast, &timeline("video"), 0, expected.len() as u64 + 1)
-			.await
-			.unwrap()
-			.is_empty()
-	);
+	assert!(fetch_past_end(&broadcast, &timeline("video"), 0, expected.len()).await);
 	serve.abort();
 	let _ = serve.await;
 }
@@ -847,7 +803,7 @@ async fn enrolled_timeline_fetch_survives_finish() {
 	archive.add("audio", 1..2, 1).await;
 	reader.track("audio", &timeline("audio")).await.unwrap();
 	reader.refresh().await.unwrap();
-	let expected = fetch(&broadcast, &timeline("audio"), 0, 0).await.unwrap();
+	let expected = fetch(&broadcast, &timeline("audio"), 0).await.unwrap();
 	reader.finish().unwrap();
 	let now = moq_net::time::Instant::now();
 	broadcast.info().pool.poll(now, &kio::Waiter::noop());
@@ -855,19 +811,14 @@ async fn enrolled_timeline_fetch_survives_finish() {
 		.info()
 		.pool
 		.poll(now + Duration::from_secs(31), &kio::Waiter::noop());
-	assert_eq!(fetch(&broadcast, &timeline("audio"), 0, 0).await.unwrap(), expected);
-	let missing = fetch(&broadcast, &timeline("audio"), 2, 0).await;
+	assert_eq!(fetch(&broadcast, &timeline("audio"), 0).await.unwrap(), expected);
+	let missing = fetch(&broadcast, &timeline("audio"), 2).await;
 	assert!(
 		matches!(missing, Err(moq_net::Error::NotFound)),
 		"unknown timeline group: {missing:?}"
 	);
 	// Complete groups retain their known end, so a read past it is EOF.
-	assert!(
-		fetch(&broadcast, &timeline("audio"), 0, expected.len() as u64 + 1)
-			.await
-			.unwrap()
-			.is_empty()
-	);
+	assert!(fetch_past_end(&broadcast, &timeline("audio"), 0, expected.len()).await);
 	serving.abort();
 	let _ = serving.await;
 }
@@ -918,7 +869,7 @@ async fn benchmark_timeline_fetch_fanout() {
 					"benchmark must fetch an evicted group"
 				);
 				let started = std::time::Instant::now();
-				let results = futures::future::join_all((0..readers).map(|_| fetch(&broadcast, &name, 0, 0))).await;
+				let results = futures::future::join_all((0..readers).map(|_| fetch(&broadcast, &name, 0))).await;
 				elapsed += started.elapsed();
 				assert!(
 					results

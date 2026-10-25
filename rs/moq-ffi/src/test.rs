@@ -565,7 +565,6 @@ async fn raw_audio_activity() {
 				channels: None,
 				bitrate: None,
 				frame_duration_us: FRAME_DURATION_US,
-				preset: None,
 			},
 			track: Some("microphone".into()),
 			bandwidth: None,
@@ -693,7 +692,6 @@ async fn audio_raw_publish_from_many_threads() {
 		channels: None,
 		bitrate: None,
 		frame_duration_us: 20_000,
-		preset: None,
 	};
 	let audio = MoqAudioProducer::new(
 		&catalog,
@@ -781,7 +779,6 @@ async fn audio_raw_publish_rejects_bad_frames() {
 				channels: None,
 				bitrate: None,
 				frame_duration_us: 20_000,
-				preset: None,
 			},
 			track: None,
 			bandwidth: None,
@@ -831,7 +828,6 @@ async fn raw_audio_decode_delay() {
 				channels: None,
 				bitrate: None,
 				frame_duration_us: FRAME_US as u32,
-				preset: None,
 			},
 			track: Some("microphone".into()),
 			bandwidth: None,
@@ -923,7 +919,6 @@ async fn raw_audio_frame_durations() {
 		channels: None,
 		bitrate: None,
 		frame_duration_us,
-		preset: None,
 	};
 
 	let audio = MoqAudioProducer::new(
@@ -982,7 +977,6 @@ async fn raw_audio_codec_default_frame() {
 		channels: None,
 		bitrate: None,
 		frame_duration_us: 0,
-		preset: None,
 	};
 
 	let opus = MoqAudioProducer::new(
@@ -1108,7 +1102,7 @@ async fn raw_track_update_does_not_wait_for_pending_read() {
 			priority: 10,
 			max_delay_us: Some(25_000),
 			ranges: Some(vec![MoqRange {
-				start: MoqAnchor::Absolute { group: 0, frame: 0 },
+				start: MoqAnchor::Absolute { group: 0 },
 				end: None,
 			}]),
 			order: None,
@@ -4101,14 +4095,6 @@ fn close_twice_is_a_noop() {
 	);
 }
 
-/// A raw track with a millisecond max age, which is what a finish lingers for.
-fn aged_info(max_age_ms: u64) -> MoqTrackInfo {
-	MoqTrackInfo {
-		max_age_us: Some(max_age_ms * 1_000),
-		..timed_info()
-	}
-}
-
 /// Wait for the announcement of `path` to end, failing the test if it doesn't.
 async fn await_unannounced(announced: &MoqAnnounceConsumer) {
 	match next_event(announced).await {
@@ -4118,35 +4104,27 @@ async fn await_unannounced(announced: &MoqAnnounceConsumer) {
 }
 
 /// A finished broadcast stays announced and serves its finished tracks to a late subscriber,
-/// lingering for the longest max age among them; a live track adds nothing.
+/// even once their handles are released, until it closes.
 #[tokio::test]
-async fn finish_serves_finished_tracks_to_a_late_subscriber() {
+async fn finish_serves_finished_tracks_until_close() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
 	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
 	let broadcast = create_announced(&origin, "finish");
 	next_announced(&announced).await;
 
-	let video = broadcast.publish_track("video".into(), Some(aged_info(2_000))).unwrap();
-	let audio = broadcast.publish_track("audio".into(), Some(aged_info(5_000))).unwrap();
-	let live = broadcast.publish_track("live".into(), Some(aged_info(60_000))).unwrap();
-	for track in [&video, &audio, &live] {
-		track
-			.write_frame(MoqFrame {
-				payload: b"tail".to_vec(),
-				timestamp_us: Some(0),
-			})
-			.unwrap();
-	}
-	video.finish().unwrap();
+	let audio = broadcast.publish_track("audio".into(), Some(timed_info())).unwrap();
+	audio
+		.write_frame(MoqFrame {
+			payload: b"tail".to_vec(),
+			timestamp_us: Some(0),
+		})
+		.unwrap();
 	audio.finish().unwrap();
-	// A binding's garbage collector may release a finished handle before the broadcast finishes.
-	drop((video, audio));
-
-	let finish = broadcast.finish().unwrap();
-	assert_eq!(finish.linger_us(), 5_000_000);
-	assert!(matches!(broadcast.consume(), Err(MoqError::Closed)));
-	broadcast.close().unwrap();
+	// A binding's garbage collector may release a finished handle before the broadcast closes.
+	drop(audio);
+	let catalog = crate::media::MoqMediaCatalogProducer::new(broadcast.clone()).unwrap();
+	catalog.finish().unwrap();
 
 	let late = await_announced(&consumer, "finish").await;
 	let track = late.subscribe_track("audio".into(), None).await.unwrap();
@@ -4157,104 +4135,9 @@ async fn finish_serves_finished_tracks_to_a_late_subscriber() {
 		.expect("expected the finished track's frame");
 	assert_eq!(frame.payload, b"tail");
 
-	finish.close();
+	broadcast.close().unwrap();
 	await_unannounced(&announced).await;
-	finish.close();
-	assert!(matches!(finish.wait().await, Err(MoqError::Closed)));
-	live.finish().unwrap();
-}
-
-/// Media tracks finish through their importer handles, which a finish must still hold.
-#[tokio::test]
-async fn finish_holds_finished_media_tracks() {
-	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let media = MoqMediaTrackProducer::audio(
-		&broadcast,
-		MoqMediaTarget::Named { name: None },
-		audio_init(MoqAudioFormat::Opus, opus_head()),
-	)
-	.unwrap();
-	media
-		.write_frame(MoqFrame {
-			payload: b"opus frame".to_vec(),
-			timestamp_us: Some(0),
-		})
-		.unwrap();
-	media.finish().unwrap();
-	drop(media);
-
-	let finish = broadcast.finish().unwrap();
-	assert!(finish.linger_us() > 0, "the finished media track was not held");
-	finish.close();
-}
-
-/// Without a max age nothing lingers: the wait closes the broadcast at once.
-#[tokio::test]
-async fn finish_without_a_max_age_closes_on_wait() {
-	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
-	let consumer = origin.consume();
-	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
-	let broadcast = create_announced(&origin, "finish");
-	next_announced(&announced).await;
-	let track = broadcast.publish_track("status".into(), Some(timed_info())).unwrap();
-	track.finish().unwrap();
-
-	let finish = broadcast.finish().unwrap();
-	assert_eq!(finish.linger_us(), 0);
-	tokio::time::timeout(TIMEOUT, finish.wait())
-		.await
-		.expect("the wait outlived a zero linger")
-		.unwrap();
-	await_unannounced(&announced).await;
-}
-
-/// Closing the handle, the interrupt, ends a wait in progress and the broadcast with it.
-#[tokio::test]
-async fn closing_finish_ends_the_wait() {
-	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
-	let consumer = origin.consume();
-	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
-	let broadcast = create_announced(&origin, "finish");
-	next_announced(&announced).await;
-	let track = broadcast
-		.publish_track("status".into(), Some(aged_info(3_600_000)))
-		.unwrap();
-	track.finish().unwrap();
-
-	let finish = broadcast.finish().unwrap();
-	let wait = spawn_parked({
-		let finish = finish.clone();
-		async move { finish.wait().await }
-	})
-	.await;
-	finish.close();
-	tokio::time::timeout(TIMEOUT, wait)
-		.await
-		.expect("the wait outlived the close")
-		.expect("the wait panicked")
-		.unwrap();
-	await_unannounced(&announced).await;
-}
-
-/// Dropping a wait in progress, as a cancelled foreign future does, closes the broadcast.
-#[tokio::test]
-async fn cancelling_the_wait_closes_the_broadcast() {
-	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
-	let consumer = origin.consume();
-	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
-	let broadcast = create_announced(&origin, "finish");
-	next_announced(&announced).await;
-	let track = broadcast
-		.publish_track("status".into(), Some(aged_info(3_600_000)))
-		.unwrap();
-	track.finish().unwrap();
-
-	let finish = broadcast.finish().unwrap();
-	let mut wait = Box::pin(finish.wait());
-	let first = std::future::poll_fn(|cx| std::task::Poll::Ready(wait.as_mut().poll(cx))).await;
-	assert!(first.is_pending());
-	drop(wait);
-	await_unannounced(&announced).await;
+	assert!(matches!(catalog.finish(), Err(MoqError::Closed)));
 }
 
 #[tokio::test]
@@ -4682,7 +4565,7 @@ async fn raw_track_update_during_pending_group_still_reads_datagram() {
 			priority: 10,
 			max_delay_us: Some(25_000),
 			ranges: Some(vec![MoqRange {
-				start: MoqAnchor::Absolute { group: 0, frame: 0 },
+				start: MoqAnchor::Absolute { group: 0 },
 				end: None,
 			}]),
 			order: None,

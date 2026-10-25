@@ -97,6 +97,9 @@ pub(crate) struct BroadcastProducer {
 	pub(crate) timebases: std::collections::HashMap<usize, moq_mux::catalog::Timebase<Extra>>,
 	pub(crate) driver: Background,
 	pub(crate) finished: Finished,
+	/// Set by [`MoqMediaCatalogProducer::finish`](crate::media::MoqMediaCatalogProducer::finish): the
+	/// catalog is final, so a close leaves it alone.
+	pub(crate) ended: bool,
 }
 
 impl Drop for BroadcastProducer {
@@ -110,10 +113,10 @@ type Keeping = Option<Vec<Box<dyn kio::MaybeSend>>>;
 
 /// Finished producers a broadcast keeps until it ends.
 ///
-/// A track unlists once its last producer drops, and a finish holds only listed tracks. An
-/// importer lets go of its producer when it finishes, and a binding may release a raw track's
-/// handle whenever its garbage collector runs, so the broadcast keeps them here instead, and
-/// [`MoqBroadcastProducer::finish`] still holds the track.
+/// A finished track stops being served once its last producer drops. An importer lets go of
+/// its producer when it finishes, and a binding may release a raw track's handle whenever its
+/// garbage collector runs, so the broadcast keeps them here instead, and a subscriber arriving
+/// after the end still finds the track until the broadcast closes.
 #[derive(Clone)]
 pub(crate) struct Finished(Arc<std::sync::Mutex<Keeping>>);
 
@@ -208,6 +211,7 @@ impl MoqBroadcastProducer {
 				timebases: Default::default(),
 				driver,
 				finished: Default::default(),
+				ended: false,
 			})),
 		})
 	}
@@ -336,100 +340,12 @@ impl MoqBroadcastProducer {
 		};
 		// Close the broadcast first so it ends even if finalizing the catalog fails.
 		state.broadcast.close();
-		let result = state.catalog.finish().map_err(Into::into);
+		let result = match state.ended {
+			true => Ok(()),
+			false => state.catalog.finish().map_err(Into::into),
+		};
 		state.driver.check()?;
 		result
-	}
-
-	/// End the broadcast cleanly, keeping it servable until its media goes stale.
-	///
-	/// Finish every track first: the returned handle holds the tracks finished by now and keeps
-	/// the broadcast announced, so a subscriber still catching up can drain them. A track still
-	/// live is not held and adds nothing to the linger. Await [`MoqBroadcastFinish::wait`], or keep
-	/// the handle for [`MoqBroadcastFinish::linger_us`] on your own clock and then close it.
-	///
-	/// Every later call on this producer fails with `Closed`, as after [`close`](Self::close).
-	pub fn finish(&self) -> Result<Arc<MoqBroadcastFinish>, MoqError> {
-		let _guard = crate::ffi::enter();
-		let mut state = self.state.lock().unwrap().take().ok_or(MoqError::Closed)?;
-		// Finished before the broadcast is, so the catalog lingers with the media. On failure the
-		// producer is gone, so close the broadcast rather than leave a dynamic handle holding it.
-		let ready = state.catalog.finish().map_err(MoqError::from);
-		if let Err(err) = ready.and_then(|()| state.driver.check()) {
-			state.broadcast.close();
-			return Err(err);
-		}
-		let broadcast = state.broadcast.clone();
-		// Released only once the finish holds their tracks.
-		let finished = state.finished.release();
-		let finish = state.broadcast.clone().finish();
-		drop(finished);
-		Ok(Arc::new(MoqBroadcastFinish {
-			linger: finish.linger(),
-			until: moq_clock::now().checked_add(finish.linger()),
-			broadcast,
-			finish: std::sync::Mutex::new(Some(finish)),
-		}))
-	}
-}
-
-/// A cleanly ended broadcast, still announced and serving its finished tracks.
-///
-/// Returned by [`MoqBroadcastProducer::finish`]. Closing or dropping it closes the broadcast,
-/// which is how an interrupt ends the linger early. A garbage-collected language (Kotlin, Go,
-/// Dart) drops it only when the collector reclaims it, possibly long after the last reference
-/// goes, so wait on or close it rather than leave it for the collector.
-#[derive(uniffi::Object)]
-pub struct MoqBroadcastFinish {
-	linger: std::time::Duration,
-	// The linger counts from the finish, as a C caller's own clock would, not from the first
-	// poll of a wait; `None` when it overflows the clock.
-	until: Option<moq_clock::Instant>,
-	// Closes the broadcast from any thread, ending a wait that took `finish`.
-	broadcast: moq_net::broadcast::Producer,
-	// Taken by `wait` or `close`.
-	finish: std::sync::Mutex<Option<moq_net::broadcast::Finish>>,
-}
-
-#[uniffi::export]
-impl MoqBroadcastFinish {
-	/// How long to keep the broadcast, in microseconds: the longest max age of the held tracks.
-	///
-	/// Tracks still live at the finish, and tracks without a max age, add nothing.
-	pub fn linger_us(&self) -> u64 {
-		u64::try_from(self.linger.as_micros()).unwrap_or(u64::MAX)
-	}
-
-	/// Keep the broadcast up for its linger, or until [`close`](Self::close), then close it.
-	///
-	/// Cancelling the wait closes the broadcast at once. Errors with `Closed` once another wait
-	/// or a close took the handle.
-	pub async fn wait(&self) -> Result<(), MoqError> {
-		let finish = self.finish.lock().unwrap().take().ok_or(MoqError::Closed)?;
-		let until = self.until;
-		crate::ffi::detached(async move {
-			let closed = kio::wait(|waiter| finish.poll_closed(waiter));
-			match until {
-				Some(until) => {
-					tokio::select! {
-						_ = moq_clock::sleep_until(until) => {}
-						_ = closed => {}
-					}
-				}
-				None => closed.await,
-			}
-			// Dropping the finish is what closes the broadcast.
-			drop(finish);
-			Ok::<_, MoqError>(())
-		})
-		.await
-	}
-
-	/// Close the broadcast now, ending the linger and any wait. Closing again is a no-op.
-	pub fn close(&self) {
-		let _guard = crate::ffi::enter();
-		self.broadcast.close();
-		drop(self.finish.lock().unwrap().take());
 	}
 }
 
@@ -793,7 +709,7 @@ impl MoqTrackProducer {
 	///
 	/// [`finish_at`](Self::finish_at) declares the boundary ahead of time, so this keeps
 	/// that boundary. The handle remains so a later [`abort`](Self::abort) can still run, and
-	/// the broadcast keeps the finished track until it ends, so its finish still holds it.
+	/// the broadcast keeps the finished track until it closes.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();

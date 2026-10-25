@@ -5,10 +5,9 @@
 The moq-transport features moq-net exposes with the most interop bug
 history have cross-implementation tests: Rust, JS, and the bindings exchange
 hang media and exercise subgroup data, namespace discovery, late joins,
-FETCH, GOAWAY, TRACK_STATUS, and datagrams over the even drafts 14
-through 22, and request limits over drafts 14 and 16 (later drafts have
-no MAX_REQUEST_ID). Our upstream runner clients implement the runner's
-existing cases for those features.
+FETCH, GOAWAY, TRACK_STATUS, and datagrams over drafts 18 and 22. Our
+upstream runner clients implement the runner's existing cases for those
+features.
 
 Boundaries:
 
@@ -31,15 +30,18 @@ Boundaries:
 Decided with the maintainer on 2026-10-21, from an inventory of the
 coverage on `main` at `3ab6cbf81d`.
 
-- `just test interop --versions ietf` runs the matrix on each even draft;
+- `just test interop --versions ietf` runs the matrix on each supported draft;
   every new case runs on it. Beyond it, moq-transport is covered by
   in-process codec tests (`rs/moq-net/src/test_interop.rs`), the public
   relays page (published clients), and the Cloudflare and Moxygen smoke
   lanes.
-- Even drafts only (14, 16, 18, 20, 22), nightly.
+- Drafts 18 and 22 only, nightly: the only drafts left once
+  [moq-transport 18 and 22 only](/quest/m1/ietf-drop/README.md) lands
+  (decided 2026-10-24, maintainer). The request-limits case went with
+  drafts 14 and 16, the only ones with MAX_REQUEST_ID.
 - Case ranking follows interop bug history: subgroup data and namespace
   discovery, then late join and FETCH, then GOAWAY, TRACK_STATUS,
-  datagrams, and limits.
+  and datagrams.
 
 ## Required
 

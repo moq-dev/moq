@@ -808,28 +808,6 @@ mod tests {
 		assert!(matches!(lister.finish("up"), Err(Error::NotFound)));
 	}
 
-	#[test]
-	fn a_finished_track_is_listed_while_held() {
-		let broadcast = Info::new().produce();
-		let a = broadcast.create_track("a", None).unwrap();
-		a.finish().unwrap();
-		drop(a);
-		// Nothing holds it once its producer is gone.
-		let mut tracks = broadcast.consume().tracks().unwrap();
-		assert_eq!(drain(&mut tracks), ["synced"]);
-
-		let broadcast = Info::new().produce();
-		let a = broadcast.create_track("a", None).unwrap();
-		a.finish().unwrap();
-		let mut tracks = broadcast.consume().tracks().unwrap();
-		assert_eq!(drain(&mut tracks), ["+a", "synced"]);
-		let finish = broadcast.finish();
-		drop(a);
-		assert_eq!(drain(&mut tracks), NONE, "held by the finish");
-		drop(finish);
-		assert_eq!(drain(&mut tracks), ["~a", "end"], "the end says it finished");
-	}
-
 	/// A clean end reports each track that left before it, and how, but not one the reader
 	/// never saw; an error ends at once.
 	#[test]

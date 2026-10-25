@@ -84,6 +84,14 @@ and leaves subscriptions already in flight alone until each track ends or its
 last subscriber leaves. A graceful session close withdraws its announcements
 and waits up to one second for them to be delivered. An abort skips that.
 
+A broadcast has no finished state. Online means announced, and offline means
+no route is left. The end of content is a track FIN: the publisher finishes
+each track, and a hang broadcast also finishes its catalog. A finished track
+stays servable to the subscribers it already has, including through a relay
+whose upstream session has since gone. How long a finished broadcast stays
+announced for late readers is the application's retention policy, such as the
+`--linger` of [`moq import`](/bin/cli), not a protocol state.
+
 ### Publisher epochs
 
 A route may carry an epoch: a UUIDv7 naming the publisher instance behind it.
@@ -254,7 +262,7 @@ Each subscription carries the knobs that decide behavior under congestion:
 | **Priority** (-128..127, default 0) | Higher-priority tracks get bandwidth first. Audio above video, base layer above enhancement. The publisher's track priority breaks ties between subscriptions at one priority. From a native Rust publisher over QUIC or WebTransport (iroh excepted), subscriptions at the same priority and publisher priority split bandwidth evenly by bytes, streams and datagrams alike, however many groups each has queued. A browser publisher and other transports without send groups are not covered. |
 | **Order** | Which group to send first when several are pending. Newest first for live (the default), oldest first for catch-up. Needs moq-lite 07 or moq-transport; older moq-lite always sends newest first. |
 | **Max delay** | How long a non-latest group stays worth delivering before it is skipped. Zero means "live edge only", and raising it is also what asks for history. Unset leaves the publisher's retention window alone to bound it. |
-| **Ranges** | Which groups to ask for: from a group, a number of groups back from the latest, or the group containing a presentation time, optionally up to an end. The default asks for everything max delay allows. Max delay still caps every range. |
+| **Ranges** | Which groups to ask for: from a group, a number of groups back from the latest, or the group containing a presentation time, optionally up to an end. Each group arrives whole, from its first frame. The default asks for everything max delay allows. Max delay still caps every range. |
 
 On moq-lite 05 and later, a publisher explicitly reports groups that will not arrive.
 This lets a finished subscription settle without waiting for missing groups.
