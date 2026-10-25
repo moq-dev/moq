@@ -437,9 +437,7 @@ impl ElementImpl for MoqSink {
 			if let Some(state) = control.live.as_ref()
 				&& let Some(catalog) = state.catalog.as_ref()
 			{
-				pad.lifecycle()
-					.media
-					.reserve(catalog, state.wall.clone(), &state.names);
+				pad.lifecycle().media.reserve(catalog, state.wall.clone(), &state.names);
 			}
 			control.admissions.insert(pad.clone());
 		}
@@ -890,9 +888,7 @@ impl MoqSink {
 					if !lifecycle.releasing {
 						lifecycle.ended = false;
 						if let Some(catalog) = &state.catalog {
-							lifecycle
-								.media
-								.reserve(catalog, state.wall.clone(), &state.names);
+							lifecycle.media.reserve(catalog, state.wall.clone(), &state.names);
 						}
 					}
 				}
@@ -918,9 +914,7 @@ impl MoqSink {
 									lifecycle.media.flush();
 									let catalog = state.catalog.as_ref();
 									if let Some(catalog) = catalog {
-										lifecycle
-											.media
-											.reserve(catalog, state.wall.clone(), &state.names);
+										lifecycle.media.reserve(catalog, state.wall.clone(), &state.names);
 									}
 									let caps = lifecycle.media.resumable_caps();
 									caps.zip(catalog).and_then(|(caps, catalog)| {
@@ -1215,9 +1209,7 @@ fn observe_caps(
 	lifecycle: &mut PadLifecycle,
 	caps: &gst::Caps,
 ) -> (Option<Notifications>, bool) {
-	lifecycle
-		.media
-		.reserve(catalog, state.wall.clone(), &state.names);
+	lifecycle.media.reserve(catalog, state.wall.clone(), &state.names);
 	let requested = lifecycle.requested().map(str::to_owned);
 	let mut options = ProducerOptions::new(caps).with_container(lifecycle.container().into());
 	if let Some(track) = requested.as_deref() {

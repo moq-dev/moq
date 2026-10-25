@@ -1214,15 +1214,11 @@ pub fn caps_supported(caps: &gst::CapsRef) -> bool {
 /// audio or text pad builds from its whole caps (the codec config, rate, channels, language), which
 /// is what a subscriber decodes or selects by, so any change there is new content.
 fn same_importer(current: &gst::CapsRef, next: &gst::CapsRef) -> bool {
-	let (Some(current_structure), Some(next_structure)) = (current.structure(0), next.structure(0)) else {
+	let (Some(was), Some(now)) = (current.structure(0), next.structure(0)) else {
 		return false;
 	};
-	match next_structure.name().as_str() {
-		"video/x-h264" | "video/x-h265" | "video/x-av1" | "video/x-vp8" | "video/x-vp9" | "application/octet-stream" => {
-			current_structure.name() == next_structure.name()
-		}
-		_ => current == next,
-	}
+	let media = now.name().as_str();
+	was.name() == now.name() && (media.starts_with("video/") || media == "application/octet-stream" || current == next)
 }
 
 fn segment_info(segment: &gst::Segment) -> SegmentInfo {
@@ -1411,7 +1407,12 @@ mod tests {
 		assert_eq!(pushed, Ok(PushOutcome::Published));
 
 		// The reader may skip to the latest group, but never sees the track end before the new caps.
-		while subscriber.recv_group().await.unwrap().expect("the track continues").sequence != 2 {}
+		loop {
+			let group = subscriber.recv_group().await.unwrap().expect("the track continues");
+			if group.sequence == 2 {
+				break;
+			}
+		}
 	}
 
 	/// A new codec config is new content: the old track ends on its name, and the replacement takes a
