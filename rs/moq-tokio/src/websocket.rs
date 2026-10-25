@@ -969,13 +969,11 @@ mod tests {
 	fn moqt_18_and_newer_pin_to_qmux01() {
 		// The literals in `qmux_versions_for` must stay the IETF draft ALPNs;
 		// otherwise the pin silently stops matching.
-		assert_eq!(
-			QMUX01_ONLY_ALPNS
-				.iter()
-				.map(|&a| moq_net::Version::from_alpn(a).map(|v| v.code()))
-				.collect::<Vec<_>>(),
-			vec![Some(0xff000012), Some(0xff000016)]
-		);
+		let drafts: Vec<_> = [0xff000012, 0xff000016]
+			.into_iter()
+			.map(|code| moq_net::Version::from_code(code).unwrap().alpn())
+			.collect();
+		assert_eq!(QMUX01_ONLY_ALPNS, drafts);
 		for &alpn in QMUX01_ONLY_ALPNS {
 			assert_eq!(qmux_versions_for(alpn), &[qmux::Version::QMux01]);
 		}

@@ -12,7 +12,7 @@ Component crates are named `moq-<component>` (`hang` is the exception); infrastr
 
 # Producer / Consumer
 
-Most crates use a split-handle pattern: a `Producer` writes, any number of `Consumer`s read, state is shared via `kio`. Handles are refcounted: clones share state, the last drop closes cleanly, `abort(err)` closes with an error. A parked clone that keeps something alive is a bug in the holder, and a consumer never keeps its producer or parent alive. A track, group, or frame consumer seeing `Error::Dropped` is a bug too: its producer went away unfinished without calling `abort` with a specific error, so find that path and abort with the real cause. Lifecycle watchers like `broadcast::Demand` return `Dropped` after `close()` by design.
+Most crates use a split-handle pattern: a `Producer` writes, any number of `Consumer`s read, state is shared via `kio`. Handles are refcounted: clones share state, the last drop closes cleanly, `abort(err)` closes with an error. A parked clone that keeps something alive is a bug in the holder, and a consumer never keeps its producer or parent alive. A track, group, or frame consumer seeing `Error::Dropped` is a bug too: its producer went away unfinished without calling `abort` with a specific error, so find that path and abort with the real cause. Lifecycle watchers like `track::Demand` return `Dropped` after `close()` by design.
 
 # Async / poll
 
@@ -52,5 +52,5 @@ Prefer poll. New logic is a `poll_*` with an `async` helper, not the other way a
 
 - Tests are inline `#[cfg(test)] mod tests`, except full Client/Server session tests over a crate's shared mock harness, which go in its `tests/integration/` module. Time-dependent async tests call `tokio::time::pause()` first (moq-net uses `#[moq_clock::test]` instead), unless they cross real networking that can't be mocked (sockets, smoke tests); those run on the wall clock and assert lower bounds.
 - Run tests through `just` (nextest), not `cargo test`: nextest kills a wedged test as TIMEOUT, cargo hangs forever. A test flagged SLOW is a bug to fix, not a threshold to raise.
-- `just check` compiles default features only, like CI. `just rs features` (nightly) covers `--all-features` / `--no-default-features`. Keep a feature gate around the dependency, not the logic, so the logic's tests stay in the merge gate.
+- `just check` and CI compile the selected crates at default and extreme feature sets, with isolated boundary checks. `just rs features` (nightly) covers the full matrix. Keep a feature gate around the dependency, not the logic, so the logic's tests stay in the merge gate.
 - Local checks compile only the host platform; Nightly and release PRs run `just rs windows` / `macos` on those hosts, and `just rs wasm` covers `moq-wasm`.

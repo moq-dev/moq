@@ -178,10 +178,10 @@ pub struct MoqAudio {
 	pub enabled: bool,
 	/// The framing used to carry this rendition.
 	pub container: MoqContainer,
-	/// The publisher's worst-case delay between a frame being ready and its flush, in
-	/// microseconds, which floors an estimated playout delay. Absent means frames flush at once.
+	/// The publisher's worst-case delay between a frame being ready and its flush, which
+	/// floors an estimated playout delay. Absent means frames flush at once.
 	#[uniffi(default = None)]
-	pub jitter_us: Option<u64>,
+	pub jitter: Option<std::time::Duration>,
 }
 
 /// A payload and the time it should be presented.
@@ -553,9 +553,7 @@ pub(crate) fn convert_catalog(catalog: &moq_mux::catalog::hang::Catalog<moq_mux:
 					bitrate: config.bitrate,
 					enabled: config.enabled,
 					container: MoqContainer::from_catalog(&config.container)?,
-					jitter_us: config
-						.jitter
-						.map(|jitter| jitter.as_micros().try_into().unwrap_or(u64::MAX)),
+					jitter: config.jitter.map(crate::ffi::duration),
 				},
 			))
 		})
@@ -1450,7 +1448,7 @@ impl MoqMediaGroupConsumer {
 	/// Pair it with [`MoqTrackConsumer::recv_group`](crate::consumer::MoqTrackConsumer::recv_group)
 	/// to read media in arrival order: frame timestamps are container media time, not the
 	/// transport's. Which groups arrive, and how long a stalled one stays readable, is the
-	/// subscription's `max_delay_us`. Takes over `group`, whose handle is closed afterward; errors
+	/// subscription's `max_delay`. Takes over `group`, whose handle is closed afterward; errors
 	/// if it has already read a frame.
 	#[uniffi::constructor]
 	pub fn new(group: &MoqGroupConsumer, container: MoqContainer) -> Result<Arc<Self>, MoqError> {

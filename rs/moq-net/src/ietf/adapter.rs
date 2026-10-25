@@ -1540,8 +1540,8 @@ impl crate::transport::poll::Session for ControlStreamAdapter {
 		self.inner.max_datagram_size()
 	}
 
-	fn binding(&self) -> crate::transport::Binding {
-		self.inner.binding()
+	fn address(&self) -> crate::transport::Address {
+		self.inner.address()
 	}
 	fn protocol(&self) -> Option<&str> {
 		self.inner.protocol()
