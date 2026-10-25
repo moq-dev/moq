@@ -6,6 +6,7 @@ import { Producer as BroadcastProducer } from "../src/broadcast.ts";
 import { BroadcastCache } from "../src/consume.ts";
 import * as Epoch from "../src/epoch.ts";
 import { HopSchema, Route } from "../src/hop.ts";
+import { hooks } from "../src/internal.ts";
 import { AnnounceRequest } from "../src/lite/announce.ts";
 import { Publisher } from "../src/lite/publisher.ts";
 import { Subscriber } from "../src/lite/subscriber.ts";
@@ -252,7 +253,10 @@ for (const pathCount of routeCounts) {
 			Array.from({ length: readerCount }, () => origin.consume().request(Path.from(`room/${index}`))),
 		).flat();
 		const broadcasts = Array.from({ length: pathCount }, () => new BroadcastProducer());
-		for (const broadcast of broadcasts) (await pending.next()).value?.accept(broadcast);
+		for (const broadcast of broadcasts) {
+			const request = (await pending.next()).value;
+			if (request) hooks.acceptRequest(request, broadcast);
+		}
 		await Promise.resolve();
 		const before = requests.map((request) => request.active.peek());
 		const start = performance.now();

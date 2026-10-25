@@ -27,7 +27,7 @@ than measure first or drop py's test features.
   cdylib, which then finds it fresh, so concurrent lanes never rebuild the
   shared output while another reads it. Give carla its own venv. Keep cpp and
   obs_compile in one lane. Every other binding becomes its own lane under
-  `MOQ_CHECK_JOBS`.
+  `CHECK_JOBS`.
 - dart keeps running alone: its build hook checks the filtered build stays
   fresh, which any concurrent Cargo build of moq-ffi would break.
 - Measure the full-run wall time and peak disk before and after on matched

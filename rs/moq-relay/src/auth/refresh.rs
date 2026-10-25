@@ -129,8 +129,10 @@ impl Refresh {
 		let mut initial = Credential::new(lease.consumer.clone());
 		// Admission and protocol setup can observe different live grant versions, so
 		// hold this one to the admission's checks too.
-		if super::still_valid(&initial.grant).is_err() {
-			return Err(moq_net::Error::Unauthorized);
+		match super::still_valid(&initial.grant) {
+			Ok(()) => {}
+			Err(lease::Reason::Expired) => return Err(moq_net::Error::Expired),
+			Err(_) => return Err(moq_net::Error::Unauthorized),
 		}
 		initial.initial = true;
 		let this = Self {
@@ -226,7 +228,7 @@ impl Refresh {
 			return;
 		}
 		let Ok(token) = std::str::from_utf8(request.token()) else {
-			request.reject(SessionError::Unauthorized, "token is not UTF-8");
+			request.reject(SessionError::MalformedAuthToken, "token is not UTF-8");
 			return;
 		};
 		let mut facts = source.request.clone();
@@ -428,7 +430,7 @@ fn refuse(request: auth::Request, err: super::Error) {
 			request.reject(SessionError::Internal, "auth server unavailable");
 		}
 		super::Error::Forbidden(reason) => request.reject(SessionError::Unauthorized, reason),
-		_ => request.reject(SessionError::Unauthorized, "token refused"),
+		err => request.reject(SessionError::from(&err), "token refused"),
 	}
 }
 

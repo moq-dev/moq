@@ -57,7 +57,7 @@ def rust(directory):
         metadata = json.loads((run / 'metadata.json').read_text())
         if metadata['mode'] != '--criterion':
             raise ValueError(f'not a measured Criterion run: {run}')
-        label = metadata['environment'].get('MOQ_BENCH_LABEL')
+        label = metadata['environment'].get('BENCH_LABEL')
         if not isinstance(label, str) or not label:
             raise ValueError(f'missing Criterion source label: {run}')
         estimates = sorted((run / 'criterion').glob('**/new/estimates.json'))
@@ -92,7 +92,7 @@ def paired(directory):
         for key in ('commit', 'base', 'threshold_pct', 'rounds'):
             if combined.setdefault(key, comparison[key]) != comparison[key]:
                 raise ValueError(f'paired run disagrees on {key}: {run}')
-        label = data['environment']['MOQ_BENCH_LABEL']
+        label = data['environment']['BENCH_LABEL']
         combined['unavailable'] += [{'name': f'rust/{label}/{entry["target"]}', 'reason': entry['reason']}
                                     for entry in comparison['unavailable']]
         for case in comparison['cases']:

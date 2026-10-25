@@ -115,7 +115,7 @@ esac
 
 # Selection and empty crate sets stay outside admission. The paths are
 # root-relative because the `cd` above invalidates a relative `$0`.
-if [[ "${GITHUB_ACTIONS:-}" != true && "${MOQ_LOCAL_SUPERVISED:-}" != 1 ]]; then
+if [[ "${GITHUB_ACTIONS:-}" != true && "${LOCAL_SUPERVISED:-}" != 1 ]]; then
     exec bash sh/local.sh bash sh/rs/select.sh "$@"
 fi
 

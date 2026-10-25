@@ -45,7 +45,7 @@ struct Setup {
 	pair: MockPair,
 	track: moq_net::track::Producer,
 	frames: futures::channel::mpsc::UnboundedReceiver<Vec<u8>>,
-	_broadcast: moq_net::broadcast::Producer,
+	_broadcast: moq_net::origin::Publication,
 }
 
 async fn setup(version: Version) -> Setup {
