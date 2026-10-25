@@ -86,7 +86,7 @@ Added 2026-10-23 (maintainer, pre-cut triage): breaks that would otherwise
 force another major (`announce="never"`, the unused OBS outputs, binding
 durations, and the remaining web-transport-trait adapters) land before the
 cut, as do the small hostile-input and container fixes from the 2026-10-22
-security audit, the draft 14-16 session errors, and the stuck-window scan.
+security audit, and the stuck-window scan.
 Binding durations wait on Duration support in the generated C.
 
 ## Required
@@ -121,6 +121,7 @@ Binding durations wait on Duration support in the generated C.
 - [JS interop tone](/quest/m1/interop-js-tone.md) - the `js ->` cells pass the audio check on every draft again, after the 2026-10-23 regression
 - [fMP4 edit lists](/quest/m1/fmp4-edit-lists.md) - the fMP4 importer applies edit lists to frame timestamps, so the interop AAC tone passes the phase check
 - [A smaller, safer API than release](/quest/m1/api-audit/README.md) - every surface added since release has a consumer or is gone, overlapping operations are collapsed, names mirror across Rust, JS, and the bindings, and every break says how to migrate
+- [moq-transport 18 and 22 only](/quest/m1/ietf-drop/README.md) - drafts 14-17 and 19-21 are deleted from Rust, JS, tests, interop lanes, and docs, removing the legacy control-stream adapter and its request limit
 - [moq-quic's API improves on quinn's](/quest/m1/quic-api/README.md) - moq-quic and both QUIC drivers ship one mirrored API: `send::`/`recv::` namespaces, one error per direction, consuming terminal operations, plain configs, no quinn baggage
 - [Drop web-transport-trait](/quest/m1/drop-web-transport-trait.md) - iroh, wasm, and ffi implement moq-net's `transport::poll` traits, and the remaining `web_transport_trait` adapters are deleted
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - browser publishers answer IETF FETCH through the JS ranges request surface
@@ -152,8 +153,7 @@ Binding durations wait on Duration support in the generated C.
 - [API Extractor checks](/quest/m1/api-extractor-checks.md) - API Extractor fails a PR on a forgotten export, an unresolved declaration, or an undocumented export, replacing the hand-rolled `.d.ts` checkers
 - [Generated JS API reference](/quest/m1/js-api-reference.md) - the doc site renders an API reference for every `@moq/*` package from API Extractor's doc model
 - [IETF lazy discovery](/quest/m1/ietf-lazy-discovery.md) - JS moq-transport sessions never hold overlapping SUBSCRIBE_NAMESPACE requests at a peer that refuses them
-- [Draft 14-16 session errors](/quest/m1/ietf-adapter-session-errors.md) - the moq-transport adapter keeps session-level error causes, so a terminal rejection is not redialed
-- [Interop coverage](/quest/m1/interop-coverage/README.md) - the riskiest moq-transport features moq-net exposes get cross-implementation tests over the even drafts 14 to 22
+- [Interop coverage](/quest/m1/interop-coverage/README.md) - the riskiest moq-transport features moq-net exposes get cross-implementation tests over drafts 18 and 22
 - [AMF0 exact reads](/quest/m1/rtmp-amf0-exact-reads.md) - a truncated RTMP string fails with `UnexpectedEof` instead of parsing NUL padding
 - [HLS variant area](/quest/m1/hls-variant-area.md) - a hostile `RESOLUTION` cannot panic or misorder variant ranking
 - [MSF duplicate init](/quest/m1/msf-duplicate-init.md) - an MSF catalog refuses a repeated `initDataList` id instead of resolving it last-wins
