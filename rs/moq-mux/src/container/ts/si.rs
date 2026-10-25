@@ -444,11 +444,12 @@ impl Entry {
 /// PCR, or past it with no interval to extrapolate from, is dropped, so a source cannot
 /// hold SI by withholding its clock.
 ///
-/// A valid PCR interval (forward, at most [`MAX_INTERVAL`]) advances it by its own ticks.
-/// Any other, a stalled or rewound PCR, a corrupt jump, or one across a clock break,
-/// advances it by the input packets it spans at the measured multiplex rate, and so does
-/// the interval still open past the last PCR, once it outruns any valid one: until then the
-/// next PCR may yet close it, and a burst above the average rate must not retire SI early.
+/// A valid PCR interval (forward, at most [`MAX_INTERVAL`], over no more input than that at
+/// the measured multiplex rate) advances it by its own ticks. Any other, a stalled or rewound
+/// PCR, a corrupt jump, one across a clock break, or one resuming after PCR silence, advances
+/// it by the input packets it spans at the measured rate, and so does the interval still open
+/// past the last PCR, once it outruns any valid one: until then the next PCR may yet close
+/// it, and a burst above the average rate must not retire SI early.
 /// The rate pools every valid interval rather than reading the catalog's `mux_rate`, which
 /// a variable-rate source leaves unset.
 #[derive(Default)]
@@ -466,16 +467,20 @@ impl Clock {
 	fn pcr(&mut self, pcr: u64, count: u64) {
 		if let Some((last, at)) = self.last {
 			let packets = count - at;
+			let extrapolated = self.extrapolate(packets);
+			// A small step after a long silence would otherwise drop the age the open
+			// interval already charged, freezing SI for as long as the silence lasted.
 			let step = last
 				.map(|last| (pcr + PCR_WRAP - last) % PCR_WRAP)
-				.filter(|step| (1..=MAX_INTERVAL).contains(step));
+				.filter(|step| (1..=MAX_INTERVAL).contains(step))
+				.filter(|_| extrapolated.is_none_or(|ticks| ticks <= MAX_INTERVAL));
 			let ticks = match step {
 				Some(step) => {
 					self.measured.0 += step;
 					self.measured.1 += packets;
 					step
 				}
-				None => self.extrapolate(packets).unwrap_or(0),
+				None => extrapolated.unwrap_or(0),
 			};
 			self.elapsed = self.elapsed.saturating_add(ticks);
 		}
@@ -1000,6 +1005,13 @@ mod tests {
 		assert_eq!(at(&clock, 50 + 260), Some(240));
 		clock.pcr(80 * MS, 60);
 		assert_eq!(at(&clock, 60), Some(240));
+		// Ten seconds of PCR silence, then a valid-looking step: the silence stays charged
+		// and the clock runs on from there rather than freezing until the PCR catches up.
+		assert_eq!(at(&clock, 60 + 2_500), Some(9_240));
+		clock.pcr(120 * MS, 2_560);
+		assert_eq!(at(&clock, 2_560), Some(10_240));
+		clock.pcr(160 * MS, 2_570);
+		assert_eq!(at(&clock, 2_570), Some(10_280));
 	}
 
 	#[moq_clock::test]
