@@ -1,14 +1,14 @@
-//! What one relay pays per stats tick to drain its registry and encode the
-//! traffic tracks, swept over held paths, tiers, and the share of those paths
+//! What one relay pays per stats tick to drain its registry and encode its
+//! group track, swept over held paths, tiers, and the share of those paths
 //! whose counters changed since the last tick.
 //!
-//! Idle paths stay in the plain snapshot for as long as the registry holds
+//! Idle paths stay in the group's snapshot for as long as the registry holds
 //! them, so `heldB` grows with the table and is what nears the frame cap
 //! (`cap%`).
-//! `plainB` and `zB` are what this tick wrote (zero when nothing changed).
-//! The plain side is a full snapshot; the compressed side is a merge-patch
-//! delta. Time is the Criterion target `stats/tick`. The table is one warm-up
-//! plus a few ticks, allocations included.
+//! `wroteB` is what this tick wrote: a merge-patch delta, or a snapshot when
+//! the tick opened a group, and zero when nothing changed. Time is the
+//! Criterion target `stats/tick`. The table is one warm-up plus a few ticks,
+//! allocations included.
 //!
 //! `stats/presence` sweeps the same tick over connected labels and the
 //! presence tracks held for them.
@@ -17,9 +17,9 @@
 //! tracks: each row walks its ancestors once a prefix is held, so the cost
 //! grows with rows times depth, plus each held track's encode.
 //!
-//! `stats/groups` sweeps the track layout over held paths and the groups they
-//! spread across, each group one track: the rows cost the same however they
-//! split, so a slope in groups is per-track overhead.
+//! `stats/groups` sweeps a depth-1 producer over held paths and the groups
+//! they spread across, each group one track: the rows cost the same however
+//! they split, so a slope in groups is per-track overhead.
 //!
 //! Run `cargo bench -p moq-stats --features bench --bench producer_tick`.
 
@@ -102,7 +102,7 @@ struct Relay {
 impl Relay {
 	/// `depth` is each path's segment count, at least 2. With `groups`, the
 	/// paths spread over that many first segments and the driver publishes each
-	/// as a group track.
+	/// as its own group track; without, every path shares one.
 	fn build(paths: usize, tiers: usize, changed_percent: usize, depth: usize, groups: Option<usize>) -> Self {
 		let registry = stats::Registry::new(
 			stats::Config::new().with_exclude(moq_net::Pattern::subtree(".stats").expect("literal prefix")),
@@ -141,11 +141,8 @@ impl Relay {
 		registry.report(&mut report);
 		assert_eq!(report.traffic.len(), paths * tiers, "one held entry per path and tier");
 
-		let driver = match groups {
-			Some(_) => Driver::tracks(registry.clone(), origin.clone()),
-			None => Driver::new(registry.clone(), origin.clone()),
-		}
-		.expect("stats broadcast");
+		let depth = if groups.is_some() { 1 } else { 0 };
+		let driver = Driver::new(registry.clone(), origin.clone(), depth).expect("stats broadcast");
 		Self {
 			registry,
 			tiers: tier_labels,
@@ -213,27 +210,23 @@ fn sample(relay: &mut Relay) -> Row {
 
 fn check_row(paths: usize, changed: usize, row: &Row) {
 	let cap = moq_net::group::MAX_CACHE_BYTES;
-	assert!(row.bytes.held > 0, "publisher snapshot missing");
+	assert!(row.bytes.held > 0, "group snapshot missing");
 	assert!(
 		row.bytes.held as u64 <= cap,
-		"plain frame exceeds the cache cap: {} > {cap}",
+		"group frame exceeds the cache cap: {} > {cap}",
 		row.bytes.held
 	);
 	// The snapshot keeps every held path, so a few paths cannot be a couple of braces.
-	assert!(row.bytes.held > paths, "plain snapshot did not grow with held paths");
+	assert!(row.bytes.held > paths, "group snapshot did not grow with held paths");
 	if changed > 0 {
-		assert!(row.bytes.plain > 0, "changed paths did not publish a plain frame");
-		assert!(
-			row.bytes.compressed > 0,
-			"changed paths did not publish a compressed frame"
-		);
+		assert!(row.bytes.wrote > 0, "changed paths did not publish a frame");
 	}
 }
 
 fn bench(c: &mut Criterion) {
 	let cap = moq_net::group::MAX_CACHE_BYTES;
 	println!("plain frame cap: {cap} bytes");
-	println!("paths tiers changed% allocs/tick us/tick heldB cap% plainB zB");
+	println!("paths tiers changed% allocs/tick us/tick heldB cap% wroteB");
 
 	let mut group = c.benchmark_group("stats/tick");
 	group.sample_size(10);
@@ -253,12 +246,11 @@ fn bench(c: &mut Criterion) {
 						let row = sample(&mut relay);
 						let micros = row.elapsed.as_secs_f64() * 1e6;
 						println!(
-							"{paths:>5} {tiers:>5} {changed:>8} {allocs:>11} {micros:>8.1} {held:>8} {ratio:>4.0} {plain:>8} {z:>8}",
+							"{paths:>5} {tiers:>5} {changed:>8} {allocs:>11} {micros:>8.1} {held:>8} {ratio:>4.0} {wrote:>8}",
 							allocs = row.allocs,
 							held = row.bytes.held,
 							ratio = row.bytes.held as f64 * 100.0 / cap as f64,
-							plain = row.bytes.plain,
-							z = row.bytes.compressed,
+							wrote = row.bytes.wrote,
 						);
 						check_row(paths, changed, &row);
 						relay
@@ -311,7 +303,7 @@ impl Presence {
 			.iter()
 			.map(|session| session.wire(moq_net::transport::Wire::new()))
 			.collect();
-		let mut driver = Driver::new(registry.clone(), origin.clone()).expect("stats broadcast");
+		let mut driver = Driver::new(registry.clone(), origin.clone(), 0).expect("stats broadcast");
 		driver.tick();
 		let held = names
 			.iter()
@@ -431,7 +423,8 @@ const GROUP_PATHS: [usize; 2] = [1_000, 10_000];
 /// Groups the paths spread across, each a track.
 const GROUPS: [usize; 3] = [1, 100, 1_000];
 
-/// What the track layout costs a tick, with a tenth of the paths moving.
+/// What spreading paths over group tracks costs a tick, with a tenth of the
+/// paths moving.
 fn groups(c: &mut Criterion) {
 	println!("paths groups allocs/tick us/tick");
 

@@ -6,25 +6,23 @@ use std::time::Duration;
 use moq_clock::Instant;
 use moq_net::{PathOwned, origin, stats::Registry, track};
 
-use super::{Drain, Layout, PendingPair, Task};
+use super::{Drain, PendingPair, Task};
 
-/// Plain and compressed publisher-frame sizes from one tick, in bytes.
+/// Group-track frame sizes from one tick, in bytes.
 ///
-/// `held` is the largest plain snapshot any tier is still holding (idle paths
-/// included). `plain` and `compressed` are what this tick wrote, or zero when
-/// the encoder skipped an unchanged value. Each is the max across tiers, so a
-/// single frame can be compared with the cache cap.
+/// `held` is the largest snapshot any group's track is still holding (idle
+/// paths included). `wrote` is the largest frame this tick wrote, a snapshot
+/// or a merge-patch delta, or zero when every group was unchanged. Each is a
+/// max across groups, so a single frame can be compared with the cache cap.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FrameBytes {
-	/// Largest plain publisher snapshot still held.
+	/// Largest group snapshot still held.
 	pub held: usize,
-	/// Largest plain publisher payload written this tick.
-	pub plain: usize,
-	/// Largest compressed publisher payload written this tick.
-	pub compressed: usize,
+	/// Largest group frame written this tick.
+	pub wrote: usize,
 }
 
-/// A depth-0 stats publisher, driven one drain at a time.
+/// A stats publisher, driven one drain at a time.
 pub struct Driver {
 	drain: Drain,
 	/// The last drain's instant. Each tick is one interval later, so it may open a group.
@@ -32,27 +30,16 @@ pub struct Driver {
 }
 
 impl Driver {
-	/// Publish `.stats/node` on `origin` and drain `registry`, the way
-	/// [`crate::Producer::new`] does at depth 0. `None` if the origin refuses
-	/// the broadcast.
-	pub fn new(registry: Registry, origin: origin::Producer) -> Option<Self> {
-		Self::build(registry, origin, 0, Layout::Broadcast)
-	}
-
-	/// [`Self::new`] in the track layout at depth 1: each first path segment
-	/// is a group track of `.stats/node`.
-	pub fn tracks(registry: Registry, origin: origin::Producer) -> Option<Self> {
-		Self::build(registry, origin, 1, Layout::Track)
-	}
-
-	fn build(registry: Registry, origin: origin::Producer, depth: usize, layout: Layout) -> Option<Self> {
+	/// Publish `.stats/node` on `origin` and drain `registry` into one group
+	/// track per `depth` leading path segments, the way [`crate::Producer::new`]
+	/// does. `None` if the origin refuses the broadcast.
+	pub fn new(registry: Registry, origin: origin::Producer, depth: usize) -> Option<Self> {
 		let task = Task {
 			registry,
 			origin,
 			prefix: PathOwned::from(".stats"),
 			node: None,
 			depth,
-			layout,
 			linger: Duration::from_secs(300),
 			interval: Duration::from_secs(1),
 		};
@@ -67,7 +54,7 @@ impl Driver {
 		self.now += self.drain.task.interval;
 		self.drain.collect();
 		self.drain.publish(self.now);
-		self.drain.publisher_frame_bytes()
+		self.drain.group_frame_bytes()
 	}
 
 	/// Hold `label`'s presence track as a reader would, so every tick updates
@@ -75,10 +62,10 @@ impl Driver {
 	/// track.
 	pub fn hold_presence(&mut self, label: &str) -> track::Subscriber {
 		let stamp = self.drain.stamp(self.now);
-		let group = self.drain.groups.get_mut("").expect("the depth 0 broadcast");
+		let node = &mut self.drain.node;
 		let label = PathOwned::from(label.to_string());
-		group.adopt_presence(&self.drain.report, label.clone(), PendingPair::default(), stamp);
-		group.presence[&label].pair.plain.track.subscribe(None)
+		node.adopt_presence(&self.drain.report, label.clone(), PendingPair::default(), stamp);
+		node.presence[&label].pair.plain.track.subscribe(None)
 	}
 
 	/// Hold broadcast prefix `path`'s track as a reader would; see
@@ -86,14 +73,14 @@ impl Driver {
 	pub fn hold_prefix(&mut self, path: &str) -> track::Subscriber {
 		let tick = self.drain.tick;
 		let stamp = self.drain.stamp(self.now);
-		let group = self.drain.groups.get_mut("").expect("the depth 0 broadcast");
-		group.adopt_prefix(
+		let node = &mut self.drain.node;
+		node.adopt_prefix(
 			&self.drain.report,
 			PathOwned::from(path.to_string()),
 			PendingPair::default(),
 			tick,
 			stamp,
 		);
-		group.prefixes[path].pair.plain.track.subscribe(None)
+		node.prefixes[path].pair.plain.track.subscribe(None)
 	}
 }

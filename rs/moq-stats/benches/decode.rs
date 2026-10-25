@@ -1,8 +1,9 @@
-//! Cost of reading one tick off compressed (`.json.z`) traffic tracks, swept over broadcasts per
-//! frame, tiers, and the share of broadcasts that changed since the last tick.
+//! Cost of reading one tick off a group track, swept over broadcasts per tier, tiers, and the share
+//! of broadcasts that changed since the last tick.
 //!
-//! Each tick is one merge-patch delta per tier, applied and materialized the way
-//! [`moq_stats::Consumer`] does per yield. The encoded frames are built outside the measured section.
+//! Each tick is one merge-patch delta, applied and materialized the way [`moq_stats::Consumer`]
+//! does per yield. The encoded frames are built outside the measured section, and so is the
+//! track's own DEFLATE, which moq-net inflates before the reader sees a frame.
 //!
 //! Run `cargo bench -p moq-stats --bench decode` and compare the table across revisions.
 
@@ -16,8 +17,17 @@ use std::hint::black_box;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use std::collections::BTreeMap;
+
 use moq_json::snapshot::{self, Decoder, Encoder};
-use moq_stats::{Traffic, TrafficFrame};
+use moq_stats::{Group, GroupFrame, Traffic};
+
+/// A group frame as the producer writes it.
+#[derive(serde::Serialize)]
+struct Body {
+	epoch: String,
+	tiers: BTreeMap<String, Group>,
+}
 
 struct Counter;
 
@@ -74,19 +84,27 @@ fn traffic(index: usize, tick: u64, changed_percent: usize) -> Traffic {
 	traffic
 }
 
-/// The compressed frames one tier's producer would publish over the run, snapshot first.
-fn frames(broadcasts: usize, tier: usize, changed_percent: usize) -> Vec<(Vec<u8>, bool)> {
-	let mut config = snapshot::Config::default().with_deltas(true);
-	config.compression = moq_json::Compression::Deflate;
-	let mut encoder = Encoder::<TrafficFrame>::new(config);
+/// The frames a group's producer would publish over the run, snapshot first.
+fn frames(broadcasts: usize, tiers: usize, changed_percent: usize) -> Vec<(Vec<u8>, bool)> {
+	let mut encoder = Encoder::<Body>::new(snapshot::Config::default().with_deltas(true));
+	let epoch = moq_net::Epoch::mint().to_string();
 	(0..TICKS + 2)
 		.map(|tick| {
-			let frame: TrafficFrame = (0..broadcasts)
-				.map(|index| {
-					let path = format!("tier-{tier}/acme/room-{index:06}/camera");
-					(path, traffic(index, tick, changed_percent))
+			let tiers = (0..tiers)
+				.map(|tier| {
+					let mut group = Group::default();
+					for index in 0..broadcasts {
+						let path = format!("acme/room-{index:06}/camera");
+						let usage = group.paths.entry(path).or_default();
+						usage.publisher = traffic(index, tick, changed_percent);
+					}
+					(format!("tier-{tier}"), group)
 				})
 				.collect();
+			let frame = Body {
+				epoch: epoch.clone(),
+				tiers,
+			};
 			let encoded = encoder.update(&frame).unwrap().expect("every tick changes something");
 			let out = (encoded.payload.to_vec(), encoded.keyframe);
 			encoded.commit();
@@ -95,40 +113,31 @@ fn frames(broadcasts: usize, tier: usize, changed_percent: usize) -> Vec<(Vec<u8
 		.collect()
 }
 
-/// Mean allocations and time per tick across every tier.
+/// Mean allocations and time per tick.
 fn measure(broadcasts: usize, tiers: usize, changed_percent: usize) -> (usize, Duration) {
-	let mut config = snapshot::consumer::Config::default();
-	config.compression = moq_json::Compression::Deflate;
-	let mut readers: Vec<_> = (0..tiers)
-		.map(|tier| {
-			let mut frames = frames(broadcasts, tier, changed_percent).into_iter();
-			let mut decoder = Decoder::<TrafficFrame>::new(config.clone());
-			let (snapshot, keyframe) = frames.next().unwrap();
-			assert!(keyframe);
-			decoder.snapshot(&snapshot).unwrap();
-			let (warm, _) = frames.next().unwrap();
-			decoder.delta(&warm).unwrap();
-			decoder.decode().unwrap();
-			(decoder, frames)
-		})
-		.collect();
+	let mut frames = frames(broadcasts, tiers, changed_percent).into_iter();
+	let mut decoder = Decoder::<GroupFrame>::new(snapshot::consumer::Config::default());
+	let (snapshot, keyframe) = frames.next().unwrap();
+	assert!(keyframe);
+	decoder.snapshot(&snapshot).unwrap();
+	let (warm, _) = frames.next().unwrap();
+	decoder.delta(&warm).unwrap();
+	decoder.decode().unwrap();
 
 	let mut allocations = 0;
 	let mut elapsed = Duration::ZERO;
 	for _ in 0..TICKS {
-		for (decoder, frames) in &mut readers {
-			let (payload, keyframe) = frames.next().unwrap();
-			assert!(!keyframe, "the run stays in one group");
-			ALLOCATIONS.store(0, Ordering::Relaxed);
-			COUNTING.store(true, Ordering::Relaxed);
-			let start = Instant::now();
-			decoder.delta(&payload).unwrap();
-			let frame = decoder.decode().unwrap();
-			elapsed += start.elapsed();
-			COUNTING.store(false, Ordering::Relaxed);
-			allocations += ALLOCATIONS.load(Ordering::Relaxed);
-			drop(black_box(frame));
-		}
+		let (payload, keyframe) = frames.next().unwrap();
+		assert!(!keyframe, "the run stays in one group");
+		ALLOCATIONS.store(0, Ordering::Relaxed);
+		COUNTING.store(true, Ordering::Relaxed);
+		let start = Instant::now();
+		decoder.delta(&payload).unwrap();
+		let frame = decoder.decode().unwrap();
+		elapsed += start.elapsed();
+		COUNTING.store(false, Ordering::Relaxed);
+		allocations += ALLOCATIONS.load(Ordering::Relaxed);
+		drop(black_box(frame));
 	}
 	(allocations / TICKS as usize, elapsed / TICKS as u32)
 }

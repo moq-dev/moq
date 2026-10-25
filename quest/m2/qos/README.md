@@ -37,8 +37,8 @@ Decided (2026-10-06 audit): stats prefix tracks (`<path>/prefix.json`)
 landed first in #5811, since they are a prerequisite of the lag API; the lag
 histogram was deferred to m2 by the maintainer on 2026-10-15 and lands on the
 stats totals and
-prefix tracks rather than the per-path `publisher.json` and
-`subscriber.json` map rows, which stay unchanged for existing readers
+prefix tracks rather than the group tracks' per-path
+`paths` rows, which stay unchanged for existing readers
 (2026-10-12).
 Rejected: the histogram first, which would make prefix tracks carry the lag
 histogram and dropped counters across.

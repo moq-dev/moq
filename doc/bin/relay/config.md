@@ -350,23 +350,22 @@ group of every track is always kept, even past `capacity`.
 ```toml
 [stats]
 enabled = true
-prefix = ".stats"                    # Broadcasts appear under <prefix>/node/<node>.
+prefix = ".stats"                    # The broadcast appears at <prefix>/node/<node>.
 interval = "1s"                      # Time between snapshots. Default.
 node = "sjc/1"                       # Disambiguates relays sharing a cluster.
-depth = 1                            # Also bucket by the first N path segments (per tenant).
-layout = "broadcast"                 # Or "track": each group is a track of the node's one broadcast.
-linger = "5m"                        # Keep an empty group's broadcast announced this long. Default.
+depth = 1                            # One group track per first N path segments (per tenant).
+linger = "5m"                        # Keep an empty group's track listed this long. Default.
 ```
 
 Each node publishes its traffic and session counters as MoQ tracks, split by a
 **tier** label from the auth server's grant (`--cluster-tier` for links this
 relay dials and LAN peers it admits), which is what makes billing per customer or per region possible.
-Each run, and each group returning after its linger, announces under a fresh
-[epoch](/concept/moq-lite#publisher-epochs), so a restart is a new broadcast at
-the same path. With `layout = "track"` a group is a
-[track](/concept/stats#group-tracks) instead, and a returning one restarts its
-counters without an announce. Each group's totals count everything since its epoch began, so
-billing reads those; per-path traffic and per-label sessions and HTTP requests are for
+Each run announces under a fresh [epoch](/concept/moq-lite#publisher-epochs),
+so a restart is a new broadcast at the same path. Each group is a
+[track](/concept/stats#group-tracks) of that broadcast, and one returning after
+its linger restarts its counters under a new epoch without an announce. The
+node's totals count everything since its epoch began, so billing reads those;
+a group's per-path traffic and per-label sessions and HTTP requests are for
 dashboards. Session counters report how close sessions come to the
 per-session limits, past which one is closed with `TOO_MANY_REQUESTS`.
 [Stats](/concept/stats) describes the paths, tracks, and encodings; read them
