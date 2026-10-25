@@ -15,6 +15,7 @@ Rename these, which kept their behavior:
 | `auth::Auth` | `auth::Credential` |
 | `track::Consumer::query()`, `track::Querying` | `track::Consumer::info()`, `track::Resolving` |
 | `bandwidth::Reservation::consumer()` | `bandwidth::Reservation::consume()` |
+| `bandwidth::Reservation::peek()` | `bandwidth::Reservation::rate()` |
 | `stats::Control` | `stats::Message` |
 | `stats::Bytes` | `stats::Totals` |
 | `transport::Stats`, `transport::poll::Session::stats()` | `transport::Metrics`, `transport::poll::Session::metrics()` |

@@ -10,7 +10,7 @@ How to update your code for each breaking change, newest first.
 
 ### `Allocator` ([#6751](https://github.com/moq-dev/moq/pull/6751))
 
-`Bandwidth` is `Allocator`, and `bandwidth()` is `allocator()`. The producers' `bandwidth` option keeps its name.
+`Bandwidth` is `Allocator`, `bandwidth()` is `allocator()`, and `Reservation.grant()` is `rate()`. The producers' `bandwidth` option keeps its name.
 
 ### Connection state
 

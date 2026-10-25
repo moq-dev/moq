@@ -151,17 +151,17 @@ func (a *Allocator) Reserve(demand *TrackDemand, maxBps uint64) *Reservation {
 
 // Reservation is one track's standing claim on an Allocator.
 //
-// Grant is a snapshot: nil means no estimate or no demand, so hold the current
-// rate, and 0 is a real zero grant.
+// Rate is a snapshot: nil means no estimate or no demand, so hold the current
+// rate, and 0 is a real zero rate.
 // Update(0) relinquishes the allocation while the track stays subscribed; the
 // handle remains usable and a later Update can claim bandwidth again.
 type Reservation struct {
 	inner *ffi.MoqReservation
 }
 
-// Grant returns this reservation's slice right now, in bits per second.
-func (r *Reservation) Grant() *uint64 {
-	return r.inner.Grant()
+// Rate returns this reservation's slice right now, in bits per second.
+func (r *Reservation) Rate() *uint64 {
+	return r.inner.Rate()
 }
 
 // Update changes the ceiling, keeping the same claim. Zero immediately gives

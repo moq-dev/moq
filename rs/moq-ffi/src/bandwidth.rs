@@ -51,9 +51,9 @@ impl MoqAllocator {
 
 /// One track's standing claim on a [`MoqAllocator`].
 ///
-/// [`grant`](Self::grant) is [`moq_net::bandwidth::Reservation::peek`]: `None`
+/// [`rate`](Self::rate) is [`moq_net::bandwidth::Reservation::rate`]: `None`
 /// means no estimate or no demand, so hold the current rate, and `Some(0)` is a
-/// real zero grant.
+/// real zero rate.
 #[derive(uniffi::Object)]
 pub struct MoqReservation {
 	inner: moq_net::bandwidth::Reservation,
@@ -75,10 +75,10 @@ impl MoqReservation {
 	/// This reservation's slice right now, in bits per second.
 	///
 	/// `None` means no estimate or no demand: hold the current rate. `Some(0)`
-	/// is a real zero grant.
-	pub fn grant(&self) -> Option<u64> {
+	/// is a real zero rate.
+	pub fn rate(&self) -> Option<u64> {
 		let _guard = crate::ffi::enter();
-		self.inner.peek().map(moq_net::bandwidth::Rate::as_bps)
+		self.inner.rate().map(moq_net::bandwidth::Rate::as_bps)
 	}
 
 	/// Change the ceiling, keeping the same claim.
@@ -123,8 +123,8 @@ mod tests {
 			.set(Some(moq_net::bandwidth::Rate::from_bps(3_000_000)))
 			.unwrap();
 
-		let a = first.grant().unwrap();
-		let b = second.grant().unwrap();
+		let a = first.rate().unwrap();
+		let b = second.rate().unwrap();
 		assert!(a + b <= 3_000_000, "{a} + {b} oversubscribed");
 		assert_eq!(a, 1_500_000);
 		assert_eq!(b, 1_500_000);
@@ -146,13 +146,13 @@ mod tests {
 		let track = named_track(&broadcast, "a");
 		let _sub = track.consume(None).unwrap();
 		let reserved = first.reserve(&track.demand().unwrap(), 4_000_000);
-		assert_eq!(reserved.grant(), Some(3_000_000));
+		assert_eq!(reserved.rate(), Some(3_000_000));
 
 		let other = named_track(&broadcast, "b");
 		let _other_sub = other.consume(None).unwrap();
 		let other = second.reserve(&other.demand().unwrap(), 4_000_000);
-		assert_eq!(reserved.grant(), Some(1_500_000));
-		assert_eq!(other.grant(), Some(1_500_000));
+		assert_eq!(reserved.rate(), Some(1_500_000));
+		assert_eq!(other.rate(), Some(1_500_000));
 	}
 
 	#[test]
@@ -171,10 +171,10 @@ mod tests {
 		let second = named_track(&broadcast, "b");
 		let _second_sub = second.consume(None).unwrap();
 		let second = bandwidth.reserve(&second.demand().unwrap(), 2_000_000);
-		assert_eq!(second.grant(), Some(1_500_000));
+		assert_eq!(second.rate(), Some(1_500_000));
 
 		drop(first);
-		assert_eq!(second.grant(), Some(2_000_000));
+		assert_eq!(second.rate(), Some(2_000_000));
 	}
 
 	/// A missing estimate (disconnected) reports `None`; a later value is a grant
@@ -192,15 +192,15 @@ mod tests {
 		estimate
 			.set(Some(moq_net::bandwidth::Rate::from_bps(2_000_000)))
 			.unwrap();
-		assert_eq!(reserved.grant(), Some(2_000_000));
+		assert_eq!(reserved.rate(), Some(2_000_000));
 
 		estimate.set(None).unwrap();
-		assert_eq!(reserved.grant(), None);
+		assert_eq!(reserved.rate(), None);
 
 		estimate
 			.set(Some(moq_net::bandwidth::Rate::from_bps(1_000_000)))
 			.unwrap();
-		assert_eq!(reserved.grant(), Some(1_000_000));
+		assert_eq!(reserved.rate(), Some(1_000_000));
 	}
 
 	#[cfg(all(feature = "video", not(target_arch = "wasm32")))]

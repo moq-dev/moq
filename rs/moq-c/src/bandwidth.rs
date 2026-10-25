@@ -89,17 +89,17 @@ pub extern "C" fn moq_allocator_reserve(allocator: u32, track: u32, max_bps: u64
 /// This reservation's slice right now, in bits per second.
 ///
 /// `present` is false when there is no estimate or no demand: hold the current
-/// rate. `present` true and `bps` 0 is a real zero grant.
+/// rate. `present` true and `bps` 0 is a real zero rate.
 ///
 /// # Safety
 /// - `bps` and `present` must be valid pointers.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_reservation_grant(reservation: u32, bps: *mut u64, present: *mut bool) -> i32 {
+pub unsafe extern "C" fn moq_reservation_rate(reservation: u32, bps: *mut u64, present: *mut bool) -> i32 {
 	ffi::enter(move || {
 		let reservation = ffi::parse_id(reservation)?;
 		let bps = unsafe { bps.as_mut() }.ok_or(Error::InvalidPointer)?;
 		let present = unsafe { present.as_mut() }.ok_or(Error::InvalidPointer)?;
-		match State::lock().bandwidth.reservation(reservation)?.peek() {
+		match State::lock().bandwidth.reservation(reservation)?.rate() {
 			Some(rate) => {
 				*bps = rate.as_bps();
 				*present = true;

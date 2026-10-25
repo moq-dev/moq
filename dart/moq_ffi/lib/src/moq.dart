@@ -8900,7 +8900,7 @@ class FfiConverterMoqBandwidthConsumer {
 }
 
 abstract class MoqReservationInterface {
-  int? grant();
+  int? rate();
   void update({required int maxBps});
 }
 
@@ -8935,9 +8935,9 @@ class MoqReservation implements MoqReservationInterface {
     rustCall((status) => uniffi_moq_ffi_fn_free_moqreservation(_ptr, status));
   }
 
-  int? grant() {
+  int? rate() {
     return rustCallWithLifter(
-      (status) => uniffi_moq_ffi_fn_method_moqreservation_grant(
+      (status) => uniffi_moq_ffi_fn_method_moqreservation_rate(
         uniffiClonePointer(),
         status,
       ),
@@ -16751,7 +16751,7 @@ external void uniffi_moq_ffi_fn_free_moqreservation(
 @Native<RustBuffer Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
-external RustBuffer uniffi_moq_ffi_fn_method_moqreservation_grant(
+external RustBuffer uniffi_moq_ffi_fn_method_moqreservation_rate(
   Pointer<Void> ptr,
   Pointer<RustCallStatus> uniffiStatus,
 );
@@ -19472,7 +19472,7 @@ external int uniffi_moq_ffi_checksum_method_moqbandwidthconsumer_rate();
 external int uniffi_moq_ffi_checksum_method_moqbandwidthconsumer_rate_changed();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
-external int uniffi_moq_ffi_checksum_method_moqreservation_grant();
+external int uniffi_moq_ffi_checksum_method_moqreservation_rate();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqreservation_update();
@@ -20181,7 +20181,7 @@ void _checkApiChecksums() {
       38021) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqreservation_grant() != 59401) {
+  if (uniffi_moq_ffi_checksum_method_moqreservation_rate() != 45979) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqreservation_update() != 9626) {

@@ -665,7 +665,7 @@ void MoQOutput::VideoData(struct encoder_packet *packet)
 	// Read before the frame is written, so a retune lands on the encoder's next
 	// frame. obs_encoder_update only flags an active encoder for its own thread.
 	if (track.rate && track.reservation) {
-		if (auto next = track.rate->Update(track.reservation->grant(), MoQRate::Clock::now()))
+		if (auto next = track.rate->Update(track.reservation->rate(), MoQRate::Clock::now()))
 			SetBitrate(encoder, *next);
 	}
 

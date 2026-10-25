@@ -992,7 +992,7 @@ mod tests {
 		let _encoder_sub = encoder_track.subscribe(None);
 		let encoder = allocator.reserve(&encoder_track.demand(), moq_net::bandwidth::Rate::from_bps(8_000_000));
 		assert_eq!(
-			encoder.peek(),
+			encoder.rate(),
 			Some(moq_net::bandwidth::Rate::from_bps(6_000_000)),
 			"alone, the encoder takes the whole estimate"
 		);
@@ -1005,14 +1005,14 @@ mod tests {
 		producer.write(sized_frame(0, true, 100_000)).unwrap();
 		producer.write(sized_frame(500_000, false, 100_000)).unwrap();
 		assert_eq!(
-			encoder.peek(),
+			encoder.rate(),
 			Some(moq_net::bandwidth::Rate::from_bps(6_000_000)),
 			"nothing claimed before the first window"
 		);
 
 		producer.cut(Some(Timestamp::from_micros(1_000_000).unwrap())).unwrap();
 		assert_eq!(
-			encoder.peek(),
+			encoder.rate(),
 			Some(moq_net::bandwidth::Rate::from_bps(4_400_000)),
 			"the encoder's grant drops by the passthrough peak (1.6 Mbps)"
 		);

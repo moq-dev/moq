@@ -5486,22 +5486,22 @@ fn test_allocator() -> (u32, moq_net::bandwidth::Producer) {
 	(bandwidth, estimate)
 }
 
-fn grant(reservation: u32) -> Option<u64> {
+fn rate(reservation: u32) -> Option<u64> {
 	let mut bps = 0;
 	let mut present = false;
-	assert_eq!(unsafe { moq_reservation_grant(reservation, &mut bps, &mut present) }, 0);
+	assert_eq!(unsafe { moq_reservation_rate(reservation, &mut bps, &mut present) }, 0);
 	present.then_some(bps)
 }
 
-fn wait_grant(reservation: u32) -> u64 {
+fn wait_rate(reservation: u32) -> u64 {
 	let deadline = std::time::Instant::now() + TIMEOUT;
 	loop {
-		if let Some(bps) = grant(reservation) {
+		if let Some(bps) = rate(reservation) {
 			return bps;
 		}
 		assert!(
 			std::time::Instant::now() < deadline,
-			"timed out waiting for a reservation grant"
+			"timed out waiting for a reservation rate"
 		);
 		std::thread::sleep(Duration::from_millis(10));
 	}
@@ -5546,16 +5546,16 @@ fn bandwidth_reservations_split_the_estimate() {
 		.set(Some(moq_net::bandwidth::Rate::from_bps(3_000_000)))
 		.unwrap();
 
-	wait_grant(first);
-	wait_grant(second);
-	let a = grant(first).expect("first grant");
-	let b = grant(second).expect("second grant");
+	wait_rate(first);
+	wait_rate(second);
+	let a = rate(first).expect("first rate");
+	let b = rate(second).expect("second rate");
 	assert!(a + b <= 3_000_000, "{a} + {b} oversubscribed");
 	assert_eq!(a, 1_500_000);
 	assert_eq!(b, 1_500_000);
 
 	assert_eq!(moq_reservation_close(first), 0);
-	assert_eq!(grant(second), Some(2_000_000));
+	assert_eq!(rate(second), Some(2_000_000));
 
 	assert_eq!(moq_reservation_close(second), 0);
 	assert_eq!(moq_allocator_close(bandwidth), 0);
@@ -5593,10 +5593,10 @@ fn bandwidth_handles_share_the_registry() {
 	let (second_sub, second_cb) = subscribe_named_track(consume, b"b");
 
 	let reserved = id(moq_allocator_reserve(first, first_track, 4_000_000));
-	assert_eq!(wait_grant(reserved), 3_000_000);
+	assert_eq!(wait_rate(reserved), 3_000_000);
 	let other = id(moq_allocator_reserve(second, second_track, 4_000_000));
-	assert_eq!(wait_grant(other), 1_500_000);
-	assert_eq!(grant(reserved), Some(1_500_000));
+	assert_eq!(wait_rate(other), 1_500_000);
+	assert_eq!(rate(reserved), Some(1_500_000));
 
 	assert_eq!(moq_reservation_close(reserved), 0);
 	assert_eq!(moq_reservation_close(other), 0);
@@ -5644,15 +5644,15 @@ fn encode_video_bitrate_caps_the_reservation() {
 	estimate
 		.set(Some(moq_net::bandwidth::Rate::from_bps(4_000_000)))
 		.unwrap();
-	assert_eq!(wait_grant(reservation), 4_000_000);
+	assert_eq!(wait_rate(reservation), 4_000_000);
 
 	assert_eq!(moq_encode_video_bitrate(producer, 1_000_000), 0);
-	assert_eq!(grant(reservation), Some(1_000_000));
+	assert_eq!(rate(reservation), Some(1_000_000));
 
 	estimate
 		.set(Some(moq_net::bandwidth::Rate::from_bps(3_000_000)))
 		.unwrap();
-	assert_eq!(grant(reservation), Some(1_000_000));
+	assert_eq!(rate(reservation), Some(1_000_000));
 
 	assert_eq!(moq_reservation_close(reservation), 0);
 	assert_eq!(moq_consume_track_cancel(sub), 0);

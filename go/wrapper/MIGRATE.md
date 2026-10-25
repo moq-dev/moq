@@ -10,7 +10,7 @@ How to update your code for each breaking change, newest first.
 
 ### `Allocator` ([#6751](https://github.com/moq-dev/moq/pull/6751))
 
-`Bandwidth` is `Allocator`, and `Session.Bandwidth()` is `Session.Allocator()`. The `Bandwidth` field of `ProducerOptions` keeps its name and takes a `*moq.Allocator`.
+`Bandwidth` is `Allocator`, `Session.Bandwidth()` is `Session.Allocator()`, and `Reservation.Grant()` is `Reservation.Rate()`. The `Bandwidth` field of `ProducerOptions` keeps its name and takes a `*moq.Allocator`.
 
 ### Connection state
 

@@ -376,7 +376,7 @@ impl Reservation {
 	///
 	/// Stateless, unlike [`Consumer::poll_changed`], which carries a cursor over what it last
 	/// reported and so needs a handle of its own.
-	pub fn peek(&self) -> Option<Rate> {
+	pub fn rate(&self) -> Option<Rate> {
 		self.share.grant()
 	}
 
@@ -877,7 +877,7 @@ mod tests {
 		let second_share = allocator.reserve(&second.demand(), bps(4_000_000));
 
 		assert_eq!(first_share.changed().await.unwrap(), Some(bps(1_000_000)));
-		assert_eq!(second_share.peek(), Some(bps(1_000_000)));
+		assert_eq!(second_share.rate(), Some(bps(1_000_000)));
 	}
 
 	/// An unwatched track releases its reservation, since `publish_capture` stops
@@ -895,15 +895,15 @@ mod tests {
 		let (_idle_broadcast, idle) = track(VIDEO);
 		let idle_share = allocator.reserve(&idle.demand(), bps(4_000_000));
 
-		assert_eq!(watched_share.peek(), Some(bps(2_000_000)));
+		assert_eq!(watched_share.rate(), Some(bps(2_000_000)));
 		// Not zero: an idle share reports "no opinion" so a sender that is mid-shutdown
 		// holds its rate instead of retuning to the floor on the way out.
-		assert_eq!(idle_share.peek(), None);
+		assert_eq!(idle_share.rate(), None);
 
 		// It joins, and the split happens.
 		let _idle_sub = idle.subscribe(None);
-		assert_eq!(watched_share.peek(), Some(bps(1_000_000)));
-		assert_eq!(idle_share.peek(), Some(bps(1_000_000)));
+		assert_eq!(watched_share.rate(), Some(bps(1_000_000)));
+		assert_eq!(idle_share.rate(), Some(bps(1_000_000)));
 	}
 
 	/// Demand transitions have to wake a parked share, not just change what a later
@@ -1080,7 +1080,7 @@ mod tests {
 		let (_second_broadcast, second) = track(VIDEO);
 		let _second_sub = second.subscribe(None);
 		let second_reserved = allocator.reserve(&second.demand(), bps(4_000_000));
-		assert_eq!(second_reserved.peek(), Some(bps(1_000_000)));
+		assert_eq!(second_reserved.rate(), Some(bps(1_000_000)));
 
 		// A read handle is not the claim: the reservation outliving it is what keeps the
 		// room, and the reservation going away is what returns it.
@@ -1089,7 +1089,7 @@ mod tests {
 
 		drop(first_reserved);
 		assert_eq!(allocator.registry.read().entries.len(), 1);
-		assert_eq!(second_reserved.peek(), Some(bps(2_000_000)));
+		assert_eq!(second_reserved.rate(), Some(bps(2_000_000)));
 
 		// The orphaned reader is woken and told, rather than being left parked on a slice
 		// that will never move again. It reports the same "hold your rate" as an unwatched
@@ -1116,19 +1116,19 @@ mod tests {
 		let large_reserved = allocator.reserve(&large.demand(), bps(8_000_000));
 
 		// Max-min fair: the small claim is satisfied in full, the rest goes to the other.
-		assert_eq!(small_reserved.peek(), Some(bps(1_000_000)));
-		assert_eq!(large_reserved.peek(), Some(bps(5_000_000)));
+		assert_eq!(small_reserved.rate(), Some(bps(1_000_000)));
+		assert_eq!(large_reserved.rate(), Some(bps(5_000_000)));
 
 		// It reopens at a mode that can use much more, and the split follows without a
 		// second entry appearing.
 		small_reserved.update(bps(4_000_000));
 		assert_eq!(allocator.registry.read().entries.len(), 2);
-		assert_eq!(small_reserved.peek(), Some(bps(3_000_000)));
-		assert_eq!(large_reserved.peek(), Some(bps(3_000_000)));
+		assert_eq!(small_reserved.rate(), Some(bps(3_000_000)));
+		assert_eq!(large_reserved.rate(), Some(bps(3_000_000)));
 
 		// And back down, which has to release the difference rather than hold it.
 		small_reserved.update(bps(1_000_000));
-		assert_eq!(large_reserved.peek(), Some(bps(5_000_000)));
+		assert_eq!(large_reserved.rate(), Some(bps(5_000_000)));
 	}
 
 	/// Collected-language callers can relinquish a ceiling before their retained
@@ -1148,20 +1148,20 @@ mod tests {
 		let (_sibling_broadcast, sibling) = track(VIDEO);
 		let _sibling_sub = sibling.subscribe(None);
 		let sibling = allocator.reserve(&sibling.demand(), bps(4_000_000));
-		assert_eq!(sibling.peek(), Some(bps(1_000_000)));
+		assert_eq!(sibling.rate(), Some(bps(1_000_000)));
 		assert_eq!(target.poll_changed(&waiter), Poll::Ready(bps(12_000_000)));
 
 		retired.update(Rate::ZERO);
-		assert_eq!(retired.peek(), Some(Rate::ZERO));
-		assert_eq!(replacement.peek(), Some(bps(1_500_000)));
-		assert_eq!(sibling.peek(), Some(bps(1_500_000)));
+		assert_eq!(retired.rate(), Some(Rate::ZERO));
+		assert_eq!(replacement.rate(), Some(bps(1_500_000)));
+		assert_eq!(sibling.rate(), Some(bps(1_500_000)));
 		assert_eq!(target.poll_changed(&waiter), Poll::Ready(bps(8_000_000)));
 		retired.update(Rate::ZERO);
 		assert!(target.poll_changed(&waiter).is_pending());
 
 		// The registration remains usable, so an encoder may resume in place.
 		retired.update(bps(4_000_000));
-		assert_eq!(sibling.peek(), Some(bps(1_000_000)));
+		assert_eq!(sibling.rate(), Some(bps(1_000_000)));
 		assert_eq!(target.poll_changed(&waiter), Poll::Ready(bps(12_000_000)));
 		assert!(encoder.demand().is_used());
 	}

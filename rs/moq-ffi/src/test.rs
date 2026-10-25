@@ -510,10 +510,10 @@ async fn media_track_reserves_through_its_demand() {
 	let demand = media.demand().unwrap();
 	let reservation = bandwidth.reserve(&demand, 4_000_000);
 	// No subscriber yet: no demand, so hold the current rate.
-	assert_eq!(reservation.grant(), None);
+	assert_eq!(reservation.rate(), None);
 
 	let _sub = subscribe(&broadcast, &demand.name()).await;
-	assert_eq!(reservation.grant(), Some(3_000_000));
+	assert_eq!(reservation.rate(), Some(3_000_000));
 }
 
 #[tokio::test]
@@ -6602,7 +6602,7 @@ async fn video_encoder_follows_a_shrinking_grant() {
 	.unwrap();
 
 	let reservation = video.reservation().expect("published against an allocator");
-	assert_eq!(reservation.grant(), None, "no demand yet");
+	assert_eq!(reservation.rate(), None, "no demand yet");
 
 	let consumer = broadcast.consume().unwrap();
 	let _sub = consumer.subscribe_track("camera".into(), None).await.unwrap();
@@ -6610,12 +6610,12 @@ async fn video_encoder_follows_a_shrinking_grant() {
 	estimate
 		.set(Some(moq_net::bandwidth::Rate::from_bps(4_000_000)))
 		.unwrap();
-	assert_eq!(reservation.grant(), Some(4_000_000));
+	assert_eq!(reservation.rate(), Some(4_000_000));
 
 	estimate
 		.set(Some(moq_net::bandwidth::Rate::from_bps(1_000_000)))
 		.unwrap();
-	assert_eq!(reservation.grant(), Some(1_000_000));
+	assert_eq!(reservation.rate(), Some(1_000_000));
 
 	let deadline = moq_clock::Instant::now() + TIMEOUT;
 	loop {
@@ -6715,16 +6715,16 @@ async fn set_bitrate_caps_a_later_bandwidth_grant() {
 	estimate
 		.set(Some(moq_net::bandwidth::Rate::from_bps(4_000_000)))
 		.unwrap();
-	assert_eq!(reservation.grant(), Some(4_000_000));
+	assert_eq!(reservation.rate(), Some(4_000_000));
 
 	video.set_bitrate(1_000_000).unwrap();
-	assert_eq!(reservation.grant(), Some(1_000_000));
+	assert_eq!(reservation.rate(), Some(1_000_000));
 	assert_eq!(video.applied_bitrate(), 1_000_000);
 
 	estimate
 		.set(Some(moq_net::bandwidth::Rate::from_bps(3_000_000)))
 		.unwrap();
-	assert_eq!(reservation.grant(), Some(1_000_000));
+	assert_eq!(reservation.rate(), Some(1_000_000));
 	assert_eq!(video.applied_bitrate(), 1_000_000);
 
 	video.finish().unwrap();

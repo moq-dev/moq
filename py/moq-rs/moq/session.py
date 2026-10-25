@@ -213,16 +213,16 @@ class Allocator:
 class Reservation:
     """One track's standing claim on an :class:`Allocator`.
 
-    :meth:`grant` is a snapshot: ``None`` means no estimate or no demand, so
-    hold the current rate, and ``0`` is a real zero grant.
+    :meth:`rate` is a snapshot: ``None`` means no estimate or no demand, so
+    hold the current rate, and ``0`` is a real zero rate.
     """
 
     def __init__(self, inner: MoqReservation) -> None:
         self._inner = inner
 
-    def grant(self) -> int | None:
+    def rate(self) -> int | None:
         """This reservation's slice right now, in bits per second."""
-        return self._inner.grant()
+        return self._inner.rate()
 
     def update(self, max_bps: int) -> None:
         """Change the ceiling, keeping the same claim."""

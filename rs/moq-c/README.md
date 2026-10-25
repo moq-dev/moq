@@ -36,7 +36,7 @@ int32_t moq_session_close(uint32_t session);
 int32_t moq_session_allocator(uint32_t session);
 int32_t moq_allocator_reserve(uint32_t allocator, uint32_t track, uint64_t max_bps);
 int32_t moq_allocator_close(uint32_t allocator);
-int32_t moq_reservation_grant(uint32_t reservation, uint64_t *bps, bool *present);
+int32_t moq_reservation_rate(uint32_t reservation, uint64_t *bps, bool *present);
 int32_t moq_reservation_update(uint32_t reservation, uint64_t max_bps);
 int32_t moq_reservation_close(uint32_t reservation);
 

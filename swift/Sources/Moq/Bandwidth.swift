@@ -38,8 +38,8 @@ public final class Allocator: Sendable {
 
 /// One track's standing claim on an `Allocator`.
 ///
-/// `grant()` is a snapshot: `nil` means no estimate or no demand, so hold the
-/// current rate, and `0` is a real zero grant.
+/// `rate()` is a snapshot: `nil` means no estimate or no demand, so hold the
+/// current rate, and `0` is a real zero rate.
 public final class Reservation: Sendable {
     let ffi: MoqReservation
 
@@ -48,8 +48,8 @@ public final class Reservation: Sendable {
     }
 
     /// This reservation's slice right now, in bits per second.
-    public func grant() -> UInt64? {
-        ffi.grant()
+    public func rate() -> UInt64? {
+        ffi.rate()
     }
 
     /// Change the ceiling, keeping the same claim.

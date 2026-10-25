@@ -10,7 +10,7 @@ How to update your code for each breaking change, newest first.
 
 ### `Allocator` ([#6751](https://github.com/moq-dev/moq/pull/6751))
 
-`Bandwidth` is `Allocator`, and `Session.bandwidth()` is `allocator()`. `Bandwidth.Consumer`, returned by `recvBandwidth()`, is the top-level `BandwidthConsumer`. The producers' `bandwidth:` parameter keeps its name.
+`Bandwidth` is `Allocator`, `Session.bandwidth()` is `allocator()`, and `Reservation.grant()` is `rate()`. `Bandwidth.Consumer`, returned by `recvBandwidth()`, is the top-level `BandwidthConsumer`. The producers' `bandwidth:` parameter keeps its name.
 
 ### Connection state
 
