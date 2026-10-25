@@ -523,7 +523,7 @@ impl Video {
 			tokio::select! {
 				biased;
 				_ = closed => {}
-				_ = follow_reservation(follower, reservation.consumer(), ceiling) => {}
+				_ = follow_reservation(follower, reservation.consume(), ceiling) => {}
 			}
 			Ok(())
 		});

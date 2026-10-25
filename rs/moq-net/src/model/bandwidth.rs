@@ -312,7 +312,7 @@ impl Allocator {
 	/// released when the track closes either way, since a [`track::Demand`] is a weak
 	/// handle and reserving never keeps a track alive.
 	///
-	/// Read the current slice through [`Reservation::consumer`], which reports `None`
+	/// Read the current slice through [`Reservation::consume`], which reports `None`
 	/// while nothing is subscribed to the track or the connection has no estimate.
 	/// That tells a sender to hold its current rate rather than encode at zero.
 	pub fn reserve(&self, track: &track::Demand, max: Rate) -> Reservation {
@@ -384,7 +384,7 @@ impl Reservation {
 	///
 	/// Cloneable and independent of the reservation: once the reservation is dropped
 	/// these report `None`, the same "hold your rate" a track nobody is watching reports.
-	pub fn consumer(&self) -> Consumer {
+	pub fn consume(&self) -> Consumer {
 		Consumer {
 			inner: Inner::Share(Box::new(self.share.clone())),
 			last: None,
@@ -400,7 +400,7 @@ impl Reservation {
 	/// picture moved again.
 	///
 	/// Does nothing once every [`Allocator`] is gone, since there is then nothing left
-	/// dividing anything; a reader learns that from its [`consumer`](Self::consumer).
+	/// dividing anything; a reader learns that from its [`consumer`](Self::consume).
 	pub fn update(&self, max: Rate) {
 		let Some(registry) = self.registry.upgrade() else {
 			return;
@@ -864,7 +864,7 @@ mod tests {
 		let (_first_broadcast, first) = track(VIDEO);
 		let _first_sub = first.subscribe(None);
 		let first = allocator.reserve(&first.demand(), bps(4_000_000));
-		let mut first_share = first.consumer();
+		let mut first_share = first.consume();
 
 		estimate.set(Some(bps(2_000_000))).unwrap();
 		// Alone, it gets everything it asked for that the link can carry.
@@ -918,7 +918,7 @@ mod tests {
 		let (_mine_broadcast, mine) = track(VIDEO);
 		let _mine_sub = mine.subscribe(None);
 		let mine_share_reserved = allocator.reserve(&mine.demand(), bps(4_000_000));
-		let mut mine_share = mine_share_reserved.consumer();
+		let mut mine_share = mine_share_reserved.consume();
 
 		let (_sibling_broadcast, sibling) = track(VIDEO);
 		let sibling_sub = sibling.subscribe(None);
@@ -978,7 +978,7 @@ mod tests {
 		let (_broadcast, track) = track(VIDEO);
 		let _sub = track.subscribe(None);
 		let share_reserved = allocator.reserve(&track.demand(), bps(4_000_000));
-		let mut share = share_reserved.consumer();
+		let mut share = share_reserved.consume();
 
 		estimate.set(Some(bps(10_000_000))).unwrap();
 		assert_eq!(share.changed().await.unwrap(), Some(bps(4_000_000)));
@@ -1006,7 +1006,7 @@ mod tests {
 		let (_mine_broadcast, mine) = track(VIDEO);
 		let _mine_sub = mine.subscribe(None);
 		let share_reserved = allocator.reserve(&mine.demand(), bps(4_000_000));
-		let mut share = share_reserved.consumer();
+		let mut share = share_reserved.consume();
 
 		let (_sibling_broadcast, sibling) = track(VIDEO);
 		let sibling_sub = sibling.subscribe(None);
@@ -1031,7 +1031,7 @@ mod tests {
 		let (_broadcast, track) = track(VIDEO);
 		let _sub = track.subscribe(None);
 		let share_reserved = allocator.reserve(&track.demand(), bps(4_000_000));
-		let mut share = share_reserved.consumer();
+		let mut share = share_reserved.consume();
 
 		estimate.set(Some(bps(2_000_000))).unwrap();
 		assert_eq!(share.changed().await.unwrap(), Some(bps(2_000_000)));
@@ -1084,7 +1084,7 @@ mod tests {
 
 		// A read handle is not the claim: the reservation outliving it is what keeps the
 		// room, and the reservation going away is what returns it.
-		let mut orphan = first_reserved.consumer();
+		let mut orphan = first_reserved.consume();
 		assert_eq!(orphan.changed().await.unwrap(), Some(bps(1_000_000)));
 
 		drop(first_reserved);
@@ -1178,7 +1178,7 @@ mod tests {
 		let (_broadcast, producer) = track(VIDEO);
 		let _sub = producer.subscribe(None);
 		let reserved = allocator.reserve(&producer.demand(), bps(1_000_000));
-		let mut share = reserved.consumer();
+		let mut share = reserved.consume();
 		assert_eq!(share.changed().await.unwrap(), Some(bps(1_000_000)));
 
 		let (woken, waiter) = Woken::new();
@@ -1200,7 +1200,7 @@ mod tests {
 		let (_broadcast, producer) = track(VIDEO);
 		let _sub = producer.subscribe(None);
 		let share_reserved = allocator.reserve(&producer.demand(), bps(4_000_000));
-		let mut share = share_reserved.consumer();
+		let mut share = share_reserved.consume();
 
 		drop(allocator);
 		drop(estimate);

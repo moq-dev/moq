@@ -125,7 +125,7 @@ test("a share wakes when a sibling goes idle", async () => {
 	expect(mine.peek()).toBe(1_000_000);
 	expect(sibling.peek()).toBe(1_000_000);
 
-	const next = mine.grant.changed();
+	const next = mine.rate.changed();
 	siblingSub.close();
 	expect(await next).toBe(2_000_000);
 	expect(mine.peek()).toBe(2_000_000);
@@ -144,7 +144,7 @@ test("an unchanged slice still follows the estimate past the cap", async () => {
 	estimate.set(10_000_000);
 	expect(reserved.peek()).toBe(4_000_000);
 
-	const next = reserved.grant.changed();
+	const next = reserved.rate.changed();
 	// Still miles above the reservation, so the slice holds at 4 Mbps.
 	estimate.set(9_000_000);
 	expect(reserved.peek()).toBe(4_000_000);
@@ -172,7 +172,7 @@ test("a parked share is woken by sibling demand", async () => {
 	expect(reserved.peek()).toBe(1_000_000);
 	expect(sibling.peek()).toBe(1_000_000);
 
-	const next = reserved.grant.changed();
+	const next = reserved.rate.changed();
 	siblingSub.close();
 	expect(await next).toBe(2_000_000);
 
@@ -211,7 +211,7 @@ test("closing a reservation releases it", async () => {
 	const second = allocator.reserve(secondTrack.demand(), 4_000_000);
 	expect(second.peek()).toBe(1_000_000);
 
-	const orphan = first.grant;
+	const orphan = first.rate;
 	expect(orphan.peek()).toBe(1_000_000);
 
 	const next = orphan.changed();
@@ -258,7 +258,7 @@ test("update wakes a parked reader", async () => {
 	const reserved = allocator.reserve(producer.demand(), 1_000_000);
 	expect(reserved.peek()).toBe(1_000_000);
 
-	const next = reserved.grant.changed();
+	const next = reserved.rate.changed();
 	reserved.update(4_000_000);
 	expect(await next).toBe(4_000_000);
 
@@ -284,7 +284,7 @@ test("a closed allocator reports no grant", () => {
 
 	allocator.close();
 	expect(reserved.peek()).toBeUndefined();
-	expect(reserved.grant.peek()).toBeUndefined();
+	expect(reserved.rate.peek()).toBeUndefined();
 });
 
 test("reserve and update reject a non-finite or negative ceiling", () => {

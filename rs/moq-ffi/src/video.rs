@@ -647,7 +647,7 @@ impl MoqVideoProducer {
 		});
 		let follow = reserved
 			.as_ref()
-			.map(|reservation| spawn_follow(inner.clone(), reservation.consumer(), ceiling, applied.clone()));
+			.map(|reservation| spawn_follow(inner.clone(), reservation.consume(), ceiling, applied.clone()));
 
 		Ok(Arc::new(MoqVideoProducer {
 			inner,

@@ -65,8 +65,8 @@ impl MoqReservation {
 	}
 
 	#[cfg(all(feature = "video", not(target_arch = "wasm32")))]
-	pub(crate) fn consumer(&self) -> moq_net::bandwidth::Consumer {
-		self.inner.consumer()
+	pub(crate) fn consume(&self) -> moq_net::bandwidth::Consumer {
+		self.inner.consume()
 	}
 }
 
@@ -213,7 +213,7 @@ mod tests {
 		let broadcast = MoqBroadcastProducer::new().unwrap();
 		let track = named_track(&broadcast, "a");
 		let reserved = bandwidth.reserve(&track.demand().unwrap(), 4_000_000);
-		let mut consumer = reserved.consumer();
+		let mut consumer = reserved.consume();
 
 		let parked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 		let parked_flag = parked.clone();

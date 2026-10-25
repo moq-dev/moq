@@ -81,7 +81,7 @@ interface Entry {
 	demand: Demand;
 	priority: number;
 	max: number;
-	grant: Signal<number | undefined>;
+	rate: Signal<number | undefined>;
 }
 
 interface Registry {
@@ -198,7 +198,7 @@ export class Allocator implements Handle {
 	 * as the sender is publishing, change the ceiling with
 	 * {@link Reservation.update}, and close it to hand the room back.
 	 *
-	 * {@link Reservation.peek} / {@link Reservation.grant} report `undefined`
+	 * {@link Reservation.peek} / {@link Reservation.rate} report `undefined`
 	 * while nothing is subscribed to the track or the connection has no estimate.
 	 * That tells a sender to hold its current rate rather than encode at zero.
 	 */
@@ -207,18 +207,18 @@ export class Allocator implements Handle {
 		this.#prune();
 
 		const id = this.#nextId++;
-		const grant = new Signal<number | undefined>(undefined);
+		const rate = new Signal<number | undefined>(undefined);
 		this.#entries.mutate((entries) => {
 			entries.push({
 				id,
 				demand: track,
 				priority: hooks.demandPriority(track),
 				max,
-				grant,
+				rate,
 			});
 		});
 
-		const reservation = makeReservation(this.#registry, id, grant);
+		const reservation = makeReservation(this.#registry, id, rate);
 		this.#publish();
 		return reservation;
 	}
@@ -231,7 +231,7 @@ export class Allocator implements Handle {
 		if (!this.#alive.peek()) return;
 		this.#alive.set(false);
 		for (const entry of this.#entries.peek()) {
-			entry.grant.set(undefined);
+			entry.rate.set(undefined);
 		}
 		this.#entries.set([]);
 		this.#signals.close();
@@ -249,7 +249,7 @@ export class Allocator implements Handle {
 		const entries = this.#entries.peek();
 		const wants = wantsOf(entries);
 		for (const entry of entries) {
-			entry.grant.set(estimate == null ? undefined : allocate(estimate, wants, entry.id));
+			entry.rate.set(estimate == null ? undefined : allocate(estimate, wants, entry.id));
 		}
 	}
 
@@ -282,7 +282,7 @@ export class Allocator implements Handle {
 	}
 }
 
-let makeReservation: (registry: Registry, id: number, grant: Signal<number | undefined>) => Reservation;
+let makeReservation: (registry: Registry, id: number, rate: Signal<number | undefined>) => Reservation;
 
 /**
  * One track's standing claim on an {@link Allocator}, held for as long as the
@@ -295,23 +295,23 @@ let makeReservation: (registry: Registry, id: number, grant: Signal<number | und
 export class Reservation implements Disposable {
 	readonly #registry: Registry;
 	readonly #id: number;
-	readonly #grant: Signal<number | undefined>;
+	readonly #rate: Signal<number | undefined>;
 	#closed = false;
 
-	private constructor(registry: Registry, id: number, grant: Signal<number | undefined>) {
+	private constructor(registry: Registry, id: number, rate: Signal<number | undefined>) {
 		this.#registry = registry;
 		this.#id = id;
-		this.#grant = grant;
+		this.#rate = rate;
 	}
 
 	static {
-		makeReservation = (registry, id, grant) => new Reservation(registry, id, grant);
+		makeReservation = (registry, id, rate) => new Reservation(registry, id, rate);
 	}
 
 	/**
 	 * This reservation's slice right now.
 	 *
-	 * Stateless, unlike {@link grant}, which is a signal of what was last
+	 * Stateless, unlike {@link rate}, which is a signal of what was last
 	 * published and so can lag a synchronous {@link update} by a microtask if
 	 * something else writes the registry first. Call this after {@link update}.
 	 */
@@ -327,8 +327,8 @@ export class Reservation implements Disposable {
 	 * this reservation has been closed: hold the current rate rather than encode
 	 * at zero.
 	 */
-	get grant(): Getter<number | undefined> {
-		return this.#grant;
+	get rate(): Getter<number | undefined> {
+		return this.#rate;
 	}
 
 	/**
@@ -347,7 +347,7 @@ export class Reservation implements Disposable {
 	close(): void {
 		if (this.#closed) return;
 		this.#closed = true;
-		this.#grant.set(undefined);
+		this.#rate.set(undefined);
 		this.#registry.release(this.#id);
 	}
 
