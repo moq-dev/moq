@@ -209,7 +209,7 @@ jobs:
           cli=$(nix build --refresh --no-link --print-out-paths 'github:moq-dev/moq#moq')
           {
             echo "RELAY_BIN=$relay/bin/moq-relay"
-            echo "MOQ_BIN=$cli/bin/moq"
+            echo "CLI_BIN=$cli/bin/moq"
           } >> "$GITHUB_ENV"
 
       # cachix.yml only pushes release tags, so each new HEAD
@@ -228,19 +228,19 @@ jobs:
             echo "no CACHIX_AUTH_TOKEN secret; not pushing"
             exit 0
           fi
-          nix run nixpkgs#cachix -- push kixelated "${RELAY_BIN%/bin/*}" "${MOQ_BIN%/bin/*}"
+          nix run nixpkgs#cachix -- push kixelated "${RELAY_BIN%/bin/*}" "${CLI_BIN%/bin/*}"
 
       - name: Pull moqdev images (docker channel)
         if: matrix.channel == 'docker'
         # Pull :latest fresh, then point smoke.sh at the wrapper scripts (which
-        # `docker run --network host` the images) via RELAY_BIN/MOQ_BIN. Docker is
+        # `docker run --network host` the images) via RELAY_BIN/CLI_BIN. Docker is
         # preinstalled on the Linux runners.
         run: |
           docker pull moqdev/moq-relay
           docker pull moqdev/moq
           {
             echo "RELAY_BIN=$PWD/clients/docker/moq-relay"
-            echo "MOQ_BIN=$PWD/clients/docker/moq"
+            echo "CLI_BIN=$PWD/clients/docker/moq"
           } >> "$GITHUB_ENV"
 
       # ── browser deps (Chromium runtime libs on Linux) ──────────────────
@@ -290,7 +290,7 @@ jobs:
       # ── token interop ──────────────────────────────────────────────────
       # Independent of the media matrix: prove the published token tooling
       # cross-verifies. `moq auth` rides the same channel as moq-relay/moq
-      # (cargo/apt/brew/nix, on PATH or MOQ_BIN); @moq/auth comes from npm and
+      # (cargo/apt/brew/nix, on PATH or CLI_BIN); @moq/auth comes from npm and
       # runs under both node and bun; rust-docker runs `auth` in the
       # moqdev/moq image. The negative pass inside token.sh confirms each verifier rejects
       # tampered tokens and the wrong key.

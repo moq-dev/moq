@@ -56,7 +56,6 @@ Rust/JS parity. Run `just check`, `just test interop --all`, and `just drafts ch
 
 ## Required
 
-- [Identity proof](/quest/m1/cluster-routing/identity.md) - proven own identities for every session
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - identity, scoped claims, reachability, and export policy
 
 ## Related

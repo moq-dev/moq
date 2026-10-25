@@ -28,9 +28,6 @@ pub const ALPNS: &[&str] = &[
 	ALPN_LITE_03,
 	ALPN_LITE,
 	ALPN_22,
-	ALPN_21,
-	ALPN_20,
-	ALPN_19,
 	ALPN_18,
 	ALPN_17,
 	ALPN_16,
@@ -50,12 +47,9 @@ pub(crate) const ALPN_15: &str = "moqt-15";
 pub(crate) const ALPN_16: &str = "moqt-16";
 pub(crate) const ALPN_17: &str = "moqt-17";
 pub(crate) const ALPN_18: &str = "moqt-18";
-pub(crate) const ALPN_19: &str = "moqt-19";
-pub(crate) const ALPN_20: &str = "moqt-20";
-pub(crate) const ALPN_21: &str = "moqt-21";
 pub(crate) const ALPN_22: &str = "moqt-22";
 
-const ALL: [Version; 16] = [
+const ALL: [Version; 13] = [
 	Version::Lite(lite::Version::Lite07),
 	Version::Lite(lite::Version::Lite06),
 	Version::Lite(lite::Version::Lite05),
@@ -64,9 +58,6 @@ const ALL: [Version; 16] = [
 	Version::Lite(lite::Version::Lite02),
 	Version::Lite(lite::Version::Lite01),
 	Version::Ietf(ietf::Version::Draft22),
-	Version::Ietf(ietf::Version::Draft21),
-	Version::Ietf(ietf::Version::Draft20),
-	Version::Ietf(ietf::Version::Draft19),
 	Version::Ietf(ietf::Version::Draft18),
 	Version::Ietf(ietf::Version::Draft17),
 	Version::Ietf(ietf::Version::Draft16),
@@ -98,7 +89,7 @@ impl Version {
 		ALL.iter().map(Self::as_str)
 	}
 
-	/// Handshake / config name, e.g. `moq-lite-05` or `moq-transport-20`.
+	/// Handshake / config name, e.g. `moq-lite-05` or `moq-transport-22`.
 	pub fn as_str(&self) -> &'static str {
 		match self {
 			Self::Lite(lite::Version::Lite01) => "moq-lite-01",
@@ -113,9 +104,6 @@ impl Version {
 			Self::Ietf(ietf::Version::Draft16) => "moq-transport-16",
 			Self::Ietf(ietf::Version::Draft17) => "moq-transport-17",
 			Self::Ietf(ietf::Version::Draft18) => "moq-transport-18",
-			Self::Ietf(ietf::Version::Draft19) => "moq-transport-19",
-			Self::Ietf(ietf::Version::Draft20) => "moq-transport-20",
-			Self::Ietf(ietf::Version::Draft21) => "moq-transport-21",
 			Self::Ietf(ietf::Version::Draft22) => "moq-transport-22",
 		}
 	}
@@ -135,9 +123,6 @@ impl Version {
 			0xff000010 => Some(Self::Ietf(ietf::Version::Draft16)),
 			0xff000011 => Some(Self::Ietf(ietf::Version::Draft17)),
 			0xff000012 => Some(Self::Ietf(ietf::Version::Draft18)),
-			0xff000013 => Some(Self::Ietf(ietf::Version::Draft19)),
-			0xff000014 => Some(Self::Ietf(ietf::Version::Draft20)),
-			0xff000015 => Some(Self::Ietf(ietf::Version::Draft21)),
 			0xff000016 => Some(Self::Ietf(ietf::Version::Draft22)),
 			_ => None,
 		}
@@ -158,9 +143,6 @@ impl Version {
 			Self::Ietf(ietf::Version::Draft16) => 0xff000010,
 			Self::Ietf(ietf::Version::Draft17) => 0xff000011,
 			Self::Ietf(ietf::Version::Draft18) => 0xff000012,
-			Self::Ietf(ietf::Version::Draft19) => 0xff000013,
-			Self::Ietf(ietf::Version::Draft20) => 0xff000014,
-			Self::Ietf(ietf::Version::Draft21) => 0xff000015,
 			Self::Ietf(ietf::Version::Draft22) => 0xff000016,
 		}
 	}
@@ -182,9 +164,6 @@ impl Version {
 			ALPN_16 => Some(Self::Ietf(ietf::Version::Draft16)),
 			ALPN_17 => Some(Self::Ietf(ietf::Version::Draft17)),
 			ALPN_18 => Some(Self::Ietf(ietf::Version::Draft18)),
-			ALPN_19 => Some(Self::Ietf(ietf::Version::Draft19)),
-			ALPN_20 => Some(Self::Ietf(ietf::Version::Draft20)),
-			ALPN_21 => Some(Self::Ietf(ietf::Version::Draft21)),
 			ALPN_22 => Some(Self::Ietf(ietf::Version::Draft22)),
 			_ => None,
 		}
@@ -204,9 +183,6 @@ impl Version {
 			Self::Ietf(ietf::Version::Draft16) => ALPN_16,
 			Self::Ietf(ietf::Version::Draft17) => ALPN_17,
 			Self::Ietf(ietf::Version::Draft18) => ALPN_18,
-			Self::Ietf(ietf::Version::Draft19) => ALPN_19,
-			Self::Ietf(ietf::Version::Draft20) => ALPN_20,
-			Self::Ietf(ietf::Version::Draft21) => ALPN_21,
 			Self::Ietf(ietf::Version::Draft22) => ALPN_22,
 		}
 	}

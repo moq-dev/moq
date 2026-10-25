@@ -167,12 +167,13 @@ macro_rules! relay_chain_tests {
 relay_chain_tests! {
 	relay_chain_lite06: "moq-lite-06",
 	relay_chain_lite07: "moq-lite-07-wip",
-	relay_chain_ietf19: "moq-transport-19",
+	relay_chain_ietf18: "moq-transport-18",
 	relay_chain_ietf22: "moq-transport-22",
 }
 
 /// A worker claiming `pool` without an epoch, answering each request with an output
-/// whose `video` track carries the worker's name.
+/// whose `video` track carries the worker's name. The claim is a peer's, landed through
+/// the hidden `fuzz` module as a session lands it, so its answers carry no exact route.
 struct Worker {
 	origin: origin::Producer,
 	_claim: Rc<origin::Dynamic>,
@@ -182,7 +183,7 @@ struct Worker {
 impl Worker {
 	fn new(hop: u64) -> Self {
 		let origin = produce_origin(hop);
-		let claim = Rc::new(origin.dynamic_route("pool", origin::Route::default()).unwrap());
+		let claim = Rc::new(moq_net::fuzz::dynamic_route(&origin, "pool", origin::Route::default()).unwrap());
 		let outputs = Rc::new(RefCell::new(Vec::new()));
 		let (handler, served) = (claim.clone(), outputs.clone());
 		drop(moq_clock::sim::spawn(async move {
@@ -190,7 +191,7 @@ impl Worker {
 				let output = broadcast::Info::new().produce();
 				let track = output.create_track("video", timed()).unwrap();
 				write(&track, &format!("{hop}"));
-				request.accept(&output);
+				moq_net::fuzz::accept(request, &output);
 				served.borrow_mut().push((output, track));
 			}
 		}));
@@ -255,7 +256,9 @@ async fn prefix_pool_lite07() {
 }
 
 /// A claim at `live` whose handler answers each request with a fresh output, kept so
-/// the test can write into it: `outputs[n]` answered the `n`th request.
+/// the test can write into it: `outputs[n]` answered the `n`th request. Only a peer's
+/// claim carries an epoch or re-prices, so it lands through the hidden `fuzz` module as
+/// a session lands it.
 struct Claim {
 	dynamic: Rc<origin::Dynamic>,
 	outputs: Rc<RefCell<Vec<(broadcast::Producer, track::Producer)>>>,
@@ -265,14 +268,14 @@ impl Claim {
 	fn new(origin: &origin::Producer, epoch: Option<Epoch>) -> Self {
 		let mut route = origin::Route::default();
 		route.epoch = epoch;
-		let dynamic = Rc::new(origin.dynamic_route("live", route).unwrap());
+		let dynamic = Rc::new(moq_net::fuzz::dynamic_route(origin, "live", route).unwrap());
 		let outputs = Rc::new(RefCell::new(Vec::new()));
 		let (handler, served) = (dynamic.clone(), outputs.clone());
 		drop(moq_clock::sim::spawn(async move {
 			while let Ok(request) = handler.requested_broadcast().await {
 				let output = broadcast::Info::new().produce();
 				let track = output.create_track("video", timed()).unwrap();
-				request.accept(&output);
+				moq_net::fuzz::accept(request, &output);
 				served.borrow_mut().push((output, track));
 			}
 		}));
@@ -292,7 +295,11 @@ impl Claim {
 	fn update_epoch(&self, epoch: Option<Epoch>) {
 		let mut route = self.dynamic.route();
 		route.epoch = epoch;
-		self.dynamic.update_route(route).unwrap();
+		self.update_route(route);
+	}
+
+	fn update_route(&self, route: origin::Route) {
+		moq_net::fuzz::update_route(&self.dynamic, route).unwrap();
 	}
 }
 
@@ -320,7 +327,7 @@ async fn dynamic_epoch(version: &str, from: Option<Epoch>, to: Option<Epoch>) {
 	assert_eq!(read(&mut sticky).await, "old:0", "{version}");
 
 	// A re-price at the same epoch is an update at most: every handle survives.
-	claim.dynamic.update_route(claim.dynamic.route().with_cost(5)).unwrap();
+	claim.update_route(claim.dynamic.route().with_cost(5));
 	while let Ok(event) = moq_clock::timeout(Duration::from_secs(1), announced.next()).await {
 		assert!(
 			matches!(event, Some(announce::Event::Update(_))),
@@ -389,7 +396,7 @@ macro_rules! dynamic_epoch_tests {
 dynamic_epoch_tests! {
 	dynamic_epoch_lite06: "moq-lite-06",
 	dynamic_epoch_lite07: "moq-lite-07-wip",
-	dynamic_epoch_ietf19: "moq-transport-19",
+	dynamic_epoch_ietf18: "moq-transport-18",
 	dynamic_epoch_ietf22: "moq-transport-22",
 }
 
@@ -401,12 +408,9 @@ async fn dynamic_epoch_second_route_keeps_winning() {
 	let (a, _) = epochs();
 	let origin = produce_origin(1);
 	let first = Claim::new(&origin, Some(a.clone()));
-	first.dynamic.update_route(first.dynamic.route().with_cost(1)).unwrap();
+	first.update_route(first.dynamic.route().with_cost(1));
 	let second = Claim::new(&origin, Some(a.clone()));
-	second
-		.dynamic
-		.update_route(second.dynamic.route().with_cost(5))
-		.unwrap();
+	second.update_route(second.dynamic.route().with_cost(5));
 	let mut announced = origin.consume().announced();
 	match next_event(&mut announced).await {
 		announce::Event::Start(announce) => assert_eq!(announce.route.epoch.as_ref(), Some(&a)),
@@ -521,9 +525,6 @@ retired_fetch_tests! {
 	retired_fetch_ietf16: "moq-transport-16",
 	retired_fetch_ietf17: "moq-transport-17",
 	retired_fetch_ietf18: "moq-transport-18",
-	retired_fetch_ietf19: "moq-transport-19",
-	retired_fetch_ietf20: "moq-transport-20",
-	retired_fetch_ietf21: "moq-transport-21",
 	retired_fetch_ietf22: "moq-transport-22",
 }
 
@@ -601,7 +602,7 @@ async fn a_more_specific_source_cannot_fill_a_held_covering_track() {
 /// fresh epoch and published at its exact path, and `outputs[path]` holds the latest.
 struct Pool {
 	_claim: Rc<origin::Dynamic>,
-	outputs: Rc<RefCell<std::collections::HashMap<String, (broadcast::Producer, track::Producer)>>>,
+	outputs: Rc<RefCell<std::collections::HashMap<String, (origin::Publication, track::Producer)>>>,
 	answered: Rc<RefCell<usize>>,
 }
 
