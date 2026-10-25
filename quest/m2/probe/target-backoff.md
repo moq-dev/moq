@@ -12,8 +12,11 @@ probe bytes indefinitely.
   4.6% redundant bytes for a 100 Mbit/s target on a 3 Mbit/s path.
   `rs/moq-quic/src/connection/bandwidth_probe.rs` keeps no state about failed
   rises.
-- Back off exponentially after a number of ProbeBW_UP cycles with no estimate
-  rise, and reset when the target changes. Prove it on a bufferbloat path.
+- Keep the requested target (`set_probe_target`) apart from the effective one
+  the probe paces to. Back off the effective target exponentially after
+  ProbeBW_UP cycles with no estimate rise, reset it to the requested target
+  when the caller changes that, and retry the requested target on the same
+  backoff so returning capacity is found. Prove it on a bufferbloat path.
 
 ## Related
 

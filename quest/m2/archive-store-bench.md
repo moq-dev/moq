@@ -8,8 +8,9 @@ the track count grows, so a regression in archive reads shows up.
 
 ## Plan
 
-- The cost is store round trips (one LIST per track per refresh, one GET per
-  object), which an `InMemory` Criterion bench would hide
-  ([moq-dev/moq#6262](https://github.com/moq-dev/moq/pull/6262)).
+- The cost is store round trips (per refresh, one LIST of the archive prefix
+  plus one per track; one GET per object), which an `InMemory` Criterion
+  bench would hide ([moq-dev/moq#6262](https://github.com/moq-dev/moq/pull/6262)).
   `object_store`'s `aws` feature is already a dev feature.
-- Sweep the track count, per the fan-out benchmark rule.
+- Sweep both axes, track count and objects per track, per the fan-out
+  benchmark rule.

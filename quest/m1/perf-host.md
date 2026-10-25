@@ -2,13 +2,15 @@
 
 ## Goal
 
-Condition: a quiet Linux host has `kernel.perf_event_paranoid=-1` and is
-recorded in `bench/README.md`. Check with `sysctl kernel.perf_event_paranoid`
-on that host. This is a maintainer action; delete this quest once it holds.
+Condition: a quiet Linux host has `kernel.perf_event_paranoid=-1` and
+`bench/README.md` names it and how to reach it. Check with
+`sysctl kernel.perf_event_paranoid` on that host. This is a maintainer action;
+delete this quest once it holds.
 
 ## Plan
 
-- `bench/profile.py` refuses to run without it. The kio log quest and
+- `bench/profile.py` refuses `lock` and `cpu` captures without it (heap
+  captures need only `jeprof`). The kio log quest and
   [moq-dev/moq#6680](https://github.com/moq-dev/moq/pull/6680) need CPU and lock
   profiles from such a host.
 

@@ -21,7 +21,7 @@ disable, stop funding rungs the path can no longer carry.
   fallback to `bw_shortterm` is the rejected alternative.
 - Turn the `stale_estimate` report in `rs/moq-quic/src/tests/probe.rs` into an
   assertion on a mocked clock and a bufferbloat path (a rate limit below the
-  media bitrate behind a deep finite queue).
+  media bitrate behind a deep finite queue whose overflow drops packets).
 
 ## Related
 

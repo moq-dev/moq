@@ -221,7 +221,7 @@ and the widening and ordering rules above; published versions are
 unchanged.
 - A local producer's declared end must settle over dropped groups, as the
   doc on `TrackState::drop_groups` already claims (added 2026-10-25): let
-  `reaches(fin)` count a live edge whose gap up to `fin` is wholly dropped,
+  `reaches(fin)` count a live edge whose gap `edge..fin` is wholly dropped,
   then delete moq-archive's fake empty group at `fin - 1`
   (`rs/moq-archive/src/consumer/track.rs`).
 
