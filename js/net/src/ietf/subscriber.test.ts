@@ -49,7 +49,7 @@ const STREAM_WAIT = 500;
  * Reads the queue directly instead of racing {@link Stream.accept}, whose pending read
  * would keep the reader locked after the race resolves and could swallow a later stream.
  */
-async function nextStream(transport: WebTransport): Promise<Stream | undefined> {
+async function nextStream(transport: WebTransport, version: IetfVersion = VERSION): Promise<Stream | undefined> {
 	const reader =
 		transport.incomingBidirectionalStreams.getReader() as ReadableStreamDefaultReader<WebTransportBidirectionalStream>;
 
@@ -63,7 +63,7 @@ async function nextStream(transport: WebTransport): Promise<Stream | undefined> 
 		]);
 
 		if (!next || next.done) return undefined;
-		return new Stream({ readable: next.value.readable, writable: next.value.writable, version: VERSION });
+		return new Stream({ readable: next.value.readable, writable: next.value.writable, version });
 	} finally {
 		clearTimeout(timer);
 		reader.releaseLock();
@@ -234,23 +234,28 @@ test("an advertisement with no path is anonymous", async () => {
  * Answer the SUBSCRIBE_NAMESPACE the subscriber just opened, then hand back its stream so
  * the test can feed inline NAMESPACE entries down it.
  */
-async function acceptSubscribeNamespace(transport: WebTransport): Promise<Stream> {
-	const stream = await nextStream(transport);
+async function acceptSubscribeNamespace(transport: WebTransport, version: IetfVersion = VERSION): Promise<Stream> {
+	const stream = await nextStream(transport, version);
 	if (!stream) throw new Error("no SUBSCRIBE_NAMESPACE was sent");
 
 	// Drain the request, then answer it.
 	await stream.reader.u53();
-	await SubscribeNamespace.decode(stream.reader, VERSION);
+	await SubscribeNamespace.decode(stream.reader, version);
 	await stream.writer.u53(RequestOk.id);
-	await new RequestOk({ requestId: undefined }).encode(stream.writer, VERSION);
+	await new RequestOk({ requestId: undefined }).encode(stream.writer, version);
 
 	return stream;
 }
 
 /** Advertise `path` inline on a SUBSCRIBE_NAMESPACE stream. */
-async function inlineNamespace(stream: Stream, path: Path.Valid, cluster?: Cluster.Advert): Promise<void> {
+async function inlineNamespace(
+	stream: Stream,
+	path: Path.Valid,
+	cluster?: Cluster.Advert,
+	version: IetfVersion = VERSION,
+): Promise<void> {
 	await stream.writer.u53(SubscribeNamespaceEntry.id);
-	await new SubscribeNamespaceEntry({ suffix: path, params: cluster && { cluster } }).encode(stream.writer, VERSION);
+	await new SubscribeNamespaceEntry({ suffix: path, params: cluster && { cluster } }).encode(stream.writer, version);
 }
 
 /**
@@ -2236,24 +2241,25 @@ test("an announce consumer closed while waiting on request-ID credit takes no ID
  * It goes out only once the peer has ended the narrower one's stream.
  */
 test("a request overlapping one on its way out waits for the peer to end it", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
-	const session = new NativeSession(pair.server, VERSION, true);
+	const version = Version.DRAFT_22;
+	const pair = createMockTransportPair(ALPN.DRAFT_22);
+	const session = new NativeSession(pair.server, version, true);
 	const subscriber = new Subscriber({ session });
 
 	const narrow = subscriber.announced(Path.Pattern.subtree(Path.from("a/b")));
-	const stream = await acceptSubscribeNamespace(pair.client);
-	await inlineNamespace(stream, Path.from("x"));
+	const stream = await acceptSubscribeNamespace(pair.client, version);
+	await inlineNamespace(stream, Path.from("x"), undefined, version);
 	expect(await narrow.next()).toMatchObject({ prefix: Path.from("a/b/x"), kind: "start" });
 
 	// A request still open is no blocker, and hears the narrower one's route go at once.
 	const watcher = subscriber.announced(Path.Pattern.subtree(Path.from("a/b")));
-	const watching = await acceptSubscribeNamespace(pair.client);
+	const watching = await acceptSubscribeNamespace(pair.client, version);
 	expect(await watcher.next()).toMatchObject({ prefix: Path.from("a/b/x"), kind: "start" });
 	narrow.close();
 	const broad = subscriber.announced(Path.Pattern.subtree(Path.from("a")));
 	expect(await watcher.next()).toMatchObject({ prefix: Path.from("a/b/x"), kind: "end" });
 
-	// Draft 19 cancels with a reset, and the broader request waits on the peer's half.
+	// Draft 22 cancels with a reset, and the broader request waits on the peer's half.
 	expect(stream.reader.done()).rejects.toMatchObject({ code: StreamCode.Cancel });
 	const incoming = pair.client.incomingBidirectionalStreams.getReader();
 	let sent = false;
@@ -2263,7 +2269,7 @@ test("a request overlapping one on its way out waits for the peer to end it", as
 	});
 
 	// The closed reader is still registered meanwhile, and hears nothing more.
-	await inlineNamespace(watching, Path.from("y"));
+	await inlineNamespace(watching, Path.from("y"), undefined, version);
 	expect(await watcher.next()).toMatchObject({ prefix: Path.from("a/b/y"), kind: "start" });
 	expect(sent).toBe(false);
 
@@ -2271,9 +2277,9 @@ test("a request overlapping one on its way out waits for the peer to end it", as
 	const next = await opened;
 	incoming.releaseLock();
 	if (next.done) throw new Error("the broader SUBSCRIBE_NAMESPACE never went out");
-	const asked = new Stream({ readable: next.value.readable, writable: next.value.writable, version: VERSION });
+	const asked = new Stream({ readable: next.value.readable, writable: next.value.writable, version });
 	await asked.reader.u53();
-	expect((await SubscribeNamespace.decode(asked.reader, VERSION)).namespace).toBe(Path.from("a"));
+	expect((await SubscribeNamespace.decode(asked.reader, version)).namespace).toBe(Path.from("a"));
 
 	watcher.close();
 	broad.close();
