@@ -573,3 +573,33 @@ test("repeated GOAWAYs back to the same place are restarts, not a loop", async (
 		installed.close();
 	}
 });
+
+test("a peer restarting through immediate GOAWAYs escalates the backoff but never spends the window", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	// Full delay every time, so the waits are exact.
+	const random = spyOn(Math, "random").mockReturnValue(1);
+	const { dials } = fleet();
+	const reload = new Reload({
+		url,
+		websocket: { enabled: false },
+		goaway: { handover },
+		// The waits add up to far more than the window, which a restart restarts after each one.
+		delay: { initial: Milli(10), multiplier: 2, max: Milli(1000), timeout: Milli(25) },
+	});
+
+	try {
+		const waited: number[] = [];
+		for (let i = 1; i <= 4; i++) {
+			await waitUntil(() => dials.length === i && reload.status.peek() === "connected");
+			await goaway(dials[i - 1]?.server as WebTransport, "");
+			waited.push(await elapse(clock, () => dials.length === i + 1 || reload.error.peek() !== undefined));
+		}
+		expect(waited).toEqual([10, 20, 40, 80]);
+		expect(reload.error.peek()).toBeUndefined();
+	} finally {
+		reload.close();
+		random.mockRestore();
+		installed.close();
+	}
+});
