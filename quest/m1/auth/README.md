@@ -144,11 +144,10 @@ because `main` assigned 0x3A to NOT_FETCHABLE first.
 
 ## Required
 
-- [Auth outlives its session](/quest/m1/auth/issuer.md) - one `auth::Handle` spans a connection's sessions, so a route's auth survives a reconnect
 - [Token in band](/quest/m1/auth/token-in-band.md) - extra credentials ride
   AUTH streams: a session starts on the token its SETUP or URL carried and its
   AUTH streams add the rest
-- [Binding auth polish](/quest/m1/auth/bindings-polish.md) - OBS reconnects with the presented token, one FFI auth handle, Swift grant sequences
+- [Binding auth polish](/quest/m1/auth/bindings-polish.md) - OBS reconnects with the presented token, Swift grant sequences
 - [Re-present a lost token](/quest/m1/auth/token-represent.md) - a token whose AUTH stream ended without a verdict is presented again on the live session
 
 ## Related

@@ -455,7 +455,7 @@ class Reader implements ResumeSource {
 		const start = Math.max(cursor.start, copy.floor ?? 0);
 		const replaced = copyEnd(copy);
 		const end = replaced === undefined ? cursor.end : Math.min(cursor.end ?? replaced, replaced);
-		hooks.replaceGroups(copy.sub, {
+		copy.sub.withRange({
 			start: { included: start },
 			end: end === undefined ? undefined : { excluded: end },
 		});
@@ -1348,6 +1348,22 @@ export class Front {
 			listing?.reader?.close();
 			listing = undefined;
 		};
+		const read = (reader: Tracks): Promise<{ event?: TracksEvent; err?: Error }> =>
+			reader.next().then(
+				(event) => ({ event }),
+				(err: unknown) => ({ err: err instanceof Error ? err : new Error(String(err)) }),
+			);
+		// Forwarded as the source reported it, finished or not.
+		const unlist = (
+			listed: Set<string>,
+			stale: Set<string>,
+			event: { kind: "removed" | "finished"; name: string },
+		) => {
+			stale.delete(event.name);
+			if (!listed.delete(event.name)) return;
+			if (event.kind === "finished") lister.finish(event.name);
+			else lister.remove(event.name);
+		};
 		try {
 			for (;;) {
 				if (closed.peek() !== undefined) return;
@@ -1360,7 +1376,15 @@ export class Front {
 					continue;
 				}
 				if (this.#concluded) {
-					// No route will serve it again, so nothing more will be listed.
+					// No route will serve it again, so nothing more will be listed. A source that
+					// closed ended its listing after the tracks it finished last: those go first.
+					while (listing?.reader && listing.source?.from.closed.peek() !== undefined) {
+						const { event } = await (listing.next ?? read(listing.reader));
+						listing.next = undefined;
+						if (!event) break;
+						if (event.kind === "removed" || event.kind === "finished")
+							unlist(listing.listed, listing.stale, event);
+					}
 					stop();
 					lister.end();
 					continue;
@@ -1390,10 +1414,7 @@ export class Front {
 					await wait();
 					continue;
 				}
-				listing.next ??= reader.next().then(
-					(event) => ({ event }),
-					(err: unknown) => ({ err: err instanceof Error ? err : new Error(String(err)) }),
-				);
+				listing.next ??= read(reader);
 				const result = await race([listing.next, wait().then(() => undefined)]);
 				if (!result) continue;
 				listing.next = undefined;
@@ -1420,11 +1441,7 @@ export class Front {
 						lister.add(event.name, event.info);
 					}
 				} else if (event.kind === "removed" || event.kind === "finished") {
-					// Forwarded as the source reported it, finished or not.
-					listing.stale.delete(event.name);
-					if (!listing.listed.delete(event.name)) continue;
-					if (event.kind === "finished") lister.finish(event.name);
-					else lister.remove(event.name);
+					unlist(listing.listed, listing.stale, event);
 				} else {
 					// What the new source still lacks at its SYNCED is gone.
 					for (const name of listing.stale) {

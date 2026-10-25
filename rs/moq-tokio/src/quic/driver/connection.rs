@@ -32,9 +32,10 @@ use crate::quic::driver::{
     send_stream::SendStream,
     udp_transmit,
 };
+use moq_congestion::Controller;
 use moq_quic::{
     ConnectionError, ConnectionHandle, ConnectionStats, Dir, EndpointEvent, Side, StreamEvent,
-    StreamId, TransportError, TransportErrorCode, congestion::Controller,
+    StreamId, TransportError, TransportErrorCode,
 };
 
 /// In-progress connection attempt future

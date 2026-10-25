@@ -28,11 +28,9 @@ Each connection publishes under a fresh
 [epoch](/concept/moq-lite#publisher-epochs), so an encoder that reconnects
 while its stale connection is still open replaces it at once: viewers see the
 broadcast restart, and their next subscribe reaches the new feed. An
-`export srt` stream ends with its broadcast; `--linger` and `--stitch` follow a
+`export srt` stream ends with its broadcast; `--follow` and `--stitch` follow a
 return or a replacement on the same connection, as they do for
-[`export ts`](/bin/cli#retention-and-latency). The linger also bounds a
-mid-stream replacement's first catalog; expiry ends the export with an error.
-With the default `--linger 0s`, that catalog must already be available.
+[`export ts`](/bin/cli#retention-and-latency).
 
 A multi-program feed is refused unless `--program`
 picks one: `--program 2` imports program 2 alone, and `--program all`

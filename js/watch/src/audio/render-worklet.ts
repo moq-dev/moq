@@ -11,6 +11,7 @@ class Render extends AudioWorkletProcessor {
 	#underflow = 0;
 	#stateCounter = 0;
 	#epoch = 0;
+	#playing = true;
 	// Whether the previous quantum ended short, so the next one fades back in.
 	#short = false;
 
@@ -21,6 +22,7 @@ class Render extends AudioWorkletProcessor {
 			const msg = event.data;
 			if (msg.type === "init") {
 				this.#ring = new AudioRingBuffer(msg);
+				this.#playing = msg.playing ?? true;
 				this.#underflow = 0;
 				this.#short = false;
 			} else if (msg.type === "data") {
@@ -36,6 +38,9 @@ class Render extends AudioWorkletProcessor {
 			} else if (msg.type === "reset") {
 				this.#ring?.reset();
 				this.#epoch = msg.epoch;
+				this.#playing = msg.playing ?? true;
+			} else if (msg.type === "playing" && msg.epoch === this.#epoch) {
+				this.#playing = msg.playing;
 			}
 		};
 	}
@@ -43,7 +48,7 @@ class Render extends AudioWorkletProcessor {
 	process(_inputs: Float32Array[][], outputs: Float32Array[][], _parameters: Record<string, Float32Array>) {
 		const output = outputs[0];
 		const ring = this.#ring;
-		const samplesRead = ring?.read(output) ?? 0;
+		const samplesRead = this.#playing ? (ring?.read(output) ?? 0) : 0;
 
 		if (samplesRead < output[0].length) {
 			// Fade the tail of what we did read down to the silence that follows it.
@@ -53,7 +58,7 @@ class Render extends AudioWorkletProcessor {
 					channel[samplesRead - ramp + i] *= 1 - (i + 1) / ramp;
 				}
 			}
-			this.#underflow += output[0].length - samplesRead;
+			if (this.#playing) this.#underflow += output[0].length - samplesRead;
 			this.#short = true;
 		} else {
 			if (this.#short) {

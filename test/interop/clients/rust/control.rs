@@ -54,7 +54,7 @@ async fn main() -> anyhow::Result<()> {
 		.stdin(Stdio::piped())
 		.kill_on_drop(true)
 		.spawn()?;
-	let (session, driver) = listener.accept().await.context("accept")?.ok().await?;
+	let session = listener.accept().await.context("accept")?.ok().await?;
 	ensure!(session.version() == version, "wrong negotiated version");
 	if args[1] == "credit" {
 		// The JS peer has one usable track slot beyond any namespace discovery.
@@ -87,7 +87,7 @@ async fn main() -> anyhow::Result<()> {
 	}
 	ensure!(child.wait().await?.success(), "JS peer failed");
 	session.abort(moq_net::Error::Cancel);
-	let _ = driver.await?;
+	let _ = session.closed().await;
 	eprintln!("{} interop passed {version}", args[1]);
 	Ok(())
 }

@@ -21,7 +21,7 @@
 use std::sync::Arc;
 
 use super::Encoded;
-use super::encoder::{Applied, Config};
+use super::encoder::Config;
 use crate::{Error, Frame};
 
 #[cfg(apple)]
@@ -73,12 +73,6 @@ impl Sink {
 	/// The encoder name in use, e.g. `"mediafoundation"`.
 	pub fn name(&self) -> &str {
 		self.0.name()
-	}
-
-	/// The latency and compression controls the backend applied, like
-	/// [`Encoder::applied`](super::Encoder::applied).
-	pub fn applied(&self) -> &Applied {
-		self.0.applied()
 	}
 
 	/// Cut a new group at the next frame, like
@@ -158,7 +152,7 @@ mod threaded {
 	use tokio::sync::{mpsc, oneshot};
 
 	use super::super::Encoded;
-	use super::super::encoder::{Applied, Config, Encoder};
+	use super::super::encoder::{Config, Encoder};
 	use crate::worker::{Ready, Worker};
 	use crate::{Error, Frame};
 
@@ -204,7 +198,6 @@ mod threaded {
 	/// What the encode thread reports once its encoder is open.
 	pub struct Opened {
 		name: String,
-		applied: Applied,
 	}
 
 	/// Build an encoder for `config` and serve requests until the channel closes.
@@ -217,7 +210,6 @@ mod threaded {
 		// If the awaiting `open` was cancelled, give up before encoding.
 		let opened = Opened {
 			name: encoder.name().to_owned(),
-			applied: encoder.applied().clone(),
 		};
 		if !ready.ok(opened) {
 			return;
@@ -274,10 +266,6 @@ mod threaded {
 			&self.0.info().name
 		}
 
-		pub fn applied(&self) -> &Applied {
-			&self.0.info().applied
-		}
-
 		pub async fn cut(&mut self) -> Result<(), Error> {
 			self.0.request(|resp| Request::Cut { resp }).await
 		}
@@ -312,7 +300,7 @@ mod inline {
 	use std::sync::Arc;
 
 	use super::super::Encoded;
-	use super::super::encoder::{Applied, Config, Encoder};
+	use super::super::encoder::{Config, Encoder};
 	use crate::{Error, Frame};
 
 	/// An [`Encoder`] driven inline on the calling thread (see the module docs).
@@ -330,10 +318,6 @@ mod inline {
 
 		pub fn name(&self) -> &str {
 			self.0.name()
-		}
-
-		pub fn applied(&self) -> &Applied {
-			self.0.applied()
 		}
 
 		/// Async only to match the threaded `Inner`; there's no thread to hand this
@@ -444,29 +428,6 @@ mod tests {
 			!log.iter().any(|(event, _)| *event == "cut"),
 			"a refused cut still reached the codec: {log:?}"
 		);
-	}
-
-	/// What the backend applied has to survive the trip off the encode thread,
-	/// since that thread is the only place the encoder can be asked.
-	#[cfg(feature = "openh264")]
-	#[test]
-	fn the_applied_preset_crosses_the_thread() {
-		let mut config = Config::new(320, 240, crate::Rate::new(30, 1).unwrap());
-		config.kind = Kind::Software;
-		config.preset = super::super::Preset::Quality;
-		let sink = pollster::block_on(Sink::open(&config)).unwrap();
-		// openh264 has no Quality controls of its own, and says so.
-		assert_eq!(sink.applied().preset, Some(super::super::Preset::Balanced));
-		assert!(!sink.applied().controls.is_empty());
-	}
-
-	/// A backend that reports nothing claims no preset, rather than echoing the
-	/// one that was asked for.
-	#[test]
-	fn an_unreported_backend_claims_no_preset() {
-		let _probe = probe::exclusive();
-		let sink = pollster::block_on(Sink::open(&probe_config())).unwrap();
-		assert_eq!(sink.applied().preset, None);
 	}
 
 	/// Regression: a queued request runs on the encode thread whether or not the

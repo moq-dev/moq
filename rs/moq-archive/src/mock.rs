@@ -1,11 +1,9 @@
-//! A test object store: any inner store plus an operation log, injected failures, and
-//! S3-style paginated listing.
+//! A test object store: any inner store plus an operation log and injected failures.
 
 use std::sync::{Arc, Mutex};
 
 use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
-use object_store::list::{PaginatedListOptions, PaginatedListResult, PaginatedListStore};
 use object_store::memory::InMemory;
 use object_store::path::Path;
 use object_store::{
@@ -13,16 +11,13 @@ use object_store::{
 	PutOptions, PutPayload, PutResult,
 };
 
-/// S3's ListObjectsV2 page limit.
-const MAX_KEYS: usize = 1000;
-
 /// One call made against a [`Mock`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Op {
 	Get(String),
 	Put(String),
 	Delete(String),
-	/// A streaming or paginated listing, with its prefix and exclusive offset.
+	/// A streaming listing, with its prefix and exclusive offset.
 	List {
 		prefix: String,
 		offset: Option<String>,
@@ -304,44 +299,5 @@ impl ObjectStore for Mock {
 
 	async fn copy_opts(&self, from: &Path, to: &Path, options: CopyOptions) -> object_store::Result<()> {
 		self.inner.copy_opts(from, to, options).await
-	}
-}
-
-/// ListObjectsV2 semantics: a raw string prefix, lexical order, an exclusive `start-after`
-/// offset, at most 1000 keys, and an opaque continuation token that resumes after the last key.
-#[async_trait::async_trait]
-impl PaginatedListStore for Mock {
-	async fn list_paginated(
-		&self,
-		prefix: Option<&str>,
-		opts: PaginatedListOptions,
-	) -> object_store::Result<PaginatedListResult> {
-		if opts.delimiter.is_some() {
-			return Err(unsupported("delimiter"));
-		}
-		self.log(Op::List {
-			prefix: prefix.unwrap_or_default().to_string(),
-			offset: opts.offset.clone(),
-		});
-
-		let mut metas: Vec<ObjectMeta> = self.inner.list(None).try_collect().await?;
-		metas.sort_by(|a, b| a.location.as_ref().cmp(b.location.as_ref()));
-		let after = opts.page_token.or(opts.offset);
-		metas.retain(|meta| {
-			let key = meta.location.as_ref();
-			prefix.is_none_or(|prefix| key.starts_with(prefix)) && after.as_deref().is_none_or(|after| key > after)
-		});
-
-		let take = opts.max_keys.unwrap_or(MAX_KEYS).clamp(1, MAX_KEYS);
-		let page_token = (metas.len() > take).then(|| metas[take - 1].location.to_string());
-		metas.truncate(take);
-		Ok(PaginatedListResult {
-			result: ListResult {
-				objects: metas,
-				common_prefixes: Vec::new(),
-				extensions: Default::default(),
-			},
-			page_token,
-		})
 	}
 }

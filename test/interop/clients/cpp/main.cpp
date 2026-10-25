@@ -241,14 +241,17 @@ int publish(
     ok(audio->finish(), "audio finish");
     ok(media->finish(), "video finish");
     if (!finish_ack.empty()) {
-        const auto started = Clock::now();
-        auto finish = ok(broadcast->finish(), "broadcast finish");
-        const auto linger = std::chrono::microseconds(finish->linger_us());
-        if (linger.count() <= 0) fail("finished media has no linger");
-        std::printf("finish ready linger_us=%llu\n", static_cast<unsigned long long>(finish->linger_us()));
+        // Finishing the catalog ends the content; the broadcast stays up for the late readers
+        // until the close takes it offline.
+        ok(catalog->finish(), "catalog finish");
+        const auto linger = std::chrono::seconds(10);
+        std::printf(
+            "finish ready linger_us=%llu\n",
+            static_cast<unsigned long long>(std::chrono::microseconds(linger).count())
+        );
         std::fflush(stdout);
-        ok(finish->wait().get(), "finish linger");
-        if (Clock::now() - started < linger) fail("finish wait ended before its linger");
+        std::this_thread::sleep_for(linger);
+        ok(broadcast->close(), "broadcast close");
         std::puts("finish ended");
         std::fflush(stdout);
         auto health = ok(session->publish()->create_broadcast(path + ".health"), "health broadcast");

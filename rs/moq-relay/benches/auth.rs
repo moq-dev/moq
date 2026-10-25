@@ -16,10 +16,10 @@ fn grant(prefix: &str) -> Grant {
 
 struct Fixture {
 	_connections: Vec<moq_tokio::Connection>,
-	_tokens: Vec<moq_tokio::connection::auth::Auth>,
+	_tokens: Vec<moq_net::auth::Auth>,
 	producers: Vec<lease::Producer>,
 	selected: usize,
-	watch: moq_tokio::connection::auth::Watch,
+	watch: moq_net::auth::Watch,
 	tasks: Vec<tokio::task::JoinHandle<()>>,
 	alternate: bool,
 }
@@ -69,9 +69,8 @@ impl Fixture {
 			}
 		});
 		let mut config = moq_tokio::connect::Config::default();
-		config.once = Some(true);
 		config.version = vec!["moq-transport-22".parse().unwrap()];
-		let client = config.init(Default::default()).unwrap();
+		let client = config.init(Default::default()).unwrap().with_reconnect(false);
 		let url: url::Url = format!("tcp://127.0.0.1:{port}/").parse().unwrap();
 		let mut connections = Vec::new();
 		let mut retained = Vec::new();
@@ -83,7 +82,7 @@ impl Fixture {
 			producers.push(receive.recv().await.unwrap().1);
 			let auth = connection.auth();
 			let added = futures::future::join_all((0..tokens).map(|index| auth.add(format!("token{index}")))).await;
-			let added: Vec<_> = added.into_iter().map(Result::unwrap).collect();
+			let added: Vec<_> = added.into_iter().map(|added| added.unwrap().0).collect();
 			if session == 0 {
 				let mut observed = added.last().unwrap().grant();
 				observed.changed().await.unwrap();
@@ -148,7 +147,7 @@ fn refresh(c: &mut Criterion) {
 /// so requests beyond the fixed production window wait for a verification slot.
 struct Queue {
 	_connection: moq_tokio::Connection,
-	auth: moq_tokio::connection::auth::Handle,
+	auth: moq_net::auth::Handle,
 	admissions: auth::Admissions,
 	presented: usize,
 	tasks: Vec<tokio::task::JoinHandle<()>>,
@@ -181,9 +180,8 @@ impl Queue {
 			}
 		});
 		let mut config = moq_tokio::connect::Config::default();
-		config.once = Some(true);
 		config.version = vec!["moq-transport-22".parse().unwrap()];
-		let client = config.init(Default::default()).unwrap();
+		let client = config.init(Default::default()).unwrap().with_reconnect(false);
 		let url: url::Url = format!("tcp://127.0.0.1:{port}/").parse().unwrap();
 		let (connection, ()) = tokio::join!(async { client.connect(url).established().await.unwrap() }, async {
 			let admission = admissions.next().await.unwrap();
