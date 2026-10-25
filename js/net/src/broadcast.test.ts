@@ -1,9 +1,8 @@
 import { expect, setSystemTime, test } from "bun:test";
 import { Milli } from "@moq/clock";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
-import { GroupTooLarge, NotFound, ProtocolViolation, TimestampMismatch } from "./error.ts";
+import { GroupTooLarge, NotFound } from "./error.ts";
 import { MAX_GROUP_FRAMES } from "./group.ts";
-import { TrackSequences } from "./internal.ts";
 import { textFrame } from "./mock.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import type { Request as TrackRequest } from "./track.ts";
@@ -98,80 +97,9 @@ test("a disposed staged track refuses a later commit", async () => {
 	await expect(info).rejects.toThrow("staged track dropped");
 });
 
-// A replacement continues the name's timeline, so its groups can't start before the highest one an
-// earlier producer checked, while a new broadcast starts over.
-test("a replacement producer refuses a rewind past its predecessor", () => {
-	const broadcast = new BroadcastProducer();
-	const first = broadcast.createTrack("media", { timescale: Timescale.MILLI });
-	first.appendGroup().writeFrame(textFrame("a", Timestamp.fromMillis(1000)));
-	first.close();
-
-	const second = broadcast.createTrack("media", { timescale: Timescale.MILLI });
-	const group = second.createGroup(1);
-	expect(() => group.writeFrame(textFrame("b", Timestamp.fromMillis(500)))).toThrow(TimestampMismatch);
-	group.writeFrame(textFrame("b", Timestamp.fromMillis(1000)));
-
-	const next = new BroadcastProducer();
-	const track = next.createTrack("media", { timescale: Timescale.MILLI });
-	track.appendGroup().writeFrame(textFrame("c", Timestamp.fromMillis(500)));
-
-	second.close();
-	broadcast.close();
-	next.close();
-});
-
-// A replacement that closes before writing anything still ends past its predecessor's groups:
-// an end below them would contradict the ones subscribers already received.
-test("an empty replacement ends past its predecessor's groups", async () => {
-	const broadcast = new BroadcastProducer();
-	const first = broadcast.createTrack("media", { timescale: Timescale.MILLI });
-	first.appendGroup().close();
-	first.close();
-
-	const second = broadcast.createTrack("media", { timescale: Timescale.MILLI });
-	const subscriber = second.subscribe();
-	expect(() => second.finishAt({ group: 0, frame: 0 })).toThrow(ProtocolViolation);
-	expect(() => second.finishAt({ group: 0, frame: 1 })).toThrow(ProtocolViolation);
-	second.close();
-	expect(await subscriber.finished()).toEqual({ group: 1, frame: 0 });
-	broadcast.close();
-});
-
-test("a removed producer writes nothing once its replacement claims the name", async () => {
-	const broadcast = new BroadcastProducer();
-	const first = broadcast.createTrack("media", { timescale: Timescale.MILLI });
-	first.appendGroup().close();
-	broadcast.removeTrack("media");
-
-	const second = broadcast.createTrack("media", { timescale: Timescale.MILLI });
-	const subscriber = second.subscribe();
-	second.close();
-	expect(() => first.appendGroup()).toThrow("replaced");
-	expect(() => first.createGroup(1)).toThrow("replaced");
-	expect(() => first.appendDatagram(Timestamp.fromMillis(0), new Uint8Array())).toThrow("replaced");
-	expect(await subscriber.finished()).toEqual({ group: 1, frame: 0 });
-	first.close();
-	broadcast.close();
-});
-
-test("a removed producer's abort ignores its replacement's groups", async () => {
-	const broadcast = new BroadcastProducer();
-	const first = broadcast.createTrack("media", { timescale: Timescale.MILLI });
-	first.finishAt({ group: 2, frame: 0 });
-	broadcast.removeTrack("media");
-
-	const second = broadcast.createTrack("media", { timescale: Timescale.MILLI });
-	for (let i = 0; i < 3; i++) second.appendGroup().close();
-	const abort = new Error("cut off");
-	first.close(abort);
-	expect(first.closed.peek()).toBe(abort);
-	second.close();
-	broadcast.close();
-});
-
-// A name keeps one sequence namespace across producer replacements. The application owns where a
-// replacement starts: an append that would reuse an earlier producer's sequence throws.
-test("a replacement producer refuses to append a sequence the name already wrote", async () => {
+// A broadcast keeps nothing of a name once its track is gone: a replacement numbers and times its
+// groups from scratch, and the application owns keeping them past its predecessor's.
+test("a replacement producer starts over", async () => {
 	const broadcast = new BroadcastProducer();
 
 	// Pull before subscribing: a broadcast nobody serves on demand answers NotFound instead.
@@ -179,39 +107,28 @@ test("a replacement producer refuses to append a sequence the name already wrote
 	const firstSubscriber = broadcast.track("media").subscribe();
 	const firstRequest = await firstPull;
 	if (!firstRequest) throw new Error("expected first request");
-	const firstProducer = firstRequest.accept({ timescale: Timescale.MILLI });
-	expect(firstProducer.appendGroup().sequence).toBe(0);
-	expect(firstProducer.appendDatagram(Timestamp.fromMillis(0), new Uint8Array())).toBe(1);
-	firstProducer.createGroup(8);
-	firstProducer.insertDatagram(12, Timestamp.fromMillis(0), new Uint8Array());
+	const first = firstRequest.accept({ timescale: Timescale.MILLI });
+	const group = first.createGroup(8);
+	group.writeFrame(textFrame("a", Timestamp.fromMillis(1000)));
+	group.close();
 	firstSubscriber.close();
-	firstProducer.close();
+	first.close();
 
 	const secondSubscriber = broadcast.track("media").subscribe();
 	const secondRequest = await wireOf(broadcast).requested();
 	if (!secondRequest) throw new Error("expected second request");
-	const secondProducer = secondRequest.accept({ timescale: Timescale.MILLI });
-	expect(() => secondProducer.appendGroup()).toThrow("duplicate sequence");
-	expect(() => secondProducer.appendDatagram(Timestamp.fromMillis(0), new Uint8Array())).toThrow(
-		"duplicate sequence",
-	);
-
-	// An explicit first write picks the start, and appends continue from there.
-	secondProducer.createGroup(13);
-	expect(secondProducer.appendGroup().sequence).toBe(14);
-
-	const nextGeneration = new BroadcastProducer();
-	const nextPull = wireOf(nextGeneration).requested();
-	const nextSubscriber = nextGeneration.track("media").subscribe();
-	const nextRequest = await nextPull;
-	if (!nextRequest) throw new Error("expected next-generation request");
-	expect(nextRequest.accept({ timescale: Timescale.MILLI }).appendGroup().sequence).toBe(0);
-
+	const second = secondRequest.accept({ timescale: Timescale.MILLI });
+	const appended = second.appendGroup();
+	expect(appended.sequence).toBe(0);
+	appended.writeFrame(textFrame("b", Timestamp.fromMillis(500)));
 	secondSubscriber.close();
-	secondProducer.close();
-	nextSubscriber.close();
+	second.close();
+
+	broadcast.removeTrack("media");
+	const third = broadcast.createTrack("media", { timescale: Timescale.MILLI });
+	third.finishAt({ group: 0, frame: 0 });
+	third.close();
 	broadcast.close();
-	nextGeneration.close();
 });
 
 test("createTrack answers a queued request", async () => {
@@ -266,69 +183,6 @@ test("createTrack does not take over a request a handler already pulled", async 
 	// The handler holds it, so the name stays duplicate until it answers, as in Rust.
 	expect(() => broadcast.createTrack("media")).toThrow("duplicate track");
 	request.reject();
-	broadcast.close();
-});
-
-test("created and requested tracks share a name's sequences", async () => {
-	const broadcast = new BroadcastProducer();
-	const first = broadcast.createTrack("media", { timescale: Timescale.MILLI });
-	expect(first.appendGroup().sequence).toBe(0);
-	first.createGroup(8);
-	first.insertDatagram(12, Timestamp.fromMillis(0), new Uint8Array());
-	first.close();
-
-	// A replacement refuses to append past nothing, since that would reuse every explicit write.
-	const second = broadcast.createTrack("media", { timescale: Timescale.MILLI });
-	expect(() => second.appendGroup()).toThrow("duplicate sequence");
-	second.createGroup(13);
-	second.close();
-
-	// An on-demand producer checks the same namespace, and so does a later created track.
-	broadcast.removeTrack("media");
-	const pulled = wireOf(broadcast).requested();
-	const subscriber = broadcast.track("media").subscribe();
-	const request = await pulled;
-	if (!request) throw new Error("expected request");
-	const requested = request.accept({ timescale: Timescale.MILLI });
-	expect(() => requested.appendDatagram(Timestamp.fromMillis(0), new Uint8Array())).toThrow("duplicate sequence");
-	requested.insertDatagram(14, Timestamp.fromMillis(0), new Uint8Array());
-	subscriber.close();
-	requested.close();
-
-	const later = broadcast.createTrack("media", { timescale: Timescale.MILLI });
-	expect(() => later.appendGroup()).toThrow("duplicate sequence");
-	later.close();
-
-	// Only a new broadcast starts over.
-	const next = new BroadcastProducer();
-	expect(next.createTrack("media", { timescale: Timescale.MILLI }).appendGroup().sequence).toBe(0);
-	broadcast.close();
-	next.close();
-});
-
-test("names that never wrote leave nothing behind", () => {
-	const sequences = new TrackSequences();
-	sequences.get("written").next = 1;
-	const held = sequences.get("held");
-	held.holders = 1;
-
-	// A peer asking for arbitrary names cannot grow the map: unused names are swept as it grows.
-	for (let i = 0; i < 1000; i++) sequences.get(`unused-${i}`);
-	expect(sequences.size).toBeLessThan(64);
-
-	// Written and held names survive every sweep.
-	expect(sequences.get("written").next).toBe(1);
-	expect(sequences.get("held")).toBe(held);
-});
-
-test("a written name refuses to reuse its sequences after many other names", () => {
-	const broadcast = new BroadcastProducer();
-	const written = broadcast.createTrack("written");
-	written.appendGroup().close();
-	written.close();
-	for (let i = 0; i < 1000; i++) broadcast.createTrack(`unused-${i}`).close();
-
-	expect(() => broadcast.createTrack("written").appendGroup()).toThrow("duplicate sequence");
 	broadcast.close();
 });
 
