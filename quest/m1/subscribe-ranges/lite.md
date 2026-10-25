@@ -2,46 +2,32 @@
 
 ## Goal
 
-FETCH is gone from lite-07, and a relay fills a lite-07 upstream by
-subscribing to the missing ranges. Older wires and moq-transport carry the
-anchors they can, and refuse only the rest.
+A relay fills a lite-07 upstream by subscribing to the missing ranges, and a
+covered bounded lite-07 subscription ends without parking. Older wires and
+moq-transport carry the anchors they can, and refuse only the rest. FETCH
+stays on lite-07 until [JS ranges](/quest/m1/subscribe-ranges/js.md) removes
+it from both implementations.
 
 ## Plan
 
-Before implementing the remainder, settle its scope with the
-[JS ranges](/quest/m1/subscribe-ranges/js.md) quest. JS still serves and requests
-FETCH on lite-07: `js/net/src/lite/subscriber.ts` `fetchGroup`/`#fetchSetup`
-emits `StreamId.Fetch`, `js/net/src/lite/connection.ts` dispatches it, and
-`js/net/src/lite/fetch.ts` accepts it. A Rust-only removal would therefore
-remove a current cross-language capability on the explicitly offered WIP
-version. JS ranges currently Requires this quest, so the plans cannot leave
-that migration to an unchanged child while calling this wire change complete.
+Decided 2026-10-25 (maintainer, on
+[moq-dev/moq#6807](https://github.com/moq-dev/moq/pull/6807)):
 
-Options for the maintainer:
-
-- Recommended: land the Rust range-fill and completion implementation first,
-  then move final FETCH removal in both implementations to JS ranges. This
-  keeps the two implementation rollouts independently landable; it changes this
-  quest's Goal and the JS quest's boundary only after approval.
-- Keep FETCH removal here and include the required JS request/response
-  migration in this PR. The remaining public JS range API and dynamic producer
-  work can stay with JS ranges, but this PR must identify that boundary and
-  preserve every currently supported lite-07 fetch consumer.
-
-Also confirm the bounded-subscription contract before changing it. This plan
-expects a lite-07 FIN without SUBSCRIBE_END when ranges are covered, while
-[Fetch as a range](/quest/m1/subscribe-ranges/fetch-range.md) says wire
-publishers keep parking so an update can widen the range. Current
-`lite/publisher.rs` `TrackRun::update` treats the end as a serving cap and
-`model/track.rs` `TrackState::poll_next_in_range` explicitly parks at it;
-`lite/subscriber.rs` `ServeLoop::poll` refuses a FIN without SUBSCRIBE_END on
-lite-05 and later. The draft's Subscribe section also requires SUBSCRIBE_END
-before a publisher FIN, apart from subscriber cancellation. Recommendation:
-make bounded completion an explicit lite-07 exception and preserve parking on
-published lite versions and moq-transport. Keeping all wire subscriptions
-parked is the alternative and needs a distinct completion mechanism for a
-bounded fill. A subscription completing must not declare its cached track
-finished or reset a group stream still being read.
+- **FETCH removal moves to JS ranges.** JS still requests and serves wire
+  FETCH on lite-07 (`track.Consumer.fetchGroup` emits `StreamId.Fetch`, and
+  `lite/connection.ts` dispatches it), so a Rust-only removal would drop a
+  current cross-language capability. This quest lands the Rust range fill and
+  bounded completion; the coordinated Rust and JS removal, with its draft
+  change, lands in JS ranges. Keeping the removal here with the JS
+  request/response migration was rejected.
+- **A covered bounded subscription FINs on lite-07.** Once every range has a
+  bounded end and every group in them is delivered or named by
+  SUBSCRIBE_DROP, the lite-07 publisher FINs without SUBSCRIBE_END. The FIN
+  ends the subscription, never the track: the subscriber settles its tail,
+  keeps the cached copy, and resets no group stream still being read.
+  Published lite versions and moq-transport keep parking, since their
+  subscribers read a FIN as the track's end. Parking on every wire with a
+  separate bounded-fill completion was rejected.
 
 Lite-07 SUBSCRIBE and SUBSCRIBE_UPDATE already carry the range list
 (`lite::Range`, typed anchors), and the publisher serves it from the model.
@@ -64,11 +50,9 @@ fetches of an open or previously cut group (`catalog_handover` fetch tests,
 - A relay serving the fill from its own cut copy has the same problem one hop
   up.
 
-The intended bounded-completion path settles the subscription tail and keeps
-the copy once every owed range is covered; the contract above must first be
-aligned across the quest plans, the draft, and both implementations. The Rust
-copy currently sends a relative or time end as open, since nothing names a
-resolved end and it resolves the end itself (`wire_ranges`).
+The Rust copy sends a relative or time end as open, since nothing names a
+resolved end and it resolves the end itself (`wire_ranges`), so only absolute
+bounded ranges complete upstream.
 
 moq-transport's relative offsets differ by one: draft-20 `Relative(0)` is
 the next group and `Relative(1)` the current one, so an open-ended
@@ -81,9 +65,8 @@ Each mapping that makes a wire carry an anchor lifts that wire's
 `Unsupported` refusal for it, and extends the per-wire table in
 `rs/moq-net/tests/integration/range_anchors.rs`.
 
-Update `drafts/draft-lcurley-moq-lite.md` with the FETCH removal and its
-lite-07 changelog bullets (FETCH max age and epoch). Published versions
-(lite-03..06) keep FETCH. Run `just drafts check` and `just test interop --all`.
+Update `drafts/draft-lcurley-moq-lite.md` with each wire change here. Run
+`just drafts check` and `just test interop --all`.
 
 Decided 2026-10-22 (maintainer): SUBSCRIBE_OK carries the resolved start for
 a relative range start, so a reader's ordered cursor takes its floor from it
@@ -92,3 +75,4 @@ a relative range start, so a reader's ordered cursor takes its floor from it
 ## Related
 
 - [Container reads drop backfill](/quest/m1/read-backfill.md) - floors its ordered cursor on the resolved start
+- [JS ranges](/quest/m1/subscribe-ranges/js.md) - removes FETCH from lite-07 in both implementations once this lands
