@@ -9,16 +9,18 @@ queue still runs the flake check in full.
 
 ## Plan
 
-Seen 2026-10-24/25 in every quest-spawn agent: `check:flake` (`sh/dispatch.sh`)
-runs `nix flake check`, whose github-runner VM test (`nix/runner/test.nix`)
-fails with `unshare ... uid_map: Operation not permitted`. That failure cancels
-other lanes (kt, js, rs tests), so agents fell back to partial checks and
-reported them as `just check`.
+Implemented in [moq-dev/moq#6823](https://github.com/moq-dev/moq/pull/6823).
+The dispatcher finishes independent lanes and modules after failures while
+retaining a failing exit status. Local Linux checks use a fresh, local-only
+Nix derivation to probe repart's `unshare --map-root-user` invocation; only
+its explicit namespace-refusal marker skips the flake module. Strict CI
+still runs the complete `nix flake check` without a probe.
 
-- Probe for user namespaces once, up front, and report the flake module as
-  skipped with that reason; never as passed.
-- Alternatively split the VM test out of the default flake check and run it
-  only where it can; pick whichever keeps `just ci` in the queue unchanged.
-- One module failing must not cancel unrelated lanes either way.
+The same binary succeeds in the host shell but fails to write `uid_map`
+inside the Nix builder, so a shell-only probe would misclassify this host.
+The 24 dispatcher tests, ShellCheck, shfmt, and nixfmt checks passed.
+
+Remaining: run the complete local and strict dispatch, address findings,
+then remove this quest and its links when validation completes.
 
 Public API: none. Wire: none.
