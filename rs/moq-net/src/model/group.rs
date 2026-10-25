@@ -4645,7 +4645,10 @@ mod test {
 		producer.finish().unwrap();
 		assert!(matches!(producer.poll_closed(&waiter), Poll::Ready(Ok(()))));
 		assert!(matches!(demand.poll_closed(&waiter), Poll::Ready(Ok(()))));
-		assert!(handle.poll_aborted(&waiter).is_pending(), "a finish alone frees nothing");
+		assert!(
+			handle.poll_aborted(&waiter).is_pending(),
+			"a finish alone frees nothing"
+		);
 		assert!(consumer.read_frame().now_or_never().unwrap().unwrap().is_some());
 
 		producer.abort(Error::Cancel).unwrap();

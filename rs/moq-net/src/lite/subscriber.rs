@@ -565,7 +565,9 @@ impl SubscriptionCleanup {
 		for (_, entry) in self.0.lock().drain() {
 			let _ = match entry.tail.read().is_ended() {
 				true => entry.producer.finish(),
-				false => entry.producer.abort(Error::Stream(crate::StreamError::Session(crate::SessionError::Cancel))),
+				false => entry
+					.producer
+					.abort(Error::Stream(crate::StreamError::Session(crate::SessionError::Cancel))),
 			};
 		}
 	}
@@ -2986,7 +2988,10 @@ mod tests {
 				}
 				_ => {
 					assert!(matches!(res, Err(Error::ProtocolViolation)), "{version:?}: {res:?}");
-					assert!(matches!(track.closed().now_or_never(), Some(Err(Error::ProtocolViolation))));
+					assert!(matches!(
+						track.closed().now_or_never(),
+						Some(Err(Error::ProtocolViolation))
+					));
 				}
 			}
 		}

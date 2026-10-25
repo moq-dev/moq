@@ -126,7 +126,7 @@ const ticker = setInterval(() => {
 		payload: new TextEncoder().encode(String(group.sequence)),
 		timestamp: Moq.Time.Timestamp.now(),
 	});
-	group.close();
+	group.finish();
 	lastPublished = group.sequence;
 }, GROUP_INTERVAL_MS);
 

@@ -553,8 +553,8 @@ impl Driver {
 		tokio::select! {
 			biased;
 			changed = desired_changed(&self.desired, revision) => changed.is_some(),
-			err = track.closed() => {
-				log_track_ended(err);
+			closed = track.closed() => {
+				log_track_ended(closed);
 				false
 			}
 		}
@@ -811,7 +811,7 @@ async fn until_wanted(demand: &mut moq_net::track::Demand, wanted: bool) -> bool
 			Ok(next) if next.is_some() == wanted => return true,
 			Ok(_) => {}
 			Err(err) => {
-				log_track_ended(err);
+				log_track_ended(Err(err));
 				return false;
 			}
 		}
@@ -1193,9 +1193,14 @@ impl Supervisor {
 	}
 }
 
-/// An application dropping or closing its producer ends publishing normally;
-/// a specific abort (such as a transport reset) stays visible in diagnostics.
-fn log_track_ended(err: moq_net::Error) {
+/// A finished track, or an application dropping or closing its producer, ends
+/// publishing normally; a specific abort (such as a transport reset) stays
+/// visible in diagnostics.
+fn log_track_ended(outcome: Result<(), moq_net::Error>) {
+	let Err(err) = outcome else {
+		tracing::debug!("audio track finished; stopping capture");
+		return;
+	};
 	if matches!(err, moq_net::Error::Dropped | moq_net::Error::Closed) {
 		tracing::debug!("audio track no longer announced; stopping capture");
 	} else {

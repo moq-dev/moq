@@ -3880,10 +3880,7 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 				let Some(io) = tracks.get_mut(&name) else { continue };
 				io.copy = None;
 				io.held = None;
-				io.closed = matches!(
-					result,
-					Err(Error::Stream(StreamError::Session(SessionError::Cancel)))
-				);
+				io.closed = matches!(result, Err(Error::Stream(StreamError::Session(SessionError::Cancel))));
 				Event::TrackEnded {
 					track: name,
 					source,

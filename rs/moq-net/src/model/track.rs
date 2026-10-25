@@ -13074,7 +13074,9 @@ mod test {
 		group
 			.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"b"))
 			.unwrap();
-		producer.abort(Error::Stream(StreamError::Session(crate::SessionError::Cancel))).unwrap();
+		producer
+			.abort(Error::Stream(StreamError::Session(crate::SessionError::Cancel)))
+			.unwrap();
 		assert!(matches!(
 			consumer.poll_complete(&kio::Waiter::noop()),
 			Poll::Ready(Err(_))
@@ -13098,7 +13100,10 @@ mod test {
 		producer.append_group().unwrap().finish().unwrap();
 		assert!(matches!(producer.poll_closed(&waiter), Poll::Ready(Ok(()))));
 		assert!(matches!(demand.closed().now_or_never(), Some(Ok(()))));
-		assert!(producer.poll_aborted(&waiter).is_pending(), "lower groups may still arrive");
+		assert!(
+			producer.poll_aborted(&waiter).is_pending(),
+			"lower groups may still arrive"
+		);
 
 		producer.clone().abort(Error::Cancel).unwrap();
 		assert!(matches!(producer.poll_closed(&waiter), Poll::Ready(Ok(()))));
