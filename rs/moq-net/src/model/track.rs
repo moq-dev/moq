@@ -1336,7 +1336,7 @@ impl TrackState {
 	) -> Option<&'a Slot> {
 		loop {
 			match select(self) {
-				Some(slot) if slot.group.poll_closed(waiter).is_ready() && slot.group.is_aborted() => continue,
+				Some(slot) if slot.group.poll_aborted(waiter).is_ready() => continue,
 				slot => return slot,
 			}
 		}
@@ -1494,8 +1494,7 @@ impl TrackState {
 			// edge again, so each pass resolves a lower one.
 			if let Some(live) = edge.presentation
 				&& let Some(slot) = self.lookup.get(&live.sequence)
-				&& slot.group.poll_closed(waiter).is_ready()
-				&& slot.group.is_aborted()
+				&& slot.group.poll_aborted(waiter).is_ready()
 			{
 				continue;
 			}

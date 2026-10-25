@@ -1058,7 +1058,7 @@ impl GroupRecv {
 						if let Poll::Ready(err) = track.poll_closed(waiter) {
 							break 'serve Err(err);
 						}
-						if let Poll::Ready(err) = group.handle().poll_closed(waiter) {
+						if let Poll::Ready(err) = group.handle().poll_aborted(waiter) {
 							break 'serve Err(err);
 						}
 						match ingest.poll(&mut self.reader, group, waiter) {

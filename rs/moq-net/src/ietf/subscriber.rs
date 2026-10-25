@@ -4482,7 +4482,7 @@ impl Subscriber {
 				if let Poll::Ready(err) = track.poll_closed(waiter) {
 					return Poll::Ready(Err(err));
 				}
-				if let Poll::Ready(err) = observing.poll_closed(waiter) {
+				if let Poll::Ready(err) = observing.poll_aborted(waiter) {
 					return Poll::Ready(Err(err));
 				}
 				ingest.poll(stream, &mut producer, waiter)
@@ -5633,7 +5633,7 @@ impl Subscriber {
 				if let Poll::Ready(res) = waiter.poll_future(receive.as_mut()) {
 					return Poll::Ready(res);
 				}
-				closed.poll_closed(waiter).map(Err)
+				closed.poll_aborted(waiter).map(Err)
 			})
 			.await
 		};
@@ -16518,7 +16518,7 @@ mod joining_fetch_tests {
 			}
 			if !complete {
 				assert!(
-					matches!(observed.poll_closed(&kio::Waiter::noop()), Poll::Ready(Error::Cancel)),
+					matches!(observed.poll_closed(&kio::Waiter::noop()), Poll::Ready(Err(Error::Cancel))),
 					"partial group must abort"
 				);
 			}
