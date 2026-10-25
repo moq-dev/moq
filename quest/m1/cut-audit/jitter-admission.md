@@ -3,8 +3,8 @@
 ## Goal
 
 The TS, MKV, and FLV exports' jitter buffer stays bounded by construction:
-a track is read only while its next frame is due within the delay plus its
-lead, so a track whose timestamps outrun real time is held back in its
+a track is read only while its newest queued frame is due within the delay
+plus its lead, so a track whose timestamps outrun real time is held back in its
 source as backpressure instead of queued without bound beside an honest
 track.
 
@@ -22,8 +22,12 @@ video at 3x, the buffer grew linearly from 500 frames at 20 s to 3,006 at
 unbounded while an honest one sits beside it. Affects `ts/export.rs:442`,
 `mkv/export.rs:485`, and the FLV export.
 
-Make admission the bound: a track is full once its front frame is due later
-than now plus delay plus its lead. No frame-count cap. Alternatively charge
+Make admission the bound: a track is full once its newest queued frame (the
+back of its queue, or the frame about to be admitted) is due later than now
+plus delay plus its lead. Judging the front frame would not work: in the
+scenario above the oldest video frame stays near its deadline while newer
+frames pile up behind it, and `Stream::fill` keeps reading while
+`jitter.full(name)` is false. No frame-count cap. Alternatively charge
 a track whose lead keeps growing as a source fault.
 
 Then evaluate the larger simplification: about a dozen fixes to the export
