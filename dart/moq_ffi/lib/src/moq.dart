@@ -8,9 +8,7 @@ import "dart:ffi";
 import "dart:io" show Platform, File, Directory;
 import "dart:isolate";
 import "dart:typed_data";
-
 import "package:ffi/ffi.dart";
-
 import "uniffi_runtime.dart";
 export "uniffi_runtime.dart";
 
@@ -14141,6 +14139,13 @@ class FfiConverterDuration {
   }
 
   static int write(Duration value, Uint8List buf) {
+    if (value.isNegative) {
+      throw ArgumentError.value(
+        value,
+        "value",
+        "Duration must not be negative",
+      );
+    }
     final bytes = buf.buffer.asByteData(buf.offsetInBytes, 12);
     bytes.setUint64(0, value.inSeconds);
     final ms = (value.inMicroseconds - (value.inSeconds * 1000000)) * 1000;
