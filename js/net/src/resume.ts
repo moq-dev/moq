@@ -17,6 +17,11 @@
  * yet get it). Nothing under the bound is waited for past the reader's budget. Datagrams are
  * ephemeral, so no copy is kept for them: a reader that never asked for a group keeps none.
  *
+ * A new copy is asked from where the reader got to, so it never has the groups below the reader's
+ * local floor that the copies it replaced cached. Lowering that floor asks the newest route for
+ * them through a backfill: another copy of that route, bounded to the groups the floor newly
+ * covers, and kept like a replaced copy.
+ *
  * A group carries on across the switch through its {@link Recover}: once its copy stalls while a
  * newer route serves, it continues from the serving route's copy of the same group at the same
  * frame, found in that copy's cache or fetched from it. Once its copy fails, any other copy still
@@ -271,8 +276,13 @@ class Reader implements ResumeSource {
 	#shell: ResumeShell;
 	/** The route generation last read. */
 	#generation?: number;
-	/** Oldest first: the last one is the serving route's, when it is subscribed. */
+	/**
+	 * Oldest first, except that a backfill goes before the copy of the route it backfills: the last
+	 * one is the serving route's own, when it is subscribed.
+	 */
 	#copies: Copy[] = [];
+	/** The cursor start the copies were last bounded at: a lower one asks for a backfill. */
+	#start: number;
 	/** The newest group handed out: where a new copy is asked to start. */
 	#newest?: number;
 	/** The last datagram handed out, which never ages until another supersedes it. */
@@ -315,6 +325,7 @@ class Reader implements ResumeSource {
 		this.route = route;
 		this.#shell = shell;
 		this.#record = record;
+		this.#start = shell.cursor.peek().start;
 		route.readers.add(this);
 		this.#dispose.push(
 			shell.subscription.subscribe(() => {
@@ -322,6 +333,9 @@ class Reader implements ResumeSource {
 			}),
 			shell.cursor.subscribe(() => {
 				for (const copy of this.#copies) this.#bound(copy);
+				const passed = this.#start;
+				this.#start = shell.cursor.peek().start;
+				if (this.#start < passed) this.#backfill(this.#start, passed);
 				if (this.#ended) this.#letGo(this.#delivered);
 			}),
 		);
@@ -355,8 +369,9 @@ class Reader implements ResumeSource {
 		// group they get meanwhile may be one the new route never has. See #observe.
 		for (const copy of this.#copies) copy.replaced = true;
 		// Cloned handles share closed, so a returning route reuses its subscription and
-		// leases rather than replaying its cache and retaining another copy per flap.
-		const index = this.#copies.findIndex((copy) => copy.source.from.closed === source.from.closed);
+		// leases rather than replaying its cache and retaining another copy per flap. The newest
+		// is the route's own copy, not a backfill of it.
+		const index = this.#copies.findLastIndex((copy) => copy.source.from.closed === source.from.closed);
 		if (index !== -1) {
 			const [copy] = this.#copies.splice(index, 1);
 			source.retain();
@@ -390,12 +405,12 @@ class Reader implements ResumeSource {
 		});
 	}
 
-	/** Read `copy` as the newest one, recording the properties it commits. */
-	#add(copy: Copy): void {
+	/** Read `copy` as the newest one, or at `index`, recording the properties it commits. */
+	#add(copy: Copy, index = this.#copies.length): void {
 		const { source } = copy;
 		source.retain();
 		this.#bound(copy);
-		this.#copies.push(copy);
+		this.#copies.splice(index, 0, copy);
 		const shell = this.#shell;
 		const record = this.#record;
 		copy.sub.info().then(
@@ -467,14 +482,50 @@ class Reader implements ResumeSource {
 		});
 	}
 
+	/**
+	 * Ask the newest copy's route for the groups from `start` up to `passed` under that copy's
+	 * resume point, which a lowered floor newly covers. The copies that cached them may be gone,
+	 * and that copy never asked for them, so a bounded copy of the same route asks for just those.
+	 */
+	#backfill(start: number, passed: number): void {
+		const newest = this.#copies.at(-1);
+		if (this.#closed || this.#ended || newest?.floor === undefined) return;
+		const end = Math.min(passed, newest.floor);
+		// An ordered reader never goes back, nor does any reader past its budget.
+		if (this.#delivered.covers(start, end)) return;
+		// A floor lowered again asks once.
+		const closed = newest.source.from.closed;
+		const asked = (copy: Copy) =>
+			copy.source.from.closed === closed &&
+			copy.floor !== undefined &&
+			copy.floor <= start &&
+			(copyEnd(copy) ?? Number.POSITIVE_INFINITY) >= end;
+		if (this.#copies.some(asked)) return;
+		const backfill = { floor: start, until: end - 1 };
+		this.#add(
+			{
+				generation: newest.generation,
+				source: newest.source,
+				sub: subscribe(newest.source.wire, this.route.name, this.#wire(backfill)),
+				...backfill,
+				// Bounded from the start: everything it may deliver is older than what the reader
+				// already read, so it is waited for no longer than the reader's budget.
+				replaced: true,
+				since: now(),
+				lease: 0,
+			},
+			this.#copies.length - 1,
+		);
+	}
+
 	/** Wake parked reads, so they look again and let go of what nothing needs. */
 	wake(): void {
 		this.#changed.update((n) => n + 1);
 	}
 
-	/** The reader's copy of the route at `generation`, if it subscribed one. */
+	/** The reader's copy of the route at `generation`, if it subscribed one, rather than a backfill of it. */
 	copy(generation: number): Copy | undefined {
-		return this.#copies.find((copy) => copy.generation === generation);
+		return this.#copies.findLast((copy) => copy.generation === generation);
 	}
 
 	/** The copies other than `except` whose track still holds group `sequence` unfailed, newest first. */
@@ -492,9 +543,10 @@ class Reader implements ResumeSource {
 	 * just below it: what they hold under it may be groups the new route never has, and what
 	 * is at or above it the new route delivers. Never below a group already handed out. A group
 	 * it replays, already handed out, bounds nothing: the replaced copies may still hold the next.
+	 * Nor does a backfill of the serving route.
 	 */
 	#observe(copy: Copy, sequence: number): void {
-		if (copy.generation !== this.#generation) return;
+		if (copy.replaced || copy.generation !== this.#generation) return;
 		const bound = Math.max(this.#newest ?? -1, sequence - 1);
 		for (const replaced of this.#copies) {
 			if (replaced === copy || !replaced.replaced || replaced.until !== undefined) continue;

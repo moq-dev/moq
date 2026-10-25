@@ -2341,6 +2341,68 @@ test.each(["lands", "expired"])(
 	},
 );
 
+// Lowering a resumed reader's floor offers the groups below the old floor that only a copy it
+// already let go cached: the serving route is asked for just those, whether it caches them or
+// gets them once asked. An ordered reader never goes back, so it asks for nothing.
+test.each([
+	[true, false],
+	[false, false],
+	[true, true],
+])(
+	"a lowered floor asks the serving route for a released copy's groups (cached=%p, ordered=%p)",
+	async (cached, ordered) => {
+		const front = new Front();
+		const a = new BroadcastProducer();
+		const b = new BroadcastProducer();
+		const ta = copy(a);
+		const tb = copy(b);
+		front.serve(a.consume());
+		const sub = front.consumer.track("seq").subscribe({ maxDelay: Milli(3_600_000) });
+		const inOrder = ordered ? sub.ordered() : undefined;
+		const read = () => {
+			const sequences: number[] = [];
+			const next = () => (inOrder ? inOrder.tryNextGroup() : sub.tryRecvGroup());
+			for (let group = next(); group; group = next()) {
+				sequences.push(group.sequence);
+				group.close();
+			}
+			return sequences;
+		};
+		const asked = () => tb.producer.subscription.peek()?.groups?.start?.included;
+		try {
+			sub.withRange({ start: { included: 4 } });
+			await settle();
+			for (let sequence = 0; sequence < 6; sequence++) ta.write(sequence);
+			expect(read()).toEqual([4, 5]);
+
+			if (cached) for (let sequence = 0; sequence < 6; sequence++) tb.write(sequence);
+			front.serve(b.consume());
+			await settle();
+			tb.write(6);
+			expect(read()).toEqual([6]);
+			await settle();
+			expect(ta.producer.demand().wanted.peek()).toBeUndefined();
+			expect(asked()).toBe(5);
+
+			sub.withRange({ start: { included: 1 } });
+			await settle();
+			expect(asked()).toBe(ordered ? 5 : 1);
+			if (!cached) {
+				expect(read()).toEqual([]);
+				for (let sequence = 1; sequence < 4; sequence++) tb.write(sequence);
+			}
+			expect(read()).toEqual(ordered ? [] : [1, 2, 3]);
+			tb.write(7);
+			expect(read()).toEqual([7]);
+		} finally {
+			sub.close();
+			front.consumer.close();
+			a.close();
+			b.close();
+		}
+	},
+);
+
 test("a datagram below the group floor does not keep a finite track's copy", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();
