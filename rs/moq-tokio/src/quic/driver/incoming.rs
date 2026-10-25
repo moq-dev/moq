@@ -1,13 +1,10 @@
-use std::{
-	future::{Future, IntoFuture},
-	net::{IpAddr, SocketAddr},
-	pin::Pin,
-	sync::Arc,
-	task::{Context, Poll},
-};
+use std::future::{IntoFuture, Ready, ready};
+#[cfg(test)]
+use std::net::{IpAddr, SocketAddr};
 
-use moq_quic::{ConnectionError, ConnectionId, ServerConfig};
-use thiserror::Error;
+use futures::future::Either;
+
+use moq_quic::ConnectionError;
 
 use crate::quic::driver::{
 	connection::{Connecting, Connection},
@@ -26,49 +23,32 @@ impl Incoming {
 	/// Attempt to accept this incoming connection (an error may still occur)
 	pub fn accept(mut self) -> Result<Connecting, ConnectionError> {
 		let state = self.0.take().unwrap();
-		state.endpoint.accept(state.inner, None)
-	}
-
-	/// Accept this incoming connection using a custom configuration
-	///
-	/// See [`accept()`][Incoming::accept] for more details.
-	pub fn accept_with(mut self, server_config: Arc<ServerConfig>) -> Result<Connecting, ConnectionError> {
-		let state = self.0.take().unwrap();
-		state.endpoint.accept(state.inner, Some(server_config))
+		state.endpoint.accept(state.inner)
 	}
 
 	/// Reject this incoming connection attempt
-	pub fn refuse(mut self) {
+	#[cfg(test)]
+	pub(super) fn refuse(mut self) {
 		let state = self.0.take().unwrap();
 		state.endpoint.refuse(state.inner);
 	}
 
-	/// Respond with a retry packet, requiring the client to retry with address validation
-	///
-	/// Errors if `may_retry()` is false.
-	pub fn retry(mut self) -> Result<(), RetryError> {
+	/// Retry an incoming connection in driver tests.
+	#[cfg(test)]
+	pub(super) fn retry(mut self) -> Result<(), moq_quic::RetryError> {
 		let state = self.0.take().unwrap();
-		state.endpoint.retry(state.inner).map_err(|e| {
-			RetryError(Box::new(Self(Some(State {
-				inner: e.into_incoming(),
-				endpoint: state.endpoint,
-			}))))
-		})
-	}
-
-	/// Ignore this incoming connection attempt, not sending any packet in response
-	pub fn ignore(mut self) {
-		let state = self.0.take().unwrap();
-		state.endpoint.ignore(state.inner);
+		state.endpoint.retry(state.inner)
 	}
 
 	/// The local IP address which was used when the peer established the connection
-	pub fn local_ip(&self) -> Option<IpAddr> {
+	#[cfg(test)]
+	pub(super) fn local_ip(&self) -> Option<IpAddr> {
 		self.0.as_ref().unwrap().inner.local_ip()
 	}
 
 	/// The peer's UDP address
-	pub fn remote_address(&self) -> SocketAddr {
+	#[cfg(test)]
+	pub(super) fn remote_address(&self) -> SocketAddr {
 		self.0.as_ref().unwrap().inner.remote_address()
 	}
 
@@ -77,23 +57,9 @@ impl Incoming {
 	/// This means that the sender of the initial packet has proved that they can receive traffic
 	/// sent to `self.remote_address()`.
 	///
-	/// If `self.remote_address_validated()` is false, `self.may_retry()` is guaranteed to be true.
-	/// The inverse is not guaranteed.
-	pub fn remote_address_validated(&self) -> bool {
+	#[cfg(test)]
+	pub(super) fn remote_address_validated(&self) -> bool {
 		self.0.as_ref().unwrap().inner.remote_address_validated()
-	}
-
-	/// Whether it is legal to respond with a retry packet
-	///
-	/// If `self.remote_address_validated()` is false, `self.may_retry()` is guaranteed to be true.
-	/// The inverse is not guaranteed.
-	pub fn may_retry(&self) -> bool {
-		self.0.as_ref().unwrap().inner.may_retry()
-	}
-
-	/// The original destination CID when initiating the connection
-	pub fn orig_dst_cid(&self) -> ConnectionId {
-		self.0.as_ref().unwrap().inner.orig_dst_cid()
 	}
 }
 
@@ -112,38 +78,14 @@ struct State {
 	endpoint: EndpointRef,
 }
 
-/// Error for attempting to retry an [`Incoming`] which already bears a token from a previous retry
-#[derive(Debug, Error)]
-#[error("retry() with validated Incoming")]
-pub struct RetryError(Box<Incoming>);
-
-impl RetryError {
-	/// Get the [`Incoming`]
-	pub fn into_incoming(self) -> Incoming {
-		*self.0
-	}
-}
-
-/// Basic adapter to let [`Incoming`] be `await`-ed like a [`Connecting`]
-#[derive(Debug)]
-pub struct IncomingFuture(Result<Connecting, ConnectionError>);
-
-impl Future for IncomingFuture {
-	type Output = Result<Connection, ConnectionError>;
-
-	fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-		match &mut self.0 {
-			Ok(connecting) => Pin::new(connecting).poll(cx),
-			Err(e) => Poll::Ready(Err(e.clone())),
-		}
-	}
-}
-
 impl IntoFuture for Incoming {
 	type Output = Result<Connection, ConnectionError>;
-	type IntoFuture = IncomingFuture;
+	type IntoFuture = Either<Connecting, Ready<Self::Output>>;
 
 	fn into_future(self) -> Self::IntoFuture {
-		IncomingFuture(self.accept())
+		match self.accept() {
+			Ok(connecting) => Either::Left(connecting),
+			Err(error) => Either::Right(ready(Err(error))),
+		}
 	}
 }

@@ -1,6 +1,6 @@
 //! An async QUIC driver: [`moq_quic`]'s state machine on tokio sockets and timers.
 //!
-//! Its API mirrors quinn's, plus what moq-quic adds:
+//! It exposes moq-quic streams and datagrams with:
 //! [`SendGroup`]s that schedule streams and datagrams together, [`SendStream::reset_at`] to
 //! keep a prefix reliable, [`RecvStream::poll_lease`] to hold receive credit until a message is
 //! complete, and [`Connection::set_limits`] to change flow control on a live connection.
@@ -58,23 +58,19 @@ mod work_limiter;
 pub(crate) use moq_clock::Instant;
 pub(crate) use std::time::Duration;
 
-pub use moq_quic::BloomTokenLog;
 pub use moq_quic::{
 	AckFrequencyConfig, ApplicationClose, Chunk, ClientConfig, ClosedStream, ConfigError, ConnectError,
 	ConnectionClose, ConnectionError, ConnectionId, ConnectionIdGenerator, ConnectionStats, Dir, EcnCodepoint,
-	EndpointConfig, FrameStats, FrameType, IdleTimeout, InvalidCid, MtuDiscoveryConfig, NoneTokenLog, NoneTokenStore,
-	PathStats, ServerConfig, Side, StdSystemTime, StreamId, TimeSource, TokenLog, TokenMemoryCache, TokenReuseError,
-	TokenStore, Transmit, TransportConfig, TransportErrorCode, UdpStats, ValidationTokenConfig, VarInt,
+	EndpointConfig, FrameStats, FrameType, IdleTimeout, InvalidCid, MtuDiscoveryConfig, PathStats, ServerConfig,
+	StreamId, Transmit, TransportConfig, TransportErrorCode, UdpStats, ValidationTokenConfig, VarInt,
 	VarIntBoundsExceeded, Written, crypto,
 };
 #[cfg(feature = "qlog")]
 pub use moq_quic::{QlogConfig, QlogStream};
 
-pub use crate::quic::driver::connection::{
-	AcceptBi, AcceptUni, Connecting, Connection, OpenBi, OpenUni, ReadDatagram, RemoteAddressWatcher, SendDatagramError,
-};
-pub use crate::quic::driver::endpoint::{Accept, Endpoint, EndpointStats};
-pub use crate::quic::driver::incoming::{Incoming, IncomingFuture, RetryError};
+pub use crate::quic::driver::connection::{Connecting, Connection, SendDatagramError};
+pub use crate::quic::driver::endpoint::Endpoint;
+pub use crate::quic::driver::incoming::Incoming;
 pub use crate::quic::driver::recv_stream::{Lease, ReadError, ReadExactError, ReadToEndError, RecvStream, ResetError};
 #[cfg(feature = "quic")]
 pub(crate) use crate::quic::driver::runtime::send_failed;

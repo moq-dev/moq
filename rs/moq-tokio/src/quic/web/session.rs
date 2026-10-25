@@ -363,8 +363,7 @@ impl Session {
 	/// `options` schedule it.
 	pub fn send_datagram(&self, data: Bytes, options: SendOptions<'_>) -> Result<(), SessionError> {
 		let result = if !self.header_datagram.is_empty() {
-			// Unfortunately, we need to allocate/copy each datagram because of the driver API.
-			// Pls go +1 if you care: https://github.com/quinn-rs/quinn/issues/1724
+			// The driver sends a single contiguous buffer, including the session header.
 			let mut buf = BytesMut::with_capacity(self.header_datagram.len() + data.len());
 
 			// Prepend the datagram with the header indicating the session ID.
