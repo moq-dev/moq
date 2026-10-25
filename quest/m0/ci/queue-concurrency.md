@@ -26,26 +26,23 @@ empties it on start. The self-hosted cache step keeps its mbx version stamp per
 workspace, so a runner sharing a home with another still drops its own
 workspace's state after an mbx version change.
 
-Open: how the two runners share state. A NixOS container builds through the
-host's Nix daemon by default, so the Nix store is shared in every option.
-
-1. One home under one static user (recommended): concurrent entries share
-   mbx's store, wait on a compilation the other entry is running instead of
-   repeating it, and draw on one machine-wide compile budget, which mbx
-   documents as supported
-   ([how it works](https://github.com/jdx/mr-boxington/blob/v1.25.0/docs/how-it-works.md#machine-wide-scheduling)).
-   nixpkgs gives each runner its own `DynamicUser` by default, so both need
-   the same `user` and `HOME`.
-2. A home per runner: no mutable state crosses entries, but each cache warms
-   separately, disk use doubles, and two mbx schedulers each budget the whole
-   container's CPUs.
-3. A second container: the strongest separation and its own cgroup, with the
-   costs of option 2 plus a second container to maintain.
+Decided 2026-10-25 (maintainer): ✅ one home under one static user for both
+runners. Concurrent entries share mbx's store, wait on a compilation the other
+entry is running instead of repeating it, and draw on one machine-wide compile
+budget, which mbx documents as supported
+([how it works](https://github.com/jdx/mr-boxington/blob/v1.25.0/docs/how-it-works.md#machine-wide-scheduling)).
+nixpkgs gives each runner its own `DynamicUser` by default, so both need the
+same `user` and `HOME`. Rejected: a home per runner (two cold caches, double
+the disk, two mbx schedulers each budgeting the whole container's CPUs) and a
+second container (those costs plus another container). A NixOS container
+builds through the host's Nix daemon by default, so the Nix store is shared
+either way.
 
 Remaining (maintainer, on the host):
 
 - Register a second runner in `container@moq-ci` with its own name and work
-  directory, under the chosen layout, with a fresh registration token.
+  directory, under the same static user and `HOME` as the first, with a fresh
+  registration token.
 - Size the container's share of `ci.slice`, which it shares with the `moq-pro`
   runner and a desktop, so concurrent entries do not slow each other past the
   gain. Queue entries skip `quest gate` (`sh/local.sh` execs directly under
