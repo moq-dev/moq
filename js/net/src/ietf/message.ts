@@ -1,4 +1,4 @@
-import { concat, encodeVarint, Reader, Writer } from "../stream.ts";
+import { concat, encodeVarint, Reader, type StreamVersion, Writer } from "../stream.ts";
 import { MalformedAuthToken } from "./token.ts";
 import type { IetfVersion } from "./version.ts";
 
@@ -23,8 +23,13 @@ export interface Encode {
 // Writes `msg` after the type `id` the caller picked for it, in one write, so a message that
 // fails to encode leaves nothing on the stream.
 export async function write(writer: Writer, id: number, msg: Encode, version: IetfVersion) {
-	const body = await Writer.collect(writer.version, (w) => msg.encode(w, version));
-	await writer.write(concat([encodeVarint(id, writer.version), body]));
+	await writer.write(await frame(writer.version, id, msg, version));
+}
+
+// The one chunk `write` sends, for a caller that must tell a failed encode from a failed write.
+export async function frame(stream: StreamVersion, id: number, msg: Encode, version: IetfVersion) {
+	const body = await Writer.collect(stream, (w) => msg.encode(w, version));
+	return concat([encodeVarint(id, stream), body]);
 }
 
 // Reads a message with a u16 size prefix.

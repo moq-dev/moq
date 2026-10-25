@@ -7,7 +7,7 @@ use moq_net::Timed;
 use serde::Serialize;
 use serde_json::Value;
 
-use super::{Checkpoint, Encoded, Encoder, ProducerConfig};
+use super::{Encoded, Encoder, ProducerConfig};
 use crate::Result;
 use crate::refresh::Refresh;
 
@@ -38,10 +38,6 @@ impl<T> Clone for Producer<T> {
 impl<T> Producer<T> {
 	/// Create a producer that publishes to the given track.
 	pub fn new(track: moq_net::track::Producer, config: ProducerConfig) -> Self {
-		Self::with_encoder(track, Encoder::new(config))
-	}
-
-	fn with_encoder(track: moq_net::track::Producer, encoder: Encoder<T>) -> Self {
 		Self {
 			inner: Arc::new(Mutex::new(Inner {
 				refresh: Refresh::new(&track),
@@ -50,7 +46,7 @@ impl<T> Producer<T> {
 					group: None,
 					largest: None,
 				},
-				encoder,
+				encoder: Encoder::new(config),
 				at: None,
 				finished: false,
 			})),
@@ -121,14 +117,6 @@ impl<T> Producer<T> {
 }
 
 impl<T: Serialize> Producer<T> {
-	/// Create a producer continuing `checkpoint` on the given track.
-	///
-	/// The first edit opens a group restating the checkpoint, so a reader that already holds those
-	/// records sees only what follows. Fails like [`Encoder::resume`].
-	pub fn resume(track: moq_net::track::Producer, config: ProducerConfig, checkpoint: &Checkpoint<T>) -> Result<Self> {
-		Ok(Self::with_encoder(track, Encoder::resume(config, checkpoint)?))
-	}
-
 	/// Append a record at its timestamp, or untimed when absent.
 	pub fn push<'a>(&mut self, value: impl Into<Timed<&'a T>>) -> Result<()>
 	where

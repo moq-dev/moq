@@ -302,7 +302,7 @@ pub(super) mod fixture {
 	use std::sync::Arc;
 
 	use super::*;
-	use crate::DmaBufLayout;
+	use crate::frame::DmaBufLayout;
 
 	/// The VA-API fourcc naming the same layout as a DRM format.
 	///

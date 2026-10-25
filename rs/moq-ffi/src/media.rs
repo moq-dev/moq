@@ -135,6 +135,9 @@ pub struct MoqVideo {
 	/// Whether this rendition may be selected; when false, no frames are coming.
 	#[uniffi(default = true)]
 	pub enabled: bool,
+	/// Higher values are preferred; compatibility transcodes use -1 and the default is 0.
+	#[uniffi(default = 0)]
+	pub preference: i32,
 	/// The frame rate in frames per second, when specified.
 	pub framerate: Option<f64>,
 	/// The framing used to carry this rendition.
@@ -293,8 +296,6 @@ pub enum MoqContainerFormat {
 	Ts,
 	/// Flash Video, as used by RTMP.
 	Flv,
-	/// Fragmented MP4 / CMAF, republished whole as one CMAF frame per fragment.
-	Cmaf,
 }
 
 /// What an audio publish needs: a format, its codec init bytes, and an optional label.
@@ -474,7 +475,6 @@ impl From<MoqContainerFormat> for moq_mux::import::ContainerFormat {
 	fn from(format: MoqContainerFormat) -> Self {
 		match format {
 			MoqContainerFormat::Fmp4 => Self::Fmp4,
-			MoqContainerFormat::Cmaf => Self::Cmaf,
 			MoqContainerFormat::Mkv => Self::Mkv,
 			MoqContainerFormat::Ts => Self::Ts,
 			MoqContainerFormat::Flv => Self::Flv,
@@ -526,6 +526,7 @@ pub(crate) fn convert_catalog(catalog: &moq_mux::catalog::hang::Catalog<moq_mux:
 					},
 					bitrate: config.bitrate,
 					enabled: config.enabled,
+					preference: config.preference,
 					framerate: config.framerate,
 					container: MoqContainer::from_catalog(&config.container)?,
 				},
@@ -584,6 +585,20 @@ pub(crate) fn convert_catalog(catalog: &moq_mux::catalog::hang::Catalog<moq_mux:
 #[cfg(test)]
 mod test {
 	use super::*;
+
+	#[test]
+	fn catalog_preserves_video_preference() {
+		let mut catalog = moq_mux::catalog::hang::Catalog::default();
+		for preference in [i32::MIN, -1, 0, 1, i32::MAX] {
+			let mut video = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+			video.preference = preference;
+			catalog.video.renditions.insert(preference.to_string(), video);
+		}
+		let converted = convert_catalog(&catalog);
+		for (id, video) in &catalog.video.renditions {
+			assert_eq!(converted.video[id].preference, video.preference);
+		}
+	}
 
 	#[test]
 	fn catalog_exposes_disabled_renditions() {
@@ -759,6 +774,20 @@ impl MoqMediaCatalogProducer {
 			let mut guard = state.catalog.modify()?;
 			guard.remove_section(&name);
 			guard.commit()?;
+			Ok(())
+		})
+	}
+
+	/// Finish the catalog, which ends the broadcast's content.
+	///
+	/// Finish every track first. The broadcast stays announced and keeps serving its finished
+	/// tracks, so a subscriber that arrives late can still read them, until the broadcast's
+	/// `close` takes it offline. How long to keep it up is yours to decide.
+	pub fn finish(&self) -> Result<(), MoqError> {
+		let _guard = crate::ffi::enter();
+		self.broadcast.upgrade().ok_or(MoqError::Closed)?.with_state(|state| {
+			state.catalog.finish()?;
+			state.ended = true;
 			Ok(())
 		})
 	}
@@ -967,20 +996,7 @@ impl MoqMediaTrackProducer {
 		Ok(())
 	}
 
-	/// Record a locally encoded frame's handoff for catalog jitter measurement.
-	///
-	/// `timestamp_us` is on the broadcast media clock. Call this after `write_frame` only for
-	/// encoder output; imported files, pipes, and network media stay clock-free.
-	pub fn flush(&self, timestamp_us: u64) -> Result<(), MoqError> {
-		let _guard = crate::ffi::enter();
-		let timestamp = moq_net::Timestamp::from_micros(timestamp_us)?;
-		let mut guard = self.inner.lock().unwrap();
-		let media = guard.as_mut().ok_or(MoqError::Closed)?;
-		media.import.flush(timestamp, moq_clock::Instant::now())?;
-		Ok(())
-	}
-
-	/// Mark a timeline break and restart handoff measurement without lowering advertised jitter.
+	/// Mark a timeline break without lowering the advertised jitter or delay.
 	///
 	/// Publishes a discontinuity marker; resumed frames must continue the broadcast media clock,
 	/// and video must resume on a keyframe.
@@ -1071,7 +1087,9 @@ impl MoqMediaContainerProducer {
 			let _guard = crate::ffi::enter();
 			let mut guard = self.inner.lock().unwrap();
 			let container = guard.as_mut().ok_or(MoqError::Closed)?;
-			container.import.cut();
+			container.import.cut().map_err(|err| MoqError::Codec {
+				reason: format!("cut failed: {err}"),
+			})?;
 			Ok(())
 		})();
 		self.driver.check()?;

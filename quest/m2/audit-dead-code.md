@@ -20,7 +20,7 @@ independently landable and too large to review alongside the rest becomes a
 follow-up through `/quest-plan`.
 
 Removing a public item is a breaking change and the maintainer's call, so it is
-always a follow-up with its `MIGRATE.md` entry, never an inline fix.
+always a follow-up, never an inline fix.
 
 The m1 run (2026-10-20) removed unused `@moq/signals` dependencies from
 `@moq/json` and the browser bench, the web demo's unused `solid-element`, and
@@ -35,7 +35,7 @@ Start by comparing the live tree against these baselines:
   through `cfg_attr`. The unconditional ones are drop guards, compile-time
   Send assertions, generated settings registries, shared test and benchmark
   harnesses, deserialization fixtures, FFI tables, and two `GroupConsumer`
-  helpers waiting on the [answering API](/quest/m1/public-model/answer.md).
+  helpers waiting on the [answering API](/quest/m1/api-audit/answer.md).
   Once the lint audit lands, every unconditional one is an `expect`, so a
   stale one fails the build; check what the conditional ones still guard.
   `cargo shear` found no unused dependencies.

@@ -164,11 +164,6 @@ impl Import {
 		Ok(())
 	}
 
-	/// Record a locally encoded frame's transport handoff for catalog jitter measurement.
-	pub fn flush(&mut self, timestamp: moq_net::Timestamp, now: moq_clock::Instant) -> crate::Result<()> {
-		self.track.flush(timestamp, now)
-	}
-
 	/// Record a frame's reorder delay (`PTS - DTS`) so the catalog `jitter` reflects the
 	/// B-frame reorder depth (the decode buffer a transmuxer/player must hold). The
 	/// container supplies this since the elementary stream alone carries no decode time.
@@ -186,7 +181,8 @@ impl Import {
 			return Ok(());
 		}
 		let config = config_from_sps(sps_nal)?;
-		self.last_sps = Some(sps_nal.clone());
+		// Own just the parameter set: the access unit it was found in is far larger.
+		self.last_sps = Some(Bytes::copy_from_slice(sps_nal));
 		self.apply_config(config)?;
 		Ok(())
 	}
@@ -255,7 +251,7 @@ pub fn config(buf: &[u8]) -> Result<hang::catalog::VideoConfig> {
 
 /// The config an `AVCDecoderConfigurationRecord` describes, stored verbatim as the `description`
 /// (`inline: false`, the avc1 shape).
-fn config_from_avcc(avcc_bytes: &[u8]) -> Result<hang::catalog::VideoConfig> {
+pub(crate) fn config_from_avcc(avcc_bytes: &[u8]) -> Result<hang::catalog::VideoConfig> {
 	let avcc = super::Avcc::parse(avcc_bytes)?;
 
 	let mut config = hang::catalog::VideoConfig::new(hang::catalog::H264 {
@@ -266,6 +262,7 @@ fn config_from_avcc(avcc_bytes: &[u8]) -> Result<hang::catalog::VideoConfig> {
 	});
 	config.coded_width = avcc.coded_width;
 	config.coded_height = avcc.coded_height;
+	config.interlaced = avcc.sps.first().and_then(|sps| super::sps_interlaced(sps)) == Some(true);
 	if let Some(vui) = avcc.sps.first().and_then(|sps| super::sps_vui(sps)) {
 		vui.apply(&mut config);
 	}
@@ -286,6 +283,7 @@ fn config_from_sps(sps_nal: &[u8]) -> Result<hang::catalog::VideoConfig> {
 	});
 	config.coded_width = Some(sps.coded_width);
 	config.coded_height = Some(sps.coded_height);
+	config.interlaced = super::sps_interlaced(sps_nal) == Some(true);
 	if let Some(vui) = super::sps_vui(sps_nal) {
 		vui.apply(&mut config);
 	}
@@ -392,6 +390,43 @@ mod tests {
 		let color = keyframe(80, &[SPS_BT709, PPS, idr]);
 		assert_eq!(color.primaries, Some(1));
 		assert_eq!((color.mastering, color.content_light), (None, None));
+	}
+
+	/// A frame-only SPS declares its reorder depth, which holds for the track's life: a later SPS
+	/// declaring less or none keeps it, and one declaring more is refused.
+	#[tokio::test(start_paused = true)]
+	async fn a_declared_reorder_depth_holds_for_the_track() {
+		use crate::codec::h264::fixtures::{PPS, SPS_FIELD, SPS_IPB, SPS_PYRAMID};
+
+		let idr: &[u8] = &[0x65, 0x88, 0x84, 0x21];
+		let (deep, catalog) = setup("deep");
+		let (shallow, _) = setup("shallow");
+		let mut deep = Import::new(deep, catalog.reserve(), Default::default()).unwrap();
+		let mut shallow = Import::new(shallow, catalog.reserve(), Default::default()).unwrap();
+		let mut split = Split::new();
+		let mut keyframe = |import: &mut Import, name: &str, ms: u64, sps: &[u8]| {
+			let mut annexb = BytesMut::new();
+			for nal in [sps, PPS, idr] {
+				annexb.extend_from_slice(&[0, 0, 0, 1]);
+				annexb.extend_from_slice(nal);
+			}
+			let pts = moq_net::Timestamp::from_millis(ms).unwrap();
+			let mut frames = split.decode(&annexb, pts).expect("split keyframe");
+			frames.extend(split.flush(pts).expect("flush keyframe"));
+			import
+				.decode(frames)
+				.map(|()| catalog.snapshot().video.renditions[name].reorder)
+		};
+
+		assert_eq!(keyframe(&mut deep, "deep", 0, SPS_PYRAMID).unwrap(), Some(2));
+		assert_eq!(keyframe(&mut deep, "deep", 40, SPS_IPB).unwrap(), Some(2));
+		assert_eq!(
+			keyframe(&mut deep, "deep", 80, SPS_FIELD).unwrap(),
+			Some(2),
+			"fields declare none"
+		);
+		assert_eq!(keyframe(&mut shallow, "shallow", 0, SPS_IPB).unwrap(), Some(1));
+		assert!(keyframe(&mut shallow, "shallow", 40, SPS_PYRAMID).is_err());
 	}
 
 	/// A new out-of-band avcC starts a new coded sequence, so in-band HDR metadata from the last one
@@ -528,6 +563,22 @@ mod tests {
 		let mut inline = vec![0, 0, 0, 1];
 		inline.extend_from_slice(fixtures::SPS_IPB_VARIABLE);
 		assert_eq!(config(&inline).unwrap().framerate, None);
+	}
+
+	/// `frame_mbs_only_flag` 0 marks the rendition interlaced, in both the avc1 and avc3 shapes.
+	#[test]
+	fn config_marks_field_coding_interlaced() {
+		use crate::codec::h264::fixtures;
+
+		for (sps, interlaced) in [(fixtures::SPS_IPB, false), (fixtures::SPS_FIELD, true)] {
+			let avcc =
+				super::super::build_avcc(&[Bytes::from_static(sps)], &[Bytes::from_static(fixtures::PPS)]).unwrap();
+			assert_eq!(config(&avcc).unwrap().interlaced, interlaced);
+
+			let mut inline = vec![0, 0, 0, 1];
+			inline.extend_from_slice(sps);
+			assert_eq!(config(&inline).unwrap().interlaced, interlaced);
+		}
 	}
 
 	/// An avcC initializer resolves a config with the avcC stored as `description`.

@@ -66,12 +66,10 @@ struct Entry {
 /// [`Error::Cancel`], so an owner's listings cost one queue per broadcast however many
 /// paths or requests reach it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-// private: capability gap
 // Sessions dedup a peer's listings per broadcast; a custom session has no public owner yet.
 pub(crate) struct Owner(u64);
 
 impl Owner {
-	// private: capability gap
 	// Sessions dedup a peer's listings per broadcast; a custom session has no public owner yet.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn new() -> Self {
@@ -502,8 +500,8 @@ impl Consumer {
 	/// List the broadcast's tracks: each one with its info, then
 	/// [`TracksEvent::Synced`], then changes as they happen.
 	///
-	/// Lists the tracks the producer created and any a handler answers with through a
-	/// [`Lister`], such as a relay's copy listing its upstream's. A track served only on
+	/// Lists the tracks the producer created and any a session answers with, such as a
+	/// relay's copy listing its upstream's. A track served only on
 	/// request is never listed, and listing never requests one. Fails with
 	/// [`Error::Unroutable`] once the broadcast has ended.
 	pub fn tracks(&self) -> Result<Tracks, Error> {
@@ -512,7 +510,6 @@ impl Consumer {
 
 	/// [`Self::tracks`] for `owner`, ending its older listing of this broadcast with
 	/// [`Error::Cancel`].
-	// private: capability gap
 	// Sessions dedup a peer's listings per broadcast; a custom session has no public owner yet.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn tracks_as(&self, owner: Owner) -> Result<Tracks, Error> {
@@ -542,7 +539,7 @@ impl Consumer {
 /// [`sync`](Self::synced) before reporting [`TracksEvent::Synced`]. Answer while [`poll_used`](Self::poll_used): list what the
 /// publisher behind the handler holds and keep it current, then [`clear`](Self::clear)
 /// once [`poll_unused`](Self::poll_unused). Dropping it clears what it listed.
-pub struct Lister {
+pub(crate) struct Lister {
 	state: kio::Shared<BroadcastState>,
 }
 
@@ -784,28 +781,6 @@ mod tests {
 		lister.remove("gone").unwrap();
 		assert_eq!(drain(&mut tracks), ["~up", "-gone"]);
 		assert!(matches!(lister.finish("up"), Err(Error::NotFound)));
-	}
-
-	#[test]
-	fn a_finished_track_is_listed_while_held() {
-		let broadcast = Info::new().produce();
-		let a = broadcast.create_track("a", None).unwrap();
-		a.finish().unwrap();
-		drop(a);
-		// Nothing holds it once its producer is gone.
-		let mut tracks = broadcast.consume().tracks().unwrap();
-		assert_eq!(drain(&mut tracks), ["synced"]);
-
-		let broadcast = Info::new().produce();
-		let a = broadcast.create_track("a", None).unwrap();
-		a.finish().unwrap();
-		let mut tracks = broadcast.consume().tracks().unwrap();
-		assert_eq!(drain(&mut tracks), ["+a", "synced"]);
-		let finish = broadcast.finish();
-		drop(a);
-		assert_eq!(drain(&mut tracks), NONE, "held by the finish");
-		drop(finish);
-		assert_eq!(drain(&mut tracks), ["end"]);
 	}
 
 	#[test]

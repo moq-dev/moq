@@ -144,7 +144,7 @@ pub struct moq_audio_frame {
 /// An audio producer, shared so the Opus encode in `write` runs with the global
 /// lock released. See [`Shared`].
 pub(crate) struct AudioEncoder {
-	producer: moq_audio::encode::Producer<moq_mux::catalog::hang::Extra>,
+	producer: moq_audio::encode::Producer,
 	reservation: Option<Arc<moq_net::bandwidth::Reservation>>,
 	finished: crate::publish::Finished,
 }
@@ -254,8 +254,9 @@ impl Audio {
 				biased;
 				_ = &mut close => return Ok(()),
 				frame = consumer.read() => match frame {
-					Ok(Some(moq_audio::decode::Read::Frame { frame, .. })) => frame,
-					Ok(Some(moq_audio::decode::Read::End { .. })) => continue,
+					Ok(Some(moq_audio::decode::Read::Frame(frame))) => frame,
+					// The C ABI hands over PCM only.
+					Ok(Some(moq_audio::decode::Read::Gap { .. } | moq_audio::decode::Read::End { .. })) => continue,
 					Ok(None) => return Ok(()),
 					// One packet the codec rejected is that packet's problem: the
 					// decoder stays usable, so drop it and keep the subscription rather
@@ -344,17 +345,16 @@ pub unsafe extern "C" fn moq_encode_audio(
 		let codec = codec_str
 			.parse()
 			.map_err(|_| Error::UnknownFormat(codec_str.to_string()))?;
-		options.settings = moq_audio::encode::Settings::from_input(codec, &encoder_input);
+		options.config = moq_audio::encode::Config::from_input(codec, &encoder_input);
 		if let Some(sample_rate) = zeroable(raw_output.sample_rate) {
-			options.settings.sample_rate = sample_rate;
+			options.config.sample_rate = sample_rate;
 		}
 		if let Some(channels) = zeroable(raw_output.channels) {
-			options.settings.layout = moq_audio::Layout::from_channels(channels)?;
+			options.config.layout = moq_audio::Layout::from_channels(channels)?;
 		}
-		options.settings.bitrate =
-			zeroable(raw_output.bitrate).map(|bps| moq_net::bandwidth::Rate::from_bps(bps.into()));
+		options.config.bitrate = zeroable(raw_output.bitrate).map(|bps| moq_net::bandwidth::Rate::from_bps(bps.into()));
 		if let Some(micros) = zeroable(raw_output.frame_duration_us) {
-			options.settings.frame_duration = Duration::from_micros(micros.into());
+			options.config.frame_duration = Duration::from_micros(micros.into());
 		}
 
 		let bandwidth = ffi::parse_id_optional(bandwidth)?;
@@ -445,8 +445,8 @@ pub unsafe extern "C" fn moq_encode_audio_frame(producer: u32, frame: *const moq
 
 /// Flush any pending samples and finalize an audio producer.
 ///
-/// The broadcast keeps the finished track, catalog rendition included, until it closes or its
-/// `moq_publish_finish` linger ends, so a late subscriber can still drain it.
+/// The broadcast keeps the finished track, catalog rendition included, until it closes, so a
+/// late subscriber can still drain it.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_encode_audio_finish(producer: u32) -> i32 {
 	ffi::enter(move || {

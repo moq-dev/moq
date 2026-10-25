@@ -1,11 +1,9 @@
 import { expect, setSystemTime, test } from "bun:test";
-import { Manual, Milli, Nano } from "@moq/clock";
+import { Milli } from "@moq/clock";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { GroupTooLarge, NotFound } from "./error.ts";
 import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "./group.ts";
 import { textFrame } from "./mock.ts";
-import { Producer as OriginProducer } from "./origin.ts";
-import * as Path from "./path.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import type { Request as TrackRequest } from "./track.ts";
 import { unwanted } from "./util/demand.ts";
@@ -800,119 +798,4 @@ test("removeTrack stops counting the removed track's demand at once", async () =
 	subscriber.close();
 	video.close();
 	broadcast.close();
-});
-
-// A track holding one finished group, with the given max-age in seconds.
-function finishedTrack(broadcast: BroadcastProducer, name: string, maxAge?: number) {
-	const track = broadcast.createTrack(name, {
-		timescale: Timescale.MILLI,
-		maxAge: maxAge === undefined ? undefined : Milli(maxAge * 1_000),
-	});
-	const group = track.appendGroup();
-	group.writeFrame(textFrame(name, Timestamp.fromMillis(0)));
-	group.close();
-	return track;
-}
-
-// A finished broadcast keeps serving its finished tracks, so a late subscriber still gets the media,
-// and closes once the longest max-age passes. A live track, an aborted one, and a track without a
-// max-age add nothing to the wait.
-test("finish serves finished tracks until stale", async () => {
-	const clock = new Manual();
-	const restore = clock.install();
-	const origin = new OriginProducer();
-	try {
-		const broadcast = origin.createBroadcast(Path.from("finish"));
-		const consumer = broadcast.consume();
-		const live = finishedTrack(broadcast, "live", 60);
-		const aborted = finishedTrack(broadcast, "aborted", 60);
-		aborted.close(new Error("gone"));
-		for (const [name, age] of [
-			["video", 2],
-			["audio", 5],
-			["catalog", undefined],
-		] as const) {
-			finishedTrack(broadcast, name, age).close();
-		}
-		broadcast.announce();
-
-		const finish = broadcast.finish();
-		expect(finish.linger).toBe(Milli(5_000));
-		let done = false;
-		const wait = finish.wait().then(() => {
-			done = true;
-		});
-
-		await clock.advance(Nano.fromMilli(Milli(4_000)));
-		const late = consumer.track("audio").subscribe().ordered();
-		expect(await late.readString()).toBe("audio");
-		expect(done).toBe(false);
-		expect(broadcast.route).toBeDefined();
-
-		await clock.advance(Nano.fromMilli(Milli(1_000)));
-		await wait;
-		expect(Number(clock.now())).toBe(Nano.fromMilli(Milli(5_000)));
-		expect(consumer.closed.peek()).toBeNull();
-		expect(broadcast.route).toBeUndefined();
-		expect(() => consumer.track("audio").subscribe()).toThrow("broadcast is closed");
-		late.close();
-		live.close();
-	} finally {
-		origin.close();
-		restore();
-	}
-});
-
-// The linger is the local retention window, so the cache window caps a longer max-age.
-test("finish caps the linger at the cache window", () => {
-	const broadcast = new BroadcastProducer();
-	finishedTrack(broadcast, "video", 600).close();
-	expect(broadcast.finish().linger).toBe(Milli(30_000));
-	broadcast.close();
-});
-
-// Closing the handle, the interrupt, closes the broadcast at once.
-test("closing a finish closes the broadcast early", () => {
-	const broadcast = new BroadcastProducer();
-	finishedTrack(broadcast, "video", 30).close();
-	const finish = broadcast.finish();
-	expect(finish.closed.peek()).toBeUndefined();
-	finish.close();
-	expect(broadcast.closed.peek()).toBeNull();
-	finish.close();
-});
-
-// The linger is fixed at finish, so the broadcast refuses any change that could outlast it.
-test("a finished broadcast refuses changes", () => {
-	const origin = new OriginProducer();
-	const broadcast = origin.createBroadcast(Path.from("finish"));
-	finishedTrack(broadcast, "video", 30).close();
-	broadcast.announce();
-	const finish = broadcast.finish();
-	expect(() => broadcast.createTrack("audio")).toThrow("broadcast is finished");
-	expect(() => broadcast.removeTrack("video")).toThrow("broadcast is finished");
-	expect(() => broadcast.announce()).toThrow("broadcast is finished");
-	expect(() => broadcast.unannounce()).toThrow("broadcast is finished");
-	expect(() => broadcast.finish()).toThrow("broadcast is finished");
-	expect(broadcast.route).toBeDefined();
-	finish.close();
-	origin.close();
-});
-
-// A close elsewhere ends the linger early.
-test("closing the broadcast elsewhere ends the linger", async () => {
-	const clock = new Manual();
-	const restore = clock.install();
-	try {
-		const broadcast = new BroadcastProducer();
-		finishedTrack(broadcast, "video", 30).close();
-		const finish = broadcast.finish();
-		const wait = finish.wait();
-		await clock.advance(Nano.fromMilli(Milli(1_000)));
-		broadcast.close();
-		await wait;
-		expect(Number(clock.now())).toBe(Nano.fromMilli(Milli(1_000)));
-	} finally {
-		restore();
-	}
 });

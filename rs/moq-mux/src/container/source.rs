@@ -508,7 +508,7 @@ impl ExportSource {
 			}
 			let mut subscription = moq_net::track::Subscription::default().with_max_delay(self.max_delay);
 			if let Some(after) = self.after {
-				subscription = subscription.with_groups((Bound::Excluded(after), Bound::Unbounded));
+				subscription = subscription.with_range((Bound::Excluded(after), Bound::Unbounded));
 			}
 			let track = match broadcast.track(&name) {
 				Ok(track) => track,
@@ -560,7 +560,7 @@ impl ExportSource {
 						moq_net::Error::Cancel
 						| moq_net::Error::Closed
 						| moq_net::Error::GoingAway
-						| moq_net::Error::SessionClosed
+						| moq_net::Error::Stream(moq_net::StreamError::Session(moq_net::SessionError::Cancel))
 						| moq_net::Error::Session(moq_net::SessionError::Cancel),
 					)))
 					| Poll::Pending
@@ -1027,7 +1027,7 @@ mod tests {
 			})
 			.await;
 
-			assert_eq!(observed, max_delay, "live start: {live_start}");
+			assert_eq!(observed, Some(max_delay), "live start: {live_start}");
 		}
 	}
 

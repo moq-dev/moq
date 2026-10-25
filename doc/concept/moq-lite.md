@@ -84,6 +84,14 @@ and leaves subscriptions already in flight alone until each track ends or its
 last subscriber leaves. A graceful session close withdraws its announcements
 and waits up to one second for them to be delivered. An abort skips that.
 
+A broadcast has no finished state. Online means announced, and offline means
+no route is left. The end of content is a track FIN: the publisher finishes
+each track, and a hang broadcast also finishes its catalog. A finished track
+stays servable to the subscribers it already has, including through a relay
+whose upstream session has since gone. How long a finished broadcast stays
+announced for late readers is the application's retention policy, such as the
+`--linger` of [`moq import`](/bin/cli), not a protocol state.
+
 ### Publisher epochs
 
 A route may carry an epoch: a UUIDv7 naming the publisher instance behind it.
@@ -217,14 +225,16 @@ code and the session stays up. A client that publishes outside its grant closes
 the session with `UNAUTHORIZED`, naming the path. A session whose last
 credential expires closes with `EXPIRED_AUTH_TOKEN` instead: refresh the token
 and reconnect, rather than treating the credential as invalid. moq-transport carries the same
-exchange on draft-17+ through the [MoQ Auth extension](/draft/moq-auth), limited
-to namespace prefixes. Older versions have no grant; the URL token keeps working
+exchange on draft-17+ through the [MoQ Auth extension](/draft/moq-auth), with
+the same patterns. Older versions have no grant; the URL token keeps working
 everywhere. On moq-transport an added token is kept even without the extension,
 so an announcement can name it: it rides that `PUBLISH_NAMESPACE` as its
 authorization token. Naming a fresh token renews the announcement in place with
 `REQUEST_UPDATE` from draft 16, and re-announces it on drafts 14 and 15, so it
-can outlive the token it started with. The token belongs to the session that added it, so after a
-reconnect the application adds it again and re-announces. moq-lite has no
+can outlive the token it started with. A token added to a reconnecting
+connection's auth handle is presented on every session it makes, so the
+announcement keeps it across a reconnect with no re-add or re-announce; one
+added to a single session's handle ends with that session. moq-lite has no
 per-request token, so there an announcement rides the session's scope.
 
 ## Subscriptions
@@ -236,14 +246,23 @@ JSON snapshot). Groups can also be fetched by sequence number, which is how the
 [HLS gateway](/bin/hls) and the relay's [HTTP fetch](/bin/relay/http) serve
 history.
 
+Native Rust subscriptions, track queries, fetches, and announcement interest on
+QUIC, WebTransport, or qmux fail locally when the peer has granted no stream
+credit, without retrying. Iroh still waits; browser-backed Rust retains the
+browser's behavior. Once admitted, these requests have no answer deadline:
+each lasts until answered, its demand leaves, or its session closes.
+Announcement-interest refusal is logged and releases discovery sync. The merged
+announcement listing keeps its existing event and sync API, with no per-source
+error result, and continues receiving announcements from unrelated sources.
+
 Each subscription carries the knobs that decide behavior under congestion:
 
 | Knob | Effect |
 | --- | --- |
 | **Priority** (-128..127, default 0) | Higher-priority tracks get bandwidth first. Audio above video, base layer above enhancement. The publisher's track priority breaks ties between subscriptions at one priority. From a native Rust publisher over QUIC or WebTransport (iroh excepted), subscriptions at the same priority and publisher priority split bandwidth evenly by bytes, streams and datagrams alike, however many groups each has queued. A browser publisher and other transports without send groups are not covered. |
 | **Order** | Which group to send first when several are pending. Newest first for live (the default), oldest first for catch-up. Needs moq-lite 07 or moq-transport; older moq-lite always sends newest first. |
-| **Max delay** | How long a non-latest group stays worth delivering before it is skipped. Zero means "live edge only", and raising it is also what asks for history. |
-| **Ranges** | Which groups to ask for: from a group, a number of groups back from the latest, or the group containing a presentation time, optionally up to an end. The default asks for everything max delay allows. Max delay still caps every range. |
+| **Max delay** | How long a non-latest group stays worth delivering before it is skipped. Zero means "live edge only", and raising it is also what asks for history. Unset leaves the publisher's retention window alone to bound it. |
+| **Ranges** | Which groups to ask for: from a group, a number of groups back from the latest, or the group containing a presentation time, optionally up to an end. Each group arrives whole, from its first frame. The default asks for everything max delay allows. Max delay still caps every range. |
 
 On moq-lite 05 and later, a publisher explicitly reports groups that will not arrive.
 This lets a finished subscription settle without waiting for missing groups.
@@ -255,10 +274,19 @@ Ranges are both a request and a filter. A subscriber reads only the groups its
 own ranges cover, resolved again whenever it replaces them, even when another
 subscriber of the same track asked for more. Widening them, including lowering
 the start, also serves the cached groups they newly cover, never one already
-served. A relay merges its subscribers' ranges into one upstream request, which
-today's wire versions carry as the single span covering them. A time anchor is
-resolved from the groups the serving hop holds; upstream it asks for everything
-max delay allows, and an untimed track refuses it. At the live edge, a time end
+served. A group they cover below the live feed that the cache lacks (evicted
+before the subscriber first looked for it, skipped, or below where the feed
+starts) is asked of the track's dynamic handler
+as a fill, which a relay serves by fetching upstream one group at a time, skipping
+a group once every subscriber that asked for it narrows past it; with
+no handler it is reported as dropped once the feed stops waiting for it. One
+evicted after the subscriber saw it cached, but before it read it, is skipped. A relay merges its subscribers' ranges into one upstream request, which
+today's wire versions carry as the single span covering them. A relative or time
+anchor resolves on the hop that publishes the track, and over moq-lite-07, which
+reports the live edge and media time and asks upstream for every group the budget
+allows. Over an older lite or any moq-transport version, a subscriber gets every
+anchor but the live and default starts refused as unsupported, and an untimed
+track refuses a time anchor. At the live edge, a time end
 may let one group through before its first frame shows it starts past the end:
 the first group that has yet to start is handed out without waiting for that
 frame, and the next one waits on it. A datagram is judged by its own timestamp.

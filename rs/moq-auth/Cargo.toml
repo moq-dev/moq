@@ -12,11 +12,9 @@ rust-version.workspace = true
 [features]
 default = ["client"]
 # The HTTP client that drives a lease against an auth server.
-client = ["dep:reqwest", "dep:rustls", "tokio", "dep:tracing", "dep:rand"]
+client = ["dep:reqwest", "dep:rustls", "dep:tokio", "moq-clock/runtime", "dep:tracing", "dep:rand"]
 # The reference auth server behind `moq auth serve`: the policy a relay held, on axum.
-serve = ["dep:axum", "tokio", "dep:tracing", "tokio/net"]
-# The lease clock: `lease::Producer::{due, failed}`.
-tokio = ["dep:tokio", "dep:rand", "moq-clock/runtime"]
+serve = ["dep:axum", "dep:tokio", "dep:tracing", "tokio/net"]
 
 [dependencies]
 aws-lc-rs = { workspace = true }
@@ -24,7 +22,7 @@ axum = { workspace = true, optional = true }
 base64 = { workspace = true }
 jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
 kio = { workspace = true }
-moq-clock = { version = "0.11.0", path = "../moq-clock", default-features = false }
+moq-clock = { version = "0.11.0", path = "../moq-clock", default-features = false, features = ["serde"] }
 moq-pattern = { workspace = true, features = ["serde"] }
 p256 = "0.14.0"
 p384 = "0.14.0"

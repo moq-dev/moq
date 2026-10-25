@@ -54,8 +54,8 @@ impl Rate {
 
 	/// This rate scaled by `factor`, saturating at both ends.
 	///
-	/// For the fractional arithmetic rate control does (a ramp allowance, a hysteresis
-	/// band) without spreading `as` casts across the callers.
+	/// For fractional arithmetic, such as halving a rate, without spreading `as`
+	/// casts across the callers.
 	pub fn scaled(self, factor: f64) -> Self {
 		let scaled = self.0 as f64 * factor.max(0.0);
 		if scaled >= u64::MAX as f64 {
@@ -231,7 +231,6 @@ impl Allocator {
 
 	/// The same registry dividing `estimate` instead, or nothing when it is `None`.
 	#[cfg(feature = "async")]
-	// private: capability gap
 	// Sessions follow their allocator's target; a custom session has no public way to yet.
 	pub(crate) fn with_estimate(&self, estimate: Option<Consumer>) -> Self {
 		Self {
@@ -258,7 +257,6 @@ impl Allocator {
 
 	/// Follow the probe target, for the session that probes on the reservations' behalf.
 	#[cfg(any(feature = "async", test))]
-	// private: capability gap
 	// Sessions follow their allocator's target; a custom session has no public way to yet.
 	pub(crate) fn target(&self) -> Target {
 		Target {
@@ -485,7 +483,6 @@ struct Entry {
 
 /// An [`Allocator`]'s probe target, followed by the session that probes for it.
 #[cfg(any(feature = "async", test))]
-// private: capability gap
 // Sessions follow their allocator's target; a custom session has no public way to yet.
 pub(crate) struct Target {
 	/// `None` once every allocator is gone.
@@ -498,7 +495,6 @@ impl Target {
 	/// The target once it differs from the last one returned, arming `waiter` otherwise.
 	///
 	/// Zero once every allocator is gone, since nothing is left reserving.
-	// private: capability gap
 	// Sessions follow their allocator's target; a custom session has no public way to yet.
 	pub(crate) fn poll_changed(&mut self, waiter: &kio::Waiter) -> Poll<Rate> {
 		let Some(registry) = &self.registry else {

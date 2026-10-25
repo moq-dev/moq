@@ -9,17 +9,17 @@ no-win abandons it.
 
 ## Plan
 
-- `GroupExpiry::is_expired` (`rs/moq-net/src/model/track.rs:3744`) reads the
-  track state (`self.state.read()`, `track.rs:3760`) on every group poll.
+- `GroupExpiry::is_expired` (`rs/moq-net/src/model/track.rs`) reads the
+  track state (`self.state.read()`) on every group poll.
   That read is 32% of all mutex wait at 16 workers in both `just bench-profile lock`
   shapes, per the
   [epic](/quest/m2/perf/kio-channel-contention/README.md)'s baseline.
 - Suggested direction: an atomic mirror of the verdict, like `Alive::aborted`
-  (`rs/moq-net/src/model/group.rs:441`), written under the track lock when the
+  (`rs/moq-net/src/model/group.rs`), written under the track lock when the
   verdict can change and read on its own by the group poll.
 - Open: what the mirror holds. The verdict combines the successor's first
   frame, the drift edge, the budget, and whether the slot is still cached
-  (`poll_drifted`, `track.rs:832`), and the read also parks the waiter on
+  (`poll_drifted`), and the read also parks the waiter on
   landings and deadlines. Settle the shape first, with options and a
   recommendation.
 - Rerun the baseline on a quiet host before the change, since the epic's

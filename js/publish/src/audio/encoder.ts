@@ -15,7 +15,7 @@ import {
 } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
 import { errors } from "../internal";
-import { type Baseline, Estimator } from "../jitter";
+import { Estimator, type Order } from "../order";
 import type { AudioFrame, Capture, Format } from "./capture";
 import { Gain } from "./gain";
 import { Resampler } from "./resampler";
@@ -223,7 +223,7 @@ export class Encoder {
 	#seen?: { capture?: Capture; source?: unknown; format?: Format };
 	#signals = new Effect();
 	#estimator = new Estimator();
-	// The estimator's jitter and delay, republished whenever either rises.
+	// The estimator's delay, republished whenever it rises.
 	#estimate = new Signal<Estimator["estimate"]>({});
 	// What this rendition advertised on each broadcast, keyed by the broadcast or, with none, the
 	// encoder. A broadcast keeps a rendition's track when it re-registers, so returning to one
@@ -394,7 +394,7 @@ export class Encoder {
 			const resolved = effect.get(this.#config);
 			if (!enabled || !format || fatal || !resolved) return;
 
-			this.#encode(broadcast.baseline, format, effect);
+			this.#encode(broadcast.order, format, effect);
 		});
 
 		// Each subscription gets its own producer. Losing demand ends the epoch, as stopping the
@@ -596,10 +596,12 @@ export class Encoder {
 
 	// Encode captured audio frames into whichever track producer is live. The broadcast owns the
 	// track's lifetime, so this never closes it; a fatal encoder error aborts only the live track.
-	#encode(baseline: Baseline, format: Format, effect: Effect): void {
+	#encode(order: Order, format: Format, effect: Effect): void {
 		// The parent owns the config subscription before the async codec scope is opened.
 		const resolved = this.#config.peek();
 		if (!resolved) return;
+		// A stopped rendition stops holding the others' delay back.
+		effect.cleanup(() => order.leave(this.#estimator));
 		effect.spawn(async () => {
 			// We're using an async polyfill temporarily for Safari support.
 			await Util.Libav.polyfill();
@@ -648,7 +650,7 @@ export class Encoder {
 						const keyframe = live.start === undefined || timestamp - live.start >= this.#groupDuration;
 						if (keyframe) live.start = timestamp;
 						live.producer.encode(frame, timestamp, keyframe);
-						if (this.#estimator.flush(frame.timestamp, baseline)) {
+						if (this.#estimator.write(frame.timestamp, order)) {
 							this.#estimate.set({ ...this.#estimator.estimate });
 						}
 					},

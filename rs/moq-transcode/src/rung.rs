@@ -8,7 +8,7 @@
 //!   group for group until the track goes `unused` again. The group open at
 //!   that point is finished first, so a later reader of that sequence gets the
 //!   whole group rather than an aborted one.
-//! - A fetch of a specific group (`requested_group`) fetches that same group
+//! - A fetch of a specific group (`requested_fill`) fetches that same group
 //!   from the source and transcodes just that group with a fresh encoder. A
 //!   fetch that starts mid-group is refused: a fresh encode's frames are only
 //!   valid after the head that same encode produced. A fetch every caller
@@ -18,6 +18,7 @@
 //! output group N maps to source group N and a player switching renditions
 //! lands on the same content.
 
+use std::future::Future;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -124,6 +125,51 @@ impl Rung {
 	}
 }
 
+/// Keeps a cancelled serving future from dropping an unfinished output track.
+struct Serving(Option<moq_net::track::Producer>);
+
+impl Drop for Serving {
+	fn drop(&mut self) {
+		if let Some(producer) = self.0.take() {
+			let _ = producer.abort(moq_net::Error::Cancel);
+		}
+	}
+}
+
+/// An incomplete group is cancelled even when its async writer is abandoned.
+struct Writing(Option<moq_net::group::Producer>);
+
+impl Writing {
+	fn finish(mut self) -> moq_net::Result<()> {
+		self.0.take().expect("owned group").finish()
+	}
+
+	fn abort(mut self, err: moq_net::Error) -> moq_net::Result<()> {
+		self.0.take().expect("owned group").abort(err)
+	}
+}
+
+impl std::ops::Deref for Writing {
+	type Target = moq_net::group::Producer;
+	fn deref(&self) -> &Self::Target {
+		self.0.as_ref().expect("owned group")
+	}
+}
+
+impl std::ops::DerefMut for Writing {
+	fn deref_mut(&mut self) -> &mut Self::Target {
+		self.0.as_mut().expect("owned group")
+	}
+}
+
+impl Drop for Writing {
+	fn drop(&mut self) {
+		if let Some(producer) = self.0.take() {
+			let _ = producer.abort(moq_net::Error::Cancel);
+		}
+	}
+}
+
 /// How the live path ended, which decides how the output track ends.
 enum Ended {
 	/// The source track finished: finish this one too, once nothing else can add a group.
@@ -133,41 +179,44 @@ enum Ended {
 }
 
 /// Serve one requested rung track until it closes or the source ends.
-pub(crate) async fn serve(rung: Rung, request: moq_net::track::Request) -> Result<(), Error> {
+pub(crate) fn serve(rung: Rung, request: moq_net::track::Request) -> impl Future<Output = Result<(), Error>> {
 	// Grab the group-request handle before accepting: a Request is dynamic from
 	// birth, so a fetch racing the acceptance queues instead of failing.
 	let dynamic = request.dynamic();
 	let info = hang::container::track_info(hang::catalog::PRIORITY.video);
 	let mut producer = request.accept(info);
-	let (finished, mut finishing) = tokio::sync::watch::channel(false);
+	let serving = Serving(Some(producer.clone()));
+	async move {
+		let mut serving = serving;
+		let (finished, mut finishing) = tokio::sync::watch::channel(false);
 
-	let live = async {
-		let result = live(&rung, &mut producer).await;
-		let _ = finished.send(true);
-		result
-	};
-	let (live, fetches) = tokio::join!(live, fetches(&rung, dynamic, &mut finishing));
+		let live = async {
+			let result = live(&rung, &mut producer).await;
+			let _ = finished.send(true);
+			result
+		};
+		let (live, fetches) = tokio::join!(live, fetches(&rung, dynamic, &mut finishing));
 
-	// Only a source that finished finishes the track; every other ending aborts it.
-	// A rung retired, closed, or cut off from its source can have its name served
-	// again, and that serve starts over, so a finish here would declare an end below
-	// groups a relay still caches for the name. An abort declares no end.
-	//
-	// Finished here rather than in `live`, because the boundary is only known once
-	// no fetch can still claim a group. `finish` sets the exclusive boundary one
-	// past the highest group produced so far (0 when none was), and a group at or
-	// above it is refused. A fetch still opening its decoder has produced nothing
-	// to count, so finishing then would reject the very group it was fetching.
-	let result = match (live, fetches) {
-		(Ok(Ended::Finished), Ok(())) => match producer.finish() {
-			Ok(()) => return Ok(()),
-			Err(err) => Err(err.into()),
-		},
-		(live, fetches) => live.map(|_| ()).and(fetches),
-	};
-	// Subscribers see an end rather than a stall.
-	let _ = producer.abort(moq_net::Error::Cancel);
-	result
+		// Only a source that finished finishes the track; every other ending aborts it.
+		// A rung retired, closed, or cut off from its source can have its name served
+		// again, and that serve starts over, so a finish here would declare an end below
+		// groups a relay still caches for the name. An abort declares no end.
+		//
+		// Finished here rather than in `live`, because the boundary is only known once
+		// no fetch can still claim a group. `finish` sets the exclusive boundary one
+		// past the highest group produced so far (0 when none was), and a group at or
+		// above it is refused. A fetch still opening its decoder has produced nothing
+		// to count, so finishing then would reject the very group it was fetching.
+		match (live, fetches) {
+			(Ok(Ended::Finished), Ok(())) => {
+				producer.finish()?;
+				serving.0 = None;
+				Ok(())
+			}
+			// `serving` aborts the track on drop, so subscribers see an end rather than a stall.
+			(live, fetches) => live.map(|_| ()).and(fetches),
+		}
+	}
 }
 
 /// Wait until some subscriber wants the track, or none does, returning at once if
@@ -230,7 +279,7 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 		let mut encoder = Encoder::default();
 
 		// The output group currently being written, if the feed is mid-group.
-		let mut current: Option<moq_net::group::Producer> = None;
+		let mut current: Option<Writing> = None;
 		// Set while demand is gone but a group is still open. A group name always
 		// means the same content, so the group is finished for whoever reads that
 		// sequence later instead of aborted, and the session ends at its boundary.
@@ -313,7 +362,7 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 					// switches map 1:1.
 					let info = moq_net::group::Info { sequence };
 					current = match producer.create_group(info) {
-						Ok(output) => Some(output),
+						Ok(output) => Some(Writing(Some(output))),
 						// A fetch task is already serving this sequence (a consumer
 						// fetched a group at the live edge before the live loop
 						// reached it). The fetch is authoritative and its group
@@ -393,9 +442,9 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 	}
 }
 
-/// The fetch path: serve requests for specific (past) groups.
+/// The fetch path: serve fills of specific (past) groups, each one group at a time.
 ///
-/// Fetch tasks run under a local [`JoinSet`](tokio::task::JoinSet) rather than
+/// Fill tasks run under a local [`JoinSet`](tokio::task::JoinSet) rather than
 /// detached. Retirement takes whatever the handler already had queued, closes
 /// admission by dropping it, and drains those fetches before the track is
 /// aborted. Other teardown aborts them, so no source subscription or encoder
@@ -417,7 +466,7 @@ async fn fetches(
 		// Reap finished fetches so the set doesn't grow without bound.
 		while tasks.try_join_next().is_some() {}
 
-		// Take a slot before popping a request, so retirement never strands one in
+		// Take a slot before popping a fill, so retirement never strands one in
 		// the handler while all slots are busy.
 		let permit = tokio::select! {
 			biased;
@@ -429,26 +478,26 @@ async fn fetches(
 			permit = limit.clone().acquire_owned() => permit.expect("the semaphore stays open"),
 		};
 
-		let request = tokio::select! {
+		let fill = tokio::select! {
 			biased;
 			() = retire.fired() => {
 				retired = true;
 				break;
 			},
 			_ = finishing.wait_for(|finished| *finished) => break,
-			request = dynamic.requested_group() => match request {
-				Ok(request) => request,
+			fill = dynamic.requested_fill() => match fill {
+				Ok(fill) => fill,
 				// The output track closed; nothing more to serve.
 				Err(_) => break,
 			},
 		};
 
-		spawn_fetch(&mut tasks, rung.clone(), request, permit);
+		spawn_fill(&mut tasks, rung.clone(), fill, permit);
 	}
 
 	if retired {
 		// A consumer that asked for a group before retirement is already waiting on
-		// it, whether or not this loop had reached it yet: the request queues on the
+		// it, whether or not this loop had reached it yet: the fill queues on the
 		// dynamic handler the moment the fetch is made. Take what is queued now, so
 		// dropping the handler below does not cancel a fetch that beat retirement.
 		//
@@ -457,14 +506,14 @@ async fn fetches(
 		// handler admits a cache miss for as long as it is alive, so a drain that
 		// waited for a slot with it still open would keep taking those in too and
 		// the rung would never finish. Dropping it closes admission and releases
-		// whatever arrived after the pass; the requests already popped are held
+		// whatever arrived after the pass; the fills already popped are held
 		// here, so they are unaffected.
 		let mut queued = Vec::new();
 		loop {
 			tokio::select! {
 				biased;
-				request = dynamic.requested_group() => match request {
-					Ok(request) => queued.push(request),
+				fill = dynamic.requested_fill() => match fill {
+					Ok(fill) => queued.push(fill),
 					// The output track closed; nothing left to serve.
 					Err(_) => break,
 				},
@@ -474,9 +523,9 @@ async fn fetches(
 		}
 		drop(dynamic);
 
-		for request in queued {
+		for fill in queued {
 			let permit = limit.clone().acquire_owned().await.expect("the semaphore stays open");
-			spawn_fetch(&mut tasks, rung.clone(), request, permit);
+			spawn_fill(&mut tasks, rung.clone(), fill, permit);
 		}
 
 		// Finish every group the handler accepted, or its producer stays open and
@@ -495,66 +544,71 @@ async fn fetches(
 	Ok(())
 }
 
-/// Spawn one fetch, holding its concurrency slot for the life of the task.
-fn spawn_fetch(
+/// Spawn one fill, holding its concurrency slot for the life of the task.
+fn spawn_fill(
 	tasks: &mut tokio::task::JoinSet<()>,
 	rung: Rung,
-	request: moq_net::group::Request,
+	fill: moq_net::track::Fill,
 	permit: tokio::sync::OwnedSemaphorePermit,
 ) {
 	tasks.spawn(async move {
 		let _permit = permit;
-		let sequence = request.sequence();
-		if let Err(err) = fetch(rung, request).await {
-			tracing::warn!(%err, sequence, "transcode fetch failed");
+		let mut last = None;
+		while fill.is_used()
+			&& let Some(sequence) = fill.next()
+			&& last != Some(sequence)
+		{
+			last = Some(sequence);
+			if let Err(err) = fetch(&rung, &fill, sequence).await {
+				tracing::warn!(%err, sequence, "transcode fetch failed");
+			}
 		}
 	});
 }
 
-/// Transcode one specifically requested group, fetching it from the source.
+/// Transcode group `sequence` of a fill, fetching it from the source.
 ///
-/// A failure while someone still wants the group rejects the request: a source
-/// fetch error passes through, and a pipeline or container error rejects with
-/// [`moq_net::Error::Cancel`]. Dropping it would auto-reject with [`moq_net::Error::Dropped`], which
-/// reads as "the handler vanished" and hides the actual failure. Once nobody
-/// wants the group, the request is dropped instead: the last caller already
-/// withdrew the attempt, and accepting afterwards would cache the group under a
-/// fresh request for the same sequence, whose own accept is then
-/// [`moq_net::Error::Duplicate`].
-async fn fetch(rung: Rung, request: moq_net::group::Request) -> Result<(), Error> {
+/// The group is dropped only once the source says it no longer has it. Any other
+/// failure while someone still wants the group refuses it for those readers alone,
+/// so a later reader asks again. Once nobody wants the group, it is left unanswered
+/// instead, releasing the permit for the groups the fill still owes: its last reader
+/// already left it, and accepting afterwards would cache the group a fresh fill is
+/// about to serve.
+async fn fetch(rung: &Rung, fill: &moq_net::track::Fill, sequence: u64) -> Result<(), Error> {
+	let groups = sequence..sequence + 1;
+	let refuse = |err: moq_net::Error| fill.refuse_groups(groups.clone(), err);
+	let failed = || refuse(moq_net::Error::Stream(moq_net::StreamError::Internal));
 	// A fresh encode of this group need not match the bytes the reader's head
 	// came from (the live encoder, or an earlier fetch), so its tail cannot
 	// continue that head. Refuse it so the reader moves on to the next group
-	// boundary instead of decoding a splice.
-	if request.frame_start() != 0 {
-		tracing::debug!(
-			sequence = request.sequence(),
-			frame = request.frame_start(),
-			"refusing a fetch that starts mid-group"
-		);
-		request.reject(moq_net::Error::NotFound);
+	// boundary instead of decoding a splice; a reader of the whole group still
+	// gets it.
+	let frame = fill.frame_start(sequence);
+	if frame != 0 {
+		tracing::debug!(sequence, frame, "refusing a fetch that starts mid-group");
+		refuse(moq_net::Error::Unsupported);
 		return Ok(());
 	}
-
-	// Watched until accept. After that the callers resolve from the cache, and
-	// this handle going unused is them picking the group up, not abandoning it.
-	let demand = request.demand();
 
 	let track = match rung.broadcast.track(&rung.source) {
 		Ok(track) => track,
 		Err(err) => {
-			request.reject(err.clone());
+			refuse(err.clone());
 			return Err(err.into());
 		}
 	};
-	let options = moq_net::group::Fetch::default().with_priority(request.priority());
+	let options = moq_net::group::Fetch::default().with_priority(fill.priority());
 	let mut source = tokio::select! {
 		biased;
-		_ = demand.unused() => return abandon(request),
-		source = track.fetch_group(request.sequence(), options) => match source {
+		_ = fill.unwanted(sequence) => return abandon(sequence),
+		source = track.fetch_group(sequence, options) => match source {
 			Ok(source) => source,
+			Err(moq_net::Error::NotFound) => {
+				fill.drop_groups(groups);
+				return Err(moq_net::Error::NotFound.into());
+			}
 			Err(err) => {
-				request.reject(err.clone());
+				refuse(err.clone());
 				return Err(err.into());
 			}
 		},
@@ -569,7 +623,7 @@ async fn fetch(rung: Rung, request: moq_net::group::Request) -> Result<(), Error
 	let pipeline = match rung.pipeline().await {
 		Ok(pipeline) => pipeline,
 		Err(err) => {
-			request.reject(moq_net::Error::Cancel);
+			failed();
 			return Err(err);
 		}
 	};
@@ -577,18 +631,18 @@ async fn fetch(rung: Rung, request: moq_net::group::Request) -> Result<(), Error
 	let container = match rung.container() {
 		Ok(container) => container,
 		Err(err) => {
-			request.reject(moq_net::Error::Cancel);
+			failed();
 			return Err(err);
 		}
 	};
 
 	// Accepting is what publishes the group. One last look, so a caller who
-	// left while the pipeline was opening does not race a fresh request.
-	if !demand.is_used() {
-		return abandon(request);
+	// left while the pipeline was opening does not race a fresh fill.
+	if !fill.is_wanted(sequence) {
+		return abandon(sequence);
 	}
 
-	let output = match request.accept(None) {
+	let output = match fill.accept(sequence, None) {
 		Ok(output) => output,
 		Err(err) => return Err(err.into()),
 	};
@@ -596,18 +650,14 @@ async fn fetch(rung: Rung, request: moq_net::group::Request) -> Result<(), Error
 	// live path is idle. Reference counted, so overlapping the live session
 	// bills the rendition once rather than twice.
 	let active = rung.active.attach(&rung.info);
-	transcode_group(pipeline, &container, &mut source, output, &active).await?;
+	transcode_group(pipeline, &container, &mut source, Writing(Some(output)), &active).await?;
 	Ok(())
 }
 
-/// Drop a fetch nobody is waiting on.
-///
-/// Dropping rejects with [`moq_net::Error::Dropped`]. No caller is left to see
-/// it, and keeping the request would let this encode publish the group a fresh
-/// request is about to serve.
-fn abandon(request: moq_net::group::Request) -> Result<(), Error> {
-	tracing::debug!(sequence = request.sequence(), "dropping a fetch nobody wants");
-	drop(request);
+/// Leave a group nobody is waiting on: its fill no longer owes it, so this encode must not
+/// publish the group a fresh fill is about to serve.
+fn abandon(sequence: u64) -> Result<(), Error> {
+	tracing::debug!(sequence, "leaving a fetch nobody wants");
 	Ok(())
 }
 
@@ -618,7 +668,7 @@ async fn transcode_group(
 	pipeline: Pipeline,
 	container: &moq_mux::catalog::hang::Container,
 	source: &mut moq_net::group::Consumer,
-	mut output: moq_net::group::Producer,
+	mut output: Writing,
 	active: &crate::active::Guard,
 ) -> Result<(), Error> {
 	match transcode_group_inner(pipeline, container, source, &mut output, active).await {
@@ -904,6 +954,72 @@ mod tests {
 		(rung, source, trigger)
 	}
 
+	/// A group every reader narrowed past releases the fill's one-at-a-time fetch, so the
+	/// groups the fill still owes are fetched rather than waiting behind it.
+	#[tokio::test(start_paused = true)]
+	#[expect(clippy::disallowed_methods, reason = "tokio's paused clock bounds the waits")]
+	async fn a_group_nobody_reads_releases_its_fill() {
+		use std::task::Poll;
+		let (rung, source, _retire) = idle_rung();
+		let source_fills = source.create_track("video", None).unwrap().dynamic();
+
+		let output = moq_net::broadcast::Info::default().produce();
+		let timed = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
+		let mut track = output.create_track("video/120p", timed).unwrap();
+		let fills = track.dynamic();
+		let ascending = |groups| {
+			moq_net::track::Subscription::default()
+				.with_max_delay(None)
+				.with_range(groups)
+				.with_order(moq_net::track::Order::Ascending)
+		};
+		let mut reader = track.subscribe(ascending(7..));
+		track.start_at(10).unwrap();
+		let mut live = track.create_group(moq_net::group::Info { sequence: 10 }).unwrap();
+		live.write_frame(moq_net::Timestamp::from_millis(10).unwrap(), &b"x"[..])
+			.unwrap();
+		live.finish().unwrap();
+		let waiter = kio::Waiter::noop();
+		while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
+		let fill = fills.requested_fill().await.unwrap();
+		assert_eq!((fill.start().group, fill.end()), (7, 10));
+
+		let mut tasks = tokio::task::JoinSet::new();
+		let permit = Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap();
+		spawn_fill(&mut tasks, rung, fill, permit);
+		let wait = std::time::Duration::from_secs(5);
+		let first = tokio::time::timeout(wait, source_fills.requested_fill())
+			.await
+			.expect("group 7 is fetched from the source")
+			.unwrap();
+		assert_eq!(first.start().group, 7);
+
+		reader.update(ascending(8..)).unwrap();
+		assert!(reader.poll_recv_group(&waiter).is_pending());
+		let next = tokio::time::timeout(wait, source_fills.requested_fill())
+			.await
+			.expect("the fill waited behind group 7, which nobody reads")
+			.unwrap();
+		assert_eq!(next.start().group, 8);
+	}
+
+	/// A restarted source cancels the serving future even while a rung waits for media.
+	/// Its subscribers must see that cause, rather than an unfinished producer drop.
+	#[tokio::test(start_paused = true)]
+	async fn cancelling_an_idle_rung_reports_cancel() {
+		let (rung, _source, _retire) = idle_rung();
+		let output = moq_net::broadcast::Info::default().produce();
+		let mut dynamic = output.dynamic();
+		let view = output.consume();
+		let subscribing = tokio::spawn(async move { view.track("rung").unwrap().subscribe(None).await.unwrap() });
+		let request = dynamic.requested_track().await.unwrap();
+		let running = tokio::spawn(serve(rung, request));
+		let mut track = subscribing.await.unwrap();
+		running.abort();
+		assert!(running.await.unwrap_err().is_cancelled());
+		assert!(matches!(track.recv_group().await, Err(moq_net::Error::Cancel)));
+	}
+
 	#[tokio::test(start_paused = true)]
 	async fn internal_idle_source_end_is_cancel() {
 		use std::future::Future;
@@ -921,6 +1037,22 @@ mod tests {
 		source.close();
 		assert!(matches!(running.await, Ok(Ended::Unfinished)));
 		assert!(matches!(observed.closed().await, moq_net::Error::Cancel));
+	}
+
+	/// The track is admitted before the serving future is spawned, so it also owns cleanup
+	/// when its caller abandons that future without polling it at all.
+	#[tokio::test(start_paused = true)]
+	async fn an_unpolled_rung_reports_cancel() {
+		let (rung, _source, _retire) = idle_rung();
+		let output = moq_net::broadcast::Info::default().produce();
+		let mut dynamic = output.dynamic();
+		let view = output.consume();
+		let subscribing = tokio::spawn(async move { view.track("rung").unwrap().subscribe(None).await.unwrap() });
+		let request = dynamic.requested_track().await.unwrap();
+		let running = serve(rung, request);
+		let mut track = subscribing.await.unwrap();
+		drop(running);
+		assert!(matches!(track.recv_group().await, Err(moq_net::Error::Cancel)));
 	}
 
 	/// A source switching color space mid-stream (an SDR insert in an HDR

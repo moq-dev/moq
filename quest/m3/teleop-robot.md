@@ -45,7 +45,7 @@ that might exceed the budget before encoding, leaving the log intact and
 writable (`rs/moq-json/src/stream/mod.rs`). It never rolls its one group;
 when its budget is spent the publisher opens a new track. A link drop or
 reconnect loses what was in flight.
-Those caps hold until [Unbounded groups](/quest/m2/unbounded-groups/README.md)
+Those caps hold until [Unbounded groups](/quest/m1/unbounded-groups/README.md)
 lands; after it, a lagging reader refills a shed part of the group or sees
 `Evicted`.
 So the contract is ordered, gap-free delivery for a live reader within one
@@ -124,5 +124,5 @@ control then it is the wrong abstraction.
 
 ## Related
 
-- [Unbounded groups](/quest/m2/unbounded-groups/README.md) - removes the group caps that bound the reliable class's one log
+- [Unbounded groups](/quest/m1/unbounded-groups/README.md) - removes the group caps that bound the reliable class's one log
 - [arbitration](/quest/m3/teleop-arbitration.md) - which controller is obeyed

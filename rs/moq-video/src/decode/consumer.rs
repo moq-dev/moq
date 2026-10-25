@@ -6,13 +6,42 @@ use std::task::{Context, Poll, ready};
 
 use hang::catalog::VideoConfig;
 use moq_clock::Instant;
-use moq_mux::container::Read;
+use moq_mux::container::Read as Encoded;
 
 use super::decoder::Config;
 use super::select::{Lane, Next, Selector};
 use super::sink::Sink;
 use crate::Error;
 use crate::Frame;
+
+/// One item of a [`Consumer`] read, in delivery order: a decoded picture, or a break
+/// between them.
+///
+/// The decoded counterpart of [`moq_mux::container::Read`], and the same shape
+/// `moq_audio::decode::Read` has, so a player handles loss and ends alike for
+/// every media type.
+pub enum Read {
+	/// A decoded picture.
+	Frame(Frame),
+	/// Media after what was already read was lost: a group was skipped or never arrived.
+	/// The decoder was drained first, so every picture from before the loss precedes it.
+	///
+	/// The span is an upper bound, in the scale of the media that follows.
+	Gap {
+		/// The furthest presentation point already read.
+		timestamp: moq_net::Timestamp,
+		/// How long until the next picture resumes.
+		duration: moq_net::Timestamp,
+	},
+	/// The publisher stopped its encoder: it paused, switched source, or finished.
+	///
+	/// The decoder was drained first, so the stopped encoder's last pictures precede it
+	/// rather than waiting for the next one. What follows comes from a fresh encoder.
+	End {
+		/// Where the stopped encoder's media stops.
+		end: moq_net::Timestamp,
+	},
+}
 
 /// Where a consumer starts on a track that already holds groups.
 ///
@@ -78,7 +107,7 @@ impl Options {
 /// Subscribe to a moq-mux video track and emit decoded frames.
 ///
 /// The codec/backend are fixed at construction; [`read`](Self::read) returns
-/// plain [`Frame`]s in the representation
+/// [`Read`] events carrying pictures in the representation
 /// [`Config::output`](super::Config::output) asked for. The direct mirror of
 /// `moq_audio::decode::Consumer`.
 ///
@@ -106,7 +135,7 @@ enum Slot {
 }
 
 /// A [`Reader::read`] in flight, handing the reader back with its result.
-type Step = Pin<Box<dyn Future<Output = (Box<Reader>, Result<Option<Frame>, Error>)> + Send>>;
+type Step = Pin<Box<dyn Future<Output = (Box<Reader>, Result<Option<Read>, Error>)> + Send>>;
 
 /// One subscription and the decoder it feeds.
 struct Reader {
@@ -116,10 +145,11 @@ struct Reader {
 	/// unbalance the per-thread COM apartment the Windows backend opens.
 	decoder: Sink,
 	track: moq_mux::container::Consumer<moq_mux::catalog::hang::Container>,
-	/// Frames a single access unit decoded to but `read` hasn't returned yet.
-	/// One AU yields one frame in the low-delay path, but a backend may hand back
-	/// more, so we buffer to keep `read` one-frame-per-call.
-	pending: VecDeque<Frame>,
+	/// Pictures a single access unit or drain decoded to, and the boundary behind
+	/// them, that `read` hasn't returned yet. One AU yields one picture in the
+	/// low-delay path, but a backend may hand back more, so we buffer to keep
+	/// `read` one-item-per-call.
+	pending: VecDeque<Read>,
 	/// Whether the ended track's decoder has already been drained.
 	drained: bool,
 	/// The first recovery group lacks the preceding GOP's references.
@@ -171,16 +201,16 @@ impl Consumer {
 		&self.name
 	}
 
-	/// Read the next decoded frame, or `None` after the track ends and the
-	/// decoder's buffered tail has been drained.
+	/// Read the next decoded picture or boundary, or `None` after the track ends and
+	/// the decoder's buffered tail has been drained.
 	///
 	/// Join and delivery-gap recovery trim leading pictures whose previous GOP is absent.
-	/// Returned timestamps strictly increase.
+	/// Returned picture timestamps strictly increase.
 	///
 	/// Cancel-safe: a decode in flight when the read is dropped is kept and
 	/// finished by the next read. A codec error from either decoder fails the
 	/// read.
-	pub async fn read(&mut self) -> Result<Option<Frame>, Error> {
+	pub async fn read(&mut self) -> Result<Option<Read>, Error> {
 		let mut sleep = None;
 		std::future::poll_fn(|cx| self.poll_read(cx, &mut sleep)).await
 	}
@@ -189,11 +219,11 @@ impl Consumer {
 		&mut self,
 		cx: &mut Context<'_>,
 		sleep: &mut Option<Pin<Box<moq_clock::Sleep>>>,
-	) -> Poll<Result<Option<Frame>, Error>> {
+	) -> Poll<Result<Option<Read>, Error>> {
 		loop {
 			let deadline = match self.selector.next(Instant::now()) {
-				Next::Frame(frame) => return Poll::Ready(Ok(Some(frame))),
-				Next::End => return Poll::Ready(Ok(None)),
+				Next::Read(read) => return Poll::Ready(Ok(Some(read))),
+				Next::Done => return Poll::Ready(Ok(None)),
 				Next::Wait(deadline) => deadline,
 			};
 
@@ -218,7 +248,7 @@ impl Consumer {
 				progress = true;
 				*slot = Slot::Idle(reader);
 				match result {
-					Ok(Some(frame)) => self.selector.push(lane, frame, Instant::now()),
+					Ok(Some(read)) => self.selector.push(lane, read, Instant::now()),
 					Ok(None) => {
 						*slot = Slot::Closed;
 						self.selector.finish(lane);
@@ -244,6 +274,17 @@ impl Consumer {
 
 #[cfg(test)]
 impl Consumer {
+	/// The next picture, skipping gaps and ends.
+	async fn next_frame(&mut self) -> Result<Option<Frame>, Error> {
+		loop {
+			match self.read().await? {
+				Some(Read::Frame(frame)) => return Ok(Some(frame)),
+				Some(Read::Gap { .. } | Read::End { .. }) => {}
+				None => return Ok(None),
+			}
+		}
+	}
+
 	/// The lane's decoder between reads; a lane decoding in the background is busy.
 	fn reader(&mut self, lane: Lane) -> &mut Reader {
 		let Slot::Idle(reader) = &mut self.lanes[lane as usize] else {
@@ -295,7 +336,7 @@ impl Reader {
 		if options.start == Start::Latest
 			&& let Some(live_edge) = subscriber.largest().await
 		{
-			subscriber.set_groups(live_edge.group.saturating_sub(lookback)..);
+			subscriber = subscriber.with_range(live_edge.group.saturating_sub(lookback)..);
 		}
 		let track = subscriber;
 		// The catalog says how the track is framed, and it is not always the legacy
@@ -314,24 +355,33 @@ impl Reader {
 		})
 	}
 
-	/// The next frame this decoder alone produces; see [`Consumer::read`].
-	async fn read(&mut self) -> Result<Option<Frame>, Error> {
+	/// The next item this decoder alone produces; see [`Consumer::read`].
+	async fn read(&mut self) -> Result<Option<Read>, Error> {
 		loop {
-			if let Some(frame) = self.pending.pop_front() {
-				return Ok(Some(frame));
+			if let Some(read) = self.pending.pop_front() {
+				return Ok(Some(read));
 			}
 			if self.drained {
 				return Ok(None);
 			}
 
 			let mux_frame = match self.track.read().await? {
-				Some(Read::Frame { frame, .. }) => Some(frame),
-				Some(Read::Gap { .. }) => {
+				Some(Encoded::Frame { frame, .. }) => Some(frame),
+				// Drained so the pictures from before the boundary all come out ahead of it,
+				// rather than whenever the media after it pushes them through. The decoder
+				// stays usable and restarts on the next group's keyframe.
+				Some(Encoded::Gap { timestamp, duration }) => {
+					self.drain().await?;
+					self.pending.push_back(Read::Gap { timestamp, duration });
 					self.recover = true;
 					continue;
 				}
-				// A fresh encoder has no preceding GOP to reference.
-				Some(Read::End { .. }) => continue,
+				// A fresh encoder has no preceding GOP to reference, so no recovery.
+				Some(Encoded::End { end, .. }) => {
+					self.drain().await?;
+					self.pending.push_back(Read::End { end });
+					continue;
+				}
 				None => None,
 			};
 
@@ -348,7 +398,7 @@ impl Reader {
 				// nothing in between to wait on. A caller that treats a codec
 				// error as one lost picture and carries on then spins.
 				self.drained = true;
-				self.pending.extend(tail?);
+				self.pending.extend(tail?.into_iter().map(Read::Frame));
 				continue;
 			};
 
@@ -360,12 +410,19 @@ impl Reader {
 				continue;
 			}
 
-			self.pending.extend(
-				self.decoder
-					.decode(mux_frame.payload, mux_frame.timestamp, mux_frame.keyframe)
-					.await?,
-			);
+			let pictures = self
+				.decoder
+				.decode(mux_frame.payload, mux_frame.timestamp, mux_frame.keyframe)
+				.await?;
+			self.pending.extend(pictures.into_iter().map(Read::Frame));
 		}
+	}
+
+	/// Queue every picture the decoder still holds.
+	async fn drain(&mut self) -> Result<(), Error> {
+		let pictures = self.decoder.flush().await?;
+		self.pending.extend(pictures.into_iter().map(Read::Frame));
+		Ok(())
 	}
 }
 
@@ -466,7 +523,7 @@ mod tests {
 		.await
 		.unwrap();
 
-		let frame = consumer.read().await.unwrap().expect("decoded frame");
+		let frame = consumer.next_frame().await.unwrap().expect("decoded frame");
 		assert_eq!(frame.size(), crate::Size::new(320, 240));
 	}
 
@@ -533,7 +590,7 @@ mod tests {
 		// timestamp, so this says which group the read started from. It is the
 		// backend to use here rather than the plain probe, whose event log is
 		// process-wide and belongs to the thread-affinity test.
-		let frame = consumer.read().await.unwrap().expect("a decoded frame");
+		let frame = consumer.next_frame().await.unwrap().expect("a decoded frame");
 		assert_eq!(
 			frame.timestamp,
 			Timestamp::from_micros(2_000_000).unwrap(),
@@ -611,7 +668,7 @@ mod tests {
 		.unwrap();
 
 		let mut seen = Vec::new();
-		while let Some(frame) = consumer.read().await.unwrap() {
+		while let Some(frame) = consumer.next_frame().await.unwrap() {
 			seen.push(frame.timestamp);
 		}
 		assert_eq!(
@@ -680,7 +737,8 @@ mod tests {
 
 		let subscription = published.subscription().expect("the consumer subscribed");
 		assert_eq!(
-			subscription.max_delay, max_delay,
+			subscription.max_delay,
+			Some(max_delay),
 			"the age budget did not reach the publisher"
 		);
 
@@ -688,7 +746,9 @@ mod tests {
 		assert_eq!(opened.output, decoder.output);
 		assert_eq!(opened.scale_hint, decoder.scale_hint);
 
-		let frame = pollster::block_on(consumer.read()).unwrap().expect("a decoded frame");
+		let frame = pollster::block_on(consumer.next_frame())
+			.unwrap()
+			.expect("a decoded frame");
 		assert!(
 			matches!(frame.surface, crate::Surface::I420(_)),
 			"CPU output was not enforced"
@@ -743,7 +803,7 @@ mod tests {
 		write(11, &[2000, 1800, 1900, 2100]);
 		let mut got = Vec::new();
 		for _ in 0..5 {
-			got.push(consumer.read().await.unwrap().unwrap().timestamp.as_micros());
+			got.push(consumer.next_frame().await.unwrap().unwrap().timestamp.as_micros());
 		}
 		assert_eq!(
 			got,
@@ -758,7 +818,7 @@ mod tests {
 		write(13, &[4000, 3800, 3900, 4100]);
 		track.finish().unwrap();
 		got.clear();
-		while let Some(frame) = consumer.read().await.unwrap() {
+		while let Some(frame) = consumer.next_frame().await.unwrap() {
 			got.push(frame.timestamp.as_micros());
 		}
 		assert_eq!(
@@ -815,20 +875,21 @@ mod tests {
 		.unwrap();
 
 		let mut timestamps = Vec::new();
-		while let Some(frame) = consumer.read().await.unwrap() {
+		while let Some(frame) = consumer.next_frame().await.unwrap() {
 			timestamps.push(frame.timestamp.as_micros());
 		}
 		assert_eq!(timestamps, vec![0, 33_333]);
 		assert!(
-			consumer.read().await.unwrap().is_none(),
+			consumer.next_frame().await.unwrap().is_none(),
 			"the decoder was drained twice"
 		);
 	}
 
-	/// A declared discontinuity is a playhead event, not a decoder flush. A delayed
-	/// picture from before the seam still surfaces; the next group continues forward.
+	/// A declared end drains the decoder, so the stopped encoder's last picture
+	/// comes out ahead of the end while the publisher is still paused, rather
+	/// than when the fresh encoder's first picture pushes it through.
 	#[tokio::test]
-	async fn discontinuity_does_not_flush_the_decoder() {
+	async fn an_end_drains_the_pictures_before_it() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
 			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
@@ -838,24 +899,15 @@ mod tests {
 			track,
 			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
 		);
-		producer
-			.write(moq_mux::container::Frame {
-				timestamp: Timestamp::from_micros(100_000).unwrap(),
-				duration: None,
-				payload: Bytes::from_static(b"old access unit"),
-				keyframe: true,
-			})
-			.unwrap();
+		let picture = |micros: u64, payload: &'static [u8]| moq_mux::container::Frame {
+			timestamp: Timestamp::from_micros(micros).unwrap(),
+			duration: Some(Timestamp::from_micros(33_333).unwrap()),
+			payload: Bytes::from_static(payload),
+			keyframe: true,
+		};
+		producer.write(picture(100_000, b"old access unit")).unwrap();
+		producer.cut(None).unwrap();
 		producer.discontinuity().unwrap();
-		producer
-			.write(moq_mux::container::Frame {
-				timestamp: Timestamp::from_micros(200_000).unwrap(),
-				duration: None,
-				payload: Bytes::from_static(b"new access unit"),
-				keyframe: true,
-			})
-			.unwrap();
-		producer.finish().unwrap();
 
 		let catalog = VideoConfig::new(hang::catalog::H264 {
 			inline: true,
@@ -879,11 +931,26 @@ mod tests {
 		.await
 		.unwrap();
 
-		let mut timestamps = Vec::new();
-		while let Some(frame) = consumer.read().await.unwrap() {
-			timestamps.push(frame.timestamp.as_micros());
-		}
-		assert_eq!(timestamps, vec![100_000, 200_000]);
+		let mut reads = Vec::new();
+		let mut read = async |consumer: &mut Consumer| {
+			reads.push(match consumer.read().await.unwrap() {
+				Some(Read::Frame(frame)) => format!("frame {}", frame.timestamp.as_micros()),
+				Some(Read::Gap { timestamp, duration }) => {
+					format!("gap {}+{}", timestamp.as_micros(), duration.as_micros())
+				}
+				Some(Read::End { end }) => format!("end {}", end.as_micros()),
+				None => "none".to_string(),
+			});
+		};
+		// Nothing follows the end yet.
+		read(&mut consumer).await;
+		read(&mut consumer).await;
+
+		producer.write(picture(200_000, b"new access unit")).unwrap();
+		producer.finish().unwrap();
+		read(&mut consumer).await;
+		read(&mut consumer).await;
+		assert_eq!(reads, ["frame 100000", "end 133333", "frame 200000", "none"]);
 	}
 
 	/// A read dropped while a threaded flush is in flight loses nothing: the
@@ -925,7 +992,7 @@ mod tests {
 		.await
 		.unwrap();
 
-		let mut read = Box::pin(consumer.read());
+		let mut read = Box::pin(consumer.next_frame());
 		let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
 		loop {
 			tokio::select! {
@@ -945,10 +1012,10 @@ mod tests {
 		probe::release_flush();
 
 		assert!(
-			consumer.read().await.unwrap().is_none(),
+			consumer.next_frame().await.unwrap().is_none(),
 			"the cancelled read's flush was not resumed"
 		);
-		assert!(consumer.read().await.unwrap().is_none());
+		assert!(consumer.next_frame().await.unwrap().is_none());
 	}
 
 	/// VAAPI returns its buffered tail before the consumer reports track end.
@@ -1007,7 +1074,7 @@ mod tests {
 		};
 
 		let mut timestamps = Vec::new();
-		while let Some(frame) = consumer.read().await.unwrap() {
+		while let Some(frame) = consumer.next_frame().await.unwrap() {
 			timestamps.push(frame.timestamp.as_micros());
 		}
 		let expected: Vec<u128> = (0..FRAMES as u128).map(|index| index * 33_333).collect();
@@ -1015,7 +1082,7 @@ mod tests {
 
 		// The end stays the end: the drain runs once, so a caller that keeps
 		// reading past it does not get the tail a second time.
-		assert!(consumer.read().await.unwrap().is_none());
+		assert!(consumer.next_frame().await.unwrap().is_none());
 	}
 
 	/// One frame per second, so the frame interval the selector holds a picture
@@ -1090,7 +1157,7 @@ mod tests {
 
 	/// Read one frame, as (seconds, the lane it was shown from).
 	async fn read(consumer: &mut Consumer) -> (u64, Lane) {
-		let frame = tokio::time::timeout(std::time::Duration::from_secs(10), consumer.read())
+		let frame = tokio::time::timeout(std::time::Duration::from_secs(10), consumer.next_frame())
 			.await
 			.expect("a frame within ten seconds")
 			.unwrap()
@@ -1108,7 +1175,7 @@ mod tests {
 				tokio::time::Instant::now() < deadline,
 				"the max-delay decoder never caught up"
 			);
-			if let Ok(frame) = tokio::time::timeout(std::time::Duration::from_millis(20), consumer.read()).await {
+			if let Ok(frame) = tokio::time::timeout(std::time::Duration::from_millis(20), consumer.next_frame()).await {
 				panic!(
 					"nothing new was published, yet read returned {:?}",
 					frame.map(|f| f.map(|f| f.timestamp))
@@ -1134,7 +1201,7 @@ mod tests {
 		)
 		.await;
 		assert_eq!(
-			published.subscription().map(|sub| sub.max_delay),
+			published.subscription().and_then(|sub| sub.max_delay),
 			Some(WARMUP),
 			"the two subscriptions did not share one request at the larger budget"
 		);
@@ -1182,7 +1249,7 @@ mod tests {
 		let mut live = group(&mut track, 2, &[8]);
 		shown.push(read(&mut consumer).await);
 		assert!(
-			tokio::time::timeout(std::time::Duration::from_millis(100), consumer.read())
+			tokio::time::timeout(std::time::Duration::from_millis(100), consumer.next_frame())
 				.await
 				.is_err()
 		);
@@ -1261,11 +1328,11 @@ mod tests {
 		// A budget that keeps every cached group, so both decoders read them all.
 		let mut consumer = dual(&broadcast, Start::Oldest, WARMUP, probe::BUFFERED_NAME).await;
 		let mut shown = Vec::new();
-		while let Some(frame) = consumer.read().await.unwrap() {
+		while let Some(frame) = consumer.next_frame().await.unwrap() {
 			shown.push(u64::try_from(frame.timestamp.as_micros()).unwrap() / SECOND);
 		}
 		assert_eq!(shown, [0, 1, 2, 3, 4, 5]);
-		assert!(consumer.read().await.unwrap().is_none());
+		assert!(consumer.next_frame().await.unwrap().is_none());
 		assert!(consumer.lanes.iter().all(|slot| matches!(slot, Slot::Closed)));
 	}
 
@@ -1291,7 +1358,7 @@ mod tests {
 			.await
 			.unwrap();
 			assert!(matches!(consumer.lanes[Lane::Max as usize], Slot::Closed));
-			assert_eq!(track.subscription().map(|sub| sub.max_delay), Some(max_delay));
+			assert_eq!(track.subscription().and_then(|sub| sub.max_delay), Some(max_delay));
 		}
 	}
 
@@ -1351,7 +1418,7 @@ mod tests {
 		)
 		.await;
 		for _ in 0..3 {
-			match tokio::time::timeout(std::time::Duration::from_secs(10), consumer.read()).await {
+			match tokio::time::timeout(std::time::Duration::from_secs(10), consumer.next_frame()).await {
 				Ok(Ok(Some(_))) => continue,
 				Ok(Err(err)) => {
 					assert!(err.to_string().contains("corrupt"), "unexpected error: {err}");

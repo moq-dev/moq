@@ -5,7 +5,8 @@
  * that comes from npm rather than this checkout). Runs under both node and bun.
  * Connect, wait for a .hang catalog with video and audio, read video through the
  * same container consumer the browser player uses until a non-empty frame arrives,
- * and decode the first --audio-ms of audio to --audio-out for tone.py to judge.
+ * and decode the first --audio-ms of every audio rendition to --audio-out.<codec> for
+ * tone.py to judge.
  * Neither runtime has WebCodecs, so audio decodes through `@moq/hang`'s libav
  * fallback, as a player under them would. Exits 0 once both are done (1 on
  * timeout). Subscribe-only: publishing media needs a WebCodecs encoder a native
@@ -46,7 +47,8 @@ const MAX_DELAY = Milli(1000);
 
 // Audio is checked for gaps, which a reader skipping behind live would cause itself: the matrix
 // starts every subscriber at once, and a runtime starved by the others can fall a second behind.
-// That is this reader's speed, not the delivery under test, so it gets a wider budget.
+// That is this reader's speed, not the delivery under test, so it gets a wider budget. A track's
+// max-age caps it, so interop.sh's Rust publisher keeps its media at least this long.
 const AUDIO_MAX_DELAY = Milli(5000);
 
 const { positionals, values } = parseArgs({
@@ -90,15 +92,15 @@ if (
 // rendition in a later update, so keep reading until one has both video and audio.
 async function catalog(
 	bc: Moq.Broadcast.Consumer,
-): Promise<{ video: [string, Catalog.VideoConfig]; audio: [string, Catalog.AudioConfig] }> {
+): Promise<{ video: [string, Catalog.VideoConfig]; audio: [string, Catalog.AudioConfig][] }> {
 	const track = bc.track("catalog.json").subscribe({ priority: Catalog.PRIORITY.catalog });
 	const catalog = new Json.Snapshot.Consumer<Catalog.Root>({ track, schema: Catalog.RootSchema });
 	for (;;) {
 		const root = (await catalog.latest())?.value;
 		if (!root) throw new Error("catalog ended without a video and an audio track");
 		const video = Object.entries(root.video?.renditions ?? {})[0];
-		const audio = Object.entries(root.audio?.renditions ?? {})[0];
-		if (video && audio) return { video, audio };
+		const audio = Object.entries(root.audio?.renditions ?? {});
+		if (video && audio.length) return { video, audio };
 	}
 }
 
@@ -131,7 +133,11 @@ async function video(bc: Moq.Broadcast.Consumer, name: string, config: Catalog.V
 	throw new Error("no frame data received");
 }
 
-/** Decode the first {@link audioMs} of the rendition to `{audioOut}.{txt,pcm}`, the layout tone.py reads. */
+/**
+ * Decode the first {@link audioMs} of the rendition to `{audioOut}.{codec}.{txt,pcm}`, the layout tone.py
+ * reads. The codec is the catalog's up to its first `.` (`opus`, `mp4a`). The files are created exclusively,
+ * so two renditions of one codec fail rather than overwrite each other.
+ */
 async function audio(bc: Moq.Broadcast.Consumer, name: string, config: Catalog.AudioConfig): Promise<void> {
 	const channels = config.numberOfChannels;
 	const want = (audioMs * config.sampleRate) / 1000;
@@ -205,10 +211,12 @@ async function audio(bc: Moq.Broadcast.Consumer, name: string, config: Catalog.A
 	}
 	if (failed) throw failed;
 
-	writeFileSync(`${audioOut}.txt`, `${log.join("\n")}\n`);
+	const out = `${audioOut}.${config.codec.split(".")[0]}`;
+	writeFileSync(`${out}.txt`, `${log.join("\n")}\n`, { flag: "wx" });
 	writeFileSync(
-		`${audioOut}.pcm`,
+		`${out}.pcm`,
 		Buffer.concat(pcm.map((samples) => Buffer.from(samples.buffer, samples.byteOffset, samples.byteLength))),
+		{ flag: "wx" },
 	);
 }
 
@@ -256,12 +264,17 @@ async function run(): Promise<void> {
 		}
 
 		const renditions = await catalog(bc);
-		const [bytes] = await Promise.all([video(bc, ...renditions.video), audio(bc, ...renditions.audio)]);
+		const [bytes] = await Promise.all([
+			video(bc, ...renditions.video),
+			...renditions.audio.map((rendition) => audio(bc, ...rendition)),
+		]);
 		// The harness judges success by this marker, not the exit code: the
 		// @moq/web-transport NAPI addon can segfault during the runtime's exit
 		// teardown after a frame has arrived (an upstream bug, seen under bun),
 		// which would turn a real success into a signal exit.
-		console.error(`received ${bytes} bytes and ${audioMs}ms of audio from ${broadcast}`);
+		console.error(
+			`received ${bytes} bytes and ${audioMs}ms of ${renditions.audio.length} audio renditions from ${broadcast}`,
+		);
 	} finally {
 		unwatch();
 		requested?.close();

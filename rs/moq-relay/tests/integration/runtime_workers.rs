@@ -50,9 +50,11 @@ fn worker_config(cert: &std::path::Path, key: &std::path::Path, workers: u16) ->
 fn client() -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
-	config.once = Some(true);
 	config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
-	config.init(Default::default()).expect("client init")
+	config
+		.init(Default::default())
+		.expect("client init")
+		.with_reconnect(false)
 }
 
 async fn connect(client: moq_tokio::Client, url: url::Url) -> moq_tokio::Connection {
@@ -77,7 +79,7 @@ async fn workers_serve_quic_and_share_one_origin() {
 	let (cert, key) = certificate(dir.path());
 	let config = worker_config(&cert, &key, WORKERS);
 
-	let relay = Relay::load(config).await.expect("load relay");
+	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let port = relay.addr().expect("workers bound an address").port();
 
 	// The owner keeps the worker group; aborting this task is what joins them.

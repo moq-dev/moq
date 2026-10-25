@@ -91,11 +91,11 @@ console.log("tracks,viewers,catalog_publishes,subscribe_updates,unlimited_subscr
 for (const tracks of [1, 4, 16]) {
 	for (const viewers of [1, 4, 16]) {
 		const clock = new Manual();
-		const restore = clock.install();
+		const installed = clock.install();
 		try {
 			await measure(tracks, viewers, clock);
 		} finally {
-			restore();
+			installed.close();
 		}
 	}
 }
