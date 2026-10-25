@@ -25,8 +25,7 @@ cases, so an oracle comes before any rewrite.
 - Run a fixed seed set in the merge gate and a longer sweep nightly.
 - Fix what it finds at the cause. If the failures cluster on the per-reader
   route-copy design rather than single missed checks, bring back the
-  producer-replacement redesign (planned for m2 in
-  [moq-dev/moq#6707](https://github.com/moq-dev/moq/pull/6707)) to the
+  [producer-replacement redesign](/quest/m2/resume-redesign.md) to the
   maintainer for m1, with this test as its oracle.
 
 Public API: none. Wire: none.

@@ -26,3 +26,7 @@ twice (0.6 to 0.7, then to the generated 0.8); that is the accepted cost.
   release produces the C archive the samples are checked against.
 
 Public API: moq-c gains each m1 binding feature. Wire: none.
+
+## Required
+
+- [moq-c decode start](/quest/m1/c/decode-start.md) - a moq-c decoder can read a finished track from its start
