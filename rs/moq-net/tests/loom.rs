@@ -488,6 +488,7 @@ fn a_refused_answer_is_never_announced() {
 			.expect("requested")
 			.prepare(moq_net::Epoch::mint())
 			.expect("prepare");
+		// Keep a refused answer alive so dropping it cannot hide a stray announcement.
 		let _answer = prepared.broadcast().clone();
 		let announced = |consumer: &origin::Consumer| {
 			let mut route = std::pin::pin!(consumer.routed("room/alice"));
