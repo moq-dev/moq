@@ -9,6 +9,10 @@
 # can't check.
 set -euo pipefail
 
+if [[ "${GITHUB_ACTIONS:-}" != true && "${LOCAL_SUPERVISED:-}" != 1 ]]; then
+    exec bash "$(dirname "$0")/../local.sh" bash "$0" "$@"
+fi
+
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "$here/../../cpp/obs"
 

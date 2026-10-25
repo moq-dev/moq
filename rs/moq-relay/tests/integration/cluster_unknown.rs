@@ -130,7 +130,7 @@ fn client(version: Option<moq_net::Version>) -> moq_tokio::Client {
 }
 
 struct Publisher {
-	_broadcast: moq_net::broadcast::Producer,
+	_broadcast: moq_net::origin::Publication,
 	_session: moq_tokio::Connection,
 	streamer: tokio::task::AbortHandle,
 }

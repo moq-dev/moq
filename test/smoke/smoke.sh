@@ -44,11 +44,11 @@ RELAY="${RELAY_BIN:-moq-relay}"
 # Name of the docker-channel relay container, shared with clients/docker/moq-relay
 # so cleanup() can reap it after a SIGKILL of the wrapper (see cleanup()). Exported
 # so the wrapper binds the same name; ignored by the non-docker channels.
-RELAY_CONTAINER="${MOQ_RELAY_CONTAINER:-moq-relay-smoke}"
-export MOQ_RELAY_CONTAINER="$RELAY_CONTAINER"
+RELAY_CONTAINER="${SMOKE_RELAY_CONTAINER:-moq-relay-smoke}"
+export SMOKE_RELAY_CONTAINER="$RELAY_CONTAINER"
 # The CLI binary under test. The package/crate is still distributed as moq-cli in
-# some channels, but the installed executable is `moq`. Honor MOQ_BIN if set.
-MOQ="${MOQ_BIN:-}"
+# some channels, but the installed executable is `moq`. Honor CLI_BIN if set.
+MOQ="${CLI_BIN:-}"
 
 require_value() {
     # require_value <flag> "$@": the flag plus the rest of the argv. Ensures a
@@ -198,7 +198,7 @@ fetch_tarball() {
 }
 
 require_tools() {
-    # Resolve the CLI binary name unless MOQ_BIN pinned it.
+    # Resolve the CLI binary name unless CLI_BIN pinned it.
     if [[ -z "$MOQ" ]]; then
         MOQ=moq
     fi
@@ -360,12 +360,12 @@ gst_prepare() {
     }
     # Escape hatch: point at a locally-built plugin dir (e.g. target/release after
     # `cargo build -p moq-gst`) instead of the published tarball, mirroring the
-    # RELAY_BIN/MOQ_BIN overrides. Skips the download but still load-checks it.
-    if [[ -n "${MOQ_GST_PLUGIN_DIR:-}" ]]; then
-        GST_PLUGIN_DIR="$MOQ_GST_PLUGIN_DIR"
+    # RELAY_BIN/CLI_BIN overrides. Skips the download but still load-checks it.
+    if [[ -n "${SMOKE_GST_PLUGIN_DIR:-}" ]]; then
+        GST_PLUGIN_DIR="$SMOKE_GST_PLUGIN_DIR"
         echo "moq-gst (local: $GST_PLUGIN_DIR)"
         [[ -d "$GST_PLUGIN_DIR" ]] || {
-            echo "MOQ_GST_PLUGIN_DIR is not a directory: $GST_PLUGIN_DIR" >&2
+            echo "SMOKE_GST_PLUGIN_DIR is not a directory: $GST_PLUGIN_DIR" >&2
             return 1
         }
         GST_PLUGIN_PATH_1_0="$GST_PLUGIN_DIR" GST_PLUGIN_SYSTEM_PATH_1_0="" \

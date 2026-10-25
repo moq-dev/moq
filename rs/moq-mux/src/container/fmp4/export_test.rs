@@ -1928,12 +1928,12 @@ async fn split_h265_parameter_sets_keep_the_sync_point() {
 #[tokio::test(start_paused = true)]
 async fn an_in_band_keyframe_without_parameter_sets_fails() {
 	let mut live = Live::avc3();
-	live.track.write(annexb_frame(0, &[IDR])).unwrap();
-	live.track.finish().unwrap();
-
 	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await)
 		.with_max_delay(RECORDING_MAX_DELAY);
 	chunk_now(&mut exporter).await.init().expect("init");
+
+	live.track.write(annexb_frame(0, &[IDR])).unwrap();
+	live.track.finish().unwrap();
 	let err = error_now(&mut exporter).await;
 	assert!(
 		matches!(

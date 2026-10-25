@@ -910,6 +910,10 @@ impl Grouped for crate::quic::web::Session {
 		Some(crate::quic::driver::Connection::wire(self))
 	}
 
+	fn probe(&self) -> Option<moq_net::transport::Probe> {
+		crate::quic::driver::Connection::probe(self)
+	}
+
 	fn streams_evicted(&self) -> Option<u64> {
 		Some(crate::quic::driver::Connection::stats(self).credit.evicted)
 	}
