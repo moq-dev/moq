@@ -30,4 +30,18 @@ Kept from [moq-dev/moq#5678](https://github.com/moq-dev/moq/pull/5678):
 prepare and publish, one epoch per answer, and the cold-start reset until
 [announce takeover](/quest/m1/announce-takeover.md) lands.
 
+Parked 2026-10-24 (maintainer) until announce takeover lands: #6496's
+conformance tests subscribe through a `dynamic()` claim and get `Unroutable`
+from the cold-start reset (the worker's answer arrives under a fresh epoch),
+not from a missing route; `dynamic()` already builds the same route as
+`dynamic_route` minus `publishes: false`. Takeover removes the reset at its
+source. On resuming, main has new out-of-crate callers to move: `wide_hop.rs`,
+moq-hls `export/rendition.rs`, moq-cli `play/media.rs`, moq-mux
+`benches/export.rs`, and moq-gst `source/imp.rs`, which used the removed
+`Publisher::standalone` and needs a redesign.
+
 Public API: moq-net breaking (three hidden items go private). Wire: none.
+
+## Required
+
+- [Announcement takeover](/quest/m1/announce-takeover.md) - removes the cold-start reset the claim's first subscribe hits
