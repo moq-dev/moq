@@ -95,7 +95,11 @@ MPEG-TS import carries H.264/H.265 and AAC/MP2/AC-3/E-AC-3/Opus, and passes
 SCTE-35, DSM-CC sections, and every other stream it does not decode (MPEG-2
 video, LATM AAC, KLV, subtitles, DVB AC-3) through as tracks. MPEG-2 video still
 paces the program by its timestamps, and a subscriber joins it at a sequence
-header. Each such PES goes through whole, at its place on the program clock
+header. H.264/H.265 AUs can span PES, and a PES can contain several. Supply
+a PTS for each AU or declare a proportional POC clock: AVC needs
+`fixed_frame_rate_flag` and `temporal_poc_flag` in the TS timing descriptor plus
+fixed-rate SPS VUI; HEVC needs VUI's `vui_poc_proportional_to_timing_flag`. Missing timing
+ends the import instead of repeating a timestamp. Private and undecoded PES go through whole, at their place on the program clock
 (PCR); one before the first PCR is dropped. A stream it cannot carry unaltered
 is refused with a warning: any in a program with no PCR, and one whose PES carry
 an ESCR, pack header or TREF, are scrambled, leave a non-video PES unbounded,
@@ -483,11 +487,15 @@ what each rendition has written, about once a second while someone subscribes,
 with the connection's RTT, estimated send rate, and loss. It covers the stdin imports;
 capture, the gateways, `archive`, and `ts --program all` refuse it.
 
-`export --echo <name>` answers a publisher that solicits feedback: under the
-catalog's `echo` path it publishes `<name>.echo`, reporting what each rendition
-the export reads has received and its newest arrival, until the export ends.
-It covers the stdout container exports and needs a hang catalog, so MSF
-refuses it.
+`import --echo-path <path>` solicits feedback from the same imports: it sets
+the catalog's `echo` path, resolved against the broadcast like a relative URL,
+so `viewers` from `room/event` is `room/viewers`. A path above the connection
+root is refused, since readers would refuse the catalog, and so is one no
+viewer could publish beneath: a segment holding `*`, or past 32 segments.
+`export --echo <name>` answers: under the catalog's `echo` path it publishes
+`<name>.echo`, reporting what each rendition the export reads has received and
+its newest arrival, until the export ends. It covers the stdout container
+exports and needs a hang catalog, so MSF refuses it.
 
 The `report` and `echo` sinks print reports as JSON lines. `export report`
 follows one broadcast's report track until the broadcast ends; `export echo`
@@ -496,7 +504,7 @@ prints `{"broadcast", "feedback"}` for every `.echo` broadcast under
 final report. Either sink stops reading a report that grows past 1 MiB.
 
 ```bash
-moq ... --broadcast event import --report ts < feed.ts
+moq ... --broadcast event import --report --echo-path viewers ts < feed.ts
 moq ... --broadcast event export report
 moq ... --broadcast event export --echo alice ts > out.ts
 moq ... --broadcast viewers export echo

@@ -306,7 +306,7 @@ mod tests {
 			color: None,
 		};
 		delivery.replace(surface, Timestamp::from_micros(0).unwrap(), now);
-		let mut config = Config::new(320, 240, crate::Rate::integer(50));
+		let mut config = Config::new(320, 240, crate::FrameRate::integer(50));
 		config.kind = Kind::Software;
 		let mut encoder = Encoder::new(&config).unwrap();
 		let mut broadcast = moq_net::broadcast::Info::new().produce();

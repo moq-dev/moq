@@ -365,8 +365,8 @@ export class Connection {
 	}
 
 	/**
-	 * Release this handle. The shared connection closes once its last handle is gone and
-	 * the linger window passes; other handles on the URL are unaffected. Idempotent.
+	 * Release this handle. The shared connection drains and closes once its last handle is
+	 * gone and the linger window passes; other handles on the URL are unaffected. Idempotent.
 	 */
 	close(abort?: Error): void {
 		this.#signals.close();

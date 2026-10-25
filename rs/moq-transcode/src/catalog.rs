@@ -20,7 +20,7 @@ pub(crate) struct Resolved {
 	/// The output resolution, derived from the source aspect ratio.
 	pub size: moq_video::Size,
 	pub bitrate: moq_net::bandwidth::Rate,
-	pub framerate: Option<moq_video::Rate>,
+	pub framerate: Option<moq_video::FrameRate>,
 }
 
 impl Resolved {
@@ -284,7 +284,7 @@ pub(crate) fn resolve_rungs(ladder: &Ladder, source_name: &str, source: &VideoCo
 	let Some((source_width, source_height)) = dimensions(source) else {
 		return Err(Error::SourceDimensions(source_name.to_string()));
 	};
-	let framerate = source.framerate.map(moq_video::Rate::from_f64).transpose()?;
+	let framerate = source.framerate.map(moq_video::FrameRate::from_f64).transpose()?;
 
 	let mut resolved: Vec<Resolved> = Vec::new();
 	for rung in ladder.rungs() {
@@ -328,13 +328,13 @@ pub(crate) async fn rung_entry(
 	source: &VideoConfig,
 	encoder: &moq_video::encode::Kind,
 ) -> Result<VideoConfig, Error> {
-	let encode_rate = rung.framerate.unwrap_or(moq_video::Rate::new(30, 1).unwrap());
+	let encode_rate = rung.framerate.unwrap_or(moq_video::FrameRate::new(30, 1).unwrap());
 	let mut config = moq_video::encode::Config::new(rung.size.width, rung.size.height, encode_rate);
 	config.bitrate = Some(rung.bitrate);
 	config.kind = encoder.clone();
 
 	let mut entry = config.probe().await?;
-	entry.framerate = rung.framerate.map(moq_video::Rate::as_f64);
+	entry.framerate = rung.framerate.map(moq_video::FrameRate::as_f64);
 	// A property of the source rather than the ladder: every rung shows the same picture.
 	entry.optimize_for_latency = source.optimize_for_latency;
 	Ok(entry)
@@ -443,7 +443,7 @@ mod tests {
 				short_side: 360,
 				size: moq_video::Size::new(640, 360),
 				bitrate: moq_net::bandwidth::Rate::from_bps(600_000),
-				framerate: Some(moq_video::Rate::new(30, 1).unwrap()),
+				framerate: Some(moq_video::FrameRate::new(30, 1).unwrap()),
 			},
 			entry: source(640, 360, Some(600_000)),
 		}];
@@ -474,7 +474,7 @@ mod tests {
 				short_side: 360,
 				size: moq_video::Size::new(640, 360),
 				bitrate: moq_net::bandwidth::Rate::from_bps(600_000),
-				framerate: Some(moq_video::Rate::new(30, 1).unwrap()),
+				framerate: Some(moq_video::FrameRate::new(30, 1).unwrap()),
 			},
 			entry: source(640, 360, Some(600_000)),
 		}];
@@ -509,7 +509,7 @@ mod tests {
 		let resolved = resolve_rungs(&ladder, "video", &fractional).unwrap();
 		assert_eq!(
 			resolved[0].framerate,
-			Some(moq_video::Rate::new(30_000, 1_001).unwrap())
+			Some(moq_video::FrameRate::new(30_000, 1_001).unwrap())
 		);
 
 		fractional.framerate = None;
@@ -706,7 +706,7 @@ mod tests {
 			short_side: 360,
 			size: moq_video::Size::new(640, 360),
 			bitrate: moq_net::bandwidth::Rate::from_bps(600_000),
-			framerate: Some(moq_video::Rate::new(30, 1).unwrap()),
+			framerate: Some(moq_video::FrameRate::new(30, 1).unwrap()),
 		};
 		let mut source = source(1920, 1080, Some(6_000_000));
 		source.optimize_for_latency = Some(true);

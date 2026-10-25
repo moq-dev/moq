@@ -10,7 +10,7 @@ pub const MAX_FRAMES_PER_SECOND: u32 = 1_000_000;
 /// An invalid video frame rate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
-pub enum RateError {
+pub enum FrameRateError {
 	/// The numerator or denominator was zero.
 	#[error("frame rate numerator and denominator must be non-zero")]
 	Zero,
@@ -24,19 +24,19 @@ pub enum RateError {
 
 /// An exact positive video frame rate, in frames per second.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
-pub struct Rate {
+pub struct FrameRate {
 	numerator: u32,
 	denominator: u32,
 }
 
-impl Rate {
+impl FrameRate {
 	/// Construct an exact rate from a numerator and denominator.
-	pub fn new(numerator: u32, denominator: u32) -> Result<Self, RateError> {
+	pub fn new(numerator: u32, denominator: u32) -> Result<Self, FrameRateError> {
 		if numerator == 0 || denominator == 0 {
-			return Err(RateError::Zero);
+			return Err(FrameRateError::Zero);
 		}
 		if u64::from(numerator) > u64::from(MAX_FRAMES_PER_SECOND) * u64::from(denominator) {
-			return Err(RateError::TooLarge);
+			return Err(FrameRateError::TooLarge);
 		}
 		let divisor = gcd(numerator, denominator);
 		Ok(Self {
@@ -46,12 +46,12 @@ impl Rate {
 	}
 
 	/// Approximate a finite catalog rate using 32-bit rational components.
-	pub fn from_f64(value: f64) -> Result<Self, RateError> {
+	pub fn from_f64(value: f64) -> Result<Self, FrameRateError> {
 		if !value.is_finite() || value <= 0.0 {
-			return Err(RateError::InvalidFloat);
+			return Err(FrameRateError::InvalidFloat);
 		}
 		if value > f64::from(MAX_FRAMES_PER_SECOND) {
-			return Err(RateError::TooLarge);
+			return Err(FrameRateError::TooLarge);
 		}
 		// Continued fractions recover conventional rates such as 30000/1001 from
 		// their JSON floating-point representation without inventing a decimal timebase.
@@ -118,20 +118,20 @@ impl Rate {
 	}
 }
 
-impl Ord for Rate {
+impl Ord for FrameRate {
 	fn cmp(&self, other: &Self) -> Ordering {
 		(u64::from(self.numerator) * u64::from(other.denominator))
 			.cmp(&(u64::from(other.numerator) * u64::from(self.denominator)))
 	}
 }
 
-impl PartialOrd for Rate {
+impl PartialOrd for FrameRate {
 	fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
 		Some(self.cmp(other))
 	}
 }
 
-impl fmt::Display for Rate {
+impl fmt::Display for FrameRate {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		write!(f, "{}/{}", self.numerator, self.denominator)
 	}
@@ -153,32 +153,38 @@ mod tests {
 	#[test]
 	fn preserves_broadcast_rates() {
 		assert_eq!(
-			Rate::new(30_000, 1_001).unwrap(),
-			Rate::from_f64(30_000.0 / 1_001.0).unwrap()
+			FrameRate::new(30_000, 1_001).unwrap(),
+			FrameRate::from_f64(30_000.0 / 1_001.0).unwrap()
 		);
 		assert_eq!(
-			Rate::new(60_000, 1_001).unwrap(),
-			Rate::from_f64(60_000.0 / 1_001.0).unwrap()
+			FrameRate::new(60_000, 1_001).unwrap(),
+			FrameRate::from_f64(60_000.0 / 1_001.0).unwrap()
 		);
 	}
 
 	#[test]
 	fn validates_components_and_range() {
-		assert_eq!(Rate::new(30, 0), Err(RateError::Zero));
-		assert_eq!(Rate::new(0, 1), Err(RateError::Zero));
-		assert_eq!(Rate::new(MAX_FRAMES_PER_SECOND + 1, 1), Err(RateError::TooLarge));
+		assert_eq!(FrameRate::new(30, 0), Err(FrameRateError::Zero));
+		assert_eq!(FrameRate::new(0, 1), Err(FrameRateError::Zero));
+		assert_eq!(
+			FrameRate::new(MAX_FRAMES_PER_SECOND + 1, 1),
+			Err(FrameRateError::TooLarge)
+		);
 	}
 
 	#[test]
 	fn rejects_invalid_floats() {
-		assert_eq!(Rate::from_f64(f64::NAN), Err(RateError::InvalidFloat));
-		assert_eq!(Rate::from_f64(f64::INFINITY), Err(RateError::InvalidFloat));
-		assert_eq!(Rate::from_f64(f64::NEG_INFINITY), Err(RateError::InvalidFloat));
-		assert_eq!(Rate::from_f64(0.0), Err(RateError::InvalidFloat));
-		assert_eq!(Rate::from_f64(-30.0), Err(RateError::InvalidFloat));
+		assert_eq!(FrameRate::from_f64(f64::NAN), Err(FrameRateError::InvalidFloat));
+		assert_eq!(FrameRate::from_f64(f64::INFINITY), Err(FrameRateError::InvalidFloat));
 		assert_eq!(
-			Rate::from_f64(f64::from(MAX_FRAMES_PER_SECOND) + 1.0),
-			Err(RateError::TooLarge)
+			FrameRate::from_f64(f64::NEG_INFINITY),
+			Err(FrameRateError::InvalidFloat)
+		);
+		assert_eq!(FrameRate::from_f64(0.0), Err(FrameRateError::InvalidFloat));
+		assert_eq!(FrameRate::from_f64(-30.0), Err(FrameRateError::InvalidFloat));
+		assert_eq!(
+			FrameRate::from_f64(f64::from(MAX_FRAMES_PER_SECOND) + 1.0),
+			Err(FrameRateError::TooLarge)
 		);
 	}
 }

@@ -321,7 +321,7 @@ export function ended(handle: Handle): Error | undefined {
  * that session. Pass one to `connect` as `auth` instead and it outlives its sessions: each
  * presents every token the handle holds, so an {@link Auth} it returned keeps riding a route's
  * announcements across a reconnect. It backs one active session at a time, plus the ones
- * draining after a GOAWAY. Mirrors the Rust `moq_net::auth::Handle`.
+ * draining after a GOAWAY or a `close()`. Mirrors the Rust `moq_net::auth::Handle`.
  */
 export class Handle {
 	/** A handle backing no session yet, for `connect`'s `auth` option. */
@@ -539,7 +539,7 @@ export interface AuthSessionProps {
 	peerGrant: Grant;
 	/** The handle the session is built on, or undefined for one of its own that ends with it. */
 	handle?: Handle;
-	/** Whether the session is draining after a GOAWAY, which frees its handle for a successor. */
+	/** Whether the session is draining after a GOAWAY or a local close, which frees its handle for a successor. */
 	draining?: () => boolean;
 }
 
@@ -596,7 +596,7 @@ export class AuthSession {
 		for (const token of [...this.#state.tokens]) this.offer(token);
 	}
 
-	/** Whether the session still takes new work: open, with no GOAWAY received. */
+	/** Whether the session still takes new work: open, neither closing nor past a GOAWAY. */
 	get active(): boolean {
 		return !this.#closed && !this.#draining();
 	}

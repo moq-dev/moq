@@ -29,6 +29,8 @@ from __future__ import annotations
 import argparse
 import bisect
 import json
+import re
+from fractions import Fraction
 import subprocess
 import sys
 from collections import deque
@@ -562,6 +564,8 @@ def read_programs(ts_path: str) -> list[tuple[int, list[Stream]]]:
             names = {d["#name"] for d in descriptors}
             names |= {f"registration:{d['format_identifier']}" for d in descriptors if "format_identifier" in d}
             names |= {"hrd_management_valid" for d in descriptors if d.get("hrd_management_valid") is True}
+            names |= {"temporal_poc_clock" for d in descriptors
+                      if d.get("fixed_frame_rate") is True and d.get("temporal_poc") is True}
             names |= {
                 f"tag{d['tag']}:" + "".join(d.get("#nodes", [])).replace(" ", "").lower()
                 for d in descriptors
@@ -931,18 +935,130 @@ VCL = {"avc": set(range(1, 6)), "hevc": set(range(0, 32)), "mpeg2-video": set(ra
 DELIMITER = {"avc": 9, "hevc": 35, "mpeg2-video": 0x00}
 
 
+def proportional_video_clock(stream: Stream, kind: str, count: int) -> list[tuple[int, Fraction, bool, tuple[int, Fraction] | None]]:
+    """Frame-only POC clocks and HRD output delays, parsed by FFmpeg.
+
+    POC plus VUI supplies presentation time; picture-timing SEI's DPB output
+    delay supplies its distance from decode time (H.264 C.2, H.265 D.3.3).
+    Never let FFmpeg's guessed packet/frame timestamps become the timing oracle.
+    """
+    if kind == "avc" and "temporal_poc_clock" not in stream.descriptors:
+        raise Refused("several access units have no declared proportional POC timestamp clock")
+    proc = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "trace", "-f", "h264" if kind == "avc" else "hevc",
+                           "-i", "pipe:0", "-map", "0:v:0", "-c", "copy", "-bsf:v", "trace_headers", "-f", "null", "-"],
+                          input=bytes(stream.es), capture_output=True, check=False)
+    if proc.returncode:
+        raise Refused("cannot parse the video timing headers")
+    blocks: list[tuple[str, dict[str, int]]] = []
+    for line in proc.stderr.decode(errors="replace").splitlines():
+        if not line.startswith("[trace_headers @"):
+            continue
+        text = line.split("] ", 1)[1]
+        if text in ("Sequence Parameter Set", "Slice Header", "Slice Segment Header"):
+            blocks.append((text, {}))
+        elif text and text[0].isupper():
+            blocks.append((text, {}))
+        elif blocks:
+            match = re.match(r"\d+\s+(\S+)\s+\S+\s+=\s+(-?\d+)$", text)
+            if match:
+                blocks[-1][1][match[1]] = int(match[2])
+    sps: dict[str, int] = {}
+    previous_lsb = previous_msb = frame_num = frame_offset = 0
+    seen = False
+    clocks = []
+    timing = None
+    for name, fields in blocks:
+        if name == "Picture Timing":
+            timing = fields
+            continue
+        if name == "Sequence Parameter Set":
+            sps = fields
+            continue
+        if name not in ("Slice Header", "Slice Segment Header"):
+            continue
+        if kind == "avc":
+            if fields.get("first_mb_in_slice") != 0:
+                continue
+            if (sps.get("frame_mbs_only_flag") != 1 or sps.get("pic_struct_present_flag", 0)
+                    or sps.get("fixed_frame_rate_flag") != 1):
+                raise Refused("missing DTS outside the frame-only video clock profile")
+            units, scale = sps.get("num_units_in_tick", 0), sps.get("time_scale", 0)
+            if units <= 0 or scale <= 0:
+                raise Refused("several access units have no proportional timestamp clock")
+            rate = tick = Fraction(units, scale)
+            output = None if timing is None else timing.get("dpb_output_delay")
+            reset = fields.get("nal_unit_type") == 5
+            if 5 in [value for key, value in fields.items() if key.startswith("memory_management_control_operation")]:
+                raise Refused("missing DTS across an MMCO-5 reset is outside the model profile")
+            mode = sps.get("pic_order_cnt_type")
+            if reset:
+                previous_lsb = previous_msb = frame_num = frame_offset = 0
+            if mode == 0:
+                maximum = 1 << (sps["log2_max_pic_order_cnt_lsb_minus4"] + 4)
+                lsb = fields["pic_order_cnt_lsb"]
+                msb = previous_msb
+                if lsb < previous_lsb and previous_lsb - lsb >= maximum // 2:
+                    msb += maximum
+                elif lsb > previous_lsb and lsb - previous_lsb > maximum // 2:
+                    msb -= maximum
+                poc = msb + lsb
+                if fields.get("nal_ref_idc"):
+                    previous_lsb, previous_msb = lsb, msb
+            elif mode == 2:
+                if fields["frame_num"] < frame_num:
+                    frame_offset += 1 << (sps["log2_max_frame_num_minus4"] + 4)
+                frame_num = fields["frame_num"]
+                poc = 0 if reset else 2 * (frame_offset + frame_num) - (fields.get("nal_ref_idc") == 0)
+            else:
+                raise Refused("missing DTS with AVC POC type 1 is outside the model profile")
+        else:
+            if fields.get("first_slice_segment_in_pic_flag") != 1:
+                continue
+            if (sps.get("field_seq_flag", 0) or sps.get("sub_pic_hrd_params_present_flag", 0)
+                    or sps.get("vui_poc_proportional_to_timing_flag") != 1):
+                raise Refused("missing DTS outside the frame-only proportional HEVC clock profile")
+            units, scale = sps.get("vui_num_units_in_tick", 0), sps.get("vui_time_scale", 0)
+            if units <= 0 or scale <= 0:
+                raise Refused("several access units have no proportional timestamp clock")
+            tick = Fraction(units, scale)
+            rate = tick * (sps.get("vui_num_ticks_poc_diff_one_minus1", 0) + 1)
+            output = None if timing is None else timing.get("pic_dpb_output_delay")
+            nal = fields["nal_unit_type"]
+            reset = nal in range(16, 21) or (nal == 21 and not seen)
+            lsb = fields.get("slice_pic_order_cnt_lsb", 0)
+            maximum = 1 << (sps["log2_max_pic_order_cnt_lsb_minus4"] + 4)
+            msb = 0 if reset else previous_msb
+            if not reset:
+                if lsb < previous_lsb and previous_lsb - lsb >= maximum // 2:
+                    msb += maximum
+                elif lsb > previous_lsb and lsb - previous_lsb > maximum // 2:
+                    msb -= maximum
+            poc = msb + lsb
+            if fields.get("nuh_temporal_id_plus1") == 1 and nal not in (0, 2, 4, 6, 7, 8, 9):
+                previous_lsb, previous_msb = lsb, msb
+        if not rate:
+            raise Refused("several access units have no proportional timestamp clock")
+        clocks.append((poc, rate, reset, None if output is None else (output, tick)))
+        timing = None
+        seen = True
+    if len(clocks) != count:
+        raise Refused("video timing headers do not identify every access unit")
+    return clocks
+
+
 def video_units(stream: Stream, kind: str) -> list[AccessUnit]:
     """One access unit per coded picture, each decoded at its PES's DTS (or PTS).
 
     An access unit opens at the first delimiter, parameter set or SEI after the previous
     picture's last slice (H.264 7.4.1.2.3, H.265 7.4.2.4.4); H.222.0 2.14.1 and 2.17.1
     also put a delimiter in every one, so a stream without them is refused. A PES may
-    carry several access units, but only the first takes its timestamp; the rest would
-    need decoding times derived from the stream's own timing (2.4.2.3), which this model
-    does not do, so such a layout is refused rather than graded as one unit.
+    carry several access units, but only the first takes its timestamp. Missing times
+    use a declared proportional POC clock and HRD picture-timing output delay
+    in the frame-only profile; absent signaling is refused.
     """
     es = bytes(stream.es)
     starts = []
+    owners = []
     delimited = False
     after_vcl = True  # the first opener starts the first whole access unit
     pos = es.find(b"\x00\x00\x01")
@@ -953,6 +1069,9 @@ def video_units(stream: Stream, kind: str) -> list[AccessUnit]:
             # The zero_byte ahead of the start code belongs to this NAL unit (H.264 B.1.1,
             # H.265 B.2.1), so to this access unit rather than the last.
             starts.append(pos - 1 if pos and es[pos - 1] == 0 else pos)
+            # An optional zero_byte can be a preceding PES's trailing zero.
+            # The required start_code_prefix decides timestamp ownership.
+            owners.append(pos)
             after_vcl = False
         elif nal in VCL[kind]:
             after_vcl = True
@@ -965,13 +1084,30 @@ def video_units(stream: Stream, kind: str) -> list[AccessUnit]:
     packets = [index for index, _h, body, _o in stream.packets if body]
     units: list[AccessUnit] = []
     stamped: set[int] = set()
+    owner_pes = [bisect.bisect_right(pes_at, owner) - 1 for owner in owners]
+    needs_clock = len(set(owner_pes)) != len(owner_pes) or any(pes[k][1] is None for k in owner_pes)
+    clocks = proportional_video_clock(stream, kind, len(starts)) if needs_clock else []
+    anchor = None
     for n, start in enumerate(starts):
-        k = bisect.bisect_right(pes_at, start) - 1
+        k = owner_pes[n]
         _offset, pts, dts, index = pes[k]
+        explicit = pts is not None and k not in stamped
+        if clocks:
+            poc, rate, reset, output = clocks[n]
+            if reset:
+                anchor = None
+            if explicit:
+                anchor = (poc, Fraction(pts), rate)
+            elif anchor is not None and anchor[2] == rate:
+                pts = anchor[1] + (poc - anchor[0]) * rate * PTS_HZ
+                if output is None:
+                    raise Refused("an inferred access unit has no HRD picture timing for its decode time")
+                delay, tick = output
+                dts = pts - delay * tick * PTS_HZ
+            else:
+                raise Refused("an access unit has no timestamp anchor for its POC clock")
         if pts is None:
             raise Refused(f"an access unit starts in the untimestamped PES at packet {index}")
-        if k in stamped:
-            raise Refused(f"the PES at packet {index} carries several access units, whose decode times are not derived")
         stamped.add(k)
         end = starts[n + 1] if n + 1 < len(starts) else stream.es_len
         first = packets[bisect.bisect_right(packet_at, start) - 1]

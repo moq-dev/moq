@@ -19,6 +19,7 @@ import { Parameters } from "./ietf/parameters.ts";
 import { Publisher as IetfPublisher } from "./ietf/publisher.ts";
 import { RequestOk } from "./ietf/request.ts";
 import { SubscribeTracks } from "./ietf/subscribe_tracks.ts";
+import { hooks } from "./internal.ts";
 import * as Lite from "./lite/index.ts";
 import { Publisher as LitePublisher } from "./lite/publisher.ts";
 import { createMockTransportPair, textFrame } from "./mock.ts";
@@ -2739,7 +2740,7 @@ test("a handle serves a request under live/** over the wire", async () => {
 		for await (const request of handle.requested()) {
 			const produced = new BroadcastProducer();
 			produced.createTrack("chat", { timescale: Timescale.MILLI }).writeFrame(textFrame("hello"));
-			request.accept(produced);
+			hooks.acceptRequest(request, produced);
 		}
 	})();
 
