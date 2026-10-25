@@ -9,8 +9,7 @@ use object_store::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::path::{check_id, decode_track, encode_track, push};
-use crate::segment::Frame;
-use crate::{Error, ID_WIDTH, Result, VERSION};
+use crate::{Error, ID_WIDTH, Result, VERSION, VERSION_MIN};
 
 /// The broadcast's completion marker, beside its track segments.
 pub(crate) const BROADCAST_END: &str = ".end";
@@ -144,6 +143,15 @@ impl End {
 	}
 }
 
+/// One frame's timestamp and original payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Frame {
+	/// Absolute timestamp in the track's timescale, or `None` on an untimed track.
+	pub timestamp: Option<u64>,
+	/// Original frame payload, including any group-scoped compression.
+	pub payload: Bytes,
+}
+
 /// One stored sequence, in the form it was forwarded in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Entry {
@@ -188,6 +196,15 @@ impl Object {
 			frame: self.frame_start,
 			pts: first.first().timestamp,
 		})
+	}
+
+	/// Its payload bytes plus a small per-frame overhead, for a byte-bounded cache.
+	pub(crate) fn weight(&self) -> u64 {
+		let frames = self.entries.iter().flat_map(|entry| match entry {
+			Entry::Group { frames, .. } => frames.as_slice(),
+			Entry::Datagram { frame, .. } => std::slice::from_ref(frame),
+		});
+		frames.map(|frame| frame.payload.len() as u64 + 32).sum::<u64>() + 64
 	}
 
 	/// The position just past the last stored frame or datagram.
@@ -257,10 +274,11 @@ impl Object {
 	}
 
 	/// Decode a whole table before slicing any payload; `timed` is whether the track's `.info`
-	/// declares a timescale, which says whether each frame stores a timestamp.
+	/// declares a timescale, which says whether each frame stores a timestamp. Version 2 objects
+	/// are identical to the current ones.
 	pub(crate) fn decode(mut buf: impl Buf, timed: bool) -> Result<Self> {
 		let version = read(&mut buf)?;
-		if version != VERSION {
+		if !(VERSION_MIN..=VERSION).contains(&version) {
 			return Err(Error::Version(version));
 		}
 		let frame_start = read(&mut buf)?;
@@ -535,8 +553,12 @@ mod tests {
 		let bytes = object.encode(false).unwrap();
 		// version, frame start, one entry: sequence 2, a group of two frames, then the payloads.
 		assert_eq!(bytes.as_ref(), &[VERSION as u8, 0, 1, 2, 0, 2, 1, 2, b'x', b'y', b'z']);
-		assert_eq!(Object::decode(bytes, false).unwrap(), object);
+		assert_eq!(Object::decode(bytes.clone(), false).unwrap(), object);
 		assert!(matches!(object.encode(true), Err(Error::Timing)));
+
+		let mut v2 = bytes.to_vec();
+		v2[0] = 2;
+		assert_eq!(Object::decode(&v2[..], false).unwrap(), object);
 	}
 
 	#[test]
@@ -589,9 +611,11 @@ mod tests {
 			Object::decode(&[VERSION as u8, 0, 0x7f][..], false),
 			Err(Error::Table)
 		));
-		assert!(matches!(
-			Object::decode(&[VERSION as u8 + 1, 0, 0][..], false),
-			Err(Error::Version(_))
-		));
+		for version in [1, VERSION as u8 + 1] {
+			assert!(matches!(
+				Object::decode(&[version, 0, 0][..], false),
+				Err(Error::Version(_))
+			));
+		}
 	}
 }

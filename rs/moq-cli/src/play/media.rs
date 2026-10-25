@@ -33,13 +33,13 @@ enum Crossing {
 /// network jitter, and one with no depth at all can never be read from.
 const AUDIO_BUFFER_MIN: Duration = Duration::from_millis(50);
 
-/// How far the speaker may run over its target before a write skips back onto
-/// it.
+/// How far the speaker may hold more than its target, ahead of a write, before
+/// the write skips back onto it.
 ///
-/// The level moves by a device period each time the speaker pulls and by a
-/// packet each time one lands, so a margin under that would skip on ordinary
-/// cadence. Anything over it is latency nobody asked for, since a live stream
-/// arrives as fast as it plays and never drains the excess on its own.
+/// The level moves by a device period each time the speaker pulls, so a margin
+/// under that would skip on ordinary cadence. Anything over it is latency nobody
+/// asked for, since a live stream arrives as fast as it plays and never drains
+/// the excess on its own.
 const AUDIO_SLACK: Duration = Duration::from_millis(20);
 
 /// Silence written per slice when padding, so the buffer stays a fixed size.
@@ -77,6 +77,9 @@ impl<O: Output> Media<O> {
 	/// update is the same instance, which its subscriptions already ride out.
 	async fn play(self) -> anyhow::Result<()> {
 		let mut follow = Instances::new(&self.origin, &self.broadcast, None)?;
+		// The device belongs to the player, so replacing a broadcast never waits
+		// for it to close and reopen. Each sink adapts its own rate and layout.
+		let device = tokio::sync::OnceCell::new();
 		let mut playing = None;
 
 		loop {
@@ -103,7 +106,7 @@ impl<O: Output> Media<O> {
 					self.video.lock().unwrap().clear();
 					self.drained.notify_one();
 					self.output.send(Event::Wake);
-					playing = Some(Box::pin(self.play_broadcast(broadcast)));
+					playing = Some(Box::pin(self.play_broadcast(broadcast, &device)));
 				}
 				result = async { playing.as_mut().expect("guarded").await }, if playing.is_some() => {
 					playing = None;
@@ -118,7 +121,11 @@ impl<O: Output> Media<O> {
 	}
 
 	/// Play the instance handed out by the follower until its catalog and tracks end.
-	async fn play_broadcast(&self, broadcast: moq_net::broadcast::Consumer) -> anyhow::Result<()> {
+	async fn play_broadcast(
+		&self,
+		broadcast: moq_net::broadcast::Consumer,
+		device: &tokio::sync::OnceCell<O::Speaker>,
+	) -> anyhow::Result<()> {
 		let source = moq_mux::Source::new(self.origin.clone(), broadcast.clone());
 		let mut catalogs = catalog::Consumer::<()>::new(&broadcast, self.args.catalog_format(&self.broadcast))
 			.await
@@ -132,8 +139,8 @@ impl<O: Output> Media<O> {
 		let mut audio_demand: Option<Demand> = None;
 		// Shared by an audio rendition and the retired tails still playing beside
 		// it, so their sinks mix on one stream: a second stream on an exclusive
-		// device would fail to open. Released once none of them is left, so an
-		// idle `play` does not hold the device.
+		// device would fail to open. Released once none of them is left to hand
+		// the presentation anchor back to video; the player keeps the device.
 		let mut speaker = None;
 		// Retired audio sinks still playing out what they hold.
 		let mut tails = tokio::task::JoinSet::new();
@@ -208,9 +215,8 @@ impl<O: Output> Media<O> {
 				}
 			}
 
-			// The speaker is only open while some audio is, so releasing it marks the
-			// last of it going quiet: nothing holds playback to the speaker's cadence
-			// any more, and video takes the anchor back.
+			// The last sink went quiet: nothing holds playback to the speaker's
+			// cadence any more, and video takes the anchor back.
 			if !playback.playing(Kind::Audio) && tails.is_empty() && speaker.take().is_some() {
 				self.presentation.lock().unwrap().stopped();
 				self.drained.notify_one();
@@ -344,7 +350,7 @@ impl<O: Output> Media<O> {
 						Ok(consumer) => {
 							tracing::info!(track = name, decoder = consumer.name(), "playing audio rendition");
 							if speaker.is_none() {
-								speaker = Some(self.output.speaker().await?);
+								speaker = Some(device.get_or_try_init(|| self.output.speaker()).await?.clone());
 							}
 							let audio = AudioPlayback {
 								speaker: speaker.clone().expect("opened above"),
@@ -735,7 +741,7 @@ async fn play_audio<O: Output>(
 			// is also what the sink's ring was sized to hold.
 			let held = delay.min(max_delay).max(AUDIO_BUFFER_MIN);
 			let target = samples(held);
-			let fit = fit(dry, buffered, target, slack, timing.silence + length as u64);
+			let fit = fit(dry, buffered, target, slack, timing.silence, length as u64);
 			dry = false;
 
 			// Playback drops stay on the live timeline; retrying them would add latency,
@@ -1661,6 +1667,7 @@ mod tests {
 		write(&mut new, 10, NEW).await;
 
 		settle(player, &recorder).await;
+		assert_eq!(recorder.speakers(), 1, "the replacement reopened the speaker");
 		assert!(
 			played(&recorder, OLD).0 > Duration::ZERO,
 			"the old broadcast never played"
@@ -1712,6 +1719,7 @@ mod tests {
 		write(&mut new, 10, NEW).await;
 
 		settle(player, &recorder).await;
+		assert_eq!(recorder.speakers(), 1, "the replacement reopened the speaker");
 		assert!(
 			played(&recorder, OLD).0 > Duration::ZERO,
 			"the old broadcast never played"
@@ -1749,6 +1757,7 @@ mod tests {
 		write(&mut new, 10, NEW).await;
 
 		settle(player, &recorder).await;
+		assert_eq!(recorder.speakers(), 1, "the returning broadcast reopened the speaker");
 		assert_eq!(
 			played(&recorder, OLD).0,
 			PACKET_DURATION * 10,
@@ -1938,6 +1947,33 @@ mod tests {
 		settle(player, &recorder).await;
 		let played: Duration = recorder.played().iter().map(|p| p.to - p.from).sum();
 		assert_eq!(played, PACKET_DURATION, "the finished track lost its tail");
+	}
+
+	/// An encoder fed 1024-sample blocks emits each 960-sample packet once the
+	/// block holding its end arrives: a little later each time, then two at once,
+	/// so arrivals swing by a packet. That is cadence, and a fixed delay plays
+	/// every sample through it.
+	#[tokio::test]
+	async fn arrivals_swinging_by_a_packet_play_every_sample() {
+		tokio::time::pause();
+		const BLOCK: u64 = 1024;
+		const COUNT: u64 = 100;
+		let origin = moq_tokio::origin::spawn();
+		let (_broadcast, _catalog, mut audio) = publish(&origin, Default::default());
+		let recorder = Recorder::default();
+		let player = tokio::spawn(media(&origin, Duration::from_millis(50), recorder.clone()).run());
+		let start = Instant::now();
+		for index in 0..COUNT {
+			let ready = ((index + 1) * PACKET).div_ceil(BLOCK) * BLOCK;
+			moq_clock::sleep_until(start + Duration::from_secs_f64(ready as f64 / SAMPLE_RATE as f64)).await;
+			audio.write(packet(index, 0.25)).unwrap();
+		}
+		settle(player, &recorder).await;
+		assert_eq!(
+			played(&recorder, 0.25).0,
+			PACKET_DURATION * COUNT as u32,
+			"a packet was skipped"
+		);
 	}
 
 	/// The 61-frame tune-in burst from #3946 must reach the clock before the
