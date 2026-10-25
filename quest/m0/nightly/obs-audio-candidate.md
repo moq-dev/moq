@@ -1,4 +1,4 @@
-# [XS] OBS audio-candidate test waits for its condition
+# [S] OBS audio-candidate test passes under TSan
 
 ## Goal
 
@@ -9,11 +9,14 @@ TSan report.
 
 ## Plan
 
-The test returns once the failure counter increments, but `moq-source.cpp`
-clears `pending_audio` later, so the check races the clear. Make the test
-wait on the event that clears `pending_audio` (or on a "candidate dropped"
-signal) instead of the counter. Do not add a retry or a sleep. Before
-changing anything, rerun the TSan job once to confirm it is this race.
+The cause is not known yet. It is not the counter racing the clear: the
+"Audio track error" log that bumps `g_candidate_failures` and the
+`pending_audio` clear both run under `ctx->mutex`, which the check then takes.
+But the counter is global, also bumped by any "Failed to resolve" or "Failed
+to subscribe", and the check also needs the active `audio` to survive.
+Reproduce under TSan first, find which conjunct fails and which track and
+error bumped the counter, then fix that cause. If the wait is too broad, make
+it wait on the replacement's own failure. Do not add a retry or a sleep.
 
 Planned 2026-10-25 (maintainer) from the triage of Nightly run
 [40192013303](https://github.com/moq-dev/moq/actions/runs/40192013303).
