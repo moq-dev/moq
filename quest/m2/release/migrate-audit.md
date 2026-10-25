@@ -3,7 +3,7 @@
 ## Goal
 
 Before the breaking cut merges, every break it ships, including those in
-surfaces the [API-diff check](/quest/m1/api-diff.md) cannot see, has its
+surfaces `just api-diff` cannot see, has its
 `MIGRATE.md` entry, and each entry states the net change from the last
 published version.
 
@@ -43,5 +43,4 @@ m1 quest on 2026-10-22.
 
 ## Required
 
-- [API-diff check](/quest/m1/api-diff.md) - the report this audit reads
 - [Breaking release readiness](/quest/m1/README.md) - all breaking work and the MIGRATE.md convention have landed

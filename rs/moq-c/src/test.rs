@@ -3704,14 +3704,14 @@ fn consume_announced_close_cancels() {
 }
 
 /// Publish `path` on `origin` through `route`, which the C ABI cannot set.
-fn publish(origin: u32, path: &str, route: moq_net::origin::Route) -> moq_net::broadcast::Producer {
+fn publish(origin: u32, path: &str, route: moq_net::origin::Route) -> moq_net::origin::Publication {
 	let _runtime = crate::ffi::RUNTIME.enter();
 	let origin = crate::Id::try_from(origin).unwrap();
 	State::lock().origin.get(origin).unwrap().publish(path, route).unwrap()
 }
 
 /// Publish `path` on `origin` under a fresh epoch, as each run of a publisher does.
-fn publish_run(origin: u32, path: &str) -> moq_net::broadcast::Producer {
+fn publish_run(origin: u32, path: &str) -> moq_net::origin::Publication {
 	publish(
 		origin,
 		path,
@@ -5263,7 +5263,7 @@ fn zero_with_a_flag_set_is_a_real_value() {
 
 #[test]
 fn config_versions_round_trip() {
-	let versions = [moq_str("moq-lite-05"), moq_str("moq-transport-19")];
+	let versions = [moq_str("moq-lite-05"), moq_str("moq-transport-22")];
 	let mut config = client_config();
 	config.versions = versions.as_ptr();
 	config.versions_len = versions.len();

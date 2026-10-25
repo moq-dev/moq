@@ -94,8 +94,9 @@ Future<_Resolved> _build(Uri workspace, String target, String library) async {
     '--package',
     'moq-ffi',
     // The software H.264 fallback is opt-in in Rust; the published library ships it.
+    // A checkout build is a test build, carrying the hooks leak_test.dart reads.
     '--features',
-    'openh264',
+    'openh264,testing',
     '--manifest-path',
     workspace.resolve('Cargo.toml').toFilePath(),
   ];
