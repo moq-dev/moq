@@ -17,13 +17,7 @@ use support::harness::{MockConnectOptions, MockPair, connect_mock};
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Every draft that has SUBSCRIBE_TRACKS.
-const DRAFTS: [&str; 5] = [
-	"moq-transport-18",
-	"moq-transport-19",
-	"moq-transport-20",
-	"moq-transport-21",
-	"moq-transport-22",
-];
+const DRAFTS: [&str; 2] = ["moq-transport-18", "moq-transport-22"];
 
 /// SUBSCRIBE (0x03), as the first byte of a request stream.
 const SUBSCRIBE: u8 = 0x03;
@@ -278,8 +272,8 @@ async fn a_reader_resumes_the_held_publish() {
 }
 
 /// A reader joining a listed track mid-group gets the objects already published in it: on
-/// drafts 18 and 19, whose filters deliver nothing already published, through a Joining
-/// FETCH on the held PUBLISH's Request ID, and from draft-20 through the resume's fill.
+/// draft 18, whose filters deliver nothing already published, through a Joining
+/// FETCH on the held PUBLISH's Request ID, and from draft-22 through the resume's fill.
 #[moq_clock::test]
 async fn a_join_gets_the_current_groups_head() {
 	for version in DRAFTS {

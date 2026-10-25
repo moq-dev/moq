@@ -83,7 +83,7 @@ test.each([Lite.ALPN_05, Lite.ALPN_06])(
 // moq-transport carries the end in an END_OF_TRACK object, so it survives a track that
 // declared an end past the groups it produced, and the Stream Count lets the subscriber stop
 // waiting for streams at once.
-test.each([Ietf.ALPN.DRAFT_16, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_20])(
+test.each([Ietf.ALPN.DRAFT_16, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])(
 	"%s: END_OF_TRACK carries the declared end",
 	async (alpn) => {
 		const { video, reader, close } = await session(alpn);

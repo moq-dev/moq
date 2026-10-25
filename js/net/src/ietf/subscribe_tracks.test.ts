@@ -20,7 +20,7 @@ import { Subscribe } from "./subscribe.ts";
 import { PublishSkipped, SubscribeTracks } from "./subscribe_tracks.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
 
-const drafts = [Version.DRAFT_18, Version.DRAFT_19, Version.DRAFT_20, Version.DRAFT_21, Version.DRAFT_22];
+const drafts = [Version.DRAFT_18, Version.DRAFT_22];
 
 /** A client and server WebTransport, connected to each other. */
 type Pair = { client: WebTransport; server: WebTransport };
@@ -118,7 +118,7 @@ function fixture(
 
 async function publishOk(stream: Stream, version: IetfVersion) {
 	const parameters = new Parameters();
-	if (version < Version.DRAFT_20) parameters.forward = false;
+	if (version < Version.DRAFT_22) parameters.forward = false;
 	await stream.writer.u53(RequestOk.id);
 	await new RequestOk({ parameters }).encode(stream.writer, version);
 }
@@ -494,7 +494,7 @@ test("session shutdown releases listing tasks while the local origin stays open"
 	expect(broadcast.createTrack("still-local").name).toBe("still-local");
 });
 
-for (const version of [Version.DRAFT_20, Version.DRAFT_22]) {
+for (const version of [Version.DRAFT_22]) {
 	test(`a paused filter applies on resume, but an active pause/filter update is refused atomically (${version})`, async () => {
 		const fx = fixture(version);
 		const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
@@ -599,7 +599,7 @@ for (const version of drafts) {
 
 // A FORWARD=1 listing reads its next track only once the request stream has taken the last
 // skip, so a peer that stops reading leaves one skip queued, however many tracks are listed.
-for (const version of [Version.DRAFT_19, Version.DRAFT_22]) {
+for (const version of [Version.DRAFT_22]) {
 	test(`a forwarding listing reads only as skips go out (${version})`, async () => {
 		const clock = new Manual();
 		const installed = clock.install();

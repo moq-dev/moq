@@ -111,7 +111,7 @@ async function readFrames(group: Group.Consumer, count: number): Promise<void> {
 for (const [name, alpn] of [
 	["lite-03", Lite.ALPN_03],
 	["lite-05", Lite.ALPN_05],
-	["ietf-19", Ietf.ALPN.DRAFT_19],
+	["ietf-19", Ietf.ALPN.DRAFT_18],
 ]) {
 	test(`${name}: the frames of one long group leave no listener behind`, async () => {
 		const { producer, track, close } = await session(alpn);

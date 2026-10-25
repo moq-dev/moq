@@ -16,19 +16,12 @@ import { SubscribeNamespaceEntry } from "./subscribe_namespace.ts";
 import { TrackStatusRequest } from "./track.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
-const VERSION = Version.DRAFT_19;
+const VERSION = Version.DRAFT_18;
 const EPOCH_PARAM = 0x40b69n;
 const EPOCH = Epoch.mint();
 
 const LEGACY = [Version.DRAFT_14, Version.DRAFT_15, Version.DRAFT_16] as const;
-const NEGOTIATING = [
-	Version.DRAFT_17,
-	Version.DRAFT_18,
-	Version.DRAFT_19,
-	Version.DRAFT_20,
-	Version.DRAFT_21,
-	Version.DRAFT_22,
-] as const;
+const NEGOTIATING = [Version.DRAFT_17, Version.DRAFT_18, Version.DRAFT_22] as const;
 
 async function encode(
 	message: { encode(w: Writer, v: IetfVersion): Promise<void> },

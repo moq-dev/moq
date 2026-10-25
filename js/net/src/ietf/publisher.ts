@@ -785,7 +785,7 @@ export class Publisher {
 			// the broadcast again: a dynamic serve is one request per peer subscription, so
 			// asking the broadcast would mint a second producer nobody has accepted.
 			const fill =
-				msg.fill && msg.forward && !answer && Filter.isDraft20(version)
+				msg.fill && msg.forward && !answer && Filter.isDraft22(version)
 					? fillRange(msg.fill, msg.filter, edge.largest)
 					: undefined;
 			cache =
@@ -818,14 +818,14 @@ export class Publisher {
 							: undefined,
 					trackAlias: msg.requestId,
 					// Required once the track has content; a fill-requesting subscriber sizes its
-					// backfill against this. Below draft-20 round it down to the start of its
-					// group, matching what the subscription serves there: a draft-20 subscriber
+					// backfill against this. Below draft-22 round it down to the start of its
+					// group, matching what the subscription serves there: a draft-22 subscriber
 					// recovers a group's head with a FILL, which we serve, while older drafts
 					// recover it with a joining FETCH, which we do not, so naming a mid-group
 					// start would strand them.
 					largest:
 						edge.largest &&
-						(Filter.isDraft20(version)
+						(Filter.isDraft22(version)
 							? { groupId: edge.largest.group, objectId: edge.largest.object }
 							: { groupId: edge.largest.group, objectId: 0n }),
 					properties: msg.propertiesWanted
@@ -1309,7 +1309,7 @@ export class Publisher {
 	}
 
 	/**
-	 * Serve a draft-20 fill on its own fetch stream: the requested range, read from the
+	 * Serve a draft-22 fill on its own fetch stream: the requested range, read from the
 	 * group cache, capped at the Largest Object snapshot.
 	 *
 	 * A fill is a promise once requested. An empty range opens no stream, but a range we
@@ -1372,7 +1372,7 @@ export class Publisher {
 	}
 
 	/**
-	 * Write one cached group's frames as draft-20 fetch objects.
+	 * Write one cached group's frames as draft-22 fetch objects.
 	 *
 	 * The cap is the Largest Object snapshot: the group may keep growing, but everything
 	 * past the snapshot belongs to the subscription, not the fill.
@@ -2679,7 +2679,7 @@ export class Publisher {
 				propertiesWanted: defaults.includeProperties ?? true,
 			});
 			const parameters = new Parameters();
-			if (Filter.isDraft20(version)) {
+			if (Filter.isDraft22(version)) {
 				parameters.subscriberPriority = subscription.subscriberPriority;
 				parameters.groupOrder =
 					subscription.groupOrder === "ascending" ? GroupOrder.Ascending : GroupOrder.Descending;
@@ -2736,7 +2736,7 @@ export class Publisher {
 				return;
 			}
 			this.#applyPublished(subscription, params);
-			let forward = !Filter.isDraft20(version) && params.forward !== false;
+			let forward = !Filter.isDraft22(version) && params.forward !== false;
 			for (;;) {
 				if (!this.#gate.allows(namespace) || unlisted.peek() !== undefined) {
 					await Message.write(
@@ -3017,7 +3017,7 @@ interface ServeRange {
 
 	/**
 	 * Where the range ends, inclusive, or open ended when absent. The subscription stays open
-	 * once the range is exhausted; draft-20 removed the notion of a filter ending one.
+	 * once the range is exhausted; draft-22 has no notion of a filter ending one.
 	 */
 	end?: EndLocation;
 }
@@ -3069,7 +3069,7 @@ interface FillGroup {
 	until?: bigint;
 }
 
-/** What a draft-20 fill request resolves to. */
+/** What a draft-22 fill request resolves to. */
 type FillServe =
 	/** The range is empty, so no fetch stream is opened at all. */
 	| { kind: "empty" }
@@ -3121,15 +3121,15 @@ function liveEdge(track: TrackSubscriber): LiveEdge {
 /**
  * Resolve a SUBSCRIBE's Location Filter into the range to serve.
  *
- * Only draft-20 is honored. Earlier drafts have a Filter Type tag whose absolute forms we
+ * Only draft-22 is honored. Earlier drafts have a Filter Type tag whose absolute forms we
  * never served, and starting to interpret them now would change what an existing peer
- * receives; draft-20 is also the first version whose relative forms can name a past group
+ * receives; draft-22 is also the first version whose relative forms can name a past group
  * without the subscriber knowing Largest Object.
  */
 function subscribeRange(msg: Subscribe, edge: LiveEdge, version: IetfVersion): ServeRange {
-	if (!Filter.isDraft20(version)) {
+	if (!Filter.isDraft22(version)) {
 		if (msg.filter.kind !== "nextObject" && msg.filter.kind !== "unfiltered") {
-			console.warn(`filter not supported before draft-20, ignoring: ${msg.filter.kind}`);
+			console.warn(`filter not supported before draft-22, ignoring: ${msg.filter.kind}`);
 		}
 		return {};
 	}

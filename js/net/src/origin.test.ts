@@ -290,21 +290,6 @@ test("closing the origin closes every routed broadcast", async () => {
 	expect(origin.closed.peek()).toBe(abort);
 });
 
-test("the table is reactive", async () => {
-	const origin = new Producer();
-	const consumer = origin.consume();
-	const path = Path.from("room");
-
-	const changed = wireOf(consumer).broadcasts.changed();
-	const broadcast = publish(origin, path);
-
-	const table = await changed;
-	expect(table?.has(path)).toBe(true);
-
-	broadcast.close();
-	origin.close();
-});
-
 test("announced streams the table under a scope with origin-relative paths", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
@@ -455,7 +440,7 @@ test("the publisher-facing table excludes remote entries", async () => {
 	serve(origin, Path.from("theirs"), provider(upstream));
 
 	// What a session announces to a peer: local only, so a shared origin cannot echo.
-	const table = wireOf(consumer).broadcasts.peek();
+	const table = wireOf(consumer).advertised.peek();
 	expect(table?.has(Path.from("mine"))).toBe(true);
 	expect(table?.has(Path.from("theirs"))).toBe(false);
 
@@ -628,7 +613,6 @@ test("requests never appear in announced or the table", async () => {
 	// stays out of the table, and out of the announcements the table drives.
 	expect(request.active.peek()).toBeDefined();
 	expect(wireOf(origin).routes(path)).toBe(false);
-	expect(wireOf(consumer).broadcasts.peek()?.has(path)).toBe(false);
 
 	const announced = consumer.announced();
 	publish(origin, Path.from("real"));
@@ -974,7 +958,6 @@ test("createBroadcast is invisible to everyone until announce", async () => {
 
 	const broadcast = origin.createBroadcast(path);
 	expect(wireOf(consumer).routes(path)).toBe(false);
-	expect(wireOf(consumer).broadcasts.peek()?.has(path)).toBe(false);
 	expect(wireOf(consumer).advertised.peek()?.has(path)).toBe(false);
 	const request = consumer.request(path);
 	expect(request.active.peek()).toBeUndefined();

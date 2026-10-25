@@ -1,19 +1,20 @@
-# [M] Fetch as a range
+# [L] Fetch as a range
 
 ## Goal
 
 `fetch_group` is gone: every caller reads a past group through a one-range
 subscription, which ends once its range is accounted for. That covers the
 relay, moq-archive, hls, moq-ffi and every binding wrapper with its `doc/lib`
-page, and `moq fetch` through `moq_relay::fetch_group`. A benchmark covers
-filling over range count and span as separate axes.
+page, and `moq fetch` through `moq_relay::fetch_group`.
 
 ## Plan
 
 Split out of dynamic range requests, which replaced `requested_group` with
 `requested_fill`, by the maintainer on 2026-10-20
 ([moq-dev/moq#6123](https://github.com/moq-dev/moq/pull/6123)), so each PR
-breaks one API once.
+breaks one API once. Resized from [M] to [L] on 2026-10-24, when the first
+attempt ([moq-dev/moq#6722](https://github.com/moq-dev/moq/pull/6722)) found
+the questions decided below and landed only the `track_range_filling` benchmark.
 
 - **Ending a bounded read** (decided 2026-10-20). `recv_group` returns `None`
   once every sequence in a bounded window is delivered, dropped, stale, or
@@ -35,4 +36,51 @@ breaks one API once.
   `Error::Lagged` rather than the group being skipped (maintainer,
   2026-10-20). Only `fetch_group` requests a head fill today, so the one-range
   read has to request it instead of letting `Lagged` reach the caller.
-- Benchmark filling beside `track_range_serving`, which covers serving.
+  `fill::Ask` already carries a start frame, so the miss judge can count a
+  headless slot as a hole for a bounded window.
+- **Wire publishers keep parking.** The lite subscriber reads an upstream FIN
+  as the track's end, because "bounded downstream demand alone never FINs; the
+  publisher parks" (`lite/subscriber.rs`). Once `recv_group` ends a bounded
+  read, the lite and IETF publishers keep parking on a bounded downstream
+  SUBSCRIBE rather than FIN it, or a peer on a published version reads the
+  range's end as the track's.
+- **Route recovery keeps a frame start.** `resume::Recover` fetches the rest of
+  a group from frame N on the new route (`group::Fetch::frame_start`), which a
+  whole-group range cannot say, so a crate-private fetch stays for it.
+- **A miss with no feed frontier** (maintainer, 2026-10-25). A reader asks
+  fills only below the newest group the live feed produced (decision 2 on
+  [moq-dev/moq#6123](https://github.com/moq-dev/moq/pull/6123)), so on a track
+  nothing feeds live, such as the moq-archive reader's or a relay copy no
+  subscription feeds, `Range::groups(5..6)` asks no fill and parks forever.
+  While the track has no live feed, holes in a bounded range are misses up to
+  its end. This asks nothing of a live feed; the rejected options were
+  treating every bounded range's holes as misses, which asks fills for groups
+  a live feed has yet to produce, and keeping a by-sequence read beside
+  subscriptions.
+- **Cached backfill is owed** (maintainer, 2026-10-25). A range reader never
+  reads a group another reader's fill cached today: the arrival walk skips
+  backfill and the miss judge counts it held, so a second `0..1` read after a
+  first reader's fill cached group 0 parks with no fill asked. A cached
+  backfill group inside a reader's window is owed to it like its own fill's
+  answer, so a relay behaves the same warm or cold. This retires
+  `fetched_backfill_not_subscribed` and
+  `refilled_sequence_stays_out_of_subscriptions`, which assert that a
+  subscriber never sees backfill. Re-filling a cached group was rejected: it
+  costs an upstream FETCH for a group already in the cache.
+- **Relay demand before lite-07** (maintainer, 2026-10-25). A one-range read's
+  ranges join the track's aggregate, so a relay would put a bounded SUBSCRIBE
+  upstream where `fetch_group` puts a FETCH. `fetch_only.rs` asserts that a
+  moq-transport fetch never subscribes, and a lite SUBSCRIBE before lite-05
+  cannot name a missing group. A range wholly below the live edge stays out of
+  the upstream SUBSCRIBE on any wire without range SUBSCRIBE and is filled by
+  per-group FETCH, keeping today's wire behavior until
+  [lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) land. A bounded
+  upstream SUBSCRIBE accounted by SUBSCRIBE_START and SUBSCRIBE_DROP was
+  rejected: it works on lite-05 and later only.
+- **The fill path goes linear first** (maintainer, 2026-10-25). One-range
+  reads put every past read on the fill path, which `track_range_filling`
+  measures as superlinear in range count and span: at span 64, 215K groups/s
+  over 1 range, 69K over 16, and 1.9K over 256. This quest waits on the
+  linear fill path quest (`quest/m1/subscribe-ranges/fill-linear.md`, planned
+  in [moq-dev/moq#6790](https://github.com/moq-dev/moq/pull/6790)); once it is
+  on main, list it under Required here.
