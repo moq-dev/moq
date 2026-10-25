@@ -1,4 +1,4 @@
-# Nightly passes on main
+# [S] Nightly passes on main
 
 ## Goal
 
@@ -16,7 +16,7 @@ Decided 2026-10-24 (maintainer), from a triage of run
 child per distinct cause, each landing on its own. The PR gate keeps
 skipping benches and examples; a green Nightly catches them within a day.
 
-This README's own work, after the children:
+This README's own work:
 
 - Nightly's multi-step jobs (Features first) keep going past a failed step
   and fail at the end, so one break never hides the steps after it.
