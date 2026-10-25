@@ -19,8 +19,12 @@ measured before adoption.
   - share one key type (for example a `u64` sequence wrapper);
   - use a `Vec` kept sorted where it stays small;
   - erase the value behind an index into a slab.
-- [bbtree](/quest/m2/bbtree.md) is evaluated separately; if it replaces std's map,
-  count its instantiations instead.
+- Stay on std's map. A spike on 2026-10-25 found bbtree 0.1.5 slower on
+  `TrackState`'s ascending insert, front pruning, and range lookups (2-4x on
+  insert), about 9x std's IR per instantiation, and a hard dependency on Verus's
+  `vstd`. Its concurrent map won only on contended reads of maps over 10k
+  entries, and its scans can't give `containing()` one consistent view. Revisit
+  it once it leaves 0.1.x with `vstd` optional.
 - Keep each change local, and don't trade a lookup's complexity for build time on
   a hot path without a benchmark.
 
