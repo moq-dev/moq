@@ -253,7 +253,7 @@ pub async fn import(
 		config = config.with_refresh(refresh.into());
 	}
 	let broadcast = origin.create_broadcast(&name).context("failed to create broadcast")?;
-	let consumer = moq_archive::Consumer::open(store, broadcast.clone(), config)
+	let consumer = moq_archive::Consumer::open(store, broadcast.broadcast().clone(), config)
 		.await
 		.with_context(|| format!("no readable recording at {}", args.store))?;
 	broadcast

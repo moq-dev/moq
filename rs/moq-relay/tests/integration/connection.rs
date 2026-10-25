@@ -14,7 +14,7 @@ const TIMEOUT: Duration = Duration::from_secs(60);
 /// JavaScript's exact number range, on each flavour used by the browser bindings.
 #[tokio::test(start_paused = true)]
 async fn largest_quic_sequence_reaches_the_subscriber() {
-	for alpn in ["moq-lite-02", "moq-lite-06", "moq-transport-19"] {
+	for alpn in ["moq-lite-02", "moq-lite-06", "moq-transport-22"] {
 		let version = alpn.parse().unwrap();
 		let auth = memory::public(&["**"], &[], &[]);
 		let cluster = memory::cluster();
@@ -61,7 +61,7 @@ async fn largest_quic_sequence_reaches_the_subscriber() {
 			let frame = got.read_frame().await.unwrap().unwrap();
 			assert_eq!(frame.payload, b"ladder".as_ref());
 			// Lite-02 carries no timestamps, and a lite-06 subscriber drops them.
-			let timed = alpn == "moq-transport-19";
+			let timed = alpn == "moq-transport-22";
 			assert_eq!(frame.timestamp, timed.then_some(timestamp), "{alpn}");
 		}
 	}
@@ -72,7 +72,7 @@ fn publish(
 	name: &str,
 ) -> (
 	moq_net::origin::Producer,
-	moq_net::broadcast::Producer,
+	moq_net::origin::Publication,
 	moq_net::track::Producer,
 ) {
 	let origin = moq_tokio::origin::spawn();

@@ -3,8 +3,8 @@ use crate::origin;
 use crate::time::{Deadlines, Instant};
 use crate::transport::poll::Session as _;
 use crate::{
-	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_19, ALPN_20, ALPN_21, ALPN_22, ALPN_LITE, ALPN_LITE_03,
-	ALPN_LITE_04, ALPN_LITE_05, ALPN_LITE_06, ALPN_LITE_07_WIP, Consume, Error, NEGOTIATED, Session, Version, Versions,
+	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_22, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05,
+	ALPN_LITE_06, ALPN_LITE_07_WIP, Consume, Error, NEGOTIATED, Session, Version, Versions,
 	coding::{self, Decode, Encode, Stream},
 	ietf, lite, setup, stats,
 };
@@ -108,7 +108,7 @@ impl Client {
 	}
 
 	/// The request target our SETUP carries: the dialed URL's path, plus `?` and the
-	/// query when there is one (draft-ietf-moq-transport-19, section 10.3.1.2).
+	/// query when there is one (draft-ietf-moq-transport-22, section 9.1.2).
 	///
 	/// `None` on a transport that carries its own request URI, where a SETUP path is a
 	/// protocol violation, and when the target is empty, which means the server's
@@ -134,7 +134,7 @@ impl Client {
 	}
 
 	/// The URI authority our SETUP carries, which a raw-QUIC `moqt://` client must send
-	/// (draft-ietf-moq-transport-21, 9.1.1).
+	/// (draft-ietf-moq-transport-22, 9.1.1).
 	///
 	/// Built from the host and port so URL userinfo never goes on the wire. `None` for
 	/// every other scheme, on a transport that carries its own request URI, and when the
@@ -353,12 +353,9 @@ impl Client {
 		// If ALPN was used to negotiate the version, use the appropriate encoding.
 		// Default to IETF 14 if no ALPN was used and we'll negotiate the version later.
 		let (encoding, supported) = match session.protocol() {
-			Some(alpn @ (ALPN_22 | ALPN_21 | ALPN_20 | ALPN_19 | ALPN_18 | ALPN_17)) => {
+			Some(alpn @ (ALPN_22 | ALPN_18 | ALPN_17)) => {
 				let draft = match alpn {
 					ALPN_22 => ietf::Version::Draft22,
-					ALPN_21 => ietf::Version::Draft21,
-					ALPN_20 => ietf::Version::Draft20,
-					ALPN_19 => ietf::Version::Draft19,
 					ALPN_18 => ietf::Version::Draft18,
 					_ => ietf::Version::Draft17,
 				};
@@ -1044,7 +1041,7 @@ mod tests {
 				"iroh://k5lnrlndqpqcgh4d5nhbnbnhcyrgvw6ttxwrsvsu4nlt6foorxaa/",
 				Some("/"),
 			),
-			// The fragment is processed by the client and never sent (draft-19 3.1.2).
+			// The fragment is processed by the client and never sent (draft-22 6.1.1).
 			("moqt://relay.example.com/anon?jwt=abc#pos:12", Some("/anon?jwt=abc")),
 			// A trailing `?` is an empty query, not a query.
 			("moqt://relay.example.com/anon?", Some("/anon")),

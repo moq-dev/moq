@@ -77,8 +77,9 @@ async fn main() -> anyhow::Result<()> {
 		.await?;
 	let mut stdin = tokio::io::BufReader::new(tokio::io::stdin());
 	if args.role == "publish" {
-		let mut broadcast = origin.create_broadcast(&args.broadcast)?;
-		let mut catalog = moq_mux::catalog::Producer::<()>::new(&mut broadcast, Default::default())?;
+		let broadcast = origin.create_broadcast(&args.broadcast)?;
+		let mut catalog =
+			moq_mux::catalog::Producer::<()>::new(&mut broadcast.broadcast().clone(), Default::default())?;
 		let mut media = moq_mux::import::TrackStream::video(
 			broadcast.reserve_track("video")?,
 			catalog.reserve(),
@@ -91,7 +92,7 @@ async fn main() -> anyhow::Result<()> {
 		catalog.finish()?;
 		broadcast.announce(Default::default())?;
 		// Keep the finished broadcast up for the late readers, then take it offline.
-		let linger = moq_mux::Linger::new([broadcast], (media, catalog), LINGER);
+		let linger = moq_mux::Linger::new([broadcast.broadcast().clone()], (media, catalog), LINGER);
 		println!("finish ready linger_us={}", LINGER.as_micros());
 		linger.wait().await;
 		println!("finish ended");
