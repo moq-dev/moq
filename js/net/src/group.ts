@@ -756,7 +756,8 @@ export class Consumer {
 
 	// The next change a parked read waits for.
 	#changed(): GetPromise<unknown> {
-		const changed: Getter<unknown>[] = [this.#state.frames, this.#state.closed];
+		// The verdict too: releasing a shared handle settles only it, and must end a parked read.
+		const changed: Getter<unknown>[] = [this.#state.frames, this.#state.closed, this.#verdict];
 		if (this.#expiry) changed.push(...this.#expiry.changed);
 		if (this.#recover) changed.push(this.#recover.changed);
 		return Signal.race(...changed);
@@ -878,14 +879,16 @@ export class Consumer {
 		return { sequence, frame, inflated: slice?.inflated };
 	}
 
-	/** True once no further frames can be read: the group has closed and every buffered frame is read. */
+	/** True once no further frames can be read: this handle or the group has closed, and every buffered frame is read. */
 	get done(): boolean {
-		return this.#terminal !== undefined || (this.#bufferedFrames().length === 0 && this.#settled());
+		return (
+			this.#terminal !== undefined || (this.#bufferedFrames().length === 0 && (this.#released || this.#settled()))
+		);
 	}
 
-	/** True once the group has been closed, regardless of whether buffered frames remain unread. Synchronous complement to the {@link closed} promise. */
+	/** True once this handle or the group has been closed, regardless of whether buffered frames remain unread. Synchronous complement to the {@link closed} promise. */
 	get isClosed(): boolean {
-		return this.#terminal !== undefined || this.#settled();
+		return this.#terminal !== undefined || this.#released || this.#settled();
 	}
 
 	// Whether the copy being read ended, for good: a failure recovery may continue is not an end.

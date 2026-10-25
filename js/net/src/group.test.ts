@@ -65,6 +65,25 @@ test("closing a consumer releases only that handle", async () => {
 	expect(await other.readFrame()).toBeUndefined();
 });
 
+test("closing a consumer ends its own parked reads", async () => {
+	const { producer, consumer } = pair(0);
+	const other = producer.consume();
+	const reading = consumer.readFrame();
+	const waiting = consumer.readable();
+	consumer.close();
+	expect(await reading).toBeUndefined();
+	await waiting;
+	expect(consumer.isClosed).toBe(true);
+	expect(consumer.done).toBe(true);
+
+	// The other reader is still parked on the open group, and reads the next frame.
+	const next = other.readFrame();
+	producer.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.now() });
+	expect((await next)?.payload[0]).toBe(1);
+	expect(other.isClosed).toBe(false);
+	producer.finish();
+});
+
 test("a group caps its frame count and aborts on the next write", async () => {
 	const { producer, consumer } = pair(0);
 

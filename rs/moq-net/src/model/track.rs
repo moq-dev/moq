@@ -2501,10 +2501,23 @@ impl TrackState {
 			.map(|()| producer.read().abort.clone().unwrap_or(Error::Dropped))
 	}
 
-	/// The track's outcome once final: `Ok` once its declared end is reached, which a later
-	/// abort keeps, or the abort error.
+	/// The track's outcome once final: `Ok` once its declared end is reached with every
+	/// cached group below it finished, which a later abort keeps, or the abort error.
 	fn poll_outcome(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
 		if self.is_complete() {
+			// An abort after the end settled keeps the clean end; until then a group below it
+			// may still abort, which would cut the track off, so wait for each to finish. One
+			// that aborts leaves the outcome to the track's own abort or drop.
+			if self.abort.is_none()
+				&& let Some(fin) = self.final_sequence()
+			{
+				for (_, slot) in self.lookup.range(..fin) {
+					if !slot.group.is_finished() {
+						let _ = slot.group.poll_closed(waiter);
+						return Poll::Pending;
+					}
+				}
+			}
 			Poll::Ready(Ok(()))
 		} else if let Some(err) = &self.abort {
 			Poll::Ready(Err(err.clone()))
@@ -12998,6 +13011,34 @@ mod test {
 		producer.clone().abort(Error::Cancel).unwrap();
 		assert!(matches!(producer.poll_closed(&waiter), Poll::Ready(Ok(()))));
 		assert!(matches!(demand.closed().now_or_never(), Some(Ok(()))));
+	}
+
+	/// A group still open below a reached end keeps the outcome pending: it finishing settles
+	/// the end and wakes the wait, while an abort before then cuts the track off.
+	#[test]
+	#[cfg(feature = "async")]
+	fn closed_waits_for_open_groups_below_the_end() {
+		use std::sync::atomic::{AtomicBool, Ordering};
+
+		let mut producer = track_producer("test", Info::timed());
+		let mut open = producer.append_group().unwrap();
+		producer.finish_at(Position::group(1)).unwrap();
+		let woken = Arc::new(AtomicBool::new(false));
+		let waiter = kio::Waiter::new(futures::task::waker(Arc::new(FlagWake(woken.clone()))));
+		assert!(producer.poll_closed(&waiter).is_pending(), "group 0 may still abort");
+		open.finish().unwrap();
+		assert!(woken.load(Ordering::SeqCst), "the group finishing wakes the wait");
+		assert!(matches!(producer.poll_closed(&waiter), Poll::Ready(Ok(()))));
+
+		let mut cut = track_producer("cut", Info::timed());
+		let _open = cut.append_group().unwrap();
+		cut.finish_at(Position::group(1)).unwrap();
+		assert!(cut.poll_closed(&kio::Waiter::noop()).is_pending());
+		cut.clone().abort(Error::Cancel).unwrap();
+		assert!(matches!(
+			cut.poll_closed(&kio::Waiter::noop()),
+			Poll::Ready(Err(Error::Cancel))
+		));
 	}
 
 	/// An abort short of the end, or the last producer leaving without one, is the outcome.
