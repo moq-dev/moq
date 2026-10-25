@@ -857,8 +857,10 @@ mod tests {
 				for _ in 0..2 {
 					let epoch = moq_net::Epoch::mint();
 					let route = moq_net::origin::Route::default().with_epoch(epoch.clone());
-					let mut broadcast = origin.publish("camera", route).unwrap();
-					let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+					let broadcast = origin.publish("camera", route).unwrap();
+					let mut catalog =
+						moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default())
+							.unwrap();
 					published_tx.send((epoch, broadcast.clone(), catalog.clone())).unwrap();
 					// The first session to return ends the run; dropping the other's pull
 					// finishes its tracks.

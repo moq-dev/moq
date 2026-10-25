@@ -82,7 +82,7 @@ pub enum Error {
 		url: url::Url,
 		/// The requested byte count.
 		expected: u64,
-		/// The returned byte count.
+		/// The returned byte count, or the count read when an overrun was refused.
 		actual: usize,
 	},
 
@@ -95,6 +95,16 @@ pub enum Error {
 		start: u64,
 		/// The last requested byte, inclusive.
 		end: u64,
+	},
+
+	/// An HTTP origin answered a byte range request with a status other than `206 Partial Content`,
+	/// such as a `200` carrying the whole resource.
+	#[error("byte range for {url} was answered with status {status}, expected 206 Partial Content")]
+	ByteRangeIgnored {
+		/// The ranged resource.
+		url: url::Url,
+		/// The status the origin answered with.
+		status: u16,
 	},
 
 	/// An HLS media or discontinuity sequence was too large to pack into a MoQ group sequence.
