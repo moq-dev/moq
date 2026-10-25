@@ -35,5 +35,5 @@ Public API: none. Wire: none.
 
 - [Nightly's base in a shallow checkout](/quest/m0/nightly/shallow-base.md) - `sh/gh/nightly.test.py` passes in Nightly's depth-1 checkout
 - [Windows builds moq-relay tests](/quest/m0/nightly/windows-relay-expect.md) - an unfulfilled lint expectation stops failing the Windows build
-- [OBS audio-candidate test](/quest/m0/nightly/obs-audio-candidate.md) - the failed audio candidate check passes under TSan, fixed at its reproduced cause
+- [OBS audio-candidate test](/quest/m0/nightly/obs-audio-candidate.md) - the failed audio candidate check passes under TSan and load, fixed at its reproduced cause
 - [moq-hls without default features](/quest/m0/nightly/hls-poll-closed.md) - `Broadcaster::poll_closed` is gated with its only caller, so the no-default-features build stops warning
