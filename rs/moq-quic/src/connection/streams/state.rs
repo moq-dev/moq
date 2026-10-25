@@ -1677,7 +1677,12 @@ mod tests {
         server.received_ack_of(sent[0].clone());
         assert!(!server.can_send_stream_data());
         buf.clear();
-        assert!(server.write_frames(&mut buf, 0..1000, true).streams.is_empty());
+        assert!(
+            server
+                .write_frames(&mut buf, 0..1000, true)
+                .streams
+                .is_empty()
+        );
     }
 
     #[test]

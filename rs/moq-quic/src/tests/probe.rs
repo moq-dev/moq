@@ -665,7 +665,13 @@ fn single_packet_writes() {
         ];
         pair.time = pair.time.max(wakeups.into_iter().flatten().min().unwrap());
     }
-    assert!(pair.client_conn_mut(client_ch).stats().path.sent_bandwidth_probes > 0);
+    assert!(
+        pair.client_conn_mut(client_ch)
+            .stats()
+            .path
+            .sent_bandwidth_probes
+            > 0
+    );
 }
 
 #[test]
