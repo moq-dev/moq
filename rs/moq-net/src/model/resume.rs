@@ -28,7 +28,8 @@
 //! direct reader from taking a re-created group twice.
 //!
 //! A reader polled for drops reports what the serving copy gave up, other than a route
-//! failure, once no copy it replaced may still deliver it.
+//! failure, once no copy it replaced may still deliver it. A route change discards what the
+//! former serving copy gave up and the reader had yet to report.
 
 use crate::sync::{Mutex, MutexGuard};
 use rangemap::{RangeMap, RangeSet};
@@ -937,6 +938,8 @@ impl Reader {
 			return;
 		}
 		self.generation = Some(generation);
+		// What a former route gave up is no verdict on the one that serves now.
+		self.drops = RangeMap::new();
 		let Some(track) = serving else { return };
 		if self.copies.last().is_some_and(|copy| copy.generation == generation) {
 			return;
@@ -2854,6 +2857,36 @@ mod test {
 		assert_eq!(dropped(&mut sub), [(2..3, StreamError::NotFound)]);
 		write(&a, 2);
 		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+	}
+
+	/// A run a replaced route held back is dropped with that route: the route serving next
+	/// may still deliver it.
+	#[test]
+	fn a_drop_a_replaced_route_held_back_is_no_verdict_on_the_next() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		write(&a, 0);
+		assert_eq!(drain(&mut sub, false), [0]);
+
+		let b = copy();
+		routes.serve(b.consume());
+		// Held back: the copy b replaced may still deliver group 1.
+		b.drop_groups(1..2, StreamError::NotFound);
+		assert_eq!(dropped(&mut sub), []);
+
+		let c = copy();
+		routes.serve(c.consume());
+		a.abort(Error::Stream(StreamError::Session(SessionError::Cancel)))
+			.unwrap();
+		b.abort(Error::Stream(StreamError::Session(SessionError::Cancel)))
+			.unwrap();
+		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
+		assert_eq!(dropped(&mut sub), []);
+		write(&c, 1);
+		assert_eq!(drain(&mut sub, false), [1]);
 	}
 
 	/// Read a fetched group from frame 0, which must already be cached.

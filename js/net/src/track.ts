@@ -2469,8 +2469,15 @@ export class Subscriber {
 	}
 
 	// The next run this cursor gave up and has not reported, without taking a group. From the
-	// first call on, a read without dispositions keeps its budget skips for it too.
+	// first call on, a read without dispositions keeps its budget skips for it too. A resumed
+	// one reports what its routes' copies gave up.
 	#tryDrop(): (Recv & { kind: "drop" }) | undefined {
+		if (this.#resume) {
+			const dropped = this.#resume.tryDrop(this.#delivered);
+			// Accounted for as #tryResumed does, so no copy serves it later.
+			if (dropped) this.#delivered.addRun(dropped.start, dropped.end);
+			return dropped;
+		}
 		const { start, end } = this.#cursor.peek();
 		// Rescanned only after it changed, so an idle poll costs nothing per drop held.
 		// Out-of-window runs were skipped, so a moved window rescans too.

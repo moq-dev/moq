@@ -1132,6 +1132,63 @@ test("a drop waits while a copy the serving one replaced may still deliver it", 
 	}
 });
 
+test("a drop a replaced route held back is no verdict on the route serving next", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const c = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	const tc = copy(c);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	ta.write(0);
+	expect(recvDisposition(sub)).toBe(0);
+	front.serve(b.consume());
+	await settle();
+	// Held back: the copy b replaced may still deliver group 1.
+	tb.producer.dropGroups(1, 2, new StreamError(StreamCode(70), { message: "cut" }));
+	expect(recvDisposition(sub)).toBe("idle");
+	front.serve(c.consume());
+	await settle();
+	ta.producer.close(new StreamError(StreamCode.SessionClosed));
+	tb.producer.close(new StreamError(StreamCode.SessionClosed));
+	await settle();
+	expect(recvDisposition(sub)).toBe("idle");
+	tc.write(1);
+	expect(recvDisposition(sub)).toBe(1);
+
+	sub.close();
+	front.consumer.close();
+	a.close();
+	b.close();
+	c.close();
+});
+
+test("a front serving another front reports the inner serving route's drop", async () => {
+	const inner = new Front();
+	const outer = new Front();
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	inner.serve(a.consume());
+	outer.serve(inner.consumer);
+	const sub = outer.consumer.track("seq").subscribe();
+	ta.write(0);
+	expect(recvDisposition(sub)).toBe(0);
+	ta.producer.dropGroups(1, 3, new StreamError(StreamCode(70), { message: "cut" }));
+	expect(recvDisposition(sub)).toEqual([1, 3, 70]);
+	expect(recvDisposition(sub)).toBe("idle");
+	// Re-created under a run already reported dropped.
+	ta.write(2);
+	ta.write(3);
+	expect(recvDisposition(sub)).toBe(3);
+
+	sub.close();
+	outer.consumer.close();
+	inner.consumer.close();
+	a.close();
+});
+
 for (const [field, first, second] of [
 	["priority", { priority: 1 }, { priority: 2 }],
 	["compression", { compress: true }, { compress: false }],

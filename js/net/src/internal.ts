@@ -286,6 +286,8 @@ export interface ResumeSource {
 	 * `dispositions`, a run no copy may still deliver is reported once as a `drop`.
 	 */
 	tryGroup(ordered: boolean, delivered: Delivered, dispositions: boolean): Recv;
+	/** The next run no copy may still deliver, reported once as a `drop`, without taking a group. */
+	tryDrop(delivered: Delivered): (Recv & { kind: "drop" }) | undefined;
 	/**
 	 * The next datagram in arrival order, without waiting. `delivered` is the group record, so a
 	 * copy that still holds a group for a later group read is kept.

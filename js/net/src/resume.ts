@@ -360,6 +360,8 @@ class Reader implements ResumeSource {
 		const route = this.route;
 		if (this.#generation === route.generation) return;
 		this.#generation = route.generation;
+		// What a former route gave up is no verdict on the one that serves now.
+		this.#drops = [];
 		const source = route.source;
 		if (!source) return;
 		// The replaced copies keep delivering until the new one delivers its first group: a
@@ -571,6 +573,13 @@ class Reader implements ResumeSource {
 			if (dropped) return dropped;
 		}
 		return this.#end((copy) => copy.done);
+	}
+
+	tryDrop(delivered: Delivered): (Recv & { kind: "drop" }) | undefined {
+		this.#delivered = delivered;
+		this.sync();
+		this.#learnEnd();
+		return this.#tryDrop(delivered);
 	}
 
 	/**
