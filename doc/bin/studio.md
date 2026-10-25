@@ -36,7 +36,7 @@ Every panel is a tab you can drag, split, or stack.
 | Sources | Add a source by hand, see whether each is live, and remove one. |
 | Devices | List this machine's cameras, displays, windows, and audio inputs, and add one as a source. |
 | Audio | Set each audio source's gain and mute, and watch its meter and the program's. |
-| Output | See the relay connection, whether anyone is watching, the encoder's work, and which sources are uploaded to the GPU. |
+| Output | See the relay connection, whether anyone is watching, and the encoder's work. |
 
 A broadcast source subscribes through the same relay connection, plays the
 best video and audio its catalog lists, switches when the catalog changes, and
@@ -104,5 +104,5 @@ encoder cannot keep up with are dropped there rather than delaying the stream.
 Sources make the opposite trip. A frame already on the GPU is drawn where it
 lies: PipeWire camera and VA-API decode DMA-BUFs on Linux, given a Vulkan
 driver that imports them, and NV12 capture and VideoToolbox decode surfaces on
-macOS. Any other frame, every frame on Windows, and every still image is
-uploaded from the CPU, which the Output panel counts per source.
+macOS. Every other source, every source on Windows, and every still image
+delivers its frames from the CPU, which the compositor uploads.

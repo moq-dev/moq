@@ -15,10 +15,10 @@
 //! reformatted; only the descriptor is duplicated, once per plane.
 //!
 //! What that leaves is the modifier itself. A buffer whose modifier the driver
-//! lists for neither format has nowhere to go at all, and the import fails so
-//! the renderer downloads the frame instead. Nothing here re-tiles such a
-//! buffer into a layout Vulkan would take: on the hardware this was measured on,
-//! a VA-API decode target already lands on an importable modifier.
+//! lists for neither format has nowhere to go at all, and the import fails.
+//! Nothing here re-tiles such a buffer into a layout Vulkan would take: on the
+//! hardware this was measured on, a VA-API decode target already lands on an
+//! importable modifier.
 
 use std::os::fd::{AsFd, BorrowedFd};
 
@@ -32,21 +32,15 @@ fn err(message: impl std::fmt::Display) -> Error {
 }
 
 /// Alias one DMA-BUF allocation as the sampled Vulkan textures of a frame.
-pub(super) fn import(device: &wgpu::Device, buffer: &DmaBuf) -> Result<Option<Source>, Error> {
+pub(super) fn import(device: &wgpu::Device, buffer: &DmaBuf) -> Result<Source, Error> {
+	// The feature is only offered on Vulkan, so it also proves the backend.
 	if !device
 		.features()
 		.contains(wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF)
 	{
-		return Ok(None);
-	}
-
-	// A device carrying the feature above is Vulkan-backed, so this is not a
-	// route anything takes. It is here for what it returns rather than for what
-	// it catches: `Ok(None)` sends the frame to the CPU path without the strike
-	// an `Err` from the import itself would cost.
-	// SAFETY: the guard is only asked whether it exists, and drops here.
-	if unsafe { device.as_hal::<wgpu::hal::api::Vulkan>() }.is_none() {
-		return Ok(None);
+		return Err(err(
+			"the wgpu device cannot import DMA-BUFs: open it on Vulkan with Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF, or decode or capture with Output::Cpu",
+		));
 	}
 
 	let size = Size::new(buffer.width(), buffer.height());
@@ -82,7 +76,13 @@ pub(super) fn import(device: &wgpu::Device, buffer: &DmaBuf) -> Result<Option<So
 		)
 	}?;
 
-	Ok(Some(source))
+	Ok(source)
+}
+
+/// Whether [`import`] takes a buffer of `format`.
+pub(super) fn imports(format: DrmFormat) -> bool {
+	// Any even size will do: only the format decides whether there is a shape.
+	Shape::of(format, Size::new(2, 2)).is_ok()
 }
 
 /// How a DRM format is sampled: the shader layout it feeds, and the Vulkan
@@ -136,7 +136,12 @@ impl Shape {
 					plane2: Some((wgpu::TextureFormat::R8Unorm, half)),
 				}
 			}
-			format => return Err(err(format!("cannot import DMA-BUF format {:#x}", format.as_raw()))),
+			format => {
+				return Err(err(format!(
+					"cannot import DMA-BUF format {:#x}; decode or capture with Output::Render, which delivers it as CPU frames",
+					format.as_raw()
+				)));
+			}
 		})
 	}
 

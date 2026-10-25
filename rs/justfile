@@ -359,7 +359,7 @@ render-sw:
     icd=("$mesa"/share/vulkan/icd.d/lvp_icd.*.json)
     LD_LIBRARY_PATH="$loader/lib" VK_DRIVER_FILES="${icd[0]}" \
         just rs test -p moq-video --features render --lib --run-ignored only \
-        -E 'test(/^render::renderer::tests::(the_declared_color_space_beats_the_size_guess|cpu_frames_survive_the_round_trip|config_size_overrides_the_frame_size)$/)'
+        -E 'test(/^render::renderer::tests::(the_declared_color_space_beats_the_size_guess|cpu_frames_survive_the_round_trip|config_size_overrides_the_frame_size|an_unimportable_gpu_frame_is_refused)$/)'
     LD_LIBRARY_PATH="$loader/lib" VK_DRIVER_FILES="${icd[0]}" \
         just rs test -p moq-scene --lib --run-ignored only -E 'test(/^compositor::tests::/)'
     LD_LIBRARY_PATH="$loader/lib" VK_DRIVER_FILES="${icd[0]}" \

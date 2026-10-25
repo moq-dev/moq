@@ -224,9 +224,12 @@ refused rather than narrowed to 8-bit 4:2:0. Any other rendition yields
 
 `decode::Config::output` says where decoded pictures live: `Output::Native`
 (the default) hands back whatever the backend decoded into, a GPU surface or
-CPU pixels, and `Output::Cpu` delivers every picture as `Surface::I420`,
+CPU pixels, `Output::Cpu` delivers every picture as `Surface::I420`,
 decoded straight to system memory where the backend can and downloaded where it
-cannot. `decode::Config::scale_hint` asks a decoder with a hardware scaler
+cannot, and `Output::Render` keeps only the surfaces `render::Renderer` imports
+and downloads the rest, which is what a player asks for since the renderer
+refuses any other GPU surface. `capture::Config::output` makes the same choice
+for captured frames. `decode::Config::scale_hint` asks a decoder with a hardware scaler
 (NVDEC) to emit that size; it is a hint, so check `Frame::size` and use
 `Frame::resize` for the exact size. `decode::Consumer` takes `decode::Options`,
 which pairs that config with the subscription's `start` and `max_delay`.

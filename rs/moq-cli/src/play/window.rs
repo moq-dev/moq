@@ -355,7 +355,11 @@ impl Display {
 			compatible_surface: Some(&surface),
 			apply_limit_buckets: false,
 		}))?;
-		let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))?;
+		// The renderer imports a decoded DMA-BUF only on a device with this.
+		let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+			required_features: adapter.features() & wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF,
+			..Default::default()
+		}))?;
 		let mut config = surface
 			.get_default_config(&adapter, size.width.max(1), size.height.max(1))
 			.context("the graphics adapter cannot present to this window")?;
@@ -391,7 +395,7 @@ impl Display {
 	}
 
 	fn render(&mut self, frame: &moq_video::Frame) -> anyhow::Result<()> {
-		self.texture = Some((self.renderer.render(frame)?.texture, frame.size()));
+		self.texture = Some((self.renderer.render(frame)?, frame.size()));
 		Ok(())
 	}
 

@@ -30,7 +30,7 @@ use moq_mux::codec::{annexb, h264, h265};
 use moq_net::Timestamp;
 
 use super::backend::{self, Backend, Codec};
-use crate::{Color, Error, Frame, Output, Size, Surface};
+use crate::{Color, Error, Frame, Output, Size};
 
 /// Which decoder implementation to use. `#[non_exhaustive]` so new selection
 /// strategies can be added without breaking external `match`es.
@@ -72,7 +72,9 @@ pub struct Config {
 	/// decode straight to system memory does, the rest download each picture.
 	/// Ask for it when the pixels are headed for the CPU anyway, since a GPU
 	/// surface handed out and downloaded later costs an allocation the backend
-	/// could have skipped.
+	/// could have skipped. [`Output::Render`] keeps the surfaces
+	/// `render::Renderer` imports and downloads the rest, which is what a
+	/// player that draws asks for.
 	pub output: Output,
 	/// Ask the decoder to scale its output to this size (both dimensions even)
 	/// instead of the stream's native one.
@@ -303,10 +305,7 @@ impl Decoder {
 					self.color = color;
 					self.switches.pop_front();
 				}
-				let mut surface = match self.output {
-					Output::Native => frame.surface,
-					Output::Cpu => Surface::I420(frame.surface.into_i420()?),
-				};
+				let mut surface = self.output.convert(frame.surface)?;
 				if let Some(color) = self.color {
 					surface.label(color);
 				}

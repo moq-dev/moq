@@ -258,7 +258,11 @@ impl<O: Output> Media<O> {
 					// doubles as the staleness budget on the wire.
 					let max_delay = self.args.video_max_delay(&snapshot.audio);
 					let opened = async {
-						let decoder = moq_video::decode::Sink::open(config, &Default::default()).await?;
+						// The window's renderer refuses a GPU surface it cannot import, so
+						// the decoder downloads those instead.
+						let mut decode = moq_video::decode::Config::new();
+						decode.output = moq_video::Output::Render;
+						let decoder = moq_video::decode::Sink::open(config, &decode).await?;
 						let track = rendition.track(hang::catalog::Reference::track(config, name))?;
 						let mut subscriber = track
 							.subscribe(

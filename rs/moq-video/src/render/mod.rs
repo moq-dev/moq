@@ -6,10 +6,10 @@
 //! frame on the GPU; this draws it there too, converting YUV to RGB in a shader
 //! instead of downloading pixels to convert them on the CPU.
 //!
-//! [`Renderer::render`] returns a plain [`wgpu::Texture`] in a [`Rendered`],
-//! the whole integration seam: presenting it to a window, feeding it to egui or
-//! bevy, or copying it back is yours to do, so this module carries no windowing
-//! or UI dependency.
+//! [`Renderer::render`] returns a plain [`wgpu::Texture`], which is the whole
+//! integration seam: presenting it to a window, feeding it to egui or bevy, or
+//! copying it back is yours to do, so this module carries no windowing or UI
+//! dependency.
 //!
 //! ```no_run
 //! # fn example(device: &moq_video::render::wgpu::Device, queue: &moq_video::render::wgpu::Queue) -> Result<(), moq_video::Error> {
@@ -17,8 +17,8 @@
 //!
 //! let mut renderer = Renderer::new(device, queue, Config::new())?;
 //! # let frame: moq_video::Frame = todo!();
-//! let rendered = renderer.render(&frame)?;
-//! # let _ = (rendered.texture, rendered.route);
+//! let texture = renderer.render(&frame)?;
+//! # let _ = texture;
 //! # Ok(())
 //! # }
 //! ```
@@ -36,13 +36,11 @@
 //!
 //! Linux callers must request
 //! [`wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF`] when creating the device
-//! to enable that import. Every other frame, and any import that fails, goes through
-//! [`Surface::into_i420`](crate::Surface::into_i420) and a plane upload. That
-//! path is always available, so which route a frame takes is a question of cost,
-//! and [`Rendered::route`] reports it per frame so a caller can count the
-//! uploads it hoped to avoid.
-//! An import path that keeps failing (a driver that cannot do it at all) retires
-//! itself after a few frames rather than paying for the attempt forever.
+//! to enable that import. A CPU frame is uploaded as planes. Any other GPU
+//! surface, and any import that fails, is an error rather than a download, so
+//! a frame's path is settled where it is produced: decode or capture with
+//! [`Output::Render`](crate::Output::Render) to receive only frames that draw
+//! here.
 //!
 //! Enabled by the non-default `render` feature, which is what pulls in `wgpu`.
 
@@ -50,13 +48,15 @@ mod color;
 mod renderer;
 mod source;
 
+pub(crate) use source::imports;
+
 #[cfg(all(target_os = "linux", feature = "dmabuf"))]
 mod dmabuf;
 
 #[cfg(apple)]
 mod metal;
 
-pub use renderer::{Config, Rendered, Renderer, Route};
+pub use renderer::{Config, Renderer};
 
 /// The `wgpu` this renderer was built against, re-exported so you name the exact
 /// version rather than guessing at a compatible one.

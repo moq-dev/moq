@@ -87,7 +87,8 @@ impl Vaapi {
 		};
 		let decoder = Decoder::new(vaapi).map_err(|e| Error::Codec(anyhow::anyhow!("VAAPI decoder init: {e:?}")))?;
 
-		let exporting = config.output == Output::Native;
+		// The renderer imports the NV12 this exports, so `Render` keeps it too.
+		let exporting = config.output != Output::Cpu;
 		tracing::info!(decoder = NAME, exporting, "opened H.264 decoder");
 		Ok(Box::new(Self {
 			decoder,

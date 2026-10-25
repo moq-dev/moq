@@ -5,8 +5,8 @@
 `moq-studio`'s pictures stay on the GPU from source to encoder on the
 backends proven before the cut: sources reach the compositor as textures on
 the shared device, and the program reaches the encoder as a GPU surface. A
-CPU copy remains only as a counted fallback, visible in the studio's Output
-panel.
+CPU copy remains only where a backend has no GPU path, decided when the
+source or encoder opens rather than as a fallback after a GPU attempt fails.
 
 ## Plan
 
@@ -17,7 +17,7 @@ never in the app, so other consumers inherit it.
 Scope is the API shape plus the backends provable now. AMD Vulkan Video
 encode, Intel VA-API on an external Vulkan image, and Direct3D11 render
 import stay in m2 as Related follow-ups; until they land, those backends take
-the counted CPU path. Nothing here requires m2 or m3 work, including the
+the CPU path. Nothing here requires m2 or m3 work, including the
 [macOS and Windows runs](/quest/m3/studio/app.md): moq-video and moq-scene
 test each platform's path on that platform's CI.
 

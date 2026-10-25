@@ -10,9 +10,7 @@
 //! without it (a plain `CVPixelBufferCreate`, as
 //! [`Surface::into_pixel_buffer`](crate::Surface::into_pixel_buffer) does when
 //! uploading a CPU frame) has no handle Metal can address, and the import fails.
-//! Capture and decoder pools always set it, so frames off the fast path arrive
-//! importable; anything else lands on the CPU fallback, which is the right
-//! answer for pixels that were on the CPU to begin with.
+//! Capture and decoder pools always set it, so their frames arrive importable.
 
 use std::ptr::NonNull;
 
@@ -56,6 +54,25 @@ struct Keepalive(#[expect(dead_code, reason = "held for its release, never read"
 unsafe impl Send for Keepalive {}
 unsafe impl Sync for Keepalive {}
 
+/// The layout and range (video swing vs full swing) a pixel format imports as,
+/// or `None` when it does not.
+fn layout_of(format: u32) -> Option<(Layout, Range)> {
+	match format {
+		f if f == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange => Some((Layout::Nv12, Range::Limited)),
+		f if f == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange => Some((Layout::Nv12, Range::Full)),
+		// Rare: a pool configured for planar output rather than the NV12 every
+		// hardware decoder produces. Cheap to support and it keeps the import
+		// from being NV12-only by construction.
+		f if f == kCVPixelFormatType_420YpCbCr8Planar => Some((Layout::I420, Range::Limited)),
+		_ => None,
+	}
+}
+
+/// Whether [`Import::import`] takes `buffer`'s pixel format.
+pub(super) fn imports(buffer: &PixelBuffer) -> bool {
+	layout_of(CVPixelBufferGetPixelFormatType(buffer.buffer())).is_some()
+}
+
 /// A `CVMetalTextureCache` bound to the renderer's Metal device.
 ///
 /// Held across frames on purpose: the cache is what recycles the per-IOSurface
@@ -74,8 +91,8 @@ unsafe impl Send for Import {}
 impl Import {
 	/// Build a texture cache on the same `MTLDevice` wgpu is rendering with.
 	///
-	/// Errors when the device is not a Metal one, which is how a caller running
-	/// wgpu's Vulkan or GL backend on macOS lands on the CPU path.
+	/// Errors when the device is not a Metal one: a caller running wgpu's
+	/// Vulkan or GL backend on macOS decodes and captures with `Output::Cpu`.
 	pub fn new(device: &wgpu::Device) -> Result<Self, Error> {
 		// SAFETY: the handle is only read to create the cache, and it is
 		// dropped before this returns, so nothing outlives the guard.
@@ -109,17 +126,10 @@ impl Import {
 	pub fn import(&mut self, device: &wgpu::Device, buffer: &PixelBuffer) -> Result<Source, Error> {
 		let size = Size::new(buffer.width(), buffer.height());
 		let format = CVPixelBufferGetPixelFormatType(buffer.buffer());
-
-		// The pixel format names the layout and the range (video swing vs full
-		// swing).
-		let (layout, range) = match format {
-			f if f == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange => (Layout::Nv12, Range::Limited),
-			f if f == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange => (Layout::Nv12, Range::Full),
-			// Rare: a pool configured for planar output rather than the NV12
-			// every hardware decoder produces. Cheap to support and it keeps the
-			// import from being NV12-only by construction.
-			f if f == kCVPixelFormatType_420YpCbCr8Planar => (Layout::I420, Range::Limited),
-			f => return Err(err(format!("cannot import pixel format {f:#x}"))),
+		let Some((layout, range)) = layout_of(format) else {
+			return Err(err(format!(
+				"cannot import pixel format {format:#x}; decode or capture with Output::Render, which delivers it as CPU frames"
+			)));
 		};
 
 		// The matrix comes off the buffer's own attachment, which VideoToolbox

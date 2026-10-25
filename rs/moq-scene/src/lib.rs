@@ -12,9 +12,6 @@
 //!   compositor and sound goes to a `moq_audio::bus::Bus`, the program audio.
 //! - [`Compositor`] draws the scene in preview and the scene on program into
 //!   textures on the caller's `wgpu` device, cutting or fading between them.
-//!   A captured or decoded frame already on the GPU is imported rather than
-//!   copied where the platform allows, and [`Compositor::routes`] counts the
-//!   ones that were uploaded instead.
 //! - [`Readback`] copies the program back to the CPU for an encoder that cannot
 //!   take a GPU surface.
 //!
@@ -29,7 +26,7 @@ mod readback;
 pub mod source;
 
 pub use collection::{Audio, Canvas, Collection, Item, Rect, Rgba, Scene, Source, Transition};
-pub use compositor::{Compositor, FORMAT, Routes};
+pub use compositor::{Compositor, FORMAT};
 pub use readback::{Pending, Readback};
 
 /// The `wgpu` the compositor draws with: `moq_video`'s, so its textures and

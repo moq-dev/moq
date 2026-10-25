@@ -4,6 +4,15 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### The renderer refuses GPU frames it cannot import (#6806)
+
+`render::Renderer::render` no longer downloads a GPU surface it cannot import; it returns an error naming the cause and the fix.
+`render::Config::zero_copy` is gone, along with the retry-and-retire fallback behind it.
+CPU frames (`Surface::I420`) upload as before.
+Decode and capture with `Output::Render` (`decode::Config::output`, `capture::Config::output`) to receive only frames the renderer draws: it keeps the surfaces this platform imports on the GPU and downloads the rest.
+On Linux, open the device with `wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF` where the adapter has it, or a DMA-BUF is refused.
+To force the CPU path that `zero_copy: false` gave, decode or capture with `Output::Cpu`.
+
 ### `Rate` is `FrameRate` (#6653)
 
 `Rate` and `RateError` are `FrameRate` and `FrameRateError`, the name the bindings already use.

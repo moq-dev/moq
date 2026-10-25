@@ -153,12 +153,6 @@ impl Feed {
 	pub(crate) fn take(&self) -> Option<Picture> {
 		self.picture.lock().unwrap().take()
 	}
-
-	/// Deliver `picture` as the source's driver would.
-	#[cfg(test)]
-	pub(crate) fn show(&self, picture: Picture) {
-		*self.picture.lock().unwrap() = Some(picture);
-	}
 }
 
 /// The work behind one [`Feed`]: opening the source and delivering what it
@@ -239,6 +233,7 @@ impl Driver {
 
 		let mut config = moq_video::capture::Config::default();
 		config.source = video;
+		config.output = moq_video::Output::Render;
 		let mut stream = moq_video::capture::open(&config).await?;
 		while let Some(frame) = stream.read().await? {
 			self.show(Picture::Frame(frame));
@@ -364,6 +359,7 @@ impl Driver {
 	) -> Result<(), Error> {
 		let mut options = moq_video::decode::Options::new();
 		options.start = moq_video::decode::Start::Latest;
+		options.decoder.output = moq_video::Output::Render;
 		let mut consumer = moq_video::decode::Consumer::new(broadcast, &config, name, options).await?;
 		while let Some(read) = consumer.read().await? {
 			if let moq_video::decode::Read::Frame(frame) = read {
