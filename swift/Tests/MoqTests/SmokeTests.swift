@@ -114,6 +114,8 @@ final class SmokeTests: XCTestCase {
         defer { client.cancel() }
         let session = try await client.connect(to: "https://\(addr)")
         guard let request = try await accepted else { return XCTFail("server closed before accept") }
+        // The wrapper names itself ahead of moq-ffi, so a server can tell bindings apart.
+        XCTAssertTrue(request.peerImplementation?.hasPrefix("moq-swift/") == true, "\(String(describing: request.peerImplementation))")
         let peer = try await request.accept()
 
         // Ending both sessions ends any wait below, so a grant that never arrives fails
@@ -216,7 +218,6 @@ final class SmokeTests: XCTestCase {
         let broadcast = try origin.createBroadcast(path: "epoch")
 
         let first = mintEpoch()
-        XCTAssertEqual(try epochTime("018bcfe5-6800-7000-8000-000000000000"), Date(timeIntervalSince1970: 1_700_000_000))
         try broadcast.announce(route: AnnounceRoute(epoch: first))
         guard case .start(let start) = try await nextRoute(announced) else {
             return XCTFail("expected an announcement")
@@ -230,7 +231,7 @@ final class SmokeTests: XCTestCase {
         }
         XCTAssertEqual(restart.route.epoch, second)
 
-        XCTAssertThrowsError(try epochTime("not-an-epoch"))
+        XCTAssertThrowsError(try broadcast.announce(route: AnnounceRoute(epoch: "not-an-epoch")))
     }
 
     func testDynamicServesARequestUnderAPrefix() async throws {

@@ -29,6 +29,7 @@ extern "C" {
 #include <libswscale/swscale.h>
 }
 
+#include "moq-implementation.h"
 #include "moq-source.h"
 #include "moq-url.h"
 #include "moq-worker.h"
@@ -364,6 +365,7 @@ static moq::ClientConfig moq_source_client_config(bool keylog)
 {
 	moq::ClientConfig config;
 	config.quic.keylog = keylog;
+	config.implementation = MoQImplementation();
 	return config;
 }
 
