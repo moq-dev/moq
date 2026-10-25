@@ -322,8 +322,8 @@ func TestAudioConsumerDelay(t *testing.T) {
 	}
 }
 
-// FrameDurationUs is microseconds so Opus' 2.5 ms frame is expressible at all,
-// and a duration outside the Opus set is refused rather than silently rounded.
+// Opus' 2.5 ms frame reaches the encoder, and a duration outside the Opus set is
+// refused rather than silently rounded.
 func TestEncodeAudioFrameDurations(t *testing.T) {
 	broadcast, err := moq.NewBroadcastProducer()
 	if err != nil {

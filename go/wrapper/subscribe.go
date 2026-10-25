@@ -145,12 +145,8 @@ func (t *TrackConsumer) RecvDatagram(ctx context.Context) (*Datagram, error) {
 }
 
 // Info returns the publisher-side track properties learned during subscription.
-func (t *TrackConsumer) Info() (TrackInfo, error) {
-	info, err := t.inner.Info()
-	if err != nil {
-		return TrackInfo{}, err
-	}
-	return trackInfoFromFFI(info), nil
+func (t *TrackConsumer) Info() TrackInfo {
+	return trackInfoFromFFI(t.inner.Info())
 }
 
 // Update changes this subscriber's delivery preferences. It fails on a
