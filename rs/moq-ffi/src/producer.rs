@@ -81,6 +81,7 @@ impl From<&moq_net::track::Info> for MoqTrackInfo {
 
 pub(crate) struct BroadcastProducer {
 	pub(crate) broadcast: moq_net::broadcast::Producer,
+	pub(crate) publication: Option<moq_net::origin::Publication>,
 	// Carries the untyped `Extra` extension so callers can attach application catalog
 	// sections by name (the only extension shape that crosses the FFI boundary).
 	pub(crate) catalog: moq_mux::catalog::Producer<Extra>,
@@ -198,6 +199,7 @@ impl MoqBroadcastProducer {
 		Ok(Self {
 			state: std::sync::Mutex::new(Some(BroadcastProducer {
 				broadcast,
+				publication: None,
 				catalog,
 				timebases: Default::default(),
 				driver,
@@ -205,6 +207,19 @@ impl MoqBroadcastProducer {
 				ended: false,
 			})),
 		})
+	}
+
+	/// Retain the native publication capability alongside the binding's fill handle.
+	pub(crate) fn from_publication(
+		publication: moq_net::origin::Publication,
+		driver: Background,
+	) -> Result<Self, MoqError> {
+		let result = Self::from_inner(publication.broadcast().clone(), driver)?;
+		result.with_state(|state| {
+			state.publication = Some(publication);
+			Ok(())
+		})?;
+		Ok(result)
 	}
 
 	#[cfg(test)]
@@ -281,7 +296,7 @@ impl MoqBroadcastProducer {
 		let _guard = crate::ffi::enter();
 		let route: moq_net::origin::Route = route.try_into()?;
 		self.with_state(|state| {
-			state.broadcast.announce(route)?;
+			state.publication.as_ref().ok_or(MoqError::Closed)?.announce(route)?;
 			Ok(())
 		})
 	}
@@ -294,7 +309,9 @@ impl MoqBroadcastProducer {
 	pub fn unannounce(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		self.with_state(|state| {
-			state.broadcast.unannounce();
+			if let Some(publication) = &state.publication {
+				publication.unannounce();
+			}
 			Ok(())
 		})
 	}

@@ -171,15 +171,18 @@ impl Message for AuthError {
 /// The REQUEST_ERROR codes AUTH_ERROR carries.
 const UNAUTHORIZED: u64 = 0x1;
 const NOT_SUPPORTED: u64 = 0x3;
+const MALFORMED_AUTH_TOKEN: u64 = 0x4;
 const EXPIRED_AUTH_TOKEN: u64 = 0x5;
 /// Draft-17 assigned it, the first draft this extension negotiates on.
 const GOING_AWAY: u64 = 0x6;
 
 /// The AUTH_ERROR code for a refusal. The public API speaks session codes, and the
-/// actionable distinctions this registry carries are unsupported, expired, and unauthorized.
+/// actionable distinctions this registry carries are unsupported, malformed, expired, and
+/// unauthorized.
 fn to_code(code: SessionError) -> u64 {
 	match code {
 		SessionError::Version | SessionError::Unsupported => NOT_SUPPORTED,
+		SessionError::MalformedAuthToken => MALFORMED_AUTH_TOKEN,
 		SessionError::Expired => EXPIRED_AUTH_TOKEN,
 		_ => UNAUTHORIZED,
 	}
@@ -189,6 +192,7 @@ fn to_code(code: SessionError) -> u64 {
 fn from_code(code: u64) -> Error {
 	match code {
 		NOT_SUPPORTED => Error::Unsupported,
+		MALFORMED_AUTH_TOKEN => Error::Session(SessionError::MalformedAuthToken),
 		EXPIRED_AUTH_TOKEN => Error::Expired,
 		GOING_AWAY => Error::GoingAway,
 		_ => Error::Session(SessionError::Unauthorized),
@@ -783,5 +787,10 @@ mod tests {
 		assert_eq!(to_code(SessionError::Unauthorized), UNAUTHORIZED);
 		assert!(matches!(from_code(EXPIRED_AUTH_TOKEN), Error::Expired));
 		assert_eq!(to_code(SessionError::Expired), EXPIRED_AUTH_TOKEN);
+		assert!(matches!(
+			from_code(MALFORMED_AUTH_TOKEN),
+			Error::Session(SessionError::MalformedAuthToken)
+		));
+		assert_eq!(to_code(SessionError::MalformedAuthToken), MALFORMED_AUTH_TOKEN);
 	}
 }

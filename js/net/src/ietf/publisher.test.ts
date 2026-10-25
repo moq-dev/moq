@@ -7,6 +7,7 @@ import * as Epoch from "../epoch.ts";
 import { error, ProtocolViolation, SessionCode, SessionError, StreamCode, unauthorized } from "../error.ts";
 import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "../group.ts";
 import { type Hop, HopSchema } from "../hop.ts";
+import { hooks } from "../internal.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -435,7 +436,7 @@ test("a cancelled TRACK_STATUS releases its demand on every draft", async () => 
 		expect(early.written).toEqual([]);
 		// Withdrawn, so a late answer is closed rather than served.
 		const answer = new BroadcastProducer().consume();
-		pending?.accept(answer);
+		hooks.acceptRequest(pending, answer);
 		expect(answer.closed.peek()).toBeNull();
 
 		// The broadcast resolves, but its track is never answered.
@@ -445,7 +446,7 @@ test("a cancelled TRACK_STATUS releases its demand on every draft", async () => 
 		if (!request) throw new Error("no request for room/late");
 		const served = new BroadcastProducer();
 		const trackRequest = wireOf(served).requested();
-		request.accept(served);
+		hooks.acceptRequest(request, served);
 		expect((await trackRequest)?.name).toBe("video");
 		expect(served.demand().used.peek()).toBe(true);
 		late.cancel();
@@ -485,7 +486,7 @@ test("a SUBSCRIBE withdrawn during setup releases its demand on every draft", as
 		expect(early.written).toEqual([]);
 		// Withdrawn, so a late answer is closed rather than served.
 		const answer = new BroadcastProducer().consume();
-		pending?.accept(answer);
+		if (pending) hooks.acceptRequest(pending, answer);
 		expect(answer.closed.peek()).toBeNull();
 
 		// The broadcast resolves, but its track is never answered.
@@ -495,7 +496,7 @@ test("a SUBSCRIBE withdrawn during setup releases its demand on every draft", as
 		if (!request) throw new Error("no request for room/late");
 		const served = new BroadcastProducer();
 		const trackRequest = wireOf(served).requested();
-		request.accept(served);
+		hooks.acceptRequest(request, served);
 		expect((await trackRequest)?.name).toBe("video");
 		expect(served.demand().used.peek()).toBe(true);
 		late.withdraw();

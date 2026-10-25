@@ -74,7 +74,7 @@ jobs:
         env:
           # The run writes its directory here, so a failed one is uploaded below
           # and a passing one is deleted as usual.
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
 
       # A failing harness run keeps its directory, holding the relay logs, their
       # configs, and a Playwright trace of the failing page. Upload it for a
