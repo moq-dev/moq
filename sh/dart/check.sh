@@ -55,8 +55,35 @@ done
 
 generated=$(mktemp -d)
 trap 'rm -rf "$generated"' EXIT
+
+# generate.sh and the build hook both reach Cargo through PATH, which Dart's
+# filter keeps. A recorder in front of Cargo saves each build's environment and
+# stderr, so a rebuild below can name its cause. It leaves out the variables its
+# own shell sets, and leaves PATH before Cargo starts, or mbx's Cargo shim would
+# find the recorder again as the real Cargo. Only builds are recorded:
+# uniffi_bindgen_dart runs `cargo metadata` in the full environment.
+real_cargo=$(command -v cargo)
+mkdir "$generated/bin"
+record_cargo() {
+    local phase=$1 flags=$2
+    cat >"$generated/bin/cargo" <<EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == build ]]; then
+    env -u PWD -u OLDPWD -u SHLVL -u _ -0 | sort -z >"$generated/$phase.env"
+    set -- "\$@" $flags
+fi
+export PATH=\${PATH#"$generated/bin:"}
+exec "$real_cargo" "\$@" 2> >(tee -a "$generated/$phase.log" >&2)
+EOF
+    chmod +x "$generated/bin/cargo"
+}
+export PATH="$generated/bin:$PATH"
+
+record_cargo generate ""
 MOQ_FFI_PROFILE=debug "$DART_DIR/../sh/dart/generate.sh" "$generated"
 touch "$generated/built"
+# Verbose, so Cargo says why it rebuilt anything.
+record_cargo hook --verbose
 
 for file in moq.dart uniffi_runtime.dart; do
     if ! diff -u -B "$DART_DIR/moq_ffi/lib/src/$file" "$generated/$file"; then
@@ -91,12 +118,23 @@ for package in moq_ffi moq; do
 done
 
 # The build hook reuses generate.sh's build only while both run Cargo with the
-# same environment. A Dart SDK bump that changes the hook's filter would
-# otherwise silently double this check's Rust build. Cargo rewrites the .d
-# dep-info file even on a no-op, so only the libraries count.
+# same environment and that build's inputs stay in place. A Dart SDK bump that
+# changes the hook's filter would otherwise silently double this check's Rust
+# build. Cargo rewrites the .d dep-info file even on a no-op, so only the
+# libraries count.
 host=$(rustc -vV | sed -n 's/^host: //p')
 if [[ -n "$(find "$DART_DIR/../target/$host/debug" -maxdepth 1 -name '*moq_ffi.*' ! -name '*.d' -newer "$generated/built")" ]]; then
-    echo "error: the moq_ffi build hook rebuilt moq-ffi; update hook_vars in sh/dart/generate.sh to match the Dart SDK" >&2
+    drift=$(
+        { diff <(tr '\0' '\n' <"$generated/generate.env") <(tr '\0' '\n' <"$generated/hook.env") || true; } |
+            sed -n 's/^[<>] \([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' | sort -u | paste -sd ' ' -
+    )
+    if [[ -n "$drift" ]]; then
+        echo "error: the moq_ffi build hook ran Cargo with $drift set differently than sh/dart/generate.sh; update hook_vars there to match the Dart SDK" >&2
+    else
+        echo "error: the moq_ffi build hook rebuilt moq-ffi in generate.sh's environment, so an input of that build changed or went missing, such as a generated source tree mbx gc evicted" >&2
+    fi
+    # Units rebuilt only because a dependency was are left out.
+    grep -hs 'Dirty' "$generated/hook.log" | grep -v 'info of dependency' >&2 || true
     exit 1
 fi
 

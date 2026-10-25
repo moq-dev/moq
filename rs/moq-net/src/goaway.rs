@@ -90,7 +90,7 @@ impl Goaway {
 pub struct Producer {
 	trigger: kio::Producer<Option<Goaway>>,
 	/// Whether this side may name a redirect URI. A client may not,
-	/// since it cannot tell a server to open connections (draft-19 sect 10.4).
+	/// since it cannot tell a server to open connections (draft-22 section 9.2).
 	redirect: bool,
 }
 
@@ -144,14 +144,6 @@ pub struct Consumer {
 }
 
 impl Consumer {
-	/// The peer's GOAWAY, or `None` if it has not sent one.
-	///
-	/// The synchronous read behind [`poll`](Self::poll), for callers that only
-	/// want to know whether the session is draining.
-	pub fn peek(&self) -> Option<Goaway> {
-		self.state.read().clone()
-	}
-
 	/// Poll for the peer's GOAWAY.
 	///
 	/// `Ready(Err)` once the session closes without one, so a caller can stop
@@ -165,12 +157,6 @@ impl Consumer {
 			Poll::Ready(Err(_)) => Poll::Ready(Err(Error::Closed)),
 			Poll::Pending => Poll::Pending,
 		}
-	}
-
-	/// Wait for the peer's GOAWAY, or `None` if the session closes without one.
-	#[cfg(feature = "async")]
-	pub async fn recv(&self) -> Option<Goaway> {
-		kio::wait(|waiter| self.poll(waiter)).await.ok()
 	}
 }
 
@@ -251,7 +237,7 @@ impl Protocol {
 	/// # Errors
 	///
 	/// Returns [`Error::ProtocolViolation`] on a second GOAWAY, which both drafts
-	/// require the session be closed over (draft-19 sect 10.4). Keeping the first
+	/// require the session be closed over (draft-22 section 9.2). Keeping the first
 	/// payload instead would leave an observer acting on a URI the peer has since
 	/// replaced, with no way to tell.
 	pub fn record(&self, goaway: Goaway) -> Result<()> {
@@ -494,13 +480,12 @@ mod tests {
 		assert!(matches!(err, Error::ProtocolViolation));
 	}
 
-	/// The consumer reports the recorded GOAWAY both synchronously and by polling.
-	#[moq_clock::test]
-	#[cfg(feature = "async")]
-	async fn consumer_observes_the_recorded_goaway() {
+	/// The consumer reports the recorded GOAWAY once it arrives.
+	#[test]
+	fn consumer_observes_the_recorded_goaway() {
 		let (handle, protocol) = Handle::new(true);
 		let consumer = handle.consumer();
-		assert_eq!(consumer.peek(), None);
+		assert!(consumer.poll(&kio::Waiter::noop()).is_pending());
 
 		let goaway = Goaway {
 			uri: "https://elsewhere.example/".to_string(),
@@ -508,18 +493,22 @@ mod tests {
 		};
 		protocol.record(goaway.clone()).unwrap();
 
-		assert_eq!(consumer.peek(), Some(goaway.clone()));
-		assert_eq!(consumer.recv().await, Some(goaway));
+		let Poll::Ready(Ok(received)) = consumer.poll(&kio::Waiter::noop()) else {
+			panic!("the recorded GOAWAY");
+		};
+		assert_eq!(received, goaway);
 	}
 
-	/// A session that closes without a GOAWAY resolves `recv` rather than parking
+	/// A session that closes without a GOAWAY resolves the poll rather than parking
 	/// forever, so a caller watching for one can stop.
-	#[moq_clock::test]
-	#[cfg(feature = "async")]
-	async fn recv_resolves_when_the_session_closes() {
+	#[test]
+	fn poll_resolves_when_the_session_closes() {
 		let (handle, protocol) = Handle::new(true);
 		let consumer = handle.consumer();
 		drop(protocol);
-		assert_eq!(consumer.recv().await, None);
+		assert!(matches!(
+			consumer.poll(&kio::Waiter::noop()),
+			Poll::Ready(Err(Error::Closed))
+		));
 	}
 }

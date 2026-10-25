@@ -98,6 +98,11 @@ if (auto catalog = ok(catalogs->next().get())) {   // std::nullopt once the cata
 }
 ```
 
+A session advertises its implementation in SETUP, which a relay's auth service sees.
+The config is generated, so nothing names this package for you: set
+`ClientConfig::implementation` (and `ServerConfig::implementation`) to `moq::IMPLEMENTATION`,
+after any product tokens of your own, and moq-ffi appends its own.
+
 Call `available()` again to wait for the next publisher instance at that path, such as a
 restarted publisher, and drop what was read from the previous one then: its tracks end
 when its session does.

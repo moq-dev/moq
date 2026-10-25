@@ -10,9 +10,6 @@ const ALL: IetfVersion[] = [
 	Version.DRAFT_16,
 	Version.DRAFT_17,
 	Version.DRAFT_18,
-	Version.DRAFT_19,
-	Version.DRAFT_20,
-	Version.DRAFT_21,
 	Version.DRAFT_22,
 ];
 

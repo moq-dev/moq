@@ -14,7 +14,7 @@ const TIMEOUT: Duration = Duration::from_secs(60);
 /// JavaScript's exact number range, on each flavour used by the browser bindings.
 #[tokio::test(start_paused = true)]
 async fn largest_quic_sequence_reaches_the_subscriber() {
-	for alpn in ["moq-lite-02", "moq-lite-06", "moq-transport-19"] {
+	for alpn in ["moq-lite-02", "moq-lite-06", "moq-transport-22"] {
 		let version = alpn.parse().unwrap();
 		let auth = memory::public(&["**"], &[], &[]);
 		let cluster = memory::cluster();
@@ -61,7 +61,7 @@ async fn largest_quic_sequence_reaches_the_subscriber() {
 			let frame = got.read_frame().await.unwrap().unwrap();
 			assert_eq!(frame.payload, b"ladder".as_ref());
 			// Lite-02 carries no timestamps, and a lite-06 subscriber drops them.
-			let timed = alpn == "moq-transport-19";
+			let timed = alpn == "moq-transport-22";
 			assert_eq!(frame.timestamp, timed.then_some(timestamp), "{alpn}");
 		}
 	}
@@ -214,7 +214,7 @@ async fn the_setup_path_reaches_the_decider_and_roots_the_grant() {
 	let (origin, _broadcast, _track) = publish("cam");
 	let publisher = moq_net::Client::new()
 		.with_publisher(origin.consume())
-		.with_path("/room?jwt=token");
+		.with_url("moql://relay.example.com/room?jwt=token".parse().unwrap());
 	let _publisher = connect(publisher, newest(), &cluster, &auth)
 		.await
 		.expect("publisher connects");

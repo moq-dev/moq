@@ -10,6 +10,11 @@ How to update your code for each breaking change, newest first.
 `rate::Policy` gains `lower`, the next lower rendition's ceiling, which only a rendition encoded beside lower ones sets; add `lower: None` to a struct literal, or build it with `Policy::new`.
 Match `Target::Enabled(rate)` where you took the rate before. A policy without `lower` never yields `Target::Disabled`.
 
+### JSON snapshot encoder options move to `json::Options`
+
+`json::Config::deltas` and `with_deltas` move to the new `json::Options`, which `catalog::Producer::json_snapshot` takes as a third argument, so a custom catalog entry can set them too.
+Pass `json::Options::default()` where you relied on the default, or `json::Options::default().with_deltas(false)` where you called `Config::with_deltas(false)`.
+
 ### `Programs::finish` returns the program broadcasts
 
 `Programs::finish` now returns each program's `broadcast::Producer` instead of `()`.

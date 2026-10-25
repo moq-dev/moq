@@ -74,7 +74,6 @@ impl Rate {
 #[derive(Default)]
 struct State {
 	bitrate: Option<Rate>,
-	abort: Option<Error>,
 }
 
 /// Produces bandwidth estimates, notifying consumers when the value changes.
@@ -93,7 +92,7 @@ impl Producer {
 
 	/// Set the current bandwidth estimate, or `None` while the backend has none.
 	pub fn set(&self, bitrate: Option<Rate>) -> Result<()> {
-		let mut state = self.modify()?;
+		let mut state = self.state.write().map_err(|_| Error::Dropped)?;
 		if state.bitrate != bitrate {
 			state.bitrate = bitrate;
 		}
@@ -115,21 +114,6 @@ impl Producer {
 		Weak(self.state.weak())
 	}
 
-	/// Close the producer with an error, notifying all consumers.
-	pub fn abort(&self, err: Error) -> Result<()> {
-		let mut state = self.modify()?;
-		state.abort = Some(err);
-		state.close();
-		Ok(())
-	}
-
-	/// Block until the channel is closed, returning the cause.
-	#[cfg(feature = "async")]
-	pub async fn closed(&self) -> Error {
-		self.state.closed().await;
-		self.close_error()
-	}
-
 	/// Block until there are no active consumers.
 	#[cfg(feature = "async")]
 	pub async fn unused(&self) -> Result<()> {
@@ -138,7 +122,7 @@ impl Producer {
 
 	/// Poll until there are no active consumers. Errors if the channel closes first.
 	pub fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
-		self.state.poll_unused(waiter).map_err(|_| self.close_error())
+		self.state.poll_unused(waiter).map_err(|_| Error::Dropped)
 	}
 
 	/// Whether at least one active consumer exists right now.
@@ -154,18 +138,7 @@ impl Producer {
 
 	/// Poll until at least one active consumer exists. Errors if the channel closes first.
 	pub fn poll_used(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
-		self.state.poll_used(waiter).map_err(|_| self.close_error())
-	}
-
-	fn modify(&self) -> Result<kio::Mut<'_, State>> {
-		self.state
-			.write()
-			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
-	}
-
-	/// The close error, once the channel is closed.
-	fn close_error(&self) -> Error {
-		self.state.read().abort.clone().unwrap_or(Error::Dropped)
+		self.state.poll_used(waiter).map_err(|_| Error::Dropped)
 	}
 }
 
@@ -781,7 +754,7 @@ impl Consumer {
 				// terminal. Collapsing this into `Ok(None)` would be indistinguishable
 				// from a live-but-unavailable estimate, and since a closed channel is
 				// always immediately ready, a `select!` over it would spin forever.
-				Poll::Ready(Err(state)) => return Poll::Ready(Err(state.abort.clone().unwrap_or(Error::Dropped))),
+				Poll::Ready(Err(_)) => return Poll::Ready(Err(Error::Dropped)),
 				Poll::Pending => return Poll::Pending,
 			},
 			// A share recomputes its slice on every wakeup, so it filters the
@@ -1106,7 +1079,7 @@ mod tests {
 		estimate.set(None).unwrap();
 		assert_eq!(share.changed().await.unwrap(), None);
 
-		estimate.abort(Error::Cancel).unwrap();
+		drop(estimate);
 		assert!(share.changed().await.is_err());
 		assert!(share.changed().await.is_err());
 	}
@@ -1292,7 +1265,7 @@ mod tests {
 		assert_eq!(consumer.changed().await.unwrap(), None);
 
 		// Gone for good.
-		producer.abort(Error::Cancel).unwrap();
+		drop(producer);
 		assert!(consumer.changed().await.is_err());
 		// And it stays terminal rather than flapping back to a value.
 		assert!(consumer.changed().await.is_err());

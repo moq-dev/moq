@@ -101,9 +101,6 @@ const IETF_VERSIONS: &[ietf::Version] = &[
 	ietf::Version::Draft16,
 	ietf::Version::Draft17,
 	ietf::Version::Draft18,
-	ietf::Version::Draft19,
-	ietf::Version::Draft20,
-	ietf::Version::Draft21,
 	ietf::Version::Draft22,
 ];
 
@@ -291,6 +288,13 @@ impl AnnounceWriter {
 		msg.encode(&mut Encoder::new(data, self.version.into()), self.version)
 			.expect("could not encode an announcement");
 	}
+}
+
+/// Fill the `groups` of `track` its cache misses, a run per FETCH, as a publisher answers a
+/// range FETCH, for the session bench. The returned guard keeps the filled groups cached.
+pub async fn fill_groups(track: &track::Consumer, groups: std::ops::Range<u64>) -> crate::Result<impl Sized> {
+	track.query().await?;
+	Ok(track.fill_groups(groups, 0).await)
 }
 
 /// `origin` as a session connected to `peer` serves it, for the viewers bench.
@@ -507,10 +511,7 @@ impl LiteSample {
 				track: "video".into(),
 				priority: 2,
 				max_delay: std::time::Duration::from_secs(10),
-				start_group: None,
-				end_group: None,
-				start_frame: 0,
-				end_frame: None,
+				ranges: vec![lite::Range::OLDEST],
 			}
 			.encode(w, version)
 			.unwrap(),
@@ -675,7 +676,7 @@ where
 /// ones, and the two disagree about which byte sequences are even legal.
 ///
 /// The leading-ones form spans the full `u64`, while the QUIC form stops at
-/// [`crate::coding::varint::MAX_QUIC`]; a value always re-encodes in the form it was read in.
+/// `2^62 - 1`; a value always re-encodes in the form it was read in.
 pub fn varint(data: &[u8]) -> bool {
 	let Some((&selector, rest)) = data.split_first() else {
 		return false;
@@ -735,20 +736,20 @@ impl Default for Messages {
 				track: "video".into(),
 				priority: 3,
 				max_delay: Duration::from_millis(500),
-				start_group: Some(1_000),
-				end_group: None,
-				start_frame: 0,
-				end_frame: None,
+				ranges: vec![lite::Range {
+					start: Some(lite::Anchor::Absolute(crate::track::Position::group(1_000))),
+					end: None,
+				}],
 			},
 			lite_update: lite::SubscribeUpdate {
 				wanted_group: None,
 				order: crate::track::Order::Descending,
 				priority: 4,
 				max_delay: Duration::from_millis(500),
-				start_group: Some(1_000),
-				end_group: Some(2_000),
-				start_frame: 0,
-				end_frame: None,
+				ranges: vec![lite::Range {
+					start: Some(lite::Anchor::Absolute(crate::track::Position::group(1_000))),
+					end: Some(lite::Anchor::Absolute(crate::track::Position::group(2_001))),
+				}],
 			},
 			lite_start: lite::SubscribeResponse::Start(lite::SubscribeStart {
 				group: 1_234,
@@ -808,7 +809,7 @@ impl Default for Messages {
 const BENCH_LITE: lite::Version = lite::Version::Lite06;
 
 /// The moq-transport draft the [`Messages`] mix is encoded at: a leading-ones varint draft.
-const BENCH_IETF: ietf::Version = ietf::Version::Draft20;
+const BENCH_IETF: ietf::Version = ietf::Version::Draft22;
 
 impl Messages {
 	/// Append the moq-lite messages to `out`.
@@ -1123,7 +1124,7 @@ pub fn seeds() -> Vec<Seed> {
 	// FETCH is the one arm the sweep above cannot reach: its body ends in a parameter
 	// count, and a uniform fill never lands a zero there. Build it from the encoder
 	// instead, which also means a field change breaks the build rather than the seed.
-	// Draft-20 dropped the joining forms, so each draft gets whichever layout it has.
+	// Draft-22 dropped the joining forms, so each draft gets whichever layout it has.
 	for (index, version) in IETF_VERSIONS.iter().enumerate() {
 		let fetch_types = [
 			ietf::FetchType::AbsoluteJoining {

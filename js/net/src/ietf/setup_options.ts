@@ -30,7 +30,7 @@ export const SetupOption = {
 	Epoch: 0x40b68n,
 } as const;
 
-// Unknown SETUP options may repeat, including GREASE (draft-21 section 9.1).
+// Unknown SETUP options may repeat, including GREASE (draft-22 section 9.1).
 const KNOWN_SETUP_OPTIONS: readonly bigint[] = Object.values(SetupOption);
 
 /**
@@ -95,20 +95,6 @@ export class SetupOptions {
 			throw new Error(`invalid parameter id: ${id.toString()}, must be even`);
 		}
 		return this.vars.get(id);
-	}
-
-	removeBytes(id: bigint): boolean {
-		if (id % 2n !== 1n) {
-			throw new Error(`invalid parameter id: ${id.toString()}, must be odd`);
-		}
-		return this.bytes.delete(id);
-	}
-
-	removeVarint(id: bigint): boolean {
-		if (id % 2n !== 0n) {
-			throw new Error(`invalid parameter id: ${id.toString()}, must be even`);
-		}
-		return this.vars.delete(id);
 	}
 
 	async encode(w: Writer, version: IetfVersion) {

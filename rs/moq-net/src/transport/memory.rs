@@ -416,9 +416,9 @@ impl poll::Session for Session {
 		self.conn().config.protocol.as_deref()
 	}
 
-	fn binding(&self) -> super::Binding {
+	fn address(&self) -> super::Address {
 		// Like raw QUIC, the pair has no request URI, so the target travels in SETUP.
-		super::Binding::InBand
+		super::Address::Setup
 	}
 
 	fn close(&mut self, code: u32, reason: &str) {

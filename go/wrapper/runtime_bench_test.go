@@ -114,11 +114,7 @@ func BenchmarkFFI(b *testing.B) {
 			b.Fatal(err)
 		}
 		b.Cleanup(consumer.Cancel)
-		benchCall(b, func() {
-			if _, err := consumer.Info(); err != nil {
-				b.Fatal(err)
-			}
-		})
+		benchCall(b, func() { _ = consumer.Info() })
 	})
 }
 

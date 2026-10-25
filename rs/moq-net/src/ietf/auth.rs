@@ -268,24 +268,45 @@ pub(super) async fn run_present(
 		};
 		let violation = violation.clone();
 		tasks.push(async move {
-			// After a GOAWAY, sent or received, the peer must not see new requests. AUTH_ERROR
-			// carries no code that may pass, so unlike moq-lite a refusal is never presented again.
-			let err = match present.handle.active() {
-				true => present.run(token).await,
-				false => Error::GoingAway,
-			};
-			let err = crate::auth::protocol_error(err);
-			if matches!(err, Error::ProtocolViolation) {
-				violation.lock().get_or_insert(err.clone());
-			}
-
-			match &err {
-				Error::Cancel | Error::Unsupported | Error::Transport(_) | Error::IdleTimeout | Error::Session(_) => {
-					tracing::debug!(%err, "auth token ended")
+			let mut token = Ok(token);
+			let mut answered = false;
+			loop {
+				// After a GOAWAY, sent or received, the peer must not see new requests.
+				let err = match token {
+					Ok(token) if present.handle.active() => present.run(token, &mut answered).await,
+					Ok(_) => Error::GoingAway,
+					Err(err) => err,
+				};
+				let err = match err {
+					// The peer negotiated the extension, but a reset before any reply still tells
+					// us nothing about the token: it earns nothing here, as on moq-lite.
+					Error::Stream(_) if !answered => Error::Unsupported,
+					err => crate::auth::protocol_error(err),
+				};
+				// AUTH_ERROR carries no code that may pass, so unlike moq-lite only a lost
+				// request is presented again.
+				if let Some(delay) = present.handle.retry(present.id, &err) {
+					tracing::debug!(%err, ?delay, "auth token presenting again");
+					token = present.reopen(delay).await;
+					continue;
 				}
-				err => tracing::warn!(%err, "auth token ended"),
+				if matches!(err, Error::ProtocolViolation) {
+					violation.lock().get_or_insert(err.clone());
+				}
+
+				match &err {
+					Error::Cancel
+					| Error::Unsupported
+					| Error::Transport(_)
+					| Error::IdleTimeout
+					| Error::Session(_) => {
+						tracing::debug!(%err, "auth token ended")
+					}
+					err => tracing::warn!(%err, "auth token ended"),
+				}
+				present.handle.ended(present.id, err);
+				return;
 			}
-			present.handle.ended(present.id, err);
 		});
 	}
 	std::future::pending().await
@@ -305,9 +326,25 @@ struct Present {
 
 #[cfg(feature = "async")]
 impl Present {
+	/// Wait out a retry's `delay`, then take the token to present again.
+	async fn reopen(&self, delay: Duration) -> Result<Bytes, Error> {
+		let mut deadline = crate::time::Deadline::after(&self.runtime, delay);
+		kio::wait(|waiter| {
+			if self.handle.poll_withdrawn(self.id, waiter).is_ready() {
+				return Poll::Ready(Err(Error::Cancel));
+			}
+			std::task::ready!(deadline.poll(waiter));
+			Poll::Ready(self.handle.reopen(self.id))
+		})
+		.await
+	}
+
 	/// Send the token, then track its grant until either side ends it, resolving with why.
-	#[cfg(feature = "async")]
-	async fn run(&self, token: Bytes) -> Error {
+	///
+	/// `answered` records that the peer replied to the token, on this request or an
+	/// earlier one, so a request it closes or resets before replying is lost rather than
+	/// unsupported.
+	async fn run(&self, token: Bytes, answered: &mut bool) -> Error {
 		let mut stream = match Stream::open_request(&mut self.session.clone(), self.version).await {
 			Ok(stream) => stream,
 			Err(err) => return err,
@@ -321,7 +358,6 @@ impl Present {
 			return err;
 		}
 
-		let mut answered = false;
 		let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
 		loop {
 			enum Next {
@@ -345,7 +381,7 @@ impl Present {
 				Next::Withdrawn => return Error::Cancel,
 				Next::Reply(Ok(Some(super::request_stream::Framed(id, body)))) => (id, body),
 				// The peer ended the grant without revoking it.
-				Next::Reply(Ok(None)) if answered => return Error::Cancel,
+				Next::Reply(Ok(None)) if *answered => return Error::Cancel,
 				// A peer that closes before answering could not tell us anything.
 				Next::Reply(Ok(None)) => return Error::Unsupported,
 				Next::Reply(Err(err)) => return err,
@@ -364,7 +400,7 @@ impl Present {
 						Some(None) => return Error::ProtocolViolation,
 						expires => expires.flatten(),
 					};
-					answered = true;
+					*answered = true;
 					self.handle.granted(
 						self.id,
 						Grant {
@@ -386,6 +422,7 @@ impl Present {
 					if !matches!(err, Error::Unsupported | Error::GoingAway) {
 						self.handle.refused(self.id);
 					}
+					*answered = true;
 					return err;
 				}
 				_ => return Error::UnexpectedMessage,
@@ -589,7 +626,7 @@ mod tests {
 	#[cfg(feature = "async")]
 	#[moq_clock::test]
 	async fn auth_refused_without_credit_spends_no_request_id() {
-		for version in [Version::Draft17, Version::Draft19] {
+		for version in [Version::Draft17, Version::Draft18] {
 			for client in [false, true] {
 				let first = if client { 0 } else { 1 };
 				let control = Control::new(Some(RequestId(first + 1)), client);
@@ -604,7 +641,10 @@ mod tests {
 					version,
 					id: 0,
 				};
-				assert!(matches!(present.run(Bytes::new()).await, Error::NoStreamCredit));
+				assert!(matches!(
+					present.run(Bytes::new(), &mut false).await,
+					Error::NoStreamCredit
+				));
 				assert_eq!(
 					control.poll_next_request_id(&kio::Waiter::noop()),
 					Poll::Ready(RequestId(first))
@@ -637,14 +677,7 @@ mod tests {
 	/// before the unified SETUP carry none.
 	#[test]
 	fn setup_option_round_trips_on_supported_drafts() {
-		for version in [
-			Version::Draft17,
-			Version::Draft18,
-			Version::Draft19,
-			Version::Draft20,
-			Version::Draft21,
-			Version::Draft22,
-		] {
+		for version in [Version::Draft17, Version::Draft18, Version::Draft22] {
 			let mut params = super::super::Parameters::default();
 			assert_eq!(from_setup(&params, version), None);
 			into_setup(&mut params, version);
