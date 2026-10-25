@@ -2,7 +2,7 @@
 
 ## Goal
 
-The relay issues each session a short-lived, node-bound grant that another
+The relay issues each session a short-lived, key-bound grant that another
 client can verify without learning a signing key. A browser presents that
 grant on a direct session and serves only the paths it names. HMAC keys
 never leave the relay: a peer grant is signed with an asymmetric key
@@ -15,19 +15,15 @@ nothing on a direct connection.
 `moq_auth::Claims` stays the bearer token the relay verifies. A peer grant
 is a separate type (`moq_auth::PeerGrant`) so presenting one as `?jwt=`
 fails verification rather than widening a relay session. It carries the
-session's publish and subscribe patterns, the routing identity the relay
-stamped on that session
-([Stamp routing identities](/quest/m1/cluster-routing/stamp.md)), a
-presenter public key (`cnf`), `iat`, and a short `exp`. A node id is public on the
-roster, so a copied JWT is not enough: the presenter proves possession of
-the matching private key on the direct AUTH stream. A roster peer that
+session's publish and subscribe patterns, a presenter public key (`cnf`),
+`iat`, and a short `exp`, and no routing identity. The presenter key is
+public on the roster, so a copied JWT is not enough: the presenter proves
+possession of the matching private key on the direct AUTH stream. A roster peer that
 received someone else's grant cannot replay it.
 
 Issuance: the relay owns AUTH (`rs/moq-relay/src/auth/refresh.rs`). The
 client mints one key per process or tab and announces its public half on the
-relay's AUTH stream (AUTH_CNF); it is the `cnf`. The grant's routing identity
-is the relay's own stamp, never one the client named, so a client cannot
-obtain a grant for someone else's identity. Then, after AUTH_OK:
+relay's AUTH stream (AUTH_CNF); it is the `cnf`. Then, after AUTH_OK:
 
 - `AUTH_KEYS { Jwks (b) }`, the relay's kid-indexed public JWKS,
   asymmetric keys only, HMAC material never included;
@@ -37,11 +33,11 @@ AUTH_KEYS and AUTH_PEER may repeat for refresh and key rotation. The lite
 draft and both language codecs gain AUTH_KEYS and AUTH_PEER in whichever lite
 wip is current when this lands; they do not gate the lite-07 cut (decided
 2026-10-13). Decided 2026-10-25 (maintainer): this quest owns AUTH_CNF and
-the possession proof, which do not gate the cut either, since relays stamp
-routing identities instead of accepting proven ones; `just drafts check` passes. Reissue before expiry; the client
+the possession proof, which do not gate the cut either, since every
+session's receiver stamps its routing identity instead of accepting a proven
+one; `just drafts check` passes. Reissue before expiry; the client
 replaces the grant on each live peer session with `auth().add` and drops
-the old one. A node-id or key change mints a new grant; the old node id is
-dead.
+the old one. A key change mints a new grant; the old key is dead.
 
 Verification on a direct session: the opener writes `AUTH { Token (b) }`
 with the JWT and proves possession of the `cnf` key bound to this session.
@@ -51,12 +47,20 @@ exchanges, so the proof binds an authenticated transport exporter or
 authenticates every routing control the session sends; settle which here and
 add replay tests before the wire is fixed. The
 receiver verifies the relay signature against the JWKS from its own
-AUTH_KEYS, checks `exp`, matches node id against the roster, and requires
-`cnf` to equal the key the session proved. The origin then serves only the
-granted paths, and the receiver files the session's own routes under the
-grant's routing identity, never one the session named, so an origin reached
-through the CDN and directly is one identity. A missing, expired, HMAC-signed, or unproven grant, or one
-whose `cnf` is not the session's proven key, is not a grant.
+AUTH_KEYS, checks `exp`, matches `cnf` against the presenter key in the
+peer's roster entry, and requires `cnf` to equal the key the session proved.
+The origin then serves only the granted paths. A missing, expired,
+HMAC-signed, or unproven grant, or one whose `cnf` is not the session's
+proven key, is not a grant.
+
+Decided 2026-10-25 (maintainer): no cross-path recognition. The grant
+authorizes paths and binds a key; it carries no routing identity for a
+direct session to file routes under. The receiver stamps the direct session's
+routing identity itself, as for any session
+([Stamp routing identities](/quest/m1/cluster-routing/stamp.md)), so an
+origin reached through the CDN and directly is two identities, and switching
+between them resumes only across a matching explicit epoch. Simpler: one
+identity regime.
 
 [Signaling and policy](/quest/m2/p2p/signal.md) presents the grant in band
 on each direct session. P2P is its only consumer, so it lives on this line
@@ -65,7 +69,8 @@ rather than the auth line (decided in the 2026-09-30 audit).
 Docs: `doc/bin/relay/auth.md` states that peer grants need an asymmetric
 key, that HS256 operators get none, and that the public JWKS is not a
 secret. Tests: ES256 round trip; an HS256-only relay issues nothing; a
-peer grant fails `Claims` verification; a node-id mismatch is refused; a
+peer grant fails `Claims` verification; a key that does not match the
+peer's roster entry is refused; a
 grant whose `cnf` is not the session's proven key is refused; a grant copied onto another
 session without the private key is refused; copying both grant and a prior
 valid proof onto another session is refused; a refreshed grant replaces
@@ -75,5 +80,4 @@ Additive.
 
 ## Required
 
-- [Routes and announces](/quest/m1/cluster-routing/routes.md) - the route-layer node id a grant binds
 - [In-band auth](/quest/m1/auth/README.md) - relay tokens reach `main` with this line, so the relay owns AUTH and knows the session's paths

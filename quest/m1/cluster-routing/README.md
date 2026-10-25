@@ -38,12 +38,15 @@ Decided with the maintainer, 2026-10-13:
 - Keep Babel. A detour longer than the lost route may wait for a sequence
   refresh from the origin; instant failover is not required. Measure failure
   detection, additional routing recovery, and total interruption separately.
-- The relay a session attaches to stamps its routing identity and ignores a
-  self-named one ([Stamp routing identities](/quest/m1/cluster-routing/stamp.md),
-  decided 2026-10-25, superseding the 2026-10-14 per-process key proven once
-  per session). Keep administrative identity separate; `cluster.id` is
-  removed. Recognizing one publisher through both its CDN and P2P connections
-  moves to [Peer grants](/quest/m2/p2p/peer-grant.md).
+- The receiver of a session, a relay or a direct peer, stamps its routing
+  identity and ignores a self-named one
+  ([Stamp routing identities](/quest/m1/cluster-routing/stamp.md), decided
+  2026-10-25, superseding the 2026-10-14 per-process key proven once per
+  session). Keep administrative identity separate; `cluster.id` is removed.
+  No cross-path recognition (decided 2026-10-25, maintainer; simpler, one
+  identity regime): a publisher reached through the CDN and over P2P is two
+  origins, and switching between them resumes only across a matching
+  explicit epoch.
 - A connection's own stamped identity stays bare everywhere. Identities a
   connection forwards on behalf of others are filed under
   `hash(subject, id)`, keyed by the grant's credential subject, when its
@@ -119,7 +122,7 @@ setup after the capabilities land.
 
 ## Required
 
-- [Stamp routing identities](/quest/m1/cluster-routing/stamp.md) - relays stamp every session's routing identity and ignore a self-named one
+- [Stamp routing identities](/quest/m1/cluster-routing/stamp.md) - every session's receiver stamps its routing identity and ignores a self-named one
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - implement the proven route layer with Rust/JS parity and tiered-cluster acceptance
 - [Outbound federation](/quest/m1/cluster-routing/federation.md) - an outbound-only local relay exchanges authorized broadcasts with the CDN and survives partition/healing
 

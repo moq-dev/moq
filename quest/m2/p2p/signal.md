@@ -23,11 +23,20 @@ define that handle before fixing `Peers`. Publishing into the origin reaches
 the relay and its announce stream is the roster. Tests inject transport
 factories and cover pairing, application selection, and the roster gate.
 
-Identity: the roster id is the origin's route-layer node id, the id its
-ROUTE_START carries ([routes](/quest/m1/cluster-routing/routes.md)), which
-the relay stamps on the tab's session
-([Stamp routing identities](/quest/m1/cluster-routing/stamp.md)) and its peer
-grant names. lite-07 drops the hop list, so no hop chain carries it.
+Identity: decided 2026-10-25 (maintainer), no cross-path recognition. Each
+session's receiver stamps its routing identity, a direct peer included
+([Stamp routing identities](/quest/m1/cluster-routing/stamp.md)), so a
+publisher reached through the CDN and directly is two origins, and switching
+between them resumes only across a matching explicit epoch. Simpler: one
+identity regime. The route-layer node id differs per session, so it cannot
+be the roster id. Open, to settle here: what names a
+roster entry (`<id>` below, also the perfect-negotiation tiebreak) and what
+key maps an announce to a roster peer. An announce reaching a client through
+the CDN carries the broadcast path, its epoch, and an identity the
+publisher's relay stamped. Candidates the plans already hold are the
+presenter key in the roster entry, which the peer grant binds, and the
+grant's publish patterns, which are verified only after connecting. Since
+the application selects peers, it may need no automatic mapping at all.
 
 Roster: each peer publishes `<prefix><id>` with an `info.json` snapshot track:
 the moq ALPNs it accepts, `webrtc: true`, the presenter public key that
@@ -83,10 +92,10 @@ scoped like a relay session, but the relay token itself never crosses it: a
 `moq_auth` JWT is a bearer credential with no audience or proof of
 possession, so a peer that received one could replay it against the relay.
 Instead the relay issues each session a peer grant, a relay-signed statement
-of that session's path scopes bound to its node id, its presenter public key,
-and short-lived, which the peer presents in band with a proof of possession;
-the other side verifies the relay's signature, the node id and key against
-the roster, and that the key is the one the session proved, then serves only the granted paths. Issuance,
+of that session's path scopes bound to its presenter public key and
+short-lived, which the peer presents in band with a proof of possession;
+the other side verifies the relay's signature, the key against the
+roster entry, and that the key is the one the session proved, then serves only the granted paths. Issuance,
 asymmetric keys, JWKS, and refresh live in
 [Peer grants](/quest/m2/p2p/peer-grant.md), along with the key's proof: HMAC keys cannot be given to
 browsers without also letting them forge grants, so an HS256-only relay
@@ -95,5 +104,4 @@ there is no equal-scope shortcut.
 
 ## Required
 
-- [Routes](/quest/m1/cluster-routing/routes.md) - the ROUTE_START node id the roster keys on
-- [Peer grants](/quest/m2/p2p/peer-grant.md) - the node-bound, asymmetrically signed credential a direct session presents; HS256 keys issue none
+- [Peer grants](/quest/m2/p2p/peer-grant.md) - the key-bound, asymmetrically signed credential a direct session presents; HS256 keys issue none

@@ -116,11 +116,16 @@ channel, and has no reset code without a side channel.
 ### Routes and migration
 
 Routing is the [cluster routing line](/quest/m1/cluster-routing/README.md)'s:
-every session speaks per-node ROUTEs and path-less ANNOUNCEs, so a broadcast's
-announce names its origin node, the roster maps that node to a peer, and the
-application priority followed by total cost picks the direct link or relay. The roster id is the node id the origin's relay
-stamped on its session, which its [peer grant](/quest/m2/p2p/peer-grant.md)
-carries onto direct sessions.
+every session speaks per-node ROUTEs and path-less ANNOUNCEs, and the
+application priority followed by total cost picks the direct link or relay.
+
+Decided 2026-10-25 (maintainer): no cross-path recognition. Each session's
+receiver stamps its routing identity, a direct peer included, so a publisher
+reached through the CDN and directly is two origins with separate routes,
+and switching between them resumes only across a matching explicit epoch.
+Simpler: one identity regime. A routing node id therefore no longer names a
+roster peer; [Signaling and policy](/quest/m2/p2p/signal.md) owns the open
+question of what key maps announces to roster peers.
 
 Decided 2026-10-13: priority then total cost selects among authorized routes;
 a direct connection does not always win. A watching tab never re-serves what
@@ -147,7 +152,7 @@ Backend choice does not change the policy that watching tabs never re-serve.
 
 ## Required
 
-- [Peer grants](/quest/m2/p2p/peer-grant.md) - the relay issues a node-bound, asymmetrically signed grant a browser can verify; HS256 keys issue none
+- [Peer grants](/quest/m2/p2p/peer-grant.md) - the relay issues a key-bound, asymmetrically signed grant a browser can verify; HS256 keys issue none
 - [Signaling and policy](/quest/m2/p2p/signal.md) - opted-in peers find each other under the prefix, the application picks who to dial, and the roster-size gate decides whether STUN is used
 - [UDP demux](/quest/m2/p2p/udp-demux.md) - one classifier splits QUIC from STUN and WebRTC on the relay's socket and on a native pair's
 - [Native pairs over ICE and QUIC](/quest/m2/p2p/native-quic.md) - two native peers connect through ICE, then `moq-quic` over the nominated path with fingerprints pinned from the offer

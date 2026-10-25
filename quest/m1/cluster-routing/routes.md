@@ -112,14 +112,17 @@ The handoff contract below, decided 2026-10-16, settles claim freshness:
   them was rejected: downstream nodes would lose their only route during the
   drain. Existing readers resume only
   across a matching explicit epoch; epochless changes preserve Restart.
-- The relay a session attaches to stamps its routing identity and ignores a
-  self-named one ([Stamp routing identities](/quest/m1/cluster-routing/stamp.md),
-  decided 2026-10-25). This supersedes the per-process key shared across an
-  origin's live sessions and proven once per session (decided 2026-10-13 and
+- The receiver of a session, a relay or a direct peer, stamps its routing
+  identity and ignores a self-named one
+  ([Stamp routing identities](/quest/m1/cluster-routing/stamp.md), decided
+  2026-10-25). This supersedes the per-process key shared across an origin's
+  live sessions and proven once per session (decided 2026-10-13 and
   2026-10-14): a self-named identity is unverifiable without that proof, and
-  key proof moves to [Peer grants](/quest/m2/p2p/peer-grant.md), which also
-  owns recognizing an origin reached through CDN and direct links and mapping
-  it to a roster peer. Keep administrative identity and broadcast epoch
+  key proof moves to [Peer grants](/quest/m2/p2p/peer-grant.md). Decided
+  2026-10-25 (maintainer): no cross-path recognition. An origin reached
+  through the CDN and over a direct session is two identities, and switching
+  between them resumes only across a matching explicit epoch. Simpler: one
+  identity regime. Keep administrative identity and broadcast epoch
   separate. An identity's seqno advances whenever the sessions it is reached
   through change: feasibility distances held elsewhere otherwise refuse a
   restart that reuses an identity, and starve the old neighbors of an origin
@@ -220,10 +223,12 @@ The handoff contract below, decided 2026-10-16, settles claim freshness:
   to reach the origin, where today's path vector fails over at once. Redundant
   cores are feasible successors and switch immediately
   (`redundant_cores_fail_over_without_a_seqno_request`); a local mesh reaching
-  its other half through the CDN, or a routing node falling back from P2P to
-  the CDN, starves until the origin answers
-  (`partitioned_local_mesh_reaches_itself_through_the_cdn`,
-  `p2p_fallback_is_immediate_for_leaves_and_needs_a_seqno_for_transit`).
+  its other half through the CDN starves until the origin answers
+  (`partitioned_local_mesh_reaches_itself_through_the_cdn`). Falling back
+  from P2P to the CDN switches to the origin's CDN identity, so it no longer
+  waits for a seqno, even at a transit node; rewrite
+  `p2p_fallback_is_immediate_for_leaves_and_needs_a_seqno_for_transit`, which
+  still models one identity on both paths.
   Decided 2026-10-13: accept this recovery pause; instant failover is not a
   requirement. Measure transport failure detection, additional sequence-refresh
   recovery, and total interruption separately. The fixtures' manual origin
@@ -289,7 +294,7 @@ The handoff contract below, decided 2026-10-16, settles claim freshness:
   never on the wire. Relays default on; applications choose per P2P
   connection; browser tabs stay off until the Rust-to-TypeScript port.
 - A plain client (`proxy` off) advertises its own origin and publications only, under
-  the identity its relay stamped. Clients receive only authorized, interested claims; opaque ids expose no
+  the identity each session's receiver stamped. Clients receive only authorized, interested claims; opaque ids expose no
   backbone addresses, but are not themselves authorization. A client
   advertises nothing it receives, so it holds no feasibility distance and
   falls back from P2P to the CDN at once. It still echoes every ROUTE_END.
@@ -642,7 +647,7 @@ release.
 
 ## Required
 
-- [Stamp routing identities](/quest/m1/cluster-routing/stamp.md) - every session's own identity is relay-stamped, never self-named
+- [Stamp routing identities](/quest/m1/cluster-routing/stamp.md) - every session's own identity is stamped by its receiver, never self-named
 
 ## Related
 

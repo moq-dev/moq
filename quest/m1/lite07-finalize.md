@@ -35,8 +35,11 @@ owns the tier/partition correctness tests, so they run before the cut. Peer
 grants and metadata-only subscriptions do not gate it: neither is clustering
 stability. Both are additive and, per the freeze policy, target whichever lite
 wip is current when they land. Decided 2026-10-25: no routing identity proof
-gates the cut; relays stamp identities instead, and the key and its proof
-belong to Peer grants.
+gates the cut; every session's receiver, a direct peer included, stamps its
+identity instead, and the key and its proof belong to Peer grants. Decided
+the same day (maintainer): no cross-path recognition, so the CDN and direct
+copies of an origin are separate identities and nothing in lite-07 carries a
+stamp between sessions. Simpler: one identity regime.
 
 Decided 2026-10-08: Restart and AUTH join Required, since both change the
 lite-07 wire. Compressed tracks joined on 2026-10-17 and landed
