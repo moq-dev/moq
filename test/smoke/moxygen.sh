@@ -7,7 +7,7 @@
 set -euo pipefail
 
 MOQ_REPO="https://github.com/moq-dev/moq"
-MOQ_RELAY="${MOQ_RELAY_BIN:-}"
+MOQ_RELAY="${RELAY_BIN:-}"
 DOCKER="${MOXYGEN_DOCKER:-docker}"
 MOXYGEN_IMAGE="${MOXYGEN_IMAGE:-ghcr.io/facebookexperimental/moxygen-interop-client:latest-amd64}"
 PORT="${MOXYGEN_SMOKE_PORT:-4444}"

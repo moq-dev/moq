@@ -39,6 +39,11 @@ func (b *BroadcastConsumer) FetchGroup(
 	sequence uint64,
 	options *FetchGroupOptions,
 ) (*GroupConsumer, error) {
+	if options != nil {
+		if err := bridge.NonNegative(options.MaxDelay, "max delay"); err != nil {
+			return nil, err
+		}
+	}
 	inner, err := b.inner.FetchGroup(ctx, name, sequence, options)
 	if err != nil {
 		return nil, err
@@ -59,6 +64,9 @@ func (b *BroadcastConsumer) FetchGroup(
 // Errors if this broadcast came from a local producer rather than an origin, since a
 // standalone broadcast has no sibling to name.
 func (b *BroadcastConsumer) Resolve(ctx context.Context, rendition ffi.MoqRendition) (*BroadcastConsumer, error) {
+	if err := bridge.Rendition(rendition); err != nil {
+		return nil, err
+	}
 	inner, err := b.inner.Resolve(ctx, rendition)
 	if err != nil {
 		return nil, err
@@ -145,12 +153,8 @@ func (t *TrackConsumer) RecvDatagram(ctx context.Context) (*Datagram, error) {
 }
 
 // Info returns the publisher-side track properties learned during subscription.
-func (t *TrackConsumer) Info() (TrackInfo, error) {
-	info, err := t.inner.Info()
-	if err != nil {
-		return TrackInfo{}, err
-	}
-	return trackInfoFromFFI(info), nil
+func (t *TrackConsumer) Info() TrackInfo {
+	return trackInfoFromFFI(t.inner.Info())
 }
 
 // Update changes this subscriber's delivery preferences. It fails on a

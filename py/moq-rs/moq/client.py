@@ -13,7 +13,7 @@ from moq_ffi import (
     moq_versions,
 )
 
-from ._records import Backoff, ClientTls, QuicConfig, WebSocketConfig, _opt_us, _strs
+from ._records import Backoff, ClientTls, QuicConfig, WebSocketConfig, _strs
 from .origin import AnnounceConsumer, AnnouncedBroadcast, OriginConsumer, OriginProducer
 from .publish import BroadcastProducer
 from .session import Session
@@ -94,9 +94,9 @@ class Client:
         self._config = MoqClientConfig(
             bind=bind,
             versions=_strs(versions, "versions"),
-            timeout_us=_opt_us(timeout, "timeout"),
-            race_us=_opt_us(race, "race"),
-            resolution_delay_us=_opt_us(resolution_delay, "resolution_delay"),
+            timeout=timeout,
+            race=race,
+            resolution_delay=resolution_delay,
             tls=(tls or ClientTls())._ffi(),
             quic=(quic or QuicConfig())._ffi(),
             websocket=(websocket or WebSocketConfig())._ffi(),

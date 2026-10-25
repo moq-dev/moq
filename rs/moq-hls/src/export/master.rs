@@ -22,6 +22,14 @@ const AUDIO_GROUP: &str = "aud";
 /// in both layouts.
 pub(crate) const PATH_SEGMENT: &AsciiSet = &NON_ALPHANUMERIC.remove(b'-').remove(b'.').remove(b'_').remove(b'~');
 
+/// Whether a rendition name can be addressed as one URL path segment.
+///
+/// A client resolves a `.` or `..` segment away, percent-encoded or not, and the router refuses
+/// an empty one, so renditions with those names are never admitted.
+pub(crate) fn is_path_segment(name: &str) -> bool {
+	!matches!(name, "" | "." | "..")
+}
+
 /// The live layout's media-playlist URI for a rendition of the publisher `instance`, relative to
 /// the master, with an optional query (without the leading `?`) appended.
 pub(crate) fn rendition_uri(instance: &str, kind: Kind, name: &str, query: Option<&str>) -> String {

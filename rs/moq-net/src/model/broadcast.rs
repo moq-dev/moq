@@ -260,8 +260,17 @@ impl Producer {
 		self
 	}
 
+	/// Answer track requests only while `validity` holds, ending the broadcast once it
+	/// lapses. Set when a session mints a source, before any handle is shared.
+	pub(crate) fn with_validity(mut self, validity: RequestValidity) -> Self {
+		Arc::get_mut(&mut self.alive)
+			.expect("validity is set on a fresh broadcast")
+			.validity = validity;
+		self
+	}
+
 	/// The route this broadcast is announced with, or `None` while it is not.
-	pub fn route(&self) -> Option<Route> {
+	pub(super) fn route(&self) -> Option<Route> {
 		self.alive.announcer.lock().as_ref()?.route()
 	}
 
@@ -282,7 +291,7 @@ impl Producer {
 	/// through an origin, so there is nothing to announce into), on a claim answer
 	/// still being [prepared](super::origin::Request::prepare), once the broadcast
 	/// has closed, or once the origin's driver has been dropped.
-	pub fn announce(&self, route: Route) -> Result<(), Error> {
+	pub(super) fn announce(&self, route: Route) -> Result<(), Error> {
 		let mut announcer = self.alive.announcer.lock();
 		let announcer = announcer.as_mut().ok_or(Error::Closed)?;
 		announcer.announce(route)
@@ -324,7 +333,7 @@ impl Producer {
 	/// the broadcast the origin served from it ends, while tracks already in
 	/// flight carry on to their own end. [`announce`](Self::announce) brings it
 	/// back.
-	pub fn unannounce(&self) {
+	pub(super) fn unannounce(&self) {
 		self.alive.unannounce();
 	}
 
@@ -459,7 +468,7 @@ impl Producer {
 
 	/// End the broadcast for good, whether or not other clones are still alive.
 	///
-	/// Retracts its announcement and local discovery; a later [`Self::announce`] fails
+	/// Retracts its announcement and local discovery; a later [`super::origin::Publication::announce`] fails
 	/// with [`Error::Closed`]. Tracks already handed out carry on and end with their
 	/// own finish or abort. Every later [`Consumer::track`], and every name reserved or
 	/// still queued for a handler, answers [`Error::Unroutable`]: the same answer an
@@ -510,6 +519,10 @@ struct Alive {
 	// The advertisement of the broadcast's exact path, owned here so it retracts
 	// with the broadcast: on close or the last producer-side handle dropping. `None` for a standalone broadcast.
 	announcer: kio::Lock<Option<Announcer>>,
+	// How long a session's source still names the instance that minted it. Held on the
+	// producer side, never by a consumer, so the selection it may hold is dropped by its
+	// session rather than wherever the last consumer goes.
+	validity: RequestValidity,
 }
 
 impl Alive {
@@ -518,6 +531,7 @@ impl Alive {
 			token: kio::Producer::default(),
 			state,
 			announcer: kio::Lock::new(None),
+			validity: RequestValidity::default(),
 		})
 	}
 
@@ -615,7 +629,6 @@ impl RequestValidity {
 	}
 
 	/// Capture one selection period so a pending request never revives after a replacement.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn start(&self) -> Self {
 		match self {
 			Self::Selected(selected) => Self::Period(selected.current(), selected.clone()),
@@ -623,7 +636,6 @@ impl RequestValidity {
 		}
 	}
 
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn check(&self, waiter: &kio::Waiter) -> Result<(), crate::Error> {
 		match self {
 			Self::Route(route) if route.poll_closed(waiter).is_ready() => Err(crate::Error::Unroutable),
@@ -651,9 +663,8 @@ impl Producer {
 	}
 }
 
-/// A session-owned handle to a source broadcast created via
-/// [`crate::origin::Producer::create_broadcast`], closing it on drop even while the
-/// session's serve machines still hold its [`Dynamic`].
+/// A session-owned source broadcast, closed on drop even while the session's
+/// serve machines still hold its [`Dynamic`].
 ///
 /// A peer's retraction and a dead session end the source the same way: a broadcast
 /// carries no end cause past this hop. Shared by the lite and IETF subscribers.
@@ -757,6 +768,12 @@ impl Dynamic {
 	/// Returns [`Error::Closed`] once the broadcast has ended, so a serving loop
 	/// knows to stop and release its handle.
 	pub fn poll_requested_track(&mut self, waiter: &kio::Waiter) -> Poll<Result<track::Request, Error>> {
+		// A source that no longer names the instance that minted it takes no new track:
+		// ending it refuses what is queued with `Unroutable`, while the tracks it handed
+		// out run on. Checked outside the broadcast lock, since the selection reads the origin.
+		if self.alive.validity.check(waiter).is_err() {
+			self.alive.close();
+		}
 		let mut state = ready!(self.state.poll(waiter, |state| {
 			if state.requests.has_queued() || state.closing {
 				Poll::Ready(())
@@ -792,6 +809,13 @@ impl Dynamic {
 			state: self.state.clone(),
 			stats: stats::Scope::default(),
 		}
+	}
+
+	/// What a request to the peer for this source must still hold when it goes out, for
+	/// an operation on a track the source already handed out.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn validity(&self) -> &RequestValidity {
+		&self.alive.validity
 	}
 
 	/// Answer the broadcast's track listings, for a handler that knows the tracks it
@@ -1882,6 +1906,33 @@ mod test {
 
 		drop(dynamic);
 		assert!(matches!(pending.await, Err(Error::Unroutable)));
+	}
+
+	/// A source that no longer names the instance that minted it takes no new track, even
+	/// from a handler that checks nothing: its request stream ends and every later request
+	/// answers `Unroutable`, while the track it accepted earlier runs on.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn a_lapsed_source_refuses_new_tracks() {
+		let route = kio::Producer::new(());
+		let producer = Info::new()
+			.produce()
+			.with_validity(RequestValidity::Route(route.consume()));
+		let mut dynamic = producer.dynamic();
+		let consumer = producer.consume();
+
+		let pending = subscribe_pending!(consumer, "accepted");
+		let served = dynamic.assert_request().accept(crate::track::Info::timed());
+		let mut accepted = pending.await.unwrap();
+		let queued = subscribe_pending!(consumer, "queued");
+
+		drop(route);
+		assert!(matches!(dynamic.requested_track().await, Err(Error::Closed)));
+		assert!(matches!(queued.await, Err(Error::Unroutable)));
+		assert!(matches!(consumer.track("later"), Err(Error::Unroutable)));
+
+		served.append_group().unwrap().finish().unwrap();
+		accepted.assert_group();
 	}
 
 	/// With a producer still alive, losing the last handler is not the broadcast ending:
