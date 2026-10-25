@@ -3625,3 +3625,27 @@ for (const abort of [false, true]) {
 		producer.close();
 	});
 }
+
+// A widened budget re-offers the cached groups the reader skipped as stale, and never one it
+// already handed out.
+test("a widened maxDelay re-offers what it skipped as stale", () => {
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
+	const subscriber = producer.subscribe({ maxDelay: Milli(1500) });
+	stampGroup(producer, 0, 0);
+	expect(drainGroups(subscriber)).toEqual([0]);
+	for (const [sequence, ms] of [
+		[1, 1000],
+		[2, 2000],
+		[3, 3000],
+		[4, 6000],
+	]) {
+		stampGroup(producer, sequence, ms);
+	}
+	// Groups 1 and 2 reach 2s and 3s, at least 1.5s behind the 6s edge.
+	expect(drainGroups(subscriber)).toEqual([3, 4]);
+
+	subscriber.update({ maxDelay: Milli(10_000) });
+	expect(drainGroups(subscriber)).toEqual([1, 2]);
+	expect(drainGroups(subscriber)).toEqual([]);
+	producer.close();
+});

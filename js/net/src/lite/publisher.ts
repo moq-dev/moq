@@ -1385,6 +1385,11 @@ export class Publisher {
 						if (range.start <= startSequence && range.end > startSequence)
 							startSequence = Math.min(range.end, group.sequence);
 					}
+					// What was given up below the start is never named, so a wider budget may serve it.
+					for (const range of skipped) {
+						if (range.start < startSequence)
+							hooks.unreport(track, range.start, Math.min(range.end, startSequence));
+					}
 					// A later group above an explicit floor is still delivered, so the cursor stays put.
 					// A pre-06 subscribe that named no group is the exception: an absent
 					// Group Start is the latest group, and this sequence becomes the floor.

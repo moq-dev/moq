@@ -21,8 +21,8 @@ mod bytes;
 mod clock;
 pub(crate) mod datagram;
 mod delivered;
-mod skipped;
 mod expiry;
+mod skipped;
 // The DEFLATE codec behind compressed tracks.
 mod flate;
 pub(crate) mod object;

@@ -18067,7 +18067,11 @@ mod test {
 		assert_eq!(drain(&mut subscriber), vec![0, 1]);
 
 		subscriber.update(replay().with_range(0..)).unwrap();
-		assert_eq!(drain(&mut subscriber), vec![3, 2], "held back, now in range, newest first");
+		assert_eq!(
+			drain(&mut subscriber),
+			vec![3, 2],
+			"held back, now in range, newest first"
+		);
 
 		// The latest group is 3 now, so one back is 2, already read: only new groups follow.
 		let mut late = producer.subscribe(replay().with_range(..1));
@@ -18570,14 +18574,10 @@ mod test {
 		let mut groups: Vec<_> = (0..4)
 			.map(|sequence| producer.create_group(group::Info { sequence }).unwrap())
 			.collect();
-		let mut subscriber = producer.subscribe(
-			replay()
-				.with_order(Order::Ascending)
-				.with_ranges([Range {
-					start: Anchor::Absolute(0),
-					end: Some(Anchor::Time(at(3500))),
-				}]),
-		);
+		let mut subscriber = producer.subscribe(replay().with_order(Order::Ascending).with_ranges([Range {
+			start: Anchor::Absolute(0),
+			end: Some(Anchor::Time(at(3500))),
+		}]));
 		assert_eq!(drain(&mut subscriber), vec![0]);
 
 		let parked = moq_clock::sim::spawn(async move {
@@ -18720,8 +18720,14 @@ mod test {
 		// Groups 1 and 2 reach 2s and 3s, at least 1.5s behind the 6s edge.
 		assert_eq!(drain(&mut subscriber), vec![3, 4]);
 
-		subscriber.update(narrow.with_max_delay(Duration::from_secs(10))).unwrap();
-		assert_eq!(drain(&mut subscriber), vec![2, 1], "newest first, never 0, 3, or 4 again");
+		subscriber
+			.update(narrow.with_max_delay(Duration::from_secs(10)))
+			.unwrap();
+		assert_eq!(
+			drain(&mut subscriber),
+			vec![2, 1],
+			"newest first, never 0, 3, or 4 again"
+		);
 		assert_eq!(drain(&mut subscriber), Vec::<u64>::new());
 	}
 
@@ -18738,7 +18744,92 @@ mod test {
 			.with_order(Order::Ascending);
 		let mut subscriber = producer.subscribe(narrow.clone());
 		assert_eq!(drain(&mut subscriber), vec![2, 3]);
-		subscriber.update(narrow.with_max_delay(Duration::from_secs(10))).unwrap();
+		subscriber
+			.update(narrow.with_max_delay(Duration::from_secs(10)))
+			.unwrap();
 		assert_eq!(drain(&mut subscriber), vec![0, 1]);
+	}
+
+	/// How many runs of skipped groups `subscriber` holds.
+	fn skipped_runs(subscriber: &Subscriber) -> usize {
+		let Inner::Plain(cursor) = &subscriber.inner else {
+			unreachable!()
+		};
+		cursor.skipped.runs()
+	}
+
+	/// The groups handed out around a skipped one aging past the budget does not fold it in
+	/// with them: a widening still owes it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_skipped_group_outlives_the_fold_of_its_neighbours() {
+		let mut producer = track_producer("test", Info::timed());
+		let narrow = Subscription::default().with_max_delay(Duration::from_millis(1500));
+		let mut subscriber = producer.subscribe(narrow.clone());
+		append_at(&mut producer, 0);
+		assert_eq!(drain(&mut subscriber), vec![0]);
+		for millis in [1000, 2000, 3000, 6000] {
+			append_at(&mut producer, millis);
+		}
+		assert_eq!(drain(&mut subscriber), vec![3, 4]);
+		// Groups 3 and 4 are past the budget now, which would write off the gap below them.
+		for millis in [20_000, 40_000] {
+			append_at(&mut producer, millis);
+			assert_eq!(drain(&mut subscriber).len(), 1);
+		}
+		assert_eq!(
+			subscriber.delivered_runs(),
+			2,
+			"folded up to the skipped groups, no further"
+		);
+
+		subscriber
+			.update(narrow.with_max_delay(Duration::from_secs(60)))
+			.unwrap();
+		assert_eq!(drain(&mut subscriber), vec![2, 1]);
+	}
+
+	/// A group skipped at the track's max age bound is final: no widening passes the bound, so
+	/// the cursor keeps no record of it and its gap folds as the groups above it age out.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_skip_at_the_max_age_bound_folds_into_the_floor() {
+		let mut producer = track_producer("test", Info::timed().with_max_age(Duration::from_millis(500)));
+		for millis in [0, 1000, 2000] {
+			append_at(&mut producer, millis);
+		}
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(10)));
+		assert_eq!(drain(&mut subscriber), vec![1, 2]);
+		assert_eq!(skipped_runs(&subscriber), 0);
+		append_at(&mut producer, 3000);
+		assert_eq!(drain(&mut subscriber), vec![3]);
+		assert_eq!(subscriber.delivered_runs(), 1, "the gap at group 0 folded");
+	}
+
+	/// A skipped group gone from the cache can never be offered again, so the cursor forgets
+	/// it and a widening finds nothing.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_evicted_skip_is_forgotten() {
+		let mut producer = track_producer("test", Info::timed());
+		let narrow = Subscription::default().with_max_delay(Duration::from_millis(1500));
+		let mut subscriber = producer.subscribe(narrow.clone());
+		append_at(&mut producer, 0);
+		assert_eq!(drain(&mut subscriber), vec![0]);
+		for millis in [1000, 2000, 3000, 6000] {
+			append_at(&mut producer, millis);
+		}
+		assert_eq!(drain(&mut subscriber), vec![3, 4]);
+		assert_eq!(skipped_runs(&subscriber), 1);
+
+		evict(&producer, 1);
+		evict(&producer, 2);
+		append_at(&mut producer, 7000);
+		assert_eq!(drain(&mut subscriber), vec![5]);
+		assert_eq!(skipped_runs(&subscriber), 0);
+		subscriber
+			.update(narrow.with_max_delay(Duration::from_secs(60)))
+			.unwrap();
+		assert_eq!(drain(&mut subscriber), Vec::<u64>::new());
 	}
 }

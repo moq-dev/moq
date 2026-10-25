@@ -11,8 +11,13 @@ use rangemap::RangeInclusiveMap;
 /// Only a widening reverses a stale verdict, so a run comes back once the budget grows
 /// past the one it was judged under. A run is kept only while one of its groups is cached:
 /// a group gone from the cache cannot be offered again, so its verdict is final.
+///
+/// Boxed on the first skip: most readers never skip one, and the cursor holding it is hot.
 #[derive(Default)]
-pub(super) struct Skipped {
+pub(super) struct Skipped(Option<Box<Runs>>);
+
+#[derive(Default)]
+struct Runs {
 	runs: RangeInclusiveMap<u64, Duration>,
 	/// At most the narrowest budget any run was judged under, so a poll whose budget did
 	/// not widen past it skips the scan.
@@ -22,59 +27,74 @@ pub(super) struct Skipped {
 impl Skipped {
 	/// Record `sequence` as skipped under `budget`.
 	pub fn insert(&mut self, sequence: u64, budget: Duration) {
-		if self.runs.is_empty() || budget < self.narrowest {
-			self.narrowest = budget;
+		let skipped = self.0.get_or_insert_default();
+		if skipped.runs.is_empty() || budget < skipped.narrowest {
+			skipped.narrowest = budget;
 		}
-		self.runs.insert(sequence..=sequence, budget);
+		skipped.runs.insert(sequence..=sequence, budget);
 	}
 
 	/// Forget `sequence`, now handed out.
 	pub fn remove(&mut self, sequence: u64) {
-		if !self.runs.is_empty() {
-			self.runs.remove(sequence..=sequence);
+		if let Some(skipped) = &mut self.0
+			&& !skipped.runs.is_empty()
+		{
+			skipped.runs.remove(sequence..=sequence);
 		}
 	}
 
 	/// Take the runs judged under a budget narrower than `budget`, lowest first.
 	pub fn widened(&mut self, budget: Duration) -> Vec<RangeInclusive<u64>> {
-		if self.runs.is_empty() || budget <= self.narrowest {
+		let Some(skipped) = self.0.as_mut().filter(|skipped| !skipped.runs.is_empty()) else {
+			return Vec::new();
+		};
+		if budget <= skipped.narrowest {
 			return Vec::new();
 		}
 		let mut widened = Vec::new();
 		let mut narrowest = None::<Duration>;
-		for (run, judged) in self.runs.iter() {
+		for (run, judged) in skipped.runs.iter() {
 			match *judged < budget {
 				true => widened.push(run.clone()),
 				false => narrowest = Some(narrowest.map_or(*judged, |narrowest| narrowest.min(*judged))),
 			}
 		}
 		for run in &widened {
-			self.runs.remove(run.clone());
+			skipped.runs.remove(run.clone());
 		}
-		self.narrowest = narrowest.unwrap_or_default();
+		skipped.narrowest = narrowest.unwrap_or_default();
 		widened
 	}
 
 	/// The lowest sequence skipped.
 	pub fn lowest(&self) -> Option<u64> {
-		self.runs.first_range_value().map(|(run, _)| *run.start())
+		let skipped = self.0.as_ref()?;
+		skipped.runs.first_range_value().map(|(run, _)| *run.start())
 	}
 
 	/// Drop the lowest runs `gone` says no longer hold a cached group, and every such run
 	/// once the runs outnumber `cached` twice over, so each kept run holds a distinct cached
 	/// group and pruning costs O(1) per skip amortized.
 	pub fn prune(&mut self, cached: usize, mut gone: impl FnMut(&RangeInclusive<u64>) -> bool) {
-		while let Some((run, _)) = self.runs.first_range_value() {
+		let Some(skipped) = &mut self.0 else {
+			return;
+		};
+		while let Some((run, _)) = skipped.runs.first_range_value() {
 			let run = run.clone();
 			if !gone(&run) {
 				break;
 			}
-			self.runs.remove(run);
+			skipped.runs.remove(run);
 		}
-		if self.runs.len() > cached.saturating_mul(2) {
-			let gone: Vec<_> = self.runs.iter().map(|(run, _)| run.clone()).filter(&mut gone).collect();
+		if skipped.runs.len() > cached.saturating_mul(2) {
+			let gone: Vec<_> = skipped
+				.runs
+				.iter()
+				.map(|(run, _)| run.clone())
+				.filter(&mut gone)
+				.collect();
 			for run in gone {
-				self.runs.remove(run);
+				skipped.runs.remove(run);
 			}
 		}
 	}
@@ -82,7 +102,7 @@ impl Skipped {
 	/// How many runs it holds.
 	#[cfg(test)]
 	pub fn runs(&self) -> usize {
-		self.runs.len()
+		self.0.as_ref().map_or(0, |skipped| skipped.runs.len())
 	}
 }
 

@@ -463,6 +463,11 @@ export const hooks: {
 	deliveredRuns: (subscriber: Subscriber) => number;
 	/** Forget the gaps in another reader's `delivered` below each group past this subscriber's budget. */
 	forgetPastBudget: (subscriber: Subscriber, delivered: Delivered) => void;
+	/**
+	 * Take `[start, end)` back out of what a subscriber's wire cursor reported dropped: a drop
+	 * below where SUBSCRIBE_START resolved never goes out, so a wider budget may still serve it.
+	 */
+	unreport: (subscriber: Subscriber, start: number, end: number) => void;
 	/** Whether this subscriber's budget gives up on `sequence`, judged by its successor; see {@link expireGroup}. */
 	staleAt: (subscriber: Subscriber, sequence: number) => Expiry;
 	/** A group the subscriber's track still caches, as a fresh read handle. */
@@ -609,6 +614,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	forgetPastBudget: () => {
+		throw new Error("track.ts not loaded");
+	},
+	unreport: () => {
 		throw new Error("track.ts not loaded");
 	},
 	tryRecvDatagram: () => {

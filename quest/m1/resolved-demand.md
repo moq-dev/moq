@@ -19,6 +19,13 @@ copy's first one.
 
 ## Plan
 
+In progress in [moq-dev/moq#6717](https://github.com/moq-dev/moq/pull/6717):
+the re-offer landed in Rust and JS, with a skipped-run record whose lifetime
+is tied to the cached groups it covers rather than the pool-billed record
+below. Whether to keep that or build the full record (replacing `Delivered`,
+absorbing `TrackRun::served` and `#reported`, `TooFarBehind` on eviction) is
+the open decision in the PR.
+
 Found while building SUBSCRIBE_ALL
 ([moq-dev/moq#5931](https://github.com/moq-dev/moq/pull/5931)), which
 closed unmerged; its listed-track workaround (sending the resolved start as
