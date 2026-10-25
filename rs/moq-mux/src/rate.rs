@@ -716,7 +716,10 @@ mod tests {
 		assert_eq!(control.deadline(), None, "a drop lands at once");
 
 		let recovered = start + Duration::from_secs(1);
-		assert_eq!(control.update(Some(bps(4_000_000)), recovered), Some(on(bps(1_250_000))));
+		assert_eq!(
+			control.update(Some(bps(4_000_000)), recovered),
+			Some(on(bps(1_250_000)))
+		);
 		let (applied, last) = follow(&mut control, bps(4_000_000));
 
 		assert_eq!(applied.last(), Some(&bps(4_000_000)));
@@ -1164,7 +1167,11 @@ mod tests {
 		let allocator = bandwidth::Allocator::new(estimate.consume());
 		let broadcast = broadcast::Info::default().produce();
 		// Lowest first, each a step below the last in priority and a doubling in ceiling.
-		let ladder = [(1_000_000, None), (2_000_000, Some(1_000_000)), (4_000_000, Some(2_000_000))];
+		let ladder = [
+			(1_000_000, None),
+			(2_000_000, Some(1_000_000)),
+			(4_000_000, Some(2_000_000)),
+		];
 		let mut tracks = Vec::new();
 		let mut viewers = Vec::new();
 		let mut reservations = Vec::new();
@@ -1198,7 +1205,10 @@ mod tests {
 		// 4.5 Mbps funds the lower two in full and leaves 1.5 Mbps, under the top
 		// rendition's 2.67 Mbps boundary.
 		estimate.set(Some(bps(4_500_000))).unwrap();
-		assert_eq!(update(start), [on(bps(1_000_000)), on(bps(2_000_000)), Target::Disabled]);
+		assert_eq!(
+			update(start),
+			[on(bps(1_000_000)), on(bps(2_000_000)), Target::Disabled]
+		);
 
 		// Shrinking further takes the middle one next, still keeping the lowest whole.
 		estimate.set(Some(bps(2_000_000))).unwrap();

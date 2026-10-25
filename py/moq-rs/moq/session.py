@@ -212,8 +212,9 @@ class Bandwidth:
 class Reservation:
     """One track's standing claim on a :class:`Bandwidth`.
 
-    :meth:`grant` is a snapshot: ``None`` means no estimate or no demand, so
-    hold the current rate, and ``0`` is a real zero grant.
+    :meth:`grant` is a snapshot: ``None`` means no estimate, so hold the
+    current rate, and ``0`` is a real zero grant. While nothing subscribes it
+    is the share the track would get.
     """
 
     def __init__(self, inner: MoqReservation) -> None:

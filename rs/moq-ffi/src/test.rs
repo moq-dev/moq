@@ -501,19 +501,30 @@ async fn media_track_reserves_through_its_demand() {
 	let bandwidth = crate::bandwidth::MoqBandwidth::new(moq_net::bandwidth::Allocator::new(estimate.consume()));
 
 	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let media = MoqMediaTrackProducer::audio(
-		&broadcast,
-		MoqMediaTarget::Named { name: None },
-		audio_init(MoqAudioFormat::Opus, opus_head()),
-	)
-	.unwrap();
+	let audio = |name: &str| {
+		MoqMediaTrackProducer::audio(
+			&broadcast,
+			MoqMediaTarget::Named {
+				name: Some(name.into()),
+			},
+			audio_init(MoqAudioFormat::Opus, opus_head()),
+		)
+		.unwrap()
+	};
+	let media = audio("media");
+	let sibling = audio("sibling");
 	let demand = media.demand().unwrap();
+	let sibling_demand = sibling.demand().unwrap();
+	let _sibling_sub = subscribe(&broadcast, &sibling_demand.name()).await;
 	let reservation = bandwidth.reserve(&demand, 4_000_000);
-	// No subscriber yet: no demand, so hold the current rate.
-	assert_eq!(reservation.grant(), None);
+	let sibling_reservation = bandwidth.reserve(&sibling_demand, 4_000_000);
+	// No subscriber yet: it claims nothing from its sibling, and reads what it would get.
+	assert_eq!(sibling_reservation.grant(), Some(3_000_000));
+	assert_eq!(reservation.grant(), Some(1_500_000));
 
 	let _sub = subscribe(&broadcast, &demand.name()).await;
-	assert_eq!(reservation.grant(), Some(3_000_000));
+	assert_eq!(sibling_reservation.grant(), Some(1_500_000));
+	assert_eq!(reservation.grant(), Some(1_500_000));
 }
 
 #[tokio::test]
@@ -6608,7 +6619,7 @@ async fn video_encoder_follows_a_shrinking_grant() {
 	.unwrap();
 
 	let reservation = video.reservation().expect("published against an allocator");
-	assert_eq!(reservation.grant(), None, "no demand yet");
+	assert_eq!(reservation.grant(), None, "no estimate yet");
 
 	let consumer = broadcast.consume().unwrap();
 	let _sub = consumer.subscribe_track("camera".into(), None).await.unwrap();

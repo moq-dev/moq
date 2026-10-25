@@ -684,7 +684,11 @@ impl MoqVideoProducer {
 				}
 				let guard = lower.inner.lock().map_err(|_| panic_error())?;
 				let below = guard.as_ref().ok_or(MoqError::Closed)?;
-				Some((Arc::downgrade(&lower.inner), below.ceiling, below.priority.saturating_sub(1)))
+				Some((
+					Arc::downgrade(&lower.inner),
+					below.ceiling,
+					below.priority.saturating_sub(1),
+				))
 			}
 			None => None,
 		};
@@ -1573,7 +1577,10 @@ mod rung_tests {
 	async fn a_rung_takes_the_priority_below_its_lower() {
 		let ladder = ladder();
 		assert_eq!(priority(&ladder.broadcast, "low").await, hang::catalog::PRIORITY.video);
-		assert_eq!(priority(&ladder.broadcast, "high").await, hang::catalog::PRIORITY.video - 1);
+		assert_eq!(
+			priority(&ladder.broadcast, "high").await,
+			hang::catalog::PRIORITY.video - 1
+		);
 	}
 
 	/// A rung needs an allocator to follow and a ceiling above its lower rendition's.

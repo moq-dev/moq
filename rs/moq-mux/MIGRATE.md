@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Rate following can disable a simulcast rung
+
+`rate::Follower::next` and `poll_next` return a `rate::Target`, and `rate::Control::update` returns `Option<rate::Target>`: `Target::Enabled(rate)` is the bitrate to encode at, and `Target::Disabled` means stop encoding and advertise the rendition disabled.
+`rate::Policy` gains `lower`, the next lower rendition's ceiling, which only a rendition encoded beside lower ones sets; add `lower: None` to a struct literal, or build it with `Policy::new`.
+Match `Target::Enabled(rate)` where you took the rate before. A policy without `lower` never yields `Target::Disabled`.
+
 ### `Programs::finish` returns the program broadcasts
 
 `Programs::finish` now returns each program's `broadcast::Producer` instead of `()`.

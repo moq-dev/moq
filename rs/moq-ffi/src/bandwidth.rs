@@ -81,16 +81,6 @@ impl MoqReservation {
 		self.inner.peek().map(moq_net::bandwidth::Rate::as_bps)
 	}
 
-	/// Whether a session probes the connection for this reservation, so the estimate
-	/// can rise to fund it even while its sender is stopped.
-	///
-	/// Stop a sender for lack of bandwidth only while this holds: without a probing
-	/// session the estimate stops rising, so it could never resume.
-	pub fn probed(&self) -> bool {
-		let _guard = crate::ffi::enter();
-		self.inner.consumer().probed()
-	}
-
 	/// Change the ceiling, keeping the same claim.
 	pub fn update(&self, max_bps: u64) {
 		let _guard = crate::ffi::enter();

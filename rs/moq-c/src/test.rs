@@ -5493,15 +5493,18 @@ fn grant(reservation: u32) -> Option<u64> {
 	present.then_some(bps)
 }
 
-fn wait_grant(reservation: u32) -> u64 {
+/// Wait for `reservation`'s grant to reach `bps`, since a subscription reaches the
+/// allocator asynchronously and an unwatched track already reads a would-be share.
+fn wait_grant(reservation: u32, bps: u64) {
 	let deadline = std::time::Instant::now() + TIMEOUT;
 	loop {
-		if let Some(bps) = grant(reservation) {
-			return bps;
+		let last = grant(reservation);
+		if last == Some(bps) {
+			return;
 		}
 		assert!(
 			std::time::Instant::now() < deadline,
-			"timed out waiting for a reservation grant"
+			"timed out waiting for a {bps} bps grant, last {last:?}"
 		);
 		std::thread::sleep(Duration::from_millis(10));
 	}
@@ -5546,8 +5549,8 @@ fn bandwidth_reservations_split_the_estimate() {
 		.set(Some(moq_net::bandwidth::Rate::from_bps(3_000_000)))
 		.unwrap();
 
-	wait_grant(first);
-	wait_grant(second);
+	wait_grant(first, 1_500_000);
+	wait_grant(second, 1_500_000);
 	let a = grant(first).expect("first grant");
 	let b = grant(second).expect("second grant");
 	assert!(a + b <= 3_000_000, "{a} + {b} oversubscribed");
@@ -5593,10 +5596,10 @@ fn bandwidth_handles_share_the_registry() {
 	let (second_sub, second_cb) = subscribe_named_track(consume, b"b");
 
 	let reserved = id(moq_bandwidth_reserve(first, first_track, 4_000_000));
-	assert_eq!(wait_grant(reserved), 3_000_000);
+	wait_grant(reserved, 3_000_000);
 	let other = id(moq_bandwidth_reserve(second, second_track, 4_000_000));
-	assert_eq!(wait_grant(other), 1_500_000);
-	assert_eq!(grant(reserved), Some(1_500_000));
+	wait_grant(other, 1_500_000);
+	wait_grant(reserved, 1_500_000);
 
 	assert_eq!(moq_reservation_close(reserved), 0);
 	assert_eq!(moq_reservation_close(other), 0);
@@ -5644,7 +5647,7 @@ fn encode_video_bitrate_caps_the_reservation() {
 	estimate
 		.set(Some(moq_net::bandwidth::Rate::from_bps(4_000_000)))
 		.unwrap();
-	assert_eq!(wait_grant(reservation), 4_000_000);
+	wait_grant(reservation, 4_000_000);
 
 	assert_eq!(moq_encode_video_bitrate(producer, 1_000_000), 0);
 	assert_eq!(grant(reservation), Some(1_000_000));

@@ -427,7 +427,14 @@ mod tests {
 		import.set_enabled(false).unwrap();
 		assert!(!enabled());
 		keyframe(&mut import, 40, SPS_BT709);
-		assert_eq!(catalog.snapshot().video.renditions["video"].color.as_ref().unwrap().primaries, Some(1));
+		assert_eq!(
+			catalog.snapshot().video.renditions["video"]
+				.color
+				.as_ref()
+				.unwrap()
+				.primaries,
+			Some(1)
+		);
 		assert!(!enabled(), "a reconfiguration keeps the rendition disabled");
 		import.set_enabled(true).unwrap();
 		assert!(enabled());

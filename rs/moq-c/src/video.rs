@@ -567,8 +567,7 @@ impl Video {
 	/// a track advertised that will never carry frames.
 	///
 	/// A `lower` encoder makes this one a simulcast rung above it: it takes the track
-	/// priority one below, and disables when the grant [`follow`](Self::follow) reads
-	/// can no longer fund it.
+	/// priority one below, and disables when its bandwidth grant can no longer fund it.
 	pub fn publish(
 		&mut self,
 		target: crate::publish::Target<'_>,

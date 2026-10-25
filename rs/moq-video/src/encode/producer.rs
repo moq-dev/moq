@@ -600,11 +600,7 @@ async fn next_target(rate: &mut RateControl) -> Result<rate::Target, moq_net::Er
 /// An error means the grant is gone (the session ended for good), so rate control
 /// retires and the encoder holds its current bitrate.
 #[cfg(feature = "capture")]
-async fn apply_target(
-	encoder: &mut Sink,
-	rate: &mut RateControl,
-	target: Result<rate::Target, moq_net::Error>,
-) {
+async fn apply_target(encoder: &mut Sink, rate: &mut RateControl, target: Result<rate::Target, moq_net::Error>) {
 	let Some(follower) = rate.as_mut() else { return };
 
 	let Ok(target) = target else {

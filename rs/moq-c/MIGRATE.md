@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `moq_encode_video` takes a lower rendition
+
+`moq_encode_video` takes a fifth `uint32_t lower` argument. Pass `0` to keep the old behavior, or the handle of the next lower rendition's encoder to disable this one while its bandwidth grant cannot fund it; that needs a `bandwidth` handle and a bitrate above the lower encoder's.
+`moq_reservation_grant` reports the slice the track would get back while nothing subscribes to it, instead of no grant.
+
 ### Sessions report a lifecycle snapshot
 
 `moq_session_connect` and `moq_session_request_accept` take a `moq_state_callback` instead of a `moq_status_callback`: `void on_state(void *user_data, const moq_connection_state *state)`.
