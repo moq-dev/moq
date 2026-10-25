@@ -51,6 +51,10 @@ which publishes `rust2-uniffi`, `rust2-uniffi-core`, `rust2-uniffi-macros`, and
   Delete `rs/uniffi-bindgen`, the "five places" comments in `flake.nix`, and the
   `nix/uniffi-dart-*` lockfile and patch. The `sh/{kt,swift,dart,cpp}`
   packaging scripts stay: they package moq.
+- Negative durations (2026-10-25, maintainer): the Dart negative-duration
+  patch moq carries goes upstream into the fork's Dart generator, and the Go
+  generator stops panicking on a negative `time.Duration` (the Go wrapper
+  guards it today; delete the guard once the generator is fixed).
 - Update the quests that name a `kixelated/uniffi-*` fork
   ([Generated C bindings](/quest/m1/c/README.md)) to point at rust2, then
   archive the three forks.

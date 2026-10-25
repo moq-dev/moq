@@ -100,6 +100,7 @@ catalog linger (#5305).
 
 - [PAT changes](/quest/m1/ts-reliability/pat-lifecycle.md) - a revised PAT never leaves a broadcast meaning another program
 - [Stream routes](/quest/m1/ts-reliability/stream-routes.md) - every PID gets a declared route, and what is not carried is counted
+- [Export SI order](/quest/m1/ts-reliability/export-si-order.md) - a TS export sends SI after its PMT and a PCR interval, so a hop keeps first emissions
 
 ## Related
 

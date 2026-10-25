@@ -16,7 +16,9 @@ and now `Connection::open_request`
 `#[cfg(feature = "net")]`; only `quic/web/session.rs` uses it. Reproduce:
 `cargo clippy -p moq-tokio --all-targets --no-default-features --features driver,aws-lc-rs -- -D warnings`.
 
-- Fix `open_request`'s gating.
+- Fix `open_request`'s gating, and moq-hls `Broadcaster::poll_closed`
+  (`rs/moq-hls/src/export/mod.rs`), which is dead under
+  `--no-default-features` (found 2026-10-25).
 - Add the feature and profile variant check to the PR gate, scoped to the
   crates a branch changes the way `just check` selects them. Measure its
   cost in the PR. Nightly keeps the full matrix.
