@@ -3180,7 +3180,7 @@ impl Publisher {
 
 		// The response, raced against the grant: a standalone FETCH whose grant narrows while it
 		// waits on stream credit stops there instead of sending what it no longer may.
-		let respond = async {
+		let ok = async {
 			// FETCH_OK on every draft, never REQUEST_OK: section 5.2 allows exactly one FETCH_OK or
 			// REQUEST_ERROR in answer to a FETCH, and REQUEST_OK's own definition lists the other
 			// requests it answers without ever naming this one.
@@ -3200,8 +3200,28 @@ impl Publisher {
 					end_location,
 					properties,
 				})
-				.await?;
+				.await
+		};
+		let res = {
+			let mut ok = std::pin::pin!(ok);
+			kio::wait(|waiter| {
+				if gate.poll_denied(waiter).is_ready() || lapsed(waiter) {
+					return Poll::Ready(Err(Error::Unauthorized));
+				}
+				waiter.poll_future(ok.as_mut())
+			})
+			.await
+		};
+		if let Err(err) = res {
+			stream.writer.abort(&err);
+			return Err(err);
+		}
 
+		// The groups after FETCH_OK, which may wait on a group still being written, so the
+		// subscriber cancelling still releases everything the answer holds.
+		let mut finished = false;
+		let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
+		let respond = async {
 			let mut rank = ranking.rank(range.start);
 			let uni = self
 				.session
@@ -3244,12 +3264,22 @@ impl Publisher {
 		let res = {
 			let mut respond = std::pin::pin!(respond);
 			kio::wait(|waiter| {
-				if gate.poll_denied(waiter).is_ready() || lapsed(waiter) {
-					return Poll::Ready(Err(Error::Unauthorized));
+				let mut cx = waiter.context();
+				if super::request_stream::poll_cancel(&mut stream, &mut finished, &mut messages, self.version, &mut cx)
+					.is_ready()
+				{
+					return Poll::Ready(None);
 				}
-				waiter.poll_future(respond.as_mut())
+				if gate.poll_denied(waiter).is_ready() || lapsed(waiter) {
+					return Poll::Ready(Some(Err(Error::Unauthorized)));
+				}
+				waiter.poll_future(respond.as_mut()).map(Some)
 			})
 			.await
+		};
+		// Cancelled: the fetch stream, if open, reset as it dropped with the response.
+		let Some(res) = res else {
+			return Ok(());
 		};
 		if let Err(err) = res {
 			// The fetch stream, if open, reset as it dropped with the response. Once FETCH_OK
@@ -11905,6 +11935,77 @@ mod serve_tests {
 				.unwrap_or_else(|_| panic!("{version}: still responding after the grant narrowed"));
 			assert!(matches!(res, Err(Error::Unauthorized)), "{version}: {res:?}");
 			drop(credit);
+		}
+	}
+
+	/// A FETCH whose answer waits on an earlier group still being written, after FETCH_OK
+	/// is out, ends when the subscriber cancels it rather than holding the group.
+	#[moq_clock::test]
+	async fn a_fetch_cancelled_after_its_fetch_ok_stops_waiting() {
+		use crate::lite::test_transport::Close;
+		for version in FETCH_DRAFTS {
+			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
+			let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
+			let mut open = track.create_group(group::Info { sequence: 3 }).unwrap();
+			open.write_frame(timestamp(), b"3-0".to_vec()).unwrap();
+			let mut done = track.create_group(group::Info { sequence: 4 }).unwrap();
+			done.write_frame(timestamp(), b"4-0".to_vec()).unwrap();
+			done.finish().unwrap();
+			settle().await;
+
+			let session = ScriptedSession::new(Vec::new());
+			let peer_setup = peer::PeerSetup::default();
+			peer_setup.set(peer::Peer::default());
+			let publisher = Publisher::new(
+				crate::time::sim(),
+				crate::driver::Transport::new(session.clone()),
+				origin.consume(),
+				Control::new(None, false),
+				None,
+				peer_setup,
+				version,
+			);
+			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+				.await
+				.unwrap();
+			let mark = session.log.writes.lock().unwrap().len();
+			let mut fetch = std::pin::pin!(publisher.run_fetch_stream(
+				stream,
+				ietf::Fetch {
+					request_id: FETCH_ID,
+					subscriber_priority: 128,
+					group_order: GroupOrder::Ascending,
+					fetch_type: FetchType::Standalone {
+						namespace: crate::Path::new("room"),
+						track: "video".into(),
+						start: Location { group: 3, object: 0 },
+						end: Location { group: 4, object: 0 },
+					},
+					range_filters: false,
+					fill_timeout: false,
+					properties_wanted: true,
+					epoch: None,
+				},
+			));
+			for _ in 0..100 {
+				assert!(futures::poll!(fetch.as_mut()).is_pending(), "{version}: answered early");
+				if session.log.writes.lock().unwrap().len() > mark {
+					break;
+				}
+				moq_clock::sim::yield_now().await;
+			}
+			assert!(
+				session.log.writes.lock().unwrap().len() > mark,
+				"{version}: FETCH_OK never went out"
+			);
+
+			session.close(Close::Reset);
+			let res = moq_clock::timeout(std::time::Duration::from_secs(1), fetch)
+				.await
+				.unwrap_or_else(|_| panic!("{version}: still waiting after the cancel"));
+			assert!(res.is_ok(), "{version}: {res:?}");
+			drop(open);
 		}
 	}
 
