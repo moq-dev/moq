@@ -1372,7 +1372,7 @@ mod tests {
 		publisher: Publisher,
 		session: memory::Session,
 		peer: memory::Session,
-		broadcast: crate::broadcast::Producer,
+		broadcast: crate::origin::Publication,
 		tracks: HashMap<&'static str, track::Producer>,
 		_origin: origin::Producer,
 	}

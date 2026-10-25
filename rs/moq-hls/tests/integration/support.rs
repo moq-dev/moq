@@ -91,7 +91,7 @@ fn origin(config: moq_net::origin::Config) -> moq_net::origin::Producer {
 /// catalog advertises.
 pub struct Publisher {
 	/// The broadcast, which announces its path while it lives.
-	pub broadcast: moq_net::broadcast::Producer,
+	pub broadcast: moq_net::origin::Publication,
 	/// The catalog.
 	pub catalog: moq_mux::catalog::Producer,
 	/// The media track, recording its timeline as it is written.
@@ -101,12 +101,12 @@ pub struct Publisher {
 impl Publisher {
 	/// Announce `path` on `origin` under `route` and publish its catalog.
 	pub fn new(origin: &moq_net::origin::Producer, path: &str, route: moq_net::origin::Route) -> Self {
-		let mut broadcast = origin.create_broadcast(path).expect("publish");
+		let broadcast = origin.create_broadcast(path).expect("publish");
 		broadcast.announce(route).expect("announce");
 		// A hinted timeline is advertised before any media, so a recorder can start first.
 		let timeline = moq_mux::timeline::Config::default().with_duration_hint(Duration::from_secs(2));
 		let config = moq_mux::catalog::Config::default().with_timeline(timeline);
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).expect("catalog");
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config).expect("catalog");
 		let reserved = catalog.reserve();
 		let track = broadcast.create_track(TRACK, timed()).expect("track");
 		let media = reserved

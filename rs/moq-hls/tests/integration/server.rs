@@ -193,14 +193,15 @@ async fn a_sibling_resolves_through_a_client_session() {
 #[tokio::test(start_paused = true)]
 async fn a_disconnected_sibling_publisher_answers_404() {
 	let pair = Pair::connect().await;
-	let mut catalog_broadcast = pair.publisher.create_broadcast("room/live").expect("catalog");
+	let catalog_broadcast = pair.publisher.create_broadcast("room/live").expect("catalog");
 	catalog_broadcast
 		.announce(Default::default())
 		.expect("announce catalog");
 	let media_broadcast = pair.publisher.create_broadcast("room/source").expect("media");
 	media_broadcast.announce(Default::default()).expect("announce media");
 
-	let catalog = moq_mux::catalog::Producer::new(&mut catalog_broadcast, Default::default()).unwrap();
+	let catalog =
+		moq_mux::catalog::Producer::new(&mut catalog_broadcast.broadcast().clone(), Default::default()).unwrap();
 	let reserved = catalog.reserve();
 	let mut config = video_config();
 	config.broadcast = Some(moq_net::path::Relative::new("./source").to_owned());
