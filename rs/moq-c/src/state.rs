@@ -63,6 +63,11 @@ impl<T> Shared<T> {
 		self.0.lock().unwrap_or_else(PoisonError::into_inner)
 	}
 
+	/// A handle that reads the resource without keeping it alive.
+	pub fn downgrade(&self) -> std::sync::Weak<Mutex<Option<T>>> {
+		Arc::downgrade(&self.0)
+	}
+
 	/// Take the resource, for the call that ends it and needs to consume it.
 	pub fn take(&self) -> Option<T> {
 		self.lock().take()

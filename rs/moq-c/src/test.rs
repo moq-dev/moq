@@ -4187,7 +4187,7 @@ fn video_raw_publish_consume() {
 		encoder: std::ptr::null(),
 		encoder_len: 0,
 	};
-	let producer = id(unsafe { moq_encode_video(broadcast, &input, &output, 0) });
+	let producer = id(unsafe { moq_encode_video(broadcast, &input, &output, 0, 0) });
 
 	let rgba = gray_rgba(320, 240);
 	let publish = |index: u64| {
@@ -4354,7 +4354,7 @@ fn decode_first_frame(output: &moq_video_decoder_output) -> (u32, u32, usize) {
 		encoder: std::ptr::null(),
 		encoder_len: 0,
 	};
-	let producer = id(unsafe { moq_encode_video(broadcast, &input, &encode_output, 0) });
+	let producer = id(unsafe { moq_encode_video(broadcast, &input, &encode_output, 0, 0) });
 
 	let rgba = gray_rgba(320, 240);
 	let publish = |index: u64| {
@@ -4472,7 +4472,7 @@ fn video_raw_publish_from_many_threads() {
 		encoder: std::ptr::null(),
 		encoder_len: 0,
 	};
-	let producer = id(unsafe { moq_encode_video(broadcast, &input, &output, 0) });
+	let producer = id(unsafe { moq_encode_video(broadcast, &input, &output, 0, 0) });
 
 	// A fresh caller thread per frame, never the one that published.
 	let rgba = std::sync::Arc::new(gray_rgba(320, 240));
@@ -4544,8 +4544,8 @@ fn a_stalled_encode_does_not_block_unrelated_calls() {
 		encoder: std::ptr::null(),
 		encoder_len: 0,
 	};
-	let stalled = id(unsafe { moq_encode_video(broadcast, &input, &output, 0) });
-	let other = id(unsafe { moq_encode_video(broadcast, &input, &output, 0) });
+	let stalled = id(unsafe { moq_encode_video(broadcast, &input, &output, 0, 0) });
+	let other = id(unsafe { moq_encode_video(broadcast, &input, &output, 0, 0) });
 
 	// Hold the lock a publish takes for the duration of its encode.
 	let handle = State::lock().video.producer(Id::try_from(stalled).unwrap()).unwrap();
@@ -4626,7 +4626,7 @@ fn video_raw_publish_rejects_frame_size_mismatch() {
 		encoder: std::ptr::null(),
 		encoder_len: 0,
 	};
-	let producer = id(unsafe { moq_encode_video(broadcast, &input, &output, 0) });
+	let producer = id(unsafe { moq_encode_video(broadcast, &input, &output, 0, 0) });
 
 	// A 640x480 buffer against a 320x240 encoder: the frame carries no dimensions
 	// of its own, so this is caught as a wrong-sized picture.
@@ -4668,14 +4668,14 @@ fn video_raw_publish_rejects_invalid_config() {
 		encoder_len: 0,
 	};
 
-	assert!(unsafe { moq_encode_video(broadcast, std::ptr::null(), &valid_output, 0) } < 0);
-	assert!(unsafe { moq_encode_video(broadcast, &valid_input, std::ptr::null(), 0) } < 0);
+	assert!(unsafe { moq_encode_video(broadcast, std::ptr::null(), &valid_output, 0, 0) } < 0);
+	assert!(unsafe { moq_encode_video(broadcast, &valid_input, std::ptr::null(), 0, 0) } < 0);
 
 	let bad_format = moq_video_encoder_input {
 		format: 99,
 		..valid_input
 	};
-	assert!(unsafe { moq_encode_video(broadcast, &bad_format, &valid_output, 0) } < 0);
+	assert!(unsafe { moq_encode_video(broadcast, &bad_format, &valid_output, 0, 0) } < 0);
 
 	let zero_framerate = moq_video_encoder_input {
 		framerate: moq_video_frame_rate {
@@ -4684,7 +4684,7 @@ fn video_raw_publish_rejects_invalid_config() {
 		},
 		..valid_input
 	};
-	assert!(unsafe { moq_encode_video(broadcast, &zero_framerate, &valid_output, 0) } < 0);
+	assert!(unsafe { moq_encode_video(broadcast, &zero_framerate, &valid_output, 0, 0) } < 0);
 	let zero_denominator = moq_video_encoder_input {
 		framerate: moq_video_frame_rate {
 			numerator: 30_000,
@@ -4692,7 +4692,7 @@ fn video_raw_publish_rejects_invalid_config() {
 		},
 		..valid_input
 	};
-	let refused = unsafe { moq_encode_video(broadcast, &zero_denominator, &valid_output, 0) };
+	let refused = unsafe { moq_encode_video(broadcast, &zero_denominator, &valid_output, 0, 0) };
 	assert!(refused < 0 && refused != MOQ_ERROR_PANIC);
 
 	// Regression: dimensions arrive as a raw `u32` pair, and their product used to
@@ -4703,7 +4703,7 @@ fn video_raw_publish_rejects_invalid_config() {
 		height: u32::MAX - 1,
 		..valid_input
 	};
-	let refused = unsafe { moq_encode_video(broadcast, &unrepresentable, &valid_output, 0) };
+	let refused = unsafe { moq_encode_video(broadcast, &unrepresentable, &valid_output, 0, 0) };
 	assert!(refused < 0 && refused != MOQ_ERROR_PANIC, "{refused}");
 
 	// A size no encoder can take, but whose arithmetic is fine, is the backend's
@@ -4718,7 +4718,7 @@ fn video_raw_publish_rejects_invalid_config() {
 		height: 2,
 		..valid_input
 	};
-	let huge = unsafe { moq_encode_video(broadcast, &merely_huge, &valid_output, 0) };
+	let huge = unsafe { moq_encode_video(broadcast, &merely_huge, &valid_output, 0, 0) };
 	if huge > 0 {
 		assert_eq!(moq_encode_video_finish(id(huge)), 0);
 	} else {
@@ -4733,13 +4733,13 @@ fn video_raw_publish_rejects_invalid_config() {
 		codec: 99,
 		..valid_output
 	};
-	assert!(unsafe { moq_encode_video(broadcast, &valid_input, &bad_codec, 0) } < 0);
+	assert!(unsafe { moq_encode_video(broadcast, &valid_input, &bad_codec, 0, 0) } < 0);
 
 	let bad_kind = moq_video_encoder_output {
 		kind: 99,
 		..valid_output
 	};
-	assert!(unsafe { moq_encode_video(broadcast, &valid_input, &bad_kind, 0) } < 0);
+	assert!(unsafe { moq_encode_video(broadcast, &valid_input, &bad_kind, 0, 0) } < 0);
 
 	// Handles for a producer that was never created.
 	assert!(moq_encode_video_cut(0) < 0);
@@ -5637,7 +5637,7 @@ fn encode_video_bitrate_caps_the_reservation() {
 		encoder: std::ptr::null(),
 		encoder_len: 0,
 	};
-	let producer = id(unsafe { moq_encode_video(broadcast, &input, &output, bandwidth) });
+	let producer = id(unsafe { moq_encode_video(broadcast, &input, &output, bandwidth, 0) });
 	let reservation = id(moq_encode_video_reservation(producer));
 	let (sub, cb) = subscribe_named_track(consume, b"0.avc3");
 
@@ -5660,6 +5660,42 @@ fn encode_video_bitrate_caps_the_reservation() {
 	assert_eq!(moq_encode_video_finish(producer), 0);
 	assert_eq!(moq_bandwidth_close(bandwidth), 0);
 	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// A simulcast rung needs a bandwidth allocator and a bitrate above its lower rendition's.
+#[test]
+fn encode_video_rung_needs_a_grant_and_a_band() {
+	let (bandwidth, _estimate) = test_allocator();
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"rung");
+
+	let input = moq_video_encoder_input {
+		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
+		width: 320,
+		height: 240,
+		framerate: moq_video_frame_rate {
+			numerator: 30,
+			denominator: 1,
+		},
+	};
+	let output = |bitrate| moq_video_encoder_output {
+		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
+		bitrate,
+		gop: 0,
+		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
+		encoder: std::ptr::null(),
+		encoder_len: 0,
+	};
+	let low = id(unsafe { moq_encode_video(broadcast, &input, &output(500_000), bandwidth, 0) });
+	assert!(unsafe { moq_encode_video(broadcast, &input, &output(2_000_000), 0, low) } < 0);
+	assert!(unsafe { moq_encode_video(broadcast, &input, &output(400_000), bandwidth, low) } < 0);
+	let high = id(unsafe { moq_encode_video(broadcast, &input, &output(2_000_000), bandwidth, low) });
+
+	assert_eq!(moq_encode_video_finish(high), 0);
+	assert_eq!(moq_encode_video_finish(low), 0);
+	assert_eq!(moq_bandwidth_close(bandwidth), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
