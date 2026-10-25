@@ -26,12 +26,9 @@ use rangemap::{RangeInclusiveSet, RangeSet};
 use super::fill::{Ask, FillState, Join};
 use super::{Drift, Order, Position, TrackState};
 use crate::Error;
-use crate::model::subscription::Window;
 
 /// What one reader asks its fills with.
-pub(super) struct Asking<'a> {
-	/// The reader's resolved ranges, for the frame each run's first group starts from.
-	pub window: &'a Window,
+pub(super) struct Asking {
 	pub priority: i8,
 	pub max_delay: Option<Duration>,
 	pub order: Order,
@@ -115,10 +112,11 @@ impl Misses {
 		}
 	}
 
-	/// Take `sequence` as handed out.
+	/// Take `sequence` as handed out, if a fill answered it.
 	pub fn take_filled(&mut self, sequence: u64) {
-		self.filled.remove(&sequence);
-		self.release(sequence);
+		if self.filled.remove(&sequence) {
+			self.release(sequence);
+		}
 	}
 
 	/// Stop holding a filled `sequence` in its fill: handed out, the group's own reader
@@ -377,6 +375,54 @@ impl Misses {
 		asks
 	}
 
+	/// Give up what a fill still owes this reader once it is stale under the reader's budget,
+	/// as the reader skips a stale cached group, parking `waiter` on each run going stale.
+	/// A fill answers on its handler's time, so an ordered reader would otherwise wait out
+	/// a stalled one for good.
+	pub fn expire(&mut self, state: &TrackState, drift: &Drift, given_up: &mut GivenUp, waiter: &kio::Waiter) {
+		let (mut stale, mut arrived) = (RangeSet::new(), RangeSet::new());
+		for run in self.wanted.iter() {
+			// Each stretch between the groups cached inside the run shares one successor, so
+			// one check judges it whole. Groups arrive out of order, so a fresh late group
+			// keeps the stretch below it owed while the ones around it go stale.
+			let mut from = run.start;
+			// Only the live feed's arrivals split the run: an aborted group is a hole, and a
+			// backfill is a fill's answer, reaching the reader once that fill publishes it.
+			let cached = state
+				.lookup
+				.range(run.clone())
+				.filter(|(_, slot)| slot.is_walked())
+				.map(|(&sequence, _)| sequence);
+			for at in cached.chain(std::iter::once(run.end)) {
+				if from < at && state.poll_drifted(from, &drift.edge.servable, drift.budget, None, waiter) {
+					stale.insert(from..at);
+				}
+				// What arrived live is the feed's to serve, as the reader serves any cached group.
+				if at < run.end {
+					arrived.insert(at..at + 1);
+				}
+				from = at.saturating_add(1);
+			}
+		}
+		if stale.is_empty() && arrived.is_empty() {
+			return;
+		}
+		for run in stale.iter().chain(arrived.iter()) {
+			self.wanted.remove(run.clone());
+		}
+		let mut released = stale.clone();
+		for run in arrived.iter() {
+			released.insert(run.clone());
+		}
+		self.joins.retain_mut(|join| {
+			join.release(&released);
+			!join.is_empty()
+		});
+		for run in stale.iter() {
+			self.give_up(run.clone(), given_up);
+		}
+	}
+
 	/// Ask the fills for `runs` in the reader's order, settling what no handler can take as
 	/// refused. Fills queue in the order asked, so a descending reader's newest run comes first.
 	pub fn ask(
@@ -384,33 +430,16 @@ impl Misses {
 		state: &kio::Consumer<TrackState>,
 		fills: &kio::Shared<FillState>,
 		runs: &RangeSet<u64>,
-		asking: &Asking<'_>,
+		asking: &Asking,
 		given_up: &mut GivenUp,
 	) {
-		// A group a range starts inside heads its own fill, since a fill reads every group
-		// after its first whole.
-		let mut cuts: Vec<u64> = asking.window.partial_starts().collect();
-		cuts.sort_unstable();
-		cuts.dedup();
-		let mut runs: Vec<ops::Range<u64>> = runs
-			.iter()
-			.flat_map(|run| {
-				let inside = cuts.iter().copied().filter(|cut| run.start < *cut && *cut < run.end);
-				let starts = std::iter::once(run.start).chain(inside.clone());
-				let ends = inside.chain(std::iter::once(run.end));
-				starts.zip(ends).map(|(start, end)| start..end)
-			})
-			.collect();
+		let mut runs: Vec<ops::Range<u64>> = runs.iter().cloned().collect();
 		if asking.order == Order::Descending {
 			runs.reverse();
 		}
 		for run in runs {
-			let (frame, _) = asking.window.frames(run.start);
 			let ask = Ask {
-				start: Position {
-					group: run.start,
-					frame,
-				},
+				start: Position::group(run.start),
 				end: run.end,
 				priority: asking.priority,
 				max_delay: asking.max_delay,

@@ -18,12 +18,13 @@ wrap the Rust core. [Layers](/lib/layers) maps the binding namespaces.
 | Working on | Start here | Orientation |
 | --- | --- | --- |
 | Broadcast discovery, subscriptions, caching, groups, frames | [`rs/moq-net`](https://github.com/moq-dev/moq/tree/main/rs/moq-net), [`js/net`](https://github.com/moq-dev/moq/tree/main/js/net) | [moq-lite](/concept/moq-lite) |
+| Congestion controllers and controller tests | [`rs/moq-congestion`](https://github.com/moq-dev/moq/tree/main/rs/moq-congestion) | [Transport](/concept/transport) |
 | Connecting, listening, TLS, transport fallback | [`rs/moq-tokio`](https://github.com/moq-dev/moq/tree/main/rs/moq-tokio), [`js/net/src/connection`](https://github.com/moq-dev/moq/tree/main/js/net/src/connection) | [Transport](/concept/transport) |
 | Relay routing, clustering, HTTP, configuration | [`rs/moq-relay`](https://github.com/moq-dev/moq/tree/main/rs/moq-relay) | [Relay](/bin/relay/) |
 | Authorization and path permissions | [`rs/moq-auth`](https://github.com/moq-dev/moq/tree/main/rs/moq-auth), [`js/auth`](https://github.com/moq-dev/moq/tree/main/js/auth) | [Authentication](/bin/relay/auth) |
 | Media catalogs and frame containers | [`rs/hang`](https://github.com/moq-dev/moq/tree/main/rs/hang), [`js/hang`](https://github.com/moq-dev/moq/tree/main/js/hang) | [hang](/concept/hang) |
 | Importing and exporting media formats | [`rs/moq-mux`](https://github.com/moq-dev/moq/tree/main/rs/moq-mux) | [Muxing](/lib/rs/moq-mux) |
-| Browser capture, playback, and controls | [`js/publish`](https://github.com/moq-dev/moq/tree/main/js/publish), [`js/watch`](https://github.com/moq-dev/moq/tree/main/js/watch), [`js/video`](https://github.com/moq-dev/moq/tree/main/js/video) | [TypeScript](/lib/js/) |
+| Browser capture, playback, and controls | [`js/publish`](https://github.com/moq-dev/moq/tree/main/js/publish), [`js/watch`](https://github.com/moq-dev/moq/tree/main/js/watch), [`js/video`](https://github.com/moq-dev/moq/tree/main/js/video), [`js/ui`](https://github.com/moq-dev/moq/tree/main/js/ui) | [TypeScript](/lib/js/) |
 | Browser reactive state and cleanup | [`js/signals`](https://github.com/moq-dev/moq/tree/main/js/signals) | [Signals](/lib/js/signals) |
 | Native capture, codecs, and rendering | [`rs/moq-audio`](https://github.com/moq-dev/moq/tree/main/rs/moq-audio), [`rs/moq-video`](https://github.com/moq-dev/moq/tree/main/rs/moq-video), [`rs/moq-transcode`](https://github.com/moq-dev/moq/tree/main/rs/moq-transcode) | [Audio](/lib/rs/moq-audio), [video](/lib/rs/moq-video) |
 | CLI commands and protocol gateways | [`rs/moq-cli`](https://github.com/moq-dev/moq/tree/main/rs/moq-cli), then the corresponding `rs/moq-{rtmp,srt,rtc,rtsp,hls}` crate | [Applications](/bin/) |

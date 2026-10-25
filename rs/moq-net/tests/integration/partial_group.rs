@@ -102,7 +102,7 @@ async fn round(version: &str) -> Option<Result<Option<usize>, moq_net::Error>> {
 		remote.track("data").unwrap().subscribe(
 			Subscription::default()
 				.with_max_delay(Duration::from_secs(3600))
-				.with_groups(0..),
+				.with_range(0..),
 		),
 	)
 	.await

@@ -289,7 +289,7 @@ impl From<kio::Producer<Subscription>> for Preferences {
 #[cfg(test)]
 mod tests {
 	use super::super::super::subscription::Combined;
-	use super::super::{Anchor, Position, Range};
+	use super::super::{Anchor, Range};
 	use super::*;
 	use rand::{RngExt, SeedableRng};
 	use std::sync::atomic::{AtomicUsize, Ordering};
@@ -306,10 +306,7 @@ mod tests {
 			let anchor = |rng: &mut rand::rngs::StdRng| match rng.random_range(0..4) {
 				0 => Anchor::Relative(rng.random_range(0..3)),
 				1 => Anchor::Relative(u64::MAX),
-				_ => Anchor::Absolute(Position {
-					group: rng.random_range(0..8),
-					frame: rng.random_range(0..4),
-				}),
+				_ => Anchor::Absolute(rng.random_range(0..8)),
 			};
 			let ranges: Vec<Range> = (0..rng.random_range(0..3))
 				.map(|_| Range {
@@ -375,7 +372,7 @@ mod tests {
 		assert!(producer.poll_subscription_changed(&waiter).is_pending());
 		let mut weak = producer.subscribe(
 			Subscription::default()
-				.with_groups(100..200)
+				.with_range(100..200)
 				.with_order(Order::Ascending),
 		);
 		weak.update(Subscription::default().with_priority(5)).unwrap();

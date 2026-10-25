@@ -75,8 +75,6 @@ typealias BroadcastProducer = uniffi.moq.MoqBroadcastProducer
 typealias BroadcastConsumer = uniffi.moq.MoqBroadcastConsumer
 /** Receives tracks requested from a dynamically served broadcast. */
 typealias BroadcastDynamic = uniffi.moq.MoqBroadcastDynamic
-/** A cleanly ended broadcast, still announced and serving its finished tracks until its linger ends. */
-typealias BroadcastFinish = uniffi.moq.MoqBroadcastFinish
 /** The write side of a raw track: append groups of frames. */
 typealias TrackProducer = uniffi.moq.MoqTrackProducer
 /** A subscriber-requested track not yet accepted: accept it for a [TrackProducer] or abort it. */
@@ -109,7 +107,7 @@ typealias Subscription = uniffi.moq.MoqSubscription
 typealias Range = uniffi.moq.MoqRange
 /** Where one end of a [Range] falls: [AnchorAbsolute], [AnchorRelative], or [AnchorTime]. */
 typealias Anchor = uniffi.moq.MoqAnchor
-/** An exact group and frame. */
+/** A group, delivered from its first frame. */
 typealias AnchorAbsolute = uniffi.moq.MoqAnchor.Absolute
 /** The group `groups` before the latest one, clamped to group 0: 0 is the latest. */
 typealias AnchorRelative = uniffi.moq.MoqAnchor.Relative
@@ -135,7 +133,7 @@ typealias VideoDecoderOutput = uniffi.moq.MoqVideoDecoderOutput
 typealias VideoDecodedFrame = uniffi.moq.MoqVideoDecodedFrame
 /** The PCM layout the caller feeds an audio producer. */
 typealias AudioEncoderInput = uniffi.moq.MoqAudioEncoderInput
-/** The codec-side encoder configuration: codec, output rate/channels, bitrate, frame duration, and preset. */
+/** The codec-side encoder configuration: codec, output rate/channels, bitrate, and frame duration. */
 typealias AudioEncoderOutput = uniffi.moq.MoqAudioEncoderOutput
 /** One video frame: pixels in the configured layout plus a presentation timestamp. */
 typealias VideoFrame = uniffi.moq.MoqVideoFrame
@@ -145,7 +143,7 @@ typealias VideoCodec = uniffi.moq.MoqVideoCodec
 typealias VideoPixelFormat = uniffi.moq.MoqVideoPixelFormat
 /** The pixel layout, resolution, and framerate the caller feeds a video producer. */
 typealias VideoEncoderInput = uniffi.moq.MoqVideoEncoderInput
-/** The video track name, codec, bitrate, keyframe interval, and backend preference. */
+/** The video codec, bitrate, keyframe interval, and backend preference. */
 typealias VideoEncoderOutput = uniffi.moq.MoqVideoEncoderOutput
 /** Which encoder implementation to use: automatic, hardware, software, or one named backend. */
 typealias VideoEncoderKind = uniffi.moq.MoqVideoEncoderKind
@@ -163,8 +161,11 @@ typealias Auth = uniffi.moq.MoqAuth
 typealias AuthToken = uniffi.moq.MoqAuthToken
 /** What the peer lets this side do: publish and subscribe patterns, and an expiry. */
 typealias Grant = uniffi.moq.MoqGrant
-/** A connection lifecycle transition reported by [Session.status]. */
-typealias ConnectionStatus = uniffi.moq.MoqConnectionStatus
+/** A connection lifecycle transition reported by [Session.state]. */
+typealias ConnectionPhase = uniffi.moq.MoqConnectionPhase
+
+/** One coherent connection lifecycle snapshot. */
+typealias ConnectionState = uniffi.moq.MoqConnectionState
 /** Retry pacing for the automatic reconnect: initial delay, multiplier, ceiling, and give-up window. */
 typealias Backoff = uniffi.moq.MoqBackoff
 /** Whether a protocol code is from the session or stream registry. */

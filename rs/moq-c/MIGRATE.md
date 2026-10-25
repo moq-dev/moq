@@ -4,12 +4,21 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Group requests come from fills
+### Sessions report a lifecycle snapshot
 
-The ABI is unchanged. A track's dynamic handler now also gets group requests for history a subscription covers that the cache lacks, not only for fetches; each run arrives one group at a time, the next once the previous is accepted, aborted, or freed.
-`moq_group_request_abort` no longer delivers its error code: the waiting fetches fail as not found.
-A request whose group nobody reads any more, because every subscriber narrowed past it, is withdrawn and the next group follows: answering it then fails as not found.
-`moq_subscription.max_delay_us` always sets a budget, so a C subscriber cannot ask for the publisher's max age alone.
+`moq_session_connect` and `moq_session_request_accept` take a `moq_state_callback` instead of a `moq_status_callback`: `void on_state(void *user_data, const moq_connection_state *state)`.
+Each change delivers a `moq_connection_state` with `phase`, `connects`, `failure`, and the live `protocol`; copy what you keep, since it is valid only during the callback.
+Read `state->connects` where you read a positive status code. A failed dial or dropped connection now fires the callback with a negative `failure`, so drop your `moq_session_failure` polling; `moq_error()` describes it during the callback.
+The terminal call has phase `MOQ_CONNECTION_PHASE_CLOSED`, with `failure` zero after a requested close or the error that ended the session, where the terminal status code used to be. Release `user_data` there, as before.
+
+### Exact encoder rates and publication options
+
+`moq_video_encoder_input.framerate` is now `moq_video_frame_rate { numerator,
+denominator }`, changing the C ABI layout. Replace `30` with `{30, 1}` or use
+`{30000, 1001}` for an exact fractional rate. Both components must be nonzero;
+rates above 1,000,000 fps are refused. Recompile callers with the generated header
+and matching native library. Invalid rational rates return `MOQ_ERROR_INVALID_CONFIG`.
+Audio and publication track arguments are unchanged.
 
 ### Video rendition preference
 
@@ -52,7 +61,7 @@ Clamp timestamps you build from unbounded input to `2^61 - 1`.
 
 ### Finished tracks stay until the broadcast ends (#6157)
 
-`moq_publish_track_finish`, `moq_publish_media_finish`, `moq_publish_container_finish`, and the encoder finishes now release the handle while the broadcast keeps the finished track listed, with its catalog rendition and demand, until `moq_publish_close` or the new `moq_publish_finish_close`.
+`moq_publish_track_finish`, `moq_publish_media_finish`, `moq_publish_container_finish`, and the encoder finishes now release the handle while the broadcast keeps the finished track listed, with its catalog rendition and demand, until `moq_publish_close`.
 Publish a replacement under a new name, and expect a finished track's demand terminal callback when the broadcast closes rather than at the finish.
 
 ### A claim answers by publishing (#5678)
@@ -190,6 +199,7 @@ if (frame.timestamp_present) use(frame.timestamp_us);
 ### `moq_publish_finish` is removed (#4152)
 
 Close the broadcast with `moq_publish_close`.
+To end its content first, call `moq_publish_catalog_finish`; the broadcast stays up until `moq_publish_close`.
 
 ### A decoded frame can fail on its own (#4094)
 

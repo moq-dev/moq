@@ -17,16 +17,34 @@ use crate::time::{Deadlines, Instant};
 /// closure on the next poll. Dropping the driver cancels the session, and
 /// [`crate::Session::closed`] resolves with [`Error::Cancel`]. It is `Send` on
 /// native, like the [`Boxable`](crate::transport::poll::Boxable) transport it drives.
+/// A panic during polling is published as a transport failure before unwinding to the caller.
 #[must_use = "the session makes no progress unless its driver is polled"]
 pub struct Driver {
 	state: State,
 	clock: Deadlines,
 }
 
+// An executor may catch the panic and only drop the future after unwinding ended. Publish at
+// the actual poll boundary, while the failure is still distinguishable from cancellation.
+struct Polling<'a>(&'a mut State);
+
+impl Drop for Polling<'_> {
+	fn drop(&mut self) {
+		if !std::thread::panicking() {
+			return;
+		}
+		let error = Error::Transport("session driver panicked".into());
+		self.0.result = Some(Err(error.clone()));
+		if let Some(mut supervisor) = self.0.supervisor.take() {
+			supervisor.panicked(error);
+		}
+	}
+}
+
 /// The protocol half of a machine, one variant per negotiated wire protocol.
 pub(crate) enum Protocol {
 	/// Boxed for size only.
-	Lite(Box<crate::lite::Driver<Transport>>),
+	Lite(Box<crate::lite::Driver>),
 	Ietf(crate::ietf::Driver),
 }
 
@@ -57,9 +75,10 @@ impl Driver {
 	///
 	/// Panics if `now` is earlier than the previous poll or construction time.
 	pub fn poll(&mut self, now: Instant, waiter: &kio::Waiter) -> Result<Option<Instant>, Error> {
+		let state = Polling(&mut self.state);
 		waiter.batch(|| {
 			self.clock.advance(now);
-			match self.state.poll(waiter) {
+			match state.0.poll(waiter) {
 				Poll::Ready(Ok(())) => Err(Error::Closed),
 				Poll::Ready(Err(err)) => Err(err),
 				Poll::Pending => Ok(self.clock.park(waiter)),
@@ -69,13 +88,6 @@ impl Driver {
 }
 
 impl Protocol {
-	pub(crate) fn local_close(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
-		match self {
-			Self::Lite(driver) => driver.local_close.clone(),
-			Self::Ietf(driver) => driver.local_close.clone(),
-		}
-	}
-
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		match self {
 			Self::Lite(driver) => driver.poll(waiter),

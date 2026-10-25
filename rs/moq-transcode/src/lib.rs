@@ -66,6 +66,9 @@ pub async fn run(
 /// The split exists so a caller can attach [`active`] before any encoding
 /// starts. [`run`](Self::run) consumes the transcoder, so take the cursors you
 /// want first.
+///
+/// Dropping this handle or its run future cancels its catalog and closes the output, including
+/// when the future was never polled.
 pub struct Transcoder {
 	source: moq_net::broadcast::Consumer,
 	output: moq_net::broadcast::Producer,
@@ -111,15 +114,15 @@ impl Transcoder {
 	}
 
 	/// Serve the ladder until the source broadcast ends.
-	pub async fn run(self) -> Result<(), Error> {
+	pub async fn run(mut self) -> Result<(), Error> {
 		let Self {
 			source,
 			output,
 			config,
-			mut derived,
-			mut dynamic,
+			derived,
+			dynamic,
 			active,
-		} = self;
+		} = &mut self;
 
 		// The source catalog drives everything; wait for a snapshot with a usable
 		// video rendition (the first may precede the source publishing its video).
@@ -145,7 +148,7 @@ impl Transcoder {
 		let mut ladder = pipeline::Pipeline::new(
 			source.clone(),
 			config.clone(),
-			active,
+			active.clone(),
 			decoders,
 			source_name,
 			source_config,
@@ -209,14 +212,41 @@ impl Transcoder {
 	}
 }
 
+impl Drop for Transcoder {
+	fn drop(&mut self) {
+		// The owner exists before `run` is polled. A cancelled prologue must close the
+		// already registered catalog too. Abort preserves an earlier clean finish or error.
+		self.derived.clone().abort(moq_net::Error::Cancel);
+		self.output.close();
+	}
+}
+
 #[cfg(test)]
 #[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 
 	use super::*;
 
-	/// A live source broadcast; the producers are kept so the tracks stay open
-	/// for the duration of the test.
+	/// Constructing a transcoder registers its catalog synchronously, so even an unpolled
+	/// run future owns published state that must end deliberately when abandoned.
+	#[tokio::test(start_paused = true)]
+	async fn an_unpolled_run_cancels_its_registered_catalog() {
+		let source = moq_net::broadcast::Info::new().produce();
+		let output = moq_net::broadcast::Info::new().produce();
+		let consumer = output.consume();
+		let transcoder = Transcoder::new(source.consume(), output.clone(), Default::default()).unwrap();
+		let mut catalog = consumer
+			.track(hang::Catalog::DEFAULT_NAME)
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap();
+		drop(transcoder.run());
+		assert!(consumer.is_closed());
+		assert!(matches!(catalog.recv_group().await, Err(moq_net::Error::Cancel)));
+	}
+
+	/// A live source broadcast, whose producers keep its tracks open.
 	struct Source {
 		broadcast: moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer,
@@ -1399,70 +1429,6 @@ mod tests {
 		.expect("retirement aborted the accepted group");
 		assert!(frames > 0, "the fetch claimed its group but produced no frames");
 
-		transcoder.abort();
-	}
-
-	/// A fetch that starts partway through a group is refused rather than served.
-	/// A fresh encode of that group need not match the bytes of the head a reader
-	/// holds, so its tail cannot continue it. The reader moves on to the next group.
-	#[tokio::test]
-	async fn a_mid_group_fetch_is_refused() {
-		let source = source_catalog(320, 240);
-		// Serve any source group on demand, so a fetch that is not refused has
-		// something to transcode and resolves.
-		let source_fetches = source._track.dynamic();
-		let server = tokio::spawn(async move {
-			while let Ok(request) = source_fetches.requested_fill().await {
-				let mut group = request.accept(request.start().group, None).unwrap();
-				write_keyframe(&mut group);
-				group.finish().unwrap();
-			}
-		});
-
-		let config = Config {
-			ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
-			encoder: moq_video::encode::Kind::Software,
-			decoder: moq_video::decode::Kind::Software,
-			source: None,
-			..Default::default()
-		};
-		let output = moq_net::broadcast::Info::default().produce();
-		let consumer = output.consume();
-		let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
-
-		let catalog = loop {
-			match consumer.track(hang::Catalog::DEFAULT_NAME) {
-				Ok(track) => break track,
-				Err(moq_net::Error::NotFound) => tokio::task::yield_now().await,
-				Err(err) => panic!("catalog track: {err}"),
-			}
-		};
-		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(catalog.subscribe(None).await.unwrap());
-		await_catalog(&mut catalogs, |snapshot| {
-			snapshot.video.renditions.contains_key("video/120p")
-		})
-		.await;
-
-		// The source publishes no live groups, so group 7 is a cache miss that
-		// reaches the rung's fetch handler.
-		let rung = consumer.track("video/120p").unwrap();
-		rung.query().await.unwrap();
-
-		let partial = rung
-			.fetch_group(7, moq_net::group::Fetch::default().with_frame_start(2))
-			.await;
-		match partial {
-			Err(moq_net::Error::NotFound) => {}
-			Err(err) => panic!("expected a NotFound refusal, got {err}"),
-			Ok(_) => panic!("served a fetch that starts mid-group"),
-		}
-
-		// The whole group still serves.
-		let mut whole = rung.fetch_group(7, None).await.unwrap();
-		while whole.read_frame().await.unwrap().is_some() {}
-		assert!(whole.finished().await.unwrap() > 0, "the whole group had no frames");
-
-		server.abort();
 		transcoder.abort();
 	}
 

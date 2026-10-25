@@ -27,9 +27,8 @@ Decided 2026-10-23 (API audit follow-up, maintainer):
   `session::Stats` reads them from it. `StatsUnavailable` goes; the trait
   method gets a default.
 - **Credential.** `auth::Auth` (JS `Auth.Auth`) is one presented credential:
-  `auth::Credential` in Rust, JS, and the FFI, including moq-tokio's
-  `connection::auth::Auth`. Update [issuer](/quest/m1/auth/issuer.md) and
-  the [auth epic](/quest/m1/auth/README.md), which use the old name.
+  `auth::Credential` in Rust, JS, and the FFI. Update the
+  [auth epic](/quest/m1/auth/README.md), which uses the old name.
 - **Info.** `track::Consumer::query() -> Pending<Querying>` becomes
   `info() -> Pending<Resolving>`, mirroring JS `Track.Consumer.info()`.
   `Pending` stays generic over the task so poll callers and `track()` keep
@@ -42,7 +41,7 @@ Decided 2026-10-23 (API audit follow-up, maintainer):
 Kept, so the next audit skips them: `largest()` stays a snapshot on
 `track::Producer` and a stream on readers, and `subscription()` stays the
 aggregate on producers and requests: the receiver type tells them apart.
-`server::Activity` and `stats::Refusal` stay in moq-net.
+`server::Activity` and `stats::RefusalKind` stay in moq-net.
 
 Public API: moq-net, `@moq/net`, moq-tokio, moq-ffi and its wrappers renamed.
 Wire: none.

@@ -11,8 +11,7 @@ its own connection. A dashboard reads both the same way a publisher does. One
 shared model turns either report into a health verdict, and a bounded
 preflight run reports which media layer of a broadcast is broken. Stats and
 feedback cost nothing on the network unless someone subscribes. Not here: the
-relay's `moq-stats` layout, which this line does not change (the
-[broadcast epoch](/quest/m0/broadcast-epoch/README.md) line reshapes it);
+relay's `moq-stats` layout, which this line does not change;
 clock synchronization; any
 requirement that a client report; and feedback as an input to billing,
 authorization, or route selection.
@@ -106,7 +105,7 @@ reports; no encoder acts on them here.
 
 Decided 2026-10-05 (moq.pro audit): the client health model and preflight
 media checks moq.pro planned against the pre-#4510 `.stats` broadcast are
-generic, so they join this line as [client health](/quest/m2/stats/health.md)
+generic, so they join this line as [client health](/doc/concept/stats.md#health)
 and [preflight](/quest/m2/stats/preflight.md). moq.pro keeps the per-project
 connection view and the dashboard flow.
 
@@ -116,8 +115,6 @@ connection view and the dashboard flow.
   gateways publish stats and feedback, as the CLI remuxes do
 - [Browser reporters](/quest/m2/stats/js.md) - `<moq-publish>` publishes
   stats and `<moq-watch>` publishes feedback
-- [Client health](/quest/m2/stats/health.md) - two snapshots become a
-  health sample and a verdict that names its observer, in Rust and JS
 - [Preflight](/quest/m2/stats/preflight.md) - a bounded test run over a
   broadcast reports which media layer is broken and why
 

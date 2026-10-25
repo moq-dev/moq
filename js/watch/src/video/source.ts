@@ -214,6 +214,9 @@ export class Source {
 	};
 	/** The derived outputs, read-only. */
 	readonly out = readonlys(this.#out);
+	#pending = new Signal(false);
+	/** Whether rendition support is still being resolved. @internal */
+	readonly pending: Getter<boolean> = this.#pending;
 
 	#signals = new Effect();
 	#supportCache = new WeakMap<Supported, Map<string, { key: string; supported: boolean }>>();
@@ -260,6 +263,7 @@ export class Source {
 			if (!names.has(name)) cache.delete(name);
 		}
 
+		effect.set(this.#pending, true, false);
 		effect.spawn(async () => {
 			const available: Record<string, Catalog.VideoConfig> = {};
 
@@ -304,6 +308,7 @@ export class Source {
 				this.#out.error.set(undefined);
 			}
 			this.#out.available.set(available);
+			this.#pending.set(false);
 		});
 	}
 

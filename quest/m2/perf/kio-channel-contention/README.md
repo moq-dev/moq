@@ -151,7 +151,7 @@ Decided (maintainer, 2026-10-14, per-thread follow-up):
   leave each replica's mutex uncontended.
 
 Decided 2026-10-20 (maintainer): the
-[group storage benchmark](/quest/m2/group-storage-bench.md) chooses between
+[group storage benchmark](/quest/m1/group-storage-bench.md) chooses between
 the log (or a ring buffer) and unbounded groups' sorted runs for
 `GroupState` before either lands, leaning log because performance matters
 more than middle eviction.

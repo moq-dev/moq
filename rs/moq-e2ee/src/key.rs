@@ -60,6 +60,8 @@ impl TrackKey {
 
 	/// Encrypt, counting this invocation and its plaintext bytes.
 	pub(crate) fn protect(&mut self, group: u64, frame: u64, plaintext: &[u8], payload_limit: usize) -> Result<Bytes> {
+		// Refusals check identity, then size, then budget, the same order in every core.
+		nonce(group, frame)?;
 		if plaintext.len().saturating_add(TAG_LEN) > payload_limit {
 			return Err(Error::Oversize);
 		}
@@ -71,10 +73,10 @@ impl TrackKey {
 
 	/// Decrypt, counting the attempt whether or not the tag verifies.
 	pub(crate) fn open(&mut self, group: u64, frame: u64, payload: &[u8], payload_limit: usize) -> Result<Bytes> {
+		nonce(group, frame)?;
 		if payload.len() < TAG_LEN || payload.len() > payload_limit {
 			return Err(Error::Oversize);
 		}
-		nonce(group, frame)?;
 		let plaintext_len = payload.len() - TAG_LEN;
 		self.reserve(plaintext_len)?;
 		let result = open(&self.bytes, group, frame, payload, payload_limit);

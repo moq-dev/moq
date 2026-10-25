@@ -106,10 +106,9 @@ void audio_roundtrip() {
     auto catalog = ok(moq::MediaCatalogProducer::init(broadcast), "audio catalog producer");
     moq::AudioEncoderInput input{moq::AudioSampleFormat::kF32, 48000, 2};
     moq::AudioEncoderOutput output{};
-    output.track = "tone";
     output.codec = moq::AudioCodec::opus();
     output.frame_duration_us = 20000;
-    auto audio = ok(moq::AudioProducer::init(catalog, input, output, nullptr), "audio producer");
+    auto audio = ok(moq::AudioProducer::init(catalog, {input, output, "tone", nullptr}), "audio producer");
     auto snapshot = ok(catalogs->next().get(), "audio catalog");
     CHECK(snapshot.has_value());
     moq::AudioDecoderOutput decoded{};
@@ -173,17 +172,14 @@ int main() {
     CHECK(!moq::MediaTimebase::init(timebase_owner));
     ok(timebase_other->close(), "close timebase other");
 
-    // A finished broadcast lingers for its longest max age; closing the handle ends the wait early.
+    // A finished catalog leaves the broadcast up, still serving its finished tracks, until it closes.
     auto finished = ok(moq::BroadcastProducer::init(), "finished broadcast");
-    moq::TrackInfo aged;
-    aged.max_age_us = 3600000000;
-    ok(ok(finished->publish_track("status", aged), "publish aged track")->finish(), "finish aged track");
-    auto finish = ok(finished->finish(), "broadcast finish");
-    CHECK(finish->linger_us() == 3600000000);
-    CHECK(!finished->publish_track("events", {}));
-    auto lingering = finish->wait();
-    finish->close();
-    ok(lingering.get(), "finish wait");
+    auto finished_catalog = ok(moq::MediaCatalogProducer::init(finished), "finished catalog");
+    ok(ok(finished->publish_track("status", {}), "publish track")->finish(), "finish track");
+    ok(finished_catalog->finish(), "catalog finish");
+    ok(finished->consume(), "consume a finished broadcast");
+    ok(finished->close(), "close finished broadcast");
+    CHECK(!finished_catalog->finish());
 
     // A synchronous error is a returned value, not an exception.
     auto unbound = ok(moq::Server::init({}), "server init");

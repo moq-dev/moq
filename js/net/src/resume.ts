@@ -288,9 +288,9 @@ class Reader implements ResumeSource {
 	/** The logical track ended cleanly: the reader drains what its copies hold and follows no route. */
 	#ended = false;
 	/** The serving copy's largest when the track ended, kept once that copy goes. */
-	#last?: { largest?: track.Location; ended: true };
+	#last?: { largest?: track.Position; ended: true };
 	/** The first end any copy declared: the logical track's, whichever copy serves. */
-	#declared?: track.Location;
+	#declared?: track.Position;
 	/** The subscriber's record of groups handed out, as the last read passed it. */
 	#delivered = new Delivered();
 	/** Whether groups were ever asked for; until then the reader keeps no replaced copy. */
@@ -455,7 +455,7 @@ class Reader implements ResumeSource {
 		const start = Math.max(cursor.start, copy.floor ?? 0);
 		const replaced = copyEnd(copy);
 		const end = replaced === undefined ? cursor.end : Math.min(cursor.end ?? replaced, replaced);
-		hooks.replaceGroups(copy.sub, {
+		copy.sub.withRange({
 			start: { included: start },
 			end: end === undefined ? undefined : { excluded: end },
 		});
@@ -882,7 +882,7 @@ class Reader implements ResumeSource {
 	// The logical track's end, learning it from any copy that declared one. A group or datagram
 	// at or past it, on any copy or already handed out, claims other content: a direct track
 	// refuses an end below what it received.
-	#learnEnd(): track.Location | undefined {
+	#learnEnd(): track.Position | undefined {
 		for (const copy of this.#copies) {
 			const end = copy.sub.end();
 			if (end) this.#declare(end);
@@ -907,7 +907,7 @@ class Reader implements ResumeSource {
 	// Record `end` as the logical track's end. One logical track has one end, as it has one set
 	// of properties: a copy declaring another is refused. A mid-group end refines the group
 	// boundary it falls just before, as a wire end may.
-	#declare(end: track.Location): void {
+	#declare(end: track.Position): void {
 		if (this.#closed) return;
 		const declared = this.#declared;
 		if (!declared) {
@@ -936,12 +936,12 @@ class Reader implements ResumeSource {
 		return serving && hooks.sourceStart(serving.sub);
 	}
 
-	end(): track.Location | undefined {
+	end(): track.Position | undefined {
 		this.sync();
 		return this.#learnEnd();
 	}
 
-	async finished(): Promise<track.Location> {
+	async finished(): Promise<track.Position> {
 		for (;;) {
 			this.sync();
 			const end = this.#learnEnd();
@@ -968,19 +968,19 @@ class Reader implements ResumeSource {
 		}
 	}
 
-	bufferedLargest(): track.Location | undefined {
+	bufferedLargest(): track.Position | undefined {
 		this.sync();
 		const serving = this.#serving();
 		return serving && hooks.bufferedLargest(serving.sub);
 	}
 
-	peekLargest(): { largest?: track.Location; ended: boolean } {
+	peekLargest(): { largest?: track.Position; ended: boolean } {
 		this.sync();
 		const serving = this.#serving();
 		return serving ? hooks.peekLargest(serving.sub) : (this.#last ?? { ended: false });
 	}
 
-	async largest(seen: track.Location | undefined): Promise<track.Location | undefined> {
+	async largest(seen: track.Position | undefined): Promise<track.Position | undefined> {
 		for (;;) {
 			this.sync();
 			const serving = this.#serving();
@@ -1058,7 +1058,7 @@ interface Fetch {
 }
 
 function startFetch(
-	wire: BroadcastWire,
+	fetchGroup: NonNullable<BroadcastWire["fetchGroup"]>,
 	name: string,
 	sequence: number,
 	generation: number,
@@ -1077,7 +1077,7 @@ function startFetch(
 			if (fetch.outcome && "group" in fetch.outcome) fetch.outcome.group.close();
 		},
 	};
-	wire.fetchGroup(name, sequence, { signal: controller.signal })
+	fetchGroup(name, sequence, { signal: controller.signal })
 		.then(
 			(group) => {
 				// A copy that already failed continues nothing: that is the route failing again.
@@ -1252,15 +1252,21 @@ class Recover implements GroupRecover {
 					const cached = hooks.cachedGroup(serving.sub, this.sequence);
 					if (cached) return this.#replacement(cached, serving);
 				}
-				// Otherwise ask for it. The subscription may still deliver it first.
-				if (fetch?.generation !== generation) {
-					fetch = startFetch(serving.source.wire, route.name, this.sequence, generation, signal);
+				// Otherwise ask for it, if the route's version can fetch. The subscription may still
+				// deliver it first. Without FETCH only a copy continues a failed group, and none
+				// holds it, so it ends as the failed copy left it.
+				const fetchGroup = serving.source.wire.fetchGroup;
+				if (!fetchGroup && failed) throw failed;
+				if (fetchGroup && fetch?.generation !== generation) {
+					fetch = startFetch(fetchGroup, route.name, this.sequence, generation, signal);
 					started(fetch);
 				}
+				// A fetch from an earlier route answers for that route, not this one.
+				const asked = fetch?.generation === generation ? fetch : undefined;
 				const stale = hooks.staleAt(serving.sub, this.sequence);
 				if (stale.expired()) throw new StreamError(StreamCode.Old, { message: "group is past the budget" });
-				waits.push(...stale.changed, ...(fetch.outcome ? [] : [fetch.settled]));
-				const outcome = fetch.outcome;
+				waits.push(...stale.changed, ...(asked && !asked.outcome ? [asked.settled] : []));
+				const outcome = asked?.outcome;
 				if (outcome && "group" in outcome) return this.#replacement(outcome.group, serving);
 				// That route failing too waits for the next one, and a refusal is a verdict only for
 				// a copy that failed.
@@ -1342,6 +1348,22 @@ export class Front {
 			listing?.reader?.close();
 			listing = undefined;
 		};
+		const read = (reader: Tracks): Promise<{ event?: TracksEvent; err?: Error }> =>
+			reader.next().then(
+				(event) => ({ event }),
+				(err: unknown) => ({ err: err instanceof Error ? err : new Error(String(err)) }),
+			);
+		// Forwarded as the source reported it, finished or not.
+		const unlist = (
+			listed: Set<string>,
+			stale: Set<string>,
+			event: { kind: "removed" | "finished"; name: string },
+		) => {
+			stale.delete(event.name);
+			if (!listed.delete(event.name)) return;
+			if (event.kind === "finished") lister.finish(event.name);
+			else lister.remove(event.name);
+		};
 		try {
 			for (;;) {
 				if (closed.peek() !== undefined) return;
@@ -1354,7 +1376,15 @@ export class Front {
 					continue;
 				}
 				if (this.#concluded) {
-					// No route will serve it again, so nothing more will be listed.
+					// No route will serve it again, so nothing more will be listed. A source that
+					// closed ended its listing after the tracks it finished last: those go first.
+					while (listing?.reader && listing.source?.from.closed.peek() !== undefined) {
+						const { event } = await (listing.next ?? read(listing.reader));
+						listing.next = undefined;
+						if (!event) break;
+						if (event.kind === "removed" || event.kind === "finished")
+							unlist(listing.listed, listing.stale, event);
+					}
 					stop();
 					lister.end();
 					continue;
@@ -1384,10 +1414,7 @@ export class Front {
 					await wait();
 					continue;
 				}
-				listing.next ??= reader.next().then(
-					(event) => ({ event }),
-					(err: unknown) => ({ err: err instanceof Error ? err : new Error(String(err)) }),
-				);
+				listing.next ??= read(reader);
 				const result = await race([listing.next, wait().then(() => undefined)]);
 				if (!result) continue;
 				listing.next = undefined;
@@ -1414,11 +1441,7 @@ export class Front {
 						lister.add(event.name, event.info);
 					}
 				} else if (event.kind === "removed" || event.kind === "finished") {
-					// Forwarded as the source reported it, finished or not.
-					listing.stale.delete(event.name);
-					if (!listing.listed.delete(event.name)) continue;
-					if (event.kind === "finished") lister.finish(event.name);
-					else lister.remove(event.name);
+					unlist(listing.listed, listing.stale, event);
 				} else {
 					// What the new source still lacks at its SYNCED is gone.
 					for (const name of listing.stale) {
@@ -1637,7 +1660,7 @@ export class Front {
 		}
 	}
 
-	largest(name: string): track.Location | undefined {
+	largest(name: string): track.Position | undefined {
 		return this.#source?.wire.largest(name);
 	}
 
@@ -1706,7 +1729,9 @@ export class Front {
 			const signal = options?.signal ? AbortSignal.any([options.signal, retired]) : retired;
 			try {
 				await until(this.#verify(name, source), signal);
-				const group = await source.wire.fetchGroup(name, sequence, { ...options, signal });
+				const fetchGroup = source.wire.fetchGroup;
+				if (!fetchGroup) throw new Error("fetch group is not supported by this session's version");
+				const group = await fetchGroup(name, sequence, { ...options, signal });
 				// A copy that already failed continues nothing: that is the route failing again.
 				const failed = group.closed.peek();
 				if (failed instanceof Error) {

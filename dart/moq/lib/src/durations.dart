@@ -61,12 +61,6 @@ extension TrackInfoDuration on MoqTrackInfo {
       maxAgeUs == null ? null : Duration(microseconds: maxAgeUs!);
 }
 
-/// Duration view over how long a finished broadcast stays up.
-extension BroadcastFinishDuration on MoqBroadcastFinish {
-  /// The longest max age of the finished tracks the broadcast holds.
-  Duration get linger => Duration(microseconds: lingerUs());
-}
-
 /// Duration view over a raw frame's presentation time.
 extension FrameDuration on MoqFrame {
   /// Presentation timestamp, or null for an untimed frame.

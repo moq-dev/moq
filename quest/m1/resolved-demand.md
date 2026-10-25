@@ -71,8 +71,7 @@ with no wire change.
   because watching for it needs more than this plan carries: a verdict
   depends on two groups (`drifted` uses G's successor for `reach` and a
   possibly later presentation edge in `live_above`, and losing either can
-  free G), a range may end mid-group so an edge needs a frame position, and
-  a run skipped at the max age bound would no longer be final. Likewise,
+  free G), and a run skipped at the max age bound would no longer be final. Likewise,
   a stale drop in flight across an aggregate range change (lite-07, see
   [Drop set](/quest/m1/drop-set.md)) may settle a reader whose own range
   would not convict, since SUBSCRIBE_UPDATE has no acknowledgement and the
@@ -115,7 +114,7 @@ with no wire change.
   with the same idle window as the groups they sit between, under the same
   fold-or-`TooFarBehind` rule, so there are at most about one per cached
   sequence and the record grows no faster than the JS cache. The JS byte
-  bound is [JS unbounded groups](/quest/m2/unbounded-groups/js.md).
+  bound is [JS unbounded groups](/quest/m1/unbounded-groups/js.md).
 - **Drops are final for now**, decided by the maintainer on 2026-10-19. A
   widening re-offers only groups this cursor never reported in
   SUBSCRIBE_DROP; a reported group stays dropped, as today. That leaves a
@@ -171,4 +170,4 @@ max age or the range.
 ## Related
 
 - [Drop set](/quest/m1/drop-set.md) - closes the gap this leaves for groups already reported dropped
-- [JS unbounded groups](/quest/m2/unbounded-groups/js.md) - the JS byte bound for groups and the cursor runs between them
+- [JS unbounded groups](/quest/m1/unbounded-groups/js.md) - the JS byte bound for groups and the cursor runs between them

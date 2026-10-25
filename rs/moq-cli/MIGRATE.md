@@ -4,15 +4,19 @@ How to update your invocation and config for each breaking change, newest first.
 
 ## Unreleased
 
-### `import archive` reads what `export archive` writes
+### `import --linger` sets how long a finished broadcast stays up
 
-`moq import archive <url>` replays one recorded broadcast, the `<url>/<broadcast>/@<epoch>` prefix `export archive` wrote, every track included; point `<url>` at that prefix.
-It no longer reads timeline recordings made by older `moq` versions.
-`--follow <interval>` is removed: a recording still being made is always followed, until `export archive` marks it complete; set the check interval with `--refresh` (default 1s).
+A cleanly ended import used to stay up for its `--max-age`; it now stays up for `--linger` (default 30 s), counted from the end, and `--max-age` only sets retention.
+Replace `import --max-age 5s` used to shorten that wait with `import --linger 5s`, or `--linger 0s` to close at once.
+A reconnect at the same path no longer ends the wait. `import rtsp`, `import archive`, `import capture`, and `import rtc --connect` refuse `--linger`.
 
 ### The `nvenc` and `nvdec` Cargo features are removed ([#6483](https://github.com/moq-dev/moq/pull/6483))
 
 Enable `nvidia` instead; the old names were aliases for it.
+
+### Iroh is opt-in
+
+The default source-build features no longer include `iroh`. Add `--features iroh` when building a binary that must use Iroh endpoints.
 
 ### `import fmp4` and `import hls` unwrap to Legacy (#6250)
 
@@ -24,6 +28,7 @@ Add `--passthrough` to keep publishing CMAF.
 `moq export archive <url>` records every broadcast announced at or under `--broadcast`, each instance under `<url>/<broadcast>/@<epoch>`, until the connection ends, instead of one broadcast at `<url>`.
 Point `<url>` at the root you want recordings under, and drop `--catalog-format`, which it now refuses.
 Untimed tracks record, and `--retention` works on them.
+`import archive` does not read the new layout yet; it still replays recordings made by older `moq` versions.
 
 ### `--cluster-lan-secret` is a file path only (#5910)
 
@@ -74,13 +79,14 @@ Rename `--max-age` to `--max-delay` on those exports.
 Each frame is written that long after its decode time; the older staleness spellings are refused with `--delay` named.
 Rename `--max-age` to `--delay`.
 
-### `moq export ts --linger` follows only the same publisher instance
+### `moq export ts --linger` is `--follow`, and follows only the same publisher instance
 
-A restarted publisher exits 1 unless `--stitch` follows it as a program switch.
-`moq export srt` takes the same two flags.
+Rename `export ts --linger` to `--follow`; the old spelling stops the run naming it. `export srt` takes the same `--follow`.
+A restarted publisher exits 1 unless `--stitch` follows it as a program switch, and a stitched replacement's first catalog is awaited until it arrives or the replacement goes, so `--follow 0s` no longer refuses a cold one.
+A failure other than the publisher leaving, such as a codec TS cannot carry, exits at once rather than after a 1 s grace.
 
 ```bash
-moq export ts --linger 10s --stitch ...
+moq export ts --follow 10s --stitch ...
 ```
 
 ### `moq export fmp4` fixes its track set at the init segment

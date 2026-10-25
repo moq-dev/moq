@@ -76,10 +76,6 @@ val AudioDecoderOutput.maxDelay: Duration?
 val AudioDecoderOutput.delay: Duration?
     get() = delayUs?.toLong()?.microseconds
 
-/** How long to keep a finished broadcast: the longest max age of the tracks it holds. */
-val BroadcastFinish.linger: Duration
-    get() = lingerUs().coerceAtMost(Long.MAX_VALUE.toULong()).toLong().microseconds
-
 /** Playout delay to hold ahead of the playhead: the fixed one, or the estimate from every frame read so far. */
 val dev.moq.audio.Consumer.delay: Duration
     get() = delayUs().toLong().microseconds

@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { Manual, type Micro, Milli, Nano } from "@moq/clock";
-import { Format as LocFormat, Producer as LocProducer } from "@moq/loc";
+import { Format as LocFormat } from "@moq/loc";
 import { Group, Error as NetError, SessionCode, StreamCode, Time, Track, Varint } from "@moq/net";
 import { decodeInitSegment, type InitSegment } from "../cmaf/decode.ts";
 import { Format as CmafFormat } from "../cmaf/format.ts";
@@ -30,6 +30,27 @@ function encodeLegacyFrame(timestamp: Micro, payload: Uint8Array): Uint8Array {
 	data.set(tsBytes, 0);
 	data.set(payload, tsBytes.byteLength);
 	return data;
+}
+
+/** A LOC frame carrying only the timestamp property (0x10). */
+function encodeLocFrame(timestamp: Micro, payload: Uint8Array): Uint8Array {
+	const props = new Uint8Array([...Varint.encode(0x10), ...Varint.encode(timestamp)]);
+	return new Uint8Array([...Varint.encode(props.byteLength), ...props, ...payload]);
+}
+
+/** Write each group of `[timestamp, payload]` LOC frames to `track`, then close it. */
+function writeLoc(track: Track.Producer, groups: [Micro, number[]][][]) {
+	for (const frames of groups) {
+		const group = track.appendGroup();
+		for (const [timestamp, payload] of frames) {
+			group.writeFrame({
+				payload: encodeLocFrame(timestamp, new Uint8Array(payload)),
+				timestamp: Time.Timestamp.fromMicros(timestamp),
+			});
+		}
+		group.close();
+	}
+	track.close();
 }
 
 /** A moq-net timestamp of `ticks` at the test track's timescale. */
@@ -61,18 +82,6 @@ function settle(ms = 20): Promise<void> {
 function replay(track: Track.Producer): Track.Subscriber {
 	return track.subscribe({ maxDelay: Milli(30_000) });
 }
-
-test("Consumer refuses maxAge before taking ownership of the track", () => {
-	const producer = new Track.Producer("test");
-	const track = producer.subscribe();
-	for (const maxAge of [Milli(500), undefined]) {
-		const props = { format: new LegacyFormat("data"), maxAge };
-		expect(() => new Consumer(track, props)).toThrow("maxDelay");
-		expect(track.closed.peek()).toBeUndefined();
-	}
-	track.close();
-	producer.close();
-});
 
 // --- LegacyFormat ---
 
@@ -808,7 +817,7 @@ test("Consumer skips groups via PTS-span when over the max delay", async () => {
 
 test("Consumer measures arrivals as they land", async () => {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(track.subscribe(), {
 		format: new LegacyFormat("audio"),
@@ -840,7 +849,7 @@ test("Consumer measures arrivals as they land", async () => {
 		track.close();
 		consumer.close();
 		next.close();
-		restore();
+		installed.close();
 	}
 });
 
@@ -992,10 +1001,13 @@ test("Consumer reads a leading marker as an end and keeps the first media keyfra
 
 test("Consumer reads an empty LOC payload as the frame's duration", async () => {
 	const track = new Track.Producer("test");
-	const producer = new LocProducer(track);
-	producer.encode(new Uint8Array([0xde, 0xad]), 0 as Micro, true);
-	producer.encode(new Uint8Array(), 33_000 as Micro, false);
-	producer.close();
+	writeLoc(track, [
+		[
+			[0 as Micro, [0xde, 0xad]],
+			[33_000 as Micro, []],
+			[66_000 as Micro, []],
+		],
+	]);
 
 	const consumer = new Consumer(replay(track), { format: new LocFormat("video"), maxDelay: 500 as Milli });
 	await settle();
@@ -1006,13 +1018,19 @@ test("Consumer reads an empty LOC payload as the frame's duration", async () => 
 	consumer.close();
 });
 
-test("Consumer passes over the duration markers the LOC producer writes", async () => {
+test("Consumer passes over LOC duration markers", async () => {
 	const track = new Track.Producer("test");
-	const producer = new LocProducer(track);
-	producer.encode(new Uint8Array([0xde, 0xad]), 0 as Micro, true);
-	producer.encode(new Uint8Array([0xbe, 0xef]), 10_000 as Micro, false);
-	producer.encode(new Uint8Array([0xca, 0xfe]), 20_000 as Micro, true);
-	producer.close();
+	writeLoc(track, [
+		[
+			[0 as Micro, [0xde, 0xad]],
+			[10_000 as Micro, [0xbe, 0xef]],
+			[20_000 as Micro, []],
+		],
+		[
+			[20_000 as Micro, [0xca, 0xfe]],
+			[30_000 as Micro, []],
+		],
+	]);
 
 	const consumer = new Consumer(replay(track), { format: new LocFormat("video"), maxDelay: 500 as Milli });
 	await settle();
@@ -1030,10 +1048,13 @@ test("Consumer passes over the duration markers the LOC producer writes", async 
 test("Consumer preserves empty Legacy and LOC data frames", async () => {
 	for (const kind of ["legacy", "loc"]) {
 		const track = new Track.Producer("data");
-		const producer =
-			kind === "legacy" ? new LegacyProducer(track, new LegacyFormat("data")) : new LocProducer(track);
-		producer.encode(new Uint8Array(), 0 as Micro, true);
-		producer.close();
+		if (kind === "legacy") {
+			const producer = new LegacyProducer(track, new LegacyFormat("data"));
+			producer.encode(new Uint8Array(), 0 as Micro, true);
+			producer.close();
+		} else {
+			writeLoc(track, [[[0 as Micro, []]]]);
+		}
 		const format = kind === "legacy" ? new LegacyFormat("data") : new LocFormat();
 		const consumer = new Consumer(replay(track), { format, maxDelay: 500 as Milli });
 		const frame = frameOf(await consumer.next());

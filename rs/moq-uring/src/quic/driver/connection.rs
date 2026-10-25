@@ -10,7 +10,7 @@ use bytes::Bytes;
 use moq_quic::{ConnectionHandle, Dir, StreamId, VarInt};
 use rustc_hash::FxHashMap;
 
-use super::super::{Error, SEGMENT};
+use super::super::Error;
 use super::endpoint;
 use crate::udp;
 use crate::worker::Owner;
@@ -513,6 +513,26 @@ pub(crate) async fn establish(shared: Shared, deadline: Option<Instant>) -> Resu
 	Ok(conn)
 }
 
+impl Connection {
+	pub(crate) fn open_request(&self) -> Result<Option<(super::SendStream, super::RecvStream)>, Error> {
+		if let Some(err) = self.shared.closed() {
+			return Err(err);
+		}
+		let id = self
+			.shared
+			.conn
+			.borrow_mut()
+			.streams()
+			.open(Dir::Bi, Default::default());
+		Ok(id.map(|id| {
+			(
+				super::SendStream::new(self.shared.clone(), id),
+				super::RecvStream::new(self.shared.clone(), id),
+			)
+		}))
+	}
+}
+
 impl web_transport_trait::poll::Session for Connection {
 	type SendStream = super::SendStream;
 	type RecvStream = super::RecvStream;
@@ -881,16 +901,19 @@ impl Driver {
 			Poll::Pending => return Poll::Pending,
 		};
 
-		let segments = (tx.capacity() / SEGMENT).min(TRAIN_SEGMENTS);
-		if segments == 0 {
-			return Poll::Ready(Err(Error::Io(format!(
-				"transmit buffer of {} bytes holds no {SEGMENT} byte segment",
-				tx.capacity()
-			))));
-		}
-
 		let (transmit, closing) = {
 			let mut conn = self.shared.conn.borrow_mut();
+			// moq-quic packs every full datagram at the current MTU, which
+			// discovery can raise, so a train sized for any smaller one would
+			// outgrow the buffer.
+			let mtu = usize::from(conn.current_mtu());
+			let segments = (tx.capacity() / mtu).min(TRAIN_SEGMENTS);
+			if segments == 0 {
+				return Poll::Ready(Err(Error::Io(format!(
+					"transmit buffer of {} bytes holds no {mtu} byte datagram",
+					tx.capacity()
+				))));
+			}
 			// moq-quic encrypts the train straight into the socket's buffer.
 			// Nothing to send, or paced; the buffer returns to the pool on drop.
 			let Some(transmit) = conn.poll_transmit(self.shared.owner.now(), segments, &mut tx) else {

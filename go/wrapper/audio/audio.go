@@ -29,28 +29,13 @@ type Packet = ffi.MoqAudioPacket
 // EncoderFinish holds the packets Encoder.Finish drains and the padded samples to discard.
 type EncoderFinish = ffi.MoqAudioEncoderFinish
 
-// Preset is how the encoder trades latency for compression; a nil EncoderOutput.Preset is PresetBalanced.
-type Preset = ffi.MoqAudioPreset
-
-const (
-	// PresetLowLatency packs 10 ms Opus packets, at twice the packet rate.
-	PresetLowLatency = ffi.MoqAudioPresetLowLatency
-	// PresetBalanced packs 20 ms Opus packets, the default.
-	PresetBalanced = ffi.MoqAudioPresetBalanced
-	// PresetQuality favors compression; 20 ms Opus packets today, the same as PresetBalanced.
-	PresetQuality = ffi.MoqAudioPresetQuality
-)
-
-// EncoderOutput configures the codec side: codec, track name, rate, channels, bitrate, frame duration (0 takes the preset's or codec's own frame), and preset.
-// Preset is refused alongside a nonzero FrameDuration.
+// EncoderOutput configures the codec side: codec, rate, channels, bitrate, and frame duration (0 takes the codec's own frame; 10 ms Opus halves the packetization delay).
 type EncoderOutput struct {
 	Codec         Codec
-	Track         *string
 	SampleRate    *uint32
 	Channels      *uint32
 	Bitrate       *uint32
 	FrameDuration time.Duration
-	Preset        *Preset
 }
 
 func (o EncoderOutput) ffi() (ffi.MoqAudioEncoderOutput, error) {
@@ -58,7 +43,7 @@ func (o EncoderOutput) ffi() (ffi.MoqAudioEncoderOutput, error) {
 	if err == nil && frame > math.MaxUint32 {
 		err = fmt.Errorf("audio frame duration %v exceeds %d microseconds", o.FrameDuration, uint32(math.MaxUint32))
 	}
-	return ffi.MoqAudioEncoderOutput{Codec: o.Codec, Track: o.Track, SampleRate: o.SampleRate, Channels: o.Channels, Bitrate: o.Bitrate, FrameDurationUs: uint32(frame), Preset: o.Preset}, err
+	return ffi.MoqAudioEncoderOutput{Codec: o.Codec, SampleRate: o.SampleRate, Channels: o.Channels, Bitrate: o.Bitrate, FrameDurationUs: uint32(frame)}, err
 }
 
 // DecoderOutput configures the PCM a Consumer delivers, how stale a group may get before it is skipped, and the playout delay.
@@ -99,18 +84,30 @@ func frame(raw ffi.MoqAudioFrame) Frame {
 // Producer encodes PCM and publishes it as a track in a broadcast's catalog.
 type Producer struct{ inner *ffi.MoqAudioProducer }
 
-// NewProducer opens an audio track on the catalog's broadcast and registers its rendition; bandwidth may be nil.
-func NewProducer(catalog *media.CatalogProducer, input EncoderInput, output EncoderOutput, bandwidth *moq.Bandwidth) (*Producer, error) {
-	out, err := output.ffi()
+// ProducerOptions holds input, codec settings, and publication ownership.
+type ProducerOptions struct {
+	// Input is the raw media layout the caller writes.
+	Input EncoderInput
+	// Output is the codec configuration.
+	Output EncoderOutput
+	// Track names the published track; nil derives a name from the codec.
+	Track *string
+	// Bandwidth reserves the track against a session allocator when non-nil.
+	Bandwidth *moq.Bandwidth
+}
+
+// NewProducer opens an audio track on the catalog's broadcast and registers its rendition.
+func NewProducer(catalog *media.CatalogProducer, options ProducerOptions) (*Producer, error) {
+	out, err := options.Output.ffi()
 	if err != nil {
 		return nil, err
 	}
 	var bw **ffi.MoqBandwidth
-	if bandwidth != nil {
-		raw := bridge.Bandwidth(bandwidth)
+	if options.Bandwidth != nil {
+		raw := bridge.Bandwidth(options.Bandwidth)
 		bw = &raw
 	}
-	inner, err := ffi.NewMoqAudioProducer(bridge.CatalogProducer(catalog), input, out, bw)
+	inner, err := ffi.NewMoqAudioProducer(bridge.CatalogProducer(catalog), ffi.MoqAudioProducerOptions{Input: options.Input, Output: out, Track: options.Track, Bandwidth: bw})
 	if err != nil {
 		return nil, err
 	}
@@ -153,7 +150,7 @@ func (p *Producer) Finish() error { return p.inner.Finish() }
 // Encoder encodes PCM without publishing it.
 type Encoder struct{ inner *ffi.MoqAudioEncoder }
 
-// NewEncoder opens a codec-only encoder; output.Track is ignored.
+// NewEncoder opens a codec-only encoder.
 func NewEncoder(output EncoderOutput) (*Encoder, error) {
 	raw, err := output.ffi()
 	if err != nil {

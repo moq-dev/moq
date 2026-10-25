@@ -26,12 +26,12 @@ pub struct ExportArgs {
 
 	/// Keep only this much recent content (a DVR), deleting older objects. Unset keeps everything.
 	#[usage(long)]
-	pub retention: Option<crate::duration::Duration>,
+	pub retention: Option<moq_tokio::cli::Duration>,
 
 	/// How long a deleted object outlives the retention, so readers can finish their downloads.
 	/// Defaults to 30s; needs `--retention`.
 	#[usage(long)]
-	pub retention_grace: Option<crate::duration::Duration>,
+	pub retention_grace: Option<moq_tokio::cli::Duration>,
 }
 
 /// `import archive` args.
@@ -43,7 +43,7 @@ pub struct ImportArgs {
 
 	/// How often a recording still growing is checked for new objects and tracks. Defaults to 1s.
 	#[usage(long)]
-	pub refresh: Option<crate::duration::Duration>,
+	pub refresh: Option<moq_tokio::cli::Duration>,
 }
 
 /// One publisher instance being recorded: its path, and its epoch when its route has one.
@@ -57,8 +57,8 @@ type Instance = (moq_net::PathOwned, Option<moq_net::Epoch>);
 pub async fn export(origin: moq_net::origin::Consumer, prefix: String, args: ExportArgs) -> anyhow::Result<()> {
 	let dvr = match (args.retention, args.retention_grace) {
 		(Some(window), grace) => Some(moq_archive::producer::Dvr::new(
-			window.into_std(),
-			grace.map_or(GRACE, crate::duration::Duration::into_std),
+			window.into(),
+			grace.map_or(GRACE, Into::into),
 		)),
 		(None, Some(_)) => anyhow::bail!("`--retention-grace` needs `--retention`"),
 		(None, None) => None,
@@ -250,7 +250,7 @@ pub async fn import(
 	let store = open(&args.store)?;
 	let mut config = moq_archive::consumer::Config::default();
 	if let Some(refresh) = args.refresh {
-		config = config.with_refresh(refresh.into_std());
+		config = config.with_refresh(refresh.into());
 	}
 	let broadcast = origin.create_broadcast(&name).context("failed to create broadcast")?;
 	let consumer = moq_archive::Consumer::open(store, broadcast.clone(), config)

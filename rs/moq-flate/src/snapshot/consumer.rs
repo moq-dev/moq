@@ -229,7 +229,7 @@ mod timestamps {
 			.create_track("data", moq_net::track::Info::default())
 			.unwrap();
 		let mut subscriber = track.subscribe(None);
-		subscriber.set_groups(..5);
+		subscriber = subscriber.with_range(..5);
 		let config = crate::snapshot::Config::default();
 		let mut producer = crate::snapshot::Producer::new(track, config.clone());
 		let mut consumer = Consumer::new(subscriber, config);

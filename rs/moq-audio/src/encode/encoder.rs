@@ -1,6 +1,6 @@
 //! Audio encoder front end.
 //!
-//! [`Encoder`] checks [`Settings`] against the codec, opens a
+//! [`Encoder`] checks [`Config`] against the codec, opens a
 //! [`Backend`](super::backend::Backend) for it, and owns what every backend of a
 //! codec shares: framing, the terminal drain, and the catalog entry.
 
@@ -72,7 +72,7 @@ impl FromStr for Codec {
 }
 
 /// Encoder backend selection.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Kind {
 	/// Prefer a platform encoder, falling back to software.
@@ -80,10 +80,6 @@ pub enum Kind {
 	Auto,
 	/// Require a software backend.
 	Software,
-	/// Require [`Settings::codec`] to be this codec, by its lowercase name:
-	/// `"opus"`, `"pcm"`, or `"aac"`. Any other codec is refused. The library
-	/// still picks the backend, platform first.
-	Named(String),
 }
 
 /// PCM supplied to [`Producer::write`](super::Producer::write).
@@ -115,83 +111,10 @@ impl Default for Input {
 	}
 }
 
-/// How an encoder trades latency for compression, applied with
-/// [`Settings::with_preset`].
-///
-/// Mirrors `moq_video::encode::Preset`. A preset sets packetization only:
-/// codec, sample rate, layout, bitrate, and DTX stay as configured. The
-/// packet duration is a packetization setting, not a delay guarantee: Opus adds
-/// its own 6.5 ms lookahead, and transport and playout buffering are separate.
-/// [`Encoder::applied`] reports what took effect.
-///
-/// `#[non_exhaustive]` so a later policy can be added without breaking a
-/// `match`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum Preset {
-	/// 10 ms packets: the shortest packetization Opus codes with its full
-	/// toolset, at twice the packet rate.
-	LowLatency,
-	/// 20 ms packets, the Opus default and what [`Settings::new`] builds.
-	#[default]
-	Balanced,
-	/// 20 ms packets. Identical to [`Balanced`](Self::Balanced) today:
-	/// libopus already runs at full complexity, and a longer packet would only
-	/// add delay.
-	Quality,
-}
-
-impl Preset {
-	/// The packet duration this preset codes at.
-	fn frame_duration(self) -> Duration {
-		match self {
-			Self::LowLatency => Duration::from_millis(10),
-			Self::Balanced | Self::Quality => Duration::from_millis(20),
-		}
-	}
-}
-
-/// The packetization an encoder actually applied, as reported by
-/// [`Encoder::applied`].
-///
-/// Mirrors `moq_video::encode::Applied`. A report, not a request: it names the
-/// preset whose packet duration the encoder runs at, so [`Preset::Quality`]
-/// reports [`Preset::Balanced`], whose 20 ms it shares.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct Applied {
-	/// The preset whose controls took effect, or `None` when the frame duration
-	/// matches none: a custom [`Settings::frame_duration`], or AAC's fixed
-	/// 1024-sample frames.
-	pub preset: Option<Preset>,
-	/// The controls that took effect, for display, e.g. `"10ms packets"`. Not a
-	/// parse target.
-	pub controls: String,
-}
-
-impl Applied {
-	/// What `settings` apply once validated.
-	fn new(settings: &Settings) -> Self {
-		if settings.codec == Codec::Aac {
-			return Self {
-				preset: None,
-				controls: format!("{AAC_FRAME_SIZE}-sample frames"),
-			};
-		}
-		let preset = [Preset::LowLatency, Preset::Balanced]
-			.into_iter()
-			.find(|preset| preset.frame_duration() == settings.frame_duration);
-		Self {
-			preset,
-			controls: format!("{:?} packets", settings.frame_duration),
-		}
-	}
-}
-
-/// Audio codec settings shared by [`Encoder`] and [`Producer`](super::Producer).
+/// Audio codec config shared by [`Encoder`] and [`Producer`](super::Producer).
 #[derive(Clone, Debug)]
 #[non_exhaustive]
-pub struct Settings {
+pub struct Config {
 	/// Output codec. Defaults to [`Codec::Opus`].
 	pub codec: Codec,
 	/// Sample rate accepted by the codec.
@@ -219,49 +142,23 @@ pub struct Settings {
 	pub frame_duration: Duration,
 	/// Which encoder implementation to use.
 	pub kind: Kind,
-	/// The preset last given to [`with_preset`](Self::with_preset), read back
-	/// with [`preset`](Self::preset). Crate-visible so the crate's struct
-	/// literals can still end in `..Settings::default()`.
-	pub(crate) preset: Preset,
 }
 
-impl Settings {
-	/// Build default Opus settings for `sample_rate` and `layout`, packetized
-	/// by the default [`Preset`].
+impl Config {
+	/// Build default Opus config for `sample_rate` and `layout`, in 20 ms packets.
 	pub fn new(sample_rate: u32, layout: Layout) -> Self {
-		let preset = Preset::default();
 		Self {
 			codec: Codec::default(),
 			sample_rate,
 			layout,
 			bitrate: None,
 			dtx: false,
-			frame_duration: preset.frame_duration(),
+			frame_duration: Duration::from_millis(20),
 			kind: Kind::Auto,
-			preset,
 		}
 	}
 
-	/// Store `preset` and apply its packetization, keeping every other setting.
-	///
-	/// AAC frames are always 1024 samples, so AAC keeps its frame duration.
-	pub fn with_preset(mut self, preset: Preset) -> Self {
-		self.preset = preset;
-		if self.codec != Codec::Aac {
-			self.frame_duration = preset.frame_duration();
-		}
-		self
-	}
-
-	/// The preset given to [`with_preset`](Self::with_preset), or the default.
-	///
-	/// It echoes the request and goes stale if `codec` or `frame_duration` is
-	/// changed afterward; [`Encoder::applied`] reports what took effect.
-	pub fn preset(&self) -> Preset {
-		self.preset
-	}
-
-	/// Derive concrete codec settings from source PCM.
+	/// Derive concrete codec config from source PCM.
 	pub fn from_input(codec: Codec, input: &Input) -> Self {
 		let sample_rate = match codec {
 			Codec::Opus => opus::pick_rate(input.sample_rate),
@@ -279,10 +176,10 @@ impl Settings {
 		}
 	}
 
-	/// Check the settings against the codec, returning its frame size.
+	/// Check the config against the codec, returning its frame size.
 	///
 	/// Codec rules live here rather than in a backend, so every backend of a
-	/// codec refuses the same settings.
+	/// codec refuses the same config.
 	fn frame_size(&self) -> Result<usize, Error> {
 		self.layout.validate()?;
 		let (rate, channels) = (self.sample_rate, self.layout.channels());
@@ -298,7 +195,7 @@ impl Settings {
 			Codec::Pcm => {
 				if self.bitrate.is_some() {
 					return Err(Error::Unsupported(
-						"pcm bitrate is fixed; leave Settings::bitrate unset".into(),
+						"pcm bitrate is fixed; leave Config::bitrate unset".into(),
 					));
 				}
 				if self.dtx {
@@ -335,7 +232,7 @@ impl Settings {
 	}
 }
 
-impl Default for Settings {
+impl Default for Config {
 	fn default() -> Self {
 		Self::new(48_000, Layout::Stereo)
 	}
@@ -350,14 +247,14 @@ fn aac_frame_duration(sample_rate: u32) -> Duration {
 	Duration::from_nanos((AAC_FRAME_SIZE as u64 * 1_000_000_000 + rate / 2) / rate)
 }
 
-/// The AudioSpecificConfig fields for AAC-LC at the settings' rate and layout.
+/// The AudioSpecificConfig fields for AAC-LC at the config's rate and layout.
 ///
 /// Only layouts with a channelConfiguration are accepted, since synthesizing
 /// one from a bare count would mislabel the rest: config 3 is 3.0 where the
 /// count's default layout is 2.1, and 6.1 has no config the encoder writes.
 /// 7.1 takes config 7, the one every decoder reads as eight channels.
-fn aac_config(settings: &Settings) -> Result<moq_mux::codec::aac::Config, Error> {
-	let layout = settings.layout;
+fn aac_config(config: &Config) -> Result<moq_mux::codec::aac::Config, Error> {
+	let layout = config.layout;
 	if !matches!(
 		layout,
 		Layout::Mono
@@ -373,7 +270,7 @@ fn aac_config(settings: &Settings) -> Result<moq_mux::codec::aac::Config, Error>
 		)));
 	}
 
-	let sample_rate = settings.sample_rate;
+	let sample_rate = config.sample_rate;
 	if !(1..=AAC_MAX_SAMPLE_RATE).contains(&sample_rate) {
 		return Err(Error::Unsupported(format!(
 			"aac sample rate must be between 1 and {AAC_MAX_SAMPLE_RATE} Hz (got {sample_rate})"
@@ -395,11 +292,9 @@ fn aac_config(settings: &Settings) -> Result<moq_mux::codec::aac::Config, Error>
 /// the terminal [`Finish::discard_padding`] when the container supports it.
 pub struct Encoder {
 	backend: Box<dyn Backend>,
-	settings: Settings,
-	/// What the settings applied, fixed at open.
-	applied: Applied,
+	config: Config,
 	frame_size: usize,
-	/// The catalog description, synthesized from the settings at construction so
+	/// The catalog description, synthesized from the config at construction so
 	/// the rendition can be registered before the first packet exists.
 	description: Option<Bytes>,
 	/// Whether input has reached the codec, since a fresh encoder owes no drain.
@@ -430,32 +325,31 @@ impl Finish {
 }
 
 impl Encoder {
-	/// Open an encoder for `settings`, refusing a codec no backend on this host
+	/// Open an encoder for `config`, refusing a codec no backend on this host
 	/// encodes.
-	pub fn new(settings: &Settings) -> Result<Self, Error> {
-		let frame_size = settings.frame_size()?;
-		let backend = backend::open(settings)?;
+	pub fn new(config: &Config) -> Result<Self, Error> {
+		let frame_size = config.frame_size()?;
+		let backend = backend::open(config)?;
 
-		let description = match settings.codec {
+		let description = match config.codec {
 			Codec::Opus => {
 				// OpusHead carries the lookahead in the 48 kHz timebase.
 				let lookahead = backend.delay() as u64;
-				let pre_skip = u16::try_from((lookahead * 48_000) / u64::from(settings.sample_rate))
+				let pre_skip = u16::try_from((lookahead * 48_000) / u64::from(config.sample_rate))
 					.map_err(|_| Error::Unsupported(format!("Opus lookahead {lookahead} does not fit in OpusHead")))?;
-				let head = moq_mux::codec::opus::Config::new(settings.sample_rate, settings.layout.channels())
+				let head = moq_mux::codec::opus::Config::new(config.sample_rate, config.layout.channels())
 					.with_pre_skip(pre_skip)
 					.encode()
 					.map_err(moq_mux::Error::from)?;
 				Some(head)
 			}
-			Codec::Aac => Some(aac_config(settings)?.encode().map_err(moq_mux::Error::from)?),
+			Codec::Aac => Some(aac_config(config)?.encode().map_err(moq_mux::Error::from)?),
 			Codec::Pcm => None,
 		};
 
 		Ok(Self {
 			backend,
-			settings: settings.clone(),
-			applied: Applied::new(settings),
+			config: config.clone(),
 			frame_size,
 			description,
 			started: false,
@@ -467,32 +361,27 @@ impl Encoder {
 		self.backend.name()
 	}
 
-	/// The packetization applied for [`Settings::preset`].
-	pub fn applied(&self) -> &Applied {
-		&self.applied
-	}
-
-	/// The encoder settings, including the latest accepted runtime bitrate.
-	pub fn settings(&self) -> &Settings {
-		&self.settings
+	/// The encoder config, including the latest accepted runtime bitrate.
+	pub fn config(&self) -> &Config {
+		&self.config
 	}
 
 	/// The codec this encoder emits. A [`Producer`](super::Producer) must be
 	/// built for the same codec to publish its packets.
 	pub fn codec(&self) -> Codec {
-		self.settings.codec
+		self.config.codec
 	}
 
 	/// Sample rate the codec actually runs at, which is
-	/// [`Settings::sample_rate`].
+	/// [`Config::sample_rate`].
 	pub fn codec_rate(&self) -> u32 {
-		self.settings.sample_rate
+		self.config.sample_rate
 	}
 
 	/// Channel count the codec actually runs at, which is
-	/// [`Settings::layout`]'s channel count.
+	/// [`Config::layout`]'s channel count.
 	pub fn codec_channels(&self) -> u32 {
-		self.settings.layout.channels()
+		self.config.layout.channels()
 	}
 
 	/// Number of samples per channel the codec consumes per call to
@@ -518,7 +407,7 @@ impl Encoder {
 		let previous = self.backend.bitrate();
 		self.backend.set_bitrate(bitrate.as_bps())?;
 		if bitrate.as_bps() != previous {
-			self.settings.bitrate = Some(bitrate);
+			self.config.bitrate = Some(bitrate);
 		}
 		Ok(())
 	}
@@ -542,7 +431,7 @@ impl Encoder {
 	/// AAC packet is stamped that much earlier and the priming lands before the
 	/// first input sample rather than delaying it.
 	pub(super) fn folded_delay(&self) -> usize {
-		match self.settings.codec {
+		match self.config.codec {
 			Codec::Aac => self.backend.delay(),
 			Codec::Opus | Codec::Pcm => 0,
 		}
@@ -636,10 +525,10 @@ impl Encoder {
 	/// hang catalog entry describing this encoder's output stream.
 	pub fn catalog(&self) -> hang::catalog::AudioConfig {
 		let (rate, channels) = (self.codec_rate(), self.codec_channels());
-		let (codec, bitrate): (hang::catalog::AudioCodec, _) = match self.settings.codec {
+		let (codec, bitrate): (hang::catalog::AudioCodec, _) = match self.config.codec {
 			Codec::Opus => (
 				hang::catalog::AudioCodec::Opus,
-				self.settings.bitrate.map(moq_net::bandwidth::Rate::as_bps),
+				self.config.bitrate.map(moq_net::bandwidth::Rate::as_bps),
 			),
 			Codec::Pcm => (
 				hang::catalog::AudioCodec::Pcm,
@@ -647,7 +536,7 @@ impl Encoder {
 			),
 			Codec::Aac => (
 				hang::catalog::AAC { profile: AAC_LC }.into(),
-				self.settings.bitrate.map(moq_net::bandwidth::Rate::as_bps),
+				self.config.bitrate.map(moq_net::bandwidth::Rate::as_bps),
 			),
 		};
 
@@ -655,7 +544,7 @@ impl Encoder {
 		config.bitrate = bitrate;
 		config.description = self.description.clone();
 		config.container = hang::catalog::Container::Legacy;
-		if matches!(self.settings.codec, Codec::Opus) {
+		if matches!(self.config.codec, Codec::Opus) {
 			config.warmup = Some(moq_mux::codec::opus::WARMUP);
 		}
 		config
@@ -688,9 +577,9 @@ mod tests {
 
 	#[test]
 	fn opus_encode_then_decode_keeps_signal_close() {
-		let mut enc = Encoder::new(&Settings {
+		let mut enc = Encoder::new(&Config {
 			bitrate: Some(moq_net::bandwidth::Rate::from_bps(96_000)),
-			..Settings::default()
+			..Config::default()
 		})
 		.unwrap();
 
@@ -718,87 +607,44 @@ mod tests {
 
 	#[test]
 	fn opus_rejects_unsupported_frame_duration() {
-		let err = Encoder::new(&Settings {
+		let err = Encoder::new(&Config {
 			frame_duration: Duration::from_millis(15),
-			..Settings::default()
+			..Config::default()
 		});
 		assert!(matches!(err, Err(Error::Unsupported(_))));
 	}
 
-	/// A preset has to reach the codec as its packet duration, read back off the
-	/// packet's TOC rather than our own settings, and leave everything else alone.
-	/// The settings keep the requested preset; the encoder reports the applied one.
+	/// The frame duration has to reach the codec as its packet duration, read
+	/// back off the packet's TOC rather than our own config.
 	#[test]
-	fn preset_sets_the_packet_duration_and_keeps_the_rest() {
-		for (preset, samples, applied) in [
-			(Preset::LowLatency, 480, Preset::LowLatency),
-			(Preset::Balanced, 960, Preset::Balanced),
-			(Preset::Quality, 960, Preset::Balanced),
-		] {
-			let settings = Settings {
-				bitrate: Some(moq_net::bandwidth::Rate::from_bps(96_000)),
+	fn frame_duration_reaches_the_packet() {
+		for (millis, samples) in [(10, 480), (20, 960)] {
+			let config = Config {
 				layout: Layout::Mono,
-				..Settings::default()
-			}
-			.with_preset(preset);
-			let mut enc = Encoder::new(&settings).unwrap();
-			assert_eq!(enc.settings().layout, Layout::Mono);
-			assert_eq!(enc.settings().preset(), preset);
-			assert_eq!(enc.applied().preset, Some(applied), "{preset:?}");
-			assert_eq!(enc.bitrate().as_bps(), 96_000);
+				frame_duration: Duration::from_millis(millis),
+				..Config::default()
+			};
+			let mut enc = Encoder::new(&config).unwrap();
 			assert_eq!(enc.frame_size(), samples);
 
 			let packet = enc.encode(&vec![0.0f32; samples]).unwrap();
 			// SAFETY: a non-empty packet from the encoder above; the TOC is its first byte.
 			let coded = unsafe { unsafe_libopus::opus_packet_get_samples_per_frame(packet.payload.as_ptr(), 48_000) };
-			assert_eq!(coded as usize, samples, "{preset:?} packet");
-
-			let input = Input::new(48_000, Layout::Stereo);
-			let aac = Settings::from_input(Codec::Aac, &input).with_preset(preset);
-			assert_eq!(aac.preset(), preset);
-			assert_eq!(
-				aac.frame_duration,
-				Settings::from_input(Codec::Aac, &input).frame_duration
-			);
-			assert_eq!(aac.frame_size().unwrap(), AAC_FRAME_SIZE, "{preset:?} aac");
-			assert_eq!(stub(&aac).unwrap().applied().preset, None, "{preset:?} aac");
+			assert_eq!(coded as usize, samples, "{millis} ms packet");
 		}
-	}
-
-	/// Settings without a preset are the default preset, and say so.
-	#[test]
-	fn default_settings_apply_the_default_preset() {
-		let settings = Settings::default();
-		assert_eq!(settings.preset(), Preset::default());
-		let enc = Encoder::new(&settings).unwrap();
-		assert_eq!(enc.applied().preset, Some(Preset::default()));
-		assert_eq!(enc.applied().controls, "20ms packets");
-	}
-
-	/// A frame duration no preset uses is reported as such, not as the request.
-	#[test]
-	fn custom_frame_duration_applies_no_preset() {
-		let settings = Settings {
-			frame_duration: Duration::from_micros(2_500),
-			..Settings::default().with_preset(Preset::LowLatency)
-		};
-		let enc = Encoder::new(&settings).unwrap();
-		assert_eq!(enc.settings().preset(), Preset::LowLatency);
-		assert_eq!(enc.applied().preset, None);
-		assert_eq!(enc.applied().controls, "2.5ms packets");
 	}
 
 	#[test]
 	fn opus_rejects_misaligned_input() {
-		let mut enc = Encoder::new(&Settings::default()).unwrap();
+		let mut enc = Encoder::new(&Config::default()).unwrap();
 		assert!(matches!(enc.encode(&[0.0f32; 100]), Err(Error::Misaligned { .. })));
 	}
 
 	#[test]
 	fn opus_catalog_includes_opushead() {
-		let enc = Encoder::new(&Settings {
+		let enc = Encoder::new(&Config {
 			bitrate: Some(moq_net::bandwidth::Rate::from_bps(64_000)),
-			..Settings::default()
+			..Config::default()
 		})
 		.unwrap();
 		let cfg = enc.catalog();
@@ -814,7 +660,7 @@ mod tests {
 
 	#[test]
 	fn opus_decoder_trims_encoder_lookahead_once() {
-		let mut enc = Encoder::new(&Settings::default()).unwrap();
+		let mut enc = Encoder::new(&Config::default()).unwrap();
 		let mut dec = Decoder::new(&enc.catalog(), &DecodeConfig::default()).unwrap();
 		let frame = vec![0.0; enc.frame_size() * enc.codec_channels() as usize];
 
@@ -830,7 +676,7 @@ mod tests {
 
 	#[test]
 	fn opus_finish_accounts_for_partial_frame_padding() {
-		let enc = Encoder::new(&Settings::new(48_000, Layout::Mono)).unwrap();
+		let enc = Encoder::new(&Config::new(48_000, Layout::Mono)).unwrap();
 
 		// The 360 frames of terminal padding exceed the 312-frame lookahead,
 		// so the partial packet itself completes the drain.
@@ -841,9 +687,9 @@ mod tests {
 
 	#[test]
 	fn opus_finish_drains_lookahead_across_multiple_short_packets() {
-		let mut enc = Encoder::new(&Settings {
+		let mut enc = Encoder::new(&Config {
 			frame_duration: Duration::from_micros(2_500),
-			..Settings::new(48_000, Layout::Mono)
+			..Config::new(48_000, Layout::Mono)
 		})
 		.unwrap();
 		let frame = vec![0.0; enc.frame_size()];
@@ -857,7 +703,7 @@ mod tests {
 
 	#[test]
 	fn reset_drops_pending_opus_lookahead() {
-		let mut enc = Encoder::new(&Settings::new(48_000, Layout::Mono)).unwrap();
+		let mut enc = Encoder::new(&Config::new(48_000, Layout::Mono)).unwrap();
 		let mut old = vec![0.0; enc.frame_size()];
 		old[enc.frame_size() - 1] = 1.0;
 		enc.encode(&old).unwrap();
@@ -881,20 +727,20 @@ mod tests {
 
 	#[test]
 	fn opus_runtime_bitrate_updates_encoder_state() {
-		let mut enc = Encoder::new(&Settings {
+		let mut enc = Encoder::new(&Config {
 			bitrate: Some(moq_net::bandwidth::Rate::from_bps(64_000)),
-			..Settings::default()
+			..Config::default()
 		})
 		.unwrap();
 
 		enc.set_bitrate(moq_net::bandwidth::Rate::from_bps(32_000)).unwrap();
 		assert_eq!(enc.bitrate(), moq_net::bandwidth::Rate::from_bps(32_000));
-		assert_eq!(enc.settings().bitrate, Some(moq_net::bandwidth::Rate::from_bps(32_000)));
+		assert_eq!(enc.config().bitrate, Some(moq_net::bandwidth::Rate::from_bps(32_000)));
 	}
 
 	#[test]
 	fn opus_runtime_bitrate_rejects_values_libopus_would_clamp() {
-		let mut enc = Encoder::new(&Settings::default()).unwrap();
+		let mut enc = Encoder::new(&Config::default()).unwrap();
 		let original = enc.bitrate();
 		assert!(enc.set_bitrate(moq_net::bandwidth::Rate::from_bps(1)).is_err());
 		assert!(enc.set_bitrate(moq_net::bandwidth::Rate::from_bps(600_001)).is_err());
@@ -903,7 +749,7 @@ mod tests {
 
 	#[test]
 	fn settings_fix_the_codec_rate() {
-		let enc = Encoder::new(&Settings::new(24_000, Layout::Mono)).unwrap();
+		let enc = Encoder::new(&Config::new(24_000, Layout::Mono)).unwrap();
 		assert_eq!(enc.codec_rate(), 24_000);
 		let catalog = enc.catalog();
 		assert_eq!(catalog.sample_rate, 24_000);
@@ -913,9 +759,9 @@ mod tests {
 
 	#[test]
 	fn pcm_roundtrip_is_lossless() {
-		let mut enc = Encoder::new(&Settings {
+		let mut enc = Encoder::new(&Config {
 			codec: Codec::Pcm,
-			..Settings::default()
+			..Config::default()
 		})
 		.unwrap();
 		let mut dec = Decoder::new(&enc.catalog(), &DecodeConfig::default()).unwrap();
@@ -932,17 +778,17 @@ mod tests {
 	#[test]
 	fn pcm_refuses_layouts_its_count_cannot_name() {
 		for layout in [Layout::ThreePointZero, Layout::FourPointZero] {
-			let err = Encoder::new(&Settings {
+			let err = Encoder::new(&Config {
 				codec: Codec::Pcm,
-				..Settings::new(48_000, layout)
+				..Config::new(48_000, layout)
 			});
 			assert!(matches!(err, Err(Error::Unsupported(_))), "{layout:?}");
 		}
 
 		for layout in [Layout::TwoPointOne, Layout::Quad, Layout::Discrete(3)] {
-			let mut enc = Encoder::new(&Settings {
+			let mut enc = Encoder::new(&Config {
 				codec: Codec::Pcm,
-				..Settings::new(48_000, layout)
+				..Config::new(48_000, layout)
 			})
 			.unwrap();
 			let mut dec = Decoder::new(&enc.catalog(), &DecodeConfig::default()).unwrap();
@@ -954,9 +800,9 @@ mod tests {
 
 	#[test]
 	fn pcm_catalog_declares_fixed_bitrate() {
-		let enc = Encoder::new(&Settings {
+		let enc = Encoder::new(&Config {
 			codec: Codec::Pcm,
-			..Settings::default()
+			..Config::default()
 		})
 		.unwrap();
 		let catalog = enc.catalog();
@@ -968,9 +814,9 @@ mod tests {
 
 	#[test]
 	fn pcm_rejects_runtime_bitrate_change() {
-		let mut enc = Encoder::new(&Settings {
+		let mut enc = Encoder::new(&Config {
 			codec: Codec::Pcm,
-			..Settings::default()
+			..Config::default()
 		})
 		.unwrap();
 		let bitrate = enc.bitrate();
@@ -981,43 +827,43 @@ mod tests {
 
 	#[test]
 	fn pcm_rejects_fractional_sample_frame_duration() {
-		let err = Encoder::new(&Settings {
+		let err = Encoder::new(&Config {
 			codec: Codec::Pcm,
 			frame_duration: Duration::from_micros(2_500),
-			..Settings::new(44_100, Layout::Stereo)
+			..Config::new(44_100, Layout::Stereo)
 		});
 		assert!(matches!(err, Err(Error::Unsupported(_))));
 	}
 
 	#[test]
 	fn pcm_rejects_bitrate_overflow() {
-		let err = Encoder::new(&Settings {
+		let err = Encoder::new(&Config {
 			codec: Codec::Pcm,
 			frame_duration: Duration::from_secs(1),
-			..Settings::new(u32::MAX, Layout::Discrete(u32::MAX))
+			..Config::new(u32::MAX, Layout::Discrete(u32::MAX))
 		});
 		assert!(matches!(err, Err(Error::Unsupported(_))));
 	}
 
 	#[test]
 	fn pcm_rejects_opus_only_settings() {
-		let settings = Settings {
+		let config = Config {
 			codec: Codec::Pcm,
 			dtx: true,
-			..Settings::default()
+			..Config::default()
 		};
-		assert!(matches!(Encoder::new(&settings), Err(Error::Unsupported(_))));
+		assert!(matches!(Encoder::new(&config), Err(Error::Unsupported(_))));
 	}
 
 	/// The catalog carries only a count, so a discrete layout comes back as the
 	/// count's default one, with the samples untouched.
 	#[test]
 	fn pcm_passes_discrete_multichannel_samples_through() {
-		let settings = Settings {
+		let config = Config {
 			codec: Codec::Pcm,
-			..Settings::new(48_000, Layout::Discrete(3))
+			..Config::new(48_000, Layout::Discrete(3))
 		};
-		let mut encoder = Encoder::new(&settings).unwrap();
+		let mut encoder = Encoder::new(&config).unwrap();
 		let catalog = encoder.catalog();
 		let mut decoder = Decoder::new(&catalog, &DecodeConfig::default()).unwrap();
 		let input = [0.1, 0.2, 0.3].repeat(encoder.frame_size());
@@ -1029,18 +875,18 @@ mod tests {
 
 	#[test]
 	fn opus_refuses_discrete_layout() {
-		let settings = Settings::new(48_000, Layout::Discrete(2));
-		assert!(matches!(Encoder::new(&settings), Err(Error::Unsupported(_))));
+		let config = Config::new(48_000, Layout::Discrete(2));
+		assert!(matches!(Encoder::new(&config), Err(Error::Unsupported(_))));
 	}
 
-	fn aac(layout: Layout) -> Settings {
-		Settings::from_input(Codec::Aac, &Input::new(48_000, layout))
+	fn aac(layout: Layout) -> Config {
+		Config::from_input(Codec::Aac, &Input::new(48_000, layout))
 	}
 
-	/// Open `settings` on the test stub, since this host has no AAC encoder.
-	fn stub(settings: &Settings) -> Result<Encoder, Error> {
+	/// Open `config` on the test stub, since this host has no AAC encoder.
+	fn stub(config: &Config) -> Result<Encoder, Error> {
 		let _stub = backend::stub::install();
-		Encoder::new(settings)
+		Encoder::new(config)
 	}
 
 	/// Without the stub, the public constructor sees the real tiers and refuses.
@@ -1052,7 +898,7 @@ mod tests {
 		assert!(matches!(err, Error::Unsupported(_)), "{err}");
 	}
 
-	/// The ASC is synthesized from the settings, so it exists before any packet.
+	/// The ASC is synthesized from the config, so it exists before any packet.
 	#[test]
 	fn aac_catalog_carries_the_synthesized_asc() {
 		let enc = stub(&aac(Layout::Stereo)).unwrap();
@@ -1105,33 +951,33 @@ mod tests {
 	#[test]
 	fn aac_frame_duration_is_the_codecs() {
 		assert_eq!(aac(Layout::Stereo).frame_duration, Duration::from_nanos(21_333_333));
-		let settings = Settings {
+		let config = Config {
 			frame_duration: Duration::from_micros(21_333),
 			..aac(Layout::Stereo)
 		};
-		assert_eq!(stub(&settings).unwrap().frame_size(), 1024);
+		assert_eq!(stub(&config).unwrap().frame_size(), 1024);
 
-		let settings = Settings {
+		let config = Config {
 			frame_duration: Duration::from_millis(20),
 			..aac(Layout::Stereo)
 		};
-		let err = stub(&settings).err().expect("20 ms is 960 samples");
+		let err = stub(&config).err().expect("20 ms is 960 samples");
 		assert!(err.to_string().contains("1024"), "{err}");
 	}
 
 	#[test]
 	fn aac_refuses_dtx() {
-		let settings = Settings {
+		let config = Config {
 			dtx: true,
 			..aac(Layout::Stereo)
 		};
-		assert!(matches!(stub(&settings), Err(Error::Unsupported(_))));
+		assert!(matches!(stub(&config), Err(Error::Unsupported(_))));
 	}
 
 	/// A backend that can't retune keeps its opening rate.
 	#[test]
 	fn fixed_rate_backend_keeps_its_opening_rate() {
-		let mut enc = stub(&Settings {
+		let mut enc = stub(&Config {
 			bitrate: Some(moq_net::bandwidth::Rate::from_bps(96_000)),
 			..aac(Layout::Stereo)
 		})
@@ -1140,7 +986,7 @@ mod tests {
 		let err = enc.set_bitrate(moq_net::bandwidth::Rate::from_bps(64_000));
 		assert!(matches!(err, Err(Error::Unsupported(_))));
 		assert_eq!(enc.bitrate(), moq_net::bandwidth::Rate::from_bps(96_000));
-		assert_eq!(enc.settings().bitrate, Some(moq_net::bandwidth::Rate::from_bps(96_000)));
+		assert_eq!(enc.config().bitrate, Some(moq_net::bandwidth::Rate::from_bps(96_000)));
 		assert_eq!(enc.catalog().bitrate, Some(96_000));
 	}
 

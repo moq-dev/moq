@@ -455,6 +455,20 @@ test("PublishNamespaceDone: round trip", async () => {
 	expect(decoded.trackNamespace).toBe("old/stream" as Path.Valid);
 });
 
+test("UnsubscribeNamespace: names the prefix on draft 14 and the request on draft 15", async () => {
+	const msg = new SubscribeNamespace.UnsubscribeNamespace({ prefix: Path.from("cam/front"), requestId: 6n });
+
+	const v14 = await encodeVersioned(msg, Version.DRAFT_14);
+	const named = await decodeVersioned(v14, SubscribeNamespace.UnsubscribeNamespace.decode, Version.DRAFT_14);
+	expect(named.prefix).toBe("cam/front" as Path.Valid);
+
+	const v15 = await encodeVersioned(msg, Version.DRAFT_15);
+	const numbered = await decodeVersioned(v15, SubscribeNamespace.UnsubscribeNamespace.decode, Version.DRAFT_15);
+	expect(numbered.requestId).toBe(6n);
+
+	await expect((() => encodeVersioned(msg, Version.DRAFT_16))()).rejects.toThrow(/draft-14\/15 only/);
+});
+
 test("PublishNamespaceCancel: round trip", async () => {
 	const msg = new Announce.PublishNamespaceCancel({
 		trackNamespace: Path.from("canceled"),
@@ -2043,6 +2057,15 @@ test("Subscribe v20: decodes every legal parameter", async () => {
 	expect(msg.forward).toBe(false);
 	expect(msg.rangeFilters).toBe(true);
 	expect(msg.propertiesWanted).toBe(false);
+});
+
+// From draft-15 an omitted SUBSCRIBER_PRIORITY means 128, not the unset 127, so a relay
+// forwards it unchanged.
+test("Subscribe: an omitted SUBSCRIBER_PRIORITY is 128", async () => {
+	for (const version of [Version.DRAFT_15, Version.DRAFT_16, Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
+		const msg = await decodeVersioned(framed([...TRACK_HEAD, 0x00]), Subscribe.Subscribe.decode, version);
+		expect(msg.subscriberPriority).toBe(128);
+	}
 });
 
 // INCLUDE_PROPERTIES is a uint8: one raw byte with no Length.

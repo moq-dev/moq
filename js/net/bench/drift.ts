@@ -5,7 +5,7 @@ import { type Group, Track } from "@moq/net";
 /** Read live frames after a retained window, checking every delivered payload. */
 export async function run(): Promise<void> {
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const payload = new Uint8Array([7]);
 	try {
 		console.log("retained,publishers,readers,ns_per_frame");
@@ -58,7 +58,7 @@ export async function run(): Promise<void> {
 					}
 				}
 	} finally {
-		restore();
+		installed.close();
 	}
 }
 if (import.meta.main) await run();

@@ -501,7 +501,7 @@ impl Session {
 			binding: transport.binding(),
 		});
 
-		let (writer, reader) = transport.split();
+		let (writer, reader) = transport.split(&config);
 		let reader = tokio::spawn(run_reader(inner.clone(), reader));
 		tokio::spawn(run_writer(inner.clone(), writer, reader));
 
@@ -548,7 +548,7 @@ impl Session {
 	/// Open a send group at `priority`, for streams to join with
 	/// [`SendStream::set_group`](poll::SendStream::set_group) and datagrams with
 	/// [`SendOptions`](poll::SendOptions).
-	pub fn send_group(&self, priority: i64) -> SendGroup {
+	fn send_group(&self, priority: i64) -> SendGroup {
 		let id = self.inner.lock().conn.send_groups().open(priority);
 		SendGroup(Arc::new(GroupInner {
 			inner: self.inner.clone(),
@@ -660,6 +660,35 @@ impl poll::Session for Session {
 				RecvStream::new(self.inner.clone(), id),
 			)
 		})
+	}
+
+	fn poll_open_request(
+		&mut self,
+		cx: &mut Context<'_>,
+		options: poll::SendOptions<'_, SendGroup>,
+	) -> Poll<Result<Option<poll::BiStreams<Self>>, Error>> {
+		let waiter = self.park.hold(cx);
+		let mut state = self.inner.lock();
+		if let Some(err) = &state.closed {
+			return Poll::Ready(Err(err.clone()));
+		}
+		// A session started on an out-of-band protocol (a WebSocket subprotocol) runs before
+		// the peer's transport parameters arrive. Until then its credit is unknown, not spent.
+		if !state.established {
+			waiter.register(&mut state.establish_waiters);
+			return Poll::Pending;
+		}
+		let id = state.conn.streams().open(Dir::Bi, to_quic(options));
+		if id.is_some() {
+			state.driver.wake();
+		}
+		drop(state);
+		Poll::Ready(Ok(id.map(|id| {
+			(
+				SendStream::new(self.inner.clone(), id),
+				RecvStream::new(self.inner.clone(), id),
+			)
+		})))
 	}
 
 	fn send_group(&mut self, priority: i64) -> Option<SendGroup> {
@@ -842,23 +871,14 @@ impl SendStream {
 		}
 	}
 
-	/// Reset the stream with `code`, still delivering the first `offset` bytes written, as
-	/// RESET_STREAM_AT does on draft-02. Elsewhere the prefix is not guaranteed.
-	pub fn reset_at(&mut self, offset: u64, code: u32) {
-		self.reset_with(code, Some(offset));
-	}
-
-	fn reset_with(&mut self, code: u32, offset: Option<u64>) {
+	fn reset_with(&mut self, code: u32) {
 		if self.reset {
 			return;
 		}
 		let code = VarInt::from_u32(code);
 		let mut state = self.inner.lock();
 		// Err means the stream is already gone, which is what we wanted.
-		let _ = match offset {
-			Some(offset) => state.conn.send_stream(self.id).reset_at(offset, code),
-			None => state.conn.send_stream(self.id).reset(code),
-		};
+		let _ = state.conn.send_stream(self.id).reset(code);
 		state.driver.wake();
 		self.reset = true;
 	}
@@ -937,7 +957,7 @@ impl poll::SendStream for SendStream {
 	}
 
 	fn reset(&mut self, code: u32) {
-		self.reset_with(code, None);
+		self.reset_with(code);
 	}
 
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
@@ -994,7 +1014,7 @@ enum Read {
 /// An incoming stream. Dropping it unfinished sends STOP_SENDING with code 0.
 ///
 /// Reading returns the peer's connection credit as it goes, so incomplete messages are
-/// bounded by the largest message each rather than by `max_data`, and nothing is evicted.
+/// bounded by the largest message each rather than by `receive_window`, and nothing is evicted.
 pub struct RecvStream(poll::Buffered<RecvChunks>);
 
 impl RecvStream {
