@@ -69,7 +69,6 @@ Rejected in planning:
 - [The origin announces](/quest/m1/api-audit/announce-owner.md) - a broadcast producer cannot announce; the origin hands out the announcement, so `Prepared` and standalone broadcasts lose methods that always fail
 - [moq-net exports with a consumer](/quest/m1/api-audit/net-exports.md) - the dead and test-only moq-net, `@moq/net`, and moq-ffi items the follow-up audit found go private or away
 - [Bindings read gaps and ends](/quest/m1/api-audit/decode-read-bindings.md) - moq-ffi and every wrapper surface `Gap` and `End` instead of discarding them
-- [One frame rate name](/quest/m1/api-audit/frame-rate.md) - core `moq_video::Rate` becomes `FrameRate`, as the bindings name it
 - [Pinned consumers adopt the CLI flag names](/quest/m1/api-audit/cli-flags-consumers.md) - pinned downstream deployments move past the flag rename and use its spellings
 - [Session-only items stay private](/quest/m1/api-audit/model-private.md) - model items only the built-in sessions use are private
 - [Only sessions accept a request](/quest/m1/api-audit/claim-request-type.md) - accepting an application claim's request fails to compile, and the peer-route hatches are crate-private

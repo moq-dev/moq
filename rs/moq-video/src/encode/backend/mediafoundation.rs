@@ -65,7 +65,7 @@ pub(crate) struct MediaFoundation {
 	codec: Codec,
 	width: u32,
 	height: u32,
-	framerate: crate::Rate,
+	framerate: crate::FrameRate,
 	bitrate: u32,
 	/// Keyframe interval in frames.
 	gop: u32,
