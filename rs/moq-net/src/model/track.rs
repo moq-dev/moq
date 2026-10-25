@@ -101,7 +101,7 @@ pub(crate) const IDLE_LINGER: Duration = Duration::from_secs(30);
 // Deliberately not `Copy`, even though it's now a plain value: adding `Copy` turns
 // every existing `info.clone()` in a consumer's code into a `clippy::clone_on_copy`
 // error under `-D warnings`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Info {
 	/// Units per second for per-frame timestamps on this track, or `None` for an untimed
@@ -1921,7 +1921,11 @@ impl TrackState {
 			// Readers and group demand reach it at once. Its arrival starts the wall clock of
 			// the reads it succeeds, but it counts as content only once it starts.
 			self.arrival.push_back((sequence, stamp));
-			self.wake_landed(sequence);
+			// Registration holds a track read lock, so this exclusive insert sees
+			// its hint. Reveal only holds a read lock and cannot use the shortcut.
+			if self.cache.wakes().has_landing_waiters() {
+				self.wake_landed(sequence);
+			}
 		}
 	}
 
@@ -3706,6 +3710,11 @@ impl TrackWeak {
 		state.abort = Some(err);
 		state.close();
 		true
+	}
+
+	/// Whether its producer declared the track's end, which is how its listing ends too.
+	pub(super) fn is_finished(&self) -> bool {
+		self.state.read().end.is_some()
 	}
 
 	/// Whether anyone is consuming the track right now. A closed track doesn't

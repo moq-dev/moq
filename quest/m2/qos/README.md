@@ -23,8 +23,8 @@ histograms, which stay monotonic and merge-patch friendly, and which any
 consumer can diff into a distribution. Clients report for themselves through
 hang stats and `.echo` feedback tracks, planned in their own line on `main`.
 
-Only the lag counters land here. Client health and preflight are
-[client health](/quest/m2/stats/health.md) and
+Only the lag counters land here. Client health is
+[graded in hang](/doc/concept/stats.md#health), and preflight is
 [preflight](/quest/m2/stats/preflight.md) in the media stats line. The
 moq.pro (downstream) dashboard work, including the health badge and the
 connection-health drill-down, consumes both.

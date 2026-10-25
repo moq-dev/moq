@@ -9,6 +9,7 @@
 //! [Info] is the broadcast's static metadata, fixed for its lifetime.
 use crate::{cache, stats, track};
 use std::{
+	collections::HashSet,
 	sync::Arc,
 	task::{Poll, ready},
 };
@@ -145,6 +146,18 @@ impl BroadcastState {
 		for track in self.tracks.iter() {
 			track.reject(err.clone());
 		}
+	}
+
+	/// End every listing, reporting each listed track whose producer declared its end as
+	/// finished, though that producer still holds it in the table.
+	fn close_listing(&mut self) {
+		let finished: HashSet<Arc<str>> = self
+			.tracks
+			.iter()
+			.filter(|track| track.is_finished())
+			.map(|track| track.name().clone())
+			.collect();
+		self.listing.close(|name| finished.contains(name));
 	}
 
 	/// The track serving `name` now, published or requested, read without joining its demand.
@@ -526,7 +539,7 @@ impl Alive {
 			// and `Consumer::track` answers `Unroutable` for one asked about after this
 			// point. Say the same to whoever asked earlier.
 			state.reject_unserved(Error::Unroutable);
-			state.listing.close();
+			state.close_listing();
 		}
 		let _ = self.token.close();
 		self.retract();
@@ -552,7 +565,7 @@ impl Alive {
 			};
 			state.closing = true;
 			state.reject_unserved(Error::Unroutable);
-			state.listing.close();
+			state.close_listing();
 			token
 		};
 		token.close();

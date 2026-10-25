@@ -2540,7 +2540,19 @@ export class Publisher {
 					reading ??= listing.next().then((event): Woken => ({ kind: "track", event }));
 					waits.push(reading);
 				}
-				const woken = await untilAborted(race(waits), hold.signal);
+				let woken: Woken;
+				try {
+					woken = await untilAborted(race(waits), hold.signal);
+				} catch (err) {
+					// A closed broadcast's listing has already ended, after the tracks that left
+					// before it, so it is read to that end whatever withdrew the broadcast: a
+					// PUBLISH whose track finished ends with TRACK_ENDED. Nothing more goes out.
+					if (source.closed.peek() === undefined) throw err;
+					pending.clear();
+					unstage();
+					reading ??= listing.next().then((event): Woken => ({ kind: "track", event }));
+					woken = await reading;
+				}
 				if (woken.kind === "changed") continue;
 				if (woken.kind === "failed") {
 					console.debug(`listed broadcast=${namespace}: PUBLISH stream did not open`, woken.err);
