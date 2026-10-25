@@ -108,8 +108,8 @@ impl<S: poll::Session> poll::Session for Local<S> {
 		self.0.poll_closed(cx)
 	}
 
-	fn stats(&self) -> impl moq::Stats {
-		self.0.stats()
+	fn metrics(&self) -> impl moq::Metrics {
+		self.0.metrics()
 	}
 
 	fn wire(&self) -> Option<moq::Wire> {

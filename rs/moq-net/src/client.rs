@@ -628,7 +628,7 @@ mod tests {
 		close_events: kio::Shared<Vec<(u32, String)>>,
 		control_writes: Arc<Mutex<Vec<u8>>>,
 		send_rate: Mutex<Option<u64>>,
-		bytes_sent: Mutex<Option<u64>>,
+		wire: crate::transport::Wire,
 	}
 
 	fn any_close(events: &kio::Ref<'_, Vec<(u32, String)>>) -> Poll<()> {
@@ -652,7 +652,7 @@ mod tests {
 				close_events: kio::Shared::default(),
 				control_writes: writes,
 				send_rate: Mutex::new(None),
-				bytes_sent: Mutex::new(None),
+				wire: crate::transport::Wire::new(),
 			};
 			Self {
 				state: Arc::new(state),
@@ -676,8 +676,8 @@ mod tests {
 			self.probe.as_ref().expect("built with_probe").target().as_bps()
 		}
 
-		fn set_bytes_sent(&self, bytes: Option<u64>) {
-			*self.state.bytes_sent.lock().unwrap() = bytes;
+		fn set_sent_bytes(&self, bytes: u64) {
+			self.state.wire.set_sent_bytes(bytes);
 		}
 
 		fn control_writes(&self) -> Vec<u8> {
@@ -776,11 +776,14 @@ mod tests {
 			Poll::Ready(FakeError)
 		}
 
-		fn stats(&self) -> impl crate::transport::Stats {
-			FakeStats {
+		fn metrics(&self) -> impl crate::transport::Metrics {
+			FakeMetrics {
 				send_rate: *self.state.send_rate.lock().unwrap(),
-				bytes_sent: *self.state.bytes_sent.lock().unwrap(),
 			}
+		}
+
+		fn wire(&self) -> Option<crate::transport::Wire> {
+			Some(self.state.wire.clone())
 		}
 
 		fn probe(&self) -> Option<crate::transport::Probe> {
@@ -788,18 +791,13 @@ mod tests {
 		}
 	}
 
-	struct FakeStats {
+	struct FakeMetrics {
 		send_rate: Option<u64>,
-		bytes_sent: Option<u64>,
 	}
 
-	impl crate::transport::Stats for FakeStats {
+	impl crate::transport::Metrics for FakeMetrics {
 		fn estimated_send_rate(&self) -> Option<u64> {
 			self.send_rate
-		}
-
-		fn bytes_sent(&self) -> Option<u64> {
-			self.bytes_sent
 		}
 	}
 
@@ -1193,7 +1191,7 @@ mod tests {
 	async fn stats_capture_the_final_counters() {
 		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
 		fake.set_send_rate(None);
-		fake.set_bytes_sent(Some(0));
+		fake.set_sent_bytes(0);
 
 		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
 		let (session, driver) = client.connect(moq_clock::now(), fake.clone()).await.unwrap();
@@ -1203,7 +1201,7 @@ mod tests {
 			"no send-rate estimate, so nothing samples on its own"
 		);
 
-		fake.set_bytes_sent(Some(4242));
+		fake.set_sent_bytes(4242);
 
 		session.abort(Error::Cancel);
 		session.closed().await;

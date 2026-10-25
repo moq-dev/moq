@@ -1555,8 +1555,8 @@ impl crate::transport::poll::Session for ControlStreamAdapter {
 		self.inner.poll_closed(cx).map(|_| crate::Error::Closed)
 	}
 
-	fn stats(&self) -> impl crate::transport::Stats {
-		self.inner.stats()
+	fn metrics(&self) -> impl crate::transport::Metrics {
+		self.inner.metrics()
 	}
 }
 
@@ -2428,7 +2428,7 @@ mod tests {
 		use crate::{
 			coding::{Encode, Stream},
 			lite::test_transport::{Log, ScriptedSession, SinkSend},
-			stats::{Bytes, Control as Class, Registry, Tier},
+			stats::{Message as Class, Registry, Tier, Totals},
 		};
 		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
 			let registry = Registry::new(Default::default());
@@ -2465,7 +2465,7 @@ mod tests {
 			physical.write_all(&mut raw.clone()).await.unwrap();
 			assert_eq!(
 				registry.snapshot().control(),
-				vec![(Tier::default(), Class::Fetch, Bytes { tx: size, rx: 0 })],
+				vec![(Tier::default(), Class::Fetch, Totals { tx: size, rx: 0 })],
 				"{version:?}"
 			);
 			assert_eq!(*log.writes.lock().unwrap(), raw);
@@ -2479,7 +2479,7 @@ mod tests {
 			virtual_stream.reader.decode::<ietf::FetchCancel>().await.unwrap();
 			assert_eq!(
 				registry.snapshot().control(),
-				vec![(Tier::default(), Class::Fetch, Bytes { tx: size, rx: size })],
+				vec![(Tier::default(), Class::Fetch, Totals { tx: size, rx: size })],
 				"virtual decode counted a physical frame twice: {version:?}"
 			);
 			adapter.send_max_request_id(RequestId(123));

@@ -24,7 +24,7 @@ pub(super) fn decode_size(r: &mut Decoder<'_>, max: usize) -> Result<usize, Deco
 /// Lite messages use a varint size prefix.
 pub trait Message: Sized + std::fmt::Debug {
 	/// The control metric class, or none for media headers.
-	const CONTROL: Option<crate::stats::Control> = None;
+	const CONTROL: Option<crate::stats::Message> = None;
 	/// The largest body this receiver accepts for this message.
 	const MAX_SIZE: usize = MAX_MESSAGE_SIZE;
 

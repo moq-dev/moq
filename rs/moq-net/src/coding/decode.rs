@@ -142,7 +142,7 @@ pub struct Decoder<'a> {
 	/// See [`Self::need`].
 	need: usize,
 	/// The control message read, counted once the read is consumed.
-	pub(crate) control: Option<crate::stats::Control>,
+	pub(crate) control: Option<crate::stats::Message>,
 	/// Leading bytes left out of the `control` count: a type selector the sender writes
 	/// apart from the message, and so never counts.
 	pub(crate) uncounted: usize,

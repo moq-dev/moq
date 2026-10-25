@@ -317,7 +317,7 @@ impl Records {
 pub struct TrackProperties(pub Option<Arc<crate::model::object::TrackProperties>>);
 
 impl Message for TrackProperties {
-	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::TrackInfo);
+	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::TrackInfo);
 	fn encode_msg(&self, w: &mut Encoder<'_>, _: Version) -> Result<(), EncodeError> {
 		// A track published over moq-lite is a lone 0.
 		let Some(properties) = &self.0 else {

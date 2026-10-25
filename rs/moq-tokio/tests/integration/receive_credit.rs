@@ -287,7 +287,7 @@ async fn the_less_urgent_partial_frame_gives_way(version: &str, profile: Option<
 		moq_net::transport::Binding::InBand,
 	);
 	assert_eq!(
-		moq_net::transport::Stats::streams_evicted(&moq_net::transport::poll::Session::stats(&session)),
+		moq_net::transport::Metrics::streams_evicted(&moq_net::transport::poll::Session::metrics(&session)),
 		Some(1),
 		"moq-net sees the eviction count, {version}"
 	);

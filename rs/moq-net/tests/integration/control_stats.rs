@@ -8,7 +8,7 @@ use crate::support::{
 };
 use moq_net::{
 	Timescale, Timestamp, origin,
-	stats::{Control, Registry, Tier},
+	stats::{Message, Registry, Tier},
 };
 
 fn origin() -> origin::Producer {
@@ -57,7 +57,7 @@ async fn control_classes_cross_lite_and_ietf_sessions_without_counting_payload()
 		let mut group = sub.recv_group().await.unwrap().unwrap();
 		assert_eq!(group.read_frame().await.unwrap().unwrap().payload.len(), 64 * 1024);
 		let rows = registry.snapshot().control();
-		for class in [Control::Announce, Control::Subscribe] {
+		for class in [Message::Announce, Message::Subscribe] {
 			assert!(
 				rows.iter()
 					.any(|(row_tier, row_class, bytes)| *row_tier == tier && *row_class == class && bytes.tx > 0),
@@ -103,7 +103,7 @@ async fn setup_counts_under_the_admitted_stats() {
 		assert!(
 			rows.iter()
 				.any(|(row_tier, class, bytes)| *row_tier == tier
-					&& *class == Control::Session
+					&& *class == Message::Session
 					&& bytes.tx > 0 && bytes.rx > 0),
 			"{version}: {rows:?}"
 		);

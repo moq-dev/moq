@@ -3,7 +3,7 @@
 use std::{sync::Arc, task::Poll, time::Duration};
 
 use crate::transport::poll::Session as _;
-use crate::transport::{Error as _, Stats as _};
+use crate::transport::{Error as _, Metrics as _};
 
 use crate::{Error, SessionError, Version, auth, bandwidth, coding::StreamCodes, goaway};
 
@@ -808,19 +808,21 @@ impl Supervisor {
 	}
 }
 
-/// A [`Stats`] snapshot of the transport's counters.
+/// A [`Stats`] snapshot of the transport's metrics and wire counters.
 fn snapshot<S: crate::transport::poll::Session>(session: &S) -> Stats {
-	let stats = session.stats();
+	// Metrics first: a transport that polls its byte counts refreshes its wire while reading them.
+	let metrics = session.metrics();
+	let wire = session.wire();
 	Stats {
-		rtt: stats.rtt(),
-		estimated_send_rate: stats.estimated_send_rate().map(bandwidth::Rate::from_bps),
-		bytes_sent: stats.bytes_sent(),
-		bytes_received: stats.bytes_received(),
-		bytes_lost: stats.bytes_lost(),
-		packets_sent: stats.packets_sent(),
-		packets_received: stats.packets_received(),
-		packets_lost: stats.packets_lost(),
-		streams_evicted: stats.streams_evicted(),
+		rtt: metrics.rtt(),
+		estimated_send_rate: metrics.estimated_send_rate().map(bandwidth::Rate::from_bps),
+		bytes_sent: wire.as_ref().map(crate::transport::Wire::sent_bytes),
+		bytes_received: wire.as_ref().map(crate::transport::Wire::received_bytes),
+		bytes_lost: metrics.bytes_lost(),
+		packets_sent: metrics.packets_sent(),
+		packets_received: metrics.packets_received(),
+		packets_lost: metrics.packets_lost(),
+		streams_evicted: metrics.streams_evicted(),
 	}
 }
 

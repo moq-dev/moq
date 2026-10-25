@@ -548,7 +548,7 @@ impl moq_net::transport::poll::Session for Gated {
 		self.inner.poll_closed(cx)
 	}
 
-	fn stats(&self) -> impl moq_net::transport::Stats {
-		self.inner.stats()
+	fn metrics(&self) -> impl moq_net::transport::Metrics {
+		self.inner.metrics()
 	}
 }

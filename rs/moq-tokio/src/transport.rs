@@ -117,6 +117,8 @@ pub struct Session<S: web_transport_trait::Session> {
 	request_bi: OpSlot<RequestResult<S>>,
 	recv_datagram: OpSlot<Result<Bytes, S::Error>>,
 	closed: OpSlot<S::Error>,
+	// Wire counters for a backend that has none and reports bytes only in its stats.
+	polled_wire: moq_net::transport::Wire,
 }
 
 /// The stream pair an async-interface accept or open resolves to.
@@ -166,6 +168,7 @@ impl<S: web_transport_trait::Session> Session<S> {
 			request_bi: OpSlot::default(),
 			recv_datagram: OpSlot::default(),
 			closed: OpSlot::default(),
+			polled_wire: moq_net::transport::Wire::new(),
 		}
 	}
 }
@@ -174,7 +177,10 @@ impl<S: web_transport_trait::Session> Session<S> {
 // owns its own progress under the poll contract.
 impl<S: web_transport_trait::Session> Clone for Session<S> {
 	fn clone(&self) -> Self {
-		Self::new(self.session.clone(), self.binding)
+		Self {
+			polled_wire: self.polled_wire.clone(),
+			..Self::new(self.session.clone(), self.binding)
+		}
 	}
 }
 

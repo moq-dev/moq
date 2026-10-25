@@ -752,14 +752,12 @@ impl poll::Session for Session {
 		Poll::Pending
 	}
 
-	fn stats(&self) -> impl net::Stats {
+	fn metrics(&self) -> impl net::Metrics {
 		let state = self.inner.lock();
 		// The kernel's view of the socket underneath beats a QX_PING sample: it is there
 		// from the first byte and costs no traffic.
 		let socket = self.inner.socket_stats.as_ref();
-		Stats {
-			sent: state.sent_bytes,
-			received: state.received_bytes,
+		Metrics {
 			rtt: socket.and_then(|stats| stats.rtt()).or(state.conn.rtt()),
 			rate: socket.and_then(|stats| stats.estimated_send_rate()),
 		}
@@ -770,23 +768,13 @@ impl poll::Session for Session {
 	}
 }
 
-/// A snapshot of the session's counters.
-struct Stats {
-	sent: u64,
-	received: u64,
+/// A snapshot of the session's metrics; its [`net::Wire`] holds the byte counts.
+struct Metrics {
 	rtt: Option<Duration>,
 	rate: Option<u64>,
 }
 
-impl net::Stats for Stats {
-	fn bytes_sent(&self) -> Option<u64> {
-		Some(self.sent)
-	}
-
-	fn bytes_received(&self) -> Option<u64> {
-		Some(self.received)
-	}
-
+impl net::Metrics for Metrics {
 	fn rtt(&self) -> Option<Duration> {
 		self.rtt
 	}

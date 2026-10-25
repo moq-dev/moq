@@ -496,7 +496,7 @@ mod tests {
 	fn control_counts_consumed_messages_once() {
 		use crate::{
 			lite,
-			stats::{Bytes, Control, Registry, Tier},
+			stats::{Message, Registry, Tier, Totals},
 		};
 		let registry = Registry::new(Default::default());
 		let session = registry.tier(Tier::default()).session("");
@@ -509,7 +509,7 @@ mod tests {
 		let size = bytes.len() as u64;
 		let (head, tail) = bytes.split_at(2);
 		let counted = || registry.snapshot().control();
-		let probes = |n: u64| vec![(Tier::default(), Control::Probe, Bytes { tx: 0, rx: size * n })];
+		let probes = |n: u64| vec![(Tier::default(), Message::Probe, Totals { tx: 0, rx: size * n })];
 
 		let mut reader = queue(&[bytes, head], version).with_stats(&session);
 		let mut cx = Context::from_waker(std::task::Waker::noop());
@@ -542,8 +542,8 @@ mod tests {
 		));
 		let auth = (
 			Tier::default(),
-			Control::Auth,
-			Bytes {
+			Message::Auth,
+			Totals {
 				tx: 0,
 				rx: reply.len() as u64,
 			},
