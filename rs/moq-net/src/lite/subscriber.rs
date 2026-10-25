@@ -3866,7 +3866,7 @@ mod tests {
 					origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 					recv_bandwidth: None,
 					version,
-					peer_setup: lite::PeerSetup::new(false, crate::transport::Binding::InBand),
+					peer_setup: lite::PeerSetup::new(false, crate::transport::Address::Setup),
 					peer_hop: None,
 					cost: None,
 					going_away: Default::default(),
