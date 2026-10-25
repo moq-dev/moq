@@ -219,7 +219,8 @@ source files. The retained path is printed at the end, including on failure.
 Choose an evidence parent outside disposable worktrees when the report must survive
 worktree removal. Criterion case discovery uses isolated short measurements and
 their full JSON IDs, since `--list` truncates display names; discovery samples
-are retained separately and never used in the comparison.
+are retained separately and never used in the comparison. A target that writes
+no Criterion samples, such as one that prints its own table, is listed as skipped.
 
 Each comparison reports the median of the paired percentage deltas, their median
 absolute deviation and range, and flags fewer than three observations or a sign
