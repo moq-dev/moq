@@ -434,17 +434,18 @@ impl Producer {
 			.map(|row| row.segment)
 	}
 
-	/// The newest group of `reference` a row starts on a keyframe, used to bootstrap an init
-	/// segment for inline-parameter-set codecs.
-	pub fn latest_keyframe_group(&self, reference: &ReferenceKey) -> Option<u64> {
+	/// The groups of `reference` a row starts on a keyframe, to bootstrap an inline-parameter-set
+	/// codec's init from, in the order to try them (see [`super::spans::bootstrap_groups`]).
+	pub fn keyframe_groups(&self, reference: &ReferenceKey) -> Vec<u64> {
 		let state = self.state.read();
-		state
-			.rows
-			.iter()
-			.rev()
-			.filter(|row| *row.reference == *reference)
-			.find(|row| row.starts_sync())
-			.map(|row| row.frames.start.group)
+		super::spans::bootstrap_groups(
+			state
+				.rows
+				.iter()
+				.rev()
+				.filter(|row| *row.reference == *reference && row.starts_sync())
+				.map(|row| row.frames.clone()),
+		)
 	}
 
 	/// Whether the playlist has anything to serve yet (at least one segment, or the broadcast
@@ -476,6 +477,21 @@ impl Producer {
 			// Ready, or the channel closed (no more rows will arrive): stop waiting either way.
 			Poll::Ready(_) => Poll::Ready(()),
 			Poll::Pending => Poll::Pending,
+		}
+	}
+
+	/// Poll until the reference timeline fails.
+	#[cfg_attr(
+		not(feature = "server"),
+		allow(dead_code, reason = "only the `server` feature uses it")
+	)]
+	pub fn poll_failed(&self, waiter: &kio::Waiter) -> Poll<()> {
+		match self.state.poll_ref(waiter, |state| match state.failed {
+			Some(_) => Poll::Ready(()),
+			None => Poll::Pending,
+		}) {
+			Poll::Ready(Ok(())) => Poll::Ready(()),
+			_ => Poll::Pending,
 		}
 	}
 
@@ -820,14 +836,10 @@ mod tests {
 		);
 		assert_eq!(live.row(&tag, 7), None, "unknown segments miss");
 		assert_eq!(live.row("00000000", 0), None, "another reference's numbering misses");
-		assert_eq!(
-			live.latest_keyframe_group(&video),
-			Some(0),
-			"row 1 does not start on a keyframe"
-		);
-		assert_eq!(
-			live.latest_keyframe_group(&(Kind::Audio, "video".to_string(), "video".to_string())),
-			None
+		assert_eq!(live.keyframe_groups(&video), [0], "row 1 does not start on a keyframe");
+		assert!(
+			live.keyframe_groups(&(Kind::Audio, "video".to_string(), "video".to_string()))
+				.is_empty()
 		);
 	}
 

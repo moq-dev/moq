@@ -311,11 +311,10 @@ impl Peer {
 			let len = peer[index].spec.len;
 			let before = receiving.read;
 			let mut stream = conn.recv_stream(id);
-			let mut chunks = stream.read(true).unwrap();
+			let mut chunks = stream.read().unwrap();
 			loop {
 				match chunks.next(usize::MAX) {
 					Ok(Some(chunk)) => {
-						prop_assert_eq!(chunk.offset, receiving.read as u64);
 						let end = receiving.read + chunk.bytes.len();
 						prop_assert!(end <= len, "stream {index} ran past its {len} bytes");
 						prop_assert!(

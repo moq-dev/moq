@@ -87,6 +87,19 @@ per merged PR today (PR and queue), at 13 minutes median and 26 minutes p90 of
 wall time per PR run. Superseded in part 2026-10-24: the PR gate checks
 feature shapes for the crates a branch changes; Nightly keeps the full matrix.
 
+Decided 2026-10-25 (maintainer): across moq's many CI and release builds
+(targets, features, FFI languages, Nix packages), each crate configuration
+compiles once and is reused through the cache, and each run builds and tests
+only what its diff can affect, measured in runner CPU time. Wall clock for its
+own sake and replacing cargo are non-goals. mbx already caches each compilation,
+so the work is making builds identical enough to hit it (one crane dependency
+layer, flags in `.cargo/config.toml`, cargo-hakari), and auditing the package
+selection `just ci` already does. Nix builds run sandboxed and cannot reach R2:
+kixelated/rust2's
+[Nix build benchmark](https://github.com/kixelated/rust2/blob/main/quest/m1/bench-nix.md)
+decides between crane with mbx, crate2nix, and cargo with mbx after the crane
+fixes land.
+
 Measure each change against a current baseline and record the result in its PR.
 The historical samples locate candidates; they are not controlled benchmarks.
 
@@ -98,6 +111,9 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [Bump to the manifest fix](/quest/m0/ci/mbx-bump.md) - condition: an mbx release contains jdx/mr-boxington#798; then bump the Rust cache's pin
 - [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) - measure the hosted Nightly jobs' hits, restore time, and expiry once the bump lands
 - [Verify the Nix cache](/quest/m0/ci/nix-cache-verify.md) - confirm CI and releases use `nix.moq.dev` and retire Cachix
+- [Share crane's dependency layer](/quest/m0/ci/crane-layers.md) - Nix packages build their dependencies once, and a workspace edit rebuilds none of them
+- [Unify dependency features](/quest/m0/ci/hakari.md) - a cargo-hakari workspace-hack so every job compiles each dependency alike and mbx hits across jobs
+- [Audit CI's package selection](/quest/m0/ci/select-audit.md) - how often the queue runs everything, and whether each rule that forces it is needed
 - [First shared FFI release](/quest/m0/ci/nightly-ffi-reuse.md) - condition: the backport merges and the next `moq-ffi-v*` tag runs `Release FFI`; verify the wrappers
 - [Loom tests compile](/quest/m0/ci/loom-build.md) - `just rs loom` builds on main and a `--cfg loom` break fails its PR
 - [just check without user namespaces](/quest/m0/ci/check-without-userns.md) - a host that refuses `unshare` reports the flake module as not run instead of cancelling other lanes

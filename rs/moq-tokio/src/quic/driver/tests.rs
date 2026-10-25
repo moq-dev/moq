@@ -863,7 +863,7 @@ fn run_echo(args: EchoArgs) {
 			// Note for anyone modifying the platform support in this test:
 			// If `local_ip` gets available on additional platforms - which
 			// requires modifying this test - please update the list of supported
-			// platforms in the doc comment of `quinn_udp::RecvMeta::dst_ip`.
+			// platforms in the doc comment of `moq_sock::udp::RecvMeta::dst_ip`.
 			if cfg!(target_os = "linux")
 				|| cfg!(target_os = "android")
 				|| cfg!(target_os = "freebsd")
@@ -934,26 +934,8 @@ struct EchoArgs {
 }
 
 async fn echo((mut send, mut recv): (SendStream, RecvStream)) {
-	loop {
-		// These are 32 buffers, for reading approximately 32kB at once
-		#[rustfmt::skip]
-        let mut bufs = [
-            Bytes::new(), Bytes::new(), Bytes::new(), Bytes::new(),
-            Bytes::new(), Bytes::new(), Bytes::new(), Bytes::new(),
-            Bytes::new(), Bytes::new(), Bytes::new(), Bytes::new(),
-            Bytes::new(), Bytes::new(), Bytes::new(), Bytes::new(),
-            Bytes::new(), Bytes::new(), Bytes::new(), Bytes::new(),
-            Bytes::new(), Bytes::new(), Bytes::new(), Bytes::new(),
-            Bytes::new(), Bytes::new(), Bytes::new(), Bytes::new(),
-            Bytes::new(), Bytes::new(), Bytes::new(), Bytes::new(),
-        ];
-
-		match recv.read_chunks(&mut bufs).await.expect("read chunks") {
-			Some(n) => {
-				send.write_all_chunks(&mut bufs[..n]).await.expect("write chunks");
-			}
-			None => break,
-		}
+	while let Some(chunk) = recv.read_chunk(32 << 10).await.expect("read chunk") {
+		send.write_chunk(chunk.bytes).await.expect("write chunk");
 	}
 
 	let _ = send.finish();
@@ -1329,7 +1311,7 @@ async fn split_accept_driver_lost_during_handshake() {
 }
 
 #[tokio::test]
-async fn remote_address_monitoring() {
+async fn remote_address_follows_migration() {
 	let _guard = subscribe();
 
 	let factory = EndpointFactory::new();
@@ -1343,17 +1325,22 @@ async fn remote_address_monitoring() {
 	let server_task = tokio::spawn(async move {
 		let conn = server.accept().await.unwrap().await.unwrap();
 		let old_remote = conn.remote_address();
-		let mut addr_watch = conn.watch_remote_address();
 
 		trigger_migration_clone.notify_one();
 
-		let addr_a = addr_watch.wait().await.unwrap();
+		let mut stream = conn.accept_uni().await.unwrap();
+		assert_eq!(stream.read_to_end(16).await.unwrap(), b"hello");
+		let addr_a = conn.remote_address();
 		assert_eq!(addr_a.port(), 23_001);
 		assert_ne!(old_remote, addr_a);
 
 		trigger_migration_clone.notify_one();
 
-		let addr_b = addr_watch.wait().await.unwrap();
+		for _ in 0..2 {
+			let mut stream = conn.accept_uni().await.unwrap();
+			assert_eq!(stream.read_to_end(16).await.unwrap(), b"hello");
+		}
+		let addr_b = conn.remote_address();
 		assert_eq!(addr_b.port(), 23_003);
 		assert_ne!(addr_a, addr_b);
 	});
@@ -1919,7 +1906,7 @@ async fn dropped_endpoint_cleans_up() {
 
 	let mut endpoint_factory = EndpointFactory::new();
 	let cid_generator = Arc::new(|| -> Box<dyn moq_quic::ConnectionIdGenerator> {
-		Box::<moq_quic::HashedConnectionIdGenerator>::default()
+		Box::<moq_quic::RandomConnectionIdGenerator>::default()
 	});
 	endpoint_factory.endpoint_config.cid_generator(cid_generator.clone());
 	let endpoint = endpoint_factory.endpoint();
