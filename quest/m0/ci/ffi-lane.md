@@ -32,7 +32,3 @@ than measure first or drop py's test features.
   fresh, which any concurrent Cargo build of moq-ffi would break.
 - Measure the full-run wall time and peak disk before and after on matched
   inputs: concurrent lanes add their temporary data together.
-
-## Related
-
-- [Share Python check and test preparation](/quest/m0/ci/python-setup.md) - py's repeated preparation, inside its own lane

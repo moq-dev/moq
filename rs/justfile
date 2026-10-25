@@ -318,6 +318,7 @@ doctest *args:
 loom *args:
     RUSTFLAGS="--cfg loom" cargo test --locked --release -p kio --lib loom:: "$@"
     RUSTFLAGS="--cfg loom" cargo test --locked --release -p moq-net --test loom "$@"
+    RUSTFLAGS="--cfg loom" cargo test --locked --release -p moq-net --test expiry-loom "$@"
 
 # Run the moq-quic simulation's random workloads from a fresh seed, printing the settings that replay it.
 quic-sim:
@@ -376,6 +377,7 @@ audio-devices:
 # crate's own tests instead. See rs/moq-net/fuzz/README.md and rs/moq-quic/fuzz/README.md.
 
 # Fuzz a moq-net or moq-quic target by name: `just rs fuzz lite -- -max_total_time=300`.
+# `just rs fuzz --minimize lite` shrinks its corpus instead.
 [positional-arguments]
 fuzz target *args:
     sh/rs/fuzz.sh "$@"

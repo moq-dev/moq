@@ -233,30 +233,83 @@ for (const version of drafts) {
 		const clock = new Manual();
 		const installed = clock.install();
 		using _installed = { [Symbol.dispose]: () => installed.close() };
+		// Spied before listing, since the PUBLISH may go out before the listing's OK is read.
+		// Restored only once the test is done: `Message.write` reads `writer.write` before
+		// awaiting its frame, so restoring mid-write would drop a concurrent write on the stale spy.
+		const resume = Promise.withResolvers<void>();
+		let holding = false;
+		const write = Writer.prototype.write;
+		const held = spyOn(Writer.prototype, "write").mockImplementation(async function (this: Writer, chunk) {
+			await write.call(this, chunk);
+			if (holding || chunk[0] !== Publish.id) return;
+			holding = true;
+			await resume.promise;
+		});
+		using _held = { [Symbol.dispose]: () => held.mockRestore() };
 		const fx = fixture(version);
 		const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
 		broadcast.announce();
 		const track = broadcast.createTrack("video");
 		const listing = await fx.list();
 		await ok(listing, version);
-		const resume = Promise.withResolvers<void>();
-		const write = Writer.prototype.write;
-		const held = spyOn(Writer.prototype, "write").mockImplementation(async function (this: Writer, chunk) {
-			await write.call(this, chunk);
-			if (chunk[0] !== Publish.id) return;
-			held.mockRestore();
-			await resume.promise;
-		});
 		const { stream } = await fx.offered(false);
 		track.close();
 		broadcast.removeTrack("video");
 		await clock.advance(Nano.zero);
+		expect(holding).toBe(true);
 		resume.resolve();
 		await publishOk(stream, version);
 		expect(await stream.reader.u53()).toBe(PublishDone.id);
 		const done = await PublishDone.decode(stream.reader, version);
 		expect(done.statusCode).toBe(PublishDoneStatus.TRACK_ENDED);
 	});
+
+	// A broadcast closing right after a track finished ends that track's PUBLISH with TRACK_ENDED,
+	// removed first or not and answered or not, while a track left unfinished still ends in error:
+	// PUBLISH_DONE once answered, a reset before.
+	for (const remove of [false, true]) {
+		for (const answer of [true, false]) {
+			const name = `remove=${remove} answer=${answer}`;
+			test(`a clean end keeps its finishes, ${name} (${version})`, async () => {
+				const clock = new Manual();
+				const installed = clock.install();
+				using _installed = { [Symbol.dispose]: () => installed.close() };
+				const fx = fixture(version);
+				const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
+				broadcast.announce();
+				const video = broadcast.createTrack("video");
+				broadcast.createTrack("audio");
+				const listing = await fx.list();
+				await ok(listing, version);
+				const published = new Map<string, Stream>();
+				for (let i = 0; i < 2; i++) {
+					const { stream, publish } = await fx.offered(answer);
+					published.set(publish.trackName, stream);
+				}
+				await clock.advance(Nano.zero);
+				video.close();
+				if (remove) broadcast.removeTrack("video");
+				broadcast.close();
+				await clock.advance(Nano.zero);
+				const videoStream = published.get("video");
+				const audioStream = published.get("audio");
+				if (!videoStream || !audioStream) throw new Error("missing PUBLISH");
+				if (!answer) await publishOk(videoStream, version);
+				expect(await videoStream.reader.u53()).toBe(PublishDone.id);
+				expect((await PublishDone.decode(videoStream.reader, version)).statusCode).toBe(
+					PublishDoneStatus.TRACK_ENDED,
+				);
+				if (!answer) {
+					await expect(audioStream.reader.u53()).rejects.toThrow();
+					return;
+				}
+				expect(await audioStream.reader.u53()).toBe(PublishDone.id);
+				expect((await PublishDone.decode(audioStream.reader, version)).statusCode).toBe(
+					PublishDoneStatus.INTERNAL_ERROR,
+				);
+			});
+		}
+	}
 
 	test(`track listing rejects overlapping prefixes (${version})`, async () => {
 		const fx = fixture(version);

@@ -2012,7 +2012,17 @@ export default class Session implements WebTransport {
 	}
 
 	/** Always `"default"`: the underlying TCP connection does its own congestion control. */
-	get congestionControl(): string {
+	get congestionControl(): WebTransportCongestionControl {
 		return "default";
+	}
+
+	/** Always `"reliable-only"`: datagrams ride the WebSocket, so nothing is unreliable. */
+	get reliability() {
+		return "reliable-only" as const;
+	}
+
+	/** Reports no counters: the WebSocket exposes none. `datagrams` is required by the W3C dictionary. */
+	async getStats() {
+		return { datagrams: {} };
 	}
 }

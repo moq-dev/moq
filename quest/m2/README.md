@@ -68,7 +68,6 @@ lite-07; bitrate enforcement is not part of this release.
 - [Perf](/quest/m2/perf/README.md) - eliminate measured hot-path costs across moq-uring, kio, and the moq-net model
 - [Wire stats](/quest/m2/wire-stats/README.md) - `Presence` counts each root's transport bytes on the wire, `wire_tx` and `wire_rx`, from QUIC, WebSocket, and embedder gateway sources
 - [Performance survey follow-ups](/quest/m2/performance-survey/README.md) - benchmark the source audit's transport, browser, media and serving risks before optimizing
-- [Nightly fuzzing keeps its corpus](/quest/m2/fuzz-corpus.md) - each fuzz target resumes from the previous Nightly's minimized corpus instead of starting from seeds
 - [Relay session bench](/quest/m2/bench-relay.md) - the same scenario through moq-relay's own connection handling
 - [Transport x version benches](/quest/m2/bench-transport-sweep.md) - the session benches sweep transports as well as versions
 - [Paired bench BASE](/quest/m2/bench-base-paired.md) - `just bench <base>` uses the nightly's paired comparison and the old one is deleted

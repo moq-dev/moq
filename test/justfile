@@ -22,6 +22,7 @@ harness_browser_tests := '''
     ./open-gop.browser.ts
     ./publish-ui.browser.ts
     ./signals-dom.browser.ts
+    ./tone.test.ts
     ./src/contract.test.ts
     ./src/resume.test.ts
 '''

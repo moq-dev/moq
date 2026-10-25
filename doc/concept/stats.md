@@ -97,6 +97,51 @@ source's. `export ts --passthrough` reports it without `mpegts`.
 | `drift` | Gauge, parts per million: the source clock's rate against ours, positive running fast. |
 | `outOfTolerance` | Measurements that found the source clock past the 30 ppm ISO/IEC 13818-1 allows, which the output cannot follow. |
 
+### Health
+
+`hang::health` and `Hang.Health` in `@moq/hang` grade a client from two
+consecutive reports: `publisher` takes a pair of `stats` snapshots, `viewer` a
+pair of `.echo` snapshots. Each report names the broadcast it was read from
+(its path and epoch), which observed every number in it; the caller states the
+interval between the two and how long ago the newer one arrived. Both
+languages compute the same result from the shared fixtures in
+`rs/hang/fixtures/health.json`.
+
+The result holds the deltas over the interval (frames, bytes, and bitrate per
+rendition; lost bytes and packets for the connection) and a verdict for the
+connection and each rendition: `unknown`, `healthy`, `degraded`, or
+`unhealthy`. Each verdict carries its evidence, every input with its value and
+grade, and is the worst graded input. An input the report cannot show is
+listed as `unknown`, and a verdict with nothing graded is `unknown`: a browser
+publisher that knows only its PROBE RTT grades on RTT alone. A report older
+than the stale limit is `unknown` throughout, as is a transport sample whose
+`age` plus the report's exceeds it, and a client with no report has no sample at all. A changed
+path or epoch (`replaced`) or a decreasing counter (`decrease`) is a reset:
+the deltas start over, so only gauges are graded until the next pair.
+Container sections such as `mpegts` are not read.
+
+| Input | Role | Value | Degraded | Unhealthy |
+| --- | --- | --- | --- | --- |
+| `rtt` | both | Round-trip time, ms. | 300 | 800 |
+| `loss` | publisher | Transport bytes lost per media byte sent. | 0.02 | 0.1 |
+| `headroom` | publisher | Estimated `rate` over the media bitrate sent. | below 1.5 | below 1 |
+| `skipped` | publisher | Frames skipped, as a share of frames sent or skipped. | 0.01 | 0.05 |
+| `late` | viewer | Late frames per frame received. | 0.01 | 0.05 |
+| `errors` | viewer | Decode errors per frame received. | 0.01 | 0.05 |
+| `stalled` | viewer | The share of the interval spent stalled. | 0.01 | 0.05 |
+
+These are defaults the caller can override, as is the five-second stale limit.
+A viewer's loss counters describe its own uplink, so they are reported but not
+graded. Loss and headroom divide the connection's transport counters by the
+report's own media, so they hold when the broadcast is the only one its
+connection publishes. The transport limits were measured on one paced TS feed
+through a shaped link over five-second intervals; no CLI reporter emits
+`skipped`, `late`, `errors`, or `stalled`, so their limits are not measured.
+
+A publisher whose link falls below its media rate sends no report at all,
+since its report track sits below every media track. Its health goes stale
+and reads `unknown`; only its viewers' playout counters can show the damage.
+
 ## Broadcasts
 
 Each node publishes under a prefix, `.stats` by default, which
