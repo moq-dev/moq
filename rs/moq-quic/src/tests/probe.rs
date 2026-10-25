@@ -328,7 +328,7 @@ fn run(scenario: &Scenario) -> Outcome {
 			}
 			if let Some(id) = *recv {
 				let mut stream = pair.server_recv(*server, id);
-				let mut chunks = stream.read(false).unwrap();
+				let mut chunks = stream.read().unwrap();
 				while let Ok(Some(chunk)) = chunks.next(usize::MAX) {
 					outcome.competitor += chunk.bytes.len() as u64;
 				}
@@ -477,7 +477,7 @@ fn receive(
 			continue;
 		}
 		let mut stream = conn.recv_stream(id);
-		let Ok(mut chunks) = stream.read(true) else {
+		let Ok(mut chunks) = stream.read() else {
 			reading.done = true;
 			continue;
 		};

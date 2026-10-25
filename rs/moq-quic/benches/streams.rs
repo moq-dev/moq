@@ -17,6 +17,56 @@ mod common;
 
 use common::{Pair, Setup, ThreadCpu, payload};
 
+#[allow(dead_code, reason = "the scheduler benchmark exercises only its queued send paths")]
+#[path = "../src/connection/streams/schedule.rs"]
+mod schedule;
+
+fn bench_schedule(c: &mut Criterion<ThreadCpu>) {
+	use schedule::{Next, Schedule, Slot};
+	let mut group = c.benchmark_group("schedule");
+	for groups in [1, 16, 256] {
+		for queued in [1, 16, 256] {
+			let mut schedule = Schedule::<usize, ()>::new();
+			let ids: Vec<_> = (0..groups).map(|_| schedule.open_group(0)).collect();
+			let mut slots: Vec<_> = (0..groups * queued).map(|_| Slot::default()).collect();
+			for (id, slot) in slots.iter_mut().enumerate() {
+				schedule.join(id, slot, Some(ids[id / queued]), 0);
+				schedule.push(id, slot, 0);
+			}
+			group.bench_function(
+				BenchmarkId::new("pop", format!("groups_{groups}_queued_{queued}")),
+				|b| {
+					b.iter(|| {
+						let Some(Next::Stream(id)) = schedule.pop() else {
+							panic!("stream remains queued")
+						};
+						schedule.sent(id, &mut slots[id], 1200, Some(0), true);
+					});
+				},
+			);
+			let mut schedule = Schedule::<usize, ()>::new();
+			let ids: Vec<_> = (0..groups).map(|_| schedule.open_group(0)).collect();
+			for &id in &ids {
+				for _ in 0..queued {
+					schedule.push_datagram(Some(id), 0, (), 100, usize::MAX);
+				}
+			}
+			let budget = groups * queued * 100;
+			let mut next = 0;
+			group.bench_function(
+				BenchmarkId::new("datagram_push", format!("groups_{groups}_queued_{queued}")),
+				|b| {
+					b.iter(|| {
+						schedule.push_datagram(Some(ids[next % groups]), 0, (), 100, budget);
+						next += 1;
+					});
+				},
+			);
+		}
+	}
+	group.finish();
+}
+
 /// How often a `holes` case loses a client datagram: often enough that most windows hold a hole.
 const LOSE_EVERY: u64 = 16;
 
@@ -239,6 +289,6 @@ fn bench_probe(c: &mut Criterion<ThreadCpu>) {
 criterion_group! {
 	name = benches;
 	config = common::config();
-	targets = bench_priority, bench_reprioritize, bench_write_size, bench_connection_blocked, bench_probe
+	targets = bench_schedule, bench_priority, bench_reprioritize, bench_write_size, bench_connection_blocked, bench_probe
 }
 criterion_main!(benches);
