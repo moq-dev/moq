@@ -12,7 +12,4 @@
 pub mod bind;
 pub mod cpu;
 pub mod shard;
-// cargo fmt formats submodules with the crate root's config, so `just rs fix`
-// formats this one separately with its own (quinn's).
-#[rustfmt::skip]
 pub mod udp;

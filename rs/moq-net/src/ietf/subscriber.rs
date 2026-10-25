@@ -16438,7 +16438,7 @@ mod joining_fetch_tests {
 			);
 			assert!(subscriber.state.lock().group_fetches.is_empty());
 			assert!(matches!(
-				outcome.read().refused(GROUP).cloned(),
+				outcome.read().refused(GROUP).map(|(err, _)| err.clone()),
 				Some(Error::Cancel | Error::Unroutable)
 			));
 			return;
@@ -16456,7 +16456,7 @@ mod joining_fetch_tests {
 				"{version:?}: unanswered FETCH stays alive"
 			);
 			assert!(matches!(
-				outcome.read().refused(GROUP).cloned(),
+				outcome.read().refused(GROUP).map(|(err, _)| err.clone()),
 				Some(Error::Cancel | Error::Unroutable)
 			));
 		} else {
