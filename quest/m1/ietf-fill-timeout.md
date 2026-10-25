@@ -51,4 +51,4 @@ inline, clearly distinguishing upstream wait time from content age.
 
 ## Related
 
-- [moq-transport ranges](/quest/m1/subscribe-ranges/ietf.md) - sparse range forwarding and gap handling
+- [moq-transport range updates](/quest/m1/subscribe-ranges/ietf.md) - upstream range changes

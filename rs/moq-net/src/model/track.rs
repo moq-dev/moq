@@ -4654,6 +4654,70 @@ impl Consumer {
 		})
 	}
 
+	/// Fill the groups of `span` the cache misses and nothing recorded dropped, asking a
+	/// [`Dynamic`] once per run of misses so it fetches each run at once, and resolve once
+	/// every run is answered. The returned guard keeps the fills wanted, so the groups they
+	/// accepted stay cached while the caller reads them. A track with no handler resolves at
+	/// once, and a front's logical track fills through the copy serving it, if any.
+	#[cfg(feature = "async")]
+	pub(crate) async fn fill_groups(&self, span: ops::Range<u64>, priority: i8) -> Filled {
+		if let Some(serving) = self.serving() {
+			return Box::pin(serving.fill_groups(span, priority)).await;
+		}
+		let state = self.resolve(None).0;
+		let (fills, holes) = {
+			let state = state.read();
+			if state.routes.is_some() {
+				return Filled { joins: Vec::new() };
+			}
+			let holes: Vec<ops::Range<u64>> = miss::holes(&state, span)
+				.into_iter()
+				.flat_map(|hole| state.drops.gaps(&hole).collect::<Vec<_>>())
+				.collect();
+			(state.fills.clone(), holes)
+		};
+		let mut joins = Vec::new();
+		for hole in holes {
+			let ask = fill::Ask {
+				start: Position::group(hole.start),
+				end: hole.end,
+				priority,
+				// A fetch names its groups outright, so only the publisher's max age applies.
+				max_delay: None,
+				order: Order::Ascending,
+			};
+			joins.extend(fills.lock().join(&fills, &ask).0);
+		}
+		kio::wait(|waiter| {
+			for join in &joins {
+				ready!(join.poll_answered(waiter));
+			}
+			Poll::Ready(())
+		})
+		.await;
+		Filled { joins }
+	}
+
+	/// The sequences of `span` the cache holds, lowest first.
+	#[cfg(feature = "async")]
+	pub(crate) fn cached_groups(&self, span: ops::Range<u64>) -> Vec<u64> {
+		if let Some(serving) = self.serving() {
+			return serving.cached_groups(span);
+		}
+		self.with_state(|state| {
+			let Some(state) = state else {
+				return Vec::new();
+			};
+			let state = state.read();
+			state
+				.lookup
+				.range(span)
+				.filter(|(_, slot)| !slot.is_aborted())
+				.map(|(sequence, _)| *sequence)
+				.collect()
+		})
+	}
+
 	/// Resolve the track's [`Info`] without subscribing.
 	///
 	/// A [`Consumer`] is a lazy handle, so the info may not be known yet: this waits
@@ -4901,6 +4965,13 @@ fn queue(fills: &kio::Shared<FillState>, sequence: u64, options: &group::Fetch) 
 	// nobody drains); with no handler, `Fetching::poll` fails fast.
 	let (joins, _) = fills.lock().join(fills, &ask);
 	joins.into_iter().next().map(Box::new)
+}
+
+/// The fills a [`Consumer::fill_groups`] asked, kept wanted until it drops.
+#[cfg(feature = "async")]
+pub(crate) struct Filled {
+	#[expect(dead_code, reason = "held only to keep the fills wanted")]
+	joins: Vec<fill::Join>,
 }
 
 /// The pollable state of a [`Consumer::fetch_group`].
@@ -18160,6 +18231,47 @@ mod test {
 			b"b"
 		);
 		assert!(matches!(whole.read_frame().now_or_never(), Some(Ok(None))));
+	}
+
+	/// Filling a span asks once per run of misses, and a run is served up to a group the
+	/// cache gained since, which it skips: the handler fetches each run at once.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn a_filled_span_is_served_a_run_at_a_time() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.dynamic();
+		let consumer = producer.consume();
+		producer
+			.create_group(group::Info { sequence: 2 })
+			.unwrap()
+			.finish()
+			.unwrap();
+
+		let mut filling = Box::pin(consumer.fill_groups(0..8, 0));
+		assert!(futures::poll!(filling.as_mut()).is_pending());
+		let low = dynamic.requested_fill().await.unwrap();
+		let high = dynamic.requested_fill().await.unwrap();
+		assert_eq!((low.start().group, low.end()), (0, 2));
+		assert_eq!((high.start().group, high.end()), (3, 8));
+
+		// Group 5 lands live while the high run waits on its source.
+		producer
+			.create_group(group::Info { sequence: 5 })
+			.unwrap()
+			.finish()
+			.unwrap();
+		assert_eq!(low.next_run(), Some(0..2));
+		assert_eq!(high.next_run(), Some(3..5));
+		high.drop_groups(3..5);
+		assert_eq!(high.next_run(), Some(6..8));
+		high.accept(6, None).unwrap().finish().unwrap();
+		assert_eq!(high.next_run(), Some(7..8));
+		high.drop_groups(7..8);
+		assert_eq!(high.next_run(), None);
+		low.drop_groups(0..2);
+
+		assert!(futures::poll!(filling.as_mut()).is_ready());
+		assert_eq!(consumer.cached_groups(0..8), [2, 5, 6]);
 	}
 
 	/// A drop judges the subscription, not a fetch: a fetched head still arriving keeps
