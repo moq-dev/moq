@@ -167,11 +167,11 @@ mod tests {
 		};
 
 		let mut buf = Vec::new();
-		msg.encode_msg(&mut Encoder::new(&mut buf, Version::Draft19.into()), Version::Draft19)
+		msg.encode_msg(&mut Encoder::new(&mut buf, Version::Draft18.into()), Version::Draft18)
 			.unwrap();
 
 		let mut bytes = bytes::Bytes::from(buf.to_vec());
-		let decoded: GoAway = crate::coding::decode_buf(&mut bytes, Version::Draft19, GoAway::decode_msg).unwrap();
+		let decoded: GoAway = crate::coding::decode_buf(&mut bytes, Version::Draft18, GoAway::decode_msg).unwrap();
 
 		assert_eq!(decoded.new_session_uri, "moqt://relay.example/");
 		assert_eq!(decoded.timeout, 5000);

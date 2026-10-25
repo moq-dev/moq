@@ -214,15 +214,12 @@ mod tests {
 		Ok(datagram)
 	}
 
-	const ALL: [Version; 9] = [
+	const ALL: [Version; 6] = [
 		Version::Draft14,
 		Version::Draft15,
 		Version::Draft16,
 		Version::Draft17,
 		Version::Draft18,
-		Version::Draft19,
-		Version::Draft20,
-		Version::Draft21,
 		Version::Draft22,
 	];
 

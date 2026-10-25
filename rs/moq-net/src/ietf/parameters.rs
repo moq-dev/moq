@@ -626,18 +626,18 @@ mod tests {
 	use super::super::Filter;
 	use super::*;
 
-	/// Before draft 19, 0x08 is an unknown SETUP option, so a peer may repeat it.
+	/// On draft 18, 0x08 is an unknown SETUP option, so a peer may repeat it.
 	#[test]
-	fn max_request_updates_is_unknown_before_draft_19() {
+	fn max_request_updates_is_unknown_on_draft_18() {
 		// Draft 18: no count prefix, delta-encoded types, so the repeat is a delta of 0.
 		let block = [0x08, 0x01, 0x00, 0x02];
 		let mut r = Decoder::new(&block, Version::Draft18.into());
 		let params = Parameters::decode(&mut r, Version::Draft18).expect("a repeated unknown option is legal");
 		assert_eq!(params.get_varint(ParameterVarInt::MaxRequestUpdates), None);
 
-		let mut r = Decoder::new(&block, Version::Draft19.into());
+		let mut r = Decoder::new(&block, Version::Draft22.into());
 		assert!(matches!(
-			Parameters::decode(&mut r, Version::Draft19),
+			Parameters::decode(&mut r, Version::Draft22),
 			Err(DecodeError::Duplicate)
 		));
 	}
@@ -650,9 +650,6 @@ mod tests {
 			Version::Draft16,
 			Version::Draft17,
 			Version::Draft18,
-			Version::Draft19,
-			Version::Draft20,
-			Version::Draft21,
 			Version::Draft22,
 		] {
 			for kind in [0x20, 0x21, 0x9d, 0x11c] {
@@ -684,7 +681,7 @@ mod tests {
 
 	#[test]
 	fn setup_rejects_repeated_known_options() {
-		for version in [Version::Draft18, Version::Draft21, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft22] {
 			for bytes in [&[4, 1, 0, 2][..], &[7, 1, b'a', 0, 1, b'b'][..]] {
 				assert!(matches!(
 					Parameters::decode_slice(bytes, version),
@@ -696,21 +693,14 @@ mod tests {
 
 	#[test]
 	fn setup_repeated_unknown_options_still_require_complete_values() {
-		for version in [Version::Draft18, Version::Draft21, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft22] {
 			assert!(Parameters::decode_slice(&[0x21, 1, b'a', 0, 2, b'b'], version).is_err());
 		}
 	}
 
 	#[test]
 	fn group_order_parameter_rejects_values_outside_one_and_two() {
-		for version in [
-			Version::Draft17,
-			Version::Draft18,
-			Version::Draft19,
-			Version::Draft20,
-			Version::Draft21,
-			Version::Draft22,
-		] {
+		for version in [Version::Draft17, Version::Draft18, Version::Draft22] {
 			for value in [0u8, 3, 255] {
 				let bytes = [value];
 				let mut r = Decoder::new(&bytes, version.into());
@@ -873,7 +863,6 @@ mod tests {
 			(Version::Draft16, &[0x01, 0x20, 0x40, 0xff][..]),
 			(Version::Draft17, &[0x01, 0x20, 0xff][..]),
 			(Version::Draft18, &[0x01, 0x20, 0xff][..]),
-			(Version::Draft19, &[0x01, 0x20, 0xff][..]),
 		] {
 			let mut buf = Vec::new();
 			encode_params!(&mut Encoder::new(&mut buf, version.into()), version, 0x20 => u8::MAX);
@@ -953,8 +942,7 @@ mod tests {
 			(Version::Draft16, &[0x01, 0x09, 0x04, 0x40, 0xff, 0x40, 0x80][..]),
 			(Version::Draft17, &[0x01, 0x09, 0x80, 0xff, 0x80, 0x80][..]),
 			(Version::Draft18, &[0x01, 0x09, 0x80, 0xff, 0x80, 0x80][..]),
-			(Version::Draft19, &[0x01, 0x09, 0x80, 0xff, 0x80, 0x80][..]),
-			(Version::Draft20, &[0x01, 0x09, 0x80, 0xff, 0x80, 0x80][..]),
+			(Version::Draft22, &[0x01, 0x09, 0x80, 0xff, 0x80, 0x80][..]),
 		] {
 			let mut buf = Vec::new();
 			encode_params!(&mut Encoder::new(&mut buf, version.into()), version, 0x09 => location.clone());
@@ -1272,7 +1260,7 @@ mod tests {
 				value: vec![0xAA],
 			})
 		};
-		for version in [Version::Draft15, Version::Draft16, Version::Draft17, Version::Draft20] {
+		for version in [Version::Draft15, Version::Draft16, Version::Draft17, Version::Draft22] {
 			let mut buf = Vec::new();
 			let mut w = Encoder::new(&mut buf, version.into());
 			w.varint(2).unwrap();

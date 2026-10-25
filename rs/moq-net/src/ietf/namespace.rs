@@ -122,8 +122,6 @@ pub(super) fn refusal(namespace: &Path, version: super::Version) -> Option<super
 			| super::Version::Draft16
 			| super::Version::Draft17
 			| super::Version::Draft18
-			| super::Version::Draft19
-			| super::Version::Draft20
 	) {
 		return None;
 	}
@@ -162,10 +160,12 @@ mod tests {
 		] {
 			let parts: Vec<_> = fields.iter().map(|field| (*field).to_owned()).collect();
 			let path = from_tuple(&parts);
-			for version in [super::super::Version::Draft21, super::super::Version::Draft22] {
-				assert_eq!(refusal(&path, version).is_some(), reserved, "{version}: {fields:?}");
-			}
-			assert!(refusal(&path, super::super::Version::Draft20).is_none());
+			assert_eq!(
+				refusal(&path, super::super::Version::Draft22).is_some(),
+				reserved,
+				"{fields:?}"
+			);
+			assert!(refusal(&path, super::super::Version::Draft18).is_none());
 		}
 	}
 	use crate::coding::Form;

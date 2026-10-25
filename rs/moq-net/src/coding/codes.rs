@@ -111,7 +111,7 @@ mod tests {
 	#[test]
 	fn the_version_picks_the_registry() {
 		let lite = crate::Version::Lite(lite::Version::Lite05);
-		let ietf = crate::Version::Ietf(ietf::Version::Draft20);
+		let ietf = crate::Version::Ietf(ietf::Version::Draft22);
 
 		assert_eq!(lite.encode_stream_code(&StreamError::Old), StreamError::Old.to_code());
 		assert_eq!(ietf.encode_stream_code(&StreamError::Old), ietf::error::INTERNAL_ERROR);
@@ -206,7 +206,7 @@ mod tests {
 			}
 		}
 
-		let version = ietf::Version::Draft20;
+		let version = ietf::Version::Draft22;
 
 		// 0x0 ends a session cleanly, but fails a stream.
 		assert!(matches!(

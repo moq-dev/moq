@@ -95,7 +95,6 @@ const VERSIONS: &[&str] = &[
 	"moq-transport-15",
 	"moq-transport-16",
 	"moq-transport-18",
-	"moq-transport-19",
 	"moq-transport-22",
 ];
 
@@ -166,7 +165,7 @@ async fn relayed(version: &str) {
 /// frames: the copy is timed from TRACK_STATUS_OK, and the resumed SUBSCRIBE keeps it so.
 #[moq_clock::test]
 async fn a_subscribe_after_track_status_keeps_timestamps() {
-	for version in ["moq-transport-18", "moq-transport-19", "moq-transport-22"] {
+	for version in ["moq-transport-18", "moq-transport-22"] {
 		moq_clock::timeout(TIMEOUT, async {
 			let publisher = produce_origin(1);
 			let broadcast = publisher.create_broadcast("bcast").unwrap();

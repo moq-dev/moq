@@ -258,9 +258,6 @@ fn ietf_datagram_interop() {
 		ietf::Version::Draft16,
 		ietf::Version::Draft17,
 		ietf::Version::Draft18,
-		ietf::Version::Draft19,
-		ietf::Version::Draft20,
-		ietf::Version::Draft21,
 		ietf::Version::Draft22,
 	];
 	for (draft, version) in (14..).zip(all) {
@@ -450,9 +447,6 @@ fn ietf_track_status_interop() {
 		ietf::Version::Draft16,
 		ietf::Version::Draft17,
 		ietf::Version::Draft18,
-		ietf::Version::Draft19,
-		ietf::Version::Draft20,
-		ietf::Version::Draft21,
 		ietf::Version::Draft22,
 	];
 	for (draft, version) in (14..).zip(all) {
@@ -497,7 +491,7 @@ fn ietf_track_status_interop() {
 				},
 				ietf::Version::Draft16 | ietf::Version::Draft17 => ietf::Properties::default(),
 				// Only draft-20 can carry the opt-out.
-				_ if !wanted && ietf::Filter::is_draft20(version) => ietf::Properties::default(),
+				_ if !wanted && ietf::Filter::is_draft22(version) => ietf::Properties::default(),
 				_ => ietf::Properties {
 					unknown: Default::default(),
 					dynamic_groups: false,

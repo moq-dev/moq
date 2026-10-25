@@ -131,7 +131,7 @@ async fn rejoin_skips_a_cache_kept_by_another_handle() {
 		"moq-lite-05",
 		"moq-lite-06",
 		"moq-lite-07-wip",
-		"moq-transport-19",
+		"moq-transport-18",
 		"moq-transport-22",
 	] {
 		moq_clock::timeout(TEST_TIMEOUT, async {
@@ -194,7 +194,7 @@ async fn rejoin_mid_group_keeps_the_head_for_later_readers() {
 		"moq-lite-05",
 		"moq-lite-06",
 		"moq-lite-07-wip",
-		"moq-transport-19",
+		"moq-transport-18",
 		"moq-transport-22",
 	] {
 		moq_clock::timeout(TEST_TIMEOUT, async {
@@ -269,7 +269,7 @@ async fn rejoin_mid_group_keeps_the_head_for_later_readers() {
 /// downstream, rather than wait on a head that is never coming.
 #[moq_clock::test]
 async fn rejoin_goes_live_without_the_join_head() {
-	for version in ["moq-transport-19", "moq-transport-22"] {
+	for version in ["moq-transport-18", "moq-transport-22"] {
 		moq_clock::timeout(TEST_TIMEOUT, async {
 			let publisher = produce_origin(1);
 			let relay = produce_origin(2);
@@ -471,7 +471,7 @@ async fn leaving_after_the_cache_window_keeps_the_latest_group() {
 		"moq-lite-05",
 		"moq-lite-06",
 		"moq-lite-07-wip",
-		"moq-transport-19",
+		"moq-transport-18",
 		"moq-transport-22",
 	] {
 		moq_clock::timeout(TEST_TIMEOUT + moq_net::cache::DEFAULT_EXPIRY * 3, async {
@@ -549,7 +549,7 @@ async fn leaving_after_the_cache_window_keeps_the_latest_group() {
 /// the empty block the second one carries.
 #[moq_clock::test]
 async fn rejoin_keeps_source_timestamps() {
-	for version in ["moq-transport-19", "moq-transport-22"] {
+	for version in ["moq-transport-18", "moq-transport-22"] {
 		moq_clock::timeout(TEST_TIMEOUT, async {
 			let publisher = produce_origin(1);
 			let client = produce_origin(2);
@@ -610,7 +610,7 @@ async fn rejoined_quiet_catalog_survives_cache_expiry() {
 		"moq-lite-05",
 		"moq-lite-06",
 		"moq-lite-07-wip",
-		"moq-transport-19",
+		"moq-transport-18",
 		"moq-transport-22",
 	] {
 		quiet_catalog_survives_cache_expiry(version.parse().unwrap(), false).await;
@@ -628,7 +628,7 @@ async fn taken_over_quiet_catalog_survives_cache_expiry() {
 		"moq-lite-05",
 		"moq-lite-06",
 		"moq-lite-07-wip",
-		"moq-transport-19",
+		"moq-transport-18",
 		"moq-transport-22",
 	] {
 		quiet_catalog_survives_cache_expiry(version.parse().unwrap(), true).await;

@@ -461,9 +461,6 @@ mod tests {
 			Version::Draft16,
 			Version::Draft17,
 			Version::Draft18,
-			Version::Draft19,
-			Version::Draft20,
-			Version::Draft21,
 			Version::Draft22,
 		] {
 			for bytes in [
@@ -563,7 +560,7 @@ mod tests {
 					&decoded.properties,
 					Some(Version::Draft22),
 					decoded.timestamp,
-					Version::Draft18,
+					Version::Draft22,
 					timescale
 				),
 				Err(Error::Unsupported)
@@ -761,7 +758,7 @@ mod tests {
 					&decoded.properties,
 					Some(Version::Draft22),
 					decoded.timestamp,
-					Version::Draft19,
+					Version::Draft22,
 					timescale
 				)
 				.unwrap(),
@@ -788,7 +785,7 @@ mod tests {
 				&legacy.properties,
 				Some(Version::Draft18),
 				legacy.timestamp,
-				Version::Draft19,
+				Version::Draft22,
 				milli
 			)
 			.unwrap(),
@@ -826,7 +823,7 @@ mod tests {
 				&legacy.properties,
 				Some(Version::Draft18),
 				legacy.timestamp,
-				Version::Draft19,
+				Version::Draft22,
 				milli
 			),
 			Err(Error::Unsupported)

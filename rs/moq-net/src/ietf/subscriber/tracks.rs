@@ -775,7 +775,7 @@ impl Subscriber {
 				}
 			} else if listings.entries.contains_key(&key) {
 				Offer::Refuse(duplicate, "already subscribed")
-			} else if msg.forward && !matches!(self.version, Version::Draft18 | Version::Draft19) {
+			} else if msg.forward && !matches!(self.version, Version::Draft18) {
 				// From draft-20 the PUBLISH sets its own Forward State, and PUBLISH_OK has no
 				// FORWARD to pause it: its objects would be refused unseen behind a healthy
 				// listing.
@@ -1472,7 +1472,7 @@ mod tests {
 	/// track, and UNINTERESTED after.
 	#[moq_clock::test]
 	async fn an_unasked_or_redundant_publish_is_refused() {
-		for (version, duplicate) in [(Version::Draft18, 0x19), (Version::Draft19, 0x20)] {
+		for (version, duplicate) in [(Version::Draft18, 0x19), (Version::Draft22, 0x20)] {
 			let mut h = harness(version);
 			let _listing = h.establish().await;
 			let (_, id, body) = h.offer(offered("other", "video", 1)).await;
@@ -1535,7 +1535,7 @@ mod tests {
 	/// clean SUBSCRIPTION_ENDED (drafts 18-19), which says nothing of the track itself.
 	#[moq_clock::test]
 	async fn a_resumed_track_ending_otherwise_fails_the_listing() {
-		let version = Version::Draft19;
+		let version = Version::Draft18;
 		let mut h = harness(version);
 		let _listing = h.establish().await;
 		let mut video = h.publish("video", 1).await;
@@ -1656,12 +1656,12 @@ mod tests {
 		));
 	}
 
-	/// From draft-20 a PUBLISH that forwards contradicts the paused listing it answers, and
+	/// On draft-22 a PUBLISH that forwards contradicts the paused listing it answers, and
 	/// nothing we send can pause it: it is refused and the listing fails, rather than have its
-	/// objects refused unseen. Through draft-19 our PUBLISH_OK pauses it.
+	/// objects refused unseen. On draft-18 our PUBLISH_OK pauses it.
 	#[moq_clock::test]
-	async fn a_forwarding_publish_fails_the_listing_from_draft_20() {
-		for version in [Version::Draft19, Version::Draft20] {
+	async fn a_forwarding_publish_fails_the_listing_on_draft_22() {
+		for version in [Version::Draft18, Version::Draft22] {
 			let mut h = harness(version);
 			let _listing = h.establish().await;
 			let forwarding = ietf::Publish {
@@ -1671,7 +1671,7 @@ mod tests {
 			let (_, id, _) = h.offer(forwarding).await;
 			let failed = h.listening.poll_failed(&kio::Waiter::noop());
 			match version {
-				Version::Draft19 => {
+				Version::Draft18 => {
 					assert_ne!(id, ietf::RequestError::ID, "{version}: refused");
 					assert!(failed.is_pending(), "{version}: {failed:?}");
 				}
@@ -1849,23 +1849,22 @@ mod tests {
 	/// draft-19, where a FIN is no cancel. The held PUBLISHes are let go with it.
 	#[moq_clock::test]
 	async fn dropping_the_listing_cancels_it() {
-		for version in [Version::Draft18, Version::Draft19] {
-			let mut h = harness(version);
-			let mut listing = h.establish().await;
-			let mut video = h.publish("video", 1).await;
-			drop(h.listening);
-			settle().await;
-			let ended = moq_clock::timeout(TIMEOUT, listing.reader.varint_maybe())
-				.await
-				.expect("the listing stayed open");
-			match version {
-				Version::Draft18 => assert!(matches!(ended, Ok(None)), "{version}: {ended:?}"),
-				_ => assert!(ended.is_err(), "{version}: {ended:?}"),
-			}
-			let ended = moq_clock::timeout(TIMEOUT, video.reader.varint_maybe())
-				.await
-				.expect("the PUBLISH stayed held");
-			assert!(!matches!(ended, Ok(Some(_))), "{version}: {ended:?}");
+		let version = Version::Draft18;
+		let mut h = harness(version);
+		let mut listing = h.establish().await;
+		let mut video = h.publish("video", 1).await;
+		drop(h.listening);
+		settle().await;
+		let ended = moq_clock::timeout(TIMEOUT, listing.reader.varint_maybe())
+			.await
+			.expect("the listing stayed open");
+		match version {
+			Version::Draft18 => assert!(matches!(ended, Ok(None)), "{version}: {ended:?}"),
+			_ => assert!(ended.is_err(), "{version}: {ended:?}"),
 		}
+		let ended = moq_clock::timeout(TIMEOUT, video.reader.varint_maybe())
+			.await
+			.expect("the PUBLISH stayed held");
+		assert!(!matches!(ended, Ok(Some(_))), "{version}: {ended:?}");
 	}
 }

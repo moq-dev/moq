@@ -1,4 +1,4 @@
-//! The MAX_REQUEST_UPDATES Setup Option (draft-ietf-moq-transport-19 section 10.3.1.7).
+//! The MAX_REQUEST_UPDATES Setup Option (draft-ietf-moq-transport-22).
 //!
 //! A request stream (SUBSCRIBE, PUBLISH_NAMESPACE, ...) can be refreshed in place with
 //! REQUEST_UPDATE messages. Each is outstanding from when the peer sends it until its
@@ -158,16 +158,13 @@ mod tests {
 	/// The option rides SETUP only on the drafts that define it; an older peer sees nothing,
 	/// which is what keeps the bound a negotiated contract rather than a surprise.
 	#[test]
-	fn advertised_only_on_draft_19_plus() {
-		for version in [Version::Draft19, Version::Draft20, Version::Draft21, Version::Draft22] {
-			let mut params = super::super::Parameters::default();
-			into_setup(&mut params, version);
-			assert_eq!(
-				params.get_varint(super::super::ParameterVarInt::MaxRequestUpdates),
-				Some(MAX_REQUEST_UPDATES),
-				"{version} must advertise MAX_REQUEST_UPDATES"
-			);
-		}
+	fn advertised_only_on_draft_22() {
+		let mut params = super::super::Parameters::default();
+		into_setup(&mut params, Version::Draft22);
+		assert_eq!(
+			params.get_varint(super::super::ParameterVarInt::MaxRequestUpdates),
+			Some(MAX_REQUEST_UPDATES)
+		);
 
 		for version in [
 			Version::Draft14,

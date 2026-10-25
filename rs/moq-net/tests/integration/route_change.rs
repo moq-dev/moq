@@ -469,7 +469,7 @@ macro_rules! route_change_tests {
 route_change_tests! {
 	lite_07: "moq-lite-07-wip",
 	ietf_17: "moq-transport-17",
-	ietf_19: "moq-transport-19",
+	ietf_18: "moq-transport-18",
 	ietf_22: "moq-transport-22",
 }
 
@@ -1187,6 +1187,6 @@ producer_replaced_tests! {
 	replaced_lite_06: "moq-lite-06",
 	replaced_lite_05: "moq-lite-05",
 	replaced_lite_04: "moq-lite-04",
-	replaced_ietf_19: "moq-transport-19",
+	replaced_ietf_18: "moq-transport-18",
 	replaced_ietf_22: "moq-transport-22",
 }

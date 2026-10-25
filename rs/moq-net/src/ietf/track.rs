@@ -52,7 +52,7 @@ impl Message for TrackStatus<'_> {
 			_ => {
 				// Only the opt-out is worth bytes, and an older peer would read the
 				// parameter as unknown, which is a protocol violation.
-				let include_properties = (!self.properties_wanted && Filter::is_draft20(version)).then_some(false);
+				let include_properties = (!self.properties_wanted && Filter::is_draft22(version)).then_some(false);
 				let epoch = self.epoch.clone().filter(|_| super::epoch::supported(version));
 				encode_params!(w, version,
 					0x35 => include_properties,
@@ -351,15 +351,12 @@ mod tests {
 		assert_eq!(decoded.track_name, "video");
 	}
 
-	const ALL: [Version; 9] = [
+	const ALL: [Version; 6] = [
 		Version::Draft14,
 		Version::Draft15,
 		Version::Draft16,
 		Version::Draft17,
 		Version::Draft18,
-		Version::Draft19,
-		Version::Draft20,
-		Version::Draft21,
 		Version::Draft22,
 	];
 
@@ -378,7 +375,7 @@ mod tests {
 				};
 				let decoded: TrackStatus = decode_message(&encode_message(&msg, version), version)
 					.unwrap_or_else(|e| panic!("{version}: {e}"));
-				let expected = wanted || !Filter::is_draft20(version);
+				let expected = wanted || !Filter::is_draft22(version);
 				assert_eq!(decoded.properties_wanted, expected, "{version} wanted={wanted}");
 			}
 		}
@@ -470,7 +467,7 @@ mod tests {
 				0x10, 0x00, // FORWARD = 0
 				0x20, 0x01, // SUBSCRIBER_PRIORITY = 1
 			]),
-			(Version::Draft20, &[
+			(Version::Draft22, &[
 				0x02, // Number of Parameters
 				0x03, 0x03, 0x03, 0x00, 0xAA, // AUTHORIZATION TOKEN
 				0x32, 0x00, // INCLUDE_PROPERTIES (0x35) = 0
@@ -484,7 +481,7 @@ mod tests {
 			let msg = TrackStatus::decode_msg(&mut buf, version).unwrap_or_else(|e| panic!("{version}: {e}"));
 			assert!(buf.is_empty(), "{version}: trailing bytes");
 			assert_eq!(msg.track_name, "video", "{version}");
-			assert_eq!(msg.properties_wanted, version != Version::Draft20, "{version}");
+			assert_eq!(msg.properties_wanted, version != Version::Draft22, "{version}");
 		}
 	}
 }

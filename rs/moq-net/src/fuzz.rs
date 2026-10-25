@@ -101,9 +101,6 @@ const IETF_VERSIONS: &[ietf::Version] = &[
 	ietf::Version::Draft16,
 	ietf::Version::Draft17,
 	ietf::Version::Draft18,
-	ietf::Version::Draft19,
-	ietf::Version::Draft20,
-	ietf::Version::Draft21,
 	ietf::Version::Draft22,
 ];
 
@@ -808,7 +805,7 @@ impl Default for Messages {
 const BENCH_LITE: lite::Version = lite::Version::Lite06;
 
 /// The moq-transport draft the [`Messages`] mix is encoded at: a leading-ones varint draft.
-const BENCH_IETF: ietf::Version = ietf::Version::Draft20;
+const BENCH_IETF: ietf::Version = ietf::Version::Draft22;
 
 impl Messages {
 	/// Append the moq-lite messages to `out`.

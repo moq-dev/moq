@@ -368,9 +368,6 @@ const IETF: &[&str] = &[
 	"moq-transport-16",
 	"moq-transport-17",
 	"moq-transport-18",
-	"moq-transport-19",
-	"moq-transport-20",
-	"moq-transport-21",
 	"moq-transport-22",
 ];
 
