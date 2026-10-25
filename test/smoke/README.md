@@ -23,7 +23,7 @@ CI runs the matrix nightly and on pull requests that touch `test/smoke/`: [`.git
 
 ## Clients
 
-`moq-relay` and `moq` come from `PATH` or from `RELAY_BIN` and `MOQ_BIN`. Every other client installs from its registry on each run.
+`moq-relay` and `moq` come from `PATH` or from `RELAY_BIN` and `CLI_BIN`. Every other client installs from its registry on each run.
 
 | Client | Role | Install |
 | --- | --- | --- |
@@ -53,7 +53,7 @@ just token
 just check    # shfmt, shellcheck, actionlint, freshness
 ```
 
-`just nix-channel` is a run, not an install. It builds `github:moq-dev/moq#moq-relay` and `#moq` with `nix build --refresh --no-link`, then runs `smoke.sh` with `RELAY_BIN` and `MOQ_BIN` pointed at those outputs. Nothing is left on `PATH`, so a later `just full` does not see those binaries. The Docker images work the same way: point `RELAY_BIN` and `MOQ_BIN` at the wrappers in [`clients/docker`](clients/docker). Those wrappers are not an install.
+`just nix-channel` is a run, not an install. It builds `github:moq-dev/moq#moq-relay` and `#moq` with `nix build --refresh --no-link`, then runs `smoke.sh` with `RELAY_BIN` and `CLI_BIN` pointed at those outputs. Nothing is left on `PATH`, so a later `just full` does not see those binaries. The Docker images work the same way: point `RELAY_BIN` and `CLI_BIN` at the wrappers in [`clients/docker`](clients/docker). Those wrappers are not an install.
 
 `just check` lints the harness. Run the lane you changed.
 

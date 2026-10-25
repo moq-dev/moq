@@ -17,7 +17,7 @@
 # so each case is also an interop check. See README.md.
 set -euo pipefail
 
-if [[ "${GITHUB_ACTIONS:-}" != true && "${MOQ_LOCAL_SUPERVISED:-}" != 1 ]]; then
+if [[ "${GITHUB_ACTIONS:-}" != true && "${LOCAL_SUPERVISED:-}" != 1 ]]; then
     exec bash "$(dirname "$0")/../../sh/local.sh" bash "$0" "$@"
 fi
 
@@ -47,7 +47,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --baseline)
             BASELINE=true
-            export MOQ_TEST_KEEP=1
+            export HARNESS_KEEP=1
             shift
             ;;
         --uniffi)
@@ -144,7 +144,7 @@ if [[ -n $BASELINE ]]; then
     driver=baseline/driver.ts
     if [[ -n $UNIFFI ]]; then
         bun build uniffi/dist/index.ts --outfile dist/uniffi.js --target browser --minify >/dev/null
-        export MOQ_WASM_UNIFFI=1
+        export WASM_UNIFFI=1
     fi
 else
     bun build src/main.ts --outdir dist --target browser >/dev/null
