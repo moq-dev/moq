@@ -630,11 +630,22 @@ impl Connection {
 
             // Is there data or a close message to send in this space?
             let can_send = self.space_can_send(space_id, frame_space_1rtt);
+            // The packet still being built isn't in flight yet; assume it gets padded to fill
+            // the segment
+            let untracked_bytes = if let Some(builder) = &builder_storage {
+                buf_capacity - builder.partial_encode.start
+            } else {
+                0
+            } as u64;
             // With nothing else to send, resend in-flight data while the controller probes
             let bandwidth_probe = space_id == SpaceId::Data
                 && can_send.is_empty()
                 && !close
-                && match self.bandwidth_probe_ready(now, &controller_metrics, segment_size as u64) {
+                && match self.bandwidth_probe_ready(
+                    now,
+                    &controller_metrics,
+                    segment_size as u64 + untracked_bytes,
+                ) {
                     bandwidth_probe::Ready::Idle => false,
                     bandwidth_probe::Ready::Blocked(until) => {
                         if let Some(until) = until {
@@ -712,12 +723,6 @@ impl Connection {
                 // longer processes ACKs, so the window could never drain
                 // (see https://github.com/quinn-rs/quinn/issues/2785)
                 if ack_eliciting && self.spaces[space_id].loss_probes == 0 && !close {
-                    // Assume the current packet will get padded to fill the segment
-                    let untracked_bytes = if let Some(builder) = &builder_storage {
-                        buf_capacity - builder.partial_encode.start
-                    } else {
-                        0
-                    } as u64;
                     debug_assert!(untracked_bytes <= segment_size as u64);
 
                     let bytes_to_send = segment_size as u64 + untracked_bytes;

@@ -674,6 +674,38 @@ fn single_packet_writes() {
     );
 }
 
+/// A batch of probe packets stays within the inflight the controller allows a probe, counting the
+/// packet still being built
+#[test]
+fn batch_within_probe_inflight() {
+    let _guard = subscribe();
+    let mut pair = Pair::default();
+    pair.latency = Duration::from_millis(20);
+    let (client_ch, _) = pair.connect();
+    // Far above the path, so only the inflight bound holds the probe back
+    pair.client_conn_mut(client_ch)
+        .set_probe_target(1000 * TARGET);
+    let id = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
+    pair.client_send(client_ch, id).write(&[0; 1400]).unwrap();
+    pair.drive_client();
+
+    let conn = pair.client_conn_mut(client_ch);
+    let inflight = conn
+        .congestion_state()
+        .metrics()
+        .probe_inflight
+        .expect("probing in Startup");
+    assert!(conn.stats().path.sent_bandwidth_probes > 1);
+    assert!(
+        conn.bytes_in_flight() <= inflight,
+        "{} bytes in flight past the probe's {inflight}",
+        conn.bytes_in_flight()
+    );
+}
+
 #[test]
 #[ignore = "nightly: just rs quic-sim"]
 fn steps_keyframes() {
