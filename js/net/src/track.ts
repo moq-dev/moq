@@ -2615,6 +2615,8 @@ export class Subscriber {
 			this.#state.drops.changed(fn),
 			this.#state.startChanged.changed(fn),
 			this.#cursor.changed(fn),
+			// A widened budget re-offers the groups it skipped as stale.
+			this.#state.update.changed(fn),
 			this.#state.closed.changed(fn),
 			this.#state.end.changed(fn),
 			this.#state.received.changed(fn),

@@ -3636,6 +3636,28 @@ test("a widened maxDelay re-offers what it skipped as stale", () => {
 	producer.close();
 });
 
+// A read already parked when the budget widens wakes for the re-offer.
+test("a widened maxDelay wakes a parked read", async () => {
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
+	const subscriber = producer.subscribe({ maxDelay: Milli(1500) });
+	stampGroup(producer, 0, 0);
+	expect(drainGroups(subscriber)).toEqual([0]);
+	for (const [sequence, ms] of [
+		[1, 1000],
+		[2, 2000],
+		[3, 6000],
+	]) {
+		stampGroup(producer, sequence, ms);
+	}
+	// Group 1 reaches 2s, 4s behind the 6s edge.
+	expect(drainGroups(subscriber)).toEqual([2, 3]);
+
+	const parked = subscriber.recvGroup();
+	subscriber.update({ maxDelay: Milli(10_000) });
+	expect((await parked)?.sequence).toBe(1);
+	producer.close();
+});
+
 // A re-offer never hands out a group below a floor raised in the same update.
 test("a widened maxDelay re-offers nothing below a raised floor", () => {
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
