@@ -11,6 +11,13 @@ use crate::quic;
 
 #[cfg(feature = "quic")]
 impl Grouped for quic::web::Session {
+	fn poll_open_request(
+		&mut self,
+		cx: &mut std::task::Context<'_>,
+	) -> std::task::Poll<Result<Option<web_transport_trait::poll::BiStreams<Self>>, Self::Error>> {
+		Self::poll_open_request(self, cx)
+	}
+
 	// Leased in the QUIC stack, so the receive window bounds what an incomplete message holds.
 	type Recv = quic::web::RecvStream;
 
@@ -20,6 +27,10 @@ impl Grouped for quic::web::Session {
 
 	fn wire(&self) -> Option<moq_net::transport::Wire> {
 		Some(quic::web::Session::wire(self))
+	}
+
+	fn probe(&self) -> Option<moq_net::transport::Probe> {
+		quic::web::Session::probe(self)
 	}
 
 	fn streams_evicted(&self) -> Option<u64> {

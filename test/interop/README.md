@@ -18,21 +18,34 @@ WebCodecs output painted to a canvas and drives the player's pause/resume contro
 Every publisher also sends an Opus tone, one sine per channel, and every subscriber
 decodes it. Python and C++ send a mono 440 Hz tone; the rest send 440 Hz left and
 660 Hz right, so a channel swap fails too. The Rust CLI imports it from ffmpeg in
-fragmented MP4, the browser encodes its fake microphone playing the tone from a WAV
-file, and the Python, Go, and C++ clients encode it through `moq-ffi` at a 2.5 ms
+fragmented MP4, as both an Opus and an AAC rendition, so AAC import and decode cross
+every subscriber (the wire-compat lanes send Opus alone; see
+[Released wire compatibility](#released-wire-compatibility)). The browser decodes the picture
+and the tone from a looping file through `<moq-publish>`'s file source and encodes both, rather
+than capturing Chromium's fake camera and microphone: those run on timers that skip a late tick,
+so a runner short of CPU splices the captured tone with no timestamp gap. The Python, Go, and
+C++ clients encode it through `moq-ffi` at a 2.5 ms
 frame duration, so the matrix covers the FFI audio path with a non-default codec config.
-Each subscriber decodes with what it already has: moq-audio for Rust (the
+Each subscriber decodes every audio rendition with what it already has: moq-audio for Rust (the
 `interop-audio` example, since the CLI has no PCM output), `moq-ffi` for Python,
-Go, and C++, `moq-c` for C, `decodebin` on `audio_0` for GStreamer, and
-`@moq/hang`'s libav WebCodecs fallback under Node and Bun. Each writes its first
-600 ms of PCM and frame timestamps for [`tone.py`](tone.py), which requires the
+Go, and C++, `moq-c` for C, `decodebin` on each `audio_N` pad for GStreamer, and
+`@moq/hang`'s libav WebCodecs fallback under Node and Bun. Each writes the first
+600 ms of PCM and frame timestamps of each rendition, named by its codec, for
+[`tone.py`](tone.py), which requires the
 publisher's channel count, contiguous timestamps, and each channel's tone carrying
 most of its energy by a Goertzel filter. A garbled decode (wrong channel order or
-sample rate), silence, or a timestamp gap fails the cell; a misapplied pre-skip only
-shifts the tone's phase, which this does not check. The browser
-runs the same filter on each channel of the player's audio graph. A negative control
-then has the Rust CLI swap its channels' tones, and every subscriber must refuse it
-as the wrong tone, not fail some other way. `interop.sh` is the one place the tones are chosen.
+sample rate), silence, a timestamp gap, or a rendition left undecoded fails the cell.
+Each publisher's tone starts at timestamp zero, so `--phase` also holds every
+rendition's tone to its timestamps within a sample, which fails a decoder that keeps
+or drops the wrong Opus pre-skip or AAC priming. It skips the browser publisher, which stamps its file
+from its own page clock, the native-JS subscriber, which leaves the pre-skip to the
+player as WebCodecs does and stamps milliseconds, and GStreamer's AAC, whose `faad`
+decoder reads the priming a frame early. The browser plays each rendition in a page
+of its own, the player pinned to it by `controls.audio.target`, and runs the same
+filter on each channel of the player's audio graph. A negative control then has the
+Rust CLI swap its channels' tones, and every subscriber must refuse every rendition
+as the wrong tone, not fail some other way. `interop.sh` is the one place the tones
+and each publisher's codecs are chosen.
 
 The normal run also checks a finite raw track through the relay. Its publisher
 announces end 4 before writing four 256 KiB groups; the reader verifies every byte,
@@ -121,9 +134,10 @@ marks the cell unavailable.
 
 The GStreamer client builds the `moqsrc` plugin from `rs/moq-gst` and points
 `GST_PLUGIN_PATH` at it, then reads a broadcast with
-`gst-launch-1.0 moqsrc ... ! filesink`, decoding `audio_0` through `decodebin`.
+`gst-launch-1.0 moqsrc ... ! filesink`, decoding each `audio_N` pad through `decodebin`.
 The plugin dynamic-links the host's GStreamer, so this cell needs `gst-launch-1.0`
-plus the core plugins and `opusdec` on the system.
+plus the core plugins, `opusdec`, and an AAC decoder (`fdkaacdec`, `avdec_aac`, or
+`faad`) on the system.
 The `nix develop` shell ships them; a bare shell without GStreamer marks the cell
 unavailable rather than failing it.
 
@@ -296,7 +310,8 @@ default matrix covers tokens and grants.
 Current Rust media publishers feed released Rust and JS readers, then released
 publishers feed current readers, through both relay sources. Each reader is its
 own lane, `media-rust` and `media-js-native-node`. Each Rust CLI publishes the
-stereo interop tone from fragmented MP4 (released CLIs publish it as CMAF), and
+stereo interop tone from fragmented MP4 (released CLIs publish it as CMAF) as
+Opus alone, since the released `@moq/hang`'s libav fallback has no AAC decoder, and
 every reader must decode both a video frame and the tone, which `tone.py`
 judges as in the matrix: a garbled decode, a missing audio rendition, or a
 timestamp gap fails the lane, and the swapped-tone control must fail it. Rust
@@ -428,6 +443,25 @@ It uses the same real fixture, player and content oracles while leaving cold-sta
 grading and the unrelated negative controls to the default full run. A focused
 pass makes no claim about those omitted checks.
 
+`just test media --media-cases replacement` keeps publisher A open while B takes
+the same path, then closes B and follows A again. Lite-07, lite-06, and IETF draft
+22 viewers must present each run's marked pixels and synchronized audio, with
+no A pictures spliced into B. Epoch-aware viewers also check the broadcast
+identities. Both publishers use lite-07. Each switch must present within a bound
+derived from its parts, counted from B's readiness (connected, with catalogs) or
+B's withdrawal: the relay's 300 ms announcement hold, five loopback round trips
+at QUIC's 1 ms timer granularity, the 500 ms GOP, one frame to decode, the 50 ms
+playback delay, and one page sample plus one driver poll. Publisher preparation
+is not part of it.
+
+The CLI integration suite's `epochs` cases exercise the real QUIC relay with
+lite-07, lite-06, and IETF drafts 14 and 22. Held catalog snapshots and media
+subscriptions keep A while fresh catalog handles resolve B with fresh sibling
+pins. Later metadata and FETCH work cannot join B through A's retired handle;
+withdrawing B reveals the still-live A to fresh readers. Announcement followers
+must see each switch within the relay's and the reader's announcement holds plus
+one round trip.
+
 The run ends with negative controls. Each injects a defect and names the
 assertion that has to catch it, and passes only by failing there:
 
@@ -449,7 +483,7 @@ and any claim about physical playback.
 The relay's port is reserved for the run rather than fixed, so two checkouts can
 run the interop test at once; `INTEROP_PORT` pins one instead. A failing run keeps its
 directory, including a Playwright trace of the failing page, and CI uploads it;
-`MOQ_TEST_KEEP=1` keeps a passing run's too. See [the harness
+`HARNESS_KEEP=1` keeps a passing run's too. See [the harness
 contract](../README.md).
 
 ## Layout
@@ -495,7 +529,7 @@ table of publisher by subscriber for each suite, case, transport, and version, p
 workflow step's outcome. A red cell links to its run and to the failure artifact, and
 its tooltip names the log inside that artifact.
 
-The report reads records, never logs. With `MOQ_TEST_RESULTS` set, `interop.sh` and
+The report reads records, never logs. With `HARNESS_RESULTS` set, `interop.sh` and
 `compat.sh` append one JSON line per case through `harness_result` (`test/lib/harness.sh`):
 suite, case, publisher, subscriber, transport, version, outcome, seconds, detail, and
 log. A run first records every case it will reach as `not run`, before building
@@ -504,7 +538,7 @@ rather than missing ones. Transport and version are `auto` where each client neg
 its own; a pinned pass, the drop lanes, and wire-compat record their version. `report.py` renders the page:
 
 ```bash
-MOQ_TEST_RESULTS=/tmp/results.jsonl just test interop
+HARNESS_RESULTS=/tmp/results.jsonl just test interop
 just test interop-report /tmp/results.jsonl /tmp/interop-report
 ```
 
@@ -513,7 +547,7 @@ just test interop-report /tmp/results.jsonl /tmp/interop-report
 `just test bare-fin` exchanges encoded subscription responses between Rust and
 JS, then feeds them into each implementation's subscriber over an in-memory
 transport. It checks bare FIN before and after SUBSCRIBE\_START on lite-05/06/07,
-and FIN without PUBLISH\_DONE on IETF draft-19. Clean-end controls use the same
+and FIN without PUBLISH\_DONE on IETF draft-18. Clean-end controls use the same
 path. This tests response interoperability, not network delivery or relay behavior.
 The interop workflow runs it alongside the real-transport matrix.
 
@@ -544,12 +578,12 @@ range is per version: JS writes lite-07's 64-bit values, which Rust reads back,
 and JS refuses them on lite-06.
 
 `ietf_datagram_interop` does the same for moq-transport's `OBJECT_DATAGRAM` on
-drafts 14 through 22: `ietf-datagram.ts` decodes Rust's datagrams and their
+each supported draft: `ietf-datagram.ts` decodes Rust's datagrams and their
 Timestamps and re-encodes them byte for byte, and Rust decodes the datagram the
 JS publisher sends.
 
 `ietf_track_status_interop` sends Rust's `TRACK_STATUS` to the JS publisher on
-drafts 14 through 22 through `track-status.ts`, and Rust decodes each
+each supported draft through `track-status.ts`, and Rust decodes each
 `TRACK_STATUS_OK` and the refusal for a missing broadcast the way its
 subscriber reads them.
 

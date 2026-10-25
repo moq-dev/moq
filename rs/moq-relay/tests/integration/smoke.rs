@@ -103,7 +103,7 @@ async fn spawn_versioned_relay(versions: Vec<moq_net::Version>) -> (u16, tokio::
 	config.auth.public = vec![moq_auth::Pattern::all()];
 
 	// `load` binds the web listener, so the port is ours before anyone dials it.
-	let relay = Relay::load(config).await.expect("load relay");
+	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let port = relay.web_addrs().http.expect("HTTP listener is configured").port();
 	let handle = tokio::spawn(async move { relay.run().await.expect("relay") });
 
@@ -120,16 +120,18 @@ fn client_version(version: Option<moq_net::Version>) -> moq_tokio::Client {
 	config.tls.insecure = Some(true);
 	// One-shot: these tests were written against a single dial, and a background
 	// redial would re-register with the relay behind the assertions' back.
-	config.once = Some(true);
 	// Zero head start so the WebSocket path runs immediately.
-	config.websocket.delay = Some(std::time::Duration::ZERO);
+	config.websocket.delay = Some((std::time::Duration::ZERO).into());
 	// Every relay in this file listens on IPv4 loopback, so bind the same family
 	// rather than egressing a QUIC dial from a dual-stack IPv6 socket.
 	config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
 	if let Some(version) = version {
 		config.version = vec![version];
 	}
-	config.init(Default::default()).expect("client init")
+	config
+		.init(Default::default())
+		.expect("client init")
+		.with_reconnect(false)
 }
 
 /// Connect a publisher and a subscriber to a real relay over `ws://`, push
@@ -220,18 +222,8 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 /// a QUIC one, so the interop harness can pair its `conn{id=N}` span with that close.
 #[tokio::test]
 async fn relay_websocket_logs_its_close_under_a_cluster_id() {
-	use tracing_subscriber::layer::SubscriberExt;
-
 	let logs = Logs::default();
-	// Only the connection target, as the interop harness keeps, so the span and its close
-	// must both log there.
-	let subscriber = tracing_subscriber::fmt()
-		.with_ansi(false)
-		.with_writer(logs.clone())
-		.finish()
-		.with(tracing_subscriber::filter::Targets::new().with_target("moq_relay::connection", tracing::Level::INFO));
-	// Thread-local, which covers the relay: the test's current-thread runtime runs its tasks.
-	let _logging = tracing::subscriber::set_default(subscriber);
+	let _logging = logs.capture();
 
 	let cluster = new_cluster();
 	// Take an id as a QUIC accept would, so a WebSocket counter of its own would reuse it.

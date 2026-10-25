@@ -31,7 +31,7 @@ use super::{Capture, DEFAULT_FRAMERATE, Kind, Target, drm_format, err, linear_mo
 use crate::capture::mode::{self, Request};
 use crate::capture::v4l2::{DEFAULT_HEIGHT, DEFAULT_WIDTH, bounds};
 use crate::capture::{Camera, Config, Mode, PIPEWIRE, Stream};
-use crate::{Error, Rate, Size};
+use crate::{Error, FrameRate, Size};
 
 /// How long the PipeWire daemon may take to answer a query. A connected daemon
 /// answers in milliseconds, so running out means it is stuck.
@@ -378,7 +378,7 @@ pub(super) struct Format {
 	/// The sizes on offer. A size range contributes its corners.
 	sizes: Vec<Size>,
 	/// The exact rates on offer, highest first. Empty for a rate range.
-	rates: Vec<Rate>,
+	rates: Vec<FrameRate>,
 	/// The size range, when the size is one, which also offers the grid size
 	/// nearest the request.
 	ranged: Option<Grid>,
@@ -436,8 +436,8 @@ impl Grid {
 }
 
 /// Whether the rate range `min..=max` holds `rate`, compared as cross products
-/// because a range may start at 0/1, which is no valid [`Rate`].
-fn holds(min: spa::utils::Fraction, max: spa::utils::Fraction, rate: Rate) -> bool {
+/// because a range may start at 0/1, which is no valid [`FrameRate`].
+fn holds(min: spa::utils::Fraction, max: spa::utils::Fraction, rate: FrameRate) -> bool {
 	let (num, denom) = (u64::from(rate.numerator()), u64::from(rate.denominator()));
 	u64::from(min.num) * denom <= num * u64::from(min.denom) && num * u64::from(max.denom) <= u64::from(max.num) * denom
 }
@@ -448,7 +448,7 @@ pub(super) struct Selected {
 	encoding: Encoding,
 	size: Size,
 	/// `None` when the camera reports a rate range and no rate in it was requested.
-	framerate: Option<Rate>,
+	framerate: Option<FrameRate>,
 }
 
 impl Selected {
@@ -522,7 +522,7 @@ impl Selected {
 	}
 }
 
-fn fraction(rate: Rate) -> spa::utils::Fraction {
+fn fraction(rate: FrameRate) -> spa::utils::Fraction {
 	spa::utils::Fraction {
 		num: rate.numerator(),
 		denom: rate.denominator(),
@@ -625,9 +625,9 @@ fn parse_format(value: &Value) -> Vec<Format> {
 		}
 		_ => (Vec::new(), None),
 	};
-	let rate = |fraction: &spa::utils::Fraction| Rate::new(fraction.num, fraction.denom).ok();
+	let rate = |fraction: &spa::utils::Fraction| FrameRate::new(fraction.num, fraction.denom).ok();
 	let framerate = property(FormatProperties::VideoFramerate);
-	let mut rates: Vec<Rate> = match framerate {
+	let mut rates: Vec<FrameRate> = match framerate {
 		Some(Value::Fraction(fraction)) => rate(fraction).into_iter().collect(),
 		Some(Value::Choice(ChoiceValue::Fraction(choice))) => listed(&choice.1).iter().filter_map(rate).collect(),
 		_ => Vec::new(),
@@ -685,7 +685,7 @@ fn select(formats: &[Format], want: Request) -> Option<Selected> {
 			.and_then(|grid| grid.nearest(want.size))
 			.into_iter()
 			.chain(format.sizes.iter().copied());
-		let rates: Vec<Option<Rate>> = if format.rates.is_empty() {
+		let rates: Vec<Option<FrameRate>> = if format.rates.is_empty() {
 			let held = want
 				.framerate
 				.filter(|&rate| format.rate_range.is_some_and(|(min, max)| holds(min, max, rate)));
@@ -906,7 +906,7 @@ mod tests {
 		assert_eq!(formats.len(), 5);
 		assert_eq!(formats[0].encoding, Encoding::Mjpeg);
 		assert_eq!(formats[0].sizes, [Size::new(1280, 720)]);
-		assert_eq!(formats[0].rates, [Rate::new(30, 1).unwrap()]);
+		assert_eq!(formats[0].rates, [FrameRate::new(30, 1).unwrap()]);
 		assert_eq!(formats[3].encoding, Encoding::Raw(VideoFormat::YUY2));
 	}
 
@@ -979,7 +979,7 @@ mod tests {
 	fn request(width: u32, height: u32, fps: Option<u32>) -> Request {
 		Request {
 			size: Size::new(width, height),
-			framerate: fps.map(|fps| Rate::new(fps, 1).unwrap()),
+			framerate: fps.map(|fps| FrameRate::new(fps, 1).unwrap()),
 		}
 	}
 
@@ -1084,7 +1084,7 @@ mod tests {
 			(selected.encoding, selected.framerate)
 		};
 		let nv12 = Encoding::Raw(VideoFormat::NV12);
-		let rate = |fps| Some(Rate::new(fps, 1).unwrap());
+		let rate = |fps| Some(FrameRate::new(fps, 1).unwrap());
 		assert_eq!(pick(Some(60)), (nv12, rate(60)));
 		assert_eq!(pick(Some(30)), (nv12, rate(30)));
 		// Out of the range, the exact rate elsewhere is the better answer.
@@ -1092,8 +1092,8 @@ mod tests {
 		// Nothing requested: the range stays open and the cheaper format wins.
 		assert_eq!(pick(None), (nv12, None));
 
-		assert!(holds(ratio(0, 1), ratio(30, 1), Rate::new(30000, 1001).unwrap()));
-		assert!(!holds(ratio(0, 1), ratio(30, 1), Rate::new(30001, 1000).unwrap()));
+		assert!(holds(ratio(0, 1), ratio(30, 1), FrameRate::new(30000, 1001).unwrap()));
+		assert!(!holds(ratio(0, 1), ratio(30, 1), FrameRate::new(30001, 1000).unwrap()));
 	}
 
 	/// The offer pins the chosen mode, and only NV12 gets a DMA-BUF offer.
@@ -1117,7 +1117,7 @@ mod tests {
 		let mjpeg = Selected {
 			encoding: Encoding::Mjpeg,
 			size: Size::new(1920, 1080),
-			framerate: Some(Rate::new(30, 1).unwrap()),
+			framerate: Some(FrameRate::new(30, 1).unwrap()),
 		};
 		let offers = mjpeg.offers();
 		assert_eq!(offers.len(), 1);

@@ -11,20 +11,41 @@ use std::task::{Context, Poll};
 use bytes::{Buf, Bytes};
 
 use super::poll::{self, SendOptions};
-use super::{Binding, CloseKind, MaybeSend, MaybeSync, Probe, Wire};
+use super::{Address, CloseKind, MaybeSend, MaybeSync, Probe, Wire};
 
 /// A boxed [`poll::Boxable`] session.
-pub(crate) struct Session(Box<dyn ErasedSession>);
+pub(crate) struct Session {
+	inner: Box<dyn ErasedSession>,
+	/// Shared by every clone, so whichever task closes the transport first says why.
+	closing: std::sync::Arc<crate::session::Closing>,
+}
 
 impl Session {
 	pub(crate) fn new<S: poll::Boxable>(session: S) -> Self {
-		Self(Box::new(session))
+		Self {
+			inner: Box::new(session),
+			closing: Default::default(),
+		}
+	}
+
+	/// How this side closed the transport.
+	pub(crate) fn closing(&self) -> &std::sync::Arc<crate::session::Closing> {
+		&self.closing
+	}
+
+	/// Close with `code` over `cause`, this side's reason for ending the session.
+	pub(crate) fn abort(&mut self, cause: &crate::Error, code: u32, reason: &str) {
+		self.closing.sent(code, Some(cause));
+		self.inner.close(code, reason);
 	}
 }
 
 impl Clone for Session {
 	fn clone(&self) -> Self {
-		Self(self.0.clone_box())
+		Self {
+			inner: self.inner.clone_box(),
+			closing: self.closing.clone(),
+		}
 	}
 }
 
@@ -83,8 +104,8 @@ impl poll::SendGroup for Group {
 pub(crate) struct SendStream(Box<dyn ErasedSend>);
 
 impl SendStream {
-	/// Box a stream whose send group, if any, is a [`Group`].
-	pub(crate) fn new(stream: impl poll::SendStream<Group = Group> + MaybeSend + MaybeSync) -> Self {
+	/// Box a stream, keeping its own send-group type behind the boundary.
+	pub(crate) fn new(stream: impl poll::SendStream<Group: MaybeSend + MaybeSync> + MaybeSend + MaybeSync) -> Self {
 		Self(Box::new(stream))
 	}
 }
@@ -175,12 +196,17 @@ trait ErasedSession: MaybeSend + MaybeSync {
 		cx: &mut Context<'_>,
 		options: SendOptions<'_, Group>,
 	) -> Poll<Result<(SendStream, RecvStream), Error>>;
+	fn poll_open_request(
+		&mut self,
+		cx: &mut Context<'_>,
+		options: SendOptions<'_, Group>,
+	) -> Poll<Result<Option<(SendStream, RecvStream)>, Error>>;
 	fn send_group(&mut self, priority: i64) -> Option<Group>;
 	fn send_datagram(&mut self, payload: Bytes, options: SendOptions<'_, Group>) -> Result<(), Error>;
 	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Error>>;
 	fn max_datagram_size(&self) -> usize;
 	fn protocol(&self) -> Option<&str>;
-	fn binding(&self) -> Binding;
+	fn address(&self) -> Address;
 	fn close(&mut self, code: u32, reason: &str);
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Error>;
 	fn stats(&self) -> Stats;
@@ -269,6 +295,15 @@ impl<S: poll::Boxable> ErasedSession for S {
 		poll::Session::poll_open_bi(self, cx, unbox(options)).map(|res| res.map(bi::<S>).map_err(Error::new))
 	}
 
+	fn poll_open_request(
+		&mut self,
+		cx: &mut Context<'_>,
+		options: SendOptions<'_, Group>,
+	) -> Poll<Result<Option<(SendStream, RecvStream)>, Error>> {
+		poll::Session::poll_open_request(self, cx, unbox(options))
+			.map(|res| res.map(|streams| streams.map(bi::<S>)).map_err(Error::new))
+	}
+
 	fn send_group(&mut self, priority: i64) -> Option<Group> {
 		poll::Session::send_group(self, priority).map(|group| Group(Box::new(group)))
 	}
@@ -289,8 +324,8 @@ impl<S: poll::Boxable> ErasedSession for S {
 		poll::Session::protocol(self)
 	}
 
-	fn binding(&self) -> Binding {
-		poll::Session::binding(self)
+	fn address(&self) -> Address {
+		poll::Session::address(self)
 	}
 
 	fn close(&mut self, code: u32, reason: &str) {
@@ -404,11 +439,11 @@ impl poll::Session for Session {
 	type Error = Error;
 
 	fn poll_accept_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<RecvStream, Error>> {
-		self.0.poll_accept_uni(cx)
+		self.inner.poll_accept_uni(cx)
 	}
 
 	fn poll_accept_bi(&mut self, cx: &mut Context<'_>) -> Poll<Result<(SendStream, RecvStream), Error>> {
-		self.0.poll_accept_bi(cx)
+		self.inner.poll_accept_bi(cx)
 	}
 
 	fn poll_open_uni(
@@ -416,7 +451,7 @@ impl poll::Session for Session {
 		cx: &mut Context<'_>,
 		options: SendOptions<'_, Group>,
 	) -> Poll<Result<SendStream, Error>> {
-		self.0.poll_open_uni(cx, options)
+		self.inner.poll_open_uni(cx, options)
 	}
 
 	fn poll_open_bi(
@@ -424,51 +459,60 @@ impl poll::Session for Session {
 		cx: &mut Context<'_>,
 		options: SendOptions<'_, Group>,
 	) -> Poll<Result<(SendStream, RecvStream), Error>> {
-		self.0.poll_open_bi(cx, options)
+		self.inner.poll_open_bi(cx, options)
+	}
+
+	fn poll_open_request(
+		&mut self,
+		cx: &mut Context<'_>,
+		options: SendOptions<'_, Group>,
+	) -> Poll<Result<Option<(SendStream, RecvStream)>, Error>> {
+		self.inner.poll_open_request(cx, options)
 	}
 
 	fn send_group(&mut self, priority: i64) -> Option<Group> {
-		self.0.send_group(priority)
+		self.inner.send_group(priority)
 	}
 
 	fn send_datagram(&mut self, payload: Bytes, options: SendOptions<'_, Group>) -> Result<(), Error> {
-		self.0.send_datagram(payload, options)
+		self.inner.send_datagram(payload, options)
 	}
 
 	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Error>> {
-		self.0.poll_recv_datagram(cx)
+		self.inner.poll_recv_datagram(cx)
 	}
 
 	fn max_datagram_size(&self) -> usize {
-		self.0.max_datagram_size()
+		self.inner.max_datagram_size()
 	}
 
 	fn protocol(&self) -> Option<&str> {
-		self.0.protocol()
+		self.inner.protocol()
 	}
 
-	fn binding(&self) -> Binding {
-		self.0.binding()
+	fn address(&self) -> Address {
+		self.inner.address()
 	}
 
 	fn close(&mut self, code: u32, reason: &str) {
-		self.0.close(code, reason)
+		self.closing.sent(code, None);
+		self.inner.close(code, reason)
 	}
 
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Error> {
-		self.0.poll_closed(cx)
+		self.inner.poll_closed(cx)
 	}
 
 	fn stats(&self) -> impl super::Stats {
-		self.0.stats()
+		self.inner.stats()
 	}
 
 	fn wire(&self) -> Option<Wire> {
-		self.0.wire()
+		self.inner.wire()
 	}
 
 	fn probe(&self) -> Option<Probe> {
-		self.0.probe()
+		self.inner.probe()
 	}
 }
 

@@ -44,6 +44,22 @@ wrapped in an idiomatic layer, while C gets a hand-written stable ABI
 (`moq-c`). A feature added to the core lands in all of them together.
 [Layers](/lib/layers) shows where each layer they wrap lives in every binding.
 
+## Performance
+
+The [benchmark trends](https://git.moq.dev/bench/) compare binding overhead
+and show how it changes over time. Binding cases run in process, without
+network or codec work, measuring throughput, CPU per byte, and synchronous
+call latency. Each wrapper is compared with `rust-ffi`, which calls
+`moq-ffi` directly from Rust. The `rust-net` cases call `moq-net` directly,
+showing what `moq-ffi` adds through its handles and runtime.
+Ratios above 1 mean more cost than `rust-ffi`, including throughput ratios,
+which divide Rust's throughput by the wrapper's.
+
+Each row shows its latest measurement, baseline, and recent history. Compare
+binding ratios within the same run: absolute results depend on the machine.
+These measurements help choose a language for the work crossing the binding;
+application performance also includes its network, codecs, and own processing.
+
 ## What every binding can do
 
 The wrapped bindings share one feature set, so the language pages only show
@@ -66,4 +82,5 @@ C's audio decoder neither takes nor reports a playout delay, and C has no in-ban
 ## Upgrading
 
 Each package keeps a `MIGRATE.md` saying how to migrate past every breaking
-change; [Upgrade](/setup/upgrade#migration-guides) links them all.
+release, written when that release is cut;
+[Upgrade](/setup/upgrade#migration-guides) links them all.

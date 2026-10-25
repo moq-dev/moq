@@ -592,7 +592,7 @@ mod tests {
 	};
 
 	fn config() -> Config {
-		Config::new(320, 240, crate::Rate::new(30, 1).unwrap())
+		Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap())
 	}
 
 	/// Only a selection whose every candidate promises cuts may advertise them, and a

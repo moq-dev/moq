@@ -1,3 +1,5 @@
+use crate::driver::Transport;
+use crate::transport::poll::Session as _;
 use std::task::{Context, Poll, ready};
 
 use super::{Message, Version};
@@ -8,11 +10,11 @@ use crate::{
 
 /// Legacy receives are framed once by the physical multiplexer, not again by
 /// the virtual request decoder. Encodes still count at their typed codec.
-pub(super) fn with_stats<S: crate::transport::poll::Session>(
-	stream: Stream<S, Version>,
+pub(super) fn with_stats(
+	stream: Stream<Transport, Version>,
 	stats: &crate::stats::Session,
 	version: Version,
-) -> Stream<S, Version> {
+) -> Stream<Transport, Version> {
 	let mut stream = stream.with_stats(stats);
 	if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
 		stream.reader = stream.reader.with_stats(&Default::default());
@@ -28,10 +30,10 @@ pub(super) fn fin_cancels(version: Version) -> bool {
 }
 
 /// Watch abrupt cancellation after the requester has finished sending messages.
-pub(super) fn poll_cancel<S: crate::transport::poll::Session>(
-	stream: &mut Stream<S, Version>,
+pub(super) fn poll_cancel(
+	stream: &mut Stream<Transport, Version>,
 	finished: &mut bool,
-	messages: &mut Messages<S>,
+	messages: &mut Messages,
 	version: Version,
 	cx: &mut Context<'_>,
 ) -> Poll<Result<(), Error>> {
@@ -57,8 +59,8 @@ pub(super) fn poll_cancel<S: crate::transport::poll::Session>(
 /// what it sent meanwhile: a waiting message (an update, say) ends the watch on the reader and
 /// is read once the request is answered. A withdrawal queued behind an update is therefore seen
 /// only then; until the verifier answers, the requester holds nothing but its own slot.
-pub(super) fn poll_withdrawn<S: crate::transport::poll::Session>(
-	stream: &mut Stream<S, Version>,
+pub(super) fn poll_withdrawn(
+	stream: &mut Stream<Transport, Version>,
 	version: Version,
 	cx: &mut Context<'_>,
 ) -> Poll<()> {
@@ -87,8 +89,8 @@ pub(super) fn poll_withdrawn<S: crate::transport::poll::Session>(
 /// An update modifies the request rather than ending it, and the requests watched here
 /// apply none, so each is refused with [`refuse_update`] and the request stays open. Any
 /// other message is `Err(Cancel)`, and the stream finishing is `Ok(())`.
-pub(super) fn poll_legacy_end<S: crate::transport::poll::Session>(
-	stream: &mut Stream<S, Version>,
+pub(super) fn poll_legacy_end(
+	stream: &mut Stream<Transport, Version>,
 	version: Version,
 	cx: &mut Context<'_>,
 ) -> Poll<Result<(), Error>> {
@@ -108,8 +110,8 @@ pub(super) fn poll_legacy_end<S: crate::transport::poll::Session>(
 /// Draft 14 answers no update. Drafts 15 and 16 answer each with exactly one REQUEST_OK or
 /// REQUEST_ERROR naming the update's own Request ID, and a refusal leaves any request but a
 /// subscription standing, so NOT_SUPPORTED is the whole answer.
-pub(super) fn refuse_update<S: crate::transport::poll::SendStream>(
-	writer: &mut crate::coding::Writer<S, Version>,
+pub(super) fn refuse_update<W: crate::transport::poll::SendStream>(
+	writer: &mut crate::coding::Writer<W, Version>,
 	body: &super::Body,
 	version: Version,
 ) -> Result<(), Error> {
@@ -117,17 +119,19 @@ pub(super) fn refuse_update<S: crate::transport::poll::SendStream>(
 		return Ok(());
 	}
 	let request_id = super::RequestId::decode(&mut body.decoder(version), version).map_err(DecodeError::complete)?;
-	writer.buffer_varint(super::RequestError::ID)?;
-	writer.buffer(&super::RequestError {
-		request_id: Some(request_id),
-		error_code: super::error::request::to_code(
-			&Error::Unsupported,
-			super::error::request::Kind::Subscribe,
-			version,
-		),
-		reason_phrase: "update not supported".into(),
-		retry_interval: 0,
-	})
+	writer.buffer_message(
+		super::RequestError::ID,
+		&super::RequestError {
+			request_id: Some(request_id),
+			error_code: super::error::request::to_code(
+				&Error::Unsupported,
+				super::error::request::Kind::Subscribe,
+				version,
+			),
+			reason_phrase: "update not supported".into(),
+			retry_interval: 0,
+		},
+	)
 }
 
 /// A message the adapter routed onto a draft 14-16 request after the request itself.
@@ -174,7 +178,7 @@ impl Decode<Version> for Framed {
 }
 
 /// A message following the request on a request stream: `T`, or from draft 18 a GOAWAY
-/// migrating this one request (draft-21 section 9.2).
+/// migrating this one request (draft-22 section 9.2).
 #[derive(Debug)]
 pub(super) enum Next<T> {
 	Message(T),
@@ -208,7 +212,7 @@ impl<T: Decode<Version>> Decode<Version> for Next<T> {
 	}
 }
 
-/// The GOAWAYs the peer sent on one request stream (draft-21 section 9.2).
+/// The GOAWAYs the peer sent on one request stream (draft-22 section 9.2).
 pub(super) struct GoAways {
 	/// Our own role: a client's peer is a server, which may name a new session.
 	client: bool,
@@ -246,13 +250,13 @@ impl GoAways {
 }
 
 /// The messages on one request stream, keeping GOAWAY validation across response phases.
-pub(super) struct Messages<S> {
-	session: S,
+pub(super) struct Messages {
+	session: Transport,
 	goaways: GoAways,
 }
 
-impl<S: crate::transport::poll::Session> Messages<S> {
-	pub fn new(session: S, client: bool) -> Self {
+impl Messages {
+	pub fn new(session: Transport, client: bool) -> Self {
 		Self {
 			session,
 			goaways: GoAways::new(client),
@@ -311,12 +315,11 @@ impl<S: crate::transport::poll::Session> Messages<S> {
 }
 
 /// Refuse a modern request with its complete REQUEST_ERROR, then finish the response.
-pub(super) async fn reject<S: crate::transport::poll::Session>(
-	mut stream: Stream<S, Version>,
+pub(super) async fn reject(
+	mut stream: Stream<Transport, Version>,
 	error: super::RequestError<'_>,
 ) -> Result<(), Error> {
-	stream.writer.varint(super::RequestError::ID).await?;
-	stream.writer.encode(&error).await?;
+	stream.writer.encode_message(&error).await?;
 	// A peer dropping the response after reading the refusal is a normal end.
 	let _ = stream.writer.close().await;
 	Ok(())
@@ -326,8 +329,8 @@ pub(super) async fn reject<S: crate::transport::poll::Session>(
 ///
 /// Each draft-14 error message has the REQUEST_ERROR body that draft-15 folded them into, so
 /// only the message type changes; draft-17 then drops the Request ID.
-pub(super) async fn write_error<S: crate::transport::poll::SendStream>(
-	writer: &mut crate::coding::Writer<S, Version>,
+pub(super) async fn write_error<W: crate::transport::poll::SendStream>(
+	writer: &mut crate::coding::Writer<W, Version>,
 	kind: super::error::request::Kind,
 	request_id: super::RequestId,
 	err: &Error,
@@ -345,15 +348,16 @@ pub(super) async fn write_error<S: crate::transport::poll::SendStream>(
 		(Version::Draft14, Kind::TrackStatus) => super::TRACK_STATUS_ERROR_14,
 		_ => super::RequestError::ID,
 	};
-	writer.buffer_varint(id)?;
-	writer
-		.encode(&super::RequestError {
+	writer.buffer_message(
+		id,
+		&super::RequestError {
 			request_id: matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16).then_some(request_id),
 			error_code: super::error::request::to_code(err, kind, version),
 			reason_phrase: reason.into(),
 			retry_interval: 0,
-		})
-		.await
+		},
+	)?;
+	std::future::poll_fn(|cx| writer.poll_flush(cx)).await
 }
 
 /// A framed subscription update, preserving omitted preferences.
@@ -376,7 +380,7 @@ pub(super) struct Update {
 	pub(super) forward: Option<bool>,
 	/// The new Location Filter, which only a paused PUBLISH subscription resuming takes.
 	pub(super) filter: Option<super::Filter>,
-	/// FILL_PARAMETERS (draft-20+), which only a paused PUBLISH subscription resuming takes.
+	/// FILL_PARAMETERS (draft-22), which only a paused PUBLISH subscription resuming takes.
 	pub(super) fill: Option<super::Fill>,
 }
 
@@ -441,7 +445,7 @@ impl Update {
 			0x10 => forward: Option<bool>,
 			0x20 => priority: Option<u8>,
 			0x21 => filter: Option<Filter>,
-			0x23 => fill: Option<Fill> where Filter::is_draft20(version),
+			0x23 => fill: Option<Fill> where Filter::is_draft22(version),
 			0x25 => subgroup_filter: Vec<Opaque> where super::subscribe::has_range_filters(version),
 			0x26 => object_filter: Vec<Opaque> where super::subscribe::has_range_filters(version),
 			0x27 => priority_filter: Vec<Opaque> where super::subscribe::has_range_filters(version),
@@ -506,8 +510,8 @@ impl Decode<Version> for Update {
 }
 
 /// The namespace-only parameters of a modern REQUEST_UPDATE. `TRACKS` marks one on a
-/// SUBSCRIBE_TRACKS, which from draft-19 may also carry TRACK_PROPERTY_FILTER and from
-/// draft-20 FORWARD.
+/// SUBSCRIBE_TRACKS, which from draft-22 may also carry TRACK_PROPERTY_FILTER and from
+/// draft-22 FORWARD.
 #[derive(Debug)]
 pub(super) struct NamespaceUpdate<const TRACKS: bool = false> {
 	pub(super) request_id: super::RequestId,
@@ -539,7 +543,7 @@ impl<const TRACKS: bool> Decode<Version> for NamespaceUpdate<TRACKS> {
 			let request_id = super::RequestId::decode(&mut data, version)?;
 			decode_params!(&mut data, version,
 				0x03 => token: Vec<super::token::RequestToken>,
-				0x10 => _forward: Option<bool> where TRACKS && super::Filter::is_draft20(version),
+				0x10 => _forward: Option<bool> where TRACKS && super::Filter::is_draft22(version),
 				0x29 => _track_filter: Vec<super::Opaque> where TRACKS && super::subscribe::has_range_filters(version),
 				0x34 => prefix: Option<NamespacePrefix>,
 			);
@@ -566,12 +570,14 @@ mod tests {
 	#[moq_clock::test]
 	async fn request_messages_keep_goaway_state_across_response_phases() {
 		use crate::lite::test_transport::ScriptedSession;
-		for version in [Version::Draft18, Version::Draft19, Version::Draft21, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft22] {
 			// GOAWAY, REQUEST_OK, then another GOAWAY on the same stream.
 			let script = vec![0x10, 0, 2, 0, 0, 0x07, 0, 0, 0x10, 0, 2, 0, 0];
-			let mut session = ScriptedSession::eof(script);
-			let mut stream = Stream::open(&mut session, version).await.unwrap();
-			let mut messages = Messages::new(session.clone(), true);
+			let session = ScriptedSession::eof(script);
+			let mut stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+				.await
+				.unwrap();
+			let mut messages = Messages::new(crate::driver::Transport::new(session.clone()), true);
 			assert_eq!(messages.message(&mut stream.reader).await.unwrap().0, 0x07);
 			assert!(matches!(
 				messages.message(&mut stream.reader).await,
@@ -590,9 +596,15 @@ mod tests {
 		let registry = Registry::new(Default::default());
 		let stats = registry.tier(Tier::default()).session("");
 		let version = Version::Draft22;
-		let mut session = ScriptedSession::new(vec![0x10, 0, 2, 0, 0, 0x07, 0, 0]);
-		let mut stream = with_stats(Stream::open(&mut session, version).await.unwrap(), &stats, version);
-		let mut messages = Messages::new(session.clone(), true);
+		let session = ScriptedSession::new(vec![0x10, 0, 2, 0, 0, 0x07, 0, 0]);
+		let mut stream = with_stats(
+			Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+				.await
+				.unwrap(),
+			&stats,
+			version,
+		);
+		let mut messages = Messages::new(crate::driver::Transport::new(session.clone()), true);
 		assert_eq!(messages.message(&mut stream.reader).await.unwrap().0, 0x07);
 		let rx = |class| {
 			let rows = registry.snapshot().control();
@@ -605,10 +617,12 @@ mod tests {
 	#[moq_clock::test]
 	async fn a_goaway_does_not_cancel_a_pending_request() {
 		use crate::lite::test_transport::ScriptedSession;
-		for version in [Version::Draft18, Version::Draft21, Version::Draft22] {
-			let mut session = ScriptedSession::new(vec![0x10, 0, 2, 0, 0]);
-			let mut stream = Stream::open(&mut session, version).await.unwrap();
-			let mut messages = Messages::new(session.clone(), false);
+		for version in [Version::Draft18, Version::Draft22] {
+			let session = ScriptedSession::new(vec![0x10, 0, 2, 0, 0]);
+			let mut stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+				.await
+				.unwrap();
+			let mut messages = Messages::new(crate::driver::Transport::new(session.clone()), false);
 			let mut finished = false;
 			assert!(
 				futures::poll!(std::future::poll_fn(|cx| poll_cancel(
@@ -654,10 +668,12 @@ mod tests {
 			};
 			let mut update = vec![super::super::SubscribeUpdate::ID as u8, 0, body.len() as u8];
 			update.extend_from_slice(body);
-			let mut session = ScriptedSession::new(update);
-			let mut stream = Stream::open(&mut session, version).await.unwrap();
+			let session = ScriptedSession::new(update);
+			let mut stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
+				.await
+				.unwrap();
 			let mut finished = false;
-			let mut messages = Messages::new(session.clone(), false);
+			let mut messages = Messages::new(crate::driver::Transport::new(session.clone()), false);
 
 			let polled = futures::poll!(std::future::poll_fn(|cx| poll_cancel(
 				&mut stream,
@@ -697,7 +713,7 @@ mod tests {
 
 	#[test]
 	fn delivery_timeouts_on_subscription_updates_are_accepted() {
-		for version in [Version::Draft18, Version::Draft21, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft22] {
 			// Request ID 2; OBJECT_DELIVERY_TIMEOUT=7, SUBGROUP_DELIVERY_TIMEOUT=9.
 			let mut buf = bytes::Bytes::from_static(&[2, 2, 0x02, 7, 0x04, 9]);
 			let update = crate::coding::decode_buf(&mut buf, version, Update::decode_body).unwrap();
@@ -707,29 +723,27 @@ mod tests {
 
 	#[test]
 	fn track_property_filter_on_subscription_update_is_a_protocol_violation() {
-		for version in [Version::Draft19, Version::Draft21, Version::Draft22] {
-			let mut buf = bytes::Bytes::from_static(&[2, 1, 0x29, 2, 0, 0]);
-			let error = crate::coding::decode_buf(&mut buf, version, Update::decode_body).unwrap_err();
-			assert_eq!(
-				super::super::error::to_session_code(&crate::SessionError::from(&Error::from(error))),
-				0x03
-			);
-		}
+		let version = Version::Draft22;
+		let mut buf = bytes::Bytes::from_static(&[2, 1, 0x29, 2, 0, 0]);
+		let error = crate::coding::decode_buf(&mut buf, version, Update::decode_body).unwrap_err();
+		assert_eq!(
+			super::super::error::to_session_code(&crate::SessionError::from(&Error::from(error))),
+			0x03
+		);
 	}
 
-	/// From draft-19 a SUBSCRIBE_TRACKS update may carry TRACK_PROPERTY_FILTER (0x29), so it
+	/// From draft-22 a SUBSCRIBE_TRACKS update may carry TRACK_PROPERTY_FILTER (0x29), so it
 	/// decodes there, to be refused per request, while a SUBSCRIBE_NAMESPACE's still closes.
 	#[test]
 	fn track_property_filter_on_listing_update_decodes() {
 		// REQUEST_UPDATE, 6 bytes: Request ID 2, one parameter: 0x29 with a two-byte value.
 		const FRAME: &[u8] = &[0x02, 0x00, 0x06, 2, 1, 0x29, 2, 0, 0];
-		for version in [Version::Draft19, Version::Draft21, Version::Draft22] {
-			let mut buf = bytes::Bytes::from_static(FRAME);
-			let update = crate::coding::decode_buf(&mut buf, version, NamespaceUpdate::<true>::decode).unwrap();
-			assert!(update.refused.is_none(), "{version}: {:?}", update.refused);
-			let mut buf = bytes::Bytes::from_static(FRAME);
-			assert!(crate::coding::decode_buf(&mut buf, version, NamespaceUpdate::<false>::decode).is_err());
-		}
+		let version = Version::Draft22;
+		let mut buf = bytes::Bytes::from_static(FRAME);
+		let update = crate::coding::decode_buf(&mut buf, version, NamespaceUpdate::<true>::decode).unwrap();
+		assert!(update.refused.is_none(), "{version}: {:?}", update.refused);
+		let mut buf = bytes::Bytes::from_static(FRAME);
+		assert!(crate::coding::decode_buf(&mut buf, version, NamespaceUpdate::<false>::decode).is_err());
 		let mut buf = bytes::Bytes::from_static(FRAME);
 		assert!(crate::coding::decode_buf(&mut buf, Version::Draft18, NamespaceUpdate::<true>::decode).is_err());
 	}
@@ -771,13 +785,19 @@ mod tests {
 			Kind::TrackStatus,
 		] {
 			let shared = Log::default();
-			let mut writer = crate::coding::Writer::new(SinkSend::new(shared.clone()), version);
+			let mut writer = crate::coding::Writer::new(
+				crate::transport::boxed::SendStream::new(SinkSend::new(shared.clone())),
+				version,
+			);
 			write_error(&mut writer, kind, request_id, &err, reason, version)
 				.await
 				.unwrap();
 
 			let legacy = Log::default();
-			let mut writer = crate::coding::Writer::new(SinkSend::new(legacy.clone()), version);
+			let mut writer = crate::coding::Writer::new(
+				crate::transport::boxed::SendStream::new(SinkSend::new(legacy.clone())),
+				version,
+			);
 			let error_code = to_code(&err, kind, version);
 			let reason_phrase = reason.into();
 			match kind {

@@ -57,7 +57,7 @@ def rust(directory):
         metadata = json.loads((run / 'metadata.json').read_text())
         if metadata['mode'] != '--criterion':
             raise ValueError(f'not a measured Criterion run: {run}')
-        label = metadata['environment'].get('MOQ_BENCH_LABEL')
+        label = metadata['environment'].get('BENCH_LABEL')
         if not isinstance(label, str) or not label:
             raise ValueError(f'missing Criterion source label: {run}')
         estimates = sorted((run / 'criterion').glob('**/new/estimates.json'))
@@ -92,7 +92,7 @@ def paired(directory):
         for key in ('commit', 'base', 'threshold_pct', 'rounds'):
             if combined.setdefault(key, comparison[key]) != comparison[key]:
                 raise ValueError(f'paired run disagrees on {key}: {run}')
-        label = data['environment']['MOQ_BENCH_LABEL']
+        label = data['environment']['BENCH_LABEL']
         combined['unavailable'] += [{'name': f'rust/{label}/{entry["target"]}', 'reason': entry['reason']}
                                     for entry in comparison['unavailable']]
         for case in comparison['cases']:
@@ -134,13 +134,6 @@ def measurement_unit(column):
 def javascript_file(path):
     entries, headers = [], None
     for line_number, line in enumerate(path.read_text().splitlines(), 1):
-        # The interests sweep reports dimensions and elapsed time in one line.
-        interests = re.fullmatch(r'broadcasts=(\d+) tracks=(\d+) acquire\+release=([\d.eE+-]+) us', line)
-        if interests:
-            broadcasts, tracks, elapsed = interests.groups()
-            entries.append({'name': f'js/{path.stem}/broadcasts={broadcasts}/tracks={tracks}/acquire+release',
-                            'unit': 'us', 'value': value(float(elapsed))})
-            continue
         row = [field.strip() for field in next(csv.reader([line]))]
         if len(row) > 1 and any(measurement_unit(field) for field in row):
             if len(set(row)) != len(row):

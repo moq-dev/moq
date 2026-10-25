@@ -30,6 +30,7 @@ jobs:
     timeout-minutes: 10
     outputs:
       android: ${{ steps.filter.outputs.android }}
+      api-diff: ${{ steps.filter.outputs.api-diff }}
       audio-quality: ${{ steps.filter.outputs.audio-quality }}
       c: ${{ steps.filter.outputs.c }}
       cpp: ${{ steps.filter.outputs.cpp }}
@@ -83,6 +84,20 @@ jobs:
               - "Cargo.lock"
               - "rust-toolchain.toml"
               - ".github/workflows/android.yml"
+            # Anything a published API is built from, including the lockfiles,
+            # since a bumped dependency can change a re-exported type.
+            api-diff:
+              - "rs/**"
+              - "js/**"
+              - "Cargo.toml"
+              - "Cargo.lock"
+              - "package.json"
+              - "bun.lock"
+              - "cpp/moq/uniffi.toml"
+              - "sh/api-diff/**"
+              - "justfile"
+              - ".github/workflows/api-diff.yml"
+              - ".github/workflows/release-gate.yml"
             audio-quality:
               - "js/watch/**"
               # The container consumer decides what a replay delivers, waits for, and skips, on the
@@ -218,6 +233,7 @@ jobs:
               - "rs/moq-auth/**"
               - "rs/moq-cli/**"
               - "rs/moq-clock/**"
+              - "rs/moq-congestion/**"
               - "rs/moq-flate/**"
               - "rs/moq-hls/**"
               - "rs/moq-ice/**"
@@ -265,6 +281,10 @@ jobs:
               - "js/video/**"
               - "js/publish/src/preview.ts"
               - "js/publish/src/element.ts"
+              - "js/watch/src/player.ts"
+              - "js/watch/src/sync.ts"
+              - "js/watch/src/audio/**"
+              - "js/watch/src/video/**"
               - "test/video/**"
               - "test/justfile"
               - "package.json"
@@ -321,6 +341,13 @@ jobs:
     needs: scope
     if: needs.scope.outputs.android == 'true'
     uses: ./.github/workflows/android.yml
+
+  api-diff:
+    name: API diff
+    needs: scope
+    if: needs.scope.outputs.api-diff == 'true'
+    uses: ./.github/workflows/api-diff.yml
+    secrets: inherit
 
   audio-quality:
     name: Audio quality
@@ -479,6 +506,7 @@ jobs:
       - platform
       - features
       - android
+      - api-diff
       - audio-quality
       - c
       - cpp

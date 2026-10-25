@@ -1,8 +1,10 @@
 import { expect, test } from "bun:test";
 import { Producer as BroadcastProducer } from "./broadcast";
 import * as Epoch from "./epoch";
+import { StreamCode, StreamError } from "./error";
 import { Route } from "./hop";
-import { Producer } from "./origin";
+import { hooks } from "./internal.ts";
+import { Producer, type Request } from "./origin";
 import * as Path from "./path";
 import { wireOf } from "./wire";
 
@@ -142,7 +144,7 @@ test("announced requests follow the serving prefix, ignoring descendants and re-
 	const keeper = source.consume();
 	const prefix = origin.dynamicRoute(Path.from("pool"));
 	const serving = (async () => {
-		for await (const request of prefix.requested()) request.accept(source.consume());
+		for await (const request of prefix.requested()) hooks.acceptRequest(request, source.consume());
 	})();
 	const request = origin.request(Path.from("pool/job"), { announced: true });
 	await settle();
@@ -195,7 +197,7 @@ test("an announced request follows an epochless route replaced by an identical o
 	const serve = (source: BroadcastProducer) => {
 		const route = origin.dynamicRoute(path);
 		void (async () => {
-			for await (const request of route.requested()) request.accept(source.consume());
+			for await (const request of route.requested()) hooks.acceptRequest(request, source.consume());
 		})();
 		return route;
 	};
@@ -226,7 +228,7 @@ test("an origin closing settles an announced request a served route resolved", a
 	const source = new BroadcastProducer();
 	const route = origin.dynamicRoute(path);
 	void (async () => {
-		for await (const request of route.requested()) request.accept(source.consume());
+		for await (const request of route.requested()) hooks.acceptRequest(request, source.consume());
 	})();
 	const request = origin.request(path, { announced: true });
 	await settle();
@@ -276,7 +278,7 @@ for (const received of [false, true]) {
 		const source = new BroadcastProducer();
 		const route = received ? wireOf(origin).receive(path, Route.default) : origin.dynamicRoute(path);
 		void (async () => {
-			for await (const request of route.requested()) request.accept(source.consume());
+			for await (const request of route.requested()) hooks.acceptRequest(request, source.consume());
 		})();
 
 		const request = origin.request(path);
@@ -341,20 +343,21 @@ test("a prepared answer cannot announce itself before publish", async () => {
 	origin.close();
 });
 
-test("an application claim refuses an arbitrary broadcast", async () => {
+test("an application claim cannot accept an arbitrary broadcast", async () => {
 	const origin = new Producer();
 	const claim = origin.dynamic(Path.from("room"));
 	const requests = claim.requested();
 	const request = origin.request(Path.from("room/alice"));
-	const pending = (await requests.next()).value;
+	const pending: Request | undefined = (await requests.next()).value;
 	if (!pending) throw new Error("expected a request");
-	expect(() => pending.accept(new BroadcastProducer())).toThrow("prepared and published");
+	// @ts-expect-error Only sessions accept a request; an application prepares and publishes.
+	expect(pending.accept).toBeUndefined();
 	request.close();
 	claim.close();
 	origin.close();
 });
 
-test("rejecting a prepared answer refuses the request and closes its broadcast", async () => {
+test("closing a prepared answer refuses the request and closes its broadcast", async () => {
 	const origin = new Producer();
 	const claim = origin.dynamic(Path.from("room"));
 	const requests = claim.requested();
@@ -362,26 +365,12 @@ test("rejecting a prepared answer refuses the request and closes its broadcast",
 	const pending = (await requests.next()).value;
 	if (!pending) throw new Error("expected a request");
 	const prepared = pending.prepare(Epoch.mint());
-	prepared.reject(new Error("no output"));
+	prepared.close();
+	prepared.close();
+	prepared[Symbol.dispose]();
 	await settle();
 	expect(request.closed.peek()).toBeInstanceOf(Error);
 	expect(prepared.broadcast.closed.peek()).toBeDefined();
-	claim.close();
-	origin.close();
-});
-
-test("a prepared answer that fails to publish refuses the request", async () => {
-	const origin = new Producer();
-	const claim = origin.dynamic(Path.from("room"));
-	const requests = claim.requested();
-	const request = origin.request(Path.from("room/alice"));
-	const pending = (await requests.next()).value;
-	if (!pending) throw new Error("expected a request");
-	const prepared = pending.prepare(Epoch.mint());
-	prepared.broadcast.close();
-	expect(() => prepared.publish()).toThrow("broadcast is closed");
-	await settle();
-	expect(request.closed.peek()).toBeInstanceOf(Error);
 	claim.close();
 	origin.close();
 });
@@ -402,5 +391,151 @@ test("an answer prepared for an abandoned claim is never announced", async () =>
 	expect(announced.active.peek()).toBeUndefined();
 	announced.close();
 	request.close();
+	origin.close();
+});
+
+for (const cleanup of ["close", "dispose", "broadcast"] as const) {
+	test(`prepared ${cleanup} releases shared requesters and admits a new request`, async () => {
+		const origin = new Producer();
+		const path = Path.from("room/alice");
+		const claim = origin.dynamic(Path.from("room"));
+		const requests = claim.requested();
+		const first = origin.request(path);
+		const pending = (await requests.next()).value;
+		if (!pending) throw new Error("expected a request");
+		const prepared = pending.prepare(Epoch.mint());
+		const shared = origin.request(path);
+		if (cleanup === "close") prepared.close();
+		else if (cleanup === "dispose") prepared[Symbol.dispose]();
+		else prepared.broadcast.close();
+		// Requested in the same turn, so the release cannot wait on a reactive notification.
+		const later = origin.request(path);
+		await settle();
+		prepared.close();
+		prepared[Symbol.dispose]();
+
+		for (const request of [first, shared]) {
+			expect(request.closed.peek()).toBeInstanceOf(StreamError);
+			expect((request.closed.peek() as StreamError).code).toBe(StreamCode.Unroutable);
+		}
+		expect(later.closed.peek()).toBeUndefined();
+		expect(() => prepared.publish()).toThrow("prepared answer is closed");
+		const next = (await requests.next()).value;
+		if (!next) throw new Error("expected another request");
+		expect(next).not.toBe(pending);
+		next.reject(new Error("done"));
+		await settle();
+		expect(later.closed.peek()).toBeInstanceOf(Error);
+		claim.close();
+		origin.close();
+	});
+}
+
+test("a throwing handler disposes its prepared answer and leaves the claim answerable", async () => {
+	const origin = new Producer();
+	const path = Path.from("room/alice");
+	const claim = origin.dynamic(Path.from("room"));
+	const failed = (async () => {
+		for await (const request of claim.requested()) {
+			using prepared = request.prepare(Epoch.mint());
+			prepared.broadcast.createTrack("video");
+			throw new Error("handler failed");
+		}
+	})();
+	const first = origin.request(path);
+	await expect(failed).rejects.toThrow("handler failed");
+	await settle();
+	expect((first.closed.peek() as StreamError).code).toBe(StreamCode.Unroutable);
+	const requests = claim.requested();
+	const later = origin.request(path);
+	const pending = (await requests.next()).value;
+	if (!pending) throw new Error("expected another request");
+	{
+		using prepared = pending.prepare(Epoch.mint());
+		prepared.close();
+	}
+	await settle();
+	expect((later.closed.peek() as StreamError).code).toBe(StreamCode.Unroutable);
+	claim.close();
+	origin.close();
+});
+
+test("using transfers a published answer without closing it on disposal", async () => {
+	const origin = new Producer();
+	const path = Path.from("room/alice");
+	const claim = origin.dynamic(Path.from("room"));
+	const requests = claim.requested();
+	const request = origin.request(path);
+	const pending = (await requests.next()).value;
+	if (!pending) throw new Error("expected a request");
+	let published: BroadcastProducer;
+	{
+		using prepared = pending.prepare(Epoch.mint());
+		prepared.broadcast.createTrack("data").writeFrame({ payload: new TextEncoder().encode("published") });
+		published = prepared.publish();
+		expect(() => prepared.publish()).toThrow("prepared answer is closed");
+		prepared.close();
+	}
+	await settle();
+	expect(published.closed.peek()).toBeUndefined();
+	expect(request.active.peek()?.epoch).toBe(published.route?.epoch);
+	const reader = request.active.peek()?.track("data").subscribe().ordered();
+	expect(await reader?.readString()).toBe("published");
+	reader?.close();
+	request.close();
+	published.close();
+	claim.close();
+	origin.close();
+});
+
+for (const cleanup of ["close", "dispose", "broadcast", "publish"] as const) {
+	test(`an old prepared ${cleanup} cannot refuse the next request for its path`, async () => {
+		const origin = new Producer();
+		const path = Path.from("room/alice");
+		const claim = origin.dynamic(Path.from("room"));
+		const requests = claim.requested();
+		const first = origin.request(path);
+		const pending = (await requests.next()).value;
+		if (!pending) throw new Error("expected a request");
+		const old = pending.prepare(Epoch.mint());
+		first.close();
+		await settle();
+		const later = origin.request(path);
+		const next = (await requests.next()).value;
+		if (!next) throw new Error("expected another request");
+		if (cleanup === "close") old.close();
+		else if (cleanup === "dispose") old[Symbol.dispose]();
+		else if (cleanup === "broadcast") old.broadcast.close();
+		else expect(() => old.publish()).toThrow("request is closed");
+		await settle();
+		expect(later.closed.peek()).toBeUndefined();
+		using prepared = next.prepare(Epoch.mint());
+		prepared.broadcast.createTrack("data").writeFrame({ payload: new TextEncoder().encode(cleanup) });
+		const published = prepared.publish();
+		await settle();
+		expect(later.active.peek()?.epoch).toBe(published.route?.epoch);
+		const reader = later.active.peek()?.track("data").subscribe().ordered();
+		expect(await reader?.readString()).toBe(cleanup);
+		reader?.close();
+		old.close();
+		later.close();
+		published.close();
+		claim.close();
+		origin.close();
+	});
+}
+
+test("a forwarded request cannot be prepared by setting a publisher property", async () => {
+	const origin = new Producer();
+	const route = origin.dynamicRoute(Path.from("room"));
+	const requests = route.requested();
+	const request = origin.request(Path.from("room/alice"));
+	const pending = (await requests.next()).value;
+	if (!pending) throw new Error("expected a request");
+	Object.assign(pending, { publisher: origin });
+	expect(() => pending.prepare(Epoch.mint())).toThrow("forwarded requests cannot be prepared");
+	pending.reject(new Error("refused"));
+	request.close();
+	route.close();
 	origin.close();
 });

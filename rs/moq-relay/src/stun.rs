@@ -75,7 +75,8 @@ impl Counters {
 		{
 			let _ = writeln!(
 				out,
-				"moq_relay_stun_dropped_total{{reason=\"{reason}\"}} {}",
+				"moq_relay_stun_dropped_total{{reason=\"{}\"}} {}",
+				crate::internal::Label(reason),
 				count.load(Ordering::Relaxed)
 			);
 		}
@@ -218,7 +219,7 @@ pub(crate) struct Server {
 }
 
 impl Server {
-	#[cfg(test)]
+	#[cfg(all(test, feature = "stun"))]
 	pub(crate) fn addr(&self) -> SocketAddr {
 		self.socket.local_addr().unwrap()
 	}

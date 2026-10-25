@@ -209,7 +209,7 @@ jobs:
           cli=$(nix build --refresh --no-link --print-out-paths 'github:moq-dev/moq#moq')
           {
             echo "RELAY_BIN=$relay/bin/moq-relay"
-            echo "MOQ_BIN=$cli/bin/moq"
+            echo "CLI_BIN=$cli/bin/moq"
           } >> "$GITHUB_ENV"
 
       # cachix.yml only pushes release tags, so each new HEAD
@@ -228,19 +228,19 @@ jobs:
             echo "no CACHIX_AUTH_TOKEN secret; not pushing"
             exit 0
           fi
-          nix run nixpkgs#cachix -- push kixelated "${RELAY_BIN%/bin/*}" "${MOQ_BIN%/bin/*}"
+          nix run nixpkgs#cachix -- push kixelated "${RELAY_BIN%/bin/*}" "${CLI_BIN%/bin/*}"
 
       - name: Pull moqdev images (docker channel)
         if: matrix.channel == 'docker'
         # Pull :latest fresh, then point smoke.sh at the wrapper scripts (which
-        # `docker run --network host` the images) via RELAY_BIN/MOQ_BIN. Docker is
+        # `docker run --network host` the images) via RELAY_BIN/CLI_BIN. Docker is
         # preinstalled on the Linux runners.
         run: |
           docker pull moqdev/moq-relay
           docker pull moqdev/moq
           {
             echo "RELAY_BIN=$PWD/clients/docker/moq-relay"
-            echo "MOQ_BIN=$PWD/clients/docker/moq"
+            echo "CLI_BIN=$PWD/clients/docker/moq"
           } >> "$GITHUB_ENV"
 
       # ── browser deps (Chromium runtime libs on Linux) ──────────────────
@@ -290,7 +290,7 @@ jobs:
       # ── token interop ──────────────────────────────────────────────────
       # Independent of the media matrix: prove the published token tooling
       # cross-verifies. `moq auth` rides the same channel as moq-relay/moq
-      # (cargo/apt/brew/nix, on PATH or MOQ_BIN); @moq/auth comes from npm and
+      # (cargo/apt/brew/nix, on PATH or CLI_BIN); @moq/auth comes from npm and
       # runs under both node and bun; rust-docker runs `auth` in the
       # moqdev/moq image. The negative pass inside token.sh confirms each verifier rejects
       # tampered tokens and the wrong key.
@@ -399,7 +399,8 @@ jobs:
       cancel-in-progress: false
       queue: max
     permissions:
-      # Delete a Pages artifact left by an earlier run attempt.
+      # Delete a Pages artifact left by an earlier run attempt or by this run's
+      # upstream runner report.
       actions: write
       contents: write
       pages: write
@@ -521,3 +522,109 @@ jobs:
         # failing the job; remove this once that protocol mismatch is fixed.
         continue-on-error: true
         run: just moxygen
+
+  interop-runner:
+    name: Upstream Docker interoperability
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    outputs:
+      report: ${{ steps.upload.outcome }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/just
+
+      - uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
+
+      - name: Build this checkout's relay image
+        run: just runner-build
+
+      # Upstream follows its default branch. This job has no secrets and neither
+      # checkout persists credentials; its report is the only publishing input.
+      - name: Checkout upstream runner HEAD
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: englishm/moq-interop-runner
+          path: runner-upstream
+          persist-credentials: false
+
+      # Any failed pair or setup step fails the job. A complete run still writes
+      # its report first, since a failing run is the one worth looking at.
+      - name: Run upstream Docker matrices
+        run: just runner "$GITHUB_WORKSPACE/runner-upstream" "$GITHUB_WORKSPACE/interop-runner-report"
+
+      - name: Upload upstream report
+        id: upload
+        if: ${{ !cancelled() && hashFiles('interop-runner-report/index.html') != '' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: interop-runner-report
+          path: interop-runner-report/
+          if-no-files-found: error
+
+      - name: Upload runner diagnostics
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: interop-runner-diagnostics
+          path: runner-upstream/results
+          if-no-files-found: ignore
+
+  interop-runner-report:
+    name: Publish upstream runner report
+    needs: interop-runner
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && needs.interop-runner.outputs.report == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: benchmark-pages
+      cancel-in-progress: false
+      queue: max
+    permissions:
+      # Delete a Pages artifact left by an earlier run attempt or by this run's
+      # relay report.
+      actions: write
+      contents: write
+      pages: write
+      id-token: write
+    defaults:
+      run:
+        working-directory: .
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: true
+
+      - uses: ./.github/actions/just
+
+      - name: Download upstream report
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: interop-runner-report
+          path: ${{ runner.temp }}/interop-runner-report
+
+      - name: Commit upstream report
+        run: just gh pages-publish interop-runner "$RUNNER_TEMP/interop-runner-report" "$RUNNER_TEMP/pages"
+
+      - name: Drop a stale Pages artifact
+        run: just gh pages-clean
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Upload site
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: ${{ runner.temp }}/pages
+
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

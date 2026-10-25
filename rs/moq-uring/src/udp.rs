@@ -1677,7 +1677,9 @@ impl RecvMeta {
 			// SAFETY: bounds-checked read of a cmsghdr-sized prefix.
 			let header = unsafe { control.as_ptr().add(offset).cast::<libc::cmsghdr>().read_unaligned() };
 			let message_len = header.cmsg_len;
-			if message_len < header_len || offset + message_len > control.len() {
+			// Compared against what remains rather than added to `offset`, which a
+			// length near usize::MAX would overflow.
+			if message_len < header_len || message_len > control.len() - offset {
 				return meta;
 			}
 			let data = &control[offset + header_len..offset + message_len];
@@ -1923,6 +1925,25 @@ mod tests {
 		assert_eq!(RecvMeta::parse(&gro(0)).stride, None);
 	}
 
+	/// A malformed length after a valid message ends the walk with that message.
+	#[test]
+	fn malformed_control_lengths_preserve_valid_prefix() {
+		let prefix = gro(1200);
+		let suffix = gro(900);
+		let header_len = unsafe { libc::CMSG_LEN(0) } as usize;
+		for length in [0, header_len - 1, suffix.len() + 1, usize::MAX] {
+			let mut control = [prefix.as_slice(), suffix.as_slice()].concat();
+			// SAFETY: the suffix contains a complete header, written without assuming alignment.
+			unsafe {
+				let pointer = control.as_mut_ptr().add(prefix.len()).cast::<libc::cmsghdr>();
+				let mut header = pointer.read_unaligned();
+				header.cmsg_len = length;
+				pointer.write_unaligned(header);
+			}
+			assert_eq!(RecvMeta::parse(&control).stride, Some(1200));
+		}
+	}
+
 	/// Round-trip an address through the kernel wire encoding.
 	fn roundtrip(addr: SocketAddr) -> Option<SocketAddr> {
 		// SAFETY: all-zero is a valid sockaddr_storage.
@@ -2031,7 +2052,7 @@ mod tests {
 	fn a_failed_send_costs_only_its_packet() {
 		let mut worker = match crate::Worker::new(crate::Config::default()) {
 			Ok(worker) => worker,
-			Err(Error::Unsupported(reason)) if std::env::var_os("MOQ_STRICT").is_none() => {
+			Err(Error::Unsupported(reason)) if std::env::var_os("CI_STRICT").is_none() => {
 				eprintln!("skipping io_uring socket test: {reason}");
 				return;
 			}
@@ -2119,7 +2140,7 @@ mod tests {
 	fn a_stale_source_keeps_segmentation() {
 		let mut worker = match crate::Worker::new(crate::Config::default()) {
 			Ok(worker) => worker,
-			Err(Error::Unsupported(reason)) if std::env::var_os("MOQ_STRICT").is_none() => {
+			Err(Error::Unsupported(reason)) if std::env::var_os("CI_STRICT").is_none() => {
 				eprintln!("skipping io_uring socket test: {reason}");
 				return;
 			}
@@ -2182,7 +2203,7 @@ mod tests {
 
 		let mut worker = match crate::Worker::new(crate::Config::default()) {
 			Ok(worker) => worker,
-			Err(Error::Unsupported(reason)) if std::env::var_os("MOQ_STRICT").is_none() => {
+			Err(Error::Unsupported(reason)) if std::env::var_os("CI_STRICT").is_none() => {
 				eprintln!("skipping io_uring socket test: {reason}");
 				return;
 			}

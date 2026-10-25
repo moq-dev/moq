@@ -423,6 +423,9 @@ impl Server {
 			.with_versions(versions.clone())
 			.with_extensions(config.extensions)
 			.with_stats(stats);
+		if let Some(implementation) = &config.implementation {
+			moq = moq.with_implementation(implementation);
+		}
 		if let Some(publisher) = publisher {
 			moq = moq.with_publisher(publisher);
 		}
@@ -737,9 +740,9 @@ impl Server {
 							// (like the stream bindings).
 							let Accepted { session, url, identity, authority, mut link } = within(deadline, crate::quic::accept(_conn, alpns)).await?;
 							link.local = local;
-							let binding = match url { Some(_) => moq_net::transport::Binding::Uri, None => moq_net::transport::Binding::InBand };
-							let quic = Some(crate::quic::Connection::new((*session).clone()));
-							let session = crate::transport::Session::new(session, binding);
+							let address = match url { Some(_) => moq_net::transport::Address::Uri, None => moq_net::transport::Address::Setup };
+							let quic = Some((*session).clone());
+							let session = crate::transport::Session::new(session, address);
 							let (request, deadline) = accept_request(&setup.server, session, deadline).await?;
 							// Only WebTransport carries a request URL; raw QUIC puts the path in the SETUP.
 							let transport = match url { Some(_) => Transport::WebTransport, None => Transport::Quic };
@@ -758,8 +761,8 @@ impl Server {
 						};
 						self.accept.push(async move {
 							let Accepted { session, url, identity, authority, link } = within(deadline, super::iroh::accept(_conn, alpns)).await?;
-							let binding = match url { Some(_) => moq_net::transport::Binding::Uri, None => moq_net::transport::Binding::InBand };
-							let session = crate::transport::Session::new(session, binding);
+							let address = match url { Some(_) => moq_net::transport::Address::Uri, None => moq_net::transport::Address::Setup };
+							let session = crate::transport::Session::new(session, address);
 							let (request, deadline) = accept_request(&setup.server, session, deadline).await?;
 							Ok(Request {
 								transport: Transport::Iroh,
@@ -1005,8 +1008,7 @@ impl Drop for Listener {
 
 /// Complete one accepted [`Request`] and wait for the session to close.
 async fn serve_session(request: Request) -> crate::Result<()> {
-	let (session, driver) = request.ok().await?;
-	driver.await.map_err(|_| Error::Panic)??;
+	let session = request.ok().await?;
 	Err(session.closed().await.into())
 }
 
@@ -1060,7 +1062,7 @@ where
 	S: moq_net::transport::poll::Boxable + Send + Sync,
 {
 	let deadline = deadline.map(|at| Deadline::new(at, session.clone()));
-	let accept = async { Ok(server.accept_request(moq_net::time::now(), session).await?) };
+	let accept = async { Ok(server.accept_request(moq_net::time::Instant::now(), session).await?) };
 	let request = Deadline::bound(deadline.as_ref(), accept).await?;
 	Ok((request, deadline))
 }
@@ -1639,33 +1641,16 @@ pub struct Request {
 	handshake: Box<moq_net::server::Handshake>,
 	/// The connection under a QUIC or WebTransport request, for [`Request::quic`].
 	#[cfg(feature = "quic")]
-	quic: Option<crate::quic::Connection>,
+	quic: Option<crate::quic::driver::Connection>,
 	/// What remains of the handshake deadline, which also bounds [`Request::ok`].
 	deadline: Option<Deadline>,
 }
 
-/// Why an incoming session was rejected.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum Reject {
-	/// The request supplied no acceptable credentials.
-	Unauthorized,
-	/// The credentials do not grant the requested operation.
-	Forbidden,
-	/// An application-defined HTTP-style status code.
-	App(u16),
-}
-
 impl Request {
 	/// Reject the session. The transport is already accepted, so this closes the
-	/// just-established MoQ session rather than answering the transport handshake:
-	/// the `code` (an HTTP-style status the caller passes) maps to a MoQ close reason.
-	pub async fn reject(self, reject: Reject) -> crate::Result<()> {
-		let err = match reject {
-			Reject::Unauthorized | Reject::Forbidden => moq_net::Error::Unauthorized,
-			Reject::App(code) => moq_net::Error::App(code),
-		};
-		self.handshake.close(err);
+	/// just-established MoQ session with `code` rather than answering the transport handshake.
+	pub async fn reject(self, code: moq_net::SessionError) -> crate::Result<()> {
+		self.handshake.close(code.into());
 		Ok(())
 	}
 
@@ -1704,7 +1689,7 @@ impl Request {
 	/// The QUIC connection under this request, to change its limits before answering
 	/// SETUP. `None` on a transport moq-quic does not drive (qmux streams, iroh).
 	#[cfg(feature = "quic")]
-	pub fn quic(&self) -> Option<&crate::quic::Connection> {
+	pub fn quic(&self) -> Option<&crate::quic::driver::Connection> {
 		self.quic.as_ref()
 	}
 
@@ -1719,38 +1704,40 @@ impl Request {
 		Deadline::bound(self.deadline.as_ref(), async { Ok(work.await) }).await
 	}
 
-	/// Accept the session and return its supervised driver task.
+	/// Accept the session, driving it until it closes.
 	///
-	/// Await the driver before classifying the session close so a panic cannot look like cancellation.
+	/// A driver panic is reported through [`Session::closed`].
 	///
 	/// Bounded by what remains of the handshake deadline: answering SETUP can wait
 	/// on a peer that withholds flow-control credit, which keep-alives would
 	/// otherwise hold open.
-	pub async fn ok(self) -> crate::Result<(Session, tokio::task::JoinHandle<crate::Result<()>>)> {
+	pub async fn ok(self) -> crate::Result<Session> {
 		let Request {
 			handshake,
 			deadline,
 			active,
 			..
 		} = self;
-		let ok = async {
-			let (session, driver) = handshake.ok().await?;
-			use tracing::Instrument;
-			let driver = tokio::spawn(
-				async move {
-					crate::panic::isolate(async move {
-						let _active = active;
-						moq_net::time::run(driver).await;
-						Ok(())
-					})
-					.await
-					.unwrap_or(Err(Error::Panic))
-				}
-				.instrument(tracing::Span::current()),
-			);
-			Ok((session, driver))
-		};
-		Deadline::bound(deadline.as_ref(), ok).await
+		// moq-net enforces it, so a reply the peer never took counts in the session's stats.
+		let mut handshake = *handshake;
+		if let Some(deadline) = deadline {
+			handshake = handshake.with_deadline(deadline.at);
+		}
+		let (session, driver) = handshake.ok().await?;
+		use tracing::Instrument;
+		tokio::spawn(
+			async move {
+				crate::panic::isolate(async move {
+					let _active = active;
+					moq_net::time::run(driver).await;
+					Ok(())
+				})
+				.await
+				.unwrap_or(Err(Error::Panic))
+			}
+			.instrument(tracing::Span::current()),
+		);
+		Ok(session)
 	}
 
 	/// Returns the network transport carrying this session.
@@ -1834,13 +1821,18 @@ impl Request {
 	/// bidirectional session (it omitted the role, or the version carries none).
 	/// Available on every transport. Use it to reject a token that lacks the scope for
 	/// the client's intended direction.
-	pub fn role(&self) -> Option<moq_net::Role> {
+	pub fn role(&self) -> Option<moq_net::setup::Role> {
 		self.handshake.role()
 	}
 
-	/// Answer the peer's tokens before accepting and starting its protocol driver.
+	/// The session's auth handle, the same one the accepted session's `auth` returns.
 	pub fn auth(&self) -> moq_net::auth::Handle {
 		self.handshake.auth()
+	}
+
+	/// Answer the peer's tokens yourself; see [`moq_net::server::Handshake::requests`].
+	pub fn requests(&mut self) -> moq_net::auth::Requests {
+		self.handshake.requests()
 	}
 
 	/// The Hop ID the peer declared in its SETUP (moq-lite-05+).
@@ -1852,6 +1844,14 @@ impl Request {
 	/// authenticated identity: authorize on the token or client certificate.
 	pub fn peer_hop(&self) -> Option<moq_net::Hop> {
 		self.handshake.peer_hop()
+	}
+
+	/// The implementation the client advertised in its SETUP, such as
+	/// `moq-net-rs/0.3.10`, or `None` when it advertised none.
+	///
+	/// Peer-controlled: use it for logs and rollout counts, never to authorize.
+	pub fn peer_implementation(&self) -> Option<&str> {
+		self.handshake.peer_implementation()
 	}
 
 	/// The credential a moq-transport client presented in its SETUP's `AUTHORIZATION
@@ -1978,8 +1978,7 @@ mod tests {
 		tokio::select! {
 			biased;
 			_ = stalled.read_to_end(&mut remaining) => panic!("first handshake ended before second completed"),
-			result = qmux::tcp::Config::new(qmux::Version::QMux01)
-				.protocols(["moq-lite-06"]).connect(addr) => {
+			result = qmux::tcp::connect(addr, { let mut config = qmux::Config::new(qmux::Version::QMux01); config.protocol = qmux::Protocol::Negotiate(vec!["moq-lite-06".into()]); config }) => {
 				result.expect("second handshake completes");
 			}
 		}
@@ -2010,10 +2009,12 @@ mod tests {
 			},
 			tx,
 		);
-		let result = qmux::tcp::Config::new(qmux::Version::QMux01)
-			.protocols(["moq-lite-06"])
-			.connect(addr)
-			.await;
+		let result = qmux::tcp::connect(addr, {
+			let mut config = qmux::Config::new(qmux::Version::QMux01);
+			config.protocol = qmux::Protocol::Negotiate(vec!["moq-lite-06".into()]);
+			config
+		})
+		.await;
 		assert!(result.is_err(), "a closed server must not handshake");
 		task.abort();
 		let _ = task.await;
@@ -2052,8 +2053,7 @@ mod tests {
 		tokio::select! {
 			biased;
 			_ = stalled.read_to_end(&mut remaining) => panic!("first handshake ended before second completed"),
-			result = qmux::uds::Config::new(qmux::Version::QMux01)
-				.protocols(["moq-lite-06"]).connect(&path) => {
+			result = qmux::uds::connect(&path, { let mut config = qmux::Config::new(qmux::Version::QMux01); config.protocol = qmux::Protocol::Negotiate(vec!["moq-lite-06".into()]); config }) => {
 				result.expect("second handshake completes");
 			}
 		}
@@ -2383,7 +2383,7 @@ mod tests {
 		let start = tokio::time::Instant::now();
 		let Err(err) = accept_request(
 			&setup.server,
-			crate::transport::Session::new(peer.clone(), moq_net::transport::Binding::Uri),
+			crate::transport::Session::new(peer.clone(), moq_net::transport::Address::Uri),
 			setup.deadline(),
 		)
 		.await
@@ -2400,7 +2400,7 @@ mod tests {
 
 	/// Answering SETUP is part of the handshake: a moq-transport peer that sends
 	/// its SETUP but never grants credit for the reply is refused at the same
-	/// deadline, rather than held open by keep-alives.
+	/// deadline, rather than held open by keep-alives, and the session counts it.
 	#[cfg(feature = "websocket")]
 	#[tokio::test(start_paused = true)]
 	async fn stalled_setup_reply_is_closed_at_the_deadline() {
@@ -2408,9 +2408,11 @@ mod tests {
 		// reply that never comes.
 		let recorder = Scripted::new("moq-00");
 		let client = tokio::spawn({
-			let recorder = crate::transport::Session::new(recorder.clone(), moq_net::transport::Binding::Uri);
+			let recorder = crate::transport::Session::new(recorder.clone(), moq_net::transport::Address::Uri);
 			async move {
-				let _ = moq_net::Client::new().connect(moq_net::time::now(), recorder).await;
+				let _ = moq_net::Client::new()
+					.connect(moq_net::time::Instant::now(), recorder)
+					.await;
 			}
 		});
 		tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -2429,7 +2431,7 @@ mod tests {
 		let start = tokio::time::Instant::now();
 		let Ok((request, deadline)) = accept_request(
 			&setup.server,
-			crate::transport::Session::new(peer.clone(), moq_net::transport::Binding::Uri),
+			crate::transport::Session::new(peer.clone(), moq_net::transport::Address::Uri),
 			setup.deadline(),
 		)
 		.await
@@ -2438,16 +2440,31 @@ mod tests {
 		};
 		assert_eq!(start.elapsed(), std::time::Duration::ZERO);
 
-		let ok = async { Ok(request.ok().await.map(drop)?) };
-		let err = Deadline::bound(deadline.as_ref(), ok)
-			.await
-			.expect_err("a reply the peer never took completed");
+		let registry = moq_net::stats::Registry::new(Default::default());
+		let request = Request {
+			active: setup.activity.enter().unwrap(),
+			transport: Transport::WebSocket,
+			url: None,
+			authority: None,
+			identity: None,
+			link: Link::default(),
+			handshake: Box::new(request),
+			#[cfg(feature = "quic")]
+			quic: None,
+			deadline,
+		}
+		.with_stats(registry.tier(Default::default()).session("room"));
+		let Err(err) = request.ok().await else {
+			panic!("a reply the peer never took completed");
+		};
 		assert!(matches!(err, Error::MoqNet(moq_net::Error::Timeout)), "{err}");
 		assert_eq!(start.elapsed(), timeout);
 		assert_eq!(
 			*peer.closed.lock().unwrap(),
 			Some(moq_net::SessionError::Timeout.to_code())
 		);
+		let failed = registry.snapshot().sessions()[0].1.sessions_failed;
+		assert_eq!(failed.count(moq_net::stats::Failure::Application), 1, "{failed:?}");
 	}
 
 	/// The deadline bounds only the handshake: a session that finished in time
@@ -2469,7 +2486,7 @@ mod tests {
 		let transport = client.clone();
 		let connect = tokio::spawn(async move {
 			let (session, driver) = moq_net::Client::new()
-				.connect(moq_net::time::now(), transport)
+				.connect(moq_net::time::Instant::now(), transport)
 				.await
 				.expect("client handshake");
 			tokio::spawn(moq_net::time::run(driver));
@@ -2513,7 +2530,7 @@ mod tests {
 				.await
 				.expect("upgrade");
 			let (_session, driver) = moq_net::Client::new()
-				.connect(moq_net::time::now(), session)
+				.connect(moq_net::time::Instant::now(), session)
 				.await
 				.expect("client handshake");
 			moq_net::time::run(driver).await
@@ -2788,7 +2805,7 @@ mod tests {
 		let connection = client.with_reconnect(false).connect(url);
 
 		let request = listener.accept().await.expect("no incoming connection");
-		let (session, _driver) = request.with_publisher(&origin).ok().await.expect("server handshake");
+		let session = request.with_publisher(&origin).ok().await.expect("server handshake");
 
 		listener.close().await;
 		std::net::UdpSocket::bind(addr).expect("close must release the QUIC socket");

@@ -37,39 +37,92 @@ public final class TrackRequest: Sendable {
     }
 }
 
-/// A request to produce one uncached group for a fetch consumer.
-public final class GroupRequest: Sendable {
-    let ffi: MoqGroupRequest
+/// A run of groups readers miss, for a `TrackDynamic` to serve.
+///
+/// Accept each group you have and drop the rest; `next()` names what is still owed, in the
+/// fill's order. Releasing the fill names whatever is left as dropped while a reader still
+/// wants it; once nobody does, it is withdrawn, so stop serving it when `unused()` returns.
+/// Stop serving a single group when `unwanted(sequence:)` returns for it, and move on to `next()`.
+public final class Fill: Sendable {
+    let ffi: MoqFill
 
-    init(_ ffi: MoqGroupRequest) {
+    init(_ ffi: MoqFill) {
         self.ffi = ffi
     }
 
-    /// The requested group sequence within the track.
-    public var sequence: UInt64 {
-        ffi.sequence()
+    /// The first group to fill.
+    public var startGroup: UInt64 {
+        ffi.startGroup()
     }
 
-    /// The consumer's delivery priority for this fetch.
+    /// The frame within the first group to start from.
+    public var startFrame: UInt64 {
+        ffi.startFrame()
+    }
+
+    /// The exclusive end group.
+    public var endGroup: UInt64 {
+        ffi.endGroup()
+    }
+
+    /// The most urgent delivery priority among the readers waiting on it.
     public var priority: Int8 {
         ffi.priority()
     }
 
-    /// Accept the request and return a producer for the group.
-    public func accept() throws -> GroupProducer {
-        GroupProducer(try ffi.accept())
+    /// The most tolerant age budget among its readers, or nil for the publisher's max age
+    /// alone.
+    public var maxDelay: TimeInterval? {
+        ffi.maxDelay()
     }
 
-    /// Reject the fetch with an application error code.
-    public func abort(errorCode: UInt16) throws {
-        try ffi.abort(errorCode: errorCode)
+    /// Which end to fill first.
+    public var order: Subscription.Order {
+        ffi.order()
+    }
+
+    /// The next group still owed in the fill's order, or nil once every group is answered.
+    public func next() -> UInt64? {
+        ffi.next()
+    }
+
+    /// Insert group `sequence` and return a producer for it. The first group starts at
+    /// `startFrame`, so its frames keep their indices.
+    public func accept(sequence: UInt64) throws -> GroupProducer {
+        GroupProducer(try ffi.accept(sequence: sequence))
+    }
+
+    /// Name groups `start` up to the exclusive `end` as never to be delivered.
+    public func dropGroups(start: UInt64, end: UInt64) {
+        ffi.dropGroups(start: start, end: end)
+    }
+
+    /// Whether a reader still waits on this fill.
+    public var isUsed: Bool {
+        ffi.isUsed()
+    }
+
+    /// Suspend until no reader waits on this fill.
+    public func unused() async throws {
+        try await ffi.unused()
+    }
+
+    /// Whether a reader still waits for group `sequence` from this fill: false once every
+    /// reader took it or narrowed past it, or nobody waits on the fill.
+    public func isWanted(sequence: UInt64) -> Bool {
+        ffi.isWanted(sequence: sequence)
+    }
+
+    /// Suspend until no reader waits for group `sequence` from this fill, so stop serving it.
+    public func unwanted(sequence: UInt64) async throws {
+        try await ffi.unwanted(sequence: sequence)
     }
 }
 
-/// A stream of uncached group requests for one track.
+/// A stream of the fills readers of one track need: runs of groups the cache lacks.
 public final class TrackDynamic: AsyncSequence, Sendable {
-    /// The group request emitted by this sequence.
-    public typealias Element = GroupRequest
+    /// The fill emitted by this sequence.
+    public typealias Element = Fill
 
     let ffi: MoqTrackDynamic
 
@@ -77,20 +130,20 @@ public final class TrackDynamic: AsyncSequence, Sendable {
         self.ffi = ffi
     }
 
-    /// Wait for the next uncached group request.
-    public func requestedGroup() async throws -> GroupRequest {
-        GroupRequest(try await ffi.requestedGroup())
+    /// Wait for the next fill.
+    public func requestedFill() async throws -> Fill {
+        Fill(try await ffi.requestedFill())
     }
 
-    /// Cancel all current and future group request waits.
+    /// Cancel all current and future fill waits.
     public func cancel() {
         ffi.cancel()
     }
 
     /// Create an iterator that cancels native waits when iteration ends.
-    public func makeAsyncIterator() -> AsyncThrowingStream<GroupRequest, Swift.Error>.Iterator {
+    public func makeAsyncIterator() -> AsyncThrowingStream<Fill, Swift.Error>.Iterator {
         moqStream(cancel: { [ffi] in ffi.cancel() }) { [ffi] in
-            GroupRequest(try await ffi.requestedGroup())
+            Fill(try await ffi.requestedFill())
         }.makeAsyncIterator()
     }
 }

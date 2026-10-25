@@ -22,15 +22,18 @@ class QueryTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.repo = self.root / "repo"
         (self.repo / "sh").mkdir(parents=True)
-        for script in ("dispatch.sh", "changed.sh"):
+        for script in ("dispatch.sh", "changed.sh", "local.sh"):
             shutil.copy(ROOT / "sh" / script, self.repo / "sh" / script)
         self.bin = self.root / "bin"
         self.bin.mkdir()
         for command in ("bash", "git", "sort", "mktemp", "rm", "grep"):
             (self.bin / command).symlink_to(shutil.which(command))
-        self.env = dict(os.environ, PATH=str(self.bin), GIT_CONFIG_NOSYSTEM="1",
-                        GIT_CONFIG_GLOBAL=os.devnull, MOQ_STRICT="1")
-        for key in ("MOQ_DEV_SHELL", "MOQ_ALLOW_HOST", "GITHUB_BASE_REF"):
+        self.env = dict(os.environ, LOCAL_SUPERVISED="1", PATH=str(self.bin), GIT_CONFIG_NOSYSTEM="1",
+                        GIT_CONFIG_GLOBAL=os.devnull, CI_STRICT="1")
+        # The runner's own Actions variables would move the run's error
+        # annotations to stdout and append to the real job summary.
+        for key in ("IN_MOQ_DEV_SHELL", "ALLOW_HOST_TOOLCHAIN", "CHECK_JOBS", "GITHUB_BASE_REF",
+                    "GITHUB_ACTIONS", "GITHUB_STEP_SUMMARY"):
             self.env.pop(key, None)
         self.git("init", "-q", "-b", "main")
         self.git("config", "user.name", "test")
@@ -173,7 +176,7 @@ class QueryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertEqual(result.stdout, "")
 
-    def run_ci(self, base="origin/main"):
+    def stub_ci(self, just=""):
         for tool in ("bun", "python3", "cargo", "wasm-bindgen", "jq", "shellcheck",
                      "shfmt", "taplo", "nixfmt", "actionlint", "quest", "nix",
                      "c++", "clang-format", "cmake", "dart", "dash", "gersemi", "go",
@@ -182,23 +185,81 @@ class QueryTests(unittest.TestCase):
             path = self.bin / tool
             path.write_text("#!/bin/sh\nexit 0\n")
             path.chmod(0o755)
-        just = self.bin / "just"
-        just.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$*" >>"$CALLS"\n')
-        just.chmod(0o755)
+        path = self.bin / "just"
+        path.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$*" >>"$CALLS"\n' + just)
+        path.chmod(0o755)
         nix = self.bin / "nix"
         nix.write_text('#!/usr/bin/env bash\nprintf "nix %s\\n" "$*" >>"$CALLS"\n')
         nix.chmod(0o755)
-        self.env.update(MOQ_DEV_SHELL="1", CALLS=str(self.root / "calls"))
+        self.env.update(IN_MOQ_DEV_SHELL="1", CALLS=str(self.root / "calls"))
         (self.root / "calls").unlink(missing_ok=True)
         self.env["PATH"] = f"{self.bin}:{os.environ['PATH']}"
-        for script in ("markdown.sh", "shell.sh"):
+        for script in ("markdown.sh", "shell.sh", "large-files.sh"):
             path = self.repo / "sh" / script
             path.write_text("#!/bin/sh\nexit 0\n")
             path.chmod(0o755)
+
+    def run_ci(self, base="origin/main"):
+        self.stub_ci()
         result = subprocess.run(["bash", "sh/dispatch.sh", "ci", base],
                                 cwd=self.repo, env=self.env, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         return (self.root / "calls").read_text().splitlines()
+
+    def test_failure_cancels_running_lanes_and_names_its_phase(self):
+        # rs's tests and cpp's check run until killed, and gh's tests fail only
+        # once both are running, so the run ends only if the failure cancels
+        # both lanes.
+        blocked = {}
+        for name, call in (("rs", '"rs test-changed "*'), ("cpp", '"cpp check"')):
+            started = self.root / f"{name}.started"
+            os.mkfifo(started)
+            pid = self.root / f"{name}.pid"
+            blocked[name] = (call, started, pid)
+        stub = "".join(f'    {call}) echo $$ >"{pid}"; echo >"{started}"; exec sleep 600 ;;\n'
+                       for call, started, pid in blocked.values())
+        reads = "; ".join(f'read -r <"{started}"' for _, started, _ in blocked.values())
+        self.stub_ci(f'case "$*" in\n{stub}    "gh test") {reads}; exit 3 ;;\nesac\n')
+        self.change("rs/moq-ffi/src/lib.rs")
+        result = subprocess.run(["bash", "sh/dispatch.sh", "ci", "origin/main"], cwd=self.repo,
+                                env=self.env, text=True, capture_output=True, timeout=60)
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertIn("ci: test gh failed", result.stderr)
+        self.assertRegex(result.stderr, r"\d+  test gh \(failed\)")
+        self.assertRegex(result.stderr, r"\d+  test rs \(cancelled\)")
+        self.assertRegex(result.stderr, r"\d+  check cpp \(cancelled\)")
+        for _, _, pid in blocked.values():
+            with self.assertRaises(ProcessLookupError):
+                os.kill(int(pid.read_text()), 0)
+        # go's lane ran beside the blocked ones, but a cancelled lane starts no
+        # more of its modules, and no lane starts after the failure.
+        calls = (self.root / "calls").read_text().splitlines()
+        self.assertIn("go check", calls)
+        self.assertNotIn("obs compile", calls)
+        self.assertNotIn("dart check", calls)
+
+    def test_terminating_the_run_stops_the_running_phase(self):
+        started = self.root / "started"
+        os.mkfifo(started)
+        pid = self.root / "pid"
+        self.stub_ci(f'''case "$*" in
+    "rs lint-changed "*) echo $$ >"{pid}"; echo >"{started}"; exec sleep 600 ;;
+esac
+''')
+        self.change("rs/moq-clock/src/lib.rs")
+        for jobs in ("1", "3"):
+            with self.subTest(jobs=jobs):
+                run = subprocess.Popen(["bash", "sh/dispatch.sh", "ci", "origin/main"],
+                                       cwd=self.repo, env=dict(self.env, CHECK_JOBS=jobs),
+                                       text=True, stdout=subprocess.DEVNULL,
+                                       stderr=subprocess.PIPE)
+                started.read_text()
+                run.terminate()
+                _, stderr = run.communicate(timeout=60)
+                self.assertEqual(run.returncode, 143, stderr)
+                self.assertRegex(stderr, r"\d+  check rs \(cancelled\)")
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(int(pid.read_text()), 0)
 
     def test_ci_runs_one_lint_preamble_and_one_test_pass(self):
         self.change("rs/moq-clock/src/lib.rs")

@@ -40,9 +40,11 @@ fn public_auth(config: &mut Config) {
 fn client() -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
-	config.once = Some(true);
 	config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
-	config.init(Default::default()).expect("client init")
+	config
+		.init(Default::default())
+		.expect("client init")
+		.with_reconnect(false)
 }
 
 async fn assert_owner_stopped(quic: SocketAddr, http: SocketAddr) {
@@ -151,8 +153,8 @@ async fn embed_and_stop(mut config: Config) {
 
 	// No drain window: the sessions are already gone by the time the owner
 	// stops, and the test should not wait out the default.
-	config.drain_timeout = Duration::ZERO;
-	let relay = Relay::load(config).await.expect("load relay");
+	config.drain_timeout = Some((Duration::ZERO).into());
+	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let quic = relay.quic_addr().expect("quic listener bound");
 	let http = relay.web_addrs().http.expect("http listener bound");
 	assert_eq!(
@@ -400,13 +402,13 @@ async fn worker_tokio_custom_route_and_quic() {
 }
 
 /// io_uring workers. Off the default feature set; `just rs uring` and nightly
-/// `--all-features` compile it. Skips below the 6.12 floor unless MOQ_STRICT.
+/// `--all-features` compile it. Skips below the 6.12 floor unless CI_STRICT.
 #[cfg(all(target_os = "linux", feature = "_uring"))]
 #[tokio::test]
 async fn uring_custom_route_and_quic() {
 	match moq_uring::Worker::new(Default::default()) {
 		Ok(_) => {}
-		Err(moq_uring::Error::Unsupported(reason)) if std::env::var_os("MOQ_STRICT").is_none() => {
+		Err(moq_uring::Error::Unsupported(reason)) if std::env::var_os("CI_STRICT").is_none() => {
 			eprintln!("skipping io_uring embed test: {reason}");
 			return;
 		}
@@ -429,8 +431,8 @@ async fn embedded_listener_health_reaches_metrics() {
 	let (cert, key) = certificate(dir.path());
 	let mut config = http_and_quic(&cert, &key, "127.0.0.1:0".into());
 	config.internal.listen = Some("127.0.0.1:0".parse().unwrap());
-	config.drain_timeout = Duration::ZERO;
-	let relay = Relay::load(config).await.expect("load relay");
+	config.drain_timeout = Some((Duration::ZERO).into());
+	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let internal = relay.internal().addr().expect("internal listener bound");
 	let ready = relay.ready();
 	let trigger = relay.shutdown_trigger().clone();
@@ -466,24 +468,43 @@ struct EmbeddedConfig {
 /// A flattened relay merges its settings without resetting the embedder's flags.
 #[test]
 fn embedded_cli_merges_only_relay_settings() {
+	let dir = tempfile::tempdir().unwrap();
+	let path = dir.path().join("relay.toml");
+	std::fs::write(&path, "[cluster]\nid = 7\n[stats]\nenabled = false\n").unwrap();
 	let (mut parsed, cli) = EmbeddedConfig::parse_from_with_settings(&[
+		path.as_os_str(),
 		std::ffi::OsStr::new("--worker-name"),
 		std::ffi::OsStr::new("recorder"),
 		std::ffi::OsStr::new("--cluster-id"),
 		std::ffi::OsStr::new("9"),
 	])
 	.expect("parse embedding CLI");
-	let file = toml::from_str::<toml::Value>("[cluster]\nid = 7\n").unwrap();
-	let source = moq_tokio::cli::FileSource {
-		path: std::path::Path::new("relay.toml"),
-		value: &file,
-	};
-	parsed
-		.relay
-		.merge_into(&cli, &usage_rs::config::EnvLayer::from_process(), Some(source))
-		.unwrap();
+	parsed.relay.merge(&cli).unwrap();
 	assert_eq!(parsed.worker_name.as_deref(), Some("recorder"));
 	assert_eq!(parsed.relay.cluster.id, Some(9));
+	assert_eq!(parsed.relay.source("cluster.id"), Some("--cluster-id"));
+	assert!(!parsed.relay.stats.enabled);
+	assert!(parsed.relay.source("stats.enabled").unwrap().contains("enabled"));
+	// The explicit file value equals the runtime default but still has file provenance.
+	let (mut defaults, cli) = EmbeddedConfig::parse_from_with_settings(&[]).unwrap();
+	defaults.relay.merge(&cli).unwrap();
+	assert_eq!(defaults.relay.stats.enabled, parsed.relay.stats.enabled);
+	assert_ne!(
+		defaults.relay.source("stats.enabled"),
+		parsed.relay.source("stats.enabled")
+	);
+}
+
+/// A composed CLI refuses obsolete file keys before constructing a relay or initializing logging.
+#[test]
+fn embedded_loader_refuses_obsolete_file_settings() {
+	let dir = tempfile::tempdir().unwrap();
+	let path = dir.path().join("relay.toml");
+	std::fs::write(&path, "[server]\nbind = \"127.0.0.1:0\"\n").unwrap();
+	let (mut parsed, cli) = EmbeddedConfig::parse_from_with_settings(&[path.as_os_str()]).unwrap();
+	let error = parsed.relay.merge(&cli).unwrap_err();
+	assert!(error.to_string().contains("[server]"), "{error}");
+	assert!(error.to_string().contains("[listen]"), "{error}");
 }
 
 /// The next route and whether it is active.

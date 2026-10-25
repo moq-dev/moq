@@ -6,8 +6,9 @@
 //! subscriber `S` links to both, ranking `A` first with
 //! [`origin::Producer::with_preference`] while pricing `B` cheaper, so only the
 //! preference puts `A` ahead. Losing `A` moves `S` to `B`, and `A` returning moves it
-//! back. Between routes with the same epoch each move resumes the subscription, whether
-//! `B` speaks lite-07 or moq-transport with the MoQ Epoch extension. A moq-transport `B`
+//! back. Between lite-07 routes with the same epoch each move resumes the subscription.
+//! A moq-transport `B` with the MoQ Epoch extension carries the epoch, but its copy's
+//! track info records the draft, so the move onto it is refused. A moq-transport `B`
 //! that cannot carry the epoch (before draft-17) makes each move a restart and a
 //! re-request.
 
@@ -16,7 +17,7 @@ use crate::support;
 use std::time::Duration;
 
 use futures::{StreamExt, channel::mpsc};
-use moq_net::{Error, Hop, Timestamp, Version, announce, broadcast, origin, track};
+use moq_net::{Error, Hop, Timestamp, Version, announce, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -142,7 +143,7 @@ struct Topology {
 	cdn_b: origin::Producer,
 	subscriber: origin::Producer,
 	track: track::Producer,
-	_broadcast: broadcast::Producer,
+	_broadcast: moq_net::origin::Publication,
 	_pushes: Vec<MockPair>,
 	s_to_a: Option<MockPair>,
 	s_to_b: MockPair,
@@ -312,17 +313,49 @@ async fn preferred_cdn_fails_over_and_back() {
 	fails_over_and_back("moq-lite-07-wip").await;
 }
 
-/// A moq-transport `B` with the MoQ Epoch extension carries `P`'s epoch, so `S` resumes
-/// across a chain mixing lite-07 and moq-transport exactly as it does over lite-07 alone.
+/// A moq-transport `B` with the MoQ Epoch extension carries `P`'s epoch, so losing `A` is
+/// an update, not a restart. Its copy's track info differs from `A`'s, recording the draft
+/// it crossed, and one epoch means identical content: `S` refuses the copy, so the track
+/// ends with no frame of `B`'s.
+async fn refused_across_protocols(secondary: &str) {
+	moq_clock::timeout(TEST_TIMEOUT, async {
+		let mut topology = Topology::new(secondary.parse().unwrap()).await;
+		let mut announced = topology.subscriber.consume().announced();
+		let start = announced.next().await.expect("announced");
+		assert!(via_a(&start), "{start:?}");
+
+		let mut rx = topology.subscribe().await;
+		let seen = topology.group_through_a(&mut rx).await;
+		assert_continuous(&seen, 1);
+
+		topology.lose_a().await;
+		let update = announced.next().await.expect("announced");
+		assert!(
+			matches!(update, announce::Event::Update(_)) && !via_a(&update),
+			"same epoch over B: {update:?}"
+		);
+		topology.group();
+		settle().await;
+		let rest: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+		assert!(
+			matches!(rest.as_slice(), [(u64::MAX, Err(Error::Unsupported))]),
+			"the track did not end with the refusal: {rest:?}"
+		);
+		drop((topology.publisher, topology.cdn_b));
+	})
+	.await
+	.expect("timed out");
+}
+
 #[moq_clock::test]
-async fn transport_secondary_fails_over_and_back() {
-	fails_over_and_back("moq-transport-22").await;
+async fn transport_secondary_is_refused() {
+	refused_across_protocols("moq-transport-22").await;
 }
 
 /// The same over the first draft that can carry the epoch.
 #[moq_clock::test]
-async fn transport_17_secondary_fails_over_and_back() {
-	fails_over_and_back("moq-transport-17").await;
+async fn transport_17_secondary_is_refused() {
+	refused_across_protocols("moq-transport-17").await;
 }
 
 /// A moq-transport `B` before draft-17 carries no epoch, so `S` cannot resume onto it:

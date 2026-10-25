@@ -1,26 +1,28 @@
 //! The sessions a [`Connection`](crate::Connection) serves, whatever transport carries them.
 
 use crate::auth;
-use axum::http;
 
 /// A session whose SETUP awaits the relay's reply: what a [`Connection`](crate::Connection) serves.
 ///
-/// Sealed: implemented by [`moq_tokio::server::Request`] and [`Accepted`].
+/// Sealed: native requests, plus in-memory accepted sessions with `test-support`.
 pub trait Incoming: Sealed {}
 
 impl Incoming for moq_tokio::server::Request {}
 
+#[cfg(feature = "test-support")]
 impl Incoming for Accepted {}
 
 /// A session accepted on any moq-net transport, its SETUP awaiting the relay's reply.
 ///
 /// The auth decider sees the path, query, token, and role the SETUP carried, so the
 /// client must send its path in-band.
+#[cfg(feature = "test-support")]
 pub struct Accepted {
 	handshake: moq_net::server::Handshake,
 	transport: moq_auth::Transport,
 }
 
+#[cfg(feature = "test-support")]
 impl Accepted {
 	/// Wrap `handshake`, reported to the auth decider as arriving over `transport`.
 	pub fn new(handshake: moq_net::server::Handshake, transport: moq_auth::Transport) -> Self {
@@ -52,24 +54,24 @@ pub trait Sealed: Sized {
 	/// Finish `work` before the handshake deadline, closing the session if it passes.
 	async fn within<T>(&self, work: impl std::future::Future<Output = T>) -> anyhow::Result<T>;
 
-	/// Refuse the session with the admission's HTTP-style status.
-	async fn reject(self, status: http::StatusCode);
+	/// Refuse the session, closing it with `code`.
+	async fn reject(self, code: moq_net::SessionError);
 
 	/// The QUIC connection under the request, to widen a peer's limits before SETUP OK.
 	#[cfg(feature = "quic")]
-	fn quic(&self) -> Option<&moq_tokio::quic::Connection> {
+	fn quic(&self) -> Option<&moq_tokio::quic::driver::Connection> {
 		None
 	}
 
 	fn auth(&self) -> moq_net::auth::Handle;
-	fn role(&self) -> Option<moq_net::Role>;
+	fn requests(&mut self) -> moq_net::auth::Requests;
+	fn role(&self) -> Option<moq_net::setup::Role>;
 	fn with_stats(self, stats: moq_net::stats::Session) -> Self;
 	fn with_limits(self, limits: moq_net::session::Limits) -> Self;
 	fn with_publisher(self, publish: moq_net::origin::Consumer) -> Self;
 	fn with_subscriber(self, subscribe: moq_net::origin::Producer) -> Self;
 
-	/// Answer the SETUP. A MoQ failure comes back as a bare [`moq_net::Error`], so
-	/// its cause classifies the failure.
+	/// Answer the SETUP. A MoQ failure comes back as a bare [`moq_net::Error`].
 	async fn ok(self) -> anyhow::Result<(moq_net::Session, Self::Driver)>;
 
 	/// Run the session's protocol until it ends, alongside its supervision.
@@ -78,7 +80,7 @@ pub trait Sealed: Sized {
 
 impl Sealed for moq_tokio::server::Request {
 	/// Spawned by [`Request::ok`](moq_tokio::server::Request::ok) on its own task.
-	type Driver = tokio::task::JoinHandle<moq_tokio::Result<()>>;
+	type Driver = ();
 
 	fn remote(&self) -> Option<std::net::SocketAddr> {
 		self.remote_addr()
@@ -96,17 +98,12 @@ impl Sealed for moq_tokio::server::Request {
 		Ok(moq_tokio::server::Request::within(self, work).await?)
 	}
 
-	async fn reject(self, status: http::StatusCode) {
-		let reject = match status {
-			http::StatusCode::UNAUTHORIZED => moq_tokio::server::Reject::Unauthorized,
-			http::StatusCode::FORBIDDEN => moq_tokio::server::Reject::Forbidden,
-			status => moq_tokio::server::Reject::App(status.as_u16()),
-		};
-		let _ = moq_tokio::server::Request::reject(self, reject).await;
+	async fn reject(self, code: moq_net::SessionError) {
+		let _ = moq_tokio::server::Request::reject(self, code).await;
 	}
 
 	#[cfg(feature = "quic")]
-	fn quic(&self) -> Option<&moq_tokio::quic::Connection> {
+	fn quic(&self) -> Option<&moq_tokio::quic::driver::Connection> {
 		moq_tokio::server::Request::quic(self)
 	}
 
@@ -114,7 +111,11 @@ impl Sealed for moq_tokio::server::Request {
 		moq_tokio::server::Request::auth(self)
 	}
 
-	fn role(&self) -> Option<moq_net::Role> {
+	fn requests(&mut self) -> moq_net::auth::Requests {
+		moq_tokio::server::Request::requests(self)
+	}
+
+	fn role(&self) -> Option<moq_net::setup::Role> {
 		moq_tokio::server::Request::role(self)
 	}
 
@@ -136,17 +137,18 @@ impl Sealed for moq_tokio::server::Request {
 
 	async fn ok(self) -> anyhow::Result<(moq_net::Session, Self::Driver)> {
 		match moq_tokio::server::Request::ok(self).await {
-			Ok(ok) => Ok(ok),
+			Ok(session) => Ok((session, ())),
 			Err(moq_tokio::Error::MoqNet(err)) => Err(err.into()),
 			Err(err) => Err(err.into()),
 		}
 	}
 
-	async fn drive(driver: Self::Driver) -> anyhow::Result<()> {
-		Ok(driver.await??)
+	async fn drive((): Self::Driver) -> anyhow::Result<()> {
+		Ok(())
 	}
 }
 
+#[cfg(feature = "test-support")]
 impl Sealed for Accepted {
 	/// Polled on the connection's own task, so it needs no runtime to spawn on.
 	type Driver = moq_net::Driver;
@@ -168,18 +170,19 @@ impl Sealed for Accepted {
 		Ok(work.await)
 	}
 
-	async fn reject(self, status: http::StatusCode) {
-		self.handshake.close(match status {
-			http::StatusCode::UNAUTHORIZED | http::StatusCode::FORBIDDEN => moq_net::Error::Unauthorized,
-			status => moq_net::Error::App(status.as_u16()),
-		});
+	async fn reject(self, code: moq_net::SessionError) {
+		self.handshake.close(code.into());
 	}
 
 	fn auth(&self) -> moq_net::auth::Handle {
 		self.handshake.auth()
 	}
 
-	fn role(&self) -> Option<moq_net::Role> {
+	fn requests(&mut self) -> moq_net::auth::Requests {
+		self.handshake.requests()
+	}
+
+	fn role(&self) -> Option<moq_net::setup::Role> {
 		self.handshake.role()
 	}
 

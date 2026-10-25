@@ -98,8 +98,10 @@ impl Session {
 	/// Connect to a relay over the browser's WebTransport, using the system roots.
 	pub async fn connect(url: String) -> Result<Session, JsValue> {
 		let url = url::Url::parse(&url).map_err(js_err)?;
-		let transport = transport::connect(url, Default::default()).await.map_err(js_err)?;
-		Self::handshake(transport).await
+		let transport = transport::connect(url.clone(), Default::default())
+			.await
+			.map_err(js_err)?;
+		Self::handshake(url, transport).await
 	}
 
 	/// Connect trusting only the given sha-256 certificate hashes (serverless dev).
@@ -111,11 +113,11 @@ impl Session {
 			server_certificate_hashes: hashes,
 			..Default::default()
 		};
-		let transport = transport::connect(url, options).await.map_err(js_err)?;
-		Self::handshake(transport).await
+		let transport = transport::connect(url.clone(), options).await.map_err(js_err)?;
+		Self::handshake(url, transport).await
 	}
 
-	async fn handshake(transport: transport::Session) -> Result<Session, JsValue> {
+	async fn handshake(url: url::Url, transport: transport::Session) -> Result<Session, JsValue> {
 		// Wire a subscribe origin so the session has somewhere to insert the
 		// broadcasts the remote announces; keep a consumer to read them.
 		let (origin, origin_driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
@@ -123,10 +125,13 @@ impl Session {
 			moq_net::time::run(origin_driver).await;
 		});
 		let consumer = origin.consume();
-		let client = moq_net::Client::new().with_subscriber(origin);
+		let client = moq_net::Client::new().with_url(url).with_subscriber(origin);
 		// The driver holds no session clone, so dropping this `Session` still
 		// closes the transport and ends the spawned task.
-		let (inner, driver) = client.connect(moq_net::time::now(), transport).await.map_err(js_err)?;
+		let (inner, driver) = client
+			.connect(moq_net::time::Instant::now(), transport)
+			.await
+			.map_err(js_err)?;
 		web_async::spawn(async move {
 			moq_net::time::run(driver).await;
 		});

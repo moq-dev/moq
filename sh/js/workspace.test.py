@@ -62,9 +62,9 @@ class SelectionTest(unittest.TestCase):
         just = tools / "just"
         subprocess.run(["git", "init", "--quiet", str(self.root)], check=True)
         calls = self.root / "calls"
-        env = dict(os.environ, PATH=f"{tools}:{os.environ['PATH']}", MOQ_ALLOW_HOST="1",
+        env = dict(os.environ, PATH=f"{tools}:{os.environ['PATH']}", ALLOW_HOST_TOOLCHAIN="1",
                    SELECT_CALLS=str(calls))
-        for script in ("markdown.sh", "shell.sh"):
+        for script in ("markdown.sh", "shell.sh", "large-files.sh"):
             path = sh / script
             path.write_text("#!/bin/sh\nexit 0\n")
             path.chmod(0o755)
@@ -174,7 +174,7 @@ class SelectionTest(unittest.TestCase):
         self.assertEqual(set(self.plan(["js/view/src/index.ts"])["packages"]),
                          {"@example/core", "@example/view", "docs"})
 
-    def calls(self, paths, action="check"):
+    def calls(self, paths, action="check", github_actions=False):
         calls = []
         self.configurations = []
         def invoke(args, **kwargs):
@@ -182,7 +182,8 @@ class SelectionTest(unittest.TestCase):
             if args[:2] == ("bunx", "tsc") and args[-1] != "test/tsconfig.json":
                 self.configurations.append(json.loads(Path(args[-1]).read_text()))
             return type("Result", (), {"returncode": 1 if args[0] == "grep" else 0})()
-        with patch.object(selector, "ROOT", self.root), patch.object(selector.os, "chdir"), \
+        with patch.dict(selector.os.environ, GITHUB_ACTIONS=str(github_actions).lower()), \
+                patch.object(selector, "ROOT", self.root), patch.object(selector.os, "chdir"), \
                 patch.object(selector.subprocess, "run", side_effect=invoke), \
                 patch.object(selector.shutil, "which", return_value="tool"):
             selector.run(action, self.plan(paths))
@@ -191,7 +192,7 @@ class SelectionTest(unittest.TestCase):
     def test_executor_runs_only_selected_package_scripts_without_wasm(self):
         calls = self.calls(["doc/index.md"])
         scripts = [c for c in calls if c[:2] == ["bun", "run"]]
-        self.assertEqual(scripts, [["bun", "run", "--filter=docs", "--elide-lines=0", action]
+        self.assertEqual(scripts, [["bun", "run", "--sequential", "--filter=docs", "--elide-lines=0", action]
                                   for action in ("check", "build")])
         self.assertNotIn(["just", "js", "wasm", "dev"], calls)
         self.assertTrue(any(c[:2] == ["bunx", "tsc"] for c in calls))
@@ -225,7 +226,9 @@ class SelectionTest(unittest.TestCase):
 
     def test_tests_do_not_build_wasm_or_unselected_packages(self):
         calls = self.calls(["doc/index.md"], "test")
-        self.assertIn(["bun", "run", "--filter=docs", "--elide-lines=0", "test"], calls)
+        self.assertIn(["bun", "run", "--sequential", "--filter=docs", "--elide-lines=0", "test"], calls)
+        hosted = self.calls(["doc/index.md"], "test", github_actions=True)
+        self.assertIn(["bun", "run", "--filter=docs", "--elide-lines=0", "test"], hosted)
         self.assertFalse(any(c[0] == "just" for c in calls))
 
     def test_owned_package_without_scripts_keeps_harness_check(self):

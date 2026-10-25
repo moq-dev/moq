@@ -34,13 +34,11 @@ struct Fixture {
 	_published: Box<dyn std::any::Any>,
 	_origin: moq_net::origin::Producer,
 	driver: tokio::task::JoinHandle<moq_net::Error>,
-	requests: tokio::task::JoinHandle<()>,
 }
 
 impl Drop for Fixture {
 	fn drop(&mut self) {
 		self.driver.abort();
-		self.requests.abort();
 	}
 }
 
@@ -56,9 +54,10 @@ async fn prepare(video: Video, payload: &Bytes) -> (moq_mux::Source, impl Stream
 		frames,
 		frames_per_group,
 	} = video;
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let consumer = broadcast.consume();
-	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let (origin, driver) = moq_net::origin::Producer::new(Default::default());
+	let driver = tokio::spawn(moq_net::time::run(driver));
+	let broadcast = origin.create_broadcast("bench").unwrap();
+	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
 	let mut publishers = Vec::new();
 	for index in 0..tracks {
 		let track = broadcast
@@ -85,14 +84,7 @@ async fn prepare(video: Video, payload: &Bytes) -> (moq_mux::Source, impl Stream
 		publishers.push(publisher);
 	}
 	catalog.finish().unwrap();
-	let (origin, driver) = moq_net::origin::Producer::new(Default::default());
-	let driver = tokio::spawn(moq_net::time::run(driver));
-	let dynamic = origin.dynamic_route("", Default::default()).unwrap();
-	let requests = tokio::spawn(async move {
-		while let Ok(request) = dynamic.requested_broadcast().await {
-			request.accept(consumer.clone());
-		}
-	});
+	broadcast.announce(Default::default()).unwrap();
 	let resolved = origin.consume().request_broadcast("bench", None).await.unwrap();
 	let source = moq_mux::Source::new(origin.consume(), resolved);
 	let stream = source.catalog::<()>(CatalogFormat::Hang).await.unwrap();
@@ -100,7 +92,6 @@ async fn prepare(video: Video, payload: &Bytes) -> (moq_mux::Source, impl Stream
 		_published: Box::new((broadcast, catalog, publishers)),
 		_origin: origin,
 		driver,
-		requests,
 	};
 	(source, stream, fixture)
 }
@@ -459,5 +450,205 @@ fn queued_groups(c: &mut Criterion) {
 	group.finish();
 }
 
-criterion_group!(benches, containers, interleaved_runs, queued_groups);
+/// An SI-only TS program with accepted PCR progress. The four capture PIDs and
+/// eight-bit table IDs bound table-key history to 1,024 keys in the real importer.
+struct SiImport {
+	inner: moq_mux::container::ts::Import<moq_mux::container::ts::Ext>,
+	cc: [u8; 4],
+	clock: u64,
+	pending: bool,
+}
+
+impl SiImport {
+	const PIDS: [u16; 4] = [0x10, 0x11, 0x12, 0x14];
+
+	fn new() -> Self {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(
+			&mut broadcast,
+			moq_mux::catalog::Config::default()
+				.with_catalog(moq_mux::catalog::hang::Catalog::<moq_mux::container::ts::Ext>::default()),
+		)
+		.unwrap();
+		let mut this = Self {
+			inner: moq_mux::container::ts::Import::new(broadcast, catalog.reserve()),
+			cc: [0; 4],
+			clock: 0,
+			pending: false,
+		};
+		// PAT and an empty PMT declaring a dedicated PCR PID. Together they also
+		// provide the framer's initial second packet for confirming its sync byte.
+		let program = [
+			Self::packet(0, 0, this.section(0, 1, &[0, 1, 0xe0, 0x20])),
+			Self::packet(0x20, 0, this.section(2, 1, &[0xe1, 0xff, 0xf0, 0])),
+		]
+		.concat();
+		this.inner.decode(&program).unwrap();
+		this.tick();
+		this
+	}
+
+	fn section(&self, table: u8, id: u16, body: &[u8]) -> Vec<u8> {
+		let length = 9 + body.len();
+		let mut section = vec![
+			table,
+			0xb0,
+			length as u8,
+			(id >> 8) as u8,
+			id as u8,
+			0xc1,
+			0,
+			u8::from(self.pending && table == 0x42),
+		];
+		section.extend_from_slice(body);
+		let crc = crc::Crc::<u32>::new(&crc::CRC_32_MPEG_2).checksum(&section);
+		section.extend_from_slice(&crc.to_be_bytes());
+		section
+	}
+
+	fn packet(pid: u16, cc: u8, section: Vec<u8>) -> Vec<u8> {
+		let mut packet = vec![0x47, 0x40 | (pid >> 8) as u8, pid as u8, 0x10 | cc, 0];
+		packet.extend(section);
+		packet.resize(188, 0xff);
+		packet
+	}
+
+	/// A 40 ms PCR interval, safely below the importer's accepted jump bound.
+	fn tick(&mut self) {
+		let base = self.clock / 300;
+		let mut packet = vec![0x47, 0x01, 0xff, 0x20, 183, 0x10];
+		packet.extend_from_slice(&[
+			(base >> 25) as u8,
+			(base >> 17) as u8,
+			(base >> 9) as u8,
+			(base >> 1) as u8,
+			((base & 1) << 7) as u8 | 0x7e,
+			0,
+		]);
+		packet.resize(188, 0xff);
+		self.inner.decode(&packet).unwrap();
+		self.clock += 40 * 27_000;
+	}
+
+	fn repeat(&mut self, entries: impl IntoIterator<Item = (usize, u8, u16)>) {
+		let mut packets = Vec::new();
+		for (pid, table, id) in entries {
+			let cc = self.cc[pid];
+			self.cc[pid] = (cc + 1) & 15;
+			packets.extend(Self::packet(Self::PIDS[pid], cc, self.section(table, id, &[0; 6])));
+		}
+		self.inner.decode(&packets).unwrap();
+	}
+
+	fn identities(count: u16) -> Self {
+		let mut this = Self::new();
+		this.repeat((0..count).map(|id| (2, 0x80, id)));
+		this
+	}
+
+	fn pending(count: u16) -> Self {
+		let mut this = Self::new();
+		this.pending = true;
+		this.inner = this.inner.with_program(1);
+		this.repeat((0..count).map(|id| (1, 0x42, id)));
+		this
+	}
+
+	fn table_key(index: u16) -> (usize, u8, u16) {
+		(usize::from(index / 256), index as u8, 1)
+	}
+
+	fn history(count: u16, touches: u16) -> Self {
+		let mut this = Self::new();
+		this.repeat((0..count).map(Self::table_key));
+		// All table generations expire. The existing continuity policy retains
+		// their Entry/track owners; re-activate just the entries the timed call touches.
+		for _ in 0..=775 {
+			this.tick();
+		}
+		this.repeat((0..touches).map(|key| Self::table_key(key % count)));
+		this
+	}
+}
+
+/// Time one accepted PCR interval plus `touches` SI arrivals against `retained` state,
+/// swept over both axes so a cost that grows with the retained set shows up as a slope.
+fn ts_si_sweep(
+	c: &mut Criterion,
+	name: &str,
+	retained: [u16; 3],
+	setup: impl Fn(u16, u16) -> SiImport,
+	touch: impl Fn(u16, u16) -> (usize, u8, u16),
+) {
+	let mut group = c.benchmark_group(name);
+	group.measurement_time(Duration::from_secs(1));
+	group.warm_up_time(Duration::from_millis(200));
+	group.sample_size(10);
+	for retained in retained {
+		for touches in [1, 16, 64] {
+			group.throughput(Throughput::Elements(u64::from(touches)));
+			group.bench_with_input(
+				BenchmarkId::new(retained.to_string(), touches),
+				&touches,
+				|b, &touches| {
+					b.iter_batched_ref(
+						|| setup(retained, touches),
+						|import| {
+							import.tick();
+							import.repeat((0..touches).map(|key| touch(retained, key)));
+						},
+						BatchSize::SmallInput,
+					);
+				},
+			);
+		}
+	}
+	group.finish();
+}
+
+/// SI renewal across retained sub-table count and touched identities. Accepted
+/// PCR advances the deadlines during timing without expiring the retained set.
+fn ts_si_renewal(c: &mut Criterion) {
+	ts_si_sweep(
+		c,
+		"ts_si_renewal_pcr",
+		[1, 64, 4096],
+		|identities, _| SiImport::identities(identities),
+		|identities, id| (2, 0x80, id % identities),
+	);
+}
+
+/// Pending SDT generations retain only their first section; the selected service
+/// prevents a repeated partial set from committing as a sparse complete cycle.
+fn ts_si_pending(c: &mut Criterion) {
+	ts_si_sweep(
+		c,
+		"ts_si_pending_pcr",
+		[1, 64, 4096],
+		|identities, _| SiImport::pending(identities),
+		|identities, id| (1, 0x42, id % identities),
+	);
+}
+
+/// Distinct expired PID/table-key history versus current touched entries, using
+/// only the four SI PIDs the importer actually captures and the full table-ID space.
+fn ts_si_table_history(c: &mut Criterion) {
+	ts_si_sweep(
+		c,
+		"ts_si_table_history_pcr",
+		[1, 64, 1024],
+		SiImport::history,
+		|history, key| SiImport::table_key(key % history),
+	);
+}
+
+criterion_group!(
+	benches,
+	containers,
+	interleaved_runs,
+	queued_groups,
+	ts_si_renewal,
+	ts_si_pending,
+	ts_si_table_history
+);
 criterion_main!(benches);

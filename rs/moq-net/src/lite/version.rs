@@ -21,7 +21,8 @@ pub enum Version {
 	/// a `.`-prefixed segment below the requested prefix is left out. SUBSCRIBE_DROP
 	/// accounts for every group the subscription will not deliver.
 	/// ANNOUNCE_START and ANNOUNCE_UPDATE may copy a path head or hop-chain tail from a
-	/// live announcement on the same stream. Adds the Auth Stream. The wire format is
+	/// live announcement on the same stream. Adds the Auth Stream. SUBSCRIBE carries a
+	/// list of ranges. The wire format is
 	/// still work-in-progress, so it is advertised over ALPN as `moq-lite-07-wip` and
 	/// only when explicitly requested; the default version sets leave it out.
 	Lite07,
@@ -38,6 +39,13 @@ impl Version {
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
 		)
+	}
+
+	/// Whether a copy received over this version resolves relative and time range anchors
+	/// as its publisher would: the start resolves from the budget, the answer reports the
+	/// largest, and frames carry media time. Added in lite-07; an earlier copy refuses them.
+	pub(crate) fn resolves_anchors(self) -> bool {
+		self.resolves_start() && self.has_largest() && self.has_media_time()
 	}
 
 	/// Whether the version has lite-05's dedicated TRACK stream and related stream
@@ -151,6 +159,16 @@ impl Version {
 	/// Whether SUBSCRIBE and SUBSCRIBE_UPDATE carry the subscriber's `Group Order`.
 	/// Added in lite-07; an earlier subscription is served newest first.
 	pub(crate) fn has_order(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
+		)
+	}
+
+	/// Whether SUBSCRIBE and SUBSCRIBE_UPDATE carry a list of ranges, each end absolute,
+	/// relative to the latest group, or at a presentation time. Added in lite-07; an earlier
+	/// subscription carries one span with absolute ends.
+	pub(crate) fn has_ranges(self) -> bool {
 		!matches!(
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06

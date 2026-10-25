@@ -7,6 +7,10 @@
 # compiler on Unix; Windows uses MSVC.
 set -euo pipefail
 
+if [[ "${GITHUB_ACTIONS:-}" != true && "${LOCAL_SUPERVISED:-}" != 1 ]]; then
+    exec bash "$(dirname "$0")/../local.sh" bash "$0" "$@"
+fi
+
 ffi_dir=""
 archive=""
 if [[ $# -gt 0 ]]; then

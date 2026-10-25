@@ -3,21 +3,31 @@ package dev.moq
 import dev.moq.media.*
 import dev.moq.audio.Consumer as AudioConsumer
 import dev.moq.audio.Producer as AudioProducer
+import dev.moq.audio.ProducerOptions as AudioProducerOptions
 import dev.moq.video.Consumer as VideoConsumer
 import dev.moq.video.Producer as VideoProducer
+import dev.moq.video.ProducerOptions as VideoProducerOptions
+import dev.moq.video.FrameRate as VideoFrameRate
 
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
-import kotlinx.coroutines.yield
 import dev.moq.json.SnapshotConfig
 import dev.moq.json.SnapshotConsumer
 import dev.moq.json.SnapshotProducer
 import dev.moq.json.StreamConfig
 import dev.moq.json.Timed
+import dev.moq.json.WindowConfig
+import dev.moq.json.WindowConsumer
+import dev.moq.json.WindowEventPop
+import dev.moq.json.WindowEventPush
+import dev.moq.json.WindowProducer
 import dev.moq.json.decode
+import dev.moq.json.events
+import dev.moq.json.push
+import dev.moq.json.timestamp
 import dev.moq.json.update
 import dev.moq.json.valuesAs
 import kotlinx.serialization.Serializable
@@ -29,10 +39,7 @@ import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
-import kotlin.time.Duration.Companion.hours
-import kotlin.time.Duration.Companion.microseconds
 import kotlin.time.Duration.Companion.milliseconds
-import kotlin.time.Duration
 import kotlin.time.Instant
 
 @Serializable
@@ -104,7 +111,7 @@ class SmokeTest {
 
     /**
      * Exercises the [Moq.connect] facade end to end without a network: a bogus
-     * URL fails fast, and the failure surfaces as a [MoqException]. Also proves
+     * dial failure reaches the returned session through [Session.closed]. Also proves
      * the native lib loads through the transitive `moq-ffi` dependency.
      * One-shot mode, since the default reconnect would retry the dial with
      * backoff instead of failing.
@@ -112,7 +119,9 @@ class SmokeTest {
     @Test
     fun `connect fails fast and surfaces a MoqException`() = runTest {
         val ex = assertFailsWith<MoqException> {
-            Moq.connect("https://localhost:0/test", ClientConfig(tls = ClientTls(insecure = true), once = true))
+            Moq.connect("https://localhost:0/test", ClientConfig(tls = ClientTls(insecure = true), once = true)).use { moq ->
+                moq.session.closed()
+            }
         }
         assertTrue(
             ex.isShutdown || ex is MoqException.Connect || ex is MoqException.Url,
@@ -133,9 +142,9 @@ class SmokeTest {
                 ClientConfig(
                     tls = ClientTls(insecure = true),
                     once = true,
-                    websocket = WebSocketConfig(enabled = false, delayUs = 0uL),
+                    websocket = WebSocketConfig(enabled = false, delay = java.time.Duration.ZERO),
                 ),
-            )
+            ).use { moq -> moq.session.closed() }
         }
         assertFailsWith<MoqException.Config> {
             Moq.connect("https://localhost:0/test", ClientConfig(versions = listOf("moq-lite-99")))
@@ -182,10 +191,10 @@ class SmokeTest {
         val stream: StreamConfig = StreamConfig(compression = false)
         val properties: VideoProperties = VideoProperties(rotation = 315.0)
         val backoff: Backoff = Backoff(
-            initialUs = 500_000uL,
+            initial = java.time.Duration.ofMillis(500),
             multiplier = 2u,
-            maxUs = 10_000_000uL,
-            timeoutUs = 0uL,
+            max = java.time.Duration.ofSeconds(10),
+            timeout = java.time.Duration.ZERO,
         )
         val client: ClientConfig = ClientConfig(
             tls = ClientTls(insecure = true),
@@ -196,14 +205,14 @@ class SmokeTest {
         val server: ServerConfig = ServerConfig(tls = ServerTls(generate = listOf("localhost")))
         assertEquals(4096uL, client.quic.maxStreams)
         assertEquals(listOf("localhost"), server.tls.generate)
-        val status: ConnectionStatus = ConnectionStatus.CONNECTED
+        val status: ConnectionPhase = ConnectionPhase.CONNECTED
         assertEquals(4_000_000uL, hint.bitrate)
         assertEquals(true, snapshot.deltas)
         assertEquals(false, stream.compression)
         assertNull(properties.display)
         assertNull(properties.flip)
-        assertEquals(500_000uL, backoff.initialUs)
-        assertEquals(ConnectionStatus.CONNECTED, status)
+        assertEquals(java.time.Duration.ofMillis(500), backoff.initial)
+        assertEquals(ConnectionPhase.CONNECTED, status)
     }
 
     @Test
@@ -231,19 +240,15 @@ class SmokeTest {
     }
 
     @Test
-    fun `finishing a broadcast lingers until the wait is cancelled`() = runTest {
-        val broadcast = BroadcastProducer()
-        val track = broadcast.publishTrack("status", TrackInfo(maxAgeUs = 3_600_000_000uL))
-        track.finish()
-        broadcast.finish().use { finish ->
-            assertEquals(1.hours, finish.linger)
-            assertFailsWith<MoqException> { broadcast.consume() }
-            // Cancelling the wait is the interrupt: it ends instead of lingering for an hour.
-            val wait = async { finish.wait() }
-            yield()
-            wait.cancel()
-            wait.join()
-            finish.end()
+    fun `a finished catalog leaves the broadcast up until it ends`() {
+        BroadcastProducer().use { broadcast ->
+            val catalog = CatalogProducer(broadcast)
+            broadcast.publishTrack("status", null).finish()
+            catalog.finish()
+            // Finishing the content leaves the broadcast up until it ends.
+            broadcast.consume().close()
+            broadcast.end()
+            assertFailsWith<MoqException> { catalog.finish() }
         }
     }
 
@@ -284,7 +289,7 @@ class SmokeTest {
             }
             val consumer = track.consume(
                 Subscription(
-                    maxDelayUs = 10_000_000uL,
+                    maxDelay = java.time.Duration.ofSeconds(10),
                     ranges = listOf(Range(start = AnchorRelative(groups = 2uL))),
                     order = Order.ASCENDING,
                 ),
@@ -402,28 +407,11 @@ class SmokeTest {
         assertNotNull(audio)
     }
 
-    /** Microsecond fields read back as a Duration. */
+    /** Microsecond timestamps read back as a Duration. */
     @Test
-    fun `microsecond fields read back as durations`() {
-        val backoff = Backoff(initialUs = 1_000uL, multiplier = 2u, maxUs = 2_000uL, timeoutUs = 3_000uL)
-        assertEquals(1.milliseconds, backoff.initial)
-        assertEquals(2.milliseconds, backoff.max)
-        assertEquals(3.milliseconds, backoff.timeout)
-
-        fun stats(rttUs: ULong?) = ConnectionStats(
-            rttUs = rttUs,
-            estimatedSendRateBps = null,
-            bytesSent = null,
-            bytesReceived = null,
-            bytesLost = null,
-            packetsSent = null,
-            packetsReceived = null,
-            packetsLost = null,
-        )
-        assertNull(stats(null).rtt)
-        assertEquals(1_500.microseconds, stats(1_500uL).rtt)
+    fun `microsecond timestamps read back as durations`() {
         assertEquals(20.milliseconds, Frame(payload = ByteArray(0), timestampUs = 20_000uL).timestamp)
-        assertEquals(Duration.ZERO, AudioEncoderOutput(codec = AudioCodec.opus()).frameDuration)
+        assertNull(AudioEncoderOutput(codec = AudioCodec.opus()).frameDuration)
     }
 
     @Test
@@ -439,6 +427,39 @@ class SmokeTest {
             assertEquals(Timed(Status(state = "live1"), 1.milliseconds), consumer.next()?.decode<Status>())
             assertEquals(Timed(Status(state = "live2"), 2.milliseconds), consumer.next()?.decode<Status>())
             assertEquals(Timed(Status(state = "live4"), 4.milliseconds), consumer.latest()?.decode<Status>())
+        }
+    }
+
+    @Test
+    fun `json window yields pushes and pops in order`() = runTest {
+        BroadcastProducer().use { broadcast ->
+            val config = WindowConfig(compression = true)
+            val track = broadcast.publishTrack("log", TrackInfo(timescale = 1_000_000uL))
+            val producer = WindowProducer(track, config)
+            val consumer = WindowConsumer(broadcast.consume().subscribeTrack("log", null), config)
+            for (n in 1..3) producer.push(Status(state = "live$n"), timestampUs = n.toULong() * 1_000uL)
+            producer.pop(2uL, 4_000uL)
+
+            for (n in 0..2) {
+                val timed = checkNotNull(consumer.next())
+                val push = assertIs<WindowEventPush>(timed.event)
+                assertEquals(n.toULong(), push.index)
+                assertEquals(Status(state = "live${n + 1}"), push.decode<Status>())
+                assertEquals((n + 1).milliseconds, timed.timestamp)
+            }
+            val pop = checkNotNull(consumer.next())
+            assertEquals(WindowEventPop(0uL, 2uL), pop.event)
+            assertEquals(4.milliseconds, pop.timestamp)
+
+            // The cut's new group restates record 2, which this reader already has.
+            producer.cut()
+            producer.push(Status(state = "live4"), timestampUs = 5_000uL)
+            producer.finish()
+            val events = consumer.events().toList()
+            assertEquals(1, events.size)
+            val push = assertIs<WindowEventPush>(events[0].event)
+            assertEquals(3uL, push.index)
+            assertEquals(Status(state = "live4"), push.decode<Status>())
         }
     }
 
@@ -503,6 +524,18 @@ class SmokeTest {
             server.createBroadcast("live").use { broadcast ->
                 broadcast.announce(AnnounceRoute())
                 broadcast.unannounce()
+            }
+        }
+    }
+
+    @Test
+    fun `sessions advertise the wrapper ahead of moq-ffi`() = runTest {
+        Server.listen(ServerConfig(bind = "127.0.0.1:0", tls = ServerTls(generate = listOf("localhost")))).use { server ->
+            Moq.connect("https://${server.localAddr}", ClientConfig(tls = ClientTls(insecure = true))).use {
+                server.requests().first().use { request ->
+                    val advertised = request.peerImplementation()
+                    assertTrue(advertised?.startsWith("moq-kt/") == true, "advertised: $advertised")
+                }
             }
         }
     }
@@ -607,9 +640,8 @@ class SmokeTest {
     }
 
     /**
-     * `frameDurationUs` is microseconds so Opus' 2.5 ms frame is expressible at
-     * all, and a duration outside the Opus set is refused rather than silently
-     * rounded.
+     * Opus' 2.5 ms frame reaches the encoder, and a duration outside the Opus
+     * set is refused rather than silently rounded.
      */
     @Test
     fun `encode audio honors the opus frame duration set`() {
@@ -619,8 +651,11 @@ class SmokeTest {
             val catalog = CatalogProducer(broadcast)
             val fine = AudioProducer(
                 catalog,
-                input,
-                AudioEncoderOutput(codec = AudioCodec.opus(), track = "fine", frameDurationUs = 2_500u),
+                AudioProducerOptions(
+                    input = input,
+                    output = AudioEncoderOutput(codec = AudioCodec.opus(),  frameDuration = java.time.Duration.ofNanos(2_500_000)),
+                    track = "fine",
+                ),
             )
             // 2.5 ms of silence at 48 kHz mono f32: exactly one encoded frame.
             fine.write(AudioFrame(timestampUs = 0uL, data = ByteArray(120 * 4)))
@@ -629,8 +664,11 @@ class SmokeTest {
             assertFailsWith<MoqException.Audio> {
                 AudioProducer(
                     catalog,
-                    input,
-                    AudioEncoderOutput(codec = AudioCodec.opus(), track = "coarse", frameDurationUs = 2_000u),
+                    AudioProducerOptions(
+                        input = input,
+                        output = AudioEncoderOutput(codec = AudioCodec.opus(),  frameDuration = java.time.Duration.ofMillis(2)),
+                        track = "coarse",
+                    ),
                 )
             }
         }
@@ -653,7 +691,7 @@ class SmokeTest {
                 ClientConfig(bind = "127.0.0.1:0", versions = version, tls = ClientTls(insecure = true), once = true),
             )
             moq.use {
-                val everything = Grant(publish = listOf("**"), subscribe = listOf("**"), expiresUs = null)
+                val everything = Grant(publish = listOf("**"), subscribe = listOf("**"), expires = null)
                 assertEquals(everything, moq.auth().grants().first { it != null })
                 val session = accepted.await()
                 assertEquals(everything, session.auth().grants().first { it != null })
@@ -666,24 +704,17 @@ class SmokeTest {
         }
     }
 
-    /**
-     * Cancelling the client aborts a connect parked on a server that never
-     * accepts, and the connect reports it as [MoqException.Cancelled].
-     */
+    /** The returned Session owns its pending dial even after Client cancellation. */
     @Test
-    fun `client cancel aborts a pending connect`() = runTest {
+    fun `session owns and cancels its first dial`() = runTest {
         Server.listen(ServerConfig(bind = "127.0.0.1:0", tls = ServerTls(generate = listOf("localhost")))).use { server ->
-            // A reconnecting client would redial instead of failing the connect.
             val client = Client(ClientConfig(bind = "127.0.0.1:0", tls = ClientTls(insecure = true), once = true))
-
-            // runCatching, because a failed `async` would cancel the test scope
-            // before `await` ever reported it.
-            val connect = async { runCatching { client.connect("https://${server.localAddr}") } }
-            yield()
+            val session = client.connect("https://${server.localAddr}")
             client.cancel()
-
-            val connected = connect.await().exceptionOrNull()
-            assertTrue(connected is MoqException.Cancelled, "expected a cancelled connect, got: $connected")
+            assertEquals(0uL, session.state().connects)
+            session.cancel(0u)
+            session.closed()
+            assertEquals(ConnectionPhase.CLOSED, session.state().phase)
         }
     }
 
@@ -694,8 +725,11 @@ class SmokeTest {
             origin.createBroadcast("audio-delay").use { broadcast ->
                 val audio = AudioProducer(
                     CatalogProducer(broadcast),
-                    AudioEncoderInput(format = AudioSampleFormat.F32, sampleRate = 48_000u, channels = 1u),
-                    AudioEncoderOutput(codec = AudioCodec.opus(), track = "mic"),
+                    AudioProducerOptions(
+                        input = AudioEncoderInput(format = AudioSampleFormat.F32, sampleRate = 48_000u, channels = 1u),
+                        output = AudioEncoderOutput(codec = AudioCodec.opus(), ),
+                        track = "mic",
+                    ),
                 )
                 broadcast.announce(AnnounceRoute())
 
@@ -703,12 +737,11 @@ class SmokeTest {
                 val catalog = CatalogConsumer.subscribe(consumer).next()!!
                 val rendition = catalog.audio["mic"]!!
 
-                val fixedOutput = AudioDecoderOutput(format = AudioSampleFormat.F32, delayUs = 80_000uL)
-                assertEquals(80.milliseconds, fixedOutput.delay)
+                val fixedOutput = AudioDecoderOutput(format = AudioSampleFormat.F32, delay = java.time.Duration.ofMillis(80))
                 val fixed = AudioConsumer.subscribe(consumer, "mic", rendition, fixedOutput)
                 val estimated = AudioConsumer.subscribe(consumer, "mic", rendition, AudioDecoderOutput(format = AudioSampleFormat.F32))
-                assertEquals(80.milliseconds, fixed.delay)
-                val initial = estimated.delay
+                assertEquals(java.time.Duration.ofMillis(80), fixed.delay())
+                val initial = estimated.delay()
 
                 // Two 20 ms Opus frames of silence at 48 kHz mono.
                 for (i in 0 until 2) {
@@ -717,8 +750,8 @@ class SmokeTest {
                 assertNotNull(fixed.next())
                 assertNotNull(estimated.next())
 
-                assertEquals(80.milliseconds, fixed.delay)
-                assertTrue(estimated.delay != initial, "the estimate should move as frames are read")
+                assertEquals(java.time.Duration.ofMillis(80), fixed.delay())
+                assertTrue(estimated.delay() != initial, "the estimate should move as frames are read")
 
                 fixed.cancel()
                 estimated.cancel()
@@ -733,10 +766,12 @@ class SmokeTest {
             origin.createBroadcast("video-decode-frame").use { broadcast ->
                 val video = VideoProducer(
                     CatalogProducer(broadcast),
-                    VideoEncoderInput(format = VideoPixelFormat.RGBA, width = 320u, height = 240u, framerate = 30u),
-                    // Software so the encode is deterministic everywhere.
-                    VideoEncoderOutput(codec = VideoCodec.H264, track = "camera", kind = softwareEncoder),
-                    null,
+                    VideoProducerOptions(
+                        input = VideoEncoderInput(format = VideoPixelFormat.RGBA, width = 320u, height = 240u, framerate = VideoFrameRate(30000u, 1001u)),
+                        output = VideoEncoderOutput(codec = VideoCodec.H264,  kind = softwareEncoder),
+                        track = "camera",
+                        bandwidth = null,
+                    ),
                 )
                 broadcast.announce(AnnounceRoute())
 
@@ -785,8 +820,15 @@ class SmokeTest {
         for (codecFirst in listOf(true, false)) {
             BroadcastProducer().use { broadcast ->
                 val codec = AudioCodec.opus()
-                val output = AudioEncoderOutput(codec = codec, track = "mic")
-                val producer = AudioProducer(CatalogProducer(broadcast), input, output)
+                val output = AudioEncoderOutput(codec = codec)
+                val producer = AudioProducer(
+                    CatalogProducer(broadcast),
+                    AudioProducerOptions(
+                        input = input,
+                        output = output,
+                        track = "mic",
+                    ),
+                )
                 if (codecFirst) {
                     codec.close()
                 } else {

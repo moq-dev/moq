@@ -12,9 +12,11 @@ from moq_ffi import (
     MoqVideoFrame,
     MoqVideoPacket,
     MoqVideoProducer,
+    MoqVideoProducerOptions,
 )
+from moq_ffi import MoqVideoFrameRate as FrameRate
 
-from ._records import _from_us, _opt_us, _to_us
+from ._records import _from_us, _to_us
 from ._stream import _Stream
 from .media import CatalogProducer, Dimensions, Video
 from .publish import TrackDemand
@@ -64,7 +66,7 @@ class DecoderOutput:
     def _ffi(self) -> MoqVideoDecoderOutput:
         return MoqVideoDecoderOutput(
             resize=self.resize,
-            max_delay_us=_opt_us(self.max_delay, "max_delay"),
+            max_delay=self.max_delay,
             surface=self.surface,
         )
 
@@ -82,14 +84,18 @@ class Producer:
         input: EncoderInput,
         output: EncoderOutput,
         *,
+        track: str | None = None,
         bandwidth: Bandwidth | None = None,
     ) -> None:
         """Open a video track on the catalog's broadcast and register its rendition."""
         self._inner = MoqVideoProducer(
             catalog._inner,
-            input,
-            output,
-            None if bandwidth is None else bandwidth._inner,
+            MoqVideoProducerOptions(
+                input=input,
+                output=output,
+                track=track,
+                bandwidth=None if bandwidth is None else bandwidth._inner,
+            ),
         )
 
     def demand(self) -> TrackDemand:
@@ -196,4 +202,5 @@ __all__ = [
     "Packet",
     "PixelFormat",
     "Producer",
+    "FrameRate",
 ]

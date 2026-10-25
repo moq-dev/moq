@@ -3,6 +3,7 @@
 
 #include "moq-output.h"
 #include "moq-error.h"
+#include "moq-implementation.h"
 #include "moq-settings.h"
 #include "moq-url.h"
 #include "logger.h"
@@ -15,23 +16,6 @@
 #include <vector>
 
 namespace {
-
-bool LooksGenericOffline(const std::string &reason)
-{
-	if (reason.empty() || reason == "offline")
-		return true;
-	// Case-insensitive contains for "offline" only as a whole-ish token.
-	for (size_t i = 0; i + 6 < reason.size() + 1; i++) {
-		char buf[8] = {};
-		for (int j = 0; j < 7 && i + j < reason.size(); j++) {
-			char c = reason[i + j];
-			buf[j] = (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
-		}
-		if (std::strncmp(buf, "offline", 7) == 0)
-			return true;
-	}
-	return false;
-}
 
 // Dial URL scheme only. https races WebTransport vs WebSocket, and the session
 // does not report which won, so do not invent a transport name here.
@@ -103,8 +87,8 @@ MoQOutput::~MoQOutput()
 	// stop on an output that is going away.
 	Stop();
 
-	// Let the sessions finish draining, so the relay sees the tracks end rather than a
-	// cancel. moq-ffi bounds each drain to about a second.
+	// Wait out the drains: OBS unloads the module, stopping the runtime, right
+	// after destroying its outputs on exit. moq-ffi bounds each drain to about a second.
 	std::vector<moq::Future<void>> drains;
 	{
 		std::lock_guard<std::recursive_mutex> signal_lock(signal_mutex);
@@ -203,6 +187,7 @@ bool MoQOutput::Start()
 	// switched off the client keeps the library defaults.
 	moq::ClientConfig config;
 	config.publish = next_origin;
+	config.implementation = MoQImplementation();
 	OBSDataAutoRelease service_settings = obs_service_get_settings(service);
 	std::string invalid = MoQSettings::Configure(service_settings, config);
 	std::shared_ptr<moq::Client> client;
@@ -240,7 +225,6 @@ bool MoQOutput::Start()
 		std::lock_guard<std::mutex> lock(mutex);
 		url = server;
 		epoch = *route.epoch;
-		dialing = client;
 	}
 	{
 		std::lock_guard<std::mutex> lock(media_mutex);
@@ -268,19 +252,7 @@ void MoQOutput::OnConnect(const std::shared_ptr<Attempt> &current, moq::expected
 		return;
 	}
 
-	auto elapsed = std::chrono::steady_clock::now() - current->started;
-	auto ms = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count());
-	const int connects = static_cast<int>((*result)->connects());
-
-	// OBS and older dock paths treat connect_time_ms == 0 as "never connected".
-	// Clamp sub-millisecond connects to 1 so that sentinel stays honest. Set before
-	// the session reads as live, so nothing sees a live session that never connected.
-	connect_time_ms = ms > 0 ? ms : 1;
-
 	current->session = *result;
-	current->connected = true;
-	current->live = true;
-	// Before the session reads as live, so the first frame after can reserve.
 	{
 		std::lock_guard<std::mutex> lock(media_mutex);
 		bandwidth = current->session->bandwidth();
@@ -288,65 +260,53 @@ void MoQOutput::OnConnect(const std::shared_ptr<Attempt> &current, moq::expected
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		session = current->session;
-		dialing.reset();
 		recv_bandwidth = session->recv_bandwidth();
-		connected = true;
-		live = true;
-		last_failure_code = MoQError::None;
-		last_failure_reason.clear();
 	}
-
-	LOG_INFO("MoQ session connected (%d ms, connect %d): %s", ms, connects, MoQRedactUrl(current->url).c_str());
-
-	WatchStatus(current);
+	OnState(current, current->session->state());
 }
 
-void MoQOutput::WatchStatus(const std::shared_ptr<Attempt> &current)
+void MoQOutput::WatchState(const std::shared_ptr<Attempt> &current)
 {
-	// Replacing `pending` from inside its own continuation is fine: that call has
-	// already completed, so dropping it cancels nothing.
-	current->pending = current->session->status().then(
-		worker.Executor(), Current<moq::expected<moq::ConnectionStatus>>(
-					   current, [this](const std::shared_ptr<Attempt> &current, auto result) {
-						   OnStatus(current, std::move(result));
-					   }));
+	current->pending = current->session->state_changed(current->revision)
+				   .then(worker.Executor(),
+					 Current<moq::expected<moq::ConnectionState>>(
+						 current, [this](const std::shared_ptr<Attempt> &current, auto result) {
+							 OnState(current, std::move(result));
+						 }));
 }
 
-void MoQOutput::OnStatus(const std::shared_ptr<Attempt> &current, moq::expected<moq::ConnectionStatus> result)
+void MoQOutput::OnState(const std::shared_ptr<Attempt> &current, moq::expected<moq::ConnectionState> result)
 {
-	// The status stream ends in an error once reconnecting gives up for good.
 	if (!result) {
 		Fail(current, result.error());
 		return;
 	}
-
-	switch (*result) {
-	case moq::ConnectionStatus::kConnected: {
-		const int connects = static_cast<int>(current->session->connects());
-		current->live = true;
-		{
-			std::lock_guard<std::mutex> lock(mutex);
-			live = true;
+	const auto &state = *result;
+	current->revision = state.revision;
+	current->live = state.phase == moq::ConnectionPhase::kConnected ||
+			state.phase == moq::ConnectionPhase::kMigrating;
+	if (state.connects > 0 && !current->connected) {
+		auto elapsed = std::chrono::steady_clock::now() - current->started;
+		auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+		connect_time_ms = ms > 0 ? static_cast<int>(ms) : 1;
+		current->connected = true;
+	}
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		connected = current->connected;
+		live = current->live;
+		if (state.failure) {
+			last_failure_code = FailureCode(*state.failure);
+			last_failure_reason = state.failure->to_string();
+		} else if (current->live) {
 			last_failure_code = MoQError::None;
 			last_failure_reason.clear();
 		}
-		LOG_INFO("MoQ session reconnected (connect %d): %s", connects, MoQRedactUrl(current->url).c_str());
-		break;
 	}
-	case moq::ConnectionStatus::kDisconnected: {
-		current->live = false;
-		std::lock_guard<std::mutex> lock(mutex);
-		live = false;
-		LOG_WARNING("MoQ session dropped, reconnecting: %s", MoQRedactUrl(current->url).c_str());
-		break;
-	}
-	case moq::ConnectionStatus::kMigrating:
-		// The old session keeps serving while the replacement dials.
-		LOG_INFO("MoQ session migrating: %s", MoQRedactUrl(current->url).c_str());
-		break;
-	}
-
-	WatchStatus(current);
+	LOG_INFO("MoQ connection state changed (connect %llu): %s", (unsigned long long)state.connects,
+		 MoQRedactUrl(current->url).c_str());
+	// A second wait at the terminal revision returns its close reason through Fail.
+	WatchState(current);
 }
 
 void MoQOutput::Fail(const std::shared_ptr<Attempt> &current, const moq::Error &error)
@@ -361,7 +321,6 @@ void MoQOutput::Fail(const std::shared_ptr<Attempt> &current, const moq::Error &
 		std::lock_guard<std::mutex> lock(mutex);
 		recv_bandwidth.reset();
 		session.reset();
-		dialing.reset();
 		connected = false;
 		live = false;
 		last_failure_code = FailureCode(error);
@@ -404,7 +363,6 @@ void MoQOutput::Reset()
 		std::lock_guard<std::mutex> lock(mutex);
 		recv_bandwidth.reset();
 		session.reset();
-		dialing.reset();
 		connected = false;
 		live = false;
 		url.clear();
@@ -445,18 +403,20 @@ void MoQOutput::Reset()
 	broadcast.reset();
 	origin.reset();
 
-	// Drain once tracks finish. Default lite-06 waits for transport ACKs, not
-	// confirmation that the peer received the tail. Keep the future past this
-	// attempt because dropping it aborts the drain.
+	// The session owns the drain after this request, even if the output dies now.
+	// Keep a waiter only so the destructor can hold off module unload, which
+	// stops the runtime and would cancel the drain.
 	if (retired) {
+		retired->shutdown();
 		draining.erase(std::remove_if(draining.begin(), draining.end(),
 					      [](const moq::Future<void> &drain) {
 						      return drain.wait_for(std::chrono::seconds(0)) ==
 							     std::future_status::ready;
 					      }),
 			       draining.end());
-		draining.push_back(retired->shutdown());
+		draining.push_back(retired->closed());
 	}
+
 	lock.unlock();
 
 	for (auto &[encoder, bitrate] : restore)
@@ -489,7 +449,6 @@ bool MoQOutput::TryGetConnectionStats(ConnectionStats *out)
 	}
 
 	if (!current_live) {
-		RecordReconnectFailure(current);
 		return false;
 	}
 
@@ -497,8 +456,8 @@ bool MoQOutput::TryGetConnectionStats(ConnectionStats *out)
 
 	ConnectionStats snapshot;
 	snapshot.reconnects = GetReconnectCount();
-	snapshot.rtt_valid = raw.rtt_us.has_value();
-	snapshot.rtt_ms = raw.rtt_us ? static_cast<double>(*raw.rtt_us) / 1000.0 : 0;
+	snapshot.rtt_valid = raw.rtt.has_value();
+	snapshot.rtt_ms = raw.rtt ? std::chrono::duration<double, std::milli>(*raw.rtt).count() : 0;
 	snapshot.estimated_send_rate_valid = raw.estimated_send_rate_bps.has_value();
 	snapshot.estimated_send_rate_bps =
 		raw.estimated_send_rate_bps ? static_cast<double>(*raw.estimated_send_rate_bps) : 0;
@@ -516,46 +475,6 @@ bool MoQOutput::TryGetConnectionStats(ConnectionStats *out)
 	snapshot.dial = DialSchemeLabel(dial_url);
 
 	return CommitConnectionStats(current, std::move(snapshot), out);
-}
-
-void MoQOutput::RecordReconnectFailure(const std::shared_ptr<moq::Session> &current)
-{
-	// Read outside the lock: it calls into moq-ffi.
-	const auto failure = current->failure();
-
-	std::lock_guard<std::mutex> lock(mutex);
-	// A Stop(), restart, or reconnect while failure() ran made this one stale.
-	if (session != current || live)
-		return;
-	if (failure) {
-		last_failure_code = FailureCode(*failure);
-		last_failure_reason = failure->to_string();
-	} else if (last_failure_reason.empty() || LooksGenericOffline(last_failure_reason)) {
-		// Nothing named yet. Keep a more specific prior failure over a generic blip.
-		last_failure_code = MoQError::Offline;
-		last_failure_reason = "offline";
-	}
-}
-
-void MoQOutput::RecordDialFailure()
-{
-	std::shared_ptr<moq::Client> current;
-	{
-		std::lock_guard<std::mutex> lock(mutex);
-		if (!dialing)
-			return;
-		current = dialing;
-	}
-
-	// Read outside the lock: it calls into moq-ffi.
-	const auto failure = current->failure();
-
-	std::lock_guard<std::mutex> lock(mutex);
-	// A Stop(), restart, or connect while failure() ran made this one stale.
-	if (dialing != current || !failure)
-		return;
-	last_failure_code = FailureCode(*failure);
-	last_failure_reason = failure->to_string();
 }
 
 bool MoQOutput::CommitConnectionStats(const std::shared_ptr<moq::Session> &current, ConnectionStats snapshot,
@@ -577,9 +496,8 @@ int MoQOutput::GetReconnectCount()
 		std::lock_guard<std::mutex> lock(mutex);
 		current = session;
 	}
-	// Read live rather than tracked from status(), which coalesces a drop that
-	// reconnects before it is asked again.
-	const uint64_t connects = current ? current->connects() : 0;
+	// The cumulative count survives a reconnect that finishes between UI reads.
+	const uint64_t connects = current ? current->state().connects : 0;
 	return connects > 1 ? static_cast<int>(connects - 1) : 0;
 }
 
@@ -591,7 +509,6 @@ bool MoQOutput::IsLiveSession()
 
 void MoQOutput::CopyLastFailure(int *code, std::string *reason)
 {
-	RecordDialFailure();
 
 	std::lock_guard<std::mutex> lock(mutex);
 	if (code)
@@ -724,14 +641,8 @@ void MoQOutput::AudioData(struct encoder_packet *packet)
 	// Audio has no keyframes, so it has no group boundary of its own: without this the whole
 	// stream is one group. Cut per frame, which is one QUIC stream per packet forwarded without
 	// waiting for the next, the right trade for live. Video groups at its own keyframes.
-	// Cut before observing the flush so a failed observation never leaves the group open.
 	if (auto result = track.producer->cut(); !result) {
 		LOG_ERROR("Failed to cut audio group: %s", result.error().to_string().c_str());
-		return;
-	}
-
-	if (auto result = track.producer->flush(*timestamp); !result) {
-		LOG_ERROR("Failed to observe audio encoder flush: %s", result.error().to_string().c_str());
 		return;
 	}
 
@@ -768,11 +679,6 @@ void MoQOutput::VideoData(struct encoder_packet *packet)
 
 	if (auto result = track.producer->write_frame(PacketFrame(packet, *timestamp)); !result) {
 		LOG_ERROR("Failed to write video frame: %s", result.error().to_string().c_str());
-		return;
-	}
-
-	if (auto result = track.producer->flush(*timestamp); !result) {
-		LOG_ERROR("Failed to observe video encoder flush: %s", result.error().to_string().c_str());
 		return;
 	}
 
@@ -937,15 +843,10 @@ void MoQOutput::AudioInit(obs_encoder_t *encoder)
 
 void register_moq_output()
 {
-	const uint32_t base_flags = OBS_OUTPUT_ENCODED | OBS_OUTPUT_SERVICE | OBS_OUTPUT_MULTI_TRACK_VIDEO |
-				    OBS_OUTPUT_MULTI_TRACK_AUDIO;
-
-	const char *audio_codecs = "aac;opus";
-	const char *video_codecs = "h264;hevc;av1";
-
 	struct obs_output_info info = {};
 	info.id = "moq_output";
-	info.flags = OBS_OUTPUT_AV | base_flags;
+	info.flags = OBS_OUTPUT_AV | OBS_OUTPUT_ENCODED | OBS_OUTPUT_SERVICE | OBS_OUTPUT_MULTI_TRACK_VIDEO |
+		     OBS_OUTPUT_MULTI_TRACK_AUDIO;
 	info.get_name = [](void *) -> const char * {
 		return "MoQ Output";
 	};
@@ -970,20 +871,9 @@ void register_moq_output()
 	info.get_connect_time_ms = [](void *priv_data) -> int {
 		return static_cast<MoQOutput *>(priv_data)->GetConnectTime();
 	};
-	info.encoded_video_codecs = video_codecs;
-	info.encoded_audio_codecs = audio_codecs;
+	info.encoded_video_codecs = "h264;hevc;av1";
+	info.encoded_audio_codecs = "aac;opus";
 	info.protocols = "MoQ";
 
-	obs_register_output(&info);
-
-	info.id = "moq_output_video";
-	info.flags = OBS_OUTPUT_VIDEO | base_flags;
-	info.encoded_audio_codecs = nullptr;
-	obs_register_output(&info);
-
-	info.id = "moq_output_audio";
-	info.flags = OBS_OUTPUT_AUDIO | base_flags;
-	info.encoded_video_codecs = nullptr;
-	info.encoded_audio_codecs = audio_codecs;
 	obs_register_output(&info);
 }

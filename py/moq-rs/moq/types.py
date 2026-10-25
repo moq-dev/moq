@@ -1,6 +1,6 @@
 """Re-export moq-ffi record types without the Moq prefix.
 
-Records with duration fields are owned in `_records` instead, so they read as `timedelta`.
+Records the wrapper gives Python defaults or timestamp conversions are owned in `_records` instead.
 """
 
 from moq_ffi import (
@@ -16,13 +16,13 @@ from moq_ffi import (
     MoqAudioEncoderInput as AudioEncoderInput,
 )
 from moq_ffi import (
-    MoqAudioPreset as AudioPreset,
-)
-from moq_ffi import (
     MoqAudioSampleFormat as AudioSampleFormat,
 )
 from moq_ffi import (
-    MoqConnectionStatus as ConnectionStatus,
+    MoqConnectionPhase as ConnectionPhase,
+)
+from moq_ffi import (
+    MoqConnectionState as ConnectionState,
 )
 from moq_ffi import (
     MoqErrorScope as ErrorScope,
@@ -67,18 +67,30 @@ from moq_ffi import (
     MoqVideoPixelFormat as VideoPixelFormat,
 )
 
-from ._records import Backoff, ConnectionStats, Datagram, Frame, Grant, Subscription, TrackInfo
+from ._records import (
+    Backoff,
+    ClientTls,
+    ConnectionStats,
+    Datagram,
+    Frame,
+    Grant,
+    QuicConfig,
+    Subscription,
+    TrackInfo,
+    WebSocketConfig,
+)
 
 __all__ = [
     "AnnounceRoute",
     "Anchor",
     "AudioCodec",
     "AudioEncoderInput",
-    "AudioPreset",
     "AudioSampleFormat",
     "Backoff",
+    "ClientTls",
     "ConnectionStats",
-    "ConnectionStatus",
+    "ConnectionPhase",
+    "ConnectionState",
     "Datagram",
     "ErrorScope",
     "Frame",
@@ -87,6 +99,7 @@ __all__ = [
     "Order",
     "ProtocolError",
     "ProtocolKind",
+    "QuicConfig",
     "Range",
     "Route",
     "Subscription",
@@ -98,4 +111,5 @@ __all__ = [
     "VideoEncoderOutput",
     "VideoDecodedFrame",
     "VideoPixelFormat",
+    "WebSocketConfig",
 ]

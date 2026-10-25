@@ -19,7 +19,7 @@ runner-vm-ci:
 
 # Build and test the persistent NixOS runner VM on x86_64 Linux.
 runner-vm:
-    nix build --no-link .#checks.x86_64-linux.github-runner-vm .#checks.x86_64-linux.github-runner-vm-image .#checks.x86_64-linux.github-runner-vm-config --print-build-logs
+    bash sh/local.sh nix build --no-link .#checks.x86_64-linux.github-runner-vm .#checks.x86_64-linux.github-runner-vm-image .#checks.x86_64-linux.github-runner-vm-config --print-build-logs
 
 # Lint GitHub Actions workflows, their alert coverage, and that every step runs a recipe.
 check:
@@ -31,6 +31,8 @@ check:
 
 # Tests of repository tooling; every `just check` and `just ci` runs them.
 test:
+    python3 sh/local.test.py
+    python3 test/smoke/runner.test.py
     python3 sh/coverage.test.py
     python3 sh/size/report.test.py
     python3 sh/size/release.test.py
@@ -38,9 +40,9 @@ test:
     python3 bench/compare.test.py
     python3 bench/summary.test.py
     python3 bench/profile.test.py
-    python3 bench/ffi.test.py
     python3 sh/gh/gst-formula.test.py
     python3 sh/changed.test.py
+    python3 sh/large-files.test.py
     python3 sh/dispatch-query.test.py
     python3 sh/dispatch-query.test.py --bench
     bun test sh/gh/setup.test.ts

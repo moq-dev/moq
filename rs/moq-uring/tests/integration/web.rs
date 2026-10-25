@@ -3,7 +3,7 @@
 //! streams and datagrams through the H3 framing; the other runs a whole
 //! moq-lite session over it, which is exactly the browser-to-relay path.
 //!
-//! Unsupported local kernels skip loudly; MOQ_STRICT makes CI refuse them.
+//! Unsupported local kernels skip loudly; CI_STRICT makes CI refuse them.
 
 #![cfg(all(target_os = "linux", feature = "quic"))]
 
@@ -19,7 +19,7 @@ use web_transport_trait::poll::{RecvStream as _, SendStream as _, Session as _};
 fn worker() -> Option<Worker> {
 	match Worker::new(Config::default()) {
 		Ok(worker) => Some(worker),
-		Err(Error::Unsupported(reason)) if std::env::var_os("MOQ_STRICT").is_none() => {
+		Err(Error::Unsupported(reason)) if std::env::var_os("CI_STRICT").is_none() => {
 			eprintln!("skipping io_uring web test: {reason}");
 			None
 		}
@@ -285,8 +285,8 @@ fn lite_session_over_webtransport() {
 			let (moq, session_driver) = moq_net::Client::new()
 				.with_subscriber(sub_origin.clone())
 				.connect(
-					moq_net::time::now(),
-					moq_tokio::transport::Session::new(session, moq_net::transport::Binding::Uri),
+					moq_net::time::Instant::now(),
+					moq_tokio::transport::Session::new(session, moq_net::transport::Address::Uri),
 				)
 				.await
 				.expect("connect");
@@ -336,10 +336,10 @@ fn lite_session_over_webtransport() {
 			let (session, driver) = moq_net::Server::new()
 				.with_publisher(&serve_origin)
 				.accept(
-					moq_net::time::now(),
+					moq_net::time::Instant::now(),
 					moq_uring::transport::Local::new(moq_uring::transport::Session::new(
 						session,
-						moq_net::transport::Binding::Uri,
+						moq_net::transport::Address::Uri,
 					)),
 				)
 				.await

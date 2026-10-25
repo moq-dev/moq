@@ -21,12 +21,13 @@
 //! each SDT actual snapshot is rebuilt as one section holding only the selected
 //! service's entry, with a fresh CRC. An SDT actual section whose own CRC fails is
 //! dropped, and a revision commits only once every section has arrived, so the last
-//! good snapshot stays in force until then. An SDT that does not list the
+//! good snapshot stays in force until then or until the source stops repeating it
+//! for its table's maximum interval on the program clock ([`Clock`]). An SDT that does not list the
 //! service carries no SDT actual, so a revision that drops it retires the earlier
 //! one. Network-wide tables (NIT, BAT, SDT other, EIT other, TDT/TOT) pass through
 //! verbatim, as does everything when no program is selected.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use moq_clock::Instant;
@@ -35,6 +36,8 @@ use bytes::Bytes;
 use moq_net::Timestamp;
 
 use super::catalog;
+use super::mux_rate::{MAX_INTERVAL, PCR_WRAP};
+use super::passthrough::PCR_HZ;
 use super::psi::{self, CRC};
 
 const SDT_PID: u16 = 0x0011;
@@ -160,6 +163,8 @@ fn sdt_service<'a>(sections: impl IntoIterator<Item = &'a Bytes>, service: u16) 
 /// unused section numbers, so 0..=last is not a contiguous range there.
 #[derive(Default, PartialEq)]
 struct Generation {
+	/// The program-clock deadline for this generation's next repetition.
+	expires: Duration,
 	version: Option<u8>,
 	sections: BTreeMap<u8, Bytes>,
 }
@@ -167,6 +172,7 @@ struct Generation {
 /// A generation still being assembled, section by section.
 #[derive(Default)]
 struct Pending {
+	expires: Duration,
 	/// Highest section number this generation can hold, from `last_section_number`
 	/// (also raised by any observed `section_number`, so a malformed header cannot
 	/// hide a section).
@@ -206,8 +212,12 @@ struct Entry {
 	/// The selected service an SDT actual snapshot is reduced to.
 	service: Option<u16>,
 	active: BTreeMap<Identity, Generation>,
-	/// In-flight generations, keyed by sub-table and version.
-	pending: HashMap<(Identity, u8), Pending>,
+	/// In-flight generations, keyed by sub-table and version. Tree nodes follow
+	/// live generations instead of retaining a hash table's peak bucket allocation.
+	pending: BTreeMap<(Identity, u8), Pending>,
+	/// One deadline per retained generation: None is active, Some(version) is pending.
+	/// Renewal replaces its old key rather than leaving stale timer entries behind.
+	expiry: BTreeSet<(Duration, Identity, Option<u8>)>,
 	/// A commit changed `active` since the last cut.
 	dirty: bool,
 	/// The newest snapshot group carries at least one sub-table.
@@ -223,10 +233,16 @@ impl Entry {
 	/// Fold one completed, current section into the store, committing its
 	/// generation when it completes. Returns nothing; a commit marks the entry
 	/// dirty and [`Capture::flush`] cuts the group.
-	fn section(&mut self, section: Bytes) {
+	fn section(&mut self, section: Bytes, now: Duration) {
+		self.expire(now);
 		let id = identity(&section);
+		let expires = now + self.interval.unwrap_or(Duration::from_secs(30));
 
 		let Identity::Sub { .. } = id else {
+			if let Some(current) = self.active.get(&id) {
+				self.expiry.remove(&(current.expires, id, None));
+			}
+			self.expiry.insert((expires, id, None));
 			// Latest-value slot: a short-form table has no version to buffer under, so
 			// each arrival replaces the last (a TDT ticks ~every 30s and every section
 			// is new bytes). A byte-identical repetition is not a change.
@@ -238,11 +254,14 @@ impl Entry {
 				self.active.insert(
 					id,
 					Generation {
+						expires,
 						version: None,
 						sections: BTreeMap::from([(0u8, section)]),
 					},
 				);
 				self.dirty = true;
+			} else if let Some(current) = self.active.get_mut(&id) {
+				current.expires = expires;
 			}
 			return;
 		};
@@ -254,14 +273,20 @@ impl Entry {
 		// A byte-identical repetition of the current state is the overwhelmingly
 		// common case (SI repeats every couple of seconds); recognize it before
 		// touching any pending state.
-		if let Some(current) = self.active.get(&id)
+		if let Some(current) = self.active.get_mut(&id)
 			&& current.version == Some(version)
 			&& current.sections.get(&number) == Some(&section)
 		{
+			self.expiry.remove(&(current.expires, id, None));
+			current.expires = expires;
+			self.expiry.insert((expires, id, None));
 			return;
 		}
 
 		let pending = self.pending.entry((id, version)).or_default();
+		self.expiry.remove(&(pending.expires, id, Some(version)));
+		pending.expires = expires;
+		self.expiry.insert((expires, id, Some(version)));
 		pending.last = pending.last.max(last).max(number);
 
 		if let Some(prior) = pending.sections.get(&number) {
@@ -314,7 +339,18 @@ impl Entry {
 	/// declaration's `last_section_number`, so a shrunken table cannot resurrect
 	/// sections past its own end. Repetition of an unchanged set is not a change.
 	fn commit(&mut self, id: Identity, version: u8, mut sections: BTreeMap<u8, Bytes>, complete: Complete) {
-		self.pending.retain(|(pid, _), _| *pid != id);
+		let expires = self.pending[&(id, version)].expires;
+		// Versions are five bits. Only this identity's versions can leave, so a
+		// commit never scans unrelated in-flight sub-tables.
+		for version in 0..32 {
+			if let Some(pending) = self.pending.remove(&(id, version)) {
+				self.expiry.remove(&(pending.expires, id, Some(version)));
+			}
+		}
+		if let Some(current) = self.active.get(&id) {
+			self.expiry.remove(&(current.expires, id, None));
+		}
+		self.expiry.insert((expires, id, None));
 		if let Complete::Wrapped { last } = complete
 			&& let Some(current) = self.active.get(&id)
 			&& current.version == Some(version)
@@ -329,12 +365,32 @@ impl Entry {
 		self.active.insert(
 			id,
 			Generation {
+				expires,
 				version: Some(version),
 				sections,
 			},
 		);
 		if changed {
 			self.dirty = true;
+		}
+	}
+
+	/// Forget generations the source stopped repeating on its program clock.
+	fn expire(&mut self, now: Duration) {
+		while let Some(&(expires, id, version)) = self.expiry.first() {
+			if expires >= now {
+				break;
+			}
+			self.expiry.pop_first();
+			if let Some(version) = version {
+				self.pending.remove(&(id, version));
+			} else {
+				self.active.remove(&id);
+				self.dirty = true;
+				// Retraction is due on the program clock even during fast replay;
+				// the host-clock debounce may only delay ordinary updates.
+				self.last_cut = None;
+			}
 		}
 	}
 
@@ -384,16 +440,92 @@ impl Entry {
 	}
 }
 
+/// The program clock SI ages on, admitted as whole PES are placed: SI before the first
+/// PCR, or past it with no interval to extrapolate from, is dropped, so a source cannot
+/// hold SI by withholding its clock.
+///
+/// A valid PCR interval (forward, at most [`MAX_INTERVAL`]) advances it by its own ticks and
+/// joins the measured multiplex rate. Any other, a stalled or rewound PCR, a corrupt jump, or
+/// one across a clock break, advances it by the input packets it spans at the measured rate.
+/// So does the interval still open past the last PCR, once it outruns any valid one: until
+/// then the next PCR may yet close it, and a burst above the average rate must not retire SI
+/// early. A valid interval that closes a longer open one keeps what the open one charged, so
+/// PCR silence ages SI whatever step resumes it.
+/// The rate pools every valid interval rather than reading the catalog's `mux_rate`, which
+/// a variable-rate source leaves unset.
+#[derive(Default)]
+struct Clock {
+	/// Ticks elapsed through the last PCR.
+	elapsed: u64,
+	/// The last PCR (`None` past a clock break) and the input packet count at it.
+	last: Option<(Option<u64>, u64)>,
+	/// Ticks and packets over every valid interval.
+	measured: (u64, u64),
+}
+
+impl Clock {
+	/// A PCR on the program's clock PID, carried by input packet `count`.
+	fn pcr(&mut self, pcr: u64, count: u64) {
+		if let Some((last, at)) = self.last {
+			let packets = count - at;
+			let extrapolated = self.extrapolate(packets).unwrap_or(0);
+			let step = last
+				.map(|last| (pcr + PCR_WRAP - last) % PCR_WRAP)
+				.filter(|step| (1..=MAX_INTERVAL).contains(step));
+			let ticks = match step {
+				// What [`Self::at`] already charged the open interval stays charged, or a
+				// small step after a long silence would freeze SI for as long as it lasted.
+				Some(step) => {
+					let open = extrapolated.saturating_sub(MAX_INTERVAL);
+					self.measured.0 += step;
+					self.measured.1 += packets;
+					step.max(open)
+				}
+				None => extrapolated,
+			};
+			self.elapsed = self.elapsed.saturating_add(ticks);
+		}
+		self.last = Some((Some(pcr), count));
+	}
+
+	/// The clock broke or changed PID: the interval across it is extrapolated.
+	fn discontinuity(&mut self) {
+		if let Some((pcr, _)) = &mut self.last {
+			*pcr = None;
+		}
+	}
+
+	/// Ticks `packets` span at the measured rate, or `None` before a valid interval.
+	fn extrapolate(&self, packets: u64) -> Option<u64> {
+		let (ticks, total) = self.measured;
+		(total > 0)
+			.then(|| u64::try_from(u128::from(packets) * u128::from(ticks) / u128::from(total)).unwrap_or(u64::MAX))
+	}
+
+	/// The clock at input packet `count`, or `None` when it cannot place SI there.
+	fn at(&self, count: u64) -> Option<Duration> {
+		let (_, at) = self.last?;
+		let open = self.extrapolate(count - at)?.saturating_sub(MAX_INTERVAL);
+		let ticks = self.elapsed.saturating_add(open);
+		Some(Duration::from_secs(ticks / PCR_HZ) + Duration::from_nanos((ticks % PCR_HZ) * 1_000 / 27))
+	}
+}
+
 /// Import-side SI capture: reassembled sections in, snapshot tracks and catalog
 /// entries out.
 ///
 /// Owned by the TS importer, which feeds it every completed section on a captured
-/// SI PID and calls [`flush`](Self::flush) once per decode batch. Dropping it
-/// removes the advertised entries from the catalog, mirroring the verbatim tracks.
+/// SI PID and every PCR, and calls [`flush`](Self::flush) once per decode batch.
+/// Dropping it removes the advertised entries from the catalog, mirroring the verbatim
+/// tracks.
 pub(super) struct Capture<E: catalog::Catalog> {
 	broadcast: moq_net::broadcast::Producer,
 	catalog: crate::catalog::Producer<E>,
 	entries: BTreeMap<(u16, u8), Entry>,
+	clock: Clock,
+	/// The latest [`Clock`] reading, independent of host time and media PTS. Monotonic:
+	/// an open interval's extrapolation may run ahead of the PCR that closes it.
+	now: Duration,
 	/// The selected program_number, which is the service_id of the only service
 	/// carried; `None` captures every service.
 	program: Option<u16>,
@@ -405,8 +537,29 @@ impl<E: catalog::Catalog> Capture<E> {
 			broadcast,
 			catalog,
 			entries: BTreeMap::new(),
+			clock: Clock::default(),
+			now: Duration::ZERO,
 			program: None,
 		}
+	}
+
+	/// A PCR on the program's clock PID, carried by input packet `count`.
+	pub fn pcr(&mut self, pcr: u64, count: u64) {
+		self.clock.pcr(pcr, count);
+		self.advance(count);
+	}
+
+	/// The program clock broke or changed PID.
+	pub fn discontinuity(&mut self) {
+		self.clock.discontinuity();
+	}
+
+	fn advance(&mut self, count: u64) -> bool {
+		let Some(now) = self.clock.at(count) else {
+			return false;
+		};
+		self.now = self.now.max(now);
+		true
 	}
 
 	/// Carry only the service numbered `program`: its EIT actual, and an SDT actual
@@ -416,19 +569,21 @@ impl<E: catalog::Catalog> Capture<E> {
 		self.program = Some(program);
 	}
 
-	/// Fold one completed section from `pid` into its `(pid, table_id)` entry,
-	/// creating the entry on first sight of the pair.
-	pub fn section(&mut self, pid: u16, section: Vec<u8>) -> anyhow::Result<()> {
+	/// Fold one completed section from `pid`, completed by input packet `count`, into its
+	/// `(pid, table_id)` entry, creating the entry on first sight of the pair.
+	///
+	/// Returns `false` when the program clock cannot place it ([`Clock`]): it is dropped,
+	/// for the caller to count unplaced.
+	pub fn section(&mut self, pid: u16, section: Bytes, count: u64) -> bool {
 		let Some(&table_id) = section.first() else {
-			return Ok(());
+			return true;
 		};
 		// A next-version section (current_next_indicator clear) describes a future
 		// state, not the current one; carrying it would need a second generation slot
 		// per sub-table for a table nothing re-emits, so it is dropped until the
 		// version becomes current.
-		let section = Bytes::from(section);
 		if long_form(&section) && section[5] & 0x01 == 0 {
-			return Ok(());
+			return true;
 		}
 		// EIT actual (now/next and schedule) is keyed by service_id: another
 		// service's sub-table describes a program this import does not carry.
@@ -437,28 +592,32 @@ impl<E: catalog::Catalog> Capture<E> {
 			&& matches!(table_id, 0x4E | 0x50..=0x5F)
 			&& !matches!(identity(&section), Identity::Sub { ext, .. } if ext == program)
 		{
-			return Ok(());
+			return true;
 		}
 
 		let service = self.program.filter(|_| (pid, table_id) == (SDT_PID, SDT_ACTUAL));
 		// The rebuilt SDT gets a fresh CRC, which would certify corruption the
 		// source's CRC flags; dropping the section keeps the last good generation.
 		if service.is_some() && !psi::crc_ok(&section) {
-			return Ok(());
+			return true;
+		}
+		if !self.advance(count) {
+			return false;
 		}
 		let entry = self.entries.entry((pid, table_id)).or_insert_with(|| Entry {
 			track: None,
 			interval: catalog::si_interval(table_id),
 			service,
 			active: BTreeMap::new(),
-			pending: HashMap::new(),
+			pending: BTreeMap::new(),
+			expiry: BTreeSet::new(),
 			dirty: false,
 			populated: false,
 			advertised: false,
 			last_cut: None,
 		});
-		entry.section(section);
-		Ok(())
+		entry.section(section, self.now);
+		true
 	}
 
 	/// Cut snapshot groups for the dirty entries, then advertise each entry whose
@@ -471,6 +630,7 @@ impl<E: catalog::Catalog> Capture<E> {
 	pub fn flush(&mut self, pts: Timestamp, force: bool) -> anyhow::Result<()> {
 		let now = moq_clock::now();
 		for (key, entry) in self.entries.iter_mut() {
+			entry.expire(self.now);
 			if !entry.dirty {
 				continue;
 			}
@@ -606,5 +766,317 @@ impl Snapshot {
 
 	pub fn is_empty(&self) -> bool {
 		self.subs.is_empty()
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::container::ts::fixture::{Flags, Mux};
+
+	#[moq_clock::test]
+	async fn program_clock_places_and_retires_si_without_media_pts() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<catalog::Ext>::default()),
+		)
+		.unwrap();
+		let mut import = super::super::Import::new(broadcast, catalog.reserve());
+		let mut mux = Mux::default();
+		mux.pat(&[(1, 0x20)]).pmt(0x20, 1, 0x1ff, &[], 0);
+		let sdt = psi::section(0x42, 1, 0, 0, 0, &[0, 1, 0xff]);
+		// Before the first PCR, and past it with no interval to extrapolate from, the program
+		// clock cannot age SI, so it is dropped as an unplaced whole PES is.
+		mux.section(0x11, &sdt);
+		mux.packet(0x1ff, Flags::pcr(0));
+		mux.section(0x11, &sdt);
+		import.decode(&std::mem::take(&mut mux.out)).unwrap();
+		assert!(catalog.snapshot().ext.mpegts.si.is_empty());
+		let row = &import.stats().streams[&0x11];
+		assert_eq!((row.track.as_str(), row.unplaced), (".si", 2));
+		mux.packet(0x1ff, Flags::pcr(40 * 27_000));
+		mux.section(0x11, &sdt);
+		import.decode(&std::mem::take(&mut mux.out)).unwrap();
+		assert!(catalog.snapshot().ext.mpegts.si.contains_key(&0x11));
+		assert_eq!(import.stats().streams[&0x11].unplaced, 2);
+		// Accepted PCR intervals move the program clock; no video PTS or host time passes.
+		for n in 2..=52 {
+			mux.packet(0x1ff, Flags::pcr(n * 40 * 27_000));
+			import.decode(&std::mem::take(&mut mux.out)).unwrap();
+		}
+		assert!(catalog.snapshot().ext.mpegts.si.is_empty());
+	}
+	fn capture() -> (Capture<catalog::Ext>, crate::catalog::Producer<catalog::Ext>) {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<catalog::Ext>::default()),
+		)
+		.unwrap();
+		(Capture::new(broadcast, catalog.clone()), catalog)
+	}
+
+	fn section(table: u8, id: u16, version: u8, last: u8) -> Bytes {
+		psi::section(table, id, version, 0, last, &[0, 0, 0, 0, 0, 0]).into()
+	}
+
+	const MS: u64 = 27_000;
+
+	/// Drives a capture's program clock from test time zero: a PCR every 40 ms, ten input
+	/// packets apart, each section completed by the packet carrying the latest PCR.
+	struct Input {
+		/// Ticks past the first PCR, which every interval so far accepted.
+		pcr: u64,
+		count: u64,
+	}
+
+	impl Input {
+		/// One valid interval measures the rate, so SI is placed from test time zero.
+		fn new(capture: &mut Capture<catalog::Ext>) -> Self {
+			capture.pcr(0, 0);
+			let mut input = Self { pcr: 0, count: 0 };
+			input.step(capture, 40 * MS);
+			input
+		}
+
+		fn step(&mut self, capture: &mut Capture<catalog::Ext>, ticks: u64) {
+			self.pcr += ticks;
+			self.count += 10;
+			capture.pcr(self.pcr % PCR_WRAP, self.count);
+		}
+
+		/// Advance the program clock to `t` past test time zero, rounding up to a whole tick.
+		fn to(&mut self, capture: &mut Capture<catalog::Ext>, t: Duration) {
+			let target = 40 * MS + u64::try_from((t.as_nanos() * 27).div_ceil(1_000)).unwrap();
+			while self.pcr < target {
+				self.step(capture, (target - self.pcr).min(40 * MS));
+			}
+		}
+
+		fn section(&self, capture: &mut Capture<catalog::Ext>, pid: u16, section: Bytes) {
+			assert!(capture.section(pid, section, self.count), "placed");
+		}
+	}
+
+	#[moq_clock::test]
+	async fn incomplete_generations_expire_on_their_table_intervals() {
+		let (mut capture, _) = capture();
+		let mut input = Input::new(&mut capture);
+		for id in 0..4096 {
+			for table in [0x4e, 0x80] {
+				input.section(&mut capture, 0x12, section(table, id, 0, 1));
+			}
+		}
+		let payload = capture.entries[&(0x12, 0x4e)].pending.values().next().unwrap().sections[&0].clone();
+		assert!(!payload.is_unique());
+		input.to(&mut capture, Duration::from_secs(2));
+		capture.flush(Timestamp::ZERO, false).unwrap();
+		assert_eq!(
+			capture.entries[&(0x12, 0x4e)].pending.len(),
+			4096,
+			"the deadline is inclusive"
+		);
+		input.to(&mut capture, Duration::from_secs(2) + Duration::from_nanos(1));
+		capture.flush(Timestamp::ZERO, false).unwrap();
+		let eit = &capture.entries[&(0x12, 0x4e)];
+		assert!(eit.pending.is_empty());
+		assert!(eit.expiry.is_empty());
+		assert!(
+			payload.is_unique(),
+			"expiry releases the generation's payload ownership"
+		);
+		assert_eq!(capture.entries[&(0x12, 0x80)].pending.len(), 4096);
+		input.to(&mut capture, Duration::from_secs(30) + Duration::from_nanos(1));
+		capture.flush(Timestamp::ZERO, false).unwrap();
+		assert!(
+			capture
+				.entries
+				.values()
+				.all(|e| e.pending.is_empty() && e.expiry.is_empty())
+		);
+	}
+
+	#[moq_clock::test]
+	async fn pending_renewal_replaces_its_deadline_without_renewing_other_versions() {
+		let (mut capture, _) = capture();
+		let mut input = Input::new(&mut capture);
+		capture.select(1);
+		for version in [0, 1] {
+			input.section(&mut capture, 0x11, section(0x42, 1, version, 2));
+		}
+		input.to(&mut capture, Duration::from_millis(1500));
+		for _ in 0..1000 {
+			input.section(&mut capture, 0x11, section(0x42, 1, 0, 2));
+		}
+		assert_eq!(capture.entries[&(0x11, 0x42)].expiry.len(), 2);
+		input.to(&mut capture, Duration::from_millis(2100));
+		capture.flush(Timestamp::ZERO, false).unwrap();
+		let entry = &capture.entries[&(0x11, 0x42)];
+		assert_eq!(entry.pending.len(), 1);
+		assert!(entry.pending.contains_key(&(Identity::Sub { ext: 1, scope: 0 }, 0)));
+		assert_eq!(entry.expiry.len(), 1);
+		input.to(&mut capture, Duration::from_millis(3501));
+		capture.flush(Timestamp::ZERO, false).unwrap();
+		assert!(capture.entries[&(0x11, 0x42)].pending.is_empty());
+	}
+
+	#[moq_clock::test]
+	async fn retirement_publishes_reduced_and_empty_snapshots_without_host_debounce() {
+		let (mut capture, catalog) = capture();
+		let mut input = Input::new(&mut capture);
+		for id in [1, 2] {
+			input.section(&mut capture, 0x10, section(0x40, id, 0, 0));
+		}
+		capture.flush(Timestamp::ZERO, false).unwrap();
+		let name = catalog.snapshot().ext.mpegts.si[&0x10][&0x40].track.clone();
+		let mut reader = capture
+			.broadcast
+			.consume()
+			.track(&name)
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap();
+		let mut original = reader.recv_group().await.unwrap().unwrap();
+		input.to(&mut capture, Duration::from_secs(9));
+		for _ in 0..1000 {
+			input.section(&mut capture, 0x10, section(0x40, 1, 0, 0));
+		}
+		assert_eq!(capture.entries[&(0x10, 0x40)].expiry.len(), 2);
+		input.to(&mut capture, Duration::from_millis(10_001));
+		capture.flush(Timestamp::ZERO, false).unwrap();
+		let mut reduced = reader.recv_group().await.unwrap().unwrap();
+		let frame = reduced.read_frame().await.unwrap().unwrap();
+		assert_eq!(identity(&frame.payload), Identity::Sub { ext: 1, scope: 0 });
+		assert!(reduced.read_frame().await.unwrap().is_none());
+		assert_eq!(catalog.snapshot().ext.mpegts.si[&0x10][&0x40].track, name);
+		input.to(&mut capture, Duration::from_millis(19_001));
+		capture.flush(Timestamp::ZERO, false).unwrap();
+		let mut empty = reader.recv_group().await.unwrap().unwrap();
+		assert!(empty.read_frame().await.unwrap().is_none());
+		assert!(catalog.snapshot().ext.mpegts.si.is_empty());
+		assert!(capture.entries[&(0x10, 0x40)].active.is_empty());
+		assert!(capture.entries[&(0x10, 0x40)].expiry.is_empty());
+		// Retraction cannot invalidate a reader already holding a prior snapshot.
+		assert!(original.read_frame().await.unwrap().is_some());
+		input.section(&mut capture, 0x10, section(0x40, 1, 0, 0));
+		capture.flush(Timestamp::ZERO, true).unwrap();
+		let mut resumed = reader.recv_group().await.unwrap().unwrap();
+		assert!(resumed.read_frame().await.unwrap().is_some());
+		assert_eq!(catalog.snapshot().ext.mpegts.si[&0x10][&0x40].track, name);
+	}
+
+	#[moq_clock::test]
+	async fn host_time_and_new_si_at_one_input_position_do_not_age_si() {
+		let (mut capture, _) = capture();
+		let input = Input::new(&mut capture);
+		input.section(&mut capture, 0x12, section(0x4e, 0, 0, 0));
+		capture.flush(Timestamp::ZERO, false).unwrap();
+		moq_clock::sleep(Duration::from_secs(60)).await;
+		for id in 1..1024 {
+			input.section(&mut capture, 0x12, section(0x4e, id, 0, 1));
+		}
+		capture.flush(Timestamp::ZERO, false).unwrap();
+		let entry = &capture.entries[&(0x12, 0x4e)];
+		assert_eq!(entry.active.len(), 1);
+		assert_eq!(entry.pending.len(), 1023);
+		assert_eq!(entry.expiry.len(), 1024);
+	}
+
+	#[test]
+	fn the_clock_counts_valid_intervals_and_extrapolates_the_rest() {
+		let mut clock = Clock::default();
+		let at = |clock: &Clock, count| clock.at(count).map(|t| t.as_millis());
+		clock.pcr(PCR_WRAP - 40 * MS, 0);
+		assert_eq!(at(&clock, 0), None, "no interval measures the rate");
+		// Across the wrap: 40 ms over 10 packets.
+		clock.pcr(0, 10);
+		assert_eq!(at(&clock, 10), Some(40));
+		// A stall, a rewind, a corrupt jump and a flagged break each charge the input they
+		// span at the measured rate, not their PCR values.
+		clock.pcr(0, 20);
+		clock.pcr(PCR_WRAP - 1_000 * MS, 30);
+		clock.pcr(100_000 * MS, 40);
+		clock.discontinuity();
+		clock.pcr(40 * MS, 50);
+		assert_eq!(at(&clock, 50), Some(200));
+		// The interval still open is charged only once it outruns any valid interval.
+		assert_eq!(at(&clock, 50 + 250), Some(200));
+		assert_eq!(at(&clock, 50 + 260), Some(240));
+		clock.pcr(80 * MS, 60);
+		assert_eq!(at(&clock, 60), Some(240));
+		// Ten seconds of PCR silence, then a valid step: the silence stays charged and the
+		// clock runs on from there rather than freezing until the PCR catches up.
+		assert_eq!(at(&clock, 60 + 2_500), Some(9_240));
+		clock.pcr(120 * MS, 2_560);
+		assert_eq!(at(&clock, 2_560), Some(9_240));
+		clock.pcr(160 * MS, 2_570);
+		assert_eq!(at(&clock, 2_570), Some(9_280));
+	}
+
+	#[test]
+	fn the_clock_follows_a_rate_increase() {
+		let mut clock = Clock::default();
+		let at = |clock: &Clock, count| clock.at(count).map(|t| t.as_millis());
+		for n in 0..=10 {
+			clock.pcr(n * 40 * MS, n * 10);
+		}
+		let mut count = 100;
+		// 26 times the packets per interval: each valid step still counts as its own 40 ms,
+		// rather than the second its packets span at the old rate.
+		for n in 11..=100 {
+			count += 260;
+			clock.pcr(n * 40 * MS, count);
+		}
+		assert_eq!(at(&clock, count), Some(4_000));
+	}
+
+	#[moq_clock::test]
+	async fn fresh_si_ages_out_while_the_pcr_stalls() {
+		for silent in [false, true] {
+			let (mut capture, _) = capture();
+			let mut input = Input::new(&mut capture);
+			let stalled = input.pcr;
+			let mut peak = 0;
+			for id in 0..2000 {
+				input.count += 10;
+				if !silent {
+					capture.pcr(stalled, input.count);
+				}
+				input.section(&mut capture, 0x12, section(0x4e, id, 0, 1));
+				capture.flush(Timestamp::ZERO, false).unwrap();
+				let entry = &capture.entries[&(0x12, 0x4e)];
+				assert_eq!(entry.expiry.len(), entry.pending.len());
+				peak = peak.max(entry.pending.len());
+			}
+			// Each identity arrives 40 ms of input after the last and lives the table's 2 s. A
+			// silent clock charges nothing for the open interval's first second, so the 25
+			// identities in it outlive their 2 s once.
+			assert_eq!(peak, if silent { 75 } else { 51 }, "silent: {silent}");
+			assert_eq!(capture.entries[&(0x12, 0x4e)].pending.len(), 51, "silent: {silent}");
+		}
+	}
+
+	#[moq_clock::test]
+	async fn short_form_repetitions_replace_their_deadline_and_latest_value() {
+		let (mut capture, _) = capture();
+		let mut input = Input::new(&mut capture);
+		let mut time = vec![0x70, 0x70, 5, 0, 0, 0, 0, 0];
+		input.section(&mut capture, 0x14, Bytes::from(time.clone()));
+		input.to(&mut capture, Duration::from_secs(29));
+		input.section(&mut capture, 0x14, Bytes::from(time.clone()));
+		input.to(&mut capture, Duration::from_secs(31));
+		time[7] = 1;
+		input.section(&mut capture, 0x14, Bytes::from(time.clone()));
+		input.to(&mut capture, Duration::from_secs(60));
+		capture.flush(Timestamp::ZERO, false).unwrap();
+		let entry = &capture.entries[&(0x14, 0x70)];
+		assert_eq!(entry.expiry.len(), 1);
+		assert_eq!(entry.active[&Identity::Table].sections[&0], Bytes::from(time));
+		input.to(&mut capture, Duration::from_millis(61_001));
+		capture.flush(Timestamp::ZERO, false).unwrap();
+		assert!(capture.entries[&(0x14, 0x70)].active.is_empty());
+		assert!(capture.entries[&(0x14, 0x70)].expiry.is_empty());
 	}
 }

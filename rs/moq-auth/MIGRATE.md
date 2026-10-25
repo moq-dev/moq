@@ -4,6 +4,17 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Tiers are metric-safe names (#6778)
+
+A tier is `/`-joined segments of ASCII letters, digits, `.`, `_`, and `-`, checked by `tier::validate`; the empty tier is the default.
+`Grant::validate` refuses any other with `Error::InvalidTier`, a `Refusal` naming one does not deserialize, and `serve::Server::new` refuses a `Policy::tier` (`moq auth serve --tier`) outside the rule.
+Rename tiers that carry spaces, quotes, or other punctuation, for example `gold tier` to `gold-tier`.
+
+### `serve::Refusal` is `serve::Denial` (#6510)
+
+The reference server's policy failure is `serve::Denial`, so `Refusal` names only the shared 403 body, `moq_auth::Refusal`.
+Rename `serve::Refusal` to `serve::Denial`; its variants are unchanged, and `Policy::decide` and `Server::answer` return it.
+
 ### `Key` and `KeySet` parse through `FromStr` (#6471)
 
 The inherent `Key::from_str` and `KeySet::from_str` are replaced by `impl FromStr`, with the same `Error`.

@@ -35,14 +35,12 @@ class ReportTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 report.checked(entries)
 
-    def test_js_multiple_schemas_and_interests(self):
+    def test_js_multiple_schemas(self):
         source = self.root / 'requests.csv'
         source.write_text('bun install v1.3\npaths,active_us,settled_us\n4,1.25,2.5\noperation,ns_per_op\nclose,0\n')
         entries = report.javascript_file(source)
         self.assertEqual([entry['value'] for entry in entries], [1.25, 2.5, 0])
         self.assertEqual(entries[0]['name'], 'js/requests/paths=4/active_us')
-        source.write_text('broadcasts=32 tracks=8 acquire+release=1.250 us\n')
-        self.assertEqual(report.javascript_file(source)[0]['value'], 1.25)
         for text in ('Testing case\nSuccess\n', 'paths,time_us\n4\n', 'paths,time_us\n4,nan\n'):
             source.write_text(text)
             with self.assertRaises(ValueError):
@@ -66,7 +64,7 @@ class ReportTest(unittest.TestCase):
         run.mkdir(parents=True)
         (self.root / 'criterion-runs.txt').write_text(f'{run}\n')
         (run / 'metadata.json').write_text(json.dumps({'mode': '--criterion', 'revision': 'abc',
-            'environment': {'MOQ_BENCH_LABEL': 'net-cpu', 'SESSION_CPU': '1'}}))
+            'environment': {'BENCH_LABEL': 'net-cpu', 'SESSION_CPU': '1'}}))
         with self.assertRaises(ValueError):
             report.rust(self.root)
         case = run / 'criterion' / 'delivery' / 'new'
@@ -86,7 +84,7 @@ class ReportTest(unittest.TestCase):
             run = self.root / 'runs' / label
             run.mkdir(parents=True)
             (run / 'metadata.json').write_text(json.dumps({'mode': '--criterion', 'revision': 'c2', 'base': base,
-                                                           'environment': {'MOQ_BENCH_LABEL': label}}))
+                                                           'environment': {'BENCH_LABEL': label}}))
             if comparison is not None:
                 (run / 'paired.json').write_text(json.dumps(comparison))
             runs.append(str(run))

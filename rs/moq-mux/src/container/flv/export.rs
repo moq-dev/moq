@@ -34,6 +34,8 @@ use super::{
 	VIDEO_EX_HEADER, VIDEO_PACKET_CODED_FRAMES, VIDEO_PACKET_MULTITRACK, VIDEO_PACKET_SEQUENCE_START,
 };
 use crate::catalog::Stream;
+use crate::container::consumer::Event;
+use crate::container::declared::DeclaredClock;
 use crate::container::{ExportSource, Frame};
 
 /// Before the header, unbind every track the catalog no longer lists (removed, or disabled) or
@@ -154,6 +156,9 @@ pub struct Export<S: Stream> {
 
 	/// True once the file header and sequence headers have been emitted.
 	header_emitted: bool,
+	/// Milliseconds added to every tag's timestamps, so the decode times a declared reorder
+	/// depth puts before a group's earliest presentation still fit FLV's unsigned clock.
+	shift: u32,
 }
 
 /// A frame waiting to go out as a tag.
@@ -161,6 +166,8 @@ struct Tag {
 	frame: Frame,
 	/// The tag timestamp, the authored DTS for a codec with composition time.
 	timestamp: u32,
+	/// The presentation time on the tag clock.
+	presentation: u32,
 	/// The codec config record the frame was read under, which a sequence-header tag must
 	/// have announced before it.
 	record: Option<Bytes>,
@@ -184,6 +191,11 @@ struct FlvTrack {
 	/// tag, used when the catalog (and thus [`ExportSource::description`]) carries
 	/// none. Only AV1 needs this today (its av1C is optional in the catalog).
 	fallback_description: Option<Bytes>,
+	/// The video rendition's catalog entry as last listed.
+	config: Option<hang::catalog::VideoConfig>,
+	/// The current group's clock, when its rendition declared `reorder` at the group's start,
+	/// holding each frame with the config record it was read under.
+	declared: Option<DeclaredClock<(crate::jitter::Arrival<Frame>, Option<Bytes>)>>,
 	/// How far to run the authored decode clock behind the PTS, in FLV milliseconds.
 	dts_reserve: u32,
 	/// Last authored video DTS, in FLV milliseconds.
@@ -200,13 +212,114 @@ impl FlvTrack {
 		self.empty = moq_clock::now();
 	}
 
-	fn tag_timestamp(&self, frame: &Frame) -> anyhow::Result<u32> {
-		let pts = frame_timestamp_ms(frame)?;
+	/// The tag timestamp of a frame presented at `pts` on the tag clock, on the inferred clock.
+	fn tag_timestamp(&self, pts: u32) -> anyhow::Result<u32> {
 		if self.flavor.has_composition_time() {
 			author_dts(pts, self.dts_reserve, self.last_dts)
 		} else {
 			Ok(pts)
 		}
+	}
+
+	/// Start a group: queue the last one's frames, settled by `arrived`, the keyframe's arrival,
+	/// then clock this one at the depth its rendition declares now, or on the inferred clock.
+	fn start_group(
+		&mut self,
+		key: (u8, usize),
+		arrived: moq_clock::Instant,
+		shift: u32,
+		jitter: &mut crate::jitter::Buffer<(u8, usize), Tag>,
+	) -> anyhow::Result<()> {
+		self.release(key, Some(arrived), shift, true, jitter)?;
+		let depth = match &self.config {
+			Some(config) if self.flavor.has_composition_time() => crate::container::declared::depth(config)?,
+			_ => None,
+		};
+		self.declared = depth.map(DeclaredClock::new);
+		Ok(())
+	}
+
+	/// Queue each frame the declared clock releases, every one when `flush`. A frame held for a
+	/// later one is judged as arriving with it, at `settled`.
+	fn release(
+		&mut self,
+		key: (u8, usize),
+		settled: Option<moq_clock::Instant>,
+		shift: u32,
+		flush: bool,
+		jitter: &mut crate::jitter::Buffer<(u8, usize), Tag>,
+	) -> anyhow::Result<()> {
+		let Some(mut clock) = self.declared.take() else {
+			return Ok(());
+		};
+		let released = (|| {
+			while let Some(((mut arrival, record), dts)) = clock.pop(flush)? {
+				if let Some(settled) = settled {
+					arrival.arrived = arrival.arrived.max(settled);
+				}
+				let timestamp = u32::try_from(dts + i128::from(shift))
+					.context("FLV decode time before the stream's origin or past 32 bits")?;
+				self.queue(key, arrival, record, timestamp, shift, jitter)?;
+			}
+			anyhow::Ok(())
+		})();
+		self.declared = Some(clock);
+		released
+	}
+
+	/// Queue `arrival` as a tag decoding at `timestamp`, under the config `record` it was read with.
+	fn queue(
+		&mut self,
+		key: (u8, usize),
+		arrival: crate::jitter::Arrival<Frame>,
+		record: Option<Bytes>,
+		timestamp: u32,
+		shift: u32,
+		jitter: &mut crate::jitter::Buffer<(u8, usize), Tag>,
+	) -> anyhow::Result<()> {
+		if self.flavor.has_composition_time() {
+			self.last_dts = Some(timestamp);
+		}
+		let presentation = frame_timestamp_ms(&arrival.item, shift)?;
+		let crate::jitter::Arrival {
+			arrived,
+			read,
+			restart,
+			skip,
+			cut,
+			sync,
+			leading,
+			item,
+			..
+		} = arrival;
+		let pushed = jitter.push(
+			key,
+			crate::jitter::Arrival {
+				arrived,
+				read,
+				decode: moq_net::Timestamp::from_millis(u64::from(timestamp))?.into(),
+				restart,
+				skip,
+				cut,
+				sync,
+				leading,
+				item: Tag {
+					frame: item,
+					timestamp,
+					presentation,
+					record,
+				},
+			},
+		)?;
+		if pushed == crate::jitter::Push::Late {
+			tracing::warn!(
+				kind = key.0,
+				index = key.1,
+				dropped = jitter.dropped(),
+				"frame missed its deadline; dropped"
+			);
+		}
+		Ok(())
 	}
 
 	/// The out-of-band config record for this track's sequence-header tag, or
@@ -241,6 +354,7 @@ impl<S: Stream> Export<S> {
 			video: Vec::new(),
 			audio: Vec::new(),
 			header_emitted: false,
+			shift: 0,
 		}
 	}
 
@@ -378,8 +492,14 @@ impl<S: Stream> Export<S> {
 						if track.finished {
 							break;
 						}
-						let frame = match track.source.poll_read(waiter)? {
-							Poll::Ready(Some(frame)) => frame,
+						let frame = match track.source.poll_event(waiter)? {
+							Poll::Ready(Some(Event::Frame { frame, .. })) => frame,
+							// A group that ended or was cut short holds frames no later one can precede.
+							Poll::Ready(Some(Event::GroupEnd | Event::Cut)) => {
+								track.release((kind, index), None, self.shift, true, &mut self.jitter)?;
+								continue;
+							}
+							Poll::Ready(Some(Event::FrameEnd { .. })) => continue,
 							Poll::Ready(None) => {
 								track.finished = true;
 								break;
@@ -396,7 +516,7 @@ impl<S: Stream> Export<S> {
 						crate::jitter::Arrival {
 							arrived: track.empty,
 							read: moq_clock::now(),
-							decode: frame.timestamp,
+							decode: frame.timestamp.into(),
 							restart: track.source.markers(),
 							skip: track.source.skips(),
 							cut: track.source.cuts(),
@@ -409,48 +529,33 @@ impl<S: Stream> Export<S> {
 						track.pending = Some(arrival);
 						break;
 					}
-					let timestamp = track.tag_timestamp(&arrival.item)?;
-					if track.flavor.has_composition_time() {
-						track.last_dts = Some(timestamp);
-					}
+					let key = (kind, index);
 					let record = track.config_record()?;
-					let crate::jitter::Arrival {
-						arrived,
-						read,
-						restart,
-						skip,
-						cut,
-						sync,
-						leading,
-						item,
-						..
-					} = arrival;
-					if self.jitter.push(
-						(kind, index),
-						crate::jitter::Arrival {
-							arrived,
-							read,
-							decode: moq_net::Timestamp::from_millis(u64::from(timestamp))?,
-							restart,
-							skip,
-							cut,
-							sync,
-							leading,
-							item: Tag {
-								frame: item,
-								timestamp,
-								record,
-							},
-						},
-					)? == crate::jitter::Push::Late
-					{
-						tracing::warn!(
-							kind,
-							index,
-							dropped = self.jitter.dropped(),
-							"frame missed its deadline; dropped"
-						);
+					if kind == 0 && arrival.item.keyframe {
+						track.start_group(key, arrival.arrived, self.shift, &mut self.jitter)?;
 					}
+					match &mut track.declared {
+						Some(clock) => {
+							// Clocked in FLV's milliseconds, so the leading frames step a tag tick apart.
+							let pts = arrival.item.timestamp.as_millis() as u64;
+							let arrived = arrival.arrived;
+							clock.push((arrival, record), pts)?;
+							track.release(key, Some(arrived), self.shift, false, &mut self.jitter)?;
+						}
+						None => {
+							let timestamp = track.tag_timestamp(frame_timestamp_ms(&arrival.item, self.shift)?)?;
+							track.queue(key, arrival, record, timestamp, self.shift, &mut self.jitter)?;
+						}
+					}
+				}
+				let track = if kind == 0 {
+					&mut self.video[index]
+				} else {
+					&mut self.audio[index]
+				};
+				// Nothing settles the frames held when a track ends, so they keep their own arrival.
+				if track.finished && self.header_emitted {
+					track.release((kind, index), None, self.shift, true, &mut self.jitter)?;
 				}
 			}
 		}
@@ -468,6 +573,16 @@ impl<S: Stream> Export<S> {
 		// single-track stream rebinds to a better-ranked rendition. A bound rendition the
 		// catalog moves to another track follows it, under a new sequence-header tag when
 		// its config record changes.
+		for track in &mut self.video {
+			if let Some(config) = catalog.video.renditions.get(&track.name) {
+				// A depth declared after the header deepens the shift, so its group's first DTS stays
+				// at or past zero. The shift never shrinks, so tag times keep increasing.
+				if self.header_emitted && track.flavor.has_composition_time() {
+					self.shift = self.shift.max(config.reorder.map_or(0, u32::from));
+				}
+				track.config = Some(config.clone());
+			}
+		}
 		if !self.header_emitted {
 			self.bind_video(&catalog)?;
 			self.bind_audio(&catalog)?;
@@ -569,6 +684,8 @@ impl<S: Stream> Export<S> {
 				finished: false,
 				flavor,
 				fallback_description,
+				config: Some(config.clone()),
+				declared: None,
 				dts_reserve: dts_reserve(config),
 				last_dts: None,
 				announced: None,
@@ -616,6 +733,8 @@ impl<S: Stream> Export<S> {
 				finished: false,
 				flavor,
 				fallback_description: None,
+				config: None,
+				declared: None,
 				dts_reserve: 0,
 				last_dts: None,
 				announced: None,
@@ -659,6 +778,15 @@ impl<S: Stream> Export<S> {
 		for track in self.video.iter_mut().chain(&mut self.audio) {
 			track.announced = track.config_record()?;
 		}
+		// A group decodes its first `reorder` frames a millisecond apart before its earliest
+		// presentation, so the deepest declaration bounds how far before zero a DTS can fall.
+		self.shift = self
+			.video
+			.iter()
+			.filter(|track| track.flavor.has_composition_time())
+			.filter_map(|track| track.config.as_ref()?.reorder)
+			.max()
+			.map_or(0, u32::from);
 
 		Ok(out.freeze())
 	}
@@ -669,6 +797,7 @@ impl<S: Stream> Export<S> {
 		let Tag {
 			frame,
 			timestamp: timestamp_ms,
+			presentation: pts_ms,
 			record,
 		} = tag;
 		let mut out = BytesMut::with_capacity(TAG_HEADER_LEN + frame.payload.len() + 8);
@@ -690,7 +819,6 @@ impl<S: Stream> Export<S> {
 			let track = &self.video[index];
 			let flavor = track.flavor;
 			let track_id = track.track_id;
-			let pts_ms = frame_timestamp_ms(&frame)?;
 			let frame_type = if frame.keyframe {
 				FRAME_TYPE_KEY
 			} else {
@@ -873,11 +1001,11 @@ fn audio_flavor(config: &hang::catalog::AudioConfig) -> anyhow::Result<Flavor> {
 	}
 }
 
-fn frame_timestamp_ms(frame: &Frame) -> anyhow::Result<u32> {
-	frame
-		.timestamp
-		.as_millis()
-		.try_into()
+/// The frame's presentation time on the tag clock, `shift` milliseconds past its own.
+fn frame_timestamp_ms(frame: &Frame, shift: u32) -> anyhow::Result<u32> {
+	u32::try_from(frame.timestamp.as_millis())
+		.ok()
+		.and_then(|pts| pts.checked_add(shift))
 		.context("FLV timestamp exceeds 32 bits")
 }
 

@@ -38,9 +38,9 @@ pub enum SessionError {
 	#[error("key-value formatting error")]
 	KeyValueFormatting,
 
-	/// The peer went past what the session allows: a request ID at or past the
-	/// MAX_REQUEST_ID we advertised (moq-transport drafts 14 to 16), or more announcements,
-	/// subscriptions, or FETCH requests than its `crate::session::Limits`.
+	/// The peer went past what the session allows: more announcements than its
+	/// `crate::session::Limits`, or on moq-transport drafts 14 to 16, a request ID at or past
+	/// the MAX_REQUEST_ID we advertised or more live requests than the window.
 	#[error("too many requests")]
 	TooManyRequests,
 
@@ -61,12 +61,16 @@ pub enum SessionError {
 	#[error("version negotiation failed")]
 	Version,
 
+	/// The peer's token could not be parsed. Retrying with the same token will fail again.
+	#[error("malformed auth token")]
+	MalformedAuthToken,
+
 	/// A token named an alias that was never registered.
 	#[error("unknown auth token alias")]
 	UnknownAuthTokenAlias,
 
 	/// The peer left more unacknowledged REQUEST_UPDATEs outstanding on one request stream
-	/// than the MAX_REQUEST_UPDATES it was advertised (draft-19 section 10.3.1.7).
+	/// than the MAX_REQUEST_UPDATES it was advertised (draft-22 section 9.1.7).
 	#[error("too many request updates")]
 	TooManyRequestUpdates,
 
@@ -112,6 +116,7 @@ impl SessionError {
 			Self::Timeout => 0x11,
 			Self::AuthTokenCacheOverflow => 0x13,
 			Self::Version => 0x15,
+			Self::MalformedAuthToken => 0x16,
 			Self::UnknownAuthTokenAlias => 0x17,
 			Self::InvalidAuthority => 0x19,
 			Self::Unsupported => 0x1,
@@ -141,6 +146,7 @@ impl SessionError {
 			0x11 => Self::Timeout,
 			0x13 => Self::AuthTokenCacheOverflow,
 			0x15 => Self::Version,
+			0x16 => Self::MalformedAuthToken,
 			0x17 => Self::UnknownAuthTokenAlias,
 			0x19 => Self::InvalidAuthority,
 			0x1B => Self::TooManyRequestUpdates,
@@ -326,7 +332,10 @@ impl StreamError {
 /// Local conditions are the flat variants (`Cancel`, `NotFound`, `Lagged`, and so
 /// on): this side decided what went wrong. Codes received from a peer are nested
 /// in [`Self::Session`] or [`Self::Stream`], preserving the registry and the numeric
-/// value. [`Self::Remote`] is an unrecognized request-rejection code (the IETF
+/// value. A stream also reads its session ending cleanly, whichever side closed it, as
+/// `Session(SessionError::Cancel)`: to the stream that is the session failing under it,
+/// while `Session::closed` reports the clean close itself as [`Self::Cancel`].
+/// [`Self::Remote`] is an unrecognized request-rejection code (the IETF
 /// request registry), not a session or stream unknown.
 ///
 /// The two registries are the wire. Mapping a local condition onto a code is
@@ -374,8 +383,8 @@ pub enum Error {
 	#[error("duplicate")]
 	Duplicate,
 
-	/// Nobody is reading any more, so the producer stopped. Not a failure.
-	// Cancel is returned when there are no more readers.
+	/// Nobody is reading any more, so the producer stopped; or the session closed cleanly,
+	/// by either side, as `Session::closed` reports it. Not a failure.
 	#[error("cancelled")]
 	Cancel,
 
@@ -439,7 +448,7 @@ pub enum Error {
 	#[error("unexpected message")]
 	UnexpectedMessage,
 
-	/// The peer asked for a feature this endpoint does not implement.
+	/// A feature was asked for that this endpoint, or the wire to the peer, does not implement.
 	#[error("unsupported")]
 	Unsupported,
 
@@ -451,8 +460,8 @@ pub enum Error {
 	#[error("too many parameters")]
 	TooManyParameters,
 
-	/// The peer already holds as many FETCH requests, announcements, or subscriptions as this
-	/// session allows (see `crate::session::Limits`).
+	/// The peer went past this session's `crate::session::Limits`: too many announcements, or
+	/// too many requests on moq-transport drafts 14 to 16.
 	#[error("too many requests")]
 	TooManyRequests,
 
@@ -509,7 +518,7 @@ pub enum Error {
 	/// The peer did not close the session within the GOAWAY drain deadline.
 	///
 	/// Sent as the session termination code when the draining side force-closes
-	/// after the advertised deadline expires (see [`crate::goaway::Goaway::timeout`]).
+	/// after the advertised drain deadline expires.
 	#[error("goaway timeout")]
 	GoawayTimeout,
 
@@ -520,11 +529,6 @@ pub enum Error {
 	/// The track requires a moq-transport property this endpoint does not understand.
 	#[error("unsupported extension")]
 	UnsupportedExtension,
-
-	/// The stream was torn down because the session closed. The specific reason travels on
-	/// the session close, not here.
-	#[error("session closed")]
-	SessionClosed,
 
 	/// A session-scoped protocol error, with its registry and verbatim code.
 	///
@@ -548,6 +552,10 @@ pub enum Error {
 	/// The underlying connection reached its transport idle deadline.
 	#[error("transport idle timeout")]
 	IdleTimeout,
+
+	/// The transport refused a request because the peer granted no stream credit.
+	#[error("no stream credit")]
+	NoStreamCredit,
 }
 
 impl Error {
@@ -625,7 +633,7 @@ impl From<&Error> for SessionError {
 			Error::Stream(StreamError::App(app)) => Self::App(*app),
 			// A stream-scoped code has no meaning in this registry; don't forward the number.
 			Error::Stream(_) => Self::Internal,
-			Error::Cancel | Error::Closed | Error::GoingAway | Error::SessionClosed => Self::Cancel,
+			Error::Cancel | Error::Closed | Error::GoingAway => Self::Cancel,
 			Error::Unauthorized => Self::Unauthorized,
 			Error::Expired => Self::Expired,
 			Error::Unsupported => Self::Unsupported,
@@ -651,7 +659,7 @@ impl From<&Error> for SessionError {
 			// says an unrecognized code is an unspecified error. Send that instead.
 			Error::Remote(_) => Self::Internal,
 			// Our own transport failed: there is no code to say so.
-			Error::Transport(_) | Error::IdleTimeout => Self::Internal,
+			Error::Transport(_) | Error::IdleTimeout | Error::NoStreamCredit => Self::Internal,
 			// Stream-scoped conditions have no session code.
 			Error::Old
 			| Error::Evicted
@@ -687,7 +695,6 @@ impl From<&Error> for StreamError {
 			// this session is fine, and the failed session's code means nothing here.
 			Error::Session(_) | Error::Transport(_) | Error::IdleTimeout => Self::Unroutable,
 			Error::Cancel | Error::Closed => Self::Cancel,
-			Error::SessionClosed => Self::Session(SessionError::Cancel),
 			Error::Decode(coding::DecodeError::Session(err)) => Self::Session(err.clone()),
 			Error::Old => Self::Old,
 			Error::Evicted => Self::Evicted,
@@ -717,7 +724,7 @@ impl From<&Error> for StreamError {
 			// Session-scoped: the peer learns the detail from the session close.
 			// A stream refused on its own is not a session failure, so it does not claim
 			// SESSION_CLOSED; there is no stream-scoped PROTOCOL_VIOLATION to send instead.
-			Error::UnexpectedStream => Self::Internal,
+			Error::UnexpectedStream | Error::NoStreamCredit => Self::Internal,
 			Error::Version
 			| Error::UnknownAlpn(_)
 			| Error::TooManyParameters
@@ -784,6 +791,7 @@ mod tests {
 			(SessionError::Timeout, 0x11),
 			(SessionError::AuthTokenCacheOverflow, 0x13),
 			(SessionError::Version, 0x15),
+			(SessionError::MalformedAuthToken, 0x16),
 			(SessionError::UnknownAuthTokenAlias, 0x17),
 			(SessionError::Expired, 0x18),
 			(SessionError::InvalidAuthority, 0x19),

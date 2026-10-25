@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -39,6 +39,8 @@ enum Answer {
 	Grant(Grant),
 	Status(u16),
 	Token(Grant, moq_auth::Token),
+	/// A 403 carrying a typed refusal.
+	Refuse(moq_auth::refusal::Reason),
 }
 
 /// A server whose answers the test changes mid-session, recording every request.
@@ -122,6 +124,11 @@ impl Script {
 			Answer::Token(grant, token) if request.token.as_ref() == Some(&token) => Json(grant).into_response(),
 			Answer::Token(..) => StatusCode::UNAUTHORIZED.into_response(),
 			Answer::Status(code) => StatusCode::from_u16(code).unwrap().into_response(),
+			Answer::Refuse(reason) => {
+				let mut refusal = moq_auth::Refusal::default();
+				refusal.reason = reason;
+				(StatusCode::FORBIDDEN, Json(refusal)).into_response()
+			}
 		}
 	}
 
@@ -142,7 +149,7 @@ fn all() -> Patterns {
 /// Everything under the dialed path, re-checked every second, good for `expires_in`.
 fn grant(expires_in: Duration) -> Grant {
 	let mut grant = Grant::new(all(), all());
-	grant.expires = Some(SystemTime::now() + expires_in);
+	grant.expires = Some(moq_clock::wall() + expires_in);
 	grant.revalidate = Some(Duration::from_secs(1));
 	grant
 }
@@ -231,10 +238,12 @@ async fn spawn_ws_relay_with(
 fn client() -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
-	config.once = Some(true);
-	config.websocket.delay = Some(Duration::ZERO);
+	config.websocket.delay = Some((Duration::ZERO).into());
 	config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
-	config.init(Default::default()).expect("client init")
+	config
+		.init(Default::default())
+		.expect("client init")
+		.with_reconnect(false)
 }
 
 fn room_url(scheme: &str, port: u16) -> url::Url {
@@ -444,11 +453,13 @@ async fn forwards_the_setup_token() {
 				.await
 				.expect("connect WebSocket")
 		} else {
-			qmux::tcp::Config::new(qmux::Version::QMux01)
-				.protocols(["moqt-16"])
-				.connect(("127.0.0.1", port))
-				.await
-				.expect("connect TCP")
+			qmux::tcp::connect(("127.0.0.1", port), {
+				let mut config = qmux::Config::new(qmux::Version::QMux01);
+				config.protocol = qmux::Protocol::Negotiate(vec!["moqt-16".into()]);
+				config
+			})
+			.await
+			.expect("connect TCP")
 		};
 		let (mut send, mut recv) = session
 			.open_bi(Default::default())
@@ -1131,11 +1142,13 @@ async fn a_certificate_admits_only_what_the_server_grants() {
 	let mtls_client = || {
 		let mut config = moq_tokio::connect::Config::default();
 		config.tls.insecure = Some(true);
-		config.once = Some(true);
 		config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
 		config.tls.cert = Some(client_cert.clone());
 		config.tls.key = Some(client_key.clone());
-		config.init(Default::default()).expect("client init")
+		config
+			.init(Default::default())
+			.expect("client init")
+			.with_reconnect(false)
 	};
 	// No grant for certificates: refused, over QUIC with a certificate and over
 	// WebSocket without one.
@@ -1183,7 +1196,7 @@ async fn a_certificate_admits_only_what_the_server_grants() {
 	relay.abort();
 }
 
-/// A relay dialing in with a certificate, admitted by `moq auth serve --mtls-peer`,
+/// A relay dialing in with a certificate, admitted by `moq auth serve --mtls-link peer`,
 /// is a cluster peer: what it announces entered the cluster elsewhere.
 #[tokio::test]
 async fn an_mtls_peer_is_a_cluster_peer() {
@@ -1194,14 +1207,14 @@ async fn an_mtls_peer_is_a_cluster_peer() {
 	);
 }
 
-/// Without `--mtls-peer`, a certificate identifies a client ingesting here.
+/// Without `--mtls-link peer`, a certificate identifies a client ingesting here.
 #[tokio::test]
 async fn an_mtls_client_ingests_here() {
 	assert_eq!(mtls_route_source(false).await, moq_net::origin::Source::Local);
 }
 
 /// The source the relay records for a broadcast announced over a certificate
-/// session, admitted by `moq auth serve` with `mtls_peer` set as given.
+/// session, admitted by `moq auth serve` with the peer link role when requested.
 async fn mtls_route_source(mtls_peer: bool) -> moq_net::origin::Source {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 	let dir = tempfile::tempdir().expect("tempdir");
@@ -1209,7 +1222,7 @@ async fn mtls_route_source(mtls_peer: bool) -> moq_net::origin::Source {
 
 	let mut policy = moq_auth::serve::Policy::default();
 	policy.mtls = moq_auth::Permissions::new(all(), all());
-	policy.mtls_peer = mtls_peer;
+	policy.mtls_link = mtls_peer.then_some(moq_auth::serve::Link::Peer);
 	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 	let auth_url: url::Url = format!("http://{}/", listener.local_addr().unwrap()).parse().unwrap();
 	let server = moq_auth::serve::Server::new(policy).unwrap();
@@ -1369,7 +1382,7 @@ async fn memory_sessions() -> (moq_net::Session, moq_net::Session) {
 	config.protocol = Some(crate::memory::newest().alpn().to_string());
 	let (client, server) = moq_net::transport::memory::pair(config);
 
-	let now = moq_net::time::now();
+	let now = moq_net::time::Instant::now();
 	let client = async {
 		let (session, driver) = moq_net::Client::new()
 			.connect(now, client)
@@ -1414,7 +1427,7 @@ fn manual() -> moq_clock::Installed {
 /// Everything under the dialed path, until [`EXPIRES`] from now on the ambient clock.
 fn expiring() -> Grant {
 	let mut grant = Grant::new(all(), all());
-	grant.expires = Some(SystemTime::from(moq_clock::wall()) + EXPIRES);
+	grant.expires = Some(moq_clock::wall() + EXPIRES);
 	grant
 }
 
@@ -1462,15 +1475,15 @@ async fn a_relay_without_an_auth_source_is_decided_by_the_embedder() {
 		let mut config = Config::default();
 		config.listen.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
 		// The sessions are gone by the time the trigger fires; no need to wait out the default window.
-		config.drain_timeout = Duration::from_millis(100);
+		config.drain_timeout = Some((Duration::from_millis(100)).into());
 		config
 	};
 
-	let untaken = Relay::load(config()).await.expect("load relay");
+	let untaken = Relay::load(config()).await.expect("load relay").with_signals(false);
 	let err = untaken.run().await.expect_err("nobody can authenticate");
 	assert!(err.to_string().contains("nobody can authenticate"), "{err}");
 
-	let mut relay = Relay::load(config()).await.expect("load relay");
+	let mut relay = Relay::load(config()).await.expect("load relay").with_signals(false);
 	let port = relay.tcp_addr().expect("TCP listener bound").port();
 	let admissions = relay.admissions().expect("an empty [auth] hands over the admissions");
 	assert!(relay.admissions().is_none(), "taken once");
@@ -1503,9 +1516,9 @@ async fn connect_through_embedded_admission(
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 	let mut config = Config::default();
 	config.listen.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
-	config.listen.timeout = Some(timeout);
-	config.drain_timeout = Duration::from_millis(100);
-	let mut relay = Relay::load(config).await.expect("load relay");
+	config.listen.timeout = Some((timeout).into());
+	config.drain_timeout = Some((Duration::from_millis(100)).into());
+	let mut relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let port = relay.tcp_addr().expect("TCP listener bound").port();
 	let admissions = relay.admissions().expect("an empty [auth] hands over the admissions");
 	let url = room_url("tcp", port);
@@ -1630,7 +1643,7 @@ async fn quic_and_webtransport_report_distinct_auth_transports() {
 async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 	for scheme in ["tcp", "ws"] {
 		let mut initial = Grant::new(all(), "a/**".parse::<moq_auth::Pattern>().unwrap());
-		initial.expires = Some(SystemTime::now() + Duration::from_secs(3600));
+		initial.expires = Some(moq_clock::wall() + Duration::from_secs(3600));
 		let script = Script::new(initial);
 		let auth = build_auth(script.spawn().await);
 		let (port, relay) = if scheme == "tcp" {
@@ -1640,10 +1653,9 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 		};
 		let client = || {
 			let mut config = moq_tokio::connect::Config::default();
-			config.once = Some(true);
 			config.version = vec!["moq-transport-22".parse().unwrap()];
-			config.websocket.delay = Some(Duration::ZERO);
-			config.init(Default::default()).unwrap()
+			config.websocket.delay = Some((Duration::ZERO).into());
+			config.init(Default::default()).unwrap().with_reconnect(false)
 		};
 		let origin = moq_tokio::origin::spawn();
 		let a = origin.create_broadcast("a/cam").unwrap();
@@ -1680,7 +1692,7 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 			.unwrap();
 		let mut a_sub = a_read.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut replacement = Grant::new(all(), "b/**".parse::<moq_auth::Pattern>().unwrap());
-		replacement.expires = Some(SystemTime::now() + Duration::from_secs(3600));
+		replacement.expires = Some(moq_clock::wall() + Duration::from_secs(3600));
 		script.on_connect(Answer::Grant(replacement));
 		let token = tokio::time::timeout(TIMEOUT, subscriber.auth().add("replacement"))
 			.await
@@ -1799,17 +1811,24 @@ async fn relay_request_limits_distinguish_clients_and_peers() {
 /// Browser-visible policy refusals happen after the WebSocket upgrade, in MoQ's close registry.
 #[tokio::test]
 async fn websocket_refusal_is_in_band() {
+	use moq_auth::refusal::Reason;
 	use moq_net::transport::{
 		Error as _,
 		poll::{SendStream as _, Session as _},
 	};
-	for (status, code) in [
-		(401, moq_net::SessionError::Unauthorized),
-		(403, moq_net::SessionError::Unauthorized),
-		(502, moq_net::SessionError::App(502)),
+	for (answer, code) in [
+		(Answer::Status(401), moq_net::SessionError::Unauthorized),
+		(Answer::Status(403), moq_net::SessionError::Unauthorized),
+		(Answer::Status(502), moq_net::SessionError::App(502)),
+		(Answer::Refuse(Reason::Forbidden), moq_net::SessionError::Unauthorized),
+		(Answer::Refuse(Reason::Expired), moq_net::SessionError::Expired),
+		(
+			Answer::Refuse(Reason::Malformed),
+			moq_net::SessionError::MalformedAuthToken,
+		),
 	] {
 		let script = Script::new(grant(Duration::from_secs(3600)));
-		script.on_connect(Answer::Status(status));
+		script.on_connect(answer);
 		let (port, relay) = spawn_ws_relay(build_auth(script.spawn().await)).await;
 		let mut session = qmux::ws::Client::new()
 			.with_protocol("moq-lite-06", &[qmux::Version::QMux01])

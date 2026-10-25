@@ -45,7 +45,8 @@ public = "**"          # anonymous access to everything; development only
 ```
 
 Every option is also a `--flag` or `MOQ_*` environment variable, and
-`RUST_LOG` controls logging. The
+`RUST_LOG` controls logging. A `MOQ_*` variable the relay does not read, such as
+a misspelling, stops it at startup with the variable named. The
 [configuration reference](/bin/relay/config) covers every section, and
 [`demo/relay/`](https://github.com/moq-dev/moq/tree/main/demo/relay) has
 working configs for development, production, and a cluster. Options renamed
@@ -57,7 +58,11 @@ between releases are listed in
 `moq-relay` is also a library, for an application that wants extra HTTP
 routes or in-process workers against the cluster origin. Load a `Relay`, take
 what you need, and call `run`, which keeps the listeners, QUIC workers, and
-shutdown inside the relay.
+shutdown inside the relay. An embedded CLI calls
+`config.relay.merge(&cli_layer)?` after its own `parse_from_with_settings` to
+load the relay file and environment, retain provenance, and refuse obsolete
+spellings, then `moq_tokio::cli::check_env` with its own spec to refuse `MOQ_*`
+variables it does not read. CLI-only fields on the embedding root stay intact.
 
 ```rust
 use axum::routing::get;
@@ -89,7 +94,7 @@ relay.with_web(web).run().await?;
   from `relay.shutdown().activity()` and pass `relay.shutdown().clone()` to
   `Connection::with_shutdown`, so the drain waits for its handshakes too.
 - To serve a session from any other moq-net transport, such as the in-memory
-  one in tests, read its SETUP with `moq_net::Server::accept_request` and pass
+  one in tests, enable the `test-support` feature, read its SETUP with `moq_net::Server::accept_request` and pass
   `Accepted::new(handshake, transport)` to `Connection::new`. The client must
   send its path in the SETUP.
 - To decide admissions yourself, leave `[auth]` empty and answer

@@ -3,7 +3,7 @@
 ## Goal
 
 Before the breaking cut merges, every break it ships, including those in
-surfaces the [API-diff check](/quest/m1/api-diff.md) cannot see, has its
+surfaces `just api-diff` cannot see, has its
 `MIGRATE.md` entry, and each entry states the net change from the last
 published version.
 
@@ -12,16 +12,17 @@ published version.
 Decided 2026-10-16 (maintainer interview); the diff tooling moved to its own
 m1 quest on 2026-10-22.
 
-- PRs stop writing `MIGRATE.md` entries once
-  [MIGRATE.md at the cut](/quest/m0/migrate-at-cut.md) lands (decided
-  2026-10-23): gather every `!` subject in `git log` since the `release`
-  merge base and write each PR's Impact-bullet migration note into its
-  package's guide.
+- PRs into `main` no longer write `MIGRATE.md` entries (decided
+  2026-10-23). Gather the breaks from `!` PRs: every `!` subject in
+  `git log` since the `release` merge base, then each PR's Impact section
+  for its migration note, since squash commits drop the PR body. Write each
+  note into its package's guide. The API-diff report below catches breaks a
+  PR left unmarked; a behavior break with no `!` stays with PR review.
 - Run the API-diff report on the cut PR and read the diff of the
   hand-written binding wrappers (`py/moq-rs`, `kt/moq`, `dart/moq`,
   `go/wrapper`, `swift`, `cpp/moq`, `cpp/obs`) and of each binary's flags,
-  env vars, and config keys by hand. Add the audit step to CONTRIBUTING.md's
-  Releases section.
+  env vars, and config keys by hand. Add this manual pass to
+  CONTRIBUTING.md's Releases section, which already names the other sources.
 - Fill every gap the report and the manual pass show in the matching
   `MIGRATE.md`. Known gaps: breaking releases cut after the
   2026-09-23 train have no transition section yet (moq-json 0.4 -> 0.5
@@ -30,7 +31,8 @@ m1 quest on 2026-10-22.
   deletes moq-flate before this cut: audit the migration from its published
   API to ordinary tracks with `compress`, rather than promising a new
   moq-flate transition release.
-- Each `## Unreleased` section says how to migrate from the published
+- Each version-transition section, starting from the `## Unreleased`
+  entries already on `main`, says how to migrate from the published
   version to the candidate (decided 2026-10-22, maintainer, from an external
   API audit). Collapse entries a later change reversed or reshaped (an API
   removed then reintroduced, a default changed twice) into the net change,
@@ -41,5 +43,4 @@ m1 quest on 2026-10-22.
 
 ## Required
 
-- [API-diff check](/quest/m1/api-diff.md) - the report this audit reads
 - [Breaking release readiness](/quest/m1/README.md) - all breaking work and the MIGRATE.md convention have landed

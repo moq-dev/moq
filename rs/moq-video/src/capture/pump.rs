@@ -21,7 +21,7 @@ use std::thread::JoinHandle;
 
 use super::channel::FrameChannel;
 use crate::frame::Surface;
-use crate::{Error, Rate};
+use crate::{Error, FrameRate};
 
 /// The outcome of one device read.
 pub(super) enum Read {
@@ -41,7 +41,7 @@ pub(super) enum Read {
 pub(super) struct Geometry {
 	pub width: u32,
 	pub height: u32,
-	pub framerate: Option<Rate>,
+	pub framerate: Option<FrameRate>,
 	pub label: String,
 }
 

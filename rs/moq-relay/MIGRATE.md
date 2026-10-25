@@ -5,6 +5,16 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
+### Tiers are metric-safe names (#6778)
+
+`--cluster-tier` and the auth server's grant and refusal `tier` must be `/`-joined segments of ASCII letters, digits, `.`, `_`, and `-`.
+The relay refuses to start with any other `--cluster-tier`, and treats a grant naming one as an auth server error; rename such tiers, for example `gold tier` to `gold-tier`.
+
+### Unknown `MOQ_*` environment variables stop startup ([#6633](https://github.com/moq-dev/moq/pull/6633))
+
+A `MOQ_*` variable moq-relay does not read, such as a misspelling, a removed name, or one meant for another binary, now stops startup with the variable named instead of being ignored.
+Remove or rename what the error lists.
+
 ### Auth `server_name` is the SNI only (#6509)
 
 The auth request's `server_name` no longer falls back to the HTTP `Host` header, `:authority`, or the WebTransport CONNECT host: it is absent over plain `http://` and `ws://` and for an IP-literal dial, while HTTPS and `wss://` report the SNI.
@@ -19,7 +29,7 @@ Have the auth server mark cluster peers as `peer` (`moq auth serve --mtls-peer`)
 
 `stats.interval`, `--stats-interval`, and `MOQ_STATS_INTERVAL` take a duration such as `"1s"` or `"500ms"` instead of a bare number of seconds, and a zero interval refuses to start.
 Write `interval = 5` as `interval = "5s"`.
-In Rust, `stats::Config::interval` is a `Duration`, and `stats::Config::build` returns a `Result`.
+In Rust, `stats::Config::interval` is an `Option<Duration>` (`None` publishes every second), and `stats::Config::build` returns a `Result`.
 
 ### `receive_window` has a floor (#5878)
 

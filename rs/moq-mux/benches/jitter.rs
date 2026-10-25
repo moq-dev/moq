@@ -26,7 +26,7 @@ async fn steer(tracks: u16, floors: u64) -> u64 {
 			let arrival = jitter::Arrival {
 				arrived: at,
 				read: at,
-				decode: Timestamp::from_millis(second * 1_000).unwrap(),
+				decode: Timestamp::from_millis(second * 1_000).unwrap().into(),
 				restart: 0,
 				skip: 0,
 				cut: 0,
@@ -88,7 +88,7 @@ fn acquisition(c: &mut Criterion) {
 										jitter::Arrival {
 											arrived: start,
 											read: start,
-											decode: Timestamp::from_millis(frame * 20).unwrap(),
+											decode: Timestamp::from_millis(frame * 20).unwrap().into(),
 											restart: 0,
 											skip: 0,
 											cut: 0,

@@ -25,6 +25,9 @@ const PathSchema = z.string().check(
 	),
 );
 
+// A relay renders the tier as a metrics label; empty is the default tier.
+const TierSchema = z.string().check(z.regex(/^([A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*)?$/, "invalid tier"));
+
 /** How a session reached the relay; `http` is a one-shot request on the relay's web listener. */
 export const TransportSchema = z.pipe(
 	z.string(),
@@ -121,6 +124,8 @@ const BaseRequestSchema = z.object({
 	token: z.optional(TokenSchema),
 	/** The direction the client declared at SETUP; absent means both. */
 	role: z.optional(RoleSchema),
+	/** What the client advertised in its SETUP, such as `moq-net-js/0.4.2`; peer-controlled, so never authorize on it. */
+	implementation: z.optional(z.string()),
 	/** The verified client certificate, when one was presented. */
 	tls: z.optional(PeerSchema),
 });
@@ -176,8 +181,8 @@ export const GrantSchema = z
 		expires: z.optional(z.int()),
 		/** How long until the relay asks again, in whole seconds. Zero would be a tight loop. */
 		revalidate: z.optional(z.int().check(z.positive())),
-		/** An opaque label handed to stats, so traffic can be bucketed. */
-		tier: z.optional(z.string()),
+		/** The stats tier this session's traffic is bucketed under: `/`-joined segments of ASCII letters, digits, `.`, `_`, and `-`. */
+		tier: z.optional(TierSchema),
 		/** The literal path this session's stats record under, independent of its root. Absent records under the empty label. */
 		label: z.optional(PathSchema),
 		/**
@@ -206,11 +211,11 @@ export type Grant = z.infer<typeof GrantSchema>;
 /** The reason and verified attribution an auth server returns with HTTP 403. */
 export const RefusalSchema = z.object({
 	/** Unknown reason strings read as `refused`. */
-	reason: z.pipe(z.string(), z.catch(z.enum(["refused", "forbidden", "expired"]), "refused")),
+	reason: z.pipe(z.string(), z.catch(z.enum(["refused", "forbidden", "expired", "malformed"]), "refused")),
 	/** A root named by a verified credential, never an unverified request path. */
 	root: z.optional(PathSchema),
-	/** The tier resolved by the decider; absent uses the default tier. */
-	tier: z.optional(z.string()),
+	/** The tier resolved by the decider, as in a grant; absent uses the default tier. */
+	tier: z.optional(TierSchema),
 });
 /** A typed refusal returned by an admission decider. */
 export type Refusal = z.infer<typeof RefusalSchema>;

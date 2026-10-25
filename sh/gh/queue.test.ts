@@ -69,6 +69,7 @@ for (const [id, job] of calls) {
 // Every workflow that used to run on release PRs blocks a release now.
 assert.deepEqual(calls.map(([id]) => id).sort(), [
 	"android",
+	"api-diff",
 	"audio-quality",
 	"c",
 	"cpp",

@@ -498,7 +498,6 @@ mod tests {
 	use super::*;
 	use moq_pattern::Patterns;
 	use std::task::Poll;
-	use std::time::SystemTime;
 	use wiremock::matchers::{method, path};
 	use wiremock::{Mock, MockServer, Request as Received, ResponseTemplate};
 
@@ -620,7 +619,7 @@ mod tests {
 	/// as zero and be refused; these tests run on a one-second cadence.
 	fn grant(expires_in: Option<Duration>, revalidate: Option<Duration>) -> Grant {
 		let mut grant = Grant::new(patterns(&["**"]), Patterns::new());
-		grant.expires = expires_in.map(|d| SystemTime::now() + d);
+		grant.expires = expires_in.map(|d| moq_clock::wall() + d);
 		grant.revalidate = revalidate;
 		grant
 	}
@@ -1074,7 +1073,7 @@ mod tests {
 	#[tokio::test]
 	async fn typed_refusal_preserves_reason_root_and_tier() {
 		use crate::refusal::Reason;
-		for reason in [Reason::Refused, Reason::Forbidden, Reason::Expired] {
+		for reason in [Reason::Refused, Reason::Forbidden, Reason::Expired, Reason::Malformed] {
 			for root in [None, Some("tenant")] {
 				for tier in [None, Some("edge")] {
 					let expected = crate::Refusal {
@@ -1250,7 +1249,7 @@ mod tests {
 	async fn an_expired_grant_is_refused() {
 		tokio::time::pause();
 		let mut grant = Grant::new(patterns(&["**"]), Patterns::new());
-		grant.expires = Some(SystemTime::now() - Duration::from_secs(1));
+		grant.expires = Some(moq_clock::wall() - Duration::from_secs(1));
 		let script = Script::new(Log::default(), move |_| Some(Ok(grant.clone())));
 		assert!(matches!(script.connect().await, Err(Error::GrantExpired)));
 	}
@@ -1283,7 +1282,7 @@ mod tests {
 	#[tokio::test]
 	async fn an_outage_keeps_the_grant_until_expires() {
 		tokio::time::pause();
-		let expires = SystemTime::now() + Duration::from_secs(3);
+		let expires = moq_clock::wall() + Duration::from_secs(3);
 		let log = Log::default();
 		let script = Script::new(log.clone(), move |request| {
 			Some(match request.event {
@@ -1298,10 +1297,10 @@ mod tests {
 
 		// `expires` is wall-clock time, which the client maps onto Tokio's clock
 		// somewhere inside `connect`, so bracket it: the bounds hold however long it takes.
-		let (wall, tick) = (SystemTime::now(), tokio::time::Instant::now());
+		let (wall, tick) = (moq_clock::wall(), tokio::time::Instant::now());
 		let consumer = script.connect().await.unwrap();
-		let earliest = tick + expires.duration_since(SystemTime::now()).unwrap();
-		let latest = tokio::time::Instant::now() + expires.duration_since(wall).unwrap();
+		let earliest = tick + expires.checked_duration_since(moq_clock::wall()).unwrap();
+		let latest = tokio::time::Instant::now() + expires.checked_duration_since(wall).unwrap();
 
 		// A millisecond either side for Tokio's timer resolution.
 		let tolerance = Duration::from_millis(1);

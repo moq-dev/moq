@@ -2,6 +2,7 @@ import 'package:moq_ffi/moq_ffi.dart';
 
 import 'aliases.dart';
 import 'stream.dart';
+import 'version.dart';
 
 /// Scope for discovering announcements.
 final class AnnounceOptions {
@@ -20,32 +21,12 @@ final class AnnounceOptions {
       AnnounceConfig(prefix: prefix, filter: filter, hidden: hidden);
 }
 
-/// Everything [Moq.connect] can be told beyond the URL.
+/// Everything [Moq.connect] can be told beyond the URL, named and nested like
+/// the FFI's [MoqClientConfig].
 ///
 /// Every field is optional; a null keeps the native default. A value the native
 /// side cannot use fails [Moq.connect] with `MoqException.Config`.
 final class ConnectOptions {
-  /// Set false to skip certificate verification (local dev only).
-  final bool tlsVerify;
-
-  /// PEM root certificate paths to trust instead of the platform roots.
-  final List<String>? tlsRoots;
-
-  /// Whether to also trust the platform roots when [tlsRoots] is set.
-  final bool? tlsSystemRoots;
-
-  /// Peer certificate SHA-256 fingerprints to pin.
-  final List<String>? tlsFingerprints;
-
-  /// Path to a PEM certificate chain to present for mTLS.
-  final String? tlsCert;
-
-  /// Path to a PEM private key to present for mTLS.
-  final String? tlsKey;
-
-  /// Server name to verify the certificate against (SNI) instead of the URL's host.
-  final String? tlsHostName;
-
   /// Local socket address to bind, e.g. `0.0.0.0:0`.
   final String? bind;
 
@@ -62,6 +43,64 @@ final class ConnectOptions {
   /// Happy Eyeballs: how long IPv4 waits for the full DNS answer.
   final Duration? resolutionDelay;
 
+  /// Certificate trust and the mTLS identity, such as `ClientTls(insecure: true)`
+  /// for a self-signed relay during local development.
+  final ClientTls? tls;
+
+  /// QUIC transport tuning.
+  final QuicConfig? quic;
+
+  /// The WebSocket fallback raced against QUIC for `http(s)` URLs.
+  final WebSocketConfig? websocket;
+
+  /// Set true for a one-shot dial. By default the session redials with
+  /// backoff whenever the transport drops.
+  final bool once;
+
+  /// Retry pacing for the automatic reconnect.
+  final Backoff? backoff;
+
+  /// Origin to announce broadcasts through; auto-created when null.
+  final OriginProducer? publish;
+
+  /// Origin to discover broadcasts through; auto-created when null.
+  final OriginProducer? consume;
+
+  const ConnectOptions({
+    this.bind,
+    this.versions,
+    this.timeout,
+    this.race,
+    this.resolutionDelay,
+    this.tls,
+    this.quic,
+    this.websocket,
+    this.once = false,
+    this.backoff,
+    this.publish,
+    this.consume,
+  });
+
+  MoqClientConfig get _ffi => MoqClientConfig(
+    bind: bind,
+    versions: versions ?? const [],
+    timeout: timeout,
+    race: race,
+    resolutionDelay: resolutionDelay,
+    tls: tls ?? ClientTls(),
+    quic: (quic ?? const QuicConfig())._ffi,
+    websocket: (websocket ?? const WebSocketConfig())._ffi,
+    once: once,
+    backoff: backoff ?? MoqBackoff(),
+    implementation: implementation,
+    publish: publish,
+    consume: consume,
+  );
+}
+
+/// QUIC transport tuning for [ConnectOptions.quic]; the WebSocket fallback
+/// ignores it. Null fields keep the library or backend default.
+final class QuicConfig {
   /// Cap on the concurrent QUIC streams the peer may open toward this
   /// connection. MoQ opens one stream per group, so a subscriber to many
   /// tracks may want this raised.
@@ -89,40 +128,7 @@ final class ConnectOptions {
   /// decrypting a capture. Off by default; on without `SSLKEYLOGFILE` fails.
   final bool keylog;
 
-  /// Set false to stop the WebSocket fallback racing QUIC, e.g. against a
-  /// relay that only serves QUIC. On by default.
-  final bool? websocketEnabled;
-
-  /// Head start QUIC gets before the WebSocket fallback joins the race; 200ms
-  /// by default, and zero races both at once.
-  final Duration? websocketDelay;
-
-  /// Set false for a one-shot dial. By default the session redials with
-  /// backoff whenever the transport drops.
-  final bool reconnect;
-
-  /// Retry pacing for the automatic reconnect.
-  final Backoff? backoff;
-
-  /// Origin to announce broadcasts through; auto-created when null.
-  final OriginProducer? publish;
-
-  /// Origin to discover broadcasts through; auto-created when null.
-  final OriginProducer? consume;
-
-  const ConnectOptions({
-    this.tlsVerify = true,
-    this.tlsRoots,
-    this.tlsSystemRoots,
-    this.tlsFingerprints,
-    this.tlsCert,
-    this.tlsKey,
-    this.tlsHostName,
-    this.bind,
-    this.versions,
-    this.timeout,
-    this.race,
-    this.resolutionDelay,
+  const QuicConfig({
     this.maxStreams,
     this.idleTimeout,
     this.keepAlive,
@@ -131,71 +137,49 @@ final class ConnectOptions {
     this.congestionControl,
     this.qlog,
     this.keylog = false,
-    this.websocketEnabled,
-    this.websocketDelay,
-    this.reconnect = true,
-    this.backoff,
-    this.publish,
-    this.consume,
   });
 
-  MoqClientConfig get _ffi {
-    int? us(Duration? value, String name) {
-      if (value != null && value.isNegative) {
-        throw ArgumentError.value(value, name, 'must not be negative');
-      }
-      return value?.inMicroseconds;
-    }
+  MoqQuicConfig get _ffi => MoqQuicConfig(
+    maxStreams: maxStreams,
+    idleTimeout: idleTimeout,
+    keepAlive: keepAlive,
+    gso: gso,
+    mtuDiscovery: mtuDiscovery,
+    congestionControl: congestionControl,
+    qlog: qlog,
+    keylog: keylog,
+  );
+}
 
-    return MoqClientConfig(
-      bind: bind,
-      versions: versions ?? const [],
-      timeoutUs: us(timeout, 'timeout'),
-      raceUs: us(race, 'race'),
-      resolutionDelayUs: us(resolutionDelay, 'resolutionDelay'),
-      tls: MoqClientTls(
-        insecure: !tlsVerify,
-        roots: tlsRoots ?? const [],
-        systemRoots: tlsSystemRoots,
-        fingerprints: tlsFingerprints ?? const [],
-        cert: tlsCert,
-        key: tlsKey,
-        hostName: tlsHostName,
-      ),
-      quic: MoqQuicConfig(
-        maxStreams: maxStreams,
-        idleTimeoutUs: us(idleTimeout, 'idleTimeout'),
-        keepAliveUs: us(keepAlive, 'keepAlive'),
-        gso: gso,
-        mtuDiscovery: mtuDiscovery,
-        congestionControl: congestionControl,
-        qlog: qlog,
-        keylog: keylog,
-      ),
-      websocket: MoqWebSocketConfig(
-        enabled: websocketEnabled,
-        delayUs: us(websocketDelay, 'websocketDelay'),
-      ),
-      once: !reconnect,
-      backoff: backoff ?? MoqBackoff(),
-      publish: publish,
-      consume: consume,
-    );
-  }
+/// The WebSocket fallback for [ConnectOptions.websocket], raced against QUIC
+/// for `http(s)` URLs.
+final class WebSocketConfig {
+  /// Set false to stop the fallback, e.g. against a relay that only serves
+  /// QUIC. On by default.
+  final bool? enabled;
+
+  /// Head start QUIC gets before the fallback joins the race; 200ms by
+  /// default, and zero races both at once.
+  final Duration? delay;
+
+  const WebSocketConfig({this.enabled, this.delay});
+
+  MoqWebSocketConfig get _ffi =>
+      MoqWebSocketConfig(enabled: enabled, delay: delay);
 }
 
 /// The protocol versions offered by default, most preferred first, spelled the
 /// way [ConnectOptions.versions] takes them.
 List<String> versions() => moqVersions();
 
-/// Whether this build can write qlog traces for [ConnectOptions.qlog].
+/// Whether this build can write qlog traces for [QuicConfig.qlog].
 bool qlogSupported() => moqQlogSupported();
 
-/// A connected MoQ session with publishing and subscription conveniences.
+/// A MoQ session with publishing and subscription conveniences.
 final class Moq {
   final Client _client;
 
-  /// The established raw MoQ session.
+  /// The connecting or connected raw MoQ session.
   final Session session;
 
   Moq._(this.session, this._client);
@@ -244,10 +228,6 @@ final class Moq {
   Future<BroadcastConsumer> requestBroadcast(String path) =>
       session.consume().requestBroadcast(path: path);
 
-  /// How many times this session has connected: 1 for the connect that built it, one more
-  /// on each reconnect. A server-accepted session stays at 1.
-  int get connects => session.connects();
-
   /// The session's bandwidth allocator.
   ///
   /// Every call returns a handle to the same registry. [Bandwidth.reserve]
@@ -269,7 +249,8 @@ final class Moq {
   /// IETF also waits for transport ACKs.
   Future<void> close() async {
     try {
-      await session.shutdown();
+      session.shutdown();
+      await session.closed();
     } finally {
       _client.cancel();
     }

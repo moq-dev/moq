@@ -3,10 +3,11 @@
 // Split from release.ts to allow building packages without publishing
 
 import { copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { publint } from "publint";
 import { formatMessage } from "publint/utils";
-import { problems } from "./declarations.ts";
+import { checkReports } from "./api.ts";
+import { problems, type Source } from "./declarations.ts";
 import { undocumented } from "./docs.ts";
 
 console.log("✍️  Rewriting package.json...");
@@ -111,6 +112,20 @@ pkg.jsr = undefined; // JSR opt-out flag, not part of the npm package
 // Write the rewritten package.json
 writeFileSync("dist/package.json", JSON.stringify(pkg, null, 2));
 
+// A package that reports its own version keeps it in src/version.ts as "dev", since the
+// workspace runs src/ unbuilt; the published build gets the real one.
+if (existsSync("src/version.ts")) {
+	console.log(`🏷️  Stamping version ${pkg.version}...`);
+	const file = join("dist", "version.js");
+	const body = readFileSync(file, "utf8");
+	const placeholder = 'VERSION = "dev";';
+	if (body.split(placeholder).length !== 2) {
+		console.error(`${file} must contain exactly one \`${placeholder}\``);
+		process.exit(1);
+	}
+	writeFileSync(file, body.replace(placeholder, `VERSION = ${JSON.stringify(pkg.version)};`));
+}
+
 // Copy static files
 console.log("📄 Copying README.md...");
 copyFileSync("README.md", join("dist", "README.md"));
@@ -130,13 +145,22 @@ if (messages.length > 0) {
 	process.exit(1);
 }
 
-console.log("🔍 Checking declaration imports...");
+console.log("🔍 Checking declaration names...");
 const declarations = new Map<string, string>();
+const sources = new Map<string, Source>();
 for (const rel of new Bun.Glob("**/*.d.ts").scanSync("dist")) {
 	const file = resolve("dist", rel);
 	declarations.set(file, readFileSync(file, "utf8"));
+
+	// A declaration copied rather than emitted has no map, and no source to compare against.
+	const map = `${file}.map`;
+	if (!existsSync(map)) continue;
+	const [source] = JSON.parse(readFileSync(map, "utf8")).sources as string[];
+	if (!source) continue;
+	const path = resolve(dirname(map), source);
+	sources.set(file, { path, text: readFileSync(path, "utf8") });
 }
-const unresolved = problems(resolve("dist"), declarations);
+const unresolved = problems(resolve("dist"), declarations, sources);
 if (unresolved.length > 0) {
 	for (const problem of unresolved) console.error(problem);
 	process.exit(1);
@@ -154,6 +178,9 @@ if (published) {
 		for (const problem of missing) console.error(`  dist/${problem}`);
 		process.exit(1);
 	}
+
+	console.log("🔍 Checking API reports...");
+	checkReports(".");
 }
 
 console.log("📦 Package built successfully in dist/");
