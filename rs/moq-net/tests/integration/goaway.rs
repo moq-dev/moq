@@ -39,7 +39,6 @@ const GOAWAY_VERSIONS: &[&str] = &[
 	"moq-transport-16",
 	"moq-transport-17",
 	"moq-transport-18",
-	"moq-transport-19",
 ];
 
 /// A full receive window or missing FIN ACK cannot hold a drain beyond its local deadline.
@@ -218,9 +217,9 @@ async fn goaway_drains_without_a_wire_message_moq_lite_03() {
 /// A moq-transport client cannot tell a server where to reconnect, so naming a
 /// URI is refused locally instead of getting the session closed by the peer.
 #[moq_clock::test]
-async fn goaway_client_redirect_refused_moq_transport_19() {
+async fn goaway_client_redirect_refused_moq_transport_18() {
 	moq_clock::timeout(TEST_TIMEOUT, async {
-		let version: Version = "moq-transport-19".parse().unwrap();
+		let version: Version = "moq-transport-18".parse().unwrap();
 		let pair = connect_mock(MockConnectOptions::new(version)).await;
 
 		let err = pair
@@ -471,8 +470,8 @@ async fn goaway_keeps_new_subscribes_moq_lite_05() {
 }
 
 #[moq_clock::test]
-async fn goaway_keeps_new_subscribes_moq_transport_19() {
-	goaway_keeps_new_subscribes("moq-transport-19".parse().unwrap()).await;
+async fn goaway_keeps_new_subscribes_moq_transport_22() {
+	goaway_keeps_new_subscribes("moq-transport-22".parse().unwrap()).await;
 }
 
 /// A GOAWAY costs the peer's routes at [`Cost::DRAIN`] so the origin stops
@@ -530,6 +529,6 @@ async fn goaway_drains_routes_moq_lite_04() {
 }
 
 #[moq_clock::test]
-async fn goaway_drains_routes_moq_transport_19() {
-	goaway_drains_routes("moq-transport-19".parse().unwrap()).await;
+async fn goaway_drains_routes_moq_transport_18() {
+	goaway_drains_routes("moq-transport-18".parse().unwrap()).await;
 }

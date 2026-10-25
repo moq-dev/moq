@@ -185,7 +185,7 @@ mod tests {
 
 	use std::time::Duration;
 
-	use moq_net::{Consume, PathOwned, Timestamp, announce, broadcast, origin, track};
+	use moq_net::{Consume, PathOwned, Timestamp, announce, origin, track};
 
 	use crate::{Encoding, Producer, Tier, produce};
 
@@ -207,7 +207,7 @@ mod tests {
 		track: track::Producer,
 		sub: track::Subscriber,
 		_announced: announce::Consumer,
-		_source: broadcast::Producer,
+		_source: origin::Publication,
 		_ctx: moq_net::stats::Session,
 	}
 

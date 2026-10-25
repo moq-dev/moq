@@ -311,6 +311,7 @@ step() {
         test:py) just py test ;;
         test:gh) just gh test ;;
         fix:rs) just rs fix-changed "$rs_list" ;;
+        fix:js) just js fix "$js_list" ;;
         fix:markdown)
             bun install
             sh/markdown.sh fix
