@@ -98,7 +98,7 @@ async fn until(announced: &mut announce::Consumer, path: &str, active: bool) {
 
 #[moq_clock::test]
 async fn a_panicking_session_leaves_the_others_serving() {
-	for version in ["moq-lite-07-wip", "moq-transport-20"] {
+	for version in ["moq-lite-07-wip", "moq-transport-22"] {
 		let version: Version = version.parse().unwrap();
 		let relay = produce_origin(100);
 		let mut announced = relay.consume().announced();

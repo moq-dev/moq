@@ -35,7 +35,7 @@ const output = new Writer(
 			bytes.push(...chunk);
 		},
 	}),
-	version ?? IetfVersion.DRAFT_19,
+	version ?? IetfVersion.DRAFT_18,
 );
 let reader: TrackSubscriber;
 let peer: Stream | undefined;
@@ -55,8 +55,8 @@ if (version !== undefined) {
 	if (input.started) await encodeSubscribeResponse(output, { start: new SubscribeStart(0) }, version);
 	if (input.clean) await encodeSubscribeResponse(output, { end: new SubscribeEnd(0) }, version);
 } else {
-	assert.equal(input.version, "moqt-19");
-	const version = IetfVersion.DRAFT_19;
+	assert.equal(input.version, "moqt-18");
+	const version = IetfVersion.DRAFT_18;
 	const subscriber = new IetfSubscriber({ session: new NativeSession(pair.client, version, true) });
 	reader = subscriber.consume(path).track("video").subscribe();
 	peer = await Stream.accept(pair.server, version);

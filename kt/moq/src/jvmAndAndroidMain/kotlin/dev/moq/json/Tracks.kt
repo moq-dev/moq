@@ -98,7 +98,7 @@ inline fun <reified T> WindowEventPush.decode(): T = MoqJson.decodeFromString(se
 /**
  * Stream of each JSON state from a snapshot track, in order.
  *
- * Groups older than the subscription's `maxDelayUs` are skipped, so a playhead reader sets that
+ * Groups older than the subscription's `maxDelay` are skipped, so a playhead reader sets that
  * budget to its distance behind live. Call [SnapshotConsumer.latest] to skip to the newest state.
  */
 fun SnapshotConsumer.values(): Flow<Value> = pull({ cancel() }) { next() }

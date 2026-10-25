@@ -46,7 +46,7 @@ Replacement is serialized by `flock` on Linux or `lockf` on macOS, and the
 reservation records the owner's process start so a reused PID is not mistaken
 for the original run.
 
-The reservation root ignores `TMPDIR`: Nix shells have private temporary
+The reservation root ignores `TMPDIR`: shells may set different temporary
 directories but share the host's ports. The user id avoids ownership conflicts in
 world-writable `/tmp`. An override via `HARNESS_PORT_ROOT` must be the same for every
 run sharing the network. The root must belong to the current user and cannot be

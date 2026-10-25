@@ -195,12 +195,11 @@ A Position is a (Group Sequence, Frame Index) pair identifying one frame within 
 Positions order lexicographically: by group first, then by frame within the group.
 
 SUBSCRIBE and FETCH bound their delivery by Position rather than by Group alone.
-Each carries a `Frame Start` qualifying its start group and a `Frame End` qualifying its end group; both default to the whole group, which is the behavior of a draft that has no such field.
+A SUBSCRIBE Range's Absolute anchors name Positions (see [SUBSCRIBE](#subscribe)), and FETCH carries a `Frame Start` and `Frame End` within its group; a frame index of 0 at the start, or an absent end frame, is the whole group.
 
 The bounds are chosen so that two subscriptions abut exactly.
-`Frame Start` is the index of the first frame to deliver and `Frame End` is the index of the last (inclusive), so a subscriber that has received frames 0 through `N-1` of group `G` and wants the remainder asks for `Group Start` = `G`, `Frame Start` = `N`.
-Capping the first subscription at `Group End` = `G`, `Frame End` = `N-1` covers exactly the complement with no gap and no overlap.
-Because `Group End` and `Frame End` are both encoded as `absolute + 1` (see [SUBSCRIBE](#subscribe)) while `Group Start` and `Frame Start` are not, the two requests carry the *same* numbers on the wire; the end bound is effectively exclusive once encoded.
+A Range starts at its start Position and stops just before its end Position, so a subscriber that has received frames 0 through `N-1` of group `G` and wants the remainder starts a Range at (`G`, `N`).
+Ending the first subscription's Range at (`G`, `N`) covers exactly the complement with no gap and no overlap: the two requests carry the *same* numbers on the wire.
 
 This is what lets a subscriber move a Track to a different publisher partway through a Group instead of waiting for the next Group to start, which matters for Tracks whose current Group may stay open indefinitely.
 A Group can therefore be assembled from more than one publisher: each contributes a disjoint run of frames, and the subscriber concatenates them in index order.
@@ -213,13 +212,7 @@ The asymmetry with Groups is deliberate.
 A Group is the unit of decodability: dropping leading *Groups* leaves a stream the application can still decode, whereas dropping leading *Frames* often does not, whether because the Group opens with a keyframe the rest depends on or because its compression state lives in the frames that went missing.
 A subscription therefore starts at a Group's first frame, and a subscriber asks for a partial Group only to finish one whose earlier frames it already holds, from this publisher or another.
 
-Frame indices are only meaningful relative to a Group the subscriber has already begun receiving, so:
-
-- A `Frame Start` qualifies the group `Group Start` names, group 0 included.
-  A subscriber MUST send `Frame Start` = 0 unless it already holds every frame of that group below it.
-- A `Frame End` is meaningless without a `Group End`; an unbounded subscription (`Group End` = 0) MUST send `Frame End` = 0.
-
-A publisher MUST close the session with a PROTOCOL_VIOLATION on a non-zero `Frame End` without a `Group End`.
+Frame indices are only meaningful relative to a Group the subscriber has already begun receiving, so a subscriber MUST start a Range at frame 0 unless it already holds every frame of that group below its start.
 
 # Flow
 This section outlines the flow of messages within a moq-lite session.
@@ -796,7 +789,7 @@ A Group MAY contain zero FRAME messages, potentially indicating a gap in the tra
 A frame MAY contain an empty payload, potentially indicating a gap in the group.
 
 The GROUP message's `Frame Start` gives the index of the first FRAME on the stream, so a stream carrying only part of a Group is self-describing.
-It is redundant with the subscription's own `Frame Start` in the steady state, and carried anyway because a SUBSCRIBE_UPDATE that moves the bound races the Group Streams already in flight: the two travel on different streams with no ordering between them, so the receiver would otherwise have to guess which bound a given Group Stream was opened under.
+It is redundant with the subscription's own start Position in the steady state, and carried anyway because a SUBSCRIBE_UPDATE that moves the bound races the Group Streams already in flight: the two travel on different streams with no ordering between them, so the receiver would otherwise have to guess which bound a given Group Stream was opened under.
 
 A publisher MUST NOT send two Group Streams for the same Group Sequence on one subscription.
 A subscriber assembling a Group from more than one publisher does so across separate subscriptions, and is responsible for concatenating the runs in index order and for ignoring any frame it has already received.
@@ -809,7 +802,7 @@ The subscriber MAY cache the error and potentially retry later.
 QUIC datagrams provide unreliable, unordered delivery for latency-sensitive content that does not need retransmission.
 
 A publisher MAY transmit a Group consisting of exactly one Frame as a single QUIC datagram, in addition to (or instead of) opening a Group Stream, based on application hints, group size, and network conditions; a multi-frame Group is delivered via a Group Stream only.
-A publisher sends a datagram to a subscription only when its Group Sequence is inside the subscription's range, where a non-zero `Frame Start` excludes the start group (see [Positions](#positions)).
+A publisher sends a datagram to a subscription only when its Group Sequence is inside one of the subscription's Ranges, where a start Position past frame 0 excludes its group (see [Positions](#positions)).
 A datagram is never cached or retransmitted, and FETCH never returns one.
 A publisher MAY send a new subscription the datagrams still in a short send buffer, so a subscriber cannot assume a datagram was sent after it subscribed.
 A publisher that knows a FETCH names a group delivered only as a datagram resets the stream with NOT_FETCHABLE; otherwise it answers as for a group that does not exist, with NOT_FOUND.
@@ -1225,10 +1218,21 @@ SUBSCRIBE Message {
   Subscriber Priority (8)
   Group Order (8)
   Subscriber Max Age (i)
-  Group Start (i)
-  Group End (i)
-  Frame Start (i)
-  Frame End (i)
+  Range Count (i)
+  Range (..) ...
+}
+
+Range {
+  Start (Anchor)
+  End (Anchor)
+}
+
+Anchor {
+  Anchor Type (i)
+  [Group Sequence (i)]
+  [Frame Index (i)]
+  [Groups Back (i)]
+  [Timestamp (i)]
 }
 ~~~
 
@@ -1254,40 +1258,41 @@ A value of `0` means the subscriber wants only the latest group in live delivery
 This is a delivery-time preference, not a retention rule: the publisher MAY still hold these groups for FETCH or future subscriptions (see `Publisher Max Age` in [TRACK_INFO](#track-info)).
 See the [Expiration](#expiration) section for more information.
 
-**Group Start**:
-The minimum group sequence to deliver: an absolute floor, defaulting to 0 (no floor).
+**Range Count**:
+The number of Ranges that follow.
+A value of 0 is a PROTOCOL_VIOLATION, since a subscription that asks for nothing has no use.
 
-A floor is not a request; `Subscriber Max Age` is the only thing that asks for data.
+**Range**:
+A span of the Track to deliver, from its `Start` up to its `End`.
+The subscription is the union of its Ranges: the publisher delivers each Group inside any of them once, in `Group Order` across all of them, and accounts with SUBSCRIBE_DROP for every Group it will not deliver.
+
+**Anchor Type**:
+Which fields follow, and what the Anchor names:
+
+- None (0x0): no fields. As a `Start`, the oldest Group (no floor); as an `End`, the live edge (unbounded).
+- Absolute (0x1): `Group Sequence` and `Frame Index`, a Position. A `Start` delivers from it and an `End` stops just before it.
+- Relative (0x2): `Groups Back`, the Group that many before the latest, 0 being the latest. Included as an `End`.
+- Time (0x3): `Timestamp`, the Group containing that presentation time in the Track's `Timescale` (see [TRACK_INFO](#track-info)). Included as an `End`. On an untimed Track it is refused with TIMESTAMP_MISMATCH.
+
+Any other value is a PROTOCOL_VIOLATION.
+The publisher resolves a Relative or Time Anchor against the Track as it holds it.
+
+A `Start` is a floor, not a request; `Subscriber Max Age` is the only thing that asks for data.
 The publisher SHOULD start at the oldest group at or above the floor that [Expiration](#expiration) has not expired, and MUST NOT deliver an older one.
 A `Subscriber Max Age` of 0 therefore starts at the latest group, since every older group is already stale.
 A subscriber that buffers is then handed the head of what it can still play instead of only the live edge, and is never sent history it would discard on arrival: the same bound decides what to start at and what to expire, so the two cannot disagree.
 A floor above the latest group simply waits there: that is a resumed subscription naming where it left off.
 Reaching back is best-effort, not a guarantee that the groups still exist; see `Publisher Max Age` in [TRACK_INFO](#track-info).
 
-**Group End**:
-The last group to deliver (inclusive).
-A value of 0 means unbounded (default).
-A non-zero value is the absolute group sequence + 1.
-
-**Frame Start**:
-The index of the first frame to deliver within the `Group Start` group (see [Positions](#positions)).
-A value of 0 means from the start of that group (default), so the group is delivered whole.
-Frames before this index are not delivered, even when delivery begins at that exact group; a start resolved at a later group is always delivered from frame 0.
-A subscriber MUST send 0 unless it already holds every frame below this index, from this publisher or another, since a Group is the unit of decodability (see [Positions](#positions)).
-
-**Frame End**:
-The last frame to deliver (inclusive) within the end group (see [Positions](#positions)).
-A value of 0 means the whole group (default).
-A non-zero value is the absolute frame index + 1, matching `Group End`.
-MUST be 0 when `Group End` is 0, since an unbounded subscription has no end group to qualify.
-
-`Group End` and `Frame End` are offset by 1 so 0 can mean "absent". `Group Start` is an absolute sequence, and 0 is group 0.
+An Absolute `Start` past frame 0 delivers its group from that frame; a start resolved at a later group is always delivered from frame 0.
+A subscriber MUST start at frame 0 unless it already holds every frame below it, from this publisher or another, since a Group is the unit of decodability (see [Positions](#positions)).
+An Absolute `End` past frame 0 delivers its group up to that frame.
 
 ## SUBSCRIBE_UPDATE
 A subscriber can modify a subscription with a SUBSCRIBE_UPDATE message.
 A subscriber MAY send multiple SUBSCRIBE_UPDATE messages to update the subscription.
-The start and end group can be changed in either direction (growing or shrinking).
-Lowering `Group Start` covers the groups below the old start that the publisher still holds, not only those that arrive later; a group already sent is not sent again.
+Its Ranges replace the previous ones, growing or shrinking the subscription.
+Lowering a `Start` covers the groups below the old one that the publisher still holds, not only those that arrive later; a group already sent is not sent again.
 
 ~~~
 SUBSCRIBE_UPDATE Message {
@@ -1295,16 +1300,14 @@ SUBSCRIBE_UPDATE Message {
   Subscriber Priority (8)
   Group Order (8)
   Subscriber Max Age (i)
-  Group Start (i)
-  Group End (i)
-  Frame Start (i)
-  Frame End (i)
+  Range Count (i)
+  Range (..) ...
   Wanted Group (i)
 }
 ~~~
 
 See [SUBSCRIBE](#subscribe) for information about each field.
-Moving `Frame Start` forward within a group that is already being delivered does not retract frames the publisher has already sent; like `Group Start`, it only bounds what the publisher sends from here on.
+Moving a `Start` forward within a group that is already being delivered does not retract frames the publisher has already sent; it only bounds what the publisher sends from here on.
 
 
 **Wanted Group**:
@@ -1367,7 +1370,7 @@ The maximum age, in milliseconds, that the publisher caches a non-latest group, 
 Applies only to non-latest groups; the latest group is always retained.
 It is an upper bound on retention, the inverse of an HTTP `Cache-Control: max-age` guarantee:
 
-- A subscriber MAY issue a SUBSCRIBE or FETCH with an older `Group Start`, but the publisher MAY have already dropped any group whose age exceeds `Publisher Max Age`.
+- A subscriber MAY issue a SUBSCRIBE or FETCH for an older group, but the publisher MAY have already dropped any group whose age exceeds `Publisher Max Age`.
 - The publisher MAY drop groups sooner than `Publisher Max Age` under resource pressure; subscribers MUST NOT assume older groups within the bound are still available.
 
 Encoded as the duration in milliseconds plus one; `0` means no publisher limit.
@@ -1485,7 +1488,7 @@ Set to 0x0 to indicate a SUBSCRIBE_OK message.
 **Group**:
 The absolute sequence number where delivery starts when the subscription resolves.
 Group streams can arrive out of order, so it need not be the first group sent.
-It MUST be greater than or equal to the requested `Group Start`.
+It MUST be greater than or equal to the lowest requested `Start`, as resolved for a Relative or Time Anchor.
 This group is not a new floor.
 A subscriber SHOULD NOT wait for a group between the requested floor and this group.
 The publisher still delivers such a group if it is created or becomes available later, while it is within `Subscriber Max Age`.
@@ -1494,7 +1497,7 @@ A subscriber whose `Subscriber Max Age` resolves the start to the latest group l
 There is no matching frame field, because the start frame is never in doubt: a partial group is only delivered when it was asked for, so the subscription starts either exactly where it asked or at the beginning of a later group (see [Positions](#positions)).
 The subscriber derives the start frame from `Group` and its own request:
 
-- `Group` equals the requested start group: delivery begins at the requested `Frame Start`.
+- `Group` equals the requested start group: delivery begins at the requested start frame.
 - `Group` is greater: delivery begins at frame 0.
 
 The second case is easy to get wrong, so to be explicit: a subscriber that requested group 5 frame 15 and receives `Group` = 6 starts at **frame 0** of group 6, not frame 15.
@@ -1813,7 +1816,7 @@ The `Message Length` describes the payload size on the wire.
 - Added TRACK_INFO `Refresh` and SUBSCRIBE_UPDATE `Wanted Group`, carrying ratio-based refresh demand through relays.
 
 - Added `Compression` to TRACK_INFO: none (0x0) or DEFLATE (0x1), whose Groups are DEFLATE streams per draft-lcurley-moq-flate. FRAME and datagrams carry an `Inflated Size` when it is not none. Earlier versions receive the Track inflated.
-- A subscription starts at a Group's first frame: SUBSCRIBE carries a non-zero `Frame Start` only when the subscriber holds every frame below it, compressed Track or not.
+- A subscription starts at a Group's first frame: SUBSCRIBE starts past frame 0 only when the subscriber holds every frame below it, compressed Track or not.
 
 - Replaced ANNOUNCE_OK Active Count with an ordered, empty SYNCED event (0x4), marking the initial set without retaining routes that end before delivery.
 
@@ -1828,9 +1831,9 @@ The `Message Length` describes the payload size on the wire.
 - Listed the shared EXPIRED_AUTH_TOKEN (0x18) session code. A request that expires on its own resets with the UNAUTHORIZED stream code.
 
 - SUBSCRIBE_OK `Group` names where delivery starts when the subscription resolves, which need not be the first group sent. It is not a new floor. A subscriber does not wait for a group between the requested floor and it, but a publisher still delivers one that arrives later within Subscriber Max Age.
-- Corrected the SUBSCRIBE note that offset `Group Start` by 1. Only `Group End` and `Frame End` are offset so 0 can mean absent. `Group Start` is an absolute sequence, and 0 is group 0.
+- Replaced `Group Start`, `Group End`, `Frame Start`, and `Frame End` in SUBSCRIBE and SUBSCRIBE_UPDATE with a non-empty list of Ranges. Each end is an Anchor: none, an absolute Position (exclusive as an end), a count of Groups back from the latest, or a presentation time.
 - A subscription's range bounds datagrams like groups, and FETCH never returns a datagram.
-- A SUBSCRIBE_UPDATE that lowers `Group Start` covers the groups below the old start that the publisher still holds, not only those that arrive later. A group already sent is not sent again.
+- A SUBSCRIBE_UPDATE that lowers a `Start` covers the groups below the old start that the publisher still holds, not only those that arrive later. A group already sent is not sent again.
 - A publisher SHOULD order a datagram among the subscription's streams as if it were its Group's stream, ahead of that stream when both exist. It SHOULD drop a datagram rather than block when the transport has no room for it, where it previously sent one only if the congestion controller could transmit it immediately.
 - Assigned 0x3A NOT_FETCHABLE in the stream error table: a FETCH for a group delivered only as a datagram.
 - The subscriber FINs its Subscribe Stream after settling its tail; graceful session close waits for that FIN or reset.
