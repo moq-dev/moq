@@ -401,11 +401,6 @@ impl<S: Stream> Export<S> {
 			}
 		}
 
-		self.jitter.expect(
-			(0..self.video.len())
-				.map(|i| (0, i))
-				.chain((0..self.audio.len()).map(|i| (1, i))),
-		);
 		self.fill(waiter)?;
 
 		// 3. Emit the header once every track's codec config has resolved.
@@ -600,6 +595,12 @@ impl<S: Stream> Export<S> {
 		// publisher retires a rendition as its track finishes or drops, and the catalog
 		// update races that end on another stream, so only the track's end can say which it
 		// was: a finish ends it cleanly, and a drop is the error the export reports.
+		// Only binding adds tracks, so the clock waits on the bound set as of this update.
+		self.jitter.expect(
+			(0..self.video.len())
+				.map(|i| (0, i))
+				.chain((0..self.audio.len()).map(|i| (1, i))),
+		);
 		Ok(())
 	}
 
