@@ -81,7 +81,7 @@ impl Rendition {
 	}
 
 	/// The output framerate, inherited from the source.
-	pub fn framerate(&self) -> Option<moq_video::Rate> {
+	pub fn framerate(&self) -> Option<moq_video::FrameRate> {
 		self.0.rung.framerate
 	}
 
@@ -370,7 +370,7 @@ mod tests {
 			short_side: height,
 			size: moq_video::Size::new(height * 16 / 9, height),
 			bitrate: moq_net::bandwidth::Rate::from_bps(100_000),
-			framerate: Some(moq_video::Rate::new(30, 1).unwrap()),
+			framerate: Some(moq_video::FrameRate::new(30, 1).unwrap()),
 		}
 	}
 

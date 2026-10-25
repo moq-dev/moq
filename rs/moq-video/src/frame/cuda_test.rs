@@ -92,7 +92,7 @@ fn nal_types(annexb: &[u8]) -> Vec<u8> {
 }
 
 fn nvenc(size: Size, color: Color) -> crate::encode::Encoder {
-	let mut config = crate::encode::Config::new(size.width, size.height, crate::Rate::new(30, 1).unwrap());
+	let mut config = crate::encode::Config::new(size.width, size.height, crate::FrameRate::new(30, 1).unwrap());
 	config.kind = crate::encode::Kind::Named("nvenc".into());
 	config.color = Some(color);
 	config.gop = crate::encode::Gop::Keyframe { interval: 30 };
@@ -541,7 +541,7 @@ async fn vulkan_cuda_auto_external_encode() {
 	};
 	let mut renditions = Vec::new();
 	for output in [size, Size::new(160, 96)] {
-		let mut config = crate::encode::Config::new(output.width, output.height, crate::Rate::new(30, 1).unwrap());
+		let mut config = crate::encode::Config::new(output.width, output.height, crate::FrameRate::new(30, 1).unwrap());
 		config.input = Some(device);
 		config.color = Some(color);
 		config

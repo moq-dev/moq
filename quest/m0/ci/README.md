@@ -92,7 +92,6 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [Share local check capacity](/quest/m0/ci/local-gate.md) - gate expensive phases and bound internal fanout
 - [select.sh launcher path](/quest/m0/ci/select-launcher-path.md) - `sh/rs/select.sh` runs from a subdirectory by resolving its launcher before `cd`
 - [Build queue entries concurrently](/quest/m0/ci/queue-concurrency.md) - the queue builds two or more entries at once instead of one
-- [Share Python check and test preparation](/quest/m0/ci/python-setup.md) - prepare editable bindings once per combined CI pass while preserving standalone commands
 - [Check the bindings in separate lanes](/quest/m0/ci/ffi-lane.md) - py, kt, swift, go, carla, and cpp check concurrently instead of in one serial lane
 - [Measure nightly compiler levers](/quest/m0/ci/nightly-levers.md) - the parallel frontend and Cranelift, adopted only if the numbers beat their risks
 - [Bump to the manifest fix](/quest/m0/ci/mbx-bump.md) - condition: an mbx release contains jdx/mr-boxington#798; then bump the Rust cache's pin

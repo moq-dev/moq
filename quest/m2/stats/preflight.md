@@ -6,7 +6,7 @@ A bounded test run against a published broadcast produces one report a person
 can act on: catalog validity, codec support, time to the first sync point
 (a group start a decoder can begin at), bitrate and frame cadence per
 rendition, sync point interval, audio/video skew,
-media timestamp continuity, the [health verdict](/quest/m2/stats/health.md)
+media timestamp continuity, the [health verdict](/doc/concept/stats.md#health)
 from the publisher's stats, and whether the broadcast ends with a clean
 unannounce (observed by the check; the publisher, which owns the
 `broadcast::Producer`, does the unannounce). A failure names the broken layer
@@ -49,7 +49,6 @@ Public API: a preflight check and its report type, and a CLI sink. Wire: none.
 
 ## Required
 
-- [Client health](/quest/m2/stats/health.md) - the verdict the report includes
 - [Rust reporters](/quest/m2/stats/rust.md) - a publisher with a stats track for the end-to-end proof
 
 ## Related
