@@ -58,15 +58,22 @@ the reverse (decided 2026-10-20, maintainer):
   without changing moq-net's `track(name)`; propose the encoding in the PR.
   Record it in `draft-lcurley-moq-e2ee.md`, replacing the Catalogs section's
   `.z` sibling rule.
-- Ranges: moq-net widens a range that starts mid-group on a compressed group
-  to frame 0 when the requester lacks the prefix, but it sees only the
-  uncompressed physical track. The wrapper's subscriber applies that rule
-  itself: it widens such a physical request to frame 0, inflates from
-  there, and yields only the requested logical range. Test a resumed
-  mid-group read, not only full round trips.
+- Ranges: every moq-net range starts at a group's first frame
+  ([moq-dev/moq#6465](https://github.com/moq-dev/moq/pull/6465)), so the wrapper reads each physical group whole
+  and inflates from frame 0.
 - Frames: AEAD authenticates a whole frame, so the wrapper's frame producer
   buffers chunks from `write` and seals at `finish`, and its frame consumer
   yields chunks only after the frame authenticates.
+- Listing (maintainer, 2026-10-24): the wire listing (moq-lite's Tracks
+  stream, IETF SUBSCRIBE_TRACKS) carries physical names unchanged, so
+  relays list a protected broadcast like any other. The consumer's `tracks`
+  opens each listed physical name and reports its semantic name. A name that does not
+  open (relay-forged, another epoch's, malformed) is skipped after one open
+  and keeps no state: a relay can inject names into a listing, so ending
+  the listing would let it deny discovery. Test a forged and an
+  older-epoch name among valid ones. Recovery is crate-private
+  `generation::Producer::open` today; move it to the consuming generation,
+  which holds the same name keys, so both sides can open.
 - Demand and preference cross the wrapper: an encrypted track's demand is
   its physical track's, and preference updates reach the physical track.
 - Keep the nonce rules the epic specifies: a group producer still owns its
@@ -83,3 +90,7 @@ and each compressed object's authenticated inflated size.
 ## Required
 
 - [moq-net traits](/quest/m2/net-wrap/traits.md) - the traits this implements
+
+## Related
+
+- [Compressed tracks](/quest/m1/compress/README.md) - the per-group compression the wrapper applies before AEAD

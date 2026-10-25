@@ -12,7 +12,7 @@ const { probe } = await import("./probe.ts");
 test("audio-only sampling holds probe demand until its final RTT sample", async () => {
 	jest.useFakeTimers();
 	const clock = new Manual();
-	const restore = clock.install();
+	const installed = clock.install();
 	const network = new Observed<{ rtt: Milli } | undefined>(undefined);
 	const producer = new Effect((effect) => {
 		if (effect.get(network.used)) effect.set(network, { rtt: Milli(12) }, undefined);
@@ -32,16 +32,16 @@ test("audio-only sampling holds probe demand until its final RTT sample", async 
 	const measurement = probe(watch);
 	try {
 		await drain();
-		await clock.advanceAsync(Nano.fromMilli(Milli(250)));
+		await clock.advance(Nano.fromMilli(Milli(250)));
 		expect(measurement.drain().map((sample) => sample.rtt)).toEqual([12]);
 		await measurement.finish();
 		expect(measurement.drain().at(-1)?.rtt).toBe(12);
 		expect(network.used.peek()).toBe(false);
-		await clock.advanceAsync(Nano.fromMilli(Milli(500)));
+		await clock.advance(Nano.fromMilli(Milli(500)));
 		expect(measurement.drain()).toEqual([]);
 	} finally {
 		producer.close();
-		restore();
+		installed.close();
 		jest.useRealTimers();
 	}
 });

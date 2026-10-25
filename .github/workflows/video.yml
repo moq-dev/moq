@@ -4,10 +4,9 @@ name: Video
 # the WebGPU path, a lost device, and the Canvas2D fallback only exist in a real
 # browser. SwiftShader stands in for the GPU, so no GPU runner is needed.
 #
-# Narrow trigger, like wasm.yml: the renderer, the harness, and the two files that
-# wire the renderer into `<moq-publish>` (which the harness drives). `@moq/watch`
-# wires it the same way but needs a relay to drive, so its regressions surface
-# nightly instead.
+# Narrow trigger, like wasm.yml: the renderer, the harness, and what the harness
+# drives: the two files that wire the renderer into `<moq-publish>`, and the
+# `@moq/watch` playback path, fed from an in-memory origin so no relay is needed.
 
 permissions:
   contents: read
@@ -35,13 +34,6 @@ jobs:
           persist-credentials: false
 
       - uses: ./.github/actions/nix
-
-      # Playwright's Chromium isn't in the nix devShell. Install it plus its apt
-      # runtime libs (`--with-deps` needs the host package manager); the recipe's
-      # own `playwright install` then no-ops.
-      - name: Playwright Chromium
-        run: nix develop --command bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium"
-        shell: bash -leo pipefail {0}
 
       - name: Video
         run: nix develop --command just test video

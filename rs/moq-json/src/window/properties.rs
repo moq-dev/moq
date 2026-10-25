@@ -46,6 +46,8 @@ fn value() -> BoxedStrategy<Value> {
 enum Edit {
 	Push(Value),
 	Pop(u64),
+	/// Restate the window with [`Encoder::snapshot`], as a refresh does.
+	Restate,
 }
 
 #[derive(Clone, Debug)]
@@ -104,6 +106,11 @@ fn check(config: ProducerConfig, steps: Vec<Step>, join: usize) -> TestCaseResul
 					offset += count as u64;
 					records.drain(..count);
 					frame
+				}
+				Edit::Restate => {
+					let frame = encoder.snapshot().unwrap();
+					prop_assert!(frame.keyframe);
+					Some(frame)
 				}
 			};
 			if let Some(frame) = frame {
@@ -236,7 +243,11 @@ fn window_codec_property_matches_every_readers_logical_window() {
 	});
 	let steps = proptest::collection::vec(
 		(
-			prop_oneof![value().prop_map(Edit::Push), (0u64..=8).prop_map(Edit::Pop)],
+			prop_oneof![
+				4 => value().prop_map(Edit::Push),
+				4 => (0u64..=8).prop_map(Edit::Pop),
+				1 => Just(Edit::Restate),
+			],
 			0u8..16,
 			any::<bool>(),
 		)
@@ -248,16 +259,13 @@ fn window_codec_property_matches_every_readers_logical_window() {
 		1..65,
 	);
 	let sequence = (
-		(
-			proptest::sample::select(vec![0, 1, 2, 8, 100]),
-			any::<bool>(),
-			proptest::option::of(1usize..=8),
-		)
-			.prop_map(|(op_ratio, compression, checkpoint_records)| ProducerConfig {
-				op_ratio,
+		(any::<bool>(), any::<bool>(), proptest::option::of(1usize..=8)).prop_map(
+			|(ops, compression, checkpoint_records)| ProducerConfig {
+				ops,
 				compression,
 				checkpoint_records,
-			}),
+			},
+		),
 		steps,
 		0usize..64,
 	);

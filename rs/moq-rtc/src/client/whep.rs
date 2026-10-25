@@ -6,8 +6,6 @@
 //! returned answer, then hands the resulting `str0m::Rtc` to the internal
 //! session driver in ingest mode (the same sink the WHIP server uses).
 
-use std::time::Instant;
-
 use str0m::{
 	Candidate, Rtc,
 	change::SdpAnswer,
@@ -17,19 +15,15 @@ use url::Url;
 
 use crate::{Error, Result, client::Client, ingest::IngestSink, session};
 
-pub(crate) async fn dial(
-	client: &Client,
-	url: Url,
-	broadcast: moq_net::broadcast::Producer,
-) -> Result<crate::wire::Source> {
+pub(crate) async fn dial(client: &Client, url: Url, broadcast: moq_net::broadcast::Producer) -> Result<()> {
 	let config = moq_mux::catalog::Config::default()
 		.with_max_age(client.config().max_age)
 		.with_bandwidth(client.config().bandwidth.clone());
 	let sink = Box::new(IngestSink::new(broadcast, config)?);
 
 	let socket = session::bind_udp(&client.config().ice_candidates).await?;
-	let mut rtc = Rtc::new(Instant::now());
-	for addr in &socket.locals {
+	let mut rtc = Rtc::new(moq_clock::now().into_std());
+	for addr in socket.locals() {
 		let cand = Candidate::host(*addr, "udp").map_err(Error::rtc)?;
 		rtc.add_local_candidate(cand);
 	}
@@ -67,11 +61,5 @@ pub(crate) async fn dial(
 	for mid in mids {
 		session.open_media(mid)?;
 	}
-	let wire = session.wire();
-	tokio::spawn(async move {
-		let result = session.run().await;
-		session::log_session_end("whep client", &result);
-	});
-
-	Ok(wire)
+	session::end("whep client", session.run().await)
 }

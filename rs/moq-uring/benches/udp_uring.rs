@@ -1,10 +1,12 @@
 //! io_uring comparison for UDP receive batching and send GSO on Linux.
-// Benchmarks measure themselves on the host clock.
-#![allow(clippy::disallowed_methods)]
 
 use criterion::{criterion_group, criterion_main};
 
 #[cfg(target_os = "linux")]
+#[expect(
+	clippy::disallowed_methods,
+	reason = "benchmarks measure themselves on the host clock"
+)]
 mod linux {
 	use std::alloc::{Layout, alloc_zeroed, dealloc, handle_alloc_error};
 	use std::fmt;

@@ -3,32 +3,70 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::Context;
-use mpeg2ts::ts::{Pid, TsPacket};
+use mpeg2ts::ts::Pid;
 
-use super::claims::Claims;
-use super::import::{Framer, Liveness, PatReader, SectionReassembler};
-use super::{Ext, Import, psi, stats};
+use super::demux::{Demux, Packet};
+use super::import::SectionReassembler;
+use super::unclaimed::Unclaimed;
+use super::{Ext, Import, catalog::SI_PIDS, psi, stats};
 use crate::catalog;
 
 /// Imports every program the first PAT lists, each as its own broadcast on `origin`, with its
 /// own clock and catalog.
 ///
 /// Program `n` of `event.hang` publishes on `event/n.hang`, keeping the catalog suffix last so
-/// format detection still sees it; a name without one gains a plain `/n`. Input ahead of that
-/// PAT is dropped, as a single [`Import`] drops media ahead of its PSI. A program a later PAT
-/// adds is not published; one it removes ends the import.
+/// format detection still sees it; a name without one gains a plain `/n`. A program starts once
+/// its PMT lists an elementary stream, so one the PAT names but the input never describes costs
+/// nothing. Input ahead of that PMT is dropped, as a single [`Import`] drops media ahead of its
+/// PSI; its SI arrives with the next repetition, as for an import joining mid-stream. A later PAT moves a waiting program to the PMT PID it names and drops one it no longer
+/// lists. A program a later PAT adds is not published; removing a started one ends the import.
+///
+/// The multiplex is parsed once: framing, continuity, the PAT and the SI sections are shared,
+/// and each program reads only the packets on the PIDs its PAT entry and PMT claim. A packet on a
+/// PID no program reads, the PAT's PMT PIDs, the SI PIDs and the null PID aside, is counted once
+/// for the multiplex (see [`stats::Snapshot::streams`]). Counting waits until every program the
+/// PAT lists has started, or 0.5 s of program clock has passed without its PMT (TR 101 290's
+/// `PMT_error_2`), since until then a PID may be a program's still to come.
 pub struct Programs {
 	origin: moq_net::origin::Producer,
 	name: moq_net::PathOwned,
 	config: catalog::Config,
-	/// Input not yet read for the PAT: a trailing partial packet, or what follows the PAT.
-	pending: Vec<u8>,
-	/// Reads the PAT out of the input.
-	scan: PatScan,
-	/// Empty until the PAT arrives.
+	demux: Demux,
+	/// The latest whole PAT, from the first that lists a program, which seeds every program.
+	pat: Option<psi::Pat>,
+	/// The programs the first PAT lists and no PMT has started yet, by the PMT PID the latest
+	/// PAT names for them.
+	waiting: HashMap<u16, Waiting>,
+	/// PMT sections dropped for a bad CRC on a PID no program read, by PID.
+	crc_errors: BTreeMap<u16, u64>,
+	/// Empty until a PMT starts a program.
 	programs: Vec<Program>,
-	/// Every program's PAT and PMT, read once for the PIDs none of them claims.
-	tables: Tables,
+	/// The programs reading each PID they claim, indexed by PID, in program order. The PAT and
+	/// the SI PIDs go to every program instead.
+	readers: Vec<Vec<usize>>,
+	/// The programs the current [`decode`](Self::decode) call routed a packet to.
+	touched: Vec<usize>,
+	/// Every PMT PID the latest PAT lists, which the PAT claims whether or not a program reads it.
+	pmt_pids: HashSet<u16>,
+	/// The programs the PAT lists that no PMT has started, holding back the unclaimed count.
+	holdouts: HashSet<u16>,
+	/// The first program's clock past which every holdout's PMT has lapsed, once it has a clock.
+	deadline: Option<u64>,
+	/// The packets on PIDs no program reads.
+	unclaimed: Unclaimed,
+}
+
+/// `PMT_error_2`: a PMT recurs at least every 0.5 s of program clock.
+const PMT_LIMIT: u64 = super::passthrough::PCR_HZ / 2;
+
+/// The programs waiting for their PMT on one PID.
+#[derive(Default)]
+struct Waiting {
+	sections: SectionReassembler,
+	programs: HashSet<u16>,
+	/// Whether a program read this PID when the section still assembling began, and so counts
+	/// it if it is corrupt.
+	began_read: bool,
 }
 
 /// One program's broadcast.
@@ -42,6 +80,10 @@ struct Program {
 	/// The route and catalog track until the catalog first names a servable track: announced any
 	/// sooner, a relay would ask for tracks it cannot serve yet.
 	pending: Option<(moq_net::origin::Route, moq_net::track::Consumer)>,
+	/// The PIDs this program is listed under in [`Programs::readers`], sorted.
+	claims: Vec<u16>,
+	/// Whether the current [`Programs::decode`] call routed it a packet.
+	touched: bool,
 }
 
 impl Program {
@@ -71,78 +113,295 @@ impl Programs {
 			origin,
 			name: name.as_path().to_owned(),
 			config,
-			pending: Vec::new(),
-			scan: PatScan::default(),
+			demux: Demux::new(true),
+			pat: None,
+			waiting: HashMap::new(),
+			crc_errors: BTreeMap::new(),
 			programs: Vec::new(),
-			tables: Tables::new(),
+			readers: vec![Vec::new(); 1 << 13],
+			touched: Vec::new(),
+			pmt_pids: HashSet::new(),
+			holdouts: HashSet::new(),
+			deadline: None,
+			unclaimed: Unclaimed::default(),
 		}
 	}
 
 	/// Demux a chunk of the multiplex. A trailing partial packet is retained for the next call.
 	pub fn decode(&mut self, data: &[u8]) -> anyhow::Result<()> {
-		if !self.programs.is_empty() {
-			return self.feed(data);
-		}
-		self.pending.extend_from_slice(data);
-		let Some(pat) = self.scan.scan(&mut self.pending) else {
-			return Ok(());
-		};
-		for program in pat.program_numbers() {
-			let name = program_broadcast(self.name.as_str(), program);
-			let mut broadcast = self
-				.origin
-				.create_broadcast(&name)
-				.with_context(|| format!("failed to create broadcast {name}"))?;
-			// TS carries undecoded elementary streams verbatim, so each catalog carries the
-			// `mpegts` extension, and owns its broadcast's catalog tracks.
-			let config = self
-				.config
-				.clone()
-				.with_catalog(catalog::hang::Catalog::<Ext>::default());
-			let catalog = catalog::Producer::new(&mut broadcast, config)?;
-			let mut import = Import::new(broadcast.clone(), catalog.reserve())
-				.with_program(program)
-				.in_multiplex();
-			// Seeded with the scanner's PAT rather than replaying its packets, so every section
-			// reaches the importer and nothing the scanner counted is counted again.
-			import.handle_pat(&pat)?;
-			// Each program is its own publisher instance for this run, so a restart
-			// replaces it rather than resuming into it.
-			let route = moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
-			let listed = broadcast.consume().track(hang::Catalog::DEFAULT_NAME)?;
-			self.programs.push(Program {
-				number: program,
-				broadcast,
-				import,
-				catalog,
-				pending: Some((route, listed)),
-			});
-		}
-		self.tables.pat(&pat);
-		let pending = std::mem::take(&mut self.pending);
-		self.feed(&pending)
+		let mut demux = std::mem::take(&mut self.demux);
+		let result = self.decode_with(&mut demux, data);
+		self.demux = demux;
+		result
 	}
 
-	fn feed(&mut self, data: &[u8]) -> anyhow::Result<()> {
-		for program in &mut self.programs {
-			program.import.decode(data)?;
+	fn decode_with(&mut self, demux: &mut Demux, data: &[u8]) -> anyhow::Result<()> {
+		demux.push(data);
+		while let Some(packet) = demux.next() {
+			// The holdouts have no clock of their own until their PMT names one.
+			if self.deadline.is_none() && !self.holdouts.is_empty() {
+				self.deadline = self.now().map(|now| now + PMT_LIMIT);
+			}
+			if let Some(pat) = &packet.pat {
+				self.wait(pat);
+			} else if !self.waiting.is_empty() {
+				self.describe(&packet)?;
+			}
+			// Every program reads the PAT, and the SI sections the parser reassembled.
+			let everyone = packet.pid == Pid::PAT || (SI_PIDS.contains(&packet.pid) && !packet.sections.is_empty());
+			let readers = match everyone {
+				true => None,
+				false => match self.readers[usize::from(packet.pid)].as_slice() {
+					[] => {
+						self.unclaimed(&packet);
+						continue;
+					}
+					readers => Some(readers),
+				},
+			};
+			let mut changed = Vec::new();
+			for at in 0..readers.map_or(self.programs.len(), <[usize]>::len) {
+				let index = readers.map_or(at, |readers| readers[at]);
+				let program = &mut self.programs[index];
+				if !std::mem::replace(&mut program.touched, true) {
+					self.touched.push(index);
+				}
+				let import = &mut program.import;
+				import.packet(&packet)?;
+				if import.claims_changed() {
+					changed.push(index);
+				}
+			}
+			drop(packet);
+			// Only a PAT or PMT moves claims or restarts a route.
+			for index in changed {
+				for pid in self.programs[index].import.restarts() {
+					// Another program still reading the PID judges its partial bytes against
+					// this chain, so only the PID's sole reader restarts it.
+					if self.readers[usize::from(pid)].iter().all(|&reader| reader == index) {
+						demux.restart(pid);
+					}
+				}
+				self.reclaim(index);
+			}
+		}
+		demux.drain();
+		// Only a program that read something has anything to flush or announce, so a call
+		// costs what it carried rather than one pass over every program.
+		for index in self.touched.drain(..) {
+			let program = &mut self.programs[index];
+			program.touched = false;
+			program.import.flush_batch()?;
 			program.announce_if_listed()?;
 		}
-		self.tables.decode(data);
 		Ok(())
+	}
+
+	/// Wait for the PMT of each program the first whole PAT listing one names. A later PAT moves
+	/// a waiting program to the PMT PID it names, and drops one it no longer lists.
+	fn wait(&mut self, pat: &psi::Pat) {
+		// The PAT repeats several times a second, mostly unchanged.
+		if self.pat.as_ref() == Some(pat) {
+			return;
+		}
+		let mut listed = HashMap::new();
+		for entry in &pat.programs {
+			// An importer takes a program's first entry, so a repeated number waits there alone.
+			if entry.program_number != 0 {
+				listed.entry(entry.program_number).or_insert(entry.pmt_pid.as_u16());
+			}
+		}
+		if self.pat.is_none() {
+			if listed.is_empty() {
+				return;
+			}
+			for (&number, &pid) in &listed {
+				self.waiting.entry(pid).or_default().programs.insert(number);
+			}
+			self.holdouts = listed.keys().copied().collect();
+		} else {
+			let mut moved = Vec::new();
+			self.waiting.retain(|pid, waiting| {
+				waiting.programs.retain(|number| match listed.get(number) {
+					Some(listed) if listed == pid => true,
+					Some(&listed) => {
+						moved.push((*number, listed));
+						false
+					}
+					None => false,
+				});
+				!waiting.programs.is_empty()
+			});
+			for (number, pid) in moved {
+				self.waiting.entry(pid).or_default().programs.insert(number);
+			}
+			// A program the PAT adds holds the count back afresh.
+			self.holdouts.retain(|number| listed.contains_key(number));
+			let started: HashSet<u16> = self.programs.iter().map(|program| program.number).collect();
+			for &number in listed.keys() {
+				if !started.contains(&number) && self.holdouts.insert(number) {
+					self.deadline = None;
+				}
+			}
+		}
+		self.pmt_pids = listed.values().copied().collect();
+		self.pat = Some(pat.clone());
+	}
+
+	/// The first program's clock, which times the holdouts' lapse.
+	fn now(&self) -> Option<u64> {
+		self.programs.first().and_then(|program| program.import.now())
+	}
+
+	/// Count a packet on a PID no program reads, unless the PAT claims it or a holdout's PMT may
+	/// still claim it.
+	fn unclaimed(&mut self, packet: &Packet) {
+		// A packet flagged corrupt may carry another PID's number.
+		if packet.pkt[1] & 0x80 != 0 || Unclaimed::fixed(packet.pid, true) || self.pmt_pids.contains(&packet.pid) {
+			return;
+		}
+		let acquired = match self.holdouts.is_empty() {
+			true => self.pat.is_some(),
+			false => self
+				.deadline
+				.zip(self.now())
+				.is_some_and(|(deadline, now)| now > deadline),
+		};
+		if acquired {
+			self.unclaimed.packet(packet.pid);
+		}
+	}
+
+	/// Read a packet on a waiting PMT PID, and start each program whose PMT it completes with a
+	/// stream listed.
+	///
+	/// A started program reads this packet itself, from the reassembler as it stood before it,
+	/// so its own PMT path applies the PMT, counts the packet's corrupt sections, and starts its
+	/// clock from the PCR already seen. Of several revisions in the packet, the last decides.
+	fn describe(&mut self, packet: &Packet) -> anyhow::Result<()> {
+		let Some(waiting) = self.waiting.get_mut(&packet.pid) else {
+			return Ok(());
+		};
+		let before = waiting.sections.clone();
+		let read = self.readers[usize::from(packet.pid)]
+			.iter()
+			.any(|&index| self.programs[index].import.reads_pmt(packet.pid));
+		let began = waiting.began_read;
+		let mut sections = Vec::new();
+		waiting.sections.push(packet.pkt, &mut sections);
+		let resumed = waiting.sections.resumed();
+		if waiting.sections.fresh() {
+			waiting.began_read = read;
+		}
+		// Corrupt sections no program read from their start.
+		let mut corrupt = 0;
+		let mut latest: Vec<psi::Pmt> = Vec::new();
+		for (index, section) in sections.into_iter().enumerate() {
+			// Other tables may share the PID.
+			if section.first() != Some(&psi::PMT_TABLE_ID) {
+				continue;
+			}
+			if !psi::crc_ok(&section) {
+				let read = if index == 0 && resumed { began } else { read };
+				corrupt += u64::from(!read);
+				continue;
+			}
+			if let Some(pmt) = psi::Pmt::parse(&section)
+				&& waiting.programs.contains(&pmt.program_number)
+			{
+				latest.retain(|seen| seen.program_number != pmt.program_number);
+				latest.push(pmt);
+			}
+		}
+		latest.retain(|pmt| !pmt.streams.is_empty());
+		if latest.is_empty() {
+			if corrupt > 0 {
+				*self.crc_errors.entry(packet.pid).or_default() += corrupt;
+				tracing::warn!(pid = packet.pid, "dropped a PSI section with a bad CRC");
+			}
+			return Ok(());
+		}
+		for pmt in &latest {
+			waiting.programs.remove(&pmt.program_number);
+		}
+		if waiting.programs.is_empty() {
+			self.waiting.remove(&packet.pid);
+		}
+		for pmt in latest {
+			self.start(pmt.program_number, packet.pid, before.clone())?;
+		}
+		// The programs just started read this packet, so they read any section it began.
+		if let Some(waiting) = self.waiting.get_mut(&packet.pid) {
+			waiting.began_read = true;
+		}
+		Ok(())
+	}
+
+	/// Create the broadcast of program `number`, its importer seeded with the PAT and carrying
+	/// on the PMT `sections` began on `pmt_pid`.
+	fn start(&mut self, number: u16, pmt_pid: u16, sections: SectionReassembler) -> anyhow::Result<()> {
+		self.holdouts.remove(&number);
+		let pat = self.pat.as_ref().expect("a program waits on its PAT");
+		let name = program_broadcast(self.name.as_str(), number);
+		let mut broadcast = self
+			.origin
+			.create_broadcast(&name)
+			.with_context(|| format!("failed to create broadcast {name}"))?;
+		// TS carries undecoded elementary streams verbatim, so each catalog carries the
+		// `mpegts` extension, and owns its broadcast's catalog tracks.
+		let config = self
+			.config
+			.clone()
+			.with_catalog(catalog::hang::Catalog::<Ext>::default());
+		let catalog = catalog::Producer::new(&mut broadcast, config)?;
+		let pmt_pid = Pid::new(pmt_pid).expect("a packet's PID fits 13 bits");
+		let mut import = Import::new(broadcast.clone(), catalog.reserve())
+			.with_program(number)
+			.with_pmt(pmt_pid, sections);
+		import.handle_pat(pat)?;
+		// Each program is its own publisher instance for this run, so a restart
+		// replaces it rather than resuming into it.
+		let route = moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+		let listed = broadcast.consume().track(hang::Catalog::DEFAULT_NAME)?;
+		self.programs.push(Program {
+			number,
+			broadcast,
+			import,
+			catalog,
+			pending: Some((route, listed)),
+			claims: Vec::new(),
+			touched: false,
+		});
+		self.reclaim(self.programs.len() - 1);
+		Ok(())
+	}
+
+	/// Move program `index` in [`Self::readers`] to the PIDs it claims now.
+	fn reclaim(&mut self, index: usize) {
+		let program = &mut self.programs[index];
+		let claims = program.import.claims();
+		for &pid in program.claims.iter().filter(|pid| claims.binary_search(pid).is_err()) {
+			self.readers[usize::from(pid)].retain(|&reader| reader != index);
+		}
+		for &pid in claims.iter().filter(|pid| program.claims.binary_search(pid).is_err()) {
+			let readers = &mut self.readers[usize::from(pid)];
+			let at = readers.partition_point(|&reader| reader < index);
+			readers.insert(at, index);
+		}
+		program.claims = claims;
 	}
 
 	/// Every program's counters in one map: PIDs are unique across a multiplex.
 	///
-	/// Every importer reads the same PAT, and programs sharing a PMT PID read the same PMT
-	/// sections, so a dropped section counts once however many read it. Every importer also
-	/// grades every packet of the multiplex, so each TR 101 290 error counts once too. A PID no
-	/// program's PMT and no captured SI claims is counted here, once for the multiplex, in the
-	/// row of the program that carries it whenever one does.
+	/// The multiplex is graded once. Programs sharing a PMT PID read the same PMT sections, so
+	/// a dropped section counts once however many read it, and programs sharing a PCR PID
+	/// count its faults once too. PMT sections dropped before any program read their PID are
+	/// counted here, and so are the packets on PIDs no program reads, in the row of the program
+	/// that reads the PID whenever one does.
 	pub fn stats(&self) -> stats::Snapshot {
 		let mut stats = stats::Snapshot::default();
 		let mut crc_errors = BTreeMap::<u16, u64>::new();
-		let mut errors = super::health::Errors::default();
+		let mut errors = self.demux.errors().clone();
 		for program in &self.programs {
 			stats.streams.extend(program.import.stats().streams);
 			for (&pid, &count) in program.import.crc_errors() {
@@ -151,31 +410,31 @@ impl Programs {
 			}
 			errors.max(program.import.errors());
 		}
-		stats::Stream::dropped(&mut stats.streams, self.tables.claims.rows());
-		// The importers only see the PATs after the one that started them.
-		*crc_errors.entry(Pid::PAT).or_default() += self.scan.crc_error;
-		stats.crc_error = crc_errors.values().sum();
+		self.unclaimed.report(&mut stats.streams, |pid| {
+			Unclaimed::fixed(pid, true) || self.pmt_pids.contains(&pid) || !self.readers[usize::from(pid)].is_empty()
+		});
+		stats.crc_error = crc_errors.values().chain(self.crc_errors.values()).sum::<u64>() + self.demux.pat_crc_error();
 		errors.report(&mut stats);
 		stats
 	}
 
 	/// Finish each program's tracks, then its catalog while it still lists them.
 	///
-	/// Returns each program's [`Finish`](moq_net::broadcast::Finish), which keeps it servable
-	/// until its media is stale; dropping one closes that program.
-	/// Fails when the input ended before its PAT listed a program or any program declared a track.
-	pub fn finish(&mut self) -> anyhow::Result<Vec<moq_net::broadcast::Finish>> {
-		anyhow::ensure!(!self.programs.is_empty(), "input ended before its PAT listed a program");
+	/// Returns each program's broadcast. The finished tracks stay servable while this importer
+	/// is held, so hand both to a [`Linger`](crate::Linger) to keep them up for late
+	/// subscribers. Fails when the input ended before its PAT listed a program or any program
+	/// declared a track.
+	pub fn finish(&mut self) -> anyhow::Result<Vec<moq_net::broadcast::Producer>> {
+		self.demux.finish();
+		anyhow::ensure!(self.pat.is_some(), "input ended before its PAT listed a program");
 		let mut announced = false;
-		let mut finished = Vec::with_capacity(self.programs.len());
 		for program in &mut self.programs {
 			program.import.finish()?;
 			announced |= program.announce_if_listed()?;
 			program.catalog.finish()?;
-			finished.push(program.broadcast.clone().finish());
 		}
 		anyhow::ensure!(announced, "input ended before any program declared a track");
-		Ok(finished)
+		Ok(self.programs.iter().map(|program| program.broadcast.clone()).collect())
 	}
 
 	/// Abort every program's catalog and media tracks with `err`. Consumes the importer.
@@ -198,153 +457,6 @@ fn program_broadcast(name: &str, program: u16) -> String {
 	}
 }
 
-/// The multiplex's own reading of the PAT and every PMT it lists, so a PID is counted dropped only
-/// when no program claims it. Each importer reads only its own program's PMT.
-struct Tables {
-	framer: Framer,
-	/// A trailing partial packet.
-	scratch: Vec<u8>,
-	pat: PatReader,
-	/// A reassembler for each PMT PID the PAT lists.
-	pmts: HashMap<Pid, SectionReassembler>,
-	/// Each `(program_number, PMT PID)` the PAT lists: a PMT on another program's PID is ignored.
-	listed: HashSet<(u16, Pid)>,
-	/// The program and PCR PID whose clock times a PMT's lapse: the first program to deliver one.
-	clock: Option<(u16, Pid)>,
-	liveness: Liveness,
-	claims: Claims,
-}
-
-impl Tables {
-	fn new() -> Self {
-		Self {
-			framer: Framer::default(),
-			scratch: Vec::new(),
-			pat: PatReader::default(),
-			pmts: HashMap::new(),
-			listed: HashSet::new(),
-			clock: None,
-			liveness: Liveness::default(),
-			// Every program's catalog carries the `mpegts` section, so the SI is captured.
-			claims: Claims::new(super::catalog::SI_PIDS),
-		}
-	}
-
-	/// A whole PAT: the programs it lists, and their PMT PIDs to read.
-	fn pat(&mut self, pat: &psi::Pat) {
-		let listed: Vec<_> = pat
-			.programs
-			.iter()
-			.filter(|entry| entry.program_number != 0)
-			.map(|entry| (entry.program_number, entry.pmt_pid))
-			.collect();
-		self.pmts.retain(|pid, _| listed.iter().any(|(_, pmt)| pmt == pid));
-		for (_, pid) in &listed {
-			self.pmts.entry(*pid).or_default();
-		}
-		self.claims.pat(&listed, self.liveness.now());
-		self.listed = listed.into_iter().collect();
-	}
-
-	/// Read the tables and the clock out of `data`, counting each packet no table claims.
-	fn decode(&mut self, data: &[u8]) {
-		self.scratch.extend_from_slice(data);
-		let mut off = 0;
-		while let Some(at) = self.framer.next(&self.scratch, &mut off) {
-			let pkt: [u8; TsPacket::SIZE] = self.scratch[at..at + TsPacket::SIZE].try_into().unwrap();
-			// A packet flagged corrupt may carry another PID's number, and its tables and clock
-			// are as untrustworthy.
-			if pkt[1] & 0x80 != 0 {
-				continue;
-			}
-			let pid = (u16::from(pkt[1] & 0x1f) << 8) | u16::from(pkt[2]);
-			self.claims.packet(pid);
-			let Ok(pid) = Pid::new(pid) else {
-				continue;
-			};
-			if pid.as_u16() == Pid::PAT {
-				// The importers count a bad CRC.
-				if let Some(pat) = self.pat.push(&pkt, &mut 0) {
-					self.pat(&pat);
-				}
-			} else if let Some(reassembler) = self.pmts.get_mut(&pid) {
-				let mut sections = Vec::new();
-				reassembler.push(&pkt, &mut sections);
-				for section in sections {
-					if section.first() != Some(&psi::PMT_TABLE_ID) || !psi::crc_ok(&section) {
-						continue;
-					}
-					if let Some(pmt) = psi::Pmt::parse(&section)
-						&& self.listed.contains(&(pmt.program_number, pid))
-					{
-						self.pmt(&pmt);
-					}
-				}
-			}
-			if self.clock.is_some_and(|(_, clock)| clock == pid) && super::import::adaptation_valid(&pkt) {
-				if super::import::discontinuity_indicator(&pkt) {
-					self.liveness.discontinuity();
-				}
-				if let Some(pcr) = super::import::pcr(&pkt) {
-					self.liveness.pcr(pcr);
-					if let Some(now) = self.liveness.now() {
-						self.claims.tick(now);
-					}
-				}
-			}
-		}
-		self.scratch.drain(..off);
-	}
-
-	/// A PMT's claims, and the clock it names if it is the first to name one.
-	fn pmt(&mut self, pmt: &psi::Pmt) {
-		let pids = pmt.streams.iter().map(|es| es.pid.as_u16());
-		self.claims
-			.pmt(pmt.program_number, pids.chain(pmt.pcr_pid.map(|pid| pid.as_u16())));
-		match (self.clock, pmt.pcr_pid) {
-			(None, Some(pcr)) => self.clock = Some((pmt.program_number, pcr)),
-			(Some((program, old)), pcr) if program == pmt.program_number && pcr != Some(old) => {
-				self.clock = pcr.map(|pcr| (program, pcr));
-				self.liveness.discontinuity();
-			}
-			_ => {}
-		}
-	}
-}
-
-/// Finds the first whole PAT listing a program, before any importer exists to read one.
-#[derive(Default)]
-struct PatScan {
-	framer: Framer,
-	pat: PatReader,
-	/// PAT sections dropped for a bad CRC before the first whole PAT.
-	crc_error: u64,
-}
-
-impl PatScan {
-	/// Read `pending` up to the first whole PAT listing a program, returning it with `pending`
-	/// trimmed to start just after the packet that completed it. Otherwise only a trailing
-	/// partial packet is kept: the reader holds a partial PAT itself.
-	fn scan(&mut self, pending: &mut Vec<u8>) -> Option<psi::Pat> {
-		let mut off = 0;
-		let mut found = None;
-		while let Some(at) = self.framer.next(pending, &mut off) {
-			let pkt: &[u8; TsPacket::SIZE] = pending[at..at + TsPacket::SIZE].try_into().unwrap();
-			if (u16::from(pkt[1] & 0x1f) << 8 | u16::from(pkt[2])) != Pid::PAT {
-				continue;
-			}
-			if let Some(pat) = self.pat.push(pkt, &mut self.crc_error)
-				&& !pat.program_numbers().is_empty()
-			{
-				found = Some(pat);
-				break;
-			}
-		}
-		pending.drain(..off);
-		found
-	}
-}
-
 #[cfg(test)]
 mod test {
 	use std::time::Duration;
@@ -353,7 +465,7 @@ mod test {
 	use crate::catalog::hang::Container;
 	use crate::container::Consumer;
 	use crate::container::ts::import::test::{
-		corrupt, fifty_programs, pat_section, psi_packets, two_programs, two_section_pat,
+		MP2, corrupt, fifty_programs, mp2_pes, pat_section, pmt_section, psi_packets, two_programs, two_section_pat,
 	};
 
 	#[tokio::test(start_paused = true)]
@@ -383,9 +495,16 @@ mod test {
 		assert_eq!(program_broadcast("event", 1), "event/1");
 	}
 
-	/// The PAT in a whole buffer, as one [`PatScan`] reads it.
+	/// The first whole PAT in a buffer, as the parser reads it.
 	fn pat_programs(data: &[u8]) -> Option<Vec<u16>> {
-		Some(PatScan::default().scan(&mut data.to_vec())?.program_numbers())
+		let mut demux = Demux::new(false);
+		demux.push(data);
+		while let Some(packet) = demux.next() {
+			if let Some(pat) = packet.pat {
+				return Some(pat.programs.iter().map(|entry| entry.program_number).collect());
+			}
+		}
+		None
 	}
 
 	#[test]
@@ -399,18 +518,18 @@ mod test {
 		assert_eq!(pat_programs(&data[..100]), None);
 	}
 
-	/// A PAT too big for one packet is read whole, and each importer is handed all of it, so
-	/// the program listed in its second packet publishes.
+	/// A PAT too big for one packet is read whole, so the program listed in its second packet
+	/// publishes, and the forty-nine without a PMT start nothing.
 	#[tokio::test]
-	async fn a_pat_spanning_two_packets_starts_every_program() {
+	async fn a_pat_spanning_two_packets_is_read_whole() {
 		let origin = crate::source::produce_origin();
 		let mut programs = Programs::new(origin.clone(), "event.hang", catalog::Config::default());
 		let input = fifty_programs();
 		for chunk in input.chunks(100) {
 			programs.decode(chunk).unwrap();
 		}
-		let _finished = programs.finish().unwrap();
-		assert_eq!(programs.programs.len(), 50);
+		programs.finish().unwrap();
+		assert_eq!(programs.programs.len(), 1, "only program 50 has a PMT");
 
 		let consumer = origin.consume().request_broadcast("event/50.hang", None).await.unwrap();
 		let catalog = hang::catalog::Catalog::<()>::subscribe(&consumer)
@@ -423,8 +542,8 @@ mod test {
 		assert_eq!(catalog.audio.renditions.len(), 1, "program 50 publishes its stream");
 	}
 
-	/// A corrupt PAT starts nothing and is counted; the good repetition after it starts the
-	/// program without counting again.
+	/// A corrupt PAT is counted and ignored; the good repetition after it is read without
+	/// counting again.
 	#[test]
 	fn a_corrupt_pat_starts_no_program() {
 		let origin = crate::source::produce_origin();
@@ -436,13 +555,13 @@ mod test {
 		let mut data = psi_packets(0, &mut cc, &[], &corrupt(pat_section(&[(1, 0x0100)])));
 		data.extend_from_slice(&null);
 		programs.decode(&data).unwrap();
-		assert!(programs.programs.is_empty());
+		assert!(programs.pat.is_none());
 		assert_eq!(programs.stats().crc_error, 1);
 
 		let mut data = psi_packets(0, &mut cc, &[], &pat_section(&[(1, 0x0100)]));
 		data.extend_from_slice(&null);
 		programs.decode(&data).unwrap();
-		assert_eq!(programs.programs.len(), 1);
+		assert!(programs.pat.is_some());
 		assert_eq!(programs.stats().crc_error, 1);
 	}
 
@@ -459,17 +578,214 @@ mod test {
 		catalog.audio.renditions.len()
 	}
 
-	/// A PAT in two sections starts both programs, each importer seeded with the whole table
+	/// A PAT in two sections starts both programs, each handed the whole table
 	/// rather than only the section that completed it.
 	#[tokio::test]
 	async fn a_pat_in_two_sections_starts_every_program() {
 		let origin = crate::source::produce_origin();
 		let mut programs = Programs::new(origin.clone(), "event.hang", catalog::Config::default());
 		programs.decode(&two_section_pat()).unwrap();
-		let _finished = programs.finish().unwrap();
+		programs.finish().unwrap();
 		assert_eq!(programs.programs.len(), 2);
 		assert_eq!(renditions(&origin, "event/1.hang").await, 1);
 		assert_eq!(renditions(&origin, "event/2.hang").await, 1);
+	}
+
+	/// A PAT naming a thousand programs starts only the two whose PMTs the input carries, even
+	/// where an undescribed program shares a described one's PMT PID.
+	#[tokio::test]
+	async fn only_programs_a_pmt_describes_publish() {
+		let origin = crate::source::produce_origin();
+		let mut programs = Programs::new(origin.clone(), "event.hang", catalog::Config::default());
+		// Pairs of programs share a PMT PID, so 6 waits on the PID that starts 7.
+		let pmt_pid = |program: u16| 0x0100 + program / 2;
+		let mut cc = 0;
+		let mut data = Vec::new();
+		for section in 0..4u8 {
+			let entries: Vec<u8> = (1..=250)
+				.map(|n| u16::from(section) * 250 + n)
+				.flat_map(|n| {
+					let pid = pmt_pid(n);
+					[(n >> 8) as u8, n as u8, 0xe0 | (pid >> 8) as u8, pid as u8]
+				})
+				.collect();
+			data.extend(psi_packets(
+				0,
+				&mut cc,
+				&[],
+				&psi::section(0x00, 1, 0, section, 3, &entries),
+			));
+		}
+		for (program, pid, fills) in [(7u16, 0x0061, [0xAA, 0xBB]), (900, 0x0071, [0xCC, 0xDD])] {
+			let pmt = pmt_section(program, 0, &[(MP2, pid, &[])]);
+			data.extend(psi_packets(pmt_pid(program), &mut 0, &[], &pmt));
+			data.extend(mp2_pes(pid, 0, 90_000, fills));
+		}
+		programs.decode(&data).unwrap();
+		programs.finish().unwrap();
+
+		let started: Vec<_> = programs.programs.iter().map(|program| program.number).collect();
+		assert_eq!(started, [7, 900]);
+		assert_eq!(renditions(&origin, "event/7.hang").await, 1);
+		assert_eq!(renditions(&origin, "event/900.hang").await, 1);
+	}
+
+	/// A later PAT moves a waiting program to its new PMT PID and drops one it no longer lists,
+	/// so neither the stale PMT nor the dropped program's PMT starts anything.
+	#[tokio::test]
+	async fn a_later_pat_revises_the_waiting_programs() {
+		let origin = crate::source::produce_origin();
+		let mut programs = Programs::new(origin.clone(), "event.hang", catalog::Config::default());
+		let mut cc = 0;
+		let mut data = psi_packets(0, &mut cc, &[], &pat_section(&[(1, 0x0100), (2, 0x0101)]));
+		let revised = psi::section(0x00, 1, 1, 0, 0, &[0x00, 0x01, 0xe2, 0x00]);
+		data.extend(psi_packets(0, &mut cc, &[], &revised));
+		for (pid, program, version, es) in [(0x0100, 1, 0, 0x0062), (0x0101, 2, 0, 0x0071), (0x0200, 1, 1, 0x0061)] {
+			data.extend(psi_packets(
+				pid,
+				&mut 0,
+				&[],
+				&pmt_section(program, version, &[(MP2, es, &[])]),
+			));
+		}
+		data.extend(mp2_pes(0x0061, 0, 90_000, [0xAA, 0xBB]));
+		programs.decode(&data).unwrap();
+		programs.finish().unwrap();
+
+		let started: Vec<_> = programs.programs.iter().map(|program| program.number).collect();
+		assert_eq!(started, [1]);
+		assert_eq!(renditions(&origin, "event/1.hang").await, 1);
+	}
+
+	/// Of two revisions of a PMT in one packet, the program starts on the later.
+	#[tokio::test]
+	async fn a_program_starts_on_the_last_pmt_in_its_packet() {
+		let origin = crate::source::produce_origin();
+		let mut programs = Programs::new(origin.clone(), "event.hang", catalog::Config::default());
+		let mut data = psi_packets(0, &mut 0, &[], &pat_section(&[(1, 0x0100)]));
+		let mut sections = pmt_section(1, 0, &[(MP2, 0x0062, &[])]);
+		sections.extend(pmt_section(1, 1, &[(MP2, 0x0061, &[])]));
+		data.extend(psi_packets(0x0100, &mut 0, &[], &sections));
+		data.extend(mp2_pes(0x0061, 0, 90_000, [0xAA, 0xBB]));
+		programs.decode(&data).unwrap();
+		programs.finish().unwrap();
+		assert_eq!(renditions(&origin, "event/1.hang").await, 1);
+	}
+
+	/// A PMT spanning two packets starts its program, which carries on from the first packet
+	/// rather than reading the second alone.
+	#[tokio::test]
+	async fn a_pmt_spanning_two_packets_starts_its_program() {
+		let origin = crate::source::produce_origin();
+		let mut programs = Programs::new(origin.clone(), "event.hang", catalog::Config::default());
+		let mut data = psi_packets(0, &mut 0, &[], &pat_section(&[(1, 0x0100)]));
+		let mut private = vec![0x80, 200];
+		private.resize(202, 0);
+		let packets = psi_packets(0x0100, &mut 0, &[], &pmt_section(1, 0, &[(MP2, 0x0061, &private)]));
+		assert_eq!(packets.len(), 2 * 188, "the PMT spans two packets");
+		data.extend(packets);
+		data.extend(mp2_pes(0x0061, 0, 90_000, [0xAA, 0xBB]));
+		programs.decode(&data).unwrap();
+		programs.finish().unwrap();
+		assert_eq!(renditions(&origin, "event/1.hang").await, 1);
+	}
+
+	/// A corrupt PMT counts once whether it arrives before any program reads its PID, in the
+	/// packet that starts one, while one program reads it beside a waiting one, or while both
+	/// do, including after a PAT moves a started program onto a waiting one's PID.
+	#[test]
+	fn a_corrupt_pmt_counts_once_whoever_reads_it() {
+		let origin = crate::source::produce_origin();
+		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
+		let mut null = vec![0x47, 0x1f, 0xff, 0x10];
+		null.resize(188, 0xff);
+		let pmt = |program| pmt_section(program, 0, &[(MP2, 0x0060 + program, &[])]);
+		let mut data = psi_packets(0, &mut 0, &[], &pat_section(&[(1, 0x0100), (2, 0x0100)]));
+		let mut cc = 0;
+		let mut starting = corrupt(pmt(1));
+		starting.extend(pmt(1));
+		for section in [corrupt(pmt(1)), starting, corrupt(pmt(2)), pmt(2), corrupt(pmt(1))] {
+			data.extend(psi_packets(0x0100, &mut cc, &[], &section));
+		}
+		data.extend_from_slice(&null);
+		programs.decode(&data).unwrap();
+		assert_eq!(programs.programs.len(), 2);
+		assert_eq!(programs.stats().crc_error, 4);
+
+		let origin = crate::source::produce_origin();
+		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
+		let mut cc = 0;
+		let mut data = psi_packets(0, &mut cc, &[], &pat_section(&[(1, 0x0100), (2, 0x0200)]));
+		data.extend(psi_packets(0x0100, &mut 0, &[], &pmt(1)));
+		let moved = [0x00, 0x01, 0xe2, 0x00, 0x00, 0x02, 0xe2, 0x00];
+		data.extend(psi_packets(0, &mut cc, &[], &psi::section(0x00, 1, 1, 0, 0, &moved)));
+		data.extend(psi_packets(0x0200, &mut 0, &[], &corrupt(pmt(2))));
+		programs.decode(&data).unwrap();
+		assert_eq!(programs.programs.len(), 1);
+		assert_eq!(programs.stats().crc_error, 1);
+
+		// The same move landing while the corrupt section is partway in: the program it moved
+		// never saw that section begin, so the scan counts it.
+		let origin = crate::source::produce_origin();
+		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
+		let mut cc = 0;
+		let mut data = psi_packets(0, &mut cc, &[], &pat_section(&[(1, 0x0100), (2, 0x0200)]));
+		data.extend(psi_packets(0x0100, &mut 0, &[], &pmt(1)));
+		let mut private = vec![0x80, 200];
+		private.resize(202, 0);
+		let split = psi_packets(
+			0x0200,
+			&mut 0,
+			&[],
+			&corrupt(pmt_section(2, 0, &[(MP2, 0x0071, &private)])),
+		);
+		assert_eq!(split.len(), 2 * 188, "the corrupt PMT spans two packets");
+		data.extend_from_slice(&split[..188]);
+		data.extend(psi_packets(0, &mut cc, &[], &psi::section(0x00, 1, 1, 0, 0, &moved)));
+		data.extend_from_slice(&split[188..]);
+		programs.decode(&data).unwrap();
+		assert_eq!(programs.stats().crc_error, 1);
+
+		// After that move, a section start abandons the partial for another split corrupt
+		// section, which the moved program reads from its start, so it alone counts it.
+		let origin = crate::source::produce_origin();
+		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
+		let mut cc = 0;
+		let mut data = psi_packets(0, &mut cc, &[], &pat_section(&[(1, 0x0100), (2, 0x0200)]));
+		data.extend(psi_packets(0x0100, &mut 0, &[], &pmt(1)));
+		data.extend_from_slice(&split[..188]);
+		data.extend(psi_packets(0, &mut cc, &[], &psi::section(0x00, 1, 1, 0, 0, &moved)));
+		data.extend(psi_packets(
+			0x0200,
+			&mut 1,
+			&[],
+			&corrupt(pmt_section(2, 0, &[(MP2, 0x0071, &private)])),
+		));
+		programs.decode(&data).unwrap();
+		assert_eq!(programs.stats().crc_error, 1);
+
+		// A corrupt section begun in the packet that starts a program sharing the PID: the new
+		// program reads that packet, so it alone counts the section.
+		let origin = crate::source::produce_origin();
+		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
+		let mut data = psi_packets(0, &mut 0, &[], &pat_section(&[(1, 0x0100), (2, 0x0100)]));
+		let mut sections = pmt(1);
+		sections.extend(corrupt(pmt_section(2, 0, &[(MP2, 0x0071, &private)])));
+		data.extend(psi_packets(0x0100, &mut 0, &[], &sections));
+		programs.decode(&data).unwrap();
+		assert_eq!(programs.programs.len(), 1);
+		assert_eq!(programs.stats().crc_error, 1);
+
+		// A waiting program's PMT PID that a started program reads only as media: no program
+		// reassembles PMTs there, so the scan counts the corrupt section.
+		let origin = crate::source::produce_origin();
+		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
+		let mut data = psi_packets(0, &mut 0, &[], &pat_section(&[(1, 0x0100), (2, 0x0061)]));
+		data.extend(psi_packets(0x0100, &mut 0, &[], &pmt(1)));
+		data.extend(psi_packets(0x0061, &mut 0, &[], &corrupt(pmt(2))));
+		programs.decode(&data).unwrap();
+		assert_eq!(programs.programs.len(), 1);
+		assert_eq!(programs.stats().crc_error, 1);
 	}
 
 	/// Each program announces as its own publisher instance for the run, so a restart
@@ -479,7 +795,7 @@ mod test {
 		let origin = crate::source::produce_origin();
 		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
 		programs.decode(&two_section_pat()).unwrap();
-		let _finished = programs.finish().unwrap();
+		programs.finish().unwrap();
 		let epochs: Vec<_> = programs
 			.programs
 			.iter()
@@ -500,7 +816,7 @@ mod test {
 		let mut packets = input.chunks(188);
 		while programs.programs.is_empty() {
 			programs
-				.decode(packets.next().expect("the PAT starts the programs"))
+				.decode(packets.next().expect("a PMT starts a program"))
 				.unwrap();
 		}
 		assert!(
@@ -508,12 +824,12 @@ mod test {
 				.programs
 				.iter()
 				.all(|program| program.broadcast.route().is_none()),
-			"announced on the PAT alone"
+			"announced on the PSI alone"
 		);
 		for packet in packets {
 			programs.decode(packet).unwrap();
 		}
-		let _finished = programs.finish().unwrap();
+		programs.finish().unwrap();
 		assert!(
 			programs
 				.programs
@@ -569,11 +885,7 @@ mod test {
 			programs.decode(&null).unwrap();
 		}
 		assert!(programs.programs.is_empty());
-		assert!(
-			programs.pending.len() < 2 * 188,
-			"held {} bytes",
-			programs.pending.len()
-		);
+		assert!(programs.demux.held() < 188, "held {} bytes", programs.demux.held());
 	}
 
 	/// A corrupt PAT section sharing a packet with the good one that starts the programs is
@@ -589,8 +901,37 @@ mod test {
 		null.resize(188, 0xff);
 		data.extend_from_slice(&null);
 		programs.decode(&data).unwrap();
-		assert_eq!(programs.programs.len(), 1);
+		assert!(programs.pat.is_some());
 		assert_eq!(programs.stats().crc_error, 1);
+	}
+
+	/// A second program claiming an elementary PID another already reads keeps the PID's
+	/// continuity chain, so a counter gap right after its PMT still counts.
+	#[test]
+	fn a_shared_pid_keeps_its_chain_when_another_program_claims_it() {
+		const MP2: u8 = 0x03;
+		let es = |cc: u8| {
+			let mut pkt = vec![0x47, 0x00, 0x61, 0x10 | cc];
+			pkt.resize(188, 0xff);
+			pkt
+		};
+		let origin = crate::source::produce_origin();
+		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
+		let pmt = |program: u16| {
+			psi_packets(
+				program << 8,
+				&mut 0,
+				&[],
+				&pmt_section(program, 0, &[(MP2, 0x0061, &[])]),
+			)
+		};
+		let mut data = psi_packets(0, &mut 0, &[], &pat_section(&[(1, 0x0100), (2, 0x0200)]));
+		data.extend(pmt(1));
+		data.extend(es(0));
+		data.extend(pmt(2));
+		data.extend(es(2));
+		programs.decode(&data).unwrap();
+		assert_eq!(programs.stats().continuity_count_error, 1);
 	}
 
 	/// The input is held until the PAT is whole, then each program publishes as its own
@@ -602,15 +943,15 @@ mod test {
 		let mut programs = Programs::new(origin.clone(), "event.hang", catalog::Config::default());
 
 		let input = two_programs();
-		let before = std::time::SystemTime::now();
+		let before = moq_clock::wall();
 		programs.decode(&input[..100]).unwrap();
 		assert!(
 			programs.programs.is_empty(),
 			"no program is known before the PAT is whole"
 		);
 		programs.decode(&input[100..]).unwrap();
-		let _finished = programs.finish().unwrap();
-		let after = std::time::SystemTime::now();
+		programs.finish().unwrap();
+		let after = moq_clock::wall();
 
 		for (path, fills) in [("event/1.hang", [0xAA, 0xBB]), ("event/2.hang", [0xCC, 0xDD])] {
 			let consumer = origin.consume().request_broadcast(path, None).await.unwrap();

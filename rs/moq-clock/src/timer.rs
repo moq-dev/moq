@@ -158,7 +158,17 @@ pub fn timeout<F: IntoFuture>(duration: Duration, future: F) -> Timeout<F::IntoF
 	}
 }
 
-/// The future [`timeout`] returns.
+/// Run `future` until `deadline` on the ambient clock.
+///
+/// The future is polled first, so one that is already ready wins even past the deadline.
+pub fn timeout_at<F: IntoFuture>(deadline: Instant, future: F) -> Timeout<F::IntoFuture> {
+	Timeout {
+		future: Box::pin(future.into_future()),
+		sleep: sleep_until(deadline),
+	}
+}
+
+/// The future [`timeout`] and [`timeout_at`] return.
 pub struct Timeout<F> {
 	future: Pin<Box<F>>,
 	sleep: Sleep,
@@ -187,7 +197,7 @@ pub enum MissedTickBehavior {
 	Skip,
 }
 
-/// Ticks on the ambient clock every period, starting at once.
+/// Ticks on the ambient clock every period.
 pub struct Interval {
 	sleep: Sleep,
 	period: Duration,
@@ -200,9 +210,18 @@ pub struct Interval {
 ///
 /// When `period` is zero.
 pub fn interval(period: Duration) -> Interval {
+	interval_at(crate::now(), period)
+}
+
+/// Tick every `period` on the ambient clock, the first tick at `start`.
+///
+/// # Panics
+///
+/// When `period` is zero.
+pub fn interval_at(start: Instant, period: Duration) -> Interval {
 	assert!(!period.is_zero(), "interval period must be non-zero");
 	Interval {
-		sleep: sleep_until(crate::now()),
+		sleep: sleep_until(start),
 		period,
 		missed: MissedTickBehavior::default(),
 	}

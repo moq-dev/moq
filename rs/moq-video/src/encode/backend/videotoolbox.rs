@@ -436,7 +436,6 @@ fn annexb_from_sample(sample: &CMSampleBuffer, codec: Codec) -> Result<Option<(B
 
 /// Dispatch to the codec-specific VideoToolbox parameter-set getter. Both have
 /// identical signatures; only the codec differs.
-#[allow(clippy::too_many_arguments)]
 unsafe fn get_param_set(
 	format: &CMFormatDescription,
 	index: usize,

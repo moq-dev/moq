@@ -11,8 +11,8 @@ drawn as if it were SDR as today.
 ## Plan
 
 Decided 2026-10-08 in the WebGPU renderer `/quest-plan` interview: SDR and
-wide gamut first in the `@moq/video` WebGPU renderer (`js/video`), HDR here,
-HDR and its catalog extension now follow in m2.
+wide gamut first in the `@moq/video` WebGPU renderer (`js/video`). HDR
+follows here; the catalog colour fields it reads landed in #5846.
 
 Facts (2026-10):
 

@@ -1,5 +1,5 @@
 // The TypeScript qmux peer against the Rust one, per draft, in both roles.
-// The Rust side is qmux 0.6.3's interop examples, installed by `just test qmux`.
+// The Rust side is the in-tree qmux crate's interop examples, built by `just test qmux`.
 import { expect, test } from "bun:test";
 import { join } from "node:path";
 import Session, { selectSubprotocol, type Version, type WebSocketStreamLike } from "@moq/qmux";
@@ -22,10 +22,8 @@ const VERSIONS = ["qmux-02", "qmux-01", "qmux-00"] as const;
 // Small receive windows force the Rust sender to observe and react to
 // MAX_DATA/MAX_STREAM_DATA updates during the large transfer.
 const CONFIG = {
-	maxData: 64n * 1024n,
-	maxStreamDataBidiLocal: 32n * 1024n,
-	maxStreamDataBidiRemote: 32n * 1024n,
-	maxStreamDataUni: 32n * 1024n,
+	receiveWindow: 64n * 1024n,
+	streamReceiveWindow: 32n * 1024n,
 };
 
 function payload(seed: number): Uint8Array {

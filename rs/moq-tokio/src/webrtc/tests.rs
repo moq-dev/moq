@@ -1,5 +1,5 @@
 use std::net::{IpAddr, Ipv4Addr};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::*;
 
@@ -53,7 +53,7 @@ async fn transfer(offerer: &Offerer, answerer: &Answerer, payload: &[u8]) {
 		.init()
 		.unwrap()
 		.with_subscriber(subscribed);
-	let ((_server, _driver), _client) = tokio::time::timeout(TIMEOUT, async {
+	let (_server, _client) = tokio::time::timeout(TIMEOUT, async {
 		tokio::join!(server, async { client.connect_webrtc(offerer).await.unwrap() })
 	})
 	.await
@@ -148,7 +148,7 @@ async fn ignoring_flow_control_closes_the_channel() {
 	use qmux::transport::{Reader as _, Writer as _};
 
 	let (_offerer, _answerer, sent, received) = channels().await;
-	let budget = received.config.max_data + READ_SLACK;
+	let budget = received.config.receive_window + READ_SLACK;
 	let within = (budget / RECORD_SIZE) as usize;
 	let (mut writer, mut reader) = (sent.channel.writer, received.channel.reader);
 	tokio::time::timeout(TIMEOUT, async {
@@ -316,7 +316,7 @@ fn mdns_candidates_are_split_out() {
 		a=candidate:1 1 udp 2113937151 0a1b2c3d.local 54321 typ host\r\n\
 		a=candidate:2 1 udp 2113937151 192.168.1.2 54321 typ host\r\n\
 		a=end-of-candidates\r\n";
-	let (kept, mdns) = split_mdns(sdp);
+	let (kept, mdns) = split_mdns(sdp).unwrap();
 	assert_eq!(
 		kept,
 		"v=0\r\na=candidate:2 1 udp 2113937151 192.168.1.2 54321 typ host\r\na=end-of-candidates\r\n"
@@ -324,13 +324,16 @@ fn mdns_candidates_are_split_out() {
 	assert_eq!(mdns, ["candidate:1 1 udp 2113937151 0a1b2c3d.local 54321 typ host"]);
 }
 
-#[tokio::test]
-async fn ip_candidates_parse_without_mdns() {
-	let candidate = parse_candidate("candidate:2 1 udp 2113937151 192.168.1.2 54321 typ host")
-		.await
-		.unwrap();
-	assert_eq!(candidate.addr(), "192.168.1.2:54321".parse().unwrap());
-	assert!(parse_candidate("candidate:2 1 udp nope").await.is_err());
+/// A malformed `.local` candidate is refused up front, not after costing a query.
+#[test]
+fn malformed_mdns_candidates_are_refused() {
+	let sdp = "v=0\r\na=candidate:1 1 udp nope 0a1b2c3d.local 54321 typ host\r\n";
+	assert!(matches!(split_mdns(sdp), Err(Error::Candidate(_))));
+	assert!(mdns_host("candidate:1 1 udp 2113937151 0a1b2c3d.local 54321 typ nope").is_err());
+	assert_eq!(
+		mdns_host("candidate:1 1 udp 2113937151 0a1b2c3d.local 54321 typ host").unwrap(),
+		Some("0a1b2c3d.local")
+	);
 }
 
 /// Building a peer mutates its `Rtc` several times before the agent's first drain:
@@ -361,4 +364,29 @@ fn construction_queues_no_output() {
 	host(&mut answerer, "[::1]:5001");
 	answerer.sdp_api().accept_offer(offer).unwrap();
 	idle(&mut answerer);
+}
+
+/// A trickled IP candidate waits for the driver to take the one before it, so a
+/// peer cannot queue candidates faster than the connection applies them.
+#[tokio::test(start_paused = true)]
+async fn trickled_candidates_wait_for_the_driver() {
+	let (commands, mut driver) = mpsc::channel(1);
+	let (_candidates, candidates) = mpsc::unbounded_channel();
+	let peer = Peer {
+		resolver: Resolver::spawn(commands.clone(), resolver::Mdns),
+		commands,
+		candidates,
+	};
+	let candidate = Candidate::new("candidate:1 1 udp 2113937151 192.0.2.1 54321 typ host");
+
+	peer.add_candidate(&candidate).await.unwrap();
+	let mut second = std::pin::pin!(peer.add_candidate(&candidate));
+	assert!(
+		futures::poll!(&mut second).is_pending(),
+		"the second candidate queued while the driver held the first"
+	);
+
+	assert!(matches!(driver.recv().await, Some(Command::Candidate(_))));
+	second.await.unwrap();
+	assert!(matches!(driver.recv().await, Some(Command::Candidate(_))));
 }

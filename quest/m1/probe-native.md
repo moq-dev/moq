@@ -14,7 +14,7 @@ Sessions on moq-tokio and moq-uring then have a sender, so
 ## Plan
 
 Decided with the maintainer on 2026-10-20: this moved to m1 with the
-[target](/quest/m1/probe-target.md), since the native
+session send target, since the native
 [rung disable](/quest/m1/simulcast-rung-disable.md) requires it to resume a
 stopped rendition.
 
@@ -39,16 +39,17 @@ mechanism wins first" step:
   stream as `Old`, even after its FIN while bytes await acknowledgment
   (`poll_expired_while_pending`), and moq-quic never resends a reset stream's
   bytes, so probing never sends past a group's expiry. A group the cache
-  evicted is only judged once [evicted-group staleness](/quest/m1/evicted-group-stale.md)
-  lands, so it is required, with a test that evicts a group mid-probe. Rejected: requiring
+  evicted is still judged by its successor's arrival; a test evicts a group
+  mid-probe to cover it. Rejected: requiring
   [per-stream deadlines](/quest/m2/quic-deadline.md) first. They predict
   whether bytes can still arrive before the deadline, which tightens loss
   recovery too, but expiry itself already reaches moq-quic as a reset.
 - Evaluate the IMMEDIATE_ACK extension so ACK delay doesn't obscure a short
   sample.
-- Implement the [target](/quest/m1/probe-target.md) quest's sender hook in
-  moq-quic's recovery and pacing layer and the moq-tokio and moq-uring
-  adapters. A controller with no ProbeBW_UP phase (such as the
+- Implement the sender hook, `transport::poll::Session::probe` returning the
+  `transport::Probe` cell the session writes its target to, in moq-quic's
+  recovery and pacing layer and the moq-tokio and moq-uring adapters (their
+  `Grouped` traits, beside `wire`). A controller with no ProbeBW_UP phase (such as the
   [realtime controller](/quest/m2/quic-realtime/README.md)) can't, so its
   sessions keep `Report`: [padding](/quest/m2/probe/padding.md) is
   browser-only. Nor can a session with no media in flight; the native rung
@@ -77,12 +78,7 @@ Padding is browser-only, so the native
 [viewer up-switch](/quest/m2/probe/viewer-upswitch.md) then go back to the
 maintainer instead of falling back to it.
 
-## Required
-
-- [Session send target](/quest/m1/probe-target.md) - the target this probes to and the sender hook it implements
-- [An evicted group is judged stale](/quest/m1/evicted-group-stale.md) - an evicted group's stream resets once stale, so probing never retransmits it
-
 ## Related
 
 - [Per-stream deadlines](/quest/m2/quic-deadline.md) - decides when in-flight data has expired
-- [BBR media study](/quest/m2/quic-bbr-natural-drain.md) - separate ProbeRTT policy experiment
+- [Skip ProbeRTT after a near-floor RTT](/quest/m1/bbr-probe-rtt-skip.md) - separate ProbeRTT policy change

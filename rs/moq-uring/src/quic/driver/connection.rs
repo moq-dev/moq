@@ -10,7 +10,7 @@ use bytes::Bytes;
 use moq_quic::{ConnectionHandle, Dir, StreamId, VarInt};
 use rustc_hash::FxHashMap;
 
-use super::super::{Error, SEGMENT};
+use super::super::Error;
 use super::endpoint;
 use crate::udp;
 use crate::worker::Owner;
@@ -226,14 +226,6 @@ impl Inner {
 		self.state.borrow_mut().forget_recv(id);
 	}
 
-	/// Wake anyone parked on stream `id` being readable.
-	pub(crate) fn wake_readable(&self, id: StreamId) {
-		let mut state = self.state.borrow_mut();
-		if let Some(mut waiters) = state.readable.remove(&id) {
-			waiters.wake();
-		}
-	}
-
 	/// Close the connection with a full-width application code.
 	///
 	/// The [`web_transport_trait::poll::Session::close`] surface narrows codes
@@ -377,14 +369,14 @@ impl Connection {
 		Ok(())
 	}
 
-	/// Returns connection statistics.
-	pub fn stats(&self) -> moq_quic::ConnectionStats {
-		self.shared.conn.borrow().stats()
-	}
-
 	/// The wire counters this connection updates as it sends and receives.
 	pub(crate) fn wire(&self) -> moq_net::transport::Wire {
 		self.shared.wire.clone()
+	}
+
+	/// Receive streams evicted to free a stuck receive window.
+	pub(crate) fn streams_evicted(&self) -> u64 {
+		self.shared.conn.borrow().stats().credit.evicted
 	}
 }
 
@@ -519,6 +511,26 @@ pub(crate) async fn establish(shared: Shared, deadline: Option<Instant>) -> Resu
 	};
 	guard.shared = None;
 	Ok(conn)
+}
+
+impl Connection {
+	pub(crate) fn open_request(&self) -> Result<Option<(super::SendStream, super::RecvStream)>, Error> {
+		if let Some(err) = self.shared.closed() {
+			return Err(err);
+		}
+		let id = self
+			.shared
+			.conn
+			.borrow_mut()
+			.streams()
+			.open(Dir::Bi, Default::default());
+		Ok(id.map(|id| {
+			(
+				super::SendStream::new(self.shared.clone(), id),
+				super::RecvStream::new(self.shared.clone(), id),
+			)
+		}))
+	}
 }
 
 impl web_transport_trait::poll::Session for Connection {
@@ -889,16 +901,19 @@ impl Driver {
 			Poll::Pending => return Poll::Pending,
 		};
 
-		let segments = (tx.capacity() / SEGMENT).min(TRAIN_SEGMENTS);
-		if segments == 0 {
-			return Poll::Ready(Err(Error::Io(format!(
-				"transmit buffer of {} bytes holds no {SEGMENT} byte segment",
-				tx.capacity()
-			))));
-		}
-
 		let (transmit, closing) = {
 			let mut conn = self.shared.conn.borrow_mut();
+			// moq-quic packs every full datagram at the current MTU, which
+			// discovery can raise, so a train sized for any smaller one would
+			// outgrow the buffer.
+			let mtu = usize::from(conn.current_mtu());
+			let segments = (tx.capacity() / mtu).min(TRAIN_SEGMENTS);
+			if segments == 0 {
+				return Poll::Ready(Err(Error::Io(format!(
+					"transmit buffer of {} bytes holds no {mtu} byte datagram",
+					tx.capacity()
+				))));
+			}
 			// moq-quic encrypts the train straight into the socket's buffer.
 			// Nothing to send, or paced; the buffer returns to the pool on drop.
 			let Some(transmit) = conn.poll_transmit(self.shared.owner.now(), segments, &mut tx) else {
@@ -916,6 +931,7 @@ impl Driver {
 			to: transmit.destination,
 			segment: transmit.segment_size.unwrap_or(transmit.size),
 			ecn: transmit.ecn.map(super::ecn_from_quic),
+			src_ip: transmit.src_ip,
 		};
 		if let Err(err) = tx.send(transmit) {
 			return Poll::Ready(Err(Error::Io(err.to_string())));

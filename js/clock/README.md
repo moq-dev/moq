@@ -7,14 +7,14 @@ Use `Manual` to test time without replacing the host's timers.
 import { Manual, Milli, Nano, now, sleep } from "@moq/clock";
 
 const clock = new Manual();
-const restore = clock.install();
+const installed = clock.install();
 try {
     const pending = sleep(Nano.fromMilli(Milli(10)));
-    await clock.advanceAsync(Nano.fromMilli(Milli(10)));
+    await clock.advance(Nano.fromMilli(Milli(10)));
     await pending;
     console.log(now()); // 10,000,000 nanoseconds
 } finally {
-    restore();
+    installed.close();
 }
 ```
 

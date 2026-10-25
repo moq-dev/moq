@@ -45,6 +45,7 @@ just test ts --full             # the same with two audio PIDs, filling its mult
 just test ts --fragment-pes    # legal headers split across packets, with FFmpeg/TSDuck grading
 just test ts --klv              # KLV and DVB AC-3 carried as whole PES, graded against the source
 just test ts --mpeg2            # MPEG-2 video carried as whole PES, decoded from the capture
+just test ts --revision         # the PMT revised mid-stream, a KLV stream joining and leaving
 just test ts --delay 2s         # pass the exporter's --delay
 just test ts --hrd --rate 7000000 # congest the subscriber's leg below the media rate
 just test ts --loss 1           # drop 1% of the relay's datagrams to the subscriber
@@ -74,6 +75,14 @@ importer does not decode MPEG-2 video, so it rides its track whole while its PTS
 still paces the program. `mpeg2.py` decodes source and capture with FFmpeg: past
 the GOP the subscriber joins in, every picture is the source's next one, through
 the source's last. `holes.py` and the T-STD model grade the rest.
+`--revision` has `revision.py` add asynchronous KLV to the default clip's null
+slots from a third of its program clock to two thirds, and revise the PMT at each
+end: the next `version_number` lists the stream before its first packet, and the
+one after drops it once its last packet is out. `revision.py grade` holds the
+capture's PMTs to the source's layouts in order, each at the version after the one
+before and the KLV entry byte-equal, every packet of the stream between the PMT
+listing it and the one dropping it, and every PES of the stream in order and
+byte-equal.
 
 `--live` swaps the analyzer, not the rig: the same round-trip runs, but the
 subscriber's stdout goes straight into `pcr-timing.py` instead of a capture file.
@@ -123,6 +132,7 @@ Severities: **hard** checks fail the run by default; **shape** checks report as
 | `packet-size` | hard | 188 (or 204) bytes per packet |
 | `sync` | hard | no invalid sync bytes / transport-error packets |
 | `pat` / `pmt` | hard | valid PAT mapping programs to a PMT that lists the elementary streams |
+| `pmt-versions` | hard | each program's PMT changes only at a new `version_number`, and never returns to an older one |
 | `psi-crc` | hard | no section dropped for a bad CRC |
 | `continuity` | hard | no continuity-counter discontinuities |
 | `pcr-presence` | hard | every program's declared PCR PID carries PCR (0x1FFF declares none) |
@@ -491,7 +501,7 @@ checks to hard.
 Two exporters of the same broadcast must converge after acquisition. `--pair`
 starts the second subscriber five seconds late and checks table placement on the
 shared PCR timeline. This measures table alignment; it does not establish packet
-identity, `--sync`, or ST 2022-7 compatibility.
+identity or ST 2022-7 compatibility.
 
 ```bash
 just test ts --pair
@@ -906,7 +916,7 @@ browser interop. It runs nightly on `main`, and release PRs touching a workspace
 crate `run.sh` builds (kept in sync by `sh/gh/ts-paths.py`), the harness, or the
 toolchain run it too:
 `just test ts-controls`, `just test ts-pair-controls`, the default and 2 Mb/s round trips, HRD, leak, full, headroom,
-open-GOP, KLV (strict), MPEG-2 video, passthrough (generated, Kyrion and MPTS), EIT, and T-STD controls. Each step runs even after another test fails.
+open-GOP, KLV (strict), MPEG-2 video, PMT revision, passthrough (generated, Kyrion and MPTS), EIT, and T-STD controls. Each step runs even after another test fails.
 All recipes use the same pinned Nix FFmpeg and TSDuck locally and in CI.
 
 Nightly and manual runs also invoke `just test ts --pair`,

@@ -5,6 +5,7 @@
  * traced and counted passes stay separate, so tracing and copy counting never inflate a timing.
  * Correctness fails the run; timing is reported, never judged.
  */
+import { appendFile } from "node:fs/promises";
 import { cpus, freemem, loadavg, platform, totalmem } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
@@ -101,6 +102,8 @@ const server = Bun.serve({
 	port: 0,
 	async fetch(request) {
 		const path = new URL(request.url).pathname;
+		if (path === "/cmaf-fixtures.json")
+			return new Response(Bun.file(new URL("../../js/hang/src/cmaf/fixtures.json", import.meta.url)));
 		const page = /^\/([a-z0-9-]+)\/(transport|cmaf|media)$/.exec(path);
 		if (page)
 			return new Response(
@@ -198,7 +201,7 @@ try {
 	await save();
 }
 console.log(`Retained ${report.samples.length} samples: ${output}`);
-printComparisons();
+await printComparisons();
 
 type Pass = "timed" | "traced" | "counted" | "probed";
 
@@ -465,11 +468,11 @@ async function cmaf(variant: string, shape: Cmaf, round: number, pass: Pass) {
 	const opened = await open(variant, "cmaf");
 	try {
 		await opened.page.evaluate((shape) => window.cmaf.prepare(shape), shape);
-		const expected = shape.sizes.reduce(
-			(sum, size, frame) => (sum + check(payload(size, frame), size, frame, false)) >>> 0,
-			0,
-		);
-		for (const phase of ["encode", "decode"] as const) {
+		const expected = shape.sizes.reduce((sum, size, frame) => {
+			const pattern = shape.kind === "video" && frame > 0 ? 1 : 0;
+			return (sum + check(payload(size, pattern), size, pattern, false)) >>> 0;
+		}, 0);
+		for (const phase of ["decode"] as const) {
 			const before = await metrics(opened);
 			let result: Phase | undefined;
 			const run = async () => {
@@ -649,21 +652,32 @@ function log(row: Row) {
 	console.log(`${row.key} ${row.variant} ${row.pass}${row.round >= 0 ? ` r${row.round}` : ""}: ${shown}`);
 }
 
-function printComparisons() {
-	console.log("\nPaired change, variant against reference (median of per-round deltas [range]; host load varies):");
+async function printComparisons() {
+	const lines: string[] = [];
+	const line = (text: string) => {
+		console.log(text);
+		lines.push(text);
+	};
+	line("\nPaired change, variant against reference (median of per-round deltas [range]; host load varies):");
 	for (const entry of report.comparisons as ReturnType<typeof compare>) {
 		if (!HEADLINE.has(entry.metric)) continue;
 		const sign = (value: number) => `${value >= 0 ? "+" : ""}${value.toFixed(1)}`;
-		console.log(
+		line(
 			`  ${entry.key} ${entry.variant} vs ${entry.reference} ${entry.metric}: ${sign(entry.median_pct)}% [${sign(entry.min_pct)}, ${sign(entry.max_pct)}] n=${entry.pairs}${entry.consistent ? "" : " (sign varies)"}`,
 		);
 	}
-	console.log("\nInstrumented passes (one sample each):");
+	line("\nInstrumented passes (one sample each):");
 	for (const row of report.samples) {
 		if (row.pass === "timed") continue;
 		const shown = Object.entries(row.metrics)
 			.filter(([name]) => INSTRUMENTED.test(name))
 			.map(([name, value]) => `${name}=${Number.isInteger(value) ? value : value.toFixed(3)}`);
-		console.log(`  ${row.key} ${row.variant} ${row.pass}: ${shown.join(" ")}`);
+		line(`  ${row.key} ${row.variant} ${row.pass}: ${shown.join(" ")}`);
+	}
+	if (process.env.GITHUB_STEP_SUMMARY) {
+		await appendFile(
+			process.env.GITHUB_STEP_SUMMARY,
+			`## Browser benchmark\n\n\`\`\`text\n${lines.join("\n")}\n\`\`\`\n`,
+		);
 	}
 }

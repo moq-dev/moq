@@ -755,6 +755,10 @@ struct AlignedCmsgBuf([u8; 32]);
 
 #[test]
 #[cfg(any(target_os = "linux", target_os = "android"))]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "tests read the host clock directly"
+)]
 fn recv_transport_error() {
     let sock = Socket::from(UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap());
 
@@ -823,6 +827,10 @@ fn recv_transport_error() {
 
 #[test]
 #[cfg(any(target_os = "linux", target_os = "android"))]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "tests read the host clock directly"
+)]
 fn recv_transport_error_ipv6() {
     let sock = Socket::from(UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).unwrap());
 
@@ -882,6 +890,10 @@ fn recv_transport_error_ipv6() {
 /// doing so allows a subsequent send to succeed and deliver its payload.
 #[test]
 #[cfg(any(target_os = "linux", target_os = "android"))]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "tests read the host clock directly"
+)]
 fn draining_error_queue_before_send_prevents_absorption() {
     let sock = Socket::from(UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap());
 

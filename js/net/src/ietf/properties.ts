@@ -30,7 +30,7 @@ export interface Properties {
 	/// `undefined` declares no timeline, so the track and its objects are untimed.
 	timescale?: Timescale;
 
-	/// Publisher priority for a group header without its priority flag. The wire default is 128.
+	/// Publisher priority for a group header without its priority flag. Omitted, it is the wire default 128, priority -1.
 	priority?: number;
 
 	/// The publisher's preference for prioritizing groups within a subscription,

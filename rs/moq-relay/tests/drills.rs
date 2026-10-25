@@ -25,6 +25,11 @@
 //! drill fails when its recovery behavior is removed, and the loom/fuzz cases
 //! covering the primitives underneath.
 #![cfg(all(feature = "quic", feature = "websocket"))]
+#![expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 
 use std::time::Duration;
 
@@ -314,8 +319,8 @@ fn quic() -> moq_tokio::quic::Config {
 	// busy runner has to stall eight times over before a live session is mistaken
 	// for a dead one.
 	let mut quic = moq_tokio::quic::Config::default();
-	quic.idle_timeout = Some(Duration::from_secs(2));
-	quic.keep_alive = Some(Duration::from_millis(250));
+	quic.idle_timeout = Some((Duration::from_secs(2)).into());
+	quic.keep_alive = Some((Duration::from_millis(250)).into());
 	quic
 }
 
@@ -336,9 +341,9 @@ fn dial() -> moq_tokio::connect::Config {
 
 	// Fast enough to keep a relay bounce or a link flap inside the drill's
 	// budget, paced enough that the loop is still a backoff.
-	config.backoff.initial = Some(Duration::from_millis(50));
-	config.backoff.max = Some(Duration::from_millis(200));
-	config.backoff.timeout = Some(Duration::from_secs(5));
+	config.backoff.initial = Some((Duration::from_millis(50)).into());
+	config.backoff.max = Some((Duration::from_millis(200)).into());
+	config.backoff.timeout = Some((Duration::from_secs(5)).into());
 	config
 }
 
@@ -802,37 +807,36 @@ const PAYLOAD: usize = 256;
 /// stalls of #4349.
 const SETTLE: Duration = Duration::from_secs(10);
 
-/// The cross-relay drill's link: the drills' impairment behind a bottleneck a
-/// burst overruns, so its tail waits in the queue or is dropped from it. It is
-/// slower than [`credit`]'s receive window lets a sender go. The first burst
+/// The cross-relay drill's link: a bottleneck a burst overruns, so its tail
+/// waits in the queue or is dropped from it. Random loss and reordering cannot
+/// establish that congestion acted, so only overflow supplies loss here. It is
+/// slower than [`credit`]'s stream window lets a sender go. The first burst
 /// is collected at ingress after setup, so scheduling cannot drain the bucket
 /// between its datagrams; its bytes exceed the burst and 50ms queue allowance
 /// before they are accounted at one instant.
 fn bursty() -> moq_shaper::Profile {
 	moq_shaper::Profile {
+		delay: Duration::from_millis(20),
 		rate: Some(moq_shaper::Rate {
 			bits_per_second: 100_000,
 			burst: 1500,
 			queue: Duration::from_millis(50),
 		}),
-		..impairment()
+		..Default::default()
 	}
 }
 
 /// QUIC credit tighter than a burst on the impaired lane: fewer concurrent
 /// streams than a burst has groups (each group is a stream, each FETCH another),
-/// and receive windows of a few groups, so senders wait on MAX_STREAMS and
-/// MAX_DATA mid-burst, over a path that loses the frames granting them.
+/// and stream windows of a few groups, so senders wait on MAX_STREAMS and
+/// MAX_STREAM_DATA mid-burst while the path is congested. The connection window
+/// keeps its default, since it has to fit the largest message a session assembles.
 fn credit(lane: Lane, mut quic: moq_tokio::quic::Config) -> moq_tokio::quic::Config {
 	if let Lane::Impaired = lane {
 		quic.max_streams = Some(16);
 		// The one-shot ingress burst must fit inside transport credit before
-		// anything is released. Keep two bucket allowances, rounded to groups,
-		// while still forcing a full application burst to wait for more credit.
-		let receive_window = ingress_bytes();
-		assert!(receive_window < BURST_GROUPS * PAYLOAD as u64);
-		quic.receive_window = Some(receive_window);
-		quic.stream_receive_window = Some(receive_window);
+		// anything is released. Keep two bucket allowances, rounded to groups.
+		quic.stream_receive_window = Some(ingress_bytes());
 	}
 	quic
 }
@@ -1011,7 +1015,7 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 	config.connect = dial();
 	// Retry forever: a give-up after a slow impaired handshake would look exactly
 	// like the never-redialed regression, and a stall still fails the drill.
-	config.connect.backoff.timeout = Some(Duration::ZERO);
+	config.connect.backoff.timeout = Some((Duration::ZERO).into());
 	if link == PeerLink::Transport {
 		config.connect.version = vec!["moq-transport-19".parse().expect("parse version")];
 	}
@@ -1462,7 +1466,7 @@ async fn subscriber_max_age_skips_bufferbloat(version: &str) {
 		loop {
 			if track
 				.subscription()
-				.is_some_and(|subscription| subscription.max_delay == Duration::from_millis(100))
+				.is_some_and(|subscription| subscription.max_delay == Some(Duration::from_millis(100)))
 			{
 				break;
 			}

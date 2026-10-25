@@ -26,12 +26,12 @@ pub struct ExportArgs {
 
 	/// Keep only this much recent content (a DVR), deleting older objects. Unset keeps everything.
 	#[usage(long)]
-	pub retention: Option<crate::duration::Duration>,
+	pub retention: Option<moq_tokio::cli::Duration>,
 
 	/// How long a deleted object outlives the retention, so readers can finish their downloads.
 	/// Defaults to 30s; needs `--retention`.
 	#[usage(long)]
-	pub retention_grace: Option<crate::duration::Duration>,
+	pub retention_grace: Option<moq_tokio::cli::Duration>,
 }
 
 /// `import archive` args.
@@ -44,7 +44,7 @@ pub struct ImportArgs {
 	/// Keep following a recording that is still growing, checking for new segments at this
 	/// interval. Unset replays what is stored now and ends the timeline there.
 	#[usage(long)]
-	pub follow: Option<crate::duration::Duration>,
+	pub follow: Option<moq_tokio::cli::Duration>,
 }
 
 /// One publisher instance being recorded: its path, and its epoch when its route has one.
@@ -58,8 +58,8 @@ type Instance = (moq_net::PathOwned, Option<moq_net::Epoch>);
 pub async fn export(origin: moq_net::origin::Consumer, prefix: String, args: ExportArgs) -> anyhow::Result<()> {
 	let dvr = match (args.retention, args.retention_grace) {
 		(Some(window), grace) => Some(moq_archive::producer::Dvr::new(
-			window.into_std(),
-			grace.map_or(GRACE, crate::duration::Duration::into_std),
+			window.into(),
+			grace.map_or(GRACE, Into::into),
 		)),
 		(None, Some(_)) => anyhow::bail!("`--retention-grace` needs `--retention`"),
 		(None, None) => None,
@@ -268,14 +268,14 @@ pub async fn import(
 	notify_ready();
 
 	// The store holds no end marker, so only the caller can say the recording is complete.
-	let Some(interval) = args.follow.map(crate::duration::Duration::into_std) else {
+	let Some(interval) = args.follow.map(Into::into) else {
 		reader.finish()?;
 		serve.await;
 		return Ok(());
 	};
 	let refresh = async {
 		loop {
-			tokio::time::sleep(interval).await;
+			moq_clock::sleep(interval).await;
 			// A rendition the recording enrolled after the replay started.
 			for (track, timeline) in listing.timelines().await? {
 				if let std::collections::btree_map::Entry::Vacant(entry) = timelines.entry(track) {
@@ -310,6 +310,7 @@ fn open(url: &Url) -> anyhow::Result<moq_archive::Store<Arc<dyn ObjectStore>>> {
 }
 
 #[cfg(test)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 
@@ -337,8 +338,6 @@ mod tests {
 	/// `<path>/@<epoch>`, and leaves out what is announced elsewhere.
 	#[tokio::test]
 	async fn each_broadcast_records_under_its_own_key_prefix() {
-		// `open_store` reads the credential variables.
-		let _env = crate::test_env::EnvGuard::clear(&[]);
 		let dir = tempfile::tempdir().unwrap();
 		let url = Url::from_directory_path(dir.path()).unwrap();
 

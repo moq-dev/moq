@@ -14,7 +14,7 @@ categories = ["asynchronous", "concurrency"]
 
 [features]
 # Per-task Ready poll accounting for deterministic simulators, never production.
-sim = []
+_sim = []
 
 [dependencies]
 smallvec = { version = "1.15", features = ["union"] }
@@ -47,5 +47,5 @@ harness = false
 name = "contended"
 harness = false
 
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
+[lints]
+workspace = true

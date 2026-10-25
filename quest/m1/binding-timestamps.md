@@ -32,9 +32,10 @@ Decided with the maintainer on 2026-10-18:
 - **m1**, beside data consumer timestamps.
 - **#5677 shipped** the data-value timestamps with the interim microsecond
   fields; this quest converts every site at once, `MoqJsonValue` included.
-- **Shape mirrors the core:** one `{value, scale}` per value, `value` at most
-  `2^62 - 1` and `scale` non-zero and at most `2^62 - 1`, matching
-  `Timestamp::new` and `Timescale::new`. The FFI boundary refuses anything else with
+- **Shape mirrors the core:** one `{value, scale}` per value, `value` bounded
+  as `Timestamp::new` bounds it (`2^61 - 1` once
+  [#6168](https://github.com/moq-dev/moq/pull/6168) lands, decided 2026-10-22)
+  and `scale` non-zero and at most `2^62 - 1`, matching `Timescale::new`. The FFI boundary refuses anything else with
   an error. Rejected: raw ticks at the track scale beside
   `MoqTrackInfo.timescale`, because a producer argument needs its own scale
   and per-value records match the core and JS.
@@ -49,7 +50,7 @@ Decided with the maintainer on 2026-10-18:
   to nearest and says so in its doc; the record itself stays exact.
 - **One PR across every binding**, per the cross-package sync table, so each
   binding breaks once. No shim: the microsecond fields are removed, not kept
-  beside the record. Each package gets a `MIGRATE.md` entry, and `doc/lib/*`
+  beside the record. The Impact bullet says how to migrate each package, and `doc/lib/*`
   and `doc/bin/obs.md` update in the same PR.
 
 Verification: round-trip a 90 kHz tick, a present zero, and untimed through
@@ -60,10 +61,9 @@ Decided 2026-10-20 (maintainer): the moq-c half lands on the
 [generated C package](/quest/m1/c/README.md), not the frozen hand-written
 ABI, so C users break once.
 
+Wall and monotonic times stay `moq_clock::Wall` and `moq_clock::Instant`, not
+media timestamps; keep the types distinct.
+
 ## Required
 
 - [Generated C bindings](/quest/m1/c/README.md) - `moq_timestamp` reaches C through the generated package, so C users break once
-
-## Related
-
-- [Controlled time](/quest/m1/time/README.md) - wall and monotonic time, not media timestamps; keep the types distinct

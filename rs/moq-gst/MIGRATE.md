@@ -4,6 +4,11 @@ How to update your pipelines for each breaking change, newest first.
 
 ## Unreleased
 
+### `moqsrc` audio caps are the standard ones
+
+`moqsrc` audio pads now carry `rate` and `channels` as `int`, and Opus pads the mapping fields (`channel-mapping-family`, `stream-count`, `coupled-count`, plus `channel-mapping` beyond stereo) with the OpusHead and an empty OpusTags as `streamheader`, so `decodebin` and `opusdec` accept them and `opusdec` applies the output gain.
+Opus pads no longer carry the nonstandard `codec_data` and `stream-format=ogg`; a capsfilter naming either, or a `uint` rate or channel count, must drop it.
+
 ### Rust embedders move to gstreamer 0.25 (#6169)
 
 Only Rust code that links `gstmoq` as a library is affected; pipelines and the loadable plugin are not.

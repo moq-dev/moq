@@ -33,9 +33,10 @@ The per-broadcast verdict combining client reports, the relay's starvation,
 and publisher timeliness lives downstream. This line only reports the
 counters.
 
-Decided (2026-10-06 audit): stats prefix tracks (`<path>/traffic.json`)
-landed first, since they are a prerequisite of the lag API; both are deferred to m2 by the maintainer
-on 2026-10-15; the lag histogram lands on the stats totals and
+Decided (2026-10-06 audit): stats prefix tracks (`<path>/prefix.json`)
+landed first in #5811, since they are a prerequisite of the lag API; the lag
+histogram was deferred to m2 by the maintainer on 2026-10-15 and lands on the
+stats totals and
 prefix tracks rather than the per-path `publisher.json` and
 `subscriber.json` map rows, which stay unchanged for existing readers
 (2026-10-12).

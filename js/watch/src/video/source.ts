@@ -15,9 +15,6 @@ type CacheableSupported = Supported & {
 	[supportCacheKey]?: (config: Catalog.VideoConfig) => string;
 };
 
-/** A video source error that prevents choosing a usable rendition. */
-export type SourceError = "unsupported";
-
 /** What the viewer wants from the video rendition; the source picks the best one within it. */
 export type Target = {
 	// Optional manual override for the selected rendition name.
@@ -55,8 +52,9 @@ type SourceOutput = {
 	catalog: Signal<Catalog.Video | undefined>;
 	available: Signal<Record<string, Catalog.VideoConfig>>;
 
-	// The current source error, or undefined while healthy or still probing.
-	error: Signal<SourceError | undefined>;
+	// Why no rendition can be chosen, or undefined while healthy or still probing. A
+	// `NotSupportedError` means the browser can decode none of the catalog's renditions.
+	error: Signal<Error | undefined>;
 
 	// The name of the active rendition.
 	track: Signal<string | undefined>;
@@ -210,12 +208,15 @@ export class Source {
 	readonly #out: SourceOutput = {
 		catalog: new Signal<Catalog.Video | undefined>(undefined),
 		available: new Signal<Record<string, Catalog.VideoConfig>>({}),
-		error: new Signal<SourceError | undefined>(undefined),
+		error: new Signal<Error | undefined>(undefined),
 		track: new Signal<string | undefined>(undefined),
 		config: new Signal<Catalog.VideoConfig | undefined>(undefined),
 	};
 	/** The derived outputs, read-only. */
 	readonly out = readonlys(this.#out);
+	#pending = new Signal(false);
+	/** Whether rendition support is still being resolved. @internal */
+	readonly pending: Getter<boolean> = this.#pending;
 
 	#signals = new Effect();
 	#supportCache = new WeakMap<Supported, Map<string, { key: string; supported: boolean }>>();
@@ -262,6 +263,7 @@ export class Source {
 			if (!names.has(name)) cache.delete(name);
 		}
 
+		effect.set(this.#pending, true, false);
 		effect.spawn(async () => {
 			const available: Record<string, Catalog.VideoConfig> = {};
 
@@ -299,14 +301,14 @@ export class Source {
 				if (isSupported) available[name] = config;
 			}
 
-			const error =
-				Object.keys(available).length === 0 && Object.keys(renditions).length > 0 ? "unsupported" : undefined;
-			if (error === "unsupported") {
+			if (Object.keys(available).length === 0 && Object.keys(renditions).length > 0) {
 				console.warn("[Source] No supported video renditions found:", renditions);
+				this.#out.error.set(new DOMException("no supported video renditions", "NotSupportedError"));
+			} else {
+				this.#out.error.set(undefined);
 			}
-
-			this.#out.error.set(error);
 			this.#out.available.set(available);
+			this.#pending.set(false);
 		});
 	}
 

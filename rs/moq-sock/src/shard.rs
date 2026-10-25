@@ -671,6 +671,7 @@ mod tests {
 	/// socket would be unrelated to the connection ID.
 	#[test]
 	#[cfg(target_os = "linux")]
+	#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 	fn a_connection_id_reaches_its_own_member() {
 		const COUNT: u16 = 4;
 

@@ -8,7 +8,7 @@
 //!
 //! A [`Producer`] writes, under its prefix:
 //!
-//! - `<track>/.info`: the track's properties as JSON, `{"version":2,"priority":127,"timescale":1000}`,
+//! - `<track>/.info`: the track's properties as JSON, `{"version":3,"priority":0,"timescale":1000}`,
 //!   written before its first object. `timescale` is absent on an untimed track. Properties never
 //!   change for a track name. The source's max age is not stored: it bounds the live cache, not
 //!   the archive.
@@ -32,7 +32,7 @@
 //!
 //! ```text
 //! Object {
-//!   Version (i) = 2,
+//!   Version (i) = 3,
 //!   Frame Start (i),      // the first group's first frame index; 0 when it starts with a datagram
 //!   Entry Count (i),
 //!   Entry (..) ...,
@@ -69,20 +69,24 @@ mod path;
 pub mod producer;
 pub mod reader;
 /// The binary segment object holding a record's groups and frames.
-pub mod segment;
-/// Put, get, list, and delete recording objects on an object store.
-pub mod store;
+mod segment;
+/// Recording objects on an object store.
+mod store;
 
 pub use error::{Error, Result};
 pub use info::Info;
-pub use path::Key;
+pub(crate) use path::Key;
 pub use producer::Producer;
 pub use reader::Reader;
-pub use segment::{Frame, Group, Object};
+pub(crate) use segment::Object;
 pub use store::Store;
 
 /// Recording format version written into `.info` and the binary envelope.
-pub const VERSION: u64 = 2;
+pub const VERSION: u64 = 3;
+
+/// The oldest recording format version [`Reader`] accepts. Version 2 stored `.info`'s
+/// priority as its moq-lite byte and is otherwise identical.
+pub(crate) const VERSION_MIN: u64 = 2;
 
 /// Largest group, segment, or timestamp value the format allows (`2^53 - 1`).
 pub const ID_MAX: u64 = (1 << 53) - 1;

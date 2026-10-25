@@ -16,6 +16,7 @@
 //! groups have a `_cpu` suffix. Cache-clock advancement remains outside both clocks.
 //! `session_delivery_group_cost` sweeps publishers and viewers independently for SUBSCRIBE
 //! and FETCH; its constrained cases release held streams only after a real blocked write.
+//! A one-relay lite FETCH fixture asserts one upstream FETCH per group during setup.
 //! `session_delivery_credit` grants a viewer one uni stream at a time, swept over its
 //! subscriptions and the backlog each holds, so every group waits for a stream grant. A
 //! publisher that parks state per backlogged group pays for it on each grant, which shows
@@ -46,8 +47,10 @@
 //!
 //! Run with `cargo bench -p moq-net --bench session`.
 
-// Custom timings measure the real time the work took, not the ambient clock.
-#![allow(clippy::disallowed_methods)]
+#![expect(
+	clippy::disallowed_methods,
+	reason = "custom timings measure the real time the work took, not the ambient clock"
+)]
 
 #[path = "../tests/integration/support/mod.rs"]
 mod support;
@@ -117,6 +120,8 @@ struct Shape {
 	window: usize,
 	/// Group streams a viewer's relay may have open toward it at once.
 	credit: Option<usize>,
+	/// Publish compressed groups and exercise negotiated versus plain fallback egress.
+	compress: bool,
 	/// Read each group via a fresh FETCH rather than a live subscription.
 	fetch: bool,
 }
@@ -138,6 +143,7 @@ impl Shape {
 		window: 1024 * 1024,
 		credit: None,
 		fetch: false,
+		compress: false,
 	};
 
 	/// What each viewer subscribes with: a burst is a backlog, which the default
@@ -354,8 +360,8 @@ impl Cluster {
 		// whole origin, hidden broadcasts included, and subscribes into it.
 		for server in 0..shape.relays {
 			for client in 0..server {
-				let client = this.relays[client].clone().peer();
-				let server = this.relays[server].clone().peer();
+				let client = this.relays[client].clone().with_link(moq_net::origin::Link::Peer);
+				let server = this.relays[server].clone().with_link(moq_net::origin::Link::Peer);
 				let mut options = MockConnectOptions::new(this.version);
 				options.transport.stream_buffer = this.window;
 				options.client_publish = Some(client.consume().with_hidden(true));
@@ -373,7 +379,11 @@ impl Cluster {
 				let broadcast = origin
 					.publish(path(publisher * shape.broadcasts + index), Default::default())
 					.unwrap();
-				this.tracks.push(broadcast.create_track(TRACK, timed()).unwrap());
+				this.tracks.push(
+					broadcast
+						.create_track(TRACK, timed().with_compress(shape.compress))
+						.unwrap(),
+				);
 				this._broadcasts.push(broadcast);
 			}
 
@@ -569,6 +579,22 @@ impl Room {
 				"the constrained fixture must exercise flow control"
 			);
 		}
+		if shape.fetch && shape.relays == 1 && room.cluster.version.is_lite() {
+			let upstream_fetches = room
+				.cluster
+				._pairs
+				.iter()
+				.map(|pair| {
+					// Lite FETCH's stream type is 3, encoded in one byte.
+					pair.server_transport
+						.bidi_types()
+						.into_iter()
+						.filter(|kind| *kind == 3)
+						.count()
+				})
+				.sum::<usize>();
+			assert_eq!(upstream_fetches, room.groups, "one upstream FETCH per written group");
+		}
 		room
 	}
 
@@ -583,7 +609,7 @@ impl Room {
 	fn tick(&mut self) {
 		self.cache_now += Duration::from_secs(1);
 		for pool in self.pools() {
-			pool.gc(self.cache_now, &kio::Waiter::noop());
+			pool.poll(self.cache_now, &kio::Waiter::noop());
 		}
 	}
 
@@ -1042,14 +1068,23 @@ impl ChurnRoom {
 	}
 
 	/// Open and close one subscription per iteration, round-robin over the sessions.
-	async fn measure(&self, iters: u64) -> Duration {
+	async fn measure(&mut self, iters: u64) -> Duration {
 		let start = Instant::now();
 		for iter in 0..iters as usize {
 			let session = iter % self.broadcasts.len();
 			let track = self.broadcasts[session].track(&format!("churn{session}")).unwrap();
-			let subscriber = track.subscribe(None).await.unwrap();
-			// The relay saw the request, rather than a cached track answering it locally.
-			support::wanted(self.churn[session].demand()).await.unwrap();
+			let mut subscriber = track.subscribe(None).await.unwrap();
+			// Keep the reader polled while its per-route subscription resolves. No
+			// groups are produced here, so this starts demand without consuming data.
+			kio::wait(|waiter| {
+				assert!(subscriber.poll_recv_group(waiter).is_pending());
+				while std::task::ready!(self.churn[session].poll_subscription_changed(waiter))
+					.unwrap()
+					.is_none()
+				{}
+				std::task::Poll::Ready(())
+			})
+			.await;
 			drop(subscriber);
 			drop(track);
 			support::unwanted(self.churn[session].demand()).await.unwrap();
@@ -1204,6 +1239,20 @@ fn session(c: &mut Criterion) {
 		return;
 	}
 	let base = Shape::BASE;
+
+	delivery(
+		c,
+		"compression",
+		[1, 16].into_iter().flat_map(|publishers| {
+			[1, 16].map(move |viewers| Shape {
+				publishers,
+				viewers,
+				compress: true,
+				frame: 1024,
+				..base
+			})
+		}),
+	);
 
 	delivery(
 		c,

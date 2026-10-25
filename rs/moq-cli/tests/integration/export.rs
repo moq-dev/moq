@@ -1,9 +1,9 @@
-//! `moq export ts --linger` and `--stitch` over a real relay: the export rides out the same
+//! `moq export ts --follow` and `--stitch` over a real relay: the export rides out the same
 //! publisher instance leaving and coming back, switches to a replacement only when asked, and
 //! exits with the verdict of the broadcast's last end. The other formats fail once the route
 //! they read dies.
 //!
-//! Each test spawns `moq` processes that feed clips and wait out lingers in real time, tens of
+//! Each test spawns `moq` processes that feed clips and wait out follows in real time, tens of
 //! seconds between them, so they are ignored here and run nightly as `just rs cli-export`.
 #![cfg(unix)]
 
@@ -90,7 +90,7 @@ struct Relay {
 async fn relay() -> Relay {
 	let _ = moq_tokio::crypto::install_default();
 	let mut config = moq_relay::Config::default();
-	config.drain_timeout = Duration::ZERO;
+	config.drain_timeout = Some(Duration::ZERO.into());
 	config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.listen.tls.generate = vec!["localhost".into()];
 	config.listen.version = std::iter::once(LITE_07.parse().unwrap())
@@ -123,9 +123,9 @@ fn moq(relay: &Relay, args: &[&str]) -> tokio::process::Command {
 	command
 }
 
-/// Start `moq export ts --linger <linger>`, collecting its output and diagnostics.
-fn export(relay: &Relay, linger: &str) -> Export {
-	export_with(relay, &[], &["--linger", linger])
+/// Start `moq export ts --follow <follow>`, collecting its output and diagnostics.
+fn export(relay: &Relay, follow: &str) -> Export {
+	export_with(relay, &[], &["--follow", follow])
 }
 
 /// A container both `import` and `export` speak, with a clip of it.
@@ -220,7 +220,7 @@ fn collect(
 					received.lock().unwrap().push((Instant::now(), output.len()));
 				}
 				Some(fence) = requested.recv() => {
-					// The follower entered linger only after each old stdout write and flush.
+					// The follower started following only after each old stdout write and flush.
 					// This task owns the reader, so no read can race the queued-byte count.
 					let mut pending: libc::c_int = 0;
 					// SAFETY: the pipe is live and pending points to a writable c_int.
@@ -253,8 +253,8 @@ fn import_with(relay: &Relay, global: &[&str]) -> (Child, JoinHandle<ChildStdin>
 /// [`import_with`] in `format`.
 fn import_as(relay: &Relay, global: &[&str], format: Format) -> (Child, JoinHandle<ChildStdin>) {
 	let mut child = moq(relay, global)
-		// A finished import lingers for its max-age; keep that short so the publisher exits promptly.
-		.args(["import", "--max-age", "1s", format.name])
+		// A finished import lingers; keep that short so the publisher exits promptly.
+		.args(["import", "--max-age", "1s", "--linger", "1s", format.name])
 		.stdin(Stdio::piped())
 		.spawn()
 		.expect("spawn import");
@@ -313,14 +313,14 @@ fn adaptation_flags(packet: &[u8]) -> Option<u8> {
 
 #[tokio::test]
 #[ignore = "real-time process test: just rs cli-export"]
-async fn a_clean_finish_exits_zero_once_the_linger_expires() {
+async fn a_clean_finish_exits_zero_once_the_follow_expires() {
 	let relay = relay().await;
 	let mut export = export(&relay, "1s");
 
 	let (mut publisher, feeding) = import(&relay);
 	let stdin = feeding.await.unwrap();
 	export.output_past(0).await;
-	// The linger can't start before stdin closes, but it can before the publisher exits.
+	// The follow can't start before stdin closes, but it can before the publisher exits.
 	let closed = Instant::now();
 	drop(stdin);
 	assert!(wait(&mut publisher).await.success());
@@ -332,19 +332,21 @@ async fn a_clean_finish_exits_zero_once_the_linger_expires() {
 	);
 	assert!(
 		closed.elapsed() >= Duration::from_millis(900),
-		"the export waited out its linger"
+		"the export waited out its follow"
 	);
 }
 
 #[tokio::test]
 #[ignore = "real-time process test: just rs cli-export"]
-async fn a_drop_exits_one_once_the_linger_expires() {
+async fn a_drop_exits_one_once_the_follow_expires() {
 	let relay = relay().await;
 	let mut export = export(&relay, "1s");
 
 	let (publisher, feeding) = import(&relay);
 	let stdin = feeding.await.unwrap();
 	export.output_past(0).await;
+	// The follow can't start before the interrupt.
+	let interrupted = Instant::now();
 	interrupt(publisher, stdin).await;
 
 	let (status, errors) = export.wait().await;
@@ -353,17 +355,21 @@ async fn a_drop_exits_one_once_the_linger_expires() {
 		Some(1),
 		"a drop exits 1, got {status}; exporter stderr: {errors}"
 	);
+	assert!(
+		interrupted.elapsed() >= Duration::from_millis(900),
+		"the export waited out its follow rather than failing on the drop; exporter stderr: {errors}"
+	);
 }
 
 /// An export that fails on its own, with the broadcast still up, has no return to wait for.
 #[tokio::test]
 #[ignore = "real-time process test: just rs cli-export"]
-async fn an_export_failure_with_the_broadcast_up_exits_without_lingering() {
+async fn an_export_failure_with_the_broadcast_up_exits_without_following() {
 	let relay = relay().await;
 	let export = export(&relay, "20s");
 
 	// TS cannot carry AV1, so the export fails on the catalog while the publisher stays up.
-	let mut publisher = moq(&relay, &["import", "--max-age", "1s", "fmp4"])
+	let mut publisher = moq(&relay, &["import", "--max-age", "1s", "--linger", "1s", "fmp4"])
 		.stdin(Stdio::piped())
 		.spawn()
 		.expect("spawn import");
@@ -416,8 +422,8 @@ async fn interrupted(export: &mut Export, publisher: (Child, JoinHandle<ChildStd
 	interrupt(publisher, stdin).await;
 	tokio::time::timeout(TIMEOUT, export.settled.take().expect("one interruption per export"))
 		.await
-		.expect("export never drained into linger")
-		.expect("export stopped before entering linger");
+		.expect("export never drained into its follow")
+		.expect("export stopped before following");
 	let (fence, drained) = tokio::sync::oneshot::channel();
 	export.fence.send(fence).expect("stdout reader is still running");
 	let len = tokio::time::timeout(TIMEOUT, drained)
@@ -434,7 +440,7 @@ async fn interrupted(export: &mut Export, publisher: (Child, JoinHandle<ChildStd
 #[ignore = "real-time process test: just rs cli-export"]
 async fn a_restarted_publisher_exits_one_without_stitch() {
 	let relay = relay().await;
-	let mut export = export_with(&relay, &[], &["--linger", "20s"]);
+	let mut export = export_with(&relay, &[], &["--follow", "20s"]);
 	let output = export.output.clone();
 	let mark = interrupted(&mut export, import(&relay)).await;
 
@@ -448,7 +454,7 @@ async fn a_restarted_publisher_exits_one_without_stitch() {
 	);
 	assert!(
 		started.elapsed() < Duration::from_secs(10),
-		"exited after {:?}, as though waiting out the linger",
+		"exited after {:?}, as though waiting out the follow",
 		started.elapsed()
 	);
 	assert!(errors.contains("--stitch"), "the error names --stitch: {errors}");
@@ -468,7 +474,7 @@ async fn a_restarted_publisher_exits_one_without_stitch() {
 #[ignore = "real-time process test: just rs cli-export"]
 async fn a_restarted_publisher_is_a_program_switch_with_stitch() {
 	let relay = relay().await;
-	let mut export = export_with(&relay, &[], &["--linger", "4s", "--stitch"]);
+	let mut export = export_with(&relay, &[], &["--follow", "4s", "--stitch"]);
 	let output = export.output.clone();
 	let mark = interrupted(&mut export, import(&relay)).await;
 
@@ -501,11 +507,11 @@ async fn a_restarted_publisher_is_a_program_switch_with_stitch() {
 	assert_eq!(unflagged(after), Vec::<u16>::new(), "every PID flags the break");
 }
 
-/// One publisher reconnects within the linger, continuing its capture under the same epoch
+/// One publisher reconnects within the follow, continuing its capture under the same epoch
 /// and program before delivering a clean final finish.
 #[tokio::test]
 #[ignore = "real-time process test: just rs cli-export"]
-async fn the_same_instance_within_the_linger_continues() {
+async fn the_same_instance_within_the_follow_continues() {
 	let relay = relay().await;
 	let epoch = moq_net::Epoch::mint();
 	let lite07 = ["--connect-version", LITE_07];
@@ -529,7 +535,7 @@ async fn the_same_instance_within_the_linger_continues() {
 		.with_reconnect(false);
 	let url: url::Url = relay.url.parse().unwrap();
 	let connection = client.connect(url.clone()).established().await.unwrap();
-	let mut export = export_with(&relay, &lite07, &["--linger", "4s"]);
+	let mut export = export_with(&relay, &lite07, &["--follow", "4s"]);
 	let output = export.output.clone();
 
 	// Continue one capture across a transport loss. Replaying its beginning in a fresh
@@ -627,7 +633,7 @@ async fn a_standby_before_its_tracks(global: &[&str], format: Format) {
 	second.output_past(0).await;
 
 	let mut standby = moq(&relay, publish)
-		.args(["import", "--max-age", "1s", format.name])
+		.args(["import", "--max-age", "1s", "--linger", "1s", format.name])
 		.stdin(Stdio::piped())
 		.stderr(Stdio::piped())
 		.spawn()
@@ -694,7 +700,7 @@ async fn a_standby_before_its_init_segment_leaves_the_fmp4_exports_running_on_li
 async fn an_old_publisher_that_stays_up_keeps_the_export() {
 	let relay = relay().await;
 	let lite07 = ["--connect-version", LITE_07];
-	let mut export = export_with(&relay, &lite07, &["--linger", "10s"]);
+	let mut export = export_with(&relay, &lite07, &["--follow", "10s"]);
 	let output = export.output.clone();
 
 	let (mut old, feeding) = import_with(&relay, &lite07);
@@ -739,7 +745,7 @@ async fn an_old_publisher_that_stays_up_keeps_the_export() {
 /// it does once its input declares a track.
 async fn import_announced(relay: &Relay, format: Format) -> (Child, JoinHandle<ChildStdin>) {
 	let mut child = moq(relay, &[])
-		.args(["import", "--max-age", "1s", format.name])
+		.args(["import", "--max-age", "1s", "--linger", "1s", format.name])
 		.env("RUST_LOG", "warn,moq_net::lite::publisher=debug")
 		.stdin(Stdio::piped())
 		.stderr(Stdio::piped())
@@ -848,10 +854,20 @@ fn redundant_feed() -> (tokio::sync::mpsc::UnboundedSender<ChildStdin>, JoinHand
 	(add, task)
 }
 
-/// Start an importer of the live source on lite-07, with `flags` for `import ts`.
+/// Start an importer of the live source on lite-07, with `flags` for `import ts`. A killed
+/// importer sends no close, so the relay keeps its route until the QUIC idle timeout: a short
+/// one, as a redundant ingest would run, keeps that outage to seconds.
 fn redundant_import(relay: &Relay, feed: &tokio::sync::mpsc::UnboundedSender<ChildStdin>, flags: &[&str]) -> Child {
-	let mut child = moq(relay, &["--connect-version", LITE_07])
-		.args(["import", "--max-age", "10s", "ts"])
+	let global = [
+		"--connect-version",
+		LITE_07,
+		"--quic-idle-timeout",
+		"2s",
+		"--quic-keep-alive",
+		"500ms",
+	];
+	let mut child = moq(relay, &global)
+		.args(["import", "--max-age", "10s", "--linger", "10s", "ts"])
 		.args(flags)
 		.stdin(Stdio::piped())
 		.spawn()
@@ -916,7 +932,7 @@ async fn redundant_failover(bufferbloat: bool) {
 			export_with(
 				&subscribers,
 				&["--connect-version", LITE_07],
-				&["--stitch", "--linger", "10s", "--delay", "3s"],
+				&["--stitch", "--follow", "10s", "--delay", "3s"],
 			)
 		})
 		.collect();
@@ -928,7 +944,10 @@ async fn redundant_failover(bufferbloat: bool) {
 		for export in &mut exports {
 			tokio::time::timeout(TIMEOUT, async {
 				loop {
-					assert!(export.child.try_wait().unwrap().is_none(), "stitching export exited");
+					if export.child.try_wait().unwrap().is_some() {
+						let errors = (&mut export.stderr).await.expect("collect exporter stderr");
+						panic!("stitching export exited: {errors}");
+					}
 					if packets(&export.output.lock().unwrap())
 						.filter_map(|packet| pat_version(packet))
 						.any(|v| v == version)

@@ -45,14 +45,11 @@ pub struct Config {
 	)]
 	pub prefix: String,
 
-	/// Interval (in seconds) between snapshot publishes. Defaults to 1.
-	#[usage(
-		long = "stats-interval",
-		env = "MOQ_STATS_INTERVAL",
-		default = "1",
-		setting = "stats.interval"
-	)]
-	pub interval: u64,
+	/// How often a snapshot is published, e.g. "1s" or "500ms". Defaults to 1
+	/// second.
+	#[usage(long = "stats-interval", env = "MOQ_STATS_INTERVAL", setting = "stats.interval")]
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub interval: Option<moq_tokio::cli::Duration>,
 
 	/// Node identifier appended to the advertised stats path to disambiguate
 	/// broadcasts when multiple relays share a cluster origin. Without this,
@@ -70,7 +67,7 @@ pub struct Config {
 	/// single `<prefix>/node/<node>` broadcast for the whole node. Set to 1 to
 	/// publish a per-first-segment broadcast (e.g. per tenant), so a consumer can
 	/// announce-scope to just that group rather than slurping every node's full
-	/// stats. See [`moq_stats::produce::Config::depth`].
+	/// stats.
 	#[usage(
 		long = "stats-depth",
 		env = "MOQ_STATS_DEPTH",
@@ -85,13 +82,9 @@ pub struct Config {
 	/// churn doesn't unannounce and re-announce it across the mesh; one that
 	/// returns after it announces under a new epoch. Only applies at `depth` 1
 	/// or more. See [`moq_stats::produce::Config::linger`].
-	#[usage(skip)]
-	#[serde(with = "crate::duration::serde_option")]
-	pub linger: Option<Duration>,
-
 	#[usage(long = "stats-linger", env = "MOQ_STATS_LINGER", setting = "stats.linger")]
-	#[serde(default, rename = "__cli_linger", skip_serializing_if = "Option::is_none")]
-	pub(crate) linger_arg: Option<crate::duration::Duration>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub linger: Option<moq_tokio::cli::Duration>,
 }
 
 impl Default for Config {
@@ -99,19 +92,23 @@ impl Default for Config {
 		Self {
 			enabled: false,
 			prefix: ".stats".into(),
-			interval: 1,
+			interval: None,
 			node: None,
 			depth: 0,
 			linger: None,
-			linger_arg: None,
 		}
 	}
 }
 
 impl Config {
+	/// The publish interval; `None` keeps the producer's default.
+	pub(crate) fn interval(&self) -> Option<Duration> {
+		self.interval.map(Into::into)
+	}
+
 	/// The linger after command-line overrides; `None` keeps the producer's default.
 	pub(crate) fn linger(&self) -> Option<Duration> {
-		self.linger_arg.map(crate::duration::Duration::into_std).or(self.linger)
+		self.linger.map(Into::into)
 	}
 
 	/// Build a [`moq_stats::Producer`] from this config, publishing on `origin`.
@@ -120,26 +117,29 @@ impl Config {
 	/// attach the result unconditionally. Hand it to
 	/// [`Cluster::with_stats`](crate::cluster::Cluster::with_stats), which takes over both
 	/// the registry and keeping the publish task alive (the task stops when the
-	/// last clone of the producer drops).
-	pub fn build(&self, origin: origin::Producer) -> moq_stats::Producer {
+	/// last clone of the producer drops). Fails on a zero interval.
+	pub fn build(&self, origin: origin::Producer) -> anyhow::Result<moq_stats::Producer> {
 		if !self.enabled {
-			return moq_stats::Producer::new(moq_stats::produce::Config::new());
+			return Ok(moq_stats::Producer::new(moq_stats::produce::Config::new()));
 		}
 		let prefix = self.prefix.clone();
-		let interval = Duration::from_secs(self.interval.max(1));
+		let interval = self.interval();
+		anyhow::ensure!(interval != Some(Duration::ZERO), "stats.interval must be non-zero");
 		let node = self.node.clone().map(PathOwned::from);
 		let depth = self.depth;
 		let linger = self.linger();
-		tracing::info!(prefix, interval_secs = interval.as_secs(), node = ?node, depth, ?linger, "stats publishing enabled");
+		tracing::info!(prefix, ?interval, node = ?node, depth, ?linger, "stats publishing enabled");
 		let mut config = moq_stats::produce::Config::new()
 			.with_origin(origin)
 			.with_prefix(prefix)
-			.with_interval(interval)
 			.with_node(node)
 			.with_depth(depth);
+		if let Some(interval) = interval {
+			config = config.with_interval(interval);
+		}
 		if let Some(linger) = linger {
 			config = config.with_linger(linger);
 		}
-		moq_stats::Producer::new(config)
+		Ok(moq_stats::Producer::new(config))
 	}
 }

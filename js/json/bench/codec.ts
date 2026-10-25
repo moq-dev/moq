@@ -9,7 +9,7 @@ for (const keys of [1, 10, 100, 1000]) {
 		for (const compression of ["none", "deflate"] as const) {
 			const samples: number[] = [];
 			for (let sample = 0; sample < 3; sample++) {
-				const config = { deltaRatio: 100, compression };
+				const config = { compression };
 				const encoder = new Encoder<Record<string, number>>(config);
 				const decoder = new Decoder<Record<string, number>>(config);
 				let value = Object.fromEntries(Array.from({ length: keys }, (_, n) => [`k${n}`, 0]));

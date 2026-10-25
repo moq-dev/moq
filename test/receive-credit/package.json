@@ -1,0 +1,12 @@
+{
+	"name": "@moq/receive-credit-test",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"check": "tsc --noEmit"
+	},
+	"dependencies": {
+		"@moq/net": "workspace:*",
+		"@moq/web-transport": "^0.1.5"
+	}
+}

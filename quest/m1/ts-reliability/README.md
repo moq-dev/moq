@@ -41,10 +41,9 @@ periodic cuts, and an intact object alone do not ensure available PAT/PMT,
 codec configuration, clock context, or references for every MPTS program.
 
 The README owns the guide and integration proof for the modes present in
-m1: semantic remux and raw import/carriage. The deferred raw export quest
-extends the guide and proves its output when it lands; it does not block
-this proof. Reuse the children's fixtures and CI recipes, including their
-known-bad controls. Publish
+m1: semantic remux and raw import/carriage. Raw export and its packet-level
+proof landed in #5856; the guide covers it too. Reuse the children's
+fixtures and CI recipes, including their known-bad controls. Publish
 a coverage table linking each supported profile and loss guarantee to its
 test; unsupported or unmeasured cells stay explicit. Keep CLI instructions
 and the MPEG-TS draft consistent in each feature change.
@@ -63,7 +62,7 @@ refused means an error or a counted drop.
 
 | Mechanism | Contract | Owner |
 |:--|:--|:--|
-| H.264 (0x1B), H.265 (0x24) | Preserved: video rendition, PID and ES descriptors in `mpegts.tracks` | landed |
+| H.264 (0x1B), H.265 (0x24) | Preserved: video rendition, PID and ES descriptors in `mpegts.tracks`; DTS normalized from decode order. Today one access unit per PES | [access units](/quest/m1/ts-reliability/pes-access-units.md) |
 | AAC ADTS (0x0F), MP2, AC-3, E-AC-3, Opus (0x06 + `Opus`) | Preserved: audio rendition; Opus export labels mono and stereo, and 3 to 8 channels with an OpusHead in the Vorbis layout. Other mapping families (such as 255) refuse | landed |
 | Private and unknown PES types, LATM (0x11), metadata (0x15) | Preserved: `pesPacket`, PTS and DTS rebased | landed |
 | PES clock fields (ESCR, pack header, TREF), PES scrambling | Refused, counted in `refused` | landed |
@@ -73,7 +72,7 @@ refused means an error or a counted drop.
 | CAT, EMM/ECM, ATSC PSIP, other SI PIDs, unlisted PIDs, TS scrambling | Outside the profile, raw lane; counted in `refused`, unclaimed PIDs when the import reads every program | landed |
 | DVB SI on 0x0010, 0x0011, 0x0012, 0x0014 | Preserved: snapshot track per PID and `table_id` | landed |
 | Program identity, program and ES descriptors | Preserved: descriptors follow each PMT revision; an identity change refuses | landed |
-| PMT add, remove, retype; PID reuse | Normalized without a new epoch: a changed or reused PID ends its track and continues under a fresh name, and the PMT is rebuilt at the next `version_number`. Import landed; today refusal or stale PMT on export | [PMT export](/quest/m1/ts-reliability/pmt-export.md) |
+| PMT add, remove, retype; PID reuse | Normalized without a new epoch: a changed or reused PID ends its track and continues under a fresh name, and the export rebuilds the PMT at the next `version_number` | landed |
 | PAT changes: moved PMT PID, programs added or removed | Normalized: followed; a removed program retires, and returns as a new epoch. Today ignored, or the whole multiplex stops | [PAT changes](/quest/m1/ts-reliability/pat-lifecycle.md) |
 | Programs without video | Preserved when the PMT names a PCR PID; refused without one | landed |
 | PCR | Normalized: rebased, carried on the first video PID, else audio, else a dedicated PCR-only PID | landed |
@@ -82,19 +81,28 @@ refused means an error or a counted drop.
 | Media PES headers, TS packet layer | Normalized: rebuilt by export; the raw lane keeps them | landed |
 | PAT network PID entry | Preserved: listed on 0x0010 when a NIT is carried | landed |
 
+Decided in the 2026-10-22 root-cause audit: the rows above kept getting
+patched one at a time because two foundations were missing. Decode time is
+reconstructed from history instead of decode order, and import state has no
+owner that retires it. Those quests rank ahead of the remaining rows. Rejected: carrying
+decode time in every frame container, one shared ingest byte budget,
+and replacing the demux with GStreamer or another parser (it fixes neither
+cause). Out of scope for now: decoupling catalog publication from mux-rate
+measurement. Re-planned the same day: decode order covers MKV and FLV too and
+absorbs the release audit's export-reorder quest, and the shared parser lands
+before the open stream-routes and PAT drafts, which rebase onto it.
+
 PMT fragmentation (#5220), initial mux-rate measurement (#5287), and
-decoder-time admission (#5306) have landed; PSI runs and catalog linger
-remain with their current quests.
+decoder-time admission (#5306) have landed, as have PSI runs (#5606) and
+catalog linger (#5305).
 
 ## Required
 
-- [PMT export](/quest/m1/ts-reliability/pmt-export.md) - a TS export announces each PMT revision at the next `version_number`
+- [State bound](/quest/m1/ts-reliability/state-bound.md) - SI and revision state retire with what the source stops repeating
+- [Access units](/quest/m1/ts-reliability/pes-access-units.md) - a PES carrying several access units publishes each at its own time
 - [PAT changes](/quest/m1/ts-reliability/pat-lifecycle.md) - a revised PAT never leaves a broadcast meaning another program
-- [Arrival stamps](/quest/m1/ts-reliability/arrival-stamps.md) - frames carry their local arrival time, so a stalled path never lets late frames out
-- [Release clock false alarms](/quest/m1/ts-reliability/release-clock-false-alarms.md) - no false jitter leap at a 500 ms delay and no false drift alarm
 
 ## Related
 
-- [TS over RTP legs](/quest/m2/ts-rtp-egress.md) - TS identity alone is not ST 2022-7, which also needs matching RTP headers
 - [MSFTS mapping](/quest/m3/msfts-convergence.md) - document the exact equivalence and differences between the carriage modes
 

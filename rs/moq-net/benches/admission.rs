@@ -1,7 +1,9 @@
 //! Admission guard cost across serving threads and already admitted connections.
 
-// Custom timings measure the real time the work took, not the ambient clock.
-#![allow(clippy::disallowed_methods)]
+#![expect(
+	clippy::disallowed_methods,
+	reason = "custom timings measure the real time the work took, not the ambient clock"
+)]
 
 use std::{sync::Barrier, time::Instant};
 

@@ -54,7 +54,7 @@ capture = [
 # Device playback. Mixes any number of `playback::Sink`s into one cpal output
 # stream (CoreAudio / WASAPI / ALSA). Same libasound build dependency on Linux
 # as `capture`.
-playback = ["dep:cpal", "dep:fixed-resample", "dep:tokio", "dep:tracing"]
+playback = ["dep:cpal", "dep:fixed-resample", "dep:kio", "dep:tokio", "dep:tracing"]
 # Reach devices through the Linux sound server rather than its ALSA plugin, for
 # the server's own device names and routing. These customize cpal only when
 # `capture` or `playback` activates it, so a host flag alone pulls no audio I/O.
@@ -80,6 +80,7 @@ cpal = { version = "0.18", optional = true }
 fixed-resample = { version = "0.13", optional = true, default-features = false, features = ["channel", "resampler"] }
 hang = { workspace = true }
 kio = { workspace = true, optional = true }
+moq-clock = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 # We only use the sinc resampler (Async::new_sinc), so skip the default
@@ -140,3 +141,6 @@ objc2-screen-capture-kit = { workspace = true, features = ["SCStream", "SCSharea
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
+
+[lints]
+workspace = true

@@ -11,7 +11,7 @@
 use std::{
 	sync::{
 		Arc, Mutex,
-		atomic::{AtomicUsize, Ordering},
+		atomic::{AtomicBool, AtomicUsize, Ordering},
 	},
 	task::{Context, Poll},
 };
@@ -62,6 +62,7 @@ pub struct Log {
 	/// How long the trail and the stops were at the first session close.
 	closed_at: Arc<Mutex<Option<(usize, usize)>>>,
 	bi_opens: Arc<AtomicUsize>,
+	pub request_attempts: Arc<AtomicUsize>,
 	priorities: Arc<Mutex<Vec<u8>>>,
 	/// Hands each send group its id.
 	group_ids: Arc<AtomicUsize>,
@@ -374,16 +375,16 @@ pub struct PendingRecv;
 
 impl poll::RecvStream for PendingRecv {
 	type Error = SinkError;
+	// Never handed out.
+	type Lease<'a> = poll::BufferedLease<'a>;
 
-	fn poll_read(&mut self, _cx: &mut Context<'_>, _dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
+	fn poll_lease(&mut self, _cx: &mut Context<'_>, _want: usize) -> Poll<Result<Self::Lease<'_>, Self::Error>> {
 		Poll::Pending
 	}
+
+	fn set_priority(&mut self, _priority: i64) {}
 
 	fn stop(&mut self, _code: u32) {}
-
-	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-		Poll::Pending
-	}
 }
 
 /// A RESET_STREAM as the transport reports it. `Some(code)` decodes as
@@ -421,16 +422,16 @@ pub struct DeadRecv(ResetError);
 
 impl poll::RecvStream for DeadRecv {
 	type Error = ResetError;
+	// Never handed out.
+	type Lease<'a> = poll::BufferedLease<'a>;
 
-	fn poll_read(&mut self, _cx: &mut Context<'_>, _dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
+	fn poll_lease(&mut self, _cx: &mut Context<'_>, _want: usize) -> Poll<Result<Self::Lease<'_>, Self::Error>> {
 		Poll::Ready(Err(self.0))
 	}
+
+	fn set_priority(&mut self, _priority: i64) {}
 
 	fn stop(&mut self, _code: u32) {}
-
-	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-		Poll::Ready(Err(self.0))
-	}
 }
 
 /// Incoming streams that die before their first byte: `accept_uni` / `accept_bi`
@@ -519,6 +520,17 @@ impl poll::Session for DeadStreamSession {
 		)))
 	}
 
+	fn poll_open_request(
+		&mut self,
+		cx: &mut std::task::Context<'_>,
+		options: crate::transport::poll::SendOptions<
+			'_,
+			<Self::SendStream as crate::transport::poll::SendStream>::Group,
+		>,
+	) -> std::task::Poll<Result<Option<crate::transport::poll::BiStreams<Self>>, Self::Error>> {
+		self.poll_open_bi(cx, options).map_ok(Some)
+	}
+
 	fn poll_open_uni(
 		&mut self,
 		_cx: &mut Context<'_>,
@@ -580,6 +592,9 @@ pub struct SinkSession {
 	/// Set by [`Self::accepted_bi`]. `None` parks `accept_bi` forever, which is what
 	/// every session that only ever opens its own streams expects.
 	accept_gate: Option<kio::Consumer<bool>>,
+	/// Set by [`Self::with_open_bi_gate`] to withhold bidi stream credit.
+	bi_open_gate: Option<kio::Consumer<bool>>,
+	bi_open_park: kio::Park,
 	/// Set by [`Self::gated_uni`] to hold unidirectional stream writes.
 	uni_gate: Option<kio::Consumer<bool>>,
 	/// Set by [`Self::gated_open_uni`] to withhold unidirectional stream credit.
@@ -598,6 +613,8 @@ pub struct SinkSession {
 	/// with no congestion controller exposed. Shared and mutable so a test can
 	/// change it mid-session, the way a real transport's figures move.
 	stats: Arc<Mutex<SinkStats>>,
+	/// Set by [`Self::with_probe`].
+	probe: Option<crate::transport::Probe>,
 }
 
 impl SinkSession {
@@ -624,6 +641,12 @@ impl SinkSession {
 	/// Accept datagrams up to `max_size` bytes, recording them in the log.
 	pub fn with_datagrams(mut self, max_size: usize) -> Self {
 		self.datagram_size = max_size;
+		self
+	}
+
+	/// Give the transport a sender for the session to hand its probe target.
+	pub fn with_probe(mut self) -> Self {
+		self.probe = Some(crate::transport::Probe::new());
 		self
 	}
 
@@ -694,6 +717,12 @@ impl SinkSession {
 		self.uni_open_gate = Some(gate);
 		self
 	}
+
+	/// Also hold bidi stream opens until `gate` grants stream credit.
+	pub fn with_open_bi_gate(mut self, gate: kio::Consumer<bool>) -> Self {
+		self.bi_open_gate = Some(gate);
+		self
+	}
 }
 
 impl poll::Session for SinkSession {
@@ -716,17 +745,35 @@ impl poll::Session for SinkSession {
 
 	fn poll_open_bi(
 		&mut self,
-		_cx: &mut Context<'_>,
+		cx: &mut Context<'_>,
 		options: poll::SendOptions<'_, SinkGroup>,
 	) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
 		let Some(gate) = self.bi_gate.clone() else {
 			return Poll::Pending;
 		};
+		if let Some(credit) = &self.bi_open_gate {
+			let waiter = self.bi_open_park.hold(cx);
+			match credit.poll(waiter, |open| (**open).then_some(()).map_or(Poll::Pending, Poll::Ready)) {
+				Poll::Ready(Ok(())) => {}
+				Poll::Ready(Err(_)) | Poll::Pending => return Poll::Pending,
+			}
+		}
 		self.log.bi_opens.fetch_add(1, Ordering::Relaxed);
 
 		let mut send = SinkSend::gated(self.log.clone(), gate).opened(options);
 		send.prefix = self.bi_prefix;
 		Poll::Ready(Ok((send, PendingRecv)))
+	}
+
+	fn poll_open_request(
+		&mut self,
+		cx: &mut std::task::Context<'_>,
+		options: crate::transport::poll::SendOptions<
+			'_,
+			<Self::SendStream as crate::transport::poll::SendStream>::Group,
+		>,
+	) -> std::task::Poll<Result<Option<crate::transport::poll::BiStreams<Self>>, Self::Error>> {
+		self.poll_open_bi(cx, options).map_ok(Some)
 	}
 
 	fn poll_open_uni(
@@ -788,6 +835,10 @@ impl poll::Session for SinkSession {
 	fn stats(&self) -> impl crate::transport::Stats {
 		*self.stats.lock().unwrap()
 	}
+
+	fn probe(&self) -> Option<crate::transport::Probe> {
+		self.probe.clone()
+	}
 }
 
 /// Connection statistics a test can dictate. Every metric defaults to unknown,
@@ -827,7 +878,10 @@ impl crate::transport::Stats for SinkStats {
 ///
 /// Parks once the script is exhausted rather than reporting EOF: a read loop that saw
 /// EOF would exit, and a test usually wants to assert against the loop still running.
-pub struct ScriptedRecv {
+pub type ScriptedRecv = poll::Buffered<Script>;
+
+/// The plain reads of a [`ScriptedRecv`].
+pub struct Script {
 	park: kio::Park,
 	script: Arc<Mutex<Vec<u8>>>,
 	/// How the peer's send side ends once the script runs out; `None` parks.
@@ -842,38 +896,30 @@ pub enum Close {
 	Reset,
 }
 
-impl poll::RecvStream for ScriptedRecv {
+impl poll::Chunks for Script {
 	type Error = SinkError;
 
-	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
-		let take = {
+	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<bytes::Bytes>, Self::Error>> {
+		let chunk: bytes::Bytes = {
 			let mut script = self.script.lock().unwrap();
-			if script.is_empty() {
-				0
-			} else {
-				let take = dst.len().min(script.len());
-				dst[..take].copy_from_slice(&script[..take]);
-				script.drain(..take);
-				take
-			}
+			// A real transport hands over what each packet carried, so a body that is all
+			// ready at once still takes many reads.
+			let take = max.min(script.len()).min(8 * 1024);
+			script.drain(..take).collect()
 		};
 
-		match take {
-			0 => match *self.close.lock().unwrap() {
+		match chunk.is_empty() {
+			true => match *self.close.lock().unwrap() {
 				Some(Close::Fin) => Poll::Ready(Ok(None)),
 				Some(Close::Reset) => Poll::Ready(Err(SinkError::default())),
 				None => self.log.poll_closed(self.park.hold(cx)).map(Err),
 			},
-			take => Poll::Ready(Ok(Some(take))),
+			false => Poll::Ready(Ok(Some(chunk))),
 		}
 	}
 
 	fn stop(&mut self, code: u32) {
 		self.log.stops.lock().unwrap().push(code);
-	}
-
-	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-		Poll::Pending
 	}
 }
 
@@ -894,8 +940,9 @@ pub struct ScriptedSession {
 	/// across every stream.
 	queue: Option<Arc<Mutex<std::collections::VecDeque<Vec<u8>>>>>,
 	/// Set by [`Self::gated_open`]: parks `poll_open_bi` until the gate opens, standing in
-	/// for a peer that has granted no more concurrent streams.
+	/// for a transport header blocked on send capacity.
 	open_gate: Option<kio::Consumer<bool>>,
+	credit: Arc<AtomicBool>,
 	/// Keeps the gate registration alive between `poll_open_bi` calls.
 	park: kio::Park,
 	/// Scripts the peer pushes at us on unidirectional streams, popped by `accept_uni`
@@ -904,10 +951,23 @@ pub struct ScriptedSession {
 	incoming_bidis: Arc<Mutex<std::collections::VecDeque<Vec<u8>>>>,
 	/// Set by [`Self::with_unacked_fin`].
 	unacked_fin: bool,
+	/// Set by [`Self::with_unacked_uni_fins`]; shared, so every clone counts down one budget.
+	unacked_unis: Arc<AtomicUsize>,
 	datagram_size: usize,
+	/// Set by [`Self::with_groups`].
+	groups: bool,
 }
 
 impl ScriptedSession {
+	pub fn without_credit(self) -> Self {
+		self.credit.store(false, Ordering::Relaxed);
+		self
+	}
+
+	pub fn grant_credit(&self) {
+		self.credit.store(true, Ordering::Relaxed);
+	}
+
 	pub fn with_stats(mut self, stats: SinkStats) -> Self {
 		self.stats = stats;
 		self
@@ -926,17 +986,33 @@ impl ScriptedSession {
 			script: Arc::new(Mutex::new(script)),
 			queue: None,
 			open_gate: None,
+			credit: Arc::new(AtomicBool::new(true)),
 			park: kio::Park::default(),
 			incoming_unis: Arc::new(Mutex::new(std::collections::VecDeque::new())),
 			incoming_bidis: Arc::new(Mutex::new(std::collections::VecDeque::new())),
 			unacked_fin: false,
+			unacked_unis: Default::default(),
 			datagram_size: 0,
+			groups: false,
 		}
+	}
+
+	/// Open send groups, as native QUIC does, recording them in the log.
+	pub fn with_groups(mut self) -> Self {
+		self.groups = true;
+		self
 	}
 
 	/// Never acknowledge an opened stream's FIN, like a peer that stopped reading.
 	pub fn with_unacked_fin(mut self) -> Self {
 		self.unacked_fin = true;
+		self
+	}
+
+	/// Never acknowledge the FIN of the next `count` unidirectional streams opened, like a
+	/// peer stalled on those alone.
+	pub fn with_unacked_uni_fins(self, count: usize) -> Self {
+		self.unacked_unis.store(count, Ordering::Relaxed);
 		self
 	}
 
@@ -1007,7 +1083,7 @@ impl ScriptedSession {
 	}
 
 	/// Answer each stream from `scripts`, but only once the gate opens: a peer that
-	/// replies normally and is simply out of stream credit until then.
+	/// replies normally after its transport header gets send capacity.
 	pub fn gated_open(scripts: Vec<Vec<u8>>, gate: kio::Consumer<bool>) -> Self {
 		Self {
 			open_gate: Some(gate),
@@ -1025,12 +1101,12 @@ impl poll::Session for ScriptedSession {
 		let Some(script) = self.incoming_unis.lock().unwrap().pop_front() else {
 			return self.log.poll_closed(self.park.hold(cx)).map(Err);
 		};
-		Poll::Ready(Ok(ScriptedRecv {
+		Poll::Ready(Ok(poll::Buffered::new(Script {
 			park: Default::default(),
 			script: Arc::new(Mutex::new(script)),
 			close: self.close.clone(),
 			log: self.log.clone(),
-		}))
+		})))
 	}
 
 	fn poll_accept_bi(&mut self, cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
@@ -1039,12 +1115,12 @@ impl poll::Session for ScriptedSession {
 		};
 		Poll::Ready(Ok((
 			SinkSend::new(self.log.clone()),
-			ScriptedRecv {
+			poll::Buffered::new(Script {
 				park: Default::default(),
 				script: Arc::new(Mutex::new(script)),
 				close: self.close.clone(),
 				log: self.log.clone(),
-			},
+			}),
 		)))
 	}
 
@@ -1074,13 +1150,28 @@ impl poll::Session for ScriptedSession {
 		send.unacked_fin = self.unacked_fin;
 		Poll::Ready(Ok((
 			send,
-			ScriptedRecv {
+			poll::Buffered::new(Script {
 				park: Default::default(),
 				script,
 				close: self.close.clone(),
 				log: self.log.clone(),
-			},
+			}),
 		)))
+	}
+
+	fn poll_open_request(
+		&mut self,
+		cx: &mut std::task::Context<'_>,
+		options: crate::transport::poll::SendOptions<
+			'_,
+			<Self::SendStream as crate::transport::poll::SendStream>::Group,
+		>,
+	) -> std::task::Poll<Result<Option<crate::transport::poll::BiStreams<Self>>, Self::Error>> {
+		self.log.request_attempts.fetch_add(1, Ordering::Relaxed);
+		if !self.credit.load(Ordering::Relaxed) {
+			return Poll::Ready(Ok(None));
+		}
+		self.poll_open_bi(cx, options).map_ok(Some)
 	}
 
 	fn poll_open_uni(
@@ -1088,11 +1179,16 @@ impl poll::Session for ScriptedSession {
 		_cx: &mut Context<'_>,
 		options: poll::SendOptions<'_, SinkGroup>,
 	) -> Poll<Result<Self::SendStream, Self::Error>> {
-		Poll::Ready(Ok(SinkSend::new(self.log.clone()).opened(options)))
+		let mut send = SinkSend::new(self.log.clone());
+		send.unacked_fin = self
+			.unacked_unis
+			.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| count.checked_sub(1))
+			.is_ok();
+		Poll::Ready(Ok(send.opened(options)))
 	}
 
-	fn send_group(&mut self, _: i64) -> Option<SinkGroup> {
-		None
+	fn send_group(&mut self, priority: i64) -> Option<SinkGroup> {
+		self.groups.then(|| SinkGroup::open(self.log.clone(), priority))
 	}
 
 	fn send_datagram(
@@ -1146,10 +1242,11 @@ fn a_local_close_preserves_scripted_uni_bytes_and_ends_accepts() {
 		let Poll::Ready(Ok(mut recv)) = session.poll_accept_uni(&mut cx) else {
 			panic!("buffered uni lost")
 		};
-		let mut bytes = [0; 4];
-		assert!(matches!(recv.poll_read(&mut cx, &mut bytes), Poll::Ready(Ok(Some(4)))));
-		assert_eq!(&bytes, b"last");
-		let end = recv.poll_read(&mut cx, &mut bytes);
+		let Poll::Ready(Ok(Some(bytes))) = recv.poll_read_chunk(&mut cx, 4) else {
+			panic!("buffered bytes lost")
+		};
+		assert_eq!(&bytes[..], b"last");
+		let end = recv.poll_read_chunk(&mut cx, 4);
 		assert!(if fin {
 			matches!(end, Poll::Ready(Ok(None)))
 		} else {

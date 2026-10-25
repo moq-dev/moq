@@ -17,7 +17,7 @@ mod stream;
 pub use connection::Connection;
 pub use endpoint::Endpoint;
 pub use group::{SendGroup, SendOptions};
-pub use stream::{Credit, RecvStream, SendStream};
+pub use stream::{Lease, RecvStream, SendStream};
 
 pub(crate) use connection::{End, Shared};
 
@@ -29,15 +29,20 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 #[cfg(feature = "qlog")]
 use super::qlog;
-use super::{Congestion, Error, Identity, SEGMENT, Transport, client, server};
+use super::{Congestion, Error, Identity, Transport, client, server};
 use crate::udp;
 
-/// Per-stream flow control credit.
+/// Per-stream flow control credit, which returns as bytes are read, so it only paces a stream.
 const STREAM_WINDOW: u32 = 4 * 1024 * 1024;
-/// Per-connection flow control credit.
-const CONNECTION_WINDOW: u32 = 16 * 1024 * 1024;
-/// How many datagrams to buffer in each direction.
-const DATAGRAM_WINDOW: usize = 64 * SEGMENT;
+/// Per-connection flow control credit, which also bounds incomplete messages, so it has to fit
+/// the largest one: `MIN_RECEIVE_WINDOW` is the 64 MiB announcement cap plus framing. 128 MiB
+/// also holds two maximum-size frames at once.
+const CONNECTION_WINDOW: u32 = 128 * 1024 * 1024;
+const _: () = assert!(CONNECTION_WINDOW as u64 >= moq_net::transport::MIN_RECEIVE_WINDOW);
+/// Unacknowledged outgoing data to buffer, whatever the peer allows.
+const SEND_WINDOW: u32 = 16 * 1024 * 1024;
+/// Datagram bytes to buffer in each direction, about 64 full-size datagrams.
+const DATAGRAM_WINDOW: usize = 96 * 1024;
 
 fn ecn_to_quic(ecn: udp::Ecn) -> moq_quic::EcnCodepoint {
 	match ecn {
@@ -91,12 +96,11 @@ fn provider() -> Arc<rustls::crypto::CryptoProvider> {
 		.clone()
 }
 
-/// The endpoint-wide configuration: how connection ids are minted, the reset
-/// key, and the largest datagram we tell peers we can receive.
+/// The endpoint-wide configuration: how connection ids are minted and the reset key.
 pub(crate) fn endpoint_config(
 	shard: Option<moq_sock::shard::Shard>,
 	reset_secret: Option<&[u8; 32]>,
-) -> Result<Arc<moq_quic::EndpointConfig>, Error> {
+) -> Arc<moq_quic::EndpointConfig> {
 	let mut config = moq_quic::EndpointConfig::default();
 	// The random ids below validate a predecessor's too, so the reset reaches them.
 	if let Some(secret) = reset_secret {
@@ -114,10 +118,7 @@ pub(crate) fn endpoint_config(
 		}
 		Box::new(cids)
 	}));
-	config
-		.max_udp_payload_size(SEGMENT as u16)
-		.map_err(|err| Error::Quic(err.to_string()))?;
-	Ok(Arc::new(config))
+	Arc::new(config)
 }
 
 /// Dial as `config` says.
@@ -261,32 +262,32 @@ fn transport_config(config: &Transport) -> Result<moq_quic::TransportConfig, Err
 	transport.keep_alive_interval(config.keep_alive);
 	transport.max_concurrent_bidi_streams(streams);
 	transport.max_concurrent_uni_streams(streams);
-	// Unset keeps the credits this stack has always advertised. A value that
-	// cannot go on the wire is an error: clamping it would ignore what was set.
-	let stream_window = match config.stream_receive_window {
-		Some(window) => varint_window("stream receive window", window)?,
-		None => STREAM_WINDOW.into(),
-	};
+	// A value that cannot go on the wire is an error: clamping it would ignore
+	// what was set.
 	let connection_window = match config.receive_window {
 		Some(window) => varint_window("receive window", window)?,
 		None => CONNECTION_WINDOW.into(),
 	};
-	let send_window = config.send_window.unwrap_or(u64::from(CONNECTION_WINDOW));
+	let stream_window = match config.stream_receive_window {
+		Some(window) => varint_window("stream receive window", window)?,
+		None => STREAM_WINDOW.into(),
+	};
+	let send_window = config.send_window.unwrap_or(u64::from(SEND_WINDOW));
 	transport.stream_receive_window(stream_window);
 	transport.receive_window(connection_window);
 	transport.send_window(send_window);
 	transport.datagram_receive_buffer_size(Some(DATAGRAM_WINDOW));
 	transport.datagram_send_buffer_size(DATAGRAM_WINDOW);
-	// Every datagram in a GSO train is one SEGMENT, so the packet size is not
-	// moq-quic's to discover: pin it and turn the probing off.
-	transport.initial_mtu(SEGMENT as u16);
-	transport.min_mtu(SEGMENT as u16);
-	transport.mtu_discovery_config(None);
+	// moq-quic probes by default; the 1200-byte floor reaches every path.
+	if !config.mtu_discovery {
+		transport.mtu_discovery_config(None);
+	}
 	transport.congestion_controller_factory(match config.congestion {
-		Congestion::Loss => Arc::new(moq_quic::congestion::CubicConfig::default())
-			as Arc<dyn moq_quic::congestion::ControllerFactory + Send + Sync>,
-		Congestion::Delay => Arc::new(moq_quic::congestion::Bbr3Config::default()),
-		Congestion::None => Arc::new(moq_quic::congestion::Unlimited),
+		Congestion::Loss => {
+			Arc::new(moq_congestion::CubicConfig::default()) as Arc<dyn moq_congestion::ControllerFactory + Send + Sync>
+		}
+		Congestion::Delay => Arc::new(moq_congestion::Bbr3Config::default()),
+		Congestion::None => Arc::new(moq_congestion::Unlimited),
 	});
 	Ok(transport)
 }
@@ -386,7 +387,7 @@ impl rustls::client::danger::ServerCertVerifier for NoVerify {
 
 #[cfg(test)]
 mod tests {
-	use super::{CONNECTION_WINDOW, STREAM_WINDOW, Transport, transport_config};
+	use super::{CONNECTION_WINDOW, SEND_WINDOW, STREAM_WINDOW, Transport, transport_config};
 
 	/// moq-quic keeps the windows private, but its `Debug` prints them. The leading
 	/// space keeps `receive_window` from matching `stream_receive_window`, and
@@ -404,20 +405,20 @@ mod tests {
 			u64::from(STREAM_WINDOW)
 		));
 		assert!(has_window(&transport, "receive_window", u64::from(CONNECTION_WINDOW)));
-		assert!(has_window(&transport, "send_window", u64::from(CONNECTION_WINDOW)));
+		assert!(has_window(&transport, "send_window", u64::from(SEND_WINDOW)));
 	}
 
 	#[test]
 	fn configured_windows_replace_the_defaults() {
 		let config = Transport {
-			receive_window: Some(64 << 20),
+			receive_window: Some(256 << 20),
 			stream_receive_window: Some(8 << 20),
 			send_window: Some(32 << 20),
 			..Default::default()
 		};
 
 		let transport = transport_config(&config).expect("windows");
-		assert!(has_window(&transport, "receive_window", 64 << 20));
+		assert!(has_window(&transport, "receive_window", 256 << 20));
 		assert!(has_window(&transport, "stream_receive_window", 8 << 20));
 		assert!(has_window(&transport, "send_window", 32 << 20));
 		assert!(!has_window(&transport, "receive_window", u64::from(CONNECTION_WINDOW)));

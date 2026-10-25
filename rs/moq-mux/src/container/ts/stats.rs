@@ -203,21 +203,6 @@ impl Stream {
 		}
 	}
 
-	/// Fold the packets dropped on each PID no table claims into `streams`, as
-	/// [`Claims::rows`](super::claims::Claims::rows) lists them: counted in `refused`, and while
-	/// the PID is dropped its row names no track. A PID a table claims again keeps its count
-	/// under the row of the route that carries it now.
-	pub(super) fn dropped(streams: &mut BTreeMap<u16, Self>, rows: impl Iterator<Item = (u16, u64, bool)>) {
-		for (pid, dropped, now) in rows {
-			let row = streams.entry(pid).or_insert_with(|| Self::new("", Class::Data));
-			row.refused += dropped;
-			if now {
-				row.track.clear();
-				row.class = Class::Data;
-			}
-		}
-	}
-
 	/// Add a newer route's frame-sync counters while naming the route that is active now.
 	/// Delivery and damage are kept per PID rather than per route, so they need no merging.
 	pub(super) fn merge(&mut self, current: &Self) {

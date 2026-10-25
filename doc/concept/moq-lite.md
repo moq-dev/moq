@@ -56,8 +56,8 @@ always a prefix. A service that serves only some of the paths beneath it
 refuses the rest as they are requested. Announcements are hints; the request is
 what decides.
 
-Inside a broadcast, a reader can list its tracks (moq-lite-07, Rust only so
-far): each track with its fixed properties, a synced mark, then tracks as they
+Inside a broadcast, a reader can list its tracks (moq-lite-07): each track
+with its fixed properties, a synced mark, then tracks as they
 come and go. Listing is discovery, not delivery: subscribe to each track you
 want, and its groups still cached upstream reach you late. A broadcast lists
 the tracks its publisher creates, never one served only on request, and a path
@@ -73,12 +73,24 @@ bytes. A hop of 0 is the anonymous mark and travels the chain unchanged. A
 route that passed through an anonymous hop at any depth ranks below
 every fully identified route, whatever the costs say.
 
+A relay operator can lower the [hop-path cap](/bin/relay/cluster#topology) to
+limit the detours explored after a withdrawal. It drops longer paths while
+preserving route selection among those within the cap.
+
 A broadcast exists only while it is announced, in the same process and across
 a session: one that is created but never announced can be neither discovered
 nor requested. Retracting a route stops new requests from resolving through it
 and leaves subscriptions already in flight alone until each track ends or its
 last subscriber leaves. A graceful session close withdraws its announcements
 and waits up to one second for them to be delivered. An abort skips that.
+
+A broadcast has no finished state. Online means announced, and offline means
+no route is left. The end of content is a track FIN: the publisher finishes
+each track, and a hang broadcast also finishes its catalog. A finished track
+stays servable to the subscribers it already has, including through a relay
+whose upstream session has since gone. How long a finished broadcast stays
+announced for late readers is the application's retention policy, such as the
+`--linger` of [`moq import`](/bin/cli), not a protocol state.
 
 ### Publisher epochs
 
@@ -213,14 +225,16 @@ code and the session stays up. A client that publishes outside its grant closes
 the session with `UNAUTHORIZED`, naming the path. A session whose last
 credential expires closes with `EXPIRED_AUTH_TOKEN` instead: refresh the token
 and reconnect, rather than treating the credential as invalid. moq-transport carries the same
-exchange on draft-17+ through the [MoQ Auth extension](/draft/moq-auth), limited
-to namespace prefixes. Older versions have no grant; the URL token keeps working
+exchange on draft-17+ through the [MoQ Auth extension](/draft/moq-auth), with
+the same patterns. Older versions have no grant; the URL token keeps working
 everywhere. On moq-transport an added token is kept even without the extension,
 so an announcement can name it: it rides that `PUBLISH_NAMESPACE` as its
 authorization token. Naming a fresh token renews the announcement in place with
 `REQUEST_UPDATE` from draft 16, and re-announces it on drafts 14 and 15, so it
-can outlive the token it started with. The token belongs to the session that added it, so after a
-reconnect the application adds it again and re-announces. moq-lite has no
+can outlive the token it started with. A token added to a reconnecting
+connection's auth handle is presented on every session it makes, so the
+announcement keeps it across a reconnect with no re-add or re-announce; one
+added to a single session's handle ends with that session. moq-lite has no
 per-request token, so there an announcement rides the session's scope.
 
 ## Subscriptions
@@ -232,14 +246,23 @@ JSON snapshot). Groups can also be fetched by sequence number, which is how the
 [HLS gateway](/bin/hls) and the relay's [HTTP fetch](/bin/relay/http) serve
 history.
 
+Native Rust subscriptions, track queries, fetches, and announcement interest on
+QUIC, WebTransport, or qmux fail locally when the peer has granted no stream
+credit, without retrying. Iroh still waits; browser-backed Rust retains the
+browser's behavior. Once admitted, these requests have no answer deadline:
+each lasts until answered, its demand leaves, or its session closes.
+Announcement-interest refusal is logged and releases discovery sync. The merged
+announcement listing keeps its existing event and sync API, with no per-source
+error result, and continues receiving announcements from unrelated sources.
+
 Each subscription carries the knobs that decide behavior under congestion:
 
 | Knob | Effect |
 | --- | --- |
-| **Priority** (0..255) | Higher-priority tracks get bandwidth first. Audio above video, base layer above enhancement. From a native Rust publisher over QUIC or WebTransport (iroh excepted), subscriptions at the same priority split bandwidth evenly by bytes, streams and datagrams alike, however many groups each has queued. A browser publisher and other transports without send groups are not covered. |
+| **Priority** (-128..127, default 0) | Higher-priority tracks get bandwidth first. Audio above video, base layer above enhancement. The publisher's track priority breaks ties between subscriptions at one priority. From a native Rust publisher over QUIC or WebTransport (iroh excepted), subscriptions at the same priority and publisher priority split bandwidth evenly by bytes, streams and datagrams alike, however many groups each has queued. A browser publisher and other transports without send groups are not covered. |
 | **Order** | Which group to send first when several are pending. Newest first for live (the default), oldest first for catch-up. Needs moq-lite 07 or moq-transport; older moq-lite always sends newest first. |
-| **Max delay** | How long a non-latest group stays worth delivering before it is skipped. Zero means "live edge only", and raising it is also what asks for history. |
-| **Ranges** | Which groups to ask for: from a group, a number of groups back from the latest, or the group containing a presentation time, optionally up to an end. The default asks for everything max delay allows. Max delay still caps every range. |
+| **Max delay** | How long a non-latest group stays worth delivering before it is skipped. Zero means "live edge only", and raising it is also what asks for history. Unset leaves the publisher's retention window alone to bound it. |
+| **Ranges** | Which groups to ask for: from a group, a number of groups back from the latest, or the group containing a presentation time, optionally up to an end. Each group arrives whole, from its first frame. The default asks for everything max delay allows. Max delay still caps every range. |
 
 On moq-lite 05 and later, a publisher explicitly reports groups that will not arrive.
 This lets a finished subscription settle without waiting for missing groups.
@@ -251,10 +274,19 @@ Ranges are both a request and a filter. A subscriber reads only the groups its
 own ranges cover, resolved again whenever it replaces them, even when another
 subscriber of the same track asked for more. Widening them, including lowering
 the start, also serves the cached groups they newly cover, never one already
-served. A relay merges its subscribers' ranges into one upstream request, which
-today's wire versions carry as the single span covering them. A time anchor is
-resolved from the groups the serving hop holds; upstream it asks for everything
-max delay allows, and an untimed track refuses it. At the live edge, a time end
+served. A group they cover below the live feed that the cache lacks (evicted
+before the subscriber first looked for it, skipped, or below where the feed
+starts) is asked of the track's dynamic handler
+as a fill, which a relay serves by fetching upstream one group at a time, skipping
+a group once every subscriber that asked for it narrows past it; with
+no handler it is reported as dropped once the feed stops waiting for it. One
+evicted after the subscriber saw it cached, but before it read it, is skipped. A relay merges its subscribers' ranges into one upstream request, which
+today's wire versions carry as the single span covering them. A relative or time
+anchor resolves on the hop that publishes the track, and over moq-lite-07, which
+reports the live edge and media time and asks upstream for every group the budget
+allows. Over an older lite or any moq-transport version, a subscriber gets every
+anchor but the live and default starts refused as unsupported, and an untimed
+track refuses a time anchor. At the live edge, a time end
 may let one group through before its first frame shows it starts past the end:
 the first group that has yet to start is handed out without waiting for that
 frame, and the next one waits on it. A datagram is judged by its own timestamp.
@@ -283,13 +315,24 @@ untimed. moq-lite 05 and 06 cannot declare an untimed track, so there its
 frames go out stamped with their send time; the work-in-progress 07 carries it
 untimed.
 
+A publisher refuses a group that starts before a lower one, and so does a
+moq-lite 07 receiver. Since moq-lite 05 and 06 send times look like media time,
+a receiver drops every timestamp it gets over them and the track arrives
+untimed.
+Timestamps received over moq-transport, whose peers may stamp arrival times,
+are not checked. Rust relays preserve them across moq-lite 07 when both peers
+negotiate the [ietf extension](/draft/moq-ietf), which carries their origin and
+keeps them unchecked. A moq-lite peer without it receives that track untimed.
+
 A publisher may compress a track, which pays off for repetitive data such as
 JSON and not for media. Each group's frames become one DEFLATE stream
 ([moq-flate](/draft/moq-flate)), and a datagram
 compresses alone. Only the work-in-progress moq-lite 07 carries the compressed
 bytes. A relay forwards them as received and inflates each group once for every
 other subscriber, moq-transport included, so readers always see the original
-frames. Rust publishes and relays compressed tracks; js/net refuses them for now.
+frames. Rust and JavaScript publish compressed tracks by setting `compress: true`
+on the track's info. Application writes stay synchronous and readers receive plain
+payloads; compression is useful for repetitive data, not already compressed media.
 
 A relay cancels its upstream subscription once nobody subscribes, but keeps its
 copy of the track for 30 seconds after the last reader leaves, so a returning
@@ -316,6 +359,33 @@ Put together, a conference might use:
 
 Under light congestion video drops the tail of a group; under heavy congestion
 video stops and audio lags by at most 500 ms. No protocol change, just knobs.
+
+### Refresh
+
+A publisher can opt a track into refresh by setting its byte ratio. A new
+subscriber asks for a fresh group only when the current group's bytes after
+its first frame exceed that ratio times the first frame's size. A ratio of 2,
+for example, permits two snapshots' worth of deltas before a join asks for a
+new snapshot. Equality does not trigger it, and neither elapsed time nor more
+deltas trigger it without a join.
+
+The request does not hold back cached groups: a joiner may receive the old
+group before the publisher answers. The ratio is a refresh trigger, not a cap
+on the bytes that joiner downloads.
+
+The publisher drives the track's `Demand::wanted`: when it passes the largest
+group written, open a new group with a keyframe or complete snapshot. A Rust
+moq-json snapshot producer answers this by driving its `refresh()` alongside
+updates. It restates the current value at its newest source timestamp, with a
+new group number. Existing readers continue into that group too.
+
+Each relay judges a join from its own cache and forwards fresh-group demand
+upstream when needed, all the way to the publisher. Preserving the ratio across
+sessions requires opt-in moq-lite 07 (`moq-lite-07-wip`) at every hop. Older
+moq-lite versions do not carry refresh; moq-transport's dynamic-groups feature
+carries it with a ratio of zero, so any join after a delta asks for a new group.
+Tracks without a ratio, JSON append streams, and importers that cannot force
+keyframes do not use this mechanism.
 
 ## Datagrams
 

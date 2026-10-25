@@ -7,19 +7,22 @@ from moq_ffi import (
     MoqAnchor as Anchor,
 )
 from moq_ffi import (
+    MoqAnnounceRoute as AnnounceRoute,
+)
+from moq_ffi import (
     MoqAudioCodec as AudioCodec,
 )
 from moq_ffi import (
     MoqAudioEncoderInput as AudioEncoderInput,
 )
 from moq_ffi import (
-    MoqAudioPreset as AudioPreset,
-)
-from moq_ffi import (
     MoqAudioSampleFormat as AudioSampleFormat,
 )
 from moq_ffi import (
-    MoqConnectionStatus as ConnectionStatus,
+    MoqConnectionPhase as ConnectionPhase,
+)
+from moq_ffi import (
+    MoqConnectionState as ConnectionState,
 )
 from moq_ffi import (
     MoqErrorScope as ErrorScope,
@@ -64,17 +67,30 @@ from moq_ffi import (
     MoqVideoPixelFormat as VideoPixelFormat,
 )
 
-from ._records import Backoff, ConnectionStats, Datagram, Frame, Grant, Subscription, TrackInfo
+from ._records import (
+    Backoff,
+    ClientTls,
+    ConnectionStats,
+    Datagram,
+    Frame,
+    Grant,
+    QuicConfig,
+    Subscription,
+    TrackInfo,
+    WebSocketConfig,
+)
 
 __all__ = [
+    "AnnounceRoute",
     "Anchor",
     "AudioCodec",
     "AudioEncoderInput",
-    "AudioPreset",
     "AudioSampleFormat",
     "Backoff",
+    "ClientTls",
     "ConnectionStats",
-    "ConnectionStatus",
+    "ConnectionPhase",
+    "ConnectionState",
     "Datagram",
     "ErrorScope",
     "Frame",
@@ -83,6 +99,7 @@ __all__ = [
     "Order",
     "ProtocolError",
     "ProtocolKind",
+    "QuicConfig",
     "Range",
     "Route",
     "Subscription",
@@ -94,4 +111,5 @@ __all__ = [
     "VideoEncoderOutput",
     "VideoDecodedFrame",
     "VideoPixelFormat",
+    "WebSocketConfig",
 ]

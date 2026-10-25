@@ -1,5 +1,7 @@
 # moq-room
 
+Workspace-only implementation; this crate is not published.
+
 Headless multi-participant rooms over [Media over QUIC](https://moq.dev/). A room is a path prefix. There is no service and no storage: joining is minting a moq-auth token rooted at that prefix.
 
 Participants are discovered from the announce stream. Identity is the path before `camera.hang` / `screen.hang`. Each participant publishes `{identity}/camera.hang` and `{identity}/screen.hang`.
@@ -29,4 +31,4 @@ while let Some(event) = room.next().await {
 Chat uses `moq-json::window` with ten seconds of history. Drive
 `Publisher::expire()` alongside incoming sends (or call `poll_expire` from a poll
 loop) so messages expire while idle. `Subscriber::recv` returns push/pop/skip
-events and propagates errors. The format differs from iroh-live's raw UTF-8 chat.
+events with their send time and propagates errors. The format differs from iroh-live's raw UTF-8 chat.

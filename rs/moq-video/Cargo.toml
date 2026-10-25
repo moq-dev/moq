@@ -124,6 +124,7 @@ kio = { workspace = true, optional = true }
 # libvpx bindings for the `vpx` feature. The library itself comes from the build
 # host; see the feature above.
 libvpx-native-sys = { version = "5.0.17", optional = true }
+moq-clock = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 # Vendored, statically linked software H.264 fallback (no system dependency).
@@ -281,3 +282,6 @@ pollster = { workspace = true }
 # `start_paused`, so the capture driver tests run on mocked time.
 tokio = { workspace = true, features = ["test-util"] }
 tracing-test = { workspace = true }
+
+[lints]
+workspace = true

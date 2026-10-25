@@ -7,6 +7,7 @@ use axum::{
 use axum_server::accept::Accept;
 use futures::{future::BoxFuture, task::AtomicWaker};
 use http_body::Body as _;
+use moq_clock::{Instant, Sleep};
 use std::{
 	io,
 	pin::Pin,
@@ -14,10 +15,7 @@ use std::{
 	task::{Context, Poll},
 	time::Duration,
 };
-use tokio::{
-	io::{AsyncRead, AsyncWrite, ReadBuf},
-	time::{Instant, Sleep},
-};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tower_service::Service;
 
 /// A connection's accept guard, handed off once to a WebSocket upgrade.
@@ -58,7 +56,7 @@ where
 		let since = Instant::now();
 		Box::pin(async move {
 			let (inner, service) = match timeout.and_then(|timeout| since.checked_add(timeout)) {
-				Some(deadline) => tokio::time::timeout_at(deadline, accepted)
+				Some(deadline) => moq_clock::timeout_at(deadline, accepted)
 					.await
 					.map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "HTTP connection idle deadline"))??,
 				None => accepted.await?,
@@ -72,7 +70,7 @@ where
 				}),
 				wake: AtomicWaker::new(),
 			});
-			let timer = Box::pin(tokio::time::sleep(Duration::ZERO));
+			let timer = Box::pin(moq_clock::sleep(Duration::ZERO));
 			Ok((
 				Io {
 					inner,
@@ -230,6 +228,10 @@ impl<I: AsyncWrite + Unpin> AsyncWrite for Io<I> {
 	dead_code,
 	unused_imports,
 	reason = "The benchmark includes this private module without a test harness"
+)]
+#[allow(
+	clippy::disallowed_methods,
+	reason = "tests read the host clock directly; an allow because the benchmark compiles them out"
 )]
 mod tests {
 	use super::*;

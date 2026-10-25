@@ -2190,14 +2190,9 @@ async fn cmaf_source_exports_at_the_frame_timestamp() {
 	let fragment = super::encode_fragment(info, &samples).unwrap();
 
 	let mut group = track.append_group().unwrap();
-	let mut frame = group
-		.create_frame(moq_net::frame::Info {
-			size: fragment.len() as u64,
-			timestamp: Some(moq_net::Timestamp::from_secs(10).unwrap()),
-		})
+	group
+		.write_frame(moq_net::Timestamp::from_secs(10).unwrap(), fragment)
 		.unwrap();
-	frame.write(fragment).unwrap();
-	frame.finish().unwrap();
 	group.finish().unwrap();
 	track.finish().unwrap();
 
@@ -2520,5 +2515,74 @@ async fn a_rendition_disabled_after_the_init_idles_and_resumes() {
 	assert!(
 		starts.contains(&(video_id, 1.0)),
 		"the re-enabled video resumes: {starts:?}"
+	);
+}
+
+/// A rendition the catalog moves to another track, in its broadcast or a sibling one, writes
+/// that track's media from then on under the track id the moov declared, and none of the
+/// track it left. The track it left goes out whole first, and neither the timeline nor the
+/// sequence numbers step back.
+#[tokio::test(start_paused = true)]
+async fn a_moved_rendition_continues_on_its_new_track() {
+	use crate::container::test_util::{Moving, marked_frame, marks};
+
+	for (track, broadcast) in [("b", None), ("a", Some("other"))] {
+		let mut moving = Moving::new();
+		for i in 0..45 {
+			moving.a.write(marked_frame(i, 0xa1)).unwrap();
+		}
+		let mut exporter = crate::container::fmp4::Export::new(moving.source().await, moving.catalog_stream().await)
+			.with_max_delay(RECORDING_MAX_DELAY);
+		let init = chunk_now(&mut exporter).await.init().expect("init");
+		let mut fragments = drain_now(&mut exporter).await;
+
+		moving.point(track, broadcast, SPS);
+		fragments.extend(drain_now(&mut exporter).await);
+		let next = match broadcast {
+			None => &mut moving.b,
+			Some(_) => &mut moving.other,
+		};
+		// Live, so the new track is read from the group it is writing when the move lands.
+		for i in 45..120 {
+			moving.a.write(marked_frame(i, 0xa2)).unwrap();
+			if i >= 60 {
+				next.write(marked_frame(i, 0xb1)).unwrap();
+			}
+			fragments.extend(drain_now(&mut exporter).await);
+		}
+
+		let written: Vec<u8> = fragments.iter().flat_map(|fragment| marks(&fragment.data)).collect();
+		let expected: Vec<u8> = [vec![0xa1; 45], vec![0xb1; 30]].concat();
+		assert_eq!(written, expected, "moved to {track} in {broadcast:?}");
+		assert_each_track_ascends(&init, &fragments);
+		assert_ascending_sequence_numbers(&fragments);
+		let ids: std::collections::HashSet<u32> =
+			fragment_starts(&init, &fragments).iter().map(|(id, _)| *id).collect();
+		assert_eq!(ids.len(), 1, "every fragment is written under the declared track");
+	}
+}
+
+/// The moov declared the rendition with its first track's parameter sets, which a move to a
+/// track described by another SPS cannot change mid-file.
+#[tokio::test(start_paused = true)]
+async fn a_rendition_moved_to_another_sample_entry_fails() {
+	use crate::container::test_util::{Moving, marked_frame};
+
+	let mut moving = Moving::new();
+	for i in 0..30 {
+		moving.a.write(marked_frame(i, 0xa1)).unwrap();
+	}
+	let mut exporter = crate::container::fmp4::Export::new(moving.source().await, moving.catalog_stream().await)
+		.with_max_delay(RECORDING_MAX_DELAY);
+	chunk_now(&mut exporter).await.init().expect("init");
+
+	moving.point("b", None, Moving::MAIN_SPS);
+	for i in 30..60 {
+		moving.b.write(marked_frame(i, 0xb1)).unwrap();
+	}
+	let err = error_now(&mut exporter).await;
+	assert!(
+		matches!(&err, crate::Error::Cmaf(crate::container::fmp4::Error::TrackChanged(name)) if name == Moving::RENDITION),
+		"{err:?}"
 	);
 }

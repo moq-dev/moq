@@ -51,6 +51,8 @@ use datagrams::DatagramState;
 pub use datagrams::{Datagrams, SendDatagramError};
 
 mod mtud;
+#[cfg(feature = "mux")]
+pub mod mux;
 mod pacing;
 
 mod packet_builder;
@@ -60,7 +62,6 @@ mod packet_crypto;
 use packet_crypto::{PrevCrypto, ZeroRttCrypto};
 
 mod paths;
-pub use paths::RttEstimator;
 use paths::{PathData, PathResponses};
 
 pub(crate) mod qlog;
@@ -79,9 +80,6 @@ mod stats;
 pub(crate) struct ConnectionTag(u64);
 
 impl ConnectionTag {
-    /// No connection, for state that has not come from one yet.
-    pub(crate) const NONE: Self = Self(0);
-
     /// A tag no other connection in this process has.
     pub(crate) fn next() -> Self {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -93,8 +91,9 @@ pub use stats::{ConnectionStats, CreditStats, FrameStats, PathStats, UdpStats};
 mod streams;
 pub(crate) use streams::StreamsState;
 pub use streams::{
-    Chunks, ClosedStream, Credit, FinishError, ReadError, ReadableError, RecvStream, SendGroup,
-    SendGroups, SendOptions, SendStream, ShouldTransmit, StreamEvent, Streams, WriteError, Written,
+    Chunks, ClosedStream, FinishError, LeaseError, Leased, ReadError, ReadableError, RecvStream,
+    SendGroup, SendGroups, SendOptions, SendStream, ShouldTransmit, StreamEvent, Streams,
+    WriteError, Written,
 };
 
 mod timer;
@@ -781,6 +780,13 @@ impl Connection {
                         // overrun
                         buf_capacity = buf.len();
 
+                        // Every later segment is capped at the first one's size. If that is
+                        // too small to be worth sending, end the batch so the rest goes out
+                        // at full size.
+                        if segment_size < MIN_PACKET_SPACE {
+                            break;
+                        }
+
                         // Check whether the data we planned to send will fit in the reduced segment
                         // size. If not, bail out and leave it for the next GSO batch so we don't
                         // end up trying to send an empty packet. We can't easily compute the right
@@ -1444,17 +1450,15 @@ impl Connection {
         stats
     }
 
-    /// Return connection flow control credit taken by [`Chunks::hold()`] to the peer.
-    ///
-    /// If [`ShouldTransmit::should_transmit()`] returns `true`, call
-    /// [`Self::poll_transmit()`] soon so the peer learns of the larger window.
-    ///
-    /// # Panics
-    /// If `credit` came from another connection.
-    pub fn release(&mut self, credit: Credit) -> ShouldTransmit {
-        let transmit = self.streams.release(credit);
-        self.spaces[SpaceId::Data].pending.max_data |= transmit.should_transmit();
-        transmit
+    /// The bytes leased from receive stream `id` with [`RecvStream::lease()`], if it has a lease
+    pub fn leased(&self, id: StreamId) -> Option<&Leased> {
+        self.streams.leased(id)
+    }
+
+    /// Assert that the receive lease books balance, for the fuzz target.
+    #[cfg(any(test, feature = "fuzz"))]
+    pub(crate) fn check_leases(&self) {
+        self.streams.check_leases();
     }
 
     /// Ping the remote endpoint
@@ -1716,7 +1720,7 @@ impl Connection {
             self.path.in_flight.bytes,
             self.app_limited,
             self.spaces[space].largest_acked_packet,
-            space,
+            space.into(),
         );
 
         if new_largest && ack_eliciting_acked {
@@ -1840,7 +1844,7 @@ impl Connection {
                     true,
                     0,
                     largest_sent,
-                    space,
+                    space.into(),
                 );
             }
         }
@@ -1858,9 +1862,9 @@ impl Connection {
                 info.time_sent,
                 info.size.into(),
                 pn,
-                space,
+                space.into(),
                 self.app_limited,
-                &self.path.rtt,
+                &moq_congestion::RttEstimator::new(self.path.rtt.get()),
             );
         }
 
@@ -2050,7 +2054,7 @@ impl Connection {
                 let info = self.spaces[pn_space].take(packet).unwrap(); // safe: lost_packets is populated just above
                 self.path
                     .congestion
-                    .on_packet_lost(info.size, packet, pn_space, now);
+                    .on_packet_lost(info.size, packet, pn_space.into(), now);
                 self.config.qlog_sink.emit_packet_lost(
                     packet,
                     &info,
@@ -2095,7 +2099,7 @@ impl Connection {
                     false,
                     size_of_lost_packets,
                     largest_lost,
-                    pn_space,
+                    pn_space.into(),
                 );
             }
         }
@@ -4563,7 +4567,7 @@ fn negotiate_max_idle_timeout(x: Option<VarInt>, y: Option<VarInt>) -> Option<Du
 mod tests {
     use super::*;
 
-    #[cfg(feature = "rustls-ring")]
+    #[cfg(feature = "ring")]
     #[test]
     fn large_initial_token_leaves_room_for_close() {
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();

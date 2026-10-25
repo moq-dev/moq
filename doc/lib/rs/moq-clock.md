@@ -28,8 +28,10 @@ and it pauses the instant but not wall time. The simulator is its own clock
 too. A runtime that reads the time itself, like a moq-uring worker, enters a
 `Deadlines` queue on its thread, and the ambient clock is that queue.
 
-Instants from different clocks don't compare, and there is no conversion back
-to `std::time::Instant`.
+Instants from different clocks don't compare. On native, `Instant::into_std()`
+and `Instant::from_std()` convert at a third-party API that takes
+`std::time::Instant`, through the runtime clock's origin. That is exact on a
+running clock, and keeps only durations on paused tokio or the simulator.
 
 ## Caller-driven code
 

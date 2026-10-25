@@ -25,6 +25,7 @@ anyhow = { workspace = true }
 clap = { workspace = true }
 humantime = { workspace = true }
 humantime-serde = { workspace = true }
+moq-clock = { workspace = true }
 rand = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -33,3 +34,6 @@ toml = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

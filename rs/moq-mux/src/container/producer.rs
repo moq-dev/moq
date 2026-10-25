@@ -242,13 +242,6 @@ where
 		Ok(())
 	}
 
-	/// Record when a locally encoded frame reached the transport. Imported media must leave
-	/// this clock observation out and rely on its container batch and reorder measurements.
-	pub fn flush(&mut self, timestamp: moq_net::Timestamp, now: moq_clock::Instant) -> crate::Result<()> {
-		self.estimator.flush(timestamp, now);
-		self.publish_estimate()
-	}
-
 	/// The catalog key owned by this producer.
 	pub fn name(&self) -> &str {
 		self.rendition
@@ -310,7 +303,7 @@ where
 		self.bandwidth.as_ref().and_then(|claim| claim.ceiling())
 	}
 
-	/// The jitter and bitrate measured from the frames written so far.
+	/// The jitter, bitrate, delay, and framerate measured from the frames written so far.
 	///
 	/// A catalog-owned producer publishes this automatically. See
 	/// [`Estimator`](crate::catalog::Estimator).
@@ -332,6 +325,14 @@ where
 		self.publish_estimate()
 	}
 
+	/// Declare a segment boundary the source drew at `pts`: the timeline closes a record at the
+	/// first group starting at or after it, instead of pacing records by duration.
+	pub(crate) fn boundary(&mut self, pts: moq_net::Timestamp) {
+		if let Some(recorder) = self.recorder.as_mut() {
+			recorder.cut(pts);
+		}
+	}
+
 	/// Whether the next [`write`](Self::write) has to be a keyframe, i.e. no group is currently open
 	/// (at the start, or after a [`cut`](Self::cut) / [`seek`](Self::seek)).
 	///
@@ -345,10 +346,7 @@ where
 	/// One past the track's largest group, even an empty one: where a group continues after
 	/// what the track holds.
 	pub(crate) fn next_sequence(&self) -> u64 {
-		match self.inner.clone().poll_largest(&moq_net::kio::Waiter::noop()) {
-			std::task::Poll::Ready(Some(largest)) => largest.group + 1,
-			_ => 0,
-		}
+		self.inner.largest().map_or(0, |largest| largest.group + 1)
 	}
 
 	/// Buffer up to `duration` of frames into each container frame.
@@ -498,9 +496,10 @@ where
 			self.count(bytes, keyframe);
 			self.observe_end(timestamp, duration);
 		} else {
-			// Buffered frames are measured on the way in instead. The flush that eventually writes
-			// them takes the track down with it when it fails, so there is nothing to unwind.
-			self.estimator.write(frame.timestamp, frame.payload.len());
+			// Buffered frames count toward the rates on the way in instead. The flush that eventually
+			// writes them takes the track down with it when it fails, so there is nothing to unwind.
+			// Their place in the write order waits for that flush, which is when the transport has them.
+			self.estimator.rate(frame.timestamp, frame.payload.len());
 			self.observe_end(frame.timestamp, frame.duration);
 			self.buffer.push(frame);
 
@@ -741,6 +740,7 @@ where
 		}
 		// Counted only once written: an abort discards the buffer, and those frames were never sent.
 		for frame in &self.buffer {
+			self.estimator.order(frame.timestamp);
 			self.count(frame.payload.len(), frame.keyframe);
 		}
 		self.buffer.clear();
@@ -753,6 +753,8 @@ where
 		self.cut(None)?;
 		self.inner.finish()?;
 		self.publish_estimate()?;
+		// A finished track may be kept around, but its media stops holding the other tracks back.
+		self.estimator.discontinuity();
 		// Dropping the recorder flushes the open record, so a track that ends before its catalog
 		// still declares a duration and is advertised.
 		self.recorder = None;
@@ -858,18 +860,20 @@ mod tests {
 		producer.finish().unwrap();
 
 		let estimate = producer.estimate();
-		assert_eq!(estimate.jitter, None, "PTS spacing alone is not flush delay");
+		assert_eq!(estimate.jitter, None, "PTS spacing alone is not jitter");
 		assert_eq!(estimate.bitrate, Some(1_600_000));
 	}
 
-	#[test]
-	fn catalog_flush_measures_delay_across_renditions_and_jitter_within_each() {
+	type Rendition = Producer<Container, hang::catalog::VideoConfig>;
+
+	/// Video renditions sharing one catalog, each opened with a keyframe at 0.
+	fn renditions(names: &[&str]) -> (moq_net::broadcast::Producer, crate::catalog::Producer, Vec<Rendition>) {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut tracks = Vec::new();
-		for name in ["fast", "slow"] {
+		for name in names {
 			let net = broadcast
-				.create_track(name, catalog.track_info(hang::catalog::PRIORITY.video))
+				.create_track(*name, catalog.track_info(hang::catalog::PRIORITY.video))
 				.unwrap();
 			let config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 			let mut track = catalog
@@ -878,21 +882,56 @@ mod tests {
 			track.write(frame(0, true)).unwrap();
 			tracks.push(track);
 		}
+		(broadcast, catalog, tracks)
+	}
 
-		let anchor = moq_clock::Instant::now();
+	#[test]
+	fn catalog_write_order_measures_delay_across_renditions() {
+		let (_broadcast, catalog, mut tracks) = renditions(&["fast", "slow"]);
+
+		// The slow rendition writes each frame after the fast one has written 200ms past it.
+		for i in 1..10u64 {
+			tracks[0].write(frame(i * 40_000 + 200_000, true)).unwrap();
+			tracks[1].write(frame(i * 40_000, true)).unwrap();
+		}
+		for track in &mut tracks {
+			track.cut(None).unwrap();
+		}
+
 		let ms = std::time::Duration::from_millis;
-		let pts = |millis: u64| Timestamp::from_micros(millis * 1_000).unwrap();
-		tracks[0].flush(pts(0), anchor).unwrap();
-		// A constant 200ms offset behind the other rendition is delay, not jitter.
-		tracks[1].flush(pts(0), anchor + ms(200)).unwrap();
-		assert_eq!(catalog.snapshot().video.renditions["slow"].jitter, None);
-		assert_eq!(catalog.snapshot().video.renditions["slow"].delay, Some(ms(200)));
-		assert_eq!(catalog.snapshot().video.renditions["fast"].delay, None);
+		let renditions = catalog.snapshot().video.renditions;
+		assert_eq!(renditions["slow"].delay, Some(ms(200)));
+		assert_eq!(renditions["fast"].delay, None);
+		assert_eq!(renditions["slow"].jitter, None, "a constant trail is not jitter");
+	}
 
-		// A frame flushed 60ms later than the slow rendition's own minimum is.
-		tracks[1].flush(pts(40), anchor + ms(300)).unwrap();
-		assert_eq!(catalog.snapshot().video.renditions["fast"].jitter, None);
-		assert_eq!(catalog.snapshot().video.renditions["slow"].jitter, Some(ms(60)));
+	/// Buffered frames reach the transport when the buffer flushes, so that is where they are ordered:
+	/// interleaved by timestamp on the way in, a second-long buffer still trails the other rendition.
+	#[test]
+	fn a_buffered_rendition_is_ordered_when_it_flushes() {
+		let (_broadcast, catalog, tracks) = renditions(&["live", "buffered"]);
+		let [mut live, buffered] = <[Rendition; 2]>::try_from(tracks).ok().unwrap();
+		let mut buffered = buffered.with_buffer(std::time::Duration::from_secs(1));
+
+		for i in 1..=25u64 {
+			live.write(frame(i * 40_000, false)).unwrap();
+			buffered.write(frame(i * 40_000, false)).unwrap();
+		}
+		buffered.cut(None).unwrap();
+
+		let delay = catalog.snapshot().video.renditions["buffered"].delay;
+		assert_eq!(delay, Some(std::time::Duration::from_millis(960)));
+	}
+
+	/// A finished rendition may be kept around, but its media stops holding the others back.
+	#[test]
+	fn a_finished_rendition_stops_holding_others_back() {
+		let (_broadcast, catalog, mut tracks) = renditions(&["ended", "live"]);
+		tracks[0].write(frame(10_000_000, true)).unwrap();
+		tracks[0].finish().unwrap();
+
+		tracks[1].write(frame(1_000_000, true)).unwrap();
+		assert_eq!(catalog.snapshot().video.renditions["live"].delay, None);
 	}
 
 	/// A passthrough producer claims nothing until the first window closes, then
@@ -1029,11 +1068,7 @@ mod tests {
 			}
 		}
 
-		fn poll_read(
-			&self,
-			_group: &mut moq_net::group::Consumer,
-			_waiter: &kio::Waiter,
-		) -> std::task::Poll<Result<Option<Vec<Frame>>, Self::Error>> {
+		fn decode(&self, _frame: moq_net::frame::Frame) -> Result<Vec<Frame>, Self::Error> {
 			unreachable!("RejectAt is write-only")
 		}
 	}
@@ -1122,18 +1157,16 @@ mod tests {
 	/// though it carries nothing. So a subscriber arriving mid-break waits for real media
 	/// rather than being handed the pre-break group as if it were live -- which is how a
 	/// 40-minute-stale frame once reached a VOD recording.
-	#[tokio::test]
-	async fn discontinuity_moves_the_live_edge_off_stale_content() {
+	#[test]
+	fn discontinuity_moves_the_live_edge_off_stale_content() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Audio));
 
-		let mut edge = producer.track().clone();
-
 		producer.write(frame(0, true)).unwrap();
-		let stale = edge.largest().await.map(|largest| largest.group);
+		let stale = producer.track().largest().map(|largest| largest.group);
 
 		producer.discontinuity().unwrap();
-		let fresh = edge.largest().await.map(|largest| largest.group);
+		let fresh = producer.track().largest().map(|largest| largest.group);
 
 		assert_eq!(fresh, stale.map(|s| s + 1), "the marker group is the live edge now");
 	}
@@ -1414,11 +1447,7 @@ mod tests {
 			Ok(())
 		}
 
-		fn poll_read(
-			&self,
-			_group: &mut moq_net::group::Consumer,
-			_waiter: &kio::Waiter,
-		) -> std::task::Poll<Result<Option<Vec<Frame>>, Self::Error>> {
+		fn decode(&self, _frame: moq_net::frame::Frame) -> Result<Vec<Frame>, Self::Error> {
 			unreachable!("Recording is write-only")
 		}
 	}

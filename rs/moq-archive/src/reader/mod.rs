@@ -38,7 +38,7 @@ use futures::TryStreamExt;
 use futures::future::BoxFuture;
 use hang::timeline::{Position, Record};
 use moq_json::window;
-use moq_net::{Timescale, Timestamp, broadcast, group, track};
+use moq_net::{Timescale, Timestamp, broadcast, track};
 use object_store::ObjectStore;
 use tokio::sync::watch;
 
@@ -96,12 +96,6 @@ struct TimelineRequests {
 	name: String,
 	timescale: Option<Timescale>,
 	dynamic: track::Dynamic,
-}
-
-struct TimelineRequest {
-	name: String,
-	timescale: Option<Timescale>,
-	request: group::Request,
 }
 
 struct Shared<T> {
@@ -358,83 +352,102 @@ async fn serve<T: ObjectStore>(shared: Arc<Shared<T>>, mut dynamic: broadcast::D
 
 /// Serve a timeline's evicted groups from their original stored objects.
 async fn serve_timeline<T: ObjectStore>(shared: Arc<Shared<T>>, requests: TimelineRequests) {
-	let mut groups = kio::Tasks::new();
+	let mut fills = kio::Tasks::new();
 	kio::wait(|waiter| {
 		loop {
-			match requests.dynamic.poll_requested_group(waiter) {
-				Poll::Ready(Ok(request)) => {
-					groups.push(task(Box::pin(serve_timeline_group(
-						shared.clone(),
-						TimelineRequest {
-							name: requests.name.clone(),
-							timescale: requests.timescale,
-							request,
-						},
-					))));
+			match requests.dynamic.poll_requested_fill(waiter) {
+				Poll::Ready(Ok(fill)) => {
+					let (shared, name, timescale) = (shared.clone(), requests.name.clone(), requests.timescale);
+					fills.push(task(Box::pin(async move {
+						let mut last = None;
+						while fill.is_used()
+							&& let Some(sequence) = fill.next()
+							&& last != Some(sequence)
+						{
+							last = Some(sequence);
+							serve_timeline_group(&shared, &name, timescale, &fill, sequence).await;
+						}
+					})));
 				}
 				Poll::Ready(Err(_)) => return Poll::Ready(()),
 				Poll::Pending => break,
 			}
 		}
-		let _ = groups.poll(waiter);
+		let _ = fills.poll(waiter);
 		Poll::Pending
 	})
 	.await;
 }
 
-async fn serve_timeline_group<T: ObjectStore>(shared: Arc<Shared<T>>, request: TimelineRequest) {
-	let TimelineRequest {
-		name,
-		timescale,
-		request,
-	} = request;
-	let sequence = request.sequence();
+/// Answer group `sequence`, which the archive failed to load. A store failure may pass, so
+/// only the readers waiting now are refused; anything else means the archive can't serve it.
+fn unavailable(fill: &track::Fill, sequence: u64, err: &Error) {
+	let groups = sequence..sequence + 1;
+	match err {
+		Error::Store(_) => fill.refuse_groups(groups, moq_net::Error::Stream(moq_net::StreamError::Internal)),
+		_ => fill.drop_groups(groups),
+	}
+}
+
+async fn serve_timeline_group<T: ObjectStore>(
+	shared: &Shared<T>,
+	name: &str,
+	timescale: Option<Timescale>,
+	fill: &track::Fill,
+	sequence: u64,
+) {
+	let reject = || fill.drop_groups(sequence..sequence + 1);
 	let segment = shared
 		.timelines
 		.lock()
 		.unwrap()
-		.get(&name)
+		.get(name)
 		.and_then(|groups| groups.get(&sequence))
 		.copied();
 	let Some(segment) = segment else {
-		request.reject(moq_net::Error::NotFound);
+		reject();
 		return;
 	};
-	let key = match Key::segments(&name, segment) {
+	let key = match Key::segments(name, segment) {
 		Ok(key) => key,
 		Err(_) => {
-			request.reject(moq_net::Error::NotFound);
+			reject();
 			return;
 		}
 	};
-	let object = shared
-		.cache
-		.get_or_insert_async(&key, async {
+	let object = tokio::select! {
+		biased;
+		// Every reader narrowed past it: the fill moves on to the groups it still owes.
+		_ = fill.unwanted(sequence) => return,
+		object = shared.cache.get_or_insert_async(&key, async {
 			shared
 				.store
-				.get_segments(&name, segment, timescale.is_some())
+				.get_segments(name, segment, timescale.is_some())
 				.await
 				.map(Arc::new)
-		})
-		.await;
+		}) => object,
+	};
 	let object = match object {
 		Ok(object) => object,
 		Err(err) => {
 			tracing::warn!(track = name, sequence, %err, "archived timeline group is unavailable");
-			request.reject(moq_net::Error::NotFound);
+			unavailable(fill, sequence, &err);
 			return;
 		}
 	};
-	let start = request.frame_start();
+	let start = fill.frame_start(sequence);
 	let Some(stored) = object.groups.iter().find(|group| group.sequence == sequence) else {
-		request.reject(moq_net::Error::NotFound);
+		reject();
 		return;
 	};
 	if object.frame_start != 0 {
-		request.reject(moq_net::Error::NotFound);
+		reject();
 		return;
 	}
-	let Ok(mut producer) = request.accept(None) else {
+	if !fill.is_wanted(sequence) {
+		return;
+	}
+	let Ok(mut producer) = fill.accept(sequence, None) else {
 		return;
 	};
 	if producer.start_at(start).is_err() {
@@ -452,7 +465,7 @@ async fn serve_timeline_group<T: ObjectStore>(shared: Arc<Shared<T>>, request: T
 	let _ = producer.finish();
 }
 
-/// Accept a track a timeline indexes, then serve its group requests until nobody uses it.
+/// Accept a track a timeline indexes, then serve its fills until nobody uses it.
 async fn serve_track<T: ObjectStore>(shared: Arc<Shared<T>>, request: track::Request, known: bool) {
 	let name = request.name().to_string();
 	if !known {
@@ -480,20 +493,30 @@ async fn serve_track<T: ObjectStore>(shared: Arc<Shared<T>>, request: track::Req
 	let dynamic = request.dynamic();
 	let mut demand = dynamic.demand();
 	let _producer = request.accept(info);
-	let mut groups = kio::Tasks::new();
+	let mut fills = kio::Tasks::new();
 
 	kio::wait(|waiter| {
 		loop {
-			match dynamic.poll_requested_group(waiter) {
-				Poll::Ready(Ok(request)) => {
-					let serve = serve_group(shared.clone(), name.clone(), timescale, request);
-					groups.push(task(Box::pin(serve)));
+			match dynamic.poll_requested_fill(waiter) {
+				Poll::Ready(Ok(fill)) => {
+					let (shared, name) = (shared.clone(), name.clone());
+					fills.push(task(Box::pin(async move {
+						// One group at a time: a fill's groups precede its readers' live edge.
+						let mut last = None;
+						while fill.is_used()
+							&& let Some(sequence) = fill.next()
+							&& last != Some(sequence)
+						{
+							last = Some(sequence);
+							serve_group(&shared, &name, timescale, &fill, sequence).await;
+						}
+					})));
 				}
 				Poll::Ready(Err(_)) => return Poll::Ready(()),
 				Poll::Pending => break,
 			}
 		}
-		if groups.poll(waiter).is_pending() {
+		if fills.poll(waiter).is_pending() {
 			return Poll::Pending;
 		}
 		// Drain the changes so the waiter stays registered, then read where demand settled.
@@ -506,41 +529,55 @@ async fn serve_track<T: ObjectStore>(shared: Arc<Shared<T>>, request: track::Req
 	.await
 }
 
-/// Answer one group request from the records holding it, or reject it as never delivered.
+/// Answer one group of a fill from the records holding it, or drop it as never delivered.
 ///
 /// A group whose records stop short of its end keeps its producer open and grows as later records
 /// commit, until one reaches the group's end or the caller finishes the reader.
 async fn serve_group<T: ObjectStore>(
-	shared: Arc<Shared<T>>,
-	track: String,
+	shared: &Shared<T>,
+	track: &str,
 	timescale: Option<Timescale>,
-	request: group::Request,
+	fill: &track::Fill,
+	sequence: u64,
 ) {
-	let sequence = request.sequence();
-	let start = request.frame_start();
+	let start = fill.frame_start(sequence);
 	let mut changed = shared.changed.subscribe();
-	let mut spans = shared.index.lock().unwrap().group(&track, sequence);
+	let mut spans = shared.index.lock().unwrap().group(track, sequence);
 
-	// The earliest retained record must hold the requested frame; an expired head is gone.
-	if spans
-		.first()
-		.is_none_or(|span| span.start > Position::new(sequence, start))
-	{
-		request.reject(moq_net::Error::NotFound);
-		return;
+	// The earliest retained record must hold the requested frame. Nothing retained is gone;
+	// an expired head is refused for this request alone, since a later one may ask the tail.
+	match spans.first() {
+		None => {
+			fill.drop_groups(sequence..sequence + 1);
+			return;
+		}
+		Some(span) if span.start > Position::new(sequence, start) => {
+			fill.refuse_groups(sequence..sequence + 1, moq_net::Error::NotFound);
+			return;
+		}
+		Some(_) => {}
 	}
 	// Validate the first object before accepting, so an unreadable group is a plain miss. Keep it,
 	// so a cache too small to hold it costs no second GET.
 	let timed = timescale.is_some();
-	let mut first = match object(&shared, &track, timed, &spans[0]).await {
+	let loaded = tokio::select! {
+		biased;
+		// Every reader narrowed past it: the fill moves on to the groups it still owes.
+		_ = fill.unwanted(sequence) => return,
+		loaded = object(shared, track, timed, &spans[0]) => loaded,
+	};
+	let mut first = match loaded {
 		Ok(object) => Some((spans[0].sequence, object)),
 		Err(err) => {
 			tracing::warn!(track, sequence, %err, "archived group is unavailable");
-			request.reject(moq_net::Error::NotFound);
+			unavailable(fill, sequence, &err);
 			return;
 		}
 	};
-	let Ok(mut producer) = request.accept(None) else {
+	if !fill.is_wanted(sequence) {
+		return;
+	}
+	let Ok(mut producer) = fill.accept(sequence, None) else {
 		return;
 	};
 	if producer.start_at(start).is_err() {
@@ -555,7 +592,7 @@ async fn serve_group<T: ObjectStore>(
 			}
 			let loaded = match first.take_if(|(loaded, _)| *loaded == span.sequence) {
 				Some((_, object)) => Ok(object),
-				None => object(&shared, &track, timed, span).await,
+				None => object(shared, track, timed, span).await,
 			};
 			let object = match loaded {
 				Ok(object) if span.start <= Position::new(sequence, next) => object,
@@ -612,7 +649,7 @@ async fn serve_group<T: ObjectStore>(
 			}
 		}
 		changed.mark_unchanged();
-		spans = shared.index.lock().unwrap().group(&track, sequence);
+		spans = shared.index.lock().unwrap().group(track, sequence);
 	}
 }
 
@@ -663,5 +700,9 @@ impl quick_cache::Weighter<Key, Arc<Object>> for Weight {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests;

@@ -15,7 +15,7 @@ import {
 } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
 import { errors } from "../internal";
-import { type Baseline, Estimator } from "../jitter";
+import { Estimator, type Order } from "../order";
 import { hardwareReliable } from "../support/video";
 import type { Capture } from "./capture";
 import { normalizeSource, type Source } from "./types";
@@ -194,7 +194,7 @@ export class Encoder {
 	};
 	#signals = new Effect();
 	#estimator = new Estimator();
-	// The estimator's jitter and delay, republished whenever either rises.
+	// The estimator's delay, republished whenever it rises.
 	#estimate = new Signal<Estimator["estimate"]>({});
 	// What this rendition advertised on each broadcast, keyed by the broadcast or, for a local preview,
 	// the encoder. A broadcast keeps a rendition's track when it re-registers, so returning to one
@@ -335,7 +335,7 @@ export class Encoder {
 			effect.set(this.#out.active, enabled && !!track && !error, false);
 			if (!enabled || !track || error) return;
 
-			this.#encode(track, broadcast.baseline, effect);
+			this.#encode(track, broadcast.order, effect);
 		});
 
 		// Reserve against the connection for as long as this track is live. Wait
@@ -366,7 +366,7 @@ export class Encoder {
 	}
 
 	// Encode captured frames into the track producer, reconfiguring when the resolved config changes.
-	#encode(track: Moq.Track.Producer, baseline: Baseline, effect: Effect): void {
+	#encode(track: Moq.Track.Producer, order: Order, effect: Effect): void {
 		const capture = effect.get(this.in.capture);
 		if (!capture) return;
 
@@ -375,6 +375,8 @@ export class Encoder {
 
 		let lastKeyframe: Micro | undefined;
 		let lastEncoded: Micro | undefined;
+		// The catalog declares no reordering, so each chunk must present after the one before it.
+		let lastOutput: number | undefined;
 		// The largest group demand asked for that a keyframe already answers. A join over the refresh
 		// ratio asks for one past the largest, which the next frame opens.
 		let answered: number | undefined;
@@ -387,6 +389,14 @@ export class Encoder {
 		effect.spawn(async () => {
 			const encoder = new VideoEncoder({
 				output: (frame: EncodedVideoChunk) => {
+					if (lastOutput !== undefined && frame.timestamp <= lastOutput) {
+						this.#abort(
+							new Error(`encoder reordered a frame at ${frame.timestamp}us behind ${lastOutput}us`),
+							track,
+						);
+						return;
+					}
+					lastOutput = frame.timestamp;
 					const key = frame.type === "key";
 					if (key) {
 						lastKeyframe = frame.timestamp as Micro;
@@ -401,7 +411,7 @@ export class Encoder {
 					producer.encode(frame, frame.timestamp as Micro, key);
 					// Including a keyframe the encoder placed on its own, which opened a group too.
 					if (key) answer();
-					if (this.#estimator.flush(frame.timestamp, baseline)) {
+					if (this.#estimator.write(frame.timestamp, order)) {
 						this.#estimate.set({ ...this.#estimator.estimate });
 					}
 				},
@@ -455,6 +465,10 @@ export class Encoder {
 						try {
 							if (effect.abort.aborted) break;
 							if (encoder.state !== "configured") continue;
+							// A pending input means the codec is saturated. Keep capture live instead of
+							// growing a stale encode queue whose lateness becomes permanent catalog delay.
+							// Drop before answering a keyframe request or advancing the frame-rate cursor.
+							if (encoder.encodeQueueSize > 0) continue;
 
 							// This doesn't need to be reactive.
 							const config = this.config.peek();
@@ -463,6 +477,9 @@ export class Encoder {
 							// Allow half an interval of slack so jittery capture timestamps don't drop
 							// a frame we meant to keep.
 							const targetFrameRate = config?.frameRate;
+							// A repeated timestamp would present with the frame before it, which no reordering
+							// declared allows; a backward one still fails the track at output.
+							if (frame.timestamp === lastEncoded) continue;
 							if (targetFrameRate && lastEncoded !== undefined) {
 								const minGap = Micro.fromSecond((1 / targetFrameRate) as Second);
 								if (frame.timestamp - lastEncoded < minGap - minGap / 2) continue;
@@ -528,6 +545,9 @@ export class Encoder {
 				}
 			} finally {
 				if (encoder.state !== "closed") encoder.close();
+				// A stopped rendition stops holding the others' delay back. Not a cleanup: the black
+				// keyframe above is written after one would run, and would seat this rendition again.
+				order.leave(this.#estimator);
 				// The broadcast owns this static track across demand gaps. Close the current group, marking
 				// the break so a later subscriber resumes on the same track without the pre-gap group reading
 				// as live. A fatal encoder error aborts the track instead.
@@ -574,6 +594,8 @@ export class Encoder {
 			codedWidth: Catalog.u53(config.width),
 			codedHeight: Catalog.u53(config.height),
 			optimizeForLatency: true,
+			// Realtime WebCodecs encoders emit no B-frames; the output callback refuses one that does.
+			reorder: Catalog.u8(0),
 			container: { kind: "legacy" } as const,
 			...estimate,
 		};
@@ -806,7 +828,7 @@ export class Encoder {
 				latencyMode: "realtime",
 				hardwareAcceleration,
 				avc: codec.startsWith("avc1") ? { format: "annexb" } : undefined,
-				// @ts-expect-error Typescript needs to be updated.
+				// @ts-expect-error TypeScript's DOM lib lacks the HEVC codec registration's `hevc` config.
 				hevc: codec.startsWith("hev1") ? { format: "annexb" } : undefined,
 			};
 

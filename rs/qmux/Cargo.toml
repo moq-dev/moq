@@ -1,0 +1,59 @@
+[package]
+name = "qmux"
+description = "QMux: QUIC streams over TCP, TLS, WebSocket, and Unix sockets"
+authors = ["Luke Curley"]
+repository = "https://github.com/moq-dev/moq"
+license = "MIT OR Apache-2.0"
+
+version = "0.7.0"
+edition = "2024"
+rust-version.workspace = true
+
+keywords = ["quic", "qmux", "websocket", "tcp", "multiplexing"]
+categories = ["network-programming", "asynchronous"]
+
+[features]
+default = ["tls", "wss"]
+tcp = ["tokio/net", "tokio/io-util"]
+tls = ["tcp", "dep:tokio-rustls", "dep:rustls"]
+uds = ["tokio/net", "tokio/io-util"]
+ws = ["dep:tokio-tungstenite", "dep:futures"]
+wss = ["ws", "dep:rustls", "tokio-tungstenite/rustls-tls-native-roots"]
+
+[dependencies]
+bytes = { workspace = true }
+futures = { workspace = true, optional = true }
+kio = { workspace = true }
+moq-clock = { workspace = true }
+moq-net = { workspace = true }
+# The stream state machine, shared with QUIC. `mux` drives it over a reliable transport.
+moq-quic = { workspace = true, features = ["mux"] }
+rustc-hash = { workspace = true }
+rustls = { version = "0.23", default-features = false, optional = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time", "macros", "rt"] }
+tokio-rustls = { workspace = true, optional = true }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake"], optional = true }
+tracing = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[dev-dependencies]
+anyhow = { workspace = true }
+# The last release before this crate moved here, for wire interop tests only.
+qmux06 = { package = "qmux", version = "0.6.3", default-features = false, features = ["tcp", "ws"] }
+tokio = { workspace = true, features = ["full", "test-util"] }
+# The 0.6 release's stream API, for driving it in the interop tests.
+web-transport-trait = { workspace = true }
+
+[[example]]
+name = "interop-client"
+required-features = ["tcp", "ws"]
+
+[[example]]
+name = "interop-server"
+required-features = ["tcp", "ws"]
+
+[lints]
+workspace = true

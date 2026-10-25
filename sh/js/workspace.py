@@ -142,6 +142,7 @@ def run(action, plan):
 
     command("bun", "install", "--frozen-lockfile")
     if action == "test":
+        command("python3", "sh/js/playwright.test.py")
         command("bun", "test", "js/common/declarations.test.ts", "js/common/deps.test.ts",
                 "js/common/docs.test.ts", "js/common/worklet.test.ts")
         scripts("test")
@@ -156,13 +157,13 @@ def run(action, plan):
         raise RuntimeError("add these cross-tree JS inputs to the js pattern in sh/dispatch.sh: "
                            + " ".join(missing))
     command("python3", "sh/rs/stats-docs.py")
-    command("python3", "sh/rs/model-markers.py")
     # These inexpensive shared checks still protect every package's imports.
     result = subprocess.run(["grep", "-rn", "--include=*.ts", "--include=*.tsx",
                              "--exclude-dir=node_modules", "--exclude-dir=dist",
                              r"import\.meta\.env", "js"])
     if result.returncode != 1:
         raise RuntimeError("import.meta.env scan found a reference or failed")
+    command("python3", "sh/js/playwright.py")
     command("bun", "js/common/deps.ts")
     if plan["wasm"]:
         command("just", "js", "wasm", "dev")

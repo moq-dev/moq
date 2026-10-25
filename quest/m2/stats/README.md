@@ -11,8 +11,7 @@ its own connection. A dashboard reads both the same way a publisher does. One
 shared model turns either report into a health verdict, and a bounded
 preflight run reports which media layer of a broadcast is broken. Stats and
 feedback cost nothing on the network unless someone subscribes. Not here: the
-relay's `moq-stats` layout, which this line does not change (the
-[broadcast epoch](/quest/m0/broadcast-epoch/README.md) line reshapes it);
+relay's `moq-stats` layout, which this line does not change;
 clock synchronization; any
 requirement that a client report; and feedback as an input to billing,
 authorization, or route selection.
@@ -85,8 +84,9 @@ kind.
     browser has only PROBE rtt until
     [#2733](https://github.com/moq-dev/moq/issues/2733)-style counters land.
 - **Encoding**: cumulative counters about once a second through
-  `moq_json::snapshot`, with the `.z` merge-patch sibling, produced whenever
-  stats are enabled. An unsubscribed stats track never leaves the process.
+  `moq_json::snapshot` on one track with `compress: true`, produced whenever
+  stats are enabled. The [m1 compression migration](/quest/m1/compress/migrate.md)
+  removes `.z` siblings; follow the delta policy it retains on the single track. An unsubscribed stats track never leaves the process.
   Gauges are carried but never summed.
 - **On main.** Every change is additive: optional sections on
   `#[non_exhaustive]` catalog types, and new types. The line left the

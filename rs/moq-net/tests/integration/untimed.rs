@@ -4,8 +4,8 @@
 //! that can say so, and a timed track keeps its timestamps.
 //!
 //! No receiver fills in arrival time. Lite-05 and lite-06 cannot encode absence, so their
-//! encoder writes its send time instead, and those hops are the one place an untimed track
-//! gains a timeline.
+//! encoder writes its send time instead, and their receivers drop every timestamp, which
+//! leaves a timed track untimed too.
 
 use crate::support;
 
@@ -27,16 +27,14 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 enum Arrives {
 	/// Both keep what the publisher wrote.
 	Faithful,
-	/// The untimed track carries the encoder's send times (lite-05 and lite-06).
-	SendTime,
-	/// The wire declares no timescale, so even the timed track arrives untimed.
+	/// The wire carries no trustworthy timescale, so even the timed track arrives untimed.
 	Untimed,
 }
 
 fn expected(version: &str) -> Arrives {
 	match version {
-		"moq-lite-03" | "moq-lite-04" => Arrives::Untimed,
-		"moq-lite-05" | "moq-lite-06" => Arrives::SendTime,
+		// Lite-05 and lite-06 stamp untimed tracks with send times, so their receivers drop them.
+		"moq-lite-03" | "moq-lite-04" | "moq-lite-05" | "moq-lite-06" => Arrives::Untimed,
 		// Drafts 14 to 16 can't carry TIMESCALE.
 		"moq-transport-14" | "moq-transport-16" => Arrives::Untimed,
 		_ => Arrives::Faithful,
@@ -136,10 +134,6 @@ async fn frames_arrive_as_published() {
 				assert_eq!(untimed, None, "{version}: absence survives");
 				assert_eq!(untimed_info.timescale, None, "{version}: no timeline is declared");
 			}
-			Arrives::SendTime => {
-				assert_eq!(timed, Some(millis(7)), "{version}: the timestamp survives");
-				assert!(untimed.is_some(), "{version}: a lite encoder writes its send time");
-			}
 			Arrives::Untimed => {
 				assert_eq!(timed, None, "{version}: no units, so no timestamp");
 				assert_eq!(timed_info.timescale, None, "{version}: no timeline is declared");
@@ -175,9 +169,8 @@ async fn a_relay_forwards_an_untimed_track_untimed() {
 /// An explicit start on an untimed track is honored the same way on lite and
 /// moq-transport: only an unfloored subscriber jumps to the latest group.
 ///
-/// The subscription asks for history the way a resume does, with a budget covering it:
-/// lite-05 and lite-06 carry send times, so downstream the groups are timed and a zero budget would
-/// skip the older ones there, as it would on any timed track. moq-transport before draft
+/// The subscription asks for history the way a resume does, with a budget covering it.
+/// moq-transport before draft
 /// 20 can only join a past group through a joining FETCH, which our publisher refuses for
 /// groups before the live one, so draft 20 stands in for it.
 #[moq_clock::test]
@@ -194,7 +187,7 @@ async fn an_explicit_start_holds_on_an_untimed_track() {
 
 		let consumer = chain.nodes[1].consume().request_broadcast("room", None).await.unwrap();
 		let subscription = track::Subscription::default()
-			.with_groups(2..)
+			.with_range(2..)
 			.with_max_delay(Duration::from_secs(30));
 		let mut subscriber = moq_clock::timeout(TIMEOUT, consumer.track("data").unwrap().subscribe(subscription))
 			.await
@@ -213,8 +206,8 @@ async fn an_explicit_start_holds_on_an_untimed_track() {
 	}
 }
 
-/// An untimed track's datagram arrives untimed, except with a send time on lite-05 and
-/// lite-06.
+/// An untimed track's datagram arrives untimed, though lite-05 and lite-06 carry a send
+/// time that the receiver drops.
 #[moq_clock::test]
 async fn datagrams_arrive_as_published() {
 	for version in ["moq-lite-05", "moq-lite-07-wip", "moq-transport-16", "moq-transport-20"] {
@@ -235,8 +228,7 @@ async fn datagrams_arrive_as_published() {
 			.expect("datagram timeout")
 			.unwrap()
 			.expect("a datagram");
-		let stamps = version == "moq-lite-05";
-		assert_eq!(datagram.timestamp.is_some(), stamps, "{version}");
+		assert_eq!(datagram.timestamp, None, "{version}");
 	}
 }
 
@@ -258,17 +250,16 @@ async fn a_fetched_untimed_frame_arrives_untimed() {
 		};
 		let groups = request.dynamic();
 		let _track = request.accept(untimed());
-		let request = match futures::future::select(std::pin::pin!(groups.requested_group()), &mut waiting).await {
+		let request = match futures::future::select(std::pin::pin!(groups.requested_fill()), &mut waiting).await {
 			futures::future::Either::Left((request, _)) => request.expect("the fetch reaches the publisher"),
 			futures::future::Either::Right(_) => panic!("nothing answered the fetch"),
 		};
-		let mut group = request.accept(timed()).unwrap();
+		let mut group = request.accept(0, timed()).unwrap();
 		group.write_frame(None, Bytes::from_static(b"segment")).unwrap();
 		group.finish().unwrap();
 
 		let mut fetched = waiting.await.unwrap();
 		let frame = fetched.read_frame().await.unwrap().unwrap();
-		let stamps = version == "moq-lite-06";
-		assert_eq!(frame.timestamp.is_some(), stamps, "{version}");
+		assert_eq!(frame.timestamp, None, "{version}");
 	}
 }

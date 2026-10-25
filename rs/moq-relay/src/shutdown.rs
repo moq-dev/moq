@@ -14,7 +14,8 @@
 
 use std::{sync::Arc, time::Duration};
 
-use tokio::{sync::watch, time::Instant};
+use moq_clock::Instant;
+use tokio::sync::watch;
 
 /// Fires the relay-wide shutdown broadcast. Held by `Relay::run` for the OS
 /// signal path; an embedder clones one to stop the relay from its own task.
@@ -197,7 +198,7 @@ impl Observer {
 			Err(_) => None,
 		};
 		match deadline {
-			Some(deadline) => tokio::time::sleep_until(deadline).await,
+			Some(deadline) => moq_clock::sleep_until(deadline).await,
 			None => std::future::pending().await,
 		}
 	}
@@ -323,7 +324,7 @@ impl Observer {
 		tokio::select! {
 			biased;
 			_ = session.closed() => return,
-			() = tokio::time::sleep_until(deadline) => {}
+			() = moq_clock::sleep_until(deadline) => {}
 		}
 		tracing::debug!("peer did not leave before the drain deadline; closing");
 		session.abort(moq_net::Error::GoawayTimeout);
@@ -384,6 +385,7 @@ pub(crate) async fn raise(signal: libc::c_int) {
 }
 
 #[cfg(test)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 
@@ -440,13 +442,13 @@ mod tests {
 	async fn withheld_websocket_setup_ends_at_the_deadline() {
 		let window = Duration::from_secs(1);
 		let mut config = crate::Config::default();
-		config.listen.timeout = Some(Duration::ZERO);
+		config.listen.timeout = Some((Duration::ZERO).into());
 		config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 		config.listen.tls.generate = vec!["localhost".into()];
 		config.web.ws = true;
 		config.web.http.listen = Some("127.0.0.1:0".parse().unwrap());
 		config.auth.public = vec![moq_auth::Pattern::all()];
-		config.drain_timeout = window;
+		config.drain_timeout = Some((window).into());
 		let relay = crate::Relay::load(config).await.unwrap().with_signals(false);
 		let addr = relay.web_addrs().http.unwrap();
 		let trigger = relay.shutdown_trigger().clone();
@@ -511,7 +513,7 @@ mod tests {
 		let window = Duration::from_secs(1);
 		let mut config = crate::Config::default();
 		config.listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
-		config.drain_timeout = window;
+		config.drain_timeout = Some((window).into());
 		let mut relay = crate::Relay::load(config).await.unwrap().with_signals(false);
 		let url: url::Url = format!("tcp://{}/room", relay.tcp_addr().unwrap()).parse().unwrap();
 		let mut admissions = relay.admissions().unwrap();

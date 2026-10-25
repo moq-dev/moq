@@ -100,4 +100,25 @@ export class Timestamp {
 	asMicros(): number {
 		return this.as(Timescale.MICRO);
 	}
+
+	/** Whether this presents before `other`, whatever their scales. */
+	isBefore(other: Timestamp): boolean {
+		if (this.scale === other.scale) return this.value < other.value;
+		// Cross-scale products can pass 2^53, so they are compared exactly in BigInt, as Rust does in u128.
+		const [ma, ea] = binary(this.value);
+		const [mb, eb] = binary(other.value);
+		const e = Math.min(ea, eb);
+		return (ma * BigInt(other.scale)) << BigInt(ea - e) < (mb * BigInt(this.scale)) << BigInt(eb - e);
+	}
+}
+
+// A finite, non-negative `value` exactly as `mantissa * 2^exponent`. Doubling is exact, so
+// a fraction becomes an integer within its binary digits.
+function binary(value: number): [bigint, number] {
+	let exponent = 0;
+	while (!Number.isInteger(value)) {
+		value *= 2;
+		exponent--;
+	}
+	return [BigInt(value), exponent];
 }

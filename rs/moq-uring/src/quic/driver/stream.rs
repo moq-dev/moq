@@ -7,8 +7,10 @@
 
 use std::task::{Context, Poll, ready};
 
-use bytes::{Buf, Bytes, BytesMut};
-use moq_quic::{StreamId, VarInt};
+use std::cell::RefMut;
+
+use bytes::{Buf, BufMut, Bytes, BytesMut};
+use moq_quic::{LeaseError, StreamId, VarInt};
 
 use super::super::Error;
 use super::{End, Shared};
@@ -221,12 +223,6 @@ impl std::fmt::Debug for SendStream {
 	}
 }
 
-/// How far [`RecvStream::poll_closed`] reads ahead of the application before
-/// it waits for the backlog to drain.
-const READ_AHEAD: usize = 64 * 1024;
-/// How much to ask for per read-ahead chunk.
-const READ_CHUNK: usize = 8 * 1024;
-
 /// One read out of moq-quic's reassembly buffer.
 enum Read {
 	/// Bytes, at most as many as were asked for.
@@ -244,16 +240,10 @@ pub struct RecvStream {
 	shared: Shared,
 	id: StreamId,
 	park: kio::Park,
-	/// Every byte up to the FIN was read out of moq-quic; reads report the end
-	/// once `backlog` is drained too.
+	/// Every byte up to the FIN was read out of moq-quic.
 	finished: bool,
 	/// We stopped the stream; no more reads matter.
 	stopped: bool,
-	/// Bytes `poll_closed` read ahead, handed to `poll_read` before moq-quic's.
-	backlog: BytesMut,
-	/// The connection credit for `backlog`, kept until the application reads
-	/// it, as if it were still in moq-quic's reassembly buffer.
-	backlog_credit: moq_quic::Credit,
 }
 
 impl RecvStream {
@@ -264,63 +254,93 @@ impl RecvStream {
 			park: kio::Park::default(),
 			finished: false,
 			stopped: false,
-			backlog: BytesMut::new(),
-			backlog_credit: moq_quic::Credit::default(),
 		}
 	}
 
-	/// Read into `dst`, keeping the connection flow control credit for exactly
-	/// the bytes read, or `None` once the peer has finished the stream.
+	/// Lease the stream's unreleased bytes once at least `want` have arrived
+	/// in order, or the stream ended.
 	///
-	/// Stream credit still advances, so a stream window smaller than an
-	/// application message keeps the message flowing, while the connection
-	/// window these bytes occupy stays spent until the credit is dropped.
-	pub fn poll_read_held(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<Credit>, Error>> {
-		let mut held = moq_quic::Credit::default();
-		self.poll_read_into(cx, dst, Some(&mut held)).map_ok(|read| {
-			read.map(|_| Credit {
-				shared: self.shared.clone(),
-				inner: held,
-			})
-		})
+	/// The bytes stay in moq-quic's receive buffer, keeping their connection
+	/// flow control credit, until read through the lease as a [`Buf`] and
+	/// then [`Lease::release`]d; bytes not read stay for the next lease.
+	/// Stream credit still advances, so a stream window smaller than a
+	/// message keeps the message flowing.
+	///
+	/// When the peer has spent the connection window and no reader can make
+	/// progress, the stream ranked lowest by [`Self::set_priority`] is
+	/// evicted: its buffered bytes and their credit are discarded and its next
+	/// lease fails with [`Error::Evicted`]. Bytes it took keep their credit
+	/// until the stream is stopped. Nothing is evicted while the leased and
+	/// unread bytes of every stream stay below the connection receive window.
+	///
+	/// Do not mix with the plain reads on one stream, which skip the leased
+	/// bytes.
+	pub fn poll_lease(&mut self, cx: &mut Context<'_>, want: usize) -> Poll<Result<Lease<'_>, Error>> {
+		let waiter = self.park.hold(cx);
+		let mut conn = self.shared.conn.borrow_mut();
+		let err = match conn.recv_stream(self.id).lease(want) {
+			Ok(transmit) => {
+				if transmit.should_transmit() {
+					self.shared.kick();
+				}
+				return Poll::Ready(Ok(Lease {
+					conn,
+					shared: &self.shared,
+					id: self.id,
+				}));
+			}
+			Err(LeaseError::Blocked(transmit)) => {
+				drop(conn);
+				if transmit.should_transmit() {
+					self.shared.kick();
+				}
+				if let Some(err) = self.shared.closed() {
+					return Poll::Ready(Err(err));
+				}
+				self.shared.park_readable(self.id, waiter);
+				return Poll::Pending;
+			}
+			Err(LeaseError::Reset(code)) => Error::Reset(code.into_inner()),
+			Err(LeaseError::Evicted) => Error::Evicted,
+			Err(LeaseError::TooLarge) => Error::TooLarge,
+			Err(LeaseError::ClosedStream) => {
+				drop(conn);
+				self.shared.closed().unwrap_or(Error::Closed)
+			}
+		};
+		Poll::Ready(Err(err))
 	}
 
-	/// [`poll_read`](web_transport_trait::poll::RecvStream::poll_read), with
-	/// the credit for the bytes read moved into `held` instead of returned to
-	/// the peer.
-	fn poll_read_into(
-		&mut self,
-		cx: &mut Context<'_>,
-		dst: &mut [u8],
-		held: Option<&mut moq_quic::Credit>,
-	) -> Poll<Result<Option<usize>, Error>> {
-		let Some(chunk) = ready!(self.poll_chunk(cx, dst.len(), held))? else {
+	/// Rank this stream for eviction: when the connection window is stuck,
+	/// the stream with the lowest priority goes first, and the newest of
+	/// those that tie.
+	pub fn set_priority(&mut self, priority: i64) {
+		self.shared
+			.conn
+			.borrow_mut()
+			.recv_stream(self.id)
+			.set_priority(priority);
+	}
+
+	/// [`poll_read`](web_transport_trait::poll::RecvStream::poll_read).
+	fn poll_read_into(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Error>> {
+		let Some(chunk) = ready!(self.poll_chunk(cx, dst.len()))? else {
 			return Poll::Ready(Ok(None));
 		};
 		dst[..chunk.len()].copy_from_slice(&chunk);
 		Poll::Ready(Ok(Some(chunk.len())))
 	}
 
-	/// [`poll_read_chunk`](web_transport_trait::poll::RecvStream::poll_read_chunk),
-	/// with the credit for the bytes read moved into `held` instead of
-	/// returned to the peer.
-	fn poll_chunk(
-		&mut self,
-		cx: &mut Context<'_>,
-		max: usize,
-		held: Option<&mut moq_quic::Credit>,
-	) -> Poll<Result<Option<Bytes>, Error>> {
+	/// [`poll_read_chunk`](web_transport_trait::poll::RecvStream::poll_read_chunk).
+	fn poll_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Error>> {
 		let waiter = self.park.hold(cx);
 		if max == 0 {
 			return Poll::Ready(Ok(Some(Bytes::new())));
 		}
-		if !self.backlog.is_empty() {
-			return Poll::Ready(Ok(Some(self.drain(max, held))));
-		}
 		if self.finished {
 			return Poll::Ready(Ok(None));
 		}
-		match Self::read(&self.shared, self.id, max, held) {
+		match Self::read(&self.shared, self.id, max) {
 			// moq-quic hands out at most `max`.
 			Read::Chunk(bytes) => Poll::Ready(Ok(Some(bytes))),
 			Read::Finished => {
@@ -347,8 +367,6 @@ impl RecvStream {
 	/// [`stop`](web_transport_trait::poll::RecvStream::stop) with a
 	/// full-width code, for the WebTransport HTTP/3 error mapping.
 	pub(crate) fn stop_code(&mut self, code: u64) {
-		release(&self.shared, std::mem::take(&mut self.backlog_credit));
-		self.backlog.clear();
 		if self.stopped || self.finished {
 			return;
 		}
@@ -366,12 +384,12 @@ impl RecvStream {
 	/// Take up to `max` bytes out of moq-quic's reassembly buffer.
 	///
 	/// Reading is what returns the peer's flow control credit, so a read that
-	/// owes it a frame kicks the driver. The connection credit for the bytes
-	/// read moves into `held` instead, when given.
+	/// owes it a frame kicks the driver. A `max` of 0 takes nothing, and still
+	/// reports the FIN or a reset once nothing is left before it.
 	///
 	/// Takes the shared state rather than `&mut self` so a caller can hold a
 	/// waiter from `self.park` across the read.
-	fn read(shared: &Shared, id: StreamId, max: usize, held: Option<&mut moq_quic::Credit>) -> Read {
+	fn read(shared: &Shared, id: StreamId, max: usize) -> Read {
 		let mut conn = shared.conn.borrow_mut();
 		let mut recv = conn.recv_stream(id);
 		let mut chunks = match recv.read(true) {
@@ -385,9 +403,6 @@ impl RecvStream {
 			Err(moq_quic::ReadError::Blocked) => Read::Blocked,
 			Err(moq_quic::ReadError::Reset(code)) => Read::Reset(code.into_inner()),
 		};
-		if let Some(held) = held {
-			held.merge(chunks.hold());
-		}
 		let transmit = chunks.finalize().should_transmit();
 		drop(conn);
 		if transmit {
@@ -395,40 +410,20 @@ impl RecvStream {
 		}
 		read
 	}
-
-	/// Take up to `max` read-ahead bytes out of the backlog, with their credit
-	/// moved into `held` or else returned to the peer.
-	///
-	/// Wakes a `poll_closed` parked at the read-ahead cap: the room it was
-	/// waiting for is what this just made.
-	fn drain(&mut self, max: usize, held: Option<&mut moq_quic::Credit>) -> Bytes {
-		let chunk = self.backlog.split_to(max.min(self.backlog.len())).freeze();
-		let credit = self.backlog_credit.split(chunk.len() as u64);
-		match held {
-			Some(held) => held.merge(credit),
-			None => release(&self.shared, credit),
-		}
-		if !chunk.is_empty() {
-			self.shared.wake_readable(self.id);
-		}
-		chunk
-	}
 }
 
 impl web_transport_trait::poll::RecvStream for RecvStream {
 	type Error = Error;
 
 	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
-		self.poll_read_into(cx, dst, None)
+		self.poll_read_into(cx, dst)
 	}
 
 	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
-		self.poll_chunk(cx, max, None)
+		self.poll_chunk(cx, max)
 	}
 
 	fn stop(&mut self, code: u32) {
-		// Giving up on the read side abandons whatever was read ahead, even
-		// when the FIN is already in and only the backlog is left.
 		self.stop_code(u64::from(code));
 	}
 
@@ -437,36 +432,20 @@ impl web_transport_trait::poll::RecvStream for RecvStream {
 		if self.finished || self.stopped {
 			return Poll::Ready(Ok(()));
 		}
-		// The FIN sits behind whatever the peer sent before it, and moq-quic only
-		// reports the stream finished once that is read out. Waiting on
-		// readability alone would park behind bytes nobody is reading, so read
-		// ahead into the backlog `poll_read` serves first: this watch resolves
-		// without the application draining the stream, and without losing what
-		// it might still want.
-		loop {
-			if self.backlog.len() >= READ_AHEAD {
-				// Enough held: reading further would let the peer send more
-				// still, so the memory bound wins over watch liveness here.
-				// `drain` wakes this once the application takes some, and a
-				// stream nobody reads past the cap keeps its watch pending
-				// until the connection's idle timeout.
-				self.shared.park_readable(self.id, waiter);
-				return Poll::Pending;
+		// An empty read observes the end without taking the bytes before it, so
+		// the stream closes once those are read.
+		match Self::read(&self.shared, self.id, 0) {
+			Read::Finished => {
+				self.finished = true;
+				Poll::Ready(Ok(()))
 			}
-			match Self::read(&self.shared, self.id, READ_CHUNK, Some(&mut self.backlog_credit)) {
-				Read::Chunk(bytes) => self.backlog.extend_from_slice(&bytes),
-				Read::Finished => {
-					self.finished = true;
-					return Poll::Ready(Ok(()));
+			Read::Reset(code) => Poll::Ready(Err(Error::Reset(code))),
+			Read::Chunk(_) | Read::Blocked => {
+				if let Some(err) = self.shared.closed() {
+					return Poll::Ready(Err(err));
 				}
-				Read::Blocked => {
-					if let Some(err) = self.shared.closed() {
-						return Poll::Ready(Err(err));
-					}
-					self.shared.park_readable(self.id, waiter);
-					return Poll::Pending;
-				}
-				Read::Reset(code) => return Poll::Ready(Err(Error::Reset(code))),
+				self.shared.park_readable(self.id, waiter);
+				Poll::Pending
 			}
 		}
 	}
@@ -474,7 +453,6 @@ impl web_transport_trait::poll::RecvStream for RecvStream {
 
 impl Drop for RecvStream {
 	fn drop(&mut self) {
-		release(&self.shared, std::mem::take(&mut self.backlog_credit));
 		self.shared.forget_recv(self.id);
 		if !self.finished && !self.stopped {
 			let _ = self
@@ -494,69 +472,66 @@ impl std::fmt::Debug for RecvStream {
 	}
 }
 
-/// Return `credit` to the peer, kicking the driver if the peer should hear.
-fn release(shared: &Shared, credit: moq_quic::Credit) {
-	if credit.is_empty() {
-		return;
-	}
-	if shared.conn.borrow_mut().release(credit).should_transmit() {
-		shared.kick();
-	}
-}
-
-/// Connection flow control credit for bytes read with
-/// [`RecvStream::poll_read_held`].
+/// Unreleased bytes borrowed from a [`RecvStream`] by [`RecvStream::poll_lease`],
+/// read as a [`Buf`].
 ///
-/// The peer cannot reuse the connection window these bytes occupy until this
-/// is dropped, which returns it even after the stream or connection is gone.
-pub struct Credit {
-	shared: Shared,
-	inner: moq_quic::Credit,
+/// Borrows the connection for as long as it lives.
+pub struct Lease<'a> {
+	conn: RefMut<'a, moq_quic::Connection>,
+	shared: &'a Shared,
+	id: StreamId,
 }
 
-impl Credit {
-	/// The number of bytes this credit covers.
-	pub fn len(&self) -> u64 {
-		self.inner.len()
+impl Lease<'_> {
+	fn leased(&self) -> &moq_quic::Leased {
+		self.conn.leased(self.id).expect("a lease outlives nothing it borrows")
 	}
 
-	/// Whether this credit covers no bytes.
-	pub fn is_empty(&self) -> bool {
-		self.inner.is_empty()
+	/// Whether the peer finished the stream right after the leased bytes.
+	pub fn is_fin(&self) -> bool {
+		self.leased().is_fin()
 	}
 
-	/// Split off the credit for the first `bytes`, keeping the rest.
-	///
-	/// # Panics
-	/// If `bytes` exceeds [`Self::len()`].
-	pub fn split(&mut self, bytes: u64) -> Self {
-		Self {
-			shared: self.shared.clone(),
-			inner: self.inner.split(bytes),
+	/// The bytes not yet read, in order, one contiguous chunk at a time.
+	pub fn chunks(&self) -> impl Iterator<Item = &[u8]> {
+		self.leased().chunks()
+	}
+
+	/// Return the credit of every byte read so far, by this lease or an
+	/// earlier one.
+	pub fn release(self) {
+		let Self { mut conn, shared, id } = self;
+		let transmit = conn.recv_stream(id).release().should_transmit();
+		drop(conn);
+		if transmit {
+			shared.kick();
 		}
 	}
-
-	/// Take over the bytes covered by `other`.
-	///
-	/// # Panics
-	/// If `other` came from another connection.
-	pub fn merge(&mut self, mut other: Self) {
-		assert!(
-			std::rc::Rc::ptr_eq(&self.shared, &other.shared),
-			"merged credit from another connection"
-		);
-		self.inner.merge(std::mem::take(&mut other.inner));
-	}
 }
 
-impl Drop for Credit {
-	fn drop(&mut self) {
-		release(&self.shared, std::mem::take(&mut self.inner));
+/// Reading moves past bytes for good, but they keep their credit until
+/// [`Lease::release`].
+impl Buf for Lease<'_> {
+	fn remaining(&self) -> usize {
+		self.leased().len()
 	}
-}
 
-impl std::fmt::Debug for Credit {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		f.debug_struct("Credit").field("len", &self.len()).finish()
+	fn chunk(&self) -> &[u8] {
+		self.leased().chunks().next().unwrap_or_default()
+	}
+
+	fn advance(&mut self, n: usize) {
+		self.conn.recv_stream(self.id).advance(n);
+	}
+
+	fn copy_to_bytes(&mut self, n: usize) -> Bytes {
+		match n <= self.chunk().len() {
+			true => self.conn.recv_stream(self.id).take(n),
+			false => {
+				let mut bytes = BytesMut::with_capacity(n);
+				bytes.put((&mut *self).take(n));
+				bytes.freeze()
+			}
+		}
 	}
 }

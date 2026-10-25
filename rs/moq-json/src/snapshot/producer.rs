@@ -8,6 +8,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use super::{Encoded, Encoder};
+use crate::refresh::Refresh;
 use moq_net::Timed;
 
 use crate::{Error, Result};
@@ -28,6 +29,10 @@ fn take<T>(inner: &Mutex<Inner<T>>) -> MutexGuard<'_, Inner<T>> {
 /// An [`Encoder`] that owns its track: it writes each encoded frame and rolls a group whenever the
 /// encoder emits a snapshot. When something else already owns the track, use the [`Encoder`]
 /// directly.
+///
+/// A group runs until a joiner wants a fresh one, which [`refresh`](Self::refresh) answers, or until
+/// it reaches the encoder's caps. Set the track's [`refresh`](moq_net::track::Info::refresh) ratio
+/// when creating it, or joins never ask.
 ///
 /// Cheaply clonable: clones share one underlying track and publishing state, like other MoQ
 /// producers.
@@ -64,16 +69,38 @@ impl<T: Serialize> Producer<T> {
 	pub fn new(track: moq_net::track::Producer, config: Config) -> Self {
 		Self {
 			inner: Arc::new(Mutex::new(Inner {
+				refresh: Refresh::new(&track),
 				track: Track {
 					inner: track,
 					group: None,
-					deltas: config.delta_ratio != 0,
+					largest: None,
+					deltas: config.deltas,
 				},
 				encoder: Encoder::new(config),
+				at: None,
 				aborted: None,
 			})),
 			_marker: PhantomData,
 		}
+	}
+
+	/// Wait for a joiner to want a fresh group, then restate the current value as a snapshot in one.
+	///
+	/// A join wants one once the open group's deltas outweigh the track's
+	/// [`refresh`](moq_net::track::Info::refresh) ratio times its snapshot (see
+	/// [`Demand::wanted`](moq_net::track::Demand::wanted)). It is a soft trigger: that joiner still
+	/// reads the cached group, then the new one. The snapshot carries the newest timestamp written, so the new group never starts before the last.
+	/// Nothing happens before the first update, or on a track without a ratio.
+	///
+	/// The producer has no runtime of its own, so the owner drives this: loop on it, or select on it
+	/// beside the updates. Errors once the track is closed.
+	pub async fn refresh(&self) -> Result<()> {
+		kio::wait(|waiter| self.poll_refresh(waiter)).await
+	}
+
+	/// Poll for [`refresh`](Self::refresh), for an owner driving the producer synchronously.
+	pub fn poll_refresh(&self, waiter: &kio::Waiter) -> std::task::Poll<Result<()>> {
+		take(&self.inner).poll_refresh(waiter)
 	}
 
 	/// Publish a new value, emitting a snapshot or a delta automatically.
@@ -95,9 +122,9 @@ impl<T: Serialize> Producer<T> {
 	///
 	/// ```no_run
 	/// # fn example(producer: &mut moq_json::snapshot::Producer<serde_json::Value>) -> moq_json::Result<()> {
-	/// producer.mutate(None, |catalog| {
+	/// producer.mutate(|catalog| {
 	///     catalog["scte35"] = serde_json::json!({ "id": 1 });
-	/// })
+	/// }, None)
 	/// # }
 	/// ```
 	///
@@ -105,7 +132,7 @@ impl<T: Serialize> Producer<T> {
 	/// from the latest value, so their sections compose instead of clobbering one another. This is
 	/// [`modify`](Self::modify) opened and committed for you; take the guard to hold the lock across
 	/// several edits, and [`update`](Self::update) to replace the whole value.
-	pub fn mutate(&mut self, at: Option<moq_net::Timestamp>, f: impl FnOnce(&mut T)) -> Result<()>
+	pub fn mutate(&mut self, f: impl FnOnce(&mut T), at: Option<moq_net::Timestamp>) -> Result<()>
 	where
 		T: Default + DeserializeOwned,
 	{
@@ -120,12 +147,10 @@ impl<T: Serialize> Producer<T> {
 	/// so far, composed, or `T::default()` if nothing has been. Editing it through [`DerefMut`] marks
 	/// the guard dirty; when a dirty guard drops it publishes the result, a no-op if unchanged.
 	///
-	/// After a rejected frame the current value is what the producer last *tried* to publish, which
-	/// consumers never received. That is deliberate. The guard exists so independent owners can each
-	/// edit their own field without clobbering, and dropping a rejected owner's field would clobber it
-	/// for whoever edits next, which is the failure this API exists to prevent. The owner whose write
-	/// failed sees the error and can act on it; the next successful publish is a full snapshot
-	/// carrying the composed value, so consumers converge on it either way.
+	/// A rejected edit never reached the wire, so the current value stays the last one that did. The
+	/// owner whose write failed sees the error and can retry; carrying the rejected edit forward would
+	/// instead fail every later owner's publish the same way, or publish a value its owner was told
+	/// failed.
 	///
 	/// Reach for this over [`mutate`](Self::mutate) when several edits belong to one publish. The
 	/// guard holds the producer's lock for its lifetime, so independent owners are serialized: each
@@ -164,7 +189,7 @@ impl<T: Serialize> Producer<T> {
 
 	/// Finish the open group, so the deltas already written stop being provisional.
 	///
-	/// No replacement group opens until the next [`update`](Self::update), which emits a full
+	/// No replacement group opens until the next [`update`](Self::update) or [`refresh`](Self::refresh), which emits a full
 	/// snapshot as its first frame even when the value is unchanged. A consumer joining at that group
 	/// therefore reads the whole value without the deltas that preceded it.
 	///
@@ -270,6 +295,13 @@ struct Inner<T> {
 	track: Track,
 	encoder: Encoder<T>,
 
+	/// Watches for a joiner wanting a group past the largest written.
+	refresh: Refresh,
+
+	/// The newest timestamp written, which a refresh restates the value at. An update may carry an
+	/// older timestamp than its group's first frame, and a new group may not start before that one.
+	at: Option<moq_net::Timestamp>,
+
 	/// Why this producer aborted the track, so [`Producer::modify`] can report the cause rather than
 	/// the closed track it left behind.
 	aborted: Option<Error>,
@@ -286,10 +318,7 @@ impl<T> Inner<T> {
 		// admits the groups below it. The largest counts every group, even an empty one, so the
 		// next group is the one after it.
 		let track = &self.track.inner;
-		let next = match track.clone().poll_largest(&moq_net::kio::Waiter::noop()) {
-			std::task::Poll::Ready(Some(largest)) => largest.group.saturating_add(1),
-			_ => 0,
-		};
+		let next = track.largest().map_or(0, |largest| largest.group.saturating_add(1));
 		if track.is_closed()
 			|| track
 				.end()
@@ -340,12 +369,29 @@ impl<T: Serialize> Inner<T> {
 		// A failed write drops `frame` uncommitted, which resets the encoder so the next update
 		// resynchronizes with a fresh snapshot. Most failures kill the track outright, but a rejected
 		// frame (too large) doesn't, and a delta against a snapshot no consumer ever saw is unreadable.
+		// The value stays the last one written, so a refresh restates that rather than the rejection.
 		let timestamp = payload.at;
 		track.write(timestamp, &frame)?;
 		let size = frame.payload.len();
 		frame.commit();
+		self.at = self.at.max(timestamp);
 
 		Ok(Some(size))
+	}
+
+	fn poll_refresh(&mut self, waiter: &kio::Waiter) -> std::task::Poll<Result<()>> {
+		// A finished track still has subscribers draining it, so its demand alone never says stop.
+		self.open()?;
+		std::task::ready!(self.refresh.poll(self.track.largest, waiter))?;
+
+		let Inner { track, encoder, at, .. } = self;
+		// A group was written, so a value was encoded and there is one to restate.
+		let Some(frame) = encoder.snapshot()? else {
+			return std::task::Poll::Pending;
+		};
+		track.write(*at, &frame)?;
+		frame.commit();
+		std::task::Poll::Ready(Ok(()))
 	}
 
 	fn finish(&mut self) -> Result<()> {
@@ -363,6 +409,9 @@ struct Track {
 
 	/// The group a delta would be appended to, open only while deltas are enabled.
 	group: Option<moq_net::group::Producer>,
+
+	/// The sequence of the newest group written, which a refresh has to pass.
+	largest: Option<u64>,
 
 	/// Whether the encoder can emit deltas at all. With them off every frame is a snapshot, so a
 	/// group is closed the moment it's written and never held open.
@@ -406,6 +455,7 @@ impl Track {
 		}
 
 		let mut group = self.inner.append_group()?;
+		self.largest = Some(group.sequence);
 		if let Err(err) = group.write_frame(timestamp, payload) {
 			// `append_group` already published this group, and a rejected frame (too large) doesn't
 			// close the track. Dropping the handle does NOT close the group, so leaving it would strand

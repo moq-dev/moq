@@ -1,6 +1,6 @@
 /** Retain raw backend samples; correctness fails, timing variability is reported. */
 import { createHash } from "node:crypto";
-import { readdir } from "node:fs/promises";
+import { appendFile, readdir } from "node:fs/promises";
 import { cpus, freemem, loadavg, platform, totalmem } from "node:os";
 import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
@@ -189,8 +189,24 @@ try {
 } finally {
 	await browser.close();
 	server.stop(true);
-	report.summary = summaries();
+	const measured = summaries();
+	report.summary = measured;
 	await Bun.write(output, JSON.stringify(report, null, 2));
+	if (process.env.GITHUB_STEP_SUMMARY) {
+		const lines = [
+			"## Browser backend baseline",
+			"",
+			"Medians across rounds; milliseconds. CPU and elapsed time measure different work.",
+			"",
+			"| Workload | Rounds | Module | First frame | CPU/frame | Elapsed |",
+			"| --- | ---: | ---: | ---: | ---: | ---: |",
+			...measured.map(
+				(row) =>
+					`| ${JSON.stringify(row.workload).replaceAll("|", "\\|")} | ${row.rounds} | ${row.startup.module_ms.median.toFixed(2)} | ${row.startup.first_frame_ms.median.toFixed(2)} | ${row.cpu.per_frame_ms.median.toFixed(2)} | ${row.frames.elapsed_ms.median.toFixed(2)} |`,
+			),
+		];
+		await appendFile(process.env.GITHUB_STEP_SUMMARY, `${lines.join("\n")}\n`);
+	}
 }
 console.log(`Retained ${report.samples.length} raw backend samples: ${output}`);
 

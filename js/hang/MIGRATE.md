@@ -4,6 +4,24 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Timeline records describe one track
+
+`Timeline.Range` is replaced by `Position { group, frame? }`; a record has inclusive `start` and exclusive `end` positions for its own track instead of a `tracks` map of group ranges.
+`Record.segment` is `sequence`, and `pts` / `duration` are absent for untimed records.
+`Timeline.DEFAULT_NAME` is replaced by `SUFFIX`; name each media track's timeline separately and advertise it in `archive.timelines`.
+
+### Container reads are a tagged union
+
+`Container.Consumer.next()` returns a `Container.Read` union instead of an object with optional `frame` and continuity counters.
+Switch on `kind`: `frame` carries `frame` and `group`, `gap` carries `timestamp` and `duration`, and `end` carries `group` and `end`.
+Reset decoder state on `gap`, and process `end` as the declared media end rather than testing `continuous` or `discontinuity`.
+
+### CMAF decoding is a separate module
+
+Replace `Container.Cmaf` with `import * as Cmaf from "@moq/hang/cmaf"`.
+Its `Format`, `decodeInitSegment`, and `decodeDataSegment` remain synchronous.
+The CMAF encoder (`createVideoInitSegment`, `createAudioInitSegment`, and `encodeDataSegment`) is removed; Hang publishers write Legacy or LOC instead.
+
 ### A container decode error rejects `Consumer.next()` (#5942)
 
 A payload the format fails to decode, or a data track's marker sharing its group, now rejects `Container.Consumer.next()` with that error and ends the reader.
@@ -17,10 +35,8 @@ Rename an extension field that was called `version`.
 
 ### Archive timelines declare a per-track duration (#5715)
 
-Each `archive.timelines` value is `{ track, duration }` instead of the timeline track's name, and `archive.durationMax` is removed.
-`duration` is the nominal record duration in the archive timescale, absent for an untimed track.
-Read the track name from the value's `track`, and use the per-track `duration` instead of `durationMax`.
-A catalog on the other side of this change parses with no `archive`; see the [upgrade guide](https://github.com/moq-dev/moq/blob/main/doc/setup/upgrade.md).
+`archive.track` becomes `archive.timelines`, keyed by each media track name. Each value is `{ track, duration }`, naming that media track's timeline and nominal duration, absent when untimed.
+Replace the shared `durationMax` with each track's `duration`. The archive version is 3 rather than 1; update publishers and consumers together.
 
 ### Timeline records are optionally timed (#5720)
 

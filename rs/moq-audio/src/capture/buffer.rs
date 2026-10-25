@@ -89,6 +89,10 @@ fn relay(mut pending: HeapCons<Filled>, tx: mpsc::Sender<Filled>) {
 		if !pending.write_is_held() {
 			return;
 		}
+		#[expect(
+			clippy::disallowed_methods,
+			reason = "the device thread runs outside any runtime, so it blocks on the host clock"
+		)]
 		std::thread::sleep(RELAY_POLL_INTERVAL);
 	}
 }

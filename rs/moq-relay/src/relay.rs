@@ -81,7 +81,9 @@ pub struct Relay {
 	internal: internal::Internal,
 	web: web::Web,
 	/// The ACME client, issuing before [`Self::run`] serves and renewing after.
+	#[cfg(feature = "acme")]
 	acme: Option<crate::acme::Acme>,
+	#[cfg(feature = "stun")]
 	stun: Option<crate::stun::Server>,
 	addr: Option<std::net::SocketAddr>,
 	shutdown: shutdown::Observer,
@@ -101,7 +103,7 @@ pub struct Relay {
 	#[cfg(feature = "_quic")]
 	workers: Option<moq_tokio::worker::Workers>,
 	/// The io_uring QUIC workers, already bound and waiting for
-	/// [`serve`](crate::uring::Workers::serve). `None` unless both
+	/// [`serve`](crate::uring::Spawned::serve). `None` unless both
 	/// `runtime.workers` and `runtime.io_uring` are configured, in which case
 	/// they own the QUIC listen address instead of `workers`.
 	#[cfg(all(target_os = "linux", feature = "_uring"))]
@@ -127,11 +129,17 @@ impl Relay {
 		// another relay. Only negotiated when both sides offer it, so other peers never see it.
 		config.listen.extensions.ietf = true;
 		config.connect.extensions.ietf = true;
+		// Name the relay ahead of its core unless the operator overrides it (empty omits it),
+		// and dial cluster peers under the same name.
+		let implementation = config
+			.listen
+			.implementation
+			.get_or_insert_with(|| format!("moq-relay/{} {}", env!("CARGO_PKG_VERSION"), moq_net::IMPLEMENTATION))
+			.clone();
+		config.connect.implementation = Some(implementation.clone());
 		// Every TLS listener serves the ACME certificate, so install it before any is built.
+		#[cfg(feature = "acme")]
 		let acme = config.acme.init(&config.listen.tls, &config.web.https)?;
-		if let Some(acme) = &acme {
-			config.listen.tls.resolver = Some(acme.resolver());
-		}
 		let resolved_config = config.clone();
 		let drain_timeout = config.drain_timeout();
 		// The name this relay reports in every auth request: the stats node label,
@@ -191,7 +199,17 @@ impl Relay {
 
 		// Workers and the stream server split one relay across listeners, so they share
 		// one loaded identity. A lone server loads its own, only if a listener needs it.
-		let served = config.runtime.workers().map(|_| config.listen.tls.load()).transpose()?;
+		#[cfg(feature = "acme")]
+		let resolved = acme
+			.as_ref()
+			.map(|acme| moq_tokio::tls::Serve::resolver(acme.resolver(), &config.listen.tls))
+			.transpose()?;
+		#[cfg(not(feature = "acme"))]
+		let resolved = None;
+		let served = match resolved {
+			Some(served) => Some(served),
+			None => config.runtime.workers().map(|_| config.listen.tls.load()).transpose()?,
+		};
 		let mut listen = config.listen.clone();
 		if served.is_some() {
 			listen.tls = Default::default();
@@ -241,7 +259,6 @@ impl Relay {
 		#[cfg(feature = "iroh")]
 		let iroh = config.iroh.bind(&config.quic).await?;
 
-		#[allow(unused_mut)]
 		let mut server_config = moq_tokio::server::Config::default();
 		server_config.listen = listen;
 		server_config.tls = served;
@@ -289,10 +306,9 @@ impl Relay {
 			advertise = advertise.with_fingerprint(fingerprint);
 		}
 		let mut cluster_options = cluster::Options::new(config.cluster).with_cache(cache);
-		cluster_options.session = config.session;
-		cluster_options.peer = config.peer;
+		cluster_options.session = config.limits.client;
+		cluster_options.peer = config.limits.peer;
 		let cluster = cluster::Cluster::new(cluster_options)?
-			.with_client_tls(config.connect.tls.build()?)
 			.with_connect(config.connect.clone(), config.quic.clone())
 			.with_advertise(advertise);
 		#[cfg(feature = "iroh")]
@@ -300,7 +316,7 @@ impl Relay {
 			Some(iroh) => cluster.with_iroh(iroh),
 			None => cluster,
 		};
-		let stats = config.stats.build(cluster.origin.clone());
+		let stats = config.stats.build(cluster.origin.clone())?;
 		// The cluster takes over keeping the publish task alive, so an embedder that
 		// drops the producer keeps publishing for as long as it serves.
 		let cluster = cluster.with_stats(stats.clone());
@@ -308,18 +324,21 @@ impl Relay {
 		let sessions = crate::session::Registry::new();
 		let (ready, _) = tokio::sync::watch::channel(false);
 		let web = web::Web::new(auth.clone(), cluster.clone(), certificates, config.web)
-			.with_acme(acme.as_ref().map(crate::acme::Acme::resolver))
 			.with_shutdown(shutdown.clone())
 			.with_versions(server_versions)
 			.with_extensions(server_extensions)
+			.with_implementation(implementation)
 			.with_timeout(handshake_timeout)
-			.with_sessions(sessions.clone())
-			.bind()?;
+			.with_sessions(sessions.clone());
+		#[cfg(feature = "acme")]
+		let web = web.with_acme(acme.as_ref().map(crate::acme::Acme::resolver));
+		let web = web.bind()?;
 		// `bind`, not `listen`: the TCP/Unix accept loops handshake as soon as
 		// they run, and `load` is not yet willing to take a session. `run`
 		// starts them on its first accept.
 		let server = server.bind().await.context("failed to bind listeners")?;
 
+		#[cfg(feature = "stun")]
 		let stun = crate::stun::Server::bind(config.stun).await?;
 
 		// Internal (ops) listener (plain HTTP, opt-in via `--internal-listen`) for
@@ -335,6 +354,7 @@ impl Relay {
 			.with_listeners(web.accept_health())
 			.with_listeners(server.accept_health())
 			.bind()?;
+		#[cfg(feature = "stun")]
 		let internal = internal.with_stun(stun.as_ref().map(|stun| stun.counters.clone()));
 		// Bound but not yet serving: registering here (rather than after the
 		// threads start) is what gives every worker a series from the first
@@ -362,7 +382,9 @@ impl Relay {
 			stats,
 			internal,
 			web,
+			#[cfg(feature = "acme")]
 			acme,
+			#[cfg(feature = "stun")]
 			stun,
 			addr,
 			shutdown,
@@ -538,7 +560,9 @@ impl Relay {
 			cluster,
 			internal,
 			web,
+			#[cfg(feature = "acme")]
 			acme,
+			#[cfg(feature = "stun")]
 			stun,
 			shutdown,
 			shutdown_trigger,
@@ -567,6 +591,7 @@ impl Relay {
 
 		// Nothing else serves or reports ready until the certificate exists: a
 		// self-signed placeholder would only fail every browser that connects.
+		#[cfg(feature = "acme")]
 		if let Some(mut acme) = acme {
 			let listener = web.https_listener().context("ACME needs the HTTPS listener")?;
 			// Issuance can take minutes, and as a container's PID 1 the relay
@@ -594,13 +619,13 @@ impl Relay {
 		// identity rustls will not load fails here, and reporting ready first would
 		// release the units depending on a relay that is about to exit.
 		#[cfg(all(target_os = "linux", feature = "_uring"))]
-		let mut uring = uring;
-		#[cfg(all(target_os = "linux", feature = "_uring"))]
-		if let Some(uring) = uring.as_mut() {
-			uring
-				.spawn(cluster.clone(), auth.clone(), shutdown.clone(), sessions.clone())
-				.context("failed to start the io_uring QUIC workers")?;
-		}
+		let mut uring = uring
+			.map(|uring| {
+				uring
+					.spawn(cluster.clone(), auth.clone(), shutdown.clone(), sessions.clone())
+					.context("failed to start the io_uring QUIC workers")
+			})
+			.transpose()?;
 
 		// Without ACME, after the last step that can fail, since a handler outlives a
 		// failed `run`, and before anything accepts a session a signal would kill
@@ -725,10 +750,13 @@ impl Relay {
 		};
 
 		let stun = async move {
+			#[cfg(feature = "stun")]
 			match stun {
 				Some(stun) => stun.run().await,
 				None => std::future::pending().await,
 			}
+			#[cfg(not(feature = "stun"))]
+			std::future::pending::<anyhow::Result<()>>().await
 		};
 		let result = tokio::select! {
 			Err(err) = started.run() => Err(err).context("cluster failed"),
@@ -840,7 +868,9 @@ async fn serve_listening(
 }
 
 #[cfg(test)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
+	#[cfg(feature = "stun")]
 	#[tokio::test]
 	async fn stun_listener_runs_with_the_relay_and_stops_with_it() {
 		use stun_types::message::{BINDING, Message, MessageWriteVec};
@@ -890,6 +920,7 @@ mod tests {
 	/// exits at once rather than starting the drain again.
 	#[cfg(unix)]
 	#[tokio::test(start_paused = true)]
+	#[expect(clippy::disallowed_types, reason = "tests read the host clock directly")]
 	async fn a_signal_after_an_early_trigger_exits_at_once() {
 		let _signals = crate::shutdown::SIGNALS.lock().await;
 		// Either arm is ready, so an unbiased wait would pass some runs.

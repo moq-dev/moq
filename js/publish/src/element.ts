@@ -25,7 +25,17 @@ function parseUrl(value: string | null): URL | undefined {
 	}
 }
 
-const OBSERVED = ["url", "name", "muted", "invisible", "source", "preview", "backend", "announce", "linger"] as const;
+// Parse the `versions` attribute: a comma-separated list, or the defaults when absent or empty.
+// The connection checks the names and reports an unsupported one on `connection.error`.
+function parseVersions(value: string | null): string[] | undefined {
+	const versions = value
+		?.split(",")
+		.map((version) => version.trim())
+		.filter((version) => version !== "");
+	return versions?.length ? versions : undefined;
+}
+
+const OBSERVED = ["url", "versions", "name", "muted", "invisible", "source", "preview", "backend", "announce"] as const;
 type Observed = (typeof OBSERVED)[number];
 
 /** The built-in capture sources selectable via the `source` attribute. */
@@ -76,8 +86,9 @@ function parsePreview(value: string | null): Preview.Mode {
 }
 
 function parseBackend(value: string | null): Preview.Backend {
-	if (value === null) return "auto";
-	if (value === "auto" || value === "webgpu" || value === "2d") return value;
+	const trimmed = value?.trim();
+	if (!trimmed) return "auto";
+	if (trimmed === "auto" || trimmed === "webgpu" || trimmed === "2d") return trimmed;
 	console.warn(`moq-publish: invalid backend="${value}", expected "auto", "webgpu", or "2d"`);
 	return "auto";
 }
@@ -106,8 +117,6 @@ export default class MoqPublish extends HTMLElement {
 		backend: new Signal<Preview.Backend>("auto"),
 		// When to advertise the broadcast: always, never, or only once a source is live.
 		announce: new Signal<AnnounceMode>("source"),
-		// Whether advertising stopping finishes the broadcast, serving its tail until stale.
-		linger: new Signal(false),
 	};
 
 	/**
@@ -211,7 +220,6 @@ export default class MoqPublish extends HTMLElement {
 			origin: this.connection.origin,
 			enabled: this.#enabled,
 			announce: this.#announcing,
-			linger: this.controls.linger,
 			name: this.#name,
 			display: this.#capture.out.display,
 			flip: this.#flip,
@@ -273,7 +281,8 @@ export default class MoqPublish extends HTMLElement {
 				// A canvas that lost its GPU never hands out another context, so swap in a fresh copy.
 				// The observer above picks it up and this effect builds a renderer for it.
 				effect.run((inner) => {
-					if (inner.get(renderer.out.error) === "surface-lost") preview.replaceWith(preview.cloneNode());
+					if (inner.get(renderer.out.error)?.name === "InvalidStateError")
+						preview.replaceWith(preview.cloneNode());
 				});
 				return;
 			}
@@ -330,14 +339,14 @@ export default class MoqPublish extends HTMLElement {
 
 		if (name === "url") {
 			this.connection.url.set(parseUrl(newValue));
+		} else if (name === "versions") {
+			this.connection.versions.set(parseVersions(newValue));
 		} else if (name === "name") {
 			this.#name.set(Moq.Path.from(newValue ?? ""));
 		} else if (name === "source") {
 			this.controls.source.set(parseSource(newValue));
 		} else if (name === "announce") {
 			this.controls.announce.set(parseAnnounce(newValue));
-		} else if (name === "linger") {
-			this.controls.linger.set(parseBoolean(newValue, false));
 		} else if (name === "muted") {
 			this.controls.muted.set(parseBoolean(newValue, false));
 		} else if (name === "invisible") {
@@ -448,6 +457,15 @@ export default class MoqPublish extends HTMLElement {
 		this.connection.url.set(value ? new URL(value) : undefined);
 	}
 
+	/** The protocol versions to offer, most preferred first; undefined offers the defaults. */
+	get versions(): readonly string[] | undefined {
+		return this.connection.versions.peek();
+	}
+
+	set versions(value: readonly string[] | undefined) {
+		this.connection.versions.set(value);
+	}
+
 	/** The broadcast name, mirrored by the `name` attribute. */
 	get name(): Moq.Path.Valid {
 		return this.#name.peek();
@@ -509,15 +527,6 @@ export default class MoqPublish extends HTMLElement {
 
 	set announce(value: AnnounceMode) {
 		this.controls.announce.set(value);
-	}
-
-	/** Whether advertising stopping finishes the broadcast, keeping it up while its media is fresh. */
-	get linger(): boolean {
-		return this.controls.linger.peek();
-	}
-
-	set linger(value: boolean) {
-		this.controls.linger.set(value);
 	}
 }
 

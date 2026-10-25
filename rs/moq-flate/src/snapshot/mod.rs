@@ -124,7 +124,7 @@ mod test {
 	fn next_preserves_intermediate_states() {
 		let (mut producer, mut track) = producer(true);
 		let mut subscription = track.subscription();
-		subscription.max_delay = std::time::Duration::MAX;
+		subscription.max_delay = None;
 		track.update(subscription).unwrap();
 		for value in [b"one".as_slice(), b"two", b"three"] {
 			producer.update(value).unwrap();
@@ -267,18 +267,24 @@ mod test {
 
 	/// `append_group` publishes immediately, so rejecting the frame inside `write_frame` would leave
 	/// an empty newest group behind. A snapshot consumer jumps to the newest, so the previous value
-	/// would vanish even though the update reported an error.
+	/// would vanish even though the update reported an error. Compression doesn't lift the limit: a
+	/// value that inflates past the group budget is refused even though it deflates to a few KiB.
 	#[test]
 	fn a_rejected_update_leaves_the_previous_value_readable() {
-		let (mut producer, track) = producer(false);
-		producer.update(&b"keep"[..]).unwrap();
+		for compression in [false, true] {
+			let (mut producer, track) = producer(compression);
+			producer.update(&b"keep"[..]).unwrap();
 
-		let oversized = Bytes::from(vec![0u8; moq_net::group::MAX_CACHE_BYTES as usize + 1]);
-		assert!(producer.update(oversized).is_err());
-		producer.finish().unwrap();
+			let oversized = Bytes::from(vec![0u8; moq_net::group::MAX_CACHE_BYTES as usize + 1]);
+			assert!(matches!(
+				producer.update(oversized),
+				Err(crate::Error::Net(moq_net::Error::FrameTooLarge))
+			));
+			producer.finish().unwrap();
 
-		// A reader arriving now still finds the last good value, not an empty superseding group.
-		assert_eq!(drain(consume(track, false)), vec![Bytes::from_static(b"keep")]);
+			// A reader arriving now still finds the last good value, not an empty superseding group.
+			assert_eq!(drain(consume(track, compression)), vec![Bytes::from_static(b"keep")]);
+		}
 	}
 
 	/// `finish` closes the underlying track, so a later update fails rather than being silently

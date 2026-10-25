@@ -2,8 +2,9 @@ use std::collections::VecDeque;
 use std::net::{IpAddr, SocketAddr};
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use moq_clock::Instant;
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, IceConnectionState, Input, Output, Rtc};
 use stun_types::attribute::XorMappedAddress;
@@ -61,8 +62,10 @@ impl Error {
 /// What [`Agent::next`] surfaced.
 #[derive(Debug)]
 #[non_exhaustive]
-// Moved once per poll; boxing would allocate for every data channel message.
-#[allow(clippy::large_enum_variant)]
+#[expect(
+	clippy::large_enum_variant,
+	reason = "moved once per poll; boxing would allocate for every data channel message"
+)]
 pub enum Event {
 	/// An event from str0m. ICE disconnection is reported as [`Error::Closed`] instead.
 	Rtc(str0m::Event),
@@ -114,19 +117,13 @@ pub struct Agent {
 }
 
 impl Agent {
-	/// Drive `rtc` over `socket`, which must have a host candidate.
+	/// Drive `rtc` over `socket`.
 	pub fn new(rtc: Rtc, socket: Socket) -> std::io::Result<Self> {
 		let Socket {
 			udp: socket,
 			locals,
 			inbound,
 		} = socket;
-		if locals.is_empty() {
-			return Err(std::io::Error::new(
-				std::io::ErrorKind::InvalidInput,
-				"no host candidate to receive on",
-			));
-		}
 		let socket_v6 = socket.local_addr()?.is_ipv6();
 		let now = Instant::now();
 		let mut agent = Self {
@@ -253,12 +250,12 @@ impl Agent {
 						self.receive(&data, src);
 						continue;
 					}
-					_ = tokio::time::sleep(deadline - now) => {}
+					_ = moq_clock::sleep_until(deadline) => {}
 				}
 			}
 
 			let now = Instant::now();
-			let result = self.change().handle_input(Input::Timeout(now));
+			let result = self.change().handle_input(Input::Timeout(now.into_std()));
 			if let Err(err) = result {
 				self.fail(Error::rtc(err));
 			}
@@ -282,8 +279,9 @@ impl Agent {
 				Err(err) => return self.fail(Error::rtc(err)),
 			};
 			match output {
+				// str0m runs on std's clock.
 				Output::Timeout(timeout) => {
-					self.timeout = timeout;
+					self.timeout = Instant::from_std(timeout);
 					return;
 				}
 				Output::Transmit(transmit) => self.send(&transmit.contents, transmit.destination),
@@ -335,7 +333,9 @@ impl Agent {
 			tracing::debug!(%src, len = data.len(), "dropped unrecognized datagram");
 			return;
 		};
-		let result = self.change().handle_input(Input::Receive(Instant::now(), receive));
+		let result = self
+			.change()
+			.handle_input(Input::Receive(Instant::now().into_std(), receive));
 		if let Err(err) = result {
 			self.fail(Error::rtc(err));
 		}
@@ -475,12 +475,8 @@ mod tests {
 		let local = socket.local_addr().unwrap();
 		let inbound = crate::reader(socket.clone());
 		let wire = inbound.wire.clone();
-		let socket = Socket {
-			udp: socket,
-			locals: vec![local],
-			inbound,
-		};
-		let mut agent = Agent::new(Rtc::builder().build(Instant::now()), socket).unwrap();
+		let socket = Socket::new(socket, vec![local], inbound).unwrap();
+		let mut agent = Agent::new(Rtc::builder().build(Instant::now().into_std()), socket).unwrap();
 
 		// Until tokio has seen the socket writable, a send waits in the outbox.
 		agent.socket.writable().await.unwrap();
@@ -503,12 +499,8 @@ mod tests {
 		socket.set_nonblocking(true).unwrap();
 		let socket = Arc::new(UdpSocket::from_std(socket).unwrap());
 		let local = socket.local_addr().unwrap();
-		let socket = Socket {
-			inbound: crate::reader(socket.clone()),
-			udp: socket,
-			locals: vec![local],
-		};
-		Agent::new(Rtc::builder().build(Instant::now()), socket).unwrap()
+		let socket = Socket::new(socket.clone(), vec![local], crate::reader(socket)).unwrap();
+		Agent::new(Rtc::builder().build(Instant::now().into_std()), socket).unwrap()
 	}
 
 	#[tokio::test]

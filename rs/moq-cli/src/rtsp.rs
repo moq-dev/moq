@@ -52,7 +52,7 @@ pub async fn connect_import(target: ImportTarget, url: Url) -> anyhow::Result<()
 		}
 
 		tracing::info!(%url, ?backoff, "RTSP reconnecting");
-		tokio::time::sleep(backoff).await;
+		moq_clock::sleep(backoff).await;
 		backoff = (backoff * 2).min(BACKOFF_MAX);
 	}
 }
@@ -99,6 +99,9 @@ async fn run(target: &ImportTarget, client: &moq_rtsp::Client, published: &mut b
 		end = client.pull(&broadcast, &catalog) => end.map_err(anyhow::Error::from),
 		err = announce => err,
 	};
+	// Closed at once even after a clean end: the pull redials and publishes the next run under a
+	// newer epoch, so a run's end is not the content's, and a retained run's finished catalog
+	// would tell readers to stop if the next run dropped.
 	let finished = match &end {
 		Ok(_) => catalog.finish(),
 		Err(err) => {

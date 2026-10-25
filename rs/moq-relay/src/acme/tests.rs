@@ -18,6 +18,7 @@ use axum::{
 	response::{IntoResponse, Response},
 	routing::{get, post},
 };
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::*;
@@ -124,6 +125,7 @@ impl Directory {
 		self.state.issued.borrow().clone()
 	}
 
+	#[cfg(all(target_os = "linux", feature = "_quic"))]
 	async fn wait_issued(&self, count: usize) -> Vec<CertificateDer<'static>> {
 		let mut issued = self.state.issued.subscribe();
 		tokio::time::timeout(TIMEOUT, issued.wait_for(|issued| issued.len() >= count))
@@ -360,12 +362,12 @@ async fn certificate(State(state): State<Arc<Server>>, Route(n): Route<usize>) -
 /// A relay that takes its certificate from `directory` for `domains`, keeping state in `dir`.
 fn relay_config(directory: &Url, dir: &Path, domains: &[&str]) -> RelayConfig {
 	let mut config = RelayConfig::default();
-	config.drain_timeout = Duration::ZERO;
+	config.drain_timeout = Some((Duration::ZERO).into());
 	config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.web.https.listen = Some("127.0.0.1:0".parse().unwrap());
 	config.auth.public = vec![moq_auth::Pattern::all()];
 	config.acme.domains = domains.iter().map(|domain| domain.to_string()).collect();
-	config.acme.dir = Some(dir.to_path_buf());
+	config.acme.cache = Some(dir.to_path_buf());
 	config.acme.directory = Some(directory.clone());
 	config
 }
@@ -424,6 +426,7 @@ impl Running {
 	}
 
 	/// Wait for HTTPS to serve `leaf`, which deploys just after the directory hands it out.
+	#[cfg(all(target_os = "linux", feature = "_quic"))]
 	async fn wait_served(&self, directory: &Directory, leaf: &CertificateDer<'static>) {
 		tokio::time::timeout(TIMEOUT, async {
 			while self.served(directory, DOMAIN).await != *leaf {
@@ -438,9 +441,8 @@ impl Running {
 	async fn quic_serves(&self, leaf: &CertificateDer<'static>) {
 		let mut config = moq_tokio::connect::Config::default();
 		config.tls.fingerprint = vec![fingerprint(leaf)];
-		config.once = Some(true);
 		config.bind = Some("127.0.0.1:0".parse().unwrap());
-		let client = config.init(Default::default()).unwrap();
+		let client = config.init(Default::default()).unwrap().with_reconnect(false);
 		let url: Url = format!("moql://127.0.0.1:{}/", self.quic.port()).parse().unwrap();
 		let _session = tokio::time::timeout(TIMEOUT, client.with_reconnect(false).connect(url).established())
 			.await
@@ -550,7 +552,7 @@ async fn unreachable_directory_fails_inside_the_budget() {
 	let dir = tempfile::tempdir().unwrap();
 	let mut config = relay_config(&url, dir.path(), &[DOMAIN]);
 	let budget = Duration::from_secs(2);
-	config.acme.timeout = Some(budget);
+	config.acme.timeout = Some((budget).into());
 
 	let relay = Relay::load(config).await.unwrap().with_signals(false);
 	let https = relay.web_addrs().https.unwrap();
@@ -580,7 +582,7 @@ async fn a_signal_during_issuance_stops_startup() {
 	let url: Url = format!("http://{closed}/directory").parse().unwrap();
 	let dir = tempfile::tempdir().unwrap();
 	let mut config = relay_config(&url, dir.path(), &[DOMAIN]);
-	config.acme.timeout = Some(Duration::from_secs(60 * 60));
+	config.acme.timeout = Some((Duration::from_secs(60 * 60)).into());
 
 	let relay = Relay::load(config).await.unwrap();
 	let ready = relay.ready();
@@ -606,7 +608,7 @@ async fn failed_validations_stop_short_of_the_rate_limit() {
 	let dir = tempfile::tempdir().unwrap();
 	let start = || async {
 		let mut config = relay_config(&directory.url, dir.path(), &[DOMAIN]);
-		config.acme.timeout = Some(TIMEOUT);
+		config.acme.timeout = Some((TIMEOUT).into());
 		let relay = Relay::load(config).await.unwrap().with_signals(false);
 		let err = tokio::time::timeout(TIMEOUT, relay.run())
 			.await
@@ -676,6 +678,15 @@ async fn failed_renewal_keeps_serving() {
 	relay.stop().await;
 }
 
+/// A key and self-signed leaf for [`DOMAIN`] in the cache's PEM layout, valid until `not_after`.
+fn cached_pem(not_after: time::OffsetDateTime) -> String {
+	let key = rcgen::KeyPair::generate().unwrap();
+	let mut params = rcgen::CertificateParams::new(vec![DOMAIN.to_string()]).unwrap();
+	params.not_before = not_after - time::Duration::days(90);
+	params.not_after = not_after;
+	format!("{}{}", key.serialize_pem(), params.self_signed(&key).unwrap().pem())
+}
+
 /// An expired cached certificate counts as missing rather than being served.
 #[tokio::test]
 async fn expired_cache_counts_as_missing() {
@@ -686,24 +697,133 @@ async fn expired_cache_counts_as_missing() {
 		dir: dir.path().to_path_buf(),
 	};
 	let domains = vec![DOMAIN.to_string()];
-	let cert = |not_after: time::OffsetDateTime| {
-		let key = rcgen::KeyPair::generate().unwrap();
-		let mut params = rcgen::CertificateParams::new(domains.clone()).unwrap();
-		params.not_before = not_after - time::Duration::days(90);
-		params.not_after = not_after;
-		format!("{}{}", key.serialize_pem(), params.self_signed(&key).unwrap().pem())
-	};
 	let now = time::OffsetDateTime::now_utc();
 
-	let expired = cert(now - time::Duration::minutes(1));
+	let expired = cached_pem(now - time::Duration::minutes(1));
 	cache.store_cert(&domains, "dir", expired.as_bytes()).await.unwrap();
 	assert_eq!(cache.load_cert(&domains, "dir").await.unwrap(), None);
 
-	let current = cert(now + time::Duration::days(1));
+	let current = cached_pem(now + time::Duration::days(1));
 	cache.store_cert(&domains, "dir", current.as_bytes()).await.unwrap();
 	assert_eq!(
 		cache.load_cert(&domains, "dir").await.unwrap().as_deref(),
 		Some(current.as_bytes())
+	);
+}
+
+/// A client for [`DOMAIN`] keeping state in `dir`, whose directory is never contacted.
+fn uncontacted(dir: &Path) -> Acme {
+	let mut config = RelayConfig::default();
+	config.web.https.listen = Some("127.0.0.1:0".parse().unwrap());
+	config.acme.domains = vec![DOMAIN.into()];
+	config.acme.cache = Some(dir.to_path_buf());
+	config.acme.directory = Some("http://127.0.0.1:1/directory".parse().unwrap());
+	config
+		.acme
+		.init(&config.listen.tls, &config.web.https)
+		.unwrap()
+		.unwrap()
+}
+
+/// What rustls-acme yields when the directory marks an authorization invalid.
+fn bad_auth() -> rustls_acme::EventError<io::Error, io::Error> {
+	rustls_acme::EventError::Order(rustls_acme::OrderError::BadAuth(rustls_acme::acme::Auth {
+		status: rustls_acme::acme::AuthStatus::Invalid,
+		identifier: rustls_acme::acme::Identifier::Dns(DOMAIN.into()),
+		challenges: Vec::new(),
+	}))
+}
+
+/// Failed renewal validations stop ordering at the startup budget, which a start
+/// inside the window honors too, and renewal resumes once the oldest leaves it.
+#[moq_clock::test]
+async fn renewal_pauses_once_failed_validations_spend_the_budget() {
+	let dir = tempfile::tempdir().unwrap();
+	let mut acme = uncontacted(dir.path());
+	let polled = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+	// rustls-acme retries a failed order within seconds; these come back at once.
+	let events = futures::stream::iter([
+		Err(bad_auth()),
+		// The directory may still fail an authorization rustls-acme stopped waiting on.
+		Err(rustls_acme::EventError::Order(
+			rustls_acme::OrderError::TooManyAttemptsAuth(DOMAIN.into()),
+		)),
+		Err(bad_auth()),
+		Err(bad_auth()),
+		Ok(EventOk::DeployedNewCert),
+	])
+	.chain(futures::stream::pending())
+	.inspect({
+		let polled = polled.clone();
+		move |_| polled.borrow_mut().push(moq_clock::wall())
+	});
+	let start = moq_clock::wall();
+	let failures = Failures {
+		path: acme.failures.path.clone(),
+	};
+	let renewal = moq_clock::sim::spawn(renew(events, failures, DOMAIN.into()));
+
+	moq_clock::sleep(FAILURE_WINDOW - Duration::from_secs(1)).await;
+	assert_eq!(
+		*polled.borrow(),
+		[start; FAILURE_LIMIT],
+		"renewal ordered past the budget"
+	);
+	let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+	let err = acme
+		.issue(&listener)
+		.await
+		.expect_err("a start without a cached certificate must not order inside the window");
+	let message = format!("{err:#}");
+	assert!(
+		message.contains("5 failed validations per hostname per hour"),
+		"{message}"
+	);
+
+	moq_clock::sleep(Duration::from_secs(1)).await;
+	moq_clock::sim::idle().await;
+	let resumed = start + FAILURE_WINDOW;
+	assert_eq!(*polled.borrow(), [start, start, start, resumed, resumed]);
+	assert!(
+		acme.failures.recent().unwrap().is_empty(),
+		"a renewal clears the failures"
+	);
+	renewal.abort();
+}
+
+/// A spent budget still starts on a valid cached certificate, and keeps its
+/// failures so renewal stays paused instead of ordering again. One rustls-acme
+/// cannot deploy refuses instead, since it would order a replacement.
+#[tokio::test]
+async fn a_spent_budget_still_serves_the_cached_certificate() {
+	let dir = tempfile::tempdir().unwrap();
+	let mut acme = uncontacted(dir.path());
+	let pem = cached_pem(time::OffsetDateTime::now_utc() + time::Duration::days(30));
+	Cache::write(&acme.cert, pem.as_bytes()).unwrap();
+	for _ in 0..FAILURE_LIMIT {
+		acme.failures.record().unwrap();
+	}
+
+	let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+	listener.set_nonblocking(true).unwrap();
+	tokio::time::timeout(TIMEOUT, acme.issue(&listener))
+		.await
+		.expect("the cached certificate deploys at once")
+		.expect("a valid cached certificate serves despite a spent budget");
+	assert_eq!(acme.failures.recent().unwrap().len(), FAILURE_LIMIT);
+
+	// A current leaf without its key, which rustls-acme fails to parse.
+	let leaf = &pem[pem.find("-----BEGIN CERTIFICATE-----").unwrap()..];
+	Cache::write(&acme.cert, leaf.as_bytes()).unwrap();
+	let mut acme = uncontacted(dir.path());
+	let err = tokio::time::timeout(TIMEOUT, acme.issue(&listener))
+		.await
+		.expect("an undeployable cached certificate must not order past the budget")
+		.expect_err("an undeployable cached certificate is no certificate");
+	let message = format!("{err:#}");
+	assert!(
+		message.contains("5 failed validations per hostname per hour"),
+		"{message}"
 	);
 }
 
@@ -715,7 +835,7 @@ fn config_refuses_what_acme_cannot_serve() {
 		let mut config = RelayConfig::default();
 		config.web.https.listen = Some("127.0.0.1:0".parse().unwrap());
 		config.acme.domains = vec![DOMAIN.into()];
-		config.acme.dir = Some(dir.path().to_path_buf());
+		config.acme.cache = Some(dir.path().to_path_buf());
 		config
 	};
 	let init = |config: RelayConfig| {
@@ -738,7 +858,7 @@ fn config_refuses_what_acme_cannot_serve() {
 			config.web.https.cert = vec!["cert.pem".into()]
 		}),
 		("wildcard", |config| config.acme.domains = vec!["*.relay.test".into()]),
-		("acme.dir", |config| config.acme.dir = None),
+		("acme.cache", |config| config.acme.cache = None),
 		("require acme.domains", |config| config.acme.domains.clear()),
 	];
 	for (expected, mutate) in cases {

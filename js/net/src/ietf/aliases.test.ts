@@ -107,7 +107,8 @@ test("a later subscribe reclaims a retired alias", async () => {
 // one entry per alias it ever used.
 test("retired aliases are capped", async () => {
 	const clock = new Manual();
-	using _clock = { [Symbol.dispose]: clock.install() };
+	const installed = clock.install();
+	using _clock = { [Symbol.dispose]: () => installed.close() };
 	const aliases = new TrackAliases<object>();
 
 	for (let i = 0n; i < 74n; i++) {
@@ -118,7 +119,7 @@ test("retired aliases are capped", async () => {
 
 	// The oldest tombstones are forgotten, so they fall back to the unknown-alias wait.
 	const forgotten = aliases.get(0n).catch((error: unknown) => error);
-	await clock.advanceAsync(Nano.fromMilli(Milli(1000)));
+	await clock.advance(Nano.fromMilli(Milli(1000)));
 	expect(await forgotten).toHaveProperty("message", "unknown track alias: 0");
 	await expect(aliases.get(73n)).rejects.toBeInstanceOf(RetiredTrackAlias);
 });
