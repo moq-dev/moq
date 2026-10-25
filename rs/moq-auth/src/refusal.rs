@@ -6,17 +6,18 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
+// Explicit discriminants keep existing `as` values: `#[serde(other)]` must stay last.
 pub enum Reason {
 	/// The credential does not allow the requested access.
-	Forbidden,
+	Forbidden = 0,
 	/// The verified credential has expired.
-	Expired,
+	Expired = 1,
 	/// The credential could not be parsed, so presenting it again fails the same way.
-	Malformed,
+	Malformed = 3,
 	/// The decider refused the credential or session.
 	#[default]
 	#[serde(other)]
-	Refused,
+	Refused = 2,
 }
 
 impl std::fmt::Display for Reason {
