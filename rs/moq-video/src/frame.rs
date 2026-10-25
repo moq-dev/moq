@@ -284,7 +284,11 @@ impl DmaBuf {
 	///
 	/// Clones share the descriptor and guard; exports duplicate the FD as needed.
 	/// External buffers refuse CPU download, including linear allocations.
-	pub fn new<T: Send + Sync + 'static>(fd: OwnedFd, layout: DmaBufLayout, owner: T) -> Result<Self, Error> {
+	#[cfg_attr(
+		not(test),
+		allow(dead_code, reason = "only tests build one until an external producer needs it")
+	)]
+	pub(crate) fn new<T: Send + Sync + 'static>(fd: OwnedFd, layout: DmaBufLayout, owner: T) -> Result<Self, Error> {
 		Self::adopt(layout, Arc::new(ExternalDmaBuf { fd, _owner: owner }))
 	}
 
@@ -366,24 +370,24 @@ impl DmaBuf {
 /// The format, tiling, and plane layout of an external DMA-BUF.
 #[cfg(all(target_os = "linux", feature = "dmabuf"))]
 #[derive(Clone, Debug)]
-#[non_exhaustive]
-pub struct DmaBufLayout {
+pub(crate) struct DmaBufLayout {
 	/// DRM fourcc describing the pixel format.
-	pub format: DrmFormat,
+	pub(crate) format: DrmFormat,
 	/// DRM modifier describing memory tiling; defaults to linear.
-	pub modifier: u64,
+	pub(crate) modifier: u64,
 	/// Visible image dimensions.
-	pub size: Size,
+	pub(crate) size: Size,
 	/// Plane offsets and row strides, in format order.
-	pub planes: Vec<DmaBufPlane>,
+	pub(crate) planes: Vec<DmaBufPlane>,
 	/// Color space of YUV samples, when the producer knows it.
-	pub color: Option<Color>,
+	pub(crate) color: Option<Color>,
 }
 
 #[cfg(all(target_os = "linux", feature = "dmabuf"))]
 impl DmaBufLayout {
 	/// Describe linear planes and set optional tiling and color fields afterward.
-	pub fn new(format: DrmFormat, size: Size, planes: Vec<DmaBufPlane>) -> Self {
+	#[cfg(test)]
+	pub(crate) fn new(format: DrmFormat, size: Size, planes: Vec<DmaBufPlane>) -> Self {
 		Self {
 			format,
 			modifier: 0,

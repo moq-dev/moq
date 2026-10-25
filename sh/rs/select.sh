@@ -169,6 +169,8 @@ case "$action" in
             features+=(moq-video/capture moq-audio/capture moq-audio/playback)
         fi
         if wants moq-cli; then features+=(moq-cli/play moq-cli/openh264); fi
+        # The WebRTC module's hostile-input tests, such as mDNS backpressure.
+        if wants moq-tokio; then features+=(moq-tokio/webrtc); fi
         if ((${#features[@]})); then flags+=(--features "${features[*]}"); fi
         just rs test "${flags[@]}" ${timings[@]+"${timings[@]}"}
         ;;

@@ -46,10 +46,11 @@ Where you skipped such a rendition on that error, bound the call yourself: add a
 
 Audio and video init records no longer carry a track name. Pass that name on the media producer's named target instead; init records describe only the codec and media.
 
-### Broadcast `finish` no longer closes
+### Broadcast `finish` is removed
 
-`BroadcastProducer.finish()` was a deprecated alias for `close()`; it no longer ends the broadcast at once.
+`BroadcastProducer.finish()`, a deprecated alias for `close()`, is removed.
 Call `BroadcastProducer.close()` where you called `finish()`.
+To end the content first, call `CatalogProducer.finish()`; the broadcast stays up until `close()`.
 
 ### JSON snapshot `deltaRatio` is `deltas`
 
@@ -89,7 +90,7 @@ Clamp timestamps you build from unbounded input to `2^61 - 1`.
 
 ### Finished tracks stay until the broadcast ends (#6157)
 
-A finished track now stays listed, with its catalog rendition and demand, until its broadcast closes or the new `BroadcastProducer.finish()` lets go.
+A finished track now stays listed, with its catalog rendition and demand, until its broadcast closes.
 Publish a replacement under a new name, and expect a finished track's demand watch to end with the broadcast.
 
 ### A claim answers by publishing (#5678)

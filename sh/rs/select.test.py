@@ -33,7 +33,7 @@ class SelectTest(unittest.TestCase):
         for github_actions in (False, True):
             for action in ("check", "check-test", "lint", "test"):
                 with self.subTest(action=action, github_actions=github_actions):
-                    suffix = f" --features {DEVICE_FEATURES}" if action == "test" else ""
+                    suffix = f" --features {DEVICE_FEATURES} moq-tokio/webrtc" if action == "test" else ""
                     suffix += " --timings" if github_actions and action == "test" else ""
                     self.assertIn(f"rs {action} --workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz{suffix}",
                                   self.selected("sh/rs/nextest.sh", action=action,
@@ -60,6 +60,10 @@ class SelectTest(unittest.TestCase):
                 calls = self.selected(path, action="test")
                 self.assertEqual(len(calls), 1, calls)
                 self.assertTrue(calls[0].endswith(f" --features {features}"), calls)
+        # moq-tokio's WebRTC module is off by default too.
+        calls = self.selected("rs/moq-tokio/src/webrtc.rs", action="test")
+        self.assertEqual(len(calls), 1, calls)
+        self.assertIn(" moq-tokio/webrtc", calls[0])
         # A dependency of the media crates still runs both their device tests.
         calls = self.selected("rs/moq-audio/src/lib.rs", action="test")
         self.assertIn("--package moq-video --package moq-audio", calls[0])

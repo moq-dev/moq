@@ -326,3 +326,100 @@ describe("skip floor", () => {
 		sync.close();
 	});
 });
+
+describe("buffered startup", () => {
+	for (const first of ["audio", "video"] as const) {
+		it(`waits for both spans when ${first} fills first`, async () => {
+			const clock = new Manual();
+			const installed = clock.install();
+			const sync = new Sync({ delay: Milli(100), buffer: Milli(1000) });
+			const spans = {
+				audio: new Signal<{ start: Milli; end: Milli } | null>(null),
+				video: new Signal<{ start: Milli; end: Milli } | null>(null),
+			};
+			const dispose = Object.values(spans).map((span) => sync.register(new Signal(Milli(100)), span));
+			try {
+				await clock.advance(Nano.zero);
+				sync.received(Milli(500));
+				spans[first].set({ start: Milli(500), end: Milli(600) });
+				await clock.advance(Nano.zero);
+				let delivered = false;
+				const waiting = sync.wait(Milli(500)).then((ok) => {
+					delivered = ok;
+				});
+				await clock.advance(Nano.fromMilli(Milli(1000)));
+				expect(delivered).toBe(false);
+				expect(sync.now()).toBeUndefined();
+				spans[first === "audio" ? "video" : "audio"].set({ start: Milli(500), end: Milli(599) });
+				await clock.advance(Nano.zero);
+				expect(delivered).toBe(false);
+				spans[first === "audio" ? "video" : "audio"].set({ start: Milli(500), end: Milli(600) });
+				await clock.advance(Nano.zero);
+				await waiting;
+				expect(delivered).toBe(true);
+				expect(sync.now()).toBe(Milli(500));
+			} finally {
+				for (const fn of dispose) fn();
+				sync.close();
+				installed.close();
+			}
+		});
+	}
+	it("releases startup waits on abort, reset, and close without starting playback", async () => {
+		const clock = new Manual();
+		const installed = clock.install();
+		const sync = new Sync({ delay: Milli(100), buffer: Milli(1000) });
+		const dispose = sync.register(new Signal(Milli(100)), new Signal(null));
+		try {
+			await clock.advance(Nano.zero);
+			sync.received(Milli(0));
+			await clock.advance(Nano.zero);
+			const abort = new AbortController();
+			const cancelled = sync.wait(Milli(0), abort.signal);
+			abort.abort();
+			expect(await cancelled).toBe(false);
+			const reset = sync.wait(Milli(0));
+			sync.reset();
+			sync.received(Milli(0));
+			expect(await reset).toBe(false);
+			const closed = sync.wait(Milli(0));
+			sync.close();
+			expect(await closed).toBe(false);
+		} finally {
+			dispose();
+			sync.close();
+			installed.close();
+		}
+	});
+	it("removes a disabled track from the floor and leaves live pacing unchanged", async () => {
+		const clock = new Manual();
+		const installed = clock.install();
+		const buffer = new Signal(Milli(1000));
+		const sync = new Sync({ delay: Milli(100), buffer });
+		const absent = new Signal<{ start: Milli; end: Milli } | null | undefined>(null);
+		const remove = sync.register(new Signal(Milli(100)), absent);
+		const video = sync.register(new Signal(Milli(100)), new Signal({ start: Milli(0), end: Milli(100) }));
+		try {
+			await clock.advance(Nano.zero);
+			sync.received(Milli(0));
+			await clock.advance(Nano.zero);
+			expect(sync.playing.peek()).toBe(false);
+			absent.set(undefined);
+			await clock.advance(Nano.zero);
+			expect(await sync.wait(Milli(0))).toBe(true);
+			buffer.set(Milli.zero);
+			sync.reset();
+			absent.set(null);
+			await clock.advance(Nano.zero);
+			sync.received(Milli(0));
+			const waiting = sync.wait(Milli(0));
+			await clock.advance(Nano.fromMilli(Milli(100)));
+			expect(await waiting).toBe(true);
+		} finally {
+			remove();
+			video();
+			sync.close();
+			installed.close();
+		}
+	});
+});

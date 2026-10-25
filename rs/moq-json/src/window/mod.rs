@@ -28,12 +28,11 @@
 //! [`snapshot`](crate::snapshot) does: on a track created with a
 //! [`refresh`](moq_net::track::Info::refresh) ratio, a subscriber joining once the open group's ops
 //! outweigh that ratio times its header asks for one, and [`Producer::refresh`] restates the window
-//! in it. Otherwise a group runs to the frame and byte caps. A [`Consumer`] never surfaces a roll.
-//! A caller that stores complete groups can also end one with [`Producer::cut`]; the next edit
-//! opens a new group with a header. A header
-//! restating records a reader already has yields nothing, so however often the publisher rolls, the
-//! reader sees one continuous stream of [`Event`]s. [`ProducerConfig::checkpoint_records`] bounds
-//! the suffix repeated on each roll for a long-lived window.
+//! in it. Otherwise a group runs to the frame and byte caps. A [`Consumer`] never surfaces a roll:
+//! a header restating records a reader already has yields nothing, so however often the publisher
+//! rolls, the reader sees one continuous stream of [`Event`]s.
+//! [`ProducerConfig::checkpoint_records`] bounds the suffix repeated on each roll for a long-lived
+//! window.
 //!
 //! # What a reader is told
 //!
@@ -60,7 +59,7 @@ mod properties;
 
 pub use consumer::Consumer;
 pub use decoder::{ConsumerConfig, Decoder, Event, Group};
-pub use encoder::{Checkpoint, Encoded, Encoder, Pending, ProducerConfig};
+pub use encoder::{Encoded, Encoder, Pending, ProducerConfig};
 pub use producer::Producer;
 
 #[cfg(test)]
@@ -455,53 +454,6 @@ mod test {
 				},
 			]
 		);
-	}
-
-	#[test]
-	fn a_resumed_encoder_continues_the_window() {
-		let config = ProducerConfig::default().with_ops(false).with_checkpoint_records(2);
-		let mut original = Encoder::<Value>::new(config.clone());
-		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
-		for n in 0..4 {
-			let frame = original.push(&rec(n)).unwrap();
-			decoder.group().decode(&frame.payload).unwrap();
-			frame.commit();
-		}
-		let frame = original.pop(1).unwrap().unwrap();
-		decoder.group().decode(&frame.payload).unwrap();
-		frame.commit();
-		std::iter::from_fn(|| decoder.next_event()).for_each(drop);
-
-		let checkpoint = Checkpoint {
-			range: 1..4,
-			records: vec![rec(1), rec(2), rec(3)],
-		};
-		let mut resumed = Encoder::resume(config, &checkpoint).unwrap();
-		assert_eq!(resumed.range(), 1..4);
-		assert_eq!(
-			resumed.window(),
-			vec![rec(2), rec(3)],
-			"trimmed to the checkpoint bound"
-		);
-
-		let frame = resumed.push(&rec(4)).unwrap();
-		assert!(frame.keyframe, "the first edit restates the window");
-		decoder.group().decode(&frame.payload).unwrap();
-		frame.commit();
-		assert_eq!(
-			std::iter::from_fn(|| decoder.next_event()).collect::<Vec<_>>(),
-			vec![Event::Push {
-				index: 4,
-				value: rec(4)
-			}],
-			"a reader that kept up sees only the new record"
-		);
-
-		let invalid = Checkpoint {
-			range: 3..4,
-			records: vec![rec(2), rec(3)],
-		};
-		assert!(Encoder::resume(ProducerConfig::default(), &invalid).is_err());
 	}
 
 	#[test]

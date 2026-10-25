@@ -1,7 +1,7 @@
 import type { Micro, Milli } from "@moq/clock";
 
 /** Everything the main thread sends the render worklet over its port. */
-export type Message = Init | Data | Latency | Reset | Truncate;
+export type Message = Init | Data | Latency | Reset | Truncate | Playing;
 
 /** Create the worklet's ring. */
 export interface Init {
@@ -12,6 +12,7 @@ export interface Init {
 	// Buffered mode: anchor to the first frame and play through. The ring holds the floor; the
 	// lookahead above it is held back upstream (the main thread applies the backpressure).
 	buffered: boolean;
+	playing?: boolean;
 }
 
 /** Flush the buffer and re-stall. */
@@ -19,6 +20,7 @@ export interface Reset {
 	type: "reset";
 	// Echoed in every later state message, so the main thread can tell state from before the reset.
 	epoch: number;
+	playing?: boolean;
 }
 
 /** Drop buffered samples at or after `timestamp`, keeping what is already due. */
@@ -53,5 +55,12 @@ export interface State {
 	// How many times the ring has run dry mid-playback, cumulative.
 	underruns: number;
 	// The epoch of the last reset or park the worklet applied.
+	epoch: number;
+}
+
+/** Release or hold consumption without discarding the queued opening. */
+export interface Playing {
+	type: "playing";
+	playing: boolean;
 	epoch: number;
 }

@@ -237,6 +237,11 @@ function requestStream(version: IetfVersion) {
 		wire: () => new Reader(undefined, Uint8Array.from(written), version),
 		send: (bytes: Uint8Array) => input.enqueue(bytes),
 		cancel: () => input.error(new Error("request cancelled")),
+		/**
+		 * End the request as `version` cancels one: by FIN through draft 18, which is what the
+		 * adapter turns UNSUBSCRIBE into on drafts 14 to 16, and by a reset after.
+		 */
+		withdraw: () => (version <= Version.DRAFT_18 ? input.close() : input.error(new Error("request cancelled"))),
 	};
 }
 
@@ -451,6 +456,106 @@ test("a cancelled TRACK_STATUS releases its demand on every draft", async () => 
 		await requests.return?.();
 		served.close();
 		origin.close();
+	}
+});
+
+// The requester leaving while a SUBSCRIBE's setup waits on a producer that never answers is
+// owed nothing, and gives back the origin demand or the track it asked for at once.
+test("a SUBSCRIBE withdrawn during setup releases its demand on every draft", async () => {
+	const subscribe = (namespace: string) =>
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from(namespace),
+			trackName: "video",
+			subscriberPriority: 0,
+		});
+	for (const version of IETF_VERSIONS) {
+		const pair = createMockTransportPair(ALPNS[version]);
+		const session = new NativeSession(pair.server, version, true);
+		const { pub, origin } = publisher(pair.server, { session });
+		const requests = origin.dynamicRoute(Path.from("room")).requested();
+
+		// The broadcast is still resolving: its handler never answers.
+		const early = requestStream(version);
+		const resolving = pub.runSubscribe(subscribe("room/early"), early.stream);
+		const pending = (await requests.next()).value;
+		expect(pending?.path).toBe(Path.from("room/early"));
+		early.withdraw();
+		await resolving;
+		expect(early.written).toEqual([]);
+		// Withdrawn, so a late answer is closed rather than served.
+		const answer = new BroadcastProducer().consume();
+		pending?.accept(answer);
+		expect(answer.closed.peek()).toBeNull();
+
+		// The broadcast resolves, but its track is never answered.
+		const late = requestStream(version);
+		const subscribing = pub.runSubscribe(subscribe("room/late"), late.stream);
+		const request = (await requests.next()).value;
+		if (!request) throw new Error("no request for room/late");
+		const served = new BroadcastProducer();
+		const trackRequest = wireOf(served).requested();
+		request.accept(served);
+		expect((await trackRequest)?.name).toBe("video");
+		expect(served.demand().used.peek()).toBe(true);
+		late.withdraw();
+		await subscribing;
+		expect(late.written).toEqual([]);
+		await served.demand().unused();
+
+		await requests.return?.();
+		served.close();
+		origin.close();
+	}
+});
+
+// A resume subscribes again as a new SUBSCRIBE does, so the requester leaving while the
+// resumed track is never answered ends the request at once too.
+test("a SUBSCRIBE withdrawn while resuming releases its demand", async () => {
+	for (const version of IETF_VERSIONS.filter((version) => version > Version.DRAFT_16)) {
+		const fx = fixture(version);
+		const client = await Stream.open(fx.pair.client, { version });
+		const server = await Stream.accept(fx.pair.server, version);
+		if (!server) throw new Error("publisher never accepted the subscribe stream");
+		const first = (async () => {
+			const request = await wireOf(fx.broadcast).requested();
+			if (!request) throw new Error("no track was requested");
+			return request.accept({ timescale: Timescale.MILLI });
+		})();
+		const serving = fx.pub.runSubscribe(
+			new Subscribe({
+				requestId: 0n,
+				trackNamespace: Path.from("test"),
+				trackName: "video",
+				subscriberPriority: 128,
+				forward: false,
+			}),
+			server,
+		);
+		try {
+			expect(await client.reader.u53()).toBe(SubscribeOk.id);
+			await SubscribeOk.decode(client.reader, version);
+			const track = await first;
+			while (track.subscription.peek() !== undefined) await track.subscription.changed();
+			// Gone, so the resume asks for the track again, and nothing answers.
+			track.close();
+			const second = wireOf(fx.broadcast).requested();
+			const parameters = new Parameters();
+			parameters.forward = true;
+			await client.writer.u53(SubscribeUpdate.id);
+			await new SubscribeUpdate({ requestId: 2n, parameters }).encode(client.writer, version);
+			const resumed = await second;
+			if (!resumed) throw new Error("the resume asked for nothing");
+			expect(resumed.demand().wanted.peek()).not.toBeUndefined();
+
+			if (version <= Version.DRAFT_18) client.writer.close();
+			else client.reader.stop(new Error("cancel"));
+			await serving;
+			expect(resumed.demand().wanted.peek()).toBeUndefined();
+		} finally {
+			client.close();
+			fx.close();
+		}
 	}
 });
 
@@ -2652,7 +2757,7 @@ test("drafts 14 to 16 refuse a namespace update without ending the subscription"
 			ask.writer.close();
 		} else {
 			await peer.writer.u53(UnsubscribeNamespace.id);
-			await new UnsubscribeNamespace({ requestId: 0n }).encode(peer.writer, version);
+			await new UnsubscribeNamespace({ prefix: asked.namespace, requestId: 0n }).encode(peer.writer, version);
 		}
 		await running;
 		origin.close();

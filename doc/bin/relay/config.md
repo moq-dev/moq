@@ -60,15 +60,16 @@ predecessor's QUIC connections, so clients reconnect at once instead of
 waiting out the idle timeout. Keep it secret, and give it to one relay
 only: any holder resets every other holder's connections, so live relays behind
 one address would reset each other's clients unless the load balancer routes by
-connection ID (`lb_id`, QUIC-LB). Relays on different addresses gain nothing from sharing
+connection ID (`[listen.lb] id`, QUIC-LB). Relays on different addresses gain nothing from sharing
 it, since a client accepts a reset only from its relay's address.
 Create one with `openssl rand -hex 32 > reset.key`.
 
 A setting no configured listener reads stops startup rather than being ignored.
-A stream-only relay refuses `preferred_v4`, `preferred_v6`, `lb_id` (or `load_balancer`), and
+A stream-only relay refuses `preferred_v4`, `preferred_v6`, `lb.id`, and
 `reset.secret`, which only QUIC reads, and a `[listen.tls]` `cert`, `key`, or `generate` unless
 `tcp.tls` serves it.
-`lb_nonce` needs `lb_id`. `lb_id` and `lb_nonce` cannot be combined with `load_balancer`.
+`[listen.lb] nonce` needs an `id` in the same table; unset nonce uses 8.
+The `--listen-quic-lb-id` and `--listen-quic-lb-nonce` flags update that table.
 `unix.allow` needs `unix.bind`.
 
 ## \[quic]
@@ -80,21 +81,24 @@ Transport tuning, applied to accepted and dialed connections alike.
 congestion_control = "delay"         # "delay" (BBR, the default), "loss" (CUBIC), or "none".
 max_streams = 10000                  # Concurrent streams per connection, bidi and uni; 0 is refused. Default.
 idle_timeout = "10s"                 # Drop a connection after this long with nothing on it. Default.
-keep_alive = "3s"                    # Ping interval; "0s" disables it. iroh still pings at least every 5s. Default.
+keep_alive = "3s"                    # Ping interval; "0s" disables it. iroh refuses zero and keeps a separate 5s path heartbeat. Default.
 gso = true                           # UDP segmentation offload. iroh cannot turn it off.
 mtu_discovery = false                # Path MTU discovery. Default.
 receive_window = 134217728           # Whole-connection window, in bytes. Default (128 MiB).
 stream_receive_window = 4194304      # Per-stream window, in bytes. Default (4 MiB).
 send_window = 16777216               # Unacknowledged outgoing data, in bytes. Default (16 MiB).
 qlog = "/var/log/moq/qlog"           # Existing directory. Needs the `qlog` build feature.
-keylog = false                       # Write TLS secrets to the file SSLKEYLOGFILE names. Default.
+# keylog = "/private/keys.log"       # Explicit secret log path; unset is off.
 ```
 
 `congestion_control = "none"` runs no congestion control and no pacing. It is
 meant for tests and controlled links, where nothing else shares the path.
 
-`SSLKEYLOGFILE` alone writes nothing: set `keylog = true` too, and only while
-debugging, since the file decrypts every captured session.
+Set `keylog` only while debugging, since the file decrypts every captured session.
+Tokio and io\_uring open the configured path at initialization. New Unix files are
+mode 0600; an existing file readable by group or others is refused without changing
+its permissions. `SSLKEYLOGFILE` does not configure native relay logging.
+Iroh currently refuses an explicit keylog path when enabled.
 
 `idle_timeout` is how long a peer that vanished without a close keeps its
 sessions, and so its [cluster routes](/bin/relay/cluster#failure-detection).

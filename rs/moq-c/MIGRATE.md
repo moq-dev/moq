@@ -61,7 +61,7 @@ Clamp timestamps you build from unbounded input to `2^61 - 1`.
 
 ### Finished tracks stay until the broadcast ends (#6157)
 
-`moq_publish_track_finish`, `moq_publish_media_finish`, `moq_publish_container_finish`, and the encoder finishes now release the handle while the broadcast keeps the finished track listed, with its catalog rendition and demand, until `moq_publish_close` or the new `moq_publish_finish_close`.
+`moq_publish_track_finish`, `moq_publish_media_finish`, `moq_publish_container_finish`, and the encoder finishes now release the handle while the broadcast keeps the finished track listed, with its catalog rendition and demand, until `moq_publish_close`.
 Publish a replacement under a new name, and expect a finished track's demand terminal callback when the broadcast closes rather than at the finish.
 
 ### A claim answers by publishing (#5678)
@@ -199,6 +199,7 @@ if (frame.timestamp_present) use(frame.timestamp_us);
 ### `moq_publish_finish` is removed (#4152)
 
 Close the broadcast with `moq_publish_close`.
+To end its content first, call `moq_publish_catalog_finish`; the broadcast stays up until `moq_publish_close`.
 
 ### A decoded frame can fail on its own (#4094)
 

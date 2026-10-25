@@ -62,7 +62,9 @@ pub struct Config {
 	/// A group that returns within the linger keeps its broadcast, so a viewer
 	/// leaving and another arriving causes no unannounce and re-announce across
 	/// the mesh. While it lingers empty, every track reads `{}`. Zero
-	/// unannounces on the first drain the group is empty. Unused at depth `0`.
+	/// unannounces on the first drain the group is empty. Holding a stats track
+	/// doesn't count as an entry: unannouncing ends every track, held ones
+	/// included. Unused at depth `0`.
 	///
 	/// A return after the linger is a new epoch, which an aggregating reader
 	/// keeps as its own node for its grace, so a short linger on a flapping
@@ -2564,6 +2566,73 @@ mod tests {
 		let mut ended = take_events(&mut events);
 		ended.sort();
 		assert_eq!(ended, [(ACME.to_string(), false), (FEED.to_string(), false)]);
+	}
+
+	/// A held subscription does not keep a group announced: once it lingers
+	/// out, its held presence, prefix, and requested tier tracks end with it,
+	/// and the group's next announcement serves them again.
+	#[tokio::test(start_paused = true)]
+	async fn group_linger_ends_held_tracks() {
+		async fn hold(broadcast: &moq_net::broadcast::Consumer) -> [track::Ordered; 3] {
+			let tier = broadcast.track("rtmp/publisher.json").expect("track").subscribe(None);
+			drive_tick().await;
+			[
+				tier.await.expect("tier held").ordered(),
+				hold_presence(broadcast, "acme/live").await,
+				hold_prefix(broadcast, "acme").await,
+			]
+		}
+		/// Whether `track` has ended, skipping the frames still buffered on it.
+		fn ended(track: &mut track::Ordered) -> bool {
+			use futures::FutureExt;
+			loop {
+				match track.next_group().now_or_never() {
+					Some(Ok(Some(_))) => continue,
+					Some(Ok(None)) => return true,
+					Some(Err(err)) => panic!("a lingered track finishes, not {err:?}"),
+					None => return false,
+				}
+			}
+		}
+
+		let (producer, origin, mut events) = grouped_producer(Duration::from_secs(10));
+		let registry = producer.registry();
+		let session = registry.tier(Tier::default()).session("acme/live");
+		drive_tick().await;
+		let [(path, true, epoch)] = &take_epochs(&mut events)[..] else {
+			panic!("expected the session's group to announce");
+		};
+		assert_eq!(path, ACME);
+		let acme = origin.consume().request_broadcast(ACME, None).await.expect("resolve");
+		let mut held = hold(&acme).await;
+
+		// The session leaves: the group lingers with every hold still live.
+		drop(session);
+		for _ in 0..4 {
+			drive_tick().await;
+		}
+		assert_eq!(take_events(&mut events), [], "the group lingers");
+		assert!(held.iter_mut().all(|track| !ended(track)), "held through the linger");
+
+		// The holds do not count as traffic, so the linger elapses under them.
+		for _ in 0..8 {
+			drive_tick().await;
+		}
+		assert_eq!(take_epochs(&mut events), [(ACME.to_string(), false, epoch.clone())]);
+		assert!(held.iter_mut().all(ended), "every held track ends with the group");
+
+		// A reader follows the next announcement and holds the same tracks anew.
+		let _again = registry.tier(Tier::default()).session("acme/live");
+		drive_tick().await;
+		let [(path, true, newer)] = &take_epochs(&mut events)[..] else {
+			panic!("expected the group to announce again");
+		};
+		assert_eq!(path, ACME);
+		assert!(newer > epoch, "a returning group mints a new epoch");
+		let acme = origin.consume().request_broadcast(ACME, None).await.expect("resolve");
+		let [_tier, mut presence, _prefix] = hold(&acme).await;
+		let frame = try_presence(&mut presence).expect("answered at once");
+		assert_eq!(frame[""].active(), 1, "served from the new epoch");
 	}
 
 	#[tokio::test(start_paused = true)]

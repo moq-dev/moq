@@ -198,6 +198,7 @@ impl<F: Container> Consumer<F> {
 		let start = track.floor();
 		let max_delay = subscription
 			.max_delay
+			.unwrap_or(std::time::Duration::MAX)
 			.min(track.info().max_age.unwrap_or(std::time::Duration::MAX));
 		Self {
 			name: track.name().into(),
