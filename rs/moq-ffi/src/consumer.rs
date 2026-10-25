@@ -67,12 +67,10 @@ pub struct MoqRange {
 /// Where one end of a [`MoqRange`] falls, mirroring [`moq_net::track::Anchor`].
 #[derive(Clone, Copy, uniffi::Enum)]
 pub enum MoqAnchor {
-	/// This exact group and frame.
+	/// This group, delivered from its first frame.
 	Absolute {
 		/// The absolute group sequence number.
 		group: u64,
-		/// The zero-based frame index within the group.
-		frame: u64,
 	},
 	/// The group this many before the latest, clamped to group 0: `0` is the latest group.
 	Relative {
@@ -101,7 +99,7 @@ impl TryFrom<MoqAnchor> for moq_net::track::Anchor {
 
 	fn try_from(anchor: MoqAnchor) -> Result<Self, MoqError> {
 		Ok(match anchor {
-			MoqAnchor::Absolute { group, frame } => Self::Absolute(moq_net::track::Position { group, frame }),
+			MoqAnchor::Absolute { group } => Self::Absolute(group),
 			MoqAnchor::Relative { groups } => Self::Relative(groups),
 			MoqAnchor::Time { timestamp_us } => {
 				Self::Time(moq_net::Timestamp::from_micros(timestamp_us).map_err(|_| MoqError::TimeOverflow)?)

@@ -77,10 +77,8 @@ struct Feed {
 	/// The publisher run every segment URL carries; late-created renditions inherit it.
 	generation: Option<Arc<str>>,
 	/// The playlist window duration applied on every push (see
-	/// [`Config::window`](super::Config::window)), or `None` in
-	/// [`Config::history`](super::Config::history) mode, where only the source timeline's pops
-	/// trim the playlists.
-	window: Option<Duration>,
+	/// [`Config::window`](super::Config::window)).
+	window: Duration,
 }
 
 impl Feed {
@@ -141,7 +139,7 @@ impl Producer {
 					closed: false,
 					anchor: None,
 					generation: None,
-					window: Some(window),
+					window,
 				}),
 			},
 		}
@@ -152,9 +150,8 @@ impl Producer {
 		self.fanout.clone()
 	}
 
-	/// The playlist window duration every rendition's window is trimmed to, or `None` when
-	/// only the source timeline trims them.
-	pub fn window(&self) -> Option<Duration> {
+	/// The playlist window duration every rendition's window is trimmed to.
+	pub fn window(&self) -> Duration {
 		self.fanout.feed.read().window
 	}
 
@@ -255,15 +252,6 @@ impl Producer {
 }
 
 impl Fanout {
-	/// List every record the source timeline retains, trimming only on its pops, instead of
-	/// a window. Call before the first record.
-	pub fn unbound(&self) {
-		self.feed
-			.write()
-			.unwrap_or_else(|_| unreachable!("fanout is open"))
-			.window = None;
-	}
-
 	/// Select the next reference, whose records list only past the last advertised one.
 	pub fn select(&self, reference: Option<Reference>) {
 		let mut feed = self.feed.write().unwrap_or_else(|_| unreachable!("fanout is open"));
@@ -335,7 +323,7 @@ impl Fanout {
 		feed.last = Some(row.clone());
 		feed.history.push_back(row.clone());
 		let window = feed.window;
-		while let Some(window) = window {
+		loop {
 			let rest = feed.history.get(1).map_or(Duration::ZERO, |second| {
 				feed.history.back().unwrap().end.saturating_sub(second.pts.into())
 			});
@@ -455,17 +443,12 @@ impl Fanout {
 		true
 	}
 
-	/// Fail every window with `err` when `reference`'s timeline failed, so no playlist reads as
-	/// finished. A superseded reader counts only in history mode while rows it must pop are still
-	/// listed; a live window trims a superseded reference's rows on its own. `None` fails the
-	/// whole source when the catalog fails.
+	/// Fail every window with `err` when the selected `reference`'s timeline failed, so no
+	/// playlist reads as finished. A live window trims a superseded reference's rows on its own.
+	/// `None` fails the whole source when the catalog fails.
 	pub fn fail(&self, reference: Option<&Reference>, err: crate::Error) -> bool {
 		let mut feed = self.feed.write().unwrap_or_else(|_| unreachable!("fanout is open"));
-		let listed = reference.is_none_or(|reference| {
-			feed.accepts(reference)
-				|| (feed.window.is_none() && feed.history.iter().any(|row| row.reference == *reference))
-		});
-		if feed.failed.is_some() || !listed {
+		if feed.failed.is_some() || !reference.is_none_or(|reference| feed.accepts(reference)) {
 			return false;
 		}
 		feed.failed = Some(err.clone());
@@ -535,8 +518,7 @@ impl Producer {
 			.write()
 			.unwrap_or_else(|_| unreachable!("fanout is open"));
 		rendition.label(feed.generation.clone());
-		// An unwindowed feed is history mode: every rendition reads its timeline from the start.
-		rendition.watch(feed.window.is_none());
+		rendition.watch();
 		for row in &feed.history {
 			rendition.push(row.clone(), feed.window);
 		}
@@ -910,30 +892,14 @@ mod tests {
 	}
 
 	#[test]
-	fn only_a_reader_of_listed_rows_fails_the_feed() {
+	fn only_the_selected_reader_fails_the_feed() {
 		let err = || crate::Error::NoVariants;
-		// Live: a superseded reader's rows trim with the window, so its failure changes nothing.
+		// A superseded reader's rows trim with the window, so its failure changes nothing.
 		let (fanout, new) = handed_off(5);
 		let old = fanout.feed.read().history[0].reference.clone();
 		assert!(!fanout.fail(Some(&old), err()));
 		assert!(fanout.fail(Some(&new), err()));
 		assert!(!fanout.finish(Some(&new)), "a failed feed never finishes");
-
-		// History: a retained reader fails the feed while rows it must pop stay listed.
-		let history = |popped: bool| {
-			let fanout = Producer::new(Duration::from_secs(30)).fanout();
-			fanout.unbound();
-			let old = Arc::new((Kind::Video, "old".into(), "old".into()));
-			fanout.select(Some(old.clone()));
-			fanout.push(0, entry(0, 0), &old);
-			fanout.select(Some(Arc::new((Kind::Video, "new".into(), "new".into()))));
-			if popped {
-				fanout.pop(0..1, &old);
-			}
-			fanout.fail(Some(&old), err())
-		};
-		assert!(history(false));
-		assert!(!history(true));
 	}
 
 	#[test]
