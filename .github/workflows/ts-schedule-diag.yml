@@ -1,0 +1,73 @@
+# Temporary diagnostic for quest/m0/nightly/ts-schedule.md; removed before the PR leaves draft.
+name: ts-schedule-diag
+on:
+  push:
+    branches: [quest/m0/nightly/ts-schedule]
+    paths: [.github/workflows/ts-schedule-diag.yml]
+permissions:
+  contents: read
+jobs:
+  diag:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Tools
+        run: sudo apt-get update -q && sudo apt-get install -y -q strace jq
+      - name: Build
+        run: |
+          set -euo pipefail
+          for side in base:4381af6f07e32d594036723f80d298b67e60085f current:0513c07369357ae0ecd6109d0f6afc61d16b597f; do
+            name=${side%%:*} rev=${side#*:}
+            git worktree add --detach "/tmp/$name" "$rev"
+            (cd "/tmp/$name" && CARGO_TARGET_DIR=/tmp/t-$name cargo bench --locked -p moq-mux --bench ts_schedule --no-run --message-format=json-render-diagnostics) |
+              jq -r 'select(.reason == "compiler-artifact" and .executable != null and .target.name == "ts_schedule") | .executable' >"/tmp/bin-$name"
+            cat "/tmp/bin-$name"
+          done
+          nproc; lscpu | head -20; getconf PAGESIZE; ldd --version | head -1
+      - name: Timing
+        run: |
+          set -uo pipefail
+          for round in 1 2; do
+            for case_ in 1/1 4/1 16/1 1/64; do
+              for name in base current; do
+                printf '%s %s r%s ' "$name" "$case_" "$round"
+                (cd "/tmp/$name/rs/moq-mux" && CRITERION_HOME=/tmp/crit/$name/$round "$(cat /tmp/bin-$name)" --bench --warm-up-time 1 --measurement-time 2 --sample-size 30 --noplot "ts_schedule/$case_" --exact 2>&1 | grep -E "time:")
+              done
+            done
+          done
+      - name: Syscalls and faults
+        run: |
+          set -uo pipefail
+          for case_ in 1/1 4/1 16/1; do
+            for name in base current; do
+              echo "== $name $case_"
+              (cd "/tmp/$name/rs/moq-mux" && CRITERION_HOME=/tmp/crit/$name/sys strace -f -c -e trace=brk,mmap,munmap,madvise,mremap -o /tmp/strace.txt "$(cat /tmp/bin-$name)" --bench --profile-time 2 "ts_schedule/$case_" --exact >/dev/null 2>&1)
+              cat /tmp/strace.txt
+              (cd "/tmp/$name/rs/moq-mux" && CRITERION_HOME=/tmp/crit/$name/sys /usr/bin/time -f "faults minor=%R major=%F" "$(cat /tmp/bin-$name)" --bench --profile-time 2 "ts_schedule/$case_" --exact 2>&1 >/dev/null | grep faults)
+            done
+          done
+      - name: Allocator held fixed
+        run: |
+          set -uo pipefail
+          for tunables in glibc.malloc.trim_threshold=1073741824:glibc.malloc.mmap_threshold=33554432 glibc.malloc.mmap_threshold=131072; do
+            for case_ in 1/1 4/1 16/1; do
+              for name in base current; do
+                printf '%s %s %s ' "$tunables" "$name" "$case_"
+                (cd "/tmp/$name/rs/moq-mux" && GLIBC_TUNABLES=$tunables CRITERION_HOME=/tmp/crit/$name/tun "$(cat /tmp/bin-$name)" --bench --warm-up-time 1 --measurement-time 2 --sample-size 30 --noplot "ts_schedule/$case_" --exact 2>&1 | grep -E "time:")
+              done
+            done
+          done
+      - name: Path length
+        run: |
+          set -uo pipefail
+          for n in 1 8 16 24 32 40 48 56; do
+            home=/tmp/h/$(printf 'x%.0s' $(seq 1 "$n"))
+            for name in base current; do
+              printf '%s len=%s ' "$name" "$n"
+              (cd "/tmp/$name/rs/moq-mux" && CRITERION_HOME=$home "$(cat /tmp/bin-$name)" --bench --warm-up-time 0.5 --measurement-time 1 --noplot ts_schedule/1/1 --exact 2>&1 | grep -E "time:")
+            done
+          done
