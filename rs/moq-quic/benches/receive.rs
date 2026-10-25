@@ -286,10 +286,8 @@ fn bench_reset_debt(c: &mut Criterion<ThreadCpu>) {
 						let mut busy = Duration::ZERO;
 						for _ in 0..iters {
 							let shrunk = VarInt::from_u64((window - debt) as u64).unwrap();
-							let limits = moq_quic::Limits {
-								receive_window: std::num::NonZeroU64::new(shrunk.into_inner()),
-								..Default::default()
-							};
+							let mut limits = moq_quic::Limits::default();
+							limits.receive_window = std::num::NonZeroU64::new(shrunk.into_inner());
 							pair.server.conn().set_limits(limits).unwrap();
 							let conn = pair.client();
 							let ids: Vec<_> = (0..resets)
@@ -317,10 +315,8 @@ fn bench_reset_debt(c: &mut Criterion<ThreadCpu>) {
 								assert!(matches!(chunks.next(usize::MAX), Err(ReadError::Reset(_))));
 								let _ = chunks.finalize();
 							}
-							let limits = moq_quic::Limits {
-								receive_window: std::num::NonZeroU64::new(window as u64),
-								..Default::default()
-							};
+							let mut limits = moq_quic::Limits::default();
+							limits.receive_window = std::num::NonZeroU64::new(window as u64);
 							conn.set_limits(limits).unwrap();
 							pair.settle();
 						}
