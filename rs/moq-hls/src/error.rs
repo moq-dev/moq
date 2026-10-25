@@ -39,6 +39,9 @@ pub enum Error {
 	InvalidFileUrl,
 
 	/// The fetched HLS playlist could not be parsed.
+	///
+	/// Carries only the parser's error kind: its unparsed input holds segment URIs, and so any
+	/// signed query they carry.
 	#[error("failed to parse HLS playlist: {0}")]
 	ParsePlaylist(String),
 
@@ -57,14 +60,14 @@ pub enum Error {
 	/// An implicit HLS byte range had no preceding range for the same resource.
 	#[error("implicit byte range for {url} has no preceding range for the same resource")]
 	MissingByteRangeOffset {
-		/// The resource whose range omitted an offset.
+		/// The resource whose range omitted an offset, without its credentials.
 		url: url::Url,
 	},
 
 	/// An HLS byte range was empty or overflowed its integer representation.
 	#[error("invalid byte range {start}+{length} for {url}")]
 	InvalidByteRange {
-		/// The ranged resource.
+		/// The ranged resource, without its credentials.
 		url: url::Url,
 		/// The first requested byte.
 		start: u64,
@@ -75,7 +78,7 @@ pub enum Error {
 	/// A ranged resource response had a different length than requested.
 	#[error("byte range for {url} returned {actual} bytes, expected {expected}")]
 	ByteRangeLengthMismatch {
-		/// The ranged resource.
+		/// The ranged resource, without its credentials.
 		url: url::Url,
 		/// The requested byte count.
 		expected: u64,
@@ -86,7 +89,7 @@ pub enum Error {
 	/// A partial HTTP response identified a different byte range than requested.
 	#[error("byte range for {url} returned a mismatched Content-Range, expected bytes {start}-{end}")]
 	ByteRangeResponseMismatch {
-		/// The ranged resource.
+		/// The ranged resource, without its credentials.
 		url: url::Url,
 		/// The first requested byte.
 		start: u64,
@@ -192,6 +195,20 @@ impl Error {
 				.is_some_and(|status| !matches!(status, 408 | 429 | 502 | 503 | 504)),
 		}
 	}
+}
+
+/// `url` without its userinfo, query, or fragment, any of which may carry a signed credential.
+///
+/// Every variant naming a resource stores it through here rather than redacting at display, so
+/// its `Debug` print is as safe as its `Display`.
+pub(crate) fn redact(url: &url::Url) -> url::Url {
+	let mut url = url.clone();
+	// Fails only for a URL that cannot carry userinfo at all, such as `file:`.
+	let _ = url.set_username("");
+	let _ = url.set_password(None);
+	url.set_query(None);
+	url.set_fragment(None);
+	url
 }
 
 impl From<reqwest::Error> for Error {
