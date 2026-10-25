@@ -1126,6 +1126,7 @@ impl StreamsState {
 		self.ensure_remote_streams(dir);
 	}
 
+	#[cfg(test)]
 	pub(crate) fn max_concurrent(&self, dir: Dir) -> u64 {
 		self.allocated_remote_count[dir as usize]
 	}
