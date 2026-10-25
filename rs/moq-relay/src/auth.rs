@@ -340,7 +340,7 @@ impl Config {
 	}
 }
 
-/// Why a session was refused, and the HTTP status a transport-level reject carries.
+/// Why a session was refused, with the HTTP status and session code that report it.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
@@ -390,6 +390,24 @@ impl From<&Error> for http::StatusCode {
 impl From<Error> for http::StatusCode {
 	fn from(err: Error) -> Self {
 		Self::from(&err)
+	}
+}
+
+/// The code a refused session closes with, or a refused in-band token is answered with.
+impl From<&Error> for moq_net::SessionError {
+	fn from(err: &Error) -> Self {
+		match err {
+			Error::Refused(refusal) => match refusal.reason {
+				moq_auth::refusal::Reason::Expired => Self::Expired,
+				moq_auth::refusal::Reason::Malformed => Self::MalformedAuthToken,
+				_ => Self::Unauthorized,
+			},
+			Error::Forbidden(_) => Self::Unauthorized,
+			// The status is what separates "your credential is bad" from "the auth server is
+			// down". Collapsing both into Unauthorized tells a client to stop reconnecting
+			// through an outage it could have waited out.
+			err => Self::App(http::StatusCode::from(err).as_u16()),
+		}
 	}
 }
 
@@ -1107,16 +1125,34 @@ mod tests {
 
 	#[test]
 	fn typed_refusal_preserves_transport_status() {
-		for (reason, status) in [
-			(moq_auth::refusal::Reason::Refused, http::StatusCode::UNAUTHORIZED),
-			(moq_auth::refusal::Reason::Expired, http::StatusCode::UNAUTHORIZED),
-			(moq_auth::refusal::Reason::Forbidden, http::StatusCode::FORBIDDEN),
+		use moq_auth::refusal::Reason;
+		use moq_net::SessionError;
+		for (reason, status, code) in [
+			(
+				Reason::Refused,
+				http::StatusCode::UNAUTHORIZED,
+				SessionError::Unauthorized,
+			),
+			(Reason::Expired, http::StatusCode::UNAUTHORIZED, SessionError::Expired),
+			(
+				Reason::Forbidden,
+				http::StatusCode::FORBIDDEN,
+				SessionError::Unauthorized,
+			),
+			(
+				Reason::Malformed,
+				http::StatusCode::UNAUTHORIZED,
+				SessionError::MalformedAuthToken,
+			),
 		] {
 			let mut refusal = moq_auth::Refusal::default();
 			refusal.reason = reason;
 			let error = Error::from(moq_auth::Error::Refused(refusal));
 			assert_eq!(http::StatusCode::from(&error), status);
+			assert_eq!(SessionError::from(&error), code);
 		}
+		let outage = Error::Unavailable("down".into());
+		assert_eq!(SessionError::from(&outage), SessionError::App(502));
 	}
 
 	#[test]

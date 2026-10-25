@@ -9,7 +9,7 @@
 //! [Info] is the broadcast's static metadata, fixed for its lifetime.
 use crate::{cache, stats, track};
 use std::{
-	collections::{HashMap, HashSet},
+	collections::HashSet,
 	sync::Arc,
 	task::{Poll, ready},
 };
@@ -114,12 +114,6 @@ struct BroadcastState {
 	// coalescing onto it there).
 	requests: Requests<Arc<str>, track::Request>,
 
-	// Each name's sequence namespace, outliving the producers that serve it: a name means
-	// the same content for the broadcast's whole life, so a replacement producer that would
-	// append a sequence an earlier one wrote is refused. Entries nothing holds or wrote are
-	// swept as the map grows, so requests for names never served stay bounded.
-	sequences: HashMap<Arc<str>, track::Sequence>,
-
 	// The tracks the broadcast lists, and the readers listing them; see [`Tracks`].
 	listing: listing::ListingState,
 
@@ -136,14 +130,6 @@ impl BroadcastState {
 			Some(_) => Err(Error::Duplicate),
 			None => Ok(()),
 		}
-	}
-
-	/// The sequence namespace for `name`, shared with every earlier track of the name.
-	fn sequence(&mut self, name: &Arc<str>) -> track::Sequence {
-		if self.sequences.len() == self.sequences.capacity() {
-			self.sequences.retain(|_, sequence| !sequence.is_unused());
-		}
-		self.sequences.entry(name.clone()).or_default().clone()
 	}
 
 	/// Resolve every name the broadcast never filled, so subscribers waiting on a
@@ -383,10 +369,7 @@ impl Producer {
 			return Ok(track.listed(unlist));
 		}
 
-		let sequence = state.sequence(&name);
-		let track = track::Producer::new(self.info.clone(), name.clone(), info.clone())
-			.with_stats(self.stats.clone())
-			.with_sequence(sequence);
+		let track = track::Producer::new(self.info.clone(), name.clone(), info.clone()).with_stats(self.stats.clone());
 		state.insert_track(track.weak())?;
 		let unlist = Unlist::list(&self.state, &mut state.listing, name, &info);
 		Ok(track.listed(unlist))
@@ -406,9 +389,7 @@ impl Producer {
 	pub fn reserve_track(&self, name: impl Into<Arc<str>>) -> Result<track::Request, Error> {
 		let name = name.into();
 		let mut state = self.state.lock();
-		let request = track::Request::new(self.info.clone(), name.clone())
-			.with_stats(self.stats.clone())
-			.with_sequence(state.sequence(&name));
+		let request = track::Request::new(self.info.clone(), name.clone()).with_stats(self.stats.clone());
 		state.insert_track(request.weak())?;
 		Ok(request.listed(ListOnAccept {
 			state: self.state.clone(),
@@ -1003,7 +984,7 @@ impl Consumer {
 		// requests map, and the FIFO order. The request inherits the broadcast's
 		// cache pool through its `Arc<Info>`, same as a producer-created track.
 		let name: Arc<str> = name.into();
-		let request = track::Request::new(self.info.clone(), name.clone()).with_sequence(state.sequence(&name));
+		let request = track::Request::new(self.info.clone(), name.clone());
 		let resolved = request.join(subscription);
 
 		// With no handler alive to serve it, the request is dropped: `NotFound` beats
@@ -1678,126 +1659,58 @@ mod test {
 		track2.assert_group();
 	}
 
-	/// A name keeps one sequence namespace for the broadcast's life. The application owns
-	/// where a replacement starts: an append that would reuse an earlier producer's sequence,
-	/// explicit writes included, is refused, while a new broadcast starts over.
+	/// A broadcast keeps nothing of a name once its track is gone: a replacement numbers and
+	/// times its groups from scratch, and the application owns keeping them past its
+	/// predecessor's.
 	#[test]
-	fn replacement_refuses_reused_sequences() {
+	fn replacement_starts_over() {
+		let at = |millis| crate::Timestamp::from_millis(millis).unwrap();
 		let producer = Info::new().produce();
 		let mut dynamic = producer.dynamic();
 		let consumer = producer.consume();
 
 		let track = consumer.track("media").unwrap().subscribe(None);
-		let mut first = dynamic.assert_request().accept(crate::track::Info::timed());
-		assert_eq!(first.append_group().unwrap().sequence, 0);
-		assert_eq!(first.append_datagram(crate::Timestamp::ZERO, b"x").unwrap(), 1);
-		let _open = first.create_group(crate::group::Info { sequence: 8 }).unwrap();
-		first.insert_datagram(12, crate::Timestamp::ZERO, b"x").unwrap();
+		let first = dynamic.assert_request().accept(crate::track::Info::timed());
+		let mut group = first.create_group(crate::group::Info { sequence: 8 }).unwrap();
+		group.write_frame(at(1000), b"a".as_slice()).unwrap();
+		group.finish().unwrap();
 		first.finish().unwrap();
 		drop((first, track));
 
 		let track = consumer.track("media").unwrap().subscribe(None);
-		let mut second = dynamic.assert_request().accept(crate::track::Info::timed());
-		assert!(matches!(second.append_group(), Err(Error::Duplicate)));
-		assert!(matches!(
-			second.append_datagram(crate::Timestamp::ZERO, b"x"),
-			Err(Error::Duplicate)
-		));
+		let second = dynamic.assert_request().accept(crate::track::Info::timed());
+		let mut group = second.append_group().unwrap();
+		assert_eq!(group.sequence, 0);
+		group.write_frame(at(500), b"b".as_slice()).unwrap();
+		drop((group, second, track));
 
-		// An explicit first write picks the start, and appends continue from there.
-		let _open = second.create_group(crate::group::Info { sequence: 13 }).unwrap();
-		assert_eq!(second.append_datagram(crate::Timestamp::ZERO, b"x").unwrap(), 14);
-		second.finish().unwrap();
-		drop((second, track));
-
-		// A track the producer creates itself checks the same namespace.
-		let third = producer.create_track("media", crate::track::Info::timed()).unwrap();
-		assert!(matches!(third.append_group(), Err(Error::Duplicate)));
-		assert_eq!(
-			third
-				.create_group(crate::group::Info { sequence: 15 })
-				.unwrap()
-				.sequence,
-			15
-		);
-
-		let next = Info::new().produce();
-		assert_eq!(
-			next.create_track("media", crate::track::Info::timed())
-				.unwrap()
-				.append_group()
-				.unwrap()
-				.sequence,
-			0
-		);
+		let mut third = producer.create_track("media", crate::track::Info::timed()).unwrap();
+		third.finish_at(crate::track::Position::group(0)).unwrap();
 	}
 
-	/// A replacement can't declare an end before or inside a group an earlier producer of the
-	/// name wrote: a subscriber that received that group would read it as a contradiction.
+	/// Names that are gone leave nothing behind, served or not, so churning distinct names
+	/// keeps the broadcast bounded by its live tracks.
 	#[test]
-	fn replacement_refuses_an_end_below_its_predecessor() {
-		let producer = Info::new().produce();
-		let first = producer.create_track("media", crate::track::Info::timed()).unwrap();
-		first.append_group().unwrap().finish().unwrap();
-		first.finish().unwrap();
-		drop(first);
-
-		let mut second = producer.create_track("media", crate::track::Info::timed()).unwrap();
-		for end in [
-			crate::track::Position::group(0),
-			crate::track::Position { group: 0, frame: 1 },
-		] {
-			assert!(
-				matches!(second.finish_at(end), Err(Error::ProtocolViolation)),
-				"{end:?}"
-			);
-		}
-		second.finish_at(crate::track::Position::group(1)).unwrap();
-	}
-
-	/// A replacement continues the name's timeline, so its groups can't start before the
-	/// highest one an earlier producer checked, while a new broadcast starts over.
-	#[test]
-	fn replacement_refuses_a_rewind_past_its_predecessor() {
-		let at = |millis| crate::Timestamp::from_millis(millis).unwrap();
-		let producer = Info::new().produce();
-
-		let first = producer.create_track("media", crate::track::Info::timed()).unwrap();
-		let mut group = first.append_group().unwrap();
-		group.write_frame(at(1000), b"a".as_slice()).unwrap();
-		group.finish().unwrap();
-		drop((group, first));
-
-		let second = producer.create_track("media", crate::track::Info::timed()).unwrap();
-		let mut group = second.create_group(crate::group::Info { sequence: 1 }).unwrap();
-		assert!(matches!(
-			group.write_frame(at(500), b"b".as_slice()),
-			Err(Error::TimestampMismatch)
-		));
-		group.write_frame(at(1000), b"b".as_slice()).unwrap();
-
-		let next = Info::new().produce();
-		let track = next.create_track("media", crate::track::Info::timed()).unwrap();
-		track
-			.append_group()
-			.unwrap()
-			.write_frame(at(500), b"c".as_slice())
-			.unwrap();
-	}
-
-	/// Names requested but never served leave nothing behind, so a peer asking for
-	/// arbitrary names cannot grow the broadcast.
-	#[test]
-	fn unserved_names_are_forgotten() {
+	fn gone_names_are_forgotten() {
 		let producer = Info::new().produce();
 		let mut dynamic = producer.dynamic();
 		let consumer = producer.consume();
 		for i in 0..1000 {
-			let track = consumer.track(&i.to_string()).unwrap().subscribe(None);
-			drop(dynamic.assert_request());
-			drop(track);
+			let track = consumer.track(&format!("requested/{i}")).unwrap().subscribe(None);
+			let served = dynamic.assert_request().accept(crate::track::Info::timed());
+			served.append_group().unwrap().finish().unwrap();
+			drop((served, track));
+
+			let track = consumer.track(&format!("refused/{i}")).unwrap().subscribe(None);
+			drop((dynamic.assert_request(), track));
+
+			let created = producer
+				.create_track(format!("created/{i}"), crate::track::Info::timed())
+				.unwrap();
+			created.append_group().unwrap().finish().unwrap();
 		}
-		assert!(producer.state.lock().sequences.len() < 16);
+		let state = producer.state.lock();
+		assert!(state.tracks.len() < 16, "{} names retained", state.tracks.len());
 	}
 
 	#[moq_clock::test]

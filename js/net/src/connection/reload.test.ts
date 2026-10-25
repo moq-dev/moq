@@ -349,7 +349,7 @@ test("a page hide after give-up does not retry the refused URL", async () => {
 	}
 });
 
-for (const code of [SessionCode.Unauthorized, SessionCode.Expired]) {
+for (const code of [SessionCode.Unauthorized, SessionCode.MalformedAuthToken, SessionCode.Expired]) {
 	test(`a session rejected with ${code} surfaces the code and stops retrying`, async () => {
 		const original = globalThis.WebTransport;
 		const url = new URL("https://example.com/");

@@ -19,8 +19,9 @@ wire changes that decide the order to upgrade a deployment.
 
 A released flag, environment variable, or config key that was renamed is
 refused at startup with its replacement named, rather than ignored. Fix what the
-error lists and rerun. The one exception is moq-cli's removed `MOQ_HOP`, which is
-ignored; its guide says what replaces it.
+error lists and rerun. Any other `MOQ_*` variable a binary does not read, such as
+moq-cli's removed `MOQ_HOP`, is refused at startup too; its guide says what
+replaces it.
 
 ## Migration guides
 
