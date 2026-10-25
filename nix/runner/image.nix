@@ -1,6 +1,5 @@
 {
   config,
-  lib,
   pkgs,
   modulesPath,
   ...
@@ -54,8 +53,8 @@
     wantedBy = [ "multi-user.target" ];
     before = [
       "nix-daemon.service"
-    ]
-    ++ map (runner: "github-runner-${runner}.service") (lib.attrNames config.services.github-runners);
+      "github-runner-runner.service"
+    ];
     unitConfig.ConditionPathExists = "/nix-path-registration";
     serviceConfig.Type = "oneshot";
     environment.NIX_REMOTE = "local";

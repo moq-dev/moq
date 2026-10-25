@@ -75,14 +75,6 @@ Nix store. Keep the expired token file after registration. The guest retains its
 own long-lived credential; wiping its state requires a fresh registration token.
 Restart the host VM service after replacing the token.
 
-Set `runner.count` to run several jobs at once in one guest. The runners share
-the home, so concurrent jobs share mbx's store and compiler budget, and a
-compilation one job is running is restored by the other instead of repeated.
-Each runner has its own work directory. The first keeps `runner.name`; the others
-append `-2`, `-3`, and so on. Raising the count registers new runners, so install
-a fresh registration token and restart the host VM service; the existing runner
-re-registers under its own name. Size `resources` for the concurrent jobs.
-
 The host service and disk are named by the instance attribute: the example uses `queue-ci.service`
 and `/var/lib/queue-ci/root.raw`. Its disk is created once. Changing the configured
 image does not replace existing state, and changing `resources.disk` does not
@@ -155,8 +147,7 @@ its build host must already support rootless user namespaces.
 startup without carrier, public egress for multiple guests, private-network and
 sibling-guest isolation including spoofed established replies, compatible host NAT
 settings, the runner's locked-memory budget, symlink-free home and work directories
-with state migrated from the former DynamicUser layout, a second runner sharing the
-home but not the work directory, free page reporting and
+with state migrated from the former DynamicUser layout, free page reporting and
 idle cache drops, killing a job that fills memory before it thrashes the disk, and
 Nix/mbx persistence across runner and guest restarts.
 It also migrates a disposable ext4 disk, boots the resulting XFS image through

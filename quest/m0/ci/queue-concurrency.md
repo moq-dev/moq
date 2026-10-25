@@ -15,25 +15,46 @@ Measured 2026-10-23 over 32 merge-queue runs: `max_entries_to_build: 1` with one
 `moq-queue` runner makes the queue fully serial, about 7 merged PRs per hour,
 with a median entry of 135 s (p90 516 s) and 3 to 12 s of runner wait.
 
-The runner VM module's `runner.count` registers several runners in one guest.
-They share the home, so concurrent entries share mbx's store, its dedup of
-in-flight compilations, and its compiler CPU and memory budget; each has its own
-work directory. mbx documents concurrent builds on one store as supported, and
-the self-hosted cache step keeps a version stamp per workspace.
+Decided 2026-10-25 (maintainer): no VM. The second runner goes into the
+deployed `container@moq-ci` systemd-nspawn container, sandboxed by kernel
+primitives (see the [CI epic](/quest/m0/ci/README.md)), not into the
+`nix/runner` VM module. The container is defined in the host's own flake, not
+in this repository, so registering the runner is a host change.
 
-Remaining:
+Each runner keeps its own work directory, since the nixpkgs runner service
+empties it on start. The self-hosted cache step keeps its mbx version stamp per
+workspace, so a runner sharing a home with another still drops its own
+workspace's state after an mbx version change.
 
-- Confirm which runner is intended: the documented `nix/runner` VM, or the
-  `container@moq-ci` systemd-nspawn container deployed on the host (see the
-  [CI epic](/quest/m0/ci/README.md)). Give whichever stays two runners sharing
-  its cache.
-- Deploy with `runner.count = 2`, a fresh registration token, and a VM restart.
-  The host also runs the `moq-pro` runner under the same `ci.slice` quota and a
-  desktop; size the guest's `resources` so concurrent entries do not slow each
-  other past the gain. Each entry runs 24 nextest workers.
-- Raise the main ruleset's `max_entries_to_build` to the runner count.
-- Measure merged PRs per hour and per-entry wall time before and after.
-- Queue entries skip `quest gate`: `sh/local.sh` execs directly under GitHub
-  Actions, so the runner quota, not admission, has to keep entries apart.
+Open: how the two runners share state. A NixOS container builds through the
+host's Nix daemon by default, so the Nix store is shared in every option.
+
+1. One home under one static user (recommended): concurrent entries share
+   mbx's store, wait on a compilation the other entry is running instead of
+   repeating it, and draw on one machine-wide compile budget, which mbx
+   documents as supported
+   ([how it works](https://github.com/jdx/mr-boxington/blob/v1.25.0/docs/how-it-works.md#machine-wide-scheduling)).
+   nixpkgs gives each runner its own `DynamicUser` by default, so both need
+   the same `user` and `HOME`.
+2. A home per runner: no mutable state crosses entries, but each cache warms
+   separately, disk use doubles, and two mbx schedulers each budget the whole
+   container's CPUs.
+3. A second container: the strongest separation and its own cgroup, with the
+   costs of option 2 plus a second container to maintain.
+
+Remaining (maintainer, on the host):
+
+- Register a second runner in `container@moq-ci` with its own name and work
+  directory, under the chosen layout, with a fresh registration token.
+- Size the container's share of `ci.slice`, which it shares with the `moq-pro`
+  runner and a desktop, so concurrent entries do not slow each other past the
+  gain. Queue entries skip `quest gate` (`sh/local.sh` execs directly under
+  GitHub Actions), so the cgroup quota, not admission, keeps them apart.
+- Keep `NEXTEST_TEST_THREADS=24` per entry (48 workers across two entries;
+  mbx budgets compiles, not tests) and watch the first day for timing flakes
+  rather than guess a lower number.
+- Raise the main ruleset's `max_entries_to_build` from 1 to 2.
+- Measure merged PRs per hour and per-entry wall time for a day against the
+  baseline before going past 2.
 
 Public API: none. Wire: none.
