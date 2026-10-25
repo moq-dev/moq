@@ -365,8 +365,8 @@ impl Invocation {
 			}
 			if let Some(stdout) = export.sink.stdout() {
 				anyhow::ensure!(
-					stdout.linger.is_zero() || matches!(stdout.format, SubscribeFormat::Ts),
-					"--linger needs an output that can mark a restart, and only `export ts` can"
+					stdout.follow.is_zero() || matches!(stdout.format, SubscribeFormat::Ts),
+					"--linger is gone, and following a broadcast's return needs an output that can mark the restart: only `export ts --follow` can"
 				);
 				if matches!(stdout.format, SubscribeFormat::H264 | SubscribeFormat::H265) {
 					anyhow::ensure!(
@@ -1090,7 +1090,7 @@ impl ExportSink {
 		let container = |format, container: &Container| Stdout {
 			format,
 			max_delay: container.max_delay.into(),
-			linger: container.linger.into(),
+			follow: container.linger.into(),
 			stitch: false,
 			fragment_duration: None,
 			mux_rate: None,
@@ -1099,7 +1099,7 @@ impl ExportSink {
 		let buffered = |format, args: &Buffered| Stdout {
 			format,
 			max_delay: args.delay.into(),
-			linger: args.linger.into(),
+			follow: args.linger.into(),
 			stitch: false,
 			fragment_duration: None,
 			mux_rate: None,
@@ -1117,7 +1117,7 @@ impl ExportSink {
 			Self::Ts(args) => Stdout {
 				format: SubscribeFormat::Ts,
 				max_delay: args.delay.into(),
-				linger: args.linger.into(),
+				follow: args.follow.into(),
 				stitch: args.stitch,
 				fragment_duration: None,
 				mux_rate: args.mux_rate,
@@ -1137,7 +1137,9 @@ pub struct Stdout {
 	/// The staleness budget, also the FLV/MKV release delay and how far behind the source `ts`
 	/// runs (`--delay`).
 	pub max_delay: Duration,
-	pub linger: Duration,
+	/// How long to wait for the broadcast to come back (`ts` only; the others refuse their
+	/// hidden `--linger`).
+	pub follow: Duration,
 	/// Follow a replacement as a program switch (`ts` only).
 	pub stitch: bool,
 	pub fragment_duration: Option<Duration>,
@@ -1154,8 +1156,8 @@ pub struct Container {
 	#[usage(long, default = "500ms")]
 	pub max_delay: moq_tokio::cli::Duration,
 
-	/// Accepted only to refuse a nonzero value with a pointer to `ts`, the one format
-	/// that can mark where a returned broadcast restarts.
+	/// The released spelling of `export ts --follow`, accepted only to refuse a nonzero value:
+	/// only TS can mark where a returned broadcast restarts.
 	#[usage(long, default = "0s", hide = true)]
 	pub linger: moq_tokio::cli::Duration,
 
@@ -1190,7 +1192,8 @@ pub struct Buffered {
 	/// drops none as late, but still skips a stalled group once a newer one is ready.
 	#[usage(long, default = "500ms")]
 	pub delay: moq_tokio::cli::Duration,
-	/// Accepted only to refuse a nonzero value: only TS can mark a broadcast restart.
+	/// The released spelling of `export ts --follow`, accepted only to refuse a nonzero value:
+	/// only TS can mark a broadcast restart.
 	#[usage(long, default = "0s", hide = true)]
 	pub linger: moq_tokio::cli::Duration,
 	/// An older spelling of the staleness setting.
@@ -1238,12 +1241,12 @@ pub struct Transport {
 	#[usage(long, default = "1s")]
 	pub delay: moq_tokio::cli::Duration,
 
-	/// How long to wait for the same publisher instance to come back once it ends (e.g. `10s`),
-	/// then carry on with the same stream. A replacement exits 1 unless `--stitch` is passed.
-	/// An export that fails while the broadcast is still up exits without waiting.
-	/// Also bounds a stitched replacement through its first catalog; zero requires it already available.
+	/// How long to wait for the same publisher instance, or with `--stitch` a replacement, to
+	/// come back once the broadcast ends (e.g. `10s`), then carry on with the same stream.
+	/// Zero follows only an instance already serving. A replacement exits 1 unless `--stitch` is
+	/// passed. A failure other than the publisher leaving exits at once.
 	#[usage(long, default = "0s")]
-	pub linger: moq_tokio::cli::Duration,
+	pub follow: moq_tokio::cli::Duration,
 
 	/// Follow another publisher instance that replaces the broadcast, as a full program switch:
 	/// a new PMT from its catalog, flagged as a break on every PID.
@@ -1259,8 +1262,12 @@ pub struct Transport {
 	/// Write the multiplex an `import ts --passthrough` published back out byte-identical,
 	/// paced on its own PCR, `--delay` behind it. Packets that arrive later than that are
 	/// dropped, leaving a continuity error.
-	#[usage(long, conflicts("--linger", "--stitch", "--mux-rate"))]
+	#[usage(long, conflicts("--follow", "--stitch", "--mux-rate"))]
 	pub passthrough: bool,
+
+	/// The released spelling of [`Self::follow`].
+	#[usage(long = "linger", hide = true)]
+	linger: Option<moq_tokio::cli::Duration>,
 
 	/// The released spelling of [`Self::delay`].
 	#[usage(long = "max-age", hide = true)]
@@ -1280,6 +1287,9 @@ impl Transport {
 		}
 		if self.latency_max.is_some() {
 			found.changed("--latency-max", None, "--delay", BEHIND);
+		}
+		if self.linger.is_some() {
+			found.flag("--linger", None, "--follow");
 		}
 		found
 	}
@@ -1318,20 +1328,29 @@ mod tests {
 		let _ = Stage::to_kdl();
 	}
 
-	/// Only TS can mark where a returned broadcast restarts, so only `export ts` may linger.
+	/// Only TS can mark where a returned broadcast restarts, so only `export ts` follows one.
+	/// The released `--linger` points there, as a rename on `ts` and a refusal elsewhere.
 	#[test]
-	fn linger_is_ts_only() {
-		let parse = |format: &str, linger: &str| {
-			Invocation::try_parse_from(["moq", "--connect", "http://relay", "export", format, "--linger", linger])
-				.unwrap()
+	fn follow_is_ts_only() {
+		let parse = |format: &str, flag: &str, value: &str| {
+			Invocation::try_parse_from(["moq", "--connect", "http://relay", "export", format, flag, value])
 		};
-		assert!(parse("ts", "10s").validate().is_ok());
-		for format in ["fmp4", "h264", "h265"] {
-			let err = parse(format, "10s").validate().unwrap_err().to_string();
-			assert!(err.contains("--linger"), "{format}: {err}");
+		assert!(parse("ts", "--follow", "10s").unwrap().validate().is_ok());
+		let Err(err) = parse("ts", "--linger", "10s") else {
+			panic!("the released spelling must not start a run");
+		};
+		assert!(err.to_string().contains("--linger -> --follow"), "{err}");
+		for format in ["fmp4", "mkv", "flv", "h264", "h265"] {
+			assert!(parse(format, "--follow", "10s").is_err(), "{format} takes no --follow");
+			let err = parse(format, "--linger", "10s")
+				.unwrap()
+				.validate()
+				.unwrap_err()
+				.to_string();
+			assert!(err.contains("export ts --follow"), "{format}: {err}");
 			assert!(
-				parse(format, "0s").validate().is_ok(),
-				"{format}: no linger is always fine"
+				parse(format, "--linger", "0s").unwrap().validate().is_ok(),
+				"{format}: a zero --linger is always fine"
 			);
 		}
 	}
@@ -1536,7 +1555,7 @@ mod tests {
 		let stdout = export.sink.stdout().unwrap();
 		assert!(stdout.passthrough);
 		assert_eq!(stdout.max_delay, Duration::from_secs(2));
-		for flags in [&["--stitch"][..], &["--linger", "10s"], &["--mux-rate", "20000000"]] {
+		for flags in [&["--stitch"][..], &["--follow", "10s"], &["--mux-rate", "20000000"]] {
 			assert!(parse(flags).is_err(), "{flags:?} must not start a run");
 		}
 	}
@@ -1777,16 +1796,16 @@ mod tests {
 		);
 	}
 
-	/// `export srt` follows its broadcast with the same `--linger` and `--stitch` as `export ts`.
+	/// `export srt` follows its broadcast with the same `--follow` and `--stitch` as `export ts`.
 	#[test]
-	fn export_srt_takes_linger_and_stitch() {
+	fn export_srt_takes_follow_and_stitch() {
 		let cli = Invocation::try_parse_from([
 			"moq",
 			"export",
 			"srt",
 			"--listen",
 			"[::]:9000",
-			"--linger",
+			"--follow",
 			"10s",
 			"--stitch",
 		])
@@ -1797,7 +1816,7 @@ mod tests {
 		let ExportSink::Srt(args) = &export.sink else {
 			panic!("an export srt stage");
 		};
-		assert_eq!(Duration::from(args.linger), Duration::from_secs(10));
+		assert_eq!(Duration::from(args.follow), Duration::from_secs(10));
 		assert!(args.stitch);
 		assert!(
 			Invocation::try_parse_from(["moq", "import", "srt", "--listen", "[::]:9000", "--stitch"]).is_err(),

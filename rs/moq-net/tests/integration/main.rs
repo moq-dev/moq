@@ -45,6 +45,7 @@ mod range_anchors;
 mod received_rewind;
 mod refresh;
 mod rejoin;
+mod relay_upstream_close;
 mod replacement;
 mod request_caps;
 mod restart;

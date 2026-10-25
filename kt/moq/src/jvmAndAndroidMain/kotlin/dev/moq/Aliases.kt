@@ -75,8 +75,6 @@ typealias BroadcastProducer = uniffi.moq.MoqBroadcastProducer
 typealias BroadcastConsumer = uniffi.moq.MoqBroadcastConsumer
 /** Receives tracks requested from a dynamically served broadcast. */
 typealias BroadcastDynamic = uniffi.moq.MoqBroadcastDynamic
-/** A cleanly ended broadcast, still announced and serving its finished tracks until its linger ends. */
-typealias BroadcastFinish = uniffi.moq.MoqBroadcastFinish
 /** The write side of a raw track: append groups of frames. */
 typealias TrackProducer = uniffi.moq.MoqTrackProducer
 /** A subscriber-requested track not yet accepted: accept it for a [TrackProducer] or abort it. */

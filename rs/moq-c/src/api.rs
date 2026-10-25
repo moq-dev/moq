@@ -2182,37 +2182,18 @@ pub extern "C" fn moq_publish_close(broadcast: u32) -> i32 {
 	})
 }
 
-/// End a broadcast cleanly and release its handle, keeping it servable until its media is stale.
+/// Finish a broadcast's catalog, which ends its content.
 ///
-/// Finish every track first: the returned finish handle holds the tracks finished by now and
-/// keeps the broadcast announced, so a subscriber still catching up can drain them. A track still
-/// live is not held. `linger_us` receives how long to keep the handle, in microseconds: the
-/// longest max age among the held tracks, or zero. Keep it that long on your own clock, then
-/// [moq_publish_finish_close]; closing it sooner is how an interrupt ends the linger.
-///
-/// Returns a non-zero finish handle on success, or a negative code on failure.
-///
-/// # Safety
-/// - `linger_us` must be a valid pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_publish_finish(broadcast: u32, linger_us: *mut u64) -> i32 {
-	ffi::enter(move || {
-		let broadcast = ffi::parse_id(broadcast)?;
-		let linger_us = unsafe { linger_us.as_mut() }.ok_or(Error::InvalidPointer)?;
-		let (finish, linger) = State::lock().publish.finish(broadcast)?;
-		*linger_us = u64::try_from(linger.as_micros()).unwrap_or(u64::MAX);
-		Ok(finish)
-	})
-}
-
-/// Close a finished broadcast and release its handle, ending its linger.
+/// Finish every track first. The broadcast stays announced and keeps serving its finished
+/// tracks, so a subscriber that arrives late can still read them, until [moq_publish_close]
+/// takes it offline. How long to keep it up is yours to decide.
 ///
 /// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_publish_finish_close(finish: u32) -> i32 {
+pub extern "C" fn moq_publish_catalog_finish(broadcast: u32) -> i32 {
 	ffi::enter(move || {
-		let finish = ffi::parse_id(finish)?;
-		State::lock().publish.finish_close(finish)
+		let broadcast = ffi::parse_id(broadcast)?;
+		State::lock().publish.catalog_finish(broadcast)
 	})
 }
 
@@ -2342,8 +2323,8 @@ pub extern "C" fn moq_publish_media_seek(media: u32, sequence: u64) -> i32 {
 
 /// Finish a media track, flushing any buffered frames. No more frames can be written.
 ///
-/// The broadcast keeps the finished track, catalog rendition included, until it closes or its
-/// [moq_publish_finish] linger ends, so a late subscriber can still drain it.
+/// The broadcast keeps the finished track, catalog rendition included, until it closes, so a
+/// late subscriber can still drain it.
 ///
 /// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
@@ -2469,8 +2450,8 @@ pub extern "C" fn moq_publish_container_seek(container: u32, sequence: u64) -> i
 
 /// Finish every track the container publishes and release the handle.
 ///
-/// The broadcast keeps the finished tracks, catalog renditions included, until it closes or its
-/// [moq_publish_finish] linger ends, so a late subscriber can still drain them.
+/// The broadcast keeps the finished tracks, catalog renditions included, until it closes, so a
+/// late subscriber can still drain them.
 ///
 /// Returns zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
@@ -2857,8 +2838,8 @@ pub unsafe extern "C" fn moq_publish_track_datagram(
 
 /// Finish a raw track and release its handle. No more groups or frames can be written.
 ///
-/// The broadcast keeps the finished track until it closes or its [moq_publish_finish] linger
-/// ends, so a late subscriber can still drain it.
+/// The broadcast keeps the finished track until it closes, so a late subscriber can still
+/// drain it.
 ///
 /// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]

@@ -84,6 +84,14 @@ and leaves subscriptions already in flight alone until each track ends or its
 last subscriber leaves. A graceful session close withdraws its announcements
 and waits up to one second for them to be delivered. An abort skips that.
 
+A broadcast has no finished state. Online means announced, and offline means
+no route is left. The end of content is a track FIN: the publisher finishes
+each track, and a hang broadcast also finishes its catalog. A finished track
+stays servable to the subscribers it already has, including through a relay
+whose upstream session has since gone. How long a finished broadcast stays
+announced for late readers is the application's retention policy, such as the
+`--linger` of [`moq import`](/bin/cli), not a protocol state.
+
 ### Publisher epochs
 
 A route may carry an epoch: a UUIDv7 naming the publisher instance behind it.

@@ -607,7 +607,7 @@ impl MoqBroadcastPrepared {
 		if let Some(state) = state.as_mut() {
 			state.publication = Some(publication);
 		}
-		// A finished fill has released this state; its Finish retains the publication.
+		// A fill releases this state only on close, which native admission refuses.
 		Ok(self.broadcast.clone())
 	}
 }
@@ -702,7 +702,7 @@ mod supervision_tests {
 	}
 
 	#[tokio::test]
-	async fn a_finish_after_a_driver_panic_closes_the_broadcast() {
+	async fn a_finish_after_a_driver_panic_reports_it_until_the_close() {
 		let (inner, completion, trigger) = crate::ffi::panicking_origin();
 		let origin = MoqOriginProducer::from_inner(Origin {
 			inner,
@@ -712,11 +712,15 @@ mod supervision_tests {
 		// A dynamic handle outlives the consumed producer, so only an explicit close ends it.
 		let _dynamic = broadcast.dynamic().unwrap();
 		let consumer = broadcast.state.lock().unwrap().as_ref().unwrap().broadcast.consume();
+		let catalog = crate::media::MoqMediaCatalogProducer::new(broadcast.clone()).unwrap();
 		*trigger
 			.write()
 			.unwrap_or_else(|_| unreachable!("test keeps its panic trigger open")) = true;
 		assert!(matches!(completion.finished().await, Err(MoqError::Task { .. })));
-		assert!(matches!(broadcast.finish(), Err(MoqError::Task { .. })));
+		assert!(matches!(catalog.finish(), Err(MoqError::Task { .. })));
+		// The handle stays the caller's to close, and the close still ends the broadcast.
+		assert!(!consumer.is_closed());
+		assert!(matches!(broadcast.close(), Err(MoqError::Task { .. })));
 		assert!(consumer.is_closed());
 	}
 

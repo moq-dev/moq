@@ -549,14 +549,24 @@ struct SubscriptionCleanup(Lock<HashMap<u64, TrackEntry>>);
 impl SubscriptionCleanup {
 	/// End every active subscription with the session's error. Group machines own
 	/// their cleanup independently; this records the track's terminal state.
+	///
+	/// A subscription the publisher already ended finishes instead, here and on
+	/// [`Self::close`]: its track is over, and what arrived stays servable to readers
+	/// still behind rather than handed to another route.
 	fn abort(&self, err: &Error) {
 		for (_, entry) in self.0.lock().drain() {
-			let _ = entry.producer.abort(err.clone());
+			let _ = match entry.tail.read().is_ended() {
+				true => entry.producer.finish(),
+				false => entry.producer.abort(err.clone()),
+			};
 		}
 	}
 	fn close(&self) {
 		for (_, entry) in self.0.lock().drain() {
-			let _ = entry.producer.close();
+			let _ = match entry.tail.read().is_ended() {
+				true => entry.producer.finish(),
+				false => entry.producer.close(),
+			};
 		}
 	}
 }
@@ -4290,44 +4300,56 @@ mod tests {
 		}
 	}
 
+	/// A session that dies hands a live track back with the session's error, but finishes one
+	/// whose subscription the publisher already ended, as the driver's cleanup does.
 	#[moq_clock::test]
-	async fn internal_tail_settle_preserves_the_session_error() {
+	async fn internal_session_end_gives_back_live_and_finishes_ended() {
 		use crate::transport::poll::Session as _;
-		let (session, mut peer) = crate::transport::memory::pair(Default::default());
-		let subscriber = Subscriber::new(SubscriberConfig {
-			runtime: crate::time::sim(),
-			session: crate::driver::Transport::new(session.clone()),
-			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
-			recv_bandwidth: None,
-			version: VERSION,
-			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Binding::InBand),
-			peer_hop: None,
-			cost: None,
-			going_away: Default::default(),
-			auth: crate::auth::Link::new(false),
-		});
-		let serve = TrackServe {
-			validity: Default::default(),
-			route: None,
-			subscriber,
-			path: Path::new("room").to_owned(),
-			epoch: None,
-			name: "video".into(),
-		};
-		let broadcast = crate::broadcast::Info::new().produce();
-		let mut serving = ServeLoop::new(&serve, broadcast.reserve_track("video").unwrap(), Default::default());
-		let _reader = serving.serving.subscribe(None);
-		let tail = kio::Producer::new(Tail::default());
-		serving.mode = ServeMode::Tail {
-			settle: Settle::new(&serve.subscriber.runtime, tail.consume()),
-			owed: Some(0..1),
-		};
-		assert!(serving.poll(&serve, &kio::Waiter::noop()).is_pending());
-		peer.close(crate::SessionError::Unauthorized.to_code(), "revoked");
-		assert!(matches!(
-			serving.poll(&serve, &kio::Waiter::noop()),
-			Poll::Ready(ServeEnd::GiveBack(Error::Session(crate::SessionError::Unauthorized)))
-		));
+		for ended in [false, true] {
+			let (session, mut peer) = crate::transport::memory::pair(Default::default());
+			let subscriber = Subscriber::new(SubscriberConfig {
+				runtime: crate::time::sim(),
+				session: crate::driver::Transport::new(session.clone()),
+				origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				recv_bandwidth: None,
+				version: VERSION,
+				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Binding::InBand),
+				peer_hop: None,
+				cost: None,
+				going_away: Default::default(),
+				auth: crate::auth::Link::new(false),
+			});
+			let serve = TrackServe {
+				validity: Default::default(),
+				route: None,
+				subscriber,
+				path: Path::new("room").to_owned(),
+				epoch: None,
+				name: "video".into(),
+			};
+			let broadcast = crate::broadcast::Info::new().produce();
+			let mut serving = ServeLoop::new(&serve, broadcast.reserve_track("video").unwrap(), Default::default());
+			let _reader = serving.serving.subscribe(None);
+			assert!(serving.poll(&serve, &kio::Waiter::noop()).is_pending());
+			// Held for the whole round: a dropped tail settles at once.
+			let tail = kio::Producer::new(Tail::default());
+			if ended {
+				serving.mode = ServeMode::Tail {
+					settle: Settle::new(&serve.subscriber.runtime, tail.consume()),
+					owed: Some(0..1),
+				};
+				assert!(serving.poll(&serve, &kio::Waiter::noop()).is_pending());
+			}
+			peer.close(crate::SessionError::Unauthorized.to_code(), "revoked");
+			let end = serving.poll(&serve, &kio::Waiter::noop());
+			match ended {
+				true => assert!(matches!(end, Poll::Ready(ServeEnd::Finished))),
+				false => assert!(matches!(
+					end,
+					Poll::Ready(ServeEnd::GiveBack(Error::Session(crate::SessionError::Unauthorized)))
+				)),
+			}
+		}
 	}
 
 	/// A publisher that finishes the track stops reading its subscribe stream, so a
@@ -7165,9 +7187,12 @@ impl ServeLoop {
 					if self.fetches.is_empty() && crate::util::poll_unwanted(&mut self.demand, waiter).is_ready() {
 						return Poll::Ready(ServeEnd::Idle);
 					}
+					// The publisher already ended the subscription, so a session that dies now
+					// finishes the track, as `SubscriptionCleanup` does, rather than hand it
+					// to another route.
 					let mut cx = std::task::Context::from_waker(waiter.waker());
-					if let Poll::Ready(err) = self.closed.poll_closed(&mut cx) {
-						return Poll::Ready(ServeEnd::GiveBack(crate::lite::error::from_transport(err)));
+					if self.closed.poll_closed(&mut cx).is_ready() {
+						return Poll::Ready(ServeEnd::Finished);
 					}
 					return Poll::Pending;
 				}
@@ -7389,6 +7414,7 @@ impl ServeLoop {
 								// (it bounds presentation-time drift), but it is how long the
 								// subscriber was willing to wait for a late group anyway.
 								if let Ok(mut tail) = active.tail.write() {
+									tail.end();
 									tail.set_grace(tail::grace(
 										subscription.map(|sub| sub.budget()).unwrap_or_default(),
 									));

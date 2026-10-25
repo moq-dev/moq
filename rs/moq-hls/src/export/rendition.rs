@@ -574,8 +574,8 @@ impl Rendition {
 	/// ready" rather than serve it.
 	///
 	/// Fails with [`TimelineFailed`](crate::Error::TimelineFailed) once the reference timeline
-	/// or this rendition's own timeline failed, rather than ending a truncated playlist with
-	/// `EXT-X-ENDLIST`. A server should answer that with an uncacheable error.
+	/// or this rendition's own timeline failed, or [`CatalogFailed`](crate::Error::CatalogFailed)
+	/// once the catalog did, rather than ending a truncated playlist with `EXT-X-ENDLIST`. A server should answer that with an uncacheable error.
 	///
 	/// A denied referenced broadcast propagates the underlying authorization error; it is
 	/// not missing media. The HTTP server answers it with 403 and no-store.
@@ -608,8 +608,7 @@ impl Rendition {
 	/// Waits without bound for the first segment; bounding it is the caller's policy. `query`
 	/// propagates exactly as in [`media_playlist`](Self::media_playlist).
 	///
-	/// A failed timeline fails it with [`TimelineFailed`](crate::Error::TimelineFailed), as in
-	/// [`media_playlist`](Self::media_playlist).
+	/// A failed timeline or catalog fails it as in [`media_playlist`](Self::media_playlist).
 	pub async fn playlist(&self, query: Option<&str>) -> Result<Option<String>> {
 		// A denied reference is refused before anything else, so no other error masks it.
 		self.authorize()?;

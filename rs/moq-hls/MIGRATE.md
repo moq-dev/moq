@@ -4,6 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A failed catalog fails listings and cursors with `CatalogFailed`
+
+A catalog stream that ends in an error now fails every rendition's playlist,
+manifest, and recording cursor with `Error::CatalogFailed { source }` instead of
+the raw `source`. Before, a recording cursor returned the raw network error
+(such as `Unroutable`) when the catalog failed before the reference timeline
+did, so a caller could not tell that final failure from a retryable fetch error.
+Match `CatalogFailed` wherever you match `TimelineFailed`, and look through
+`source` for the underlying error.
+
 ### Rendition URLs name the publisher instance
 
 `Server` follows each instance that takes over a broadcast, and every URL the

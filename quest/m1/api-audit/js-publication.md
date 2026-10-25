@@ -21,19 +21,19 @@ the fill broadcast and its announcement capability.
 
 - `Producer.createBroadcast` (`js/net/src/origin.ts`) and `Prepared.publish`
   return `Publication`. It exposes the fill producer as `broadcast`, plus
-  `announce(route)`, `unannounce()`, `route`, and `finish()` handing off to
-  the existing `broadcast.Finish`. No way to swap in another producer.
+  `announce(route)`, `unannounce()`, and `route`. No way to swap in another
+  producer, and no `finish`: a broadcast has no finished state.
 - `broadcast.Producer` loses its public `announce`, `unannounce`, and `route`
   (`js/net/src/broadcast.ts`); the announcer stays a module hook.
-- Lifetime matches Rust: publication clones (or references), fill handles, and
-  a `Finish` keep the existing broadcast lifetime; dropping a `Publication` does
-  not retract on its own. `unannounce` retracts sooner.
+- Lifetime matches Rust: publication clones (or references) and fill handles
+  keep the existing broadcast lifetime; dropping a `Publication` does not
+  retract on its own. `unannounce` retracts sooner.
 - Migrate every caller: `js/net` tests, benches, and examples, `js/publish`,
   `js/moq-boy`, the `js/e2ee` docs, `js/watch` and `js/hang` tests, and
   `demo/carla`. Add the `js/net/MIGRATE.md` entry and update
   `doc/lib/js/net.md`.
 
-Test: clone/drop, explicit unannounce, a finished tail, Prepared admission,
+Test: clone/drop, explicit unannounce, Prepared admission,
 and a stale publication against a replacement under a new epoch.
 
 Public API: breaking in `@moq/net`. Wire: none.

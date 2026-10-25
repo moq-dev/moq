@@ -46,6 +46,29 @@ Decided by the maintainer on 2026-10-17:
 - The archive does not use these records, and DVR seeks with `Time(pts)`
   ranges.
 
+Decided with the maintainer on 2026-10-24, from the moq-hls audit: this quest
+is the export's segment-finalization redesign, with no separate quest. The
+audit traced several bugs to a segment's frames, timing, and muxing inputs
+being decided in different places, some again on each request:
+
+- **Each rendition times its segments from its own records.** `EXTINF`, DASH
+  `t`/`d`, the fragment's `tfdt`, and the recorder's duration all come from
+  that rendition's record n and n+1. Today a keyframe-snapped rendition can
+  serve up to a second more or less video than the reference row it
+  advertises.
+- **No catalog estimate changes media bytes.** A segment is served only once
+  complete, so its last frame lasts until the next record's pts, or the ended
+  track's explicit duration. Today `Rendition::muxer` is rebuilt per request
+  from the live framerate, so the same URL can return a different `trun` after
+  an estimate update. Rejected: snapshotting the framerate per instance, which
+  is still a guess and wrong for VFR.
+- **Slices start at group boundaries.** With mid-group records gone, no
+  segment starts on an inter frame, so the fMP4 muxer's first-frame keyframe
+  flag stays true. A group that does not open on an IDR is
+  [export sync flags](/quest/m2/intra-refresh/export-sync-flags.md).
+- **`Spans` goes, and with it its unbounded growth** while a stalled
+  reference stops trimming a sibling's records.
+
 Guidance:
 
 - Fold in the old README's fix: `moq-mux`'s consumer refuses a record whose

@@ -1225,9 +1225,14 @@ mod tests {
 
 		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
 		let (session, driver) = client.connect(moq_clock::now(), fake.clone()).await.unwrap();
+		let mut bandwidth = session.send_bandwidth().expect("backend reports an estimate");
+		assert_eq!(
+			bandwidth.peek(),
+			Some(crate::bandwidth::Rate::from_bps(1_000_000)),
+			"the estimate is readable before the sampler first runs"
+		);
 		moq_clock::sim::spawn(crate::time::run(driver));
 
-		let mut bandwidth = session.send_bandwidth().expect("backend reports an estimate");
 		assert_eq!(
 			bandwidth.changed().await.unwrap(),
 			Some(crate::bandwidth::Rate::from_bps(1_000_000))

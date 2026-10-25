@@ -90,10 +90,6 @@ typedef BroadcastConsumer = MoqBroadcastConsumer;
 /// Receives tracks requested from a dynamically served broadcast.
 typedef BroadcastDynamic = MoqBroadcastDynamic;
 
-/// A cleanly ended broadcast, still announced and serving its finished tracks
-/// until its linger ends; close it to end the linger early.
-typedef BroadcastFinish = MoqBroadcastFinish;
-
 /// The write side of a raw track: append groups of frames.
 typedef TrackProducer = MoqTrackProducer;
 

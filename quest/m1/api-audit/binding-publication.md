@@ -20,11 +20,11 @@ once the native PR merges. The native PR keeps private adapters that hold the
 `admit`); this quest replaces them with public handles.
 
 The shape is Rust's: an origin-owned record holding the fill broadcast and its
-announcement capability, with the existing fill and finish lifetime (dropping
-the publication does not retract on its own).
+announcement capability, with the existing fill lifetime (dropping the
+publication does not retract on its own).
 
 - moq-ffi: a `MoqPublication` object with `broadcast()`, `announce`
-  (taking `MoqAnnounceRoute`), `unannounce`, and `finish`.
+  (taking `MoqAnnounceRoute`), and `unannounce`.
   `MoqOriginProducer::create_broadcast` and `MoqBroadcastPrepared::publish`
   return it; `MoqBroadcastProducer` loses `announce` and `unannounce`.
 - C ABI, recommended shape: `moq_origin_create_broadcast(origin, path,
@@ -37,11 +37,8 @@ the publication does not retract on its own).
 - Wrappers: py, swift, kt, dart, `go/wrapper`, `cpp/moq`, and `cpp/obs`, with
   their tests, READMEs, `doc/lib/{py,swift,kt,go,dart,c,cpp}`, `doc/bin/obs.md`,
   and a `MIGRATE.md` entry in each package. Regenerate bindings from source.
-- A finished-but-open prepared answer stays publishable and serveable through
-  its retained finish; a missing binding fill registry after finish does not
-  mean the native broadcast closed.
 
-Test in each layer: clone/drop, explicit unannounce, a finished tail, prepared
+Test in each layer: clone/drop, explicit unannounce, prepared
 admission (including a mismatched fill), and a stale publication against a
 replacement. Run `just test interop --all`.
 

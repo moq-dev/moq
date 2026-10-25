@@ -177,7 +177,7 @@ const MIN_DELAY: Duration = Duration::from_secs(1);
 pub(crate) struct Options {
 	/// The muxer's delay, at least [`MIN_DELAY`] ([`Subscriber::new`]).
 	pub latency: Duration,
-	/// How long a return or stitched replacement has to supply its first catalog.
+	/// How long to wait for the broadcast to come back once it ends.
 	pub follow: Duration,
 	/// Follow another instance replacing the broadcast, as a full program switch.
 	pub stitch: bool,
@@ -223,7 +223,7 @@ impl Subscriber {
 		let catalog = source.catalog::<ts::Ext>(moq_mux::catalog::CatalogFormat::Hang).await?;
 		let export = ts::Export::new(source, catalog).with_delay(options.latency.max(MIN_DELAY));
 		let follower = ts::Follower::new(export)?
-			.with_linger(options.follow)
+			.with_follow(options.follow)
 			.with_stitch(options.stitch);
 		Ok(Some(Self { follower }))
 	}

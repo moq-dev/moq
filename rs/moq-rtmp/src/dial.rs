@@ -602,9 +602,10 @@ impl Publisher {
 		Ok(moq_mux::Linger::new([self.broadcast.broadcast().clone()], self, linger))
 	}
 
-	/// Flush any buffered media, then end the broadcast so the origin unannounces it at once.
+	/// Flush any buffered media and finish the catalog, then end the broadcast so the origin unannounces it at once.
 	fn close(mut self) -> anyhow::Result<()> {
 		self.importer.finish()?;
+		self.catalog.finish()?;
 		self.broadcast.close();
 		Ok(())
 	}
@@ -614,6 +615,7 @@ impl Publisher {
 	///
 	/// Consumes the publisher and closes the broadcast.
 	fn abort(self, err: moq_net::Error) {
+		self.catalog.abort(err.clone());
 		self.importer.abort(err);
 		self.broadcast.close();
 	}

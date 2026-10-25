@@ -3371,7 +3371,6 @@ impl Producer {
 		TrackWeak {
 			name: self.name.clone(),
 			state: self.state.weak(),
-			alive: Arc::downgrade(&self.alive),
 		}
 	}
 
@@ -3756,50 +3755,9 @@ fn clamp_combined(combined: Option<Subscription>, bound: Option<Duration>) -> Op
 pub(super) struct TrackWeak {
 	name: Arc<str>,
 	state: kio::ProducerWeak<TrackState>,
-	// The producers' teardown guard, upgraded by [`Self::hold_finished`].
-	alive: std::sync::Weak<Alive>,
-}
-
-/// Keeps a finished track servable after its producers drop; see [`TrackWeak::hold_finished`].
-pub(in crate::model) struct Hold {
-	_alive: Arc<Alive>,
-	/// The track's [`Info::max_age`], clamped to the broadcast's `cache_duration`.
-	pub max_age: Option<Duration>,
 }
 
 impl TrackWeak {
-	/// Hold the track open if it finished cleanly, so lookups keep finding it after its
-	/// producers drop. `None` for a track still live (even one with a declared end ahead of
-	/// its live edge, or a group still open), aborted, never published, or gone.
-	///
-	/// Seals a held track: a lower group a surviving producer creates afterward would
-	/// outlive the linger fixed here, so it is refused instead.
-	pub(in crate::model) fn hold_finished(&self) -> Option<Hold> {
-		let alive = self.alive.upgrade()?;
-		if !alive.published.load(Ordering::Relaxed) {
-			return None;
-		}
-		let mut state = alive.state.write().ok()?;
-		// A declared end the live edge has yet to reach still has groups to come.
-		if !state.is_complete() || state.abort.is_some() {
-			return None;
-		}
-		// An open group still takes frames, which could land after the linger fixed here.
-		let open = |group: &group::Handle| !group.is_finished() && !group.is_aborted();
-		if state.lookup.values().any(|slot| slot.copies().any(open)) {
-			return None;
-		}
-		state.sealed = true;
-		let ceiling = state.broadcast.cache_duration;
-		let max_age = state
-			.info
-			.as_ref()
-			.and_then(|info| info.max_age)
-			.map(|age| age.min(ceiling));
-		drop(state);
-		Some(Hold { _alive: alive, max_age })
-	}
-
 	/// Join the cached track's demand, or `None` once it has closed.
 	///
 	/// The count moves under the same lock the close takes, which is the other half
@@ -7652,7 +7610,6 @@ impl Request {
 		TrackWeak {
 			name: self.name.clone(),
 			state: self.state.weak(),
-			alive: Arc::downgrade(&self.alive),
 		}
 	}
 }

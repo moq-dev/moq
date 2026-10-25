@@ -166,7 +166,7 @@ No duplicate quest or workflow edit belongs here.
   and publish Fanout/audio-ring profiling. QUIC protocol microbenchmarks use
   `Unlimited`; their numbers cannot establish controller performance. Expand
   reassembly flight/reordering coverage there before proposing another index.
-  [BBR study](/quest/m2/quic-bbr-natural-drain.md) owns controller behavior.
+  [BBR study](/quest/m2/quic-bbr-study.md) owns controller behavior.
 - Archive reader internals are being replaced by the
   [archive consumer](/quest/m1/archive/consumer.md). Do not optimize the
   outgoing timeline reader. Benchmark the landed replacement when revisiting it.

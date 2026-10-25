@@ -1535,10 +1535,11 @@ impl Publisher {
 		Ok(moq_mux::Linger::new([self.broadcast.broadcast().clone()], self, linger))
 	}
 
-	/// Flush any buffered media, close out the broadcast's open groups, and end
+	/// Flush any buffered media, finish the catalog, close out the broadcast's open groups, and end
 	/// the broadcast so the origin unannounces it immediately.
 	fn close(mut self) -> anyhow::Result<()> {
 		self.importer.finish()?;
+		self.catalog.finish()?;
 		self.broadcast.close();
 		Ok(())
 	}
@@ -1549,6 +1550,7 @@ impl Publisher {
 	///
 	/// Consumes the publisher and closes the broadcast.
 	fn abort(self, err: moq_net::Error) {
+		self.catalog.abort(err.clone());
 		self.importer.abort(err);
 		self.broadcast.close();
 	}
@@ -1764,6 +1766,34 @@ mod tests {
 			assert_eq!(start.elapsed(), linger);
 			assert!(broadcast.is_closed());
 		}
+	}
+
+	/// A hangup ends the catalog too, so a reader sees the publisher go rather than a
+	/// producer dropped unfinished.
+	#[tokio::test(start_paused = true)]
+	async fn a_hangup_ends_the_catalog() {
+		let origin = moq_tokio::origin::spawn();
+		let consumer = origin.consume();
+		let (mut client, server) = tokio::io::duplex(64 * 1024);
+		let accept = tokio::spawn(accept_publish(server, origin.clone(), Duration::ZERO));
+		let catalog = async {
+			consumer.routed("live/cam0").await.unwrap();
+			let broadcast = consumer.request_broadcast("live/cam0", None).await.unwrap();
+			let track = broadcast.track(hang::Catalog::DEFAULT_NAME).unwrap();
+			track.subscribe(None).await.unwrap()
+		};
+		// Holding the stream past the publish keeps the hangup until the catalog is subscribed.
+		let (mut catalog, ()) = tokio::join!(catalog, publish_one_keyframe(&mut client, Leave::Hangup));
+		drop(client);
+		accept.await.unwrap();
+
+		let end = loop {
+			match catalog.recv_group().await {
+				Ok(Some(_)) => continue,
+				end => break end.map(|_| ()),
+			}
+		};
+		assert!(end.is_ok(), "the catalog ends cleanly: {end:?}");
 	}
 
 	/// A late subscriber still reads the finished media during the linger, and an encoder

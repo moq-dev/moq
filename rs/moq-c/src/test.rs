@@ -2303,7 +2303,7 @@ fn close_invalid_or_zero_ids() {
 }
 
 /// A finished broadcast serves its finished tracks to a late subscriber, even after their
-/// handles were freed, and reports the longest max age among them as its linger.
+/// handles were freed, until it closes.
 #[test]
 fn publish_finish_serves_finished_tracks_until_closed() {
 	let origin = id(moq_origin_create());
@@ -2313,8 +2313,8 @@ fn publish_finish_serves_finished_tracks_until_closed() {
 	let name = b"data";
 	let info = moq_track_info {
 		priority: 0,
-		max_age_us: 5_000_000,
-		max_age_present: true,
+		max_age_us: 0,
+		max_age_present: false,
 		timescale: 0,
 		timescale_present: false,
 		refresh: 0,
@@ -2342,16 +2342,7 @@ fn publish_finish_serves_finished_tracks_until_closed() {
 	);
 	assert_eq!(moq_publish_media_finish(media), 0);
 
-	// A NULL out-pointer is refused before the broadcast is consumed.
-	assert!(unsafe { moq_publish_finish(broadcast, std::ptr::null_mut()) } < 0);
-	let mut linger_us = 0;
-	let finish = id(unsafe { moq_publish_finish(broadcast, &mut linger_us) });
-	// The media track's default max age outlasts the raw track's.
-	assert!(linger_us >= 5_000_000, "linger {linger_us}us");
-	assert!(
-		moq_publish_close(broadcast) < 0,
-		"a finished broadcast handle is released"
-	);
+	assert_eq!(moq_publish_catalog_finish(broadcast), 0);
 
 	let consume = request_broadcast(origin, path);
 	let frame_cb = Callback::new();
@@ -2389,9 +2380,9 @@ fn publish_finish_serves_finished_tracks_until_closed() {
 	assert_eq!(frame_cb.recv_terminal(), 0);
 	assert_eq!(moq_consume_close(consume), 0);
 
-	assert_eq!(moq_publish_finish_close(finish), 0);
-	assert!(moq_publish_finish_close(finish) < 0, "a closed finish is released");
-	assert!(request_once(origin, path) < 0, "a closed finish is unroutable");
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert!(moq_publish_close(broadcast) < 0, "a closed broadcast is released");
+	assert!(request_once(origin, path) < 0, "a closed broadcast is unroutable");
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -2772,40 +2763,6 @@ fn dynamic_serves_a_request_under_a_prefix() {
 	assert!(moq_origin_dynamic_cancel(dynamic) < 0, "double-cancel should fail");
 	assert_eq!(cb.recv_terminal(), 0);
 	assert_eq!(moq_publish_close(served), 0);
-	assert_eq!(moq_origin_close(origin), 0);
-}
-
-#[test]
-fn a_finished_prepared_fill_can_still_be_published() {
-	let origin = id(moq_origin_create());
-	let cb = Callback::new();
-	let dynamic = id(unsafe { moq_origin_dynamic(origin, std::ptr::null(), 0, Some(channel_callback), cb.ptr) });
-	let path = b"finished/answer";
-	let pending = Callback::new();
-	id(unsafe {
-		moq_origin_request(
-			origin,
-			path.as_ptr().cast(),
-			path.len(),
-			Some(channel_callback),
-			pending.ptr,
-		)
-	});
-	let request = id(cb.recv());
-	let epoch = moq_net::Epoch::mint().to_string();
-	let mut fill = 0;
-	let prepared = id(unsafe { moq_broadcast_request_prepare(request, epoch.as_ptr().cast(), epoch.len(), &mut fill) });
-	let mut linger = 0;
-	let finished = id(unsafe { moq_publish_finish(fill, &mut linger) });
-	assert_eq!(moq_broadcast_prepared_publish(prepared), 0);
-	let current = id(pending.recv());
-	assert_eq!(pending.recv_terminal(), 0);
-	let late = id(request_once(origin, path));
-	assert_eq!(moq_consume_close(current), 0);
-	assert_eq!(moq_consume_close(late), 0);
-	assert_eq!(moq_publish_finish_close(finished), 0);
-	assert_eq!(moq_origin_dynamic_cancel(dynamic), 0);
-	assert_eq!(cb.recv_terminal(), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 

@@ -128,6 +128,14 @@ pub enum Error {
 		source: Box<Error>,
 	},
 
+	/// The catalog failed before it finished, so every rendition's listings refuse and its
+	/// recording cursors end, rather than read as a finished recording or a transient fetch error.
+	#[error("catalog failed: {source}")]
+	CatalogFailed {
+		/// Why the catalog failed.
+		source: Box<Error>,
+	},
+
 	/// A media playlist already carried `EXT-X-ENDLIST` when import first saw it; import follows live playlists only.
 	#[error("playlist already ended (EXT-X-ENDLIST); HLS import follows live playlists only")]
 	PlaylistEnded,

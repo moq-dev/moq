@@ -214,6 +214,34 @@ mod tests {
 		offer.to_sdp_string()
 	}
 
+	/// A session that ends without a DELETE, here one that never connects, ends its tracks
+	/// with the transport cause, so a reader sees the publisher go rather than a producer
+	/// dropped unfinished.
+	#[tokio::test(start_paused = true)]
+	async fn a_session_ending_without_a_delete_ends_its_tracks() {
+		let server = Server::new(crate::server::Config::default());
+		let origin = moq_tokio::origin::spawn();
+		let consumer = origin.consume();
+		let session = accept(&server, &origin, "live/cam0", &offer()).await.unwrap();
+		let broadcast = consumer.request_broadcast("live/cam0", None).await.unwrap();
+		let mut catalog = broadcast
+			.track(hang::Catalog::DEFAULT_NAME)
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap();
+
+		let ended = session.run().await;
+		assert!(matches!(ended, Err(crate::Error::IceTimeout)), "{ended:?}");
+		let end = loop {
+			match catalog.recv_group().await {
+				Ok(Some(_)) => continue,
+				end => break end.map(|_| ()),
+			}
+		};
+		assert!(matches!(end, Err(moq_net::Error::Transport(_))), "{end:?}");
+	}
+
 	/// An encoder reconnecting to the same broadcast while its stale session is still
 	/// open restarts the broadcast at once: each offer is its own epoch, so a fresh
 	/// request reaches the reconnect, while the stale viewer stays on the old one until

@@ -569,8 +569,10 @@ impl Consumer {
 	///
 	/// Once a timeline fails (the reference's, or this rendition's own), the cursor drains the
 	/// segments it still covers, then fails every call with
-	/// [`TimelineFailed`](crate::Error::TimelineFailed), as [`Rendition::playlist`] does. A
-	/// denied referenced broadcast fails every call with its authorization error.
+	/// [`TimelineFailed`](crate::Error::TimelineFailed), as [`Rendition::playlist`] does; a
+	/// failed catalog likewise with [`CatalogFailed`](crate::Error::CatalogFailed). Either is
+	/// final, whichever lands first. A denied referenced broadcast fails every call with its
+	/// authorization error.
 	///
 	/// Waits for the next segment to resolve on this rendition, then FETCHes and transmuxes its
 	/// frames. A gap for this rendition is skipped. Missing window rows or unavailable media
