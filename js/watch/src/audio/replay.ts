@@ -236,9 +236,8 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 				}
 				let group = groups.get(arrival.group);
 				if (!group) {
-					group = new Group.Producer(arrival.group);
+					group = track.createGroup(arrival.group);
 					groups.set(arrival.group, group);
-					track.writeGroup(group);
 				}
 				const timestamp = micros(arrival.timestamp);
 				group.writeFrame({

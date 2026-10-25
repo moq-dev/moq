@@ -512,8 +512,6 @@ export const hooks: {
 	 * the group joined accepted it.
 	 */
 	admitGroupStart: (group: GroupProducer, admit: (start: Timestamp) => () => void) => void;
-	/** Return a group producer's first timestamp, if it already holds a frame. */
-	groupStart: (group: GroupProducer) => Timestamp | undefined;
 	/** Whether a group's bytes after its first frame exceed `ratio` times the first frame. */
 	overRefresh: (group: GroupProducer, ratio: number) => boolean;
 	/** Keep a mirror of a group accepted unverified below its track's eviction watermark out of media-time expiry. */
@@ -681,9 +679,6 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	admitGroupStart: () => {
-		throw new Error("group.ts not loaded");
-	},
-	groupStart: () => {
 		throw new Error("group.ts not loaded");
 	},
 	overRefresh: () => {

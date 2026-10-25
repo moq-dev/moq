@@ -98,10 +98,9 @@ async function measure(t: Arrival[], budget: (target: Milli) => Milli): Promise<
 			clock = t[next].arrival;
 			for (; next < t.length && t[next].arrival === clock; next++) {
 				const media = Micro.fromMilli(t[next].media as Milli);
-				const group = new Group.Producer(next);
+				const group = track.createGroup(next);
 				group.writeFrame({ payload: encode(media), timestamp: Time.Timestamp.fromMicros(media) });
 				group.close();
-				track.writeGroup(group);
 			}
 
 			// A macrotask boundary, so the group readers have observed everything written above.

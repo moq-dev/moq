@@ -1551,8 +1551,7 @@ export class Subscriber {
 						`group ${group.groupId} is at or past the declared end ${subscription.end}`,
 					);
 				}
-				producer = new netGroup.Producer(group.groupId);
-				track.writeGroup(producer);
+				producer = track.createGroup(group.groupId);
 			}
 			return producer;
 		};

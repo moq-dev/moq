@@ -2,7 +2,7 @@ import { expect, setSystemTime, test } from "bun:test";
 import { Milli } from "@moq/clock";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { GroupTooLarge, NotFound, ProtocolViolation, TimestampMismatch } from "./error.ts";
-import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "./group.ts";
+import { MAX_GROUP_FRAMES } from "./group.ts";
 import { TrackSequences } from "./internal.ts";
 import { textFrame } from "./mock.ts";
 import { Timescale, Timestamp } from "./time.ts";
@@ -107,8 +107,7 @@ test("a replacement producer refuses a rewind past its predecessor", () => {
 	first.close();
 
 	const second = broadcast.createTrack("media", { timescale: Timescale.MILLI });
-	const group = new GroupProducer(1);
-	second.writeGroup(group);
+	const group = second.createGroup(1);
 	expect(() => group.writeFrame(textFrame("b", Timestamp.fromMillis(500)))).toThrow(TimestampMismatch);
 	group.writeFrame(textFrame("b", Timestamp.fromMillis(1000)));
 
@@ -148,7 +147,7 @@ test("a removed producer writes nothing once its replacement claims the name", a
 	const subscriber = second.subscribe();
 	second.close();
 	expect(() => first.appendGroup()).toThrow("replaced");
-	expect(() => first.writeGroup(new GroupProducer(1))).toThrow("replaced");
+	expect(() => first.createGroup(1)).toThrow("replaced");
 	expect(() => first.appendDatagram(Timestamp.fromMillis(0), new Uint8Array())).toThrow("replaced");
 	expect(await subscriber.finished()).toEqual({ group: 1, frame: 0 });
 	first.close();
@@ -183,7 +182,7 @@ test("a replacement producer refuses to append a sequence the name already wrote
 	const firstProducer = firstRequest.accept({ timescale: Timescale.MILLI });
 	expect(firstProducer.appendGroup().sequence).toBe(0);
 	expect(firstProducer.appendDatagram(Timestamp.fromMillis(0), new Uint8Array())).toBe(1);
-	firstProducer.writeGroup(new GroupProducer(8));
+	firstProducer.createGroup(8);
 	firstProducer.insertDatagram(12, Timestamp.fromMillis(0), new Uint8Array());
 	firstSubscriber.close();
 	firstProducer.close();
@@ -198,7 +197,7 @@ test("a replacement producer refuses to append a sequence the name already wrote
 	);
 
 	// An explicit first write picks the start, and appends continue from there.
-	secondProducer.writeGroup(new GroupProducer(13));
+	secondProducer.createGroup(13);
 	expect(secondProducer.appendGroup().sequence).toBe(14);
 
 	const nextGeneration = new BroadcastProducer();
@@ -274,14 +273,14 @@ test("created and requested tracks share a name's sequences", async () => {
 	const broadcast = new BroadcastProducer();
 	const first = broadcast.createTrack("media", { timescale: Timescale.MILLI });
 	expect(first.appendGroup().sequence).toBe(0);
-	first.writeGroup(new GroupProducer(8));
+	first.createGroup(8);
 	first.insertDatagram(12, Timestamp.fromMillis(0), new Uint8Array());
 	first.close();
 
 	// A replacement refuses to append past nothing, since that would reuse every explicit write.
 	const second = broadcast.createTrack("media", { timescale: Timescale.MILLI });
 	expect(() => second.appendGroup()).toThrow("duplicate sequence");
-	second.writeGroup(new GroupProducer(13));
+	second.createGroup(13);
 	second.close();
 
 	// An on-demand producer checks the same namespace, and so does a later created track.

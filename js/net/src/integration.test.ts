@@ -13,7 +13,6 @@ import {
 } from "./connection/index.ts";
 import * as Epoch from "./epoch.ts";
 import { SessionCode, SessionError, StreamCode, StreamError, TooFarBehind } from "./error.ts";
-import { Producer as GroupProducer } from "./group.ts";
 import * as Ietf from "./ietf/index.ts";
 import { Parameters } from "./ietf/parameters.ts";
 import { Publisher as IetfPublisher } from "./ietf/publisher.ts";
@@ -1043,8 +1042,7 @@ test.each(["gap", "end"])("integration: lite fetch rejects coalesced misses at %
 	let serving: Promise<void> | undefined;
 	if (missing === "gap") {
 		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
-		const group = new GroupProducer(1);
-		producer.writeGroup(group);
+		const group = producer.createGroup(1);
 		group.close();
 	} else {
 		serving = (async () => {

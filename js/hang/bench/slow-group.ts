@@ -15,9 +15,8 @@ for (const count of [1, 16, 256, 1024]) {
 		maxDelay,
 	});
 	const write = (sequence: number) => {
-		const group = new Group.Producer(sequence);
+		const group = track.createGroup(sequence);
 		group.writeFrame({ payload: Varint.encode(sequence * 1000), timestamp: Time.Timestamp.now() });
-		track.writeGroup(group);
 	};
 	const buffered = async (timestamp: number) => {
 		while (consumer.buffered.peek().at(-1)?.end !== timestamp) await consumer.buffered.changed();

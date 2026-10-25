@@ -229,7 +229,6 @@ export class Producer {
 			group.#admits ??= [];
 			group.#admits.push(admit);
 		};
-		hooks.groupStart = (group) => (group.#state.total.peek() > 0 ? group.#state.timestamp : undefined);
 		hooks.overRefresh = (group, ratio) => {
 			const state = group.#state;
 			const first = state.frames.peek()[0];
