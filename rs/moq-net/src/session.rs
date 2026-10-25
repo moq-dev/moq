@@ -210,6 +210,7 @@ impl Session {
 	/// Returns a consumer for the estimated send bitrate (from the congestion controller).
 	///
 	/// Returns `None` if the QUIC backend doesn't support bandwidth estimation.
+	/// Otherwise it holds an estimate from the start, the session's first sample.
 	pub fn send_bandwidth(&self) -> Option<bandwidth::Consumer> {
 		self.send_bandwidth.as_ref().map(bandwidth::Weak::consume)
 	}
@@ -415,8 +416,11 @@ impl Session {
 		}
 
 		// Send bandwidth is version-agnostic: it depends on QUIC backend support.
+		// Seeded with the first sample, so a consumer taken before the sampler
+		// first runs reads the estimate instead of `None`.
 		let (send_bandwidth, send_producer) = if sample.estimated_send_rate.is_some() {
 			let producer = bandwidth::Producer::new();
+			let _ = producer.set(sample.estimated_send_rate);
 			(Some(producer.weak()), Some(producer))
 		} else {
 			(None, None)

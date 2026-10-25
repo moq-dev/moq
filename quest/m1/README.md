@@ -93,7 +93,6 @@ Binding durations wait on Duration support in the generated C.
 
 - [moq-congestion](/quest/m1/congestion/README.md) - one QUIC congestion-control crate with a transport-independent trait, run by `moq-quic` and published for noq
 - [Release audit findings](/quest/m1/release-audit/README.md) - resolve newly identified resource, parser, playback, and interoperability risks before the cut
-- [JS SUBSCRIBE_TRACKS follows credit](/quest/m1/js-listing-credit.md) - a `@moq/net` listing opens PUBLISHes only as stream credit admits, like moq-net
 - [Cancelled moq-transport requests stop](/quest/m1/ietf-request-cancel.md) - a cancelled request releases its state even when the peer withholds credit
 - [Empty segments refused](/quest/m1/empty-segments.md) - `room//cam` fails loud instead of naming `room/cam`
 - [In-band auth](/quest/m1/auth/README.md) - a session tells its peer what it may publish and subscribe to, unions tokens presented in band, and fails loud on an out-of-scope publish
@@ -118,7 +117,6 @@ Binding durations wait on Duration support in the generated C.
 - [Moxygen minimal interop](/quest/m1/smoke-moxygen.md) - waiting on Moxygen to send a registered filter type, then the smoke lane stops hiding its failure
 - [More tests under load](/quest/m1/test-flakes-2/README.md) - the second round of load-only failures, one quest per flake, fixed at the cause
 - [Broadcast lifecycle](/quest/m1/broadcast-lifecycle/README.md) - broadcasts are online or offline with no finished state in moq-net, finished-broadcast retention is a fixed moq-mux policy, and each linger timer has one meaning
-- [JS interop tone](/quest/m1/interop-js-tone.md) - the `js ->` cells pass the audio check on every draft again, after the 2026-10-23 regression
 - [fMP4 edit lists](/quest/m1/fmp4-edit-lists.md) - the fMP4 importer applies edit lists to frame timestamps, so the interop AAC tone passes the phase check
 - [A smaller, safer API than release](/quest/m1/api-audit/README.md) - every surface added since release has a consumer or is gone, overlapping operations are collapsed, names mirror across Rust, JS, and the bindings, and every break says how to migrate
 - [moq-quic's API improves on quinn's](/quest/m1/quic-api/README.md) - moq-quic and both QUIC drivers ship one mirrored API: `send::`/`recv::` namespaces, one error per direction, consuming terminal operations, plain configs, no quinn baggage
@@ -167,7 +165,6 @@ Binding durations wait on Duration support in the generated C.
 - [Unbounded groups](/quest/m1/unbounded-groups/README.md) - groups and frames lose their size caps; the cache sheds parts of a group under pressure and refills the holes in place
 - [Clean close reason](/quest/m1/clean-close-reason.md) - a session that closes on its own is never recorded as `Unauthorized` because its in-band credentials closed with it
 - [Metric-safe tiers](/quest/m1/metric-tier.md) - tiers are `[A-Za-z0-9._-]` paths refused where they are set, and every metric label value is escaped
-- [WebRTC mDNS resolver](/quest/m1/webrtc-mdns-resolver.md) - each peer resolves its `.local` candidates in one owned task, one distinct name at a time
 
 ## Related
 

@@ -48,12 +48,8 @@ Decided by the maintainer on 2026-10-17:
 
 Guidance:
 
-- `moq-hls` history mode becomes explicit configuration only: today the
-  catalog's `store` marks a timeline durable (`durable` in
-  `rs/moq-hls/src/export/mod.rs`).
 - Fold in the old README's fix: `moq-mux`'s consumer refuses a record whose
-  `sequence` differs from its window index, as its `Producer::resume` already
-  does
+  `sequence` differs from its window index
   ([review](https://github.com/moq-dev/moq/pull/4280#pullrequestreview-5332725290)).
 - `js/hang` updates its schema and consumer; the JS producer and the
   `@moq/publish` opt-in are [JS HLS field](/quest/m2/js-hls.md).

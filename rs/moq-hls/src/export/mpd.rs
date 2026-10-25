@@ -74,9 +74,8 @@ pub(crate) struct Manifest {
 	pub availability_start: Option<Wall>,
 	/// When this render happened (`MPD@publishTime`, dynamic only).
 	pub publish: Wall,
-	/// The playlist window (`MPD@timeShiftBufferDepth`, dynamic only), or `None` when the
-	/// timeline bounds itself and the depth is the span it lists.
-	pub window: Option<Duration>,
+	/// The playlist window (`MPD@timeShiftBufferDepth`, dynamic only).
+	pub window: Duration,
 	/// The broadcast ended: render a `static` presentation instead of a `dynamic` one.
 	pub finished: bool,
 	/// Video representations, in catalog order.
@@ -124,20 +123,6 @@ fn frame_rate(rate: f64) -> Option<String> {
 /// `units` of `timescale` as a [`Duration`].
 fn duration(units: u64, timescale: u32) -> Duration {
 	Duration::from_nanos((u128::from(units) * 1_000_000_000 / u128::from(timescale.max(1))) as u64)
-}
-
-/// The retained presentation span across representations and reference periods.
-fn listed_span<'a>(representations: impl Iterator<Item = &'a Representation>) -> Duration {
-	let spans: Vec<_> = representations
-		.filter_map(|rep| {
-			let (first, _) = rep.segments.first()?;
-			let (last, d) = rep.segments.last()?;
-			Some((duration(*first, rep.timescale), duration(last + d, rep.timescale)))
-		})
-		.collect();
-	let first = spans.iter().map(|(first, _)| *first).min().unwrap_or_default();
-	let last = spans.iter().map(|(_, last)| *last).max().unwrap_or_default();
-	last.saturating_sub(first)
 }
 
 /// The largest listed segment duration in whole seconds, for `MPD@maxSegmentDuration` (and the
@@ -295,7 +280,7 @@ pub(crate) fn render_manifest(manifest: &Manifest, query: Option<&str>) -> Strin
 		// Reload cadence and live delay follow HLS conventions: players refresh about once
 		// per segment and sit a few segments behind the live edge (bounded by the window).
 		let update = Duration::from_secs(target);
-		let window = manifest.window.unwrap_or_else(|| listed_span(representations()));
+		let window = manifest.window;
 		let delay = Duration::from_secs(3 * target).min(window.max(update));
 		let _ = write!(
 			out,
@@ -378,7 +363,7 @@ mod tests {
 			instance: "run".into(),
 			availability_start: Some(Wall::UNIX_EPOCH),
 			publish: Wall::UNIX_EPOCH,
-			window: None,
+			window: Duration::from_secs(4),
 			finished: false,
 			video: vec![old, next],
 			audio: Vec::new(),
@@ -404,7 +389,7 @@ mod tests {
 			instance: "run".into(),
 			availability_start: Some(Wall::UNIX_EPOCH),
 			publish: Wall::UNIX_EPOCH,
-			window: None,
+			window: Duration::from_secs(16),
 			finished: false,
 			video: vec![next],
 			audio: Vec::new(),
@@ -440,7 +425,7 @@ mod tests {
 			instance: "run".into(),
 			availability_start: Some(Wall::UNIX_EPOCH + Duration::from_millis(1_751_846_400_123)),
 			publish: Wall::UNIX_EPOCH + Duration::from_millis(1_751_846_410_000),
-			window: Some(Duration::from_secs(16)),
+			window: Duration::from_secs(16),
 			finished: false,
 			video: vec![video(vec![(0, 2_000), (2_000, 2_000)], false)],
 			audio: vec![audio(vec![(0, 2_000), (2_000, 2_000)], false)],
@@ -481,7 +466,7 @@ mod tests {
 			instance: "run".into(),
 			availability_start: None,
 			publish: Wall::UNIX_EPOCH,
-			window: Some(Duration::from_secs(16)),
+			window: Duration::from_secs(16),
 			finished: true,
 			// The window starts mid-broadcast: presentation time stays anchored at pts 0 (no
 			// presentationTimeOffset), so the duration spans the lead-in and a live session
@@ -506,7 +491,7 @@ mod tests {
 			instance: "run".into(),
 			availability_start: Some(Wall::UNIX_EPOCH),
 			publish: Wall::UNIX_EPOCH,
-			window: Some(Duration::from_secs(16)),
+			window: Duration::from_secs(16),
 			finished: false,
 			video: vec![video(vec![(0, 2_000)], false)],
 			audio: Vec::new(),
@@ -525,7 +510,7 @@ mod tests {
 			instance: "run".into(),
 			availability_start: Some(Wall::UNIX_EPOCH),
 			publish: Wall::UNIX_EPOCH,
-			window: Some(Duration::from_secs(16)),
+			window: Duration::from_secs(16),
 			finished: false,
 			video: vec![rep],
 			audio: Vec::new(),
@@ -549,7 +534,7 @@ mod tests {
 			instance: "run".into(),
 			availability_start: Some(Wall::UNIX_EPOCH),
 			publish: Wall::UNIX_EPOCH,
-			window: Some(Duration::from_secs(16)),
+			window: Duration::from_secs(16),
 			finished: false,
 			video: vec![video(vec![(0, 2_000)], false)],
 			audio: vec![audio(Vec::new(), false)],
@@ -568,7 +553,7 @@ mod tests {
 				instance: "run".into(),
 				availability_start: Some(Wall::UNIX_EPOCH),
 				publish: Wall::UNIX_EPOCH,
-				window: Some(Duration::from_secs(16)),
+				window: Duration::from_secs(16),
 				finished: false,
 				video: vec![rep],
 				audio: Vec::new(),

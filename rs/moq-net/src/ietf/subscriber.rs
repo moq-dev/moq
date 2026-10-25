@@ -579,11 +579,6 @@ struct TrackState {
 	// The joining FETCH's own request id, when one was sent.
 	fetch_id: Option<RequestId>,
 
-	// Where the subscription asked to start, when that is partway through a group: a
-	// resumed subscription picking up after the frames a previous route delivered. The
-	// stream for that group legitimately starts there, without a head.
-	resume: Option<track::Position>,
-
 	// The data streams read so far, which PUBLISH_DONE's Stream Count is checked against.
 	tail: kio::Producer<Tail>,
 }
@@ -607,7 +602,6 @@ impl TrackState {
 			timescale: None,
 			fill,
 			fetch_id: None,
-			resume: None,
 			tail: Default::default(),
 		}
 	}
@@ -3055,10 +3049,6 @@ impl Subscriber {
 			state.subscribes.insert(
 				request_id,
 				TrackState {
-					resume: subscription
-						.as_ref()
-						.and_then(|s| s.start())
-						.filter(|start| start.frame != 0),
 					// A resumed copy is the session's to abort from here on.
 					producer: target.producer().cloned(),
 					epoch: self.epoch.clone(),
@@ -3381,7 +3371,7 @@ impl Subscriber {
 				};
 				// Pending until the answer is written in below, so a relay serving the copy
 				// never reads the requested floor as where the feed starts.
-				let request = request.request_start(start.map(|start| start.group));
+				let request = request.request_start(start);
 				// Serves cache misses with a group FETCH. Registered before accepting, so a
 				// miss queued meanwhile waits for it rather than failing for want of a handler.
 				let dynamic = request.dynamic();
@@ -3405,7 +3395,7 @@ impl Subscriber {
 		// may still arrive after a higher one's. This resolves the pending start.
 		let _ = match live {
 			true => track.start_at(largest.map_or(0, |largest| largest.group)),
-			false => track.start_at(start.map(|start| start.group)),
+			false => track.start_at(start),
 		};
 		if let Some(staged) = staged {
 			staged.commit();
@@ -4401,15 +4391,13 @@ impl Subscriber {
 			}
 		};
 
-		let (mut track, timescale, fill, resume, mut reading) = {
+		let (mut track, timescale, fill, mut reading) = {
 			let state = self.state.lock();
 			let track = state.subscribes.get(&request_id).ok_or(Error::NotFound)?;
 			(
 				track.producer.clone().ok_or(Error::NotFound)?,
 				track.timescale,
 				track.fill.clone(),
-				// Only the group the subscription resumes partway through.
-				track.resume.filter(|resume| resume.group == group.group_id),
 				// Every data stream counts toward PUBLISH_DONE's Stream Count, even one
 				// dropped below, and the subscription's end waits until it is read.
 				Reading::open(&track.tail, Some(group.group_id), self.runtime.now()),
@@ -4421,19 +4409,18 @@ impl Subscriber {
 		stream.set_priority(crate::priority::recv_group(priority, group.group_id, order));
 
 		// Peek before creating a group: a standalone END_OF_TRACK has no payload
-		// group, and a fill or resume may already own the prefix.
+		// group, and a fill may already own the prefix.
 		//
 		// The peek inside blocks until the publisher produces the group's first object, so
 		// race it against the subscription going away the same way the group read below is.
 		// Otherwise dropping the local subscriber cannot end this handler.
-		let passthrough = !fill.read().outstanding() && resume.is_none();
+		let passthrough = !fill.read().outstanding();
 		let opened = {
 			let mut opening = track.clone();
 			let mut open = std::pin::pin!(crate::util::sendable(self.open_group(
 				stream,
 				&mut opening,
 				&fill,
-				resume,
 				&group,
 				&mut reading
 			)));
@@ -4489,7 +4476,7 @@ impl Subscriber {
 		let mut producer = crate::recv::Group::new(producer);
 		let observing = producer.handle().clone();
 
-		let mut ingest = GroupIngest::new(self, &group, timescale, resume.map(|_| start));
+		let mut ingest = GroupIngest::new(self, &group, timescale);
 		let res = {
 			kio::wait(|waiter| {
 				if let Poll::Ready(err) = track.poll_closed(waiter) {
@@ -4727,7 +4714,6 @@ impl Subscriber {
 		stream: &mut Reader<crate::transport::boxed::RecvStream, Version>,
 		track: &mut track::Producer,
 		fill: &kio::Producer<Fill>,
-		resume: Option<track::Position>,
 		header: &ietf::GroupHeader,
 		reading: &mut Reading,
 	) -> Result<Opened, Error> {
@@ -4776,21 +4762,9 @@ impl Subscriber {
 			});
 		}
 
-		// Without a fill or resume, a relay preserves the subgroup's first Object ID
-		// and FIRST_OBJECT claim independently. Plain readers see only frame ordinals.
-
+		// Without a fill, a relay preserves the subgroup's first Object ID and FIRST_OBJECT
+		// claim independently. Plain readers see only frame ordinals.
 		if !fill.read().outstanding() {
-			// The group a resumed subscription picks up partway through starts where it
-			// asked, and a stream with no objects is the end of a group complete there.
-			// A publisher sending more of it (a pre-draft-20 join asks for all of it) has
-			// the objects below the start dropped as they arrive.
-			if let Some(resume) = resume
-				&& first.is_none_or(|first| first.id <= resume.frame)
-			{
-				let mut producer = create(track)?;
-				producer.start_at(resume.frame)?;
-				return Ok(Opened::Group(producer, first.map_or(resume.frame, |first| first.id)));
-			}
 			return Ok(Opened::Group(create(track)?, first.map_or(0, |first| first.id)));
 		}
 
@@ -4896,14 +4870,11 @@ struct GroupIngest {
 	timescale: Option<Timescale>,
 	version: Version,
 	prior_object: Option<u64>,
-	start: Option<u64>,
 	properties: crate::model::object::Properties,
 	/// The property list `properties` was read from, for a status object, which has no frame.
 	raw: bytes::Bytes,
 	gap: Option<u64>,
 	inflated: Option<u64>,
-	/// The object being read is one the group started past, so it is read and dropped.
-	dropping: bool,
 	phase: IngestPhase,
 }
 
@@ -4920,30 +4891,21 @@ enum IngestPhase {
 	Status { timestamp: Option<crate::Timestamp> },
 	/// Streaming the object payload.
 	Payload { frame: frame::Producer },
-	/// Discarding a dropped object's payload: the bytes of it still to read.
-	Skip { size: usize },
 	/// An explicit end-of-group or end-of-track status arrived.
 	Finished(Ended),
 }
 
 impl GroupIngest {
-	fn new(
-		subscriber: &Subscriber,
-		group: &ietf::GroupHeader,
-		timescale: Option<Timescale>,
-		start: Option<u64>,
-	) -> Self {
+	fn new(subscriber: &Subscriber, group: &ietf::GroupHeader, timescale: Option<Timescale>) -> Self {
 		Self {
 			has_extensions: group.flags.has_extensions,
 			timescale,
 			version: subscriber.version,
 			prior_object: None,
-			start,
 			properties: Default::default(),
 			raw: bytes::Bytes::new(),
 			gap: None,
 			inflated: None,
-			dropping: false,
 			phase: IngestPhase::Delta,
 		}
 	}
@@ -4971,7 +4933,7 @@ impl Subscriber {
 			return self.recv_group_fetch(stream, slot).await;
 		}
 
-		let (subscribe_id, fill, resume, _counted) = {
+		let (subscribe_id, fill, _counted) = {
 			let state = self.state.lock();
 			// A draft-20 fill is named by the SUBSCRIBE's request id. A pre-draft-20 joining
 			// FETCH has its own id, which `fetches` maps back to that subscription.
@@ -4983,7 +4945,7 @@ impl Subscriber {
 			let counted = joined
 				.is_none()
 				.then(|| Reading::open(&track.tail, None, self.runtime.now()));
-			(subscribe_id, track.fill.clone(), track.resume, counted)
+			(subscribe_id, track.fill.clone(), counted)
 		};
 
 		// SUBSCRIBE_OK declares the units these object timestamps are in, and this stream can
@@ -5031,12 +4993,7 @@ impl Subscriber {
 		// track does not close a group producer, since those lifecycles are independent.
 		let res = {
 			let mut serving = track.clone();
-			let mut serve = std::pin::pin!(crate::util::sendable(self.run_fill(
-				stream,
-				&mut serving,
-				timescale,
-				resume
-			)));
+			let mut serve = std::pin::pin!(crate::util::sendable(self.run_fill(stream, &mut serving, timescale)));
 			kio::wait(|waiter| {
 				if let Poll::Ready(err) = track.poll_closed(waiter) {
 					return Poll::Ready(Err(err));
@@ -5086,11 +5043,10 @@ impl Subscriber {
 		stream: &mut Reader<crate::transport::boxed::RecvStream, Version>,
 		track: &mut track::Producer,
 		timescale: Option<Timescale>,
-		resume: Option<track::Position>,
 	) -> Result<Fill, Error> {
 		let mut head: Option<(u64, u64, crate::recv::Group)> = None;
 
-		match self.run_fill_objects(stream, track, timescale, resume, &mut head).await {
+		match self.run_fill_objects(stream, track, timescale, &mut head).await {
 			Ok(()) => Ok(match head {
 				Some((sequence, next, producer)) => Fill::Ready {
 					sequence,
@@ -5112,17 +5068,12 @@ impl Subscriber {
 	/// absolute IDs.
 	///
 	/// A joining FETCH and a draft-20 fill are one group, the head the live stream
-	/// continues. A Prior Object ID Gap must account for every missing ID. Ordinal resume
-	/// still requires contiguous IDs; refusing its fill leaves the subscription alone.
-	///
-	/// A pre-draft-20 join resuming partway through a group asks for all of it, so the
-	/// objects below `resume` are dropped: another route already delivered them.
+	/// continues. A Prior Object ID Gap must account for every missing ID.
 	async fn run_fill_objects(
 		&mut self,
 		stream: &mut Reader<crate::transport::boxed::RecvStream, Version>,
 		track: &mut track::Producer,
 		timescale: Option<Timescale>,
-		resume: Option<track::Position>,
 		head: &mut Option<(u64, u64, crate::recv::Group)>,
 	) -> Result<(), Error> {
 		let mut prior_group = None;
@@ -5171,7 +5122,7 @@ impl Subscriber {
 			if id < expected {
 				return Err(Error::ProtocolViolation);
 			}
-			if id > expected && (resume.is_some() || decoded.gap.is_none_or(|gap| gap < id - expected)) {
+			if id > expected && decoded.gap.is_none_or(|gap| gap < id - expected) {
 				return Err(Error::Unsupported);
 			}
 			match head.as_ref().map(|(sequence, _, _)| *sequence) {
@@ -5183,19 +5134,13 @@ impl Subscriber {
 				_ => {}
 			}
 
-			let (sequence, next, producer) = head.as_mut().expect("the head was created above");
+			let (_, next, producer) = head.as_mut().expect("the head was created above");
 			if *next == 0
 				&& let Some(mut wire) = producer.wire()
 			{
 				wire.first_id = id;
 				producer.set_wire(wire)?;
 			}
-			if *next == 0
-				&& let Some(resume) = resume.filter(|resume| resume.group == *sequence)
-			{
-				producer.start_at(resume.frame)?;
-			}
-			let keep = *next >= producer.frame_count() as u64;
 			if self
 				.recv_fetch_payload(
 					stream,
@@ -5204,7 +5149,6 @@ impl Subscriber {
 						decoded,
 						raw,
 						timescale,
-						keep,
 						id,
 					},
 				)
@@ -5218,8 +5162,7 @@ impl Subscriber {
 		Ok(())
 	}
 
-	/// Read one fetch object's length and payload into `producer`, after its header, or
-	/// past it unless `keep`.
+	/// Read one fetch object's length and payload into `producer`, after its header.
 	async fn recv_fetch_payload(
 		&self,
 		stream: &mut Reader<crate::transport::boxed::RecvStream, Version>,
@@ -5230,12 +5173,9 @@ impl Subscriber {
 			decoded,
 			raw,
 			timescale,
-			keep,
 			id,
 		} = payload;
-		if keep {
-			producer.mark_gap(id, decoded.gap)?;
-		}
+		producer.mark_gap(id, decoded.gap)?;
 		let size = stream.varint().await?;
 		if size == 0 && matches!(self.version, Version::Draft14 | Version::Draft15) {
 			let status = stream.varint().await?;
@@ -5251,9 +5191,7 @@ impl Subscriber {
 			match (status, unframed) {
 				(0, _) => {}
 				(END_OF_GROUP, Some(properties)) => {
-					if keep {
-						producer.set_end_object(crate::model::object::Fields { id, properties })?;
-					}
+					producer.set_end_object(crate::model::object::Fields { id, properties })?;
 					return Ok(Fetched::EndOfGroup);
 				}
 				// END_OF_TRACK is track-level, so there is nowhere to keep its properties.
@@ -5261,11 +5199,6 @@ impl Subscriber {
 				(END_OF_TRACK, _) => return Ok(Fetched::EndOfTrack),
 				_ => return Err(Error::Unsupported),
 			}
-		}
-		if !keep {
-			let mut remaining = usize::try_from(size).map_err(|_| Error::FrameTooLarge)?;
-			std::future::poll_fn(|cx| stream.poll_skip(cx, &mut remaining)).await?;
-			return Ok(Fetched::Frame);
 		}
 		super::object::check_frame(&decoded.properties, timescale)?;
 		let timestamp = object_time(timescale, decoded.timestamp)?;
@@ -5791,7 +5724,6 @@ impl Subscriber {
 						decoded,
 						raw,
 						timescale,
-						keep: true,
 						id,
 					},
 				)
@@ -5843,7 +5775,6 @@ struct FetchPayload {
 	/// The property list `decoded` was read from, for a status object, which has no frame.
 	raw: bytes::Bytes,
 	timescale: Option<Timescale>,
-	keep: bool,
 	id: u64,
 }
 
@@ -6028,13 +5959,12 @@ impl GroupIngest {
 					let Some(id_delta) = ready!(reader.poll_varint_maybe(&mut cx))? else {
 						return Poll::Ready(Ok(Ended::Group));
 					};
-					let id = next_object_id(self.prior_object, id_delta, self.start)?;
+					let id = next_object_id(self.prior_object, id_delta)?;
 					self.prior_object = Some(id);
 					self.properties = Default::default();
 					self.raw = bytes::Bytes::new();
 					self.gap = None;
 					self.inflated = None;
-					self.dropping = self.start.is_some() && id < group.frame_count() as u64;
 					self.phase = match self.has_extensions {
 						true => IngestPhase::ExtSize,
 						false => IngestPhase::Size { timestamp: None },
@@ -6060,11 +5990,6 @@ impl GroupIngest {
 						self.phase = IngestPhase::Status { timestamp: *timestamp };
 						continue;
 					}
-					if self.dropping {
-						let size = usize::try_from(size).map_err(|_| Error::FrameTooLarge)?;
-						self.phase = IngestPhase::Skip { size };
-						continue;
-					}
 					// `create_object` is the allocation chokepoint: it rejects an oversized
 					// `size` and allocates up front only within the origin's budget, so no
 					// pre-check is needed.
@@ -6076,12 +6001,10 @@ impl GroupIngest {
 				IngestPhase::Status { timestamp } => {
 					let status = ready!(reader.poll_varint(&mut cx))?;
 					if status == 0 {
-						if !self.dropping {
-							let timestamp = object_time(self.timescale, *timestamp)?;
-							let header = self.header(group, frame::Info { size: 0, timestamp })?;
-							let frame = group.create_object(header)?;
-							group.restore(frame.finish()?);
-						}
+						let timestamp = object_time(self.timescale, *timestamp)?;
+						let header = self.header(group, frame::Info { size: 0, timestamp })?;
+						let frame = group.create_object(header)?;
+						group.restore(frame.finish()?);
 						self.phase = IngestPhase::Delta;
 						continue;
 					}
@@ -6123,10 +6046,6 @@ impl GroupIngest {
 							return Poll::Ready(Err(err));
 						}
 					}
-				}
-				IngestPhase::Skip { size } => {
-					ready!(reader.poll_skip(&mut cx, size))?;
-					self.phase = IngestPhase::Delta;
 				}
 				IngestPhase::Finished(ended) => {
 					let ended = std::mem::replace(ended, Ended::Group);
@@ -12680,11 +12599,7 @@ struct Join {
 ///
 /// A start group we already know is absolute on draft-20 and needs no fill: the
 /// subscription's own range covers it, which is what our publisher serves from its cache.
-fn subscribe_join(
-	start: Option<track::Position>,
-	end: Option<track::Position>,
-	version: Version,
-) -> Result<Join, Error> {
+fn subscribe_join(start: Option<u64>, end: Option<u64>, version: Version) -> Result<Join, Error> {
 	if !Filter::is_draft20(version) {
 		if end.is_some() {
 			return Err(Error::Unsupported);
@@ -12708,7 +12623,7 @@ fn subscribe_join(
 			fetch: false,
 		},
 		// An absolute {0, 0} with no end is defined as unfiltered, so it spells itself.
-		Some(start) if start == track::Position::group(0) && end.is_none() => Join {
+		Some(0) if end.is_none() => Join {
 			filter: Filter::Unfiltered,
 			fill: None,
 			fetch: false,
@@ -12716,21 +12631,14 @@ fn subscribe_join(
 		Some(start) => Join {
 			filter: Filter::Absolute {
 				start: ietf::Location {
-					group: start.group,
-					object: start.frame,
+					group: start,
+					object: 0,
 				},
 				end: end.and_then(|end| {
-					if end.frame == 0 {
-						Some(ietf::EndLocation {
-							group: end.group.checked_sub(1)?,
-							object: None,
-						})
-					} else {
-						Some(ietf::EndLocation {
-							group: end.group,
-							object: Some(end.frame - 1),
-						})
-					}
+					Some(ietf::EndLocation {
+						group: end.checked_sub(1)?,
+						object: None,
+					})
 				}),
 			},
 			fill: None,
@@ -12739,69 +12647,28 @@ fn subscribe_join(
 	})
 }
 
-/// Resolve the first absolute ID or a later ID delta without overflowing.
-///
-/// Ordinary subgroup relay ingest preserves gaps. A fill or resume supplies `start`
-/// and requires contiguous IDs because its public frame ordinals stitch onto another copy.
-fn next_object_id(prior: Option<u64>, delta: u64, start: Option<u64>) -> Result<u64, Error> {
-	let object = match prior {
-		None => delta,
+/// Resolve the first absolute ID or a later ID delta without overflowing. Subgroup relay
+/// ingest preserves gaps.
+fn next_object_id(prior: Option<u64>, delta: u64) -> Result<u64, Error> {
+	match prior {
+		None => Ok(delta),
 		Some(prior) => prior
 			.checked_add(delta)
 			.and_then(|id| id.checked_add(1))
-			.ok_or(Error::Session(SessionError::ProtocolViolation))?,
-	};
-
-	let expected = prior.map_or(start.unwrap_or(object), |prior| prior.saturating_add(1));
-	if start.is_some() && object != expected {
-		tracing::warn!(
-			object,
-			expected,
-			"object IDs must start at the group's start and increment by 1"
-		);
-		return Err(Error::Unsupported);
+			.ok_or(Error::Session(SessionError::ProtocolViolation)),
 	}
-
-	Ok(object)
 }
 
 #[cfg(test)]
 mod object_id_tests {
 	use super::*;
 
-	/// A zero delta throughout is a group numbered from 0 with no gaps, which is the only
-	/// shape moq-lite can represent.
+	/// The first delta is the absolute Object ID and each later one counts past the prior.
 	#[test]
-	fn accepts_sequential_ids_from_zero() {
-		let mut prior = None;
-		for expected in 0..4 {
-			let object = next_object_id(prior, 0, Some(0)).expect("sequential");
-			assert_eq!(object, expected);
-			prior = Some(object);
-		}
-	}
-
-	/// The first object's delta is its absolute Object ID, so a non-zero one means the
-	/// group starts partway through and has a hole at the front.
-	#[test]
-	fn rejects_a_group_that_does_not_start_at_zero() {
-		assert!(matches!(next_object_id(None, 6, Some(0)), Err(Error::Unsupported)));
-	}
-
-	/// The tail of a stitched group starts where the fill's head stopped, and nowhere else.
-	#[test]
-	fn accepts_a_tail_that_starts_where_the_fill_stopped() {
-		assert_eq!(next_object_id(None, 6, Some(6)).expect("the fill's next object"), 6);
-		assert_eq!(next_object_id(Some(6), 0, Some(6)).expect("then sequential"), 7);
-		assert!(matches!(next_object_id(None, 5, Some(6)), Err(Error::Unsupported)));
-		assert!(matches!(next_object_id(None, 7, Some(6)), Err(Error::Unsupported)));
-	}
-
-	/// A later delta skips objects, which would renumber every frame after it.
-	#[test]
-	fn rejects_a_gap() {
-		assert!(matches!(next_object_id(Some(0), 1, Some(0)), Err(Error::Unsupported)));
-		assert!(matches!(next_object_id(Some(3), 9, Some(0)), Err(Error::Unsupported)));
+	fn resolves_ids_and_gaps() {
+		assert_eq!(next_object_id(None, 6).unwrap(), 6);
+		assert_eq!(next_object_id(Some(6), 0).unwrap(), 7);
+		assert_eq!(next_object_id(Some(6), 2).unwrap(), 9);
 	}
 
 	/// The running ID is bounded, and the draft makes an overflow a protocol violation
@@ -12809,7 +12676,7 @@ mod object_id_tests {
 	#[test]
 	fn rejects_an_overflow() {
 		assert!(matches!(
-			next_object_id(Some(u64::MAX), 0, Some(0)),
+			next_object_id(Some(u64::MAX), 0),
 			Err(Error::Session(SessionError::ProtocolViolation))
 		));
 	}
@@ -12842,12 +12709,7 @@ mod filter_tests {
 	#[test]
 	fn a_past_start_is_absolute() {
 		assert_eq!(
-			subscribe_join(
-				Some(track::Position::group(7)),
-				track::Position::after_group(9),
-				Version::Draft20,
-			)
-			.unwrap(),
+			subscribe_join(Some(7), Some(10), Version::Draft20).unwrap(),
 			Join {
 				filter: Filter::Absolute {
 					start: ietf::Location { group: 7, object: 0 },
@@ -12863,7 +12725,7 @@ mod filter_tests {
 	#[test]
 	fn the_whole_track_is_unfiltered() {
 		assert_eq!(
-			subscribe_join(Some(track::Position::group(0)), None, Version::Draft20).unwrap(),
+			subscribe_join(Some(0), None, Version::Draft20).unwrap(),
 			Join {
 				filter: Filter::Unfiltered,
 				fill: None,
@@ -12887,11 +12749,7 @@ mod filter_tests {
 	#[test]
 	fn older_drafts_always_join_live() {
 		for version in JOINING_DRAFTS {
-			for start in [
-				None,
-				Some(track::Position::group(7)),
-				Some(track::Position { group: 7, frame: 1 }),
-			] {
+			for start in [None, Some(7)] {
 				assert_eq!(
 					subscribe_join(start, None, version).unwrap(),
 					Join {
@@ -12910,14 +12768,7 @@ mod filter_tests {
 	fn older_drafts_refuse_a_bounded_end() {
 		for version in JOINING_DRAFTS {
 			assert!(
-				matches!(
-					subscribe_join(
-						Some(track::Position::group(7)),
-						track::Position::after_group(9),
-						version
-					),
-					Err(Error::Unsupported)
-				),
+				matches!(subscribe_join(Some(7), Some(10), version), Err(Error::Unsupported)),
 				"{version}"
 			);
 		}
@@ -13194,15 +13045,6 @@ mod stitch_tests {
 				if let Some(track) = state.subscribes.get_mut(&REQUEST) {
 					track.fetch_id = Some(fetch_id);
 				}
-			}
-			self
-		}
-
-		/// Resume the subscription partway through a group another route delivered the
-		/// head of.
-		fn with_resume(self, resume: track::Position) -> Self {
-			if let Some(track) = self.subscriber.state.lock().subscribes.get_mut(&REQUEST) {
-				track.resume = Some(resume);
 			}
 			self
 		}
@@ -14014,7 +13856,7 @@ mod stitch_tests {
 			let mut run = GroupFetchRun::new(version, objects).await;
 			let fill = h
 				.subscriber
-				.run_fill(&mut run.stream, &mut h.track, None, None)
+				.run_fill(&mut run.stream, &mut h.track, None)
 				.await
 				.unwrap();
 			*h.fill.write().ok().expect("fill open") = fill;
@@ -15085,67 +14927,6 @@ mod stitch_tests {
 		assert_eq!(frames.len(), 1, "the group is whatever one producer wrote, not both");
 	}
 
-	/// A resumed subscription that gets its group whole (a pre-draft-20 join can only ask
-	/// for all of it) keeps only the objects from where it asked: another route already
-	/// delivered the rest.
-	#[moq_clock::test]
-	async fn a_resumed_whole_group_drops_the_delivered_head() {
-		let h = Harness::new(Fill::Done, vec![tail_stream(SEQUENCE, 0, &[b"0", b"1", b"2"])]).with_resume(
-			track::Position {
-				group: SEQUENCE,
-				frame: 2,
-			},
-		);
-		let mut consumer = h.track.subscribe(None);
-		let mut whole = h.stream().await;
-		h.subscriber.clone().recv_group(&mut whole).await.expect("the group");
-
-		let mut group = consumer
-			.recv_group()
-			.await
-			.unwrap()
-			.expect("the group arrived")
-			.with_range(0..);
-		assert_eq!(group.index(), 2, "the group starts where the subscription asked");
-		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"2");
-		assert!(group.read_frame().await.unwrap().is_none());
-	}
-
-	/// The same for a joining FETCH's head: the objects below the resume point are
-	/// dropped, and the live tail continues what is left.
-	#[moq_clock::test]
-	async fn a_resumed_fill_drops_the_delivered_head() {
-		let h = Harness::new(
-			Fill::Serving(Some(Timescale::MICRO)),
-			vec![
-				fill_stream(SEQUENCE, &[b"0", b"1", b"2"]),
-				tail_stream(SEQUENCE, 3, &[b"3"]),
-			],
-		)
-		.with_resume(track::Position {
-			group: SEQUENCE,
-			frame: 2,
-		});
-		let mut consumer = h.track.subscribe(None);
-		let mut fill = h.stream().await;
-		let mut tail = h.stream().await;
-		h.subscriber.clone().recv_fill(&mut fill).await.expect("fill");
-		h.subscriber.clone().recv_group(&mut tail).await.expect("tail");
-
-		let mut group = consumer
-			.recv_group()
-			.await
-			.unwrap()
-			.expect("the group arrived")
-			.with_range(0..);
-		assert_eq!(group.index(), 2, "the group starts where the subscription asked");
-		let mut frames = Vec::new();
-		while let Some(frame) = group.read_frame().await.unwrap() {
-			frames.push(frame.payload.to_vec());
-		}
-		assert_eq!(frames, [b"2".to_vec(), b"3".to_vec()]);
-	}
-
 	/// A standalone subgroup tail keeps its identity while plain readers see its payload.
 	#[moq_clock::test]
 	async fn a_tail_without_a_fill_is_preserved() {
@@ -15983,13 +15764,13 @@ mod joining_fetch_tests {
 	}
 
 	impl JoinRun {
-		async fn start(version: Version, start: Option<track::Position>, ok: Vec<u8>, fetch: Vec<u8>) -> Self {
+		async fn start(version: Version, start: Option<u64>, ok: Vec<u8>, fetch: Vec<u8>) -> Self {
 			Self::start_with_control(version, start, [ok, fetch], Control::new(None, false)).await
 		}
 
 		async fn start_with_control(
 			version: Version,
-			start: Option<track::Position>,
+			start: Option<u64>,
 			scripts: [Vec<u8>; 2],
 			control: Control,
 		) -> Self {
@@ -16404,13 +16185,7 @@ mod joining_fetch_tests {
 		let largest = Some(ietf::Location { group: 9, object: 0 });
 		for version in JOINING_DRAFTS {
 			for start in [7, 9, 11] {
-				let run = JoinRun::start(
-					version,
-					Some(track::Position::group(start)),
-					subscribe_ok(version, largest),
-					fetch_ok(version),
-				)
-				.await;
+				let run = JoinRun::start(version, Some(start), subscribe_ok(version, largest), fetch_ok(version)).await;
 
 				let messages = decode_messages(&run.session.log, version);
 				let fetch = messages.iter().find(|(id, _)| *id == ietf::Fetch::ID).expect("FETCH");
@@ -16928,8 +16703,13 @@ mod joining_fetch_tests {
 					);
 					let dynamic = track.dynamic();
 					let consumer = track.consume();
-					let mut fetch =
-						std::pin::pin!(consumer.fetch_group(GROUP, group::Fetch::default().with_frame_start(START)));
+					let mut fetch = std::pin::pin!(consumer.fetch_group(
+						GROUP,
+						group::Fetch {
+							frame_start: START,
+							..Default::default()
+						}
+					));
 					assert!(futures::poll!(fetch.as_mut()).is_pending());
 					let request = dynamic.requested_fill_group().await.expect("no group requested");
 
@@ -17069,7 +16849,13 @@ mod joining_fetch_tests {
 		);
 		let dynamic = track.dynamic();
 		let consumer = track.consume();
-		let mut fetch = std::pin::pin!(consumer.fetch_group(GROUP, group::Fetch::default().with_frame_start(START)));
+		let mut fetch = std::pin::pin!(consumer.fetch_group(
+			GROUP,
+			group::Fetch {
+				frame_start: START,
+				..Default::default()
+			}
+		));
 		assert!(futures::poll!(fetch.as_mut()).is_pending());
 		let request = dynamic.requested_fill_group().await.expect("no group requested");
 

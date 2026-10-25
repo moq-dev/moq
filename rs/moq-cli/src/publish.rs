@@ -294,7 +294,7 @@ enum Source {
 	Capture {
 		broadcast: moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer,
-		video: Option<(moq_video::capture::Config, moq_video::encode::Options)>,
+		video: Option<moq_video::encode::Capture>,
 		audio: Option<(moq_audio::capture::Config, moq_audio::encode::Options)>,
 	},
 }
@@ -467,7 +467,7 @@ impl Publish {
 		let video = if args.no_video {
 			None
 		} else {
-			Some((args.video_config()?, args.video_encode(bandwidth.clone())))
+			Some(args.video_capture(bandwidth.clone())?)
 		};
 		let audio = (!args.no_audio).then(|| (args.audio_config(), args.audio_encode(bandwidth)));
 		anyhow::ensure!(video.is_some() || audio.is_some(), "nothing to capture");
@@ -561,14 +561,9 @@ impl Publish {
 					let catalog = catalog.clone();
 					async move {
 						match video {
-							Some((config, encode)) => {
-								let mut options = moq_video::encode::Capture::default();
-								options.capture = config;
-								options.encode = encode;
-								moq_video::encode::publish_capture(broadcast, catalog, options)
-									.await
-									.map_err(anyhow::Error::from)
-							}
+							Some(options) => moq_video::encode::publish_capture(broadcast, catalog, options)
+								.await
+								.map_err(anyhow::Error::from),
 							None => Ok(()),
 						}
 					}
@@ -780,8 +775,9 @@ impl CaptureArgs {
 		Ok(config)
 	}
 
-	fn video_encode(&self, bandwidth: moq_net::bandwidth::Allocator) -> moq_video::encode::Options {
-		let mut options = moq_video::encode::Options::default();
+	fn video_capture(&self, bandwidth: moq_net::bandwidth::Allocator) -> anyhow::Result<moq_video::encode::Capture> {
+		let mut options = moq_video::encode::Capture::default();
+		options.capture = self.video_config()?;
 		options.bitrate = self.bitrate.map(moq_net::bandwidth::Rate::from_bps);
 		options.codec = self.codec.into();
 		options.kind = if self.software {
@@ -792,7 +788,7 @@ impl CaptureArgs {
 			moq_video::encode::Kind::Auto
 		};
 		options.bandwidth = bandwidth;
-		options
+		Ok(options)
 	}
 
 	/// The audio source named by the flags, defaulting to the default
@@ -818,7 +814,7 @@ impl CaptureArgs {
 	/// names its track; consumers find it through the catalog either way.
 	fn audio_encode(&self, bandwidth: moq_net::bandwidth::Allocator) -> moq_audio::encode::Options {
 		let mut options = moq_audio::encode::Options::default();
-		options.settings.bitrate = self
+		options.config.bitrate = self
 			.audio_bitrate
 			.map(|bps| moq_net::bandwidth::Rate::from_bps(bps.into()));
 		options.bandwidth = bandwidth;
