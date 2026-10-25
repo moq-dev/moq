@@ -490,10 +490,12 @@ impl Reversed {
 					false => conn.open_uni(Default::default()).await.map(|send| (send, None)),
 				}
 				.expect("open");
-				if send.write_all(&bytes).await.is_ok() {
-					std::future::pending::<()>().await;
+				// The credit an eviction frees can reach the writer before the stop does, letting
+				// the whole write queue, so only the stop itself proves the stream was stopped.
+				let _ = send.write_all(&bytes).await;
+				if let Ok(Some(_)) = send.stopped().await {
+					let _ = tx.send(());
 				}
-				let _ = tx.send(());
 			});
 		}
 		for _ in 0..stopped {
