@@ -17,5 +17,4 @@ landed.
 
 ## Related
 
-- [Zero-copy program encode](/quest/m1/studio-gpu/encode.md) - the GPU encode path, which lands without this run
 - [Hardware validation](/quest/m3/video-hardware.md) - capture paths not yet run on real machines

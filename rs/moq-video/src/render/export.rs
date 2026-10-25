@@ -545,6 +545,14 @@ impl Blit {
 pub(crate) mod tests {
 	use super::*;
 
+	// The exporter lives on the drawing thread and each copy is waited on by the
+	// encoding one, on every platform's route.
+	const _: fn() = || {
+		fn send<T: Send>() {}
+		send::<Exporter>();
+		send::<Pending>();
+	};
+
 	/// A device opened the way a caller is told to, or `None` without a GPU.
 	pub(crate) async fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
 		let instance = wgpu::Instance::default();

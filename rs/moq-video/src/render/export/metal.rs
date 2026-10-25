@@ -86,6 +86,9 @@ impl Export {
 	}
 
 	pub fn copy(&mut self, texture: &wgpu::Texture) -> Result<Option<Copy>, Error> {
+		// Lets go of the cache's wrappers wgpu has finished with, each of which
+		// holds a buffer out of the pool.
+		self.cache.flush(0);
 		let Some(buffer) = self.buffer()? else {
 			return Ok(None);
 		};
@@ -112,8 +115,6 @@ impl Export {
 		self.nv12
 			.encode(&self.device, &mut encoder, texture, &view(&luma), &view(&chroma));
 		let submission = self.queue.submit([encoder.finish()]);
-		// Lets go of the wrappers for buffers the pool has recycled.
-		self.cache.flush(0);
 
 		let mut buffer = PixelBuffer::new(buffer, self.size.width, self.size.height);
 		buffer.color = Some(self.color);
