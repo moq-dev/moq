@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Varint.sizeLeadingOnes` is gone
+
+Take the length of `Varint.encodeLeadingOnes(v)`.
+
 ### Published names refuse navigation segments
 
 Broadcast creation and route publication now refuse literal `.` and `..` segments, including segments in the producer's root.

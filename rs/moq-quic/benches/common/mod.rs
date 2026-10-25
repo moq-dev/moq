@@ -26,7 +26,7 @@ use moq_congestion::{Ack, Ce, Controller, ControllerFactory, ControllerMetrics, 
 use moq_quic::{
 	ClientConfig, Connection, ConnectionHandle, ConnectionId, ConnectionIdGenerator, DatagramEvent, Endpoint,
 	EndpointConfig, Event, LeaseError, RandomConnectionIdGenerator, ReadError, ServerConfig, StreamEvent, StreamId,
-	TransportConfig, VarInt, coding::Codec, fuzz::Plaintext,
+	TransportConfig, VarInt, fuzz::Plaintext,
 };
 
 /// The most datagrams one `poll_transmit` may batch, as a GSO-capable socket would take.
@@ -226,7 +226,7 @@ fn drain(conn: &mut Connection, id: StreamId, sink: Sink, received: &mut Receive
 		return;
 	}
 	// A stream already stopped, finished, or reset is gone.
-	let Ok(mut chunks) = stream.read(true) else {
+	let Ok(mut chunks) = stream.read() else {
 		return;
 	};
 	loop {

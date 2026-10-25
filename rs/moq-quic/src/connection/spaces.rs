@@ -351,7 +351,7 @@ pub(crate) struct Retransmits {
 	/// It is true that a QUIC endpoint will only want to effectively have NEW_TOKEN frames
 	/// enqueued for its current path at a given point in time. Based on that, we could conceivably
 	/// change this from a vector to an `Option<(SocketAddr, usize)>` or just a `usize` or
-	/// something. However, due to the architecture of Quinn, it is considerably simpler to not do
+	/// something. However, due to the transport architecture, it is considerably simpler to not do
 	/// that; consider what such a change would mean for implementing `BitOrAssign` on Self.
 	pub(super) new_tokens: Vec<SocketAddr>,
 }

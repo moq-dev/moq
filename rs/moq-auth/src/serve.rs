@@ -460,8 +460,11 @@ pub struct Server {
 impl Server {
 	/// A server answering with `policy`, refusing one that asks for a re-check without
 	/// a bound, bounds grants past the clock's range, caps sessions without the
-	/// re-check that ages out a dead relay's,.
+	/// re-check that ages out a dead relay's, or stamps an invalid tier.
 	pub fn new(policy: Policy) -> crate::Result<Self> {
+		if let Some(tier) = &policy.tier {
+			crate::tier::validate(tier)?;
+		}
 		if policy.revalidate.is_some() && policy.expires.is_none() {
 			return Err(crate::Error::UnboundedRevalidate);
 		}
@@ -1206,6 +1209,11 @@ mod tests {
 			..Default::default()
 		};
 		assert!(matches!(Server::new(unbounded), Err(Error::UnboundedRevalidate)));
+		let quoted = Policy {
+			tier: Some("edge\"".into()),
+			..Default::default()
+		};
+		assert!(matches!(Server::new(quoted), Err(Error::InvalidTier(_))));
 	}
 
 	/// Regression: `--expires` past the system clock's range panicked every answer.

@@ -328,8 +328,8 @@ impl TransportConfig {
 	/// While datagrams are sent ASAP, it is possible for an application to generate data faster
 	/// than the link, or even the underlying hardware, can transmit them. This limits the amount of
 	/// memory that may be consumed in that case. When the send buffer is full and a new datagram is
-	/// sent, the domain holding the most datagram bytes drops the oldest datagram of its
-	/// lowest-priority send group until the new one fits; see
+	/// sent, the oldest datagram of the lowest-priority send group is dropped until the new
+	/// one fits; see
 	/// [`Datagrams::send`](crate::Datagrams::send).
 	///
 	/// Counts each datagram's frame bytes, so the payload buffered is a little smaller than
@@ -382,7 +382,7 @@ impl TransportConfig {
 	///
 	/// GSO dramatically reduces CPU consumption when sending large numbers of packets with the same
 	/// headers, such as when transmitting bulk data on a connection. However, it is not supported
-	/// by all network interface drivers or packet inspection tools. `quinn-udp` will attempt to
+	/// by all network interface drivers or packet inspection tools. The UDP driver may
 	/// disable GSO automatically when unavailable, but this can lead to spurious packet loss at
 	/// startup, temporarily degrading performance.
 	pub fn enable_segmentation_offload(&mut self, enabled: bool) -> &mut Self {
@@ -530,7 +530,7 @@ impl fmt::Debug for TransportConfig {
 /// connection, so it can take them into account when sending acknowledgements (see each parameter's
 /// description for details on how it influences acknowledgement frequency).
 ///
-/// Quinn's implementation follows the fourth draft of the
+/// The implementation follows the fourth draft of the
 /// [QUIC Acknowledgement Frequency extension](https://datatracker.ietf.org/doc/html/draft-ietf-quic-ack-frequency-04).
 /// The defaults produce behavior slightly different than the behavior without this extension,
 /// because they change the way reordered packets are handled (see
@@ -716,7 +716,7 @@ impl Default for QlogConfig {
 ///
 /// # MTU discovery internals
 ///
-/// Quinn implements MTU discovery through DPLPMTUD (Datagram Packetization Layer Path MTU
+/// The transport implements MTU discovery through DPLPMTUD (Datagram Packetization Layer Path MTU
 /// Discovery), described in [section 14.3 of RFC
 /// 9000](https://www.rfc-editor.org/rfc/rfc9000.html#section-14.3). This method consists of sending
 /// QUIC packets padded to a particular size (called PMTU probes), and waiting to see if the remote
@@ -731,7 +731,7 @@ impl Default for QlogConfig {
 /// last time when MTU discovery completed.
 ///
 /// Since the search space for MTUs is quite big (the smallest possible MTU is 1200, and the highest
-/// is 65527), Quinn performs a binary search to keep the number of probes as low as possible. The
+/// is 65527), the transport performs a binary search to keep the number of probes as low as possible. The
 /// lower bound of the search is equal to [`TransportConfig::initial_mtu`] in the
 /// initial MTU discovery run, and is equal to the currently discovered MTU in subsequent runs. The
 /// upper bound is determined by the minimum of [`MtuDiscoveryConfig::upper_bound`] and the

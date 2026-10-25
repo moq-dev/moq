@@ -53,9 +53,11 @@ async def test_server_client_roundtrip():
         # completes from the server side. Hold references so the sessions
         # outlive the test.
         sessions: list = []
+        implementations: list = []
 
         async def accept_loop() -> None:
             async for request in server:
+                implementations.append(request.peer_implementation)
                 sessions.append(await request.accept())
 
         accept_task = asyncio.create_task(accept_loop())
@@ -86,6 +88,9 @@ async def test_server_client_roundtrip():
                         break
 
                     break
+
+            # The wrapper names itself ahead of moq-ffi, so a server can tell bindings apart.
+            assert implementations[0].startswith("moq-py/")
         finally:
             accept_task.cancel()
             try:
