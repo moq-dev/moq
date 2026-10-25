@@ -37,6 +37,7 @@ import {
 	sameInstance,
 	wireOf,
 } from "./wire.ts";
+import { closeUnwanted } from "./util/announce.ts";
 
 export type { Cost, Hop, Route } from "./hop.ts";
 export { isAnonymous } from "./hop.ts";
@@ -486,17 +487,11 @@ interface Created {
 	front: broadcast.Consumer;
 }
 
-// Let go of a created broadcast the origin no longer routes. Only a producer ends a broadcast, as
-// in Rust, so it closes once nobody subscribes to it rather than under a reader still draining it.
+// End a created broadcast the origin no longer routes. Consumer handles never end a produced
+// broadcast, so the origin closes its producer; tracks already subscribed keep serving.
 function retire({ producer, front }: Created): void {
 	front.close();
-	const demand = producer.demand();
-	if (!demand.used.peek()) producer.close();
-	else
-		void demand.unused().then(
-			() => producer.close(),
-			() => {},
-		);
+	producer.close();
 }
 
 /** Reactive backing state shared by origin producers and consumers. */
@@ -1207,8 +1202,8 @@ export class Producer implements Table {
 	 * withdraws it from everyone again.
 	 *
 	 * Close the producer to drop it. Creating a path again supersedes the previous
-	 * broadcast: the origin retracts the old one and closes it once nobody subscribes to it.
-	 * Announce with a {@link Route.epoch}
+	 * broadcast: the origin retracts and closes the old one, and tracks already subscribed
+	 * keep serving until they end. Announce with a {@link Route.epoch}
 	 * (`Epoch.mint()` per run) so a restart replaces the old broadcast rather than resuming
 	 * into it; at the same epoch, a local broadcast competes on cost and wins ties.
 	 */
@@ -1242,7 +1237,7 @@ export class Producer implements Table {
 
 		// Drop it when the broadcast closes, unless a recreate already replaced it: a stale
 		// broadcast closing must not unpublish the live one. Clearing `created` also stops a
-		// later announce, since a subscriber can keep the broadcast open past this release.
+		// later announce.
 		const release = this.#hold(() => {
 			this.#retractExact(path, front);
 			if (this.#state.created?.get(path) === entry) this.#state.created.delete(path);
@@ -1987,10 +1982,7 @@ export class Consumer {
 		void this.#runAnnounced(producer, patterns, options?.hidden ?? false);
 		const consumer = producer.consume();
 		// The last reader leaving ends the stream and its watch.
-		void producer.unused().then(
-			() => producer.close(),
-			() => {},
-		);
+		closeUnwanted(producer);
 		return consumer;
 	}
 

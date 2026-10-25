@@ -81,6 +81,7 @@ import {
 } from "./subscribe_namespace.ts";
 import { MalformedAuthToken } from "./token.ts";
 import { Version } from "./version.ts";
+import { closeUnwanted } from "../util/announce.ts";
 
 // Wire ceiling (2^62-1). A draining session stamps it on every live route so any other
 // candidate outranks it, while the route stays selectable as the last path. Matches Rust
@@ -357,10 +358,7 @@ export class Subscriber {
 		this.#announcedConsumers.set(announced, filter);
 		const consumer = announced.consume();
 		// The last reader leaving ends the stream, which cancels the request.
-		void announced.unused().then(
-			() => announced.close(),
-			() => {},
-		);
+		closeUnwanted(announced);
 
 		void this.#runAnnounced(announced, prefix, filter.hidden && this.#hidden).finally(() => {
 			this.#announcedConsumers.delete(announced);

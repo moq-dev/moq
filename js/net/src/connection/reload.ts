@@ -20,6 +20,7 @@ import type { Established } from "./established.ts";
 import { DISCOVERY_REMOVED } from "./forward.ts";
 import { DEFAULT_HANDOVER, type Drain, dialed, type GoawayProps, handover, pinnedTransport, target } from "./goaway.ts";
 import type { Probe, Stats } from "./stats.ts";
+import { closeUnwanted } from "../util/announce.ts";
 
 /**
  * Exponential backoff settings for the reconnect loop.
@@ -719,10 +720,7 @@ export class Reload {
 		});
 
 		this.#signals.cleanup(() => pump.close());
-		void producer.unused().then(
-			() => producer.close(),
-			() => {},
-		);
+		closeUnwanted(producer);
 		void producer.closed.then(() => pump.close());
 
 		return consumer;

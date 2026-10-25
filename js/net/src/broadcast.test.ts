@@ -433,12 +433,7 @@ test("closing every consumer leaves a produced broadcast to its producer", async
 	const consumer = producer.consume();
 	const subscriber = consumer.track("video").subscribe();
 	consumer.close();
-	expect(producer.closed.peek()).toBeUndefined();
-
-	// The producer watches demand instead: the last subscriber leaving is what it sees.
-	const unused = producer.demand().unused();
 	subscriber.close();
-	await unused;
 	expect(producer.closed.peek()).toBeUndefined();
 
 	track.close();

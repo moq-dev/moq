@@ -31,6 +31,7 @@ import type { GoawayProps, Redirect as RedirectType } from "./goaway.ts";
 import { pumpAnnounced, Reload, type ReloadDelay, type ReloadStatus } from "./reload.ts";
 import type { Probe as ProbeType, Stats as StatsType } from "./stats.ts";
 import type { Transport as TransportType } from "./transport.ts";
+import { closeUnwanted } from "../util/announce.ts";
 
 /** How long an unreferenced shared connection lingers before it actually closes. */
 const LINGER_MS = Milli(2000);
@@ -354,10 +355,7 @@ export class Connection {
 			pumpAnnounced(effect, origin.announced(scope, options), producer);
 		});
 
-		void producer.unused().then(
-			() => producer.close(),
-			() => {},
-		);
+		closeUnwanted(producer);
 		void producer.closed.then(stop);
 
 		return consumer;

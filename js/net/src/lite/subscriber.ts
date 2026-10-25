@@ -80,6 +80,7 @@ import {
 	Version,
 	waitsForSubscriberFin,
 } from "./version.ts";
+import { closeUnwanted } from "../util/announce.ts";
 
 // A peer's buffered TRACKS events decode without reaching a task boundary, and a flood of adds
 // and removals of one name never reaches the announces cap: yield so it cannot starve the host.
@@ -260,10 +261,7 @@ export class Subscriber {
 		// The wire speaks announce interest by prefix, and echoes suffixes beneath it.
 		const consumer = announced.consume();
 		// The last reader leaving ends the stream, which cancels the request.
-		void announced.unused().then(
-			() => announced.close(),
-			() => {},
-		);
+		closeUnwanted(announced);
 		void this.#runAnnounced(announced, scopeHead(scope), scope, options?.hidden ?? false);
 		return consumer;
 	}

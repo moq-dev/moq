@@ -10,6 +10,7 @@ import * as Path from "../path.ts";
 import { registerWire, wireOf } from "../wire.ts";
 import type { Established } from "./established.ts";
 import { forwardAnnounced } from "./forward.ts";
+import { closeUnwanted } from "../util/announce.ts";
 
 const LINGER = 2000;
 
@@ -66,10 +67,7 @@ class FakeSession {
 		if (this.syncedAtOnce) stream.synced();
 		const consumer = stream.consume();
 		// The last reader leaving cancels the request, as a session's does.
-		void stream.unused().then(
-			() => stream.close(),
-			() => {},
-		);
+		closeUnwanted(stream);
 		return consumer;
 	}
 

@@ -328,9 +328,9 @@ function adopt(state: BroadcastState, producer: track.Producer, info: track.Info
 let makeDemand: (state: BroadcastState) => Demand;
 
 /**
- * A watch-only view of demand for any track in a broadcast, mirroring the Rust `broadcast::Demand`.
+ * A watch-only view of demand for any track in a broadcast.
  *
- * @public
+ * @internal Tests only; nothing outside the package consumes it.
  */
 export class Demand {
 	#state: BroadcastState;
@@ -413,8 +413,9 @@ export class Producer {
 	}
 
 	/**
-	 * Watch demand for the broadcast's tracks: a publisher that should stop once nobody reads
-	 * waits on its {@link Demand.unused}, since closing every consumer leaves the broadcast open.
+	 * Watch demand for the broadcast's tracks.
+	 *
+	 * @internal Tests only; nothing outside the package consumes it.
 	 */
 	demand(): Demand {
 		return this.#demand;
