@@ -110,9 +110,12 @@ final decoder = await video.Consumer.subscribe(
   catalogVideo: (await renditions.next())!.video['camera']!,
   output: video.DecoderOutput(),
 );
-final frame = (await decoder.next())!;
-print(frame.pixels(format: video.PixelFormat.rgba).length);
-frame.dispose();
+// A read is a frame, a gap where media was lost, or an end where the publisher stopped its encoder.
+final read = await decoder.next();
+if (read is video.ReadFrame) {
+  print(read.frame.pixels(format: video.PixelFormat.rgba).length);
+  read.frame.dispose();
+}
 ```
 
 ```dart

@@ -15,8 +15,10 @@ from moq_ffi import (
     MoqAudioPacket,
     MoqAudioProducer,
     MoqAudioProducerOptions,
+    MoqAudioRead,
 )
 
+from ._read import End, Gap, _end, _gap
 from ._records import _from_us, _opt_us, _to_us
 from ._stream import _Stream
 from .media import Audio, AudioInit, CatalogProducer
@@ -47,6 +49,10 @@ class Frame:
     @staticmethod
     def _from_ffi(value: MoqAudioFrame) -> Frame:
         return Frame(timestamp=_from_us(value.timestamp_us), data=value.data)
+
+
+Read = Frame | Gap | End
+"""One item a :class:`Consumer` reads, in delivery order: decoded PCM, or a break in it."""
 
 
 @dataclass(frozen=True)
@@ -147,11 +153,13 @@ class Producer:
         self._inner.finish()
 
 
-class Consumer(_Stream[Frame]):
-    """Async iterator of decoded PCM frames. Construct with :meth:`subscribe`.
+class Consumer(_Stream[Read]):
+    """Async iterator of decoded PCM :class:`Frame` reads, and the :class:`Gap` and
+    :class:`End` breaks between them. Construct with :meth:`subscribe`.
 
     The layout is fixed by the :class:`DecoderOutput` passed at subscribe time;
-    each frame's ``data`` is raw bytes in that format.
+    each frame's ``data`` is raw bytes in that format. Restart playback after a
+    gap or an end, since what follows does not continue what came before.
     """
 
     @classmethod
@@ -164,9 +172,17 @@ class Consumer(_Stream[Frame]):
     def __init__(self, inner: MoqAudioConsumer) -> None:
         self._inner = inner
 
-    async def _next(self) -> Frame | None:
+    async def _next(self) -> Read | None:
         value = await self._inner.next()
-        return None if value is None else Frame._from_ffi(value)
+        if value is None:
+            return None
+        if isinstance(value, MoqAudioRead.FRAME):
+            return Frame._from_ffi(value.frame)
+        if isinstance(value, MoqAudioRead.GAP):
+            return _gap(value.timestamp_us, value.duration_us)
+        if isinstance(value, MoqAudioRead.END):
+            return _end(value.end_us)
+        raise TypeError(f"unknown audio read: {value!r}")
 
     @property
     def delay(self) -> timedelta:
@@ -217,9 +233,13 @@ __all__ = [
     "EncoderInput",
     "EncoderFinish",
     "EncoderOutput",
+    "End",
     "Frame",
+    "Gap",
     "Codec",
     "Packet",
     "Producer",
+    "Read",
     "SampleFormat",
 ]
+

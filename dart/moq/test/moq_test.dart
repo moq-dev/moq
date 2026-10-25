@@ -645,10 +645,11 @@ void main() {
       );
     }
 
-    final frame = await decoder.next().timeout(timeout);
+    final read = await decoder.next().timeout(timeout);
+    final frame = (read as moq_video.ReadFrame).frame;
     // The frame outlives its consumer's cancellation.
     decoder.cancel();
-    final pixels = frame!.width() * frame.height();
+    final pixels = frame.width() * frame.height();
     expect(
       frame.pixels(format: moq_video.PixelFormat.i420).length,
       pixels * 3 ~/ 2,
@@ -717,8 +718,9 @@ void main() {
         ),
       );
     }
-    expect(await fixed.next().timeout(timeout), isNotNull);
-    expect(await estimated.next().timeout(timeout), isNotNull);
+    expect(await fixed.next().timeout(timeout), isA<moq_audio.ReadFrame>());
+    expect(await estimated.next().timeout(timeout), isA<moq_audio.ReadFrame>());
+
 
     expect(fixed.delay, const Duration(milliseconds: 80));
     expect(estimated.delay, isNot(initial));

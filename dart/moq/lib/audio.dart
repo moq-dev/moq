@@ -16,8 +16,20 @@ typedef Producer = MoqAudioProducer;
 /// Encodes PCM without publishing it.
 typedef Encoder = MoqAudioEncoder;
 
-/// Subscribes to a catalog audio rendition and yields decoded PCM; open one with `Consumer.subscribe`.
+/// Subscribes to a catalog audio rendition and yields each [Read]; open one with `Consumer.subscribe`.
 typedef Consumer = MoqAudioConsumer;
+
+/// One item a [Consumer] reads, in delivery order: [ReadFrame], [ReadGap], or [ReadEnd].
+typedef Read = MoqAudioRead;
+
+/// Decoded PCM.
+typedef ReadFrame = FrameMoqAudioRead;
+
+/// Media after what was already read was lost; what follows does not continue it.
+typedef ReadGap = GapMoqAudioRead;
+
+/// The publisher stopped its encoder; frames starting before `endUs` are its remaining media.
+typedef ReadEnd = EndMoqAudioRead;
 
 /// The PCM layout written to a [Producer].
 typedef EncoderInput = MoqAudioEncoderInput;
@@ -49,7 +61,23 @@ extension AudioFrameDuration on MoqAudioFrame {
   Duration get timestamp => Duration(microseconds: timestampUs);
 }
 
+/// Duration view over a gap.
+extension AudioReadGapDuration on GapMoqAudioRead {
+  /// The furthest presentation point already read.
+  Duration get timestamp => Duration(microseconds: timestampUs);
+
+  /// Upper bound on how long until the next frame resumes.
+  Duration get duration => Duration(microseconds: durationUs);
+}
+
+/// Duration view over an encoder end.
+extension AudioReadEndDuration on EndMoqAudioRead {
+  /// Where the stopped encoder's media stops.
+  Duration get end => Duration(microseconds: endUs);
+}
+
 /// Duration view over an encoder's frame size.
+
 extension AudioEncoderOutputDuration on MoqAudioEncoderOutput {
   /// Encoded frame duration; zero takes the codec's own.
   Duration get frameDuration => Duration(microseconds: frameDurationUs);

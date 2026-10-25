@@ -81,6 +81,46 @@ func frame(raw ffi.MoqAudioFrame) Frame {
 	return Frame{Timestamp: time.Duration(raw.TimestampUs) * time.Microsecond, Data: raw.Data}
 }
 
+// Read is one item a Consumer reads, in delivery order: a ReadFrame, ReadGap, or ReadEnd.
+type Read interface{ read() }
+
+// ReadFrame is decoded PCM.
+type ReadFrame struct {
+	Frame Frame
+}
+
+// ReadGap is media lost after what was already read: what follows does not continue it.
+type ReadGap struct {
+	// Timestamp is the furthest presentation point already read.
+	Timestamp time.Duration
+	// Duration is an upper bound on how long until the next frame resumes.
+	Duration time.Duration
+}
+
+// ReadEnd is where the publisher stopped its encoder: it paused, switched source, or finished.
+// Frames that follow and start before End are its remaining media; the first at or past End
+// comes from a fresh encoder.
+type ReadEnd struct {
+	// End is where the stopped encoder's media stops.
+	End time.Duration
+}
+
+func (ReadFrame) read() {}
+func (ReadGap) read()   {}
+func (ReadEnd) read()   {}
+
+func audioRead(raw ffi.MoqAudioRead) (Read, error) {
+	switch read := raw.(type) {
+	case ffi.MoqAudioReadFrame:
+		return ReadFrame{Frame: frame(read.Frame)}, nil
+	case ffi.MoqAudioReadGap:
+		return ReadGap{Timestamp: time.Duration(read.TimestampUs) * time.Microsecond, Duration: time.Duration(read.DurationUs) * time.Microsecond}, nil
+	case ffi.MoqAudioReadEnd:
+		return ReadEnd{End: time.Duration(read.EndUs) * time.Microsecond}, nil
+	}
+	return nil, fmt.Errorf("unknown audio read: %T", raw)
+}
+
 // Producer encodes PCM and publishes it as a track in a broadcast's catalog.
 type Producer struct{ inner *ffi.MoqAudioProducer }
 
@@ -194,18 +234,18 @@ func Subscribe(ctx context.Context, broadcast *moq.BroadcastConsumer, id string,
 	return &Consumer{inner}, nil
 }
 
-// Next returns the next decoded frame, or (nil, nil) when the track ends.
-func (d *Consumer) Next(ctx context.Context) (*Frame, error) {
+// Next returns the next decoded frame, gap, or encoder end, or (nil, nil) when the track ends.
+func (d *Consumer) Next(ctx context.Context) (Read, error) {
 	raw, err := bridge.Call(ctx, d.inner.Cancel, d.inner.Next)
 	if err != nil || raw == nil {
 		return nil, err
 	}
-	value := frame(*raw)
-	return &value, nil
+	return audioRead(*raw)
 }
 
-// All ranges over decoded frames until the track ends or the loop breaks.
-func (d *Consumer) All(ctx context.Context) iter.Seq2[*Frame, error] { return bridge.Seq(ctx, d.Next) }
+// All ranges over every read until the track ends or the loop breaks.
+func (d *Consumer) All(ctx context.Context) iter.Seq2[Read, error] { return bridge.Seq(ctx, d.Next) }
+
 
 // Delay is the playout delay to hold ahead of the playhead: the fixed one, or the estimate from every frame read so far.
 // The estimate measures when Next returns, so call it again as soon as the previous frame is handled.
