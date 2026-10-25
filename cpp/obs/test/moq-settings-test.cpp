@@ -6,6 +6,7 @@
 //
 // Run with `just obs test` (ThreadSanitizer) or `just obs ci` (plain). This is not
 // part of the plugin build.
+#include <chrono>
 #include <cstdio>
 #include <map>
 #include <string>
@@ -137,6 +138,12 @@ int g_failures = 0;
 
 } // namespace
 
+// A library default as the whole milliseconds the settings table shows.
+static long long Ms(std::chrono::nanoseconds duration)
+{
+	return std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+}
+
 int main()
 {
 	const moq::ClientConfig library = moq::client_defaults();
@@ -145,20 +152,19 @@ int main()
 	{
 		obs_data settings;
 		MoQSettings::Defaults(&settings);
-		CHECK(settings.default_ints["connect_timeout_ms"] == (long long)(*library.timeout_us / 1000));
-		CHECK(settings.default_ints["failover_delay_ms"] == (long long)(*library.race_us / 1000));
+		CHECK(settings.default_ints["connect_timeout_ms"] == Ms(*library.timeout));
+		CHECK(settings.default_ints["failover_delay_ms"] == Ms(*library.race));
 		CHECK(settings.default_ints["quic_max_streams"] == (long long)*library.quic.max_streams);
-		CHECK(settings.default_ints["quic_idle_timeout_ms"] ==
-		      (long long)(*library.quic.idle_timeout_us / 1000));
-		CHECK(settings.default_ints["quic_keep_alive_ms"] == (long long)(*library.quic.keep_alive_us / 1000));
-		CHECK(settings.default_ints["backoff_timeout_ms"] == (long long)(*library.backoff.timeout_us / 1000));
+		CHECK(settings.default_ints["quic_idle_timeout_ms"] == Ms(*library.quic.idle_timeout));
+		CHECK(settings.default_ints["quic_keep_alive_ms"] == Ms(*library.quic.keep_alive));
+		CHECK(settings.default_ints["backoff_timeout_ms"] == Ms(*library.backoff.timeout));
 		CHECK(settings.default_bools["websocket_enabled"] == *library.websocket.enabled);
 		CHECK(settings.default_strings["quic_gso"].empty());
 
 		// Advanced off leaves the config untouched.
 		moq::ClientConfig config;
 		CHECK(MoQSettings::Configure(&settings, config).empty());
-		CHECK(!config.timeout_us && !config.quic.max_streams);
+		CHECK(!config.timeout && !config.quic.max_streams);
 	}
 	printf("defaults come from moq-ffi: ok\n");
 
@@ -181,12 +187,12 @@ int main()
 		moq::ClientConfig config;
 		CHECK(MoQSettings::Configure(&settings, config).empty());
 		CHECK(config.versions == std::vector<std::string>{version});
-		CHECK(config.timeout_us == 7'000'000u);
-		CHECK(config.race_us == 80'000u);
+		CHECK(config.timeout == std::chrono::milliseconds(7000));
+		CHECK(config.race == std::chrono::milliseconds(80));
 		CHECK(config.tls.host_name == std::string("relay.example"));
 		CHECK(config.quic.congestion_control == moq::CongestionControl::kLoss);
-		CHECK(config.quic.idle_timeout_us == 9'000'000u);
-		CHECK(config.quic.keep_alive_us == 0u);
+		CHECK(config.quic.idle_timeout == std::chrono::milliseconds(9000));
+		CHECK(config.quic.keep_alive == std::chrono::nanoseconds::zero());
 		CHECK(config.quic.gso == false);
 		CHECK(config.quic.mtu_discovery == true);
 		CHECK(!config.quic.qlog);
