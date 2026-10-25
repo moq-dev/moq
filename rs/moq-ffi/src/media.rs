@@ -1096,14 +1096,18 @@ impl MoqMediaTrackProducer {
 
 	/// Finish this track and finalize encoding.
 	///
-	/// The broadcast keeps the finished track until it ends, so its finish still holds it.
+	/// The broadcast keeps the finished track until it ends, so its finish still holds it. A
+	/// failed finish ends the track with its error instead.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
 		let mut media = guard.take().ok_or(MoqError::Closed)?;
-		media.import.finish().map_err(|err| MoqError::Codec {
-			reason: format!("finish failed: {err}"),
-		})?;
+		if let Err(err) = media.import.finish() {
+			media.import.abort(cause(&err));
+			return Err(MoqError::Codec {
+				reason: format!("finish failed: {err}"),
+			});
+		}
 		self.children.keep(media);
 		Ok(())
 	}
@@ -1170,15 +1174,19 @@ impl MoqMediaContainerProducer {
 
 	/// Finish every track this container publishes.
 	///
-	/// The broadcast keeps the finished tracks until it ends, so its finish still holds them.
+	/// The broadcast keeps the finished tracks until it ends, so its finish still holds them. A
+	/// failed finish ends the tracks with its error instead.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let result = (|| {
 			let _guard = crate::ffi::enter();
 			let mut guard = self.inner.lock().unwrap();
 			let mut container = guard.take().ok_or(MoqError::Closed)?;
-			container.import.finish().map_err(|err| MoqError::Codec {
-				reason: format!("finish failed: {err}"),
-			})?;
+			if let Err(err) = container.import.finish() {
+				container.import.abort(cause(&err));
+				return Err(MoqError::Codec {
+					reason: format!("finish failed: {err}"),
+				});
+			}
 			self.children.keep(container);
 			Ok(())
 		})();
@@ -1212,16 +1220,29 @@ impl MoqMediaTrackStreamProducer {
 
 	/// Finalize the track, publishing the last access unit still waiting for a following start code.
 	///
-	/// The broadcast keeps the finished track until it ends, so its finish still holds it.
+	/// The broadcast keeps the finished track until it ends, so its finish still holds it. A
+	/// failed finish ends the track with its error instead.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
 		let mut media = guard.take().ok_or(MoqError::Closed)?;
-		media.import.finish().map_err(|err| MoqError::Codec {
-			reason: format!("finish failed: {err}"),
-		})?;
+		if let Err(err) = media.import.finish() {
+			media.import.abort(cause(&err));
+			return Err(MoqError::Codec {
+				reason: format!("finish failed: {err}"),
+			});
+		}
 		self.children.keep(media);
 		Ok(())
+	}
+}
+
+/// The cause a failed import ends its tracks with, so a reader sees the publisher fail rather than
+/// `Dropped`. Only a moq-net error has a wire code; any other reaches readers as `Internal`.
+fn cause(err: &moq_mux::Error) -> moq_net::Error {
+	match err {
+		moq_mux::Error::Moq(err) => err.clone(),
+		_ => moq_net::StreamError::Internal.into(),
 	}
 }
 

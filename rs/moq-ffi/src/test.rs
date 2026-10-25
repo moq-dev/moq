@@ -4233,6 +4233,121 @@ async fn finishing_before_close_ends_tracks_cleanly() {
 	}
 }
 
+/// One writer of each data kind on `broadcast`, each with a subscriber reading its track.
+async fn data_children(
+	broadcast: &MoqBroadcastProducer,
+) -> (
+	(
+		Arc<MoqJsonSnapshotProducer>,
+		Arc<MoqJsonStreamProducer>,
+		Arc<MoqJsonWindowProducer>,
+		Arc<MoqFlateSnapshotProducer>,
+		Arc<MoqFlateStreamProducer>,
+	),
+	[Arc<MoqTrackConsumer>; 5],
+) {
+	let consumer = broadcast.consume().unwrap();
+	let flate = || MoqFlateConfig {
+		compression: false,
+		mime: None,
+	};
+	let track = |name: &str| broadcast.publish_track(name.into(), None).unwrap();
+	let writers = (
+		MoqJsonSnapshotProducer::new(
+			broadcast,
+			&track("json-snapshot"),
+			MoqJsonSnapshotConfig {
+				deltas: true,
+				compression: false,
+			},
+		)
+		.unwrap(),
+		MoqJsonStreamProducer::new(
+			broadcast,
+			&track("json-stream"),
+			MoqJsonStreamConfig { compression: false },
+		)
+		.unwrap(),
+		MoqJsonWindowProducer::new(
+			&track("json-window"),
+			MoqJsonWindowConfig {
+				compression: false,
+				checkpoint_records: None,
+			},
+		)
+		.unwrap(),
+		MoqFlateSnapshotProducer::new(broadcast, &track("flate-snapshot"), flate()).unwrap(),
+		MoqFlateStreamProducer::new(broadcast, &track("flate-stream"), flate()).unwrap(),
+	);
+	let readers = [
+		consumer.subscribe_track("json-snapshot".into(), None).await.unwrap(),
+		consumer.subscribe_track("json-stream".into(), None).await.unwrap(),
+		consumer.subscribe_track("json-window".into(), None).await.unwrap(),
+		consumer.subscribe_track("flate-snapshot".into(), None).await.unwrap(),
+		consumer.subscribe_track("flate-stream".into(), None).await.unwrap(),
+	];
+	(writers, readers)
+}
+
+/// Closing a broadcast ends its data tracks the way it ends media ones, and their writers
+/// refuse later calls.
+#[tokio::test(start_paused = true)]
+async fn closing_a_broadcast_ends_its_open_data_tracks() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let ((json_snapshot, json_stream, json_window, flate_snapshot, flate_stream), readers) =
+		data_children(&broadcast).await;
+	broadcast.close().unwrap();
+	assert_left(readers).await;
+
+	assert!(matches!(json_snapshot.update("1".into(), None), Err(MoqError::Closed)));
+	assert!(matches!(json_stream.append("1".into(), None), Err(MoqError::Closed)));
+	assert!(matches!(json_window.push("1".into(), None), Err(MoqError::Closed)));
+	assert!(matches!(flate_snapshot.update(vec![1], None), Err(MoqError::Closed)));
+	assert!(matches!(flate_stream.append(vec![1], None), Err(MoqError::Closed)));
+}
+
+/// A data writer released without a finish ends its track as a publisher leaving.
+#[tokio::test(start_paused = true)]
+async fn dropping_an_unfinished_data_writer_ends_it() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let (writers, readers) = data_children(&broadcast).await;
+	drop(writers);
+	assert_left(readers).await;
+	broadcast.close().unwrap();
+}
+
+/// A media finish that fails ends the track with that failure, rather than dropping it without a
+/// cause.
+#[tokio::test(start_paused = true)]
+async fn a_failed_finish_ends_the_track_with_its_cause() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let consumer = broadcast.consume().unwrap();
+	let stream = MoqMediaTrackStreamProducer::video(
+		&broadcast,
+		MoqMediaTarget::Named {
+			name: Some("video".into()),
+		},
+		video_init(MoqVideoFormat::Avc3, h264_init()),
+	)
+	.unwrap();
+	let reader = consumer.subscribe_track("video".into(), None).await.unwrap();
+
+	// A delta slice with no keyframe before it, held by the splitter until the finish flushes it.
+	stream.write(vec![0, 0, 0, 1, 0x61, 0xe0, 0x12, 0x34]).unwrap();
+	assert!(matches!(stream.finish(), Err(MoqError::Codec { .. })));
+
+	let read = tokio::time::timeout(TIMEOUT, reader.read_frame()).await;
+	let Err(err) = read.expect("the track carried on") else {
+		panic!("the track ended without a cause");
+	};
+	assert_protocol(
+		&err,
+		crate::error::MoqErrorScope::Stream,
+		crate::error::MoqProtocolKind::Internal,
+	);
+	broadcast.close().unwrap();
+}
+
 /// A request accepted after its broadcast closed is refused, and its subscriber sees the
 /// publisher leave.
 #[tokio::test(start_paused = true)]

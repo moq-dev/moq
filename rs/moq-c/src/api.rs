@@ -2169,8 +2169,9 @@ pub extern "C" fn moq_publish_unannounce(broadcast: u32) -> i32 {
 /// End a broadcast for good and release its handle.
 ///
 /// The origin retracts the path immediately and serves no new tracks. Every media, raw track,
-/// container, and encoder handle still open on the broadcast ends with `UNROUTABLE`, the way a
-/// reader sees a publisher leave, and is released; finish a track first to end it cleanly. The
+/// container, encoder, JSON, and binary handle still open on the broadcast ends with `UNROUTABLE`,
+/// the way a reader sees a publisher leave, and is released; finish a track first to end it
+/// cleanly. The
 /// handles are invalid afterwards, so closing it again fails like any unknown handle, and so
 /// does any later call on a released child.
 ///
@@ -2325,7 +2326,7 @@ pub extern "C" fn moq_publish_media_seek(media: u32, sequence: u64) -> i32 {
 /// Finish a media track, flushing any buffered frames. No more frames can be written.
 ///
 /// The broadcast keeps the finished track, catalog rendition included, until it closes, so a
-/// late subscriber can still drain it.
+/// late subscriber can still drain it. A failed finish ends the track with its error instead.
 ///
 /// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
@@ -2452,7 +2453,7 @@ pub extern "C" fn moq_publish_container_seek(container: u32, sequence: u64) -> i
 /// Finish every track the container publishes and release the handle.
 ///
 /// The broadcast keeps the finished tracks, catalog renditions included, until it closes, so a
-/// late subscriber can still drain them.
+/// late subscriber can still drain them. A failed finish ends the tracks with its error instead.
 ///
 /// Returns zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]

@@ -72,6 +72,10 @@ pub(crate) enum Child {
 	Track(Id),
 	Audio(Id),
 	Video(Id),
+	JsonSnapshot(Id),
+	JsonStream(Id),
+	BinarySnapshot(Id),
+	BinaryStream(Id),
 }
 
 /// A child's handle, which ends what it still publishes when its broadcast closes.
@@ -208,6 +212,39 @@ impl Abort for Container {
 	}
 }
 
+impl Abort for JsonSnapshot {
+	fn abort(self, err: moq_net::Error) {
+		let _ = self.data.producer.abort(err);
+	}
+}
+
+impl Abort for Data<moq_mux::json::Stream<serde_json::Value>> {
+	fn abort(self, err: moq_net::Error) {
+		let _ = self.producer.abort(err);
+	}
+}
+
+impl Abort for Data<moq_mux::binary::Snapshot> {
+	fn abort(self, err: moq_net::Error) {
+		let _ = self.producer.abort(err);
+	}
+}
+
+impl Abort for Data<moq_mux::binary::Stream> {
+	fn abort(self, err: moq_net::Error) {
+		let _ = self.producer.abort(err);
+	}
+}
+
+/// The cause a failed import ends its tracks with, so a reader sees the publisher fail rather than
+/// `Dropped`. Only a moq-net error has a wire code; any other reaches readers as `Internal`.
+fn cause(err: &moq_mux::Error) -> moq_net::Error {
+	match err {
+		moq_mux::Error::Moq(err) => err.clone(),
+		_ => moq_net::StreamError::Internal.into(),
+	}
+}
+
 impl<T> std::ops::Deref for Kept<T> {
 	type Target = T;
 
@@ -227,6 +264,7 @@ impl<T> std::ops::DerefMut for Kept<T> {
 struct Data<T> {
 	producer: T,
 	clock: moq_mux::Clock,
+	children: Children,
 }
 
 /// A JSON snapshot producer, kept beside the signal that stops its refresh task.
@@ -511,7 +549,12 @@ impl Publish {
 
 	pub fn media_finish(&mut self, media: Id) -> Result<(), Error> {
 		let mut track = self.media.remove(media).ok_or(Error::MediaNotFound)?;
-		track.finish()?;
+		if let Err(err) = track.finish() {
+			track.children.forget(Child::Media(media));
+			let cause = cause(&err);
+			track.abort(cause);
+			return Err(err.into());
+		}
 		track.keep(Child::Media(media));
 		Ok(())
 	}
@@ -548,9 +591,14 @@ impl Publish {
 	pub fn container_finish(&mut self, container: Id) -> Result<(), Error> {
 		let id = container;
 		let mut container = self.containers.remove(id).ok_or(Error::MediaNotFound)?;
-		let result = container.inner.finish();
+		if let Err(err) = container.inner.finish() {
+			container.children.forget(Child::Container(id));
+			let driver = container.driver.clone();
+			container.abort(cause(&err));
+			driver.check()?;
+			return Err(err.into());
+		}
 		container.driver.check()?;
-		result?;
 		container.children.keep(Child::Container(id), container.inner);
 		Ok(())
 	}
@@ -1058,6 +1106,7 @@ impl Publish {
 		Ok(Data {
 			producer,
 			clock: broadcast.catalog.clock(),
+			children: broadcast.children.clone(),
 		})
 	}
 
@@ -1077,7 +1126,9 @@ impl Publish {
 		})?;
 		let alive = kio::Producer::new(());
 		let closed = alive.consume();
-		let id = self.json_snapshot.insert(JsonSnapshot { data, _alive: alive })?;
+		let children = data.children.clone();
+		let snapshot = JsonSnapshot { data, _alive: alive };
+		let id = children.insert(&mut self.json_snapshot, snapshot, Child::JsonSnapshot)?;
 		crate::ffi::Background::new(async move {
 			Self::json_snapshot_refresh(id, closed).await;
 			Ok(())
@@ -1120,7 +1171,9 @@ impl Publish {
 
 	/// Finish a JSON snapshot track and retire its catalog entry. No more values can be published.
 	pub fn json_snapshot_finish(&mut self, json: Id) -> Result<(), Error> {
-		let json = self.json_snapshot.remove(json).ok_or(Error::TrackNotFound)?;
+		let id = json;
+		let json = self.json_snapshot.remove(id).ok_or(Error::TrackNotFound)?;
+		json.data.children.forget(Child::JsonSnapshot(id));
 		json.data.producer.finish()?;
 		Ok(())
 	}
@@ -1133,7 +1186,8 @@ impl Publish {
 		let producer = self.data_track(broadcast, name, None, |catalog, track| {
 			catalog.json_stream(track, config)
 		})?;
-		self.json_stream.insert(producer)
+		let children = producer.children.clone();
+		children.insert(&mut self.json_stream, producer, Child::JsonStream)
 	}
 
 	/// Append one record to a JSON stream track.
@@ -1148,6 +1202,7 @@ impl Publish {
 	/// Finish a JSON stream track and retire its catalog entry. No more records can be appended.
 	pub fn json_stream_finish(&mut self, stream: Id) -> Result<(), Error> {
 		let producer = self.json_stream.remove(stream).ok_or(Error::TrackNotFound)?;
+		producer.children.forget(Child::JsonStream(stream));
 		producer.producer.finish()?;
 		Ok(())
 	}
@@ -1158,7 +1213,8 @@ impl Publish {
 		let producer = self.data_track(broadcast, name, None, |catalog, track| {
 			catalog.binary_snapshot(track, config)
 		})?;
-		self.binary_snapshot.insert(producer)
+		let children = producer.children.clone();
+		children.insert(&mut self.binary_snapshot, producer, Child::BinarySnapshot)
 	}
 
 	/// Publish a new payload to a binary snapshot track, superseding the last.
@@ -1173,6 +1229,7 @@ impl Publish {
 	/// Finish a binary snapshot track and retire its catalog entry.
 	pub fn binary_snapshot_finish(&mut self, binary: Id) -> Result<(), Error> {
 		let producer = self.binary_snapshot.remove(binary).ok_or(Error::TrackNotFound)?;
+		producer.children.forget(Child::BinarySnapshot(binary));
 		producer.producer.finish()?;
 		Ok(())
 	}
@@ -1183,7 +1240,8 @@ impl Publish {
 		let producer = self.data_track(broadcast, name, None, |catalog, track| {
 			catalog.binary_stream(track, config)
 		})?;
-		self.binary_stream.insert(producer)
+		let children = producer.children.clone();
+		children.insert(&mut self.binary_stream, producer, Child::BinaryStream)
 	}
 
 	/// Append one payload to a binary stream track.
@@ -1198,6 +1256,7 @@ impl Publish {
 	/// Finish a binary stream track and retire its catalog entry.
 	pub fn binary_stream_finish(&mut self, stream: Id) -> Result<(), Error> {
 		let producer = self.binary_stream.remove(stream).ok_or(Error::TrackNotFound)?;
+		producer.children.forget(Child::BinaryStream(stream));
 		producer.producer.finish()?;
 		Ok(())
 	}
@@ -1243,6 +1302,22 @@ impl State {
 				Child::Track(id) => self.publish.tracks.remove(id).map(|track| track.abort(err.clone())),
 				Child::Audio(id) => self.audio.remove(id).ok().map(|audio| audio.abort(err.clone())),
 				Child::Video(id) => self.video.remove(id).ok().map(|video| video.abort(err.clone())),
+				Child::JsonSnapshot(id) => self
+					.publish
+					.json_snapshot
+					.remove(id)
+					.map(|json| json.abort(err.clone())),
+				Child::JsonStream(id) => self.publish.json_stream.remove(id).map(|json| json.abort(err.clone())),
+				Child::BinarySnapshot(id) => self
+					.publish
+					.binary_snapshot
+					.remove(id)
+					.map(|data| data.abort(err.clone())),
+				Child::BinaryStream(id) => self
+					.publish
+					.binary_stream
+					.remove(id)
+					.map(|data| data.abort(err.clone())),
 			};
 		}
 		Publish::close(broadcast)
@@ -1293,6 +1368,60 @@ mod children_tests {
 		}
 		assert!(matches!(state.publish.track_finish(track), Err(Error::TrackNotFound)));
 		assert!(matches!(state.publish.media_finish(media), Err(Error::MediaNotFound)));
+	}
+
+	/// Closing a broadcast ends its data tracks the way it ends media ones, and releases their
+	/// handles.
+	#[tokio::test(start_paused = true)]
+	async fn closing_a_broadcast_ends_its_open_data_tracks() {
+		let mut state = State::new();
+		let broadcast = state
+			.publish
+			.create((moq_net::broadcast::Info::new().produce(), Default::default()))
+			.unwrap();
+		let consumer = state.publish.broadcast(broadcast).unwrap().producer.consume();
+		let json = moq_mux::json::Config::default;
+		let binary = moq_mux::binary::Config::default;
+		let json_snapshot = state.publish.json_snapshot(broadcast, "json-snapshot", json()).unwrap();
+		let json_stream = state.publish.json_stream(broadcast, "json-stream", json()).unwrap();
+		let binary_snapshot = state
+			.publish
+			.binary_snapshot(broadcast, "binary-snapshot", binary())
+			.unwrap();
+		let binary_stream = state
+			.publish
+			.binary_stream(broadcast, "binary-stream", binary())
+			.unwrap();
+		let mut readers = Vec::new();
+		for name in ["json-snapshot", "json-stream", "binary-snapshot", "binary-stream"] {
+			readers.push(consumer.track(name).unwrap().subscribe(None).await.unwrap());
+		}
+
+		state.publish_close(broadcast).unwrap();
+		for mut reader in readers {
+			let read = moq_clock::timeout(TIMEOUT, reader.recv_group()).await;
+			assert!(matches!(
+				read.expect("the track carried on"),
+				Err(moq_net::Error::Unroutable)
+			));
+		}
+		let json = serde_json::Value::Null;
+		assert!(matches!(
+			state.publish.json_snapshot_update(json_snapshot, json.clone()),
+			Err(Error::TrackNotFound)
+		));
+		assert!(matches!(
+			state.publish.json_stream_append(json_stream, json),
+			Err(Error::TrackNotFound)
+		));
+		assert!(matches!(
+			state.publish.binary_snapshot_update(binary_snapshot, b"late"),
+			Err(Error::TrackNotFound)
+		));
+		assert!(matches!(
+			state.publish.binary_stream_append(binary_stream, b"late"),
+			Err(Error::TrackNotFound)
+		));
 	}
 
 	/// A track finished before its broadcast closes ends cleanly.
