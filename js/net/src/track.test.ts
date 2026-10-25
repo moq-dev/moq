@@ -3083,7 +3083,12 @@ test("adjacent drops with the same code merge into one run", () => {
 	const reader = producer.subscribe({ maxDelay: Milli(60_000) });
 	// Each DROP decodes to its own error, so runs must merge by code, not identity.
 	for (let sequence = 2; sequence < 5; sequence++) {
-		hooks.dropTrackGroups(producer, sequence, sequence + 1, new StreamError(StreamCode.NotFound, { message: "dropped" }));
+		hooks.dropTrackGroups(
+			producer,
+			sequence,
+			sequence + 1,
+			new StreamError(StreamCode.NotFound, { message: "dropped" }),
+		);
 	}
 	const recv = hooks.tryRecvGroup(reader, true);
 	expect(recv.kind === "drop" ? [recv.start, recv.end, recv.error] : recv).toEqual([2, 5, DROPPED]);
