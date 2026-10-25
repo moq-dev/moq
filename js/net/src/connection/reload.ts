@@ -803,8 +803,9 @@ export function pumpAnnounced(effect: Effect, upstream: Announce.Consumer, produ
 
 /**
  * A session the peer sent GOAWAY on, left serving so its groups in flight finish. It retires
- * when it closes on its own, overstays its handover window (aborted), or is retired by the
- * loop, and `onRetire` runs once either way.
+ * when it closes on its own, overstays its handover window, or is retired by the loop, and
+ * `onRetire` runs once either way. The window still caps a retired session's close: it is
+ * aborted at the window's end if still open.
  */
 class Draining {
 	#connection: Established;
@@ -817,20 +818,21 @@ class Draining {
 		this.#onRetire = onRetire;
 		void sleep(Nano.fromMilli(handover), { signal: this.#timer.signal }).then(
 			() => {
-				if (!this.retire()) return;
-				console.warn("old session did not drain in time; closing");
+				if (this.retire()) console.warn("old session did not drain in time; closing");
 				connection.abort();
 			},
 			() => {},
 		);
-		void connection.closed.then(() => this.retire());
+		void connection.closed.then(() => {
+			this.#timer.abort();
+			this.retire();
+		});
 	}
 
 	/** Stop serving from the old session, returning it the first time for the caller to end. */
 	retire(): Established | undefined {
 		if (this.#retired) return undefined;
 		this.#retired = true;
-		this.#timer.abort();
 		this.#onRetire();
 		return this.#connection;
 	}

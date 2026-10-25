@@ -789,6 +789,69 @@ for (const [name, drainEnd] of Object.entries(drainEnds)) {
 	});
 }
 
+// Retiring a GOAWAY predecessor early drains it, but never past its handover window.
+test("a retired GOAWAY predecessor still closes by its handover cap", async () => {
+	const original = globalThis.WebTransport;
+	const clock = new Manual();
+	const installed = clock.install();
+	const dials: { server: Promise<Established>; quic: WebTransport; closed: boolean }[] = [];
+	const stub = function StubWebTransport(dialed: string | URL) {
+		const pair = createMockTransportPair(Lite.ALPN_06);
+		const dial = { server: accept(pair.server, new URL(dialed)), quic: pair.server, closed: false };
+		void pair.client.closed.then(() => {
+			dial.closed = true;
+		});
+		dials.push(dial);
+		return pair.client;
+	};
+	globalThis.WebTransport = stub as unknown as typeof WebTransport;
+
+	const origin = new OriginProducer();
+	const broadcast = origin.createBroadcast(Path.from("room"));
+	broadcast.announce();
+	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const reload = new Reload({
+		url: new URL("https://example.com/"),
+		websocket: { enabled: false },
+		publish: origin.consume(),
+		delay: { initial: Milli(0) },
+		goaway: { handover: Milli(100) },
+	});
+
+	await waitUntil(() => dials.length > 0);
+	const first = dials[0];
+	if (!first) throw new Error("no first dial");
+	const remote = wireOf(await first.server).consume(Path.from("room"));
+	const track = remote.track("video").subscribe().ordered();
+	try {
+		// The group stays open, so a graceful close of the predecessor would wait out its deadline.
+		producer.appendGroup().writeFrame(textFrame("live"));
+		expect(await (await track.nextGroup())?.readString()).toBe("live");
+
+		const stream = await Stream.open(first.quic, { version: Lite.Version.DRAFT_06 });
+		await stream.writer.u53(Lite.StreamId.Goaway);
+		await new Lite.Goaway("").encode(stream.writer, Lite.Version.DRAFT_06);
+		await waitUntil(() => dials.length === 2 && reload.status.peek() === "connected");
+
+		await clock.advance(Nano.fromMilli(Milli(90)));
+		reload.close();
+		await clock.advance(Nano.fromMilli(Milli(9)));
+		expect(first.closed).toBe(false);
+		await clock.advance(Nano.fromMilli(Milli(1)));
+		await waitUntil(() => first.closed);
+	} finally {
+		track.close();
+		remote.close();
+		reload.close();
+		for (const dial of dials) (await dial.server).abort();
+		producer.close();
+		broadcast.close();
+		origin.close();
+		installed.close();
+		globalThis.WebTransport = original;
+	}
+});
+
 // A publication only a token's grant covers keeps that grant while the session drains, so
 // closing the loop ends the tokens after the drain rather than cutting the final group.
 test("closing the loop keeps the tokens until the session drains", async () => {
