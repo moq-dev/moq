@@ -585,7 +585,7 @@ function holdFins(transport: MockTransport) {
 // Releasing the last handle is ordinary teardown, so a track that finished just before keeps its
 // final group, whether the session is serving or a predecessor still draining after a GOAWAY.
 // A page going away aborts: nothing would run to finish the drain. `linger` is how long after
-// `end` the session starts closing: the pool's default window, or at once for a private loop.
+// `end` the session starts closing: the pool's two-second window, or at once for a private loop.
 // `hide` then sends the page away mid-drain, after the loop itself has closed.
 const teardowns = {
 	"release of the last handle": {
