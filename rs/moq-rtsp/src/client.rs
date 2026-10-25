@@ -987,7 +987,9 @@ mod tests {
 		catalog_with(&catalog, 1, 0).await;
 		for _ in 0..4 {
 			session.rtcp(0, 0).await;
-			// A driver turn, so the pull reads the report before the clock moves on.
+			// On this current-thread runtime a yield resumes only after the I/O driver polls, so
+			// the pull sees the report as readable before the clock moves. Its timeout polls the
+			// read before the deadline, so it takes the report even when the deadline is due.
 			tokio::task::yield_now().await;
 			clock.advance(super::TIMEOUT / 4);
 		}
