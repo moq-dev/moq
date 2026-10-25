@@ -20,7 +20,9 @@ with a median entry of 135 s (p90 516 s) and 3 to 12 s of runner wait.
   under the same `ci.slice` quota and a desktop; split CPU and memory so
   concurrent entries do not slow each other past the gain.
 - Concurrent entries share the local mbx store; confirm that is safe, or give
-  each its own.
+  each its own. Each job sweeps the store before it builds
+  (`.github/actions/rust-cache`), which can evict generated source trees that
+  a concurrent entry's next build reads.
 - Measure merged PRs per hour and per-entry wall time before and after.
 - Queue entries skip `quest gate`: `sh/local.sh` execs directly under GitHub
   Actions, so the runner quota, not admission, has to keep entries apart.

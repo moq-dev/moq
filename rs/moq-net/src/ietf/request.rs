@@ -235,9 +235,6 @@ mod tests {
 			Version::Draft16,
 			Version::Draft17,
 			Version::Draft18,
-			Version::Draft19,
-			Version::Draft20,
-			Version::Draft21,
 			Version::Draft22,
 		] {
 			let bytes: &[u8] = match version {

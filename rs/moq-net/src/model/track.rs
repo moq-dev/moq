@@ -6838,7 +6838,7 @@ impl Subscriber {
 	pub(crate) fn poll_drop(&mut self, waiter: &kio::Waiter) -> Poll<(ops::Range<u64>, StreamError)> {
 		match &mut self.inner {
 			Inner::Plain(cursor) => cursor.poll_drop(waiter),
-			Inner::Resume(resume, _) => resume.poll_drop(waiter),
+			Inner::Resume(resume, _) => resume.poll_drop(&self.delivered, waiter),
 		}
 	}
 
