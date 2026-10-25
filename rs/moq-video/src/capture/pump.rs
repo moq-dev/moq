@@ -100,7 +100,7 @@ where
 					Ok(Read::Frame(frame)) => chan.push(frame),
 					Ok(Read::FrameAt(frame, timestamp)) => chan.push_native(frame, timestamp),
 					#[cfg(target_os = "linux")]
-					Ok(Read::Idle) => {}     // held: re-check the stop flag, then read again
+					Ok(Read::Idle) => {} // held: re-check the stop flag, then read again
 					Ok(Read::Done) => break, // device stopped producing frames
 					Err(err) => {
 						chan.fail(err);
