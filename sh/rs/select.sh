@@ -113,9 +113,10 @@ case "$packages" in
     *) echo "rs: selecting $names" ;;
 esac
 
-# Selection and empty crate sets stay outside admission.
+# Selection and empty crate sets stay outside admission. The paths are
+# root-relative because the `cd` above invalidates a relative `$0`.
 if [[ "${GITHUB_ACTIONS:-}" != true && "${MOQ_LOCAL_SUPERVISED:-}" != 1 ]]; then
-    exec bash "$(dirname "$0")/../local.sh" bash "$0" "$@"
+    exec bash sh/local.sh bash sh/rs/select.sh "$@"
 fi
 
 # The `*-fuzz` crates need a nightly toolchain; only `just rs fuzz` compiles them.
