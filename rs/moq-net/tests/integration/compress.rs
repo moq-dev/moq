@@ -55,7 +55,7 @@ struct Fixture {
 /// A track announced by the original publisher, before any relay carries it.
 struct Published {
 	publisher: moq_net::origin::Producer,
-	broadcast: moq_net::broadcast::Producer,
+	broadcast: moq_net::origin::Publication,
 	track: moq_net::track::Producer,
 }
 
