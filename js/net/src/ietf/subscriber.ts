@@ -355,10 +355,11 @@ export class Subscriber {
 
 		// The overlapping requests on their way out, such as the narrower ones an exclusive
 		// discovery just closed for this one. Those still open overlap it only where the
-		// caller holds both on purpose.
+		// caller holds both on purpose. One whose last reader just closed is leaving even
+		// before its producer closes.
 		const blockers: Promise<void>[] = [];
 		for (const [other, { prefix: asked, gone }] of this.#announcedConsumers) {
-			if (gone === undefined || other.closed.peek() === undefined) continue;
+			if (gone === undefined || (other.wanted.peek() && other.closed.peek() === undefined)) continue;
 			if (Path.hasPrefix(asked, prefix) || Path.hasPrefix(prefix, asked)) blockers.push(gone);
 		}
 
