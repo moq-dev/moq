@@ -180,7 +180,7 @@ declare -A compiles=(
 # Lanes start in this order, so the slowest come first. dart runs alone (see
 # below), so it waits for the rest.
 case "$action" in
-    check | ci) modules=(rs carla py kt swift go cpp obs_compile js drafts markdown gh flake bench drill workers moq_sh quest obs ts_paths shell large_files toml nix justfile dart) ;;
+    check | ci) modules=(py rs cpp obs_compile js kt flake bench carla swift go drafts markdown gh drill workers moq_sh quest obs ts_paths shell large_files toml nix justfile dart) ;;
     fix) modules=(js rs py carla dart obs markdown shell toml nix justfile) ;;
 esac
 
@@ -193,18 +193,17 @@ declare -A lane=(
     [drafts]=bun
     [markdown]=bun
     [gh]=bun
-    # carla's `uv sync` uninstalls py's editable build from the shared venv.
-    # py builds target/debug/libmoq_ffi.so with its test features, and the
-    # other bindings read their default build from that path after Cargo
-    # exits. cpp and obs_compile also share cpp/moq/build.
-    [carla]=ffi
-    [py]=ffi
-    [kt]=ffi
-    [swift]=ffi
-    [go]=ffi
-    [cpp]=ffi
-    [obs_compile]=ffi
+    # Both build cpp/moq/build.
+    [cpp]=cpp
+    [obs_compile]=cpp
 )
+
+# kt, swift, go, cpp, and obs_compile each build moq-ffi's cdylib with the same
+# features and profile before reading target/debug/libmoq_ffi.so. Cargo runs
+# one build at a time per target directory and leaves a fresh output untouched,
+# so the first of those lanes builds it while the rest wait in Cargo, and none
+# rewrites it while another reads it. py builds its test features into a target
+# directory of its own, and carla runs its tools outside py's venv.
 
 # Lanes that run with no other lane beside them. dart builds moq-ffi with the
 # filtered environment its build hook gets, then checks that the hook finds

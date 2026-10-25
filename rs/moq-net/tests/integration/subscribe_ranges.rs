@@ -124,6 +124,60 @@ async fn ahead_then_live(version: Option<&str>, relay: bool) -> (Vec<u64>, Vec<u
 	(ahead_got, live_got)
 }
 
+/// Lite-07 carries every range a subscriber asks for, so the publisher is asked for only
+/// the groups they name; an older wire carries the one span covering them. Either way the
+/// subscriber reads just its own groups.
+#[moq_clock::test]
+async fn sparse_ranges_reach_the_publisher_on_lite07() {
+	let sparse = [Range::groups(0..1), Range::groups(3..4)];
+	for version in LITE {
+		let publisher = produce_origin(1);
+		let broadcast = publisher.create_broadcast("bcast").unwrap();
+		let track = broadcast
+			.create_track("quiet", Info::default().with_timescale(moq_net::Timescale::MILLI))
+			.unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		for sequence in 0..=4 {
+			write_group(&track, sequence);
+		}
+
+		let subscriber = produce_origin(2);
+		let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
+		options.server_publish = Some(publisher.consume());
+		options.client_subscribe = Some(subscriber.clone());
+		let session = connect_mock(options).await;
+		let consumer = subscriber.consume();
+		moq_clock::timeout(TIMEOUT, consumer.routed("bcast"))
+			.await
+			.expect("announce timeout")
+			.expect("routed");
+		let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
+			.await
+			.expect("resolve timeout")
+			.expect("broadcast resolves");
+
+		let subscription = Subscription::default()
+			.with_max_delay(Duration::from_secs(60))
+			.with_ranges(sparse);
+		let mut reader = subscribe(&remote, subscription).await;
+		moq_clock::timeout(TIMEOUT, crate::support::wanted(track.demand()))
+			.await
+			.expect("no subscriber appeared")
+			.unwrap();
+		let asked = track.subscription().expect("the publisher holds the demand").ranges;
+		match *version {
+			"moq-lite-07-wip" => assert_eq!(asked, sparse, "{version}"),
+			_ => assert_eq!(asked.len(), 1, "{version}: one span, got {asked:?}"),
+		}
+
+		track.finish().unwrap();
+		let mut got = read_all(&mut reader).await;
+		got.sort_unstable();
+		assert_eq!(got, [0, 3], "{version}");
+		drop((track, session, subscriber, broadcast, publisher));
+	}
+}
+
 /// A subscriber from group 4 merged with a live one doesn't floor the shared subscription
 /// at 4: the live one still gets group 3.
 #[moq_clock::test]

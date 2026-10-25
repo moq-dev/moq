@@ -34,5 +34,4 @@ Public API: none. Wire: none.
 - [moq-net compiles in Fuzz and send-depth](/quest/m0/nightly/send-overflow.md) - the ietf publisher future stops overflowing the Send check
 - [The Python sdist builds](/quest/m0/nightly/py-sdist.md) - the sdist carries every workspace crate moq-ffi needs
 - [Feature shapes in the gate](/quest/m0/nightly/feature-shapes.md) - feature-gated dead code fails the PR that adds it, not the next Nightly
-- [ts_schedule regression](/quest/m0/nightly/ts-schedule.md) - the moq-mux `ts_schedule` benches return to their old cost
 - [Nightly's base in a shallow checkout](/quest/m0/nightly/shallow-base.md) - `sh/gh/nightly.test.py` passes in Nightly's depth-1 checkout
