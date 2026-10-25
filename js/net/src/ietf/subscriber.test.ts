@@ -28,7 +28,13 @@ import {
 } from "./publish_namespace.ts";
 import { MaxRequestId, RequestError, RequestOk } from "./request.ts";
 import { Subscribe, SubscribeOk, SubscribeUpdate, Unsubscribe } from "./subscribe.ts";
-import { SubscribeNamespace, SubscribeNamespaceEntry, SubscribeNamespaceEntryDone } from "./subscribe_namespace.ts";
+import {
+	SubscribeNamespace,
+	SubscribeNamespaceEntry,
+	SubscribeNamespaceEntryDone,
+	SubscribeNamespaceLegacy,
+	UnsubscribeNamespace,
+} from "./subscribe_namespace.ts";
 import { Subscriber } from "./subscriber.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
 
@@ -418,11 +424,14 @@ test("an entry buffered past a consumer close does not pin the path", async () =
 	await inlineNamespace(subscription, Path.from("buffered"));
 
 	announced.close();
+	// The peer ends its half on the cancel, so the request leaves the wire.
+	subscription.writer.close();
 
 	// Whatever the loop managed to attach, the stream gave back on its way out.
 	await new Promise((resolve) => setTimeout(resolve, 50));
 
 	const fresh = subscriber.announced();
+	await acceptSubscribeNamespace(pair.client);
 	const seeded = await Promise.race([
 		fresh.next(),
 		new Promise<"nothing">((resolve) => setTimeout(() => resolve("nothing"), 250)),
@@ -2221,6 +2230,75 @@ test("an announce consumer closed while waiting on request-ID credit takes no ID
 
 	session.close();
 	void running;
+});
+
+/**
+ * A request on another stream can overtake a cancel, so a peer that refuses overlapping
+ * requests (PREFIX_OVERLAP) would see the broader one beside the narrower one it replaces.
+ * It goes out only once the peer has ended the narrower one's stream.
+ */
+test("a request overlapping one on its way out waits for the peer to end it", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const session = new NativeSession(pair.server, VERSION, true);
+	const subscriber = new Subscriber({ session });
+
+	const narrow = subscriber.announced(Path.Pattern.subtree(Path.from("a/b")));
+	const stream = await acceptSubscribeNamespace(pair.client);
+	await inlineNamespace(stream, Path.from("x"));
+	expect(await narrow.next()).toMatchObject({ prefix: Path.from("a/b/x"), kind: "start" });
+
+	// A request still open is no blocker, and hears the narrower one's route go at once.
+	const watcher = subscriber.announced(Path.Pattern.subtree(Path.from("a/b")));
+	const watching = await acceptSubscribeNamespace(pair.client);
+	expect(await watcher.next()).toMatchObject({ prefix: Path.from("a/b/x"), kind: "start" });
+	narrow.close();
+	const broad = subscriber.announced(Path.Pattern.subtree(Path.from("a")));
+	expect(await watcher.next()).toMatchObject({ prefix: Path.from("a/b/x"), kind: "end" });
+
+	// Draft 19 cancels with a reset, and the broader request waits on the peer's half.
+	expect(stream.reader.done()).rejects.toMatchObject({ code: StreamCode.Cancel });
+	expect(await nextStream(pair.client)).toBeUndefined();
+
+	// The closed reader is still registered meanwhile, and hears nothing more.
+	await inlineNamespace(watching, Path.from("y"));
+	expect(await watcher.next()).toMatchObject({ prefix: Path.from("a/b/y"), kind: "start" });
+
+	stream.writer.close();
+	const asked = await nextStream(pair.client);
+	if (!asked) throw new Error("the broader SUBSCRIBE_NAMESPACE never went out");
+	await asked.reader.u53();
+	expect((await SubscribeNamespace.decode(asked.reader, VERSION)).namespace).toBe(Path.from("a"));
+
+	watcher.close();
+	broad.close();
+	session.close();
+});
+
+/** Draft 14/15 requests share the control stream, so the next one waits only for the UNSUBSCRIBE_NAMESPACE. */
+test("a draft-15 request overlapping one on its way out follows its UNSUBSCRIBE_NAMESPACE", async () => {
+	const version = Version.DRAFT_15;
+	const pair = createMockTransportPair(ALPN.DRAFT_15);
+	const control = await Stream.open(pair.server, { version });
+	const session = new ControlStreamAdapter(pair.server, control, version, 100n, true);
+	void session.run().catch(() => undefined);
+	const peer = await Stream.accept(pair.client, version);
+	if (!peer) throw new Error("no control stream");
+	const subscriber = new Subscriber({ session });
+
+	const narrow = subscriber.announced(Path.Pattern.subtree(Path.from("a/b")));
+	expect(await peer.reader.u53()).toBe(SubscribeNamespaceLegacy.id);
+	expect((await SubscribeNamespaceLegacy.decode(peer.reader, version)).namespace).toBe(Path.from("a/b"));
+
+	narrow.close();
+	const broad = subscriber.announced(Path.Pattern.subtree(Path.from("a")));
+
+	expect(await peer.reader.u53()).toBe(UnsubscribeNamespace.id);
+	await UnsubscribeNamespace.decode(peer.reader, version);
+	expect(await peer.reader.u53()).toBe(SubscribeNamespaceLegacy.id);
+	expect((await SubscribeNamespaceLegacy.decode(peer.reader, version)).namespace).toBe(Path.from("a"));
+
+	broad.close();
+	session.close();
 });
 
 /** Answer the next SUBSCRIBE_NAMESPACE with REQUEST_OK, carrying `activeCount` when given. */
