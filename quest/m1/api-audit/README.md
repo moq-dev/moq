@@ -77,5 +77,4 @@ Rejected in planning:
 
 ## Related
 
-- [API-diff check on release PRs](/quest/m1/api-diff.md) - the backstop that catches breaks this epic misses
 - [Main is no slower than release](/quest/m1/release-perf/README.md) - the other release-readiness check

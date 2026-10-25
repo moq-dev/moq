@@ -11,8 +11,8 @@
 //! So every source catalog snapshot re-resolves the ladder and diffs it: rungs
 //! the new picture has no room for retire, rungs it makes room for are added,
 //! and the rest carry on untouched. A rung whose picture changed retires and its
-//! replacement is published under a fresh name, because a retired track ends for
-//! good (see [`catalog::Names`]).
+//! replacement is published under a fresh name, because a name always means the
+//! same content (see [`catalog::Names`]).
 
 use std::collections::HashMap;
 

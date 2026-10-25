@@ -285,7 +285,7 @@
         ];
 
         # Linters / formatters used by `just check` and `just fix`, which
-        # skip a module whose tools aren't on $PATH. CI sets MOQ_STRICT=1,
+        # skip a module whose tools aren't on $PATH. CI sets CI_STRICT=1,
         # which turns that skip into an error (see the tools map in
         # sh/dispatch.sh), so this list and that one have to stay in step.
         lintDeps = with pkgs; [
@@ -390,7 +390,7 @@
 
         # uniffi-bindgen-cpp renders rs/moq-ffi for cpp/moq's CMake build. Not in
         # nixpkgs, so build it from source; without it `just check` skips the
-        # cpp module, which MOQ_STRICT turns into a failure in CI.
+        # cpp module, which CI_STRICT turns into a failure in CI.
         #
         # Like uniffi-bindgen-go, the tag pairs the generator's version with the
         # uniffi release it reads, so it moves with the `uniffi` dependency in
@@ -643,7 +643,7 @@
           env = {
             # What sh/dispatch.sh checks before a scoped `just check` or `just
             # fix`. IN_NIX_SHELL would also pass inside another project's shell.
-            MOQ_DEV_SHELL = "1";
+            IN_MOQ_DEV_SHELL = "1";
 
             PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers}";
             PLAYWRIGHT_VERSION = pkgs.playwright-driver.version;

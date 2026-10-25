@@ -23,8 +23,8 @@ jobs:
       - name: Pinned Moxygen through the relay under the conformance profile
         run: nix develop --command just test ietf-conformance
         env:
-          MOQ_TEST_RUNS: ${{ runner.temp }}/ietf-conformance
-          MOQ_TEST_KEEP: 1
+          HARNESS_RUNS: ${{ runner.temp }}/ietf-conformance
+          HARNESS_KEEP: 1
       - name: Keep conformance reports and endpoint logs
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7

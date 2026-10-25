@@ -25,7 +25,7 @@ relay before starting
 cases and rejects upstream publisher reconnects, so a recovered session cannot
 hide a failure.
 
-The nightly workflow runs this recipe. `MOQ_TEST_KEEP=1` retains the upstream
+The nightly workflow runs this recipe. `HARNESS_KEEP=1` retains the upstream
 reports, client and server logs, relay logs, configs, and endpoints. All children
 and port reservations belong to the shared harness and are reaped on exit.
 The pinned C++ build is opt-in under `legacyPackages.<system>.moxygen`; ordinary
