@@ -1153,7 +1153,13 @@ async fn broadcast_rejoin_skips_a_stale_warm_cache() {
 		"moq-lite-04",
 		"moq-lite-05",
 	];
-	for version in moq_net::Version::names().filter(|version| !pre06.contains(version)) {
+	let every = (0xff0dad00..=0xff0dadff)
+		.chain(0xff000000..=0xff0000ff)
+		.filter_map(moq_net::Version::from_code);
+	for version in every
+		.map(|version| version.as_str())
+		.filter(|version| !pre06.contains(version))
+	{
 		rejoin_skips_a_stale_warm_cache(version).await;
 	}
 }
@@ -1278,7 +1284,11 @@ async fn rejoin_skips_a_stale_warm_cache(version: &str) {
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_rejoin_replays_a_current_warm_cache() {
-	for version in moq_net::Version::names() {
+	for version in (0xff0dad00..=0xff0dadff)
+		.chain(0xff000000..=0xff0000ff)
+		.filter_map(moq_net::Version::from_code)
+		.map(|version| version.as_str())
+	{
 		for open in [false, true] {
 			rejoin_replays_a_current_warm_cache(version, open).await;
 		}
@@ -3396,12 +3406,15 @@ async fn goaway_test(scheme: &str, version: &str, expect_wire_timeout: bool) {
 
 	// Trigger the drain and observe the GOAWAY.
 	start_drain_tx.send(()).expect("send drain signal");
-	let goaway = tokio::time::timeout(TIMEOUT, draining.recv())
+	let goaway = tokio::time::timeout(TIMEOUT, moq_net::kio::wait(|waiter| draining.poll(waiter)))
 		.await
 		.expect("goaway timed out")
 		.expect("session closed before GOAWAY");
 	assert_eq!(goaway.uri(), "https://elsewhere.example/");
-	assert!(draining.peek().is_some());
+	assert!(matches!(
+		draining.poll(&moq_net::kio::Waiter::noop()),
+		std::task::Poll::Ready(Ok(_))
+	));
 	if expect_wire_timeout {
 		assert_eq!(
 			goaway.timeout(),
@@ -3489,7 +3502,8 @@ async fn goaway_timeout_force_close_moq_transport_22_quic() {
 		.expect("client connect failed");
 
 	// Observe the GOAWAY but do NOT leave.
-	let goaway = tokio::time::timeout(TIMEOUT, connection.draining().expect("connected").recv())
+	let draining = connection.draining().expect("connected");
+	let goaway = tokio::time::timeout(TIMEOUT, moq_net::kio::wait(|waiter| draining.poll(waiter)))
 		.await
 		.expect("goaway timed out")
 		.expect("session closed before GOAWAY");

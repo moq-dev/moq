@@ -2024,7 +2024,7 @@ mod tests {
 		let mut traffic = traffic(&agg);
 		let frame = read_until_bytes(&mut traffic, "acme/room", 100).await;
 		let snap = frame.get("acme/room").expect("entry");
-		assert!(snap.is_announced());
+		assert!(snap.announces_started > snap.announces_ended);
 		assert_eq!(snap.active_broadcasts(), 2);
 		assert_eq!(snap.active_subscriptions(), 3);
 
@@ -2035,7 +2035,7 @@ mod tests {
 		let frame = traffic.next().await.expect("read").expect("frame");
 		let snap = frame.get("acme/room").expect("entry");
 		assert_eq!(snap.bytes, 100, "cumulative totals stay");
-		assert!(!snap.is_announced(), "no phantom announcement");
+		assert_eq!(snap.announces_started, snap.announces_ended, "no phantom announcement");
 		assert_eq!(snap.active_broadcasts(), 0, "no phantom broadcasts");
 		assert_eq!(snap.active_subscriptions(), 0, "no phantom subscriptions");
 	}

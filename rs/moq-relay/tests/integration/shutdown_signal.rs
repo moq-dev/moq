@@ -153,10 +153,13 @@ async fn sigint_drains_sessions_before_exiting_inner() {
 	// handler, registered above.
 	assert_eq!(unsafe { libc::raise(libc::SIGINT) }, 0, "failed to raise SIGINT");
 
-	let goaway = tokio::time::timeout(Duration::from_secs(5), draining.recv())
-		.await
-		.expect("no GOAWAY within 5s of SIGINT")
-		.expect("session closed without a GOAWAY");
+	let goaway = tokio::time::timeout(
+		Duration::from_secs(5),
+		moq_net::kio::wait(|waiter| draining.poll(waiter)),
+	)
+	.await
+	.expect("no GOAWAY within 5s of SIGINT")
+	.expect("session closed without a GOAWAY");
 	// Empty URI: the relay is restarting, not moving. The window itself is the
 	// sender's own timer here (only moq-transport draft-17+ puts it on the wire),
 	// so it is the elapsed time below that proves it was honored.
@@ -192,10 +195,13 @@ async fn a_signal_right_after_ready_drains_inner() {
 	// for SIGTERM, so in a process of its own (nextest) the relay's handler is all
 	// that keeps this from killing the test.
 	assert_eq!(unsafe { libc::raise(libc::SIGTERM) }, 0, "failed to raise SIGTERM");
-	let goaway = tokio::time::timeout(Duration::from_secs(5), draining.recv())
-		.await
-		.expect("no GOAWAY within 5s of SIGTERM")
-		.expect("session closed without a GOAWAY");
+	let goaway = tokio::time::timeout(
+		Duration::from_secs(5),
+		moq_net::kio::wait(|waiter| draining.poll(waiter)),
+	)
+	.await
+	.expect("no GOAWAY within 5s of SIGTERM")
+	.expect("session closed without a GOAWAY");
 	assert_eq!(goaway.uri(), "", "expected a reconnect-to-me GOAWAY");
 	tokio::time::timeout(Duration::from_secs(15), run)
 		.await
@@ -256,7 +262,9 @@ async fn an_embedder_owns_the_signals_inner() {
 
 	// The signal is the embedder's: the relay keeps serving without a GOAWAY.
 	assert!(
-		tokio::time::timeout(DRAIN_TIMEOUT / 2, draining.recv()).await.is_err(),
+		tokio::time::timeout(DRAIN_TIMEOUT / 2, moq_net::kio::wait(|waiter| draining.poll(waiter)))
+			.await
+			.is_err(),
 		"the relay drained on a signal the embedder owns"
 	);
 	assert!(!run.is_finished(), "the relay exited on a signal the embedder owns");
@@ -264,10 +272,13 @@ async fn an_embedder_owns_the_signals_inner() {
 	// Until the embedder decides.
 	let started = std::time::Instant::now();
 	trigger.start();
-	let goaway = tokio::time::timeout(Duration::from_secs(5), draining.recv())
-		.await
-		.expect("no GOAWAY within 5s of the trigger")
-		.expect("session closed without a GOAWAY");
+	let goaway = tokio::time::timeout(
+		Duration::from_secs(5),
+		moq_net::kio::wait(|waiter| draining.poll(waiter)),
+	)
+	.await
+	.expect("no GOAWAY within 5s of the trigger")
+	.expect("session closed without a GOAWAY");
 	assert_eq!(goaway.uri(), "", "expected a reconnect-to-me GOAWAY");
 
 	tokio::time::timeout(Duration::from_secs(15), run)
@@ -302,10 +313,13 @@ async fn a_session_arriving_mid_drain_gets_what_is_left_inner() {
 	let _straggler = straggler(port).await;
 	trigger.start();
 	let deadline = std::time::Instant::now() + DRAIN_TIMEOUT;
-	let goaway = tokio::time::timeout(Duration::from_secs(5), draining.recv())
-		.await
-		.expect("no GOAWAY within 5s of the trigger")
-		.expect("session closed without a GOAWAY");
+	let goaway = tokio::time::timeout(
+		Duration::from_secs(5),
+		moq_net::kio::wait(|waiter| draining.poll(waiter)),
+	)
+	.await
+	.expect("no GOAWAY within 5s of the trigger")
+	.expect("session closed without a GOAWAY");
 	assert_eq!(goaway.uri(), "", "expected a reconnect-to-me GOAWAY");
 	let timeout = goaway.timeout().expect("the GOAWAY carries its deadline");
 	assert!(
@@ -318,10 +332,14 @@ async fn a_session_arriving_mid_drain_gets_what_is_left_inner() {
 	tokio::time::sleep(DRAIN_TIMEOUT / 2).await;
 	let dialed = std::time::Instant::now();
 	let arrival = connect(&client, port).await;
-	let goaway = tokio::time::timeout(Duration::from_secs(1), arrival.draining().expect("connected").recv())
-		.await
-		.expect("an arrival mid-drain was not sent a GOAWAY")
-		.expect("arrival closed without a GOAWAY");
+	let draining = arrival.draining().expect("connected");
+	let goaway = tokio::time::timeout(
+		Duration::from_secs(1),
+		moq_net::kio::wait(|waiter| draining.poll(waiter)),
+	)
+	.await
+	.expect("an arrival mid-drain was not sent a GOAWAY")
+	.expect("arrival closed without a GOAWAY");
 	assert_eq!(goaway.uri(), "", "expected a reconnect-to-me GOAWAY");
 
 	// Only what is left of the window, not a fresh one that would outlive the

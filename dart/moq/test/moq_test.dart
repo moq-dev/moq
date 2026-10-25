@@ -463,10 +463,6 @@ void main() {
     final broadcast = origin.createBroadcast(path: 'epoch');
 
     final first = mintEpoch();
-    expect(
-      epochTime('018bcfe5-6800-7000-8000-000000000000'),
-      DateTime.utc(2023, 11, 14, 22, 13, 20),
-    );
     broadcast.announce(route: AnnounceRoute(epoch: first));
     final start = await nextRoute(announced) as AnnounceEventStart;
     expect(start.announce.route.epoch, first);
@@ -476,7 +472,10 @@ void main() {
     final restart = await nextRoute(announced) as AnnounceEventRestart;
     expect(restart.announce.route.epoch, second);
 
-    expect(() => epochTime('not-an-epoch'), throwsA(isA<MoqException>()));
+    expect(
+      () => broadcast.announce(route: AnnounceRoute(epoch: 'not-an-epoch')),
+      throwsA(isA<MoqException>()),
+    );
     announced.cancel();
     announced.dispose();
   });

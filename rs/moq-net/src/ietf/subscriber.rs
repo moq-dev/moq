@@ -140,7 +140,6 @@ pub(super) fn is_protocol_violation(err: &Error) -> bool {
 		Error::Decode(_)
 			| Error::BoundsExceeded(_)
 			| Error::WrongSize
-			| Error::TooManyParameters
 			| Error::ProtocolViolation
 			| Error::UnexpectedMessage
 			| Error::UnexpectedStream

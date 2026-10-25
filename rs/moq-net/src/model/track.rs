@@ -5347,7 +5347,7 @@ struct Drift {
 /// Keeps one handed-out group tied to the subscription whose cursor selected it.
 struct GroupExpiry {
 	/// Weak so a handed-out group never joins the track's consumer count, which is what
-	/// [`crate::broadcast::Demand`] reads to decide the track still has readers. A group
+	/// [`Demand`] reads to decide the track still has readers. A group
 	/// outlives the cursor that produced it (a relay serves one for the life of its
 	/// stream), and pinning demand on that would hold an upstream subscription open past
 	/// the last real subscriber.
@@ -7502,18 +7502,13 @@ impl Ordered {
 		self.inner.update(subscription)
 	}
 
-	/// Poll for the track's declared exclusive end, without blocking.
-	pub fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<Position>> {
-		self.inner.poll_finished(waiter)
-	}
-
 	/// Block until the track declares its end, returning the exclusive end position.
 	///
 	/// See [`Subscriber::finished`]: this reports the declared end, not that every group
 	/// has arrived.
 	#[cfg(feature = "async")]
 	pub async fn finished(&mut self) -> Result<Position> {
-		kio::wait(|waiter| self.poll_finished(waiter)).await
+		kio::wait(|waiter| self.inner.poll_finished(waiter)).await
 	}
 
 	/// Poll for the largest location within [`Self::with_range`]; see [`Subscriber::poll_largest`].
@@ -14740,7 +14735,10 @@ mod test {
 		drop(first.await.unwrap());
 
 		let hit = consumer.fetch_group(5, None);
-		assert!(!group.abort_unused(Error::Cancel), "the pending hit wants the group");
+		assert!(
+			!group.handle().abort_unused(Error::Cancel),
+			"the pending hit wants the group"
+		);
 		let mut fetched = hit.await.unwrap();
 		assert_eq!(&fetched.read_frame().await.unwrap().unwrap().payload[..], b"head");
 	}
@@ -14796,7 +14794,7 @@ mod test {
 			.unwrap();
 		let group = req.accept(Info::timed()).unwrap();
 		drop(first.await.unwrap());
-		assert!(group.abort_unused(Error::Cancel));
+		assert!(group.handle().abort_unused(Error::Cancel));
 
 		let retry = consumer.fetch_group(5, None);
 		let req = dynamic

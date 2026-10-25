@@ -19,13 +19,6 @@ export function mint(): Valid {
 	return parse(v7());
 }
 
-/** Read the wall-clock time encoded in the UUID, with millisecond precision. */
-// biome-ignore lint/style/noRestrictedGlobals: decodes a timestamp, not a clock read.
-export function time(epoch: Valid): Date {
-	// biome-ignore lint/style/noRestrictedGlobals: decodes a timestamp, not a clock read.
-	return new Date(Number.parseInt(epoch.slice(0, 8) + epoch.slice(9, 13), 16));
-}
-
 /** The UUID's 16 bytes, as the wire carries them. @internal */
 export function toBytes(epoch: Valid): Uint8Array {
 	const hex = epoch.replaceAll("-", "");

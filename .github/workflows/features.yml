@@ -19,9 +19,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # These feature sets and optimized artifacts cannot share the queue's
-        # default-feature test build. Release binding workflows cover their
-        # optimized libraries separately, nightly and on release PRs.
+        # The queue checks selected feature extremes. Nightly and release PRs
+        # keep the full feature matrix and optimized artifacts; release binding
+        # workflows cover their optimized libraries separately.
         recipe: ["rs features", "js wasm"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

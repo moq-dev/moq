@@ -331,6 +331,7 @@ impl Subscription {
 	/// the latest group (or none is asked for).
 	///
 	/// The form a wire without ranges carries: a floor below which nothing is requested.
+	#[cfg(any(feature = "async", test))]
 	pub(crate) fn start(&self) -> Option<u64> {
 		let mut floor: Option<u64> = None;
 		for range in &self.ranges {
