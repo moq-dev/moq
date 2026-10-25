@@ -4,21 +4,44 @@
 
 Every benchmark that regressed since the previous run is explained, fixed, or
 planned, and every hot or fan-out path without a benchmark gets one or a
-follow-up.
+follow-up. `main` ships no slower than `release`: every case where the cut
+this run gates would be slower is fixed or accepted with the feature it pays
+for.
 
 ## Plan
 
 Recurs once per major release (decided 2026-10-19). The PR that finishes
 this run also adds the next one with the same file name at the end of the next
-milestone's `Required` (m0 to m1, m1 to m2). The successor keeps the Goal
-and this paragraph; the rest of its Plan is rewritten with what this run
-learned: baselines, results, and what to check first. A successor placed in m2
+milestone's `Required` (m0 to m1, m1 to m2). The successor keeps the Goal,
+this paragraph, and the release baseline section; the rest of its Plan is
+rewritten with what this run learned: baselines, results, and what to check
+first. A successor placed in m2
 also lists the [release cut](/quest/m2/release/cut.md) under `Required`, so it
 waits for the release in flight to ship. Only `/quest-delete` ends the
 recurrence. Fixes land in the run's PR, one commit each, rather than as follow-ups.
 Only a change that needs a maintainer decision (public API, scope) or is
 independently landable and too large to review alongside the rest becomes a
 follow-up through `/quest-plan`.
+
+### Release baseline
+
+The run's last step, once the rest of its milestone has merged, so `main` is
+what the cut ships. Pair it with the last cut, keeping the evidence outside
+the checkout, and record `/proc/loadavg` around each run:
+
+```bash
+BENCH_ARTIFACTS=<scratch> just bench origin/release
+bun bench/browser/micro.ts --bench frames --out <scratch>/frames.json base=<release> current=. aa=.
+```
+
+`<release>` is an export of `origin/release` with its own
+`bun install --frozen-lockfile`. Re-run every slower case in alternating
+rounds and count instructions for any that holds (see Method). A ratio
+against `release` shows where to look, not what to fix: `main` carries
+features `release` lacks, so a flat per-operation cost usually pays for one,
+while a cost that grows with `main`'s own sweep is accidental. Fix accidental
+cost in this run, and record each accepted cost in its results with the
+feature and PR it pays for. A browser row inside the `aa` spread is noise.
 
 ### What the m1 run (2026-10-22) fixed
 
