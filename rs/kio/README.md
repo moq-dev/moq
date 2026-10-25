@@ -19,7 +19,9 @@ poll-native FIFO queue (bounded or unbounded) built in the same style. `Park` ho
 waiter for as long as a poll stays pending, bridging a `std::task::Context` to kio's
 waiter-based polls when implementing `Future` or `poll_*` on top of kio channels.
 `coop::Budget` bounds the passes a loop makes per poll, so one that always finds
-work ready still yields to the rest of its runtime.
+work ready still yields to the rest of its runtime. `log::Writer` is an append-only
+log whose `log::Reader`s read committed entries by index without a lock, paired with
+a channel that parks them; evicted entries are freed by epoch-based reclamation.
 
 It's used internally by [moq-net](https://github.com/moq-dev/moq/tree/main/rs/moq-net) and friends, but is generic enough to be useful on its own.
 

@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Tiers are metric-safe names (#6778)
+
+`GrantSchema` and `RefusalSchema` refuse a `tier` that is not `/`-joined segments of ASCII letters, digits, `.`, `_`, and `-`; the empty tier is the default.
+Rename tiers that carry spaces, quotes, or other punctuation, for example `gold tier` to `gold-tier`.
+
 ### Auth roles are patterns
 
 Parsed `Claims` and `Grant` hold `publish` and `subscribe` as pattern string arrays, matching release; `authorize` returns `Patterns` in each role.
