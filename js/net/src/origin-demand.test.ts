@@ -6,6 +6,7 @@ import { NativeSession } from "./ietf/adapter.ts";
 import { Publisher as IetfPublisher } from "./ietf/publisher.ts";
 import { Subscribe as IetfSubscribe } from "./ietf/subscribe.ts";
 import { Version as IetfVersion } from "./ietf/version.ts";
+import { hooks } from "./internal.ts";
 import { Fetch } from "./lite/fetch.ts";
 import { Publisher as LitePublisher } from "./lite/publisher.ts";
 import { Subscribe as LiteSubscribe } from "./lite/subscribe.ts";
@@ -128,11 +129,11 @@ test("last cancellation finishes the internal wait and discards a late consumer"
 		const keeper = source.consume();
 		const late = source.consume();
 		const close = spyOn(late, "close");
-		old.accept(late);
+		hooks.acceptRequest(old, late);
 		expect(close).toHaveBeenCalledTimes(1);
 		close.mockRestore();
 		expect(source.closed.peek()).toBeUndefined();
-		fresh.accept(source);
+		hooks.acceptRequest(fresh, source);
 		await settle();
 		expect(next.active.peek()?.closed).toBe(source.closed);
 		next.close();
@@ -171,7 +172,7 @@ test.each([true, false])(
 			await settle();
 			const late = new Broadcast();
 			const front = late.consume();
-			old.accept(front);
+			hooks.acceptRequest(old, front);
 			expect(late.closed.peek()).toBeNull();
 			const next = origin.request(path);
 			const fresh = (await requests.next()).value;
@@ -210,7 +211,7 @@ test.each([
 	try {
 		hold.abort();
 		await first;
-		request.accept(source);
+		hooks.acceptRequest(request, source);
 		await settle();
 		expect(other === "peer" ? (await second)?.closed : local?.active.peek()?.closed).toBe(source.closed);
 	} finally {
@@ -257,7 +258,7 @@ test.each(["accept", "reject", "cancel"] as const)(
 		const request = (await requests.next()).value;
 		if (!request) throw new Error("expected a pending request");
 		try {
-			if (action === "accept") request.accept(source);
+			if (action === "accept") hooks.acceptRequest(request, source);
 			if (action === "reject") request.reject(new Error("denied"));
 			if (action === "cancel") hold.abort();
 			const result = await wait;
@@ -265,9 +266,9 @@ test.each(["accept", "reject", "cancel"] as const)(
 			hold.abort();
 			if (action === "accept") {
 				expect(result?.closed).toBe(source.closed);
-				request.accept(source);
+				hooks.acceptRequest(request, source);
 				request.reject(new Error("late"));
-			} else request.accept(source);
+			} else hooks.acceptRequest(request, source);
 			expect(source.closed.peek()).toBeUndefined();
 		} finally {
 			remove.mockRestore();
@@ -295,9 +296,9 @@ test("a pending local request changing routes withdraws the old route's work", a
 	const late = source.consume();
 	const close = spyOn(late, "close");
 	try {
-		old.accept(late);
+		hooks.acceptRequest(old, late);
 		expect(close).toHaveBeenCalledTimes(1);
-		fresh.accept(source);
+		hooks.acceptRequest(fresh, source);
 		await settle();
 		expect(local.active.peek()?.closed).toBe(source.closed);
 	} finally {
@@ -331,7 +332,7 @@ test("cancelling an old epoch waiter does not decrement a new epoch's demand", a
 	const source = new Broadcast();
 	try {
 		old.reject(new Error("obsolete"));
-		fresh.accept(source);
+		hooks.acceptRequest(fresh, source);
 		expect((await after)?.closed).toBe(source.closed);
 	} finally {
 		origin.close();
@@ -352,7 +353,7 @@ test.each(["answer", "release"] as const)(
 		const br = b.requested();
 		const held = origin.request(path);
 		const source = new Broadcast();
-		(await ar.next()).value?.accept(source);
+		hooks.acceptRequest((await ar.next()).value, source);
 		await settle();
 		// Another instance wins new requests. The old handle stays on its own epoch.
 		const c = origin.dynamicRoute(prefix, { epoch: Epoch.mint(), cost: 0n });
@@ -377,7 +378,7 @@ test.each(["answer", "release"] as const)(
 		const front = late.consume();
 		const close = spyOn(front, "close");
 		try {
-			pending.accept(front);
+			hooks.acceptRequest(pending, front);
 			await settle();
 			if (action === "release") expect(close).toHaveBeenCalledTimes(1);
 			else {
@@ -412,7 +413,7 @@ test.each([0, 1])(
 			const held = origin.request(path);
 			const source = new Broadcast();
 			sources.push(source);
-			(await ar.next()).value?.accept(source);
+			hooks.acceptRequest((await ar.next()).value, source);
 			await settle();
 			entries.push({ primary, ar, br, held });
 		}
@@ -436,9 +437,9 @@ test.each([0, 1])(
 			// The slot is still detached until its microtask runs, but no longer owns demand.
 			entries[released].held.close();
 			hold.abort();
-			pending[released].accept(front);
+			hooks.acceptRequest(pending[released], front);
 			expect(close).toHaveBeenCalledTimes(1);
-			pending[1 - released].accept(replacement);
+			hooks.acceptRequest(pending[1 - released], replacement);
 			await wait;
 			expect(readsFrom(entries[1 - released].held.active.peek(), replacement)).toBe(true);
 		} finally {
@@ -511,7 +512,7 @@ test.each(["accept", "reject"] as const)(
 		const denied = new Error("denied");
 		try {
 			hold.abort(cancelled);
-			if (answer === "accept") request.accept(source);
+			if (answer === "accept") hooks.acceptRequest(request, source);
 			else request.reject(denied);
 			expect(await first).toBe(cancelled);
 			const result = await second;
@@ -541,7 +542,7 @@ test.each([true, false])("last waiter cancellation and accept in one turn (cance
 	const close = spyOn(front, "close");
 	try {
 		if (cancelFirst) hold.abort(cancelled);
-		request.accept(front);
+		hooks.acceptRequest(request, front);
 		if (!cancelFirst) hold.abort(cancelled);
 		expect(await wait).toBe(cancelled);
 		expect(close).toHaveBeenCalledTimes(cancelFirst ? 1 : 0);
@@ -551,7 +552,7 @@ test.each([true, false])("last waiter cancellation and accept in one turn (cance
 			const fresh = (await requests.next()).value;
 			expect(fresh).not.toBe(request);
 			if (!fresh) throw new Error("expected fresh request");
-			fresh.accept(source);
+			hooks.acceptRequest(fresh, source);
 		}
 		const answer = await next;
 		expect(answer?.closed).toBe(source.closed);
@@ -586,7 +587,7 @@ test.each([true, false])("local demand survives same-turn cancellation only when
 	const replacement = rejoin ? origin.request(path) : undefined;
 	try {
 		await settle();
-		request.accept(front);
+		hooks.acceptRequest(request, front);
 		expect(close).toHaveBeenCalledTimes(rejoin ? 0 : 1);
 		if (replacement) {
 			await settle();
@@ -596,7 +597,7 @@ test.each([true, false])("local demand survives same-turn cancellation only when
 			const next = (await requests.next()).value;
 			expect(next).not.toBe(request);
 			if (!next) throw new Error("expected fresh request");
-			next.accept(source);
+			hooks.acceptRequest(next, source);
 			await settle();
 			expect(fresh.active.peek()?.closed).toBe(source.closed);
 			fresh.close();

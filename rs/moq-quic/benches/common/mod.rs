@@ -22,7 +22,7 @@ use criterion::{
     measurement::{Measurement, ValueFormatter, WallTime},
 };
 use moq_clock::Instant;
-use moq_congestion::{Controller, ControllerFactory};
+use moq_congestion::{Controller, ControllerFactory, ControllerMetrics};
 use moq_quic::{
     ClientConfig, Connection, ConnectionHandle, ConnectionId, ConnectionIdGenerator, DatagramEvent,
     Endpoint, EndpointConfig, Event, LeaseError, RandomConnectionIdGenerator, ReadError,
@@ -79,6 +79,9 @@ pub(crate) struct Setup {
     pub(crate) server_receive_window: VarInt,
     /// The client's send window: how many written bytes it retains until they are acknowledged.
     pub(crate) client_send_window: u64,
+    /// The rate the client probes up to, in bytes per second, under a controller that always
+    /// lets it; zero never probes.
+    pub(crate) client_probe_target: u64,
 }
 
 impl Default for Setup {
@@ -88,6 +91,7 @@ impl Default for Setup {
             client_cid_len: 8,
             server_receive_window: VarInt::MAX,
             client_send_window: SEND_WINDOW,
+            client_probe_target: 0,
         }
     }
 }
@@ -340,7 +344,7 @@ impl Pair {
             by_addr: HashMap::new(),
         };
 
-        let client_config = client_config(setup.client_send_window);
+        let client_config = client_config(setup.client_send_window, setup.client_probe_target > 0);
         for index in 0..setup.clients {
             let mut config = EndpointConfig::default();
             let cid_len = setup.client_cid_len;
@@ -361,6 +365,8 @@ impl Pair {
                 )
                 .expect("connect");
             let mut client = Peer::new(endpoint, addr);
+            let mut conn = conn;
+            conn.set_probe_target(setup.client_probe_target);
             client.conns.insert(ch, conn);
             pair.by_addr.insert(addr, index);
             pair.clients.push(client);
@@ -607,10 +613,10 @@ pub(crate) fn flush(pair: &mut Pair, empty: usize) -> Vec<BytesMut> {
 /// Room for the largest burst of datagrams a benchmark queues or receives at once.
 const DATAGRAM_BUFFER: usize = 64 << 20;
 
-fn transport(receive_window: VarInt, send_window: u64) -> Arc<TransportConfig> {
+fn transport(receive_window: VarInt, send_window: u64, probe: bool) -> Arc<TransportConfig> {
     let mut transport = TransportConfig::default();
     transport
-        .congestion_controller_factory(Arc::new(Unlimited))
+        .congestion_controller_factory(Arc::new(Unlimited { probe }))
         // Pinned, so black hole detection cannot shrink packets after a benchmark's losses.
         .initial_mtu(1452)
         .min_mtu(1452)
@@ -627,13 +633,13 @@ fn transport(receive_window: VarInt, send_window: u64) -> Arc<TransportConfig> {
 
 fn server_config(receive_window: VarInt) -> Arc<ServerConfig> {
     let mut config = ServerConfig::with_crypto(Arc::new(Plaintext));
-    config.transport_config(transport(receive_window, SEND_WINDOW));
+    config.transport_config(transport(receive_window, SEND_WINDOW, false));
     Arc::new(config)
 }
 
-fn client_config(send_window: u64) -> ClientConfig {
+fn client_config(send_window: u64, probe: bool) -> ClientConfig {
     let mut config = ClientConfig::new(Arc::new(Plaintext));
-    config.transport_config(transport(VarInt::MAX, send_window));
+    config.transport_config(transport(VarInt::MAX, send_window, probe));
     config
 }
 
@@ -660,7 +666,12 @@ impl ConnectionIdGenerator for Recording {
 }
 
 /// A congestion controller that never limits, so benchmarks measure the protocol, not a model.
-struct Unlimited;
+///
+/// One that probes lets its sender fill every gap with duplicates, up to its probe target.
+#[derive(Clone, Copy)]
+struct Unlimited {
+    probe: bool,
+}
 
 impl Controller for Unlimited {
     fn on_congestion_event(
@@ -681,8 +692,19 @@ impl Controller for Unlimited {
         WINDOW
     }
 
+    fn metrics(&self) -> ControllerMetrics {
+        let mut metrics = ControllerMetrics::default();
+        metrics.congestion_window = WINDOW;
+        metrics.probe_inflight = self.probe.then_some(WINDOW);
+        metrics
+    }
+
+    fn probes(&self) -> bool {
+        self.probe
+    }
+
     fn clone_box(&self) -> Box<dyn Controller> {
-        Box::new(Self)
+        Box::new(*self)
     }
 
     fn initial_window(&self) -> u64 {
@@ -696,7 +718,7 @@ impl Controller for Unlimited {
 
 impl ControllerFactory for Unlimited {
     fn build(self: Arc<Self>, _now: Instant, _current_mtu: u16) -> Box<dyn Controller> {
-        Box::new(Self)
+        Box::new(*self)
     }
 }
 

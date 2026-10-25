@@ -22,7 +22,7 @@ class SelectTest(unittest.TestCase):
             just.chmod(0o755)
             changed = scratch / "changed"
             changed.write_text("\n".join(paths) + "\n")
-            env = dict(os.environ, PATH=f"{scratch}:{os.environ['PATH']}",
+            env = dict(os.environ, LOCAL_SUPERVISED="1", PATH=f"{scratch}:{os.environ['PATH']}",
                        SELECT_CALLS=str(calls), BASH_ENV=os.devnull,
                        GITHUB_ACTIONS=str(github_actions).lower())
             subprocess.run(["bash", "sh/rs/select.sh", action, str(changed)],
@@ -108,7 +108,7 @@ class RecipeTest(unittest.TestCase):
                 (scratch / "benches/unexecuted.rs").write_text(
                     'compile_error!("nextest must not compile a benchmark it never runs");\nfn main() {}\n'
                 )
-                env = dict(os.environ, BASH_ENV=os.devnull, TMPDIR="/tmp",
+                env = dict(os.environ, LOCAL_SUPERVISED="1", BASH_ENV=os.devnull, TMPDIR="/tmp",
                            NEXTEST_PROFILE="default")
                 result = subprocess.run(
                     ["just", "rs", "test", "--manifest-path", str(scratch / "Cargo.toml")],
@@ -125,7 +125,7 @@ class FeatureTest(unittest.TestCase):
             cargo = scratch / "cargo"
             cargo.write_text(CARGO_STUB)
             cargo.chmod(0o755)
-            env = dict(os.environ, PATH=f"{scratch}:{os.environ['PATH']}",
+            env = dict(os.environ, LOCAL_SUPERVISED="1", PATH=f"{scratch}:{os.environ['PATH']}",
                        FEATURE_CALLS=str(calls), BASH_ENV=os.devnull)
             result = subprocess.run(["bash", f"sh/rs/{owner}-features.sh", *args],
                                     cwd=ROOT, env=env, capture_output=True, text=True)

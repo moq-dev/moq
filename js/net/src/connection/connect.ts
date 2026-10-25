@@ -100,9 +100,6 @@ const VERSIONS: Record<string, { alpn: string; setup?: SetupVersion }> = {
 	"moq-lite-02": { alpn: Lite.ALPN, setup: Lite.Version.DRAFT_02 },
 	"moq-lite-01": { alpn: Lite.ALPN, setup: Lite.Version.DRAFT_01 },
 	"moq-transport-22": { alpn: Ietf.ALPN.DRAFT_22 },
-	"moq-transport-21": { alpn: Ietf.ALPN.DRAFT_21 },
-	"moq-transport-20": { alpn: Ietf.ALPN.DRAFT_20 },
-	"moq-transport-19": { alpn: Ietf.ALPN.DRAFT_19 },
 	"moq-transport-18": { alpn: Ietf.ALPN.DRAFT_18 },
 	"moq-transport-17": { alpn: Ietf.ALPN.DRAFT_17 },
 	"moq-transport-16": { alpn: Ietf.ALPN.DRAFT_16 },
@@ -118,9 +115,6 @@ const DEFAULT_VERSIONS = Object.keys(VERSIONS).filter((name) => name !== "moq-li
 // it knows and the server pick one.
 const QMUX: Record<string, QmuxVersion | QmuxVersion[] | null> = {
 	[Ietf.ALPN.DRAFT_22]: "qmux-01",
-	[Ietf.ALPN.DRAFT_21]: "qmux-01",
-	[Ietf.ALPN.DRAFT_20]: "qmux-01",
-	[Ietf.ALPN.DRAFT_19]: "qmux-01",
 	[Ietf.ALPN.DRAFT_18]: "qmux-01",
 };
 
@@ -229,8 +223,8 @@ export interface ConnectProps {
 	 * naming one of its `Auth`s keeps it across a reconnect. Omit to give the session a handle
 	 * of its own, which ends with it.
 	 *
-	 * The handle backs one active session at a time, plus the ones draining after a GOAWAY:
-	 * connecting another while one is still active rejects with {@link Auth.Duplicate}.
+	 * The handle backs one active session at a time, plus the ones draining after a GOAWAY or a
+	 * `close()`: connecting another while one is still active rejects with {@link Auth.Duplicate}.
 	 */
 	auth?: Auth.Handle;
 
@@ -472,17 +466,11 @@ async function negotiate(
 	const modernVersion =
 		protocol === Ietf.ALPN.DRAFT_22
 			? Ietf.Version.DRAFT_22
-			: protocol === Ietf.ALPN.DRAFT_21
-				? Ietf.Version.DRAFT_21
-				: protocol === Ietf.ALPN.DRAFT_20
-					? Ietf.Version.DRAFT_20
-					: protocol === Ietf.ALPN.DRAFT_19
-						? Ietf.Version.DRAFT_19
-						: protocol === Ietf.ALPN.DRAFT_18
-							? Ietf.Version.DRAFT_18
-							: protocol === Ietf.ALPN.DRAFT_17
-								? Ietf.Version.DRAFT_17
-								: undefined;
+			: protocol === Ietf.ALPN.DRAFT_18
+				? Ietf.Version.DRAFT_18
+				: protocol === Ietf.ALPN.DRAFT_17
+					? Ietf.Version.DRAFT_17
+					: undefined;
 	if (modernVersion !== undefined) {
 		return await handshakeAlpn(url, session, modernVersion, wiring);
 	} else if (protocol === Ietf.ALPN.DRAFT_16) {

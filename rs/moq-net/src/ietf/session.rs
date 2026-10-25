@@ -164,7 +164,7 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 	// GOAWAY wiring: the public Session holds one half (drain trigger, received
 	// signal), the protocol tasks below hold the other.
 	// A moq-transport client MUST send an empty New Session URI: it cannot tell a
-	// server to open connections (draft-19 sect 10.4).
+	// server to open connections (draft-22 section 9.2).
 	let (goaway_handle, goaway) = crate::goaway::Handle::new(!client);
 
 	// What the peer's connection credential earns by default, from the caller's real
@@ -754,7 +754,7 @@ pub(crate) fn decode_peer_setup(
 	client: bool,
 ) -> Result<(peer::Peer, Option<String>), Error> {
 	let (params, _) = ietf::Parameters::decode_slice(&parameters, version)?;
-	// A server sends neither PATH nor AUTHORITY (draft-21 sections 9.1.1 and 9.1.2).
+	// A server sends neither PATH nor AUTHORITY (draft-22 sections 9.1.1 and 9.1.2).
 	if client && params.get_bytes(ietf::ParameterBytes::Path).is_some() {
 		return Err(SessionError::InvalidPath.into());
 	}
@@ -762,7 +762,7 @@ pub(crate) fn decode_peer_setup(
 		return Err(SessionError::InvalidAuthority.into());
 	}
 	// Nothing here uses the peer's token, but one that cannot be decoded still closes the
-	// session (draft-21 section 8.9).
+	// session (draft-22 section 8.9).
 	super::token::from_setup(&params, version)?;
 	let implementation = crate::setup::decode_implementation(params.get_bytes(ietf::ParameterBytes::Implementation))?;
 	Ok((peer_from_params(&params, version)?, implementation))
@@ -921,12 +921,12 @@ enum UniType {
 
 impl UniType {
 	/// `None` is a type the draft does not define, which MUST close the session
-	/// (draft-21 section 6.4.1, and its equivalent in every draft we negotiate).
+	/// (draft-22 section 6.4.1, and its equivalent in every draft we negotiate).
 	fn classify(kind: u64, version: Version) -> Option<Self> {
 		// Draft-14-17 use SUBGROUP_HEADER types 0x10-0x1D and 0x30-0x3D; draft-18 adds
 		// 0x40 (FIRST_OBJECT), also covering 0x50-0x5D and 0x70-0x7D. A reserved
 		// SUBGROUP_ID_MODE (0b11) or a bit the draft lacks is invalid, which MUST close the
-		// session too (draft-21 section 11.3.1).
+		// session too (draft-22 section 11.3.1).
 		if ietf::GroupFlags::decode(kind, version).is_ok() {
 			return Some(Self::Subgroup);
 		}
@@ -1133,7 +1133,7 @@ impl Uni {
 				let res = subscriber.recv_group(&mut reader).await;
 				stop_on_error(&mut reader, res)?;
 			}
-			// A fill fetch stream carries the head of the group a draft-20 subscription
+			// A fill fetch stream carries the head of the group a draft-22 subscription
 			// joined part way through. One answering no fill of ours is refused inside.
 			UniType::Fetch => {
 				let mut reader = reader.with_version(version);
@@ -1456,8 +1456,8 @@ pub(super) fn control_stream_error(err: Error) -> Error {
 /// Read every message after SETUP on the peer's SETUP stream, which may only be GOAWAY.
 ///
 /// Reading continues past the first GOAWAY until the peer FINs or the session closes.
-/// Dropping the reader would STOP_SENDING the peer's SETUP uni stream, which draft-19
-/// section 3.3 forbids closing at the transport layer mid-session, so a strict peer would
+/// Dropping the reader would STOP_SENDING the peer's SETUP uni stream, which draft-22
+/// section 6.4.1 forbids closing at the transport layer mid-session, so a strict peer would
 /// tear the session down as a PROTOCOL_VIOLATION in the middle of the drain we are honoring.
 async fn read_goaways<R: crate::transport::poll::RecvStream>(
 	mut reader: Reader<R, Version>,
@@ -1569,12 +1569,12 @@ mod tests {
 	#[moq_clock::test]
 	async fn announce_interest_without_credit_keeps_the_session_alive() {
 		use std::sync::atomic::Ordering;
-		for version in [Version::Draft16, Version::Draft17, Version::Draft19] {
+		for version in [Version::Draft16, Version::Draft17, Version::Draft18] {
 			let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 			let interest = origin.consume().announced();
-			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new()).without_credit();
-			let log = session.log.clone();
-			let mut session = crate::driver::Transport::new(session);
+			let scripted = crate::lite::test_transport::ScriptedSession::new(Vec::new());
+			let log = scripted.log.clone();
+			let mut session = crate::driver::Transport::new(scripted.clone());
 			let setup = if version == Version::Draft16 {
 				Some(
 					Stream::open(&mut session, version)
@@ -1584,6 +1584,8 @@ mod tests {
 			} else {
 				None
 			};
+			// SETUP already owns its stream; subsequent requests have no credit.
+			let _ = scripted.without_credit();
 			let (driver, _goaway) = start(Config {
 				runtime: crate::time::sim(),
 				stats: Default::default(),
@@ -1635,14 +1637,7 @@ mod tests {
 
 	#[moq_clock::test]
 	async fn auth_ids_share_the_modern_request_history() {
-		for version in [
-			Version::Draft17,
-			Version::Draft18,
-			Version::Draft19,
-			Version::Draft20,
-			Version::Draft21,
-			Version::Draft22,
-		] {
+		for version in [Version::Draft17, Version::Draft18, Version::Draft22] {
 			for client in [false, true] {
 				let first = u64::from(client);
 				for requests in [
@@ -1889,7 +1884,7 @@ mod tests {
 	/// between a close and a warning, and a test below the loop would pass regardless.
 	#[moq_clock::test]
 	async fn a_namespace_without_a_hop_path_closes_the_session() {
-		const VERSION: Version = Version::Draft19;
+		const VERSION: Version = Version::Draft18;
 
 		// A driver that swallows the violation parks forever instead of failing, so
 		// bound it: paused time makes the deadline fire the moment nothing else can run.
@@ -2211,17 +2206,11 @@ mod tests {
 	}
 
 	/// From draft-16 each request has a stream of its own, so at a foreign peer the broader
-	/// one waits for the peer to close the narrower one's, which ends with a FIN until
-	/// draft-19 makes it a reset: a peer that never closes it never sees the two overlap.
+	/// one waits for the peer to close the narrower one's, which ends with a FIN on
+	/// draft-18 and a reset on draft-22: a peer that never closes it never sees the two overlap.
 	#[moq_clock::test]
 	async fn a_broader_watch_waits_for_the_narrower_to_leave_the_wire() {
-		for version in [
-			Version::Draft16,
-			Version::Draft17,
-			Version::Draft18,
-			Version::Draft19,
-			Version::Draft22,
-		] {
+		for version in [Version::Draft16, Version::Draft17, Version::Draft18, Version::Draft22] {
 			let subscribe = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 			let _front = watch(&subscribe, "cam/front");
 			let (log, _driver) = client(version, subscribe.clone(), None).await;
@@ -2727,7 +2716,7 @@ mod tests {
 	/// even when the peer wrote one. Erroring an accept loop on it tears down the
 	/// whole session over a single stream the peer had already given up on.
 	async fn a_dead_incoming_stream_is_not_fatal(session: crate::lite::test_transport::DeadStreamSession) {
-		const VERSION: Version = Version::Draft19;
+		const VERSION: Version = Version::Draft18;
 
 		// A driver that survives parks forever, so bound it: paused time makes the
 		// deadline fire the moment nothing else can run.
@@ -2777,45 +2766,44 @@ mod tests {
 		// The driver parks forever once SETUP is out, so bound it: paused time makes the
 		// deadline fire the moment nothing else can run.
 
-		for version in [Version::Draft18, Version::Draft19] {
-			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
-			let log = session.log.clone();
+		let version = Version::Draft18;
+		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
+		let log = session.log.clone();
 
-			let (driver, _goaway) = start(Config {
-				runtime: crate::time::sim(),
-				stats: Default::default(),
-				session: crate::driver::Transport::new(session.clone()),
-				setup: None,
-				request_id_max: None,
-				limits: Default::default(),
-				client: true,
-				publish: None,
-				subscribe: None,
-				peer_hop: None,
-				cost: None,
-				version,
-				path: None,
-				authority: Some(String::from_utf8(AUTHORITY.to_vec()).unwrap()),
-				peer_setup_stream: None,
-				peer_declared: Some(peer::Peer::default()),
-				auth: crate::auth::Link::new(false),
-				early_unis: Vec::new(),
-				implementation: None,
-				peer_implementation: Default::default(),
-				extensions: Default::default(),
-			})
-			.expect("start the session");
+		let (driver, _goaway) = start(Config {
+			runtime: crate::time::sim(),
+			stats: Default::default(),
+			session: crate::driver::Transport::new(session.clone()),
+			setup: None,
+			request_id_max: None,
+			limits: Default::default(),
+			client: true,
+			publish: None,
+			subscribe: None,
+			peer_hop: None,
+			cost: None,
+			version,
+			path: None,
+			authority: Some(String::from_utf8(AUTHORITY.to_vec()).unwrap()),
+			peer_setup_stream: None,
+			peer_declared: Some(peer::Peer::default()),
+			auth: crate::auth::Link::new(false),
+			early_unis: Vec::new(),
+			implementation: None,
+			peer_implementation: Default::default(),
+			extensions: Default::default(),
+		})
+		.expect("start the session");
 
-			moq_clock::timeout(std::time::Duration::from_secs(10), driver)
-				.await
-				.expect_err("the session ended instead of parking after SETUP");
+		moq_clock::timeout(std::time::Duration::from_secs(10), driver)
+			.await
+			.expect_err("the session ended instead of parking after SETUP");
 
-			assert_eq!(
-				occurrences(&log, AUTHORITY),
-				1,
-				"{version:?}: SETUP must carry the authority once"
-			);
-		}
+		assert_eq!(
+			occurrences(&log, AUTHORITY),
+			1,
+			"{version:?}: SETUP must carry the authority once"
+		);
 	}
 
 	#[moq_clock::test]
@@ -2948,7 +2936,7 @@ mod tests {
 	#[moq_clock::test]
 	async fn a_group_for_a_retired_alias_is_stopped_with_cancelled() {
 		let (log, result) =
-			dispatch_uni(Version::Draft19, subgroup_header(Version::Draft19, 7, 0).await, Some(7)).await;
+			dispatch_uni(Version::Draft18, subgroup_header(Version::Draft18, 7, 0).await, Some(7)).await;
 
 		assert_eq!(
 			log.stops(),
@@ -2967,10 +2955,10 @@ mod tests {
 	/// before reading them deadlocks the connection.
 	#[moq_clock::test]
 	async fn a_silent_stream_does_not_hold_up_the_next() {
-		let header = subgroup_header(Version::Draft19, 7, 0).await;
+		let header = subgroup_header(Version::Draft18, 7, 0).await;
 		let session =
 			crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_unis(vec![Vec::new(), header]);
-		let (log, result) = drive_unis(Version::Draft19, session, None, Some(7)).await;
+		let (log, result) = drive_unis(Version::Draft18, session, None, Some(7)).await;
 
 		assert_eq!(
 			log.stops(),
@@ -2983,7 +2971,7 @@ mod tests {
 	/// A stalled bidi header must not block a SUBSCRIBE on the next stream.
 	#[moq_clock::test]
 	async fn a_silent_bidi_does_not_hold_up_the_next() {
-		const VERSION: Version = Version::Draft19;
+		const VERSION: Version = Version::Draft18;
 		let mut subscribe = Vec::new();
 		let mut encoder = crate::coding::Encoder::new(&mut subscribe, VERSION.into());
 		encoder.varint(ietf::Subscribe::ID).unwrap();
@@ -3034,7 +3022,7 @@ mod tests {
 	async fn invalid_bidi_requests_still_end_the_session() {
 		for id in [ietf::Subscribe::ID, 0x3f] {
 			let mut header = Vec::new();
-			let mut encoder = crate::coding::Encoder::new(&mut header, Version::Draft19.into());
+			let mut encoder = crate::coding::Encoder::new(&mut header, Version::Draft18.into());
 			encoder.varint(id).unwrap();
 			encoder.slice(&[0, 0]); // Complete, empty body: malformed for SUBSCRIBE.
 			let session =
@@ -3051,7 +3039,7 @@ mod tests {
 		}
 	}
 
-	/// Start a draft-19 session with SETUP already settled, so bidi requests run immediately.
+	/// Start a draft-22 session with SETUP already settled, so bidi requests run immediately.
 	fn bidi_driver(session: crate::lite::test_transport::ScriptedSession, publish: Option<origin::Consumer>) -> Driver {
 		start(Config {
 			runtime: crate::time::sim(),
@@ -3065,7 +3053,7 @@ mod tests {
 			subscribe: None,
 			peer_hop: None,
 			cost: None,
-			version: Version::Draft19,
+			version: Version::Draft18,
 			path: None,
 			authority: None,
 			peer_setup_stream: None,
@@ -3083,7 +3071,7 @@ mod tests {
 	/// A non-zero subgroup is refused on its own stream, never by closing the session.
 	#[moq_clock::test]
 	async fn a_non_zero_subgroup_is_stopped_without_closing_the_session() {
-		let (log, result) = dispatch_uni(Version::Draft19, subgroup_header(Version::Draft19, 7, 1).await, None).await;
+		let (log, result) = dispatch_uni(Version::Draft18, subgroup_header(Version::Draft18, 7, 1).await, None).await;
 
 		assert_eq!(log.stops(), vec![crate::ietf::error::INTERNAL_ERROR]);
 		assert!(result.is_none(), "one refused subgroup ended the session: {result:?}");
@@ -3102,13 +3090,7 @@ mod tests {
 	/// Padding is read and dropped: no STOP_SENDING, and the session stays up.
 	#[moq_clock::test]
 	async fn a_padding_stream_is_discarded() {
-		for version in [
-			Version::Draft18,
-			Version::Draft19,
-			Version::Draft20,
-			Version::Draft21,
-			Version::Draft22,
-		] {
+		for version in [Version::Draft18, Version::Draft22] {
 			let (log, result) = dispatch_uni(version, uni_stream(version, PADDING), None).await;
 
 			assert!(
@@ -3126,7 +3108,7 @@ mod tests {
 	/// data; rejecting it reached the wire as INTERNAL_ERROR.
 	#[moq_clock::test]
 	async fn uni_streams_before_setup_are_held_until_it_lands() {
-		const VERSION: Version = Version::Draft19;
+		const VERSION: Version = Version::Draft18;
 
 		let mut setup = Vec::new();
 		setup::Setup {
@@ -3162,12 +3144,12 @@ mod tests {
 	#[moq_clock::test]
 	async fn an_unknown_uni_type_closes_the_session() {
 		for (version, kind) in [
-			(Version::Draft19, 0),
+			(Version::Draft18, 0),
 			// Padding and uni SETUP arrived in later drafts, so earlier ones do not know them.
 			(Version::Draft17, PADDING),
 			(Version::Draft16, setup::SETUP_V17),
 			// SUBGROUP_HEADER types with the reserved SUBGROUP_ID_MODE (0b11).
-			(Version::Draft19, 0x56),
+			(Version::Draft18, 0x56),
 			(Version::Draft14, 0x16),
 			// FIRST_OBJECT (0x40) arrived in draft-18.
 			(Version::Draft17, 0x50),
@@ -3185,14 +3167,7 @@ mod tests {
 	/// The bidi dispatcher closes the session for an unknown full-width message type.
 	#[moq_clock::test]
 	async fn an_unknown_bidi_type_closes_the_session() {
-		for version in [
-			Version::Draft17,
-			Version::Draft18,
-			Version::Draft19,
-			Version::Draft20,
-			Version::Draft21,
-			Version::Draft22,
-		] {
+		for version in [Version::Draft17, Version::Draft18, Version::Draft22] {
 			for kind in [0u64, 1 << 53] {
 				let mut payload = Vec::new();
 				let mut w = crate::coding::Encoder::new(&mut payload, version.into());
@@ -3245,7 +3220,7 @@ mod tests {
 
 	#[moq_clock::test]
 	async fn an_invalid_group_order_closes_the_session() {
-		for version in [Version::Draft18, Version::Draft21, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft22] {
 			for (value, nested) in [
 				(0u8, false),
 				(3, false),
@@ -3254,7 +3229,7 @@ mod tests {
 				(3, true),
 				(255, true),
 			] {
-				// FILL_PARAMETERS starts in draft-20.
+				// FILL_PARAMETERS starts in draft-22.
 				if nested && version == Version::Draft18 {
 					continue;
 				}
@@ -3602,7 +3577,7 @@ mod tests {
 	/// What a server may not send in its SETUP closes the session with the draft's code.
 	#[moq_clock::test]
 	async fn a_server_setup_with_path_or_authority_closes_the_session() {
-		for version in [Version::Draft18, Version::Draft21] {
+		for version in [Version::Draft18, Version::Draft22] {
 			for (param, expected) in [
 				(ietf::ParameterBytes::Path, SessionError::InvalidPath),
 				(ietf::ParameterBytes::Authority, SessionError::InvalidAuthority),
@@ -3617,10 +3592,10 @@ mod tests {
 
 	/// The server's AUTHORIZATION TOKEN is decoded even though a client has no use for it: a
 	/// malformed one closes the session, and a registration overflowing our cache of 0 is
-	/// read as the value it carries (draft-21 section 9.1.4).
+	/// read as the value it carries (draft-22 section 9.1.4).
 	#[moq_clock::test]
 	async fn a_server_setup_token_decodes_by_the_setup_rules() {
-		for version in [Version::Draft18, Version::Draft21] {
+		for version in [Version::Draft18, Version::Draft22] {
 			for (token, expected) in [
 				// An Alias Type of 4 does not exist.
 				(&[0x04][..], Some(SessionError::KeyValueFormatting)),
@@ -3639,7 +3614,7 @@ mod tests {
 	/// is malformed, closes the session as a PROTOCOL_VIOLATION. One GOAWAY leaves it up.
 	#[moq_clock::test]
 	async fn the_setup_stream_carries_at_most_one_goaway() {
-		for version in [Version::Draft18, Version::Draft21] {
+		for version in [Version::Draft18, Version::Draft22] {
 			let request_id = (version == Version::Draft18).then_some(0);
 			let one = goaway(version, request_id);
 			let two = [one.clone(), one.clone()].concat();
@@ -3686,7 +3661,7 @@ mod tests {
 	#[moq_clock::test]
 	async fn a_control_stream_fin_or_reset_is_a_protocol_violation() {
 		use crate::lite::test_transport::{Close, DeadStreamSession, ScriptedSession};
-		for version in [Version::Draft17, Version::Draft18, Version::Draft21, Version::Draft22] {
+		for version in [Version::Draft17, Version::Draft18, Version::Draft22] {
 			let session = ScriptedSession::new(Vec::new()).with_incoming_unis(vec![setup_stream(
 				version,
 				ietf::Parameters::default(),
@@ -3718,7 +3693,7 @@ mod tests {
 	/// so an application leaving over it cannot close first, without our code.
 	#[moq_clock::test]
 	async fn a_goaway_with_more_behind_it_never_surfaces() {
-		for version in [Version::Draft18, Version::Draft21] {
+		for version in [Version::Draft18, Version::Draft22] {
 			let request_id = (version == Version::Draft18).then_some(0);
 			let two = [goaway(version, request_id), goaway(version, request_id)].concat();
 			let mut session =
@@ -3746,7 +3721,7 @@ mod tests {
 	/// reaching a strict peer first has it close over that, and it never sees our code.
 	#[moq_clock::test]
 	async fn the_session_closes_before_its_streams_reset() {
-		const VERSION: Version = Version::Draft21;
+		const VERSION: Version = Version::Draft22;
 		let mut params = ietf::Parameters::default();
 		params.set_bytes(ietf::ParameterBytes::Path, b"a".to_vec());
 		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new())
@@ -3923,7 +3898,7 @@ mod tests {
 	/// its length.
 	#[moq_clock::test]
 	async fn a_malformed_request_closes_the_session() {
-		for version in [Version::Draft18, Version::Draft21] {
+		for version in [Version::Draft18, Version::Draft22] {
 			let subscribe = |body: &[u8]| frame(version, ietf::Subscribe::ID, body);
 			// Request ID 1, the namespace "n", the name "x", and no parameters.
 			let valid = [1, 1, 1, b'n', 1, b'x', 0];
@@ -3994,7 +3969,7 @@ mod tests {
 	/// message, closes the session as a PROTOCOL_VIOLATION.
 	#[moq_clock::test]
 	async fn a_request_stream_carries_at_most_one_goaway() {
-		for version in [Version::Draft18, Version::Draft21] {
+		for version in [Version::Draft18, Version::Draft22] {
 			let one = goaway(version, None);
 			let two = [one.clone(), one.clone()].concat();
 
@@ -4023,7 +3998,7 @@ mod tests {
 	/// closes the session as a PROTOCOL_VIOLATION.
 	#[moq_clock::test]
 	async fn a_request_stream_goaway_redirects_only_from_a_server() {
-		for version in [Version::Draft18, Version::Draft21] {
+		for version in [Version::Draft18, Version::Draft22] {
 			let mut body = Vec::new();
 			ietf::GoAway {
 				new_session_uri: "https://example.com/moq".into(),

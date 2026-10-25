@@ -78,7 +78,11 @@ export async function refuseUpdate(
 	if (version !== Version.DRAFT_14) await writeRefusal(w, version, kind, refusal);
 }
 
-/** Refuse an unrecognized reserved namespace before it reaches the application. */
+/**
+ * Refuse an unrecognized reserved namespace before it reaches the application.
+ *
+ * @internal
+ */
 export async function refuseReserved(request: RequestStream): Promise<void> {
 	await request.refuse("subscribe", {
 		condition: "does_not_exist",

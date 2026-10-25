@@ -41,11 +41,11 @@ const MAX_CONCURRENT_FETCHES: usize = 4;
 /// A rung's retirement signal: the receiving half of a flag the transcoder sets
 /// when the ladder no longer has room for this rung.
 ///
-/// Retiring is a clean track end rather than a dropped task, so a subscriber
-/// sees the same thing it would on any other rendition going away and picks
-/// another one, instead of an abort it would read as a failure. The end waits
-/// on the fetches still in flight, since the track's final sequence has to sit
-/// above every group they are about to claim.
+/// Retiring aborts the track at the next group boundary rather than dropping the
+/// task mid-group, so a subscriber reads out the group it is in. It aborts rather
+/// than finishes because only a source finish ends a rung for good (see [`serve`]).
+/// The abort waits on the fetches still in flight, so a group a consumer asked for
+/// before retirement still reaches it.
 #[derive(Clone)]
 pub(crate) struct Retire(tokio::sync::watch::Receiver<bool>);
 
@@ -170,12 +170,12 @@ impl Drop for Writing {
 	}
 }
 
-/// What the live path leaves the output track in.
+/// How the live path ended, which decides how the output track ends.
 enum Ended {
-	/// Still open: finish it once nothing else can add a group.
-	Open,
-	/// Already terminal (aborted), or closed under us.
-	Closed,
+	/// The source track finished: finish this one too, once nothing else can add a group.
+	Finished,
+	/// Anything else (retired, closed under us, or the source gone without finishing): abort.
+	Unfinished,
 }
 
 /// Serve one requested rung track until it closes or the source ends.
@@ -197,24 +197,25 @@ pub(crate) fn serve(rung: Rung, request: moq_net::track::Request) -> impl Future
 		};
 		let (live, fetches) = tokio::join!(live, fetches(&rung, dynamic, &mut finishing));
 
+		// Only a source that finished finishes the track; every other ending aborts it.
+		// A rung retired, closed, or cut off from its source can have its name served
+		// again, and that serve starts over, so a finish here would declare an end below
+		// groups a relay still caches for the name. An abort declares no end.
+		//
 		// Finished here rather than in `live`, because the boundary is only known once
-		// every fetch has claimed its group. `finish` sets the exclusive boundary one
+		// no fetch can still claim a group. `finish` sets the exclusive boundary one
 		// past the highest group produced so far (0 when none was), and a group at or
 		// above it is refused. A fetch still opening its decoder has produced nothing
-		// to count, so finishing then would reject the very fetch retirement drained
-		// the loop to keep.
-		let result = match (live, fetches) {
-			(Ok(Ended::Open), Ok(())) => producer.finish().map_err(Into::into),
+		// to count, so finishing then would reject the very group it was fetching.
+		match (live, fetches) {
+			(Ok(Ended::Finished), Ok(())) => {
+				producer.finish()?;
+				serving.0 = None;
+				Ok(())
+			}
+			// `serving` aborts the track on drop, so subscribers see an end rather than a stall.
 			(live, fetches) => live.map(|_| ()).and(fetches),
-		};
-		if result.is_err() {
-			// End the track so subscribers see an error rather than a stall.
-			let _ = producer.abort(moq_net::Error::Cancel);
 		}
-		if result.is_ok() {
-			serving.0 = None;
-		}
-		result
 	}
 }
 
@@ -232,30 +233,30 @@ async fn until_wanted(demand: &moq_net::track::Demand, wanted: bool) -> moq_net:
 /// heavy lifting (subscription, decode) is shared with every other active rung
 /// of this source; only the per-rung resize and encode happen here.
 ///
-/// Reports whether the track is still open rather than finishing it: [`serve`]
-/// owns that, once the fetches in flight can no longer add a group.
+/// Reports how it ended rather than ending the track: [`serve`] owns that, once
+/// the fetches in flight can no longer add a group.
 async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<Ended, Error> {
 	let demand = producer.demand();
 	let mut retire = rung.retire.clone();
-	// Set once the ladder retires this rung. The track is finished at the next
-	// group boundary rather than mid-group, so the last thing a subscriber gets
-	// is a complete group and then a clean end.
+	// Set once the ladder retires this rung. The track ends at the next group
+	// boundary rather than mid-group, so the last thing a subscriber gets is a
+	// complete group.
 	let mut retiring = false;
 
 	loop {
 		if retiring {
-			return Ok(Ended::Open);
+			return Ok(Ended::Unfinished);
 		}
 
 		tokio::select! {
 			wanted = until_wanted(&demand, true) => if wanted.is_err() {
 				// The output track closed; nothing more to serve.
-				return Ok(Ended::Closed);
+				return Ok(Ended::Unfinished);
 			},
 			() = rung.broadcast.closed() => {
 				// A broadcast end carries no error; stop the idle rung explicitly.
 				producer.clone().abort(moq_net::Error::Cancel)?;
-				return Ok(Ended::Closed);
+				return Ok(Ended::Unfinished);
 			}
 			() = retire.fired() => {
 				// Retired while idle, which is the common case: the ladder is
@@ -424,7 +425,7 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 					if let Some(output) = current.take() {
 						output.abort(moq_net::Error::Cancel)?;
 					}
-					return Ok(Ended::Open);
+					return Ok(Ended::Finished);
 				}
 				None => {
 					// The feed died mid-stream (source or decode error).
@@ -432,7 +433,7 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 						let _ = output.abort(moq_net::Error::Cancel);
 					}
 					producer.clone().abort(moq_net::Error::Cancel)?;
-					return Ok(Ended::Closed);
+					return Ok(Ended::Unfinished);
 				}
 			}
 		}
@@ -445,8 +446,8 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 ///
 /// Fill tasks run under a local [`JoinSet`](tokio::task::JoinSet) rather than
 /// detached. Retirement takes whatever the handler already had queued, closes
-/// admission by dropping it, and drains every group below the track's final
-/// sequence. Other teardown aborts them, so no source subscription or encoder
+/// admission by dropping it, and drains those fetches before the track is
+/// aborted. Other teardown aborts them, so no source subscription or encoder
 /// session survives a failed track. A semaphore bounds how many run at once.
 ///
 /// Owns the handler rather than borrowing it, since closing admission is
@@ -528,9 +529,8 @@ async fn fetches(
 		}
 
 		// Finish every group the handler accepted, or its producer stays open and
-		// the fetch stalls forever. Nothing has declared the track's final sequence
-		// yet: `serve` does that only once this returns, which is what leaves
-		// every one of these groups writable.
+		// the fetch stalls forever. `serve` ends the track only once this returns,
+		// which is what leaves every one of these groups writable.
 		while let Some(result) = tasks.join_next().await {
 			if let Err(err) = result {
 				tracing::warn!(%err, "transcode fetch task panicked");
@@ -1035,7 +1035,7 @@ mod tests {
 				.is_pending()
 		);
 		source.close();
-		assert!(matches!(running.await, Ok(Ended::Closed)));
+		assert!(matches!(running.await, Ok(Ended::Unfinished)));
 		assert!(matches!(observed.closed().await, moq_net::Error::Cancel));
 	}
 

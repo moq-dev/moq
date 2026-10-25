@@ -1709,9 +1709,8 @@ pub extern "C" fn moq_session_request_reject(request: u32, code: u16) -> i32 {
 		let request = ffi::parse_id(request)?;
 		let request = State::lock().server.request_take(request)?;
 		let reject = match code {
-			401 => moq_tokio::server::Reject::Unauthorized,
-			403 => moq_tokio::server::Reject::Forbidden,
-			code => moq_tokio::server::Reject::App(code),
+			401 | 403 => moq_net::SessionError::Unauthorized,
+			code => moq_net::SessionError::App(code),
 		};
 		// Rejecting only queues the close, so this never waits on the network.
 		Ok::<_, Error>(pollster::block_on(request.reject(reject))?)
@@ -1763,7 +1762,7 @@ pub unsafe extern "C" fn moq_origin_create_broadcast(origin: u32, path: *const c
 
 		let mut state = State::lock();
 		let broadcast = state.origin.create_broadcast(origin, path)?;
-		state.publish.create(broadcast)
+		state.publish.create_publication(broadcast)
 	})
 }
 
@@ -1858,7 +1857,7 @@ pub unsafe extern "C" fn moq_broadcast_request_prepare(
 		let (pending, driver) = state.origin.broadcast_request_take(request)?;
 		let prepared = pending.prepare(epoch)?;
 		let broadcast = state.publish.create((prepared.broadcast().clone(), driver.clone()))?;
-		let id = state.origin.prepared_insert(prepared, driver)?;
+		let id = state.origin.prepared_insert(prepared, driver, broadcast)?;
 		*broadcast_out = broadcast.into();
 		Ok(id)
 	})
@@ -1872,12 +1871,12 @@ pub unsafe extern "C" fn moq_broadcast_request_prepare(
 pub extern "C" fn moq_broadcast_prepared_publish(prepared: u32) -> i32 {
 	ffi::enter(move || {
 		let prepared = ffi::parse_id(prepared)?;
-		let (prepared, driver) = State::lock().origin.prepared_take(prepared)?;
+		let mut state = State::lock();
+		let (prepared, driver, broadcast) = state.origin.prepared_take(prepared)?;
 		driver.check()?;
-		let result = prepared.publish();
+		let result = state.publish.admit(broadcast, prepared);
 		driver.check()?;
-		result?;
-		Ok(())
+		result
 	})
 }
 

@@ -1,6 +1,9 @@
 #![cfg(feature = "async")]
 
 //! Moxygen announces one prefix, then serves its sixteen-field test namespaces.
+//!
+//! It answers each namespace without announcing its exact path, as only a session's peer
+//! claim does, so the claim lands through the hidden `fuzz` module.
 
 use crate::support::harness::{MockConnectOptions, connect_mock, spawn};
 use moq_net::{Hop, Version, broadcast, origin};
@@ -21,7 +24,7 @@ async fn routing(version: &str, cluster: bool) {
 	let publisher = origin(1);
 	let relay = origin(2);
 	let reader = origin(4);
-	let prefix = Arc::new(publisher.dynamic_route(PREFIX, Default::default()).unwrap());
+	let prefix = Arc::new(moq_net::fuzz::dynamic_route(&publisher, PREFIX, Default::default()).unwrap());
 	let broadcast = broadcast::Info::new().produce();
 	let track = broadcast.create_track("test", moq_net::track::Info::default()).unwrap();
 	let serving = prefix.clone();
@@ -29,7 +32,7 @@ async fn routing(version: &str, cluster: bool) {
 	moq_clock::sim::spawn(async move {
 		let request = serving.requested_broadcast().await.unwrap();
 		assert_eq!(request.path().as_str(), NAMESPACE);
-		request.accept(answer);
+		moq_net::fuzz::accept(request, answer);
 	});
 
 	let mut options = MockConnectOptions::new(version);

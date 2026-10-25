@@ -148,6 +148,9 @@ impl<S: super::Grouped<SendStream: 'static, RecvStream: 'static>> poll::Session 
 	fn wire(&self) -> Option<moq::Wire> {
 		super::Grouped::wire(&self.session)
 	}
+	fn probe(&self) -> Option<moq::Probe> {
+		super::Grouped::probe(&self.session)
+	}
 }
 impl<S: super::GroupedSend + 'static> poll::SendStream for super::SendStream<S> {
 	type Error = Error<S::Error>;
