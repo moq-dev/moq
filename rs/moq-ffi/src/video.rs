@@ -1592,7 +1592,7 @@ mod rung_tests {
 			.subscribe_track(track.into(), None)
 			.await
 			.unwrap();
-		track.info().unwrap().priority
+		track.info().priority
 	}
 
 	/// A rung sits one priority below its lower rendition, so the allocator fills that first.
@@ -1649,7 +1649,7 @@ mod rung_tests {
 				"high".into(),
 				Some(crate::consumer::MoqSubscription {
 					priority: 0,
-					max_delay_us: None,
+					max_delay: None,
 					ranges: None,
 					order: None,
 				}),
