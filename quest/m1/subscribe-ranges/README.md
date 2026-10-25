@@ -93,6 +93,27 @@ This line owns the end-to-end test: a relay with a sparse cache answers a
 wide past range plus live in both orders, over lite-07 and moq-transport, with
 every sequence delivered or dropped.
 
+### Delete the old start bookkeeping (2026-10-24 pre-cut audit)
+
+Lite `TrackRun`'s fixes cluster on where a subscription starts and what it
+is owed or dropped (e713c30991, 36f82ac450, 35fa44f6bf, e1b5d2741f,
+f235fcfcbd, df0bd5c36f, 342445f251, 06765f4c1a, 4927167904, f52848d634,
+0513c07369, 5ad3652871). That state spans about eight fields (`floor`,
+`cap`, `start`, `first`, `skipped`, `served`, `start_frame`, `end_frame`),
+plus `cursor_floor` and a pre-06 re-pin branch, encoding three wire
+generations of "start". When ranges land:
+
+- Move what each cursor is owed and what was dropped into the model, so
+  `TrackRun` only translates it into SUBSCRIBE_START/DROP/END per version;
+  delete `skipped`, `served`, `first`, and the pre-06 branches rather than
+  layering lite-07 ranges on top.
+- On lite-07, where every sequence is accounted for by a stream, a datagram,
+  or a DROP, the subscriber's end is "owed range covered and no stream
+  active", with no grace period; keep `Settle`'s grace for lite-05/06 and
+  moq-transport behind one version predicate.
+- Lite-07 is unpublished, so sending a fresh START per update can remove the
+  `requested == start` gate (`lite/subscriber.rs` about line 7366).
+
 ## Required
 
 - [Fetch as a range](/quest/m1/subscribe-ranges/fetch-range.md) - `fetch_group` becomes a one-range subscription that ends once its range is accounted for
