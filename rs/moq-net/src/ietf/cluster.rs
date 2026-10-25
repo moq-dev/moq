@@ -254,7 +254,7 @@ pub fn peer_into_setup(params: &mut super::Parameters, self_hop: Hop, cost: Opti
 mod tests {
 	use super::*;
 
-	const VERSION: Version = Version::Draft19;
+	const VERSION: Version = Version::Draft18;
 
 	fn hop(id: u64) -> Hop {
 		Hop::new(id).unwrap()

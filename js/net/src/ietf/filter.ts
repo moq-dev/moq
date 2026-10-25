@@ -1,5 +1,5 @@
 /**
- * The Location Filter carried by SUBSCRIBE, and draft-20's fill request.
+ * The Location Filter carried by SUBSCRIBE, and draft-22's fill request.
  *
  * @module
  */
@@ -26,37 +26,26 @@ export type Filter =
 	 */
 	| { kind: "absolute"; startGroup: bigint; startObject: bigint; endGroup?: bigint; endObject?: bigint };
 
-/** The tagged Filter Type of draft-19 and earlier. */
+/** The tagged Filter Type of draft-18 and earlier. */
 const TAG_NEXT_GROUP = 0x1n;
 const TAG_LARGEST_OBJECT = 0x2n;
 const TAG_ABSOLUTE_START = 0x3n;
 const TAG_ABSOLUTE_RANGE = 0x4n;
 
 /**
- * Whether this is draft-20 or newer.
+ * Whether this is draft-22 or newer.
  *
- * Draft-20 replaced the Filter Type tag with up to four optional varints, where the number
- * present selects the meaning.
+ * Draft-22 replaced the Filter Type tag with a Location Filter Type that names the fields
+ * that follow, so the value carries no Length, and added the parameters that ride with it.
  */
-export function isDraft20(version: IetfVersion): boolean {
+export function isDraft22(version: IetfVersion): boolean {
 	return (
 		version !== Version.DRAFT_14 &&
 		version !== Version.DRAFT_15 &&
 		version !== Version.DRAFT_16 &&
 		version !== Version.DRAFT_17 &&
-		version !== Version.DRAFT_18 &&
-		version !== Version.DRAFT_19
+		version !== Version.DRAFT_18
 	);
-}
-
-/**
- * Whether this is draft-22 or newer.
- *
- * Draft-22 replaced the length-inferred field list with a Location Filter Type that names
- * the fields that follow, so the value carries no Length.
- */
-function isDraft22(version: IetfVersion): boolean {
-	return isDraft20(version) && version !== Version.DRAFT_20 && version !== Version.DRAFT_21;
 }
 
 /** The Location Filter Type of draft-22. */
@@ -67,9 +56,9 @@ const TYPE_ABSOLUTE_GROUP_END = 0x3n;
 const TYPE_ABSOLUTE_RANGE = 0x4n;
 const TYPE_NEXT_OBJECT = 0x5n;
 
-/** Whether the Range Filters (draft-19) exist on this draft. */
+/** Whether the Range Filters exist on this draft. */
 export function hasRangeFilters(version: IetfVersion): boolean {
-	return isDraft20(version) || version === Version.DRAFT_19;
+	return isDraft22(version);
 }
 
 /**
@@ -96,13 +85,9 @@ function endDelta(startGroup: bigint, endGroup: bigint): bigint {
 	return endGroup - startGroup;
 }
 
-/**
- * Encode a filter as its raw parameter value, without the Length that frames it through
- * draft-21. Unfiltered encodes to zero bytes on draft-20 and draft-21.
- */
+/** Encode a filter as its raw parameter value, without the Length that frames it before draft-22. */
 export function encode(filter: Filter, version: IetfVersion): Uint8Array {
-	if (isDraft22(version)) return encodeTyped(filter, version);
-	return isDraft20(version) ? encodeFields(filter, version) : encodeTag(filter, version);
+	return isDraft22(version) ? encodeTyped(filter, version) : encodeTag(filter, version);
 }
 
 /** Encode LOCATION_FILTER's value as it follows the parameter type from draft-17 on. */
@@ -207,32 +192,6 @@ function readTyped(data: Uint8Array, version: IetfVersion): [Filter, Uint8Array]
 	return [fromTyped(type, fields), rest];
 }
 
-function encodeFields(filter: Filter, version: IetfVersion): Uint8Array {
-	switch (filter.kind) {
-		case "unfiltered":
-			return new Uint8Array();
-		case "nextObject":
-			return concat([varint(0n, version), varint(0n, version)]);
-		case "relative":
-			return varint(filter.groups, version);
-		case "absolute": {
-			// An open ended absolute {0, 0} is defined as equivalent to unfiltered, so it
-			// normalizes rather than colliding with the two-zero-field nextObject spelling.
-			if (filter.startGroup === 0n && filter.startObject === 0n && filter.endGroup === undefined) {
-				return new Uint8Array();
-			}
-			const parts = [varint(filter.startGroup, version), varint(filter.startObject, version)];
-			if (filter.endGroup !== undefined) {
-				parts.push(varint(endDelta(filter.startGroup, filter.endGroup), version));
-				if (filter.endObject !== undefined) {
-					parts.push(varint(filter.endObject, version));
-				}
-			}
-			return concat(parts);
-		}
-	}
-}
-
 function encodeTag(filter: Filter, version: IetfVersion): Uint8Array {
 	switch (filter.kind) {
 		case "unfiltered":
@@ -242,16 +201,16 @@ function encodeTag(filter: Filter, version: IetfVersion): Uint8Array {
 			return varint(TAG_LARGEST_OBJECT, version);
 		case "relative":
 			if (filter.groups !== 0n) {
-				// Only draft-20 can name a start further back than the next group without
+				// Only draft-22 can name a start further back than the next group without
 				// knowing Largest Object, so there is no honest tag to fall back to.
-				throw new Error(`relative filter ${filter.groups} needs draft-20`);
+				throw new Error(`relative filter ${filter.groups} needs draft-22`);
 			}
 			return varint(TAG_NEXT_GROUP, version);
 		case "absolute": {
-			// Draft-19's AbsoluteRange ends on a group, so an object-bounded range has no
+			// Draft-18's AbsoluteRange ends on a group, so an object-bounded range has no
 			// spelling. Refuse rather than widen the range the caller asked for.
 			if (filter.endObject !== undefined) {
-				throw new Error("an object-bounded range needs draft-20");
+				throw new Error("an object-bounded range needs draft-22");
 			}
 			const parts = [
 				varint(filter.endGroup === undefined ? TAG_ABSOLUTE_START : TAG_ABSOLUTE_RANGE, version),
@@ -273,37 +232,7 @@ export function decode(data: Uint8Array, version: IetfVersion): Filter {
 		expectEmpty(rest);
 		return filter;
 	}
-	return isDraft20(version) ? decodeFields(data, version) : decodeTag(data, version);
-}
-
-function decodeFields(data: Uint8Array, version: IetfVersion): Filter {
-	const fields: bigint[] = [];
-	let rest = data;
-	while (rest.length > 0) {
-		if (fields.length === 4) {
-			throw new Error("too many fields in LOCATION_FILTER");
-		}
-		const [value, next] = unvarint(rest, version);
-		fields.push(value);
-		rest = next;
-	}
-
-	switch (fields.length) {
-		case 0:
-			return { kind: "unfiltered" };
-		case 1:
-			return { kind: "relative", groups: fields[0] };
-		default: {
-			const [startGroup, startObject] = fields;
-			// Two zeroes is the Next Object spelling; anything else is an absolute start.
-			if (fields.length === 2 && startGroup === 0n && startObject === 0n) {
-				return { kind: "nextObject" };
-			}
-			const endGroup = fields.length >= 3 ? startGroup + fields[2] : undefined;
-			const endObject = fields.length === 4 ? fields[3] : undefined;
-			return { kind: "absolute", startGroup, startObject, endGroup, endObject };
-		}
-	}
+	return decodeTag(data, version);
 }
 
 function decodeTag(data: Uint8Array, version: IetfVersion): Filter {
@@ -373,7 +302,7 @@ function expectEmpty(rest: Uint8Array): void {
 }
 
 /**
- * A draft-20 fill: the backfill a subscriber asks for alongside its subscription.
+ * A draft-22 fill: the backfill a subscriber asks for alongside its subscription.
  *
  * The publisher serves one whose range resolves to a single group, straight from the group
  * cache on a fetch stream. That covers the draft's own current-group join (a Next Object
@@ -402,7 +331,7 @@ const FILL_LOCATION_FILTER = 0x21n;
 type Framing = "byte" | "varint" | "bytes";
 
 /**
- * The parameters draft-20 allows inside FILL_PARAMETERS besides LOCATION_FILTER, and how
+ * The parameters draft-22 allows inside FILL_PARAMETERS besides LOCATION_FILTER, and how
  * each frames its value.
  *
  * Tabulated rather than derived, because neither shortcut is right. The Key-Value-Pair rule

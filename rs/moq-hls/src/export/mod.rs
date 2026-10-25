@@ -1628,6 +1628,63 @@ mod tests {
 		assert!(!master.contains("video/video1/"), "{master}");
 	}
 
+	// A client resolves a `.` or `..` URL segment away and the router refuses an empty one, so
+	// renditions with those names are never admitted, while their siblings keep serving.
+	#[tokio::test(start_paused = true)]
+	async fn renditions_named_outside_one_path_segment_are_refused() {
+		// A video and an audio rendition can't share a name, so the refused names split.
+		let refused = [(Kind::Video, ""), (Kind::Video, "."), (Kind::Audio, "..")];
+		let tracks = ["", ".", "..", "video0"];
+		let origin = produce_origin();
+		let broadcast = origin.create_broadcast("live").unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		settle().await;
+		let mut catalog =
+			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
+		catalog
+			.mutate(|catalog| {
+				for (kind, name) in refused.into_iter().chain([(Kind::Video, "video0")]) {
+					match kind {
+						Kind::Video => {
+							catalog.video.renditions.insert(name.into(), video_config());
+						}
+						Kind::Audio => {
+							let config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+							catalog.audio.renditions.insert(name.into(), config);
+						}
+					}
+				}
+				catalog.archive = Some(archive(&tracks));
+			})
+			.unwrap();
+		let mut timelines: Vec<_> = tracks
+			.into_iter()
+			.map(|name| timeline_track(&broadcast, name))
+			.collect();
+		for sequence in 0..4 {
+			for (_, timeline) in &mut timelines {
+				timeline.push(&gop(sequence)).unwrap();
+			}
+		}
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		broadcaster.advertised().await;
+		let healthy = broadcaster.rendition(Kind::Video, "video0").unwrap();
+		let tag = segments::tag(&(Kind::Video, "".into(), "".into()));
+		listed_under(&healthy, &tag, 2).await;
+
+		let master = broadcaster.master_playlist(None);
+		let manifest = broadcaster.manifest(None).unwrap().expect("video0 is listed");
+		assert!(master.contains("/video/video0/media.m3u8"), "{master}");
+		assert!(manifest.contains("id=\"video/video0\""), "{manifest}");
+		for (kind, name) in refused {
+			assert!(broadcaster.rendition(kind, name).is_none(), "{kind:?} {name:?}");
+			let segment = format!("/{}/{name}/", kind.as_str());
+			assert!(!master.contains(&segment), "{master}");
+			let id = format!("id=\"{}/{name}\"", kind.as_str());
+			assert!(!manifest.contains(&id), "{manifest}");
+		}
+	}
+
 	// With every rendition disabled no reference watcher is left, so the source ending must
 	// still end every playlist and recording cursor.
 	#[tokio::test(start_paused = true)]
