@@ -761,6 +761,80 @@ test("a URL change connects the replacement while the old session drains", async
 	}
 });
 
+// A publication only a token's grant covers keeps that grant while the session drains, so
+// closing the loop ends the tokens after the drain rather than cutting the final group.
+test("closing the loop keeps the tokens until the session drains", async () => {
+	const original = globalThis.WebTransport;
+	const clock = new Manual();
+	const installed = clock.install();
+	const url = new URL("https://example.com/");
+	const dials: { server: Promise<Established>; quic: WebTransport }[] = [];
+	const fin = { hold: undefined as ReturnType<typeof holdFins> | undefined, closed: false };
+	const stub = function StubWebTransport() {
+		const pair = createMockTransportPair(Lite.ALPN_07_WIP);
+		fin.hold = holdFins(pair.client);
+		void pair.client.closed.then(() => {
+			fin.closed = true;
+		});
+		// The connection's own credential publishes nothing; the token publishes anything.
+		const server = accept(pair.server, url);
+		void server.then(async (session) => {
+			const requests = session.auth.requests();
+			for (;;) {
+				const request = await requests.next();
+				if (!request) break;
+				const token = new TextDecoder().decode(request.token);
+				request.accept({
+					publish: new Path.Patterns(token === "token" ? [Path.Pattern.all()] : []),
+					subscribe: new Path.Patterns(),
+				});
+			}
+		});
+		dials.push({ server, quic: pair.server });
+		return pair.client;
+	};
+	globalThis.WebTransport = stub as unknown as typeof WebTransport;
+
+	const origin = new OriginProducer();
+	const reload = new Reload({ url, websocket: { enabled: false }, publish: origin.consume() });
+	await reload.auth.add("token");
+	const broadcast = origin.createBroadcast(Path.from("room"));
+	broadcast.announce();
+	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const first = dials[0];
+	if (!first) throw new Error("no first dial");
+	const remote = wireOf(await first.server).consume(Path.from("room"));
+	const track = remote.track("video").subscribe().ordered();
+	try {
+		producer.appendGroup().writeFrame(textFrame("first"));
+		expect(await (await track.nextGroup())?.readString()).toBe("first");
+
+		fin.hold?.enable();
+		const last = producer.appendGroup();
+		last.writeFrame(textFrame("last"));
+		last.close();
+		producer.close();
+		reload.close();
+
+		expect(await (await track.nextGroup())?.readString()).toBe("last");
+		await fin.hold?.reached;
+		await clock.advance(Nano.fromMilli(Milli(999)));
+		expect(fin.closed).toBe(false);
+		fin.hold?.release();
+		await waitUntil(() => fin.closed);
+	} finally {
+		fin.hold?.release();
+		track.close();
+		remote.close();
+		reload.close();
+		for (const dial of dials) (await dial.server).abort();
+		broadcast.close();
+		origin.close();
+		installed.close();
+		globalThis.WebTransport = original;
+	}
+});
+
 test("closing an announce consumer during upstream teardown does not append retractions", async () => {
 	const { Producer } = await import("../announced.ts");
 	const upstream = new Producer();

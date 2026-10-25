@@ -159,8 +159,9 @@ export class Reload {
 	 *
 	 * Each session presents every token it holds, so a route naming one keeps it across a
 	 * reconnect, and its grant follows the live session. It spans URL changes too, so its
-	 * tokens go to whatever URL the loop dials next. It ends when the loop closes, and
-	 * aborting it stops the loop at its next reconnect, with the abort's error.
+	 * tokens go to whatever URL the loop dials next. It ends once the loop closes and its
+	 * sessions finish draining, and aborting it stops the loop at its next reconnect, with the
+	 * abort's error.
 	 */
 	readonly auth = new AuthHandle();
 
@@ -232,6 +233,9 @@ export class Reload {
 	// A session the peer sent GOAWAY on, serving its groups in flight while the replacement
 	// dials. Retired when it closes, at its handover cap, or when the sequence ends.
 	#draining: Draining | undefined;
+
+	// Sessions this loop ended that are still draining, each until its close settles.
+	#ending = new Set<Promise<void>>();
 
 	// The current run of migrations. A redirect back to an endpoint that already sent us away is
 	// a loop, however healthy each session looked. Reset when a session ends without a GOAWAY,
@@ -576,7 +580,9 @@ export class Reload {
 			return;
 		}
 		// A served live track never finishes, so the deadline aborting the rest is the usual end.
-		connection.close().catch(() => {});
+		const ending = connection.close().catch(() => {});
+		this.#ending.add(ending);
+		void ending.then(() => this.#ending.delete(ending));
 	}
 
 	/** Stop serving from a drained predecessor, ending it if still open. */
@@ -720,8 +726,11 @@ export class Reload {
 	close(abort?: Error) {
 		this.#signals.close();
 		this.#retire();
-		// No session will present the tokens again, so they end with the loop.
-		this.auth.abort(abort ?? new Error("connection closed"));
+		// No session will present the tokens again, so they end with the loop, once the sessions
+		// still draining no longer need their grants to finish.
+		const err = abort ?? new Error("connection closed");
+		if (this.#ending.size === 0) this.auth.abort(err);
+		else void Promise.all(this.#ending).then(() => this.auth.abort(err));
 		if (this.#closed.peek() === undefined) this.#closed.set(abort ?? null);
 	}
 }
