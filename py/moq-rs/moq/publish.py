@@ -17,7 +17,7 @@ from moq_ffi import (
     MoqTrackRequest,
 )
 
-from ._records import _subscription, _track_info
+from ._records import _opt_from_us, _subscription, _track_info
 from ._stream import _Stream
 from .types import (
     AnnounceRoute,

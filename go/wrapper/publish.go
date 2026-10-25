@@ -3,6 +3,7 @@ package moq
 import (
 	"context"
 	"iter"
+	"time"
 
 	ffi "moq.dev/moq-ffi/moq"
 	"moq.dev/moq/internal/bridge"
