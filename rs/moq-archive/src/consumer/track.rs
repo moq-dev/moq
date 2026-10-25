@@ -18,8 +18,9 @@ pub(super) struct Live {
 	timescale: Option<Timescale>,
 	/// The newest group, kept open since a later object may continue it.
 	open: Option<Open>,
-	/// Whether the feed declared where it starts; fills serve everything before.
-	started: bool,
+	/// One past the newest sequence fed, once the feed declared where it starts; fills serve
+	/// everything before that start.
+	next: Option<u64>,
 }
 
 struct Open {
@@ -36,12 +37,12 @@ impl Live {
 			producer,
 			timescale,
 			open: None,
-			started: false,
+			next: None,
 		}
 	}
 
 	pub fn is_started(&self) -> bool {
-		self.started
+		self.next.is_some()
 	}
 
 	/// Feed `objects`' entries from sequence `from` on, in order.
@@ -51,16 +52,16 @@ impl Live {
 				if entry.sequence() < from {
 					continue;
 				}
-				if !self.started {
+				if self.next.is_none() {
 					// Readers ask fills for everything older.
 					self.producer.start_at(entry.sequence())?;
-					self.started = true;
 				}
 				let first = match index {
 					0 => object.frame_start,
 					_ => 0,
 				};
 				self.entry(entry, first)?;
+				self.next = Some(entry.sequence() + 1);
 			}
 		}
 		Ok(())
@@ -132,10 +133,23 @@ impl Live {
 	pub fn end(&mut self, end: End, track: &str) -> Result<()> {
 		self.close()?;
 		match end {
-			End::Finish(at) => self.producer.finish_at(Position {
-				group: at.group,
-				frame: at.frame,
-			})?,
+			End::Finish(at) => {
+				self.producer.finish_at(Position {
+					group: at.group,
+					frame: at.frame,
+				})?;
+				// An empty group stores no object, yet the end only settles once the live edge
+				// reaches it. The sequence just below the end replays as the empty group a
+				// source most often ended with, and any before it as dropped.
+				let fin = at.group + u64::from(at.frame != 0);
+				let from = self.next.unwrap_or(0);
+				if from < fin {
+					self.producer.drop_groups(from..fin - 1, moq_net::StreamError::NotFound);
+					self.producer
+						.create_group(group::Info { sequence: fin - 1 })?
+						.finish()?;
+				}
+			}
 			End::Error(code) => {
 				// An abort would refuse every later reader the stored history, so the track
 				// ends cleanly after its newest stored sequence instead.

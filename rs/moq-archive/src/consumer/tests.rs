@@ -536,6 +536,7 @@ async fn a_completed_archive_ends_as_recorded() {
 	archive.track("video", 0, true).await;
 	archive.track("audio", 0, true).await;
 	archive.track("errored", 0, true).await;
+	archive.track("tail", 0, true).await;
 	archive
 		.object("video", 0, vec![frames(true, 0, 0..2), frames(true, 1, 0..2)])
 		.await;
@@ -548,6 +549,9 @@ async fn a_completed_archive_ends_as_recorded() {
 	archive.end("video", End::Finish(At { group: 2, frame: 0 })).await;
 	archive.end("audio", End::Finish(At { group: 1, frame: 2 })).await;
 	archive.end("errored", End::Error(64 + 7)).await;
+	// Empty groups store no object, only the end past them.
+	archive.object("tail", 0, vec![frames(true, 0, 0..1)]).await;
+	archive.end("tail", End::Finish(At { group: 4, frame: 0 })).await;
 	archive.complete().await;
 
 	let (broadcast, _run) = serve(&archive.store).await;
@@ -566,6 +570,13 @@ async fn a_completed_archive_ends_as_recorded() {
 	assert_eq!(next(&mut reader).await.unwrap().0, 0);
 	assert_eq!(next(&mut reader).await.unwrap().0, 1);
 	assert!(next(&mut reader).await.is_none());
+
+	// The sequence below the end replays as an empty group, and those before it as dropped.
+	let mut reader = subscribe(&broadcast, "tail").await;
+	assert_eq!(next(&mut reader).await.unwrap(), (0, expected(true, 0, 0..1)));
+	assert_eq!(next(&mut reader).await.unwrap(), (3, Vec::new()));
+	assert!(next(&mut reader).await.is_none());
+	assert_eq!(reader.finished().await.unwrap(), Position::group(4));
 }
 
 /// Markers written while the consumer follows end the tracks then.
