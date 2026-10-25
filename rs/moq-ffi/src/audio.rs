@@ -422,7 +422,11 @@ impl MoqAudioProducer {
 		let mut inner = self.inner.lock().unwrap();
 		let mut producer = inner.take().ok_or(MoqError::Closed)?;
 		self.reservation.lock().unwrap().take();
-		producer.finish()?;
+		if let Err(err) = producer.finish() {
+			// Readers see the failure rather than `Dropped`, as a failed video drain does.
+			producer.abort(moq_net::Error::Transport(err.to_string()));
+			return Err(err.into());
+		}
 		self.children.keep(producer);
 		Ok(())
 	}

@@ -471,7 +471,12 @@ pub extern "C" fn moq_encode_audio_finish(producer: u32) -> i32 {
 			let AudioEncoder {
 				mut producer, children, ..
 			} = guard.take().ok_or(Error::MediaNotFound)?;
-			producer.finish()?;
+			if let Err(err) = producer.finish() {
+				// Readers see the failure rather than `Dropped`, as a failed video drain does.
+				children.forget(crate::publish::Child::Audio(id));
+				producer.abort(moq_net::Error::Transport(err.to_string()));
+				return Err(err.into());
+			}
 			// The broadcast keeps the finished track, so its finish still holds it.
 			children.keep(crate::publish::Child::Audio(id), producer);
 			Ok(())
