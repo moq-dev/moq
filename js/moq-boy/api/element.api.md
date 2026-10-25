@@ -7,6 +7,54 @@
 import * as Moq from '@moq/net';
 import * as Watch from '@moq/watch';
 
+class Game {
+    constructor(config: GameConfig);
+    readonly active: Moq.Signals.Signal<boolean>;
+    readonly audioDecoder: Watch.Audio.Decoder;
+    readonly audioEmitter: Watch.Audio.Emitter;
+    readonly audioSource: Watch.Audio.Source;
+    readonly broadcast: Watch.Broadcast;
+    readonly canvas: Moq.Signals.Signal<HTMLCanvasElement | undefined>;
+    close(): void;
+    readonly delay: Moq.Signals.Signal<Watch.Delay>;
+    readonly expanded: Moq.Signals.Signal<string | undefined>;
+    readonly heldButtons: Set<string>;
+    readonly hovered: Moq.Signals.Signal<boolean>;
+    sendButtons(): void;
+    sendCommand(cmd: Record<string, unknown>): void;
+    readonly sessionId: string;
+    readonly status: Moq.Signals.Signal<{
+        buttons: string[];
+        latency: Record<string, {
+            label: string;
+            ms: number;
+        }[]>;
+        location?: string | undefined;
+        stats?: {
+            video_secs: number;
+            audio_secs: number;
+            emulation_secs: number;
+            wall_secs: number;
+        } | undefined;
+    } | undefined>;
+    readonly sync: Watch.Sync;
+    readonly userMuted: Moq.Signals.Signal<boolean>;
+    readonly videoDecoder: Watch.Video.Decoder;
+    readonly videoRenderer: Watch.Video.Renderer;
+    readonly videoSource: Watch.Video.Source;
+    readonly viewerId: Moq.Signals.Signal<string | undefined>;
+    readonly volume: Moq.Signals.Signal<number>;
+}
+
+interface GameConfig {
+    connection: Moq.Connection;
+    expanded: Moq.Signals.Signal<string | undefined>;
+    gamePrefix: string;
+    origin: Moq.Origin.Producer;
+    sessionId: string;
+    viewerPrefix: string;
+}
+
 class MoqBoy extends HTMLElement {
     constructor();
     attributeChangedCallback(name: Observed, _oldValue: string | null, newValue: string | null): void;
@@ -27,6 +75,10 @@ class MoqBoy extends HTMLElement {
     set url(value: string | URL | undefined);
 }
 export default MoqBoy;
+
+const OBSERVED: readonly ["url", "prefix", "prefix-game", "prefix-viewer"];
+
+type Observed = (typeof OBSERVED)[number];
 
 
 ```

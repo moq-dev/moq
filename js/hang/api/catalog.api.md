@@ -24,10 +24,22 @@ export const ArchiveSchema: z.ZodMiniObject<{
     version: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>;
 }, z.core.$strip>;
 
+declare namespace audio {
+    export {
+        ranked,
+        AudioConfigSchema,
+        AudioSchema,
+        Audio_3 as Audio,
+        AudioConfig
+    }
+}
+
 const Audio_2: typeof audio;
 
 type Audio_2 = audio.Audio;
 export { Audio_2 as Audio }
+
+type Audio_3 = z.infer<typeof AudioSchema>;
 
 export type AudioConfig = z.infer<typeof AudioConfigSchema>;
 
@@ -426,6 +438,10 @@ export const ProjectionSchema: z.ZodMiniUnion<readonly [z.ZodMiniDiscriminatedUn
     [x: string]: unknown;
     kind: string;
 }>>]>;
+
+function ranked(renditions: Record<string, AudioConfig>): [string, AudioConfig][];
+
+function ranked_2(renditions: Record<string, VideoConfig>): [string, VideoConfig][];
 
 export type ReferenceEpoch = string & {
     readonly _brand: "epoch";
@@ -1167,6 +1183,22 @@ export const VERSION = 4;
 export const Video: typeof video;
 
 export type Video = video.Video;
+
+declare namespace video {
+    export {
+        ranked_2 as ranked,
+        ColorSchema,
+        Color,
+        ProjectionSchema,
+        Projection,
+        VideoConfigSchema,
+        VideoSchema,
+        Video_2 as Video,
+        VideoConfig
+    }
+}
+
+type Video_2 = z.infer<typeof VideoSchema>;
 
 export type VideoConfig = z.infer<typeof VideoConfigSchema>;
 

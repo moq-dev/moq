@@ -16,6 +16,19 @@ export class Format implements Format_2 {
     decode(payload: Uint8Array, timestamp: Time.Timestamp | undefined): Frame[];
 }
 
+interface Format_2 {
+    decode(payload: Uint8Array, timestamp: Time.Timestamp | undefined): Frame[];
+    end?(frame: Frame): Micro | undefined;
+    readonly kind?: "audio" | "video" | "data";
+}
+
+interface Frame {
+    duration?: Micro;
+    keyframe: boolean;
+    payload: Uint8Array;
+    timestamp: Micro;
+}
+
 export interface InitSegment {
     defaultSampleDuration: number;
     defaultSampleFlags: number;

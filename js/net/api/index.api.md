@@ -17,12 +17,36 @@ import * as Signals from '@moq/signals';
 import { Specificity } from '@moq/pattern';
 import * as z from 'zod/mini';
 
+function accept(input: AcceptProps): Promise<Established>;
+
+interface AcceptProps {
+    consume?: Producer_5;
+    extensions?: Extensions.Extensions;
+    implementation?: string;
+    publish?: Consumer_5;
+    transport: WebTransport;
+    url: URL;
+    version?: number;
+}
+
 class Allocator implements Handle_2 {
     constructor(estimate?: Getter<number | undefined>);
     close(): void;
     reserve(track: Demand, max: number): Reservation;
     static unlimited(): Allocator;
 }
+
+const ALPN: {
+    readonly DRAFT_14: "moq-00";
+    readonly DRAFT_15: "moqt-15";
+    readonly DRAFT_16: "moqt-16";
+    readonly DRAFT_17: "moqt-17";
+    readonly DRAFT_18: "moqt-18";
+    readonly DRAFT_19: "moqt-19";
+    readonly DRAFT_20: "moqt-20";
+    readonly DRAFT_21: "moqt-21";
+    readonly DRAFT_22: "moqt-22";
+};
 
 declare namespace Announce {
     export {
@@ -36,6 +60,16 @@ interface Announce_2 {
     captures: Path_2.Pattern[] | undefined;
     prefix: Path_2.Valid;
     route: Route;
+}
+
+declare namespace Announce_3 {
+    export {
+        Announce_2 as Announce,
+        Event_2 as Event,
+        Options,
+        Producer_4 as Producer,
+        Consumer
+    }
 }
 
 declare namespace Auth {
@@ -52,6 +86,22 @@ interface Auth_2 {
     close(): void;
     readonly closed: PromiseLike<Error | null>;
     readonly grant: Getter<Grant | undefined>;
+}
+
+declare namespace Auth_3 {
+    export {
+
+    }
+}
+
+declare namespace Auth_4 {
+    export {
+        Duplicate,
+        Handle,
+        Unsupported,
+        Grant,
+        Auth_2 as Auth
+    }
 }
 
 declare namespace Bandwidth {
@@ -78,6 +128,42 @@ declare namespace Broadcast {
         Consumer_4 as Consumer
     }
 }
+
+declare namespace Broadcast_2 {
+    export {
+        Tracks,
+        TracksEvent,
+        Producer_3 as Producer,
+        Consumer_4 as Consumer
+    }
+}
+
+interface CertificateHash {
+    algorithm?: "sha-256";
+    value: BufferSource | string;
+}
+
+function certificateHash(cert: string | BufferSource): Promise<Uint8Array<ArrayBuffer>>;
+
+class ClientSetup {
+    constructor(input: {
+        versions: number[];
+        parameters?: SetupOptions;
+    });
+    static decode(r: Reader, version: IetfVersion): Promise<ClientSetup>;
+    encode(w: Writer, version: IetfVersion): Promise<void>;
+    static id: number;
+    parameters: SetupOptions;
+    versions: number[];
+}
+
+declare namespace Cluster {
+    export {
+
+    }
+}
+
+function connect(input: ConnectProps): Promise<Established>;
 
 export class Connection {
     constructor(props?: ConnectionProps);
@@ -117,6 +203,37 @@ export namespace Connection {
     export type Transport = Transport;
     export type WebSocketProps = WebSocketProps;
     export type WebTransportProps = WebTransportProps;
+}
+
+interface ConnectionProps {
+    consume?: Origin_3.Producer;
+    delay?: ReloadDelay;
+    enabled?: boolean | Signal<boolean>;
+    goaway?: GoawayProps;
+    publish?: Origin_3.Consumer;
+    share?: boolean;
+    signal?: never;
+    timeout?: Milli;
+    transport?: never;
+    url?: URL | Signal<URL | undefined>;
+    versions?: readonly string[] | Signal<readonly string[] | undefined>;
+    websocket?: WebSocketProps;
+    webtransport?: WebTransportProps;
+}
+
+interface ConnectProps {
+    auth?: Auth_4.Handle;
+    consume?: Producer_5;
+    extensions?: Extensions.Extensions;
+    implementation?: string;
+    publish?: Consumer_5;
+    signal?: AbortSignal;
+    timeout?: Milli;
+    transport?: WebTransport;
+    url: URL;
+    versions?: readonly string[];
+    websocket?: WebSocketProps;
+    webtransport?: WebTransportProps;
 }
 
 class ConnectTimeout extends Error {
@@ -185,6 +302,22 @@ const Cost: {
     zero: bigint;
 };
 
+class Cursor {
+    constructor(buffer: Uint8Array, version: StreamVersion);
+    bool(): boolean;
+    exact<T>(size: number, decode: (c: Cursor) => T): T;
+    get offset(): number;
+    read(size: number): Uint8Array;
+    get remaining(): number;
+    string(): string;
+    u16(): number;
+    u53(): number;
+    u62(): bigint;
+    u8(): number;
+    varint(): U64;
+    readonly version: StreamVersion;
+}
+
 interface Datagram {
     payload: Uint8Array;
     sequence: number;
@@ -244,6 +377,21 @@ declare namespace Epoch {
     }
 }
 
+declare namespace Epoch_2 {
+    export {
+        parse,
+        mint,
+        time,
+        Valid_2 as Valid
+    }
+}
+
+declare namespace Epoch_3 {
+    export {
+
+    }
+}
+
 declare namespace Error_2 {
     export {
         ConnectTimeout,
@@ -261,9 +409,38 @@ declare namespace Error_2 {
     }
 }
 
+interface Established {
+    abort(): void;
+    announced(scope?: Path_2.Pattern, options?: Announce_3.Options): Announce_3.Consumer;
+    readonly auth: Auth_4.Handle;
+    close(): Promise<void>;
+    closed: Promise<Error | null>;
+    readonly peerImplementation: Promise<string | undefined>;
+    readonly probe: Getter<Probe>;
+    stats(): Promise<Stats>;
+    readonly transport: Transport;
+    readonly url: URL;
+    readonly version: string;
+}
+
 type Event_2 = {
     kind: "start" | "update" | "restart" | "end";
 } & Announce_2;
+
+declare namespace Extensions {
+    export {
+        offered,
+        intoSetup,
+        Extensions_2 as Extensions,
+        Offered
+    }
+}
+
+interface Extensions_2 {
+    auth?: boolean;
+    epoch?: boolean;
+    solicit?: boolean;
+}
 
 interface FetchGroupOptions {
     maxDelay?: Milli;
@@ -283,6 +460,11 @@ class FrameTooLarge extends Stream {
 }
 
 function from(...paths: string[]): Valid;
+
+interface GoawayProps {
+    handover?: Milli;
+    redirect?: Redirect;
+}
 
 interface Grant {
     expires?: number;
@@ -329,6 +511,29 @@ function hasPrefix(prefix: Valid, path: Valid): boolean;
 
 type Hop = z.infer<typeof HopSchema>;
 
+const HopSchema: z.core.$ZodBranded<z.ZodMiniBigInt<bigint>, "Hop", "out">;
+
+declare namespace Ietf {
+    export {
+        Auth_3 as Auth,
+        Cluster,
+        Epoch_3 as Epoch,
+        Setup,
+        ClientSetup,
+        ServerSetup,
+        initialMaxRequestId,
+        SetupOption,
+        REQUEST_WINDOW,
+        SetupOptions,
+        versionName,
+        Version,
+        ALPN,
+        IetfVersion
+    }
+}
+
+type IetfVersion = typeof Version.DRAFT_14 | typeof Version.DRAFT_15 | typeof Version.DRAFT_16 | typeof Version.DRAFT_17 | typeof Version.DRAFT_18 | typeof Version.DRAFT_19 | typeof Version.DRAFT_20 | typeof Version.DRAFT_21 | typeof Version.DRAFT_22;
+
 export const IMPLEMENTATION: string;
 
 interface Info {
@@ -345,7 +550,13 @@ interface Info_2 {
 
 function infoDefaults(info?: Partial<Info>): Info;
 
+function initialMaxRequestId(peerClient: boolean, window?: bigint): bigint;
+
+function intoSetup(params: Ietf.SetupOptions, extensions: Offered, version: Ietf.IetfVersion): void;
+
 function isAnonymous(route: Route): boolean;
+
+function isWebTransportSupported(): boolean;
 
 function join(path: Valid, other: Valid): Valid;
 
@@ -377,6 +588,21 @@ class NotFound extends Stream {
     });
 }
 
+type Offered = Required<Extensions_2>;
+
+function offered(extensions?: Extensions_2): Offered;
+
+interface OpenOptions {
+    sendOrder?: number;
+    timeout?: number | null;
+    version: StreamVersion;
+    waitUntilAvailable?: boolean;
+}
+
+interface Options {
+    hidden?: boolean;
+}
+
 type Order = "ascending" | "descending";
 
 class Ordered {
@@ -403,6 +629,23 @@ class Ordered {
 }
 
 declare namespace Origin_2 {
+    export {
+        Cost,
+        Hop,
+        Route,
+        isAnonymous,
+        Table,
+        RequestOptions,
+        Producer_5 as Producer,
+        Requesting,
+        Consumer_5 as Consumer,
+        Dynamic,
+        Request_3 as Request,
+        Prepared
+    }
+}
+
+declare namespace Origin_3 {
     export {
         Cost,
         Hop,
@@ -449,6 +692,32 @@ declare namespace Path {
     }
 }
 
+declare namespace Path_2 {
+    export {
+        from,
+        parts,
+        decode,
+        encode,
+        hasPrefix,
+        stripPrefix,
+        join,
+        empty,
+        normalizeRelative,
+        resolve,
+        tryResolve,
+        relative,
+        Valid,
+        Relative,
+        MAX_PARTS,
+        compareSpecificity,
+        InvalidPattern,
+        Pattern,
+        Patterns,
+        Segment,
+        Specificity
+    }
+}
+
 interface Position_2 {
     frame: number;
     group: number;
@@ -459,6 +728,11 @@ class Prepared {
     readonly broadcast: Broadcast_2.Producer;
     close(): void;
     publish(): Broadcast_2.Producer;
+}
+
+interface Probe {
+    estimatedRecvRate?: number;
+    rtt?: Milli;
 }
 
 class Producer {
@@ -511,6 +785,13 @@ class Producer_3 {
     unannounce(): void;
 }
 
+class Producer_4 {
+    append(event: Event_2): void;
+    close(abort?: Error): void;
+    get closed(): GetPromise<Error | null>;
+    consume(): Consumer;
+}
+
 class Producer_5 implements Table {
     constructor();
     announced(scope?: Path_2.Pattern, options?: Announce_3.Options): Announce_3.Consumer;
@@ -532,9 +813,34 @@ class ProtocolViolation extends Error {
     readonly code: SessionCode;
 }
 
+class Reader {
+    constructor(stream: ReadableStream<Uint8Array>, buffer: Uint8Array | undefined, version: StreamVersion);
+    constructor(stream: undefined, buffer: Uint8Array, version: StreamVersion);
+    bool(): Promise<boolean>;
+    get closed(): Promise<void>;
+    decode<T>(decode: (c: Cursor) => T): Promise<T>;
+    decodeMaybe<T>(decode: (c: Cursor) => T): Promise<T | undefined>;
+    discard(): Promise<void>;
+    done(): Promise<boolean>;
+    peekU62(): Promise<bigint>;
+    read(size: number): Promise<Uint8Array>;
+    readAll(): Promise<Uint8Array>;
+    stop(reason: unknown): void;
+    string(): Promise<string>;
+    tryDecode<T extends NonNullable<unknown>>(decode: (c: Cursor) => T): T | undefined;
+    u16(): Promise<number>;
+    u53(): Promise<number>;
+    u62(): Promise<bigint>;
+    u8(): Promise<number>;
+    varint(): Promise<U64>;
+    version: StreamVersion;
+}
+
 interface ReadOptions {
     from?: number;
 }
+
+type Redirect = "follow" | "same-host" | "ignore";
 
 class RefusedRedirect extends Error {
     constructor(reason: string);
@@ -545,6 +851,15 @@ type Relative = string & {
 };
 
 function relative(target: Valid, base: Valid): Relative | undefined;
+
+type ReloadDelay = {
+    initial?: Milli;
+    multiplier?: number;
+    max?: Milli;
+    timeout?: Milli;
+};
+
+type ReloadStatus = "connecting" | "connected" | "disconnected";
 
 class Request_2 {
     accept(info?: Partial<Info>): Producer;
@@ -561,6 +876,8 @@ class Request_3 {
     prepare(epoch: Epoch_2.Valid): Prepared;
     reject(err: Error): void;
 }
+
+const REQUEST_WINDOW = 240000n;
 
 class Requesting {
     readonly active: Getter<Broadcast_2.Consumer | undefined>;
@@ -601,6 +918,18 @@ const Route: {
     }): Route;
 };
 
+class ServerSetup {
+    constructor(input: {
+        version: number;
+        parameters?: SetupOptions;
+    });
+    static decode(r: Reader, version: IetfVersion): Promise<ServerSetup>;
+    encode(w: Writer, version: IetfVersion): Promise<void>;
+    static id: number;
+    parameters: SetupOptions;
+    version: number;
+}
+
 class Session extends Error {
     constructor(code: SessionCode, options?: {
         cause?: unknown;
@@ -608,6 +937,8 @@ class Session extends Error {
     });
     readonly code: SessionCode;
 }
+
+const SESSION_CODE: unique symbol;
 
 export type SessionCode = number & {
     readonly [SESSION_CODE]: true;
@@ -633,6 +964,48 @@ export const SessionCode: ((code: number) => SessionCode) & {
     readonly TooManyRequestUpdates: SessionCode;
 };
 
+class Setup {
+    constructor(input?: {
+        parameters?: SetupOptions;
+    });
+    static decode(r: Reader, version: IetfVersion): Promise<Setup>;
+    encode(w: Writer, version: IetfVersion): Promise<void>;
+    static id: number;
+    parameters: SetupOptions;
+}
+
+const SetupOption: {
+    readonly Path: 1n;
+    readonly MaxRequestId: 2n;
+    readonly AuthorizationToken: 3n;
+    readonly MaxAuthTokenCacheSize: 4n;
+    readonly Authority: 5n;
+    readonly Implementation: 7n;
+    readonly HopId: 0x40b54n;
+    readonly RelayCost: 0x40b56n;
+    readonly Solicit: 0x40b5an;
+    readonly Hidden: 0x40b5cn;
+    readonly MaxAge: 0x915c4n;
+    readonly Auth: 0x40b70n;
+    readonly ActiveCount: 0x40b64n;
+    readonly Epoch: 0x40b68n;
+};
+
+class SetupOptions {
+    constructor();
+    bytes: Map<bigint, Uint8Array>;
+    static decode(r: Reader, version: IetfVersion): Promise<SetupOptions>;
+    encode(w: Writer, version: IetfVersion): Promise<void>;
+    getBytes(id: bigint): Uint8Array | undefined;
+    getVarint(id: bigint): bigint | undefined;
+    removeBytes(id: bigint): boolean;
+    removeVarint(id: bigint): boolean;
+    setBytes(id: bigint, value: Uint8Array): void;
+    setVarint(id: bigint, value: bigint): void;
+    get size(): number;
+    vars: Map<bigint, bigint>;
+}
+
 export { Signals }
 
 function size(v: number): number;
@@ -645,10 +1018,23 @@ class Staged {
     readonly producer: Producer;
 }
 
+interface Stats {
+    bytesLost?: number;
+    bytesReceived?: number;
+    bytesSent?: number;
+    estimatedSendRate?: number;
+    packetsLost?: number;
+    packetsReceived?: number;
+    packetsSent?: number;
+    rtt?: Milli;
+}
+
 class Stream extends Error {
     constructor(code: StreamCode, options?: StreamOptions);
     readonly code: StreamCode;
 }
+
+const STREAM_CODE: unique symbol;
 
 export type StreamCode = number & {
     readonly [STREAM_CODE]: true;
@@ -678,6 +1064,8 @@ interface StreamOptions {
     message?: string;
     reason?: string;
 }
+
+type StreamVersion = IetfVersion | Version_2;
 
 function stripPrefix(prefix: Valid, path: Valid): Valid | null;
 
@@ -785,6 +1173,27 @@ declare namespace Track {
     }
 }
 
+declare namespace track {
+    export {
+        infoDefaults,
+        Datagram,
+        Position_2 as Position,
+        Info,
+        Bound,
+        Groups,
+        Subscription,
+        Order,
+        Request_2 as Request,
+        Staged,
+        FetchGroupOptions,
+        Consumer_3 as Consumer,
+        Demand,
+        Producer,
+        Subscriber,
+        Ordered
+    }
+}
+
 class Tracks {
     [Symbol.asyncIterator](): AsyncGenerator<TracksEvent, void, undefined>;
     close(): void;
@@ -805,7 +1214,29 @@ type TracksEvent = {
     name: string;
 };
 
+type Transport = "webtransport" | "websocket" | "webrtc";
+
+interface TryOpenOptions extends OpenOptions {
+    cancel: Promise<void>;
+}
+
 function tryResolve(base: Valid, rel: Relative): Valid | undefined;
+
+class U64 {
+    constructor(hi: number, lo: number);
+    add(delta: number): U64;
+    compare(other: U64): number;
+    equals(other: U64): boolean;
+    static fromBigInt(v: bigint): U64;
+    static fromNumber(v: number): U64;
+    readonly hi: number;
+    readonly lo: number;
+    static readonly MAX: U64;
+    toBigInt(): bigint;
+    toNumber(): number;
+    toString(): string;
+    static readonly ZERO: U64;
+}
 
 class Unsupported extends Error {
     constructor(message?: string);
@@ -836,6 +1267,67 @@ declare namespace Varint {
         MAX_U30,
         MAX_U53
     }
+}
+
+const Version: {
+    readonly DRAFT_07: 4278190087;
+    readonly DRAFT_14: 4278190094;
+    readonly DRAFT_15: 4278190095;
+    readonly DRAFT_16: 4278190096;
+    readonly DRAFT_17: 4278190097;
+    readonly DRAFT_18: 4278190098;
+    readonly DRAFT_19: 4278190099;
+    readonly DRAFT_20: 4278190100;
+    readonly DRAFT_21: 4278190101;
+    readonly DRAFT_22: 4278190102;
+};
+
+type Version = (typeof Version)[keyof typeof Version];
+
+const Version_2: {
+    readonly DRAFT_01: 4279086337;
+    readonly DRAFT_02: 4279086338;
+    readonly DRAFT_03: 4279086339;
+    readonly DRAFT_04: 4279086340;
+    readonly DRAFT_05: 4279086341;
+    readonly DRAFT_06: 4279086342;
+    readonly DRAFT_07: 4279086343;
+};
+
+type Version_2 = (typeof Version_2)[keyof typeof Version_2];
+
+function versionName(v: Version): string;
+
+interface WebSocketProps {
+    delay?: Milli;
+    enabled?: boolean;
+    url?: URL;
+}
+
+interface WebTransportProps extends Omit<WebTransportOptions, "serverCertificateHashes" | "protocols"> {
+    serverCertificate?: string | BufferSource;
+    serverCertificateHashes?: CertificateHash[];
+}
+
+class Writer {
+    constructor(stream: WritableStream<Uint8Array>, version: StreamVersion);
+    bool(v: boolean): Promise<void>;
+    close(): void;
+    get closed(): Promise<void>;
+    static collect(version: StreamVersion, f: (w: Writer) => Promise<void>): Promise<Uint8Array>;
+    i32(v: number): Promise<void>;
+    static open(quic: WebTransport, options: OpenOptions): Promise<Writer>;
+    reset(reason: unknown): void;
+    setPriority(sendOrder: number): void;
+    string(str: string): Promise<void>;
+    static tryOpen(quic: WebTransport, options: TryOpenOptions): Promise<Writer | undefined>;
+    u16(v: number): Promise<void>;
+    u53(v: number): Promise<void>;
+    u62(v: bigint): Promise<void>;
+    u8(v: number): Promise<void>;
+    varint(v: U64): Promise<void>;
+    version: StreamVersion;
+    write(v: Uint8Array): Promise<void>;
 }
 
 

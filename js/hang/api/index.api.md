@@ -42,9 +42,21 @@ const ArrivalSchema: z.ZodMiniObject<{
     wall: z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">;
 }, z.core.$strip>;
 
+declare namespace audio {
+    export {
+        ranked,
+        AudioConfigSchema,
+        AudioSchema,
+        Audio_3 as Audio,
+        AudioConfig
+    }
+}
+
 const Audio_2: typeof audio;
 
 type Audio_2 = audio.Audio;
+
+type Audio_3 = z.infer<typeof AudioSchema>;
 
 type AudioConfig = z.infer<typeof AudioConfigSchema>;
 
@@ -356,6 +368,97 @@ declare namespace Catalog {
     }
 }
 
+declare namespace Catalog_2 {
+    export {
+        Audio_2 as Audio,
+        Video,
+        AudioConfig,
+        AudioConfigSchema,
+        AudioSchema,
+        Color,
+        Projection,
+        VideoConfig,
+        ColorSchema,
+        ProjectionSchema,
+        VideoConfigSchema,
+        VideoSchema,
+        MOQ_EPOCH_UNIX_MILLIS,
+        ARCHIVE_VERSION,
+        ArchiveSchema,
+        Archive,
+        BinaryConfigSchema,
+        BinarySchema,
+        Binary,
+        BinaryConfig,
+        wallClockTime,
+        ClockSchema,
+        Clock,
+        compressionSupported,
+        KnownCompression,
+        CompressionSchema,
+        Compression,
+        containerSupported,
+        UnknownContainerSchema,
+        ContainerSchema,
+        Container_2 as Container,
+        CmafContainer,
+        EchoSchema,
+        Echo_2 as Echo,
+        detectFormat,
+        TRACK,
+        TRACK_COMPRESSED,
+        FORMATS,
+        Format,
+        DEFAULT_FORMAT,
+        hexSchema,
+        Hex,
+        u8,
+        u53,
+        u8Schema,
+        U8,
+        u53Schema,
+        U53,
+        nonzeroU53Schema,
+        JsonConfigSchema,
+        JsonSchema,
+        Json,
+        JsonConfig,
+        modeSupported,
+        KnownMode,
+        ModeSchema,
+        Mode,
+        RelativeBroadcastSchema,
+        RelativeBroadcast,
+        EpochSchema,
+        ReferenceEpoch,
+        PRIORITY,
+        checkRenditions,
+        encode,
+        checkResolvable,
+        watch,
+        VERSION,
+        UnsupportedVersion,
+        RootSchema,
+        Root,
+        MAX_RENDITIONS,
+        TooManyRenditions,
+        DuplicateRendition,
+        EscapingBroadcast,
+        StatsSchema,
+        Stats_2 as Stats,
+        TextFormatSchema,
+        TextRoleSchema,
+        TextConfigSchema,
+        TextSchema,
+        Text_2 as Text,
+        TextConfig,
+        TextRole,
+        track,
+        TrackSchema,
+        Track
+    }
+}
+
 function checkRenditions(root: Root): Root;
 
 function checkResolvable(root: Root, base: Net.Path.Valid): Root;
@@ -510,6 +613,20 @@ declare namespace Echo {
 }
 
 type Echo_2 = z.infer<typeof EchoSchema>;
+
+declare namespace Echo_3 {
+    export {
+        isEcho,
+        ArrivalSchema,
+        Arrival,
+        RenditionSchema,
+        Rendition,
+        SnapshotSchema,
+        Snapshot,
+        SUFFIX,
+        TRACK_2 as TRACK
+    }
+}
 
 const EchoSchema: z.ZodMiniObject<{
     path: z.ZodMiniType<RelativeBroadcast, string, z.core.$ZodTypeInternals<RelativeBroadcast, string>>;
@@ -725,6 +842,10 @@ const ProjectionSchema: z.ZodMiniUnion<readonly [z.ZodMiniDiscriminatedUnion<[z.
 }>>]>;
 
 function publisher(sample: Sample<Stats_3.Snapshot>, thresholds?: Thresholds): Health_2;
+
+function ranked(renditions: Record<string, AudioConfig>): [string, AudioConfig][];
+
+function ranked_2(renditions: Record<string, VideoConfig>): [string, VideoConfig][];
 
 type Read =
 /** A media frame from `group`. Only group equality means anything: numbers may skip. */
@@ -1506,6 +1627,17 @@ declare namespace Stats {
 
 type Stats_2 = z.infer<typeof StatsSchema>;
 
+declare namespace Stats_3 {
+    export {
+        TransportSchema,
+        Transport,
+        RenditionSchema_2 as RenditionSchema,
+        Rendition_2 as Rendition,
+        SnapshotSchema_2 as SnapshotSchema,
+        Snapshot_2 as Snapshot
+    }
+}
+
 const StatsSchema: z.ZodMiniObject<{
     track: z.ZodMiniString<string>;
 }, z.core.$strip>;
@@ -1691,6 +1823,22 @@ const VERSION = 4;
 const Video: typeof video;
 
 type Video = video.Video;
+
+declare namespace video {
+    export {
+        ranked_2 as ranked,
+        ColorSchema,
+        Color,
+        ProjectionSchema,
+        Projection,
+        VideoConfigSchema,
+        VideoSchema,
+        Video_2 as Video,
+        VideoConfig
+    }
+}
+
+type Video_2 = z.infer<typeof VideoSchema>;
 
 type VideoConfig = z.infer<typeof VideoConfigSchema>;
 

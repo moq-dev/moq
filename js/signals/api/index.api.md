@@ -60,6 +60,8 @@ export class Effect {
     timer(fn: () => void, duration: Nano): void;
 }
 
+type Falsy = false | 0 | "" | null | undefined;
+
 export interface GetPromise<T> extends Getter<T | undefined>, PromiseLike<T> {
 }
 
@@ -71,6 +73,8 @@ export interface Getter<T> {
 }
 
 export function getter<T>(value: GetterInit<T>): Getter<T>;
+
+const GETTER_BRAND: unique symbol;
 
 export type GetterInit<T> = T | Getter<T>;
 
@@ -107,6 +111,8 @@ export interface Setter<T> {
     update(fn: (prev: T) => T): void;
 }
 
+type SetterType<S> = S extends Setter<infer T> ? T : never;
+
 export class Signal<T> implements Getter<T>, Setter<T> {
     readonly [GETTER_BRAND] = true;
     readonly [SIGNAL_BRAND] = true;
@@ -125,7 +131,13 @@ export class Signal<T> implements Getter<T>, Setter<T> {
     watch(fn: Subscriber<T>): Dispose;
 }
 
+const SIGNAL_BRAND: unique symbol;
+
 export type SignalMap = Record<string, Getter<unknown>>;
+
+type Subscriber<T> = (value: T) => void;
+
+type Truthy<T> = Exclude<T, Falsy>;
 
 
 ```

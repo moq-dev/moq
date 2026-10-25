@@ -65,6 +65,10 @@ type ConsumerConfig = ConsumerConfig_2 & {
     track: Moq.Track.Subscriber;
 };
 
+interface ConsumerConfig_2 {
+    compression?: boolean;
+}
+
 class Decoder<T> {
     constructor(config?: Pick<Config<T>, "schema" | "compression">);
     decode(): T | undefined;

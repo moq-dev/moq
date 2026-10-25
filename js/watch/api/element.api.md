@@ -16,6 +16,163 @@ import { Readonlys } from '@moq/signals';
 import { Signal } from '@moq/signals';
 import * as Video_2 from '@moq/video';
 
+type Arrival = {
+    kind: "frame";
+    timestamp: Milli;
+    arrival: Milli;
+    late: boolean;
+}
+/**
+* Media after an earlier frame never reached the decoder: a latency skip or a hole. The span is
+* an upper bound, as on the container read's gap.
+*/
+| {
+    kind: "gap";
+    timestamp: Milli;
+    duration: Milli;
+};
+
+class Arrivals implements AsyncIterable<Arrival> {
+    [Symbol.asyncIterator](): AsyncIterator<Arrival>;
+    close(): void;
+    next(): Promise<Arrival | undefined>;
+}
+
+declare namespace Audio_2 {
+    export {
+        DecoderInput_2 as DecoderInput,
+        DecoderProps_2 as DecoderProps,
+        Stats_2 as Stats,
+        Decoder_2 as Decoder,
+        EmitterInput,
+        EmitterProps,
+        Emitter,
+        Target_2 as Target,
+        Supported_2 as Supported,
+        SourceInput_2 as SourceInput,
+        Source_2 as Source
+    }
+}
+
+class Broadcast {
+    constructor(props?: Inputs<BroadcastInput>);
+    close(): void;
+    readonly in: Readonlys<BroadcastInput>;
+    readonly out: Readonlys<BroadcastOutput>;
+}
+
+type BroadcastInput = {
+    origin: Getter<Moq.Origin.Table | undefined>;
+    enabled: Getter<boolean>;
+    name: Getter<Moq.Path.Valid>;
+    announced: Getter<boolean>;
+    catalogFormat: Getter<CatalogFormat | undefined>;
+    catalog: Getter<Catalog.Root | undefined>;
+};
+
+type BroadcastOutput = {
+    status: Signal<Status>;
+    active: Signal<Moq.Broadcast.Consumer | undefined>;
+    error: Signal<Error | undefined>;
+    catalog: Signal<Catalog.Root | undefined>;
+};
+
+const CATALOG_FORMATS: readonly ["hang", "msf", "hangz", "manual"];
+
+type CatalogFormat = (typeof CATALOG_FORMATS)[number];
+
+class Decoder {
+    constructor(props: DecoderProps);
+    close(): void;
+    readonly in: Readonlys<DecoderInput>;
+    readonly out: Readonlys<DecoderOutput>;
+    readonly source: Source;
+    static supported: typeof supported;
+    readonly sync: Sync;
+}
+
+class Decoder_2 {
+    constructor(props: DecoderProps_2);
+    arrivals(): Arrivals;
+    close(): void;
+    readonly in: Readonlys<DecoderInput_2>;
+    readonly out: Readonlys<DecoderOutput_2>;
+    reset(): void;
+    readonly source: Source_2;
+    static supported: typeof supported_2;
+    readonly sync: Sync;
+}
+
+type DecoderInput = {
+    enabled: Getter<boolean>;
+};
+
+type DecoderInput_2 = {
+    enabled: Getter<boolean>;
+};
+
+type DecoderOutput = {
+    error: Signal<Error | undefined>;
+    frame: Signal<VideoFrame | undefined>;
+    interlaced: Signal<boolean>;
+    timestamp: Signal<Milli | undefined>;
+    display: Signal<{
+        width: number;
+        height: number;
+    } | undefined>;
+    stalled: Signal<boolean>;
+    stats: Signal<Stats | undefined>;
+    jitter: Signal<Milli | undefined>;
+    buffered: Signal<Container.BufferedRanges>;
+};
+
+type DecoderOutput_2 = {
+    error: Signal<Error | undefined>;
+    context: Signal<AudioContext | undefined>;
+    root: Signal<AudioNode | undefined>;
+    sampleRate: Signal<number | undefined>;
+    stats: Signal<Stats_2 | undefined>;
+    timestamp: Signal<Milli | undefined>;
+    stalled: Signal<boolean>;
+    buffered: Signal<Container.BufferedRanges>;
+};
+
+type DecoderProps = Inputs<DecoderInput> & {
+    source: Source;
+    sync: Sync;
+};
+
+type DecoderProps_2 = Inputs<DecoderInput_2> & {
+    source: Source_2;
+    sync: Sync;
+};
+
+type Delay = "instant" | "auto" | Milli;
+
+class Emitter {
+    constructor(props: EmitterProps);
+    close(): void;
+    readonly in: Readonlys<EmitterInput>;
+    readonly out: Readonlys<EmitterOutput>;
+    readonly source: Decoder_2;
+}
+
+type EmitterInput = {
+    volume: Getter<number>;
+    muted: Getter<boolean>;
+    paused: Getter<boolean>;
+};
+
+type EmitterOutput = {
+    enabled: Signal<boolean>;
+};
+
+type EmitterProps = Inputs<EmitterInput> & {
+    source: Decoder_2;
+};
+
+type Kind = "video" | "audio" | "text";
+
 class MoqWatch extends HTMLElement {
     constructor();
     get announced(): boolean;
@@ -83,7 +240,251 @@ class MoqWatch extends HTMLElement {
 }
 export default MoqWatch;
 
+const OBSERVED: readonly ["url", "versions", "name", "paused", "volume", "muted", "visible", "backend", "announced", "delay", "buffer", "catalog-format", "captions"];
+
+type Observed = (typeof OBSERVED)[number];
+
 export function parseCatalogFormat(value: string | null): CatalogFormat | undefined;
+
+class Player {
+    constructor(props?: PlayerProps);
+    readonly audio: Audio_2.Decoder;
+    readonly broadcast: Broadcast;
+    close(): void;
+    readonly emitter: Audio_2.Emitter;
+    readonly in: Readonlys<Omit<PlayerInput, Kind>> & {
+        readonly [K in Kind]: Readonlys<PlayerInput[K]>;
+    };
+    readonly renderer: Video.Renderer;
+    reset(): void;
+    readonly sync: Sync;
+    readonly text: Text_2.Source;
+    readonly textRenderer: Text_2.Renderer;
+    readonly video: Video.Decoder;
+}
+
+type PlayerInput = {
+    origin: Getter<Moq.Origin.Table | undefined>;
+    name: Getter<Moq.Path.Valid>;
+    enabled: Getter<boolean>;
+    announced: Getter<boolean>;
+    catalogFormat: Getter<CatalogFormat | undefined>;
+    catalog: Getter<Catalog.Root | undefined>;
+    probe: Getter<Moq.Connection.Probe | undefined>;
+    paused: Getter<boolean>;
+    delay: Getter<Delay>;
+    buffer: Getter<Milli>;
+    video: {
+        target: Getter<Video.Target | undefined>;
+        canvas: Getter<HTMLCanvasElement | undefined>;
+        visible: Getter<Video.Visible>;
+        backend: Getter<Video.Backend>;
+    };
+    audio: {
+        target: Getter<Audio_2.Target | undefined>;
+        volume: Getter<number>;
+        muted: Getter<boolean>;
+    };
+    text: {
+        target: Getter<string | undefined>;
+        container: Getter<HTMLElement | undefined>;
+    };
+};
+
+type PlayerProps = Inputs<Omit<PlayerInput, Kind>> & {
+    [K in Kind]?: Inputs<PlayerInput[K]>;
+};
+
+function renderable(config: Catalog.TextConfig): boolean;
+
+class Renderer {
+    constructor(props: RendererProps);
+    close(): void;
+    readonly decoder: Decoder;
+    readonly in: Readonlys<RendererInput>;
+    readonly out: Readonlys<{
+        frame: Getter<VideoFrame | undefined>;
+        timestamp: Getter<Milli | undefined>;
+        visible: Getter<boolean>;
+        error: Getter<Error | undefined>;
+    }>;
+}
+
+class Renderer_2 {
+    constructor(props: RendererProps_2);
+    close(): void;
+    readonly in: Readonlys<RendererInput_2>;
+    readonly source: Source_3;
+    readonly sync: Sync;
+}
+
+type RendererInput = {
+    canvas: Getter<HTMLCanvasElement | undefined>;
+    visible: Getter<Visible>;
+    backend: Getter<Video_2.Backend>;
+};
+
+type RendererInput_2 = {
+    container: Getter<HTMLElement | undefined>;
+    enabled: Getter<boolean>;
+};
+
+type RendererProps = Inputs<RendererInput> & {
+    decoder: Decoder;
+};
+
+type RendererProps_2 = Inputs<RendererInput_2> & {
+    source: Source_3;
+    sync: Sync;
+};
+
+class Source {
+    constructor(props?: Inputs<SourceInput>);
+    close(): void;
+    readonly in: Readonlys<SourceInput>;
+    readonly out: Readonlys<SourceOutput>;
+}
+
+class Source_2 {
+    constructor(props?: Inputs<SourceInput_2>);
+    close(): void;
+    readonly in: Readonlys<SourceInput_2>;
+    readonly out: Readonlys<SourceOutput_2>;
+}
+
+class Source_3 {
+    constructor(props?: Inputs<SourceInput_3>);
+    close(): void;
+    readonly in: Readonlys<SourceInput_3>;
+    readonly out: Readonlys<SourceOutput_3>;
+}
+
+type SourceInput = {
+    broadcast: Getter<Broadcast | undefined>;
+    target: Getter<Target | undefined>;
+    supported: Getter<Supported | undefined>;
+    probe: Getter<Moq.Connection.Probe | undefined>;
+};
+
+type SourceInput_2 = {
+    broadcast: Getter<Broadcast | undefined>;
+    target: Getter<Target_2 | undefined>;
+    supported: Getter<Supported_2 | undefined>;
+};
+
+type SourceInput_3 = {
+    broadcast: Getter<Broadcast | undefined>;
+    target: Getter<string | undefined>;
+};
+
+type SourceOutput = {
+    catalog: Signal<Catalog.Video | undefined>;
+    available: Signal<Record<string, Catalog.VideoConfig>>;
+    error: Signal<Error | undefined>;
+    track: Signal<string | undefined>;
+    config: Signal<Catalog.VideoConfig | undefined>;
+};
+
+type SourceOutput_2 = {
+    catalog: Signal<Catalog.Audio | undefined>;
+    available: Signal<Record<string, Catalog.AudioConfig>>;
+    track: Signal<string | undefined>;
+    config: Signal<Catalog.AudioConfig | undefined>;
+    jitter: Signal<Milli | undefined>;
+};
+
+type SourceOutput_3 = {
+    catalog: Signal<Catalog.Text | undefined>;
+    available: Signal<Record<string, Catalog.TextConfig>>;
+    track: Signal<string | undefined>;
+    config: Signal<Catalog.TextConfig | undefined>;
+};
+
+interface Stats {
+    bytesReceived: number;
+    frameCount: number;
+}
+
+interface Stats_2 {
+    bytesReceived: number;
+    underruns: number;
+}
+
+type Status = "offline" | "loading" | "live" | "error" | "unsupported";
+
+type Supported = (config: Catalog.VideoConfig) => Promise<boolean>;
+
+function supported(config: Catalog.VideoConfig): Promise<boolean>;
+
+type Supported_2 = (config: Catalog.AudioConfig) => Promise<boolean>;
+
+function supported_2(config: Catalog.AudioConfig): Promise<boolean>;
+
+class Sync {
+    constructor(props?: Inputs<SyncInput>);
+    close(): void;
+    readonly in: Readonlys<SyncInput>;
+    now(): Milli | undefined;
+    readonly out: Readonlys<SyncOutput>;
+    reset(): void;
+}
+
+type SyncInput = {
+    delay: Getter<Delay>;
+    buffer: Getter<Milli>;
+};
+
+type SyncOutput = {
+    instant: Signal<boolean>;
+    reference: Signal<number | undefined>;
+    delay: Signal<Milli>;
+    timestamp: Signal<Milli | undefined>;
+    buffered: Signal<boolean>;
+    maxDelay: Signal<Milli>;
+};
+
+type Target = {
+    name?: string;
+    pixels?: number;
+    width?: number;
+    height?: number;
+    bitrate?: number;
+};
+
+type Target_2 = {
+    name?: string;
+};
+
+declare namespace Text_2 {
+    export {
+        RendererInput_2 as RendererInput,
+        RendererProps_2 as RendererProps,
+        Renderer_2 as Renderer,
+        renderable,
+        SourceInput_3 as SourceInput,
+        Source_3 as Source
+    }
+}
+
+declare namespace Video {
+    export {
+        Backend,
+        DecoderInput,
+        DecoderProps,
+        Stats,
+        Decoder,
+        Visible,
+        RendererInput,
+        RendererProps,
+        Renderer,
+        Supported,
+        Target,
+        SourceInput,
+        Source
+    }
+}
+
+type Visible = "never" | "always" | (string & {});
 
 
 ```

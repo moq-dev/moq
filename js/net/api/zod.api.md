@@ -9,7 +9,260 @@ import { Getter } from '@moq/signals';
 import { Milli } from '@moq/clock';
 import type * as z from '@zod/mini';
 
+type Bound = {
+    included: number;
+    excluded?: never;
+} | {
+    excluded: number;
+    included?: never;
+};
+
+class Consumer {
+    close(abort?: Error): void;
+    get closed(): GetPromise<Error | null>;
+    get done(): boolean;
+    get frameCount(): number;
+    get isClosed(): boolean;
+    readable(): Promise<void>;
+    readBool(): Promise<boolean | undefined>;
+    readFrame(): Promise<Frame | undefined>;
+    readFrameSequence(options?: ReadOptions): Promise<({
+        sequence: number;
+    } & Frame) | undefined>;
+    readJson(): Promise<unknown | undefined>;
+    readString(): Promise<string | undefined>;
+    readonly sequence: number;
+    tryReadFrame(): Frame | undefined;
+    tryReadFrameSequence(): ({
+        sequence: number;
+    } & Frame) | undefined;
+}
+
+class Consumer_2 {
+    fetchGroup(sequence: number, options?: FetchGroupOptions): Promise<Consumer>;
+    info(): Promise<Info>;
+    readonly name: string;
+    subscribe(options?: Subscription): Subscriber;
+}
+
+interface Datagram {
+    payload: Uint8Array;
+    sequence: number;
+    timestamp?: Timestamp;
+}
+
+class Demand {
+    get closed(): GetPromise<Error | null>;
+    readonly name: string;
+    get wanted(): Getter<number | undefined>;
+}
+
+class Demand_2 {
+    get closed(): GetPromise<Error | null>;
+    readonly sequence: number;
+    unused(): Promise<void>;
+    get used(): Getter<boolean>;
+}
+
+interface FetchGroupOptions {
+    maxDelay?: Milli;
+    priority?: number;
+    signal?: AbortSignal;
+}
+
+interface Frame {
+    payload: Uint8Array;
+    timestamp?: Timestamp;
+}
+
+declare namespace group {
+    export {
+        MAX_GROUP_CACHE_BYTES,
+        MAX_GROUP_FRAMES,
+        Frame,
+        ReadOptions,
+        Info_2 as Info,
+        Demand_2 as Demand,
+        Producer_2 as Producer,
+        Consumer
+    }
+}
+
+interface Groups {
+    end?: Bound;
+    start?: Bound;
+}
+
+interface Info {
+    compress?: boolean;
+    maxAge?: Milli;
+    priority: number;
+    refresh?: number;
+    timescale?: Timescale | null;
+}
+
+interface Info_2 {
+    sequence: number;
+}
+
+function infoDefaults(info?: Partial<Info>): Info;
+
+const MAX_GROUP_CACHE_BYTES: number;
+
+const MAX_GROUP_FRAMES = 8192;
+
+type Order = "ascending" | "descending";
+
+class Ordered {
+    close(abort?: Error): void;
+    get closed(): GetPromise<Error | null>;
+    end(): Position_2 | undefined;
+    finished(): Promise<Position_2>;
+    info(): Promise<Info>;
+    largest(): Promise<Position_2 | undefined>;
+    readonly name: string;
+    nextGroup(): Promise<Consumer | undefined>;
+    readBool(): Promise<boolean | undefined>;
+    readFrame(): Promise<({
+        group: number;
+        frame: number;
+    } & Frame) | undefined>;
+    readJson(): Promise<unknown | undefined>;
+    readString(): Promise<string | undefined>;
+    recvDatagram(): Promise<Datagram | undefined>;
+    get subscription(): Getter<Subscription | undefined>;
+    tryNextGroup(): Consumer | undefined;
+    update(options: Subscription): void;
+    withRange(groups: Groups): this;
+}
+
+interface Position_2 {
+    frame: number;
+    group: number;
+}
+
+class Producer {
+    constructor(name: string);
+    accept(info?: Partial<Info>): this;
+    appendDatagram(timestamp: Timestamp | undefined, payload: Uint8Array): number;
+    appendGroup(): Producer_2;
+    close(abort?: Error): void;
+    get closed(): GetPromise<Error | null>;
+    demand(): Demand;
+    dropGroups(start: number, end: number, error: Error): void;
+    finishAt(end: Position_2): void;
+    info(): Promise<Info>;
+    insertDatagram(sequence: number, timestamp: Timestamp | undefined, payload: Uint8Array): void;
+    largest(): Position_2 | undefined;
+    readonly name: string;
+    get priority(): number;
+    subscribe(options?: Subscription): Subscriber;
+    get subscription(): Getter<Subscription | undefined>;
+    writeFrame(frame: Frame): void;
+    writeGroup(group: Producer_2): void;
+}
+
+class Producer_2 {
+    constructor(sequence: number);
+    close(abort?: Error): void;
+    get closed(): GetPromise<Error | null>;
+    consume(): Consumer;
+    demand(): Demand_2;
+    get isClosed(): boolean;
+    readonly sequence: number;
+    writeFrame(frame: Frame): void;
+}
+
 export function read<T = unknown>(source: track.Ordered | group.Consumer, schema: z.ZodMiniType<T>): Promise<T | undefined>;
+
+interface ReadOptions {
+    from?: number;
+}
+
+class Request_2 {
+    accept(info?: Partial<Info>): Producer;
+    demand(): Demand;
+    readonly name: string;
+    get priority(): number;
+    reject(err?: Error): void;
+    stage(info?: Partial<Info>): Staged;
+    get subscription(): Readonly<Subscription>;
+}
+
+class Staged {
+    [Symbol.dispose](): void;
+    commit(): Producer;
+    readonly producer: Producer;
+}
+
+class Subscriber {
+    close(abort?: Error): void;
+    get closed(): GetPromise<Error | null>;
+    end(): Position_2 | undefined;
+    finished(): Promise<Position_2>;
+    info(): Promise<Info>;
+    largest(): Promise<Position_2 | undefined>;
+    readonly name: string;
+    ordered(): Ordered;
+    recvDatagram(): Promise<Datagram | undefined>;
+    recvGroup(): Promise<Consumer | undefined>;
+    get subscription(): Getter<Subscription | undefined>;
+    tryRecvGroup(): Consumer | undefined;
+    update(options: Subscription): void;
+    withRange(groups: Groups): this;
+}
+
+interface Subscription {
+    groups?: Groups;
+    maxDelay?: Milli;
+    order?: Order;
+    priority?: number;
+}
+
+type Timescale = number & {
+    readonly _brand: "timescale";
+};
+
+const Timescale: ((unitsPerSecond: number) => Timescale) & {
+    SECOND: Timescale;
+    MILLI: Timescale;
+    MICRO: Timescale;
+    NANO: Timescale;
+};
+
+class Timestamp {
+    constructor(value: number, scale: Timescale);
+    as(scale: Timescale): number;
+    asMicros(): number;
+    asMillis(): number;
+    static fromMicros(us: number): Timestamp;
+    static fromMillis(ms: number): Timestamp;
+    isBefore(other: Timestamp): boolean;
+    static now(): Timestamp;
+    readonly scale: Timescale;
+    readonly value: number;
+}
+
+declare namespace track {
+    export {
+        infoDefaults,
+        Datagram,
+        Position_2 as Position,
+        Info,
+        Bound,
+        Groups,
+        Subscription,
+        Order,
+        Request_2 as Request,
+        Staged,
+        FetchGroupOptions,
+        Consumer_2 as Consumer,
+        Demand,
+        Producer,
+        Subscriber,
+        Ordered
+    }
+}
 
 
 ```

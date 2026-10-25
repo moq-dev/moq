@@ -85,6 +85,10 @@ export const ClaimsSchema: z.ZodMiniPipe<z.ZodMiniObject<{
 
 export { compareSpecificity }
 
+function find(set: KeySet, kid: string): Key | undefined;
+
+function generate(algorithm: Algorithm_2, kid?: string): Promise<Key>;
+
 export type Grant = z.infer<typeof GrantSchema>;
 
 export const GrantSchema: z.ZodMiniObject<{
@@ -539,6 +543,10 @@ export const OperationSchema: z.ZodMiniEnum<{
     verify: "verify";
 }>;
 
+function parse(jwk: string): Key;
+
+function parse_2(jwks: string): KeySet;
+
 export { Pattern }
 
 export const PatternListSchema: z.ZodMiniArray<z.ZodMiniString<string>>;
@@ -741,6 +749,10 @@ export const ScopeSchema: z.ZodMiniPipe<z.ZodMiniObject<{
 
 export { Segment }
 
+function sign(key: Key, claims: z.input<typeof ClaimsSchema>): Promise<string>;
+
+function sign_2(set: KeySet, claims: z.input<typeof ClaimsSchema>): Promise<string>;
+
 export { Specificity }
 
 export type SymmetricKey = Extract<Key, {
@@ -753,6 +765,10 @@ export const TokenSchema: z.ZodMiniObject<{
     kind: z.ZodMiniInt;
     value: z.ZodMiniString<string>;
 }, z.core.$strip>;
+
+function toPublic(key: Key): PublicKey;
+
+function toPublic_2(set: KeySet): PublicKeySet;
 
 export type Transport = z.infer<typeof TransportSchema>;
 
@@ -769,6 +785,10 @@ export const TransportSchema: z.ZodMiniPipe<z.ZodMiniString<string>, z.ZodMiniCa
     websocket: "websocket";
     webtransport: "webtransport";
 }>>>;
+
+function verify(key: PublicKey | SymmetricKey, token: string): Promise<Claims>;
+
+function verify_2(set: KeySet, token: string): Promise<Claims>;
 
 
 ```

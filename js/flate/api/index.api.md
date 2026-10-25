@@ -59,6 +59,14 @@ export interface EncoderOptions {
     level?: number;
 }
 
+type Init = Config & {
+    track: Moq.Track.Producer;
+};
+
+type Init_2 = Config_2 & {
+    track: Moq.Track.Producer;
+};
+
 class Producer {
     constructor(config: Producer.Config);
     finish(): void;

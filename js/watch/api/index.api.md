@@ -60,6 +60,22 @@ declare namespace Audio_2 {
     }
 }
 
+declare namespace Audio_3 {
+    export {
+        DecoderInput,
+        DecoderProps,
+        Stats,
+        Decoder,
+        EmitterInput,
+        EmitterProps,
+        Emitter,
+        Target,
+        Supported,
+        SourceInput,
+        Source
+    }
+}
+
 export class Broadcast {
     constructor(props?: Inputs<BroadcastInput>);
     close(): void;
@@ -74,6 +90,13 @@ export type BroadcastInput = {
     announced: Getter<boolean>;
     catalogFormat: Getter<CatalogFormat | undefined>;
     catalog: Getter<Catalog.Root | undefined>;
+};
+
+type BroadcastOutput = {
+    status: Signal<Status>;
+    active: Signal<Net.Broadcast.Consumer | undefined>;
+    error: Signal<Error | undefined>;
+    catalog: Signal<Catalog.Root | undefined>;
 };
 
 export { BufferedRange }
@@ -116,6 +139,32 @@ type DecoderInput_2 = {
     enabled: Getter<boolean>;
 };
 
+type DecoderOutput = {
+    error: Signal<Error | undefined>;
+    context: Signal<AudioContext | undefined>;
+    root: Signal<AudioNode | undefined>;
+    sampleRate: Signal<number | undefined>;
+    stats: Signal<Stats | undefined>;
+    timestamp: Signal<Milli | undefined>;
+    stalled: Signal<boolean>;
+    buffered: Signal<Container.BufferedRanges>;
+};
+
+type DecoderOutput_2 = {
+    error: Signal<Error | undefined>;
+    frame: Signal<VideoFrame | undefined>;
+    interlaced: Signal<boolean>;
+    timestamp: Signal<Milli | undefined>;
+    display: Signal<{
+        width: number;
+        height: number;
+    } | undefined>;
+    stalled: Signal<boolean>;
+    stats: Signal<Stats_2 | undefined>;
+    jitter: Signal<Milli | undefined>;
+    buffered: Signal<Container.BufferedRanges>;
+};
+
 type DecoderProps = Inputs<DecoderInput> & {
     source: Source;
     sync: Sync;
@@ -142,11 +191,17 @@ type EmitterInput = {
     paused: Getter<boolean>;
 };
 
+type EmitterOutput = {
+    enabled: Signal<boolean>;
+};
+
 type EmitterProps = Inputs<EmitterInput> & {
     source: Decoder;
 };
 
 export { Hang }
+
+type Kind = "video" | "audio" | "text";
 
 export { Net }
 
@@ -283,6 +338,29 @@ type SourceInput_3 = {
     probe: Getter<Net.Connection.Probe | undefined>;
 };
 
+type SourceOutput = {
+    catalog: Signal<Catalog.Audio | undefined>;
+    available: Signal<Record<string, Catalog.AudioConfig>>;
+    track: Signal<string | undefined>;
+    config: Signal<Catalog.AudioConfig | undefined>;
+    jitter: Signal<Milli | undefined>;
+};
+
+type SourceOutput_2 = {
+    catalog: Signal<Catalog.Text | undefined>;
+    available: Signal<Record<string, Catalog.TextConfig>>;
+    track: Signal<string | undefined>;
+    config: Signal<Catalog.TextConfig | undefined>;
+};
+
+type SourceOutput_3 = {
+    catalog: Signal<Catalog.Video | undefined>;
+    available: Signal<Record<string, Catalog.VideoConfig>>;
+    error: Signal<Error | undefined>;
+    track: Signal<string | undefined>;
+    config: Signal<Catalog.VideoConfig | undefined>;
+};
+
 interface Stats {
     bytesReceived: number;
     underruns: number;
@@ -293,9 +371,15 @@ interface Stats_2 {
     frameCount: number;
 }
 
+type Status = "offline" | "loading" | "live" | "error" | "unsupported";
+
 type Supported = (config: Catalog.AudioConfig) => Promise<boolean>;
 
+function supported(config: Catalog.AudioConfig): Promise<boolean>;
+
 type Supported_2 = (config: Catalog.VideoConfig) => Promise<boolean>;
+
+function supported_2(config: Catalog.VideoConfig): Promise<boolean>;
 
 export class Sync {
     constructor(props?: Inputs<SyncInput>);
@@ -309,6 +393,15 @@ export class Sync {
 export type SyncInput = {
     delay: Getter<Delay>;
     buffer: Getter<Milli>;
+};
+
+type SyncOutput = {
+    instant: Signal<boolean>;
+    reference: Signal<number | undefined>;
+    delay: Signal<Milli>;
+    timestamp: Signal<Milli | undefined>;
+    buffered: Signal<boolean>;
+    maxDelay: Signal<Milli>;
 };
 
 type Target = {
@@ -334,7 +427,36 @@ declare namespace Text_2 {
     }
 }
 
+declare namespace Text_3 {
+    export {
+        RendererInput,
+        RendererProps,
+        Renderer,
+        renderable,
+        SourceInput_2 as SourceInput,
+        Source_2 as Source
+    }
+}
+
 declare namespace Video {
+    export {
+        Backend,
+        DecoderInput_2 as DecoderInput,
+        DecoderProps_2 as DecoderProps,
+        Stats_2 as Stats,
+        Decoder_2 as Decoder,
+        Visible,
+        RendererInput_2 as RendererInput,
+        RendererProps_2 as RendererProps,
+        Renderer_2 as Renderer,
+        Supported_2 as Supported,
+        Target_2 as Target,
+        SourceInput_3 as SourceInput,
+        Source_3 as Source
+    }
+}
+
+declare namespace Video_3 {
     export {
         Backend,
         DecoderInput_2 as DecoderInput,

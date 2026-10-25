@@ -27,6 +27,10 @@ export function icon(svg: string): HTMLElement;
 
 export type Level = "full" | "partial" | "none";
 
+const OBSERVED: readonly ["show", "details"];
+
+type Observed = (typeof OBSERVED)[number];
+
 interface Report_2 {
     rows: [group: string, feature: string, status: Status][];
     summary: Level;

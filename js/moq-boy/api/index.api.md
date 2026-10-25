@@ -106,6 +106,10 @@ export class MoqBoy extends HTMLElement {
     set url(value: string | URL | undefined);
 }
 
+const OBSERVED: readonly ["url", "prefix", "prefix-game", "prefix-viewer"];
+
+type Observed = (typeof OBSERVED)[number];
+
 export { Watch }
 
 

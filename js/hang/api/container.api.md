@@ -14,6 +14,44 @@ import type { Time } from '@moq/net';
 import { Track } from '@moq/net';
 import * as z from '@zod/mini';
 
+type AudioConfig = z.infer<typeof AudioConfigSchema>;
+
+const AudioConfigSchema: z.ZodMiniObject<{
+    broadcast: z.ZodMiniOptional<z.ZodMiniType<RelativeBroadcast, string, z.core.$ZodTypeInternals<RelativeBroadcast, string>>>;
+    epoch: z.ZodMiniOptional<z.ZodMiniType<ReferenceEpoch, string, z.core.$ZodTypeInternals<ReferenceEpoch, string>>>;
+    track: z.ZodMiniOptional<z.ZodMiniString<string>>;
+    label: z.ZodMiniOptional<z.ZodMiniString<string>>;
+    codec: z.ZodMiniString<string>;
+    container: z.ZodMiniDefault<z.ZodMiniUnion<readonly [z.ZodMiniDiscriminatedUnion<[z.ZodMiniObject<{
+        kind: z.ZodMiniLiteral<"legacy">;
+    }, z.core.$strip>, z.ZodMiniObject<{
+        kind: z.ZodMiniLiteral<"cmaf">;
+        init: z.ZodMiniBase64;
+    }, z.core.$strip>, z.ZodMiniObject<{
+        kind: z.ZodMiniLiteral<"loc">;
+    }, z.core.$strip>], "kind">, z.ZodMiniPipe<z.ZodMiniObject<{
+        kind: z.ZodMiniString<string>;
+    }, z.core.$loose>, z.ZodMiniTransform<{
+        kind: "unknown";
+        raw: {
+            [x: string]: unknown;
+            kind: string;
+        };
+    }, {
+        [x: string]: unknown;
+        kind: string;
+    }>>]>>;
+    description: z.ZodMiniOptional<z.ZodMiniString<string>>;
+    sampleRate: z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">;
+    numberOfChannels: z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">;
+    layout: z.ZodMiniOptional<z.ZodMiniString<string>>;
+    bitrate: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>;
+    enabled: z.ZodMiniOptional<z.ZodMiniBoolean<boolean>>;
+    jitter: z.ZodMiniOptional<z.ZodMiniPipe<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">, z.ZodMiniTransform<(number & z.$brand<"u53">) | undefined, number & z.$brand<"u53">>>>;
+    warmup: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>;
+    delay: z.ZodMiniOptional<z.ZodMiniPipe<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">, z.ZodMiniTransform<(number & z.$brand<"u53">) | undefined, number & z.$brand<"u53">>>>;
+}, z.core.$strip>;
+
 export interface BufferedRange {
     end: Milli;
     start: Milli;
@@ -117,6 +155,14 @@ export interface ReceivedFrame extends Frame {
     arrival: Milli;
 }
 
+type ReferenceEpoch = string & {
+    readonly _brand: "epoch";
+};
+
+type RelativeBroadcast = string & {
+    __brand: "Relative";
+};
+
 interface Source {
     byteLength: number;
     copyTo(buffer: Uint8Array): void;
@@ -128,6 +174,101 @@ export type TrackInfoOptions = {
     priority: number;
     maxAge?: Milli;
 };
+
+type VideoConfig = z.infer<typeof VideoConfigSchema>;
+
+const VideoConfigSchema: z.ZodMiniObject<{
+    broadcast: z.ZodMiniOptional<z.ZodMiniType<RelativeBroadcast, string, z.core.$ZodTypeInternals<RelativeBroadcast, string>>>;
+    epoch: z.ZodMiniOptional<z.ZodMiniType<ReferenceEpoch, string, z.core.$ZodTypeInternals<ReferenceEpoch, string>>>;
+    track: z.ZodMiniOptional<z.ZodMiniString<string>>;
+    label: z.ZodMiniOptional<z.ZodMiniString<string>>;
+    codec: z.ZodMiniString<string>;
+    container: z.ZodMiniDefault<z.ZodMiniUnion<readonly [z.ZodMiniDiscriminatedUnion<[z.ZodMiniObject<{
+        kind: z.ZodMiniLiteral<"legacy">;
+    }, z.core.$strip>, z.ZodMiniObject<{
+        kind: z.ZodMiniLiteral<"cmaf">;
+        init: z.ZodMiniBase64;
+    }, z.core.$strip>, z.ZodMiniObject<{
+        kind: z.ZodMiniLiteral<"loc">;
+    }, z.core.$strip>], "kind">, z.ZodMiniPipe<z.ZodMiniObject<{
+        kind: z.ZodMiniString<string>;
+    }, z.core.$loose>, z.ZodMiniTransform<{
+        kind: "unknown";
+        raw: {
+            [x: string]: unknown;
+            kind: string;
+        };
+    }, {
+        [x: string]: unknown;
+        kind: string;
+    }>>]>>;
+    description: z.ZodMiniOptional<z.ZodMiniString<string>>;
+    codedWidth: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>;
+    codedHeight: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>;
+    displayAspectWidth: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>;
+    displayAspectHeight: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>;
+    color: z.ZodMiniOptional<z.ZodMiniObject<{
+        primaries: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u8", "out">>;
+        transfer: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u8", "out">>;
+        matrix: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u8", "out">>;
+        range: z.ZodMiniOptional<z.ZodMiniEnum<{
+            full: "full";
+            limited: "limited";
+        }>>;
+        mastering: z.ZodMiniOptional<z.ZodMiniObject<{
+            red: z.ZodMiniObject<{
+                x: z.ZodMiniNumber<number>;
+                y: z.ZodMiniNumber<number>;
+            }, z.core.$strip>;
+            green: z.ZodMiniObject<{
+                x: z.ZodMiniNumber<number>;
+                y: z.ZodMiniNumber<number>;
+            }, z.core.$strip>;
+            blue: z.ZodMiniObject<{
+                x: z.ZodMiniNumber<number>;
+                y: z.ZodMiniNumber<number>;
+            }, z.core.$strip>;
+            white: z.ZodMiniObject<{
+                x: z.ZodMiniNumber<number>;
+                y: z.ZodMiniNumber<number>;
+            }, z.core.$strip>;
+            maxLuminance: z.ZodMiniNumber<number>;
+            minLuminance: z.ZodMiniNumber<number>;
+        }, z.core.$strip>>;
+        contentLight: z.ZodMiniOptional<z.ZodMiniObject<{
+            maxCll: z.ZodMiniNumber<number>;
+            maxFall: z.ZodMiniNumber<number>;
+        }, z.core.$strip>>;
+    }, z.core.$strip>>;
+    projection: z.ZodMiniOptional<z.ZodMiniUnion<readonly [z.ZodMiniDiscriminatedUnion<[z.ZodMiniObject<{
+        kind: z.ZodMiniLiteral<"rectilinear">;
+    }, z.core.$strip>, z.ZodMiniObject<{
+        kind: z.ZodMiniLiteral<"equirectangular">;
+        fov: z.ZodMiniOptional<z.ZodMiniNumber<number>>;
+    }, z.core.$strip>], "kind">, z.ZodMiniPipe<z.ZodMiniObject<{
+        kind: z.ZodMiniString<string>;
+    }, z.core.$loose>, z.ZodMiniTransform<{
+        kind: "unknown";
+        raw: {
+            [x: string]: unknown;
+            kind: string;
+        };
+    }, {
+        [x: string]: unknown;
+        kind: string;
+    }>>]>>;
+    stereo: z.ZodMiniOptional<z.ZodMiniString<string>>;
+    interlaced: z.ZodMiniOptional<z.ZodMiniBoolean<boolean>>;
+    framerate: z.ZodMiniOptional<z.ZodMiniNumber<number>>;
+    reorder: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u8", "out">>;
+    bitrate: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>;
+    enabled: z.ZodMiniOptional<z.ZodMiniBoolean<boolean>>;
+    preference: z.ZodMiniOptional<z.ZodMiniInt32>;
+    optimizeForLatency: z.ZodMiniOptional<z.ZodMiniBoolean<boolean>>;
+    jitter: z.ZodMiniOptional<z.ZodMiniPipe<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">, z.ZodMiniTransform<(number & z.$brand<"u53">) | undefined, number & z.$brand<"u53">>>>;
+    warmup: z.ZodMiniOptional<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">>;
+    delay: z.ZodMiniOptional<z.ZodMiniPipe<z.core.$ZodBranded<z.ZodMiniNumber<number>, "u53", "out">, z.ZodMiniTransform<(number & z.$brand<"u53">) | undefined, number & z.$brand<"u53">>>>;
+}, z.core.$strip>;
 
 
 ```

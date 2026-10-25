@@ -98,6 +98,9 @@ function extract(root: string, entrypoint: string, folder: string, entry: string
 				reportFolder: folder,
 				reportTempFolder: join(root, ".api-extractor"),
 				reportFileName: entry,
+				// A type the API references without exporting is still part of it, so a change to
+				// its declaration must change the report.
+				includeForgottenExports: true,
 			},
 			docModel: { enabled: false },
 			dtsRollup: { enabled: false },

@@ -18,6 +18,20 @@ export interface Config {
     streamReceiveWindow?: bigint;
 }
 
+class Datagrams implements WebTransportDatagramDuplexStream {
+    constructor(send: (data: Uint8Array) => void);
+    close(err?: Error): void;
+    incomingHighWaterMark: number;
+    incomingMaxAge: number | null;
+    get maxDatagramSize(): number;
+    outgoingHighWaterMark: number;
+    outgoingMaxAge: number | null;
+    push(data: Uint8Array): void;
+    readonly readable: ReadableStream<Uint8Array>;
+    setMaxDatagramSize(size: number): void;
+    readonly writable: WritableStream<Uint8Array>;
+}
+
 export function install(options?: InstallOptions): boolean;
 
 export interface InstallOptions {
@@ -26,6 +40,10 @@ export interface InstallOptions {
 }
 
 export function selectSubprotocol(offered: string | readonly string[] | null | undefined, options?: Pick<SessionOptions, "protocols" | "versions" | "requireProtocol">): string | undefined;
+
+type SendStreamOptions = WebTransportSendStreamOptions & {
+    waitUntilAvailable?: boolean;
+};
 
 class Session implements WebTransport {
     constructor(source: string | URL | WebSocketLike | WebSocketStreamLike, options?: SessionOptions);
@@ -95,6 +113,18 @@ export interface WebSocketLike {
     readonly url?: string;
 }
 
+interface WebSocketStreamCloseEvent {
+    closeCode: number;
+    reason: string;
+}
+
+interface WebSocketStreamCloseInfo {
+    closeCode?: number;
+    reason?: string;
+}
+
+type WebSocketStreamData = Uint8Array | string;
+
 export interface WebSocketStreamLike {
     close(closeInfo?: WebSocketStreamCloseInfo): void;
     readonly closed: Promise<WebSocketStreamCloseEvent>;
@@ -102,6 +132,15 @@ export interface WebSocketStreamLike {
     setHighWaterMark?(bytes: number): void;
     readonly url: string;
 }
+
+interface WebSocketStreamOpenEvent {
+    extensions: string;
+    protocol: string;
+    readable: ReadableStream<WebSocketStreamData>;
+    writable: WritableStream<WebSocketStreamData>;
+}
+
+type WireFormat = "qmux-00" | "qmux-01" | "qmux-02";
 
 
 ```

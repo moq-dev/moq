@@ -47,6 +47,12 @@ export { Clock }
 
 export function consume(broadcast: Watch.Broadcast): Consumed;
 
+type Consumed = {
+    user: Readonlys<UserInput>;
+    preview: Getter<Preview>;
+    close: () => void;
+};
+
 type Event_2 = Json.Window.Event<string>;
 
 export type ExtendedCatalog = Root & {
@@ -206,6 +212,10 @@ export const TRACK: {
 
 const TRACK_2 = "chat";
 
+type TrackRef = {
+    track: string;
+};
+
 export type User = {
     id?: string;
     name?: string;
@@ -221,6 +231,13 @@ export type UserFields = {
 };
 
 export function userFields(props?: UserProps): UserFields;
+
+type UserInput = {
+    id: Getter<string | undefined>;
+    name: Getter<string | undefined>;
+    avatar: Getter<string | undefined>;
+    color: Getter<string | undefined>;
+};
 
 export type UserProps = {
     id?: string | Signal<string | undefined>;
