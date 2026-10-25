@@ -41,7 +41,7 @@ Start by comparing the live tree against these baselines:
   stale one fails the build; check what the conditional ones still guard.
   `cargo shear` found no unused dependencies.
 - Rustc misses unused `pub` items. Tokenizing the tree and keeping `pub`
-  declarations whose name appears exactly once (`.scratch` script, not
+  declarations whose name appears exactly once (`.tmp` script, not
   checked in) found, outside generated bindings:
   - cfg(test) helper `track::Subscriber::assert_error` in moq-net's model,
     since removed. `AnnounceConsumer::assert_next_restarted`/`assert_next_ended`

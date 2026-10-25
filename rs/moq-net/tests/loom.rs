@@ -618,7 +618,7 @@ fn landing_wakes_a_parked_expiry(reveal: bool) {
 		head.write_frame(Timestamp::ZERO, Bytes::from_static(b"head")).unwrap();
 		let mut subscriber = track.subscribe(
 			moq_net::track::Subscription::default()
-				.with_groups(0..)
+				.with_range(0..)
 				.with_max_delay(std::time::Duration::from_millis(500)),
 		);
 		let mut held = block_on(subscriber.recv_group()).unwrap().unwrap();
