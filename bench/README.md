@@ -207,9 +207,9 @@ to the performance cores wherever the kernel lists them
 already allowed, so an outer `taskset` or cpuset still narrows it. The run prints the pinned cores beside its result and records
 them as `affinity` in the metadata. A CPU with one core type runs unpinned.
 
-BASE comparisons run paired rounds (default three, `MOQ_BENCH_RUNTIME_ROUNDS`),
+BASE comparisons run paired rounds (default three, `BENCH_RUNTIME_ROUNDS`),
 alternating base/current order. Startup remains outside the final five-second
-throughput window. `MOQ_BENCH_ARTIFACTS` chooses the evidence parent (default
+throughput window. `BENCH_ARTIFACTS` chooses the evidence parent (default
 the current worktree's `.scratch/bench`), which must be outside the repository,
 or git-ignored and outside `bench/`; each invocation retains a new run directory even on failure.
 It contains raw load/host JSONL, process diagnostics, Criterion statistics,
@@ -444,7 +444,7 @@ The latter two write `target/bench/nightly/{rust-bench,js}/report.json`. For a f
 measured Rust run using the same evidence lifecycle:
 
 ```bash
-nix develop --command env MOQ_BENCH_LABEL=pattern MOQ_BENCH_RUNS=/tmp/criterion-runs.txt just gh criterion -p moq-pattern --bench matching
+nix develop --command env BENCH_LABEL=pattern BENCH_RUNS=/tmp/criterion-runs.txt just gh criterion -p moq-pattern --bench matching
 nix develop --command just gh benchmark-report rust /tmp /tmp/rust-report.json
 ```
 
@@ -485,7 +485,7 @@ Reproduce a paired group locally against any revision; `previous-nightly`
 resolves the last scheduled Nightly's commit through `gh`:
 
 ```bash
-nix develop --command env MOQ_BENCH_BASE=previous-nightly just gh nightly rust-bench
+nix develop --command env BENCH_BASE=previous-nightly just gh nightly rust-bench
 nix develop --command just gh benchmark-report gate target/bench/nightly/rust-bench
 ```
 
