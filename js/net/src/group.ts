@@ -849,6 +849,8 @@ export class Consumer {
 	// The unread frames. Every look at the buffer goes through here, so readiness, reads and
 	// `done` agree on what is left.
 	#bufferedFrames(): Frame[] {
+		// A released shared handle reads nothing more: the queue it shares belongs to the other readers.
+		if (this.#released && !this.#owned) return [];
 		const frames = this.#state.frames.peek();
 		// A resumed copy repeats the frames an earlier one already delivered.
 		while (this.#state.start < this.#skip && frames.length > 0) {
@@ -1028,8 +1030,10 @@ export class Consumer {
 	}
 
 	/**
-	 * Release this handle, like dropping a Rust consumer: it reads what is buffered and then
-	 * ends. Never changes the group for other readers. Idempotent.
+	 * Release this handle, like dropping a Rust consumer. Never changes the group for other
+	 * readers. A track's read handle drains what it buffered and then ends; one from
+	 * {@link Producer.consume} ends at once, since its queue is shared with the producer's other
+	 * readers. Idempotent.
 	 */
 	close(): void {
 		this.#release(undefined);
