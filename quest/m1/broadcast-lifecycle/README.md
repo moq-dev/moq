@@ -47,7 +47,6 @@ timer on main at 1582fdc07d:
 ## Required
 
 - [Closing a binding broadcast ends its media](/quest/m1/broadcast-lifecycle/ffi-close.md) - moq-ffi and moq-c media handles end with a cause on close or drop, never a cause-less drop
-- [lite-03/04 close FIN](/quest/m1/broadcast-lifecycle/lite-close-fin.md) - a graceful relay close delivers pending SUBSCRIBE FINs on lite-03 and lite-04
 
 ## Related
 
@@ -55,4 +54,4 @@ timer on main at 1582fdc07d:
 
 - [moq-transport finish interop](/quest/m2/ietf-finish.md) - the interop `finish` case, whose late readers rely on retention
 - [CLI and gst flags](https://github.com/moq-dev/moq/pull/6522) - removed the opt-in `linger` booleans, leaving completion to this epic
-- [Publication owner](/quest/m1/api-audit/announce-owner.md) - adds `origin::Publication`; it must not forward a `finish` this epic deletes
+- [JS origin publications](/quest/m1/api-audit/js-publication.md) and [binding publications](/quest/m1/api-audit/binding-publication.md) - mirror `origin::Publication`, which has no `finish`

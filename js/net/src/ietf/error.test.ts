@@ -9,9 +9,6 @@ const ALL: IetfVersion[] = [
 	Version.DRAFT_16,
 	Version.DRAFT_17,
 	Version.DRAFT_18,
-	Version.DRAFT_19,
-	Version.DRAFT_20,
-	Version.DRAFT_21,
 	Version.DRAFT_22,
 ];
 
@@ -42,8 +39,8 @@ const CONDITIONS: RequestCondition[] = [
 
 /**
  * Every code we put in a rejection has to be one the negotiated draft registers for that
- * request. The table is transcribed from the drafts (draft-14 section 13.1 through draft-20
- * section 15.11.2), not derived from the mapping, so a mistake in the mapping cannot talk
+ * request. The table is transcribed from the drafts (draft-14 section 13.1 through draft-22
+ * section 16.11.2), not derived from the mapping, so a mistake in the mapping cannot talk
  * the assertion into agreeing with it.
  */
 function registered(kind: RequestKind, version: IetfVersion): number[] {
@@ -77,7 +74,7 @@ test("fetch refusal codes follow each draft registry", () => {
 		const range = version === Version.DRAFT_14 ? 0x5 : 0x11;
 		expect(toRequestCode("invalid_range", "fetch", version)).toBe(range);
 		expect(fromRequestCode(range, "fetch", version)).toBe("invalid_range");
-		const joining = version === Version.DRAFT_14 ? 0x7 : version <= Version.DRAFT_19 ? 0x32 : undefined;
+		const joining = version === Version.DRAFT_14 ? 0x7 : version <= Version.DRAFT_18 ? 0x32 : undefined;
 		expect(toRequestCode("invalid_joining_request_id", "fetch", version)).toBe(joining ?? 0);
 		if (joining !== undefined)
 			expect(fromRequestCode(joining, "fetch", version)).toBe("invalid_joining_request_id");
@@ -165,7 +162,7 @@ test("going away only exists from draft-17", () => {
 			expect(fromRequestCode(0x6, kind, version)).toBeUndefined();
 		}
 
-		for (const version of [Version.DRAFT_17, Version.DRAFT_18, Version.DRAFT_19, Version.DRAFT_20] as const) {
+		for (const version of [Version.DRAFT_17, Version.DRAFT_18, Version.DRAFT_22] as const) {
 			expect(toRequestCode("going_away", kind, version)).toBe(0x6);
 			expect(fromRequestCode(0x6, kind, version)).toBe("going_away");
 		}
@@ -207,7 +204,7 @@ test("stream reset codes are shared only where the draft agrees", () => {
 	for (const version of [Version.DRAFT_14, Version.DRAFT_15, Version.DRAFT_16, Version.DRAFT_17] as const) {
 		expect(sharedStreamCode(StreamCode.GoingAway, version)).toBe(false);
 	}
-	for (const version of [Version.DRAFT_18, Version.DRAFT_19, Version.DRAFT_20] as const) {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_22] as const) {
 		expect(sharedStreamCode(StreamCode.GoingAway, version)).toBe(true);
 	}
 
@@ -217,11 +214,11 @@ test("stream reset codes are shared only where the draft agrees", () => {
 	expect(sharedStreamCode(StreamCode.MalformedTrack, Version.DRAFT_16)).toBe(true);
 });
 
-test("INVALID_FILTER is registered from draft 19", () => {
+test("INVALID_FILTER is registered from draft 22", () => {
 	for (const version of ALL) {
-		expect(toRequestCode("invalid_filter", "subscribe", version)).toBe(version >= Version.DRAFT_19 ? 0x36 : 0);
+		expect(toRequestCode("invalid_filter", "subscribe", version)).toBe(version >= Version.DRAFT_22 ? 0x36 : 0);
 		expect(fromRequestCode(0x36, "fetch", version)).toBe(
-			version >= Version.DRAFT_19 ? "invalid_filter" : undefined,
+			version >= Version.DRAFT_22 ? "invalid_filter" : undefined,
 		);
 	}
 });

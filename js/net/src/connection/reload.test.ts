@@ -977,9 +977,9 @@ test("a watcher syncs with the server's initial set, and again after a reconnect
 	// Through the consume origin, and through the handle's own stream without one.
 	for (const [alpn, viaOrigin] of [
 		[Lite.ALPN_06, true],
-		[IetfALPN.DRAFT_19, true],
+		[IetfALPN.DRAFT_18, true],
 		[Lite.ALPN_06, false],
-		[IetfALPN.DRAFT_19, false],
+		[IetfALPN.DRAFT_18, false],
 	] as const) {
 		const original = globalThis.WebTransport;
 		const url = new URL("https://example.com/");
