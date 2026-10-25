@@ -1,0 +1,85 @@
+--- a/moxygen/moqtest/MoQTestPublisher.cpp
++++ b/moxygen/moqtest/MoQTestPublisher.cpp
+@@ -88,18 +88,25 @@ void MoQTestPublisher::cancelAll() {
+   }
+ }
+ 
+-std::shared_ptr<MoQForwarder> MoQTestPublisher::makeForwarder(
+-    const FullTrackName& ftn,
+-    uint64_t /*version*/) {
+-  auto forwarder = std::make_shared<MoQForwarder>(ftn);
++namespace {
+ 
+-  // Advertise the priority even-numbered groups are published at, so the
+-  // subgroup and datagram encodings elide it for those and write it
+-  // explicitly for the odd ones.
++// Advertise the priority even-numbered groups are published at, so the
++// subgroup and datagram encodings elide it for those and write it explicitly
++// for the odd ones.
++Extensions makeTrackProperties() {
+   Extensions trackProperties;
+   trackProperties.insertMutableExtension(
+       Extension{kPublisherPriorityExtensionType, kMoQTestPublisherPriority});
+-  forwarder->setExtensions(std::move(trackProperties));
++  return trackProperties;
++}
++
++} // namespace
++
++std::shared_ptr<MoQForwarder> MoQTestPublisher::makeForwarder(
++    const FullTrackName& ftn,
++    uint64_t /*version*/) {
++  auto forwarder = std::make_shared<MoQForwarder>(ftn);
++  forwarder->setExtensions(makeTrackProperties());
+ 
+   auto cb = std::make_shared<TrackCallback>();
+   cb->publisher = shared_from_this();
+@@ -121,6 +128,34 @@ void MoQTestPublisher::retireTrack(
+   tracks_.erase(it);
+ }
+ 
++folly::coro::Task<Publisher::TrackStatusResult> MoQTestPublisher::trackStatus(
++    TrackStatus trackStatus) {
++  XLOG(INFO) << "Received Track Status";
++
++  auto res = moxygen::convertTrackNamespaceToMoqTestParam(
++      &trackStatus.fullTrackName.trackNamespace);
++  if (res.hasError()) {
++    co_return folly::makeUnexpected(
++        TrackStatusError{
++            trackStatus.requestID,
++            TrackStatusErrorCode::NOT_SUPPORTED,
++            "Invalid Parameters"});
++  }
++
++  TrackStatusOk ok;
++  ok.requestID = trackStatus.requestID;
++  auto trackIt = tracks_.find(trackStatus.fullTrackName);
++  if (trackIt == tracks_.end()) {
++    ok.trackProperties = makeTrackProperties();
++    co_return ok;
++  }
++  const auto& forwarder = trackIt->second.forwarder;
++  ok.groupOrder = forwarder->groupOrder();
++  ok.largest = forwarder->largest();
++  ok.trackProperties = forwarder->extensions();
++  co_return ok;
++}
++
+ folly::coro::Task<MoQSession::SubscribeResult> MoQTestPublisher::subscribe(
+     SubscribeRequest sub,
+     std::shared_ptr<TrackConsumer> callback) {
+--- a/moxygen/moqtest/MoQTestPublisher.h
++++ b/moxygen/moqtest/MoQTestPublisher.h
+@@ -71,6 +71,11 @@ class MoQTestPublisher : public Publisher,
+   // ask for data -- otherwise it would hold the session open forever.
+   void cancelAll();
+ 
++  // Answers with what a SUBSCRIBE_OK for the track would carry, without
++  // starting it.  A track that is not being generated has no largest location.
++  virtual folly::coro::Task<TrackStatusResult> trackStatus(
++      TrackStatus trackStatus) override;
++
+   // Subscribing Methods.  Subscribers to the same track share one forwarder
+   // and one generator, so a late subscriber joins the track in progress.
+   virtual folly::coro::Task<SubscribeResult> subscribe(

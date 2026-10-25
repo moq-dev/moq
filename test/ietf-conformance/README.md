@@ -6,7 +6,8 @@ builds the Moxygen revision and matching Meta dependencies pinned in
 `conformance_test.sh` through this checkout's relay. This is separate from the
 published-package smoke matrix.
 
-Sections 1-7 run on both shared drafts, 16 and 18, through one relay. Each cell
+Sections 1-7 run on both shared drafts, 16 and 18, through one relay and
+through a two-relay cluster joined by native lite-07. Each cell
 runs 29 upstream SUBSCRIBE cases. A direct-origin control runs the same cases
 once per draft, separating suite or pin failures from relay behavior. FETCH is
 skipped using upstream's `SKIP_FETCH`; section 8 uses PUBLISH and is outside the
@@ -60,9 +61,10 @@ Measured over six consecutive runs:
 | 16 | 29 pass | 29 pass |
 | 18 | 29 pass | 29 pass |
 
-A two-relay cell is not run yet. The edge needs metadata from TRACK\_STATUS
-before subscribing, and the pinned MoQTestPublisher inherits NOT\_SUPPORTED for
-that request, so every case fails before media. The relay preserves that
-refusal, rather than widening query-only demand into SUBSCRIBE. The
-[passthrough quest](../../quest/m1/ietf-extension/README.md) tracks adding the
-cell back once a pinned publisher answers it.
+The two-relay cells need the origin to answer TRACK\_STATUS, which the edge's
+metadata query becomes upstream. The pinned MoQTestPublisher inherits
+NOT\_SUPPORTED for it, so
+[`nix/moxygen-track-status.patch`](../../nix/moxygen-track-status.patch) answers
+with what its SUBSCRIBE\_OK carries until the upstream fix is pinned. The
+[passthrough quest](../../quest/m1/ietf-extension/README.md) tracks the
+cluster failures that remain.

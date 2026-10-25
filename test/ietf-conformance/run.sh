@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Pinned upstream conformance under the relay profile, subgroup zero, one relay.
+# Pinned upstream conformance under the relay profile, subgroup zero, through one
+# relay and through a two-relay cluster.
 set -euo pipefail
 
 if [[ "${GITHUB_ACTIONS:-}" != true && "${LOCAL_SUPERVISED:-}" != 1 ]]; then
@@ -37,7 +38,7 @@ openssl req -config "$HARNESS_RUN/openssl.cnf" -x509 -newkey rsa:2048 -nodes \
     >"$HARNESS_RUN/certificate.log" 2>&1
 
 start_relay() {
-    local label="$1" version="$2"
+    local label="$1" version="$2" seed="${3:-}"
     harness_port "$label"
     local port="$HARNESS_PORT" config="$HARNESS_RUN/$label.toml"
     cat >"$config" <<EOF
@@ -45,7 +46,7 @@ start_relay() {
 level = "info"
 [listen]
 bind = "127.0.0.1:$port"
-version = ["moq-transport-$version"]
+version = ["moq-transport-$version", "moq-lite-07-wip"]
 tls.cert = ["$HARNESS_RUN/cert.pem"]
 tls.key = ["$HARNESS_RUN/key.pem"]
 [web.http]
@@ -53,6 +54,16 @@ listen = "127.0.0.1:$port"
 [auth]
 public = "**"
 EOF
+    if [[ -n "$seed" ]]; then
+        cat >>"$config" <<EOF
+[cluster]
+connect = ["https://127.0.0.1:$seed/"]
+[connect]
+version = ["moq-lite-07-wip"]
+[connect.tls]
+root = ["$HARNESS_RUN/cert.pem"]
+EOF
+    fi
     harness_spawn "$label" "$HARNESS_RUN/$label.log" "$relay" "$config"
     harness_ready "http://127.0.0.1:$port/certificate.sha256" 30 "$HARNESS_PID"
     harness_endpoint "$label" "http://127.0.0.1:$port"
@@ -69,7 +80,7 @@ namespace_ready() {
     local deadline=$((SECONDS + 30))
     while ((SECONDS < deadline)); do
         publisher_healthy || return 1
-        if curl -sf --max-time 1 "http://127.0.0.1:$relay_port/announced" | grep -qx 'moq-test-00'; then
+        if curl -sf --max-time 1 "http://127.0.0.1:$egress/announced" | grep -qx 'moq-test-00'; then
             return 0
         fi
         sleep 0.05
@@ -103,29 +114,39 @@ run_suite() {
 
 # The pinned MoQVersions.h supports drafts 16 and 18; this relay supports both.
 failed=0
-# A two-relay cell waits on a test publisher that answers TRACK_STATUS; see the
-# passthrough quest.
 for version in 16 18; do
-    label="single-$version"
-    start_relay "$label-origin" "$version"
-    relay_port="$HARNESS_PORT"
-    relay_pid="$HARNESS_PID"
-    harness_port "$label-publisher"
-    publisher_port="$HARNESS_PORT"
-    harness_spawn "$label-publisher" "$HARNESS_RUN/$label-publisher.log" \
-        "$package/bin/moqtest_server" --port="$HARNESS_PORT" \
-        --cert="$HARNESS_RUN/cert.pem" --key="$HARNESS_RUN/key.pem" \
-        --relay_url="https://127.0.0.1:$relay_port/" --versions="$version" --transport=quic --logging=INFO
-    publisher_pid="$HARNESS_PID"
-    namespace_ready
-    # A direct-origin control distinguishes suite/pin failures from relay behavior.
-    run_suite "reference-$version" "https://127.0.0.1:$publisher_port/test"
-    run_suite "$label" "https://127.0.0.1:$relay_port/"
-    harness_reap "$publisher_pid"
-    harness_reap "$relay_pid"
+    for topology in single cluster; do
+        label="$topology-$version"
+        start_relay "$label-origin" "$version"
+        ingress="$HARNESS_PORT"
+        ingress_pid="$HARNESS_PID"
+        egress="$ingress"
+        egress_pid=""
+        if [[ "$topology" == cluster ]]; then
+            start_relay "$label-edge" "$version" "$ingress"
+            egress="$HARNESS_PORT"
+            egress_pid="$HARNESS_PID"
+        fi
+        harness_port "$label-publisher"
+        publisher_port="$HARNESS_PORT"
+        harness_spawn "$label-publisher" "$HARNESS_RUN/$label-publisher.log" \
+            "$package/bin/moqtest_server" --port="$HARNESS_PORT" \
+            --cert="$HARNESS_RUN/cert.pem" --key="$HARNESS_RUN/key.pem" \
+            --relay_url="https://127.0.0.1:$ingress/" --versions="$version" --transport=quic --logging=INFO
+        publisher_pid="$HARNESS_PID"
+        namespace_ready
+        # A direct-origin control distinguishes suite/pin failures from relay behavior.
+        if [[ "$topology" == single ]]; then
+            run_suite "reference-$version" "https://127.0.0.1:$publisher_port/test"
+        fi
+        run_suite "$label" "https://127.0.0.1:$egress/"
+        harness_reap "$publisher_pid"
+        [[ -z "$egress_pid" ]] || harness_reap "$egress_pid"
+        harness_reap "$ingress_pid"
+    done
 done
 if ((failed != 0)); then
     echo "Moxygen conformance failed; see each cell's client and endpoint logs" >&2
     exit 1
 fi
-echo "Moxygen conformance: all shared drafts passed through the relay"
+echo "Moxygen conformance: all shared drafts and both topologies passed"
