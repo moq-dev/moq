@@ -139,7 +139,7 @@ impl<R: Incoming> Connection<R> {
 		let lease = match lease.preparing(request.auth(), request.requests(), request.role()) {
 			Ok(lease) => lease,
 			Err(err) => {
-				request.reject(http::StatusCode::UNAUTHORIZED).await;
+				request.reject(moq_net::SessionError::from(&err)).await;
 				return Err(err.into());
 			}
 		};
