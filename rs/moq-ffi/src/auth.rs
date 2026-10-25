@@ -25,7 +25,7 @@ impl From<moq_net::auth::Grant> for MoqGrant {
 			publish: patterns(&grant.publish),
 			subscribe: patterns(&grant.subscribe),
 			expires_us: grant.expires.map(|expires| {
-				let remaining = expires.saturating_duration_since(moq_net::time::now());
+				let remaining = expires.saturating_duration_since(moq_net::time::Instant::now());
 				u64::try_from(remaining.as_micros()).unwrap_or(u64::MAX)
 			}),
 		}
@@ -34,14 +34,13 @@ impl From<moq_net::auth::Grant> for MoqGrant {
 
 /// Present `token` on every session of `handle`, resolving once a peer accepts it.
 async fn add(handle: moq_net::auth::Handle, token: String) -> Result<moq_net::auth::Auth, MoqError> {
-	let auth = handle.add(token).await?;
-	// A token the peer accepted carries a grant until it ends. Without AUTH, moq-transport
-	// accepts one at once for the requests that name it, but nothing here can name one, so it
-	// would never be sent. One already revoked is left for `closed` to report.
-	if auth.grant().peek().is_none() && poll_now(auth.closed()).is_pending() {
-		return Err(MoqError::Unsupported);
+	// Without AUTH, moq-transport accepts a token only for the requests that name it, but
+	// nothing here can name one, so it would never be sent. The answer says how the peer
+	// accepted it, which a grant missing after its session drops cannot.
+	match handle.add(token).await? {
+		(auth, moq_net::auth::Answer::Granted) => Ok(auth),
+		(_, moq_net::auth::Answer::Requests) => Err(MoqError::Unsupported),
 	}
-	Ok(auth)
 }
 
 /// Poll `future` once without waiting.
@@ -95,7 +94,8 @@ impl MoqAuth {
 	/// Calls on one handle share what it last reported; an independent watcher takes its own
 	/// handle from [`MoqSession::auth`](crate::session::MoqSession::auth).
 	///
-	/// Errors once nothing will change it again, because the session ended.
+	/// Errors once nothing will change it again: a client's connection or a server's session
+	/// ended. A reconnect is not an end.
 	pub async fn grant_changed(&self) -> Result<Option<MoqGrant>, MoqError> {
 		self.changed
 			.run(|mut watch| async move { Ok(watch.changed().await?.map(Into::into)) })
@@ -146,7 +146,8 @@ impl MoqAuthToken {
 	}
 
 	/// Wait for the token to end: `Ok` when the peer closed it without an error, the peer's
-	/// revocation as [`MoqError::Protocol`], or the session's close.
+	/// revocation as [`MoqError::Protocol`], or the end of a client's connection or a server's
+	/// session as an error. A reconnect does not end it.
 	pub async fn closed(&self) -> Result<(), MoqError> {
 		self.token
 			.run(|token| async move {
@@ -163,5 +164,93 @@ impl MoqAuthToken {
 	/// Terminal: the token is withdrawn here, not when the handle is.
 	pub fn cancel(&self) {
 		self.token.cancel();
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::time::Duration;
+
+	use crate::session::{MoqClient, MoqClientConfig};
+
+	const TIMEOUT: Duration = Duration::from_secs(10);
+
+	/// Wait until `auth` reports `want`, following its changes.
+	async fn await_grant(auth: &super::MoqAuth, want: Option<Vec<String>>) {
+		let publish = || auth.grant().map(|grant| grant.publish);
+		tokio::time::timeout(TIMEOUT, async {
+			while publish() != want {
+				auth.grant_changed().await.expect("grant watch ended");
+			}
+		})
+		.await
+		.unwrap_or_else(|_| panic!("timed out waiting for {want:?}, last {:?}", publish()));
+	}
+
+	/// A token the peer granted is not refused as request-only when its session drops before
+	/// `add` reads the answer, though its grant then reads `None`.
+	#[tokio::test]
+	async fn a_grant_survives_its_session_dropping_before_add_returns() {
+		let version: moq_net::Version = "moq-lite-07-wip".parse().unwrap();
+		let mut config = moq_tokio::listen::Config::default();
+		config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+		config.version = vec![version];
+		let mut listener = config.init(Default::default()).unwrap().listen().await.unwrap();
+		let addr = listener.tcp_local_addr().unwrap();
+
+		let (drop_tx, drop_rx) = tokio::sync::oneshot::channel::<()>();
+		let serving = tokio::spawn(async move {
+			let mut request = listener.accept().await.expect("accept");
+			// Nothing redials: the client stays disconnected once the session drops.
+			drop(listener);
+			let mut requests = request.requests();
+			let session = request.ok().await.unwrap();
+			let mut issued = Vec::new();
+			for _ in 0..2 {
+				let request = requests.next().await.expect("token");
+				let pattern = match request.token().as_ref() {
+					b"" => "setup/**",
+					_ => "extra/**",
+				};
+				issued.push(request.accept(moq_net::auth::Grant {
+					publish: pattern.parse::<moq_net::Pattern>().unwrap().into(),
+					..Default::default()
+				}));
+			}
+			let _ = drop_rx.await;
+			drop((session, issued, requests));
+		});
+
+		let client = MoqClient::new(MoqClientConfig {
+			versions: vec!["moq-lite-07-wip".into()],
+			bind: Some("127.0.0.1:0".into()),
+			..Default::default()
+		})
+		.unwrap();
+		let session = tokio::time::timeout(TIMEOUT, client.connect(format!("tcp://{addr}")))
+			.await
+			.expect("connect timed out")
+			.unwrap();
+		let auth = session.auth();
+		await_grant(&auth, Some(vec!["setup/**".into()])).await;
+
+		// Presented and granted, but not read until the session is gone.
+		let mut adding = Box::pin(super::add(auth.handle.clone(), "extra".into()));
+		assert!(super::poll_now(adding.as_mut()).is_pending());
+		await_grant(&auth, Some(vec!["extra/**".into(), "setup/**".into()])).await;
+		drop_tx.send(()).unwrap();
+		await_grant(&auth, None).await;
+
+		let std::task::Poll::Ready(added) = super::poll_now(adding.as_mut()) else {
+			panic!("add did not resolve");
+		};
+		let token = added.expect("a granted token refused after its session dropped");
+		assert_eq!(token.grant().peek(), None, "no session is live");
+
+		session.cancel(0);
+		tokio::time::timeout(TIMEOUT, serving)
+			.await
+			.expect("server ended")
+			.unwrap();
 	}
 }

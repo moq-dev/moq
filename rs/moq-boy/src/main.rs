@@ -25,11 +25,12 @@
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
+use moq_clock::Instant;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 #[cfg(feature = "jemalloc")]
 #[global_allocator]
@@ -425,6 +426,10 @@ fn run_emulator(
 		// Wait for next frame.
 		let now = Instant::now();
 		if now < next_frame {
+			#[expect(
+				clippy::disallowed_methods,
+				reason = "the emulator thread runs outside any runtime, so it blocks on the host clock"
+			)]
 			std::thread::sleep(next_frame - now);
 		}
 		next_frame += frame_duration;
@@ -477,10 +482,6 @@ async fn main() -> Result<()> {
 	let config = Config::parse();
 	config.log.init()?;
 	config.check_deprecated()?;
-	// A 160x144 frame is below every hardware encoder's minimum, so OpenH264 is the only one.
-	if !cfg!(feature = "openh264") {
-		anyhow::bail!("built without the `openh264` feature: cargo install moq-boy --features openh264");
-	}
 
 	#[cfg(feature = "jemalloc")]
 	let jemalloc = moq_tokio::jemalloc::run();

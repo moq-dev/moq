@@ -2,6 +2,7 @@ use crate::error::KeyError;
 use crate::{Claims, Key, KeyOperation};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::Arc;
 
 /// JWK Set to spec <https://datatracker.ietf.org/doc/html/rfc7517#section-5>
@@ -43,13 +44,16 @@ impl<'de> Deserialize<'de> for KeySet {
 	}
 }
 
-impl KeySet {
+impl FromStr for KeySet {
+	type Err = crate::Error;
+
 	/// Parse a set from a JSON string.
-	#[allow(clippy::should_implement_trait)]
-	pub fn from_str(s: &str) -> crate::Result<Self> {
+	fn from_str(s: &str) -> crate::Result<Self> {
 		Ok(serde_json::from_str(s)?)
 	}
+}
 
+impl KeySet {
 	/// Load a set from a JSON file.
 	pub fn from_file<P: AsRef<Path>>(path: P) -> crate::Result<Self> {
 		let json = std::fs::read_to_string(&path)?;
@@ -133,7 +137,6 @@ impl KeySet {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use super::*;
 
@@ -141,15 +144,16 @@ mod tests {
 		texts.iter().map(|text| text.parse().unwrap()).collect()
 	}
 	use crate::Algorithm;
-	use std::time::{Duration, SystemTime};
+	use moq_clock::Wall;
+	use std::time::Duration;
 
 	fn create_test_claims() -> Claims {
 		Claims {
 			root: "test-path".to_string(),
-			publish: patterns(&["test-pub/**"]).into(),
-			subscribe: patterns(&["test-sub/**"]).into(),
-			expires: Some(SystemTime::now() + Duration::from_secs(3600)),
-			issued: Some(SystemTime::now()),
+			publish: patterns(&["test-pub/**"]),
+			subscribe: patterns(&["test-sub/**"]),
+			expires: Some(moq_clock::wall() + Duration::from_secs(3600)),
+			issued: Some(moq_clock::wall()),
 			not_before: None,
 		}
 	}
@@ -366,8 +370,8 @@ mod tests {
 		// Use a random-ish name to avoid collisions
 		let filename = format!(
 			"test_keyset_{}.json",
-			SystemTime::now()
-				.duration_since(SystemTime::UNIX_EPOCH)
+			moq_clock::wall()
+				.checked_duration_since(Wall::UNIX_EPOCH)
 				.unwrap()
 				.as_nanos()
 		);
@@ -388,8 +392,8 @@ mod tests {
 	fn test_file_io_permissions() {
 		use std::os::unix::fs::PermissionsExt;
 
-		let unique = SystemTime::now()
-			.duration_since(SystemTime::UNIX_EPOCH)
+		let unique = moq_clock::wall()
+			.checked_duration_since(Wall::UNIX_EPOCH)
 			.unwrap()
 			.as_nanos();
 		let path = std::env::temp_dir().join(format!("test_keyset_perms_{unique}.json"));

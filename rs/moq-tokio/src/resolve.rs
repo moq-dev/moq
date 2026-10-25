@@ -329,7 +329,7 @@ impl Candidates {
 				// stagger between attempts dwarfs this.
 				if self.count == 0 && !self.delayed && self.full.pending() {
 					self.delayed = true;
-					let _ = tokio::time::timeout(self.delay, self.answer_full()).await;
+					let _ = moq_clock::timeout(self.delay, self.answer_full()).await;
 					continue;
 				}
 
@@ -588,7 +588,7 @@ impl Query {
 
 		Self {
 			call: Some(tokio::spawn(async move {
-				tokio::time::sleep(delay).await;
+				moq_clock::sleep(delay).await;
 				Ok(addrs)
 			})),
 			..Default::default()
@@ -597,6 +597,11 @@ impl Query {
 }
 
 #[cfg(test)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests {
 	use super::*;
 

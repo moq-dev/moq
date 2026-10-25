@@ -2,19 +2,22 @@
 
 ## Goal
 
-The `moq-clock` sim drives two `moq-quic` endpoints over in-memory datagrams
-with configurable latency, loss, reordering, and bandwidth, so QUIC behavior
-(BBR, reliable reset, stream deadlines, the transport race) and MoQ over
-real QUIC are tested deterministically with no sockets.
+The `moq-clock` sim drives MoQ sessions and the relay over `moq-quic`, with
+configurable latency, loss, reordering, and bandwidth, so MoQ over real QUIC
+(the transport race, relay hops, recovery) is tested deterministically with
+no sockets.
 
 ## Plan
 
 The in-memory session and the relay connection over it
-(`moq_relay::Accepted`) landed first; simulated UDP follows.
-`moq-quic` already takes `moq_clock::Instant`, so this is a datagram link plus a
-driver. Start from moq-shaper's in-memory `UdpSocket` (`rs/moq-shaper/src/mem.rs`).
-BBR's controller-level `Sim` in `bbr3/mod.rs` stays separate unless this
-replaces it cleanly.
+(`moq_relay::Accepted`) landed first. `moq-quic`'s own tests already run two
+endpoints on a seeded, impaired sim (`Pair` and `Link` in
+`rs/moq-quic/src/tests/{util,sim}.rs`, from
+[#5780](https://github.com/moq-dev/moq/pull/5780) and
+[#5989](https://github.com/moq-dev/moq/pull/5989)), so QUIC-level behavior is
+covered there. Decided 2026-10-22 (maintainer): rescoped to MoQ sessions and
+the relay over that sim, reusing `Pair` and `Link` rather than starting from
+moq-shaper's in-memory `UdpSocket`.
 
 Keep random loss for recovery correctness. Any acceptance or performance
 consumer uses a rate below its media bitrate behind a deep but finite queue,

@@ -71,11 +71,11 @@ impl Address for Peer {
 	type Listener = Listener;
 }
 
-/// Lets a handler extract the peer address as `ConnectInfo<Peer>`, so the auth
-/// request can report where a WebSocket or HTTP session came from.
-impl axum::extract::connect_info::Connected<Peer> for Peer {
+/// Expose the accepted socket through Axum's standard extractor, including to
+/// routes supplied by an embedder.
+impl axum::extract::connect_info::Connected<Peer> for SocketAddr {
 	fn connect_info(target: Peer) -> Self {
-		target
+		target.0
 	}
 }
 
@@ -171,6 +171,12 @@ impl AddrListener<Accepted, Peer> for Listener {
 		loop {
 			match self.inner.accept().await {
 				Ok((stream, peer)) => {
+					// WebSocket qmux already batches records, so Nagle would only hold a
+					// batch's tail for the peer's delayed ACK. Only a reset socket refuses it.
+					if let Err(err) = stream.set_nodelay(true) {
+						tracing::debug!(%peer, %err, "dropped a connection that refused TCP_NODELAY");
+						continue;
+					}
 					// Enter before returning the socket: axum_server spawns the TLS
 					// acceptor, and waiting for that task would leave an uncounted gap.
 					let admission = self
@@ -183,7 +189,7 @@ impl AddrListener<Accepted, Peer> for Listener {
 				}
 				Err(err) => {
 					if let Some(delay) = self.health.failed(&err) {
-						tokio::time::sleep(delay).await;
+						moq_clock::sleep(delay).await;
 					}
 				}
 			}
@@ -212,10 +218,11 @@ mod tests {
 		assert_eq!(listener.get_local_addr().unwrap().0, addr);
 
 		let connect = tokio::spawn(async move { TcpStream::connect(addr).await.unwrap() });
-		let (_stream, peer) = listener.accept_stream().await.unwrap();
+		let (accepted, peer) = listener.accept_stream().await.unwrap();
 		let client = connect.await.unwrap();
 
 		assert_eq!(peer.0, client.local_addr().unwrap());
+		assert!(accepted.stream.nodelay().unwrap());
 		for &failure in Failure::ALL {
 			assert_eq!(health.failures(failure), 0, "{failure} on a healthy accept");
 		}

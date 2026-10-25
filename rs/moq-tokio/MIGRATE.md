@@ -4,12 +4,17 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### `Connection::auth()` returns the `moq_net` handle (#6109)
+### The connection receive window is 128 MiB, and has a floor (#5878)
 
-`Connection::auth()` returns a `moq_net::auth::Handle` that every session of the connection is built on, and the `connection::auth` module (`Handle`, `Auth`, `Watch`) is removed.
-Replace `moq_tokio::connection::auth::{Handle, Auth, Watch}` with `moq_net::auth::{Handle, Auth, Watch}`.
-A token it returns can now be named by a `Route`, and keeps riding that route's announcements on every reconnect.
-Its grant reads `None` while disconnected. A transiently refused token retries on a fixed backoff of 1s doubling to 30s rather than the reconnect `backoff`.
+`quic::DEFAULT_RECEIVE_WINDOW` is 128 MiB instead of 64 MiB, since incomplete messages now hold connection credit until complete.
+A `quic.receive_window` (`--quic-receive-window`, `[quic] receive_window`) below `moq_net::transport::MIN_RECEIVE_WINDOW`, the 64 MiB announcement cap plus 16 bytes, fails with `Error::ReceiveWindowTooSmall`.
+Raise an explicit window to at least that, or unset it.
+
+### qmux sessions are qmux 0.7 (#6231)
+
+The WebSocket, TCP, TLS, and Unix socket transports run on [qmux 0.7](https://github.com/moq-dev/moq/blob/main/rs/qmux/MIGRATE.md), which implements moq-net's poll traits directly instead of going through `web_transport_trait`.
+Code that holds a `qmux::Session` from moq-tokio, such as one from the WebSocket listener's `accept`, follows qmux's migration guide.
+A WebSocket client must offer a QMux subprotocol: `websocket::accept` refuses an upgrade without one, and the legacy `webtransport` format is gone.
 
 ### MoQ sessions need the `net` feature (#6132)
 

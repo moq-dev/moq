@@ -1,17 +1,18 @@
 use std::{
-    collections::{VecDeque, hash_map},
+    collections::{BTreeSet, VecDeque, hash_map},
     convert::TryFrom,
     mem,
     ops::Range,
 };
 
 use bytes::BufMut;
-use rustc_hash::FxHashMap;
+use indexmap::IndexSet;
+use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use tracing::{debug, trace};
 
 use super::{
-    Credit, Next, Recv, Retransmits, Schedule, Send, SendState, ShouldTransmit, StreamEvent,
-    StreamHalf, ThinRetransmits,
+    Next, Recv, Retransmits, Schedule, Send, SendState, ShouldTransmit, StreamEvent, StreamHalf,
+    ThinRetransmits, lease::Rank,
 };
 use crate::{
     Dir, MAX_STREAM_COUNT, Side, StreamId, TransportError, VarInt,
@@ -54,6 +55,12 @@ impl StreamRecv {
         match self {
             Self::Open(r) => Some(r),
             _ => None,
+        }
+    }
+
+    fn inner_mut(&mut self) -> &mut Recv {
+        match self {
+            Self::Free(r) | Self::Open(r) => r,
         }
     }
 
@@ -121,25 +128,41 @@ pub(crate) struct StreamsState {
     pub(super) events: VecDeque<StreamEvent>,
     /// Streams blocked on connection-level flow control or stream window space
     ///
-    /// Streams are only added to this list when a write fails.
-    pub(super) connection_blocked: Vec<StreamId>,
+    /// Deduplicated waiters with constant-time removal. Cancellation may change wake order.
+    pub(super) connection_blocked: IndexSet<StreamId, FxBuildHasher>,
     /// Connection-level flow control budget dictated by the peer
     pub(super) max_data: u64,
     /// The initial receive window
-    receive_window: u64,
+    pub(super) receive_window: u64,
     /// Limit on incoming data, which is transmitted through `MAX_DATA` frames
-    local_max_data: u64,
+    pub(super) local_max_data: u64,
     /// The last value of `MAX_DATA` which had been queued for transmission in
     /// an outgoing `MAX_DATA` frame
     sent_max_data: VarInt,
     /// Sum of current offsets of all send streams.
     pub(super) data_sent: u64,
     /// Sum of end offsets of all receive streams. Includes gaps, so it's an upper bound.
-    data_recvd: u64,
-    /// Bytes read with [`Chunks::hold`](super::Chunks::hold) whose connection credit the
-    /// application has not released yet
+    pub(super) data_recvd: u64,
+    /// Bytes leased from receive streams, taken or not, whose connection credit the application
+    /// has not released yet
     pub(super) held: u64,
-    /// Which connection [`Credit`]s handed out here belong to
+    /// Leased receive streams that may hold connection credit, in eviction order: every such
+    /// stream, and possibly some that no longer do, dropped as the stuck pass reaches them
+    pub(super) ranks: BTreeSet<Rank>,
+    /// Streams evicted to free a stuck receive window, ever
+    pub(super) evicted: u64,
+    /// The most credit the peer has had spent at once
+    pub(super) peak_spent: u64,
+    /// Receive streams whose reader may progress without new credit, which holds eviction off:
+    /// every such stream, and possibly some that no longer are, trimmed by the stuck pass
+    pub(super) unlooked: FxHashSet<StreamId>,
+    /// Credit still held by evicted readers that have not stopped their streams, which holds
+    /// further eviction off
+    pub(super) evicted_held: u64,
+    /// Streams the stuck pass has looked at, to prove it stays cheap
+    #[cfg(test)]
+    pub(super) scans: usize,
+    /// Which connection the send groups handed out here belong to
     pub(super) tag: ConnectionTag,
     /// Total quantity of outgoing data retained in send buffers, including acknowledged data
     pub(super) buffered_data: u64,
@@ -197,7 +220,7 @@ impl StreamsState {
             send_streams: 0,
             pending: Schedule::new(),
             events: VecDeque::new(),
-            connection_blocked: Vec::new(),
+            connection_blocked: IndexSet::default(),
             max_data: 0,
             receive_window: receive_window.into(),
             local_max_data: receive_window.into(),
@@ -205,6 +228,13 @@ impl StreamsState {
             data_sent: 0,
             data_recvd: 0,
             held: 0,
+            evicted: 0,
+            peak_spent: 0,
+            unlooked: FxHashSet::default(),
+            evicted_held: 0,
+            #[cfg(test)]
+            scans: 0,
+            ranks: BTreeSet::new(),
             tag: ConnectionTag::next(),
             buffered_data: 0,
             send_window,
@@ -279,7 +309,10 @@ impl StreamsState {
                     self.pending.leave(&mut stream.slot);
                 }
                 if let Dir::Bi = dir {
+                    // A rejected stream never received anything, so its lease holds no credit
+                    // and it has no rank.
                     self.recv.remove(&id).unwrap();
+                    self.unlooked.remove(&id);
                 }
             }
             self.next[dir as usize] = 0;
@@ -329,23 +362,57 @@ impl StreamsState {
 
         let (new_bytes, closed) =
             rs.ingest(frame, payload_len, self.data_recvd, self.local_max_data)?;
-        self.data_recvd = self.data_recvd.saturating_add(new_bytes);
+        let (stopped, evicted) = (rs.stopped, rs.lease.evicted);
+        let rank = (!stopped).then(|| rs.lease.arrived(id)).flatten();
+        self.spend(new_bytes);
 
-        if !rs.stopped {
+        let transmit = if !stopped {
             self.events.push_back(StreamEvent::Readable { id });
+            self.ranks.extend(rank);
+            self.unlooked.insert(id);
             // Credit released while the peer still had room may not have been worth a frame
             // then; it is now that the peer is about to block.
-            return Ok(ShouldTransmit(self.max_data_due()));
-        }
+            ShouldTransmit(self.max_data_due())
+        } else {
+            // Stopped streams become closed instantly on FIN, so check whether we need to clean up.
+            // An evicted one waits for the application's stop, which still holds its lease.
+            if closed && !evicted {
+                let rs = self.recv.remove(&id).flatten().unwrap();
+                // Its stop already discarded the lease, so this returns no credit.
+                let _ = self.stream_recv_freed(id, rs);
+            }
 
-        // Stopped streams become closed instantly on FIN, so check whether we need to clean up
-        if closed {
-            let rs = self.recv.remove(&id).flatten().unwrap();
-            self.stream_recv_freed(id, rs);
+            // We don't buffer data on stopped streams, so issue flow control credit immediately
+            self.add_read_credits(new_bytes)
+        };
+        if new_bytes == 0 {
+            // Neither spent nor returned credit, so a stuck window stays as it was, and a peer at
+            // its limit cannot make every repeated frame pay for a scan of every stream.
+            return Ok(transmit);
         }
+        Ok(self.evict_after_arrival(transmit))
+    }
 
-        // We don't buffer data on stopped streams, so issue flow control credit immediately
-        Ok(self.add_read_credits(new_bytes))
+    /// Count `new_bytes` of connection credit the peer spent.
+    fn spend(&mut self, new_bytes: u64) {
+        self.data_recvd = self.data_recvd.saturating_add(new_bytes);
+        // Credit only returns between arrivals, so an arrival is when the most is spent. A shrink
+        // leaves the advertised limit in place as debt, so that credit is still outstanding.
+        let spent = self
+            .data_recvd
+            .saturating_add(self.receive_window)
+            .saturating_add(self.receive_window_shrink_debt)
+            .saturating_sub(self.local_max_data);
+        self.peak_spent = self.peak_spent.max(spent);
+    }
+
+    /// Rerun the stuck check after an arrival, which may spend the last of the window or return
+    /// credit that only pays shrink debt, adding any `MAX_DATA` it frees to `transmit`.
+    fn evict_after_arrival(&mut self, transmit: ShouldTransmit) -> ShouldTransmit {
+        let evicted = self.evict_if_stuck();
+        ShouldTransmit(
+            transmit.should_transmit() || evicted.is_some_and(ShouldTransmit::should_transmit),
+        )
     }
 
     /// Process incoming RESET_STREAM frame
@@ -394,23 +461,34 @@ impl StreamsState {
             // Redundant reset
             return Ok(ShouldTransmit(false));
         };
-        self.data_recvd = self.data_recvd.saturating_add(new_bytes);
-        let credit = if rs.stopped {
+        let (stopped, evicted) = (rs.stopped, rs.lease.evicted);
+        let rank = (!stopped).then(|| rs.lease.arrived(id)).flatten();
+        self.spend(new_bytes);
+        let credit = if stopped {
             // Stopped streams should be disposed immediately on reset, and have already returned
-            // read credits up to their highest offset.
-            let rs = self.recv.remove(&id).flatten().unwrap();
-            self.stream_recv_freed(id, rs);
+            // read credits up to their highest offset. An evicted one waits for its stop.
+            if !evicted {
+                let rs = self.recv.remove(&id).flatten().unwrap();
+                // Its stop already discarded the lease, so this returns no credit.
+                let _ = self.stream_recv_freed(id, rs);
+            }
             new_bytes
         } else {
             self.events.push_back(StreamEvent::Readable { id });
+            self.ranks.extend(rank);
+            self.unlooked.insert(id);
             freed
         };
 
         // Update connection-level flow control
-        Ok(match credit {
+        let transmit = match credit {
             0 => ShouldTransmit(false),
             credit => self.add_read_credits(credit),
-        })
+        };
+        if new_bytes == 0 && credit == 0 {
+            return Ok(transmit);
+        }
+        Ok(self.evict_after_arrival(transmit))
     }
 
     /// Process incoming `STOP_SENDING` frame
@@ -434,6 +512,7 @@ impl StreamsState {
         };
         let stream = stream_opt.get_or_insert_with(|| Send::new(max_send_data));
 
+        self.connection_blocked.swap_remove(&id);
         if stream.try_stop(error_code) {
             self.events
                 .push_back(StreamEvent::Stopped { id, error_code });
@@ -478,6 +557,26 @@ impl StreamsState {
     /// stream, or a queued datagram whose frame fits
     pub(crate) fn can_send_frames(&self, space: usize) -> bool {
         self.pending.can_send(space)
+    }
+
+    /// The offset just past the data received so far on `id`
+    ///
+    /// `None` if `id` cannot receive data now, such as a closed stream or our own
+    /// unidirectional one. On an ordered transport, data at any other offset is a protocol
+    /// violation.
+    #[cfg(feature = "mux")]
+    pub(crate) fn rx_offset(&self, id: StreamId) -> Option<u64> {
+        // A peer stream not opened yet starts at offset 0 too
+        if id.initiator() != self.side && id.index() >= self.next_remote[id.dir() as usize] {
+            return Some(0);
+        }
+        let recv = self.recv.get(&id)?;
+        // Present but unopened: the peer may send on it, starting at offset 0
+        Some(
+            recv.as_ref()
+                .and_then(|r| r.as_open_recv())
+                .map_or(0, |r| r.data_end),
+        )
     }
 
     /// Whether MAX_STREAM_DATA frames could be sent for stream `id`
@@ -693,9 +792,10 @@ impl StreamsState {
     ///
     /// `payload` is the packet's frame space in `buf`, which may already hold control frames.
     /// A datagram cannot be split, so one too large for the room left ends the packet and
-    /// leads the next one. Only when it would leave the packet empty, which a packet clamped
-    /// below the path MTU can, does it step aside for what fits behind it, since
-    /// [`Self::can_send_frames`] promised a frame.
+    /// leads the next one. One too large for even an empty packet, which a packet clamped
+    /// below the path MTU can be, steps aside for what fits behind it instead, since
+    /// [`Self::can_send_frames`] promised a frame and control frames alone would leave the
+    /// packet short.
     pub(crate) fn write_frames(
         &mut self,
         buf: &mut Vec<u8>,
@@ -713,7 +813,7 @@ impl StreamsState {
                 Some(Next::Datagram(group)) => {
                     let (_, frame) = self.pending.datagram(group);
                     if buf.len() + frame > max_buf_size {
-                        if buf.len() > payload.start {
+                        if payload.start + frame <= max_buf_size {
                             break;
                         }
                         self.pending.defer_datagram(group);
@@ -747,13 +847,7 @@ impl StreamsState {
             trace!(id = %meta.id, off = meta.offsets.start, len = meta.offsets.end - meta.offsets.start, fin = meta.fin, "STREAM");
             meta.encode(encode_length, buf);
 
-            // The range might not be retrievable in a single `get` if it is
-            // stored in noncontiguous fashion. Therefore this loop iterates
-            // until the range is fully copied into the frame.
-            let mut offsets = meta.offsets.clone();
-            while offsets.start != offsets.end {
-                let data = stream.pending.get(offsets.clone());
-                offsets.start += data.len() as u64;
+            for data in stream.pending.get(meta.offsets.clone()) {
                 buf.put_slice(data);
             }
 
@@ -898,16 +992,16 @@ impl StreamsState {
 
     /// Wake the writer of a stream whose flow control limit just rose past what it has written
     fn send_unblocked(&mut self, id: StreamId) {
+        let stream = self.send.get(&id).and_then(|s| s.as_ref()).unwrap();
+        if !stream.is_writable() || stream.stop_reason.is_some() {
+            return;
+        }
         if self.write_limit() > 0 {
             self.events.push_back(StreamEvent::Writable { id });
             return;
         }
         // Still blocked on the connection window, so wait in the list that wakes when it relaxes
-        let ss = self.send.get_mut(&id).and_then(|s| s.as_mut()).unwrap();
-        if !ss.connection_blocked {
-            ss.connection_blocked = true;
-            self.connection_blocked.push(id);
-        }
+        self.connection_blocked.insert(id);
     }
 
     /// Whether the local send buffer prevents the application from writing more data.
@@ -935,12 +1029,12 @@ impl StreamsState {
                     continue;
                 };
 
-                debug_assert!(stream.connection_blocked);
-                stream.connection_blocked = false;
-
                 // If it's no longer sensible to write to a stream (even to detect an error) then don't
                 // report it.
-                if stream.is_writable() && stream.max_data > stream.offset() {
+                if stream.is_writable()
+                    && stream.stop_reason.is_none()
+                    && stream.max_data > stream.offset()
+                {
                     return Some(StreamEvent::Writable { id });
                 }
             }
@@ -1039,9 +1133,11 @@ impl StreamsState {
         let receive_window = receive_window.into();
         let mut expanded = false;
         if receive_window > self.receive_window {
-            self.local_max_data = self
-                .local_max_data
-                .saturating_add(receive_window - self.receive_window);
+            // Growth first cancels what an earlier shrink still owes, so it is credited once.
+            let growth: u64 = receive_window - self.receive_window;
+            let cancelled = growth.min(self.receive_window_shrink_debt);
+            self.receive_window_shrink_debt -= cancelled;
+            self.local_max_data = self.local_max_data.saturating_add(growth - cancelled);
             expanded = true;
         } else {
             let diff = self.receive_window - receive_window;
@@ -1106,22 +1202,6 @@ impl StreamsState {
         ShouldTransmit(self.max_data_due())
     }
 
-    /// Return the connection credit held by `credit` to the peer.
-    pub(crate) fn release(&mut self, credit: Credit) -> ShouldTransmit {
-        assert!(
-            credit.is_empty() || credit.tag == self.tag,
-            "released credit from another connection"
-        );
-        let bytes = credit.into_bytes();
-        assert!(
-            bytes <= self.held,
-            "released {bytes} bytes of credit with only {} held",
-            self.held
-        );
-        self.held -= bytes;
-        self.add_read_credits(bytes)
-    }
-
     /// Whether the window has grown enough since the last `MAX_DATA` to be worth announcing.
     ///
     /// Updates are batched to a fraction of the receive window, which accommodates bigger windows
@@ -1140,8 +1220,10 @@ impl StreamsState {
 
     pub(crate) fn credit_stats(&self) -> CreditStats {
         CreditStats {
-            held: self.held,
+            leased: self.held,
             available: self.local_max_data.saturating_sub(self.data_recvd),
+            evicted: self.evicted,
+            peak_spent: self.peak_spent,
         }
     }
 
@@ -1159,13 +1241,25 @@ impl StreamsState {
             }
         }
         if half == StreamHalf::Send {
+            self.connection_blocked.swap_remove(&id);
             self.send_streams -= 1;
         }
     }
 
-    pub(super) fn stream_recv_freed(&mut self, id: StreamId, recv: StreamRecv) {
+    /// Recycle a receive stream's state, returning any credit its lease still holds, as when a
+    /// plain read ends a stream a lease read from.
+    ///
+    /// Returns whether a `MAX_DATA` frame should be enqueued for that credit.
+    pub(super) fn stream_recv_freed(
+        &mut self,
+        id: StreamId,
+        mut recv: StreamRecv,
+    ) -> ShouldTransmit {
+        let transmit = self.discard_lease(id, &mut recv.inner_mut().lease);
+        self.unlooked.remove(&id);
         self.free_recv.push(recv.free(self.stream_receive_window));
         self.stream_freed(id, StreamHalf::Recv);
+        transmit
     }
 
     pub(super) fn max_send_data(&self, id: StreamId) -> VarInt {
@@ -1192,10 +1286,15 @@ pub(super) fn get_or_insert_recv(opt: &mut Option<StreamRecv>, initial_max_data:
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "tests read the host clock directly"
+)]
 mod tests {
     use super::*;
     use crate::{
-        ReadableError, RecvStream, SendStream, TransportErrorCode, WriteError,
+        LeaseError, ReadableError, RecvStream, SendStream, TransportErrorCode, WriteError,
         connection::State as ConnState, connection::Streams,
     };
     use bytes::Bytes;
@@ -1209,6 +1308,211 @@ mod tests {
             (1024 * 1024u32).into(),
             (1024 * 1024u32).into(),
         )
+    }
+
+    #[test]
+    fn connection_blocked_reset_churn_is_bounded() {
+        let mut server = make(Side::Server);
+        server.set_params(&TransportParameters {
+            initial_max_streams_uni: 512u32.into(),
+            initial_max_stream_data_uni: 1024u32.into(),
+            initial_max_data: 0u32.into(),
+            ..TransportParameters::default()
+        });
+        let (mut pending, state) = (Retransmits::default(), ConnState::Established);
+        for _ in 0..512 {
+            let id = Streams {
+                state: &mut server,
+                conn_state: &state,
+            }
+            .open(Dir::Uni, Default::default())
+            .unwrap();
+            let mut stream = SendStream {
+                id,
+                state: &mut server,
+                pending: &mut pending,
+                conn_state: &state,
+            };
+            assert_eq!(stream.write(b"blocked"), Err(WriteError::Blocked));
+            assert_eq!(stream.write(b"blocked"), Err(WriteError::Blocked));
+            assert_eq!(stream.state.connection_blocked.len(), 1);
+            stream.reset(0u32.into()).unwrap();
+            assert!(
+                stream.state.connection_blocked.is_empty(),
+                "reset writer no longer waits for credit"
+            );
+            assert_eq!(stream.write(b"blocked"), Err(WriteError::ClosedStream));
+            server.reset_acked(id, 0);
+            assert!(server.send.is_empty());
+            assert!(server.connection_blocked.is_empty());
+        }
+        assert_eq!(server.write_limit(), 0);
+    }
+
+    #[test]
+    fn connection_blocked_finished_stream_is_freed_without_credit() {
+        let mut server = make(Side::Server);
+        server.set_params(&TransportParameters {
+            initial_max_streams_uni: 1u32.into(),
+            initial_max_stream_data_uni: 1024u32.into(),
+            ..TransportParameters::default()
+        });
+        let (mut pending, state) = (Retransmits::default(), ConnState::Established);
+        let id = Streams {
+            state: &mut server,
+            conn_state: &state,
+        }
+        .open(Dir::Uni, Default::default())
+        .unwrap();
+        let mut stream = SendStream {
+            id,
+            state: &mut server,
+            pending: &mut pending,
+            conn_state: &state,
+        };
+        assert_eq!(stream.write(b"blocked"), Err(WriteError::Blocked));
+        stream.finish().unwrap();
+        assert_eq!(stream.write(b"closed"), Err(WriteError::ClosedStream));
+        server.received_ack_of(frame::StreamMeta {
+            id,
+            offsets: 0..0,
+            fin: true,
+        });
+        assert!(server.send.is_empty());
+        assert!(server.connection_blocked.is_empty());
+        assert_eq!(server.write_limit(), 0);
+    }
+
+    #[test]
+    fn connection_blocked_writer_observes_stop_with_a_held_window() {
+        for peer_credit in [false, true] {
+            let mut server = make(Side::Server);
+            server.send_window = 1;
+            server.set_params(&TransportParameters {
+                initial_max_streams_uni: 2u32.into(),
+                initial_max_stream_data_uni: 1024u32.into(),
+                initial_max_data: if peer_credit {
+                    1u32.into()
+                } else {
+                    1024u32.into()
+                },
+                ..TransportParameters::default()
+            });
+            let (mut pending, state) = (Retransmits::default(), ConnState::Established);
+            let holder = Streams {
+                state: &mut server,
+                conn_state: &state,
+            }
+            .open(Dir::Uni, Default::default())
+            .unwrap();
+            assert_eq!(
+                SendStream {
+                    id: holder,
+                    state: &mut server,
+                    pending: &mut pending,
+                    conn_state: &state
+                }
+                .write(b"x"),
+                Ok(1)
+            );
+            let id = Streams {
+                state: &mut server,
+                conn_state: &state,
+            }
+            .open(Dir::Uni, Default::default())
+            .unwrap();
+            let mut stream = SendStream {
+                id,
+                state: &mut server,
+                pending: &mut pending,
+                conn_state: &state,
+            };
+            assert_eq!(stream.write(b"blocked"), Err(WriteError::Blocked));
+            let code = 7u32.into();
+            stream.state.received_stop_sending(id, code).unwrap();
+            assert_eq!(
+                stream.state.poll(),
+                Some(StreamEvent::Stopped {
+                    id,
+                    error_code: code
+                })
+            );
+            assert_eq!(stream.write(b"stopped"), Err(WriteError::Stopped(code)));
+            assert_eq!(stream.write(&[]), Err(WriteError::Stopped(code)));
+            let mut chunks = [Bytes::from_static(b"stopped")];
+            assert_eq!(
+                stream.write_chunks(&mut chunks),
+                Err(WriteError::Stopped(code))
+            );
+            assert_eq!(chunks[0], b"stopped"[..]);
+            assert!(stream.state.connection_blocked.is_empty());
+            assert_eq!(stream.state.write_limit(), 0);
+            assert_eq!(
+                stream.state.send[&holder]
+                    .as_ref()
+                    .unwrap()
+                    .pending
+                    .buffered(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn connection_blocked_credit_wakes_only_live_writers_once() {
+        let mut server = make(Side::Server);
+        server.set_params(&TransportParameters {
+            initial_max_streams_uni: 4u32.into(),
+            initial_max_stream_data_uni: 1024u32.into(),
+            ..TransportParameters::default()
+        });
+        let (mut pending, state) = (Retransmits::default(), ConnState::Established);
+        let ids: Vec<_> = (0..4)
+            .map(|_| {
+                let id = Streams {
+                    state: &mut server,
+                    conn_state: &state,
+                }
+                .open(Dir::Uni, Default::default())
+                .unwrap();
+                let mut stream = SendStream {
+                    id,
+                    state: &mut server,
+                    pending: &mut pending,
+                    conn_state: &state,
+                };
+                assert_eq!(stream.write(b"x"), Err(WriteError::Blocked));
+                assert_eq!(stream.write(b"x"), Err(WriteError::Blocked));
+                id
+            })
+            .collect();
+        server.received_stop_sending(ids[0], 9u32.into()).unwrap();
+        SendStream {
+            id: ids[1],
+            state: &mut server,
+            pending: &mut pending,
+            conn_state: &state,
+        }
+        .reset(0u32.into())
+        .unwrap();
+        SendStream {
+            id: ids[2],
+            state: &mut server,
+            pending: &mut pending,
+            conn_state: &state,
+        }
+        .finish()
+        .unwrap();
+        // Late stream credit must not register a terminal writer again.
+        for &id in &ids[..3] {
+            server.received_max_stream_data(id, 2048).unwrap();
+        }
+        server.events.clear();
+        assert_eq!(server.connection_blocked.len(), 1);
+        server.received_max_data(1024u32.into());
+        assert_eq!(server.poll(), Some(StreamEvent::Writable { id: ids[3] }));
+        assert!(server.connection_blocked.is_empty());
+        assert_eq!(server.poll(), None);
     }
 
     #[test]
@@ -1924,9 +2228,7 @@ mod tests {
         assert_eq!(high.write(&[0; 200]).unwrap(), 200);
         assert_eq!(server.pending.len(), 2);
 
-        // Requeue the high priority stream to lowest priority. The initial send
-        // still uses high priority since it's queued that way. After that it will
-        // switch to low priority
+        // Lowering the queued high priority stream moves it behind mid at once.
         let mut high = SendStream {
             id: id_high,
             state: &mut server,
@@ -1934,16 +2236,9 @@ mod tests {
             conn_state: &state,
         };
         high.set_priority(-1).unwrap();
-
-        let mut buf = Vec::with_capacity(1000);
-        let meta = server.write_frames(&mut buf, 0..40, true).streams;
-        assert_eq!(meta.len(), 1);
-        assert_eq!(meta[0].id, id_high);
-
-        // After requeuing we should end up with 2 priorities - not 3
         assert_eq!(server.pending.len(), 2);
 
-        // Send the remaining data. The initial mid priority one should go first now
+        let mut buf = Vec::with_capacity(1000);
         let meta = server.write_frames(&mut buf, 0..1000, true).streams;
         assert_eq!(meta.len(), 2);
         assert_eq!(meta[0].id, id_mid);
@@ -1951,6 +2246,63 @@ mod tests {
 
         assert!(!server.can_send_stream_data());
         assert_eq!(server.pending.len(), 0);
+    }
+
+    /// A stream starved behind higher priorities that keep requeueing sends next once raised
+    /// above them, without waiting to be popped at its old priority.
+    #[test]
+    fn raising_a_starved_stream_sends_it_next() {
+        let mut server = make(Side::Server);
+        server.set_params(&TransportParameters {
+            initial_max_streams_bidi: 3u32.into(),
+            initial_max_data: 1000u32.into(),
+            initial_max_stream_data_bidi_remote: 1000u32.into(),
+            ..TransportParameters::default()
+        });
+
+        let (mut pending, state) = (Retransmits::default(), ConnState::Established);
+        let mut streams = Streams {
+            state: &mut server,
+            conn_state: &state,
+        };
+        let ids: Vec<_> = (0..3)
+            .map(|_| streams.open(Dir::Bi, Default::default()).unwrap())
+            .collect();
+        let (busy, starved) = (&ids[..2], ids[2]);
+
+        for (&id, priority) in ids.iter().zip([5, 5, 0]) {
+            let mut stream = SendStream {
+                id,
+                state: &mut server,
+                pending: &mut pending,
+                conn_state: &state,
+            };
+            stream.set_priority(priority).unwrap();
+            stream.write(&[0; 200]).unwrap();
+        }
+
+        let mut buf = Vec::with_capacity(1000);
+        for _ in 0..4 {
+            let start = buf.len();
+            let meta = server
+                .write_frames(&mut buf, start..start + 40, true)
+                .streams;
+            assert!(busy.contains(&meta[0].id), "{meta:?}");
+        }
+
+        SendStream {
+            id: starved,
+            state: &mut server,
+            pending: &mut pending,
+            conn_state: &state,
+        }
+        .set_priority(10)
+        .unwrap();
+        let start = buf.len();
+        let meta = server
+            .write_frames(&mut buf, start..start + 40, true)
+            .streams;
+        assert_eq!(meta[0].id, starved);
     }
 
     #[test]
@@ -3222,15 +3574,6 @@ mod tests {
         assert_eq!(server.buffered_data, 0);
     }
 
-    /// How a held stream ends in [`held_credit_returns_once`].
-    #[derive(Debug, Clone, Copy)]
-    enum End {
-        Fin,
-        Stop,
-        Reset,
-        StopThenReset,
-    }
-
     fn data(client: &mut StreamsState, id: StreamId, offset: u64, len: usize, fin: bool) {
         let _ = client
             .received(
@@ -3256,118 +3599,1097 @@ mod tests {
             .unwrap();
     }
 
-    /// Read everything readable now, holding its connection credit.
-    fn read_held(client: &mut StreamsState, id: StreamId) -> Credit {
-        let mut pending = Retransmits::default();
-        let mut recv = RecvStream {
+    fn recv<'a>(
+        client: &'a mut StreamsState,
+        pending: &'a mut Retransmits,
+        id: StreamId,
+    ) -> RecvStream<'a> {
+        RecvStream {
             id,
             state: client,
-            pending: &mut pending,
-        };
-        let mut chunks = recv.read(true).unwrap();
-        while let Ok(Some(_)) = chunks.next(usize::MAX) {}
-        let credit = chunks.hold();
-        let _ = chunks.finalize();
-        credit
-    }
-
-    /// Every byte of a stream returns its connection credit exactly once, whichever terminal path
-    /// it takes and whether the held bytes are released before or after its state is reclaimed.
-    #[test]
-    fn held_credit_returns_once() {
-        for end in [End::Fin, End::Stop, End::Reset, End::StopThenReset] {
-            let mut client = make(Side::Client);
-            let initial = client.local_max_data;
-            let id = StreamId::new(Side::Server, Dir::Uni, 0);
-
-            // A readable prefix, then a gap the transport must account for itself.
-            data(&mut client, id, 0, 32, false);
-            data(&mut client, id, 64, 16, false);
-            let credit = read_held(&mut client, id);
-            assert_eq!(credit.len(), 32, "{end:?}");
-            assert_eq!(client.credit_stats().held, 32, "{end:?}");
-            assert_eq!(
-                client.local_max_data, initial,
-                "{end:?}: held, not returned"
-            );
-
-            let size = match end {
-                End::Fin => {
-                    data(&mut client, id, 32, 32, false);
-                    data(&mut client, id, 80, 16, true);
-                    let rest = read_held(&mut client, id);
-                    assert_eq!(rest.len(), 64, "{end:?}");
-                    let _ = client.release(rest);
-                    96
-                }
-                End::Stop => {
-                    let mut pending = Retransmits::default();
-                    RecvStream {
-                        id,
-                        state: &mut client,
-                        pending: &mut pending,
-                    }
-                    .stop(0u32.into())
-                    .unwrap();
-                    // Late data below and beyond the stop is credited on arrival.
-                    data(&mut client, id, 32, 32, false);
-                    data(&mut client, id, 80, 16, true);
-                    96
-                }
-                End::Reset => {
-                    reset(&mut client, id, 128);
-                    let mut pending = Retransmits::default();
-                    let mut recv = RecvStream {
-                        id,
-                        state: &mut client,
-                        pending: &mut pending,
-                    };
-                    let mut chunks = recv.read(true).unwrap();
-                    assert!(chunks.next(usize::MAX).is_err(), "{end:?}");
-                    let _ = chunks.finalize();
-                    128
-                }
-                End::StopThenReset => {
-                    let mut pending = Retransmits::default();
-                    RecvStream {
-                        id,
-                        state: &mut client,
-                        pending: &mut pending,
-                    }
-                    .stop(0u32.into())
-                    .unwrap();
-                    reset(&mut client, id, 128);
-                    // A duplicate reset after reclamation changes nothing.
-                    reset(&mut client, id, 128);
-                    128
-                }
-            };
-            assert!(
-                !client.recv.contains_key(&id),
-                "{end:?}: state reclaimed while credit is held"
-            );
-            assert_eq!(
-                client.local_max_data,
-                initial + size - 32,
-                "{end:?}: everything but the held prefix"
-            );
-
-            let _ = client.release(credit);
-            assert_eq!(client.local_max_data, initial + size, "{end:?}");
-            assert_eq!(client.credit_stats().held, 0, "{end:?}");
+            pending,
         }
     }
 
+    /// Lease whatever has arrived on `id`, returning how many bytes are leased.
+    fn lease(client: &mut StreamsState, id: StreamId) -> usize {
+        let mut pending = Retransmits::default();
+        let _ = recv(client, &mut pending, id).lease(0).unwrap();
+        client.check_leases();
+        client.leased(id).unwrap().len()
+    }
+
+    /// Wait on `id` for more than it has leased, as a reader decoding a message would.
+    fn wait(client: &mut StreamsState, id: StreamId, want: usize) -> Result<(), LeaseError> {
+        let mut pending = Retransmits::default();
+        let result = recv(client, &mut pending, id).lease(want).map(|_| ());
+        client.check_leases();
+        result
+    }
+
+    fn release(client: &mut StreamsState, id: StreamId, n: usize) {
+        let mut pending = Retransmits::default();
+        let mut recv = recv(client, &mut pending, id);
+        recv.advance(n);
+        let _ = recv.release();
+        client.check_leases();
+    }
+
+    fn stop(client: &mut StreamsState, id: StreamId, code: u32) -> Retransmits {
+        let mut pending = Retransmits::default();
+        let _ = recv(client, &mut pending, id).stop(code.into());
+        client.check_leases();
+        pending
+    }
+
+    /// Leased bytes keep their connection credit until released, even across a gap, and so do
+    /// bytes taken or advanced past.
     #[test]
-    fn held_credit_pays_shrink_debt() {
+    fn lease_holds_credit_until_released() {
         let mut client = make(Side::Client);
         let initial = client.local_max_data;
         let id = StreamId::new(Side::Server, Dir::Uni, 0);
         data(&mut client, id, 0, 32, false);
-        let credit = read_held(&mut client, id);
+        data(&mut client, id, 64, 16, false);
+
+        assert_eq!(lease(&mut client, id), 32);
+        assert_eq!(client.credit_stats().leased, 32);
+        assert_eq!(client.local_max_data, initial, "leased, not returned");
+        assert_eq!(
+            lease(&mut client, id),
+            32,
+            "a second lease sees the same bytes"
+        );
+
+        let mut pending = Retransmits::default();
+        let taken = recv(&mut client, &mut pending, id).take(10);
+        assert_eq!(taken.len(), 10);
+        assert_eq!(client.leased(id).unwrap().len(), 22);
+        assert_eq!(client.local_max_data, initial, "taken, not released");
+
+        release(&mut client, id, 2);
+        assert_eq!(client.local_max_data, initial + 12);
+        assert_eq!(client.credit_stats().leased, 20);
+        assert_eq!(
+            client.credit_stats().peak_spent,
+            80,
+            "the gap counts, and the peak outlives the release"
+        );
+    }
+
+    /// A finished stream keeps its state, and its stream ID, until its reader stops it: a lease
+    /// after the last release still sees the FIN, and the stop frees it without telling the peer.
+    #[test]
+    fn finished_lease_keeps_its_stream_until_stop() {
+        let mut client = make(Side::Client);
+        let initial = client.local_max_data;
+        let id = StreamId::new(Side::Server, Dir::Uni, 0);
+        data(&mut client, id, 0, 32, true);
+
+        assert_eq!(lease(&mut client, id), 32);
+        assert!(client.leased(id).unwrap().is_fin());
+        assert_eq!(
+            wait(&mut client, id, 64),
+            Ok(()),
+            "a FIN ends the wait short"
+        );
+
+        release(&mut client, id, 32);
+        assert_eq!(client.local_max_data, initial + 32);
+        assert_eq!(client.credit_stats().leased, 0);
+        assert_eq!(wait(&mut client, id, 1), Ok(()));
+        assert!(client.leased(id).unwrap().is_fin(), "still finished");
+
+        let pending = stop(&mut client, id, 0);
+        assert!(pending.stop_sending.is_empty(), "the peer is done");
+        assert!(!client.recv.contains_key(&id), "freed");
+        assert!(client.leased(id).is_none());
+    }
+
+    /// Every byte returns its credit exactly once, whether a stop or a reset ends the stream,
+    /// with leased bytes outstanding and a gap the transport accounts for itself.
+    #[test]
+    fn lease_credit_returns_once() {
+        for reset_first in [false, true] {
+            let mut client = make(Side::Client);
+            let initial = client.local_max_data;
+            let id = StreamId::new(Side::Server, Dir::Uni, 0);
+            data(&mut client, id, 0, 32, false);
+            data(&mut client, id, 64, 16, false);
+            assert_eq!(lease(&mut client, id), 32);
+
+            if reset_first {
+                reset(&mut client, id, 128);
+                assert_eq!(
+                    wait(&mut client, id, 33),
+                    Err(LeaseError::Reset(0u32.into()))
+                );
+                assert_eq!(
+                    client.local_max_data,
+                    initial + 128 - 32,
+                    "all but the lease"
+                );
+            }
+            let _ = stop(&mut client, id, 0);
+            if !reset_first {
+                // Late data below and beyond the stop is credited on arrival.
+                data(&mut client, id, 32, 32, false);
+                reset(&mut client, id, 128);
+            }
+            assert!(!client.recv.contains_key(&id));
+            assert!(client.leased(id).is_none());
+            assert_eq!(
+                client.local_max_data,
+                initial + 128,
+                "reset_first: {reset_first}"
+            );
+            assert_eq!(client.credit_stats().leased, 0);
+        }
+    }
+
+    #[test]
+    fn lease_pays_shrink_debt() {
+        let mut client = make(Side::Client);
+        let initial = client.local_max_data;
+        let id = StreamId::new(Side::Server, Dir::Uni, 0);
+        data(&mut client, id, 0, 32, false);
+        assert_eq!(lease(&mut client, id), 32);
         client.set_receive_window((client.receive_window - 16).try_into().unwrap());
-        let _ = client.release(credit);
+        release(&mut client, id, 32);
         assert_eq!(client.local_max_data, initial + 16);
+    }
+
+    /// A want the connection window can never hold fails rather than waits forever.
+    #[test]
+    fn want_beyond_the_window_is_too_large() {
+        let mut client = make(Side::Client);
+        let id = StreamId::new(Side::Server, Dir::Uni, 0);
+        data(&mut client, id, 0, 32, false);
+        let window = client.receive_window as usize;
+        assert!(matches!(
+            wait(&mut client, id, window),
+            Err(LeaseError::Blocked(_))
+        ));
+        assert_eq!(wait(&mut client, id, window + 1), Err(LeaseError::TooLarge));
+
+        // Taken bytes do not: a frame past the window waits, and gives way to eviction.
+        let mut pending = Retransmits::default();
+        let _ = recv(&mut client, &mut pending, id).take(10);
+        assert!(matches!(
+            wait(&mut client, id, window - 9),
+            Err(LeaseError::Blocked(_))
+        ));
+    }
+
+    /// A connection with a 2 * `window` receive window, and its streams 0 and 1.
+    fn stuck(window: u64) -> (StreamsState, [StreamId; 2]) {
+        let client = StreamsState::new(
+            Side::Client,
+            128u32.into(),
+            128u32.into(),
+            1024 * 1024,
+            VarInt::from_u64(2 * window).unwrap(),
+            VarInt::from_u64(2 * window).unwrap(),
+        );
+        let ids = [0, 1].map(|index| StreamId::new(Side::Server, Dir::Uni, index));
+        (client, ids)
+    }
+
+    fn readable(client: &mut StreamsState) -> Vec<StreamId> {
+        client
+            .events
+            .drain(..)
+            .filter_map(|event| match event {
+                StreamEvent::Readable { id } => Some(id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Credit an eviction frees pays a shrunk window's debt first, so eviction goes on until the
+    /// peer has credit again; stopping at one victim would leave the other readers and the peer
+    /// waiting on each other.
+    #[test]
+    fn stuck_window_evicts_past_shrink_debt() {
+        const WINDOW: u64 = 1000;
+        let mut client = StreamsState::new(
+            Side::Client,
+            128u32.into(),
+            128u32.into(),
+            1024 * 1024,
+            VarInt::from_u64(3 * WINDOW).unwrap(),
+            VarInt::from_u64(3 * WINDOW).unwrap(),
+        );
+        let ids = [0, 1, 2].map(|index| StreamId::new(Side::Server, Dir::Uni, index));
+        for id in ids {
+            data(&mut client, id, 0, WINDOW as usize, false);
+            assert_eq!(lease(&mut client, id), WINDOW as usize);
+        }
+        assert_eq!(readable(&mut client), ids);
+        let max_data = client.local_max_data;
+        client.set_receive_window(VarInt::from_u64(3 * WINDOW / 2).unwrap());
+
+        let want = WINDOW as usize + 1;
+        assert!(matches!(
+            wait(&mut client, ids[0], want),
+            Err(LeaseError::Blocked(_))
+        ));
+        assert_eq!(client.credit_stats().evicted, 2);
+        assert_eq!(readable(&mut client), [ids[2], ids[1]], "newest first");
+        assert_eq!(client.local_max_data, max_data + WINDOW / 2);
+        assert!(!client.leased(ids[0]).unwrap().evicted);
+    }
+
+    /// However its reader consumes tiny frames, and however many arrive, the lease holds copies
+    /// of their bytes, not the receive buffers they arrived in, so a byte of credit cannot pin a
+    /// whole batch of datagrams, and the copies stay few chunks.
+    #[test]
+    fn lease_releases_datagram_buffers() {
+        #[derive(Debug, Clone, Copy)]
+        enum Reader {
+            /// Waits for more than has arrived, as a reader decoding a message does.
+            Wait,
+            /// Leases what arrived and parks without consuming it.
+            Park,
+            /// Takes each byte as it arrives and keeps it, as a reader handing payload on does.
+            Take,
+        }
+        for (reader, frames) in [Reader::Wait, Reader::Park, Reader::Take]
+            .into_iter()
+            .flat_map(|reader| [(reader, 8), (reader, 1024)])
+        {
+            let mut client = make(Side::Client);
+            let id = StreamId::new(Side::Server, Dir::Uni, 0);
+            let buffers: Vec<Bytes> = (0..frames).map(|_| Bytes::from(vec![0u8; 4096])).collect();
+            let mut taken = Vec::new();
+            for (offset, buffer) in buffers.iter().enumerate() {
+                let _ = client
+                    .received(
+                        frame::Stream {
+                            id,
+                            offset: offset as u64,
+                            fin: false,
+                            data: buffer.slice(..1),
+                        },
+                        // One datagram of a receive batch: too little over-allocation for the
+                        // assembler to copy it out.
+                        1200,
+                    )
+                    .unwrap();
+                let mut pending = Retransmits::default();
+                let mut recv = recv(&mut client, &mut pending, id);
+                match reader {
+                    Reader::Wait => assert!(matches!(
+                        recv.lease(buffers.len() + 1),
+                        Err(LeaseError::Blocked(_))
+                    )),
+                    Reader::Park => {
+                        let _ = recv.lease(1).unwrap();
+                    }
+                    Reader::Take => {
+                        let _ = recv.lease(1).unwrap();
+                        taken.push(recv.take(usize::MAX));
+                    }
+                }
+            }
+            assert!(
+                buffers.into_iter().all(|buffer| buffer.is_unique()),
+                "{reader:?} pins a receive buffer of {frames}"
+            );
+            let leased = client.leased(id).unwrap();
+            assert_eq!(leased.len() + taken.len(), frames);
+            assert!(
+                leased.chunks().count() <= frames.ilog2() as usize + 1,
+                "{reader:?} keeps {} chunks of {frames}",
+                leased.chunks().count()
+            );
+        }
+    }
+
+    /// A peer can spend the window across many streams before any reader looks, so every reader
+    /// then waits on a stuck window. Each wait checks it in amortized constant time, so a hostile
+    /// peer cannot make the stuck check quadratic.
+    #[test]
+    fn stuck_check_stays_linear() {
+        const STREAMS: u64 = 512;
+        let mut client = StreamsState::new(
+            Side::Client,
+            1024u32.into(),
+            1024u32.into(),
+            1024 * 1024,
+            VarInt::from_u64(STREAMS).unwrap(),
+            VarInt::from_u64(STREAMS).unwrap(),
+        );
+        let ids: Vec<_> = (0..STREAMS)
+            .map(|index| StreamId::new(Side::Server, Dir::Uni, index))
+            .collect();
+        for &id in &ids {
+            data(&mut client, id, 0, 1, false);
+        }
+        for &id in &ids {
+            assert!(matches!(
+                wait(&mut client, id, 2),
+                Err(LeaseError::Blocked(_))
+            ));
+        }
+        assert_eq!(client.credit_stats().evicted, 1);
+        assert!(
+            client.scans <= 4 * STREAMS as usize,
+            "{} streams looked at for {STREAMS} waits",
+            client.scans
+        );
+    }
+
+    /// A consume whose credit only pays a shrunk window's debt reruns the stuck pass: the
+    /// readers that would have rerun it are already waiting, and the peer is still blocked.
+    #[test]
+    fn consume_into_shrink_debt_evicts() {
+        const WINDOW: u64 = 1000;
+        let mut client = StreamsState::new(
+            Side::Client,
+            128u32.into(),
+            128u32.into(),
+            1024 * 1024,
+            VarInt::from_u64(3 * WINDOW).unwrap(),
+            VarInt::from_u64(3 * WINDOW).unwrap(),
+        );
+        let ids = [0, 1, 2].map(|index| StreamId::new(Side::Server, Dir::Uni, index));
+        for id in ids {
+            data(&mut client, id, 0, WINDOW as usize, false);
+        }
+        assert_eq!(lease(&mut client, ids[1]), WINDOW as usize);
+        assert_eq!(lease(&mut client, ids[2]), WINDOW as usize);
+        let max_data = client.local_max_data;
+        client.set_receive_window(VarInt::from_u64(2 * WINDOW).unwrap());
+
+        // The first stream has data its reader has not looked at, so nothing is evicted yet.
+        for id in [ids[1], ids[2]] {
+            assert!(matches!(
+                wait(&mut client, id, WINDOW as usize + 1),
+                Err(LeaseError::Blocked(_))
+            ));
+        }
+        assert_eq!(client.credit_stats().evicted, 0);
+        readable(&mut client);
+
+        // Its reader finishes a unit and parks; the credit only pays the debt.
+        assert_eq!(lease(&mut client, ids[0]), WINDOW as usize);
+        release(&mut client, ids[0], WINDOW as usize);
+        assert_eq!(client.credit_stats().evicted, 1);
+        assert_eq!(readable(&mut client), [ids[2]]);
+        assert_eq!(client.local_max_data, max_data + WINDOW);
+    }
+
+    /// A reader waiting behind a gap is not stuck: retransmitting the missing bytes spends no
+    /// connection credit, so ordinary loss on a full window evicts nothing.
+    #[test]
+    fn gap_is_not_a_stuck_window() {
+        const WINDOW: u64 = 1000;
+        let (mut client, ids) = stuck(WINDOW);
+        // A packet of the first stream is lost; the bytes after it spend the rest of its share.
+        data(&mut client, ids[0], 0, 100, false);
+        data(&mut client, ids[0], 200, (WINDOW - 200) as usize, false);
+        assert_eq!(lease(&mut client, ids[0]), 100);
+        assert!(matches!(
+            wait(&mut client, ids[0], WINDOW as usize),
+            Err(LeaseError::Blocked(_))
+        ));
+        data(&mut client, ids[1], 0, WINDOW as usize, false);
+        assert_eq!(lease(&mut client, ids[1]), WINDOW as usize);
+        assert!(matches!(
+            wait(&mut client, ids[1], WINDOW as usize + 1),
+            Err(LeaseError::Blocked(_))
+        ));
+        assert_eq!(client.credit_stats().evicted, 0);
+        assert_eq!(
+            client.local_max_data, client.data_recvd,
+            "the peer is blocked"
+        );
+
+        // The retransmission completes the first stream's unit, whose release frees its credit.
+        data(&mut client, ids[0], 100, 100, false);
+        assert_eq!(lease(&mut client, ids[0]), WINDOW as usize);
+        release(&mut client, ids[0], WINDOW as usize);
+        assert_eq!(client.credit_stats().evicted, 0);
+        assert!(
+            client.local_max_data > client.data_recvd,
+            "the peer has credit"
+        );
+    }
+
+    /// Stopping a finished stream's lease returns credit that may only pay a shrunk window's debt,
+    /// so the stop reruns the stuck pass as a release does.
+    #[test]
+    fn stop_finished_lease_into_shrink_debt_evicts() {
+        const WINDOW: u64 = 1000;
+        let mut client = StreamsState::new(
+            Side::Client,
+            128u32.into(),
+            128u32.into(),
+            1024 * 1024,
+            VarInt::from_u64(3 * WINDOW).unwrap(),
+            VarInt::from_u64(3 * WINDOW).unwrap(),
+        );
+        let ids = [0, 1, 2].map(|index| StreamId::new(Side::Server, Dir::Uni, index));
+        data(&mut client, ids[0], 0, WINDOW as usize, true);
+        for id in [ids[1], ids[2]] {
+            data(&mut client, id, 0, WINDOW as usize, false);
+            assert_eq!(lease(&mut client, id), WINDOW as usize);
+        }
+        let max_data = client.local_max_data;
+        client.set_receive_window(VarInt::from_u64(2 * WINDOW).unwrap());
+        for id in [ids[1], ids[2]] {
+            assert!(matches!(
+                wait(&mut client, id, WINDOW as usize + 1),
+                Err(LeaseError::Blocked(_))
+            ));
+        }
+        readable(&mut client);
+
+        // The first reader leases the whole finished stream, then stops it; the credit only pays
+        // the debt.
+        assert_eq!(lease(&mut client, ids[0]), WINDOW as usize);
+        assert!(client.leased(ids[0]).unwrap().is_fin());
+        assert_eq!(client.credit_stats().evicted, 0);
+        let mut pending = Retransmits::default();
+        assert!(
+            recv(&mut client, &mut pending, ids[0])
+                .stop(0u32.into())
+                .is_ok()
+        );
+        assert_eq!(client.credit_stats().evicted, 1);
+        assert_eq!(readable(&mut client), [ids[2]]);
+        assert_eq!(client.local_max_data, max_data + WINDOW);
+    }
+
+    /// Credit a stopped stream's arrival returns may only pay a shrunk window's debt, leaving the
+    /// peer blocked behind readers that are already waiting, so the arrival reruns the stuck pass.
+    #[test]
+    fn stopped_arrival_into_shrink_debt_evicts() {
+        const WINDOW: u64 = 1000;
+        let mut client = StreamsState::new(
+            Side::Client,
+            128u32.into(),
+            128u32.into(),
+            1024 * 1024,
+            VarInt::from_u64(3 * WINDOW).unwrap(),
+            VarInt::from_u64(3 * WINDOW).unwrap(),
+        );
+        let ids = [0, 1, 2].map(|index| StreamId::new(Side::Server, Dir::Uni, index));
+        data(&mut client, ids[0], 0, 1, false);
+        let _ = stop(&mut client, ids[0], 0);
+        for id in [ids[1], ids[2]] {
+            data(&mut client, id, 0, WINDOW as usize, false);
+            assert_eq!(lease(&mut client, id), WINDOW as usize);
+            assert!(matches!(
+                wait(&mut client, id, WINDOW as usize + 1),
+                Err(LeaseError::Blocked(_))
+            ));
+        }
+        client.set_receive_window(VarInt::from_u64(2 * WINDOW).unwrap());
+        readable(&mut client);
+
+        // The peer spends the rest of its credit on the stopped stream; the debt absorbs it.
+        data(&mut client, ids[0], 1, WINDOW as usize, false);
+        assert_eq!(client.credit_stats().evicted, 1);
+        assert_eq!(readable(&mut client), [ids[2]], "newest first");
+        assert!(
+            client.local_max_data > client.data_recvd,
+            "the peer has credit"
+        );
+    }
+
+    /// Repeated frames at the peer's limit spend and return no credit, so they skip the stuck
+    /// check rather than each paying for it.
+    #[test]
+    fn creditless_arrivals_skip_the_stuck_check() {
+        const WINDOW: u64 = 1000;
+        let (mut client, ids) = stuck(WINDOW);
+        data(&mut client, ids[1], 0, 10, false);
+        let _ = stop(&mut client, ids[1], 0);
+        let room = client.local_max_data - client.data_recvd;
+        data(&mut client, ids[0], 0, room as usize, false);
+        assert_eq!(
+            client.local_max_data, client.data_recvd,
+            "the peer is at its limit"
+        );
+
+        let scans = client.scans;
+        for _ in 0..100 {
+            data(&mut client, ids[0], 0, 10, false);
+            data(&mut client, ids[1], 0, 10, false);
+        }
+        assert_eq!(client.scans, scans);
+    }
+
+    /// A reset that wakes a waiting reader leaves it ready to observe the reset and release its
+    /// credit, so another reader's stuck check must not evict anyone in the meantime.
+    #[test]
+    fn reset_wake_is_not_stuck() {
+        const WINDOW: u64 = 1000;
+        let (mut client, ids) = stuck(WINDOW);
+        data(&mut client, ids[0], 0, WINDOW as usize, false);
+        assert_eq!(lease(&mut client, ids[0]), WINDOW as usize);
+        assert!(matches!(
+            wait(&mut client, ids[0], WINDOW as usize + 1),
+            Err(LeaseError::Blocked(_))
+        ));
+        data(&mut client, ids[1], 0, WINDOW as usize, false);
+        assert_eq!(lease(&mut client, ids[1]), WINDOW as usize);
+
+        reset(&mut client, ids[0], WINDOW as u32);
+        assert!(matches!(
+            wait(&mut client, ids[1], WINDOW as usize + 1),
+            Err(LeaseError::Blocked(_))
+        ));
+        assert_eq!(client.credit_stats().evicted, 0);
+        assert_eq!(
+            wait(&mut client, ids[0], WINDOW as usize + 1),
+            Err(LeaseError::Reset(0u32.into()))
+        );
+    }
+
+    /// A reset's final size spends credit like data does, so it counts toward the peak.
+    #[test]
+    fn reset_counts_toward_peak() {
+        let mut client = make(Side::Client);
+        let id = StreamId::new(Side::Server, Dir::Uni, 0);
+        data(&mut client, id, 0, 10, false);
+        reset(&mut client, id, 100);
+        assert_eq!(client.credit_stats().peak_spent, 100);
+    }
+
+    /// Shrinking the window keeps the limit already advertised, so the peer's credit spent past
+    /// the new window still counts toward the peak.
+    #[test]
+    fn shrink_debt_counts_toward_peak() {
+        let mut client = make(Side::Client);
+        let id = StreamId::new(Side::Server, Dir::Uni, 0);
+        data(&mut client, id, 0, 500, false);
+        client.set_receive_window(100u32.into());
+        data(&mut client, id, 500, 500, false);
+        assert_eq!(client.credit_stats().peak_spent, 1000);
+    }
+
+    /// Bytes a reader took outlive an eviction until it stops the stream, so their credit
+    /// returns only then, and nothing else is evicted meanwhile.
+    #[test]
+    fn evicted_taken_bytes_keep_credit_until_stop() {
+        const WINDOW: u64 = 1000;
+        let (mut client, ids) = stuck(WINDOW);
+        let mut pending = Retransmits::default();
+        for id in ids {
+            data(&mut client, id, 0, WINDOW as usize, false);
+            assert_eq!(lease(&mut client, id), WINDOW as usize);
+            let _ = recv(&mut client, &mut pending, id).take(WINDOW as usize);
+        }
+        assert_eq!(readable(&mut client), ids);
+        let max_data = client.local_max_data;
+        // Debt as large as one stream's bytes, so the first stop only pays it.
+        client.set_receive_window(VarInt::from_u64(WINDOW).unwrap());
+
+        assert!(matches!(
+            wait(&mut client, ids[0], 1),
+            Err(LeaseError::Blocked(_))
+        ));
+        assert_eq!(readable(&mut client), [ids[1]]);
+        assert_eq!(client.credit_stats().evicted, 1);
+        assert_eq!(
+            client.credit_stats().leased,
+            2 * WINDOW,
+            "taken credit stays held"
+        );
+        assert!(matches!(
+            wait(&mut client, ids[0], 1),
+            Err(LeaseError::Blocked(_))
+        ));
+        assert_eq!(client.credit_stats().evicted, 1, "waits for the stop");
+        assert_eq!(wait(&mut client, ids[1], 1), Err(LeaseError::Evicted));
+
+        // The stop pays the debt alone, so eviction resumes with the other stream.
+        let _ = stop(&mut client, ids[1], 0);
+        assert_eq!(client.local_max_data, max_data);
+        assert_eq!(client.credit_stats().evicted, 2);
+        assert_eq!(readable(&mut client), [ids[0]]);
+        let _ = stop(&mut client, ids[0], 0);
+        assert_eq!(client.credit_stats().leased, 0);
+        assert_eq!(client.local_max_data, max_data + WINDOW);
+    }
+
+    /// Once the peer has spent the window and every reader waits for more than it has, the
+    /// lowest-priority stream is evicted: its credit returns, its reader wakes to an error, and
+    /// the peer hears only when the application stops it.
+    #[test]
+    fn stuck_window_evicts_the_lowest_priority() {
+        const WINDOW: u64 = 1000;
+        let (mut client, [low, high]) = stuck(WINDOW);
+        data(&mut client, high, 0, WINDOW as usize, false);
+        data(&mut client, low, 0, WINDOW as usize - 1, false);
+        let mut pending = Retransmits::default();
+        recv(&mut client, &mut pending, low).set_priority(-1);
+        recv(&mut client, &mut pending, high).set_priority(1);
+        assert_eq!(readable(&mut client), [high, low]);
+        assert_eq!(lease(&mut client, high), WINDOW as usize);
+        assert_eq!(lease(&mut client, low), WINDOW as usize - 1);
+        assert!(matches!(
+            wait(&mut client, high, 2000),
+            Err(LeaseError::Blocked(_))
+        ));
+        assert!(matches!(
+            wait(&mut client, low, 2000),
+            Err(LeaseError::Blocked(_))
+        ));
+        assert!(
+            client.leased(low).is_some_and(|lease| !lease.evicted),
+            "a byte of credit left"
+        );
+        assert_eq!(client.credit_stats().evicted, 0);
+
+        data(&mut client, low, WINDOW - 1, 1, false);
+        // The arrival woke the reader of `low`, which may yet consume.
+        assert_eq!(readable(&mut client), [low]);
+        assert!(!client.leased(low).unwrap().evicted);
+        let blocked = wait(&mut client, low, 2000);
+        assert_eq!(blocked, Err(LeaseError::Blocked(ShouldTransmit(true))));
+        assert_eq!(readable(&mut client), [low], "the evicted reader wakes");
+        assert_eq!(wait(&mut client, low, 1), Err(LeaseError::Evicted));
+        assert_eq!(client.credit_stats().leased, WINDOW);
+        assert_eq!(client.credit_stats().evicted, 1);
+        assert_eq!(
+            client.local_max_data,
+            3 * WINDOW,
+            "the evicted credit returns"
+        );
+        assert_eq!(
+            lease(&mut client, high),
+            WINDOW as usize,
+            "the other keeps its bytes"
+        );
+
+        let stopped = stop(&mut client, low, 7);
+        assert_eq!(
+            stopped.stop_sending.len(),
+            1,
+            "the application's code tells the peer"
+        );
+        assert_eq!(stopped.stop_sending[0].error_code, 7u32.into());
+        // Late data on the evicted stream is credited on arrival.
+        data(&mut client, low, WINDOW, 10, true);
+        assert_eq!(client.local_max_data, 3 * WINDOW + 10);
+    }
+
+    /// A frame past the window: once its taken bytes fill the window, waiting for one more
+    /// evicts it like any stuck holder, so its group reads as evicted rather than broken. The
+    /// credit returns when the reader stops the stream and lets go of what it took.
+    #[test]
+    fn a_frame_past_the_window_is_evicted() {
+        const WINDOW: u64 = 1000;
+        let (mut client, [frame, _]) = stuck(WINDOW / 2);
+        data(&mut client, frame, 0, WINDOW as usize, false);
+        assert_eq!(lease(&mut client, frame), WINDOW as usize);
+        let mut pending = Retransmits::default();
+        let taken = recv(&mut client, &mut pending, frame).take(usize::MAX);
+        assert_eq!(taken.len(), WINDOW as usize);
+
+        assert_eq!(
+            wait(&mut client, frame, 1),
+            Err(LeaseError::Blocked(ShouldTransmit(true)))
+        );
+        assert_eq!(wait(&mut client, frame, 1), Err(LeaseError::Evicted));
+        assert_eq!(
+            client.local_max_data, WINDOW,
+            "the taken bytes are still held"
+        );
+        drop(taken);
+        let _ = stop(&mut client, frame, 0);
+        assert_eq!(
+            client.local_max_data,
+            2 * WINDOW,
+            "the evicted credit returns"
+        );
+    }
+
+    /// Ties go to the newest stream; a parked holder that never waits is a candidate too.
+    #[test]
+    fn stuck_window_evicts_the_newest_tie() {
+        const WINDOW: u64 = 1000;
+        let (mut client, [old, new]) = stuck(WINDOW);
+        data(&mut client, old, 0, WINDOW as usize, false);
+        // Never leased again after this: its owner parked.
+        assert_eq!(lease(&mut client, old), WINDOW as usize);
+        data(&mut client, new, 0, WINDOW as usize, false);
+        let _ = readable(&mut client);
+        assert!(matches!(
+            wait(&mut client, new, 2000),
+            Err(LeaseError::Blocked(_))
+        ));
+        assert_eq!(wait(&mut client, new, 1), Err(LeaseError::Evicted));
+        assert_eq!(lease(&mut client, old), WINDOW as usize);
+    }
+
+    /// A stream nobody has leased yet may have a reader about to run, so it holds eviction off
+    /// until its reader looks.
+    #[test]
+    fn unleased_stream_holds_eviction_off() {
+        const WINDOW: u64 = 1000;
+        let (mut client, [waiting, fresh]) = stuck(WINDOW);
+        data(&mut client, waiting, 0, WINDOW as usize, false);
+        assert_eq!(lease(&mut client, waiting), WINDOW as usize);
+        data(&mut client, fresh, 0, WINDOW as usize, false);
+        let mut pending = Retransmits::default();
+        recv(&mut client, &mut pending, fresh).set_priority(-1);
+        assert!(matches!(
+            wait(&mut client, waiting, 2000),
+            Err(LeaseError::Blocked(_))
+        ));
+        assert_eq!(client.credit_stats().evicted, 0);
+
+        assert_eq!(lease(&mut client, fresh), WINDOW as usize);
+        let blocked = wait(&mut client, fresh, 2000);
+        assert_eq!(blocked, Err(LeaseError::Blocked(ShouldTransmit(true))));
+        assert_eq!(wait(&mut client, fresh, 1), Err(LeaseError::Evicted));
+        assert_eq!(lease(&mut client, waiting), WINDOW as usize);
+    }
+
+    /// An evicted stream whose final size is already known is freed by its reader's stop, which
+    /// sends its stream ID credit and no STOP_SENDING, since the peer is done.
+    #[test]
+    fn evicted_stop_issues_stream_credit() {
+        const WINDOW: usize = 1000;
+        let mut client = StreamsState::new(
+            Side::Client,
+            2u32.into(),
+            2u32.into(),
+            1024 * 1024,
+            VarInt::from_u64(2 * WINDOW as u64).unwrap(),
+            VarInt::from_u64(2 * WINDOW as u64).unwrap(),
+        );
+        let [parked, waiting] = [0, 1].map(|index| StreamId::new(Side::Server, Dir::Uni, index));
+        data(&mut client, parked, 0, WINDOW / 2, false);
+        let mut pending = Retransmits::default();
+        recv(&mut client, &mut pending, parked).set_priority(-1);
+        assert_eq!(lease(&mut client, parked), WINDOW / 2);
+        // The rest and the FIN arrive after its reader parked.
+        data(&mut client, parked, WINDOW as u64 / 2, WINDOW / 2, true);
+        data(&mut client, waiting, 0, WINDOW, false);
+        assert_eq!(lease(&mut client, waiting), WINDOW);
+
+        let mut pending = Retransmits::default();
+        assert_eq!(
+            recv(&mut client, &mut pending, waiting).lease(2 * WINDOW),
+            Err(LeaseError::Blocked(ShouldTransmit(true)))
+        );
+        assert!(client.leased(parked).unwrap().evicted);
+        assert!(
+            !pending.max_stream_id[Dir::Uni as usize],
+            "its reader has yet to hear"
+        );
+
+        let pending = stop(&mut client, parked, 0);
+        assert!(!client.recv.contains_key(&parked), "freed");
+        assert!(pending.max_stream_id[Dir::Uni as usize]);
+        assert!(pending.stop_sending.is_empty());
+    }
+
+    /// Credit left unadvertised is still credit: the peer is not stuck, it just has not heard.
+    #[test]
+    fn window_with_credit_is_not_stuck() {
+        const WINDOW: u64 = 1000;
+        let (mut client, [a, b]) = stuck(WINDOW);
+        data(&mut client, a, 0, WINDOW as usize, false);
+        data(&mut client, b, 0, WINDOW as usize, false);
+        assert_eq!(lease(&mut client, a), WINDOW as usize);
+        release(&mut client, a, 1);
+        assert!(matches!(
+            wait(&mut client, b, 2000),
+            Err(LeaseError::Blocked(_))
+        ));
+        assert!(matches!(
+            wait(&mut client, a, 2000),
+            Err(LeaseError::Blocked(_))
+        ));
+        assert_eq!(client.credit_stats().evicted, 0);
+    }
+
+    /// A rank set on a stream read plainly to its end goes with the stream, and a closed stream
+    /// takes no rank.
+    #[test]
+    fn priority_goes_with_a_plainly_read_stream() {
+        let mut client = make(Side::Client);
+        let id = StreamId::new(Side::Server, Dir::Uni, 0);
+        let mut pending = Retransmits::default();
+        data(&mut client, id, 0, 10, true);
+        recv(&mut client, &mut pending, id).set_priority(1);
+        let mut stream = recv(&mut client, &mut pending, id);
+        let mut chunks = stream.read(true).unwrap();
+        assert_eq!(chunks.next(usize::MAX).unwrap().unwrap().bytes.len(), 10);
+        assert_eq!(chunks.next(usize::MAX), Ok(None));
+        let _ = chunks.finalize();
+        assert!(client.leased(id).is_none());
+
+        recv(&mut client, &mut pending, id).set_priority(2);
+        assert!(client.leased(id).is_none());
+        assert!(!client.recv.contains_key(&id));
+    }
+
+    /// A stopped stream stays closed: leasing it again cannot revive it for a second stop.
+    #[test]
+    fn lease_after_stop_is_closed() {
+        let mut client = make(Side::Client);
+        let id = StreamId::new(Side::Server, Dir::Uni, 0);
+        data(&mut client, id, 0, 10, true);
+        assert_eq!(lease(&mut client, id), 10);
+        let mut pending = Retransmits::default();
+        assert!(
+            recv(&mut client, &mut pending, id)
+                .stop(0u32.into())
+                .is_ok()
+        );
+        assert_eq!(wait(&mut client, id, 0), Err(LeaseError::ClosedStream));
+        assert!(
+            recv(&mut client, &mut pending, id)
+                .stop(0u32.into())
+                .is_err()
+        );
+        assert!(client.leased(id).is_none());
+    }
+
+    /// A reset already returned the credit of the data it abandoned, so a stream holding nothing
+    /// else frees nothing when evicted: it is passed over, and its reader still sees the reset.
+    #[test]
+    fn reset_stream_ranks_by_held_credit() {
+        const WINDOW: u64 = 1000;
+        let (mut client, [waiting, reset_id]) = stuck(WINDOW);
+        // Its reader looked and parked, then data it never leased arrives before the reset.
+        data(&mut client, reset_id, 0, 1, false);
+        assert_eq!(lease(&mut client, reset_id), 1);
+        release(&mut client, reset_id, 1);
+        data(&mut client, reset_id, 1, WINDOW as usize - 1, false);
+        reset(&mut client, reset_id, WINDOW as u32);
+
+        let room = (client.local_max_data - client.data_recvd) as usize;
+        data(&mut client, waiting, 0, room, false);
+        assert_eq!(lease(&mut client, waiting), room);
+        // One byte taken, so the reader waits for a unit the window can hold.
+        let mut pending = Retransmits::default();
+        let _ = recv(&mut client, &mut pending, waiting).take(1);
+        assert!(matches!(
+            wait(&mut client, waiting, room),
+            Err(LeaseError::Blocked(_))
+        ));
+        assert_eq!(client.credit_stats().evicted, 1);
+        assert_eq!(wait(&mut client, waiting, 1), Err(LeaseError::Evicted));
+        assert_eq!(
+            wait(&mut client, reset_id, 1),
+            Err(LeaseError::Reset(0u32.into()))
+        );
+    }
+
+    /// A reset below what a lease already read and partly took leaves those bytes leased, and
+    /// every byte of the final size returns its credit exactly once.
+    #[test]
+    fn reset_at_below_a_taken_lease_credits_once() {
+        let mut client = make(Side::Client);
+        let initial = client.local_max_data;
+        let id = StreamId::new(Side::Server, Dir::Uni, 0);
+        data(&mut client, id, 0, 100, false);
+        assert_eq!(lease(&mut client, id), 100);
+        let mut pending = Retransmits::default();
+        assert_eq!(recv(&mut client, &mut pending, id).take(60).len(), 60);
+
+        let _ = client
+            .received_reset(reset_at(id, 7, 200, Some(50)))
+            .unwrap();
+        assert_eq!(client.local_max_data, initial + 100, "the abandoned tail");
+        assert_eq!(
+            wait(&mut client, id, 41),
+            Err(LeaseError::Reset(7u32.into()))
+        );
+        assert_eq!(
+            client.leased(id).unwrap().len(),
+            40,
+            "read before the reset"
+        );
+
+        release(&mut client, id, 0);
+        assert_eq!(client.local_max_data, initial + 160);
+        let _ = stop(&mut client, id, 0);
+        assert_eq!(client.local_max_data, initial + 200);
+        assert_eq!(client.credit_stats().leased, 0);
+        assert!(!client.recv.contains_key(&id));
+    }
+
+    /// Growing the window back cancels the debt a shrink left, so the peer is credited once.
+    #[test]
+    fn shrink_then_grow_credits_once() {
+        let mut client = make(Side::Client);
+        let initial = client.local_max_data;
+        let window = client.receive_window;
+        let id = StreamId::new(Side::Server, Dir::Uni, 0);
+
+        client.set_receive_window(VarInt::from_u64(window / 2).unwrap());
+        client.set_receive_window(VarInt::from_u64(window).unwrap());
+        assert_eq!(client.local_max_data, initial);
+
+        // Debt partly paid by a consume before the window grows back.
+        client.set_receive_window(VarInt::from_u64(window / 2).unwrap());
+        data(&mut client, id, 0, 20, false);
+        assert_eq!(drain(&mut client, id, true).0, 20);
+        assert_eq!(client.local_max_data, initial);
+        client.set_receive_window(VarInt::from_u64(window).unwrap());
+        assert_eq!(client.local_max_data, initial + 20);
+        assert_eq!(client.receive_window_shrink_debt, 0);
+    }
+
+    /// A peer that spends each credit an eviction frees on another incomplete unit forces one
+    /// eviction per round trip, so each must cost less than a scan of every stream.
+    #[test]
+    fn repeated_evictions_stay_cheap() {
+        const STREAMS: u64 = 512;
+        const CYCLES: u64 = 64;
+        let mut client = StreamsState::new(
+            Side::Client,
+            4096u32.into(),
+            4096u32.into(),
+            1024 * 1024,
+            VarInt::from_u64(STREAMS).unwrap(),
+            VarInt::from_u64(STREAMS).unwrap(),
+        );
+        for index in 0..STREAMS + CYCLES {
+            let id = StreamId::new(Side::Server, Dir::Uni, index);
+            data(&mut client, id, 0, 1, false);
+            assert!(matches!(
+                wait(&mut client, id, 2),
+                Err(LeaseError::Blocked(_))
+            ));
+            if index == STREAMS - 1 {
+                client.scans = 0;
+            }
+        }
+        assert_eq!(client.credit_stats().evicted, 1 + CYCLES);
+        assert!(
+            client.scans <= 4 * CYCLES as usize,
+            "{} entries looked at for {CYCLES} evictions among {STREAMS} streams",
+            client.scans
+        );
+    }
+
+    /// A lease that fails reports nothing to transmit, so it must not queue anything either:
+    /// the frames would wait for an unrelated wake.
+    #[test]
+    fn failed_lease_queues_nothing() {
+        let mut client = StreamsState::new(
+            Side::Client,
+            2u32.into(),
+            2u32.into(),
+            1024 * 1024,
+            1000u32.into(),
+            64u32.into(),
+        );
+        let id = StreamId::new(Side::Server, Dir::Uni, 0);
+        data(&mut client, id, 0, 64, false);
+        let mut pending = Retransmits::default();
+        assert_eq!(
+            recv(&mut client, &mut pending, id).lease(1001),
+            Err(LeaseError::TooLarge)
+        );
+        assert!(pending.max_stream_data.is_empty());
+        assert_eq!(
+            recv(&mut client, &mut pending, id).lease(0),
+            Ok(ShouldTransmit(true))
+        );
+        assert!(pending.max_stream_data.contains(&id));
+
+        let id = StreamId::new(Side::Server, Dir::Uni, 1);
+        data(&mut client, id, 0, 10, false);
+        reset(&mut client, id, 10);
+        let mut pending = Retransmits::default();
+        assert_eq!(
+            recv(&mut client, &mut pending, id).lease(11),
+            Err(LeaseError::Reset(0u32.into()))
+        );
+        assert!(!pending.max_stream_id[Dir::Uni as usize]);
+        let pending = stop(&mut client, id, 0);
+        assert!(
+            pending.max_stream_id[Dir::Uni as usize],
+            "the stop frees it"
+        );
+        assert!(pending.stop_sending.is_empty(), "the peer already reset it");
+    }
+
+    /// Observing a reset frees the stream, so the credit its lease still held is announced then:
+    /// nothing is left to release or stop that could announce it later.
+    #[test]
+    fn observed_reset_announces_leased_credit() {
+        let mut client = make(Side::Client);
+        let initial = client.local_max_data;
+        let len = (client.receive_window / 8) as usize;
+        let id = StreamId::new(Side::Server, Dir::Uni, 0);
+        data(&mut client, id, 0, len, false);
+        assert_eq!(lease(&mut client, id), len);
+        reset(&mut client, id, len as u32);
+        assert_eq!(client.credit_stats().leased, len as u64);
+
+        let mut pending = Retransmits::default();
+        assert_eq!(
+            recv(&mut client, &mut pending, id).received_reset(),
+            Ok(Some(0u32.into()))
+        );
+        client.check_leases();
+        assert_eq!(client.local_max_data, initial + len as u64);
+        assert!(pending.max_data);
+    }
+
+    /// An evicted stream tells the peer once, when its reader stops it, and frees its stream ID
+    /// once its final size is known too, whichever comes first.
+    #[test]
+    fn evicted_stop_and_fin_tell_the_peer_once() {
+        const WINDOW: u64 = 1000;
+        for fin_first in [false, true] {
+            let mut client = StreamsState::new(
+                Side::Client,
+                2u32.into(),
+                2u32.into(),
+                1024 * 1024,
+                VarInt::from_u64(WINDOW).unwrap(),
+                VarInt::from_u64(2 * WINDOW).unwrap(),
+            );
+            let id = StreamId::new(Side::Server, Dir::Uni, 0);
+            data(&mut client, id, 0, WINDOW as usize, false);
+            assert_eq!(lease(&mut client, id), WINDOW as usize);
+            let mut pending = Retransmits::default();
+            let _ = recv(&mut client, &mut pending, id).take(1);
+            assert!(matches!(
+                wait(&mut client, id, WINDOW as usize),
+                Err(LeaseError::Blocked(_))
+            ));
+            assert_eq!(wait(&mut client, id, 1), Err(LeaseError::Evicted));
+
+            let mut frames = Retransmits::default();
+            if fin_first {
+                data(&mut client, id, WINDOW, 10, true);
+                client.queue_max_stream_id(&mut frames);
+            }
+            frames |= stop(&mut client, id, 7);
+            if !fin_first {
+                data(&mut client, id, WINDOW, 10, true);
+            }
+            client.queue_max_stream_id(&mut frames);
+            frames |= stop(&mut client, id, 7);
+
+            let expected = usize::from(!fin_first);
+            assert_eq!(
+                frames.stop_sending.len(),
+                expected,
+                "fin_first: {fin_first}"
+            );
+            assert!(
+                frames.max_stream_id[Dir::Uni as usize],
+                "fin_first: {fin_first}"
+            );
+            assert!(!client.recv.contains_key(&id));
+            assert_eq!(client.credit_stats().leased, 0);
+        }
     }
 
     /// A group token indexes its own connection's schedule, so another connection refuses it
@@ -3392,58 +4714,19 @@ mod tests {
         let _ = crate::SendGroups { state: &mut b }.open_in(0, &domain);
     }
 
-    /// Another connection holding at least as much credit still refuses it.
-    #[test]
-    #[should_panic(expected = "released credit from another connection")]
-    fn release_from_another_connection() {
-        let id = StreamId::new(Side::Server, Dir::Uni, 0);
-        let mut a = make(Side::Client);
-        data(&mut a, id, 0, 32, false);
-        let credit = read_held(&mut a, id);
-        let mut b = make(Side::Client);
-        data(&mut b, id, 0, 32, false);
-        let _held = read_held(&mut b, id);
-        let _ = b.release(credit);
-    }
-
-    #[test]
-    #[should_panic(expected = "merged credit from another connection")]
-    fn merge_from_another_connection() {
-        let id = StreamId::new(Side::Server, Dir::Uni, 0);
-        let mut a = make(Side::Client);
-        data(&mut a, id, 0, 32, false);
-        let mut b = make(Side::Client);
-        data(&mut b, id, 0, 32, false);
-        let mut credit = read_held(&mut a, id);
-        credit.merge(read_held(&mut b, id));
-    }
-
-    /// An empty default credit takes on the connection of the first credit merged into it.
-    #[test]
-    fn default_credit_adopts_its_connection() {
-        let id = StreamId::new(Side::Server, Dir::Uni, 0);
-        let mut a = make(Side::Client);
-        data(&mut a, id, 0, 32, false);
-        let mut credit = Credit::default();
-        credit.merge(read_held(&mut a, id));
-        assert_eq!(credit.len(), 32);
-        let _ = a.release(credit);
-        assert_eq!(a.credit_stats().held, 0);
-    }
-
-    /// Ingest and read rounds across many streams, with and without holding and releasing each
-    /// read's connection credit. The held cost must stay flat as the stream count grows.
+    /// Ingest and read rounds across many streams, with a plain read or a lease released whole.
+    /// The lease cost must stay flat as the stream count grows.
     #[test]
     #[ignore = "release benchmark, run by nightly"]
     fn benchmark_receive_credit() {
         const BYTES: usize = 1 << 30;
-        println!("streams,payload,plain_ns_per_read,held_ns_per_read");
+        println!("streams,payload,plain_ns_per_read,lease_ns_per_read");
         for streams in [1u64, 64, 4096] {
             for payload in [1200usize, 64 * 1024] {
                 let rounds = (BYTES / payload / streams as usize).max(1) as u64;
                 let chunk = Bytes::from(vec![0; payload]);
                 let mut ns = [0f64; 2];
-                for (mode, held) in [false, true].into_iter().enumerate() {
+                for (mode, leased) in [false, true].into_iter().enumerate() {
                     let mut client = StreamsState::new(
                         Side::Client,
                         VarInt::from_u64(streams).unwrap(),
@@ -3469,13 +4752,13 @@ mod tests {
                                 state: &mut client,
                                 pending: &mut pending,
                             };
-                            let mut chunks = recv.read(true).unwrap();
-                            std::hint::black_box(chunks.next(usize::MAX).unwrap());
-                            if held {
-                                let credit = chunks.hold();
-                                let _ = chunks.finalize();
-                                let _ = client.release(credit);
+                            if leased {
+                                let _ = recv.lease(1).unwrap();
+                                std::hint::black_box(recv.take(usize::MAX));
+                                let _ = recv.release();
                             } else {
+                                let mut chunks = recv.read(true).unwrap();
+                                std::hint::black_box(chunks.next(usize::MAX).unwrap());
                                 let _ = chunks.finalize();
                             }
                         }

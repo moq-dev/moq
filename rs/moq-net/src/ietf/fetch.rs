@@ -311,7 +311,7 @@ impl Message for Fetch<'_> {
 
 		Ok(Self {
 			request_id,
-			subscriber_priority: subscriber_priority.unwrap_or(128),
+			subscriber_priority: subscriber_priority.unwrap_or(super::priority::DEFAULT_WIRE),
 			// No preference: the publisher picks the order.
 			group_order: group_order.unwrap_or(GroupOrder::Any),
 			fetch_type,
@@ -328,6 +328,8 @@ pub struct FetchOk {
 	pub request_id: Option<RequestId>,
 	pub group_order: GroupOrder,
 	pub end_of_track: bool,
+	/// Drafts 14-19 use the last object plus one, or Object 0 for the whole End Group;
+	/// draft 20 and later use an inclusive End Location.
 	pub end_location: Location,
 	/// The track's properties, as SUBSCRIBE_OK carries them: MAX_CACHE_DURATION from the
 	/// draft-14/15 parameters, the Track Properties block from draft-16 on.
@@ -1082,6 +1084,19 @@ mod tests {
 				assert_eq!(fetch.fill_timeout, body == &fill_timeout, "{version}");
 			}
 		}
+	}
+
+	/// An omitted SUBSCRIBER_PRIORITY is the drafts' 128, not this stack's unset 127.
+	#[test]
+	fn test_fetch_omitted_priority_is_128() {
+		#[rustfmt::skip]
+		let body = [
+			0x01, // Request ID
+			0x02, 0x03, 0x00, // Relative Joining: subscription 3, offset 0
+			0x00, // no parameters
+		];
+		let fetch = decode_message::<Fetch>(&body, Version::Draft16).unwrap();
+		assert_eq!(fetch.subscriber_priority, 128);
 	}
 }
 

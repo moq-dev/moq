@@ -13,7 +13,7 @@ for (const retained of [1, 64, 1024])
 	for (const tracks of [1, 8, 32])
 		for (const joined of [1, 8, 32]) {
 			const clock = new Manual();
-			const restore = clock.install();
+			const installed = clock.install();
 			const source = new Producer();
 			const destination = new Producer();
 			const broadcast = source.createBroadcast(Path.from("room"));
@@ -83,7 +83,7 @@ for (const retained of [1, 64, 1024])
 				destination.close();
 				source.close();
 				for (const peer of peers) peer.abort();
-				await clock.advanceAsync(Nano(0));
-				restore();
+				await clock.advance(Nano(0));
+				installed.close();
 			}
 		}

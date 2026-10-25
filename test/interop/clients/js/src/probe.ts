@@ -65,6 +65,59 @@ function analyze(analyser: AnalyserNode, spectrum: Float32Array<ArrayBuffer>, wa
 	};
 }
 
+/**
+ * Samples per channel the tone check judges: ~170ms at 48kHz. Long enough that a tone 9% off
+ * frequency (a 44.1kHz stream played as 48kHz) has drifted well out of phase with the filter, and
+ * short enough that a window falls between the playout hiccups two busy headless browsers cause.
+ */
+const TONE_WINDOW = 8192;
+
+/** Fraction of the samples' energy at `hz`, by a Goertzel filter: 1.0 for a pure tone at that frequency. */
+function goertzelShare(samples: Float32Array<ArrayBuffer>, rate: number, hz: number): number {
+	const coeff = 2 * Math.cos((2 * Math.PI * hz) / rate);
+	let s1 = 0;
+	let s2 = 0;
+	let energy = 0;
+	for (const x of samples) {
+		const s0 = x + coeff * s1 - s2;
+		s2 = s1;
+		s1 = s0;
+		energy += x * x;
+	}
+	if (energy === 0) return 0;
+	return (2 * (s1 * s1 + s2 * s2 - coeff * s1 * s2)) / (samples.length * energy);
+}
+
+/** One analyser per channel of the graph root, each judged against that channel's tone. */
+class ToneCheck {
+	#analysers: AnalyserNode[];
+	#tones: number[];
+	#wave = new Float32Array(TONE_WINDOW);
+
+	constructor(root: AudioNode, tones: number[]) {
+		this.#tones = tones;
+		const splitter = new ChannelSplitterNode(root.context, { numberOfOutputs: tones.length });
+		root.connect(splitter);
+		this.#analysers = tones.map((_, channel) => {
+			const analyser = new AnalyserNode(root.context, { fftSize: TONE_WINDOW });
+			splitter.connect(analyser, channel);
+			return analyser;
+		});
+	}
+
+	read(): { rms: number; share: number }[] {
+		return this.#analysers.map((analyser, channel) => {
+			analyser.getFloatTimeDomainData(this.#wave);
+			let energy = 0;
+			for (const x of this.#wave) energy += x * x;
+			return {
+				rms: Math.sqrt(energy / this.#wave.length),
+				share: goertzelShare(this.#wave, analyser.context.sampleRate, this.#tones[channel]),
+			};
+		});
+	}
+}
+
 // Read both the fixture counter and the "is anything painted at all" check off one pixel snapshot.
 function readCanvas(canvas: HTMLCanvasElement | null) {
 	if (!canvas || canvas.width === 0 || canvas.height === 0) return { painted: false };
@@ -107,12 +160,16 @@ export function watchResources(): void {
 /**
  * Start sampling a player to the console, beginning immediately.
  *
+ * With `tones`, the frequency each channel should carry, every sample also judges each channel
+ * against its tone.
+ *
  * Returns a function that stops sampling.
  */
-export function attach(el: MoqWatch): () => void {
+export function attach(el: MoqWatch, tones: number[] = []): () => void {
 	const spectrum = new Float32Array(FFT_SIZE / 2);
 	const wave = new Float32Array(FFT_SIZE);
 	let analyser: AnalyserNode | undefined;
+	let toneCheck: ToneCheck | undefined;
 	let root: AudioNode | undefined;
 	let seq = 0;
 
@@ -123,11 +180,14 @@ export function attach(el: MoqWatch): () => void {
 		if (current !== root) {
 			root = current;
 			analyser = undefined;
+			toneCheck = undefined;
 			if (current) {
 				analyser = new AnalyserNode(current.context, { fftSize: FFT_SIZE, smoothingTimeConstant: 0 });
 				current.connect(analyser);
+				if (tones.length) toneCheck = new ToneCheck(current, tones);
 			}
 		}
+		const audioRendition = el.audio.source.out.config.peek();
 
 		const ui = document.querySelector("moq-watch-ui")?.shadowRoot;
 		const control = ui?.querySelector<HTMLButtonElement>("button.control[aria-label]");
@@ -135,6 +195,7 @@ export function attach(el: MoqWatch): () => void {
 		const state: Sample = {
 			seq: seq++,
 			broadcastActive: el.broadcast.out.active.peek() !== undefined,
+			broadcastEpoch: el.broadcast.out.active.peek()?.epoch,
 			broadcastStatus: el.broadcast.out.status.peek(),
 			userActivated: navigator.userActivation.hasBeenActive,
 			at: performance.now(),
@@ -152,6 +213,9 @@ export function attach(el: MoqWatch): () => void {
 			audioStalled: el.audio.out.stalled.peek(),
 			delay: el.sync.out.delay.peek(),
 			...(analyser ? analyze(analyser, spectrum, wave) : {}),
+			audioCodec: audioRendition?.codec,
+			audioChannels: audioRendition?.numberOfChannels,
+			tones: toneCheck?.read(),
 			controlLabel: control?.getAttribute("aria-label") ?? undefined,
 			centerPlayVisible: centerPlay ? getComputedStyle(centerPlay).display !== "none" : false,
 			paused: el.paused,

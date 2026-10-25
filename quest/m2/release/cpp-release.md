@@ -19,7 +19,7 @@ from the release line's C build (`obs-moq-v0.6.17`, 2026-10-17); the first
 plugin built on the C++ package replaces it at this tag. Decided when the C++ line landed on `main`
 (#4079): the first plugin built on the C++ package must not drop the
 Advanced settings or the dock's protocol and reconnect reason that the moq-c
-build had, so those parity quests gate this release.
+build had; that parity landed in #5726 and #6131.
 
 The nightly C++ and OBS release checks pass: the
 [2026-10-20 Nightly](https://github.com/moq-dev/moq/actions/runs/39421743227),
@@ -31,10 +31,6 @@ path no nightly checks. So if the pin is still unset, first dispatch
 the tag's source build and archive check on all four hosts, then both OBS
 builds, and publishes nothing. This quest owns that dry run, tagging, and verifying the
 published downloads.
-
-Decided in the 2026-10-10 audit: the tag also waits for Codecs and the epoch
-rename, so consumers take the binding breaks in one
-release.
 
 ## Required
 

@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { offered } from "../connection/extensions.ts";
 import { exchangeSetup } from "../connection/handshake.ts";
-import { ProtocolViolation, SessionCode } from "../error.ts";
+import { ProtocolViolation, SessionCode, StreamCode, StreamError } from "../error.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -111,6 +111,16 @@ for (const [version, alpn] of DRAFTS) {
 		["a full track name over 4096 bytes", subscribe([field(4000)], 97), SessionCode.ProtocolViolation],
 		["a trailing byte", frame(0x03, [0, 1, ...field(4), ...field(5), 0, 0]), SessionCode.ProtocolViolation],
 		[
+			"an invalid SUBSCRIBE_TRACKS FORWARD",
+			frame(SUBSCRIBE_TRACKS_ID, [0, 0, 1, 0x10, 2]),
+			SessionCode.ProtocolViolation,
+		],
+		[
+			"a duplicate SUBSCRIBE_TRACKS FORWARD",
+			frame(SUBSCRIBE_TRACKS_ID, [0, 0, 2, 0x10, 0, 0, 1]),
+			SessionCode.ProtocolViolation,
+		],
+		[
 			"a SUBSCRIBE_TRACKS prefix over 32 fields",
 			frame(SUBSCRIBE_TRACKS_ID, [0, 33, ...new Array(33).fill(field(1)).flat(), 0]),
 			SessionCode.ProtocolViolation,
@@ -202,6 +212,22 @@ for (const [version, alpn] of DRAFTS) {
 			expect(await stream.reader.u53()).toBe(SubscribeOk.id);
 			await stream.writer.write(frame(0x7e, []));
 			expect(await closeCode(pair.client)).toBe(SessionCode.ProtocolViolation);
+		} finally {
+			logged.mockRestore();
+			close();
+		}
+	});
+
+	// A relay cancels an object stream it no longer serves, such as an old route's after a replacement.
+	test(`a peer reset object stream keeps ${alpn} and logs no error`, async () => {
+		const logged = spyOn(console, "error");
+		const { pair, close } = await serving(version, alpn);
+		try {
+			const uni = new Writer(await pair.client.createUnidirectionalStream(), version);
+			await uni.write(new Uint8Array([0x10]));
+			uni.reset(new StreamError(StreamCode.Cancel, { message: "cancel" }));
+			expect(await closeCode(pair.client)).toBeUndefined();
+			expect(logged).not.toHaveBeenCalled();
 		} finally {
 			logged.mockRestore();
 			close();

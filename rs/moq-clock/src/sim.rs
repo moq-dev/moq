@@ -736,6 +736,15 @@ mod tests {
 	}
 
 	#[crate::test]
+	async fn timeout_at_ends_at_the_deadline() {
+		let slow = crate::timeout_at(at(2), crate::sleep(Duration::from_secs(60))).await;
+		assert_eq!(slow.unwrap_err(), Elapsed);
+		assert_eq!(crate::now(), at(2));
+		let late = crate::timeout_at(at(1), async { 7 }).await;
+		assert_eq!(late, Ok(7), "a ready future wins even past the deadline");
+	}
+
+	#[crate::test]
 	async fn advance_wakes_due_timers() {
 		let timer = spawn(crate::sleep(Duration::from_secs(3)));
 		yield_now().await;
@@ -829,6 +838,14 @@ mod tests {
 		);
 		assert_eq!(ticks.tick().await, at(4));
 		assert_eq!(crate::now(), at(4));
+	}
+
+	#[crate::test]
+	async fn interval_at_starts_at_its_first_tick() {
+		let mut ticks = crate::interval_at(at(2), Duration::from_secs(1));
+		assert_eq!(ticks.tick().await, at(2));
+		assert_eq!(crate::now(), at(2), "nothing ticks before the start");
+		assert_eq!(ticks.tick().await, at(3));
 	}
 
 	#[crate::test]

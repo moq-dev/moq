@@ -8,16 +8,92 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 ### `MoqClientConfig` gains `tokens`
 
 It defaults to empty in every generated binding; a Rust struct literal adds `tokens: vec![]` or ends with `..Default::default()`.
+### Connection state
+
+`MoqClient::connect` returns a connecting session without waiting for its first dial to succeed, natively and in the browser. Read `MoqSession::state()` and pass its `revision` to `state_changed(after)` to observe first-dial failures and reconnects. `MoqConnectionState` carries `phase`, `connects`, `failure`, and `version` together. These replace `status()`, `connects()`, and both `failure()` polls. Cancel the returned session to stop dialing; cancelling or releasing the client does not close it.
+
+### Exact encoder rates and publication options
+
+Encoder configuration is breaking: `MoqVideoEncoderInput.framerate` is now a
+`MoqVideoFrameRate { numerator, denominator }` (use `{30, 1}` for 30 fps or
+`{30000, 1001}` for NTSC). Zero components and rates above 1,000,000 fps are
+refused. `track` moves out of both encoder output records into
+`MoqAudioProducerOptions` / `MoqVideoProducerOptions`, alongside `input`,
+`output`, and optional `bandwidth`. Producers now take `(catalog, options)`;
+codec-only encoders keep their input/output arguments and take no publication
+settings. Regenerate bindings and rebuild the native library together.
+
+### Video rendition preference
+
+`MoqVideo` gains `preference: i32`. Set it to `0` in record literals to keep the default ranking; higher values are preferred and compatibility transcodes use `-1`. Regenerate bindings and rebuild them with the matching native library.
+
+### `announce` takes a `MoqAnnounceRoute`
+
+`MoqBroadcastProducer::announce` takes `MoqAnnounceRoute { cost, epoch }` instead of a `MoqRoute`: the origin builds the hop chain, so a publisher no longer passes `hops` or `anonymous`.
+`MoqRoute` is only what `MoqAnnounceConsumer` reports, so its fields lose their defaults, and `MoqError::InvalidRoute` is gone.
+To re-announce an observed route, copy its `cost` and `epoch`.
+
+### A broadcast reference waits for its sibling's announcement (#6254)
+
+Resolving a rendition's `broadcast` reference, through `MoqBroadcastConsumer::resolve` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
+Where you skipped such a rendition on that error, bound the call yourself: cancel it or race it against a timeout.
+
+### Session shutdown drains
+
+`MoqSession::shutdown()` still returns `()` at once, but it now requests a draining close instead of cancelling with code 0.
+Await `closed()` to wait for the drain and receive delivery failures, or call `cancel(0)` to close at once, as `shutdown()` did.
+If you adopted the release line's async `drain()`, call `shutdown()` and then await `closed()` instead.
+
+### Media track naming moves out of init
+
+`MoqAudioInit::track` and `MoqVideoInit::track` are removed.
+Pass that name through `MoqMediaTarget::Named { name }` when constructing `MoqMediaTrackProducer::audio` or `video`; init records describe the codec and media only.
+
+### Broadcast `finish` is removed
+
+`MoqBroadcastProducer::finish()`, a deprecated alias for `close()`, is removed.
+Call `MoqBroadcastProducer::close()` where you called `finish()`.
+To end the content first, call `MoqMediaCatalogProducer::finish()`; the broadcast stays up until `close()`.
+
+### JSON snapshot `delta_ratio` is `deltas`
+
+`MoqJsonSnapshotConfig::delta_ratio` is replaced by `deltas: bool` (default `true`).
+Set `deltas: false` where you set `delta_ratio: 0`.
+Snapshot groups roll on joiner demand, which the producer answers on its own: publish the track with `MoqTrackInfo::refresh` (`Some(8)` matches the old default), or its groups roll only at their caps.
+
+### Priorities are signed (#6142)
+
+`MoqTrackInfo.priority`, `MoqSubscription.priority`, `MoqFetchGroupOptions.priority`, and `MoqGroupRequest.priority()` are `i8`, higher first, and 0 is the unset midpoint.
+`MoqTrackInfo.priority` defaulted to 127 and now defaults to 0.
+To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
+
+### A client asks only about what it watches (#6165)
+
+On moq-lite, a client session asks its relay for announcements only under paths something watches, through `announced` or `announced_broadcast`, instead of under its whole scope at connect.
+`MoqOriginConsumer::request_broadcast` watches nothing, so on a client it fails with `MoqError::Unroutable` for a path nothing watches, even when the relay announces it.
+Resolve the path with `announced_broadcast`, or hold `announced` over its prefix while requesting.
+moq-transport and moq-lite-03/04 sessions are unchanged.
+
+### `MoqContainerFormat::Fmp4` unwraps to Legacy (#6250)
+
+A container import with `MoqContainerFormat::Fmp4` now publishes one Legacy frame per sample instead of one CMAF frame per fragment.
+Pass the new `MoqContainerFormat::Cmaf` to keep publishing CMAF.
 
 ### Catalog references carry their epoch
 
 `MoqVideo` and `MoqAudio` gain `epoch`, the publisher instance their `broadcast` reference names. It defaults to null in every generated binding; a Rust struct literal adds `epoch: None`.
-`MoqBroadcastConsumer::resolve` takes the rendition's `epoch` after `reference`; pass it alongside, or `None` to resolve whichever instance answers.
+`MoqBroadcastConsumer::resolve` takes the catalog `MoqRendition` instead of its `reference`, and reads the reference and its `epoch` from it.
 Resolving, and the rendition-based consumers, fail a rendition whose broadcast is proven to serve another epoch with `Mux`.
+
+### Timestamps stop at 2^61 - 1 microseconds (#6168)
+
+Every `timestamp_us` input, such as `MoqTrackProducer::write_frame` or `MoqAnchor::Time`, fails with `MoqError::TimeOverflow` past `2^61 - 1` instead of `2^62 - 1`, the most moq-lite-05/06 can carry.
+A received timestamp past it fails the group as a malformed track.
+Clamp timestamps you build from unbounded input to `2^61 - 1`.
 
 ### Finished tracks stay until the broadcast ends (#6157)
 
-A finished track, raw or media, now stays listed, with its catalog rendition and demand, until its broadcast closes or the new `MoqBroadcastProducer::finish` lets go, instead of unlisting when its producer finishes or is released.
+A finished track, raw or media, now stays listed, with its catalog rendition and demand, until its broadcast closes, instead of unlisting when its producer finishes or is released.
 Publish a replacement under a new name, and expect a finished track's demand watch to end with the broadcast.
 
 ### A claim answers by publishing (#5678)
@@ -35,13 +111,6 @@ It defaults to `false` in every generated binding; a Rust struct literal adds `c
 `MoqAnchor` gains `Time { timestamp_us }`, the group containing that presentation time, so exhaustive matches need an arm for it.
 `MoqTrackConsumer::update` now returns `Result<(), MoqError>`, failing with `TimestampMismatch` on a time anchor an untimed track can't serve.
 
-### Regenerate bindings after the API documentation update
-
-The new documentation on `MoqAudioProducer::write` and `finish` changes their
-UniFFI metadata checksums, even though their signatures and behavior are unchanged.
-Regenerate each language's bindings from the rebuilt library and update them together.
-Older generated bindings with active checksum guards reject this library during initialization.
-
 ### JSON consumers return `MoqJsonValue` (#5677)
 
 `MoqJsonSnapshotConsumer::next` and `MoqJsonStreamConsumer::next` return `MoqJsonValue { value, timestamp_us }` instead of a string; `timestamp_us` is null when untimed.
@@ -58,7 +127,6 @@ A subscription now reads only the groups its own `ranges` cover, rather than sta
 `wanted()` returns null while nobody subscribes, otherwise the group subscribers want next, and `wanted_changed()` waits for it to change (the first call returns at once).
 Loop on `wanted_changed()` until it returns non-null where you awaited `used()`, and null where you awaited `unused()`.
 `MoqTrackInfo` gains `refresh`, the ratio past which a joining subscriber asks for a new group.
-`MoqGroupDemand` is unchanged.
 
 ### `MoqCongestionControl` gained `None` (#5926)
 
@@ -83,11 +151,11 @@ A start group `n` is `MoqRange { start: MoqAnchor::Absolute { group: n, frame: 0
 ### Receive estimates come from `MoqSession::recv_bandwidth` (#5777)
 
 The connection stats no longer carry a receive estimate.
-Hold the consumer `MoqSession::recv_bandwidth` returns to request PROBE, read it with `peek()` or wait with `changed()`, and drop it to stop. `MoqConnectionStats::estimated_recv_rate_bps` is gone.
+Hold the consumer `MoqSession::recv_bandwidth` returns to request PROBE, read it with `rate()` or wait with `rate_changed()`, and drop it to stop. `MoqConnectionStats::estimated_recv_rate_bps` is gone.
 
 ```rust
 let bandwidth = session.recv_bandwidth();
-let rate = bandwidth.as_ref().and_then(|b| b.peek());
+let rate = bandwidth.as_ref().and_then(|b| b.rate());
 ```
 
 ### `available()` waits for the next publisher instance (#5700)
@@ -116,7 +184,7 @@ let config = MoqMediaTrackConfig { rendition: MoqRendition::Video { id, config: 
 ### Native codecs have audio and video namespaces (#5694)
 
 `MoqBroadcastProducer::encode_audio` / `encode_video` are the `MoqAudioProducer::new` / `MoqVideoProducer::new` constructors, which take the broadcast's `MoqMediaCatalogProducer`.
-The audio track name moves into `MoqAudioEncoderOutput::track`, and a zero `frame_duration_us` (the new default) takes the codec's own frame.
+The audio track name belongs to `MoqAudioProducerOptions::track`, and a zero `frame_duration_us` (the new default) takes the codec's own frame.
 `MoqBroadcastConsumer::decode_audio` / `decode_video` are `MoqAudioConsumer::subscribe` / `MoqVideoConsumer::subscribe`, taking the broadcast first.
 The producers' `name()`, `used()`, and `unused()` are gone; read subscriber state through `demand()`.
 `MoqVideoEncoderOutput::gop` is `Option<MoqVideoGop>`, so `Some(30)` is `Some(MoqVideoGop::Keyframe { interval: 30 })`.
@@ -124,7 +192,7 @@ Codec-only `MoqAudioEncoder` / `MoqVideoEncoder` encode without publishing.
 
 ```rust
 let catalog = MoqMediaCatalogProducer::new(broadcast)?;
-let video = MoqVideoProducer::new(&catalog, input, output, None)?;
+let video = MoqVideoProducer::new(&catalog, MoqVideoProducerOptions { input, output, track: None, bandwidth: None })?;
 let frames = MoqVideoConsumer::subscribe(&consumer, name, rendition, decoder).await?;
 ```
 
@@ -200,7 +268,8 @@ The Display text is unchanged.
 
 `MoqFrame.timestamp_us` and `MoqDatagram.timestamp_us` are optional, null on a frame read from an untimed track, and default to null.
 `MoqTrackInfo.timescale` is null on a received untimed track, and a null timescale on publish makes the track untimed.
-A raw track you publish is timed by default, so a raw write without a timestamp fails with `TimestampMismatch` instead of going out at 0.
+A raw track you publish is now untimed by default: a null `timescale` no longer selects microseconds.
+Set `timescale: Some(1_000_000)` to keep the released default, and provide a timestamp on each timed write.
 Data operations take an optional timestamp in microseconds, and whole-frame media writes require one.
 `MoqMediaCatalogProducer::now()` samples the broadcast clock for local-event stamps.
 Wrap raw frame timestamps in `Some`.
@@ -228,10 +297,6 @@ An exhaustive match needs one more arm, and a `Quic` check that meant any QUIC s
 `MoqVideoConsumer::next` returns an `Arc<MoqVideoDecodedFrame>` object with `timestamp_us()`, `width()`, `height()`, `pixels(format)`, and `surface()`.
 `MoqVideoDecoderOutput.format` is gone; set `surface: true` to keep the decoder's native surface, readable as a `MoqVideoSurface`.
 Read RGBA with `pixels(MoqVideoPixelFormat::Rgba)` instead of `data`.
-
-### Broadcast `finish` is removed (#4152)
-
-`MoqBroadcastProducer::finish()` is gone; close the broadcast instead.
 
 ### The `android-logcat` feature is removed (#4608)
 

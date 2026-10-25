@@ -11,7 +11,7 @@ use moq_net::{auth, kio};
 use crate::abort::AbortOnDrop;
 use crate::connect::{Credential, Set, Token};
 
-type Opening = futures::future::BoxFuture<'static, moq_net::Result<auth::Auth>>;
+type Opening = futures::future::BoxFuture<'static, moq_net::Result<(auth::Auth, auth::Answer)>>;
 
 /// Holds every configured token except the latest dial's connection credential on the
 /// connection's auth handle, which presents them on each session it builds, and keeps
@@ -108,15 +108,15 @@ async fn run(shared: Arc<Shared>, tokens: kio::Consumer<Set>, mut generation: u6
 /// The configured tokens held on their own AUTH streams.
 #[derive(Default)]
 struct Held {
-	tokens: Vec<(Token, Answer)>,
+	tokens: Vec<(Token, Presented)>,
 	/// Tokens a change replaced, answered or not, kept presented until every
 	/// replacement has its answer so the grant never narrows in between.
-	retiring: Vec<Answer>,
+	retiring: Vec<Presented>,
 	/// Whether the latest dial already logged that its session carries no extra tokens.
 	unsupported: bool,
 }
 
-enum Answer {
+enum Presented {
 	Waiting(Opening),
 	Granted(#[allow(dead_code, reason = "held to keep the token presented")] auth::Auth),
 	/// Refused or unsupported. Not presented again unless a change removes and re-adds it.
@@ -137,7 +137,7 @@ impl Held {
 					if let Some(result) = opening.as_mut().now_or_never() {
 						opening = futures::future::ready(result).boxed();
 					}
-					Answer::Waiting(opening)
+					Presented::Waiting(opening)
 				}
 			};
 			self.tokens.push((token, answer));
@@ -146,7 +146,7 @@ impl Held {
 		self.retiring.extend(
 			old.into_iter()
 				.map(|(_, answer)| answer)
-				.filter(|answer| !matches!(answer, Answer::Refused)),
+				.filter(|answer| !matches!(answer, Presented::Refused)),
 		);
 		self.settle();
 	}
@@ -156,28 +156,28 @@ impl Held {
 		let mut answered = false;
 		let mut unsupported = false;
 		for (_, answer) in &mut self.tokens {
-			let Answer::Waiting(opening) = answer else { continue };
+			let Presented::Waiting(opening) = answer else { continue };
 			let Poll::Ready(result) = opening.as_mut().poll(cx) else {
 				continue;
 			};
 			answered = true;
 			*answer = match result {
-				Ok(auth) => {
-					// Without AUTH, moq-transport accepts a token at once for the requests that
-					// name it, but a configured token rides no request, so this session sends it
+				Ok((auth, answer)) => {
+					// Without AUTH, moq-transport takes a token only for the requests that name
+					// it, but a configured token rides no request, so this session sends it
 					// nowhere. The handle still presents it on a later session that has AUTH.
-					if auth.grant().peek().is_none() && auth.closed().now_or_never().is_none() {
+					if answer == auth::Answer::Requests {
 						unsupported = true;
 					}
-					Answer::Granted(auth)
+					Presented::Granted(auth)
 				}
 				Err(moq_net::Error::Unsupported) => {
 					unsupported = true;
-					Answer::Refused
+					Presented::Refused
 				}
 				Err(err) => {
 					tracing::warn!(%err, "a configured token was refused");
-					Answer::Refused
+					Presented::Refused
 				}
 			};
 		}
@@ -196,7 +196,7 @@ impl Held {
 		if !self
 			.tokens
 			.iter()
-			.any(|(_, answer)| matches!(answer, Answer::Waiting(_)))
+			.any(|(_, answer)| matches!(answer, Presented::Waiting(_)))
 		{
 			self.retiring.clear();
 		}
@@ -222,37 +222,31 @@ mod tests {
 			config.protocol = qmux::Protocol::Negotiate(versions.alpns().iter().map(|alpn| alpn.to_string()).collect());
 			config
 		};
-		let stream = |io| qmux::transport::Stream::new(io, qmux::Version::QMux01, config().max_record_size);
+		let stream = |io| qmux::transport::Stream::new(io);
 		let (client, server) = tokio::io::duplex(64 * 1024);
 		let (client, server) = tokio::try_join!(
 			qmux::Session::connect(stream(client), config()),
 			qmux::Session::accept(stream(server), config())
 		)
 		.unwrap();
-		let now = moq_net::time::now();
+		let now = moq_net::time::Instant::now();
 		let handle = auth::Handle::new();
 		let client = async {
 			let (session, driver) = moq_net::Client::new()
 				.with_versions(versions.clone())
 				.with_auth(handle.clone())
-				.connect(
-					now,
-					crate::transport::Session::new(client, moq_net::transport::Binding::InBand),
-				)
+				.connect(now, client)
 				.await
 				.unwrap();
 			(session, AbortOnDrop::new(tokio::spawn(moq_net::time::run(driver))))
 		};
 		let server = async {
-			let request = moq_net::Server::new()
+			let mut request = moq_net::Server::new()
 				.with_versions(versions.clone())
-				.accept_request(
-					now,
-					crate::transport::Session::new(server, moq_net::transport::Binding::InBand),
-				)
+				.accept_request(now, server)
 				.await
 				.unwrap();
-			let mut requests = request.auth().requests().unwrap();
+			let mut requests = request.requests();
 			let (session, driver) = request.ok().await.unwrap();
 			let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
 			let acceptor = tokio::spawn(async move {
@@ -349,6 +343,23 @@ mod tests {
 		assert!(kept.is_err(), "the replacement was withdrawn");
 	}
 
+	/// A replacement is authoritative: the replaced token is withdrawn once the peer
+	/// answers its replacement, even with a refusal.
+	#[tokio::test(start_paused = true)]
+	async fn a_refused_replacement_still_withdraws_the_replaced_token() {
+		let mut pair = pair_on("moq-lite-07-wip").await;
+		let (tokens, _holder) = holder(&pair, "moqt://relay.example.com/", &["connection", "old"]);
+		let old = next_token(&mut pair).await.accept(auth::Grant::all());
+
+		tokens.set(vec!["connection".parse().unwrap(), "new".parse().unwrap()]);
+		let request = next_token(&mut pair).await;
+		assert_eq!(request.token().as_ref(), b"new");
+		request.reject(moq_net::SessionError::Unauthorized, "expired");
+		tokio::time::timeout(std::time::Duration::from_secs(5), old.closed())
+			.await
+			.expect("the replaced token outlived its refused replacement");
+	}
+
 	/// Without AUTH a configured token rides nothing on this session, which logs that once,
 	/// but the handle keeps it for a later session that has AUTH.
 	#[tokio::test(start_paused = true)]
@@ -365,7 +376,7 @@ mod tests {
 		assert!(
 			held.tokens
 				.iter()
-				.all(|(_, answer)| matches!(answer, Answer::Granted(_)))
+				.all(|(_, answer)| matches!(answer, Presented::Granted(_)))
 		);
 		assert!(held.unsupported);
 	}

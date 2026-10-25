@@ -17,9 +17,9 @@ use bytes::{Bytes, BytesMut};
 
 use super::plaintext::{Clear, Plaintext, TAG_LEN};
 use crate::{
-    ClientConfig, Connection, ConnectionHandle, Credit, DEFAULT_SUPPORTED_VERSIONS, DatagramEvent,
-    Dir, Duration, Endpoint, EndpointConfig, Event, FixedLengthConnectionIdParser, Instant,
-    PartialDecode, ReadError, ServerConfig, Side, StreamId,
+    ClientConfig, Connection, ConnectionHandle, DEFAULT_SUPPORTED_VERSIONS, DatagramEvent, Dir,
+    Duration, Endpoint, EndpointConfig, Event, FixedLengthConnectionIdParser, Instant, LeaseError,
+    PartialDecode, ReadError, ServerConfig, Side, StreamId, TransportConfig, VarInt,
     frame::{self, Frame},
 };
 
@@ -34,6 +34,17 @@ const ROUNDS: usize = 32;
 
 /// The largest single write, so a long op sequence stays fast to run.
 const MAX_WRITE: usize = 16 * 1024;
+
+/// Each side's connection receive window: four of the largest writes.
+const RECEIVE_WINDOW: u32 = 4 * MAX_WRITE as u32;
+
+/// Both sides' transport: a receive window a few writes fill, so leases that wait spend it and
+/// the stuck-window eviction runs.
+fn transport() -> Arc<TransportConfig> {
+    let mut transport = TransportConfig::default();
+    transport.receive_window(VarInt::from_u32(RECEIVE_WINDOW));
+    Arc::new(transport)
+}
 
 /// Which endpoint an op acts on, or which one's inbound queue it touches.
 #[derive(Arbitrary, Debug, Clone, Copy)]
@@ -85,12 +96,20 @@ enum Op {
         stream: u8,
         priority: i8,
     },
+    /// Rank a receive stream for eviction.
+    Rank {
+        who: Who,
+        stream: u8,
+        priority: i8,
+    },
+    /// Read up to `max` bytes in order, or on a leased stream lease until `max` bytes arrived and
+    /// consume them, waiting otherwise.
     Read {
         who: Who,
         stream: u8,
         max: u16,
-        hold: bool,
     },
+    /// Consume everything every leased stream holds.
     Release {
         who: Who,
     },
@@ -183,7 +202,6 @@ struct Peer {
     recv: Vec<StreamId>,
     /// How far each stream has been read, in order.
     read: HashMap<StreamId, u64>,
-    held: Vec<Credit>,
     /// The length of each datagram this side sent, indexed by the sequence number it carries.
     datagrams_sent: Vec<usize>,
     /// The sequence numbers of the datagrams this side received.
@@ -197,9 +215,11 @@ struct Peer {
 
 impl Peer {
     fn new(side: Side, port: u16) -> Self {
-        let server = side
-            .is_server()
-            .then(|| Arc::new(ServerConfig::with_crypto(Arc::new(Plaintext))));
+        let server = side.is_server().then(|| {
+            let mut config = ServerConfig::with_crypto(Arc::new(Plaintext));
+            config.transport_config(transport());
+            Arc::new(config)
+        });
         // A fixed seed per side keeps connection IDs and packet number skips stable across
         // runs; the reset and token keys still draw their own randomness.
         let mut endpoint = EndpointConfig::default();
@@ -214,7 +234,6 @@ impl Peer {
             send: Vec::new(),
             recv: Vec::new(),
             read: HashMap::new(),
-            held: Vec::new(),
             datagrams_sent: Vec::new(),
             datagrams_received: HashSet::new(),
             forged_streams: HashSet::new(),
@@ -300,18 +319,24 @@ impl Pair {
             capture: None,
         };
 
+        let mut config = ClientConfig::new(Arc::new(Plaintext));
+        config.transport_config(transport());
         let (ch, conn) = pair
             .client
             .endpoint
-            .connect(
-                pair.now,
-                ClientConfig::new(Arc::new(Plaintext)),
-                pair.server.addr,
-                "localhost",
-            )
+            .connect(pair.now, config, pair.server.addr, "localhost")
             .unwrap();
         pair.client.conn = Some((ch, conn));
         pair
+    }
+
+    /// Check both sides' receive lease books.
+    fn check_leases(&self) {
+        for peer in [&self.client, &self.server] {
+            if let Some((_, conn)) = &peer.conn {
+                conn.check_leases();
+            }
+        }
     }
 
     /// Drive the handshake with a lossless network, returning whether both sides connected.
@@ -566,23 +591,32 @@ impl Pair {
                     let _ = conn.send_stream(id).set_priority(priority.into());
                 }
             }
-            Op::Read {
+            Op::Rank {
                 who,
                 stream,
-                max,
-                hold,
+                priority,
             } => {
+                let peer = self.peer(who);
+                if let Some(id) = pick(&peer.recv, stream)
+                    && let Some(conn) = peer.conn()
+                {
+                    conn.recv_stream(id).set_priority(priority.into());
+                }
+            }
+            Op::Read { who, stream, max } => {
                 let (peer, sent) = self.writer(who);
                 if let Some(id) = pick(&peer.recv, stream) {
-                    read(peer, sent, id, max.into(), hold);
+                    match leased(id) {
+                        true => lease(peer, sent, id, max.into(), max.into()),
+                        false => read(peer, sent, id, max.into()),
+                    }
                 }
             }
             Op::Release { who } => {
-                let peer = self.peer(who);
-                let held = std::mem::take(&mut peer.held);
-                if let Some(conn) = peer.conn() {
-                    for credit in held {
-                        let _ = conn.release(credit);
+                let (peer, sent) = self.writer(who);
+                for id in peer.recv.clone() {
+                    if leased(id) {
+                        lease(peer, sent, id, 0, usize::MAX);
                     }
                 }
             }
@@ -726,7 +760,10 @@ impl Pair {
                     }
                 }
                 for id in peer.recv.clone() {
-                    read(peer, &self.sent, id, usize::MAX, false);
+                    match leased(id) {
+                        true => lease(peer, &self.sent, id, 0, usize::MAX),
+                        false => read(peer, &self.sent, id, usize::MAX),
+                    }
                 }
             }
             self.tick();
@@ -767,13 +804,7 @@ fn send_stream(peer: &mut Peer, index: u8) -> Option<(StreamId, &mut Connection)
 
 /// Read up to `max` bytes from a stream in order, checking each against what was sent,
 /// unless a tampered packet carried data for it.
-fn read(
-    peer: &mut Peer,
-    sent: &HashMap<(Side, StreamId), Sent>,
-    id: StreamId,
-    max: usize,
-    hold: bool,
-) {
+fn read(peer: &mut Peer, sent: &HashMap<(Side, StreamId), Sent>, id: StreamId, max: usize) {
     let writer = !peer.side;
     let forged = peer.forged_streams.contains(&id);
     let Some((_, conn)) = &mut peer.conn else {
@@ -824,10 +855,59 @@ fn read(
         }
     }
 
-    if hold {
-        peer.held.push(chunks.hold());
-    }
     let _ = chunks.finalize();
+}
+
+/// Odd streams are read through leases, since a plain read would skip what a lease holds.
+fn leased(id: StreamId) -> bool {
+    id.index() % 2 == 1
+}
+
+/// Lease a stream once `want` bytes arrived, then consume up to `max` bytes of it, checking each
+/// against what was sent unless a tampered packet carried data for it. An evicted stream is
+/// stopped, as moq-net does.
+fn lease(
+    peer: &mut Peer,
+    sent: &HashMap<(Side, StreamId), Sent>,
+    id: StreamId,
+    want: usize,
+    max: usize,
+) {
+    let writer = !peer.side;
+    let forged = peer.forged_streams.contains(&id);
+    let Some((_, conn)) = &mut peer.conn else {
+        return;
+    };
+    match conn.recv_stream(id).lease(want) {
+        Ok(_) => {}
+        Err(LeaseError::Evicted) => {
+            conn.recv_stream(id)
+                .stop(0u32.into())
+                .expect("an evicted stream stops once");
+            return;
+        }
+        // Waiting, reset, or stopped: nothing to check yet.
+        Err(_) => return,
+    }
+    let Some(lease) = conn.leased(id) else {
+        return;
+    };
+    let offset = peer.read.entry(id).or_default();
+    let n = max.min(lease.len());
+    if !forged {
+        let written = sent.get(&(writer, id)).map_or(0, |sent| sent.len);
+        assert!(
+            *offset + lease.len() as u64 <= written,
+            "leased past what was written"
+        );
+        for (at, &byte) in (*offset..).zip(lease.chunks().flatten().take(n)) {
+            assert_eq!(byte, stream_byte(writer, id, at), "corrupt stream data");
+        }
+    }
+    *offset += n as u64;
+    let mut recv = conn.recv_stream(id);
+    recv.advance(n);
+    let _ = recv.release();
 }
 
 /// The byte a writer puts at `offset` of a stream, unique enough to catch misplaced data.
@@ -875,9 +955,11 @@ pub fn connection(data: &[u8]) -> bool {
             break;
         };
         pair.apply(op);
+        pair.check_leases();
     }
 
     pair.drain();
+    pair.check_leases();
     true
 }
 
@@ -1108,7 +1190,6 @@ mod tests {
                         who,
                         stream,
                         max: rng.random(),
-                        hold: false,
                     },
                     6 => Op::Corrupt {
                         to: who,

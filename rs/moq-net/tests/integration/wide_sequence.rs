@@ -39,7 +39,7 @@ async fn largest_quic_sequence_reaches_the_subscriber() {
 			let remote = client.consume().request_broadcast("ladder", None).await.unwrap();
 			let mut sub = remote.track("data").unwrap().subscribe(None).await.unwrap();
 			for sequence in [5, 1 << 32, (1 << 53) - 1, (1 << 53) + 1, (1 << 62) - 1] {
-				// Lite05/06 zigzag the first timestamp from zero, halving its positive range.
+				// Timestamps stop at 2^61 - 1, the most lite-05/06 can zigzag as a first frame.
 				let timestamp = Timestamp::from_micros(sequence.min((1 << 61) - 1)).unwrap();
 				let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
 				group.write_frame(timestamp, b"ladder".as_ref()).unwrap();
@@ -52,9 +52,9 @@ async fn largest_quic_sequence_reaches_the_subscriber() {
 				assert_eq!(got.sequence, sequence, "{alpn} relayed={relayed}");
 				let frame = got.read_frame().await.unwrap().unwrap();
 				assert_eq!(frame.payload, b"ladder".as_ref());
-				if alpn != "moq-lite-02" {
-					assert_eq!(frame.timestamp, Some(timestamp));
-				}
+				// Lite-02 carries no timestamps, and a lite-06 subscriber drops them.
+				let timed = alpn == "moq-transport-19";
+				assert_eq!(frame.timestamp, timed.then_some(timestamp), "{alpn} relayed={relayed}");
 			}
 		}
 	}

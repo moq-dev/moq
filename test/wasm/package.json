@@ -10,6 +10,6 @@
 	"devDependencies": {
 		"@ubjs/core": "0.31.0-6",
 		"@ubjs/wasm": "0.31.0-6",
-		"playwright": "^1.64.1"
+		"playwright": "1.64.1"
 	}
 }

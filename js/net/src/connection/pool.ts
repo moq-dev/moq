@@ -59,8 +59,11 @@ export interface ConnectionProps {
 	 */
 	share?: boolean;
 
-	/** Protocol versions to offer, most preferred first, spelled like `moq-lite-06`; connections pool by URL and this list. */
-	versions?: readonly string[];
+	/**
+	 * Protocol versions to offer, most preferred first, spelled like `moq-lite-06`; connections pool by
+	 * URL and this list. Pass a `Signal` to switch versions live.
+	 */
+	versions?: readonly string[] | Signal<readonly string[] | undefined>;
 
 	/** WebTransport options applied to each connection attempt (not reactive). */
 	webtransport?: WebTransportPropsType;
@@ -82,6 +85,13 @@ export interface ConnectionProps {
 	 * `Signal` to replace them before they expire. Implies a private loop.
 	 */
 	tokens?: readonly string[] | Signal<readonly string[]>;
+
+	/**
+	 * Maximum time for each connection attempt, the dial and the MoQ handshake (default:
+	 * 30000ms; `0` waits forever). An attempt that outlives it is retried like any other
+	 * failure. The same bound as the `timeout` option of {@link Connection.connect}.
+	 */
+	timeout?: Milli;
 
 	/**
 	 * How to react to the relay's GOAWAY; an unset field uses its default. Every connection
@@ -118,7 +128,7 @@ export interface ConnectionProps {
  * session finishes its groups, and the handle and its origin carry across. A redirect the
  * {@link ConnectionProps.goaway} policy refuses stops the loop like an auth rejection does.
  *
- * Options the pool cannot honor (transport options, delay, goaway, tokens, a pinned
+ * Options the pool cannot honor (transport options, delay, timeout, goaway, tokens, a pinned
  * certificate, caller-owned origins) use a private loop. An explicit `share: true`
  * refuses them. A supplied transport cannot reconnect at all; pass it to {@link Connection.connect}
  * instead.
@@ -141,6 +151,9 @@ export class Connection {
 	/** Relay URL to connect to; updating it reconnects to that URL. */
 	url: Signal<URL | undefined>;
 
+	/** Protocol versions to offer, or undefined for the defaults; updating it reconnects with that list. */
+	versions: Signal<readonly string[] | undefined>;
+
 	/** Whether to hold a connection at all; clearing it releases this handle's share. */
 	enabled: Signal<boolean>;
 
@@ -150,8 +163,9 @@ export class Connection {
 	/**
 	 * The failure that stopped retrying the current URL, or undefined while the loop is live.
 	 *
-	 * Set on an auth rejection or when a private retry window expires. Cleared when a new URL
-	 * or a disable/re-enable starts another sequence, not on a page hide/show.
+	 * Set on an auth rejection, when a private retry window expires, or when {@link versions} names
+	 * one this build cannot offer. Cleared when a new URL or version list, or a disable/re-enable,
+	 * starts another sequence, not on a page hide/show.
 	 */
 	readonly error: Getter<Error | undefined>;
 
@@ -187,11 +201,13 @@ export class Connection {
 	readonly origin: Getter<Origin.Table | undefined>;
 
 	/**
-	 * The auth handle for the current URL, or undefined while disabled or URL-less.
+	 * The auth handle every session presents, or undefined while disabled or URL-less.
 	 *
 	 * Every session the connection makes presents the tokens it holds, so a route naming one
-	 * keeps it across a reconnect, and its grant follows the live session. A shared handle's
-	 * is the same one every other handle on this URL uses, since they share the session.
+	 * keeps it across a reconnect, and its grant follows the live session. A private
+	 * connection keeps one handle across URL changes, so its tokens go to the new URL, and
+	 * starts another when `versions` changes. A shared connection's is the one every other
+	 * handle on its URL uses, since they share the session.
 	 */
 	readonly auth: Getter<Auth.Handle | undefined>;
 
@@ -223,11 +239,17 @@ export class Connection {
 	 * (plus the linger window) wants them.
 	 */
 	constructor(props?: ConnectionProps) {
-		const versions = normalizeVersions(props);
+		const given = props?.versions;
+		// A plain list is checked and copied now, so a bad name throws here and mutating the array
+		// later changes nothing. A live list is checked as it changes, failing on `error`.
+		const fixed = normalizeVersions({ ...props, versions: Array.isArray(given) ? given : undefined });
+		// Likewise a bad timeout, before anything below exists to leak.
+		if (props?.timeout !== undefined) Milli(props.timeout);
 		refuse(props);
 		this.#signals = new Effect();
 
 		this.url = Signal.from(props?.url);
+		this.versions = Signal.from(Array.isArray(given) ? fixed : given);
 		this.enabled = Signal.from(props?.enabled ?? true);
 		this.status = this.#status;
 		this.error = this.#error;
@@ -244,7 +266,7 @@ export class Connection {
 		const href = this.#signals.computed((effect) => effect.get(this.url)?.href);
 
 		if (props && (props.share === false || requiresPrivate(props))) {
-			this.#runPrivate({ ...props, versions }, href);
+			this.#runPrivate(props, href);
 			return;
 		}
 
@@ -252,6 +274,11 @@ export class Connection {
 			if (!effect.get(this.enabled)) return;
 			const key = effect.get(href);
 			if (!key) return;
+			const versions = offered(effect.get(this.versions));
+			if (versions instanceof TypeError) {
+				effect.set(this.#error, versions, undefined);
+				return;
+			}
 
 			const lease = acquire(key, versions, linger);
 			effect.cleanup(lease.release);
@@ -273,30 +300,52 @@ export class Connection {
 		const origin = props.consume ?? new Origin.Producer();
 		if (owned) this.#signals.cleanup(() => origin.close());
 
-		const loop = new Reload({
-			url: this.url,
-			enabled: this.enabled,
-			publish: props.publish ?? (owned ? origin.consume() : undefined),
-			consume: origin,
-			versions: props.versions,
-			webtransport: props.webtransport,
-			websocket: props.websocket,
-			delay: props.delay,
-			goaway: props.goaway,
-			tokens: props.tokens,
-		});
-		this.#signals.cleanup(() => loop.close());
+		const publish = props.publish ?? (owned ? origin.consume() : undefined);
 
-		this.#signals.run((effect) => {
-			if (!effect.get(this.enabled) || !effect.get(href)) return;
-			effect.set(this.#origin, origin, undefined);
-			effect.set(this.#bandwidth, loop.bandwidth, undefined);
-			effect.set(this.#auth, loop.auth, undefined);
-		});
-		this.#signals.run((effect) => effect.set(this.#status, effect.get(loop.status), "disconnected"));
-		this.#signals.run((effect) => effect.set(this.#established, effect.get(loop.established), undefined));
-		this.#signals.run((effect) => effect.set(this.#probe, loop.probe, undefined));
-		this.#signals.run((effect) => effect.set(this.#error, effect.get(loop.error), undefined));
+		// The origin spans version changes; only the loop dialing it is replaced. Each loop is built
+		// synchronously, not in an effect a microtask later, so its hold on `consume` is in place
+		// before a watcher created alongside could sync on an empty table.
+		let stop: (() => void) | undefined;
+		const start = (list: readonly string[] | undefined) => {
+			stop?.();
+			const signals = new Effect();
+			stop = () => signals.close();
+
+			const versions = offered(list);
+			if (versions instanceof TypeError) {
+				signals.run((effect) => effect.set(this.#error, versions, undefined));
+				return;
+			}
+
+			const loop = new Reload({
+				url: this.url,
+				enabled: this.enabled,
+				publish,
+				consume: origin,
+				versions,
+				webtransport: props.webtransport,
+				websocket: props.websocket,
+				delay: props.delay,
+				timeout: props.timeout,
+				goaway: props.goaway,
+				tokens: props.tokens,
+			});
+			signals.cleanup(() => loop.close());
+
+			signals.run((effect) => {
+				if (!effect.get(this.enabled) || !effect.get(href)) return;
+				effect.set(this.#origin, origin, undefined);
+				effect.set(this.#bandwidth, loop.bandwidth, undefined);
+				effect.set(this.#auth, loop.auth, undefined);
+			});
+			signals.run((effect) => effect.set(this.#status, effect.get(loop.status), "disconnected"));
+			signals.run((effect) => effect.set(this.#established, effect.get(loop.established), undefined));
+			signals.run((effect) => effect.set(this.#probe, loop.probe, undefined));
+			signals.run((effect) => effect.set(this.#error, effect.get(loop.error), undefined));
+		};
+		start(this.versions.peek());
+		this.#signals.cleanup(this.versions.subscribe(start));
+		this.#signals.cleanup(() => stop?.());
 	}
 
 	/**
@@ -378,6 +427,16 @@ export namespace Connection {
 	export type Extensions = ExtensionsType;
 }
 
+/** The checked copy of `versions` to dial with, or why it cannot be offered. */
+function offered(versions: readonly string[] | undefined): string[] | undefined | TypeError {
+	try {
+		return normalizeVersions({ versions });
+	} catch (err) {
+		if (err instanceof TypeError) return err;
+		throw err;
+	}
+}
+
 /** Throw if `props` cannot be honored, rather than silently dropping them. */
 function refuse(props?: ConnectionProps): void {
 	if (!props) return;
@@ -411,6 +470,9 @@ function refuse(props?: ConnectionProps): void {
 	if (props.tokens !== undefined) {
 		throw new Error("tokens cannot be shared; pass share: false");
 	}
+	if (props.timeout !== undefined) {
+		throw new Error("timeout cannot be shared; pass share: false");
+	}
 	if (props.goaway !== undefined) {
 		throw new Error("goaway cannot be shared; pass share: false");
 	}
@@ -423,6 +485,7 @@ function requiresPrivate(props: ConnectionProps): boolean {
 		props.websocket !== undefined ||
 		props.delay !== undefined ||
 		props.tokens !== undefined ||
+		props.timeout !== undefined ||
 		props.goaway !== undefined ||
 		props.publish !== undefined ||
 		props.consume !== undefined

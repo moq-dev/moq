@@ -13,13 +13,15 @@ token. `moq_tokio::tcp::Listener::with_tls` (`rs/moq-tokio/src/tcp.rs`)
 already takes an `Arc<rustls::ServerConfig>`, so requesting a certificate is
 config. The real gap is getting the peer certificate out afterwards:
 `qmux::tls::Server::accept` finishes the handshake and returns a `Session`
-without it.
+without it. The same accessor also returns the SNI the client sent, so a
+`tls://` session reports it as QUIC sessions do (from
+[moq-dev/moq#6509](https://github.com/moq-dev/moq/pull/6509), decided
+2026-10-23).
 
 Decided by the maintainer (2026-10-06): the peer certificate comes from a
 new accessor on qmux's TLS session. Rejected: owning the TLS accept outside
 qmux, or leaving it open. Decided 2026-10-20 (maintainer): no new work in
-moq-dev/web-transport, so the accessor goes on the in-tree qmux crate that
-[qmux on moq-quic](/quest/m1/quic-qmux.md) brings into this repository.
+moq-dev/web-transport, so the accessor goes on the in-tree qmux crate (`rs/qmux`).
 
 Keep the token path working on the same listener, and keep pinned peers and
 CA roots meaning the same as on QUIC.
@@ -38,10 +40,7 @@ keeps both working.
 
 Public API: relay config may gain a listener option. Wire: none.
 
-## Required
-
-- [qmux on the QUIC stream state machine](/quest/m1/quic-qmux.md) - moves qmux in-tree, where the peer-certificate accessor lands
-
 ## Related
 
 - [TCP acceptor](/quest/m2/one-port/tcp-demux.md) - carries `tls://` on the shared TCP port, where the certificate request stays on the moq ALPN
+- [qmux drives its own socket](/quest/m2/perf/stream/driver.md) - replaces qmux's reader and writer tasks and its constructors' return type

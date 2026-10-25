@@ -47,9 +47,8 @@ because the newest group wins regardless of which message it holds. Putting
 them all in one long-lived group has the opposite failure: nothing can be
 skipped and head-of-line blocking is back.
 
-So the lossy class is a latest-value snapshot of opaque bytes:
-`moq_flate::snapshot`, with the raw
-frame as the value. Every update is a self-contained group, so a newer value
+So the lossy class is a plain track carrying the latest opaque frame, with
+one self-contained group per update, so a newer value
 never waits behind an older one. One detail decides whether it actually
 delivers latest-value:
 
@@ -58,8 +57,7 @@ delivers latest-value:
   under msgid 0; keying on msgid alone lets them overwrite each other. Decide
   explicitly what to do about instances distinguished only inside a payload,
   which the msgid-only rule cannot see.
-- **One snapshot track per key.** A `moq_flate::snapshot` track holds one
-  latest value, so per-key latest-value means a track per
+- **One latest-value track per key.** Per-key latest-value means a track per
   `(sysid, compid, msgid)`, named from the key and advertised in the catalog
   as it appears. That state grows with whatever the flight-controller link
   emits, so bound it: cap the number of keys (or derive the set from the
@@ -70,12 +68,16 @@ Not `moq_json::snapshot`: a MAVLink frame is not JSON, and its default batches
 up to `MAX_DELTA_FRAMES` merge patches into one ordered group, so an earlier
 50 Hz attitude delta would head-of-line block a later heartbeat.
 
-The reliable class is the append-log shape (the binary `stream` mode): commands,
+The reliable class is one bounded ordered group on a plain track: commands,
 ACKs, mission, parameter and file transfer are stop-and-wait exchanges carried
 in one ordered group. Note the scope in
 [robot](/quest/m3/teleop-robot.md): that is gap-free for a live reader, not
 recoverable after a lag or a reconnect, so these MAVLink services keep relying
 on their own retransmission across a link drop.
+
+The [compression migration](/quest/m1/compress/migrate.md) deletes the
+moq-flate snapshot and stream helpers. Keep these framing rules on plain
+tracks, setting `compress` when useful, rather than depending on those helpers.
 
 ### Deliberately out of scope
 

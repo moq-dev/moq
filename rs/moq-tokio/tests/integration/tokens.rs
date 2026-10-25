@@ -61,7 +61,7 @@ async fn serve(version: &str, refused: &'static str) -> Server {
 					request.reject(moq_tokio::server::Reject::Unauthorized).await.ok();
 					return;
 				}
-				let Ok((_session, _driver)) = request.ok().await else {
+				let Ok(_session) = request.ok().await else {
 					return;
 				};
 				// Hold the session until the test's runtime shuts down.

@@ -8,10 +8,10 @@ use mp4_atom::DecodeMaybe;
 
 use crate::Result;
 use crate::catalog::Stream;
-use crate::container::ExportSource;
 use crate::container::Frame;
 use crate::container::consumer::Event;
 use crate::container::fmp4::Error;
+use crate::container::{ExportSource, Resume};
 use moq_net::Timestamp;
 
 /// How much media a track may queue while another track waits for its codec configuration.
@@ -50,8 +50,10 @@ const INIT_QUEUE: Duration = Duration::from_secs(30);
 /// (`enabled: false`) does, is unsubscribed and idles. On its return it is resubscribed after
 /// the last group read, under the track it was declared as, when its sample entry is
 /// unchanged. That comparison covers the catalog-derived record, so an Annex-B encoder that
-/// restarts with a new parameter set can return. A new rendition, a changed sample entry, or
-/// a return that replays media already written fails the export.
+/// restarts with a new parameter set can return. A rendition the catalog moves to another
+/// track (a new `track` or `broadcast`) continues under its declared track the same way, from
+/// the new track's first sync sample past what was read. A new rendition, a changed sample
+/// entry, or a return that replays media already written fails the export.
 ///
 /// [`next_chunk`](Self::next_chunk) returns the same bytes as a [`Chunk`], which
 /// separates the init segment from a [`Fragment`] carrying whether it begins at a
@@ -153,8 +155,10 @@ pub struct Fragment {
 }
 
 /// A rendition's latest catalog entry.
-// One per rendition, so the variant sizes never add up to an allocation's worth.
-#[allow(clippy::large_enum_variant)]
+#[allow(
+	clippy::large_enum_variant,
+	reason = "one per rendition, so the variant sizes never add up to an allocation's worth; only large when extra features grow the video config"
+)]
 enum Rendition {
 	Video(VideoConfig),
 	Audio(AudioConfig),
@@ -165,6 +169,14 @@ impl Rendition {
 		match self {
 			Rendition::Video(config) => ExportSource::for_fmp4_video(source, name, config, max_delay),
 			Rendition::Audio(config) => ExportSource::for_audio(source, name, config, max_delay),
+		}
+	}
+
+	/// Whether `export` still reads the track this entry names.
+	fn read_by(&self, export: &ExportSource, source: &crate::Source, name: &str) -> bool {
+		match self {
+			Rendition::Video(config) => export.reads(source, name, config),
+			Rendition::Audio(config) => export.reads(source, name, config),
 		}
 	}
 
@@ -232,8 +244,9 @@ struct Fmp4Track {
 
 	/// Whether the source has signalled end-of-track, or the rendition left the catalog.
 	finished: bool,
-	/// The group of the last frame read, where a resubscription resumes after.
-	group: Option<u64>,
+	/// Where the subscription stopped when the rendition left the catalog, which a
+	/// resubscription resumes from.
+	resume: Option<Resume>,
 	/// The source group closed, so its buffered fragment can be emitted.
 	group_finished: bool,
 
@@ -269,7 +282,7 @@ impl Fmp4Track {
 			buffer: Vec::new(),
 			buffer_independent: false,
 			finished: false,
-			group: None,
+			resume: None,
 			group_finished: false,
 			written: None,
 			backlog: None,
@@ -306,7 +319,15 @@ impl Fmp4Track {
 		self.describe(name)
 	}
 
-	/// Resubscribe a rendition that left the catalog after the init and came back.
+	/// End what the rendition read from the track it moved off: the frame read ahead is
+	/// dropped, and the buffered run goes out as a fragment of its own, before the new track's.
+	fn moved(&mut self) {
+		self.pending = None;
+		self.group_finished = !self.buffer.is_empty();
+	}
+
+	/// Resubscribe a rendition that left the catalog after the init and came back, or moved
+	/// to another track.
 	fn rejoin(&mut self, name: &str, config: Rendition, source: ExportSource) -> Result<()> {
 		self.source = Some(source);
 		self.finished = false;
@@ -558,8 +579,7 @@ impl<S: Stream> Export<S> {
 				}
 				while let Some(source) = track.source.as_mut() {
 					match source.poll_event(waiter)? {
-						Poll::Ready(Some(Event::Frame(frame))) => {
-							track.group = source.group();
+						Poll::Ready(Some(Event::Frame { frame, .. })) => {
 							// A keyframe may carry new parameter sets, so check it still matches.
 							if !track.described || frame.keyframe {
 								track.describe(name)?;
@@ -807,17 +827,35 @@ impl<S: Stream> Export<S> {
 			if active.contains(&name) {
 				continue;
 			}
+			let moved = self
+				.tracks
+				.get(&name)
+				.and_then(|track| track.source.as_ref())
+				.is_some_and(|source| !config.read_by(source, &self.source, &name));
+			// Before the init nothing of a moved rendition went out, so it starts over as a new one.
+			if moved && !self.init_emitted {
+				self.tracks.remove(&name);
+				self.queued.retain(|(queued, _)| *queued != name);
+			}
 			match self.tracks.get_mut(&name) {
-				Some(track) if track.source.is_some() => track.reconfigure(&name, config)?,
+				Some(track) if track.source.is_some() && !moved => track.reconfigure(&name, config)?,
 				Some(track) => {
-					let Some(mut source) = config.subscribe(&self.source, &name, self.max_delay)? else {
+					let Some(source) = config.subscribe(&self.source, &name, self.max_delay)? else {
 						continue;
 					};
-					// The publisher still caches the group the rendition left on, which a
-					// fresh subscription would start at, so resume after the last group read.
-					if let Some(group) = track.group {
-						source = source.after(group);
-					}
+					// The publisher still caches the group the rendition left on, which a fresh
+					// subscription would start at, so resume after what was read. A move is new
+					// content, which continues past what was read under the declared track.
+					let source = match track.source.take() {
+						Some(previous) => {
+							track.moved();
+							source.continuing(&previous)
+						}
+						None => match &track.resume {
+							Some(resume) => source.resuming(resume),
+							None => source,
+						},
+					};
 					track.rejoin(&name, config, source)?;
 				}
 				None => {
@@ -842,7 +880,10 @@ impl<S: Stream> Export<S> {
 			// The init declared these tracks, so keep them for a rendition that returns.
 			// Ending the subscription writes out what was already read.
 			for (name, track) in &mut self.tracks {
-				if !active.contains(name) && track.source.take().is_some() {
+				if !active.contains(name)
+					&& let Some(source) = track.source.take()
+				{
+					track.resume = Some(source.resume());
 					track.finished = true;
 					track.described = false;
 				}

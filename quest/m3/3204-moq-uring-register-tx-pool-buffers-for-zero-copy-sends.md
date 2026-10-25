@@ -19,7 +19,7 @@ disabled later attempts on that ring. #3224 also filled the SQE `buf_index`
 with a raw-SQE adapter because the `io-uring` crate did not expose it for
 this opcode; check the current crate first.
 
-The TX pool already owns stable `Box<[u8]>` allocations and grows lazily. If zero-copy send wins, registering those allocations lets send SQEs reference fixed buffers and can reduce repeated page accounting on the large-train path.
+The TX pool grows lazily, but its buffers are `Vec<u8>` handed out and returned by lease (`rs/moq-uring/src/udp.rs`), not permanently stable allocations; only the receive pool owns `Box<[u8]>`. Registration needs stable storage, so it follows the allocation and lease contract [the I/O boundary](/quest/m2/quic-io-boundary.md) settles. If zero-copy send wins, registering those allocations lets send SQEs reference fixed buffers and can reduce repeated page accounting on the large-train path.
 
 #### Proposal
 

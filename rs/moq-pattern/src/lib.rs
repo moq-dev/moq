@@ -64,6 +64,7 @@
 
 #![warn(missing_docs)]
 
+mod index;
 mod pattern;
 mod patterns;
 

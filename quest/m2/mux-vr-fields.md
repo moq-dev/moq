@@ -34,11 +34,15 @@ landed the fields.
   `ambisonic`, and zeroth order or a non-diegetic stereo pair (1, 3, 6, 11,
   ... channels) is refused. A count RFC 8486 forbids is malformed and refused
   the same way.
-- `mp4-atom` 0.16.2 has no `st3d` or `sv3d` atom; add them in
-  kixelated/mp4-atom. `webm-iterable` already names the Matroska elements.
-- An fMP4 Opus track needs the `dOps` mapping table that
-  [CMAF surround Opus](/quest/m2/cmaf-opus-surround.md) adds, so ambisonic
-  fMP4 follows it; Matroska and raw Opus do not wait.
+- kixelated/mp4-atom#244 added `st3d`/`sv3d` (plus Apple `vexu`/`hfov`);
+  take mp4-atom 0.17.0 (kixelated/mp4-atom#247, not yet released), whose
+  sample entries gain a `spatial` field. Importing Apple's `vexu`/`hfov`
+  stays out of scope. `webm-iterable` already names the Matroska elements.
+- Ambisonic fMP4 needs the `dOps` mapping table, so it moved to
+  [fMP4 ambisonic layout](/quest/m2/mux-vr-ambisonic-fmp4.md) (2026-10-22,
+  maintainer); Matroska and raw Opus land here. Before taking 0.17.0,
+  settle with [CMAF surround Opus](/quest/m2/cmaf-opus-surround.md) whether
+  the release also carries kixelated/mp4-atom#246.
 - Exporters writing the fields back are out of scope.
 
 Tests: a fixture per source (MP4 360, a 180-degree equirectangular MP4 with
@@ -52,4 +56,3 @@ Public API: none beyond the catalog fields #5543 adds. Wire: none.
 ## Related
 
 - [WebXR playback](/quest/m3/watch-webxr.md) - `<moq-watch>` renders these fields
-- [CMAF surround Opus](/quest/m2/cmaf-opus-surround.md) - the `dOps` mapping table an ambisonic fMP4 track needs

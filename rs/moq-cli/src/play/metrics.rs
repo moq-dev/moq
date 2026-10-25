@@ -25,8 +25,8 @@ use super::timeline::Presentation;
 /// How often a sample is taken, the browser probe's interval.
 const INTERVAL: Duration = Duration::from_millis(250);
 
-/// Intervals to wait for the speaker to close out the measurement.
-const FINISH_TICKS: usize = 4;
+/// How long to wait for the speaker to close out the measurement: four samples.
+const FINISH_WAIT: Duration = INTERVAL.saturating_mul(4);
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -98,7 +98,7 @@ pub(super) struct Metrics {
 	/// What closed engines counted, added to the current one's totals.
 	base: Totals,
 	start: Instant,
-	interval: tokio::time::Interval,
+	interval: moq_clock::Interval,
 }
 
 impl Metrics {
@@ -109,8 +109,8 @@ impl Metrics {
 	) -> anyhow::Result<(Self, mpsc::UnboundedSender<Observer>)> {
 		let file = File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
 		let (observe, observers) = mpsc::unbounded_channel();
-		let mut interval = tokio::time::interval(INTERVAL);
-		interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+		let mut interval = moq_clock::interval(INTERVAL);
+		interval.set_missed_tick_behavior(moq_clock::MissedTickBehavior::Delay);
 		let metrics = Self {
 			file: BufWriter::new(file),
 			presentation,
@@ -136,18 +136,11 @@ impl Metrics {
 		if !self.observers.is_empty() {
 			self.sample()?;
 		}
-		if let Some((observer, _)) = &self.current {
-			observer.finish();
+		if let Some((observer, _)) = &mut self.current {
 			// The audio thread closes the gap on its next buffer. One that never
 			// comes is a device that stopped pulling, which the render clock
 			// already shows, so the wait is bounded rather than hung on it.
-			for _ in 0..FINISH_TICKS {
-				self.interval.tick().await;
-				if observer.finished() {
-					break;
-				}
-			}
-			if !observer.finished() {
+			if moq_clock::timeout(FINISH_WAIT, observer.finish()).await.is_err() {
 				tracing::warn!("the speaker never closed out the measurement; the last gap may be missing");
 			}
 		}

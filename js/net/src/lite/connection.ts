@@ -9,6 +9,7 @@ import { type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
 import { closeError, error, fromClose, ProtocolViolation, StreamCode, sessionCause } from "../error.ts";
 import { type Hop, randomHop } from "../hop.ts";
+import { IMPLEMENTATION } from "../implementation.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, Stream, Writer } from "../stream.ts";
@@ -28,13 +29,16 @@ import { DataType, StreamId } from "./stream.ts";
 import { Subscribe } from "./subscribe.ts";
 import { Subscriber } from "./subscriber.ts";
 import { Track as TrackMessage } from "./track.ts";
+import { Tracks as TracksMessage } from "./tracks.ts";
 import {
 	hasAuth,
 	hasDatagrams,
 	hasGoaway,
+	hasPadding,
 	hasProbeRtt,
 	hasSetupStream,
 	hasTrackStream,
+	hasTracks,
 	Version,
 	versionName,
 } from "./version.ts";
@@ -65,6 +69,8 @@ export interface ConnectionProps {
 	client?: boolean;
 	/** The connection credential the client's SETUP presents, on versions that carry one (lite-07+). */
 	token?: Uint8Array;
+	/** The implementation our SETUP advertises (lite-05+). Defaults to {@link IMPLEMENTATION}; empty sends nothing. */
+	implementation?: string;
 }
 
 /**
@@ -125,6 +131,13 @@ export class Connection implements Established {
 	#client: boolean;
 	// See {@link ConnectionProps.token}.
 	#token?: Uint8Array;
+	// What our SETUP advertises; see {@link ConnectionProps.implementation}.
+	#implementation: string;
+	#peerImplementation = Promise.withResolvers<string | undefined>();
+
+	/** The implementation the peer advertised; see {@link Established.peerImplementation}. */
+	readonly peerImplementation = this.#peerImplementation.promise;
+
 	// The peer's GOAWAY. Lite carries no deadline, so only the URI is set.
 	#goaway = new Once<Drain>();
 
@@ -146,7 +159,17 @@ export class Connection implements Established {
 	 *
 	 * @internal
 	 */
-	constructor({ url, quic, version, session, publish, handle, client = true, token }: ConnectionProps) {
+	constructor({
+		url,
+		quic,
+		version,
+		session,
+		publish,
+		handle,
+		client = true,
+		token,
+		implementation = IMPLEMENTATION,
+	}: ConnectionProps) {
 		this.url = url;
 		// Older versions carry the credential in the URL instead.
 		this.#token = client && hasAuth(version) ? token : undefined;
@@ -201,6 +224,9 @@ export class Connection implements Established {
 			this.#auth,
 		);
 		this.#client = client;
+		this.#implementation = implementation;
+		// Only the lite-05+ Setup Stream carries it.
+		if (!hasSetupStream(version)) this.#peerImplementation.resolve(undefined);
 		registerWire(this, {
 			consume: (path) => this.#subscriber.consume(path),
 			goaway: this.#goaway,
@@ -281,6 +307,8 @@ export class Connection implements Established {
 			fatal = await sessionCause(this.#quic, err);
 		} finally {
 			probes.close();
+			// A session that ends before the peer's SETUP never learns its implementation.
+			this.#peerImplementation.resolve(undefined);
 			// The session died under every track it was receiving, so they end with its
 			// error. A deliberate close() already ended them cleanly, which makes this a no-op.
 			this.#subscriber.close(fatal ?? (await closeError(this.#quic)));
@@ -320,7 +348,10 @@ export class Connection implements Established {
 		try {
 			await writer.u53(DataType.Setup);
 			const probe = await probeLevel(this.#quic, this.#version);
-			await new Setup({ probe, hop: this.hop, token: this.#token }).encode(writer, this.#version);
+			await new Setup({ probe, hop: this.hop, token: this.#token, implementation: this.#implementation }).encode(
+				writer,
+				this.#version,
+			);
 			writer.close();
 		} catch (err: unknown) {
 			writer.reset(err);
@@ -380,6 +411,10 @@ export class Connection implements Established {
 					await this.#publisher.runTrackInfo(msg, stream);
 				})(),
 			);
+		} else if (typ === StreamId.Tracks) {
+			if (!hasTracks(this.#version)) throw new Error("TRACKS is not supported on this version");
+			const msg = await TracksMessage.decode(stream.reader, this.#version);
+			await this.#publisher.runTracks(msg, stream);
 		} else if (typ === StreamId.Probe) {
 			if (this.#version === Version.DRAFT_01 || this.#version === Version.DRAFT_02)
 				throw new Error("PROBE is not supported on this version");
@@ -422,6 +457,8 @@ export class Connection implements Established {
 		if (typ === DataType.Group) {
 			const msg = await Group.decode(stream, this.#version);
 			await this.#subscriber.runGroup(msg, stream);
+		} else if (typ === DataType.Padding && hasPadding(this.#version)) {
+			await stream.discard();
 		} else if (typ === DataType.Setup) {
 			// Claim the stream before decoding, so two incomplete SETUPs are duplicates too.
 			if (this.#setupSeen) throw new ProtocolViolation("duplicate SETUP");
@@ -439,6 +476,7 @@ export class Connection implements Established {
 				throw new ProtocolViolation("Path on a URI-carrying binding");
 			this.#peerSetup.set(setup);
 			this.#peerRole.set(setup.role);
+			this.#peerImplementation.resolve(setup.implementation);
 		} else {
 			throw new Error(`unknown stream type: ${typ.toString()}`);
 		}

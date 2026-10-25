@@ -4,8 +4,8 @@
 
 A moq-net session and a `js/net` connection each keep a receive target: the
 sum of their viewer handles, sent to the peer as the PROBE target. A sending
-session probes to the larger of its own [send target](/quest/m1/probe-target.md)
-(in `js/net`, the one [padding](/quest/m2/probe/padding.md) adds) and the
+session probes to the larger of its own send target
+(`bandwidth::Allocator`'s; in `js/net`, the one [padding](/quest/m2/probe/padding.md) adds) and the
 peer's PROBE target, and advertises PROBE `Increase` where it has a
 sender. The two directions never mix: a session that publishes and watches
 doesn't probe its uplink for what it watches.
@@ -16,7 +16,7 @@ against their own share instead of the whole downlink.
 
 ## Plan
 
-Split from the [send target](/quest/m1/probe-target.md) by the maintainer on
+Split from the send target by the maintainer on
 2026-10-20: m1 native rung recovery needs only the send target, while these
 handles' consumers ([players](/quest/m2/probe/players.md) and the
 [viewer up-switch](/quest/m2/probe/viewer-upswitch.md)) are in m2.
@@ -86,7 +86,3 @@ opting out sends no target.
 The sum fans out over viewer handles, so add a benchmark sweeping their count,
 wired into the benchmark CI, so an update that rescans every handle shows up
 as a slope.
-
-## Required
-
-- [Session send target](/quest/m1/probe-target.md) - the sender seam and the local target the peer's is compared against

@@ -2,7 +2,7 @@
 //!
 //! Its API mirrors quinn's, plus what moq-quic adds:
 //! [`SendGroup`]s that schedule streams and datagrams together, [`SendStream::reset_at`] to
-//! keep a prefix reliable, [`RecvStream::read_held`] to hold receive credit until a message is
+//! keep a prefix reliable, [`RecvStream::poll_lease`] to hold receive credit until a message is
 //! complete, and [`Connection::set_limits`] to change flow control on a live connection.
 //!
 //! It needs no MoQ session: enable the `driver` feature (with `aws-lc-rs` or `ring`) and
@@ -66,7 +66,7 @@ pub use moq_quic::{
     InvalidCid, MtuDiscoveryConfig, NoneTokenLog, NoneTokenStore, PathStats, ServerConfig, Side,
     StdSystemTime, StreamId, TimeSource, TokenLog, TokenMemoryCache, TokenReuseError, TokenStore,
     Transmit, TransportConfig, TransportErrorCode, UdpStats, ValidationTokenConfig, VarInt,
-    VarIntBoundsExceeded, Written, congestion, crypto,
+    VarIntBoundsExceeded, Written, crypto,
 };
 #[cfg(feature = "qlog")]
 pub use moq_quic::{QlogConfig, QlogStream};
@@ -78,7 +78,7 @@ pub use crate::quic::driver::connection::{
 pub use crate::quic::driver::endpoint::{Accept, Endpoint, EndpointStats};
 pub use crate::quic::driver::incoming::{Incoming, IncomingFuture, RetryError};
 pub use crate::quic::driver::recv_stream::{
-    Credit, ReadError, ReadExactError, ReadToEndError, RecvStream, ResetError,
+    Lease, ReadError, ReadExactError, ReadToEndError, RecvStream, ResetError,
 };
 #[cfg(feature = "quic")]
 pub(crate) use crate::quic::driver::runtime::send_failed;
@@ -89,6 +89,11 @@ pub use crate::quic::driver::send_group::{SendGroup, SendOptions};
 pub use crate::quic::driver::send_stream::{SendStream, StoppedError, WriteError};
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "tests read the host clock directly"
+)]
 mod tests;
 
 #[derive(Debug)]

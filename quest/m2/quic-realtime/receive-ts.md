@@ -23,8 +23,9 @@ from relay egress to native publisher ingest. Both ends are ours.
 - Receiver: fill spare ACK space with the newest receive times first, as the
   draft's section 7.2 recommends; never send a packet just for timestamps.
 - Receive time: kernel `SO_TIMESTAMPNS` where the OS has it (moq-sock
-  already sets it and exposes `RecvMeta::timestamp`, used by moq-tokio and
-  moq-uring), userspace recv instant elsewhere. A GRO batch reports only its
+  already sets it and exposes `RecvMeta::timestamp` for moq-tokio; moq-uring
+  parses its own control messages without it, so the ring needs the same
+  option and parsing), userspace recv instant elsewhere. A GRO batch reports only its
   first datagram and omits the rest (section 7.1), since one kernel stamp
   covers the whole batch.
 - The kernel stamp is `CLOCK_REALTIME`, which NTP or an admin can step. Map
@@ -32,7 +33,7 @@ from relay egress to native publisher ingest. Both ends are ours.
   at each recv, and when the offset jumps between batches, drop that batch's
   kernel stamps for the userspace instant, so a clock step never reads as
   queue growth or drain. The basis must stay constant (section 6.1).
-- Sender: `congestion::Controller` sees each acknowledged packet's send
+- Sender: `moq_congestion::Controller` sees each acknowledged packet's send
   instant and peer receive instant, so every candidate reads the same input.
 - Receive times measure delay variation, not absolute one-way delay: the
   receiver's basis is never communicated (section 6.1). State clock offset

@@ -17,23 +17,21 @@
 //! anything fixes the clock places the mapping so that frame is live on arrival; any other shifts
 //! onto the clock (see [`catalog::Timebase`](crate::catalog::Timebase)).
 
-use std::time::{Duration, SystemTime};
+use moq_clock::Wall;
+use std::time::Duration;
 
 use hang::catalog::{MAX_SAFE_INTEGER, MOQ_EPOCH_UNIX_MILLIS};
 use moq_clock::Instant;
 
 /// Microseconds from the moq epoch (2020) to `wall`, negative before it.
-fn moq_micros(wall: SystemTime) -> i128 {
+fn moq_micros(wall: Wall) -> i128 {
 	let moq_epoch = MOQ_EPOCH_UNIX_MILLIS as i128 * 1000;
-	match wall.duration_since(SystemTime::UNIX_EPOCH) {
-		Ok(after) => after.as_micros() as i128 - moq_epoch,
-		Err(before) => -(before.duration().as_micros() as i128) - moq_epoch,
-	}
+	wall.saturating_duration_since(Wall::UNIX_EPOCH).as_micros() as i128 - moq_epoch
 }
 
 /// The host's wall clock, or `None` while it reads before the moq epoch (2020): unset.
-pub(crate) fn host_wall() -> Option<SystemTime> {
-	let now = SystemTime::from(moq_clock::wall());
+pub(crate) fn host_wall() -> Option<Wall> {
+	let now = moq_clock::wall();
 	#[cfg(test)]
 	let now = HOST_WALL.get().unwrap_or(now);
 	(moq_micros(now) >= 0).then_some(now)
@@ -42,17 +40,17 @@ pub(crate) fn host_wall() -> Option<SystemTime> {
 #[cfg(test)]
 thread_local! {
 	/// What [`host_wall`] reads on this thread instead of the system clock.
-	static HOST_WALL: std::cell::Cell<Option<SystemTime>> = const { std::cell::Cell::new(None) };
+	static HOST_WALL: std::cell::Cell<Option<Wall>> = const { std::cell::Cell::new(None) };
 }
 
 /// Make this thread's host wall clock read `now`, so a test can fake one that was never set.
 #[cfg(test)]
-pub(crate) fn fake_host_wall(now: SystemTime) {
+pub(crate) fn fake_host_wall(now: Wall) {
 	HOST_WALL.set(Some(now));
 }
 
 /// The catalog clock for PTS zero at `wall`.
-fn wall_clock(wall: SystemTime) -> crate::Result<hang::catalog::Clock> {
+fn wall_clock(wall: Wall) -> crate::Result<hang::catalog::Clock> {
 	// A time before 2020 cannot be named on the wire; refuse it rather than advertise 2020.
 	let micros = moq_micros(wall);
 	if micros < 0 {
@@ -110,7 +108,7 @@ impl Clock {
 	///
 	/// The deterministic constructor: synthetic sources and fixtures pin both ends instead of
 	/// sampling. Refuses an unrepresentable wall.
-	pub fn at(epoch: Instant, wall: SystemTime) -> crate::Result<Self> {
+	pub fn at(epoch: Instant, wall: Wall) -> crate::Result<Self> {
 		Ok(Self {
 			instant: epoch,
 			reading: 0,
@@ -147,7 +145,7 @@ impl Clock {
 	///
 	/// Refuses a mapping whose PTS zero lands before the moq epoch (2020) or after now, and a host
 	/// whose wall clock is unset, which has no now to place it against.
-	pub(crate) fn placed(pts: Duration, wall: SystemTime) -> crate::Result<Self> {
+	pub(crate) fn placed(pts: Duration, wall: Wall) -> crate::Result<Self> {
 		let unmappable = |why: &str| crate::Error::UnmappableTimestamp(format!("{pts:?} at {wall:?} {why}"));
 		let zero = wall
 			.checked_sub(pts)
@@ -200,7 +198,7 @@ impl Clock {
 	/// What this clock reads at `wall`, in microseconds: negative before PTS zero.
 	///
 	/// Pure in the stored mapping, like [`wall_clock`](Self::wall_clock), and refused without one.
-	pub(crate) fn reading(&self, wall: SystemTime) -> crate::Result<i128> {
+	pub(crate) fn reading(&self, wall: Wall) -> crate::Result<i128> {
 		Ok(moq_micros(wall) - self.mapping()?.wall.as_micros() as i128)
 	}
 
@@ -251,7 +249,7 @@ impl Clock {
 	/// Pure in the stored mapping: a system-clock adjustment after construction changes nothing.
 	/// Exact down to the nanosecond; an instant finer than that (a 90 kHz tick) is floored.
 	/// Refuses an unrepresentable result, and a clock without a mapping.
-	pub fn wall_clock(&self, pts: moq_net::Timestamp) -> crate::Result<SystemTime> {
+	pub fn wall_clock(&self, pts: moq_net::Timestamp) -> crate::Result<Wall> {
 		Ok(self.mapping()?.wall_clock(pts)?)
 	}
 }
@@ -270,8 +268,8 @@ mod tests {
 		moq_clock::now()
 	}
 
-	fn moq_epoch() -> SystemTime {
-		SystemTime::UNIX_EPOCH + Duration::from_millis(MOQ_EPOCH_UNIX_MILLIS)
+	fn moq_epoch() -> Wall {
+		Wall::UNIX_EPOCH + Duration::from_millis(MOQ_EPOCH_UNIX_MILLIS)
 	}
 
 	fn us(v: u64) -> moq_net::Timestamp {
@@ -320,7 +318,7 @@ mod tests {
 		assert_eq!(clock.wall(), wall, "a wall correction does not retime archived media");
 		assert_eq!(
 			Clock::new().wall(),
-			wall_clock(SystemTime::from(stepped) - Clock::LEAD).ok(),
+			wall_clock(stepped - Clock::LEAD).ok(),
 			"a new mapping samples the corrected wall"
 		);
 
@@ -352,11 +350,11 @@ mod tests {
 	fn unrepresentable_walls_are_refused() {
 		// One micro past the JSON-safe integer range: browsers would read a different number.
 		let past_safe = MOQ_EPOCH_UNIX_MILLIS * 1000 + MAX_SAFE_INTEGER + 1;
-		let far = SystemTime::UNIX_EPOCH + Duration::from_micros(past_safe);
+		let far = Wall::UNIX_EPOCH + Duration::from_micros(past_safe);
 		assert!(Clock::at(epoch(), far).is_err());
 
 		// Before 2020 cannot be named on the wire; saturating to the epoch would lie.
-		assert!(Clock::at(epoch(), SystemTime::UNIX_EPOCH).is_err());
+		assert!(Clock::at(epoch(), Wall::UNIX_EPOCH).is_err());
 		assert!(Clock::at(epoch(), moq_epoch() - Duration::from_micros(1)).is_err());
 		assert_eq!(Clock::at(epoch(), moq_epoch()).unwrap().wall().unwrap().wall.value(), 0);
 	}
@@ -368,9 +366,8 @@ mod tests {
 		// and the mapping still names the current wall time.
 		assert!(clock.now().as_micros() >= Clock::LEAD.as_micros());
 		let now = clock.wall_clock(clock.now()).unwrap();
-		let drift = now
-			.duration_since(SystemTime::now())
-			.unwrap_or_else(|err| err.duration());
+		let host = moq_clock::wall();
+		let drift = now.max(host).saturating_duration_since(now.min(host));
 		assert!(drift < Duration::from_secs(1), "wall + now is the current wall time");
 	}
 
@@ -382,11 +379,9 @@ mod tests {
 		let clock = Clock::arrival(since).unwrap();
 		let now = clock.now();
 		assert!(now.as_micros() >= since.as_micros());
-		let drift = clock
-			.wall_clock(now)
-			.unwrap()
-			.duration_since(moq_clock::wall().into())
-			.unwrap_or_else(|err| err.duration());
+		let actual = clock.wall_clock(now).unwrap();
+		let host = moq_clock::wall();
+		let drift = actual.max(host).saturating_duration_since(actual.min(host));
 		assert!(drift < Duration::from_secs(1), "the first timestamp is live on arrival");
 
 		// A capture from before the arrival still maps, down to PTS zero.
@@ -404,7 +399,7 @@ mod tests {
 	/// mapping, and refuses whatever needs one rather than invent it.
 	#[test]
 	fn an_unset_host_clock_has_no_wall() {
-		fake_host_wall(SystemTime::UNIX_EPOCH + Duration::from_secs(86_400));
+		fake_host_wall(Wall::UNIX_EPOCH + Duration::from_secs(86_400));
 
 		let clock = Clock::new();
 		assert_eq!(clock.wall(), None);
@@ -460,7 +455,7 @@ mod tests {
 	fn wall_clock_validates_bounds() {
 		let clock = Clock::at(epoch(), moq_epoch()).unwrap();
 		// The largest representable broadcast timestamp still maps.
-		let max = moq_net::Timestamp::from_micros((1u64 << 62) - 1).unwrap();
+		let max = moq_net::Timestamp::from_micros((1u64 << 61) - 1).unwrap();
 		assert!(clock.wall_clock(max).is_err(), "past the JSON-safe range is refused");
 	}
 }

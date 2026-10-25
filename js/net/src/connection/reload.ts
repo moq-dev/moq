@@ -4,7 +4,7 @@ import * as Announce from "../announced.ts";
 import { Handle as AuthHandle } from "../auth.ts";
 import { ended } from "../auth_session.ts";
 import { Allocator } from "../bandwidth.ts";
-import { error, SessionCode, SessionError } from "../error.ts";
+import { error, reason, SessionCode, SessionError } from "../error.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Follow } from "../util/observed.ts";
@@ -30,8 +30,10 @@ function sameTokens(a: readonly string[], b: readonly string[]): boolean {
  * Exponential backoff settings for the reconnect loop.
  *
  * The delays carry jitter, so a fleet of tabs knocked offline together doesn't reconnect in
- * lockstep. Every failure is retried; {@link ReloadDelay.timeout} is what stops the current
- * URL. A new URL or a disable/re-enable starts another sequence.
+ * lockstep. Every failure is retried, including an attempt that outlives
+ * {@link ConnectProps.timeout}, until {@link ReloadDelay.timeout} runs out; only an auth
+ * rejection or a refused GOAWAY redirect stops the current URL sooner. A new URL or a
+ * disable/re-enable starts another sequence.
  *
  * A GOAWAY off a session that outlived {@link ReloadDelay.initial} migrates at once, unless it
  * sends the connection back to an endpoint that already redirected it elsewhere and the
@@ -51,7 +53,9 @@ export type ReloadDelay = {
 	/**
 	 * Maximum total time to spend retrying the current URL before giving up
 	 * (default: 0, unlimited). Resets after each successful connection outside a redirect loop,
-	 * a URL change, or a disable/re-enable.
+	 * a URL change, or a disable/re-enable. It decides whether another attempt starts and never
+	 * cuts one that is running, so giving up can take up to one attempt longer than the window;
+	 * {@link ConnectProps.timeout} bounds each attempt.
 	 */
 	timeout?: Milli;
 };
@@ -61,11 +65,12 @@ export type ReloadDelay = {
  *
  * {@link ConnectProps.transport} is excluded: a supplied session is good for exactly one
  * connection, so the reconnect loop has nothing to reuse once that session drops. Call
- * {@link connect} directly when you have a session to hand over.
+ * {@link connect} directly when you have a session to hand over. Every attempt advertises
+ * the default {@link ConnectProps.implementation}.
  *
  * @internal
  */
-export type ReloadProps = Omit<ConnectProps, "url" | "signal" | "transport" | "tokens"> & {
+export type ReloadProps = Omit<ConnectProps, "url" | "signal" | "transport" | "implementation" | "tokens"> & {
 	/** See {@link ConnectProps.tokens}; pass a `Signal` to replace them before they expire. */
 	tokens?: readonly string[] | Signal<readonly string[]>;
 
@@ -169,7 +174,8 @@ export class Reload {
 	 * The auth handle every session of the loop is built on, spanning reconnects.
 	 *
 	 * Each session presents every token it holds, so a route naming one keeps it across a
-	 * reconnect, and its grant follows the live session. It ends when the loop closes, and
+	 * reconnect, and its grant follows the live session. It spans URL changes too, so its
+	 * tokens go to whatever URL the loop dials next. It ends when the loop closes, and
 	 * aborting it stops the loop at its next reconnect, with the abort's error.
 	 */
 	readonly auth = new AuthHandle();
@@ -182,6 +188,9 @@ export class Reload {
 
 	/** WebSocket fallback options applied to each connection attempt (not reactive). */
 	websocket: WebSocketProps | undefined;
+
+	/** The bound on each connection attempt. See {@link ConnectProps.timeout}. */
+	readonly timeout?: Milli;
 
 	/**
 	 * The origin whose broadcasts are served, spanning reconnects (not reactive).
@@ -287,22 +296,18 @@ export class Reload {
 		this.versions = normalizeVersions(props);
 		this.webtransport = props?.webtransport;
 		this.websocket = props?.websocket;
+		// Validated here, like the versions, rather than by every attempt.
+		this.timeout = props?.timeout === undefined ? undefined : Milli(props.timeout);
 		this.publish = props?.publish;
 		this.consume = props?.consume;
 
-		// Requests on the consume origin stay pending across a reconnect, and before the
-		// first session establishes, rather than reading as unroutable the moment no session
-		// is attached. Released only when this loop is disposed: giving up the current URL
-		// is recoverable (a new URL or a disable/re-enable starts another sequence), so a
-		// request must keep waiting rather than go unroutable in the gap.
+		// The consume origin's announcement streams are not synced while no session is there to
+		// deliver an initial set, so an empty table before the first connect, or during a
+		// reconnect, never reads as nothing being announced. The next session takes its own
+		// hold before this one is released. Taken now rather than in the effect, which runs
+		// a microtask later, after a watcher created alongside would already have synced.
 		if (this.consume) {
 			const consume = wireOf(this.consume);
-			this.#signals.cleanup(consume.expect());
-			// Likewise, its announcement streams are not synced while no session is there to
-			// deliver an initial set, so an empty table before the first connect, or during a
-			// reconnect, never reads as nothing being announced. The next session takes its own
-			// hold before this one is released. Taken now rather than in the effect, which runs
-			// a microtask later, after a watcher created alongside would already have synced.
 			let hold = this.enabled.peek() ? consume.snapshot(Path.empty()) : undefined;
 			this.#signals.run((effect) => {
 				if (effect.get(this.enabled) && !effect.get(this.established)) {
@@ -463,6 +468,7 @@ export class Reload {
 							websocket: this.#redirect.peek() ? { ...this.websocket, url: undefined } : this.websocket,
 							versions: this.versions,
 							webtransport: this.webtransport,
+							timeout: this.timeout,
 							publish: this.publish,
 							consume: this.consume,
 							auth: this.auth,
@@ -490,7 +496,7 @@ export class Reload {
 					const ended = await effect.race(connection.closed, wireOf(connection).goaway);
 					if (ended === undefined) return;
 					if (ended === null || ended instanceof Error) {
-						console.warn("connection closed, reconnecting");
+						console.warn(`connection closed, reconnecting: ${ended ? reason(ended) : "no error"}`);
 						this.#redirects.reset();
 						if (this.established.peek() === connection) this.established.set(undefined);
 						this.#retry(effect, connected, ended ?? undefined);
@@ -833,11 +839,13 @@ class Draining {
 }
 
 /**
- * Where `url` dials, without its query or fragment, where a peer may mint fresh credentials on
- * every redirect. Two URLs that differ only there reach the same endpoint.
+ * Where `url` dials, without its userinfo, query, or fragment, where a peer may mint fresh
+ * credentials on every redirect. Two URLs that differ only there reach the same endpoint.
  */
 function endpoint(url: URL): string {
 	const bare = new URL(url);
+	bare.username = "";
+	bare.password = "";
 	bare.search = "";
 	bare.hash = "";
 	return bare.href;

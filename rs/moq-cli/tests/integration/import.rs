@@ -10,7 +10,7 @@ use tokio::process::Child;
 const TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a finished import stays up: long enough for a subscriber to request its media
 /// after reading the final catalog, short enough that the process exits within `TIMEOUT`.
-const MAX_AGE: &str = "5s";
+const LINGER: &str = "5s";
 const BBB: &[u8] = include_bytes!("../../../moq-mux/src/container/ts/test_data/scte35/bbb5s.ts");
 
 /// Await `step` while `moq` still holds stdin open, failing as soon as the process exits.
@@ -49,7 +49,7 @@ fn import_as(url: &str, fingerprint: &str, global: &[&str], name: &str) -> Child
 			name,
 		])
 		.args(global)
-		.args(["import", "--max-age", MAX_AGE, "ts"])
+		.args(["import", "--linger", LINGER, "ts"])
 		.stdin(Stdio::piped())
 		.kill_on_drop(true)
 		.spawn()
@@ -133,7 +133,7 @@ const SHORT: &[u8] = include_bytes!("../../../moq-mux/src/container/ts/test_data
 
 /// A subscriber already waiting when a short import ends still receives its media: the
 /// import announces at the finish, once its catalog lists the tracks, and keeps them servable
-/// for their max-age after EOF.
+/// for the linger after EOF.
 #[tokio::test]
 async fn a_short_import_drains_its_media_to_a_waiting_subscriber() {
 	let _ = moq_tokio::crypto::install_default();

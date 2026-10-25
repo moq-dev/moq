@@ -36,7 +36,7 @@ Options to retain in the report:
 | Charon MIR/LLBC -> TS | Control JS representations and preserve Rust ownership semantics | A custom emitter/runtime, extraction coverage, source maps, and pinned toolchain |
 | rust-js | Reuse an existing Rust-to-JS compiler and runtime | Audit its supported subset and semantic differences, especially eager Promise execution versus lazy Rust futures |
 | Component Model + jco | Reusable typed binding and distribution machinery | Additional interface/adapters; default output still uses WASM, while `--js` offers JS-only output |
-| Own MIR/THIR backend | Control the extraction and lowering choices | Highest direct ownership of compiler integration and runtime semantics |
+| Own MIR/THIR backend | Control the extraction and lowering choices; under research in kixelated/rust2 | Highest direct ownership of compiler integration and runtime semantics |
 
 Sources: [Charon](https://github.com/AeneasVerif/charon),
 [rust-js](https://github.com/rust-js-lang/rust-js), and
@@ -49,8 +49,15 @@ If wasm2js is acceptable, scope its adoption. If not, record the concrete
 reason and plan the smallest source-translator investigation that addresses
 it. Do not require a new repo, a shared npm runtime, a particular integer
 representation, or codec/model/session rewrites before this evidence exists.
-If a custom generic translator is selected, keep it in its own repo and moq
-as a pinned consumer. Split independently landable prerequisites into quests.
+Split independently landable prerequisites into quests.
+
+Decided with the maintainer on 2026-10-23: an own rustc-driver translator is
+developed as a parallel research track in
+[kixelated/rust2](https://github.com/kixelated/rust2), starting with moq-net's
+codec ([its quest](https://github.com/kixelated/rust2/blob/main/quest/m2/ts.md)).
+It does not replace wasm2js as the first route here. Once it translates
+reachable moq-net code, compare it as the source-translator row below; moq
+consumes it as a pinned flake input, never by vendoring.
 
 Preserve earlier source-translation evidence:
 
@@ -64,8 +71,8 @@ Preserve earlier source-translation evidence:
 - [#5337](https://github.com/moq-dev/moq/issues/5337) reports closure-body
   retention and control-flow duplication fixes in Charon
   [#1513](https://github.com/AeneasVerif/charon/pull/1513) and
-  [#1514](https://github.com/AeneasVerif/charon/pull/1514). Verify their status
-  and pin before relying on them; its emitter benchmark does not establish
+  [#1514](https://github.com/AeneasVerif/charon/pull/1514). Both merged
+  upstream; pin a Charon revision carrying them before relying on them; its emitter benchmark does not establish
   the performance of a future emitter.
 - Source translation must establish precise Drop/Arc/Weak behavior, kio
   wakers and guards, unsafe storage, nested Option states, trait objects,

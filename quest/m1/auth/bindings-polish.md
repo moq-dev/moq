@@ -18,7 +18,3 @@ Decided 2026-10-21 with the maintainer: one m1 quest.
   forcing it.
 
 Public API: Swift additive. Wire: none.
-
-## Related
-
-- [First dial failures in Go](/quest/m2/go-first-dial-failure.md) - the m2 half of this binding cleanup

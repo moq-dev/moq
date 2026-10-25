@@ -1,58 +1,14 @@
 [workspace]
-members = [
-    "demo/carla/bridge",
-    "rs/hang",
-    "rs/kio",
-    "rs/libmoq",
-    "rs/moq-archive",
-    "rs/moq-audio",
-    "rs/moq-auth",
-    "rs/moq-bench",
-    "rs/moq-boy",
-    "rs/moq-c",
-    "rs/moq-cli",
-    "rs/moq-clock",
-    "rs/moq-clock/macros",
-    "rs/moq-e2ee",
-    "rs/moq-ffi",
-    "rs/moq-flate",
-    "rs/moq-gst",
-    "rs/moq-hls",
-    "rs/moq-ice",
-    "rs/moq-json",
-    "rs/moq-loc",
-    "rs/moq-msf",
-    "rs/moq-mux",
-    "rs/moq-native",
-    "rs/moq-net",
-    "rs/moq-net/fuzz",
-    "rs/moq-nvenc",
-    "rs/moq-pattern",
-    "rs/moq-quic",
-    "rs/moq-quic/fuzz",
-    "rs/moq-relay",
-    "rs/moq-room",
-    "rs/moq-rtc",
-    "rs/moq-rtmp",
-    "rs/moq-rtsp",
-    "rs/moq-shaper",
-    "rs/moq-sock",
-    "rs/moq-srt",
-    "rs/moq-stats",
-    "rs/moq-tokio",
-    "rs/moq-transcode",
-    "rs/moq-uring",
-    "rs/moq-v4l",
-    "rs/moq-video",
-    "rs/moq-wasm",
-    "rs/uniffi-bindgen",
-]
+# Keep source-only members discoverable in Maturin's dependency-pruned archive,
+# including the separately packaged UniFFI generator.
+members = ["demo/carla/bridge", "rs/*", "rs/moq-clock/macros", "rs/moq-net/fuzz", "rs/moq-quic/fuzz"]
 default-members = [
     "rs/kio",
     "rs/hang",
     # "rs/moq-c",     # requires C toolchain
     "rs/moq-clock",
     "rs/moq-clock/macros",
+    "rs/moq-congestion",
     "rs/moq-archive",
     "rs/moq-auth",
     "rs/moq-boy",
@@ -89,6 +45,8 @@ default-members = [
     "rs/moq-v4l",
     "rs/moq-video",
     # "rs/moq-wasm",  # wasm32-unknown-unknown target only
+    "rs/qmux",
+    "rs/test-env",
     # Maturin runs the workspace's `uniffi-bindgen` binary from the root to
     # generate the Python wheel, and that only searches default members. Its
     # `cli` feature keeps a plain check from compiling the generator.
@@ -111,6 +69,14 @@ ignored = ["getrandom"]
 # That pin sits above every MSRV here; rust-toolchain.toml says why.
 rust-version = "1.91"
 
+[workspace.lints.rust]
+# kio and moq-net model-check their primitives under `--cfg loom`.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
+
+[workspace.lints.clippy]
+# Every suppression says why, so the next lint audit can judge it.
+allow_attributes_without_reason = "warn"
+
 [workspace.dependencies]
 anyhow = "1"
 ash = "0.38"
@@ -131,6 +97,7 @@ dispatch2 = "0.3.1"
 flate2 = { version = "1.1", default-features = false }
 futures = "0.3"
 getrandom = { version = "0.4", features = ["wasm_js"] }
+h2 = "0.4"
 hang = { version = "0.21.11", path = "rs/hang" }
 hashlink = "0.12.2"
 hex = "0.4"
@@ -141,6 +108,7 @@ humantime-serde = "1.1.1"
 hyper-util = { version = "0.1.21", features = ["tokio"] }
 # Interface addresses for WebRTC host candidates (moq-tokio's `webrtc` feature).
 if-addrs = "0.15"
+indexmap = "2.14.2"
 io-uring = "0.7.15"
 jsonwebtoken = "11"
 kio = { version = "0.6.2", path = "rs/kio" }
@@ -158,6 +126,7 @@ moq-audio = { version = "0.1.10", path = "rs/moq-audio", default-features = fals
 moq-auth = { version = "0.2.1", path = "rs/moq-auth" }
 moq-clock = { version = "0.11.0", path = "rs/moq-clock" }
 moq-clock-macros = { version = "0.1.0", path = "rs/moq-clock/macros" }
+moq-congestion = { version = "0.1.0", path = "rs/moq-congestion" }
 moq-flate = { version = "0.2.0", path = "rs/moq-flate" }
 moq-hls = { version = "0.5.11", path = "rs/moq-hls", default-features = false }
 moq-ice = { version = "0.1.0", path = "rs/moq-ice" }
@@ -221,8 +190,9 @@ percent-encoding = "2"
 pollster = "1.0"
 # default-features off to skip the fork and timeout machinery; crates opt into what they use.
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }
-qmux = { version = "0.6.5", default-features = false }
+qmux = { version = "0.7.0", path = "rs/qmux", default-features = false }
 rand = "0.10.1"
+rand_pcg = "0.10"
 rangemap = "1.8"
 # default-features off so each consumer picks its crypto provider.
 rcgen = { version = "0.14", default-features = false }

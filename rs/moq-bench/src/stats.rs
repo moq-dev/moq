@@ -1,7 +1,8 @@
+use moq_clock::Wall;
 use std::io::Write;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use anyhow::Context;
 use serde::Serialize;
@@ -100,9 +101,8 @@ impl Stats {
 	/// Record one group keyframe's wall-clock delivery latency.
 	pub fn latency(&self, sent_ms: u128) {
 		// Read the clock before locking so contention is not measured as latency.
-		let now_ms = SystemTime::now()
-			.duration_since(UNIX_EPOCH)
-			.unwrap_or_default()
+		let now_ms = moq_clock::wall()
+			.saturating_duration_since(Wall::UNIX_EPOCH)
 			.as_millis();
 		self.latency.observe(sent_ms, now_ms);
 	}
@@ -125,7 +125,7 @@ impl Stats {
 	/// recorded stats are partial is invalid, so the caller must fail the run
 	/// rather than exit green.
 	pub async fn report(&self, interval: Duration, mut output: Option<std::fs::File>) -> anyhow::Result<()> {
-		let mut ticker = tokio::time::interval(interval);
+		let mut ticker = moq_clock::interval(interval);
 		// Skip the immediate first tick so the first report covers a full interval.
 		ticker.tick().await;
 
@@ -210,8 +210,16 @@ struct Record<'a> {
 
 impl<'a> Record<'a> {
 	fn new(previous: &Snapshot, snapshot: &'a Snapshot, interval: &'a IntervalLatency) -> anyhow::Result<Self> {
-		let interval_start_ms = previous.captured_at.duration_since(UNIX_EPOCH)?.as_millis();
-		let interval_end_ms = snapshot.captured_at.duration_since(UNIX_EPOCH)?.as_millis();
+		let interval_start_ms = previous
+			.captured_at
+			.checked_duration_since(Wall::UNIX_EPOCH)
+			.expect("Wall is after the Unix epoch")
+			.as_millis();
+		let interval_end_ms = snapshot
+			.captured_at
+			.checked_duration_since(Wall::UNIX_EPOCH)
+			.expect("Wall is after the Unix epoch")
+			.as_millis();
 		Ok(Self {
 			timestamp_ms: interval_end_ms,
 			interval_start_ms,
@@ -239,7 +247,7 @@ struct Activity {
 struct Snapshot {
 	ready: bool,
 	#[serde(skip)]
-	captured_at: SystemTime,
+	captured_at: Wall,
 	connections: Connections,
 	broadcasts: Activity,
 	subscriptions: Activity,
@@ -419,7 +427,7 @@ impl Latency {
 		// include only part of an observation. One that reads the clock before the
 		// boundary but locks after it counts in the next interval, unaltered.
 		let state = self.state.lock().expect("latency lock poisoned");
-		let captured_at = SystemTime::now();
+		let captured_at = moq_clock::wall();
 		let LatencyState {
 			buckets,
 			max_ms,
@@ -443,7 +451,7 @@ impl Latency {
 }
 
 struct LatencySnapshot {
-	captured_at: SystemTime,
+	captured_at: Wall,
 	samples: u64,
 	p50_ms: Option<u64>,
 	p90_ms: Option<u64>,
@@ -481,6 +489,11 @@ fn highest_bucket(buckets: &[u64]) -> Option<u64> {
 }
 
 #[cfg(test)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests {
 	use std::sync::Arc;
 
@@ -719,10 +732,10 @@ mod tests {
 	fn report_bounds_belong_to_captured_samples() {
 		let stats = Stats::default();
 		let mut previous = Snapshot::take(&stats);
-		previous.captured_at = UNIX_EPOCH + Duration::from_millis(1_000);
+		previous.captured_at = Wall::UNIX_EPOCH + Duration::from_millis(1_000);
 		stats.latency.observe(1_000, 1_050);
 		let mut snapshot = Snapshot::take(&stats);
-		snapshot.captured_at = UNIX_EPOCH + Duration::from_millis(2_000);
+		snapshot.captured_at = Wall::UNIX_EPOCH + Duration::from_millis(2_000);
 
 		// This delivery belongs to the next capture, even if report construction is delayed.
 		stats.latency.observe(2_000, 2_050);
@@ -745,7 +758,11 @@ mod tests {
 	fn observation_racing_a_capture_keeps_its_latency() {
 		let latency = Latency::default();
 		let first = latency.snapshot();
-		let captured_ms = first.captured_at.duration_since(UNIX_EPOCH).unwrap().as_millis();
+		let captured_ms = first
+			.captured_at
+			.checked_duration_since(Wall::UNIX_EPOCH)
+			.unwrap()
+			.as_millis();
 
 		latency.observe(captured_ms - 100, captured_ms - 50);
 		latency.observe(captured_ms - 50, captured_ms - 100);

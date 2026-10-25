@@ -133,7 +133,8 @@ test("a group read across PUBLISH_DONE is delivered whole", async () => {
 
 test("a Stream Count of 0 is a hint, so a late stream within the grace is still delivered", async () => {
 	const clock = new Manual();
-	using _clock = { [Symbol.dispose]: clock.install() };
+	const installed = clock.install();
+	using _clock = { [Symbol.dispose]: () => installed.close() };
 	const { subscriber, reader, done } = await subscribed();
 	await done(TRACK_ENDED, 0n);
 
@@ -148,9 +149,9 @@ test("a Stream Count of 0 is a hint, so a late stream within the grace is still 
 	const next = reader.recvGroup().finally(() => {
 		ended = true;
 	});
-	await clock.advanceAsync(Nano.fromMilli(Milli(GRACE - 1)));
+	await clock.advance(Nano.fromMilli(Milli(GRACE - 1)));
 	expect(ended).toBe(false);
-	await clock.advanceAsync(Nano.fromMilli(Milli(1)));
+	await clock.advance(Nano.fromMilli(Milli(1)));
 	expect(await next).toBeUndefined();
 	expect(await reader.closed).toBeNull();
 });

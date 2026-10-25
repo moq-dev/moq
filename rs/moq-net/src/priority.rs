@@ -17,14 +17,16 @@ use crate::track::Order;
 // - On remove from Vec: pop highest priority item from overflow to backfill
 // - On remove from overflow: remove its priority-and-id key in O(log n)
 //
-// Priority ordering: higher track value = higher priority, then subscription, then
-// group sequence in that subscription's own direction.
+// Priority ordering: higher track value = higher priority, then the publisher's priority,
+// then subscription, then group sequence in that subscription's own direction.
 
-/// A group stream's rank: its subscription's track priority, the subscription it
-/// belongs to, its group sequence in that subscription's [`Order`], and the first object
-/// it carries.
+/// A group stream's rank: its subscription's track priority, the publisher's priority for
+/// the track, the subscription it belongs to, its group sequence in that subscription's
+/// [`Order`], and the first object it carries.
 ///
-/// Higher `track` always wins. `group` breaks ties only *within* one `subscribe`:
+/// Higher `track` always wins, and a higher `publisher` breaks a tie between two
+/// subscriptions at the same `track`, so hang audio goes ahead of video when a subscriber
+/// asks for both at one priority. `group` breaks ties only *within* one `subscribe`:
 /// newest first by default, so a congested track sheds its backlog rather than its live
 /// edge, or oldest first for an ascending subscription draining one.
 ///
@@ -36,7 +38,8 @@ use crate::track::Order;
 /// since the rest of a group is undecodable without its start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Priority {
-	track: u8,
+	track: i8,
+	publisher: i8,
 	subscribe: u64,
 	order: Order,
 	group: u64,
@@ -45,14 +48,21 @@ pub struct Priority {
 
 impl Priority {
 	/// Rank a group for transmission: the newest group of a track transmits first.
-	pub fn new(track: u8, subscribe: u64, group: u64) -> Self {
+	pub fn new(track: i8, subscribe: u64, group: u64) -> Self {
 		Self {
 			track,
+			publisher: 0,
 			subscribe,
 			order: Order::Descending,
 			group,
 			start: 0,
 		}
+	}
+
+	/// Break a tie between subscriptions at the same track priority by the publisher's.
+	pub fn with_publisher(mut self, publisher: i8) -> Self {
+		self.publisher = publisher;
+		self
 	}
 
 	/// Rank groups of the same subscription in `order` instead.
@@ -74,6 +84,7 @@ impl Ord for Priority {
 		other
 			.track
 			.cmp(&self.track)
+			.then(other.publisher.cmp(&self.publisher))
 			// Which subscription wins a priority tie is arbitrary, but it has to be
 			// stable and independent of either one's direction. The older (lower id)
 			// subscription goes first.
@@ -113,6 +124,13 @@ pub fn in_group(group: u64, start: u64, order: Order) -> i64 {
 		Order::Ascending => -group,
 	};
 	group.saturating_add(i64::from(start == 0))
+}
+
+/// A subscription's send group priority: its subscriber priority, then the publisher's.
+///
+/// Packed so the subscriber's always dominates, exactly as [`Priority`] ranks them.
+pub fn group(subscriber: i8, publisher: i8) -> i64 {
+	i64::from(subscriber) * 256 + i64::from(publisher)
 }
 
 #[derive(Debug, Clone)]
@@ -388,7 +406,7 @@ impl PriorityState {
 	}
 
 	/// Change one item's track priority and order, leaving the rest of its rank alone.
-	fn steer(&mut self, id: usize, track: u8, order: Order) {
+	fn steer(&mut self, id: usize, track: i8, order: Order) {
 		let mut item = self.extract(id);
 		item.priority.track = track;
 		item.priority.order = order;
@@ -419,7 +437,7 @@ pub struct PriorityHandle {
 	id: usize,
 	/// This item's track priority and order, the only parts of its rank a handle owns;
 	/// the rest is fixed when the item is queued.
-	track: u8,
+	track: i8,
 	order: Order,
 	/// Last value observed via [`current`](Self::current)/[`next`](Self::next), so
 	/// `next` fires only on a real change.
@@ -483,7 +501,7 @@ impl PriorityHandle {
 
 	/// Change this item's track priority and order and re-sort the queue, returning its
 	/// new rank. No-op if neither changed.
-	pub fn steer(&mut self, track: u8, order: Order) -> u8 {
+	pub fn steer(&mut self, track: i8, order: Order) -> u8 {
 		if self.track == track && self.order == order {
 			return self.current();
 		}
@@ -501,6 +519,30 @@ impl PriorityHandle {
 	}
 }
 
+/// The receive priority of a control stream, kept over every other stream when the
+/// receive window fills: nothing downstream proceeds without it, and it is small.
+///
+/// A stream not yet identified keeps the transport's default of 0, which every group
+/// stream sits below.
+pub const RECV_CONTROL: i64 = i64::MAX;
+
+/// The receive priority of a group stream: always below a control stream or an
+/// unidentified one, ranked by its subscription's `priority` and then its `order`, like the
+/// sender ranks it. A [`Order::Descending`] subscription gives up its oldest group first,
+/// since a live track that falls behind skips to its newest anyway; an [`Order::Ascending`]
+/// one drains a backlog in sequence, so its newest group goes first.
+pub fn recv_group(priority: i8, sequence: u64, order: Order) -> i64 {
+	// Saturating the sequence at 2^48 keeps the band negative; no track gets that far.
+	const SEQUENCE: u32 = 48;
+	const MAX: i64 = (1 << SEQUENCE) - 1;
+	let sequence = (sequence.min(MAX as u64)) as i64;
+	let kept = match order {
+		Order::Descending => sequence,
+		Order::Ascending => MAX - sequence,
+	};
+	i64::MIN / 2 + (i64::from(priority) << SEQUENCE) + kept
+}
+
 #[cfg(test)]
 mod tests {
 	use std::sync::{
@@ -514,7 +556,7 @@ mod tests {
 	/// A live subscription's group rank, on the one subscription these tests share.
 	/// Group order within a subscription is what most of them exercise, so scoping
 	/// them together is what keeps them testing it.
-	fn live(track: u8, group: u64) -> Priority {
+	fn live(track: i8, group: u64) -> Priority {
 		Priority::new(track, 0, group)
 	}
 
@@ -567,20 +609,38 @@ mod tests {
 		}
 	}
 
+	/// Every group sits below an unidentified stream, and so below a control stream, with
+	/// more urgent subscriptions and then newer groups kept longer.
+	#[test]
+	fn recv_group_stays_below_unidentified_streams() {
+		for order in [Order::Descending, Order::Ascending] {
+			assert!(recv_group(0, u64::MAX, order) < recv_group(1, 0, order));
+			assert!(recv_group(0, 0, order) < recv_group(1, u64::MAX, order));
+			assert!(recv_group(i8::MIN, u64::MAX, order) < recv_group(-1, 0, order));
+			assert!(recv_group(i8::MAX, 0, order) < 0);
+			assert!(recv_group(i8::MAX, u64::MAX, order) < 0);
+			assert!(recv_group(i8::MIN, 0, order) > i64::MIN);
+			assert!(recv_group(i8::MIN, u64::MAX, order) > i64::MIN);
+		}
+		// The group the subscription would deliver last is the first to go.
+		assert!(recv_group(0, 0, Order::Descending) < recv_group(0, 1, Order::Descending));
+		assert!(recv_group(0, 1, Order::Ascending) < recv_group(0, 0, Order::Ascending));
+	}
+
 	/// A group whose rank didn't move must not be re-polled. Every queued group parks on
 	/// its own waker, so a queue-wide notification would drag every stream machine in the
 	/// session through a pass that finds nothing changed.
 	#[test]
 	fn a_reorder_wakes_only_the_ranks_that_moved() {
 		let queue = PriorityQueue::default();
-		let parked = Parked::new((0..64).map(|group| queue.insert(live(100, group))).collect());
+		let parked = Parked::new((0..64).map(|group| queue.insert(live(-28, group))).collect());
 
 		// Lowest priority yet, so it lands at the tail and shifts nobody.
-		let tail = queue.insert(live(50, 0));
+		let tail = queue.insert(live(-78, 0));
 		assert_eq!(parked.counts(), vec![0; 64], "a tail insert moved no other rank");
 
 		// Highest priority yet, so every existing entry shifts down one.
-		let front = queue.insert(live(u8::MAX, u64::MAX));
+		let front = queue.insert(live(i8::MAX, u64::MAX));
 		assert_eq!(parked.counts(), vec![1; 64], "a front insert moved every other rank");
 
 		drop((tail, front));
@@ -590,8 +650,8 @@ mod tests {
 	#[test]
 	fn an_overflow_removal_wakes_nobody() {
 		let queue = PriorityQueue::default();
-		let fillers = (0..MAX_VEC_SIZE as u64).map(|group| queue.insert(live(200, group)));
-		let overflow = (0..2).map(|group| queue.insert(live(100, group)));
+		let fillers = (0..MAX_VEC_SIZE as u64).map(|group| queue.insert(live(72, group)));
+		let overflow = (0..2).map(|group| queue.insert(live(-28, group)));
 		let mut parked = Parked::new(fillers.chain(overflow).collect());
 
 		let doomed = parked.handles.pop().expect("overflow handle");
@@ -608,7 +668,7 @@ mod tests {
 	#[test]
 	fn test_single_item() {
 		let queue = PriorityQueue::default();
-		let mut handle = queue.insert(live(100, 5));
+		let mut handle = queue.insert(live(-28, 5));
 		assert_eq!(handle.current(), 0); // First item is always index 0
 	}
 
@@ -618,8 +678,8 @@ mod tests {
 	#[test]
 	fn test_send_order_inverts_rank() {
 		let queue = PriorityQueue::default();
-		let mut top = queue.insert(live(200, 0));
-		let mut low = queue.insert(live(100, 0));
+		let mut top = queue.insert(live(72, 0));
+		let mut low = queue.insert(live(-28, 0));
 
 		assert_eq!(top.current(), 0);
 		assert_eq!(top.send_order(), 255, "most urgent rank gets the highest send order");
@@ -632,9 +692,9 @@ mod tests {
 		let queue = PriorityQueue::default();
 
 		// Insert items with different track priorities
-		let mut low = queue.insert(live(50, 0));
-		let mut high = queue.insert(live(255, 0));
-		let mut mid = queue.insert(live(100, 0));
+		let mut low = queue.insert(live(-78, 0));
+		let mut high = queue.insert(live(127, 0));
+		let mut mid = queue.insert(live(-28, 0));
 
 		// With sorted vec, indices map exactly to priority order
 		assert_eq!(high.current(), 0); // Highest priority
@@ -647,9 +707,9 @@ mod tests {
 		let queue = PriorityQueue::default();
 
 		// Same track priority, different groups
-		let mut group10 = queue.insert(live(100, 10));
-		let mut group5 = queue.insert(live(100, 5));
-		let mut group1 = queue.insert(live(100, 1));
+		let mut group10 = queue.insert(live(-28, 10));
+		let mut group5 = queue.insert(live(-28, 5));
+		let mut group1 = queue.insert(live(-28, 1));
 
 		// Exact index mapping for sorted vec
 		assert_eq!(group10.current(), 0);
@@ -662,12 +722,13 @@ mod tests {
 	#[test]
 	fn test_ord_is_total() {
 		let mixed = [
-			Priority::new(100, 7, 1),
-			Priority::new(100, 7, 2),
-			Priority::new(100, 7, 1).with_order(Order::Ascending),
-			Priority::new(100, 7, 2).with_order(Order::Ascending),
-			Priority::new(100, 8, 1),
-			Priority::new(200, 7, 1),
+			Priority::new(-28, 7, 1),
+			Priority::new(-28, 7, 2),
+			Priority::new(-28, 7, 1).with_order(Order::Ascending),
+			Priority::new(-28, 7, 2).with_order(Order::Ascending),
+			Priority::new(-28, 8, 1),
+			Priority::new(-28, 8, 1).with_publisher(5),
+			Priority::new(72, 7, 1),
 		];
 
 		for a in mixed {
@@ -687,7 +748,7 @@ mod tests {
 	#[test]
 	fn test_ascending_ranks_oldest_first() {
 		let queue = PriorityQueue::default();
-		let ascending = |group| Priority::new(100, 0, group).with_order(Order::Ascending);
+		let ascending = |group| Priority::new(-28, 0, group).with_order(Order::Ascending);
 		let mut group5 = queue.insert(ascending(5));
 		let mut group1 = queue.insert(ascending(1));
 		let mut group10 = queue.insert(ascending(10));
@@ -698,7 +759,7 @@ mod tests {
 
 		// Steering the subscription back to descending flips it once every group moved.
 		for group in [&mut group1, &mut group5, &mut group10] {
-			group.steer(100, Order::Descending);
+			group.steer(-28, Order::Descending);
 		}
 		assert_eq!(group10.current(), 0);
 		assert_eq!(group5.current(), 1);
@@ -711,7 +772,7 @@ mod tests {
 	fn test_earlier_start_ranks_first_within_a_group() {
 		for order in [Order::Descending, Order::Ascending] {
 			let queue = PriorityQueue::default();
-			let stream = |group, start| Priority::new(100, 0, group).with_order(order).with_start(start);
+			let stream = |group, start| Priority::new(-28, 0, group).with_order(order).with_start(start);
 			// Queued first, so the slab id alone would rank it ahead.
 			let mut rest = queue.insert(stream(5, 3));
 			let mut head = queue.insert(stream(5, 0));
@@ -729,14 +790,29 @@ mod tests {
 		}
 	}
 
+	/// The publisher's priority breaks a tie between subscriptions at one track priority, and
+	/// only a tie: the subscriber's priority still wins outright.
+	#[test]
+	fn test_publisher_priority_breaks_ties() {
+		let queue = PriorityQueue::default();
+		// Older subscriptions win a full tie, so the tiebreak has to beat that.
+		let mut video = queue.insert(Priority::new(0, 1, 9).with_publisher(20));
+		let mut audio = queue.insert(Priority::new(0, 2, 1).with_publisher(40));
+		let mut urgent = queue.insert(Priority::new(1, 3, 1).with_publisher(i8::MIN));
+
+		assert_eq!(urgent.current(), 0, "subscriber priority dominates");
+		assert_eq!(audio.current(), 1, "a higher publisher priority wins the tie");
+		assert_eq!(video.current(), 2);
+	}
+
 	#[test]
 	fn test_track_priority_overrides_group() {
 		let queue = PriorityQueue::default();
 
 		// Lower track priority but higher group
-		let mut low_track_high_group = queue.insert(live(50, 1000));
+		let mut low_track_high_group = queue.insert(live(-78, 1000));
 		// Higher track priority but lower group
-		let mut high_track_low_group = queue.insert(live(255, 1));
+		let mut high_track_low_group = queue.insert(live(127, 1));
 
 		// Track priority should take precedence
 		assert_eq!(high_track_low_group.current(), 0);
@@ -747,9 +823,9 @@ mod tests {
 	fn test_removal_on_drop() {
 		let queue = PriorityQueue::default();
 
-		let mut first = queue.insert(live(255, 0));
-		let mut second = queue.insert(live(100, 0));
-		let mut third = queue.insert(live(50, 0));
+		let mut first = queue.insert(live(127, 0));
+		let mut second = queue.insert(live(-28, 0));
+		let mut third = queue.insert(live(-78, 0));
 
 		assert_eq!(first.current(), 0);
 		assert_eq!(second.current(), 1);
@@ -767,8 +843,8 @@ mod tests {
 	fn test_removal_of_highest_priority() {
 		let queue = PriorityQueue::default();
 
-		let mut first = queue.insert(live(255, 0));
-		let mut second = queue.insert(live(100, 0));
+		let mut first = queue.insert(live(127, 0));
+		let mut second = queue.insert(live(-28, 0));
 
 		assert_eq!(first.current(), 0);
 		assert_eq!(second.current(), 1);
@@ -784,8 +860,8 @@ mod tests {
 	fn test_removal_of_lowest_priority() {
 		let queue = PriorityQueue::default();
 
-		let mut first = queue.insert(live(255, 0));
-		let mut second = queue.insert(live(100, 0));
+		let mut first = queue.insert(live(127, 0));
+		let mut second = queue.insert(live(-28, 0));
 
 		assert_eq!(first.current(), 0);
 		assert_eq!(second.current(), 1);
@@ -802,7 +878,7 @@ mod tests {
 		let queue = PriorityQueue::default();
 
 		// Insert items from high to low group to make them ordered in heap
-		let mut handles: Vec<_> = (0..10).rev().map(|i| queue.insert(live(100, i))).collect();
+		let mut handles: Vec<_> = (0..10).rev().map(|i| queue.insert(live(-28, i))).collect();
 
 		// Highest group (9, at handles[0]) should be at heap index 0
 		assert_eq!(handles[0].current(), 0);
@@ -818,7 +894,7 @@ mod tests {
 		let queue = PriorityQueue::default();
 
 		// Insert more than 255 items (insert high to low so first item is highest priority)
-		let mut handles: Vec<_> = (0..300).rev().map(|i| queue.insert(live(100, i))).collect();
+		let mut handles: Vec<_> = (0..300).rev().map(|i| queue.insert(live(-28, i))).collect();
 
 		// Highest priority item (group=299, handles[0]) should be at heap index 0
 		assert_eq!(handles[0].current(), 0);
@@ -839,18 +915,18 @@ mod tests {
 		let queue = PriorityQueue::default();
 
 		// Mix of different track priorities and groups
-		let mut high_track_high_group = queue.insert(live(255, 10));
-		let mut high_track_low_group = queue.insert(live(255, 1));
-		let mut mid_track_high_group = queue.insert(live(100, 5));
-		let mut mid_track_low_group = queue.insert(live(100, 1));
-		let mut low_track_high_group = queue.insert(live(50, 100));
+		let mut high_track_high_group = queue.insert(live(127, 10));
+		let mut high_track_low_group = queue.insert(live(127, 1));
+		let mut mid_track_high_group = queue.insert(live(-28, 5));
+		let mut mid_track_low_group = queue.insert(live(-28, 1));
+		let mut low_track_high_group = queue.insert(live(-78, 100));
 
 		// Exact index mapping with sorted vec
-		assert_eq!(high_track_high_group.current(), 0); // track=255, group=10
-		assert_eq!(high_track_low_group.current(), 1); // track=255, group=1
-		assert_eq!(mid_track_high_group.current(), 2); // track=100, group=5
-		assert_eq!(mid_track_low_group.current(), 3); // track=100, group=1
-		assert_eq!(low_track_high_group.current(), 4); // track=50, group=100
+		assert_eq!(high_track_high_group.current(), 0); // track=127, group=10
+		assert_eq!(high_track_low_group.current(), 1); // track=127, group=1
+		assert_eq!(mid_track_high_group.current(), 2); // track=-28, group=5
+		assert_eq!(mid_track_low_group.current(), 3); // track=-28, group=1
+		assert_eq!(low_track_high_group.current(), 4); // track=-78, group=100
 	}
 
 	#[moq_clock::test]
@@ -858,10 +934,10 @@ mod tests {
 		let queue = PriorityQueue::default();
 
 		// Fill vec to capacity
-		let mut fillers: Vec<_> = (0..255).rev().map(|i| queue.insert(live(100, i + 100))).collect();
+		let mut fillers: Vec<_> = (0..255).rev().map(|i| queue.insert(live(-28, i + 100))).collect();
 
 		// This goes to overflow
-		let mut overflow_item = queue.insert(live(100, 50));
+		let mut overflow_item = queue.insert(live(-28, 50));
 		assert_eq!(overflow_item.current(), u8::MAX);
 
 		// Spawn task to wait for promotion from overflow
@@ -882,9 +958,9 @@ mod tests {
 	fn test_interleaved_insertions_and_removals() {
 		let queue = PriorityQueue::default();
 
-		let mut h1 = queue.insert(live(200, 0));
-		let h2 = queue.insert(live(150, 0));
-		let mut h3 = queue.insert(live(100, 0));
+		let mut h1 = queue.insert(live(72, 0));
+		let h2 = queue.insert(live(22, 0));
+		let mut h3 = queue.insert(live(-28, 0));
 
 		// h1 has highest priority
 		assert_eq!(h1.current(), 0);
@@ -896,7 +972,7 @@ mod tests {
 		// h3 should have moved up
 		assert!(h3.current() < 2);
 
-		let mut h4 = queue.insert(live(250, 0));
+		let mut h4 = queue.insert(live(122, 0));
 
 		// h4 has highest priority now
 		assert_eq!(h4.current(), 0);
@@ -914,9 +990,9 @@ mod tests {
 		let queue = PriorityQueue::default();
 
 		// Items with identical track and group should still be ordered consistently
-		let mut h1 = queue.insert(live(100, 5));
-		let mut h2 = queue.insert(live(100, 5));
-		let mut h3 = queue.insert(live(100, 5));
+		let mut h1 = queue.insert(live(-28, 5));
+		let mut h2 = queue.insert(live(-28, 5));
+		let mut h3 = queue.insert(live(-28, 5));
 
 		// All three should have valid indices
 		let indices = [h1.current(), h2.current(), h3.current()];
@@ -931,9 +1007,9 @@ mod tests {
 		let queue = PriorityQueue::default();
 
 		// Create a heap with known structure
-		let mut root = queue.insert(live(255, 0));
-		let left = queue.insert(live(100, 0));
-		let mut right = queue.insert(live(100, 0));
+		let mut root = queue.insert(live(127, 0));
+		let left = queue.insert(live(-28, 0));
+		let mut right = queue.insert(live(-28, 0));
 
 		assert_eq!(root.current(), 0);
 
@@ -952,21 +1028,21 @@ mod tests {
 
 		// Insert in random order
 		let mut handles = vec![
-			queue.insert(live(100, 5)),
-			queue.insert(live(200, 3)),
-			queue.insert(live(50, 10)),
-			queue.insert(live(200, 8)),
-			queue.insert(live(100, 1)),
+			queue.insert(live(-28, 5)),
+			queue.insert(live(72, 3)),
+			queue.insert(live(-78, 10)),
+			queue.insert(live(72, 8)),
+			queue.insert(live(-28, 1)),
 		];
 
 		// Verify highest priority is at index 0
-		// track=200, group=8 should be highest
+		// track=72, group=8 should be highest
 		assert_eq!(handles[3].current(), 0);
 
 		// Remove highest priority
 		drop(handles.remove(3));
 
-		// Next highest should now be at 0 (track=200, group=3)
+		// Next highest should now be at 0 (track=72, group=3)
 		assert_eq!(handles[1].current(), 0);
 	}
 
@@ -975,10 +1051,10 @@ mod tests {
 		let queue = PriorityQueue::default();
 
 		// Fill vec to capacity - 1
-		let _fillers: Vec<_> = (0..254).map(|i| queue.insert(live(100, i + 100))).collect();
+		let _fillers: Vec<_> = (0..254).map(|i| queue.insert(live(-28, i + 100))).collect();
 
 		// Insert one more that will be at the edge
-		let mut at_edge = queue.insert(live(100, 50));
+		let mut at_edge = queue.insert(live(-28, 50));
 		assert_eq!(at_edge.current(), 254);
 
 		// Spawn task to wait for demotion notification
@@ -987,7 +1063,7 @@ mod tests {
 		moq_clock::sleep(std::time::Duration::from_millis(10)).await;
 
 		// Insert very high priority item, kicking at_edge to overflow
-		let _high = queue.insert(live(255, 1000));
+		let _high = queue.insert(live(127, 1000));
 
 		let new_priority = task.await.unwrap();
 		assert_eq!(new_priority, u8::MAX, "Should be demoted to overflow");
@@ -997,16 +1073,16 @@ mod tests {
 	fn test_empty_after_all_removed() {
 		let queue = PriorityQueue::default();
 
-		let h1 = queue.insert(live(100, 0));
-		let h2 = queue.insert(live(200, 0));
-		let h3 = queue.insert(live(50, 0));
+		let h1 = queue.insert(live(-28, 0));
+		let h2 = queue.insert(live(72, 0));
+		let h3 = queue.insert(live(-78, 0));
 
 		drop(h1);
 		drop(h2);
 		drop(h3);
 
 		// Queue should be empty, next insert should get index 0
-		let mut h4 = queue.insert(live(100, 0));
+		let mut h4 = queue.insert(live(-28, 0));
 		assert_eq!(h4.current(), 0);
 	}
 
@@ -1014,11 +1090,11 @@ mod tests {
 	fn test_steer_track_reorders() {
 		let queue = PriorityQueue::default();
 
-		// Subscription 1 (track=255), Subscription 2 (track=55)
-		let mut s1_g1 = queue.insert(live(255, 1));
-		let mut s1_g2 = queue.insert(live(255, 2));
-		let mut s2_g1 = queue.insert(live(55, 1));
-		let mut s2_g2 = queue.insert(live(55, 2));
+		// Subscription 1 (track=127), Subscription 2 (track=-73)
+		let mut s1_g1 = queue.insert(live(127, 1));
+		let mut s1_g2 = queue.insert(live(127, 2));
+		let mut s2_g1 = queue.insert(live(-73, 1));
+		let mut s2_g2 = queue.insert(live(-73, 2));
 
 		assert_eq!(s1_g2.current(), 0); // s1 highest
 		assert_eq!(s1_g1.current(), 1);
@@ -1026,10 +1102,10 @@ mod tests {
 		assert_eq!(s2_g1.current(), 3);
 
 		// Swap track priorities for each handle individually.
-		s1_g1.steer(55, Order::Descending);
-		s1_g2.steer(55, Order::Descending);
-		s2_g1.steer(255, Order::Descending);
-		s2_g2.steer(255, Order::Descending);
+		s1_g1.steer(-73, Order::Descending);
+		s1_g2.steer(-73, Order::Descending);
+		s2_g1.steer(127, Order::Descending);
+		s2_g2.steer(127, Order::Descending);
 
 		assert_eq!(s2_g2.current(), 0); // s2 now highest
 		assert_eq!(s2_g1.current(), 1);
@@ -1042,8 +1118,8 @@ mod tests {
 		let queue = PriorityQueue::default();
 
 		// h_low at index 1, will be promoted to 0 when h_high is demoted.
-		let mut h_high = queue.insert(live(255, 1));
-		let mut h_low = queue.insert(live(50, 1));
+		let mut h_high = queue.insert(live(127, 1));
+		let mut h_low = queue.insert(live(-78, 1));
 
 		assert_eq!(h_low.current(), 1);
 
@@ -1052,7 +1128,7 @@ mod tests {
 		moq_clock::sleep(std::time::Duration::from_millis(10)).await;
 
 		// Demote h_high below h_low.
-		h_high.steer(10, Order::Descending);
+		h_high.steer(-118, Order::Descending);
 
 		let new_priority = task.await.unwrap();
 		assert_eq!(new_priority, 0, "h_low should be promoted to the top");
@@ -1062,16 +1138,16 @@ mod tests {
 	fn test_steer_track_self() {
 		let queue = PriorityQueue::default();
 
-		let mut h_high = queue.insert(live(255, 1));
-		let mut h_mid = queue.insert(live(100, 1));
-		let mut h_low = queue.insert(live(50, 1));
+		let mut h_high = queue.insert(live(127, 1));
+		let mut h_mid = queue.insert(live(-28, 1));
+		let mut h_low = queue.insert(live(-78, 1));
 
 		assert_eq!(h_high.current(), 0);
 		assert_eq!(h_mid.current(), 1);
 		assert_eq!(h_low.current(), 2);
 
 		// Demote h_high below the others.
-		h_high.steer(10, Order::Descending);
+		h_high.steer(-118, Order::Descending);
 
 		assert_eq!(h_mid.current(), 0);
 		assert_eq!(h_low.current(), 1);
@@ -1082,19 +1158,19 @@ mod tests {
 	fn test_steer_track_swaps_demoted_vec_item_with_overflow() {
 		let queue = PriorityQueue::default();
 
-		// Fill vec with 255 items at track=100, groups 1..=255.
+		// Fill vec with 255 items at track=-28, groups 1..=255.
 		// f1 (group=1) is the vec tail (lowest priority of the fillers).
-		let mut fillers: Vec<_> = (1..=255u64).map(|g| queue.insert(live(100, g))).collect();
+		let mut fillers: Vec<_> = (1..=255u64).map(|g| queue.insert(live(-28, g))).collect();
 
 		// Insert a higher-track item; this kicks f1 out of vec into overflow.
-		let mut top = queue.insert(live(200, 0));
+		let mut top = queue.insert(live(72, 0));
 		assert_eq!(top.current(), 0);
 		assert_eq!(fillers[0].current(), u8::MAX, "f1 was kicked into overflow");
 
 		// Lower top's track below every filler. Without the swap, top would land
 		// in vec at the tail while f1 stays in overflow despite having higher
 		// priority, breaking the "every overflow item < every vec item" invariant.
-		top.steer(0, Order::Descending);
+		top.steer(-128, Order::Descending);
 
 		assert!(fillers[0].current() < u8::MAX, "f1 should be promoted back into vec");
 		assert_eq!(top.current(), u8::MAX, "demoted top should land in overflow");
@@ -1105,15 +1181,15 @@ mod tests {
 		let queue = PriorityQueue::default();
 
 		// Three items, all in vec; no overflow involvement.
-		let mut a = queue.insert(live(200, 0));
-		let mut b = queue.insert(live(100, 0));
-		let mut c = queue.insert(live(50, 0));
+		let mut a = queue.insert(live(72, 0));
+		let mut b = queue.insert(live(-28, 0));
+		let mut c = queue.insert(live(-78, 0));
 		assert_eq!(a.current(), 0);
 		assert_eq!(b.current(), 1);
 		assert_eq!(c.current(), 2);
 
 		// Lowering A's priority below B but above C should leave A at index 1.
-		a.steer(75, Order::Descending);
+		a.steer(-53, Order::Descending);
 		assert_eq!(b.current(), 0);
 		assert_eq!(a.current(), 1);
 		assert_eq!(c.current(), 2);
@@ -1123,13 +1199,13 @@ mod tests {
 	fn test_remove_promotes_highest_priority_overflow_item() {
 		let queue = PriorityQueue::default();
 
-		// Fill vec to capacity with track=200.
-		let fillers: Vec<_> = (100..355u64).map(|g| queue.insert(live(200, g))).collect();
+		// Fill vec to capacity with track=72.
+		let fillers: Vec<_> = (100..355u64).map(|g| queue.insert(live(72, g))).collect();
 
 		// Three overflow items with distinct priorities (same track, different groups).
-		let mut low = queue.insert(live(100, 1));
-		let mut mid = queue.insert(live(100, 2));
-		let mut high = queue.insert(live(100, 3));
+		let mut low = queue.insert(live(-28, 1));
+		let mut mid = queue.insert(live(-28, 2));
+		let mut high = queue.insert(live(-28, 3));
 		assert_eq!(low.current(), u8::MAX);
 		assert_eq!(mid.current(), u8::MAX);
 		assert_eq!(high.current(), u8::MAX);
@@ -1152,8 +1228,8 @@ mod tests {
 		let queue = PriorityQueue::default();
 
 		// Fill vec, then insert top, kicking f1 (filler at group=1) into overflow.
-		let mut fillers: Vec<_> = (1..=255u64).map(|g| queue.insert(live(100, g))).collect();
-		let mut top = queue.insert(live(200, 0));
+		let mut fillers: Vec<_> = (1..=255u64).map(|g| queue.insert(live(-28, g))).collect();
+		let mut top = queue.insert(live(72, 0));
 		assert_eq!(top.current(), 0);
 
 		// Take ownership of f1 so we can await its promotion notification.
@@ -1164,7 +1240,7 @@ mod tests {
 		moq_clock::sim::yield_now().await;
 
 		// Demoting top below every filler swaps it with f1 in overflow.
-		top.steer(0, Order::Descending);
+		top.steer(-128, Order::Descending);
 
 		let promoted = task.await.unwrap();
 		assert!(promoted < u8::MAX, "f1 should be notified of promotion");

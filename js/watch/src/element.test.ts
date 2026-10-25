@@ -37,7 +37,7 @@ for (const [attribute, value, expected] of [
 	test(`invalid ${attribute}=${value} warns and uses the default`, () => {
 		const Element = require("./element").default;
 		const set = mock(() => {});
-		const target = { connection: { url: { set } }, controls: { volume: { set } } };
+		const target = { connection: { url: { set } }, controls: { audio: { volume: { set } } } };
 		const warn = spyOn(console, "warn").mockImplementation(() => {});
 		try {
 			expect(() => Element.prototype.attributeChangedCallback.call(target, attribute, null, value)).not.toThrow();
@@ -46,5 +46,20 @@ for (const [attribute, value, expected] of [
 		} finally {
 			warn.mockRestore();
 		}
+	});
+}
+
+for (const [value, expected] of [
+	["moq-transport-14", ["moq-transport-14"]],
+	[" moq-lite-06 , moq-transport-22 ", ["moq-lite-06", "moq-transport-22"]],
+	["", undefined],
+	[" , ", undefined],
+	[null, undefined],
+] as const) {
+	test(`versions=${JSON.stringify(value)} offers ${JSON.stringify(expected)}`, () => {
+		const Element = require("./element").default;
+		const set = mock(() => {});
+		Element.prototype.attributeChangedCallback.call({ connection: { versions: { set } } }, "versions", "x", value);
+		expect(set).toHaveBeenCalledWith(expected);
 	});
 }

@@ -225,16 +225,16 @@ impl Client {
 		let result: Result<End> = async {
 			let mut session = self.within(session.play(play)).await??.demuxed()?;
 			tracing::info!(%url, streams = tracks.len(), "RTSP session playing");
-			let playing = tokio::time::Instant::now();
+			let playing = moq_clock::now();
 			// Measured from the last frame, so RTCP reports alone cannot keep a dead camera alive.
 			let mut deadline = playing + self.timeout;
-			while let Some(item) = tokio::time::timeout_at(deadline, session.next())
+			while let Some(item) = moq_clock::timeout(deadline - moq_clock::now(), session.next())
 				.await
 				.map_err(|_| Error::Stalled(self.timeout))?
 			{
 				let item = item?;
 				if matches!(item, CodecItem::VideoFrame(_) | CodecItem::AudioFrame(_)) {
-					deadline = tokio::time::Instant::now() + self.timeout;
+					deadline = moq_clock::now() + self.timeout;
 				}
 				if ingest.push(item, session.streams())?.is_some() {
 					tracing::warn!(%url, "RTSP timeline jumped, ending the session");
@@ -264,7 +264,7 @@ impl Client {
 impl Client {
 	/// Fail `step` once it takes longer than the timeout.
 	async fn within<T>(&self, step: impl Future<Output = T>) -> Result<T> {
-		tokio::time::timeout(self.timeout, step)
+		moq_clock::timeout(self.timeout, step)
 			.await
 			.map_err(|_| Error::Stalled(self.timeout))
 	}
@@ -371,11 +371,11 @@ struct Stream {
 	track: Track,
 	/// The previous frame's timestamp, in the stream's clock units since the session start, and
 	/// when it arrived.
-	last: Option<(i64, std::time::Instant)>,
+	last: Option<(i64, moq_clock::Instant)>,
 	/// Whether a keyframe has been published (video) or the session started (audio).
 	started: bool,
 	/// When a lost packet broke the video's reference chain, so it waits for a keyframe.
-	held: Option<tokio::time::Instant>,
+	held: Option<moq_clock::Instant>,
 	/// Whether retina's parameter sets still need inserting: until the splitter emits a keyframe
 	/// carrying them, after which it re-inserts them ahead of every keyframe itself.
 	fresh: bool,
@@ -419,7 +419,7 @@ impl Ingest {
 				frame.timestamp(),
 				frame.data(),
 				frame.has_new_parameters(),
-				frame.end_ctx().received(),
+				moq_clock::Instant::from_std(frame.end_ctx().received()),
 				frame.loss(),
 			),
 			CodecItem::AudioFrame(frame) => (
@@ -427,7 +427,7 @@ impl Ingest {
 				frame.timestamp(),
 				frame.data(),
 				false,
-				frame.ctx().received(),
+				moq_clock::Instant::from_std(frame.ctx().received()),
 				// AAC packets decode alone, and the decoder conceals a lost one.
 				0,
 			),
@@ -470,7 +470,7 @@ impl Ingest {
 					// access unit is damaged too, even when it is a keyframe, so drop it.
 					if stream.started && stream.held.is_none() {
 						tracing::warn!(stream_id, loss, "RTP packets lost, waiting for the next keyframe");
-						stream.held = Some(tokio::time::Instant::now());
+						stream.held = Some(moq_clock::now());
 					}
 					video.reset();
 					return Ok(None);
@@ -514,7 +514,7 @@ impl Ingest {
 
 	/// Whether a video stream has waited longer than `timeout` for a keyframe: its first since
 	/// `playing`, or its next since a loss held it.
-	fn awaiting_keyframe(&self, playing: tokio::time::Instant, timeout: std::time::Duration) -> bool {
+	fn awaiting_keyframe(&self, playing: moq_clock::Instant, timeout: std::time::Duration) -> bool {
 		self.streams.iter().flatten().any(|stream| {
 			let since = match stream.held {
 				Some(held) => held,
@@ -543,6 +543,11 @@ impl Ingest {
 }
 
 #[cfg(test)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests {
 	use std::time::Duration;
 

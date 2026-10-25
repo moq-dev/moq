@@ -65,6 +65,7 @@ The simplest way to watch a stream:
 |------------------|----------------------------|---------------|------------------------------------------|
 | `url`            | string                     | required      | Relay server URL                         |
 | `name`           | string                     | required      | Broadcast name/path                      |
+| `versions`       | comma-separated list       | stable versions | Protocol versions to offer, most preferred first, like `moq-transport-14,moq-lite-06` |
 | `paused`         | boolean                    | false         | Pause playback                           |
 | `muted`          | boolean                    | false         | Mute audio                               |
 | `visible`        | never, distance, or always | `20%`         | When to download video (see below)       |
@@ -107,14 +108,20 @@ const player = new Watch.Player({
     origin: connection.origin,
     probe: connection.probe,
     name: Watch.Net.Path.from("room/alice.hang"),
-    canvas,
-    muted,
+    video: { canvas },
+    audio: { muted },
 });
 
 // player.broadcast, player.video, player.audio, player.text,
 // player.renderer, player.emitter, and player.sync expose the pipeline.
 // Later: player.close(); connection.close();
 ```
+
+Per-media inputs nest by kind: `video` takes `target`, `canvas`, `visible`, and
+`backend`; `audio` takes `target`, `volume`, and `muted`; `text` takes the
+caption `target` and its `container`. A `target` pins a rendition by catalog
+name or, for video, caps its size and bitrate. `<moq-watch>` exposes the same
+signals under `controls.video`, `controls.audio`, and `controls.text`.
 
 `<moq-watch>` wraps this same `Player` and maps attributes to its controls.
 `Broadcast`, `Sync`, and the `Video`, `Audio`, and `Text` components remain

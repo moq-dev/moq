@@ -91,9 +91,11 @@ observe(arrival, media):
     if media > newest:                  # a reordered frame never joins the history
         newest = media
         drop history entries with entry.media < media - WINDOW
+        if MAX_HISTORY entries are held: drop the oldest
         push (arrival, media) onto history
 
-    ref = entry in history with entry.media <= media, minimising (entry.arrival - entry.media)
+    ref = entry in history with entry.media <= media, minimising (entry.arrival - entry.media),
+          the oldest on a tie
     if there is none: return            # older than the whole window, not measured
     delay = max(0, (arrival - ref.arrival) - (media - ref.media))
 
@@ -138,6 +140,22 @@ special case, and neither does a group the relay dropped.
 `WINDOW` is also the horizon over which a build-up is visible. A queue that
 fills over ten seconds is measured as the part of it that happened in the last
 two.
+
+### Bounding the history
+
+The history holds at most `MAX_HISTORY` (8192) arrivals. The window is media
+time and the publisher chooses the timestamp rate, so without a cap a stream
+that advances a nanosecond per frame keeps every frame it sends. The cap stays
+far above the two-second window of any real track, including a 1000 fps one
+(2000 entries); a stream dense enough to reach it measures against a window
+shorter than `WINDOW` instead of growing without bound.
+
+The reference is a minimum over a prefix of the history, and the publisher
+chooses the prefix by reordering, so scanning for it lets every frame cost
+`MAX_HISTORY` comparisons. Keep the history in a structure that answers any
+prefix's minimum in logarithmic time, such as a segment tree over a ring.
+Keep the oldest entry on a tie: tied entries with a different `arrival` and
+`media` round `delay` differently.
 
 ### Reordered arrivals are measured against what came before them
 
@@ -286,8 +304,9 @@ business.
 
 ## The advertised flush span, and how it composes
 
-A hang rendition may advertise `jitter`: the largest delay the publisher has
-seen between a frame being ready and handing it to the transport. It is
+A hang rendition may advertise `jitter`: the largest span of media the
+publisher writes behind a frame's timestamp, from B-frame reordering or a batch
+written together. It is
 described in [hang](/concept/hang) and specified in
 [draft-lcurley-moq-hang](/draft/moq-hang). The two quantities share a word and
 get confused for each other, so plainly:
@@ -295,15 +314,15 @@ get confused for each other, so plainly:
 | | Advertised `jitter` | The estimate here |
 | --- | --- | --- |
 | Measured by | the publisher, once | each receiver, continuously |
-| Measured at | the transport handoff | the receiver's transport |
-| Covers | encoder latency, packet packing, reorder, segmentation | all of that, plus the network |
+| Measured from | media timestamps | the receiver's arrival times |
+| Covers | packet packing, reorder, segmentation | all of that, plus encoder latency and the network |
 | Is | a declared lower bound | an observation |
 
-**They compose as a maximum, and the reason matters.** Both are the same
-formula, lateness relative to a windowed minimum, evaluated one hop apart. The
-receiver measures from the frame's media timestamp to its own arrival, so the
-publisher's flush delay is already inside every number on this page: a publisher
-flushing 100 ms of media at once produces arrivals whose relative delay reaches
+**They compose as a maximum, and the reason matters.** Both are lateness
+behind the media timestamp, evaluated one hop apart. The receiver measures from
+the frame's media timestamp to its own arrival, so the publisher's batching is
+already inside every number on this page: a publisher writing 100 ms of media at
+once produces arrivals whose relative delay reaches
 100 ms less one frame, on a perfect network, with no help from the catalog.
 
 So the advertised value is a **floor**, not an addend:
@@ -317,7 +336,7 @@ publishers that need it most. Taking the maximum on the grounds that they
 "describe the same quantity" reaches the right operation by the wrong argument:
 they are the same quantity measured at different points, and the receiver's
 point strictly contains the publisher's. The floor earns its place by being
-correct *immediately*, before the estimator has seen a full flush cycle, which
+correct *immediately*, before the estimator has seen a full batch, which
 is the one thing a measurement cannot be.
 
 ## Across renditions
@@ -328,9 +347,9 @@ constant offset between tracks cancels out of `measured`: a video encoder that
 flushes 200 ms behind the audio encoder produces the same video target as one
 that does not, and its frames would all arrive 200 ms late for the shared clock.
 
-The catalog `delay` field carries that offset: how far a rendition's minimum
-flush lateness trails the broadcast's earliest rendition, measured by the
-publisher and never lowered. It is an addend, not a floor, because nothing on
+The catalog `delay` field carries that offset: how far a rendition's
+timestamps trail those the broadcast's other renditions already wrote, measured
+by the publisher and never lowered. It is an addend, not a floor, because nothing on
 this page contains it. The shared playout is the largest requirement among the
 renditions actually subscribed:
 
@@ -339,7 +358,7 @@ playout = max over subscribed renditions of (delay + target)
 ```
 
 A receiver **must not** subtract one rendition's `delay` from another's. Each is
-a lifetime maximum taken against a sliding baseline, so two values need not
+a lifetime maximum taken against whichever rendition was ahead, so two values need not
 share an origin: if the earliest rendition later drifts behind another, their
 difference understates the real spread. The maximum never under-buffers,
 because the subscribed renditions' spread is measured from an earliest baseline
@@ -405,7 +424,9 @@ The advertised floor is the one term that can exceed that bound, and it is
 deliberately not clamped to it. The ceiling is a property of the histogram's
 size; the floor is a number the publisher declared about itself, so clamping
 the floor to the ceiling would under-buffer precisely the publisher that was
-honest about a long flush.
+honest about a long flush. Honoring it must not cost memory in proportion to
+the declared number, so the browser decodes at most 500 ms of any target and
+holds the rest as the encoded frames it actually received.
 
 Policy limits sit above the algorithm. A receiver's own configured maximum and
 the track's retention window both cap what it may hold, and neither is the
@@ -473,6 +494,7 @@ The exceptions are marked.
 | `FRESH_MAX` | 0.1 | Ours, twice the quantile's tail. NetEq ramps the forget factor from a start weight of 2 instead; see [the histogram](#the-histogram) |
 | `PRIOR[i]` | `0.5^(i+1)` | NetEq's histogram seed |
 | `IDLE_MAX` | 1024 intervals | Ours. A work bound with no effect on output |
+| `MAX_HISTORY` | 8192 arrivals | Ours. Bounds a rate the publisher chooses; see [Bounding the history](#bounding-the-history) |
 | Out-of-range delays | clamped, not dropped | Ours. See [the histogram](#the-histogram) |
 
 ## Implementing from this page

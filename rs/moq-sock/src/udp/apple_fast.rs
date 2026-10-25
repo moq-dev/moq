@@ -83,7 +83,11 @@ fn prepare_msg_x(
     hdr: &mut msghdr_x,
     iov: &mut libc::iovec,
     ctrl: &mut cmsg::Aligned<[u8; cmsg::LEN]>,
-    #[allow(unused_variables)] encode_src_ip: bool,
+    #[allow(
+        unused_variables,
+        reason = "kept for parity with the unix `prepare_msg` signature"
+    )]
+    encode_src_ip: bool,
     sendmsg_einval: bool,
 ) {
     iov.iov_base = transmit.contents.as_ptr() as *const _ as *mut _;
@@ -223,7 +227,6 @@ fn resolve_symbol(lock: &std::sync::OnceLock<usize>, name: &std::ffi::CStr) -> O
 
 // Adapted from https://github.com/apple-oss-distributions/xnu/blob/8d741a5de7ff4191bf97d57b9f54c2f6d4a15585/bsd/sys/socket_private.h
 #[repr(C)]
-#[allow(non_camel_case_types)]
 pub(crate) struct msghdr_x {
     pub msg_name: *mut libc::c_void,
     pub msg_namelen: libc::socklen_t,

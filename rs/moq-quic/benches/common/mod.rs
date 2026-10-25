@@ -22,19 +22,19 @@ use criterion::{
     measurement::{Measurement, ValueFormatter, WallTime},
 };
 use moq_clock::Instant;
+use moq_congestion::{Controller, ControllerFactory};
 use moq_quic::{
     ClientConfig, Connection, ConnectionHandle, ConnectionId, ConnectionIdGenerator, DatagramEvent,
-    Endpoint, EndpointConfig, Event, RandomConnectionIdGenerator, ReadError, ServerConfig,
-    StreamEvent, StreamId, TransportConfig, VarInt,
-    coding::Codec,
-    congestion::{Controller, ControllerFactory},
-    fuzz::Plaintext,
+    Endpoint, EndpointConfig, Event, LeaseError, RandomConnectionIdGenerator, ReadError,
+    ServerConfig, StreamEvent, StreamId, TransportConfig, VarInt, coding::Codec, fuzz::Plaintext,
 };
 
 /// The most datagrams one `poll_transmit` may batch, as a GSO-capable socket would take.
 const MAX_DATAGRAMS: usize = 10;
 /// The window the unlimited controller reports: far beyond anything a benchmark puts in flight.
 const WINDOW: u64 = 1 << 30;
+/// The send window unless a benchmark caps it: far beyond anything a benchmark writes.
+const SEND_WINDOW: u64 = 1 << 30;
 /// AEAD tag space the protocol reserves in every packet, which plaintext crypto leaves zeroed.
 const TAG_LEN: usize = 16;
 /// How far virtual time may jump to a timer while settling before the pair counts as idle.
@@ -50,6 +50,9 @@ const STALL: Duration = Duration::from_secs(10);
 pub(crate) enum Sink {
     /// Read everything to the end or the reset.
     Read,
+    /// Lease until at least this many bytes have arrived, then release everything leased. A
+    /// stream evicted while it waits is stopped, as moq-net does.
+    Lease(usize),
     /// Stop sending as soon as the stream opens.
     Stop,
 }
@@ -61,6 +64,7 @@ pub(crate) struct Received {
     pub(crate) finished: u64,
     pub(crate) reset: u64,
     pub(crate) stopped: u64,
+    pub(crate) evicted: u64,
     pub(crate) datagrams: u64,
 }
 
@@ -71,6 +75,10 @@ pub(crate) struct Setup {
     /// The client's connection ID length. Zero makes the client advertise an
     /// `active_connection_id_limit` of 2, otherwise 5, which bounds the CIDs the server issues.
     pub(crate) client_cid_len: usize,
+    /// The server's connection receive window, unbounded by default.
+    pub(crate) server_receive_window: VarInt,
+    /// The client's send window: how many written bytes it retains until they are acknowledged.
+    pub(crate) client_send_window: u64,
 }
 
 impl Default for Setup {
@@ -78,6 +86,8 @@ impl Default for Setup {
         Self {
             clients: 1,
             client_cid_len: 8,
+            server_receive_window: VarInt::MAX,
+            client_send_window: SEND_WINDOW,
         }
     }
 }
@@ -200,6 +210,9 @@ impl Peer {
 
 /// Reads or stops one stream, recording what the application saw.
 fn drain(conn: &mut Connection, id: StreamId, sink: Sink, received: &mut Received) {
+    if let Sink::Lease(want) = sink {
+        return lease(conn, id, want, received);
+    }
     let mut stream = conn.recv_stream(id);
     if sink == Sink::Stop {
         if stream.stop(VarInt::from_u32(0)).is_ok() {
@@ -223,12 +236,51 @@ fn drain(conn: &mut Connection, id: StreamId, sink: Sink, received: &mut Receive
                 received.reset += 1;
                 break;
             }
-            // Unreachable today, but keeps the suite compiling against a rewrite's new variants.
-            #[allow(unreachable_patterns)]
+            #[allow(
+                unreachable_patterns,
+                reason = "unreachable today, but keeps the suite compiling against a rewrite's new variants"
+            )]
             Err(err) => panic!("read failed: {err}"),
         }
     }
     let _ = chunks.finalize();
+}
+
+/// Leases one stream until it waits, releasing whatever it leased.
+///
+/// A stream that ends is stopped, as a driver does when its reader drops, which is what
+/// discards its lease.
+fn lease(conn: &mut Connection, id: StreamId, want: usize, received: &mut Received) {
+    loop {
+        let ended = match conn.recv_stream(id).lease(want) {
+            Ok(_) => None,
+            Err(LeaseError::Blocked(_) | LeaseError::ClosedStream) => return,
+            Err(LeaseError::Reset(_)) => Some(&mut received.reset),
+            Err(LeaseError::Evicted) => Some(&mut received.evicted),
+            Err(err) => panic!("lease failed: {err}"),
+        };
+        if let Some(count) = ended {
+            *count += 1;
+            let _ = conn.recv_stream(id).stop(VarInt::from_u32(0));
+            return;
+        }
+        let fin = conn.leased(id).expect("leased above").is_fin();
+        let mut stream = conn.recv_stream(id);
+        // Taken a chunk at a time, as moq-net hands a frame's payload on.
+        loop {
+            let chunk = stream.take(usize::MAX);
+            if chunk.is_empty() {
+                break;
+            }
+            received.bytes += chunk.len() as u64;
+        }
+        let _ = stream.release();
+        if fin {
+            received.finished += 1;
+            let _ = stream.stop(VarInt::from_u32(0));
+            return;
+        }
+    }
 }
 
 /// Splits a possibly segmented transmit into one datagram each.
@@ -271,7 +323,11 @@ impl Pair {
                     log: log.clone(),
                 })
             }));
-        let server = Endpoint::new(Arc::new(server_endpoint), Some(server_config()), false);
+        let server = Endpoint::new(
+            Arc::new(server_endpoint),
+            Some(server_config(setup.server_receive_window)),
+            false,
+        );
         let server = Peer::new(server, SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 4433));
 
         let mut pair = Self {
@@ -284,7 +340,7 @@ impl Pair {
             by_addr: HashMap::new(),
         };
 
-        let client_config = client_config();
+        let client_config = client_config(setup.client_send_window);
         for index in 0..setup.clients {
             let mut config = EndpointConfig::default();
             let cid_len = setup.client_cid_len;
@@ -551,7 +607,7 @@ pub(crate) fn flush(pair: &mut Pair, empty: usize) -> Vec<BytesMut> {
 /// Room for the largest burst of datagrams a benchmark queues or receives at once.
 const DATAGRAM_BUFFER: usize = 64 << 20;
 
-fn transport() -> Arc<TransportConfig> {
+fn transport(receive_window: VarInt, send_window: u64) -> Arc<TransportConfig> {
     let mut transport = TransportConfig::default();
     transport
         .congestion_controller_factory(Arc::new(Unlimited))
@@ -562,22 +618,22 @@ fn transport() -> Arc<TransportConfig> {
         .max_concurrent_uni_streams(VarInt::from_u32(4096))
         .max_concurrent_bidi_streams(VarInt::from_u32(4096))
         .stream_receive_window(VarInt::from_u32(16 << 20))
-        .receive_window(VarInt::MAX)
-        .send_window(1 << 30)
+        .receive_window(receive_window)
+        .send_window(send_window)
         .datagram_receive_buffer_size(Some(DATAGRAM_BUFFER))
         .datagram_send_buffer_size(DATAGRAM_BUFFER);
     Arc::new(transport)
 }
 
-fn server_config() -> Arc<ServerConfig> {
+fn server_config(receive_window: VarInt) -> Arc<ServerConfig> {
     let mut config = ServerConfig::with_crypto(Arc::new(Plaintext));
-    config.transport_config(transport());
+    config.transport_config(transport(receive_window, SEND_WINDOW));
     Arc::new(config)
 }
 
-fn client_config() -> ClientConfig {
+fn client_config(send_window: u64) -> ClientConfig {
     let mut config = ClientConfig::new(Arc::new(Plaintext));
-    config.transport_config(transport());
+    config.transport_config(transport(VarInt::MAX, send_window));
     config
 }
 
@@ -615,7 +671,7 @@ impl Controller for Unlimited {
         _is_ecn: bool,
         _lost_bytes: u64,
         _largest_lost: u64,
-        _space: moq_quic::SpaceId,
+        _space: moq_congestion::SpaceId,
     ) {
     }
 

@@ -64,13 +64,6 @@ jobs:
           access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
           secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
 
-      # Playwright's Chromium isn't in the nix devShell. Install it plus its apt
-      # runtime libs (`--with-deps` needs the host package manager); run.sh's own
-      # `playwright install` then no-ops.
-      - name: Playwright Chromium
-        run: nix develop --command bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium"
-        shell: bash -leo pipefail {0}
-
       - name: Browser clock
         run: nix develop --command just rs wasm-test
         shell: bash -leo pipefail {0}

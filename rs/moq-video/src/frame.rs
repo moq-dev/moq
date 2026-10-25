@@ -154,10 +154,13 @@ impl DmaBufPlane {
 #[cfg(all(target_os = "linux", feature = "dmabuf"))]
 pub struct DmaBufExport {
 	fd: OwnedFd,
-	// The producer's lease, held so its buffer outlives the descriptor. Only the
-	// renderer ever reads it back out, through `into_parts`, so without that feature
-	// the field is pure keepalive rather than dead.
-	#[cfg_attr(not(feature = "render"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "render"),
+		allow(
+			dead_code,
+			reason = "the producer's lease, held so its buffer outlives the descriptor. Only the renderer ever reads it back out, through `into_parts`, so without that feature the field is pure keepalive rather than dead"
+		)
+	)]
 	inner: Arc<dyn DmaBufFrame>,
 }
 
@@ -177,11 +180,11 @@ pub(crate) fn wait_dma_buf_readable(fd: BorrowedFd<'_>) -> std::io::Result<()> {
 		events: libc::POLLIN,
 		revents: 0,
 	};
-	let deadline = std::time::Instant::now() + DMA_BUF_FENCE_TIMEOUT;
+	let deadline = moq_clock::now() + DMA_BUF_FENCE_TIMEOUT;
 	loop {
 		// A signal restarts the wait against the same deadline rather than
 		// granting a fresh budget, so the total stall stays bounded.
-		let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+		let remaining = deadline.saturating_duration_since(moq_clock::now());
 		if remaining.is_zero() {
 			return Err(std::io::Error::from(std::io::ErrorKind::TimedOut));
 		}
@@ -281,7 +284,11 @@ impl DmaBuf {
 	///
 	/// Clones share the descriptor and guard; exports duplicate the FD as needed.
 	/// External buffers refuse CPU download, including linear allocations.
-	pub fn new<T: Send + Sync + 'static>(fd: OwnedFd, layout: DmaBufLayout, owner: T) -> Result<Self, Error> {
+	#[cfg_attr(
+		not(test),
+		allow(dead_code, reason = "only tests build one until an external producer needs it")
+	)]
+	pub(crate) fn new<T: Send + Sync + 'static>(fd: OwnedFd, layout: DmaBufLayout, owner: T) -> Result<Self, Error> {
 		Self::adopt(layout, Arc::new(ExternalDmaBuf { fd, _owner: owner }))
 	}
 
@@ -363,24 +370,24 @@ impl DmaBuf {
 /// The format, tiling, and plane layout of an external DMA-BUF.
 #[cfg(all(target_os = "linux", feature = "dmabuf"))]
 #[derive(Clone, Debug)]
-#[non_exhaustive]
-pub struct DmaBufLayout {
+pub(crate) struct DmaBufLayout {
 	/// DRM fourcc describing the pixel format.
-	pub format: DrmFormat,
+	pub(crate) format: DrmFormat,
 	/// DRM modifier describing memory tiling; defaults to linear.
-	pub modifier: u64,
+	pub(crate) modifier: u64,
 	/// Visible image dimensions.
-	pub size: Size,
+	pub(crate) size: Size,
 	/// Plane offsets and row strides, in format order.
-	pub planes: Vec<DmaBufPlane>,
+	pub(crate) planes: Vec<DmaBufPlane>,
 	/// Color space of YUV samples, when the producer knows it.
-	pub color: Option<Color>,
+	pub(crate) color: Option<Color>,
 }
 
 #[cfg(all(target_os = "linux", feature = "dmabuf"))]
 impl DmaBufLayout {
 	/// Describe linear planes and set optional tiling and color fields afterward.
-	pub fn new(format: DrmFormat, size: Size, planes: Vec<DmaBufPlane>) -> Self {
+	#[cfg(test)]
+	pub(crate) fn new(format: DrmFormat, size: Size, planes: Vec<DmaBufPlane>) -> Self {
 		Self {
 			format,
 			modifier: 0,
@@ -616,7 +623,10 @@ impl Surface {
 					Surface::I420(buffer.inner.download_i420()?.resize(size)?)
 				}
 			},
-			#[allow(unreachable_patterns)]
+			#[allow(
+				unreachable_patterns,
+				reason = "the other surfaces exist only on some platforms and features"
+			)]
 			other => Surface::I420(other.to_i420()?.into_owned().resize(size)?),
 		};
 		resized.label(implied);
@@ -633,7 +643,10 @@ impl Surface {
 	pub fn into_i420(self) -> Result<I420, Error> {
 		match self {
 			Surface::I420(i420) => Ok(i420),
-			#[allow(unreachable_patterns)]
+			#[allow(
+				unreachable_patterns,
+				reason = "the other surfaces exist only on some platforms and features"
+			)]
 			other => Ok(other.to_i420()?.into_owned()),
 		}
 	}
@@ -893,7 +906,10 @@ impl I420 {
 	/// strides, which a decoder may pad wider than the visible width. Used by the
 	/// software H.264 decode backend, whose `DecodedYUV` exposes strided planes.
 	/// Width and height must be even (4:2:0 chroma).
-	#[cfg_attr(not(feature = "openh264"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "openh264"),
+		allow(dead_code, reason = "only the `openh264` feature uses it")
+	)]
 	pub(crate) fn from_planes(
 		y: &[u8],
 		u: &[u8],
@@ -2814,6 +2830,11 @@ pub mod d3d11 {
 
 		#[test]
 		#[ignore = "Windows GPU workload; reports submission and batch completion, not capture latency"]
+		#[expect(
+			clippy::disallowed_methods,
+			clippy::disallowed_types,
+			reason = "the workload measures itself on the host clock"
+		)]
 		fn wgc_conversion_workload() {
 			let device = create_device().expect("D3D11 hardware device");
 			for size in [Size::new(640, 480), Size::new(1280, 720), Size::new(1920, 1080)] {

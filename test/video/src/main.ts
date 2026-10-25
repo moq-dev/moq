@@ -8,6 +8,7 @@
  */
 import "./gpu.ts";
 import "./captions.ts";
+import "./poster.ts";
 import "@moq/publish/element";
 import "@moq/watch/element";
 import { Signal } from "@moq/signals";
@@ -22,6 +23,7 @@ export type Snapshot = {
 /** The renderer check's observations, in order. */
 export type RendererReport = {
 	before: Snapshot;
+	// Error names: a DOMException does not survive the trip out of the page.
 	error: string | undefined;
 	after: Snapshot;
 	recovered: string | undefined;
@@ -117,14 +119,14 @@ window.checkRenderer = async () => {
 		const before = await until("the WebGPU paint", () => painted(first, ROTATED));
 
 		window.moqGpu.lose();
-		const error = await until("the surface-lost error", () => renderer.out.error.peek());
+		const error = (await until("the lost surface error", () => renderer.out.error.peek())).name;
 
 		const second = document.createElement("canvas");
 		first.replaceWith(second);
 		canvas.set(second);
 		const after = await until("the Canvas2D paint", () => painted(second, ROTATED));
 
-		return { before, error, after, recovered: renderer.out.error.peek() };
+		return { before, error, after, recovered: renderer.out.error.peek()?.name };
 	} finally {
 		renderer.close();
 		frame.close();

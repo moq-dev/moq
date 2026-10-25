@@ -56,7 +56,23 @@ export class Fixture {
 	readonly #video: Publish.Video.Encoder;
 	#generation = 0;
 
-	constructor(host: HTMLElement, url: string, name: string, fault: Fault) {
+	constructor(
+		host: HTMLElement,
+		{
+			url,
+			name,
+			fault,
+			versions,
+			generation = 0,
+		}: {
+			url: string;
+			name: string;
+			fault: Fault;
+			versions?: string[];
+			generation?: number;
+		},
+	) {
+		this.#generation = generation;
 		this.host = host;
 
 		const canvas = document.createElement("canvas");
@@ -86,7 +102,7 @@ export class Fixture {
 		const audioTrack = destination.stream.getAudioTracks()[0] as unknown as Publish.Audio.StreamTrack;
 		this.#signals.cleanup(() => audioTrack.stop());
 
-		const connection = new Moq.Connection({ url: new URL(url), enabled: true });
+		const connection = new Moq.Connection({ url: new URL(url), enabled: true, versions });
 		this.#signals.cleanup(() => connection.close());
 
 		const capture = new Publish.Video.Capture({ source: videoTrack });
@@ -126,13 +142,12 @@ export class Fixture {
 		// then requires an audio catalog after the click, which covers the capture resuming its own
 		// suspended graph.
 		//
-		// No sampleRate or channelCount override: the graph already runs at SAMPLE_RATE, and asking
-		// the capture for one channel puts the AudioWorklet behind an explicit Web Audio downmix that
-		// made the player stall far more often in CI, with no capture loss found in isolation; see
-		// /quest/m1/publish-audio-channel-count.md. Publishing the destination node's own format
-		// costs nothing here, since the tone is the same in both channels.
+		// Forced to mono, so every media check also covers the explicit Web Audio downmix a requested
+		// channel count puts in front of the AudioWorklet, the path a macOS microphone takes. The tone
+		// is the same in both channels, so the downmix changes nothing a check reads.
 		const audioCapture = new Publish.Audio.Capture({
 			source: { track: audioTrack, kind: "music" },
+			channelCount: 1,
 		});
 		this.#signals.cleanup(() => audioCapture.close());
 
@@ -168,14 +183,18 @@ export class Fixture {
 		unlock();
 		begin();
 
+		let readyAt: number | undefined;
 		this.#signals.run((effect) => {
+			const ready =
+				effect.get(connection.status) === "connected" &&
+				effect.get(video.out.catalog) !== undefined &&
+				effect.get(audio.out.catalog) !== undefined;
+			if (ready) readyAt ??= Date.now();
 			const state: FixtureState = {
 				frameId: effect.get(this.#frameId),
 				audioState: effect.get(this.#audioState),
-				ready:
-					effect.get(connection.status) === "connected" &&
-					effect.get(video.out.catalog) !== undefined &&
-					effect.get(audio.out.catalog) !== undefined,
+				ready,
+				readyAt,
 				videoActive: effect.get(video.out.active),
 				audioActive: effect.get(audio.out.active),
 				encodedFrames: effect.get(video.out.stats).frames,

@@ -19,15 +19,11 @@ mod front;
 mod aborts;
 mod bytes;
 mod clock;
-// private: passthrough
 pub(crate) mod datagram;
 mod delivered;
 mod expiry;
 // The DEFLATE codec behind compressed tracks.
 mod flate;
-// pending: /quest/m1/public-model/ingest.md
-pub(crate) mod ledger;
-// private: passthrough
 pub(crate) mod object;
 mod requests;
 mod resume;
@@ -43,8 +39,6 @@ use requests::Requests;
 use weak_cache::{WeakCache, WeakEntry};
 
 pub use bytes::*;
-// pending: /quest/m1/public-model/serve.md
-pub(crate) use subscription::Cap;
 // Datagram stays flat at the crate root (a small track-adjacent wire type),
 // not under a role module.
 pub use datagram::*;
@@ -55,8 +49,8 @@ pub use timed::Timed;
 pub mod origin {
 	pub use super::follow::AnnouncedBroadcast;
 	pub use super::origin_impl::{
-		Config, Consumer, Cost, DEFAULT_UPDATE_HOLD, Driver, Dynamic, Preference, Prepared, Producer, Request,
-		Requesting, Route, Routing, Source,
+		Config, Consumer, Cost, Driver, Dynamic, HopLimit, Link, Preference, Prepared, Producer, Request, Requesting,
+		Route, Routing, Source,
 	};
 }
 
@@ -72,19 +66,19 @@ pub use origin_impl::{Consume, Hop, Hops, InvalidHop};
 
 // The announce-interest prefixes a scope needs on a prefix-shaped wire.
 #[cfg(feature = "async")]
-// pending: /quest/m1/public-model/answer.md
 pub(crate) use origin_impl::interest_prefixes;
 
 // Held by a session while its peer's initial announcements arrive.
 #[cfg(feature = "async")]
-// pending: /quest/m1/public-model/answer.md
 pub(crate) use origin_impl::Snapshot;
+
+// What a client session asks its peer to announce, as the origin's readers change.
+#[cfg(feature = "async")]
+pub(crate) use origin_impl::{InterestChange, Interests};
 
 // The advertise-only route guard, for tests shaping the route table.
 #[cfg(all(test, feature = "async"))]
-// private: test
 pub(crate) use origin_impl::AnnounceProducer;
 
 #[cfg(all(test, feature = "async"))]
-// private: test
 pub(crate) use origin_impl::ProduceTest;

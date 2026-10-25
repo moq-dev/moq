@@ -19,9 +19,10 @@ rather than copying, keeping the same per-path fallback and disable behavior
 the other import paths use: a machine where the import cannot work should
 quietly take the I420 route, not fail to present.
 
-This is where the epic's "egress accessors for the other GPU variants as their
-consumers land" comes due for `d3d11::Texture`: the renderer is that consumer,
-so whatever access it needs becomes public here rather than ahead of it.
+The renderer is the first consumer of `d3d11::Texture`'s contents outside
+moq-video's frame module (its fields are `pub(crate)`,
+`rs/moq-video/src/frame.rs`), so whatever access it needs becomes public here
+rather than ahead of it.
 
 Worth doing on Windows specifically because 4K screen sharing is where the
 download plus re-upload costs most, and WGC screen capture makes that the

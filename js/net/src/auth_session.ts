@@ -1,13 +1,34 @@
 import { Instant, Milli, Nano, now, sleep, wall } from "@moq/clock";
-import { type Dispose, type Getter, Once, Signal } from "@moq/signals";
+import { type Dispose, type Getter, Once, race, Signal } from "@moq/signals";
 import type { Auth, Grant, Issued, Request, Requests } from "./auth.ts";
 import { closeReason, error, ProtocolViolation, SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";
 import * as Path from "./path.ts";
-import type { Stream } from "./stream.ts";
+import type { Reader, Stream, Writer } from "./stream.ts";
 import { nextTask } from "./util/yield.ts";
 
+/** Write a grant's patterns as a count and each one's canonical text, the encoding both wires' AUTH_OK share. @internal */
+export async function encodePatterns(w: Writer, patterns: Path.Patterns) {
+	await w.u53(patterns.size);
+	for (const pattern of patterns) await w.string(pattern.text);
+}
+
+/** Read a grant's patterns, refusing any that is invalid or not canonical. @internal */
+export async function decodePatterns(r: Reader): Promise<Path.Patterns> {
+	const count = await r.u53();
+	const patterns: Path.Pattern[] = [];
+	for (let i = 0; i < count; i++) {
+		const text = await r.string();
+		const pattern = Path.Pattern.parse(text);
+		// Only the canonical spelling is valid, so each pattern has one encoding.
+		if (pattern.text !== text) throw new Error(`non-canonical pattern: ${text}`);
+		patterns.push(pattern);
+	}
+	// Reduce once, so a peer's count never turns into quadratic work.
+	return new Path.Patterns(patterns);
+}
+
 /** Whether two grants allow the same paths and lapse together. */
-export function grantsEqual(a: Grant | undefined, b: Grant | undefined): boolean {
+function grantsEqual(a: Grant | undefined, b: Grant | undefined): boolean {
 	if (a === undefined || b === undefined) return a === b;
 	return a.publish.equals(b.publish) && a.subscribe.equals(b.subscribe) && a.expires === b.expires;
 }
@@ -79,17 +100,18 @@ export interface AuthWire {
 	unsupported(stream: Stream, reason: string): Promise<void>;
 }
 
+/** The paths any of `grants` allows. Reduced once, so it costs about the grants' total size. */
 function union(grants: Iterable<Grant>): Grant {
-	const publish = new Path.Patterns();
-	const subscribe = new Path.Patterns();
+	const publish: Path.Pattern[] = [];
+	const subscribe: Path.Pattern[] = [];
 	let expires: number | undefined;
 	for (const grant of grants) {
-		for (const pattern of grant.publish) publish.insert(pattern);
-		for (const pattern of grant.subscribe) subscribe.insert(pattern);
+		for (const pattern of grant.publish) publish.push(pattern);
+		for (const pattern of grant.subscribe) subscribe.push(pattern);
 		// The earliest expiry is when the union next shrinks.
 		if (grant.expires !== undefined) expires = Math.min(expires ?? grant.expires, grant.expires);
 	}
-	return { publish, subscribe, expires };
+	return { publish: new Path.Patterns(publish), subscribe: new Path.Patterns(subscribe), expires };
 }
 
 // The transport closed under the stream, which ends the whole session rather than one token.
@@ -342,6 +364,8 @@ export class Handle {
 	 *
 	 * The peer's stream credit bounds how many tokens wait unanswered, since each holds its
 	 * stream open until answered or withdrawn. A withdrawn token leaves the queue.
+	 *
+	 * @internal See {@link Request}.
 	 */
 	requests(): Requests {
 		const state = stateOf(this);
@@ -770,6 +794,7 @@ export class AuthSession {
 		if (this.#closed) return;
 		this.#closed = true;
 		this.#pending.set(0);
+		this.#setupPending.set(0);
 		for (const presented of this.#presented) {
 			presented.ended = true;
 			presented.isAnswered = true;
@@ -794,13 +819,16 @@ export class AuthSession {
 		let closed = false;
 		// The peer refused the last attempt with a reply, rather than losing its stream.
 		let refused = false;
-		// The peer granted the token at some point, so a clean close ends the grant.
+		// The peer granted the token, so a clean close ends the grant. A retry clears it.
 		let granted = false;
+		// The peer replied to an earlier attempt, so it knows AUTH.
+		let replied = false;
 		let delay: Milli | undefined;
 		for (;;) {
 			refused = false;
-			// Whether this attempt's stream got a grant, so a close is not the peer predating AUTH.
-			let answered = false;
+			// Whether the peer answered this token, so a close is not the peer predating AUTH:
+			// a grant on this stream, or a reply to an earlier one that this retry follows.
+			let answered = replied;
 			try {
 				const stream = await wire.present(presented.token);
 				presented.stream = stream;
@@ -844,6 +872,7 @@ export class AuthSession {
 						reply.refused instanceof StreamError && reply.refused.code === StreamCode.GoingAway;
 					if (!goingAway && !(reply.refused instanceof Unsupported)) this.#replied = true;
 					result = reply.refused;
+					replied = true;
 					// A peer going away judged nothing, so the successor presents the token instead.
 					refused = !goingAway;
 					stream.close();
@@ -871,6 +900,7 @@ export class AuthSession {
 			// carries such a code.
 			if (!refused || !transient(result) || this.#closed || presented.withdrawn) break;
 			presented.grant = undefined;
+			granted = false;
 			// Unanswered again, as on its first presentation: a request or publication the token
 			// might cover waits for the retry's verdict rather than being judged without it.
 			this.#unsettle(presented);
@@ -991,6 +1021,9 @@ export async function enforceGrant({
 		() => "closed" as const,
 	);
 	if ((await Promise.race([setupAnswered.then(() => "ready" as const), closed])) === "closed") return;
+	// Ends an authorization wait with the session, without adding a reaction on `closed` per wait.
+	const ended = new AbortController();
+	void closed.then(() => ended.abort());
 
 	// Every broadcast admitted so far that is still published.
 	const live = new Set<Path.Valid>();
@@ -1018,7 +1051,13 @@ export async function enforceGrant({
 			for (const path of table.keys()) {
 				if (live.has(path)) continue;
 				if (!current.publish.matches(path)) {
-					await auth?.ready(path, "publish");
+					try {
+						await auth?.ready(path, "publish", { signal: ended.signal });
+					} catch (err) {
+						dispose();
+						if (ended.signal.aborted) return;
+						throw err;
+					}
 					// A broadcast withdrawn during the wait is no longer ours to judge.
 					if (!advertised.peek()?.has(path)) continue;
 					if (grant.peek()?.publish.matches(path)) {
@@ -1037,7 +1076,8 @@ export async function enforceGrant({
 			}
 		}
 
-		const why = await Promise.race([woke, closed]);
+		// `race` drops its reaction on `closed` with the rest, which lives for the session.
+		const why = await race([woke, closed]);
 		dispose();
 		if (why === "closed") return;
 	}

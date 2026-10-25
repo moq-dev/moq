@@ -55,7 +55,7 @@ for (const protocol of ["lite", "ietf-17"] as const) {
 	for (const mode of ["refuse", "queue", "open"] as const) {
 		test(`${protocol}: ${mode} has one fatal request deadline`, async () => {
 			const clock = new Manual();
-			const restore = clock.install();
+			const installed = clock.install();
 			const transport = limited(mode);
 			const subscriber =
 				protocol === "lite"
@@ -65,11 +65,11 @@ for (const protocol of ["lite", "ietf-17"] as const) {
 			const track = broadcast.track("video").subscribe();
 			try {
 				await transport.created;
-				await clock.advanceAsync(Nano.zero);
+				await clock.advance(Nano.zero);
 				if (mode === "refuse") expect(track.closed.peek()?.name).toBe("NoStreamCredit");
-				await clock.advanceAsync(Nano.fromMilli(Milli(9_999)));
+				await clock.advance(Nano.fromMilli(Milli(9_999)));
 				if (mode !== "refuse") expect(track.closed.peek()).toBeUndefined();
-				await clock.advanceAsync(Nano.fromMilli(Milli(1)));
+				await clock.advance(Nano.fromMilli(Milli(1)));
 				const failure = await track.closed;
 				if (mode === "open") {
 					expect(failure).toBeInstanceOf(StreamError);
@@ -88,13 +88,13 @@ for (const protocol of ["lite", "ietf-17"] as const) {
 					await transport.aborted;
 					await transport.cancelled;
 				}
-				await clock.advanceAsync(Nano.fromMilli(Milli(30_000)));
+				await clock.advance(Nano.fromMilli(Milli(30_000)));
 				expect(transport.options).toHaveLength(1);
 			} finally {
 				track.close();
 				broadcast.close();
 				subscriber.close();
-				restore();
+				installed.close();
 			}
 		});
 	}
@@ -104,7 +104,7 @@ for (const legacy of [false, true]) {
 	for (const mode of ["refuse", "queue", "open"] as const) {
 		test(`${legacy ? "solicited draft-15" : "unsolicited draft-17"} advertisement: ${mode} is terminal`, async () => {
 			const clock = new Manual();
-			const restore = clock.install();
+			const installed = clock.install();
 			const transport = limited(mode);
 			const version = legacy ? Ietf.DRAFT_15 : Ietf.DRAFT_17;
 			const origin = new Origin();
@@ -128,13 +128,13 @@ for (const legacy of [false, true]) {
 				: publisher.runPublishNamespaces();
 			try {
 				await transport.created;
-				await clock.advanceAsync(Nano.fromMilli(Milli(9_999)));
+				await clock.advance(Nano.fromMilli(Milli(9_999)));
 				let aborted = false;
 				void transport.aborted.then(() => {
 					aborted = true;
 				});
 				expect(aborted).toBe(false);
-				await clock.advanceAsync(Nano.fromMilli(Milli(1)));
+				await clock.advance(Nano.fromMilli(Milli(1)));
 				if (mode === "queue") transport.release();
 				if (mode !== "refuse") {
 					const reset = await transport.aborted;
@@ -142,10 +142,10 @@ for (const legacy of [false, true]) {
 					if (mode === "open") expect((reset as Error).message).toContain("request timed out after 10000ms");
 					else expect(transport.written).toEqual([]);
 				}
-				await clock.advanceAsync(Nano.fromMilli(Milli(30_000)));
+				await clock.advance(Nano.fromMilli(Milli(30_000)));
 				// An unrelated change wakes reconciliation, but cannot revive the failed offer.
 				origin.createBroadcast(Path.from("another")).announce();
-				await clock.advanceAsync(Nano.zero);
+				await clock.advance(Nano.zero);
 				expect(transport.options).toEqual([
 					{ sendOrder: undefined, waitUntilAvailable: false },
 					{ sendOrder: undefined, waitUntilAvailable: false },
@@ -155,7 +155,7 @@ for (const legacy of [false, true]) {
 				origin.close();
 				await loop;
 				publisher.close();
-				restore();
+				installed.close();
 			}
 		});
 	}
@@ -165,7 +165,7 @@ for (const operation of ["info", "fetch"] as const) {
 	for (const mode of ["refuse", "queue", "open"] as const) {
 		test(`lite standalone ${operation}: ${mode} has a fatal deadline`, async () => {
 			const clock = new Manual();
-			const restore = clock.install();
+			const installed = clock.install();
 			const transport = limited(mode);
 			const subscriber = new LiteSubscriber(transport.quic, Lite.DRAFT_07, HopSchema.parse(1n));
 			let failure: unknown;
@@ -178,9 +178,9 @@ for (const operation of ["info", "fetch"] as const) {
 			});
 			try {
 				await transport.created;
-				await clock.advanceAsync(Nano.zero);
+				await clock.advance(Nano.zero);
 				if (mode === "refuse") expect((failure as Error).name).toBe("NoStreamCredit");
-				await clock.advanceAsync(Nano.fromMilli(Milli(10_000)));
+				await clock.advance(Nano.fromMilli(Milli(10_000)));
 				await request;
 				if (mode === "open") expect((failure as StreamError).code).toBe(StreamCode.ControlTimeout);
 				else expect((failure as Error).name).toBe("NoStreamCredit");
@@ -193,7 +193,7 @@ for (const operation of ["info", "fetch"] as const) {
 				expect(transport.options).toEqual([{ sendOrder: undefined, waitUntilAvailable: false }]);
 			} finally {
 				subscriber.close();
-				restore();
+				installed.close();
 			}
 		});
 	}
@@ -203,7 +203,7 @@ for (const protocol of ["lite", "ietf-17"] as const) {
 	for (const mode of ["refuse", "queue", "open"] as const) {
 		test(`${protocol} discovery: ${mode} bounds only the create`, async () => {
 			const clock = new Manual();
-			const restore = clock.install();
+			const installed = clock.install();
 			const transport = limited(mode);
 			const subscriber =
 				protocol === "lite"
@@ -212,8 +212,8 @@ for (const protocol of ["lite", "ietf-17"] as const) {
 			const announced = subscriber.announced();
 			try {
 				await transport.created;
-				await clock.advanceAsync(Nano.zero);
-				await clock.advanceAsync(Nano.fromMilli(Milli(30_000)));
+				await clock.advance(Nano.zero);
+				await clock.advance(Nano.fromMilli(Milli(30_000)));
 				if (mode === "open") expect(announced.closed.peek()).toBeUndefined();
 				else {
 					expect((await announced.closed)?.name).toBe("NoStreamCredit");
@@ -228,7 +228,7 @@ for (const protocol of ["lite", "ietf-17"] as const) {
 			} finally {
 				announced.close();
 				subscriber.close();
-				restore();
+				installed.close();
 			}
 		});
 	}
@@ -237,7 +237,7 @@ for (const protocol of ["lite", "ietf-17"] as const) {
 for (const protocol of ["lite", "ietf-17"] as const) {
 	test(`${protocol}: credit granted in the deadline task cannot send a late request`, async () => {
 		const clock = new Manual();
-		const restore = clock.install();
+		const installed = clock.install();
 		const transport = limited("queue");
 		const subscriber =
 			protocol === "lite"
@@ -247,9 +247,9 @@ for (const protocol of ["lite", "ietf-17"] as const) {
 		const track = broadcast.track("video").subscribe();
 		try {
 			await transport.created;
-			clock.advance(Nano.fromMilli(Milli(10_000)));
+			clock.jump(Nano.fromMilli(Milli(10_000)));
 			transport.release();
-			await clock.advanceAsync(Nano.zero);
+			await clock.advance(Nano.zero);
 			expect((await track.closed)?.name).toBe("NoStreamCredit");
 			await transport.aborted;
 			expect(transport.written).toEqual([]);
@@ -257,7 +257,7 @@ for (const protocol of ["lite", "ietf-17"] as const) {
 			track.close();
 			broadcast.close();
 			subscriber.close();
-			restore();
+			installed.close();
 		}
 	});
 }

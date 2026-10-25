@@ -8,7 +8,7 @@ const dec = new TextDecoder();
 test("datagram body round-trips", async () => {
 	for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 		const dg = new Datagram(7n, 42, 1000, enc.encode("hello"));
-		const decoded = await Datagram.decode(dg.encode(version), version, () => true);
+		const decoded = await Datagram.decode(dg.encode(version), version, () => ({ timed: true }));
 		expect(decoded.subscribe).toBe(7n);
 		expect(decoded.sequence).toBe(42);
 		expect(decoded.timestamp).toBe(1000);
@@ -33,7 +33,7 @@ test("datagram body varints follow the version's encoding", () => {
 
 test("datagram body round-trips an empty payload", async () => {
 	const dg = new Datagram(0n, 0, 0, new Uint8Array());
-	const decoded = await Datagram.decode(dg.encode(Version.DRAFT_07), Version.DRAFT_07, () => true);
+	const decoded = await Datagram.decode(dg.encode(Version.DRAFT_07), Version.DRAFT_07, () => ({ timed: true }));
 	expect(decoded.payload.byteLength).toBe(0);
 });
 
@@ -43,7 +43,7 @@ test("an untimed datagram body carries no timestamp", async () => {
 	expect(body.byteLength).toBe(7);
 	const decoded = await Datagram.decode(body, Version.DRAFT_07, (subscribe) => {
 		expect(subscribe).toBe(1n);
-		return false;
+		return { timed: false };
 	});
 	expect(decoded.sequence).toBe(2);
 	expect(decoded.timestamp).toBeUndefined();

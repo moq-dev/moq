@@ -15,7 +15,7 @@ by default; an application can override or disable them.
 The estimators stop learning once a connection is app-limited. moq-quic's
 BBR3 only raises `max_bw` from an app-limited sample above its current value,
 and only ages its window on a cycle that isn't app-limited (`update_max_bw`
-and `adapt_long_term_model` in `rs/moq-quic/src/congestion/bbr3/mod.rs`).
+and `adapt_long_term_model` in `rs/moq-congestion/src/bbr3/mod.rs`).
 Chromium's QUICHE gates its BBR2 filter the same way, and its Cubic estimate
 stops growing while the sender isn't cwnd-limited. So after a rendition
 stops, the estimate freezes at the value that stopped it, and today nothing
@@ -28,7 +28,7 @@ publisher-local padding handle:
 - **One session target.** The session probes to the larger of its local
   target and the peer's PROBE target. PROBE `Increase` is the wire signal;
   retransmission or padding is the mechanism. The
-  [send target](/quest/m1/probe-target.md) owns the local half and
+  send target (`bandwidth::Allocator`'s reservations) owns the local half and
   [viewer targets](/quest/m2/probe/viewer-target.md) the peer's.
 - **Viewers are in scope.** The viewer up-switch joined the epic, since a
   viewer's target is the same session target sent the other way.
@@ -48,7 +48,7 @@ publisher-local padding handle:
 
 Decided with the maintainer on 2026-10-20:
 
-- The [target](/quest/m1/probe-target.md), [native](/quest/m1/probe-native.md),
+- The send target, [native](/quest/m1/probe-native.md),
   and the native publishers' [rung disable](/quest/m1/simulcast-rung-disable.md)
   moved to m1, so Rust, FFI, and OBS publishers recover a stopped rendition in
   the next breaking release. Their rung disable needs the target and native
@@ -57,11 +57,11 @@ Decided with the maintainer on 2026-10-20:
   the only native backend with a probing hook; other native backends (iroh
   on noq, moq-quic under CUBIC) have no sender, keep `Report`, and never
   disable a rung. lite-07 reserves its stream
-  type before the cut ([lite-07 padding](/quest/m1/lite07-padding.md)), and
+  type before the cut (Padding Stream 0x2), and
   the sender stays here.
 - The JS publisher's rung disable split into its own quest here, since it
   probes with padding.
-- The target then split: m1 keeps the [send target](/quest/m1/probe-target.md)
+- The target then split: m1 keeps the send target
   native rung recovery needs, and viewer handles, viewer grants, the peer's
   PROBE target, and `Increase` came back here as
   [viewer targets](/quest/m2/probe/viewer-target.md), beside their consumers.
@@ -82,7 +82,6 @@ This README's own work, once the children land:
 
 ## Required
 
-- [Session send target](/quest/m1/probe-target.md) - a session probes up to the sum of its publisher reservations through whichever sender its transport has
 - [Native probing](/quest/m1/probe-native.md) - moq-quic retransmits in-flight data during BBR3's ProbeBW_UP so an app-limited sender still validates headroom up to the target
 - [Native rung disable](/quest/m1/simulcast-rung-disable.md) - Rust/FFI and OBS publishers stop encoding the top renditions their grant cannot fund, advertise `enabled: false`, and re-enable with hysteresis
 - [Padding probes](/quest/m2/probe/padding.md) - a browser probes with a lowest-priority padding stream on an ALR schedule
@@ -94,5 +93,5 @@ This README's own work, once the children land:
 ## Related
 
 - [A finished PROBE stops reporting](/quest/m2/probe-end-stale.md) - the receive estimate this epic raises reads unknown once its stream ends
-- [BBR media study](/quest/m2/quic-bbr-natural-drain.md) - preserving an estimate and discovering spare capacity are separate problems
+- [BBR media study](/quest/m2/quic-bbr-study.md) - preserving an estimate and discovering spare capacity are separate problems
 - [Realtime uplink congestion control](/quest/m2/quic-realtime/README.md) - a delay-based alternative to BBR3 on native uplinks, with no ProbeBW_UP phase to ride

@@ -35,18 +35,29 @@ class ReportTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 report.checked(entries)
 
-    def test_js_multiple_schemas_and_interests(self):
+    def test_js_multiple_schemas(self):
         source = self.root / 'requests.csv'
         source.write_text('bun install v1.3\npaths,active_us,settled_us\n4,1.25,2.5\noperation,ns_per_op\nclose,0\n')
         entries = report.javascript_file(source)
         self.assertEqual([entry['value'] for entry in entries], [1.25, 2.5, 0])
         self.assertEqual(entries[0]['name'], 'js/requests/paths=4/active_us')
-        source.write_text('broadcasts=32 tracks=8 acquire+release=1.250 us\n')
-        self.assertEqual(report.javascript_file(source)[0]['value'], 1.25)
         for text in ('Testing case\nSuccess\n', 'paths,time_us\n4\n', 'paths,time_us\n4,nan\n'):
             source.write_text(text)
             with self.assertRaises(ValueError):
                 report.javascript_file(source)
+
+    def test_js_byte_measurements_do_not_become_dimensions(self):
+        source = self.root / 'compression.csv'
+        source.write_text('bytes,us,size_bytes\n4,1.5,64\nmeasurement,size_bytes\nbundle,512\n')
+        entries = report.javascript_file(source)
+        self.assertEqual([(entry['name'], entry['unit'], entry['value']) for entry in entries], [
+            ('js/compression/bytes=4/us', 'us', 1.5),
+            ('js/compression/bytes=4/size_bytes', 'bytes', 64),
+            ('js/compression/measurement=bundle/size_bytes', 'bytes', 512),
+        ])
+        source.write_text('bytes,us,size_bytes\n4,2.5,128\nmeasurement,size_bytes\nbundle,1024\n')
+        self.assertEqual([entry['name'] for entry in report.javascript_file(source)],
+                         [entry['name'] for entry in entries])
 
     def test_criterion_requires_fresh_measured_estimates(self):
         run = self.root / 'runs' / 'one'
@@ -65,6 +76,80 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(entry['name'], 'rust/net-cpu/delivery/4/8')
         self.assertEqual(entry['value'], 20)
         self.assertIn('abc', entry['extra'])
+
+    def paired_runs(self, comparisons):
+        """Write measured Criterion runs, each with {label: (base, paired.json)}."""
+        runs = []
+        for label, (base, comparison) in comparisons.items():
+            run = self.root / 'runs' / label
+            run.mkdir(parents=True)
+            (run / 'metadata.json').write_text(json.dumps({'mode': '--criterion', 'revision': 'c2', 'base': base,
+                                                           'environment': {'MOQ_BENCH_LABEL': label}}))
+            if comparison is not None:
+                (run / 'paired.json').write_text(json.dumps(comparison))
+            runs.append(str(run))
+        (self.root / 'criterion-runs.txt').write_text('\n'.join(runs) + '\n')
+
+    def comparison(self, cases, unavailable=()):
+        return {'commit': 'c2', 'base': 'c1', 'threshold_pct': 10, 'rounds': 3,
+                'unavailable': [{'target': target, 'reason': 'base build failed'} for target in unavailable],
+                'cases': [{'target': 'kio/lock', 'id': name, 'base_ns': 100, 'current_ns': 150, 'delta_pct': 50,
+                           'verdict': verdict, **({'rounds': {'delta_pct': 40, 'paired_deltas_pct': [30, 40, 50],
+                                                              'status': 'consistent sign'}}
+                                                  if verdict == 'regression' else {})}
+                          for name, verdict in cases.items()]}
+
+    def test_paired_runs_combine_under_trend_names_and_gate_regressions(self):
+        self.paired_runs({'kio': ('c1', self.comparison({'lock/4': 'regression', 'lock/1': 'unchanged'})),
+                          'gst': ('c1', self.comparison({'catalog': 'faster'}, ['moq-gst/catalog']))})
+        combined = report.paired(self.root)
+        self.assertEqual([case['name'] for case in combined['cases']], ['rust/kio/lock/4', 'rust/kio/lock/1',
+                                                                         'rust/gst/catalog'])
+        self.assertEqual(combined['unavailable'], [{'name': 'rust/gst/moq-gst/catalog', 'reason': 'base build failed'}])
+        (self.root / 'paired.json').write_text(json.dumps(combined))
+        self.assertEqual(report.gate(self.root), 1)
+        combined['cases'][0]['verdict'], combined['unavailable'] = 'noise', []
+        (self.root / 'paired.json').write_text(json.dumps(combined))
+        self.assertEqual(report.gate(self.root), 0)
+        (self.root / 'paired.json').unlink()
+        with self.assertRaises(ValueError):
+            report.gate(self.root)
+
+    def test_unpaired_runs_have_no_comparison_and_bases_must_agree(self):
+        self.paired_runs({'kio': ('', None)})
+        self.assertIsNone(report.paired(self.root))
+        self.temp.cleanup()
+        self.root.mkdir()
+        self.paired_runs({'kio': ('c1', self.comparison({})), 'gst': ('', None)})
+        with self.assertRaises(ValueError):
+            report.paired(self.root)
+
+    def test_paired_comparison_publishes_beside_the_trend(self):
+        self.paired_runs({'kio': ('c1', self.comparison({'lock/4': 'regression', 'lock/1': 'unchanged'},
+                                                        ['kio/other']))})
+        source = self.root / 'inputs' / 'bench-rust'
+        source.mkdir(parents=True)
+        (source / 'report.json').write_text(json.dumps([{'name': 'rust/kio/lock/4', 'unit': 'ns', 'value': 150}]))
+        (source / 'outcome.json').write_text('{"status":"success"}')
+        (source / 'paired.json').write_text(json.dumps(report.paired(self.root)))
+        reports = self.root / 'reports'
+        report.prepare(self.root / 'inputs', reports)
+        self.history('costs', [('c2', 1, {'bench-rust/rust/kio/lock/4': 150})])
+        report.index(self.root, 'c2', reports / 'paired.json')
+        page = (self.root / 'bench' / 'index.html').read_text()
+        self.assertIn('Confirmed regressions (1)', page)
+        self.assertIn('Unchanged (1)', page)
+        self.assertIn('bench-rust/rust/kio/lock/4', page)
+        self.assertIn('+30.0% +40.0% +50.0%', page)
+        self.assertIn('bench-rust/rust/kio/kio/other: base build failed', page)
+        # The trend table still reads only its own rows.
+        self.assertEqual(self.rows('c2')[1], {'bench-rust/rust/kio/lock/4': 'muted'})
+        # A night without a finished comparison replaces the published one.
+        (source / 'outcome.json').write_text('{"status":"failure"}')
+        report.prepare(self.root / 'inputs', reports)
+        report.index(self.root, 'c3', reports / 'paired.json')
+        self.assertIn('No paired comparison finished', (self.root / 'bench' / 'index.html').read_text())
+        self.assertEqual(json.loads((self.root / 'bench' / 'paired.json').read_text()), {'sources': {}})
 
     def test_only_successful_sources_are_published(self):
         source = self.root / 'bench-ffi'
@@ -186,6 +271,8 @@ class ReportTest(unittest.TestCase):
         just.chmod(0o755)
         env = dict(os.environ, PATH=f'{commands}:{os.environ["PATH"]}')
         publisher = ROOT / 'sh/gh/bench-publish.sh'
+        paired = self.root / 'paired.json'
+        paired.write_text('{"sources": {}}')
         for iteration in (1, 2):
             subprocess.run(['bash', str(publisher), 'init'], cwd=checkout, env=env, check=True,
                            capture_output=True)
@@ -202,7 +289,7 @@ class ReportTest(unittest.TestCase):
             git('commit', '-m', 'Measured result', cwd=history)
             git('worktree', 'remove', str(history), cwd=checkout)
             site = self.root / f'site-{iteration}'
-            subprocess.run(['bash', str(publisher), 'finish', str(site)], cwd=checkout, env=env,
+            subprocess.run(['bash', str(publisher), 'finish', str(site), str(paired)], cwd=checkout, env=env,
                            check=True, capture_output=True)
             self.assertFalse((site / 'source').exists())
             self.assertEqual((site / 'bench/costs/data.js').read_text(), stored)

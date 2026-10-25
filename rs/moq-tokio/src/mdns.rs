@@ -712,12 +712,12 @@ fn addr_url(addr: SocketAddr) -> Option<Url> {
 /// refusing to start over one of those would be wrong; an error only decides the
 /// outcome if *nothing* announces.
 async fn announced(monitor: &mdns_sd::Receiver<mdns_sd::DaemonEvent>) -> Result<()> {
-	let deadline = tokio::time::Instant::now() + ANNOUNCE_TIMEOUT;
+	let deadline = moq_clock::now() + ANNOUNCE_TIMEOUT;
 	// Kept so a total failure reports why rather than just "timed out".
 	let mut failure = None;
 
 	loop {
-		let event = match tokio::time::timeout_at(deadline, monitor.recv_async()).await {
+		let event = match moq_clock::timeout_at(deadline, monitor.recv_async()).await {
 			Ok(Ok(event)) => event,
 			// The daemon died, or nothing announced in time. Either way the mesh is
 			// not live, which is exactly what the caller is gating on.
@@ -771,6 +771,7 @@ fn instance_id(fullname: &str) -> Option<&str> {
 }
 
 #[cfg(test)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 

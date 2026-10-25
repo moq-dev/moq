@@ -16,6 +16,7 @@ categories = ["multimedia", "network-programming", "web-programming"]
 bytes = { workspace = true }
 hex = { workspace = true }
 kio = { workspace = true }
+moq-clock = { workspace = true }
 moq-json = { workspace = true }
 moq-net = { workspace = true }
 regex = "1"
@@ -36,3 +37,6 @@ moq-tokio = { path = "../moq-tokio", default-features = false, features = ["quic
 tokio = { workspace = true, features = ["macros", "fs"] }
 tracing = { workspace = true }
 url = { workspace = true }
+
+[lints]
+workspace = true

@@ -8,7 +8,7 @@ use crate::{coding, ietf, lite};
 /// Ordered by preference, with the client's preference taking priority.
 /// This intentionally includes only SETUP-negotiated versions (Lite02, Lite01, Draft14);
 /// Lite03 and newer IETF drafts negotiate via dedicated ALPNs instead.
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(crate) const NEGOTIATED: [Version; 3] = [
 	Version::Lite(lite::Version::Lite02),
 	Version::Lite(lite::Version::Lite01),
@@ -85,7 +85,7 @@ pub enum Version {
 }
 
 impl Version {
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn session_code(self, error: &crate::SessionError) -> u32 {
 		match self {
 			Self::Lite(_) => crate::lite::error::to_session_code(error),
@@ -219,15 +219,6 @@ impl Version {
 			Self::Ietf(ietf::Version::Draft21) => ALPN_21,
 			Self::Ietf(ietf::Version::Draft22) => ALPN_22,
 		}
-	}
-
-	/// Whether this version uses SETUP version-code negotiation
-	/// (as opposed to ALPN-only).
-	pub fn uses_setup_negotiation(&self) -> bool {
-		matches!(
-			self,
-			Self::Lite(lite::Version::Lite01 | lite::Version::Lite02) | Self::Ietf(ietf::Version::Draft14)
-		)
 	}
 
 	/// Whether this is a lite protocol version.

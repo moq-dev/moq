@@ -17,15 +17,15 @@ bun add @moq/clock
 import { Manual, Milli, Nano, now, sleep } from "@moq/clock";
 
 const clock = new Manual();
-const restore = clock.install();
+const installed = clock.install();
 try {
     const start = now();
     const pending = sleep(Nano.fromMilli(Milli(10)));
-    await clock.advanceAsync(Nano.fromMilli(Milli(10)));
+    await clock.advance(Nano.fromMilli(Milli(10)));
     await pending;
     console.log(now() - start); // 10,000,000 nanoseconds
 } finally {
-    restore();
+    installed.close();
 }
 ```
 
@@ -41,18 +41,26 @@ that boundary until the backend explicitly shares one.
 `Wall` is a separate branded number of milliseconds since the Unix epoch.
 Use it for dates, rather than measuring elapsed time. A Rust wall-time
 boundary must convert its units explicitly. A new `Manual` starts at instant
-zero and 2025-01-01 UTC. `advance()` moves both readings; `stepWall()` changes
-only wall time. `advanceAsync()` also drains due timers and the microtasks
-they schedule, so assertions observe their effects. `fire()` waits for a timer
+zero and 2025-01-01 UTC. `await advance()` moves both readings through each due
+timer deadline, draining tasks between deadlines, including timers those tasks
+re-arm before the target. `jump()` moves straight to the target and fires due
+timers late without draining, modeling a stalled event loop. `stepWall()` changes
+only wall time. `fire()` waits for a timer
 to be armed, even by a later host task such as I/O, then advances exactly to the
 earliest deadline the same way; it never resolves if nothing arms one.
+`drive(work)` fires deadlines one at a time until `work` settles, then settles
+with it, for work whose timers a test cannot count; time stops at the deadline
+it settled on, so a timer armed afterwards waits for the next explicit call.
+Drive each clock serially: until `advance()`, `fire()`, or `drive()` settles,
+another one rejects and `jump()` throws without moving time.
+Timer callbacks may arm timers, but must leave driving that clock to their caller.
 
 `origin()` reads the wall time at instant zero, which maps an instant onto
 wall time without the jitter of subtracting two live reads. On the host it is
 the realm's performance time origin; on a `Manual` it follows `stepWall()`.
 
-Installation is scoped to the current JS realm. Restore it in `finally` and
-keep tests sharing that realm serial. Timers remain bound to the clock on
+Installation is scoped to the current JS realm. Close the handle `install()`
+returns in `finally`, and keep tests sharing that realm serial. Timers remain bound to the clock on
 which they were created, even after restoration. Host timers used by a test
 runner or RPC framework keep running in real time.
 

@@ -7,7 +7,8 @@ use p256::elliptic_curve::SecretKey;
 use p256::elliptic_curve::pkcs8::EncodePrivateKey;
 use rsa::BigUint;
 use rsa::pkcs1::EncodeRsaPrivateKey;
-use serde::{Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::str::FromStr;
 use std::sync::OnceLock;
 use std::{collections::HashSet, fmt, path::Path as StdPath};
 
@@ -246,7 +247,7 @@ impl Jwk {
 ///
 /// The fields are fixed at construction: derived crypto material is cached on first use, so a key
 /// that could be mutated would sign with stale material. Build one from a [`Jwk`], from
-/// [`Key::generate`], or by parsing with [`Key::from_str`], then use the builders to derive a new
+/// [`Key::generate`], or by parsing a string with [`str::parse`], then use the builders to derive a new
 /// key rather than editing an existing one.
 #[derive(Clone)]
 pub struct Key {
@@ -313,18 +314,11 @@ impl fmt::Debug for Key {
 	}
 }
 
-impl Key {
-	/// The serializable [`Jwk`] behind this key, cloned so editing it can't reach the original.
-	///
-	/// The inverse of [`Jwk::import`]. Use it to derive a variant: export, edit, import again.
-	/// Reading a single field needs no clone, since a [`Key`] derefs to its [`Jwk`].
-	pub fn export(&self) -> Jwk {
-		self.jwk.clone()
-	}
+impl FromStr for Key {
+	type Err = crate::Error;
 
 	/// Parse a key from a string, auto-detecting JSON or base64url encoding.
-	#[allow(clippy::should_implement_trait)]
-	pub fn from_str(s: &str) -> crate::Result<Self> {
+	fn from_str(s: &str) -> crate::Result<Self> {
 		let s = s.trim();
 		if s.starts_with('{') {
 			Ok(serde_json::from_str(s)?)
@@ -334,18 +328,26 @@ impl Key {
 			Ok(serde_json::from_str(&json)?)
 		}
 	}
+}
+
+impl Key {
+	/// The serializable [`Jwk`] behind this key, cloned so editing it can't reach the original.
+	///
+	/// The inverse of [`Jwk::import`]. Use it to derive a variant: export, edit, import again.
+	/// Reading a single field needs no clone, since a [`Key`] derefs to its [`Jwk`].
+	pub fn export(&self) -> Jwk {
+		self.jwk.clone()
+	}
 
 	/// Load a key from a file, auto-detecting JSON or base64url encoding.
 	pub fn from_file<P: AsRef<StdPath>>(path: P) -> crate::Result<Self> {
-		let contents = std::fs::read_to_string(&path)?;
-		Self::from_str(&contents)
+		std::fs::read_to_string(&path)?.parse()
 	}
 
 	/// Async version of [`from_file`](Self::from_file), using `tokio::fs`.
-	#[cfg(feature = "tokio")]
+	#[cfg(any(feature = "client", feature = "serve"))]
 	pub async fn from_file_async<P: AsRef<StdPath>>(path: P) -> crate::Result<Self> {
-		let contents = tokio::fs::read_to_string(path).await?;
-		Self::from_str(&contents)
+		tokio::fs::read_to_string(path).await?.parse()
 	}
 
 	/// Encode the key as base64url-encoded JSON.
@@ -550,11 +552,19 @@ impl Key {
 		Ok(self.encode.get_or_init(|| encoding_key))
 	}
 
-	/// Decode a signed token into any payload, checking only signature, algorithm, and key ID.
+	/// Verify a token's signature and this crate's strict claims, expiry, not-before, and key scope.
 	///
-	/// The caller validates payload fields and expiry. Use [`verify`](Self::verify) for
-	/// this crate's strict [`Claims`] contract.
-	pub fn decode<C: DeserializeOwned>(&self, token: &str) -> crate::Result<C> {
+	/// Scoping the claims to a connection path is a separate step; see
+	/// [`Claims::authorize`].
+	pub fn verify(&self, token: &str) -> crate::Result<Claims> {
+		let claims = self.verify_claims(token)?;
+		validate_times(&claims, moq_clock::wall())?;
+		Ok(claims)
+	}
+
+	/// Verify the signature, claims, and key scope but not the times, so an expired
+	/// token's root is still known to be genuine.
+	pub(crate) fn verify_claims(&self, token: &str) -> crate::Result<Claims> {
 		if !self.operations.contains(&KeyOperation::Verify) {
 			return Err(KeyError::VerifyUnsupported.into());
 		}
@@ -571,23 +581,7 @@ impl Key {
 		validation.validate_exp = false;
 		validation.validate_nbf = false;
 		validation.validate_aud = false;
-		Ok(jsonwebtoken::decode::<C>(token, self.to_decoding_key()?, &validation)?.claims)
-	}
-
-	/// Verify a token's signature and this crate's strict claims, expiry, not-before, and key scope.
-	///
-	/// Scoping the claims to a connection path is a separate step; see
-	/// [`Claims::authorize`].
-	pub fn verify(&self, token: &str) -> crate::Result<Claims> {
-		let claims = self.verify_claims(token)?;
-		validate_times(&claims, moq_clock::wall().into())?;
-		Ok(claims)
-	}
-
-	/// Verify the signature, claims, and key scope but not the times, so an expired
-	/// token's root is still known to be genuine.
-	pub(crate) fn verify_claims(&self, token: &str) -> crate::Result<Claims> {
-		let claims: Claims = self.decode(token)?;
+		let claims: Claims = jsonwebtoken::decode(token, self.to_decoding_key()?, &validation)?.claims;
 		claims.validate()?;
 		self.validate_scope(&claims)?;
 		Ok(claims)
@@ -643,7 +637,7 @@ impl Key {
 }
 
 /// Refuse claims expired at `now` (`exp <= now`) or not yet valid (`nbf > now`), as `jose` does.
-pub(crate) fn validate_times(claims: &Claims, now: std::time::SystemTime) -> crate::Result<()> {
+pub(crate) fn validate_times(claims: &Claims, now: moq_clock::Wall) -> crate::Result<()> {
 	if claims.expires.is_some_and(|exp| exp <= now) {
 		return Err(crate::Error::TokenExpired);
 	}
@@ -707,14 +701,14 @@ where
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use super::*;
 
 	fn patterns(texts: &[&str]) -> crate::Patterns {
 		texts.iter().map(|text| text.parse().unwrap()).collect()
 	}
-	use std::time::{Duration, SystemTime};
+	use moq_clock::Wall;
+	use std::time::Duration;
 
 	fn create_test_key() -> Key {
 		let mut jwk = Jwk::new(
@@ -730,36 +724,34 @@ mod tests {
 	fn create_test_claims() -> Claims {
 		Claims {
 			root: "test-path".to_string(),
-			publish: patterns(&["test-pub/**"]).into(),
-			subscribe: patterns(&["test-sub/**"]).into(),
-			expires: Some(SystemTime::now() + Duration::from_secs(3600)),
-			issued: Some(SystemTime::now()),
+			publish: patterns(&["test-pub/**"]),
+			subscribe: patterns(&["test-sub/**"]),
+			expires: Some(moq_clock::wall() + Duration::from_secs(3600)),
+			issued: Some(moq_clock::wall()),
 			not_before: None,
 		}
 	}
 
 	#[test]
-	fn decode_accepts_other_payloads_but_checks_kid_and_algorithm() {
+	fn verify_refuses_custom_payloads_and_checks_kid_and_algorithm() {
 		let key = create_test_key();
 		let mut header = Header::new(Algorithm::HS256.into());
 		header.kid = key.kid.as_ref().map(ToString::to_string);
 		let payload = serde_json::json!({"custom": "accepted", "exp": 1, "aud": "other-service"});
 		let token = jsonwebtoken::encode(&header, &payload, key.to_encoding_key().unwrap()).unwrap();
-		let decoded: serde_json::Value = key.decode(&token).unwrap();
-		assert_eq!(decoded, payload);
 		assert!(key.verify(&token).is_err(), "strict claims reject the custom payload");
 
 		header.kid = Some("someone-else".into());
 		let wrong_kid = jsonwebtoken::encode(&header, &payload, key.to_encoding_key().unwrap()).unwrap();
 		assert!(matches!(
-			key.decode::<serde_json::Value>(&wrong_kid),
+			key.verify(&wrong_kid),
 			Err(crate::Error::Key(KeyError::KeyNotFound(_)))
 		));
 
 		header.kid = key.kid.as_ref().map(ToString::to_string);
 		header.alg = jsonwebtoken::Algorithm::HS384;
 		let wrong_algorithm = jsonwebtoken::encode(&header, &payload, key.to_encoding_key().unwrap()).unwrap();
-		assert!(key.decode::<serde_json::Value>(&wrong_algorithm).is_err());
+		assert!(key.verify(&wrong_algorithm).is_err());
 	}
 
 	#[test]
@@ -892,12 +884,12 @@ mod tests {
 			.unwrap();
 		let allowed = Claims {
 			root: "test-path".into(),
-			publish: patterns(&["allowed/room/**"]).into(),
+			publish: patterns(&["allowed/room/**"]),
 			..Default::default()
 		};
 		let denied = Claims {
 			root: "test-path".into(),
-			publish: patterns(&["other/**"]).into(),
+			publish: patterns(&["other/**"]),
 			..Default::default()
 		};
 
@@ -914,7 +906,7 @@ mod tests {
 	fn test_key_derived_material_never_stale() {
 		let claims = Claims {
 			root: "test-path".into(),
-			publish: patterns(&["test-pub/**"]).into(),
+			publish: patterns(&["test-pub/**"]),
 			..Default::default()
 		};
 
@@ -977,8 +969,8 @@ mod tests {
 		let key = create_test_key();
 		let invalid_claims = Claims {
 			root: "test-path".to_string(),
-			publish: patterns(&[]).into(),
-			subscribe: patterns(&[]).into(),
+			publish: patterns(&[]),
+			subscribe: patterns(&[]),
 			expires: None,
 			issued: None,
 			not_before: None,
@@ -1051,8 +1043,8 @@ mod tests {
 	#[test]
 	fn test_key_verify_only_registered_claims() {
 		let key = create_test_key();
-		let now = SystemTime::now()
-			.duration_since(SystemTime::UNIX_EPOCH)
+		let now = moq_clock::wall()
+			.checked_duration_since(Wall::UNIX_EPOCH)
 			.unwrap()
 			.as_secs();
 
@@ -1089,8 +1081,8 @@ mod tests {
 	fn test_key_verify_enforces_not_before() {
 		let key = create_test_key();
 		let at = |offset: i64| {
-			let now = SystemTime::now()
-				.duration_since(SystemTime::UNIX_EPOCH)
+			let now = moq_clock::wall()
+				.checked_duration_since(Wall::UNIX_EPOCH)
 				.unwrap()
 				.as_secs() as i64;
 			sign_raw(
@@ -1105,10 +1097,10 @@ mod tests {
 	/// `exp` is refused at the instant itself and `nbf` accepted at it, matching `jose`.
 	#[test]
 	fn validate_times_at_the_boundary() {
-		let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+		let now = Wall::UNIX_EPOCH + Duration::from_secs(1_000);
 		let second = Duration::from_secs(1);
 
-		let at = |expires: Option<SystemTime>, not_before: Option<SystemTime>| {
+		let at = |expires: Option<Wall>, not_before: Option<Wall>| {
 			let mut claims = create_test_claims();
 			claims.expires = expires;
 			claims.not_before = not_before;
@@ -1131,7 +1123,7 @@ mod tests {
 	fn test_key_verify_expired_token() {
 		let key = create_test_key();
 		let mut claims = create_test_claims();
-		claims.expires = Some(SystemTime::now() - Duration::from_secs(3600)); // 1 hour ago
+		claims.expires = Some(moq_clock::wall() - Duration::from_secs(3600)); // 1 hour ago
 		let token = key.sign(&claims).unwrap();
 
 		let result = key.verify(&token);
@@ -1142,8 +1134,8 @@ mod tests {
 	async fn token_validity_uses_the_ambient_wall() {
 		let key = create_test_key();
 		let mut claims = create_test_claims();
-		claims.issued = Some(moq_clock::wall().into());
-		claims.expires = Some((moq_clock::wall() + Duration::from_secs(10)).into());
+		claims.issued = Some(moq_clock::wall());
+		claims.expires = Some(moq_clock::wall() + Duration::from_secs(10));
 		let token = key.sign(&claims).unwrap();
 		key.verify(&token).unwrap();
 		moq_clock::sleep(Duration::from_secs(10)).await;
@@ -1155,8 +1147,8 @@ mod tests {
 		let key = create_test_key();
 		let claims = Claims {
 			root: "test-path".to_string(),
-			publish: patterns(&["**"]).into(),
-			subscribe: patterns(&["**"]).into(),
+			publish: patterns(&["**"]),
+			subscribe: patterns(&["**"]),
 			expires: None,
 			issued: None,
 			not_before: None,
@@ -1175,10 +1167,10 @@ mod tests {
 		let key = create_test_key();
 		let original_claims = Claims {
 			root: "test-path".to_string(),
-			publish: patterns(&["test-pub/**"]).into(),
-			subscribe: patterns(&["test-sub/**"]).into(),
-			expires: Some(SystemTime::now() + Duration::from_secs(3600)),
-			issued: Some(SystemTime::now()),
+			publish: patterns(&["test-pub/**"]),
+			subscribe: patterns(&["test-sub/**"]),
+			expires: Some(moq_clock::wall() + Duration::from_secs(3600)),
+			issued: Some(moq_clock::wall()),
 			not_before: None,
 		};
 
@@ -1693,8 +1685,8 @@ mod tests {
 		let key = Key::from_str(JS_HS256_KEY).unwrap();
 		let claims = key.verify(JS_HS256_TOKEN).unwrap();
 		assert_eq!(claims.root, "live");
-		assert_eq!(claims.publish, patterns(&["camera1"]).into());
-		assert_eq!(claims.subscribe, patterns(&["camera1", "camera2"]).into());
+		assert_eq!(claims.publish, patterns(&["camera1"]));
+		assert_eq!(claims.subscribe, patterns(&["camera1", "camera2"]));
 	}
 
 	#[test]
@@ -1702,8 +1694,8 @@ mod tests {
 		let key = Key::from_str(JS_HS256_KEY).unwrap();
 		let claims = key.verify(JS_HS256_LEGACY_TOKEN).unwrap();
 		assert_eq!(claims.root, "live");
-		assert_eq!(claims.publish, patterns(&["camera1/**"]).into());
-		assert_eq!(claims.subscribe, patterns(&["camera1/**", "camera2/**"]).into());
+		assert_eq!(claims.publish, patterns(&["camera1/**"]));
+		assert_eq!(claims.subscribe, patterns(&["camera1/**", "camera2/**"]));
 	}
 
 	#[test]
@@ -1715,12 +1707,12 @@ mod tests {
 
 		let inside = Claims {
 			root: "demo/room".into(),
-			publish: patterns(&["alice"]).into(),
+			publish: patterns(&["alice"]),
 			..Default::default()
 		};
 		let outside = Claims {
 			root: "demo".into(),
-			publish: patterns(&["lobby/**"]).into(),
+			publish: patterns(&["lobby/**"]),
 			..Default::default()
 		};
 		assert!(key.verify(&key.sign(&inside).unwrap()).is_ok());
@@ -1739,14 +1731,14 @@ mod tests {
 		let key = Key::from_str(JS_HS256_KEY).unwrap();
 		let claims = Claims {
 			root: "rust-test".to_string(),
-			publish: patterns(&["pub1/**"]).into(),
-			subscribe: patterns(&["sub1/**"]).into(),
+			publish: patterns(&["pub1/**"]),
+			subscribe: patterns(&["sub1/**"]),
 			..Default::default()
 		};
 		let token = key.sign(&claims).unwrap();
 		let verified = key.verify(&token).unwrap();
 		assert_eq!(verified.root, "rust-test");
-		assert_eq!(verified.publish, patterns(&["pub1/**"]).into());
+		assert_eq!(verified.publish, patterns(&["pub1/**"]));
 	}
 
 	#[test]
@@ -1764,7 +1756,7 @@ mod tests {
 		let key = Key::from_str(JS_EDDSA_PRIVATE_KEY).unwrap();
 		let claims = key.verify(JS_EDDSA_TOKEN).unwrap();
 		assert_eq!(claims.root, "stream");
-		assert_eq!(claims.publish, patterns(&["video/**"]).into());
+		assert_eq!(claims.publish, patterns(&["video/**"]));
 	}
 
 	#[test]
@@ -1772,7 +1764,7 @@ mod tests {
 		let key = Key::from_str(JS_EDDSA_PUBLIC_KEY).unwrap();
 		let claims = key.verify(JS_EDDSA_TOKEN).unwrap();
 		assert_eq!(claims.root, "stream");
-		assert_eq!(claims.publish, patterns(&["video/**"]).into());
+		assert_eq!(claims.publish, patterns(&["video/**"]));
 	}
 
 	#[test]
@@ -1878,8 +1870,8 @@ mod tests {
 		use std::os::unix::fs::PermissionsExt;
 
 		fn temp_path(name: &str) -> std::path::PathBuf {
-			let unique = SystemTime::now()
-				.duration_since(SystemTime::UNIX_EPOCH)
+			let unique = moq_clock::wall()
+				.checked_duration_since(Wall::UNIX_EPOCH)
 				.unwrap()
 				.as_nanos();
 			std::env::temp_dir().join(format!("test_perms_{name}_{unique}.jwk"))

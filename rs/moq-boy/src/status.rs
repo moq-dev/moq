@@ -42,7 +42,10 @@ impl StatusPublisher {
 	pub fn new(broadcast: &mut moq_net::broadcast::Producer) -> anyhow::Result<Self> {
 		let producer = broadcast.create_track(
 			"status",
-			moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+			moq_net::track::Info::default()
+				.with_timescale(moq_net::Timescale::MILLI)
+				// A joiner asks for a fresh snapshot once the deltas outweigh eight of them.
+				.with_refresh(8),
 		)?;
 
 		Ok(Self {
@@ -51,7 +54,13 @@ impl StatusPublisher {
 	}
 
 	/// Publish status, a no-op if unchanged since the last call.
+	///
+	/// Also restates the status in a fresh group when a joiner wants one. Status is published every
+	/// frame, so checking here answers a joiner within a frame without a task of its own.
 	pub fn publish(&mut self, status: &Status) {
+		if let std::task::Poll::Ready(Err(err)) = self.producer.poll_refresh(&moq_net::kio::Waiter::noop()) {
+			tracing::warn!(%err, "failed to refresh status");
+		}
 		if let Err(err) = self
 			.producer
 			.update(moq_net::Timed::from(status).at(moq_net::Timestamp::now()))

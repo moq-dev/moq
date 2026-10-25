@@ -21,10 +21,6 @@ pub enum Error {
 	/// The remote resource contains delimiters reserved by the SRT stream-id syntax.
 	#[error("invalid SRT resource: {0}")]
 	InvalidResource(String),
-
-	/// The listener stopped accepting connections.
-	#[error("SRT listener stopped accepting connections")]
-	ListenerClosed,
 }
 
 impl From<std::io::Error> for Error {

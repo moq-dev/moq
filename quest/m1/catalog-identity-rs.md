@@ -70,6 +70,10 @@ Decided 2026-10-20 (maintainer): the moq-c half lands on the
 [generated C package](/quest/m1/c/README.md), not the frozen hand-written
 ABI, so C users break once.
 
+The branch checkpoint `origin/quest/m1/catalog-identity-rs` predates the
+2026-10-15 decision to mint a new rendition name, so rework it against that
+decision rather than resuming it as is.
+
 ## Required
 
 - [Generated C bindings](/quest/m1/c/README.md) - the moq-c config re-declaration fix lands on the generated package, not the frozen hand-written ABI

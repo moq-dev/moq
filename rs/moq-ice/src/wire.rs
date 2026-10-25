@@ -19,12 +19,30 @@ pub const INBOX: usize = 256;
 /// and the host candidates it is reachable at.
 pub struct Socket {
 	/// Sends datagrams, possibly shared by several agents (a demuxed server socket).
-	pub udp: Arc<UdpSocket>,
+	pub(crate) udp: Arc<UdpSocket>,
 	/// The host candidates advertised to the peer, not the socket's bind address.
 	/// Must not be empty.
-	pub locals: Vec<SocketAddr>,
+	pub(crate) locals: Vec<SocketAddr>,
 	/// The datagrams routed to this agent.
-	pub inbound: Inbound,
+	pub(crate) inbound: Inbound,
+}
+
+impl Socket {
+	/// Build a socket with at least one advertised host candidate.
+	pub fn new(udp: Arc<UdpSocket>, locals: Vec<SocketAddr>, inbound: Inbound) -> std::io::Result<Self> {
+		if locals.is_empty() {
+			return Err(std::io::Error::new(
+				std::io::ErrorKind::InvalidInput,
+				"no host candidate to receive on",
+			));
+		}
+		Ok(Self { udp, locals, inbound })
+	}
+
+	/// The advertised host candidates, which are never empty.
+	pub fn locals(&self) -> &[SocketAddr] {
+		&self.locals
+	}
 }
 
 /// The datagrams routed to one [`crate::Agent`], and the counters they are tallied in.
@@ -76,7 +94,7 @@ impl Wire {
 }
 
 /// Pump every datagram from a socket the caller owns 1:1 into a queue for
-/// [`Socket::inbound`], until the queue's receiver is dropped.
+/// an agent, until the queue's receiver is dropped.
 pub fn reader(socket: Arc<UdpSocket>) -> Inbound {
 	let (tx, rx) = mpsc::channel(INBOX);
 	let wire = Wire::default();
@@ -103,4 +121,23 @@ pub fn reader(socket: Arc<UdpSocket>) -> Inbound {
 		}
 	});
 	Inbound { packets: rx, wire }
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[tokio::test]
+	async fn construction_refuses_a_socket_without_advertised_candidates() {
+		let udp = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+		let (_, packets) = mpsc::channel(INBOX);
+		let inbound = Inbound {
+			packets,
+			wire: Wire::default(),
+		};
+		let Err(err) = Socket::new(udp, Vec::new(), inbound) else {
+			panic!("an unusable socket escaped construction");
+		};
+		assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+	}
 }

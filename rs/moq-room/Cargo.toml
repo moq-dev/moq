@@ -1,4 +1,5 @@
 [package]
+publish = false
 name = "moq-room"
 description = "Headless multi-participant rooms over MoQ: announce-derived roster, token claims, and a chat track."
 authors = ["Luke Curley <kixelated@gmail.com>"]
@@ -23,3 +24,6 @@ thiserror = { workspace = true }
 [dev-dependencies]
 moq-tokio = { path = "../moq-tokio", default-features = false, features = ["net"] }
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
+
+[lints]
+workspace = true

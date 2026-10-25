@@ -7,6 +7,7 @@ export const StreamId = {
 	Goaway: 5,
 	Track: 6,
 	Auth: 7,
+	Tracks: 8,
 	ClientCompat: 0x20,
 	ServerCompat: 0x21,
 } as const;
@@ -20,6 +21,8 @@ export const StreamId = {
 export const DataType = {
 	Group: 0,
 	Setup: 1,
+	/** Arbitrary bytes discarded by lite-07+ receivers. */
+	Padding: 2,
 } as const;
 
 /** A unidirectional data-stream type. See {@link DataType}. */

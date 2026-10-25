@@ -12,38 +12,23 @@ keywords = ["quic"]
 categories = ["network-programming", "asynchronous"]
 
 [package.metadata.docs.rs]
-# all non-default features except fips (cannot build on docs.rs environment)
-features = ["rustls-aws-lc-rs", "rustls-ring", "platform-verifier", "rustls-log"]
+features = ["rustls-aws-lc-rs", "ring"]
 
 [package.metadata.cargo-shear]
 # Enables the `web` feature on wasm32-unknown-unknown; never named in code.
 ignored = ["rustls-pki-types"]
 
 [features]
-# quinn's own defaults turn on `platform-verifier`, MoQ's clients use it, and
-# the rustdoc links to it resolve only with it on.
-default = ["rustls-ring", "tracing-log", "bloom", "platform-verifier"]
-aws-lc-rs = ["dep:aws-lc-rs", "aws-lc-rs?/aws-lc-sys", "aws-lc-rs?/prebuilt-nasm"]
-aws-lc-rs-fips = ["aws-lc-rs", "aws-lc-rs?/fips"]
-# Enables BloomTokenLog, and uses it by default
-bloom = ["dep:fastbloom"]
-# For backwards compatibility, `rustls` forwards to `rustls-ring`
-rustls = ["rustls-ring"]
-# Enable rustls with the `aws-lc-rs` crypto provider
-rustls-aws-lc-rs = ["dep:rustls", "rustls?/aws-lc-rs", "aws-lc-rs"]
-rustls-aws-lc-rs-fips = ["rustls-aws-lc-rs", "aws-lc-rs-fips"]
-# Enable rustls with the `ring` crypto provider
-rustls-ring = ["dep:rustls", "rustls?/ring", "ring"]
-ring = ["dep:ring"]
-# Enable rustls ring provider and direct ring usage
-# Provides `ClientConfig::with_platform_verifier()` convenience method
-platform-verifier = ["dep:rustls-platform-verifier"]
-# Configure `tracing` to log events via `log` if no `tracing` subscriber exists.
-tracing-log = ["tracing/log"]
-# Enable rustls logging
-rustls-log = ["rustls?/logging"]
+default = ["ring"]
+aws-lc-rs = ["dep:aws-lc-rs", "aws-lc-rs?/aws-lc-sys", "aws-lc-rs?/prebuilt-nasm", "dep:rustls", "rustls/aws-lc-rs"]
+# Enable rustls with the aws-lc-rs crypto provider.
+rustls-aws-lc-rs = ["aws-lc-rs"]
+ring = ["dep:ring", "dep:rustls", "rustls/ring"]
 # Enable qlog support
 qlog = ["dep:qlog"]
+# The sans-IO QMux connection, which runs the stream state machine over a reliable, ordered
+# transport. Driven by the `qmux` crate.
+mux = []
 # Internal (PRIVATE!) features used to aid testing.
 # Don't rely on these whatsoever. They may disappear at any time.
 
@@ -58,17 +43,17 @@ fuzz = ["dep:arbitrary", "ring"]
 arbitrary = { version = "1.5", features = ["derive"], optional = true }
 aws-lc-rs = { version = "1.9", default-features = false, optional = true }
 bytes = { workspace = true }
-fastbloom = { version = "0.17", default-features = false, optional = true }
+fastbloom = { version = "0.17", default-features = false }
+indexmap = { workspace = true }
 lru-slab = "0.1.2"
 # Without the runtime, which is meant for dev-dependencies; a driver brings its own.
 moq-clock = { version = "0.11.0", path = "../moq-clock", default-features = false }
+moq-congestion = { workspace = true }
 qlog = { version = "0.18", optional = true }
 rand = { workspace = true }
-rand_pcg = "0.10"
 ring = { version = "0.17", optional = true }
 rustc-hash = { workspace = true }
 rustls = { version = "0.23.5", default-features = false, features = ["std"], optional = true }
-rustls-platform-verifier = { version = "0.7", optional = true }
 slab = { workspace = true }
 thiserror = { workspace = true }
 tinyvec = { version = "1.1", features = ["alloc"] }
@@ -81,7 +66,6 @@ getrandom = { version = "0.4", default-features = false, features = ["wasm_js"] 
 ring = { version = "0.17", features = ["wasm32_unknown_unknown_js"], optional = true }
 # only added as dependency to enforce the `web` feature for this target
 rustls-pki-types = { version = "1.7", features = ["web"] }
-web-time = "1"
 
 [dev-dependencies]
 arbitrary = { version = "1.5", features = ["derive"] }
@@ -90,9 +74,13 @@ criterion = { workspace = true }
 hex-literal = "1"
 # The tests and benches read time through the runtime, as the drivers do.
 moq-clock = { path = "../moq-clock" }
+# The tests seed BBR3's probe phases.
+moq-congestion = { workspace = true, features = ["testing"] }
+# The mux module's tests run in the default merge gate.
+moq-quic = { path = ".", features = ["mux"] }
 proptest = { workspace = true }
+rand_pcg = { workspace = true }
 rcgen = { workspace = true, features = ["pem", "ring"] }
-stats_alloc = "0.1.10"
 tracing-subscriber = { version = "0.3.0", default-features = false, features = ["env-filter", "fmt", "ansi", "time", "local-time"] }
 wasm-bindgen-test = "0.3.45"
 
@@ -127,14 +115,5 @@ name = "wire"
 harness = false
 required-features = ["fuzz"]
 
-# quinn's workspace lints, kept so upstream code stays clean against them.
-[lints.rust]
-elided_lifetimes_in_paths = "warn"
-unnameable_types = "warn"
-unreachable_pub = "warn"
-unused_qualifications = "warn"
-
-[lints.clippy]
-manual_let_else = "warn"
-or_fun_call = "warn"
-use_self = "warn"
+[lints]
+workspace = true

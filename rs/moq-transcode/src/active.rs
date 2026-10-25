@@ -358,6 +358,7 @@ fn next_update(state: &State, seen: &BTreeMap<String, bool>) -> Option<Update> {
 }
 
 #[cfg(test)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use std::time::Duration;
 

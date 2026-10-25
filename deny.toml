@@ -29,6 +29,22 @@ ignore = [
     # on GNOME. Awaits sctk-adwaita migrating to skrifa.
     "RUSTSEC-2026-0192",
 
+    # basic-toml is unmaintained, with no patched release. Only Askama's build-time
+    # template config parser in the unpublished UniFFI generator fork uses it.
+    # Drop when Askama releases its migration to toml:
+    # https://github.com/askama-rs/askama/blob/main/askama_derive/Cargo.toml
+    "RUSTSEC-2026-0374",
+
+    # zbus 6 merged these crates into its names/wire modules. ashpd 0.13, the
+    # latest stable portal client used by moq-video, still requires zbus 5.
+    # These advisories report maintenance status, not a known vulnerability.
+    # Drop when ashpd migrates to zbus 6:
+    # https://github.com/z-galaxy/zbus/issues/2043
+    # https://github.com/bilelmoussaoui/ashpd/pull/491
+    "RUSTSEC-2026-0370",
+    "RUSTSEC-2026-0371",
+    "RUSTSEC-2026-0372",
+
 ]
 
 [licenses]
@@ -51,11 +67,7 @@ allow = [
     "Unlicense",
     "Zlib",
 ]
-exceptions = [
-    # AWS-LC's FIPS build still carries OpenSSL-licensed code. Reachable only
-    # through moq-quic's opt-in `aws-lc-rs-fips` feature, kept from quinn.
-    { crate = "aws-lc-fips-sys", allow = ["OpenSSL"] },
-]
+exceptions = []
 
 [bans]
 multiple-versions = "warn"

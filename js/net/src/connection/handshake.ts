@@ -1,6 +1,7 @@
 import { closeReason, ProtocolViolation, SessionCode, StreamError } from "../error.ts";
 import { type Hop, randomHop } from "../hop.ts";
 import * as Ietf from "../ietf/index.ts";
+import * as Message from "../ietf/message.ts";
 import { Reader, Stream, UnexpectedEnd, Writer } from "../stream.ts";
 import * as Extensions from "./extensions.ts";
 
@@ -14,8 +15,8 @@ import * as Extensions from "./extensions.ts";
  * {@link receiveSetup}), plus what the peer's SETUP declared: whether it requires
  * solicitation, which decides whether we announce namespaces unprompted (see the MoQ Solicit
  * extension), its Hop ID (see the MoQ Cluster extension), and whether MoQ Auth and MoQ Epoch
- * are negotiated. We declare our Hop ID on every session, and Solicit, Auth, and Epoch unless
- * `extensions` declines them: we send SUBSCRIBE_NAMESPACE for each prefix we want, so an unsolicited advertisement
+ * are negotiated, plus the implementation it advertised. We declare our Hop ID on every
+ * session, and Solicit, Auth, and Epoch unless `extensions` declines them: we send SUBSCRIBE_NAMESPACE for each prefix we want, so an unsolicited advertisement
  * can tell us nothing we won't have asked for, and a peer that knows our Hop ID can withhold
  * the advertisements that already flowed through us.
  */
@@ -34,10 +35,10 @@ export async function exchangeSetup(
 	cluster: Ietf.Cluster.Hops;
 	auth: boolean;
 	epoch: boolean;
+	peerImplementation: string | undefined;
 }> {
-	const encoder = new TextEncoder();
 	const params = new Ietf.SetupOptions();
-	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode(implementation));
+	Ietf.implementationIntoSetup(params, implementation);
 	Extensions.intoSetup(params, extensions, version);
 	Ietf.hiddenIntoSetup(params);
 	Ietf.maxAgeIntoSetup(params);
@@ -77,6 +78,7 @@ export async function exchangeSetup(
 		// Negotiated only when both sides offer it.
 		auth: received.auth && extensions.auth,
 		epoch: received.epoch && extensions.epoch,
+		peerImplementation: received.implementation,
 	};
 }
 
@@ -84,8 +86,7 @@ async function sendSetup(transport: WebTransport, version: Ietf.IetfVersion, set
 	// Via Writer.open for its deadline: a peer can advertise a stream limit of zero and
 	// never raise it, which would otherwise hang the handshake rather than failing it.
 	const writer = await Writer.open(transport, { version });
-	await writer.u53(Ietf.Setup.id); // 0x2F00 stream type
-	await setupMsg.encode(writer, version);
+	await Message.write(writer, Ietf.Setup.id, setupMsg, version); // 0x2F00 stream type
 	return writer;
 }
 
@@ -109,6 +110,7 @@ async function receiveSetup(
 	cluster: Hop | undefined;
 	auth: boolean;
 	epoch: boolean;
+	implementation: string | undefined;
 }> {
 	const uniReader = transport.incomingUnidirectionalStreams.getReader() as ReadableStreamDefaultReader<
 		ReadableStream<Uint8Array>
@@ -165,5 +167,20 @@ async function receiveSetup(
 		cluster: Ietf.Cluster.fromSetup(setup.parameters, version),
 		auth: Ietf.Auth.fromSetup(setup.parameters, version) === true,
 		epoch: Ietf.Epoch.fromSetup(setup.parameters, version),
+		implementation: Ietf.implementationFromSetup(setup.parameters),
 	};
+}
+
+/**
+ * The implementation a moq-transport draft-14 to 16 peer advertised in its bidi SETUP. A malformed one
+ * closes the session as a protocol violation, the way {@link exchangeSetup} refuses one.
+ */
+export function legacyPeerImplementation(transport: WebTransport, params: Ietf.SetupOptions): string | undefined {
+	try {
+		return Ietf.implementationFromSetup(params);
+	} catch (err) {
+		if (err instanceof ProtocolViolation)
+			transport.close({ closeCode: err.code, reason: closeReason(err.message) });
+		throw err;
+	}
 }

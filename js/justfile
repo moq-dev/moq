@@ -55,12 +55,12 @@ test-changed list:
 coverage package="":
     python3 ../sh/js/coverage.py '{{ package }}'
 
-# Run one net benchmark: broadcasts, forward, requests, reader, frames, track, resume, interests, observed, varint, lite-varint, priority, request-ids, or subscribe-drop.
+# Run one net benchmark: broadcasts, forward, requests, reader, frames, track, resume, observed, drift, varint, lite-varint, priority, request-ids, subscribe-drop, subscribe-tracks, refresh, or compression.
 bench name:
     bun install --frozen-lockfile
     bun net/bench/{{ name }}.ts
 
-# Sweep browser publisher fairness over backlog x viewers; requires installed Chromium.
+# Sweep browser publisher fairness over backlog x viewers using the devShell's Chromium.
 serve-bench:
     bun install --frozen-lockfile
     bunx tsc --noEmit --project net/bench/tsconfig.json
@@ -70,6 +70,16 @@ serve-bench:
 catalog-bench:
     bun install --frozen-lockfile
     bun publish/bench/catalog.ts
+
+# Sweep QMux record decoding over record size x frames per record.
+qmux-record-bench:
+    bun install --frozen-lockfile
+    bun qmux/bench/record.ts
+
+# Sweep CMAF fragment decode over mdat bytes x declared sample count, including a hostile count.
+cmaf-bench:
+    bun install --frozen-lockfile
+    bun hang/bench/cmaf.ts
 
 # Time Effect create and close, which pays for the creation stack its diagnostics print.
 signals-bench:
@@ -132,6 +142,16 @@ json-parse-bench:
 slow-group-bench:
     bun install --frozen-lockfile
     bun hang/bench/slow-group.ts
+
+# Sweep the audio jitter estimator's held history against in-order and reordered frames.
+jitter-bench:
+    bun install --frozen-lockfile
+    bun hang/bench/jitter.ts
+
+# Sweep players against the main-thread CPU and allocation of feeding the audio ring, in Chromium.
+ring-bench:
+    bun install --frozen-lockfile
+    bun watch/bench/ring.ts
 
 # Sweep decoder count against PCM callback size during audio warmup.
 audio-warmup-bench:

@@ -20,8 +20,6 @@ import * as Cluster from "./cluster.ts";
 import type { RequestKind } from "./error.ts";
 import { Fetch, FetchHeader } from "./fetch.ts";
 import { GoAway } from "./goaway.ts";
-import * as Message from "./message.ts";
-import * as Namespace from "./namespace.ts";
 import { Group } from "./object.ts";
 import { Publish } from "./publish.ts";
 import { PublishNamespace } from "./publish_namespace.ts";
@@ -34,6 +32,7 @@ import {
 	SubscribeNamespaceLegacy,
 	SubscribeOptions,
 } from "./subscribe_namespace.ts";
+import { SubscribeTracks } from "./subscribe_tracks.ts";
 import { Subscriber } from "./subscriber.ts";
 import { MalformedAuthToken } from "./token.ts";
 import { TrackStatusRequest } from "./track.ts";
@@ -108,6 +107,9 @@ export class Connection implements Established {
 	// Just to avoid logging when `close()` is called.
 	#closed = false;
 
+	/** The implementation the peer advertised; see {@link Established.peerImplementation}. */
+	readonly peerImplementation: Promise<string | undefined>;
+
 	/**
 	 * Creates a new Connection instance.
 	 * @param url - The URL of the connection
@@ -140,6 +142,7 @@ export class Connection implements Established {
 		early = [],
 		requestWindow,
 		extensions,
+		peerImplementation,
 	}: {
 		url: URL;
 		quic: WebTransport;
@@ -178,12 +181,15 @@ export class Connection implements Established {
 		requestWindow?: bigint;
 		/** What our own SETUP offered; every extension when omitted. */
 		extensions?: { solicit: boolean };
+		/** The implementation the peer's SETUP advertised, read before the session starts. */
+		peerImplementation?: string;
 	}) {
 		this.url = url;
 		this.version = versionName(version);
 		this.transport = transportOf(quic);
 		this.#quic = quic;
 		this.#client = client;
+		this.peerImplementation = Promise.resolve(peerImplementation);
 
 		// Two-path dispatch: v14-v16 uses adapter, v17+ uses native bidi streams
 		if (version >= Version.DRAFT_17) {
@@ -453,16 +459,9 @@ export class Connection implements Established {
 				if (this.#session.version < Version.DRAFT_18) {
 					throw new ProtocolViolation("SUBSCRIBE_TRACKS before draft-18");
 				}
-				const request = await Message.decode(stream.reader, async (reader) => {
-					const requestId = await reader.u62();
-					const namespace = await Namespace.decode(reader);
-					await reader.readAll();
-					return { requestId, namespace };
-				}).catch((err: unknown) => {
-					throw malformed(err, "subscribe_tracks");
-				});
-				this.#session.spendRequest(request.requestId);
-				await handed(this.#publisher.runSubscribeTracks(stream, request.namespace));
+				const decoded = SubscribeTracks.decode(stream.reader, this.#session.version);
+				const msg = await this.#request(stream, "subscribe_namespace", decoded);
+				if (msg) await handed(this.#publisher.runSubscribeTracks(msg, stream));
 				break;
 			}
 			case BigInt(TrackStatusRequest.id): {
@@ -598,7 +597,8 @@ export class Connection implements Established {
 				stream.stop(new StreamError(StreamCode.Cancel, { message: "cancel" }));
 			})
 			.catch((err: unknown) => {
-				console.error("error processing object stream", err);
+				// A peer resetting a stream it no longer wants to send is routine, not an error;
+				// only a violation is, and that one closes the session with its code.
 				stream.stop(err);
 
 				// An unknown or invalid stream type MUST close the session, not just the stream.

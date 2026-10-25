@@ -4,7 +4,7 @@
 
 The slowest, flakiest, and least valuable tests are sped up, fixed, deleted,
 or planned, so the suite costs what it earns. Workflows and jobs belong to the
-[CI workflow audit](/quest/m1/audit-ci.md).
+[CI workflow audit](/quest/m2/audit-ci.md).
 
 ## Plan
 
@@ -56,19 +56,21 @@ Check first:
   105 to 113 s at 8 threads (about 185% CPU), 60 s at 16 (315%), 47 s at 24
   (420%), and 41 s at 32 (500%): the suite needs about 200 CPU-seconds, and
   most slots wait on sockets, subprocesses, and wall-clock timeouts.
-  Oversubscribing the queue job is a maintainer decision, since it loads
-  every timing-sensitive test and a flake ejects a queue entry. Only the
-  known redundant-importer flake failed, once, at 16 threads.
-- moq-gst: about ten tests per run each pay 3 s, at random. `stop` closes the
-  client, which waits out the draining period (three PTOs at the 333 ms
-  initial RTT) of a dial to the tests' unreachable relay that never got an
-  answer. A user stopping a pipeline whose relay is down waits the same. Ask
-  whether moq-quic may skip draining for a connection that never heard from
-  its peer.
+  The maintainer selected 24 threads for the queue in
+  [CI housekeeping](/quest/m1/ci-housekeeping.md), which owns the loaded
+  proof before applying it. Only the known redundant-importer flake failed,
+  once, at 16 threads in this baseline.
+- moq-gst's unanswered-dial close wait was fixed by
+  [moq-dev/moq#6201](https://github.com/moq-dev/moq/pull/6201): the close
+  stops counting an unanswered handshake as active immediately while the
+  closing period still answers late packets. Do not repeat the old request
+  to skip draining. [moq-dev/moq#6240](https://github.com/moq-dev/moq/pull/6240)
+  retired the silent-peer quest as complete.
 - moq-uring: three endpoint tests wait out moq-quic's fixed 10 s handshake
   idle timeout (30 s together). Neither moq-uring's `Transport` nor
-  `--quic-idle-timeout` sets it; ask whether the configured idle timeout
-  should bound the handshake too (public API).
+  `--quic-idle-timeout` sets it. #6201 does not change that timeout. The
+  [retirement](https://github.com/moq-dev/moq/pull/6240) settled keeping it
+  separate with no new knob; do not select another API in a cost audit.
 - CPU-bound simulations in a debug build: five TS export timing cases (3 to
   11 s each) and the jitter buffer's day of drift (6 to 13 s), whose `Steer`
   rebuilds the hull and median over its whole window on every step.

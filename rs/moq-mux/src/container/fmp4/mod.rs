@@ -6,6 +6,7 @@
 //! container; [`Import`] parses external fMP4 streams and [`Export`]
 //! produces them.
 
+mod edit;
 mod export;
 pub mod fragment;
 mod fragmenter;
@@ -28,7 +29,7 @@ mod export_test;
 #[cfg(test)]
 mod import_test;
 
-use std::{task::Poll, time::Duration};
+use std::time::Duration;
 
 use bytes::Bytes;
 use hang::catalog::{AudioCodec, AudioConfig, VideoCodec, VideoConfig};
@@ -303,6 +304,10 @@ pub enum Error {
 	/// delivered the codec configuration their track needs.
 	#[error("renditions {0:?} never delivered their codec configuration")]
 	TrackUndescribed(Vec<String>),
+
+	/// A track's edit list does more than delay the track and start its media at one time.
+	#[error("unsupported edit list: {0}")]
+	UnsupportedEditList(&'static str),
 }
 
 impl From<mp4_atom::Error> for Error {
@@ -332,7 +337,7 @@ impl Kind {
 	}
 
 	/// The publisher priority for this kind of media.
-	fn priority(self) -> u8 {
+	fn priority(self) -> i8 {
 		match self {
 			Self::Video => hang::catalog::PRIORITY.video,
 			Self::Audio => hang::catalog::PRIORITY.audio,
@@ -439,18 +444,9 @@ impl Container for Wire {
 		)
 	}
 
-	fn poll_read(
-		&self,
-		group: &mut moq_net::group::Consumer,
-		waiter: &kio::Waiter,
-	) -> Poll<std::result::Result<Option<Vec<Frame>>, Self::Error>> {
-		use std::task::ready;
-
-		let Some(frame) = ready!(group.poll_read_frame(waiter)?) else {
-			return Poll::Ready(Ok(None));
-		};
+	fn decode(&self, frame: moq_net::frame::Frame) -> std::result::Result<Vec<Frame>, Self::Error> {
 		// CMAF carries no data track, so an object with no bytes is no marker and fails to decode.
-		Poll::Ready(Ok(Some(decode(frame.payload, frame.timestamp, self.track()?)?)))
+		decode(frame.payload, frame.timestamp, self.track()?)
 	}
 }
 
@@ -500,7 +496,9 @@ pub(crate) fn decode(data: Bytes, timestamp: Option<Timestamp>, track: Track) ->
 		defaults,
 	} = track;
 
-	let mut cursor = std::io::Cursor::new(&data);
+	// A slice cursor like the other fMP4 decodes: mp4-atom's `Any` decoder is large and compiles
+	// once per reader type.
+	let mut cursor = std::io::Cursor::new(data.as_ref());
 	let mut moof = None;
 	let mut mdat = None;
 
@@ -622,12 +620,7 @@ fn encode(group: &mut moq_net::group::Producer, frames: &[Frame], info: Fragment
 	let timestamp = Timestamp::new(timestamp_ticks(earliest, info.timescale)?, info.timescale)?;
 
 	let bytes = encode_fragment(info, frames)?;
-	let mut writer = group.create_frame(moq_net::frame::Info {
-		size: bytes.len() as u64,
-		timestamp: Some(timestamp),
-	})?;
-	writer.write(bytes)?;
-	writer.finish()?;
+	group.write_frame(timestamp, bytes)?;
 
 	Ok(())
 }
@@ -1930,18 +1923,11 @@ mod tests {
 		let timescale = moq_net::Timescale::MICRO;
 		let wire = Wire::new(synthesize_video_trak(1, 1_000_000, &config, None).unwrap()).unwrap();
 
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let untimed = moq_net::track::Info::default().with_timescale(None);
-		let track = broadcast.create_track("video", untimed).unwrap();
-		let mut group = track.append_group().unwrap();
 		let source = 3_600_000_000;
 		let input = [sample(source), sample(source + 66_000), sample(source + 33_000)];
 		let fragment = encode_fragment(info(1, timescale, 0), &input).unwrap();
-		group.write_frame(None, fragment).unwrap();
 
-		let Poll::Ready(Ok(Some(frames))) = wire.poll_read(&mut group.consume(), &kio::Waiter::noop()) else {
-			panic!("the fragment is ready");
-		};
+		let frames = wire.decode(moq_net::frame::Frame::new(None, fragment)).unwrap();
 		let source = u128::from(source);
 		assert_eq!(micros(&frames), [source, source + 66_000, source + 33_000]);
 	}

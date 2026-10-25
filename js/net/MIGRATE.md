@@ -4,15 +4,38 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### An auth handle can outlive its session (#6109)
+### Published names refuse navigation segments
 
-`Auth.Handle` is now a class: `new Auth.Handle()` backs no session yet, and `connect({ auth })` builds the session on it, so every session built on one presents the tokens it holds.
-A reconnecting `Connection` owns one as `connection.auth`; a route naming one of its `Auth.Auth`s keeps that token across a reconnect, so drop the code that added the token again and re-announced after one.
-A handle backs one active session at a time, plus the ones draining after a GOAWAY: connecting another while one is still active rejects with `Auth.Duplicate`, and so does a second `requests()` call, which threw a plain `Error` before.
-`Established.auth` returns the session's handle, so its `grant` and each `Auth.Auth`'s `grant` read undefined once the session closes, instead of an empty grant.
-`Auth.Auth.closed` settles only on the peer's verdict or the handle's end (`handle.abort()`); a session ending is not one, except for a handle the session created for itself.
-`Auth.None` is removed; nothing returned it.
-On moq-lite, a token refused with a code that may pass (`Internal`, `TooManyRequests`, `Timeout`) is presented again after a backoff of 1s doubling to 30s, instead of `add` rejecting with that code.
+Broadcast creation and route publication now refuse literal `.` and `..` segments, including segments in the producer's root.
+Resolve relative references before publishing, or rename broadcasts that used these segments.
+Path normalization, relative references, and subscription paths retain their semantics.
+
+### A listing says whether a removed track finished (#6399)
+
+`Broadcast.TracksEvent` gains `{ kind: "finished", name }`: the track left the listing because it finished. `{ kind: "removed", name }` now means it left unfinished. Handle both where you matched `"removed"`.
+
+### `Track.Producer.largest()` is a getter
+
+`Track.Producer.largest()` returns the track's largest location synchronously, `undefined` before any, instead of a promise for the next newer one.
+Drop the `await`. Every caller reads the same value: the old shared cursor let one caller take an update and leave another waiting forever.
+To wait for each newer one, keep a reader and follow its stream: `const reader = producer.subscribe();`, then `await reader.largest()`.
+
+### Stage a requested track before subscribers see it (#6111)
+
+`Track.Request.stage(info)` returns a `Track.Staged` whose `producer` writes while subscribers waiting on the request stay pending; `commit()` publishes it with everything written so far and returns the `Producer`.
+Disposing a `Staged` uncommitted (`using`, or `[Symbol.dispose]()`) rejects the request. `accept(info)` is unchanged and equals `stage(info).commit()`.
+
+### A frameless group is not a successor (#6111)
+
+A group followed by a frameless one is judged stale against the next group that has a frame, where the frameless group used to count.
+`Track.Producer.dropGroups(start, end, error)` marks groups `[start, end)` the peer said it skipped; a reader holding one of them rejects with `error`.
+
+### Priorities are signed (#6142)
+
+`Track.Info.priority`, `Track.Subscription.priority`, and a fetch's `priority` take `-128..=127`, higher first, and 0 is the unset midpoint; anything outside throws a `RangeError`.
+The track's default was 127, the midpoint, and the subscription's was 0, the least urgent; both are 0 now.
+To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
+The wire messages (`Lite.Subscribe`, `Lite.TrackInfo`, `Ietf.Subscribe`, ...) hold the same signed priority, mapped to the wire byte when encoded.
 
 ### A dropped or cut group ends its reader with an error (#6143)
 
@@ -24,9 +47,11 @@ Treat a rejected group read as the loss of that group and keep reading the track
 ### A claim answers by publishing (#5678)
 
 `Origin.Producer.dynamic(prefix)` takes no route: an application claim has no epoch, cost, or hops.
-Answer each `Origin.Request` with `request.prepare(epoch)` (a fresh `Epoch.mint()` per output run), fill `prepared.broadcast`, then `prepared.publish()`, which announces the broadcast at the exact path under that epoch and returns its producer.
+Answer each `Origin.Request` with `using prepared = request.prepare(epoch)` (a fresh `Epoch.mint()` per output run), fill `prepared.broadcast`, then `prepared.publish()`, which announces the broadcast at the exact path under that epoch and returns its producer.
 Only `publish` announces it: `prepared.broadcast.announce()` throws.
-Call `prepared.reject(err)` to refuse instead; JS has no destructor, so an abandoned `Prepared` holds its request open.
+`Prepared.reject(err)` is replaced by idempotent `close()` and `[Symbol.dispose]()`; either refuses the unpublished answer as `Unroutable` and closes its broadcast. Closing that broadcast also refuses the request. `using` handles normal scope exit and exceptions; after `publish()`, disposal leaves the returned producer live.
+Use `request.reject(err)` to refuse before preparing. A retained, unclosed `Prepared` keeps its request pending; garbage collection provides no prompt cleanup guarantee.
+Construct a `Prepared` only with `request.prepare()`. Its constructor and the `Request.publisher`, `publishPrepared`, and `rejectPrepared` completion hooks are no longer public.
 `Dynamic.update` and `Request.accept` are no longer part of the public API, and `accept` throws on a request from `dynamic`.
 Close the claim and claim again to change it, and close an answer's producer to end that output.
 
@@ -35,7 +60,7 @@ Close the claim and claim again to change it, and close an answer's producer to 
 `Track.Subscriber.largest()` and `Track.Ordered.largest()` report the track's largest only while it is within the bounds set with `setGroups` or `withGroups`, where they used to ignore the bounds.
 A largest past the cap or below the floor reports nothing; the cache never stands in for it.
 A cap moved below the largest stays pending. Moving the bounds wakes a pending read, which reports the largest once it is within them and newer than the last report.
-Unbounded readers and `Track.Producer.largest()` are unchanged.
+Unbounded readers are unchanged.
 To read the track's edge from a capped reader, lift the cap with `setGroups({})` first.
 
 ### Lite-07 accounts for groups with `SUBSCRIBE_DROP`
@@ -72,6 +97,9 @@ A new group or datagram raises it at frame 0 before any frame lands, and it can 
 ### A timed track refuses a group that rewinds (#5803)
 
 A local write whose first frame starts before a lower-sequence group's, or after a higher one's, throws `TimestampMismatch`.
+A group received over moq-lite-07 is checked the same way.
+A track received over moq-lite-05/06 arrives untimed, since its timestamps may be send times: read times from the payload, such as the hang container's, instead of the frame's `timestamp`.
+One received over moq-transport keeps its timestamps unchecked, and a relay serves it to moq-lite untimed.
 A publisher whose timeline restarts publishes a new broadcast instead.
 
 ### `Auth.Auth` is `Auth.Handle`, and `Auth.Token` is `Auth.Auth` (#5695)

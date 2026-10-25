@@ -11,6 +11,7 @@ const PARAM_PROBE = 0x1n;
 const PARAM_PATH = 0x2n;
 const PARAM_ROLE = 0x3n;
 const PARAM_HOP = 0x5n;
+const PARAM_IMPLEMENTATION = 0x6n;
 
 function concat(chunks: Uint8Array[]): Uint8Array {
 	const total = chunks.reduce((sum, c) => sum + c.byteLength, 0);
@@ -69,6 +70,7 @@ test("empty SETUP round-trips on draft-05", async () => {
 	expect(got.probe).toBe(ProbeLevel.None);
 	expect(got.path).toBeUndefined();
 	expect(got.role).toBe(Role.Both);
+	expect(got.implementation).toBeUndefined();
 });
 
 test("each probe level round-trips on draft-05", async () => {
@@ -147,6 +149,25 @@ test("hop 0 decodes as absent", async () => {
 	expect(got.hop).toBeUndefined();
 });
 
+test("SETUP with implementation round-trips", async () => {
+	const got = await roundTrip(
+		new Setup({ hop: HopSchema.parse(7n), implementation: "moq-ffi/0.4.12 moq-net-rs/0.3.10" }),
+	);
+	expect(got.implementation).toBe("moq-ffi/0.4.12 moq-net-rs/0.3.10");
+	expect(got.hop).toBe(HopSchema.parse(7n));
+});
+
+test("an empty implementation is omitted rather than encoded", async () => {
+	const empty = await bytes((w) => new Setup({ implementation: "" }).encode(w, Version.DRAFT_05), Version.DRAFT_05);
+	const none = await bytes((w) => new Setup().encode(w, Version.DRAFT_05), Version.DRAFT_05);
+	expect(empty).toEqual(none);
+});
+
+test("SETUP rejects an implementation with malformed UTF-8", async () => {
+	expect((await decodeParam(PARAM_IMPLEMENTATION, new TextEncoder().encode("x/1"))).implementation).toBe("x/1");
+	await expect(decodeParam(PARAM_IMPLEMENTATION, new Uint8Array([0xc3, 0x28]))).rejects.toThrow();
+});
+
 test("SETUP is rejected before draft-05", async () => {
 	await expect(bytes((w) => new Setup().encode(w, Version.DRAFT_04), Version.DRAFT_04)).rejects.toThrow();
 });
@@ -184,7 +205,7 @@ test("SETUP decode refuses an oversized length before reading the body", async (
 	);
 });
 
-const PARAM_TOKEN = 0x6;
+const PARAM_TOKEN = 0x7;
 
 test("SETUP token round-trips on lite-07 only", async () => {
 	const msg = new Setup({ token: new TextEncoder().encode("jwt") });

@@ -21,6 +21,7 @@
 
 mod diff;
 mod merge;
+mod refresh;
 pub mod snapshot;
 pub mod stream;
 mod strict;

@@ -13,6 +13,7 @@ import settings from "./icons/settings.svg?raw";
 import video from "./icons/video.svg?raw";
 import wifi from "./icons/wifi.svg?raw";
 
+export { icon } from "@moq/ui";
 export {
 	audio,
 	ban,
@@ -29,12 +30,3 @@ export {
 	video,
 	wifi,
 };
-
-export function icon(svg: string): HTMLElement {
-	const span = document.createElement("span");
-	span.className = "flex-center";
-	span.setAttribute("role", "img");
-	span.setAttribute("aria-hidden", "true");
-	span.innerHTML = svg;
-	return span;
-}

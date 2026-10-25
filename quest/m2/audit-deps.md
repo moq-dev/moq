@@ -10,7 +10,7 @@ replacement.
 
 Recurs once per major release (decided 2026-10-19). The PR that finishes
 this run also adds the next one with the same file name at the end of the next
-milestone's `Required` (m0 to m1, m1 to m2, m2 to m3). The successor keeps the Goal
+milestone's `Required` (m0 to m1, m1 to m2). The successor keeps the Goal
 and this paragraph; the rest of its Plan is rewritten with what this run
 learned: baselines, results, and what to check first. A successor placed in m2
 also lists the [release cut](/quest/m2/release/cut.md) under `Required`, so it
@@ -59,7 +59,7 @@ Open at the end of the m1 run:
   a lock-only smoke PR. Confirm those coupled PRs land.
 - http-cache-reqwest stays on its 1.0 prerelease (alpha.9) until 1.0 ships.
 
-Advisories waiting on upstream, with no exceptions or overrides added:
+Advisories waiting on upstream:
 
 - ashpd 0.13 pulls zbus 5 and the unmaintained zvariant, zvariant_derive, and
   zbus_names (RUSTSEC-2026-0370, 0371, 0372). Upstream's
@@ -67,12 +67,11 @@ Advisories waiting on upstream, with no exceptions or overrides added:
 - basic-toml (RUSTSEC-2026-0374) comes through askama_derive's default
   `config` feature in uniffi_bindgen 0.32, which reads its `askama.toml`.
   It only reaches the generator-only uniffi fork and never ships.
-- The root Bun audit has nine findings in four packages: VitePress 1.6.4 pins
-  Vite 5 and its vulnerable esbuild (VitePress 2 is still alpha),
-  `@tailwindcss/typography` 0.5.20 pins postcss-selector-parser 6, and braces
-  3.0.3 has no fix for
-  [GHSA-vfj7-8cjw-p6xm](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm).
-  The Worker lockfiles audit clean.
+- The root Bun audit uses version-scoped overrides for chokidar 3 to 4
+  (removing braces), postcss-selector-parser 6 to 7.1.7, and Vite 5 to 6.4.5
+  (also removing vulnerable esbuild). Remove each override when its parent,
+  remark-cli/unified-args, `@tailwindcss/typography`, or VitePress, declares
+  a safe dependency range. The root and Worker lockfiles audit clean.
 - paste (RUSTSEC-2024-0436) remains through tikv-jemalloc-ctl and iroh's
   netlink-packet-core 0.8. tikv-jemallocator's unreleased main drops it.
 

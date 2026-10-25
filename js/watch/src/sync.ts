@@ -1,5 +1,4 @@
 import { Milli, Nano, now, sleep } from "@moq/clock";
-import type * as Moq from "@moq/net";
 import {
 	type Dispose,
 	Effect,
@@ -36,12 +35,11 @@ export type SyncInput = {
 	 * Zero minimizes latency, the live default: playback re-anchors as soon as anything arrives
 	 * early. A larger value lets faster-than-real-time frames (a TTS response with future
 	 * timestamps) build up instead of being skipped. Always finite, so worst case the audio ring
-	 * drops its oldest samples rather than exhausting memory.
+	 * drops its oldest samples rather than exhausting memory. With a nonzero buffer, the first video
+	 * frame is a poster until every enabled media track holds the resolved delay; `buffer` is
+	 * lookahead, not the amount required to start.
 	 */
 	buffer: Getter<Milli>;
-
-	/** @internal */
-	probe: Getter<Moq.Connection.Probe | undefined>;
 };
 
 type SyncOutput = {
@@ -57,9 +55,6 @@ type SyncOutput = {
 	// The resolved delay from the live edge to the playhead: the configured number, or in "auto" the
 	// largest registered playout target. Zero for "instant".
 	delay: Signal<Milli>;
-
-	// The jitter buffer, always equal to `delay`.
-	jitter: Signal<Milli>;
 
 	// The media timestamp of the most recently received frame.
 	timestamp: Signal<Milli | undefined>;
@@ -83,7 +78,6 @@ export class Sync {
 		instant: new Signal<boolean>(false),
 		reference: new Signal<number | undefined>(undefined),
 		delay: new Signal<Milli>(Milli.zero),
-		jitter: new Signal<Milli>(Milli.zero),
 		timestamp: new Signal<Milli | undefined>(undefined),
 		buffered: new Signal<boolean>(false),
 		maxDelay: new Signal<Milli>(Milli.zero),
@@ -91,17 +85,26 @@ export class Sync {
 	/** The derived outputs, read-only. */
 	readonly out = readonlys(this.#out);
 
-	// Per-label late-frame tracking: accumulate count and max lateness, flush on recovery.
-	#late = new Map<string, { count: number; maxMs: number }>();
+	#media = new Signal<
+		{
+			target: Getter<Milli | undefined>;
+			// undefined is inactive, null is selected but has no playable first span yet.
+			startup?: Getter<{ start: Milli; end: Milli } | null | undefined>;
+		}[]
+	>([]);
+	#started = false;
+	#playing = new Signal(true);
+	/** Whether buffered startup has released the media consumers. @internal */
+	readonly playing: Getter<boolean> = this.#playing;
 
-	#media = new Signal<{ target: Getter<Milli | undefined> }[]>([]);
-
-	#epoch = 0;
+	// Bumped by every `reset()`. A frame that waited across a bump belongs to the previous timeline,
+	// even when the next frame restores the same reference value.
+	#epoch = new Signal(0);
 
 	// The furthest playhead a skip has jumped to on this timeline. A frame below it was passed over.
 	#floor: number | undefined;
 
-	// Releases parked waits, which may otherwise sleep forever on a reference that never returns.
+	// Releases parked waits on `close()`.
 	#closed = new Signal(false);
 
 	#signals = new Effect();
@@ -110,19 +113,57 @@ export class Sync {
 		this.in = {
 			delay: getter(props?.delay ?? ("auto" as Delay)),
 			buffer: getter(props?.buffer ?? Milli.zero),
-			probe: getter(props?.probe),
 		};
 
 		this.#signals.run(this.#runInstant.bind(this));
 		this.#signals.run(this.#runDelay.bind(this));
 		this.#signals.run(this.#runMaxDelay.bind(this));
+		this.#signals.run(this.#runStartup.bind(this));
 	}
 
-	/** Hold a decoder's "auto" playout target in the shared playback clock until disposed. */
-	register(target: Getter<Milli | undefined>): Dispose {
-		const registered = { target };
+	/**
+	 * Hold a decoder's "auto" playout target in the shared playback clock until disposed.
+	 * @internal
+	 */
+	register(
+		target: Getter<Milli | undefined>,
+		startup?: Getter<{ start: Milli; end: Milli } | null | undefined>,
+	): Dispose {
+		const registered = { target, startup };
 		this.#media.update((media) => [...media, registered]);
 		return () => this.#media.update((media) => media.filter((candidate) => candidate !== registered));
+	}
+
+	// Startup is data-driven: time passing cannot fill a missing track. The first picture still
+	// travels through the ordinary renderer while the consumers wait for this shared gate.
+	#runStartup(effect: Effect): void {
+		effect.get(this.#epoch);
+		const buffered = effect.get(this.#out.buffered);
+		const delay = effect.get(this.#out.delay);
+		const reference = effect.get(this.#out.reference);
+		const spans = effect.get(this.#media).flatMap(({ startup }) => {
+			const span = startup && effect.get(startup);
+			return span === undefined ? [] : [span];
+		});
+		if (!buffered || spans.length === 0) {
+			this.#playing.set(true);
+			return;
+		}
+		if (this.#started) return;
+		const ready = spans.filter((span) => span !== null);
+		if (
+			reference === undefined ||
+			ready.length !== spans.length ||
+			ready.some((span) => span.end - span.start < delay)
+		) {
+			this.#playing.set(false);
+			return;
+		}
+		const first = Math.min(...ready.map((span) => span.start));
+		this.#started = true;
+		// Anchor at the retained opening, not at its arrival: startup may have waited on another track.
+		this.#out.reference.set(Nano.toMilli(Nano(now())) - first - delay);
+		this.#playing.set(true);
 	}
 
 	#runInstant(effect: Effect): void {
@@ -153,14 +194,16 @@ export class Sync {
 			}
 		}
 
-		this.#out.jitter.set(delay);
 		this.#out.delay.set(delay);
 	}
 
-	/** Anchor playback from ingress time and report whether the frame arrived late. */
+	/**
+	 * Anchor playback from ingress time and report whether the frame arrived late.
+	 * @internal
+	 */
 	// Fold a newly received frame into the reference. The reference anchors playback to the
 	// wall clock; we lower it (skip ahead) only when keeping it would push the lookahead past `maxDelay`.
-	received(timestamp: Milli, label = "", arrival = Nano.toMilli(Nano(now()))): boolean {
+	received(timestamp: Milli, arrival = Nano.toMilli(Nano(now()))): boolean {
 		this.#out.timestamp.update((current) => (current === undefined || timestamp > current ? timestamp : current));
 		const ref = arrival - timestamp;
 		const currentRef = this.#out.reference.peek();
@@ -171,36 +214,24 @@ export class Sync {
 			return false;
 		}
 
+		// Retain the opening while another track fills; the ordinary max-delay bounds still own
+		// storage, but a later arrival must not advance the shared playhead before startup.
+		if (!this.#playing.peek()) return false;
+
 		// Check if `wait()` would not sleep at all.
 		// NOTE: We check here instead of in `wait()` so we can identify when frames are received late.
 		// Otherwise, chained `wait()` calls would cause a false-positive during CPU starvation.
 		const delay = this.#out.delay.peek();
 		const sleep = currentRef - ref + delay;
-		if (sleep < 0) {
-			const entry = this.#late.get(label);
-			if (entry) {
-				entry.count++;
-				entry.maxMs = Math.max(entry.maxMs, -sleep);
-			} else {
-				this.#late.set(label, { count: 1, maxMs: -sleep });
-			}
-		} else {
-			const entry = this.#late.get(label);
-			if (entry) {
-				const prefix = label ? `sync[${label}]` : "sync";
-				const behind = Sync.#formatDuration(entry.maxMs);
-				console.debug(`${prefix}: ${entry.count} late frame(s), max ${behind} behind`);
-				this.#late.delete(label);
-			}
-		}
+		const late = sleep < 0;
 
 		// Frame isn't earlier than the anchor: it can't add lookahead, so keep the reference.
-		if (ref >= currentRef) return sleep < 0;
+		if (ref >= currentRef) return late;
 
 		// Frame is earlier (more lookahead). `sleep` is how far ahead of the playhead keeping the
 		// anchor would put it.
 		const cap = this.#out.maxDelay.peek();
-		if (sleep <= cap) return sleep < 0; // within budget: let the buffer grow instead of skipping ahead
+		if (sleep <= cap) return late; // within budget: let the buffer grow instead of skipping ahead
 
 		// Over the cap: re-anchor down so the resulting lookahead is exactly the cap.
 		const reference = ref + cap - delay;
@@ -213,7 +244,7 @@ export class Sync {
 			const floor = Nano.toMilli(Nano(now())) - reference - delay;
 			if (this.#floor === undefined || floor > this.#floor) this.#floor = floor;
 		}
-		return sleep < 0;
+		return late;
 	}
 
 	/**
@@ -222,119 +253,101 @@ export class Sync {
 	 * plays from its own first frame instead of inheriting the previous reference.
 	 */
 	reset(): void {
-		this.#epoch++;
+		this.#epoch.update((epoch) => epoch + 1);
 		this.#floor = undefined;
+		this.#started = false;
+		this.#playing.set(!this.#out.buffered.peek());
 		this.#out.reference.set(undefined);
-		this.#late.clear();
 	}
 
 	/**
-	 * Bumped by every `reset()`. A frame that waited across a bump belongs to the previous
-	 * timeline, even when the next frame restores the same reference value.
+	 * Whether a frame at `timestamp` is anchored on the current timeline and ahead of any skip, so
+	 * it may still present. Advisory, for showing a frame early; {@link Sync.wait} decides on its own.
 	 * @internal
 	 */
-	get epoch(): number {
-		return this.#epoch;
+	presentable(timestamp: Milli): boolean {
+		return this.#out.reference.peek() !== undefined && !this.#skipped(timestamp);
 	}
 
-	/**
-	 * Whether a playhead skip on this timeline passed over `timestamp`, so its frame must not render.
-	 * @internal
-	 */
-	skipped(timestamp: Milli): boolean {
+	// Whether a playhead skip on this timeline passed over `timestamp`.
+	#skipped(timestamp: Milli): boolean {
 		return this.#floor !== undefined && timestamp < this.#floor;
 	}
 
 	/**
-	 * The PTS in milliseconds that should be rendering right now, derived from the reference +
-	 * buffer; negative before the first frame's turn. Undefined if no frames have been received yet.
+	 * The PTS that should be rendering right now, derived from the reference + delay; negative
+	 * before the first frame's turn. Undefined before ingress or while buffered startup is filling.
 	 */
-	now(): number | undefined {
+	now(): Milli | undefined {
+		if (!this.#playing.peek()) return undefined;
 		const reference = this.#out.reference.peek();
 		if (reference === undefined) return undefined;
-		return Nano.toMilli(Nano(now())) - reference - this.#out.delay.peek();
+		return Milli(Nano.toMilli(Nano(now())) - reference - this.#out.delay.peek());
 	}
 
 	/**
-	 * Sleep until it's time to render this frame, or until `signal` aborts.
+	 * Sleep until it's time to render this frame, then resolve whether to present it.
 	 *
-	 * A reset holds the wait until the next frame re-anchors the clock, then measures the frame
-	 * against that new reference. Aborting resolves the wait early and releases it.
+	 * `true` presents the frame now. `false` drops it: it was unanchored, a skip passed over it, a
+	 * `reset()` ended its timeline, or `close()` or `signal` released the wait.
+	 * @internal
 	 */
-	async wait(timestamp: Milli, signal?: AbortSignal): Promise<void> {
-		// A zero delay still sleeps: the sleep comes from the reference, which holds an early frame
-		// until its timestamp comes up. "instant" is the only thing that skips the wait itself.
-		// Peek the input, not `out.instant`, which lags a same-turn change until effects flush.
-		if (this.in.delay.peek() === "instant") return;
-
-		const reference = this.#out.reference.peek();
-		if (reference === undefined) {
-			throw new Error("reference not set; call received() first");
-		}
+	async wait(timestamp: Milli, signal?: AbortSignal): Promise<boolean> {
+		const epoch = this.#epoch.peek();
 
 		for (;;) {
-			// Switching to "instant", closing, or aborting wakes the sleep below, so frames parked here leave.
-			if (this.in.delay.peek() === "instant" || this.#closed.peek() || signal?.aborted) return;
+			// Closing or aborting wakes the sleep below, so frames parked here leave.
+			if (this.#closed.peek() || signal?.aborted) return false;
 
-			// Sleep until it's time to decode the next frame.
-			// NOTE: This function runs in parallel for each frame.
-			const ref = Nano.toMilli(Nano(now())) - timestamp;
+			// A reset clears the reference, so an unanchored frame predates the current timeline.
+			const reference = this.#out.reference.peek();
+			if (reference === undefined || this.#epoch.peek() !== epoch || this.#skipped(timestamp)) return false;
 
-			const currentRef = this.#out.reference.peek();
-			if (currentRef === undefined) {
+			// A zero delay still sleeps: the sleep comes from the reference, which holds an early frame
+			// until its timestamp comes up. "instant" is the only thing that skips the wait itself.
+			// Peek the input, not `out.instant`, which lags a same-turn change until effects flush.
+			if (this.in.delay.peek() === "instant") return true;
+
+			if (!this.#playing.peek()) {
 				await this.#sleep(undefined, signal);
 				continue;
 			}
 
-			const sleep = currentRef - ref + this.#out.delay.peek();
-			if (sleep <= 0) return;
+			// NOTE: This function runs in parallel for each frame.
+			const sleep = reference + timestamp - Nano.toMilli(Nano(now())) + this.#out.delay.peek();
 
 			// Skip the timer for small sleeps; the host's timer resolution (~4ms) would overshoot.
-			if (sleep < 5) return;
+			if (sleep < 5) return true;
 
-			if (await this.#sleep(sleep, signal)) return;
+			await this.#sleep(sleep, signal);
 		}
 	}
 
-	// Sleeps for `ms` (forever if undefined), or returns false early once anything the sleep was
-	// computed from changes or `signal` aborts. Releases every listener either way: frames sleep
-	// once each, so a listener left on a signal that never changes would pile up for the life of
-	// the player.
-	#sleep(ms: number | undefined, signal?: AbortSignal): Promise<boolean> {
+	// Sleeps for `ms`, or wakes early once anything the sleep was computed from changes or `signal`
+	// aborts. Releases every listener either way: frames sleep once each, so a listener left on a
+	// signal that never changes would pile up for the life of the player.
+	#sleep(ms: number | undefined, signal?: AbortSignal): Promise<void> {
 		return new Promise((resolve) => {
 			const timer = new AbortController();
-			const wake = (ok: boolean) => {
+			const wake = () => {
 				timer.abort();
 				for (const dispose of disposes) dispose();
-				resolve(ok);
+				resolve();
 			};
-			if (ms !== undefined) {
-				void sleep(Nano.fromMilli(Milli(ms)), { signal: timer.signal }).then(
-					() => wake(true),
-					() => {},
-				);
-			}
+			if (ms !== undefined) void sleep(Nano.fromMilli(Milli(ms)), { signal: timer.signal }).then(wake, () => {});
 			const disposes = [
-				this.in.delay.changed(() => wake(false)),
-				this.#out.delay.changed(() => wake(false)),
-				this.#out.reference.changed(() => wake(false)),
-				this.#closed.changed(() => wake(false)),
+				this.in.delay.changed(wake),
+				this.#out.delay.changed(wake),
+				this.#out.reference.changed(wake),
+				this.#epoch.changed(wake),
+				this.#closed.changed(wake),
+				this.#playing.changed(wake),
 			];
 			if (signal) {
-				const abort = () => wake(false);
-				signal.addEventListener("abort", abort, { once: true });
-				disposes.push(() => signal.removeEventListener("abort", abort));
+				signal.addEventListener("abort", wake, { once: true });
+				disposes.push(() => signal.removeEventListener("abort", wake));
 			}
 		});
-	}
-
-	static #formatDuration(ms: number): string {
-		ms = Math.round(ms);
-		if (ms < 1000) return `${ms}ms`;
-		const s = ms / 1000;
-		if (s < 60) return `${Math.round(s * 10) / 10}s`;
-		const m = s / 60;
-		return `${Math.round(m * 10) / 10}m`;
 	}
 
 	/** Stop and release everything this holds. */

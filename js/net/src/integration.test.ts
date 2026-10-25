@@ -15,15 +15,19 @@ import * as Epoch from "./epoch.ts";
 import { SessionCode, SessionError, StreamCode, StreamError, TooFarBehind } from "./error.ts";
 import { Producer as GroupProducer } from "./group.ts";
 import * as Ietf from "./ietf/index.ts";
+import { Parameters } from "./ietf/parameters.ts";
 import { Publisher as IetfPublisher } from "./ietf/publisher.ts";
+import { RequestOk } from "./ietf/request.ts";
+import { SubscribeTracks } from "./ietf/subscribe_tracks.ts";
 import * as Lite from "./lite/index.ts";
 import { Publisher as LitePublisher } from "./lite/publisher.ts";
 import { createMockTransportPair, textFrame } from "./mock.ts";
 import type { Consumer as OriginConsumer } from "./origin.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
+import { Stream } from "./stream.ts";
 import { Timescale, Timestamp } from "./time.ts";
-import type { Producer as TrackProducer } from "./track.ts";
+import type { Position, Producer as TrackProducer } from "./track.ts";
 import { withTimeout } from "./util/timeout.ts";
 import { wireOf } from "./wire.ts";
 
@@ -984,10 +988,10 @@ test("integration: a peer is served the cheaper route it was offered, not the lo
 	origin.close();
 });
 
-test("integration: lite draft-05 fetches a cached group", async () => {
+test("integration: lite draft-07 fetches a cached group", async () => {
 	const enc = new TextEncoder();
 	const dec = new TextDecoder();
-	const pair = createMockTransportPair(Lite.ALPN_05);
+	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
 	const origin = new OriginProducer();
 
 	const [client, server] = await Promise.all([
@@ -1160,10 +1164,10 @@ test("integration: lite draft-05 coalesces concurrent fetches of one group", asy
 	server.abort();
 });
 
-test("integration: lite draft-05 fetches an in-progress group", async () => {
+test("integration: lite draft-07 fetches an in-progress group", async () => {
 	const enc = new TextEncoder();
 	const dec = new TextDecoder();
-	const pair = createMockTransportPair(Lite.ALPN_05);
+	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
 	const origin = new OriginProducer();
 
 	const [client, server] = await Promise.all([
@@ -1202,8 +1206,8 @@ test("integration: lite draft-05 fetches an in-progress group", async () => {
 // The publisher caches TRACK_INFO so it only asks the application once per track. The cache
 // has to expire with the broadcast that answered it: a republish puts a different producer
 // on the path, and its immutable properties are its own.
-test("integration: lite draft-05 track info follows a republished broadcast", async () => {
-	const pair = createMockTransportPair(Lite.ALPN_05);
+test("integration: lite draft-07 track info follows a republished broadcast", async () => {
+	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
 	const origin = new OriginProducer();
 
 	const [client, server] = await Promise.all([
@@ -1240,9 +1244,9 @@ test("integration: lite draft-05 track info follows a republished broadcast", as
 
 // FETCH reads the same cache to decide the timescale it serves frames in, so a stale entry
 // quantizes the successor's timestamps to the predecessor's resolution.
-test("integration: lite draft-05 fetch uses the republished track's timescale", async () => {
+test("integration: lite draft-07 fetch uses the republished track's timescale", async () => {
 	const enc = new TextEncoder();
-	const pair = createMockTransportPair(Lite.ALPN_05);
+	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
 	const origin = new OriginProducer();
 
 	const [client, server] = await Promise.all([
@@ -1289,27 +1293,23 @@ test("integration: ietf fetch group is unsupported", async () => {
 	]);
 
 	const remote = wireOf(client).consume(Path.from("test"));
-	await expect(remote.track("video").fetchGroup(0)).rejects.toThrow("fetch group is not supported for moq-transport");
+	await expect(remote.track("video").fetchGroup(0)).rejects.toThrow(
+		"fetch group is not supported by this session's version",
+	);
 
 	remote.close();
 	client.abort();
 	server.abort();
 });
 
-// Draft-18 defines SUBSCRIBE_TRACKS, so a limited endpoint answers NOT_SUPPORTED and the
-// subscription already on the session keeps going.
-test("integration: ietf SUBSCRIBE_TRACKS is refused per request", async () => {
-	// SUBSCRIBE_TRACKS, Length, Request ID, Track Namespace Prefix ("room"), no parameters.
-	// A fresh even client ID, distinct from the connection's setup/discovery/subscription requests.
-	const subscribeTracks = new Uint8Array([0x51, 0x00, 0x08, 0x3e, 0x01, 0x04, 0x72, 0x6f, 0x6f, 0x6d, 0x00]);
-
-	for (const protocol of [
-		Ietf.ALPN.DRAFT_18,
-		Ietf.ALPN.DRAFT_19,
-		Ietf.ALPN.DRAFT_20,
-		Ietf.ALPN.DRAFT_21,
-		Ietf.ALPN.DRAFT_22,
-	]) {
+test("integration: cancelling an ietf track listing preserves an existing subscription", async () => {
+	for (const [protocol, version] of [
+		[Ietf.ALPN.DRAFT_18, Ietf.Version.DRAFT_18],
+		[Ietf.ALPN.DRAFT_19, Ietf.Version.DRAFT_19],
+		[Ietf.ALPN.DRAFT_20, Ietf.Version.DRAFT_20],
+		[Ietf.ALPN.DRAFT_21, Ietf.Version.DRAFT_21],
+		[Ietf.ALPN.DRAFT_22, Ietf.Version.DRAFT_22],
+	] as const) {
 		const pair = createMockTransportPair(protocol);
 		const origin = new OriginProducer();
 
@@ -1335,13 +1335,14 @@ test("integration: ietf SUBSCRIBE_TRACKS is refused per request", async () => {
 		expect(await track.readString()).toBe("before");
 
 		const bidi = await pair.client.createBidirectionalStream();
-		const writer = bidi.writable.getWriter();
-		await writer.write(subscribeTracks);
-		const reply: number[] = [];
-		for await (const chunk of bidi.readable as ReadableStream<Uint8Array>) reply.push(...chunk);
-		// REQUEST_ERROR (0x05), a two-byte length, then the error code: NOT_SUPPORTED (0x3).
-		expect(reply[0]).toBe(0x05);
-		expect(reply[3]).toBe(0x03);
+		const listing = new Stream({ ...bidi, version });
+		const params = new Parameters();
+		params.forward = false;
+		await listing.writer.u53(SubscribeTracks.id);
+		await new SubscribeTracks(62n, Path.from("room"), params).encode(listing.writer, version);
+		expect(await listing.reader.u53()).toBe(RequestOk.id);
+		await RequestOk.decode(listing.reader, version);
+		listing.abort(new StreamError(StreamCode.Cancel));
 
 		for (const producer of served) producer.writeFrame(textFrame("after"));
 		expect(await track.readString()).toBe("after");
@@ -2777,7 +2778,7 @@ async function runSessionDeath(
 	protocol: string,
 	version?: number,
 	local = false,
-): Promise<[Error | null, Error | null]> {
+): Promise<[Error | null, Error | null, Position | undefined]> {
 	const pair = createMockTransportPair(protocol);
 	const origin = new OriginProducer();
 
@@ -2816,7 +2817,7 @@ async function runSessionDeath(
 	client.abort();
 	server.abort();
 	origin.close();
-	return [closed, await withTimeout(groupEnd, Nano.fromMilli(Milli(2000)), "the group never ended")];
+	return [closed, await withTimeout(groupEnd, Nano.fromMilli(Milli(2000)), "the group never ended"), track.end()];
 }
 
 for (const [name, protocol, version] of [
@@ -2832,9 +2833,12 @@ for (const [name, protocol, version] of [
 		expect(groupEnd).toBeInstanceOf(SessionError);
 		expect((groupEnd as SessionError).code).toBe(DEATH);
 	});
-	test(`integration: ${name} ends a locally closed track cleanly`, async () => {
-		const [closed] = await runSessionDeath(protocol, version, true);
+	// A local close is a dead route, not finished content: it declares no end, so a resumed
+	// reader's replacement route continues past it.
+	test(`integration: ${name} ends a locally closed track cleanly without declaring an end`, async () => {
+		const [closed, , end] = await runSessionDeath(protocol, version, true);
 		expect(closed).toBeNull();
+		expect(end).toBeUndefined();
 	});
 }
 

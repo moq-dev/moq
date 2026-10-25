@@ -4,7 +4,10 @@
 //! merged flag is declared twice: once on the `Args` structs the binaries parse,
 //! and once here. [`usage_rs::config::Registry::drift`] is the test that the two stay in step.
 
-#![allow(dead_code)]
+#![allow(
+	dead_code,
+	reason = "declares the settings for the usage registry; nothing reads the fields"
+)]
 
 /// Accept-side settings (`[listen]`, `--listen-*`).
 #[derive(usage_rs::Config)]
@@ -20,17 +23,17 @@ pub struct Listen {
 	#[usage(env = "MOQ_LISTEN_TIMEOUT", cli("--listen-timeout"))]
 	timeout: Option<String>,
 
+	#[usage(env = "MOQ_LISTEN_IMPLEMENTATION", cli("--listen-implementation"))]
+	implementation: Option<String>,
+
 	#[usage(env = "MOQ_LISTEN_PREFERRED_V4", cli("--listen-preferred-v4"))]
 	preferred_v4: Option<String>,
 
 	#[usage(env = "MOQ_LISTEN_PREFERRED_V6", cli("--listen-preferred-v6"))]
 	preferred_v6: Option<String>,
 
-	#[usage(env = "MOQ_LISTEN_QUIC_LB_ID", cli("--listen-quic-lb-id"))]
-	lb_id: Option<String>,
-
-	#[usage(env = "MOQ_LISTEN_QUIC_LB_NONCE", cli("--listen-quic-lb-nonce"))]
-	lb_nonce: Option<u64>,
+	#[usage(flatten)]
+	lb: ListenLb,
 
 	#[usage(flatten)]
 	reset: ListenReset,
@@ -153,9 +156,6 @@ pub struct Connect {
 	#[usage(env = "MOQ_CONNECT_VERSION", cli("--connect-version"), parse = "list_by_comma")]
 	version: Option<Vec<String>>,
 
-	#[usage(env = "MOQ_CONNECT_ONCE", cli("--connect-once"))]
-	once: Option<bool>,
-
 	#[usage(flatten)]
 	tls: ConnectTls,
 
@@ -200,31 +200,34 @@ struct ConnectTls {
 	host_name: Option<String>,
 }
 
-/// `[connect.backoff]` / `--backoff-*`.
+/// `[connect.backoff]` / `--connect-backoff-*`.
 #[derive(usage_rs::Config)]
 #[usage(prefix = "connect.backoff")]
 struct ConnectBackoff {
-	#[usage(env = "MOQ_BACKOFF_INITIAL", cli("--backoff-initial"))]
+	#[usage(env = "MOQ_CONNECT_BACKOFF_INITIAL", cli("--connect-backoff-initial"))]
 	initial: Option<String>,
 
-	#[usage(env = "MOQ_BACKOFF_MULTIPLIER", cli("--backoff-multiplier"))]
+	#[usage(env = "MOQ_CONNECT_BACKOFF_MULTIPLIER", cli("--connect-backoff-multiplier"))]
 	multiplier: Option<u32>,
 
-	#[usage(env = "MOQ_BACKOFF_MAX", cli("--backoff-max"))]
+	#[usage(env = "MOQ_CONNECT_BACKOFF_MAX", cli("--connect-backoff-max"))]
 	max: Option<String>,
 
-	#[usage(env = "MOQ_BACKOFF_TIMEOUT", cli("--backoff-timeout"))]
+	#[usage(env = "MOQ_CONNECT_BACKOFF_HEALTHY", cli("--connect-backoff-healthy"))]
+	healthy: Option<String>,
+
+	#[usage(env = "MOQ_CONNECT_BACKOFF_TIMEOUT", cli("--connect-backoff-timeout"))]
 	timeout: Option<String>,
 }
 
-/// `[connect.goaway]` / `--goaway-*`.
+/// `[connect.goaway]` / `--connect-goaway-*`.
 #[derive(usage_rs::Config)]
 #[usage(prefix = "connect.goaway")]
 struct ConnectGoaway {
-	#[usage(env = "MOQ_GOAWAY_REDIRECT", cli("--goaway-redirect"))]
+	#[usage(env = "MOQ_CONNECT_GOAWAY_REDIRECT", cli("--connect-goaway-redirect"))]
 	redirect: Option<String>,
 
-	#[usage(env = "MOQ_GOAWAY_HANDOVER", cli("--goaway-handover"))]
+	#[usage(env = "MOQ_CONNECT_GOAWAY_HANDOVER", cli("--connect-goaway-handover"))]
 	handover: Option<String>,
 }
 
@@ -276,7 +279,7 @@ pub struct Quic {
 	qlog: Option<String>,
 
 	#[usage(env = "MOQ_QUIC_KEYLOG", cli("--quic-keylog"))]
-	keylog: Option<bool>,
+	keylog: Option<String>,
 }
 
 /// Log settings (`[log]`, `--log-level`).
@@ -308,4 +311,14 @@ pub struct Iroh {
 
 	#[usage(env = "MOQ_IROH_DISABLE_RELAY", cli("--iroh-disable-relay"))]
 	disable_relay: Option<bool>,
+}
+
+#[derive(usage_rs::Config)]
+#[usage(prefix = "listen.lb")]
+struct ListenLb {
+	#[usage(env = "MOQ_LISTEN_QUIC_LB_ID", cli("--listen-quic-lb-id"))]
+	id: Option<String>,
+
+	#[usage(env = "MOQ_LISTEN_QUIC_LB_NONCE", cli("--listen-quic-lb-nonce"))]
+	nonce: Option<u64>,
 }

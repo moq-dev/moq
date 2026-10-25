@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { resolveSubprotocols, selectSubprotocol } from "./session.ts";
 
 // The bare version ALPNs the polyfill appends when `requireProtocol` is false.
-const BARE = ["qmux-02", "qmux-01", "qmux-00", "webtransport"];
+const BARE = ["qmux-02", "qmux-01", "qmux-00"];
 
 describe("resolveSubprotocols", () => {
 	test("no protocols still offers the bare version ALPNs by default", () => {
@@ -43,6 +43,20 @@ describe("resolveSubprotocols", () => {
 
 	test("already-prefixed pairs pass through without a versions entry", () => {
 		expect(resolveSubprotocols(["qmux-00.moq-transport-17"], {}, true)).toEqual(["qmux-00.moq-transport-17"]);
+	});
+
+	test("unsupported mapped versions are refused before negotiating", () => {
+		for (const version of ["webtransport", "qmux-99", 42, false, {}]) {
+			for (const mapped of [version, ["qmux-01", version]]) {
+				expect(() =>
+					resolveSubprotocols(
+						["app"],
+						{ app: mapped } as unknown as Parameters<typeof resolveSubprotocols>[1],
+						true,
+					),
+				).toThrow();
+			}
+		}
 	});
 
 	test("a bare entry with no versions mapping throws", () => {
@@ -91,7 +105,7 @@ describe("selectSubprotocol", () => {
 		expect(selectSubprotocol(undefined, OPTIONS)).toBeUndefined();
 	});
 
-	test("a legacy client gets the webtransport wire format by default", () => {
-		expect(selectSubprotocol("webtransport", {})).toBe("webtransport");
+	test("a legacy client is refused", () => {
+		expect(selectSubprotocol("webtransport", {})).toBeUndefined();
 	});
 });

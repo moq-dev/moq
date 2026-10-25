@@ -16,7 +16,7 @@ moq-flate, so moq-flate is out of scope.
 
 Non-goals:
 - The runtime seam: [Runtime trait](/quest/m2/runtime-trait.md).
-- The transport seam: [Drop web-transport-trait](/quest/m2/drop-web-transport-trait.md).
+- The transport seam: [Drop web-transport-trait](/quest/m1/drop-web-transport-trait.md).
 
 ## Plan
 
@@ -37,7 +37,8 @@ and its trait-versus-bridge comparison:
   `insert_datagram`, `write_frame`, `create_frame`, `write`, `finish`,
   `abort(self, Error)`, `closed`, `track(name)` then `.subscribe(..)`,
   `recv_group`, `recv_datagram`, `read_frame`, `next_frame`, `read_chunk`,
-  and their `poll_*` forms. A wrapper adapts
+  the broadcast consumer's `tracks` listing (maintainer, 2026-10-24), and
+  their `poll_*` forms. A wrapper adapts
   to moq-net, not the other way around: moq-e2ee's error converts into
   `moq_net::Error`.
 - **Terminal propagation crosses the wrapper.** Finish, typed aborts (such
@@ -69,7 +70,7 @@ above.
 - [moq-net traits](/quest/m2/net-wrap/traits.md) - moq-net exports producer and consumer traits at every level, implemented by its own types
 - [moq-e2ee implements the traits](/quest/m2/net-wrap/e2ee.md) - the e2ee broadcast, track, and group wrappers implement the traits, proving them before the adopters land
 - [moq-json, moq-stats, and hang take the traits](/quest/m2/net-wrap/json.md) - json snapshots, streams, windows, the stats producer, and hang's tracks write and read through the traits
-- [moq-mux takes the traits](/quest/m2/net-wrap/mux.md) - importers, catalog, container, timeline, json and binary tracks, `Source`, TS export, and the moq-video and moq-audio encoders are generic over the traits
+- [moq-mux takes the traits](/quest/m2/net-wrap/mux.md) - importers, catalog, container, timeline, json tracks, `Source`, TS export, and the moq-video and moq-audio encoders are generic over the traits
 - [CLI paths take the traits](/quest/m2/net-wrap/cli.md) - the CLI's publish and play paths hand moq-mux any broadcast that implements them
 - [JS mirror](/quest/m2/net-wrap/js.md) - `@moq/net` exports the same interfaces, taken by `@moq/hang`, `@moq/publish`, and `@moq/watch`, and implemented by `@moq/e2ee`
 
