@@ -610,22 +610,28 @@ impl Pair {
 			}
 			Op::MaxStreams { who, _uni: _, count } => {
 				if let Some(conn) = self.peer(who).conn() {
-					let mut limits = Limits::default();
-					limits.max_streams = NonZeroU64::new(count.into());
+					let limits = Limits {
+						max_streams: NonZeroU64::new(count.into()),
+						..Limits::default()
+					};
 					conn.set_limits(limits).unwrap();
 				}
 			}
 			Op::ReceiveWindow { who, window } => {
 				if let Some(conn) = self.peer(who).conn() {
-					let mut limits = Limits::default();
-					limits.receive_window = NonZeroU64::new(window.into());
+					let limits = Limits {
+						receive_window: NonZeroU64::new(window.into()),
+						..Limits::default()
+					};
 					conn.set_limits(limits).unwrap();
 				}
 			}
 			Op::SendWindow { who, window } => {
 				if let Some(conn) = self.peer(who).conn() {
-					let mut limits = Limits::default();
-					limits.send_window = NonZeroU64::new(window.into());
+					let limits = Limits {
+						send_window: NonZeroU64::new(window.into()),
+						..Limits::default()
+					};
 					conn.set_limits(limits).unwrap();
 				}
 			}

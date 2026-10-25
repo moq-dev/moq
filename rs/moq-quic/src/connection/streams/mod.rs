@@ -102,8 +102,7 @@ impl<'a> Streams<'a> {
 	/// The number of remotely initiated open streams of a certain directionality.
 	///
 	/// Includes remotely initiated streams, which have not been accepted via [`accept`](Self::accept).
-	/// These streams count against the respective concurrency limit reported by
-	/// [`Connection::max_concurrent_streams`](super::Connection::max_concurrent_streams).
+	/// These streams count against the configured concurrency limit.
 	pub fn remote_open_streams(&self, dir: Dir) -> u64 {
 		// total opened - total closed = total opened - ( total permitted - total permitted unclosed )
 		self.state.next_remote[dir as usize]
