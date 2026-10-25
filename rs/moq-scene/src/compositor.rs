@@ -13,7 +13,7 @@ use crate::collection::{Canvas, Collection, Rect, Source};
 use crate::source::{Picture, Sources};
 
 /// The format of every canvas texture: gamma-encoded RGBA, what
-/// `moq_video::render` produces and what an encoder reads back.
+/// `moq_video::render` produces and what its exporter hands an encoder.
 pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 /// One draw's uniform: where on the canvas, in clip space, and how opaque.
@@ -277,7 +277,8 @@ impl Compositor {
 	}
 
 	/// The program output, as of the last [`render`](Self::render). Created
-	/// with `COPY_SRC` so an encoder can read it back.
+	/// with `COPY_SRC | TEXTURE_BINDING`, what
+	/// `moq_video::render::export::Exporter::copy` takes to hand it to an encoder.
 	pub fn program(&self) -> &wgpu::Texture {
 		&self.program.texture
 	}
@@ -629,7 +630,6 @@ mod tests {
 
 	use super::*;
 	use crate::collection::{Item, Rgba, Scene, Source};
-	use crate::readback::Readback;
 	use crate::source::test::{context, local, start};
 
 	const RED: [u8; 4] = [255, 0, 0, 255];
@@ -694,7 +694,8 @@ mod tests {
 		collection: Collection,
 		sources: Sources,
 		compositor: Compositor,
-		readback: Readback,
+		device: wgpu::Device,
+		queue: wgpu::Queue,
 		_origin: moq_net::origin::Producer,
 		_dir: tempfile::TempDir,
 	}
@@ -709,7 +710,8 @@ mod tests {
 			start(&sources, drivers).await;
 			Self {
 				compositor: Compositor::new(&device, &queue, collection.canvas).unwrap(),
-				readback: Readback::new(&device, &queue, collection.canvas),
+				device,
+				queue,
 				collection,
 				sources,
 				_origin: origin,
@@ -721,8 +723,39 @@ mod tests {
 			self.compositor.render(&self.collection, &self.sources, now).unwrap();
 		}
 
+		/// The canvas texture's exact RGBA rows: no 4:2:0 round trip, so a test
+		/// compares the stored values.
 		fn read(&mut self, texture: &wgpu::Texture) -> Vec<u8> {
-			self.readback.copy(texture, Timestamp::ZERO).unwrap().rgba().unwrap()
+			let canvas = self.compositor.canvas();
+			let row = (canvas.width * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+			let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+				label: None,
+				size: u64::from(row * canvas.height),
+				usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+				mapped_at_creation: false,
+			});
+			let mut encoder = self.device.create_command_encoder(&Default::default());
+			encoder.copy_texture_to_buffer(
+				texture.as_image_copy(),
+				wgpu::TexelCopyBufferInfo {
+					buffer: &buffer,
+					layout: wgpu::TexelCopyBufferLayout {
+						offset: 0,
+						bytes_per_row: Some(row),
+						rows_per_image: None,
+					},
+				},
+				texture.size(),
+			);
+			self.queue.submit([encoder.finish()]);
+			buffer.map_async(wgpu::MapMode::Read, .., |result| result.unwrap());
+			self.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+			let width = canvas.width as usize * 4;
+			let mapped = buffer.slice(..).get_mapped_range().unwrap();
+			mapped
+				.chunks_exact(row as usize)
+				.flat_map(|row| row[..width].to_vec())
+				.collect()
 		}
 
 		fn program(&mut self) -> Vec<u8> {
@@ -876,24 +909,25 @@ mod tests {
 		.await;
 	}
 
-	/// A slow encoder runs out of buffers and drops pictures rather than
-	/// queuing them, and a finished copy frees its buffer.
+	/// The program is a texture an exporter takes, on either route.
 	#[tokio::test]
 	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
-	async fn readback_drops_past_its_depth() {
+	async fn the_program_is_exportable() {
 		local(async {
 			let mut studio = Studio::new(collection()).await;
+			studio.compositor.set_preview(Some("blue".into()));
+			studio.compositor.cut();
 			studio.render(Instant::now());
-			let program = studio.compositor.program().clone();
-			let mut held: Vec<_> = (0..Readback::DEPTH)
-				.map(|_| studio.readback.copy(&program, Timestamp::ZERO).unwrap())
-				.collect();
-			assert!(studio.readback.copy(&program, Timestamp::ZERO).is_none());
-
-			let frame = held.pop().unwrap().wait().unwrap();
-			assert_eq!(frame.size(), moq_video::Size::new(8, 8));
-			held.push(studio.readback.copy(&program, Timestamp::ZERO).unwrap());
-			assert!(studio.readback.copy(&program, Timestamp::ZERO).is_none());
+			let size = studio.compositor.canvas().size();
+			for zero_copy in [false, true] {
+				let mut config = moq_video::render::export::Config::default();
+				config.zero_copy = zero_copy;
+				let mut exporter =
+					moq_video::render::export::Exporter::new(&studio.device, &studio.queue, size, &config).unwrap();
+				let pending = exporter.copy(studio.compositor.program(), Timestamp::ZERO).unwrap();
+				let frame = pending.expect("a free slot").wait().unwrap();
+				assert_eq!(frame.size(), size);
+			}
 		})
 		.await;
 	}
