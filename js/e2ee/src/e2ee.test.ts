@@ -246,15 +246,32 @@ test("a broadcast speaks semantic names and puts physical names on the wire", as
 	net.close();
 });
 
+// A broadcast as a session hands it out: no producer, so it ends once no handle holds it.
+class SessionBroadcast extends Broadcast.Consumer {
+	// biome-ignore lint/complexity/noUselessConstructor: widens the protected base constructor to public
+	constructor() {
+		super();
+	}
+}
+
 test("closing a protected consumer releases its broadcast handle", () => {
 	const generation = credential().produce();
-	const net = new Broadcast.Producer();
-	const consumer = new Protected.Consumer(net.consume(), generation.credential.consume(generation.epoch));
+	const net = new SessionBroadcast();
+	const consumer = new Protected.Consumer(net, generation.credential.consume(generation.epoch));
 	expect(consumer.closed.peek()).toBeUndefined();
 	consumer.close();
 	consumer.close();
 	expect(consumer.closed.peek()).toBeNull();
+});
+
+test("closing a protected consumer leaves a produced broadcast to its producer", () => {
+	const generation = credential().produce();
+	const net = new Broadcast.Producer();
+	const consumer = new Protected.Consumer(net.consume(), generation.credential.consume(generation.epoch));
+	consumer.close();
+	expect(net.closed.peek()).toBeUndefined();
 	net.close();
+	expect(consumer.closed.peek()).toBeNull();
 });
 
 test("closing a protected producer ends its broadcast", () => {
