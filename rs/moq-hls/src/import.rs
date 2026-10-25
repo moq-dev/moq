@@ -436,13 +436,13 @@ impl TrackState {
 	/// recording the playlist's target duration if not already known.
 	async fn ingest(&mut self, fetcher: &Fetcher, target_duration: &mut Option<u64>) -> Result<usize> {
 		let playlist = fetcher.media_playlist(self.playlist.clone()).await?;
+		let end = sequence_end(&playlist)?;
 		if target_duration.is_none() {
 			*target_duration = Some(playlist.target_duration);
 		}
 
 		let consumed = self.consume_segments(fetcher, &playlist).await?;
-		let last = playlist.media_sequence + playlist.segments.len() as u64;
-		self.ended = playlist.end_list && self.next_sequence.is_none_or(|next| next == last);
+		self.ended = playlist.end_list && self.next_sequence.is_none_or(|next| next == end);
 		Ok(consumed)
 	}
 
@@ -450,7 +450,7 @@ impl TrackState {
 	/// upstream window moved out from under us.
 	fn anchor(&mut self, playlist: &MediaPlaylist) -> Result<usize> {
 		let playlist_seq = playlist.media_sequence;
-		let last_playlist_seq = playlist_seq + playlist.segments.len() as u64;
+		let last_playlist_seq = sequence_end(playlist)?;
 
 		// First step: starting mid-window is normal, so no warning.
 		let Some(next) = self.next_sequence else {
@@ -1111,7 +1111,11 @@ fn select_variants(master: &MasterPlaylist) -> Vec<&VariantStream> {
 	// logs stay stable across runs.
 	let mut selected: Vec<&VariantStream> = by_resolution.into_values().collect();
 	selected.sort_by_key(|variant| {
-		let pixels = variant.resolution.map(|r| r.width * r.height).unwrap_or(0);
+		// Widened so a hostile RESOLUTION neither panics nor wraps into a false rank.
+		let pixels = variant
+			.resolution
+			.map(|r| u128::from(r.width) * u128::from(r.height))
+			.unwrap_or(0);
 		std::cmp::Reverse((pixels, bandwidth(variant)))
 	});
 	selected
@@ -1123,6 +1127,20 @@ fn resolve_uri(base: &Url, value: &str) -> std::result::Result<Url, url::ParseEr
 	}
 
 	base.join(value)
+}
+
+/// One past the media sequence of the playlist's last segment, rejecting a window that wraps u64.
+///
+/// Every sequence a segment of the window carries is below this, so validating it once keeps
+/// the per-segment arithmetic in range.
+fn sequence_end(playlist: &MediaPlaylist) -> Result<u64> {
+	playlist
+		.media_sequence
+		.checked_add(playlist.segments.len() as u64)
+		.ok_or(Error::SequenceOverflow {
+			kind: SequenceKind::Media,
+			value: playlist.media_sequence,
+		})
 }
 
 /// Advance the running discontinuity sequence, rejecting a u64 wrap on absurd input.
@@ -1462,6 +1480,17 @@ mod tests {
 		assert_eq!(uris, ["large.m3u8", "medium.m3u8", "small.m3u8"]);
 	}
 
+	/// A declared area past `u64` still ranks by its true size: 2^32 x 2^32 would wrap to 0.
+	#[test]
+	fn select_variants_ranks_an_enormous_resolution_first() {
+		let master = b"#EXTM3U\n\
+			#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080,CODECS=\"avc1.4d401f\"\nlarge.m3u8\n\
+			#EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=4294967296x4294967296,CODECS=\"avc1.4d401f\"\nhuge.m3u8\n";
+		let (_, master) = m3u8_rs::parse_master_playlist(master).unwrap();
+		let uris: Vec<&str> = select_variants(&master).iter().map(|v| v.uri.as_str()).collect();
+		assert_eq!(uris, ["huge.m3u8", "large.m3u8"]);
+	}
+
 	/// A `len`-segment window starting at `media_sequence`, ended with `EXT-X-ENDLIST` or not.
 	fn window(media_sequence: u64, len: usize, end_list: bool) -> MediaPlaylist {
 		MediaPlaylist {
@@ -1555,6 +1584,21 @@ mod tests {
 		track.next_sequence = Some(5);
 		assert_eq!(track.anchor(&window(100, 10, false)).unwrap(), 0);
 		assert!(track.next_sequence.is_none());
+	}
+
+	/// A window whose sequence runs past `u64` is refused before anything is anchored.
+	#[test]
+	fn anchor_refuses_a_window_past_the_last_sequence() {
+		let mut track = track_state();
+		let err = track.anchor(&window(u64::MAX, 1, false)).unwrap_err();
+		assert!(matches!(
+			err,
+			Error::SequenceOverflow {
+				kind: SequenceKind::Media,
+				value: u64::MAX,
+			}
+		));
+		assert!(!track.followed);
 	}
 
 	#[tokio::test]

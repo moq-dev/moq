@@ -154,7 +154,6 @@ Catalog HLS field.
 - [IETF lazy discovery](/quest/m1/ietf-lazy-discovery.md) - JS moq-transport sessions never hold overlapping SUBSCRIBE_NAMESPACE requests at a peer that refuses them
 - [Interop coverage](/quest/m1/interop-coverage/README.md) - the riskiest moq-transport features moq-net exposes get cross-implementation tests over drafts 18 and 22
 - [AMF0 exact reads](/quest/m1/rtmp-amf0-exact-reads.md) - a truncated RTMP string fails with `UnexpectedEof` instead of parsing NUL padding
-- [HLS import arithmetic](/quest/m1/hls-variant-area.md) - a hostile `RESOLUTION` or media sequence cannot panic, wrap, or misorder the import
 - [HLS URL redaction](/quest/m1/hls-url-redaction.md) - no moq-hls error prints a signed URL's query or userinfo
 - [HLS ranged responses](/quest/m1/hls-range-206.md) - a byte-range segment accepts only a matching `206` and never buffers past its length
 - [HLS redirect base](/quest/m1/hls-redirect-base.md) - relative playlist URIs resolve against a same-origin redirect's final URL
