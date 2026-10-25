@@ -2360,6 +2360,7 @@ impl Producer {
 	}
 
 	/// Land a peer's claim with its wire route metadata.
+	#[cfg(any(feature = "async", test))]
 	pub(crate) fn dynamic_route(&self, prefix: impl AsPath, route: Route) -> Result<Dynamic, Error> {
 		self.dynamic_inner(prefix, route, false)
 	}
@@ -2721,6 +2722,7 @@ impl AnnounceProducer {
 	/// The prefix is fixed at announce time and a [`Route`] cannot name one: to
 	/// move an advertisement, drop this and announce again. Fails with
 	/// [`Error::Closed`] once the origin's [`Driver`] has been dropped.
+	#[cfg(any(feature = "async", test))]
 	pub fn update(&self, route: Route) -> Result<(), Error> {
 		self.update_if(route, || true).map(|_| ())
 	}
@@ -5445,6 +5447,7 @@ impl Dynamic {
 	/// The prefix is fixed at announce time: to move a route, drop this and call
 	/// [`Producer::dynamic`] again. Fails with [`Error::Closed`] once the origin's
 	/// [`Driver`] has been dropped.
+	#[cfg(any(feature = "async", test))]
 	pub(crate) fn update_route(&self, route: Route) -> Result<(), Error> {
 		self.announcement.update(route)
 	}
@@ -5629,6 +5632,7 @@ impl Request {
 	}
 
 	/// Resolve a session-forwarded claim with its peer's already-routed broadcast.
+	#[cfg(any(feature = "async", test))]
 	pub(crate) fn accept(self, broadcast: impl Consume<broadcast::Consumer>) {
 		let broadcast = broadcast.consume();
 		let _ = ServeState::resolve(&self.home, &self.path, &self.producer, Ok(broadcast));
