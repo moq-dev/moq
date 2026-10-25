@@ -4786,6 +4786,7 @@ dependencies = [
  "moq-video",
  "mpeg2ts",
  "object_store",
+ "percent-encoding",
  "pollster",
  "reqwest",
  "rustls",

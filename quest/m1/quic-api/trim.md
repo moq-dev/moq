@@ -60,7 +60,3 @@ quinn API" and C bindings) point at `moq_tokio::quic::driver`; "Quinn" in
 no longer tracks lock time, so its `lock("purpose")` strings go.
 
 The Impact bullet says how to migrate past each removal.
-
-## Required
-
-- [Reformat](/quest/m1/quic-api/reformat.md) - lands the final formatting first
