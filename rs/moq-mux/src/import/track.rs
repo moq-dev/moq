@@ -464,6 +464,12 @@ impl Track {
 		import!(&mut self.kind, import => import.seek(sequence))
 	}
 
+	/// Where the next group opens: past every group published so far, finished or not, or where a
+	/// [`seek`](Self::seek) asked. A replacement under the same track name seeks here.
+	pub fn next_sequence(&self) -> u64 {
+		import!(&self.kind, import => import.next_sequence())
+	}
+
 	/// Drop the partial access unit of a format split from a byte stream.
 	fn reset_split(&mut self) {
 		match &mut self.kind {

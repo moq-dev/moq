@@ -20,7 +20,7 @@ use gst::prelude::*;
 use gst::subclass::prelude::*;
 use hang::moq_net;
 
-use super::pad::{CapsOutcome, ProducerOptions, PushOutcome, caps_supported};
+use super::pad::{CapsOutcome, Continuations, ProducerOptions, PushOutcome, caps_supported};
 use super::request_pad::{MoqSinkPad, Notifications, PadLifecycle};
 use super::session::{
 	CAT, Completion, CompletionHandle, ConnectionStatus, RUNTIME, ResolvedSettings, Session, SessionRegistration,
@@ -70,6 +70,8 @@ struct State {
 	broadcast: moq_net::broadcast::Producer,
 	catalog: Option<moq_mux::catalog::Producer>,
 	wall: std::sync::Arc<super::wall::Wall>,
+	/// Where each named track this run ended continues, if published again.
+	continuations: Continuations,
 	/// How long a clean end keeps the finished broadcast up before its EOS.
 	linger: Duration,
 	/// Whether the finished broadcast closed, so the EOS it owes may go out.
@@ -435,7 +437,9 @@ impl ElementImpl for MoqSink {
 			if let Some(state) = control.live.as_ref()
 				&& let Some(catalog) = state.catalog.as_ref()
 			{
-				pad.lifecycle().media.reserve(catalog, state.wall.clone());
+				pad.lifecycle()
+					.media
+					.reserve(catalog, state.wall.clone(), &state.continuations);
 			}
 			control.admissions.insert(pad.clone());
 		}
@@ -582,6 +586,7 @@ impl MoqSink {
 				broadcast,
 				catalog: Some(catalog),
 				wall,
+				continuations: Continuations::default(),
 				linger,
 				drained: false,
 				lingering: None,
@@ -598,7 +603,7 @@ impl MoqSink {
 						let changes = lifecycle.reset();
 						lifecycle.completion = Some(completion.clone());
 						if !lifecycle.releasing {
-							lifecycle.media.reserve(catalog, wall.clone());
+							lifecycle.media.reserve(catalog, wall.clone(), &state.continuations);
 						}
 						changes
 					};
@@ -885,7 +890,9 @@ impl MoqSink {
 					if !lifecycle.releasing {
 						lifecycle.ended = false;
 						if let Some(catalog) = &state.catalog {
-							lifecycle.media.reserve(catalog, state.wall.clone());
+							lifecycle
+								.media
+								.reserve(catalog, state.wall.clone(), &state.continuations);
 						}
 					}
 				}
@@ -911,7 +918,9 @@ impl MoqSink {
 									lifecycle.media.flush();
 									let catalog = state.catalog.as_ref();
 									if let Some(catalog) = catalog {
-										lifecycle.media.reserve(catalog, state.wall.clone());
+										lifecycle
+											.media
+											.reserve(catalog, state.wall.clone(), &state.continuations);
 									}
 									let caps = lifecycle.media.resumable_caps();
 									caps.zip(catalog).and_then(|(caps, catalog)| {
@@ -1205,7 +1214,9 @@ fn observe_caps(
 	lifecycle: &mut PadLifecycle,
 	caps: &gst::Caps,
 ) -> (Option<Notifications>, bool) {
-	lifecycle.media.reserve(catalog, state.wall.clone());
+	lifecycle
+		.media
+		.reserve(catalog, state.wall.clone(), &state.continuations);
 	let requested = lifecycle.requested().map(str::to_owned);
 	let mut options = ProducerOptions::new(caps).with_container(lifecycle.container().into());
 	if let Some(track) = requested.as_deref() {

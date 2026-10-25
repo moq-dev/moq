@@ -34,7 +34,45 @@ enum PadState {
 enum Sink {
 	Media(Box<Media>),
 	Text(Box<Text>),
-	Opaque(Box<moq_net::track::Producer>),
+	Opaque(Box<Opaque>),
+}
+
+impl Sink {
+	/// The track name, as the broadcast knows it.
+	fn name(&self) -> String {
+		match self {
+			Sink::Media(media) => media.track.name(),
+			Sink::Text(text) => text.producer.name().to_owned(),
+			Sink::Opaque(opaque) => opaque.producer.name().to_owned(),
+		}
+	}
+
+	/// Where a replacement under the same name continues.
+	fn next_sequence(&self) -> u64 {
+		match self {
+			Sink::Media(media) => media.track.next_sequence(),
+			Sink::Text(text) => text.producer.next_sequence(),
+			Sink::Opaque(opaque) => opaque.next_sequence(),
+		}
+	}
+}
+
+/// Where each named track a run ended continues, so the name published again in that run
+/// (renegotiated caps, a pad requested again, a resumed stream) numbers its groups past its
+/// predecessor's rather than restarting at 0: a name always means the same content.
+///
+/// Shared by every pad of a run, and holding only names the pads were configured with.
+#[derive(Clone, Default)]
+pub(super) struct Continuations(std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, u64>>>);
+
+impl Continuations {
+	fn get(&self, name: &str) -> Option<u64> {
+		self.0.lock().unwrap().get(name).copied()
+	}
+
+	fn record(&self, sink: &Sink) {
+		self.0.lock().unwrap().insert(sink.name(), sink.next_sequence());
+	}
 }
 
 /// Keep finished rendition owners until a whole run's catalog has closed.
@@ -170,6 +208,43 @@ impl Text {
 	}
 }
 
+/// An opaque data pad: one raw frame per group, with no container and no catalog entry.
+struct Opaque {
+	producer: moq_net::track::Producer,
+	/// Where the first group opens when this track continues an ended one of the same name.
+	pending: Option<u64>,
+}
+
+impl Opaque {
+	fn write(&mut self, timestamp: hang::container::Timestamp, data: &Bytes) -> Result<()> {
+		let Some(sequence) = self.pending.take() else {
+			return Ok(self.producer.write_frame(timestamp, data)?);
+		};
+		let mut group = self.producer.create_group(moq_net::group::Info { sequence })?;
+		if let Err(err) = group.write_frame(timestamp, data) {
+			let _ = group.abort(err.clone());
+			return Err(err.into());
+		}
+		Ok(group.finish()?)
+	}
+
+	/// Finish past a predecessor's groups even when nothing was written: the pending group opens
+	/// empty, since an end past the live edge alone would leave readers waiting on the gap.
+	fn finish(&mut self) -> Result<()> {
+		if let Some(sequence) = self.pending.take() {
+			self.producer
+				.create_group(moq_net::group::Info { sequence })?
+				.finish()?;
+		}
+		Ok(self.producer.finish()?)
+	}
+
+	fn next_sequence(&self) -> u64 {
+		self.pending
+			.unwrap_or_else(|| self.producer.largest().map_or(0, |largest| largest.group + 1))
+	}
+}
+
 /// Format microseconds as a WebVTT `HH:MM:SS.mmm` timestamp.
 fn format_timestamp(micros: u64) -> String {
 	let ms = micros / 1000;
@@ -237,7 +312,11 @@ pub struct Pad {
 	/// The requested pad gates the first catalog even before CAPS can name its rendition.
 	reserved: Option<moq_mux::catalog::Reserved>,
 	wall: Option<std::sync::Arc<super::wall::Wall>>,
+	/// The run's, once reserved; until then this pad's own, which still covers renegotiation.
+	continuations: Continuations,
 	track: Option<Sink>,
+	/// Whether `track` has a configured name, which may be published again. A generated one never is.
+	named: bool,
 	caps: Option<gst::Caps>,
 	/// Set once a producer build rejects this pad's caps or bitstream; further buffers are dropped and
 	/// the track stays finalized. Isolated to the pad, so the session and other pads keep going. The
@@ -258,7 +337,9 @@ impl Pad {
 		Self {
 			reserved: None,
 			wall: None,
+			continuations: Continuations::default(),
 			track: None,
+			named: false,
 			caps: None,
 			failed: false,
 			state: PadState::NoSegment,
@@ -269,8 +350,14 @@ impl Pad {
 	}
 
 	/// Fill a run's slot once, including a pad visible before its admission confirms.
-	pub(super) fn reserve(&mut self, catalog: &moq_mux::catalog::Producer, wall: std::sync::Arc<super::wall::Wall>) {
+	pub(super) fn reserve(
+		&mut self,
+		catalog: &moq_mux::catalog::Producer,
+		wall: std::sync::Arc<super::wall::Wall>,
+		continuations: &Continuations,
+	) {
 		self.wall = Some(wall);
+		self.continuations = continuations.clone();
 		if self.reserved.is_none() && self.track.is_none() && !self.failed {
 			self.reserved = Some(catalog.reserve());
 		}
@@ -350,6 +437,7 @@ impl Pad {
 		let structure = caps.structure(0).context("empty caps")?;
 		// Renegotiation: finalize the previous producer before replacing it (closed once, not abandoned).
 		self.finalize()?;
+		self.named = requested.is_some();
 		// Opaque data has no codec importer and no catalog entry, so it never reaches the codec match.
 		if structure.name() == "application/octet-stream" {
 			// A generated name would leave the track unfindable: nothing advertises it.
@@ -364,7 +452,10 @@ impl Pad {
 			let info = moq_net::track::Info::default()
 				.with_timescale(moq_net::Timescale::MICRO)
 				.with_max_age(std::time::Duration::from_secs(5));
-			self.track = Some(Sink::Opaque(Box::new(request.accept(info))));
+			self.track = Some(Sink::Opaque(Box::new(Opaque {
+				producer: request.accept(info),
+				pending: self.continuations.get(&name),
+			})));
 			self.caps = Some(caps.clone());
 			return Ok(name);
 		}
@@ -378,18 +469,17 @@ impl Pad {
 		// text with a presentation time, so there is nothing to parse, only a text rendition to declare.
 		if structure.name().as_str() == "text/x-raw" {
 			let name = Self::track_name(&broadcast, requested, ".vtt");
-			self.track = Some(Sink::Text(Box::new(Self::reserve_text(
-				&mut broadcast,
-				reserved,
-				name.clone(),
-				structure,
-			)?)));
+			let mut text = Self::reserve_text(&mut broadcast, reserved, name.clone(), structure)?;
+			if let Some(sequence) = self.continuations.get(&name) {
+				text.producer.seek(sequence)?;
+			}
+			self.track = Some(Sink::Text(Box::new(text)));
 			self.caps = Some(caps.clone());
 			return Ok(name);
 		}
 
 		let mut pre_skip = None;
-		let (track, audio, name): (import::Track, bool, String) = match structure.name().as_str() {
+		let (mut track, audio, name): (import::Track, bool, String) = match structure.name().as_str() {
 			"video/x-h264" => {
 				let (track, name) = Self::reserve_video(
 					&mut broadcast,
@@ -507,6 +597,9 @@ impl Pad {
 			}
 			other => anyhow::bail!("unsupported caps: {other}"),
 		};
+		if let Some(sequence) = self.continuations.get(&name) {
+			track.seek(sequence)?;
+		}
 		self.track = Some(Sink::Media(Box::new(Media {
 			track,
 			audio,
@@ -788,12 +881,12 @@ impl Pad {
 						},
 						Err(err) => Err(anyhow::anyhow!("subtitle cue is not valid UTF-8: {err}")),
 					},
-					Sink::Opaque(producer) => {
+					Sink::Opaque(opaque) => {
 						let Some(ts) = hang::container::Timestamp::from_micros(micros).ok() else {
 							gst::warning!(CAT, "dropping frame: timestamp out of range");
 							return Ok(PushOutcome::Dropped);
 						};
-						producer.write_frame(ts, &data).map_err(Into::into)
+						opaque.write(ts, &data)
 					}
 				};
 				match result {
@@ -840,8 +933,11 @@ impl Pad {
 		let result = match track {
 			Sink::Media(media) => media.track.finish().map_err(anyhow::Error::from),
 			Sink::Text(text) => text.producer.finish().map_err(anyhow::Error::from),
-			Sink::Opaque(producer) => producer.clone().finish().map_err(anyhow::Error::from),
+			Sink::Opaque(opaque) => opaque.finish(),
 		};
+		if self.named {
+			self.continuations.record(track);
+		}
 		self.failed |= result.is_err();
 		(closed, result.map(|()| true))
 	}
@@ -1306,6 +1402,101 @@ mod tests {
 			"the same name is reserved again, not rejected as a duplicate"
 		);
 		assert!(!pad.is_failed());
+	}
+
+	/// A name always means the same content, so the renegotiated producer numbers its groups past
+	/// the ones its predecessor published under the name instead of restarting at 0.
+	#[tokio::test]
+	async fn renegotiation_continues_past_the_predecessor_groups() {
+		gst::init().unwrap();
+		let (broadcast, catalog) = producers();
+		let mut pad = Pad::new();
+		pad.observe_caps(&broadcast, &catalog, producer_options(&h264_caps(), Some("camera")));
+		pad.observe_segment(time_segment());
+		for ms in [0, 40] {
+			let pushed = pad.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::from_mseconds(ms)), None, None);
+			assert_eq!(pushed, Ok(PushOutcome::Published));
+		}
+
+		let renegotiated = gst::Caps::builder("video/x-h264")
+			.field("stream-format", "byte-stream")
+			.field("alignment", "au")
+			.field("width", 1280i32)
+			.build();
+		pad.observe_caps(&broadcast, &catalog, producer_options(&renegotiated, Some("camera")));
+		let mut subscriber = broadcast
+			.consume()
+			.track("camera")
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap();
+		let pushed = pad.push_buffer(h264_keyframe_au(), Some(gst::ClockTime::from_mseconds(80)), None, None);
+		assert_eq!(pushed, Ok(PushOutcome::Published));
+
+		let group = subscriber.recv_group().await.unwrap().expect("a group");
+		assert_eq!(group.sequence, 2, "groups 0 and 1 belong to the predecessor");
+	}
+
+	/// A pad requested again under a released pad's name continues past its groups, even one that
+	/// ends without writing: its end still lands past them.
+	#[tokio::test]
+	async fn a_name_published_again_continues_past_its_predecessor() {
+		gst::init().unwrap();
+		let (broadcast, catalog) = producers();
+		let continuations = Continuations::default();
+		let publish = |frames: &[u64]| {
+			let mut pad = Pad::new();
+			pad.reserve(&catalog, super::super::wall::Wall::new(&catalog), &continuations);
+			pad.observe_caps(&broadcast, &catalog, producer_options(&opaque_caps(), Some("levels")));
+			pad.observe_segment(time_segment());
+			for ms in frames {
+				let pushed = pad.push_buffer(
+					Bytes::from_static(b"level"),
+					Some(gst::ClockTime::from_mseconds(*ms)),
+					None,
+					None,
+				);
+				assert_eq!(pushed, Ok(PushOutcome::Published));
+			}
+			pad
+		};
+
+		let mut first = publish(&[0, 40]);
+		assert!(first.finalize().unwrap());
+
+		let mut second = publish(&[]);
+		let mut subscriber = broadcast
+			.consume()
+			.track("levels")
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap();
+		let pushed = second.push_buffer(
+			Bytes::from_static(b"level"),
+			Some(gst::ClockTime::from_mseconds(80)),
+			None,
+			None,
+		);
+		assert_eq!(pushed, Ok(PushOutcome::Published));
+		assert_eq!(subscriber.recv_group().await.unwrap().expect("a group").sequence, 2);
+		assert!(second.finalize().unwrap());
+
+		let mut empty = publish(&[]);
+		let mut subscriber = broadcast
+			.consume()
+			.track("levels")
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap();
+		assert!(empty.finalize().unwrap());
+		assert_eq!(subscriber.recv_group().await.unwrap().expect("a group").sequence, 3);
+		assert!(
+			subscriber.recv_group().await.unwrap().is_none(),
+			"the track ends past group 3"
+		);
 	}
 
 	// AAC carries its config in caps; without codec_data the producer cannot be built.

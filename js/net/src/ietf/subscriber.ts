@@ -1034,6 +1034,11 @@ export class Subscriber {
 		const { tail, track } = subscription;
 		const complete = () => count > 0n && BigInt(tail.streams) >= count;
 		await tail.settle(complete, track.closed);
+		// SUBSCRIPTION_ENDED ends just this subscription, so the copy fails rather than declare an
+		// end the track may run past: a later reader subscribes afresh, and its groups continue.
+		if (done.statusCode !== PublishDoneStatus.TRACK_ENDED) {
+			throw new Error(`publish done: subscription ended reason=${done.reasonPhrase}`);
+		}
 	}
 
 	/**
