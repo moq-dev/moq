@@ -12,9 +12,9 @@ set -euo pipefail
 # `--shard` sweeps the QUIC shard count against the connection count.
 
 MODE=${1:-}
-ROUNDS=${MOQ_BENCH_RUNTIME_ROUNDS:-3}
+ROUNDS=${BENCH_RUNTIME_ROUNDS:-3}
 if [[ ! $ROUNDS =~ ^[0-9]+$ ]] || ((10#$ROUNDS < 1)); then
-    printf 'MOQ_BENCH_RUNTIME_ROUNDS must be a positive integer, got %q\n' "$ROUNDS" >&2
+    printf 'BENCH_RUNTIME_ROUNDS must be a positive integer, got %q\n' "$ROUNDS" >&2
     exit 1
 fi
 ROUNDS=$((10#$ROUNDS))
@@ -48,10 +48,10 @@ usable_cpus() {
 }
 case $MODE in
     --criterion)
-        # MOQ_BENCH_BASE pairs each selected target with the same target built at that revision.
+        # BENCH_BASE pairs each selected target with the same target built at that revision.
         BASE=
-        if [[ -n ${MOQ_BENCH_BASE:-} ]]; then
-            BASE=$(git rev-parse --verify "$MOQ_BENCH_BASE^{commit}")
+        if [[ -n ${BENCH_BASE:-} ]]; then
+            BASE=$(git rev-parse --verify "$BENCH_BASE^{commit}")
         fi
         CRITERION_CARGO_ARGS=()
         CRITERION_FILTER_ARGS=()
@@ -71,11 +71,11 @@ case $MODE in
         ;;
     --profile)
         BASE=
-        PROFILE_MODES=${MOQ_BENCH_PROFILE:-}
-        PROFILE_WORKLOAD=${MOQ_BENCH_PROFILE_WORKLOAD:-fanout}
-        PROFILE_WORKERS=${MOQ_BENCH_PROFILE_WORKERS:-1 4 16}
+        PROFILE_MODES=${BENCH_PROFILE_MODES:-}
+        PROFILE_WORKLOAD=${BENCH_PROFILE_WORKLOAD:-fanout}
+        PROFILE_WORKERS=${BENCH_PROFILE_WORKERS:-1 4 16}
         if [[ -z $PROFILE_MODES ]]; then
-            printf 'MOQ_BENCH_PROFILE must name one or more of: lock cpu heap\n' >&2
+            printf 'BENCH_PROFILE_MODES must name one or more of: lock cpu heap\n' >&2
             exit 1
         fi
         for value in $PROFILE_MODES; do
@@ -90,8 +90,8 @@ case $MODE in
         ;;
     --shard)
         BASE=
-        SHARD_COUNTS=${MOQ_BENCH_SHARD_COUNTS:-0 1 4 16}
-        SHARD_CONNECTIONS=${MOQ_BENCH_SHARD_CONNECTIONS:-16 64 256}
+        SHARD_COUNTS=${BENCH_SHARD_COUNTS:-0 1 4 16}
+        SHARD_CONNECTIONS=${BENCH_SHARD_CONNECTIONS:-16 64 256}
         for value in $SHARD_COUNTS $SHARD_CONNECTIONS; do
             if [[ ! $value =~ ^[0-9]+$ ]]; then
                 printf 'shard benchmark counts must be integers, got %q\n' "$value" >&2
@@ -101,7 +101,7 @@ case $MODE in
         ;;
     --runtime)
         BASE=
-        RUNTIME_WORKERS=${MOQ_BENCH_RUNTIME_WORKERS:-}
+        RUNTIME_WORKERS=${BENCH_RUNTIME_WORKERS:-}
         if [[ -z $RUNTIME_WORKERS ]]; then
             RUNTIME_WORKERS=$(usable_cpus)
             if ((RUNTIME_WORKERS > 256)); then
@@ -126,13 +126,13 @@ fi
 BASE_TARGET=$TARGET/base
 CURRENT_TARGET=$TARGET/current
 
-ARTIFACTS=${MOQ_BENCH_ARTIFACTS:-$ROOT/.scratch/bench}
+ARTIFACTS=${BENCH_ARTIFACTS:-$ROOT/.scratch/bench}
 mkdir -p "$ARTIFACTS"
 ARTIFACTS=$(cd "$ARTIFACTS" && pwd -P)
 # Each run copies bench/ and untracked sources, so it must land in neither.
 if [[ $ARTIFACTS/ == "$ROOT"/bench/* ]] ||
     { [[ $ARTIFACTS/ == "$ROOT"/* ]] && ! git -C "$ROOT" check-ignore -q "$ARTIFACTS"; }; then
-    printf 'MOQ_BENCH_ARTIFACTS must be outside the repository, or git-ignored and outside bench/: %s\n' \
+    printf 'BENCH_ARTIFACTS must be outside the repository, or git-ignored and outside bench/: %s\n' \
         "$ARTIFACTS" >&2
     exit 1
 fi
@@ -887,8 +887,8 @@ if [[ $MODE == --criterion ]]; then
     # Each invocation owns fresh results; previous runs cannot become new points.
     python3 -c 'import json,sys; from pathlib import Path; Path(sys.argv[1]).write_text(json.dumps(sys.argv[2:]))' \
         "$RUN/criterion-command.json" "${@:2}"
-    if [[ -n ${MOQ_BENCH_RUNS:-} ]]; then
-        printf '%s\n' "$RUN" >>"$MOQ_BENCH_RUNS"
+    if [[ -n ${BENCH_RUNS:-} ]]; then
+        printf '%s\n' "$RUN" >>"$BENCH_RUNS"
     fi
     measure_criterion
     exit

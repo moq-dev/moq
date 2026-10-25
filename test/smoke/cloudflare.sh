@@ -21,7 +21,7 @@ TMP=$(mktemp -d)
 RELAY_PID=""
 PUB_PID=""
 CLOUDFLARE_RELAY="${CLOUDFLARE_RELAY_BIN:-}"
-MOQ_RELAY="${MOQ_RELAY_BIN:-}"
+MOQ_RELAY="${RELAY_BIN:-}"
 CLIENT="${CLOUDFLARE_CLIENT_BIN:-}"
 
 have() { command -v "$1" >/dev/null 2>&1; }

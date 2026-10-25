@@ -45,7 +45,8 @@ public = "**"          # anonymous access to everything; development only
 ```
 
 Every option is also a `--flag` or `MOQ_*` environment variable, and
-`RUST_LOG` controls logging. The
+`RUST_LOG` controls logging. A `MOQ_*` variable the relay does not read, such as
+a misspelling, stops it at startup with the variable named. The
 [configuration reference](/bin/relay/config) covers every section, and
 [`demo/relay/`](https://github.com/moq-dev/moq/tree/main/demo/relay) has
 working configs for development, production, and a cluster. Options renamed
@@ -60,7 +61,8 @@ what you need, and call `run`, which keeps the listeners, QUIC workers, and
 shutdown inside the relay. An embedded CLI calls
 `config.relay.merge(&cli_layer)?` after its own `parse_from_with_settings` to
 load the relay file and environment, retain provenance, and refuse obsolete
-spellings. CLI-only fields on the embedding root stay intact.
+spellings, then `moq_tokio::cli::check_env` with its own spec to refuse `MOQ_*`
+variables it does not read. CLI-only fields on the embedding root stay intact.
 
 ```rust
 use axum::routing::get;

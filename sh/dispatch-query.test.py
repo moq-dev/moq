@@ -28,11 +28,11 @@ class QueryTests(unittest.TestCase):
         self.bin.mkdir()
         for command in ("bash", "git", "sort", "mktemp", "rm", "grep"):
             (self.bin / command).symlink_to(shutil.which(command))
-        self.env = dict(os.environ, MOQ_LOCAL_SUPERVISED="1", PATH=str(self.bin), GIT_CONFIG_NOSYSTEM="1",
-                        GIT_CONFIG_GLOBAL=os.devnull, MOQ_STRICT="1")
+        self.env = dict(os.environ, LOCAL_SUPERVISED="1", PATH=str(self.bin), GIT_CONFIG_NOSYSTEM="1",
+                        GIT_CONFIG_GLOBAL=os.devnull, CI_STRICT="1")
         # The runner's own Actions variables would move the run's error
         # annotations to stdout and append to the real job summary.
-        for key in ("MOQ_DEV_SHELL", "MOQ_ALLOW_HOST", "MOQ_CHECK_JOBS", "GITHUB_BASE_REF",
+        for key in ("IN_MOQ_DEV_SHELL", "ALLOW_HOST_TOOLCHAIN", "CHECK_JOBS", "GITHUB_BASE_REF",
                     "GITHUB_ACTIONS", "GITHUB_STEP_SUMMARY"):
             self.env.pop(key, None)
         self.git("init", "-q", "-b", "main")
@@ -191,7 +191,7 @@ class QueryTests(unittest.TestCase):
         nix = self.bin / "nix"
         nix.write_text('#!/usr/bin/env bash\nprintf "nix %s\\n" "$*" >>"$CALLS"\n')
         nix.chmod(0o755)
-        self.env.update(MOQ_DEV_SHELL="1", CALLS=str(self.root / "calls"))
+        self.env.update(IN_MOQ_DEV_SHELL="1", CALLS=str(self.root / "calls"))
         (self.root / "calls").unlink(missing_ok=True)
         self.env["PATH"] = f"{self.bin}:{os.environ['PATH']}"
         for script in ("markdown.sh", "shell.sh", "large-files.sh"):
@@ -250,7 +250,7 @@ esac
         for jobs in ("1", "3"):
             with self.subTest(jobs=jobs):
                 run = subprocess.Popen(["bash", "sh/dispatch.sh", "ci", "origin/main"],
-                                       cwd=self.repo, env=dict(self.env, MOQ_CHECK_JOBS=jobs),
+                                       cwd=self.repo, env=dict(self.env, CHECK_JOBS=jobs),
                                        text=True, stdout=subprocess.DEVNULL,
                                        stderr=subprocess.PIPE)
                 started.read_text()
