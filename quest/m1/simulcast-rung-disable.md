@@ -24,7 +24,7 @@ keeps encoding.
 Decided with the maintainer on 2026-10-20: the native publishers moved to m1
 and require the session send target (a session probes up to its
 `bandwidth::Allocator`'s reservations) and
-[native probing](/quest/m1/probe-native.md), not padding, which is
+native probing ([moq-dev/moq#6635](https://github.com/moq-dev/moq/pull/6635)), not padding, which is
 browser-only. The JS publisher split into its own m2 quest, since it probes
 with padding.
 
@@ -74,10 +74,6 @@ a path that reopens after the grant fell below the lowest rung.
 
 Public API: the shared rule in `moq_mux::rate` and whatever knobs the
 publishers expose for it. Wire: none; `enabled` already exists.
-
-## Required
-
-- [Native probing](/quest/m1/probe-native.md) - the sender that raises the estimate so a disabled rung can resume
 
 ## Related
 

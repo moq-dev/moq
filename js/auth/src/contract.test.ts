@@ -126,7 +126,7 @@ test("a grant round trips and is validated", () => {
 });
 
 test("refusal reasons preserve verified attribution and accept future reasons", () => {
-	for (const reason of ["refused", "forbidden", "expired"] as const) {
+	for (const reason of ["refused", "forbidden", "expired", "malformed"] as const) {
 		expect(RefusalSchema.parse({ reason, root: "tenant", tier: "edge" })).toEqual({
 			reason,
 			root: "tenant",

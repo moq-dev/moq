@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use futures::FutureExt;
-use moq_net::{Hop, Timestamp, broadcast, kio, origin};
+use moq_net::{Hop, Timestamp, kio, origin};
 
 /// A millisecond track: the frames written here carry timestamps.
 fn timed() -> moq_net::track::Info {
@@ -67,7 +67,7 @@ struct Room {
 	producer: origin::Producer,
 	driver: origin::Driver,
 	broadcasts: usize,
-	_sources: Vec<(broadcast::Producer, moq_net::track::Producer)>,
+	_sources: Vec<(origin::Publication, moq_net::track::Producer)>,
 }
 
 impl Room {

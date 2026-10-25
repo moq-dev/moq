@@ -1,6 +1,6 @@
 //! The worker's UDP send and pump path must not allocate in steady state.
 //!
-//! Unsupported local kernels skip loudly; MOQ_STRICT makes CI refuse them.
+//! Unsupported local kernels skip loudly; CI_STRICT makes CI refuse them.
 
 #![cfg(target_os = "linux")]
 
@@ -57,7 +57,7 @@ const SENDS: usize = 1_000;
 fn steady_state_sends_do_not_allocate() {
 	let mut worker = match Worker::new(Config::default()) {
 		Ok(worker) => worker,
-		Err(Error::Unsupported(reason)) if std::env::var_os("MOQ_STRICT").is_none() => {
+		Err(Error::Unsupported(reason)) if std::env::var_os("CI_STRICT").is_none() => {
 			eprintln!("skipping io_uring allocation test: {reason}");
 			return;
 		}

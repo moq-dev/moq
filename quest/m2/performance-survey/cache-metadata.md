@@ -20,7 +20,7 @@ grow/drain cycles to expose reclamation CPU, copies and allocation churn.
 Preserve arrival cursors, live-edge protection and useful cache retention.
 Correct the accounting explanation with the chosen implementation.
 
-Coordinate with [group storage](/quest/m1/group-storage-bench.md) and
+Coordinate with [Front eviction](/quest/m1/unbounded-groups/front-eviction.md) and
 [log adoption](/quest/m2/perf/kio-channel-contention/log-adoption.md) if their
 representation has changed. Idle GC clock and lock work was settled by
 [moq-dev/moq#6291](https://github.com/moq-dev/moq/pull/6291); this owns retained queue backing.

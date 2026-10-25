@@ -8,23 +8,24 @@
  * let you drill into one. A restarted relay announces a new epoch at the same
  * path, which arrives as an end then a start, so its history starts over.
  *
- * Per-node tracks we read:
- *   publisher.json   egress  (relay -> downstream viewers)
- *   subscriber.json  ingress (upstream publishers -> relay)
- *   sessions.json    sessions by stats label
+ * Per node we read `group.json`, the whole node's group at the relay's default
+ * `depth = 0`: `{ epoch, tiers: { <tier>: { paths, labels } } }`, a JSON snapshot
+ * with merge-patch deltas. From the default tier we take each path's `publisher`
+ * (egress, relay -> downstream viewers) and `subscriber` (ingress, upstream
+ * publishers -> relay), and each stats label's sessions.
  *
- * Each frame is `{ "<broadcast path>": Snapshot }`. Counters are cumulative;
- * "active" = started - ended. The relay includes every entry it still holds
- * counters for, idle ones too, so the latest frame is a snapshot of now. We sample the aggregate on an interval
- * to derive per-second throughput rates for the charts. A relay built after the
- * started/ended rename still writes the legacy names beside the new ones; this
- * dashboard prefers the canonical spelling and falls back so it also reads an
- * older relay.
+ * Counters are cumulative; "active" = started - ended. The relay includes every
+ * entry it still holds counters for, idle ones too, so the latest frame is a
+ * snapshot of now. We sample the aggregate on an interval to derive per-second
+ * throughput rates for the charts. A relay built after the started/ended rename
+ * still writes the legacy names beside the new ones; this dashboard prefers the
+ * canonical spelling and falls back so it also reads an older relay.
  */
 
 import "./highlight";
 import { Milli, Nano, wall } from "@moq/clock";
 import { Net, Signals } from "@moq/hang";
+import * as Json from "@moq/json";
 
 const RELAY_URL = import.meta.env.VITE_RELAY_URL ?? "http://localhost:4443";
 
@@ -78,9 +79,32 @@ interface SessionCounters {
 type SessionFrame = Record<string, SessionCounters>;
 
 interface NodeStats {
-	egress: BroadcastFrame; // publisher.json
-	ingress: BroadcastFrame; // subscriber.json
-	sessions: SessionFrame; // sessions.json
+	egress: BroadcastFrame; // each path's `publisher`
+	ingress: BroadcastFrame; // each path's `subscriber`
+	sessions: SessionFrame; // `labels`
+}
+
+// One tier of a `group.json` frame.
+interface GroupTier {
+	paths?: Record<string, { publisher?: Snapshot; subscriber?: Snapshot }>;
+	labels?: SessionFrame;
+}
+
+interface GroupFrame {
+	tiers?: Record<string, GroupTier>;
+}
+
+// The default tier's egress, ingress, and sessions from a group frame.
+function nodeStatsOf(frame: GroupFrame): NodeStats {
+	const tier = frame.tiers?.[""] ?? {};
+	const egress: BroadcastFrame = {};
+	const ingress: BroadcastFrame = {};
+	for (const [path, usage] of Object.entries(tier.paths ?? {})) {
+		// The relay leaves out a side that never moved.
+		if (usage.publisher) egress[path] = usage.publisher;
+		if (usage.subscriber) ingress[path] = usage.subscriber;
+	}
+	return { egress, ingress, sessions: tier.labels ?? {} };
 }
 
 // Canonical spelling wins when a frame carries both names.
@@ -176,24 +200,18 @@ function subscribeNode(effect: Signals.Effect, origin: Net.Origin.Table, path: N
 	const consumer = request.active.peek();
 	if (!consumer) return;
 
-	const sub = <K extends keyof NodeStats>(trackName: string, key: K) => {
-		const track = consumer.track(trackName).subscribe().ordered();
-		effect.cleanup(() => track.close());
-		effect.spawn(async () => {
-			for (;;) {
-				const data = await effect.race(track.readJson());
-				if (data === undefined) break;
-				nodeStats.mutate((s) => {
-					const cur = s[node];
-					if (cur) cur[key] = (data ?? {}) as NodeStats[K];
-				});
-			}
-		});
-	};
-
-	sub("publisher.json", "egress");
-	sub("subscriber.json", "ingress");
-	sub("sessions.json", "sessions");
+	const track = consumer.track("group.json").subscribe();
+	effect.cleanup(() => track.close());
+	const group = new Json.Snapshot.Consumer<GroupFrame>({ track });
+	effect.spawn(async () => {
+		for (;;) {
+			const state = await effect.race(group.latest());
+			if (state === undefined) break;
+			nodeStats.mutate((s) => {
+				if (s[node]) s[node] = nodeStatsOf(state.value ?? {});
+			});
+		}
+	});
 }
 
 // ---- Aggregation ----------------------------------------------------------
