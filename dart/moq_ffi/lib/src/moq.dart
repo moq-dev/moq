@@ -3108,6 +3108,7 @@ class MoqServerConfig {
   final List<String> versions;
   final MoqServerTls tls;
   final MoqQuicConfig quic;
+  final String? implementation;
   final MoqOriginProducer? publish;
   final MoqOriginProducer? consume;
   MoqServerConfig({
@@ -3115,6 +3116,7 @@ class MoqServerConfig {
     this.versions = const [],
     required this.tls,
     required this.quic,
+    this.implementation = null,
     this.publish = null,
     this.consume = null,
   });
@@ -3147,6 +3149,11 @@ class FfiConverterMoqServerConfig {
     );
     final quic = quic_lifted.value;
     new_offset += quic_lifted.bytesRead;
+    final implementation_lifted = FfiConverterOptionalString.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final implementation = implementation_lifted.value;
+    new_offset += implementation_lifted.bytesRead;
     final publish_lifted = FfiConverterOptionalMoqOriginProducer.read(
       Uint8List.view(buf.buffer, new_offset),
     );
@@ -3163,6 +3170,7 @@ class FfiConverterMoqServerConfig {
         versions: versions,
         tls: tls,
         quic: quic,
+        implementation: implementation,
         publish: publish,
         consume: consume,
       ),
@@ -3176,6 +3184,7 @@ class FfiConverterMoqServerConfig {
         FfiConverterSequenceString.allocationSize(value.versions) +
         FfiConverterMoqServerTls.allocationSize(value.tls) +
         FfiConverterMoqQuicConfig.allocationSize(value.quic) +
+        FfiConverterOptionalString.allocationSize(value.implementation) +
         FfiConverterOptionalMoqOriginProducer.allocationSize(value.publish) +
         FfiConverterOptionalMoqOriginProducer.allocationSize(value.consume) +
         0;
@@ -3202,6 +3211,10 @@ class FfiConverterMoqServerConfig {
       value.quic,
       Uint8List.view(buf.buffer, new_offset),
     );
+    new_offset += FfiConverterOptionalString.write(
+      value.implementation,
+      Uint8List.view(buf.buffer, new_offset),
+    );
     new_offset += FfiConverterOptionalMoqOriginProducer.write(
       value.publish,
       Uint8List.view(buf.buffer, new_offset),
@@ -3218,6 +3231,7 @@ class FfiConverterMoqServerConfig {
         FfiConverterSequenceString.allocationSize(value.versions) +
         FfiConverterMoqServerTls.allocationSize(value.tls) +
         FfiConverterMoqQuicConfig.allocationSize(value.quic) +
+        FfiConverterOptionalString.allocationSize(value.implementation) +
         FfiConverterOptionalMoqOriginProducer.allocationSize(value.publish) +
         FfiConverterOptionalMoqOriginProducer.allocationSize(value.consume) +
         0;
@@ -3403,6 +3417,7 @@ class MoqClientConfig {
   final MoqWebSocketConfig websocket;
   final bool once;
   final MoqBackoff backoff;
+  final String? implementation;
   final MoqOriginProducer? publish;
   final MoqOriginProducer? consume;
   MoqClientConfig({
@@ -3416,6 +3431,7 @@ class MoqClientConfig {
     required this.websocket,
     this.once = false,
     required this.backoff,
+    this.implementation = null,
     this.publish = null,
     this.consume = null,
   });
@@ -3478,6 +3494,11 @@ class FfiConverterMoqClientConfig {
     );
     final backoff = backoff_lifted.value;
     new_offset += backoff_lifted.bytesRead;
+    final implementation_lifted = FfiConverterOptionalString.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final implementation = implementation_lifted.value;
+    new_offset += implementation_lifted.bytesRead;
     final publish_lifted = FfiConverterOptionalMoqOriginProducer.read(
       Uint8List.view(buf.buffer, new_offset),
     );
@@ -3500,6 +3521,7 @@ class FfiConverterMoqClientConfig {
         websocket: websocket,
         once: once,
         backoff: backoff,
+        implementation: implementation,
         publish: publish,
         consume: consume,
       ),
@@ -3519,6 +3541,7 @@ class FfiConverterMoqClientConfig {
         FfiConverterMoqWebSocketConfig.allocationSize(value.websocket) +
         FfiConverterBool.allocationSize(value.once) +
         FfiConverterMoqBackoff.allocationSize(value.backoff) +
+        FfiConverterOptionalString.allocationSize(value.implementation) +
         FfiConverterOptionalMoqOriginProducer.allocationSize(value.publish) +
         FfiConverterOptionalMoqOriginProducer.allocationSize(value.consume) +
         0;
@@ -3569,6 +3592,10 @@ class FfiConverterMoqClientConfig {
       value.backoff,
       Uint8List.view(buf.buffer, new_offset),
     );
+    new_offset += FfiConverterOptionalString.write(
+      value.implementation,
+      Uint8List.view(buf.buffer, new_offset),
+    );
     new_offset += FfiConverterOptionalMoqOriginProducer.write(
       value.publish,
       Uint8List.view(buf.buffer, new_offset),
@@ -3591,6 +3618,7 @@ class FfiConverterMoqClientConfig {
         FfiConverterMoqWebSocketConfig.allocationSize(value.websocket) +
         FfiConverterBool.allocationSize(value.once) +
         FfiConverterMoqBackoff.allocationSize(value.backoff) +
+        FfiConverterOptionalString.allocationSize(value.implementation) +
         FfiConverterOptionalMoqOriginProducer.allocationSize(value.publish) +
         FfiConverterOptionalMoqOriginProducer.allocationSize(value.consume) +
         0;
@@ -12959,6 +12987,7 @@ abstract class MoqRequestInterface {
   });
   void cancel();
   String path();
+  String? peerImplementation();
   String? query();
   UniffiRustFuture<void> reject({required int code});
   MoqTransport transport();
@@ -13028,6 +13057,17 @@ class MoqRequest implements MoqRequestInterface {
         status,
       ),
       FfiConverterString.lift,
+      null,
+    );
+  }
+
+  String? peerImplementation() {
+    return rustCallWithLifter(
+      (status) => uniffi_moq_ffi_fn_method_moqrequest_peer_implementation(
+        uniffiClonePointer(),
+        status,
+      ),
+      FfiConverterOptionalString.lift,
       null,
     );
   }
@@ -18652,6 +18692,14 @@ external RustBuffer uniffi_moq_ffi_fn_method_moqrequest_path(
 @Native<RustBuffer Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
+external RustBuffer uniffi_moq_ffi_fn_method_moqrequest_peer_implementation(
+  Pointer<Void> ptr,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
+@Native<RustBuffer Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
 external RustBuffer uniffi_moq_ffi_fn_method_moqrequest_query(
   Pointer<Void> ptr,
   Pointer<RustCallStatus> uniffiStatus,
@@ -19960,6 +20008,9 @@ external int uniffi_moq_ffi_checksum_method_moqrequest_cancel();
 external int uniffi_moq_ffi_checksum_method_moqrequest_path();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqrequest_peer_implementation();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqrequest_query();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
@@ -20688,6 +20739,10 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqrequest_path() != 48052) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqrequest_peer_implementation() !=
+      48833) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqrequest_query() != 23842) {

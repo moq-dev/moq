@@ -114,6 +114,8 @@ final class SmokeTests: XCTestCase {
         defer { client.cancel() }
         let session = try await client.connect(to: "https://\(addr)")
         guard let request = try await accepted else { return XCTFail("server closed before accept") }
+        // The wrapper names itself ahead of moq-ffi, so a server can tell bindings apart.
+        XCTAssertTrue(request.peerImplementation?.hasPrefix("moq-swift/") == true, "\(String(describing: request.peerImplementation))")
         let peer = try await request.accept()
 
         // Ending both sessions ends any wait below, so a grant that never arrives fails

@@ -2,6 +2,7 @@ import 'package:moq_ffi/moq_ffi.dart';
 
 import 'aliases.dart';
 import 'stream.dart';
+import 'version.dart';
 
 /// Scope for discovering announcements.
 final class AnnounceOptions {
@@ -91,6 +92,7 @@ final class ConnectOptions {
     websocket: (websocket ?? const WebSocketConfig())._ffi,
     once: once,
     backoff: backoff ?? MoqBackoff(),
+    implementation: implementation,
     publish: publish,
     consume: consume,
   );

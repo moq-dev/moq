@@ -87,6 +87,9 @@ find_program(UNIFFI_BINDGEN_CPP uniffi-bindgen-cpp REQUIRED)
 # Rendered to a scratch directory and copied only when changed, so a no-op cargo build does
 # not recompile the bindings.
 set(_generated "${CMAKE_CURRENT_BINARY_DIR}/include/moq/ffi")
+# moq::IMPLEMENTATION names this package's version, which lives in VERSION.
+set(_version_header "${CMAKE_CURRENT_BINARY_DIR}/include/moq/version.hpp")
+configure_file(cmake/version.hpp.in "${_version_header}" @ONLY)
 set(_generated_files moq.hpp moq.cpp moq_scaffolding.hpp uniffi_expected.hpp)
 list(TRANSFORM _generated_files PREPEND "${_generated}/" OUTPUT_VARIABLE _generated_paths)
 set(_render "${CMAKE_CURRENT_BINARY_DIR}/render")
@@ -151,6 +154,7 @@ if(PROJECT_IS_TOP_LEVEL)
 
     install(DIRECTORY include/moq DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
     install(FILES ${_generated_paths} DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/moq/ffi)
+    install(FILES "${_version_header}" DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/moq)
     install(FILES src/moq.cpp DESTINATION ${CMAKE_INSTALL_DATADIR}/moq-cpp)
     install(FILES "${MOQ_FFI_LIB}" DESTINATION ${CMAKE_INSTALL_LIBDIR})
 

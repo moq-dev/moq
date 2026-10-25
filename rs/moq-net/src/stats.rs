@@ -864,7 +864,7 @@ impl fmt::Display for Tier {
 /// side statically, so this only surfaces on the aggregate read side.
 ///
 /// This is the direction traffic flowed, not the session role a client advertises
-/// in its SETUP ([`crate::setup::Role`]): one session records on both sides.
+/// in its SETUP: one session records on both sides.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Role {
 	/// Egress: bytes this node published to a peer.
@@ -1689,6 +1689,7 @@ impl Session {
 	///
 	/// Only a context from [`Handle::session`] has an end to classify: on one from
 	/// [`Handle::request`] this records nothing.
+	#[cfg(any(feature = "async", test))]
 	pub(crate) fn end(&self, err: &crate::Error) {
 		let Some(inner) = &self.inner else { return };
 		if !inner.connected {

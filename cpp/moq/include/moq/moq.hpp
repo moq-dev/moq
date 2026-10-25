@@ -3,6 +3,7 @@
 #pragma once
 
 #include <moq/ffi/moq.hpp>
+#include <moq/version.hpp>
 
 #include <chrono>
 #include <functional>
@@ -22,6 +23,10 @@
 extern "C" void moq_ffi_shutdown(void);
 
 namespace moq {
+
+// This package's product token. Every type is generated, so nothing sets it for you: put it in
+// ClientConfig::implementation and ServerConfig::implementation, after your own tokens.
+inline constexpr const char *IMPLEMENTATION = "moq-cpp/" MOQ_CPP_VERSION;
 
 // The value of a fallible call, or the Error that stopped it. tl::expected at every standard.
 template <typename T>
