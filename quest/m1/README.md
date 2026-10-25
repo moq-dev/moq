@@ -95,6 +95,10 @@ arithmetic, DASH init readiness, dot-only names) and ffprobe segment
 conformance; the audit's segment-finalization redesign is folded into
 Catalog HLS field.
 
+Added 2026-10-25 (maintainer): pure-Rust crypto moved up from m2, so the
+cut ships a relay that compiles no C. It follows moq-quic's crypto reshape,
+whose surface its QUIC adapter plugs into.
+
 ## Required
 
 - [moq-congestion](/quest/m1/congestion/README.md) - one QUIC congestion-control crate with a transport-independent trait, run by `moq-quic` and published for noq
@@ -121,6 +125,7 @@ Catalog HLS field.
 - [A smaller, safer API than release](/quest/m1/api-audit/README.md) - every surface added since release has a consumer or is gone, overlapping operations are collapsed, names mirror across Rust, JS, and the bindings, and every break says how to migrate
 - [moq-transport 18 and 22 only](/quest/m1/ietf-drop/README.md) - drafts 14-17 and 19-21 are deleted from Rust, JS, tests, interop lanes, and docs, removing the legacy control-stream adapter and its request limit
 - [moq-quic's API improves on quinn's](/quest/m1/quic-api/README.md) - moq-quic and both QUIC drivers ship one mirrored API: `send::`/`recv::` namespaces, one error per direction, consuming terminal operations, plain configs, no quinn baggage
+- [Pure-Rust crypto for moq-relay](/quest/m1/pure-crypto/README.md) - moq-relay's release builds use graviola and RustCrypto and compile no C
 - [Drop web-transport-trait](/quest/m1/drop-web-transport-trait.md) - iroh, wasm, and ffi implement moq-net's `transport::poll` traits, and the remaining `web_transport_trait` adapters are deleted
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - browser publishers answer IETF FETCH through the JS ranges request surface
 - [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - native FILL_TIMEOUT bounds upstream waiting on drafts 18 and 22, alongside local content-age enforcement
