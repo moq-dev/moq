@@ -8659,7 +8659,7 @@ mod tests {
 						if fetching {
 							track.fetch_group(0, None).await.map(|_| ())
 						} else {
-							track.query().await.map(|_| ())
+							track.info().await.map(|_| ())
 						}
 					});
 					assert!(futures::poll!(pending.as_mut()).is_pending());
@@ -8742,7 +8742,7 @@ mod tests {
 			let consumer = producer.consume();
 			let track = consumer.track("video").unwrap();
 			// Demand with nobody subscribing learns the track from TRACK_STATUS.
-			let mut query = std::pin::pin!(track.query());
+			let mut query = std::pin::pin!(track.info());
 			assert!(futures::poll!(query.as_mut()).is_pending());
 			let request = dynamic.requested_track().await.expect("no track requested");
 

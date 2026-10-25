@@ -1238,7 +1238,7 @@ mod hop_tests {
 			let frame = next(&mut received).await.unwrap();
 			assert_eq!(&frame.payload[..], b"b");
 			assert!(next(&mut received).await.is_none());
-			let info = moq_clock::timeout(TIMEOUT, copy.query()).await.unwrap().unwrap();
+			let info = moq_clock::timeout(TIMEOUT, copy.info()).await.unwrap().unwrap();
 			assert_eq!(
 				(info.max_age, info.timescale, info.priority, info.refresh),
 				(
@@ -1391,7 +1391,7 @@ mod hop_tests {
 			.unwrap();
 		let (downstream, sessions) = test_hop(&upstream, "room", [true, true]).await;
 		let (copy, mut subscriber) = subscribe(&downstream).await;
-		let info = moq_clock::timeout(TIMEOUT, copy.query()).await.unwrap().unwrap();
+		let info = moq_clock::timeout(TIMEOUT, copy.info()).await.unwrap().unwrap();
 		assert!(info.properties.is_none());
 
 		let mut group = track.append_group().unwrap();
@@ -1451,7 +1451,7 @@ mod hop_tests {
 			};
 			assert_eq!((listed.timescale, listed.ietf()), (None, None), "{offer:?}");
 			let copy = broadcast.track("video").unwrap();
-			let info = moq_clock::timeout(TIMEOUT, copy.query()).await.unwrap().unwrap();
+			let info = moq_clock::timeout(TIMEOUT, copy.info()).await.unwrap().unwrap();
 			assert_eq!(info.timescale, negotiated.then_some(Timescale::MILLI), "{offer:?}");
 			assert_eq!(
 				info.ietf(),

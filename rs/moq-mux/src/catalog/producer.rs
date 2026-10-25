@@ -1563,7 +1563,7 @@ mod test {
 			"video.timeline.z",
 		] {
 			let track = consumer.track(name).expect("track");
-			let info = track.query().await.expect("info");
+			let info = track.info().await.expect("info");
 			assert_eq!(info.priority, PRIORITY.catalog, "{name} should rank with the catalog");
 		}
 	}

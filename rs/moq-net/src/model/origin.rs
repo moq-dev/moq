@@ -2997,7 +2997,7 @@ struct Asked {
 	copy: track::Consumer,
 	/// The front's own demand on the copy, held for as long as the front holds the copy: a
 	/// bare handle is no demand, so this stands in for the readers' queries and fetches.
-	query: track::Querying,
+	query: track::Resolving,
 	info: Option<track::Info>,
 	/// Some sessions only learn a track's info by subscribing (moq-transport's
 	/// SUBSCRIBE_OK), and read the demand only then, so the readers' demand rides the
@@ -3027,7 +3027,7 @@ struct TrackIo {
 	staged: Option<Asked>,
 	/// The source whose copy serves the track, the copy, and the query holding it; plus the
 	/// subscription that query made.
-	copy: Option<(u64, track::Consumer, track::Querying)>,
+	copy: Option<(u64, track::Consumer, track::Resolving)>,
 	held: Option<kio::Pending<track::Subscribing>>,
 	/// The last copy ended because its session closed locally: a close, not an
 	/// error, so the track ends cleanly if nothing takes over.
@@ -3098,7 +3098,7 @@ struct InFlight {
 	// Kept for its readers: the logical track, the query holding its copy, and the copy's
 	// subscription.
 	_accepted: Option<track::Producer>,
-	_copy: Option<track::Querying>,
+	_copy: Option<track::Resolving>,
 	_held: Option<kio::Pending<track::Subscribing>>,
 }
 
@@ -3484,8 +3484,8 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 									lookup.subscribe(io.routes.subscription(demand, subscribers))
 								});
 								let query = match &sub {
-									Some(sub) => sub.query(),
-									None => lookup.query().into_inner(),
+									Some(sub) => sub.info(),
+									None => lookup.info().into_inner(),
 								};
 								let copy = query.track();
 								io.query = Some(Asked {
@@ -11569,7 +11569,7 @@ mod tests {
 
 			// Reopening the aborted logical track must not forget the broadcast's metadata.
 			let reopened = rig.resolved.track("video").unwrap();
-			assert!(matches!(reopened.query().await, Err(Error::Unsupported)));
+			assert!(matches!(reopened.info().await, Err(Error::Unsupported)));
 			assert!(matches!(reopened.subscribe(None).await, Err(Error::Unsupported)));
 		}
 	}

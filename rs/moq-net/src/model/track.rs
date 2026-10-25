@@ -4154,8 +4154,8 @@ impl ArrivalRead<'_> {
 /// A lazy handle to a single track within a broadcast.
 ///
 /// Obtained from [`broadcast::Consumer::track`]. Holding it sends nothing and is not
-/// [`Demand`]: the track is requested, and counts as demanded, only while a
-/// [`query`](Self::query), [`subscribe`](Self::subscribe) (a live, ongoing stream of
+/// [`Demand`]: the track is requested, and counts as demanded, only while an
+/// [`info`](Self::info), [`subscribe`](Self::subscribe) (a live, ongoing stream of
 /// groups), or [`fetch_group`](Self::fetch_group) (one group) made from it is held. The
 /// same handle can be used any number of times, and clones are cheap.
 #[derive(Clone)]
@@ -4660,8 +4660,8 @@ impl Consumer {
 	/// for the producer to [`Request::accept`] the track (a wire TRACK_INFO round-trip
 	/// for a relay), and errors with the track's abort error if it closes first.
 	/// [`Subscriber::info`] is the already-resolved counterpart.
-	pub fn query(&self) -> kio::Pending<Querying> {
-		kio::Pending::new(Querying {
+	pub fn info(&self) -> kio::Pending<Resolving> {
+		kio::Pending::new(Resolving {
 			name: self.name.clone(),
 			broadcast: self.broadcast.clone(),
 			state: self.resolve(None).0,
@@ -4787,9 +4787,9 @@ pub struct Subscribing {
 }
 
 impl Subscribing {
-	/// Query the same track with this subscription already registered.
-	pub(super) fn query(&self) -> Querying {
-		Querying {
+	/// Resolve the same track's info with this subscription already registered.
+	pub(super) fn info(&self) -> Resolving {
+		Resolving {
 			name: self.name.clone(),
 			broadcast: self.broadcast.clone(),
 			state: self.state.clone(),
@@ -4842,19 +4842,19 @@ impl kio::Task for Subscribing {
 	}
 }
 
-/// The pollable state of a [`Consumer::query`]; awaited via the
+/// The pollable state of a [`Consumer::info`]; awaited via the
 /// [`kio::Pending`] wrapper.
 ///
 /// Counts as the track's [`Demand`] while held, answered or not.
-pub struct Querying {
+pub struct Resolving {
 	name: Arc<str>,
 	broadcast: Arc<broadcast::Info>,
 	state: kio::Consumer<TrackState>,
 	stats: stats::Scope,
 }
 
-impl Querying {
-	/// A handle on the track instance this query asked, whatever its broadcast serves later.
+impl Resolving {
+	/// A handle on the track instance this resolves, whatever its broadcast serves later.
 	pub fn track(&self) -> Consumer {
 		Consumer {
 			name: self.name.clone(),
@@ -4874,7 +4874,7 @@ impl Querying {
 	}
 }
 
-impl kio::Task for Querying {
+impl kio::Task for Resolving {
 	type Output = Result<Info>;
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Self::Output> {
@@ -6500,7 +6500,7 @@ fn refuse_untimed(info: &Info, subscription: &Subscription) -> Result<()> {
 impl Subscriber {
 	/// The track's [`Info`], resolved when the subscription was established.
 	///
-	/// Free, unlike [`Consumer::query`]: subscribing already waited for the info
+	/// Free, unlike [`Consumer::info`]: subscribing already waited for the info
 	/// (SUBSCRIBE_OK on the wire), so a subscriber always has it.
 	pub fn info(&self) -> &Info {
 		&self.info
@@ -16435,7 +16435,7 @@ mod test {
 		let demand = request.demand();
 		let consumer = request.consume();
 		assert!(!demand.is_used(), "a bare handle is not demand");
-		let query = consumer.query();
+		let query = consumer.info();
 		assert!(demand.is_used());
 		assert!(dynamic.demand().is_used());
 		drop(query);

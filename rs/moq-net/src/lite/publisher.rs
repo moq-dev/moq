@@ -1797,7 +1797,7 @@ impl<R: Request> Drop for RequestServe<R> {
 /// The open stream is interest in the track: the query that answered it stays until the
 /// requester closes its side, so demand holds while the requester moves on to SUBSCRIBE.
 struct TrackInfoServe {
-	querying: track::Querying,
+	querying: track::Resolving,
 }
 
 impl Request for TrackInfoServe {
@@ -1816,7 +1816,7 @@ impl Request for TrackInfoServe {
 	}
 
 	fn start(_: &Shared, msg: Self::Message, broadcast: crate::broadcast::Consumer) -> Result<Self, Error> {
-		let querying = broadcast.track(&msg.track)?.query().into_inner();
+		let querying = broadcast.track(&msg.track)?.info().into_inner();
 		Ok(Self { querying })
 	}
 

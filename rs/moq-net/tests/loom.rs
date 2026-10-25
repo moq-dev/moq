@@ -273,13 +273,13 @@ fn a_front_sees_a_reader_come_and_go() {
 		let room = block_on(pending).expect("resolves");
 
 		// A first reader gets the source asked, then leaves.
-		let first = room.track("video").expect("track").query();
+		let first = room.track("video").expect("track").info();
 		driver.poll(now, &noop).unwrap();
 		assert!(demand.wanted().is_some(), "the front never asked the source");
 		drop(first);
 
 		let racing = room.clone();
-		let reader = thread::spawn(move || drop(racing.track("video").expect("track").query()));
+		let reader = thread::spawn(move || drop(racing.track("video").expect("track").info()));
 		driver.poll(now, &noop).unwrap();
 		reader.join().unwrap();
 
@@ -314,17 +314,17 @@ fn a_front_sees_a_reader_return() {
 		let room = block_on(pending).expect("resolves");
 
 		// A first reader comes and goes, which parks the track.
-		let first = room.track("video").expect("track").query();
+		let first = room.track("video").expect("track").info();
 		driver.poll(now, &noop).unwrap();
 		drop(first);
 		driver.poll(now, &noop).unwrap();
 		assert!(demand.wanted().is_none(), "the front kept the source for nobody");
 
-		let leaving = room.track("video").expect("track").query();
+		let leaving = room.track("video").expect("track").info();
 		let racing = room.clone();
 		let reader = thread::spawn(move || {
 			drop(leaving);
-			racing.track("video").expect("track").query()
+			racing.track("video").expect("track").info()
 		});
 		driver.poll(now, &noop).unwrap();
 		let returned = reader.join().unwrap();

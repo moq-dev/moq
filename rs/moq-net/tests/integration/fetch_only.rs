@@ -181,7 +181,7 @@ async fn a_subscribe_after_track_status_keeps_timestamps() {
 
 			let remote = resolve(&client).await;
 			let copy = remote.track("video").unwrap();
-			let info = copy.query().await.expect("TRACK_STATUS resolves the track");
+			let info = copy.info().await.expect("TRACK_STATUS resolves the track");
 			assert!(info.timescale.is_some(), "{version}: the copy is untimed");
 			assert!(track.subscription().is_none(), "{version}: the query subscribed");
 

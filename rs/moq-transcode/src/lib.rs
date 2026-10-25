@@ -1245,7 +1245,7 @@ mod tests {
 		// wait until the live path has claimed group 0, so the fetch below can only
 		// resolve from the track cache and retirement finds that live group open.
 		let rung = consumer.track("video/120p").unwrap();
-		let mut query = rung.query();
+		let mut query = rung.info();
 		(&mut query).await.unwrap();
 		let mut edge = rung.clone();
 		assert_eq!(edge.largest().await.map(|position| position.group), Some(0));
@@ -1312,7 +1312,7 @@ mod tests {
 		// A held query is demand, so the rung starts encoding and subscribes to the
 		// source.
 		let rung = consumer.track("video/120p").unwrap();
-		let mut query = rung.query();
+		let mut query = rung.info();
 		(&mut query).await.unwrap();
 		let wanted = async {
 			while demand.wanted_changed().await?.is_none() {}
@@ -1384,7 +1384,7 @@ mod tests {
 		// Resolving the info waits for the transcoder to accept the track, so the
 		// fetch below reaches a rung that is already serving.
 		let rung = consumer.track("video/120p").unwrap();
-		let mut query = rung.query();
+		let mut query = rung.info();
 		(&mut query).await.unwrap();
 		assert!(
 			source._track.subscription_changed().await.unwrap().is_some(),
@@ -1468,7 +1468,7 @@ mod tests {
 
 		// No live groups, so group 7 misses and reaches the fetch handler.
 		let rung = consumer.track("video/120p").unwrap();
-		rung.query().await.unwrap();
+		rung.info().await.unwrap();
 
 		let fetching = rung.fetch_group(7, None);
 		let abandoned = tokio::time::timeout(std::time::Duration::from_secs(5), source_fetches.requested_fill())

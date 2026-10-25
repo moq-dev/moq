@@ -190,7 +190,7 @@ async fn read_fetch(
 	priority: i8,
 	compression: bool,
 ) -> Result<FetchedGroup, Error> {
-	let info = track.query().await?;
+	let info = track.info().await?;
 	let cached = track.peek_group(sequence);
 	let wire = cached.as_ref().and_then(|group| group.wire());
 	if wire.as_ref().is_some_and(|wire| !wire.fetchable) {
@@ -3192,7 +3192,7 @@ impl Publisher {
 
 		// The requester abandoning the request is owed nothing.
 		let info = {
-			let query = track.query();
+			let query = track.info();
 			let mut finished = false;
 			let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
 			kio::wait(|waiter| {
@@ -10836,7 +10836,7 @@ mod serve_tests {
 		let _track = broadcast.create_track("video", info).unwrap();
 		let (downstream, _sessions) = crate::lite::ietf::test_hop(&upstream, "room", [true, true]).await;
 		let broadcast = downstream.consume().request_broadcast("room", None).await.unwrap();
-		broadcast.track("video").unwrap().query().await.unwrap()
+		broadcast.track("video").unwrap().info().await.unwrap()
 	}
 
 	/// Draft 19 assigns 0x06 to SUBGROUP_DELIVERY_TIMEOUT, so a track property 0x06 crosses

@@ -235,7 +235,7 @@ async fn bare_handle_is_lazy(version: &str, relays: usize) {
 	assert!(broadcast_edges.borrow().is_empty(), "{label}: a bare handle is demand");
 
 	// A held query reaches the publisher, and holds the track there until dropped.
-	let mut query = handle.query();
+	let mut query = handle.info();
 	moq_clock::timeout(TIMEOUT, &mut query)
 		.await
 		.unwrap_or_else(|_| panic!("{label}: query stalled"))
