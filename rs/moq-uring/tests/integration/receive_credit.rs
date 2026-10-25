@@ -124,7 +124,7 @@ fn partial_frame_gives_way() {
 				moq_net::time::Instant::now(),
 				moq_uring::transport::Local::new(moq_uring::transport::Session::new(
 					quic::web::Session::raw(conn),
-					moq_net::transport::Binding::InBand,
+					moq_net::transport::Address::Setup,
 				)),
 			)
 			.await
@@ -143,7 +143,7 @@ fn partial_frame_gives_way() {
 					moq_net::time::Instant::now(),
 					moq_uring::transport::Local::new(moq_uring::transport::Session::new(
 						quic::web::Session::raw(conn),
-						moq_net::transport::Binding::InBand,
+						moq_net::transport::Address::Setup,
 					)),
 				)
 				.await
@@ -299,7 +299,7 @@ fn javascript_partial_frame_gives_way() {
 					moq_net::time::Instant::now(),
 					moq_uring::transport::Local::new(moq_uring::transport::Session::new(
 						session,
-						moq_net::transport::Binding::Uri,
+						moq_net::transport::Address::Uri,
 					)),
 				)
 				.await

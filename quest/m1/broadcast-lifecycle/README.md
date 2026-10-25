@@ -47,6 +47,7 @@ timer on main at 1582fdc07d:
 ## Required
 
 - [Closing a binding broadcast ends its media](/quest/m1/broadcast-lifecycle/ffi-close.md) - moq-ffi and moq-c media handles end with a cause on close or drop, never a cause-less drop
+- [js/net close FIN](/quest/m1/broadcast-lifecycle/js-close-fin.md) - js/net finishes tracks whose FIN arrives with a graceful close
 
 ## Related
 

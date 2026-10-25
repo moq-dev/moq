@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
 use moq_net::transport::poll::{RecvStream as _, SendOptions, SendStream as _, Session as _};
-use moq_quic::coding::Codec;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio::sync::watch;
 
@@ -313,7 +312,7 @@ async fn websocket_keep_alive_needs_room_for_a_pong() {
 		let (socket, _peer) = tokio::io::duplex(PIPE);
 		let ws = WebSocketStream::from_raw_socket(socket, Role::Client, None).await;
 		let keep_alive = KeepAlive::new(Duration::from_secs(interval), Duration::from_secs(timeout));
-		let result = WsTransport::new(ws, Binding::Uri).with_keep_alive(keep_alive);
+		let result = WsTransport::new(ws, Address::Uri).with_keep_alive(keep_alive);
 		assert!(
 			matches!(result, Err(Error::InvalidConfig(_))),
 			"{interval}s / {timeout}s"
@@ -353,10 +352,10 @@ async fn websocket_keep_alive_runs_during_continuous_output() {
 	let mut config = config(Version::QMux02);
 	config.rtt_interval = None;
 	config.idle_timeout = None;
-	let a = WsTransport::new(a, Binding::Uri)
+	let a = WsTransport::new(a, Address::Uri)
 		.with_keep_alive(KeepAlive::new(Duration::from_millis(10), Duration::from_millis(500)))
 		.unwrap();
-	let b = WsTransport::new(b, Binding::Uri);
+	let b = WsTransport::new(b, Address::Uri);
 	let mut sender = Session::new(a, Side::Client, config.clone()).unwrap();
 	let _receiver = Session::new(b, Side::Server, config).unwrap();
 	while sender.max_datagram_size() == 0 {

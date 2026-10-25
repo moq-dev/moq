@@ -1,4 +1,4 @@
-// The same in-process rounds as bench/ffi.sh's other binding runners.
+// The same in-process rounds as the other binding benchmark runners (see bench/README.md).
 #include <moq/moq.hpp>
 
 #include <algorithm>

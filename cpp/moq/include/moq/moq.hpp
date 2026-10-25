@@ -3,8 +3,8 @@
 #pragma once
 
 #include <moq/ffi/moq.hpp>
+#include <moq/version.hpp>
 
-#include <chrono>
 #include <functional>
 #include <string>
 #include <utility>
@@ -22,6 +22,10 @@
 extern "C" void moq_ffi_shutdown(void);
 
 namespace moq {
+
+// This package's product token. Every type is generated, so nothing sets it for you: put it in
+// ClientConfig::implementation and ServerConfig::implementation, after your own tokens.
+inline constexpr const char *IMPLEMENTATION = "moq-cpp/" MOQ_CPP_VERSION;
 
 // The value of a fallible call, or the Error that stopped it. tl::expected at every standard.
 template <typename T>
@@ -60,18 +64,6 @@ inline void set_executor(Executor executor, std::function<void()> shutdown) noex
 inline void shutdown() noexcept {
     moq_ffi_shutdown();
     ::uniffi::shutdown_async_dispatcher();
-}
-
-// The wall-clock time an epoch encodes, to the millisecond. Errors unless it is a UUIDv7.
-// Millisecond ticks hold every 48-bit UUIDv7 time, where system_clock's nanoseconds overflow in 2262.
-inline expected<std::chrono::time_point<std::chrono::system_clock, std::chrono::milliseconds>>
-epoch_time(const std::string &epoch) {
-    auto ms = epoch_time_ms(epoch);
-    if (!ms) {
-        return unexpected(std::move(ms).error());
-    }
-    return std::chrono::time_point<std::chrono::system_clock, std::chrono::milliseconds>(
-        std::chrono::milliseconds(static_cast<std::chrono::milliseconds::rep>(*ms)));
 }
 
 #ifdef MOQ_COROUTINES

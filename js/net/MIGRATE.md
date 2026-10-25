@@ -18,6 +18,10 @@ broadcast.createTrack("data");
 publication.announce({ epoch: Epoch.mint() });
 ```
 
+### `Varint.sizeLeadingOnes` is gone
+
+Take the length of `Varint.encodeLeadingOnes(v)`.
+
 ### Published names refuse navigation segments
 
 Broadcast creation and route publication now refuse literal `.` and `..` segments, including segments in the producer's root.

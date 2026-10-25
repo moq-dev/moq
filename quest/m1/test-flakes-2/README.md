@@ -42,6 +42,5 @@ Public API: none. Wire: none.
 
 - [Media resource instrumentation](/quest/m1/test-flakes-2/resource-instrumentation.md) - the media test stops seeing a playing player report nothing to release
 - [IETF22 fallback](/quest/m1/test-flakes-2/ietf22-fallback.md) - an IETF22 browser viewer follows a fallback within the media lane's bound, keeping its session and its audio
-- [macOS receive credit](/quest/m1/test-flakes-2/macos-receive-credit.md) - `partial_control_requests_give_way` passes on the macOS lane, after checking for a shared platform cause
-- [moq-rtsp stall timers](/quest/m1/test-flakes-2/rtsp-stall-timers.md) - the 200 ms stall and keyframe tests run on a mocked clock
-- [moq-gst pinned replay](/quest/m1/test-flakes-2/gst-pinned-replay.md) - the pinned-instance finish test waits on events instead of sleep loops
+- [Echo report test on mocked time](/quest/m1/test-flakes-2/export-echo-time.md) - the moq-cli echo report test stops taking 35 s of wall time
+- [OBS failed audio candidate](/quest/m1/test-flakes-2/obs-audio-candidate.md) - the OBS failed-audio-candidate test passes under load

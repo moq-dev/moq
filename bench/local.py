@@ -51,7 +51,7 @@ def main():
                 load = os.getloadavg()
                 try:
                     for checkout in group:
-                        directory = checkout / ".scratch/local-bench"
+                        directory = checkout / ".tmp/local-bench"
                         directory.mkdir(parents=True, exist_ok=True)
                         stem = directory / str(uuid.uuid4())
                         stamp = stem.with_suffix(".started")

@@ -1770,6 +1770,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc74980687109a3b14c72fd458107bf0baa1da1a1a805e178d15501ba9b86d9d"
 dependencies = [
  "crossbeam-utils",
+ "loom",
 ]
 
 [[package]]
@@ -1777,6 +1778,9 @@ name = "crossbeam-utils"
 version = "0.8.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
+dependencies = [
+ "loom",
+]
 
 [[package]]
 name = "crunchy"
@@ -4184,6 +4188,7 @@ name = "kio"
 version = "0.6.2"
 dependencies = [
  "criterion",
+ "crossbeam-epoch",
  "futures",
  "loom",
  "smallvec",
@@ -4786,6 +4791,7 @@ dependencies = [
  "moq-video",
  "mpeg2ts",
  "object_store",
+ "percent-encoding",
  "pollster",
  "reqwest",
  "rustls",
@@ -5011,6 +5017,7 @@ dependencies = [
  "h264-reader 0.9.0",
  "hang",
  "kio 0.6.2",
+ "libc",
  "memchr",
  "moq-clock",
  "moq-flate",
@@ -5066,6 +5073,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "url",
  "uuid",
  "wasm-bindgen-test",
 ]

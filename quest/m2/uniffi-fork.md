@@ -14,7 +14,7 @@ Generated bindings are unchanged by the switch itself.
 Decided with the maintainer on 2026-10-13, after a review of how moq uses
 UniFFI:
 
-- **Base**: UniFFI. [The BoltFFI spike](/bench/ffi-gen/README.md)
+- **Base**: UniFFI. [The BoltFFI spike](https://github.com/kixelated/rust2/blob/main/bench/ffi/README.md#boltffi-comparison)
   recommended it. Decided later in #5838 (2026-10-17, maintainer):
   UniFFI-generated moq-ffi serves the browser too, over BoltFFI, so one generator serves every
   language.
