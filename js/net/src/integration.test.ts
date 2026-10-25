@@ -1730,8 +1730,8 @@ test("integration: ietf consume dedup", async () => {
 
 // Drafts 14-16 multiplex both directions over one control stream. A subscribe must resolve when it
 // races an inbound announce, without warming the session by reading that announce first.
-async function runSubscribeWithoutWarmup(version: number) {
-	const pair = createMockTransportPair("");
+async function runSubscribeWithoutWarmup(protocol: string, version?: number) {
+	const pair = createMockTransportPair(protocol);
 	const origin = new OriginProducer();
 	const [client, server] = await Promise.all([
 		connect(url, { transport: pair.client }),
@@ -1762,15 +1762,15 @@ async function runSubscribeWithoutWarmup(version: number) {
 }
 
 test("integration: ietf draft-14 subscribe without announce warmup", async () => {
-	await runSubscribeWithoutWarmup(Ietf.Version.DRAFT_14);
+	await runSubscribeWithoutWarmup("", Ietf.Version.DRAFT_14);
 });
 
 test("integration: ietf draft-15 subscribe without announce warmup", async () => {
-	await runSubscribeWithoutWarmup(Ietf.Version.DRAFT_15);
+	await runSubscribeWithoutWarmup(Ietf.ALPN.DRAFT_15);
 });
 
 test("integration: ietf draft-16 subscribe without announce warmup", async () => {
-	await runSubscribeWithoutWarmup(Ietf.Version.DRAFT_16);
+	await runSubscribeWithoutWarmup(Ietf.ALPN.DRAFT_16);
 });
 
 test("integration: subscribe to non-existent broadcast", async () => {
@@ -2027,10 +2027,10 @@ test("integration: ietf republish on one session swaps the handle every generati
 });
 
 // Draft-17+ withdraws by reset, which the replacement request does not wait behind.
-test.each([Ietf.Version.DRAFT_17, Ietf.Version.DRAFT_18])(
+test.each([Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_18])(
 	"integration: ietf republish withdrawn by reset swaps the handle (%#)",
-	async (version) => {
-		await runRepublishCycle("", version);
+	async (protocol) => {
+		await runRepublishCycle(protocol);
 	},
 );
 
