@@ -1,7 +1,7 @@
 /** Sweep retained groups and subscribers for one group published through a track and received. */
 
 import { Milli } from "@moq/clock";
-import { type Consumer as GroupConsumer, Producer as GroupProducer } from "../src/group.ts";
+import type { Consumer as GroupConsumer, Producer as GroupProducer } from "../src/group.ts";
 import { Timescale, Timestamp } from "../src/time.ts";
 import { Producer, type Subscriber } from "../src/track.ts";
 import { untilGivenUp } from "../src/util/given_up.ts";

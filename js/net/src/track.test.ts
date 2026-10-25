@@ -5,7 +5,7 @@ import { Producer as BroadcastProducer } from "./broadcast.ts";
 import { ProtocolViolation, StreamCode, StreamError, TimestampMismatch, TooFarBehind } from "./error.ts";
 import { Decoder } from "./flate/decoder.ts";
 import { Encoder } from "./flate/encoder.ts";
-import { type Consumer as GroupConsumer, Producer as GroupProducer, MAX_GROUP_FRAMES } from "./group.ts";
+import { type Consumer as GroupConsumer, type Producer as GroupProducer, MAX_GROUP_FRAMES } from "./group.ts";
 import { Version as IetfVersion } from "./ietf/version.ts";
 import { hooks } from "./internal.ts";
 import { textFrame } from "./mock.ts";

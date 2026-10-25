@@ -3368,7 +3368,10 @@ mod test {
 		assert!(matches!(demand.poll_wanted_changed(&waiter), Poll::Ready(Ok(false))));
 		drop(producer);
 		assert!(!demand.wanted());
-		assert!(matches!(demand.poll_wanted_changed(&waiter), Poll::Ready(Err(Error::Dropped))));
+		assert!(matches!(
+			demand.poll_wanted_changed(&waiter),
+			Poll::Ready(Err(Error::Dropped))
+		));
 	}
 
 	#[test]

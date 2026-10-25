@@ -4,7 +4,7 @@ import { Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
 import { fromTransport, SessionCode, StreamCode, StreamError, toStreamCode } from "../error.ts";
-import { Producer as GroupProducer } from "../group.ts";
+import type { Producer as GroupProducer } from "../group.ts";
 import { randomHop } from "../hop.ts";
 import { Version as IetfVersion } from "../ietf/version.ts";
 import { hooks } from "../internal.ts";

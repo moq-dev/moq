@@ -3,7 +3,7 @@
  *
  * @module
  */
-import { Group as NetGroup, type Track as NetTrack, type Time } from "@moq/net";
+import type { Group as NetGroup, Track as NetTrack, Time } from "@moq/net";
 import type { Event } from "./datagram.ts";
 import { checkU53 } from "./derive.ts";
 import { Failure } from "./failure.ts";

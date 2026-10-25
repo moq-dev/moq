@@ -125,7 +125,9 @@ export const Route = {
 	default: { hops: [], cost: Cost.zero } as Route,
 
 	/** Fill route defaults and saturate the static price at the wire ceiling. */
-	normalize(route: Route | { epoch?: Epoch.Valid; hops?: readonly Hop[]; cost?: Cost; auth?: Credential } = {}): Route {
+	normalize(
+		route: Route | { epoch?: Epoch.Valid; hops?: readonly Hop[]; cost?: Cost; auth?: Credential } = {},
+	): Route {
 		const cost = route.cost ?? Cost.zero;
 		if (typeof cost !== "bigint" || cost < 0n) throw new RangeError("route cost must be a non-negative bigint");
 		const max = 2n ** 62n - 1n;

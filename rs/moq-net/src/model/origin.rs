@@ -698,7 +698,13 @@ fn route_order<'a>(
 
 /// The `(hops, cost, source, epoch, auth)` metadata an announce cursor delivers alongside a
 /// prefix.
-type RouteMeta = (Hops, Cost, Source, Option<crate::Epoch>, Option<crate::auth::Credential>);
+type RouteMeta = (
+	Hops,
+	Cost,
+	Source,
+	Option<crate::Epoch>,
+	Option<crate::auth::Credential>,
+);
 
 /// The earlier of two optional deadlines.
 fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {

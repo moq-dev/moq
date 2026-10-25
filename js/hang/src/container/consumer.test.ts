@@ -2,7 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { Manual, type Micro, Milli, Nano } from "@moq/clock";
 import { Format as LocFormat } from "@moq/loc";
-import { Group, Error as NetError, SessionCode, StreamCode, Time, Track, Varint } from "@moq/net";
+import { type Group, Error as NetError, SessionCode, StreamCode, Time, Track, Varint } from "@moq/net";
 import { decodeInitSegment, type InitSegment } from "../cmaf/decode.ts";
 import { Format as CmafFormat } from "../cmaf/format.ts";
 import { Consumer, type Read } from "./consumer.ts";
@@ -1502,7 +1502,6 @@ test("Consumer does not duration-skip when the gap is not covered", async () => 
 	const g1 = track.createGroup(1);
 	g1.writeFrame({ payload: new Uint8Array([33]), timestamp: Time.Timestamp.now() });
 	g1.close();
-
 
 	// Let the consumer settle on group 0, then extend it before closing.
 	await new Promise((resolve) => setTimeout(resolve, 20));

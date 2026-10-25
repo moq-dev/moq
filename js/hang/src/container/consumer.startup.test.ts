@@ -1,6 +1,6 @@
 import { expect, jest, onTestFinished, spyOn, test } from "bun:test";
 import { Micro, Milli } from "@moq/clock";
-import { Group, Error as NetError, StreamCode, Time, Track } from "@moq/net";
+import { type Group, Error as NetError, StreamCode, Time, Track } from "@moq/net";
 import { Consumer, type Read } from "./consumer.ts";
 import { encodeFrame, Format } from "./legacy.ts";
 

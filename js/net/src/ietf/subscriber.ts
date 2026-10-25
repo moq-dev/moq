@@ -19,7 +19,7 @@ import {
 	sessionCause,
 	unauthorized,
 } from "../error.ts";
-import * as netGroup from "../group.ts";
+import type * as netGroup from "../group.ts";
 import { Cost, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
 import {
 	finalSequence,

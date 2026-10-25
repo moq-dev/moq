@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from moq_ffi import MoqAuth, MoqCredential, MoqBandwidth, MoqBandwidthConsumer, MoqReservation, MoqSession
+from moq_ffi import MoqAuth, MoqBandwidth, MoqBandwidthConsumer, MoqCredential, MoqReservation, MoqSession
 
 from .origin import OriginConsumer, OriginProducer
 from .publish import TrackDemand

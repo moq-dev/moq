@@ -19,7 +19,7 @@
 import { Manual, type Micro, Milli, Nano, type Second } from "@moq/clock";
 import type * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
-import { Group, Time, Track } from "@moq/net";
+import { type Group, Time, Track } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import { type Arrival as Diagnostic, gap } from "../arrivals";
 import { type Delay, Sync } from "../sync";
