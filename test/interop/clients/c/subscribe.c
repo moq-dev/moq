@@ -137,18 +137,29 @@ static void on_frame(void *ud, int32_t frame) {
 }
 
 // Writes each decoded audio frame to its rendition's files for tone.py, until enough has arrived.
+// A gap or an encoder end before then fails the run, as the Rust client does.
 // Runs on moq-c's runtime thread, the only writer, so the files need no lock.
-static void on_audio(void *ud, int32_t frame) {
+static void on_audio(void *ud, int32_t id) {
     audio_t *a = (audio_t *)ud;
     ctx_t *c = a->ctx;
-    if (frame <= 0) { // 0 = ended, negative = error
-        if (frame < 0) fprintf(stderr, "audio decode error: %d\n", frame);
+    if (id <= 0) { // 0 = ended, negative = error
+        if (id < 0) fprintf(stderr, "audio decode error: %d\n", id);
         done(c, &a->done);
         return;
     }
-    moq_audio_frame f;
-    memset(&f, 0, sizeof(f));
-    if (moq_decode_audio_frame((uint32_t)frame, &f) == 0 && a->samples < a->want) {
+    moq_audio_read read;
+    memset(&read, 0, sizeof(read));
+    int32_t status = moq_decode_audio_read((uint32_t)id, &read);
+    if (status == 0 && read.kind != MOQ_DECODE_READ_FRAME && a->samples < a->want) {
+        pthread_mutex_lock(&c->mu);
+        if (!c->audio_error) {
+            c->audio_error = read.kind == MOQ_DECODE_READ_GAP ? "audio gap" : "audio track ended early";
+        }
+        pthread_cond_broadcast(&c->cv);
+        pthread_mutex_unlock(&c->mu);
+    }
+    moq_audio_frame f = read.frame;
+    if (status == 0 && read.kind == MOQ_DECODE_READ_FRAME && a->samples < a->want) {
         uint64_t samples = f.data_size / a->frame_bytes;
         fprintf(a->log, "%llu %llu\n", (unsigned long long)f.timestamp_us, (unsigned long long)samples);
         fwrite(f.data, 1, f.data_size, a->pcm);
@@ -162,8 +173,9 @@ static void on_audio(void *ud, int32_t frame) {
             pthread_mutex_unlock(&c->mu);
         }
     }
-    moq_decode_audio_frame_free((uint32_t)frame);
+    moq_decode_audio_read_free((uint32_t)id);
 }
+
 
 // Whether every audio rendition has decoded enough, once any has started. Called under the lock.
 static int audio_got(ctx_t *c) {
