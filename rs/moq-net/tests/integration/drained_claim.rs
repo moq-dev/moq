@@ -2,7 +2,7 @@
 
 //! A relay's front for a path ends once unread, end to end over real sessions.
 //!
-//! Two workers each claim the `pool` prefix with `origin::Producer::dynamic` and
+//! Two workers each claim the `pool` prefix with `origin::Producer::requests` and
 //! announce it to relay `R` on their own sessions, the way a transcode pool does. A
 //! viewer on `R` reads `pool/p` from worker `A`, over the cheaper link, which then
 //! closes that output and drains its session. Nothing tells `R` the output closed, so
@@ -46,7 +46,7 @@ async fn settle() {
 /// A worker claiming `pool`, answering each request with an output whose `video`
 /// track carries the worker's name.
 struct Worker {
-	_claim: Rc<origin::Dynamic>,
+	_claim: Rc<origin::Requests>,
 	/// Each output with its track, which would end once its producer drops.
 	outputs: Rc<RefCell<Vec<(broadcast::Producer, track::Producer)>>>,
 	origin: origin::Producer,
@@ -55,7 +55,7 @@ struct Worker {
 impl Worker {
 	fn new(hop: u64, name: &'static str) -> Self {
 		let origin = produce_origin(hop);
-		let claim = Rc::new(origin.dynamic("pool").unwrap());
+		let claim = Rc::new(origin.requests("pool").unwrap());
 		let outputs = Rc::new(RefCell::new(Vec::new()));
 		let (handler, served) = (claim.clone(), outputs.clone());
 		drop(moq_clock::sim::spawn(async move {

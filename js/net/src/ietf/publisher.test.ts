@@ -341,7 +341,7 @@ test("TRACK_STATUS outside the grant is refused on every draft", async () => {
 		const session = new NativeSession(pair.server, version, true);
 		const grant = new Signal<Grant | undefined>(nothing());
 		const { pub, origin } = publisher(pair.server, { session, grant });
-		const requests = origin.dynamicRoute(Path.from("room")).requested();
+		const requests = origin.requestsRoute(Path.from("room")).requested();
 
 		const outside = requestStream(version);
 		await pub.runTrackStatusRequest(trackStatus("room"), outside.stream);
@@ -368,7 +368,7 @@ test("a second GOAWAY on an unanswered SUBSCRIBE closes the session", async () =
 		const pair = createMockTransportPair(ALPNS[version]);
 		const session = new NativeSession(pair.server, version, true);
 		const { pub, origin } = publisher(pair.server, { session });
-		const requests = origin.dynamic(Path.from("room")).requested();
+		const requests = origin.requests(Path.from("room")).requested();
 
 		const held = requestStream(version);
 		const task = pub.runSubscribe(
@@ -424,7 +424,7 @@ test("a cancelled TRACK_STATUS releases its demand on every draft", async () => 
 		const pair = createMockTransportPair(ALPNS[version]);
 		const session = new NativeSession(pair.server, version, true);
 		const { pub, origin } = publisher(pair.server, { session });
-		const requests = origin.dynamicRoute(Path.from("room")).requested();
+		const requests = origin.requestsRoute(Path.from("room")).requested();
 
 		// The broadcast is still resolving: its handler never answers.
 		const early = requestStream(version);
@@ -474,7 +474,7 @@ test("a SUBSCRIBE withdrawn during setup releases its demand on every draft", as
 		const pair = createMockTransportPair(ALPNS[version]);
 		const session = new NativeSession(pair.server, version, true);
 		const { pub, origin } = publisher(pair.server, { session });
-		const requests = origin.dynamicRoute(Path.from("room")).requested();
+		const requests = origin.requestsRoute(Path.from("room")).requested();
 
 		// The broadcast is still resolving: its handler never answers.
 		const early = requestStream(version);
@@ -675,7 +675,7 @@ test("reserved namespace requests get DOES_NOT_EXIST while other dot namespaces 
 			// Navigation segments cannot be published. A covering application
 			// route still proves these reserved requests are refused before lookup.
 			const navigation = path.split("/")[0] === ".";
-			const claim = navigation ? origin.dynamic(Path.empty()) : undefined;
+			const claim = navigation ? origin.requests(Path.empty()) : undefined;
 			const requested = claim?.requested().next();
 			const broadcast = navigation ? undefined : publish(origin, Path.from(path));
 			const track = broadcast?.createTrack("video", { timescale: Timescale.MILLI });
@@ -1226,7 +1226,7 @@ test("a subscription outside a covering route's claim does not hear it", async (
 	const pair = createMockTransportPair(ALPN.DRAFT_19);
 	const { pub, origin } = publisher(pair.server, { requiresSolicitation: true });
 	const chat = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from("room/chat"))]));
-	const dynamic = chat.dynamicRoute(Path.from("room"));
+	const dynamic = chat.requestsRoute(Path.from("room"));
 
 	const subscription = await Stream.open(pair.client, { version: VERSION });
 	const accepted = await Stream.accept(pair.server, VERSION);
@@ -1258,8 +1258,8 @@ test("a subscription hears the best covering route its claim allows", async () =
 	const { pub, origin } = publisher(pair.server, { requiresSolicitation: true });
 	const scoped = (path: string) =>
 		origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from(path))]));
-	const chat = scoped("room/chat").dynamicRoute(Path.from("room"), { cost: 1n });
-	const video = scoped("room/video").dynamicRoute(Path.from("room"), { cost: 5n });
+	const chat = scoped("room/chat").requestsRoute(Path.from("room"), { cost: 1n });
+	const video = scoped("room/video").requestsRoute(Path.from("room"), { cost: 5n });
 
 	const subscription = await Stream.open(pair.client, { version: VERSION });
 	const accepted = await Stream.accept(pair.server, VERSION);
@@ -1299,8 +1299,8 @@ test("a subscription hears a broader covering route when the narrowest cannot se
 	});
 	const chat = origin
 		.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from("tenant/chat"))]))
-		.dynamicRoute(Path.from("tenant"));
-	const broad = origin.dynamicRoute(Path.empty(), { cost: 5n });
+		.requestsRoute(Path.from("tenant"));
+	const broad = origin.requestsRoute(Path.empty(), { cost: 5n });
 
 	const subscription = await Stream.open(pair.client, { version: VERSION });
 	const accepted = await Stream.accept(pair.server, VERSION);
@@ -1337,7 +1337,7 @@ test("a covering route's claim is compared relative to the served root", async (
 		requiresSolicitation: true,
 	});
 	const chat = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from("tenant/room/chat"))]));
-	const dynamic = chat.dynamicRoute(Path.from("tenant/room"));
+	const dynamic = chat.requestsRoute(Path.from("tenant/room"));
 
 	const subscription = await Stream.open(pair.client, { version: VERSION });
 	const accepted = await Stream.accept(pair.server, VERSION);

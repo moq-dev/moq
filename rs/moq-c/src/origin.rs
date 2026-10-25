@@ -118,7 +118,7 @@ impl AnnouncedRecord {
 
 struct DynamicEntry {
 	task: Task,
-	inner: Option<moq_net::origin::Dynamic>,
+	inner: Option<moq_net::origin::Requests>,
 }
 
 impl Origin {
@@ -338,7 +338,7 @@ impl Origin {
 		let origin = self.active.get(origin).ok_or(Error::OriginNotFound)?;
 		origin.driver.check()?;
 		let driver = origin.driver.clone();
-		let result = origin.producer.dynamic(prefix);
+		let result = origin.producer.requests(prefix);
 		origin.driver.check()?;
 		let inner = result?;
 		let (task, close) = Task::new(on_request);

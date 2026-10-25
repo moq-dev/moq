@@ -1,4 +1,4 @@
-//! A coalescing request queue drained by dynamic handlers.
+//! A coalescing request queue drained by request handlers.
 use std::{
 	borrow::Borrow,
 	collections::{HashMap, VecDeque},
@@ -7,7 +7,7 @@ use std::{
 
 /// Requests keyed by `K`, drained in FIFO order by a pool of handlers.
 ///
-/// This is the state shared between requesters and the `Dynamic` handlers that
+/// This is the state shared between requesters and the `Requests` handlers that
 /// serve them (origin broadcasts, broadcast tracks, track fetches), typically
 /// inside a [`kio::Shared`] so both sides work under one lock. It encodes two
 /// invariants in one place:
@@ -20,7 +20,7 @@ use std::{
 /// [`Self::pop`] hands out only the key: the entry stays pending (still
 /// joinable) until the caller explicitly removes it, on resolution or via
 /// [`Self::drain_queued`] when the last handler leaves.
-pub(super) struct Requests<K, V> {
+pub(super) struct RequestQueue<K, V> {
 	// Every pending request: queued or already handed to a handler.
 	pending: HashMap<K, Entry<V>>,
 	// The queued (not yet popped) subset, FIFO. Every key here is in `pending`.
@@ -36,7 +36,7 @@ struct Entry<V> {
 	queued: bool,
 }
 
-impl<K, V> Default for Requests<K, V> {
+impl<K, V> Default for RequestQueue<K, V> {
 	fn default() -> Self {
 		Self {
 			pending: HashMap::new(),
@@ -46,7 +46,7 @@ impl<K, V> Default for Requests<K, V> {
 	}
 }
 
-impl<K: Clone + Eq + Hash, V> Requests<K, V> {
+impl<K: Clone + Eq + Hash, V> RequestQueue<K, V> {
 	/// Join the pending request for `key`, queued or already handed out.
 	pub fn join<Q>(&mut self, key: &Q) -> Option<&mut V>
 	where
@@ -180,7 +180,7 @@ mod test {
 
 	#[test]
 	fn insert_gated_on_handlers() {
-		let mut requests = Requests::<u64, &str>::default();
+		let mut requests = RequestQueue::<u64, &str>::default();
 		assert_eq!(requests.insert(1, "a"), Err("a"));
 
 		requests.add_handler();
@@ -194,7 +194,7 @@ mod test {
 
 	#[test]
 	fn popped_stays_joinable_until_removed() {
-		let mut requests = Requests::<u64, &str>::default();
+		let mut requests = RequestQueue::<u64, &str>::default();
 		requests.add_handler();
 		assert!(requests.insert(1, "a").is_ok());
 
@@ -210,7 +210,7 @@ mod test {
 
 	#[test]
 	fn remove_if_guards_identity() {
-		let mut requests = Requests::<u64, &str>::default();
+		let mut requests = RequestQueue::<u64, &str>::default();
 		requests.add_handler();
 		assert!(requests.insert(1, "old").is_ok());
 
@@ -224,7 +224,7 @@ mod test {
 
 	#[test]
 	fn take_after_pop_keeps_the_queue_order() {
-		let mut requests = Requests::<u64, &str>::default();
+		let mut requests = RequestQueue::<u64, &str>::default();
 		requests.add_handler();
 		for (key, value) in [(1, "a"), (2, "b"), (3, "c")] {
 			assert!(requests.insert(key, value).is_ok());
@@ -238,7 +238,7 @@ mod test {
 
 	#[test]
 	fn drain_queued_spares_popped() {
-		let mut requests = Requests::<u64, &str>::default();
+		let mut requests = RequestQueue::<u64, &str>::default();
 		requests.add_handler();
 		assert!(requests.insert(1, "handed out").is_ok());
 		assert!(requests.insert(2, "queued").is_ok());

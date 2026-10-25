@@ -238,7 +238,7 @@ async fn a_fetched_untimed_frame_arrives_untimed() {
 	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-19"] {
 		let chain = Chain::new(&[version]).await;
 		let broadcast = chain.nodes[0].create_broadcast("room").unwrap();
-		let mut dynamic = broadcast.dynamic();
+		let mut dynamic = broadcast.requests();
 		broadcast.announce(Default::default()).unwrap();
 		moq_clock::sleep(Duration::from_secs(1)).await;
 
@@ -248,7 +248,7 @@ async fn a_fetched_untimed_frame_arrives_untimed() {
 			futures::future::Either::Left((request, _)) => request.expect("the track request reaches the publisher"),
 			futures::future::Either::Right(_) => panic!("nothing answered the track"),
 		};
-		let groups = request.dynamic();
+		let groups = request.requests();
 		let _track = request.accept(untimed());
 		let request = match futures::future::select(std::pin::pin!(groups.requested_fill()), &mut waiting).await {
 			futures::future::Either::Left((request, _)) => request.expect("the fetch reaches the publisher"),

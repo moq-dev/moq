@@ -1279,7 +1279,7 @@ mod tests {
 			Default::default(),
 		);
 		let broadcast = crate::broadcast::Info::default().produce();
-		let lister = Arc::new(broadcast.dynamic().lister().unwrap());
+		let lister = Arc::new(broadcast.requests().lister().unwrap());
 		let tracks = broadcast.consume().tracks().unwrap();
 		let listening = subscriber.listen(PathOwned::from("bcast"), lister);
 		Harness {
@@ -1365,7 +1365,7 @@ mod tests {
 			kio::Pending<crate::track::Subscribing>,
 			moq_clock::sim::JoinHandle<()>,
 		) {
-			let mut dynamic = self._broadcast.dynamic();
+			let mut dynamic = self._broadcast.requests();
 			let track = self._broadcast.consume().track(name).unwrap();
 			let reader = track.subscribe(None);
 			let request = dynamic.requested_track().await.expect("no track requested");

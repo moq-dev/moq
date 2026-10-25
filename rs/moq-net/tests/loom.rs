@@ -462,7 +462,7 @@ fn a_fetch_never_joins_a_withdrawn_attempt() {
 	model(|| {
 		let broadcast = broadcast::Info::new().produce();
 		let track = broadcast.create_track("video", None).expect("create track");
-		let dynamic = track.dynamic();
+		let dynamic = track.requests();
 		let consumer = track.consume();
 
 		let first = consumer.fetch_group(5, None);
@@ -523,7 +523,7 @@ fn a_request_never_joins_a_retiring_front() {
 fn a_refused_answer_is_never_announced() {
 	model(|| {
 		let (producer, mut driver) = origin::Producer::new(origin::Config::new(Hop::new(1).unwrap()));
-		let claim = producer.dynamic("room").unwrap();
+		let claim = producer.requests("room").unwrap();
 		let pending = producer.consume().request_broadcast("room/alice", None);
 		driver
 			.poll(moq_net::time::Instant::now(), &kio::Waiter::noop())

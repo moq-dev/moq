@@ -59,7 +59,7 @@ class BroadcastState {
 	requests = new Map<string, track.Producer>();
 	lookups = new WeakMap<track.Producer, Lookups>();
 	// Whether something answers on-demand track requests: a wire layer's consumed broadcast, or a
-	// publisher that has started pulling them. The counterpart of a live Rust `broadcast::Dynamic`;
+	// publisher that has started pulling them. The counterpart of a live Rust `broadcast::Requests`;
 	// without one, a track nobody publishes is `NotFound` rather than a request nobody will answer.
 	served = false;
 	// Live consumer handles sharing this state (see {@link Consumer.clone}). The broadcast

@@ -1755,7 +1755,7 @@ async fn json_stream_roundtrip() {
 #[tokio::test]
 async fn json_on_requested_track() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let dynamic = broadcast.dynamic().unwrap();
+	let dynamic = broadcast.requests().unwrap();
 	let config = MoqJsonStreamConfig { compression: false };
 
 	// The subscribe stays pending until the request is accepted, so run it concurrently.
@@ -1820,7 +1820,7 @@ async fn json_consumer_takes_an_unread_track() {
 #[tokio::test]
 async fn track_request_demand_survives_accept() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let dynamic = broadcast.dynamic().unwrap();
+	let dynamic = broadcast.requests().unwrap();
 	let consumer = broadcast.consume().unwrap();
 	let subscribe = tokio::spawn(async move { consumer.subscribe_track("events".into(), None).await });
 	let request = dynamic.requested_track().await.unwrap();
@@ -1845,7 +1845,7 @@ async fn track_request_demand_survives_accept() {
 #[tokio::test]
 async fn track_request_demand_ends_on_rejection() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let dynamic = broadcast.dynamic().unwrap();
+	let dynamic = broadcast.requests().unwrap();
 	let consumer = broadcast.consume().unwrap();
 	let subscribe = tokio::spawn(async move { consumer.subscribe_track("events".into(), None).await });
 	let request = dynamic.requested_track().await.unwrap();
@@ -1859,7 +1859,7 @@ async fn track_request_demand_ends_on_rejection() {
 #[tokio::test]
 async fn dynamic_track_request() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let dynamic = broadcast.dynamic().unwrap();
+	let dynamic = broadcast.requests().unwrap();
 	let consumer = broadcast.consume().unwrap();
 
 	// The subscribe stays pending until the request is accepted below, so run it on a
@@ -2077,7 +2077,7 @@ async fn raw_group_abort_reaches_consumer() {
 #[tokio::test]
 async fn dynamic_track_request_can_abort() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let dynamic = broadcast.dynamic().unwrap();
+	let dynamic = broadcast.requests().unwrap();
 	let consumer = broadcast.consume().unwrap();
 
 	// The subscribe stays pending until the request is resolved; aborting an
@@ -2438,7 +2438,7 @@ async fn media_group_fails_loudly_on_bad_containers() {
 async fn dynamic_track_serves_fetch_miss_and_priority() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast.publish_track("events".into(), Some(timed_info())).unwrap();
-	let dynamic = track.dynamic().unwrap();
+	let dynamic = track.requests().unwrap();
 	let consumer = broadcast.consume().unwrap();
 
 	let fetch = tokio::spawn(async move {
@@ -2489,7 +2489,7 @@ async fn dynamic_track_serves_fetch_miss_and_priority() {
 async fn fill_goes_unused_when_the_fetcher_leaves() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast.publish_track("events".into(), None).unwrap();
-	let dynamic = track.dynamic().unwrap();
+	let dynamic = track.requests().unwrap();
 	let consumer = broadcast.consume().unwrap();
 
 	let fetch = tokio::spawn(async move { consumer.fetch_group("events".into(), 5, None).await });
@@ -2518,7 +2518,7 @@ async fn fill_goes_unused_when_the_fetcher_leaves() {
 async fn dynamic_track_rejects_fetch_miss() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast.publish_track("events".into(), None).unwrap();
-	let dynamic = track.dynamic().unwrap();
+	let dynamic = track.requests().unwrap();
 	let consumer = broadcast.consume().unwrap();
 
 	let fetch = tokio::spawn(async move { consumer.fetch_group("events".into(), 5, None).await });
@@ -2559,7 +2559,7 @@ async fn fetch_unknown_track_is_not_found() {
 #[tokio::test]
 async fn requested_track_dynamic_survives_accept() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let broadcast_dynamic = broadcast.dynamic().unwrap();
+	let broadcast_dynamic = broadcast.requests().unwrap();
 	let consumer = broadcast.consume().unwrap();
 
 	let fetch = tokio::spawn(async move { consumer.fetch_group("archive".into(), 9, None).await });
@@ -2567,7 +2567,7 @@ async fn requested_track_dynamic_survives_accept() {
 		.await
 		.expect("timed out waiting for track request")
 		.unwrap();
-	let track_dynamic = request.dynamic().unwrap();
+	let track_dynamic = request.requests().unwrap();
 	let _track = request.accept(Some(timed_info())).unwrap();
 
 	let fill = tokio::time::timeout(TIMEOUT, track_dynamic.requested_fill())
@@ -2679,7 +2679,7 @@ async fn track_stream_producer_publishes_its_last_access_unit() {
 #[tokio::test]
 async fn requested_track_keeps_its_name() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let dynamic = broadcast.dynamic().unwrap();
+	let dynamic = broadcast.requests().unwrap();
 	let consumer = broadcast.consume().unwrap();
 	let subscribe = tokio::spawn(async move {
 		MoqMediaTrackConsumer::subscribe(
@@ -2712,7 +2712,7 @@ async fn requested_track_keeps_its_name() {
 #[tokio::test]
 async fn dynamic_track_request_can_publish_media() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let dynamic = broadcast.dynamic().unwrap();
+	let dynamic = broadcast.requests().unwrap();
 	let consumer = broadcast.consume().unwrap();
 	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&consumer).await.unwrap();
 
@@ -3144,7 +3144,7 @@ async fn announced_filters_patterns_and_reports_captures() {
 		})
 		.unwrap();
 
-	let _broad = origin.dynamic("room".into()).unwrap();
+	let _broad = origin.requests("room".into()).unwrap();
 	let overlap = next_announced(&announced).await;
 	assert_eq!(overlap.prefix, "room");
 	assert_eq!(overlap.captures, None, "an overlap does not pin the wildcard");
@@ -4159,8 +4159,8 @@ async fn announced_broadcast() {
 	_broadcast.close().unwrap();
 }
 
-fn serve(origin: &MoqOriginProducer, prefix: &str) -> Arc<MoqOriginDynamic> {
-	origin.dynamic(prefix.into()).unwrap()
+fn serve(origin: &MoqOriginProducer, prefix: &str) -> Arc<MoqOriginRequests> {
+	origin.requests(prefix.into()).unwrap()
 }
 
 #[tokio::test]
@@ -5415,7 +5415,7 @@ async fn announced_broadcast_hands_out_the_instance_again_after_an_end() {
 		.unwrap();
 
 	// A covering claim answering under the same epoch.
-	let dynamic = origin.inner().inner.dynamic("").unwrap();
+	let dynamic = origin.inner().inner.requests("").unwrap();
 	broadcast.unannounce().unwrap();
 	let again = tokio::spawn(async move { followed.available().await });
 	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_broadcast())

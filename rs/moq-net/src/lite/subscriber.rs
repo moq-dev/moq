@@ -1837,7 +1837,7 @@ struct MintedSource {
 	epoch: Option<crate::Epoch>,
 	source: crate::model::broadcast::SourceGuard,
 	/// The source's track handler, registered before its requester could ask for a track.
-	dynamic: crate::broadcast::Dynamic,
+	dynamic: crate::broadcast::Requests,
 	/// Closes when the route that minted the source goes.
 	route: kio::Consumer<()>,
 }
@@ -1853,7 +1853,7 @@ struct SourceServe {
 	path: PathOwned,
 	epoch: Option<crate::Epoch>,
 	source: crate::model::broadcast::SourceGuard,
-	dynamic: crate::broadcast::Dynamic,
+	dynamic: crate::broadcast::Requests,
 	route: kio::Consumer<()>,
 	// A dedicated close-watch handle, since each pending operation needs its own.
 	closed: Transport,
@@ -2112,7 +2112,7 @@ mod tests {
 	fn feed_fetch(sequence: u64) -> (track::Producer, kio::Pending<track::Fetching>, track::Fill) {
 		let info = track::Info::default().with_timescale(None);
 		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", info);
-		let dynamic = track.dynamic();
+		let dynamic = track.requests();
 		let fetching = track.consume().fetch_group(sequence, None);
 		let req = dynamic.requested_fill().now_or_never().expect("queued").unwrap();
 		(track, fetching, req)
@@ -2288,7 +2288,7 @@ mod tests {
 	) -> (track::Producer, Vec<kio::Pending<track::Fetching>>, Vec<track::Fill>) {
 		let info = track::Info::default().with_timescale(None);
 		let track = track::Producer::new(Arc::new(crate::broadcast::Info::default()), "video", info);
-		let dynamic = track.dynamic();
+		let dynamic = track.requests();
 		let mut callers = Vec::new();
 		let mut requests = Vec::new();
 		for sequence in sequences {
@@ -2460,7 +2460,7 @@ mod tests {
 		let sub = feed_sub(&tail).await;
 		let info = track::Info::default().with_timescale(None);
 		let mut track = track::Producer::new(Arc::new(crate::broadcast::Info::default()), "video", info);
-		let dynamic = track.dynamic();
+		let dynamic = track.requests();
 		let mut reader = track.subscribe(
 			Subscription::default()
 				.with_range(0..)
@@ -2514,7 +2514,7 @@ mod tests {
 		let tail = kio::Producer::new(Tail::default());
 		let sub = feed_sub(&tail).await;
 		let (track, caller, req) = feed_fetch(1);
-		let dynamic = track.dynamic();
+		let dynamic = track.requests();
 		let mut fetches = FeedFetches::new(&clock);
 		fetches.push(req, &track.consume());
 		fetches.poll(&sub, start, &kio::Waiter::noop());
@@ -2542,7 +2542,7 @@ mod tests {
 		let tail = kio::Producer::new(Tail::default());
 		let sub = feed_sub(&tail).await;
 		let (track, mut callers, requests) = feed_batch([1, 2]);
-		let dynamic = track.dynamic();
+		let dynamic = track.requests();
 		let mut fetches = FeedFetches::new(&clock);
 		fetches.max = 2;
 		for req in requests {
@@ -3787,7 +3787,7 @@ mod tests {
 		});
 
 		let broadcast = crate::broadcast::Info::new().produce();
-		let mut dynamic = broadcast.dynamic();
+		let mut dynamic = broadcast.requests();
 		let consumer = broadcast.consume();
 		let mut waiting = std::pin::pin!(consumer.track("video").unwrap().subscribe(None));
 		assert!(
@@ -3882,7 +3882,7 @@ mod tests {
 			});
 
 			let broadcast = crate::broadcast::Info::new().produce();
-			let mut dynamic = broadcast.dynamic();
+			let mut dynamic = broadcast.requests();
 			let consumer = broadcast.consume();
 			let mut waiting = Box::pin(consumer.track("video").unwrap().subscribe(None));
 			assert!(
@@ -3937,7 +3937,7 @@ mod tests {
 		});
 		let broadcast = crate::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let dynamic = broadcast.dynamic();
+		let dynamic = broadcast.requests();
 		let route = kio::Producer::new(());
 		let serve = SourceServe::new(
 			subscriber,
@@ -4060,7 +4060,7 @@ mod tests {
 		});
 
 		let broadcast = crate::broadcast::Info::new().produce();
-		let mut dynamic = broadcast.dynamic();
+		let mut dynamic = broadcast.requests();
 		let consumer = broadcast.consume();
 		let mut waiting = Box::pin(consumer.track("video").unwrap().subscribe(None));
 		assert!(futures::poll!(waiting.as_mut()).is_pending());
@@ -4290,7 +4290,7 @@ mod tests {
 			if !dynamic_first {
 				// Isolate the subscription-changed arm, which can observe a concurrent
 				// abort after the dynamic-request poll returned Pending.
-				serving.dynamic = other.dynamic();
+				serving.dynamic = other.requests();
 			}
 			serving.serving.clone().abort(Error::ProtocolViolation).unwrap();
 			assert!(matches!(
@@ -5895,7 +5895,7 @@ impl Announced {
 	}
 
 	/// Attach a route, queued for its first serve pass.
-	fn attach(&mut self, path: PathOwned, route: crate::origin::Route, dynamic: crate::origin::Dynamic) {
+	fn attach(&mut self, path: PathOwned, route: crate::origin::Route, dynamic: crate::origin::Requests) {
 		let wake = crate::util::QueueWake::new(path.clone(), self.ready.clone());
 		let route = AnnouncedRoute::new(route, dynamic, wake);
 		route.waker.wake_by_ref();
@@ -5915,7 +5915,7 @@ impl Announced {
 			return false;
 		}
 		// An error means the prefix is outside our origin's scope, so don't serve it.
-		match subscriber.origin.dynamic_route(&path, route.clone()) {
+		match subscriber.origin.requests_route(&path, route.clone()) {
 			Ok(dynamic) => {
 				self.attach(path, route, dynamic);
 				true
@@ -6013,7 +6013,7 @@ impl Announced {
 				// asks for before the serve machine first runs queues instead of failing
 				// `NotFound`. Accepted before the push, so the requester holds the source
 				// before its serve machine can see it unheld.
-				let dynamic = source.dynamic();
+				let dynamic = source.requests();
 				let validity = if entry.route.epoch.is_some() {
 					Default::default()
 				} else {
@@ -6082,7 +6082,7 @@ struct AnnouncedRoute {
 	/// without recomputing the chain.
 	route: crate::origin::Route,
 	/// Dropping it retracts the route and rejects its queued requests.
-	dynamic: crate::origin::Dynamic,
+	dynamic: crate::origin::Requests,
 	/// Closes as the route goes, which closes every source it minted.
 	live: kio::Producer<()>,
 	/// Whether the GOAWAY drain already re-priced this route.
@@ -6097,7 +6097,7 @@ struct AnnouncedRoute {
 impl AnnouncedRoute {
 	fn new(
 		route: crate::origin::Route,
-		dynamic: crate::origin::Dynamic,
+		dynamic: crate::origin::Requests,
 		wake: Arc<crate::util::QueueWake<PathOwned>>,
 	) -> Self {
 		Self {
@@ -6863,7 +6863,7 @@ struct ServeLoop {
 	/// Watches `serving`'s subscribers, to release the copy once nobody reads it.
 	demand: track::Demand,
 	/// Serve on-demand fetches of uncached groups from this session.
-	dynamic: track::Dynamic,
+	dynamic: track::Requests,
 	sub: Sub,
 	fetches: kio::Tasks<FillServeRun>,
 	/// Fetches a pre-lite-05 upstream has no FETCH for, held for the live feed.
@@ -7113,7 +7113,7 @@ impl ServeLoop {
 		// Register the fetch handler before accepting: `accept` releases the
 		// request's own fetch gate, and a cache-miss fetch queued while TRACK_INFO
 		// was in flight would be drained as NotFound in the gap.
-		let dynamic = request.dynamic();
+		let dynamic = request.requests();
 		// Lite-06+ resolves each subscription's start from its budget, so the floor
 		// the SUBSCRIBE asks for is not where delivery begins until SUBSCRIBE_START says.
 		let request = match serve.subscriber.version.resolves_start() {

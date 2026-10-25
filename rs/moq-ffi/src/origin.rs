@@ -67,7 +67,7 @@ impl TryFrom<MoqAnnounceRoute> for moq_net::origin::Route {
 /// Carried by `MoqAnnounceConsumer` events. A route claims capability, not
 /// inventory: by convention a publisher announces each broadcast's exact path,
 /// so subscribers can enumerate broadcasts, while a service advertises a prefix
-/// with `MoqOriginProducer::dynamic` and answers whatever is requested beneath it.
+/// with `MoqOriginProducer::requests` and answers whatever is requested beneath it.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct MoqRoute {
 	/// Hop ids of the relay hops the route traversed, oldest first. 0 is the
@@ -149,9 +149,9 @@ pub struct MoqAnnounceConsumer {
 ///
 /// Keeps its origin running, like a published broadcast, after every
 /// `MoqOriginProducer` is gone.
-pub struct MoqOriginDynamic {
+pub struct MoqOriginRequests {
 	slot: Slot,
-	task: std::sync::Mutex<Option<Arc<Task<OriginDynamic>>>>,
+	task: std::sync::Mutex<Option<Arc<Task<OriginRequests>>>>,
 }
 
 #[derive(uniffi::Object)]
@@ -174,17 +174,17 @@ struct Announced {
 	driver: Background,
 }
 
-/// The served route behind one `MoqOriginProducer::dynamic` handle, shared
+/// The served route behind one `MoqOriginProducer::requests` handle, shared
 /// between the handle and the task draining it. Emptied by the handle's cancel,
 /// which retracts the route: the task sees the empty slot and ends.
-type Slot = Arc<std::sync::Mutex<Option<moq_net::origin::Dynamic>>>;
+type Slot = Arc<std::sync::Mutex<Option<moq_net::origin::Requests>>>;
 
-struct OriginDynamic {
+struct OriginRequests {
 	slot: Slot,
 	driver: Background,
 }
 
-impl OriginDynamic {
+impl OriginRequests {
 	async fn requested_broadcast(&mut self) -> Result<Arc<MoqBroadcastRequest>, MoqError> {
 		let request = self
 			.driver
@@ -398,16 +398,16 @@ impl MoqOriginProducer {
 	/// the covering prefix and rejects the rest as they are requested. Hold
 	/// the returned handle while the route should stay advertised and missing
 	/// broadcasts should be served.
-	pub fn dynamic(&self, prefix: String) -> Result<Arc<MoqOriginDynamic>, MoqError> {
+	pub fn requests(&self, prefix: String) -> Result<Arc<MoqOriginRequests>, MoqError> {
 		let _guard = crate::ffi::enter();
 		self.inner.driver.check()?;
-		let result = self.inner.dynamic(prefix);
+		let result = self.inner.requests(prefix);
 		self.inner.driver.check()?;
 		let dynamic = result?;
 		let slot = Arc::new(std::sync::Mutex::new(Some(dynamic)));
-		Ok(Arc::new(MoqOriginDynamic {
+		Ok(Arc::new(MoqOriginRequests {
 			slot: slot.clone(),
-			task: std::sync::Mutex::new(Some(Arc::new(Task::new(OriginDynamic {
+			task: std::sync::Mutex::new(Some(Arc::new(Task::new(OriginRequests {
 				slot,
 				driver: self.inner.driver.clone(),
 			})))),
@@ -419,11 +419,11 @@ impl MoqOriginProducer {
 	/// The broadcast exists for nobody, on this origin or its peers, until
 	/// [`MoqBroadcastProducer::announce`]: until then announcement streams skip it
 	/// and requests for its path are unroutable. Announce after populating
-	/// tracks; an on-demand handler is [`Self::dynamic`]. Create, `dynamic()` if
+	/// tracks; an on-demand handler is [`Self::requests`]. Create, `requests()` if
 	/// tracks are served on demand, populate, then announce.
 	///
 	/// [`MoqBroadcastProducer::close`] ends it for good; dropping its last handle,
-	/// `dynamic()` included, does the same.
+	/// `requests()` included, does the same.
 	pub fn create_broadcast(&self, path: String) -> Result<Arc<MoqBroadcastProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		self.inner.driver.check()?;
@@ -509,10 +509,10 @@ impl MoqOriginConsumer {
 	}
 }
 
-// ---- MoqOriginDynamic ----
+// ---- MoqOriginRequests ----
 
 #[uniffi::export]
-impl MoqOriginDynamic {
+impl MoqOriginRequests {
 	/// Wait for the next broadcast requested through this handle's prefix.
 	///
 	/// Returns a [`MoqBroadcastRequest`]: accept it with a broadcast producer or reject
@@ -676,7 +676,7 @@ mod supervision_tests {
 			driver: completion.clone(),
 		});
 		let broadcast = origin.create_broadcast("retained".into()).unwrap();
-		let dynamic = broadcast.dynamic().unwrap();
+		let dynamic = broadcast.requests().unwrap();
 		drop(origin);
 		*trigger
 			.write()
@@ -705,7 +705,7 @@ mod supervision_tests {
 		});
 		let broadcast = origin.create_broadcast("retained".into()).unwrap();
 		// A dynamic handle outlives the consumed producer, so only an explicit close ends it.
-		let _dynamic = broadcast.dynamic().unwrap();
+		let _dynamic = broadcast.requests().unwrap();
 		let consumer = broadcast.state.lock().unwrap().as_ref().unwrap().broadcast.consume();
 		let catalog = crate::media::MoqMediaCatalogProducer::new(broadcast.clone()).unwrap();
 		*trigger

@@ -160,7 +160,7 @@ final class SmokeTests: XCTestCase {
     func testOriginProducerIsConstructible() throws {
         let origin = OriginProducer(cacheCapacityBytes: 4096)
         _ = origin.consume()
-        _ = try origin.dynamic(prefix: "")
+        _ = try origin.requests(prefix: "")
     }
 
     func testBroadcastIsReachableOnlyWhileAnnounced() async throws {
@@ -235,7 +235,7 @@ final class SmokeTests: XCTestCase {
 
     func testDynamicServesARequestUnderAPrefix() async throws {
         let origin = OriginProducer()
-        let dynamic = try origin.dynamic(prefix: "live")
+        let dynamic = try origin.requests(prefix: "live")
         let pending = Task {
             try await origin.consume().requestBroadcast(path: "live/cam")
         }

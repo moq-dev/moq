@@ -1242,7 +1242,7 @@ mod tests {
 		assert_eq!(written(&mut writes).await.as_ref(), b"low-0");
 
 		// The better rendition lives in a broadcast whose request is never answered.
-		let _handler = origin.dynamic("missing").unwrap();
+		let _handler = origin.requests("missing").unwrap();
 		let mut config = VideoConfig::new(VideoCodec::VP8);
 		config.container = hang::catalog::Container::Legacy;
 		config.coded_width = Some(1920);

@@ -3758,7 +3758,7 @@ fn consume_announced_delivers_a_takeover_once(dynamic_at: &str) {
 	let dynamic = {
 		let _runtime = crate::ffi::RUNTIME.enter();
 		let origin = crate::Id::try_from(origin).unwrap();
-		State::lock().origin.get(origin).unwrap().dynamic(dynamic_at).unwrap()
+		State::lock().origin.get(origin).unwrap().requests(dynamic_at).unwrap()
 	};
 	let cb = Callback::new();
 	let path = b"live";
@@ -3801,10 +3801,10 @@ fn consume_announced_delivers_a_held_takeover_once() {
 }
 
 /// Serve `prefix` on `origin` dynamically.
-fn serve_dynamic(origin: u32, prefix: &str) -> moq_net::origin::Dynamic {
+fn serve_dynamic(origin: u32, prefix: &str) -> moq_net::origin::Requests {
 	let _runtime = crate::ffi::RUNTIME.enter();
 	let origin = crate::Id::try_from(origin).unwrap();
-	State::lock().origin.get(origin).unwrap().dynamic(prefix).unwrap()
+	State::lock().origin.get(origin).unwrap().requests(prefix).unwrap()
 }
 
 /// Wait for the broadcast at `path` on `origin`, delivering each instance through `cb`.

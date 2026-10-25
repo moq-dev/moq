@@ -24,7 +24,7 @@ async fn routing(version: &str, cluster: bool) {
 	let publisher = origin(1);
 	let relay = origin(2);
 	let reader = origin(4);
-	let prefix = Arc::new(moq_net::fuzz::dynamic_route(&publisher, PREFIX, Default::default()).unwrap());
+	let prefix = Arc::new(moq_net::fuzz::requests_route(&publisher, PREFIX, Default::default()).unwrap());
 	let broadcast = broadcast::Info::new().produce();
 	let track = broadcast.create_track("test", moq_net::track::Info::default()).unwrap();
 	let serving = prefix.clone();

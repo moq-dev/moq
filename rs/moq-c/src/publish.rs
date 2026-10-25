@@ -43,9 +43,9 @@ struct GroupRequest {
 /// What a request handler serves.
 enum Dynamic {
 	/// Track requests on a broadcast, remembered so media can be published onto them.
-	Broadcast(moq_net::broadcast::Dynamic, Id, Finished),
+	Broadcast(moq_net::broadcast::Requests, Id, Finished),
 	/// Group requests (fetches of uncached groups) on a track.
-	Track(moq_net::track::Dynamic),
+	Track(moq_net::track::Requests),
 }
 
 /// A published broadcast: its producer, its catalog, and the renditions the caller authored by
@@ -663,7 +663,7 @@ impl Publish {
 	///
 	/// Without a live handler an unknown track name is refused, as before.
 	pub fn dynamic(&mut self, broadcast: Id, on_request: OnStatus) -> Result<Id, Error> {
-		let dynamic = self.producer(broadcast)?.dynamic();
+		let dynamic = self.producer(broadcast)?.requests();
 		let Broadcast { driver, finished, .. } = self.broadcast(broadcast)?;
 		let dynamic = Dynamic::Broadcast(dynamic, broadcast, finished.clone());
 		self.spawn_dynamic(dynamic, on_request, driver.clone())
@@ -672,7 +672,7 @@ impl Publish {
 	/// Serve fetches of uncached groups on a raw track, delivering each as a group-request
 	/// handle via `on_group`.
 	pub fn track_dynamic(&mut self, track: Id, on_group: OnStatus) -> Result<Id, Error> {
-		let dynamic = self.tracks.get(track).ok_or(Error::TrackNotFound)?.dynamic();
+		let dynamic = self.tracks.get(track).ok_or(Error::TrackNotFound)?.requests();
 		self.spawn_dynamic(Dynamic::Track(dynamic), on_group, Default::default())
 	}
 
@@ -686,7 +686,7 @@ impl Publish {
 			.get(request)
 			.ok_or(Error::NotFound)?
 			.request
-			.dynamic();
+			.requests();
 		self.spawn_dynamic(Dynamic::Track(dynamic), on_group, Default::default())
 	}
 
@@ -1177,7 +1177,7 @@ mod supervision_tests {
 			.unwrap();
 		let producer = &publish.broadcast(broadcast).unwrap().producer;
 		// A dynamic handle outlives the consumed broadcast, so only an explicit close ends it.
-		let _dynamic = producer.dynamic();
+		let _dynamic = producer.requests();
 		let consumer = producer.consume();
 		*trigger
 			.write()

@@ -382,7 +382,7 @@ fn bench_stamp(c: &mut Criterion) {
 						let ctx = filled_track(n, &payload);
 						// A pending fetch keeps the landing index occupied beyond this batch,
 						// separating the no-reader fast path from an unrelated parked read.
-						let dynamic = waiting.then(|| ctx.track.dynamic());
+						let dynamic = waiting.then(|| ctx.track.requests());
 						let mut fetching = dynamic
 							.as_ref()
 							.map(|_| ctx.track.consume().fetch_group((2 * n + 1) as u64, None));

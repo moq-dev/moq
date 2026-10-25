@@ -4,8 +4,7 @@
 
 An encrypted broadcast producer answers requests for track names it never
 created or reserved, as a plaintext `moq-net` broadcast does. Its request
-handler (`dynamic()` today, `requests()` after
-[named requests](/quest/m1/api-audit/requests.md)) mirrors moq-net's and
+handler (`requests()`) mirrors moq-net's and
 yields requests named by their semantic name, so a handler such as
 moq-stats' or moq-transcode's serves an encrypted broadcast unchanged. A
 request whose physical name does not open under the generation is answered

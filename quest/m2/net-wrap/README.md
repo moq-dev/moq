@@ -32,7 +32,7 @@ and its trait-versus-bridge comparison:
   that spawns adds the bound at its spawn site.
 - **Mirror moq-net's current API exactly.** The trait methods are the
   methods writers and readers call today, with the same names, arguments,
-  and errors: `create_track`, `reserve_track`, `dynamic`, `demand`,
+  and errors: `create_track`, `reserve_track`, `requests`, `demand`,
   `create_group(group::Info)`, `append_group`, `append_datagram`,
   `insert_datagram`, `write_frame`, `create_frame`, `write`, `finish`,
   `abort(self, Error)`, `closed`, `track(name)` then `.subscribe(..)`,

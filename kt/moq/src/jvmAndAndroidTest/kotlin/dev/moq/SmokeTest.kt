@@ -177,7 +177,7 @@ class SmokeTest {
     fun `origin alias constructs and consumes`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
             origin.consume().use { /* lifecycle smoke */ }
-            origin.dynamic("").use { /* dynamic origin smoke */ }
+            origin.requests("").use { /* dynamic origin smoke */ }
         }
     }
 
@@ -230,7 +230,7 @@ class SmokeTest {
     @Test
     fun `ending a broadcast ends it while a dynamic handle remains`() = runTest {
         BroadcastProducer().use { broadcast ->
-            broadcast.dynamic().use {
+            broadcast.requests().use {
                 val consumer = broadcast.consume()
                 // Releasing the producer alone would leave the dynamic handle holding it open.
                 broadcast.end()
@@ -621,7 +621,7 @@ class SmokeTest {
     @Test
     fun `dynamic serves a request under a prefix`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
-            origin.dynamic("live").use { dynamic ->
+            origin.requests("live").use { dynamic ->
                 val pending = async {
                     origin.consume().requestBroadcast("live/cam")
                 }

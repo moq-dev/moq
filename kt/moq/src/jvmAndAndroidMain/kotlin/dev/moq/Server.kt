@@ -29,7 +29,7 @@ class Server internal constructor(
      *
      * Advertise it with `announce` after populating tracks. `end()` ends it for
      * good; `close()` (or `use`) releases the handle, which ends it once no
-     * `dynamic()` handle remains.
+     * `requests()` handle remains.
      */
     fun createBroadcast(path: String): BroadcastProducer {
         val origin = publishOrigin ?: throw IllegalStateException("no publish origin configured")

@@ -27,18 +27,18 @@ from .origin import (
     BroadcastPrepared,
     BroadcastRequest,
     OriginConsumer,
-    OriginDynamic,
     OriginProducer,
+    OriginRequests,
 )
 from .publish import (
-    BroadcastDynamic,
     BroadcastProducer,
+    BroadcastRequests,
     Fill,
     GroupProducer,
     TrackDemand,
-    TrackDynamic,
     TrackProducer,
     TrackRequest,
+    TrackRequests,
 )
 from .server import Request, Server, Transport
 from .session import Auth, AuthToken, Bandwidth, Reservation, Session
@@ -99,7 +99,7 @@ __all__ = [
     "Backoff",
     "Bandwidth",
     "BroadcastConsumer",
-    "BroadcastDynamic",
+    "BroadcastRequests",
     "BroadcastPrepared",
     "BroadcastProducer",
     "BroadcastRequest",
@@ -122,7 +122,7 @@ __all__ = [
     "GroupConsumer",
     "GroupProducer",
     "OriginConsumer",
-    "OriginDynamic",
+    "OriginRequests",
     "OriginProducer",
     "Order",
     "Range",
@@ -134,7 +134,7 @@ __all__ = [
     "Subscription",
     "TrackConsumer",
     "TrackDemand",
-    "TrackDynamic",
+    "TrackRequests",
     "TrackInfo",
     "TrackProducer",
     "TrackRequest",

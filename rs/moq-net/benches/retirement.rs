@@ -22,7 +22,7 @@ fn retirement(c: &mut Criterion) {
 							|| {
 								let (origin, driver) = origin::Producer::new(origin::Config::default());
 								let routes: Vec<_> = (0..routes)
-									.map(|i| origin.dynamic(format!("route/{i}")).unwrap())
+									.map(|i| origin.requests(format!("route/{i}")).unwrap())
 									.collect();
 								let mut watches = Vec::new();
 								let mut controls = Vec::new();
@@ -46,7 +46,7 @@ fn retirement(c: &mut Criterion) {
 								(origin, driver, routes, watches, controls, pending)
 							},
 							|fixture| {
-								let replacement = fixture.0.dynamic("route/0/jobs").unwrap();
+								let replacement = fixture.0.requests("route/0/jobs").unwrap();
 								let refused = fixture
 									.5
 									.iter()

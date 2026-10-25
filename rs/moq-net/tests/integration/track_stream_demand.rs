@@ -101,7 +101,7 @@ async fn one_used_edge(version: &str, relays: usize, reorder: bool) {
 	let reader: &MockSession = &links.last().unwrap().client_transport;
 
 	let broadcast = nodes[0].create_broadcast("room").unwrap();
-	let mut dynamic = broadcast.dynamic();
+	let mut dynamic = broadcast.requests();
 	broadcast.announce(Default::default()).unwrap();
 	let broadcast_edges = record!(broadcast.demand());
 
@@ -204,7 +204,7 @@ async fn bare_handle_is_lazy(version: &str, relays: usize) {
 	}
 
 	let broadcast = nodes[0].create_broadcast("room").unwrap();
-	let mut dynamic = broadcast.dynamic();
+	let mut dynamic = broadcast.requests();
 	broadcast.announce(Default::default()).unwrap();
 	let broadcast_edges = record!(broadcast.demand());
 

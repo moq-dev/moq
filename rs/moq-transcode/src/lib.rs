@@ -75,7 +75,7 @@ pub struct Transcoder {
 	config: Config,
 	derived: moq_mux::catalog::Producer,
 	// Consumers asking for a rung before (or after) it exists queue here.
-	dynamic: moq_net::broadcast::Dynamic,
+	dynamic: moq_net::broadcast::Requests,
 	active: active::Producer,
 }
 
@@ -92,7 +92,7 @@ impl Transcoder {
 		// The catalog starts empty and fills in during `run`, exactly like a
 		// media importer that hasn't seen parameter sets yet.
 		let derived = moq_mux::catalog::Producer::new(&mut output, moq_mux::catalog::Config::default())?;
-		let dynamic = output.dynamic();
+		let dynamic = output.requests();
 
 		Ok(Self {
 			source,
@@ -1348,7 +1348,7 @@ mod tests {
 	/// The query held to resolve the track is demand that starts the live path,
 	/// and the live path serves the same sequences from the same
 	/// source, so the source publishes no group at all and serves this one
-	/// through a [`moq_net::track::Dynamic`] instead. That handle also parks the
+	/// through a [`moq_net::track::Requests`] instead. That handle also parks the
 	/// fetch at exactly the point in question: past the rung's handler, before
 	/// its `Fill::accept`.
 	#[tokio::test]
@@ -1356,7 +1356,7 @@ mod tests {
 		let mut source = source_catalog(320, 240);
 		// The source track carries no live groups; this serves them on demand, so
 		// the test decides when the rung's fetch gets past its source read.
-		let source_fetches = source._track.dynamic();
+		let source_fetches = source._track.requests();
 
 		let config = Config {
 			ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
@@ -1441,7 +1441,7 @@ mod tests {
 	async fn an_abandoned_fetch_encodes_nothing() {
 		let source = source_catalog(320, 240);
 		// Held, not served, until the abandoned fetch has let go of it.
-		let source_fetches = source._track.dynamic();
+		let source_fetches = source._track.requests();
 
 		let config = Config {
 			ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
@@ -1530,7 +1530,7 @@ mod tests {
 		let mut source_demand = source._track.demand();
 		// Parks the rung's own fetch of the group below, so that fetch is demand
 		// for as long as the caller holds it and nothing else serves it.
-		let _source_fetches = source._track.dynamic();
+		let _source_fetches = source._track.requests();
 
 		// Two frames, so the output's largest moves once both are encoded.
 		let mut group = source._track.create_group(0u64.into()).unwrap();
@@ -1623,7 +1623,7 @@ mod tests {
 			let mut source_demand = source._track.demand();
 			// Parks the rung's own fetch of the group below, so that fetch is
 			// demand for as long as the caller holds it and nothing else serves it.
-			let _source_fetches = source._track.dynamic();
+			let _source_fetches = source._track.requests();
 
 			let mut encoder = moq_video::encode::Encoder::new(&{
 				let mut config = moq_video::encode::Config::new(320, 240, moq_video::FrameRate::new(30, 1).unwrap());

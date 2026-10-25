@@ -611,7 +611,7 @@ struct NodePublisher {
 	/// Holds the broadcast's request queue open, so a subscriber asking for a
 	/// presence or prefix track parks until the next drain serves it instead
 	/// of being rejected `NotFound` on the spot.
-	dynamic: broadcast::Dynamic,
+	dynamic: broadcast::Requests,
 	local: HashMap<PathOwned, HashMap<Tier, SideSlots>>,
 	totals: TotalsTrack,
 	/// Held presence tracks, keyed by stats label.
@@ -1028,7 +1028,7 @@ impl NodePublisher {
 			}
 		}
 
-		let dynamic = broadcast.dynamic();
+		let dynamic = broadcast.requests();
 
 		Some(Self {
 			broadcast,

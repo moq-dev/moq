@@ -16,14 +16,14 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
  	/// without recomputing the chain.
  	route: crate::origin::Route,
  	/// Dropping it retracts the route and rejects its queued requests.
--	dynamic: crate::origin::Dynamic,
+-	dynamic: crate::origin::Requests,
 +	// MUTATION: never dropped, so a route outlives the session that announced it.
-+	dynamic: std::mem::ManuallyDrop<crate::origin::Dynamic>,
++	dynamic: std::mem::ManuallyDrop<crate::origin::Requests>,
  	/// Closes as the route goes, which closes every source it minted.
  	live: kio::Producer<()>,
  	/// Whether the GOAWAY drain already re-priced this route.
 @@ -3584,7 +3585,7 @@
- 	fn new(route: crate::origin::Route, dynamic: crate::origin::Dynamic, wake: Arc<RouteWake>) -> Self {
+ 	fn new(route: crate::origin::Route, dynamic: crate::origin::Requests, wake: Arc<RouteWake>) -> Self {
  		Self {
  			route,
 -			dynamic,

@@ -1650,7 +1650,7 @@ fn bench_time_end(c: &mut Criterion) {
 struct Fills {
 	_broadcast: broadcast::Producer,
 	_track: track::Producer,
-	dynamic: track::Dynamic,
+	dynamic: track::Requests,
 	readers: Vec<track::Subscriber>,
 	runs: u64,
 }
@@ -1659,7 +1659,7 @@ impl Fills {
 	fn new(readers: usize, runs: u64) -> Self {
 		let broadcast = broadcast::Info::default().produce();
 		let mut track = broadcast.create_track("bench", timed()).unwrap();
-		let dynamic = track.dynamic();
+		let dynamic = track.requests();
 		// The feed starts past every run, so each is a miss asked at once.
 		let start = runs * 2;
 		track.start_at(start).unwrap();

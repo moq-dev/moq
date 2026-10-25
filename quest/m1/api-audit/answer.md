@@ -20,7 +20,7 @@ public-model goal was dropped
 - Drop every planned public addition: `answer_source`, the unused-race
   family (`poll_unheld`, `close_unheld`, group `poll_unused` and
   `abort_unused`, `reject_unused`), `Producer::empty`/`Consumer::empty`,
-  `Dynamic::withdrawn`, JS `Origin.Producer.fallback()`, and JS
+  `origin::Requests::withdrawn`, JS `Origin.Producer.fallback()`, and JS
   `Broadcast.requested` (deferred until a JS app needs it).
 - Delete `wire.ts` `OriginConsumer.broadcasts`: registered, never read.
 

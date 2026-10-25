@@ -37,7 +37,7 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
 -	source: crate::model::broadcast::SourceGuard,
 +	// MUTATION: never dropped, so a session that ends keeps every source it minted alive.
 +	source: std::mem::ManuallyDrop<crate::model::broadcast::SourceGuard>,
- 	dynamic: crate::broadcast::Dynamic,
+ 	dynamic: crate::broadcast::Requests,
  	route: kio::Consumer<()>,
  	// A dedicated close-watch handle, since each pending operation needs its own.
 @@ -1523,7 +1525,7 @@ impl<S: crate::transport::poll::Session> SourceServe<S> {

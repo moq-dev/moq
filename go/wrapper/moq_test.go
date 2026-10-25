@@ -46,7 +46,7 @@ func TestDynamicBroadcastRequest(t *testing.T) {
 	defer cancel()
 
 	origin := newOrigin(t)
-	dynamic, err := origin.Dynamic("")
+	dynamic, err := origin.Requests("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -556,7 +556,7 @@ func TestFetchGroupAndServeDynamicMiss(t *testing.T) {
 		t.Fatalf("cached fetch: frame=%+v err=%v", frame, err)
 	}
 
-	dynamic, err := track.Dynamic()
+	dynamic, err := track.Requests()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -916,7 +916,7 @@ func TestDynamicTrackRequest(t *testing.T) {
 	}
 	defer broadcast.Close()
 
-	dynamic, err := broadcast.Dynamic()
+	dynamic, err := broadcast.Requests()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -992,7 +992,7 @@ func TestDynamicTrackRequestCanPublishAudio(t *testing.T) {
 	}
 	defer broadcast.Close()
 
-	dynamic, err := broadcast.Dynamic()
+	dynamic, err := broadcast.Requests()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1143,7 +1143,7 @@ func TestConsumerCancelConcurrent(t *testing.T) {
 // that one request rather than the consumer it was made on.
 func TestRequestBroadcastCancelKeepsTheOrigin(t *testing.T) {
 	origin := newOrigin(t)
-	dynamic, err := origin.Dynamic("")
+	dynamic, err := origin.Requests("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1219,7 +1219,7 @@ func TestSubscribeTrackCancelKeepsTheBroadcast(t *testing.T) {
 	}
 	defer broadcast.Close()
 
-	dynamic, err := broadcast.Dynamic()
+	dynamic, err := broadcast.Requests()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1339,7 +1339,7 @@ func TestCancelDoesNotLeakGoroutines(t *testing.T) {
 	}
 	defer broadcast.Close()
 
-	dynamic, err := broadcast.Dynamic()
+	dynamic, err := broadcast.Requests()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1591,7 +1591,7 @@ func TestDynamicServesARequestUnderAPrefix(t *testing.T) {
 	defer cancel()
 
 	origin := newOrigin(t)
-	dynamic, err := origin.Dynamic("live")
+	dynamic, err := origin.Requests("live")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1631,7 +1631,7 @@ func TestClosingAPreparedAnswerRefusesTheRequest(t *testing.T) {
 	defer cancel()
 
 	origin := newOrigin(t)
-	dynamic, err := origin.Dynamic("live")
+	dynamic, err := origin.Requests("live")
 	if err != nil {
 		t.Fatal(err)
 	}

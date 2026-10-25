@@ -176,14 +176,14 @@ relay_chain_tests! {
 /// the hidden `fuzz` module as a session lands it, so its answers carry no exact route.
 struct Worker {
 	origin: origin::Producer,
-	_claim: Rc<origin::Dynamic>,
+	_claim: Rc<origin::Requests>,
 	_outputs: Rc<RefCell<Vec<(broadcast::Producer, track::Producer)>>>,
 }
 
 impl Worker {
 	fn new(hop: u64) -> Self {
 		let origin = produce_origin(hop);
-		let claim = Rc::new(moq_net::fuzz::dynamic_route(&origin, "pool", origin::Route::default()).unwrap());
+		let claim = Rc::new(moq_net::fuzz::requests_route(&origin, "pool", origin::Route::default()).unwrap());
 		let outputs = Rc::new(RefCell::new(Vec::new()));
 		let (handler, served) = (claim.clone(), outputs.clone());
 		drop(moq_clock::sim::spawn(async move {
@@ -260,7 +260,7 @@ async fn prefix_pool_lite07() {
 /// claim carries an epoch or re-prices, so it lands through the hidden `fuzz` module as
 /// a session lands it.
 struct Claim {
-	dynamic: Rc<origin::Dynamic>,
+	dynamic: Rc<origin::Requests>,
 	outputs: Rc<RefCell<Vec<(broadcast::Producer, track::Producer)>>>,
 }
 
@@ -268,7 +268,7 @@ impl Claim {
 	fn new(origin: &origin::Producer, epoch: Option<Epoch>) -> Self {
 		let mut route = origin::Route::default();
 		route.epoch = epoch;
-		let dynamic = Rc::new(moq_net::fuzz::dynamic_route(origin, "live", route).unwrap());
+		let dynamic = Rc::new(moq_net::fuzz::requests_route(origin, "live", route).unwrap());
 		let outputs = Rc::new(RefCell::new(Vec::new()));
 		let (handler, served) = (dynamic.clone(), outputs.clone());
 		drop(moq_clock::sim::spawn(async move {
@@ -604,14 +604,14 @@ async fn a_more_specific_source_cannot_fill_a_held_covering_track() {
 /// A worker claiming `pool` through the public API: each request is prepared under a
 /// fresh epoch and published at its exact path, and `outputs[path]` holds the latest.
 struct Pool {
-	_claim: Rc<origin::Dynamic>,
+	_claim: Rc<origin::Requests>,
 	outputs: Rc<RefCell<std::collections::HashMap<String, (broadcast::Producer, track::Producer)>>>,
 	answered: Rc<RefCell<usize>>,
 }
 
 impl Pool {
 	fn new(origin: &origin::Producer) -> Self {
-		let claim = Rc::new(origin.dynamic("pool").unwrap());
+		let claim = Rc::new(origin.requests("pool").unwrap());
 		let outputs = Rc::new(RefCell::new(std::collections::HashMap::new()));
 		let answered = Rc::new(RefCell::new(0));
 		let (handler, served, count) = (claim.clone(), outputs.clone(), answered.clone());

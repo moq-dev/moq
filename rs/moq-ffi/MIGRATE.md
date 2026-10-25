@@ -5,6 +5,11 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### Request handlers are `requests()` (#6752)
+
+Rename `dynamic()` on `MoqOriginProducer`, `MoqBroadcastProducer`, `MoqTrackProducer`, and `MoqTrackRequest` to `requests()`.
+Their handles `MoqOriginDynamic`, `MoqBroadcastDynamic`, and `MoqTrackDynamic` are `MoqOriginRequests`, `MoqBroadcastRequests`, and `MoqTrackRequests`; their methods are unchanged.
+
 ### Connection state
 
 `MoqClient::connect` returns a connecting session without waiting for its first dial to succeed, natively and in the browser. Read `MoqSession::state()` and pass its `revision` to `state_changed(after)` to observe first-dial failures and reconnects. `MoqConnectionState` carries `phase`, `connects`, `failure`, and `version` together. These replace `status()`, `connects()`, and both `failure()` polls. Cancel the returned session to stop dialing; cancelling or releasing the client does not close it.

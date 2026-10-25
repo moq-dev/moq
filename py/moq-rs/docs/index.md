@@ -59,11 +59,11 @@ asyncio.run(main())
    :nosignatures:
 
    BroadcastProducer
-   BroadcastDynamic
+   BroadcastRequests
    BroadcastRequest
    TrackProducer
    TrackDemand
-   TrackDynamic
+   TrackRequests
    TrackRequest
    GroupProducer
    Fill
@@ -179,7 +179,7 @@ broadcast, and producers advertise it in the catalog.
 
    OriginProducer
    OriginConsumer
-   OriginDynamic
+   OriginRequests
    AnnounceConsumer
    AnnouncedBroadcast
    Announce

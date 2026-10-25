@@ -31,7 +31,7 @@ for (const scope of ["unscoped", "distinct-scopes", "producer-scopes", "rooted-p
 		for (const observerCount of observerCounts) {
 			const origin = new Producer();
 			const handles = Array.from({ length: routeCount }, (_, index) =>
-				origin.dynamic(Path.from(`room/${index}`)),
+				origin.requests(Path.from(`room/${index}`)),
 			);
 			const touched = Path.from(scope === "rooted-producers" ? "0" : "room/0");
 			let notifications = 0;
@@ -247,7 +247,7 @@ const nextEpoch = Epoch.parse("01900000-0000-7000-8000-000000000002");
 for (const pathCount of routeCounts) {
 	for (const readerCount of observerCounts) {
 		const origin = new Producer();
-		const dynamic = origin.dynamicRoute(Path.from("room"), { epoch });
+		const dynamic = origin.requestsRoute(Path.from("room"), { epoch });
 		const pending = dynamic.requested();
 		const requests = Array.from({ length: pathCount }, (_, index) =>
 			Array.from({ length: readerCount }, () => origin.consume().request(Path.from(`room/${index}`))),
