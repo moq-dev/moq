@@ -510,8 +510,10 @@ impl Producer {
 pub struct Segment {
 	/// The source segment number (its URI is `seg/{reference}.{segment}.m4s`), shared across renditions.
 	pub segment: u64,
-	/// The transmuxed CMAF fragment (`moof`+`mdat`), fetched on demand by [`Consumer::next`].
-	pub media: Bytes,
+	/// The transmuxed CMAF fragment (`moof`+`mdat`), fetched on demand by [`Consumer::next`],
+	/// or `None` for a gap: the rendition has no media for this span (`EXT-X-GAP`), but the
+	/// segment keeps its number.
+	pub media: Option<Bytes>,
 	/// Presentation duration.
 	pub duration: Duration,
 	/// Wall-clock start time, when the timeline advertises an anchor.
@@ -576,47 +578,43 @@ impl Consumer {
 	/// authorization error.
 	///
 	/// Waits for the next segment to resolve on this rendition, then FETCHes and transmuxes its
-	/// frames. A gap for this rendition is skipped. Missing window rows or unavailable media
-	/// fail the recording instead of silently omitting segments. Fetch/transmux errors leave
-	/// the cursor in place so the caller can retry.
+	/// frames. A gap for this rendition is yielded without media, so every segment number is
+	/// accounted for. Missing window rows or unavailable media fail the recording instead of
+	/// silently omitting segments. Fetch/transmux errors leave the cursor in place so the caller
+	/// can retry.
 	/// A bound instance's retained media drains after End or Restart; a replacement's media
 	/// is never read under the old rows.
 	pub async fn next(&mut self) -> Result<Option<Segment>> {
-		loop {
-			let Some(row) = kio::wait(|waiter| self.poll_next(waiter)).await? else {
-				return Ok(None);
-			};
-			kio::wait(|waiter| {
-				// The refusal settles the binding, not this rendition's timeline, so watch both.
-				self.rendition.poll_media(waiter);
-				self.rendition.authorize()?;
-				self.rendition.poll_resolved(waiter, &row).map(Ok::<_, crate::Error>)
-			})
-			.await?;
-			// This rendition's timeline failed before covering the row, so no later row resolves.
-			if let Some(err) = self.rendition.own_failure()
-				&& self.rendition.is_failed(&row)
-			{
-				return Err(err);
-			}
-			if self.rendition.is_gap(&row) {
-				self.position.1 += 1;
-				continue;
-			}
-			let media = self
-				.rendition
-				.fetch(&row)
-				.await?
-				.ok_or(crate::Error::SegmentUnavailable { segment: row.segment })?;
-			self.position.1 += 1;
-			return Ok(Some(Segment {
-				segment: row.segment,
-				media,
-				duration: row.duration,
-				program_date_time: self.rendition.wall_clock(row.pts),
-				discontinuity: row.discontinuity,
-			}));
+		let Some(row) = kio::wait(|waiter| self.poll_next(waiter)).await? else {
+			return Ok(None);
+		};
+		kio::wait(|waiter| {
+			// The refusal settles the binding, not this rendition's timeline, so watch both.
+			self.rendition.poll_media(waiter);
+			self.rendition.authorize()?;
+			self.rendition.poll_resolved(waiter, &row).map(Ok::<_, crate::Error>)
+		})
+		.await?;
+		// This rendition's timeline failed before covering the row, so no later row resolves.
+		if let Some(err) = self.rendition.own_failure()
+			&& self.rendition.is_failed(&row)
+		{
+			return Err(err);
 		}
+		let media = if self.rendition.is_gap(&row) {
+			None
+		} else {
+			let media = self.rendition.fetch(&row).await?;
+			Some(media.ok_or(crate::Error::SegmentUnavailable { segment: row.segment })?)
+		};
+		self.position.1 += 1;
+		Ok(Some(Segment {
+			segment: row.segment,
+			media,
+			duration: row.duration,
+			program_date_time: self.rendition.wall_clock(row.pts),
+			discontinuity: row.discontinuity,
+		}))
 	}
 
 	fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Row>>> {

@@ -57,6 +57,11 @@ skipping inside the Nix shell.
   guest, and keep the runner registered only to this repository with
   approval required for every external contributor's workflow, as the
   README requires.
+- Open (2026-10-25): the [CI epic](/quest/m0/ci/README.md) dropped the VM
+  for the CI host in favor of kernel sandboxing, which conflicts with VFIO
+  passthrough. Recommendation: a container runner with the NVIDIA device
+  nodes and the host driver's libraries bound in. Confirm with the
+  maintainer before starting.
 
 Public API: none. Wire: none.
 

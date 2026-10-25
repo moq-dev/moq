@@ -78,9 +78,8 @@ Every hot site is a read or re-poll
 of a per-track channel that all of a track's subscribers share, which is the
 [version counter](/quest/m2/perf/kio-channel-contention/version.md)'s target.
 `GroupState` is not contended here because both shapes send one-frame
-groups; a multi-frame shape is unmeasured, so the
-[append-only log](/quest/m1/unbounded-groups/log.md) measures one as its
-before.
+groups; `group_contended` in `rs/moq-net/benches/group.rs` measures a
+multi-frame group instead.
 
 Decided (maintainer, 2026-10-07):
 
@@ -108,7 +107,7 @@ Decided (maintainer, 2026-10-14):
 - Candidates kept: a version counter with split waiter lists
   ([Version counter](/quest/m2/perf/kio-channel-contention/version.md)) and
   an append-only log primitive with front eviction
-  ([Append-only log](/quest/m1/unbounded-groups/log.md)), which
+  (Append-only log (`kio::log`)), which
   much of moq-net could adopt
   ([Log adoption](/quest/m2/perf/kio-channel-contention/log-adoption.md)).
 - Rejected, so later sessions don't re-propose them:
@@ -211,7 +210,7 @@ median): deque 30, runs 30, log 46, ring 42. Draining it: 14, 15, 12, 19.
   `GroupState` wait with multi-frame groups is still unmeasured.
 
 Decided (maintainer, 2026-10-24): Front eviction lands on the lock-free
-[append-only log](/quest/m1/unbounded-groups/log.md) itself, a tail run from
+append-only log (`kio::log`) itself, a tail run from
 an advancing base with refilled runs below it, rather than the same layout
 under today's mutex with the log swapped in later. The maintainer preferred
 landing the end-state storage once. So the log moved to m1, ahead of Front
@@ -231,5 +230,4 @@ epic's targets but carries no lock-wait split.
 - [Version counter](/quest/m2/perf/kio-channel-contention/version.md) - an opted-in re-poll skips the mutex when nothing changed, and parking no longer contends with readers
 - [Replica spike](/quest/m2/perf/kio-channel-contention/spike-replica.md) - measures per-worker data-plane replicas linked over the in-memory transport, announcements shared
 - [Cluster spike](/quest/m2/perf/kio-channel-contention/spike-cluster.md) - measures a relay per thread clustered over the in-memory transport, nothing shared
-- [Append-only log](/quest/m1/unbounded-groups/log.md) - a kio log primitive with lock-free cursor reads and front eviction, holding `GroupState`'s frames
 - [Log adoption](/quest/m2/perf/kio-channel-contention/log-adoption.md) - the rest of moq-net's log-shaped state moves onto the log where it measures as a win

@@ -375,10 +375,11 @@
           # The upstream repository ignores Cargo.lock so cargo installs test
           # the unlocked resolver. Nix still consumes committed lock data.
           cargoLock.lockFile = ./nix/uniffi-dart-Cargo.lock;
-          # Carry record converter and per-operation cancellation fixes at the source.
+          # Carry record converter, per-operation cancellation, and negative duration fixes at the source.
           patches = [
             ./nix/uniffi-dart-record-error.patch
             ./nix/uniffi-dart-cancellation.patch
+            ./nix/uniffi-dart-duration-negative.patch
           ];
           postPatch = ''
             cp ${./nix/uniffi-dart-Cargo.lock} Cargo.lock
@@ -633,6 +634,15 @@
           # finds a shim there too. That is the only way mbx reaches a build
           # that spawns Cargo itself, which release-plz does.
           shellHook = ''
+            # `nix develop` points TMPDIR at a fresh nix-shell.* dir that it
+            # never removes. Drop it and keep the caller's TMPDIR, as nix-direnv
+            # does, so nothing piles up there.
+            if [[ ''${NIX_BUILD_TOP-} == */nix-shell.* && -d $NIX_BUILD_TOP ]]; then
+              rm -rf "$NIX_BUILD_TOP"
+              export TMPDIR=''${NIX_BUILD_TOP%/*}
+              unset NIX_BUILD_TOP TMP TEMP TEMPDIR
+            fi
+
             status=$(mbx setup --status 2>/dev/null || true)
             shim=$(printf '%s\n' "$status" | sed -n '1s/.*: //p')
             if [ -x "$shim" ]; then
