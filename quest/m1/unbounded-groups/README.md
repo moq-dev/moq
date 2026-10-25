@@ -54,16 +54,15 @@ Decided 2026-10-16 (maintainer interview):
 - Refills patch the group's state in place, written only below the tail
   run's base so they never race the tail writer. They replace today's
   separate `Slot.head` copy.
-- Storage (group storage benchmark,
-  [moq-dev/moq#6627](https://github.com/moq-dev/moq/pull/6627), recommended
-  pending the maintainer, who leaned log on 2026-10-20): the
-  [append-only log](/quest/m2/perf/kio-channel-contention/log.md)'s layout,
-  a tail run from a base that only advances plus refilled runs below it,
-  landed by Front eviction under today's mutex. Prototyped, that layout cost
-  what today's `VecDeque` does; the lock-free log cost 10 to 40% less per
-  reader across cores at 1,024 readers and about 15 ns more per append, and
-  waits on the log quest. A ring buffer was rejected: an uncapped group has
-  no size to give it. Numbers are in the
+- Storage (decided 2026-10-24 by the maintainer, over the group storage
+  benchmark, [moq-dev/moq#6627](https://github.com/moq-dev/moq/pull/6627)):
+  the lock-free [append-only log](/quest/m1/unbounded-groups/log.md) is the
+  tail run, from a base that only advances, and refilled runs sit below it.
+  It moved here from m2, ahead of Front eviction, so the end-state storage
+  lands once instead of a mutex layout swapped later. Prototyped, the log
+  cost 10 to 40% less per reader across cores at 1,024 readers and about
+  15 ns more per append than today's `VecDeque`. A ring buffer was rejected:
+  an uncapped group has no size to give it. Numbers are in the
   [kio contention epic](/quest/m2/perf/kio-channel-contention/README.md).
 - Readers pin nothing: reads refresh recency as today. A reader that
   falls into an evicted run refills like a joiner. With nothing to refill
@@ -96,6 +95,7 @@ moq-transport, with memory held near the pool size.
 ## Required
 
 - [Segmented frames](/quest/m1/unbounded-groups/segmented-frames.md) - large frames store as sealed segments, preallocate at most one, and release receive credit per segment
+- [Append-only log](/quest/m1/unbounded-groups/log.md) - `GroupState`'s frames move onto a lock-free kio log with an advancing base
 - [Front eviction](/quest/m1/unbounded-groups/front-eviction.md) - groups shed whole frames from their front under pressure and refill them in place; the group caps go
 - [Byte holes](/quest/m1/unbounded-groups/byte-holes.md) - segments inside a frame evict and refill by `(frame, byte)` on the next lite version; the frame cap goes
 - [JS unbounded groups](/quest/m1/unbounded-groups/js.md) - `@moq/net` drops its caps, streams huge frames, and matches front eviction

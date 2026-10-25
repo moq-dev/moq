@@ -18,19 +18,19 @@ records".
 
 See the [epic](/quest/m1/unbounded-groups/README.md) for the decisions.
 
-- Storage takes the
-  [append-only log](/quest/m2/perf/kio-channel-contention/log.md)'s layout,
-  under today's mutex (recommended by the group storage benchmark,
-  [moq-dev/moq#6627](https://github.com/moq-dev/moq/pull/6627), pending the
-  maintainer; numbers in the
-  [kio contention epic](/quest/m2/perf/kio-channel-contention/README.md)).
-  Frames keep absolute indices. The tail run is today's `VecDeque` from a
-  base that only advances: front eviction pops its front and raises the
-  base. Refilled frames go into sorted runs below the base and never rejoin
-  the tail run, so the log can later swap the tail for lock-free storage
-  without touching refill. Readers keep one absolute cursor and search
-  the refill runs only when it falls below the base. Prototyped this way, the common
-  single-run group cost what it does today.
+- Storage is the lock-free
+  [append-only log](/quest/m1/unbounded-groups/log.md) (decided 2026-10-24
+  by the maintainer over the group storage benchmark,
+  [moq-dev/moq#6627](https://github.com/moq-dev/moq/pull/6627): land the
+  end-state storage now rather than a mutex layout swapped later; numbers in
+  the [kio contention epic](/quest/m2/perf/kio-channel-contention/README.md)).
+  Frames keep absolute indices. The log is the tail run, from a base that
+  only advances: front eviction raises its base. Refilled frames go into
+  sorted runs below the base, behind their own mutex, and never rejoin the
+  log. Readers keep one absolute cursor, read the log lock-free, and search
+  the refill runs only when the cursor falls below the base. Prototyped this
+  way, the log cost 10 to 40% less per reader across cores and about 15 ns
+  more per append.
 - Pool debt evicts whole cold groups first (`pay_debt` in
   `model/track.rs`, as today). Front frames are shed only from a group
   that is protected or being read.
@@ -71,4 +71,4 @@ groups. A reader that used to see `GroupTooLarge` now refills or sees
 
 ## Related
 
-- [Append-only log](/quest/m2/perf/kio-channel-contention/log.md) - later replaces the tail run with lock-free cursor reads
+- [Append-only log](/quest/m1/unbounded-groups/log.md) - later replaces the tail run with lock-free cursor reads

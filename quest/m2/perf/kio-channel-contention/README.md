@@ -79,8 +79,8 @@ of a per-track channel that all of a track's subscribers share, which is the
 [version counter](/quest/m2/perf/kio-channel-contention/version.md)'s target.
 `GroupState` is not contended here because both shapes send one-frame
 groups; a multi-frame shape is unmeasured, so the
-[append-only log](/quest/m2/perf/kio-channel-contention/log.md) should measure
-one before naming `GroupState` frames as its target.
+[append-only log](/quest/m1/unbounded-groups/log.md) measures one as its
+before.
 
 Decided (maintainer, 2026-10-07):
 
@@ -108,7 +108,7 @@ Decided (maintainer, 2026-10-14):
 - Candidates kept: a version counter with split waiter lists
   ([Version counter](/quest/m2/perf/kio-channel-contention/version.md)) and
   an append-only log primitive with front eviction
-  ([Append-only log](/quest/m2/perf/kio-channel-contention/log.md)), which
+  ([Append-only log](/quest/m1/unbounded-groups/log.md)), which
   much of moq-net could adopt
   ([Log adoption](/quest/m2/perf/kio-channel-contention/log-adoption.md)).
 - Rejected, so later sessions don't re-propose them:
@@ -126,8 +126,8 @@ Decided (maintainer, 2026-10-14, baseline follow-up):
 
 - `GroupExpiry::is_expired` gets its own quest, ranked ahead of the version
   counter, rather than waiting on it.
-- The append-only log measures a multi-frame (video-heavy) shape before it
-  picks targets, since both shapes above send one-frame groups.
+- The append-only log measures a multi-frame (video-heavy) shape first,
+  since both shapes above send one-frame groups.
 - The 10 messages/s pin lives only in `bench/workloads/chat.toml`;
   `rs/moq-bench/config/chat.toml` keeps its random rate and frame size.
 
@@ -147,8 +147,9 @@ Decided (maintainer, 2026-10-14, per-thread follow-up):
   land here. The in-memory transport merges for real.
 - Flow control throttles only the hop between workers, never the publisher:
   a slow worker lags and skips stale groups like any slow subscriber.
-- The append-only log waits on the spikes, since per-thread sessions would
-  leave each replica's mutex uncontended.
+- Log adoption waits on the spikes, since per-thread sessions would leave
+  each replica's mutex uncontended. The append-only log itself stopped
+  waiting on 2026-10-24 (below).
 
 Group storage benchmark (2026-10-24,
 [moq-dev/moq#6627](https://github.com/moq-dev/moq/pull/6627)): four
@@ -209,11 +210,16 @@ median): deque 30, runs 30, log 46, ring 42. Draining it: 14, 15, 12, 19.
   `kernel.perf_event_paranoid=-1` and this host has 4. So a relay's share of
   `GroupState` wait with multi-frame groups is still unmeasured.
 
-Recommendation (pending the maintainer): Front eviction lays frames out
-as the log will, a tail run from an advancing base plus refilled runs below
-it, under today's mutex, and the
-[append-only log](/quest/m2/perf/kio-channel-contention/log.md) later
-replaces only the tail run's storage, with the above as its expected win.
+Decided (maintainer, 2026-10-24): Front eviction lands on the lock-free
+[append-only log](/quest/m1/unbounded-groups/log.md) itself, a tail run from
+an advancing base with refilled runs below it, rather than the same layout
+under today's mutex with the log swapped in later. The maintainer preferred
+landing the end-state storage once. So the log moved to m1, ahead of Front
+eviction, scoped to `GroupState`'s frames with the above as its expected
+win, and no longer waits on the spikes: they change how much it wins, not
+the storage Front eviction needs. `TrackState` arrival order moved to
+[Log adoption](/quest/m2/perf/kio-channel-contention/log-adoption.md), which
+still waits on them.
 A 2026-10-22 staging CDN chat profile (default tokio runtime, `f57c0aad`,
 DWARF stacks, 36% incomplete) put waiter registration at 1.97% self-time, the
 fourth-largest site, on a 501-connection chat shape. It agrees with this
@@ -225,5 +231,5 @@ epic's targets but carries no lock-wait split.
 - [Version counter](/quest/m2/perf/kio-channel-contention/version.md) - an opted-in re-poll skips the mutex when nothing changed, and parking no longer contends with readers
 - [Replica spike](/quest/m2/perf/kio-channel-contention/spike-replica.md) - measures per-worker data-plane replicas linked over the in-memory transport, announcements shared
 - [Cluster spike](/quest/m2/perf/kio-channel-contention/spike-cluster.md) - measures a relay per thread clustered over the in-memory transport, nothing shared
-- [Append-only log](/quest/m2/perf/kio-channel-contention/log.md) - a kio log primitive with lock-free cursor reads and front eviction, if the shared model survives the spikes
+- [Append-only log](/quest/m1/unbounded-groups/log.md) - a kio log primitive with lock-free cursor reads and front eviction, holding `GroupState`'s frames
 - [Log adoption](/quest/m2/perf/kio-channel-contention/log-adoption.md) - the rest of moq-net's log-shaped state moves onto the log where it measures as a win

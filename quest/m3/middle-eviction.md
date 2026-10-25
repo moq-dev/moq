@@ -12,11 +12,12 @@ it reads that far.
 See the [unbounded groups epic](/quest/m1/unbounded-groups/README.md) for
 the decisions. Decided 2026-10-20 (maintainer): moved to m3, because group
 storage is chosen for hot-path performance, not for evicting the middle.
-The group storage benchmark
-([moq-dev/moq#6627](https://github.com/moq-dev/moq/pull/6627)) recommended a
-tail run that sheds only its front, from a base that only advances, plus
-refilled runs below it. So a kept head moves into a run below the base
-before the base advances past the middle, rather than splitting the tail.
+Group storage was decided 2026-10-24 (maintainer, over
+[moq-dev/moq#6627](https://github.com/moq-dev/moq/pull/6627)): the
+[append-only log](/quest/m1/unbounded-groups/log.md) is a tail run that sheds
+only its front, from a base that only advances, plus refilled runs below it.
+So a kept head moves into a run below the base before the base advances past
+the middle, rather than splitting the tail.
 
 - This reuses the storage and refill from
   [Front eviction](/quest/m1/unbounded-groups/front-eviction.md). The new
