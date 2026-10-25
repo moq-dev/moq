@@ -21,6 +21,9 @@
 	)
 )]
 
+// Counts moq's heap for the host leak tests; see `moq_ffi_test_allocated`.
+#[cfg(all(feature = "testing", not(target_arch = "wasm32")))]
+mod alloc;
 #[cfg(target_os = "android")]
 mod android;
 // The QUIC server and moq-native's logger have no browser equivalent, and the

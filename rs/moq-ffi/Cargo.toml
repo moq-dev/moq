@@ -36,8 +36,9 @@ openh264 = ["moq-video?/openh264"]
 # qlog trace capture (`MoqQuicConfig::qlog`). Off by default: it compiles the qlog
 # machinery in and is only wanted for debugging; `moq_qlog_supported` reports it.
 qlog = ["moq-tokio/qlog"]
-# Test-only control of the runtime clock, for the Python suite (`just py test`). Released
-# builds leave it off, so they never carry the `moq_ffi_test_clock_*` symbols.
+# Test-only hooks for the host suites: control of the runtime clock (`just py test`) and a
+# count of moq's heap (the Dart leak tests). Released builds leave it off, so they never
+# carry the `moq_ffi_test_*` symbols or the counting allocator.
 testing = ["moq-clock/manual"]
 
 [dependencies]
