@@ -76,27 +76,30 @@ impl Live {
 					.insert_datagram(*sequence, timestamp, frame.payload.clone())?;
 			}
 			Entry::Group { sequence, frames } => {
-				let mut open = match self.open.take() {
-					Some(open) if open.sequence == *sequence => {
+				if self.open.as_ref().is_some_and(|open| open.sequence != *sequence) {
+					self.close()?;
+				}
+				// The group stays in `open` while it is written, so a failure aborts it with
+				// the track rather than dropping it.
+				let open = match &mut self.open {
+					Some(open) => {
 						if open.next != first {
 							return Err(Error::Sequence);
 						}
 						open
 					}
-					other => {
-						if let Some(mut other) = other {
-							other.group.finish()?;
-						}
-						let mut group = self.producer.create_group(group::Info { sequence: *sequence })?;
-						if first > 0 {
-							// Its head was pruned.
-							group.start_at(first)?;
-						}
-						Open {
+					None => {
+						let group = self.producer.create_group(group::Info { sequence: *sequence })?;
+						let open = self.open.insert(Open {
 							group,
 							sequence: *sequence,
 							next: first,
+						});
+						if first > 0 {
+							// Its head was pruned.
+							open.group.start_at(first)?;
 						}
+						open
 					}
 				};
 				for frame in frames {
@@ -104,7 +107,6 @@ impl Live {
 					open.group.write_frame(timestamp, frame.payload.clone())?;
 					open.next += 1;
 				}
-				self.open = Some(open);
 			}
 		}
 		Ok(())

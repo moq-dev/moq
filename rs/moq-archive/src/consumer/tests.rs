@@ -481,6 +481,29 @@ async fn closing_the_broadcast_cancels_the_live_tracks() {
 	assert!(matches!(err, moq_net::Error::Cancel), "{err}");
 }
 
+/// A continuation that skips frames of the open group fails the replay, and the open group is
+/// aborted with the track rather than dropped.
+#[tokio::test(start_paused = true)]
+async fn a_gapped_continuation_aborts_the_open_group() {
+	let archive = Archive::new();
+	archive.track("video", 0, true).await;
+	archive.object("video", 0, vec![frames(true, 0, 0..1)]).await;
+
+	let (broadcast, run) = serve(&archive.store).await;
+	let mut reader = subscribe(&broadcast, "video").await;
+	let mut group = reader.next_group().await.unwrap().unwrap();
+	assert!(group.read_frame().await.unwrap().is_some());
+
+	// Frame 1 of group 0 is missing.
+	archive.object("video", 2, vec![frames(true, 0, 2..3)]).await;
+	assert!(matches!(run.await.unwrap(), Err(Error::Sequence)));
+	let err = group.read_frame().await.unwrap_err();
+	assert!(
+		matches!(err, moq_net::Error::Stream(moq_net::StreamError::Internal)),
+		"{err}"
+	);
+}
+
 /// A store failure ends the replay and aborts every served track with it, the open newest group
 /// included, so readers see the failure rather than a dropped producer.
 #[tokio::test(start_paused = true)]
