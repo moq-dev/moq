@@ -52,8 +52,7 @@ impl MoqBandwidth {
 /// One track's standing claim on a [`MoqBandwidth`].
 ///
 /// [`grant`](Self::grant) is [`moq_net::bandwidth::Reservation::peek`]: `None`
-/// means no estimate or no demand, so hold the current rate, and `Some(0)` is a
-/// real zero grant.
+/// means no estimate, so hold the current rate, and `Some(0)` is a real zero grant.
 #[derive(uniffi::Object)]
 pub struct MoqReservation {
 	inner: moq_net::bandwidth::Reservation,
@@ -74,11 +73,22 @@ impl MoqReservation {
 impl MoqReservation {
 	/// This reservation's slice right now, in bits per second.
 	///
-	/// `None` means no estimate or no demand: hold the current rate. `Some(0)`
-	/// is a real zero grant.
+	/// `None` means no estimate: hold the current rate. `Some(0)` is a real zero
+	/// grant. While nothing subscribes to the track, this is the slice it would get
+	/// back, without claiming it from the others.
 	pub fn grant(&self) -> Option<u64> {
 		let _guard = crate::ffi::enter();
 		self.inner.peek().map(moq_net::bandwidth::Rate::as_bps)
+	}
+
+	/// Whether a session probes the connection for this reservation, so the estimate
+	/// can rise to fund it even while its sender is stopped.
+	///
+	/// Stop a sender for lack of bandwidth only while this holds: without a probing
+	/// session the estimate stops rising, so it could never resume.
+	pub fn probed(&self) -> bool {
+		let _guard = crate::ffi::enter();
+		self.inner.consumer().probed()
 	}
 
 	/// Change the ceiling, keeping the same claim.

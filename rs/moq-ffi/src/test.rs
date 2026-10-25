@@ -3555,6 +3555,7 @@ async fn video_raw_publish_consume() {
 			},
 			track: Some("camera".into()),
 			bandwidth: None,
+			lower: None,
 		},
 	)
 	.unwrap();
@@ -3679,6 +3680,7 @@ async fn video_decode_frame_ownership() {
 			},
 			track: Some("camera".into()),
 			bandwidth: None,
+			lower: None,
 		},
 	)
 	.unwrap();
@@ -3832,6 +3834,7 @@ async fn video_raw_publish_from_many_threads() {
 			},
 			track: None,
 			bandwidth: None,
+			lower: None,
 		},
 	)
 	.unwrap();
@@ -3922,7 +3925,8 @@ async fn video_raw_publish_rejects_bad_frames() {
 				},
 				output: output(),
 				track: None,
-				bandwidth: None
+				bandwidth: None,
+				lower: None,
 			}
 		)
 		.is_err()
@@ -3935,6 +3939,7 @@ async fn video_raw_publish_rejects_bad_frames() {
 			output: output(),
 			track: None,
 			bandwidth: None,
+			lower: None,
 		},
 	)
 	.unwrap();
@@ -6597,6 +6602,7 @@ async fn video_encoder_follows_a_shrinking_grant() {
 			},
 			track: Some("camera".into()),
 			bandwidth: Some(bandwidth),
+			lower: None,
 		},
 	)
 	.unwrap();
@@ -6676,6 +6682,7 @@ async fn dropping_a_video_producer_stops_the_rate_follower() {
 			output,
 			track: Some("camera".into()),
 			bandwidth: Some(bandwidth),
+			lower: None,
 		},
 	)
 	.unwrap();
@@ -6705,6 +6712,7 @@ async fn set_bitrate_caps_a_later_bandwidth_grant() {
 			output,
 			track: Some("camera".into()),
 			bandwidth: Some(bandwidth),
+			lower: None,
 		},
 	)
 	.unwrap();
