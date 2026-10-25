@@ -34,7 +34,7 @@ struct Publisher {
 	server_driver: moq_clock::sim::JoinHandle<moq_net::Error>,
 	/// The client's origin, which it publishes from.
 	origin: origin::Producer,
-	_broadcast: moq_net::broadcast::Producer,
+	_broadcast: moq_net::origin::Publication,
 }
 
 async fn publish(version: Version, relay: &origin::Producer, hop: u64, name: &str) -> Publisher {

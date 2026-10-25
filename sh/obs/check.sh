@@ -32,11 +32,11 @@ fi
 # the change that opens the gap and so the one that should fail.
 # OBS_LINKED_VERSION comes from the dev shell (see flake.nix), so this leg
 # is skipped outside it, where there is no nixpkgs obs-studio to compare.
-# MOQ_STRICT turns that skip into an error for the same reason it turns a
+# CI_STRICT turns that skip into an error for the same reason it turns a
 # missing tool into one: in CI a leg that checks nothing still reports green.
 if [ -z "${OBS_LINKED_VERSION:-}" ]; then
-    if [ -n "${MOQ_STRICT:-}" ]; then
-        echo "MOQ_STRICT is set but OBS_LINKED_VERSION is unset; run inside 'nix develop', which exports it" >&2
+    if [ -n "${CI_STRICT:-}" ]; then
+        echo "CI_STRICT is set but OBS_LINKED_VERSION is unset; run inside 'nix develop', which exports it" >&2
         exit 1
     fi
 else

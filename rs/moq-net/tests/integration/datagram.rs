@@ -34,7 +34,7 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 struct Fixture {
 	producer: moq_net::track::Producer,
 	subscriber: moq_net::track::Subscriber,
-	_broadcast: moq_net::broadcast::Producer,
+	_broadcast: moq_net::origin::Publication,
 	_pair: MockPair,
 }
 

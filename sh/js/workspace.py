@@ -206,7 +206,7 @@ def main():
     if action == "plan":
         print(json.dumps(plan, default=sorted))
     else:
-        if plan["packages"] and os.environ.get("GITHUB_ACTIONS") != "true" and os.environ.get("MOQ_LOCAL_SUPERVISED") != "1":
+        if plan["packages"] and os.environ.get("GITHUB_ACTIONS") != "true" and os.environ.get("LOCAL_SUPERVISED") != "1":
             os.execvp("bash", ["bash", str(ROOT / "sh/local.sh"),
                                sys.executable, str(Path(__file__).resolve()), *sys.argv[1:]])
         started = time.monotonic()
