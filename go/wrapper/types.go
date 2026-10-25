@@ -17,7 +17,7 @@ type (
 	AudioDecoderOutput = ffi.MoqAudioDecoderOutput
 	// AudioEncoderInput declares the PCM sample format, sample rate, and channel count of frames written to an audio producer.
 	AudioEncoderInput = ffi.MoqAudioEncoderInput
-	// AudioEncoderOutput configures the encoder: codec, optional sample rate, channels, bitrate, frame duration, and preset.
+	// AudioEncoderOutput configures the encoder: codec, optional sample rate, channels, bitrate, and frame duration.
 	AudioEncoderOutput = ffi.MoqAudioEncoderOutput
 	// AudioSampleFormat is a raw PCM sample layout, mirroring WebCodecs AudioData.format.
 	AudioSampleFormat = ffi.MoqAudioSampleFormat
@@ -62,7 +62,7 @@ type (
 	Range = ffi.MoqRange
 	// Anchor is where one end of a Range falls: AnchorAbsolute, AnchorRelative, or AnchorTime.
 	Anchor = ffi.MoqAnchor
-	// AnchorAbsolute is an exact group and frame.
+	// AnchorAbsolute is a group, delivered from its first frame.
 	AnchorAbsolute = ffi.MoqAnchorAbsolute
 	// AnchorRelative is the group Groups before the latest one, clamped to group 0: 0 is the latest.
 	AnchorRelative = ffi.MoqAnchorRelative
@@ -184,12 +184,12 @@ const (
 )
 
 // Versions lists the protocol versions offered by default, most preferred
-// first, spelled the way WithVersions takes them.
+// first, spelled the way ClientConfig.Versions takes them.
 func Versions() []string {
 	return ffi.MoqVersions()
 }
 
-// QlogSupported reports whether this build can write qlog traces for WithQUICQlog.
+// QlogSupported reports whether this build can write qlog traces for QUICConfig.Qlog.
 func QlogSupported() bool {
 	return ffi.MoqQlogSupported()
 }

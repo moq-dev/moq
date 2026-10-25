@@ -1,9 +1,10 @@
 //! The ETSI TR 101 290 checks an [`Import`](super::Import) grades its input against.
 //!
 //! Counters only, at the fixed limits of TR 101 290 V1.4.1: nothing here decides what is
-//! published, and nothing is configured. The importer feeds every packet through
-//! [`Health::packet`], and the media PIDs and the clock route on its continuity verdict, so
-//! the counter and the PES reassembly cannot disagree about which packets broke a chain.
+//! published, and nothing is configured. The parser grades every packet through
+//! [`Multiplex::packet`] once, however many programs read it, and the media PIDs and the clock
+//! route on its continuity verdict, so the counter and the PES reassembly cannot disagree about
+//! which packets broke a chain. Each program times its own tables, PCR and PTS in [`Health`].
 //!
 //! Intervals run on the program clock the importer already keeps
 //! ([`Liveness`](super::import::Liveness)): the PCR summed step by step, which the 33-bit wrap,
@@ -36,8 +37,8 @@ const SYNC_ACQUIRED: u8 = 5;
 const NULL_PID: u16 = 0x1fff;
 const SYNC_BYTE: u8 = 0x47;
 
-/// What one importer counted, kept per PID so importers reading the same multiplex can be
-/// merged without counting a packet twice.
+/// What one checker counted, kept per PID so programs reading the same PID can be merged
+/// without counting a packet twice.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct Errors {
 	ts_sync_loss: u64,
@@ -57,8 +58,8 @@ struct PidErrors {
 }
 
 impl Errors {
-	/// Fold in another importer's count of the same input. Every importer of a multiplex sees
-	/// every packet, so each check takes the larger count rather than the sum.
+	/// Fold in another checker's count of the same input. Programs sharing a PAT, PMT or PCR PID
+	/// time the same packets, so each check takes the larger count rather than the sum.
 	pub(super) fn max(&mut self, other: &Self) {
 		self.ts_sync_loss = self.ts_sync_loss.max(other.ts_sync_loss);
 		self.sync_byte_error = self.sync_byte_error.max(other.sync_byte_error);
@@ -102,13 +103,73 @@ impl Errors {
 	}
 }
 
-/// The TR 101 290 checks on one importer's input. See the [module](self).
+/// The TR 101 290 checks that read packets alone: sync and per-PID continuity. One per input,
+/// however many programs read it.
 #[derive(Default)]
-pub(super) struct Health {
+pub(super) struct Multiplex {
 	errors: Errors,
 	sync: Sync,
 	/// Per PID, every PID but the null PID.
 	continuity: HashMap<u16, Continuity>,
+}
+
+impl Multiplex {
+	pub(super) fn errors(&self) -> &Errors {
+		&self.errors
+	}
+
+	/// The framer found a packet at `at` in `buf`. Checks every sync byte position up to it.
+	pub(super) fn routed(&mut self, buf: &[u8], at: usize) {
+		self.sync.routed(buf, at, &mut self.errors);
+	}
+
+	/// The parser is about to drain `buf` up to `off`: check the sync byte positions in the
+	/// rest of it, which no packet will be routed from, and carry the grid over.
+	pub(super) fn drained(&mut self, buf: &[u8], off: usize) {
+		self.sync.drained(buf, off, &mut self.errors);
+	}
+
+	/// Grade one packet's continuity, and say what it means for the bytes already accumulated
+	/// for its PID.
+	///
+	/// A packet with `transport_error_indicator` set counts `Transport_error` and nothing else:
+	/// TR 101 290 derives no further error from it.
+	pub(super) fn packet(&mut self, pkt: &[u8; TsPacket::SIZE]) -> Continuation {
+		let pid = (u16::from(pkt[1] & 0x1f) << 8) | u16::from(pkt[2]);
+		if pkt[1] & 0x80 != 0 {
+			self.errors.pid(pid).transport_error += 1;
+		}
+		// The null PID's counter is undefined (ISO/IEC 13818-1 2.4.3.3).
+		if pid == NULL_PID {
+			return Continuation::Contiguous;
+		}
+
+		let continuity = self.continuity.entry(pid).or_default();
+		let continuation = continuity.observe(pkt);
+		match continuation {
+			// ISO/IEC 13818-1 2.4.3.3 permits one duplicate; a third copy is an error.
+			Continuation::Duplicate if continuity.repeats > 1 => {
+				self.errors.pid(pid).continuity_count_error += 1;
+			}
+			Continuation::Broken if !discontinuity_indicator(pkt) => {
+				self.errors.pid(pid).continuity_count_error += 1;
+			}
+			_ => {}
+		}
+		continuation
+	}
+
+	/// `pid` changed route: forget the chain behind it, so the new route's first packet is not
+	/// judged against bytes it never accumulated.
+	pub(super) fn restart(&mut self, pid: u16) {
+		self.continuity.remove(&pid);
+	}
+}
+
+/// The TR 101 290 checks timed on one program's clock: table, PCR and PTS intervals.
+#[derive(Default)]
+pub(super) struct Health {
+	errors: Errors,
 	pcr_pid: Option<u16>,
 	/// The last PCR value on the PCR PID, forgotten across a signalled discontinuity.
 	pcr: Option<u64>,
@@ -124,49 +185,13 @@ impl Health {
 		&self.errors
 	}
 
-	/// The framer found a packet at `at` in `buf`. Checks every sync byte position up to it.
-	pub(super) fn routed(&mut self, buf: &[u8], at: usize) {
-		self.sync.routed(buf, at, &mut self.errors);
-	}
-
-	/// The importer is about to drain `buf` up to `off`: check the sync byte positions in the
-	/// rest of it, which no packet will be routed from, and carry the grid over.
-	pub(super) fn drained(&mut self, buf: &[u8], off: usize) {
-		self.sync.drained(buf, off, &mut self.errors);
-	}
-
-	/// Grade one packet, and say what it means for the bytes already accumulated for its PID.
-	///
-	/// A packet with `transport_error_indicator` set counts `Transport_error` and nothing else:
-	/// TR 101 290 derives no further error from it, so it feeds no continuity, table or PCR
-	/// check. A duplicate feeds none of them either, after its own continuity check.
-	pub(super) fn packet(&mut self, pkt: &[u8; TsPacket::SIZE], now: Option<u64>) -> Continuation {
+	/// Time one packet the [`Multiplex`] graded as `continuation`. A corrupt packet or a
+	/// duplicate feeds no table or PCR check.
+	pub(super) fn packet(&mut self, pkt: &[u8; TsPacket::SIZE], continuation: Continuation, now: Option<u64>) {
+		if matches!(continuation, Continuation::Corrupt | Continuation::Duplicate) {
+			return;
+		}
 		let pid = (u16::from(pkt[1] & 0x1f) << 8) | u16::from(pkt[2]);
-		if pkt[1] & 0x80 != 0 {
-			self.errors.pid(pid).transport_error += 1;
-		}
-		// The null PID's counter is undefined (ISO/IEC 13818-1 2.4.3.3).
-		if pid == NULL_PID {
-			return Continuation::Contiguous;
-		}
-
-		let continuity = self.continuity.entry(pid).or_default();
-		let continuation = continuity.observe(pkt);
-		match continuation {
-			Continuation::Corrupt => return continuation,
-			// ISO/IEC 13818-1 2.4.3.3 permits one duplicate; a third copy is an error.
-			Continuation::Duplicate => {
-				if continuity.repeats > 1 {
-					self.errors.pid(pid).continuity_count_error += 1;
-				}
-				return continuation;
-			}
-			Continuation::Broken if !discontinuity_indicator(pkt) => {
-				self.errors.pid(pid).continuity_count_error += 1;
-			}
-			Continuation::Broken | Continuation::Contiguous => {}
-		}
-
 		let scrambled = pkt[3] & 0xc0 != 0;
 		if pid == Pid::PAT {
 			if scrambled {
@@ -188,7 +213,6 @@ impl Health {
 		if self.pcr_pid == Some(pid) {
 			self.pcr(pid, pkt);
 		}
-		continuation
 	}
 
 	/// `PCR_repetition_error` and `PCR_discontinuity_indicator_error`, graded on consecutive
@@ -267,10 +291,8 @@ impl Health {
 		self.pts.retain(|pid, _| pids.contains(pid));
 	}
 
-	/// `pid` changed route: forget the chain behind it, so the new route's first packet is not
-	/// judged against bytes it never accumulated, and stop grading its PTS until it has one.
+	/// `pid` changed route: stop grading its PTS until it has one.
 	pub(super) fn restart(&mut self, pid: u16) {
-		self.continuity.remove(&pid);
 		self.pts.remove(&pid);
 	}
 }
@@ -402,7 +424,7 @@ impl Sync {
 /// meaningless when spliced onto bytes that didn't follow them. Keeping one implementation
 /// keeps a subtle rule (which packets advance the counter, which retransmissions to ignore)
 /// from drifting into two, and `Continuity_count_error` reads the same verdict.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct Continuity {
 	/// Last continuity_counter seen on a packet with payload, to spot gaps.
 	last_cc: Option<u8>,

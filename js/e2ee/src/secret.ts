@@ -1,5 +1,5 @@
 import { Failure } from "./failure.ts";
-import { NAME_LEN, PROFILE, SECRET_LEN } from "./limits.ts";
+import { KEY_LEN, PROFILE, SECRET_LEN } from "./limits.ts";
 
 const SALT = new TextEncoder().encode(PROFILE);
 
@@ -36,14 +36,18 @@ function importSecret(secret: Uint8Array | CryptoKey): Promise<CryptoKey> {
 	return Promise.resolve(secret);
 }
 
-/** HKDF-SHA-256 under `owner`'s secret with the profile salt: 16 bytes of output for `info`. */
-export async function expand(owner: object, info: Uint8Array<ArrayBuffer>): Promise<Uint8Array<ArrayBuffer>> {
+/** HKDF-SHA-256 under `owner`'s secret with the profile salt: `length` bytes of output for `info`. */
+export async function expand(
+	owner: object,
+	info: Uint8Array<ArrayBuffer>,
+	length = KEY_LEN,
+): Promise<Uint8Array<ArrayBuffer>> {
 	const secret = secrets.get(owner);
 	if (!secret) throw new Failure("invalid_secret");
 	const bits = await crypto.subtle.deriveBits(
 		{ name: "HKDF", hash: "SHA-256", salt: SALT, info },
 		await secret,
-		NAME_LEN * 8,
+		length * 8,
 	);
 	return new Uint8Array(bits);
 }

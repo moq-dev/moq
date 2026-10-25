@@ -46,14 +46,13 @@ timer on main at 1582fdc07d:
 
 ## Required
 
-- [Publisher retention in moq-mux](/quest/m1/broadcast-lifecycle/retention.md) - moq-cli, the gateways, and moqsink keep a finished broadcast up for a fixed `--linger` (default 30s) through a moq-mux helper instead of moq-net's `Finish`
-- [Stateless broadcasts](/quest/m1/broadcast-lifecycle/stateless.md) - `Finish`, its linger, and finished-only supersession are gone from moq-net, `@moq/net`, moq-ffi, moq-c, and every binding
-- [TS export follows by cause](/quest/m1/broadcast-lifecycle/ts-follow.md) - `export ts|srt --linger` becomes `--follow <duration>`, a replacement's catalog has no separate deadline, and a track failure is classified by its cause instead of a 1s grace
-- [SRT tells a clean end from a failure](/quest/m1/broadcast-lifecycle/srt-end.md) - an SRT ingest whose peer goes silent aborts instead of finishing as if it had shut down
-- [Timer cleanups](/quest/m1/broadcast-lifecycle/timers.md) - `ConnectionProps.linger` is gone and stale linger references are fixed
+- [Closing a binding broadcast ends its media](/quest/m1/broadcast-lifecycle/ffi-close.md) - moq-ffi and moq-c media handles end with a cause on close or drop, never a cause-less drop
+- [lite-03/04 close FIN](/quest/m1/broadcast-lifecycle/lite-close-fin.md) - a graceful relay close delivers pending SUBSCRIBE FINs on lite-03 and lite-04
 
 ## Related
 
+- [SRT on the shared socket](/quest/m2/one-port/srt-demux.md) - an SRT ingest whose peer goes silent aborts instead of finishing as if it had shut down
+
 - [moq-transport finish interop](/quest/m2/ietf-finish.md) - the interop `finish` case, whose late readers rely on retention
-- [CLI and gst flags](/quest/m1/api-audit/cli-flags.md) - removes the opt-in `linger` booleans, leaving completion to this epic
+- [CLI and gst flags](https://github.com/moq-dev/moq/pull/6522) - removed the opt-in `linger` booleans, leaving completion to this epic
 - [Publication owner](/quest/m1/api-audit/announce-owner.md) - adds `origin::Publication`; it must not forward a `finish` this epic deletes

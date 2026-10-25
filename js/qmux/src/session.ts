@@ -1,4 +1,4 @@
-import { Instant, type Interval, interval, Milli, MissedTickBehavior, Nano, now, sleep } from "@moq/clock";
+import { Instant, type Interval, interval, Milli, MissedTickBehavior, Nano, now, Second, timeout } from "@moq/clock";
 import { Credit, replenishWindow } from "./credit.ts";
 import { resetCode, SessionError, StreamError, streamCode } from "./error.ts";
 import type { TransportParams, WireFormat } from "./frame.ts";
@@ -199,8 +199,8 @@ interface PendingIncomingStream<T> {
  * mark; `desiredSize` is only a backpressure signal. QMux cannot stop reading
  * its underlying byte stream, so keep new streams in this explicit queue and
  * transfer ownership only in response to an application read. The peer's
- * MAX_STREAMS credit is replenished by `onAccept`, which bounds this pending
- * queue to the stream count we advertised.
+ * MAX_STREAMS credit waits on `onAccept`, which bounds this pending queue to the
+ * stream count we advertised.
  */
 class IncomingStreamQueue<T> {
 	readonly readable: ReadableStream<T>;
@@ -351,6 +351,11 @@ export interface AcceptOptions extends Pick<SessionOptions, "config" | "sendBuff
 
 /** Default send-buffer high-water mark (bytes) for the WebSocketStream ponyfill. */
 const DEFAULT_SEND_BUFFER_SIZE = 64 * 1024;
+
+/** How long a closing session waits for a backed-up socket to take its close
+ *  frame, matching Rust's `CLOSE_TIMEOUT`. A peer that stopped reading can't
+ *  hold the socket open past it. */
+const CLOSE_TIMEOUT = Nano.fromSecond(Second(3));
 
 /** Present the caller's socket as a `WebSocketStreamLike`, whichever they passed.
  *
@@ -513,6 +518,8 @@ interface StreamFlowState {
 	recvMax: bigint;
 	recvOffset: bigint;
 	recvConsumed: bigint;
+	/** Runs once when the send half ends, for a peer stream whose credit waits on it. */
+	onSendEnd?: () => void;
 }
 
 /** A `WebTransport` session carried over a WebSocket, for hosts without native WebTransport. */
@@ -535,6 +542,8 @@ export default class Session implements WebTransport {
 	#requireProtocol = false;
 	#closed?: Error;
 	#closeReason?: Error;
+	// The APPLICATION_CLOSE or CONNECTION_CLOSE that #teardown sends, if any.
+	#closeFrame?: Uint8Array;
 
 	#sendStreams = new Map<bigint, WritableStreamDefaultController>();
 	#recvStreams = new Map<bigint, RecvStream>();
@@ -784,7 +793,7 @@ export default class Session implements WebTransport {
 				// QMux is binary-only; a text frame is a protocol error, not something
 				// to silently drop (which would desync the session).
 				if (typeof value === "string") {
-					this.#sendConnectionClose(1003, "text frames are not valid for QMux");
+					this.#sendClose("connection_close", 1003, "text frames are not valid for QMux");
 					this.#abort(1003, "text frames are not valid for QMux");
 					return;
 				}
@@ -819,7 +828,12 @@ export default class Session implements WebTransport {
 			resetStreamAt: version === "qmux-02",
 		};
 
+		// QMux01 over WebSocket uses the WS message boundary as the implicit record
+		// boundary; no extra size prefix is required.
+		const params = Frame.encode({ type: "transport_parameters", params: this.#ourParams }, this.#version);
+		this.#validateRecordSize(params);
 		this.#scheduler = new SendScheduler(sink, {
+			first: params,
 			onActivity: () => {
 				this.#lastSendAt = now();
 			},
@@ -841,7 +855,6 @@ export default class Session implements WebTransport {
 		this.#bidiStreamCredit = new Credit(0n);
 		this.#uniStreamCredit = new Credit(0n);
 		this.#recvDataMax = this.#ourParams.initialMaxData;
-		this.#sendTransportParameters();
 		// Our own deadline applies until the peer's parameters arrive, so a peer
 		// that never sends them can't hold the session open.
 		this.#startIdleTimerIfEnabled();
@@ -879,7 +892,7 @@ export default class Session implements WebTransport {
 		} catch (error) {
 			// A decode failure or a frame that violates a negotiated limit is fatal.
 			console.error("Protocol violation:", error);
-			this.#sendConnectionClose(1002, "Protocol violation");
+			this.#sendClose("connection_close", 1002, "Protocol violation");
 			this.#abort(1002, "Protocol violation", error);
 		}
 	}
@@ -1126,7 +1139,7 @@ export default class Session implements WebTransport {
 		}
 	}
 
-	async #claimSendCredit(streamId: bigint, desired: bigint): Promise<bigint> {
+	async #claimSendCredit(streamId: bigint, desired: bigint, signal: AbortSignal): Promise<bigint> {
 		const flow = this.#streamFlow.get(streamId);
 		if (!flow) return desired;
 
@@ -1136,7 +1149,7 @@ export default class Session implements WebTransport {
 			if (streamClaimed === 0n) {
 				if (this.#closed) throw this.#closed;
 				// Wait for stream credit, then release and retry to coordinate with conn credit
-				const claimed = await flow.sendCredit.claim(desired);
+				const claimed = await flow.sendCredit.claim(desired, signal);
 				flow.sendCredit.release(claimed);
 				continue;
 			}
@@ -1146,7 +1159,7 @@ export default class Session implements WebTransport {
 			if (connClaimed === 0n) {
 				flow.sendCredit.release(streamClaimed);
 				if (this.#closed) throw this.#closed;
-				const claimed = await this.#connCredit.claim(1n);
+				const claimed = await this.#connCredit.claim(1n, signal);
 				this.#connCredit.release(claimed);
 				continue;
 			}
@@ -1345,7 +1358,7 @@ export default class Session implements WebTransport {
 
 			const credit = frame.id.dir === Stream.Dir.Bi ? this.#recvBiCredit : this.#recvUniCredit;
 			if (!credit.receiveUpTo(frame.id.index + 1n)) {
-				this.#sendConnectionClose(1002, "stream limit exceeded");
+				this.#sendClose("connection_close", 1002, "stream limit exceeded");
 				this.#abort(1002, "stream limit exceeded");
 				return;
 			}
@@ -1361,37 +1374,28 @@ export default class Session implements WebTransport {
 			// For send side on bidi: peer's bidi_local is our send limit
 			const sendMax = frame.id.dir === Stream.Dir.Bi ? this.#peerParams.initialMaxStreamDataBidiLocal : 0n;
 
+			// Stream credit returns once the application has the stream and both halves have
+			// ended, as in QUIC, so it bounds the streams a peer holds open.
+			let holds = frame.id.dir === Stream.Dir.Bi ? 3 : 2;
+			const release = () => {
+				if (--holds === 0) this.#replenishStreamCredit(frame.id.dir);
+			};
+
 			this.#streamFlow.set(streamId, {
 				sendCredit: new Credit(sendMax),
 				sendOffset: 0n,
 				recvMax,
 				recvOffset: 0n,
 				recvConsumed: 0n,
+				onSendEnd: frame.id.dir === Stream.Dir.Bi ? release : undefined,
 			});
 
 			// Validate recv flow control before accepting
 			if (!this.#accountRecv(frame)) {
-				this.#sendConnectionClose(1002, "flow control error");
+				this.#sendClose("connection_close", 1002, "flow control error");
 				this.#abort(1002, "flow control error");
 				return;
 			}
-
-			let accepted = false;
-			let terminal = false;
-			let streamCreditReplenished = false;
-			const maybeReplenishStreamCredit = () => {
-				if (!accepted || !terminal || streamCreditReplenished) return;
-				streamCreditReplenished = true;
-				this.#replenishStreamCredit(frame.id.dir);
-			};
-			const onAccept = () => {
-				accepted = true;
-				maybeReplenishStreamCredit();
-			};
-			const onTerminal = () => {
-				terminal = true;
-				maybeReplenishStreamCredit();
-			};
 
 			const recvStream = new RecvStream(
 				(bytes) => {
@@ -1409,7 +1413,7 @@ export default class Session implements WebTransport {
 					this.#recvStreams.delete(streamId);
 					this.#maybeDeleteStreamFlow(streamId);
 				},
-				onTerminal,
+				release,
 			);
 			this.#recvStreams.set(streamId, recvStream);
 			recv = recvStream;
@@ -1421,50 +1425,23 @@ export default class Session implements WebTransport {
 
 			if (frame.id.dir === Stream.Dir.Bi) {
 				// Incoming bidirectional stream
-				const writer = new WritableStream<Uint8Array>({
-					start: (controller) => {
-						this.#sendStreams.set(streamId, controller);
-					},
-					write: async (chunk) => {
-						await this.#sendStreamData(frame.id, chunk);
-					},
-					abort: (e) => {
-						this.#scheduler?.dropStream(streamId, e instanceof Error ? e : new Error("stream aborted"));
-						this.#sendPriorityFrame({
-							type: "reset_stream",
-							id: frame.id,
-							code: VarInt.from(resetCode(e)),
-							finalSize: this.#sendFinalSize(streamId),
-						});
+				const writer = this.#sendWritable(frame.id, DEFAULT_SEND_ORDER);
 
-						this.#sendStreams.delete(streamId);
-						this.#maybeDeleteStreamFlow(streamId);
-					},
-					close: async () => {
-						await this.#sendStreamFin(frame.id);
-
-						this.#sendStreams.delete(streamId);
-						this.#scheduler?.forget(streamId);
-						this.#maybeDeleteStreamFlow(streamId);
-					},
-				});
-				this.#attachSendOrder(writer, streamId, DEFAULT_SEND_ORDER);
-
-				if (!this.#incomingBidirectionalQueue.push({ readable: reader, writable: writer }, onAccept, onDrop)) {
+				if (!this.#incomingBidirectionalQueue.push({ readable: reader, writable: writer }, release, onDrop)) {
 					// Keep the refused stream registered until FIN/RESET so in-flight frames
 					// cannot repeatedly reopen it. RecvStream rejects subsequent pushes,
 					// letting the receive path account them as deliberately discarded.
 					onDrop(new Error("incoming stream acceptor cancelled"));
 				}
 			} else {
-				if (!this.#incomingUnidirectionalQueue.push(reader, onAccept, onDrop)) {
+				if (!this.#incomingUnidirectionalQueue.push(reader, release, onDrop)) {
 					onDrop(new Error("incoming stream acceptor cancelled"));
 				}
 			}
 		} else {
 			// Existing stream — validate recv flow control
 			if (!this.#accountRecv(frame)) {
-				this.#sendConnectionClose(1002, "flow control error");
+				this.#sendClose("connection_close", 1002, "flow control error");
 				this.#abort(1002, "flow control error");
 				return;
 			}
@@ -1516,7 +1493,7 @@ export default class Session implements WebTransport {
 
 			const credit = frame.id.dir === Stream.Dir.Bi ? this.#recvBiCredit : this.#recvUniCredit;
 			if (!credit.receiveUpTo(frame.id.index + 1n)) {
-				this.#sendConnectionClose(1002, "stream limit exceeded");
+				this.#sendClose("connection_close", 1002, "stream limit exceeded");
 				this.#abort(1002, "stream limit exceeded");
 				return;
 			}
@@ -1534,7 +1511,7 @@ export default class Session implements WebTransport {
 
 		const resetGap = this.#accountReset(frame);
 		if (resetGap === null) {
-			this.#sendConnectionClose(1002, "flow control error");
+			this.#sendClose("connection_close", 1002, "flow control error");
 			this.#abort(1002, "flow control error");
 			return;
 		}
@@ -1564,7 +1541,6 @@ export default class Session implements WebTransport {
 
 		const stopped = new StreamError(streamCode(frame.code.value), "STOP_SENDING");
 		stream.error(stopped);
-		this.#sendStreams.delete(streamId);
 		this.#scheduler?.dropStream(streamId, stopped);
 		// A write parked on stream credit isn't interrupted by error(); fail it here,
 		// even though a live receive half keeps the flow state around.
@@ -1577,18 +1553,18 @@ export default class Session implements WebTransport {
 			finalSize: this.#sendFinalSize(streamId),
 		});
 
+		this.#endSend(streamId);
+	}
+
+	/** End a stream's send half once its FIN or RESET_STREAM is sent. */
+	#endSend(streamId: bigint) {
+		if (!this.#sendStreams.delete(streamId)) return;
+		this.#streamFlow.get(streamId)?.onSendEnd?.();
 		this.#maybeDeleteStreamFlow(streamId);
 	}
 
 	#sendFinalSize(streamId: bigint): bigint {
 		return this.#streamFlow.get(streamId)?.sendOffset ?? 0n;
-	}
-
-	#sendTransportParameters() {
-		// QMux01 over WebSocket uses the WS message boundary as the implicit record
-		// boundary; no extra size prefix is required. This is the first frame on the
-		// wire, so it leads the control queue ahead of any stream data.
-		this.#sendPriorityFrame({ type: "transport_parameters", params: this.#ourParams });
 	}
 
 	/** The largest STREAM frame the peer accepts, in bytes.
@@ -1632,8 +1608,10 @@ export default class Session implements WebTransport {
 		}
 	}
 
-	/** Encode and enqueue a stream-data/fin frame, resolving once it hits the wire. */
-	async #enqueueStreamFrame(streamId: bigint, frame: Frame.Data) {
+	/** Encode and enqueue a stream-data/fin frame, resolving once it hits the wire.
+	 *  Refuses once `signal` aborts: its listener drops only what is already queued. */
+	async #enqueueStreamFrame(streamId: bigint, frame: Frame.Data, signal?: AbortSignal) {
+		signal?.throwIfAborted();
 		const scheduler = this.#scheduler;
 		if (!scheduler) throw this.#closed ?? new Error("session not open");
 		const bytes = Frame.encode(frame, this.#version);
@@ -1641,7 +1619,7 @@ export default class Session implements WebTransport {
 		await scheduler.enqueueStream(streamId, bytes);
 	}
 
-	async #sendStreamDataWithFlowControl(id: Stream.Id, streamId: bigint, data: Uint8Array) {
+	async #sendStreamDataWithFlowControl(id: Stream.Id, streamId: bigint, data: Uint8Array, signal: AbortSignal) {
 		const flow = this.#streamFlow.get(streamId);
 		if (!flow) throw new Error(`missing flow state for stream ${streamId}`);
 
@@ -1653,20 +1631,18 @@ export default class Session implements WebTransport {
 			const chunkMax = Number(payloadMax < remaining ? payloadMax : remaining);
 
 			// Claim flow control credit (stream + connection)
-			const allowed = await this.#claimSendCredit(streamId, BigInt(chunkMax));
+			const allowed = await this.#claimSendCredit(streamId, BigInt(chunkMax), signal);
 			const sendable = Number(allowed);
 
 			const chunk = data.subarray(offset, offset + sendable);
 			const sendOffset = flow.sendOffset;
 
 			try {
-				await this.#enqueueStreamFrame(streamId, {
-					type: "stream",
-					id,
-					offset: sendOffset,
-					data: chunk,
-					fin: false,
-				});
+				await this.#enqueueStreamFrame(
+					streamId,
+					{ type: "stream", id, offset: sendOffset, data: chunk, fin: false },
+					signal,
+				);
 			} catch (e) {
 				// Return claimed credits on send failure
 				if (sendable > 0) {
@@ -1682,10 +1658,10 @@ export default class Session implements WebTransport {
 		}
 	}
 
-	async #sendStreamData(id: Stream.Id, data: Uint8Array) {
+	async #sendStreamData(id: Stream.Id, data: Uint8Array, signal: AbortSignal) {
 		const streamId = id.value.value;
 
-		await this.#sendStreamDataWithFlowControl(id, streamId, data);
+		await this.#sendStreamDataWithFlowControl(id, streamId, data, signal);
 	}
 
 	/** Send the FIN. Routed through the stream's own queue so it stays ordered
@@ -1712,8 +1688,8 @@ export default class Session implements WebTransport {
 
 	#sendPriorityFrame(frame: Frame.Any) {
 		// Once closed, the scheduler rejects new control frames; a late reset/stop
-		// from a stream teardown callback must be a no-op, not a throw. (The
-		// graceful CONNECTION_CLOSE is enqueued before #close sets #closed.)
+		// from a stream teardown callback must be a no-op, not a throw. (The close
+		// frame goes through #sendClose instead.)
 		if (this.#closed) return;
 		const bytes = Frame.encode(frame, this.#version);
 		this.#validateRecordSize(bytes);
@@ -1788,34 +1764,7 @@ export default class Session implements WebTransport {
 			recvConsumed: 0n,
 		});
 
-		const writer = new WritableStream<Uint8Array>({
-			start: (controller) => {
-				this.#sendStreams.set(streamIdVal, controller);
-			},
-			write: async (chunk) => {
-				await this.#sendStreamData(streamId, chunk);
-			},
-			abort: (e) => {
-				this.#scheduler?.dropStream(streamIdVal, e instanceof Error ? e : new Error("stream aborted"));
-				this.#sendPriorityFrame({
-					type: "reset_stream",
-					id: streamId,
-					code: VarInt.from(resetCode(e)),
-					finalSize: this.#sendFinalSize(streamIdVal),
-				});
-
-				this.#sendStreams.delete(streamIdVal);
-				this.#maybeDeleteStreamFlow(streamIdVal);
-			},
-			close: async () => {
-				await this.#sendStreamFin(streamId);
-
-				this.#sendStreams.delete(streamIdVal);
-				this.#scheduler?.forget(streamIdVal);
-				this.#maybeDeleteStreamFlow(streamIdVal);
-			},
-		});
-		this.#attachSendOrder(writer, streamIdVal, sendOrder);
+		const writer = this.#sendWritable(streamId, sendOrder);
 
 		const recvStream = new RecvStream(
 			(bytes) => {
@@ -1861,38 +1810,65 @@ export default class Session implements WebTransport {
 			recvConsumed: 0n,
 		});
 
-		const session = this;
+		return this.#sendWritable(streamId, sendOrder);
+	}
 
-		const writer = new WritableStream<Uint8Array>({
+	/** The writable for a stream's send half. */
+	#sendWritable(id: Stream.Id, sendOrder: number): WritableStream<Uint8Array> {
+		const streamId = id.value.value;
+		let signal!: AbortSignal;
+		const reset = (e: unknown) => {
+			this.#scheduler?.dropStream(streamId, e instanceof Error ? e : new Error("stream aborted"));
+			this.#sendPriorityFrame({
+				type: "reset_stream",
+				id,
+				code: VarInt.from(resetCode(e)),
+				finalSize: this.#sendFinalSize(streamId),
+			});
+
+			this.#endSend(streamId);
+		};
+		const writable = new WritableStream<Uint8Array>({
 			start: (controller) => {
-				session.#sendStreams.set(streamIdVal, controller);
+				signal = controller.signal;
+				this.#sendStreams.set(streamId, controller);
+				// An abort fires the signal at once but runs `abort` below only after the
+				// in-flight write settles, so the signal has to end that write: here if
+				// it is queued behind other frames, in #claimSendCredit if it is parked
+				// on the peer's credit.
+				controller.signal.addEventListener(
+					"abort",
+					() => {
+						const reason = controller.signal.reason;
+						this.#scheduler?.dropStream(
+							streamId,
+							reason instanceof Error ? reason : new Error("stream aborted"),
+						);
+					},
+					{ once: true },
+				);
 			},
-			async write(chunk) {
-				await session.#sendStreamData(streamId, chunk);
+			write: async (chunk, controller) => {
+				await this.#sendStreamData(id, chunk, controller.signal);
 			},
-			abort(e) {
-				session.#scheduler?.dropStream(streamIdVal, e instanceof Error ? e : new Error("stream aborted"));
-				session.#sendPriorityFrame({
-					type: "reset_stream",
-					id: streamId,
-					code: VarInt.from(resetCode(e)),
-					finalSize: session.#sendFinalSize(streamIdVal),
-				});
+			abort: reset,
+			close: async () => {
+				try {
+					await this.#sendStreamFin(id);
+				} catch (e) {
+					// An abort during close drops the queued FIN, and WritableStream never
+					// runs `abort` once an in-flight close fails, so reset here instead.
+					if (!signal.aborted) throw e;
+					reset(signal.reason);
+					return;
+				}
 
-				session.#sendStreams.delete(streamIdVal);
-				session.#maybeDeleteStreamFlow(streamIdVal);
-			},
-			async close() {
-				await session.#sendStreamFin(streamId);
-
-				session.#sendStreams.delete(streamIdVal);
-				session.#scheduler?.forget(streamIdVal);
-				session.#maybeDeleteStreamFlow(streamIdVal);
+				this.#scheduler?.forget(streamId);
+				this.#endSend(streamId);
 			},
 		});
-		this.#attachSendOrder(writer, streamIdVal, sendOrder);
-
-		return writer;
+		this.#attachSendOrder(writable, streamId, sendOrder);
+		return writable;
 	}
 
 	/** Shared teardown for both terminal transitions: tears down streams,
@@ -1943,9 +1919,14 @@ export default class Session implements WebTransport {
 		this.#recvBiCredit.close(closeErr);
 		this.#recvUniCredit.close(closeErr);
 
-		// Reject pending stream writes; already-queued control (e.g. CONNECTION_CLOSE)
-		// still flushes before the socket is torn down.
-		this.#scheduler?.close(closeErr);
+		// Drop whatever is still queued so the close frame goes out next.
+		const flushed = this.#scheduler?.close(closeErr, this.#closeFrame) ?? Promise.resolve();
+		if (this.#closeFrame) {
+			// Close the socket once it has the close frame. A socket the peer stopped
+			// draining can't hold it open: past CLOSE_TIMEOUT it closes without it.
+			const close = () => this.#transportClose();
+			void timeout(CLOSE_TIMEOUT, flushed).then(close, close);
+		}
 	}
 
 	/** Graceful terminal transition: `closed` **fulfills** with the close code
@@ -1995,23 +1976,17 @@ export default class Session implements WebTransport {
 		} catch {}
 	}
 
-	/** APPLICATION_CLOSE (0x1d): a graceful, app-initiated close the peer surfaces
-	 *  by *fulfilling* its `closed`. Pairs with the {@link #close} transition. */
-	#sendApplicationClose(code: number, reason: string) {
-		this.#sendPriorityFrame({ type: "application_close", code: VarInt.from(code), reason });
-		// Give the queued frame a moment to flush before tearing down the socket.
-		// Must run *before* the terminal transition, which closes the scheduler to
-		// new control frames.
-		void sleep(Nano.fromMilli(Milli(100))).then(() => this.#transportClose());
-	}
-
-	/** CONNECTION_CLOSE (0x1c): a protocol violation or transport error we detected,
-	 *  which the peer surfaces by *rejecting* its `closed`. Pairs with the
-	 *  {@link #abort} transition. */
-	#sendConnectionClose(code: number, reason: string) {
-		this.#sendPriorityFrame({ type: "connection_close", code: VarInt.from(code), reason });
-		// Flush the queued frame before tearing down the socket (see above).
-		void sleep(Nano.fromMilli(Milli(100))).then(() => this.#transportClose());
+	/** Tell the peer why the session ends, then close the socket; call just before
+	 *  the terminal transition, whose teardown sends it. APPLICATION_CLOSE (0x1d)
+	 *  is a graceful close the peer surfaces by *fulfilling* its `closed`, pairing
+	 *  with {@link #close}. CONNECTION_CLOSE (0x1c) is a protocol violation or
+	 *  transport error we detected, which the peer surfaces by *rejecting* it,
+	 *  pairing with {@link #abort}. */
+	#sendClose(type: "application_close" | "connection_close", code: number, reason: string) {
+		if (this.#closed) return;
+		const bytes = Frame.encode({ type, code: VarInt.from(code), reason }, this.#version);
+		this.#validateRecordSize(bytes);
+		this.#closeFrame = bytes;
 	}
 
 	/** Close the session with an application code and reason; a no-op once closed. */
@@ -2019,7 +1994,7 @@ export default class Session implements WebTransport {
 		if (this.#closed) return;
 		const code = info?.closeCode ?? 0;
 		const reason = info?.reason ?? "";
-		this.#sendApplicationClose(code, reason);
+		this.#sendClose("application_close", code, reason);
 		this.#close(code, reason);
 	}
 
@@ -2037,7 +2012,17 @@ export default class Session implements WebTransport {
 	}
 
 	/** Always `"default"`: the underlying TCP connection does its own congestion control. */
-	get congestionControl(): string {
+	get congestionControl(): WebTransportCongestionControl {
 		return "default";
+	}
+
+	/** Always `"reliable-only"`: datagrams ride the WebSocket, so nothing is unreliable. */
+	get reliability() {
+		return "reliable-only" as const;
+	}
+
+	/** Reports no counters: the WebSocket exposes none. `datagrams` is required by the W3C dictionary. */
+	async getStats() {
+		return { datagrams: {} };
 	}
 }

@@ -11,7 +11,7 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::track::{Anchor, Info, Position, Range, Subscription};
+use moq_net::track::{Anchor, Info, Range, Subscription};
 use moq_net::{Timestamp, Version};
 use support::harness::{MockConnectOptions, connect_mock};
 
@@ -28,7 +28,7 @@ const LITE: &[&str] = &["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"];
 const TRANSPORT: &[&str] = &["moq-transport-14", "moq-transport-17", "moq-transport-22"];
 
 /// From `start`, or the oldest group still around when there is none.
-fn floored(start: Option<Position>) -> Range {
+fn floored(start: Option<u64>) -> Range {
 	Range {
 		start: start.map_or(Range::oldest().start, Anchor::Absolute),
 		end: None,
@@ -79,7 +79,7 @@ async fn read_all(sub: &mut moq_net::track::Subscriber) -> Vec<(u64, usize)> {
 }
 
 /// Group 1, then a fresh group 0, over `version`. `relay` inserts one hop.
-async fn session(version: &str, relay: bool, start: Option<Position>) -> Vec<(u64, usize)> {
+async fn session(version: &str, relay: bool, start: Option<u64>) -> Vec<(u64, usize)> {
 	let version: Version = version.parse().unwrap();
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("bcast").unwrap();
@@ -156,7 +156,7 @@ async fn session(version: &str, relay: bool, start: Option<Position>) -> Vec<(u6
 	got
 }
 
-async fn in_process(start: Option<Position>) -> Vec<(u64, usize)> {
+async fn in_process(start: Option<u64>) -> Vec<(u64, usize)> {
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("bcast").unwrap();
 	let track = broadcast
@@ -190,14 +190,14 @@ async fn an_explicit_floor_receives_a_group_created_below_the_first_served_group
 	let want = vec![(1, 4), (0, 4)];
 	let mut failures = Vec::new();
 
-	let got = in_process(Some(Position::group(0))).await;
+	let got = in_process(Some(0)).await;
 	if got != want {
 		failures.push(format!("in-process: {got:?}"));
 	}
 
 	for version in LITE.iter().chain(TRANSPORT) {
 		for relay in [false, true] {
-			let got = session(version, relay, Some(Position::group(0))).await;
+			let got = session(version, relay, Some(0)).await;
 			if got != want {
 				failures.push(format!("{version} relay={relay}: {got:?}"));
 			}

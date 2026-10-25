@@ -11,7 +11,6 @@
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use moq_clock::Instant;
 
@@ -46,13 +45,15 @@ pub trait MediaSink: Send {
 	/// loop has already converted the timestamp to microseconds.
 	fn on_frame(&mut self, mid: str0m::media::Mid, frame: codec::Frame) -> Result<()>;
 
-	/// Called once when the session ends with a genuine failure, so the sink can
-	/// abort its tracks with the real cause instead of a bare `Error::Dropped`.
+	/// Called once when the session ends other than by the peer's clean end, so the sink can
+	/// abort its tracks, the catalog included, with the real cause instead of a bare
+	/// `Error::Dropped`.
 	fn abort(&mut self, err: moq_net::Error);
 
 	/// Called once when the peer ends the session cleanly after its final media: finish
-	/// every track and return the finished broadcast, which stays up until it drops.
-	fn finish(&mut self) -> Result<moq_net::broadcast::Finish>;
+	/// every track and return the broadcast. The finished tracks stay servable while the sink
+	/// is held.
+	fn finish(&mut self) -> Result<moq_net::broadcast::Producer>;
 }
 
 /// What the session does with the negotiated media stream.
@@ -93,6 +94,9 @@ pub struct Session {
 	/// sessions; pumps send frames here, the main loop forwards them into
 	/// str0m's [`Writer`](str0m::media::Writer).
 	writes_rx: Option<mpsc::Receiver<WriteRequest>>,
+	/// Why the egress source's catalog stopped. `Some` only for [`MediaRole::Egress`] sessions,
+	/// until it does.
+	catalog_end: Option<tokio::task::JoinHandle<Result<()>>>,
 	/// Rebases each ingested track's raw RTP timestamps onto one session
 	/// timeline so audio and video stay in sync. Unused by egress sessions.
 	ingest_clock: IngestClock,
@@ -110,6 +114,7 @@ impl Session {
 			role: MediaRole::Ingest(sink),
 			opened_media: HashSet::new(),
 			writes_rx: None,
+			catalog_end: None,
 			ingest_clock: IngestClock::default(),
 			egress_clock: EgressClock::default(),
 		})
@@ -119,18 +124,16 @@ impl Session {
 	/// `inbound` comes from the server mux, or [`moq_ice::reader`] for a 1:1 client socket.
 	pub fn egress(rtc: Rtc, socket: moq_ice::Socket, mut source: EgressSource) -> Result<Self> {
 		let writes_rx = source.take_writes();
+		let catalog_end = source.take_catalog_end();
 		Ok(Self {
 			agent: moq_ice::Agent::new(rtc, socket)?,
 			role: MediaRole::Egress(Box::new(source)),
 			opened_media: HashSet::new(),
 			writes_rx: Some(writes_rx),
+			catalog_end: Some(catalog_end),
 			ingest_clock: IngestClock::default(),
 			egress_clock: EgressClock::default(),
 		})
-	}
-
-	pub(crate) fn wire(&self) -> crate::wire::Source {
-		crate::wire::Source::new(self.agent.wire().clone())
 	}
 
 	/// Open a locally offered media line after its answer has been applied.
@@ -138,22 +141,24 @@ impl Session {
 		self.handle_media(mid)
 	}
 
-	/// End an ingest cleanly after its final media: finish the sink's tracks and return the
-	/// finished broadcast to linger on. `None` for an egress session, which publishes nothing.
-	pub fn finish(self) -> Result<Option<moq_net::broadcast::Finish>> {
+	/// End an ingest cleanly after its final media: finish the sink's tracks and keep the
+	/// finished broadcast up for `linger`. `None` for an egress session, which publishes nothing.
+	pub fn finish(self, linger: std::time::Duration) -> Result<Option<moq_mux::Linger<Box<dyn MediaSink>>>> {
 		match self.role {
-			MediaRole::Ingest(mut sink) => sink.finish().map(Some),
+			MediaRole::Ingest(mut sink) => {
+				let broadcast = sink.finish()?;
+				Ok(Some(moq_mux::Linger::new([broadcast], sink, linger)))
+			}
 			MediaRole::Egress(_) => Ok(None),
 		}
 	}
 
 	pub async fn run(&mut self) -> Result<()> {
 		let result = self.run_loop().await;
-		// A genuine failure (not a normal peer disconnect or an unconnected offer)
-		// propagates to subscribers as the real cause; the normal ends just let the
-		// sink's tracks close as Dropped.
+		// Any end but the peer's DELETE, a disconnect or an offer that never connected
+		// included, ends the sink's tracks with its cause, so subscribers see the publisher
+		// go rather than its tracks dropped unfinished.
 		if let Err(err) = &result
-			&& !matches!(err, Error::SessionClosed | Error::IceTimeout)
 			&& let MediaRole::Ingest(sink) = &mut self.role
 		{
 			sink.abort(moq_net::Error::Transport(err.to_string()));
@@ -166,6 +171,22 @@ impl Session {
 			tokio::select! {
 				// Egress writes get drained promptly; `Agent::next` is cancel safe.
 				biased;
+
+				// A failed catalog, as every subscription fails once the source's route dies,
+				// means nothing more will flow, so fail rather than idle. A clean end keeps
+				// serving what the pumps still hold. Polled before the writes, which could
+				// otherwise stay ready and starve it; it completes once.
+				ended = async {
+					match self.catalog_end.as_mut() {
+						Some(end) => end.await,
+						None => std::future::pending().await,
+					}
+				} => {
+					self.catalog_end = None;
+					if let Ok(Err(err)) = ended {
+						return Err(err);
+					}
+				}
 
 				Some(req) = async {
 					match self.writes_rx.as_mut() {
@@ -318,8 +339,15 @@ pub(crate) struct IngestClock {
 
 impl IngestClock {
 	/// Record the newest RTP-to-NTP correlation for a track.
+	///
+	/// A report outside the wall range is ignored, keeping the track on arrival
+	/// time: RFC 3550 lets a sender without a wall clock report NTP time zero.
 	fn observe(&mut self, mid: str0m::media::Mid, sender: str0m::rtp::rtcp::SenderInfo) {
-		self.tracks.entry(mid).or_default().sender = Some(SenderAnchor::new(sender));
+		let Ok(anchor) = SenderAnchor::new(sender) else {
+			tracing::debug!(?mid, "ignoring a sender report outside the wall range");
+			return;
+		};
+		self.tracks.entry(mid).or_default().sender = Some(anchor);
 		self.establish_ntp_epoch();
 	}
 
@@ -403,11 +431,12 @@ struct SenderAnchor {
 }
 
 impl SenderAnchor {
-	fn new(sender: str0m::rtp::rtcp::SenderInfo) -> Self {
-		Self {
-			ntp_us: system_time_to_micros(sender.ntp_time),
+	fn new(sender: str0m::rtp::rtcp::SenderInfo) -> std::result::Result<Self, moq_clock::OutOfRange> {
+		let wall = moq_clock::Wall::try_from(sender.ntp_time)?;
+		Ok(Self {
+			ntp_us: wall.saturating_duration_since(moq_clock::Wall::UNIX_EPOCH).as_micros() as i128,
 			rtp_us: media_time_to_micros(&sender.rtp_time) as i128,
-		}
+		})
 	}
 
 	fn capture_time_us(self, media_us: u64) -> i128 {
@@ -415,28 +444,24 @@ impl SenderAnchor {
 	}
 }
 
-fn system_time_to_micros(time: SystemTime) -> i128 {
-	match time.duration_since(UNIX_EPOCH) {
-		Ok(duration) => duration.as_micros() as i128,
-		Err(err) => -(err.duration().as_micros() as i128),
-	}
-}
-
 fn to_u64(value: i128) -> u64 {
 	value.clamp(0, u64::MAX as i128) as u64
 }
 
-/// Log a finished session at the right level: an ordinary peer disconnect
-/// ([`Error::SessionClosed`]) is debug, a genuine failure is a warning. Keeps
-/// normal WebRTC churn out of the warning stream. `role` labels the path
-/// (e.g. `"whip server"`).
-pub(crate) fn log_session_end(role: &str, result: &Result<()>) {
-	match result {
+/// Log a finished session at the right level, then fold an ordinary peer disconnect
+/// ([`Error::SessionClosed`]) into `Ok` so only genuine failures error. Keeps normal
+/// WebRTC churn out of the warning stream. `role` labels the path (e.g. `"whip server"`).
+pub(crate) fn end(role: &str, result: Result<()>) -> Result<()> {
+	match &result {
 		Ok(()) | Err(Error::SessionClosed) => tracing::debug!(role, "session ended"),
 		// An abandoned offer (peer answered but never connected) is normal churn, not
 		// a failure: keep it out of the warning stream.
 		Err(Error::IceTimeout) => tracing::debug!(role, "session ended: ICE never connected"),
 		Err(err) => tracing::warn!(%err, role, "session ended"),
+	}
+	match result {
+		Ok(()) | Err(Error::SessionClosed) => Ok(()),
+		Err(err) => Err(err),
 	}
 }
 
@@ -544,11 +569,7 @@ pub fn rtc_with_codecs(codecs: &[str0m::format::Codec]) -> Rtc {
 pub async fn bind_udp(advertise: &[SocketAddr]) -> Result<moq_ice::Socket> {
 	let udp = Arc::new(UdpSocket::bind(("0.0.0.0", 0)).await?);
 	let locals = advertised_candidates(advertise, udp.local_addr()?)?;
-	Ok(moq_ice::Socket {
-		inbound: moq_ice::reader(udp.clone()),
-		udp,
-		locals,
-	})
+	Ok(moq_ice::Socket::new(udp.clone(), locals, moq_ice::reader(udp))?)
 }
 
 /// Pair configured ICE candidates with the bound UDP port and validate them.
@@ -580,13 +601,43 @@ pub(crate) fn advertised_candidates(advertise: &[SocketAddr], local: SocketAddr)
 
 #[cfg(test)]
 mod tests {
-	use std::time::{Duration, UNIX_EPOCH};
+	use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 	use str0m::media::Mid;
 	use str0m::rtp::Ssrc;
 	use str0m::rtp::rtcp::SenderInfo;
 
 	use super::*;
+
+	#[test]
+	fn sender_reports_outside_the_wall_range_are_ignored() {
+		let mut clock = IngestClock::default();
+		let audio = Mid::from("0");
+		let video = Mid::from("1");
+		let t0 = Instant::now();
+		assert_eq!(clock.normalize(audio, t0, 0), 0);
+		assert_eq!(clock.normalize(video, t0 + Duration::from_millis(50), 0), 50_000);
+
+		// NTP time zero (1900), which a sender without a wall clock may report, and past 2554.
+		let ntp_zero = UNIX_EPOCH - Duration::from_secs(2_208_988_800);
+		clock.observe(audio, sender_info(1, ntp_zero, 0));
+		clock.observe(
+			video,
+			sender_info(2, UNIX_EPOCH + Duration::from_secs(18_446_744_074), 0),
+		);
+		assert!(clock.tracks.values().all(|track| track.sender.is_none()));
+
+		// Both tracks stay on arrival time.
+		assert_eq!(
+			clock.normalize(audio, t0 + Duration::from_secs(1), 1_000_000),
+			1_000_000
+		);
+		assert_eq!(
+			clock.normalize(video, t0 + Duration::from_millis(1_050), 1_000_000),
+			1_050_000
+		);
+		assert!(SenderAnchor::new(sender_info(1, UNIX_EPOCH, 0)).is_ok());
+	}
 
 	#[test]
 	fn media_flow_respects_negotiated_direction() {

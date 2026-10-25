@@ -4,11 +4,10 @@
 //! `priority + 128`: the IETF byte is always `255 -` the lite byte. The unset priority 0
 //! goes out as 127, one step off the draft's usual 128, to keep that.
 
-/// The model priority an absent IETF priority stands for: the unset default.
-pub(super) const ABSENT: i8 = 0;
-
-/// The wire byte of [`ABSENT`], for a message that must carry a priority it was not given.
-pub(super) const ABSENT_WIRE: u8 = to_wire(ABSENT);
+/// The IETF priority an omitted SUBSCRIBER_PRIORITY or DEFAULT_PUBLISHER_PRIORITY stands for, as
+/// the drafts define both, and the byte for a message that must carry a priority it was not given.
+/// It reads as model priority -1, so a relay forwards an omitted priority as 128, not as unset 127.
+pub(super) const DEFAULT_WIRE: u8 = 128;
 
 /// Convert an IETF priority into the model's higher-first priority.
 pub(super) const fn from_wire(priority: u8) -> i8 {
@@ -33,13 +32,12 @@ mod tests {
 		assert!((0u8..u8::MAX).all(|priority| from_wire(priority) > from_wire(priority + 1)));
 	}
 
-	/// The unset default goes out as 127, and an absent priority decodes to it.
+	/// The unset default goes out as 127, and an omitted priority ranks one step below it.
 	#[test]
 	fn unset_is_127() {
 		assert_eq!(to_wire(0), 127);
 		assert_eq!(from_wire(127), 0);
-		assert_eq!(ABSENT, 0);
-		assert_eq!(ABSENT_WIRE, 127);
+		assert_eq!(from_wire(DEFAULT_WIRE), -1);
 	}
 
 	/// One urgency on both wires: the IETF byte mirrors the moq-lite byte.
