@@ -30,5 +30,9 @@ inherited. Public element API, so it lands before the cut.
 
 Add reflection effects as watch already does for its other attributes.
 
+Decided by the maintainer (2026-10-25): refusing invalid attributes wins
+over `js/AGENTS.md`'s former warn-and-fall-back rule, which now requires
+refusal. Existing fallbacks on both elements are bugs under this quest.
+
 Public API: additive reflection; `readonly` fields reject reassignment.
 Wire: none.
