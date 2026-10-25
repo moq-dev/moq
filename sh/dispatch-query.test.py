@@ -207,11 +207,11 @@ class QueryTests(unittest.TestCase):
         return (self.root / "calls").read_text().splitlines()
 
     def test_failure_cancels_running_lanes_and_names_its_phase(self):
-        # rs's tests and kt's check run until killed, and gh's tests fail only
+        # rs's tests and cpp's check run until killed, and gh's tests fail only
         # once both are running, so the run ends only if the failure cancels
         # both lanes.
         blocked = {}
-        for name, call in (("rs", '"rs test-changed "*'), ("kt", '"kt check"')):
+        for name, call in (("rs", '"rs test-changed "*'), ("cpp", '"cpp check"')):
             started = self.root / f"{name}.started"
             os.mkfifo(started)
             pid = self.root / f"{name}.pid"
@@ -227,15 +227,15 @@ class QueryTests(unittest.TestCase):
         self.assertIn("ci: test gh failed", result.stderr)
         self.assertRegex(result.stderr, r"\d+  test gh \(failed\)")
         self.assertRegex(result.stderr, r"\d+  test rs \(cancelled\)")
-        self.assertRegex(result.stderr, r"\d+  check kt \(cancelled\)")
+        self.assertRegex(result.stderr, r"\d+  check cpp \(cancelled\)")
         for _, _, pid in blocked.values():
             with self.assertRaises(ProcessLookupError):
                 os.kill(int(pid.read_text()), 0)
-        # A cancelled lane starts no more of its modules, and no lane starts
-        # after the failure.
+        # go's lane ran beside the blocked ones, but a cancelled lane starts no
+        # more of its modules, and no lane starts after the failure.
         calls = (self.root / "calls").read_text().splitlines()
-        self.assertIn("py test", calls)
-        self.assertNotIn("go check", calls)
+        self.assertIn("go check", calls)
+        self.assertNotIn("obs compile", calls)
         self.assertNotIn("dart check", calls)
 
     def test_terminating_the_run_stops_the_running_phase(self):
