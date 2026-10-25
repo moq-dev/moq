@@ -528,6 +528,11 @@ impl Rendition {
 	/// The rows go first: renders read the run before the rows, so one that sees the new label
 	/// never lists the old run's segments under it.
 	pub(crate) fn restart(&self, generation: Option<Arc<str>>) {
+		// A build parked on the old run's open group would hold `building`, so the new run could
+		// never start its own.
+		if let Some(build) = self.build.lock().expect("build lock poisoned").take() {
+			build.abort();
+		}
 		self.live.clear();
 		// The old run's own records would bootstrap an inline init from its media.
 		self.spans.clear();

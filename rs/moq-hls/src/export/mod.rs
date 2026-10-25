@@ -1791,6 +1791,31 @@ mod tests {
 		drop(open);
 	}
 
+	// A new generation releases a build parked on the old run's open group, so the new run can
+	// build its own init.
+	#[tokio::test(start_paused = true)]
+	async fn a_new_generation_releases_a_stuck_init_build() {
+		let (origin, broadcast, _catalog, _timelines) = inline_sibling().await;
+		let media = broadcast.create_track("video1", timed()).unwrap();
+		let mut open = media.create_group(3u64.into()).unwrap();
+		write_keyframe(&mut open, 3);
+
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		broadcaster.advertised().await;
+		broadcaster.set_generation(Some("run1")).unwrap();
+		let tag = segments::tag(&(Kind::Video, "video0".into(), "video0".into()));
+		listed_under(&broadcaster.rendition(Kind::Video, "video0").unwrap(), &tag, 3).await;
+		let stuck = broadcaster.rendition(Kind::Video, "video1").unwrap();
+		stuck.start_init();
+		tokio::time::sleep(Duration::from_secs(1)).await;
+		assert!(stuck.init_pending(), "the build is parked on the open group");
+
+		broadcaster.set_generation(Some("run2")).unwrap();
+		tokio::time::sleep(Duration::from_secs(1)).await;
+		assert!(!stuck.init_pending(), "the old run's build still holds the init lock");
+		drop(open);
+	}
+
 	// An ended broadcast stays dynamic while an enabled rendition's init is still building, so a
 	// player keeps refreshing until it is listed instead of loading a static presentation
 	// without it.
