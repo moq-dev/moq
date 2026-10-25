@@ -25,7 +25,3 @@ early data goes. Add a test that a peer's 0-RTT packets are dropped without
 closing the connection.
 
 The Impact bullet says how to migrate in moq-quic, moq-tokio, and moq-uring.
-
-## Required
-
-- [Reformat](/quest/m1/quic-api/reformat.md) - lands the final formatting first
