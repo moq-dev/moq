@@ -43,7 +43,7 @@ private fun cpuNs(): Long =
 private class Result(val name: String, val unit: String, val value: Double)
 
 /**
- * The Kotlin runner of the binding benchmark (rust2's `just bench-ffi`, see bench/README.md).
+ * The Kotlin runner of the binding benchmark (see bench/README.md).
  *
  * The same in-process rounds as every wrapper, so dividing by the Rust baselines isolates
  * what Kotlin adds. Runs only when `MOQ_BENCH_DIR` is set, so `just kt check` skips it.

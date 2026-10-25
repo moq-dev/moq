@@ -23,7 +23,17 @@ on:
       - "**/justfile"
       - ".github/**"
   workflow_call:
+    inputs:
+      benchmarks:
+        description: Smoke-run the Swift binding benchmark runner
+        type: boolean
+        default: false
   workflow_dispatch:
+    inputs:
+      benchmarks:
+        description: Smoke-run the Swift binding benchmark runner
+        type: boolean
+        default: false
 
 concurrency:
   group: platform-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
@@ -155,6 +165,15 @@ jobs:
       - name: Swift
         if: needs.scope.outputs.swift == 'true'
         run: just swift check
+      # At a token budget, so the runner keeps working at this commit; rust2's
+      # `just bench-ffi` measures it at its pinned moq revision.
+      - name: Swift binding benchmark runner
+        if: inputs.benchmarks
+        env:
+          MOQ_BENCH_SECONDS: "0.05"
+        run: |
+          just swift bench
+          test -s target/bench/ffi/swift.json
       - name: OBS
         if: needs.scope.outputs.obs == 'true'
         run: just obs package --target aarch64-apple-darwin --output "$RUNNER_TEMP/obs"

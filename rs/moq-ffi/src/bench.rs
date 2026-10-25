@@ -1,4 +1,4 @@
-//! The Rust baselines for the binding benchmark (rust2's `just bench-ffi`, see `bench/README.md`).
+//! The Rust baselines for the binding benchmark (see `bench/README.md`).
 //!
 //! Every wrapper runs the same loop, so dividing a wrapper's numbers by these isolates
 //! what it adds: `rust-ffi` calls the exported API without crossing the FFI, and `rust-net`
@@ -308,7 +308,7 @@ async fn rust_net() {
 }
 
 #[tokio::test]
-#[ignore = "benchmark: run by rust2's `just bench-ffi`"]
+#[ignore = "benchmark: see bench/README.md"]
 async fn benchmark_ffi() {
 	rust_ffi().await;
 	rust_net().await;

@@ -255,7 +255,9 @@ The binding benchmark itself lives in
 [rust2](https://github.com/kixelated/rust2/blob/main/bench/ffi/README.md), with
 the UniFFI fork whose changes it measures: its `just bench-ffi` runs these
 runners nightly at a pinned moq revision, against the fork, and reports each
-wrapper's ratio to Rust.
+wrapper's ratio to Rust. So that they keep working here, moq's Nightly runs every
+runner at a token budget without measuring it: `just gh nightly bindings` on
+Linux, and `just swift bench` in the macOS Platform job.
 
 ## Browser
 

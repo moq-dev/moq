@@ -2,14 +2,14 @@
 # Keep benchmark builds together while unrelated Nightly workloads run independently.
 set -euo pipefail
 
-usage='usage: just gh nightly rust-test|rust-bench|rust-shared|rust-extra|rust-uring|js'
+usage='usage: just gh nightly rust-test|rust-bench|rust-shared|rust-extra|rust-uring|js|bindings'
 if [[ $# != 1 ]]; then
     echo "$usage" >&2
     exit 2
 fi
-# The measured groups write a report for the benchmark site; rust-test only runs.
+# The measured groups write a report for the benchmark site; rust-test and bindings only run.
 case "$1" in
-    rust-test) report= ;;
+    rust-test | bindings) report= ;;
     rust-bench | rust-shared | rust-extra | rust-uring) report=rust ;;
     js) report=js ;;
     *)
@@ -147,6 +147,23 @@ case "$1" in
         javascript jitter just js jitter-bench
         javascript audio-warmup just js audio-warmup-bench
         javascript clock just js clock-bench
+        ;;
+    # The binding benchmark's runners at a token budget, so they keep working at this
+    # commit; rust2's `just bench-ffi` measures them at its pinned moq revision. Swift
+    # runs on macOS in the Platform workflow.
+    bindings)
+        export MOQ_BENCH_SECONDS=0.05
+        MOQ_BENCH_DIR=${MOQ_BENCH_RESULTS:-$(git rev-parse --show-toplevel)/target/bench/nightly/bindings}
+        export MOQ_BENCH_DIR
+        rm -rf "$MOQ_BENCH_DIR"
+        run just rs test -p moq-ffi --cargo-profile release -E 'test(bench::benchmark_ffi)' --run-ignored only
+        run just go bench -benchtime="${MOQ_BENCH_SECONDS}s"
+        for runner in py kt cpp dart; do
+            run just "$runner" bench
+        done
+        for result in rust-ffi rust-net go python kotlin cpp dart; do
+            if [[ ! -s $MOQ_BENCH_DIR/$result.json ]]; then failed+=("no $MOQ_BENCH_DIR/$result.json"); fi
+        done
         ;;
 esac
 
