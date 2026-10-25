@@ -33,6 +33,26 @@ Decided 2026-10-23 (maintainer interview):
   and dropping an export's doc comment must each fail `just check`.
 - Rust is a non-goal: docs.rs and cargo-semver-checks cover it.
 
+Implementation checkpoint: strict compiler, extractor, and TSDoc messages are
+wired into the shared report configuration. The JSR `@module` tag is defined
+and translated to `@packageDocumentation` in the isolated declaration copy;
+focused fixtures cover missing exports, stripped names, and undocumented
+exports. The old checkers remain until the replacement can pass the workspace.
+
+Open decision: the isolated copy intentionally cannot resolve external
+packages, so strict compiler diagnostics reject every bare dependency import
+with TS2307. Choose whether to preserve isolation with narrowly scoped external
+module diagnostics, or resolve declared dependency types without relying on
+sibling packages having been built. The former keeps today's independent
+reports and is the smaller change, but makes the unresolved-declaration check
+explicitly local to the package. No diagnostic exception is implemented yet.
+
+Remaining after that decision: migrate existing release tags and TSDoc syntax,
+replace private-helper `typeof` references in public static method bags with
+explicit signatures, fix any other exposed public declarations without
+expanding exports unnecessarily, remove `docs.ts` and `declarations.ts` with
+their superseded tests, and pass `just check` and `just ci`.
+
 ## Related
 
 - [Generated JS API reference](/quest/m1/js-api-reference.md) - renders the doc model from the same config

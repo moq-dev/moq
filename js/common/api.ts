@@ -42,7 +42,14 @@ function reports(dist: string): Map<string, string> {
 	try {
 		const root = join(work, "package");
 		cpSync(dist, root, { recursive: true });
-		rewriteExternalNamespaces(root);
+		writeFileSync(
+			join(root, "tsdoc.json"),
+			JSON.stringify({
+				$schema: "https://developer.microsoft.com/json-schemas/tsdoc/v0/tsdoc.schema.json",
+				extends: [join(import.meta.dir, "tsdoc.json")],
+			}),
+		);
+		prepareDeclarations(root);
 		const folder = join(work, "reports");
 		mkdirSync(folder);
 
@@ -61,16 +68,18 @@ function reports(dist: string): Map<string, string> {
 	}
 }
 
-// API Extractor cannot follow `export * as X from "<package>"`, which every entrypoint uses to
-// re-export its dependencies, but reads the equivalent import-then-export form.
-function rewriteExternalNamespaces(root: string) {
+// Keep JSR's module tag and expose its summary to API Extractor. External namespace
+// re-exports need the equivalent import-then-export form for API Extractor to follow them.
+function prepareDeclarations(root: string) {
 	for (const rel of new Bun.Glob("**/*.d.ts").scanSync(root)) {
 		const file = join(root, rel);
 		const body = readFileSync(file, "utf8");
-		const next = body.replace(
-			/^export \* as ([A-Za-z_$][\w$]*) from "([^."][^"]*)";$/gm,
-			'import * as $1 from "$2";\nexport { $1 };',
-		);
+		const next = body
+			.replace(/^(\s*\* @module)\s*$/gm, "$1\n * @packageDocumentation")
+			.replace(
+				/^export \* as ([A-Za-z_$][\w$]*) from "([^."][^"]*)";$/gm,
+				'import * as $1 from "$2";\nexport { $1 };',
+			);
 		if (next !== body) writeFileSync(file, next);
 	}
 }
@@ -89,6 +98,7 @@ function extract(root: string, entrypoint: string, folder: string, entry: string
 						moduleResolution: "bundler",
 						lib: ["esnext", "dom"],
 						strict: true,
+						types: [],
 					},
 					files: [entrypoint],
 				},
@@ -105,12 +115,11 @@ function extract(root: string, entrypoint: string, folder: string, entry: string
 			docModel: { enabled: false },
 			dtsRollup: { enabled: false },
 			tsdocMetadata: { enabled: false },
-			// The report is the output. Its findings about doc comments and unresolved
-			// dependencies are left to the build's own declaration checks.
+			// Validate the same declarations that produce the committed report.
 			messages: {
-				compilerMessageReporting: { default: { logLevel: ExtractorLogLevel.None } },
-				extractorMessageReporting: { default: { logLevel: ExtractorLogLevel.None } },
-				tsdocMessageReporting: { default: { logLevel: ExtractorLogLevel.None } },
+				compilerMessageReporting: { default: { logLevel: ExtractorLogLevel.Error } },
+				extractorMessageReporting: { default: { logLevel: ExtractorLogLevel.Error } },
+				tsdocMessageReporting: { default: { logLevel: ExtractorLogLevel.Error } },
 			},
 		},
 		configObjectFullPath: join(root, "api-extractor.json"),
