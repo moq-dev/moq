@@ -140,10 +140,6 @@ impl Relay {
 		// Every TLS listener serves the ACME certificate, so install it before any is built.
 		#[cfg(feature = "acme")]
 		let acme = config.acme.init(&config.listen.tls, &config.web.https)?;
-		#[cfg(feature = "acme")]
-		if let Some(acme) = &acme {
-			config.listen.tls.resolver = Some(acme.resolver());
-		}
 		let resolved_config = config.clone();
 		let drain_timeout = config.drain_timeout();
 		// The name this relay reports in every auth request: the stats node label,
@@ -203,7 +199,17 @@ impl Relay {
 
 		// Workers and the stream server split one relay across listeners, so they share
 		// one loaded identity. A lone server loads its own, only if a listener needs it.
-		let served = config.runtime.workers().map(|_| config.listen.tls.load()).transpose()?;
+		#[cfg(feature = "acme")]
+		let resolved = acme
+			.as_ref()
+			.map(|acme| moq_tokio::tls::Serve::resolver(acme.resolver(), &config.listen.tls))
+			.transpose()?;
+		#[cfg(not(feature = "acme"))]
+		let resolved = None;
+		let served = match resolved {
+			Some(served) => Some(served),
+			None => config.runtime.workers().map(|_| config.listen.tls.load()).transpose()?,
+		};
 		let mut listen = config.listen.clone();
 		if served.is_some() {
 			listen.tls = Default::default();

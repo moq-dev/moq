@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 
-use crate::auth::{Grant, Handle, Issue, Reply, Request, Serving};
+use crate::auth::{Grant, Issue, Link, Reply, Request, Serving};
 use crate::coding::{Decode, DecodeError, Decoder, Encode, EncodeError, Encoder};
 use crate::{Error, Patterns, SessionError};
 
@@ -225,18 +225,13 @@ pub(super) fn peer_grant(
 /// says it negotiated the extension. Never returns: a session without it just fails
 /// the tokens as unsupported.
 #[cfg(feature = "async")]
-#[expect(
-	clippy::too_many_arguments,
-	reason = "the presenting task owns each piece of session state it drives"
-)]
 pub(super) async fn run_present(
 	runtime: crate::time::Deadlines,
 	session: Transport,
 	control: Control,
-	handle: Handle,
+	handle: Link,
 	peer_setup: peer::PeerSetup,
 	version: Version,
-	going_away: crate::goaway::GoingAway,
 	stats: crate::stats::Session,
 ) -> Result<(), Error> {
 	if !peer_setup.get().await.auth {
@@ -267,13 +262,13 @@ pub(super) async fn run_present(
 			version,
 			id,
 		};
-		let going_away = going_away.clone();
 		let violation = violation.clone();
 		tasks.push(async move {
-			// After a GOAWAY the peer must not see new requests.
-			let err = match going_away.is_set() {
-				true => Error::GoingAway,
-				false => present.run(token).await,
+			// After a GOAWAY, sent or received, the peer must not see new requests. AUTH_ERROR
+			// carries no code that may pass, so unlike moq-lite a refusal is never presented again.
+			let err = match present.handle.active() {
+				true => present.run(token).await,
+				false => Error::GoingAway,
 			};
 			let err = crate::auth::protocol_error(err);
 			if matches!(err, Error::ProtocolViolation) {
@@ -299,7 +294,7 @@ struct Present {
 	runtime: crate::time::Deadlines,
 	session: Transport,
 	control: Control,
-	handle: Handle,
+	handle: Link,
 	version: Version,
 	id: u64,
 }
@@ -410,7 +405,7 @@ fn decode_reply<T: Message>(body: &super::Body, version: Version) -> Result<T, E
 #[derive(Clone)]
 pub(super) struct Serve {
 	pub runtime: crate::time::Deadlines,
-	pub handle: Handle,
+	pub handle: Link,
 	/// What the peer's connection credential earns by default.
 	pub peer_grant: Grant,
 }
@@ -601,7 +596,7 @@ mod tests {
 						crate::lite::test_transport::ScriptedSession::new(Vec::new()).without_credit(),
 					),
 					control: control.clone(),
-					handle: Handle::new(false),
+					handle: Link::new(false),
 					version,
 					id: 0,
 				};

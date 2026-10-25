@@ -7,6 +7,7 @@
 import { Milli, Nano } from "@moq/clock";
 import { Effect, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import * as Announce from "../announced.ts";
+import type * as Auth from "../auth.ts";
 import type { Handle } from "../bandwidth.ts";
 import * as Origin from "../origin.ts";
 import * as Path from "../path.ts";
@@ -184,6 +185,17 @@ export class Connection {
 	readonly origin: Getter<Origin.Table | undefined>;
 
 	/**
+	 * The auth handle every session presents, or undefined while disabled or URL-less.
+	 *
+	 * Every session the connection makes presents the tokens it holds, so a route naming one
+	 * keeps it across a reconnect, and its grant follows the live session. A private
+	 * connection keeps one handle across URL changes, so its tokens go to the new URL, and
+	 * starts another when `versions` changes. A shared connection's is the one every other
+	 * handle on its URL uses, since they share the session.
+	 */
+	readonly auth: Getter<Auth.Handle | undefined>;
+
+	/**
 	 * Settles once this handle is released via {@link close}: `null` on a clean close, or
 	 * the abort {@link Error}. Peek it synchronously (`undefined` while open), observe it
 	 * reactively, or `await` it. Attempt failures live on {@link error} instead.
@@ -198,6 +210,7 @@ export class Connection {
 	readonly #probe = new Signal<Getter<ProbeType | undefined> | undefined>(undefined);
 	readonly #origin = new Signal<Origin.Producer | undefined>(undefined);
 	readonly #bandwidth = new Signal<Handle | undefined>(undefined);
+	readonly #auth = new Signal<Auth.Handle | undefined>(undefined);
 	readonly #error = new Signal<Error | undefined>(undefined);
 	#signals: Effect;
 
@@ -227,6 +240,7 @@ export class Connection {
 		this.probe = new Follow(this.#probe);
 		this.origin = this.#origin;
 		this.bandwidth = this.#bandwidth;
+		this.auth = this.#auth;
 		this.transport = this.#signals.computed((effect) => effect.get(this.#established)?.transport);
 
 		// Key on the serialized URL: URL objects use identity equality, and an equivalent
@@ -253,6 +267,7 @@ export class Connection {
 
 			effect.set(this.#origin, lease.origin, undefined);
 			effect.set(this.#bandwidth, lease.connection.bandwidth, undefined);
+			effect.set(this.#auth, lease.connection.auth, undefined);
 
 			// Proxy the shared loop's outputs, so this handle reads like its own connection.
 			effect.run((nested) => nested.set(this.#status, nested.get(lease.connection.status), "disconnected"));
@@ -302,6 +317,7 @@ export class Connection {
 				if (!effect.get(this.enabled) || !effect.get(href)) return;
 				effect.set(this.#origin, origin, undefined);
 				effect.set(this.#bandwidth, loop.bandwidth, undefined);
+				effect.set(this.#auth, loop.auth, undefined);
 			});
 			signals.run((effect) => effect.set(this.#status, effect.get(loop.status), "disconnected"));
 			signals.run((effect) => effect.set(this.#established, effect.get(loop.established), undefined));

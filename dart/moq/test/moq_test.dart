@@ -385,24 +385,15 @@ void main() {
     second.close();
   });
 
-  test('a finished broadcast lingers until closed', () async {
+  test('a finished catalog leaves the broadcast up until closed', () {
     final broadcast = BroadcastProducer();
-    final track = broadcast.publishTrack(
-      name: 'status',
-      info: TrackInfo(maxAgeUs: 3600000000),
-    );
-    track.finish();
-    final finish = broadcast.finish();
-    expect(finish.linger, const Duration(hours: 1));
-    expect(
-      () => broadcast.publishTrack(name: 'events', info: null),
-      throwsA(isA<ClosedMoqException>()),
-    );
-    // A Dart future can't be cancelled, so closing is the interrupt: the wait
-    // ends instead of lingering for an hour.
-    final wait = finish.wait();
-    finish.close();
-    await wait.timeout(timeout);
+    final catalog = moq_media.CatalogProducer(broadcast: broadcast);
+    broadcast.publishTrack(name: 'status', info: null).finish();
+    catalog.finish();
+    // Finishing the content leaves the broadcast up until it closes.
+    broadcast.consume();
+    broadcast.close();
+    expect(() => catalog.finish(), throwsA(isA<ClosedMoqException>()));
   });
 
   test('microsecond fields read back as Durations', () {
@@ -751,8 +742,7 @@ void main() {
         ),
         output: moq_audio.EncoderOutput(
           codec: moq_audio.Codec.opus(),
-
-          preset: moq_audio.Preset.lowLatency,
+          frameDurationUs: 10000,
         ),
         track: 'mic',
       ),

@@ -336,7 +336,7 @@ impl Reader {
 		if options.start == Start::Latest
 			&& let Some(live_edge) = subscriber.largest().await
 		{
-			subscriber.set_groups(live_edge.group.saturating_sub(lookback)..);
+			subscriber = subscriber.with_range(live_edge.group.saturating_sub(lookback)..);
 		}
 		let track = subscriber;
 		// The catalog says how the track is framed, and it is not always the legacy
@@ -737,7 +737,8 @@ mod tests {
 
 		let subscription = published.subscription().expect("the consumer subscribed");
 		assert_eq!(
-			subscription.max_delay, max_delay,
+			subscription.max_delay,
+			Some(max_delay),
 			"the age budget did not reach the publisher"
 		);
 
@@ -1200,7 +1201,7 @@ mod tests {
 		)
 		.await;
 		assert_eq!(
-			published.subscription().map(|sub| sub.max_delay),
+			published.subscription().and_then(|sub| sub.max_delay),
 			Some(WARMUP),
 			"the two subscriptions did not share one request at the larger budget"
 		);
@@ -1357,7 +1358,7 @@ mod tests {
 			.await
 			.unwrap();
 			assert!(matches!(consumer.lanes[Lane::Max as usize], Slot::Closed));
-			assert_eq!(track.subscription().map(|sub| sub.max_delay), Some(max_delay));
+			assert_eq!(track.subscription().and_then(|sub| sub.max_delay), Some(max_delay));
 		}
 	}
 

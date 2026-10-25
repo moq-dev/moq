@@ -10,9 +10,10 @@
 import * as z from "zod/mini";
 import type { Auth } from "./auth.ts";
 import type * as Epoch from "./epoch.ts";
+import { isLeadingOnes, type StreamVersion } from "./stream.ts";
 
 /**
- * One relay's identity in a broadcast's hop chain, encoded as a 62-bit varint on the wire.
+ * One relay's identity in a broadcast's hop chain: any 64-bit id.
  *
  * Names a *hop*, not an {@link !Origin | Origin} routing table: this is the id a relay
  * stamps into a chain as an announcement passes through, so a receiver can spot its own
@@ -24,7 +25,7 @@ import type * as Epoch from "./epoch.ts";
  */
 export const HopSchema = z
 	.bigint()
-	.check(z.refine((value) => value >= 0n && value < 1n << 62n, "Hop must be a non-negative 62-bit integer"))
+	.check(z.refine((value) => value >= 0n && value < 1n << 64n, "Hop must be a non-negative 64-bit integer"))
 	.brand("Hop");
 
 /** A relay's hop id, validated by {@link HopSchema}. */
@@ -41,6 +42,17 @@ export type Hop = z.infer<typeof HopSchema>;
 export const UNKNOWN_HOP: Hop = HopSchema.parse(0n);
 
 /**
+ * The id `hop` carries on a wire in `version`'s varint form.
+ *
+ * A QUIC varint stops at 2^62-1, so a larger id travels as {@link UNKNOWN_HOP}: the route
+ * still reaches the peer, losing loop detection through this hop on that link only.
+ * Mirrors `Hop::wire_id` in rs/moq-net.
+ */
+export function wireHop(hop: Hop, version: StreamVersion): Hop {
+	return hop >= 1n << 62n && !isLeadingOnes(version) ? UNKNOWN_HOP : hop;
+}
+
+/**
  * Maximum length of a hop chain. Must match `MAX_HOPS` in Rust's `model/origin.rs`.
  *
  * Broadcasts with longer chains are rejected, which bounds loop detection and rejects
@@ -54,11 +66,9 @@ export const MAX_HOPS = 32;
  * `crypto.getRandomValues` is overkill for best-effort loop detection, but
  * used for slightly better distribution than `Math.random` at negligible cost.
  *
- * TEMPORARY: the wire format allows 62 bits, but older `@moq/lite` JS clients
- * decode `AnnounceInterest.exclude_hop` as a u53 (number) and throw on anything
- * > 2^53-1. To keep those clients alive against fresh peers, we cap the random
- * id at 53 bits. Restore to 62 bits once the u62 fix has propagated to deployed
- * bundles. Mirrors `Hop::random` in rs/moq-net.
+ * Older `@moq/lite` JS clients decode `AnnounceInterest.exclude_hop` as a u53
+ * (number) and throw on anything > 2^53-1, so the random id stays below 2^53 to keep
+ * those clients alive against fresh peers. Mirrors `Hop::random` in rs/moq-net.
  */
 export function randomHop(): Hop {
 	const buf = new BigUint64Array(1);

@@ -47,7 +47,8 @@ use crate::codec::annexb::InBandCodec;
 use crate::codec::video::{Hrd, Reorder};
 use crate::codec::{aac, annexb, opus};
 use crate::container::consumer::Event;
-use crate::container::decode::{DeclaredClock, DecodeClock, MAX_REORDER, Settle};
+use crate::container::declared::DeclaredClock;
+use crate::container::decode::{DecodeClock, MAX_REORDER, Settle};
 use crate::container::{ExportSource, Frame};
 use crate::jitter::{self, Arrival, Push};
 
@@ -771,7 +772,7 @@ impl Timing {
 		self.jitter = config.jitter.map_or(0, |t| (t.as_micros() * 90_000 / 1_000_000) as u64);
 		self.framerate = config.framerate.filter(|fps| fps.is_finite() && *fps > 0.0);
 		self.level = Some(video_level(config, name));
-		self.reorder = crate::container::decode::declared(config)?;
+		self.reorder = crate::container::declared::depth(config)?;
 		Ok(())
 	}
 

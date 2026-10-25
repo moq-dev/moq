@@ -71,8 +71,7 @@ with no wire change.
   because watching for it needs more than this plan carries: a verdict
   depends on two groups (`drifted` uses G's successor for `reach` and a
   possibly later presentation edge in `live_above`, and losing either can
-  free G), a range may end mid-group so an edge needs a frame position, and
-  a run skipped at the max age bound would no longer be final. Likewise,
+  free G), and a run skipped at the max age bound would no longer be final. Likewise,
   a stale drop in flight across an aggregate range change (lite-07, see
   [Drop set](/quest/m1/drop-set.md)) may settle a reader whose own range
   would not convict, since SUBSCRIBE_UPDATE has no acknowledgement and the
@@ -167,10 +166,6 @@ warm-relay case in `js/net` too.
 Public API: none. Wire: no encoding change. A publisher now re-offers
 cached groups it never reported dropped when a SUBSCRIBE_UPDATE widens the
 max age or the range.
-
-## Required
-
-- [Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md) - the range miss fill this reuses, beside #5929's landed re-offer and serving path
 
 ## Related
 
