@@ -2,10 +2,11 @@
 
 ## Goal
 
-A moq-lite hop may deliver a group starting at frame k when the receiver
-already holds the frames below k (route continuation, hole fills, and
-front-eviction refills with a frame-precise end), so a relay never refetches
-frames it has. Applications still only ask for whole groups: no public API
+A moq-lite hop may request and deliver a group starting at any frame k the
+requester needs, whether or not it still holds the frames below k (route
+continuation, hole fills, and front-eviction refills after the front was
+evicted, with a frame-precise end), so a relay never refetches frames it does
+not need. Applications still only ask for whole groups: no public API
 starts at a frame. Rust and `@moq/net` both accept and cache such a tail.
 
 ## Plan
@@ -14,12 +15,14 @@ Decided 2026-10-25 (maintainer): remove frame-N starts from the API, as
 [moq-dev/moq#6465](https://github.com/moq-dev/moq/pull/6465) did, but allow
 them in the transport as an optimization.
 
-- Draft: amend lite-07-wip so a subscriber may send a nonzero frame start for
-  a group it already holds below that frame, instead of "MUST send 0 unless
-  it already holds every frame below this index" read as a near ban. Keep the
-  `Frame End` rule.
-- A relay asked for frame k of a group it holds none of widens the upstream
-  request to frame 0 and cuts locally, so the cache stays usable by
+- Draft: amend lite-07-wip so a subscriber may send any nonzero frame start,
+  replacing "MUST send 0 unless it already holds every frame below this
+  index". A front-eviction refill needs frames k and up after the frames
+  below k were evicted, so holding the prefix cannot be the condition. Keep
+  the `Frame End` rule.
+- Widening is relay policy, not a wire rule: a relay asked for frame k of a
+  group it holds none of widens the upstream request to frame 0 and cuts
+  locally, so the cache stays usable by
   whole-group readers and a compressed group can inflate.
 - A partial copy is the same group, never a new identity: `covering_group`
   already serves only copies that cover the start. A copy cut short at the back
