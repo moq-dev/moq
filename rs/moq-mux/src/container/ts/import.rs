@@ -3113,7 +3113,7 @@ impl<E: catalog::Catalog> Stream<E> {
 			} => {
 				let published = video::avc(split, import, assembly, true)?;
 				*split = Default::default();
-				*assembly = video::Assembly::new(video::Codec::Avc);
+				assembly.finish();
 				import.finish()?;
 				return Ok(published);
 			}
@@ -3124,7 +3124,7 @@ impl<E: catalog::Catalog> Stream<E> {
 			} => {
 				let published = video::hevc(split, import, assembly, true)?;
 				*split = Default::default();
-				*assembly = video::Assembly::new(video::Codec::Hevc);
+				assembly.finish();
 				import.finish()?;
 				return Ok(published);
 			}
@@ -8731,6 +8731,19 @@ pub(super) mod test {
 		for frame in &frames {
 			assert!(frame.payload.windows(extra_pps.len()).any(|nal| nal == extra_pps));
 		}
+	}
+
+	#[test]
+	fn video_damage_in_the_final_access_unit_is_counted() {
+		let mut data = synth_pmt(&[(StreamType::H264, VIDEO)], false);
+		data.extend(video_pes(VIDEO, 0, 90_000, None, &annexb_au(true)));
+		// Only end of input ends this AU, so finish() refuses it: its truncated
+		// SPS assembles but fails to parse.
+		let au = [0, 0, 0, 1, 0x67, 0x42, 0, 0, 0, 1, 0x65, 0x80];
+		data.extend(video_pes(VIDEO, 1, 90_000 + FRAME, None, &au));
+		let (_consumer, _catalog, import) = import_all(&data).unwrap();
+		assert_eq!(import.stats().streams[&VIDEO].units, 1);
+		assert_eq!(import.stats().streams[&VIDEO].damaged, 1);
 	}
 
 	/// Damage on one PID refuses that unit and its dependent pictures while another PID

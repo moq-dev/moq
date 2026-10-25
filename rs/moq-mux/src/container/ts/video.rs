@@ -307,6 +307,13 @@ impl Assembly {
 		self.damage.take()
 	}
 
+	/// Release everything buffered at end of input, keeping damage the final drain refused.
+	pub fn finish(&mut self) {
+		let damage = self.damage.take();
+		*self = Self::new(self.codec);
+		self.damage = damage;
+	}
+
 	pub fn reset(&mut self) {
 		self.clock.reset();
 		self.tail = BytesMut::new();
