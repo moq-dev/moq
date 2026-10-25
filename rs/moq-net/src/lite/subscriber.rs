@@ -3604,7 +3604,12 @@ mod tests {
 			// The track goes on: the next group still reaches the reader.
 			let mut following = producer.create_group(group::Info { sequence: 3 }).unwrap();
 			following.write_frame(crate::Timestamp::ZERO, b"3".as_slice()).unwrap();
-			let mut next = reader.recv_group().now_or_never().expect("the next group").unwrap().unwrap();
+			let mut next = reader
+				.recv_group()
+				.now_or_never()
+				.expect("the next group")
+				.unwrap()
+				.unwrap();
 			assert_eq!(next.sequence, 3, "{version:?}");
 			assert_eq!(next.read_frame().await.unwrap().unwrap().payload.as_ref(), b"3");
 		}
