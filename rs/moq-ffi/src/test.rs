@@ -2460,14 +2460,18 @@ async fn dynamic_track_serves_fetch_miss_and_priority() {
 			.await
 	});
 
-	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_group())
+	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_fill())
 		.await
-		.expect("timed out waiting for group request")
+		.expect("timed out waiting for fill")
 		.unwrap();
-	assert_eq!(request.sequence(), 5);
+	assert_eq!(
+		(request.start_group(), request.start_frame(), request.end_group()),
+		(5, 0, 6)
+	);
 	assert_eq!(request.priority(), 11);
+	assert_eq!(request.next(), Some(5));
 
-	let group = request.accept().unwrap();
+	let group = request.accept(5).unwrap();
 	group
 		.write_frame(MoqFrame {
 			payload: b"fetched".to_vec(),
@@ -2488,6 +2492,35 @@ async fn dynamic_track_serves_fetch_miss_and_priority() {
 }
 
 #[tokio::test]
+async fn fill_goes_unused_when_the_fetcher_leaves() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("events".into(), None).unwrap();
+	let dynamic = track.dynamic().unwrap();
+	let consumer = broadcast.consume().unwrap();
+
+	let fetch = tokio::spawn(async move { consumer.fetch_group("events".into(), 5, None).await });
+	let fill = tokio::time::timeout(TIMEOUT, dynamic.requested_fill())
+		.await
+		.expect("timed out waiting for fill")
+		.unwrap();
+	assert!(fill.is_used());
+	assert!(fill.is_wanted(5));
+	assert!(!fill.is_wanted(6), "outside the fill");
+
+	fetch.abort();
+	tokio::time::timeout(TIMEOUT, fill.unused())
+		.await
+		.expect("timed out waiting for the abandoned fetch to become unused")
+		.unwrap();
+	assert!(!fill.is_used());
+	tokio::time::timeout(TIMEOUT, fill.unwanted(5))
+		.await
+		.expect("an unused fill wants none of its groups")
+		.unwrap();
+	assert!(!fill.is_wanted(5));
+}
+
+#[tokio::test]
 async fn dynamic_track_rejects_fetch_miss() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast.publish_track("events".into(), None).unwrap();
@@ -2495,26 +2528,19 @@ async fn dynamic_track_rejects_fetch_miss() {
 	let consumer = broadcast.consume().unwrap();
 
 	let fetch = tokio::spawn(async move { consumer.fetch_group("events".into(), 5, None).await });
-	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_group())
+	let fill = tokio::time::timeout(TIMEOUT, dynamic.requested_fill())
 		.await
-		.expect("timed out waiting for group request")
+		.expect("timed out waiting for fill")
 		.unwrap();
-	request.abort(404).unwrap();
+	fill.drop_groups(5, 6);
+	assert_eq!(fill.next(), None, "the dropped group is answered");
 
 	let result = tokio::time::timeout(TIMEOUT, fetch)
 		.await
 		.expect("timed out waiting for rejected fetch")
 		.expect("fetch task panicked");
-	match result {
-		Err(MoqError::Protocol { details: protocol }) => {
-			assert_eq!(protocol.scope, crate::error::MoqErrorScope::Stream);
-			assert_eq!(protocol.code, 64 + 404);
-			assert_eq!(protocol.kind, crate::error::MoqProtocolKind::App);
-		}
-		Err(other) => panic!("expected Protocol App(404), got {other:?}"),
-		Ok(_) => panic!("expected Protocol App(404), got a group"),
-	}
-	assert!(matches!(request.accept(), Err(MoqError::Closed)));
+	assert!(matches!(result, Err(MoqError::NotFound)), "got {:?}", result.err());
+	assert!(fill.accept(5).is_err(), "a dropped group is answered already");
 }
 
 #[tokio::test]
@@ -2550,12 +2576,12 @@ async fn requested_track_dynamic_survives_accept() {
 	let track_dynamic = request.dynamic().unwrap();
 	let _track = request.accept(Some(timed_info())).unwrap();
 
-	let group_request = tokio::time::timeout(TIMEOUT, track_dynamic.requested_group())
+	let fill = tokio::time::timeout(TIMEOUT, track_dynamic.requested_fill())
 		.await
-		.expect("timed out waiting for group request")
+		.expect("timed out waiting for fill")
 		.unwrap();
-	assert_eq!(group_request.sequence(), 9);
-	let group = group_request.accept().unwrap();
+	assert_eq!(fill.start_group(), 9);
+	let group = fill.accept(9).unwrap();
 	group
 		.write_frame(MoqFrame {
 			payload: b"archive".to_vec(),
@@ -5618,7 +5644,10 @@ async fn client_defaults_are_what_an_unset_config_dials_with() {
 	assert_eq!(quic.idle_timeout, unset.idle_timeout);
 	assert_eq!(quic.keep_alive, unset.keep_alive);
 	assert_eq!(defaults.websocket.enabled, Some(true));
-	assert!(defaults.backoff.initial_us.is_some() && defaults.backoff.max_us.is_some());
+	let backoff = moq_tokio::connection::Backoff::default();
+	assert_eq!(defaults.backoff.initial_us, micros(backoff.initial()));
+	assert_eq!(defaults.backoff.max_us, micros(backoff.max()));
+	assert_eq!(defaults.backoff.timeout_us, micros(backoff.timeout()));
 
 	// The backend picks these, so there is no single value to report.
 	assert_eq!(defaults.tls.system_roots, None);
@@ -7274,15 +7303,6 @@ async fn data_track_names_cannot_collide() {
 
 /// In-memory sessions whose protocol and origin drivers use the paused test clock.
 async fn memory_shutdown_pair() -> (Arc<MoqSession>, Arc<MoqSession>) {
-	async fn drive(driver: impl moq_net::time::Driver) -> moq_tokio::Result<()> {
-		match moq_net::time::run(driver).await {
-			moq_net::Error::Closed
-			| moq_net::Error::Cancel
-			| moq_net::Error::Session(moq_net::SessionError::Cancel) => Ok(()),
-			error => Err(error.into()),
-		}
-	}
-
 	fn origin() -> crate::origin::Origin {
 		let mut config = moq_net::origin::Config::default();
 		config.pool = moq_net::cache::Pool::unbounded();
@@ -7307,8 +7327,8 @@ async fn memory_shutdown_pair() -> (Arc<MoqSession>, Arc<MoqSession>) {
 			.connect(moq_clock::Instant::now(), client)
 			.await
 			.unwrap();
-		let driver = tokio::spawn(drive(driver));
-		Arc::new(MoqSession::accepted(session, a.clone(), a, driver))
+		tokio::spawn(moq_net::time::run(driver));
+		Arc::new(MoqSession::accepted(session, a.clone(), a))
 	};
 	let accept = async {
 		let (session, driver) = moq_net::Server::new()
@@ -7317,8 +7337,8 @@ async fn memory_shutdown_pair() -> (Arc<MoqSession>, Arc<MoqSession>) {
 			.accept(moq_clock::Instant::now(), server)
 			.await
 			.unwrap();
-		let driver = tokio::spawn(drive(driver));
-		Arc::new(MoqSession::accepted(session, b.clone(), b, driver))
+		tokio::spawn(moq_net::time::run(driver));
+		Arc::new(MoqSession::accepted(session, b.clone(), b))
 	};
 	tokio::join!(connect, accept)
 }
@@ -7683,7 +7703,7 @@ async fn auth_tokens_join_and_leave_the_union() {
 	let serving = tokio::spawn(async move {
 		let mut request = listener.accept().await.expect("accept");
 		let mut requests = request.requests();
-		let (session, driver) = request.ok().await.unwrap();
+		let session = request.ok().await.unwrap();
 		let mut issued = Vec::new();
 		while let Some(request) = requests.next().await {
 			match request.token().as_ref() {
@@ -7697,7 +7717,7 @@ async fn auth_tokens_join_and_leave_the_union() {
 				_ => request.reject(moq_net::SessionError::Unauthorized, "unknown token"),
 			}
 		}
-		drop((session, driver, issued));
+		drop((session, issued));
 	});
 
 	let client = MoqClient::new(MoqClientConfig {

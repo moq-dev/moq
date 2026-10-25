@@ -96,7 +96,7 @@ typedef TrackProducer = MoqTrackProducer;
 /// A subscriber-requested track not yet accepted: accept it for a [TrackProducer] or abort it.
 typedef TrackRequest = MoqTrackRequest;
 
-/// A stream of uncached group requests for one track, for serving fetches on demand.
+/// A stream of the fills readers of one track need: runs of groups the cache lacks.
 typedef TrackDynamic = MoqTrackDynamic;
 
 /// A watch-only handle to whether a published track has subscribers; holding it keeps nothing open.
@@ -105,8 +105,8 @@ typedef TrackDemand = MoqTrackDemand;
 /// The read side of a raw track: yields groups in sequence order, skipping ahead if it falls behind.
 typedef TrackConsumer = MoqTrackConsumer;
 
-/// A request to produce one uncached group for a fetch consumer.
-typedef GroupRequest = MoqGroupRequest;
+/// A run of groups readers miss: accept each group you have and drop the rest.
+typedef Fill = MoqFill;
 
 /// The write side of a single group: append frames to it.
 typedef GroupProducer = MoqGroupProducer;

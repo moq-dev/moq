@@ -36,19 +36,20 @@ The design is the [E2EE epic](/quest/m2/e2ee/README.md)'s Dynamic names section.
   refused. That keeps every `(group, frame)` identity unique without
   releasing the claim. Say in the PR whether `create_track` adopts the same
   rule, which today refuses a re-created name.
-- Listing: decide whether the wrapper's handler offers moq-net's `lister`,
-  which would take semantic names and list their physical names, or leaves
-  it out until a consumer needs it.
-- Rust only: `@moq/net` has no public broadcast request handler, so no JS
-  writer serves undeclared names yet. Recovery still lands in both cores
-  through [reversible names](/quest/m2/e2ee/reversible-names.md).
+- Listing (maintainer, 2026-10-24): the wrapper's handler offers moq-net's
+  `lister`, taking semantic names and listing their physical names. An
+  e2ee consumer's listing decrypts them back
+  ([moq-e2ee implements the traits](/quest/m2/net-wrap/e2ee.md)), so a
+  listed name round-trips.
+- Rust only: `@moq/net` has no public broadcast request handler yet;
+  [JS undeclared names](/quest/m2/e2ee/js-undeclared-names.md) adds it and
+  the `@moq/e2ee` mirror.
+- Recovery is already in both cores: crate-private
+  `generation::Producer::open` in Rust (drop its `allow(dead_code)` once
+  the handler calls it) and `@internal` `Generation.Producer.open` in JS.
 
 Public API: a request handler on `moq_e2ee::broadcast::Producer`, and
 `track::Request::name()` returns the semantic name. Wire: none.
-
-## Required
-
-- [Reversible physical names](/quest/m2/e2ee/reversible-names.md) - the recovery this handler opens requests with
 
 ## Related
 

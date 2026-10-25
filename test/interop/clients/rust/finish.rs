@@ -131,7 +131,7 @@ async fn main() -> anyhow::Result<()> {
 				.subscribe(Some(
 					moq_net::track::Subscription::default()
 						.with_max_delay(args.timeout)
-						.with_groups(0..),
+						.with_range(0..),
 				))
 				.await?;
 			let format = moq_mux::catalog::hang::Container::try_from(config)?;

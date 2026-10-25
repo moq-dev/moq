@@ -1,4 +1,4 @@
-//! Human-readable command-line durations.
+//! Human-readable configuration durations.
 
 use std::fmt;
 use std::str::FromStr;
@@ -64,15 +64,18 @@ macro_rules! test_config_duration {
 			assert_eq!(resolve(&merged(&unset)), default, "unset round-trip");
 			for value in [std::time::Duration::ZERO, std::time::Duration::from_secs(3)] {
 				for mut config in [parse(&[]), merged(&parse(&[])), <$config>::default()] {
-					config.$field = value.into();
+					config.$field = Some(value.into());
 					assert_eq!(resolve(&config), expected(value), "typed {value:?}");
 					assert_eq!(resolve(&merged(&config)), expected(value), "round-trip {value:?}");
 				}
 				let flag_value = if value.is_zero() { "3s" } else { "0s" };
-				let flag_duration = humantime::parse_duration(flag_value).unwrap();
 				for mut config in [parse(&[$flag, flag_value]), merged(&parse(&[$flag, flag_value]))] {
-					config.$field = value.into();
-					assert_eq!(resolve(&config), expected(flag_duration), "explicit flag");
+					config.$field = Some(value.into());
+					assert_eq!(
+						resolve(&config),
+						expected(value),
+						"typed assignment replaces the parsed flag"
+					);
 				}
 			}
 		}

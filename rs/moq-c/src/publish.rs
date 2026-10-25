@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use moq_mux::catalog::hang::Extra;
 use moq_mux::import;
@@ -24,10 +25,19 @@ struct TrackRequest {
 }
 
 /// A request a handler pulled, before it has a handle. A track request is boxed: it is
-/// several times the size of a group request.
+/// several times the size of a fill.
 enum Request {
 	Track(Box<TrackRequest>),
-	Group(moq_net::group::Request),
+	Fill(moq_net::track::Fill),
+}
+
+/// One group of a fill, handed to C as a group request: the frozen ABI answers fills a
+/// group at a time.
+struct GroupRequest {
+	fill: Arc<moq_net::track::Fill>,
+	sequence: u64,
+	/// Dropped once the request is answered or freed, so its fill's next group follows.
+	_pending: oneshot::Sender<()>,
 }
 
 /// What a request handler serves.
@@ -196,7 +206,7 @@ pub struct Publish {
 	track_request: NonZeroSlab<TrackRequest>,
 
 	/// Group requests delivered to a handler, freed on accept, abort, or free.
-	group_request: NonZeroSlab<moq_net::group::Request>,
+	group_request: NonZeroSlab<GroupRequest>,
 }
 
 impl Publish {
@@ -440,8 +450,9 @@ impl Publish {
 	pub fn container_cut(&mut self, container: Id) -> Result<(), Error> {
 		let container = self.containers.get_mut(container).ok_or(Error::MediaNotFound)?;
 		container.driver.check()?;
-		container.inner.cut();
-		container.driver.check()
+		let result = container.inner.cut();
+		container.driver.check()?;
+		Ok(result?)
 	}
 
 	/// Start a new segment and number its groups `sequence`.
@@ -697,23 +708,28 @@ impl Publish {
 		mut dynamic: Dynamic,
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
+		// Each fill hands out its groups one at a time, alongside the other fills.
+		let mut fills = kio::Tasks::new();
 		loop {
 			// The handler is owned here, so returning drops it and rejects whatever is pending.
 			// `biased` so a pending close always wins over a ready request.
 			let res = tokio::select! {
 				biased;
 				_ = &mut close => return Ok(()),
-				res = kio::wait(|waiter| match &mut dynamic {
-					Dynamic::Broadcast(dynamic, broadcast, finished) => {
-						dynamic.poll_requested_track(waiter).map_ok(|request| {
-							Request::Track(Box::new(TrackRequest {
-								broadcast: *broadcast,
-								finished: finished.clone(),
-								request,
-							}))
-						})
+				res = kio::wait(|waiter| {
+					let _ = fills.poll(waiter);
+					match &mut dynamic {
+						Dynamic::Broadcast(dynamic, broadcast, finished) => {
+							dynamic.poll_requested_track(waiter).map_ok(|request| {
+								Request::Track(Box::new(TrackRequest {
+									broadcast: *broadcast,
+									finished: finished.clone(),
+									request,
+								}))
+							})
+						}
+						Dynamic::Track(dynamic) => dynamic.poll_requested_fill(waiter).map_ok(Request::Fill),
 					}
-					Dynamic::Track(dynamic) => dynamic.poll_requested_group(waiter).map_ok(Request::Group),
 				}) => res,
 			};
 
@@ -725,13 +741,45 @@ impl Publish {
 			};
 
 			// Hold the lock only to buffer the request; release it before the callback.
-			let mut state = State::lock();
 			let id = match request {
-				Request::Track(request) => state.publish.track_request.insert(*request)?,
-				Request::Group(request) => state.publish.group_request.insert(request)?,
+				Request::Track(request) => State::lock().publish.track_request.insert(*request)?,
+				Request::Fill(fill) => {
+					let mut serve = Box::pin(Self::serve_fill(callback, Arc::new(fill)));
+					fills.push(move |waiter: &kio::Waiter| waiter.poll_future(serve.as_mut()));
+					continue;
+				}
 			};
-			drop(state);
 			callback.call(id);
+		}
+	}
+
+	/// Hand `fill` to C a group at a time, each once the one before it is answered or nobody
+	/// reads it any more, until every group is answered or nobody waits on the fill.
+	async fn serve_fill(callback: OnStatus, fill: Arc<moq_net::track::Fill>) {
+		let mut last = None;
+		while fill.is_used()
+			&& let Some(sequence) = fill.next()
+			&& last != Some(sequence)
+		{
+			last = Some(sequence);
+			let (pending, answered) = oneshot::channel();
+			let request = GroupRequest {
+				fill: fill.clone(),
+				sequence,
+				_pending: pending,
+			};
+			let Ok(id) = State::lock().publish.group_request.insert(request) else {
+				return;
+			};
+			callback.call(id);
+			let unwanted = kio::wait(|waiter| fill.poll_unwanted(sequence, waiter));
+			tokio::select! {
+				_ = answered => {}
+				// Withdrawn, so answering it fails as not found, and the fill moves on.
+				_ = unwanted => {
+					State::lock().publish.group_request.remove(id);
+				}
+			}
 		}
 	}
 
@@ -806,7 +854,11 @@ impl Publish {
 	/// The sequence, priority, and first frame of a requested group.
 	pub fn group_request_info(&self, request: Id) -> Result<(u64, i8, u64), Error> {
 		let request = self.group_request.get(request).ok_or(Error::NotFound)?;
-		Ok((request.sequence(), request.priority(), request.frame_start()))
+		Ok((
+			request.sequence,
+			request.fill.priority(),
+			request.fill.frame_start(request.sequence),
+		))
 	}
 
 	/// Accept a group request, returning a group handle like [`Self::track_group`].
@@ -815,25 +867,20 @@ impl Publish {
 	/// indices they have in the group rather than restarting at 0.
 	pub fn group_request_accept(&mut self, request: Id) -> Result<Id, Error> {
 		let request = self.group_request.remove(request).ok_or(Error::NotFound)?;
-		let frame_start = request.frame_start();
-		let mut group = request.accept(None)?;
-		if let Err(err) = group.start_at(frame_start) {
-			let _ = group.abort(err.clone());
-			return Err(err.into());
-		}
+		let group = request.fill.accept(request.sequence, None)?;
 		self.groups.insert(group)
 	}
 
-	/// Reject a group request, failing every fetch waiting on it with `error_code`.
-	pub fn group_request_abort(&mut self, request: Id, error_code: u16) -> Result<(), Error> {
-		let request = self.group_request.remove(request).ok_or(Error::NotFound)?;
-		request.reject(moq_net::Error::App(error_code));
-		Ok(())
+	/// Reject a group request, failing every fetch waiting on it. A fill has no error code
+	/// to carry, so `error_code` is not delivered: the fetches fail as not found.
+	pub fn group_request_abort(&mut self, request: Id, _error_code: u16) -> Result<(), Error> {
+		self.group_request_free(request)
 	}
 
 	/// Drop a group request, which rejects it.
 	pub fn group_request_free(&mut self, request: Id) -> Result<(), Error> {
-		self.group_request.remove(request).ok_or(Error::NotFound)?;
+		let request = self.group_request.remove(request).ok_or(Error::NotFound)?;
+		request.fill.drop_groups(request.sequence..request.sequence + 1);
 		Ok(())
 	}
 

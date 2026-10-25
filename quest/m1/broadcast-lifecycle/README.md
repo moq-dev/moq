@@ -47,10 +47,11 @@ timer on main at 1582fdc07d:
 ## Required
 
 - [TS export follows by cause](/quest/m1/broadcast-lifecycle/ts-follow.md) - `export ts|srt --linger` becomes `--follow <duration>`, a replacement's catalog has no separate deadline, and a track failure is classified by its cause instead of a 1s grace
-- [SRT tells a clean end from a failure](/quest/m1/broadcast-lifecycle/srt-end.md) - an SRT ingest whose peer goes silent aborts instead of finishing as if it had shut down
 - [Timer cleanups](/quest/m1/broadcast-lifecycle/timers.md) - `ConnectionProps.linger` is gone and stale linger references are fixed
 
 ## Related
+
+- [SRT on the shared socket](/quest/m2/one-port/srt-demux.md) - an SRT ingest whose peer goes silent aborts instead of finishing as if it had shut down
 
 - [moq-transport finish interop](/quest/m2/ietf-finish.md) - the interop `finish` case, whose late readers rely on retention
 - [CLI and gst flags](https://github.com/moq-dev/moq/pull/6522) - removed the opt-in `linger` booleans, leaving completion to this epic

@@ -505,14 +505,14 @@ pub struct Route {
 	/// The credential the request advertising this route carries, from
 	/// [`auth::Handle`](crate::auth::Handle)'s `add`, or `None` for the session's scope.
 	///
-	/// Only a session the auth was presented on carries it, as the token on its
+	/// Only a session built on the handle that issued it carries it, as the token on its
 	/// moq-transport PUBLISH_NAMESPACE: any other session, the inline NAMESPACE answering a
 	/// solicited SUBSCRIBE_NAMESPACE from draft 16 on (drafts 14 and 15 answer with a
 	/// PUBLISH_NAMESPACE, which carries it), and moq-lite (which rides the session's scope)
 	/// advertise the route unnamed. Swapping it is an update that renews the request with
-	/// REQUEST_UPDATE from draft 16, or ends and makes it again before. After a
-	/// reconnect, add the token on the new session and name that. Local, like
-	/// [`Self::source`]: a relay never forwards it.
+	/// REQUEST_UPDATE from draft 16, or ends and makes it again before. A handle passed to
+	/// `Client::with_auth` presents it on every session it backs, so the route keeps it
+	/// across a reconnect. Local, like [`Self::source`]: a relay never forwards it.
 	pub auth: Option<crate::auth::Auth>,
 
 	/// The announcing session's declared or assigned identity.
@@ -6108,8 +6108,8 @@ impl Consumer {
 	/// relative to this consumer's root; its patterns only filter visibility.
 	/// Routes with a segment starting with `.` below the literal head of those
 	/// patterns are hidden unless [`with_hidden`](Self::with_hidden) opted in.
-	/// The stream also watches its scope: a moq-lite client session fed by this
-	/// origin asks its peer about the scope while any stream watches it.
+	/// The stream also watches its scope: a client session fed by this origin asks
+	/// its peer about the scope while any stream watches it.
 	/// Drop the returned [`AnnounceConsumer`] to unregister.
 	pub fn announced(&self) -> AnnounceConsumer {
 		let state = kio::Producer::<OriginConsumerState>::default();
@@ -6400,7 +6400,7 @@ impl Consumer {
 	///
 	/// The returned future fails with [`Error::Unroutable`] at once when no
 	/// announced route covers the path, including a broadcast created on this
-	/// origin but not announced. A moq-lite client session only discovers what this
+	/// origin but not announced. A client session only discovers what this
 	/// origin's readers watch, so a path no [`Self::announced`],
 	/// [`Self::routed_broadcast`], or [`Self::announced_broadcast`] watches is
 	/// unroutable on it. A broadcast resolved through a discovered route keeps its
@@ -8110,7 +8110,7 @@ mod tests {
 	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn an_auth_swap_is_an_update() {
-		let handle = crate::auth::Handle::ietf(false);
+		let handle = crate::auth::Link::ietf(false);
 		let first = handle.present(bytes::Bytes::from_static(b"first"), false).unwrap();
 		let second = handle.present(bytes::Bytes::from_static(b"second"), false).unwrap();
 		let producer = origin(1).produce();
@@ -9410,7 +9410,7 @@ mod tests {
 		let fetched = Arc::new(crate::sync::Mutex::new(Vec::<crate::group::Producer>::new()));
 		let serving = fetched.clone();
 		let _fetching = moq_clock::sim::spawn(async move {
-			while let Ok(request) = fetches.requested_group().await {
+			while let Ok(request) = fetches.requested_fill_group().await {
 				let mut group = request.accept(crate::track::Info::timed()).unwrap();
 				for frame in [b"a", b"b", b"c"] {
 					group.write_frame(crate::Timestamp::ZERO, frame.as_ref()).unwrap();

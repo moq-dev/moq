@@ -125,7 +125,7 @@ pub enum Error {
 	#[error("must provide at least one cert/key pair or generate entry")]
 	NoCertSource,
 
-	/// A [`Listen::resolver`] was combined with another certificate source, which it would hide.
+	/// An external resolver was combined with another certificate source, which it would hide.
 	#[error("a certificate resolver cannot be combined with cert, key, generate, or identity")]
 	ConflictingResolver,
 
@@ -141,6 +141,10 @@ pub enum Error {
 		#[source]
 		source: Box<rustls::Error>,
 	},
+
+	/// The session secret log could not be opened as a private regular file.
+	#[error("failed to open private TLS key log")]
+	KeyLog(#[source] std::io::Error),
 
 	/// A rustls error with no more specific context, e.g. building a config.
 	#[error(transparent)]
@@ -1257,18 +1261,6 @@ pub struct Listen {
 	#[serde(skip)]
 	pub identity: Option<Identity>,
 
-	/// Pick the served certificate per handshake with this instead of any other source.
-	///
-	/// For a certificate that changes on its own schedule, such as one an ACME client
-	/// renews in the background: every listener sharing the identity serves the
-	/// resolver's current answer on its next handshake. Combining it with `cert`,
-	/// `key`, `generate`, or `identity` is an error. Not settable from the CLI or a
-	/// config file, and reported with no fingerprints by [`Serve::certificates`].
-	#[cfg(feature = "_certs")]
-	#[usage(skip)]
-	#[serde(skip)]
-	pub resolver: Option<Arc<dyn rustls::server::ResolvesServerCert>>,
-
 	/// Require a client certificate, pinned to these fingerprints (mTLS without a CA).
 	///
 	/// The peer-mesh counterpart to `root`: membership is a set of fingerprints
@@ -1369,16 +1361,13 @@ impl Listen {
 		self.refuse_deprecated()?;
 		let provider = crypto::provider();
 		let certs = Arc::new(ServeCerts::new(provider.clone()));
-		let resolver = self.external_resolver()?;
-		if resolver.is_none() {
-			certs.load_certs(self)?;
-		}
+		certs.load_certs(self)?;
 		let verifier = self.client_auth(provider)?;
 		#[cfg(feature = "watch")]
 		let reload = Reload::spawn(certs.clone(), self.clone())?;
 		Ok(Serve(Arc::new(Serving {
 			certs,
-			resolver,
+			resolver: None,
 			verifier,
 			#[cfg(feature = "watch")]
 			_reload: reload,
@@ -1392,7 +1381,6 @@ impl Listen {
 			|| !self.generate.is_empty()
 			|| !self.root.is_empty()
 			|| self.peers.is_some()
-			|| self.resolver.is_some()
 			|| {
 				#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
 				{
@@ -1459,22 +1447,6 @@ impl Listen {
 			tls.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
 			tls.send_tls13_tickets = 0;
 		}
-	}
-
-	/// The configured [`resolver`](Self::resolver), refused alongside any other certificate source.
-	#[cfg(feature = "_certs")]
-	fn external_resolver(&self) -> Result<Option<Arc<dyn rustls::server::ResolvesServerCert>>> {
-		let Some(resolver) = &self.resolver else {
-			return Ok(None);
-		};
-		#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
-		let in_memory = self.identity.is_some();
-		#[cfg(not(any(feature = "aws-lc-rs", feature = "ring")))]
-		let in_memory = false;
-		if !self.cert.is_empty() || !self.key.is_empty() || !self.generate.is_empty() || in_memory {
-			return Err(Error::ConflictingResolver);
-		}
-		Ok(Some(resolver.clone()))
 	}
 
 	/// Refuse a section parsed from released spellings, naming what replaced each.
@@ -1570,14 +1542,9 @@ impl Listen {
 		self.refuse_deprecated()?;
 		let provider = crypto::provider();
 
-		let certs: Arc<dyn rustls::server::ResolvesServerCert> = match self.external_resolver()? {
-			Some(resolver) => resolver,
-			None => {
-				let certs = ServeCerts::new(provider.clone());
-				certs.load_certs(self)?;
-				Arc::new(certs)
-			}
-		};
+		let certs = ServeCerts::new(provider.clone());
+		certs.load_certs(self)?;
+		let certs = Arc::new(certs);
 
 		// TCP can negotiate TLS 1.2 as well as 1.3, unlike QUIC which is 1.3-only.
 		let builder =
@@ -1626,6 +1593,33 @@ impl rustls::server::ResolvesServerCert for Serving {
 
 #[cfg(feature = "_certs")]
 impl Serve {
+	/// Serve this resolver's current certificate with the listen policy's client authentication.
+	///
+	/// Certificate sources in `policy` are refused. Roots and pinned peers retain their
+	/// usual verification and reload behavior. External certificates have no reported fingerprints.
+	pub fn resolver(resolver: Arc<dyn rustls::server::ResolvesServerCert>, policy: &Listen) -> Result<Self> {
+		policy.refuse_deprecated()?;
+		#[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
+		let in_memory = policy.identity.is_some();
+		#[cfg(not(any(feature = "aws-lc-rs", feature = "ring")))]
+		let in_memory = false;
+		if !policy.cert.is_empty() || !policy.key.is_empty() || !policy.generate.is_empty() || in_memory {
+			return Err(Error::ConflictingResolver);
+		}
+		let provider = crypto::provider();
+		let certs = Arc::new(ServeCerts::new(provider.clone()));
+		let verifier = policy.client_auth(provider)?;
+		#[cfg(feature = "watch")]
+		let reload = Reload::spawn(certs.clone(), policy.clone())?;
+		Ok(Self(Arc::new(Serving {
+			certs,
+			resolver: Some(resolver),
+			verifier,
+			#[cfg(feature = "watch")]
+			_reload: reload,
+		})))
+	}
+
 	/// The current certificate fingerprints, from the resolver every listener uses.
 	pub fn certificates(&self) -> Certificates {
 		Certificates::new(self.0.certs.info.clone())
@@ -2657,12 +2651,7 @@ mod tests {
 
 		let identity = Identity::generate(["localhost"]).unwrap();
 		let resolver = Arc::new(Counting(identity.certified().rustls.clone(), Default::default()));
-		let serve = Listen {
-			resolver: Some(resolver.clone()),
-			..Default::default()
-		}
-		.load()
-		.unwrap();
+		let serve = Serve::resolver(resolver.clone(), &Listen::default()).unwrap();
 		assert!(serve.certificates().fingerprints().is_empty());
 		let client = Arc::new(
 			Connect {
@@ -2675,6 +2664,90 @@ mod tests {
 		handshake_kinds(client.clone(), serve.config(Vec::new()).unwrap()).unwrap();
 		handshake_kinds(client, serve.config(Vec::new()).unwrap()).unwrap();
 		assert_eq!(resolver.1.load(std::sync::atomic::Ordering::Relaxed), 2);
+	}
+
+	/// The external certificate source must retain the listener's live peer allowlist.
+	#[cfg(all(feature = "watch", feature = "quic"))]
+	#[test]
+	fn external_resolver_retains_live_client_auth() {
+		#[derive(Debug)]
+		struct Fixed(Arc<rustls::sign::CertifiedKey>);
+		impl rustls::server::ResolvesServerCert for Fixed {
+			fn resolve(&self, _: rustls::server::ClientHello<'_>) -> Option<Arc<rustls::sign::CertifiedKey>> {
+				Some(self.0.clone())
+			}
+		}
+		let server = Identity::generate(["localhost"]).unwrap();
+		let client = Identity::generate(["client.invalid"]).unwrap();
+		let peers = Peers::new();
+		let policy = Listen {
+			peers: Some(peers.clone()),
+			..Default::default()
+		};
+		let serve = Serve::resolver(Arc::new(Fixed(server.certified().rustls.clone())), &policy).unwrap();
+		let client_config = Arc::new(
+			Connect {
+				identity: Some(client.clone()),
+				fingerprint: vec![server.fingerprint().to_string()],
+				..Default::default()
+			}
+			.build()
+			.unwrap(),
+		);
+		let tls = serve.config(Vec::new()).unwrap();
+		assert!(handshake_kinds(client_config.clone(), tls.clone()).is_err());
+		peers.insert(client.fingerprint()).unwrap();
+		assert_eq!(
+			handshake_kinds(client_config.clone(), tls.clone()).unwrap().0,
+			rustls::HandshakeKind::Full
+		);
+		peers.remove(client.fingerprint()).unwrap();
+		assert!(
+			handshake_kinds(client_config, tls).is_err(),
+			"a removed peer must not resume"
+		);
+	}
+
+	/// An ACME-style resolver retains CA verification of presented client certificates.
+	#[cfg(all(feature = "watch", feature = "quic"))]
+	#[tokio::test]
+	async fn external_resolver_retains_client_roots() {
+		let (ca, server_cert, server_key, client_cert, client_key) = signed_certificates();
+		let (_, _, _, other_cert, other_key) = signed_certificates();
+		let dir = tempfile::tempdir().unwrap();
+		let root = dir.path().join("root.pem");
+		std::fs::write(&root, ca).unwrap();
+		let provider = crypto::provider();
+		let key = rustls::sign::CertifiedKey::from_der(vec![server_cert], server_key, &provider).unwrap();
+		#[derive(Debug)]
+		struct Fixed(Arc<rustls::sign::CertifiedKey>);
+		impl rustls::server::ResolvesServerCert for Fixed {
+			fn resolve(&self, _: rustls::server::ClientHello<'_>) -> Option<Arc<rustls::sign::CertifiedKey>> {
+				Some(self.0.clone())
+			}
+		}
+		let serve = Serve::resolver(
+			Arc::new(Fixed(Arc::new(key))),
+			&Listen {
+				root: vec![root],
+				..Default::default()
+			},
+		)
+		.unwrap();
+		let client = |cert, key| {
+			Arc::new(
+				rustls::ClientConfig::builder_with_provider(provider.clone())
+					.with_safe_default_protocol_versions()
+					.unwrap()
+					.dangerous()
+					.with_custom_certificate_verifier(Arc::new(NoCertificateVerification(provider.clone())))
+					.with_client_auth_cert(vec![cert], key)
+					.unwrap(),
+			)
+		};
+		let tls = serve.config(Vec::new()).unwrap();
+		assert!(handshake_kinds(client(client_cert, client_key), tls.clone()).is_ok());
+		assert!(handshake_kinds(client(other_cert, other_key), tls).is_err());
 	}
 
 	/// A resolver would hide any other source, so combining them is refused.
@@ -2690,12 +2763,11 @@ mod tests {
 		}
 		let config = Listen {
 			generate: vec!["localhost".into()],
-			resolver: Some(Arc::new(Fixed(identity.certified().rustls.clone()))),
 			..Default::default()
 		};
-		assert!(matches!(config.load(), Err(Error::ConflictingResolver)));
+		let resolver = Arc::new(Fixed(identity.certified().rustls.clone()));
 		assert!(matches!(
-			config.server_config(Vec::new()),
+			Serve::resolver(resolver, &config),
 			Err(Error::ConflictingResolver)
 		));
 	}
@@ -3493,6 +3565,65 @@ mod legacy_tests {
 			"--tls-generate / MOQ_SERVER_TLS_GENERATE -> --listen-tls-generate / MOQ_LISTEN_TLS_GENERATE",
 		] {
 			assert!(reported.contains(line), "missing {line:?} from {reported}");
+		}
+	}
+}
+
+/// An explicit TLS session secret log shared by an endpoint's handshakes.
+///
+/// New files are private on Unix. Existing files accessible to group or other users
+/// are refused; their permissions are never changed. Open failures stop initialization.
+#[derive(Debug)]
+pub struct KeyLog(std::sync::Mutex<std::fs::File>);
+
+impl KeyLog {
+	/// Open a private regular file for appending NSS-format session secrets.
+	pub fn open(path: &std::path::Path) -> Result<Self> {
+		// Refuse an existing FIFO or device before an append open could block.
+		if fs::metadata(path).is_ok_and(|metadata| !metadata.is_file()) {
+			return Err(Error::KeyLog(io::Error::new(
+				io::ErrorKind::InvalidInput,
+				"key log must be a regular file",
+			)));
+		}
+		let mut options = std::fs::OpenOptions::new();
+		options.create(true).append(true);
+		#[cfg(unix)]
+		{
+			use std::os::unix::fs::OpenOptionsExt;
+			options.mode(0o600);
+		}
+		let file = options.open(path).map_err(Error::KeyLog)?;
+		let metadata = file.metadata().map_err(Error::KeyLog)?;
+		if !metadata.is_file() {
+			return Err(Error::KeyLog(std::io::Error::new(
+				std::io::ErrorKind::InvalidInput,
+				"key log must be a regular file",
+			)));
+		}
+		#[cfg(unix)]
+		{
+			use std::os::unix::fs::PermissionsExt;
+			if metadata.permissions().mode() & 0o077 != 0 {
+				return Err(Error::KeyLog(std::io::Error::new(
+					std::io::ErrorKind::PermissionDenied,
+					"key log is accessible to other users",
+				)));
+			}
+		}
+		Ok(Self(std::sync::Mutex::new(file)))
+	}
+}
+
+impl rustls::KeyLog for KeyLog {
+	fn log(&self, label: &str, client_random: &[u8], secret: &[u8]) {
+		use std::io::Write;
+		// Separate endpoints can open the same append path. Emit one complete record
+		// rather than letting formatting interleave fragments through independent handles.
+		let line = format!("{label} {} {}\n", hex::encode(client_random), hex::encode(secret));
+		let mut file = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+		if let Err(error) = file.write_all(line.as_bytes()) {
+			tracing::error!(%error, "failed to write TLS key log");
 		}
 	}
 }

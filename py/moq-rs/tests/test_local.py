@@ -102,25 +102,20 @@ def h264_init() -> bytes:
     return sps + pps
 
 
-async def test_fetch_abort_is_a_stream_app_code():
+async def test_fetch_of_a_dropped_group_is_not_found():
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("events")
     dynamic = track.dynamic()
     consumer = broadcast.consume()
 
     async def reject():
-        request = await dynamic.requested_group()
-        request.abort(404)
+        fill = await dynamic.requested_fill()
+        fill.drop_groups(5, 6)
 
     task = asyncio.create_task(reject())
-    with pytest.raises(moq.Error.Protocol) as raised:
+    with pytest.raises(moq.Error.NotFound):
         await consumer.fetch_group("events", 5)
     await task
-    protocol = moq.protocol_error(raised.value)
-    assert protocol is not None
-    assert protocol.scope == moq.ErrorScope.STREAM
-    assert protocol.code == 64 + 404
-    assert protocol.kind == moq.ProtocolKind.APP
 
 
 def test_protocol_error_helper_covers_known_app_and_unknown():
@@ -488,11 +483,15 @@ async def test_fetch_group_and_serve_dynamic_miss():
 
     dynamic = track.dynamic()
     pending = asyncio.create_task(consumer.fetch_group("events", 7, moq.FetchGroupOptions(priority=11)))
-    request = await asyncio.wait_for(dynamic.requested_group(), timeout=5.0)
-    assert request.sequence == 7
-    assert request.priority == 11
+    fill = await asyncio.wait_for(dynamic.requested_fill(), timeout=5.0)
+    assert (fill.start_group, fill.start_frame, fill.end_group) == (7, 0, 8)
+    assert fill.priority == 11
+    assert fill.next() == 7
+    assert fill.is_used()
+    assert fill.is_wanted(7)
+    assert not fill.is_wanted(8)
 
-    produced = request.accept()
+    produced = fill.accept(7)
     produced.write_frame(b"archive", timedelta(microseconds=140_000))
     produced.finish()
 
@@ -1642,7 +1641,7 @@ async def test_dynamic_and_json_handles_are_async_context_managers():
     track = broadcast.publish_track("events")
     async with track.dynamic() as track_dynamic:
         pass
-    await assert_cancelled(track_dynamic.requested_group())
+    await assert_cancelled(track_dynamic.requested_fill())
 
     snapshot = moq.json.SnapshotProducer(broadcast, broadcast.publish_track("state"))
     async with moq.json.SnapshotConsumer(await broadcast.consume().subscribe_track("state")) as snapshot_consumer:

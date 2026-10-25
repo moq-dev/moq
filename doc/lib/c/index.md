@@ -65,7 +65,7 @@ inside. The header is the reference: each function carries a doc comment.
 - **Threading.** Call any function from any thread. Raw publish calls block until the codec takes the frame, which paces a publisher.
 - **Zeroed config is the default.** A zeroed `moq_client_config` means the default for every field, so new fields don't break callers. A field whose default isn't zero has a `has_*` flag: `backoff_timeout_us = 0` means "retry forever" only with `has_backoff_timeout = true`.
 - **Compressed tracks.** `moq_track_info.compress` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. `@moq/net` cannot read a compressed track yet.
-- **fMP4 import.** `MOQ_CONTAINER_FORMAT_FMP4` splits each fragment into one frame per sample; `MOQ_CONTAINER_FORMAT_CMAF` republishes it whole.
+- **fMP4 import.** `MOQ_CONTAINER_FORMAT_FMP4` splits each fragment into one frame per sample.
 - **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `moq_publish_media_cut`: after every frame, or at a segment cadence to align with video.
 - **Ending cleanly.** When the input ends, finish every track, then call `moq_publish_finish()` to finish the catalog. The broadcast stays announced and keeps serving the finished tracks, so a subscriber still catching up can drain them, until `moq_publish_close()` takes it offline. How long to keep it up is yours to decide.
 - **Timeline breaks.** On a seek or pause, call `moq_publish_media_discontinuity`, then keep timestamps moving forward and resume video on a keyframe.

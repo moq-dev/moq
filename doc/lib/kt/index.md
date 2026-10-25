@@ -29,7 +29,7 @@ Share `Timebase(broadcast)` through `ContainerInit` when several imports use one
 timeline; omitting it keeps an independent offset. A timebase belongs to its broadcast
 and does not keep it open. `ContainerProducer` takes chunks split anywhere, so a raw
 byte stream needs no other importer.
-`ContainerFormat.FMP4` splits each fragment into one frame per sample; `ContainerFormat.CMAF` republishes it whole.
+`ContainerFormat.FMP4` splits each fragment into one frame per sample.
 Construct readers with `CatalogConsumer.subscribe`, `TrackConsumer.subscribe`, or
 `GroupConsumer.fetch`; the last two take a catalog `Rendition` and follow its broadcast and
 track themselves. For arrival-order reads, decode each group from

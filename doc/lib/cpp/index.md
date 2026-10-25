@@ -109,7 +109,7 @@ Share `moq::MediaTimebase::init(broadcast)` through `ContainerInit` when several
 use one source timeline; omitting it keeps an independent offset. A timebase belongs to
 its broadcast and does not keep it open. `MediaContainerProducer` takes chunks split
 anywhere, so a raw byte stream needs no other importer.
-`moq::ContainerFormat::kFmp4` splits each fragment into one frame per sample; `kCmaf` republishes it whole.
+`moq::ContainerFormat::kFmp4` splits each fragment into one frame per sample.
 
 ```cpp
 // Publish encoded frames, or raw pixels with the codec inside the binding.

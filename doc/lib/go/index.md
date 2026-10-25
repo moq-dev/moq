@@ -31,7 +31,7 @@ Share `media.NewTimebase(broadcast)` through `ContainerInit` when several import
 source timeline; omitting it keeps an independent offset. Timebases belong to one broadcast
 and do not keep it open; release the handle with `Close` on the calling goroutine.
 `NewContainerProducer` takes chunks split anywhere, so a raw byte stream needs no other importer.
-`ContainerFormatFmp4` splits each fragment into one frame per sample; `ContainerFormatCmaf` republishes it whole.
+`ContainerFormatFmp4` splits each fragment into one frame per sample.
 For arrival-order reads, decode each group from `moq.TrackConsumer.RecvGroup` with
 `media.NewGroupConsumer`; frames carry container media time as they land. `media.FetchGroup`
 fetches and decodes one past group.
