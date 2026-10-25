@@ -284,10 +284,10 @@ as a fill, which a relay serves by fetching upstream one group at a time, skippi
 a group once every subscriber that asked for it narrows past it; with
 no handler it is reported as dropped once the feed stops waiting for it. One
 evicted after the subscriber saw it cached, but before it read it, is skipped. A relay merges its subscribers' ranges into one upstream request, which
-today's wire versions carry as the single span covering them. A relative or time
-anchor resolves on the hop that publishes the track, and over moq-lite-07, which
-reports the live edge and media time and asks upstream for every group the budget
-allows. Over an older lite or any moq-transport version, a subscriber gets every
+moq-lite-07 carries range by range and older wire versions as the single span
+covering them. A relative or time anchor resolves on the hop that publishes the
+track, and over moq-lite-07, which carries a relative or time start upstream and
+reports the live edge and media time, so a copy resolves the ends itself. Over an older lite or any moq-transport version, a subscriber gets every
 anchor but the live and default starts refused as unsupported, and an untimed
 track refuses a time anchor. At the live edge, a time end
 may let one group through before its first frame shows it starts past the end:
