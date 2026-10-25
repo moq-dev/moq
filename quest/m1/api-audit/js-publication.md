@@ -37,7 +37,3 @@ Test: clone/drop, explicit unannounce, Prepared admission,
 and a stale publication against a replacement under a new epoch.
 
 Public API: breaking in `@moq/net`. Wire: none.
-
-## Related
-
-- [Claim request type](/quest/m1/api-audit/claim-request-type.md) - splits `accept` off application requests beside `Prepared`

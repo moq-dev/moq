@@ -3638,7 +3638,7 @@ async fn session_close_surfaces_a_rejection_code() {
 
 	let server_handle = tokio::spawn(async move {
 		while let Some(request) = server.accept().await {
-			request.reject(moq_tokio::server::Reject::Forbidden).await?;
+			request.reject(moq_net::SessionError::Unauthorized).await?;
 		}
 		Ok::<_, anyhow::Error>(())
 	});
@@ -3651,39 +3651,49 @@ async fn session_close_surfaces_a_rejection_code() {
 		.await
 		.expect("close timed out")
 		.expect_err("a rejected session must surface as an error");
-	// `Request::reject` maps both 401 and 403 onto the wire's single UNAUTHORIZED.
 	assert_connect_error(&err, moq_tokio::ConnectError::Unauthorized);
 
 	server_handle.abort();
 }
 
-/// The same rejection under the reconnect loop: UNAUTHORIZED is specified, so
+/// The same rejection under the reconnect loop: each auth code is specified, so
 /// the loop treats it as terminal instead of retrying the same credentials with
 /// backoff until the give-up timeout.
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn reconnect_stops_on_a_session_level_rejection() {
-	let (mut server, addr) = test_server().await;
-	let url: url::Url = format!("https://localhost:{}", addr.port()).parse().unwrap();
+	for code in [
+		moq_net::SessionError::Unauthorized,
+		moq_net::SessionError::MalformedAuthToken,
+		moq_net::SessionError::Expired,
+	] {
+		let (mut server, addr) = test_server().await;
+		let url: url::Url = format!("https://localhost:{}", addr.port()).parse().unwrap();
 
-	let server_handle = tokio::spawn(async move {
-		while let Some(request) = server.accept().await {
-			request.reject(moq_tokio::server::Reject::Unauthorized).await?;
-		}
-		Ok::<_, anyhow::Error>(())
-	});
+		let reject = code.clone();
+		let server_handle = tokio::spawn(async move {
+			while let Some(request) = server.accept().await {
+				request.reject(reject.clone()).await?;
+			}
+			Ok::<_, anyhow::Error>(())
+		});
 
-	// Without classification the loop would retry until the backoff give-up (5m by
-	// default), so `closed` resolving within TIMEOUT proves it stopped on the
-	// rejection itself.
-	let connection = test_client().connect(url);
-	let err = tokio::time::timeout(TIMEOUT, connection.closed())
-		.await
-		.expect("a rejected session must stop the reconnect loop promptly")
-		.expect_err("a rejected session must surface as an error");
-	assert_connect_error(&err, moq_tokio::ConnectError::Unauthorized);
+		// Without classification the loop would retry until the backoff give-up (5m by
+		// default), so `closed` resolving within TIMEOUT proves it stopped on the
+		// rejection itself.
+		let connection = test_client().connect(url);
+		let err = tokio::time::timeout(TIMEOUT, connection.closed())
+			.await
+			.expect("a rejected session must stop the reconnect loop promptly")
+			.expect_err("a rejected session must surface as an error");
+		assert!(err.is_auth(), "{code:?} surfaced as {err}");
+		let moq_tokio::Error::MoqNet(closed) = &err else {
+			panic!("{code:?} surfaced as {err}");
+		};
+		assert_eq!(moq_net::SessionError::from(closed), code);
 
-	server_handle.abort();
+		server_handle.abort();
+	}
 }
 
 /// One-shot mode is the other way a caller observes the rejection: with no
@@ -3696,7 +3706,7 @@ async fn one_shot_surfaces_a_session_level_rejection() {
 
 	let server_handle = tokio::spawn(async move {
 		while let Some(request) = server.accept().await {
-			request.reject(moq_tokio::server::Reject::Forbidden).await?;
+			request.reject(moq_net::SessionError::Unauthorized).await?;
 		}
 		Ok::<_, anyhow::Error>(())
 	});

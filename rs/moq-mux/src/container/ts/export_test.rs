@@ -9532,38 +9532,33 @@ async fn a_follower_built_after_its_route_went_follows_the_return() {
 	assert_eq!(start.elapsed(), Duration::from_secs(4) + follow);
 }
 
-/// The export's own instance winning the path back from a more specific route that went is no
+/// The export's own instance winning the path back from a cheaper route that went is no
 /// replacement: its end ends the export cleanly, without stitching.
 #[tokio::test(start_paused = true)]
 async fn a_follower_takes_its_own_instance_winning_back_for_no_replacement() {
 	let origin = crate::source::produce_origin();
-	let epoch = moq_net::Epoch::mint();
-	let route = |epoch| moq_net::origin::Route::default().with_epoch(epoch);
+	let route = |cost: u64| {
+		moq_net::origin::Route::default()
+			.with_epoch(moq_net::Epoch::mint())
+			.with_cost(cost)
+	};
 
-	// The export resolves through a prefix claim serving its own instance.
-	let mut info = moq_net::broadcast::Info::new();
-	info.epoch = Some(epoch.clone());
-	let mut served = info.produce();
-	let mut catalog = crate::catalog::Producer::<()>::new(&mut served, Default::default()).unwrap();
-	let pool = origin.dynamic_route("pool", route(epoch)).unwrap();
-	let consumer = served.consume();
-	tokio::spawn(async move {
-		while let Ok(request) = pool.requested_broadcast().await {
-			request.accept(consumer.clone());
-		}
-	});
+	// The export resolves its own instance.
+	let served = origin.create_broadcast("pool/job").unwrap();
+	let mut catalog = crate::catalog::Producer::<()>::new(&mut served.broadcast().clone(), Default::default()).unwrap();
+	served.announce(route(5)).unwrap();
 	let source = crate::source::resolved(&origin, "pool/job").await;
 	let mut follower = super::Follower::new(open_export(source).await.unwrap()).unwrap();
 
-	// A more specific route takes the path for a while, then goes.
-	let exact = origin.publish("pool/job", route(moq_net::Epoch::mint())).unwrap();
+	// A cheaper route takes the path for a while, then goes.
+	let cheaper = origin.publish("pool/job", route(1)).unwrap();
 	assert!(
 		tokio::time::timeout(Duration::from_secs(1), follower.next())
 			.await
 			.is_err(),
 		"still on its own instance"
 	);
-	drop(exact);
+	drop(cheaper);
 	assert!(
 		tokio::time::timeout(Duration::from_secs(1), follower.next())
 			.await
@@ -9656,10 +9651,10 @@ async fn drain_follower(follower: &mut super::Follower) -> (Vec<Frame>, Option<c
 	}
 }
 
-/// The exact route going and a covering prefix of the same epoch taking over after a gap that
-/// ended the export's request, with the follower unpolled across it, is its own instance
-/// returning: the export carries on through the prefix under the program already announced,
-/// with no break flagged.
+/// The route going and another of the same epoch taking over after a gap that ended the
+/// export's request, with the follower unpolled across it, is its own instance returning: the
+/// export carries on through the new route under the program already announced, with no break
+/// flagged.
 #[tokio::test(start_paused = true)]
 async fn a_follower_continues_through_a_same_epoch_handoff_after_a_gap() {
 	let origin = crate::source::produce_origin();
@@ -9684,24 +9679,16 @@ async fn a_follower_continues_through_a_same_epoch_handoff_after_a_gap() {
 	let (mut frames, end) = drain_follower(&mut follower).await;
 	assert!(end.is_none(), "still exporting: {end:?}");
 
-	// Left unpolled across the handoff, and long enough for the exact route's retraction to
-	// end the export's request before the prefix arrives.
+	// Left unpolled across the handoff, and long enough for the first route's retraction to
+	// end the export's request before the second arrives.
 	track.abort(moq_net::Error::Unroutable);
 	catalog.abort(moq_net::Error::Unroutable);
 	drop(exact);
 	tokio::time::sleep(Duration::from_secs(1)).await;
-	let mut info = moq_net::broadcast::Info::new();
-	info.epoch = Some(epoch);
-	let mut served = info.produce();
-	let mut catalog = crate::catalog::Producer::<()>::new(&mut served, Default::default()).unwrap();
-	let mut track = aac_rendition(&mut served, &mut catalog, "a.aac");
-	let pool = origin.dynamic_route("pool", route).unwrap();
-	let consumer = served.consume();
-	tokio::spawn(async move {
-		while let Ok(request) = pool.requested_broadcast().await {
-			request.accept(consumer.clone());
-		}
-	});
+	let served = origin.create_broadcast("pool/job").unwrap();
+	let mut catalog = crate::catalog::Producer::<()>::new(&mut served.broadcast().clone(), Default::default()).unwrap();
+	let mut track = aac_rendition(&mut served.broadcast().clone(), &mut catalog, "a.aac");
+	served.announce(route).unwrap();
 	let resumed = start.elapsed().as_millis() as u64;
 	for ms in (resumed..resumed + 200).step_by(20) {
 		write_aac(&mut track, ms);
@@ -9712,7 +9699,7 @@ async fn a_follower_continues_through_a_same_epoch_handoff_after_a_gap() {
 	frames.extend(rest);
 	assert!(
 		matches!(end, Some(Ok(()))),
-		"the prefix's broadcast ends the export: {end:?}"
+		"the second route's broadcast ends the export: {end:?}"
 	);
 
 	assert_eq!(pes_count(&frames), 20, "every frame of both routes went out");
@@ -9741,10 +9728,10 @@ async fn a_follower_ignores_a_covering_prefix_while_the_exact_route_serves() {
 	let mut follower = super::Follower::new(open_export(source).await.unwrap()).unwrap();
 	let quiet = Duration::from_secs(1);
 
-	let pool = origin.dynamic_route("pool", route(moq_net::Epoch::mint())).unwrap();
+	let pool = origin.dynamic("pool").unwrap();
 	assert!(tokio::time::timeout(quiet, follower.next()).await.is_err(), "a start");
 	drop(pool);
-	let pool = origin.dynamic_route("pool", route(moq_net::Epoch::mint())).unwrap();
+	let pool = origin.dynamic("pool").unwrap();
 	assert!(tokio::time::timeout(quiet, follower.next()).await.is_err(), "a restart");
 	drop(pool);
 	assert!(tokio::time::timeout(quiet, follower.next()).await.is_err(), "an end");

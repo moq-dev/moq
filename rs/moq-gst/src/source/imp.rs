@@ -3083,11 +3083,6 @@ mod session_tests {
 			publisher
 		}
 
-		/// A broadcast at no path, for a covering route to serve.
-		fn standalone(config: VideoConfig) -> Self {
-			Self::build(moq_net::broadcast::Info::new().produce(), config)
-		}
-
 		fn build(mut broadcast: moq_net::broadcast::Producer, config: VideoConfig) -> Self {
 			let mut catalog =
 				moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
@@ -3486,8 +3481,8 @@ mod session_tests {
 		restart(moq_net::origin::Route::default);
 	}
 
-	/// The route serving the path can be a prefix covering it, here the root, and its restart
-	/// switches too.
+	/// The route serving the path can be a prefix covering it, here the root, and a restart of
+	/// its answer switches too.
 	#[test]
 	fn a_covering_route_restart_switches_on_the_same_pad() {
 		let _pad_ids = pad_ids();
@@ -3495,22 +3490,24 @@ mod session_tests {
 		let recorder = Recorder::attach(&element);
 		let origin = origin();
 
-		let mut old = Publisher::standalone(video_rendition());
-		let serving = std::sync::Arc::new(Mutex::new(old.broadcast.consume()));
-		let pool = std::sync::Arc::new(origin.dynamic_route("", epoch()).unwrap());
-		let (handler, answer) = (pool.clone(), serving.clone());
+		let claim = origin.dynamic("").unwrap();
+		let (answers, answered) = std::sync::mpsc::channel();
 		let handler = super::RUNTIME.spawn(async move {
-			while let Ok(request) = handler.requested_broadcast().await {
-				request.accept(answer.lock().unwrap().clone());
+			while let Ok(request) = claim.requested_broadcast().await {
+				let prepared = request.prepare(moq_net::Epoch::mint()).unwrap();
+				let answer = Publisher::build(prepared.broadcast().clone(), video_rendition());
+				prepared.publish().unwrap();
+				answers.send(answer).unwrap();
 			}
 		});
 
 		let session = follow(&element, &origin);
+		let mut old = answered
+			.recv_timeout(Duration::from_secs(5))
+			.expect("the claim answered");
 		let pad = recorder.written(&mut old, 1);
 
-		let mut new = Publisher::standalone(video_rendition());
-		*serving.lock().unwrap() = new.broadcast.consume();
-		pool.update_route(epoch()).unwrap();
+		let mut new = Publisher::new(&origin, epoch(), video_rendition());
 		assert_eq!(recorder.written(&mut new, 2), pad, "the restart moved to another pad");
 
 		stop(session);
@@ -3518,15 +3515,15 @@ mod session_tests {
 		recorder.assert_one_pad_held();
 	}
 
-	/// A route that never answers must not hold the reader on a stale resolution once a
-	/// replacement serves the path. An answer arriving late cannot replace the chosen run.
+	/// A claim that never answers must not hold the reader on a stale resolution once a
+	/// replacement serves the path. Its late refusal cannot end the chosen run.
 	#[test]
 	fn a_replacement_supersedes_a_pending_broadcast_request() {
 		let _pad_ids = pad_ids();
 		let element = element();
 		let recorder = Recorder::attach(&element);
 		let origin = origin();
-		let pool = origin.dynamic_route("", epoch()).unwrap();
+		let pool = origin.dynamic("").unwrap();
 		let session = follow(&element, &origin);
 		let pending = super::RUNTIME.block_on(async {
 			tokio::time::timeout(Duration::from_secs(10), pool.requested_broadcast())
@@ -3536,12 +3533,9 @@ mod session_tests {
 		});
 		let mut new = Publisher::new(&origin, epoch(), video_rendition());
 		recorder.written(&mut new, 2);
-		let mut old = Publisher::standalone(video_rendition());
-		pending.accept(old.broadcast.consume());
-		old.write(1);
+		pending.reject(moq_net::Error::Unauthorized);
 		recorder.written(&mut new, 3);
 		stop(session);
-		assert!(!recorder.seen().iter().any(|seen| matches!(seen, Seen::Buffer(_, 1))));
 		recorder.assert_one_pad_held();
 	}
 
@@ -4537,7 +4531,7 @@ mod session_tests {
 										drop(request);
 										dropping.send_modify(|dropped| *dropped += 1);
 									}
-									Admit::Refuse => request.reject(moq_tokio::server::Reject::Forbidden).await.unwrap(),
+									Admit::Refuse => request.reject(moq_net::SessionError::Unauthorized).await.unwrap(),
 								}
 							}
 						}
