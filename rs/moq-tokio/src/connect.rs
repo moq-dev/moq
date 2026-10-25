@@ -519,7 +519,7 @@ pub struct Config {
 	/// while an offered version can't carry it in SETUP (lite before 07). Each other
 	/// token rides its own AUTH stream, widening the session's grant. A URL that
 	/// already has a `?jwt=` keeps it as the connection credential, and then every
-	/// token rides AUTH. Replace them while running with [`crate::Client::tokens`].
+	/// token rides AUTH. Replace them while running through `Client::tokens`.
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	#[usage(
 		name = "connect-token",

@@ -288,7 +288,7 @@ mod tests {
 	}
 
 	async fn next_token(pair: &mut Pair) -> auth::Request {
-		tokio::time::timeout(std::time::Duration::from_secs(5), pair.requests.recv())
+		moq_clock::timeout(std::time::Duration::from_secs(5), pair.requests.recv())
 			.await
 			.expect("no token presented")
 			.unwrap()
@@ -308,7 +308,7 @@ mod tests {
 		}
 		presented.sort();
 		assert_eq!(presented, [b"a".to_vec(), b"b".to_vec()]);
-		let again = tokio::time::timeout(std::time::Duration::from_secs(1), pair.requests.recv()).await;
+		let again = moq_clock::timeout(std::time::Duration::from_secs(1), pair.requests.recv()).await;
 		assert!(again.is_err(), "the connection credential was presented twice");
 	}
 
@@ -332,14 +332,14 @@ mod tests {
 		tokens.set(vec!["connection".parse().unwrap(), "new".parse().unwrap()]);
 		let request = next_token(&mut pair).await;
 		assert_eq!(request.token().as_ref(), b"new");
-		let early = tokio::time::timeout(std::time::Duration::from_secs(1), old.closed()).await;
+		let early = moq_clock::timeout(std::time::Duration::from_secs(1), old.closed()).await;
 		assert!(early.is_err(), "withdrawn before its replacement was answered");
 
 		let new = request.accept(auth::Grant::all());
-		tokio::time::timeout(std::time::Duration::from_secs(5), old.closed())
+		moq_clock::timeout(std::time::Duration::from_secs(5), old.closed())
 			.await
 			.expect("the replaced token was never withdrawn");
-		let kept = tokio::time::timeout(std::time::Duration::from_secs(1), new.closed()).await;
+		let kept = moq_clock::timeout(std::time::Duration::from_secs(1), new.closed()).await;
 		assert!(kept.is_err(), "the replacement was withdrawn");
 	}
 
@@ -355,7 +355,7 @@ mod tests {
 		let request = next_token(&mut pair).await;
 		assert_eq!(request.token().as_ref(), b"new");
 		request.reject(moq_net::SessionError::Unauthorized, "expired");
-		tokio::time::timeout(std::time::Duration::from_secs(5), old.closed())
+		moq_clock::timeout(std::time::Duration::from_secs(5), old.closed())
 			.await
 			.expect("the replaced token outlived its refused replacement");
 	}
@@ -367,7 +367,7 @@ mod tests {
 		let pair = pair_on("moq-transport-14").await;
 		let mut held = Held::default();
 		held.update(&pair.auth, vec!["a".parse().unwrap(), "b".parse().unwrap()]);
-		tokio::time::timeout(
+		moq_clock::timeout(
 			std::time::Duration::from_secs(5),
 			std::future::poll_fn(|cx| held.poll_answers(cx)),
 		)

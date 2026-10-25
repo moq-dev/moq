@@ -8,6 +8,7 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 ### `MoqClientConfig` gains `tokens`
 
 It defaults to empty in every generated binding; a Rust struct literal adds `tokens: vec![]` or ends with `..Default::default()`.
+
 ### Connection state
 
 `MoqClient::connect` returns a connecting session without waiting for its first dial to succeed, natively and in the browser. Read `MoqSession::state()` and pass its `revision` to `state_changed(after)` to observe first-dial failures and reconnects. `MoqConnectionState` carries `phase`, `connects`, `failure`, and `version` together. These replace `status()`, `connects()`, and both `failure()` polls. Cancel the returned session to stop dialing; cancelling or releasing the client does not close it.

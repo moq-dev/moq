@@ -890,8 +890,9 @@ token_url() {
 }
 
 # Set `connect` to moq-cli's arguments for <url>, moving a `?jwt=` token to
-# `--connect-token` so it rides SETUP on $AUTH_VERSION. The binding clients keep it
+# `--connect-token` so it rides SETUP where the version carries one. The binding clients keep it
 # in the URL, which covers the query form.
+# shellcheck disable=SC2329  # invoked from the indirectly invoked publisher and subscriber
 rust_connect() {
     case "$1" in
         *'?jwt='*) connect=(--connect "${1%%\?jwt=*}" --connect-token "${1#*\?jwt=}") ;;

@@ -3,9 +3,9 @@ import type { Auth, Handle } from "../auth.ts";
 import * as Ietf from "../ietf/index.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Reader } from "../stream.ts";
+import type { Established } from "./established.ts";
 import { offered } from "./extensions.ts";
 import { exchangeSetup } from "./handshake.ts";
-import type { Established } from "./established.ts";
 import { credential, extra, Held, hold } from "./tokens.ts";
 
 const URL_ = new URL("https://relay.example.com/room");
