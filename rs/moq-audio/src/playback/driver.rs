@@ -925,6 +925,9 @@ impl Driver {
 
 	/// Catch the mixer up after a sink was added or dropped.
 	fn sync(&mut self) {
+		// The audio thread posts a sync once it closes out an observer's measurement.
+		self.shared.observe.wake();
+
 		if let Some(retired) = &self.retired {
 			// Each of these frees a ring buffer, which is exactly why the mixer
 			// handed it over instead of dropping it itself.

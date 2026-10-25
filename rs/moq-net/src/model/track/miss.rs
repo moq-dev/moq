@@ -26,12 +26,9 @@ use rangemap::{RangeInclusiveSet, RangeSet};
 use super::fill::{Ask, FillState, Join};
 use super::{Drift, Order, Position, TrackState};
 use crate::Error;
-use crate::model::subscription::Window;
 
 /// What one reader asks its fills with.
-pub(super) struct Asking<'a> {
-	/// The reader's resolved ranges, for the frame each run's first group starts from.
-	pub window: &'a Window,
+pub(super) struct Asking {
 	pub priority: i8,
 	pub max_delay: Option<Duration>,
 	pub order: Order,
@@ -433,33 +430,16 @@ impl Misses {
 		state: &kio::Consumer<TrackState>,
 		fills: &kio::Shared<FillState>,
 		runs: &RangeSet<u64>,
-		asking: &Asking<'_>,
+		asking: &Asking,
 		given_up: &mut GivenUp,
 	) {
-		// A group a range starts inside heads its own fill, since a fill reads every group
-		// after its first whole.
-		let mut cuts: Vec<u64> = asking.window.partial_starts().collect();
-		cuts.sort_unstable();
-		cuts.dedup();
-		let mut runs: Vec<ops::Range<u64>> = runs
-			.iter()
-			.flat_map(|run| {
-				let inside = cuts.iter().copied().filter(|cut| run.start < *cut && *cut < run.end);
-				let starts = std::iter::once(run.start).chain(inside.clone());
-				let ends = inside.chain(std::iter::once(run.end));
-				starts.zip(ends).map(|(start, end)| start..end)
-			})
-			.collect();
+		let mut runs: Vec<ops::Range<u64>> = runs.iter().cloned().collect();
 		if asking.order == Order::Descending {
 			runs.reverse();
 		}
 		for run in runs {
-			let (frame, _) = asking.window.frames(run.start);
 			let ask = Ask {
-				start: Position {
-					group: run.start,
-					frame,
-				},
+				start: Position::group(run.start),
 				end: run.end,
 				priority: asking.priority,
 				max_delay: asking.max_delay,

@@ -163,7 +163,7 @@ impl<S: ObjectStore> Track<S> {
 		let config = &shared.config;
 		let range = match self.next {
 			Some(next) => Range {
-				start: Anchor::Absolute(next),
+				start: Anchor::Absolute(next.group),
 				end: None,
 			},
 			None => Range::oldest(),

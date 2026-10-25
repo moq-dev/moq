@@ -565,7 +565,6 @@ async fn raw_audio_activity() {
 				channels: None,
 				bitrate: None,
 				frame_duration_us: FRAME_DURATION_US,
-				preset: None,
 			},
 			track: Some("microphone".into()),
 			bandwidth: None,
@@ -693,7 +692,6 @@ async fn audio_raw_publish_from_many_threads() {
 		channels: None,
 		bitrate: None,
 		frame_duration_us: 20_000,
-		preset: None,
 	};
 	let audio = MoqAudioProducer::new(
 		&catalog,
@@ -781,7 +779,6 @@ async fn audio_raw_publish_rejects_bad_frames() {
 				channels: None,
 				bitrate: None,
 				frame_duration_us: 20_000,
-				preset: None,
 			},
 			track: None,
 			bandwidth: None,
@@ -831,7 +828,6 @@ async fn raw_audio_decode_delay() {
 				channels: None,
 				bitrate: None,
 				frame_duration_us: FRAME_US as u32,
-				preset: None,
 			},
 			track: Some("microphone".into()),
 			bandwidth: None,
@@ -923,7 +919,6 @@ async fn raw_audio_frame_durations() {
 		channels: None,
 		bitrate: None,
 		frame_duration_us,
-		preset: None,
 	};
 
 	let audio = MoqAudioProducer::new(
@@ -982,7 +977,6 @@ async fn raw_audio_codec_default_frame() {
 		channels: None,
 		bitrate: None,
 		frame_duration_us: 0,
-		preset: None,
 	};
 
 	let opus = MoqAudioProducer::new(
@@ -1108,7 +1102,7 @@ async fn raw_track_update_does_not_wait_for_pending_read() {
 			priority: 10,
 			max_delay_us: Some(25_000),
 			ranges: Some(vec![MoqRange {
-				start: MoqAnchor::Absolute { group: 0, frame: 0 },
+				start: MoqAnchor::Absolute { group: 0 },
 				end: None,
 			}]),
 			order: None,
@@ -4571,7 +4565,7 @@ async fn raw_track_update_during_pending_group_still_reads_datagram() {
 			priority: 10,
 			max_delay_us: Some(25_000),
 			ranges: Some(vec![MoqRange {
-				start: MoqAnchor::Absolute { group: 0, frame: 0 },
+				start: MoqAnchor::Absolute { group: 0 },
 				end: None,
 			}]),
 			order: None,

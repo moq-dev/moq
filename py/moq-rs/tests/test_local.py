@@ -12,7 +12,7 @@ import moq_ffi
 import pytest
 
 # Every group from the first, rather than only what the live edge still reaches.
-FROM_GROUP_0 = [moq.Range(start=cast(moq.Anchor, moq.Anchor.ABSOLUTE(group=0, frame=0)))]
+FROM_GROUP_0 = [moq.Range(start=cast(moq.Anchor, moq.Anchor.ABSOLUTE(group=0)))]
 
 
 async def until_wanted(demand: moq.TrackDemand, wanted: bool = True) -> None:
@@ -1403,10 +1403,10 @@ def test_audio_encoder_returns_namespaced_records():
     assert isinstance(finish, moq.audio.EncoderFinish)
 
 
-def test_audio_encoder_preset_init_and_bitrate():
-    """A preset sets the frame size, the encoder reports its OpusHead, and the bitrate retunes live."""
+def test_audio_encoder_frame_init_and_bitrate():
+    """A frame duration sets the frame size, the encoder reports its OpusHead, and the bitrate retunes live."""
     output = moq.audio.EncoderOutput(
-        codec=moq.AudioCodec.opus(), sample_rate=48000, channels=1, preset=moq.audio.Preset.LOW_LATENCY
+        codec=moq.AudioCodec.opus(), sample_rate=48000, channels=1, frame_duration=timedelta(milliseconds=10)
     )
     encoder = moq.audio.Encoder(output)
     assert encoder.frame_size == 480
@@ -1417,7 +1417,7 @@ def test_audio_encoder_preset_init_and_bitrate():
     assert encoder.encode([0.0] * encoder.frame_size).data
 
     with pytest.raises(moq.Error.Audio):
-        moq.audio.Encoder(replace(output, frame_duration=timedelta(milliseconds=20)))
+        moq.audio.Encoder(replace(output, frame_duration=timedelta(milliseconds=15)))
 
 
 def test_video_namespace_names_its_configuration_types():

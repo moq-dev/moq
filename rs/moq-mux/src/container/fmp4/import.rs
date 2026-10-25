@@ -259,7 +259,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	}
 
 	/// Return the number of metadata units discarded by this importer.
-	pub fn dropped_metadata(&self) -> u64 {
+	#[cfg(test)]
+	pub(crate) fn dropped_metadata(&self) -> u64 {
 		self.dropped_metadata
 	}
 
