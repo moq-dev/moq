@@ -386,7 +386,6 @@ impl Encoder {
 
 	/// The latency and compression controls the backend applied for
 	/// [`Config::preset`], fixed for the session's lifetime.
-	#[cfg(test)]
 	pub(crate) fn applied(&self) -> Applied {
 		self.backend.applied()
 	}
