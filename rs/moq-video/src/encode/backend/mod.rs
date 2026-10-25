@@ -167,11 +167,19 @@ pub const NAMES: &[&str] = &[
 	"openh264",
 ];
 
-/// Whether the backend called `name` reads every frame on the CPU, downloading a
-/// GPU surface it is handed.
+/// Whether the backend called `name` reads, in place, the GPU surface this
+/// platform's render export hands over: a Vulkan image on Linux, a pixel buffer
+/// on Apple platforms, a Direct3D11 texture on Windows.
 #[cfg_attr(not(feature = "render"), allow(dead_code, reason = "only the render export asks"))]
-pub(crate) fn software(name: &str) -> bool {
-	name == "openh264"
+pub(crate) fn reads_export(name: &str) -> bool {
+	HARDWARE.iter().any(|candidate| {
+		#[cfg(target_os = "linux")]
+		let reads = candidate.vulkan;
+		// Every hardware encoder on these takes the platform's surface.
+		#[cfg(not(target_os = "linux"))]
+		let reads = cfg!(any(apple, target_os = "windows"));
+		candidate.name == name && reads
+	})
 }
 
 /// A backend constructor: name, the codecs it can emit, an opener, and whether it can always cut.

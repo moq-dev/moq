@@ -97,8 +97,9 @@ with Opus stereo audio, under the `--broadcast` path. Timestamps come from the
 studio's own clock, so a source that stalls repeats its last picture instead of
 holding up the stream.
 
-Video is only encoded while someone watches it. Where the hardware encoder can
-read the GPU (NVENC on Linux, VideoToolbox on macOS, Media Foundation on
-Windows), each frame stays there; otherwise it is read back to the CPU, which
-the Output panel counts. Frames the encoder cannot keep up with are dropped
-rather than delaying the stream.
+Video is only encoded while someone watches it. A hardware encoder that reads
+the GPU (NVENC on Linux, VideoToolbox on macOS, Media Foundation on Windows)
+takes each frame there, and the studio refuses to start, saying why, when the
+GPU cannot hand frames to it. Any other encoder, such as OpenH264, reads each
+frame back to the CPU, which the Output panel counts. Frames the encoder cannot
+keep up with are dropped rather than delaying the stream.

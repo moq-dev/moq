@@ -46,15 +46,15 @@ pub(super) struct Export {
 unsafe impl Send for Export {}
 
 impl Export {
-	/// `None` when `device` is not a Metal device, `size` has an odd edge NV12
+	/// Fails when `device` is not a Metal device, `size` has an odd edge NV12
 	/// cannot hold, or the driver will not draw into a pixel buffer.
-	pub fn open(device: &wgpu::Device, queue: &wgpu::Queue, size: Size) -> Result<Option<Self>, Error> {
+	pub fn open(device: &wgpu::Device, queue: &wgpu::Queue, size: Size) -> Result<Self, Error> {
 		// SAFETY: only checked for presence, then dropped.
 		if unsafe { device.as_hal::<wgpu::hal::api::Metal>() }.is_none() {
-			return Ok(None);
+			return Err(err("it is not a Metal device; open wgpu on its Metal backend"));
 		}
 		if !size.width.is_multiple_of(2) || !size.height.is_multiple_of(2) {
-			return Ok(None);
+			return Err(err(format!("NV12 cannot hold {size}, which has an odd edge")));
 		}
 
 		let usage = CFNumber::new_i64((MTLTextureUsage::ShaderRead | MTLTextureUsage::RenderTarget).0 as i64);
@@ -74,15 +74,18 @@ impl Export {
 			nv12: Nv12::new(device, Color::infer(size)),
 		};
 
-		// A driver that hands back a texture it cannot draw into is the readback's.
+		// Checked once here, so a driver that hands back a texture it cannot draw
+		// into fails setup rather than the first copy.
 		let buffer = export.buffer()?.expect("an unused pool has room");
 		let plane = export.alias(&buffer, 0, MTLPixelFormat::R8Unorm, size)?;
 		let raw = CVMetalTextureGetTexture(&plane).ok_or_else(|| err("CVMetalTextureGetTexture returned none"))?;
 		if !raw.usage().contains(MTLTextureUsage::RenderTarget) {
-			tracing::info!(usage = ?raw.usage(), "pixel buffer textures are not drawable; reading frames back");
-			return Ok(None);
+			return Err(err(format!(
+				"its driver cannot draw into a pixel buffer (texture usage {:?})",
+				raw.usage()
+			)));
 		}
-		Ok(Some(export))
+		Ok(export)
 	}
 
 	pub fn copy(&mut self, texture: &wgpu::Texture) -> Result<Option<Copy>, Error> {
@@ -289,7 +292,7 @@ mod tests {
 	use moq_net::Timestamp;
 
 	use super::*;
-	use crate::render::export::Config;
+	use crate::render::export::Route;
 	use crate::render::export::tests::{center, gpu, near, texture};
 
 	/// VideoToolbox takes the export as the IOSurface it was drawn into, and the
@@ -298,12 +301,9 @@ mod tests {
 	async fn videotoolbox_reads_the_export_in_place() {
 		let (device, queue) = gpu().await.expect("a Metal device");
 		let size = Size::new(64, 48);
-		let mut exporter = Exporter::new(&device, &queue, size, &Config::default()).unwrap();
-		assert!(exporter.zero_copy(), "a Metal device exports pixel buffers");
-
 		let mut config = crate::encode::Config::new(size.width, size.height, crate::FrameRate::new(30, 1).unwrap());
-		exporter.probe(&mut config).await.unwrap();
-		assert!(exporter.zero_copy(), "VideoToolbox reads pixel buffers");
+		let (mut exporter, _) = Exporter::new(&device, &queue, &mut config).await.unwrap();
+		assert_eq!(exporter.route(), Route::Gpu, "VideoToolbox reads pixel buffers");
 		let mut encoder = crate::encode::Encoder::new(&config).unwrap();
 		assert_eq!(encoder.name(), "videotoolbox");
 

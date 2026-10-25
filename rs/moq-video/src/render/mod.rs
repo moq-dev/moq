@@ -44,7 +44,8 @@
 //! ## Export
 //!
 //! [`export`] runs the other way, handing a texture you drew to an encoder as a
-//! [`Frame`](crate::Frame), on the GPU where the platform and encoder allow.
+//! [`Frame`](crate::Frame): on the GPU when the encoder reads this platform's
+//! GPU surface, read back to the CPU when it does not.
 //!
 //! Enabled by the non-default `render` feature, which is what pulls in `wgpu`.
 

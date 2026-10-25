@@ -20,7 +20,7 @@ use bytes::Bytes;
 use moq_clock::Instant;
 use moq_scene::source::{self, Driver, Sources};
 use moq_scene::{Collection, Compositor, wgpu};
-use moq_video::render::export::{Exporter, Pending};
+use moq_video::render::export::{Exporter, Pending, Route};
 
 /// The GPU everything shares: sources upload to it, the compositor draws on
 /// it, the window presents from it, and the encoder reads the program from it.
@@ -240,7 +240,7 @@ impl Engine {
 				config,
 				exporter,
 			}) => {
-				let zero_copy = exporter.zero_copy();
+				let zero_copy = exporter.route() == Route::Gpu;
 				engine.stats.zero_copy.store(zero_copy, Ordering::Relaxed);
 				// One more than the exporter's pool, for a pause behind a full pool.
 				let (frames, pending) = mpsc::sync_channel(Exporter::DEPTH + 1);
@@ -390,12 +390,13 @@ async fn publish(
 	let mut broadcast = publication.broadcast().clone();
 	let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default())?;
 
-	let mut exporter = Exporter::new(&gpu.device, &gpu.queue, canvas.size(), &Default::default())?;
 	let mut config = moq_video::encode::Config::new(canvas.width, canvas.height, canvas.framerate());
 	// Opens a throwaway encoder now, so a machine that cannot encode the
 	// canvas fails at startup rather than when the first viewer arrives. It
 	// also settles whether that encoder reads the program on the GPU.
-	let rendition = exporter.probe(&mut config).await.context("cannot encode the canvas")?;
+	let (exporter, rendition) = Exporter::new(&gpu.device, &gpu.queue, &mut config)
+		.await
+		.context("cannot encode the canvas")?;
 	let reserved = catalog
 		.reserve()
 		.with_timeline_hint(config.gop.duration(config.framerate));
@@ -643,8 +644,8 @@ mod tests {
 		.await
 		.expect("the composed picture arrives");
 
-		// The program reaches the encoder as a GPU surface where the platform
-		// and encoder allow, and only falls back to reading each frame back.
+		// The program reaches the encoder as a GPU surface when the encoder
+		// reads one, and is read back frame by frame only when it does not.
 		let stats = &engine.stats;
 		assert!(stats.copied.load(Ordering::Relaxed) > 0);
 		let read_back = stats.read_back.load(Ordering::Relaxed);

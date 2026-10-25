@@ -57,15 +57,17 @@ struct Slot {
 }
 
 impl Export {
-	/// `None` when `device` is not a Direct3D12 device or `size` has an odd edge
-	/// NV12 cannot hold.
-	pub fn open(device: &wgpu::Device, queue: &wgpu::Queue, size: Size) -> Result<Option<Self>, Error> {
+	/// Fails when `device` is not a Direct3D12 device, `size` has an odd edge
+	/// NV12 cannot hold, or the adapter cannot convert a shared texture to NV12.
+	pub fn open(device: &wgpu::Device, queue: &wgpu::Queue, size: Size) -> Result<Self, Error> {
 		// SAFETY: the raw device is retained before the guard drops.
 		let Some(raw) = (unsafe { device.as_hal::<wgpu::hal::api::Dx12>() }).map(|hal| hal.raw_device().clone()) else {
-			return Ok(None);
+			return Err(err(
+				"it is not a Direct3D12 device; open wgpu on its Direct3D12 backend",
+			));
 		};
 		if !size.width.is_multiple_of(2) || !size.height.is_multiple_of(2) {
-			return Ok(None);
+			return Err(err(format!("NV12 cannot hold {size}, which has an odd edge")));
 		}
 
 		// Sharing a texture needs both devices on one adapter.
@@ -85,14 +87,14 @@ impl Export {
 			blit: Blit::new(device, FORMAT),
 			pool: Arc::default(),
 		};
-		// A driver without the video processor conversion is the readback's.
+		// Checked once here, so a driver without the video processor conversion
+		// fails setup rather than the first copy.
 		let slot = export.reserve()?.expect("an unused pool has room");
-		if let Err(err) = Texture::capture(&export.d3d11, &slot.shared, size) {
-			tracing::info!(%err, "cannot convert shared textures to NV12; reading frames back");
-			return Ok(None);
+		if let Err(e) = Texture::capture(&export.d3d11, &slot.shared, size) {
+			return Err(err(format!("its adapter cannot convert a shared texture to NV12: {e}")));
 		}
 		export.pool.lock().unwrap().free.push(slot);
-		Ok(Some(export))
+		Ok(export)
 	}
 
 	pub fn copy(&mut self, texture: &wgpu::Texture) -> Result<Option<Copy>, Error> {
@@ -268,7 +270,7 @@ mod tests {
 	use moq_net::Timestamp;
 
 	use super::*;
-	use crate::render::export::Config;
+	use crate::render::export::Route;
 	use crate::render::export::tests::{center, near, texture};
 
 	/// A Direct3D12 device, which every Windows host has, if only in software.
@@ -292,8 +294,7 @@ mod tests {
 	async fn exports_an_nv12_texture() {
 		let (device, queue) = dx12().await;
 		let size = Size::new(64, 48);
-		let mut exporter = Exporter::new(&device, &queue, size, &Config::default()).unwrap();
-		assert!(exporter.zero_copy(), "a Direct3D12 device exports shared textures");
+		let mut exporter = Exporter::open(&device, &queue, size, Route::Gpu).unwrap();
 
 		let red = texture(&device, &queue, size, [255, 0, 0, 255]);
 		let mut held: Vec<_> = (0..Exporter::DEPTH)
@@ -330,10 +331,9 @@ mod tests {
 	async fn media_foundation_encodes_the_export_in_place() {
 		let (device, queue) = dx12().await;
 		let size = Size::new(640, 480);
-		let mut exporter = Exporter::new(&device, &queue, size, &Config::default()).unwrap();
 		let mut config = crate::encode::Config::new(size.width, size.height, crate::FrameRate::new(30, 1).unwrap());
-		exporter.probe(&mut config).await.unwrap();
-		assert!(exporter.zero_copy(), "Media Foundation reads textures");
+		let (mut exporter, _) = Exporter::new(&device, &queue, &mut config).await.unwrap();
+		assert_eq!(exporter.route(), Route::Gpu, "Media Foundation reads textures");
 		let mut encoder = crate::encode::Encoder::new(&config).unwrap();
 		assert_eq!(encoder.name(), "mediafoundation");
 

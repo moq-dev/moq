@@ -85,22 +85,29 @@ impl Drop for Target {
 }
 
 impl Export {
-	/// Export from `device`, or `None` when it cannot share images and
-	/// semaphores this way.
-	pub fn open(device: &wgpu::Device, queue: &wgpu::Queue, size: Size) -> Result<Option<Self>, Error> {
+	/// Export from `device`, failing with what it lacks when it cannot share
+	/// images and semaphores this way.
+	pub fn open(device: &wgpu::Device, queue: &wgpu::Queue, size: Size) -> Result<Self, Error> {
 		// SAFETY: the guard is only read for handles, and drops before this returns.
 		let Some(hal) = (unsafe { device.as_hal::<wgpu::hal::api::Vulkan>() }) else {
-			return Ok(None);
+			return Err(err("it is not a Vulkan device; open wgpu on its Vulkan backend"));
 		};
 		let extensions = hal.enabled_device_extensions();
-		if !extensions.contains(&ash::khr::external_memory_fd::NAME)
-			|| !extensions.contains(&ash::khr::external_semaphore_fd::NAME)
-		{
-			return Ok(None);
+		for extension in [
+			ash::khr::external_memory_fd::NAME,
+			ash::khr::external_semaphore_fd::NAME,
+		] {
+			if !extensions.contains(&extension) {
+				return Err(err(format!(
+					"it was opened without {}; open it with moq_video::render::request_device, \
+					 which enables it where the driver has it",
+					extension.to_string_lossy()
+				)));
+			}
 		}
 		let shared = hal.shared_instance();
 		if shared.instance_api_version() < vk::API_VERSION_1_2 {
-			return Ok(None);
+			return Err(err("its Vulkan instance is older than 1.2"));
 		}
 		let instance = shared.raw_instance().clone();
 		let physical = hal.raw_physical_device();
@@ -111,7 +118,7 @@ impl Export {
 		// every chained structure outlives the queries.
 		let identity = unsafe {
 			if instance.get_physical_device_properties(physical).api_version < vk::API_VERSION_1_2 {
-				return Ok(None);
+				return Err(err("its Vulkan device is older than 1.2"));
 			}
 
 			let mut timeline = vk::PhysicalDeviceTimelineSemaphoreFeatures::default();
@@ -119,7 +126,7 @@ impl Export {
 			instance.get_physical_device_features2(physical, &mut features);
 			// wgpu enables the feature whenever the device has it.
 			if timeline.timeline_semaphore == vk::FALSE {
-				return Ok(None);
+				return Err(err("its driver has no timeline semaphores"));
 			}
 
 			let mut external = vk::PhysicalDeviceExternalImageFormatInfo::default()
@@ -132,21 +139,22 @@ impl Export {
 				.push_next(&mut external);
 			let mut exportable = vk::ExternalImageFormatProperties::default();
 			let mut properties = vk::ImageFormatProperties2::default().push_next(&mut exportable);
-			if instance
-				.get_physical_device_image_format_properties2(physical, &info, &mut properties)
-				.is_err()
-			{
-				return Ok(None);
+			if let Err(e) = instance.get_physical_device_image_format_properties2(physical, &info, &mut properties) {
+				return Err(err(format!("its driver cannot export RGBA images as fds: {e}")));
 			}
 			let limit = properties.image_format_properties.max_extent;
 			if !exportable
 				.external_memory_properties
 				.external_memory_features
 				.contains(vk::ExternalMemoryFeatureFlags::EXPORTABLE)
-				|| size.width > limit.width
-				|| size.height > limit.height
 			{
-				return Ok(None);
+				return Err(err("its driver cannot export RGBA image memory as an fd"));
+			}
+			if size.width > limit.width || size.height > limit.height {
+				return Err(err(format!(
+					"{size} is larger than its exportable images ({}x{})",
+					limit.width, limit.height
+				)));
 			}
 
 			let mut kind = vk::SemaphoreTypeCreateInfo::default().semaphore_type(vk::SemaphoreType::TIMELINE);
@@ -159,7 +167,7 @@ impl Export {
 				.external_semaphore_features
 				.contains(vk::ExternalSemaphoreFeatureFlags::EXPORTABLE)
 			{
-				return Ok(None);
+				return Err(err("its driver cannot export timeline semaphores as fds"));
 			}
 
 			identity(&instance, physical)?
@@ -207,7 +215,7 @@ impl Export {
 			cache: None,
 		});
 
-		Ok(Some(Self {
+		Ok(Self {
 			device: device.clone(),
 			queue: queue.clone(),
 			memory_fd: ash::khr::external_memory_fd::Device::new(&instance, &raw),
@@ -220,7 +228,7 @@ impl Export {
 			pipeline,
 			layout,
 			pool: Arc::default(),
-		}))
+		})
 	}
 
 	/// The device an importer must open on.
@@ -594,19 +602,18 @@ mod tests {
 	use moq_net::Timestamp;
 
 	use super::super::tests::{gpu, pixels, texture};
-	use super::super::{Config, Exporter};
+	use super::super::{Exporter, Route};
 	use super::*;
 
 	/// The exported memory, imported again as a second image the way an
 	/// importer on the same GPU would, holds each picture once its ready value
 	/// is reached.
 	#[tokio::test]
-	#[ignore = "needs a Vulkan device that exports memory; run by just rs render-sw and just rs gpu"]
+	#[ignore = "needs a Vulkan device that exports memory; run by just rs gpu"]
 	async fn vulkan_export_round_trips() {
 		let (device, queue) = gpu().await.expect("a GPU adapter");
 		let size = Size::new(64, 32);
-		let mut exporter = Exporter::new(&device, &queue, size, &Config::default()).unwrap();
-		assert!(exporter.zero_copy(), "this device cannot export Vulkan images");
+		let mut exporter = Exporter::open(&device, &queue, size, Route::Gpu).unwrap();
 		let identity = exporter.input().expect("a Vulkan exporter names its device");
 
 		let mut held = Vec::new();
@@ -654,10 +661,9 @@ mod tests {
 			.await
 			.unwrap();
 		let size = Size::new(320, 240);
-		let mut exporter = Exporter::new(&device, &queue, size, &Config::default()).unwrap();
 		let mut config = crate::encode::Config::new(size.width, size.height, crate::FrameRate::new(30, 1).unwrap());
-		exporter.probe(&mut config).await.unwrap();
-		assert!(exporter.zero_copy(), "NVENC refused the exported image");
+		let (mut exporter, _) = Exporter::new(&device, &queue, &mut config).await.unwrap();
+		assert_eq!(exporter.route(), Route::Gpu);
 		assert_eq!(config.input, exporter.input());
 		let mut encoder = crate::encode::Encoder::new(&config).unwrap();
 		assert_eq!(encoder.name(), "nvenc");
@@ -671,8 +677,8 @@ mod tests {
 			assert!(matches!(frame.surface, Surface::Vulkan(_)));
 			encoded.extend(encoder.encode(&frame).unwrap());
 			drop(frame);
-			let super::super::Route::Vulkan(export) = &exporter.route else {
-				unreachable!("checked zero copy above");
+			let super::super::Slots::Vulkan(export) = &exporter.slots else {
+				unreachable!("checked the route above");
 			};
 			export.settle().await;
 			assert!(
@@ -804,7 +810,7 @@ mod tests {
 				usage: wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::STORAGE_BINDING,
 				..descriptor
 			});
-			let export = Export::open(device, queue, contract.size).unwrap().unwrap();
+			let export = Export::open(device, queue, contract.size).unwrap();
 			let source = imported.create_view(&Default::default());
 			let target = plain.create_view(&Default::default());
 			let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {

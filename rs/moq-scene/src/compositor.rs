@@ -626,8 +626,6 @@ impl Uniforms {
 
 #[cfg(test)]
 mod tests {
-	use moq_net::Timestamp;
-
 	use super::*;
 	use crate::collection::{Item, Rgba, Scene, Source};
 	use crate::source::test::{context, local, start};
@@ -905,29 +903,6 @@ mod tests {
 			studio.collection.scenes.clear();
 			studio.render(Instant::now());
 			assert_eq!(pixel(&studio.program(), 1, 1), BLACK);
-		})
-		.await;
-	}
-
-	/// The program is a texture an exporter takes, on either route.
-	#[tokio::test]
-	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
-	async fn the_program_is_exportable() {
-		local(async {
-			let mut studio = Studio::new(collection()).await;
-			studio.compositor.set_preview(Some("blue".into()));
-			studio.compositor.cut();
-			studio.render(Instant::now());
-			let size = studio.compositor.canvas().size();
-			for zero_copy in [false, true] {
-				let mut config = moq_video::render::export::Config::default();
-				config.zero_copy = zero_copy;
-				let mut exporter =
-					moq_video::render::export::Exporter::new(&studio.device, &studio.queue, size, &config).unwrap();
-				let pending = exporter.copy(studio.compositor.program(), Timestamp::ZERO).unwrap();
-				let frame = pending.expect("a free slot").wait().unwrap();
-				assert_eq!(frame.size(), size);
-			}
 		})
 		.await;
 	}

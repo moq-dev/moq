@@ -6,7 +6,9 @@
 //! so the caller keeps drawing into its texture; [`Pending::wait`] then waits for
 //! the GPU on whatever thread encodes, and hands back the frame.
 //!
-//! Where the platform allows, a slot is a GPU surface the encoder reads in place:
+//! [`Exporter::new`] settles the [`Route`] once, from the encoder it probes.
+//! An encoder that reads this platform's GPU surface in place takes
+//! [`Route::Gpu`], where a slot is that surface:
 //!
 //! - Linux, on a Vulkan device: an exportable image and timeline semaphore,
 //!   handed over as `Surface::Vulkan`. NVENC imports it on the same GPU.
@@ -17,10 +19,11 @@
 //!   converted to NV12 there and handed over as `Surface::Texture`. The Media
 //!   Foundation hardware encoder reads it directly.
 //!
-//! Anywhere else, or with [`Config::zero_copy`] off, each slot is a staging
-//! buffer and the frame is read back to the CPU as I420.
-//! [`Exporter::zero_copy`] says which, so a caller can count the readbacks.
-//! [`Exporter::probe`] picks the route an encoder can take and probes it.
+//! Every other encoder reads frames on the CPU, so it takes
+//! [`Route::Readback`]: each slot is a staging buffer and the frame is read back
+//! as I420. Neither route falls back to the other. A device that cannot export
+//! the surface its encoder reads fails [`Exporter::new`], and a copy that fails
+//! on the GPU is an error.
 // The variants are deliberately not doc links: each exists on one platform, so
 // a link fails the `-D warnings` rustdoc build on every other.
 
@@ -43,25 +46,13 @@ fn err(message: impl std::fmt::Display) -> Error {
 	Error::Render(anyhow::anyhow!("{message}"))
 }
 
-/// Exporter configuration.
-///
-/// `#[non_exhaustive]`: build via `default()` and set the fields you care
-/// about, so future knobs stay additive.
-#[derive(Clone, Debug)]
-#[non_exhaustive]
-pub struct Config {
-	/// Whether to hand frames over as GPU surfaces where the platform allows,
-	/// instead of reading each one back to the CPU. On by default.
-	///
-	/// Turn it off when the encoder cannot take this platform's GPU surface, as
-	/// [`Exporter::probe`] does, or to compare the two routes.
-	pub zero_copy: bool,
-}
-
-impl Default for Config {
-	fn default() -> Self {
-		Self { zero_copy: true }
-	}
+/// How an [`Exporter`] hands frames to the encoder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Route {
+	/// As this platform's GPU surface, which the encoder reads in place.
+	Gpu,
+	/// Read back to the CPU as I420, for an encoder that reads frames there.
+	Readback,
 }
 
 /// Copies textures into frames an encoder takes, through a small pool of slots.
@@ -70,12 +61,11 @@ impl Default for Config {
 /// so an encoder that falls behind drops pictures instead of adding latency.
 pub struct Exporter {
 	device: wgpu::Device,
-	queue: wgpu::Queue,
 	size: Size,
-	route: Route,
+	slots: Slots,
 }
 
-enum Route {
+enum Slots {
 	Readback(Readback),
 	#[cfg(target_os = "linux")]
 	Vulkan(Box<vulkan::Export>),
@@ -90,42 +80,76 @@ impl Exporter {
 	/// spare so a slow encode does not drop the very next picture.
 	pub const DEPTH: usize = 3;
 
-	/// Export `size` textures drawn on `device`.
+	/// Export textures drawn on `device` to the encoder `config` opens, and
+	/// return the rendition it produces.
 	///
-	/// Falls back to reading frames back when this device cannot hand over a
-	/// GPU surface; [`zero_copy`](Self::zero_copy) reports which. On Linux the
-	/// device must come from [`request_device`](super::request_device) to
-	/// export, since wgpu leaves out the extension that shares a semaphore.
-	pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, size: Size, config: &Config) -> Result<Self, Error> {
-		size.validate_nonzero("export")?;
-		let route = match config.zero_copy {
-			true => Self::native(device, queue, size)?,
-			false => None,
+	/// Probes the encoder as [`encode::Config::probe`](crate::encode::Config::probe)
+	/// does, and takes [`Route::Gpu`] when it reads this platform's GPU surface,
+	/// [`Route::Readback`] otherwise. Textures are `config`'s size. On Linux this
+	/// sets [`encode::Config::input`](crate::encode::Config::input) to the
+	/// exported image's device, or clears it for a readback, so open the encoder
+	/// with `config` as this leaves it.
+	///
+	/// # Errors
+	///
+	/// Fails when no encoder takes `config`, or when the encoder reads GPU
+	/// surfaces and `device` cannot export one, naming what is missing. On Linux
+	/// open the device with [`request_device`](super::request_device), since
+	/// wgpu leaves out the extension that shares a semaphore.
+	pub async fn new(
+		device: &wgpu::Device,
+		queue: &wgpu::Queue,
+		config: &mut crate::encode::Config,
+	) -> Result<(Self, hang::catalog::VideoConfig), Error> {
+		#[cfg(target_os = "linux")]
+		{
+			config.input = None;
+		}
+		let (rendition, sink) = config.probe_sink().await?;
+		let encoder = sink.name().to_owned();
+		// Only one encoder session at a time, as `probe` asks.
+		drop(sink);
+		if !crate::encode::backend::reads_export(&encoder) {
+			return Ok((Self::open(device, queue, config.size(), Route::Readback)?, rendition));
+		}
+
+		let exporter = Self::open(device, queue, config.size(), Route::Gpu).map_err(|e| {
+			err(format!(
+				"{encoder} encodes GPU frames, but this device cannot export them: {e}"
+			))
+		})?;
+		// The encoder opens on the image's GPU, which need not be the one it
+		// picked for CPU frames, so it is probed again there.
+		#[cfg(target_os = "linux")]
+		let rendition = {
+			config.input = exporter.input();
+			config
+				.probe()
+				.await
+				.map_err(|e| err(format!("{encoder} cannot encode the exported image: {e}")))?
 		};
-		let route = route.unwrap_or_else(|| Route::Readback(Readback::new(device, queue, size)));
-		Ok(Self {
-			device: device.clone(),
-			queue: queue.clone(),
-			size,
-			route,
-		})
+		Ok((exporter, rendition))
 	}
 
-	#[allow(unused_variables, reason = "every platform's route is compiled out on the others")]
-	fn native(device: &wgpu::Device, queue: &wgpu::Queue, size: Size) -> Result<Option<Route>, Error> {
-		#[cfg(target_os = "linux")]
-		if let Some(export) = vulkan::Export::open(device, queue, size)? {
-			return Ok(Some(Route::Vulkan(Box::new(export))));
-		}
-		#[cfg(apple)]
-		if let Some(export) = metal::Export::open(device, queue, size)? {
-			return Ok(Some(Route::Metal(export)));
-		}
-		#[cfg(target_os = "windows")]
-		if let Some(export) = dx12::Export::open(device, queue, size)? {
-			return Ok(Some(Route::Dx12(export)));
-		}
-		Ok(None)
+	/// Export `size` textures over `route`, failing when `device` cannot.
+	fn open(device: &wgpu::Device, queue: &wgpu::Queue, size: Size, route: Route) -> Result<Self, Error> {
+		size.validate_nonzero("export")?;
+		let slots = match route {
+			Route::Readback => Slots::Readback(Readback::new(device, queue, size)),
+			#[cfg(target_os = "linux")]
+			Route::Gpu => Slots::Vulkan(Box::new(vulkan::Export::open(device, queue, size)?)),
+			#[cfg(apple)]
+			Route::Gpu => Slots::Metal(metal::Export::open(device, queue, size)?),
+			#[cfg(target_os = "windows")]
+			Route::Gpu => Slots::Dx12(dx12::Export::open(device, queue, size)?),
+			#[cfg(not(any(target_os = "linux", apple, target_os = "windows")))]
+			Route::Gpu => return Err(Error::Unsupported("no GPU export on this platform".into())),
+		};
+		Ok(Self {
+			device: device.clone(),
+			size,
+			slots,
+		})
 	}
 
 	/// The size of every texture this copies, and of every frame it hands back.
@@ -133,61 +157,22 @@ impl Exporter {
 		self.size
 	}
 
-	/// Whether frames stay on the GPU, rather than each being read back to the
-	/// CPU.
-	pub fn zero_copy(&self) -> bool {
-		!matches!(self.route, Route::Readback(_))
+	/// How frames reach the encoder.
+	pub fn route(&self) -> Route {
+		match self.slots {
+			Slots::Readback(_) => Route::Readback,
+			#[cfg(any(target_os = "linux", apple, target_os = "windows"))]
+			_ => Route::Gpu,
+		}
 	}
 
-	/// The Vulkan device an encoder must open on to take these frames, for
-	/// [`encode::Config::input`](crate::encode::Config::input). `None` when
-	/// frames are not Vulkan images.
+	/// The Vulkan device the encoder opens on to take these frames.
 	#[cfg(target_os = "linux")]
-	pub fn input(&self) -> Option<crate::frame::vulkan::Device> {
-		match &self.route {
-			Route::Vulkan(export) => Some(export.device()),
-			_ => None,
+	fn input(&self) -> Option<crate::frame::vulkan::Device> {
+		match &self.slots {
+			Slots::Vulkan(export) => Some(export.device()),
+			Slots::Readback(_) => None,
 		}
-	}
-
-	/// Probe the encoder `config` opens, settling which route this exporter
-	/// takes.
-	///
-	/// Tries the encoder on this exporter's GPU surface first, and falls back to
-	/// reading frames back when no encoder takes it, or when the one that does
-	/// would download every frame anyway (a software encoder). On Linux this
-	/// sets [`encode::Config::input`](crate::encode::Config::input), so open the
-	/// encoder with `config` as this leaves it.
-	pub async fn probe(&mut self, config: &mut crate::encode::Config) -> Result<hang::catalog::VideoConfig, Error> {
-		#[cfg(target_os = "linux")]
-		{
-			config.input = self.input();
-			if config.input.is_some() {
-				match config.probe().await {
-					Ok(rendition) => return Ok(rendition),
-					Err(err) => {
-						tracing::info!(%err, "no encoder takes the exported image; reading frames back");
-						config.input = None;
-						self.readback();
-					}
-				}
-			}
-		}
-
-		let (rendition, sink) = config.probe_sink().await?;
-		if self.zero_copy() && crate::encode::backend::software(sink.name()) {
-			tracing::info!(
-				encoder = sink.name(),
-				"a software encoder reads frames on the CPU; reading them back"
-			);
-			self.readback();
-		}
-		Ok(rendition)
-	}
-
-	/// Switch to reading frames back. Slots in flight finish on the old route.
-	fn readback(&mut self) {
-		self.route = Route::Readback(Readback::new(&self.device, &self.queue, self.size));
 	}
 
 	/// Start copying `texture` into a frame to be encoded at `timestamp`.
@@ -214,14 +199,14 @@ impl Exporter {
 			)));
 		}
 
-		let wait = match &mut self.route {
-			Route::Readback(readback) => readback.copy(texture).map(Wait::Readback),
+		let wait = match &mut self.slots {
+			Slots::Readback(readback) => readback.copy(texture).map(Wait::Readback),
 			#[cfg(target_os = "linux")]
-			Route::Vulkan(export) => export.copy(texture)?.map(Wait::Vulkan),
+			Slots::Vulkan(export) => export.copy(texture)?.map(Wait::Vulkan),
 			#[cfg(apple)]
-			Route::Metal(export) => export.copy(texture)?.map(Wait::Metal),
+			Slots::Metal(export) => export.copy(texture)?.map(Wait::Metal),
 			#[cfg(target_os = "windows")]
-			Route::Dx12(export) => export.copy(texture)?.map(Wait::Dx12),
+			Slots::Dx12(export) => export.copy(texture)?.map(Wait::Dx12),
 		};
 		Ok(wait.map(|wait| Pending {
 			device: self.device.clone(),
@@ -622,9 +607,8 @@ pub(crate) mod tests {
 		let (device, queue) = gpu().await.expect("a GPU adapter");
 		let size = Size::new(64, 32);
 		let red = texture(&device, &queue, size, [255, 0, 0, 255]);
-		let config = Config { zero_copy: false };
-		let mut exporter = Exporter::new(&device, &queue, size, &config).unwrap();
-		assert!(!exporter.zero_copy());
+		let mut exporter = Exporter::open(&device, &queue, size, Route::Readback).unwrap();
+		assert_eq!(exporter.route(), Route::Readback);
 
 		let mut held: Vec<_> = (0..Exporter::DEPTH)
 			.map(|_| exporter.copy(&red, Timestamp::ZERO).unwrap().expect("a free slot"))
@@ -639,20 +623,27 @@ pub(crate) mod tests {
 		assert!(exporter.copy(&red, Timestamp::ZERO).unwrap().is_some());
 	}
 
-	/// Probing leaves the exporter on a route the encoder it opened takes: GPU
-	/// frames only when that encoder reads them in place, otherwise readbacks.
+	/// The exporter takes the route the encoder it probed reads: GPU frames
+	/// exactly when that encoder reads them in place, otherwise readbacks.
 	#[tokio::test]
 	#[ignore = "needs a GPU and an H.264 encoder; run by just rs render-sw"]
-	async fn probe_settles_on_a_route_the_encoder_takes() {
+	async fn takes_the_route_the_encoder_reads() {
 		let (device, queue) = gpu().await.expect("a GPU adapter");
 		let size = Size::new(64, 64);
-		let mut exporter = Exporter::new(&device, &queue, size, &Config::default()).unwrap();
 		let mut config = crate::encode::Config::new(size.width, size.height, crate::FrameRate::new(30, 1).unwrap());
-		exporter.probe(&mut config).await.unwrap();
+		let (mut exporter, _) = Exporter::new(&device, &queue, &mut config).await.unwrap();
+		assert_eq!(exporter.size(), size);
 		let mut encoder = crate::encode::Encoder::new(&config).unwrap();
-		if crate::encode::backend::software(encoder.name()) {
-			assert!(!exporter.zero_copy(), "{} downloads GPU frames", encoder.name());
-		}
+		let expected = match crate::encode::backend::reads_export(encoder.name()) {
+			true => Route::Gpu,
+			false => Route::Readback,
+		};
+		assert_eq!(
+			exporter.route(),
+			expected,
+			"{} was handed the wrong route",
+			encoder.name()
+		);
 		#[cfg(target_os = "linux")]
 		assert_eq!(config.input, exporter.input());
 
@@ -668,7 +659,7 @@ pub(crate) mod tests {
 	#[ignore = "needs a GPU; run by just rs render-sw"]
 	async fn refuses_a_mismatched_texture() {
 		let (device, queue) = gpu().await.expect("a GPU adapter");
-		let mut exporter = Exporter::new(&device, &queue, Size::new(64, 32), &Default::default()).unwrap();
+		let mut exporter = Exporter::open(&device, &queue, Size::new(64, 32), Route::Readback).unwrap();
 		let other = texture(&device, &queue, Size::new(32, 32), [0; 4]);
 		assert!(exporter.copy(&other, Timestamp::ZERO).is_err());
 	}
