@@ -46,7 +46,7 @@ harness:
     python3 interop/tone.test.py
     cd .. && bun test {{ replace(harness_compat_tests, "\n", " ") }}
     cd .. && bun install --frozen-lockfile
-    cd interop/clients/js && bun test {{ replace(harness_browser_tests, "\n", " ") }}
+    cd interop/clients/js && bash ../../../../sh/local.sh bun test {{ replace(harness_browser_tests, "\n", " ") }}
 
 # Cross-language media interop test, built from this checkout. Stands up a
 # relay and runs the publisher x subscriber matrix. Default: rust only (fast
@@ -241,16 +241,16 @@ wasm *args:
 video:
     cd .. && bun install --frozen-lockfile
     # A desktop display makes software Vulkan request unsupported window surfaces.
-    cd video && env -u DISPLAY -u WAYLAND_DISPLAY bun test ./renderer.browser.ts
+    cd video && bash ../../sh/local.sh env -u DISPLAY -u WAYLAND_DISPLAY bun test ./renderer.browser.ts
 
 # Optional publisher retention across Rust/JS sessions through a Rust relay.
 max-age:
-    cargo nextest run --locked -p moq-tokio --test integration -E 'test(/^max_age::/)' --run-ignored all
+    bash ../sh/local.sh cargo nextest run --locked -p moq-tokio --test integration -E 'test(/^max_age::/)' --run-ignored all
 
 # A JavaScript sender exhausts each native receiver's connection credit, which recovers.
 receive-credit:
-    cargo nextest run --locked -p moq-tokio --test integration -E 'test(/^receive_credit::javascript_/)' --run-ignored only
-    cargo nextest run --locked -p moq-uring --test integration -E 'test(/^receive_credit::javascript_/)' --run-ignored only
+    bash ../sh/local.sh cargo nextest run --locked -p moq-tokio --test integration -E 'test(/^receive_credit::javascript_/)' --run-ignored only
+    bash ../sh/local.sh cargo nextest run --locked -p moq-uring --test integration -E 'test(/^receive_credit::javascript_/)' --run-ignored only
 
 # Cross-language subscription termination over in-memory transports.
 bare-fin:
@@ -258,7 +258,7 @@ bare-fin:
 
 # Explore JSON snapshot codec sequences with a fresh replayable seed.
 json-properties:
-    bash json-properties.sh
+    bash ../sh/local.sh bash json-properties.sh
 
 # The TypeScript qmux peer as client and server against the in-tree Rust qmux
 # interop examples, per draft. The manifest path names the in-tree crate, which
@@ -273,7 +273,7 @@ qmux:
 # Complete MoQ SETUP and transfer a frame over a real browser data-channel pair.
 p2p:
     cd .. && bun install --frozen-lockfile
-    cd p2p && bun test ./transport.browser.ts
+    cd p2p && bash ../../sh/local.sh bun test ./transport.browser.ts
 
 # Retain complete backend assets, parity, and raw alternating browser samples.
 [positional-arguments]

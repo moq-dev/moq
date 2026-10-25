@@ -222,6 +222,7 @@ test("session codes match the draft's Session Error Codes table", () => {
 		Timeout: 0x11,
 		AuthTokenCacheOverflow: 0x13,
 		Version: 0x15,
+		MalformedAuthToken: 0x16,
 		UnknownAuthTokenAlias: 0x17,
 		Expired: 0x18,
 		InvalidAuthority: 0x19,

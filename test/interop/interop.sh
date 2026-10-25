@@ -31,6 +31,10 @@
 # version per pass, such as each even moq-transport draft (`--versions ietf`).
 set -euo pipefail
 
+if [[ "${GITHUB_ACTIONS:-}" != true && "${MOQ_LOCAL_SUPERVISED:-}" != 1 ]]; then
+    exec bash "$(dirname "$0")/../../sh/local.sh" bash "$0" "$@"
+fi
+
 INTEROP_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 WORKSPACE=$(cd "$INTEROP_DIR/../.." && pwd)
 CLIENTS="$INTEROP_DIR/clients"
@@ -2058,8 +2062,8 @@ run_matrix() {
         fi
     done
 
-    # The relay refuses a token on its public rules, and Chromium has to read the close code and
-    # reason it sends. WebSocket must surface Unauthorized and stop reconnecting too.
+    # The relay refuses a token that is not a JWT, and Chromium has to read the close code and
+    # reason it sends. WebSocket must surface MalformedAuthToken and stop reconnecting too.
     # Chromium is the strict peer here, so no Rust client stands in for it. The relay refuses
     # before any version is negotiated, so one pass covers it.
     if [[ "$VERSION" == auto ]] && needs js; then

@@ -158,33 +158,32 @@ mod test {
 		publish_catalog(published)
 	}
 
-	/// [`publish_catalog`] against a *standalone* broadcast (no origin, so its own path is
-	/// empty) that a dynamic handler serves at `a/pub`, read back through the requesting
-	/// origin cursor. That is the shape an FFI app takes when it answers an origin request
-	/// with a broadcast it built itself.
+	/// [`publish_catalog`] against the answer a dynamic handler prepares and publishes at
+	/// `a/pub`, read back through the requesting origin cursor. That is the shape an app
+	/// takes when it answers an origin request.
 	async fn publish_catalog_served(published: Catalog<()>) -> Result<Option<Catalog>> {
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let track = broadcast
-			.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
-			.expect("catalog track should create");
-
 		let origin = crate::source::produce_origin();
-		let dynamic = origin.dynamic_route("", Default::default()).unwrap();
+		let dynamic = origin.dynamic("").unwrap();
 		let requesting = origin.consume().request_broadcast("a/pub", None);
-		let served = broadcast.consume();
 		// The handler hands its route back: dropping it would retract the route and end
 		// the broadcast it just served.
 		let handler = tokio::spawn(async move {
-			dynamic
+			let prepared = dynamic
 				.requested_broadcast()
 				.await
 				.expect("handler should be asked for the path")
-				.accept(&served);
-			dynamic
+				.prepare(moq_net::Epoch::mint())
+				.expect("the answer should prepare");
+			let track = prepared
+				.broadcast()
+				.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
+				.expect("catalog track should create");
+			let broadcast = prepared.publish().expect("the answer should publish");
+			(dynamic, broadcast, track)
 		});
 
 		let resolved = requesting.await;
-		let _dynamic = handler.await.expect("handler task");
+		let (_dynamic, _broadcast, track) = handler.await.expect("handler task");
 		let subscriber = resolved
 			.expect("the handler served it")
 			.track(hang::Catalog::DEFAULT_NAME)

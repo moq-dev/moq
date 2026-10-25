@@ -62,6 +62,9 @@ def run():
 
         def spawn(name, command, **kwargs):
             log = resources.enter_context((root / f"{name}.log").open("wb"))
+            # Connection timestamps and device openings are part of the measurement.
+            if command[0] == args.moq:
+                kwargs["env"] = dict(os.environ, RUST_LOG="info")
             child = subprocess.Popen(command, stderr=log, **kwargs)
             children.append(child)
             return child
@@ -171,8 +174,10 @@ def run():
             fallback_ms = (time.monotonic() - started) * 1000
             for child, _ in reversed(second):
                 stop(child)
+            opens = (root / f"{version}-player.log").read_bytes().count(b"opened audio output")
             print(json.dumps({"version": version, "replacementMs": replacement_ms,
                               "fallbackMs": fallback_ms, "boundMs": SWITCH_S * 1000,
+                              "outputOpens": opens,
                               "replacement": replaced, "fallback": fallback,
                               "backend": "private PulseAudio null sink via production ALSA/cpal"}), flush=True)
             player.send_signal(signal.SIGINT)
