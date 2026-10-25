@@ -136,7 +136,10 @@ connection credential, sent in SETUP: moq-lite-07-wip's Token parameter, or
 moq-transport's `AUTHORIZATION TOKEN` option with Token Type 0. While the client
 also offers a version that cannot carry it (moq-lite before 07), it sends the
 same value as `?jwt=`, which `moq auth serve` admits since they match; two
-different values are refused. Each further token is presented
+different values are refused. A URL token can land in server and proxy access
+logs, so to keep it out, offer only versions that carry it in SETUP, such as
+`--connect-version moq-lite-07-wip`; a relay that predates SETUP tokens then
+cannot receive it. Each further token is presented
 [in band](#in-band-renewal) and widens the session's grant. A URL that already
 carries a `?jwt=`, such as a cluster peer's, keeps it as the connection
 credential, and every configured token then rides in band. Dialing

@@ -531,13 +531,26 @@ async fn a_configured_token_is_the_connection_credential() {
 		.await
 		.expect("connect timeout")
 		.expect("the configured token was refused");
-		// A lite client is live before admission answers, so give a refusal time to land.
-		assert!(
-			tokio::time::timeout(Duration::from_millis(500), session.closed())
-				.await
-				.is_err(),
-			"{versions:?}: the relay refused the configured token"
-		);
+		if setup.is_some() {
+			// Lite-07 answers the SETUP token over AUTH, so its grant proves admission.
+			let mut grant = session.auth().grant();
+			tokio::time::timeout(TIMEOUT, async {
+				while grant.peek().is_none() {
+					grant.changed().await.expect("the relay refused the configured token");
+				}
+			})
+			.await
+			.expect("grant timeout");
+		} else {
+			// Lite-06 has no AUTH answer and a client is live before admission, so give a
+			// refusal time to land.
+			assert!(
+				tokio::time::timeout(Duration::from_millis(500), session.closed())
+					.await
+					.is_err(),
+				"{versions:?}: the relay refused the configured token"
+			);
+		}
 
 		let seen = script.seen.lock().unwrap().clone();
 		let connect = seen.iter().find(|r| r.event == Event::Connect).expect("a connect");

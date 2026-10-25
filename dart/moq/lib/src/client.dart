@@ -24,7 +24,7 @@ final class AnnounceOptions {
 /// the FFI's [MoqClientConfig].
 ///
 /// Every field is optional; a null keeps the native default. A value the native
-/// side cannot use fails [Moq.connect] with `MoqException.Config`.
+/// side cannot use fails [Moq.connect] with `ConfigMoqException`.
 final class ConnectOptions {
   /// Local socket address to bind, e.g. `0.0.0.0:0`.
   final String? bind;
@@ -259,12 +259,12 @@ final class Moq {
   /// The credentials every dial presents ([ConnectOptions.tokens]), to
   /// replace while running.
   ///
-  /// [Tokens.set] replaces them, such as before the current ones expire: the
+  /// [Tokens.set_] replaces them, such as before the current ones expire: the
   /// next dial presents them, and a live session with in-band AUTH presents
   /// them at once, withdrawing each replaced token once its replacements are
   /// answered, even when one is refused. After an authorization refusal the
   /// client redials only if they changed. An empty token throws
-  /// `MoqException.Config`.
+  /// `ConfigMoqException`.
   Tokens tokens() => _client.tokens();
 
   /// Drain within one second, then stop the client.

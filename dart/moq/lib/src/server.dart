@@ -6,7 +6,7 @@ import 'stream.dart';
 /// Everything [Server.listen] can be told.
 ///
 /// A value the native side cannot use fails [Server.listen] with
-/// `MoqException.Config`.
+/// `ConfigMoqException`.
 final class ListenOptions {
   /// Local socket address to listen on, e.g. `127.0.0.1:4443` or `[::]:443`.
   final String bind;
