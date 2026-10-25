@@ -458,8 +458,9 @@ pub(crate) struct TrackState {
 	// The error that caused the track to be aborted, if any.
 	abort: Option<Error>,
 
-	// Whether the declared end still stands after an abort: every group below it was
-	// produced and finished before the abort landed. See [`Self::is_complete`].
+	// Whether the declared end settled before a write that could reopen it or an abort:
+	// every group below it was produced and finished then, so the clean end stands for
+	// good. See [`Self::latch_settled`].
 	settled: bool,
 
 	// Active subscriptions, in their own [`kio::Lock`] so a read-only `Consumer`
@@ -1021,6 +1022,7 @@ impl TrackState {
 	/// Billed before the debt is settled, so its bytes accrue debt, but pushed after, so the
 	/// newcomer is never a victim of its own write.
 	fn push_datagram(&mut self, datagram: super::datagram::Stored) {
+		self.latch_settled();
 		let datagram = super::datagram::Buffered::new(datagram, &self.cache);
 		self.charge_debt();
 		if self.datagrams.len() == MAX_DATAGRAMS {
@@ -1852,6 +1854,7 @@ impl TrackState {
 	/// groups reach subscribers, fetched backfill is served by sequence only. A group
 	/// counts as content only once [`Self::reveal`] reports its first frame or finish.
 	fn insert_group(&mut self, group: &group::Handle, visible: bool) {
+		self.latch_settled();
 		let sequence = group.sequence;
 		self.next_stamp = self.next_stamp.wrapping_add(1);
 		let stamp = self.next_stamp;
@@ -2184,6 +2187,7 @@ impl TrackState {
 	/// or above it, and a pending tail above the last arrival, is waited for a fresh grace:
 	/// the feed may only now be sending it.
 	fn set_start(&mut self, start_sequence: Option<u64>, pending: bool) {
+		self.latch_settled();
 		self.start_sequence = start_sequence;
 		self.start_pending = pending;
 		if let Some(start) = start_sequence {
@@ -2250,13 +2254,15 @@ impl TrackState {
 	/// An abort before the end settled wins over it: a group below the boundary was
 	/// still open, so the track was cut off rather than ended.
 	fn is_complete(&self) -> bool {
-		// `sealed` is a declared end the last producer dropped short of. An abort still wins
-		// unless that end had already settled: a group below it was still open.
+		if self.settled {
+			return true;
+		}
+		// `sealed` is a declared end the last producer dropped short of.
 		let reached = self.sealed
 			|| self
 				.final_sequence()
 				.is_some_and(|fin| self.reaches(fin) && !self.awaits_tail(fin));
-		reached && (self.abort.is_none() || self.settled)
+		reached && self.abort.is_none()
 	}
 
 	/// Whether the live edge reached `fin`, or a received copy's tail decides it instead:
@@ -2343,18 +2349,21 @@ impl TrackState {
 
 	/// Whether the declared end is reached, the pending tail owes nothing below it, and
 	/// every cached group below it finished, so nothing the end promised is still in flight.
-	///
-	/// Decided as an abort lands, which ends any wait for the tail: a group the tail still
-	/// owed was cut off by the abort, so readers get the error rather than a clean end.
 	fn is_settled(&self) -> bool {
 		let Some(fin) = self.final_sequence() else {
 			return false;
 		};
 		let reached = self.sealed || self.reaches(fin);
-		reached
-			&& (self.abort.is_none() || self.settled)
-			&& !self.owes(fin)
-			&& self.lookup.range(..fin).all(|(_, slot)| slot.group.is_finished())
+		reached && !self.owes(fin) && self.lookup.range(..fin).all(|(_, slot)| slot.group.is_finished())
+	}
+
+	/// Record that the end settled before a write that could reopen it: an abort, a late
+	/// group below the end, or a fresh grace for the tail. Whoever saw the clean end, a
+	/// reader or `closed()`, keeps it; a group the end still waited on was cut off instead.
+	fn latch_settled(&mut self) {
+		if !self.settled && self.abort.is_none() && self.is_settled() {
+			self.settled = true;
+		}
 	}
 
 	/// Where a replacement route should pick this track up: one past the last frame
@@ -2508,7 +2517,7 @@ impl TrackState {
 			// An abort after the end settled keeps the clean end; until then a group below it
 			// may still abort, which would cut the track off, so wait for each to finish. One
 			// that aborts leaves the outcome to the track's own abort or drop.
-			if self.abort.is_none()
+			if !self.settled
 				&& let Some(fin) = self.final_sequence()
 			{
 				for (_, slot) in self.lookup.range(..fin) {
@@ -2621,7 +2630,7 @@ fn commit_abort(mut state: kio::Mut<'_, TrackState>, err: Error) -> OpenGroups {
 	// past the grace was lost before the abort rather than cut off by it.
 	let now = state.cache.pool().now_wall();
 	state.fold_arrivals(now);
-	state.settled = state.is_settled();
+	state.latch_settled();
 	state.abort = Some(err.clone());
 	// Keep what finished for consumers still draining: they get it, then the abort (or
 	// the clean end, when the end settled). Clearing here would abort finished groups a
@@ -13039,6 +13048,29 @@ mod test {
 			cut.poll_closed(&kio::Waiter::noop()),
 			Poll::Ready(Err(Error::Cancel))
 		));
+	}
+
+	/// A settled end is final: a late group below it and a later abort leave the outcome
+	/// `closed()` already saw.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_settled_end_survives_a_late_group_and_an_abort() {
+		let waiter = kio::Waiter::noop();
+		let mut producer = track_producer("test", Info::timed());
+		let demand = producer.demand();
+		producer
+			.create_group(group::Info { sequence: 5 })
+			.unwrap()
+			.finish()
+			.unwrap();
+		producer.finish_at(Position::group(6)).unwrap();
+		assert!(matches!(producer.poll_closed(&waiter), Poll::Ready(Ok(()))));
+
+		let _late = producer.create_group(group::Info { sequence: 4 }).unwrap();
+		assert!(matches!(producer.poll_closed(&waiter), Poll::Ready(Ok(()))));
+		producer.clone().abort(Error::Cancel).unwrap();
+		assert!(matches!(producer.poll_closed(&waiter), Poll::Ready(Ok(()))));
+		assert!(matches!(demand.closed().now_or_never(), Some(Ok(()))));
 	}
 
 	/// An abort short of the end, or the last producer leaving without one, is the outcome.
