@@ -1,6 +1,6 @@
 use std::{
-    io::{self, IoSliceMut},
-    mem::MaybeUninit,
+	io::{self, IoSliceMut},
+	mem::MaybeUninit,
 };
 
 use super::{RecvMeta, Transmit, UdpSockRef};
@@ -10,93 +10,92 @@ use super::{RecvMeta, Transmit, UdpSockRef};
 /// `wasi:sockets` exposes none of this crate's advanced features, so they are stubbed out.
 #[derive(Debug)]
 pub struct UdpSocketState {
-    _private: (),
+	_private: (),
 }
 
 impl UdpSocketState {
-    /// Sets `socket` non-blocking and returns its state; WASI has no offloads to configure.
-    pub fn new(socket: UdpSockRef<'_>) -> io::Result<Self> {
-        socket.set_nonblocking(true)?;
+	/// Sets `socket` non-blocking and returns its state; WASI has no offloads to configure.
+	pub fn new(socket: UdpSockRef<'_>) -> io::Result<Self> {
+		socket.set_nonblocking(true)?;
 
-        Ok(Self { _private: () })
-    }
+		Ok(Self { _private: () })
+	}
 
-    /// Sends a [`Transmit`] on the given socket without any additional error handling.
-    pub fn try_send(&self, socket: UdpSockRef<'_>, transmit: &Transmit<'_>) -> io::Result<()> {
-        send(socket, transmit)
-    }
+	/// Sends a [`Transmit`] on the given socket without any additional error handling.
+	pub fn try_send(&self, socket: UdpSockRef<'_>, transmit: &Transmit<'_>) -> io::Result<()> {
+		send(socket, transmit)
+	}
 
-    /// Receives datagrams into `bufs`, filling one [`RecvMeta`] per message, and returns how many messages arrived.
-    pub fn recv(
-        &self,
-        socket: UdpSockRef<'_>,
-        bufs: &mut [IoSliceMut<'_>],
-        meta: &mut [RecvMeta],
-    ) -> io::Result<usize> {
-        // `wasi:sockets` has no vectored receive, and `BATCH_SIZE` is 1 regardless.
-        // Safety: `MaybeUninit<u8>` shares the layout of `u8`, and `recv_from` writes only
-        // the prefix it reports as filled.
-        let buf = unsafe { &mut *(&mut *bufs[0] as *mut [u8] as *mut [MaybeUninit<u8>]) };
-        let (len, addr) = socket.0.recv_from(buf)?;
-        meta[0] = RecvMeta {
-            len,
-            stride: len,
-            addr: addr.as_socket().unwrap(),
-            ecn: None,
-            dst_ip: None,
-            interface_index: None,
-            timestamp: None,
-        };
-        Ok(1)
-    }
+	/// Receives datagrams into `bufs`, filling one [`RecvMeta`] per message, and returns how many messages arrived.
+	pub fn recv(
+		&self,
+		socket: UdpSockRef<'_>,
+		bufs: &mut [IoSliceMut<'_>],
+		meta: &mut [RecvMeta],
+	) -> io::Result<usize> {
+		// `wasi:sockets` has no vectored receive, and `BATCH_SIZE` is 1 regardless.
+		// Safety: `MaybeUninit<u8>` shares the layout of `u8`, and `recv_from` writes only
+		// the prefix it reports as filled.
+		let buf = unsafe { &mut *(&mut *bufs[0] as *mut [u8] as *mut [MaybeUninit<u8>]) };
+		let (len, addr) = socket.0.recv_from(buf)?;
+		meta[0] = RecvMeta {
+			len,
+			stride: len,
+			addr: addr.as_socket().unwrap(),
+			ecn: None,
+			dst_ip: None,
+			interface_index: None,
+			timestamp: None,
+		};
+		Ok(1)
+	}
 
-    #[inline]
-    pub fn max_gso_segments(&self) -> usize {
-        1
-    }
+	#[inline]
+	pub fn max_gso_segments(&self) -> usize {
+		1
+	}
 
-    #[inline]
-    pub fn gro_segments(&self) -> usize {
-        1
-    }
+	#[inline]
+	pub fn gro_segments(&self) -> usize {
+		1
+	}
 
-    /// Resize the send buffer of `socket` to `bytes`
-    #[inline]
-    pub fn set_send_buffer_size(&self, socket: UdpSockRef<'_>, bytes: usize) -> io::Result<()> {
-        socket.0.set_send_buffer_size(bytes)
-    }
+	/// Resize the send buffer of `socket` to `bytes`
+	#[inline]
+	pub fn set_send_buffer_size(&self, socket: UdpSockRef<'_>, bytes: usize) -> io::Result<()> {
+		socket.0.set_send_buffer_size(bytes)
+	}
 
-    /// Resize the receive buffer of `socket` to `bytes`
-    #[inline]
-    pub fn set_recv_buffer_size(&self, socket: UdpSockRef<'_>, bytes: usize) -> io::Result<()> {
-        socket.0.set_recv_buffer_size(bytes)
-    }
+	/// Resize the receive buffer of `socket` to `bytes`
+	#[inline]
+	pub fn set_recv_buffer_size(&self, socket: UdpSockRef<'_>, bytes: usize) -> io::Result<()> {
+		socket.0.set_recv_buffer_size(bytes)
+	}
 
-    /// Get the size of the `socket` send buffer
-    #[inline]
-    pub fn send_buffer_size(&self, socket: UdpSockRef<'_>) -> io::Result<usize> {
-        socket.0.send_buffer_size()
-    }
+	/// Get the size of the `socket` send buffer
+	#[inline]
+	pub fn send_buffer_size(&self, socket: UdpSockRef<'_>) -> io::Result<usize> {
+		socket.0.send_buffer_size()
+	}
 
-    /// Get the size of the `socket` receive buffer
-    #[inline]
-    pub fn recv_buffer_size(&self, socket: UdpSockRef<'_>) -> io::Result<usize> {
-        socket.0.recv_buffer_size()
-    }
+	/// Get the size of the `socket` receive buffer
+	#[inline]
+	pub fn recv_buffer_size(&self, socket: UdpSockRef<'_>) -> io::Result<usize> {
+		socket.0.recv_buffer_size()
+	}
 
-    /// Whether transmitted datagrams might get fragmented by the IP layer
-    #[inline]
-    pub fn may_fragment(&self) -> bool {
-        true
-    }
+	/// Whether transmitted datagrams might get fragmented by the IP layer
+	#[inline]
+	pub fn may_fragment(&self) -> bool {
+		true
+	}
 }
 
 fn send(socket: UdpSockRef<'_>, transmit: &Transmit<'_>) -> io::Result<()> {
-    socket.0.send_to(
-        transmit.contents,
-        &socket2::SockAddr::from(transmit.destination),
-    )?;
-    Ok(())
+	socket
+		.0
+		.send_to(transmit.contents, &socket2::SockAddr::from(transmit.destination))?;
+	Ok(())
 }
 
 pub(crate) const BATCH_SIZE: usize = 1;

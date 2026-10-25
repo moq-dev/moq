@@ -322,8 +322,8 @@ func TestAudioConsumerDelay(t *testing.T) {
 	}
 }
 
-// FrameDurationUs is microseconds so Opus' 2.5 ms frame is expressible at all,
-// and a duration outside the Opus set is refused rather than silently rounded.
+// Opus' 2.5 ms frame reaches the encoder, and a duration outside the Opus set is
+// refused rather than silently rounded.
 func TestEncodeAudioFrameDurations(t *testing.T) {
 	broadcast, err := moq.NewBroadcastProducer()
 	if err != nil {
@@ -554,6 +554,11 @@ func TestFetchGroupAndServeDynamicMiss(t *testing.T) {
 	frame, err := fetched.ReadFrame(ctx)
 	if err != nil || frame == nil || string(frame.Payload) != "cached" {
 		t.Fatalf("cached fetch: frame=%+v err=%v", frame, err)
+	}
+
+	negative := -time.Millisecond
+	if _, err := consumer.FetchGroup(ctx, "events", 0, &moq.FetchGroupOptions{MaxDelay: &negative}); err == nil {
+		t.Fatal("a negative fetch max delay was accepted, want an error")
 	}
 
 	dynamic, err := track.Requests()

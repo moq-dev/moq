@@ -17,7 +17,7 @@ from moq_ffi import (
     MoqTrackRequests,
 )
 
-from ._records import _opt_from_us, _subscription, _track_info
+from ._records import _subscription, _track_info
 from ._stream import _Stream
 from .types import (
     AnnounceRoute,
@@ -226,7 +226,7 @@ class Fill:
     @property
     def max_delay(self) -> timedelta | None:
         """The most tolerant age budget among its readers, ``None`` for the publisher's max age alone."""
-        return _opt_from_us(self._inner.max_delay_us())
+        return self._inner.max_delay()
 
     @property
     def order(self) -> MoqOrder:

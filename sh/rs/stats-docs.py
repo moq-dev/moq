@@ -38,11 +38,11 @@ PAGES = {
 	"doc/lib/go/index.md": pascal,
 }
 
-# Python and Go own their stats record so microseconds read as a duration type,
-# which renames those fields.
+# The hand-written C ABI keeps its microsecond field, and the Go wrapper's own
+# stats record spells RTT as an initialism.
 RENAMED = {
-	"doc/lib/py/index.md": {"rtt_us": "rtt"},
-	"doc/lib/go/index.md": {"rtt_us": "RTT"},
+	"doc/lib/c/index.md": {"rtt": "rtt_us"},
+	"doc/lib/go/index.md": {"rtt": "RTT"},
 }
 
 

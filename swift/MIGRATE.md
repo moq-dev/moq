@@ -9,6 +9,14 @@ How to update your code for each breaking change, newest first.
 Rename `dynamic()` on `OriginProducer`, `BroadcastProducer`, `TrackProducer`, and `TrackRequest` to `requests()`.
 Their handles `OriginDynamic`, `BroadcastDynamic`, and `TrackDynamic` are `OriginRequests`, `BroadcastRequests`, and `TrackRequests`; their methods are unchanged.
 
+### Durations are `TimeInterval`
+
+Every duration is a `TimeInterval` in seconds instead of a `UInt64` `...Us` field, and drops the suffix: `Client(timeout:race:resolutionDelay:)`, `Backoff(initial:max:timeout:)`, `QuicConfig(idleTimeout:keepAlive:)`, `WebSocketConfig(delay:)`, `ConnectionStats.rtt`, `Grant.expires`, `TrackInfo.maxAge`, `Subscription.maxDelay`, `Fill.maxDelay`, `Audio.Consumer.delay`, and the decoder outputs' `maxDelay` and `delay`.
+Divide a microsecond value by 1,000,000. A negative interval traps.
+`AudioEncoderOutput.frameDuration` is optional: pass `nil` where you passed `frameDurationUs: 0` for the codec's own frame.
+`Subscription.maxDelay` has no default: pass `0` for the old one.
+`TrackConsumer.info()` no longer throws.
+
 ### Connection state
 
 `Client.connect(to:)` returns a connecting native session. Replace `status()`, `connects()`, and both `failure()` polls with `state()` and `stateChanged(after: state.revision)`. Use `ConnectionState.phase`, `connects`, `failure`, and `version`; `ConnectionPhase` replaces `ConnectionStatus`.

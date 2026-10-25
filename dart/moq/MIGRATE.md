@@ -9,6 +9,13 @@ How to update your code for each breaking change, newest first.
 Rename `dynamic_()` on `OriginProducer`, `BroadcastProducer`, `TrackProducer`, and `TrackRequest` to `requests()`.
 Their handles `OriginDynamic`, `BroadcastDynamic`, and `TrackDynamic` are `OriginRequests`, `BroadcastRequests`, and `TrackRequests`; their methods are unchanged.
 
+### Durations are `Duration` fields
+
+The records carry durations as `Duration` fields instead of `*Us` microsecond integers, so the duration extension getters are gone: read `backoff.initial`, `stats.rtt`, `grant.expires`, `info.maxAge`, `fill.maxDelay()`, and `consumer.delay()` directly.
+`audio.EncoderOutput.frameDuration` is nullable: pass null where you passed `frameDurationUs: 0` for the codec's own frame.
+`Subscription.maxDelay` has no default, so a `MoqSubscription()` that omits it gets no staleness limit instead of moq-net's 0: pass `Duration.zero` for the old default.
+A negative `Duration` throws `ArgumentError` wherever it crosses into the native library.
+
 ### Connection state
 
 `Moq.connect` returns a connecting native session. Replace status, connect-count, and failure polls with `session.state()` and `session.stateChanged(after: state.revision)`. `ConnectionState` carries `phase`, `connects`, `failure`, and `version`; `ConnectionPhase` replaces `ConnectionStatus`.

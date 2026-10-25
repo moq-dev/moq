@@ -9,6 +9,12 @@ How to update your code for each breaking change, newest first.
 Rename `Dynamic()` on `OriginProducer`, `BroadcastProducer`, `TrackProducer`, and `TrackRequest` to `Requests()`.
 Their handles `OriginDynamic`, `BroadcastDynamic`, and `TrackDynamic` are `OriginRequests`, `BroadcastRequests`, and `TrackRequests`; their methods are unchanged.
 
+### Durations cross as `time.Duration`
+
+The re-exported records carry `time.Duration` instead of microseconds: `FetchGroupOptions.MaxDelay`, `media.Audio.Jitter`, and the raw `AudioDecoderOutput.{MaxDelay, Delay}`, `AudioEncoderOutput.FrameDuration`, and `VideoDecoderOutput.MaxDelay`, each a `*time.Duration` where it was a `*uint64` `...Us` field.
+`TrackConsumer.Info()` returns only the `TrackInfo`, since it can no longer fail.
+A sub-microsecond `Backoff` duration now reaches the native side as given instead of flooring at 1us.
+
 ### Connection state
 
 `Dial` returns a connecting native client. Replace `Session.Status`, `Connects`, and `Failure` with `State()` and `StateChanged(ctx, state.Revision)`. `ConnectionState` carries `Phase`, `Connects`, `Failure`, and `Version`; `ConnectionPhase` replaces `ConnectionStatus`. Cancelling a state wait only cancels that wait. Cancel the session itself to stop its dial.
