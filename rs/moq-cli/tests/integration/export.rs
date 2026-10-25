@@ -90,7 +90,7 @@ struct Relay {
 async fn relay() -> Relay {
 	let _ = moq_tokio::crypto::install_default();
 	let mut config = moq_relay::Config::default();
-	config.drain_timeout = Duration::ZERO;
+	config.drain_timeout = Some(Duration::ZERO.into());
 	config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.listen.tls.generate = vec!["localhost".into()];
 	config.listen.version = std::iter::once(LITE_07.parse().unwrap())
@@ -253,8 +253,8 @@ fn import_with(relay: &Relay, global: &[&str]) -> (Child, JoinHandle<ChildStdin>
 /// [`import_with`] in `format`.
 fn import_as(relay: &Relay, global: &[&str], format: Format) -> (Child, JoinHandle<ChildStdin>) {
 	let mut child = moq(relay, global)
-		// A finished import lingers for its max-age; keep that short so the publisher exits promptly.
-		.args(["import", "--max-age", "1s", format.name])
+		// A finished import lingers; keep that short so the publisher exits promptly.
+		.args(["import", "--max-age", "1s", "--linger", "1s", format.name])
 		.stdin(Stdio::piped())
 		.spawn()
 		.expect("spawn import");
@@ -363,7 +363,7 @@ async fn an_export_failure_with_the_broadcast_up_exits_without_lingering() {
 	let export = export(&relay, "20s");
 
 	// TS cannot carry AV1, so the export fails on the catalog while the publisher stays up.
-	let mut publisher = moq(&relay, &["import", "--max-age", "1s", "fmp4"])
+	let mut publisher = moq(&relay, &["import", "--max-age", "1s", "--linger", "1s", "fmp4"])
 		.stdin(Stdio::piped())
 		.spawn()
 		.expect("spawn import");
@@ -627,7 +627,7 @@ async fn a_standby_before_its_tracks(global: &[&str], format: Format) {
 	second.output_past(0).await;
 
 	let mut standby = moq(&relay, publish)
-		.args(["import", "--max-age", "1s", format.name])
+		.args(["import", "--max-age", "1s", "--linger", "1s", format.name])
 		.stdin(Stdio::piped())
 		.stderr(Stdio::piped())
 		.spawn()
@@ -739,7 +739,7 @@ async fn an_old_publisher_that_stays_up_keeps_the_export() {
 /// it does once its input declares a track.
 async fn import_announced(relay: &Relay, format: Format) -> (Child, JoinHandle<ChildStdin>) {
 	let mut child = moq(relay, &[])
-		.args(["import", "--max-age", "1s", format.name])
+		.args(["import", "--max-age", "1s", "--linger", "1s", format.name])
 		.env("RUST_LOG", "warn,moq_net::lite::publisher=debug")
 		.stdin(Stdio::piped())
 		.stderr(Stdio::piped())
@@ -861,7 +861,7 @@ fn redundant_import(relay: &Relay, feed: &tokio::sync::mpsc::UnboundedSender<Chi
 		"500ms",
 	];
 	let mut child = moq(relay, &global)
-		.args(["import", "--max-age", "10s", "ts"])
+		.args(["import", "--max-age", "10s", "--linger", "10s", "ts"])
 		.args(flags)
 		.stdin(Stdio::piped())
 		.spawn()

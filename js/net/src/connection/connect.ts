@@ -1,9 +1,12 @@
 import { Elapsed, Milli, Nano, sleep, timeout } from "@moq/clock";
 import Session, { type Version as QmuxVersion } from "@moq/qmux";
 import { race } from "@moq/signals";
+import type * as Auth from "../auth.ts";
+import { vacant } from "../auth_session.ts";
 import { ConnectTimeout, error, fromClose, ProtocolViolation, sessionCause } from "../error.ts";
 import * as Ietf from "../ietf/index.ts";
 import * as Message from "../ietf/message.ts";
+import { IMPLEMENTATION } from "../implementation.ts";
 import * as Lite from "../lite/index.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../origin.ts";
 import { Stream } from "../stream.ts";
@@ -14,7 +17,7 @@ import { isWebTransportSupported } from "./browser.ts";
 import type { Established } from "./established.ts";
 import * as Extensions from "./extensions.ts";
 import { DISCOVERY_REMOVED, forwardAnnounced } from "./forward.ts";
-import { exchangeSetup } from "./handshake.ts";
+import { exchangeSetup, legacyPeerImplementation } from "./handshake.ts";
 
 // Default head start for WebTransport before attempting the WebSocket fallback.
 const DEFAULT_WEBSOCKET_DELAY_MS = Milli(500);
@@ -222,6 +225,22 @@ export interface ConnectProps {
 	extensions?: Extensions.Extensions;
 
 	/**
+	 * Build the session on `auth`, so it presents every token the handle holds and a route
+	 * naming one of its `Auth`s keeps it across a reconnect. Omit to give the session a handle
+	 * of its own, which ends with it.
+	 *
+	 * The handle backs one active session at a time, plus the ones draining after a GOAWAY:
+	 * connecting another while one is still active rejects with {@link Auth.Duplicate}.
+	 */
+	auth?: Auth.Handle;
+
+	/**
+	 * The implementation this side advertises in SETUP. Defaults to {@link IMPLEMENTATION};
+	 * a wrapper prepends its own token, like `my-app/1.0 moq-net-js/0.4.2`. Empty sends nothing.
+	 */
+	implementation?: string;
+
+	/**
 	 * Maximum time for one connect, covering the dial and the MoQ handshake, which has no
 	 * deadline of its own (default: 30000ms). `0` waits forever. Past it, the connect rejects
 	 * with {@link ConnectTimeout} and closes whatever it had opened.
@@ -239,10 +258,14 @@ export interface ConnectProps {
 /** The per-session wiring shared by every negotiated protocol path. */
 type SessionProps = {
 	publish?: OriginConsumer;
+	/** The auth handle the session is built on, or undefined for one of its own. */
+	handle?: Auth.Handle;
 	/** Whether this side dialed; only the dialing side aborts on a publication its grant does not cover. */
 	client: boolean;
 	/** The moq-transport extensions this side offers. */
 	extensions: Extensions.Offered;
+	/** The implementation this side advertises in SETUP; empty sends nothing. */
+	implementation: string;
 };
 
 // Save if WebSocket won the last race, so we won't give QUIC a head start next time.
@@ -264,6 +287,8 @@ export async function connect({ url, ...props }: ConnectProps): Promise<Establis
 	if (props.transport && props.versions) throw new TypeError("versions cannot reconfigure a supplied transport");
 	const signal = props.signal ?? NEVER_ABORTED;
 	signal.throwIfAborted();
+	// Fail before dialing; the session checks again when it attaches.
+	if (props.auth) vacant(props.auth);
 	const limit = props.timeout ?? DEFAULT_TIMEOUT;
 	// Checked before anything is armed, so an invalid value throws here, in the caller's unit.
 	const deadline = Nano.fromMilli(Milli(limit));
@@ -316,8 +341,10 @@ async function connectInner(raw: URL, props: Omit<ConnectProps, "url">, abort: P
 	const url = dialable(raw);
 	const wiring: SessionProps = {
 		publish: props.publish,
+		handle: props.auth,
 		client: true,
 		extensions: Extensions.offered(props.extensions),
+		implementation: props.implementation ?? IMPLEMENTATION,
 	};
 
 	const offered = offer(props.versions);
@@ -480,11 +507,9 @@ async function negotiate(
 
 	const stream = await Stream.open(session, { version: setupVersion });
 
-	const encoder = new TextEncoder();
-
 	const params = new Ietf.SetupOptions();
 	params.setVarint(Ietf.SetupOption.MaxRequestId, Ietf.initialMaxRequestId(false));
-	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode("moq-lite-js"));
+	Ietf.implementationIntoSetup(params, wiring.implementation);
 	Extensions.intoSetup(params, wiring.extensions, setupVersion);
 	Ietf.hiddenIntoSetup(params);
 	Ietf.maxAgeIntoSetup(params);
@@ -532,6 +557,7 @@ async function negotiate(
 			hidden: Ietf.hiddenFromSetup(server.parameters),
 			maxAge: Ietf.maxAgeFromSetup(server.parameters),
 			activeCount: Ietf.activeCountFromSetup(server.parameters, server.version as Ietf.IetfVersion),
+			peerImplementation: legacyPeerImplementation(session, server.parameters),
 		});
 	} else {
 		throw new Error(`unsupported server version: ${server.version.toString()}`);
@@ -552,7 +578,7 @@ async function handshakeAlpn(
 	// The IETF session code loads on demand, since most sessions negotiate lite; the ALPN already
 	// committed to IETF, so fetch it alongside SETUP.
 	const [setup, { Connection }] = await Promise.all([
-		exchangeSetup(session, version, "moq-lite-js", wiring),
+		exchangeSetup(session, version, wiring.implementation, wiring),
 		import("../ietf/connection.ts"),
 	]);
 

@@ -445,11 +445,11 @@ fn encode_hops(w: &mut Encoder<'_>, version: Version, hops: &Hops) -> Result<(),
 pub struct AnnounceRequest<'a> {
 	// Request tracks with this prefix.
 	pub prefix: Path<'a>,
-	// Lite04/05 only: if non-zero, the publisher SHOULD skip announces whose hop IDs
+	// Lite04/05 only: unless unknown, the publisher SHOULD skip announces whose hop IDs
 	// contain this value. Not on the wire elsewhere, so the value set here is ignored
-	// when encoding for another version and decodes as zero; lite-06 carries the
+	// when encoding for another version and decodes as unknown; lite-06 carries the
 	// identity session-wide in the SETUP Hop parameter instead.
-	pub exclude_hop: u64,
+	pub exclude_hop: Hop,
 	// Lite07+: also announce routes with a `.`-prefixed segment below the prefix.
 	// Not on the wire earlier, so the value set here is ignored when encoding for an
 	// older version and decodes as false.
@@ -461,8 +461,8 @@ impl Message for AnnounceRequest<'_> {
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let prefix = Path::decode(r, version)?;
 		let exclude_hop = match version.has_exclude_hop() {
-			true => r.varint()?,
-			false => 0,
+			true => Hop::decode(r, version)?,
+			false => Hop::UNKNOWN,
 		};
 		let hidden = match version.has_hidden() {
 			true => r.bool()?,
@@ -478,7 +478,7 @@ impl Message for AnnounceRequest<'_> {
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		self.prefix.encode(w, version)?;
 		if version.has_exclude_hop() {
-			w.varint(self.exclude_hop)?;
+			self.exclude_hop.encode(w, version)?;
 		}
 		if version.has_hidden() {
 			w.bool(self.hidden);
@@ -1062,7 +1062,7 @@ mod tests {
 		for hidden in [false, true] {
 			let msg = AnnounceRequest {
 				prefix: Path::new("room/"),
-				exclude_hop: 0,
+				exclude_hop: Hop::UNKNOWN,
 				hidden,
 			};
 			assert_eq!(request_round_trip(&msg, Version::Lite07).hidden, hidden);
@@ -1092,10 +1092,10 @@ mod tests {
 	fn announce_request_carries_exclude_hop_on_lite05() {
 		let msg = AnnounceRequest {
 			prefix: Path::new("room/"),
-			exclude_hop: 42,
+			exclude_hop: Hop::new(42).unwrap(),
 			hidden: false,
 		};
-		assert_eq!(request_round_trip(&msg, Version::Lite05).exclude_hop, 42);
+		assert_eq!(request_round_trip(&msg, Version::Lite05).exclude_hop.id(), 42);
 	}
 
 	// Lite06 dropped the field: the receiver's reflected-announce check catches the same
@@ -1104,10 +1104,10 @@ mod tests {
 	fn announce_request_drops_exclude_hop_on_lite06() {
 		let msg = AnnounceRequest {
 			prefix: Path::new("room/"),
-			exclude_hop: 42,
+			exclude_hop: Hop::new(42).unwrap(),
 			hidden: false,
 		};
-		assert_eq!(request_round_trip(&msg, Version::Lite06).exclude_hop, 0);
+		assert_eq!(request_round_trip(&msg, Version::Lite06).exclude_hop, Hop::UNKNOWN);
 
 		// And it costs nothing on the wire: the body is just the prefix.
 		let mut with = Vec::new();

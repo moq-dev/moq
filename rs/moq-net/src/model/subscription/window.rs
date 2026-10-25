@@ -118,6 +118,8 @@ pub(in crate::model) struct Window {
 	spans: Vec<Span>,
 	/// The groups the spans cover, an unsettled time end through its cap.
 	groups: RangeInclusiveSet<u64>,
+	/// The part of `groups` a miss may ask for: see [`Self::missable`].
+	missable: RangeInclusiveSet<u64>,
 	/// A relative anchor waits on a first group, so nothing is filtered yet.
 	pending: bool,
 	/// Nothing is left to resolve: see [`Self::is_settled`]. Kept so a read checks it once
@@ -134,6 +136,9 @@ struct Span {
 	end: End,
 	/// Whether the start names a group, rather than reaching back to the oldest one.
 	floored: bool,
+	/// The lowest group a miss asks for. A time start before every group held asks none
+	/// below the oldest: which of them it reaches is unknown until they start.
+	reach: u64,
 }
 
 impl Span {
@@ -324,6 +329,7 @@ impl Window {
 			ranges: ranges.to_vec(),
 			spans: Vec::new(),
 			groups: RangeInclusiveSet::new(),
+			missable: RangeInclusiveSet::new(),
 			pending: false,
 			settled: false,
 		};
@@ -483,9 +489,23 @@ impl Window {
 
 	/// The groups in range from `from` on, lowest first.
 	pub fn runs(&self, from: u64) -> impl Iterator<Item = ops::RangeInclusive<u64>> + '_ {
+		self.from(&self.groups, from)
+	}
+
+	/// The groups in range from `from` on that a miss may ask for, lowest first: all of
+	/// them but those below the oldest group held when a time start fell before it.
+	pub fn missable(&self, from: u64) -> impl Iterator<Item = ops::RangeInclusive<u64>> + '_ {
+		self.from(&self.missable, from)
+	}
+
+	fn from<'a>(
+		&'a self,
+		groups: &'a RangeInclusiveSet<u64>,
+		from: u64,
+	) -> impl Iterator<Item = ops::RangeInclusive<u64>> + 'a {
 		let all = self.pending.then_some(from..=u64::MAX);
 		let runs = (!self.pending).then(|| {
-			self.groups
+			groups
 				.overlapping(from..=u64::MAX)
 				.map(move |run| (*run.start()).max(from)..=*run.end())
 		});
@@ -512,6 +532,17 @@ impl Window {
 			});
 		}
 		hull.unwrap_or((0, None))
+	}
+
+	/// The groups some range starts inside, past their frame 0, that are read from there.
+	pub fn partial_starts(&self) -> impl Iterator<Item = u64> + '_ {
+		self.ranges
+			.iter()
+			.filter_map(|range| match range.start {
+				Anchor::Absolute(start) if start.frame > 0 => Some(start.group),
+				_ => None,
+			})
+			.filter(|group| self.frames(*group).0 > 0)
 	}
 
 	/// The first run of `range` that is in range.
@@ -556,11 +587,16 @@ impl Window {
 				}
 				end => end,
 			};
+			let reach = match range.start {
+				Anchor::Time(_) if !floored => holdings.next_start(0).map_or(start, |(oldest, _)| oldest),
+				_ => start,
+			};
 			self.spans.push(Span {
 				index,
 				start,
 				end,
 				floored,
+				reach,
 			});
 		}
 		self.rebuild();
@@ -570,6 +606,7 @@ impl Window {
 	fn rebuild(&mut self) {
 		self.settled = !self.pending && !self.spans.iter().any(|span| matches!(span.end, End::Time(_)));
 		self.groups = RangeInclusiveSet::new();
+		self.missable = RangeInclusiveSet::new();
 		for span in &self.spans {
 			let last = match span.limit() {
 				Some(end) => match end.checked_sub(1) {
@@ -579,6 +616,9 @@ impl Window {
 				None => u64::MAX,
 			};
 			self.groups.insert(span.start..=last);
+			if span.reach <= last {
+				self.missable.insert(span.reach..=last);
+			}
 		}
 	}
 }

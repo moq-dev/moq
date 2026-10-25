@@ -19,7 +19,7 @@ async fn budget(track: &mut track::Producer, millis: u64, version: Version) {
 		loop {
 			if track
 				.subscription()
-				.is_some_and(|subscription| subscription.max_delay == Duration::from_millis(millis))
+				.is_some_and(|subscription| subscription.max_delay == Some(Duration::from_millis(millis)))
 			{
 				return;
 			}

@@ -318,6 +318,12 @@ impl Invocation {
 			{
 				anyhow::bail!("--report names a track in the catalog the import builds, but {reason}");
 			}
+			if let Command::Import(import) = command
+				&& import.linger.is_some()
+				&& let Some(reason) = import.source.linger_refusal()
+			{
+				anyhow::bail!("--linger keeps a cleanly ended broadcast up, but {reason}");
+			}
 			let Command::Export(export) = command else {
 				continue;
 			};
@@ -745,10 +751,19 @@ pub struct Import {
 	/// wait for a late group). The default suits a segmented egress (HLS/DASH), which may only
 	/// advertise segments that are still fetchable; lower it when nothing reads history and the
 	/// memory matters. Media tracks only -- the catalog and timeline are read at the live edge,
-	/// which is retained unconditionally. A stdin import also stays up this long after EOF, so
-	/// a subscriber still catching up can drain the finished broadcast.
+	/// which is retained unconditionally.
 	#[usage(long)]
 	pub max_age: Option<moq_tokio::cli::Duration>,
+
+	/// How long a cleanly ended broadcast stays up, counted from its end, e.g. "30s"; "0s"
+	/// closes it at once. Defaults to 30s.
+	///
+	/// Subscribers already reading get the tail either way; this serves one that arrives after
+	/// the end, such as a player that read the final catalog late. A clean end is stdin EOF, an
+	/// RTMP unpublish or completed play, the end of an SRT stream, a WHIP `DELETE`, or an HLS
+	/// playlist's `EXT-X-ENDLIST`. A failure, and Ctrl-C, close the broadcast at once.
+	#[usage(long)]
+	pub linger: Option<moq_tokio::cli::Duration>,
 
 	/// The released spelling of [`Self::max_age`].
 	#[usage(long = "latency-max", hide = true)]
@@ -839,6 +854,28 @@ impl ImportSource {
 			#[cfg(feature = "capture")]
 			Self::Capture(_) => Some("`import capture` encodes, and its encoders do not count yet"),
 			Self::Avc3 | Self::Fmp4(_) | Self::Ts(_) | Self::Flv => None,
+		}
+	}
+
+	/// Why `--linger` can't apply to this source, or `None` when it can: only a source with a
+	/// clean end has a finished broadcast to keep up.
+	fn linger_refusal(&self) -> Option<&'static str> {
+		match self {
+			// Every run is followed by a redial publishing the next one, so a run's end is not
+			// the end of the content, and its finished catalog would tell readers to stop.
+			Self::Rtsp(_) => Some("`import rtsp` redials after every session, so a run's end is not the content's"),
+			Self::Rtc(rtc) if rtc.connect.is_some() => Some("a WHEP pull has no clean end"),
+			Self::Archive(_) => Some("`import archive` serves its recording until stopped"),
+			#[cfg(feature = "capture")]
+			Self::Capture(_) => Some("`import capture` has no clean end"),
+			Self::Avc3
+			| Self::Fmp4(_)
+			| Self::Ts(_)
+			| Self::Flv
+			| Self::Hls(_)
+			| Self::Rtmp(_)
+			| Self::Srt(_)
+			| Self::Rtc(_) => None,
 		}
 	}
 }

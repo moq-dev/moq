@@ -1,7 +1,17 @@
 import { Failure } from "./failure.ts";
-import { KEY_LABEL, MAX_BYTES, MAX_U32, NAME_LABEL, NAME_LEN, PATH_LABEL } from "./limits.ts";
+import {
+	KEY_LABEL,
+	MAX_BYTES,
+	MAX_U32,
+	NAME_BLOCK,
+	NAME_KEY_LABEL,
+	NAME_MAC_LABEL,
+	NAME_NONCE_LEN,
+	PATH_LABEL,
+	TAG_LEN,
+} from "./limits.ts";
 
-/** An opaque physical track name: 22 unpadded base64url characters derived from a semantic name. */
+/** An opaque physical track name: unpadded base64url of a semantic name sealed under its generation. */
 export type Name = string & { readonly _brand: "e2ee-name" };
 
 /** Grouped-frame versus datagram key domain. */
@@ -23,6 +33,17 @@ export function checkU53(value: number): void {
 /** Refuse a frame that is not an integer in `0..=2^32-1`. */
 function checkU32(value: number): void {
 	if (!Number.isInteger(value) || value < 0 || value > MAX_U32) throw new Failure("identity");
+}
+
+/**
+ * The UTF-8 bytes of `text`, refusing a lone surrogate with {@link Failure} `identity`.
+ *
+ * `TextEncoder` maps a lone surrogate to U+FFFD, so two distinct strings would share one name
+ * and one payload key while claims and budgets, keyed by string, told them apart.
+ */
+export function utf8(text: string): Uint8Array<ArrayBuffer> {
+	if (!text.isWellFormed()) throw new Failure("identity");
+	return encoder.encode(text);
 }
 
 /** Refuse a `bytes` field longer than 65535 bytes. */
@@ -48,7 +69,7 @@ class Info {
 	}
 
 	text(text: string): this {
-		return this.bytes(encoder.encode(text));
+		return this.bytes(utf8(text));
 	}
 
 	u64(value: number): this {
@@ -86,20 +107,49 @@ export function pathInfo(context: Uint8Array, kid: number, semantic: string): Ui
 	return new Info().label(PATH_LABEL).bytes(context).u64(kid).text(semantic).finish();
 }
 
-/** `"moq-e2ee-00 name" || bytes(context) || bytes(epoch) || u64(kid) || bytes(semantic)`. */
-export function nameInfo(context: Uint8Array, epoch: string, kid: number, semantic: string): Uint8Array<ArrayBuffer> {
-	return new Info().label(NAME_LABEL).bytes(context).text(epoch).u64(kid).text(semantic).finish();
+/** `"moq-e2ee-00 name-mac" || bytes(context) || bytes(epoch) || u64(kid)`. */
+export function nameMacInfo(context: Uint8Array, epoch: string, kid: number): Uint8Array<ArrayBuffer> {
+	return new Info().label(NAME_MAC_LABEL).bytes(context).text(epoch).u64(kid).finish();
 }
 
-/** `"moq-e2ee-00 key" || bytes(context) || bytes(epoch) || u64(kid) || bytes(name) || domain`. */
+/** `"moq-e2ee-00 name-key" || bytes(context) || bytes(epoch) || u64(kid)`. */
+export function nameKeyInfo(context: Uint8Array, epoch: string, kid: number): Uint8Array<ArrayBuffer> {
+	return new Info().label(NAME_KEY_LABEL).bytes(context).text(epoch).u64(kid).finish();
+}
+
+/** `"moq-e2ee-00 key" || bytes(context) || bytes(epoch) || u64(kid) || bytes(semantic) || domain`. */
 export function keyInfo(
 	context: Uint8Array,
 	epoch: string,
 	kid: number,
-	name: Name,
+	semantic: string,
 	domain: Domain,
 ): Uint8Array<ArrayBuffer> {
-	return new Info().label(KEY_LABEL).bytes(context).text(epoch).u64(kid).text(name).u8(domain).finish();
+	return new Info().label(KEY_LABEL).bytes(context).text(epoch).u64(kid).text(semantic).u8(domain).finish();
+}
+
+/** `semantic || 0x80 || 0x00...`, with the fewest zeros that reach a multiple of 16 bytes. */
+export function pad(semantic: string): Uint8Array<ArrayBuffer> {
+	const bytes = utf8(semantic);
+	checkBytes(bytes.byteLength);
+	const out = new Uint8Array((Math.floor(bytes.byteLength / NAME_BLOCK) + 1) * NAME_BLOCK);
+	out.set(bytes);
+	out[bytes.byteLength] = 0x80;
+	return out;
+}
+
+const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+
+/** Strip canonical padding and decode UTF-8; anything else is {@link Failure} `authentication`. */
+export function unpad(padded: Uint8Array): string {
+	let end = padded.byteLength - 1;
+	while (end >= 0 && padded[end] === 0) end--;
+	if (end < 0 || padded[end] !== 0x80 || padded.byteLength - end > NAME_BLOCK) throw new Failure("authentication");
+	try {
+		return decoder.decode(padded.subarray(0, end));
+	} catch {
+		throw new Failure("authentication");
+	}
 }
 
 /** 96-bit AES-GCM nonce: `u64(group) || u32(frame)`. */
@@ -114,18 +164,40 @@ export function nonce(group: number, frame: number): Uint8Array<ArrayBuffer> {
 	return out;
 }
 
-/** Encode 16 bytes of HKDF output as unpadded base64url. */
-export function encode(material: Uint8Array): Name {
-	if (material.byteLength !== NAME_LEN) throw new Failure("identity");
-	const text = btoa(String.fromCharCode(...material));
-	return text.replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "") as Name;
+/** Encode bytes as unpadded base64url. */
+export function encode(material: Uint8Array): string {
+	// Per byte rather than spread: a long name would overflow the argument limit.
+	let binary = "";
+	for (const byte of material) binary += String.fromCharCode(byte);
+	return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
 }
 
-// 21 free characters, then one whose low four bits are zero: exactly 16 bytes, canonical.
-const NAME = /^[A-Za-z0-9_-]{21}[AQgw]$/;
+const BASE64URL = /^[A-Za-z0-9_-]*$/;
 
-/** Accept a name learned from a track or a decrypted catalog. */
+/**
+ * Decode a physical name, checking syntax only: only its generation can open it.
+ *
+ * Throws {@link Failure} `identity` unless `name` is canonical unpadded base64url decoding to a
+ * 12-byte nonce, a whole number of 16-byte blocks, and a 16-byte tag.
+ */
+export function decode(name: string): Uint8Array<ArrayBuffer> {
+	if (!BASE64URL.test(name)) throw new Failure("identity");
+	let binary: string;
+	try {
+		binary = atob(name.replaceAll("-", "+").replaceAll("_", "/"));
+	} catch {
+		throw new Failure("identity");
+	}
+	const material = Uint8Array.from(binary, (c) => c.charCodeAt(0));
+	// Refuses nonzero trailing bits, so each name has one spelling.
+	if (encode(material) !== name) throw new Failure("identity");
+	const padded = material.byteLength - NAME_NONCE_LEN - TAG_LEN;
+	if (padded < NAME_BLOCK || padded % NAME_BLOCK !== 0) throw new Failure("identity");
+	return material;
+}
+
+/** Accept a physical name learned from a track request; see {@link decode}. */
 export function parse(name: string): Name {
-	if (!NAME.test(name)) throw new Failure("identity");
+	decode(name);
 	return name as Name;
 }

@@ -31,6 +31,11 @@ const VIDEO_US: u64 = 40_000;
 const AUDIO_US: u64 = 21_333;
 /// Video frames per group: 600 ms.
 const GOP: u64 = 15;
+/// A B-pyramid group in decode order (`max_num_reorder_frames` 2): each frame's place in
+/// presentation order.
+const PYRAMID: [u64; GOP as usize] = [0, 4, 2, 1, 3, 8, 6, 5, 7, 12, 10, 9, 11, 14, 13];
+/// How many frames after its tick a B-pyramid frame is presented: its decode delay.
+const PYRAMID_DELAY: u64 = 2;
 /// Audio frames per group, roughly matching the video group duration.
 const AUDIO_GROUP: u64 = 28;
 
@@ -77,6 +82,8 @@ struct Live {
 	/// negative sends the video later. A TS source sends video well ahead of its decode time
 	/// and audio just in time, so its audio lags.
 	audio_lag: i64,
+	/// Video is a B-pyramid: see [`Self::reorder`].
+	reorder: bool,
 	start: Instant,
 	tick: u64,
 	audio_index: u64,
@@ -139,6 +146,7 @@ impl Live {
 			scale,
 			rate: MUX_RATE,
 			audio_lag,
+			reorder: false,
 			start: moq_clock::now(),
 			tick: 0,
 			audio_index: 0,
@@ -168,6 +176,23 @@ impl Live {
 		for config in catalog.video.renditions.values_mut() {
 			config.jitter = Some(jitter);
 		}
+	}
+
+	/// Send video as a B-pyramid in decode order, each frame [`PYRAMID_DELAY`] frames after its
+	/// tick, under an SPS that declares the depth, and declare that depth in the catalog, so each
+	/// group decodes on its own.
+	fn reorder(&mut self) {
+		use crate::codec::h264::fixtures::{PPS as PYRAMID_PPS, SPS_PYRAMID};
+
+		let description =
+			crate::codec::h264::build_avcc(&[Bytes::from_static(SPS_PYRAMID)], &[Bytes::from_static(PYRAMID_PPS)])
+				.unwrap();
+		let mut catalog = self.catalog.modify().unwrap();
+		for config in catalog.video.renditions.values_mut() {
+			config.description = Some(description.clone());
+			config.reorder = Some(2);
+		}
+		self.reorder = true;
 	}
 
 	/// Send nothing for `gap`, as a publisher that died, then resume at the live edge on the
@@ -231,12 +256,16 @@ impl Live {
 					} else {
 						vec![0x41u8; 400]
 					};
+					let presented = match self.reorder {
+						true => (tick - tick % GOP + PYRAMID[(tick % GOP) as usize] + PYRAMID_DELAY) * VIDEO_US,
+						false => video,
+					};
 					let group = self.group.as_mut().expect("the first tick is a keyframe");
 					HangContainer::Legacy(crate::container::Kind::Video)
 						.write(
 							group,
 							&[Frame {
-								timestamp: Timestamp::from_micros(video).unwrap(),
+								timestamp: Timestamp::from_micros(presented).unwrap(),
 								duration: None,
 								payload: length_prefixed(&[&slice]),
 								keyframe,
@@ -942,6 +971,53 @@ async fn live_audio_shares_its_pes() {
 		for pair in audio.windows(2) {
 			let frames = ((pair[1] - pair[0]) as f64 / at90(AUDIO_US) as f64).round() as u64;
 			assert!(matches!(frames, 12 | 7), "lag {lag}: a PES carried {frames} frames");
+		}
+	}
+}
+
+/// Each video frame's DTS (else PTS) by its PTS, in 90 kHz ticks, as a leg rendered it.
+fn decode_times(leg: &Leg) -> std::collections::BTreeMap<u64, u64> {
+	let bytes: Vec<u8> = leg
+		.out
+		.iter()
+		.flat_map(|(_, frame)| frame.payload.iter().copied())
+		.collect();
+	let mut reader = TsPacketReader::new(Cursor::new(bytes));
+	let mut out = std::collections::BTreeMap::new();
+	while let Some(packet) = reader.read_ts_packet().unwrap() {
+		if let Some(TsPayload::PesStart(pes)) = &packet.payload
+			&& packet.header.pid.as_u16() == VIDEO_PID
+			&& let Some(pts) = pes.header.pts
+		{
+			out.insert(pts.as_u64(), pes.header.dts.unwrap_or(pts).as_u64());
+		}
+	}
+	out
+}
+
+/// Legs that joined at different groups, one after reading a group cut short below a frame it
+/// never received, author the same DTS for every frame both render once the rendition declares
+/// its reorder depth: each group decodes from its own frames alone.
+#[tokio::test(start_paused = true)]
+async fn declared_legs_author_the_same_dts() {
+	let stall = |tick: u64| (2 * GOP + 8..3 * GOP).contains(&tick);
+	for join in [JOIN, 4 * GOP + 2] {
+		let mut live = Live::new(1.0, 0).await;
+		live.reorder();
+		let mut a = live.join(Duration::ZERO).await;
+		live.run(join, &mut [&mut a], stall).await;
+		let mut b = live.join(Duration::from_millis(100)).await;
+		live.run(12 * GOP, &mut [&mut a, &mut b], stall).await;
+		live.finish(&mut [&mut a, &mut b]).await;
+		let (a, b) = (decode_times(&a), decode_times(&b));
+		let shared: Vec<_> = b.iter().filter(|(pts, _)| a.contains_key(pts)).collect();
+		assert!(
+			shared.len() > 6 * GOP as usize,
+			"join {join}: {} shared frames",
+			shared.len()
+		);
+		for (pts, dts) in shared {
+			assert_eq!(a[pts], *dts, "join {join}: the frame presented at {pts}");
 		}
 	}
 }

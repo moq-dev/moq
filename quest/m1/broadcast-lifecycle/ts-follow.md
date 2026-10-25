@@ -5,8 +5,8 @@
 `moq export ts --linger` and `moq export srt --linger` become `--follow
 <duration>`: how long to wait for the publisher, or with `--stitch` a
 replacement, to come back. The default 0 means don't follow. The Rust
-`container::ts::Follower::with_linger` and moq-srt's `Subscribe::with_linger`
-and `Client::with_linger` become `with_follow`. A replacement's first catalog
+`container::ts::Follower::with_linger` becomes `with_follow`, matching
+moq-srt's `Subscribe::with_follow` and `Client::with_follow`. A replacement's first catalog
 is awaited until it arrives or the replacement withdraws, with no deadline of
 its own. A track failure is classified by its cause, not by waiting
 `CLOSE_GRACE` (1s) to see whether the announcement also goes.
@@ -28,13 +28,12 @@ Decided with the maintainer on 2026-10-23:
   (`rs/moq-cli/src/args.rs`) keeps refusing; point its message at `--follow`
   only where following applies.
 - Move the follower onto `moq_mux::follow::Instances` here (decided
-  2026-10-24), as [readers follow restarts](/quest/m1/sink-restart-follow.md)
-  did for `moq play`, `moqsrc`, and `transcode`. `with_linger` waits from the
+  2026-10-24), as `moq play`, `moqsrc`, and `transcode` already do. `with_linger` waits from the
   announcement through resolution and the first catalog, but `Instances`
   yields `Start` only after resolution, so settle what `--follow` bounds
-  before moving the timer onto it. Coordinate the name with that quest.
+  before moving the timer onto it.
 - Docs: `doc/bin/cli.md`, plus a migration note for moq-cli, moq-mux, and
   moq-srt in the Impact bullet.
 
-Public API: moq-mux and moq-srt renames (breaking); moq-cli flag rename.
+Public API: moq-mux rename (breaking); moq-cli flag rename.
 Wire: none unless the failure cause needs a new code.

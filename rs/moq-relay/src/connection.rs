@@ -146,6 +146,7 @@ impl<R: Incoming> Connection<R> {
 		};
 		let serving = lifecycle.shutdown.serve();
 		// Bounded too: a peer that stalls the SETUP reply must not outlive the relay.
+		// Abandoning the reply refuses the session with the timeout code, which its stats count.
 		let (session, driver) = lifecycle
 			.shutdown
 			.until_deadline(request.ok())
@@ -169,7 +170,8 @@ fn span(id: u64, remote: Option<std::net::SocketAddr>) -> tracing::Span {
 		"conn",
 		id,
 		remote = remote.map(tracing::field::display),
-		session = tracing::field::Empty
+		session = tracing::field::Empty,
+		implementation = tracing::field::Empty
 	)
 }
 
@@ -276,6 +278,11 @@ impl Lifecycle {
 		request: moq_auth::Request,
 	) -> Result<(cluster::Admitted, Option<crate::session::Registration>), StatusError> {
 		self.span.record("session", &request.id);
+		// Peer-controlled, so recorded escaped rather than displayed raw.
+		if let Some(implementation) = &request.implementation {
+			self.span
+				.record("implementation", tracing::field::debug(implementation));
+		}
 		let admitted = self.shutdown.admit(self.authorize(request)).await;
 		// Cluster admission records its own refusals; LAN and drain refusals are recorded here.
 		if let Err(err) = &admitted

@@ -53,7 +53,7 @@ async fn main() -> anyhow::Result<()> {
 		.kill_on_drop(true)
 		.spawn()?;
 	let mut output = tokio::io::BufReader::new(child.stdout.take().context("child stdout")?).lines();
-	let (session, driver) = first.accept().await.context("first accept")?.ok().await?;
+	let session = first.accept().await.context("first accept")?.ok().await?;
 	ensure!(session.version() == version, "wrong first negotiated version");
 	let mut demand = track.demand();
 	while demand.wanted_changed().await?.is_none() {}
@@ -64,7 +64,7 @@ async fn main() -> anyhow::Result<()> {
 		"JS did not read first group"
 	);
 	session.drain().send(moq_net::goaway::Goaway::redirect(&second_url))?;
-	let (replacement, replacement_driver) = second.accept().await.context("replacement accept")?.ok().await?;
+	let replacement = second.accept().await.context("replacement accept")?.ok().await?;
 	ensure!(replacement.version() == version, "wrong replacement negotiated version");
 	// First exercise the replacement while the drained route still serves. A JS
 	// acknowledgement of its namespace proves more than the SETUP handshake.
@@ -75,7 +75,7 @@ async fn main() -> anyhow::Result<()> {
 	);
 	// Only the replacement can deliver the next group after this transport is cut.
 	session.abort(moq_net::Error::Cancel);
-	let _ = driver.await?;
+	let _ = session.closed().await;
 	if legacy {
 		ensure!(
 			output.next_line().await?.as_deref() == Some("resubscribed"),
@@ -89,7 +89,7 @@ async fn main() -> anyhow::Result<()> {
 	);
 	ensure!(child.wait().await?.success(), "JS client failed");
 	replacement.abort(moq_net::Error::Cancel);
-	let _ = replacement_driver.await?;
+	let _ = replacement.closed().await;
 	eprintln!("goaway redirect resumed {version}");
 	Ok(())
 }

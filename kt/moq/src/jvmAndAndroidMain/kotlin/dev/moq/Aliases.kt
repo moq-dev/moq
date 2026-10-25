@@ -81,14 +81,14 @@ typealias BroadcastFinish = uniffi.moq.MoqBroadcastFinish
 typealias TrackProducer = uniffi.moq.MoqTrackProducer
 /** A subscriber-requested track not yet accepted: accept it for a [TrackProducer] or abort it. */
 typealias TrackRequest = uniffi.moq.MoqTrackRequest
-/** A stream of uncached group requests for one track, for serving fetches on demand. */
+/** A stream of the fills readers of one track need: runs of groups the cache lacks. */
 typealias TrackDynamic = uniffi.moq.MoqTrackDynamic
 /** A watch-only handle to whether a published track has subscribers; holding it keeps nothing open. */
 typealias TrackDemand = uniffi.moq.MoqTrackDemand
 /** The read side of a raw track: yields groups in sequence order, skipping ahead if it falls behind. */
 typealias TrackConsumer = uniffi.moq.MoqTrackConsumer
-/** A request to produce one uncached group for a fetch consumer. */
-typealias GroupRequest = uniffi.moq.MoqGroupRequest
+/** A run of groups readers miss: accept each group you have and drop the rest. */
+typealias Fill = uniffi.moq.MoqFill
 /** The write side of a single group: append frames to it. */
 typealias GroupProducer = uniffi.moq.MoqGroupProducer
 /** The read side of a single group: yields timestamped raw frames. */

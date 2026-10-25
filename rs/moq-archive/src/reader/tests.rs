@@ -763,6 +763,75 @@ async fn evicted_timeline_groups_remain_fetchable() {
 	let _ = serve.await;
 }
 
+/// A timeline group every reader narrowed past stops its GET, so the groups the fill still
+/// owes are read rather than waiting behind it.
+#[tokio::test(start_paused = true)]
+async fn a_narrowed_timeline_read_skips_the_group_it_left() {
+	let mut archive = Archive::new().await;
+	for group in 0..3 {
+		archive.add("video", group..group + 1, 1).await;
+	}
+	let mut info = broadcast::Info::new();
+	info.pool = moq_net::cache::Pool::new(moq_net::cache::Config::default().with_expiry(Duration::from_millis(100)));
+	let pool = info.pool.clone();
+	let broadcast = info.produce();
+	let reader = Reader::open(archive.store.clone(), &broadcast, archive.config())
+		.await
+		.unwrap();
+	let serve = tokio::spawn(reader.serve());
+	let now = moq_net::time::Instant::now();
+	pool.poll(now, &kio::Waiter::noop());
+	pool.poll(now + Duration::from_secs(1), &kio::Waiter::noop());
+
+	let mock = archive.store.inner().clone();
+	mock.take();
+	let gate = mock.stall_gets("video%2Etimeline%2Ez/segments/");
+	let ascending = |groups| {
+		moq_net::track::Subscription::default()
+			.with_max_delay(None)
+			.with_range(groups)
+			.with_order(moq_net::track::Order::Ascending)
+	};
+	let mut subscriber = broadcast
+		.consume()
+		.track(&timeline("video"))
+		.unwrap()
+		.subscribe(ascending(0..))
+		.await
+		.unwrap();
+	let waiter = kio::Waiter::noop();
+	let mut gets = Vec::new();
+	let _ = subscriber.poll_recv_group(&waiter);
+	assert!(
+		segment_read(&mock, &mut gets, 0).await,
+		"group 0 is read from its segment"
+	);
+
+	subscriber.update(ascending(1..)).unwrap();
+	let _ = subscriber.poll_recv_group(&waiter);
+	assert!(
+		segment_read(&mock, &mut gets, 1).await,
+		"group 1 waited behind group 0, which nobody reads"
+	);
+	gate.add_permits(16);
+	serve.abort();
+	let _ = serve.await;
+}
+
+/// Whether the video timeline's `segment` is requested once the runtime settles, collecting
+/// GETs. Bounded by yields rather than time, so the paused clock stays put.
+async fn segment_read(mock: &Mock, gets: &mut Vec<String>, segment: u64) -> bool {
+	let path = format!("rec/video%2Etimeline%2Ez/segments/{segment:019}");
+	for _ in 0..1000 {
+		gets.extend(mock.gets());
+		if gets.contains(&path) {
+			return true;
+		}
+		tokio::task::yield_now().await;
+	}
+	false
+}
+
 #[tokio::test(start_paused = true)]
 async fn enrolled_timeline_fetch_survives_finish() {
 	let mut archive = Archive::new().await;
@@ -833,7 +902,7 @@ async fn benchmark_timeline_fetch_fanout() {
 					broadcast.info().pool.poll(now, &kio::Waiter::noop());
 				}
 				let subscription = moq_net::track::Subscription::default()
-					.with_groups(0..)
+					.with_range(0..)
 					.with_max_delay(Duration::from_secs(60));
 				let mut retained = broadcast
 					.consume()

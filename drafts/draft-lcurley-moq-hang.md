@@ -194,7 +194,7 @@ This draft needs `version` 4 for:
 - a `track` ({{field-track}}) other than the entry's ID, which an older consumer subscribes to instead;
 - a video `warmup` ({{field-warmup}}) above zero, since an older consumer starts decoding a group at a picture that is not a keyframe.
 
-Every other catalog change in this draft is safe to ignore: `enabled` ({{field-enabled}}) leaves an older consumer selecting a disabled rendition, which plays nothing; `archive` ({{archive-catalog}}) is ignored when undecodable; `stats` and `echo` ({{media-stats}}) only offer optional tracks; `jitter`, `delay`, audio `warmup`, and the data track estimates are hints.
+Every other catalog change in this draft is safe to ignore: `enabled` ({{field-enabled}}) leaves an older consumer selecting a disabled rendition, which plays nothing; `archive` ({{archive-catalog}}) is ignored when undecodable; `stats` and `echo` ({{media-stats}}) only offer optional tracks; video `reorder` leaves an older consumer inferring decode times from timestamps; `jitter`, `delay`, audio `warmup`, and the data track estimates are hints.
 
 ## Clock {#clock}
 The catalog's root `clock` field is the broadcast's one continuous clock:
@@ -258,6 +258,7 @@ type VideoDecoderConfigExtensions = {
   "displayAspectWidth": number | undefined,
   "displayAspectHeight": number | undefined,
   "preference": number | undefined,
+  "reorder": number | undefined,
   "color": Color | undefined,
   "projection": Projection | undefined,
   "stereo": string | undefined,
@@ -275,6 +276,16 @@ If absent, it defaults to 0; a publisher SHOULD only write it when nonzero.
 A consumer selecting a rendition automatically MUST choose among the enabled ({{field-enabled}}) renditions it can decode with the highest `preference`, then by its own criteria, such as size and bitrate, within them.
 A consumer MAY select another rendition at the viewer's explicit request.
 A consumer that carries every rendition, rather than selecting one, ignores the field.
+
+`reorder` is the most frames that can precede a frame in decode order and follow it in presentation order, the unit of H.264 `max_num_reorder_frames` and HEVC `sps_max_num_reorder_pics`, as an integer from 0 to 255.
+`0` declares that presentation order is decode order.
+A publisher that does not know the depth MUST omit the field; absent declares nothing.
+A publisher that declares it MUST NOT send a frame that more than `reorder` earlier frames of its group follow in presentation order, and MUST NOT change or remove it for the track once declared.
+
+A consumer that authors decode times, such as a transmuxer to a container that carries them, derives them from a declared `reorder` and the frames of the current group alone, so consumers that joined at different groups agree.
+The n-th frame of a group in decode order decodes at the group's (n - `reorder`)-th earliest presentation time, counting from zero, and the group's first `reorder` frames decode at successive instants just before its earliest presentation time.
+A consumer MUST refuse a frame reordered deeper than its rendition declares rather than author an invalid decode time, and SHOULD refuse a `reorder` the codec cannot reach: above the level's decoded picture buffer, or nonzero for a codec whose presentation order is its decode order.
+Without `reorder`, a consumer infers decode times from the timestamps it has read.
 
 `color` describes the decoded pixels so a renderer can configure its pipeline without parsing the bitstream:
 
@@ -1204,6 +1215,7 @@ This document has no IANA actions.
 - Each archive timeline declares its own fixed nominal record duration, omitted for an untimed track; removed the broadcast-wide duration bound.
 - Removed the Recording section: the store layout is a moq-archive format, documented with that crate, not part of this draft.
 - Added the optional video `preference` field: a consumer selects automatically among the highest preference it can decode.
+- Added the optional video `reorder` field: the most frames that can precede one in decode order and follow it in presentation, fixed for the track once declared. A consumer that authors decode times derives them from it and the current group alone, refusing deeper reordering; without it, a consumer infers them from timestamps.
 - Added an optional `epoch` beside every rendition and data track `broadcast` reference, and `replayEpoch` beside the archive's `replay` ({{field-epoch}}). A consumer reads each referenced path from the first broadcast it resolves for a catalog instance; a present `epoch` fails a rendition proven to resolve another instance, and is best effort over a route without an Epoch.
 - Derived HLS and DASH exports hand disabled references to enabled renditions at the first record numbered past the advertised ones, keeping the record `sequence` as the HLS media sequence and starting a DASH period.
 - Added optional `stats` and `echo` catalog sections, publisher/viewer snapshots keyed by rendition ID, and the `.echo` feedback broadcast convention.

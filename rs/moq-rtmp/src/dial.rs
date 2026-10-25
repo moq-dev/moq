@@ -75,6 +75,8 @@ pub struct Client<S = TcpStream> {
 	max_age: Option<Duration>,
 	/// Connection allocator each track [`pull`](Self::pull) ingests claims its peak-hold bitrate on.
 	bandwidth: moq_net::bandwidth::Allocator,
+	/// How long a broadcast [`pull`](Self::pull) finished stays up.
+	linger: Duration,
 	/// Script data [`pull`](Self::pull) discards, including any sent before Play.Start.
 	metadata: crate::metadata::Dropped,
 }
@@ -158,6 +160,7 @@ impl<S: Stream> Client<S> {
 			max_delay: crate::DEFAULT_MAX_DELAY,
 			max_age: None,
 			bandwidth: moq_net::bandwidth::Allocator::unlimited(),
+			linger: moq_mux::Linger::DEFAULT,
 			metadata: Default::default(),
 		})
 	}
@@ -198,6 +201,16 @@ impl<S: Stream> Client<S> {
 	/// broadcast someone else declared.
 	pub fn with_bandwidth(mut self, bandwidth: moq_net::bandwidth::Allocator) -> Self {
 		self.bandwidth = bandwidth;
+		self
+	}
+
+	/// Keep the broadcast [`pull`](Self::pull) publishes up for `linger` after the remote
+	/// completes the play, so a subscriber that arrives after the end still gets the tail.
+	/// Defaults to [`moq_mux::Linger::DEFAULT`]; zero closes it at once.
+	///
+	/// The pull (ingest) direction only.
+	pub fn with_linger(mut self, linger: Duration) -> Self {
+		self.linger = linger;
 		self
 	}
 
@@ -297,10 +310,9 @@ impl<S: Stream> Client<S> {
 	/// on its own task.
 	///
 	/// A remote that completes the play (`NetStream.Play.Complete` or `NetStream.Play.Stop`)
-	/// ends cleanly: the finished broadcast stays up until its media is stale, so subscribers
-	/// still catching up drain the tail, and the future resolves after that. Dropping the
-	/// future ends the linger early, as does a newer publish at `path`. A connection that
-	/// drops first closes the broadcast at once.
+	/// ends cleanly: the finished broadcast stays up for the [linger](Self::with_linger), and
+	/// the future resolves after that. Dropping the future ends the linger early. A
+	/// connection that drops first closes the broadcast at once.
 	pub async fn pull(mut self, stream_key: &str, origin: &origin::Producer, path: impl moq_net::AsPath) -> Result<()> {
 		let path = path.as_path();
 		let request = self
@@ -322,14 +334,15 @@ impl<S: Stream> Client<S> {
 
 		let result = self.pull_media(&mut publisher).await;
 		match result {
-			// A clean end: serve the finished broadcast until its media is stale, so
-			// subscribers still catching up drain the tail. The remote is done, so hang up first.
+			// A clean end: serve the finished broadcast for the linger, so a subscriber that
+			// arrives after the end still gets the tail. The remote is done, so hang up first.
 			Ok(true) => {
+				let linger = self.linger;
 				drop(self);
-				match publisher.finish() {
-					Ok(finish) => {
-						tracing::info!(%path, linger = ?finish.linger(), "rtmp play completed, serving the finished broadcast until its media is stale");
-						finish.wait().await;
+				match publisher.finish(linger) {
+					Ok(publisher) => {
+						tracing::info!(%path, ?linger, "rtmp play completed, serving the finished broadcast");
+						publisher.wait().await;
 					}
 					Err(err) => tracing::debug!(%err, "error finishing RTMP pull"),
 				}
@@ -582,13 +595,12 @@ impl Publisher {
 		Ok(self.importer.decode(&flv::tag(tag_type, timestamp, body))?)
 	}
 
-	/// Flush any buffered media and finish every track, the catalog included, returning
-	/// the finished broadcast, which stays announced until it is dropped.
-	fn finish(mut self) -> anyhow::Result<moq_net::broadcast::Finish> {
+	/// Flush any buffered media and finish every track, the catalog included, keeping the
+	/// finished broadcast up for `linger`.
+	fn finish(mut self, linger: Duration) -> anyhow::Result<moq_mux::Linger<Self>> {
 		self.importer.finish()?;
 		self.catalog.finish()?;
-		// Taken while the importer is alive, so it holds the tracks just finished.
-		Ok(self.broadcast.finish())
+		Ok(moq_mux::Linger::new([self.broadcast.clone()], self, linger))
 	}
 
 	/// Flush any buffered media, then end the broadcast so the origin unannounces it at once.
@@ -642,6 +654,7 @@ mod tests {
 			max_delay: crate::DEFAULT_MAX_DELAY,
 			max_age: None,
 			bandwidth: Default::default(),
+			linger: Duration::ZERO,
 			metadata: crate::metadata::Dropped::new("metadata"),
 		};
 		let origin = moq_tokio::origin::spawn();
@@ -650,7 +663,7 @@ mod tests {
 		let queued = std::mem::take(&mut client.work);
 		client.pull_results(queued, &mut publisher).await.unwrap();
 		assert_eq!(client.metadata.count, 2);
-		drop(publisher.finish().unwrap());
+		drop(publisher.finish(Duration::ZERO).unwrap());
 		drop(client);
 		logs_assert(|lines| {
 			let warnings = lines
@@ -694,11 +707,11 @@ mod tests {
 
 	/// A clean end crosses an RTMP hop in both directions: a finished export unpublishes,
 	/// so the server it pushes to lingers, and a server whose play completes lets a pull
-	/// linger. Each lingering side serves its finished copy for the declared max-age.
+	/// linger. Each lingering side serves its finished copy for its linger.
 	#[tokio::test(start_paused = true)]
 	async fn a_finished_broadcast_lingers_across_rtmp() {
 		let peer = "127.0.0.1:1935".parse().unwrap();
-		let max_age = Duration::from_secs(10);
+		let linger = Duration::from_secs(10);
 		for push in [true, false] {
 			let upstream = moq_tokio::origin::spawn();
 			let downstream = moq_tokio::origin::spawn();
@@ -710,11 +723,9 @@ mod tests {
 			let ingest = downstream.clone();
 			let server = tokio::spawn(async move {
 				match accept_stream(server_io, peer).await.unwrap().unwrap() {
-					Request::Publish(publish) => publish
-						.with_max_age(Some(max_age))
-						.accept(&ingest, "live/cam0")
-						.await
-						.unwrap(),
+					Request::Publish(publish) => {
+						publish.with_linger(linger).accept(&ingest, "live/cam0").await.unwrap()
+					}
 					Request::Play(play) => play.accept(&served, "live/cam0").await.unwrap(),
 				}
 			});
@@ -724,7 +735,7 @@ mod tests {
 				match push {
 					true => client.publish("cam0", exported, "live/cam0").await.unwrap(),
 					false => client
-						.with_max_age(max_age)
+						.with_linger(linger)
 						.pull("cam0", &pulled, "live/cam0")
 						.await
 						.unwrap(),
@@ -749,9 +760,99 @@ mod tests {
 			done.await.unwrap();
 			assert!(!copy.is_closed(), "push={push}: the copy lingers");
 			lingering.await.unwrap();
-			assert_eq!(start.elapsed(), max_age, "push={push}");
+			assert_eq!(start.elapsed(), linger, "push={push}");
 			assert!(copy.is_closed());
 		}
+	}
+
+	/// Contains `needle` somewhere in `haystack`.
+	fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+		haystack.windows(needle.len()).any(|window| window == needle)
+	}
+
+	/// A push stays on the instance it resolved: a publisher taking over the path never reaches
+	/// the remote, so the push never splices in another timeline or codec state, and it fails
+	/// once its instance's route dies.
+	#[tokio::test(start_paused = true)]
+	async fn a_push_stays_on_its_instance_until_the_route_dies() {
+		const OLD_IDR: &[u8] = &[0x65, 0x88, 0x84, 0x21, 0x00];
+		const OLD_DELTA: &[u8] = &[0x41, 0x9a, 0x02, 0x03];
+		const NEW_IDR: &[u8] = &[0x65, 0x99, 0x99, 0x99, 0x99];
+		let publish = |origin: &origin::Producer, epoch: &moq_net::Epoch, idr: &[u8]| {
+			let mut vseq = vec![0x17, 0x00, 0x00, 0x00, 0x00];
+			vseq.extend_from_slice(&[0x01, 0x42, 0xc0, 0x1f, 0xff, 0xe1, 0x00, 0x04, 0x67, 0x42, 0xc0, 0x1f]);
+			vseq.extend_from_slice(&[0x01, 0x00, 0x04, 0x68, 0xce, 0x3c, 0x80]);
+			let mut vframe = vec![0x17, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, idr.len() as u8];
+			vframe.extend_from_slice(idr);
+			let mut broadcast = origin.create_broadcast("live/cam0").unwrap();
+			broadcast
+				.announce(origin::Route::default().with_epoch(epoch.clone()))
+				.unwrap();
+			let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+			let mut importer = FlvImport::new(broadcast, catalog.reserve());
+			importer.decode(&flv::file_header()).unwrap();
+			importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vseq)).unwrap();
+			importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vframe)).unwrap();
+			(importer, catalog)
+		};
+
+		let upstream = moq_tokio::origin::spawn();
+		let downstream = moq_tokio::origin::spawn();
+		let (mut old, old_catalog) = publish(&upstream, &moq_net::Epoch::mint(), OLD_IDR);
+		let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+		let ingest = downstream.clone();
+		let server = tokio::spawn(async move {
+			let Some(Request::Publish(publish)) = accept_stream(server_io, "127.0.0.1:1935".parse().unwrap())
+				.await
+				.unwrap()
+			else {
+				panic!("expected a publish request");
+			};
+			let _ = publish.accept(&ingest, "live/cam0").await;
+		});
+		let exported = upstream.consume();
+		let pushed = tokio::spawn(async move {
+			let client = Client::with_stream(client_io, "live").await.unwrap();
+			client.publish("cam0", exported, "live/cam0").await
+		});
+
+		// Read what reaches the remote back out as FLV.
+		let consumer = downstream.consume();
+		consumer.routed("live/cam0").await.unwrap();
+		let copy = consumer.request_broadcast("live/cam0", None).await.unwrap();
+		let source = moq_mux::Source::new(consumer, copy);
+		let catalog = source
+			.catalog::<()>(moq_mux::catalog::CatalogFormat::default())
+			.await
+			.unwrap();
+		let mut remote = FlvExport::new(source, catalog);
+		let mut received = Vec::new();
+		let mut until = async |needle: &[u8]| {
+			while !contains(&received, needle) {
+				let chunk = remote.next().await.unwrap().expect("the remote copy ended");
+				received.extend_from_slice(&chunk);
+			}
+		};
+		until(OLD_IDR).await;
+
+		let epoch = moq_net::Epoch::mint();
+		let mut instances = moq_mux::follow::Instances::new(&upstream.consume(), "live/cam0", Some(&epoch)).unwrap();
+		let (_new, _new_catalog) = publish(&upstream, &epoch, NEW_IDR);
+		tokio::time::timeout(Duration::from_secs(5), instances.next())
+			.await
+			.expect("the new publisher takes over")
+			.unwrap();
+
+		let mut delta = vec![0x27, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, OLD_DELTA.len() as u8];
+		delta.extend_from_slice(OLD_DELTA);
+		old.decode(&flv::tag(flv::TAG_VIDEO, 40, &delta)).unwrap();
+		until(OLD_DELTA).await;
+		assert!(!contains(&received, NEW_IDR), "the push left its instance");
+
+		old.abort(moq_net::Error::Transport("connection lost".into()));
+		drop(old_catalog);
+		assert!(pushed.await.unwrap().is_err(), "the push ended cleanly");
+		server.abort();
 	}
 
 	/// Loopback: dial the crate's own server and pull a broadcast the server plays

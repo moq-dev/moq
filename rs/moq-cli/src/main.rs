@@ -226,14 +226,13 @@ impl Serving {
 			request = request.with_subscriber(subscribe);
 		}
 		let serving = self.shutdown.serve();
-		let (session, driver) = self
+		let session = self
 			.shutdown
 			.until_deadline(request.ok())
 			.await
 			.ok_or_else(|| anyhow::anyhow!("the SETUP reply was still pending at the drain deadline"))??;
-		let result = moq_relay::supervise(session, lease, serving, None).await;
-		driver.await??;
-		result
+
+		moq_relay::supervise(session, lease, serving, None).await
 	}
 }
 
@@ -707,12 +706,14 @@ fn spawn_import(
 	}
 
 	let max_age = import.max_age.map(Into::into);
+	let linger = import.linger.map_or(moq_mux::Linger::DEFAULT, Into::into);
 	// The MoQ side every gateway publishes into, minted per source since each takes it
 	// by value onto its own task.
 	let target = |name: String| crate::moq::ImportTarget {
 		origin: origin.clone(),
 		name,
 		max_age,
+		linger,
 		bandwidth: bandwidth.clone(),
 	};
 
@@ -733,7 +734,8 @@ fn spawn_import(
 		} else {
 			let broadcast = origin.create_broadcast(&name).context("failed to create broadcast")?;
 			Publish::new(broadcast, &format, config)?
-		};
+		}
+		.with_linger(linger);
 		publish.announce(epoch)?;
 		local = Some(publish);
 	} else {
@@ -1175,7 +1177,7 @@ mod tests {
 				let consumer = origin.consume();
 				let mut client = moq_tokio::connect::Config::default();
 				// Only the listener's deadline may end the undecided admission.
-				client.timeout = Some(Duration::ZERO);
+				client.timeout = Some(Duration::ZERO.into());
 				let client = client
 					.init(Default::default())
 					.unwrap()

@@ -207,7 +207,7 @@ impl Consumer {
 			&& warmup.is_zero()
 			&& let Some(live_edge) = subscriber.largest().await
 		{
-			subscriber.set_groups(live_edge.group..);
+			subscriber = subscriber.with_range(live_edge.group..);
 		}
 		let track = subscriber;
 		let retention = track.info().max_age;
@@ -2124,7 +2124,7 @@ mod tests {
 		)
 		.await
 		.unwrap();
-		assert_eq!(observed.subscription().unwrap().max_delay, max_delay);
+		assert_eq!(observed.subscription().unwrap().max_delay, Some(max_delay));
 
 		let samples = [0.25f32, -0.5, 0.75, -1.0];
 		let payload: Vec<u8> = samples.iter().flat_map(|sample| sample.to_le_bytes()).collect();

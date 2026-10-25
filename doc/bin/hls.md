@@ -22,7 +22,7 @@ The CLI serves the one `--broadcast` it was given, at
 
 Import follows a live playlist, joining a few segments behind its live edge,
 until every rendition's playlist ends with `EXT-X-ENDLIST`. It then keeps the
-finished broadcast up until its media is stale
+finished broadcast up for `--linger`
 (see [retention](/bin/cli#retention-and-latency)). A playlist that has already
 ended, such as a VOD recording, is refused with an error rather than imported.
 An `EXT-X-DISCONTINUITY` keeps the source's timestamps. Timestamp resets are not
@@ -47,7 +47,7 @@ What that means for you:
 - **Publish timelines.** A broadcast whose catalog advertises no timelines is skipped, and a rendition is listed only once its own timeline is advertised. Without a duration hint, a publisher declares that timeline after the rendition's first segment.
 - **Align GOPs across video renditions.** Segment boundaries come from one reference rendition. Other video renditions snap to their nearest keyframe, and a segment with none nearby becomes an `EXT-X-GAP`.
 - **Disabled renditions are hidden.** A rendition the catalog marks `enabled: false` leaves the multivariant playlist and DASH manifest until it re-enables. Its media playlist keeps serving, so a player already on it is not ended with `EXT-X-ENDLIST`. If it supplied segment boundaries, an enabled sibling takes over at its first record numbered past the last advertised one, and DASH starts a new period. The media sequence is the record number, so every edge agrees: a sibling numbered ahead restarts the playlist with a discontinuity, and one numbered behind (such as a re-enabled rung) holds every playlist until its numbering catches up. `EXT-X-DISCONTINUITY-SEQUENCE` and DASH periods are counted per edge, so edges agree on them only when no discontinuity or handoff happened while each was running.
-- **Segment URLs are stable.** Every edge and every reload derive the same URLs, so a CDN in front of export caches them.
+- **URLs name the publisher instance.** Every URL the multivariant playlist and DASH manifest list sits under `@<instance>`, the publisher's epoch, so every edge and every reload derive the same URLs and a CDN in front of export caches them. A restarted publisher gets URLs of its own, whose numbering starts over. The multivariant playlist and manifest switch to it at once, while a player already on the old instance keeps playing until that publisher leaves; the player then has to reload the multivariant playlist. An instance without an epoch (one that reached export over moq-lite-06 or older) gets an id each export mints, so only that export serves its URLs.
 - **Only a clean finish ends a playlist.** `EXT-X-ENDLIST` and a `static` DASH manifest mean the timeline finished. If the segment-boundary rendition's timeline fails instead, such as a publisher dropping its session, every media playlist and the DASH manifest answer HTTP 500 with `Cache-Control: no-store`, so a truncated recording never looks complete. A rendition whose own timeline fails answers the error alone and leaves the multivariant playlist and DASH manifest, so players switch to a sibling.
 
 A [`moq-archive`](https://docs.rs/moq-archive) recording replayed through its

@@ -138,7 +138,7 @@ test("Cluster: a path that cannot have come from a conforming sender is rejected
 });
 
 test("Cluster: the setup options round trip", async () => {
-	for (const declared of [origin(42n), UNKNOWN_HOP]) {
+	for (const declared of [origin(42n), origin((1n << 64n) - 1n), UNKNOWN_HOP]) {
 		const params = new SetupOptions();
 		Cluster.intoSetup(params, declared, VERSION);
 

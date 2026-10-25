@@ -33,6 +33,7 @@ import type { Groups, Info, Position as TrackPosition, Subscriber as TrackSubscr
 import { untilAborted } from "../util/abort.ts";
 import { nextChange } from "../util/change.ts";
 import { Deadline, REQUEST_TIMEOUT_MS, requestOptions } from "../util/deadline.ts";
+import { untilGivenUp } from "../util/given_up.ts";
 import { LIMITS, type Limits, Slots } from "../util/limits.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import * as Varint from "../varint.ts";
@@ -331,9 +332,8 @@ export class Publisher {
 	#quic: WebTransport;
 	#session: Session;
 	#requiresSolicitation: boolean;
-	// Subscriptions the peer holds live on this session.
+	// Subscriptions the peer holds, PUBLISHes for its listings capped by `Limits.requests`.
 	#subscriptions: Slots;
-	#fetches: Slots;
 	#listings = new Set<Path.Valid>();
 	#trackClaims = new Map<string, "publish" | number>();
 
@@ -424,8 +424,7 @@ export class Publisher {
 		limits?: Limits;
 	}) {
 		this.#quic = quic;
-		this.#subscriptions = new Slots(limits.subscriptions, { quic, reason: "too many subscriptions" });
-		this.#fetches = new Slots(limits.fetches, { quic, reason: "too many fetches" });
+		this.#subscriptions = new Slots(limits.requests, { reason: "too many requests" });
 		this.#grant = grant;
 		this.#gate = new Gate(grant);
 		this.#auth = auth;
@@ -482,9 +481,9 @@ export class Publisher {
 			return;
 		}
 		// Only a subscription we would serve holds a slot, as in Rust: a refused one ends at
-		// once. A peer past the cap loses the session.
+		// once. Stream credit bounds them, so none is refused here.
 		const charged = !msg.rangeFilters && this.#gate.allows(msg.trackNamespace);
-		if (charged) this.#subscriptions.acquire();
+		if (charged) this.#subscriptions.hold();
 		if (claimed) this.#trackClaims.set(key, ((this.#trackClaims.get(key) as number | undefined) ?? 0) + 1);
 		try {
 			await this.#serveSubscribe(msg, request);
@@ -546,7 +545,7 @@ export class Publisher {
 			// A range that resolves without the live edge has a fixed start, which is no join:
 			// bound the subscription before subscribing so the refresh ratio never judges it.
 			const fixed = subscribeRange(msg, {}, version);
-			return wireOf(source).subscribe(msg.trackName, {
+			return source.track(msg.trackName).subscribe({
 				priority: fromWire(msg.subscriberPriority),
 				order: msg.groupOrder,
 				// An absent budget preserves everything retained by the producer.
@@ -561,6 +560,10 @@ export class Publisher {
 			try {
 				info = await untilAborted(track.info(), left.signal);
 			} catch (err) {
+				if (left.signal.aborted) {
+					request.abort(cancel);
+					return;
+				}
 				const failed = error(err);
 				if (
 					!(failed instanceof StreamError) ||
@@ -772,7 +775,7 @@ export class Publisher {
 				groups: rangeGroups(range),
 			});
 			const startGroup = range.start ? Number(range.start.group) : hooks.latestSequence(track);
-			if (startGroup !== undefined) track.setGroups({ ...rangeGroups(range), start: { included: startGroup } });
+			if (startGroup !== undefined) track.withRange({ ...rangeGroups(range), start: { included: startGroup } });
 
 			// A fill reads the group cache through its own consumer, independent of the
 			// subscription's cursor. Forked from this subscriber rather than resolved through
@@ -1084,11 +1087,9 @@ export class Publisher {
 			// once the open settles. tryOpen owns resetting a slot that arrives too late.
 			const opened = Promise.withResolvers<void>();
 			let failure: Error | undefined;
-			const abandoned = hooks
-				.guardGroup(group, () => opened.promise)
-				.catch((err: unknown) => {
-					failure = error(err);
-				});
+			const abandoned = untilGivenUp(group, () => opened.promise).then((stop) => {
+				failure = stop;
+			});
 			let stream: Writer | undefined;
 			try {
 				stream = await Writer.tryOpen(this.#quic, {
@@ -1136,10 +1137,20 @@ export class Publisher {
 				left = true;
 				return undefined;
 			});
+			// The subscription's budget, or an eviction of what is left to read, may give up on the
+			// group mid-write, which abandons the stream. A group already given up never starts the write.
+			const write = async (op: () => Promise<unknown>) => {
+				const stop = await untilGivenUp(group, op);
+				if (stop) throw stop;
+			};
+			// Writing the group stops for the pause too; the drain below answers it without a reset.
+			const send = async (op: () => Promise<unknown>) => {
+				await race([write(op), cancelled]);
+				if (left) throw new Error("unsubscribed while serving the group");
+			};
 
 			try {
-				await race([hooks.guardGroup(group, () => header.encode(stream, this.#session.version)), cancelled]);
-				if (left) throw new Error("unsubscribed while serving the group");
+				await send(() => header.encode(stream, this.#session.version));
 				// The first written object goes on the wire as its absolute id, so a trimmed
 				// head shows the true numbering rather than a silently renumbered group.
 				let first = true;
@@ -1156,32 +1167,16 @@ export class Publisher {
 
 					// Reading from the filter's start drops the objects below it: they are outside
 					// the requested range, so skipping them is not a gap.
-					const read = await race([hooks.readGroupFrame(group, slice.skip), stream.closed, cancelled]);
-					if (left) {
-						read?.complete();
-						throw new Error("unsubscribed while serving the group");
-					}
+					const read = await race([group.readFrameSequence({ from: slice.skip }), stream.closed, cancelled]);
+					if (left) throw new Error("unsubscribed while serving the group");
 					if (!read) break;
 					next = read.sequence + 1;
-					if (slice.until !== undefined && read.sequence >= slice.until) {
-						read.complete();
-						break;
-					}
+					if (slice.until !== undefined && read.sequence >= slice.until) break;
 
-					try {
-						const obj = new Frame({ payload: read.frame.payload, timestamp: read.frame.timestamp });
-						const delta = first ? read.sequence : 0;
-						first = false;
-						await race([
-							hooks.guardGroup(group, () =>
-								obj.encode(stream, header.flags, timescale, this.#session.version, delta),
-							),
-							cancelled,
-						]);
-						if (left) throw new Error("unsubscribed while serving the group");
-					} finally {
-						read.complete();
-					}
+					const obj = new Frame({ payload: read.payload, timestamp: read.timestamp });
+					const delta = first ? read.sequence : 0;
+					first = false;
+					await send(() => obj.encode(stream, header.flags, timescale, this.#session.version, delta));
 				}
 
 				// The track ends right after this group's last object, so the marker rides this
@@ -1199,12 +1194,15 @@ export class Publisher {
 				}
 
 				stream.close();
+				// The stream holds every byte it owes, so frames past a range's end failing upstream
+				// can no longer give it up: release the read, leaving the budget.
+				group.close();
 				// Its bytes still hold the connection until acknowledged, so a group gone stale
 				// meanwhile is reset like one still serving, as the Rust `GroupServe` does. Awaited
 				// even without a marker: PUBLISH_DONE waits on this group, so the track, whose
 				// timeline judges the budget, stays open until the stream settles.
 				const delivered = await race([
-					hooks.guardGroup(group, () => stream.closed).then(() => true),
+					write(() => stream.closed).then(() => true),
 					unsubscribed.then(() => false),
 				]);
 				// Only a stream that closed cleanly delivered the marker: one reset after its FIN
@@ -2836,20 +2834,15 @@ export class Publisher {
 
 	async #runFetch(msg: Fetch, request: RequestStream) {
 		this.#pinned(msg.epoch);
-		this.#fetches.acquire();
-		try {
-			if (msg.trackNamespace !== undefined && Namespace.reserved(msg.trackNamespace, this.#session.version)) {
-				await refuseReserved(request);
-				return;
-			}
-			await request.refuse("fetch", {
-				requestId: msg.requestId,
-				condition: msg.rangeFilters ? "invalid_filter" : "not_supported",
-				reasonPhrase: msg.rangeFilters ? "Range Filters exceed MAX_FILTER_RANGES=0" : "FETCH is not supported",
-			});
-		} finally {
-			this.#fetches.release();
+		if (msg.trackNamespace !== undefined && Namespace.reserved(msg.trackNamespace, this.#session.version)) {
+			await refuseReserved(request);
+			return;
 		}
+		await request.refuse("fetch", {
+			requestId: msg.requestId,
+			condition: msg.rangeFilters ? "invalid_filter" : "not_supported",
+			reasonPhrase: msg.rangeFilters ? "Range Filters exceed MAX_FILTER_RANGES=0" : "FETCH is not supported",
+		});
 	}
 
 	/** What a request that failed to resolve is refused with. */
