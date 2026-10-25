@@ -19,18 +19,25 @@ Decided 2026-10-23 (maintainer interview):
 - Update `doc/bin/cli.md` and `doc/bin/hls.md`, and every example that uses
   `export hls`.
 
-Decoder reconfiguration closes the old rendition cursor and adds a replacement.
-The replacement cursor starts at the oldest row still in its window, so it can
-repeat segment numbers already written by the old cursor. Settle recorded
-playback before implementing the output layout:
+Decided 2026-10-24 (maintainer interview): a full recording stays playable from
+its master playlist after decoder reconfiguration. Each rendition keeps one
+continuous media playlist; separate instance directories would leave the master
+listing only current instances, losing the recording's earlier part.
 
-- Separate instance directories preserve both cursors independently, but a master
-  listing only current instances cannot play the recording's earlier part after
-  reconfiguration.
-- A continuous playlist per logical rendition must drain the old cursor, discard
-  repeated rows from the replacement, write its new init, and mark the decoder
-  transition without losing or duplicating media. Coordinate discontinuities
-  across the recording's audio and video playlists.
-
-Prefer continuity for a full recording. Confirm that contract and the overlap
-policy before choosing the layout; the CLI flags above are already decided.
+- Reconfiguration closes the old rendition and adds a replacement over the same
+  shared rows. The replacement's cursor starts at its oldest retained row, so it
+  repeats segments the old cursor wrote. Drain the old cursor first: it owns every
+  segment it wrote. Discard replacement segments numbered at or below the old
+  cursor's last, then write the replacement's init and mark the transition.
+- Discarding by number is sound: every rendition's rows fan out from one reference
+  timeline, so a number names the same content span on each, and numbers only
+  increase within a broadcaster run, including across reference handoffs.
+- A rewound timeline or a new generation can reuse lower numbers, but it also
+  advances `Segment::discontinuity`. A repeated number with a newer discontinuity
+  is a source reset and fails the recording instead of being discarded.
+- A true gap must fail too. The cursor skips declared gaps silently, so a number
+  jump between the two cursors cannot tell a declared gap from rows evicted before
+  the replacement was subscribed. Make that boundary observable, such as by having
+  the cursor report gap rows, which the recording needs for `EXT-X-GAP` anyway.
+- Mark the transition at the same segment in every playlist of the recording, so
+  their discontinuity sequences stay matched.
