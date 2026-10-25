@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use moq_quic::{Dir, VarInt};
+use moq_quic::{Dir, ReadError, VarInt};
 
 #[allow(
     dead_code,
@@ -266,6 +266,97 @@ fn bench_evict_churn(c: &mut Criterion<ThreadCpu>) {
     group.finish();
 }
 
+/// Resets into a shrunk window: `holders` leased streams wait on a window that `resets` unread
+/// streams fill, the server shrinks its window, and the client resets the unread streams in one
+/// burst. Each reset frees credit that only pays the shrink debt, so the window stays stuck and
+/// every RESET_STREAM frame reruns the stuck check.
+///
+/// Only the server's side of the burst is timed, and the cost per reset must not grow with the
+/// holders.
+fn bench_reset_debt(c: &mut Criterion<ThreadCpu>) {
+    let mut group = c.benchmark_group("receive_reset_debt");
+    for holders in [16, 256, 2048] {
+        for resets in [16, 256] {
+            let window = (holders + resets) * PACKET;
+            // Paid by all but the last reset, which frees the window again.
+            let debt = (resets - 1) * PACKET;
+            let mut pair = None;
+            group.throughput(Throughput::Elements(resets as u64));
+            group.bench_function(
+                BenchmarkId::new(format!("holders_{holders}"), format!("resets_{resets}")),
+                |b| {
+                    let pair = pair.get_or_insert_with(|| {
+                        let mut pair = Pair::new(Setup {
+                            server_receive_window: VarInt::from_u64(window as u64).unwrap(),
+                            ..Default::default()
+                        });
+                        // Each reader waits for the whole window, which no single stream fills.
+                        pair.server.sink = Sink::Lease(window);
+                        let data = payload(PACKET);
+                        let conn = pair.client();
+                        for _ in 0..holders {
+                            let id = conn
+                                .streams()
+                                .open(Dir::Uni, Default::default())
+                                .expect("stream limit");
+                            assert_eq!(conn.send_stream(id).write(&data).unwrap(), PACKET);
+                        }
+                        pair.settle();
+                        pair.server.sink = Sink::Ignore;
+                        pair
+                    });
+                    let data = payload(PACKET);
+                    b.iter_custom(|iters| {
+                        let mut busy = Duration::ZERO;
+                        for _ in 0..iters {
+                            let shrunk = VarInt::from_u64((window - debt) as u64).unwrap();
+                            pair.server.conn().set_receive_window(shrunk);
+                            let conn = pair.client();
+                            let ids: Vec<_> = (0..resets)
+                                .map(|_| {
+                                    let id = conn
+                                        .streams()
+                                        .open(Dir::Uni, Default::default())
+                                        .expect("stream limit");
+                                    assert_eq!(conn.send_stream(id).write(&data).unwrap(), PACKET);
+                                    id
+                                })
+                                .collect();
+                            pair.settle();
+
+                            pair.server.busy = Duration::ZERO;
+                            let conn = pair.client();
+                            for id in ids {
+                                conn.send_stream(id).reset(VarInt::from_u32(0)).unwrap();
+                            }
+                            pair.drive_until(|pair| {
+                                pair.client().streams().send_streams() == holders
+                            });
+                            busy += pair.server.busy;
+
+                            // Read the resets, freeing the streams, and restore the window.
+                            let conn = pair.server.conn();
+                            while let Some(id) = conn.streams().accept(Dir::Uni) {
+                                let mut stream = conn.recv_stream(id);
+                                let mut chunks = stream.read(true).unwrap();
+                                assert!(matches!(
+                                    chunks.next(usize::MAX),
+                                    Err(ReadError::Reset(_))
+                                ));
+                                let _ = chunks.finalize();
+                            }
+                            conn.set_receive_window(VarInt::from_u64(window as u64).unwrap());
+                            pair.settle();
+                        }
+                        busy
+                    });
+                },
+            );
+        }
+    }
+    group.finish();
+}
+
 /// Receiver stops: the server sends STOP_SENDING for every stream as it opens, and the exchange
 /// runs until the client has reset and forgotten them all.
 fn bench_stop(c: &mut Criterion<ThreadCpu>) {
@@ -309,6 +400,6 @@ fn bench_stop(c: &mut Criterion<ThreadCpu>) {
 criterion_group! {
     name = benches;
     config = common::config();
-    targets = bench_loss, bench_lease, bench_evict, bench_evict_churn, bench_reset, bench_stop
+    targets = bench_loss, bench_lease, bench_evict, bench_evict_churn, bench_reset, bench_reset_debt, bench_stop
 }
 criterion_main!(benches);

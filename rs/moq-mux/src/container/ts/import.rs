@@ -139,8 +139,6 @@ pub struct Import<E: catalog::Catalog = ()> {
 	streams: HashMap<Pid, Stream<E>>,
 	/// Counters from routes a later PMT replaced, keyed by PID.
 	retired_stats: BTreeMap<u16, stats::Stream>,
-	/// Stream revisions applied so far; see [`Self::MAX_REVISIONS`].
-	revisions: usize,
 	/// Damaged packets, PES, or access units refused, cumulative across PID remaps.
 	damaged: BTreeMap<u16, u64>,
 	damage_log: super::damage::Log,
@@ -255,7 +253,6 @@ impl<E: catalog::Catalog> Import<E> {
 			crc_errors: BTreeMap::new(),
 			streams: HashMap::new(),
 			retired_stats: BTreeMap::new(),
-			revisions: 0,
 			damaged: BTreeMap::new(),
 			damage_log: Default::default(),
 			liveness: Liveness::default(),
@@ -453,16 +450,14 @@ impl<E: catalog::Catalog> Import<E> {
 				// The new timebase starts with the PCR the flag rides, if it rides one.
 				if let Some(pcr) = pcr(pkt) {
 					self.place_pcr(pcr, offset)?;
+					self.si.pcr(pcr, packet.count);
 				}
 			} else if let Some(pcr) = pcr(pkt) {
 				self.place_pcr(pcr, offset)?;
 				self.liveness.pcr(pcr);
+				self.si.pcr(pcr, packet.count);
 				if let Some(now) = self.liveness.now() {
 					self.health.tick(now);
-					self.si.advance(
-						std::time::Duration::from_secs(now / PCR_HZ)
-							+ std::time::Duration::from_nanos((now % PCR_HZ) * 1_000 / 27),
-					);
 				}
 				if self.supports_mpegts {
 					let ready = self.mux_rate.ready();
@@ -494,7 +489,9 @@ impl<E: catalog::Catalog> Import<E> {
 		// `table_id`.
 		if self.supports_mpegts && catalog::SI_PIDS.contains(&pid) {
 			for section in packet.sections {
-				self.si.section(pid, section.clone())?;
+				if !self.si.section(pid, section.clone(), packet.count) {
+					*self.unplaced.entry(pid).or_default() += 1;
+				}
 			}
 			return Ok(());
 		}
@@ -612,6 +609,7 @@ impl<E: catalog::Catalog> Import<E> {
 			// A new clock: the intervals straddling the switch measure nothing, and the whole PES
 			// the old one began are placed on its timebase, never between its PCRs and the new.
 			self.liveness.discontinuity();
+			self.si.discontinuity();
 			self.reset_mux_rate()?;
 			self.settle_placement()?;
 		}
@@ -628,7 +626,6 @@ impl<E: catalog::Catalog> Import<E> {
 		// Record the program-level descriptors as the PMT revises them; export re-emits them
 		// verbatim, including the original CUEI.
 		if self.supports_mpegts && self.program_info != pmt.program_info {
-			self.count_revision()?;
 			if let Some(mpegts) = self.catalog.modify()?.ext.mpegts_mut() {
 				mpegts.program_descriptors = pmt.program_info.clone();
 			}
@@ -797,6 +794,9 @@ impl<E: catalog::Catalog> Import<E> {
 			section.finish()?;
 			self.pending.remove(&pid);
 			self.headers.remove(&pid);
+			let name = section.entry.name.clone();
+			drop(section);
+			self.retire_track(Some(name))?;
 		}
 		// A private PES stream follows the PMT's PCR_PID: refused while there is none to place
 		// its PES by, and routed again once there is, or once the PID carries another type.
@@ -1033,23 +1033,12 @@ impl<E: catalog::Catalog> Import<E> {
 		}
 	}
 
-	/// Stream revisions one import may apply: routes ended or refused, and program descriptor
-	/// changes. A route that reopens takes a fresh track name, which the broadcast reserves for
-	/// its whole life, and each revision republishes the catalog to every viewer, so a source that
-	/// keeps revising its PMT would otherwise grow the broadcast and churn its viewers without
-	/// bound. Under 10 MB of reserved names; a feed revising its PMT 50 times a day would take
-	/// years to reach it.
-	const MAX_REVISIONS: usize = 65_536;
-
-	/// Count a revision, refusing the import once its source has churned through
-	/// [`Self::MAX_REVISIONS`].
-	fn count_revision(&mut self) -> anyhow::Result<()> {
-		self.revisions += 1;
-		anyhow::ensure!(
-			self.revisions <= Self::MAX_REVISIONS,
-			"the TS source revised its streams {} times, more than an import accepts",
-			Self::MAX_REVISIONS
-		);
+	/// Retire the timeline of a track whose route has ended. Every route mints its own name, so
+	/// nothing enrolls it again, and a source revising its PMT holds only its live routes.
+	fn retire_track(&mut self, name: Option<String>) -> anyhow::Result<()> {
+		if let Some(name) = name {
+			self.catalog.retire(&name)?;
+		}
 		Ok(())
 	}
 
@@ -1058,7 +1047,6 @@ impl<E: catalog::Catalog> Import<E> {
 	/// PCRs so far or counted unplaced (refusing the import, as end of input does, if no media
 	/// timestamp anchored it), and its track finishes and leaves the catalog.
 	fn end_route(&mut self, pid: Pid) -> anyhow::Result<()> {
-		self.count_revision()?;
 		if self.headers.remove(&pid).is_some() {
 			self.damage(pid, &anyhow::anyhow!("PES header truncated by a PMT revision"))?;
 		}
@@ -1078,8 +1066,11 @@ impl<E: catalog::Catalog> Import<E> {
 			);
 			section.finish()?;
 		}
-		if self.sections.remove(&pid.as_u16()).is_some() {
+		if let Some(section) = self.sections.remove(&pid.as_u16()) {
 			self.keep_stats(pid, Some(stats::Stream::new(".ts", stats::Class::Data)));
+			let name = section.entry.name.clone();
+			drop(section);
+			self.retire_track(Some(name))?;
 		}
 		self.unclocked.remove(&pid);
 		if let Some(stream) = self.streams.get_mut(&pid)
@@ -1107,6 +1098,9 @@ impl<E: catalog::Catalog> Import<E> {
 		if let Some(stream) = self.streams.remove(&pid) {
 			// Finishing can publish a held frame, which its counters then include.
 			self.keep_stats(pid, stream.stats());
+			let name = stream.track_name();
+			drop(stream);
+			self.retire_track(name)?;
 		}
 		if unplaced > 0 {
 			*self.unplaced.entry(pid.as_u16()).or_default() += unplaced;
@@ -1436,15 +1430,17 @@ impl<E: catalog::Catalog> Import<E> {
 	/// Refuse the undecoded stream on `pid` rather than carry it altered: its track ends with an
 	/// error and leaves the catalog, and the PID is dropped from here on.
 	fn refuse(&mut self, pid: Pid, why: &str) -> anyhow::Result<()> {
-		// A PMT that keeps losing and regaining its PCR reopens the stream each time.
-		self.count_revision()?;
 		self.pending.remove(&pid);
 		self.headers.remove(&pid);
 		if let Some(section) = self.sections.remove(&pid.as_u16()) {
+			let name = section.entry.name.clone();
 			section.abort(moq_net::Error::Unsupported);
+			self.retire_track(Some(name))?;
 		}
 		if let Some(stream) = self.retire_stream(pid) {
+			let name = stream.track_name();
 			stream.abort(moq_net::Error::Unsupported);
+			self.retire_track(name)?;
 		}
 		self.streams.insert(pid, Stream::Ignored);
 		*self.refused.entry(pid.as_u16()).or_default() += 1;
@@ -1521,6 +1517,7 @@ impl<E: catalog::Catalog> Import<E> {
 		self.held_edge = None;
 		self.published = false;
 		self.liveness.discontinuity();
+		self.si.discontinuity();
 		if self.mux_rate.discontinuity() {
 			self.record_mux_rate()?;
 		}
@@ -1772,11 +1769,13 @@ impl<E: catalog::Catalog> Import<E> {
 				.or_insert_with(|| stats::Stream::new("", stats::Class::Data))
 				.damaged = damaged;
 		}
-		// A stream refused before it had a track has no row of its own either.
+		// A stream refused before it had a track has no row of its own either, nor does an
+		// SI PID.
 		for (&pid, &unplaced) in &self.unplaced {
+			let track = if catalog::SI_PIDS.contains(&pid) { ".si" } else { ".ts" };
 			streams
 				.entry(pid)
-				.or_insert_with(|| stats::Stream::new(".ts", stats::Class::Data))
+				.or_insert_with(|| stats::Stream::new(track, stats::Class::Data))
 				.unplaced = unplaced;
 		}
 		for (&pid, &refused) in &self.refused {
@@ -2050,8 +2049,8 @@ impl<E: catalog::Catalog> Drop for VerbatimEntry<E> {
 /// track and catalog entry and places each section on the PCR clock.
 struct SectionStream<E: catalog::Catalog> {
 	track: crate::container::Producer<crate::catalog::hang::Container>,
-	/// Held for its `Drop`, which clears this track's catalog entry.
-	_entry: VerbatimEntry<E>,
+	/// Clears this track's catalog entry on drop; its name retires the timeline when the route ends.
+	entry: VerbatimEntry<E>,
 	reassembler: SectionReassembler,
 	/// Sections waiting for the next PCR or the timebase's offset, in input order.
 	held: VecDeque<Held>,
@@ -2079,7 +2078,7 @@ impl<E: catalog::Catalog> SectionStream<E> {
 		};
 		Ok(Self {
 			track,
-			_entry: entry,
+			entry,
 			reassembler: SectionReassembler::default(),
 			held: VecDeque::new(),
 			staging: Arc::default(),
@@ -2229,8 +2228,8 @@ fn adjust_splice(section: &mut [u8], offset: Offset) {
 /// its stream.
 struct PesPacketStream<E: catalog::Catalog> {
 	track: crate::container::Producer<crate::catalog::hang::Container>,
-	/// Held for its `Drop`, which clears this track's catalog entry.
-	_entry: VerbatimEntry<E>,
+	/// Clears this track's catalog entry on drop; its name retires the timeline when the route ends.
+	entry: VerbatimEntry<E>,
 	/// The PMT `stream_type`, which says whether an unbounded PES is video.
 	stream_type: u8,
 	/// Whole PES waiting for the PCR after them or the timebase's offset, in input order.
@@ -2277,7 +2276,7 @@ impl<E: catalog::Catalog> PesPacketStream<E> {
 		};
 		Ok(Self {
 			track,
-			_entry: entry,
+			entry,
 			stream_type,
 			held: VecDeque::new(),
 		})
@@ -3178,6 +3177,14 @@ impl<E: catalog::Catalog> Stream<E> {
 			Stream::Clock => stats::Stream::new("", stats::Class::Video),
 			Stream::Ignored => return None,
 		})
+	}
+
+	/// The MoQ track name this route publishes, decoded or verbatim, once its track exists.
+	fn track_name(&self) -> Option<String> {
+		match self {
+			Stream::PesPacket(stream) => Some(stream.entry.name.clone()),
+			stream => stream.media_track_name(),
+		}
 	}
 
 	/// The MoQ track name of a decoded media stream, once its (lazily created) track
@@ -10792,99 +10799,60 @@ pub(super) mod test {
 		assert!(err.to_string().contains("twice"), "{err:#}");
 	}
 
-	/// Every ended route leaves its track name reserved, so a source that keeps revising its PMT
-	/// is refused once it has applied as many revisions as an import accepts.
+	/// A source revising its PMT without end holds only its live routes: each revision ends a
+	/// decoded or verbatim route, refuses one for a lost PCR, or rewrites the program descriptors,
+	/// and none leaves its track's timeline or catalog entry behind.
 	#[test]
-	fn pmt_churn_past_the_revision_bound_refuses_the_import() {
+	fn pmt_churn_keeps_flat_state() {
 		use crate::container::ts::psi::{Es, Pmt};
-		let (_catalog, mut import) = psi_import();
-		let pmt = |streams: &[u8]| Pmt {
-			program_number: 1,
-			pcr_pid: Some(Pid::new(PCR_PID).unwrap()),
-			program_info: Vec::new(),
-			streams: streams
-				.iter()
-				.map(|&stream_type| Es {
+		// Each round of three revisions ends where it started.
+		const ROUNDS: u32 = 333;
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<Ext>::default()),
+		)
+		.unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		let pmt = |revision: u32| {
+			// A decoded H.264 route, a private PES route, then the same one refused for want of a PCR.
+			let (stream_type, pcr) = match revision % 3 {
+				0 => (StreamType::H264 as u8, true),
+				1 => (0x06, true),
+				_ => (0x06, false),
+			};
+			Pmt {
+				program_number: 1,
+				pcr_pid: pcr.then(|| Pid::new(PCR_PID).unwrap()),
+				program_info: vec![super::catalog::Descriptor {
+					tag: 0x80,
+					data: bytes::Bytes::copy_from_slice(&revision.to_be_bytes()),
+				}],
+				streams: vec![Es {
 					stream_type,
 					pid: Pid::new(0x0062).unwrap(),
 					descriptors: Vec::new(),
-				})
-				.collect(),
+				}],
+			}
 		};
-		import.handle_pmt(pmt(&[0x06])).unwrap();
-		import.revisions = super::Import::<()>::MAX_REVISIONS - 1;
-
-		import
-			.handle_pmt(pmt(&[0x15]))
-			.expect("the last revision within the bound");
-		let err = import.handle_pmt(pmt(&[])).expect_err("one revision past the bound");
-		assert!(err.to_string().contains("revised"), "{err:#}");
-	}
-
-	/// A PMT that keeps dropping and restoring its PCR reopens the stream each time, so its
-	/// refusals count toward the same bound.
-	#[test]
-	fn pcr_churn_past_the_revision_bound_refuses_the_import() {
-		use crate::container::ts::psi::{Es, Pmt};
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = crate::catalog::Producer::new(
-			&mut broadcast,
-			crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<Ext>::default()),
-		)
-		.unwrap();
-		let mut import = super::Import::new(broadcast, catalog.reserve());
-		let pmt = |pcr_pid: Option<u16>| Pmt {
-			program_number: 1,
-			pcr_pid: pcr_pid.map(|pid| Pid::new(pid).unwrap()),
-			program_info: Vec::new(),
-			streams: vec![Es {
-				stream_type: 0x06,
-				pid: Pid::new(0x0062).unwrap(),
-				descriptors: Vec::new(),
-			}],
+		let state = |import: &super::Import<Ext>| {
+			let snapshot = catalog.snapshot();
+			(
+				catalog.timeline().len(),
+				snapshot.archive.map_or(0, |archive| archive.timelines.len()),
+				snapshot.ext.mpegts.tracks.len(),
+				import.streams.len() + import.sections.len() + import.listed.len() + import.retired_stats.len(),
+			)
 		};
-		import.handle_pmt(pmt(Some(PCR_PID))).unwrap();
-		import.revisions = super::Import::<Ext>::MAX_REVISIONS;
 
-		let err = import.handle_pmt(pmt(None)).expect_err("a refusal past the bound");
-		assert!(err.to_string().contains("revised"), "{err:#}");
-	}
-
-	/// Each program descriptor change republishes the catalog without ending a route, so it
-	/// counts toward the same bound.
-	#[test]
-	fn descriptor_churn_past_the_revision_bound_refuses_the_import() {
-		use crate::container::ts::psi::{Es, Pmt};
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = crate::catalog::Producer::new(
-			&mut broadcast,
-			crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<Ext>::default()),
-		)
-		.unwrap();
-		let mut import = super::Import::new(broadcast, catalog.reserve());
-		let pmt = |data: &'static [u8]| Pmt {
-			program_number: 1,
-			pcr_pid: Some(Pid::new(PCR_PID).unwrap()),
-			program_info: vec![super::catalog::Descriptor {
-				tag: 0x80,
-				data: bytes::Bytes::from_static(data),
-			}],
-			streams: vec![Es {
-				stream_type: StreamType::Mpeg2Video as u8,
-				pid: Pid::new(PCR_PID).unwrap(),
-				descriptors: Vec::new(),
-			}],
-		};
-		import.handle_pmt(pmt(&[0xaa])).unwrap();
-		import.revisions = super::Import::<Ext>::MAX_REVISIONS - 1;
-
-		import
-			.handle_pmt(pmt(&[0xbb]))
-			.expect("the last revision within the bound");
-		let err = import
-			.handle_pmt(pmt(&[0xaa]))
-			.expect_err("one revision past the bound");
-		assert!(err.to_string().contains("revised"), "{err:#}");
+		for revision in 0..6 {
+			import.handle_pmt(pmt(revision)).unwrap();
+		}
+		let settled = state(&import);
+		for revision in 6..3 * ROUNDS {
+			import.handle_pmt(pmt(revision)).unwrap();
+		}
+		assert_eq!(state(&import), settled);
 	}
 
 	/// The first PMT records its program descriptors over whatever the catalog held, even when it
