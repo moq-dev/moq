@@ -46,4 +46,4 @@ and `stats()` are removed if `Reload` is exported. Wire: none.
 
 ## Related
 
-- [JS reload config](/quest/m1/js-reload-config.md) - the other `Reload` change before the cut
+- [moq-dev/moq#6756](https://github.com/moq-dev/moq/pull/6756) - the other `Reload` change before the cut, now landed

@@ -25,4 +25,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [MSF duplicate init](/quest/m1/msf-duplicate-init.md) - the repeated `initDataList` id in the same reader
+- [moq-dev/moq#6773](https://github.com/moq-dev/moq/pull/6773) - refused malformed `initDataList` references in every MSF reader
