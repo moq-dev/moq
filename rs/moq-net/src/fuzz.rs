@@ -101,9 +101,6 @@ const IETF_VERSIONS: &[ietf::Version] = &[
 	ietf::Version::Draft16,
 	ietf::Version::Draft17,
 	ietf::Version::Draft18,
-	ietf::Version::Draft19,
-	ietf::Version::Draft20,
-	ietf::Version::Draft21,
 	ietf::Version::Draft22,
 ];
 
@@ -296,6 +293,25 @@ impl AnnounceWriter {
 /// `origin` as a session connected to `peer` serves it, for the viewers bench.
 pub fn excluding(origin: crate::origin::Consumer, peer: crate::Hop) -> crate::origin::Consumer {
 	origin.excluding(peer)
+}
+
+/// Land a claim with a peer's wire route, as a session does, for the origin bench.
+pub fn dynamic_route(
+	origin: &crate::origin::Producer,
+	prefix: impl crate::AsPath,
+	route: crate::origin::Route,
+) -> Result<crate::origin::Dynamic, crate::Error> {
+	origin.dynamic_route(prefix, route)
+}
+
+/// Replace a peer claim's route in place, as a session does on a route update.
+pub fn update_route(dynamic: &crate::origin::Dynamic, route: crate::origin::Route) -> Result<(), crate::Error> {
+	dynamic.update_route(route)
+}
+
+/// Answer a peer claim's request with the broadcast its session already holds.
+pub fn accept(request: crate::origin::Request, broadcast: impl crate::Consume<broadcast::Consumer>) {
+	request.accept(broadcast)
 }
 
 /// A session's snapshot of its peer's initial announcements, for the synced bench.
@@ -789,7 +805,7 @@ impl Default for Messages {
 const BENCH_LITE: lite::Version = lite::Version::Lite06;
 
 /// The moq-transport draft the [`Messages`] mix is encoded at: a leading-ones varint draft.
-const BENCH_IETF: ietf::Version = ietf::Version::Draft20;
+const BENCH_IETF: ietf::Version = ietf::Version::Draft22;
 
 impl Messages {
 	/// Append the moq-lite messages to `out`.
@@ -1104,7 +1120,7 @@ pub fn seeds() -> Vec<Seed> {
 	// FETCH is the one arm the sweep above cannot reach: its body ends in a parameter
 	// count, and a uniform fill never lands a zero there. Build it from the encoder
 	// instead, which also means a field change breaks the build rather than the seed.
-	// Draft-20 dropped the joining forms, so each draft gets whichever layout it has.
+	// Draft-22 dropped the joining forms, so each draft gets whichever layout it has.
 	for (index, version) in IETF_VERSIONS.iter().enumerate() {
 		let fetch_types = [
 			ietf::FetchType::AbsoluteJoining {

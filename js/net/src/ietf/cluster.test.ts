@@ -13,7 +13,7 @@ import { SubscribeNamespaceEntry } from "./subscribe_namespace.ts";
 import { MalformedAuthToken } from "./token.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
-const VERSION = Version.DRAFT_19;
+const VERSION = Version.DRAFT_18;
 
 /** A session that negotiated MoQ Cluster alone. */
 const CLUSTER = { cluster: true, epoch: false };
@@ -186,7 +186,7 @@ test("Cluster: the setup options are skipped before draft-17", () => {
 		expect(params.getVarint(SetupOption.HopId)).toBeUndefined();
 
 		// Even one that arrived anyway reads as "not negotiated" there.
-		Cluster.intoSetup(params, origin(42n), Version.DRAFT_19);
+		Cluster.intoSetup(params, origin(42n), Version.DRAFT_18);
 		expect(Cluster.fromSetup(params, version)).toBeUndefined();
 	}
 });

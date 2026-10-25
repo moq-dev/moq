@@ -31,7 +31,7 @@ class UringTest(unittest.TestCase):
             cargo.write_text('#!/bin/sh\ncat "$TEST_METADATA"\n')
             cargo.chmod(0o755)
             changed = scratch / "changed"
-            env = dict(os.environ, PATH=f"{scratch}:{os.environ['PATH']}",
+            env = dict(os.environ, LOCAL_SUPERVISED="1", PATH=f"{scratch}:{os.environ['PATH']}",
                        SELECT_CALLS=str(calls), TEST_METADATA=str(fixture))
             for path, passes in (
                 ("rs/moq-uring/src/worker.rs", True), ("rs/moq-relay/src/uring.rs", True),
