@@ -91,6 +91,7 @@ pub struct Internal {
 	health: moq_tokio::accept::Health,
 	listeners: Vec<moq_tokio::accept::Health>,
 	uring: Vec<UringWorker>,
+	#[cfg(any(feature = "stun", test))]
 	stun: Option<crate::stun::Counters>,
 	shutdown: Option<crate::shutdown::Observer>,
 	listener: Option<net::TcpListener>,
@@ -105,6 +106,7 @@ struct InternalState {
 	sessions: crate::session::Registry,
 	listeners: Vec<moq_tokio::accept::Health>,
 	uring: Vec<UringWorker>,
+	#[cfg(any(feature = "stun", test))]
 	stun: Option<crate::stun::Counters>,
 	shutdown: Option<crate::shutdown::Observer>,
 }
@@ -133,6 +135,7 @@ impl Internal {
 			health,
 			listeners,
 			uring: Vec::new(),
+			#[cfg(any(feature = "stun", test))]
 			stun: None,
 			shutdown: None,
 			listener: None,
@@ -140,6 +143,7 @@ impl Internal {
 		}
 	}
 
+	#[cfg(feature = "stun")]
 	pub(crate) fn with_stun(mut self, counters: Option<crate::stun::Counters>) -> Self {
 		self.stun = counters;
 		self
@@ -259,6 +263,7 @@ impl Internal {
 				sessions: self.sessions.clone(),
 				listeners: self.listeners.clone(),
 				uring: self.uring.clone(),
+				#[cfg(any(feature = "stun", test))]
 				stun: self.stun.clone(),
 				shutdown: self.shutdown.clone(),
 			})
@@ -334,6 +339,7 @@ async fn serve_health() -> Response {
 /// counts (`open - closed`).
 async fn serve_metrics(State(state): State<InternalState>) -> Response {
 	let mut body = render_metrics(&state.stats.snapshot(), &state.listeners, &state.uring);
+	#[cfg(any(feature = "stun", test))]
 	if let Some(stun) = &state.stun {
 		stun.render(&mut body);
 	}
@@ -383,6 +389,25 @@ async fn revalidate_sessions(RawQuery(query): RawQuery, State(state): State<Inte
 	}
 }
 
+/// A Prometheus label value, escaped per the text exposition format so no value
+/// can end its label or line early.
+pub(crate) struct Label<'a>(pub(crate) &'a str);
+
+impl std::fmt::Display for Label<'_> {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		use std::fmt::Write as _;
+		for c in self.0.chars() {
+			match c {
+				'\\' => f.write_str("\\\\")?,
+				'"' => f.write_str("\\\"")?,
+				'\n' => f.write_str("\\n")?,
+				c => f.write_char(c)?,
+			}
+		}
+		Ok(())
+	}
+}
+
 /// Render a [`moq_net::stats::Snapshot`] as Prometheus text exposition (v0.0.4).
 ///
 /// Hand-formatted rather than pulling in a metrics registry crate: the atomics
@@ -408,8 +433,8 @@ fn render_metrics(
 			let _ = writeln!(
 				out,
 				"{name}{{tier=\"{}\",role=\"{}\"}} {}",
-				tier.as_str(),
-				role.as_str(),
+				Label(tier.as_str()),
+				Label(role.as_str()),
 				field(totals)
 			);
 		}
@@ -515,7 +540,7 @@ fn render_metrics(
 		let _ = writeln!(out, "# HELP {name} {help}");
 		let _ = writeln!(out, "# TYPE {name} counter");
 		for (tier, presence) in snap.sessions() {
-			let _ = writeln!(out, "{name}{{tier=\"{}\"}} {}", tier.as_str(), field(&presence));
+			let _ = writeln!(out, "{name}{{tier=\"{}\"}} {}", Label(tier.as_str()), field(&presence));
 		}
 	}
 
@@ -538,8 +563,8 @@ fn render_metrics(
 			let _ = writeln!(
 				out,
 				"{name}{{tier=\"{}\",class=\"{}\"}} {}",
-				tier.as_str(),
-				class.as_str(),
+				Label(tier.as_str()),
+				Label(class.as_str()),
 				field(bytes)
 			);
 		}
@@ -554,7 +579,7 @@ fn render_metrics(
 		let _ = writeln!(
 			out,
 			"moq_relay_requests_total{{tier=\"{}\"}} {}",
-			tier.as_str(),
+			Label(tier.as_str()),
 			presence.requests
 		);
 	}
@@ -566,7 +591,7 @@ fn render_metrics(
 		let _ = writeln!(
 			out,
 			"moq_relay_sessions_opened_total{{tier=\"{}\"}} {}",
-			tier.as_str(),
+			Label(tier.as_str()),
 			sessions.sessions_started
 		);
 	}
@@ -579,7 +604,7 @@ fn render_metrics(
 		let _ = writeln!(
 			out,
 			"moq_relay_sessions_closed_total{{tier=\"{}\"}} {}",
-			tier.as_str(),
+			Label(tier.as_str()),
 			sessions.sessions_ended
 		);
 	}
@@ -594,8 +619,8 @@ fn render_metrics(
 			let _ = writeln!(
 				out,
 				"moq_relay_sessions_failed_total{{tier=\"{}\",kind=\"{}\"}} {}",
-				tier.as_str(),
-				kind.as_str(),
+				Label(tier.as_str()),
+				Label(kind.as_str()),
 				presence.sessions_failed.count(kind)
 			);
 		}
@@ -639,7 +664,7 @@ fn render_refusals(out: &mut String, refusals: &crate::refusals::Refusals) {
 		let _ = writeln!(
 			out,
 			"moq_relay_sessions_refused_total{{reason=\"{}\"}} {}",
-			refusal.as_str(),
+			Label(refusal.as_str()),
 			counts.count(refusal)
 		);
 	}
@@ -681,8 +706,8 @@ fn render_accepts(out: &mut String, listeners: &[moq_tokio::accept::Health]) {
 			let _ = writeln!(
 				out,
 				"moq_relay_accept_failures_total{{listener=\"{}\",class=\"{}\"}} {}",
-				health.listener(),
-				failure.as_str(),
+				Label(health.listener()),
+				Label(failure.as_str()),
 				health.failures(failure)
 			);
 		}
@@ -697,7 +722,7 @@ fn render_accepts(out: &mut String, listeners: &[moq_tokio::accept::Health]) {
 		let _ = writeln!(
 			out,
 			"moq_relay_accept_stalled_seconds{{listener=\"{}\"}} {}",
-			health.listener(),
+			Label(health.listener()),
 			health.stalled().unwrap_or_default().as_secs_f64()
 		);
 	}
@@ -1147,6 +1172,7 @@ mod tests {
 			sessions: crate::session::Registry::new(),
 			listeners: Vec::new(),
 			uring: Vec::new(),
+			#[cfg(any(feature = "stun", test))]
 			stun: None,
 			shutdown: None,
 		};
@@ -1166,6 +1192,7 @@ mod tests {
 			sessions: crate::session::Registry::new(),
 			listeners: Vec::new(),
 			uring: Vec::new(),
+			#[cfg(any(feature = "stun", test))]
 			stun: None,
 			shutdown: None,
 		};
@@ -1197,6 +1224,25 @@ mod tests {
 			);
 			assert!(body.contains(&row), "missing {row}:\n{body}");
 		}
+	}
+
+	/// A label value carrying a quote, backslash, or newline stays inside its label, so
+	/// it can neither break the exposition nor forge another series.
+	#[test]
+	fn label_values_are_escaped() {
+		let stats = moq_net::stats::Registry::new(Default::default());
+		let tier = "a\\b\"} 9\nmoq_relay_requests_total{tier=\"x";
+		drop(stats.tier(moq_net::stats::Tier::new(tier)).request("root"));
+		let body = render_metrics(&stats.snapshot(), &[], &[]);
+		assert!(
+			body.contains(r#"moq_relay_requests_total{tier="a\\b\"} 9\nmoq_relay_requests_total{tier=\"x"} 1"#),
+			"{body}"
+		);
+		assert!(
+			body.lines()
+				.all(|line| !line.starts_with("moq_relay_requests_total{tier=\"x")),
+			"{body}"
+		);
 	}
 
 	#[test]

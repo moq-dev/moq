@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Run `just check`, `just fix`, or `just ci` over one resolved branch diff.
+# check and ci run CHECK_JOBS lanes of modules at once (default 3); 1 runs
+# them in order and streams their output.
 # `--query` prints the selection before CI installs its toolchain and caches.
 # `ci-platform` exists only as a query for the native platform workflows.
 set -euo pipefail
@@ -22,11 +24,11 @@ esac
 
 # A host toolchain fails deep in a build instead: its gcc keeps the
 # _FORTIFY_SOURCE the dev shell disables, which breaks jemalloc's -Werror
-# configure probes. This flake's dev shell sets MOQ_DEV_SHELL. Windows has no
+# configure probes. This flake's dev shell sets IN_MOQ_DEV_SHELL. Windows has no
 # Nix, so it always runs on the host.
-if [[ -z "$query" && -z "${MOQ_DEV_SHELL:-}" && -z "${MOQ_ALLOW_HOST:-}" && "$OSTYPE" != msys && "$OSTYPE" != cygwin ]]; then
+if [[ -z "$query" && -z "${IN_MOQ_DEV_SHELL:-}" && -z "${ALLOW_HOST_TOOLCHAIN:-}" && "$OSTYPE" != msys && "$OSTYPE" != cygwin ]]; then
     echo "error: run inside the Nix dev shell ('nix develop' or direnv) so tools match CI" >&2
-    echo "       or set MOQ_ALLOW_HOST=1 to use the host toolchain anyway" >&2
+    echo "       or set ALLOW_HOST_TOOLCHAIN=1 to use the host toolchain anyway" >&2
     exit 1
 fi
 
@@ -44,7 +46,7 @@ else
 
     # These files hold the map and the recipes that call it, and match no
     # module, so a change to them would otherwise validate none of it.
-    if grep -qE '^(justfile|sh/(dispatch|changed)\.sh)$' "$changed"; then
+    if grep -qE '^(justfile|sh/(dispatch|changed)\.sh|sh/local\.(sh|ts))$' "$changed"; then
         echo "$action: root orchestration changed; running everything." >&2
         all=1
     fi
@@ -62,7 +64,7 @@ declare -A scope=(
     [workers]='^(infra/|demo/pub/|sh/js/workers\.sh$)'
     [moq_sh]='^infra/moq-sh/'
     # sh/rs/select.sh widens to the whole workspace for inputs every crate shares.
-    [rs]='^(rs/|demo/carla/bridge/|sh/rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|\.config/nextest\.toml$)'
+    [rs]='^(sh/local\.(sh|ts)$|rs/|demo/carla/bridge/|sh/rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|\.config/nextest\.toml$)'
     [bench]='^bench/'
     # The CARLA demo's simulator worker and launchers. Its player is a JS
     # package and its GPU bridge a Rust crate, so those modules cover them.
@@ -131,7 +133,7 @@ if [[ "$action" == ci-platform ]]; then
 fi
 
 # The tools each module needs. A module missing one is skipped locally, so an
-# incomplete toolchain checks less; under MOQ_STRICT (CI) it is an error, up
+# incomplete toolchain checks less; under CI_STRICT (CI) it is an error, up
 # front, because there a skip is indistinguishable from a pass. swift needs
 # none: it skips off macOS by design, and platform.yml is its real gate.
 declare -A tools=(
@@ -175,10 +177,40 @@ declare -A compiles=(
     [fix]='rs'
 )
 
+# Lanes start in this order, so the slowest come first. dart runs alone (see
+# below), so it waits for the rest.
 case "$action" in
-    check | ci) modules=(js workers moq_sh drafts rs bench carla quest drill py kt swift go dart cpp obs_compile obs flake ts_paths markdown shell large_files toml nix justfile gh) ;;
+    check | ci) modules=(py rs cpp obs_compile js kt flake bench carla swift go drafts markdown gh drill workers moq_sh quest obs ts_paths shell large_files toml nix justfile dart) ;;
     fix) modules=(js rs py carla dart obs markdown shell toml nix justfile) ;;
 esac
+
+# Modules that share mutable state run in one lane, in module order; every
+# other module is a lane of its own, and lanes run concurrently.
+declare -A lane=(
+    # `bun install` relinks the root workspace's packages even when nothing
+    # changed, so a concurrent install or import of them fails.
+    [js]=bun
+    [drafts]=bun
+    [markdown]=bun
+    [gh]=bun
+    # Both build cpp/moq/build.
+    [cpp]=cpp
+    [obs_compile]=cpp
+)
+
+# kt, swift, go, cpp, and obs_compile each build moq-ffi's cdylib with the same
+# features and profile before reading target/debug/libmoq_ffi.so. Cargo runs
+# one build at a time per target directory and leaves a fresh output untouched,
+# so the first of those lanes builds it while the rest wait in Cargo, and none
+# rewrites it while another reads it. py builds its test features into a target
+# directory of its own, and carla runs its tools outside py's venv.
+
+# Lanes that run with no other lane beside them. dart builds moq-ffi with the
+# filtered environment its build hook gets, then checks that the hook finds
+# that build fresh. Any other Cargo build in between reruns the host build
+# scripts in target/debug that track the environment, such as bindgen's
+# BINDGEN_EXTRA_CLANG_ARGS, and so rebuilds what the hook then rebuilds again.
+declare -A alone=([dart]=1)
 
 selected=()
 missing=()
@@ -198,7 +230,7 @@ for module in "${modules[@]}"; do
     done
     if ((${#absent[@]} == 0)); then
         selected+=("$module")
-    elif [[ -n "${MOQ_STRICT:-}" ]]; then
+    elif [[ -n "${CI_STRICT:-}" ]]; then
         missing+=("${absent[@]}")
     else
         echo "$action: skipping $module; missing ${absent[*]}" >&2
@@ -220,8 +252,8 @@ if [[ -n "$query" ]]; then
 fi
 
 if ((${#missing[@]})); then
-    echo "error: MOQ_STRICT is set but these tools are missing: $(printf '%s\n' "${missing[@]}" | sort -u | tr '\n' ' ')" >&2
-    echo "       run inside 'nix develop', or unset MOQ_STRICT to skip what isn't installed" >&2
+    echo "error: CI_STRICT is set but these tools are missing: $(printf '%s\n' "${missing[@]}" | sort -u | tr '\n' ' ')" >&2
+    echo "       run inside 'nix develop', or unset CI_STRICT to skip what isn't installed" >&2
     exit 1
 fi
 
@@ -246,57 +278,24 @@ files() {
     git ls-files -z --cached --others --exclude-standard -- "$@"
 }
 
-# Each phase's wall time, printed when the run ends, pass or fail, so the slow
-# module of a check or a queue run is named without reading log timestamps.
-# GitHub Actions also gets it in the job summary.
-labels=()
-seconds=()
-current=
-began=0
-begin() {
-    current=$1
-    began=$SECONDS
-}
-finish() {
-    [[ -n "$current" ]] || return 0
-    labels+=("$current${1:+ ($1)}")
-    seconds+=("$((SECONDS - began))")
-    current=
-}
-report() {
-    finish failed
-    ((${#labels[@]})) || return 0
-    echo "$action: seconds per module" >&2
-    for i in "${!labels[@]}"; do
-        printf '%6d  %s\n' "${seconds[$i]}" "${labels[$i]}" >&2
-    done
-    [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] || return 0
-    {
-        printf '| %s module | Seconds |\n| --- | ---: |\n' "$action"
-        for i in "${!labels[@]}"; do
-            printf '| %s | %d |\n' "${labels[$i]}" "${seconds[$i]}"
-        done
-    } >>"$GITHUB_STEP_SUMMARY"
-}
-trap 'report; rm -f "$changed" "$js_changed"' EXIT
-
-for module in "${selected[@]}"; do
-    begin "$verb $module"
-    case "$verb:$module" in
+# One phase of one module. The bindings run their tests in their check; rs,
+# js, py, and gh test right after it, in the same lane.
+step() {
+    case "$1:$2" in
         check:js) just js check-changed "$js_list" ;;
         check:workers) just js workers ;;
         check:moq_sh) just infra moq-sh test ;;
-        # The preamble keeps docs and target-specific lints; the test build
-        # below enforces default-feature clippy without a second compile.
+        # The check keeps docs and target-specific lints; the test phase
+        # enforces default-feature clippy without a second compile.
         check:rs) just rs lint-changed "$rs_list" ;;
         check:bench)
             python3 bench/compare.test.py
-            cargo check --locked --package moq-relay --package moq-bench --features moq-relay/io-uring
+            bash sh/local.sh cargo check --locked --package moq-relay --package moq-bench --features moq-relay/io-uring
             ;;
         check:quest) quest check ;;
         check:drill) just test drill-sensitivity --apply-only ;;
         check:obs_compile) just obs compile ;;
-        check:flake) nix flake check ;;
+        check:flake) bash sh/local.sh nix flake check ;;
         check:ts_paths) python3 sh/gh/ts-paths.py ;;
         check:markdown)
             bun install --frozen-lockfile
@@ -306,7 +305,12 @@ for module in "${selected[@]}"; do
         check:toml) RUST_LOG=error taplo format --check ;;
         check:nix) files '*.nix' | xargs -0 nixfmt --check ;;
         check:justfile) files justfile '*/justfile' | xargs -0 -n1 just --fmt --check --justfile ;;
+        test:rs) just rs test-changed "$rs_list" ;;
+        test:js) just js test-changed "$js_list" ;;
+        test:py) just py test ;;
+        test:gh) just gh test ;;
         fix:rs) just rs fix-changed "$rs_list" ;;
+        fix:js) just js fix "$js_list" ;;
         fix:markdown)
             bun install
             sh/markdown.sh fix
@@ -314,26 +318,173 @@ for module in "${selected[@]}"; do
         fix:toml) RUST_LOG=error taplo format ;;
         fix:nix) files '*.nix' | xargs -0 nixfmt ;;
         fix:justfile) files justfile '*/justfile' | xargs -0 -n1 just --fmt --justfile ;;
-        *:shell) sh/shell.sh "$verb" ;;
-        *) just "$module" "$verb" ;;
+        *:shell) sh/shell.sh "$1" ;;
+        *) just "$2" "$1" ;;
     esac
-    finish
+}
+
+# Lanes run at most this many at a time. fix stays serial: its fixers rewrite
+# files the others read, such as taplo under `cargo clippy --fix`.
+limit=${CHECK_JOBS:-3}
+[[ "$action" != fix ]] || limit=1
+if [[ ! "$limit" =~ ^[1-9][0-9]*$ ]]; then
+    echo "error: CHECK_JOBS must be a positive integer, not '$limit'" >&2
+    exit 2
+fi
+
+lanes=()
+declare -A members=()
+for module in "${selected[@]}"; do
+    name=${lane[$module]:-$module}
+    [[ -v "members[$name]" ]] || lanes+=("$name")
+    members[$name]+=" $module"
 done
 
-# The bindings run their tests in the preamble; these suites run once here.
-# gh's tooling tests run on every diff: path selection would let a broken
-# selector skip the very tests that catch it.
-if [[ "$verb" == check ]]; then
-    for module in "${selected[@]}"; do
-        case "$module" in
-            rs | js | py | gh) begin "test $module" ;;
-        esac
-        case "$module" in
-            rs) just rs test-changed "$rs_list" ;;
-            js) just js test-changed "$js_list" ;;
-            py) just py test ;;
-            gh) just gh test ;;
-        esac
-        finish
+github() {
+    [[ -n "${GITHUB_ACTIONS:-}" ]]
+}
+
+# Run one lane's modules in order, appending each phase's seconds to the lane's
+# times file. The lane stops at its first failure. A TERM, from the scheduler
+# cancelling the run, records the phase it cut short.
+run_lane() {
+    times=$1
+    shift
+    current=
+    trap 'cancelled; exit 143' TERM
+    for module in "$@"; do
+        phases=("$verb")
+        # gh's tooling tests run on every diff: path selection would let a
+        # broken selector skip the very tests that catch it.
+        if [[ "$verb" == check ]]; then
+            case "$module" in
+                rs | js | py | gh) phases+=(test) ;;
+            esac
+        fi
+        for phase in "${phases[@]}"; do
+            current="$phase $module"
+            began=$SECONDS
+            if github; then echo "::group::$current"; else echo "==> $current"; fi
+            # A plain statement, so errexit stays on inside the subshell.
+            set +e
+            (
+                set -e
+                # A subshell dies on TERM at once, orphaning the phase's
+                # processes. Trapped, it exits once they do, so a cancel
+                # returns only after the whole tree has exited.
+                trap 'exit 143' TERM
+                step "$phase" "$module"
+            )
+            status=$?
+            set -e
+            ! github || echo "::endgroup::"
+            if ((status)); then
+                record failed
+                return "$status"
+            fi
+            record
+            current=
+        done
     done
+}
+record() {
+    echo "$((SECONDS - began)) $current${1:+ ($1)}" >>"$times"
+}
+cancelled() {
+    [[ -n "$current" ]] || return 0
+    ! github || echo "::endgroup::"
+    record cancelled
+}
+
+# Each phase's wall time, printed when the run ends, pass or fail, so the slow
+# module of a check or a queue run is named without reading log timestamps.
+# GitHub Actions also gets it in the job summary. Concurrent phases overlap, so
+# the run's own wall time comes last.
+report() {
+    local name row seconds label rows=()
+    for name in "${lanes[@]:0:next}"; do
+        [[ ! -f "$logs/$name.times" ]] || mapfile -t -O "${#rows[@]}" rows <"$logs/$name.times"
+    done
+    ((${#rows[@]})) || return 0
+    rows+=("$SECONDS wall time")
+    echo "$action: seconds per module" >&2
+    for row in "${rows[@]}"; do
+        read -r seconds label <<<"$row"
+        printf '%6d  %s\n' "$seconds" "$label" >&2
+    done
+    [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] || return 0
+    {
+        printf '| %s module | Seconds |\n| --- | ---: |\n' "$action"
+        for row in "${rows[@]}"; do
+            read -r seconds label <<<"$row"
+            printf '| %s | %d |\n' "$label" "$seconds"
+        done
+    } >>"$GITHUB_STEP_SUMMARY"
+}
+
+# Stop every running lane, whose process group holds its whole tree.
+cancel() {
+    local pid
+    for pid in "${!running[@]}"; do
+        kill -TERM -- "-$pid" 2>/dev/null || true
+    done
+}
+
+logs=$(mktemp -d)
+declare -A running=()
+lone=
+next=0
+failed=
+failed_status=0
+trap 'cancel; wait; report; rm -rf "$logs" "$changed" "$js_changed"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# Each lane runs in its own process group, so a cancel reaches its whole tree;
+# a lane shell defers its own TERM trap until the running phase exits.
+# Concurrent lanes buffer their output and print it whole when they finish; a
+# serial run streams instead. The first failure cancels the running lanes and
+# starts no more, as a serial run stops at its first failure.
+set -m
+while true; do
+    while [[ -z "$failed" && -z "$lone" ]] && ((next < ${#lanes[@]} && ${#running[@]} < limit)); do
+        name=${lanes[next]}
+        if [[ -v "alone[$name]" ]] && ((${#running[@]})); then
+            break
+        fi
+        next=$((next + 1))
+        read -ra lane_modules <<<"${members[$name]}"
+        if ((limit == 1)); then
+            run_lane "$logs/$name.times" "${lane_modules[@]}" </dev/null &
+        else
+            echo "$action: started ${lane_modules[*]}" >&2
+            run_lane "$logs/$name.times" "${lane_modules[@]}" </dev/null >"$logs/$name.log" 2>&1 &
+        fi
+        running[$!]=$name
+        [[ ! -v "alone[$name]" ]] || lone=$!
+    done
+    ((${#running[@]})) || break
+
+    status=0
+    wait -n -p pid "${!running[@]}" || status=$?
+    name=${running[$pid]}
+    unset "running[$pid]"
+    [[ "$pid" != "$lone" ]] || lone=
+    if ((status)) && [[ -z "$failed" ]]; then
+        failed=$name
+        failed_status=$status
+        cancel
+        continue
+    fi
+    ((limit == 1)) || cat "$logs/$name.log"
+    [[ -z "$failed" || "$status" != 143 ]] || echo "$action: cancelled ${members[$name]# }" >&2
+done
+
+# The failure prints last, after what it cancelled.
+if [[ -n "$failed" ]]; then
+    ((limit == 1)) || cat "$logs/$failed.log"
+    phase=$(sed -n 's/^[0-9]* \(.*\) (failed)$/\1/p' "$logs/$failed.times")
+    phase=${phase:-${members[$failed]# }}
+    if github; then echo "::error::$action: $phase failed"; else echo "$action: $phase failed" >&2; fi
+    exit "$failed_status"
 fi

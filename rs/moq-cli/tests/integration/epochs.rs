@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use hang::moq_net::{self, Epoch, Timestamp, announce, broadcast, origin, track};
+use hang::moq_net::{self, Epoch, Timestamp, announce, origin, track};
 use moq_mux::catalog::Stream;
 
 const LITE_07: &str = "moq-lite-07-wip";
@@ -13,7 +13,12 @@ const ROUND_TRIP: Duration = Duration::from_millis(1);
 /// How long an announcement-following reader may take to see a replacement or a fallback: the
 /// relay's and the reader's origins may each hold the route change for their update hold, and
 /// the announcement crosses both links in one round trip. The idle timeout never enters it.
-const ROUTING: Duration = origin::DEFAULT_UPDATE_HOLD.saturating_mul(2).saturating_add(ROUND_TRIP);
+fn routing() -> Duration {
+	origin::Config::default()
+		.update_hold
+		.saturating_mul(2)
+		.saturating_add(ROUND_TRIP)
+}
 
 struct Relay {
 	url: url::Url,
@@ -29,7 +34,7 @@ impl Drop for Relay {
 async fn relay() -> Relay {
 	let _ = moq_tokio::crypto::install_default();
 	let mut config = moq_relay::Config::default();
-	config.drain_timeout = Duration::ZERO;
+	config.drain_timeout = Some(Duration::ZERO.into());
 	config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.listen.tls.generate = vec!["localhost".into()];
 	config.listen.version = std::iter::once(LITE_07.parse().unwrap())
@@ -47,10 +52,9 @@ async fn relay() -> Relay {
 fn client(version: &str) -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
-	config.once = Some(true);
 	config.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.version = vec![version.parse().unwrap()];
-	config.init(Default::default()).unwrap()
+	config.init(Default::default()).unwrap().with_reconnect(false)
 }
 
 fn write(track: &track::Producer, tag: &str) {
@@ -71,14 +75,14 @@ async fn read(subscription: &mut track::Subscriber) -> String {
 
 struct Published {
 	catalog: moq_mux::catalog::Producer,
-	_catalog_broadcast: broadcast::Producer,
-	sibling: broadcast::Producer,
+	_catalog_broadcast: origin::Publication,
+	sibling: origin::Publication,
 	media: track::Producer,
 }
 
 fn publish(origin: &origin::Producer, epoch: &Epoch, tag: &str) -> Published {
 	let route = origin::Route::default().with_epoch(epoch.clone());
-	let mut broadcast = origin.publish("live/catalog.hang", route.clone()).unwrap();
+	let broadcast = origin.publish("live/catalog.hang", route.clone()).unwrap();
 	let sibling = origin.publish("live/media", route).unwrap();
 	let media = sibling
 		.create_track(
@@ -87,7 +91,7 @@ fn publish(origin: &origin::Producer, epoch: &Epoch, tag: &str) -> Published {
 		)
 		.unwrap();
 	write(&media, &format!("{tag}:0"));
-	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
 	catalog
 		.mutate(|catalog| {
 			let mut audio = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
@@ -104,12 +108,12 @@ fn publish(origin: &origin::Producer, epoch: &Epoch, tag: &str) -> Published {
 	}
 }
 
-/// Finish a route change within [`ROUTING`] of `started`.
+/// Finish a route change within [`routing`] of `started`.
 async fn within<T>(started: Instant, change: impl Future<Output = T>) -> T {
-	let deadline = tokio::time::Instant::from_std(started + ROUTING);
+	let deadline = tokio::time::Instant::from_std(started + routing());
 	tokio::time::timeout_at(deadline, change)
 		.await
-		.unwrap_or_else(|_| panic!("route change took longer than {ROUTING:?}"))
+		.unwrap_or_else(|_| panic!("route change took longer than {:?}", routing()))
 }
 
 /// Ignore same-instance metadata updates, but keep the actual replacement representation.
@@ -203,8 +207,9 @@ async fn replacement(version: &str) {
 	);
 	assert_eq!(media_restart, catalog_restart);
 	println!(
-		"{version}: relay replacement observed in {:?} of {ROUTING:?} (publisher already connected)",
-		started.elapsed()
+		"{version}: relay replacement observed in {:?} of {:?} (publisher already connected)",
+		started.elapsed(),
+		routing()
 	);
 
 	// Later catalog snapshots stay on A and resolving again keeps A's sibling pin.
@@ -284,8 +289,9 @@ async fn replacement(version: &str) {
 	assert!(returned_frame.starts_with("A:"), "fallback read {returned_frame}");
 	assert_eq!(read(&mut subscription).await, "A:3");
 	println!(
-		"{version}: relay fallback observed in {:?} of {ROUTING:?}",
-		started.elapsed()
+		"{version}: relay fallback observed in {:?} of {:?}",
+		started.elapsed(),
+		routing()
 	);
 }
 

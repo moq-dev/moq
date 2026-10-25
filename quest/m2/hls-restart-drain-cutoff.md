@@ -34,8 +34,9 @@ Decided 2026-10-24 (iteration, on the merits):
 - Rejected: an unbounded drain of the old run; an immediate cutoff at
   `Restart` that discards listed rows; treating a catalog error as media EOF.
 - A cutoff recording is complete: its cursor returns `Ok(None)` after the last
-  listed row, as after `End`. Keep this consistent with the end semantics the
-  [cursor audit](/quest/m1/hls-teardown.md) settles.
+  listed row, as after `End`. The cursors return `Ok(None)` only for a
+  confirmed end and `Error::IncompleteRecording` for any other close, so the
+  cutoff must end the old windows, not just close them.
 - No new public API: the boundary shows up as the cursor's end. No wire change.
 
 Tests: an old publisher that keeps sending after `Restart` still finalizes
@@ -43,7 +44,3 @@ with exactly the rows listed before it; with the old run's drain held
 blocked, the successor's recording begins as soon as `Restart` is processed;
 catalog EOF and catalog-error behavior are unchanged.
 
-## Related
-
-- [HLS cursors error on every incomplete recording](/quest/m1/hls-teardown.md) - decides which window closes are clean finishes
-- [HLS recorder in the CLI](/quest/m1/hls-record-cli.md) - the recorder that would see a replaced run

@@ -109,11 +109,12 @@ type StreamOp<S, T, E> = OpBox<(S, Option<Result<T, E>>)>;
 ///   cancellation while later writes reclaim the stream.
 pub struct Session<S: web_transport_trait::Session> {
 	session: S,
-	binding: moq_net::transport::Binding,
+	address: moq_net::transport::Address,
 	accept_uni: OpSlot<Result<S::RecvStream, S::Error>>,
 	accept_bi: OpSlot<BiResult<S>>,
 	open_uni: OpSlot<Result<S::SendStream, S::Error>>,
 	open_bi: OpSlot<BiResult<S>>,
+	request_bi: OpSlot<RequestResult<S>>,
 	recv_datagram: OpSlot<Result<Bytes, S::Error>>,
 	closed: OpSlot<S::Error>,
 }
@@ -124,6 +125,15 @@ type BiResult<S> = Result<
 		<S as web_transport_trait::Session>::SendStream,
 		<S as web_transport_trait::Session>::RecvStream,
 	),
+	<S as web_transport_trait::Session>::Error,
+>;
+
+/// A request's stream pair, or a refusal before consuming stream credit.
+type RequestResult<S> = Result<
+	Option<(
+		<S as web_transport_trait::Session>::SendStream,
+		<S as web_transport_trait::Session>::RecvStream,
+	)>,
 	<S as web_transport_trait::Session>::Error,
 >;
 
@@ -145,14 +155,15 @@ fn poll_op<T>(slot: &mut OpSlot<T>, cx: &mut Context<'_>, start: impl FnOnce() -
 
 impl<S: web_transport_trait::Session> Session<S> {
 	/// Wrap an async-interface transport session.
-	pub fn new(session: S, binding: moq_net::transport::Binding) -> Self {
+	pub fn new(session: S, address: moq_net::transport::Address) -> Self {
 		Self {
 			session,
-			binding,
+			address,
 			accept_uni: OpSlot::default(),
 			accept_bi: OpSlot::default(),
 			open_uni: OpSlot::default(),
 			open_bi: OpSlot::default(),
+			request_bi: OpSlot::default(),
 			recv_datagram: OpSlot::default(),
 			closed: OpSlot::default(),
 		}
@@ -163,7 +174,7 @@ impl<S: web_transport_trait::Session> Session<S> {
 // owns its own progress under the poll contract.
 impl<S: web_transport_trait::Session> Clone for Session<S> {
 	fn clone(&self) -> Self {
-		Self::new(self.session.clone(), self.binding)
+		Self::new(self.session.clone(), self.address)
 	}
 }
 
@@ -885,6 +896,9 @@ impl<S: web_transport_trait::RecvStream + 'static> Drop for RecvStream<S> {
 
 #[cfg(feature = "quic")]
 impl Grouped for crate::quic::web::Session {
+	fn open_request(&self) -> impl std::future::Future<Output = RequestResult<Self>> + Send {
+		Self::open_request(self)
+	}
 	// Leased in the QUIC stack, so the receive window bounds what an incomplete message holds.
 	type Recv = crate::quic::web::RecvStream;
 
@@ -894,6 +908,10 @@ impl Grouped for crate::quic::web::Session {
 
 	fn wire(&self) -> Option<moq_net::transport::Wire> {
 		Some(crate::quic::driver::Connection::wire(self))
+	}
+
+	fn probe(&self) -> Option<moq_net::transport::Probe> {
+		crate::quic::driver::Connection::probe(self)
 	}
 
 	fn streams_evicted(&self) -> Option<u64> {
@@ -1524,11 +1542,11 @@ mod tests {
 		assert_eq!(fake.writes.lock().unwrap().as_slice(), b"hello");
 		assert_eq!(fake.priorities.lock().unwrap().as_slice(), &[7]);
 		assert_eq!(fake.resets.lock().unwrap().as_slice(), &[0x33]);
-		for binding in [moq_net::transport::Binding::Uri, moq_net::transport::Binding::InBand] {
-			let session = Session::new(FakeSession, binding);
+		for address in [moq_net::transport::Address::Uri, moq_net::transport::Address::Setup] {
+			let session = Session::new(FakeSession, address);
 			let mut cloned = session.clone();
-			assert_eq!(poll::Session::binding(&session), binding);
-			assert_eq!(poll::Session::binding(&cloned), binding);
+			assert_eq!(poll::Session::address(&session), address);
+			assert_eq!(poll::Session::address(&cloned), address);
 			assert!(poll::Session::poll_accept_uni(&mut cloned, &mut cx).is_pending());
 		}
 	}

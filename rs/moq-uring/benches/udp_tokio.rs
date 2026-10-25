@@ -1,12 +1,12 @@
 //! Tokio/epoll baseline for UDP receive batching and send GSO on Linux.
-#![expect(
-	clippy::disallowed_methods,
-	reason = "benchmarks measure themselves on the host clock"
-)]
 
 use criterion::{criterion_group, criterion_main};
 
 #[cfg(target_os = "linux")]
+#[expect(
+	clippy::disallowed_methods,
+	reason = "benchmarks measure themselves on the host clock"
+)]
 mod linux {
 	use std::fmt;
 	use std::io::{self, IoSliceMut};

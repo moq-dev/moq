@@ -1,21 +1,18 @@
 import { Unsupported } from "../auth.ts";
-import type { AuthWire, WireGrant, WireReply } from "../auth_session.ts";
+import { type AuthWire, decodePatterns, encodePatterns, type WireGrant, type WireReply } from "../auth_session.ts";
 import { ProtocolViolation, SessionCode, SessionError, StreamCode, StreamError } from "../error.ts";
-import * as Path from "../path.ts";
+import type * as Path from "../path.ts";
 import type { Reader, Stream, Writer } from "../stream.ts";
 import type { Session } from "./adapter.ts";
 import { supported } from "./auth_setup.ts";
 import * as Message from "./message.ts";
-import * as Namespace from "./namespace.ts";
 import { nextMessage } from "./request_stream.ts";
 import type { IetfVersion } from "./version.ts";
 
 /**
- * The MoQ Auth extension (draft-lcurley-moq-auth-00): the moq-lite Auth Stream as
- * moq-transport request streams, negotiated in `auth_setup.ts`.
- *
- * The wire carries namespace prefixes, so a grant is told only when it is a union of
- * subtrees; anything narrower is refused with NOT_SUPPORTED rather than widened.
+ * The MoQ Auth extension (draft-lcurley-moq-auth-01): the moq-lite Auth Stream as
+ * moq-transport request streams, negotiated in `auth_setup.ts`. AUTH_OK carries the
+ * same patterns, encoded the same way, as moq-lite's.
  *
  * @module
  * @internal
@@ -24,6 +21,7 @@ import type { IetfVersion } from "./version.ts";
 /** The REQUEST_ERROR codes AUTH_ERROR carries. */
 const UNAUTHORIZED = 0x1;
 const NOT_SUPPORTED = 0x3;
+const MALFORMED_AUTH_TOKEN = 0x4;
 const EXPIRED_AUTH_TOKEN = 0x5;
 /** Draft-17 assigned it, the first draft this extension negotiates on. */
 const GOING_AWAY = 0x6;
@@ -75,30 +73,6 @@ export class AuthMessage {
 	}
 }
 
-/** Each pattern as a namespace prefix, or throw {@link Unsupported} for one that is not a subtree. */
-function prefixes(patterns: Path.Patterns): Path.Valid[] {
-	return patterns.toArray().map((pattern) => {
-		const prefix = pattern.asPrefix();
-		if (prefix === undefined) throw new Unsupported(`grant not representable as namespace prefixes: ${pattern}`);
-		return prefix as Path.Valid;
-	});
-}
-
-async function encodePrefixes(w: Writer, list: Path.Valid[]) {
-	await w.u53(list.length);
-	for (const prefix of list) await Namespace.encode(w, prefix);
-}
-
-async function decodePrefixes(r: Reader): Promise<Path.Patterns> {
-	const count = await r.u53();
-	const patterns: Path.Pattern[] = [];
-	for (let i = 0; i < count; i++) {
-		patterns.push(Path.Pattern.subtree(await Namespace.decode(r)));
-	}
-	// Reduce once, so a peer's count never turns into quadratic work.
-	return new Path.Patterns(patterns);
-}
-
 /** AUTH_OK: the grant a token earns, replacing any earlier one on the stream. @internal */
 export class AuthOk {
 	static id = 0x40b62;
@@ -116,15 +90,11 @@ export class AuthOk {
 
 	async encode(w: Writer, version: IetfVersion): Promise<void> {
 		guard(version);
-		// Resolved before anything is written, so an unrepresentable grant leaves nothing
-		// half-sent.
-		const publish = prefixes(this.publish);
-		const subscribe = prefixes(this.subscribe);
 		return Message.encode(
 			w,
 			async (wr) => {
-				await encodePrefixes(wr, publish);
-				await encodePrefixes(wr, subscribe);
+				await encodePatterns(wr, this.publish);
+				await encodePatterns(wr, this.subscribe);
 				// 0 means never, so a lapsed grant rounds up to the smallest real expiry.
 				const expires =
 					this.expires === undefined
@@ -139,8 +109,8 @@ export class AuthOk {
 	static async decode(r: Reader, version: IetfVersion): Promise<AuthOk> {
 		guard(version);
 		return Message.decode(r, async (rd) => {
-			const publish = await decodePrefixes(rd);
-			const subscribe = await decodePrefixes(rd);
+			const publish = await decodePatterns(rd);
+			const subscribe = await decodePatterns(rd);
 			const expires = await rd.u53();
 			return new AuthOk(publish, subscribe, expires === 0 ? undefined : expires);
 		});
@@ -191,6 +161,9 @@ export class AuthError {
 	/** What the refusal means to the presenter, preserving an actionable expiry. */
 	toError(): Error {
 		if (this.code === NOT_SUPPORTED) return new Unsupported(this.reason);
+		if (this.code === MALFORMED_AUTH_TOKEN) {
+			return new SessionError(SessionCode.MalformedAuthToken, { reason: this.reason });
+		}
 		if (this.code === EXPIRED_AUTH_TOKEN) return new SessionError(SessionCode.Expired, { reason: this.reason });
 		if (this.code === GOING_AWAY) return new StreamError(StreamCode.GoingAway, { reason: this.reason });
 		return new SessionError(SessionCode.Unauthorized, { reason: this.reason });
@@ -253,9 +226,11 @@ export class IetfAuthWire implements AuthWire {
 		const wire =
 			code === SessionCode.Version || code === SessionCode.Unsupported
 				? NOT_SUPPORTED
-				: code === SessionCode.Expired
-					? EXPIRED_AUTH_TOKEN
-					: UNAUTHORIZED;
+				: code === SessionCode.MalformedAuthToken
+					? MALFORMED_AUTH_TOKEN
+					: code === SessionCode.Expired
+						? EXPIRED_AUTH_TOKEN
+						: UNAUTHORIZED;
 		await new AuthError(wire, reason).encode(stream.writer, this.#version);
 	}
 

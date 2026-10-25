@@ -18,13 +18,23 @@ moq-transport.
 
 ## Plan
 
-Decided 2026-10-23 (maintainer): moved from m2 to m1 with the
-[group storage benchmark](/quest/m1/group-storage-bench.md), holding the next
+Decided 2026-10-23 (maintainer): moved from m2 to m1, holding the next
 breaking cut, so a long-lived log such as a moq-json `Stream` has no record
 ceiling in that release. Making `Stream` roll groups instead was rejected:
 its readers reject a second group (`Rolled`), and a `Window` that never pops
 is already the rolling log. Pointing `Stream`'s docs at `Window` in the
 meantime was declined.
+
+Decided 2026-10-24 (maintainer interview): one group should work as an
+indefinite stream, since many applications are 1:1 and keeping a whole
+group just in case someone joins is wasteful. Refills ask for exactly the
+hole and are unpaced; reader-paced refill "trains" that merge were rejected
+as not worth their complexity. A refill refreshes the frames after it so it
+never evicts what its reader needs next. When nothing serves a hole, the
+reader gets `Evicted` and a joiner falls back to `Info::refresh`. The live
+edge is never paced by readers. Groups are bounded by bytes, with each
+frame's slot charged to the pool. Details are in
+[Front eviction](/quest/m1/unbounded-groups/front-eviction.md).
 
 Decided 2026-10-16 (maintainer interview):
 
@@ -52,13 +62,19 @@ Decided 2026-10-16 (maintainer interview):
 - QUIC receive credit is released per segment, so an arbitrary-size frame
   never needs a matching receive allowance. The aim is to avoid
   over-allocating, not to bound a frame.
-- Refills patch the group's state in place, written only below
-  `committed` so they never race the tail writer. They replace today's
-  separate `Slot.head` copy. Whether the state is sorted runs or the
-  [append-only log](/quest/m2/perf/kio-channel-contention/log.md) (or a ring
-  buffer) is the [group storage benchmark](/quest/m1/group-storage-bench.md)'s
-  call (decided 2026-10-20, maintainer, leaning log because hot-path
-  performance matters more than evicting the middle).
+- Refills patch the group's state in place, written only below the tail
+  run's base so they never race the tail writer. They replace today's
+  separate `Slot.head` copy.
+- Storage (decided 2026-10-24 by the maintainer, over the group storage
+  benchmark, [moq-dev/moq#6627](https://github.com/moq-dev/moq/pull/6627)):
+  the lock-free append-only log (`kio::log`) is the
+  tail run, from a base that only advances, and refilled runs sit below it.
+  It moved here from m2, ahead of Front eviction, so the end-state storage
+  lands once instead of a mutex layout swapped later. Prototyped, the log
+  cost 10 to 40% less per reader across cores at 1,024 readers and about
+  15 ns more per append than today's `VecDeque`. A ring buffer was rejected:
+  an uncapped group has no size to give it. Numbers are in the
+  [kio contention epic](/quest/m2/perf/kio-channel-contention/README.md).
 - Readers pin nothing: reads refresh recency as today. A reader that
   falls into an evicted run refills like a joiner. With nothing to refill
   from, it gets `Error::Evicted`. Within a group, victims go front to back.
@@ -78,9 +94,7 @@ Decided 2026-10-16 (maintainer interview):
   draft's 32 MiB interop cap. The
   [m1 compression migration](/quest/m1/compress/migrate.md) deletes the flate packages. There is no new page.
 
-The refill API is the
-[Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md)
-`track::Dynamic` range request. A handler serves a range by writing into a
+The refill API is the `track::Dynamic` fill (`track::Fill`). A handler serves a range by writing into a
 group producer bounded to that range, the same API as a live write, so an
 origin can regenerate data from disk or an archive.
 
@@ -94,6 +108,7 @@ moq-transport, with memory held near the pool size.
 - [Front eviction](/quest/m1/unbounded-groups/front-eviction.md) - groups shed whole frames from their front under pressure and refill them in place; the group caps go
 - [Byte holes](/quest/m1/unbounded-groups/byte-holes.md) - segments inside a frame evict and refill by `(frame, byte)` on the next lite version; the frame cap goes
 - [JS unbounded groups](/quest/m1/unbounded-groups/js.md) - `@moq/net` drops its caps, streams huge frames, and matches front eviction
+- [Log lock profile](/quest/m1/unbounded-groups/log-lock-profile.md) - a lock profile on a perf host confirms the epoch-based `kio::log` cut `GroupState` contention
 
 ## Related
 

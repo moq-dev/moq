@@ -93,6 +93,8 @@ pub struct EgressSource {
 	/// The latest catalog snapshot, followed for the session's life so each pump serves the
 	/// best enabled rendition. Its sender drops when the catalog ends.
 	catalog: watch::Receiver<Catalog>,
+	/// Why the catalog stopped, until the session takes it.
+	catalog_end: Option<tokio::task::JoinHandle<Result<()>>>,
 	writes_tx: mpsc::Sender<WriteRequest>,
 	writes_rx: Option<mpsc::Receiver<WriteRequest>>,
 }
@@ -111,12 +113,13 @@ impl EgressSource {
 		let mut consumer = source.catalog::<()>(moq_mux::catalog::CatalogFormat::Hang).await?;
 		let catalog = consumer.next().await?.ok_or(Error::CatalogClosed)?;
 		let (catalog_tx, catalog) = watch::channel(catalog);
-		tokio::spawn(follow_catalog(consumer, catalog_tx));
+		let catalog_end = tokio::spawn(follow_catalog(consumer, catalog_tx));
 
 		let (tx, rx) = mpsc::channel(64);
 		Ok(Self {
 			source,
 			catalog,
+			catalog_end: Some(catalog_end),
 			writes_tx: tx,
 			writes_rx: Some(rx),
 		})
@@ -126,6 +129,12 @@ impl EgressSource {
 	/// awaits on this to forward frames into str0m.
 	pub fn take_writes(&mut self) -> mpsc::Receiver<WriteRequest> {
 		self.writes_rx.take().expect("EgressSource writes_rx already taken")
+	}
+
+	/// One-shot extractor for why the catalog stopped. A failure, such as the source's route
+	/// dying, ends the session, since nothing more will flow.
+	pub(crate) fn take_catalog_end(&mut self) -> tokio::task::JoinHandle<Result<()>> {
+		self.catalog_end.take().expect("EgressSource catalog_end already taken")
 	}
 
 	/// Spawn a pump task for a newly added (sendonly) media line.
@@ -184,21 +193,22 @@ impl EgressSource {
 	}
 }
 
-/// Publish each catalog snapshot until the catalog ends or every pump is gone.
-async fn follow_catalog(mut consumer: moq_mux::catalog::Consumer<()>, tx: watch::Sender<Catalog>) {
+/// Publish each catalog snapshot until the catalog ends or every pump is gone, failing with the
+/// catalog's failure.
+async fn follow_catalog(mut consumer: moq_mux::catalog::Consumer<()>, tx: watch::Sender<Catalog>) -> Result<()> {
 	loop {
 		tokio::select! {
 			next = consumer.next() => match next {
 				Ok(Some(catalog)) => {
 					tx.send_replace(catalog);
 				}
-				Ok(None) => return,
+				Ok(None) => return Ok(()),
 				Err(err) => {
 					tracing::warn!(%err, "egress catalog failed");
-					return;
+					return Err(err.into());
 				}
 			},
-			_ = tx.closed() => return,
+			_ = tx.closed() => return Ok(()),
 		}
 	}
 }
@@ -277,6 +287,21 @@ impl Rendition {
 		}
 	}
 
+	/// The track the rendition reads through `source`.
+	fn target(&self, source: &moq_mux::Source) -> Target {
+		use hang::catalog::Reference;
+
+		let (name, config): (_, &dyn Reference) = match self {
+			Self::Audio(name, config) => (name, config),
+			Self::Video(name, config) => (name, config),
+		};
+		Target {
+			path: source.resolve_reference(config.broadcast()),
+			epoch: config.epoch().cloned(),
+			track: config.track(name).to_string(),
+		}
+	}
+
 	/// Subscribe to the rendition, honoring its cross-broadcast reference (the catalog
 	/// `broadcast` field).
 	async fn subscribe(self, source: moq_mux::Source) -> Result<codec::Track> {
@@ -309,9 +334,19 @@ fn pick_audio<'a>(
 	})
 }
 
+/// The track a rendition reads: its broadcast's path, the publisher instance that broadcast
+/// must be, and the track's name there. A catalog update that changes it moves the rendition.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Target {
+	path: Option<moq_net::PathOwned>,
+	epoch: Option<moq_net::Epoch>,
+	track: String,
+}
+
 /// A subscribed rendition, sent in `format`.
 struct Serving {
 	name: String,
+	target: Target,
 	format: Format,
 	track: codec::Track,
 }
@@ -319,18 +354,19 @@ struct Serving {
 /// A rendition whose subscription is still resolving.
 struct Subscribing {
 	name: String,
+	target: Target,
 	format: Format,
 	track: std::pin::Pin<Box<dyn Future<Output = Result<codec::Track>> + Send>>,
 }
 
 /// Serves one negotiated media line from the best enabled rendition in its codecs.
 ///
-/// The pump re-picks on every catalog change. A better or newly enabled rendition is
-/// subscribed beside the current one, which keeps flowing until the new one reaches a
-/// keyframe past the line's playhead, so a switch leaves no gap and never steps back in
-/// time: a new subscription starts at the rendition's latest group, which for one re-enabled
-/// is the stale group it stopped on. A switch across codecs changes the payload type at that
-/// keyframe. With nothing enabled it serves nothing until a
+/// The pump re-picks on every catalog change. A better or newly enabled rendition, or the
+/// current one moved to another track, is subscribed beside the current one, which keeps
+/// flowing until the new one reaches a keyframe past the line's playhead, so a switch leaves
+/// no gap and never steps back in time: a new subscription starts at the rendition's latest
+/// group, which for one re-enabled is the stale group it stopped on. A switch across codecs
+/// changes the payload type at that keyframe. With nothing enabled it serves nothing until a
 /// rendition re-enables. There is no ABR on the peer, so a re-enabled top rendition wins
 /// the line back.
 ///
@@ -364,7 +400,8 @@ impl Pump {
 		loop {
 			if repick {
 				repick = false;
-				let pick = pick(&self.source, &self.catalog.borrow_and_update(), &self.formats);
+				let pick = pick(&self.source, &self.catalog.borrow_and_update(), &self.formats)
+					.map(|(pick, format)| (pick.target(&self.source), pick, format));
 				match pick {
 					None => {
 						if serving.is_some() || next.is_some() || subscribing.is_some() {
@@ -375,17 +412,20 @@ impl Pump {
 						subscribing = None;
 						held = Held::default();
 					}
-					Some((pick, _)) if serving.as_ref().is_some_and(|s| s.name == pick.name()) => {
+					// Compared by track rather than by ID: a rendition the catalog moves to
+					// another track switches to it like any other pick.
+					Some((target, ..)) if serving.as_ref().is_some_and(|s| s.target == target) => {
 						next = None;
 						subscribing = None;
 					}
-					Some((pick, _))
-						if next.as_ref().is_some_and(|s| s.name == pick.name())
-							|| subscribing.as_ref().is_some_and(|s| s.name == pick.name()) => {}
-					Some((pick, format)) => {
+					Some((target, ..))
+						if next.as_ref().is_some_and(|s| s.target == target)
+							|| subscribing.as_ref().is_some_and(|s| s.target == target) => {}
+					Some((target, pick, format)) => {
 						next = None;
 						subscribing = Some(Subscribing {
 							name: pick.name().to_string(),
+							target,
 							format,
 							track: Box::pin(pick.subscribe(self.source.clone())),
 						});
@@ -410,10 +450,10 @@ impl Pump {
 				// The session is gone, even if this line is idle.
 				_ = self.tx.closed() => return,
 				subscribed = subscribe(&mut subscribing) => {
-					let Subscribing { name, format, .. } = subscribing.take().expect("a subscription resolved");
+					let Subscribing { name, target, format, .. } = subscribing.take().expect("a subscription resolved");
 					match subscribed {
 						Ok(track) => {
-							next = Some(Serving { name, format, track });
+							next = Some(Serving { name, target, format, track });
 							held.reached = None;
 						}
 						Err(err) => tracing::warn!(mid = ?self.mid, rendition = name, %err, "egress track subscribe failed"),
@@ -606,6 +646,7 @@ mod tests {
 		let egress = EgressSource {
 			source,
 			catalog: watch::channel(catalog).1,
+			catalog_end: None,
 			writes_tx,
 			writes_rx: Some(writes_rx),
 		};
@@ -851,6 +892,74 @@ mod tests {
 		idle(&mut writes).await;
 		high.write(frame(200, b"high-1", true)).unwrap();
 		assert_eq!(written(&mut writes).await.as_ref(), b"high-1");
+	}
+
+	/// A rendition the catalog moves to another track, in its broadcast or a sibling one, keeps
+	/// its media line: the line switches to the new track at its first keyframe past the
+	/// playhead and serves nothing more of the track it left, even while that one still sends.
+	#[tokio::test(start_paused = true)]
+	async fn a_moved_rendition_follows_its_new_track() {
+		let origin = produce_origin();
+		let live = origin.publish("live", Default::default()).unwrap();
+		let other = origin.publish("other", Default::default()).unwrap();
+		let mut catalog =
+			moq_mux::catalog::Producer::new(&mut live.broadcast().clone(), moq_mux::catalog::Config::default())
+				.unwrap();
+		let track = |broadcast: &mut moq_net::broadcast::Producer, name: &str| {
+			let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
+			moq_mux::container::Producer::new(
+				broadcast.create_track(name, info).unwrap(),
+				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
+			)
+		};
+		let mut a = track(&mut live.broadcast().clone(), "a");
+		let mut b = track(&mut live.broadcast().clone(), "b");
+		let mut sibling = track(&mut other.broadcast().clone(), "a");
+		let point = |catalog: &mut moq_mux::catalog::Producer, track: &str, broadcast: Option<&str>| {
+			let mut config = VideoConfig::new(VideoCodec::VP8);
+			config.container = hang::catalog::Container::Legacy;
+			config.track = Some(track.to_string());
+			config.broadcast = broadcast.map(|broadcast| Relative::new(broadcast).into_owned());
+			catalog
+				.modify()
+				.unwrap()
+				.video
+				.renditions
+				.insert("main".to_string(), config);
+		};
+		point(&mut catalog, "a", None);
+
+		let broadcast = origin.consume().request_broadcast("live", None).await.unwrap();
+		let mut egress = EgressSource::new(moq_mux::Source::new(origin.consume(), broadcast))
+			.await
+			.unwrap();
+		let mut writes = egress.take_writes();
+		egress.on_track(Mid::from("0"), vec![format(Codec::Vp8, 96)]).unwrap();
+
+		a.write(frame(0, b"a-0", true)).unwrap();
+		assert_eq!(written(&mut writes).await.as_ref(), b"a-0");
+
+		// Moved within the broadcast: the old track is paced to the new one until its keyframe.
+		point(&mut catalog, "b", None);
+		idle(&mut writes).await;
+		a.write(frame(33, b"a-1", false)).unwrap();
+		idle(&mut writes).await;
+		b.write(frame(66, b"b-2", true)).unwrap();
+		assert_eq!(written(&mut writes).await.as_ref(), b"a-1");
+		assert_eq!(written(&mut writes).await.as_ref(), b"b-2");
+		a.write(frame(100, b"a-3", false)).unwrap();
+		idle(&mut writes).await;
+
+		// Moved to a sibling broadcast.
+		point(&mut catalog, "a", Some("other"));
+		idle(&mut writes).await;
+		sibling.write(frame(100, b"sibling-3", true)).unwrap();
+		assert_eq!(written(&mut writes).await.as_ref(), b"sibling-3");
+		a.write(frame(133, b"a-4", false)).unwrap();
+		b.write(frame(133, b"b-4", false)).unwrap();
+		idle(&mut writes).await;
+		sibling.write(frame(133, b"sibling-4", false)).unwrap();
+		assert_eq!(written(&mut writes).await.as_ref(), b"sibling-4");
 	}
 
 	/// A line that negotiated both codecs serves the preferred rendition in its payload type,

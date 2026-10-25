@@ -39,25 +39,8 @@ export const Version = {
 	DRAFT_18: 0xff000012,
 
 	/**
-	 * draft-ietf-moq-transport-19
-	 * https://www.ietf.org/archive/id/draft-ietf-moq-transport-19.txt
-	 */
-	DRAFT_19: 0xff000013,
-
-	/**
-	 * draft-ietf-moq-transport-20
-	 * https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.txt
-	 */
-	DRAFT_20: 0xff000014,
-
-	/**
-	 * draft-ietf-moq-transport-21
-	 * https://www.ietf.org/archive/id/draft-ietf-moq-transport-21.txt
-	 */
-	DRAFT_21: 0xff000015,
-
-	/**
-	 * draft-ietf-moq-transport-22 (unpublished, wire-identical to draft-21)
+	 * draft-ietf-moq-transport-22
+	 * https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.txt
 	 */
 	DRAFT_22: 0xff000016,
 } as const;
@@ -71,9 +54,6 @@ export const ALPN = {
 	DRAFT_16: "moqt-16",
 	DRAFT_17: "moqt-17",
 	DRAFT_18: "moqt-18",
-	DRAFT_19: "moqt-19",
-	DRAFT_20: "moqt-20",
-	DRAFT_21: "moqt-21",
 	DRAFT_22: "moqt-22",
 } as const;
 
@@ -87,9 +67,6 @@ export type IetfVersion =
 	| typeof Version.DRAFT_16
 	| typeof Version.DRAFT_17
 	| typeof Version.DRAFT_18
-	| typeof Version.DRAFT_19
-	| typeof Version.DRAFT_20
-	| typeof Version.DRAFT_21
 	| typeof Version.DRAFT_22;
 
 const VERSION_NAMES: Record<number, string> = {
@@ -99,9 +76,6 @@ const VERSION_NAMES: Record<number, string> = {
 	[Version.DRAFT_16]: "moq-transport-16",
 	[Version.DRAFT_17]: "moq-transport-17",
 	[Version.DRAFT_18]: "moq-transport-18",
-	[Version.DRAFT_19]: "moq-transport-19",
-	[Version.DRAFT_20]: "moq-transport-20",
-	[Version.DRAFT_21]: "moq-transport-21",
 	[Version.DRAFT_22]: "moq-transport-22",
 };
 

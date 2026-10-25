@@ -36,10 +36,10 @@ pub trait Transport: Send + 'static {
 		None
 	}
 
-	/// How the session's endpoint was bound. Most transports know the peer only by its
-	/// socket, so the default is [`Binding::InBand`](moq_net::transport::Binding::InBand).
-	fn binding(&self) -> moq_net::transport::Binding {
-		moq_net::transport::Binding::InBand
+	/// Where the session's request target travels. Most transports carry no request URI,
+	/// so the default is [`Address::Setup`](moq_net::transport::Address::Setup).
+	fn address(&self) -> moq_net::transport::Address {
+		moq_net::transport::Address::Setup
 	}
 }
 
@@ -98,7 +98,6 @@ mod stream_transport {
 
 	use bytes::{BufMut, Bytes, BytesMut};
 	use moq_quic::VarInt;
-	use moq_quic::coding::Codec;
 	use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
 	use tokio::sync::mpsc;
 	use tokio::task::{AbortHandle, JoinHandle};
@@ -818,14 +817,13 @@ pub(crate) use stream_session::build as build_stream_session;
 // WsTransport: message I/O over WebSocket.
 #[cfg(feature = "ws")]
 mod ws_transport {
-	use std::pin::Pin;
 	use std::time::Duration;
 
 	use bytes::Bytes;
 	use futures::stream::SplitSink;
+	use moq_clock::{Interval, MissedTickBehavior, Sleep};
 	use tokio::sync::mpsc;
 	use tokio::task::JoinHandle;
-	use tokio::time::{Instant, Interval, MissedTickBehavior, Sleep};
 	use tokio_tungstenite::tungstenite;
 
 	use super::{Reader, Transport, Writer};
@@ -862,16 +860,16 @@ mod ws_transport {
 		ws: T,
 		keep_alive: Option<KeepAlive>,
 		socket_stats: Option<crate::SharedSocketStats>,
-		binding: moq_net::transport::Binding,
+		address: moq_net::transport::Address,
 	}
 
 	impl<T> WsTransport<T> {
-		pub fn new(ws: T, binding: moq_net::transport::Binding) -> Self {
+		pub fn new(ws: T, address: moq_net::transport::Address) -> Self {
 			Self {
 				ws,
 				keep_alive: None,
 				socket_stats: None,
-				binding,
+				address,
 			}
 		}
 
@@ -902,11 +900,10 @@ mod ws_transport {
 
 	impl PingState {
 		fn new(config: KeepAlive) -> Self {
+			// The first tick is one interval out, so we don't ping on connect.
+			let mut interval = moq_clock::interval_at(moq_clock::now() + config.interval, config.interval);
 			// Skip catch-up bursts after a long pause; we just want one Ping per tick.
-			let mut interval = tokio::time::interval(config.interval);
 			interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-			// First tick fires immediately by default; consume it so we don't ping on connect.
-			interval.reset();
 			Self { interval }
 		}
 	}
@@ -914,7 +911,7 @@ mod ws_transport {
 	/// Reader-side keep-alive: close the session if no frame arrives within `timeout`.
 	struct DeadlineState {
 		// Resets every time we receive a frame. If it elapses, the peer is gone.
-		deadline: Pin<Box<Sleep>>,
+		deadline: Sleep,
 		timeout: Duration,
 	}
 
@@ -922,13 +919,13 @@ mod ws_transport {
 		fn new(config: KeepAlive) -> Self {
 			let timeout = config.timeout;
 			Self {
-				deadline: Box::pin(tokio::time::sleep(timeout)),
+				deadline: moq_clock::sleep(timeout),
 				timeout,
 			}
 		}
 
 		fn observe_recv(&mut self) {
-			self.deadline.as_mut().reset(Instant::now() + self.timeout);
+			self.deadline.reset(moq_clock::now() + self.timeout);
 		}
 	}
 
@@ -966,8 +963,8 @@ mod ws_transport {
 			self.socket_stats.clone()
 		}
 
-		fn binding(&self) -> moq_net::transport::Binding {
-			self.binding
+		fn address(&self) -> moq_net::transport::Address {
+			self.address
 		}
 
 		fn split(self, config: &crate::Config) -> (WsWriter<T>, WsReader) {
@@ -1078,7 +1075,7 @@ mod ws_transport {
 				Some(d) => tokio::select! {
 					biased;
 					msg = stream.next() => msg,
-					_ = d.deadline.as_mut() => {
+					_ = &mut d.deadline => {
 						tracing::debug!("websocket keep_alive timeout");
 						let _ = tx.send(Err(Error::Closed)).await;
 						return;
@@ -1199,7 +1196,7 @@ mod ws_transport {
 
 			// Model a session wedged on a full accept channel: don't read for well
 			// over the 50ms keep-alive timeout while the pump is parked on delivery.
-			tokio::time::sleep(Duration::from_millis(150)).await;
+			moq_clock::sleep(Duration::from_millis(150)).await;
 
 			assert_eq!(
 				rx.recv().await.expect("channel open").expect("no timeout"),
@@ -1225,7 +1222,7 @@ mod ws_transport {
 			let (tx, mut rx) = mpsc::channel(4);
 			let pump = tokio::spawn(ws_pump(stream, Some(DeadlineState::new(ka)), usize::MAX, tx));
 
-			let result = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+			let result = moq_clock::timeout(Duration::from_secs(1), rx.recv())
 				.await
 				.expect("keep-alive deadline should fire on a silent peer");
 			assert!(
@@ -1247,7 +1244,7 @@ mod ws_transport {
 			let pump = tokio::spawn(ws_pump(stream, None, usize::MAX, tx));
 
 			// No deadline, so recv stays pending well past any keep-alive window.
-			let pending = tokio::time::timeout(Duration::from_millis(100), rx.recv()).await;
+			let pending = moq_clock::timeout(Duration::from_millis(100), rx.recv()).await;
 			assert!(pending.is_err(), "recv must not resolve without activity");
 
 			pump.abort();

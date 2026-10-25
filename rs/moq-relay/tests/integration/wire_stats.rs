@@ -36,8 +36,8 @@ async fn wire_sources(io_uring: bool) {
 	config.auth.public = vec![moq_auth::Pattern::all()];
 	config.stats.enabled = true;
 	config.internal.listen = Some("127.0.0.1:0".parse().unwrap());
-	config.stats.interval = Duration::from_secs(3600);
-	config.drain_timeout = Duration::ZERO;
+	config.stats.interval = Some(Duration::from_secs(3600).into());
+	config.drain_timeout = Some(Duration::ZERO.into());
 	if io_uring {
 		config.runtime.workers = Some(1);
 		config.runtime.pin = false;
@@ -134,7 +134,7 @@ async fn native_sessions_supply_direct_wire_counters() {
 async fn uring_sessions_supply_direct_wire_counters() {
 	match moq_uring::Worker::new(Default::default()) {
 		Ok(_) => (),
-		Err(moq_uring::Error::Unsupported(reason)) if std::env::var_os("MOQ_STRICT").is_none() => {
+		Err(moq_uring::Error::Unsupported(reason)) if std::env::var_os("CI_STRICT").is_none() => {
 			eprintln!("skipping io_uring wire stats test: {reason}");
 			return;
 		}

@@ -289,7 +289,7 @@ mod tests {
 
 		let mut encoder = Encoder::new(&EncodeConfig {
 			kind: EncodeKind::Software,
-			..EncodeConfig::new(w, h, crate::Rate::new(30, 1).unwrap())
+			..EncodeConfig::new(w, h, crate::FrameRate::new(30, 1).unwrap())
 		})
 		.unwrap();
 		let mut decoder = Vaapi::open(Codec::H264, &decode_config()).expect("VAAPI H.264 decoder");
@@ -342,7 +342,7 @@ mod tests {
 
 		let mut encoder = Encoder::new(&EncodeConfig {
 			kind: EncodeKind::Software,
-			..EncodeConfig::new(w, h, crate::Rate::new(30, 1).unwrap())
+			..EncodeConfig::new(w, h, crate::FrameRate::new(30, 1).unwrap())
 		})
 		.unwrap();
 		let mut exporting = Vaapi::open(Codec::H264, &gpu_decode_config()).expect("VAAPI H.264 decoder");
@@ -432,7 +432,7 @@ mod tests {
 
 		let mut encoder = Encoder::new(&EncodeConfig {
 			kind: EncodeKind::Software,
-			..EncodeConfig::new(w, h, crate::Rate::new(30, 1).unwrap())
+			..EncodeConfig::new(w, h, crate::FrameRate::new(30, 1).unwrap())
 		})
 		.unwrap();
 		let mut decoder = Vaapi::open(Codec::H264, config).expect("VAAPI H.264 decoder");

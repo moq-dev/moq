@@ -27,8 +27,10 @@ for (const bytes of [160, 1_160, 16_384, 262_144]) {
 			const net = new Broadcast.Producer().createTrack(await generation.name("video"), {
 				timescale: Time.Timescale.MILLI,
 			});
-			const consumer = credential.consume(generation.epoch).consume(net.subscribe({ maxDelay: Milli(60_000) }));
-			const producer = await generation.produce(net);
+			const consumer = credential
+				.consume(generation.epoch)
+				.consume(net.subscribe({ maxDelay: Milli(60_000) }), "video");
+			const producer = await generation.produce(net, "video");
 
 			const sealStart = performance.now();
 			const pending: Promise<void>[] = [];

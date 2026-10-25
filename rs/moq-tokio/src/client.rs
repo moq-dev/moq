@@ -41,7 +41,7 @@ impl Config {
 /// Create via [`crate::connect::Config::init`] or [`Client::new`].
 #[derive(Clone)]
 pub struct Client {
-	moq: moq_net::Client,
+	pub(crate) moq: moq_net::Client,
 	/// The single resolved set of protocol versions, used to advertise moq ALPNs across
 	/// every transport (passed into the QUIC backend's `connect` and used directly for
 	/// raw TCP/UDS qmux and WebSocket). Resolved once in [`Client::new`] so the ALPN list
@@ -84,7 +84,16 @@ pub struct Client {
 	iroh: Option<crate::iroh::Endpoint>,
 	#[cfg(feature = "iroh")]
 	iroh_addrs: Vec<std::net::SocketAddr>,
+	/// Replaces the transport dial in tests, so the reconnect loop can run over
+	/// in-memory sessions on a paused clock.
+	#[cfg(test)]
+	pub(crate) dialer: Option<std::sync::Arc<Dialer>>,
 }
+
+/// A test stand-in for [`Client::dial`].
+#[cfg(test)]
+pub(crate) type Dialer =
+	dyn Fn(crate::connect::Addr) -> std::pin::Pin<Box<dyn Future<Output = crate::Result<Dialed>> + Send>> + Send + Sync;
 
 impl Client {
 	/// Build a client from its config.
@@ -113,6 +122,7 @@ impl Client {
 		}
 
 		quic.validate()?;
+		config.backoff.validate()?;
 
 		// Only the rustls-backed transports use this. Iroh and the plaintext
 		// qmux transports must not require a rustls crypto provider.
@@ -135,14 +145,19 @@ impl Client {
 		let tls_host_name = config.tls.host_name.clone();
 		let timeout = resolved.timeout;
 
+		let mut moq = moq_net::Client::new()
+			.with_versions(versions.clone())
+			.with_extensions(config.extensions);
+		if let Some(implementation) = &config.implementation {
+			moq = moq.with_implementation(implementation);
+		}
+
 		Ok(Self {
-			moq: moq_net::Client::new()
-				.with_versions(versions.clone())
-				.with_extensions(config.extensions),
+			moq,
 			versions,
 			connect: config.url,
 			timeout,
-			reconnect: !config.once.unwrap_or(false),
+			reconnect: true,
 			backoff: config.backoff,
 			goaway: config.goaway,
 			restart: Restart::default(),
@@ -165,6 +180,8 @@ impl Client {
 			iroh: None,
 			#[cfg(feature = "iroh")]
 			iroh_addrs: Vec::new(),
+			#[cfg(test)]
+			dialer: None,
 		})
 	}
 
@@ -240,7 +257,7 @@ impl Client {
 
 	/// Override whether this client redials after a session drop.
 	///
-	/// Defaults to true, unless [`crate::connect::Config::once`] turned it off.
+	/// Defaults to true. Each clone can choose its own reconnect policy.
 	pub fn with_reconnect(mut self, reconnect: bool) -> Self {
 		self.reconnect = reconnect;
 		self
@@ -258,7 +275,7 @@ impl Client {
 	/// redials with exponential backoff whenever the session drops. Wait for the
 	/// first session with [`Connection::established`] and for the loop to stop
 	/// with [`Connection::closed`]; drop the last clone to stop it. Disable the
-	/// redialing with [`crate::connect::Config::once`] / [`Self::with_reconnect`] for
+	/// redialing with [`Self::with_reconnect`] for
 	/// a one-shot dial.
 	///
 	/// Takes a [`Url`] for the usual case of a peer at a known address. Pass
@@ -373,6 +390,11 @@ impl Client {
 		feature = "uds"
 	))]
 	pub(crate) async fn dial(&self, addr: crate::connect::Addr) -> crate::Result<Dialed> {
+		#[cfg(test)]
+		if let Some(dialer) = &self.dialer {
+			return dialer(addr).await;
+		}
+
 		// Each compiled backend adds state to this dispatch future. Keep it off the
 		// caller's stack so all-feature builds remain safe on standard 2 MiB threads.
 		let attempt = Box::pin(self.connect_inner(addr));
@@ -392,21 +414,6 @@ impl Client {
 		Ok(dialed)
 	}
 
-	/// The moq client builder, advertising `path` in the SETUP when there is one.
-	#[cfg(any(
-		feature = "quic",
-		feature = "iroh",
-		feature = "websocket",
-		feature = "tcp",
-		feature = "uds"
-	))]
-	fn moq_with_path(&self, path: Option<String>) -> moq_net::Client {
-		match path {
-			Some(path) => self.moq.clone().with_path(path),
-			None => self.moq.clone(),
-		}
-	}
-
 	#[cfg(any(
 		feature = "quic",
 		feature = "iroh",
@@ -416,16 +423,9 @@ impl Client {
 	))]
 	async fn connect_inner(&self, addr: crate::connect::Addr) -> crate::Result<Dialed> {
 		let url = addr.url().clone();
-		// Transports with no request URI of their own advertise the request target in the
-		// SETUP instead; `setup_path` returns `None` for the ones that carry a URI, where
-		// sending it again is a protocol violation. An iroh-only build reads none of this:
-		// that dial waits for the negotiated binding and builds its own.
-		let moq = self.moq_with_path(setup_path(&url));
-		#[allow(unused_variables, reason = "an iroh-only build never reads it")]
-		let moq = match setup_authority(&url) {
-			Some(authority) => moq.with_authority(authority),
-			None => moq,
-		};
+		// Each session's transport says whether its own request URI carries the target or
+		// the SETUP has to, so every dial below shares this builder.
+		let moq = self.moq.clone().with_url(url.clone());
 
 		// Plain TCP (qmux, no TLS). Explicit opt-in scheme; never raced against
 		// QUIC, which can't speak it. Use only on a trusted network.
@@ -465,44 +465,32 @@ impl Client {
 		// nothing to race and the fallback's answer is the connect's verdict.
 		#[cfg(feature = "websocket")]
 		if matches!(url.scheme(), "ws" | "wss") {
-			return self.connect_websocket(addr).await;
+			return self.connect_websocket(&moq, addr).await;
 		}
 
 		// iroh offers the moq ALPNs ahead of H3, so two moq endpoints normally land on raw
 		// QUIC, which carries no request URI. The scheme can't tell us which we got, so the
-		// request target waits on the negotiated binding: the SETUP for raw QUIC, the
-		// CONNECT URL for H3 (where a SETUP path would be a protocol violation).
+		// negotiated ALPN decides where the request target travels.
 		#[cfg(feature = "iroh")]
 		if url.scheme() == "iroh" {
 			let endpoint = self.iroh.as_ref().ok_or(Error::IrohDisabled)?;
-			let target = request_target(&url);
-			let (session, binding) =
+			let (session, address) =
 				crate::iroh::connect(endpoint, url, self.iroh_addrs.iter().copied(), &self.versions).await?;
-
-			let moq = match binding {
-				crate::iroh::Binding::Raw => self.moq_with_path(target),
-				crate::iroh::Binding::H3 => self.moq.clone(),
-			};
-
-			let binding = match binding {
-				crate::iroh::Binding::Raw => moq_net::transport::Binding::InBand,
-				crate::iroh::Binding::H3 => moq_net::transport::Binding::Uri,
-			};
-			let session = connect_session(&moq, crate::transport::Session::new(session, binding)).await?;
+			let session = connect_session(&moq, crate::transport::Session::new(session, address)).await?;
 			return Ok(Dialed::new(session, crate::Transport::Iroh));
 		}
 
 		#[cfg(feature = "quic")]
 		if let Some(quic) = self.quic.as_ref() {
 			let quic_addr = addr.clone();
-			let binding = match quic_transport(&url) {
-				crate::Transport::Quic => moq_net::transport::Binding::InBand,
-				_ => moq_net::transport::Binding::Uri,
+			let address = match quic_transport(&url) {
+				crate::Transport::Quic => moq_net::transport::Address::Setup,
+				_ => moq_net::transport::Address::Uri,
 			};
 			let quic_handle = async {
 				quic.connect(&self.tls, quic_addr, &self.versions)
 					.await
-					.map(|session| crate::transport::Session::new(session, binding))
+					.map(|session| crate::transport::Session::new(session, address))
 					.map_err(Error::from)
 			};
 
@@ -520,29 +508,24 @@ impl Client {
 		}
 
 		#[cfg(feature = "websocket")]
-		return self.connect_websocket(addr).await;
+		return self.connect_websocket(&moq, addr).await;
 
 		#[cfg(not(feature = "websocket"))]
 		return Err(Error::NoBackend("no QUIC backend matched; this should not happen"));
 	}
 
-	/// Connect over WebSocket alone. qmux over WebSocket carries the path in its request
-	/// URI, so the plain builder is used: repeating it in the SETUP is a protocol violation.
+	/// Connect over WebSocket alone.
 	#[cfg(feature = "websocket")]
-	async fn connect_websocket(&self, addr: crate::connect::Addr) -> crate::Result<Dialed> {
+	async fn connect_websocket(&self, moq: &moq_net::Client, addr: crate::connect::Addr) -> crate::Result<Dialed> {
 		let alpns = self.versions.alpns();
 		let session =
 			crate::websocket::connect(&self.websocket, &self.tls, self.tls_host_name.as_deref(), addr, &alpns).await?;
-		let session = connect_session(&self.moq, session).await?;
+		let session = connect_session(moq, session).await?;
 		Ok(Dialed::new(session, crate::Transport::WebSocket))
 	}
 
 	/// Race the QUIC dial against the WebSocket fallback, handshaking whichever wins.
 	/// The loser is cancelled as soon as the winner's transport is up.
-	///
-	/// `moq` is the QUIC-side builder, which carries the SETUP path for a raw QUIC dial.
-	/// The WebSocket fallback uses the plain builder: qmux over WebSocket carries the
-	/// path in its request URI, so repeating it in the SETUP is a protocol violation.
 	///
 	/// Only compiled when there is a QUIC dial to race: a WebSocket-only build connects
 	/// over the fallback directly.
@@ -572,66 +555,10 @@ impl Client {
 		match race_transport_connect(&url, quic, websocket).await? {
 			TransportRace::Quic(quic) => Ok(Dialed::new(connect_session(moq, quic).await?, transport)),
 			TransportRace::WebSocket(session) => {
-				let session = connect_session(&self.moq, session).await?;
+				let session = connect_session(moq, session).await?;
 				Ok(Dialed::new(session, crate::Transport::WebSocket))
 			}
 		}
-	}
-}
-
-/// The request target a URI-less transport advertises in its SETUP: the URL path, plus
-/// `?` and the query when there is one (draft-ietf-moq-transport-19, section 10.3.1.2).
-/// That query is how `?jwt=` reaches a relay.
-///
-/// `None` when the result is empty, which means the same as omitting the parameter: the
-/// server's default path. A peer on published lite-05 rejects an empty value outright.
-#[cfg(any(
-	feature = "quic",
-	feature = "iroh",
-	feature = "websocket",
-	feature = "tcp",
-	feature = "uds"
-))]
-fn request_target(url: &Url) -> Option<String> {
-	// A trailing `?` parses as an empty query, which is not a query: appending it would
-	// spell one target two ways, and `moqt://host?` would yield a bare "?" rather than
-	// the empty value that means the default path.
-	let target = match url.query().filter(|query| !query.is_empty()) {
-		Some(query) => format!("{}?{}", url.path(), query),
-		None => url.path().to_owned(),
-	};
-
-	(!target.is_empty()).then_some(target)
-}
-
-/// The request target to advertise in the SETUP, chosen by the dial URL's scheme.
-///
-/// `None` for the schemes whose transport carries a request URI of its own
-/// (WebTransport, qmux over WebSocket): they convey the target there, and a SETUP path
-/// on top of it is a protocol violation. `iroh` is `None` here because its binding is
-/// picked by ALPN negotiation rather than by the scheme; that dial reads the negotiated
-/// [`crate::iroh::Binding`] and calls [`request_target`] itself.
-#[cfg(any(
-	feature = "quic",
-	feature = "iroh",
-	feature = "websocket",
-	feature = "tcp",
-	feature = "uds"
-))]
-fn setup_path(url: &Url) -> Option<String> {
-	match url.scheme() {
-		// A Unix socket URL's path is the socket file, so the request target rides in
-		// the `?path=` query, query string and all. It is one form-encoded value, so a
-		// target that carries its own `?query` percent-encodes it.
-		"unix" => url
-			.query_pairs()
-			.find(|(k, _)| k == "path")
-			.map(|(_, v)| v.into_owned())
-			.filter(|path| !path.is_empty()),
-		// Raw QUIC and qmux over TCP negotiate an ALPN and nothing else, so the whole
-		// request target travels in the SETUP.
-		"moqt" | "moql" | "tcp" | "tls" => request_target(url),
-		_ => None,
 	}
 }
 
@@ -666,30 +593,6 @@ impl Dialed {
 	fn new(session: moq_net::Session, transport: crate::Transport) -> Self {
 		Self { session, transport }
 	}
-}
-
-/// The URI authority to advertise in the SETUP, chosen by the dial URL's scheme.
-///
-/// A raw-QUIC `moqt://` client MUST send it (draft-ietf-moq-transport-21, 9.1.1). Built
-/// from the host and port so URL userinfo never goes on the wire. `None` for every other
-/// scheme, and when the URL has no host, since an empty authority is meaningless.
-#[cfg(any(
-	feature = "quic",
-	feature = "iroh",
-	feature = "websocket",
-	feature = "tcp",
-	feature = "uds"
-))]
-fn setup_authority(url: &Url) -> Option<String> {
-	if url.scheme() != "moqt" {
-		return None;
-	}
-
-	let host = url.host_str().filter(|host| !host.is_empty())?;
-	Some(match url.port() {
-		Some(port) => format!("{host}:{port}"),
-		None => host.to_owned(),
-	})
 }
 
 /// The arm that won a [`race_transport_connect`]; the other was dropped, cancelling it.
@@ -831,13 +734,16 @@ mod tests {
 			let request = server.accept().await.unwrap();
 			assert_eq!(request.path(), "/room");
 			assert_eq!(request.query(), Some("jwt=secret"));
-			let (session, _driver) = request.with_publisher(&server_origin).ok().await.unwrap();
+			let session = request.with_publisher(&server_origin).ok().await.unwrap();
 			(server, session)
 		});
 		let mut config = crate::connect::Config::default();
 		config.tls.insecure = Some(true);
-		config.once = Some(once);
-		let client = config.init(Default::default()).unwrap().with_publisher(&origin);
+		let client = config
+			.init(Default::default())
+			.unwrap()
+			.with_reconnect(!once)
+			.with_publisher(&origin);
 		let url: url::Url = format!("https://relay.invalid:{}/room?jwt=secret", peer.port())
 			.parse()
 			.unwrap();
@@ -891,121 +797,6 @@ mod tests {
 		}
 	}
 
-	#[cfg(any(
-		feature = "quic",
-		feature = "iroh",
-		feature = "websocket",
-		feature = "tcp",
-		feature = "uds"
-	))]
-	#[test]
-	fn setup_path_covers_the_uri_less_transports() {
-		// An empty path and an absent one both mean the server's default, so we send
-		// neither. A peer on published lite-05 rejects an empty value outright.
-		let cases = [
-			("unix:///run/moq.sock?path=/room", Some("/room")),
-			// The whole resource path is one form-encoded value, so a `?query` inside it
-			// arrives percent-encoded and comes back out whole.
-			("unix:///run/moq.sock?path=/room%3Fjwt%3Dabc", Some("/room?jwt=abc")),
-			("unix:///run/moq.sock?path=", None),
-			("unix:///run/moq.sock", None),
-			("tcp://localhost:4443/room", Some("/room")),
-			("tcp://localhost:4443/room?jwt=abc", Some("/room?jwt=abc")),
-			("tcp://localhost:4443", None),
-			("tls://localhost:4443/room?jwt=abc", Some("/room?jwt=abc")),
-			("tls://localhost:4443", None),
-			// Raw QUIC: the URL is ours alone, so the path and query have to ride the
-			// SETUP or the server never sees them.
-			("moqt://relay.example.com/anon", Some("/anon")),
-			("moqt://relay.example.com/anon?jwt=abc", Some("/anon?jwt=abc")),
-			("moql://relay.example.com/anon?jwt=abc", Some("/anon?jwt=abc")),
-			("moqt://relay.example.com", None),
-			// The fragment is processed by the client and never sent (draft-19 3.1.2).
-			("moqt://relay.example.com/anon?jwt=abc#pos:12", Some("/anon?jwt=abc")),
-			("moqt://relay.example.com/anon#pos:12", Some("/anon")),
-			// A trailing `?` is an empty query, not a query.
-			("moqt://relay.example.com/anon?", Some("/anon")),
-			("moqt://relay.example.com?", None),
-			// The transport's own request URI carries the path, so sending one here
-			// would be a protocol violation.
-			("https://relay.example.com/anon?jwt=abc", None),
-			("http://relay.example.com/anon", None),
-			("wss://relay.example.com/anon?jwt=abc", None),
-			// Decided after the ALPN is negotiated, not here.
-			("iroh://k5lnrlndqpqcgh4d5nhbnbnhcyrgvw6ttxwrsvsu4nlt6foorxaa/anon", None),
-		];
-
-		for (url, want) in cases {
-			let url = Url::parse(url).unwrap();
-			let got = setup_path(&url);
-			assert_eq!(got.as_deref(), want, "{url}");
-		}
-	}
-
-	#[cfg(any(
-		feature = "quic",
-		feature = "iroh",
-		feature = "websocket",
-		feature = "tcp",
-		feature = "uds"
-	))]
-	#[test]
-	fn setup_authority_is_only_for_raw_quic_moqt() {
-		let cases = [
-			("moqt://relay.example.com", Some("relay.example.com")),
-			("moqt://relay.example.com/anon?jwt=abc", Some("relay.example.com")),
-			("moqt://relay.example.com:4443/anon", Some("relay.example.com:4443")),
-			("moqt://[::1]:4443", Some("[::1]:4443")),
-			// Userinfo is a credential, and never goes on the wire.
-			(
-				"moqt://user:pass@relay.example.com:4443",
-				Some("relay.example.com:4443"),
-			),
-			// A hostless URL has no authority to send.
-			("moqt:///anon", None),
-			// Only the draft's `moqt://` scheme is required to send it.
-			("moql://relay.example.com", None),
-			("tcp://relay.example.com:4443", None),
-			("https://relay.example.com", None),
-			("wss://relay.example.com", None),
-			("unix:///run/moq.sock", None),
-			("iroh://k5lnrlndqpqcgh4d5nhbnbnhcyrgvw6ttxwrsvsu4nlt6foorxaa", None),
-		];
-
-		for (url, want) in cases {
-			let url = Url::parse(url).unwrap();
-			let got = setup_authority(&url);
-			assert_eq!(got.as_deref(), want, "{url}");
-		}
-	}
-
-	/// The iroh dial derives its target here rather than through [`setup_path`], since
-	/// only the negotiated binding says whether to send one.
-	#[cfg(any(
-		feature = "quic",
-		feature = "iroh",
-		feature = "websocket",
-		feature = "tcp",
-		feature = "uds"
-	))]
-	#[test]
-	fn request_target_joins_the_path_and_query() {
-		const PEER: &str = "k5lnrlndqpqcgh4d5nhbnbnhcyrgvw6ttxwrsvsu4nlt6foorxaa";
-
-		let cases = [
-			(format!("iroh://{PEER}/room?jwt=abc"), Some("/room?jwt=abc")),
-			(format!("iroh://{PEER}/room"), Some("/room")),
-			(format!("iroh://{PEER}"), None),
-			(format!("iroh://{PEER}/"), Some("/")),
-		];
-
-		for (url, want) in cases {
-			let url = Url::parse(&url).unwrap();
-			let got = request_target(&url);
-			assert_eq!(got.as_deref(), want, "{url}");
-		}
-	}
-
 	/// A value loaded from TOML survives re-applying CLI args that omit its flag,
 	/// one row per value shape.
 	#[test]
@@ -1017,7 +808,6 @@ mod tests {
 			r#"tls.fingerprint = ["abcd1234", "ef567890"]"#,
 			r#"version = ["moq-lite-02"]"#,
 			r#"url = "https://relay.example.com/anon""#,
-			"once = true",
 			r#"bind = "127.0.0.1:1234""#,
 			r#"tls.host_name = "example.host""#,
 		] {
@@ -1077,14 +867,13 @@ mod tests {
 		);
 	}
 
-	/// `--client-reconnect` means the opposite of the flag that replaced it, so the
-	/// line has to say so: carried across unchanged it would silently invert.
+	/// A removed CLI policy points embedders at the per-clone API.
 	#[test]
-	fn an_inverted_replacement_says_so() {
+	fn removed_reconnect_names_the_native_policy() {
 		let config = Cli::config_from(["test", "--client-reconnect=false"]);
 		let reported = config.deprecated().to_string();
-		assert!(reported.contains("--connect-once"), "{reported}");
-		assert!(reported.contains("inverted"), "{reported}");
+		assert!(reported.contains("Client::with_reconnect(bool)"), "{reported}");
+		assert!(reported.contains("native API only"), "{reported}");
 	}
 
 	/// Building a client is the backstop: a caller that skipped its own check must
@@ -1106,7 +895,7 @@ mod tests {
 	#[test]
 	fn test_cli_resolution_delay() {
 		let config = Cli::config_from(["test", "--connect-resolution-delay", "0s"]);
-		assert_eq!(config.resolution_delay, None);
+		assert_eq!(config.resolution_delay, Some(std::time::Duration::ZERO.into()));
 		assert_eq!(config.resolve().resolution_delay, std::time::Duration::ZERO);
 	}
 
@@ -1123,24 +912,27 @@ mod tests {
 	#[test]
 	fn test_cli_version_help_lists_every_parseable_name() {
 		let help = Cli::render_help(Cli::command(), true).expect("long help");
-		for name in moq_net::Version::names() {
+		// Every wire code this crate parses, including the opt-in `-wip` drafts.
+		let codes = (0xff0dad00..=0xff0dadff).chain(0xff000000..=0xff0000ff);
+		for name in codes
+			.filter_map(moq_net::Version::from_code)
+			.map(|version| version.as_str())
+		{
 			assert!(help.contains(name), "missing {name} from --connect-version help");
 		}
 	}
 
-	/// The released TOML said `reconnect = false`; `once` says the opposite thing.
-	///
-	/// Still parsed, because `deny_unknown_fields` would otherwise reject the file
-	/// with no hint of what to write instead, and the inversion is the whole reason
-	/// this can't be a rename someone applies mechanically.
+	/// A removed TOML policy still parses so it can name the per-clone native API.
 	#[test]
-	fn test_toml_reconnect_is_reported_not_inverted() {
+	fn test_toml_reconnect_is_reported_as_native_policy() {
 		let config: crate::connect::Config = toml::from_str("reconnect = false").unwrap();
-		assert_eq!(config.once, None);
 
 		let reported = config.deprecated().to_string();
-		assert!(reported.contains("reconnect -> once"), "{reported}");
-		assert!(reported.contains("inverted"), "{reported}");
+		assert!(
+			reported.contains("reconnect -> Client::with_reconnect(bool)"),
+			"{reported}"
+		);
+		assert!(reported.contains("native API only"), "{reported}");
 	}
 
 	/// An explicit canonical bind remains distinguishable from an omitted bind.
@@ -1175,18 +967,6 @@ mod tests {
 				"moq-lite-02".parse::<moq_net::Version>().unwrap()
 			]
 		);
-	}
-
-	#[test]
-	fn test_cli_once_flag() {
-		let config = Cli::config_from(["test"]);
-		assert_eq!(config.once, None, "unset means the default (reconnect)");
-
-		let config = Cli::config_from(["test", "--connect-once"]);
-		assert_eq!(config.once, Some(true));
-
-		let config = Cli::config_from(["test", "--connect-once=false"]);
-		assert_eq!(config.once, Some(false));
 	}
 
 	#[test]
@@ -1272,7 +1052,7 @@ mod tests {
 		let mut config = crate::connect::Config::default();
 		config.tls.insecure = Some(true);
 		// No head start, so the fallback dials while QUIC waits on the 403.
-		config.websocket.delay = Some(std::time::Duration::ZERO);
+		config.websocket.delay = Some((std::time::Duration::ZERO).into());
 		let client = config.init(Default::default()).unwrap();
 
 		// The same race `connect_inner` runs, except the fallback dials its own port,
@@ -1286,7 +1066,7 @@ mod tests {
 			forbid.await.unwrap().expect("fallback listener failed");
 			quic.connect(&tls, quic_addr, &versions)
 				.await
-				.map(|session| crate::transport::Session::new(session, moq_net::transport::Binding::Uri))
+				.map(|session| crate::transport::Session::new(session, moq_net::transport::Address::Uri))
 				.map_err(Error::from)
 		});
 
@@ -1349,7 +1129,7 @@ mod tests {
 		let mut client_config = crate::connect::Config::default();
 		client_config.tls.insecure = Some(true);
 		// Dial both arms immediately; the fallback handshake is gated by QUIC.
-		client_config.websocket.delay = Some(std::time::Duration::ZERO);
+		client_config.websocket.delay = Some((std::time::Duration::ZERO).into());
 
 		let client = client_config.init(Default::default()).expect("failed to init client");
 		let quic_addr: crate::connect::Addr = Url::parse(&format!("https://localhost:{quic_port}")).unwrap().into();
@@ -1365,7 +1145,7 @@ mod tests {
 				crate::Transport::WebTransport,
 				"expected the QUIC listener",
 			);
-			let (session, _driver) = request.with_publisher(&pub_origin).ok().await?;
+			let session = request.with_publisher(&pub_origin).ok().await?;
 			assert_eq!(session.version(), expected_version, "server negotiated stale version");
 			let _broadcast = broadcast;
 			let _track = track;
@@ -1381,7 +1161,7 @@ mod tests {
 			connected.send(()).expect("fallback listener alive");
 			Ok::<_, crate::Error>(crate::transport::Session::new(
 				session,
-				moq_net::transport::Binding::Uri,
+				moq_net::transport::Address::Uri,
 			))
 		});
 		let cc = client
@@ -1579,10 +1359,10 @@ mod tests {
 
 		let timeout = crate::connect::DEFAULT_TIMEOUT;
 		let mut config = crate::connect::Config {
-			timeout: Some(timeout),
+			timeout: Some((timeout).into()),
 			..Default::default()
 		};
-		config.websocket.delay = Some(std::time::Duration::ZERO);
+		config.websocket.delay = Some((std::time::Duration::ZERO).into());
 		let client = config.init(Default::default()).unwrap();
 
 		// Nothing is listening on UDP, so the QUIC arm fails and leaves the WebSocket

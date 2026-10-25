@@ -16,15 +16,12 @@ use support::harness::{MockConnectOptions, MockPair, connect_mock};
 const SETTLE: Duration = Duration::from_secs(1);
 
 /// Every moq-transport draft, each of which carries the SOLICIT option.
-const MOQT: [&str; 9] = [
+const MOQT: [&str; 6] = [
 	"moq-transport-14",
 	"moq-transport-15",
 	"moq-transport-16",
 	"moq-transport-17",
 	"moq-transport-18",
-	"moq-transport-19",
-	"moq-transport-20",
-	"moq-transport-21",
 	"moq-transport-22",
 ];
 
@@ -139,10 +136,11 @@ async fn a_declined_auth_extension_is_not_negotiated() {
 				assert_eq!(session.auth().grant().peek(), None, "{context}");
 				// Only a request that names it can carry the token, so it resolves at once with
 				// a grant that stays unknown.
-				let added = moq_clock::timeout(SETTLE, session.auth().add("token"))
+				let (added, answer) = moq_clock::timeout(SETTLE, session.auth().add("token"))
 					.await
 					.unwrap_or_else(|_| panic!("{context}: add never resolved"))
 					.unwrap_or_else(|err| panic!("{context}: {err:?}"));
+				assert_eq!(answer, moq_net::auth::Answer::Requests, "{context}");
 				assert_eq!(added.grant().peek(), None, "{context}");
 				assert_eq!(session.auth().grant().peek(), None, "{context}");
 			}

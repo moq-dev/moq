@@ -56,8 +56,11 @@ Failover routes must carry copies of one publisher's broadcast. Independent
 importers use distinct epochs and switch as a restart, even when fed one stream.
 See [Redundant ingest](/setup/redundancy) to choose between publisher switching,
 subscriber selection, and several routes to one publisher.
-A source whose track differs in timescale, retention, publisher priority, or
-group order is refused for that track.
+A source whose track differs in any property, such as timescale, retention,
+publisher priority, compression, or refresh, is refused for that track. A
+moq-transport link records its draft in the track's properties and carries
+refresh only as on or off, so a route crossing one does not fail over to or from
+a route that does not.
 
 A route whose original publisher (its first hop) changes under the same epoch is
 updated in place on both wire protocols, so the broadcast never briefly vanishes
@@ -67,7 +70,7 @@ that is another source, so it restarts.
 ## Topology
 
 List the peers each relay dials. That's the whole topology: a relay dials only
-peers from `connect`, [`connect_api`](#dynamic-peer-lists), or
+peers from `connect`, [`api.url`](#dynamic-peer-lists), or
 [LAN discovery](#lan-discovery), never a URL learned from an announcement.
 
 ```toml
@@ -79,7 +82,7 @@ connect = ["https://us-east.example.com/"]
 A chain (`eu-west <- us-east <- us-west`) dedupes fetches through the middle;
 a full mesh trades that for one fewer hop. Mix shapes as your traffic demands.
 
-For a full mesh, list every other relay, or serve the list from `connect_api`.
+For a full mesh, list every other relay, or serve the list from `api.url`.
 A session carries both directions, so one dial per pair is enough; listing a
 pair on both sides opens a redundant second session.
 
@@ -124,7 +127,7 @@ connect = [
 The mark belongs to the link, whichever side dialed: a dialed peer is upstream
 when its `connect` entry says so, and a peer that dials in when its
 [grant](/bin/relay/auth#the-contract) sets `"upstream": true` beside
-`"peer": true`. `moq auth serve --mtls-peer --mtls-upstream` grants that to
+`"peer": true`. `moq auth serve --mtls-link upstream` grants that to
 every certificate, so use it only where cores are the only relays dialing in
 with mTLS: on a hub that leaf relays dial into, it marks every leaf upstream
 and the hub stops forwarding between them. A relay that predates the mark treats every link as
@@ -221,7 +224,7 @@ different `app` never discover each other.
 
 ## Dynamic peer lists
 
-Point `connect_api` at an HTTP(S) endpoint or local file returning a JSON
+Point `api.url` at an HTTP(S) endpoint or local file returning a JSON
 array of peers: bare URL strings and/or the same objects `connect` accepts.
 The relay re-checks it (honoring `Cache-Control`, or
 watching the file) and reconciles: new peers are dialed, missing ones dropped,
@@ -233,15 +236,17 @@ changed URLs redialed. A bad fetch keeps the last good list.
 
 ```toml
 [cluster]
-connect_api = "https://api.example.com/cluster/peers"
 node = "https://us-west.example.com/"
+
+[cluster.api]
+url = "https://api.example.com/cluster/peers"
 ```
 
 HTTPS peer-list fetches present the same client certificate as cluster dials,
 but authenticate the API with system roots and the hostname in its URL.
 Mesh roots, fingerprints, insecure mode, and the mesh hostname override do not
-apply to the API. For a private API, set `cluster.connect_api_tls_root` to PEM
-paths (or repeat `--cluster-connect-api-tls-root`); these replace system trust
+apply to the API. For a private API, set `cluster.api.tls.root` to PEM
+paths (or repeat `--cluster-api-tls-root`); these replace system trust
 for API fetches only. Malformed roots fail startup, and files reload for new
 connections when rotated.
 
@@ -250,8 +255,9 @@ connections when rotated.
 Each relay has a Hop ID: the value it adds to a route's hop list for loop
 detection and shortest-path routing. It is random on every start, which is fine
 for loop detection but makes a restarted relay look like a new node. Set
-`cluster.id` to a stable non-zero integer to pin it, below 2^53 if browser
-clients decode it.
+`cluster.id` to a stable non-zero 64-bit integer to pin it: below 2^53 if older
+browser clients decode it, and below 2^62 to keep loop detection over moq-lite-06
+and older links, which carry a larger id as 0.
 
 ## Failure detection
 
@@ -274,9 +280,9 @@ Peers dial with **mTLS** (recommended: `listen.tls.root` on the listener,
 URL, `token` on a peer object, or a shared `cluster.token` file for every
 listed peer). The accepting relay admits a peer like any client, so a mesh
 needs an auth server that grants the cluster CA, such as
-`moq auth serve --mtls-publish '**' --mtls-subscribe '**' --mtls-peer`. An
+`moq auth serve --mtls-publish '**' --mtls-subscribe '**' --mtls-link peer`. An
 accepted peer counts as a cluster peer only when its grant sets `peer: true`,
-as `--mtls-peer` does; otherwise what it announces counts as ingest here, like
+as `--mtls-link peer` does; otherwise what it announces counts as ingest here, like
 a client's, and it lists [hidden](/concept/moq-lite#hidden-broadcasts) routes
 only by asking, which a relay below moq-lite-07-wip, or on moq-transport
 without the hidden extension, cannot. Dials retry forever with jittered backoff

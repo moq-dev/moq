@@ -15,8 +15,8 @@ import * as Extensions from "./extensions.ts";
  * {@link receiveSetup}), plus what the peer's SETUP declared: whether it requires
  * solicitation, which decides whether we announce namespaces unprompted (see the MoQ Solicit
  * extension), its Hop ID (see the MoQ Cluster extension), and whether MoQ Auth and MoQ Epoch
- * are negotiated. We declare our Hop ID on every session, and Solicit, Auth, and Epoch unless
- * `extensions` declines them: we send SUBSCRIBE_NAMESPACE for each prefix we want, so an unsolicited advertisement
+ * are negotiated, plus the implementation it advertised. We declare our Hop ID on every
+ * session, and Solicit, Auth, and Epoch unless `extensions` declines them: we send SUBSCRIBE_NAMESPACE for each prefix we want, so an unsolicited advertisement
  * can tell us nothing we won't have asked for, and a peer that knows our Hop ID can withhold
  * the advertisements that already flowed through us.
  */
@@ -35,10 +35,10 @@ export async function exchangeSetup(
 	cluster: Ietf.Cluster.Hops;
 	auth: boolean;
 	epoch: boolean;
+	peerImplementation: string | undefined;
 }> {
-	const encoder = new TextEncoder();
 	const params = new Ietf.SetupOptions();
-	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode(implementation));
+	Ietf.implementationIntoSetup(params, implementation);
 	Extensions.intoSetup(params, extensions, version);
 	Ietf.hiddenIntoSetup(params);
 	Ietf.maxAgeIntoSetup(params);
@@ -76,6 +76,7 @@ export async function exchangeSetup(
 		// Negotiated only when both sides offer it.
 		auth: received.auth && extensions.auth,
 		epoch: received.epoch && extensions.epoch,
+		peerImplementation: received.implementation,
 	};
 }
 
@@ -107,6 +108,7 @@ async function receiveSetup(
 	cluster: Hop | undefined;
 	auth: boolean;
 	epoch: boolean;
+	implementation: string | undefined;
 }> {
 	const uniReader = transport.incomingUnidirectionalStreams.getReader() as ReadableStreamDefaultReader<
 		ReadableStream<Uint8Array>
@@ -142,7 +144,7 @@ async function receiveSetup(
 	await reader.u53(); // the SETUP type, peeked above
 	const setup = await Ietf.Setup.decode(reader, version);
 
-	// A server sends neither PATH nor AUTHORITY (draft-21 sections 9.1.1 and 9.1.2).
+	// A server sends neither PATH nor AUTHORITY (draft-22 sections 9.1.1 and 9.1.2).
 	if (client && setup.parameters.getBytes(Ietf.SetupOption.Path) !== undefined) {
 		throw new ProtocolViolation("server SETUP carries PATH", { code: SessionCode.InvalidPath });
 	}
@@ -150,7 +152,7 @@ async function receiveSetup(
 		throw new ProtocolViolation("server SETUP carries AUTHORITY", { code: SessionCode.InvalidAuthority });
 	}
 	// Nothing here uses the peer's token, but one that cannot be decoded still closes the
-	// session (draft-21 section 8.9).
+	// session (draft-22 section 8.9).
 	Ietf.tokenFromSetup(setup.parameters, version);
 
 	return {
@@ -163,5 +165,20 @@ async function receiveSetup(
 		cluster: Ietf.Cluster.fromSetup(setup.parameters, version),
 		auth: Ietf.Auth.fromSetup(setup.parameters, version) === true,
 		epoch: Ietf.Epoch.fromSetup(setup.parameters, version),
+		implementation: Ietf.implementationFromSetup(setup.parameters),
 	};
+}
+
+/**
+ * The implementation a moq-transport draft-14 to 16 peer advertised in its bidi SETUP. A malformed one
+ * closes the session as a protocol violation, the way {@link exchangeSetup} refuses one.
+ */
+export function legacyPeerImplementation(transport: WebTransport, params: Ietf.SetupOptions): string | undefined {
+	try {
+		return Ietf.implementationFromSetup(params);
+	} catch (err) {
+		if (err instanceof ProtocolViolation)
+			transport.close({ closeCode: err.code, reason: closeReason(err.message) });
+		throw err;
+	}
 }

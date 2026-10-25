@@ -8,7 +8,7 @@ package dev.moq
  * auto-created), so you can [createBroadcast] and collect [announced] updates
  * without touching the raw [Client] handle.
  *
- * Call [shutdown] to drain finished tracks before disconnecting. [AutoCloseable]
+ * Call [shutdown], then await [Session.closed] to drain finished tracks before disconnecting. [AutoCloseable]
  * disposal through `use { ... }` or [close] cancels immediately.
  */
 class Moq internal constructor(
@@ -69,17 +69,14 @@ class Moq internal constructor(
     fun auth(): Auth = session.auth()
 
     /**
-     * Drain finished tracks within one second, throwing on failure.
+     * Request a draining close now; await `session.closed()` for its result, then [close]
+     * to release the client.
      * Explicit `moq-lite-07-wip` waits for the peer to receive finished tails; older
      * Lite versions, including the default lite-06, wait only for transport ACKs.
      * IETF also waits for transport ACKs.
      */
-    suspend fun shutdown() {
-        try {
-            session.shutdown()
-        } finally {
-            client.cancel()
-        }
+    fun shutdown() {
+        session.shutdown()
     }
 
     /** Cancel immediately and release the client. */
@@ -102,7 +99,7 @@ class Moq internal constructor(
          * two directions.
          */
         suspend fun connect(url: String, config: ClientConfig = ClientConfig()): Moq {
-            val client = Client(config)
+            val client = Client(config.copy(implementation = implementation(config.implementation)))
             try {
                 return Moq(client.connect(url), client)
             } catch (e: Throwable) {

@@ -421,23 +421,6 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 		Poll::Ready(Ok(bytes))
 	}
 
-	/// Poll to discard `remaining` bytes, counting it down as they arrive. Each byte is
-	/// released as it is skipped, so a peer cannot make a skipped payload cost credit.
-	pub(crate) fn poll_skip(&mut self, cx: &mut Context<'_>, remaining: &mut usize) -> Poll<Result<(), Error>> {
-		self.want = 0;
-		while *remaining > 0 {
-			let mut lease = ready!(self.poll_lease(cx, 1))?;
-			if !lease.has_remaining() {
-				return Poll::Ready(Err(DecodeError::Short.into()));
-			}
-			let skipped = lease.remaining().min(*remaining);
-			lease.advance(skipped);
-			lease.release();
-			*remaining -= skipped;
-		}
-		Poll::Ready(Ok(()))
-	}
-
 	/// Read exactly the given number of bytes from the stream.
 	pub async fn read_exact(&mut self, size: usize) -> Result<Bytes, Error> {
 		std::future::poll_fn(|cx| self.poll_read_exact(cx, size)).await
@@ -617,7 +600,7 @@ mod tests {
 		let mut lite = stop_log(crate::lite::Version::Lite05);
 		lite.abort(&Error::Old);
 
-		let mut ietf = stop_log(crate::ietf::Version::Draft20);
+		let mut ietf = stop_log(crate::ietf::Version::Draft22);
 		ietf.abort(&Error::Old);
 
 		assert_eq!(lite.stream.get_ref().stops, vec![StreamError::Old.to_code()]);
@@ -717,24 +700,6 @@ mod tests {
 		}
 	}
 
-	/// A skipped payload is discarded across reads, leaving what follows it, and a skip
-	/// waiting on more has counted down what it already discarded.
-	#[test]
-	fn skip_discards_across_reads() {
-		let mut reader = queue(&[b"abc", b"defg", b"hi"], crate::lite::Version::Lite05);
-		let mut cx = Context::from_waker(std::task::Waker::noop());
-
-		let mut remaining = 6;
-		assert!(matches!(reader.poll_skip(&mut cx, &mut remaining), Poll::Ready(Ok(()))));
-		assert_eq!(&reader.read_exact(3).now_or_never().unwrap().unwrap()[..], b"ghi");
-
-		let mut reader = queue(&[b"ab", b"cd"], crate::lite::Version::Lite05);
-		let mut remaining = 5;
-		assert!(reader.poll_skip(&mut cx, &mut remaining).is_pending());
-		assert_eq!(remaining, 1);
-		assert_eq!(leased(&mut reader), 0, "nothing skipped is kept");
-	}
-
 	/// A message cut across chunks decodes from a copy, waiting for exactly what its
 	/// prefix declared, and consumes only itself.
 	#[test]
@@ -816,7 +781,7 @@ mod tests {
 		use crate::{Version, ietf, lite, setup};
 		refuses_frame::<lite::Setup, _>(&[0], lite::Version::Lite05, false);
 		refuses_frame::<lite::Goaway, _>(&[0], lite::Version::Lite05, false);
-		refuses_frame::<ietf::GoAway, _>(&[0, 0], ietf::Version::Draft20, false);
+		refuses_frame::<ietf::GoAway, _>(&[0, 0], ietf::Version::Draft22, false);
 		for version in [
 			Version::Lite(lite::Version::Lite01),
 			Version::Lite(lite::Version::Lite02),

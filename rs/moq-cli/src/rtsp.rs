@@ -69,14 +69,14 @@ fn is_fatal(err: &anyhow::Error) -> bool {
 /// Publish one session as one broadcast, announced once its catalog names a track, setting
 /// `published` then.
 async fn run(target: &ImportTarget, client: &moq_rtsp::Client, published: &mut bool) -> anyhow::Result<moq_rtsp::End> {
-	let mut broadcast = target
+	let broadcast = target
 		.origin
 		.create_broadcast(&target.name)
 		.context("failed to create broadcast")?;
 	let config = moq_mux::catalog::Config::default()
 		.with_max_age(target.max_age)
 		.with_bandwidth(target.bandwidth.clone());
-	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
+	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config)?;
 
 	// A relay asks for a broadcast's tracks the moment it is announced, so wait for the
 	// first keyframe to put them in the catalog.
@@ -99,6 +99,9 @@ async fn run(target: &ImportTarget, client: &moq_rtsp::Client, published: &mut b
 		end = client.pull(&broadcast, &catalog) => end.map_err(anyhow::Error::from),
 		err = announce => err,
 	};
+	// Closed at once even after a clean end: the pull redials and publishes the next run under a
+	// newer epoch, so a run's end is not the content's, and a retained run's finished catalog
+	// would tell readers to stop if the next run dropped.
 	let finished = match &end {
 		Ok(_) => catalog.finish(),
 		Err(err) => {

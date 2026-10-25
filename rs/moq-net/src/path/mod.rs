@@ -62,7 +62,7 @@ impl<'a> AsPath for &'a String {
 /// A borrowed slice of the path, or a suffix of a shared reference-counted buffer.
 ///
 /// The `Shared` variant is what makes owned paths cheap: cloning bumps a refcount and
-/// suffix operations (strip_prefix, next_part) only advance `start`, so one allocation
+/// suffix operations (strip_prefix) only advance `start`, so one allocation
 /// serves every copy of a path as it fans out to consumers.
 #[derive(Clone)]
 enum Repr<'a> {
@@ -248,20 +248,6 @@ impl<'a> Path<'a> {
 		// Paths are normalized on creation so there are no empty parts to filter,
 		// except that splitting the empty path yields one empty item.
 		self.as_str().split('/').filter(|part| !part.is_empty())
-	}
-
-	/// Strip the directory component of the path, if any, and return the rest of the path.
-	pub fn next_part(&'a self) -> Option<(&'a str, Path<'a>)> {
-		let s = self.as_str();
-		if s.is_empty() {
-			return None;
-		}
-
-		if let Some(i) = s.find('/') {
-			Some((&s[..i], self.slice_from(i + 1)))
-		} else {
-			Some((s, Path::empty()))
-		}
 	}
 
 	/// Whether a segment starts with `.`, which hides the path from announce
@@ -596,6 +582,38 @@ impl<V> Encode<V> for Path<'_> {
 			return Err(EncodeError::BoundsExceeded);
 		}
 		w.string(self.as_str())
+	}
+}
+
+/// A grant's patterns as a count and each one's canonical text, the one encoding both
+/// wires' AUTH_OK share.
+impl<V> Encode<V> for Patterns {
+	fn encode(&self, w: &mut Encoder<'_>, _: V) -> Result<(), EncodeError> {
+		w.varint(self.len() as u64)?;
+		for pattern in self {
+			w.string(pattern.as_str())?;
+		}
+		Ok(())
+	}
+}
+
+impl<V> Decode<V> for Patterns {
+	fn decode(r: &mut Decoder<'_>, _: V) -> Result<Self, DecodeError> {
+		let count = r.varint()?;
+		// No preallocation: the count is peer-controlled, and the message size limit
+		// is what bounds how many patterns actually fit.
+		let mut patterns = Vec::new();
+		for _ in 0..count {
+			let text = r.string()?;
+			let pattern = Pattern::try_from(text.as_str()).map_err(|_| DecodeError::InvalidValue)?;
+			// Only the canonical spelling is valid, so each pattern has one encoding.
+			if pattern.as_str() != text {
+				return Err(DecodeError::InvalidValue);
+			}
+			patterns.push(pattern);
+		}
+		// Reduce once, so a peer's count never turns into quadratic work.
+		Ok(patterns.into_iter().collect())
 	}
 }
 
@@ -1202,12 +1220,6 @@ mod tests {
 		let stripped = path.strip_prefix("customer").unwrap().to_owned();
 		assert_eq!(stripped.as_str(), "room/broadcast");
 		assert_eq!(stripped.as_str().as_ptr(), path.as_str()["customer/".len()..].as_ptr());
-
-		// next_part shares the rest as well.
-		let (dir, rest) = path.next_part().unwrap();
-		assert_eq!(dir, "customer");
-		let rest = rest.to_owned();
-		assert_eq!(rest.as_str().as_ptr(), stripped.as_str().as_ptr());
 
 		// join produces an owned path whose clones share.
 		let joined = path.join("alice");

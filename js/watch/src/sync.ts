@@ -35,7 +35,9 @@ export type SyncInput = {
 	 * Zero minimizes latency, the live default: playback re-anchors as soon as anything arrives
 	 * early. A larger value lets faster-than-real-time frames (a TTS response with future
 	 * timestamps) build up instead of being skipped. Always finite, so worst case the audio ring
-	 * drops its oldest samples rather than exhausting memory.
+	 * drops its oldest samples rather than exhausting memory. With a nonzero buffer, the first video
+	 * frame is a poster until every enabled media track holds the resolved delay; `buffer` is
+	 * lookahead, not the amount required to start.
 	 */
 	buffer: Getter<Milli>;
 };
@@ -83,7 +85,17 @@ export class Sync {
 	/** The derived outputs, read-only. */
 	readonly out = readonlys(this.#out);
 
-	#media = new Signal<{ target: Getter<Milli | undefined> }[]>([]);
+	#media = new Signal<
+		{
+			target: Getter<Milli | undefined>;
+			// undefined is inactive, null is selected but has no playable first span yet.
+			startup?: Getter<{ start: Milli; end: Milli } | null | undefined>;
+		}[]
+	>([]);
+	#started = false;
+	#playing = new Signal(true);
+	/** Whether buffered startup has released the media consumers. @internal */
+	readonly playing: Getter<boolean> = this.#playing;
 
 	// Bumped by every `reset()`. A frame that waited across a bump belongs to the previous timeline,
 	// even when the next frame restores the same reference value.
@@ -106,16 +118,52 @@ export class Sync {
 		this.#signals.run(this.#runInstant.bind(this));
 		this.#signals.run(this.#runDelay.bind(this));
 		this.#signals.run(this.#runMaxDelay.bind(this));
+		this.#signals.run(this.#runStartup.bind(this));
 	}
 
 	/**
 	 * Hold a decoder's "auto" playout target in the shared playback clock until disposed.
 	 * @internal
 	 */
-	register(target: Getter<Milli | undefined>): Dispose {
-		const registered = { target };
+	register(
+		target: Getter<Milli | undefined>,
+		startup?: Getter<{ start: Milli; end: Milli } | null | undefined>,
+	): Dispose {
+		const registered = { target, startup };
 		this.#media.update((media) => [...media, registered]);
 		return () => this.#media.update((media) => media.filter((candidate) => candidate !== registered));
+	}
+
+	// Startup is data-driven: time passing cannot fill a missing track. The first picture still
+	// travels through the ordinary renderer while the consumers wait for this shared gate.
+	#runStartup(effect: Effect): void {
+		effect.get(this.#epoch);
+		const buffered = effect.get(this.#out.buffered);
+		const delay = effect.get(this.#out.delay);
+		const reference = effect.get(this.#out.reference);
+		const spans = effect.get(this.#media).flatMap(({ startup }) => {
+			const span = startup && effect.get(startup);
+			return span === undefined ? [] : [span];
+		});
+		if (!buffered || spans.length === 0) {
+			this.#playing.set(true);
+			return;
+		}
+		if (this.#started) return;
+		const ready = spans.filter((span) => span !== null);
+		if (
+			reference === undefined ||
+			ready.length !== spans.length ||
+			ready.some((span) => span.end - span.start < delay)
+		) {
+			this.#playing.set(false);
+			return;
+		}
+		const first = Math.min(...ready.map((span) => span.start));
+		this.#started = true;
+		// Anchor at the retained opening, not at its arrival: startup may have waited on another track.
+		this.#out.reference.set(Nano.toMilli(Nano(now())) - first - delay);
+		this.#playing.set(true);
 	}
 
 	#runInstant(effect: Effect): void {
@@ -166,6 +214,10 @@ export class Sync {
 			return false;
 		}
 
+		// Retain the opening while another track fills; the ordinary max-delay bounds still own
+		// storage, but a later arrival must not advance the shared playhead before startup.
+		if (!this.#playing.peek()) return false;
+
 		// Check if `wait()` would not sleep at all.
 		// NOTE: We check here instead of in `wait()` so we can identify when frames are received late.
 		// Otherwise, chained `wait()` calls would cause a false-positive during CPU starvation.
@@ -203,6 +255,8 @@ export class Sync {
 	reset(): void {
 		this.#epoch.update((epoch) => epoch + 1);
 		this.#floor = undefined;
+		this.#started = false;
+		this.#playing.set(!this.#out.buffered.peek());
 		this.#out.reference.set(undefined);
 	}
 
@@ -222,9 +276,10 @@ export class Sync {
 
 	/**
 	 * The PTS that should be rendering right now, derived from the reference + delay; negative
-	 * before the first frame's turn. Undefined if no frames have been received yet.
+	 * before the first frame's turn. Undefined before ingress or while buffered startup is filling.
 	 */
 	now(): Milli | undefined {
+		if (!this.#playing.peek()) return undefined;
 		const reference = this.#out.reference.peek();
 		if (reference === undefined) return undefined;
 		return Milli(Nano.toMilli(Nano(now())) - reference - this.#out.delay.peek());
@@ -253,6 +308,11 @@ export class Sync {
 			// Peek the input, not `out.instant`, which lags a same-turn change until effects flush.
 			if (this.in.delay.peek() === "instant") return true;
 
+			if (!this.#playing.peek()) {
+				await this.#sleep(undefined, signal);
+				continue;
+			}
+
 			// NOTE: This function runs in parallel for each frame.
 			const sleep = reference + timestamp - Nano.toMilli(Nano(now())) + this.#out.delay.peek();
 
@@ -266,7 +326,7 @@ export class Sync {
 	// Sleeps for `ms`, or wakes early once anything the sleep was computed from changes or `signal`
 	// aborts. Releases every listener either way: frames sleep once each, so a listener left on a
 	// signal that never changes would pile up for the life of the player.
-	#sleep(ms: number, signal?: AbortSignal): Promise<void> {
+	#sleep(ms: number | undefined, signal?: AbortSignal): Promise<void> {
 		return new Promise((resolve) => {
 			const timer = new AbortController();
 			const wake = () => {
@@ -274,13 +334,14 @@ export class Sync {
 				for (const dispose of disposes) dispose();
 				resolve();
 			};
-			void sleep(Nano.fromMilli(Milli(ms)), { signal: timer.signal }).then(wake, () => {});
+			if (ms !== undefined) void sleep(Nano.fromMilli(Milli(ms)), { signal: timer.signal }).then(wake, () => {});
 			const disposes = [
 				this.in.delay.changed(wake),
 				this.#out.delay.changed(wake),
 				this.#out.reference.changed(wake),
 				this.#epoch.changed(wake),
 				this.#closed.changed(wake),
+				this.#playing.changed(wake),
 			];
 			if (signal) {
 				signal.addEventListener("abort", wake, { once: true });

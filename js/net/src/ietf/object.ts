@@ -2,7 +2,7 @@ import { ProtocolViolation, StreamCode, Stream as StreamError } from "../error.t
 import { asIetf, type Cursor, type Reader, Writer } from "../stream.ts";
 import { type Timescale, Timestamp } from "../time.ts";
 import { U64 } from "../util/u64.ts";
-import { ABSENT_WIRE } from "./priority.ts";
+import { DEFAULT_WIRE } from "./priority.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 // Implementation limit for object extension blocks, independent of the IETF draft.
@@ -213,7 +213,7 @@ export class Group {
 		const id = legacy ? raw : raw & ~FIRST_OBJECT_BIT;
 
 		// An invalid type MUST close the session, including the reserved SUBGROUP_ID_MODE
-		// 0b11 (draft-21 section 11.3.1).
+		// 0b11 (draft-22 section 11.3.1).
 		const known = (id >= 0x10 && id <= 0x1f) || (id >= 0x30 && id <= 0x3f);
 		if (!known || (id & 0x06) === 0x06) {
 			throw new ProtocolViolation(`Unsupported group type: ${raw}`);
@@ -235,7 +235,7 @@ export class Group {
 		const trackAlias = await r.u62();
 		const groupId = await r.u53();
 		const subGroupId = flags.hasSubgroup ? await r.u53() : 0;
-		const publisherPriority = hasPriority ? await r.u8() : ABSENT_WIRE;
+		const publisherPriority = hasPriority ? await r.u8() : DEFAULT_WIRE;
 
 		return new Group({ trackAlias, groupId, subGroupId, publisherPriority, flags });
 	}

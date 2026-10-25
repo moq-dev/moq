@@ -703,7 +703,7 @@ struct Imported {
 	published: std::collections::BTreeMap<String, Vec<u128>>,
 	/// The root clock the catalog advertised.
 	clock: hang::catalog::Clock,
-	arrival: std::ops::RangeInclusive<std::time::SystemTime>,
+	arrival: std::ops::RangeInclusive<moq_clock::Wall>,
 }
 
 /// Import `data` on a catalog with the default clock.
@@ -713,9 +713,9 @@ async fn import_stream(data: &[u8]) -> Imported {
 	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 
-	let before = std::time::SystemTime::now();
+	let before = moq_clock::wall();
 	import.decode(data).unwrap();
-	let after = std::time::SystemTime::now();
+	let after = moq_clock::wall();
 	import.finish().unwrap();
 
 	let snapshot = catalog.snapshot();
@@ -960,7 +960,8 @@ fn import_reports_a_silent_scte35_pid() {
 }
 
 /// Every elementary stream the importer carries reports a row, decoded, clock-only, and
-/// verbatim alike, and every row has delivered.
+/// verbatim alike, and every row has delivered. An SI PID has a row only for the sections
+/// it sent before the program clock could place them, as ffmpeg leads with its SDT.
 #[test]
 fn import_reports_every_elementary_stream() {
 	for (data, rows) in [
@@ -970,12 +971,15 @@ fn import_reports_every_elementary_stream() {
 		),
 		(
 			&include_bytes!("test_data/scte35/bbb5s.ts")[..],
-			&[(0x21, ".ts"), (0x100, ".hev1"), (0x101, ".opus")][..],
+			&[(0x11, ".si"), (0x21, ".ts"), (0x100, ".hev1"), (0x101, ".opus")][..],
 		),
 	] {
-		let stats = sample(data, &[]).pop().unwrap();
+		let mut stats = sample(data, &[]).pop().unwrap();
 		let tracks: Vec<(u16, &str)> = stats.streams.iter().map(|(&pid, s)| (pid, s.track.as_str())).collect();
 		assert_eq!(tracks, rows);
+		if let Some(sdt) = stats.streams.remove(&0x11) {
+			assert_eq!((sdt.units, sdt.unplaced), (0, 1), "{sdt:?}");
+		}
 		for (pid, stream) in &stats.streams {
 			assert!(stream.units > 0, "{pid:#x} delivered nothing: {stream:?}");
 			assert!(stream.quiet.is_some(), "{pid:#x} has no program clock: {stream:?}");

@@ -450,6 +450,11 @@ impl Session {
 		self.conn.wire()
 	}
 
+	/// The target the connection probes up to, or `None` when it cannot probe.
+	pub(crate) fn probe(&self) -> Option<moq_net::transport::Probe> {
+		self.conn.probe()
+	}
+
 	/// Receive streams evicted to free a stuck receive window.
 	pub(crate) fn streams_evicted(&self) -> u64 {
 		self.conn.streams_evicted()
@@ -599,6 +604,23 @@ impl std::fmt::Debug for Session {
 			.field("web", &self.web.is_some())
 			.field("protocol", &self.protocol)
 			.finish()
+	}
+}
+
+impl Session {
+	pub(crate) fn poll_open_request(
+		&mut self,
+		cx: &mut Context<'_>,
+	) -> Poll<Result<Option<(SendStream, RecvStream)>, Error>> {
+		if self.opening_bi.is_none() {
+			let Some((send, recv)) = self.conn.open_request().map_err(|err| self.map_err(err))? else {
+				return Poll::Ready(Ok(None));
+			};
+			let web = self.web.is_some();
+			let header = self.web.as_ref().map(|web| web.header_bi.clone()).unwrap_or_default();
+			self.opening_bi = Some((SendStream::new(send, web), RecvStream { inner: recv, web }, header));
+		}
+		web_transport_trait::poll::Session::poll_open_bi(self, cx).map_ok(Some)
 	}
 }
 

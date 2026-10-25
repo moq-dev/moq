@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use moq_net::{Client, Hop, Server, Timestamp, Version, broadcast, cache, origin, track, transport::memory};
+use moq_net::{Client, Hop, Server, Timestamp, Version, cache, origin, track, transport::memory};
 
 const VERSION: &str = "moq-lite-06";
 
@@ -102,7 +102,7 @@ struct Link {
 	tracks: Vec<track::Producer>,
 	subscribers: Vec<track::Subscriber>,
 	payload: Bytes,
-	_broadcast: broadcast::Producer,
+	_broadcast: origin::Publication,
 	_sessions: (moq_net::Session, moq_net::Session),
 	_origins: (origin::Producer, origin::Producer),
 }

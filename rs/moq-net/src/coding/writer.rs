@@ -243,10 +243,27 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 }
 
 impl<S: crate::transport::poll::SendStream> Writer<S, ietf::Version> {
-	/// Encode an IETF `Message` to the stream, writing `[type_id][size][body]`.
+	/// Encode `msg` into the write buffer as `[id][size][body]`, to be sent by
+	/// [`Self::poll_flush`]. The type and body go in together or not at all, so a failed encode
+	/// never leaves a bare type for the next write to complete. `id` is explicit for the drafts
+	/// that send one body under several types.
+	pub fn buffer_message<T: Encode<ietf::Version>>(&mut self, id: u64, msg: &T) -> Result<(), Error> {
+		let start = self.buffer.len();
+		self.buffer_varint(id)?;
+		// The body is buffered on its own so control stats count it without its type selector.
+		let version = self.version;
+		if let Err(err) = self.buffer_with(|w| msg.encode(w, version)) {
+			self.buffer.truncate(start);
+			return Err(err);
+		}
+		Ok(())
+	}
+
+	/// Encode an IETF `Message` to the stream as `[type_id][size][body]`, with the same
+	/// all-or-nothing buffering as [`Self::buffer_message`] and cancellation rules as [`Self::encode`].
 	pub async fn encode_message<T: ietf::Message>(&mut self, msg: &T) -> Result<(), Error> {
-		self.buffer_varint(T::ID)?;
-		self.encode(msg).await
+		self.buffer_message(T::ID, msg)?;
+		std::future::poll_fn(|cx| self.poll_flush(cx)).await
 	}
 }
 
@@ -315,7 +332,7 @@ mod tests {
 				Error::Stream(crate::StreamError::Unknown(0x4)),
 			),
 			(
-				crate::Version::Ietf(crate::ietf::Version::Draft20),
+				crate::Version::Ietf(crate::ietf::Version::Draft22),
 				Error::Stream(crate::StreamError::GoingAway),
 			),
 			(
@@ -357,8 +374,8 @@ mod tests {
 	#[derive(Debug)]
 	struct Poison;
 
-	impl Encode<crate::lite::Version> for Poison {
-		fn encode(&self, w: &mut Encoder<'_>, _: crate::lite::Version) -> Result<(), EncodeError> {
+	impl<V> Encode<V> for Poison {
+		fn encode(&self, w: &mut Encoder<'_>, _: V) -> Result<(), EncodeError> {
 			w.control = Some(crate::stats::Control::Probe);
 			w.slice(b"junk");
 			Err(EncodeError::BoundsExceeded)
@@ -379,6 +396,17 @@ mod tests {
 		let mut cx = std::task::Context::from_waker(Waker::noop());
 		assert!(writer.poll_flush(&mut cx).is_ready());
 		assert_eq!(*log.writes.lock().unwrap(), vec![5, 7], "the partial encode leaked");
+
+		// A control message's type goes with its body: a bare type would make the next
+		// message, or a FIN, a torn one.
+		let mut writer = Writer::new(SinkSend::new(Log::default()), crate::ietf::Version::Draft17);
+		writer.buffer_varint(5).unwrap();
+		writer.buffer_message(0x2, &Poison).unwrap_err();
+		writer.buffer_varint(7).unwrap();
+
+		let log = writer.stream.as_ref().unwrap().log.clone();
+		assert!(writer.poll_flush(&mut cx).is_ready());
+		assert_eq!(*log.writes.lock().unwrap(), vec![5, 7], "the message type leaked");
 	}
 
 	#[test]

@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use bytes::{Buf, Bytes};
 use moq_clock::Instant;
-use moq_net::transport::{self as net, Binding, poll};
+use moq_net::transport::{self as net, Address, poll};
 use moq_quic::{Dir, Side, StreamId, TransportError, TransportErrorCode, VarInt, mux};
 use rustc_hash::FxHashMap;
 
@@ -34,7 +34,7 @@ struct Inner {
 	/// Updated by the reader and writer, so stats never take the lock.
 	wire: net::Wire,
 	socket_stats: Option<SharedSocketStats>,
-	binding: Binding,
+	address: Address,
 }
 
 struct State {
@@ -498,7 +498,7 @@ impl Session {
 			}),
 			wire: net::Wire::new(),
 			socket_stats: transport.socket_stats(),
-			binding: transport.binding(),
+			address: transport.address(),
 		});
 
 		let (writer, reader) = transport.split(&config);
@@ -662,6 +662,35 @@ impl poll::Session for Session {
 		})
 	}
 
+	fn poll_open_request(
+		&mut self,
+		cx: &mut Context<'_>,
+		options: poll::SendOptions<'_, SendGroup>,
+	) -> Poll<Result<Option<poll::BiStreams<Self>>, Error>> {
+		let waiter = self.park.hold(cx);
+		let mut state = self.inner.lock();
+		if let Some(err) = &state.closed {
+			return Poll::Ready(Err(err.clone()));
+		}
+		// A session started on an out-of-band protocol (a WebSocket subprotocol) runs before
+		// the peer's transport parameters arrive. Until then its credit is unknown, not spent.
+		if !state.established {
+			waiter.register(&mut state.establish_waiters);
+			return Poll::Pending;
+		}
+		let id = state.conn.streams().open(Dir::Bi, to_quic(options));
+		if id.is_some() {
+			state.driver.wake();
+		}
+		drop(state);
+		Poll::Ready(Ok(id.map(|id| {
+			(
+				SendStream::new(self.inner.clone(), id),
+				RecvStream::new(self.inner.clone(), id),
+			)
+		})))
+	}
+
 	fn send_group(&mut self, priority: i64) -> Option<SendGroup> {
 		Some(Session::send_group(self, priority))
 	}
@@ -701,8 +730,8 @@ impl poll::Session for Session {
 		Session::protocol(self)
 	}
 
-	fn binding(&self) -> Binding {
-		self.inner.binding
+	fn address(&self) -> Address {
+		self.inner.address
 	}
 
 	fn close(&mut self, code: u32, reason: &str) {
@@ -1091,7 +1120,7 @@ impl poll::Chunks for RecvChunks {
 /// kicks the writer.
 fn read(state: &mut State, id: StreamId, max: usize) -> Read {
 	let mut recv = state.conn.recv_stream(id);
-	let mut chunks = match recv.read(true) {
+	let mut chunks = match recv.read() {
 		Ok(chunks) => chunks,
 		// The stream is gone, so everything it held is already ours.
 		Err(_) => return Read::Finished,

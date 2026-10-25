@@ -178,10 +178,10 @@ pub struct MoqAudio {
 	pub enabled: bool,
 	/// The framing used to carry this rendition.
 	pub container: MoqContainer,
-	/// The publisher's worst-case delay between a frame being ready and its flush, in
-	/// microseconds, which floors an estimated playout delay. Absent means frames flush at once.
+	/// The publisher's worst-case delay between a frame being ready and its flush, which
+	/// floors an estimated playout delay. Absent means frames flush at once.
 	#[uniffi(default = None)]
-	pub jitter_us: Option<u64>,
+	pub jitter: Option<std::time::Duration>,
 }
 
 /// A payload and the time it should be presented.
@@ -296,8 +296,6 @@ pub enum MoqContainerFormat {
 	Ts,
 	/// Flash Video, as used by RTMP.
 	Flv,
-	/// Fragmented MP4 / CMAF, republished whole as one CMAF frame per fragment.
-	Cmaf,
 }
 
 /// What an audio publish needs: a format, its codec init bytes, and an optional label.
@@ -477,7 +475,6 @@ impl From<MoqContainerFormat> for moq_mux::import::ContainerFormat {
 	fn from(format: MoqContainerFormat) -> Self {
 		match format {
 			MoqContainerFormat::Fmp4 => Self::Fmp4,
-			MoqContainerFormat::Cmaf => Self::Cmaf,
 			MoqContainerFormat::Mkv => Self::Mkv,
 			MoqContainerFormat::Ts => Self::Ts,
 			MoqContainerFormat::Flv => Self::Flv,
@@ -556,9 +553,7 @@ pub(crate) fn convert_catalog(catalog: &moq_mux::catalog::hang::Catalog<moq_mux:
 					bitrate: config.bitrate,
 					enabled: config.enabled,
 					container: MoqContainer::from_catalog(&config.container)?,
-					jitter_us: config
-						.jitter
-						.map(|jitter| jitter.as_micros().try_into().unwrap_or(u64::MAX)),
+					jitter: config.jitter.map(crate::ffi::duration),
 				},
 			))
 		})
@@ -780,6 +775,20 @@ impl MoqMediaCatalogProducer {
 			Ok(())
 		})
 	}
+
+	/// Finish the catalog, which ends the broadcast's content.
+	///
+	/// Finish every track first. The broadcast stays announced and keeps serving its finished
+	/// tracks, so a subscriber that arrives late can still read them, until the broadcast's
+	/// `close` takes it offline. How long to keep it up is yours to decide.
+	pub fn finish(&self) -> Result<(), MoqError> {
+		let _guard = crate::ffi::enter();
+		self.broadcast.upgrade().ok_or(MoqError::Closed)?.with_state(|state| {
+			state.catalog.finish()?;
+			state.ended = true;
+			Ok(())
+		})
+	}
 }
 
 /// A whole-frame importer for one codec track.
@@ -985,20 +994,7 @@ impl MoqMediaTrackProducer {
 		Ok(())
 	}
 
-	/// Record a locally encoded frame's handoff for catalog jitter measurement.
-	///
-	/// `timestamp_us` is on the broadcast media clock. Call this after `write_frame` only for
-	/// encoder output; imported files, pipes, and network media stay clock-free.
-	pub fn flush(&self, timestamp_us: u64) -> Result<(), MoqError> {
-		let _guard = crate::ffi::enter();
-		let timestamp = moq_net::Timestamp::from_micros(timestamp_us)?;
-		let mut guard = self.inner.lock().unwrap();
-		let media = guard.as_mut().ok_or(MoqError::Closed)?;
-		media.import.flush(timestamp, moq_clock::Instant::now())?;
-		Ok(())
-	}
-
-	/// Mark a timeline break and restart handoff measurement without lowering advertised jitter.
+	/// Mark a timeline break without lowering the advertised jitter or delay.
 	///
 	/// Publishes a discontinuity marker; resumed frames must continue the broadcast media clock,
 	/// and video must resume on a keyframe.
@@ -1089,7 +1085,9 @@ impl MoqMediaContainerProducer {
 			let _guard = crate::ffi::enter();
 			let mut guard = self.inner.lock().unwrap();
 			let container = guard.as_mut().ok_or(MoqError::Closed)?;
-			container.import.cut();
+			container.import.cut().map_err(|err| MoqError::Codec {
+				reason: format!("cut failed: {err}"),
+			})?;
 			Ok(())
 		})();
 		self.driver.check()?;
@@ -1450,7 +1448,7 @@ impl MoqMediaGroupConsumer {
 	/// Pair it with [`MoqTrackConsumer::recv_group`](crate::consumer::MoqTrackConsumer::recv_group)
 	/// to read media in arrival order: frame timestamps are container media time, not the
 	/// transport's. Which groups arrive, and how long a stalled one stays readable, is the
-	/// subscription's `max_delay_us`. Takes over `group`, whose handle is closed afterward; errors
+	/// subscription's `max_delay`. Takes over `group`, whose handle is closed afterward; errors
 	/// if it has already read a frame.
 	#[uniffi::constructor]
 	pub fn new(group: &MoqGroupConsumer, container: MoqContainer) -> Result<Arc<Self>, MoqError> {

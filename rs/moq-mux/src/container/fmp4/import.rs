@@ -4,7 +4,7 @@ use moq_net::Timestamp;
 use mp4_atom::{Any, Atom, DecodeMaybe, Encode, Mdat, Moof, Moov, Trak};
 use std::collections::{HashMap, HashSet};
 
-use super::{Error, Kind, sample};
+use super::{Error, Kind, edit::Edit, sample};
 use crate::Result;
 use crate::catalog::Estimator;
 
@@ -12,7 +12,8 @@ use crate::catalog::Estimator;
 ///
 /// By default each fragment is unwrapped: every sample becomes one
 /// [`Legacy`](Container::Legacy) frame carrying the codec payload, timed at its presentation time,
-/// so a consumer needs no ISO BMFF parser. [`with_passthrough`](Self::with_passthrough) instead
+/// so a consumer needs no ISO BMFF parser. Either way, each track's edit list is applied to the
+/// frame timestamps and left out of the catalog. [`with_passthrough`](Self::with_passthrough) instead
 /// republishes each fragment whole as one [`Cmaf`](Container::Cmaf) frame, for a source whose exact
 /// `trun` timing must survive.
 ///
@@ -114,6 +115,13 @@ struct Fmp4Track<E: crate::catalog::hang::CatalogExt> {
 	/// The `mdhd` timescale the samples count in.
 	timescale: moq_net::Timescale,
 
+	/// The edit list, applied to every sample's presentation time.
+	edit: Edit,
+
+	/// No sync sample precedes the next sample, since the import joined mid-GOP or the edit list
+	/// dropped the last one, so the samples decoding from it go too.
+	orphaned: bool,
+
 	// The decode time of the last fragment, which the next one has to advance past.
 	last_decode_time: Option<u64>,
 
@@ -201,11 +209,14 @@ macro_rules! media {
 
 /// One sample of a fragment, resolved against the track's defaults.
 struct Sample {
-	/// Decode time, in track ticks.
+	/// Decode time, in media ticks.
 	dts: u64,
-	/// Presentation time, in track ticks.
+	/// Composition time, in media ticks.
 	pts: u64,
+	/// Presentation time once the edit list applies, at the track's scale.
+	timestamp: Timestamp,
 	duration: Option<u32>,
+	flags: u32,
 	sync: bool,
 	/// The sample's bytes within the `mdat` payload.
 	range: std::ops::Range<usize>,
@@ -218,6 +229,8 @@ struct Run {
 	earliest: Timestamp,
 	/// The furthest presentation end any sample reaches.
 	end: Timestamp,
+	/// The edit list dropped some of the fragment's samples.
+	dropped: bool,
 }
 
 impl<E: crate::catalog::hang::CatalogExt> Import<E> {
@@ -247,7 +260,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	}
 
 	/// Return the number of metadata units discarded by this importer.
-	pub fn dropped_metadata(&self) -> u64 {
+	#[cfg(test)]
+	pub(crate) fn dropped_metadata(&self) -> u64 {
 		self.dropped_metadata
 	}
 
@@ -262,8 +276,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// This is where audio groups are drawn too: audio rolls its group at a segment boundary, so
 	/// it follows the same segmentation as video. A passthrough video track rolls there as well,
 	/// while an unwrapped one opens a group at each sync sample.
-	pub fn cut(&mut self) {
+	pub fn cut(&mut self) -> Result<()> {
 		self.pending_cut = true;
+		Ok(())
 	}
 
 	/// Restrict which track roles are published.
@@ -396,6 +411,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			}
 
 			let timescale = moq_net::Timescale::new(trak.mdia.mdhd.timescale as u64)?;
+			let edit = Edit::new(trak, moov.mvhd.timescale)?;
 			let output = match self.passthrough {
 				true => Output::Passthrough(Box::new(
 					self.init_passthrough(trak, &moov, &reserved, kind, timescale)?,
@@ -409,6 +425,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					kind,
 					defaults: sample::Defaults::from_moov(&moov, track_id),
 					timescale,
+					edit,
+					// Audio samples decode alone, whatever their sync flags say.
+					orphaned: kind == Kind::Video,
 					last_decode_time: None,
 					sample_duration: None,
 					segment: None,
@@ -474,7 +493,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			start: None,
 			recorder: Some(recorder),
 			pending_sequence: None,
-			estimator: Estimator::new(),
+			estimator: self.catalog.estimator(),
 			claim: crate::catalog::Claim::new(self.catalog.bandwidth()),
 		})
 	}
@@ -519,6 +538,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			),
 			_ => return Ok(false),
 		};
+		let edit = Edit::new(trak, moov.mvhd.timescale)?;
 		config.lang = Some(trak.mdia.mdhd.language.clone());
 		// The picker label is the HandlerBox name; `vlab` is an opaque source identifier.
 		config.label = (!trak.mdia.hdlr.name.is_empty()).then(|| trak.mdia.hdlr.name.clone());
@@ -535,6 +555,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				format,
 				defaults: sample::Defaults::from_moov(moov, trak.tkhd.track_id),
 				timescale: moq_net::Timescale::new(trak.mdia.mdhd.timescale as u64)?,
+				edit,
 				end_decode_time: None,
 				discontinuity: false,
 			},
@@ -570,9 +591,14 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					..Default::default()
 				});
 
+			// The importer applies the edit list to every frame timestamp, so a consumer applying it
+			// again would shift the track twice.
+			let mut trak = trak.clone();
+			trak.edts = None;
+
 			let single_moov = Moov {
 				mvhd: moov.mvhd.clone(),
-				trak: vec![trak.clone()],
+				trak: vec![trak],
 				mvex: Some(mp4_atom::Mvex {
 					mehd: None,
 					trex: vec![trex],
@@ -942,7 +968,12 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				None => return Err(Error::UnknownTrack(track_id).into()),
 			};
 
-			let run = track.run(traf, moof_size, header_size, payload.len())?;
+			// A fragment wholly before the edit or the first sync sample, such as priming samples or
+			// a mid-GOP join. Skipped before the segment is counted as opened, or the next keyframe
+			// would roll a second segment.
+			let Some(run) = track.run(traf, moof_size, header_size, payload.len())? else {
+				continue;
+			};
 			for sample in &run.samples {
 				claimed.take(sample.range.clone())?;
 			}
@@ -961,19 +992,14 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				declared: new_segment && self.declared,
 			};
 
-			let opened = match &mut track.output {
+			match &mut track.output {
 				Output::Passthrough(passthrough) => {
 					let fragment = fragment(traf, &moof, &run, &payload, &track.defaults)?;
 					passthrough.write(fragment, &run, track.kind, placement)?;
-					true
 				}
 				output => unwrap(output, &run, &payload, track.timescale, placement)?,
-			};
-			// A video track joined mid-GOP skips samples until a sync sample, so its segment opens
-			// there; counting a skipped fragment would let the next keyframe roll a second segment.
-			if opened {
-				track.segment = Some(self.segment);
 			}
+			track.segment = Some(self.segment);
 		}
 
 		Ok(())
@@ -992,8 +1018,9 @@ struct Placement {
 }
 
 impl<E: crate::catalog::hang::CatalogExt> Fmp4Track<E> {
-	/// Resolve the samples `traf` places in an mdat whose payload is `len` bytes.
-	fn run(&mut self, traf: &mp4_atom::Traf, moof_size: usize, header_size: usize, len: usize) -> Result<Run> {
+	/// Resolve the samples `traf` places in an mdat whose payload is `len` bytes, or `None` when
+	/// the edit list drops every one.
+	fn run(&mut self, traf: &mp4_atom::Traf, moof_size: usize, header_size: usize, len: usize) -> Result<Option<Run>> {
 		let tfdt = traf.tfdt.as_ref().ok_or(Error::MissingTfdt)?;
 		let timescale = self.timescale;
 		let mut dts = tfdt.base_media_decode_time;
@@ -1023,6 +1050,8 @@ impl<E: crate::catalog::hang::CatalogExt> Fmp4Track<E> {
 		let mut end = None;
 		let total_samples: usize = traf.trun.iter().map(|t| t.entries.len()).sum();
 		let mut samples = Vec::with_capacity(total_samples);
+		let mut index = 0;
+		let mut dropped = false;
 
 		for trun in &traf.trun {
 			if let Some(data_offset) = trun.data_offset {
@@ -1045,7 +1074,7 @@ impl<E: crate::catalog::hang::CatalogExt> Fmp4Track<E> {
 
 				// A non-final sample with no resolvable duration leaves the rest of the
 				// fragment's DTS ambiguous, so reject it rather than collapse timestamps.
-				if duration.is_none() && samples.len() + 1 != total_samples {
+				if duration.is_none() && index + 1 != total_samples {
 					return Err(Error::MissingSampleDuration.into());
 				}
 
@@ -1053,18 +1082,12 @@ impl<E: crate::catalog::hang::CatalogExt> Fmp4Track<E> {
 				let pts = dts
 					.checked_add_signed(entry.cts.unwrap_or_default() as i64)
 					.ok_or(Error::PtsOverflow)?;
-				let timestamp = Timestamp::new(pts, timescale)?;
-				let sample_end = if let Some(duration) = duration {
-					let duration = Timestamp::new(duration as u64, timescale)?;
+				let duration_ts = duration
+					.map(|duration| Timestamp::new(duration as u64, timescale))
+					.transpose()?;
+				if let Some(duration) = duration_ts {
 					self.sample_duration = Some(self.sample_duration.map_or(duration, |min| min.min(duration)));
-					timestamp.checked_add(duration)?
-				} else if let Some(duration) = self.sample_duration {
-					timestamp.checked_add(duration)?
-				} else {
-					timestamp
-				};
-				end = Some(end.map_or(sample_end, |max: Timestamp| max.max(sample_end)));
-				earliest = Some(earliest.map_or(timestamp, |min: Timestamp| min.min(timestamp)));
+				}
 
 				// Each sample must lie inside the mdat, or the sizes and offsets disagree with the
 				// data and it cannot be addressed safely.
@@ -1080,26 +1103,52 @@ impl<E: crate::catalog::hang::CatalogExt> Fmp4Track<E> {
 					.into());
 				}
 
-				samples.push(Sample {
-					dts,
-					pts,
-					duration,
-					sync: sample.is_sync(),
-					range: offset..next,
-				});
+				let presented = self.edit.present(pts)?;
+				if sample.is_sync() {
+					self.orphaned = presented.is_none();
+				}
+				if let Some(presented) = presented.filter(|_| !self.orphaned) {
+					let timestamp = Timestamp::new(presented, timescale)?;
+					let sample_end = match duration_ts.or(self.sample_duration) {
+						Some(duration) => timestamp.checked_add(duration)?,
+						None => timestamp,
+					};
+					end = Some(end.map_or(sample_end, |max: Timestamp| max.max(sample_end)));
+					earliest = Some(earliest.map_or(timestamp, |min: Timestamp| min.min(timestamp)));
+
+					samples.push(Sample {
+						dts,
+						pts,
+						timestamp,
+						duration,
+						flags: sample.flags,
+						sync: sample.is_sync(),
+						range: offset..next,
+					});
+				} else {
+					dropped = true;
+				}
 
 				if let Some(duration) = duration {
 					dts = dts.checked_add(duration as u64).ok_or(Error::PtsOverflow)?;
 				}
 				offset = next;
+				index += 1;
 			}
 		}
 
-		Ok(Run {
+		let (Some(earliest), Some(end)) = (earliest, end) else {
+			return match dropped {
+				true => Ok(None),
+				false => Err(Error::MissingTrun.into()),
+			};
+		};
+		Ok(Some(Run {
 			samples,
-			earliest: earliest.ok_or(Error::MissingTrun)?,
-			end: end.ok_or(Error::MissingTrun)?,
-		})
+			earliest,
+			end,
+			dropped,
+		}))
 	}
 }
 
@@ -1118,7 +1167,10 @@ fn fragment(
 	// with only the samples belonging to this track.
 	let mut adjusted_moof = Moof {
 		mfhd: moof.mfhd.clone(),
-		traf: vec![traf.clone()],
+		traf: vec![match run.dropped {
+			true => kept(traf, run)?,
+			false => traf.clone(),
+		}],
 	};
 
 	// Apply structural (flag-presence) changes BEFORE measuring the encoded
@@ -1188,6 +1240,41 @@ fn fragment(
 	Mdat { data }.encode(&mut moof_buf)?;
 
 	Ok(Bytes::from(moof_buf))
+}
+
+/// `traf` restated as one run of `run`'s samples, for a fragment the edit list dropped some of.
+///
+/// Each sample keeps its decode and composition time: `tfdt` starts at the first kept sample, and
+/// each kept sample lasts until the next one decodes. The per-sample tables (`sbgp`,
+/// `subs`, sample auxiliary information) would index the wrong samples, and no consumer reads
+/// them, so they go.
+fn kept(traf: &mp4_atom::Traf, run: &Run) -> Result<mp4_atom::Traf> {
+	let mut entries = Vec::with_capacity(run.samples.len());
+	for (index, sample) in run.samples.iter().enumerate() {
+		let duration = match run.samples.get(index + 1) {
+			Some(next) => Some(u32::try_from(next.dts - sample.dts).map_err(|_| Error::PtsOverflow)?),
+			None => sample.duration,
+		};
+		let cts = i128::from(sample.pts) - i128::from(sample.dts);
+		entries.push(mp4_atom::TrunEntry {
+			duration,
+			size: Some(sample.range.len() as u32),
+			flags: Some(sample.flags),
+			cts: Some(i32::try_from(cts).map_err(|_| Error::PtsOverflow)?),
+		});
+	}
+	let first = run.samples.first().ok_or(Error::MissingTrun)?;
+	Ok(mp4_atom::Traf {
+		tfhd: traf.tfhd.clone(),
+		tfdt: Some(mp4_atom::Tfdt {
+			base_media_decode_time: first.dts,
+		}),
+		trun: vec![mp4_atom::Trun {
+			data_offset: None,
+			entries,
+		}],
+		..Default::default()
+	})
 }
 
 impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
@@ -1271,15 +1358,13 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 }
 
 /// Write each sample of `run` as its own frame on an unwrapped track.
-///
-/// Returns whether the track now has a group open, which video lacks until its first sync sample.
 fn unwrap<E: crate::catalog::hang::CatalogExt>(
 	output: &mut Output<E>,
 	run: &Run,
 	payload: &Bytes,
 	timescale: moq_net::Timescale,
 	placement: Placement,
-) -> Result<bool> {
+) -> Result<()> {
 	let earliest = placement.offset.apply(run.earliest)?;
 	let end = placement.offset.apply(run.end)?;
 	let video = matches!(output, Output::Video(_));
@@ -1302,7 +1387,7 @@ fn unwrap<E: crate::catalog::hang::CatalogExt>(
 				producer.reorder(Timestamp::new(sample.pts - sample.dts, timescale)?);
 			}
 			let frame = crate::container::Frame {
-				timestamp: placement.offset.apply(Timestamp::new(sample.pts, timescale)?)?,
+				timestamp: placement.offset.apply(sample.timestamp)?,
 				payload: payload.slice(sample.range.clone()),
 				keyframe,
 				duration: sample
@@ -1310,16 +1395,12 @@ fn unwrap<E: crate::catalog::hang::CatalogExt>(
 					.map(|duration| Timestamp::new(duration as u64, timescale))
 					.transpose()?,
 			};
-			match producer.write(frame) {
-				// A source joined mid-GOP: skip ahead to the first sync sample.
-				Ok(()) | Err(crate::Error::MissingKeyframe(_)) => {}
-				Err(err) => return Err(err),
-			}
+			producer.write(frame)?;
 		}
 
 		// The fragment arrived at once, so a consumer has to buffer its whole span.
 		producer.burst(end.checked_sub(earliest)?.into())?;
-		Ok(!producer.needs_keyframe())
+		Ok(())
 	}, _ => unreachable!("passthrough tracks write whole fragments"))
 }
 
@@ -1337,6 +1418,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			media!(&mut track.output, producer => producer.finish()?, passthrough => {
 				passthrough.close()?;
 				passthrough.track.finish()?;
+				// The importer may be kept around, but its media stops holding the other tracks back.
+				passthrough.estimator.discontinuity();
 				// Dropping the recorder flushes the open record, so the track is advertised.
 				passthrough.recorder = None;
 			});
@@ -1367,13 +1450,18 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// control is intentionally not exposed. Skipping sequences is not a new timeline, so the
 	/// next fragment must still advance past the last decode time; see
 	/// [`discontinuity`](Self::discontinuity). Text spends a group per cue, so a text track that
-	/// is already past `sequence` continues from its own next group instead.
+	/// is already past `sequence` continues from its own next group instead. Video resumes at its
+	/// next sync sample, dropping the samples before it.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		for track in self.text.values_mut() {
 			let next = track.producer.next_sequence();
 			track.producer.seek(sequence.max(next))?;
 		}
 		for track in self.tracks.values_mut() {
+			// The next group opens on a sync sample, so video drops the samples before one.
+			if track.kind == Kind::Video {
+				track.orphaned = true;
+			}
 			media!(&mut track.output, producer => producer.seek(sequence)?, passthrough => {
 				passthrough.close()?;
 				passthrough.pending_sequence = Some(sequence);
@@ -1387,7 +1475,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// restarts below where it was still fails with
 	/// [`TimestampRewind`](crate::container::TimestampRewind): a track refuses a group that
 	/// rewinds, before publishing any of it.
-	pub fn discontinuity(&mut self) {
+	pub fn discontinuity(&mut self) -> Result<()> {
 		for track in self.text.values_mut() {
 			track.end_decode_time = None;
 			track.discontinuity = true;
@@ -1395,5 +1483,6 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		for track in self.tracks.values_mut() {
 			track.last_decode_time = None;
 		}
+		Ok(())
 	}
 }

@@ -7,6 +7,9 @@ use moq_mux::catalog::Stream;
 use moq_tokio::moq_net;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 
+/// How long the publisher keeps its finished broadcast up for the late readers.
+const LINGER: Duration = Duration::from_secs(10);
+
 struct Args {
 	role: String,
 	url: url::Url,
@@ -74,8 +77,9 @@ async fn main() -> anyhow::Result<()> {
 		.await?;
 	let mut stdin = tokio::io::BufReader::new(tokio::io::stdin());
 	if args.role == "publish" {
-		let mut broadcast = origin.create_broadcast(&args.broadcast)?;
-		let mut catalog = moq_mux::catalog::Producer::<()>::new(&mut broadcast, Default::default())?;
+		let broadcast = origin.create_broadcast(&args.broadcast)?;
+		let mut catalog =
+			moq_mux::catalog::Producer::<()>::new(&mut broadcast.broadcast().clone(), Default::default())?;
 		let mut media = moq_mux::import::TrackStream::video(
 			broadcast.reserve_track("video")?,
 			catalog.reserve(),
@@ -87,13 +91,10 @@ async fn main() -> anyhow::Result<()> {
 		media.finish()?;
 		catalog.finish()?;
 		broadcast.announce(Default::default())?;
-		let started = moq_clock::now();
-		let finish = broadcast.finish();
-		let linger = finish.linger();
-		ensure!(!linger.is_zero(), "finished media has no linger");
-		println!("finish ready linger_us={}", finish.linger().as_micros());
-		finish.wait().await;
-		ensure!(started.elapsed() >= linger, "finish wait ended before its linger");
+		// Keep the finished broadcast up for the late readers, then take it offline.
+		let linger = moq_mux::Linger::new([broadcast.broadcast().clone()], (media, catalog), LINGER);
+		println!("finish ready linger_us={}", LINGER.as_micros());
+		linger.wait().await;
 		println!("finish ended");
 		let health = origin.create_broadcast(format!("{}.health", args.broadcast))?;
 		let mut track = health.create_track("live", moq_net::track::Info::default())?;
@@ -131,7 +132,7 @@ async fn main() -> anyhow::Result<()> {
 				.subscribe(Some(
 					moq_net::track::Subscription::default()
 						.with_max_delay(args.timeout)
-						.with_groups(0..),
+						.with_range(0..),
 				))
 				.await?;
 			let format = moq_mux::catalog::hang::Container::try_from(config)?;

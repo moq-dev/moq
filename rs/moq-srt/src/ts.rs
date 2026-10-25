@@ -34,7 +34,7 @@ pub enum Program {
 /// Each chunk is handed straight to the TS importer, which consumes whole
 /// transport packets and retains any partial trailing packet internally for the
 /// next call (the same pattern `moq-cli import ... stdin ts` uses against stdin).
-/// [`Self::finish`] hands back the finished broadcasts to linger on; dropping the
+/// [`Self::finish`] keeps the finished broadcasts up for a linger; dropping the
 /// publisher ends them and unannounces their paths.
 pub struct Publisher {
 	importer: Importer,
@@ -53,9 +53,8 @@ enum Importer {
 		import: Box<ts::Import<ts::Ext>>,
 		// Finished at a clean end, so the finished broadcast keeps serving the catalog.
 		catalog: Box<moq_mux::catalog::Producer<ts::Ext>>,
-		// A clone of the importer's producer, so an end can finish or close the broadcast
-		// even though the importer owns it.
-		broadcast: moq_net::broadcast::Producer,
+		// Controls publication while the importer fills it, including finish or close at EOF.
+		broadcast: moq_net::origin::Publication,
 	},
 	/// Each program's broadcast is created once the first PAT names it, and announced once its PMT
 	/// declares its tracks.
@@ -83,10 +82,10 @@ impl Publisher {
 			Some(Program::All) => Importer::All(Box::new(ts::Programs::new(origin.clone(), path, config))),
 			Some(Program::One(_)) | None => {
 				let route = moq_net::origin::Route::default().with_epoch(epoch.insert(moq_net::Epoch::mint()).clone());
-				let mut broadcast = origin.publish(path, route)?;
+				let broadcast = origin.publish(path, route)?;
 				let config = config.with_catalog(moq_mux::catalog::hang::Catalog::<ts::Ext>::default());
-				let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
-				let mut import = ts::Import::new(broadcast.clone(), catalog.reserve());
+				let catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config)?;
+				let mut import = ts::Import::new(broadcast.broadcast().clone(), catalog.reserve());
 				if let Some(Program::One(program)) = program {
 					import = import.with_program(program);
 				}
@@ -134,9 +133,9 @@ impl Publisher {
 		}
 	}
 
-	/// Flush any buffered media and finish every track, the catalogs included, returning
-	/// each finished broadcast, which stays announced until it is dropped.
-	pub fn finish(mut self) -> Result<Vec<moq_net::broadcast::Finish>> {
+	/// Flush any buffered media and finish every track, the catalogs included, keeping each
+	/// finished broadcast up for `linger`.
+	pub fn finish(mut self, linger: Duration) -> Result<moq_mux::Linger<Self>> {
 		let finished = match &mut self.importer {
 			Importer::One {
 				import,
@@ -145,14 +144,13 @@ impl Publisher {
 			} => {
 				import.finish().map_err(moq_mux::Error::from)?;
 				catalog.finish()?;
-				// Taken while the importer is alive, so it holds the tracks just finished.
-				vec![broadcast.clone().finish()]
+				vec![broadcast.broadcast().clone()]
 			}
 			Importer::All(programs) => programs.finish().map_err(moq_mux::Error::from)?,
 		};
 		// The drain at end of input can publish a frame nothing vouched for.
 		self.span.in_scope(|| self.log.finish(&self.stats()));
-		Ok(finished)
+		Ok(moq_mux::Linger::new(finished, self, linger))
 	}
 
 	/// Abort the published tracks with `err` so subscribers see the real cause
@@ -179,8 +177,8 @@ const MIN_DELAY: Duration = Duration::from_secs(1);
 pub(crate) struct Options {
 	/// The muxer's delay, at least [`MIN_DELAY`] ([`Subscriber::new`]).
 	pub latency: Duration,
-	/// How long a return or stitched replacement has to supply its first catalog.
-	pub linger: Duration,
+	/// How long to wait for the broadcast to come back once it ends.
+	pub follow: Duration,
 	/// Follow another instance replacing the broadcast, as a full program switch.
 	pub stitch: bool,
 }
@@ -193,7 +191,7 @@ pub(crate) struct Options {
 /// the TS bytes plus the media timestamp used to pace delivery.
 ///
 /// The path's announcements drive it through [`ts::Follower`], as they drive a player: the same
-/// publisher instance returning within the linger continues the stream, and a replacement either
+/// publisher instance returning within the follow window continues the stream, and a replacement either
 /// ends it with [`moq_mux::Error::Replaced`] or, with `stitch`, switches the program.
 pub struct Subscriber {
 	follower: ts::Follower<ts::Ext>,
@@ -225,7 +223,7 @@ impl Subscriber {
 		let catalog = source.catalog::<ts::Ext>(moq_mux::catalog::CatalogFormat::Hang).await?;
 		let export = ts::Export::new(source, catalog).with_delay(options.latency.max(MIN_DELAY));
 		let follower = ts::Follower::new(export)?
-			.with_linger(options.linger)
+			.with_follow(options.follow)
 			.with_stitch(options.stitch);
 		Ok(Some(Self { follower }))
 	}
@@ -365,7 +363,7 @@ mod tests {
 			let bytes: Vec<u8> = payload.iter().flat_map(|(_, pkt)| pkt.iter().copied()).collect();
 			publisher.feed(bytes.into()).unwrap();
 		}
-		drop(publisher.finish().unwrap());
+		drop(publisher.finish(Duration::ZERO).unwrap());
 	}
 
 	/// One payload-only TS packet carrying a complete PSI section (PUSI + pointer_field
@@ -562,33 +560,24 @@ mod tests {
 				.is_err(),
 			"nothing is published on the bare path"
 		);
-		drop(publisher.finish().unwrap());
+		drop(publisher.finish(Duration::ZERO).unwrap());
 	}
 
-	/// A finished ingest stays servable, its catalog included, until its media is stale, so a
+	/// A finished ingest stays servable, its catalog included, for the linger, so a
 	/// subscriber arriving after the end still learns what the tracks were.
 	#[tokio::test(start_paused = true)]
-	async fn a_finished_ingest_serves_its_catalog_until_stale() {
+	async fn a_finished_ingest_serves_its_catalog_for_the_linger() {
 		let origin = produce_origin();
-		let max_age = Duration::from_secs(3);
-		let config = moq_mux::catalog::Config::default().with_max_age(max_age);
-		let mut publisher = Publisher::new(&origin, "live/cam0", config, None).unwrap();
+		let linger = Duration::from_secs(3);
+		let mut publisher = Publisher::new(&origin, "live/cam0", Default::default(), None).unwrap();
 		publisher.feed(Bytes::from_static(BBB5S)).unwrap();
 
 		let consumer = origin.consume();
 		consumer.routed("live/cam0").await.unwrap();
 		let broadcast = consumer.request_broadcast("live/cam0", None).await.unwrap();
-		let finished = publisher.finish().unwrap();
-		assert_eq!(
-			finished.iter().map(|finish| finish.linger()).collect::<Vec<_>>(),
-			[max_age]
-		);
-
 		let start = tokio::time::Instant::now();
-		let wait = tokio::spawn(futures::future::join_all(
-			finished.into_iter().map(moq_net::broadcast::Finish::wait),
-		));
-		tokio::time::sleep(max_age / 2).await;
+		let wait = tokio::spawn(publisher.finish(linger).unwrap().wait());
+		tokio::time::sleep(linger / 2).await;
 		let mut catalog = broadcast.track("catalog.json").unwrap().subscribe(None).await.unwrap();
 		assert!(
 			catalog.recv_group().await.unwrap().is_some(),
@@ -596,7 +585,7 @@ mod tests {
 		);
 
 		wait.await.unwrap();
-		assert_eq!(start.elapsed(), max_age);
+		assert_eq!(start.elapsed(), linger);
 		assert!(broadcast.is_closed());
 	}
 
@@ -726,7 +715,7 @@ mod tests {
 				Err(_) => break,
 			}
 		}
-		drop(publisher.finish().unwrap());
+		drop(publisher.finish(Duration::ZERO).unwrap());
 
 		let mut roundtrip = moq_net::broadcast::Info::new().produce();
 		let roundtrip_consumer = roundtrip.consume();

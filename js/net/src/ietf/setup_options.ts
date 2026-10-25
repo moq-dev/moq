@@ -1,4 +1,6 @@
+import { ProtocolViolation } from "../error.ts";
 import type { Reader, Writer } from "../stream.ts";
+import { decodeUtf8 } from "../util/utf8.ts";
 import { AUTHORIZATION_TOKEN } from "./token.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
@@ -21,14 +23,14 @@ export const SetupOption = {
 	/** Subscriber max age, from the MoQ Timestamp extension. */
 	MaxAge: 0x915c4n,
 	/** AUTH, from the MoQ Auth extension. See `auth.ts`. */
-	Auth: 0x40b60n,
+	Auth: 0x40b70n,
 	/** ACTIVE_COUNT, from the MoQ Active Count extension. See `active_count.ts`. */
 	ActiveCount: 0x40b64n,
 	/** EPOCH, from the MoQ Epoch extension. See `epoch.ts`. */
 	Epoch: 0x40b68n,
 } as const;
 
-// Unknown SETUP options may repeat, including GREASE (draft-21 section 9.1).
+// Unknown SETUP options may repeat, including GREASE (draft-22 section 9.1).
 const KNOWN_SETUP_OPTIONS: readonly bigint[] = Object.values(SetupOption);
 
 /**
@@ -93,20 +95,6 @@ export class SetupOptions {
 			throw new Error(`invalid parameter id: ${id.toString()}, must be even`);
 		}
 		return this.vars.get(id);
-	}
-
-	removeBytes(id: bigint): boolean {
-		if (id % 2n !== 1n) {
-			throw new Error(`invalid parameter id: ${id.toString()}, must be odd`);
-		}
-		return this.bytes.delete(id);
-	}
-
-	removeVarint(id: bigint): boolean {
-		if (id % 2n !== 0n) {
-			throw new Error(`invalid parameter id: ${id.toString()}, must be even`);
-		}
-		return this.vars.delete(id);
 	}
 
 	async encode(w: Writer, version: IetfVersion) {
@@ -215,5 +203,29 @@ export class SetupOptions {
 		}
 
 		return params;
+	}
+}
+
+/**
+ * Advertise our implementation in the IMPLEMENTATION option, or nothing when `value` is empty.
+ *
+ * @internal
+ */
+export function implementationIntoSetup(params: SetupOptions, value: string) {
+	if (value) params.setBytes(SetupOption.Implementation, new TextEncoder().encode(value));
+}
+
+/**
+ * The implementation the peer advertised, if any. Malformed UTF-8 is a protocol violation.
+ *
+ * @internal
+ */
+export function implementationFromSetup(params: SetupOptions): string | undefined {
+	const bytes = params.getBytes(SetupOption.Implementation);
+	if (bytes === undefined) return undefined;
+	try {
+		return decodeUtf8(bytes);
+	} catch (cause) {
+		throw new ProtocolViolation("malformed IMPLEMENTATION", { cause });
 	}
 }

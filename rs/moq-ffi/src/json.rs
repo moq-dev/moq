@@ -16,7 +16,6 @@ use crate::demand::MoqTrackDemand;
 use crate::error::MoqError;
 use crate::ffi::Task;
 use crate::producer::{MoqBroadcastProducer, MoqTrackProducer};
-use moq_mux::catalog::hang::Extra;
 
 /// Options for a JSON snapshot track (lossy latest-value mode).
 ///
@@ -161,7 +160,7 @@ mod tests {
 /// still reads the cached group first.
 #[derive(uniffi::Object)]
 pub struct MoqJsonSnapshotProducer {
-	inner: Arc<std::sync::Mutex<Option<moq_mux::json::Snapshot<Value, Extra>>>>,
+	inner: Arc<std::sync::Mutex<Option<moq_mux::json::Snapshot<Value>>>>,
 
 	/// Closed on finish or drop, which stops the refresh task.
 	alive: kio::Producer<()>,
@@ -172,10 +171,7 @@ impl MoqJsonSnapshotProducer {
 	///
 	/// A failed restatement only stops the refreshes: the error that caused it (a closed track, a
 	/// rejected write) reaches the caller through its next update.
-	async fn refresh(
-		inner: Arc<std::sync::Mutex<Option<moq_mux::json::Snapshot<Value, Extra>>>>,
-		alive: kio::Consumer<()>,
-	) {
+	async fn refresh(inner: Arc<std::sync::Mutex<Option<moq_mux::json::Snapshot<Value>>>>, alive: kio::Consumer<()>) {
 		loop {
 			let stop = kio::wait(|waiter| {
 				if alive.poll_closed(waiter).is_ready() {
@@ -220,11 +216,11 @@ impl MoqJsonSnapshotProducer {
 		config: MoqJsonSnapshotConfig,
 	) -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::enter();
-		let config = moq_mux::json::Config::default()
-			.with_compression(config.compression)
-			.with_deltas(config.deltas);
-		let producer = track
-			.adopt(|track| broadcast.with_state(|state| Ok(state.catalog.json_snapshot::<Value>(track, config)?)))?;
+		let options = moq_mux::json::Options::default().with_deltas(config.deltas);
+		let config = moq_mux::json::Config::default().with_compression(config.compression);
+		let producer = track.adopt(|track| {
+			broadcast.with_state(|state| Ok(state.catalog.json_snapshot::<Value>(track, config, options)?))
+		})?;
 		let inner = Arc::new(std::sync::Mutex::new(Some(producer)));
 		let alive = kio::Producer::new(());
 		crate::ffi::spawn(Self::refresh(inner.clone(), alive.consume()));
@@ -312,7 +308,7 @@ impl MoqJsonSnapshotConsumer {
 
 	/// Get the next state in order. Returns `None` once the track ends.
 	///
-	/// Groups older than the subscription's `max_delay_us` are skipped, so a playhead
+	/// Groups older than the subscription's `max_delay` are skipped, so a playhead
 	/// reader sets that budget to its distance behind live.
 	pub async fn next(&self) -> Result<Option<MoqJsonValue>, MoqError> {
 		self.task
@@ -342,7 +338,7 @@ impl MoqJsonSnapshotConsumer {
 /// Publishes an ordered log of JSON records, one record per append.
 #[derive(uniffi::Object)]
 pub struct MoqJsonStreamProducer {
-	inner: std::sync::Mutex<Option<moq_mux::json::Stream<Value, Extra>>>,
+	inner: std::sync::Mutex<Option<moq_mux::json::Stream<Value>>>,
 }
 
 #[uniffi::export]

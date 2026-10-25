@@ -62,9 +62,8 @@ cannot answer unambiguously is refused.
   are present. Draft 17 is a separate family because it forbids 7-byte varints.
   Rewriting them would violate immutability; forwarding unchanged
   across those families would change their meaning.
-- **Crate-private on purpose.** These fields never become public API
-  ([moq-transport stays private](/quest/m1/api-audit/ietf-private.md)); a
-  relay that is not moq-relay drops them, as plain lite does.
+- **Crate-private on purpose.** These carried fields never become public
+  API. A relay that is not moq-relay drops them, as plain lite does.
 - **Verification:** Rust integration tests per feature in each child, plus
   the nightly moxygen job owned here.
 
@@ -112,9 +111,9 @@ them yet. Remaining, in order:
   edge's TRACK_INFO query becomes TRACK_STATUS upstream, and the pinned
   MoQTestPublisher inherits NOT_SUPPORTED. Preserve that refusal: widening
   query-only demand into a SUBSCRIBE is not an authorized fallback.
-  [Range widening](/quest/m1/compress/ietf-range-widen.md), claimed by
-  [moq-dev/moq#6465](https://github.com/moq-dev/moq/pull/6465), owns that
-  separate cold-metadata boundary. Needs a Moxygen revision whose test
+  No cold request needs that metadata to pick its start, since
+  [moq-dev/moq#6465](https://github.com/moq-dev/moq/pull/6465) starts every
+  subscription at a group's first frame. Needs a Moxygen revision whose test
   publisher answers TRACK_STATUS; then bump the pins, rebase the profile, and
   add the two-relay cell back to `test/ietf-conformance/run.sh` (it ran in
   [d96126c65a](https://github.com/moq-dev/moq/commit/d96126c65a52027820884cee7cb9741e79fb674b)).
@@ -132,4 +131,3 @@ gate passing before deleting this README.
 ## Related
 
 - [#4926](https://github.com/moq-dev/moq/issues/4926) - the declined request for an object-level API; this carries the fields for relays only
-- [moq-transport stays private](/quest/m1/api-audit/ietf-private.md) - no public moq-net item exists only for moq-transport

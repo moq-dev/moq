@@ -377,6 +377,17 @@ impl poll::Session for Session {
 		Poll::Ready(opened.map(|()| (send, recv)))
 	}
 
+	fn poll_open_request(
+		&mut self,
+		cx: &mut std::task::Context<'_>,
+		options: crate::transport::poll::SendOptions<
+			'_,
+			<Self::SendStream as crate::transport::poll::SendStream>::Group,
+		>,
+	) -> std::task::Poll<Result<Option<crate::transport::poll::BiStreams<Self>>, Self::Error>> {
+		self.poll_open_bi(cx, options).map_ok(Some)
+	}
+
 	fn send_group(&mut self, _: i64) -> Option<crate::transport::poll::Ungrouped> {
 		None
 	}
@@ -405,9 +416,9 @@ impl poll::Session for Session {
 		self.conn().config.protocol.as_deref()
 	}
 
-	fn binding(&self) -> super::Binding {
+	fn address(&self) -> super::Address {
 		// Like raw QUIC, the pair has no request URI, so the target travels in SETUP.
-		super::Binding::InBand
+		super::Address::Setup
 	}
 
 	fn close(&mut self, code: u32, reason: &str) {

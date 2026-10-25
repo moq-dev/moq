@@ -62,7 +62,7 @@ refused means an error or a counted drop.
 
 | Mechanism | Contract | Owner |
 |:--|:--|:--|
-| H.264 (0x1B), H.265 (0x24) | Preserved: video rendition, PID and ES descriptors in `mpegts.tracks`; DTS normalized from decode order. Today one access unit per PES | [access units](/quest/m1/ts-reliability/pes-access-units.md), [decode order](/quest/m1/ts-reliability/decode-order.md) |
+| H.264 (0x1B), H.265 (0x24) | Preserved: video rendition, PID and ES descriptors in `mpegts.tracks`; AUs cross PES boundaries with source or explicitly proportional POC-derived PTS; DTS normalized from decode order | landed |
 | AAC ADTS (0x0F), MP2, AC-3, E-AC-3, Opus (0x06 + `Opus`) | Preserved: audio rendition; Opus export labels mono and stereo, and 3 to 8 channels with an OpusHead in the Vorbis layout. Other mapping families (such as 255) refuse | landed |
 | Private and unknown PES types, LATM (0x11), metadata (0x15) | Preserved: `pesPacket`, PTS and DTS rebased | landed |
 | PES clock fields (ESCR, pack header, TREF), PES scrambling | Refused, counted in `refused` | landed |
@@ -84,8 +84,7 @@ refused means an error or a counted drop.
 Decided in the 2026-10-22 root-cause audit: the rows above kept getting
 patched one at a time because two foundations were missing. Decode time is
 reconstructed from history instead of decode order, and import state has no
-owner that retires it. Those quests, and the shared parser that the routes
-and PAT plans build on, rank ahead of the remaining rows. Rejected: carrying
+owner that retires it. Those quests rank ahead of the remaining rows. Rejected: carrying
 decode time in every frame container, one shared ingest byte budget,
 and replacing the demux with GStreamer or another parser (it fixes neither
 cause). Out of scope for now: decoupling catalog publication from mux-rate
@@ -94,18 +93,14 @@ absorbs the release audit's export-reorder quest, and the shared parser lands
 before the open stream-routes and PAT drafts, which rebase onto it.
 
 PMT fragmentation (#5220), initial mux-rate measurement (#5287), and
-decoder-time admission (#5306) have landed; PSI runs and catalog linger
-remain with their current quests.
+decoder-time admission (#5306) have landed, as have PSI runs (#5606) and
+catalog linger (#5305).
 
 ## Required
 
-- [State bound](/quest/m1/ts-reliability/state-bound.md) - SI and revision state retire with what the source stops repeating
-- [Decode order](/quest/m1/ts-reliability/decode-order.md) - TS, MKV and FLV author DTS from decode order and a declared `reorder` depth
-- [Shared parser](/quest/m1/ts-reliability/shared-parser.md) - `--program all` scans the multiplex once
-- [Access units](/quest/m1/ts-reliability/pes-access-units.md) - a PES carrying several access units publishes each at its own time
 - [PAT changes](/quest/m1/ts-reliability/pat-lifecycle.md) - a revised PAT never leaves a broadcast meaning another program
 - [Stream routes](/quest/m1/ts-reliability/stream-routes.md) - every PID gets a declared route, and what is not carried is counted
-- [Program cap](/quest/m1/ts-reliability/program-cap.md) - a PAT listing every program number cannot create a broadcast per program
+- [TS workflow passes](/quest/m1/ts-reliability/validation-green.md) - the scheduled TS lanes pass on main again, with no lane loosened
 
 ## Related
 

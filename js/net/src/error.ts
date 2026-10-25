@@ -4,6 +4,7 @@
  * @module
  */
 
+import type { Milli } from "@moq/clock";
 import { sharedStreamCode } from "./ietf/error.ts";
 import type { IetfVersion } from "./ietf/version.ts";
 import { TimeoutError } from "./util/timeout.ts";
@@ -42,7 +43,7 @@ export const SessionCode = Object.freeze(
 		InvalidRequestId: 0x4 as SessionCode,
 		/** A key-value pair was malformed or repeated more than allowed. */
 		KeyValueFormatting: 0x6 as SessionCode,
-		/** The peer went past what the session allows: a request ID past MAX_REQUEST_ID, or too many announcements or subscriptions. */
+		/** The peer went past what the session allows: a request ID past MAX_REQUEST_ID, or too many announcements. */
 		TooManyRequests: 0x7 as SessionCode,
 		/** A PATH the peer may not send, such as a server sending one at all. */
 		InvalidPath: 0x8 as SessionCode,
@@ -54,6 +55,8 @@ export const SessionCode = Object.freeze(
 		AuthTokenCacheOverflow: 0x13 as SessionCode,
 		/** No version could be negotiated. */
 		Version: 0x15 as SessionCode,
+		/** The token could not be parsed. Retrying with the same token will fail again. */
+		MalformedAuthToken: 0x16 as SessionCode,
 		/** A token named an alias that was never registered. */
 		UnknownAuthTokenAlias: 0x17 as SessionCode,
 		/** An AUTHORITY the peer may not send, such as a server sending one at all. */
@@ -299,6 +302,24 @@ export class RefusedRedirect extends Error {
 	constructor(reason: string) {
 		super(`GOAWAY redirect refused: ${reason}`);
 		this.name = "RefusedRedirect";
+	}
+}
+
+/**
+ * The dial and the MoQ handshake together outlived the connect's `timeout` option.
+ *
+ * A caller can retry it. Mirrors the Rust `Error::ConnectTimeout`.
+ *
+ * @public
+ */
+export class ConnectTimeout extends Error {
+	/** The timeout that elapsed. */
+	readonly timeout: Milli;
+
+	constructor(timeout: Milli) {
+		super(`connect timed out after ${timeout}ms`);
+		this.name = "ConnectTimeout";
+		this.timeout = timeout;
 	}
 }
 

@@ -25,9 +25,6 @@ const VERSIONS: &[&str] = &[
 	"moq-transport-16",
 	"moq-transport-17",
 	"moq-transport-18",
-	"moq-transport-19",
-	"moq-transport-20",
-	"moq-transport-21",
 	"moq-transport-22",
 ];
 
@@ -102,7 +99,7 @@ async fn round(version: &str) -> Option<Result<Option<usize>, moq_net::Error>> {
 		remote.track("data").unwrap().subscribe(
 			Subscription::default()
 				.with_max_delay(Duration::from_secs(3600))
-				.with_groups(0..),
+				.with_range(0..),
 		),
 	)
 	.await

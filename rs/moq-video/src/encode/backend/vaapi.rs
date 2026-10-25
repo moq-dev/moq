@@ -238,7 +238,7 @@ mod tests {
 	use crate::decode::backend as decode_backend;
 	use crate::decode::{Codec as DecodeCodec, Config as DecodeConfig, Kind as DecodeKind};
 	use crate::encode::{Encoder as CrateEncoder, Kind as EncodeKind};
-	use crate::{Output, Rate, Size};
+	use crate::{FrameRate, Output, Size};
 
 	const WIDTH: u32 = 320;
 	const HEIGHT: u32 = 240;
@@ -246,7 +246,7 @@ mod tests {
 	fn config() -> Config {
 		Config {
 			kind: EncodeKind::Named(NAME.into()),
-			..Config::new(WIDTH, HEIGHT, Rate::new(30, 1).unwrap())
+			..Config::new(WIDTH, HEIGHT, FrameRate::new(30, 1).unwrap())
 		}
 	}
 
@@ -389,7 +389,7 @@ mod tests {
 		// A software-encoded source stream, decoded by VA-API into DMA-BUFs.
 		let mut source = CrateEncoder::new(&Config {
 			kind: EncodeKind::Software,
-			..Config::new(WIDTH, HEIGHT, Rate::new(30, 1).unwrap())
+			..Config::new(WIDTH, HEIGHT, FrameRate::new(30, 1).unwrap())
 		})
 		.unwrap();
 		let mut hardware = decoder(NAME, Output::Native);
@@ -553,7 +553,7 @@ mod tests {
 			let config = Config {
 				kind: EncodeKind::Named(NAME.into()),
 				color: Some(color),
-				..Config::new(size.width, size.height, Rate::new(30, 1).unwrap())
+				..Config::new(size.width, size.height, FrameRate::new(30, 1).unwrap())
 			};
 			let Ok(mut backend) = Vaapi::new(&config) else {
 				eprintln!("skipping: no VA-API H.264 encoder");

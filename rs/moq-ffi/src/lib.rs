@@ -21,6 +21,9 @@
 	)
 )]
 
+// Counts moq's heap for the host leak tests; see `moq_ffi_test_allocated`.
+#[cfg(all(feature = "testing", not(target_arch = "wasm32")))]
+mod alloc;
 #[cfg(target_os = "android")]
 mod android;
 // The QUIC server and moq-native's logger have no browser equivalent, and the
@@ -104,6 +107,6 @@ pub extern "C" fn moq_ffi_test_clock_now() -> u64 {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test;
 
-// The binding benchmark's Rust baselines; ignored unless `just bench-ffi` asks for them.
+// The binding benchmark's Rust baselines; ignored unless a run asks for them (see bench/README.md).
 #[cfg(all(test, unix))]
 mod bench;

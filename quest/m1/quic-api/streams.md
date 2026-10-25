@@ -70,10 +70,9 @@ the connection's `MutexGuard`, so while moq-net decodes a message from a
 lease, the connection's packet processing, transmits, timers, and every other
 stream wait on it. `recv::Lease` instead holds owned `Bytes` chunks, taken
 under a short lock, and returns their credit under another short lock on
-release or drop. The [receive pinning](/quest/m1/quic-receive-pinning.md)
-fix already copies or compacts chunks out of the batch, so owning them adds
-no copy. A lease stays `!Send` only if something still needs it; otherwise it
-may cross an await. Test that the driver keeps sending and receiving on
+release or drop. A lease already copies its chunks out of the receive batch
+as it fills, so owning them adds no copy. A lease stays `!Send` only if
+something still needs it; otherwise it may cross an await. Test that the driver keeps sending and receiving on
 other streams while a lease is held.
 
 **Datagrams.** `send_datagram(impl Buf, send::Options)`, so a caller
@@ -101,7 +100,7 @@ driver's waiter method arrives with [poll_acked](/quest/m2/quic-ack-hook.md).
 **moq-uring.** Its driver gets the same names and signatures and passes
 `send::Options` to the open, as moq-tokio's does, instead of applying them
 through setters afterwards. Moved here from
-[drop web-transport-trait](/quest/m2/drop-web-transport-trait.md).
+[drop web-transport-trait](/quest/m1/drop-web-transport-trait.md).
 
 Update every consumer (`quic::web` in both crates, qmux, the backends,
 moq-relay's tests). `poll_*` forms come in [poll](/quest/m1/quic-api/poll.md). The Impact bullet says how to migrate in moq-quic, moq-tokio, moq-uring, and
@@ -109,5 +108,4 @@ qmux if its public API changes.
 
 ## Required
 
-- [Trim](/quest/m1/quic-api/trim.md) - removes unordered reads and dead read/write paths first
 - [Zero-RTT](/quest/m1/quic-api/zero-rtt.md) - removes 0-RTT, so no error carries it

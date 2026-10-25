@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### QUIC receive chunks are ordered
+
+The underlying `moq_quic::RecvStream::read()` no longer takes an ordering flag, and `Chunk` contains only `bytes`.
+The uring driver's receive API keeps its existing ordered behavior.
+
 ### `udp::Transmit` is built with `Transmit::new` (#6400)
 
 `udp::Transmit` gains `src_ip`, the local address a send leaves from, and is `#[non_exhaustive]`.
@@ -13,7 +18,7 @@ Pass a received `Packet::dst_ip()` as `src_ip` to answer from the address the pe
 ### Wrap sessions in `transport::Local` (#6176)
 
 moq-net dropped `connect_lite`, `accept_lite`, and `accept_request_lite`, and every session now needs a `Send` transport.
-Wrap the worker's session as `transport::Local::new(transport::Session::new(conn, binding))` and call `connect`, `accept`, or `accept_request`.
+Wrap the worker's session as `transport::Local::new(transport::Session::new(conn, address))` and call `connect`, `accept`, or `accept_request`.
 
 ### Timers run on moq-clock
 
@@ -51,5 +56,5 @@ moq-net no longer takes a `web_transport_trait` session.
 Wrap a moq-uring session with `transport::Session::new`, naming how the request target travels.
 
 ```rust
-let session = moq_uring::transport::Session::new(connection, moq_net::transport::Binding::Uri);
+let session = moq_uring::transport::Session::new(connection, moq_net::transport::Address::Uri);
 ```

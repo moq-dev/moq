@@ -2,6 +2,7 @@
 #include "moq-settings.h"
 #include "logger.h"
 
+#include <chrono>
 #include <cstring>
 #include <optional>
 #include <string>
@@ -69,15 +70,15 @@ std::optional<bool> TriState(obs_data_t *settings, const char *key, std::string 
 	return std::nullopt;
 }
 
-// A library default in microseconds, as the milliseconds the UI edits. moq-ffi reports
-// every duration this table shows; one it stops reporting reads as zero and is logged.
-long long Millis(const std::optional<uint64_t> &us, const char *key)
+// A library default as the milliseconds the UI edits. moq-ffi reports every duration
+// this table shows; one it stops reporting reads as zero and is logged.
+template<typename Duration> long long Millis(const std::optional<Duration> &duration, const char *key)
 {
-	if (!us) {
+	if (!duration) {
 		LOG_ERROR("moq-ffi reported no default for %s", key);
 		return 0;
 	}
-	return static_cast<long long>(*us / 1000);
+	return static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(*duration).count());
 }
 
 // Read an integer setting, refusing one outside the range its Field declares. Scene
@@ -99,6 +100,12 @@ uint64_t Amount(obs_data_t *settings, const char *key, std::string &error)
 
 	Refuse(error, std::string("advanced integer setting has no field: ") + key);
 	return 0;
+}
+
+// Read a millisecond setting through Amount.
+std::chrono::milliseconds Milliseconds(obs_data_t *settings, const char *key, std::string &error)
+{
+	return std::chrono::milliseconds(static_cast<std::chrono::milliseconds::rep>(Amount(settings, key, error)));
 }
 
 // Shorthands so the table below reads as data rather than aggregate initializers.
@@ -169,11 +176,11 @@ const std::vector<Field> &Fields()
 		f.push_back(Text(BIND, "Bind address",
 				 "Local UDP address to send from, e.g. 192.0.2.7:0 to pin the outgoing "
 				 "interface. Leave empty for any."));
-		f.push_back(Number(CONNECT_TIMEOUT, "Connect timeout (ms)", Millis(d.timeout_us, CONNECT_TIMEOUT), 0,
+		f.push_back(Number(CONNECT_TIMEOUT, "Connect timeout (ms)", Millis(d.timeout, CONNECT_TIMEOUT), 0,
 				   600000, 1000,
 				   "How long one connection attempt may take, dial and handshake together. "
 				   "0 waits forever."));
-		f.push_back(Number(FAILOVER_DELAY, "Happy Eyeballs delay (ms)", Millis(d.race_us, FAILOVER_DELAY), 0,
+		f.push_back(Number(FAILOVER_DELAY, "Happy Eyeballs delay (ms)", Millis(d.race, FAILOVER_DELAY), 0,
 				   10000, 50, "How long to wait before also trying the next address DNS returned."));
 
 		// TLS.
@@ -193,15 +200,13 @@ const std::vector<Field> &Fields()
 				 "URL, so a relay can be reached by IP."));
 
 		// Reconnect.
-		f.push_back(Number(BACKOFF_INITIAL, "Reconnect delay (ms)",
-				   Millis(d.backoff.initial_us, BACKOFF_INITIAL), 1, 60000, 100,
-				   "Delay before the first reconnect attempt; it grows from here."));
-		f.push_back(Number(BACKOFF_MAX, "Reconnect delay cap (ms)", Millis(d.backoff.max_us, BACKOFF_MAX), 1,
+		f.push_back(Number(BACKOFF_INITIAL, "Reconnect delay (ms)", Millis(d.backoff.initial, BACKOFF_INITIAL),
+				   1, 60000, 100, "Delay before the first reconnect attempt; it grows from here."));
+		f.push_back(Number(BACKOFF_MAX, "Reconnect delay cap (ms)", Millis(d.backoff.max, BACKOFF_MAX), 1,
 				   600000, 1000, "Ceiling on the growing reconnect delay."));
-		f.push_back(Number(BACKOFF_TIMEOUT, "Give up after (ms)", Millis(d.backoff.timeout_us, BACKOFF_TIMEOUT),
-				   0, 3600000, 1000,
-				   "Total time to keep retrying before the stream fails. Also how long the "
-				   "broadcast lingers for viewers across the gap. 0 retries forever."));
+		f.push_back(Number(BACKOFF_TIMEOUT, "Give up after (ms)", Millis(d.backoff.timeout, BACKOFF_TIMEOUT), 0,
+				   3600000, 1000,
+				   "Total time to keep retrying before the stream fails. 0 retries forever."));
 
 		// QUIC transport.
 		f.push_back(Choose(
@@ -213,10 +218,10 @@ const std::vector<Field> &Fields()
 				   static_cast<long long>(d.quic.max_streams.value_or(0)), 1, 65536, 1,
 				   "MoQ opens a stream per group, so a busy publisher wants this high."));
 		f.push_back(Number(QUIC_IDLE_TIMEOUT, "Idle timeout (ms)",
-				   Millis(d.quic.idle_timeout_us, QUIC_IDLE_TIMEOUT), 0, 600000, 1000,
+				   Millis(d.quic.idle_timeout, QUIC_IDLE_TIMEOUT), 0, 600000, 1000,
 				   "How long an idle connection survives before it is dropped."));
 		f.push_back(Number(QUIC_KEEP_ALIVE, "Keep-alive interval (ms)",
-				   Millis(d.quic.keep_alive_us, QUIC_KEEP_ALIVE), 0, 60000, 100,
+				   Millis(d.quic.keep_alive, QUIC_KEEP_ALIVE), 0, 60000, 100,
 				   "0 disables the keep-alive pings."));
 		f.push_back(Choose(QUIC_GSO, "UDP segmentation offload", AutoOnOff(), false,
 				   "Batches sends into one syscall. Turn it off if large sends vanish; some "
@@ -241,7 +246,7 @@ const std::vector<Field> &Fields()
 				   "Race a WebSocket connection against QUIC so a network that blocks UDP "
 				   "still goes live. Turn it off to measure the QUIC path alone."));
 		f.push_back(Number(WEBSOCKET_DELAY, "WebSocket fallback delay (ms)",
-				   Millis(d.websocket.delay_us, WEBSOCKET_DELAY), 0, 10000, 50,
+				   Millis(d.websocket.delay, WEBSOCKET_DELAY), 0, 10000, 50,
 				   "How long QUIC gets a head start before the WebSocket attempt joins in."));
 
 		return f;
@@ -325,8 +330,8 @@ std::string Configure(obs_data_t *settings, moq::ClientConfig &config)
 		config.versions = {version};
 	if (const char *bind = OptionalString(settings, BIND))
 		config.bind = bind;
-	config.timeout_us = Amount(settings, CONNECT_TIMEOUT, error) * 1000;
-	config.race_us = Amount(settings, FAILOVER_DELAY, error) * 1000;
+	config.timeout = Milliseconds(settings, CONNECT_TIMEOUT, error);
+	config.race = Milliseconds(settings, FAILOVER_DELAY, error);
 
 	if (obs_data_get_bool(settings, TLS_DISABLE_VERIFY))
 		config.tls.insecure = true;
@@ -337,9 +342,9 @@ std::string Configure(obs_data_t *settings, moq::ClientConfig &config)
 	if (const char *host_name = OptionalString(settings, TLS_HOST_NAME))
 		config.tls.host_name = host_name;
 
-	config.backoff.initial_us = Amount(settings, BACKOFF_INITIAL, error) * 1000;
-	config.backoff.max_us = Amount(settings, BACKOFF_MAX, error) * 1000;
-	config.backoff.timeout_us = Amount(settings, BACKOFF_TIMEOUT, error) * 1000;
+	config.backoff.initial = Milliseconds(settings, BACKOFF_INITIAL, error);
+	config.backoff.max = Milliseconds(settings, BACKOFF_MAX, error);
+	config.backoff.timeout = Milliseconds(settings, BACKOFF_TIMEOUT, error);
 
 	// Automatic leaves the tri-states and the congestion family unset, which keeps the
 	// transport free to pick.
@@ -352,8 +357,8 @@ std::string Configure(obs_data_t *settings, moq::ClientConfig &config)
 			Refuse(error, std::string("unknown congestion control: ") + family);
 	}
 	config.quic.max_streams = Amount(settings, QUIC_MAX_STREAMS, error);
-	config.quic.idle_timeout_us = Amount(settings, QUIC_IDLE_TIMEOUT, error) * 1000;
-	config.quic.keep_alive_us = Amount(settings, QUIC_KEEP_ALIVE, error) * 1000;
+	config.quic.idle_timeout = Milliseconds(settings, QUIC_IDLE_TIMEOUT, error);
+	config.quic.keep_alive = Milliseconds(settings, QUIC_KEEP_ALIVE, error);
 	config.quic.gso = TriState(settings, QUIC_GSO, error);
 	config.quic.mtu_discovery = TriState(settings, QUIC_MTU_DISCOVERY, error);
 	// A scene collection written by a qlog-capable build keeps the key even where the
@@ -368,7 +373,7 @@ std::string Configure(obs_data_t *settings, moq::ClientConfig &config)
 	config.quic.keylog = obs_data_get_bool(settings, QUIC_KEYLOG);
 
 	config.websocket.enabled = obs_data_get_bool(settings, WEBSOCKET_ENABLED);
-	config.websocket.delay_us = Amount(settings, WEBSOCKET_DELAY, error) * 1000;
+	config.websocket.delay = Milliseconds(settings, WEBSOCKET_DELAY, error);
 	return error;
 }
 

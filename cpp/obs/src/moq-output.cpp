@@ -3,6 +3,7 @@
 
 #include "moq-output.h"
 #include "moq-error.h"
+#include "moq-implementation.h"
 #include "moq-settings.h"
 #include "moq-url.h"
 #include "logger.h"
@@ -86,8 +87,8 @@ MoQOutput::~MoQOutput()
 	// stop on an output that is going away.
 	Stop();
 
-	// Let the sessions finish draining, so the relay sees the tracks end rather than a
-	// cancel. moq-ffi bounds each drain to about a second.
+	// Wait out the drains: OBS unloads the module, stopping the runtime, right
+	// after destroying its outputs on exit. moq-ffi bounds each drain to about a second.
 	std::vector<moq::Future<void>> drains;
 	{
 		std::lock_guard<std::recursive_mutex> signal_lock(signal_mutex);
@@ -186,6 +187,7 @@ bool MoQOutput::Start()
 	// switched off the client keeps the library defaults.
 	moq::ClientConfig config;
 	config.publish = next_origin;
+	config.implementation = MoQImplementation();
 	OBSDataAutoRelease service_settings = obs_service_get_settings(service);
 	std::string invalid = MoQSettings::Configure(service_settings, config);
 	std::shared_ptr<moq::Client> client;
@@ -401,18 +403,20 @@ void MoQOutput::Reset()
 	broadcast.reset();
 	origin.reset();
 
-	// Drain once tracks finish. Default lite-06 waits for transport ACKs, not
-	// confirmation that the peer received the tail. Keep the future past this
-	// attempt because dropping it aborts the drain.
+	// The session owns the drain after this request, even if the output dies now.
+	// Keep a waiter only so the destructor can hold off module unload, which
+	// stops the runtime and would cancel the drain.
 	if (retired) {
+		retired->shutdown();
 		draining.erase(std::remove_if(draining.begin(), draining.end(),
 					      [](const moq::Future<void> &drain) {
 						      return drain.wait_for(std::chrono::seconds(0)) ==
 							     std::future_status::ready;
 					      }),
 			       draining.end());
-		draining.push_back(retired->shutdown());
+		draining.push_back(retired->closed());
 	}
+
 	lock.unlock();
 
 	for (auto &[encoder, bitrate] : restore)
@@ -452,8 +456,8 @@ bool MoQOutput::TryGetConnectionStats(ConnectionStats *out)
 
 	ConnectionStats snapshot;
 	snapshot.reconnects = GetReconnectCount();
-	snapshot.rtt_valid = raw.rtt_us.has_value();
-	snapshot.rtt_ms = raw.rtt_us ? static_cast<double>(*raw.rtt_us) / 1000.0 : 0;
+	snapshot.rtt_valid = raw.rtt.has_value();
+	snapshot.rtt_ms = raw.rtt ? std::chrono::duration<double, std::milli>(*raw.rtt).count() : 0;
 	snapshot.estimated_send_rate_valid = raw.estimated_send_rate_bps.has_value();
 	snapshot.estimated_send_rate_bps =
 		raw.estimated_send_rate_bps ? static_cast<double>(*raw.estimated_send_rate_bps) : 0;
@@ -637,14 +641,8 @@ void MoQOutput::AudioData(struct encoder_packet *packet)
 	// Audio has no keyframes, so it has no group boundary of its own: without this the whole
 	// stream is one group. Cut per frame, which is one QUIC stream per packet forwarded without
 	// waiting for the next, the right trade for live. Video groups at its own keyframes.
-	// Cut before observing the flush so a failed observation never leaves the group open.
 	if (auto result = track.producer->cut(); !result) {
 		LOG_ERROR("Failed to cut audio group: %s", result.error().to_string().c_str());
-		return;
-	}
-
-	if (auto result = track.producer->flush(*timestamp); !result) {
-		LOG_ERROR("Failed to observe audio encoder flush: %s", result.error().to_string().c_str());
 		return;
 	}
 
@@ -681,11 +679,6 @@ void MoQOutput::VideoData(struct encoder_packet *packet)
 
 	if (auto result = track.producer->write_frame(PacketFrame(packet, *timestamp)); !result) {
 		LOG_ERROR("Failed to write video frame: %s", result.error().to_string().c_str());
-		return;
-	}
-
-	if (auto result = track.producer->flush(*timestamp); !result) {
-		LOG_ERROR("Failed to observe video encoder flush: %s", result.error().to_string().c_str());
 		return;
 	}
 
@@ -850,15 +843,10 @@ void MoQOutput::AudioInit(obs_encoder_t *encoder)
 
 void register_moq_output()
 {
-	const uint32_t base_flags = OBS_OUTPUT_ENCODED | OBS_OUTPUT_SERVICE | OBS_OUTPUT_MULTI_TRACK_VIDEO |
-				    OBS_OUTPUT_MULTI_TRACK_AUDIO;
-
-	const char *audio_codecs = "aac;opus";
-	const char *video_codecs = "h264;hevc;av1";
-
 	struct obs_output_info info = {};
 	info.id = "moq_output";
-	info.flags = OBS_OUTPUT_AV | base_flags;
+	info.flags = OBS_OUTPUT_AV | OBS_OUTPUT_ENCODED | OBS_OUTPUT_SERVICE | OBS_OUTPUT_MULTI_TRACK_VIDEO |
+		     OBS_OUTPUT_MULTI_TRACK_AUDIO;
 	info.get_name = [](void *) -> const char * {
 		return "MoQ Output";
 	};
@@ -883,20 +871,9 @@ void register_moq_output()
 	info.get_connect_time_ms = [](void *priv_data) -> int {
 		return static_cast<MoQOutput *>(priv_data)->GetConnectTime();
 	};
-	info.encoded_video_codecs = video_codecs;
-	info.encoded_audio_codecs = audio_codecs;
+	info.encoded_video_codecs = "h264;hevc;av1";
+	info.encoded_audio_codecs = "aac;opus";
 	info.protocols = "MoQ";
 
-	obs_register_output(&info);
-
-	info.id = "moq_output_video";
-	info.flags = OBS_OUTPUT_VIDEO | base_flags;
-	info.encoded_audio_codecs = nullptr;
-	obs_register_output(&info);
-
-	info.id = "moq_output_audio";
-	info.flags = OBS_OUTPUT_AUDIO | base_flags;
-	info.encoded_video_codecs = nullptr;
-	info.encoded_audio_codecs = audio_codecs;
 	obs_register_output(&info);
 }

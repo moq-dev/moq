@@ -12,7 +12,7 @@ workarounds quinn's shape forced on them.
 Non-goals: the congestion controller API (redesigned in another quest), a
 buffer pool ([QUIC I/O boundary](/quest/m2/quic-io-boundary.md)), and the
 non-QUIC backends' move off `web_transport_trait`
-([drop web-transport-trait](/quest/m2/drop-web-transport-trait.md)).
+([drop web-transport-trait](/quest/m1/drop-web-transport-trait.md)).
 
 ## Plan
 
@@ -43,8 +43,6 @@ side by side and fix any name or signature that still differs, and check
 
 ## Required
 
-- [Reformat](/quest/m1/quic-api/reformat.md) - moq-quic, moq-sock's `udp`, and the tokio driver take the workspace rustfmt; quinn's cherry-pick recipes go
-- [Trim](/quest/m1/quic-api/trim.md) - every public item has a consumer; unordered reads, send domains, duplicate limit setters, unused features, and quinn-era docs are gone
 - [Zero-RTT](/quest/m1/quic-api/zero-rtt.md) - no early data anywhere, and no 0-RTT API or error variants
 - [Streams](/quest/m1/quic-api/streams.md) - `send::`/`recv::` namespaces, one error per direction, `finish(self) -> send::Finished`, consuming `reset`/`stop`, `Buf` writes, both drivers mirrored
 - [Crypto](/quest/m1/quic-api/crypto.md) - crypto traits sealed to rustls, concrete peer identity and handshake data
@@ -54,7 +52,4 @@ side by side and fix any name or signature that still differs, and check
 
 ## Related
 
-- [Receive pinning](/quest/m1/quic-receive-pinning.md) - audit fix ranked ahead
-- [Priority requeue](/quest/m1/quic-priority-requeue.md) - audit fix ranked ahead
-- [Lease bookkeeping](/quest/m1/quic-lease-bookkeeping.md) - audit fix ranked ahead
 - [poll_acked](/quest/m2/quic-ack-hook.md) - the m2 consumer that keeps `send::Stream::acked` in the API

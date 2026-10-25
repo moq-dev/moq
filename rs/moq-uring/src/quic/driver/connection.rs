@@ -31,6 +31,9 @@ pub(crate) struct Inner {
 	pub(crate) conn: RefCell<moq_quic::Connection>,
 	/// Updated by packet ingress and egress, so readers never wake the worker to sample.
 	pub(crate) wire: moq_net::transport::Wire,
+	/// The session's probe target, read before every egress, or `None` when the congestion
+	/// controller cannot probe
+	pub(crate) probe: Option<moq_net::transport::Probe>,
 	pub(crate) state: RefCell<State>,
 	/// The worker driving this connection, which anything layered on it
 	/// (the WebTransport handshake, say) runs on too.
@@ -374,6 +377,11 @@ impl Connection {
 		self.shared.wire.clone()
 	}
 
+	/// The target this connection probes up to, or `None` when its congestion controller cannot probe.
+	pub(crate) fn probe(&self) -> Option<moq_net::transport::Probe> {
+		self.shared.probe.clone()
+	}
+
 	/// Receive streams evicted to free a stuck receive window.
 	pub(crate) fn streams_evicted(&self) -> u64 {
 		self.shared.conn.borrow().stats().credit.evicted
@@ -411,8 +419,10 @@ pub(crate) fn launch(
 	let wire = moq_net::transport::Wire::new();
 	wire.set_sent_bytes(stats.udp_tx.bytes);
 	wire.set_received_bytes(stats.udp_rx.bytes);
+	let probe = conn.congestion_state().probes().then(moq_net::transport::Probe::new);
 	let shared = Rc::new(Inner {
 		wire,
+		probe,
 		conn: RefCell::new(conn),
 		state: RefCell::new(State::new()),
 		owner: owner.clone(),
@@ -511,6 +521,26 @@ pub(crate) async fn establish(shared: Shared, deadline: Option<Instant>) -> Resu
 	};
 	guard.shared = None;
 	Ok(conn)
+}
+
+impl Connection {
+	pub(crate) fn open_request(&self) -> Result<Option<(super::SendStream, super::RecvStream)>, Error> {
+		if let Some(err) = self.shared.closed() {
+			return Err(err);
+		}
+		let id = self
+			.shared
+			.conn
+			.borrow_mut()
+			.streams()
+			.open(Dir::Bi, Default::default());
+		Ok(id.map(|id| {
+			(
+				super::SendStream::new(self.shared.clone(), id),
+				super::RecvStream::new(self.shared.clone(), id),
+			)
+		}))
+	}
 }
 
 impl web_transport_trait::poll::Session for Connection {
@@ -893,6 +923,11 @@ impl Driver {
 					"transmit buffer of {} bytes holds no {mtu} byte datagram",
 					tx.capacity()
 				))));
+			}
+			// A new target waits for the next egress: probing only resends data in flight, so it
+			// has nothing to send until a write or an ACK kicks the driver anyway.
+			if let Some(probe) = &self.shared.probe {
+				conn.set_probe_target(probe.target().as_bps() / 8);
 			}
 			// moq-quic encrypts the train straight into the socket's buffer.
 			// Nothing to send, or paced; the buffer returns to the pool on drop.

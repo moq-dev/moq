@@ -50,7 +50,7 @@ export class MockTransport implements WebTransport {
 
 	readonly datagrams: WebTransportDatagramDuplexStream;
 	readonly congestionControl: WebTransportCongestionControl;
-	readonly reliability: string;
+	readonly reliability = "supports-unreliable";
 
 	/**
 	 * Every outgoing stream this transport opened, in call order, split by stream kind. Each
@@ -99,7 +99,6 @@ export class MockTransport implements WebTransport {
 		});
 
 		this.congestionControl = "default";
-		this.reliability = "supports-unreliable";
 
 		if (datagramsEnabled) {
 			// A real datagram duplex: writes enqueue into the peer's incoming readable,
@@ -282,8 +281,9 @@ export class MockTransport implements WebTransport {
 	/** The snapshot {@link getStats} resolves with (default empty). */
 	stats: TransportStats = {};
 
-	async getStats(): Promise<TransportStats> {
-		return this.stats;
+	/** `datagrams` is the one member the W3C stats dictionary requires. */
+	async getStats() {
+		return { datagrams: {}, ...this.stats };
 	}
 }
 

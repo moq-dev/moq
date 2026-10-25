@@ -49,7 +49,7 @@ using Clock = std::chrono::steady_clock;
 constexpr size_t READ_CHUNK = 64 * 1024;
 
 // SubscribeMedia max delay: how much reordering the jitter buffer tolerates.
-constexpr uint64_t MAX_DELAY_US = 1'000'000;
+constexpr std::chrono::nanoseconds MAX_DELAY = std::chrono::seconds(1);
 
 // Synthetic audio: a 48 kHz tone per channel at 0.5 amplitude, encoded as Opus.
 constexpr const char *AUDIO_TRACK = "tone";
@@ -57,8 +57,8 @@ constexpr uint32_t AUDIO_RATE = 48'000;
 constexpr double AUDIO_AMPLITUDE = 0.5;
 constexpr double PI = 3.14159265358979323846;
 // A non-default frame duration, and the shortest Opus offers. 20 ms would pass even if the
-// microsecond field were truncated to milliseconds somewhere.
-constexpr uint32_t AUDIO_FRAME_DURATION_US = 2'500;
+// duration were truncated to milliseconds somewhere.
+constexpr std::chrono::nanoseconds AUDIO_FRAME_DURATION = std::chrono::microseconds(2'500);
 // Written in 20 ms batches, so each write spans eight encoded Opus frames.
 constexpr uint64_t AUDIO_BATCH_US = 20'000;
 constexpr size_t AUDIO_BATCH_SAMPLES = AUDIO_RATE * AUDIO_BATCH_US / 1'000'000;
@@ -70,7 +70,8 @@ std::shared_ptr<moq::Session> open_session;
 [[noreturn]] void exit_failed() {
     // Taken first, so a failure while closing cannot close it again.
     if (auto session = std::exchange(open_session, nullptr)) {
-        session->shutdown().wait_for(std::chrono::seconds(5));
+        session->shutdown();
+        session->closed().wait_for(std::chrono::seconds(5));
     }
     std::exit(1);
 }
@@ -153,7 +154,8 @@ std::shared_ptr<moq::Session> connect(const std::string &url, const Dial &dial, 
 // once, and stopping the runtime right after it can leave the relay to time the connection out.
 void close_session(const std::shared_ptr<moq::Session> &session) {
     open_session = nullptr;
-    until(session->shutdown(), Clock::now() + std::chrono::seconds(5), "session shutdown");
+    session->shutdown();
+    until(session->closed(), Clock::now() + std::chrono::seconds(5), "session shutdown");
 }
 
 // Feeds the encoder a real-time tone per channel, interleaved, until `stop` is set.
@@ -198,7 +200,7 @@ int publish(
         "video stream producer"
     );
     moq::AudioEncoderOutput output{moq::AudioCodec::opus()};
-    output.frame_duration_us = AUDIO_FRAME_DURATION_US;
+    output.frame_duration = AUDIO_FRAME_DURATION;
     auto audio = ok(
         moq::AudioProducer::init(
             catalog,
@@ -239,14 +241,17 @@ int publish(
     ok(audio->finish(), "audio finish");
     ok(media->finish(), "video finish");
     if (!finish_ack.empty()) {
-        const auto started = Clock::now();
-        auto finish = ok(broadcast->finish(), "broadcast finish");
-        const auto linger = std::chrono::microseconds(finish->linger_us());
-        if (linger.count() <= 0) fail("finished media has no linger");
-        std::printf("finish ready linger_us=%llu\n", static_cast<unsigned long long>(finish->linger_us()));
+        // Finishing the catalog ends the content; the broadcast stays up for the late readers
+        // until the close takes it offline.
+        ok(catalog->finish(), "catalog finish");
+        const auto linger = std::chrono::seconds(10);
+        std::printf(
+            "finish ready linger_us=%llu\n",
+            static_cast<unsigned long long>(std::chrono::microseconds(linger).count())
+        );
         std::fflush(stdout);
-        ok(finish->wait().get(), "finish linger");
-        if (Clock::now() - started < linger) fail("finish wait ended before its linger");
+        std::this_thread::sleep_for(linger);
+        ok(broadcast->close(), "broadcast close");
         std::puts("finish ended");
         std::fflush(stdout);
         auto health = ok(session->publish()->create_broadcast(path + ".health"), "health broadcast");
@@ -284,7 +289,7 @@ void decode_audio(
     }
     moq::AudioDecoderOutput output{};
     output.format = moq::AudioSampleFormat::kF32;
-    output.max_delay_us = MAX_DELAY_US;
+    output.max_delay = MAX_DELAY;
     auto decoder = until(moq::AudioConsumer::subscribe(consumer, id, audio, output), deadline, "audio consumer");
 
     std::ofstream log(out + ".txt");
@@ -344,7 +349,8 @@ int subscribe(
     const auto &[id, video] = *catalog->video.begin();
 
     moq::Subscription subscription;
-    subscription.max_delay_us = finish ? static_cast<uint64_t>(timeout * 1e6) : MAX_DELAY_US;
+    subscription.max_delay =
+        finish ? std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::duration<double>(timeout)) : MAX_DELAY;
     auto media = until(
         moq::MediaTrackConsumer::subscribe(consumer, {moq::Rendition::kVideo{id, video}, subscription}), read_deadline,
         "container consumer"
@@ -465,7 +471,7 @@ int main(int argc, char **argv) {
         fail("--url and --broadcast are required");
     }
     // Warnings and errors from the Rust layer, such as a publication outside the grant.
-    ok(moq::moq_log_level("warn"), "log level");
+    ok(moq::log_level("warn"), "log level");
 
     if (role == "publish") {
         if (tones.empty()) {

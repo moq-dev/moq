@@ -109,7 +109,7 @@ pub(crate) struct Moving {
 	/// `other`'s track `a`.
 	pub(crate) other: crate::container::Producer<crate::catalog::hang::Container>,
 	origin: moq_net::origin::Producer,
-	_broadcasts: [moq_net::broadcast::Producer; 2],
+	_broadcasts: [moq_net::origin::Publication; 2],
 }
 
 impl Moving {
@@ -119,9 +119,10 @@ impl Moving {
 
 	pub(crate) fn new() -> Self {
 		let origin = crate::source::produce_origin();
-		let mut live = origin.publish("live", Default::default()).unwrap();
-		let mut other = origin.publish("other", Default::default()).unwrap();
-		let catalog = crate::catalog::Producer::new(&mut live, crate::catalog::Config::default()).unwrap();
+		let live = origin.publish("live", Default::default()).unwrap();
+		let other = origin.publish("other", Default::default()).unwrap();
+		let catalog =
+			crate::catalog::Producer::new(&mut live.broadcast().clone(), crate::catalog::Config::default()).unwrap();
 		let track = |broadcast: &mut moq_net::broadcast::Producer, name: &str| {
 			let info = hang::container::track_info(hang::catalog::PRIORITY.video);
 			let track = broadcast.create_track(name, info).unwrap();
@@ -129,9 +130,9 @@ impl Moving {
 			crate::container::Producer::new(track, wire)
 		};
 		let mut moving = Self {
-			a: track(&mut live, "a"),
-			b: track(&mut live, "b"),
-			other: track(&mut other, "a"),
+			a: track(&mut live.broadcast().clone(), "a"),
+			b: track(&mut live.broadcast().clone(), "b"),
+			other: track(&mut other.broadcast().clone(), "a"),
 			catalog,
 			origin,
 			_broadcasts: [live, other],
@@ -501,6 +502,17 @@ impl moq_net::transport::poll::Session for Gated {
 		self.inner.poll_open_bi(cx, options)
 	}
 
+	fn poll_open_request(
+		&mut self,
+		cx: &mut std::task::Context<'_>,
+		options: moq_net::transport::poll::SendOptions<
+			'_,
+			<Self::SendStream as moq_net::transport::poll::SendStream>::Group,
+		>,
+	) -> std::task::Poll<Result<Option<moq_net::transport::poll::BiStreams<Self>>, Self::Error>> {
+		self.inner.poll_open_request(cx, options)
+	}
+
 	fn send_group(&mut self, priority: i64) -> Option<moq_net::transport::poll::Ungrouped> {
 		self.inner.send_group(priority)
 	}
@@ -525,8 +537,8 @@ impl moq_net::transport::poll::Session for Gated {
 		self.inner.protocol()
 	}
 
-	fn binding(&self) -> moq_net::transport::Binding {
-		self.inner.binding()
+	fn address(&self) -> moq_net::transport::Address {
+		self.inner.address()
 	}
 
 	fn close(&mut self, code: u32, reason: &str) {

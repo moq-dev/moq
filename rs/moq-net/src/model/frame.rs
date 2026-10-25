@@ -331,7 +331,7 @@ impl<const N: usize> Buffer<N> {
 	}
 
 	/// Whether the buffer is at capacity, so [`Self::push`] would refuse.
-	pub fn is_full(&self) -> bool {
+	pub(crate) fn is_full(&self) -> bool {
 		self.0.is_full()
 	}
 
@@ -340,8 +340,9 @@ impl<const N: usize> Buffer<N> {
 		&self.0
 	}
 
-	/// The frames from the most recent fill, mutably (to take payloads out, say).
-	pub fn filled_mut(&mut self) -> &mut [Frame] {
+	/// The frames from the most recent fill, mutably, for the batch a read hands back.
+	#[cfg(feature = "async")]
+	pub(crate) fn filled_mut(&mut self) -> &mut [Frame] {
 		&mut self.0
 	}
 
@@ -1210,14 +1211,7 @@ impl Consumer {
 		kio::wait(|waiter| self.poll_read_chunk(waiter)).await
 	}
 
-	/// Poll for all remaining bytes, resolving once the frame is finished.
-	pub fn poll_read_all(&mut self, waiter: &kio::Waiter) -> Poll<Result<Bytes>> {
-		if self.recover.is_none() {
-			return self.poll_read_all_once(waiter);
-		}
-		self.poll_resumed(waiter, Self::poll_read_all_once)
-	}
-
+	#[cfg(feature = "async")]
 	fn poll_read_all_once(&mut self, waiter: &kio::Waiter) -> Poll<Result<Bytes>> {
 		if self.expired {
 			return Poll::Ready(Err(Error::Old));
@@ -1257,7 +1251,13 @@ impl Consumer {
 	/// Return all remaining bytes, blocking until the frame is finished.
 	#[cfg(feature = "async")]
 	pub async fn read_all(&mut self) -> Result<Bytes> {
-		kio::wait(|waiter| self.poll_read_all(waiter)).await
+		kio::wait(|waiter| {
+			if self.recover.is_none() {
+				return self.poll_read_all_once(waiter);
+			}
+			self.poll_resumed(waiter, Self::poll_read_all_once)
+		})
+		.await
 	}
 }
 

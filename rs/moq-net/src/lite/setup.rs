@@ -15,6 +15,8 @@ const PARAM_ROLE: u64 = 0x3;
 const PARAM_COST: u64 = 0x4;
 /// Setup Parameter id for the endpoint's Hop ID.
 const PARAM_HOP: u64 = 0x5;
+/// Setup Parameter id for the sender's implementation, as `name/version` product tokens.
+const PARAM_IMPLEMENTATION: u64 = 0x6;
 /// Setup Parameter id offering the `ietf` extension (draft-lcurley-moq-ietf): "IETF" in ASCII.
 const PARAM_IETF: u64 = 0x4945_5446;
 
@@ -166,9 +168,9 @@ pub struct Setup {
 	/// The request path, for transports that carry no request URI (native QUIC,
 	/// qmux over TCP/TLS, unix sockets), with `?` and the URI query appended when
 	/// there is one. Sent only by the client; a server never sends one and a relay
-	/// never forwards it. `None` on URI-carrying bindings, where it would be a
-	/// protocol violation. On an in-band binding an empty path selects the root, like `None`;
-	/// a URI binding forbids even an empty Path parameter.
+	/// never forwards it. `None` when the transport URI carries the target, where it would
+	/// be a protocol violation, even empty. Otherwise an empty path selects the root, like
+	/// `None`.
 	pub path: Option<String>,
 	/// The single direction the client intends to use, or `None` for a bidirectional
 	/// session. `None` is sent as the absence of the parameter, which is also how a
@@ -189,6 +191,9 @@ pub struct Setup {
 	/// Whether this endpoint offers the `ietf` extension (lite-07+). Negotiated only when
 	/// both endpoints offer it.
 	pub ietf: bool,
+	/// The sender's implementation, as space-separated `name/version` product tokens
+	/// (`moq-net-rs/0.3.10`). Opaque; `None` omits the parameter.
+	pub implementation: Option<String>,
 }
 
 impl Message for Setup {
@@ -221,7 +226,10 @@ impl Message for Setup {
 			params.set_varint(PARAM_COST, cost, version)?;
 		}
 		if let Some(hop) = self.hop {
-			params.set_varint(PARAM_HOP, hop.id(), version)?;
+			params.set_varint(PARAM_HOP, hop.wire_id(version.into()), version)?;
+		}
+		if let Some(implementation) = &self.implementation {
+			params.set_bytes(PARAM_IMPLEMENTATION, implementation.as_bytes().to_vec());
 		}
 		if self.ietf {
 			// The framing it changes is unpublished, so a published version cannot offer it.
@@ -272,6 +280,7 @@ impl Message for ReceivedSetup {
 		let hop = params
 			.get_varint(PARAM_HOP, version)?
 			.and_then(|id| crate::Hop::new(id).ok());
+		let implementation = crate::setup::decode_implementation(params.get_bytes(PARAM_IMPLEMENTATION))?;
 		// An older version does not know the parameter, so it ignores it like any other.
 		let ietf = match params.get_bytes(PARAM_IETF) {
 			Some(value) if version.has_ietf() => match value.is_empty() {
@@ -290,6 +299,7 @@ impl Message for ReceivedSetup {
 				cost,
 				hop,
 				ietf,
+				implementation,
 			},
 		})
 	}
@@ -309,32 +319,42 @@ pub(crate) struct PeerSetup(kio::Shared<PeerSetupState>);
 
 struct PeerSetupState {
 	client: bool,
-	binding: crate::transport::Binding,
+	address: crate::transport::Address,
 	/// Whether our own SETUP offers the `ietf` extension.
 	ietf: bool,
 	seen: bool,
 	setup: Option<Setup>,
+	/// Where the peer's advertised implementation is published for the session handle.
+	implementation: crate::setup::PeerImplementation,
 }
 
 impl PeerSetup {
-	pub fn new(client: bool, binding: crate::transport::Binding) -> Self {
+	pub fn new(client: bool, address: crate::transport::Address) -> Self {
 		Self(kio::Shared::new(PeerSetupState {
 			client,
-			binding,
+			address,
 			ietf: false,
 			seen: false,
 			setup: None,
+			implementation: Default::default(),
 		}))
+	}
+
+	/// Publish the peer's advertised implementation to `slot` once its SETUP arrives.
+	pub fn with_implementation(self, slot: crate::setup::PeerImplementation) -> Self {
+		self.0.lock().implementation = slot;
+		self
 	}
 
 	pub(super) fn receive(&self, received: ReceivedSetup) -> Result<(), crate::Error> {
 		let mut state = self.0.lock();
-		if ((state.client || state.binding == crate::transport::Binding::Uri) && received.setup.path.is_some())
+		if ((state.client || state.address == crate::transport::Address::Uri) && received.setup.path.is_some())
 			|| (state.client && received.role_present)
 		{
 			return Err(crate::Error::ProtocolViolation);
 		}
 		state.seen = true;
+		state.implementation.set(received.setup.implementation.clone());
 		state.setup = Some(received.setup);
 		Ok(())
 	}
@@ -368,6 +388,7 @@ impl PeerSetup {
 	pub fn set(&self, setup: Setup) {
 		let mut state = self.0.lock();
 		state.seen = true;
+		state.implementation.set(setup.implementation.clone());
 		state.setup = Some(setup);
 	}
 
@@ -593,12 +614,55 @@ mod tests {
 	}
 
 	#[test]
+	fn implementation_round_trip() {
+		for implementation in [None, Some("moq-ffi/0.4.12 moq-net-rs/0.3.10".to_string())] {
+			let msg = Setup {
+				implementation,
+				..Default::default()
+			};
+			assert_eq!(round_trip(&msg), msg);
+		}
+	}
+
+	/// The value is UTF-8, so bytes that are not refuse the whole SETUP.
+	#[test]
+	fn implementation_must_be_utf8() {
+		let msg = Setup {
+			implementation: Some("ab".to_string()),
+			..Default::default()
+		};
+		let mut buf = msg.encode_bytes(Version::Lite07).unwrap().to_vec();
+		let last = buf.len() - 1;
+		buf[last] = 0xff;
+		assert!(matches!(
+			Setup::decode_slice(&buf, Version::Lite07),
+			Err(DecodeError::InvalidValue)
+		));
+	}
+
+	#[test]
 	fn hop_round_trip() {
 		let msg = Setup {
 			hop: Some(crate::Hop::new(42).unwrap()),
 			..Default::default()
 		};
 		assert_eq!(round_trip(&msg), msg);
+	}
+
+	// A hop past 2^62 - 1 travels as 0 on a QUIC-varint version, which reads as undeclared.
+	#[test]
+	fn wide_hop_needs_leading_ones() {
+		let msg = Setup {
+			hop: Some(crate::Hop::new(u64::MAX).unwrap()),
+			..Default::default()
+		};
+		for (version, want) in [(Version::Lite06, None), (Version::Lite07, msg.hop)] {
+			let mut buf = Vec::new();
+			msg.encode(&mut Encoder::new(&mut buf, version.into()), version)
+				.unwrap();
+			let got = crate::coding::decode_buf(&mut &buf[..], version, Setup::decode).unwrap();
+			assert_eq!(got.hop, want, "{version:?}");
+		}
 	}
 
 	// A declared id of 0 carries no identity (it cannot be excluded), so it

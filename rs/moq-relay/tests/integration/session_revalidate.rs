@@ -6,7 +6,7 @@
 //! session.
 
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -99,7 +99,7 @@ fn all() -> Patterns {
 /// A grant that lasts an hour and would not re-check on its own during a test.
 fn grant() -> Grant {
 	let mut grant = Grant::new(all(), all());
-	grant.expires = Some(SystemTime::now() + Duration::from_secs(3600));
+	grant.expires = Some(moq_clock::wall() + Duration::from_secs(3600));
 	grant.revalidate = Some(Duration::from_secs(3600));
 	grant
 }
@@ -239,10 +239,12 @@ impl Fixture {
 fn client_at(bind: &str) -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
-	config.once = Some(true);
-	config.websocket.delay = Some(Duration::ZERO);
+	config.websocket.delay = Some((Duration::ZERO).into());
 	config.bind = Some(bind.parse().expect("parse bind"));
-	config.init(Default::default()).expect("client init")
+	config
+		.init(Default::default())
+		.expect("client init")
+		.with_reconnect(false)
 }
 
 async fn connect(url: url::Url, bind: &str) -> moq_tokio::Connection {

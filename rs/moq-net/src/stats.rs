@@ -641,11 +641,6 @@ impl Traffic {
 		self.stale.add(other.stale);
 	}
 
-	/// True while the broadcast is announced (an announce guard is open).
-	pub fn is_announced(&self) -> bool {
-		self.announces_started > self.announces_ended
-	}
-
 	/// Distinct sessions currently subscribed (viewers on the egress side).
 	pub fn active_broadcasts(&self) -> u64 {
 		self.broadcasts_started.saturating_sub(self.broadcasts_ended)
@@ -654,13 +649,6 @@ impl Traffic {
 	/// Track subscriptions currently open.
 	pub fn active_subscriptions(&self) -> u64 {
 		self.subscriptions_started.saturating_sub(self.subscriptions_ended)
-	}
-
-	/// All bytes attributable to this slice: payload plus announce overhead.
-	/// Both inputs are monotonic, so the sum regresses only when the entry was
-	/// garbage collected and re-created.
-	pub fn total_bytes(&self) -> u64 {
-		self.bytes.saturating_add(self.announced_bytes)
 	}
 
 	/// True once every started counter equals its ended counterpart: no guard is
@@ -823,11 +811,9 @@ impl Presence {
 /// etc. traffic. Each tracked broadcast keeps a per-tier counter set on both its
 /// publisher and subscriber sides.
 ///
-/// The default tier ([`Tier::default`]) is unprefixed: its published tracks are
-/// `publisher.json`, `subscriber.json`, and `sessions.json`. A named tier
-/// prefixes every track with its label, so `Tier::new("region/sjc")` records on
-/// `region/sjc/publisher.json`. The label is an arbitrary path chosen by business
-/// logic; an empty label is the default tier.
+/// Published stats frames key each tier's counters by its label, so
+/// `Tier::new("region/sjc")` records under `"region/sjc"`. The label is an
+/// arbitrary path chosen by business logic; an empty label is the default tier.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Tier(PathOwned);
 
@@ -842,25 +828,8 @@ impl Tier {
 		&self.0
 	}
 
-	/// True for the default (unprefixed) tier.
-	pub fn is_default(&self) -> bool {
-		self.0.is_empty()
-	}
-
-	/// Track name for this tier: `name` on the default tier, else `<tier>/<name>`.
-	/// This is the naming rule the published stats tracks follow.
-	pub fn track_name(&self, name: &str) -> String {
-		if self.0.is_empty() {
-			name.to_string()
-		} else {
-			format!("{}/{}", self.0.as_str(), name)
-		}
-	}
-
 	/// The tier label as used in metrics: empty (`""`) for the default tier,
-	/// otherwise the label (e.g. `"region/sjc"`). Mirrors the
-	/// wire convention, where the default tier is unprefixed and named
-	/// tiers are `<label>/`-prefixed.
+	/// otherwise the label (e.g. `"region/sjc"`), as stats frames key it.
 	pub fn as_str(&self) -> &str {
 		self.0.as_str()
 	}
@@ -878,7 +847,7 @@ impl fmt::Display for Tier {
 /// side statically, so this only surfaces on the aggregate read side.
 ///
 /// This is the direction traffic flowed, not the session role a client advertises
-/// in its SETUP ([`crate::Role`]): one session records on both sides.
+/// in its SETUP: one session records on both sides.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Role {
 	/// Egress: bytes this node published to a peer.
@@ -1195,11 +1164,6 @@ impl Registry {
 		self.shared.is_some()
 	}
 
-	/// The excluded patterns. See [`Config::exclude`].
-	pub fn exclude(&self) -> &Patterns {
-		&self.exclude
-	}
-
 	/// The shared state, panicking for a disabled registry. Tests build enabled
 	/// registries so this is always present.
 	#[cfg(test)]
@@ -1420,16 +1384,6 @@ impl Handle {
 		}
 	}
 
-	/// The registry this handle is tied to.
-	pub fn parent(&self) -> &Registry {
-		&self.stats
-	}
-
-	/// The tier this handle bumps into.
-	pub fn tier(&self) -> &Tier {
-		&self.tier
-	}
-
 	/// Record a connected session under `label` on this tier. Hold
 	/// the returned guard for the session's lifetime; dropping it bumps
 	/// `sessions_ended`. Counts presence regardless of any data flow, so a
@@ -1441,13 +1395,10 @@ impl Handle {
 	}
 
 	/// Count one admitted request under `label` and meter its traffic without session presence.
+	///
+	/// A request has no session end to classify, so it never records a failure.
 	pub fn request(&self, label: impl AsPath) -> Session {
 		self.context(label, Context::Request)
-	}
-
-	/// Count an external connection's wire counters under `label` without counting an admission.
-	pub fn wire(&self, label: impl AsPath, counters: crate::transport::Wire) -> Wire {
-		self.context(label, Context::Wire).wire(counters)
 	}
 
 	fn context(&self, label: impl AsPath, context: Context) -> Session {
@@ -1461,7 +1412,6 @@ impl Handle {
 				Context::Request => {
 					presence.requests.fetch_add(1, Ordering::Relaxed);
 				}
-				Context::Wire => {}
 			}
 		}
 		let traffic = Arc::new(SessionTraffic::default());
@@ -1498,7 +1448,6 @@ impl Default for Handle {
 enum Context {
 	Session,
 	Request,
-	Wire,
 }
 
 /// Registered wire counters; dropping this adds their final reading and unregisters them.
@@ -1702,16 +1651,19 @@ impl Session {
 		Wire { inner: Some(source) }
 	}
 
-	/// Record the first abnormal end on this connected session, shared across clones.
-	pub fn fail(&self, kind: Failure) {
+	/// Record how a transport session under this connected context ended, shared across
+	/// clones. A reconnect's later end replaces an earlier one, so the context fails only
+	/// if its last session did.
+	///
+	/// Only a context from [`Handle::session`] has an end to classify: on one from
+	/// [`Handle::request`] this records nothing.
+	#[cfg(any(feature = "async", test))]
+	pub(crate) fn end(&self, err: &crate::Error) {
 		let Some(inner) = &self.inner else { return };
 		if !inner.connected {
 			return;
 		}
-		let mut current = inner.current.lock().unwrap_or_else(PoisonError::into_inner);
-		if current.failure.is_none() {
-			current.failure = Some(kind);
-		}
+		inner.current.lock().unwrap_or_else(PoisonError::into_inner).failure = Failure::of(err);
 	}
 
 	/// Record later traffic and session presence under `(tier, label)`; a request stays counted where admitted.
@@ -2206,37 +2158,10 @@ mod tests {
 	}
 
 	#[test]
-	fn dropping_a_wire_guard_records_once_and_unregisters_without_an_admission() {
-		let registry = test_stats();
-		let bytes = counters(10, 3);
-		let wire = registry.tier(Tier::default()).wire("room", bytes.clone());
-		assert_eq!(drain(&registry).sessions[0].presence.wire_tx, 10);
-		bytes.set_sent_bytes(17);
-		drop(wire);
-		let final_row = drain(&registry).sessions.pop().unwrap();
-		assert!(final_row.closed);
-		assert_eq!((final_row.presence.wire_tx, final_row.presence.wire_rx), (17, 3));
-		assert_eq!(
-			(
-				final_row.presence.requests,
-				final_row.presence.sessions_started,
-				final_row.presence.sessions_ended
-			),
-			(0, 0, 0)
-		);
-		bytes.set_sent_bytes(40);
-		assert!(drain(&registry).sessions.is_empty());
-		assert_eq!(
-			registry.snapshot().sessions()[0].1.wire_tx,
-			17,
-			"a dropped guard is never read again"
-		);
-	}
-
-	#[test]
 	fn disabled_wire_collection_reports_nothing() {
 		let registry = Registry::disabled();
-		let wire = registry.tier(Tier::default()).wire("root", counters(5, 7));
+		let session = registry.tier(Tier::default()).session("root");
+		let wire = session.wire(counters(5, 7));
 		assert!(drain(&registry).sessions.is_empty());
 		drop(wire);
 		assert!(drain(&registry).sessions.is_empty());
@@ -2275,8 +2200,9 @@ mod tests {
 		let session = handle.session("root");
 		let clone = session.clone();
 		session.retag(Tier::new("next"), "root");
-		clone.fail(Failure::IdleTimeout);
-		session.fail(Failure::Application);
+		// A reconnect's later end replaces an earlier one.
+		clone.end(&crate::Error::Transport("lost".into()));
+		session.end(&crate::Error::IdleTimeout);
 		drop(clone);
 		drop(session);
 		let before = stats.snapshot();
@@ -2295,14 +2221,17 @@ mod tests {
 			.unwrap()
 			.1;
 		assert_eq!(next.sessions_failed.idle_timeout, 1);
-		assert_eq!(next.sessions_failed.application, 0);
+		assert_eq!(next.sessions_failed.transport, 0);
 		assert_eq!(next.active(), 0);
 		drain(&stats);
 		let after = stats.snapshot();
 		assert_eq!(before.sessions(), after.sessions(), "retirement keeps outcomes once");
 		let disabled = Registry::disabled();
 		disabled.tier(Tier::default()).refuse("root", RefusalKind::Refused);
-		disabled.tier(Tier::default()).session("root").fail(Failure::Expired);
+		disabled
+			.tier(Tier::default())
+			.session("root")
+			.end(&crate::Error::Expired);
 		assert!(disabled.snapshot().sessions().is_empty());
 	}
 
@@ -2330,7 +2259,6 @@ mod tests {
 		let tier = Tier::default();
 		assert_eq!(tier.as_str(), "");
 		assert_eq!(tier.to_string(), "");
-		assert_eq!(tier.track_name("publisher.json"), "publisher.json");
 	}
 
 	/// Counters for `(path, tier)`, creating the tier slot if absent.
