@@ -8,35 +8,54 @@ included, and resolves a `Time(pts)` end before it goes upstream.
 
 ## Plan
 
-Range fills already go upstream as one FETCH per run of missing groups, and
-our publisher serves multi-group FETCHes ending at the Largest Object's group.
-That group is never cut at the Largest Object (maintainer, 2026-10-25,
-departing from draft-22 section 9.11): the cache cannot know an open group's
-real Largest Object, so the answer waits for it to finish rather than handing a
-downstream cache a truncated group as complete. What remains is the
-subscription side.
+The implementation is published in draft [moq-dev/moq#6815](https://github.com/moq-dev/moq/pull/6815).
+It carries aggregate range changes in the existing `write_update` path from
+draft 15 onward, preserving draft 14's limitation. Draft-22 widening requests
+fills in ascending order; the publisher serves multiple groups and owns the
+current-group tail separately from its history fill. Cancellation releases a
+blocked fill without ending the subscription's other groups.
 
-Upstream range changes ride `write_update` in `ietf/subscriber.rs`.
-Narrowing is allowed from draft-15 on. Widening is a bug today: on draft-22
-and later, a subscriber from a future group puts its absolute start in the
-SUBSCRIBE filter, and a live subscriber merged in after it never gets the
-current group. Draft-22 lets an update lower the start with FILL_PARAMETERS
-for what it missed, which opens a second fill stream on the subscription.
-Draft 14 forbids widening, and 15 to 18 have no fill.
-`rs/moq-net/tests/integration/subscribe_ranges.rs` leaves draft-22 out for
-that reason; add it back once the update carries the widened filter. Our
-publisher still resets a subscription fill spanning several groups
-(`FillServe::Unsupported` in `ietf/publisher.rs`); serve it from the cache as
-a multi-group FETCH is served.
+Cached `Time(pts)` ends resolve to group bounds before going upstream, or are
+refused without replacing the previous requested ranges. Fetch-only copies
+retain the exact upstream Largest Object independently of their cache. Empty
+ranges retire the wire subscription when no sibling holds demand, and can
+widen again using the retained copy.
 
-moq-transport has no time filter, so a downstream `Time(pts)` end is
-resolved against the relay's cache before it goes upstream as a group range,
-or refused when the cache cannot resolve it.
+Standalone FETCH still serves the whole Largest Object group after it
+finishes (maintainer, 2026-10-25, departing from draft-22 section 9.11). The
+cache cannot know an open group's real Largest Object, so it must not hand a
+downstream cache a truncated group as complete. Joining fills keep their
+snapshot-head and live-tail split.
 
-A relay's fetch-only copy refuses a draft-22 FETCH relative to the Largest
-Object with Unsupported, since it does not store the Largest that
-TRACK_STATUS reports. Record it on the copy so those filters resolve there
-too.
+Source checkpoint [4e9050af2302](https://github.com/moq-dev/moq/commit/4e9050af23026478749bc2f963fd6e13eca7e84a) includes main [011402e005](https://github.com/moq-dev/moq/commit/011402e005f6c8efeff07c46535fa2cfa95f021e), the Rust range,
+anchor, and lifecycle implementation, matching JavaScript fill-order codecs,
+and a session benchmark over groups per fill and concurrent requests. No
+maintainer decision is currently identified; this quest remains claimed while
+validation is unfinished.
+
+Before merging main, the full moq-net suite passed 3,227 of 3,228 tests, with
+11 skipped. The sole failure was draft-14 unsupported Time-anchor error
+precedence, corrected in [de20deea09](https://github.com/moq-dev/moq/commit/de20deea093709f327952b88d0d4996b47ccf3c9) without weakening its assertion. The run
+passed supported legacy narrowing/widening, draft-22 repeated bound changes,
+quiet-head stitching, and the strict cached-Time refusal guarantee. The
+JavaScript helper passed 2,746 tests, TypeScript, and Biome checks.
+Merged-head Rustfmt, changed-file Biome, and whitespace checks also passed.
+
+Remaining validation on the merged head:
+
+- Run the range/anchor tests, including the new empty-demand direct/relay and
+  sibling-isolation regression, then the full moq-net suite.
+- Complete `just ci`, especially the selected Rust feature boundaries. The
+  merged-head attempt passed its JavaScript checks and selected tests
+  (including all 2,746 net tests), Markdown, GitHub harness, drill, shell,
+  large-file, TOML, Nix, and Justfile checks. Rust remained at host admission;
+  its waiting commands were stopped for a clean handoff.
+- Run `just test interop --all`.
+- Compile, smoke-test, and measure the new `session_range_updates` benchmark
+  across both its group-span and concurrent-request axes.
+
+Do not mark the PR ready until these checks finish. Keep the whole-group
+standalone FETCH decision and the joining fill semantics above.
 
 ## Related
 
