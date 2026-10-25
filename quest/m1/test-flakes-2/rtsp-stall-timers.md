@@ -11,7 +11,7 @@ tests (`:979`, `:1096`) never fail under load.
 They set 200 ms timeouts against a real-socket fake server on wall time.
 `client.timeout` also bounds every RTSP request step (`within()` at `:266`),
 so a loaded runner can stall during setup instead of at the point under
-test. Drive the timeouts with a `moq_clock::Manual` clock, or move the fake
-server off real sockets.
+test. Drive the timeouts with a `moq_clock::Manual` clock; moving the fake
+server off real sockets alone would leave them on wall time.
 
 Public API: none. Wire: none.

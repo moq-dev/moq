@@ -19,7 +19,8 @@ sends the reader to the wrong file.
 
 - Either mbx gc skips trees a live build holds, or the runner keeps enough
   free disk that gc never runs mid-job; pick by measurement.
-- The check's message says the hook rebuilt and why it may have (stale
-  `hook_vars` or an evicted tree).
+- The check tells the two causes apart before naming one: it blames
+  `hook_vars` only when they differ from `sh/dart/generate.sh`, and otherwise
+  reports that the restored tree was missing.
 
 Public API: none. Wire: none.
