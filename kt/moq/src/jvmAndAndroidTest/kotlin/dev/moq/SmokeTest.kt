@@ -548,6 +548,18 @@ class SmokeTest {
     }
 
     @Test
+    fun `sessions advertise the wrapper ahead of moq-ffi`() = runTest {
+        Server.listen(ServerConfig(bind = "127.0.0.1:0", tls = ServerTls(generate = listOf("localhost")))).use { server ->
+            Moq.connect("https://${server.localAddr}", ClientConfig(tls = ClientTls(insecure = true))).use {
+                server.requests().first().use { request ->
+                    val advertised = request.peerImplementation()
+                    assertTrue(advertised?.startsWith("moq-kt/") == true, "advertised: $advertised")
+                }
+            }
+        }
+    }
+
+    @Test
     fun `closing a server releases its port`() = runTest {
         val first = Server.listen(ServerConfig(bind = "127.0.0.1:0", tls = ServerTls(generate = listOf("localhost"))))
         val addr = first.localAddr

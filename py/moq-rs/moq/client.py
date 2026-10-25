@@ -13,7 +13,7 @@ from moq_ffi import (
     moq_versions,
 )
 
-from ._records import Backoff, ClientTls, QuicConfig, WebSocketConfig, _opt_us, _strs
+from ._records import Backoff, ClientTls, QuicConfig, WebSocketConfig, _implementation, _opt_us, _strs
 from .origin import AnnounceConsumer, AnnouncedBroadcast, OriginConsumer, OriginProducer
 from .publish import BroadcastProducer
 from .session import Session
@@ -102,6 +102,7 @@ class Client:
             websocket=(websocket or WebSocketConfig())._ffi(),
             once=once,
             backoff=(backoff or Backoff())._ffi(),
+            implementation=_implementation(),
             publish=None if publish is None else publish._inner,
             consume=None if consume is None else consume._inner,
         )

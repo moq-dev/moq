@@ -278,6 +278,8 @@ void main() {
 
     final accepted = () async {
       final request = await server.requests().first.timeout(timeout);
+      // The wrapper names itself ahead of moq-ffi, so a server can tell bindings apart.
+      expect(request.peerImplementation(), startsWith('moq-dart/'));
       return request.accept().timeout(timeout);
     }();
 
