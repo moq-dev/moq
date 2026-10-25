@@ -40,8 +40,7 @@ Open design (maintainer to decide):
    still needs the forwarder, close, and publisher changes from option 1.
 
 Starting point: this test in `rs/moq-net/src/ietf/publisher/tracks.rs` fails
-on drafts 18-22 (the finished track gets status 0, not 2). Swapping
-`h.broadcast.close()` for a dropped `finish()` fails the same way.
+on drafts 18-22 (the finished track gets status 0, not 2).
 
 ```rust
 #[moq_clock::test]
