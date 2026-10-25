@@ -163,26 +163,36 @@ export function decode(raw: Uint8Array): Catalog {
 			if (!RESERVED_ROOT.includes(name)) ext[name] = value;
 		}
 
-		// id -> inline payload, built once so resolution is linear in the number
+		// id -> init data entry, built once so resolution is linear in the number
 		// of tracks rather than tracks x entries. A repeated id is refused: readers
 		// that kept different entries would disagree on a track's init bytes.
-		const ids = new Set<string>();
-		const inline = new Map<string, string>();
+		const byId = new Map<string, z.infer<typeof InitDataSchema>>();
 		for (const entry of wire.initDataList ?? []) {
-			if (ids.has(entry.id)) throw new Error(`MSF catalog has duplicate initData id "${entry.id}"`);
-			ids.add(entry.id);
-			if (entry.type === "inline") inline.set(entry.id, entry.data);
+			if (byId.has(entry.id)) throw new Error(`MSF catalog has duplicate initData id "${entry.id}"`);
+			byId.set(entry.id, entry);
 		}
 
 		const tracks = (wire.tracks ?? []).map(({ initRef, ...track }) => {
 			track.isLive ??= false;
 
-			// Resolve draft-01 initRef into inline initData so callers never see
-			// the indirection. Inline initData (draft-00) is left untouched.
-			if (track.initData === undefined && initRef !== undefined) {
-				// Only inline entries are resolved here. A non-inline (e.g. `url`) initRef
-				// legitimately stays undefined; the consumer fetches that init out-of-band.
-				track.initData = inline.get(initRef);
+			// Resolve draft-01 initRef into inline initData so callers never see the
+			// indirection. Inline initData (draft-00) is kept as-is, but a catalog that
+			// carries both forms must not disagree. Every refusal mirrors `moq-msf`, so a
+			// malformed reference never looks like a track without init data.
+			if (initRef !== undefined) {
+				const entry = byId.get(initRef);
+				if (entry === undefined) {
+					throw new Error(`MSF track "${track.name}" references missing initData "${initRef}"`);
+				}
+				if (entry.type !== "inline") {
+					throw new Error(
+						`MSF track "${track.name}" references initData "${initRef}" with unsupported type "${entry.type}"`,
+					);
+				}
+				if (track.initData !== undefined && track.initData !== entry.data) {
+					throw new Error(`MSF track "${track.name}" carries conflicting initData and initRef "${initRef}"`);
+				}
+				track.initData = entry.data;
 			}
 			return track;
 		});
