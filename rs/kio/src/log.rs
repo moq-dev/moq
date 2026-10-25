@@ -499,34 +499,44 @@ impl<T> Read<'_, T> {
 			return Ok(None);
 		}
 
-		let mut segment = match self.reader.hint {
-			Some((segment, start)) if start <= index => segment,
+		// The hint's chain can end short of `index` when the writer emptied the log and
+		// started a fresh segment after this pin's check, so fall back to the head.
+		let hinted = match self.reader.hint {
+			Some((segment, start)) if start <= index => Self::walk(segment, index),
+			_ => None,
+		};
+		let segment = match hinted {
+			Some(segment) => segment,
 			// Loaded under the pin: the writer moves the head before retiring what it
 			// passes.
-			_ => NonNull::new(shared.head.load(Ordering::Acquire)).ok_or(Evicted)?,
+			None => NonNull::new(shared.head.load(Ordering::Acquire))
+				.and_then(|head| Self::walk(head, index))
+				// Evicted since the base was checked.
+				.ok_or(Evicted)?,
 		};
-		loop {
-			// SAFETY: the hint or the head, or linked from one: segments retire oldest first,
-			// so none of them was retired before this pin.
-			let header = unsafe { Segment::header(segment) };
-			// Past the oldest segment's start: evicted since the base was checked.
-			if index < header.start {
-				return Err(Evicted);
-			}
-			let filled = header.filled.load(Ordering::Acquire);
-			if index < header.start + filled as u64 {
-				break;
-			}
-			// A segment links its successor before anything is written into it. A tail
-			// that holds neither `index` nor a link was evicted with everything else since
-			// the end was checked.
-			segment = NonNull::new(header.next.load(Ordering::Acquire)).ok_or(Evicted)?;
-		}
 		// SAFETY: found under this pin, which keeps it alive, so the hint holds only for
 		// as long as `Reader::read` keeps checking it.
 		self.reader.hint = Some((segment, unsafe { Segment::header(segment) }.start));
 		// SAFETY: `filled` covers `index`, so its slot was written.
 		Ok(Some(unsafe { Segment::get(segment, index) }))
+	}
+
+	/// Follow links from `segment` to the one whose written slots hold `index`, if any.
+	fn walk(mut segment: NonNull<Segment<T>>, index: u64) -> Option<NonNull<Segment<T>>> {
+		loop {
+			// SAFETY: the hint or the head, or linked from one, all reached under this pin:
+			// segments retire oldest first, so none of them was retired before it.
+			let header = unsafe { Segment::header(segment) };
+			if index < header.start {
+				return None;
+			}
+			if index < header.start + header.filled.load(Ordering::Acquire) as u64 {
+				return Some(segment);
+			}
+			// A segment links its successor before anything is written into it, so a
+			// segment without a link is the tail, or one evicted early with everything.
+			segment = NonNull::new(header.next.load(Ordering::Acquire))?;
+		}
 	}
 }
 
@@ -702,6 +712,21 @@ mod test {
 		drop(read);
 		collect();
 		assert_eq!(StdArc::strong_count(&entry), 1);
+	}
+
+	/// A read that spans the writer emptying the log and appending again finds the new
+	/// entry, though the segment it last read was cut off from the new one.
+	#[test]
+	fn a_read_spans_a_full_eviction() {
+		let mut writer = Writer::new(0);
+		let mut reader = writer.reader();
+		writer.push(0u64);
+		let mut read = reader.read();
+		assert_eq!(read.get(0), Ok(Some(&0)));
+		writer.evict(1);
+		writer.push(1);
+		assert_eq!(read.get(0), Err(Evicted));
+		assert_eq!(read.get(1), Ok(Some(&1)));
 	}
 
 	/// Evicting everything drops the last segment with its unused slots, and the next
