@@ -1024,7 +1024,7 @@ mod tests {
 
 	/// Run a client session on a shared handle over `transport` for five simulated seconds,
 	/// presenting one token, and return it after checking the session still runs.
-	async fn present_on_shared_handle(transport: ScriptedSession) -> crate::auth::Auth {
+	async fn present_on_shared_handle(transport: ScriptedSession) -> crate::auth::Credential {
 		let handle = crate::auth::Handle::new();
 		let start = start(Config {
 			runtime: crate::time::sim(),
