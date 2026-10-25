@@ -886,6 +886,9 @@ export class AuthSession {
 					break;
 				}
 			} catch (err: unknown) {
+				// End both halves: a peer that reset only its own leaves ours open, and a retry that
+				// abandoned it would hold the stream's credit until the session ends.
+				presented.stream?.abort(cancel());
 				closed = transportClosed(err);
 				if (presented.withdrawn || presented.ended) {
 					result = null;
