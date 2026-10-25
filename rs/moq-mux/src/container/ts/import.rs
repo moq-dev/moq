@@ -383,6 +383,11 @@ impl<E: catalog::Catalog> Import<E> {
 		pids
 	}
 
+	/// PCR ticks elapsed on the program clock since its first PCR, or `None` before one.
+	pub(super) fn clock(&self) -> Option<u64> {
+		self.liveness.now()
+	}
+
 	/// Whether [`claims`](Self::claims) may have changed since the last call.
 	pub(super) fn claims_changed(&mut self) -> bool {
 		std::mem::take(&mut self.claims_changed)
@@ -5759,7 +5764,7 @@ pub(super) mod test {
 	}
 
 	/// Annex-B bytes for one access unit: SPS + PPS + IDR for a keyframe, else a delta slice.
-	fn annexb_au(keyframe: bool) -> Vec<u8> {
+	pub(in crate::container::ts) fn annexb_au(keyframe: bool) -> Vec<u8> {
 		use crate::container::test_util::{IDR, PPS, SPS};
 		let nals: &[&[u8]] = if keyframe {
 			&[SPS, PPS, IDR]
@@ -8389,7 +8394,7 @@ pub(super) mod test {
 
 	/// A PUSI TS packet on `pid` carrying one bounded video PES (stream_id 0xE0) with `pts`
 	/// and, when it differs, `dts`, sized to complete on this packet.
-	fn video_pes(pid: u16, cc: u8, pts: u64, dts: Option<u64>, payload: &[u8]) -> Vec<u8> {
+	pub(in crate::container::ts) fn video_pes(pid: u16, cc: u8, pts: u64, dts: Option<u64>, payload: &[u8]) -> Vec<u8> {
 		let mut header = Vec::new();
 		match dts {
 			Some(dts) => {

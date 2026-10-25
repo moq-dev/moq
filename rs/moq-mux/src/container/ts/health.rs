@@ -24,7 +24,7 @@ use super::stats::Snapshot;
 
 const PCR_HZ: u64 = 27_000_000;
 /// `PAT_error_2` and `PMT_error_2`: each table recurs at least every 0.5 s.
-const TABLE_LIMIT: u64 = PCR_HZ / 2;
+pub(super) const TABLE_LIMIT: u64 = PCR_HZ / 2;
 /// `PCR_repetition_error` and `PCR_discontinuity_indicator_error`: 100 ms. The 40 ms limit
 /// left TS 101 154 in 2005.
 const PCR_LIMIT: u64 = PCR_HZ / 10;
