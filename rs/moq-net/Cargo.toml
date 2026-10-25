@@ -170,7 +170,7 @@ required-features = ["fuzz"]
 [[bench]]
 name = "session"
 harness = false
-required-features = ["async"]
+required-features = ["fuzz"]
 
 [[bench]]
 name = "admission"
