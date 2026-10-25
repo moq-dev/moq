@@ -5245,7 +5245,7 @@ fn zero_with_a_flag_set_is_a_real_value() {
 
 #[test]
 fn config_versions_round_trip() {
-	let versions = [moq_str("moq-lite-05"), moq_str("moq-transport-19")];
+	let versions = [moq_str("moq-lite-05"), moq_str("moq-transport-22")];
 	let mut config = client_config();
 	config.versions = versions.as_ptr();
 	config.versions_len = versions.len();

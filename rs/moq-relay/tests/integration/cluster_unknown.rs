@@ -381,7 +381,7 @@ async fn unknown_publisher_does_not_flap_across_a_lite_cluster_triangle() {
 
 #[tokio::test]
 async fn unknown_publisher_does_not_flap_across_an_ietf_cluster_triangle() {
-	let version = "moq-transport-19".parse().expect("parse version");
+	let version = "moq-transport-22".parse().expect("parse version");
 	assert_unknown_publisher_stays_announced(Some(version)).await;
 }
 

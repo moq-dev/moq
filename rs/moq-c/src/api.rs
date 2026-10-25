@@ -3234,10 +3234,9 @@ pub unsafe extern "C" fn moq_publish_json_snapshot(
 		let broadcast = ffi::parse_id(broadcast)?;
 		let name = unsafe { ffi::parse_str(name, name_len)? };
 		let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
-		let producer = moq_mux::json::Config::default()
-			.with_compression(config.compression)
-			.with_deltas(config.deltas);
-		State::lock().publish.json_snapshot(broadcast, name, producer)
+		let entry = moq_mux::json::Config::default().with_compression(config.compression);
+		let options = moq_mux::json::Options::default().with_deltas(config.deltas);
+		State::lock().publish.json_snapshot(broadcast, name, entry, options)
 	})
 }
 
