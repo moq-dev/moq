@@ -511,6 +511,29 @@ impl Producer {
 		.await;
 	}
 
+	/// Resolve once an enabled video rendition has its init, or none is enabled.
+	#[cfg_attr(
+		not(feature = "server"),
+		allow(dead_code, reason = "only the `server` feature uses it")
+	)]
+	pub(crate) async fn video_init(&self) {
+		let _ = kio::wait(|waiter| {
+			self.state.poll_ref(waiter, |current| {
+				let mut video = current
+					.renditions
+					.values()
+					.filter(|rendition| rendition.kind == Kind::Video && rendition.is_enabled())
+					.peekable();
+				if video.peek().is_none() || video.any(|rendition| rendition.poll_init(waiter).is_ready()) {
+					Poll::Ready(())
+				} else {
+					Poll::Pending
+				}
+			})
+		})
+		.await;
+	}
+
 	/// Enroll a freshly-created rendition in the timeline feed, replaying the recent history
 	/// (and the ended/failed/closed markers) so its window matches its siblings', and start following its
 	/// own timeline.

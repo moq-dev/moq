@@ -91,6 +91,10 @@ async fn manifest(server: &Server, broadcast: &str, query: Option<&str>) -> Resp
 	// A manifest whose timelines are all empty confuses players; give the broadcast a moment
 	// to index its first complete segment before answering.
 	let _ = moq_clock::timeout(READY_TIMEOUT, broadcaster.playable()).await;
+	// Each representation names its init by hash, which an inline codec only learns from media.
+	// A player keeps the adaptation sets of the first manifest it loads, so wait for one video
+	// init rather than every init: a stuck rendition never holds a sibling that can play.
+	let _ = moq_clock::timeout(READY_TIMEOUT, broadcaster.video_init()).await;
 	match broadcaster.manifest(query) {
 		Ok(Some(manifest)) => mpd(manifest),
 		Ok(None) => not_found(),
@@ -528,6 +532,25 @@ mod tests {
 
 		write_three_gops(&mut media);
 		wait_listed(&app, "/live/master.m3u8", "video/video0/media.m3u8").await;
+	}
+
+	/// A player keeps the adaptation sets of the first manifest it loads, so a fresh edge's first
+	/// manifest already lists an inline-codec video rendition, whose init is only known from media.
+	#[tokio::test(start_paused = true)]
+	async fn the_first_manifest_lists_inline_video() {
+		let origin = moq_tokio::origin::spawn();
+		let mut broadcast = origin.create_broadcast("live").expect("publish");
+		broadcast.announce(run()).expect("announce");
+		let inline = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		let (_catalog, _registration, _track, mut media) = publish_video(&mut broadcast, inline, timed());
+		write_three_gops(&mut media);
+
+		let app = Server::new(origin.consume(), crate::export::Config::default()).router();
+		let response = oneshot(app, "/live/manifest.mpd").await;
+		assert_eq!(response.status(), StatusCode::OK);
+		let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+		let body = String::from_utf8(body.to_vec()).unwrap();
+		assert!(body.contains("id=\"video/video0\""), "{body}");
 	}
 
 	/// A restarted publisher gets URLs of its own, whose numbering starts over: the master lists

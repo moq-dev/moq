@@ -287,8 +287,8 @@ pub struct Rendition {
 	/// [`Broadcaster::set_generation`](super::Broadcaster::set_generation)) and the init, built
 	/// on first request. A catalog reconfigure rebuilds the whole rendition, while a new
 	/// generation drops the init, since a restarted inline-codec publisher may carry new
-	/// parameter sets under the same catalog.
-	run: Mutex<Run>,
+	/// parameter sets under the same catalog. Shared state so a render can wait for the init.
+	run: kio::Producer<Run>,
 	/// Serializes init builds, so concurrent first requests fetch the keyframe group once. Shared
 	/// so a background build (see [`start_init`](Self::start_init)) holds it for its whole run.
 	building: Arc<tokio::sync::Mutex<()>>,
@@ -378,7 +378,7 @@ impl Rendition {
 			catalog: source.broadcast(),
 			watcher: Mutex::new(None),
 			media,
-			run: Mutex::default(),
+			run: kio::Producer::default(),
 			building: Arc::new(tokio::sync::Mutex::new(())),
 		})
 	}
@@ -410,7 +410,7 @@ impl Rendition {
 			catalog: source.broadcast(),
 			watcher: Mutex::new(None),
 			media,
-			run: Mutex::default(),
+			run: kio::Producer::default(),
 			building: Arc::new(tokio::sync::Mutex::new(())),
 		})
 	}
@@ -492,7 +492,7 @@ impl Rendition {
 
 	/// List every segment URL under `generation` from now on, keeping the run's rows and init.
 	pub(crate) fn label(&self, generation: Option<Arc<str>>) {
-		self.run.lock().expect("run lock poisoned").generation = generation;
+		self.run_mut().generation = generation;
 	}
 
 	/// Start a new publisher run labeled `generation`, dropping the previous run's rows, records,
@@ -504,7 +504,7 @@ impl Rendition {
 		self.live.clear();
 		// The old run's own records would bootstrap an inline init from its media.
 		self.spans.clear();
-		let mut run = self.run.lock().expect("run lock poisoned");
+		let mut run = self.run_mut();
 		*run = Run {
 			generation,
 			init: None,
@@ -514,7 +514,24 @@ impl Rendition {
 	}
 
 	fn run(&self) -> Run {
-		self.run.lock().expect("run lock poisoned").clone()
+		self.run.read().clone()
+	}
+
+	fn run_mut(&self) -> kio::Mut<'_, Run> {
+		self.run
+			.write()
+			.unwrap_or_else(|_| unreachable!("the run is never closed"))
+	}
+
+	/// Poll until the current run's init is built.
+	pub(crate) fn poll_init(&self, waiter: &kio::Waiter) -> Poll<()> {
+		match self.run.poll_ref(waiter, |run| match run.init {
+			Some(_) => Poll::Ready(()),
+			None => Poll::Pending,
+		}) {
+			Poll::Ready(_) => Poll::Ready(()),
+			Poll::Pending => Poll::Pending,
+		}
 	}
 
 	/// The generation every segment URL currently carries.
@@ -811,7 +828,7 @@ impl Rendition {
 	/// Record a start listed in window `resets`. Resets only grow, so a delayed latch for an
 	/// older window never replaces a newer one.
 	fn latch(&self, resets: u64) {
-		let mut run = self.run.lock().expect("run lock poisoned");
+		let mut run = self.run_mut();
 		run.startable = run.startable.max(Some(resets));
 	}
 
@@ -998,7 +1015,7 @@ impl Rendition {
 	/// Cache `bytes` as the init of the run numbered `epoch`, unless a restart has since
 	/// replaced that run.
 	fn cache_init(&self, epoch: u64, bytes: Bytes) -> Arc<Init> {
-		let mut run = self.run.lock().expect("run lock poisoned");
+		let mut run = self.run_mut();
 		if run.epoch != epoch {
 			return Arc::new(Init::new(bytes));
 		}
