@@ -556,6 +556,11 @@ func TestFetchGroupAndServeDynamicMiss(t *testing.T) {
 		t.Fatalf("cached fetch: frame=%+v err=%v", frame, err)
 	}
 
+	negative := -time.Millisecond
+	if _, err := consumer.FetchGroup(ctx, "events", 0, &moq.FetchGroupOptions{MaxDelay: &negative}); err == nil {
+		t.Fatal("a negative fetch max delay was accepted, want an error")
+	}
+
 	dynamic, err := track.Dynamic()
 	if err != nil {
 		t.Fatal(err)

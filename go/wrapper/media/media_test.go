@@ -1,8 +1,10 @@
 package media_test
 
 import (
+	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"moq.dev/moq"
 	"moq.dev/moq/media"
@@ -39,6 +41,15 @@ func TestRequestedTargetRequiresRequest(t *testing.T) {
 		if _, err := media.NewAudioTrackProducer(nil, target, media.AudioInit{}); err == nil {
 			t.Fatal("invalid target succeeded")
 		}
+	}
+}
+
+// The generated converter panics on a negative duration, so it is refused first.
+func TestFetchGroupRefusesNegativeMaxDelay(t *testing.T) {
+	negative := -time.Millisecond
+	config := media.GroupConfig{Options: &moq.FetchGroupOptions{MaxDelay: &negative}}
+	if _, err := media.FetchGroup(context.Background(), nil, config); err == nil {
+		t.Fatal("a negative fetch max delay was accepted, want an error")
 	}
 }
 

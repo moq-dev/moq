@@ -254,6 +254,11 @@ type GroupConfig struct {
 
 // FetchGroup fetches and decodes exactly one group of a catalog rendition, following its broadcast and track.
 func FetchGroup(ctx context.Context, broadcast *moq.BroadcastConsumer, config GroupConfig) (*GroupConsumer, error) {
+	if config.Options != nil {
+		if err := bridge.NonNegative(config.Options.MaxDelay, "max delay"); err != nil {
+			return nil, err
+		}
+	}
 	inner, err := ffi.MoqMediaGroupConsumerFetch(ctx, bridge.BroadcastConsumer(broadcast), ffi.MoqMediaGroupConfig{Rendition: config.Rendition, Sequence: config.Sequence, Options: config.Options})
 	if err != nil {
 		return nil, err

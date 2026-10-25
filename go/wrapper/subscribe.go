@@ -39,6 +39,11 @@ func (b *BroadcastConsumer) FetchGroup(
 	sequence uint64,
 	options *FetchGroupOptions,
 ) (*GroupConsumer, error) {
+	if options != nil {
+		if err := bridge.NonNegative(options.MaxDelay, "max delay"); err != nil {
+			return nil, err
+		}
+	}
 	inner, err := b.inner.FetchGroup(ctx, name, sequence, options)
 	if err != nil {
 		return nil, err
