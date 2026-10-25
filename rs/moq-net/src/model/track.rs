@@ -5931,14 +5931,16 @@ impl Cursor {
 
 	/// Forget the gaps in `delivered` below each group past this cursor's budget now,
 	/// whether this track holds it or not: one landing there would be written off. A group
-	/// skipped as stale is not forgotten, since a wider budget owes it again.
+	/// skipped as stale is not forgotten, since a wider budget owes it again, and neither is
+	/// one a widening still owes, which a newest-first re-offer has yet to judge.
 	///
 	/// One edge for every group judged, so forgetting N gaps never resolves it N times.
 	fn forget_past_budget(&self, delivered: &mut Delivered) {
 		if delivered.above_gap().is_none() {
 			return;
 		}
-		let skipped = self.skipped.lowest();
+		let owed = self.filter.owed.first().map(|run| *run.start());
+		let skipped = self.skipped.lowest().into_iter().chain(owed).min();
 		let max_delay = self.subscription.read().budget();
 		let state = self.state.read();
 		let budget = clamp_max_delay(max_delay, state.max_age_bound());
@@ -18655,6 +18657,33 @@ mod test {
 			.update(narrow.with_max_delay(Duration::from_secs(10)))
 			.unwrap();
 		assert_eq!(drain(&mut subscriber), vec![1]);
+	}
+
+	/// Handing out the newest group a widened range owes never folds the older ones it still
+	/// owes into the delivered floor before they are judged: a later budget widening gets the
+	/// ones judged stale.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_newest_first_range_reoffer_keeps_the_older_owed_groups() {
+		let mut producer = track_producer("test", Info::timed());
+		for millis in [0, 1000, 2000, 3000, 6000] {
+			append_at(&mut producer, millis);
+		}
+		let narrow = Subscription::default().with_max_delay(Duration::from_millis(1500));
+		let mut subscriber = producer.subscribe(narrow.clone());
+		subscriber.set_range(3..5);
+		assert_eq!(drain(&mut subscriber), vec![3, 4]);
+		for millis in [20_000, 40_000] {
+			append_at(&mut producer, millis);
+		}
+
+		subscriber.set_range(0..);
+		// Groups 0 through 2 reach 3s at most, far behind the 40s edge.
+		assert_eq!(drain(&mut subscriber), vec![6, 5]);
+		subscriber
+			.update(narrow.with_max_delay(Duration::from_secs(60)))
+			.unwrap();
+		assert_eq!(drain(&mut subscriber), vec![2, 1, 0]);
 	}
 
 	/// How many runs of skipped groups `subscriber` holds.
