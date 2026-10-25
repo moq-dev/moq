@@ -295,8 +295,11 @@ impl Driver {
 		let format = moq_mux::catalog::CatalogFormat::detect(path).unwrap_or_default();
 		let mut catalogs = moq_mux::catalog::Consumer::<()>::new(&broadcast, format).await?;
 
-		let mut video: Option<Rendition<hang::catalog::VideoConfig>> = None;
-		let mut audio: Option<Rendition<hang::catalog::AudioConfig>> = None;
+		// A rendition name always means the same decoder config, so only a new
+		// name restarts a decoder; a metadata-only update, such as a jitter
+		// estimate, leaves playback alone.
+		let mut video: Option<String> = None;
+		let mut audio: Option<String> = None;
 		let mut video_playing: Playing<'_> = Box::pin(std::future::pending());
 		let mut audio_playing: Playing<'_> = Box::pin(std::future::pending());
 
@@ -314,8 +317,8 @@ impl Driver {
 						.enabled()
 						.find(|(_, config)| config.broadcast.is_none())
 						.map(|(name, config)| (name.clone(), config.clone()));
-					if next != video {
-						video = next.clone();
+					if next.as_ref().map(|(name, _)| name) != video.as_ref() {
+						video = next.as_ref().map(|(name, _)| name.clone());
 						video_playing = match next {
 							Some((name, config)) => Box::pin(self.play_video(&broadcast, name, config)),
 							None => Box::pin(std::future::pending()),
@@ -326,8 +329,8 @@ impl Driver {
 						.enabled()
 						.find(|(_, config)| config.broadcast.is_none())
 						.map(|(name, config)| (name.clone(), config.clone()));
-					if next != audio {
-						audio = next.clone();
+					if next.as_ref().map(|(name, _)| name) != audio.as_ref() {
+						audio = next.as_ref().map(|(name, _)| name.clone());
 						audio_playing = match next {
 							Some((name, config)) => Box::pin(self.play_audio(&broadcast, name, config)),
 							None => Box::pin(std::future::pending()),
@@ -394,9 +397,6 @@ impl Driver {
 		Ok(())
 	}
 }
-
-/// A rendition a broadcast source is playing: its name and configuration.
-type Rendition<C> = (String, C);
 
 /// Start the feed for `source`, and the driver that fills it.
 fn open(name: &str, source: &Source, context: &Context) -> (Feed, Driver) {
