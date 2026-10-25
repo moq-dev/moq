@@ -29,8 +29,9 @@ for (const touched of ["watched", "unrelated"])
 			const origin = new Producer();
 			const path = Path.from("room/0");
 			const broadcasts = Array.from({ length: routes }, (_, i) => {
-				const broadcast = origin.createBroadcast(Path.from(`room/${i}`));
-				broadcast.announce();
+				const broadcastPublication = origin.createBroadcast(Path.from(`room/${i}`));
+				const broadcast = broadcastPublication.broadcast;
+				broadcastPublication.announce();
 				return broadcast;
 			});
 			const requests = Array.from({ length: followers }, () => origin.request(path, { announced: true }));
@@ -41,8 +42,9 @@ for (const touched of ["watched", "unrelated"])
 			for (let round = 0; round < 6; round++) {
 				const start = performance.now();
 				for (let i = 0; i < 128; i++) {
-					const next = origin.createBroadcast(touched === "watched" ? path : Path.from("other"));
-					next.announce();
+					const nextPublication = origin.createBroadcast(touched === "watched" ? path : Path.from("other"));
+					const next = nextPublication.broadcast;
+					nextPublication.announce();
 					if (touched === "watched") {
 						current.close();
 						current = next;
@@ -279,8 +281,9 @@ for (const [version, alpn] of [
 			const sources = [];
 			for (const prefix of ["a", "b"])
 				for (let i = 0; i < namespaces; i++) {
-					const source = origin.createBroadcast(Path.from(`${prefix}/${i}`));
-					source.announce();
+					const sourcePublication = origin.createBroadcast(Path.from(`${prefix}/${i}`));
+					const source = sourcePublication.broadcast;
+					sourcePublication.announce();
 					sources.push(source);
 				}
 			const peers = await Promise.all(

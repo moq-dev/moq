@@ -1,39 +1,33 @@
-# [M] JS origin publications
+# [S] Validate JS origin publications
 
 ## Goal
 
-A `@moq/net` `broadcast.Producer` fills tracks; it cannot announce. Creating a
-broadcast on an origin and publishing a `Prepared` answer return a
-`Publication` that carries `announce`, `unannounce`, and `route`, so a
-standalone broadcast and `prepared.broadcast` no longer expose announcement
-calls that can only throw. Mirrors Rust's `origin::Publication`.
+The JS publication split in [moq-dev/moq#6795](https://github.com/moq-dev/moq/pull/6795)
+passes the full local gate and is ready for review. An origin returns a
+`Publication` with announcement control and a readonly fill `broadcast`;
+standalone and prepared fill producers cannot announce.
 
 ## Plan
 
-Decided 2026-10-23 (maintainer, on
-[moq-dev/moq#6464](https://github.com/moq-dev/moq/pull/6464)): ✅ land the
-announcement split in three PRs: native Rust in that PR, this `@moq/net`
-mirror, and the [binding publications](/quest/m1/api-audit/binding-publication.md).
-This one does not depend on the native PR and can start now.
+Implementation and consumer migration are complete in that PR. The approved
+shape and lifetime mirror Rust's `origin::Publication`: releasing a publication
+reference does not retract its broadcast, and `unannounce` retracts sooner.
 
-The shape is Rust's, approved on the same PR: an origin-owned record holding
-the fill broadcast and its announcement capability.
+Remaining work is validation. Re-run `just ci` after the host load gate admits
+its jobs, then remove this quest and its links and mark the PR ready. The first
+attempt remained at admission for the benchmark Rust check and was stopped;
+no gate result is claimed. The shared test typecheck also needs the generated
+`@moq/wasm` declarations, absent from a fresh checkout until its WASM build.
 
-- `Producer.createBroadcast` (`js/net/src/origin.ts`) and `Prepared.publish`
-  return `Publication`. It exposes the fill producer as `broadcast`, plus
-  `announce(route)`, `unannounce()`, and `route`. No way to swap in another
-  producer, and no `finish`: a broadcast has no finished state.
-- `broadcast.Producer` loses its public `announce`, `unannounce`, and `route`
-  (`js/net/src/broadcast.ts`); the announcer stays a module hook.
-- Lifetime matches Rust: publication clones (or references) and fill handles
-  keep the existing broadcast lifetime; dropping a `Publication` does not
-  retract on its own. `unannounce` retracts sooner.
-- Migrate every caller: `js/net` tests, benches, and examples, `js/publish`,
-  `js/moq-boy`, the `js/e2ee` docs, `js/watch` and `js/hang` tests, and
-  `demo/carla`. Add the `js/net/MIGRATE.md` entry and update
-  `doc/lib/js/net.md`.
+Completed checks: 2,832 net unit tests, 123 focused publisher/watcher/E2EE
+tests, package and independent JS harness typechecks, net declaration build
+and API report, Markdown, and workflow checks. Stale publication tests cover a
+held fill handle and a replacement under a new epoch.
 
-Test: clone/drop, explicit unannounce, Prepared admission,
-and a stale publication against a replacement under a new epoch.
+Public API: breaking in `@moq/net`; retain the returned publication for
+`announce`, `unannounce`, and `route`, and use its `broadcast` to fill tracks.
+Wire: none.
 
-Public API: breaking in `@moq/net`. Wire: none.
+## Related
+
+- [Binding publications](/quest/m1/api-audit/binding-publication.md) - mirrors the native split across the bindings

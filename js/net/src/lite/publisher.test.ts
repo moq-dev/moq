@@ -32,8 +32,9 @@ import { Track as TrackMessage } from "./track.ts";
 import { ALPN_05, ALPN_06, ALPN_07_WIP, Version } from "./version.ts";
 
 function publish(origin: OriginProducer, path: Path.Valid) {
-	const broadcast = origin.createBroadcast(path);
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(path);
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	return broadcast;
 }
 
@@ -105,8 +106,9 @@ test.each([
 	const pair = createMockTransportPair(ALPN_05);
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
-	const broadcast = origin.createBroadcast(Path.from("cam"));
-	broadcast.announce({ cost: 7n });
+	const broadcastPublication = origin.createBroadcast(Path.from("cam"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce({ cost: 7n });
 
 	const written: Uint8Array[] = [];
 	const stream = new Stream({
@@ -124,7 +126,7 @@ test.each([
 	const initial = written.length;
 	expect(initial).toBeGreaterThan(0);
 
-	broadcast.announce({ cost: 9n });
+	broadcastPublication.announce({ cost: 9n });
 	await settle();
 	expect(written.length > initial).toBe(sent);
 
@@ -2404,8 +2406,9 @@ test("lite draft-06: announces wait for the setup grant", async () => {
 		answered = resolve;
 	});
 	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomHop(), origin.consume(), { grant, ready });
-	const broadcast = origin.createBroadcast(Path.from("foo/bar"));
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(Path.from("foo/bar"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 
 	const written: Uint8Array[] = [];
 	const stream = new Stream({

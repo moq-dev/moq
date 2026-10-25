@@ -25,16 +25,17 @@ const connection = await Moq.Connection.connect({
     consume: origin,
 });
 
-const broadcast = origin.createBroadcast(Moq.Path.from("chat.room"));
+const publication = origin.createBroadcast(Moq.Path.from("chat.room"));
+const broadcast = publication.broadcast;
 const track = broadcast.createTrack("messages", { timescale: Moq.Time.Timescale.MILLI });
 const group = track.appendGroup();
 group.writeFrame({ payload: new TextEncoder().encode("hello"), timestamp: Moq.Time.Timestamp.now() });
 group.close();
-broadcast.announce();
+publication.announce();
 ```
 
-- **The origin holds the broadcasts, not the connection.** Closing a session unannounces them and leaves them created for the next one. A broadcast is invisible, locally and remotely, until `announce()`.
-- **Answer claimed paths with `using`.** `dynamic(prefix)` claims a prefix and yields each requested path. Use `using prepared = request.prepare(epoch)`, fill its broadcast, then `prepared.publish()` to answer with a new publisher instance. Leaving the scope without publishing, including on a throw, refuses the request as unroutable. Explicit `prepared.close()` or closing its unpublished broadcast does the same; disposal after publishing leaves the returned producer live. Reject before preparing with `request.reject(err)`. A retained, unclosed prepared answer keeps the request pending; JavaScript garbage collection provides no prompt cleanup guarantee.
+- **The origin holds the broadcasts, not the connection.** Closing a session unannounces them and leaves them created for the next one. A publication controls announcements; its `broadcast` fills tracks. The broadcast is invisible, locally and remotely, until the publication calls `announce()`.
+- **Answer claimed paths with `using`.** `dynamic(prefix)` claims a prefix and yields each requested path. Use `using prepared = request.prepare(epoch)`, fill its broadcast, then `prepared.publish()` to answer with a new publisher instance. Leaving the scope without publishing, including on a throw, refuses the request as unroutable. Explicit `prepared.close()` or closing its unpublished broadcast does the same; disposal after publishing leaves the returned publication and its fill broadcast live. Reject before preparing with `request.reject(err)`. A retained, unclosed prepared answer keeps the request pending; JavaScript garbage collection provides no prompt cleanup guarantee.
 - **End content by closing tracks.** A broadcast has no finished state. When the input ends, close each track cleanly; the broadcast stays announced and keeps serving them until you `close()` it. How long to keep it up for late readers is yours to decide.
 - **Requests can pin an epoch.** `consumer.request(path, { epoch })` resolves only through a route announcing that [publisher epoch](/concept/moq-lite#publisher-epochs). The resolved broadcast's `epoch` names the route it came through, pinned or not.
 - **Follow restarts.** `origin.request(path, { announced: true })` follows whichever publisher instance serves the path: its `active` changes to a fresh broadcast on a restart, clears on an end, and resolves again on the next start, so read it reactively and close the request when done. Instances are never stitched, so subscribe again to each new broadcast. Another route of the same epoch taking over (epochs travel only on `moq-lite-07-wip`) keeps `active` as is, and each track subscription resumes there from the first group it lacks. A refusal ends the request. Add `epoch` to pin one instance; a plain `request(path)` keeps its accepted instance, can resolve blindly, and ends once that instance stops serving. To list what is live, iterate `announced(scope)`.

@@ -7,8 +7,9 @@ import * as Path from "./path.ts";
 import { wireOf } from "./wire.ts";
 
 function publish(origin: OriginProducer, path: Path.Valid): BroadcastProducer {
-	const broadcast = origin.createBroadcast(path);
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(path);
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	return broadcast;
 }
 
