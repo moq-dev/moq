@@ -52,6 +52,7 @@ impl MtuDiscovery {
 		}
 	}
 
+	#[cfg(test)]
 	pub(super) fn reset(&mut self, current_mtu: u16, min_mtu: u16) {
 		self.current_mtu = current_mtu;
 		if let Some(state) = self.state.take() {

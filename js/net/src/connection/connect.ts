@@ -15,7 +15,6 @@ import { redact } from "../util/log.ts";
 import { after } from "../util/timer.ts";
 import { isWebTransportSupported } from "./browser.ts";
 import type { Established } from "./established.ts";
-import type { Extensions as ExtensionsType } from "./extensions.ts";
 import * as Extensions from "./extensions.ts";
 import { DISCOVERY_REMOVED, forwardAnnounced } from "./forward.ts";
 import { exchangeSetup, legacyPeerImplementation } from "./handshake.ts";
@@ -216,8 +215,12 @@ export interface ConnectProps {
 	 */
 	consume?: OriginProducer;
 
-	/** The moq-transport extensions to offer, each on unless set to `false`. */
-	extensions?: ExtensionsType;
+	/**
+	 * The moq-transport extensions to offer, each on unless set to `false`.
+	 *
+	 * @internal Tests only; nothing outside the package consumes it.
+	 */
+	extensions?: Extensions.Extensions;
 
 	/**
 	 * Build the session on `auth`, so it presents every token the handle holds and a route

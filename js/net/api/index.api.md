@@ -21,7 +21,6 @@ function accept(input: AcceptProps): Promise<Established>;
 
 interface AcceptProps {
     consume?: Producer_4;
-    extensions?: Extensions;
     implementation?: string;
     publish?: Consumer_5;
     transport: WebTransport;
@@ -164,7 +163,6 @@ interface ConnectionProps {
 interface ConnectProps {
     auth?: Auth.Handle;
     consume?: Producer_4;
-    extensions?: Extensions;
     implementation?: string;
     publish?: Consumer_5;
     signal?: AbortSignal;
@@ -262,13 +260,6 @@ class Demand {
     get wanted(): Getter<number | undefined>;
 }
 
-class Demand_2 {
-    get closed(): GetPromise<Error | null>;
-    readonly sequence: number;
-    unused(): Promise<void>;
-    get used(): Getter<boolean>;
-}
-
 class Duplicate extends Error {
     constructor(message?: string);
 }
@@ -296,7 +287,6 @@ declare namespace Epoch {
     export {
         parse,
         mint,
-        time,
         Valid_2 as Valid
     }
 }
@@ -381,7 +371,6 @@ declare namespace Group {
         Frame,
         ReadOptions,
         Info_2 as Info,
-        Demand_2 as Demand,
         Producer_2 as Producer,
         Consumer_2 as Consumer
     }
@@ -588,7 +577,6 @@ class Producer_2 {
     close(abort?: Error): void;
     get closed(): GetPromise<Error | null>;
     consume(): Consumer_2;
-    demand(): Demand_2;
     get isClosed(): boolean;
     readonly sequence: number;
     writeFrame(frame: Frame): void;
@@ -753,8 +741,6 @@ export { Signals }
 
 function size(v: number): number;
 
-function sizeLeadingOnes(v: number | bigint): number;
-
 class Staged {
     [Symbol.dispose](): void;
     commit(): Producer;
@@ -850,8 +836,6 @@ declare namespace Time {
     }
 }
 export { Time }
-
-function time(epoch: Valid_2): Date;
 
 export interface Timed<T> {
     at?: Timestamp;
@@ -955,7 +939,6 @@ type Valid_2 = string & {
 
 declare namespace Varint {
     export {
-        sizeLeadingOnes,
         encodeLeadingOnesTo,
         encodeLeadingOnes,
         decodeLeadingOnes,

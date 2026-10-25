@@ -6,21 +6,16 @@ use std::{
 
 use bytes::{Buf, Bytes, BytesMut};
 
-use crate::range_set::RangeSet;
-
 /// Helper to assemble unordered stream frames into an ordered stream
 #[derive(Debug, Default)]
 pub(super) struct Assembler {
-	state: State,
 	/// Buffered chunks, in `Buffer::cmp` order
 	data: VecDeque<Buffer>,
-	/// Total number of buffered bytes, including duplicates in ordered mode.
+	/// Total number of buffered bytes, including duplicates.
 	buffered: usize,
 	/// Estimated number of allocated bytes, will never be less than `buffered`.
 	allocated: usize,
-	/// Number of bytes read by the application. When only ordered reads have been used, this is the
-	/// length of the contiguous prefix of the stream which has been consumed by the application,
-	/// aka the stream offset.
+	/// The stream offset immediately after the bytes consumed by the application.
 	bytes_read: u64,
 	end: u64,
 }
@@ -38,40 +33,22 @@ impl Assembler {
 		self.data.clear();
 	}
 
-	pub(super) fn ensure_ordering(&mut self, ordered: bool) -> Result<(), IllegalOrderedRead> {
-		if ordered && !self.state.is_ordered() {
-			return Err(IllegalOrderedRead);
-		} else if !ordered && self.state.is_ordered() {
-			// Enter unordered mode
-			if !self.data.is_empty() {
-				self.defragment(self.bytes_read);
-			}
-			let mut recvd = RangeSet::new();
-			recvd.insert(0..self.bytes_read);
-			for chunk in &self.data {
-				recvd.insert(chunk.offset..chunk.end());
-			}
-			self.state = State::Unordered { recvd };
-		}
-		Ok(())
-	}
-
 	/// Get the the next chunk
-	pub(super) fn read(&mut self, max_length: usize, ordered: bool) -> Option<Chunk> {
-		while ordered && self.data.front()?.end() <= self.bytes_read {
+	pub(super) fn read(&mut self, max_length: usize) -> Option<Chunk> {
+		while self.data.front()?.end() <= self.bytes_read {
 			// Next buffer ends before the current read index
 			let front = self.data.pop_front().unwrap();
 			self.buffered -= front.bytes.len();
 			self.allocated -= front.allocation_size;
 		}
 
-		if ordered && self.data.front()?.offset > self.bytes_read {
+		if self.data.front()?.offset > self.bytes_read {
 			// Next buffer starts after the current read index
 			return None;
 		}
 
 		let mut front = self.data.pop_front()?;
-		if ordered && let Some(skip) = self.bytes_read.checked_sub(front.offset) {
+		if let Some(skip) = self.bytes_read.checked_sub(front.offset) {
 			// Advance front to the slice of useful data
 			front.bytes.advance(skip as usize);
 			front.offset = self.bytes_read;
@@ -80,7 +57,7 @@ impl Assembler {
 
 		let chunk = if max_length < front.bytes.len() {
 			// Take a prefix of the front buffer and reinsert the remainder
-			let chunk = Chunk::new(front.offset, front.bytes.split_to(max_length));
+			let chunk = Chunk::new(front.bytes.split_to(max_length));
 			front.offset += max_length as u64;
 			let idx = self.data.iter().take_while(|other| **other < front).count();
 			self.data.insert(idx, front);
@@ -88,7 +65,7 @@ impl Assembler {
 		} else {
 			// Take the entirety of the front buffer
 			self.allocated -= front.allocation_size;
-			Chunk::new(front.offset, front.bytes)
+			Chunk::new(front.bytes)
 		};
 
 		self.bytes_read += chunk.bytes.len() as u64;
@@ -167,24 +144,7 @@ impl Assembler {
 			bytes.len()
 		);
 		self.end = self.end.max(offset + bytes.len() as u64);
-		if let State::Unordered { recvd } = &mut self.state {
-			// Discard duplicate data
-			for duplicate in recvd.replace(offset..offset + bytes.len() as u64) {
-				if duplicate.start > offset {
-					let buffer = Buffer::new(
-						offset,
-						bytes.split_to((duplicate.start - offset) as usize),
-						allocation_size,
-					);
-					self.buffered += buffer.bytes.len();
-					self.allocated += buffer.allocation_size;
-					insert_ordered(&mut self.data, buffer);
-					offset = duplicate.start;
-				}
-				bytes.advance((duplicate.end - offset) as usize);
-				offset = duplicate.end;
-			}
-		} else if offset < self.bytes_read {
+		if offset < self.bytes_read {
 			if (offset + bytes.len() as u64) <= self.bytes_read {
 				return Ok(());
 			} else {
@@ -194,7 +154,6 @@ impl Assembler {
 			}
 		}
 
-		// No early return when empty: the dedup loop above may already have pushed chunks.
 		if !bytes.is_empty() {
 			let buffer = Buffer::new(offset, bytes, allocation_size);
 			self.buffered += buffer.bytes.len();
@@ -234,14 +193,7 @@ impl Assembler {
 
 	/// Number of bytes before `end` the application has yet to read, received or not
 	pub(super) fn unread_before(&self, end: u64) -> u64 {
-		let State::Unordered { recvd } = &self.state else {
-			return end.saturating_sub(self.bytes_read);
-		};
-		// Unordered reads leave holes, so count what was received and not yet handed out
-		let clip = |range: std::ops::Range<u64>| range.end.min(end).saturating_sub(range.start);
-		let received: u64 = recvd.iter().map(clip).sum();
-		let buffered: u64 = self.data.iter().map(|buffer| clip(buffer.offset..buffer.end())).sum();
-		end - received + buffered
+		end.saturating_sub(self.bytes_read)
 	}
 
 	/// Discard buffered data at or past `end`
@@ -273,15 +225,13 @@ impl Assembler {
 /// A chunk of data from the receive stream
 #[derive(Debug, PartialEq, Eq)]
 pub struct Chunk {
-	/// The offset in the stream
-	pub offset: u64,
 	/// The contents of the chunk
 	pub bytes: Bytes,
 }
 
 impl Chunk {
-	fn new(offset: u64, bytes: Bytes) -> Self {
-		Self { offset, bytes }
+	fn new(bytes: Bytes) -> Self {
+		Self { bytes }
 	}
 }
 
@@ -366,27 +316,6 @@ impl PartialEq for Buffer {
 	}
 }
 
-#[derive(Debug, Default)]
-enum State {
-	#[default]
-	Ordered,
-	Unordered {
-		/// The set of offsets that have been received from the peer, including portions not yet
-		/// read by the application.
-		recvd: RangeSet,
-	},
-}
-
-impl State {
-	fn is_ordered(&self) -> bool {
-		matches!(self, Self::Ordered)
-	}
-}
-
-/// Error indicating that an ordered read was performed on a stream after an unordered read
-#[derive(Debug)]
-pub(crate) struct IllegalOrderedRead;
-
 /// Error indicating that too many chunks are buffered due to maliciously small/gapped frames
 #[derive(Debug)]
 pub(crate) struct TooManyChunks;
@@ -448,34 +377,6 @@ mod test {
 		assert_matches!(next(&mut x, 32), Some(y) if &y[..] == b"789");
 		assert_matches!(next(&mut x, 32), Some(y) if &y[..] == b"10");
 		assert_matches!(next(&mut x, 32), None);
-	}
-
-	#[test]
-	fn assemble_unordered() {
-		let mut x = Assembler::new();
-		x.ensure_ordering(false).unwrap();
-		x.insert(3, Bytes::from_static(b"456"), 3).unwrap();
-		assert_matches!(next(&mut x, 32), None);
-		x.insert(0, Bytes::from_static(b"123"), 3).unwrap();
-		assert_matches!(next(&mut x, 32), Some(y) if &y[..] == b"123");
-		assert_matches!(next(&mut x, 32), Some(y) if &y[..] == b"456");
-		assert_matches!(next(&mut x, 32), None);
-	}
-
-	#[test]
-	fn unordered_after_ordered_read_drops_a_stale_duplicate() {
-		let mut x = Assembler::new();
-		// The same range arrives twice (a spurious retransmission) before
-		// the application reads it.
-		x.insert(0, Bytes::from_static(b"abc"), 3).unwrap();
-		x.insert(0, Bytes::from_static(b"abc"), 3).unwrap();
-		// An ordered read consumes one copy.
-		assert_matches!(next(&mut x, 3), Some(y) if &y[..] == b"abc");
-		assert_eq!(x.bytes_read(), 3);
-		// Switching to unordered must not hand the stale copy back.
-		x.ensure_ordering(false).unwrap();
-		assert_eq!(x.read(usize::MAX, false), None);
-		assert_eq!(x.bytes_read(), 3);
 	}
 
 	#[test]
@@ -595,8 +496,9 @@ mod test {
 		x.insert(9, Bytes::from_static(b"jkl"), 4).unwrap();
 		x.insert(12, Bytes::from_static(b"mno"), 4).unwrap();
 		x.defragment(0);
-		assert_eq!(next_unordered(&mut x), Chunk::new(0, Bytes::from_static(b"abcdef")));
-		assert_eq!(next_unordered(&mut x), Chunk::new(9, Bytes::from_static(b"jklmno")));
+		assert_eq!(x.data.len(), 2);
+		assert_eq!(x.data[0].bytes, Bytes::from_static(b"abcdef"));
+		assert_eq!(x.data[1].bytes, Bytes::from_static(b"jklmno"));
 	}
 
 	#[test]
@@ -604,7 +506,10 @@ mod test {
 		let mut x = Assembler::new();
 		x.insert(3, Bytes::from_static(b"def"), 3).unwrap();
 		x.defragment(0);
-		assert_eq!(next_unordered(&mut x), Chunk::new(3, Bytes::from_static(b"def")));
+		assert_eq!(x.data.len(), 1);
+		assert_eq!(x.data[0].offset, 3);
+		assert_eq!(x.data[0].bytes, Bytes::from_static(b"def"));
+		assert!(x.read(usize::MAX).is_none());
 	}
 
 	#[test]
@@ -615,83 +520,35 @@ mod test {
 		x.insert(7, Bytes::from_static(b"hij"), 4).unwrap();
 		x.insert(11, Bytes::from_static(b"lmn"), 4).unwrap();
 		x.defragment(0);
-		assert_matches!(x.read(usize::MAX, true), Some(y) if &y.bytes[..] == b"abcdef");
+		assert_matches!(x.read(usize::MAX), Some(y) if &y.bytes[..] == b"abcdef");
 		x.insert(5, Bytes::from_static(b"fghijklmn"), 9).unwrap();
-		assert_matches!(x.read(usize::MAX, true), Some(y) if &y.bytes[..] == b"ghijklmn");
+		assert_matches!(x.read(usize::MAX), Some(y) if &y.bytes[..] == b"ghijklmn");
 		x.insert(13, Bytes::from_static(b"nopq"), 4).unwrap();
-		assert_matches!(x.read(usize::MAX, true), Some(y) if &y.bytes[..] == b"opq");
+		assert_matches!(x.read(usize::MAX), Some(y) if &y.bytes[..] == b"opq");
 		x.insert(15, Bytes::from_static(b"pqrs"), 4).unwrap();
-		assert_matches!(x.read(usize::MAX, true), Some(y) if &y.bytes[..] == b"rs");
-		assert_matches!(x.read(usize::MAX, true), None);
-	}
-
-	#[test]
-	fn unordered_happy_path() {
-		let mut x = Assembler::new();
-		x.ensure_ordering(false).unwrap();
-		x.insert(0, Bytes::from_static(b"abc"), 3).unwrap();
-		assert_eq!(next_unordered(&mut x), Chunk::new(0, Bytes::from_static(b"abc")));
-		assert_eq!(x.read(usize::MAX, false), None);
-		x.insert(3, Bytes::from_static(b"def"), 3).unwrap();
-		assert_eq!(next_unordered(&mut x), Chunk::new(3, Bytes::from_static(b"def")));
-		assert_eq!(x.read(usize::MAX, false), None);
-	}
-
-	#[test]
-	fn unordered_dedup() {
-		let mut x = Assembler::new();
-		x.ensure_ordering(false).unwrap();
-		x.insert(3, Bytes::from_static(b"def"), 3).unwrap();
-		assert_eq!(next_unordered(&mut x), Chunk::new(3, Bytes::from_static(b"def")));
-		assert_eq!(x.read(usize::MAX, false), None);
-		x.insert(0, Bytes::from_static(b"a"), 1).unwrap();
-		x.insert(0, Bytes::from_static(b"abcdefghi"), 9).unwrap();
-		x.insert(0, Bytes::from_static(b"abcd"), 4).unwrap();
-		assert_eq!(next_unordered(&mut x), Chunk::new(0, Bytes::from_static(b"a")));
-		assert_eq!(next_unordered(&mut x), Chunk::new(1, Bytes::from_static(b"bc")));
-		assert_eq!(next_unordered(&mut x), Chunk::new(6, Bytes::from_static(b"ghi")));
-		assert_eq!(x.read(usize::MAX, false), None);
-		x.insert(8, Bytes::from_static(b"ijkl"), 4).unwrap();
-		assert_eq!(next_unordered(&mut x), Chunk::new(9, Bytes::from_static(b"jkl")));
-		assert_eq!(x.read(usize::MAX, false), None);
-		x.insert(12, Bytes::from_static(b"mno"), 3).unwrap();
-		assert_eq!(next_unordered(&mut x), Chunk::new(12, Bytes::from_static(b"mno")));
-		assert_eq!(x.read(usize::MAX, false), None);
-		x.insert(2, Bytes::from_static(b"cde"), 3).unwrap();
-		assert_eq!(x.read(usize::MAX, false), None);
+		assert_matches!(x.read(usize::MAX), Some(y) if &y.bytes[..] == b"rs");
+		assert_matches!(x.read(usize::MAX), None);
 	}
 
 	#[test]
 	fn chunks_dedup() {
 		let mut x = Assembler::new();
 		x.insert(3, Bytes::from_static(b"def"), 3).unwrap();
-		assert_eq!(x.read(usize::MAX, true), None);
+		assert_eq!(x.read(usize::MAX), None);
 		x.insert(0, Bytes::from_static(b"a"), 1).unwrap();
 		x.insert(1, Bytes::from_static(b"bcdefghi"), 9).unwrap();
 		x.insert(0, Bytes::from_static(b"abcd"), 4).unwrap();
-		assert_eq!(
-			x.read(usize::MAX, true),
-			Some(Chunk::new(0, Bytes::from_static(b"abcd")))
-		);
-		assert_eq!(
-			x.read(usize::MAX, true),
-			Some(Chunk::new(4, Bytes::from_static(b"efghi")))
-		);
-		assert_eq!(x.read(usize::MAX, true), None);
+		assert_eq!(x.read(usize::MAX), Some(Chunk::new(Bytes::from_static(b"abcd"))));
+		assert_eq!(x.read(usize::MAX), Some(Chunk::new(Bytes::from_static(b"efghi"))));
+		assert_eq!(x.read(usize::MAX), None);
 		x.insert(8, Bytes::from_static(b"ijkl"), 4).unwrap();
-		assert_eq!(
-			x.read(usize::MAX, true),
-			Some(Chunk::new(9, Bytes::from_static(b"jkl")))
-		);
-		assert_eq!(x.read(usize::MAX, true), None);
+		assert_eq!(x.read(usize::MAX), Some(Chunk::new(Bytes::from_static(b"jkl"))));
+		assert_eq!(x.read(usize::MAX), None);
 		x.insert(12, Bytes::from_static(b"mno"), 3).unwrap();
-		assert_eq!(
-			x.read(usize::MAX, true),
-			Some(Chunk::new(12, Bytes::from_static(b"mno")))
-		);
-		assert_eq!(x.read(usize::MAX, true), None);
+		assert_eq!(x.read(usize::MAX), Some(Chunk::new(Bytes::from_static(b"mno"))));
+		assert_eq!(x.read(usize::MAX), None);
 		x.insert(2, Bytes::from_static(b"cde"), 3).unwrap();
-		assert_eq!(x.read(usize::MAX, true), None);
+		assert_eq!(x.read(usize::MAX), None);
 	}
 
 	#[test]
@@ -699,24 +556,11 @@ mod test {
 		let mut x = Assembler::new();
 		x.insert(0, Bytes::from_static(b"abc"), 3).unwrap();
 		assert_eq!(x.data.len(), 1);
-		assert_eq!(
-			x.read(usize::MAX, true),
-			Some(Chunk::new(0, Bytes::from_static(b"abc")))
-		);
+		assert_eq!(x.read(usize::MAX), Some(Chunk::new(Bytes::from_static(b"abc"))));
 		x.insert(0, Bytes::from_static(b"ab"), 2).unwrap();
 		assert_eq!(x.data.len(), 0);
 		x.insert(2, Bytes::from_static(b"cd"), 2).unwrap();
 		assert_eq!(x.data.front(), Some(&Buffer::new(3, Bytes::from_static(b"d"), 2)));
-	}
-
-	#[test]
-	fn ordered_insert_unordered_read() {
-		let mut x = Assembler::new();
-		x.insert(0, Bytes::from_static(b"abc"), 3).unwrap();
-		x.insert(0, Bytes::from_static(b"abc"), 3).unwrap();
-		x.ensure_ordering(false).unwrap();
-		assert_eq!(x.read(3, false), Some(Chunk::new(0, Bytes::from_static(b"abc"))));
-		assert_eq!(x.read(3, false), None);
 	}
 
 	#[test]
@@ -774,25 +618,6 @@ mod test {
 	}
 
 	#[test]
-	fn bounded_chunks_unordered_overlap_flood() {
-		// Overlapping frames whose tail is already received: the dedup loop pushes
-		// the fresh head byte and leaves `bytes` empty, and `end` never rises, so
-		// the flood costs the peer no flow control.
-		let mut x = Assembler::new();
-		x.ensure_ordering(false).unwrap();
-		let top = 1_000_000u64;
-		x.insert(top, Bytes::from_static(b"ab"), 2).unwrap();
-		for k in 0..(4 * MAX_CHUNKS as u64) {
-			x.insert(top - k - 1, Bytes::from_static(b"ab"), 2).unwrap();
-			assert!(
-				x.data.len() <= COMPACT_THRESHOLD + 1,
-				"chunk count {} exceeded the bound at k={k}",
-				x.data.len()
-			);
-		}
-	}
-
-	#[test]
 	fn bounded_chunks_duplicate_flood() {
 		// Duplicates against a stream already at the cap. Ordered mode does not dedup,
 		// so each one pushes a chunk; they must not be rejected, or compact every frame.
@@ -840,16 +665,11 @@ mod test {
 
 	#[test]
 	fn assemble_random() {
-		random_stream(true);
-	}
-
-	#[test]
-	fn assemble_random_unordered() {
-		random_stream(false);
+		random_stream();
 	}
 
 	/// Fragments arriving retransmitted and shuffled must still read back as the exact stream
-	fn random_stream(ordered: bool) {
+	fn random_stream() {
 		const LEN: usize = 2048;
 		let mut rng = new_rng();
 		let stream: Vec<u8> = (0..LEN).map(|_| rng.random()).collect();
@@ -876,9 +696,6 @@ mod test {
 			frags.shuffle(&mut rng);
 
 			let mut x = Assembler::new();
-			if !ordered {
-				x.ensure_ordering(false).unwrap();
-			}
 			let mut delivered = vec![false; LEN];
 			for (offset, size) in frags {
 				let bytes = Bytes::copy_from_slice(&stream[offset as usize..offset as usize + size]);
@@ -886,19 +703,20 @@ mod test {
 				assert_sorted(&x);
 				if rng.random_ratio(1, 3) {
 					let max = rng.random_range(1..=64);
-					drain(&mut x, max, ordered, &stream, &mut delivered);
+					drain(&mut x, max, &stream, &mut delivered);
 				}
 			}
-			drain(&mut x, usize::MAX, ordered, &stream, &mut delivered);
+			drain(&mut x, usize::MAX, &stream, &mut delivered);
 			assert!(delivered.iter().all(|d| *d), "stream did not fully assemble");
 		}
 	}
 
 	/// Read `x` dry, checking chunks against `stream` and that no byte arrives twice
 	#[track_caller]
-	fn drain(x: &mut Assembler, max: usize, ordered: bool, stream: &[u8], delivered: &mut [bool]) {
-		while let Some(chunk) = x.read(max, ordered) {
-			let start = chunk.offset as usize;
+	fn drain(x: &mut Assembler, max: usize, stream: &[u8], delivered: &mut [bool]) {
+		loop {
+			let start = x.bytes_read() as usize;
+			let Some(chunk) = x.read(max) else { break };
 			let end = start + chunk.bytes.len();
 			assert_eq!(&chunk.bytes[..], &stream[start..end]);
 			for d in &mut delivered[start..end] {
@@ -914,11 +732,11 @@ mod test {
 		let mut x = Assembler::new();
 		x.insert(0, Bytes::from_static(b"0123456789"), 10).unwrap();
 		x.insert(2, Bytes::from_static(b"23456789abcdef"), 14).unwrap();
-		let chunk = x.read(5, true).unwrap();
+		let chunk = x.read(5).unwrap();
 		assert_eq!(&chunk.bytes[..], b"01234");
 		assert_sorted(&x);
 		let mut got = chunk.bytes.to_vec();
-		while let Some(chunk) = x.read(usize::MAX, true) {
+		while let Some(chunk) = x.read(usize::MAX) {
 			got.extend_from_slice(&chunk.bytes);
 		}
 		assert_eq!(&got[..], b"0123456789abcdef");
@@ -933,7 +751,7 @@ mod test {
 		x.defragment(0);
 		assert_sorted(&x);
 		let mut got = Vec::new();
-		while let Some(chunk) = x.read(usize::MAX, true) {
+		while let Some(chunk) = x.read(usize::MAX) {
 			got.extend_from_slice(&chunk.bytes);
 		}
 		assert_eq!(&got[..], b"abcdefghij");
@@ -956,26 +774,7 @@ mod test {
 		assert_eq!(x.unread_before(9), 4);
 	}
 
-	#[test]
-	fn truncate_unordered() {
-		let mut x = Assembler::new();
-		x.ensure_ordering(false).unwrap();
-		x.insert(4, Bytes::from_static(b"efgh"), 4).unwrap();
-		x.insert(0, Bytes::from_static(b"a"), 1).unwrap();
-		assert_eq!(next_unordered(&mut x), Chunk::new(0, Bytes::from_static(b"a")));
-		// 1..4 was never received, and 4..6 is buffered
-		assert_eq!(x.unread_before(6), 5);
-		x.truncate(6);
-		assert_eq!(next_unordered(&mut x), Chunk::new(4, Bytes::from_static(b"ef")));
-		assert_eq!(x.unread_before(6), 3);
-		assert_eq!(x.read(usize::MAX, false), None);
-	}
-
-	fn next_unordered(x: &mut Assembler) -> Chunk {
-		x.read(usize::MAX, false).unwrap()
-	}
-
 	fn next(x: &mut Assembler, size: usize) -> Option<Bytes> {
-		x.read(size, true).map(|chunk| chunk.bytes)
+		x.read(size).map(|chunk| chunk.bytes)
 	}
 }

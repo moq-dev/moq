@@ -38,7 +38,7 @@ struct Inner {
 
 impl SendGroup {
 	pub(crate) fn new(conn: Arc<ConnectionInner>, priority: i64) -> Self {
-		let group = conn.state.lock("SendGroup::new").inner.send_groups().open(priority);
+		let group = conn.state.lock().inner.send_groups().open(priority);
 		Self(Arc::new(Inner {
 			conn,
 			group: Some(group),
@@ -47,13 +47,13 @@ impl SendGroup {
 
 	/// Change the group's priority, moving any data it has queued along with it
 	pub fn set_priority(&self, priority: i64) {
-		let mut conn = self.0.conn.state.lock("SendGroup::set_priority");
+		let mut conn = self.0.conn.state.lock();
 		conn.inner.send_groups().set_priority(self.id(), priority);
 	}
 
 	/// Get the group's priority
 	pub fn priority(&self) -> i64 {
-		let mut conn = self.0.conn.state.lock("SendGroup::priority");
+		let mut conn = self.0.conn.state.lock();
 		conn.inner.send_groups().priority(self.id())
 	}
 
@@ -81,7 +81,7 @@ impl SendGroup {
 impl Drop for Inner {
 	fn drop(&mut self) {
 		if let Some(group) = self.group.take() {
-			let mut conn = self.conn.state.lock("SendGroup::drop");
+			let mut conn = self.conn.state.lock();
 			conn.inner.send_groups().close(group);
 		}
 	}
