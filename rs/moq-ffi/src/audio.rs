@@ -339,13 +339,33 @@ impl TryFrom<MoqAudioFrame> for moq_audio::Frame {
 /// [`write`](Self::write) accepts an [`MoqAudioFrame`] whose `data`
 /// is PCM in the format declared by the [`MoqAudioEncoderInput`]
 /// passed at publish time.
+///
+/// Released before its finish, or still open when its broadcast closes, it ends its track with
+/// `Unroutable`, which readers take as the publisher leaving.
 #[derive(uniffi::Object)]
 pub struct MoqAudioProducer {
 	inner: std::sync::Mutex<Option<moq_audio::encode::Producer>>,
 	reservation: std::sync::Mutex<Option<Arc<MoqReservation>>>,
 	/// Held so the reservation's registry outlives extra bandwidth handles.
 	_bandwidth: Option<Arc<MoqBandwidth>>,
-	finished: crate::producer::Finished,
+	children: crate::producer::Children,
+}
+
+// Dropped or closed before its finish, the track ends the way a publisher leaving does.
+impl crate::producer::Child for MoqAudioProducer {
+	fn abort(&self, err: moq_net::Error) {
+		let _guard = crate::ffi::runtime().enter();
+		if let Some(producer) = self.inner.lock().unwrap().take() {
+			self.reservation.lock().unwrap().take();
+			producer.abort(err);
+		}
+	}
+}
+
+impl Drop for MoqAudioProducer {
+	fn drop(&mut self) {
+		crate::producer::Child::abort(self, moq_net::Error::Unroutable);
+	}
 }
 
 impl MoqAudioProducer {
@@ -400,7 +420,7 @@ impl MoqAudioProducer {
 		let mut producer = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
 		self.reservation.lock().unwrap().take();
 		producer.finish()?;
-		self.finished.keep(producer);
+		self.children.keep(producer);
 		Ok(())
 	}
 }
@@ -458,10 +478,10 @@ impl MoqAudioProducer {
 			options.bandwidth = bandwidth.allocator().clone();
 		}
 
-		let (producer, finished) = broadcast.with_state(|state| {
+		let (producer, children) = broadcast.with_state(|state| {
 			let producer =
 				moq_audio::encode::Producer::new(&mut state.broadcast, state.catalog.clone(), input, &options)?;
-			Ok((producer, state.finished.clone()))
+			Ok((producer, state.children.clone()))
 		})?;
 
 		// Producer::new does not reserve today (only capture does), so the
@@ -471,11 +491,11 @@ impl MoqAudioProducer {
 			.as_ref()
 			.map(|bandwidth| bandwidth.reserve_demand(&producer.demand(), producer.bitrate().as_bps()));
 
-		Ok(Arc::new(MoqAudioProducer {
+		children.adopt(Arc::new(MoqAudioProducer {
 			inner: std::sync::Mutex::new(Some(producer)),
 			reservation: std::sync::Mutex::new(reservation),
 			_bandwidth: bandwidth,
-			finished,
+			children: children.clone(),
 		}))
 	}
 }

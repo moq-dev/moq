@@ -12,7 +12,7 @@ use crate::consumer::{
 use crate::demand::MoqTrackDemand;
 use crate::error::MoqError;
 use crate::ffi::Task;
-use crate::producer::{MoqBroadcastProducer, MoqTrackRequest};
+use crate::producer::{Child, Children, MoqBroadcastProducer, MoqTrackRequest};
 
 /// A width and height in pixels.
 #[derive(Clone, uniffi::Record)]
@@ -399,7 +399,7 @@ fn reserve_container(
 		moq_net::broadcast::Producer,
 		moq_mux::catalog::Reserved<Extra>,
 		crate::ffi::Background,
-		crate::producer::Finished,
+		crate::producer::Children,
 	),
 	MoqError,
 > {
@@ -412,7 +412,7 @@ fn reserve_container(
 			state.broadcast.clone(),
 			reserved,
 			state.driver.clone(),
-			state.finished.clone(),
+			state.children.clone(),
 		))
 	})
 }
@@ -816,25 +816,81 @@ struct MediaStreamProducer {
 }
 
 /// Imports a container into a broadcast, from chunks split anywhere such as a raw byte stream.
+///
+/// Released before its finish, or still open when its broadcast closes, it ends its tracks with
+/// `Unroutable`, which readers take as the publisher leaving.
 #[derive(uniffi::Object)]
 pub struct MoqMediaContainerProducer {
 	driver: crate::ffi::Background,
 	inner: std::sync::Mutex<Option<ContainerProducer>>,
-	finished: crate::producer::Finished,
+	children: Children,
 }
 
 /// Imports complete encoded frames onto one track.
+///
+/// Released before its finish, or still open when its broadcast closes, it ends its track with
+/// `Unroutable`, which readers take as the publisher leaving.
 #[derive(uniffi::Object)]
 pub struct MoqMediaTrackProducer {
 	inner: std::sync::Mutex<Option<MediaProducer>>,
-	finished: crate::producer::Finished,
+	children: Children,
 }
 
 /// Imports a video byte stream onto one track.
+///
+/// Released before its finish, or still open when its broadcast closes, it ends its track with
+/// `Unroutable`, which readers take as the publisher leaving.
 #[derive(uniffi::Object)]
 pub struct MoqMediaTrackStreamProducer {
 	inner: std::sync::Mutex<Option<MediaStreamProducer>>,
-	finished: crate::producer::Finished,
+	children: Children,
+}
+
+// A media handle dropped or closed before its finish ends its tracks the way a publisher
+// leaving does, never as a cause-less drop.
+impl Child for MoqMediaContainerProducer {
+	fn abort(&self, err: moq_net::Error) {
+		let _guard = crate::ffi::enter();
+		if let Some(container) = self.inner.lock().unwrap().take() {
+			container.import.abort(err);
+		}
+	}
+}
+
+impl Drop for MoqMediaContainerProducer {
+	fn drop(&mut self) {
+		self.abort(moq_net::Error::Unroutable);
+	}
+}
+
+impl Child for MoqMediaTrackProducer {
+	fn abort(&self, err: moq_net::Error) {
+		let _guard = crate::ffi::enter();
+		if let Some(media) = self.inner.lock().unwrap().take() {
+			media.import.abort(err);
+		}
+	}
+}
+
+impl Drop for MoqMediaTrackProducer {
+	fn drop(&mut self) {
+		self.abort(moq_net::Error::Unroutable);
+	}
+}
+
+impl Child for MoqMediaTrackStreamProducer {
+	fn abort(&self, err: moq_net::Error) {
+		let _guard = crate::ffi::enter();
+		if let Some(media) = self.inner.lock().unwrap().take() {
+			media.import.abort(err);
+		}
+	}
+}
+
+impl Drop for MoqMediaTrackStreamProducer {
+	fn drop(&mut self) {
+		self.abort(moq_net::Error::Unroutable);
+	}
 }
 
 #[uniffi::export]
@@ -858,7 +914,7 @@ impl MoqMediaTrackProducer {
 					reason: format!("init failed: {err}"),
 				}
 			})?;
-			Ok(MoqMediaTrackProducer::from_import(import, state.finished.clone()))
+			MoqMediaTrackProducer::from_import(import, &state.children)
 		})
 	}
 }
@@ -885,7 +941,7 @@ impl MoqMediaTrackProducer {
 					reason: format!("init failed: {err}"),
 				}
 			})?;
-			Ok(MoqMediaTrackProducer::from_import(import, state.finished.clone()))
+			MoqMediaTrackProducer::from_import(import, &state.children)
 		})
 	}
 }
@@ -902,15 +958,15 @@ impl MoqMediaContainerProducer {
 	) -> Result<Arc<MoqMediaContainerProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let native = moq_mux::import::ContainerInit::new(init.format.into(), init.data);
-		let (target, reserved, driver, finished) = reserve_container(broadcast, init.timebase.as_deref())?;
+		let (target, reserved, driver, children) = reserve_container(broadcast, init.timebase.as_deref())?;
 		let import = moq_mux::import::Container::new(target, reserved, &native).map_err(|err| MoqError::Codec {
 			reason: format!("init failed: {err}"),
 		})?;
 
-		Ok(Arc::new(MoqMediaContainerProducer {
+		children.adopt(Arc::new(MoqMediaContainerProducer {
 			driver,
 			inner: std::sync::Mutex::new(Some(ContainerProducer { import })),
-			finished,
+			children: children.clone(),
 		}))
 	}
 }
@@ -939,11 +995,11 @@ impl MoqMediaTrackStreamProducer {
 					}
 				})?;
 
-			Ok(Arc::new(MoqMediaTrackStreamProducer {
+			state.children.adopt(Arc::new(MoqMediaTrackStreamProducer {
 				inner: std::sync::Mutex::new(Some(MediaStreamProducer {
 					import: Box::new(import),
 				})),
-				finished: state.finished.clone(),
+				children: state.children.clone(),
 			}))
 		})
 	}
@@ -951,15 +1007,15 @@ impl MoqMediaTrackStreamProducer {
 
 impl MoqMediaTrackProducer {
 	/// Wrap a single-codec importer, capturing the demand handle its track exposes.
-	fn from_import(import: moq_mux::import::Track, finished: crate::producer::Finished) -> Arc<Self> {
+	fn from_import(import: moq_mux::import::Track, children: &Children) -> Result<Arc<Self>, MoqError> {
 		let demand = import.demand();
-		Arc::new(Self {
+		children.adopt(Arc::new(Self {
 			inner: std::sync::Mutex::new(Some(MediaProducer {
 				import: Box::new(import),
 				demand,
 			})),
-			finished,
-		})
+			children: children.clone(),
+		}))
 	}
 }
 
@@ -1048,7 +1104,7 @@ impl MoqMediaTrackProducer {
 		media.import.finish().map_err(|err| MoqError::Codec {
 			reason: format!("finish failed: {err}"),
 		})?;
-		self.finished.keep(media);
+		self.children.keep(media);
 		Ok(())
 	}
 }
@@ -1123,7 +1179,7 @@ impl MoqMediaContainerProducer {
 			container.import.finish().map_err(|err| MoqError::Codec {
 				reason: format!("finish failed: {err}"),
 			})?;
-			self.finished.keep(container);
+			self.children.keep(container);
 			Ok(())
 		})();
 		self.driver.check()?;
@@ -1164,7 +1220,7 @@ impl MoqMediaTrackStreamProducer {
 		media.import.finish().map_err(|err| MoqError::Codec {
 			reason: format!("finish failed: {err}"),
 		})?;
-		self.finished.keep(media);
+		self.children.keep(media);
 		Ok(())
 	}
 }

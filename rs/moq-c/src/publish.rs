@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use moq_mux::catalog::hang::Extra;
@@ -19,8 +19,8 @@ struct DemandEntry {
 /// broadcast it was made on so media can be published onto it under that broadcast's catalog.
 struct TrackRequest {
 	broadcast: Id,
-	// Carried, not looked up, so a raw accept still works after the broadcast handle is released.
-	finished: Finished,
+	// Carried, not looked up, so a raw accept learns its broadcast closed even after the id is gone.
+	children: Children,
 	request: moq_net::track::Request,
 }
 
@@ -43,7 +43,7 @@ struct GroupRequest {
 /// What a request handler serves.
 enum Dynamic {
 	/// Track requests on a broadcast, remembered so media can be published onto them.
-	Broadcast(moq_net::broadcast::Dynamic, Id, Finished),
+	Broadcast(moq_net::broadcast::Dynamic, Id, Children),
 	/// Group requests (fetches of uncached groups) on a track.
 	Track(moq_net::track::Dynamic),
 }
@@ -59,51 +59,111 @@ struct Broadcast {
 	catalog: moq_mux::catalog::Producer<Extra>,
 	video: BTreeMap<String, hang::catalog::VideoConfig>,
 	audio: BTreeMap<String, hang::catalog::AudioConfig>,
-	finished: Finished,
+	children: Children,
 	/// Set by [`Publish::catalog_finish`]: the catalog is final, so a close leaves it alone.
 	ended: bool,
 }
 
-impl Drop for Broadcast {
-	fn drop(&mut self) {
-		self.finished.release();
-	}
+/// A handle publishing tracks on a broadcast, by the table that holds it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum Child {
+	Media(Id),
+	Container(Id),
+	Track(Id),
+	Audio(Id),
+	Video(Id),
 }
 
-/// The finished producers a broadcast keeps, or `None` once it ended.
-type Keeping = Option<Vec<Box<dyn Send>>>;
+/// A child's handle, which ends what it still publishes when its broadcast closes.
+pub(crate) trait Abort {
+	/// End the handle's tracks with `err`. A track that already finished ends cleanly instead.
+	fn abort(self, err: moq_net::Error);
+}
 
-/// Finished producers a broadcast keeps until it ends.
+/// What a broadcast holds of its children.
+enum Family {
+	Open {
+		/// Handles that may still publish, ended on close.
+		open: HashSet<Child>,
+		/// Finished producers, kept so a late subscriber still finds their tracks.
+		kept: Vec<Box<dyn Send>>,
+	},
+	/// The broadcast closed: its children ended and new ones are refused.
+	Closed,
+}
+
+/// The track-publishing handles of one broadcast.
 ///
-/// A finished track stops being served once its last producer drops. A `*_finish` call frees
-/// its handle, so the broadcast keeps the finished producer here instead, and a subscriber
-/// arriving after the end still finds the track until [`Publish::close`].
+/// Closing the broadcast ends every child still open with `Unroutable`, the way a reader sees a
+/// publisher leave, and frees its handle. A finished track stops being served once its last
+/// producer drops, and a `*_finish` call frees its handle, so the broadcast keeps the finished
+/// producer here instead: a subscriber arriving after the end still finds the track until
+/// [`State::publish_close`].
 #[derive(Clone)]
-pub struct Finished(std::sync::Arc<std::sync::Mutex<Keeping>>);
+pub struct Children(Arc<std::sync::Mutex<Family>>);
 
-impl Default for Finished {
+impl Default for Children {
 	fn default() -> Self {
-		Self(std::sync::Arc::new(std::sync::Mutex::new(Some(Vec::new()))))
+		Self(Arc::new(std::sync::Mutex::new(Family::Open {
+			open: HashSet::new(),
+			kept: Vec::new(),
+		})))
 	}
 }
 
-impl Finished {
-	/// Keep a finished producer until the broadcast ends, or drop it now if it already has.
-	pub(crate) fn keep(&self, producer: impl Send + 'static) {
+impl Children {
+	fn lock(&self) -> std::sync::MutexGuard<'_, Family> {
+		self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+	}
+
+	/// Insert a new child into `slab`, so the broadcast's close ends it. Once the broadcast
+	/// closed, the child is aborted and refused.
+	pub(crate) fn insert<T: Abort>(
+		&self,
+		slab: &mut NonZeroSlab<T>,
+		value: T,
+		child: fn(Id) -> Child,
+	) -> Result<Id, Error> {
+		let id = slab.insert(value)?;
+		match &mut *self.lock() {
+			Family::Open { open, .. } => {
+				open.insert(child(id));
+				return Ok(id);
+			}
+			Family::Closed => {}
+		}
+		if let Some(value) = slab.remove(id) {
+			value.abort(moq_net::Error::Unroutable);
+		}
+		Err(Error::BroadcastNotFound)
+	}
+
+	/// Keep `child`'s finished producer until the broadcast ends, or drop it now if it already has.
+	pub(crate) fn keep(&self, child: Child, producer: impl Send + 'static) {
 		let producer: Box<dyn Send> = Box::new(producer);
-		let mut kept = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-		if let Some(kept) = kept.as_mut() {
+		if let Family::Open { open, kept } = &mut *self.lock() {
+			open.remove(&child);
 			kept.push(producer);
 		}
 	}
 
-	/// Stop keeping, handing back what was kept so the caller decides when it drops.
-	fn release(&self) -> Vec<Box<dyn Send>> {
-		self.0
-			.lock()
-			.unwrap_or_else(std::sync::PoisonError::into_inner)
-			.take()
-			.unwrap_or_default()
+	/// Stop tracking `child`, which ended on its own.
+	pub(crate) fn forget(&self, child: Child) {
+		if let Family::Open { open, .. } = &mut *self.lock() {
+			open.remove(&child);
+		}
+	}
+
+	/// Refuse new children, handing back the open ones and letting go of the finished ones.
+	fn close(&self) -> HashSet<Child> {
+		let family = std::mem::replace(&mut *self.lock(), Family::Closed);
+		match family {
+			Family::Open { open, kept } => {
+				drop(kept);
+				open
+			}
+			Family::Closed => HashSet::new(),
+		}
 	}
 }
 
@@ -111,19 +171,37 @@ impl Finished {
 pub struct Target<'a> {
 	pub producer: &'a mut moq_net::broadcast::Producer,
 	pub catalog: &'a mut moq_mux::catalog::Producer<Extra>,
-	/// Where the broadcast keeps the producer once it finishes.
-	pub finished: &'a Finished,
+	/// The broadcast's children, which the producer joins.
+	pub children: &'a Children,
 }
 
-/// A producer handle, with where its broadcast keeps it once finished.
+/// A producer handle, with the broadcast that keeps it once finished.
 struct Kept<T> {
 	inner: T,
-	finished: Finished,
+	children: Children,
 }
 
 impl<T: Send + 'static> Kept<T> {
-	fn keep(self) {
-		self.finished.keep(self.inner);
+	fn keep(self, child: Child) {
+		self.children.keep(child, self.inner);
+	}
+}
+
+impl Abort for Kept<Box<import::Track>> {
+	fn abort(self, err: moq_net::Error) {
+		self.inner.abort(err);
+	}
+}
+
+impl Abort for Kept<moq_net::track::Producer> {
+	fn abort(self, err: moq_net::Error) {
+		let _ = self.inner.abort(err);
+	}
+}
+
+impl Abort for Container {
+	fn abort(self, err: moq_net::Error) {
+		self.inner.abort(err);
 	}
 }
 
@@ -159,7 +237,7 @@ struct JsonSnapshot {
 struct Container {
 	inner: import::Container<Extra>,
 	driver: crate::ffi::Background,
-	finished: Finished,
+	children: Children,
 }
 
 #[derive(Default)]
@@ -238,7 +316,7 @@ impl Publish {
 			catalog,
 			video: BTreeMap::new(),
 			audio: BTreeMap::new(),
-			finished: Finished::default(),
+			children: Children::default(),
 			ended: false,
 		})?;
 		Ok(id)
@@ -287,13 +365,12 @@ impl Publish {
 		Ok(Target {
 			producer: &mut broadcast.producer,
 			catalog: &mut broadcast.catalog,
-			finished: &broadcast.finished,
+			children: &broadcast.children,
 		})
 	}
 
-	/// End the broadcast for good and release it, finalizing the catalog stream.
-	pub fn close(&mut self, broadcast: Id) -> Result<(), Error> {
-		let mut broadcast = self.broadcasts.remove(broadcast).ok_or(Error::BroadcastNotFound)?;
+	/// End the broadcast for good, finalizing the catalog stream. Its children already ended.
+	fn close(mut broadcast: Broadcast) -> Result<(), Error> {
 		if broadcast.ended {
 			broadcast.producer.close();
 			return broadcast.driver.check();
@@ -320,7 +397,7 @@ impl Publish {
 	}
 
 	/// End the broadcast's content by finishing its catalog, with its entries still listed, so
-	/// a late subscriber finds the finished tracks until [`Self::close`].
+	/// a late subscriber finds the finished tracks until [`State::publish_close`].
 	pub fn catalog_finish(&mut self, broadcast: Id) -> Result<(), Error> {
 		let broadcast = self.broadcast_mut(broadcast)?;
 		let result = broadcast.catalog.finish();
@@ -329,16 +406,25 @@ impl Publish {
 		Ok(result?)
 	}
 
-	/// Where a broadcast keeps the producers finished on it.
-	fn finished(&self, broadcast: Id) -> Result<Finished, Error> {
-		Ok(self.broadcast(broadcast)?.finished.clone())
+	/// The children of a broadcast.
+	fn children(&self, broadcast: Id) -> Result<Children, Error> {
+		Ok(self.broadcast(broadcast)?.children.clone())
+	}
+
+	/// Insert a media importer as a child of the broadcast `children` belongs to.
+	fn insert_media(&mut self, track: import::Track, children: Children) -> Result<Id, Error> {
+		let media = Kept {
+			inner: Box::new(track),
+			children: children.clone(),
+		};
+		children.insert(&mut self.media, media, Child::Media)
 	}
 
 	pub fn audio(&mut self, broadcast: Id, init: import::AudioInit) -> Result<Id, Error> {
 		let Broadcast {
 			producer: broadcast,
 			catalog,
-			finished,
+			children,
 			..
 		} = self.broadcast(broadcast)?;
 		let broadcast = broadcast.clone();
@@ -346,19 +432,15 @@ impl Publish {
 		let request = broadcast.reserve_track(name)?;
 
 		let track = import::Track::audio(request, catalog.reserve(), init)?;
-		let finished = finished.clone();
-		let id = self.media.insert(Kept {
-			inner: Box::new(track),
-			finished,
-		})?;
-		Ok(id)
+		let children = children.clone();
+		self.insert_media(track, children)
 	}
 
 	pub fn video(&mut self, broadcast: Id, init: import::VideoInit) -> Result<Id, Error> {
 		let Broadcast {
 			producer: broadcast,
 			catalog,
-			finished,
+			children,
 			..
 		} = self.broadcast(broadcast)?;
 		let broadcast = broadcast.clone();
@@ -366,12 +448,8 @@ impl Publish {
 		let request = broadcast.reserve_track(name)?;
 
 		let track = import::Track::video(request, catalog.reserve(), init)?;
-		let finished = finished.clone();
-		let id = self.media.insert(Kept {
-			inner: Box::new(track),
-			finished,
-		})?;
-		Ok(id)
+		let children = children.clone();
+		self.insert_media(track, children)
 	}
 
 	pub fn container(&mut self, broadcast: Id, init: import::ContainerInit) -> Result<Id, Error> {
@@ -379,17 +457,17 @@ impl Publish {
 			producer: broadcast,
 			catalog,
 			driver,
-			finished,
+			children,
 			..
 		} = self.broadcast(broadcast)?;
 		let container = import::Container::new(broadcast.clone(), catalog.reserve(), &init)?;
+		let children = children.clone();
 		let container = Container {
 			inner: container,
 			driver: driver.clone(),
-			finished: finished.clone(),
+			children: children.clone(),
 		};
-		let id = self.containers.insert(container)?;
-		Ok(id)
+		children.insert(&mut self.containers, container, Child::Container)
 	}
 
 	pub fn media_frame(&mut self, media: Id, data: &[u8], timestamp: hang::container::Timestamp) -> Result<(), Error> {
@@ -431,7 +509,7 @@ impl Publish {
 	pub fn media_finish(&mut self, media: Id) -> Result<(), Error> {
 		let mut track = self.media.remove(media).ok_or(Error::MediaNotFound)?;
 		track.finish()?;
-		track.keep();
+		track.keep(Child::Media(media));
 		Ok(())
 	}
 
@@ -465,11 +543,12 @@ impl Publish {
 	}
 
 	pub fn container_finish(&mut self, container: Id) -> Result<(), Error> {
-		let mut container = self.containers.remove(container).ok_or(Error::MediaNotFound)?;
+		let id = container;
+		let mut container = self.containers.remove(id).ok_or(Error::MediaNotFound)?;
 		let result = container.inner.finish();
 		container.driver.check()?;
 		result?;
-		container.finished.keep(container.inner);
+		container.children.keep(Child::Container(id), container.inner);
 		Ok(())
 	}
 
@@ -664,8 +743,8 @@ impl Publish {
 	/// Without a live handler an unknown track name is refused, as before.
 	pub fn dynamic(&mut self, broadcast: Id, on_request: OnStatus) -> Result<Id, Error> {
 		let dynamic = self.producer(broadcast)?.dynamic();
-		let Broadcast { driver, finished, .. } = self.broadcast(broadcast)?;
-		let dynamic = Dynamic::Broadcast(dynamic, broadcast, finished.clone());
+		let Broadcast { driver, children, .. } = self.broadcast(broadcast)?;
+		let dynamic = Dynamic::Broadcast(dynamic, broadcast, children.clone());
 		self.spawn_dynamic(dynamic, on_request, driver.clone())
 	}
 
@@ -719,11 +798,11 @@ impl Publish {
 				res = kio::wait(|waiter| {
 					let _ = fills.poll(waiter);
 					match &mut dynamic {
-						Dynamic::Broadcast(dynamic, broadcast, finished) => {
+						Dynamic::Broadcast(dynamic, broadcast, children) => {
 							dynamic.poll_requested_track(waiter).map_ok(|request| {
 								Request::Track(Box::new(TrackRequest {
 									broadcast: *broadcast,
-									finished: finished.clone(),
+									children: children.clone(),
 									request,
 								}))
 							})
@@ -801,41 +880,36 @@ impl Publish {
 
 	/// Accept a track request as a raw track, returning a track handle like [`Self::track`].
 	pub fn track_request_accept(&mut self, request: Id, info: moq_net::track::Info) -> Result<Id, Error> {
-		let TrackRequest { finished, request, .. } = self.track_request.remove(request).ok_or(Error::NotFound)?;
-		self.tracks.insert(Kept {
+		let TrackRequest { children, request, .. } = self.track_request.remove(request).ok_or(Error::NotFound)?;
+		let track = Kept {
 			inner: request.accept(info),
-			finished,
-		})
+			children: children.clone(),
+		};
+		children.insert(&mut self.tracks, track, Child::Track)
 	}
 
 	/// Accept a track request as an audio track, returning a media handle like [`Self::audio`].
 	pub fn track_request_audio(&mut self, request: Id, init: import::AudioInit) -> Result<Id, Error> {
 		let TrackRequest {
 			broadcast,
-			finished,
+			children,
 			request,
 		} = self.track_request.remove(request).ok_or(Error::NotFound)?;
 		let catalog = self.catalog(broadcast)?;
 		let track = import::Track::audio(request, catalog.reserve(), init)?;
-		self.media.insert(Kept {
-			inner: Box::new(track),
-			finished,
-		})
+		self.insert_media(track, children)
 	}
 
 	/// Accept a track request as a video track, returning a media handle like [`Self::video`].
 	pub fn track_request_video(&mut self, request: Id, init: import::VideoInit) -> Result<Id, Error> {
 		let TrackRequest {
 			broadcast,
-			finished,
+			children,
 			request,
 		} = self.track_request.remove(request).ok_or(Error::NotFound)?;
 		let catalog = self.catalog(broadcast)?;
 		let track = import::Track::video(request, catalog.reserve(), init)?;
-		self.media.insert(Kept {
-			inner: Box::new(track),
-			finished,
-		})
+		self.insert_media(track, children)
 	}
 
 	/// Reject a track request, failing every subscriber waiting on it with `error_code`.
@@ -890,10 +964,14 @@ impl Publish {
 	/// for non-media tracks. Pair it with [`Self::video_config`] / [`Self::audio_config`]
 	/// if you want to describe the track in the catalog as well.
 	pub fn track(&mut self, broadcast: Id, name: &str, info: Option<moq_net::track::Info>) -> Result<Id, Error> {
-		let finished = self.finished(broadcast)?;
+		let children = self.children(broadcast)?;
 		let broadcast = self.producer(broadcast)?;
 		let track = broadcast.create_track(name, info)?;
-		self.tracks.insert(Kept { inner: track, finished })
+		let track = Kept {
+			inner: track,
+			children: children.clone(),
+		};
+		children.insert(&mut self.tracks, track, Child::Track)
 	}
 
 	/// Append a new group to a raw track, returning a group producer.
@@ -933,11 +1011,12 @@ impl Publish {
 	/// [`Self::track_finish_at`] declares the boundary ahead of time, so this keeps that
 	/// boundary and only releases the handle; the broadcast keeps the track.
 	pub fn track_finish(&mut self, track: Id) -> Result<(), Error> {
-		let track = self.tracks.remove(track).ok_or(Error::TrackNotFound)?;
+		let id = track;
+		let track = self.tracks.remove(id).ok_or(Error::TrackNotFound)?;
 		if track.end().is_none() {
 			track.finish()?;
 		}
-		track.keep();
+		track.keep(Child::Track(id));
 		Ok(())
 	}
 
@@ -950,7 +1029,9 @@ impl Publish {
 
 	/// Abort a raw track with an application error code.
 	pub fn track_abort(&mut self, track: Id, error_code: u16) -> Result<(), Error> {
-		let track = self.tracks.remove(track).ok_or(Error::TrackNotFound)?;
+		let id = track;
+		let track = self.tracks.remove(id).ok_or(Error::TrackNotFound)?;
+		track.children.forget(Child::Track(id));
 		track.inner.abort(moq_net::Error::App(error_code))?;
 		Ok(())
 	}
@@ -1140,6 +1221,108 @@ impl Publish {
 	}
 }
 
+impl State {
+	/// End a broadcast for good and release it with every child still open on it.
+	///
+	/// The children end first, with `Unroutable` as a reader sees a publisher leave, so none
+	/// outlives the broadcast it publishes on.
+	pub fn publish_close(&mut self, broadcast: Id) -> Result<(), Error> {
+		let broadcast = self.publish.broadcasts.remove(broadcast).ok_or(Error::BroadcastNotFound)?;
+		let err = moq_net::Error::Unroutable;
+		for child in broadcast.children.close() {
+			match child {
+				Child::Media(id) => self.publish.media.remove(id).map(|media| media.abort(err.clone())),
+				Child::Container(id) => self.publish.containers.remove(id).map(|media| media.abort(err.clone())),
+				Child::Track(id) => self.publish.tracks.remove(id).map(|track| track.abort(err.clone())),
+				Child::Audio(id) => self.audio.remove(id).ok().map(|audio| audio.abort(err.clone())),
+				Child::Video(id) => self.video.remove(id).ok().map(|video| video.abort(err.clone())),
+			};
+		}
+		Publish::close(broadcast)
+	}
+}
+
+#[cfg(test)]
+mod children_tests {
+	use super::*;
+
+	const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+	/// A standalone broadcast with one raw track and one media importer, each read by a subscriber.
+	async fn children(state: &mut State) -> (Id, Id, Id, [moq_net::track::Subscriber; 2]) {
+		let broadcast = state
+			.publish
+			.create((moq_net::broadcast::Info::new().produce(), Default::default()))
+			.unwrap();
+		let consumer = state.publish.broadcast(broadcast).unwrap().producer.consume();
+		let track = state.publish.track(broadcast, "raw", None).unwrap();
+		let mut head = b"OpusHead".to_vec();
+		head.extend_from_slice(&[1, 2, 0, 0, 0x80, 0xbb, 0, 0, 0, 0, 0]);
+		let media = state
+			.publish
+			.audio(broadcast, import::AudioInit::new(import::AudioFormat::Opus, head))
+			.unwrap();
+		let name = state.publish.media_demand(media).unwrap().name().to_string();
+		let readers = [
+			consumer.track("raw").unwrap().subscribe(None).await.unwrap(),
+			consumer.track(&name).unwrap().subscribe(None).await.unwrap(),
+		];
+		(broadcast, track, media, readers)
+	}
+
+	/// Closing a broadcast ends every child still open on it the way a publisher leaving does,
+	/// and releases the child handles.
+	#[tokio::test(start_paused = true)]
+	async fn closing_a_broadcast_ends_its_open_tracks() {
+		let mut state = State::new();
+		let (broadcast, track, media, readers) = children(&mut state).await;
+		state.publish_close(broadcast).unwrap();
+		for mut reader in readers {
+			let read = moq_clock::timeout(TIMEOUT, reader.recv_group()).await;
+			assert!(matches!(read.expect("the track carried on"), Err(moq_net::Error::Unroutable)));
+		}
+		assert!(matches!(state.publish.track_finish(track), Err(Error::TrackNotFound)));
+		assert!(matches!(state.publish.media_finish(media), Err(Error::MediaNotFound)));
+	}
+
+	/// A track finished before its broadcast closes ends cleanly.
+	#[tokio::test(start_paused = true)]
+	async fn finishing_before_close_ends_tracks_cleanly() {
+		let mut state = State::new();
+		let (broadcast, track, media, readers) = children(&mut state).await;
+		state.publish.track_finish(track).unwrap();
+		state.publish.media_finish(media).unwrap();
+		state.publish_close(broadcast).unwrap();
+		for mut reader in readers {
+			let read = moq_clock::timeout(TIMEOUT, reader.recv_group()).await;
+			assert!(matches!(read.expect("the track carried on"), Ok(None)));
+		}
+	}
+
+	/// A child made after its broadcast closed, such as a request accepted late, is refused and
+	/// ends the way a publisher leaving does.
+	#[tokio::test(start_paused = true)]
+	async fn a_child_of_a_closed_broadcast_is_refused() {
+		let children = Children::default();
+		children.close();
+		let track = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("late", None)
+			.unwrap();
+		let mut reader = track.subscribe(None);
+		let mut tracks = NonZeroSlab::default();
+		let kept = Kept {
+			inner: track,
+			children: children.clone(),
+		};
+		assert!(matches!(
+			children.insert(&mut tracks, kept, Child::Track),
+			Err(Error::BroadcastNotFound)
+		));
+		assert!(matches!(reader.recv_group().await, Err(moq_net::Error::Unroutable)));
+	}
+}
+
 #[cfg(test)]
 mod supervision_tests {
 	use super::*;
@@ -1171,11 +1354,12 @@ mod supervision_tests {
 	#[tokio::test]
 	async fn a_finish_after_a_driver_panic_reports_it_until_the_close() {
 		let (origin, completion, trigger) = crate::ffi::panicking_origin();
-		let mut publish = Publish::default();
-		let broadcast = publish
+		let mut state = State::new();
+		let broadcast = state
+			.publish
 			.create((origin.create_broadcast("retained").unwrap(), completion.clone()))
 			.unwrap();
-		let producer = &publish.broadcast(broadcast).unwrap().producer;
+		let producer = &state.publish.broadcast(broadcast).unwrap().producer;
 		// A dynamic handle outlives the consumed broadcast, so only an explicit close ends it.
 		let _dynamic = producer.dynamic();
 		let consumer = producer.consume();
@@ -1183,10 +1367,10 @@ mod supervision_tests {
 			.write()
 			.unwrap_or_else(|_| unreachable!("test keeps its panic trigger open")) = true;
 		assert!(matches!(completion.finished().await, Err(Error::Panic)));
-		assert!(matches!(publish.catalog_finish(broadcast), Err(Error::Panic)));
+		assert!(matches!(state.publish.catalog_finish(broadcast), Err(Error::Panic)));
 		// The handle stays the caller's to close, and the close still ends the broadcast.
 		assert!(!consumer.is_closed());
-		assert!(matches!(publish.close(broadcast), Err(Error::Panic)));
+		assert!(matches!(state.publish_close(broadcast), Err(Error::Panic)));
 		assert!(consumer.is_closed());
 	}
 }

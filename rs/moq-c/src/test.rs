@@ -3223,9 +3223,10 @@ fn dynamic_track_request_publishes_media() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// A raw track request already delivered stays acceptable after its broadcast handle is closed.
+/// A raw track request accepted after its broadcast closed is refused, and its subscriber sees the
+/// publisher leave instead of a track that outlives the broadcast.
 #[test]
-fn track_request_accepts_after_the_broadcast_closes() {
+fn track_request_accepted_after_the_broadcast_closes_is_refused() {
 	let origin = id(moq_origin_create());
 	let broadcast = publish_broadcast(origin, b"dynamic-closed");
 	let request_cb = Callback::new();
@@ -3237,10 +3238,11 @@ fn track_request_accepts_after_the_broadcast_closes() {
 
 	let request = id(request_cb.recv());
 	assert_eq!(moq_publish_close(broadcast), 0);
-	let track = id(unsafe { moq_track_request_accept(request, std::ptr::null()) });
-	assert_eq!(moq_publish_track_finish(track), 0);
-	// The subscription ends with the finished track, before its callback's channel is freed.
-	assert_eq!(frame_cb.recv_terminal(), 0);
+	assert_eq!(
+		unsafe { moq_track_request_accept(request, std::ptr::null()) },
+		MOQ_ERROR_BROADCAST_NOT_FOUND
+	);
+	assert!(frame_cb.recv_terminal() < 0, "the subscription ended cleanly");
 	assert_eq!(request_cb.recv_terminal(), 0);
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_origin_close(origin), 0);

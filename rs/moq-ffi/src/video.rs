@@ -305,12 +305,12 @@ impl MoqVideoEncoder {
 fn finalize(
 	mut producer: moq_video::encode::Producer,
 	drained: Result<(), moq_video::Error>,
-	finished: &crate::producer::Finished,
+	children: &crate::producer::Children,
 ) -> Result<(), MoqError> {
 	match drained {
 		Ok(()) => {
 			producer.finish()?;
-			finished.keep(producer);
+			children.keep(producer);
 			Ok(())
 		}
 		Err(err) => {
@@ -408,14 +408,14 @@ impl VideoProducer {
 		Ok(())
 	}
 
-	fn finish(self, finished: &crate::producer::Finished) -> Result<(), MoqError> {
+	fn finish(self, children: &crate::producer::Children) -> Result<(), MoqError> {
 		let Self {
 			encoder, mut producer, ..
 		} = self;
 		// Drain the codec into the track before ending it, so the last frames land
 		// in it rather than being dropped with the encoder.
 		let drained = block_on(encoder.finish()).and_then(|encoded| producer.publish(&encoded));
-		finalize(producer, drained, finished)
+		finalize(producer, drained, children)
 	}
 }
 
@@ -424,6 +424,9 @@ impl VideoProducer {
 /// Constructed from a broadcast's media catalog. Each
 /// [`write`](Self::write) accepts a [`MoqVideoFrame`] whose `data` is in the
 /// pixel format declared by the [`MoqVideoEncoderInput`] passed at publish time.
+///
+/// Released before its finish, or still open when its broadcast closes, it ends its track with
+/// `Unroutable`, which readers take as the publisher leaving.
 #[derive(uniffi::Object)]
 pub struct MoqVideoProducer {
 	inner: Arc<std::sync::Mutex<Option<VideoProducer>>>,
@@ -433,7 +436,28 @@ pub struct MoqVideoProducer {
 	applied: Arc<AtomicU64>,
 	/// Held so the reservation's registry outlives extra bandwidth handles.
 	_bandwidth: Option<Arc<MoqBandwidth>>,
-	finished: crate::producer::Finished,
+	children: crate::producer::Children,
+}
+
+// Dropped or closed before its finish, the track ends the way a publisher leaving does.
+impl crate::producer::Child for MoqVideoProducer {
+	fn abort(&self, err: moq_net::Error) {
+		let _guard = crate::ffi::runtime().enter();
+		let Some(producer) = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() else {
+			return;
+		};
+		if let Some(mut follow) = self.follow.lock().unwrap().take() {
+			let _ = follow.stop();
+		}
+		self.reservation.lock().unwrap().take();
+		producer.producer.abort(err);
+	}
+}
+
+impl Drop for MoqVideoProducer {
+	fn drop(&mut self) {
+		crate::producer::Child::abort(self, moq_net::Error::Unroutable);
+	}
 }
 
 impl MoqVideoProducer {
@@ -565,7 +589,7 @@ impl MoqVideoProducer {
 		self.reservation.lock().unwrap().take();
 		// A follower panic only stops rate adaptation, so the encoded frames still
 		// end the track cleanly before the panic is reported.
-		producer.finish(&self.finished)?;
+		producer.finish(&self.children)?;
 		followed
 	}
 }
@@ -608,7 +632,7 @@ impl MoqVideoProducer {
 		let encoder = block_on(moq_video::encode::Sink::open(&config))?;
 		let gop = config.gop.duration(config.framerate);
 		let ceiling = video_ceiling(&config, &rendition);
-		let finished = broadcast.with_state(|state| Ok(state.finished.clone()))?;
+		let children = broadcast.with_state(|state| Ok(state.children.clone()))?;
 		let producer = broadcast.with_state(|state| match track {
 			Some(name) => {
 				let track = state
@@ -649,13 +673,13 @@ impl MoqVideoProducer {
 			.as_ref()
 			.map(|reservation| spawn_follow(inner.clone(), reservation.consumer(), ceiling, applied.clone()));
 
-		Ok(Arc::new(MoqVideoProducer {
+		children.adopt(Arc::new(MoqVideoProducer {
 			inner,
 			reservation: std::sync::Mutex::new(reserved),
 			follow: std::sync::Mutex::new(follow),
 			applied,
 			_bandwidth: bandwidth,
-			finished,
+			children: children.clone(),
 		}))
 	}
 }

@@ -1837,9 +1837,17 @@ async fn track_request_demand_survives_accept() {
 	demand.until_wanted().await.unwrap();
 	consumer.cancel();
 	demand.until_unwanted().await.unwrap();
+	// Released unfinished, the track aborts, and its watcher keeps the cause.
 	drop(track);
 	broadcast.close().unwrap();
-	assert!(matches!(demand.until_wanted().await, Err(MoqError::Closed)));
+	let Err(err) = demand.until_wanted().await else {
+		panic!("the watcher outlived its track");
+	};
+	assert_protocol(
+		&err,
+		crate::error::MoqErrorScope::Stream,
+		crate::error::MoqProtocolKind::Unroutable,
+	);
 }
 
 #[tokio::test]
@@ -4138,6 +4146,102 @@ async fn finish_serves_finished_tracks_until_close() {
 	broadcast.close().unwrap();
 	await_unannounced(&announced).await;
 	assert!(matches!(catalog.finish(), Err(MoqError::Closed)));
+}
+
+/// One raw and one media handle on `broadcast`, each with a subscriber reading it.
+async fn children(
+	broadcast: &MoqBroadcastProducer,
+) -> (Arc<MoqTrackProducer>, Arc<MoqMediaTrackProducer>, [Arc<MoqTrackConsumer>; 2]) {
+	let consumer = broadcast.consume().unwrap();
+	let raw = broadcast.publish_track("raw".into(), Some(timed_info())).unwrap();
+	let media = MoqMediaTrackProducer::audio(
+		broadcast,
+		MoqMediaTarget::Named {
+			name: Some("media".into()),
+		},
+		audio_init(MoqAudioFormat::Opus, opus_head()),
+	)
+	.unwrap();
+	let readers = [
+		consumer.subscribe_track("raw".into(), None).await.unwrap(),
+		consumer.subscribe_track("media".into(), None).await.unwrap(),
+	];
+	(raw, media, readers)
+}
+
+/// Each reader ends with `Unroutable`, the cause of a publisher leaving.
+async fn assert_left<const N: usize>(readers: [Arc<MoqTrackConsumer>; N]) {
+	for reader in readers {
+		let read = tokio::time::timeout(TIMEOUT, reader.read_frame()).await;
+		let Err(err) = read.expect("the track carried on") else {
+			panic!("the track ended without a cause");
+		};
+		assert_protocol(
+			&err,
+			crate::error::MoqErrorScope::Stream,
+			crate::error::MoqProtocolKind::Unroutable,
+		);
+	}
+}
+
+/// Closing a broadcast ends every track handle still open on it the way a publisher leaving
+/// does, and the handles refuse later calls.
+#[tokio::test(start_paused = true)]
+async fn closing_a_broadcast_ends_its_open_tracks() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let (raw, media, readers) = children(&broadcast).await;
+	broadcast.close().unwrap();
+	assert_left(readers).await;
+
+	let frame = MoqFrame {
+		payload: b"late".to_vec(),
+		timestamp_us: Some(0),
+	};
+	assert!(matches!(raw.write_frame(frame.clone()), Err(MoqError::Closed)));
+	assert!(matches!(raw.finish(), Err(MoqError::Closed)));
+	assert!(matches!(media.write_frame(frame), Err(MoqError::Closed)));
+	assert!(matches!(media.finish(), Err(MoqError::Closed)));
+}
+
+/// A track handle released without a finish, as a garbage collector does, ends its track as a
+/// publisher leaving rather than a cause-less drop.
+#[tokio::test(start_paused = true)]
+async fn dropping_an_unfinished_track_handle_ends_it() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let (raw, media, readers) = children(&broadcast).await;
+	drop((raw, media));
+	assert_left(readers).await;
+	broadcast.close().unwrap();
+}
+
+/// A track finished before its broadcast closes ends cleanly, even once its handle is released.
+#[tokio::test(start_paused = true)]
+async fn finishing_before_close_ends_tracks_cleanly() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let (raw, media, readers) = children(&broadcast).await;
+	raw.finish().unwrap();
+	media.finish().unwrap();
+	drop(raw);
+	broadcast.close().unwrap();
+	for reader in readers {
+		let read = tokio::time::timeout(TIMEOUT, reader.read_frame()).await;
+		assert!(read.expect("the track carried on").unwrap().is_none());
+	}
+}
+
+/// A request accepted after its broadcast closed is refused, and its subscriber sees the
+/// publisher leave.
+#[tokio::test(start_paused = true)]
+async fn accepting_a_request_after_close_is_refused() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let dynamic = broadcast.dynamic().unwrap();
+	let consumer = broadcast.consume().unwrap();
+	let subscribe = tokio::spawn(async move { consumer.subscribe_track("late".into(), None).await });
+	let request = dynamic.requested_track().await.unwrap();
+	broadcast.close().unwrap();
+	assert!(matches!(request.accept(None), Err(MoqError::Closed)));
+	let reader = subscribe.await.unwrap().unwrap();
+	assert_left([reader]).await;
 }
 
 #[tokio::test]

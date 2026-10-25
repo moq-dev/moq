@@ -2168,16 +2168,18 @@ pub extern "C" fn moq_publish_unannounce(broadcast: u32) -> i32 {
 
 /// End a broadcast for good and release its handle.
 ///
-/// The origin retracts the path immediately and serves no new tracks; tracks already
-/// subscribed carry on to their own end. The handle is invalid afterwards, so closing
-/// it again fails like any unknown handle.
+/// The origin retracts the path immediately and serves no new tracks. Every media, raw track,
+/// container, and encoder handle still open on the broadcast ends with `UNROUTABLE`, the way a
+/// reader sees a publisher leave, and is released; finish a track first to end it cleanly. The
+/// handles are invalid afterwards, so closing it again fails like any unknown handle, and so
+/// does any later call on a released child.
 ///
 /// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_publish_close(broadcast: u32) -> i32 {
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
-		State::lock().publish.close(broadcast)
+		State::lock().publish_close(broadcast)
 	})
 }
 
@@ -3011,7 +3013,9 @@ pub unsafe extern "C" fn moq_track_request_dynamic(
 ///
 /// Consumes the request handle. `info` is as in [moq_publish_track]: NULL for the
 /// microsecond default. Returns a non-zero track handle usable with every
-/// `moq_publish_track_*` function, or a negative code on failure.
+/// `moq_publish_track_*` function, or a negative code on failure. Once the request's
+/// broadcast closed, the track ends with `UNROUTABLE` and the call fails with
+/// `MOQ_ERROR_BROADCAST_NOT_FOUND`.
 ///
 /// # Safety
 /// - `info` must be NULL or a valid pointer to a [moq_track_info] struct.
