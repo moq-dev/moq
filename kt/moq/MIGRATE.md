@@ -40,10 +40,11 @@ If you adopted the release line's async `drain()`, call `shutdown()` and then aw
 
 Audio and video init records no longer carry a track name. Pass that name on the media producer's named target instead; init records describe only the codec and media.
 
-### Broadcast `finish` no longer closes
+### Broadcast `finish` is removed
 
-`BroadcastProducer.finish()` was a deprecated alias for `end()`; it now finishes only the catalog, and the broadcast stays up until `end()`.
+`BroadcastProducer.finish()`, a deprecated alias for `end()`, is removed.
 Call `BroadcastProducer.end()` where you called `finish()`.
+To end the content first, call `CatalogProducer.finish()`; the broadcast stays up until `end()`.
 
 ### JSON snapshot `deltaRatio` is `deltas`
 

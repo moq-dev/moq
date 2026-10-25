@@ -263,15 +263,16 @@ final class SmokeTests: XCTestCase {
         XCTAssertThrowsError(try broadcast.publishTrack(name: "events"))
     }
 
-    func testFinishedBroadcastStaysUpUntilClosed() throws {
+    func testFinishedCatalogLeavesTheBroadcastUpUntilClosed() throws {
         let broadcast = try BroadcastProducer()
+        let catalog = try Media.CatalogProducer(broadcast: broadcast)
         let track = try broadcast.publishTrack(name: "status")
         try track.finish()
-        try broadcast.finish()
+        try catalog.finish()
         // Finishing the content leaves the broadcast up until it closes.
         _ = try broadcast.consume()
         try broadcast.close()
-        XCTAssertThrowsError(try broadcast.finish())
+        XCTAssertThrowsError(try catalog.finish())
     }
 
     func testVideoHintsReachMediaPublishApi() throws {

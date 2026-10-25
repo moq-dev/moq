@@ -777,6 +777,20 @@ impl MoqMediaCatalogProducer {
 			Ok(())
 		})
 	}
+
+	/// Finish the catalog, which ends the broadcast's content.
+	///
+	/// Finish every track first. The broadcast stays announced and keeps serving its finished
+	/// tracks, so a subscriber that arrives late can still read them, until the broadcast's
+	/// `close` takes it offline. How long to keep it up is yours to decide.
+	pub fn finish(&self) -> Result<(), MoqError> {
+		let _guard = crate::ffi::enter();
+		self.broadcast.upgrade().ok_or(MoqError::Closed)?.with_state(|state| {
+			state.catalog.finish()?;
+			state.ended = true;
+			Ok(())
+		})
+	}
 }
 
 /// A whole-frame importer for one codec track.

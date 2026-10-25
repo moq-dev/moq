@@ -60,7 +60,7 @@ struct Broadcast {
 	video: BTreeMap<String, hang::catalog::VideoConfig>,
 	audio: BTreeMap<String, hang::catalog::AudioConfig>,
 	finished: Finished,
-	/// Set by [`Publish::finish`]: the catalog is final, so a close leaves it alone.
+	/// Set by [`Publish::catalog_finish`]: the catalog is final, so a close leaves it alone.
 	ended: bool,
 }
 
@@ -321,7 +321,7 @@ impl Publish {
 
 	/// End the broadcast's content by finishing its catalog, with its entries still listed, so
 	/// a late subscriber finds the finished tracks until [`Self::close`].
-	pub fn finish(&mut self, broadcast: Id) -> Result<(), Error> {
+	pub fn catalog_finish(&mut self, broadcast: Id) -> Result<(), Error> {
 		let broadcast = self.broadcast_mut(broadcast)?;
 		let result = broadcast.catalog.finish();
 		broadcast.ended |= result.is_ok();
@@ -1183,7 +1183,7 @@ mod supervision_tests {
 			.write()
 			.unwrap_or_else(|_| unreachable!("test keeps its panic trigger open")) = true;
 		assert!(matches!(completion.finished().await, Err(Error::Panic)));
-		assert!(matches!(publish.finish(broadcast), Err(Error::Panic)));
+		assert!(matches!(publish.catalog_finish(broadcast), Err(Error::Panic)));
 		// The handle stays the caller's to close, and the close still ends the broadcast.
 		assert!(!consumer.is_closed());
 		assert!(matches!(publish.close(broadcast), Err(Error::Panic)));

@@ -2,8 +2,7 @@
 
 ## Goal
 
-When a broadcast ends right after its tracks finish, by `close()` or by a
-clean `finish()`, each IETF SUBSCRIBE_TRACKS PUBLISH for a finished track
+When a broadcast closes right after its tracks finish, each IETF SUBSCRIBE_TRACKS PUBLISH for a finished track
 ends with TRACK_ENDED, not INTERNAL_ERROR, in Rust and JS. A track left
 unfinished still ends in error.
 
@@ -26,9 +25,6 @@ Why a "finished cleanly" check on the PUBLISH's track handle can't work:
   source listing's end it drops the reader (`rs/moq-net/src/model/origin.rs`,
   the `Step::Listed` `Ok(None)` arm, around lines 3966-3973), and the source's
   queued `Finished` is lost.
-- `broadcast.finish()` is no better: a finished track is listed while held,
-  and the listing closes before the holds drop, so no `Finished` is queued at
-  all.
 
 Open design (maintainer to decide):
 

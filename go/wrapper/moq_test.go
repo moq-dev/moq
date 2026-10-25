@@ -143,8 +143,12 @@ func TestPublishAudioLifecycle(t *testing.T) {
 	}
 }
 
-func TestBroadcastFinishThenClose(t *testing.T) {
+func TestCatalogFinishThenClose(t *testing.T) {
 	broadcast, err := moq.NewBroadcastProducer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := moqmedia.NewCatalogProducer(broadcast)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +159,7 @@ func TestBroadcastFinishThenClose(t *testing.T) {
 	if err := track.Finish(); err != nil {
 		t.Fatal(err)
 	}
-	if err := broadcast.Finish(); err != nil {
+	if err := catalog.Finish(); err != nil {
 		t.Fatal(err)
 	}
 	// Finishing the content leaves the broadcast up until it closes.
@@ -165,8 +169,8 @@ func TestBroadcastFinishThenClose(t *testing.T) {
 	if err := broadcast.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := broadcast.Finish(); !errors.Is(err, moq.ErrClosed) {
-		t.Fatalf("Finish after Close = %v, want closed", err)
+	if err := catalog.Finish(); !errors.Is(err, moq.ErrClosed) {
+		t.Fatalf("catalog Finish after Close = %v, want closed", err)
 	}
 }
 

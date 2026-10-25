@@ -416,7 +416,7 @@ async def test_finish_serves_until_closed():
     track = broadcast.publish_track("status")
     track.write_frame(b"tail")
     track.finish()
-    broadcast.finish()
+    moq.media.CatalogProducer(broadcast).finish()
 
     # A late subscriber still drains the finished track while the broadcast is up.
     late = await consumer.request_broadcast("finish")

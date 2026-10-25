@@ -79,15 +79,6 @@ func (b *BroadcastProducer) Close() error {
 	return b.inner.Close()
 }
 
-// Finish ends the broadcast's content by finishing its catalog.
-//
-// Finish every track first. The broadcast stays announced and keeps serving its
-// finished tracks to late subscribers until [BroadcastProducer.Close] takes it
-// offline; how long to keep it up is yours to decide.
-func (b *BroadcastProducer) Finish() error {
-	return b.inner.Finish()
-}
-
 // BroadcastDynamic is a stream of subscriber-requested tracks.
 type BroadcastDynamic struct {
 	inner *ffi.MoqBroadcastDynamic

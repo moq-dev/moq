@@ -46,10 +46,11 @@ If you adopted the release line's async `drain()`, call `shutdown()` and then aw
 `MoqAudioInit::track` and `MoqVideoInit::track` are removed.
 Pass that name through `MoqMediaTarget::Named { name }` when constructing `MoqMediaTrackProducer::audio` or `video`; init records describe the codec and media only.
 
-### Broadcast `finish` no longer closes
+### Broadcast `finish` is removed
 
-`MoqBroadcastProducer::finish()` was a deprecated alias for `close()`; it now finishes only the catalog, and the broadcast stays up until `close()`.
+`MoqBroadcastProducer::finish()`, a deprecated alias for `close()`, is removed.
 Call `MoqBroadcastProducer::close()` where you called `finish()`.
+To end the content first, call `MoqMediaCatalogProducer::finish()`; the broadcast stays up until `close()`.
 
 ### JSON snapshot `delta_ratio` is `deltas`
 

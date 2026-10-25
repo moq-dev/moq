@@ -385,14 +385,15 @@ void main() {
     second.close();
   });
 
-  test('a finished broadcast stays up until closed', () {
+  test('a finished catalog leaves the broadcast up until closed', () {
     final broadcast = BroadcastProducer();
+    final catalog = moq_media.CatalogProducer(broadcast: broadcast);
     broadcast.publishTrack(name: 'status', info: null).finish();
-    broadcast.finish();
+    catalog.finish();
     // Finishing the content leaves the broadcast up until it closes.
     broadcast.consume();
     broadcast.close();
-    expect(() => broadcast.finish(), throwsA(isA<ClosedMoqException>()));
+    expect(() => catalog.finish(), throwsA(isA<ClosedMoqException>()));
   });
 
   test('microsecond fields read back as Durations', () {

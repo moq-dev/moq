@@ -707,11 +707,12 @@ mod supervision_tests {
 		// A dynamic handle outlives the consumed producer, so only an explicit close ends it.
 		let _dynamic = broadcast.dynamic().unwrap();
 		let consumer = broadcast.state.lock().unwrap().as_ref().unwrap().broadcast.consume();
+		let catalog = crate::media::MoqMediaCatalogProducer::new(broadcast.clone()).unwrap();
 		*trigger
 			.write()
 			.unwrap_or_else(|_| unreachable!("test keeps its panic trigger open")) = true;
 		assert!(matches!(completion.finished().await, Err(MoqError::Task { .. })));
-		assert!(matches!(broadcast.finish(), Err(MoqError::Task { .. })));
+		assert!(matches!(catalog.finish(), Err(MoqError::Task { .. })));
 		// The handle stays the caller's to close, and the close still ends the broadcast.
 		assert!(!consumer.is_closed());
 		assert!(matches!(broadcast.close(), Err(MoqError::Task { .. })));

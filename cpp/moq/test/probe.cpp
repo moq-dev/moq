@@ -172,13 +172,14 @@ int main() {
     CHECK(!moq::MediaTimebase::init(timebase_owner));
     ok(timebase_other->close(), "close timebase other");
 
-    // A finished broadcast stays up, still serving its finished tracks, until it closes.
+    // A finished catalog leaves the broadcast up, still serving its finished tracks, until it closes.
     auto finished = ok(moq::BroadcastProducer::init(), "finished broadcast");
+    auto finished_catalog = ok(moq::MediaCatalogProducer::init(finished), "finished catalog");
     ok(ok(finished->publish_track("status", {}), "publish track")->finish(), "finish track");
-    ok(finished->finish(), "broadcast finish");
+    ok(finished_catalog->finish(), "catalog finish");
     ok(finished->consume(), "consume a finished broadcast");
     ok(finished->close(), "close finished broadcast");
-    CHECK(!finished->finish());
+    CHECK(!finished_catalog->finish());
 
     // A synchronous error is a returned value, not an exception.
     auto unbound = ok(moq::Server::init({}), "server init");

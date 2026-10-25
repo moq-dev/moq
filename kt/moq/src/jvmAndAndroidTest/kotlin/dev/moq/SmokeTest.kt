@@ -242,14 +242,15 @@ class SmokeTest {
     }
 
     @Test
-    fun `a finished broadcast stays up until it ends`() {
+    fun `a finished catalog leaves the broadcast up until it ends`() {
         BroadcastProducer().use { broadcast ->
+            val catalog = CatalogProducer(broadcast)
             broadcast.publishTrack("status", null).finish()
-            broadcast.finish()
+            catalog.finish()
             // Finishing the content leaves the broadcast up until it ends.
             broadcast.consume().close()
             broadcast.end()
-            assertFailsWith<MoqException> { broadcast.finish() }
+            assertFailsWith<MoqException> { catalog.finish() }
         }
     }
 

@@ -241,9 +241,9 @@ int publish(
     ok(audio->finish(), "audio finish");
     ok(media->finish(), "video finish");
     if (!finish_ack.empty()) {
-        // Finishing finalizes the catalog; the broadcast stays up for the late readers until the
-        // close takes it offline.
-        ok(broadcast->finish(), "broadcast finish");
+        // Finishing the catalog ends the content; the broadcast stays up for the late readers
+        // until the close takes it offline.
+        ok(catalog->finish(), "catalog finish");
         const auto linger = std::chrono::seconds(10);
         std::printf(
             "finish ready linger_us=%llu\n",

@@ -362,12 +362,3 @@ class BroadcastProducer:
         Tracks already subscribed carry on to their own end. Closing again is a no-op.
         """
         self._inner.close()
-
-    def finish(self) -> None:
-        """End the broadcast's content by finishing its catalog.
-
-        Finish every track first. The broadcast stays announced and keeps serving its
-        finished tracks to late subscribers until :meth:`close` takes it offline; how long
-        to keep it up is yours to decide.
-        """
-        self._inner.finish()

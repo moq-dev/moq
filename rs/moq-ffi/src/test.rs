@@ -4129,7 +4129,8 @@ async fn finish_serves_finished_tracks_until_close() {
 	audio.finish().unwrap();
 	// A binding's garbage collector may release a finished handle before the broadcast closes.
 	drop(audio);
-	broadcast.finish().unwrap();
+	let catalog = crate::media::MoqMediaCatalogProducer::new(broadcast.clone()).unwrap();
+	catalog.finish().unwrap();
 
 	let late = await_announced(&consumer, "finish").await;
 	let track = late.subscribe_track("audio".into(), None).await.unwrap();
@@ -4142,7 +4143,7 @@ async fn finish_serves_finished_tracks_until_close() {
 
 	broadcast.close().unwrap();
 	await_unannounced(&announced).await;
-	assert!(matches!(broadcast.finish(), Err(MoqError::Closed)));
+	assert!(matches!(catalog.finish(), Err(MoqError::Closed)));
 }
 
 #[tokio::test]

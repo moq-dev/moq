@@ -40,10 +40,11 @@ If you adopted the release line's async `drain()`, call `session.shutdown()` and
 
 Audio and video init records no longer carry a track name. Pass that name on the media producer's named target instead; init records describe only the codec and media.
 
-### Broadcast `finish` no longer closes
+### Broadcast `finish` is removed
 
-`BroadcastProducer.finish()` was a deprecated alias for `close()`; it now finishes only the catalog, and the broadcast stays up until `close()`.
+`BroadcastProducer.finish()`, a deprecated alias for `close()`, is removed.
 Call `BroadcastProducer.close()` where you called `finish()`.
+To end the content first, call `moq.media.CatalogProducer.finish()`; the broadcast stays up until `close()`.
 
 ### JSON snapshot `delta_ratio` is `deltas`
 

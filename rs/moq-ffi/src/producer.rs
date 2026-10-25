@@ -97,7 +97,8 @@ pub(crate) struct BroadcastProducer {
 	pub(crate) timebases: std::collections::HashMap<usize, moq_mux::catalog::Timebase<Extra>>,
 	pub(crate) driver: Background,
 	pub(crate) finished: Finished,
-	/// Set by [`MoqBroadcastProducer::finish`]: the catalog is final, so a close leaves it alone.
+	/// Set by [`MoqMediaCatalogProducer::finish`](crate::media::MoqMediaCatalogProducer::finish): the
+	/// catalog is final, so a close leaves it alone.
 	pub(crate) ended: bool,
 }
 
@@ -345,20 +346,6 @@ impl MoqBroadcastProducer {
 		};
 		state.driver.check()?;
 		result
-	}
-
-	/// End the broadcast's content: finish its catalog, the hang end of content.
-	///
-	/// Finish every track first. The broadcast stays announced and keeps serving its finished
-	/// tracks, so a subscriber that arrives late can still read them, until
-	/// [`close`](Self::close) takes it offline. How long to keep it up is yours to decide.
-	pub fn finish(&self) -> Result<(), MoqError> {
-		let _guard = crate::ffi::enter();
-		self.with_state(|state| {
-			state.catalog.finish()?;
-			state.ended = true;
-			Ok(())
-		})
 	}
 }
 

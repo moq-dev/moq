@@ -2349,7 +2349,7 @@ fn publish_finish_serves_finished_tracks_until_closed() {
 	);
 	assert_eq!(moq_publish_media_finish(media), 0);
 
-	assert_eq!(moq_publish_finish(broadcast), 0);
+	assert_eq!(moq_publish_catalog_finish(broadcast), 0);
 
 	let consume = request_broadcast(origin, path);
 	let frame_cb = Callback::new();

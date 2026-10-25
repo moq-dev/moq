@@ -2189,7 +2189,7 @@ pub extern "C" fn moq_publish_close(broadcast: u32) -> i32 {
 	})
 }
 
-/// End a broadcast's content by finishing its catalog.
+/// Finish a broadcast's catalog, which ends its content.
 ///
 /// Finish every track first. The broadcast stays announced and keeps serving its finished
 /// tracks, so a subscriber that arrives late can still read them, until [moq_publish_close]
@@ -2197,10 +2197,10 @@ pub extern "C" fn moq_publish_close(broadcast: u32) -> i32 {
 ///
 /// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_publish_finish(broadcast: u32) -> i32 {
+pub extern "C" fn moq_publish_catalog_finish(broadcast: u32) -> i32 {
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
-		State::lock().publish.finish(broadcast)
+		State::lock().publish.catalog_finish(broadcast)
 	})
 }
 

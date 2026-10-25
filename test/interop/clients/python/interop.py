@@ -143,9 +143,9 @@ async def publish(
         audio.finish()
         media.finish()
         if finish_ack is not None:
-            # finish() finalizes the catalog; the broadcast stays up for the late readers until
-            # close() takes it offline. ACK never controls the linger.
-            producer.finish()
+            # Finishing the catalog ends the content; the broadcast stays up for the late readers
+            # until close() takes it offline. ACK never controls the linger.
+            catalog.finish()
             print(f"finish ready linger_us={LINGER // timedelta(microseconds=1)}", flush=True)
             await asyncio.sleep(LINGER.total_seconds())
             producer.close()

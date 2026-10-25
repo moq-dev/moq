@@ -39,10 +39,11 @@ Call `Session.Closed(ctx)` to wait for the drain and receive delivery failures, 
 
 Audio and video init records no longer carry a track name. Pass that name on the media producer's named target instead; init records describe only the codec and media.
 
-### Broadcast `Finish` no longer closes
+### Broadcast `Finish` is removed
 
-`BroadcastProducer.Finish()` was a deprecated alias for `Close()`; it now finishes only the catalog, and the broadcast stays up until `Close()`.
+`BroadcastProducer.Finish()`, a deprecated alias for `Close()`, is removed.
 Call `BroadcastProducer.Close()` where you called `Finish()`.
+To end the content first, call `media.CatalogProducer.Finish()`; the broadcast stays up until `Close()`.
 
 ### JSON snapshot `DeltaRatio` is `Deltas`
 

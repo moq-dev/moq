@@ -221,9 +221,9 @@ func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeo
 	if finishAck == "" {
 		return nil
 	}
-	// Finish finalizes the catalog; the broadcast stays up for the late readers until Close
-	// takes it offline. ACK never controls the linger.
-	if err := producer.Finish(); err != nil {
+	// Finishing the catalog ends the content; the broadcast stays up for the late readers
+	// until Close takes it offline. ACK never controls the linger.
+	if err := catalog.Finish(); err != nil {
 		return err
 	}
 	fmt.Printf("finish ready linger_us=%d\n", finishLinger.Microseconds())

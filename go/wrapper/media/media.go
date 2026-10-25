@@ -158,6 +158,13 @@ func (c *CatalogProducer) SetSection(name string, value any) error {
 // RemoveSection removes an application catalog section if present.
 func (c *CatalogProducer) RemoveSection(name string) error { return c.inner.RemoveSection(name) }
 
+// Finish finishes the catalog, which ends the broadcast's content.
+//
+// Finish every track first. The broadcast stays announced and keeps serving its
+// finished tracks to late subscribers until [moq.BroadcastProducer.Close] takes it
+// offline; how long to keep it up is yours to decide.
+func (c *CatalogProducer) Finish() error { return c.inner.Finish() }
+
 // NewAudioTrackProducer imports encoded audio frames on target.
 func NewAudioTrackProducer(broadcast *moq.BroadcastProducer, target Target, init AudioInit) (*TrackProducer, error) {
 	resolved, err := targetFFI(target)

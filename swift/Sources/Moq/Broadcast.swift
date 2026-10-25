@@ -99,13 +99,4 @@ public final class BroadcastProducer: Sendable {
     public func close() throws {
         try ffi.close()
     }
-
-    /// End the broadcast's content by finishing its catalog.
-    ///
-    /// Finish every track first. The broadcast stays announced and keeps serving its finished
-    /// tracks to late subscribers until `close()` takes it offline; how long to keep it up is
-    /// yours to decide.
-    public func finish() throws {
-        try ffi.finish()
-    }
 }
