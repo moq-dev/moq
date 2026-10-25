@@ -575,8 +575,9 @@ class Reader implements ResumeSource {
 
 	/**
 	 * The next run the serving copy gave up that `delivered` lacks and no other copy may still
-	 * deliver. Only the serving copy's verdicts count, as in Rust; a copy it replaced may still
-	 * deliver what is under its bound, so a run there waits until that copy no longer feeds.
+	 * deliver. Only the serving copy's verdicts count; a copy it replaced may still deliver what
+	 * is under its bound, so a run there waits until that copy no longer feeds. Mirrors the
+	 * Rust `Reader::poll_drop`.
 	 */
 	#tryDrop(delivered: Delivered): (Recv & { kind: "drop" }) | undefined {
 		if (this.#closed) return undefined;
