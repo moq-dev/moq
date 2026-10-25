@@ -115,7 +115,7 @@ moq-auth = { path = "../moq-auth", features = ["client", "serve"] }
 moq-clock = { path = "../moq-clock", features = ["manual", "sim"] }
 moq-congestion = { path = "../moq-congestion" }
 # The shared session bench fills FETCH runs through the hidden `fuzz` module.
-moq-net = { workspace = true, features = ["fuzz"] }
+moq-net = { path = "../moq-net", features = ["fuzz"] }
 moq-shaper = { path = "../moq-shaper", features = ["test"] }
 qmux = { workspace = true, features = ["tcp"] }
 rcgen = { workspace = true, features = ["pem", "ring", "x509-parser"] }
