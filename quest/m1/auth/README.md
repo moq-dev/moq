@@ -148,7 +148,6 @@ because `main` assigned 0x3A to NOT_FETCHABLE first.
   AUTH streams: a session starts on the token its SETUP or URL carried and its
   AUTH streams add the rest
 - [Binding auth polish](/quest/m1/auth/bindings-polish.md) - OBS reconnects with the presented token, Swift grant sequences
-- [Re-present a lost token](/quest/m1/auth/token-represent.md) - a token whose AUTH stream ended without a verdict is presented again on the live session
 
 ## Related
 
