@@ -2794,6 +2794,24 @@ test("an abort after the declared end reached by a datagram ends clean", () => {
 	expect(producer.closed.peek()).toBeNull();
 });
 
+test("a settled end survives a late group and an abort", async () => {
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
+	const subscriber = producer.subscribe();
+	const last = new GroupProducer(5);
+	producer.writeGroup(last);
+	last.finish();
+	producer.finishAt({ group: 6, frame: 0 });
+	await settle();
+	expect(producer.closed.peek()).toBeNull();
+
+	producer.writeGroup(new GroupProducer(4));
+	producer.abort(new Error("boom"));
+	expect(producer.closed.peek()).toBeNull();
+	expect((await subscriber.recvGroup())?.sequence).toBe(5);
+	// The abort cut nothing the end promised, so the subscriber ends cleanly.
+	expect(await subscriber.recvGroup()).toBeUndefined();
+});
+
 test("finish is not terminal: closed settles once the groups below the end finish", async () => {
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
 	const subscriber = producer.subscribe();

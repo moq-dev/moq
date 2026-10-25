@@ -2254,15 +2254,13 @@ impl TrackState {
 	/// An abort before the end settled wins over it: a group below the boundary was
 	/// still open, so the track was cut off rather than ended.
 	fn is_complete(&self) -> bool {
-		if self.settled {
-			return true;
-		}
-		// `sealed` is a declared end the last producer dropped short of.
+		// `sealed` is a declared end the last producer dropped short of. An abort still wins
+		// unless that end had already settled: a group below it was still open.
 		let reached = self.sealed
 			|| self
 				.final_sequence()
 				.is_some_and(|fin| self.reaches(fin) && !self.awaits_tail(fin));
-		reached && self.abort.is_none()
+		reached && (self.abort.is_none() || self.settled)
 	}
 
 	/// Whether the live edge reached `fin`, or a received copy's tail decides it instead:
@@ -2358,8 +2356,9 @@ impl TrackState {
 	}
 
 	/// Record that the end settled before a write that could reopen it: an abort, a late
-	/// group below the end, or a fresh grace for the tail. Whoever saw the clean end, a
-	/// reader or `closed()`, keeps it; a group the end still waited on was cut off instead.
+	/// group below the end, or a fresh grace for the tail. The clean outcome `closed()` saw
+	/// then stands, and a later abort ends readers cleanly. A late group or a wider
+	/// subscription is still served; it just cannot turn the outcome into an error.
 	fn latch_settled(&mut self) {
 		if !self.settled && self.abort.is_none() && self.is_settled() {
 			self.settled = true;
@@ -2513,11 +2512,14 @@ impl TrackState {
 	/// The track's outcome once final: `Ok` once its declared end is reached with every
 	/// cached group below it finished, which a later abort keeps, or the abort error.
 	fn poll_outcome(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
+		if self.settled {
+			return Poll::Ready(Ok(()));
+		}
 		if self.is_complete() {
 			// An abort after the end settled keeps the clean end; until then a group below it
 			// may still abort, which would cut the track off, so wait for each to finish. One
 			// that aborts leaves the outcome to the track's own abort or drop.
-			if !self.settled
+			if self.abort.is_none()
 				&& let Some(fin) = self.final_sequence()
 			{
 				for (_, slot) in self.lookup.range(..fin) {

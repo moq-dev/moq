@@ -817,6 +817,7 @@ export class Producer {
 		hooks.trackReleased = (producer) => producer.#state.closed;
 		hooks.trackFinished = (producer) => producer.#state.end.peek() !== undefined;
 		hooks.startTrack = (producer, served) => {
+			producer.#settle();
 			producer.#served = served;
 			producer.#owe();
 			for (const state of [producer.#state, ...producer.#sinks]) state.startChanged.update((rev) => rev + 1);
@@ -1096,6 +1097,7 @@ export class Producer {
 	// the aggregate. The wire layer observes this signal and emits SUBSCRIBE_UPDATE.
 	#updateSubscription(): void {
 		const combined = combineSubscriptions(this.#sinks);
+		this.#settle();
 		const retained = this.#state.info.peek()?.maxAge;
 		if (combined && retained !== undefined)
 			combined.maxDelay = Milli(Math.min(combined.maxDelay ?? Milli.zero, retained));
@@ -1322,6 +1324,7 @@ export class Producer {
 	// frame 0 passes its checked `start` and whether it is `late`; any other checks frame 0
 	// against this track when it lands.
 	#publish(group: GroupProducer, start?: Timestamp, late = false): void {
+		this.#settle();
 		const entry: CachedGroup = { group, mirrors: new Map<TrackState, GroupConsumer>(), arrived: now() };
 		this.#undrop(group.sequence);
 		group.closed.then((closed) => {
@@ -1476,6 +1479,7 @@ export class Producer {
 	// Late subscribers do NOT replay old datagrams (best-effort, unlike the group cache). A
 	// compressed track's rings share only `slice`: each holds its own lazy view of it.
 	#publishDatagram(datagram: Datagram, slice?: Stored): void {
+		this.#settle();
 		const { sequence, timestamp } = datagram;
 		this.#advance(sequence, false);
 		this.#arrive(sequence);
@@ -1600,7 +1604,9 @@ export class Producer {
 		this.#settle();
 	}
 
-	// Settle the outcome cleanly once the declared end is reached and settled.
+	// Settle the outcome cleanly once the declared end is reached and settled. Also run before a
+	// write that could reopen it (a late group below the end, a fresh grace for the tail): that
+	// write is still served, but the clean outcome stays final. Mirrors the Rust `latch_settled`.
 	#settle(): void {
 		if (this.#state.outcome.peek() === undefined && this.#settled()) this.#state.outcome.set(null);
 	}
@@ -1710,7 +1716,7 @@ export class Producer {
 		if (this.#state.closed.peek() !== undefined) return;
 		// A gap past the grace was lost before the abort rather than cut off by it.
 		if (abort && this.#tailPending) this.#arrivals.expire(now(), this.#grace());
-		if (abort && this.#settled()) abort = undefined;
+		if (abort && (this.#state.outcome.peek() === null || this.#settled())) abort = undefined;
 		// Nobody will finish these, so a subscriber that has not taken one yet never sees it.
 		// Not evicted: a reader already holding one keeps its frames and sees the abort.
 		const open = abort ? this.#cache.filter((entry) => entry.group.closed.peek() === undefined) : [];
