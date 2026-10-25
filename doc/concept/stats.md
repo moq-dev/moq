@@ -47,7 +47,8 @@ A TS import or export adds sections of its own, which
 cumulative and omitted at zero, and a gauge is omitted until it is measured.
 
 `mpegts` holds `streams`, one row per elementary stream keyed by its PID in
-decimal, and the stream-wide counters. A row has `track` (the track suffix),
+decimal (plus a `.si` row for an SI PID that dropped sections), and the
+stream-wide counters. A row has `track` (the track suffix),
 `class` (`audio`, `video`, or `data`; an unknown class reads as `data`),
 `units` (access units delivered), and `quiet`, a gauge: milliseconds of
 program clock since its last access unit. Its losses are `resyncs`, bytes

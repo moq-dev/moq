@@ -8,12 +8,11 @@ import (
 	"moq.dev/moq/internal/bridge"
 )
 
-// moq-ffi spells every duration as integer microseconds, because not every
-// target language has a duration type. These records mirror the generated ones
-// with time.Duration fields and convert at the boundary.
+// moq-ffi spells media timestamps as integer microseconds. These records mirror
+// the generated ones with time.Duration timestamps and convert at the boundary.
 
-// fromMicros saturates past time.Duration's ~292 years, which a peer's delay or
-// max age can exceed, rather than wrapping to a negative duration.
+// fromMicros saturates past time.Duration's ~292 years rather than wrapping to
+// a negative duration.
 func fromMicros(us uint64) time.Duration {
 	if us > uint64(math.MaxInt64/int64(time.Microsecond)) {
 		return time.Duration(math.MaxInt64)
@@ -77,17 +76,16 @@ type Subscription struct {
 }
 
 func (s Subscription) ffi() (ffi.MoqSubscription, error) {
-	maxDelay, err := bridge.OptionalDuration(s.MaxDelay, "max delay")
 	var ranges *[]ffi.MoqRange
 	if s.Ranges != nil {
 		ranges = &s.Ranges
 	}
 	return ffi.MoqSubscription{
-		Priority:   s.Priority,
-		MaxDelayUs: maxDelay,
-		Ranges:     ranges,
-		Order:      s.Order,
-	}, err
+		Priority: s.Priority,
+		MaxDelay: s.MaxDelay,
+		Ranges:   ranges,
+		Order:    s.Order,
+	}, bridge.NonNegative(s.MaxDelay, "max delay")
 }
 
 func subscriptionFFI(s *Subscription) (*ffi.MoqSubscription, error) {
@@ -117,20 +115,19 @@ func trackInfoFFI(info *TrackInfo) (*ffi.MoqTrackInfo, error) {
 	if info == nil {
 		return nil, nil
 	}
-	maxAge, err := bridge.OptionalDuration(info.MaxAge, "max age")
 	return &ffi.MoqTrackInfo{
 		Priority:  info.Priority,
-		MaxAgeUs:  maxAge,
+		MaxAge:    info.MaxAge,
 		Refresh:   info.Refresh,
 		Timescale: info.Timescale,
 		Compress:  info.Compress,
-	}, err
+	}, bridge.NonNegative(info.MaxAge, "max age")
 }
 
 func trackInfoFromFFI(info ffi.MoqTrackInfo) TrackInfo {
 	return TrackInfo{
 		Priority:  info.Priority,
-		MaxAge:    optFromMicros(info.MaxAgeUs),
+		MaxAge:    info.MaxAge,
 		Refresh:   info.Refresh,
 		Timescale: info.Timescale,
 		Compress:  info.Compress,
@@ -154,7 +151,7 @@ type ConnectionStats struct {
 
 func connectionStatsFromFFI(s ffi.MoqConnectionStats) ConnectionStats {
 	return ConnectionStats{
-		RTT:                  optFromMicros(s.RttUs),
+		RTT:                  s.Rtt,
 		EstimatedSendRateBps: s.EstimatedSendRateBps,
 		BytesSent:            s.BytesSent,
 		BytesReceived:        s.BytesReceived,
@@ -181,5 +178,5 @@ func grantFromFFI(g *ffi.MoqGrant) *Grant {
 	if g == nil {
 		return nil
 	}
-	return &Grant{Publish: g.Publish, Subscribe: g.Subscribe, Expires: optFromMicros(g.ExpiresUs)}
+	return &Grant{Publish: g.Publish, Subscribe: g.Subscribe, Expires: g.Expires}
 }

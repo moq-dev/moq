@@ -31,7 +31,11 @@ export interface AcceptProps {
 	 */
 	consume?: OriginProducer;
 
-	/** The moq-transport extensions to offer, each on unless set to `false`. */
+	/**
+	 * The moq-transport extensions to offer, each on unless set to `false`.
+	 *
+	 * @internal Tests only; nothing outside the package consumes it.
+	 */
 	extensions?: Extensions.Extensions;
 
 	/** The implementation this side advertises in SETUP; see the `implementation` connect option. */

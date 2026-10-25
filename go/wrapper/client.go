@@ -2,12 +2,29 @@ package moq
 
 import (
 	"context"
+	"runtime/debug"
+	"strings"
 	"sync"
 	"time"
 
 	ffi "moq.dev/moq-ffi/moq"
 	"moq.dev/moq/internal/bridge"
 )
+
+// implementation is this module's product token, which its sessions advertise
+// ahead of moq-ffi's. The module version comes from the build info Go embeds in
+// every binary; a source-tree build, which has none, reports dev.
+var implementation = func() string {
+	version := "dev"
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, module := range append([]*debug.Module{&info.Main}, info.Deps...) {
+			if module.Path == "moq.dev/moq" && module.Replace == nil && strings.HasPrefix(module.Version, "v") {
+				version = strings.TrimPrefix(module.Version, "v")
+			}
+		}
+	}
+	return "moq-go/" + version
+}()
 
 // ClientConfig configures a client created with Dial, mirroring moq-ffi's
 // MoqClientConfig. The zero value dials with the native defaults: an empty
@@ -109,14 +126,21 @@ func (c ClientConfig) ffi() (ffi.MoqClientConfig, error) {
 	if err != nil {
 		return ffi.MoqClientConfig{}, err
 	}
-	// Each duration converts on its own; the first negative one fails the whole config.
-	us := func(name string, d *time.Duration) *uint64 {
-		if err != nil {
-			return nil
+	// The generated converter panics on a negative duration, so the first one fails the whole config.
+	for _, d := range []struct {
+		name  string
+		value *time.Duration
+	}{
+		{"connect timeout", c.Timeout},
+		{"race", c.Race},
+		{"resolution delay", c.ResolutionDelay},
+		{"QUIC idle timeout", c.QUIC.IdleTimeout},
+		{"QUIC keep-alive", c.QUIC.KeepAlive},
+		{"websocket delay", c.WebSocket.Delay},
+	} {
+		if err := bridge.NonNegative(d.value, d.name); err != nil {
+			return ffi.MoqClientConfig{}, err
 		}
-		var out *uint64
-		out, err = bridge.OptionalDuration(d, name)
-		return out
 	}
 	// Go's empty string is the native null: none of these fields accepts "".
 	str := func(s string) *string {
@@ -138,9 +162,9 @@ func (c ClientConfig) ffi() (ffi.MoqClientConfig, error) {
 	cfg := ffi.MoqClientConfig{
 		Bind:              str(c.Bind),
 		Versions:          c.Versions,
-		TimeoutUs:         us("connect timeout", c.Timeout),
-		RaceUs:            us("race", c.Race),
-		ResolutionDelayUs: us("resolution delay", c.ResolutionDelay),
+		Timeout:         c.Timeout,
+		Race:            c.Race,
+		ResolutionDelay: c.ResolutionDelay,
 		Tls: ffi.MoqClientTls{
 			Insecure:     c.TLS.Insecure,
 			Roots:        c.TLS.Roots,
@@ -152,20 +176,18 @@ func (c ClientConfig) ffi() (ffi.MoqClientConfig, error) {
 		},
 		Quic: ffi.MoqQuicConfig{
 			MaxStreams:        maxStreams,
-			IdleTimeoutUs:     us("QUIC idle timeout", c.QUIC.IdleTimeout),
-			KeepAliveUs:       us("QUIC keep-alive", c.QUIC.KeepAlive),
+			IdleTimeout:       c.QUIC.IdleTimeout,
+			KeepAlive:         c.QUIC.KeepAlive,
 			Gso:               c.QUIC.GSO,
 			MtuDiscovery:      c.QUIC.MTUDiscovery,
 			CongestionControl: c.QUIC.CongestionControl,
 			Qlog:              str(c.QUIC.Qlog),
 			Keylog:            keylog,
 		},
-		Websocket: ffi.MoqWebSocketConfig{Enabled: c.WebSocket.Enabled, DelayUs: us("websocket delay", c.WebSocket.Delay)},
-		Once:      c.Once,
-		Backoff:   backoff,
-	}
-	if err != nil {
-		return ffi.MoqClientConfig{}, err
+		Websocket:      ffi.MoqWebSocketConfig{Enabled: c.WebSocket.Enabled, Delay: c.WebSocket.Delay},
+		Once:           c.Once,
+		Backoff:        backoff,
+		Implementation: &implementation,
 	}
 	if c.Publish != nil {
 		cfg.Publish = &c.Publish.inner
@@ -201,10 +223,10 @@ const RetryForever time.Duration = -1
 func (b Backoff) ffi() (ffi.MoqBackoff, error) {
 	var out ffi.MoqBackoff
 	var err error
-	if out.InitialUs, err = backoffMicros("backoff initial", b.Initial); err != nil {
+	if out.Initial, err = backoffDuration("backoff initial", b.Initial); err != nil {
 		return out, err
 	}
-	if out.MaxUs, err = backoffMicros("backoff max", b.Max); err != nil {
+	if out.Max, err = backoffDuration("backoff max", b.Max); err != nil {
 		return out, err
 	}
 	if b.Multiplier != 0 {
@@ -214,26 +236,20 @@ func (b Backoff) ffi() (ffi.MoqBackoff, error) {
 	// two are spelled apart here: Backoff{} keeps the default and forever is
 	// explicit at the call site.
 	if b.Timeout == RetryForever {
-		forever := uint64(0)
-		out.TimeoutUs = &forever
-	} else if out.TimeoutUs, err = backoffMicros("backoff timeout", b.Timeout); err != nil {
+		forever := time.Duration(0)
+		out.Timeout = &forever
+	} else if out.Timeout, err = backoffDuration("backoff timeout", b.Timeout); err != nil {
 		return out, err
 	}
 	return out, nil
 }
 
-// backoffMicros leaves a zero duration unset and floors a positive one at 1us,
-// so a sub-microsecond duration doesn't truncate to an unpaced zero.
-func backoffMicros(name string, d time.Duration) (*uint64, error) {
+// backoffDuration leaves a zero duration unset and refuses a negative one.
+func backoffDuration(name string, d time.Duration) (*time.Duration, error) {
 	if d == 0 {
 		return nil, nil
 	}
-	us, err := bridge.Duration(d, name)
-	if err != nil {
-		return nil, err
-	}
-	us = max(us, 1)
-	return &us, nil
+	return &d, bridge.NonNegative(&d, name)
 }
 
 // Client is a connected MoQ client with automatic origin wiring. When no origin
@@ -317,7 +333,7 @@ func (c *Client) Close() error {
 	c.closeOnce.Do(func() {
 		if c.session != nil {
 			c.session.Shutdown()
-            c.closeErr = c.session.Closed(context.Background())
+			c.closeErr = c.session.Closed(context.Background())
 		}
 		if c.inner != nil {
 			c.inner.Cancel()

@@ -131,7 +131,7 @@ async fn setup_through(
 
 	let subscriber = moq_tokio::origin::spawn();
 	let session =
-		moq_tokio::transport::Session::new(web::Session::raw(conn.clone()), moq_net::transport::Binding::InBand);
+		moq_tokio::transport::Session::new(web::Session::raw(conn.clone()), moq_net::transport::Address::Setup);
 	let (client, driver) = moq_net::Client::new()
 		.with_versions(version.into())
 		.with_subscriber(subscriber.clone())
@@ -284,7 +284,7 @@ async fn the_less_urgent_partial_frame_gives_way(version: &str, profile: Option<
 	assert_eq!(setup.conn.stats().credit.evicted, 1, "{version}");
 	let session = moq_tokio::transport::Session::new(
 		web::Session::raw(setup.conn.clone()),
-		moq_net::transport::Binding::InBand,
+		moq_net::transport::Address::Setup,
 	);
 	assert_eq!(
 		moq_net::transport::Stats::streams_evicted(&moq_net::transport::poll::Session::stats(&session)),
@@ -432,7 +432,7 @@ async fn reversed(version: &str) -> Reversed {
 	broadcast.announce(Default::default()).expect("announce");
 	let subscriber = moq_tokio::origin::spawn();
 	let session = |conn: driver::Connection| {
-		moq_tokio::transport::Session::new(web::Session::raw(conn), moq_net::transport::Binding::InBand)
+		moq_tokio::transport::Session::new(web::Session::raw(conn), moq_net::transport::Address::Setup)
 	};
 	// A moq-lite client's driver sends its half of the handshake, so it runs meanwhile.
 	let client_session = tokio::spawn({
@@ -490,10 +490,12 @@ impl Reversed {
 					false => conn.open_uni(Default::default()).await.map(|send| (send, None)),
 				}
 				.expect("open");
-				if send.write_all(&bytes).await.is_ok() {
-					std::future::pending::<()>().await;
+				// The credit an eviction frees can reach the writer before the stop does, letting
+				// the whole write queue, so only the stop itself proves the stream was stopped.
+				let _ = send.write_all(&bytes).await;
+				if let Ok(Some(_)) = send.stopped().await {
+					let _ = tx.send(());
 				}
-				let _ = tx.send(());
 			});
 		}
 		for _ in 0..stopped {
@@ -647,7 +649,7 @@ async fn javascript_partial_frame_gives_way(version: &str) {
 		.with_subscriber(origin.clone())
 		.accept(
 			moq_net::time::Instant::now(),
-			moq_tokio::transport::Session::new(session, moq_net::transport::Binding::Uri),
+			moq_tokio::transport::Session::new(session, moq_net::transport::Address::Uri),
 		)
 		.await
 		.expect("server handshake");

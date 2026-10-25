@@ -3237,14 +3237,18 @@ async fn service_layer_survives_roundtrip() {
 	let data = include_bytes!("test_data/bbb.ts");
 	let nit = make_long_section(0x40, 0x1234, 1, 0, 0, &[0xff, 0x01]);
 
-	// Prepend a synthetic NIT Actual packet (0x0010); prepend keeps bbb's alignment.
-	// Twice, because real SI repeats every few seconds: the repetition must collapse
-	// into the same single committed section rather than cutting a second group. The
-	// repeat varies the continuity counter so it reaches the store (an identical
-	// packet would be dropped as a TS duplicate before reassembly).
-	let mut input = si_packet(0x0010, &nit);
+	// Append a synthetic NIT Actual packet (0x0010), past bbb's PCRs: SI before the
+	// program clock can place it is dropped, which is where bbb's own SDT sits, so it is
+	// repeated there too. The NIT goes twice, because real SI repeats every few seconds:
+	// the repetition must collapse into the same single committed section rather than
+	// cutting a second group. Each repeat advances the continuity counter so it reaches
+	// the store (an identical packet would be dropped as a TS duplicate before reassembly).
+	let mut input = data.to_vec();
+	input.extend_from_slice(&si_packet(0x0010, &nit));
 	input.extend_from_slice(&si_packet_cc(0x0010, &nit, 1));
-	input.extend_from_slice(&data[..]);
+	let mut sdt = data[..188].to_vec();
+	sdt[3] = (sdt[3] & 0xf0) | ((sdt[3] + 1) & 0x0f);
+	input.extend_from_slice(&sdt);
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
@@ -3334,9 +3338,16 @@ async fn service_layer_survives_roundtrip() {
 	}
 	assert!(checked_pat, "missing PAT");
 
-	// Re-import: the SDT and NIT must come back byte-for-byte.
+	// The SDT and NIT go out byte-for-byte.
+	assert_eq!(ts_sections(&ts, 0x0011), vec![sdt], "the SDT survived byte-for-byte");
+	assert_eq!(
+		ts_sections(&ts, 0x0010),
+		vec![Bytes::from(nit)],
+		"the NIT survived byte-for-byte"
+	);
+
+	// Re-import: the identity comes back.
 	let mut broadcast2 = moq_net::broadcast::Info::new().produce();
-	let consumer2 = broadcast2.consume();
 	let catalog2 = crate::catalog::Producer::new(
 		&mut broadcast2,
 		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
@@ -3345,10 +3356,14 @@ async fn service_layer_survives_roundtrip() {
 	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.reserve());
 	import2.decode(&BytesMut::from(ts.as_ref())).unwrap();
 	import2.finish().unwrap();
-	assert!(
-		!import2.stats().streams.contains_key(&0x0010),
-		"the network entry names captured SI, not a PID to count"
-	);
+	// Its row, if any, is the SI track's, never an unclaimed PID's.
+	if let Some(nit) = import2.stats().streams.get(&0x0010) {
+		assert_eq!(
+			(nit.track.as_str(), nit.refused),
+			(".si", 0),
+			"the network entry names captured SI, not a PID to count: {nit:?}"
+		);
+	}
 
 	let snapshot2 = catalog2.snapshot();
 	let program2 = snapshot2
@@ -3366,17 +3381,6 @@ async fn service_layer_survives_roundtrip() {
 		"program number survived"
 	);
 	assert_eq!(program2.pmt_pid, program.pmt_pid, "PMT PID survived");
-	assert_eq!(snapshot2.ext.mpegts.si, si, "every SI entry survived the round-trip");
-	assert_eq!(
-		read_si_sections(&consumer2, &snapshot2.ext.mpegts.si[&0x0011][&0x42].track).await,
-		vec![sdt],
-		"the SDT survived byte-for-byte"
-	);
-	assert_eq!(
-		read_si_sections(&consumer2, &snapshot2.ext.mpegts.si[&0x0010][&0x40].track).await,
-		vec![Bytes::from(nit)],
-		"the NIT survived byte-for-byte"
-	);
 }
 
 /// Each SI PID must be re-emitted on its own interval, independently of the PSI cadence
@@ -4142,24 +4146,17 @@ async fn multi_packet_si_section_is_captured() {
 	let input = si_packets_multi(0x0011, &sdt);
 	assert!(input.len() > 188, "the SDT must span more than one TS packet");
 
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let consumer = broadcast.consume();
-	let catalog = crate::catalog::Producer::new(
-		&mut broadcast,
-		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
-	)
-	.unwrap();
-	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
-	import.decode(&BytesMut::from(&input[..])).unwrap();
-	import.finish().unwrap();
+	let mut rig = si_rig();
+	rig.import.decode(&BytesMut::from(&input[..])).unwrap();
+	rig.import.finish().unwrap();
 
-	let si = catalog.snapshot().ext.mpegts.si.clone();
+	let si = rig.catalog.snapshot().ext.mpegts.si.clone();
 	let entry = si
 		.get(&0x0011)
 		.and_then(|tables| tables.get(&0x42))
 		.expect("an SDT entry");
 	assert_eq!(
-		read_si_sections(&consumer, &entry.track).await,
+		read_si_sections(&rig.consumer, &entry.track).await,
 		vec![Bytes::from(sdt)],
 		"the multi-packet SDT was reassembled and captured byte-for-byte"
 	);
@@ -4174,6 +4171,13 @@ struct SiRig {
 }
 
 fn si_rig() -> SiRig {
+	let mut rig = si_import();
+	rig.import.decode(&BytesMut::from(&si_clock(1)[..])).unwrap();
+	rig
+}
+
+/// A rig with no input decoded yet.
+fn si_import() -> SiRig {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(
@@ -4187,6 +4191,16 @@ fn si_rig() -> SiRig {
 		catalog,
 		consumer,
 	}
+}
+
+/// A program clock for SI-only input to be placed by: a PAT, a PMT for `program` with no
+/// streams, and one PCR interval.
+fn si_clock(program: u16) -> Vec<u8> {
+	use super::fixture::{Flags, MS, Mux};
+	let mut mux = Mux::default();
+	mux.pat(&[(program, 0x20)]).pmt(0x20, program, 0x1ff, &[], 0);
+	mux.packet(0x1ff, Flags::pcr(0)).packet(0x1ff, Flags::pcr(40 * MS));
+	mux.out
 }
 
 /// #2881: a multi-section table revised one section at a time must never publish a
@@ -4279,9 +4293,11 @@ fn si_rig_selecting(program: u16) -> SiRig {
 		import,
 		catalog,
 		consumer,
-	} = si_rig();
+	} = si_import();
+	let mut import = import.with_program(program);
+	import.decode(&BytesMut::from(&si_clock(program)[..])).unwrap();
 	SiRig {
-		import: import.with_program(program),
+		import,
 		catalog,
 		consumer,
 	}
@@ -4440,10 +4456,11 @@ async fn an_sdt_revision_dropping_the_service_retires_it() {
 	.unwrap();
 	let mut capture = crate::container::ts::si::Capture::new(broadcast, catalog.clone());
 	capture.select(1);
+	// One PCR interval, so the program clock places SI.
+	capture.pcr(0, 0);
+	capture.pcr(40 * 27_000, 10);
 	let mut revise = |version: u8, services: &[(u16, &[u8])]| {
-		capture
-			.section(0x0011, sdt_actual(version, 0, 0, services).into())
-			.unwrap();
+		assert!(capture.section(0x0011, sdt_actual(version, 0, 0, services).into(), 10));
 		capture.flush(Timestamp::ZERO, true).unwrap();
 		catalog
 			.snapshot()
@@ -4485,8 +4502,11 @@ async fn a_corrupt_sdt_keeps_the_last_good_snapshot() {
 	.unwrap();
 	let mut capture = crate::container::ts::si::Capture::new(broadcast, catalog.clone());
 	capture.select(1);
+	// One PCR interval, so the program clock places SI.
+	capture.pcr(0, 0);
+	capture.pcr(40 * 27_000, 10);
 	let mut feed = |section: Vec<u8>| {
-		capture.section(0x0011, section.into()).unwrap();
+		assert!(capture.section(0x0011, section.into(), 10));
 		capture.flush(Timestamp::ZERO, true).unwrap();
 		catalog
 			.snapshot()
@@ -4526,8 +4546,11 @@ async fn a_partial_sdt_revision_keeps_the_last_good_snapshot() {
 	.unwrap();
 	let mut capture = crate::container::ts::si::Capture::new(broadcast, catalog.clone());
 	capture.select(1);
+	// One PCR interval, so the program clock places SI.
+	capture.pcr(0, 0);
+	capture.pcr(40 * 27_000, 10);
 	let mut feed = |section: Vec<u8>| {
-		capture.section(0x0011, section.into()).unwrap();
+		assert!(capture.section(0x0011, section.into(), 10));
 		capture.flush(Timestamp::ZERO, true).unwrap();
 		catalog
 			.snapshot()
@@ -4572,12 +4595,15 @@ async fn a_selection_filters_eit_schedule() {
 	.unwrap();
 	let mut capture = crate::container::ts::si::Capture::new(broadcast, catalog.clone());
 	capture.select(1);
+	// One PCR interval, so the program clock places SI.
+	capture.pcr(0, 0);
+	capture.pcr(40 * 27_000, 10);
 	let schedule = |service: u16| {
 		let body = [0x00, 0x01, 0x00, 0x02, 0x00, 0x50, service as u8];
 		make_long_section(0x50, service, 0, 0, 0, &body)
 	};
 	for service in [1, 2] {
-		capture.section(0x0012, schedule(service).into()).unwrap();
+		assert!(capture.section(0x0012, schedule(service).into(), 10));
 	}
 	capture.finish(Timestamp::ZERO).unwrap();
 
@@ -4612,18 +4638,29 @@ async fn a_selected_programs_si_survives_export() {
 	let mut reader = TsPacketReader::new(Cursor::new(ts.as_ref()));
 	while reader.read_ts_packet().unwrap().is_some() {}
 
-	let mut again = si_rig();
-	again.import.decode(&BytesMut::from(ts.as_ref())).unwrap();
-	again.import.finish().unwrap();
-	let si = again.catalog.snapshot().ext.mpegts.si.clone();
-	let sdt = read_si_sections(&again.consumer, &si[&0x0011][&0x42].track).await;
+	let sdt = ts_sections(&ts, 0x0011);
 	assert_eq!(sdt.len(), 1, "one SDT actual section");
 	assert_sdt_lists_only(&sdt[0], 0, 2, b"Two");
 	assert_eq!(
-		read_si_sections(&again.consumer, &si[&0x0012][&0x4E].track).await,
+		ts_sections(&ts, 0x0012),
 		vec![eit_pf(2, 0), eit_pf(2, 1)],
 		"only program 2's EIT"
 	);
+}
+
+/// The sections `ts` carries on `pid`, each whole in one packet. Read off the wire rather
+/// than by a re-import: SI an export leads with precedes its PCRs, so an import drops it
+/// until it repeats.
+fn ts_sections(ts: &[u8], pid: u16) -> Vec<Bytes> {
+	ts.chunks(188)
+		.filter(|p| (u16::from(p[1] & 0x1f) << 8 | u16::from(p[2])) == pid && p[1] & 0x40 != 0)
+		.map(|p| {
+			let pointer = if p[3] & 0x20 != 0 { 5 + usize::from(p[4]) } else { 4 };
+			let start = pointer + 1 + usize::from(p[pointer]);
+			let len = 3 + (usize::from(p[start + 1] & 0x0f) << 8 | usize::from(p[start + 2]));
+			Bytes::copy_from_slice(&p[start..start + len])
+		})
+		.collect()
 }
 
 /// #2842: SDT other sections from two networks that reuse a transport_stream_id
@@ -6604,7 +6641,8 @@ async fn si_rapid_revisions_are_rate_bounded() {
 #[tokio::test(start_paused = true)]
 async fn overlapping_capture_teardown_keeps_the_survivors_mapping() {
 	let sdt = make_long_section(0x42, 1, 0, 0, 0, &[0xaa; 4]);
-	let mut input = si_packet(0x0011, &sdt);
+	let mut input = si_clock(1);
+	input.extend_from_slice(&si_packet(0x0011, &sdt));
 	input.extend_from_slice(&si_packet_cc(0x0011, &sdt, 1));
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();

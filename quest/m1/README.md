@@ -95,24 +95,27 @@ arithmetic, DASH init readiness, dot-only names) and ffprobe segment
 conformance; the audit's segment-finalization redesign is folded into
 Catalog HLS field.
 
+Added 2026-10-24 (maintainer-requested pre-cut audit of main): remote
+crashes and amplification in media and RTMP parsing, lite announce bounds,
+JS track terminal causes, browser element teardown, and smaller Rust/JS
+divergences, under one epic; its redesign proposals went to m2.
+
 ## Required
 
 - [moq-congestion](/quest/m1/congestion/README.md) - one QUIC congestion-control crate with a transport-independent trait, run by `moq-quic` and published for noq
 - [Release audit findings](/quest/m1/release-audit/README.md) - resolve newly identified resource, parser, playback, and interoperability risks before the cut
+- [Pre-cut audit findings](/quest/m1/cut-audit/README.md) - fix the crashes, hostile-input costs, and correctness bugs the 2026-10-24 audit of main found
 - [Cancelled moq-transport requests stop](/quest/m1/ietf-request-cancel.md) - a cancelled request releases its state even when the peer withholds credit
 - [Empty segments refused](/quest/m1/empty-segments.md) - `room//cam` fails loud instead of naming `room/cam`
 - [In-band auth](/quest/m1/auth/README.md) - a session tells its peer what it may publish and subscribe to, unions tokens presented in band, and fails loud on an out-of-scope publish
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - prove shared routing contracts, implement per-origin routes, and connect outbound local clusters
 - [No reused track names](/quest/m1/name-reuse.md) - no first-party publisher re-creates a finished track under its old name
 - [Routing guide](/quest/m1/routing-guide.md) - concepts and practical outbound federation setup
-- [One stuck check per packet](/quest/m1/quic-stuck-scan.md) - a RESET_STREAM storm into a shrunk window costs one stream scan per packet
 - [Generated C bindings](/quest/m1/c/README.md) - C generated from moq-ffi ships as `moq-c` 0.8.0 and replaces the hand-written libmoq
 - [Exact timestamps in every binding](/quest/m1/binding-timestamps.md) - bindings carry `{value, scale}` timestamps instead of lossy microseconds
-- [Binding durations](/quest/m1/ffi-durations.md) - moq-ffi takes and returns durations as a typed duration instead of `_us` integers, so wrappers stop converting by hand
 - [moq-transport passthrough](/quest/m1/ietf-extension/README.md) - object IDs, properties, end status, datagram objects, and unknown track properties survive moq-transport -> moq-relay (and a relay cluster) -> moq-transport; moxygen's moq-test sections 1-7 pass nightly under the relay conformance profile, except cases that use a subgroup other than 0
 - [Announcement takeover](/quest/m1/announce-takeover.md) - a new independent route explicitly continues instances served through its predecessor, with shared Rust/JS semantics and lite-07 wire
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - a lite-07 SUBSCRIBE asks for past and live ranges with absolute or relative ends, in either order, and replaces FETCH; merged ranges never starve a subscriber; relays fill misses by range, including over moq-transport
-- [Updates reach fills](/quest/m1/fill-updates.md) - a reader's new priority, delay, order, or earlier start reaches fills already queued or taken
 - [A widened max age re-offers cached groups](/quest/m1/resolved-demand.md) - a warm relay serves a reader with a wider max age the cached groups a cold relay would, with no wire change
 - [Drop set](/quest/m1/drop-set.md) - each cursor judges missing groups against its own budget, so a narrow reader drops promptly and a widening re-offers groups already reported dropped on lite-07
 - [Broadcast archives](/quest/m1/archive/README.md) - ANNOUNCE, TRACKS, and a SUBSCRIBE per track record every track under a prefix to any object_store, a host serves a stored broadcast back, and the catalog drops its archive pointer for an opt-in `hls` field
@@ -121,8 +124,6 @@ Catalog HLS field.
 - [Moxygen minimal interop](/quest/m1/smoke-moxygen.md) - waiting on Moxygen to send a registered filter type, then the smoke lane stops hiding its failure
 - [More tests under load](/quest/m1/test-flakes-2/README.md) - the second round of load-only failures, one quest per flake, fixed at the cause
 - [Broadcast lifecycle](/quest/m1/broadcast-lifecycle/README.md) - broadcasts are online or offline with no finished state in moq-net, finished-broadcast retention is a fixed moq-mux policy, and each linger timer has one meaning
-- [fMP4 edit lists](/quest/m1/fmp4-edit-lists.md) - the fMP4 importer applies edit lists to frame timestamps, so the interop AAC tone passes the phase check
-- [fMP4 passthrough sync start](/quest/m1/fmp4-passthrough-sync.md) - a passthrough video import that starts mid-GOP publishes nothing before its first sync sample
 - [A smaller, safer API than release](/quest/m1/api-audit/README.md) - every surface added since release has a consumer or is gone, overlapping operations are collapsed, names mirror across Rust, JS, and the bindings, and every break says how to migrate
 - [moq-transport 18 and 22 only](/quest/m1/ietf-drop/README.md) - drafts 14-17 and 19-21 are deleted from Rust, JS, tests, interop lanes, and docs, removing the legacy control-stream adapter and its request limit
 - [moq-quic's API improves on quinn's](/quest/m1/quic-api/README.md) - moq-quic and both QUIC drivers ship one mirrored API: `send::`/`recv::` namespaces, one error per direction, consuming terminal operations, plain configs, no quinn baggage
@@ -138,33 +139,20 @@ Catalog HLS field.
 - [A/V clock](/quest/m1/av-clock.md) - the audio playhead drives Sync.reference while audio plays, through per-track sync handles
 - [Container reads drop backfill](/quest/m1/read-backfill.md) - the JS container consumer drops groups below its read cursor like Rust
 - [Buffered playback subscribes in ascending order](/quest/m1/buffered-ascending.md) - a buffered `<moq-watch>` asks for the oldest group first, so a voice reply's opening arrives first, and audio's head hold shrinks to the floor
-- [JS reload config](/quest/m1/js-reload-config.md) - `@moq/net` reload takes Rust's `healthy` backoff and no ignored `extensions`
 - [TS fidelity and recovery](/quest/m1/ts-reliability/README.md) - both modes have explicit profiles, automated validation, loss tests, and a dedicated guide
-- [Lowered resume floor](/quest/m1/resume-floor.md) - lowering a resumed reader's floor re-offers groups only a released copy cached
 - [WebGPU on Safari](/quest/m1/webgpu-safari.md) - the WebGPU renderer is verified on Safari 26 for macOS and iOS
-- [JSON encoder options without a downcast](/quest/m1/json-encoder-options.md) - moq-mux's `json_snapshot` takes its `deltas` switch through a typed path any custom catalog entry can use, not an `Any` downcast
 - [CI housekeeping](/quest/m1/ci-housekeeping.md) - validate queue nextest at 24 threads and remove the actionlint queue ignore after its release
 - [Main is no slower than release](/quest/m1/release-perf/README.md) - every benchmark where main is slower than release is fixed or accepted with a reason, checked by a final paired run before the cut
 - [Drop announce="never"](/quest/m1/publish-announce-never.md) - `@moq/publish` offers only announce modes a watcher can reach
-- [Drop unused OBS outputs](/quest/m1/obs-output-variants.md) - the plugin registers only `moq_output`, so the broken audio-only variant is gone
 - [API Extractor checks](/quest/m1/api-extractor-checks.md) - API Extractor fails a PR on a forgotten export, an unresolved declaration, or an undocumented export, replacing the hand-rolled `.d.ts` checkers
 - [Generated JS API reference](/quest/m1/js-api-reference.md) - the doc site renders an API reference for every `@moq/*` package from API Extractor's doc model
-- [IETF lazy discovery](/quest/m1/ietf-lazy-discovery.md) - JS moq-transport sessions never hold overlapping SUBSCRIBE_NAMESPACE requests at a peer that refuses them
 - [Interop coverage](/quest/m1/interop-coverage/README.md) - the riskiest moq-transport features moq-net exposes get cross-implementation tests over drafts 18 and 22
 - [AMF0 exact reads](/quest/m1/rtmp-amf0-exact-reads.md) - a truncated RTMP string fails with `UnexpectedEof` instead of parsing NUL padding
-- [HLS URL redaction](/quest/m1/hls-url-redaction.md) - no moq-hls error prints a signed URL's query or userinfo
-- [HLS redirect base](/quest/m1/hls-redirect-base.md) - relative playlist URIs resolve against a same-origin redirect's final URL
 - [DASH init readiness](/quest/m1/dash-init-ready.md) - a DASH manifest lists the renditions whose init exists instead of waiting on one that is stuck
-- [HLS dot-only names](/quest/m1/hls-dot-names.md) - a `.` or `..` rendition is refused instead of advertising a URL outside its directory
-- [MSF duplicate init](/quest/m1/msf-duplicate-init.md) - an MSF catalog refuses a repeated `initDataList` id instead of resolving it last-wins
-- [Binding peer version](/quest/m1/binding-peer-version.md) - every binding names itself ahead of the Rust core in the SETUP Implementation parameter
 - [Calibrate the paired nightly benchmarks](/quest/m1/bench-ci.md) - A/A and deliberately slowed Nightly runs set the paired comparison's threshold, so its regression alerts can be trusted
-- [HLS export tests over a session](/quest/m1/hls-session-tests.md) - an integration suite records and serves through a real moq-net session, so a publisher disconnect, finish, or takeover ends the cursor and playlists as specified
-- [HLS recorder in the CLI](/quest/m1/hls-record-cli.md) - `export hls --output <dir>` records playlists and segments to a directory
+- [HLS takeover leak](/quest/m1/hls-takeover-leak.md) - a replaced instance's recording cursor never yields the replacement's media, and ends or fails instead of stalling
 - [HLS and DASH segment conformance](/quest/m1/hls-conformance.md) - nightly ffprobe checks that advertised timing, sync flags, and bytes match the media served
 - [Unbounded groups](/quest/m1/unbounded-groups/README.md) - groups and frames lose their size caps; the cache sheds parts of a group under pressure and refills the holes in place
-- [Clean close reason](/quest/m1/clean-close-reason.md) - a session that closes on its own is never recorded as `Unauthorized` because its in-band credentials closed with it
-- [Metric-safe tiers](/quest/m1/metric-tier.md) - tiers are `[A-Za-z0-9._-]` paths refused where they are set, and every metric label value is escaped
 
 ## Related
 
