@@ -92,10 +92,10 @@ int32_t moq_publish_demand_cancel(uint32_t watcher);
 int32_t moq_publish_demand_wanted(uint32_t watcher, uint64_t *group, bool *present);
 
 // Publishing: Requests
-int32_t moq_publish_dynamic(uint32_t broadcast, moq_status_callback on_request, void *user_data);
-int32_t moq_publish_track_dynamic(uint32_t track, moq_status_callback on_group, void *user_data);
-int32_t moq_track_request_dynamic(uint32_t request, moq_status_callback on_group, void *user_data);
-int32_t moq_publish_dynamic_cancel(uint32_t dynamic);
+int32_t moq_publish_requests(uint32_t broadcast, moq_status_callback on_request, void *user_data);
+int32_t moq_publish_track_requests(uint32_t track, moq_status_callback on_group, void *user_data);
+int32_t moq_track_request_requests(uint32_t request, moq_status_callback on_group, void *user_data);
+int32_t moq_publish_requests_cancel(uint32_t dynamic);
 int32_t moq_track_request_name(uint32_t request, moq_string *dst);
 int32_t moq_track_request_accept(uint32_t request, const moq_track_info *info);
 int32_t moq_track_request_video(uint32_t request, const moq_video_init *config);

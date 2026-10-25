@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Request handlers are named requests
+
+The request-handler functions are renamed to match moq-net's `requests()`; their arguments and callbacks are unchanged:
+`moq_origin_dynamic` and `moq_origin_dynamic_cancel` are `moq_origin_requests` and `moq_origin_requests_cancel`,
+`moq_publish_dynamic`, `moq_publish_track_dynamic`, and `moq_track_request_dynamic` are `moq_publish_requests`, `moq_publish_track_requests`, and `moq_track_request_requests`,
+and `moq_publish_dynamic_cancel` is `moq_publish_requests_cancel`.
+
 ### Sessions report a lifecycle snapshot
 
 `moq_session_connect` and `moq_session_request_accept` take a `moq_state_callback` instead of a `moq_status_callback`: `void on_state(void *user_data, const moq_connection_state *state)`.

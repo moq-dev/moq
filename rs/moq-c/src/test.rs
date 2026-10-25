@@ -2721,7 +2721,7 @@ fn dynamic_serves_a_request_under_a_prefix() {
 	let cb = Callback::new();
 	let prefix = b"live";
 	let dynamic = id(unsafe {
-		moq_origin_dynamic(
+		moq_origin_requests(
 			origin,
 			prefix.as_ptr() as *const c_char,
 			prefix.len(),
@@ -2759,8 +2759,8 @@ fn dynamic_serves_a_request_under_a_prefix() {
 	assert!(req_cb.recv() > 0);
 	req_cb.recv_terminal();
 
-	assert_eq!(moq_origin_dynamic_cancel(dynamic), 0);
-	assert!(moq_origin_dynamic_cancel(dynamic) < 0, "double-cancel should fail");
+	assert_eq!(moq_origin_requests_cancel(dynamic), 0);
+	assert!(moq_origin_requests_cancel(dynamic) < 0, "double-cancel should fail");
 	assert_eq!(cb.recv_terminal(), 0);
 	assert_eq!(moq_publish_close(served), 0);
 	assert_eq!(moq_origin_close(origin), 0);
@@ -2771,7 +2771,7 @@ fn dynamic_refuses_a_missing_callback() {
 	let origin = id(moq_origin_create());
 	let prefix = b"live";
 	let code = unsafe {
-		moq_origin_dynamic(
+		moq_origin_requests(
 			origin,
 			prefix.as_ptr() as *const c_char,
 			prefix.len(),
@@ -3079,11 +3079,11 @@ fn dynamic_serves_track_requests() {
 	let broadcast = publish_broadcast(origin, b"dynamic-tracks");
 
 	assert!(
-		unsafe { moq_publish_dynamic(broadcast, None, std::ptr::null_mut()) } < 0,
+		unsafe { moq_publish_requests(broadcast, None, std::ptr::null_mut()) } < 0,
 		"a missing on_request must be refused"
 	);
 	let request_cb = Callback::new();
-	let dynamic = id(unsafe { moq_publish_dynamic(broadcast, Some(channel_callback), request_cb.ptr) });
+	let dynamic = id(unsafe { moq_publish_requests(broadcast, Some(channel_callback), request_cb.ptr) });
 
 	// The subscribe stays pending until the request is answered.
 	let consume = consume_local(broadcast);
@@ -3163,9 +3163,9 @@ fn dynamic_serves_track_requests() {
 	assert_eq!(moq_track_request_free(request), 0);
 	assert!(freed_cb.recv_terminal() < 0, "a freed request fails its subscriber");
 
-	assert_eq!(moq_publish_dynamic_cancel(dynamic), 0);
+	assert_eq!(moq_publish_requests_cancel(dynamic), 0);
 	assert_eq!(request_cb.recv_terminal(), 0);
-	assert!(moq_publish_dynamic_cancel(dynamic) < 0, "double-close should fail");
+	assert!(moq_publish_requests_cancel(dynamic) < 0, "double-close should fail");
 
 	assert_eq!(moq_consume_track_cancel(consumer), 0);
 	assert_eq!(frame_cb.recv_terminal(), 0);
@@ -3182,7 +3182,7 @@ fn dynamic_track_request_publishes_media() {
 	let origin = id(moq_origin_create());
 	let broadcast = publish_broadcast(origin, b"dynamic-media");
 	let request_cb = Callback::new();
-	let _dynamic = id(unsafe { moq_publish_dynamic(broadcast, Some(channel_callback), request_cb.ptr) });
+	let _dynamic = id(unsafe { moq_publish_requests(broadcast, Some(channel_callback), request_cb.ptr) });
 
 	let consume = consume_local(broadcast);
 	let frame_cb = Callback::new();
@@ -3229,7 +3229,7 @@ fn track_request_accepts_after_the_broadcast_closes() {
 	let origin = id(moq_origin_create());
 	let broadcast = publish_broadcast(origin, b"dynamic-closed");
 	let request_cb = Callback::new();
-	let _dynamic = id(unsafe { moq_publish_dynamic(broadcast, Some(channel_callback), request_cb.ptr) });
+	let _dynamic = id(unsafe { moq_publish_requests(broadcast, Some(channel_callback), request_cb.ptr) });
 
 	let consume = consume_local(broadcast);
 	let frame_cb = Callback::new();
@@ -3285,7 +3285,7 @@ fn track_dynamic_serves_a_fetch_miss() {
 		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
 
 	let group_cb = Callback::new();
-	let dynamic = id(unsafe { moq_publish_track_dynamic(track, Some(channel_callback), group_cb.ptr) });
+	let dynamic = id(unsafe { moq_publish_track_requests(track, Some(channel_callback), group_cb.ptr) });
 
 	let fetch = fetch_group(broadcast, "data", 5, 11);
 	let request = id(group_cb.recv());
@@ -3319,7 +3319,7 @@ fn track_dynamic_serves_a_fetch_miss() {
 		.expect_err("a rejected fetch fails");
 	assert!(matches!(err, moq_net::Error::NotFound), "got {err:?}");
 
-	assert_eq!(moq_publish_dynamic_cancel(dynamic), 0);
+	assert_eq!(moq_publish_requests_cancel(dynamic), 0);
 	assert_eq!(group_cb.recv_terminal(), 0);
 	assert_eq!(moq_publish_track_finish(track), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
@@ -3336,7 +3336,7 @@ fn a_group_request_nobody_reads_is_withdrawn() {
 	let track =
 		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
 	let group_cb = Callback::new();
-	let dynamic = id(unsafe { moq_publish_track_dynamic(track, Some(channel_callback), group_cb.ptr) });
+	let dynamic = id(unsafe { moq_publish_track_requests(track, Some(channel_callback), group_cb.ptr) });
 
 	let ascending = |start, end| {
 		moq_net::track::Subscription::default()
@@ -3373,7 +3373,7 @@ fn a_group_request_nobody_reads_is_withdrawn() {
 
 	assert_eq!(moq_group_request_free(next), 0);
 	drop(reader);
-	assert_eq!(moq_publish_dynamic_cancel(dynamic), 0);
+	assert_eq!(moq_publish_requests_cancel(dynamic), 0);
 	assert_eq!(group_cb.recv_terminal(), 0);
 	assert_eq!(moq_publish_track_finish(track), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
@@ -3385,13 +3385,13 @@ fn track_request_dynamic_survives_accept() {
 	let origin = id(moq_origin_create());
 	let broadcast = publish_broadcast(origin, b"request-dynamic");
 	let request_cb = Callback::new();
-	let _dynamic = id(unsafe { moq_publish_dynamic(broadcast, Some(channel_callback), request_cb.ptr) });
+	let _dynamic = id(unsafe { moq_publish_requests(broadcast, Some(channel_callback), request_cb.ptr) });
 
 	// A fetch of a track the broadcast has not declared requests the track first.
 	let fetch = fetch_group(broadcast, "archive", 9, 0);
 	let request = id(request_cb.recv());
 	let group_cb = Callback::new();
-	let track_dynamic = id(unsafe { moq_track_request_dynamic(request, Some(channel_callback), group_cb.ptr) });
+	let track_dynamic = id(unsafe { moq_track_request_requests(request, Some(channel_callback), group_cb.ptr) });
 	let track = id(unsafe { moq_track_request_accept(request, std::ptr::null()) });
 
 	let group_request = id(group_cb.recv());
@@ -3407,7 +3407,7 @@ fn track_request_dynamic_survives_accept() {
 	assert_eq!(moq_publish_group_finish(group), 0);
 	assert_eq!(fetch.recv_timeout(TIMEOUT).unwrap().unwrap(), (0, payload.to_vec()));
 
-	assert_eq!(moq_publish_dynamic_cancel(track_dynamic), 0);
+	assert_eq!(moq_publish_requests_cancel(track_dynamic), 0);
 	assert_eq!(group_cb.recv_terminal(), 0);
 	assert_eq!(moq_publish_track_finish(track), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
