@@ -462,6 +462,30 @@ async fn an_archive_without_markers_stays_open() {
 	assert!(pending.is_err(), "the newest group stays open");
 }
 
+/// A store failure ends the replay and aborts every served track with it, the open newest group
+/// included, so readers see the failure rather than a dropped producer.
+#[tokio::test(start_paused = true)]
+async fn a_store_failure_aborts_the_served_tracks() {
+	let archive = Archive::new();
+	archive.track("video", 0, true).await;
+	archive.object("video", 0, vec![frames(true, 0, 0..1)]).await;
+
+	let (broadcast, run) = serve(&archive.store).await;
+	let mut reader = subscribe(&broadcast, "video").await;
+	let mut group = reader.next_group().await.unwrap().unwrap();
+	assert!(group.read_frame().await.unwrap().is_some());
+
+	archive.store.inner().fail_lists();
+	assert!(run.await.unwrap().is_err());
+	let failed = |err: &moq_net::Error| matches!(err, moq_net::Error::Stream(moq_net::StreamError::Internal));
+	let err = group.read_frame().await.unwrap_err();
+	assert!(failed(&err), "{err}");
+	let Err(err) = reader.next_group().await else {
+		panic!("the track is aborted");
+	};
+	assert!(failed(&err), "{err}");
+}
+
 /// A completed archive ends each track at its recorded end, mid-group included, and an
 /// errored track replays its stored groups.
 #[tokio::test(start_paused = true)]

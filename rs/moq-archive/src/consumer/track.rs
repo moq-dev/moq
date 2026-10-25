@@ -117,6 +117,15 @@ impl Live {
 		Ok(())
 	}
 
+	/// End the feed with `err` when serving the archive failed, the open group included, so
+	/// readers see why rather than a dropped producer.
+	pub fn abort(self, err: moq_net::Error) {
+		if let Some(open) = self.open {
+			let _ = open.group.abort(err.clone());
+		}
+		let _ = self.producer.abort(err);
+	}
+
 	/// End the feed as the archive recorded.
 	pub fn end(&mut self, end: End, track: &str) -> Result<()> {
 		self.close()?;

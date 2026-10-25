@@ -147,14 +147,34 @@ impl<S: ObjectStore> Consumer<S> {
 		if refreshed.added.is_empty() {
 			return Err(Error::NotFound(consumer.shared.store.prefix().to_string()));
 		}
-		consumer.apply(refreshed)?;
+		if let Err(err) = consumer.apply(refreshed) {
+			consumer.abort();
+			return Err(err);
+		}
 		Ok(consumer)
 	}
 
 	/// Serve the archive until the broadcast closes, following it while it grows.
 	///
 	/// Fails when the store does, or when it holds a key or object the layout does not name.
+	/// Every served track is then aborted, so its readers see the failure.
 	pub async fn run(mut self) -> Result<()> {
+		let result = self.serve().await;
+		if result.is_err() {
+			self.abort();
+		}
+		result
+	}
+
+	/// Abort every served track, its open group included, after serving failed.
+	fn abort(&mut self) {
+		let err = moq_net::Error::Stream(moq_net::StreamError::Internal);
+		for (_, track) in self.tracks.drain() {
+			track.live.abort(err.clone());
+		}
+	}
+
+	async fn serve(&mut self) -> Result<()> {
 		let mut fills = kio::Tasks::new();
 		let mut refreshing: Option<BoxFuture<'static, Result<Refreshed>>> = None;
 
