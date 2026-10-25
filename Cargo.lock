@@ -5054,6 +5054,7 @@ dependencies = [
  "loom",
  "moq-clock",
  "moq-json",
+ "moq-net",
  "moq-pattern 0.1.2",
  "num_enum",
  "rand 0.10.3",
