@@ -98,7 +98,7 @@ fn back_to_back_groups_arrive_in_order() {
 		let consumer = broadcast.consume();
 		let track = broadcast.create_track("video", None).expect("create track");
 		let from_start = moq_net::track::Subscription::default()
-			.with_groups(0..)
+			.with_range(0..)
 			.with_max_delay(std::time::Duration::MAX);
 		let subscribing = consumer.track("video").expect("track").subscribe(from_start);
 
@@ -466,11 +466,11 @@ fn a_fetch_never_joins_a_withdrawn_attempt() {
 		let consumer = track.consume();
 
 		let first = consumer.fetch_group(5, None);
-		let request = block_on(dynamic.requested_group()).expect("requested");
+		let request = block_on(dynamic.requested_fill()).expect("requested");
 
 		let leaver = thread::spawn(move || {
 			drop(first);
-			request.demand().is_used().then_some(request)
+			request.is_used().then_some(request)
 		});
 		let mut retry = consumer.fetch_group(5, None);
 		let request = match leaver.join().unwrap() {
@@ -480,10 +480,10 @@ fn a_fetch_never_joins_a_withdrawn_attempt() {
 				if let std::task::Poll::Ready(Err(err)) = polled {
 					panic!("the retry joined a withdrawn attempt: {err}");
 				}
-				block_on(dynamic.requested_group()).expect("the retry queued a fresh request")
+				block_on(dynamic.requested_fill()).expect("the retry queued a fresh request")
 			}
 		};
-		request.accept(None).expect("accept").finish().expect("finish");
+		request.accept(5, None).expect("accept").finish().expect("finish");
 		block_on(retry).expect("the retry resolves");
 	});
 }
@@ -598,11 +598,65 @@ fn an_aborted_parked_group_releases_a_finished_track() {
 		let track = broadcast.create_track("parked", timed()).unwrap();
 		let mut group = track.append_group().unwrap();
 		group.finish().unwrap();
-		let mut subscriber = track.subscribe(moq_net::track::Subscription::default().with_groups(0..));
-		subscriber.set_groups(..0);
+		let mut subscriber = track.subscribe(moq_net::track::Subscription::default().with_range(0..));
+		subscriber = subscriber.with_range(..0);
 		track.finish().unwrap();
 		let aborting = thread::spawn(move || group.abort(Error::Old).unwrap());
 		assert!(block_on(subscriber.recv_group()).unwrap().is_none());
 		aborting.join().unwrap();
 	});
+}
+
+/// An arrival takes the track write lock; revealing an already cached group only takes
+/// its read lock. Either path must observe a registered expiry read or leave the
+/// successor visible when that read judges it. The landing hint uses Loom atomics.
+fn landing_wakes_a_parked_expiry(reveal: bool) {
+	model(move || {
+		let broadcast = broadcast::Info::new().produce();
+		let track = broadcast.create_track("video", timed()).unwrap();
+		let mut head = track.append_group().unwrap();
+		head.write_frame(Timestamp::ZERO, Bytes::from_static(b"head")).unwrap();
+		let mut subscriber = track.subscribe(
+			moq_net::track::Subscription::default()
+				.with_groups(0..)
+				.with_max_delay(std::time::Duration::from_millis(500)),
+		);
+		let mut held = block_on(subscriber.recv_group()).unwrap().unwrap();
+		assert!(block_on(held.read_frame()).unwrap().is_some());
+
+		let landing = if reveal {
+			let landing = track.append_group().unwrap();
+			let mut edge = track.append_group().unwrap();
+			edge.write_frame(Timestamp::from_millis(2000).unwrap(), Bytes::from_static(b"edge"))
+				.unwrap();
+			edge.finish().unwrap();
+			Some(landing)
+		} else {
+			let mut successor = track.append_group().unwrap();
+			successor
+				.write_frame(Timestamp::from_millis(1000).unwrap(), Bytes::from_static(b"successor"))
+				.unwrap();
+			successor.finish().unwrap();
+			None
+		};
+		let publisher = thread::spawn(move || {
+			let mut landing = landing.unwrap_or_else(|| track.append_group().unwrap());
+			let at = Timestamp::from_millis(if reveal { 1000 } else { 2000 }).unwrap();
+			landing.write_frame(at, Bytes::from_static(b"landing")).unwrap();
+			landing.finish().unwrap();
+			(track, landing)
+		});
+		assert!(matches!(block_on(held.read_frame()), Err(Error::Old)));
+		drop(publisher.join().unwrap());
+	});
+}
+
+#[test]
+fn a_group_arrival_landing_wakes_parked_expiry() {
+	landing_wakes_a_parked_expiry(false);
+}
+
+#[test]
+fn a_group_reveal_landing_wakes_parked_expiry() {
+	landing_wakes_a_parked_expiry(true);
 }

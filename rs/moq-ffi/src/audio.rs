@@ -89,28 +89,6 @@ impl MoqAudioCodec {
 	}
 }
 
-/// How an audio encoder trades latency for compression, mirroring
-/// `moq_audio::encode::Preset`. A preset sets packetization only; bitrate stays separate.
-#[derive(Clone, Copy, uniffi::Enum)]
-pub enum MoqAudioPreset {
-	/// 10 ms Opus packets, at twice the packet rate.
-	LowLatency,
-	/// 20 ms Opus packets, the default.
-	Balanced,
-	/// Favor compression; 20 ms Opus packets today, the same as `Balanced`.
-	Quality,
-}
-
-impl From<MoqAudioPreset> for moq_audio::encode::Preset {
-	fn from(preset: MoqAudioPreset) -> Self {
-		match preset {
-			MoqAudioPreset::LowLatency => Self::LowLatency,
-			MoqAudioPreset::Balanced => Self::Balanced,
-			MoqAudioPreset::Quality => Self::Quality,
-		}
-	}
-}
-
 /// PCM layout the caller will pass to [`MoqAudioProducer::write`].
 #[derive(uniffi::Record)]
 pub struct MoqAudioEncoderInput {
@@ -142,14 +120,11 @@ pub struct MoqAudioEncoderOutput {
 	#[uniffi(default = None)]
 	pub bitrate: Option<u32>,
 	/// Encoded frame duration in microseconds. Opus accepts exactly
-	/// 2500/5000/10000/20000/40000/60000 us. 0 takes the preset's frame, or the
-	/// codec's own: 20 ms for Opus and 1024 samples for AAC.
+	/// 2500/5000/10000/20000/40000/60000 us; 10000 trades twice the packet rate
+	/// for lower latency. 0 takes the codec's own: 20 ms for Opus and 1024
+	/// samples for AAC.
 	#[uniffi(default = 0)]
 	pub frame_duration_us: u32,
-	/// Packetization preset. `None` is `Balanced`. Refused alongside a nonzero
-	/// `frame_duration_us`; AAC keeps its 1024-sample frames either way.
-	#[uniffi(default = None)]
-	pub preset: Option<MoqAudioPreset>,
 }
 
 /// Input, codec settings, and publication ownership for an audio producer.
@@ -168,20 +143,12 @@ pub struct MoqAudioProducerOptions {
 }
 
 impl MoqAudioEncoderOutput {
-	/// Apply the preset or explicit frame duration to `settings`.
-	fn packetize(&self, settings: moq_audio::encode::Settings) -> Result<moq_audio::encode::Settings, MoqError> {
-		match (self.preset, self.frame_duration_us) {
-			(None, 0) => Ok(settings),
-			(Some(preset), 0) => Ok(settings.with_preset(preset.into())),
-			(None, us) => {
-				let mut settings = settings;
-				settings.frame_duration = Duration::from_micros(us.into());
-				Ok(settings)
-			}
-			(Some(_), _) => {
-				Err(moq_audio::Error::Unsupported("set preset or frame_duration_us, not both".into()).into())
-			}
+	/// Apply an explicit frame duration to `config`, keeping the codec's own for 0.
+	fn packetize(&self, mut config: moq_audio::encode::Config) -> moq_audio::encode::Config {
+		if self.frame_duration_us != 0 {
+			config.frame_duration = Duration::from_micros(self.frame_duration_us.into());
 		}
+		config
 	}
 }
 
@@ -251,13 +218,13 @@ pub struct MoqAudioEncoder {
 	inner: std::sync::Mutex<Option<moq_audio::encode::Encoder>>,
 }
 
-fn audio_settings(output: &MoqAudioEncoderOutput) -> Result<moq_audio::encode::Settings, MoqError> {
+fn encode_config(output: &MoqAudioEncoderOutput) -> Result<moq_audio::encode::Config, MoqError> {
 	let sample_rate = output.sample_rate.unwrap_or(48_000);
 	let layout = moq_audio::Layout::from_channels(output.channels.unwrap_or(2))?;
 	let input = moq_audio::encode::Input::new(sample_rate, layout);
-	let mut settings = moq_audio::encode::Settings::from_input(output.codec.codec(), &input);
-	settings.bitrate = output.bitrate.map(|bps| moq_net::bandwidth::Rate::from_bps(bps.into()));
-	output.packetize(settings)
+	let mut config = moq_audio::encode::Config::from_input(output.codec.codec(), &input);
+	config.bitrate = output.bitrate.map(|bps| moq_net::bandwidth::Rate::from_bps(bps.into()));
+	Ok(output.packetize(config))
 }
 
 fn audio_packets(packets: impl IntoIterator<Item = moq_audio::encode::Encoded>) -> Vec<MoqAudioPacket> {
@@ -274,7 +241,7 @@ impl MoqAudioEncoder {
 	/// Create an encoder from codec-side output settings.
 	#[uniffi::constructor]
 	pub fn new(output: MoqAudioEncoderOutput) -> Result<Arc<Self>, MoqError> {
-		let encoder = moq_audio::encode::Encoder::new(&audio_settings(&output)?)?;
+		let encoder = moq_audio::encode::Encoder::new(&encode_config(&output)?)?;
 		Ok(Arc::new(Self {
 			inner: std::sync::Mutex::new(Some(encoder)),
 		}))
@@ -374,7 +341,7 @@ impl TryFrom<MoqAudioFrame> for moq_audio::Frame {
 /// passed at publish time.
 #[derive(uniffi::Object)]
 pub struct MoqAudioProducer {
-	inner: std::sync::Mutex<Option<moq_audio::encode::Producer<moq_mux::catalog::hang::Extra>>>,
+	inner: std::sync::Mutex<Option<moq_audio::encode::Producer>>,
 	reservation: std::sync::Mutex<Option<Arc<MoqReservation>>>,
 	/// Held so the reservation's registry outlives extra bandwidth handles.
 	_bandwidth: Option<Arc<MoqBandwidth>>,
@@ -470,22 +437,22 @@ impl MoqAudioProducer {
 		// than letting the codec derive one.
 		let mut options = moq_audio::encode::Options::default();
 		options.track = track;
-		options.settings = moq_audio::encode::Settings::from_input(output.codec.codec(), &input);
+		options.config = moq_audio::encode::Config::from_input(output.codec.codec(), &input);
 		if let Some(sample_rate) = output.sample_rate {
-			options.settings.sample_rate = sample_rate;
+			options.config.sample_rate = sample_rate;
 		}
 		if let Some(channels) = output.channels {
-			options.settings.layout = moq_audio::Layout::from_channels(channels)?;
+			options.config.layout = moq_audio::Layout::from_channels(channels)?;
 		}
-		options.settings.bitrate = output.bitrate.map(|bps| moq_net::bandwidth::Rate::from_bps(bps.into()));
-		options.settings = output.packetize(options.settings)?;
+		options.config.bitrate = output.bitrate.map(|bps| moq_net::bandwidth::Rate::from_bps(bps.into()));
+		options.config = output.packetize(options.config);
 		if output.frame_duration_us == 0 && output.codec.codec() == moq_audio::encode::Codec::Aac {
 			// from_input sized this at the input rate. The codec rate may be the
 			// override above, and AAC's own frame is 1024 samples of that rate.
 			let mut rated = input.clone();
-			rated.sample_rate = options.settings.sample_rate;
-			options.settings.frame_duration =
-				moq_audio::encode::Settings::from_input(moq_audio::encode::Codec::Aac, &rated).frame_duration;
+			rated.sample_rate = options.config.sample_rate;
+			options.config.frame_duration =
+				moq_audio::encode::Config::from_input(moq_audio::encode::Codec::Aac, &rated).frame_duration;
 		}
 		if let Some(bandwidth) = &bandwidth {
 			options.bandwidth = bandwidth.allocator().clone();
@@ -738,7 +705,6 @@ mod tests {
 						channels: None,
 						bitrate: None,
 						frame_duration_us: 0,
-						preset: None,
 					},
 					track: Some(format!("audio-{index}")),
 					bandwidth: None,
@@ -761,7 +727,7 @@ mod tests {
 				})
 				.unwrap();
 		}
-		let _finished = broadcast.finish().unwrap();
+		catalog.finish().unwrap();
 		for index in 0..4 {
 			let mut track = reader
 				.track(&format!("audio-{index}"))
@@ -787,7 +753,6 @@ mod tests {
 			channels: None,
 			bitrate: None,
 			frame_duration_us: 0,
-			preset: None,
 		};
 		let encoder = MoqAudioEncoder::new(output).unwrap();
 		let samples = encoder.frame_size().unwrap() as usize * 2;
@@ -796,46 +761,27 @@ mod tests {
 		assert!(matches!(encoder.frame_size(), Err(MoqError::Closed)));
 	}
 
-	fn opus_output(preset: Option<MoqAudioPreset>, frame_duration_us: u32) -> MoqAudioEncoderOutput {
+	fn opus_output(frame_duration_us: u32) -> MoqAudioEncoderOutput {
 		MoqAudioEncoderOutput {
 			codec: MoqAudioCodec::opus(),
 			sample_rate: Some(48_000),
 			channels: Some(2),
 			bitrate: None,
 			frame_duration_us,
-			preset,
 		}
 	}
 
 	#[test]
-	fn codec_only_encoder_packetizes_by_preset() {
-		for (preset, frame_size) in [
-			(None, 960),
-			(Some(MoqAudioPreset::LowLatency), 480),
-			(Some(MoqAudioPreset::Balanced), 960),
-			(Some(MoqAudioPreset::Quality), 960),
-		] {
-			let encoder = MoqAudioEncoder::new(opus_output(preset, 0)).unwrap();
-			assert_eq!(encoder.frame_size().unwrap(), frame_size);
+	fn codec_only_encoder_packetizes_by_frame_duration() {
+		for (frame_duration_us, frame_size) in [(0, 960), (10_000, 480), (20_000, 960)] {
+			let encoder = MoqAudioEncoder::new(opus_output(frame_duration_us)).unwrap();
+			assert_eq!(encoder.frame_size().unwrap(), frame_size, "{frame_duration_us} us");
 		}
-		assert_eq!(
-			MoqAudioEncoder::new(opus_output(None, 10_000))
-				.unwrap()
-				.frame_size()
-				.unwrap(),
-			480
-		);
-	}
-
-	#[test]
-	fn codec_only_encoder_refuses_a_preset_with_a_frame_duration() {
-		let result = MoqAudioEncoder::new(opus_output(Some(MoqAudioPreset::LowLatency), 20_000));
-		assert!(matches!(result, Err(MoqError::Audio { .. })));
 	}
 
 	#[test]
 	fn codec_only_encoder_reports_its_opus_head() {
-		let encoder = MoqAudioEncoder::new(opus_output(None, 0)).unwrap();
+		let encoder = MoqAudioEncoder::new(opus_output(0)).unwrap();
 		let init = encoder.track_init().unwrap();
 		assert!(matches!(init.format, crate::media::MoqAudioFormat::Opus));
 		assert_eq!(&init.data[..8], b"OpusHead");
@@ -846,7 +792,7 @@ mod tests {
 
 	#[test]
 	fn codec_only_encoder_retunes_its_bitrate() {
-		let encoder = MoqAudioEncoder::new(opus_output(None, 0)).unwrap();
+		let encoder = MoqAudioEncoder::new(opus_output(0)).unwrap();
 		encoder.set_bitrate(32_000).unwrap();
 		let samples = encoder.frame_size().unwrap() as usize * 2;
 		assert!(!encoder.encode(vec![0.0; samples]).unwrap().data.is_empty());

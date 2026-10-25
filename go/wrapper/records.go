@@ -1,6 +1,7 @@
 package moq
 
 import (
+	"math"
 	"time"
 
 	ffi "moq.dev/moq-ffi/moq"
@@ -11,7 +12,12 @@ import (
 // target language has a duration type. These records mirror the generated ones
 // with time.Duration fields and convert at the boundary.
 
+// fromMicros saturates past time.Duration's ~292 years, which a peer's delay or
+// max age can exceed, rather than wrapping to a negative duration.
 func fromMicros(us uint64) time.Duration {
+	if us > uint64(math.MaxInt64/int64(time.Microsecond)) {
+		return time.Duration(math.MaxInt64)
+	}
 	return time.Duration(us) * time.Microsecond
 }
 
@@ -58,19 +64,20 @@ func datagramFromFFI(d *ffi.MoqDatagram) *Datagram {
 }
 
 // Subscription holds subscriber-side delivery preferences: priority, the max delay
-// a non-latest group may fall behind before it is skipped (zero skips at once, and it
-// caps every range), the ranges of the track to deliver (nil for everything MaxDelay
-// still allows, while an empty non-nil slice asks for nothing), and the order the
-// publisher sends pending groups in (nil for newest first).
+// a non-latest group may fall behind before it is skipped (zero skips at once, nil
+// leaves the publisher's max age alone to bound it, and it caps every range), the
+// ranges of the track to deliver (nil for everything MaxDelay still allows, while an
+// empty non-nil slice asks for nothing), and the order the publisher sends pending
+// groups in (nil for newest first).
 type Subscription struct {
 	Priority int8
-	MaxDelay time.Duration
+	MaxDelay *time.Duration
 	Ranges   []Range
 	Order    *Order
 }
 
 func (s Subscription) ffi() (ffi.MoqSubscription, error) {
-	maxDelay, err := bridge.Duration(s.MaxDelay, "max delay")
+	maxDelay, err := bridge.OptionalDuration(s.MaxDelay, "max delay")
 	var ranges *[]ffi.MoqRange
 	if s.Ranges != nil {
 		ranges = &s.Ranges
@@ -141,7 +148,7 @@ type ConnectionStats struct {
 	PacketsSent          *uint64
 	PacketsReceived      *uint64
 	PacketsLost          *uint64
-	// Version is the negotiated protocol version, spelled like WithVersions.
+	// Version is the negotiated protocol version, spelled like ClientConfig.Versions.
 	Version *string
 }
 

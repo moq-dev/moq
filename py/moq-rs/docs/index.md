@@ -36,6 +36,10 @@ asyncio.run(main())
 
    Client
    connect
+   ClientTls
+   QuicConfig
+   WebSocketConfig
+   Backoff
    Server
    Session
    Request
@@ -62,7 +66,7 @@ asyncio.run(main())
    TrackDynamic
    TrackRequest
    GroupProducer
-   GroupRequest
+   Fill
 ```
 
 ## Subscribing

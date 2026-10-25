@@ -42,7 +42,7 @@ export class Producer {
 	 */
 	async createTrack(semantic: string, info: Partial<NetTrack.Info> = {}): Promise<Track.Producer> {
 		const name = await this.generation.name(semantic);
-		return this.generation.produce(this.#inner.createTrack(name, info));
+		return this.generation.produce(this.#inner.createTrack(name, info), semantic);
 	}
 
 	/** End the wrapped broadcast, as `@moq/net`'s `close` does. Idempotent. */
@@ -75,7 +75,7 @@ export class Consumer {
 	/** Subscribe to the track for `semantic` under its physical name; rejects with {@link Failure} `identity` past 65535 bytes. */
 	async subscribe(semantic: string, subscription?: NetTrack.Subscription): Promise<Track.Consumer> {
 		const name = await this.generation.name(semantic);
-		return this.generation.consume(this.#inner.track(name).subscribe(subscription));
+		return this.generation.consume(this.#inner.track(name).subscribe(subscription), semantic);
 	}
 
 	/** Release the wrapped broadcast handle, as `@moq/net`'s `close` does. Idempotent. */

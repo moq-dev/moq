@@ -155,6 +155,7 @@ async fn serve(
 impl ServerState {
 	fn new(config: MoqServerConfig) -> Result<Self, MoqError> {
 		let mut listen = moq_tokio::listen::Config::default();
+		listen.implementation = Some(crate::session::implementation());
 		if let Some(bind) = config.bind {
 			let parsed = bind.parse().map_err(|_| MoqError::Config {
 				reason: format!("invalid bind address: {bind}"),
@@ -494,7 +495,7 @@ impl MoqRequest {
 						publish.as_ref().or(state.publish.as_ref()),
 						consume.as_ref().or(state.consume.as_ref()),
 					);
-					let (session, driver) = request
+					let session = request
 						.with_publisher(&publish.inner)
 						.with_subscriber(subscribe.inner.clone())
 						.ok()
@@ -502,7 +503,7 @@ impl MoqRequest {
 						.map_err(|err| MoqError::Connect {
 							reason: format!("{err}"),
 						})?;
-					Ok(Arc::new(MoqSession::accepted(session, publish, subscribe, driver)))
+					Ok(Arc::new(MoqSession::accepted(session, publish, subscribe)))
 				})
 			})
 			.await

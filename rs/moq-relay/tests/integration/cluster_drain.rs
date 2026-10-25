@@ -109,7 +109,7 @@ async fn relay(name: &str) -> (Relay, SocketAddr, moq_net::broadcast::Producer) 
 	let mut config = moq_relay::Config::default();
 	config.listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.auth.public = vec![moq_auth::Pattern::all()];
-	config.drain_timeout = DRAIN;
+	config.drain_timeout = Some(DRAIN.into());
 	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let addr = relay.tcp_addr().expect("tcp listener");
 	let broadcast = relay.cluster().origin.create_broadcast(name).expect("create broadcast");

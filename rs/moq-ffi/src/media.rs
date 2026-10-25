@@ -296,8 +296,6 @@ pub enum MoqContainerFormat {
 	Ts,
 	/// Flash Video, as used by RTMP.
 	Flv,
-	/// Fragmented MP4 / CMAF, republished whole as one CMAF frame per fragment.
-	Cmaf,
 }
 
 /// What an audio publish needs: a format, its codec init bytes, and an optional label.
@@ -477,7 +475,6 @@ impl From<MoqContainerFormat> for moq_mux::import::ContainerFormat {
 	fn from(format: MoqContainerFormat) -> Self {
 		match format {
 			MoqContainerFormat::Fmp4 => Self::Fmp4,
-			MoqContainerFormat::Cmaf => Self::Cmaf,
 			MoqContainerFormat::Mkv => Self::Mkv,
 			MoqContainerFormat::Ts => Self::Ts,
 			MoqContainerFormat::Flv => Self::Flv,
@@ -780,6 +777,20 @@ impl MoqMediaCatalogProducer {
 			Ok(())
 		})
 	}
+
+	/// Finish the catalog, which ends the broadcast's content.
+	///
+	/// Finish every track first. The broadcast stays announced and keeps serving its finished
+	/// tracks, so a subscriber that arrives late can still read them, until the broadcast's
+	/// `close` takes it offline. How long to keep it up is yours to decide.
+	pub fn finish(&self) -> Result<(), MoqError> {
+		let _guard = crate::ffi::enter();
+		self.broadcast.upgrade().ok_or(MoqError::Closed)?.with_state(|state| {
+			state.catalog.finish()?;
+			state.ended = true;
+			Ok(())
+		})
+	}
 }
 
 /// A whole-frame importer for one codec track.
@@ -985,20 +996,7 @@ impl MoqMediaTrackProducer {
 		Ok(())
 	}
 
-	/// Record a locally encoded frame's handoff for catalog jitter measurement.
-	///
-	/// `timestamp_us` is on the broadcast media clock. Call this after `write_frame` only for
-	/// encoder output; imported files, pipes, and network media stay clock-free.
-	pub fn flush(&self, timestamp_us: u64) -> Result<(), MoqError> {
-		let _guard = crate::ffi::enter();
-		let timestamp = moq_net::Timestamp::from_micros(timestamp_us)?;
-		let mut guard = self.inner.lock().unwrap();
-		let media = guard.as_mut().ok_or(MoqError::Closed)?;
-		media.import.flush(timestamp, moq_clock::Instant::now())?;
-		Ok(())
-	}
-
-	/// Mark a timeline break and restart handoff measurement without lowering advertised jitter.
+	/// Mark a timeline break without lowering the advertised jitter or delay.
 	///
 	/// Publishes a discontinuity marker; resumed frames must continue the broadcast media clock,
 	/// and video must resume on a keyframe.
@@ -1089,7 +1087,9 @@ impl MoqMediaContainerProducer {
 			let _guard = crate::ffi::enter();
 			let mut guard = self.inner.lock().unwrap();
 			let container = guard.as_mut().ok_or(MoqError::Closed)?;
-			container.import.cut();
+			container.import.cut().map_err(|err| MoqError::Codec {
+				reason: format!("cut failed: {err}"),
+			})?;
 			Ok(())
 		})();
 		self.driver.check()?;

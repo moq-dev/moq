@@ -24,4 +24,4 @@ against it.
 
 ## Related
 
-- [BBR media study](/quest/m2/quic-bbr-natural-drain.md) - the ProbeRTT and drain behavior this inherits
+- [Skip ProbeRTT after a near-floor RTT](/quest/m1/bbr-probe-rtt-skip.md) - the ProbeRTT behavior this inherits

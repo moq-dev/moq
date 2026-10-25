@@ -121,6 +121,8 @@ const BaseRequestSchema = z.object({
 	token: z.optional(TokenSchema),
 	/** The direction the client declared at SETUP; absent means both. */
 	role: z.optional(RoleSchema),
+	/** What the client advertised in its SETUP, such as `moq-net-js/0.4.2`; peer-controlled, so never authorize on it. */
+	implementation: z.optional(z.string()),
 	/** The verified client certificate, when one was presented. */
 	tls: z.optional(PeerSchema),
 });

@@ -9,6 +9,7 @@ import {
 	type Getter,
 	getter,
 	type Inputs,
+	Once,
 	type Readonlys,
 	readonlys,
 	Signal,
@@ -146,7 +147,19 @@ export class Decoder {
 			const delay = active && effect.get(active.catalog)?.video?.renditions?.[active.track]?.delay;
 			return Milli(Math.max(spread + (delay ?? 0), jitter ?? Milli.zero));
 		});
-		this.#signals.cleanup(this.sync.register(target));
+		const startup = this.#signals.computed((effect) => {
+			if (!effect.get(this.in.enabled)) return undefined;
+			if (effect.get(this.source.pending)) return null;
+			if (!effect.get(this.source.out.config)) return undefined;
+			const active = effect.get(this.#active);
+			if (!active) return null;
+			const timestamp = effect.get(active.first);
+			if (timestamp === undefined) return null;
+			const ranges = effect.get(active.buffered);
+			const span = ranges.find((range) => range.start <= timestamp && range.end >= timestamp);
+			return span ? { ...span } : { start: timestamp, end: timestamp };
+		});
+		this.#signals.cleanup(this.sync.register(target, startup));
 		this.#identity = this.#signals.computed((effect) => {
 			const config = effect.get(this.source.out.config);
 			return config ? playbackIdentity(config) : undefined;
@@ -426,6 +439,8 @@ class DecoderTrack {
 
 	// Network jitter + decode buffer.
 	buffered = new Signal<Container.BufferedRanges>([]);
+	// First decoded picture on this timeline, independent of the previously held poster.
+	readonly first = new Signal<Milli | undefined>(undefined);
 
 	// How late frames arrive relative to the earliest one, from the container consumer.
 	spread = new Signal<Milli | undefined>(undefined);
@@ -491,6 +506,8 @@ class DecoderTrack {
 						// Late frame, don't render it.
 						return;
 					}
+
+					if (this.first.peek() === undefined) this.first.set(timestamp);
 
 					// Render something while we wait for the sync to catch up, unless the frame is
 					// already off the timeline: WebCodecs can hold a picture past a reset or a skip.
@@ -626,6 +643,7 @@ class DecoderTrack {
 				latest = next.group;
 				this.#resetAtKeyframe(decoder, frame.keyframe);
 				decoder.decode(chunk);
+				if (!this.sync.playing.peek()) await this.#waitStartup(effect);
 			}
 		});
 	}
@@ -708,8 +726,33 @@ class DecoderTrack {
 						timestamp: frame.timestamp,
 					}),
 				);
+				if (!this.sync.playing.peek()) await this.#waitStartup(effect);
 			}
 		});
+	}
+
+	// Once this track has filled its floor, leave further media encoded upstream while the other
+	// track fills. Otherwise a missing audio track could retain unbounded decoded GPU frames.
+	async #waitStartup(effect: Effect): Promise<void> {
+		// Some codecs need more input before their first output. Do not park that input
+		// behind a gate that needs the very picture the decoder has not produced yet.
+		if (this.first.peek() === undefined) return;
+		const span = this.#buffered.peek()[0];
+		if (!span || span.end - span.start < this.sync.out.delay.peek()) return;
+		const waiting = new Effect();
+		const refill = new Once<true>();
+		waiting.run((inner) => {
+			// An adaptive floor can rise while another track fills. Resume decoding to reach it,
+			// rather than waiting on a clock whose startup now needs more video.
+			if (span.end - span.start < inner.get(this.sync.out.delay)) refill.set(true);
+		});
+		try {
+			// Wait on the span's first picture, which is due the moment startup releases, so decoding
+			// resumes with the whole floor still ahead instead of once it has played out.
+			await effect.race(refill, this.sync.wait(span.start, waiting.abort));
+		} finally {
+			waiting.close();
+		}
 	}
 
 	// The container read a gap or a declared end after media. Re-anchor and let the next decoded
@@ -717,6 +760,7 @@ class DecoderTrack {
 	// high value from late-rejecting the following frames, which may overlap the previous group's
 	// tail. The held picture stays until the new keyframe renders.
 	#onBreak(): void {
+		this.first.set(undefined);
 		this.timestamp.set(undefined);
 		this.#buffered.set([]);
 		this.sync.reset();

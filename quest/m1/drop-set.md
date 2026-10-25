@@ -207,7 +207,7 @@ Test on mock time through a relay:
   one step, whether dropped, skipped by a wider reader, or evicted and
   judged again.
 - Per-reader misses are bounded the same way. [Dynamic range
-  requests](/quest/m1/subscribe-ranges/dynamic.md) adds a third unbounded
+  requests](https://github.com/moq-dev/moq/pull/6171) adds a third unbounded
   record: each reader's given-up misses, one per gap, which a reader whose
   floor never moves cannot forget. Fold them into the cursor's runs, billed
   to the pool (from
@@ -226,6 +226,5 @@ unchanged.
 
 ## Related
 
-- [An evicted group is judged stale](/quest/m1/evicted-group-stale.md) - the sibling for groups a reader already holds after the cache evicts them
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - fills the cache miss an evicted run leaves
 - [JS unbounded groups](/quest/m1/unbounded-groups/js.md) - the JS byte bound for groups and the runs between them; not required, since JS runs never outgrow the JS cache

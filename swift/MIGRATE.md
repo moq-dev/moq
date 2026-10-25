@@ -29,6 +29,16 @@ the matching generated bindings and native library.
 Resolving a rendition's `broadcast` reference, through `BroadcastConsumer.resolve(_:epoch:)` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
 Where you skipped such a rendition on that error, bound the call yourself: cancel the task.
 
+### Media track names belong to the target
+
+Audio and video init records no longer carry a track name. Pass that name on the media producer's named target instead; init records describe only the codec and media.
+
+### Broadcast `finish` is removed
+
+`BroadcastProducer.finish()`, a deprecated alias for `close()`, is removed.
+Call `BroadcastProducer.close()` where you called `finish()`.
+To end the content first, call `Media.CatalogProducer.finish()`; the broadcast stays up until `close()`.
+
 ### JSON snapshot `deltaRatio` is `deltas`
 
 `Json.SnapshotProducer(deltaRatio:)` and `MoqJsonSnapshotConfig.deltaRatio` are replaced by `deltas: Bool` (default `true`).
@@ -67,7 +77,7 @@ Clamp timestamps you build from unbounded input to `2^61 - 1`.
 
 ### Finished tracks stay until the broadcast ends (#6157)
 
-A finished track now stays listed, with its catalog rendition and demand, until its broadcast closes or the new `BroadcastProducer.finish()` lets go.
+A finished track now stays listed, with its catalog rendition and demand, until its broadcast closes.
 Publish a replacement under a new name, and expect a finished track's demand watch to end with the broadcast.
 
 ### A claim answers by publishing (#5678)
@@ -191,7 +201,8 @@ The `Client` setters are `Client(...)` arguments, with `tls`, `quic`, `websocket
 `setReconnect(false)` is `once: true`.
 A value the native side cannot use throws `MoqError.Config`, including a bad bind address.
 `Server` takes its config at init too, and a request takes its origins in `accept(publish:consume:)`, where `nil` inherits the server's origin.
-`Session.shutdown()` is `async throws` and drains before returning.
+`Session.shutdown()` still returns at once, but it now requests a draining close instead of cancelling; `try await session.closed()` waits for the drain and throws delivery failures.
+Call `session.cancel(code: 0)` to close at once, as `shutdown()` did, and replace the release line's awaited `drain()` with `shutdown()` followed by `try await session.closed()`.
 
 ```swift
 let client = try Client(tls: ClientTls(insecure: true), consume: origin)
@@ -229,6 +240,8 @@ let stream = try Media.ContainerProducer(broadcast: broadcast, initData: Media.C
 
 ### Timestamps are optional
 
+An omitted timescale now publishes a raw track untimed instead of selecting microseconds. Explicitly set a microsecond timescale to preserve the released default.
+
 Raw `writeFrame(_:timestampUs:)` takes a `UInt64?` defaulting to `nil`, and a frame read from an untimed track has a `nil` `timestampUs`.
 A write to a timed track without a timestamp throws `TimestampMismatch` instead of going out at 0, and whole-frame media writes require one.
 `Media.CatalogProducer.now()` samples the broadcast clock for local-event stamps.
@@ -262,10 +275,6 @@ Read `enabled` where you read `!stalled`.
 `VideoDecodedFrame` has `timestampUs()`, `width()`, `height()`, `pixels(format:)`, and `surface()` instead of stored fields.
 `VideoDecoderOutput.format` is gone; set `surface: true` to keep the decoder's native surface.
 Call `try frame.pixels(format: .rgba)` instead of reading `frame.data`.
-
-### `BroadcastProducer.finish()` is `close()` (#4152)
-
-Close the broadcast instead; tracks already subscribed carry on to their own end.
 
 ## 0.4 -> 0.5
 

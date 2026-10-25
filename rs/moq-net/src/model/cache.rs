@@ -28,10 +28,10 @@
 //! stale; the pool's expiry is the orthogonal bound that frees the bytes of content
 //! nobody touches.
 //!
-//! Expiry is driven by [`Pool::gc`], also called by each origin driver.
+//! Expiry is driven by [`Pool::poll`], also called by each origin driver.
 //! Reads and writes clear the expiration timestamp without reading a clock.
 //! The next cleanup pass dates that activity at its supplied instant. Delayed
-//! cleanup extends retention; standalone pools must call `gc` too.
+//! cleanup extends retention; standalone pools must call `poll` too.
 //! Byte-pressure eviction still runs inline on writes.
 //!
 //! A bare pool is inert by default ([`Pool::unbounded`]): publishers and subscribers
@@ -111,7 +111,7 @@ impl Config {
 	/// [`Error::Old`](crate::Error::Old). This is independent of track retention:
 	/// [`max_age`](crate::track::Info::max_age) decides what readers skip, while this
 	/// window keeps idle content from pinning memory. Reclaiming without a write behind
-	/// it needs [`Pool::gc`] called periodically (origins do this automatically).
+	/// it needs [`Pool::poll`] called periodically (origins do this automatically).
 	/// The value is fixed when the
 	/// pool is created. Values are rounded up to the pool's 100 ms clock tick, with
 	/// 100 ms as the minimum effective window.
@@ -126,7 +126,7 @@ impl Config {
 /// The pool tracks how many payload bytes are cached across every registered group and
 /// datagram buffer, plus the mean last-access time of the evictable groups. It never
 /// evicts on its own: tracks accrue eviction debt as they write and evict their own
-/// oldest groups and datagrams to pay it. Idle expiration runs during [`Self::gc`]. The capacity is
+/// oldest groups and datagrams to pay it. Idle expiration runs during [`Self::poll`]. The capacity is
 /// therefore a target usage converges toward, not a hard limit: carried debt, capped
 /// payments, and the always-protected live edge all let usage transiently exceed it.
 #[derive(Clone)]
@@ -173,7 +173,7 @@ struct Inner {
 	held: Mutex<Vec<Weak<group::Handoff>>>,
 }
 
-/// The pool-wide index of wall-clock deadlines that [`Pool::gc`] fires.
+/// The pool-wide index of wall-clock deadlines that [`Pool::poll`] fires.
 ///
 /// One entry per track and earliest deadline: the reads themselves park in the track's
 /// own `expiry::Wakes`, so arming one takes this lock only when it moves its track's
@@ -346,8 +346,6 @@ impl Pool {
 		}
 	}
 
-	/// Collect idle cache entries and return the next cleanup time.
-	///
 	/// Collect idle cache entries and return the next cleanup time, like
 	/// [`Driver::poll`](crate::time::Driver::poll).
 	///
@@ -366,7 +364,7 @@ impl Pool {
 	/// of those, and `waiter` wakes when a read arms one earlier than it. Until a pool is
 	/// first collected, no deadline fires; that first collection wakes the reads waiting
 	/// on one so they arm it.
-	pub fn gc(&self, now: crate::time::Instant, waiter: &kio::Waiter) -> Option<crate::time::Instant> {
+	pub fn poll(&self, now: crate::time::Instant, waiter: &kio::Waiter) -> Option<crate::time::Instant> {
 		self.advance(now, true, Some(waiter))
 	}
 
@@ -1355,7 +1353,7 @@ mod test {
 		track.watch_wall(at, &reading);
 
 		let (driver, driving) = flag();
-		assert_eq!(pool.gc(now, &driving), None, "an undriven pool indexes nothing");
+		assert_eq!(pool.poll(now, &driving), None, "an undriven pool indexes nothing");
 		assert!(
 			read.0.load(Ordering::SeqCst),
 			"the first collection never woke the read"
@@ -1366,11 +1364,11 @@ mod test {
 			driver.0.load(Ordering::SeqCst),
 			"the driver slept through an earlier deadline"
 		);
-		assert_eq!(pool.gc(now, &driving), Some(at));
+		assert_eq!(pool.poll(now, &driving), Some(at));
 
-		pool.gc(at - Duration::from_millis(1), &driving);
+		pool.poll(at - Duration::from_millis(1), &driving);
 		assert!(!read.0.load(Ordering::SeqCst), "released early");
-		assert_eq!(pool.gc(at, &driving), None);
+		assert_eq!(pool.poll(at, &driving), None);
 		assert!(read.0.load(Ordering::SeqCst), "the read was never released");
 	}
 
@@ -1380,15 +1378,15 @@ mod test {
 	fn replacement_drivers_hear_new_deadlines() {
 		let pool = Pool::unbounded();
 		let now = super::super::clock::wall();
-		pool.gc(now, &kio::Waiter::noop());
+		pool.poll(now, &kio::Waiter::noop());
 		let track = Track::new(pool.clone(), Default::default(), kio::Weak::new());
 		let (read, reading) = flag();
 		let (driver, driving) = flag();
-		assert_eq!(pool.gc(now, &driving), None);
+		assert_eq!(pool.poll(now, &driving), None);
 		let at = now + Duration::from_secs(1);
 		track.watch_wall(at, &reading);
 		assert!(driver.0.swap(false, Ordering::SeqCst));
-		assert_eq!(pool.gc(at, &driving), None);
+		assert_eq!(pool.poll(at, &driving), None);
 		assert!(read.0.swap(false, Ordering::SeqCst));
 		track.watch_wall(at + Duration::from_secs(1), &reading);
 		assert!(driver.0.load(Ordering::SeqCst), "the drained list was never rearmed");
@@ -1401,21 +1399,21 @@ mod test {
 		let pool = Pool::unbounded();
 		let now = moq_clock::now();
 		let waiter = kio::Waiter::noop();
-		pool.gc(now, &waiter);
+		pool.poll(now, &waiter);
 		let track = Track::new(pool.clone(), Default::default(), kio::Weak::new());
 		let (read, reading) = flag();
 		let at = now + Duration::from_secs(1);
 		track.watch_wall(at, &reading);
 		moq_clock::sleep(Duration::from_secs(1)).await;
-		assert_eq!(pool.gc(now, &waiter), None);
+		assert_eq!(pool.poll(now, &waiter), None);
 		assert!(read.0.swap(false, Ordering::SeqCst), "ambient time was ignored");
 
 		let future = at + Duration::from_secs(1);
 		track.watch_wall(future, &reading);
-		assert_eq!(pool.gc(future, &waiter), None);
+		assert_eq!(pool.poll(future, &waiter), None);
 		assert!(read.0.swap(false, Ordering::SeqCst), "driven time was ignored");
 		let tick = pool.now();
-		pool.gc(now, &waiter);
+		pool.poll(now, &waiter);
 		assert_eq!(pool.now_wall(), future);
 		assert_eq!(pool.now(), tick);
 	}
@@ -1425,7 +1423,7 @@ mod test {
 	fn a_dropped_track_leaves_the_wall_index() {
 		let pool = Pool::unbounded();
 		let now = super::super::clock::wall();
-		pool.gc(now, &kio::Waiter::noop());
+		pool.poll(now, &kio::Waiter::noop());
 		let track = Track::new(pool.clone(), Default::default(), kio::Weak::new());
 		let (_read, reading) = flag();
 		track.watch_wall(now + Duration::from_secs(2), &reading);
@@ -1673,9 +1671,9 @@ mod test {
 	fn collecting_before_the_deadline_does_not_postpone_it() {
 		let pool = Pool::new(Config::default().with_expiry(Duration::from_secs(2)));
 		let now = crate::time::Instant::now();
-		let deadline = pool.gc(now, &kio::Waiter::noop());
+		let deadline = pool.poll(now, &kio::Waiter::noop());
 		assert_eq!(
-			pool.gc(now + Duration::from_millis(500), &kio::Waiter::noop()),
+			pool.poll(now + Duration::from_millis(500), &kio::Waiter::noop()),
 			deadline
 		);
 	}
@@ -1684,13 +1682,13 @@ mod test {
 	fn bounded_pools_sample_recency_without_expiration() {
 		let pool = Pool::unbounded();
 		let now = crate::time::Instant::now();
-		assert_eq!(pool.gc(now, &kio::Waiter::noop()), None);
+		assert_eq!(pool.poll(now, &kio::Waiter::noop()), None);
 		pool.resize(1024);
-		assert_eq!(pool.gc(now, &kio::Waiter::noop()), Some(now + DEFAULT_EXPIRY / 2));
-		pool.gc(now + DEFAULT_EXPIRY, &kio::Waiter::noop());
+		assert_eq!(pool.poll(now, &kio::Waiter::noop()), Some(now + DEFAULT_EXPIRY / 2));
+		pool.poll(now + DEFAULT_EXPIRY, &kio::Waiter::noop());
 		assert!(pool.now() > 0);
 		pool.resize(None);
-		assert_eq!(pool.gc(now + DEFAULT_EXPIRY, &kio::Waiter::noop()), None);
+		assert_eq!(pool.poll(now + DEFAULT_EXPIRY, &kio::Waiter::noop()), None);
 	}
 
 	#[test]

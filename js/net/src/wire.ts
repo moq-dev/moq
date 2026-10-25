@@ -24,7 +24,7 @@ export interface Broadcast {
 	/** The track's properties; `hold` keeps the track wanted until it aborts, the way a held TRACK stream does, and aborting it before the answer abandons the lookup. */
 	resolveTrackInfo(name: string, hold?: AbortSignal): Promise<track.Info>;
 	/** The newest frame the track's cache holds, read without subscribing; `undefined` while it holds none. */
-	largest(name: string): track.Location | undefined;
+	largest(name: string): track.Position | undefined;
 	/** Fetch one group; absent when the session's version has no FETCH, so callers never ask. */
 	fetchGroup?(name: string, sequence: number, options?: track.FetchGroupOptions): Promise<GroupConsumer>;
 	requested(): Promise<track.Request | undefined>;
@@ -59,7 +59,6 @@ export interface OriginProducer {
 		route?: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"]; auth?: Route["auth"] },
 	): origin.Dynamic;
 	attach(discovery: boolean): Dispose;
-	expect(): Dispose;
 	/**
 	 * Hold the origin's announcement streams overlapping `prefix` unsynced until
 	 * the returned dispose: a session holds one while its peer's initial set is in flight.
@@ -119,6 +118,13 @@ export interface Established {
 	consume(path: Path.Valid): broadcast.Consumer;
 	/** Settles with the peer's GOAWAY; the session keeps serving until it closes. */
 	readonly goaway: GetPromise<Drain>;
+	// private: plumbing
+	/**
+	 * This session's side of its auth handle.
+	 *
+	 * @internal
+	 */
+	readonly auth: import("./auth_session.ts").AuthSession;
 }
 
 /** A produced broadcast's view, which always fetches from its own cache. */

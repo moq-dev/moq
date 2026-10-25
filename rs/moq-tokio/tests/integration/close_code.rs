@@ -55,7 +55,7 @@ async fn serve(case: Case) -> Server {
 						request.reject(moq_net::SessionError::App(CODE)).await.ok();
 					}
 					Case::Abort | Case::AbortThenDrop => {
-						let Ok((session, _driver)) = request.ok().await else {
+						let Ok(session) = request.ok().await else {
 							return;
 						};
 						session.abort(moq_net::Error::App(CODE));

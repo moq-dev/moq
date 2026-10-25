@@ -69,14 +69,14 @@ impl session::MediaSink for IngestSink {
 	}
 
 	fn abort(&mut self, err: moq_net::Error) {
+		self.catalog.clone().abort(err.clone());
 		self.bridges.abort(err);
 	}
 
-	fn finish(&mut self) -> Result<moq_net::broadcast::Finish> {
+	fn finish(&mut self) -> Result<moq_net::broadcast::Producer> {
 		self.bridges.finish()?;
 		self.catalog.finish()?;
-		// Taken while the bridges are alive, so it holds the tracks just finished.
-		Ok(self.broadcast.clone().finish())
+		Ok(self.broadcast.clone())
 	}
 }
 
@@ -111,13 +111,12 @@ mod tests {
 	}
 
 	/// A clean end finishes every track, the catalog and a video track that never got a frame
-	/// included, so the finished broadcast serves them to a late subscriber for the retention.
+	/// included, so the held sink serves them to a late subscriber for the linger.
 	#[tokio::test]
-	async fn finish_keeps_every_track_for_its_retention() {
+	async fn finish_keeps_every_track_for_the_linger() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let max_age = Duration::from_secs(3);
-		let mut sink = IngestSink::new(broadcast, moq_mux::catalog::Config::default().with_max_age(max_age)).unwrap();
+		let mut sink = IngestSink::new(broadcast, moq_mux::catalog::Config::default()).unwrap();
 		let audio = str0m::media::MediaKind::Audio;
 		sink.on_track("0".into(), audio, str0m::format::Codec::Opus, Some((48_000, 2)))
 			.unwrap();
@@ -134,16 +133,15 @@ mod tests {
 		)
 		.unwrap();
 
-		let finish = sink.finish().unwrap();
-		assert_eq!(finish.linger(), max_age);
-		drop(sink);
+		let broadcast = sink.finish().unwrap();
+		let linger = moq_mux::Linger::new([broadcast], sink, Duration::from_secs(3));
 		let mut catalog = consumer.track("catalog.json").unwrap().subscribe(None).await.unwrap();
 		assert!(
 			catalog.recv_group().await.unwrap().is_some(),
 			"the late subscriber reads the catalog"
 		);
 		assert!(consumer.track("0.opus").is_ok());
-		drop(finish);
+		drop(linger);
 		assert!(consumer.is_closed());
 	}
 }

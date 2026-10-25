@@ -30,7 +30,7 @@ const WIRE_VERSION: qmux::Version = qmux::Version::QMux01;
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
 pub struct Config {
-	/// Bind a qmux TCP listener on this address, plaintext unless [`Self::tls`].
+	/// Bind a qmux TCP listener on this address, plaintext unless `--listen-tcp-tls` is set.
 	#[usage(
 		long = "listen-tcp-bind",
 		name = "listen-tcp-bind",
@@ -406,15 +406,12 @@ mod tests {
 			assert_eq!(request.transport(), crate::Transport::Tcp);
 			assert_eq!(request.path(), "/room");
 			assert_eq!(request.query(), Some("jwt=credential"));
-			let (session, _driver) = request.ok().await.unwrap();
+			let session = request.ok().await.unwrap();
 			(server, session)
 		});
 
 		let dial = |insecure: bool| {
-			let mut config = crate::connect::Config {
-				once: Some(true),
-				..Default::default()
-			};
+			let mut config = crate::connect::Config::default();
 			config.tls.insecure = Some(insecure);
 			config
 				.init(Default::default())
