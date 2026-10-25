@@ -406,7 +406,16 @@ async fn announced_route_keeps_static_cost_on_reannounce() {
 			epoch: route.epoch.clone(),
 		})
 		.unwrap();
-	let current = broadcast.state.lock().unwrap().as_ref().unwrap().broadcast.route();
+	let current = broadcast
+		.state
+		.lock()
+		.unwrap()
+		.as_ref()
+		.unwrap()
+		.publication
+		.as_ref()
+		.unwrap()
+		.route();
 	assert_eq!(current.map(MoqRoute::from), Some(route));
 
 	broadcast.close().unwrap();
@@ -4166,7 +4175,8 @@ async fn dynamic_broadcast_request() {
 		.unwrap();
 	assert_eq!(request.path().unwrap(), "dynamic/broadcast");
 
-	let prepared = request.prepare(moq_net::Epoch::mint().to_string()).unwrap();
+	let epoch = moq_net::Epoch::mint().to_string();
+	let prepared = request.prepare(epoch.clone()).unwrap();
 	let served = prepared.broadcast();
 	let track = served.publish_track("status".into(), Some(timed_info())).unwrap();
 	// Only publish announces the answer, under its epoch and after admission.
@@ -4175,6 +4185,12 @@ async fn dynamic_broadcast_request() {
 		Err(MoqError::Closed)
 	));
 	prepared.publish().unwrap();
+	served
+		.announce(MoqAnnounceRoute {
+			epoch: Some(epoch),
+			cost: 7,
+		})
+		.unwrap();
 	assert!(matches!(request.path(), Err(MoqError::Closed)));
 
 	let broadcast = tokio::time::timeout(TIMEOUT, request_broadcast)

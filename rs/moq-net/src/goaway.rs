@@ -90,7 +90,7 @@ impl Goaway {
 pub struct Producer {
 	trigger: kio::Producer<Option<Goaway>>,
 	/// Whether this side may name a redirect URI. A client may not,
-	/// since it cannot tell a server to open connections (draft-19 sect 10.4).
+	/// since it cannot tell a server to open connections (draft-22 section 9.2).
 	redirect: bool,
 }
 
@@ -237,7 +237,7 @@ impl Protocol {
 	/// # Errors
 	///
 	/// Returns [`Error::ProtocolViolation`] on a second GOAWAY, which both drafts
-	/// require the session be closed over (draft-19 sect 10.4). Keeping the first
+	/// require the session be closed over (draft-22 section 9.2). Keeping the first
 	/// payload instead would leave an observer acting on a URI the peer has since
 	/// replaced, with no way to tell.
 	pub fn record(&self, goaway: Goaway) -> Result<()> {

@@ -602,7 +602,7 @@ impl Client {
 }
 
 /// The request target a URI-less transport advertises in its SETUP: the URL path, plus
-/// `?` and the query when there is one (draft-ietf-moq-transport-19, section 10.3.1.2).
+/// `?` and the query when there is one (draft-ietf-moq-transport-22, section 9.1.2).
 /// That query is how `?jwt=` reaches a relay.
 ///
 /// `None` when the result is empty, which means the same as omitting the parameter: the
@@ -692,7 +692,7 @@ impl Dialed {
 
 /// The URI authority to advertise in the SETUP, chosen by the dial URL's scheme.
 ///
-/// A raw-QUIC `moqt://` client MUST send it (draft-ietf-moq-transport-21, 9.1.1). Built
+/// A raw-QUIC `moqt://` client MUST send it (draft-ietf-moq-transport-22, 9.1.1). Built
 /// from the host and port so URL userinfo never goes on the wire. `None` for every other
 /// scheme, and when the URL has no host, since an empty authority is meaningless.
 #[cfg(any(
@@ -945,7 +945,7 @@ mod tests {
 			("moqt://relay.example.com/anon?jwt=abc", Some("/anon?jwt=abc")),
 			("moql://relay.example.com/anon?jwt=abc", Some("/anon?jwt=abc")),
 			("moqt://relay.example.com", None),
-			// The fragment is processed by the client and never sent (draft-19 3.1.2).
+			// The fragment is processed by the client and never sent (draft-22 6.1.1).
 			("moqt://relay.example.com/anon?jwt=abc#pos:12", Some("/anon?jwt=abc")),
 			("moqt://relay.example.com/anon#pos:12", Some("/anon")),
 			// A trailing `?` is an empty query, not a query.

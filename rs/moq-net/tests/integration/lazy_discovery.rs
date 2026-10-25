@@ -34,7 +34,7 @@ fn produce_origin(hop: u64) -> origin::Producer {
 struct Lazy {
 	subscriber: origin::Producer,
 	pair: MockPair,
-	_broadcasts: Vec<moq_net::broadcast::Producer>,
+	_broadcasts: Vec<moq_net::origin::Publication>,
 }
 
 impl Lazy {
@@ -368,9 +368,6 @@ const IETF: &[&str] = &[
 	"moq-transport-16",
 	"moq-transport-17",
 	"moq-transport-18",
-	"moq-transport-19",
-	"moq-transport-20",
-	"moq-transport-21",
 	"moq-transport-22",
 ];
 
