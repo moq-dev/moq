@@ -3254,6 +3254,17 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 		front.retain_routes(|route| table.routes.covers(&path.as_path(), route));
 		let instance = resolved.as_ref().map(|resolved| &resolved.instance);
 		let best = pick(&table, &path.as_path(), horizon, front, instance);
+		// Under the table's lock, which a request reads it under too: a request that
+		// sees another winner from here on mints its own front rather than join this one.
+		if resolved.is_none()
+			&& let Some(entry) = best
+			&& let Ok(mut pending) = request.write()
+		{
+			let selected = entry.instance();
+			if pending.selected != selected {
+				pending.selected = selected;
+			}
+		}
 		// Only a received route carries a hop chain: a local one needs no discovery.
 		let received = best.is_some_and(|entry| !entry.hops.is_empty());
 		let best = best.map(|entry| Candidate {
@@ -5249,11 +5260,15 @@ struct PendingBroadcast {
 
 /// A front's verdict, which its requesters wait on: the instance it resolved, or the
 /// error that ended it unresolved. A request joins the front only while that instance
-/// still wins. Each requester holds the front's broadcast from the moment it joins, so
-/// this carries no handle that would keep the front held.
-#[derive(Default)]
+/// still wins, or before then, while the one it selected does. Each requester holds the
+/// front's broadcast from the moment it joins, so this carries no handle that would keep
+/// the front held.
 struct PendingFront {
 	resolved: Option<Result<Instance, Error>>,
+	/// The instance the front resolves on unless the table moves first: the winner it
+	/// was minted for, then each one it selects. Written under the table's lock, so a
+	/// request never joins a front that picked an instance the request saw beaten.
+	selected: Instance,
 }
 
 /// What a front resolved: the instance its first source serves, and the route that
@@ -6465,13 +6480,18 @@ impl Consumer {
 		// resolves (or already resolved) the request channel with its verdict, so
 		// repeat requests share one upstream subscription. A front resolved on
 		// another instance stays only for the subscriptions already on it, so a new
-		// request mints a fresh front for the winner rather than join the old one.
+		// request mints a fresh front for the winner rather than join the old one. So
+		// does a front still resolving one the table has since beaten: it may already
+		// hold that instance's source, and hand this request an instance it saw lose.
 		let key = (absolute.clone(), horizon);
 		if let Some(front) = state.fronts.get(&key) {
-			let current = match &front.request.read().resolved {
-				None => true,
-				Some(Ok(resolved)) => *resolved == best,
-				Some(Err(_)) => false,
+			let current = {
+				let pending = front.request.read();
+				match &pending.resolved {
+					None => pending.selected == best,
+					Some(Ok(resolved)) => *resolved == best,
+					Some(Err(_)) => false,
+				}
 			};
 			// Held from here on, so the front cannot retire under this requester. A
 			// retiring front closes atomically with this mint: found closed, it is
@@ -6503,7 +6523,10 @@ impl Consumer {
 			// A front reads its routes' copies, so it writes no frames of its own.
 			frames: Default::default(),
 		});
-		let request = kio::Producer::<PendingFront>::default();
+		let request = kio::Producer::new(PendingFront {
+			resolved: None,
+			selected: best,
+		});
 		let consumer = request.consume();
 		// The front starts held by this request; see [`Front::new`].
 		let held = broadcast.consume();
@@ -9262,7 +9285,11 @@ mod tests {
 			path,
 			horizon: Horizon::default(),
 			watch,
-			request: kio::Producer::default(),
+			// Nothing joins this front, and its first selection overwrites the instance.
+			request: kio::Producer::new(PendingFront {
+				resolved: None,
+				selected: Instance::Route(0),
+			}),
 			joined: Arc::default(),
 			timers: consumer.timers.clone(),
 		};
@@ -11925,6 +11952,59 @@ mod tests {
 		// The path is free again for a fresh broadcast.
 		let _third = producer.publish("room/alice", Route::default()).unwrap();
 		assert!(consumer.get_broadcast("room/alice").is_some());
+	}
+
+	/// A front still resolving an instance that another has since beaten takes no new
+	/// requester: it may already hold the beaten instance's source, and would hand it to a
+	/// request that saw it lose, which no later announcement corrects.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn a_request_skips_a_front_resolving_a_beaten_instance() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let server = producer
+			.dynamic_route("room", Route::default().with_hops(hops(&[10])))
+			.unwrap();
+
+		// The front selected the covering route and waits on its answer.
+		let pending = consumer.request_broadcast("room/alice", None);
+		let _request = queued(&server).await;
+
+		// The exact path beats the covering route before the front resolves.
+		let _winner = producer.publish("room/alice", Route::default()).unwrap();
+		let again = consumer.request_broadcast("room/alice", None).await.expect("resolves");
+		let first = pending.await.expect("the first front moves to the winner");
+		assert!(!again.is_clone(&first), "joined a front resolving the beaten route");
+	}
+
+	/// A front that moved to the new winner before resolving takes requesters for it, so
+	/// they share it rather than each minting a front on the winner.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn a_request_joins_a_front_resolving_the_winner() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let covering = producer
+			.dynamic_route("room", Route::default().with_hops(hops(&[10])))
+			.unwrap();
+		let pending = consumer.request_broadcast("room/alice", None);
+		let _beaten = queued(&covering).await;
+
+		// The exact path wins, and the front asks it in turn.
+		let exact = producer
+			.dynamic_route("room/alice", Route::default().with_hops(hops(&[10])))
+			.unwrap();
+		let request = queued(&exact).await;
+		let again = consumer.request_broadcast("room/alice", None);
+
+		let upstream = broadcast::Info::new().produce();
+		request.accept(&upstream);
+		let first = pending.await.expect("resolves");
+		let again = again.await.expect("resolves");
+		assert!(
+			again.is_clone(&first),
+			"a request skipped the front resolving its winner"
+		);
 	}
 
 	/// The publisher finishes a track, then its broadcast. A subscription already in
