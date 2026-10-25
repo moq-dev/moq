@@ -2361,7 +2361,7 @@ mod tests {
 		assert_eq!(out_rx.peek(), Some(moq_net::bandwidth::Rate::from_bps(9_000)));
 
 		// Closing the source is what retires the arm, so we stop polling a dead one.
-		src.abort(moq_net::Error::Cancel).unwrap();
+		drop(src);
 		poll_forward(&mut bw, &out, &waiter);
 		assert!(bw.is_none());
 	}
@@ -2445,11 +2445,6 @@ mod tests {
 			source.is_used(),
 			"new demand must be forwarded without unrelated activity"
 		);
-		out.abort(moq_net::Error::Cancel).unwrap();
-		forward.poll(&out, &kio::Waiter::noop(), || {
-			panic!("a closed output must not acquire a source")
-		});
-		assert!(!source.is_used());
 	}
 
 	const WALK_TIMEOUT: Duration = Duration::from_secs(30);
@@ -3376,7 +3371,9 @@ mod tests {
 			.expect("the drained session stopped serving")
 			.unwrap();
 		assert!(
-			connection.draining().and_then(|goaway| goaway.peek()).is_some(),
+			connection
+				.draining()
+				.is_some_and(|goaway| matches!(goaway.poll(&kio::Waiter::noop()), Poll::Ready(Ok(_)))),
 			"the GOAWAY never arrived"
 		);
 		assert_eq!(

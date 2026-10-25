@@ -956,6 +956,21 @@ impl<E: CatalogExt> Producer<E> {
 		Ok(recorder)
 	}
 
+	/// Retire `track`'s timeline once its producer dropped, for an owner that never enrolls the
+	/// name again: the timeline track finishes and leaves the root `archive` entry.
+	pub(crate) fn retire(&mut self, track: &str) -> crate::Result<()> {
+		self.timeline.retire(track)?;
+		let advertised = take(&self.current)
+			.catalog
+			.archive
+			.as_ref()
+			.is_some_and(|archive| archive.timelines.contains_key(track));
+		if advertised && let Some(archive) = self.modify()?.archive.as_mut() {
+			archive.timelines.remove(track);
+		}
+		Ok(())
+	}
+
 	/// The broadcast's [`Timelines`](crate::timeline::Timelines): each enrolled track's index.
 	///
 	/// A track's timeline is created (and advertised in the catalog's root `archive` entry) when
@@ -974,10 +989,9 @@ impl<E: CatalogExt> Producer<E> {
 	/// `config` is a [`json::Config`](crate::json::Config) for the `json` section, or an
 	/// application's own entry embedding a [`JsonConfig`](hang::catalog::JsonConfig) (see
 	/// [`IntoRendition`](super::IntoRendition)). The producer sets its `mode`, encodes the track
-	/// with its `compression`, and fills an absent `bitrate` from what it writes. The
-	/// [`deltas`](crate::json::Config::deltas) switch on `json::Config` configures the snapshot
-	/// encoder; it is not written into the catalog entry. The config is `'static` so that switch
-	/// can be read off the builder. With deltas, create `track` with a
+	/// with its `compression`, and fills an absent `bitrate` from what it writes. `options`
+	/// configures the encoder and is not written into the catalog entry. With
+	/// [`deltas`](crate::json::Options::deltas), create `track` with a
 	/// [`refresh`](moq_net::track::Info::refresh) ratio and drive
 	/// [`Snapshot::refresh`](crate::json::Snapshot::refresh), so joiners get a fresh group.
 	///
@@ -987,10 +1001,11 @@ impl<E: CatalogExt> Producer<E> {
 	pub fn json_snapshot<T: serde::Serialize>(
 		&self,
 		track: moq_net::track::Producer,
-		config: impl super::IntoRendition<E, hang::catalog::JsonConfig> + 'static,
+		config: impl super::IntoRendition<E, hang::catalog::JsonConfig>,
+		options: crate::json::Options,
 	) -> crate::Result<crate::json::Snapshot<T>> {
 		let rendition = self.data_entry(track.name())?;
-		crate::json::Snapshot::new(track, rendition, config)
+		crate::json::Snapshot::new(track, rendition, config.into_rendition(), options)
 	}
 
 	/// Publish `track` as an append-log JSON track, advertising it in the catalog.
@@ -1936,6 +1951,35 @@ mod test {
 		// Something else already took the name the timeline track wants.
 		let _taken = broadcast.create_track("video0.timeline.z", None).unwrap();
 		assert!(catalog.enroll("video0", None).is_err());
+	}
+
+	/// A retired track's timeline ends for the readers already on it and leaves the archive, while
+	/// one still recording is refused.
+	#[test]
+	fn retiring_a_track_ends_its_timeline() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+		let recorder = catalog
+			.enroll("video0", Some(std::time::Duration::from_secs(4)))
+			.unwrap();
+		let waiter = kio::Waiter::noop();
+		let mut subscribing = broadcast
+			.consume()
+			.track("video0.timeline.z")
+			.unwrap()
+			.subscribe(None)
+			.into_inner();
+		let std::task::Poll::Ready(Ok(mut reader)) = kio::Task::poll(&mut subscribing, &waiter) else {
+			panic!("the timeline track is live");
+		};
+		assert!(catalog.retire("video0").is_err(), "its recorder is still alive");
+
+		drop(recorder);
+		catalog.retire("video0").unwrap();
+		let archive = catalog.snapshot().archive.unwrap();
+		assert_eq!(archive.timelines.keys().collect::<Vec<_>>(), vec!["catalog.json"]);
+		assert_eq!(catalog.timeline().len(), 1);
+		assert!(matches!(reader.poll_finished(&waiter), std::task::Poll::Ready(Ok(_))));
 	}
 
 	#[test]

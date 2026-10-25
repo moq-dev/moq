@@ -11,6 +11,10 @@ A connection's `bandwidth` allocator is `allocator`, mirroring Rust's `Session::
 `Track.Producer.writeGroup(group)` is `createGroup(sequence)`, which creates the group and returns it like `appendGroup()`: replace `const group = new Group.Producer(n); track.writeGroup(group);` with `const group = track.createGroup(n);`.
 A group can no longer be written before it joins a track, or join more than one track.
 
+### `Varint.sizeLeadingOnes` is gone
+
+Take the length of `Varint.encodeLeadingOnes(v)`.
+
 ### Published names refuse navigation segments
 
 Broadcast creation and route publication now refuse literal `.` and `..` segments, including segments in the producer's root.

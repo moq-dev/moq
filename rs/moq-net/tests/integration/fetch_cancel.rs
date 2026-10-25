@@ -232,6 +232,6 @@ async fn a_refetch_within_the_linger_stays_on_the_relay_lite07() {
 }
 
 #[moq_clock::test]
-async fn a_refetch_within_the_linger_stays_on_the_relay_ietf19() {
-	a_refetch_within_the_linger_stays_on_the_relay("moq-transport-19").await;
+async fn a_refetch_within_the_linger_stays_on_the_relay_ietf18() {
+	a_refetch_within_the_linger_stays_on_the_relay("moq-transport-18").await;
 }

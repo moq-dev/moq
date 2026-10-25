@@ -11,7 +11,7 @@ use std::task::{Context, Poll};
 use bytes::{Buf, Bytes};
 
 use super::poll::{self, SendOptions};
-use super::{Binding, CloseKind, MaybeSend, MaybeSync, Probe, Wire};
+use super::{Address, CloseKind, MaybeSend, MaybeSync, Probe, Wire};
 
 /// A boxed [`poll::Boxable`] session.
 pub(crate) struct Session {
@@ -196,7 +196,7 @@ trait ErasedSession: MaybeSend + MaybeSync {
 	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Error>>;
 	fn max_datagram_size(&self) -> usize;
 	fn protocol(&self) -> Option<&str>;
-	fn binding(&self) -> Binding;
+	fn address(&self) -> Address;
 	fn close(&mut self, code: u32, reason: &str);
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Error>;
 	fn metrics(&self) -> Metrics;
@@ -314,8 +314,8 @@ impl<S: poll::Boxable> ErasedSession for S {
 		poll::Session::protocol(self)
 	}
 
-	fn binding(&self) -> Binding {
-		poll::Session::binding(self)
+	fn address(&self) -> Address {
+		poll::Session::address(self)
 	}
 
 	fn close(&mut self, code: u32, reason: &str) {
@@ -480,8 +480,8 @@ impl poll::Session for Session {
 		self.inner.protocol()
 	}
 
-	fn binding(&self) -> Binding {
-		self.inner.binding()
+	fn address(&self) -> Address {
+		self.inner.address()
 	}
 
 	fn close(&mut self, code: u32, reason: &str) {

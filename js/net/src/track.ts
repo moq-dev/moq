@@ -1756,7 +1756,7 @@ export class Subscriber {
 	// it to sequence order; whichever wins is the only one allowed from here on.
 	// Datagrams are a separate cursor and never commit.
 	#mode?: "arrival" | "ordered";
-	// What the lite publisher forwards as drops: sequences given up and not reported yet,
+	// What this cursor reports as drops: sequences given up and not reported yet,
 	// the track's drops last folded in, and every sequence already reported. Drops are
 	// persistent track state, so they are tracked here rather than removed for everyone.
 	#pending: DropRun[] = [];
@@ -2019,6 +2019,7 @@ export class Subscriber {
 			return Math.max(start, subscriber.#cursor.peek().start);
 		};
 		hooks.tryRecvGroup = (subscriber, dispositions) => subscriber.#tryRecvGroup(dispositions);
+		hooks.tryDrop = (subscriber) => subscriber.#tryDrop();
 		hooks.tryNextGroup = (subscriber) => subscriber.#tryNextGroup();
 		hooks.peekGroup = (subscriber, ordered) => subscriber.#peekGroup(ordered);
 		hooks.forgetPastBudget = (subscriber, delivered) => subscriber.#forgetPastBudget(delivered);
@@ -2295,7 +2296,9 @@ export class Subscriber {
 	 * omitted end removes the cap. Lowering the floor or raising the cap offers the groups it
 	 * newly covers that the track still caches and this reader never handed out; a group is
 	 * never handed out twice. A local filter, not a request: it leaves the wire subscription
-	 * alone. {@link largest} reports within these bounds.
+	 * alone. One exception: on a track served across route changes, lowering the floor asks the
+	 * serving route again for the groups it newly covers within the subscription's groups, since
+	 * the route that delivered them may be gone. {@link largest} reports within these bounds.
 	 */
 	withRange(groups: Groups): this {
 		const { start, end } = groupBounds(groups);
@@ -2391,38 +2394,17 @@ export class Subscriber {
 	// Package-internal synchronous half of recvGroup. The lite publisher uses this so applying
 	// control state, popping the group, and positioning its frames are one JavaScript turn.
 	#tryRecvGroup(dispositions = false): Recv {
-		if (this.#resume) return this.#tryResumed(false);
+		if (this.#resume) return this.#tryResumed(false, dispositions);
 		const groups = this.#state.groups.peek();
 		const { start, end } = this.#cursor.peek();
-		// The first part of `[from, to)` this cursor has not reported yet, now reported, with why.
-		const report = (from: number, to: number, error: Error): Recv | undefined => {
-			if (!dispositions) return undefined;
-			const [gap] = runGaps(this.#reported, Math.max(from, start), Math.min(to, end ?? to));
-			if (!gap) return undefined;
-			insertRun(this.#reported, gap.start, gap.end);
-			return { kind: "drop", ...gap, error };
-		};
 		const old = () => new StreamError(StreamCode.Old, { message: "group is past the budget" });
 
 		// Keep unread groups below the floor until cache eviction: replacing the
 		// subscription can lower it, just as raising the cap re-offers held groups.
 		const index = timelineIndex(groups, start);
 		if (dispositions) {
-			// Rescanned only after it changed, so an idle poll costs nothing per drop held.
-			// Out-of-window runs were skipped, so a moved window rescans too.
-			const drops = this.#state.drops.peek();
-			const seen = this.#dropsSeen;
-			if (!seen || seen.drops !== drops || seen.start !== start || seen.end !== end) {
-				this.#dropsSeen = { drops, start, end };
-				for (const run of drops) this.#pending = insertDrop(this.#pending, run.start, run.end, run.error);
-			}
-			for (let run = this.#pending.shift(); run; run = this.#pending.shift()) {
-				const dropped = report(run.start, run.end, run.error);
-				if (dropped?.kind !== "drop") continue;
-				if (dropped.end < run.end)
-					this.#pending.unshift({ start: dropped.end, end: run.end, error: run.error });
-				return dropped;
-			}
+			const dropped = this.#tryDrop();
+			if (dropped) return dropped;
 		}
 		const drift = this.#drift();
 
@@ -2440,7 +2422,7 @@ export class Subscriber {
 			}
 			const failed = group.closed.peek();
 			if (dispositions && failed instanceof Error) {
-				const dropped = report(group.sequence, group.sequence + 1, failed);
+				const dropped = this.#report(group.sequence, group.sequence + 1, failed);
 				if (dropped) return dropped;
 				continue;
 			}
@@ -2450,8 +2432,13 @@ export class Subscriber {
 			}
 			if (this.#staleAt(group.sequence, drift)) {
 				group.close();
-				const dropped = report(group.sequence, group.sequence + 1, old());
-				if (dropped) return dropped;
+				if (dispositions) {
+					const dropped = this.#report(group.sequence, group.sequence + 1, old());
+					if (dropped) return dropped;
+				} else if (this.#dropsSeen) {
+					// A cursor #tryDrop reads reports it there.
+					this.#pending = insertDrop(this.#pending, group.sequence, group.sequence + 1, old());
+				}
 				continue;
 			}
 			this.#handOut(group.sequence, false);
@@ -2467,14 +2454,53 @@ export class Subscriber {
 		return group ? { kind: "boundary" } : { kind: "done" };
 	}
 
+	// The first part of `[from, to)` this cursor has not reported yet, now reported, with why.
+	#report(from: number, to: number, error: Error): (Recv & { kind: "drop" }) | undefined {
+		const { start, end } = this.#cursor.peek();
+		const [gap] = runGaps(this.#reported, Math.max(from, start), Math.min(to, end ?? to));
+		if (!gap) return undefined;
+		insertRun(this.#reported, gap.start, gap.end);
+		return { kind: "drop", ...gap, error };
+	}
+
+	// The next run this cursor gave up and has not reported, without taking a group. From the
+	// first call on, a read without dispositions keeps its budget skips for it too. A resumed
+	// one reports what its routes' copies gave up.
+	#tryDrop(): (Recv & { kind: "drop" }) | undefined {
+		if (this.#resume) {
+			const dropped = this.#resume.tryDrop(this.#delivered);
+			// Accounted for as #tryResumed does, so no copy serves it later.
+			if (dropped) this.#delivered.addRun(dropped.start, dropped.end);
+			return dropped;
+		}
+		const { start, end } = this.#cursor.peek();
+		// Rescanned only after it changed, so an idle poll costs nothing per drop held.
+		// Out-of-window runs were skipped, so a moved window rescans too.
+		const drops = this.#state.drops.peek();
+		const seen = this.#dropsSeen;
+		if (!seen || seen.drops !== drops || seen.start !== start || seen.end !== end) {
+			this.#dropsSeen = { drops, start, end };
+			for (const run of drops) this.#pending = insertDrop(this.#pending, run.start, run.end, run.error);
+		}
+		for (let run = this.#pending.shift(); run; run = this.#pending.shift()) {
+			const dropped = this.#report(run.start, run.end, run.error);
+			if (!dropped) continue;
+			if (dropped.end < run.end) this.#pending.unshift({ start: dropped.end, end: run.end, error: run.error });
+			return dropped;
+		}
+		return undefined;
+	}
+
 	// A group from the routes' copies; see #resume.
-	#tryResumed(ordered: boolean): Recv {
+	#tryResumed(ordered: boolean, dispositions = false): Recv {
 		const resume = this.#resume as ResumeSource;
 		// A clean end leaves what the copies hold readable, as a direct reader's buffer is.
 		const closed = this.#state.closed.peek();
 		if (closed instanceof Error) return { kind: "error", error: closed };
-		const recv = resume.tryGroup(ordered, this.#delivered);
+		const recv = resume.tryGroup(ordered, this.#delivered, dispositions);
 		if (recv.kind === "group") this.#handOut(recv.group.sequence, ordered);
+		// Accounted for as a group handed out is, so no copy serves it later.
+		else if (recv.kind === "drop") this.#delivered.addRun(recv.start, recv.end);
 		return recv;
 	}
 

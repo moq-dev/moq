@@ -51,7 +51,6 @@ pub(crate) fn protocol_error(err: Error) -> Error {
 		Error::Decode(_)
 		| Error::BoundsExceeded(_)
 		| Error::WrongSize
-		| Error::TooManyParameters
 		| Error::UnexpectedMessage
 		| Error::UnexpectedStream => Error::ProtocolViolation,
 		err => err,
@@ -157,6 +156,16 @@ fn transient(err: &Error) -> bool {
 		err,
 		Error::Session(SessionError::Internal | SessionError::TooManyRequests | SessionError::Timeout)
 	)
+}
+
+/// Whether a token's stream ending with `err` is the peer's verdict on it: a refusal that
+/// will not pass, [`Error::Unsupported`], or a clean close after a grant. Anything else
+/// left the token undecided.
+fn verdict(slot: &Slot, err: &Error) -> bool {
+	(slot.refused && !transient(err))
+		|| matches!(err, Error::Unsupported)
+		// The peer ended the grant without revoking it.
+		|| (matches!(err, Error::Cancel) && slot.grant.is_some())
 }
 
 /// The shared state behind one [`Handle`]: the tokens it presents, and every session
@@ -524,7 +533,8 @@ impl Handle {
 	///
 	/// The grant joins the union while any clone of the returned [`Credential`] lives. With no
 	/// session live it waits for the next one. A refusal that may pass, such as an
-	/// unreachable auth server, is presented again after a backoff. On moq-transport
+	/// unreachable auth server, is presented again after a backoff, and so is a token whose
+	/// stream the peer drops without a verdict. On moq-transport
 	/// without AUTH there is no answer to wait for: it resolves at once with
 	/// [`Answer::Requests`] and a grant that stays unknown, and only a request that names it
 	/// carries the token.
@@ -960,8 +970,7 @@ impl Link {
 
 	/// Record an AUTH_ERROR for the token: a reply that grants nothing, so a refused
 	/// setup token leaves an empty union rather than an unknown (unrestricted) one.
-	/// The driver then calls [`retry`](Self::retry), and [`ended`](Self::ended) unless it
-	/// presents the token again.
+	/// The driver then calls [`retry`](Self::retry), as on every end of the token's stream.
 	pub(crate) fn refused(&self, id: u64) {
 		self.with(|link| {
 			if let Some(slot) = link.slots.get_mut(&id) {
@@ -971,15 +980,27 @@ impl Link {
 		});
 	}
 
-	/// The delay before presenting a refused token again, when the refusal `err` may pass
-	/// and the token is still wanted here; `None` when the driver should end it instead.
+	/// The delay before presenting a token again once its stream ended with `err`, or `None`
+	/// when the driver should end it instead.
+	///
+	/// A token still wanted on an active session is presented again when the peer refused it
+	/// for a reason that may pass, or, on a shared handle, when its stream was lost without a
+	/// verdict, so the session never runs on without it. A session's own handle ends a lost
+	/// token instead, which tells the application. Both back off from [`RETRY_INITIAL`],
+	/// doubling until a grant resets it.
 	pub(crate) fn retry(&self, id: u64, err: &Error) -> Option<Duration> {
-		self.with(|link| {
-			if link.closed.is_some() || !transient(err) {
+		self.with_state(|state, link| {
+			let bound = state.bound;
+			let link = attached(&mut state.links, link);
+			if !link.active() {
 				return None;
 			}
 			let slot = link.slots.get_mut(&id)?;
-			if !slot.refused || slot.withdrawn || slot.ended.is_some() {
+			// A protocol violation ends the session anyway.
+			if slot.withdrawn || slot.ended.is_some() || verdict(slot, err) || matches!(err, Error::ProtocolViolation) {
+				return None;
+			}
+			if bound && !slot.refused {
 				return None;
 			}
 			slot.refused = false;
@@ -1018,8 +1039,9 @@ impl Link {
 		})
 	}
 
-	/// End the token on this session: refused or revoked by the peer, withdrawn by us, or
-	/// its stream lost. A token that was never answered records `err` as its answer. The
+	/// End the token on this session, once [`retry`](Self::retry) declined to present it
+	/// again: refused or revoked by the peer, withdrawn by us, or its stream lost while the
+	/// session drains. A token that was never answered records `err` as its answer. The
 	/// peer's verdict ends one of the handle's tokens on every session; anything else
 	/// leaves it for the next session to present, except on a handle of the session's own.
 	pub(crate) fn ended(&self, id: u64, err: Error) {
@@ -1040,16 +1062,12 @@ impl Link {
 			let Some(slot) = link.slots.get_mut(&id) else {
 				return;
 			};
-			let verdict = !slot.setup
+			let settled = !slot.setup
 				&& !superseded
 				&& link.closed.is_none()
 				&& !slot.withdrawn
 				&& slot.ended.is_none()
-				&& (bound
-					|| slot.refused
-					|| matches!(err, Error::Unsupported)
-					// The peer ended the grant without revoking it.
-					|| (matches!(err, Error::Cancel) && slot.grant.is_some()));
+				&& (bound || verdict(slot, &err));
 			slot.grant = None;
 			slot.answered.get_or_insert(Err(err.clone()));
 			slot.ended.get_or_insert(err.clone());
@@ -1060,7 +1078,7 @@ impl Link {
 			// Even with the union unchanged, a request carrying this token must drop it.
 			link.epoch += 1;
 			link.recompute();
-			if verdict {
+			if settled {
 				state.end_token(id, err);
 			}
 		});
@@ -2797,7 +2815,9 @@ mod tests {
 		let link = Link::new(true);
 		let auth = link.present(Bytes::from_static(b"jwt"), false).unwrap();
 		let id = opened(&link);
-		link.ended(id, Error::Stream(crate::StreamError::Internal));
+		let lost = Error::Stream(crate::StreamError::Internal);
+		assert_eq!(link.retry(id, &lost), None, "the application hears of a lost token");
+		link.ended(id, lost);
 		assert!(matches!(
 			auth.poll_answered(&kio::Waiter::noop()),
 			Poll::Ready(Err(Error::Stream(_)))
@@ -2907,6 +2927,65 @@ mod tests {
 		));
 	}
 
+	/// A shared handle's token whose stream is lost without a verdict is presented again on the
+	/// same session, doubling its backoff until a grant resets it. A request keeps carrying it
+	/// meanwhile, and a request it might cover waits for the retry's answer.
+	#[test]
+	fn a_lost_stream_is_presented_again() {
+		let handle = Handle::new();
+		let link = Link::attach(&handle, true, true).unwrap();
+		let auth = handle.present(Bytes::from_static(b"jwt")).unwrap();
+		let id = opened(&link);
+		let lost = Error::Stream(crate::StreamError::Internal);
+
+		link.granted(id, Grant::all());
+		assert_eq!(link.retry(id, &lost), Some(RETRY_INITIAL));
+		assert_eq!(auth.grant().peek(), None, "the lost stream's grant is gone");
+		assert_eq!(link.token(&auth).as_deref(), Some(&b"jwt"[..]));
+		let mut gate = Gate::new(link.clone(), crate::Path::new("room").to_owned(), Direction::Publish);
+		assert!(gate.poll_ready(&kio::Waiter::noop()).is_pending());
+
+		assert_eq!(link.reopen(id).unwrap().as_ref(), b"jwt");
+		assert_eq!(link.retry(id, &lost), Some(RETRY_INITIAL * 2));
+		link.reopen(id).unwrap();
+		link.granted(id, Grant::all());
+		assert!(gate.poll_ready(&kio::Waiter::noop()).is_ready());
+		assert_eq!(link.retry(id, &lost), Some(RETRY_INITIAL), "a grant resets the backoff");
+		assert!(Selector::Token(id).ended(&handle.state.read()).is_none());
+
+		// A clean close after a grant is the peer's verdict, not a lost stream.
+		link.reopen(id).unwrap();
+		link.granted(id, Grant::all());
+		assert_eq!(link.retry(id, &Error::Cancel), None);
+		link.ended(id, Error::Cancel);
+		assert!(matches!(
+			Selector::Token(id).ended(&handle.state.read()),
+			Some(Error::Cancel)
+		));
+	}
+
+	/// A draining session presents nothing again, and a transient refusal there is no verdict:
+	/// the token waits for the successor.
+	#[test]
+	fn a_draining_session_leaves_an_undecided_token() {
+		let handle = Handle::new();
+		let draining = Link::attach(&handle, true, false).unwrap();
+		let _auth = handle.present(Bytes::from_static(b"jwt")).unwrap();
+		let id = opened(&draining);
+		let (goaway, _protocol) = crate::goaway::Handle::new(false);
+		goaway.producer().send(crate::goaway::Goaway::new()).unwrap();
+		draining.drain_with(std::sync::Arc::new(goaway));
+
+		let busy = Error::Session(SessionError::TooManyRequests);
+		draining.refused(id);
+		assert_eq!(draining.retry(id, &busy), None);
+		draining.ended(id, busy);
+		assert!(Selector::Token(id).ended(&handle.state.read()).is_none());
+
+		let successor = Link::attach(&handle, true, false).unwrap();
+		assert_eq!(opened(&successor), id, "the successor presents it");
+	}
+
 	/// A refusal that may pass is presented again after a doubling backoff, and settles nothing.
 	#[test]
 	fn a_transient_refusal_backs_off() {
@@ -2969,7 +3048,7 @@ mod request_token_tests {
 	async fn a_typed_request_token_is_unsupported() {
 		let handle = Link::new(true);
 		let mut requests = handle.handle().requests();
-		let verdict = handle.verify_request(token(b"cat", crate::setup::Token::CAT), None);
+		let verdict = handle.verify_request(token(b"cat", 1), None);
 		let err = verdict.grant().await.expect_err("a typed token");
 		assert!(matches!(err.error, Error::Unsupported), "{err:?}");
 		assert!(

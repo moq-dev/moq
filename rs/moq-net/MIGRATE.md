@@ -24,6 +24,28 @@ Rename these, which kept their behavior:
 `transport::Metrics` drops `bytes_sent` and `bytes_received`: a transport reports them through the `transport::Wire` it returns from `wire()`, which `session::Stats` now reads.
 `transport::StatsUnavailable` is gone: `metrics()` defaults to reporting nothing, so delete an implementation that returned it.
 
+### Exports without a consumer are gone
+
+These had no caller outside tests; replace them as follows.
+
+- `broadcast::Demand` and both `broadcast::{Producer, Consumer}::demand()`: watch each track's `track::Demand` instead.
+- `goaway::Consumer::{peek, recv}`: poll it, `goaway.poll(&kio::Waiter::noop())` to peek or `kio::wait(|waiter| goaway.poll(waiter)).await` to wait.
+- `bandwidth::Producer::{abort, closed}`: drop the last producer to close it.
+- `Version::{names, from_alpn, is_ietf}`: use `Versions::all().iter()` or `Version::from_code`, match `alpn()` yourself, and `!is_lite()`.
+- `Server::with_origin(origin)`: call `with_publisher(&origin).with_subscriber(origin)`.
+- `stats::Handle::{parent, tier}`, `stats::Registry::exclude`, `stats::Traffic::{is_announced, total_bytes}`, `stats::Tier::is_default`: read the public fields, such as `announces_started > announces_ended` or `tier.label().is_empty()`.
+- `frame::Consumer::poll_read_all`: use `read_all`, or poll `poll_read_chunk` until the frame ends.
+- `frame::Buffer::{is_full, filled_mut}`: compare `len()` with `capacity()`, and read `filled()`.
+- `Path::next_part`: split `as_str()` on the first `/`.
+- `setup::Token::CAT`: compare `kind` with `1`.
+- `Error::TooManyParameters` and `DecodeError::{ExpectedData, Missing, Unsupported}` were never produced; drop their match arms.
+
+### `Client::with_url` replaces `with_path` and `with_authority`
+
+Pass the URL you dial: `Client::new().with_url(url)` instead of `.with_path(path).with_authority(authority)`.
+The client derives what SETUP carries from it and from the transport's `address()`: the path and query when SETUP carries the target, plus the authority for `moqt://`, and nothing when the transport's own URI does.
+A `unix://` URL names its target in its `?path=` query.
+
 ### `stats::Refusal` is `stats::RefusalKind`, and `time::now` is gone (#6510)
 
 Rename `moq_net::stats::Refusal` to `moq_net::stats::RefusalKind`, so it no longer shares a name with `moq_auth::Refusal`; its variants and `Refusals` are unchanged.
@@ -72,9 +94,9 @@ Pass `Position::group(n)` where you passed `n`, or a position within the last gr
 
 ### IETF whole-group FETCH answers name the requested group ([#6199](https://github.com/moq-dev/moq/issues/6199))
 
-On moq-transport drafts 14 through 19, a whole-group `FETCH_OK` now names `{g, 0}` instead of `{g+1, 0}`.
+On moq-transport drafts 14 through 18, a whole-group `FETCH_OK` now names `{g, 0}` instead of `{g+1, 0}`.
 Readers accept both forms and set End Of Track to the sequence after the fetched group.
-An older moq-net reader can reject the new answer; upgrade it before pairing it with a new publisher, or use draft 20 and later, whose inclusive End Location is unchanged.
+An older moq-net reader can reject the new answer; upgrade it before pairing it with a new publisher, or use draft 22, whose inclusive End Location is unchanged.
 No Rust API changes.
 
 ### Receive streams are read through leases (#5878)
@@ -416,12 +438,12 @@ A `group::Request` is withdrawn once its last `fetch_group` caller leaves, so a 
 
 `moq_net::web_transport_trait` is gone.
 `transport::poll::{Session, SendStream, RecvStream}` carry their own `poll_*` methods, `transport::Error`, and `transport::Stats`, and `Error::from_transport` takes a `transport::Error`.
-A custom transport implements these traits and reports `binding()`: `transport::Binding::Uri` when its handshake carries the request URI, or `InBand` when SETUP carries it.
+A custom transport implements these traits and reports `address()`: `transport::Address::Uri` when its handshake carries the request URI, or `Setup` when SETUP carries it.
 
 ```rust
 impl moq_net::transport::poll::Session for MySession {
-	fn binding(&self) -> moq_net::transport::Binding {
-		moq_net::transport::Binding::Uri
+	fn address(&self) -> moq_net::transport::Address {
+		moq_net::transport::Address::Uri
 	}
 	// poll_accept_bi, poll_open_uni, ...
 }
@@ -487,7 +509,7 @@ A publisher that restarts its group numbering must publish under a new broadcast
 ### No `VarInt`
 
 Varints are plain `u64`s.
-Use `moq_net::varint::decode_quic(buf)` and `moq_net::varint::encode_quic(v, buf)`, which fails past `varint::MAX_QUIC`.
+Use `moq_net::varint::decode_quic(buf)` and `moq_net::varint::encode_quic(v, buf)`, which fails past `2^62 - 1`.
 
 ## 0.2 -> 0.3
 

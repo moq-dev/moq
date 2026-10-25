@@ -137,7 +137,7 @@ async fn close_delivers_a_finished_track() {
 
 #[moq_clock::test]
 async fn ietf_close_delivers_a_finished_track() {
-	close_delivers_a_finished_track_for("moq-transport-20").await;
+	close_delivers_a_finished_track_for("moq-transport-22").await;
 }
 
 async fn close_delivers_a_finished_track_for(version: &str) {
@@ -177,7 +177,7 @@ async fn close_gives_up_on_a_live_track() {
 
 #[moq_clock::test]
 async fn ietf_close_gives_up_on_a_live_track() {
-	close_gives_up_on_a_live_track_for("moq-transport-20").await;
+	close_gives_up_on_a_live_track_for("moq-transport-22").await;
 }
 
 async fn close_gives_up_on_a_live_track_for(version: &str) {
@@ -201,7 +201,7 @@ async fn abort_cuts_a_drain_short() {
 
 #[moq_clock::test]
 async fn ietf_abort_cuts_a_drain_short() {
-	abort_cuts_a_drain_short_for("moq-transport-20").await;
+	abort_cuts_a_drain_short_for("moq-transport-22").await;
 }
 
 async fn abort_cuts_a_drain_short_for(version: &str) {

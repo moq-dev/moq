@@ -71,21 +71,9 @@ pub enum DecodeError {
 		max: usize,
 	},
 
-	/// The stream ended where a payload was required.
-	#[error("expected data")]
-	ExpectedData,
-
 	/// A parameter or field appeared more than once.
 	#[error("duplicate")]
 	Duplicate,
-
-	/// A required parameter or field was absent.
-	#[error("missing")]
-	Missing,
-
-	/// The value is well-formed but this implementation does not handle it.
-	#[error("unsupported")]
-	Unsupported,
 
 	/// Bytes remained after the value was fully decoded.
 	#[error("trailing bytes")]

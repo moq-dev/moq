@@ -351,8 +351,8 @@ impl Session {
 
 	/// Observe a GOAWAY from the peer, telling us to migrate elsewhere.
 	///
-	/// [`peek`](goaway::Consumer::peek) is the cheap synchronous check;
-	/// [`recv`](goaway::Consumer::recv) waits for one. Once a GOAWAY arrives, this
+	/// [`poll`](goaway::Consumer::poll) it with a no-op waiter for a synchronous check, or
+	/// wait on it for one. Once a GOAWAY arrives, this
 	/// session's routes cost [`Cost::DRAIN`](crate::origin::Cost::DRAIN): requests
 	/// keep opening on it until a replacement session's route outranks it, and
 	/// existing subscriptions keep flowing until the session closes.

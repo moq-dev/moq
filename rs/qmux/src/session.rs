@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use bytes::{Buf, Bytes};
 use moq_clock::Instant;
-use moq_net::transport::{self as net, Binding, poll};
+use moq_net::transport::{self as net, Address, poll};
 use moq_quic::{Dir, Side, StreamId, TransportError, TransportErrorCode, VarInt, mux};
 use rustc_hash::FxHashMap;
 
@@ -34,7 +34,7 @@ struct Inner {
 	/// Updated by the reader and writer, so stats never take the lock.
 	wire: net::Wire,
 	socket_stats: Option<SharedSocketStats>,
-	binding: Binding,
+	address: Address,
 }
 
 struct State {
@@ -498,7 +498,7 @@ impl Session {
 			}),
 			wire: net::Wire::new(),
 			socket_stats: transport.socket_stats(),
-			binding: transport.binding(),
+			address: transport.address(),
 		});
 
 		let (writer, reader) = transport.split(&config);
@@ -730,8 +730,8 @@ impl poll::Session for Session {
 		Session::protocol(self)
 	}
 
-	fn binding(&self) -> Binding {
-		self.inner.binding
+	fn address(&self) -> Address {
+		self.inner.address
 	}
 
 	fn close(&mut self, code: u32, reason: &str) {

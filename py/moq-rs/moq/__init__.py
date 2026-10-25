@@ -12,7 +12,7 @@ from . import flate as flate
 from . import json as json
 from . import video as video
 from .client import Client, CongestionControl, connect, qlog_supported, versions
-from .epoch import epoch_time, mint_epoch
+from .epoch import mint_epoch
 from .errors import is_auth, is_shutdown, protocol_error
 from .log import log_level
 from .origin import (
@@ -148,7 +148,6 @@ __all__ = [
     "VideoPixelFormat",
     "WebSocketConfig",
     "connect",
-    "epoch_time",
     "is_auth",
     "is_shutdown",
     "log_level",

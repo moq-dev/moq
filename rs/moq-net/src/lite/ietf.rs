@@ -610,7 +610,7 @@ mod tests {
 	#[test]
 	fn track_properties_round_trip() {
 		let properties = crate::model::object::TrackProperties {
-			version: Draft::Draft19,
+			version: Draft::Draft18,
 			values: vec![
 				Property {
 					id: IMMUTABLE,
@@ -954,14 +954,14 @@ mod tests {
 		assert!(wire.properties.heap() < (COUNT * size_of::<Property>()) as u64 / 10);
 	}
 
-	/// Drafts 18 and 19 serialize a block alike, so only the track's draft says whether 0x06
-	/// is SUBGROUP_DELIVERY_TIMEOUT: a draft-18 one is dropped on its way to draft-19.
+	/// Drafts 18 and 22 serialize a block alike, so only the track's draft says whether 0x06
+	/// is SUBGROUP_DELIVERY_TIMEOUT: a draft-18 one is dropped on its way to draft-22.
 	#[test]
 	fn a_block_means_what_its_tracks_draft_says() {
-		for (version, kept) in [(Draft::Draft18, false), (Draft::Draft19, true)] {
+		for (version, kept) in [(Draft::Draft18, false), (Draft::Draft22, true)] {
 			let decoded = decode_properties(&[0x06, 42], from(version, None), true).unwrap();
 			let written =
-				crate::ietf::object::write(&decoded.properties, Some(version), None, Draft::Draft19, None).unwrap();
+				crate::ietf::object::write(&decoded.properties, Some(version), None, Draft::Draft22, None).unwrap();
 			assert_eq!(!written.is_empty(), kept, "{version}");
 		}
 	}

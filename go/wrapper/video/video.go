@@ -66,8 +66,7 @@ type DecoderOutput struct {
 }
 
 func (o DecoderOutput) ffi() (ffi.MoqVideoDecoderOutput, error) {
-	delay, err := bridge.OptionalDuration(o.MaxDelay, "video max delay")
-	return ffi.MoqVideoDecoderOutput{Resize: o.Resize, MaxDelayUs: delay, Surface: o.Surface}, err
+	return ffi.MoqVideoDecoderOutput{Resize: o.Resize, MaxDelay: o.MaxDelay, Surface: o.Surface}, bridge.NonNegative(o.MaxDelay, "video max delay")
 }
 
 // Producer encodes raw pictures and publishes them as a track in a broadcast's catalog.

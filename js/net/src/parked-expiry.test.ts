@@ -18,7 +18,7 @@ import { Timescale, Timestamp } from "./time.ts";
 const protocols = [
 	{ kind: "lite", version: Lite.DRAFT_05, alpn: ALPN_05 },
 	{ kind: "lite", version: Lite.DRAFT_07, alpn: ALPN_07_WIP },
-	{ kind: "ietf", version: Ietf.DRAFT_19, alpn: ALPN.DRAFT_19 },
+	{ kind: "ietf", version: Ietf.DRAFT_18, alpn: ALPN.DRAFT_18 },
 	{ kind: "ietf", version: Ietf.DRAFT_22, alpn: ALPN.DRAFT_22 },
 ] as const;
 

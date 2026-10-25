@@ -14,8 +14,8 @@ pub struct MoqGrant {
 	pub publish: Vec<String>,
 	/// The broadcast patterns this side may subscribe to from the peer.
 	pub subscribe: Vec<String>,
-	/// Microseconds until the grant lapses, measured when it was read, or `None` for never.
-	pub expires_us: Option<u64>,
+	/// How long until the grant lapses, measured when it was read, or `None` for never.
+	pub expires: Option<std::time::Duration>,
 }
 
 impl From<moq_net::auth::Grant> for MoqGrant {
@@ -24,10 +24,9 @@ impl From<moq_net::auth::Grant> for MoqGrant {
 		Self {
 			publish: patterns(&grant.publish),
 			subscribe: patterns(&grant.subscribe),
-			expires_us: grant.expires.map(|expires| {
-				let remaining = expires.saturating_duration_since(moq_net::time::Instant::now());
-				u64::try_from(remaining.as_micros()).unwrap_or(u64::MAX)
-			}),
+			expires: grant
+				.expires
+				.map(|expires| crate::ffi::duration(expires.saturating_duration_since(moq_net::time::Instant::now()))),
 		}
 	}
 }

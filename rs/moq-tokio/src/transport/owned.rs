@@ -121,8 +121,8 @@ impl<S: super::Grouped<SendStream: 'static, RecvStream: 'static>> poll::Session 
 	fn max_datagram_size(&self) -> usize {
 		backend::Session::max_datagram_size(self)
 	}
-	fn binding(&self) -> moq::Binding {
-		self.binding
+	fn address(&self) -> moq::Address {
+		self.address
 	}
 	fn protocol(&self) -> Option<&str> {
 		backend::Session::protocol(self)

@@ -3,6 +3,7 @@
 
 #include "moq-output.h"
 #include "moq-error.h"
+#include "moq-implementation.h"
 #include "moq-settings.h"
 #include "moq-url.h"
 #include "logger.h"
@@ -186,6 +187,7 @@ bool MoQOutput::Start()
 	// switched off the client keeps the library defaults.
 	moq::ClientConfig config;
 	config.publish = next_origin;
+	config.implementation = MoQImplementation();
 	OBSDataAutoRelease service_settings = obs_service_get_settings(service);
 	std::string invalid = MoQSettings::Configure(service_settings, config);
 	std::shared_ptr<moq::Client> client;
@@ -454,8 +456,8 @@ bool MoQOutput::TryGetConnectionStats(ConnectionStats *out)
 
 	ConnectionStats snapshot;
 	snapshot.reconnects = GetReconnectCount();
-	snapshot.rtt_valid = raw.rtt_us.has_value();
-	snapshot.rtt_ms = raw.rtt_us ? static_cast<double>(*raw.rtt_us) / 1000.0 : 0;
+	snapshot.rtt_valid = raw.rtt.has_value();
+	snapshot.rtt_ms = raw.rtt ? std::chrono::duration<double, std::milli>(*raw.rtt).count() : 0;
 	snapshot.estimated_send_rate_valid = raw.estimated_send_rate_bps.has_value();
 	snapshot.estimated_send_rate_bps =
 		raw.estimated_send_rate_bps ? static_cast<double>(*raw.estimated_send_rate_bps) : 0;
@@ -841,15 +843,10 @@ void MoQOutput::AudioInit(obs_encoder_t *encoder)
 
 void register_moq_output()
 {
-	const uint32_t base_flags = OBS_OUTPUT_ENCODED | OBS_OUTPUT_SERVICE | OBS_OUTPUT_MULTI_TRACK_VIDEO |
-				    OBS_OUTPUT_MULTI_TRACK_AUDIO;
-
-	const char *audio_codecs = "aac;opus";
-	const char *video_codecs = "h264;hevc;av1";
-
 	struct obs_output_info info = {};
 	info.id = "moq_output";
-	info.flags = OBS_OUTPUT_AV | base_flags;
+	info.flags = OBS_OUTPUT_AV | OBS_OUTPUT_ENCODED | OBS_OUTPUT_SERVICE | OBS_OUTPUT_MULTI_TRACK_VIDEO |
+		     OBS_OUTPUT_MULTI_TRACK_AUDIO;
 	info.get_name = [](void *) -> const char * {
 		return "MoQ Output";
 	};
@@ -874,20 +871,9 @@ void register_moq_output()
 	info.get_connect_time_ms = [](void *priv_data) -> int {
 		return static_cast<MoQOutput *>(priv_data)->GetConnectTime();
 	};
-	info.encoded_video_codecs = video_codecs;
-	info.encoded_audio_codecs = audio_codecs;
+	info.encoded_video_codecs = "h264;hevc;av1";
+	info.encoded_audio_codecs = "aac;opus";
 	info.protocols = "MoQ";
 
-	obs_register_output(&info);
-
-	info.id = "moq_output_video";
-	info.flags = OBS_OUTPUT_VIDEO | base_flags;
-	info.encoded_audio_codecs = nullptr;
-	obs_register_output(&info);
-
-	info.id = "moq_output_audio";
-	info.flags = OBS_OUTPUT_AUDIO | base_flags;
-	info.encoded_video_codecs = nullptr;
-	info.encoded_audio_codecs = audio_codecs;
 	obs_register_output(&info);
 }

@@ -116,7 +116,11 @@ function appendFrame(state: GroupState, frame: Frame) {
 
 let makeDemand: (sequence: number, used: Getter<boolean>, state: GroupState) => Demand;
 
-/** A watch-only view of a group's mirror readers, including coalesced fetches. */
+/**
+ * A watch-only view of a group's mirror readers, including coalesced fetches.
+ *
+ * @internal The sessions' own fetch coalescing is its only consumer.
+ */
 export class Demand {
 	/** The group sequence this handle watches. */
 	readonly sequence: number;
@@ -312,7 +316,11 @@ export class Producer {
 		return makeConsumer(dst);
 	}
 
-	/** Watch the mirror readers attached to this group. */
+	/**
+	 * Watch the mirror readers attached to this group.
+	 *
+	 * @internal The sessions' own fetch coalescing is its only consumer.
+	 */
 	demand(): Demand {
 		return this.#demand;
 	}

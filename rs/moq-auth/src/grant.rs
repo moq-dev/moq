@@ -43,7 +43,8 @@ pub struct Grant {
 	#[serde_as(as = "Option<DurationSeconds<u64>>")]
 	pub revalidate: Option<Duration>,
 
-	/// An opaque label handed to stats, so traffic can be bucketed.
+	/// The stats tier this session's traffic is bucketed under: `/`-joined segments of
+	/// ASCII letters, digits, `.`, `_`, and `-`, as [`tier::validate`](crate::tier::validate) checks.
 	pub tier: Option<String>,
 
 	/// The literal path this session's stats record under, independent of its root. Absent records under the empty label.
@@ -84,7 +85,8 @@ impl Grant {
 	}
 
 	/// Refuse a grant that admits nothing, marks a non-peer upstream, asks to be
-	/// revalidated without a bound or at no interval, or has already expired.
+	/// revalidated without a bound or at no interval, names an invalid stats tier or
+	/// label, or has already expired.
 	pub fn validate(&self) -> crate::Result<()> {
 		if self.publish.is_empty() && self.subscribe.is_empty() {
 			return Err(crate::Error::UselessGrant);
@@ -98,6 +100,9 @@ impl Grant {
 		// A zero cadence would have the relay re-check in a tight loop.
 		if self.revalidate.is_some_and(|cadence| cadence.is_zero()) {
 			return Err(crate::Error::ZeroRevalidate);
+		}
+		if let Some(tier) = &self.tier {
+			crate::tier::validate(tier)?;
 		}
 		if let Some(label) = &self.label {
 			moq_pattern::Pattern::literal(label).map_err(crate::Error::InvalidLabel)?;
@@ -223,6 +228,20 @@ mod tests {
 		let mut grant = Grant::new(patterns(&["**"]), Patterns::default());
 		grant.label = Some("project/*".into());
 		assert!(matches!(grant.validate(), Err(crate::Error::InvalidLabel(_))));
+	}
+
+	#[test]
+	fn validate_refuses_a_tier_a_metrics_label_would_escape() {
+		let mut grant = Grant::new(patterns(&["**"]), Patterns::default());
+		for tier in ["a\"b", "a\\b", "a\nb"] {
+			grant.tier = Some(tier.into());
+			assert!(
+				matches!(grant.validate(), Err(crate::Error::InvalidTier(_))),
+				"{tier:?}"
+			);
+		}
+		grant.tier = Some("region/sjc".into());
+		grant.validate().unwrap();
 	}
 
 	/// The expiry and the instant come from one clock, so time passing before the

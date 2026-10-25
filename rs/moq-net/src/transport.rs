@@ -41,13 +41,13 @@ impl<T> MaybeSend for T {}
 #[cfg(target_family = "wasm")]
 impl<T> MaybeSync for T {}
 
-/// Where the transport carries the request target.
+/// Where a session's request target travels.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Binding {
-	/// The request target is carried by the transport URI.
+pub enum Address {
+	/// The transport's own request URI carries it (WebTransport, qmux over WebSocket).
 	Uri,
-	/// The request target is carried by the MoQ SETUP.
-	InBand,
+	/// The MoQ SETUP carries it, because the transport has no request URI.
+	Setup,
 }
 
 /// One connection's cumulative wire counters, which its transport updates as it sends and receives.
@@ -323,7 +323,7 @@ pub mod poll {
 		fn protocol(&self) -> Option<&str>;
 
 		/// Return where this transport carries the request target.
-		fn binding(&self) -> super::Binding;
+		fn address(&self) -> super::Address;
 
 		/// Close the connection immediately with a code and reason.
 		///

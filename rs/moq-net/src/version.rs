@@ -28,9 +28,6 @@ pub const ALPNS: &[&str] = &[
 	ALPN_LITE_03,
 	ALPN_LITE,
 	ALPN_22,
-	ALPN_21,
-	ALPN_20,
-	ALPN_19,
 	ALPN_18,
 	ALPN_17,
 	ALPN_16,
@@ -50,12 +47,9 @@ pub(crate) const ALPN_15: &str = "moqt-15";
 pub(crate) const ALPN_16: &str = "moqt-16";
 pub(crate) const ALPN_17: &str = "moqt-17";
 pub(crate) const ALPN_18: &str = "moqt-18";
-pub(crate) const ALPN_19: &str = "moqt-19";
-pub(crate) const ALPN_20: &str = "moqt-20";
-pub(crate) const ALPN_21: &str = "moqt-21";
 pub(crate) const ALPN_22: &str = "moqt-22";
 
-const ALL: [Version; 16] = [
+const ALL: [Version; 13] = [
 	Version::Lite(lite::Version::Lite07),
 	Version::Lite(lite::Version::Lite06),
 	Version::Lite(lite::Version::Lite05),
@@ -64,9 +58,6 @@ const ALL: [Version; 16] = [
 	Version::Lite(lite::Version::Lite02),
 	Version::Lite(lite::Version::Lite01),
 	Version::Ietf(ietf::Version::Draft22),
-	Version::Ietf(ietf::Version::Draft21),
-	Version::Ietf(ietf::Version::Draft20),
-	Version::Ietf(ietf::Version::Draft19),
 	Version::Ietf(ietf::Version::Draft18),
 	Version::Ietf(ietf::Version::Draft17),
 	Version::Ietf(ietf::Version::Draft16),
@@ -93,12 +84,7 @@ impl Version {
 		}
 	}
 
-	/// Iterate the names accepted by [`FromStr`].
-	pub fn names() -> impl Iterator<Item = &'static str> {
-		ALL.iter().map(Self::as_str)
-	}
-
-	/// Handshake / config name, e.g. `moq-lite-05` or `moq-transport-20`.
+	/// Handshake / config name, e.g. `moq-lite-05` or `moq-transport-22`.
 	pub fn as_str(&self) -> &'static str {
 		match self {
 			Self::Lite(lite::Version::Lite01) => "moq-lite-01",
@@ -113,9 +99,6 @@ impl Version {
 			Self::Ietf(ietf::Version::Draft16) => "moq-transport-16",
 			Self::Ietf(ietf::Version::Draft17) => "moq-transport-17",
 			Self::Ietf(ietf::Version::Draft18) => "moq-transport-18",
-			Self::Ietf(ietf::Version::Draft19) => "moq-transport-19",
-			Self::Ietf(ietf::Version::Draft20) => "moq-transport-20",
-			Self::Ietf(ietf::Version::Draft21) => "moq-transport-21",
 			Self::Ietf(ietf::Version::Draft22) => "moq-transport-22",
 		}
 	}
@@ -135,9 +118,6 @@ impl Version {
 			0xff000010 => Some(Self::Ietf(ietf::Version::Draft16)),
 			0xff000011 => Some(Self::Ietf(ietf::Version::Draft17)),
 			0xff000012 => Some(Self::Ietf(ietf::Version::Draft18)),
-			0xff000013 => Some(Self::Ietf(ietf::Version::Draft19)),
-			0xff000014 => Some(Self::Ietf(ietf::Version::Draft20)),
-			0xff000015 => Some(Self::Ietf(ietf::Version::Draft21)),
 			0xff000016 => Some(Self::Ietf(ietf::Version::Draft22)),
 			_ => None,
 		}
@@ -158,35 +138,7 @@ impl Version {
 			Self::Ietf(ietf::Version::Draft16) => 0xff000010,
 			Self::Ietf(ietf::Version::Draft17) => 0xff000011,
 			Self::Ietf(ietf::Version::Draft18) => 0xff000012,
-			Self::Ietf(ietf::Version::Draft19) => 0xff000013,
-			Self::Ietf(ietf::Version::Draft20) => 0xff000014,
-			Self::Ietf(ietf::Version::Draft21) => 0xff000015,
 			Self::Ietf(ietf::Version::Draft22) => 0xff000016,
-		}
-	}
-
-	/// Parse from ALPN string.
-	///
-	/// Returns `None` for `ALPN_LITE` since multiple versions share
-	/// that ALPN, requiring SETUP negotiation to determine the version.
-	pub fn from_alpn(alpn: &str) -> Option<Self> {
-		match alpn {
-			ALPN_LITE => None, // Multiple versions share this ALPN, need SETUP negotiation
-			ALPN_LITE_03 => Some(Self::Lite(lite::Version::Lite03)),
-			ALPN_LITE_04 => Some(Self::Lite(lite::Version::Lite04)),
-			ALPN_LITE_05 => Some(Self::Lite(lite::Version::Lite05)),
-			ALPN_LITE_06 => Some(Self::Lite(lite::Version::Lite06)),
-			ALPN_LITE_07_WIP => Some(Self::Lite(lite::Version::Lite07)),
-			ALPN_14 => Some(Self::Ietf(ietf::Version::Draft14)),
-			ALPN_15 => Some(Self::Ietf(ietf::Version::Draft15)),
-			ALPN_16 => Some(Self::Ietf(ietf::Version::Draft16)),
-			ALPN_17 => Some(Self::Ietf(ietf::Version::Draft17)),
-			ALPN_18 => Some(Self::Ietf(ietf::Version::Draft18)),
-			ALPN_19 => Some(Self::Ietf(ietf::Version::Draft19)),
-			ALPN_20 => Some(Self::Ietf(ietf::Version::Draft20)),
-			ALPN_21 => Some(Self::Ietf(ietf::Version::Draft21)),
-			ALPN_22 => Some(Self::Ietf(ietf::Version::Draft22)),
-			_ => None,
 		}
 	}
 
@@ -204,9 +156,6 @@ impl Version {
 			Self::Ietf(ietf::Version::Draft16) => ALPN_16,
 			Self::Ietf(ietf::Version::Draft17) => ALPN_17,
 			Self::Ietf(ietf::Version::Draft18) => ALPN_18,
-			Self::Ietf(ietf::Version::Draft19) => ALPN_19,
-			Self::Ietf(ietf::Version::Draft20) => ALPN_20,
-			Self::Ietf(ietf::Version::Draft21) => ALPN_21,
 			Self::Ietf(ietf::Version::Draft22) => ALPN_22,
 		}
 	}
@@ -216,14 +165,6 @@ impl Version {
 		match self {
 			Self::Lite(_) => true,
 			Self::Ietf(_) => false,
-		}
-	}
-
-	/// Whether this is an IETF protocol version.
-	pub fn is_ietf(&self) -> bool {
-		match self {
-			Self::Ietf(_) => true,
-			Self::Lite(_) => false,
 		}
 	}
 }
@@ -387,7 +328,6 @@ mod tests {
 	fn default_versions_prefer_lite_06() {
 		let newest = Version::Lite(lite::Version::Lite06);
 		assert_eq!(newest.alpn(), "moq-lite-06");
-		assert_eq!(Version::from_alpn("moq-lite-06-wip"), None);
 		assert!("moq-lite-06-wip".parse::<Version>().is_err());
 		assert_eq!(Versions::all().iter().next(), Some(&newest));
 		assert_eq!(Versions::all().alpns().first(), Some(&newest.alpn()));
@@ -400,9 +340,7 @@ mod tests {
 		assert_eq!(wip.alpn(), "moq-lite-07-wip");
 		assert_eq!(wip.to_string(), "moq-lite-07-wip");
 		assert_eq!("moq-lite-07-wip".parse::<Version>(), Ok(wip));
-		assert_eq!(Version::from_alpn("moq-lite-07-wip"), Some(wip));
 		assert!("moq-lite-07".parse::<Version>().is_err());
-		assert_eq!(Version::from_alpn("moq-lite-07"), None);
 
 		assert!(!Versions::all().contains(&wip));
 		assert!(!ALPNS.contains(&wip.alpn()));

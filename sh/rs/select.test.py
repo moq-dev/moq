@@ -43,15 +43,28 @@ class SelectTest(unittest.TestCase):
             self.assertIn(f"rs {recipe}", selected)
         self.assertNotIn("rs capture", selected)
 
-    def test_queue_leaves_permutations_to_feature_gate(self):
+    def test_queue_checks_selected_feature_shapes(self):
         for path in ("rs/kio/src/lib.rs", "rs/moq-tokio/src/lib.rs",
                      "rs/moq-video/src/lib.rs", "Cargo.lock", "sh/rs/nextest.sh"):
             for action in ("check", "check-test", "lint"):
                 with self.subTest(path=path, action=action):
                     calls = self.selected(path, action=action)
-                    self.assertFalse(any("-features" in call for call in calls), calls)
+                    defaults = next(call for call in calls if call.startswith(f"rs {action} "))
+                    self.assertIn(defaults.replace(f"rs {action} ", "rs feature-shapes ", 1), calls)
         for owner in ("tokio", "media", "net"):
-            self.assertEqual(self.selected(f"sh/rs/{owner}-features.sh"), [])
+            calls = self.selected(f"sh/rs/{owner}-features.sh")
+            self.assertIn("rs feature-shapes --workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz", calls)
+
+    def test_boundary_checks_follow_reverse_dependencies(self):
+        self.assertIn("rs tokio-features", self.selected("rs/moq-tokio/src/lib.rs"))
+        self.assertIn("rs net-features", self.selected("rs/moq-net/src/lib.rs"))
+        self.assertIn("rs quic-features", self.selected("rs/moq-quic/src/lib.rs"))
+        self.assertIn("rs media-features", self.selected("rs/moq-video/src/lib.rs"))
+        calls = self.selected("rs/kio/src/lib.rs")
+        for owner in ("tokio", "net", "quic", "media"):
+            self.assertIn(f"rs {owner}-features", calls)
+        calls = self.selected("rs/moq-stats/benches/producer_tick.rs")
+        self.assertFalse(any(call.endswith("-features") for call in calls), calls)
 
     def test_device_features_join_the_one_test_build(self):
         for path, features in (("rs/moq-audio/src/lib.rs", DEVICE_FEATURES),
@@ -110,11 +123,13 @@ class RecipeTest(unittest.TestCase):
                 )
                 env = dict(os.environ, LOCAL_SUPERVISED="1", BASH_ENV=os.devnull, TMPDIR="/tmp",
                            NEXTEST_PROFILE="default")
-                result = subprocess.run(
-                    ["just", "rs", "test", "--manifest-path", str(scratch / "Cargo.toml")],
-                    cwd=ROOT, env=env, capture_output=True, text=True,
-                )
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                for recipe in ("test", "feature-shapes"):
+                    with self.subTest(recipe=recipe):
+                        result = subprocess.run(
+                            ["just", "rs", recipe, "--manifest-path", str(scratch / "Cargo.toml")],
+                            cwd=ROOT, env=env, capture_output=True, text=True,
+                        )
+                        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 class FeatureTest(unittest.TestCase):
@@ -132,11 +147,25 @@ class FeatureTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             return calls.read_text().splitlines()
 
+    def test_net_keeps_model_and_browser_contracts(self):
+        boundary = self.trace("net")
+        exhaustive = self.trace("net", "--all")
+        self.assertTrue(any(" --tests " in call for call in boundary if call.startswith("clippy ")))
+        self.assertFalse(any(" --all-targets " in call for call in boundary))
+        self.assertTrue(any(" --all-targets " in call for call in exhaustive))
+        for calls in (boundary, exhaustive):
+            self.assertTrue(any(" --target wasm32-unknown-unknown " in call for call in calls))
+            self.assertTrue(any(call.startswith("nextest run ") for call in calls))
+            self.assertTrue(any(call.startswith("doc ") for call in calls))
+
     def test_tokio_keeps_extremes_and_crypto_contracts(self):
         boundary = self.trace("tokio")
         exhaustive = self.trace("tokio", "--all")
         self.assertEqual(sum(call.startswith("clippy ") for call in boundary), 3)
         self.assertEqual(sum(call.startswith("clippy ") for call in exhaustive), 12)
+        self.assertTrue(any(" --tests " in call for call in boundary))
+        self.assertFalse(any(" --all-targets " in call for call in boundary))
+        self.assertTrue(any(" --all-targets " in call for call in exhaustive))
         self.assertEqual([call for call in boundary if not call.startswith("clippy ")],
                          [call for call in exhaustive if not call.startswith("clippy ")])
 
@@ -145,6 +174,8 @@ class FeatureTest(unittest.TestCase):
         exhaustive = self.trace("media", "--all")
         self.assertEqual(sum(call.startswith("check ") for call in boundary), 4)
         self.assertEqual(sum(call.startswith("check ") for call in exhaustive), 10)
+        self.assertFalse(any(" --all-targets " in call for call in boundary))
+        self.assertTrue(any(" --all-targets " in call for call in exhaustive))
         self.assertEqual([call for call in boundary if not call.startswith("check ")],
                          [call for call in exhaustive if not call.startswith("check ")])
 
