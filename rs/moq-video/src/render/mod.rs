@@ -45,6 +45,8 @@
 //! Enabled by the non-default `render` feature, which is what pulls in `wgpu`.
 
 mod color;
+mod device;
+pub mod export;
 mod renderer;
 mod source;
 
@@ -54,6 +56,7 @@ mod dmabuf;
 #[cfg(apple)]
 mod metal;
 
+pub use device::request_device;
 pub use renderer::{Config, Renderer};
 
 /// The `wgpu` this renderer was built against, re-exported so you name the exact

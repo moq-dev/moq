@@ -83,12 +83,15 @@ v4l2 = ["dep:moq-v4l", "dep:libc"]
 # backend that can produce or consume one. It pulls no graphics API by itself.
 dmabuf = ["dep:libc", "dep:linux-raw-sys"]
 # GPU rendering of decoded frames (the `render` module): a wgpu pipeline that
-# converts a frame to RGBA and hands back a texture the caller presents. wgpu
-# loads Vulkan / Metal / D3D at runtime, so this costs compile time and nothing
-# else; a relay or headless publisher drops it. `dmabuf` adds the Linux surface
-# vocabulary; Vulkan itself still comes from wgpu.
+# converts a frame to RGBA and hands back a texture the caller presents, and the
+# export that hands a drawn texture to an encoder. wgpu loads Vulkan / Metal / D3D
+# at runtime, so this costs compile time and nothing else; a relay or headless
+# publisher drops it. `dmabuf` adds the Linux surface vocabulary; Vulkan itself
+# still comes from wgpu, and `ash` names the handles the export allocates on
+# wgpu's own Vulkan device.
 render = [
     "dmabuf",
+    "dep:ash",
     "dep:bytemuck",
     "dep:wgpu",
     "dep:objc2-metal",
