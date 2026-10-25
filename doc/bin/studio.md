@@ -46,8 +46,9 @@ or not its scene is live; mute a source to leave it out.
 ## Scene file
 
 The collection is TOML, so it diffs and reviews like code. It names devices,
-files, and broadcast paths, never a relay URL or token, so it is safe to commit
-and share. A file from another format version fails to load rather than being
+files, and broadcast paths, never a relay URL or token. Check its image paths
+and device IDs before sharing it, since they can name your home directory or
+hardware. A file from another format version fails to load rather than being
 guessed at.
 
 ```toml
