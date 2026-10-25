@@ -42,8 +42,8 @@ Dependabot misses three kinds of update, so list them by hand:
   `just js workers` walk every tracked `bun.lock`.
 
 Deliberately uncovered: `dart/moq` (see the comment in
-`.github/dependabot.yml`), `bench/ffi-gen/Cargo.lock` (a one-off BoltFFI
-comparison), and `nix/uniffi-dart-Cargo.lock` (pinned with the generator).
+`.github/dependabot.yml`) and `nix/uniffi-dart-Cargo.lock` (pinned with the
+generator).
 The uniffi `>=0.33` ignore blocks nothing until 0.33 ships; keep it, since it
 ties uniffi to the Go generator.
 

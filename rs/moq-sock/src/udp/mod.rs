@@ -36,14 +36,14 @@ use std::os::fd::AsFd;
 #[cfg(windows)]
 use std::os::windows::io::AsSocket;
 use std::{
-    io,
-    net::{IpAddr, Ipv6Addr, SocketAddr},
+	io,
+	net::{IpAddr, Ipv6Addr, SocketAddr},
 };
 #[cfg(target_os = "wasi")]
 use std::{
-    mem::ManuallyDrop,
-    net::UdpSocket,
-    os::fd::{AsRawFd, FromRawFd},
+	mem::ManuallyDrop,
+	net::UdpSocket,
+	os::fd::{AsRawFd, FromRawFd},
 };
 #[cfg(windows)]
 use windows_sys::Win32::Networking::WinSock;
@@ -70,11 +70,11 @@ mod imp;
 mod imp;
 
 #[allow(
-    unused_imports,
-    reason = "moq-sock always logs through `tracing`, so quinn-udp's `log` and no-op backends are not carried"
+	unused_imports,
+	reason = "moq-sock always logs through `tracing`, so quinn-udp's `log` and no-op backends are not carried"
 )]
 mod log {
-    pub(crate) use tracing::{debug, error, info, trace, warn};
+	pub(crate) use tracing::{debug, error, info, trace, warn};
 }
 
 #[cfg(not(wasm_browser))]
@@ -95,90 +95,87 @@ pub const BATCH_SIZE: usize = 1;
 #[derive(Debug, Copy, Clone)]
 #[non_exhaustive]
 pub struct RecvMeta {
-    /// The source address of the datagram(s) contained in the buffer
-    pub addr: SocketAddr,
-    /// The number of bytes the associated buffer has
-    pub len: usize,
-    /// The size of a single datagram in the associated buffer
-    ///
-    /// When GRO (Generic Receive Offload) is used this indicates the size of a single
-    /// datagram inside the buffer. If the buffer is larger, that is if [`len`] is greater
-    /// then this value, then the individual datagrams contained have their boundaries at
-    /// `stride` increments from the start. The last datagram could be smaller than
-    /// `stride`.
-    ///
-    /// [`len`]: RecvMeta::len
-    pub stride: usize,
-    /// The Explicit Congestion Notification bits for the datagram(s) in the buffer
-    pub ecn: Option<EcnCodepoint>,
-    /// The destination IP address which was encoded in this datagram
-    ///
-    /// Populated on platforms: Windows, Linux, Android (API level > 25),
-    /// FreeBSD, OpenBSD, NetBSD, macOS, and iOS.
-    pub dst_ip: Option<IpAddr>,
-    /// The interface index of the interface on which the datagram was received
-    pub interface_index: Option<u32>,
-    /// Kernel receive timestamp as Unix epoch
-    ///
-    /// Populated on platforms: Linux, Android.
-    pub timestamp: Option<Duration>,
+	/// The source address of the datagram(s) contained in the buffer
+	pub addr: SocketAddr,
+	/// The number of bytes the associated buffer has
+	pub len: usize,
+	/// The size of a single datagram in the associated buffer
+	///
+	/// When GRO (Generic Receive Offload) is used this indicates the size of a single
+	/// datagram inside the buffer. If the buffer is larger, that is if [`len`] is greater
+	/// then this value, then the individual datagrams contained have their boundaries at
+	/// `stride` increments from the start. The last datagram could be smaller than
+	/// `stride`.
+	///
+	/// [`len`]: RecvMeta::len
+	pub stride: usize,
+	/// The Explicit Congestion Notification bits for the datagram(s) in the buffer
+	pub ecn: Option<EcnCodepoint>,
+	/// The destination IP address which was encoded in this datagram
+	///
+	/// Populated on platforms: Windows, Linux, Android (API level > 25),
+	/// FreeBSD, OpenBSD, NetBSD, macOS, and iOS.
+	pub dst_ip: Option<IpAddr>,
+	/// The interface index of the interface on which the datagram was received
+	pub interface_index: Option<u32>,
+	/// Kernel receive timestamp as Unix epoch
+	///
+	/// Populated on platforms: Linux, Android.
+	pub timestamp: Option<Duration>,
 }
 
 impl Default for RecvMeta {
-    /// Constructs a value with arbitrary fields, intended to be overwritten
-    fn default() -> Self {
-        Self {
-            addr: SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 0),
-            len: 0,
-            stride: 0,
-            ecn: None,
-            dst_ip: None,
-            interface_index: None,
-            timestamp: None,
-        }
-    }
+	/// Constructs a value with arbitrary fields, intended to be overwritten
+	fn default() -> Self {
+		Self {
+			addr: SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 0),
+			len: 0,
+			stride: 0,
+			ecn: None,
+			dst_ip: None,
+			interface_index: None,
+			timestamp: None,
+		}
+	}
 }
 
 /// An outgoing packet
 #[derive(Debug, Clone)]
 pub struct Transmit<'a> {
-    /// The socket this datagram should be sent to
-    pub destination: SocketAddr,
-    /// Explicit congestion notification bits to set on the packet
-    pub ecn: Option<EcnCodepoint>,
-    /// Contents of the datagram
-    pub contents: &'a [u8],
-    /// The segment size if this transmission contains multiple datagrams.
-    /// This is `None` if the transmit only contains a single datagram
-    pub segment_size: Option<usize>,
-    /// Optional source IP address for the datagram
-    pub src_ip: Option<IpAddr>,
+	/// The socket this datagram should be sent to
+	pub destination: SocketAddr,
+	/// Explicit congestion notification bits to set on the packet
+	pub ecn: Option<EcnCodepoint>,
+	/// Contents of the datagram
+	pub contents: &'a [u8],
+	/// The segment size if this transmission contains multiple datagrams.
+	/// This is `None` if the transmit only contains a single datagram
+	pub segment_size: Option<usize>,
+	/// Optional source IP address for the datagram
+	pub src_ip: Option<IpAddr>,
 }
 
 impl Transmit<'_> {
-    /// Computes the effective segment-size of the packet.
-    ///
-    /// Some (older) network drivers don't like being told to do GSO even if
-    /// there is effectively only a single segment.
-    /// (i.e. `segment_size == contents.len()`)
-    /// Additionally, a `segment_size` that is greater than the content also
-    /// means there is effectively only a single segment.
-    /// This case is actually quite common when splitting up a prepared GSO batch
-    /// again after GSO has been disabled because the last datagram in a GSO
-    /// batch is allowed to be smaller than the segment size.
-    #[cfg_attr(
-        apple_fast,
-        allow(
-            dead_code,
-            reason = "used by prepare_msg, which is unused when apple_fast"
-        )
-    )]
-    fn effective_segment_size(&self) -> Option<usize> {
-        match self.segment_size? {
-            size if size >= self.contents.len() => None,
-            size => Some(size),
-        }
-    }
+	/// Computes the effective segment-size of the packet.
+	///
+	/// Some (older) network drivers don't like being told to do GSO even if
+	/// there is effectively only a single segment.
+	/// (i.e. `segment_size == contents.len()`)
+	/// Additionally, a `segment_size` that is greater than the content also
+	/// means there is effectively only a single segment.
+	/// This case is actually quite common when splitting up a prepared GSO batch
+	/// again after GSO has been disabled because the last datagram in a GSO
+	/// batch is allowed to be smaller than the segment size.
+	#[cfg_attr(
+		apple_fast,
+		allow(dead_code, reason = "used by prepare_msg, which is unused when apple_fast")
+	)]
+	fn effective_segment_size(&self) -> Option<usize> {
+		match self.segment_size? {
+			size if size >= self.contents.len() => None,
+			size => Some(size),
+		}
+	}
 }
 
 /// Asynchronous transport-layer errors reported by the operating system
@@ -190,40 +187,40 @@ impl Transmit<'_> {
 #[derive(Debug, Copy, Clone)]
 #[non_exhaustive]
 pub struct TransportError {
-    /// Address associated with the error
-    ///
-    /// This is the remote peer or an intermediate network device that triggered the error.
-    /// Returns `None` if the kernel cannot determine the source (e.g. `AF_UNSPEC`).
-    pub addr: Option<SocketAddr>,
-    /// Transport-layer error details
-    pub payload: TransportErrorPayload,
-    /// The raw error code from the underlying operating system
-    pub raw_errno: i32,
+	/// Address associated with the error
+	///
+	/// This is the remote peer or an intermediate network device that triggered the error.
+	/// Returns `None` if the kernel cannot determine the source (e.g. `AF_UNSPEC`).
+	pub addr: Option<SocketAddr>,
+	/// Transport-layer error details
+	pub payload: TransportErrorPayload,
+	/// The raw error code from the underlying operating system
+	pub raw_errno: i32,
 }
 
 impl TransportError {
-    /// Returns the recommended MTU for packet-too-big errors
-    pub fn mtu(&self) -> Option<u32> {
-        match self.payload {
-            TransportErrorPayload::TooBig { mtu } => Some(mtu),
-            _ => None,
-        }
-    }
+	/// Returns the recommended MTU for packet-too-big errors
+	pub fn mtu(&self) -> Option<u32> {
+		match self.payload {
+			TransportErrorPayload::TooBig { mtu } => Some(mtu),
+			_ => None,
+		}
+	}
 }
 
 /// Transport-layer error details reported by the kernel
 #[derive(Debug, Copy, Clone)]
 #[non_exhaustive]
 pub enum TransportErrorPayload {
-    /// Destination host or port is unreachable
-    Unreachable,
-    /// Packet exceeds path MTU
-    TooBig {
-        /// Recommended Maximum Transmission Unit
-        mtu: u32,
-    },
-    /// Other transport-layer or kernel-reported error
-    Other,
+	/// Destination host or port is unreachable
+	Unreachable,
+	/// Packet exceeds path MTU
+	TooBig {
+		/// Recommended Maximum Transmission Unit
+		mtu: u32,
+	},
+	/// Other transport-layer or kernel-reported error
+	Other,
 }
 
 /// Returns true if the given I/O error corresponds to a message size error
@@ -238,18 +235,18 @@ pub enum TransportErrorPayload {
 /// distinct from the MSVCRT `errno.h` EMSGSIZE value of 115, which is
 /// never actually populated by socket operations).
 pub fn is_msg_size_err(err: &io::Error) -> bool {
-    #[cfg(unix)]
-    {
-        err.raw_os_error() == Some(libc::EMSGSIZE)
-    }
-    #[cfg(windows)]
-    {
-        err.raw_os_error() == Some(WinSock::WSAEMSGSIZE)
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        false
-    }
+	#[cfg(unix)]
+	{
+		err.raw_os_error() == Some(libc::EMSGSIZE)
+	}
+	#[cfg(windows)]
+	{
+		err.raw_os_error() == Some(WinSock::WSAEMSGSIZE)
+	}
+	#[cfg(not(any(unix, windows)))]
+	{
+		false
+	}
 }
 
 /// Returns true if the given send error means the local stack has no way to reach the destination
@@ -264,12 +261,10 @@ pub fn is_msg_size_err(err: &io::Error) -> bool {
 /// `UdpSocketState` sockets are by default. A `connect`ed socket, or one with `IP_RECVERR`, can
 /// report a received ICMP error here instead, which an off-path attacker can forge.
 pub fn is_unreachable_err(err: &io::Error) -> bool {
-    matches!(
-        err.kind(),
-        io::ErrorKind::NetworkUnreachable
-            | io::ErrorKind::HostUnreachable
-            | io::ErrorKind::NetworkDown
-    )
+	matches!(
+		err.kind(),
+		io::ErrorKind::NetworkUnreachable | io::ErrorKind::HostUnreachable | io::ErrorKind::NetworkDown
+	)
 }
 
 /// A borrowed UDP socket
@@ -282,128 +277,128 @@ pub struct UdpSockRef<'a>(socket2::SockRef<'a>);
 
 #[cfg(not(wasm_browser))]
 impl UdpSockRef<'_> {
-    /// Configures the socket for non-blocking or blocking operation.
-    pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
-        #[cfg(not(target_os = "wasi"))]
-        self.0.set_nonblocking(nonblocking)?;
+	/// Configures the socket for non-blocking or blocking operation.
+	pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
+		#[cfg(not(target_os = "wasi"))]
+		self.0.set_nonblocking(nonblocking)?;
 
-        #[cfg(target_os = "wasi")]
-        {
-            // socket2 uses `fcntl`, which WASI rejects; `std` uses `ioctl(FIONBIO)`.
-            // Safety: `self` outlives the borrow, and `ManuallyDrop` prevents a second close.
-            let borrowed = ManuallyDrop::new(unsafe { UdpSocket::from_raw_fd(self.0.as_raw_fd()) });
-            borrowed.set_nonblocking(nonblocking)?;
-        }
+		#[cfg(target_os = "wasi")]
+		{
+			// socket2 uses `fcntl`, which WASI rejects; `std` uses `ioctl(FIONBIO)`.
+			// Safety: `self` outlives the borrow, and `ManuallyDrop` prevents a second close.
+			let borrowed = ManuallyDrop::new(unsafe { UdpSocket::from_raw_fd(self.0.as_raw_fd()) });
+			borrowed.set_nonblocking(nonblocking)?;
+		}
 
-        Ok(())
-    }
+		Ok(())
+	}
 }
 
 #[cfg(any(unix, target_os = "wasi"))]
 impl<'s, S> From<&'s S> for UdpSockRef<'s>
 where
-    S: AsFd,
+	S: AsFd,
 {
-    fn from(socket: &'s S) -> Self {
-        Self(socket.into())
-    }
+	fn from(socket: &'s S) -> Self {
+		Self(socket.into())
+	}
 }
 
 #[cfg(windows)]
 impl<'s, S> From<&'s S> for UdpSockRef<'s>
 where
-    S: AsSocket,
+	S: AsSocket,
 {
-    fn from(socket: &'s S) -> Self {
-        Self(socket.into())
-    }
+	fn from(socket: &'s S) -> Self {
+		Self(socket.into())
+	}
 }
 
 /// Explicit congestion notification codepoint
 #[repr(u8)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum EcnCodepoint {
-    /// The ECT(0) codepoint, indicating that an endpoint is ECN-capable
-    Ect0 = 0b10,
-    /// The ECT(1) codepoint, indicating that an endpoint is ECN-capable
-    Ect1 = 0b01,
-    /// The CE codepoint, signalling that congestion was experienced
-    Ce = 0b11,
+	/// The ECT(0) codepoint, indicating that an endpoint is ECN-capable
+	Ect0 = 0b10,
+	/// The ECT(1) codepoint, indicating that an endpoint is ECN-capable
+	Ect1 = 0b01,
+	/// The CE codepoint, signalling that congestion was experienced
+	Ce = 0b11,
 }
 
 impl EcnCodepoint {
-    /// Create new object from the given bits
-    pub fn from_bits(x: u8) -> Option<Self> {
-        use EcnCodepoint::*;
-        Some(match x & 0b11 {
-            0b10 => Ect0,
-            0b01 => Ect1,
-            0b11 => Ce,
-            _ => {
-                return None;
-            }
-        })
-    }
+	/// Create new object from the given bits
+	pub fn from_bits(x: u8) -> Option<Self> {
+		use EcnCodepoint::*;
+		Some(match x & 0b11 {
+			0b10 => Ect0,
+			0b01 => Ect1,
+			0b11 => Ce,
+			_ => {
+				return None;
+			}
+		})
+	}
 }
 
 #[cfg(test)]
 mod tests {
-    use std::net::Ipv4Addr;
+	use std::net::Ipv4Addr;
 
-    use super::*;
+	use super::*;
 
-    #[cfg(unix)]
-    #[test]
-    fn unreachable_errors_are_only_the_routing_failures() {
-        for code in [libc::ENETUNREACH, libc::EHOSTUNREACH, libc::ENETDOWN] {
-            let err = io::Error::from_raw_os_error(code);
-            assert!(is_unreachable_err(&err), "{err}");
-        }
-        // Loss, readiness, MTU probes, the GSO fallback, and ICMP noise all stay retryable.
-        for code in [
-            libc::ENOBUFS,
-            libc::EAGAIN,
-            libc::EMSGSIZE,
-            libc::EINVAL,
-            libc::EIO,
-            libc::ECONNREFUSED,
-        ] {
-            let err = io::Error::from_raw_os_error(code);
-            assert!(!is_unreachable_err(&err), "{err}");
-        }
-    }
+	#[cfg(unix)]
+	#[test]
+	fn unreachable_errors_are_only_the_routing_failures() {
+		for code in [libc::ENETUNREACH, libc::EHOSTUNREACH, libc::ENETDOWN] {
+			let err = io::Error::from_raw_os_error(code);
+			assert!(is_unreachable_err(&err), "{err}");
+		}
+		// Loss, readiness, MTU probes, the GSO fallback, and ICMP noise all stay retryable.
+		for code in [
+			libc::ENOBUFS,
+			libc::EAGAIN,
+			libc::EMSGSIZE,
+			libc::EINVAL,
+			libc::EIO,
+			libc::ECONNREFUSED,
+		] {
+			let err = io::Error::from_raw_os_error(code);
+			assert!(!is_unreachable_err(&err), "{err}");
+		}
+	}
 
-    #[test]
-    fn effective_segment_size() {
-        assert_eq!(
-            make_transmit(&[0u8; 10], Some(15)).effective_segment_size(),
-            None,
-            "segment_size > content_len should yield no effective segment_size"
-        );
-        assert_eq!(
-            make_transmit(&[0u8; 10], Some(10)).effective_segment_size(),
-            None,
-            "segment_size == content_len should yield no effective segment_size"
-        );
-        assert_eq!(
-            make_transmit(&[0u8; 10], None).effective_segment_size(),
-            None,
-            "no segment_size should yield no effective segment_size"
-        );
-        assert_eq!(
-            make_transmit(&[0u8; 10], Some(5)).effective_segment_size(),
-            Some(5),
-            "segment_size < content_len should yield effective segment_size"
-        );
-    }
+	#[test]
+	fn effective_segment_size() {
+		assert_eq!(
+			make_transmit(&[0u8; 10], Some(15)).effective_segment_size(),
+			None,
+			"segment_size > content_len should yield no effective segment_size"
+		);
+		assert_eq!(
+			make_transmit(&[0u8; 10], Some(10)).effective_segment_size(),
+			None,
+			"segment_size == content_len should yield no effective segment_size"
+		);
+		assert_eq!(
+			make_transmit(&[0u8; 10], None).effective_segment_size(),
+			None,
+			"no segment_size should yield no effective segment_size"
+		);
+		assert_eq!(
+			make_transmit(&[0u8; 10], Some(5)).effective_segment_size(),
+			Some(5),
+			"segment_size < content_len should yield effective segment_size"
+		);
+	}
 
-    fn make_transmit(contents: &[u8], segment_size: Option<usize>) -> Transmit<'_> {
-        Transmit {
-            destination: SocketAddr::from((Ipv4Addr::UNSPECIFIED, 1)),
-            ecn: None,
-            contents,
-            segment_size,
-            src_ip: None,
-        }
-    }
+	fn make_transmit(contents: &[u8], segment_size: Option<usize>) -> Transmit<'_> {
+		Transmit {
+			destination: SocketAddr::from((Ipv4Addr::UNSPECIFIED, 1)),
+			ecn: None,
+			contents,
+			segment_size,
+			src_ip: None,
+		}
+	}
 }
