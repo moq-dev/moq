@@ -22,13 +22,13 @@ class QueryTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.repo = self.root / "repo"
         (self.repo / "sh").mkdir(parents=True)
-        for script in ("dispatch.sh", "changed.sh"):
+        for script in ("dispatch.sh", "changed.sh", "local.sh"):
             shutil.copy(ROOT / "sh" / script, self.repo / "sh" / script)
         self.bin = self.root / "bin"
         self.bin.mkdir()
         for command in ("bash", "git", "sort", "mktemp", "rm", "grep"):
             (self.bin / command).symlink_to(shutil.which(command))
-        self.env = dict(os.environ, PATH=str(self.bin), GIT_CONFIG_NOSYSTEM="1",
+        self.env = dict(os.environ, LOCAL_SUPERVISED="1", PATH=str(self.bin), GIT_CONFIG_NOSYSTEM="1",
                         GIT_CONFIG_GLOBAL=os.devnull, CI_STRICT="1")
         # The runner's own Actions variables would move the run's error
         # annotations to stdout and append to the real job summary.

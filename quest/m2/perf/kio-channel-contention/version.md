@@ -19,7 +19,7 @@ longer contends with readers of the value. Lands with the contended bench (`rs/k
 - `is_closed` and the closed check become atomic loads.
 - This attacks spurious polls, not the wake-all herd: a woken consumer whose
   data really changed still locks to read `T`. The
-  [append-only log](/quest/m2/perf/kio-channel-contention/log.md) covers that.
+  [append-only log](/quest/m1/unbounded-groups/log.md) covers that.
 - The skip is opt-in, never a silent change to `poll`: a predicate may read
   state outside the channel. `Settle::poll` (`rs/moq-net/src/tail.rs`)
   captures a deadline's `expired` in its closure, so skipping it on an

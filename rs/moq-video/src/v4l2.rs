@@ -498,7 +498,7 @@ impl Device {
 	}
 
 	/// Declare the input framerate, which rate control uses to spend the bitrate.
-	pub(crate) fn set_framerate(&self, dir: Dir, framerate: crate::Rate) -> Result<(), Error> {
+	pub(crate) fn set_framerate(&self, dir: Dir, framerate: crate::FrameRate) -> Result<(), Error> {
 		let mut parm = v4l2_streamparm::zeroed();
 		parm.type_ = dir.buf_type();
 		// SAFETY: the buffer type just written picks the arm the driver reads, so

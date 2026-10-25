@@ -157,7 +157,10 @@ next when that route goes; a publisher pushes the same broadcast to every CDN.
 The move resumes without a seam only between routes with the same epoch, which
 needs moq-lite 07, or moq-transport draft 17 or later with the epoch extension,
 on both links. A CDN link that carries no epoch makes moving onto it, or back
-off it, a restart, and the player requests the path again.
+off it, a restart, and the player requests the path again. Both links must
+also speak the same protocol and draft: a copy's track info records the
+moq-transport draft it crossed, and a copy whose track info differs is refused,
+ending the track.
 
 ### Hidden broadcasts
 
