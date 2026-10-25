@@ -917,6 +917,9 @@ fn retune(
 	apply: impl FnOnce(moq_mux::rate::Target) -> Result<(), moq_video::Error>,
 ) -> Result<Option<moq_mux::rate::Target>, &'static str> {
 	if *follower.policy() != policy {
+		// The target was never applied, so take it back first: a policy that keeps the
+		// follower's state (a moved lower rendition) would otherwise count it applied.
+		follower.failed();
 		follower.set_policy(policy);
 		return Ok(None);
 	}
@@ -1403,6 +1406,30 @@ mod follow_tests {
 			Target::Enabled(bitrate) => set(bitrate),
 			Target::Disabled => unreachable!("no lower rendition"),
 		})
+	}
+
+	/// A lower rendition moving between a target and its apply drops that target, and the
+	/// follower asks for it again under the new policy rather than counting it applied.
+	#[tokio::test(start_paused = true)]
+	async fn a_moved_lower_retries_the_dropped_target() {
+		let policy = |lower| {
+			let mut policy = Policy::new(Rate::from_mbps(4));
+			policy.lower = Some(lower);
+			policy
+		};
+		let grant = moq_net::bandwidth::Producer::new();
+		let mut follower = Follower::new(grant.consume(), policy(Rate::from_mbps(1)));
+		grant.set(Some(Rate::from_mbps(2))).unwrap();
+		let dropped = follower.next().await.unwrap();
+		let moved = retune(&mut follower, policy(Rate::from_kbps(900)), dropped, |_| {
+			unreachable!("a target under a stale policy is never applied")
+		});
+		assert_eq!(moved, Ok(None));
+
+		let retried = moq_clock::timeout(Duration::from_secs(60), follower.next())
+			.await
+			.expect("the dropped target is asked for again");
+		assert_eq!(retried.unwrap(), Target::Enabled(Rate::from_mbps(2)));
 	}
 
 	fn bitrate(target: Target) -> Rate {
