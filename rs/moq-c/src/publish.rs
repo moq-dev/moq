@@ -56,6 +56,7 @@ enum Dynamic {
 struct Broadcast {
 	driver: crate::ffi::Background,
 	producer: moq_net::broadcast::Producer,
+	publication: Option<moq_net::origin::Publication>,
 	catalog: moq_mux::catalog::Producer<Extra>,
 	video: BTreeMap<String, hang::catalog::VideoConfig>,
 	audio: BTreeMap<String, hang::catalog::AudioConfig>,
@@ -235,6 +236,7 @@ impl Publish {
 		let id = self.broadcasts.insert(Broadcast {
 			driver,
 			producer: broadcast,
+			publication: None,
 			catalog,
 			video: BTreeMap::new(),
 			audio: BTreeMap::new(),
@@ -244,11 +246,42 @@ impl Publish {
 		Ok(id)
 	}
 
+	/// Retain a native publication alongside its C fill handle and catalog.
+	pub fn create_publication(
+		&mut self,
+		(publication, driver): (moq_net::origin::Publication, crate::ffi::Background),
+	) -> Result<Id, Error> {
+		let id = self.create((publication.broadcast().clone(), driver))?;
+		self.broadcasts.get_mut(id).expect("just-created broadcast").publication = Some(publication);
+		Ok(id)
+	}
+
+	/// Publish a prepared answer and retain control beside its live fill handle.
+	pub fn admit(&mut self, id: Id, prepared: moq_net::origin::Prepared) -> Result<(), Error> {
+		let broadcast = self.broadcasts.get_mut(id);
+		if let Some(broadcast) = &broadcast {
+			broadcast.driver.check()?;
+			if !broadcast.producer.is_clone(prepared.broadcast()) {
+				return Err(Error::BroadcastNotFound);
+			}
+		}
+		let publication = prepared.publish()?;
+		if let Some(broadcast) = broadcast {
+			broadcast.publication = Some(publication);
+		}
+		// A fill leaves this registry only on close, which native admission refuses.
+		Ok(())
+	}
+
 	/// Advertise the broadcast's exact path as a route. Announcing again re-prices
 	/// in place. Until announced, the broadcast is invisible and unroutable.
 	pub fn announce(&mut self, broadcast: Id, route: moq_net::origin::Route) -> Result<(), Error> {
 		let broadcast = self.broadcast_mut(broadcast)?;
-		let result = broadcast.producer.announce(route);
+		let result = broadcast
+			.publication
+			.as_ref()
+			.ok_or(Error::Moq(moq_net::Error::Closed))?
+			.announce(route);
 		broadcast.driver.check()?;
 		result?;
 		Ok(())
@@ -257,7 +290,9 @@ impl Publish {
 	/// Retract the broadcast's exact-path advertisement, if any.
 	pub fn unannounce(&mut self, broadcast: Id) -> Result<(), Error> {
 		let broadcast = self.broadcast_mut(broadcast)?;
-		broadcast.producer.unannounce();
+		if let Some(publication) = &broadcast.publication {
+			publication.unannounce();
+		}
 		Ok(())
 	}
 
@@ -1144,12 +1179,63 @@ impl Publish {
 mod supervision_tests {
 	use super::*;
 
+	#[tokio::test(start_paused = true)]
+	async fn admission_must_match_the_broadcast_it_filled() {
+		let origin = moq_tokio::origin::spawn();
+		let claim = origin.requests("room").unwrap();
+		let pending = origin.consume().request_broadcast("room/first", None);
+		let prepared = claim
+			.requested_broadcast()
+			.await
+			.unwrap()
+			.prepare(moq_net::Epoch::mint())
+			.unwrap();
+		let mut publish = Publish::default();
+		let first = publish
+			.create((prepared.broadcast().clone(), Default::default()))
+			.unwrap();
+		let alias = {
+			let original = publish.broadcast(first).unwrap();
+			Broadcast {
+				driver: original.driver.clone(),
+				producer: original.producer.clone(),
+				publication: None,
+				catalog: original.catalog.clone(),
+				video: Default::default(),
+				audio: Default::default(),
+				finished: Default::default(),
+				ended: false,
+			}
+		};
+		let clone = publish.broadcasts.insert(alias).unwrap();
+		assert_ne!(first, clone);
+		publish.admit(clone, prepared).unwrap();
+		pending.await.unwrap();
+
+		let pending = origin.consume().request_broadcast("room/second", None);
+		let prepared = claim
+			.requested_broadcast()
+			.await
+			.unwrap()
+			.prepare(moq_net::Epoch::mint())
+			.unwrap();
+		let other = publish
+			.create((prepared.broadcast().clone(), Default::default()))
+			.unwrap();
+		assert!(matches!(publish.admit(first, prepared), Err(Error::BroadcastNotFound)));
+		assert!(pending.await.is_err());
+		assert!(matches!(
+			publish.announce(other, Default::default()),
+			Err(Error::Moq(moq_net::Error::Closed))
+		));
+	}
+
 	#[tokio::test]
 	async fn a_container_importer_keeps_the_origin_failure_after_other_owners_are_released() {
 		let (origin, completion, trigger) = crate::ffi::panicking_origin();
 		let mut publish = Publish::default();
 		let broadcast = publish
-			.create((origin.create_broadcast("retained").unwrap(), completion.clone()))
+			.create_publication((origin.create_broadcast("retained").unwrap(), completion.clone()))
 			.unwrap();
 		let container = publish
 			.container(
@@ -1173,7 +1259,7 @@ mod supervision_tests {
 		let (origin, completion, trigger) = crate::ffi::panicking_origin();
 		let mut publish = Publish::default();
 		let broadcast = publish
-			.create((origin.create_broadcast("retained").unwrap(), completion.clone()))
+			.create_publication((origin.create_broadcast("retained").unwrap(), completion.clone()))
 			.unwrap();
 		let producer = &publish.broadcast(broadcast).unwrap().producer;
 		// A dynamic handle outlives the consumed broadcast, so only an explicit close ends it.

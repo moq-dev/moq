@@ -605,7 +605,7 @@ async fn a_more_specific_source_cannot_fill_a_held_covering_track() {
 /// fresh epoch and published at its exact path, and `outputs[path]` holds the latest.
 struct Pool {
 	_claim: Rc<origin::Requests>,
-	outputs: Rc<RefCell<std::collections::HashMap<String, (broadcast::Producer, track::Producer)>>>,
+	outputs: Rc<RefCell<std::collections::HashMap<String, (origin::Publication, track::Producer)>>>,
 	answered: Rc<RefCell<usize>>,
 }
 

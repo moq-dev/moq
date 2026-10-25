@@ -2255,13 +2255,14 @@ mod session_tests {
 		let _pad_ids = pad_ids();
 		let element = element();
 		let origin = origin();
-		let mut catalog_broadcast = origin.create_broadcast("room/catalog").unwrap();
+		let catalog_broadcast = origin.create_broadcast("room/catalog").unwrap();
 		let mut local = catalog_broadcast.requests();
 		let left = origin.create_broadcast("room/left").unwrap();
 		let mut remote = left.requests();
 		let right = origin.create_broadcast("room/right").unwrap();
 		let mut replacement = right.requests();
-		let mut catalog = moq_mux::catalog::Producer::new(&mut catalog_broadcast, Default::default()).unwrap();
+		let mut catalog =
+			moq_mux::catalog::Producer::new(&mut catalog_broadcast.broadcast().clone(), Default::default()).unwrap();
 		let mut config = video_rendition();
 		config.broadcast = Some("./left".into());
 		config.track = Some("encoded".into());
@@ -3056,6 +3057,7 @@ mod session_tests {
 
 	/// A broadcast with one video rendition, and what feeds it.
 	struct Publisher {
+		publication: Option<moq_net::origin::Publication>,
 		broadcast: moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer,
 		video: moq_mux::container::Producer<moq_mux::catalog::hang::Container>,
@@ -3065,15 +3067,19 @@ mod session_tests {
 	impl Publisher {
 		/// Publish at `room` on `origin` under `route`.
 		fn new(origin: &moq_net::origin::Producer, route: moq_net::origin::Route, config: VideoConfig) -> Self {
-			let publisher = Self::build(origin.create_broadcast("room").unwrap(), config);
-			publisher.broadcast.announce(route).unwrap();
+			let publication = origin.create_broadcast("room").unwrap();
+			let mut publisher = Self::build(publication.broadcast().clone(), config);
+			publication.announce(route).unwrap();
+			publisher.publication = Some(publication);
 			publisher
 		}
 
 		/// The `cam` broadcast a rendition of `room` references as `./cam`, under `route`.
 		fn sibling(origin: &moq_net::origin::Producer, route: moq_net::origin::Route) -> Self {
-			let publisher = Self::build(origin.create_broadcast("cam").unwrap(), video_rendition());
-			publisher.broadcast.announce(route).unwrap();
+			let publication = origin.create_broadcast("cam").unwrap();
+			let mut publisher = Self::build(publication.broadcast().clone(), video_rendition());
+			publication.announce(route).unwrap();
+			publisher.publication = Some(publication);
 			publisher
 		}
 
@@ -3092,6 +3098,7 @@ mod session_tests {
 				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
 			);
 			Self {
+				publication: None,
 				broadcast,
 				catalog,
 				video,
@@ -3647,9 +3654,9 @@ mod session_tests {
 		first.video.finish().unwrap();
 		await_finished(&first);
 		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
-		first.broadcast.unannounce();
+		first.publication.as_ref().unwrap().unannounce();
 		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::End(_)));
-		first.broadcast.announce(route).unwrap();
+		first.publication.as_ref().unwrap().announce(route).unwrap();
 		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
 
 		let mut second = Publisher::sibling(&origin, epoch());
@@ -4285,7 +4292,12 @@ mod session_tests {
 		let session = follow(&element, &origin);
 		recorder.written(&mut publisher, 1);
 
-		publisher.broadcast.announce(route.with_cost(5)).unwrap();
+		publisher
+			.publication
+			.as_ref()
+			.unwrap()
+			.announce(route.with_cost(5))
+			.unwrap();
 		await_event(&mut announced, |event| {
 			matches!(event, moq_net::announce::Event::Update(_))
 		});
@@ -4424,7 +4436,7 @@ mod session_tests {
 		let session = follow(&element, &origin);
 		let pad = recorder.written(&mut old, 1);
 
-		old.broadcast.unannounce();
+		old.publication.as_ref().unwrap().unannounce();
 		await_event(&mut announced, |event| {
 			matches!(event, moq_net::announce::Event::End(_))
 		});

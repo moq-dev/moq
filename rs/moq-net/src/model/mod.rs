@@ -49,8 +49,8 @@ pub use timed::Timed;
 pub mod origin {
 	pub use super::follow::AnnouncedBroadcast;
 	pub use super::origin_impl::{
-		Config, Consumer, Cost, Driver, HopLimit, Link, Preference, Prepared, Producer, Request, Requesting, Requests,
-		Route, Routing, Source,
+		Config, Consumer, Cost, Driver, Requests, HopLimit, Link, Preference, Prepared, Producer, Publication, Request,
+		Requesting, Route, Routing, Source,
 	};
 }
 

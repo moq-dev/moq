@@ -39,7 +39,7 @@ struct Body {
 /// A hand-published node stats broadcast with one group track carrying
 /// default-tier egress.
 struct Node {
-	source: moq_net::broadcast::Producer,
+	source: moq_net::origin::Publication,
 	epoch: Epoch,
 	known: bool,
 	group: moq_json::snapshot::Producer<Body>,

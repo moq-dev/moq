@@ -13,7 +13,7 @@ use crate::support;
 
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
-use moq_net::{Epoch, Hop, Timestamp, Version, broadcast, goaway::Goaway, origin, track};
+use moq_net::{Epoch, Hop, Timestamp, Version, goaway::Goaway, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -47,8 +47,8 @@ async fn settle() {
 /// track carries the worker's name.
 struct Worker {
 	_claim: Rc<origin::Requests>,
-	/// Each output with its track, which would end once its producer drops.
-	outputs: Rc<RefCell<Vec<(broadcast::Producer, track::Producer)>>>,
+	/// Each output with its track, which would end once its publication drops.
+	outputs: Rc<RefCell<Vec<(origin::Publication, track::Producer)>>>,
 	origin: origin::Producer,
 }
 
