@@ -8408,7 +8408,10 @@ pub(super) mod test {
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 		import
 			.decode(&synth_pmt(
-				&[(StreamType::H264, 0x50), (StreamType::Dts8ChannelLosslessAudio, 0x21)],
+				&[
+					(StreamType::AdtsAac, 0x50),
+					(StreamType::Dts8ChannelLosslessAudio, 0x21),
+				],
 				true,
 			))
 			.unwrap();
