@@ -5,6 +5,10 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### Decoders read gaps and ends
+
+`MoqAudioConsumer::next` returns `MoqAudioRead` and `MoqVideoConsumer::next` returns `MoqVideoRead`, mirroring `moq_audio::decode::Read` and `moq_video::decode::Read`, instead of a bare frame. Take the frame from the `Frame { frame }` variant where you used the return value before. `Gap { timestamp_us, duration_us }` marks lost media and `End { end_us }` where the publisher stopped its encoder; what follows either does not continue what came before, so restart playback there, or skip them to keep the old behavior. `None` still means the track ended.
+
 ### Connection state
 
 `MoqClient::connect` returns a connecting session without waiting for its first dial to succeed, natively and in the browser. Read `MoqSession::state()` and pass its `revision` to `state_changed(after)` to observe first-dial failures and reconnects. `MoqConnectionState` carries `phase`, `connects`, `failure`, and `version` together. These replace `status()`, `connects()`, and both `failure()` polls. Cancel the returned session to stop dialing; cancelling or releasing the client does not close it.

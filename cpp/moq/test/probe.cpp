@@ -132,8 +132,13 @@ void audio_roundtrip() {
     size_t frames = 0;
     double real[2][2] = {}, imag[2][2] = {};
     for (;;) {
-        auto next = ok(consumer->next().get(), "decoded audio");
-        if (!next) break;
+        auto read = ok(consumer->next().get(), "decoded audio");
+        if (!read) break;
+        // Whole 20 ms frames need no end marker, and nothing was lost.
+        const auto *decoded = std::get_if<moq::AudioRead::kFrame>(&read->get_variant());
+        CHECK(decoded != nullptr);
+        const auto *next = &decoded->frame;
+
         CHECK(next->timestamp_us == 250000 + frames * 1000000 / 48000);
         CHECK(next->data.size() % (2 * sizeof(float)) == 0);
         for (size_t sample = 0; sample < next->data.size() / (2 * sizeof(float)); sample++) {

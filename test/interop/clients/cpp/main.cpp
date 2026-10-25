@@ -32,6 +32,7 @@
 #include <string>
 #include <thread>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #ifdef _WIN32
@@ -298,10 +299,20 @@ void decode_audio(
     const size_t frame_bytes = sizeof(float) * audio.channel_count;
     uint64_t decoded = 0;
     while (decoded * 1000 < audio_ms * audio.sample_rate) {
-        auto frame = until(decoder->next(), deadline, "audio frame");
-        if (!frame) {
+        auto read = until(decoder->next(), deadline, "audio frame");
+        if (!read) {
             fail("audio track ended early");
         }
+        // moq-audio reports a hole it saw directly; tone.py checks the timestamps too.
+        if (std::holds_alternative<moq::AudioRead::kGap>(read->get_variant())) {
+            fail("audio gap");
+        }
+        const auto *decoded = std::get_if<moq::AudioRead::kFrame>(&read->get_variant());
+        if (!decoded) {
+            fail("audio track ended early");
+        }
+        const auto *frame = &decoded->frame;
+
         const size_t samples = frame->data.size() / frame_bytes;
         log << frame->timestamp_us << " " << samples << "\n";
         pcm.write(reinterpret_cast<const char *>(frame->data.data()), static_cast<std::streamsize>(frame->data.size()));

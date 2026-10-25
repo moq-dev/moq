@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Decoders read gaps and ends
+
+`audio.Consumer` yields `audio.Read` (`audio.Frame | audio.Gap | audio.End`) and `video.Consumer` yields `video.Read` (`VideoDecodedFrame | video.Gap | video.End`). Check `isinstance(read, audio.Frame)` (or `VideoDecodedFrame`) where you used each item as a frame; a `Gap` marks lost media and an `End` where the publisher stopped its encoder, and what follows either does not continue what came before.
+
 ### Connection state
 
 Client entry returns a connecting native session. Replace `Session.status()`, `connects()`, and both `failure()` polls with `state()` and `await state_changed(state.revision)`. The `ConnectionState` fields include `phase`, `connects`, `failure`, and `version`; `ConnectionPhase` replaces `ConnectionStatus`. Wait for `CONNECTED` when work requires an established transport, or await `closed()` for the terminal result.

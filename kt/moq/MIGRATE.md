@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Decoders read gaps and ends
+
+`dev.moq.audio.Consumer.next()` and `dev.moq.video.Consumer.next()` return a `Read` instead of a frame. Take `(read as? ReadFrame)?.frame` where you used the frame; `ReadGap` marks lost media and `ReadEnd` where the publisher stopped its encoder, and what follows either does not continue what came before.
+
 ### Connection state
 
 `Moq.connect` returns a connecting native session. Replace `status()`, `connects()`, and failure polls with `session.state()` and `session.stateChanged(state.revision)`. `ConnectionState` carries `phase`, `connects`, `failure`, and `version`; `ConnectionPhase` replaces `ConnectionStatus`.

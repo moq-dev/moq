@@ -657,12 +657,13 @@ static void moq_source_stop_audio(const std::shared_ptr<Connection> &conn, const
 static void moq_source_read_audio(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
 				  const std::shared_ptr<Track> &track);
 
-// Takes one decoded frame under the source lock. A candidate's first frame commits it, and
-// any failure stops the track. On success `audio` points into the frame, for output once
-// the lock is released.
+// Takes one decoded read under the source lock. A candidate's first frame commits it, and
+// any failure stops the track. On a frame `audio` points into it, for output once the lock
+// is released. A gap or encoder end needs nothing here: OBS buffers by timestamp, so the
+// next frame resumes wherever its timestamp lands.
 static bool moq_source_on_audio_frame(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
 				      const std::shared_ptr<Track> &track,
-				      const moq::expected<std::optional<moq::AudioFrame>> &result,
+				      const moq::expected<std::optional<moq::AudioRead>> &result,
 				      obs_source_audio &audio)
 {
 	if (!result) {
@@ -676,8 +677,14 @@ static bool moq_source_on_audio_frame(struct moq_source *ctx, const std::shared_
 		return false;
 	}
 
+	const auto *read = std::get_if<moq::AudioRead::kFrame>(&(*result)->get_variant());
+	if (!read) {
+		moq_source_read_audio(ctx, conn, track);
+		return false;
+	}
+
 	// moq-audio delivers whole planar float samples in the layout the track asked for.
-	const auto &frame = **result;
+	const auto &frame = read->frame;
 	const auto &layout = track->audio_layout;
 	const size_t plane = frame.data.size() / layout.channels;
 	if (plane == 0 || plane % sizeof(float) != 0 || plane * layout.channels != frame.data.size()) {
@@ -712,7 +719,8 @@ static void moq_source_read_audio(struct moq_source *ctx, const std::shared_ptr<
 	track->call = track->audio_consumer->next().then(
 		ctx->worker.Executor(),
 		[ctx, weak_conn = std::weak_ptr<Connection>(conn),
-		 weak_track = std::weak_ptr<Track>(track)](moq::expected<std::optional<moq::AudioFrame>> result) {
+		 weak_track = std::weak_ptr<Track>(track)](moq::expected<std::optional<moq::AudioRead>> result) {
+
 			obs_source_audio audio = {};
 			{
 				std::lock_guard<std::mutex> lock(ctx->mutex);
