@@ -375,10 +375,11 @@
           # The upstream repository ignores Cargo.lock so cargo installs test
           # the unlocked resolver. Nix still consumes committed lock data.
           cargoLock.lockFile = ./nix/uniffi-dart-Cargo.lock;
-          # Carry record converter and per-operation cancellation fixes at the source.
+          # Carry record converter, per-operation cancellation, and negative duration fixes at the source.
           patches = [
             ./nix/uniffi-dart-record-error.patch
             ./nix/uniffi-dart-cancellation.patch
+            ./nix/uniffi-dart-duration-negative.patch
           ];
           postPatch = ''
             cp ${./nix/uniffi-dart-Cargo.lock} Cargo.lock

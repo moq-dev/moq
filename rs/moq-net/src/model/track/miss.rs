@@ -23,16 +23,10 @@ use std::{
 
 use rangemap::{RangeInclusiveSet, RangeSet};
 
+pub(super) use super::fill::Asking;
 use super::fill::{Ask, FillState, Join};
 use super::{Drift, Order, Position, TrackState};
 use crate::Error;
-
-/// What one reader asks its fills with.
-pub(super) struct Asking {
-	pub priority: i8,
-	pub max_delay: Option<Duration>,
-	pub order: Order,
-}
 
 /// What a probe judges against: the span read, the feed's newest group, where the feed
 /// and readers start, and the drops revision.
@@ -52,6 +46,8 @@ pub(super) struct Misses {
 	refused: RangeSet<u64>,
 	/// The fills this reader waits on.
 	joins: Vec<Join>,
+	/// What the reader asked its fills with last.
+	asking: Option<Asking>,
 	/// The sequences of `joins` still unanswered.
 	wanted: RangeSet<u64>,
 	/// Answered by a fill and cached, not handed out yet.
@@ -128,6 +124,17 @@ impl Misses {
 			join.release(&lost);
 			!join.is_empty()
 		});
+	}
+
+	/// Ask every fill this reader waits on with `asking` from now on, queued or taken.
+	pub fn update(&mut self, asking: &Asking) {
+		if self.asking.as_ref() == Some(asking) {
+			return;
+		}
+		self.asking = Some(*asking);
+		for join in &mut self.joins {
+			join.update(asking);
+		}
 	}
 
 	/// Forget what the reader no longer reads: below `from`, or outside `admitted`. Its fills
@@ -433,6 +440,7 @@ impl Misses {
 		asking: &Asking,
 		given_up: &mut GivenUp,
 	) {
+		self.update(asking);
 		let mut runs: Vec<ops::Range<u64>> = runs.iter().cloned().collect();
 		if asking.order == Order::Descending {
 			runs.reverse();
@@ -441,9 +449,7 @@ impl Misses {
 			let ask = Ask {
 				start: Position::group(run.start),
 				end: run.end,
-				priority: asking.priority,
-				max_delay: asking.max_delay,
-				order: asking.order,
+				asking: *asking,
 			};
 			let (joins, unfillable) = fills.lock().join(fills, &ask);
 			self.wanted.insert(run.clone());
