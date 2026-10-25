@@ -29,7 +29,6 @@ panel already counts.
 
 ## Related
 
-- [Zero-copy source import](/quest/m1/studio-gpu/import.md) - the other half of keeping the studio's pictures on the GPU
 - [VA-API encodes an external Vulkan image](/quest/m2/vaapi-vulkan-import.md) - the follow-up that gives Intel the same Vulkan slot
 - [Vulkan Video encode on AMD](/quest/m2/vulkan-encode.md) - the follow-up that gives AMD the same Vulkan slot
 - [NVENC reuses its input and output buffers](/quest/m2/nvenc-pool.md) - per-frame NVENC allocation the program encode also pays

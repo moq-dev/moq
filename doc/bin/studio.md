@@ -19,7 +19,7 @@ cargo run --release -p moq-studio --features capture,openh264 -- \
 - Without `--connect`, the studio composes and previews but publishes nothing,
   and broadcast sources stay offline.
 - `capture` adds camera, display, window, microphone, and system-audio sources.
-  On Linux it links ALSA; add `pipewire` for Wayland screen capture. `openh264`
+  On Linux it links ALSA; add `pipewire` for PipeWire cameras. `openh264`
   is the software H.264 fallback for a machine without a hardware encoder.
 - The `--connect-*`, `--quic-*`, and `--log-level` flags are moq-cli's; see
   `moq-studio --help`.
@@ -36,7 +36,7 @@ Every panel is a tab you can drag, split, or stack.
 | Sources | Add a source by hand, see whether each is live, and remove one. |
 | Devices | List this machine's cameras, displays, windows, and audio inputs, and add one as a source. |
 | Audio | Set each audio source's gain and mute, and watch its meter and the program's. |
-| Output | See the relay connection, whether anyone is watching, and the encoder's work. |
+| Output | See the relay connection, whether anyone is watching, the encoder's work, and which sources are uploaded to the GPU. |
 
 A broadcast source subscribes through the same relay connection, plays the
 best video and audio its catalog lists, switches when the catalog changes, and
@@ -100,3 +100,9 @@ holding up the stream.
 Video is only encoded while someone watches it. Each frame is read back from
 the GPU to the CPU for the encoder, which the Output panel counts; frames the
 encoder cannot keep up with are dropped there rather than delaying the stream.
+
+Sources make the opposite trip. A frame already on the GPU is drawn where it
+lies: PipeWire camera and VA-API decode DMA-BUFs on Linux, given a Vulkan
+driver that imports them, and NV12 capture and VideoToolbox decode surfaces on
+macOS. Any other frame, every frame on Windows, and every still image is
+uploaded from the CPU, which the Output panel counts per source.

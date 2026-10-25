@@ -61,14 +61,13 @@ repository.
 
 Added 2026-10-25 (maintainer): the studio's
 [GPU encode](/quest/m1/studio-gpu/encode.md) and
-[source import](/quest/m1/studio-gpu/import.md) quests are in m1 so
+source import quests are in m1 so
 moq-video's GPU encode and import API changes, mainly encoders taking a GPU
 surface and zero-copy texture import, land before the cut.
 
 ## Required
 
 - [Zero-copy program encode](/quest/m1/studio-gpu/encode.md) - the program reaches the encoder as a GPU surface instead of a CPU readback
-- [Zero-copy source import](/quest/m1/studio-gpu/import.md) - captured and decoded frames reach the compositor as GPU textures instead of a CPU upload
 - [Studio on macOS and Windows](/quest/m3/studio/app.md) - the studio runs on macOS and Windows, not only Linux
 - [Destinations](/quest/m3/studio/destinations.md) - RTMP, RTMPS, and WHIP push with per-destination codecs and shared encoders, on a UI-free egress library a hosted service can reuse
 - [Multiple canvases](/quest/m3/studio/multi-canvas.md) - landscape and portrait canvases composite at once from shared sources

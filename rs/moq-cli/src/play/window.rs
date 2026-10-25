@@ -391,7 +391,7 @@ impl Display {
 	}
 
 	fn render(&mut self, frame: &moq_video::Frame) -> anyhow::Result<()> {
-		self.texture = Some((self.renderer.render(frame)?, frame.size()));
+		self.texture = Some((self.renderer.render(frame)?.texture, frame.size()));
 		Ok(())
 	}
 

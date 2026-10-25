@@ -6,10 +6,10 @@
 //! frame on the GPU; this draws it there too, converting YUV to RGB in a shader
 //! instead of downloading pixels to convert them on the CPU.
 //!
-//! [`Renderer::render`] returns a plain [`wgpu::Texture`], which is the whole
-//! integration seam: presenting it to a window, feeding it to egui or bevy, or
-//! copying it back is yours to do, so this module carries no windowing or UI
-//! dependency.
+//! [`Renderer::render`] returns a plain [`wgpu::Texture`] in a [`Rendered`],
+//! the whole integration seam: presenting it to a window, feeding it to egui or
+//! bevy, or copying it back is yours to do, so this module carries no windowing
+//! or UI dependency.
 //!
 //! ```no_run
 //! # fn example(device: &moq_video::render::wgpu::Device, queue: &moq_video::render::wgpu::Queue) -> Result<(), moq_video::Error> {
@@ -17,8 +17,8 @@
 //!
 //! let mut renderer = Renderer::new(device, queue, Config::new())?;
 //! # let frame: moq_video::Frame = todo!();
-//! let texture = renderer.render(&frame)?;
-//! # let _ = texture;
+//! let rendered = renderer.render(&frame)?;
+//! # let _ = (rendered.texture, rendered.route);
 //! # Ok(())
 //! # }
 //! ```
@@ -38,7 +38,9 @@
 //! [`wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF`] when creating the device
 //! to enable that import. Every other frame, and any import that fails, goes through
 //! [`Surface::into_i420`](crate::Surface::into_i420) and a plane upload. That
-//! path is always available, so which route a frame takes is a question of cost.
+//! path is always available, so which route a frame takes is a question of cost,
+//! and [`Rendered::route`] reports it per frame so a caller can count the
+//! uploads it hoped to avoid.
 //! An import path that keeps failing (a driver that cannot do it at all) retires
 //! itself after a few frames rather than paying for the attempt forever.
 //!
@@ -54,7 +56,7 @@ mod dmabuf;
 #[cfg(apple)]
 mod metal;
 
-pub use renderer::{Config, Renderer};
+pub use renderer::{Config, Rendered, Renderer, Route};
 
 /// The `wgpu` this renderer was built against, re-exported so you name the exact
 /// version rather than guessing at a compatible one.

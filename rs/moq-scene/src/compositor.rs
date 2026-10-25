@@ -6,7 +6,7 @@ use std::num::NonZeroU64;
 use std::time::Duration;
 
 use moq_clock::Instant;
-use moq_video::render::{Renderer, wgpu};
+use moq_video::render::{Renderer, Route, wgpu};
 
 use crate::Error;
 use crate::collection::{Canvas, Collection, Rect, Source};
@@ -105,6 +105,17 @@ struct Target {
 	bind: wgpu::BindGroup,
 }
 
+/// How many of a source's pictures reached the GPU each way, from
+/// [`Compositor::routes`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Routes {
+	/// Pictures sampled where the capturer or decoder left them, without a copy.
+	pub imported: u64,
+	/// Pictures copied from system memory: CPU frames, still images, and GPU
+	/// surfaces this platform cannot import.
+	pub uploaded: u64,
+}
+
 /// One source's newest picture on the GPU.
 struct Layer {
 	/// What the picture came from. An edited source starts a new layer, so it
@@ -116,6 +127,8 @@ struct Layer {
 	bind: Option<wgpu::BindGroup>,
 	/// Set once a picture failed to draw, so the failure is logged once.
 	failed: bool,
+	/// How the pictures drawn so far reached the GPU.
+	routes: Routes,
 }
 
 /// A growable uniform buffer holding one [`Uniform`] per draw of a render.
@@ -292,6 +305,12 @@ impl Compositor {
 		self.program_scene.as_deref()
 	}
 
+	/// How `source`'s pictures have reached the GPU since it was added or last
+	/// edited, or `None` before its first picture is drawn.
+	pub fn routes(&self, source: &str) -> Option<Routes> {
+		self.layers.get(source).map(|layer| layer.routes)
+	}
+
 	/// Whether a fade is under way.
 	pub fn fading(&self) -> bool {
 		self.fade.is_some()
@@ -446,8 +465,9 @@ impl Compositor {
 				renderer: None,
 				bind: None,
 				failed: false,
+				routes: Routes::default(),
 			});
-			let texture = match picture {
+			let drawn = match picture {
 				Picture::Frame(frame) => {
 					let renderer = match layer.renderer.as_mut() {
 						Some(renderer) => Ok(renderer),
@@ -456,14 +476,21 @@ impl Compositor {
 					};
 					renderer
 						.and_then(|renderer| renderer.render(&frame))
+						.map(|rendered| (rendered.texture, rendered.route))
 						.map_err(Error::from)
 				}
-				Picture::Rgba { size, pixels } => upload(&self.device, &self.queue, size, &pixels),
+				Picture::Rgba { size, pixels } => {
+					upload(&self.device, &self.queue, size, &pixels).map(|texture| (texture, Route::Upload))
+				}
 			};
 
-			match texture {
-				Ok(texture) => {
+			match drawn {
+				Ok((texture, route)) => {
 					layer.failed = false;
+					match route {
+						Route::Import => layer.routes.imported += 1,
+						Route::Upload => layer.routes.uploaded += 1,
+					}
 					let view = texture.create_view(&Default::default());
 					layer.bind = Some(image_bind(&self.device, &self.image_layout, &self.sampler, &view));
 				}
@@ -872,6 +899,46 @@ mod tests {
 			studio.collection.scenes.clear();
 			studio.render(Instant::now());
 			assert_eq!(pixel(&studio.program(), 1, 1), BLACK);
+		})
+		.await;
+	}
+
+	/// A CPU frame reaches the GPU through the renderer's upload, which the
+	/// compositor counts against its source once per picture drawn, not per
+	/// canvas frame that repeats it.
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn cpu_frames_count_as_uploads() {
+		local(async {
+			let mut studio = Studio::new(collection()).await;
+			studio.compositor.set_preview(Some("blue".into()));
+			studio.compositor.cut();
+			assert_eq!(studio.compositor.routes("blue"), None, "nothing drawn yet");
+
+			studio.render(Instant::now());
+			let color = Routes {
+				imported: 0,
+				uploaded: 1,
+			};
+			assert_eq!(studio.compositor.routes("blue"), Some(color), "a color uploads once");
+
+			let size = moq_video::Size::new(8, 8);
+			let pixels = RED.repeat(size.pixels() as usize);
+			for _ in 0..2 {
+				let surface = moq_video::Surface::rgba(&pixels, size).unwrap();
+				let frame = moq_video::Frame::new(surface, Timestamp::ZERO);
+				studio.sources.get("blue").unwrap().show(Picture::Frame(frame));
+				studio.render(Instant::now());
+			}
+			studio.render(Instant::now());
+
+			let frames = Routes {
+				imported: 0,
+				uploaded: 3,
+			};
+			assert_eq!(studio.compositor.routes("blue"), Some(frames));
+			let [red, _, blue, _] = pixel(&studio.program(), 1, 1);
+			assert!(red > 240 && blue < 16, "the frame replaced the color");
 		})
 		.await;
 	}

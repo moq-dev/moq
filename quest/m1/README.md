@@ -97,7 +97,7 @@ Catalog HLS field.
 
 Added 2026-10-25 (maintainer): the studio's
 [GPU encode](/quest/m1/studio-gpu/encode.md) and
-[source import](/quest/m1/studio-gpu/import.md) quests are in m1 so
+source import quests are in m1 so
 moq-video's GPU encode and import API changes, mainly encoders taking a GPU
 surface and zero-copy texture import, land before the cut.
 

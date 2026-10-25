@@ -30,8 +30,8 @@ nvidia = ["moq-video/nvidia"]
 openh264 = ["moq-video/openh264"]
 # Intel/AMD VAAPI hardware codecs (Linux); its bindgen needs libclang.
 vaapi = ["moq-video/vaapi"]
-# Wayland screen capture through the portal and PipeWire cameras and audio.
-pipewire = ["capture", "moq-video/pipewire", "moq-audio/pipewire"]
+# PipeWire cameras, drawn without a copy, and audio through the sound server.
+pipewire = ["capture", "moq-scene/pipewire"]
 
 [dependencies]
 anyhow = { workspace = true, features = ["backtrace"] }

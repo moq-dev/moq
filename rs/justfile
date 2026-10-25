@@ -144,6 +144,9 @@ macos-test:
     just rs test -p hang -p moq-tokio -p moq-sock
     just rs test -p moq-sock --features fast-apple-datapath
     just rs test -p moq-video --no-default-features -E 'test(encode::backend::videotoolbox::tests)'
+    # The runner's paravirtual Metal device proves the IOSurface import, ignored elsewhere.
+    just rs test -p moq-video --no-default-features --features render --lib --run-ignored only \
+        -E 'test(/^render::renderer::tests::(the_metal_import_matches_the_cpu_path|imports_survive_decoder_pool_recycling)$/)'
 
 # Compile and lint the capture and playback features, which the default check skips.
 [positional-arguments]

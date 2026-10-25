@@ -519,6 +519,21 @@ impl Panels {
 				millis(&stats.readback_us)
 			));
 			ui.end_row();
+			// The other CPU copy: a source the GPU could not import from.
+			let state = self.engine.state.lock().unwrap();
+			for (name, _) in state.sources.iter() {
+				let Some(routes) = state.compositor.routes(name) else {
+					continue;
+				};
+				ui.label(format!("Uploaded from `{name}`"));
+				ui.label(format!(
+					"{} of {} pictures",
+					routes.uploaded,
+					routes.uploaded + routes.imported
+				));
+				ui.end_row();
+			}
+			drop(state);
 			ui.label("Dropped");
 			ui.label(format!("{} frames", count(&stats.dropped)));
 			ui.end_row();

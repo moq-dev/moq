@@ -61,7 +61,7 @@ A separate-plane producer belongs to
 Pi produces nothing, write it down and stop. `doc/lib/rs/moq-video.md` says
 both paths are reachable; correct that sentence if one cannot capture.
 
-### Windows and Apple GPU probes
+### Windows GPU probes
 
 Ignored moq-video tests that only a GPU on that platform can run, and that no
 runner hosts (found by the m0 coverage audit):
@@ -76,8 +76,6 @@ runner hosts (found by the m0 coverage audit):
   capture tests belong to [Windows.Graphics.Capture](/quest/m2/capture-wgc.md).
 - Media Foundation encode: `mediafoundation_cpu_rgba` and
   `mediafoundation_camera_texture`.
-- Metal import on an Apple Silicon Mac: `the_metal_import_matches_the_cpu_path`
-  and `imports_survive_decoder_pool_recycling`.
 
 ### Fixes
 

@@ -153,6 +153,12 @@ impl Feed {
 	pub(crate) fn take(&self) -> Option<Picture> {
 		self.picture.lock().unwrap().take()
 	}
+
+	/// Deliver `picture` as the source's driver would.
+	#[cfg(test)]
+	pub(crate) fn show(&self, picture: Picture) {
+		*self.picture.lock().unwrap() = Some(picture);
+	}
 }
 
 /// The work behind one [`Feed`]: opening the source and delivering what it

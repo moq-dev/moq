@@ -95,6 +95,28 @@ impl Config {
 	}
 }
 
+/// A drawn frame, from [`Renderer::render`].
+#[derive(Clone, Debug)]
+pub struct Rendered {
+	/// The texture holding the frame. It aliases a texture the renderer
+	/// reuses, so the next [`Renderer::render`] overwrites it: present or copy
+	/// it first.
+	pub texture: wgpu::Texture,
+	/// How the frame's pixels reached the GPU.
+	pub route: Route,
+}
+
+/// How a frame's pixels reached the GPU: the cost [`Renderer::render`] paid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Route {
+	/// Sampled where the decoder or capturer left them, with the surface
+	/// aliased as a texture and nothing copied.
+	Import,
+	/// Copied from system memory. A CPU frame always takes this route; a GPU
+	/// surface takes it when no importer could, after a download.
+	Upload,
+}
+
 /// Draws decoded [`Frame`]s into a `wgpu` texture you present.
 ///
 /// The egress end of the pipeline, and the seam an application integrates at:
@@ -104,7 +126,9 @@ impl Config {
 /// A GPU frame is imported without a round trip through the CPU where the
 /// platform allows it, and any frame the fast paths do not recognize falls back
 /// to uploading [`Surface::into_i420`](crate::Surface::into_i420). So which path
-/// a frame takes is a question of cost, not of whether it draws at all.
+/// a frame takes is a question of cost, not of whether it draws at all, and
+/// each [`Rendered`] says which [`Route`] it took so a caller can count the
+/// fallback.
 ///
 /// One renderer draws one video. It caches the pipeline, the plane textures and
 /// the output texture, so keep it alive across frames rather than rebuilding it
@@ -244,13 +268,12 @@ impl Renderer {
 		})
 	}
 
-	/// Draw `frame` and hand back the texture holding it.
+	/// Draw `frame`, handing back the texture holding it and how it got there.
 	///
-	/// The returned handle aliases a texture the renderer reuses, so the next
-	/// call overwrites what you are holding. Present or copy it before rendering
-	/// again.
-	pub fn render(&mut self, frame: &Frame) -> Result<wgpu::Texture, Error> {
-		let mut source = self.source(frame)?;
+	/// The texture aliases one the renderer reuses, so the next call overwrites
+	/// what you are holding. Present or copy it before rendering again.
+	pub fn render(&mut self, frame: &Frame) -> Result<Rendered, Error> {
+		let (mut source, route) = self.source(frame)?;
 		if let Some(source_color) = source.color {
 			let color = self.config.color.unwrap_or(source_color);
 			if self.color != Some(color) {
@@ -331,12 +354,12 @@ impl Renderer {
 			drop((submission, keepalive));
 		}
 
-		Ok(output)
+		Ok(Rendered { texture: output, route })
 	}
 
 	/// Turn a frame into plane textures, preferring a zero-copy import and
 	/// falling back to a CPU upload.
-	fn source(&mut self, frame: &Frame) -> Result<Source, Error> {
+	fn source(&mut self, frame: &Frame) -> Result<(Source, Route), Error> {
 		if self.config.zero_copy && !self.retired {
 			match self.source.import(&self.device, &frame.surface) {
 				Ok(Some(source)) => {
@@ -352,7 +375,7 @@ impl Renderer {
 							"drawing frames zero-copy; the picture reaches the GPU without a download"
 						);
 					}
-					return Ok(source);
+					return Ok((source, Route::Import));
 				}
 				// No import path for this surface on this platform. Not a
 				// failure, so it costs no strike: the CPU path is the answer
@@ -371,7 +394,7 @@ impl Renderer {
 			}
 		}
 
-		self.source.upload(&self.device, &self.queue, frame)
+		Ok((self.source.upload(&self.device, &self.queue, frame)?, Route::Upload))
 	}
 
 	/// The output texture, recreated when the size it should have changes.
@@ -614,9 +637,9 @@ mod tests {
 			assert_eq!(imported.layout, Layout::Rgba);
 			drop(imported);
 
-			let texture = renderer.render(&frame).expect("a zero-copy rendered frame");
-			assert_eq!(renderer.strikes, 0, "frame {index} fell back to the CPU");
-			assert!(!renderer.retired, "frame {index} retired the zero-copy path");
+			let rendered = renderer.render(&frame).expect("a zero-copy rendered frame");
+			assert_eq!(rendered.route, Route::Import, "frame {index} fell back to the CPU");
+			let texture = rendered.texture;
 			assert_eq!((texture.width(), texture.height()), (stream.width(), stream.height()));
 		}
 
@@ -750,7 +773,7 @@ mod tests {
 				"the RGB conversion reports the space it converted into"
 			);
 
-			let texture = renderer.render(&frame).expect("a rendered frame");
+			let texture = renderer.render(&frame).expect("a rendered frame").texture;
 			let pixels = readback(&device, &queue, &texture).await;
 			let center = (size.height as usize / 2) * size.width as usize + size.width as usize / 2;
 			assert_close(pixels[center], rgba);
@@ -770,7 +793,7 @@ mod tests {
 			);
 			assert_ne!(scaled.surface.color(), Some(crate::Color::infer(size)));
 
-			let texture = renderer.render(&scaled).expect("a rendered frame");
+			let texture = renderer.render(&scaled).expect("a rendered frame").texture;
 			let pixels = readback(&device, &queue, &texture).await;
 			assert_close(pixels[center], rgba);
 		}
@@ -797,7 +820,9 @@ mod tests {
 			[0, 0, 0, 255],
 			[77, 153, 230, 255],
 		] {
-			let texture = renderer.render(&solid(size, rgba)).expect("a rendered frame");
+			let rendered = renderer.render(&solid(size, rgba)).expect("a rendered frame");
+			assert_eq!(rendered.route, Route::Upload, "a CPU frame has nothing to import");
+			let texture = rendered.texture;
 			assert_eq!((texture.width(), texture.height()), (size.width, size.height));
 
 			let pixels = readback(&device, &queue, &texture).await;
@@ -826,7 +851,8 @@ mod tests {
 
 		let texture = renderer
 			.render(&solid(Size::new(64, 64), [255, 0, 0, 255]))
-			.expect("a rendered frame");
+			.expect("a rendered frame")
+			.texture;
 		assert_eq!((texture.width(), texture.height()), (32, 16));
 
 		let pixels = readback(&device, &queue, &texture).await;
@@ -1019,7 +1045,7 @@ mod tests {
 			let i420 = crate::frame::I420::from_nv12(&nv12, size).expect("deinterleave NV12");
 			let frame = Frame::new(Surface::I420(i420), Timestamp::ZERO);
 			let mut renderer = Renderer::new(device, queue, config.clone()).expect("a renderer");
-			let texture = renderer.render(&frame).expect("a rendered frame");
+			let texture = renderer.render(&frame).expect("a rendered frame").texture;
 			readback(device, queue, &texture).await
 		};
 
@@ -1037,10 +1063,13 @@ mod tests {
 		assert_eq!(imported.color, Some(color));
 		drop(imported);
 
-		let texture = renderer.render(&frame).expect("a rendered frame");
-		assert_eq!(renderer.strikes, 0, "the zero-copy import should not have failed");
-		assert!(!renderer.retired);
-		let zero_copy = readback(device, queue, &texture).await;
+		let rendered = renderer.render(&frame).expect("a rendered frame");
+		assert_eq!(
+			rendered.route,
+			Route::Import,
+			"the zero-copy import should not have failed"
+		);
+		let zero_copy = readback(device, queue, &rendered.texture).await;
 
 		// Every pixel, not a sample of them: a shear from an ignored row pitch
 		// grows down the frame and leaves the top correct.
@@ -1257,11 +1286,11 @@ mod tests {
 			assert_eq!(source.layout, Layout::Nv12, "picture {index} did not import as NV12");
 			drop(source);
 
-			let texture = importing.render(gpu).expect("draw the imported picture");
-			assert_eq!(importing.strikes, 0, "picture {index} fell back to the CPU");
-			let zero_copy = readback(&device, &queue, &texture).await;
+			let rendered = importing.render(gpu).expect("draw the imported picture");
+			assert_eq!(rendered.route, Route::Import, "picture {index} fell back to the CPU");
+			let zero_copy = readback(&device, &queue, &rendered.texture).await;
 
-			let texture = uploading.render(cpu).expect("draw the downloaded picture");
+			let texture = uploading.render(cpu).expect("draw the downloaded picture").texture;
 			let cpu = readback(&device, &queue, &texture).await;
 
 			assert_eq!(
@@ -1385,10 +1414,10 @@ mod tests {
 					buffers.insert(file.metadata().expect("stat the DMA-BUF").ino());
 					drop((file, export));
 
-					let texture = importing.render(gpu).expect("draw the imported picture");
-					assert_eq!(importing.strikes, 0, "picture {index} fell back to the CPU");
-					let zero_copy = readback(&device, &queue, &texture).await;
-					let texture = uploading.render(cpu).expect("draw the downloaded picture");
+					let rendered = importing.render(gpu).expect("draw the imported picture");
+					assert_eq!(rendered.route, Route::Import, "picture {index} fell back to the CPU");
+					let zero_copy = readback(&device, &queue, &rendered.texture).await;
+					let texture = uploading.render(cpu).expect("draw the downloaded picture").texture;
 					let reference = readback(&device, &queue, &texture).await;
 
 					for (pixel, (&imported, &expected)) in zero_copy.iter().zip(&reference).enumerate() {
@@ -1438,7 +1467,7 @@ mod tests {
 	/// GPU. Run with `--ignored`.
 	#[cfg(apple)]
 	#[tokio::test]
-	#[ignore = "needs a Metal GPU; see quest/m3/video-hardware.md"]
+	#[ignore = "needs a Metal GPU; run by just rs macos-test"]
 	async fn imports_survive_decoder_pool_recycling() {
 		let (device, queue) = gpu().await;
 		let size = Size::new(256, 256);
@@ -1453,12 +1482,12 @@ mod tests {
 			let rgba = colors[round % colors.len()];
 			// Built and dropped inside the loop, so its buffer returns to the
 			// pool the moment `render` returns.
-			let texture = renderer
+			let rendered = renderer
 				.render(&Frame::new(pooled(size, rgba), Timestamp::ZERO))
 				.expect("a rendered frame");
-			assert_eq!(renderer.strikes, 0, "round {round} fell back to the CPU");
+			assert_eq!(rendered.route, Route::Import, "round {round} fell back to the CPU");
 
-			let pixels = readback(&device, &queue, &texture).await;
+			let pixels = readback(&device, &queue, &rendered.texture).await;
 			assert_close(pixels[128 * 256 + 128], rgba);
 		}
 	}
@@ -1468,7 +1497,7 @@ mod tests {
 	/// Run with `--ignored`.
 	#[cfg(apple)]
 	#[tokio::test]
-	#[ignore = "needs a Metal GPU; see quest/m3/video-hardware.md"]
+	#[ignore = "needs a Metal GPU; run by just rs macos-test"]
 	async fn the_metal_import_matches_the_cpu_path() {
 		let (device, queue) = gpu().await;
 		let size = Size::new(64, 64);
@@ -1480,7 +1509,7 @@ mod tests {
 
 		let uploaded = {
 			let mut renderer = Renderer::new(&device, &queue, config.clone()).expect("a renderer");
-			let texture = renderer.render(&solid(size, rgba)).expect("a rendered frame");
+			let texture = renderer.render(&solid(size, rgba)).expect("a rendered frame").texture;
 			readback(&device, &queue, &texture).await
 		};
 
@@ -1488,15 +1517,14 @@ mod tests {
 		let surface = pooled(size, rgba);
 
 		let mut renderer = Renderer::new(&device, &queue, config).expect("a renderer");
-		let texture = renderer
+		let rendered = renderer
 			.render(&Frame::new(surface, Timestamp::ZERO))
 			.expect("a rendered frame");
 		// The point of the test: the fast path ran. Without this the CPU
 		// fallback would quietly satisfy every assertion below.
-		assert_eq!(renderer.strikes, 0, "the zero-copy import should not have failed");
-		assert!(!renderer.retired);
+		assert_eq!(rendered.route, Route::Import, "the Metal import should not have failed");
 
-		let imported = readback(&device, &queue, &texture).await;
+		let imported = readback(&device, &queue, &rendered.texture).await;
 		assert_eq!(uploaded.len(), imported.len());
 		for (upload, import) in uploaded.iter().zip(imported.iter()) {
 			assert_close(*import, *upload);
