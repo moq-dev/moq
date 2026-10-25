@@ -1882,14 +1882,35 @@ mod tests {
 		}
 	}
 
+	/// Drive an RTMP play client over `stream`, collecting media messages until `want` have
+	/// arrived or the server hangs up.
+	async fn play_client_collect<S: Stream>(stream: S, want: usize, caps_ex: u32, fourccs: &[&[u8; 4]]) -> Vec<Media> {
+		let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+		let client = play_client(stream, caps_ex, fourccs, tx);
+		tokio::pin!(client);
+		let mut media = Vec::new();
+		while media.len() < want {
+			tokio::select! {
+				Some(next) = rx.recv() => media.push(next),
+				() = &mut client => break,
+			}
+		}
+		while media.len() < want
+			&& let Ok(next) = rx.try_recv()
+		{
+			media.push(next);
+		}
+		media
+	}
+
 	/// Drive an RTMP play client over `stream` through handshake -> connect(`live`)
-	/// -> play(`cam0`), collecting media messages until `want` have arrived.
-	async fn play_client_collect<S: Stream>(
+	/// -> play(`cam0`), sending each media message to `media` until the server hangs up.
+	async fn play_client<S: Stream>(
 		mut stream: S,
-		want: usize,
 		caps_ex: u32,
 		fourccs: &[&[u8; 4]],
-	) -> Vec<Media> {
+		media: tokio::sync::mpsc::UnboundedSender<Media>,
+	) {
 		// Handshake.
 		let mut handshake = Handshake::new(PeerType::Client);
 		stream
@@ -1925,7 +1946,6 @@ mod tests {
 		set_connect_capabilities(&mut session, caps_ex, fourccs);
 		work.push_back(session.request_connection("live".to_string()).unwrap());
 
-		let mut media = Vec::new();
 		loop {
 			while let Some(result) = work.pop_front() {
 				match result {
@@ -1936,21 +1956,18 @@ mod tests {
 						work.push_back(session.request_playback("cam0".to_string()).unwrap());
 					}
 					ClientSessionResult::RaisedEvent(ClientSessionEvent::VideoDataReceived { data, .. }) => {
-						media.push((true, data));
+						let _ = media.send((true, data));
 					}
 					ClientSessionResult::RaisedEvent(ClientSessionEvent::AudioDataReceived { data, .. }) => {
-						media.push((false, data));
+						let _ = media.send((false, data));
 					}
 					_ => {}
 				}
 			}
-			if media.len() >= want {
-				return media;
-			}
-			let n = stream.read(&mut buffer).await.unwrap();
-			if n == 0 {
-				return media;
-			}
+			let n = match stream.read(&mut buffer).await {
+				Ok(0) | Err(_) => return,
+				Ok(n) => n,
+			};
 			work.extend(session.handle_input(&buffer[..n]).unwrap());
 		}
 	}
@@ -2141,6 +2158,85 @@ mod tests {
 		assert_eq!(media[1].1[1], 0x01);
 
 		server_task.abort();
+	}
+
+	/// Publish an AVC broadcast at `live/cam0` under `epoch`, starting with a keyframe carrying
+	/// `idr`, and return its importer for more tags.
+	fn publish_avc(
+		origin: &origin::Producer,
+		epoch: moq_net::Epoch,
+		idr: &[u8],
+	) -> (FlvImport, moq_mux::catalog::Producer) {
+		let mut vseq = vec![0x17, 0x00, 0x00, 0x00, 0x00];
+		vseq.extend_from_slice(&[0x01, 0x42, 0xc0, 0x1f, 0xff, 0xe1, 0x00, 0x04, 0x67, 0x42, 0xc0, 0x1f]);
+		vseq.extend_from_slice(&[0x01, 0x00, 0x04, 0x68, 0xce, 0x3c, 0x80]);
+		let mut vframe = vec![0x17, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, idr.len() as u8];
+		vframe.extend_from_slice(idr);
+
+		let mut broadcast = origin.create_broadcast("live/cam0").unwrap();
+		broadcast.announce(origin::Route::default().with_epoch(epoch)).unwrap();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let mut importer = FlvImport::new(broadcast, catalog.reserve());
+		importer.decode(&flv::file_header()).unwrap();
+		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vseq)).unwrap();
+		importer.decode(&flv::tag(flv::TAG_VIDEO, 0, &vframe)).unwrap();
+		(importer, catalog)
+	}
+
+	/// A play stays on the instance it resolved: a publisher taking over the path never reaches
+	/// it, so the session never splices in another timeline or codec state, and the play fails
+	/// once its instance's route dies.
+	#[tokio::test]
+	async fn a_play_stays_on_its_instance_until_the_route_dies() {
+		const OLD_DELTA: &[u8] = &[0x41, 0x9a, 0x02, 0x03];
+		let origin = moq_tokio::origin::spawn();
+		let consumer = origin.consume();
+		let (mut old, old_catalog) = publish_avc(&origin, moq_net::Epoch::mint(), &[0x65, 0x88, 0x84, 0x21, 0x00]);
+
+		let mut server = Server::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+		let addr = server.local_addr().unwrap();
+		let play_origin = consumer.clone();
+		let played = tokio::spawn(async move {
+			let Some(Request::Play(play)) = server.accept().await else {
+				panic!("expected a play request");
+			};
+			play.accept(&play_origin, "live/cam0").await
+		});
+		let (tx, mut media) = tokio::sync::mpsc::unbounded_channel();
+		let client = tokio::spawn(play_client(TcpStream::connect(addr).await.unwrap(), 0, &[], tx));
+		let mut next = async || {
+			tokio::time::timeout(Duration::from_secs(5), media.recv())
+				.await
+				.expect("no media")
+				.expect("the play ended")
+		};
+		// The sequence header, then the keyframe.
+		assert_eq!(next().await.1[..2], [0x17, 0x00]);
+		assert_eq!(next().await.1[..2], [0x17, 0x01]);
+
+		let epoch = moq_net::Epoch::mint();
+		let mut instances = moq_mux::follow::Instances::new(&consumer, "live/cam0", Some(&epoch)).unwrap();
+		let (_new, _new_catalog) = publish_avc(&origin, epoch, &[0x65, 0x99, 0x99, 0x99, 0x99]);
+		tokio::time::timeout(Duration::from_secs(5), instances.next())
+			.await
+			.expect("the new publisher takes over")
+			.unwrap();
+
+		let mut delta = vec![0x27, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, OLD_DELTA.len() as u8];
+		delta.extend_from_slice(OLD_DELTA);
+		old.decode(&flv::tag(flv::TAG_VIDEO, 40, &delta)).unwrap();
+		let (video, body) = next().await;
+		assert!(video && body.starts_with(&[0x27, 0x01]), "{body:?}");
+		assert!(body.ends_with(OLD_DELTA), "the play left its instance: {body:?}");
+
+		old.abort(moq_net::Error::Transport("connection lost".into()));
+		drop(old_catalog);
+		let played = tokio::time::timeout(Duration::from_secs(5), played)
+			.await
+			.expect("the play outlived its route")
+			.unwrap();
+		assert!(played.is_err(), "the play ended cleanly");
+		client.abort();
 	}
 
 	#[tokio::test]

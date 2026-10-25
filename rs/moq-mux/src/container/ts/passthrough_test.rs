@@ -10,9 +10,7 @@ use std::time::Duration;
 use bytes::Bytes;
 
 use super::fixture::{ACCESS, Flags, MS, Mux, WRAP, paced, program};
-use super::passthrough::{
-	GROUP_BYTES_MAX, GROUP_OBJECTS_MAX, PacketSizeError, Passthrough, PcrGapError, PcrRestartError, PcrRewindError,
-};
+use super::passthrough::{GROUP_BYTES_MAX, GROUP_OBJECTS_MAX, Passthrough};
 
 /// A delay budget no test timeline comes close to, so the reader sees every group.
 const RECORDING_MAX_DELAY: Duration = Duration::from_secs(30);
@@ -634,8 +632,11 @@ async fn a_flagged_step_back_is_a_restart() {
 		Ok(_) => panic!("a restart was carried on one timeline"),
 		Err(err) => err,
 	};
-	let restart = err.downcast_ref::<PcrRestartError>().expect("a typed refusal");
-	assert_eq!((restart.pid, restart.to), (0x100, 2_000 * MS));
+	let restart = err.downcast_ref::<crate::Error>();
+	assert!(
+		matches!(restart, Some(crate::Error::PcrRestart { pid: 0x100, to, .. }) if *to == 2_000 * MS),
+		"{err:?}"
+	);
 }
 
 /// A break before any group has started is no group start, so the first group still waits for a
@@ -665,8 +666,11 @@ async fn an_unflagged_rewind_is_refused() {
 		Ok(_) => panic!("a rewind was accepted"),
 		Err(err) => err,
 	};
-	let rewind = err.downcast_ref::<PcrRewindError>().expect("a typed refusal");
-	assert_eq!((rewind.pid, rewind.to), (0x100, 9_000 * MS));
+	let rewind = err.downcast_ref::<crate::Error>();
+	assert!(
+		matches!(rewind, Some(crate::Error::PcrRewind { pid: 0x100, to, .. }) if *to == 9_000 * MS),
+		"{err:?}"
+	);
 }
 
 #[tokio::test(start_paused = true)]
@@ -744,7 +748,13 @@ async fn a_clock_that_stops_is_refused_once_a_group_would_overflow() {
 		Ok(_) => panic!("an untimed run was accepted"),
 		Err(err) => err,
 	};
-	assert_eq!(err.downcast_ref::<PcrGapError>().map(|gap| gap.pid), Some(0x100));
+	assert!(
+		matches!(
+			err.downcast_ref::<crate::Error>(),
+			Some(crate::Error::PcrGap { pid: 0x100, .. })
+		),
+		"{err:?}"
+	);
 }
 
 #[tokio::test(start_paused = true)]
@@ -781,7 +791,10 @@ async fn a_192_or_204_byte_source_is_refused() {
 			Ok(_) => panic!("{size}-byte packets were accepted"),
 			Err(err) => err,
 		};
-		assert_eq!(err.downcast_ref::<PacketSizeError>(), Some(&PacketSizeError { size }));
+		assert!(
+			matches!(err.downcast_ref::<crate::Error>(), Some(crate::Error::TsPacketSize(got)) if *got == size),
+			"{err:?}"
+		);
 	}
 }
 

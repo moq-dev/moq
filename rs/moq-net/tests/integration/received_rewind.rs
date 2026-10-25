@@ -74,7 +74,7 @@ async fn relay(
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
 
-	let subscription = Subscription::default().with_max_delay(BUDGET).with_groups(0..);
+	let subscription = Subscription::default().with_max_delay(BUDGET).with_range(0..);
 	let reader = moq_clock::sim::spawn(async move {
 		let mut sub = remote
 			.track("data")

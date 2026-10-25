@@ -43,14 +43,14 @@ impl Producer {
 	) -> Result<track::Producer> {
 		let name = self.generation.name(semantic)?;
 		let track = self.inner.create_track(name.as_str(), info)?;
-		self.generation.produce(track)
+		self.generation.produce(track, semantic)
 	}
 
 	/// Reserve the track for `semantic` under its physical name, to accept once it is wanted.
 	///
 	/// Subscribers wait on the name until the [`track::Request`] is accepted or rejected.
-	/// A track served on demand is reserved this way: physical names cannot be mapped back,
-	/// so a request for a name nobody created or reserved fails as not found.
+	/// A track served on demand is reserved this way; a request for a name nobody created or
+	/// reserved fails as not found.
 	///
 	/// # Errors
 	///
@@ -58,7 +58,7 @@ impl Producer {
 	pub fn reserve_track(&self, semantic: &str) -> Result<track::Request> {
 		let name = self.generation.name(semantic)?;
 		let request = self.inner.reserve_track(name.as_str())?;
-		match self.generation.claim(name.as_str()) {
+		match self.generation.claim(semantic) {
 			Ok(keys) => Ok(track::Request::new(request, keys)),
 			Err(err) => {
 				request.reject(moq_net::Error::Cancel);
@@ -105,6 +105,7 @@ impl Consumer {
 		Ok(kio::Pending::new(track::Subscribing::new(
 			track.subscribe(subscription),
 			self.generation.clone(),
+			semantic.to_string(),
 		)))
 	}
 }

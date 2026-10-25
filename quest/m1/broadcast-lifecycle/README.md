@@ -47,10 +47,11 @@ timer on main at 1582fdc07d:
 ## Required
 
 - [Stateless broadcasts](/quest/m1/broadcast-lifecycle/stateless.md) - `Finish`, its linger, and finished-only supersession are gone from moq-net, `@moq/net`, moq-ffi, moq-c, and every binding
-- [SRT tells a clean end from a failure](/quest/m1/broadcast-lifecycle/srt-end.md) - an SRT ingest whose peer goes silent aborts instead of finishing as if it had shut down
 - [Timer cleanups](/quest/m1/broadcast-lifecycle/timers.md) - `ConnectionProps.linger` is gone and stale linger references are fixed
 
 ## Related
+
+- [SRT on the shared socket](/quest/m2/one-port/srt-demux.md) - an SRT ingest whose peer goes silent aborts instead of finishing as if it had shut down
 
 - [moq-transport finish interop](/quest/m2/ietf-finish.md) - the interop `finish` case, whose late readers rely on retention
 - [CLI and gst flags](https://github.com/moq-dev/moq/pull/6522) - removed the opt-in `linger` booleans, leaving completion to this epic

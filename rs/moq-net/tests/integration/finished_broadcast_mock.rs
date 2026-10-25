@@ -60,7 +60,7 @@ async fn round(finish_broadcast: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>)
 		.expect("broadcast resolves");
 
 	let reader = moq_clock::sim::spawn(async move {
-		let subscription = moq_net::track::Subscription::default().with_groups(0..);
+		let subscription = moq_net::track::Subscription::default().with_range(0..);
 		let mut sub = remote
 			.track("video")
 			.unwrap()
