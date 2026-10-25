@@ -88,7 +88,7 @@ export class Producer {
 			// end. The group reaches a reader already inside it, which keeps its own handle and would
 			// otherwise get a generic error when ours is dropped.
 			const abort = err instanceof Error ? err : new Error(String(err));
-			this.#group?.close(abort);
+			this.#group?.abort(abort);
 			this.#group = undefined;
 			this.#track.close(abort);
 			throw err;
@@ -100,7 +100,7 @@ export class Producer {
 
 	/** Finish the track, closing the group. */
 	finish(): void {
-		this.#group?.close();
+		this.#group?.finish();
 		this.#group = undefined;
 		this.#track.close();
 	}

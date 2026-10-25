@@ -151,11 +151,11 @@ test("latest lets a newer group preempt an open one", async () => {
 	// A complete newer value arrives while the previous group is still open.
 	const fresh = track.appendGroup();
 	fresh.writeFrame({ payload: bytes(2), timestamp: Time.Timestamp.now() });
-	fresh.close();
+	fresh.finish();
 
 	expect((await consumer.latest())?.value).toEqual(bytes(2));
 
-	stale.close();
+	stale.finish();
 	track.close();
 });
 

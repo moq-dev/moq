@@ -126,7 +126,7 @@ test("a replacement producer refuses a rewind past its predecessor", () => {
 test("an empty replacement ends past its predecessor's groups", async () => {
 	const broadcast = new BroadcastProducer();
 	const first = broadcast.createTrack("media", { timescale: Timescale.MILLI });
-	first.appendGroup().close();
+	first.appendGroup().finish();
 	first.close();
 
 	const second = broadcast.createTrack("media", { timescale: Timescale.MILLI });
@@ -141,7 +141,7 @@ test("an empty replacement ends past its predecessor's groups", async () => {
 test("a removed producer writes nothing once its replacement claims the name", async () => {
 	const broadcast = new BroadcastProducer();
 	const first = broadcast.createTrack("media", { timescale: Timescale.MILLI });
-	first.appendGroup().close();
+	first.appendGroup().finish();
 	broadcast.removeTrack("media");
 
 	const second = broadcast.createTrack("media", { timescale: Timescale.MILLI });
@@ -162,7 +162,7 @@ test("a removed producer's abort ignores its replacement's groups", async () => 
 	broadcast.removeTrack("media");
 
 	const second = broadcast.createTrack("media", { timescale: Timescale.MILLI });
-	for (let i = 0; i < 3; i++) second.appendGroup().close();
+	for (let i = 0; i < 3; i++) second.appendGroup().finish();
 	const abort = new Error("cut off");
 	first.close(abort);
 	expect(first.closed.peek()).toBe(abort);
@@ -325,7 +325,7 @@ test("names that never wrote leave nothing behind", () => {
 test("a written name refuses to reuse its sequences after many other names", () => {
 	const broadcast = new BroadcastProducer();
 	const written = broadcast.createTrack("written");
-	written.appendGroup().close();
+	written.appendGroup().finish();
 	written.close();
 	for (let i = 0; i < 1000; i++) broadcast.createTrack(`unused-${i}`).close();
 
@@ -606,7 +606,7 @@ test("subscribe serves a statically inserted track without a request", async () 
 	const broadcast = new BroadcastProducer();
 
 	const track1 = broadcast.createTrack("track1", { timescale: Timescale.MILLI });
-	track1.appendGroup().close();
+	track1.appendGroup().finish();
 
 	// The track already exists, so subscribe resolves immediately (no requested()).
 	const sub1 = broadcast.track("track1").subscribe().ordered();
@@ -619,7 +619,7 @@ test("subscribe serves a statically inserted track without a request", async () 
 	const track2 = broadcast.createTrack("track2", { timescale: Timescale.MILLI });
 
 	const sub2 = broadcast.track("track2").subscribe().ordered();
-	track2.appendGroup().close();
+	track2.appendGroup().finish();
 	expect((await sub2.nextGroup())?.sequence).toBe(0);
 });
 
@@ -677,7 +677,7 @@ test("a read throws GroupTooLarge on an overflow, then resyncs to the next group
 	// Group 1 is clean.
 	const g1 = producer.appendGroup();
 	g1.writeFrame({ payload: new TextEncoder().encode("ok"), timestamp: Timestamp.now() });
-	g1.close();
+	g1.finish();
 
 	// The reader hits the abort in group 0 (error, not a silent skip), then the next
 	// read resyncs from group 1.
@@ -812,11 +812,11 @@ test("a fetch waits for a group still to come", async () => {
 
 	const first = track.appendGroup();
 	first.writeFrame({ payload: new TextEncoder().encode("0"), timestamp: Timestamp.now() });
-	first.close();
+	first.finish();
 
 	const second = track.appendGroup();
 	second.writeFrame({ payload: new TextEncoder().encode("1"), timestamp: Timestamp.now() });
-	second.close();
+	second.finish();
 
 	const group = await pending;
 	expect(group.sequence).toBe(1);
@@ -835,7 +835,7 @@ test("fetch maxDelay tightens publisher retention without changing omission", as
 			payload: new TextEncoder().encode(String(millis)),
 			timestamp: Timestamp.fromMillis(millis),
 		});
-		group.close();
+		group.finish();
 	}
 
 	const omitted = await wireOf(broadcast).fetchGroup("video", 0);

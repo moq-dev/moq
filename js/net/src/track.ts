@@ -917,7 +917,7 @@ export class Producer {
 		if (open) {
 			for (const [sequence, entry] of this.#cached) {
 				if (sequence >= start && sequence < end && entry.group.closed.peek() === undefined) {
-					entry.group.close(error);
+					entry.group.abort(error);
 				}
 			}
 		}
@@ -1162,7 +1162,7 @@ export class Producer {
 		if (!entry.group.isClosed) {
 			const evicted = new TooFarBehind();
 			EVICTED.add(evicted);
-			entry.group.close(evicted);
+			entry.group.abort(evicted);
 		}
 		const mirrors = [...entry.mirrors.values()];
 		for (const mirror of mirrors) hooks.evictGroup(mirror);
@@ -1758,7 +1758,10 @@ export class Producer {
 		closeTrackState(this.#state, abort);
 		this.#sequence.holders--;
 		if (this.#sequence.owner === this) this.#sequence.owner = undefined;
-		for (const { group } of this.#cache) group.close(abort);
+		for (const { group } of this.#cache) {
+			if (abort) group.abort(abort);
+			else group.finish();
+		}
 		for (const entry of open) {
 			this.#unlink(entry);
 			this.#uncache(entry);
@@ -1791,10 +1794,10 @@ export class Producer {
 			group.writeFrame(frame);
 		} catch (err) {
 			// Abort the group so no subscriber waits on a group that will never get its frame.
-			group.close(err instanceof Error ? err : new Error(String(err)));
+			group.abort(err instanceof Error ? err : new Error(String(err)));
 			throw err;
 		}
-		group.close();
+		group.finish();
 	}
 }
 

@@ -96,14 +96,14 @@ export class Producer {
 		}
 		this.#closed = true;
 		void this.#writer.pump.run(() => {
-			if (!this.#aborted) this.#inner.close();
+			if (!this.#aborted) this.#inner.finish();
 		});
 	}
 
 	#abort(error: Error): void {
 		this.#closed = true;
 		this.#aborted ??= error;
-		this.#inner.close(error);
+		this.#inner.abort(error);
 	}
 }
 

@@ -22,7 +22,7 @@ for (const publishers of [1, 4, 16]) {
 			let started = performance.now();
 			for (const group of groups) {
 				for (let index = 0; index < frames; index++) group.writeFrame({ payload });
-				group.close();
+				group.finish();
 			}
 			publish += performance.now() - started;
 			stored = groups.reduce((bytes, group) => bytes + hooks.groupCacheBytes(group), 0);

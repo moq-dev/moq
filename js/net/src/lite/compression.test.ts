@@ -45,7 +45,7 @@ for (const downstream of [ALPN_06, ALPN_07_WIP]) {
 			const group = track.appendGroup();
 			const payloads = [new Uint8Array(4096).fill(7), new Uint8Array(), new Uint8Array(4096).fill(7)];
 			for (const payload of payloads) group.writeFrame({ payload });
-			group.close();
+			group.finish();
 			const received = await reader.recvGroup();
 			if (!received) throw new Error("missing group");
 			expect(received.sequence).toBe(0);

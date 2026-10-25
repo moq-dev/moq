@@ -33,7 +33,7 @@ function group(track: Track.Producer, timestamps: number[], end?: number) {
 			payload: encodeFrame(new Uint8Array(), Micro(end)),
 		});
 	}
-	group.close();
+	group.finish();
 }
 
 async function frame(consumer: Consumer) {

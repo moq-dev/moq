@@ -26,13 +26,13 @@ test.each([0, 100])("a sequence hole before a paused data marker expires at %sms
 		const first = new Group.Producer(0);
 		track.writeGroup(first);
 		first.writeFrame({ payload: encodeFrame(new Uint8Array([1]), Micro(10_000)), timestamp: Time.Timestamp.now() });
-		first.close();
+		first.finish();
 		await flush();
 		expect(results).toHaveLength(1);
 		const marker = new Group.Producer(2);
 		track.writeGroup(marker);
 		marker.writeFrame({ payload: new Uint8Array(), timestamp: Time.Timestamp.now() });
-		marker.close();
+		marker.finish();
 		await flush();
 		if (budget > 0) {
 			expect(results).toHaveLength(1);
@@ -75,7 +75,7 @@ test("a filled hole cancels its timer and the next hole gets a fresh budget", as
 			payload: timestamp === undefined ? new Uint8Array() : encodeFrame(new Uint8Array([1]), Micro(timestamp)),
 			timestamp: Time.Timestamp.fromMicros(timestamp ?? 20_000),
 		});
-		group.close();
+		group.finish();
 	};
 	try {
 		write(0, 0);
@@ -126,7 +126,7 @@ test("the holes a stalled source left behind share one budget", async () => {
 			payload: encodeFrame(new Uint8Array([1]), Micro(sequence * 10_000)),
 			timestamp: Time.Timestamp.fromMicros(sequence * 10_000),
 		});
-		group.close();
+		group.finish();
 	};
 	try {
 		write(0);
@@ -167,7 +167,7 @@ test("a hole is late from the earliest arrival past it", async () => {
 			payload: encodeFrame(new Uint8Array([1]), Micro(sequence * 10_000)),
 			timestamp: Time.Timestamp.fromMicros(sequence * 10_000),
 		});
-		group.close();
+		group.finish();
 	};
 	try {
 		write(0);

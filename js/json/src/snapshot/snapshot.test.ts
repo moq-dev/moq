@@ -634,7 +634,7 @@ test("snapshot consumer propagates a non-gap frame failure", async () => {
 	const group = track.appendGroup();
 	group.writeFrame({ payload: new TextEncoder().encode('{"ok":true}'), timestamp: Time.Timestamp.now() });
 	expect((await consumer.next())?.value).toEqual({ ok: true });
-	group.close(new NetError.Stream(StreamCode.Internal));
+	group.abort(new NetError.Stream(StreamCode.Internal));
 	await expect(consumer.next()).rejects.toMatchObject({ code: StreamCode.Internal });
 });
 

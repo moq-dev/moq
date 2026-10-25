@@ -799,13 +799,13 @@ test("a blocked group header is reset when the group expires", async () => {
 
 		const old = new GroupProducer(0);
 		old.writeFrame({ payload: new TextEncoder().encode("old"), timestamp: Timestamp.fromMillis(0) });
-		old.close();
+		old.finish();
 		track.writeGroup(old);
 		await headerStarted;
 
 		const edge = new GroupProducer(1);
 		edge.writeFrame({ payload: new TextEncoder().encode("edge"), timestamp: Timestamp.fromMillis(10_000) });
-		edge.close();
+		edge.finish();
 		track.writeGroup(edge);
 
 		// A group beyond the edge, so group 0's reach (10s, where group 1 begins) is
@@ -813,7 +813,7 @@ test("a blocked group header is reset when the group expires", async () => {
 		// the successor alone never convicts it: nothing yet proves group 0 ends sooner.
 		const later = new GroupProducer(2);
 		later.writeFrame({ payload: new TextEncoder().encode("later"), timestamp: Timestamp.fromMillis(20_000) });
-		later.close();
+		later.finish();
 		track.writeGroup(later);
 
 		const resetBeforeRelease = await Promise.race([
@@ -885,7 +885,7 @@ test("a group stream whose FIN never completes is reset when the group expires",
 		const write = (sequence: number) => {
 			const group = new GroupProducer(sequence);
 			group.writeFrame({ payload: new TextEncoder().encode("frame"), timestamp: Timestamp.fromMillis(0) });
-			group.close();
+			group.finish();
 			track.writeGroup(group);
 		};
 
@@ -969,7 +969,7 @@ test("a group stream whose FIN never completes is reset after the cache evicts i
 		const write = (sequence: number) => {
 			const group = new GroupProducer(sequence);
 			group.writeFrame({ payload: new TextEncoder().encode("frame"), timestamp: Timestamp.fromMillis(0) });
-			group.close();
+			group.finish();
 			track.writeGroup(group);
 		};
 
@@ -1054,7 +1054,7 @@ test("a group that goes stale while its stream opens writes nothing", async () =
 		const write = (sequence: number, ms: number) => {
 			const group = new GroupProducer(sequence);
 			group.writeFrame({ payload: new TextEncoder().encode("frame"), timestamp: Timestamp.fromMillis(ms) });
-			group.close();
+			group.finish();
 			track.writeGroup(group);
 		};
 		write(0, 0);
@@ -2858,7 +2858,7 @@ function writeGroup(track: TrackProducer, frames: number): void {
 	for (let i = 0; i < frames; i++) {
 		group.writeFrame({ payload: new TextEncoder().encode(`${group.sequence}.${i}`), timestamp: Timestamp.now() });
 	}
-	group.close();
+	group.finish();
 }
 
 /** Send `msg` on a fresh subscribe stream and read the publisher's SUBSCRIBE_OK. */
@@ -3143,7 +3143,7 @@ test("draft-20: a fill serves the current group's head on a fetch stream", async
 
 		// Everything past the snapshot belongs to the subscription, not the fill.
 		group.writeFrame({ payload: new TextEncoder().encode("0.2"), timestamp: Timestamp.now() });
-		group.close();
+		group.finish();
 
 		const live = await nextUni(fx.uni);
 		if (!live) throw new Error("the subscription never served the live tail");
@@ -3309,7 +3309,7 @@ async function subscribeOkLargest(version: IetfVersion): Promise<SubscribeOk["la
 	for (let i = 0; i < 4; i++) {
 		group.writeFrame({ payload: new TextEncoder().encode(`5.${i}`), timestamp: Timestamp.now() });
 	}
-	group.close();
+	group.finish();
 
 	const { client, ok } = await runSubscribe(
 		fx,
@@ -3494,11 +3494,11 @@ test.each([false, true])("draft-20: exact terminal 5/5 survives group FIN=%s", a
 			expect(frame.payload).toEqual(new Uint8Array([i]));
 		}
 		if (finished) {
-			group.close();
+			group.finish();
 			expect(await reader.done()).toBe(true);
 		}
 		track.finishAt({ group: 5, frame: 5 });
-		group.close();
+		group.finish();
 		track.close();
 		if (finished) {
 			const marker = await fx.uni.read();
@@ -3574,7 +3574,7 @@ test("draft-20: an inline terminal reset after its FIN falls back to a standalon
 		});
 
 		track.finishAt({ group: 5, frame: 5 });
-		group.close();
+		group.finish();
 		track.close();
 
 		const inline = await reader.decode((c) => Frame.decode(c, header.flags, undefined));
@@ -3702,7 +3702,7 @@ test("draft-20: the subscriber leaving ends a fill still reading its group", asy
 		const served = await reading;
 		expect(served.reset?.message).toContain("unsubscribed");
 	} finally {
-		open.close();
+		open.finish();
 		fx.close();
 		client.close();
 	}
@@ -3757,7 +3757,7 @@ test("draft-20: a fill works on a dynamically requested track", async () => {
 			reset: undefined,
 		});
 	} finally {
-		group.close();
+		group.finish();
 		fx.close();
 		client.close();
 	}
@@ -4172,7 +4172,7 @@ test("a SUBSCRIBE pauses without demand and resumes as a new subscriber", async 
 		const write = (text: string) => {
 			const group = track.appendGroup();
 			group.writeFrame({ payload: new TextEncoder().encode(text), timestamp: Timestamp.now() });
-			group.close();
+			group.finish();
 		};
 		const { client } = await runSubscribe(
 			fx,

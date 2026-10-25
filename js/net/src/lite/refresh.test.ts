@@ -73,7 +73,7 @@ test.each([ALPN_06, ALPN_07_WIP])("refresh joins reach a browser publisher on %s
 		for (const join of joins) join.close();
 		received.close();
 		baseline.close();
-		group.close();
+		group.finish();
 	} finally {
 		spy.mockRestore();
 		for (const origin of [b, source]) origin.close();

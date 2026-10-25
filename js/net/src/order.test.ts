@@ -105,7 +105,7 @@ async function backlog(protocol: string, order: Order, update?: Order) {
 
 	const result = { upstream: video.subscription.peek()?.order, orders: sendOrders(transport) };
 
-	for (const group of groups) group.close();
+	for (const group of groups) group.finish();
 	subscriber.close();
 	remote.close();
 	broadcast.close();
@@ -153,7 +153,7 @@ test.each(["ascending", "descending"] as const)("ietf serves GROUP_ORDER %s", as
 	}
 	expect(sendOrders(transport)).toEqual(expected(order, 3));
 
-	for (const group of groups) group.close();
+	for (const group of groups) group.finish();
 	subscriber.close();
 	remote.close();
 	broadcast.close();
@@ -217,12 +217,12 @@ test("ietf keeps a closing group stream ranked until it settles", async () => {
 	}
 
 	// The newest group, ranked first, finishes while its FIN is held.
-	groups[2]?.close();
+	groups[2]?.finish();
 	await fins.closing;
 	expect(sendOrders(transport)).toEqual(expected("descending", 3));
 
 	fins.release();
-	for (const group of groups) group.close();
+	for (const group of groups) group.finish();
 	subscriber.close();
 	remote.close();
 	broadcast.close();
@@ -264,7 +264,7 @@ test("a shared track aggregates descending and serves each subscriber in its own
 	expect(sendOrders(ascending.transport)).toEqual(expected("ascending", 3));
 	expect(sendOrders(descending.transport)).toEqual(expected("descending", 3));
 
-	for (const group of groups) group.close();
+	for (const group of groups) group.finish();
 	ascendingTrack.close();
 	descendingTrack.close();
 	ascendingRemote.close();

@@ -385,7 +385,7 @@ export class Producer {
 			mirror.frames.set([]);
 			mirror.cacheBytes = 0;
 		}
-		this.close(error);
+		this.abort(error);
 		throw error;
 	}
 
@@ -394,15 +394,27 @@ export class Producer {
 		return this.#state.closed.peek() !== undefined;
 	}
 
-	/** Closes the group, optionally with an error to abort readers. */
-	close(abort?: Error) {
+	/** Marks the group complete: no more frames will be written. Idempotent. */
+	finish() {
+		this.#end(null);
+	}
+
+	/**
+	 * Ends the group with `error`, which readers that have not drained it see. A no-op once the
+	 * group finished or aborted: the outcome is already settled.
+	 */
+	abort(error: Error) {
+		this.#end(error);
+	}
+
+	#end(outcome: Error | null) {
 		if (this.#state.closed.peek() !== undefined) return;
 		this.#state.flate?.finish();
-		this.#state.closed.set(abort ?? null);
+		this.#state.closed.set(outcome);
 
 		if (this.#mirrors) {
 			for (const mirror of this.#mirrors) {
-				if (mirror.closed.peek() === undefined) mirror.closed.set(abort ?? null);
+				if (mirror.closed.peek() === undefined) mirror.closed.set(outcome);
 			}
 			this.#mirrors.clear();
 		}

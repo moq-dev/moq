@@ -1247,7 +1247,7 @@ export class Subscriber {
 			// Arm after admission, before checking: another unanswered token may still
 			// widen the union while we wait, which is not a revocation of this fetch.
 			const disposeGrant = this.#grant?.subscribe(() => {
-				if (this.#denied(broadcast)) group.close(refused);
+				if (this.#denied(broadcast)) group.abort(refused);
 			});
 			void group.closed.then(() => disposeGrant?.());
 			if (this.#denied(broadcast)) throw refused;
@@ -1274,7 +1274,7 @@ export class Subscriber {
 			hooks.bindGroupCompression(group, accepted.info.compress);
 			void this.#runFetchResponse(accepted.stream, group, accepted.info);
 		} catch (err: unknown) {
-			group.close(error(err));
+			group.abort(error(err));
 			throw err;
 		}
 	}
@@ -1375,11 +1375,11 @@ export class Subscriber {
 				hooks.writeGroupFrame(group, frame, frame.inflated);
 			}
 
-			group.close();
+			group.finish();
 			stream.close();
 		} catch (err: unknown) {
 			const e = error(err);
-			group.close(e);
+			group.abort(e);
 			stream.abort(e);
 		}
 	}
@@ -1616,7 +1616,7 @@ export class Subscriber {
 			while (scale === undefined) {
 				if (track.closed.peek() !== undefined) {
 					// Subscription ended before the scale resolved; nothing to decode.
-					producer.close();
+					producer.finish();
 					stream.stop(StreamCode.Cancel);
 					return;
 				}
@@ -1626,17 +1626,17 @@ export class Subscriber {
 
 			await readFrames(stream, producer, { scale, timed: hasMediaTime(this.version), compress: entry.compress });
 
-			producer.close();
+			producer.finish();
 			stream.stop(StreamCode.Cancel);
 		} catch (err: unknown) {
 			// A violation ends the session, which the connection does once it escapes; anything
 			// else ends only this group.
 			if (err instanceof ProtocolViolation) {
-				producer.close(err);
+				producer.abort(err);
 				throw err;
 			}
 			const e = await sessionCause(this.#quic, err);
-			producer.close(e);
+			producer.abort(e);
 			stream.stop(e);
 		} finally {
 			read();
@@ -1807,7 +1807,7 @@ export class Subscriber {
 
 		// This also releases callers still awaiting acceptance.
 		for (const { group } of this.#fetches.values()) {
-			group.close(cut);
+			group.abort(cut);
 		}
 	}
 }
@@ -1841,7 +1841,7 @@ async function untilAbandoned<T>(group: netGroup.Producer, step: Promise<T>): Pr
 			// Close here rather than where the error lands, so no fetch coalesces onto the group
 			// in between only to fail with it.
 			const err = new StreamError(StreamCode.Cancel, { message: "cancel" });
-			group.close(err);
+			group.abort(err);
 			throw err;
 		}
 	}

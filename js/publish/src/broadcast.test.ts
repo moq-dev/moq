@@ -279,7 +279,7 @@ test("a rendition keeps its track across rendition changes", async () => {
 	await settle();
 	const track = video.track.peek();
 	if (!track) throw new Error("expected the demanded track");
-	track.appendGroup().close();
+	track.appendGroup().finish();
 
 	// Registering another rendition leaves this one's track alone.
 	const audio = broadcast.audio("audio");
@@ -338,7 +338,7 @@ test("replacing a closed rendition track keeps the broadcast and publishes a fre
 	if (!track) throw new Error("expected the demanded track");
 
 	// The encoder wrote, then failed.
-	track.appendGroup().close();
+	track.appendGroup().finish();
 	track.close(new Error("encoder failed"));
 	video.close();
 	await settle();
@@ -474,7 +474,7 @@ test("a served decoder identity change moves the rendition to a fresh track name
 		await settle();
 		const track = video.track.peek();
 		if (!track) throw new Error("expected the demanded track");
-		track.appendGroup().close();
+		track.appendGroup().finish();
 
 		// Bitrate, frame rate, and coded size move either way on the served track.
 		for (const update of [

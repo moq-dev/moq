@@ -965,7 +965,7 @@ async function livePlayback(burst: number) {
 					for (const timestamp of held) {
 						const group = new Moq.Group.Producer(sequence++);
 						group.writeFrame(legacyFrame(Micro.fromMilli(Milli(timestamp))));
-						group.close();
+						group.finish();
 						track.writeGroup(group);
 					}
 					held = [];

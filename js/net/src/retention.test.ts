@@ -140,7 +140,7 @@ for (const [name, alpn] of [
 			for (let i = 0; i < count; i++) {
 				const group = producer.appendGroup();
 				group.writeFrame(frame(offset + i));
-				group.close();
+				group.finish();
 				const consumer = await track.nextGroup();
 				if (!consumer) throw new Error("no group");
 				await readFrames(consumer, 1);

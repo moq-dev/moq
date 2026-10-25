@@ -388,7 +388,7 @@ test("grouped authentication failure ends the track", async () => {
 	const bad = new NetGroup.Producer(1);
 	p.net.writeGroup(bad);
 	bad.writeFrame({ timestamp: ms(2), payload: await sealed(p, GROUP, 1, 0, "ok", true) });
-	bad.close();
+	bad.finish();
 
 	expect(await readText(await recvGroup(p.consumer))).toBe("ok");
 	const forged = await recvGroup(p.consumer);

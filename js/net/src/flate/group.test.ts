@@ -16,7 +16,7 @@ test("synchronous writers store slices; plain readers share one charged inflated
 	const raw = group.mirror();
 	group.writeFrame({ payload });
 	group.writeFrame({ payload });
-	group.close();
+	group.finish();
 	const stored = hooks.groupCacheBytes(group);
 	expect(stored).toBeLessThan(payload.length);
 	const inflating = spyOn(Decoder.prototype, "frame");
@@ -44,7 +44,7 @@ test("received slices are forwarded byte-for-byte and exact declarations fail al
 	hooks.bindGroupCompression(group, true);
 	const slice = new Encoder().frame(payload);
 	hooks.writeGroupFrame(group, { payload: slice }, payload.length + 1);
-	group.close();
+	group.finish();
 	const raw = await hooks.readGroupFrame(group.mirror(), true);
 	expect(raw?.frame.payload).toBe(slice);
 	const bad = group.mirror();
@@ -65,7 +65,7 @@ test("declared plain bytes consume the group budget before any inflation", () =>
 		expect(hooks.groupCacheBytes(group)).toBe(0);
 	} finally {
 		inflating.mockRestore();
-		group.close();
+		group.finish();
 	}
 });
 
@@ -77,7 +77,7 @@ test("empty frames preserve the window and prewritten groups bind without duplic
 	const track = new Track("compressed").accept({ compress: true });
 	track.writeGroup(group);
 	group.writeFrame({ payload });
-	group.close();
+	group.finish();
 	for (const expected of [payload, new Uint8Array(), payload])
 		expect((await reader.readFrame())?.payload).toEqual(expected);
 	track.close();
@@ -89,7 +89,7 @@ test("a cut compressed group preserves its committed frames before returning its
 	const reader = group.mirror();
 	group.writeFrame({ payload });
 	const cut = new Error("cut");
-	group.close(cut);
+	group.abort(cut);
 	expect((await reader.readFrame())?.payload).toEqual(payload);
 	await expect(reader.readFrame()).rejects.toThrow(cut);
 	track.close();
@@ -103,7 +103,7 @@ test("a shared plain read cannot change a later synchronous write's admission", 
 	expect((await reader.readFrame())?.payload.length).toBe(MAX_GROUP_CACHE_BYTES);
 	// The plain-byte budget is full, but another empty frame still fits, regardless of readers.
 	expect(() => group.writeFrame({ payload: new Uint8Array() })).not.toThrow();
-	group.close();
+	group.finish();
 	expect((await reader.readFrame())?.payload.length).toBe(0);
 	track.close();
 });
@@ -148,7 +148,7 @@ test("refresh measures stored slices without inflating a compressed group", () =
 		expect(inflating).toHaveBeenCalledTimes(0);
 	} finally {
 		inflating.mockRestore();
-		group.close();
+		group.finish();
 		track.close();
 	}
 });

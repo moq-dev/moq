@@ -100,7 +100,7 @@ async function measure(t: Arrival[], budget: (target: Milli) => Milli): Promise<
 				const media = Micro.fromMilli(t[next].media as Milli);
 				const group = new Group.Producer(next);
 				group.writeFrame({ payload: encode(media), timestamp: Time.Timestamp.fromMicros(media) });
-				group.close();
+				group.finish();
 				track.writeGroup(group);
 			}
 

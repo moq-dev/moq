@@ -150,7 +150,7 @@ for (const version of drafts) {
 		const track = broadcast.createTrack("video");
 		const group = track.appendGroup();
 		group.writeFrame({ payload: new Uint8Array([1]) });
-		group.close();
+		group.finish();
 		const listing = await fx.list();
 		await ok(listing, version);
 		const { stream, publish } = await fx.offered();
@@ -499,7 +499,7 @@ for (const version of [Version.DRAFT_20, Version.DRAFT_22]) {
 		for (let i = 0; i < 2; i++) {
 			const group = track.appendGroup();
 			group.writeFrame({ payload: new Uint8Array([i]) });
-			group.close();
+			group.finish();
 		}
 		await ok(await fx.list(), version);
 		const { stream } = await fx.offered();
@@ -518,7 +518,7 @@ for (const version of [Version.DRAFT_20, Version.DRAFT_22]) {
 		await update(stream, version, 4n, true);
 		const fresh = track.appendGroup();
 		fresh.writeFrame({ payload: new Uint8Array([2]) });
-		fresh.close();
+		fresh.finish();
 		const uni = fx.pair.client.incomingUnidirectionalStreams.getReader();
 		const next = await uni.read();
 		if (!next.value) throw new Error("missing filtered group");

@@ -2417,7 +2417,7 @@ test.each([
 	expect(resolved?.epoch).toBe(from);
 
 	const sticky = resolved?.track("video").subscribe();
-	oldTrack.appendGroup().close();
+	oldTrack.appendGroup().finish();
 	expect((await sticky?.recvGroup())?.sequence).toBe(0);
 
 	// A re-price at the same epoch keeps every handle, and the handler is not asked again.
@@ -2439,7 +2439,7 @@ test.each([
 	expect(pinned.active.peek()?.epoch).toBe(from);
 
 	// The subscription already open stays on the old answer.
-	oldTrack.appendGroup().close();
+	oldTrack.appendGroup().finish();
 	expect((await sticky?.recvGroup())?.sequence).toBe(1);
 
 	// A re-request, local or from a session, asks the handler again and never reads the
@@ -2460,7 +2460,7 @@ test.each([
 	// Existing request handles can still subscribe, but never join the new answer.
 	const retained = held.active.peek()?.track("video").subscribe();
 	expect((await retained?.recvGroup())?.sequence).toBe(1);
-	oldTrack.appendGroup().close();
+	oldTrack.appendGroup().finish();
 	expect((await retained?.recvGroup())?.sequence).toBe(2);
 	expect(held.active.peek()).toBe(resolved);
 

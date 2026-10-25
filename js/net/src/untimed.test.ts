@@ -56,7 +56,7 @@ async function roundTrip(wire: Wire, timescale: Timescale | undefined, timestamp
 			for (const [i, timestamp] of timestamps.entries()) {
 				group.writeFrame({ payload: new Uint8Array([i]), timestamp });
 			}
-			group.close();
+			group.finish();
 		}
 	})();
 
@@ -86,7 +86,7 @@ async function republish(input: BroadcastConsumer): Promise<BroadcastProducer> {
 			for (let group = await groups.nextGroup(); group; group = await groups.nextGroup()) {
 				const out = video.appendGroup();
 				for (let frame = await group.readFrame(); frame; frame = await group.readFrame()) out.writeFrame(frame);
-				out.close();
+				out.finish();
 			}
 			// Closing the broadcast does not end a track inserted into it.
 			video.close();
@@ -122,7 +122,7 @@ test("a forwarded untimed track stays untimed", async () => {
 			if (!request) break;
 			const group = request.accept({ timescale: Timescale.MICRO }).appendGroup();
 			group.writeFrame({ payload: new Uint8Array([7]), timestamp: Timestamp.fromMicros(1_234) });
-			group.close();
+			group.finish();
 		}
 	})();
 
@@ -197,7 +197,7 @@ for (const wire of WIRES.filter((wire) => wire.name === "lite-06" || wire.name =
 		// Datagrams aren't cached, so a group read back first proves the subscription is live.
 		const group = producer.appendGroup();
 		group.writeFrame({ payload: new Uint8Array([0]) });
-		group.close();
+		group.finish();
 		expect(await subscriber.recvGroup()).toBeDefined();
 
 		producer.appendDatagram(undefined, new Uint8Array([7]));

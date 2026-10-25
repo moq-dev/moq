@@ -67,10 +67,10 @@ for (const emptySuccessor of [false, true]) {
 			if (emptySuccessor) {
 				const empty = new Group.Producer(17);
 				track.writeGroup(empty);
-				empty.close();
+				empty.finish();
 				await flush();
 			}
-			stale.close(new NetError.Stream(StreamCode.Old));
+			stale.abort(new NetError.Stream(StreamCode.Old));
 			await flush();
 			expect(results).toEqual([]);
 
@@ -97,7 +97,7 @@ test("Consumer preserves a declared marker before its first media across a hole"
 	const marker = new Group.Producer(16);
 	track.writeGroup(marker);
 	write(marker, 0, true);
-	marker.close();
+	marker.finish();
 	await flush();
 	expect(items(results)).toEqual(["end 16@0"]);
 
@@ -117,7 +117,7 @@ test.each([false, true])("Consumer still waits for a gap after media (playhead r
 	const first = new Group.Producer(16);
 	track.writeGroup(first);
 	write(first, 0);
-	first.close();
+	first.finish();
 	await flush();
 	expect(items(results)).toEqual(["16@0"]);
 
@@ -125,7 +125,7 @@ test.each([false, true])("Consumer still waits for a gap after media (playhead r
 		const marker = new Group.Producer(17);
 		track.writeGroup(marker);
 		write(marker, 0, true);
-		marker.close();
+		marker.finish();
 		await flush();
 		expect(items(results)).toEqual(["16@0", "end 17@0"]);
 	}
@@ -141,7 +141,7 @@ test.each([false, true])("Consumer still waits for a gap after media (playhead r
 	const bridge = new Group.Producer(sequence - 1);
 	track.writeGroup(bridge);
 	write(bridge, 0);
-	bridge.close();
+	bridge.finish();
 	await flush();
 	// The bridge closes the hole, so nothing reads as a gap.
 	expect(items(results)).toEqual(["16@0", ...(reset ? ["end 17@0"] : []), `${sequence - 1}@0`, `${sequence}@50000`]);

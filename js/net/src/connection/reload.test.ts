@@ -686,7 +686,7 @@ for (const [name, teardown] of Object.entries(teardowns)) {
 			fin.hold?.enable();
 			const last = producer.appendGroup();
 			last.writeFrame(textFrame("last"));
-			last.close();
+			last.finish();
 			producer.close();
 			teardown.end(handle, win);
 			await clock.advance(Nano.fromMilli(teardown.linger));
@@ -903,7 +903,7 @@ test("closing the loop keeps the tokens until the session drains", async () => {
 		fin.hold?.enable();
 		const last = producer.appendGroup();
 		last.writeFrame(textFrame("last"));
-		last.close();
+		last.finish();
 		producer.close();
 		reload.close();
 

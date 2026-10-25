@@ -209,7 +209,7 @@ async function subscribeEnd(sequences: number[], version: Version = Version.DRAF
 	for (const sequence of sequences) {
 		const group = new GroupProducer(sequence);
 		group.writeFrame(textFrame("hello", Timestamp.fromMillis(sequence)));
-		group.close();
+		group.finish();
 		track.writeGroup(group);
 
 		// Let the publisher drain this group before the next, so arrival order is the
@@ -302,7 +302,7 @@ async function groupSendOrders(options: {
 		});
 	} finally {
 		opened.releaseLock();
-		for (const group of groups) group.close();
+		for (const group of groups) group.finish();
 		publisher.close();
 		client.close();
 	}
@@ -394,7 +394,7 @@ test("lite draft-05: a subscribe update re-ranks a group already on the wire", a
 
 		expect(stream.sendOrder).toBe(sendOrder({ priority: 9 }));
 	} finally {
-		group.close();
+		group.finish();
 		publisher.close();
 		client.close();
 	}
@@ -453,7 +453,7 @@ test("lite draft-05: a subscribe update during the stream open still ranks the g
 
 		expect(pair.server.sendStreams.uni[0]?.sendOrder).toBe(sendOrder({ priority: 9 }));
 	} finally {
-		group.close();
+		group.finish();
 		publisher.close();
 		client.close();
 	}
@@ -508,7 +508,7 @@ test("lite draft-05: many concurrent groups share one subscription listener", as
 
 		expect(pair.server.sendStreams.uni.map((stream) => stream.sendOrder)).toEqual(expected);
 	} finally {
-		for (const group of groups) group.close();
+		for (const group of groups) group.finish();
 		publisher.close();
 		client.close();
 	}
@@ -526,7 +526,7 @@ test("lite draft-05: the fetch response ranks the publisher's own writes", async
 
 	const group = new GroupProducer(7);
 	group.writeFrame(textFrame("hello"));
-	group.close();
+	group.finish();
 	track.writeGroup(group);
 
 	const client = await Stream.open(pair.client, { version: Version.DRAFT_05 });
@@ -562,7 +562,7 @@ test("lite draft-06: an unchecked track's fetched frames carry their send time",
 
 	const group = new GroupProducer(0);
 	group.writeFrame(textFrame("hello", Timestamp.fromMillis(36_000_000)));
-	group.close();
+	group.finish();
 	track.writeGroup(group);
 
 	const client = await Stream.open(pair.client, { version: Version.DRAFT_06 });
@@ -699,7 +699,7 @@ async function servedSubscription(
 		serve(sequence: number) {
 			const group = new GroupProducer(sequence);
 			for (const frame of frames) group.writeFrame(textFrame(frame, Timestamp.fromMillis(sequence)));
-			group.close();
+			group.finish();
 			track.writeGroup(group);
 		},
 		// Makes the next group stream withhold its FIN from the client, the way a stream the
@@ -812,7 +812,7 @@ test("lite draft-06: a cut group is dropped early, once", async () => {
 
 		const cut = new GroupProducer(1);
 		sub.track.writeGroup(cut);
-		cut.close(new Error("cut"));
+		cut.abort(new Error("cut"));
 		const resp = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
 		if (!("drop" in resp)) throw new Error("expected SUBSCRIBE_DROP");
 		expect([resp.drop.start, resp.drop.end]).toEqual([1, 1]);
@@ -838,7 +838,7 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 
 			const cut = new GroupProducer(1);
 			sub.track.writeGroup(cut);
-			cut.close(new StreamError(StreamCode(70), { message: "cut" }));
+			cut.abort(new StreamError(StreamCode(70), { message: "cut" }));
 			const resp = await decodeSubscribeResponse(sub.client.reader, version);
 			if (!("drop" in resp)) throw new Error("expected SUBSCRIBE_DROP");
 			expect([resp.drop.start, resp.drop.end, resp.drop.error]).toEqual([
@@ -946,7 +946,7 @@ test("lite draft-06: a cut dropped then re-created is not served", async () => {
 
 		const cut = new GroupProducer(1);
 		sub.track.writeGroup(cut);
-		cut.close(new Error("cut"));
+		cut.abort(new Error("cut"));
 		const resp = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
 		if (!("drop" in resp)) throw new Error("expected SUBSCRIBE_DROP");
 		expect([resp.drop.start, resp.drop.end]).toEqual([1, 1]);
@@ -1159,7 +1159,8 @@ for (const skipped of ["failed", "stale"] as const) {
 			const group = new GroupProducer(5);
 			group.writeFrame(textFrame("old", Timestamp.fromMillis(5)));
 			sub.track.writeGroup(group);
-			group.close(skipped === "failed" ? new Error("cut") : undefined);
+			if (skipped === "failed") group.abort(new Error("cut"));
+			else group.finish();
 			if (skipped === "failed") sub.track.dropGroups(7, 8, new Error("cut"));
 			sub.serve(6);
 			const response = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
@@ -1619,7 +1620,7 @@ test("lite draft-07: subscribe end precedes groups below a declared finish", asy
 	try {
 		const first = new GroupProducer(0);
 		first.writeFrame(textFrame("hello"));
-		first.close();
+		first.finish();
 		track.writeGroup(first);
 		track.finishAt({ group: 2, frame: 0 });
 
@@ -1631,7 +1632,7 @@ test("lite draft-07: subscribe end precedes groups below a declared finish", asy
 
 		const second = new GroupProducer(1);
 		second.writeFrame(textFrame("hello"));
-		second.close();
+		second.finish();
 		track.writeGroup(second);
 		track.close();
 
@@ -1673,7 +1674,7 @@ async function heldOpenEnd() {
 
 	const group = new GroupProducer(0);
 	group.writeFrame(textFrame("hello"));
-	group.close();
+	group.finish();
 	track.writeGroup(group);
 	track.close();
 
@@ -1755,7 +1756,7 @@ test("lite draft-07: a group whose close fails is dropped", async () => {
 	try {
 		const group = new GroupProducer(0);
 		group.writeFrame(textFrame("hello"));
-		group.close();
+		group.finish();
 		track.writeGroup(group);
 		track.close();
 
@@ -1805,7 +1806,7 @@ test("blocked DROP responses stop opening later groups", async () => {
 	const append = (sequence: number) => {
 		const group = new GroupProducer(sequence);
 		group.writeFrame(textFrame("frame"));
-		group.close();
+		group.finish();
 		track.writeGroup(group);
 	};
 	for (let sequence = 0; sequence < 8; sequence++) append(sequence);
@@ -1881,7 +1882,7 @@ async function serve(
 	for (const [sequence, frames] of Object.entries(groups)) {
 		const group = new GroupProducer(Number(sequence));
 		for (const frame of frames) group.writeFrame(textFrame(frame));
-		group.close();
+		group.finish();
 		track.writeGroup(group);
 
 		// Let the publisher drain each group before the next, so the streams arrive in
@@ -2061,7 +2062,7 @@ async function saturatedGroup() {
 	// A finished group still has frames to send, so its own close must not drop it.
 	const group = new GroupProducer(0);
 	group.writeFrame(textFrame("hello"));
-	group.close();
+	group.finish();
 	track.writeGroup(group);
 
 	// The group is queued inside the open from here on.
@@ -2142,13 +2143,13 @@ test("lite draft-05: a blocked group header is reset when the group expires", as
 
 		const old = new GroupProducer(0);
 		old.writeFrame({ payload: new TextEncoder().encode("old"), timestamp: Timestamp.fromMillis(0) });
-		old.close();
+		old.finish();
 		track.writeGroup(old);
 		await headerStarted;
 
 		const edge = new GroupProducer(1);
 		edge.writeFrame({ payload: new TextEncoder().encode("edge"), timestamp: Timestamp.fromMillis(1000) });
-		edge.close();
+		edge.finish();
 		track.writeGroup(edge);
 
 		const resetBeforeRelease = await Promise.race([
@@ -2285,7 +2286,7 @@ test("lite draft-05: a group parked at its tail resets as too old when it expire
 		for (const ms of [1000, 2000]) {
 			const group = new GroupProducer(ms / 1000);
 			group.writeFrame(frame(ms));
-			group.close();
+			group.finish();
 			track.writeGroup(group);
 		}
 
@@ -2296,7 +2297,7 @@ test("lite draft-05: a group parked at its tail resets as too old when it expire
 		expect(end).toMatchObject({ code: StreamCode.Old });
 	} finally {
 		opened.releaseLock();
-		open.close();
+		open.finish();
 		publisher.close();
 		client.close();
 		broadcast.close();
@@ -2356,7 +2357,7 @@ test("lite draft-05: a group that goes stale while its stream opens writes nothi
 		const write = (sequence: number, ms: number) => {
 			const group = new GroupProducer(sequence);
 			group.writeFrame({ payload: new TextEncoder().encode("frame"), timestamp: Timestamp.fromMillis(ms) });
-			group.close();
+			group.finish();
 			track.writeGroup(group);
 		};
 		write(0, 0);
@@ -2657,7 +2658,7 @@ test("lite draft-06: a grant that shrinks mid-fetch resets the fetch", async () 
 		expect(unauthorizedResets(resets)).toContain("unauthorized: live");
 	} finally {
 		resets.mockRestore();
-		group.close();
+		group.finish();
 		publisher.close();
 		client.close();
 		broadcast.close();
@@ -2697,7 +2698,7 @@ test("lite draft-07: a fetch whose budget gives up partway resets as too old", a
 		for (const ms of [1000, 2000]) {
 			const group = new GroupProducer(ms / 1000);
 			group.writeFrame(frame(ms));
-			group.close();
+			group.finish();
 			track.writeGroup(group);
 		}
 		await serving;
@@ -2705,7 +2706,7 @@ test("lite draft-07: a fetch whose budget gives up partway resets as too old", a
 		expect(resets.mock.calls.map(([reason]) => toStreamCode(reason as Error))).toContain(StreamCode.Old);
 	} finally {
 		resets.mockRestore();
-		open.close();
+		open.finish();
 		publisher.close();
 		client.close();
 		broadcast.close();
@@ -2722,7 +2723,7 @@ test.each([0, 1])("lite draft-07 reports the cached largest position when starti
 	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const group = new GroupProducer(0);
 	group.writeFrame(textFrame("cached"));
-	group.close();
+	group.finish();
 	track.writeGroup(group);
 	const client = await Stream.open(pair.client, { version });
 	const server = await Stream.accept(pair.server, version);
@@ -2767,7 +2768,7 @@ test("lite draft-07 reports the source's largest position past what a relay hold
 	hooks.reportedLargest(track, { group: 4, frame: 0 });
 	const group = new GroupProducer(0);
 	group.writeFrame(textFrame("oldest"));
-	group.close();
+	group.finish();
 	track.writeGroup(group);
 	const client = await Stream.open(pair.client, { version });
 	const server = await Stream.accept(pair.server, version);

@@ -37,7 +37,7 @@ for (const protocol of protocols) {
 			const write = (sequence: number) => {
 				const group = new Group(sequence);
 				group.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.fromMillis(0) });
-				group.close();
+				group.finish();
 				track.writeGroup(group);
 			};
 
@@ -162,7 +162,7 @@ for (const protocol of protocols) {
 			for (let frame = 0; frame < frames; frame++) {
 				group.writeFrame({ payload: new Uint8Array([frame]), timestamp: Timestamp.fromMillis(0) });
 			}
-			group.close();
+			group.finish();
 			track.writeGroup(group);
 		};
 

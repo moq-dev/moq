@@ -902,7 +902,7 @@ function liveVideo(clock: ReturnType<typeof manualAt>, track: Moq.Track.Producer
 				for (const media of held) {
 					const group = new Moq.Group.Producer(sequence++);
 					group.writeFrame(legacyFrame(Micro.fromMilli(Milli(media))));
-					group.close();
+					group.finish();
 					track.writeGroup(group);
 				}
 				held = [];
@@ -1031,7 +1031,7 @@ it("buffered video holds its poster until its own span reaches the floor", async
 		await clock.advance(40);
 		expect(playback.decoder.out.frame.peek()?.timestamp).toBe(40_000);
 	} finally {
-		group.close();
+		group.finish();
 		playback.close();
 		await microtasks();
 		clock.installed.close();
@@ -1055,7 +1055,7 @@ it("bounds startup decoding while another track is missing and releases it on cl
 		expect(playback.pictures.every((frame) => frame.closed)).toBe(true);
 	} finally {
 		remove();
-		group.close();
+		group.finish();
 		playback.close();
 		await microtasks();
 		clock.installed.close();
@@ -1081,7 +1081,7 @@ it("resumes decoding the moment shared startup releases", async () => {
 		expect(playback.submitted).toHaveLength(8);
 	} finally {
 		remove();
-		group.close();
+		group.finish();
 		playback.close();
 		await microtasks();
 		clock.installed.close();
@@ -1130,7 +1130,7 @@ it("continues filling when the shared floor rises while video waits on audio", a
 		expect(playback.decoder.out.frame.peek()?.timestamp).toBeGreaterThanOrEqual(200_000);
 	} finally {
 		remove();
-		group.close();
+		group.finish();
 		playback.close();
 		await microtasks();
 		clock.installed.close();
@@ -1148,7 +1148,7 @@ it("keeps feeding a decoder that has not output its first picture yet", async ()
 		await clock.advance(160);
 		expect(playback.decoder.out.frame.peek()?.timestamp).toBe(160_000);
 	} finally {
-		group.close();
+		group.finish();
 		playback.close();
 		await microtasks();
 		clock.installed.close();
