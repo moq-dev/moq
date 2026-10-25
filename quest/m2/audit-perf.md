@@ -112,6 +112,12 @@ did not move.
   catalog on every estimate to validate it before retaining it (62% of
   `catalog_estimate_fanout/hang/tracks_4/4`). Validating only the edited entry
   would weaken that guarantee for custom configs, so it needs a decision.
+- The TS export grows with track count (1.50x release at `container-export/ts/1x1`,
+  2.24x at `16x64`): `Schedule::index` and `Schedule::admit`
+  (`moq-mux/src/container/ts/schedule.rs`) scan and sort every queued unit
+  per PCR slot.
+- e2ee expands the AES-GCM key on every frame (`aead` in
+  `moq-e2ee/src/protect.rs`), about a quarter of `protect`; release does too.
 
 ### Method: attribute with instruction counts, not wall time
 
@@ -131,6 +137,9 @@ wall-clock bisect blames the wrong commit. Count instructions instead:
   `finish` for `track_stamp_groups`) and divide by the count.
 - `callgrind_annotate --inclusive=yes` diffs between two commits point at the
   step; workspace sources show as `${workspace}`, so read them by name.
+- A wall-time hold at equal instructions may be page faults: compare
+  `/usr/bin/time -f %R`, then pin glibc with `GLIBC_TUNABLES` (see
+  [the m1 release run](/quest/m1/release-perf/README.md)) before blaming code.
 - A bench that is not CPU-bound is not attributable this way:
   `relay_auth_refresh` runs real loopback sockets and moved +27-60% on CI with
   +0.4% instructions.
