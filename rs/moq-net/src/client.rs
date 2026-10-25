@@ -114,7 +114,10 @@ impl Client {
 	/// protocol violation, and when the target is empty, which means the server's
 	/// default path: a peer on published lite-05 rejects an empty value outright.
 	fn setup_path(&self, address: crate::transport::Address) -> Option<String> {
-		let url = self.url.as_ref().filter(|_| address == crate::transport::Address::Setup)?;
+		let url = self
+			.url
+			.as_ref()
+			.filter(|_| address == crate::transport::Address::Setup)?;
 
 		let target = match url.scheme() {
 			// One form-encoded value, so a target with its own `?query` arrives percent-encoded.
@@ -137,7 +140,10 @@ impl Client {
 	/// every other scheme, on a transport that carries its own request URI, and when the
 	/// URL has no host.
 	fn setup_authority(&self, address: crate::transport::Address) -> Option<String> {
-		let url = self.url.as_ref().filter(|_| address == crate::transport::Address::Setup)?;
+		let url = self
+			.url
+			.as_ref()
+			.filter(|_| address == crate::transport::Address::Setup)?;
 		if url.scheme() != "moqt" {
 			return None;
 		}
@@ -1034,7 +1040,10 @@ mod tests {
 			("moqt://relay.example.com/anon?jwt=abc", Some("/anon?jwt=abc")),
 			("moql://relay.example.com/anon", Some("/anon")),
 			("moqt://relay.example.com", None),
-			("iroh://k5lnrlndqpqcgh4d5nhbnbnhcyrgvw6ttxwrsvsu4nlt6foorxaa/", Some("/")),
+			(
+				"iroh://k5lnrlndqpqcgh4d5nhbnbnhcyrgvw6ttxwrsvsu4nlt6foorxaa/",
+				Some("/"),
+			),
 			// The fragment is processed by the client and never sent (draft-19 3.1.2).
 			("moqt://relay.example.com/anon?jwt=abc#pos:12", Some("/anon?jwt=abc")),
 			// A trailing `?` is an empty query, not a query.
@@ -1044,7 +1053,11 @@ mod tests {
 
 		for (url, want) in cases {
 			let client = dialed(url);
-			assert_eq!(client.setup_path(crate::transport::Address::Setup).as_deref(), want, "{url}");
+			assert_eq!(
+				client.setup_path(crate::transport::Address::Setup).as_deref(),
+				want,
+				"{url}"
+			);
 			// The transport's own request URI carries the target: a SETUP path is a violation.
 			assert_eq!(client.setup_path(crate::transport::Address::Uri), None, "{url}");
 		}
@@ -1058,7 +1071,10 @@ mod tests {
 			("moqt://relay.example.com:4443/anon", Some("relay.example.com:4443")),
 			("moqt://[::1]:4443", Some("[::1]:4443")),
 			// Userinfo is a credential, and never goes on the wire.
-			("moqt://user:pass@relay.example.com:4443", Some("relay.example.com:4443")),
+			(
+				"moqt://user:pass@relay.example.com:4443",
+				Some("relay.example.com:4443"),
+			),
 			// A hostless URL has no authority to send.
 			("moqt:///anon", None),
 			// Only the draft's `moqt://` scheme is required to send it.
@@ -1069,7 +1085,11 @@ mod tests {
 
 		for (url, want) in cases {
 			let client = dialed(url);
-			assert_eq!(client.setup_authority(crate::transport::Address::Setup).as_deref(), want, "{url}");
+			assert_eq!(
+				client.setup_authority(crate::transport::Address::Setup).as_deref(),
+				want,
+				"{url}"
+			);
 			assert_eq!(client.setup_authority(crate::transport::Address::Uri), None, "{url}");
 		}
 	}

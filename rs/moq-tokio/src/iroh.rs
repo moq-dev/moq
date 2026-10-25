@@ -475,7 +475,10 @@ pub(crate) async fn connect(
 		}
 		alpn if alpns.contains(&alpn) => {
 			let conn = connecting.await?;
-			(web_transport_iroh::Session::raw(conn), moq_net::transport::Address::Setup)
+			(
+				web_transport_iroh::Session::raw(conn),
+				moq_net::transport::Address::Setup,
+			)
 		}
 		_ => return Err(Error::UnsupportedAlpn(alpn)),
 	};

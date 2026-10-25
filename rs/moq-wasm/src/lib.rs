@@ -98,7 +98,9 @@ impl Session {
 	/// Connect to a relay over the browser's WebTransport, using the system roots.
 	pub async fn connect(url: String) -> Result<Session, JsValue> {
 		let url = url::Url::parse(&url).map_err(js_err)?;
-		let transport = transport::connect(url.clone(), Default::default()).await.map_err(js_err)?;
+		let transport = transport::connect(url.clone(), Default::default())
+			.await
+			.map_err(js_err)?;
 		Self::handshake(url, transport).await
 	}
 
