@@ -265,12 +265,27 @@ async fn prepare_fetch(
 			(Some(filled), track.cached_groups(span))
 		}
 	};
-	let Some(last) = groups.pop() else {
-		return Err((Error::NotFound, "no group in range".into()));
-	};
-	let last = read_fetch(track, last, range.skip(last), range.until(last), priority, compression)
+	// A group gone or never fetchable is absent from the answer, as the response skips it,
+	// unless it is the only one.
+	let last = loop {
+		let Some(sequence) = groups.pop() else {
+			return Err((Error::NotFound, "no group in range".into()));
+		};
+		match read_fetch(
+			track,
+			sequence,
+			range.skip(sequence),
+			range.until(sequence),
+			priority,
+			compression,
+		)
 		.await
-		.map_err(failed)?;
+		{
+			Ok(group) => break group,
+			Err(Error::NotFound | Error::NotFetchable | Error::Unsupported | Error::Old) if !groups.is_empty() => {}
+			Err(err) => return Err(failed(err)),
+		}
+	};
 	Ok(PreparedFetch {
 		range,
 		groups,
@@ -3102,7 +3117,7 @@ impl Publisher {
 		let end_location = if joined {
 			// The subscription starts at the saved Largest Object, so the prefix of that
 			// group has to be here in full or the two leave a gap.
-			if group.end() != end.object {
+			if group.sequence != end.group || group.end() != end.object {
 				return self
 					.reject_fetch(stream, msg.request_id, &Error::Evicted, "joining prefix unavailable")
 					.await;
@@ -3123,9 +3138,11 @@ impl Publisher {
 				group: group.sequence,
 				object,
 			}
-		} else if end_of_track && end.object > 0 {
-			// Cap a bounded response at the track's last object. A whole-group response
-			// keeps Object 0 rather than claiming that the next group is covered.
+		} else if (end_of_track && end.object > 0) || group.sequence < end.group {
+			// Cap a bounded response at the track's last object, or at the last object sent
+			// when the end group is not held: before draft-20 the End Location promises every
+			// object before it. A whole-group response keeps Object 0 rather than claiming
+			// that the next group is covered.
 			Location {
 				group: group.sequence,
 				object: group.end(),
@@ -10486,6 +10503,60 @@ mod serve_tests {
 		assert!(h.log.resets().is_empty());
 	}
 
+	/// A joining FETCH reaching back past an evicted prefix group is refused, even when an
+	/// earlier group it holds has as many objects as the prefix promised.
+	#[moq_clock::test]
+	async fn a_joining_fetch_refuses_a_prefix_group_it_lost() {
+		let version = Version::Draft17;
+		let h = serve(version);
+		let mut earlier = h.track.create_group(group::Info { sequence: 3 }).unwrap();
+		earlier.write_frame(timestamp(), b"frame".as_slice()).unwrap();
+		earlier.finish().unwrap();
+		let mut prefix = h.track.create_group(group::Info { sequence: 5 }).unwrap();
+		prefix.write_frame(timestamp(), b"frame".as_slice()).unwrap();
+		settle().await;
+		let stream = Stream::open(&mut crate::driver::Transport::new(h.session.clone()), version)
+			.await
+			.unwrap();
+		let mut serving = Box::pin(
+			h.publisher
+				.clone()
+				.run_subscribe_stream(stream, subscribe(Filter::NextObject, None)),
+		);
+		registered(&h, serving.as_mut()).await;
+		prefix.abort(Error::Evicted).unwrap();
+
+		let mark = h.log.writes.lock().unwrap().len();
+		let stream = Stream::open(&mut crate::driver::Transport::new(h.session.clone()), version)
+			.await
+			.unwrap();
+		h.publisher
+			.clone()
+			.run_fetch_stream(
+				stream,
+				ietf::Fetch {
+					request_id: FETCH_ID,
+					subscriber_priority: 128,
+					group_order: GroupOrder::Ascending,
+					fetch_type: FetchType::RelativeJoining {
+						subscriber_request_id: RequestId(REQUEST_ID),
+						group_offset: 2,
+					},
+					range_filters: false,
+					fill_timeout: false,
+					properties_wanted: true,
+					epoch: None,
+				},
+			)
+			.await
+			.unwrap();
+		let mut response = bytes::Bytes::from(h.log.writes.lock().unwrap()[mark..].to_vec());
+		assert_eq!(
+			crate::coding::decode_varint(&mut response, version).unwrap(),
+			ietf::RequestError::ID
+		);
+	}
+
 	/// A joining FETCH that arrives after its subscription ended has no live edge to name, so
 	/// it is refused rather than answered from a group that is no longer the edge of anything.
 	#[moq_clock::test]
@@ -11488,6 +11559,45 @@ mod serve_tests {
 				}
 				assert_eq!(objects, expected.concat(), "{version} {order:?}");
 			}
+		}
+	}
+
+	/// A highest group that cannot be fetched is left out like any other, and the End Location
+	/// names the last object sent rather than promising the group left out.
+	#[moq_clock::test]
+	async fn a_fetch_skips_an_unfetchable_highest_group() {
+		for version in FETCH_DRAFTS {
+			let mut h = serve(version);
+			publish_pairs(&mut h, 3, None);
+			let mut datagram = h.track.create_group(group::Info { sequence: 3 }).unwrap();
+			datagram
+				.set_wire(group::Wire {
+					sparse: false,
+					first_object: true,
+					first_id: 0,
+					extensions: false,
+					has_end: true,
+					fetchable: false,
+					last: None,
+				})
+				.unwrap();
+			datagram.write_frame(timestamp(), b"3-0".to_vec()).unwrap();
+			datagram.finish().unwrap();
+			let mut later = h.track.create_group(group::Info { sequence: 4 }).unwrap();
+			later.write_frame(timestamp(), b"4-0".to_vec()).unwrap();
+			later.finish().unwrap();
+			settle().await;
+
+			let buf = standalone_fetch(
+				&h,
+				Location { group: 1, object: 0 },
+				Location { group: 3, object: 0 },
+				GroupOrder::Ascending,
+			)
+			.await;
+			let (ok, objects) = fetch_answer(buf, version);
+			assert_eq!(ok.end_location, end_location(version, 2, 1), "{version}");
+			assert_eq!(objects, [pairs([1]), pairs([2])].concat(), "{version}");
 		}
 	}
 
