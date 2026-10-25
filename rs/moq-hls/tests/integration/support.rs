@@ -172,11 +172,6 @@ pub fn frame(second: u64, payload: u8) -> moq_mux::container::Frame {
 	}
 }
 
-/// Whether `haystack` contains `needle`.
-pub fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-	haystack.windows(needle.len()).any(|window| window == needle)
-}
-
 /// The rendition `server` exports for `path` once its catalog lists it.
 pub async fn rendition(server: &Server, path: &str) -> std::sync::Arc<Rendition> {
 	let broadcaster = moq_clock::timeout(TIMEOUT, server.broadcaster(path))
