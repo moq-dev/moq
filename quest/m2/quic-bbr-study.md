@@ -15,9 +15,9 @@ quality or performance.
 
 Decided in the 2026-09-30 audit: the Google BBR comparison merged here as
 one study, since both reuse the same media profiles, harness, and baseline.
-On 2026-10-24 the maintainer split ProbeRTT natural-drain credit out to
-[its own quest](/quest/m1/bbr-probe-rtt-skip.md), which ships QUICHE's
-near-floor skip.
+ProbeRTT natural-drain credit is settled: BBR3 already skips a due ProbeRTT
+after an app-limited, congestion-free interval whose lowest RTT stayed within
+12.5% of `min_rtt` (QUICHE's kBBR7).
 
 ### Harness
 
@@ -95,4 +95,3 @@ adopt either in advance.
 ## Related
 
 - [TS validation](/test/ts/README.md) - shaped paths, whole-group shedding, and measured baselines
-- [Skip ProbeRTT after a near-floor RTT](/quest/m1/bbr-probe-rtt-skip.md) - the ProbeRTT natural-drain decision split out of this study
