@@ -1,6 +1,6 @@
 /**
  * OBJECT_DATAGRAM: one Object carried in a QUIC datagram (draft-14 section 10.3.1 through
- * draft-20 section 11.3.1).
+ * draft-22 section 11.2.1).
  *
  * The model counterpart is {@link Datagram}, a single-frame group, so only an Object at ID 0
  * maps onto it. The Type is a set of flags on every draft; draft-14 lacks the
