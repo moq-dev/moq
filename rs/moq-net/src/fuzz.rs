@@ -616,35 +616,42 @@ pub fn ietf_wire(data: &[u8]) -> bool {
 		38 => roundtrip::<ietf::PublishNamespaceUpdate, _>(rest, version),
 		39 => roundtrip::<ietf::ObjectDatagram, _>(rest, version),
 		40 => roundtrip::<ietf::SubscribeTracks<'static>, _>(rest, version),
-		41 => {
-			if matches!(
-				version,
-				ietf::Version::Draft14 | ietf::Version::Draft15 | ietf::Version::Draft16
-			) {
-				return false;
-			}
-			let outer = crate::Version::Ietf(version);
-			if let Ok((setup, _)) = crate::setup::Setup::decode_slice(rest, outer) {
-				let _ = ietf::Parameters::decode_slice(&setup.parameters, version);
-			}
-			roundtrip::<crate::setup::Setup, _>(rest, outer)
+		// The unified SETUP replaced the client/server pair at draft-17. The pair refuses a
+		// later draft itself, but the unified one treats an earlier draft as unreachable.
+		41 if matches!(
+			version,
+			ietf::Version::Draft14 | ietf::Version::Draft15 | ietf::Version::Draft16
+		) =>
+		{
+			false
 		}
-		42 => {
-			let outer = crate::Version::Ietf(version);
-			if let Ok((setup, _)) = crate::setup::Client::decode_slice(rest, outer) {
-				let _ = ietf::Parameters::decode_slice(&setup.parameters, version);
-			}
-			roundtrip::<crate::setup::Client, _>(rest, outer)
-		}
-		43 => {
-			let outer = crate::Version::Ietf(version);
-			if let Ok((setup, _)) = crate::setup::Server::decode_slice(rest, outer) {
-				let _ = ietf::Parameters::decode_slice(&setup.parameters, version);
-			}
-			roundtrip::<crate::setup::Server, _>(rest, outer)
-		}
+		41 => setup::<crate::setup::Setup>(rest, version, |setup| &setup.parameters),
+		42 => setup::<crate::setup::Client>(rest, version, |setup| &setup.parameters),
+		43 => setup::<crate::setup::Server>(rest, version, |setup| &setup.parameters),
 		_ => unreachable!("kind is taken modulo IETF_KINDS"),
 	}
+}
+
+/// [`roundtrip`] for a SETUP envelope, plus the Setup Options inside it read the way a
+/// session reads them.
+///
+/// A server may not send PATH or AUTHORITY but is otherwise held to the same options, so
+/// any block a client accepts from its server, a server accepts from its client.
+fn setup<T>(data: &[u8], version: ietf::Version, parameters: fn(&T) -> &Bytes) -> bool
+where
+	T: Decode<crate::Version> + Encode<crate::Version>,
+{
+	let outer = crate::Version::Ietf(version);
+	if let Ok((message, _)) = T::decode_slice(data, outer) {
+		let parameters = parameters(&message);
+		if ietf::decode_peer_setup(parameters.clone(), version, true).is_ok() {
+			assert!(
+				ietf::decode_peer_setup(parameters.clone(), version, false).is_ok(),
+				"a server's Setup Options are refused from a client"
+			);
+		}
+	}
+	roundtrip::<T, _>(data, outer)
 }
 
 /// Decode a varint with whichever codec the selected version uses.

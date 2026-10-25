@@ -1677,7 +1677,9 @@ impl RecvMeta {
 			// SAFETY: bounds-checked read of a cmsghdr-sized prefix.
 			let header = unsafe { control.as_ptr().add(offset).cast::<libc::cmsghdr>().read_unaligned() };
 			let message_len = header.cmsg_len;
-			if message_len < header_len || offset + message_len > control.len() {
+			// Compared against what remains rather than added to `offset`, which a
+			// length near usize::MAX would overflow.
+			if message_len < header_len || message_len > control.len() - offset {
 				return meta;
 			}
 			let data = &control[offset + header_len..offset + message_len];
@@ -1923,6 +1925,7 @@ mod tests {
 		assert_eq!(RecvMeta::parse(&gro(0)).stride, None);
 	}
 
+	/// A malformed length after a valid message ends the walk with that message.
 	#[test]
 	fn malformed_control_lengths_preserve_valid_prefix() {
 		let prefix = gro(1200);

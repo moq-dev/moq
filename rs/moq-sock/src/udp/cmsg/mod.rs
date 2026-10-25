@@ -88,6 +88,8 @@ impl<M: MsgHdr> Drop for Encoder<'_, M> {
 pub(crate) struct Iter<'a, M: MsgHdr> {
     hdr: &'a M,
     cmsg: Option<NonNull<M::ControlMessage>>,
+    /// The address one past the control buffer, which bounds every message yielded.
+    end: usize,
 }
 
 impl<'a, M: MsgHdr> Iter<'a, M> {
@@ -95,14 +97,16 @@ impl<'a, M: MsgHdr> Iter<'a, M> {
     ///
     /// `hdr` must hold a pointer to memory outliving `'a` which can be soundly read for the
     /// lifetime of the constructed `Iter` and contains a buffer of native cmsgs, i.e. is aligned
-    //  for native `cmsghdr`, is fully initialized, and has correct internal links.
+    //  for native `cmsghdr` and is fully initialized. A malformed length ends the walk.
     pub(crate) unsafe fn new(hdr: &'a M) -> Self {
+        // `hdr` is a reference to the message header, not to a control message header, and
+        // `cmsg_first_hdr` yields the control buffer pointer it stores, so the resulting
+        // pointer has provenance over the whole control buffer.
+        let cmsg = NonNull::new(hdr.cmsg_first_hdr());
         Self {
+            end: cmsg.map_or(0, |first| first.addr().get() + hdr.control_len()),
             hdr,
-            // `hdr` is a reference to the message header, not to a control message header, and
-            // `cmsg_first_hdr` yields the control buffer pointer it stores, so the resulting
-            // pointer has provenance over the whole control buffer.
-            cmsg: NonNull::new(hdr.cmsg_first_hdr()),
+            cmsg,
         }
     }
 }
@@ -112,24 +116,20 @@ impl<'a, M: MsgHdr> Iterator for Iter<'a, M> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let current = self.cmsg.take()?;
-        // SAFETY: `new` guarantees that the buffer contains valid, correctly linked cmsgs
+        // SAFETY: `cmsg_first_hdr` and `cmsg_nxt_hdr` only return a header that fits the buffer.
+        let len = unsafe { current.as_ref() }.len();
+        // A length shorter than its header would revisit it forever (as zeroed headers do on
+        // macOS < 14), and one past the buffer would overflow the platform's alignment
+        // arithmetic or point a payload read outside it, so either ends the walk.
+        if len < M::ControlMessage::cmsg_len(0) || len > self.end - current.addr().get() {
+            return None;
+        }
+        // SAFETY: `current` is an initialized header whose length stays inside the buffer.
         self.cmsg = NonNull::new(unsafe { self.hdr.cmsg_nxt_hdr(current.as_ptr()) });
-        let current = CMsg {
+        Some(CMsg {
             ptr: current,
             _lifetime: PhantomData,
-        };
-
-        #[cfg(apple_fast)]
-        {
-            // On MacOS < 14 CMSG_NXTHDR might continuously return a zeroed cmsg. In
-            // such case, return `None` instead, thus indicating the end of
-            // the cmsghdr chain.
-            if current.len() < size_of::<M::ControlMessage>() {
-                return None;
-            }
-        }
-
-        Some(current)
+        })
     }
 }
 
@@ -265,5 +265,34 @@ mod tests {
         assert_eq!(unsafe { cmsg.decode::<u16>() }, 0x0102);
 
         assert!(iter.next().is_none());
+    }
+
+    /// A malformed length after a valid message ends the walk with that message.
+    #[test]
+    fn malformed_lengths_end_the_walk() {
+        let header_len = libc::cmsghdr::cmsg_len(0);
+        let space = libc::cmsghdr::cmsg_space(size_of::<u32>());
+        // Past the end by one byte, and far enough to overflow alignment arithmetic.
+        for len in [0, header_len - 1, LEN - space + 1, usize::MAX] {
+            let mut buf = Aligned([0u8; LEN]);
+            let mut hdr = unsafe { mem::zeroed::<libc::msghdr>() };
+            hdr.msg_control = buf.0.as_mut_ptr() as _;
+            hdr.msg_controllen = LEN as _;
+
+            let mut encoder = unsafe { Encoder::new(&mut hdr) };
+            encoder.push(1, 2, 0x1234_5678u32);
+            encoder.push(3, 4, 0u32);
+            encoder.finish();
+
+            let mut iter = unsafe { Iter::new(&hdr) };
+            let first = iter.next().unwrap();
+            assert_eq!(unsafe { first.decode::<u32>() }, 0x1234_5678);
+            // SAFETY: the second header lies inside the buffer, after the first message.
+            unsafe {
+                let second = first.ptr.as_ptr().byte_add(space);
+                (*second).cmsg_len = len as _;
+            }
+            assert!(iter.next().is_none(), "length {len}");
+        }
     }
 }

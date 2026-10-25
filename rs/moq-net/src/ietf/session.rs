@@ -802,7 +802,7 @@ pub async fn accept_setup(session: &mut Transport, version: Version) -> Result<P
 
 /// Parse the Setup Options we act on out of a raw SETUP parameter block, refusing any the
 /// peer's role may not send.
-fn decode_peer_setup(
+pub(crate) fn decode_peer_setup(
 	parameters: bytes::Bytes,
 	version: Version,
 	client: bool,
