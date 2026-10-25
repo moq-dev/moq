@@ -375,3 +375,84 @@ fn a_held_wake_never_hides_a_remote_wake() {
 		});
 	}
 }
+
+/// An entry appended under a channel's write guard reaches a reader that checks the
+/// log first and parks on the channel only when nothing is committed, the pairing the
+/// log's docs prescribe. The reader either reads the entry or is woken by its guard.
+#[test]
+fn a_log_append_wakes_a_reader_parked_on_its_channel() {
+	loom::model(|| {
+		let producer = Producer::new(crate::log::Writer::new(0));
+		let consumer = producer.consume();
+		let mut reader = producer.read().reader();
+
+		let writer = thread::spawn(move || {
+			let mut log = producer.write().ok().expect("open");
+			log.push(7u32);
+			log.push(8);
+		});
+
+		let mut index = 0;
+		let mut read = Vec::new();
+		block_on(wait(|waiter| {
+			while let Ok(Some(value)) = reader.get(index) {
+				read.push(*value);
+				index += 1;
+			}
+			if index == 2 {
+				return Poll::Ready(());
+			}
+			// Re-checked under the channel's lock, which every append holds.
+			let committed = |log: &Ref<'_, crate::log::Writer<u32>>| match log.end() > index {
+				true => Poll::Ready(()),
+				false => Poll::Pending,
+			};
+			consumer.poll(waiter, committed).map(|_| ())
+		}));
+		while let Ok(Some(value)) = reader.get(index) {
+			read.push(*value);
+			index += 1;
+		}
+		assert_eq!(read, [7, 8], "an append was lost or misread");
+		writer.join().unwrap();
+	});
+}
+
+/// A reader racing front eviction reads each entry correctly or learns it was evicted,
+/// across a segment boundary, whether it reaches a segment by link or by the list.
+#[test]
+fn a_log_reader_racing_eviction_never_misreads() {
+	loom::model(|| {
+		let mut writer = crate::log::Writer::new(0);
+		for i in 0..5u64 {
+			writer.push(i);
+		}
+		// Pin every segment here, so each is dropped after the join: loom can't see
+		// through the std refcount that orders a drop after another thread's reads.
+		let pins: Vec<_> = [0, 1, 3]
+			.into_iter()
+			.map(|first| {
+				let mut pin = writer.reader();
+				assert_eq!(pin.get(first), Ok(Some(&first)));
+				pin
+			})
+			.collect();
+
+		let mut reader = writer.reader();
+		let racer = thread::spawn(move || {
+			for i in 0..5u64 {
+				match reader.get(i) {
+					Ok(Some(value)) => assert_eq!(*value, i, "misread entry {i}"),
+					Ok(None) => panic!("entry {i} was committed"),
+					Err(_) => {}
+				}
+			}
+			reader
+		});
+
+		writer.evict(2);
+		writer.evict(5);
+		drop(racer.join().unwrap());
+		drop(pins);
+	});
+}
