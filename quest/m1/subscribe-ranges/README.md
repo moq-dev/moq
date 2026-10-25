@@ -45,7 +45,7 @@ relay bounds a sparse FETCH only if the model can request ranges:
   an IETF FETCH is served from the model's ranges, capped at the Largest
   Object.
 - **Relative ends** (maintainer, 2026-10-11, superseding the 10-07 `Live`
-  flag and closing #5085). Each range end is `Absolute(group, frame)` or
+  flag and closing #5085). Each range end is `Absolute(group)` or
   `Relative(n)`, naming the group n before the latest; either end may be
   relative, and an omitted end is live. An offset past the track's start
   clamps to group 0. Before any group exists, relative ends resolve when the
