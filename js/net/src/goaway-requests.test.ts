@@ -245,7 +245,7 @@ test("ietf: requests open on the draining session until the replacement wins", a
 });
 
 test("announcing and subscribing after GOAWAY still open streams, on the adapter too", async () => {
-	for (const version of [IetfVersion.DRAFT_14, IetfVersion.DRAFT_16, IetfVersion.DRAFT_19]) {
+	for (const version of [IetfVersion.DRAFT_14, IetfVersion.DRAFT_16, IetfVersion.DRAFT_18]) {
 		const goaway = new Once<Drain>();
 		goaway.set({ uri: "" });
 		let opened = false;

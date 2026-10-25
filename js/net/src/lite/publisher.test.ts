@@ -12,6 +12,7 @@ import { createMockTransportPair, textFrame } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { sendOrder } from "../priority.ts";
+import { Front } from "../resume.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import { Subscriber as TrackSubscriber } from "../track.ts";
@@ -650,6 +651,9 @@ async function servedSubscription(
 		// Frame payloads written into every served group. Frame bounds need draft-06.
 		frames?: string[];
 		version?: Version;
+		// Answer the subscription with a front's broadcast, as an application forwarding a
+		// routed one does, so the track reads through the front's serving route.
+		routed?: boolean;
 	} = {},
 ) {
 	const version = options.version ?? Version.DRAFT_05;
@@ -658,7 +662,20 @@ async function servedSubscription(
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
 
-	const broadcast = publish(origin, Path.from("test"));
+	let broadcast: BroadcastProducer;
+	let routed: { front: Front; dynamic: { close(): void } } | undefined;
+	if (options.routed) {
+		broadcast = new BroadcastProducer();
+		const front = new Front();
+		front.serve(broadcast.consume());
+		const dynamic = origin.dynamicRoute(Path.from("test"));
+		void (async () => {
+			for await (const request of dynamic.requested()) hooks.acceptRequest(request, front.consumer);
+		})();
+		routed = { front, dynamic };
+	} else {
+		broadcast = publish(origin, Path.from("test"));
+	}
 	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: options.maxAge });
 
 	const client = await Stream.open(pair.client, { version: version });
@@ -769,6 +786,8 @@ async function servedSubscription(
 			await opened.cancel();
 			publisher.close();
 			client.close();
+			routed?.dynamic.close();
+			routed?.front.consumer.close();
 		},
 	};
 }
@@ -846,6 +865,26 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 			expect([resp.drop.start, resp.drop.end, resp.drop.error]).toEqual([
 				1,
 				1,
+				version === Version.DRAFT_07 ? 70 : 0,
+			]);
+		} finally {
+			await sub.close();
+		}
+	});
+
+	test(`lite ${version}: a routed track forwards its serving route's drop`, async () => {
+		const sub = await servedSubscription({ version, startGroup: 0, routed: true });
+		try {
+			sub.serve(0);
+			expect(await sub.servedSequence()).toBe(0);
+			expect("start" in (await decodeSubscribeResponse(sub.client.reader, version))).toBe(true);
+
+			sub.track.dropGroups(1, 3, new StreamError(StreamCode(70), { message: "cut" }));
+			const resp = await decodeSubscribeResponse(sub.client.reader, version);
+			if (!("drop" in resp)) throw new Error("expected SUBSCRIBE_DROP");
+			expect([resp.drop.start, resp.drop.end, resp.drop.error]).toEqual([
+				1,
+				2,
 				version === Version.DRAFT_07 ? 70 : 0,
 			]);
 		} finally {

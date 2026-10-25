@@ -42,9 +42,6 @@ const ALPN: {
     readonly DRAFT_16: "moqt-16";
     readonly DRAFT_17: "moqt-17";
     readonly DRAFT_18: "moqt-18";
-    readonly DRAFT_19: "moqt-19";
-    readonly DRAFT_20: "moqt-20";
-    readonly DRAFT_21: "moqt-21";
     readonly DRAFT_22: "moqt-22";
 };
 
@@ -532,7 +529,7 @@ declare namespace Ietf {
     }
 }
 
-type IetfVersion = typeof Version.DRAFT_14 | typeof Version.DRAFT_15 | typeof Version.DRAFT_16 | typeof Version.DRAFT_17 | typeof Version.DRAFT_18 | typeof Version.DRAFT_19 | typeof Version.DRAFT_20 | typeof Version.DRAFT_21 | typeof Version.DRAFT_22;
+type IetfVersion = typeof Version.DRAFT_14 | typeof Version.DRAFT_15 | typeof Version.DRAFT_16 | typeof Version.DRAFT_17 | typeof Version.DRAFT_18 | typeof Version.DRAFT_22;
 
 export const IMPLEMENTATION: string;
 
@@ -1283,9 +1280,6 @@ const Version: {
     readonly DRAFT_16: 4278190096;
     readonly DRAFT_17: 4278190097;
     readonly DRAFT_18: 4278190098;
-    readonly DRAFT_19: 4278190099;
-    readonly DRAFT_20: 4278190100;
-    readonly DRAFT_21: 4278190101;
     readonly DRAFT_22: 4278190102;
 };
 
