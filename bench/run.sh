@@ -435,6 +435,11 @@ criterion_cases() {
             CRITERION_ARGS=(--warm-up-time 0.001 --measurement-time 0.001 --sample-size 10 --nresamples 1 --noplot)
             CRITERION_HOME=$discovery run_criterion_target "$checkout" "$manifest" "$target" --save-baseline discovery
         ) >&2 || return 1
+        # A harness = false target without Criterion, such as moq-cli's play_buffer, writes no samples.
+        if [[ -z $(find "$discovery" -name benchmark.json -print -quit 2>/dev/null) ]]; then
+            printf 'Not a Criterion target, skipped: %s %s\n' "$manifest" "$target" >&2
+            continue
+        fi
         python3 "$ROOT/bench/compare.py" --criterion-cases "$discovery" >"$RUN/criterion-listing" || return 1
         while IFS= read -r benchmark; do
             printf '%s\t%s\t%s\n' "$manifest" "$target" "$benchmark"
