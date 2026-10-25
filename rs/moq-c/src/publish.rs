@@ -1455,7 +1455,10 @@ mod children_tests {
 		let consumer = state.publish.broadcast(broadcast).unwrap().producer.consume();
 		let json = moq_mux::json::Config::default;
 		let binary = moq_mux::binary::Config::default;
-		let json_snapshot = state.publish.json_snapshot(broadcast, "json-snapshot", json(), Default::default()).unwrap();
+		let json_snapshot = state
+			.publish
+			.json_snapshot(broadcast, "json-snapshot", json(), Default::default())
+			.unwrap();
 		let json_stream = state.publish.json_stream(broadcast, "json-stream", json()).unwrap();
 		let binary_snapshot = state
 			.publish
