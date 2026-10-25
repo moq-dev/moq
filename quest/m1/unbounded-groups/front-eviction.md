@@ -68,7 +68,4 @@ groups. A reader that used to see `GroupTooLarge` now refills or sees
 ## Required
 
 - [Segmented frames](/quest/m1/unbounded-groups/segmented-frames.md) - frame storage the cache can account for without whole-frame preallocation
-
-## Related
-
-- [Append-only log](/quest/m1/unbounded-groups/log.md) - later replaces the tail run with lock-free cursor reads
+- [Append-only log](/quest/m1/unbounded-groups/log.md) - `GroupState`'s frames in a lock-free kio log with an advancing base, the tail run this builds on
