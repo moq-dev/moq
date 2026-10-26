@@ -12,8 +12,8 @@
 //!   compositor and sound goes to a `moq_audio::bus::Bus`, the program audio.
 //! - [`Compositor`] draws the scene in preview and the scene on program into
 //!   textures on the caller's `wgpu` device, cutting or fading between them.
-//! - [`Readback`] copies the program back to the CPU for an encoder that cannot
-//!   take a GPU surface.
+//!   `moq_video::render::export` hands the program to an encoder, on the GPU
+//!   where the platform allows.
 //!
 //! Every picture is drawn on the program clock the caller ticks
 //! [`Compositor::render`] with, from whatever each source delivered last: a
@@ -22,12 +22,10 @@
 
 mod collection;
 mod compositor;
-mod readback;
 pub mod source;
 
 pub use collection::{Audio, Canvas, Collection, Item, Rect, Rgba, Scene, Source, Transition};
 pub use compositor::{Compositor, FORMAT};
-pub use readback::{Pending, Readback};
 
 /// The `wgpu` the compositor draws with: `moq_video`'s, so its textures and
 /// the decoder's are the same type.
@@ -62,10 +60,6 @@ pub enum Error {
 	/// This build or platform cannot open the source.
 	#[error("unsupported source: {0}")]
 	Unsupported(String),
-
-	/// The GPU failed while reading a picture back.
-	#[error("gpu: {0}")]
-	Gpu(String),
 
 	/// Capturing, decoding, or drawing video failed.
 	#[error(transparent)]
