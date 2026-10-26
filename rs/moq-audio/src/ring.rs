@@ -90,7 +90,15 @@ pub(crate) fn channel(channels: usize, input_rate: u32, output_rate: u32, config
 	// primes only the remainder.
 	let delay = convert.as_ref().map_or(0, |convert| convert.resampler.output_delay());
 	let latency = latency.checked_sub(delay).filter(|&latency| latency > 0).unwrap_or(1);
-	let capacity = ((config.capacity.as_secs_f64() * output_rate as f64).round() as usize).max(2 * latency);
+	// Below 50 Hz a chunk is one input frame, up to a second of output, so the
+	// room above the latency must hold one chunk to admit it at all, and two so
+	// that admitting one does not trigger a trim.
+	let chunk = convert
+		.as_ref()
+		.map_or(0, |convert| convert.resampler.output_frames_max());
+	let capacity = ((config.capacity.as_secs_f64() * output_rate as f64).round() as usize)
+		.max(2 * latency)
+		.max(latency + 2 * chunk);
 
 	let (mut prod, cons) = HeapRb::<f32>::new(capacity * channels).split();
 	prod.push_iter(std::iter::repeat_n(0.0, latency * channels));
@@ -453,6 +461,33 @@ mod tests {
 		}
 	}
 
+	/// A queue shorter than one chunk's output grows to admit it, rather than
+	/// dropping every chunk of an input too slow to fill one in 20 ms.
+	#[test]
+	fn a_chunk_longer_than_the_capacity_is_heard() {
+		let (mut prod, mut cons) = channel(
+			STEREO,
+			1,
+			48_000,
+			Config {
+				latency: Duration::from_millis(50),
+				capacity: Duration::from_millis(200),
+				pad: false,
+				trim: true,
+			},
+		);
+		cons.start();
+		// The cubic filter lags its input by a few frames, which at 1 Hz is
+		// seconds, so only the last second is past it.
+		let mut out = vec![0.0; 48_000 * STEREO];
+		for second in 0..6 {
+			assert_eq!(prod.push(&[0.25; STEREO]), Push::Ok, "second {second}");
+			let read = cons.read(&mut out);
+			assert!(!matches!(read, Read::Trimmed { .. }), "second {second}: {read:?}");
+		}
+		assert!(out.iter().all(|&sample| sample > 0.125), "the last second is silent");
+	}
+
 	/// Writes before the reader starts are dropped rather than played late, and
 	/// a reader sees silence until the writer starts.
 	#[test]
@@ -517,9 +552,10 @@ mod tests {
 			let (_, stats) = crate::allocation::measure(|| queue(input_rate, 48_000, Duration::from_secs(1)));
 			let baseline = *baseline.get_or_insert(stats.bytes);
 			// One chunk is at most 20 ms of input, or one frame below 50 Hz, which
-			// is at most a second of output.
+			// is at most a second of output: held once to convert into, and twice
+			// in the room the queue keeps for it.
 			assert!(
-				stats.bytes <= baseline + second,
+				stats.bytes <= baseline + 3 * second,
 				"{input_rate} Hz allocated {} bytes, baseline {baseline}",
 				stats.bytes
 			);
