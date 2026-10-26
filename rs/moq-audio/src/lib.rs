@@ -64,6 +64,8 @@ mod level;
 mod opus;
 mod pcm;
 mod resample;
+#[cfg(any(feature = "bus", feature = "playback"))]
+mod ring;
 
 #[cfg(feature = "aec")]
 pub mod aec;
