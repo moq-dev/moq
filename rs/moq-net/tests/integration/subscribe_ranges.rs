@@ -211,13 +211,17 @@ async fn range_fixture(relay: bool) -> RangeFixture {
 }
 
 async fn range_fixture_version(version: &str, relay: bool) -> RangeFixture {
+	range_fixture_history(version, relay, 6).await
+}
+
+async fn range_fixture_history(version: &str, relay: bool, history: u64) -> RangeFixture {
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("ranges").unwrap();
 	let track = broadcast
 		.create_track("quiet", Info::default().with_timescale(moq_net::Timescale::MILLI))
 		.unwrap();
 	broadcast.announce(Default::default()).unwrap();
-	for sequence in 0..6 {
+	for sequence in 0..history {
 		let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
 		group
 			.write_frame(Timestamp::from_millis(sequence * 1000).unwrap(), b"x".as_slice())
@@ -531,5 +535,68 @@ async fn empty_ranges_retire_the_wire_and_can_widen_again() {
 			reader.update(live).unwrap();
 			assert_eq!(next(&mut reader).await, Some(7), "{version} relay={relay}");
 		}
+	}
+}
+
+/// A fill that widens an initially empty copy must finish every completed group,
+/// including the snapshot head, before the publisher produces another group.
+#[moq_clock::test]
+async fn draft22_cold_widening_finishes_every_filled_group() {
+	for relay in [false, true] {
+		let mut fixture = range_fixture_history("moq-transport-22", relay, 0).await;
+		let initial = Subscription::default().with_range(2..).with_max_delay(None);
+		let mut reader = subscribe(&fixture.remote, initial.clone()).await;
+		moq_clock::timeout(
+			TIMEOUT,
+			kio::wait(|waiter| {
+				assert!(reader.poll_recv_group(waiter).is_pending());
+				loop {
+					if fixture
+						.track
+						.subscription()
+						.is_some_and(|subscription| subscription.ranges == [Range::groups(2..)])
+					{
+						return std::task::Poll::Ready(());
+					}
+					if fixture.track.poll_subscription_changed(waiter).is_pending() {
+						return std::task::Poll::Pending;
+					}
+				}
+			}),
+		)
+		.await
+		.unwrap();
+		for sequence in 0..2 {
+			let mut group = fixture.track.create_group(moq_net::group::Info { sequence }).unwrap();
+			group
+				.write_frame(Timestamp::ZERO, sequence.to_be_bytes().as_slice())
+				.unwrap();
+			group.finish().unwrap();
+		}
+		reader.update(initial.with_range(0..)).unwrap();
+		let mut sequences = Vec::new();
+		for _ in 0..2 {
+			let mut group = moq_clock::timeout(TIMEOUT, reader.recv_group())
+				.await
+				.unwrap_or_else(|_| panic!("relay={relay}: a filled group did not arrive; got {sequences:?}"))
+				.unwrap()
+				.unwrap();
+			sequences.push(group.sequence);
+			let frame = moq_clock::timeout(TIMEOUT, group.read_frame())
+				.await
+				.unwrap()
+				.unwrap()
+				.unwrap();
+			assert_eq!(frame.payload, group.sequence.to_be_bytes().as_slice());
+			assert!(
+				moq_clock::timeout(TIMEOUT, group.read_frame())
+					.await
+					.unwrap_or_else(|_| panic!("relay={relay}: group {} never finished", group.sequence))
+					.unwrap()
+					.is_none()
+			);
+		}
+		sequences.sort_unstable();
+		assert_eq!(sequences, [0, 1]);
 	}
 }
