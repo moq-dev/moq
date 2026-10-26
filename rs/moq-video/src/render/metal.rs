@@ -73,6 +73,13 @@ pub(super) fn imports(buffer: &PixelBuffer) -> bool {
 	layout_of(CVPixelBufferGetPixelFormatType(buffer.buffer())).is_some()
 }
 
+/// Whether [`Import::new`] takes `device`: only a Metal one has the `MTLDevice`
+/// the texture cache binds to.
+pub(super) fn supports(device: &wgpu::Device) -> bool {
+	// SAFETY: the handle is only checked for presence and dropped at once.
+	unsafe { device.as_hal::<wgpu::hal::api::Metal>() }.is_some()
+}
+
 /// A `CVMetalTextureCache` bound to the renderer's Metal device.
 ///
 /// Held across frames on purpose: the cache is what recycles the per-IOSurface
@@ -91,8 +98,8 @@ unsafe impl Send for Import {}
 impl Import {
 	/// Build a texture cache on the same `MTLDevice` wgpu is rendering with.
 	///
-	/// Errors when the device is not a Metal one: a caller running wgpu's
-	/// Vulkan or GL backend on macOS decodes and captures with `Output::Cpu`.
+	/// Errors when the device is not a Metal one, for which
+	/// [`output`](super::output) picks `Output::Cpu`.
 	pub fn new(device: &wgpu::Device) -> Result<Self, Error> {
 		// SAFETY: the handle is only read to create the cache, and it is
 		// dropped before this returns, so nothing outlives the guard.
@@ -128,7 +135,7 @@ impl Import {
 		let format = CVPixelBufferGetPixelFormatType(buffer.buffer());
 		let Some((layout, range)) = layout_of(format) else {
 			return Err(err(format!(
-				"cannot import pixel format {format:#x}; decode or capture with Output::Render, which delivers it as CPU frames"
+				"cannot import pixel format {format:#x}; decode or capture with render::output(&device), which delivers it as CPU frames"
 			)));
 		};
 

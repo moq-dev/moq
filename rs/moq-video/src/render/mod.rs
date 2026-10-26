@@ -39,8 +39,7 @@
 //! to enable that import. A CPU frame is uploaded as planes. Any other GPU
 //! surface, and any import that fails, is an error rather than a download, so
 //! a frame's path is settled where it is produced: decode or capture with
-//! [`Output::Render`](crate::Output::Render) to receive only frames that draw
-//! here.
+//! [`output`] of the device to receive only frames that draw here.
 //!
 //! Enabled by the non-default `render` feature, which is what pulls in `wgpu`.
 
@@ -49,6 +48,7 @@ mod renderer;
 mod source;
 
 pub(crate) use source::imports;
+pub use source::output;
 
 #[cfg(all(target_os = "linux", feature = "dmabuf"))]
 mod dmabuf;

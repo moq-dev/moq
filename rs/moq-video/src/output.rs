@@ -32,8 +32,9 @@ pub enum Output {
 	///
 	/// The renderer refuses the GPU surfaces it cannot import, so a source
 	/// feeding one asks for this instead of guessing which backend it will get.
-	/// The device still needs what the import does, such as
-	/// `VULKAN_EXTERNAL_MEMORY_DMA_BUF` for a Linux DMA-BUF.
+	/// Says nothing about the device, which may be unable to import at all:
+	/// `render::output` picks this only for a device that can, and
+	/// [`Cpu`](Self::Cpu) otherwise.
 	Render,
 }
 

@@ -259,9 +259,10 @@ impl<O: Output> Media<O> {
 					let max_delay = self.args.video_max_delay(&snapshot.audio);
 					let opened = async {
 						// The window's renderer refuses a GPU surface it cannot import, so
-						// the decoder downloads those instead.
+						// the decoder downloads those instead, all of them on a device
+						// that imports none.
 						let mut decode = moq_video::decode::Config::new();
-						decode.output = moq_video::Output::Render;
+						decode.output = self.output.render().await;
 						let decoder = moq_video::decode::Sink::open(config, &decode).await?;
 						let track = rendition.track(hang::catalog::Reference::track(config, name))?;
 						let mut subscriber = track

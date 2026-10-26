@@ -107,5 +107,6 @@ encoder cannot keep up with are dropped there rather than delaying the stream.
 Sources make the opposite trip. A frame already on the GPU is drawn where it
 lies: PipeWire camera and VA-API decode DMA-BUFs on Linux, given a Vulkan
 driver that imports them, and NV12 capture and VideoToolbox decode surfaces on
-macOS. Every other source, every source on Windows, and every still image
-delivers its frames from the CPU, which the compositor uploads.
+macOS. Every other source, every source on Windows or on a GPU that cannot
+import, and every still image delivers its frames from the CPU, which the
+compositor uploads.

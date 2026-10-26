@@ -75,7 +75,7 @@ impl Config {
 /// A CPU frame ([`Surface::I420`](crate::Surface::I420)) is uploaded. A GPU
 /// frame is imported without a round trip through the CPU, and one this
 /// platform has no importer for is an error rather than a hidden download: ask
-/// the decoder or capture for [`Output::Render`](crate::Output::Render) and it
+/// the decoder or capture for [`output`](super::output) of the device and it
 /// only hands over frames that draw here.
 ///
 /// One renderer draws one video. It caches the pipeline, the plane textures and
@@ -500,6 +500,34 @@ mod tests {
 		renderer
 			.render(&solid(Size::new(8, 8), [255, 0, 0, 255]))
 			.expect("a CPU frame after the refusal");
+	}
+
+	/// [`output`](super::super::output) keeps GPU frames only for a device that
+	/// imports them, so a source feeding a device without the import feature
+	/// decodes to the CPU instead of handing over DMA-BUFs it would refuse.
+	#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+	#[tokio::test]
+	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
+	async fn the_output_follows_the_device() {
+		let instance = wgpu::Instance::default();
+		let adapter = instance
+			.request_adapter(&wgpu::RequestAdapterOptions::default())
+			.await
+			.expect("a GPU adapter");
+		let open = |features| {
+			adapter.request_device(&wgpu::DeviceDescriptor {
+				required_features: features,
+				..Default::default()
+			})
+		};
+
+		let (without, _queue) = open(wgpu::Features::empty()).await.expect("a GPU device");
+		assert_eq!(super::super::output(&without), crate::Output::Cpu);
+
+		let import = wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF;
+		assert!(adapter.features().contains(import), "the adapter imports DMA-BUFs");
+		let (with, _queue) = open(import).await.expect("a DMA-BUF-capable GPU device");
+		assert_eq!(super::super::output(&with), crate::Output::Render);
 	}
 
 	/// Capture packed PipeWire DMA-BUFs, import them through Vulkan, and turn

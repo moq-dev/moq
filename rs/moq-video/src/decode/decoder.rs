@@ -73,8 +73,9 @@ pub struct Config {
 	/// Ask for it when the pixels are headed for the CPU anyway, since a GPU
 	/// surface handed out and downloaded later costs an allocation the backend
 	/// could have skipped. [`Output::Render`] keeps the surfaces
-	/// `render::Renderer` imports and downloads the rest, which is what a
-	/// player that draws asks for.
+	/// `render::Renderer` imports and downloads the rest; a player that draws
+	/// asks `render::output` of its device, which picks it where the device
+	/// imports.
 	pub output: Output,
 	/// Ask the decoder to scale its output to this size (both dimensions even)
 	/// instead of the stream's native one.

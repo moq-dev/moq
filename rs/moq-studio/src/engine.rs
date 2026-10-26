@@ -200,7 +200,12 @@ impl Engine {
 		let bus = moq_audio::bus::Bus::new(Default::default())?;
 		let subscribe = moq_tokio::origin::spawn();
 		let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
-		let sources = Sources::new(source::Context::new(bus.clone(), subscribe.consume(), dir));
+		let sources = Sources::new(source::Context {
+			bus: bus.clone(),
+			origin: subscribe.consume(),
+			dir,
+			output: moq_video::render::output(&gpu.device),
+		});
 		let mut compositor = Compositor::new(&gpu.device, &gpu.queue, collection.canvas)?;
 		compositor.set_preview(collection.scenes.first().map(|scene| scene.name.clone()));
 		compositor.cut();

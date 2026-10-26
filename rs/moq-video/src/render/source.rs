@@ -1,7 +1,7 @@
 //! Getting a frame's pixels into textures the shader can sample: a zero-copy
 //! import for a GPU frame, an upload for a CPU one.
 
-use crate::{Color, Error, I420, Size, Surface};
+use crate::{Color, Error, I420, Output, Size, Surface};
 
 /// How the planes of a [`Source`] are arranged, which picks the fragment shader.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,7 +60,7 @@ impl Cache {
 	/// Alias a GPU frame's memory as textures, no download.
 	///
 	/// Errors for a surface this platform has no importer for, naming the
-	/// [`Output`](crate::Output) that keeps such frames away from the renderer.
+	/// [`output`] that keeps such frames away from the renderer.
 	pub fn import(&mut self, device: &wgpu::Device, surface: &Surface) -> Result<Source, Error> {
 		match surface {
 			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
@@ -80,7 +80,7 @@ impl Cache {
 			other => {
 				let _ = device;
 				Err(Error::Unsupported(format!(
-					"the renderer has no importer for {} surfaces; decode or capture with Output::Render, which delivers them as CPU frames",
+					"the renderer has no importer for {} surfaces; decode or capture with render::output(&device), which delivers them as CPU frames",
 					kind(other)
 				)))
 			}
@@ -117,10 +117,27 @@ impl Cache {
 	}
 }
 
-/// Whether [`Cache::import`] takes `surface`: what
-/// [`Output::Render`](crate::Output::Render) keeps on the GPU.
+/// The [`Output`] to decode and capture with for a [`Renderer`](super::Renderer) on `device`.
 ///
-/// Says nothing about the device, which still needs the import's features.
+/// [`Output::Render`] when `device` can import this platform's GPU frames, and
+/// [`Output::Cpu`] when it cannot, such as wgpu's GL backend, a Linux device
+/// opened without [`wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF`], or a
+/// platform with no importer.
+pub fn output(device: &wgpu::Device) -> Output {
+	#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+	let imports = super::dmabuf::supports(device);
+	#[cfg(apple)]
+	let imports = super::metal::supports(device);
+	#[cfg(not(any(apple, all(target_os = "linux", feature = "dmabuf"))))]
+	let imports = {
+		let _ = device;
+		false
+	};
+	if imports { Output::Render } else { Output::Cpu }
+}
+
+/// Whether [`Cache::import`] takes `surface` on a device [`output`] picks
+/// [`Output::Render`] for: what that output keeps on the GPU.
 pub(crate) fn imports(surface: &Surface) -> bool {
 	match surface {
 		#[cfg(all(target_os = "linux", feature = "dmabuf"))]

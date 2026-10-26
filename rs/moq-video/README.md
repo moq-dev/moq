@@ -227,8 +227,10 @@ refused rather than narrowed to 8-bit 4:2:0. Any other rendition yields
 CPU pixels, `Output::Cpu` delivers every picture as `Surface::I420`,
 decoded straight to system memory where the backend can and downloaded where it
 cannot, and `Output::Render` keeps only the surfaces `render::Renderer` imports
-and downloads the rest, which is what a player asks for since the renderer
-refuses any other GPU surface. `capture::Config::output` makes the same choice
+and downloads the rest. The renderer refuses any other GPU surface, so a player
+decodes with `render::output(&device)`, which picks `Output::Render` for a
+device that can import and `Output::Cpu` for one that cannot (wgpu's GL
+backend, or Linux without DMA-BUF import). `capture::Config::output` makes the same choice
 for captured frames. `decode::Config::scale_hint` asks a decoder with a hardware scaler
 (NVDEC) to emit that size; it is a hint, so check `Frame::size` and use
 `Frame::resize` for the exact size. `decode::Consumer` takes `decode::Options`,
