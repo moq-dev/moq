@@ -2930,6 +2930,7 @@ impl Consumer {
 	}
 
 	/// Read the next frame as stored, so a frame in segments stays in them.
+	#[cfg(feature = "async")]
 	fn poll_read_cached(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Cached>>> {
 		self.poll_read_as(waiter, Prefetch::pop_cached)
 	}

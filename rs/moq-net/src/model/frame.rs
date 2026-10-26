@@ -160,6 +160,7 @@ impl Payload {
 		}
 	}
 
+	#[cfg(feature = "async")]
 	pub fn is_empty(&self) -> bool {
 		self.len() == 0
 	}
@@ -706,12 +707,6 @@ impl FrameBuf {
 		Bytes::from_owner(Filled { segment, len }).slice(start - base..)
 	}
 
-	/// The payload from `start` on in one buffer, copied only when it spans segments.
-	/// Only valid once the frame is fully written.
-	fn contiguous(&self, start: usize) -> Bytes {
-		self.freeze().contiguous(start)
-	}
-
 	/// Heap bytes the buffer currently holds for the payload.
 	#[cfg(test)]
 	pub(super) fn allocated(&self) -> usize {
@@ -1242,7 +1237,7 @@ impl Consumer {
 				Poll::Pending
 			}
 		})?);
-		let out = buf.contiguous(read_idx);
+		let out = buf.freeze().contiguous(read_idx);
 		self.read_idx = size;
 		self.stats.bytes(out.len() as u64);
 		Poll::Ready(Ok(out))
@@ -1293,7 +1288,7 @@ mod tests {
 
 		assert_eq!(early, &b"abc"[..]);
 		assert_eq!(buf.slice(3, 7), &b"defg"[..]);
-		assert_eq!(buf.contiguous(0), &b"abcdefghij"[..]);
+		assert_eq!(buf.freeze().contiguous(0), &b"abcdefghij"[..]);
 	}
 
 	/// A reader on another thread slicing while the writer reallocates only ever sees
@@ -1323,7 +1318,7 @@ mod tests {
 			buf.append(chunk);
 		}
 		reader.join().unwrap();
-		assert_eq!(buf.contiguous(0), payload);
+		assert_eq!(buf.freeze().contiguous(0), payload);
 	}
 
 	/// A frame larger than a segment allocates only the segment being written, whatever it
@@ -1365,8 +1360,8 @@ mod tests {
 			};
 			let lens: Vec<usize> = chain.segments.iter().map(Bytes::len).collect();
 			assert_eq!(lens, [SEGMENT, SEGMENT, 100]);
-			assert_eq!(buf.contiguous(0), payload);
-			assert_eq!(buf.contiguous(SEGMENT + 1), payload[SEGMENT + 1..]);
+			assert_eq!(buf.freeze().contiguous(0), payload);
+			assert_eq!(buf.freeze().contiguous(SEGMENT + 1), payload[SEGMENT + 1..]);
 		}
 	}
 
