@@ -42,6 +42,7 @@ default:
 harness:
     ./lib/harness.test.sh
     ./interop/relay-log.test.sh
+    python3 ../rs/moq-gst/smoke.test.py
     python3 interop/report.test.py
     python3 interop/tone.test.py
     cd .. && bun test {{ replace(harness_compat_tests, "\n", " ") }}
