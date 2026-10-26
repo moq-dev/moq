@@ -76,7 +76,6 @@ pub(crate) struct Set {
 }
 
 impl Tokens {
-	#[cfg(any(feature = "_transport", test))]
 	pub(crate) fn new(tokens: Vec<Token>) -> Self {
 		Self(kio::Producer::new(Set {
 			tokens,
