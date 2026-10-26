@@ -12,10 +12,10 @@ Publisher epochs already support this: the same epoch on several relays
 resumes mid-group, and a restart is a newer epoch (`doc/concept/moq-lite.md`,
 Publisher epochs and Multiple CDNs). The studio dials one relay today. Encode
 once and publish to both. The second relay is configured, never inferred.
-Both links must negotiate a version with publisher epochs; a relay that does
-not is refused at setup with the reason, rather than failing over as a
-restart. Show
-each relay's state in the health panel.
+Both links must negotiate the same protocol and draft, one with publisher
+epochs, since a copy whose track info differs ends the track; a relay that
+does not match is refused at setup with the reason, rather than failing over
+as a restart. Show each relay's state in the health panel.
 
 ## Related
 
