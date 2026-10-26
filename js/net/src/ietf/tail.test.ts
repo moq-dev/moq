@@ -176,7 +176,8 @@ test("a SUBSCRIPTION_ENDED PUBLISH_DONE drains, then aborts the track", async ()
 
 	expect(await readAll(await reader.recvGroup())).toEqual(["0.0"]);
 	expect(await reader.closed).toBeInstanceOf(Error);
-	expect(reader.end()).toBeUndefined();
+	// No end was declared: the track fails rather than finish.
+	await expect(reader.finished()).rejects.toBeInstanceOf(Error);
 });
 
 test("an UNAUTHORIZED PUBLISH_DONE reads as the revocation a moq-lite peer sends", async () => {
