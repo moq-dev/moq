@@ -506,11 +506,26 @@ impl Client {
 		ietf::max_age::into_setup(&mut parameters, ietf_encoding);
 		ietf::active_count::into_setup(&mut parameters, ietf_encoding);
 		ietf::flate::into_setup(&mut parameters, ietf_encoding);
-		let parameters = parameters.encode_bytes(ietf_encoding)?;
+
+		// With no version ALPN, the whole offer goes in VERSIONS, and the version list keeps
+		// what an older server can run on this stream.
+		let mut versions: coding::Versions = supported.clone().into();
+		if matches!(session.protocol(), Some(ALPN_LITE) | None) {
+			parameters.set_bytes(
+				ietf::ParameterBytes::Versions,
+				versions.encode_bytes(ietf_encoding)?.into(),
+			);
+			versions = supported
+				.iter()
+				.copied()
+				.filter(|v| !v.hands_off())
+				.collect::<Vec<_>>()
+				.into();
+		}
 
 		let client = setup::Client {
-			versions: supported.clone().into(),
-			parameters,
+			versions,
+			parameters: parameters.encode_bytes(ietf_encoding)?,
 		};
 
 		stream.writer.encode(&client).await?;
@@ -523,11 +538,10 @@ impl Client {
 			.copied()
 			.ok_or(Error::Version)?;
 
-		// Lite03 and newer have no session on this stream: the server ends it after its SETUP,
-		// and the session continues as that version's ALPN would. Reading to the end first
-		// keeps the drop from stopping a reply the server is still waiting to have acknowledged.
+		// The server ends the stream after its SETUP. Reading to the end first keeps the drop
+		// from stopping a reply the server is still waiting to have acknowledged.
 		if let Version::Lite(v) = version
-			&& !matches!(v, lite::Version::Lite01 | lite::Version::Lite02)
+			&& version.hands_off()
 		{
 			std::future::poll_fn(|cx| stream.reader.poll_closed(cx)).await?;
 			drop(stream);
@@ -967,9 +981,27 @@ mod tests {
 			setup::Client::decode,
 		)
 		.unwrap();
-		let advertised: Vec<Version> = setup.versions.iter().map(|v| Version::try_from(*v).unwrap()).collect();
+		let decode = |versions: &crate::coding::Versions| -> Vec<Version> {
+			versions.iter().map(|v| Version::try_from(*v).unwrap()).collect()
+		};
+		// A server that predates VERSIONS runs any lite version it recognizes on this stream,
+		// so the version list leaves out those that hand off.
 		assert_eq!(
-			advertised,
+			decode(&setup.versions),
+			vec![
+				Version::Lite(lite::Version::Lite02),
+				Version::Lite(lite::Version::Lite01),
+				Version::Ietf(ietf::Version::Draft14),
+			]
+		);
+		let (params, _) = ietf::Parameters::decode_slice(&setup.parameters, ietf::Version::Draft14).unwrap();
+		let (offered, _) = crate::coding::Versions::decode_slice(
+			params.get_bytes(ietf::ParameterBytes::Versions).unwrap(),
+			ietf::Version::Draft14,
+		)
+		.unwrap();
+		assert_eq!(
+			decode(&offered),
 			vec![
 				Version::Lite(lite::Version::Lite03),
 				Version::Lite(lite::Version::Lite02),

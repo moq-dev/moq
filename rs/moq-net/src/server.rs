@@ -8,7 +8,7 @@ use crate::transport::poll::Session as _;
 use crate::{
 	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_22, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05,
 	ALPN_LITE_06, ALPN_LITE_07_WIP, Consume, Error, NEGOTIATED, Session, SessionError, Version, Versions,
-	coding::{Decode, Encode, Stream},
+	coding::{self, Decode, Encode, Stream},
 	ietf, lite,
 	setup::{self, Role},
 	stats,
@@ -371,19 +371,30 @@ impl Server {
 		// Stats attach in `ok()`: a caller may still replace them on the handshake.
 		let mut stream = Stream::accept(&mut session, encoding).await?;
 		let (client, client_setup_size) = stream.reader.decode_sized::<setup::Client>().await?;
+		let ietf_encoding = ietf::Version::try_from(encoding).map_err(|_| Error::Version)?;
+		let (params, _) = ietf::Parameters::decode_slice(&client.parameters, ietf_encoding)?;
 
-		let version = client
-			.versions
+		// VERSIONS, when present, is the client's whole offer.
+		let offered = match params.get_bytes(ietf::ParameterBytes::Versions) {
+			Some(bytes) => {
+				let (offered, size) = coding::Versions::decode_slice(bytes, ietf_encoding)?;
+				if size != bytes.len() {
+					return Err(Error::Decode(crate::DecodeError::TrailingBytes));
+				}
+				offered
+			}
+			None => client.versions,
+		};
+		let version = offered
 			.iter()
 			.flat_map(|v| Version::try_from(*v).ok())
 			.find(|v| supported.contains(v))
 			.ok_or(Error::Version)?;
 
-		// Lite03 and newer have no session on this stream: answer, close it, and continue as
-		// that version's ALPN would. Waiting for the acknowledgement keeps the reply from being
-		// discarded by the reset a dropped stream sends.
+		// Answer, close the stream, and continue as that version's ALPN would. Waiting for the
+		// acknowledgement keeps the reply from being discarded by the reset a dropped stream sends.
 		if let Version::Lite(v) = version
-			&& !matches!(v, lite::Version::Lite01 | lite::Version::Lite02)
+			&& version.hands_off()
 		{
 			let Stream { mut writer, .. } = stream;
 			writer
@@ -401,7 +412,6 @@ impl Server {
 		// in its SETUP just like lite-05.
 		let (path, token, request_id_max, peer_declared, peer_implementation) = match version {
 			Version::Ietf(v) => {
-				let (params, _) = ietf::Parameters::decode_slice(&client.parameters, v)?;
 				let path = match params.get_bytes(ietf::ParameterBytes::Path) {
 					Some(bytes) => Some(
 						std::str::from_utf8(bytes)

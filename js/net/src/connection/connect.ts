@@ -17,7 +17,7 @@ import { isWebTransportSupported } from "./browser.ts";
 import type { Established } from "./established.ts";
 import * as Extensions from "./extensions.ts";
 import { DISCOVERY_REMOVED, forwardAnnounced } from "./forward.ts";
-import { exchangeSetup, legacyPeerImplementation } from "./handshake.ts";
+import { exchangeSetup, handsOff, legacyPeerImplementation } from "./handshake.ts";
 import { type Credential, credential, fallback, hold } from "./tokens.ts";
 
 // Default head start for WebTransport before attempting the WebSocket fallback.
@@ -488,7 +488,6 @@ async function connectTransport(
 // Negotiate the MoQ protocol over an established transport. The caller races this against
 // the session closing so a close code is not lost behind a failed or stalled SETUP stream.
 // `setup` lists the versions a `moql` or ALPN-less session offers in SETUP.
-// A moq-lite version newer than 02 selected there continues as its ALPN would.
 async function negotiate(
 	url: URL,
 	session: WebTransport,
@@ -543,15 +542,19 @@ async function negotiate(
 	Ietf.activeCountIntoSetup(params, setupVersion);
 	if (wiring.token) Ietf.tokenIntoSetup(params, { kind: Ietf.TOKEN_OUT_OF_BAND, value: wiring.token }, setupVersion);
 
-	const client = new Ietf.ClientSetup({
-		versions:
-			setupVersion === Ietf.Version.DRAFT_16
-				? [Ietf.Version.DRAFT_16]
-				: setupVersion === Ietf.Version.DRAFT_15
-					? [Ietf.Version.DRAFT_15]
-					: setup,
-		parameters: params,
-	});
+	// With no version ALPN, the whole offer goes in VERSIONS, and the version list keeps what an
+	// older server can run on this stream.
+	let offered: number[];
+	let versions: number[];
+	if (setupVersion === Ietf.Version.DRAFT_14) {
+		offered = setup;
+		versions = setup.filter((v) => !handsOff(v));
+		Ietf.versionsIntoSetup(params, offered);
+	} else {
+		offered = versions = [setupVersion];
+	}
+
+	const client = new Ietf.ClientSetup({ versions, parameters: params });
 	await Message.write(stream.writer, Lite.StreamId.ClientCompat, client, setupVersion);
 
 	const serverCompat = await stream.reader.u53();
@@ -560,15 +563,11 @@ async function negotiate(
 	}
 
 	const server = await Ietf.ServerSetup.decode(stream.reader, setupVersion);
-	if (!client.versions.includes(server.version)) {
+	if (!offered.includes(server.version)) {
 		throw new Error(`server selected an unoffered version: 0x${server.version.toString(16)}`);
 	}
 
-	if (
-		server.version !== Lite.Version.DRAFT_01 &&
-		server.version !== Lite.Version.DRAFT_02 &&
-		isLite(server.version)
-	) {
+	if (handsOff(server.version)) {
 		// The server ends the stream after its SETUP; nothing else may follow.
 		if (!(await stream.reader.done())) throw new Error("unexpected data after SERVER_SETUP");
 		stream.close();

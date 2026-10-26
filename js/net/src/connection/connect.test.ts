@@ -2,8 +2,11 @@ import { expect, jest, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano, sleep } from "@moq/clock";
 import { ConnectTimeout, SessionCode, SessionError } from "../error.ts";
 import * as Ietf from "../ietf/index.ts";
+import * as Message from "../ietf/message.ts";
+import { StreamId } from "../lite/stream.ts";
 import { ALPN, ALPN_05, ALPN_06, ALPN_07_WIP, Version as LiteVersion } from "../lite/version.ts";
 import { createMockTransportPair } from "../mock.ts";
+import { Stream } from "../stream.ts";
 import { accept } from "./accept.ts";
 import { type ConnectProps, connect as connectSession } from "./connect.ts";
 
@@ -420,6 +423,32 @@ test("SETUP refuses a version the client did not name", async () => {
 			connect(url, { versions: ["moq-lite-07-wip", "moq-lite-06"], websocket: { enabled: false } }),
 		).rejects.toThrow("server selected an unoffered version: 0xff0dad05");
 		(await server)?.abort();
+	} finally {
+		restore();
+	}
+});
+
+// A server that predates VERSIONS runs the first moq-lite version it recognizes in the version list
+// on the SETUP stream, so the list must hold only lite-01/02 for it to pick.
+test("SETUP falls back to the version list with a server that ignores VERSIONS", async () => {
+	const pair = createMockTransportPair("");
+	const restore = stubWebTransport(pair.client);
+	try {
+		const legacy = (async () => {
+			const stream = await Stream.accept(pair.server, Ietf.Version.DRAFT_14);
+			if (!stream) throw new Error("no SETUP stream");
+			expect(await stream.reader.u53()).toBe(StreamId.ClientCompat);
+			const setup = await Ietf.ClientSetup.decode(stream.reader, Ietf.Version.DRAFT_14);
+			const version = setup.versions.find((v) => Object.values(LiteVersion).includes(v as LiteVersion));
+			if (version === undefined) throw new Error("no lite version listed");
+			const reply = new Ietf.ServerSetup({ version, parameters: new Ietf.SetupOptions() });
+			await Message.write(stream.writer, StreamId.ServerCompat, reply, Ietf.Version.DRAFT_14);
+			return stream;
+		})();
+		const client = await connect(url, { versions: ["moq-lite-06", "moq-lite-02"], websocket: { enabled: false } });
+		expect(client.version).toBe("moq-lite-02");
+		client.abort();
+		(await legacy).close();
 	} finally {
 		restore();
 	}
