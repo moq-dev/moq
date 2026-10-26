@@ -106,11 +106,6 @@ impl Server {
 		self
 	}
 
-	/// Set both publish and subscribe from one shared [`origin::Producer`].
-	pub fn with_origin(self, origin: origin::Producer) -> Self {
-		self.with_publisher(&origin).with_subscriber(origin)
-	}
-
 	/// Cap what each client can make its session hold. Defaults to [`session::Limits::default`](crate::session::Limits::default).
 	pub fn with_limits(mut self, limits: crate::session::Limits) -> Self {
 		self.limits = limits;
@@ -181,6 +176,7 @@ impl Server {
 				cost: None,
 				// Filled by `lite::start` from the attached origin handles.
 				hop: None,
+				token: None,
 				ietf: self.extensions.ietf && version.has_ietf(),
 				implementation: self.implementation(),
 			}
@@ -286,12 +282,15 @@ impl Server {
 			}
 			PausedHandshake::IetfModern(_) | PausedHandshake::Legacy(_) => false,
 		});
+		let token = match &handshake {
+			PausedHandshake::LiteSetup { client_setup, .. } => client_setup.setup.token.clone(),
+			_ => None,
+		};
 		Ok(Handshake {
 			path,
 			role,
 			origin,
-			// moq-lite carries no SETUP token.
-			token: None,
+			token,
 			peer_implementation,
 			assigned_hop: crate::Hop::random(),
 			auth,
@@ -600,6 +599,7 @@ impl PausedIetfModern {
 			version,
 			path: None,
 			authority: None,
+			token: None,
 			peer_setup_stream: Some(peer_setup.stream),
 			peer_declared: Some(peer_setup.declared),
 			auth: auth.clone(),
@@ -742,6 +742,7 @@ impl PausedLegacy {
 					version: v,
 					path: None,
 					authority: None,
+					token: None,
 					peer_setup_stream: None,
 					peer_declared: Some(peer_declared),
 					auth: auth.clone(),
@@ -847,10 +848,11 @@ impl Handshake {
 		self.auth.handle().requests()
 	}
 
-	/// The credential the client presented in its SETUP's `AUTHORIZATION TOKEN` option.
+	/// The connection credential the client presented in its SETUP: moq-transport's
+	/// `AUTHORIZATION TOKEN` option, or moq-lite-07's Token parameter.
 	///
-	/// Only moq-transport carries one, so moq-lite sessions return `None`. The transport
-	/// has not verified it: authorize on it the way you would a URL token.
+	/// Older moq-lite versions carry none, so they return `None`. The transport has not
+	/// verified it: authorize on it the way you would a URL token.
 	pub fn token(&self) -> Option<&setup::Token> {
 		self.token.as_ref()
 	}
@@ -1060,7 +1062,7 @@ mod tests {
 	/// else is inert.
 	#[derive(Clone)]
 	struct FakeSession {
-		binding: crate::transport::Binding,
+		address: crate::transport::Address,
 		protocol: Option<&'static str>,
 		uni: Arc<Mutex<VecDeque<Vec<u8>>>>,
 		bi: Arc<Mutex<VecDeque<Vec<u8>>>>,
@@ -1073,7 +1075,7 @@ mod tests {
 	impl FakeSession {
 		fn new(protocol: &'static str, uni: impl IntoIterator<Item = Vec<u8>>) -> Self {
 			Self {
-				binding: crate::transport::Binding::InBand,
+				address: crate::transport::Address::Setup,
 				protocol: Some(protocol),
 				uni: Arc::new(Mutex::new(uni.into_iter().collect())),
 				bi: Default::default(),
@@ -1178,8 +1180,8 @@ mod tests {
 		fn max_datagram_size(&self) -> usize {
 			1200
 		}
-		fn binding(&self) -> crate::transport::Binding {
-			self.binding
+		fn address(&self) -> crate::transport::Address {
+			self.address
 		}
 		fn protocol(&self) -> Option<&str> {
 			self.protocol
@@ -1263,6 +1265,7 @@ mod tests {
 			role,
 			cost: None,
 			hop,
+			token: None,
 			ietf: false,
 			implementation: None,
 		}
@@ -1566,11 +1569,11 @@ mod tests {
 	}
 
 	#[moq_clock::test]
-	async fn uri_binding_rejects_setup_path_presence() {
+	async fn uri_address_rejects_setup_path_presence() {
 		for alpn in [ALPN_LITE_05, ALPN_LITE_06, ALPN_LITE_07_WIP] {
 			for path in ["", "/team/room"] {
 				let mut session = FakeSession::new(alpn, [lite05_setup(Some(path), None, None)]);
-				session.binding = crate::transport::Binding::Uri;
+				session.address = crate::transport::Address::Uri;
 				let observed = session.clone();
 				let result = Server::new()
 					.with_versions(alpn.parse::<Version>().unwrap().into())
@@ -1578,7 +1581,7 @@ mod tests {
 					.await;
 				assert!(
 					matches!(result, Err(Error::ProtocolViolation)),
-					"{alpn}: URI binding accepted a SETUP path"
+					"{alpn}: URI address accepted a SETUP path"
 				);
 				assert_eq!(observed.close_code(), Some(3));
 			}
@@ -1586,9 +1589,9 @@ mod tests {
 	}
 
 	#[moq_clock::test]
-	async fn uri_binding_accepts_setup_without_path() {
+	async fn uri_address_accepts_setup_without_path() {
 		let mut session = FakeSession::new(ALPN_LITE_05, [lite05_setup(None, None, None)]);
-		session.binding = crate::transport::Binding::Uri;
+		session.address = crate::transport::Address::Uri;
 		let request = Server::new().accept_request(moq_clock::now(), session).await.unwrap();
 		assert_eq!(request.path(), "");
 	}

@@ -23,6 +23,8 @@ use crate::transport::poll;
 #[derive(Debug, Clone, Default)]
 pub struct SinkError {
 	code: u32,
+	/// The peer reset this one stream with this code, rather than failing the session.
+	stream: Option<u32>,
 }
 
 impl std::fmt::Display for SinkError {
@@ -35,7 +37,14 @@ impl std::error::Error for SinkError {}
 
 impl crate::transport::Error for SinkError {
 	fn session_error(&self) -> Option<(u32, String)> {
-		Some((self.code, "closed".to_string()))
+		match self.stream {
+			Some(_) => None,
+			None => Some((self.code, "closed".to_string())),
+		}
+	}
+
+	fn stream_error(&self) -> Option<u32> {
+		self.stream
 	}
 }
 
@@ -95,6 +104,7 @@ impl Log {
 			})
 			.map(|closed| SinkError {
 				code: closed.expect("closed"),
+				stream: None,
 			})
 	}
 
@@ -560,8 +570,8 @@ impl poll::Session for DeadStreamSession {
 		0
 	}
 
-	fn binding(&self) -> crate::transport::Binding {
-		crate::transport::Binding::InBand
+	fn address(&self) -> crate::transport::Address {
+		crate::transport::Address::Setup
 	}
 	fn protocol(&self) -> Option<&str> {
 		None
@@ -829,8 +839,8 @@ impl poll::Session for SinkSession {
 		self.datagram_size
 	}
 
-	fn binding(&self) -> crate::transport::Binding {
-		crate::transport::Binding::InBand
+	fn address(&self) -> crate::transport::Address {
+		crate::transport::Address::Setup
 	}
 	fn protocol(&self) -> Option<&str> {
 		self.protocol
@@ -905,7 +915,10 @@ pub struct Script {
 #[derive(Clone, Copy, Debug)]
 pub enum Close {
 	Fin,
+	/// Fail the read as a session close would.
 	Reset,
+	/// Reset just this stream with a code, as a peer that gave up on one stream would.
+	ResetStream(u32),
 }
 
 impl poll::Chunks for Script {
@@ -924,6 +937,10 @@ impl poll::Chunks for Script {
 			true => match *self.close.lock().unwrap() {
 				Some(Close::Fin) => Poll::Ready(Ok(None)),
 				Some(Close::Reset) => Poll::Ready(Err(SinkError::default())),
+				Some(Close::ResetStream(code)) => Poll::Ready(Err(SinkError {
+					stream: Some(code),
+					..Default::default()
+				})),
 				None => self.log.poll_closed(self.park.hold(cx)).map(Err),
 			},
 			false => Poll::Ready(Ok(Some(chunk))),
@@ -1229,8 +1246,8 @@ impl poll::Session for ScriptedSession {
 		self.datagram_size
 	}
 
-	fn binding(&self) -> crate::transport::Binding {
-		crate::transport::Binding::InBand
+	fn address(&self) -> crate::transport::Address {
+		crate::transport::Address::Setup
 	}
 	fn protocol(&self) -> Option<&str> {
 		None

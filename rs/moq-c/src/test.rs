@@ -3223,9 +3223,10 @@ fn dynamic_track_request_publishes_media() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// A raw track request already delivered stays acceptable after its broadcast handle is closed.
+/// A raw track request accepted after its broadcast closed is refused, and its subscriber sees the
+/// publisher leave instead of a track that outlives the broadcast.
 #[test]
-fn track_request_accepts_after_the_broadcast_closes() {
+fn track_request_accepted_after_the_broadcast_closes_is_refused() {
 	let origin = id(moq_origin_create());
 	let broadcast = publish_broadcast(origin, b"dynamic-closed");
 	let request_cb = Callback::new();
@@ -3237,10 +3238,11 @@ fn track_request_accepts_after_the_broadcast_closes() {
 
 	let request = id(request_cb.recv());
 	assert_eq!(moq_publish_close(broadcast), 0);
-	let track = id(unsafe { moq_track_request_accept(request, std::ptr::null()) });
-	assert_eq!(moq_publish_track_finish(track), 0);
-	// The subscription ends with the finished track, before its callback's channel is freed.
-	assert_eq!(frame_cb.recv_terminal(), 0);
+	assert_eq!(
+		unsafe { moq_track_request_accept(request, std::ptr::null()) },
+		MOQ_ERROR_BROADCAST_NOT_FOUND
+	);
+	assert!(frame_cb.recv_terminal() < 0, "the subscription ended cleanly");
 	assert_eq!(request_cb.recv_terminal(), 0);
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_origin_close(origin), 0);
@@ -3372,6 +3374,76 @@ fn a_group_request_nobody_reads_is_withdrawn() {
 	assert!(moq_group_request_accept(first) < 0, "the withdrawn request");
 
 	assert_eq!(moq_group_request_free(next), 0);
+	drop(reader);
+	assert_eq!(moq_publish_dynamic_cancel(dynamic), 0);
+	assert_eq!(group_cb.recv_terminal(), 0);
+	assert_eq!(moq_publish_track_finish(track), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// Rejecting a group request fails only the readers waiting on it: the group is not named
+/// dropped, so a later subscriber asks again.
+#[test]
+fn a_rejected_group_request_binds_only_its_readers() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"track-dynamic-refused");
+	let name = b"data";
+	let track =
+		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
+	let group_cb = Callback::new();
+	let dynamic = id(unsafe { moq_publish_track_dynamic(track, Some(channel_callback), group_cb.ptr) });
+
+	// The live feed ran from 10 and ended, so only a fill can serve group 6.
+	{
+		let mut state = State::lock();
+		let producer = state.publish.track_producer(Id::try_from(track).unwrap()).unwrap();
+		producer.start_at(10).unwrap();
+		let mut group = producer.create_group(moq_net::group::Info { sequence: 10 }).unwrap();
+		group
+			.write_frame(moq_net::Timestamp::from_millis(10).unwrap(), &b"live"[..])
+			.unwrap();
+		group.finish().unwrap();
+		producer.finish().unwrap();
+	}
+	let subscribe = || {
+		let subscription = moq_net::track::Subscription::default()
+			.with_max_delay(None)
+			.with_range(6..7);
+		let mut state = State::lock();
+		let producer = state.publish.track_producer(Id::try_from(track).unwrap()).unwrap();
+		producer.subscribe(subscription)
+	};
+	let waiter = kio::Waiter::noop();
+
+	let mut sequence = 0u64;
+	for reject in [
+		|request| moq_group_request_abort(request, 9),
+		|request| moq_group_request_free(request),
+	] {
+		let mut reader = subscribe();
+		assert!(reader.poll_recv_group(&waiter).is_pending());
+		let request = id(group_cb.recv());
+		assert_eq!(unsafe { moq_group_request_sequence(request, &mut sequence) }, 0);
+		assert_eq!(sequence, 6);
+		assert_eq!(reject(request), 0);
+	}
+
+	let mut reader = subscribe();
+	assert!(reader.poll_recv_group(&waiter).is_pending());
+	let request = id(group_cb.recv());
+	let group = id(moq_group_request_accept(request));
+	let payload = b"fetched";
+	assert_eq!(
+		unsafe { moq_publish_group_frame(group, payload.as_ptr(), payload.len(), 6_000) },
+		0
+	);
+	assert_eq!(moq_publish_group_finish(group), 0);
+	let std::task::Poll::Ready(Ok(Some(group))) = reader.poll_recv_group(&waiter) else {
+		panic!("the accepted group reaches the reader");
+	};
+	assert_eq!(group.sequence, 6);
+
 	drop(reader);
 	assert_eq!(moq_publish_dynamic_cancel(dynamic), 0);
 	assert_eq!(group_cb.recv_terminal(), 0);
@@ -4602,6 +4674,60 @@ fn a_stalled_encode_does_not_block_unrelated_calls() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
+/// Closing a broadcast whose encoder is mid-encode waits for that encode without holding the
+/// global lock, so unrelated calls go on meanwhile.
+#[test]
+fn closing_a_broadcast_does_not_block_unrelated_calls_behind_its_encoder() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"video-close-stall-test");
+
+	let input = moq_video_encoder_input {
+		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
+		width: 320,
+		height: 240,
+		framerate: moq_video_frame_rate {
+			numerator: 30,
+			denominator: 1,
+		},
+	};
+	let output = moq_video_encoder_output {
+		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
+		bitrate: 0,
+		gop: 0,
+		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
+		encoder: std::ptr::null(),
+		encoder_len: 0,
+	};
+	let stalled = id(unsafe { moq_encode_video(broadcast, &input, &output, 0) });
+
+	// Hold the lock an encode takes for the duration of its codec call.
+	let handle = State::lock().video.producer(Id::try_from(stalled).unwrap()).unwrap();
+	let held = handle.lock();
+	let closing = std::thread::spawn(move || moq_publish_close(broadcast));
+
+	// Once the close released the broadcast, unrelated calls must not wait on the encoder. On
+	// its own thread so a regression fails this assertion rather than hanging the test.
+	let (tx, rx) = mpsc::channel();
+	let unrelated = std::thread::spawn(move || {
+		let broadcast = Id::try_from(broadcast).unwrap();
+		while State::lock().publish.catalog_snapshot(broadcast).is_ok() {
+			std::thread::yield_now();
+		}
+		let _ = tx.send(moq_origin_create());
+	});
+	let created = rx
+		.recv_timeout(TIMEOUT)
+		.expect("an unrelated call was waiting on the closing encoder");
+	assert!(created > 0, "creating an origin failed while a close was waiting");
+	unrelated.join().unwrap();
+
+	drop(held);
+	assert_eq!(closing.join().unwrap(), 0);
+	assert!(moq_encode_video_finish(stalled) < 0, "the close released the encoder");
+	assert_eq!(moq_origin_close(id(created)), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
 /// A raw video producer rejects a buffer that isn't one picture at the
 /// configured resolution, rather than reinterpreting it.
 #[test]
@@ -5115,6 +5241,45 @@ fn a_null_config_dials_with_the_defaults() {
 		parsed.connect.websocket.resolve().enabled,
 		defaults.connect.websocket.resolve().enabled
 	);
+}
+
+/// The caller's product tokens go ahead of the library's, and a malformed list fails the dial.
+#[test]
+fn implementation_prefixes_the_library() {
+	let core = format!("moq-c/{} {}", env!("CARGO_PKG_VERSION"), moq_net::IMPLEMENTATION);
+	assert_eq!(parsed(&client_config()).connect.implementation, Some(core.clone()));
+
+	let mut config = client_config();
+	let prefix = "moq-obs/0.7.0";
+	config.implementation = prefix.as_ptr() as *const c_char;
+	config.implementation_len = prefix.len();
+	assert_eq!(parsed(&config).connect.implementation, Some(format!("{prefix} {core}")));
+
+	let bad = "moq-obs/0.7.0 ";
+	config.implementation = bad.as_ptr() as *const c_char;
+	config.implementation_len = bad.len();
+	assert!(unsafe { crate::parse_client(Some(&config)) }.is_err());
+}
+
+/// Configured tokens reach the dial in order, and an empty one fails it.
+#[test]
+fn tokens_reach_the_dial() {
+	assert!(parsed(&client_config()).connect.tokens.is_empty());
+
+	let mut config = client_config();
+	let tokens = [moq_str("a"), moq_str("b")];
+	config.tokens = tokens.as_ptr();
+	config.tokens_len = tokens.len();
+	let parsed = parsed(&config).connect.tokens;
+	assert_eq!(
+		parsed.iter().map(|token| token.as_str()).collect::<Vec<_>>(),
+		["a", "b"]
+	);
+
+	let empty = [moq_str("a"), moq_str("")];
+	config.tokens = empty.as_ptr();
+	config.tokens_len = empty.len();
+	assert!(unsafe { crate::parse_client(Some(&config)) }.is_err());
 }
 
 /// The whole point of the `has_*` flags: a caller who zeroes the struct and sets
@@ -5737,6 +5902,19 @@ fn server_accepts_a_session() {
 	let mut query = moq_str("");
 	assert_eq!(unsafe { moq_session_request_query(request, &mut query) }, 0);
 	assert_eq!(borrowed_string(query.data, query.len).as_deref(), Some("jwt=abc"));
+	let mut implementation = moq_str("");
+	assert_eq!(
+		unsafe { moq_session_request_peer_implementation(request, &mut implementation) },
+		0
+	);
+	assert_eq!(
+		borrowed_string(implementation.data, implementation.len),
+		Some(format!(
+			"moq-c/{} {}",
+			env!("CARGO_PKG_VERSION"),
+			moq_net::IMPLEMENTATION
+		))
+	);
 
 	let session_cb = States::new();
 	let session = id(unsafe { moq_session_request_accept(request, served, 0, Some(state_callback), session_cb.ptr) });

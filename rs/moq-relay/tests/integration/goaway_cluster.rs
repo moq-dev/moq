@@ -688,14 +688,19 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 
 	// ── no GOAWAY cascade to the downstream subscriber ───────────────────
 	assert!(
-		sub_connection.draining().expect("connected").peek().is_none(),
+		sub_connection
+			.draining()
+			.expect("connected")
+			.poll(&moq_net::kio::Waiter::noop())
+			.is_pending(),
 		"BOTTOM must not propagate the upstream GOAWAY downstream"
 	);
 	// The async observer must stay pending too (bounded probe: everything
 	// above already synchronized, so 500ms of silence is decisive).
+	let draining = sub_connection.draining().expect("connected");
 	let leaked = tokio::time::timeout(
 		Duration::from_millis(500),
-		sub_connection.draining().expect("connected").recv(),
+		moq_net::kio::wait(|waiter| draining.poll(waiter)),
 	)
 	.await;
 	assert!(

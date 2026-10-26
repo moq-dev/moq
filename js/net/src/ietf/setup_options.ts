@@ -97,20 +97,6 @@ export class SetupOptions {
 		return this.vars.get(id);
 	}
 
-	removeBytes(id: bigint): boolean {
-		if (id % 2n !== 1n) {
-			throw new Error(`invalid parameter id: ${id.toString()}, must be odd`);
-		}
-		return this.bytes.delete(id);
-	}
-
-	removeVarint(id: bigint): boolean {
-		if (id % 2n !== 0n) {
-			throw new Error(`invalid parameter id: ${id.toString()}, must be even`);
-		}
-		return this.vars.delete(id);
-	}
-
 	async encode(w: Writer, version: IetfVersion) {
 		if (version !== Version.DRAFT_14 && version !== Version.DRAFT_15) {
 			// d17+: no count prefix; d16: count prefix

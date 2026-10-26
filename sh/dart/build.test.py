@@ -65,7 +65,7 @@ class BuildTest(unittest.TestCase):
                                              BASH_ENV=os.devnull), capture_output=True, text=True)
             self.assertEqual(result.returncode, 7, result.stderr)
             self.assertEqual(manifest.read_text(), "name: fixture\n")
-            self.assertEqual(list((root / ".scratch").iterdir()), [])
+            self.assertEqual(list((root / ".tmp").iterdir()), [])
 
 
 if __name__ == "__main__":

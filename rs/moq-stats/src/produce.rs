@@ -2176,7 +2176,10 @@ mod tests {
 		assert_eq!(totals.publisher.subscriptions_started, 2);
 		assert_eq!(totals.publisher.active_subscriptions(), 0);
 		assert_eq!(totals.subscriber.bytes, 1500, "the publisher's ingress");
-		assert!(!totals.subscriber.is_announced(), "the publisher left");
+		assert_eq!(
+			totals.subscriber.announces_started, totals.subscriber.announces_ended,
+			"the publisher left"
+		);
 		assert_eq!(totals.sessions.sessions_started, 2);
 		assert_eq!(totals.sessions.active(), 1, "the publisher's session left with it");
 	}

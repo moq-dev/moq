@@ -30,9 +30,16 @@ stdenv.mkDerivation {
   version = "unstable-2026-10-23";
   src = sources.moxygen;
   cmakeDir = "../standalone";
-  # The relay conformance profile: the client accepts track-level priority and
-  # an END_OF_TRACK directly after the last object. Every other check stays.
-  patches = [ ./moxygen-profile.patch ];
+  patches = [
+    # The relay conformance profile: the client accepts track-level priority and
+    # an END_OF_TRACK directly after the last object. Every other check stays.
+    ./moxygen-profile.patch
+    # The test origin answers TRACK_STATUS, which a relay cluster's edge sends
+    # before subscribing, without the GROUP_ORDER parameter draft-18 forbids in
+    # TRACK_STATUS_OK. Drop at the next pin bump once
+    # https://github.com/facebookexperimental/moxygen/pull/264 lands.
+    ./moxygen-track-status.patch
+  ];
   nativeBuildInputs = [
     cmake
     ninja

@@ -67,6 +67,8 @@ export interface ConnectionProps {
 	 * Defaults to true.
 	 */
 	client?: boolean;
+	/** The connection credential the client's SETUP presents, on versions that carry one (lite-07+). */
+	token?: Uint8Array;
 	/** The implementation our SETUP advertises (lite-05+). Defaults to {@link IMPLEMENTATION}; empty sends nothing. */
 	implementation?: string;
 }
@@ -127,6 +129,8 @@ export class Connection implements Established {
 
 	// Whether we dialed; see {@link ConnectionProps.client}.
 	#client: boolean;
+	// See {@link ConnectionProps.token}.
+	#token?: Uint8Array;
 	// What our SETUP advertises; see {@link ConnectionProps.implementation}.
 	#implementation: string;
 	#peerImplementation = Promise.withResolvers<string | undefined>();
@@ -163,9 +167,12 @@ export class Connection implements Established {
 		publish,
 		handle,
 		client = true,
+		token,
 		implementation = IMPLEMENTATION,
 	}: ConnectionProps) {
 		this.url = url;
+		// Older versions carry the credential in the URL instead.
+		this.#token = client && hasAuth(version) ? token : undefined;
 		this.#quic = quic;
 		this.#session = session;
 		// The session stream was opened at the SETUP exchange's version; the rest of it speaks this one.
@@ -223,6 +230,7 @@ export class Connection implements Established {
 		registerWire(this, {
 			consume: (path) => this.#subscriber.consume(path),
 			goaway: this.#goaway,
+			exclusive: false,
 			auth: this.#auth,
 		});
 
@@ -341,7 +349,7 @@ export class Connection implements Established {
 		try {
 			await writer.u53(DataType.Setup);
 			const probe = await probeLevel(this.#quic, this.#version);
-			await new Setup({ probe, hop: this.hop, implementation: this.#implementation }).encode(
+			await new Setup({ probe, hop: this.hop, token: this.#token, implementation: this.#implementation }).encode(
 				writer,
 				this.#version,
 			);
@@ -464,7 +472,7 @@ export class Connection implements Established {
 				throw new ProtocolViolation("invalid SETUP", { cause: err });
 			});
 			if (this.#client && hasClientParameters(setup))
-				throw new ProtocolViolation("server SETUP contains Path or Role");
+				throw new ProtocolViolation("server SETUP contains Path, Role, or Token");
 			if (!this.#client && setup.path !== undefined)
 				throw new ProtocolViolation("Path on a URI-carrying binding");
 			this.#peerSetup.set(setup);

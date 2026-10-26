@@ -894,11 +894,6 @@ impl Traffic {
 		self.dropped.add(other.dropped);
 	}
 
-	/// True while the broadcast is announced (an announce guard is open).
-	pub fn is_announced(&self) -> bool {
-		self.announces_started > self.announces_ended
-	}
-
 	/// Distinct sessions currently subscribed (viewers on the egress side).
 	pub fn active_broadcasts(&self) -> u64 {
 		self.broadcasts_started.saturating_sub(self.broadcasts_ended)
@@ -907,13 +902,6 @@ impl Traffic {
 	/// Track subscriptions currently open.
 	pub fn active_subscriptions(&self) -> u64 {
 		self.subscriptions_started.saturating_sub(self.subscriptions_ended)
-	}
-
-	/// All bytes attributable to this slice: payload plus announce overhead.
-	/// Both inputs are monotonic, so the sum regresses only when the entry was
-	/// garbage collected and re-created.
-	pub fn total_bytes(&self) -> u64 {
-		self.bytes.saturating_add(self.announced_bytes)
 	}
 
 	/// True once every started counter equals its ended counterpart: no guard is
@@ -1093,11 +1081,6 @@ impl Tier {
 		&self.0
 	}
 
-	/// True for the default (unprefixed) tier.
-	pub fn is_default(&self) -> bool {
-		self.0.is_empty()
-	}
-
 	/// The tier label as used in metrics: empty (`""`) for the default tier,
 	/// otherwise the label (e.g. `"region/sjc"`), as stats frames key it.
 	pub fn as_str(&self) -> &str {
@@ -1117,7 +1100,7 @@ impl fmt::Display for Tier {
 /// side statically, so this only surfaces on the aggregate read side.
 ///
 /// This is the direction traffic flowed, not the session role a client advertises
-/// in its SETUP ([`crate::setup::Role`]): one session records on both sides.
+/// in its SETUP: one session records on both sides.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Role {
 	/// Egress: bytes this node published to a peer.
@@ -1434,11 +1417,6 @@ impl Registry {
 		self.shared.is_some()
 	}
 
-	/// The excluded patterns. See [`Config::exclude`].
-	pub fn exclude(&self) -> &Patterns {
-		&self.exclude
-	}
-
 	/// The shared state, panicking for a disabled registry. Tests build enabled
 	/// registries so this is always present.
 	#[cfg(test)]
@@ -1664,16 +1642,6 @@ impl Handle {
 				.counter(reason)
 				.fetch_add(1, Ordering::Relaxed);
 		}
-	}
-
-	/// The registry this handle is tied to.
-	pub fn parent(&self) -> &Registry {
-		&self.stats
-	}
-
-	/// The tier this handle bumps into.
-	pub fn tier(&self) -> &Tier {
-		&self.tier
 	}
 
 	/// Record a connected session under `label` on this tier. Hold
@@ -1949,6 +1917,7 @@ impl Session {
 	///
 	/// Only a context from [`Handle::session`] has an end to classify: on one from
 	/// [`Handle::request`] this records nothing.
+	#[cfg(any(feature = "async", test))]
 	pub(crate) fn end(&self, err: &crate::Error) {
 		let Some(inner) = &self.inner else { return };
 		if !inner.connected {

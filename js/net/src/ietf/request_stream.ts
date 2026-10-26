@@ -1,4 +1,4 @@
-import { error, ProtocolViolation, StreamError } from "../error.ts";
+import { error, ProtocolViolation, StreamCode, StreamError } from "../error.ts";
 import type * as Path from "../path.ts";
 import { Reader, type Stream, type Writer } from "../stream.ts";
 import type { Session } from "./adapter.ts";
@@ -232,6 +232,16 @@ export class RequestStream {
 	async refuse(kind: RequestKind, refusal: Refusal): Promise<void> {
 		await writeRefusal(this.writer, this.#session.version, kind, refusal);
 		this.close();
+	}
+
+	/**
+	 * Cancel the request but keep reading, so {@link next} reports when the peer ends its
+	 * half: FIN where that cancels, a CANCELLED reset otherwise.
+	 */
+	cancel(): void {
+		if (this.#closed) return;
+		if (finCancels(this.#session.version)) this.writer.close();
+		else this.writer.reset(new StreamError(StreamCode.Cancel, { message: "cancel" }));
 	}
 
 	/** End the request cleanly: FIN, and stop reading. Only the first close counts. */

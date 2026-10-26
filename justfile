@@ -52,15 +52,6 @@ bench $BASE="":
 bench-local *args:
     python3 bench/local.py "$@"
 
-# Benchmark selected wrappers against two Rust baselines on this machine.
-[positional-arguments]
-bench-ffi *runners:
-    bench/ffi.sh "$@"
-
-# Compare BoltFFI with UniFFI on one moq-ffi slice. STEPS: build, bench, size, or all.
-bench-ffi-gen *STEPS:
-    bench/ffi-gen/run.sh {{ STEPS }}
-
 # Measure audio group sizes across relay publisher/subscriber and fanout shapes.
 bench-audio:
     bench/run.sh --audio
@@ -103,8 +94,9 @@ check $BASE="":
     sh/dispatch.sh check "$BASE"
 
 # The merge queue runs this gate in one job. The test build also enforces
-# default-feature clippy; distinct feature permutations and optimized binding
-# builds run nightly and on release PRs. Missing tools fail under CI_STRICT.
+# default-feature clippy; selected feature extremes run in the gate, while
+# the full feature matrix and optimized bindings run nightly and on release
+# PRs. Missing tools fail under CI_STRICT.
 
 # Run the merge queue's Linux gate over the branch diff against BASE.
 ci $BASE="":
