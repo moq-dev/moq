@@ -66,6 +66,18 @@ Decisions (maintainer, 2026-10-13):
   not needed for isolation. The `nix/runner` VM module is not the deployment
   target.
 
+Decided 2026-10-26 (maintainer), from 414 queue merges over 2026-10-23 to
+10-26: the queue's latency is serial waiting (98%), not GitHub's overhead
+(about 1 minute per merge), with a median of 18 entries ahead and 12.7% of
+runs failing. GitHub's merge queue cannot test several PRs in one run, so a
+batched gate replaces it on the one self-hosted runner: `quest land`, shared
+through kixelated/quest, lands a tested chain of squash commits by
+fast-forward ([land](/quest/m0/ci/land.md)). This supersedes concurrent queue
+entries on a second runner. Batching gains most when failures are rare, so the
+[flake epic](/quest/m0/test-flakes-2/README.md) moved to m0 and
+`MIGRATE.md` Unreleased sections, a top source of conflicts, stop being
+written per PR.
+
 Decided 2026-10-23 (maintainer), to speed up the serial queue: structural
 changes first (concurrent entries, parallel modules, one test build), then a
 measured nightly-compiler experiment.
@@ -113,7 +125,9 @@ The historical samples locate candidates; they are not controlled benchmarks.
 
 - [Require the release gate](/quest/m0/ci/release-gates.md) - condition: the next cut carries `release-gate.yml`; then release PRs require it
 - [Seed release with API reports](/quest/m0/ci/release-api-seed.md) - the first cut's API diff has a baseline on `release`
-- [Build queue entries concurrently](/quest/m0/ci/queue-concurrency.md) - the queue builds two or more entries at once instead of one
+- [Land main through quest land](/quest/m0/ci/land.md) - one self-hosted runner tests every queued PR as a squash chain and fast-forwards `main` to the longest passing prefix
+- [Bump quest to quest land](/quest/m0/ci/land-bump.md) - condition: kixelated/quest ships `quest land`; then bump the flake input
+- [Feature PRs stop editing MIGRATE.md](/quest/m0/ci/migrate-unreleased.md) - Unreleased sections stop conflicting, and the cut writes each version's section
 - [Measure nightly compiler levers](/quest/m0/ci/nightly-levers.md) - the parallel frontend and Cranelift, adopted only if the numbers beat their risks
 - [Bump to the manifest fix](/quest/m0/ci/mbx-bump.md) - condition: an mbx release contains jdx/mr-boxington#798; then bump the Rust cache's pin
 - [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) - measure the hosted Nightly jobs' hits, restore time, and expiry once the bump lands
