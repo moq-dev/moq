@@ -98,7 +98,6 @@ mod stream_transport {
 
 	use bytes::{BufMut, Bytes, BytesMut};
 	use moq_quic::VarInt;
-	use moq_quic::coding::Codec;
 	use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
 	use tokio::sync::mpsc;
 	use tokio::task::{AbortHandle, JoinHandle};

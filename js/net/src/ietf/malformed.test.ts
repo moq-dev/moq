@@ -57,8 +57,9 @@ async function serving(version: IetfVersion, alpn: string) {
 	const pair = createMockTransportPair(alpn);
 	const control = await Stream.open(pair.server, { version });
 	const origin = new OriginProducer();
-	const broadcast = origin.createBroadcast(Path.from("room"));
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(Path.from("room"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const connection = new Connection({
 		url: new URL("https://example.com"),
