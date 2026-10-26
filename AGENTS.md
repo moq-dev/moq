@@ -17,6 +17,7 @@ Use this checkout's source and docs for repository work; published API reference
 - Dig into the root cause and fix it at the source. Never work around a fixable bug with a retry, sleep, or timeout, nor pass a flaky test by loosening its assertion or disabling production behavior.
 - Fail loud and early. Error on unsupported or malformed input rather than warn and continue: supported or refused.
 - Treat anything received over the network as untrusted. Ask how a hostile peer could abuse it, such as memory, CPU, or state it makes the other side hold, and bound that cost by design (backpressure, flow control, ownership), never with a constant whose only effect is a runtime refusal. A peer must never crash the process, reach another tenant's data, or receive a credential it was not issued.
+- Don't detect a peer reusing or duplicating an ID, name, or sequence unless our own correctness or the hostile-peer bounds above depend on it. A duplicate that only confuses the sender's own requests is its problem; track a high-water mark or nothing.
 - Reproduce bugs before fixing them. Tests must be worth their weight long-term: cover edge cases, not old bugs or trivial values.
 - Unit tests mock time instead of depending on wall-clock timing or sleeps.
 - Impair a network with bufferbloat (a rate limit below the media bitrate, behind a deep but finite queue), whose overflow drops packets too. Random loss may prove correctness, such as retransmits happening, but never gates acceptance or performance.
@@ -62,6 +63,8 @@ A bad shape costs a breaking change in every language, and the surface is huge.
 - Keep things private until a current or planned consumer needs them. Scrutinize every new exported item.
 - Never add `foo_with_x`, `foo_checked`, or a compatibility shim. Make the breaking change to `foo` instead.
 - Let the type system make misuse unrepresentable
+- Decide a fast or supported path at setup from known capabilities, and error otherwise. No API tries a path at runtime and silently falls back, and reporting which path ran is not a fix.
+- Players start and stop on a broadcast's announcement and keep waiting for it to return; a request error is never the restart trigger.
 - A broadcast, track, or group name always means the same content. MoQ has no ETag-style invalidation, so a publisher that reuses a name for different content (such as restarting group numbers) is a bug; publish a new broadcast instead of working around it.
 - Each publisher produces its own stream. With several publishers, the end subscriber decides how to subscribe to them (switch between, combine, or keep separate); never make independent publishers produce identical output so the relay can stitch them.
 - Avoid callback parameters. Return a handle, an event, or a Producer/Consumer split.
@@ -82,6 +85,7 @@ The boundary between packages is extremely important to keep things modular and 
 PRs target `main`, the trunk, where breaking API changes are allowed.
 `release` is what ships; touch it only to cut a release or backport a fix (see `CONTRIBUTING.md`).
 Wire changes should be backwards compatible for any *published* drafts/versions.
+Between our own builds only moq-lite compatibility is guarded, since our implementations always prefer it; moq-transport compatibility matters against third-party implementations.
 An unpublished `-wip` version changes freely, so never defer a better wire design to keep it compatible.
 
 Scratch lives in the checkout's ignored `.tmp/`, not `target/`: build output may live outside the checkout and gets wiped.
@@ -106,12 +110,13 @@ The `quest` binary comes from the kixelated/quest flake input and serves the que
 |---|---|
 | `rs/moq-ffi` | `rs/moq-c`, `{py,swift,kt,dart}/`, `go/wrapper/` (the `go/ffi` and `dart/moq_ffi` bindings regenerate automatically, but a new method needs a hand-written wrapper too, like `py/moq-rs` or `dart/moq`), `cpp/moq`, `cpp/obs/src`, `doc/lib/{py,swift,kt,go,dart,c,cpp}`, `doc/bin/obs.md` |
 | `rs/moq-net` wire/API | `js/net`, `doc/concept`, `drafts/draft-lcurley-moq-lite.md` (if the wire spec changes) |
-| `rs/hang` catalog/container | `js/hang`, `doc/concept`, `drafts/draft-lcurley-moq-hang.md` (if the format spec changes) |
+| `rs/hang` catalog/container (the `m2ts` section is Rust-only) | `js/hang`, `doc/concept`, `drafts/draft-lcurley-moq-hang.md` (if the format spec changes) |
 | `rs/moq-auth` | `js/auth`, `doc/bin/relay/auth.md` |
 | `rs/moq-stats` wire (track names, frame shapes) | `doc/concept/stats.md` |
 | `rs/moq-relay` config/behavior | `doc/bin/relay/` |
 | `rs/moq-cli` | `doc/bin/cli.md` |
 | `rs/moq-gst` | `doc/bin/gstreamer.md` |
+| `rs/moq-scene`, `rs/moq-studio` | `doc/bin/studio.md` |
 | `rs/moq-c` C ABI (`moq.h`) | `doc/lib/c` |
 | `js/{watch,publish}` UI/API | `demo/web` if it consumes the API |
 

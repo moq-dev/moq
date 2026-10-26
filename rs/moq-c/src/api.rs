@@ -1245,6 +1245,15 @@ pub struct moq_client_config {
 	pub implementation: *const c_char,
 	/// The length in bytes of `implementation`.
 	pub implementation_len: usize,
+
+	/// Credentials every dial presents, or NULL for none. The first is the connection
+	/// credential, sent in SETUP and, while an offered version can't carry it there (lite
+	/// before 07), as the URL's `?jwt=`; each other token widens the grant over in-band
+	/// AUTH. A `?jwt=` already in the URL stays the connection credential, and then every
+	/// token rides AUTH. An empty token fails the dial.
+	pub tokens: *const moq_string,
+	/// The number of entries in `tokens`.
+	pub tokens_len: usize,
 }
 
 /// The settings [moq_session_connect] dials with when given NULL.

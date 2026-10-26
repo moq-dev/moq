@@ -145,6 +145,7 @@ export default defineConfig({
 							link: "/bin/cli",
 							items: [{ text: "Inspect a relay", link: "/bin/inspect" }],
 						},
+						{ text: "moq-studio", link: "/bin/studio" },
 						{
 							text: "Gateways",
 							items: [
