@@ -50,6 +50,7 @@ mod request_caps;
 mod restart;
 mod route_change;
 mod routing_contracts;
+mod segmented_frame;
 mod session_close;
 mod session_panic;
 mod settled_end_survives_abort;
