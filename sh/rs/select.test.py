@@ -81,6 +81,13 @@ class SelectTest(unittest.TestCase):
         calls = self.selected("rs/moq-audio/src/lib.rs", action="test")
         self.assertIn("--package moq-video --package moq-audio", calls[0])
 
+    def test_net_session_tests_follow_the_library(self):
+        for path in ("rs/moq-net/src/lib.rs", "rs/moq-json/src/lib.rs",
+                     "rs/moq-net-tests/tests/integration/main.rs"):
+            with self.subTest(path=path):
+                calls = self.selected(path, action="test")
+                self.assertTrue(any("/rs/moq-net-tests#" in call for call in calls), calls)
+
     def test_demo_crate_follows_its_dependencies(self):
         for path in ("demo/carla/bridge/src/lib.rs", "rs/moq-video/src/lib.rs"):
             with self.subTest(path=path):
@@ -133,7 +140,7 @@ class RecipeTest(unittest.TestCase):
 
 
 class FeatureTest(unittest.TestCase):
-    def trace(self, owner, *args):
+    def trace(self, owner, *args, net_features="", expected_returncode=0):
         with tempfile.TemporaryDirectory() as directory:
             scratch = Path(directory)
             calls = scratch / "calls"
@@ -141,22 +148,28 @@ class FeatureTest(unittest.TestCase):
             cargo.write_text(CARGO_STUB)
             cargo.chmod(0o755)
             env = dict(os.environ, LOCAL_SUPERVISED="1", PATH=f"{scratch}:{os.environ['PATH']}",
-                       FEATURE_CALLS=str(calls), BASH_ENV=os.devnull)
+                       FEATURE_CALLS=str(calls), FEATURE_NET_FEATURES=net_features, BASH_ENV=os.devnull)
             result = subprocess.run(["bash", f"sh/rs/{owner}-features.sh", *args],
                                     cwd=ROOT, env=env, capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(result.returncode, expected_returncode, result.stdout + result.stderr)
             return calls.read_text().splitlines()
 
     def test_net_keeps_model_and_browser_contracts(self):
         boundary = self.trace("net")
         exhaustive = self.trace("net", "--all")
-        self.assertTrue(any(" --tests " in call for call in boundary if call.startswith("clippy ")))
-        self.assertFalse(any(" --all-targets " in call for call in boundary))
-        self.assertTrue(any(" --all-targets " in call for call in exhaustive))
         for calls in (boundary, exhaustive):
+            self.assertTrue(any(" --lib " in call for call in calls if call.startswith("clippy ")))
+            self.assertFalse(any(" --all-targets " in call for call in calls))
             self.assertTrue(any(" --target wasm32-unknown-unknown " in call for call in calls))
             self.assertTrue(any(call.startswith("nextest run ") for call in calls))
             self.assertTrue(any(call.startswith("doc ") for call in calls))
+
+    def test_net_rejects_async_from_test_dependencies(self):
+        for feature in ("async", "default", "fuzz"):
+            with self.subTest(feature=feature):
+                calls = self.trace("net", net_features=f'moq-net feature "{feature}"',
+                                   expected_returncode=1)
+                self.assertTrue(all(call.startswith("tree ") for call in calls), calls)
 
     def test_tokio_keeps_extremes_and_crypto_contracts(self):
         boundary = self.trace("tokio")
@@ -187,6 +200,10 @@ if [[ "$*" == 'check --locked -p moq-tokio --no-default-features --features quic
  exit 1
 fi
 if [[ $1 == tree ]]; then
+ if [[ "$*" == *'-i moq-net'* ]]; then
+  printf '%s\n' "${FEATURE_NET_FEATURES:-}"
+  exit 0
+ fi
  echo 'root v1'
  case "$*" in
   *'--features openh264'*) printf 'openh264 v1\nopenh264-sys2 v1\n' ;;
