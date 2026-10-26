@@ -21,7 +21,7 @@ use crate::rml::sessions::StreamMetadata;
 use crate::rml::time::RtmpTimestamp;
 use bytes::Bytes;
 use moq_clock::Instant;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 const FOURCC_CAN_DECODE: u32 = 0x01;
 
@@ -569,11 +569,20 @@ impl ServerSession {
 				}
 			}
 			Value::Object(properties) => {
+				let mut names = HashMap::new();
 				for (key, value) in properties {
 					Self::add_fourcc(&mut support, key);
-					if let Value::Utf8String(name) = value {
-						Self::add_fourcc(&mut support, name);
+					// Only the final value for a key advertises a codec.
+					if let Value::Utf8String(name) = value
+						&& (name.len() == 4 || name == "*")
+					{
+						names.insert(key, name);
+					} else {
+						names.remove(key);
 					}
+				}
+				for name in names.into_values() {
+					Self::add_fourcc(&mut support, name);
 				}
 			}
 			Value::Utf8String(s) => {
@@ -593,15 +602,21 @@ impl ServerSession {
 		let Value::Object(properties) = value else {
 			return support;
 		};
+		let mut codecs = HashSet::new();
 		for (name, value) in properties {
-			if let Value::Number(mask) = value
-				&& (mask as u32) & FOURCC_CAN_DECODE != 0
-			{
-				Self::add_fourcc(&mut support, name);
+			let decode = matches!(value, Value::Number(mask) if (mask as u32) & FOURCC_CAN_DECODE != 0);
+			if name == "*" {
+				support.any = decode;
+			} else if let Ok(fourcc) = <[u8; 4]>::try_from(name.as_bytes()) {
+				if decode {
+					codecs.insert(fourcc);
+				} else {
+					codecs.remove(&fourcc);
+				}
 			}
 		}
+		support.fourccs = codecs.into_iter().collect();
 		support.fourccs.sort_unstable();
-		support.fourccs.dedup();
 		support
 	}
 
