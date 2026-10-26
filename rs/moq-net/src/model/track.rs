@@ -2975,6 +2975,7 @@ impl Producer {
 	/// with it and their writers fail. A reader following the track's routes resumes from
 	/// another one where this copy stopped. Use [`Self::finish`] or [`Self::finish_at`]
 	/// when the end is known.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn close(self) -> Result<()> {
 		let mut state = self.modify()?;
 		state.sealed = true;
@@ -3063,6 +3064,7 @@ impl Producer {
 	/// Its readers' relative and time anchors, other than [`Range::live`](crate::track::Range::live)
 	/// and [`Range::oldest`](crate::track::Range::oldest), fail with [`Error::Unsupported`]
 	/// unless its session's wire lets it resolve them, since it holds only part of the track.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn received(&self) {
 		if let Ok(mut state) = self.modify() {
 			state.received = true;
@@ -5267,7 +5269,7 @@ struct Drift {
 /// Keeps one handed-out group tied to the subscription whose cursor selected it.
 struct GroupExpiry {
 	/// Weak so a handed-out group never joins the track's consumer count, which is what
-	/// [`crate::broadcast::Demand`] reads to decide the track still has readers. A group
+	/// [`Demand`] reads to decide the track still has readers. A group
 	/// outlives the cursor that produced it (a relay serves one for the life of its
 	/// stream), and pinning demand on that would hold an upstream subscription open past
 	/// the last real subscriber.
@@ -7392,18 +7394,13 @@ impl Ordered {
 		self.inner.update(subscription)
 	}
 
-	/// Poll for the track's declared exclusive end, without blocking.
-	pub fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<Position>> {
-		self.inner.poll_finished(waiter)
-	}
-
 	/// Block until the track declares its end, returning the exclusive end position.
 	///
 	/// See [`Subscriber::finished`]: this reports the declared end, not that every group
 	/// has arrived.
 	#[cfg(feature = "async")]
 	pub async fn finished(&mut self) -> Result<Position> {
-		kio::wait(|waiter| self.poll_finished(waiter)).await
+		kio::wait(|waiter| self.inner.poll_finished(waiter)).await
 	}
 
 	/// Poll for the largest location within [`Self::with_range`]; see [`Subscriber::poll_largest`].
@@ -7563,6 +7560,7 @@ impl Request {
 	/// as they arrive, but a relay serving the track waits for the resolved start before
 	/// declaring its own. Applied atomically with [`Self::accept`], before any reader can
 	/// see the track.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn request_start(mut self, floor: impl Into<Option<u64>>) -> Self {
 		self.requested_start = Some(floor.into());
 		self
@@ -14627,7 +14625,10 @@ mod test {
 		drop(first.await.unwrap());
 
 		let hit = consumer.fetch_group(5, None);
-		assert!(!group.abort_unused(Error::Cancel), "the pending hit wants the group");
+		assert!(
+			!group.handle().abort_unused(Error::Cancel),
+			"the pending hit wants the group"
+		);
 		let mut fetched = hit.await.unwrap();
 		assert_eq!(&fetched.read_frame().await.unwrap().unwrap().payload[..], b"head");
 	}
@@ -14683,7 +14684,7 @@ mod test {
 			.unwrap();
 		let group = req.accept(Info::timed()).unwrap();
 		drop(first.await.unwrap());
-		assert!(group.abort_unused(Error::Cancel));
+		assert!(group.handle().abort_unused(Error::Cancel));
 
 		let retry = consumer.fetch_group(5, None);
 		let req = dynamic
