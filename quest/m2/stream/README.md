@@ -22,7 +22,8 @@ Decided 2026-10-25 with the maintainer (mesh planning interview):
   is written and a read has one. It coalesces whatever is buffered with no
   added timer (the local socket's own Nagle or `TCP_NODELAY` still applies).
 - The receiver flushes a frame's bytes to its socket as they arrive, never
-  waiting for the whole frame.
+  waiting for the whole frame, unless the mesh's
+  [authentication](/quest/m2/mesh/sign.md) must verify it first.
   Group finish is a FIN (half-close); a group abort with a code is a reset.
   The implementer measures and records a frame-size cap.
 - Lossless delivery comes from
