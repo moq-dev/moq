@@ -40,7 +40,7 @@ Decided with the maintainer, 2026-10-13:
   detection, additional routing recovery, and total interruption separately.
 - The receiver of a session, a relay or a direct peer, stamps its routing
   identity and ignores a self-named one
-  (decided
+  ([Stamp routing identities](/quest/m1/cluster-routing/stamp.md), decided
   2026-10-25, superseding the 2026-10-14 per-process key proven once per
   session). Keep administrative identity separate; `cluster.id` is removed.
   No cross-path recognition (decided 2026-10-25, maintainer; simpler, one
@@ -122,6 +122,7 @@ setup after the capabilities land.
 
 ## Required
 
+- [Stamp routing identities](/quest/m1/cluster-routing/stamp.md) - every session's receiver stamps its routing identity and ignores a self-named one
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - implement the proven route layer with Rust/JS parity and tiered-cluster acceptance
 - [Outbound federation](/quest/m1/cluster-routing/federation.md) - an outbound-only local relay exchanges authorized broadcasts with the CDN and survives partition/healing
 

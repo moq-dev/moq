@@ -56,7 +56,8 @@ proven key, is not a grant.
 Decided 2026-10-25 (maintainer): no cross-path recognition. The grant
 authorizes paths and binds a key; it carries no routing identity for a
 direct session to file routes under. The receiver stamps the direct session's
-routing identity itself, as for any session, so an
+routing identity itself, as for any session
+([Stamp routing identities](/quest/m1/cluster-routing/stamp.md)), so an
 origin reached through the CDN and directly is two identities, and switching
 between them resumes only across a matching explicit epoch. Simpler: one
 identity regime.

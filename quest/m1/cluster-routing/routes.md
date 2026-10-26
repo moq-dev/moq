@@ -114,7 +114,7 @@ The handoff contract below, decided 2026-10-16, settles claim freshness:
   across a matching explicit epoch; epochless changes preserve Restart.
 - The receiver of a session, a relay or a direct peer, stamps its routing
   identity and ignores a self-named one
-  (decided
+  ([Stamp routing identities](/quest/m1/cluster-routing/stamp.md), decided
   2026-10-25). This supersedes the per-process key shared across an origin's
   live sessions and proven once per session (decided 2026-10-13 and
   2026-10-14): a self-named identity is unverifiable without that proof, and
@@ -659,6 +659,10 @@ ingest or local announce when a peer sends none, so `Instance` collapses to
 Selection retirement, leaving Follow's same-epoch Update/Restart split as
 the only takeover rule. `Route::epoch` stops being optional (a breaking
 API change); no wire change.
+
+## Required
+
+- [Stamp routing identities](/quest/m1/cluster-routing/stamp.md) - every session's own identity is stamped by its receiver, never self-named
 
 ## Related
 
