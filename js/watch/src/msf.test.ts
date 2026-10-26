@@ -267,15 +267,26 @@ test("MSF namespaces preserve self and root references and refuse unrepresentabl
 	expect(() => toHang({ tracks: [{ ...track, namespace: "room/left" }] })).toThrow(
 		"requires the catalog broadcast path",
 	);
-	expect(() =>
-		toHang(
-			{
-				tracks: [
-					{ ...track, namespace: "room/left" },
-					{ ...track, namespace: "room/right" },
-				],
-			},
-			base,
-		),
-	).toThrow("ambiguous");
+	const last = toHang(
+		{
+			tracks: [
+				{ ...track, namespace: "room/left" },
+				{ ...track, namespace: "room/right" },
+			],
+		},
+		base,
+	);
+	const broadcast = last.video?.renditions.video?.broadcast;
+	expect(broadcast && Path.tryResolve(base, broadcast)).toBe(Path.from("room/right"));
+});
+
+test("a later MSF track with a name replaces the earlier one, whatever its role", () => {
+	const video: Msf.Track = { name: "main", packaging: "loc", role: "video", codec: "vp8" };
+	const audio: Msf.Track = { name: "main", packaging: "loc", role: "audio", codec: "opus", samplerate: 48_000 };
+	const root = toHang({ tracks: [video, { ...video, codec: "vp09.00.10.08" }, audio] });
+	expect(root.video).toBeUndefined();
+	expect(root.audio?.renditions.main?.codec).toBe("opus");
+	expect(toHang({ tracks: [video, { ...video, codec: "vp09.00.10.08" }] }).video?.renditions.main?.codec).toBe(
+		"vp09.00.10.08",
+	);
 });

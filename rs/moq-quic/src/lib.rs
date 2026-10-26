@@ -92,8 +92,6 @@ mod cid_generator;
 pub use crate::cid_generator::{ConnectionIdGenerator, InvalidCid, RandomConnectionIdGenerator};
 
 mod token;
-#[cfg(test)]
-use token::NoneTokenStore;
 use token::ResetToken;
 use token::{TokenLog, TokenReuseError, TokenStore};
 

@@ -14,8 +14,9 @@ can still arrive and be served. Making Rust's drops final broke
 `rejoin::rejoined_quiet_catalog_survives_cache_expiry`: a late reader never got
 the catalog's group 0.
 
-Decide (maintainer) whether a reported drop is final. Then change the side that
-differs, the plain cursor and the resume path together, with tests in both
-languages.
+Decided 2026-10-25 (maintainer): a reported drop is not final, as in Rust.
+JS stops recording a reported drop as delivered, so a group that arrives
+later is still served, on the plain cursor and the resume path together,
+with tests in both languages.
 
 Public API: none expected. Wire: none.

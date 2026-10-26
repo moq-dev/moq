@@ -22,8 +22,6 @@ fallback URLs and disabled fallback. Never put real credentials in reports.
 Establish the useful ownership lifetime before changing it. Do not silently
 collapse endpoint-specific behavior into origin-only keys or pick an
 arbitrary TTL; bring a necessary racing-policy decision to the maintainer.
-Recheck the [release audit](https://github.com/moq-dev/moq/pull/6311) for overlap
-before implementation; its current QMux queue scope does not own this set.
 
 Follow the [survey benchmark contract](/quest/m2/performance-survey/README.md):
 baseline first, paired evidence, equivalent work and nightly coverage. A

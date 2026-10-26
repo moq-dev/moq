@@ -14,8 +14,8 @@ once `main` reaches `release`; check with
 The version is `cpp/moq/VERSION`; the plugin's is `cpp/obs/VERSION`. Delete
 this quest once the release exists.
 
-As of 2026-10-20 no `cpp-v*` release exists, and `obs-moq` still publishes
-from the release line's C build (`obs-moq-v0.6.17`, 2026-10-17); the first
+As of 2026-10-25 no `cpp-v*` release exists, and `obs-moq` still publishes
+from the release line's C build (`obs-moq-v0.6.18`, 2026-10-23); the first
 plugin built on the C++ package replaces it at this tag. Decided when the C++ line landed on `main`
 (#4079): the first plugin built on the C++ package must not drop the
 Advanced settings or the dock's protocol and reconnect reason that the moq-c

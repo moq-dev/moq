@@ -47,8 +47,9 @@ first after the next release; frame-granularity sampling then adds the ACK
 hook without making either resolution a release gate.
 
 Decided 2026-10-08: the group-granularity sampler is the
-[viewer lag histogram](/quest/m2/qos/lag-histogram.md), not yet on main (its
-code is on `wip/4133-lag-histogram`), so that quest is Required.
+[viewer lag histogram](/quest/m2/qos/lag-histogram.md), not yet on main (in
+progress as [moq-dev/moq#6791](https://github.com/moq-dev/moq/pull/6791)), so
+that quest is Required.
 
 Tests: the frontier tracking frame ends under a peer that acknowledges in
 bursts, with interval samples landing one bucket lower than group-granularity

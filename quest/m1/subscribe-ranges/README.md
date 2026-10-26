@@ -125,9 +125,10 @@ generations of "start". When ranges land:
 - [Fetch as a range](/quest/m1/subscribe-ranges/fetch-range.md) - `fetch_group` becomes a one-range subscription that ends once its range is accounted for
 - [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - the lite-07 wire, Rust publisher and subscriber, and the draft
 - [moq-transport range updates](/quest/m1/subscribe-ranges/ietf.md) - widening and narrowing upstream ranges, and `Time` ends
-- [JS ranges](/quest/m1/subscribe-ranges/js.md) - `@moq/net` model and lite-07 parity
+- [JS ranges](/quest/m1/subscribe-ranges/js.md) - `@moq/net` model and lite-07 parity, and FETCH removed from lite-07 in both implementations
 - [Range count cost](/quest/m1/subscribe-ranges/range-cost.md) - a subscription's range count cannot multiply per-group cost
 
 ## Related
 
 - [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - bounds upstream waiting independently of content age
+- [Rust groups by start](/quest/m1/time-addressing/model.md) - the cut reworks `Absolute(group)` ends and sequence-range drops onto times

@@ -63,7 +63,8 @@ Advisories waiting on upstream:
 
 - ashpd 0.13 pulls zbus 5 and the unmaintained zvariant, zvariant_derive, and
   zbus_names (RUSTSEC-2026-0370, 0371, 0372). Upstream's
-  [zbus 6 port](https://github.com/bilelmoussaoui/ashpd/pull/491) is open.
+  [zbus 6 port](https://github.com/bilelmoussaoui/ashpd/pull/491) merged on
+  2026-10-25; wait for a stable ashpd release that carries it.
 - basic-toml (RUSTSEC-2026-0374) comes through askama_derive's default
   `config` feature in uniffi_bindgen 0.32, which reads its `askama.toml`.
   It only reaches the generator-only uniffi fork and never ships.

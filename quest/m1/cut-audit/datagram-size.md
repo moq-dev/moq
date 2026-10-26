@@ -20,12 +20,9 @@ larger QUIC limit we send and accept a 1300-byte body that a relay then
 cannot forward onto a 1200-byte hop, so it vanishes mid-path.
 [E2EE](/quest/m2/e2ee/README.md) sizes its plaintext on the 1200 cap.
 
-Decision for the maintainer, with a recommendation:
+Decided 2026-10-25 (maintainer): enforce 1200 end to end. Cap sends at the
+smaller of 1200 and the transport limit, and drop larger bodies on receive,
+in both languages. A per-hop limit was rejected: it loses datagrams silently
+mid-path.
 
-1. **Enforce 1200 end to end (recommended).** Cap sends at the smaller of
-   1200 and the transport limit, and drop larger bodies on receive, in both
-   languages. Predictable across any path, matches the draft and E2EE.
-2. Relax the draft to a per-hop limit and size E2EE per hop. Larger
-   datagrams on good paths, at the cost of silent mid-path loss.
-
-Public API: none. Wire: none (option 1 matches the draft as written).
+Public API: none. Wire: none (matches the draft as written).
