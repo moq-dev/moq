@@ -16,7 +16,10 @@ Decided 2026-10-26 (maintainer):
 - **Delay:** reuse `moq play`'s timing, the `--delay auto` target from
   moq-audio's jitter estimate (`rs/moq-audio/src/jitter.rs`,
   `doc/concept/audio-jitter.md`), rather than a second algorithm or a manual
-  setting. Show each source's current delay in the UI.
+  setting. As in `moq play`, the estimate is the broadcast's audio track's,
+  and video follows it rather than keeping its own, so one delay governs the
+  whole broadcast. A broadcast with no audio keeps video's own short delay.
+  Show each source's delay in the UI.
 
 Lift the shared part out of `moq play` into a library both binaries use,
 rather than copying it. The video side holds frames until their audio-aligned
