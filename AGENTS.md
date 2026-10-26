@@ -116,6 +116,7 @@ The `quest` binary comes from the kixelated/quest flake input and serves the que
 | `rs/moq-relay` config/behavior | `doc/bin/relay/` |
 | `rs/moq-cli` | `doc/bin/cli.md` |
 | `rs/moq-gst` | `doc/bin/gstreamer.md` |
+| `rs/moq-scene`, `rs/moq-studio` | `doc/bin/studio.md` |
 | `c/moq` C API (`moq/moq.h`) | `doc/lib/c` |
 | `js/{watch,publish}` UI/API | `demo/web` if it consumes the API |
 
