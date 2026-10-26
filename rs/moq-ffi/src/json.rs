@@ -15,7 +15,7 @@ use crate::consumer::{MoqTrackConsumer, timestamp_us};
 use crate::demand::MoqTrackDemand;
 use crate::error::MoqError;
 use crate::ffi::Task;
-use crate::producer::{MoqBroadcastProducer, MoqTrackProducer};
+use crate::producer::{Child, MoqBroadcastProducer, MoqTrackProducer};
 
 /// Options for a JSON snapshot track (lossy latest-value mode).
 ///
@@ -158,6 +158,9 @@ mod tests {
 /// A join that finds more deltas than the track's `refresh` ratio allows gets the value restated
 /// in a fresh group, by a task this producer runs until it is finished or dropped. That joiner
 /// still reads the cached group first.
+///
+/// Released before its finish, or still open when its broadcast closes, it ends its track with
+/// `Unroutable`, which readers take as the publisher leaving.
 #[derive(uniffi::Object)]
 pub struct MoqJsonSnapshotProducer {
 	inner: Arc<std::sync::Mutex<Option<moq_mux::json::Snapshot<Value>>>>,
@@ -190,11 +193,20 @@ impl MoqJsonSnapshotProducer {
 	}
 }
 
+impl Child for MoqJsonSnapshotProducer {
+	fn abort(&self, err: moq_net::Error) {
+		let _guard = crate::ffi::enter();
+		let producer = self.inner.lock().unwrap().take();
+		let _ = self.alive.close();
+		if let Some(producer) = producer {
+			let _ = producer.abort(err);
+		}
+	}
+}
+
 impl Drop for MoqJsonSnapshotProducer {
 	fn drop(&mut self) {
-		// The refresh task shares `inner`, so drop the producer here rather than whenever the task
-		// next wakes: dropping it retires the catalog entry.
-		self.inner.lock().unwrap().take();
+		self.abort(moq_net::Error::Unroutable);
 	}
 }
 
@@ -218,13 +230,16 @@ impl MoqJsonSnapshotProducer {
 		let _guard = crate::ffi::enter();
 		let options = moq_mux::json::Options::default().with_deltas(config.deltas);
 		let config = moq_mux::json::Config::default().with_compression(config.compression);
-		let producer = track.adopt(|track| {
-			broadcast.with_state(|state| Ok(state.catalog.json_snapshot::<Value>(track, config, options)?))
+		let this = track.adopt(|track| {
+			let producer =
+				broadcast.with_state(|state| Ok(state.catalog.json_snapshot::<Value>(track, config, options)?))?;
+			Ok(Self {
+				inner: Arc::new(std::sync::Mutex::new(Some(producer))),
+				alive: kio::Producer::new(()),
+			})
 		})?;
-		let inner = Arc::new(std::sync::Mutex::new(Some(producer)));
-		let alive = kio::Producer::new(());
-		crate::ffi::spawn(Self::refresh(inner.clone(), alive.consume()));
-		Ok(Arc::new(Self { inner, alive }))
+		crate::ffi::spawn(Self::refresh(this.inner.clone(), this.alive.consume()));
+		Ok(this)
 	}
 
 	/// Publish a new value, encoded as a snapshot or delta automatically. `value` is a JSON
@@ -336,9 +351,28 @@ impl MoqJsonSnapshotConsumer {
 // ---- Stream ----
 
 /// Publishes an ordered log of JSON records, one record per append.
+///
+/// Released before its finish, or still open when its broadcast closes, it ends its track with
+/// `Unroutable`, which readers take as the publisher leaving.
 #[derive(uniffi::Object)]
 pub struct MoqJsonStreamProducer {
 	inner: std::sync::Mutex<Option<moq_mux::json::Stream<Value>>>,
+}
+
+impl Child for MoqJsonStreamProducer {
+	fn abort(&self, err: moq_net::Error) {
+		let _guard = crate::ffi::enter();
+		let producer = self.inner.lock().unwrap().take();
+		if let Some(producer) = producer {
+			let _ = producer.abort(err);
+		}
+	}
+}
+
+impl Drop for MoqJsonStreamProducer {
+	fn drop(&mut self) {
+		self.abort(moq_net::Error::Unroutable);
+	}
 }
 
 #[uniffi::export]
@@ -359,11 +393,12 @@ impl MoqJsonStreamProducer {
 	) -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let config = moq_mux::json::Config::default().with_compression(config.compression);
-		let producer = track
-			.adopt(|track| broadcast.with_state(|state| Ok(state.catalog.json_stream::<Value>(track, config)?)))?;
-		Ok(Arc::new(Self {
-			inner: std::sync::Mutex::new(Some(producer)),
-		}))
+		track.adopt(|track| {
+			let producer = broadcast.with_state(|state| Ok(state.catalog.json_stream::<Value>(track, config)?))?;
+			Ok(Self {
+				inner: std::sync::Mutex::new(Some(producer)),
+			})
+		})
 	}
 
 	/// Append one record to the log. `value` is a JSON document.
@@ -447,6 +482,9 @@ impl MoqJsonStreamConsumer {
 ///
 /// A join that finds the open group's edits outweigh the track's `refresh` ratio gets the window
 /// restated in a fresh group, by a task this producer runs until it is finished or dropped.
+///
+/// Released before its finish, or still open when its broadcast closes, it ends its track with
+/// `Unroutable`, which readers take as the publisher leaving.
 #[derive(uniffi::Object)]
 pub struct MoqJsonWindowProducer {
 	inner: Arc<std::sync::Mutex<Option<moq_json::window::Producer<Value>>>>,
@@ -492,11 +530,20 @@ impl MoqJsonWindowProducer {
 	}
 }
 
+impl Child for MoqJsonWindowProducer {
+	fn abort(&self, err: moq_net::Error) {
+		let _guard = crate::ffi::enter();
+		let producer = self.inner.lock().unwrap().take();
+		let _ = self.alive.close();
+		if let Some(producer) = producer {
+			let _ = producer.abort(err);
+		}
+	}
+}
+
 impl Drop for MoqJsonWindowProducer {
 	fn drop(&mut self) {
-		// The refresh task shares `inner`, so release the track here rather than whenever the task
-		// next wakes.
-		self.inner.lock().unwrap().take();
+		self.abort(moq_net::Error::Unroutable);
 	}
 }
 
@@ -511,14 +558,17 @@ impl MoqJsonWindowProducer {
 	pub fn new(track: &MoqTrackProducer, config: MoqJsonWindowConfig) -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let config = config.try_into()?;
-		let (producer, demand) = track.adopt(|track| {
-			let demand = track.demand();
-			Ok((moq_json::window::Producer::new(track, config), demand))
+		let this = track.adopt(|track| {
+			Ok(Self {
+				demand: track.demand(),
+				inner: Arc::new(std::sync::Mutex::new(Some(moq_json::window::Producer::new(
+					track, config,
+				)))),
+				alive: kio::Producer::new(()),
+			})
 		})?;
-		let inner = Arc::new(std::sync::Mutex::new(Some(producer)));
-		let alive = kio::Producer::new(());
-		crate::ffi::spawn(Self::refresh(inner.clone(), alive.consume()));
-		Ok(Arc::new(Self { inner, demand, alive }))
+		crate::ffi::spawn(Self::refresh(this.inner.clone(), this.alive.consume()));
+		Ok(this)
 	}
 
 	/// Append one record to the back of the window. `value` is a JSON document.

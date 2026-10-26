@@ -1157,11 +1157,6 @@ impl Producer {
 		self
 	}
 
-	/// The group's header, as it was created.
-	pub fn info(&self) -> Info {
-		self.handle.info
-	}
-
 	/// The parent track's timescale, or `None` when it declared no timeline.
 	pub fn timescale(&self) -> Option<Timescale> {
 		self.handle.track.timescale
@@ -1691,17 +1686,6 @@ impl Producer {
 	/// logical length rather than the number of frames this handle holds.
 	pub fn frame_count(&self) -> usize {
 		self.handle.frame_count()
-	}
-
-	/// Abort with `err` only while nothing consumes the group, returning whether it is
-	/// closed. Consumer creation and the check share a lock, so a reader arriving first
-	/// keeps the group alive instead of reading the abort.
-	#[allow(
-		dead_code,
-		reason = "only tests call it; the dead-code audit decides whether it stays"
-	)]
-	pub(crate) fn abort_unused(&self, err: Error) -> bool {
-		self.handle.abort_unused(err)
 	}
 
 	/// Whether the group has been aborted (including pool eviction). The track's
@@ -2700,6 +2684,7 @@ impl Consumer {
 	/// [`max_delay`](crate::track::Subscription::max_delay) expires the group, it abandons
 	/// the stream, even with every frame already read off. It abandons it too once
 	/// [`Self::poll_finished`] fails. Stays `true` once set.
+	#[cfg(any(feature = "async", test))]
 	pub(crate) fn poll_expired(&mut self, waiter: &kio::Waiter) -> bool {
 		self.poll_expiry(waiter, true)
 	}
@@ -3654,12 +3639,12 @@ mod test {
 
 		let consumer = producer.handle.try_consume().expect("open");
 		assert!(
-			!producer.abort_unused(crate::Error::Cancel),
+			!producer.handle.abort_unused(crate::Error::Cancel),
 			"a reader declines the abort"
 		);
 		drop(consumer);
 
-		assert!(producer.abort_unused(crate::Error::Cancel));
+		assert!(producer.handle.abort_unused(crate::Error::Cancel));
 		assert!(
 			producer.handle.try_consume().is_none(),
 			"an aborted group mints no reader"
@@ -4617,13 +4602,6 @@ mod test {
 		assert!(pool.used() <= before);
 	}
 
-	/// A writer names the group it fills.
-	#[test]
-	fn info_names_the_group() {
-		let producer = Info { sequence: 7 }.produce();
-		assert_eq!(producer.info(), Info { sequence: 7 });
-	}
-
 	/// An open frame still reads its group: which one it is, how many frames it holds,
 	/// and whether anyone reads it. Finishing the frame hands the same writer back.
 	#[test]
@@ -4635,7 +4613,7 @@ mod test {
 
 		let mut frame = producer.create_frame(sized(1)).unwrap();
 		let group = frame.group();
-		assert_eq!(group.info().sequence, 3);
+		assert_eq!(group.sequence, 3);
 		assert_eq!(group.frame_count(), 2, "the open frame counts");
 		assert!(group.demand().is_used());
 		assert!(group.poll_closed(&kio::Waiter::noop()).is_pending());

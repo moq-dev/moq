@@ -18,7 +18,3 @@ Decided 2026-10-21 with the maintainer: one m1 quest.
   forcing it.
 
 Public API: Swift additive. Wire: none.
-
-## Required
-
-- [Token in band](/quest/m1/auth/token-in-band.md) - tokens that ride SETUP, which the OBS reconnect needs

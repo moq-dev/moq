@@ -149,7 +149,7 @@ harness = false
 [[bench]]
 name = "tail"
 harness = false
-required-features = ["async"]
+required-features = ["fuzz"]
 
 [[bench]]
 name = "priority"

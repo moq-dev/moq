@@ -13,7 +13,7 @@ prepared broadcast no longer exposes announcement calls that can only fail.
 Decided 2026-10-23 (maintainer, on
 [moq-dev/moq#6464](https://github.com/moq-dev/moq/pull/6464)): ✅ land the
 announcement split in three PRs: native Rust in that PR, the
-[JS mirror](/quest/m1/api-audit/js-publication.md), and this binding rollout
+[JS mirror](https://github.com/moq-dev/moq/pull/6795), and this binding rollout
 once the native PR merges. The native PR keeps private adapters that hold the
 `Publication` beside each binding fill handle (`rs/moq-ffi/src/producer.rs`
 `from_publication`, `rs/moq-c/src/publish.rs` `create_publication` and

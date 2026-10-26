@@ -1,0 +1,56 @@
+# Poll-first async
+
+## Goal
+
+moq's library crates write asynchronous logic as kio `poll_*` functions and
+compile no coroutines by default. Their `async fn` wrappers are generated and
+behind an `async` cargo feature that binaries, tests, and tokio glue enable. A
+design report says how far to take it: whether a kio proc macro should write
+`poll_*` bodies from straight-line code, and whether moq-net's protocol core
+should become sans-IO. Everything stays interoperable with the Rust ecosystem at
+the edges, through std's `Waker` and `Context`.
+
+## Plan
+
+Decided with the maintainer on 2026-10-25, from a survey of async Rust's problems
+and their alternatives:
+
+- **Problems:**
+  - function coloring;
+  - `Pin` and `Unpin`;
+  - cancel safety and no async drop;
+  - `Send` inference and the `Send` bound problem (two `MaybeSend`s in moq);
+  - `'static` spawn;
+  - runtime coupling;
+  - future size (a 32 MiB test stack in moq-relay);
+  - debugging;
+  - compile cost: rmeta encodes every `async fn` body's coroutine MIR, so any
+    body edit changes the crate's metadata and rebuilds its dependents.
+- **Upstream won't fix them soon:**
+  - return type notation stalled in Dec 2025;
+  - pin ergonomics was discontinued in Aug 2026;
+  - async drop is nightly-only, and the 2026 roadmap keeps destructors sync;
+  - scoped spawn waits on guaranteed destructors (2026-27).
+- **kio already avoids:** `Pin` in user code, hidden cancellation points (progress
+  lives in named fields), leaked wakers, runtime coupling in the library, and
+  per-future allocation in `Tasks`.
+- **What kio keeps:** coloring (`poll_x` plus `async fn x`), `'static` spawn, the
+  `MaybeSend` split, hand-written state machines, and 184 non-test `async fn`
+  wrappers in moq-net that still compile into coroutines.
+- **Rejected:** stackful coroutines (green threads). They break wasm, rust2's MIR
+  TypeScript translation, and thread-local soundness.
+- **Zig's model** (I/O passed as an explicit `std.Io`, like an allocator) removes
+  coloring only because its evented backend parks whole stacks. kio's `&Waiter`
+  parameter is the stackless half of that idea. Sans-IO is the other: the protocol
+  never does I/O and each runtime drives it.
+- **Gate the wrappers regardless** of the build measurement, because poll-first is
+  the style moq wants. kixelated/rust2's
+  [semantic API hash quest](https://github.com/kixelated/rust2/blob/main/quest/m3/api-cutoff.md)
+  replays moq-net's history with and without the wrappers, to report the build
+  effect.
+
+## Required
+
+- [Generated async wrappers behind a feature](/quest/m1/poll-first/async-feature.md) - each library's `async fn` wrappers are generated from its `poll_*` signatures and compile only with its `async` feature
+- [A kio macro for poll bodies](/quest/m1/poll-first/poll-macro.md) - spike a proc macro that writes a `poll_*` state machine from straight-line code with wait points
+- [Sans-IO compared](/quest/m1/poll-first/sansio-compare.md) - one moq-net protocol path as a sans-IO core, compared with kio poll

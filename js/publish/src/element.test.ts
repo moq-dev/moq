@@ -31,3 +31,33 @@ test("an invalid URL attribute warns and clears the publish URL", async () => {
 		globalThis.customElements = originalRegistry;
 	}
 });
+
+test("an invalid announce attribute throws and stops announcing", async () => {
+	const originalElement = globalThis.HTMLElement;
+	const originalRegistry = globalThis.customElements;
+	const registry = new Map<string, CustomElementConstructor>();
+	globalThis.HTMLElement = class {} as unknown as typeof HTMLElement;
+	globalThis.customElements = {
+		define: (name: string, ctor: CustomElementConstructor) => {
+			registry.set(name, ctor);
+		},
+		get: (name: string) => registry.get(name),
+	} as unknown as CustomElementRegistry;
+
+	const set = mock(() => {});
+	try {
+		const { default: Element } = await import("./element");
+		expect(() =>
+			Element.prototype.attributeChangedCallback.call(
+				{ controls: { announce: { set } } },
+				"announce",
+				"source",
+				"never",
+			),
+		).toThrow('invalid announce="never"');
+		expect(set).toHaveBeenCalledWith(undefined);
+	} finally {
+		globalThis.HTMLElement = originalElement;
+		globalThis.customElements = originalRegistry;
+	}
+});
