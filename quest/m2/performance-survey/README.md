@@ -70,7 +70,7 @@ benchmark result is claimed.
 
 For settings sweeps, record effective values, not only requested ones.
 [Resolved client defaults](/rs/moq-tokio/src/quic.rs) currently allow 10,000
-streams per direction, 64 MiB connection receive credit, 4 MiB per-stream
+streams per direction, 128 MiB connection receive credit, 4 MiB per-stream
 credit and 16 MiB send credit. [Relay peer overrides](/rs/moq-relay/src/limits.rs)
 allow 100,000 streams and 640 MiB each of connection receive and send credit.
 Standalone backend defaults differ again; benchmark the effective settings

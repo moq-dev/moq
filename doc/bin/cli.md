@@ -22,7 +22,7 @@ Docker; see [Install](/setup/install).
 | `import` | `rtsp --connect <url>` | Pull an IP camera's stream. |
 | `import` | `archive <url>` | Replay a recording from an object store. |
 | `export` | `fmp4`, `mkv`, `ts`, `flv`, `h264`, `h265` | Write a container to stdout. |
-| `export` | `hls --listen` | Serve the broadcast as HLS over HTTP. |
+| `export` | `hls --listen`, `hls --output <dir>` | Serve the broadcast as HLS over HTTP, record it to a directory, or both. |
 | `export` | `rtmp`, `srt`, `rtc` | Serve plays (`--listen`) or push to a remote (`--connect`). |
 | `export` | `archive <url>` | Record every broadcast under the prefix into an object store. |
 | `play` | | Decode and play in a native window with sound. |
@@ -43,8 +43,11 @@ moq <MoQ side> fetch <track> [options]
 ```
 
 The **MoQ side** goes first and attaches the process to the network:
-`--connect <url>` dials a relay (the path is the auth path, `?jwt=`
-carries a token), and `--broadcast <name>` names the broadcast. A process can
+`--connect <url>` dials a relay (the path is the auth path), `--connect-token`
+presents a token (repeat it to present several, see
+[Tokens](/bin/relay/auth#tokens)), and `--broadcast <name>` names the
+broadcast. A `?jwt=` in the URL still works, and is how a token reaches a
+relay that predates `--connect-token`. A process can
 instead host sessions with `--listen`, or both at once, admitting clients the
 way the relay does (see [Authentication](/bin/relay/auth)). Listening imports and
 exports share the relay's shutdown behavior: SIGINT or SIGTERM sends accepted
@@ -74,7 +77,7 @@ ffmpeg -re -i video.mp4 -c copy -f mpegts -pes_payload_size 0 -muxdelay 0 - | \
 moq --connect https://relay.example.com/anon --broadcast my-stream.hang export ts | ffplay -
 
 # With a token
-moq --connect "https://relay.example.com/rooms/1?jwt=$TOKEN" --broadcast alice.hang import ts
+moq --connect https://relay.example.com/rooms/1 --connect-token "$TOKEN" --broadcast alice.hang import ts
 ```
 
 ## Import
@@ -94,8 +97,10 @@ For a source already in MPEG-TS, `ffmpeg -c copy -f mpegts` re-muxes and drops P
 or use [`import srt`](/bin/srt).
 
 MPEG-TS import carries H.264/H.265 and AAC/MP2/AC-3/E-AC-3/Opus, and passes
-SCTE-35 and every other stream it does not decode (KLV, subtitles, DVB AC-3)
-through as tracks. Video AUs can span PES, and a PES can contain several. Supply
+SCTE-35, DSM-CC sections, and every other stream it does not decode (MPEG-2
+video, LATM AAC, KLV, subtitles, DVB AC-3) through as tracks. MPEG-2 video still
+paces the program by its timestamps, and a subscriber joins it at a sequence
+header. H.264/H.265 AUs can span PES, and a PES can contain several. Supply
 a PTS for each AU or declare a proportional POC clock: AVC needs
 `fixed_frame_rate_flag` and `temporal_poc_flag` in the TS timing descriptor plus
 fixed-rate SPS VUI; HEVC needs VUI's `vui_poc_proportional_to_timing_flag`. Missing timing
@@ -103,7 +108,10 @@ ends the import instead of repeating a timestamp. Private and undecoded PES go t
 (PCR); one before the first PCR is dropped. A stream it cannot carry unaltered
 is refused with a warning: any in a program with no PCR, and one whose PES carry
 an ESCR, pack header or TREF, are scrambled, leave a non-video PES unbounded,
-or have a malformed header.
+or have a malformed header, as is `0x86` without a SCTE-35 registration, which
+may be DTS audio. A PID no table claims, such as conditional access or ATSC
+PSIP, is dropped with one warning and counted in the
+[stats](/concept/stats#mpeg-ts-sections); `--passthrough` keeps them.
 SCTE-35 cues and private PES share the media clock, or anchor on the first PCR
 when the PMT declares only data. Audio-only and data-only programs round-trip
 without video; a data-only program still requires PCR. A program declaring

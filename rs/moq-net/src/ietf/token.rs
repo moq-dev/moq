@@ -1,4 +1,4 @@
-//! The `AUTHORIZATION TOKEN` Setup Option (draft-ietf-moq-transport-21 section 9.1.4) and
+//! The `AUTHORIZATION TOKEN` Setup Option (draft-ietf-moq-transport-22 section 9.1.4) and
 //! Message Parameter.
 //!
 //! The value is the Token structure of section 8.9: an Alias Type, then fields that
@@ -39,7 +39,6 @@ pub fn from_setup(params: &Parameters, version: Version) -> Result<Option<Token>
 }
 
 /// Present `token` in our SETUP, by value.
-#[cfg_attr(not(test), expect(dead_code, reason = "only tests use it"))]
 pub fn into_setup(params: &mut Parameters, token: &Token, version: Version) -> Result<(), EncodeError> {
 	params.set_bytes(ParameterBytes::AuthorizationToken, encode(token, version)?);
 	Ok(())
@@ -213,15 +212,12 @@ mod tests {
 		));
 	}
 
-	const VERSIONS: [Version; 9] = [
+	const VERSIONS: [Version; 6] = [
 		Version::Draft14,
 		Version::Draft15,
 		Version::Draft16,
 		Version::Draft17,
 		Version::Draft18,
-		Version::Draft19,
-		Version::Draft20,
-		Version::Draft21,
 		Version::Draft22,
 	];
 

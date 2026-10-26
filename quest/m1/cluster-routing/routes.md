@@ -112,15 +112,20 @@ The handoff contract below, decided 2026-10-16, settles claim freshness:
   them was rejected: downstream nodes would lose their only route during the
   drain. Existing readers resume only
   across a matching explicit epoch; epochless changes preserve Restart.
-- Fresh routing identity per process/tab restart, shared across its
-  authenticated live sessions, decided 2026-10-13. It is the hash of a
-  per-process key that every session proves once
-  ([Identity proof](/quest/m1/cluster-routing/identity.md), decided
-  2026-10-14). Keep administrative identity and broadcast epoch separate. The shared identity recognizes an
-  origin reached through CDN and direct links and maps it to a roster peer.
-  The origin advances its seqno whenever its own set of sessions changes:
-  feasibility distances held elsewhere otherwise refuse a restart that reuses
-  an identity, and starve the old neighbors of an origin that moved to a
+- Fresh routing identity per process/tab restart, declared by the origin and
+  shared across its live sessions, decided 2026-10-13. It is unverified:
+  recognizing a routing identity needs key proof, which
+  [Peer grants](/quest/m2/p2p/peer-grant.md) owns (decided 2026-10-25).
+  Decided 2026-10-26 (maintainer): receivers do not stamp a fresh identity
+  per session. In a mesh, two relays stamping their sessions from one origin
+  forward its routes as two identities a third relay cannot recognize as
+  one, and a declared identity kept beside the stamp as a loop hint would
+  stay unverified.
+  Switching between paths resumes only across a matching explicit epoch.
+  Keep administrative identity and broadcast epoch separate. The origin
+  advances its seqno whenever its own set of sessions changes: feasibility
+  distances held elsewhere otherwise refuse a restart that reuses an
+  identity, and starve the old neighbors of an origin that moved to a
   farther attachment (`restart_reusing_identity_is_refused`,
   `reconnect_without_restart_needs_a_seqno_advance`). A random identity alone
   does not keep a dead incarnation away. What bounds it is ordered sessions,
@@ -131,10 +136,13 @@ The handoff contract below, decided 2026-10-16, settles claim freshness:
   message already in flight on a live session, which delivers the retraction
   next (`collected_incarnation_returns_only_while_its_retraction_is_in_flight`).
   `cluster.id` stops naming a routing identity.
-- Decided 2026-10-14: a connection's own proven identity stays bare. An
-  identity a connection forwards for another origin is subject-qualified:
+- Decided 2026-10-14: every identity a connection sends is subject-qualified:
   filed under `hash(subject, id)` when the connection's publish grant is
-  scoped, and bare when it is unscoped (publish `**` at the root). The hash
+  scoped, and bare when it is unscoped (publish `**` at the root). Its own
+  identity is no exception (2026-10-26): the bare exemption relied on the
+  dropped proof, so an unproven own identity could otherwise claim a
+  victim's. Extend the fixture below to a forger declaring the victim's id as
+  its own, and drop the reference model's `proved` exemption. The hash
   has its own domain, so it cannot collide with a key-derived identity, and is
   collision-resistant at the identity width, since the forwarder picks `id`
   and could otherwise grind another subject's key. The relay that files it
@@ -284,10 +292,8 @@ The handoff contract below, decided 2026-10-16, settles claim freshness:
   whether a connection is sent routes learned from other connections; it is
   never on the wire. Relays default on; applications choose per P2P
   connection; browser tabs stay off until the Rust-to-TypeScript port.
-- A plain client (`proxy` off) advertises its own origin and publications only. Its
-  authenticated routing identity is shared across its live sessions so P2P
-  can recognize the same origin, superseding the session-only identity plan.
-  Clients receive only authorized, interested claims; opaque ids expose no
+- A plain client (`proxy` off) advertises its own origin and publications only, under
+  the one identity it declares on every live session. Clients receive only authorized, interested claims; opaque ids expose no
   backbone addresses, but are not themselves authorization. A client
   advertises nothing it receives, so it holds no feasibility distance and
   falls back from P2P to the CDN at once. It still echoes every ROUTE_END.
@@ -306,8 +312,7 @@ loss never reports an END:
   seqno advance, claim change, or seqno request that would reach it rotates
   the identity instead, ending the old one everywhere and announcing the
   claims again under a fresh one, so nothing wraps and every advertised
-  seqno leaves room for the successor a request names. A session proves one
-  key once, so rotating closes and reopens every session the origin has up
+  seqno leaves room for the successor a request names
   (`exhausted_counters_rotate_the_identity`).
   A session sends an origin's announcements in batches, each closed by its
   floors: per region, the revision as of which the stream's announcements
@@ -639,9 +644,20 @@ continues to rank feasible transit routes; report it. This may
 split at start (Rust and draft, then JS), as long as both land in one
 release.
 
-## Required
+### Mint an epoch for every route (2026-10-24 pre-cut audit)
 
-- [Identity proof](/quest/m1/cluster-routing/identity.md) - proven own identities and subject-qualified forwarded ones
+The epochless instance machinery keeps drawing fixes (35d935f428,
+3655358c2f, c39780f952, 29e74a26b7, a7acf21e2a, ef2511e101, aa0d915867,
+0f4f81f9ed, f0fcbefd66, 4c8ab3ca41, 001482144f, 07127f8f5b), as does front
+splice, park, and linger in `serve_front` (166f9e87bc, 3b4ad5bf02,
+88848954db, 24b9177b6e, 0e1995017d, 732101ed1e, 00d27780dd, 37b49d8042).
+Proposal for this quest to weigh: mint an epoch on the receiving side at
+ingest or local announce when a peer sends none, so `Instance` collapses to
+`Epoch`. That deletes the `Instance::Route(generation)` renewals,
+`restarted_since`, the held-restart Release for epochless routes, and
+Selection retirement, leaving Follow's same-epoch Update/Restart split as
+the only takeover rule. `Route::epoch` stops being optional (a breaking
+API change); no wire change.
 
 ## Related
 

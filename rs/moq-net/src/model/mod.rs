@@ -22,6 +22,7 @@ mod clock;
 pub(crate) mod datagram;
 mod delivered;
 mod expiry;
+mod skipped;
 // The DEFLATE codec behind compressed tracks.
 mod flate;
 pub(crate) mod object;
@@ -49,8 +50,8 @@ pub use timed::Timed;
 pub mod origin {
 	pub use super::follow::AnnouncedBroadcast;
 	pub use super::origin_impl::{
-		Config, Consumer, Cost, Driver, Dynamic, HopLimit, Link, Preference, Prepared, Producer, Request, Requesting,
-		Route, Routing, Source,
+		Config, Consumer, Cost, Driver, Dynamic, HopLimit, Link, Preference, Prepared, Producer, Publication, Request,
+		Requesting, Route, Routing, Source,
 	};
 }
 

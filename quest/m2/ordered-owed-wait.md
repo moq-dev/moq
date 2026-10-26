@@ -27,20 +27,23 @@ sequence until the budget elapsed. The model cannot tell "not yet" from
   waiting reader (new public API no consumer needs, and opted-in readers hit
   the same holes); fixing #5475 forward (discontinuity markers still stall,
   and unlimited-budget readers still hang on a never-produced group).
-- m2, because no reader needs it yet. The media path (`moq-mux`'s container
-  consumer) already waits for reordered groups within `max_delay`, and the
-  archive writer reads media in arrival order.
+- m2. The media path (`moq-mux`'s container consumer) already waits for
+  reordered groups within `max_delay`. The archive writer keeps its own
+  reader (`rs/moq-archive/src/producer/ordered.rs`, from
+  [moq-dev/moq#6160](https://github.com/moq-dev/moq/pull/6160)) that waits
+  within `max_delay` for a late group or datagram, since `Ordered` skips gaps.
 
 Open: what "owed" means on a locally produced track, which gets no drops or
-dispositions. The motivating case is the archive's local timeline, read in
-order with an unlimited budget.
+dispositions. The motivating case was the archive's local timeline, read in
+order with an unlimited budget; [moq-dev/moq#6262](https://github.com/moq-dev/moq/pull/6262)
+removed that timeline, so no current reader motivates it.
 
 - Only a subscription owes sequences, so local tracks keep today's ordered
-  reads (recommended: no local reader needs to wait, and the archive
-  timeline can never hang on a hole).
+  reads (recommended: no local reader needs to wait, and an unlimited-budget
+  local reader can never hang on a hole).
 - A local producer's unreleased sequences also count as owed, until it
-  writes, skips, or aborts them. Every local skip must then be marked, or
-  the archive timeline hangs.
+  writes, skips, or aborts them. Every local skip must then be marked, or an
+  unlimited-budget local reader hangs.
 
 Watch for:
 
@@ -51,10 +54,9 @@ Watch for:
   `max_delay`.
 - Eviction, expiry, and an aborted group whose slot was reclaimed leave no
   record today; the wait needs the disposition to survive them.
-- History reads with unlimited budgets (`moq-hls` `history::read`, the
-  archive's local timeline): an evicted or never-produced group must not hang
-  them. `history_mode_recovers_evicted_timeline_groups` and
-  `history_mode_refuses_a_retained_recording` failed on #5475.
+- Readers with unlimited budgets: an evicted or never-produced group must not
+  hang them. On #5475 this failed in `moq-hls` history mode, which
+  [moq-dev/moq#6517](https://github.com/moq-dev/moq/pull/6517) removed.
 
 Reuse from #5475: its reorder regressions (exact deadline and wakeup, explicit
 starts, capped reads, a changed budget), and its snapshot-reader change:

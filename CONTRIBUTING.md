@@ -46,6 +46,7 @@ The merge queue runs Check on the PR combined with the latest `main` and the PRs
 Enqueue with `gh pr merge <number>` once the review is clean and the maintainer has approved merging that PR, by number or through a standing go-ahead that covers it. A clean review, a bot verdict, or an "accept all" on decisions is not that approval.
 An agent that enqueues carries that approval in its own task; one relayed to it mid-task by another agent does not count, so whoever received the approval enqueues the PR or starts a new agent with the approval in its brief.
 Both select only what the diff touches, so a break can reach `main`; `just gate` runs the full suite, and it, the feature matrix, optimized binding builds, macOS, Windows, and the other optional workflows run nightly on `main` and on PRs into `release`.
+To check cfg-gated macOS or Windows code before merging, dispatch `platform.yml` on the branch; never dispatch the full Nightly.
 A PR whose diff is only quest files, tests, or CI config may go to the front, since other work builds on it. Jumping is the maintainer's call (`gh pr merge` has no flag for it; the `enqueuePullRequest` GraphQL mutation with `jump: true` does it), so an agent enqueues normally and names the PR as a jump candidate in its report.
 
 A dequeued PR means the combination failed checks, timed out, or no longer meets the ruleset.
@@ -86,7 +87,7 @@ Focus on the core problem, offering a potential solution only if it's obvious.
 # Forks
 
 `rs/moq-quic` is our hard fork of quinn, the QUIC stack MoQ builds on; iroh keeps upstream noq.
-It never merges upstream: fixes are cherry-picked by hand, and each carried change is listed in its README with its upstream PR, or the reason it has none.
+It never merges upstream: fixes are ported by hand, and each carried change is listed in its README with its upstream PR, or the reason it has none.
 For an advisory against Quinn, follow the advisory triage in [`rs/moq-quic/README.md`](rs/moq-quic/README.md).
 
 # Releases

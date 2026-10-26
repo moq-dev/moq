@@ -5,7 +5,7 @@
 // idiomatic Go: context.Context cancellation, Go error returns, and Go 1.23
 // range-over-func iterators (iter.Seq2) for live streams. The raw record,
 // enum, and small object types are re-exported here without the Moq prefix (see types.go),
-// records with durations carry time.Duration (see records.go), so
+// records with timestamps carry time.Duration (see records.go), so
 // most programs never need to import the ffi package directly.
 //
 // A typical full-duplex client wires a single origin as both publish source

@@ -707,6 +707,9 @@ impl Track {
 		if video && frame.keyframe {
 			self.keyframe = Some(frame.timestamp);
 		}
+		// Video, MPEG-1/2 carried whole among it, resumes only at a keyframe, since its other
+		// pictures reference earlier ones.
+		let sync = frame.keyframe || self.kind.class() != super::stats::Class::Video;
 		// Replaying anchors on the first frame, and the tracks arrive together rather than each
 		// sent ahead by its send-ahead: judged as arriving that much earlier, as a live source
 		// sends it, every track's first frames are on the clock whichever anchors it.
@@ -725,7 +728,7 @@ impl Track {
 			restart,
 			skip,
 			cut,
-			sync: frame.keyframe || !video,
+			sync,
 			leading,
 			item: Queued {
 				frame,
@@ -913,7 +916,11 @@ impl Kind {
 	/// alike at both edges.
 	fn class(&self) -> super::stats::Class {
 		match self {
-			Kind::Video(_) => super::stats::Class::Video,
+			// MPEG-1/2 video rides whole, but paces the program as decoded video does.
+			Kind::Video(_)
+			| Kind::PesPacket {
+				stream_type: 0x01 | 0x02,
+			} => super::stats::Class::Video,
 			Kind::Aac { .. } | Kind::Opus { .. } | Kind::Mp2 { .. } | Kind::Ac3 | Kind::Eac3 => {
 				super::stats::Class::Audio
 			}
@@ -922,10 +929,14 @@ impl Kind {
 	}
 }
 
-/// The program tables: the PAT, fixed for the program's life, and the PMT, which lists the
-/// streams on the air.
+/// The program tables: the PAT, fixed for the program's life but for its network entry, and the
+/// PMT, which lists the streams on the air.
 struct Psi {
 	pat: Bytes,
+	/// The source's `transport_stream_id`, so the rebuilt PAT stays consistent with the carried SI.
+	transport_stream_id: u16,
+	/// Whether the PAT lists the network entry, pointing at the NIT the export carries.
+	network: bool,
 	/// What the PMT says now.
 	pmt: psi::Pmt,
 	/// PID the PMT rides on: the source's original (preserved from the service
@@ -951,6 +962,35 @@ impl Psi {
 		self.pcr_pid()
 			.filter(|&pcr| self.pmt.streams.iter().all(|es| es.pid.as_u16() != pcr))
 	}
+}
+
+/// The DVB NIT's PID (ETSI EN 300 468 5.1.3), the network PID the PAT's program 0 names.
+const NIT_PID: u16 = 0x0010;
+/// The `table_id` of the NIT describing the delivering network.
+const NIT_ACTUAL: u8 = 0x40;
+
+/// The PAT for the exported program at `version`, listing the network PID as program 0 first when
+/// the export carries the NIT (ISO/IEC 13818-1 2.4.4.3), which a receiver otherwise cannot find.
+fn encode_pat(
+	transport_stream_id: u16,
+	program_number: u16,
+	pmt_pid: u16,
+	network: bool,
+	version: VersionNumber,
+) -> anyhow::Result<Bytes> {
+	let network = network.then(|| ProgramAssociation {
+		program_num: 0,
+		program_map_pid: Pid::new(NIT_PID).expect("a valid PID"),
+	});
+	let program = ProgramAssociation {
+		program_num: program_number,
+		program_map_pid: Pid::new(pmt_pid)?,
+	};
+	psi::encode_pat(&Pat {
+		transport_stream_id,
+		version_number: version,
+		table: network.into_iter().chain([program]).collect(),
+	})
 }
 
 /// Per-frame PES descriptor (everything but the payload bytes).
@@ -2305,14 +2345,8 @@ where
 		// carried SI; synthesize a minimal identity otherwise.
 		let pmt_pid = self.pmt_pid();
 		let transport_stream_id = self.program.as_ref().map(|s| s.transport_stream_id).unwrap_or(1);
-		let pat = Pat {
-			transport_stream_id,
-			version_number: self.version,
-			table: vec![ProgramAssociation {
-				program_num: pmt.program_number,
-				program_map_pid: Pid::new(pmt_pid)?,
-			}],
-		};
+		let network = self.carries_nit();
+		let pat = encode_pat(transport_stream_id, pmt.program_number, pmt_pid, network, self.version)?;
 
 		self.schedule.set_tables(pmt_pid);
 		self.schedule.set_clock(pcr_pid);
@@ -2320,7 +2354,9 @@ where
 			self.liveness.register(track.pid);
 		}
 		self.psi = Some(Psi {
-			pat: super::psi::encode_pat(&pat)?,
+			pat,
+			transport_stream_id,
+			network,
 			pmt,
 			pmt_pid,
 			pushed: None,
@@ -2329,6 +2365,11 @@ where
 		});
 		self.psi_due = true;
 		Ok(())
+	}
+
+	/// Whether the catalog carries a NIT on its PID, which the PAT then points a receiver at.
+	fn carries_nit(&self) -> bool {
+		self.si.contains_key(&(NIT_PID, NIT_ACTUAL))
 	}
 
 	/// The PID to carry the clock: the first video track's, else the first audio track's, else
@@ -2537,9 +2578,12 @@ where
 		if !std::mem::take(&mut self.psi_due) {
 			return Ok(());
 		}
+		// A NIT acquired or lost after the tables went out revises the PAT's network entry, at
+		// the next version beside the PMT, so the PAT's version never runs ahead of the PMT's.
+		let network = self.carries_nit();
 		let psi = self.psi.as_mut().context("PSI not built")?;
 		let version = match &psi.pushed {
-			Some((version, pmt)) if *pmt == psi.pmt => *version,
+			Some((version, pmt)) if *pmt == psi.pmt && psi.network == network => *version,
 			Some((version, _)) => {
 				let mut version = *version;
 				version.increment();
@@ -2547,6 +2591,16 @@ where
 			}
 			None => self.version,
 		};
+		if psi.network != network {
+			psi.pat = encode_pat(
+				psi.transport_stream_id,
+				psi.pmt.program_number,
+				psi.pmt_pid,
+				network,
+				version,
+			)?;
+			psi.network = network;
+		}
 		let added: Vec<u16> = psi
 			.pmt
 			.streams
@@ -2713,10 +2767,11 @@ where
 		};
 		let pid = track.pid;
 		let place = frame.timestamp.as_nanos();
+		// Its first access unit decodes at the DTS, which a reordered picture carries ahead of its PTS.
 		let decode = pes
 			.as_ref()
-			.and_then(|pes| pes.pts)
-			.map(|pts| unwrap_pts(pts, frame.timestamp));
+			.and_then(|pes| pes.dts.or(pes.pts))
+			.map(|ticks| unwrap_pts(ticks, frame.timestamp));
 		let dolby = Dolby::described(&track.descriptors)
 			.filter(|_| matches!(track.kind, Kind::PesPacket { stream_type: 0x06 }));
 		let frames = match (&pes, decode, dolby) {
@@ -3290,6 +3345,8 @@ const PES_DTS_LEN: usize = 5;
 struct PesPacket {
 	/// Its PTS in 90 kHz ticks, as the 33-bit field carries it.
 	pts: Option<u64>,
+	/// Its DTS, likewise, where it differs from the PTS.
+	dts: Option<u64>,
 	/// Where its payload begins, past the header.
 	payload: usize,
 }
@@ -3313,6 +3370,7 @@ impl PesPacket {
 		}
 		Ok(Self {
 			pts: pes.pts,
+			dts: pes.dts,
 			payload: pes.header.len(),
 		})
 	}

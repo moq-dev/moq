@@ -52,7 +52,7 @@ async function openUni(
 
 /** Padding is read to the end and dropped: no STOP_SENDING, and the session stays up. */
 test("a padding stream is discarded", async () => {
-	const { pair, connection, writer } = await openUni(Version.DRAFT_19, ALPN.DRAFT_19, PADDING);
+	const { pair, connection, writer } = await openUni(Version.DRAFT_18, ALPN.DRAFT_18, PADDING);
 	let closed = false;
 	void pair.server.closed.then(() => {
 		closed = true;
@@ -76,13 +76,13 @@ test("a padding stream is discarded", async () => {
 /** An unknown or invalid stream type MUST close the session with PROTOCOL_VIOLATION. */
 test("an unknown uni stream type closes the session", async () => {
 	for (const [version, alpn, type] of [
-		[Version.DRAFT_19, ALPN.DRAFT_19, 0n],
+		[Version.DRAFT_18, ALPN.DRAFT_18, 0n],
 		// Past 2^53, so it cannot be read as a number.
-		[Version.DRAFT_19, ALPN.DRAFT_19, 2n ** 53n],
+		[Version.DRAFT_18, ALPN.DRAFT_18, 2n ** 53n],
 		// Padding arrived in draft-18.
 		[Version.DRAFT_17, ALPN.DRAFT_17, PADDING],
 		// A SUBGROUP_HEADER with the reserved SUBGROUP_ID_MODE (0b11).
-		[Version.DRAFT_19, ALPN.DRAFT_19, 0x56n],
+		[Version.DRAFT_18, ALPN.DRAFT_18, 0x56n],
 	] as const) {
 		const logged = spyOn(console, "error").mockImplementation(() => void 0);
 		const { pair, connection } = await openUni(version, alpn, type);
@@ -101,9 +101,6 @@ test("an unknown uni stream type closes the session", async () => {
 for (const [version, alpn] of [
 	[Version.DRAFT_17, ALPN.DRAFT_17],
 	[Version.DRAFT_18, ALPN.DRAFT_18],
-	[Version.DRAFT_19, ALPN.DRAFT_19],
-	[Version.DRAFT_20, ALPN.DRAFT_20],
-	[Version.DRAFT_21, ALPN.DRAFT_21],
 	[Version.DRAFT_22, ALPN.DRAFT_22],
 ] as const) {
 	for (const type of [0n, 2n ** 53n]) {
@@ -136,8 +133,8 @@ for (const [version, alpn] of [
 
 /** A cancelled listing leaves the session usable for a new listing of the same prefix. */
 test("SUBSCRIBE_TRACKS accepts an empty origin", async () => {
-	const version = Version.DRAFT_19;
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const version = Version.DRAFT_22;
+	const pair = createMockTransportPair(ALPN.DRAFT_22);
 	const control = await Stream.open(pair.server, { version });
 	const connection = new Connection({
 		url: new URL("https://example.com"),
@@ -276,8 +273,8 @@ for (const [version, alpn] of [
  * that already held a subscription or probed for bandwidth straight away.
  */
 test("uni streams before SETUP are held until it lands", async () => {
-	const version = Version.DRAFT_19;
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const version = Version.DRAFT_18;
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 
 	const padding = new Writer(await pair.client.createUnidirectionalStream(), version);
 	await padding.u62(PADDING);
@@ -471,7 +468,6 @@ for (const [name, options] of [
 
 for (const [version, alpn] of [
 	[Version.DRAFT_18, ALPN.DRAFT_18],
-	[Version.DRAFT_21, ALPN.DRAFT_21],
 	[Version.DRAFT_22, ALPN.DRAFT_22],
 ] as const) {
 	for (const [value, nested] of [
@@ -482,7 +478,7 @@ for (const [version, alpn] of [
 		[3, true],
 		[255, true],
 	] as const) {
-		if (nested && version === Version.DRAFT_18) continue; // FILL_PARAMETERS starts in draft-20.
+		if (nested && version === Version.DRAFT_18) continue; // FILL_PARAMETERS starts in draft-22.
 		test(`invalid ${nested ? "fill " : ""}GROUP_ORDER ${value} closes ${alpn}`, async () => {
 			const logged = spyOn(console, "error").mockImplementation(() => void 0);
 			const pair = createMockTransportPair(alpn);
@@ -616,8 +612,9 @@ for (const [version, alpn] of [
 			const pair = createMockTransportPair(alpn);
 			const control = await Stream.open(pair.server, { version });
 			const origin = new OriginProducer();
-			const broadcast = origin.createBroadcast(Path.from("room"));
-			broadcast.announce();
+			const broadcastPublication = origin.createBroadcast(Path.from("room"));
+			const broadcast = broadcastPublication.broadcast;
+			broadcastPublication.announce();
 			broadcast.createTrack("video", { timescale: Timescale.MILLI });
 			const connection = new Connection({
 				url: new URL("https://example.com"),
@@ -668,8 +665,9 @@ async function serving(version: IetfVersion, alpn: string) {
 	const pair = createMockTransportPair(alpn);
 	const control = await Stream.open(pair.server, { version });
 	const origin = new OriginProducer();
-	const broadcast = origin.createBroadcast(Path.from("room"));
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(Path.from("room"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const connection = new Connection({
 		url: new URL("https://example.com"),

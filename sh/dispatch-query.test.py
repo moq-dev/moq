@@ -82,6 +82,16 @@ class QueryTests(unittest.TestCase):
                 (self.repo / path).unlink()
         self.expect(True, base="--all", rust=True)
 
+    def test_cargo_configuration_selects_rust(self):
+        for path in (".cargo/config.toml", ".cargo/config"):
+            with self.subTest(path=path):
+                self.change(path)
+                self.expect(True, rust=True)
+                calls = self.run_ci()
+                self.assertTrue(any(call.startswith("rs lint-changed ") for call in calls), calls)
+                self.assertTrue(any(call.startswith("rs test-changed ") for call in calls), calls)
+                (self.repo / path).unlink()
+
     def test_nixpkgs_updates_check_browser_pins(self):
         # JS selection also builds wasm, which is reflected in the Rust cache query.
         self.change("flake.lock")
@@ -207,11 +217,11 @@ class QueryTests(unittest.TestCase):
         return (self.root / "calls").read_text().splitlines()
 
     def test_failure_cancels_running_lanes_and_names_its_phase(self):
-        # rs's tests and kt's check run until killed, and gh's tests fail only
+        # rs's tests and cpp's check run until killed, and gh's tests fail only
         # once both are running, so the run ends only if the failure cancels
         # both lanes.
         blocked = {}
-        for name, call in (("rs", '"rs test-changed "*'), ("kt", '"kt check"')):
+        for name, call in (("rs", '"rs test-changed "*'), ("cpp", '"cpp check"')):
             started = self.root / f"{name}.started"
             os.mkfifo(started)
             pid = self.root / f"{name}.pid"
@@ -227,15 +237,15 @@ class QueryTests(unittest.TestCase):
         self.assertIn("ci: test gh failed", result.stderr)
         self.assertRegex(result.stderr, r"\d+  test gh \(failed\)")
         self.assertRegex(result.stderr, r"\d+  test rs \(cancelled\)")
-        self.assertRegex(result.stderr, r"\d+  check kt \(cancelled\)")
+        self.assertRegex(result.stderr, r"\d+  check cpp \(cancelled\)")
         for _, _, pid in blocked.values():
             with self.assertRaises(ProcessLookupError):
                 os.kill(int(pid.read_text()), 0)
-        # A cancelled lane starts no more of its modules, and no lane starts
-        # after the failure.
+        # go's lane ran beside the blocked ones, but a cancelled lane starts no
+        # more of its modules, and no lane starts after the failure.
         calls = (self.root / "calls").read_text().splitlines()
-        self.assertIn("py test", calls)
-        self.assertNotIn("go check", calls)
+        self.assertIn("go check", calls)
+        self.assertNotIn("obs compile", calls)
         self.assertNotIn("dart check", calls)
 
     def test_terminating_the_run_stops_the_running_phase(self):
@@ -272,7 +282,8 @@ esac
                         next(i for i, call in enumerate(calls) if call.startswith("rs test-changed ")))
 
     def test_flake_checks_follow_nix_inputs_instead_of_rust_source(self):
-        for path, expected in (("rs/moq-net/src/lib.rs", False),
+        for path, expected in ((".cargo/config.toml", True),
+                               ("rs/moq-net/src/lib.rs", False),
                                ("rs/moq-net/Cargo.toml", True),
                                ("rs/moq-c/native-libs/linux.txt", True),
                                ("rs/moq-video/src/frame/nv12_resize.ptx", True),

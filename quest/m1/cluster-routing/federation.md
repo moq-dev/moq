@@ -15,8 +15,8 @@ admission exists; extend and prove those paths rather than creating a reverse
 connection protocol. Do not require an inbound connection to the local relay.
 
 Use authenticated, namespace-scoped admission: the CDN scopes the local
-relay's connection to a path prefix, and identities it forwards for its local
-publishers are filed under `hash(subject, id)`, keyed by the grant's
+relay's connection to a path prefix, and identities it sends, its own and its
+local publishers', are filed under `hash(subject, id)`, keyed by the grant's
 credential subject, so a forger or a misconfigured
 uplink only affects its own scope (decided 2026-10-14; see
 [Routes and announces](/quest/m1/cluster-routing/routes.md)). A scoped
@@ -56,7 +56,6 @@ Rust/JS parity. Run `just check`, `just test interop --all`, and `just drafts ch
 
 ## Required
 
-- [Identity proof](/quest/m1/cluster-routing/identity.md) - proven own identities for every session
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - identity, scoped claims, reachability, and export policy
 
 ## Related

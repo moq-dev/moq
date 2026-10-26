@@ -34,13 +34,14 @@ Start by comparing the live tree against these baselines:
 - Rust had 423 dead-code/unused suppression lines: 77 unconditional, 346
   through `cfg_attr`. The unconditional ones are drop guards, compile-time
   Send assertions, generated settings registries, shared test and benchmark
-  harnesses, deserialization fixtures, FFI tables, and two `GroupConsumer`
-  helpers waiting on the [answering API](/quest/m1/api-audit/answer.md).
+  harnesses, deserialization fixtures, FFI tables, and
+  `group::Producer::abort_unused`, which only tests call since the answering
+  API that wanted it was dropped.
   Once the lint audit lands, every unconditional one is an `expect`, so a
   stale one fails the build; check what the conditional ones still guard.
   `cargo shear` found no unused dependencies.
 - Rustc misses unused `pub` items. Tokenizing the tree and keeping `pub`
-  declarations whose name appears exactly once (`.scratch` script, not
+  declarations whose name appears exactly once (`.tmp` script, not
   checked in) found, outside generated bindings:
   - cfg(test) helper `track::Subscriber::assert_error` in moq-net's model,
     since removed. `AnnounceConsumer::assert_next_restarted`/`assert_next_ended`
@@ -73,6 +74,14 @@ Start by comparing the live tree against these baselines:
 No public removal landed in this run itself; the items marked removed above
 went in a follow-up PR. Propose any public removals separately with their migration and consumer evidence. The public model and
 performance audits own their API and benchmark decisions.
+
+From the 2026-10-25 run:
+
+- moq-tokio's `RecvBandwidth::poll` still handles a closed output, but `out`
+  can no longer close while that call borrows it
+  ([moq-dev/moq#6744](https://github.com/moq-dev/moq/pull/6744)).
+- Locals and fields still named `dynamic` after the `requests()` rename
+  ([moq-dev/moq#6752](https://github.com/moq-dev/moq/pull/6752)).
 
 ## Required
 

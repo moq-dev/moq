@@ -13,6 +13,25 @@ pub struct Config {
 	pub quic: moq_tokio::quic::Config,
 }
 
+/// What sessions opened through this library advertise in SETUP: the caller's `prefix`,
+/// then moq-c, then its core.
+pub fn implementation(prefix: Option<&str>) -> Result<String, Error> {
+	let core = format!("moq-c/{} {}", env!("CARGO_PKG_VERSION"), moq_net::IMPLEMENTATION);
+	let Some(prefix) = prefix else {
+		return Ok(core);
+	};
+	// An empty token or stray whitespace would corrupt the list every peer splits on spaces.
+	if prefix
+		.split(' ')
+		.any(|token| token.is_empty() || token.contains(|c: char| c.is_whitespace() || c.is_control()))
+	{
+		return Err(Error::InvalidConfig(format!(
+			"implementation must be space-separated product tokens: {prefix:?}"
+		)));
+	}
+	Ok(format!("{prefix} {core}"))
+}
+
 /// Build a client configuration from what C handed us.
 ///
 /// `None` (a NULL pointer) is the defaults. Otherwise every knob is read through
@@ -28,10 +47,14 @@ pub struct Config {
 /// - Every non-NULL pointer in `config` must be valid for its length.
 pub unsafe fn parse_client(config: Option<&moq_client_config>) -> Result<Config, Error> {
 	let mut out = Config::default();
+	out.connect.implementation = Some(implementation(None)?);
 
 	let Some(config) = config else {
 		return Ok(out);
 	};
+
+	let prefix = unsafe { ffi::parse_str_optional(config.implementation, config.implementation_len)? };
+	out.connect.implementation = Some(implementation(prefix)?);
 
 	// Protocol
 	let versions = unsafe { ffi::parse_strings(config.versions, config.versions_len)? };
@@ -41,6 +64,14 @@ pub unsafe fn parse_client(config: Option<&moq_client_config>) -> Result<Config,
 			.map(|version| moq_net::Version::from_str(version).map_err(Error::InvalidConfig))
 			.collect::<Result<_, _>>()?;
 	}
+	out.connect.tokens = unsafe { ffi::parse_strings(config.tokens, config.tokens_len)? }
+		.into_iter()
+		.map(|token| {
+			token
+				.try_into()
+				.map_err(|err: moq_tokio::connect::EmptyToken| Error::InvalidConfig(err.to_string()))
+		})
+		.collect::<Result<_, _>>()?;
 
 	// Transport
 	if let Some(bind) = unsafe { ffi::parse_str_optional(config.bind, config.bind_len)? } {

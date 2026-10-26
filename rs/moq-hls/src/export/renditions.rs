@@ -19,6 +19,7 @@ use std::time::Duration;
 use moq_mux::catalog::hang::Catalog;
 use moq_mux::timeline::Entry;
 
+use super::master;
 use super::rendition::{Kind, Rendition};
 use super::segments::{self, Discontinuities, Reference};
 
@@ -511,6 +512,48 @@ impl Producer {
 		.await;
 	}
 
+	/// Start every enabled video rendition's init build, then resolve once one of them has its
+	/// init and is [advertised](Rendition::is_advertised), so a manifest lists it, or none is left
+	/// that listings do not refuse: a denied or failed one can never be listed. A build that has
+	/// nothing to read from yet starts on the wake that indexes its media.
+	#[cfg_attr(
+		not(feature = "server"),
+		allow(dead_code, reason = "only the `server` feature uses it")
+	)]
+	pub(crate) async fn video_init(&self) {
+		kio::wait(|waiter| {
+			let poll = self.state.poll_ref(waiter, |current| {
+				let mut video = current
+					.renditions
+					.values()
+					.filter(|rendition| {
+						rendition.kind == Kind::Video
+							&& rendition.is_enabled()
+							&& rendition.poll_refused(waiter).is_pending()
+					})
+					.peekable();
+				if video.peek().is_none()
+					|| video.any(|rendition| {
+						// Rerun on every wake: `poll_refused` registered `waiter` on both timelines,
+						// so the rows a build needs wake this wait to start it.
+						rendition.start_init();
+						rendition.poll_init(waiter).is_ready() && rendition.poll_advertised(waiter).is_ready()
+					}) {
+					Poll::Ready(())
+				} else {
+					Poll::Pending
+				}
+			});
+			match poll {
+				Poll::Ready(Ok(())) => Poll::Ready(()),
+				// A closed catalog adds no rendition, but the existing ones' inits keep arriving,
+				// and the predicate registered `waiter` on each of them.
+				Poll::Ready(Err(_)) | Poll::Pending => Poll::Pending,
+			}
+		})
+		.await
+	}
+
 	/// Enroll a freshly-created rendition in the timeline feed, replaying the recent history
 	/// (and the ended/failed/closed markers) so its window matches its siblings', and start following its
 	/// own timeline.
@@ -559,7 +602,9 @@ impl Producer {
 	/// `source` holds the broadcast the snapshot was read from, so each rendition serves media
 	/// from that same broadcast rather than whatever is at the path by the time it is asked. A
 	/// rendition whose `broadcast` reference escapes above the origin root names no broadcast at
-	/// all, so it is dropped with a warning rather than served.
+	/// all, so it is dropped with a warning rather than served. So is a rendition named `""`, `.`, or
+	/// `..`, which no URL path segment can address, so the master playlist, the DASH manifest, and
+	/// the router agree on what is served.
 	pub fn sync(&self, source: &moq_mux::Source, catalog: &Catalog) {
 		use hang::catalog::Reference as _;
 
@@ -604,6 +649,13 @@ impl Producer {
 		}
 
 		for (name, video) in &catalog.video.renditions {
+			if !master::is_path_segment(name) {
+				tracing::warn!(
+					rendition = name,
+					"ignoring video rendition not named as a URL path segment"
+				);
+				continue;
+			}
 			let key = (Kind::Video, name.clone());
 			if let Some(rendition) = current.renditions.get(&key) {
 				// Survived the stale pass, so it decodes the same: keep its window, its cached
@@ -626,6 +678,13 @@ impl Producer {
 			current.renditions.insert(key, rendition);
 		}
 		for (name, audio) in &catalog.audio.renditions {
+			if !master::is_path_segment(name) {
+				tracing::warn!(
+					rendition = name,
+					"ignoring audio rendition not named as a URL path segment"
+				);
+				continue;
+			}
 			let key = (Kind::Audio, name.clone());
 			if let Some(rendition) = current.renditions.get(&key) {
 				rendition.refresh(audio.bitrate, None, audio.enabled);

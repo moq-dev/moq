@@ -25,17 +25,15 @@ This README's own work, after the children:
   [audio jitter target](/quest/m1/audio-jitter-target/README.md), the
   macOS `receive_credit` timeout to
   [test flakes](/quest/m1/test-flakes-2/README.md), and the paired bench
-  threshold to [bench CI](/quest/m1/bench-ci.md). The `cli-export`
-  bufferbloat failure is expected to clear with
-  [moq-dev/moq#6656](https://github.com/moq-dev/moq/pull/6656).
+  threshold to [bench CI](/quest/m1/bench-ci.md).
 
 Public API: none. Wire: none.
 
 ## Required
 
-- [Claimed fetches wait for credit](/quest/m0/nightly/drill-credit.md) - the impaired burst drills stop losing groups to "no stream credit"
-- [Feature shapes in the gate](/quest/m0/nightly/feature-shapes.md) - feature-gated dead code fails the PR that adds it, not the next Nightly
-- [qmux fallback closes cleanly](/quest/m0/nightly/qmux-fallback-close.md) - the WebSocket fallback startup benchmark stops failing "not cleanly closed"
-- [ts_schedule regression](/quest/m0/nightly/ts-schedule.md) - the moq-mux `ts_schedule` benches return to their old cost
-- [Nightly's base in a shallow checkout](/quest/m0/nightly/shallow-base.md) - `sh/gh/nightly.test.py` passes in Nightly's depth-1 checkout
-- [Advisory bumps](/quest/m0/nightly/advisories.md) - both audits pass on today's advisories
+- [moq-net compiles in Fuzz and send-depth](/quest/m0/nightly/send-overflow.md) - the ietf publisher future stops overflowing the Send check
+- [The Python sdist builds](/quest/m0/nightly/py-sdist.md) - the sdist carries every workspace crate moq-ffi needs
+- [OBS audio-candidate test](/quest/m0/nightly/obs-audio-candidate.md) - the failed audio candidate check passes under TSan and load, fixed at its reproduced cause
+- [moq-net builds without async](/quest/m0/nightly/net-async-free.md) - the no-default-features lane stops pulling `async` back in
+- [qmux builds clean for iOS](/quest/m0/nightly/qmux-ios-dead-code.md) - `TcpStats` is gated to the platforms that implement it, so the iOS simulator build has no dead code
+- [Probe against Cubic](/quest/m0/nightly/competing-cubic.md) - the `competing_cubic` probe test stops resending a stream after its reset

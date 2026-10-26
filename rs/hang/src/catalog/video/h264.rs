@@ -47,7 +47,7 @@ impl FromStr for H264 {
 		};
 
 		let part = parts.next().ok_or(Error::InvalidCodec)?;
-		if part.len() != 6 {
+		if part.len() != 6 || !part.bytes().all(|byte| byte.is_ascii_hexdigit()) {
 			return Err(Error::InvalidCodec);
 		}
 
@@ -67,6 +67,19 @@ mod tests {
 	use crate::catalog::VideoCodec;
 
 	use super::*;
+
+	#[test]
+	fn malformed_hex_fields_are_invalid() {
+		for prefix in ["avc1", "avc3"] {
+			for part in ["aé123", "12aé3", "123aé", "+12345", "12+345", "1234+5", "12gg56"] {
+				let encoded = format!("{prefix}.{part}");
+				assert!(
+					matches!(VideoCodec::from_str(&encoded), Err(Error::InvalidCodec)),
+					"{encoded}"
+				);
+			}
+		}
+	}
 
 	#[test]
 	fn test_h264_avc1() {

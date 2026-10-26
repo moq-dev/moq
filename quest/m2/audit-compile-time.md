@@ -39,8 +39,9 @@ What to check first:
   PR gate.
 - The last per-reader `Any::decode_atom` copy in moq-mux: `fmp4/text.rs`
   decodes from a bare `&[u8]` (13,307 lines, 1.3% of the lib) while every
-  other fMP4 path uses `Cursor<&[u8]>`. It was skipped for open PR
-  [moq-dev/moq#6379](https://github.com/moq-dev/moq/pull/6379).
+  other fMP4 path uses `Cursor<&[u8]>`. It was skipped for
+  [moq-dev/moq#6379](https://github.com/moq-dev/moq/pull/6379), which has
+  since merged, so it is ready to fix.
 - Whether `cargo-llvm-lines` joined the pinned shell. `flake.nix` had four
   open PRs at the m1 run, so it was not added.
 
@@ -115,7 +116,7 @@ instantiating the whole map.
 
 ### Method
 
-Per target, `CARGO_TARGET_DIR=.scratch/target CARGO_BUILD_JOBS=2
+Per target, `CARGO_TARGET_DIR=.tmp/target CARGO_BUILD_JOBS=2
 MBX_DISABLE=1 cargo llvm-lines --locked -p <crate> --lib` (or `--bin`; name
 `qmux@<version>` since a dev-dependency pins an older qmux), then group rows
 by the first path segment after stripping crate hashes, and by substrings for

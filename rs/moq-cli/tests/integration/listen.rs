@@ -120,7 +120,7 @@ async fn drains(stage: &str) {
 	let (connection, _origin) = connects(&listening, stage).await;
 	let draining = connection.draining().unwrap();
 	listening.signal();
-	let goaway = tokio::time::timeout(TIMEOUT, draining.recv())
+	let goaway = tokio::time::timeout(TIMEOUT, moq_net::kio::wait(|waiter| draining.poll(waiter)))
 		.await
 		.expect("no GOAWAY after SIGTERM")
 		.expect("CLI closed the session without GOAWAY");
@@ -178,7 +178,10 @@ async fn an_export_stage_ending_during_drain_waits_for_every_session() {
 	let draining = publisher.draining().unwrap();
 	let signalled = std::time::Instant::now();
 	listening.signal();
-	tokio::time::timeout(TIMEOUT, draining.recv()).await.unwrap().unwrap();
+	tokio::time::timeout(TIMEOUT, moq_net::kio::wait(|waiter| draining.poll(waiter)))
+		.await
+		.unwrap()
+		.unwrap();
 	publisher.closed().await.unwrap();
 	tokio::time::timeout(TIMEOUT, legacy.closed())
 		.await

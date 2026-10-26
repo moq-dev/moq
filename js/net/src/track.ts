@@ -36,6 +36,7 @@ import {
 	type Run,
 	removeRun,
 	runGaps,
+	type StagedTrack,
 	type TrackRequestOptions,
 } from "./internal.ts";
 import { grace, Ledger } from "./ledger.ts";
@@ -342,6 +343,7 @@ export class Request {
 
 	static {
 		hooks.makeRequest = (options) => new Request(options);
+		hooks.stageRequest = (request, info) => request.#stage(info);
 	}
 
 	/** Watch the subscribers waiting for this request. */
@@ -361,76 +363,33 @@ export class Request {
 
 	/**
 	 * Accept the request, committing the track's immutable {@link Info}. Throws, rejecting the
-	 * request, if `info` is invalid. The same as {@link stage} followed by {@link Staged.commit}.
+	 * request, if `info` is invalid.
 	 */
 	accept(info: Partial<Info> = {}): Producer {
-		return this.stage(info).commit();
+		return this.#stage(info).commit();
 	}
 
-	/**
-	 * Take the track's {@link Producer} without resolving any subscriber yet, so content written
-	 * through {@link Staged.producer} is there when the first reader looks. For a relay that
-	 * already holds groups of the track: write them, then {@link Staged.commit}. Disposing the
-	 * {@link Staged} uncommitted rejects the request.
-	 */
-	stage(info: Partial<Info> = {}): Staged {
+	#stage(info: Partial<Info>): StagedTrack {
 		this.#pending.delete(this);
-		return new Staged(this.#producer, info);
+		const producer = this.#producer;
+		return {
+			producer,
+			commit: () => {
+				try {
+					return producer.accept(info);
+				} catch (err) {
+					// Refused, so its subscribers see the error instead of waiting on an open request.
+					producer.close(err instanceof Error ? err : new Error(String(err)));
+					throw err;
+				}
+			},
+		};
 	}
 
 	/** Reject the request, closing the track optionally with an error. */
 	reject(err?: Error): void {
 		this.#pending.delete(this);
 		this.#producer.close(err);
-	}
-}
-
-/**
- * A requested track being written before any subscriber sees it; see {@link Request.stage}.
- *
- * Write through {@link producer}. Subscribers waiting on the request resolve only at
- * {@link commit}, with everything written by then. Disposing it uncommitted rejects the request,
- * so hold it with `using` or commit it.
- *
- * @public
- */
-export class Staged {
-	/** The track's writer. */
-	readonly producer: Producer;
-
-	#info: Partial<Info>;
-	#done = false;
-
-	/** @internal */
-	constructor(producer: Producer, info: Partial<Info>) {
-		this.producer = producer;
-		this.#info = info;
-	}
-
-	/**
-	 * Publish the track: every waiting subscriber resolves now, with what was written. Throws,
-	 * rejecting the request, if the info is invalid or something written does not match it.
-	 * Throws without publishing once committed or disposed.
-	 */
-	commit(): Producer {
-		// Rust's `commit(self)` consumes the handle; here a disposed one has already rejected
-		// its subscribers, and accepting a closed producer would silently do nothing.
-		if (this.#done) throw new Error("staged track already committed or dropped");
-		this.#done = true;
-		try {
-			return this.producer.accept(this.#info);
-		} catch (err) {
-			// Refused, so its subscribers see the error instead of waiting on an open request.
-			this.producer.close(err instanceof Error ? err : new Error(String(err)));
-			throw err;
-		}
-	}
-
-	/** Reject the request unless it was committed. */
-	[Symbol.dispose](): void {
-		if (this.#done) return;
-		this.#done = true;
-		this.producer.close(new Error("staged track dropped"));
 	}
 }
 
@@ -639,6 +598,9 @@ let reofferCached: (
 	end: number,
 	offer: (sequence: number) => boolean,
 ) => void;
+// Mirror the cached groups at `sequences` into a sink again, for a reader whose budget widened
+// past the one it skipped them under; assigned in the producer's static block.
+let reofferSequences: (producer: Producer, sink: TrackState, sequences: readonly number[]) => void;
 // Whether a group may still land on the producer's live feed; assigned in its static block.
 let mayLand: (producer: Producer, land: Land) => boolean;
 let sourceStart: (producer: Producer) => number | "pending" | undefined;
@@ -803,6 +765,7 @@ export class Producer {
 		hooks.joinProducer = (producer) => producer.#join();
 		hooks.endTrack = (producer, end) => producer.#endPending(end);
 		hooks.releaseTrack = (producer) => producer.#close(undefined, false);
+		hooks.dropTrackGroups = (producer, start, end, error) => producer.#drop(start, end, error, true);
 		hooks.startTrack = (producer, served) => {
 			producer.#served = served;
 			producer.#owe();
@@ -829,17 +792,14 @@ export class Producer {
 				producer.#mirror(entry, sink);
 			}
 		};
+		reofferSequences = (producer, sink, sequences) => {
+			const held = new Set(sink.groups.peek().map((group) => group.sequence));
+			for (const sequence of sequences) {
+				const entry = producer.#cached.get(sequence);
+				if (entry && !held.has(sequence)) producer.#mirror(entry, sink);
+			}
+		};
 		mayLand = (producer, land) => producer.#mayLand(land);
-	}
-
-	/**
-	 * Record that the publisher gave up the groups `[start, end)` with `error`, mirroring the
-	 * Rust `drop_groups`: none will arrive, so a reader waiting on one moves past it, a group
-	 * still arriving in them ends with `error`, the declared end does not wait for them, and a
-	 * relay serving this track forwards the drop.
-	 */
-	dropGroups(start: number, end: number, error: Error): void {
-		this.#drop(start, end, error, true);
 	}
 
 	// Whether a group may still land from the live feed, by the rule a pending tail is judged
@@ -1715,6 +1675,8 @@ export class Producer {
 // One read pass's view of the budget and the live edge; see Subscriber.#drift.
 type Drift = {
 	budget: number;
+	// The budget is the track's max age, which no widening passes: its verdicts are final.
+	bounded: boolean;
 	presentation?: { sequence: number; timestamp: Timestamp };
 	end?: number;
 };
@@ -1746,6 +1708,12 @@ export class Subscriber {
 	// Every group sequence this reader handed out, so a re-created group or one a second route
 	// delivers is handed out once.
 	#delivered = new Delivered();
+	// Cached groups the arrival cursor skipped as stale, each with the budget it was judged
+	// under, so a wider budget offers them again. Only a widening reverses a stale verdict, and
+	// an entry is kept only while its group is cached, since nothing could offer it again.
+	#skipped = new Map<number, number>();
+	// At most the narrowest budget in #skipped, so a read whose budget did not widen skips the scan.
+	#narrowest = Number.POSITIVE_INFINITY;
 	// This reader closed itself, so lowering its floor offers nothing: a producer's clean close
 	// alone leaves the cache readable, but the reader leaving must stay terminal.
 	#closed = false;
@@ -1763,7 +1731,7 @@ export class Subscriber {
 	// it to sequence order; whichever wins is the only one allowed from here on.
 	// Datagrams are a separate cursor and never commit.
 	#mode?: "arrival" | "ordered";
-	// What the lite publisher forwards as drops: sequences given up and not reported yet,
+	// What this cursor reports as drops: sequences given up and not reported yet,
 	// the track's drops last folded in, and every sequence already reported. Drops are
 	// persistent track state, so they are tracked here rather than removed for everyone.
 	#pending: DropRun[] = [];
@@ -1807,6 +1775,7 @@ export class Subscriber {
 		const retained = info?.maxAge;
 		return {
 			budget: retained === undefined ? requested : Math.min(requested, retained),
+			bounded: retained !== undefined && requested >= retained,
 			presentation,
 			end,
 		};
@@ -1989,20 +1958,87 @@ export class Subscriber {
 	#handOut(sequence: number, ordered: boolean): void {
 		if (ordered) this.#delivered.forgetBelow(sequence);
 		this.#delivered.add(sequence);
+		this.#skipped.delete(sequence);
 		if (this.#resume) this.#resume.forgetPastBudget(this.#delivered);
 		else this.#forgetPastBudget(this.#delivered);
 	}
 
 	// Forget the gaps in `delivered` below each group past this subscriber's budget now, whether
-	// this track holds it or not: one landing there would be written off.
+	// this track holds it or not: one landing there would be written off. A group skipped as
+	// stale is not forgotten, since a wider budget offers it again.
 	#forgetPastBudget(delivered: Delivered): void {
 		if (delivered.aboveGap() === undefined) return;
 		// One edge for every group judged, so forgetting N gaps never resolves it N times.
 		const drift = this.#drift();
+		// Found once a gap is stale, so a hand-out that forgets nothing never scans #skipped. A
+		// skip whose group left the cache can never be offered again, so it is forgotten here
+		// rather than holding the gaps above it forever.
+		let skipped: number | undefined;
+		let scanned = false;
 		for (let oldest = delivered.aboveGap(); oldest !== undefined; oldest = delivered.aboveGap()) {
 			if (!this.#staleAt(oldest, drift)) break;
+			if (!scanned) {
+				scanned = true;
+				const producer = this.#state.producer;
+				for (const sequence of this.#skipped.keys()) {
+					if (producer && !cachedHolds(producer, sequence)) this.#skipped.delete(sequence);
+					else skipped = Math.min(skipped ?? sequence, sequence);
+				}
+			}
+			if (skipped !== undefined && skipped < oldest) {
+				delivered.forgetBelow(skipped);
+				break;
+			}
 			delivered.forgetBelow(oldest);
 		}
+	}
+
+	// Record `sequence` as skipped stale under `budget`, so a wider one offers it again.
+	#skip(sequence: number, budget: number): void {
+		this.#skipped.set(sequence, budget);
+		this.#narrowest = Math.min(this.#narrowest, budget);
+		// Each kept entry holds a distinct cached group, so pruning once they outnumber the
+		// cache twice over costs O(1) per skip amortized.
+		const producer = this.#state.producer;
+		if (!producer || this.#skipped.size <= 2 * this.#state.timeline.length) return;
+		for (const skipped of this.#skipped.keys()) {
+			if (!cachedHolds(producer, skipped)) this.#skipped.delete(skipped);
+		}
+	}
+
+	// Offer again the cached groups skipped as stale under a budget narrower than `budget`, now
+	// that it widened. Each stays recorded, judged under `budget`, until it is handed out or
+	// skipped again, so a newer one handed out first never folds it into #delivered. Costs the
+	// skipped groups, never the cache.
+	#reoffer(budget: number): void {
+		if (this.#skipped.size === 0 || budget <= this.#narrowest) return;
+		const sequences: number[] = [];
+		let narrowest = Number.POSITIVE_INFINITY;
+		for (const [sequence, judged] of this.#skipped) {
+			if (judged >= budget) {
+				narrowest = Math.min(narrowest, judged);
+				continue;
+			}
+			// A sequence already reported dropped stays dropped.
+			if (runGaps(this.#reported, sequence, sequence + 1).length === 0) {
+				this.#skipped.delete(sequence);
+				continue;
+			}
+			this.#skipped.set(sequence, budget);
+			narrowest = budget;
+			sequences.push(sequence);
+			// Judged again, so a stale drop not reported yet is withdrawn.
+			if (dropAt(this.#pending, sequence) instanceof Error) {
+				this.#pending = this.#pending.flatMap((run) =>
+					run.start <= sequence && sequence < run.end && toStreamCode(run.error) === StreamCode.Old
+						? removeRun([run], sequence, sequence + 1)
+						: [run],
+				);
+			}
+		}
+		this.#narrowest = narrowest;
+		const producer = this.#state.producer;
+		if (producer && !this.#closed) reofferSequences(producer, this.#state, sequences);
 	}
 
 	private constructor(name: string, state: TrackState) {
@@ -2026,9 +2062,13 @@ export class Subscriber {
 			return Math.max(start, subscriber.#cursor.peek().start);
 		};
 		hooks.tryRecvGroup = (subscriber, dispositions) => subscriber.#tryRecvGroup(dispositions);
+		hooks.tryDrop = (subscriber) => subscriber.#tryDrop();
 		hooks.tryNextGroup = (subscriber) => subscriber.#tryNextGroup();
 		hooks.peekGroup = (subscriber, ordered) => subscriber.#peekGroup(ordered);
 		hooks.forgetPastBudget = (subscriber, delivered) => subscriber.#forgetPastBudget(delivered);
+		hooks.unreport = (subscriber, start, end) => {
+			subscriber.#reported = removeRun(subscriber.#reported, start, end);
+		};
 		hooks.tryRecvDatagram = (subscriber) => subscriber.#tryDatagram();
 		hooks.deliveredRuns = (subscriber) => subscriber.#delivered.runs;
 		hooks.datagramChanged = (subscriber, fn) => {
@@ -2302,7 +2342,9 @@ export class Subscriber {
 	 * omitted end removes the cap. Lowering the floor or raising the cap offers the groups it
 	 * newly covers that the track still caches and this reader never handed out; a group is
 	 * never handed out twice. A local filter, not a request: it leaves the wire subscription
-	 * alone. {@link largest} reports within these bounds.
+	 * alone. One exception: on a track served across route changes, lowering the floor asks the
+	 * serving route again for the groups it newly covers within the subscription's groups, since
+	 * the route that delivered them may be gone. {@link largest} reports within these bounds.
 	 */
 	withRange(groups: Groups): this {
 		const { start, end } = groupBounds(groups);
@@ -2398,40 +2440,21 @@ export class Subscriber {
 	// Package-internal synchronous half of recvGroup. The lite publisher uses this so applying
 	// control state, popping the group, and positioning its frames are one JavaScript turn.
 	#tryRecvGroup(dispositions = false): Recv {
-		if (this.#resume) return this.#tryResumed(false);
+		if (this.#resume) return this.#tryResumed(false, dispositions);
 		const groups = this.#state.groups.peek();
 		const { start, end } = this.#cursor.peek();
-		// The first part of `[from, to)` this cursor has not reported yet, now reported, with why.
-		const report = (from: number, to: number, error: Error): Recv | undefined => {
-			if (!dispositions) return undefined;
-			const [gap] = runGaps(this.#reported, Math.max(from, start), Math.min(to, end ?? to));
-			if (!gap) return undefined;
-			insertRun(this.#reported, gap.start, gap.end);
-			return { kind: "drop", ...gap, error };
-		};
 		const old = () => new StreamError(StreamCode.Old, { message: "group is past the budget" });
 
-		// Keep unread groups below the floor until cache eviction: replacing the
-		// subscription can lower it, just as raising the cap re-offers held groups.
-		const index = timelineIndex(groups, start);
 		if (dispositions) {
-			// Rescanned only after it changed, so an idle poll costs nothing per drop held.
-			// Out-of-window runs were skipped, so a moved window rescans too.
-			const drops = this.#state.drops.peek();
-			const seen = this.#dropsSeen;
-			if (!seen || seen.drops !== drops || seen.start !== start || seen.end !== end) {
-				this.#dropsSeen = { drops, start, end };
-				for (const run of drops) this.#pending = insertDrop(this.#pending, run.start, run.end, run.error);
-			}
-			for (let run = this.#pending.shift(); run; run = this.#pending.shift()) {
-				const dropped = report(run.start, run.end, run.error);
-				if (dropped?.kind !== "drop") continue;
-				if (dropped.end < run.end)
-					this.#pending.unshift({ start: dropped.end, end: run.end, error: run.error });
-				return dropped;
-			}
+			const dropped = this.#tryDrop();
+			if (dropped) return dropped;
 		}
 		const drift = this.#drift();
+		this.#reoffer(drift.budget);
+		// Keep unread groups below the floor until cache eviction: replacing the
+		// subscription can lower it, just as raising the cap re-offers held groups. Found
+		// after the re-offer, which may insert below the floor.
+		const index = timelineIndex(groups, start);
 
 		for (;;) {
 			// The buffer is sequence-sorted, so an in-range group that arrives behind a
@@ -2447,7 +2470,7 @@ export class Subscriber {
 			}
 			const failed = group.closed.peek();
 			if (dispositions && failed instanceof Error) {
-				const dropped = report(group.sequence, group.sequence + 1, failed);
+				const dropped = this.#report(group.sequence, group.sequence + 1, failed);
 				if (dropped) return dropped;
 				continue;
 			}
@@ -2457,8 +2480,16 @@ export class Subscriber {
 			}
 			if (this.#staleAt(group.sequence, drift)) {
 				group.close();
-				const dropped = report(group.sequence, group.sequence + 1, old());
-				if (dropped) return dropped;
+				// A re-offered group stale at the bound is final.
+				if (drift.bounded) this.#skipped.delete(group.sequence);
+				else this.#skip(group.sequence, drift.budget);
+				if (dispositions) {
+					const dropped = this.#report(group.sequence, group.sequence + 1, old());
+					if (dropped) return dropped;
+				} else if (this.#dropsSeen) {
+					// A cursor #tryDrop reads reports it there.
+					this.#pending = insertDrop(this.#pending, group.sequence, group.sequence + 1, old());
+				}
 				continue;
 			}
 			this.#handOut(group.sequence, false);
@@ -2474,14 +2505,53 @@ export class Subscriber {
 		return group ? { kind: "boundary" } : { kind: "done" };
 	}
 
+	// The first part of `[from, to)` this cursor has not reported yet, now reported, with why.
+	#report(from: number, to: number, error: Error): (Recv & { kind: "drop" }) | undefined {
+		const { start, end } = this.#cursor.peek();
+		const [gap] = runGaps(this.#reported, Math.max(from, start), Math.min(to, end ?? to));
+		if (!gap) return undefined;
+		insertRun(this.#reported, gap.start, gap.end);
+		return { kind: "drop", ...gap, error };
+	}
+
+	// The next run this cursor gave up and has not reported, without taking a group. From the
+	// first call on, a read without dispositions keeps its budget skips for it too. A resumed
+	// one reports what its routes' copies gave up.
+	#tryDrop(): (Recv & { kind: "drop" }) | undefined {
+		if (this.#resume) {
+			const dropped = this.#resume.tryDrop(this.#delivered);
+			// Accounted for as #tryResumed does, so no copy serves it later.
+			if (dropped) this.#delivered.addRun(dropped.start, dropped.end);
+			return dropped;
+		}
+		const { start, end } = this.#cursor.peek();
+		// Rescanned only after it changed, so an idle poll costs nothing per drop held.
+		// Out-of-window runs were skipped, so a moved window rescans too.
+		const drops = this.#state.drops.peek();
+		const seen = this.#dropsSeen;
+		if (!seen || seen.drops !== drops || seen.start !== start || seen.end !== end) {
+			this.#dropsSeen = { drops, start, end };
+			for (const run of drops) this.#pending = insertDrop(this.#pending, run.start, run.end, run.error);
+		}
+		for (let run = this.#pending.shift(); run; run = this.#pending.shift()) {
+			const dropped = this.#report(run.start, run.end, run.error);
+			if (!dropped) continue;
+			if (dropped.end < run.end) this.#pending.unshift({ start: dropped.end, end: run.end, error: run.error });
+			return dropped;
+		}
+		return undefined;
+	}
+
 	// A group from the routes' copies; see #resume.
-	#tryResumed(ordered: boolean): Recv {
+	#tryResumed(ordered: boolean, dispositions = false): Recv {
 		const resume = this.#resume as ResumeSource;
 		// A clean end leaves what the copies hold readable, as a direct reader's buffer is.
 		const closed = this.#state.closed.peek();
 		if (closed instanceof Error) return { kind: "error", error: closed };
-		const recv = resume.tryGroup(ordered, this.#delivered);
+		const recv = resume.tryGroup(ordered, this.#delivered, dispositions);
 		if (recv.kind === "group") this.#handOut(recv.group.sequence, ordered);
+		// Accounted for as a group handed out is, so no copy serves it later.
+		else if (recv.kind === "drop") this.#delivered.addRun(recv.start, recv.end);
 		return recv;
 	}
 
@@ -2508,6 +2578,8 @@ export class Subscriber {
 			this.#state.drops.changed(fn),
 			this.#state.startChanged.changed(fn),
 			this.#cursor.changed(fn),
+			// A widened budget re-offers the groups it skipped as stale.
+			this.#state.update.changed(fn),
 			this.#state.closed.changed(fn),
 			this.#state.end.changed(fn),
 			this.#state.received.changed(fn),

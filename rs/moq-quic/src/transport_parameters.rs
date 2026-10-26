@@ -7,8 +7,8 @@
 //! implementations of the `crypto::Session` trait.
 
 use std::{
-    convert::TryFrom,
-    net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6},
+	convert::TryFrom,
+	net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6},
 };
 
 use bytes::{Buf, BufMut};
@@ -16,13 +16,13 @@ use rand::{Rng, RngExt, seq::SliceRandom as _};
 use thiserror::Error;
 
 use crate::{
-    LOC_CID_COUNT, MAX_CID_SIZE, MAX_STREAM_COUNT, RESET_TOKEN_SIZE, ResetToken, Side,
-    TIMER_GRANULARITY, TransportError, VarInt,
-    cid_generator::ConnectionIdGenerator,
-    cid_queue::CidQueue,
-    coding::{BufExt, BufMutExt, UnexpectedEnd},
-    config::{EndpointConfig, ServerConfig, TransportConfig},
-    shared::ConnectionId,
+	LOC_CID_COUNT, MAX_CID_SIZE, MAX_STREAM_COUNT, RESET_TOKEN_SIZE, ResetToken, Side, TIMER_GRANULARITY,
+	TransportError, VarInt,
+	cid_generator::ConnectionIdGenerator,
+	cid_queue::CidQueue,
+	coding::{BufExt, BufMutExt, UnexpectedEnd},
+	config::{EndpointConfig, ServerConfig, TransportConfig},
+	shared::ConnectionId,
 };
 
 // Apply a given macro to a list of all the transport parameters having integer types, along with
@@ -31,37 +31,37 @@ use crate::{
 // something with transport parameters, we'll handle the bulk of cases by writing a macro that
 // takes a list of arguments in this form, then passing it to this macro.
 macro_rules! apply_params {
-    ($macro:ident) => {
-        $macro! {
-            // #[doc] name (id) = default,
-            /// Milliseconds, disabled if zero
-            max_idle_timeout(MaxIdleTimeout) = 0,
-            /// Limits the size of UDP payloads that the endpoint is willing to receive
-            max_udp_payload_size(MaxUdpPayloadSize) = 65527,
+	($macro:ident) => {
+		$macro! {
+			// #[doc] name (id) = default,
+			/// Milliseconds, disabled if zero
+			max_idle_timeout(MaxIdleTimeout) = 0,
+			/// Limits the size of UDP payloads that the endpoint is willing to receive
+			max_udp_payload_size(MaxUdpPayloadSize) = 65527,
 
-            /// Initial value for the maximum amount of data that can be sent on the connection
-            initial_max_data(InitialMaxData) = 0,
-            /// Initial flow control limit for locally-initiated bidirectional streams
-            initial_max_stream_data_bidi_local(InitialMaxStreamDataBidiLocal) = 0,
-            /// Initial flow control limit for peer-initiated bidirectional streams
-            initial_max_stream_data_bidi_remote(InitialMaxStreamDataBidiRemote) = 0,
-            /// Initial flow control limit for unidirectional streams
-            initial_max_stream_data_uni(InitialMaxStreamDataUni) = 0,
+			/// Initial value for the maximum amount of data that can be sent on the connection
+			initial_max_data(InitialMaxData) = 0,
+			/// Initial flow control limit for locally-initiated bidirectional streams
+			initial_max_stream_data_bidi_local(InitialMaxStreamDataBidiLocal) = 0,
+			/// Initial flow control limit for peer-initiated bidirectional streams
+			initial_max_stream_data_bidi_remote(InitialMaxStreamDataBidiRemote) = 0,
+			/// Initial flow control limit for unidirectional streams
+			initial_max_stream_data_uni(InitialMaxStreamDataUni) = 0,
 
-            /// Initial maximum number of bidirectional streams the peer may initiate
-            initial_max_streams_bidi(InitialMaxStreamsBidi) = 0,
-            /// Initial maximum number of unidirectional streams the peer may initiate
-            initial_max_streams_uni(InitialMaxStreamsUni) = 0,
+			/// Initial maximum number of bidirectional streams the peer may initiate
+			initial_max_streams_bidi(InitialMaxStreamsBidi) = 0,
+			/// Initial maximum number of unidirectional streams the peer may initiate
+			initial_max_streams_uni(InitialMaxStreamsUni) = 0,
 
-            /// Exponent used to decode the ACK Delay field in the ACK frame
-            ack_delay_exponent(AckDelayExponent) = 3,
-            /// Maximum amount of time in milliseconds by which the endpoint will delay sending
-            /// acknowledgments
-            max_ack_delay(MaxAckDelay) = 25,
-            /// Maximum number of connection IDs from the peer that an endpoint is willing to store
-            active_connection_id_limit(ActiveConnectionIdLimit) = 2,
-        }
-    };
+			/// Exponent used to decode the ACK Delay field in the ACK frame
+			ack_delay_exponent(AckDelayExponent) = 3,
+			/// Maximum amount of time in milliseconds by which the endpoint will delay sending
+			/// acknowledgments
+			max_ack_delay(MaxAckDelay) = 25,
+			/// Maximum number of connection IDs from the peer that an endpoint is willing to store
+			active_connection_id_limit(ActiveConnectionIdLimit) = 2,
+		}
+	};
 }
 
 macro_rules! make_struct {
@@ -146,77 +146,54 @@ macro_rules! make_struct {
 apply_params!(make_struct);
 
 impl TransportParameters {
-    pub(crate) fn new(
-        config: &TransportConfig,
-        endpoint_config: &EndpointConfig,
-        cid_gen: &dyn ConnectionIdGenerator,
-        initial_src_cid: ConnectionId,
-        server_config: Option<&ServerConfig>,
-        rng: &mut impl Rng,
-    ) -> Self {
-        Self {
-            initial_src_cid: Some(initial_src_cid),
-            initial_max_streams_bidi: config.max_concurrent_bidi_streams,
-            initial_max_streams_uni: config.max_concurrent_uni_streams,
-            initial_max_data: config.receive_window,
-            initial_max_stream_data_bidi_local: config.stream_receive_window,
-            initial_max_stream_data_bidi_remote: config.stream_receive_window,
-            initial_max_stream_data_uni: config.stream_receive_window,
-            max_udp_payload_size: endpoint_config.max_udp_payload_size,
-            max_idle_timeout: config.max_idle_timeout.unwrap_or(VarInt(0)),
-            disable_active_migration: server_config.is_some_and(|c| !c.migration),
-            active_connection_id_limit: if cid_gen.cid_len() == 0 {
-                2 // i.e. default, i.e. unsent
-            } else {
-                CidQueue::LEN as u32
-            }
-            .into(),
-            max_datagram_frame_size: config
-                .datagram_receive_buffer_size
-                .map(|x| (x.min(u16::MAX.into()) as u16).into()),
-            grease_quic_bit: endpoint_config.grease_quic_bit,
-            min_ack_delay: Some(
-                VarInt::from_u64(u64::try_from(TIMER_GRANULARITY.as_micros()).unwrap()).unwrap(),
-            ),
-            reset_stream_at: config.reset_stream_at,
-            grease_transport_parameter: Some(ReservedTransportParameter::random(rng)),
-            write_order: Some({
-                let mut order = std::array::from_fn(|i| i as u8);
-                order.shuffle(rng);
-                order
-            }),
-            ..Self::default()
-        }
-    }
+	pub(crate) fn new(
+		config: &TransportConfig,
+		endpoint_config: &EndpointConfig,
+		cid_gen: &dyn ConnectionIdGenerator,
+		initial_src_cid: ConnectionId,
+		server_config: Option<&ServerConfig>,
+		rng: &mut impl Rng,
+	) -> Self {
+		Self {
+			initial_src_cid: Some(initial_src_cid),
+			initial_max_streams_bidi: config.max_concurrent_bidi_streams,
+			initial_max_streams_uni: config.max_concurrent_uni_streams,
+			initial_max_data: config.receive_window,
+			initial_max_stream_data_bidi_local: config.stream_receive_window,
+			initial_max_stream_data_bidi_remote: config.stream_receive_window,
+			initial_max_stream_data_uni: config.stream_receive_window,
+			max_udp_payload_size: endpoint_config.max_udp_payload_size,
+			max_idle_timeout: config.max_idle_timeout.unwrap_or(VarInt(0)),
+			disable_active_migration: server_config.is_some_and(|c| !c.migration),
+			active_connection_id_limit: if cid_gen.cid_len() == 0 {
+				2 // i.e. default, i.e. unsent
+			} else {
+				CidQueue::LEN as u32
+			}
+			.into(),
+			max_datagram_frame_size: config
+				.datagram_receive_buffer_size
+				.map(|x| (x.min(u16::MAX.into()) as u16).into()),
+			grease_quic_bit: endpoint_config.grease_quic_bit,
+			min_ack_delay: Some(VarInt::from_u64(u64::try_from(TIMER_GRANULARITY.as_micros()).unwrap()).unwrap()),
+			reset_stream_at: config.reset_stream_at,
+			grease_transport_parameter: Some(ReservedTransportParameter::random(rng)),
+			write_order: Some({
+				let mut order = std::array::from_fn(|i| i as u8);
+				order.shuffle(rng);
+				order
+			}),
+			..Self::default()
+		}
+	}
 
-    /// Check that these parameters are legal when resuming from
-    /// certain cached parameters
-    pub(crate) fn validate_resumption_from(&self, cached: &Self) -> Result<(), TransportError> {
-        if cached.active_connection_id_limit > self.active_connection_id_limit
-            || cached.initial_max_data > self.initial_max_data
-            || cached.initial_max_stream_data_bidi_local > self.initial_max_stream_data_bidi_local
-            || cached.initial_max_stream_data_bidi_remote > self.initial_max_stream_data_bidi_remote
-            || cached.initial_max_stream_data_uni > self.initial_max_stream_data_uni
-            || cached.initial_max_streams_bidi > self.initial_max_streams_bidi
-            || cached.initial_max_streams_uni > self.initial_max_streams_uni
-            || cached.max_datagram_frame_size > self.max_datagram_frame_size
-            || cached.grease_quic_bit && !self.grease_quic_bit
-            || cached.reset_stream_at && !self.reset_stream_at
-        {
-            return Err(TransportError::PROTOCOL_VIOLATION(
-                "0-RTT accepted with incompatible transport parameters",
-            ));
-        }
-        Ok(())
-    }
-
-    /// Maximum number of CIDs to issue to this peer
-    ///
-    /// Consider both a) the active_connection_id_limit from the other end; and
-    /// b) LOC_CID_COUNT used locally
-    pub(crate) fn issue_cids_limit(&self) -> u64 {
-        self.active_connection_id_limit.0.min(LOC_CID_COUNT)
-    }
+	/// Maximum number of CIDs to issue to this peer
+	///
+	/// Consider both a) the active_connection_id_limit from the other end; and
+	/// b) LOC_CID_COUNT used locally
+	pub(crate) fn issue_cids_limit(&self) -> u64 {
+		self.active_connection_id_limit.0.min(LOC_CID_COUNT)
+	}
 }
 
 /// A server's preferred address
@@ -224,177 +201,177 @@ impl TransportParameters {
 /// This is communicated as a transport parameter during TLS session establishment.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub(crate) struct PreferredAddress {
-    pub(crate) address_v4: Option<SocketAddrV4>,
-    pub(crate) address_v6: Option<SocketAddrV6>,
-    pub(crate) connection_id: ConnectionId,
-    pub(crate) stateless_reset_token: ResetToken,
+	pub(crate) address_v4: Option<SocketAddrV4>,
+	pub(crate) address_v6: Option<SocketAddrV6>,
+	pub(crate) connection_id: ConnectionId,
+	pub(crate) stateless_reset_token: ResetToken,
 }
 
 impl PreferredAddress {
-    fn wire_size(&self) -> u16 {
-        4 + 2 + 16 + 2 + 1 + self.connection_id.len() as u16 + 16
-    }
+	fn wire_size(&self) -> u16 {
+		4 + 2 + 16 + 2 + 1 + self.connection_id.len() as u16 + 16
+	}
 
-    fn write<W: BufMut>(&self, w: &mut W) {
-        w.write(self.address_v4.map_or(Ipv4Addr::UNSPECIFIED, |x| *x.ip()));
-        w.write::<u16>(self.address_v4.map_or(0, |x| x.port()));
-        w.write(self.address_v6.map_or(Ipv6Addr::UNSPECIFIED, |x| *x.ip()));
-        w.write::<u16>(self.address_v6.map_or(0, |x| x.port()));
-        w.write::<u8>(self.connection_id.len() as u8);
-        w.put_slice(&self.connection_id);
-        w.put_slice(&self.stateless_reset_token);
-    }
+	fn write<W: BufMut>(&self, w: &mut W) {
+		w.write(self.address_v4.map_or(Ipv4Addr::UNSPECIFIED, |x| *x.ip()));
+		w.write::<u16>(self.address_v4.map_or(0, |x| x.port()));
+		w.write(self.address_v6.map_or(Ipv6Addr::UNSPECIFIED, |x| *x.ip()));
+		w.write::<u16>(self.address_v6.map_or(0, |x| x.port()));
+		w.write::<u8>(self.connection_id.len() as u8);
+		w.put_slice(&self.connection_id);
+		w.put_slice(&self.stateless_reset_token);
+	}
 
-    fn read<R: Buf>(r: &mut R) -> Result<Self, Error> {
-        let ip_v4 = r.get::<Ipv4Addr>()?;
-        let port_v4 = r.get::<u16>()?;
-        let ip_v6 = r.get::<Ipv6Addr>()?;
-        let port_v6 = r.get::<u16>()?;
-        let cid_len = r.get::<u8>()?;
-        if r.remaining() < cid_len as usize || cid_len > MAX_CID_SIZE as u8 {
-            return Err(Error::Malformed);
-        }
-        let mut stage = [0; MAX_CID_SIZE];
-        r.copy_to_slice(&mut stage[0..cid_len as usize]);
-        let cid = ConnectionId::new(&stage[0..cid_len as usize]);
-        if r.remaining() < 16 {
-            return Err(Error::Malformed);
-        }
-        let mut token = [0; RESET_TOKEN_SIZE];
-        r.copy_to_slice(&mut token);
-        let address_v4 = if ip_v4.is_unspecified() && port_v4 == 0 {
-            None
-        } else {
-            Some(SocketAddrV4::new(ip_v4, port_v4))
-        };
-        let address_v6 = if ip_v6.is_unspecified() && port_v6 == 0 {
-            None
-        } else {
-            Some(SocketAddrV6::new(ip_v6, port_v6, 0, 0))
-        };
-        if address_v4.is_none() && address_v6.is_none() {
-            return Err(Error::IllegalValue);
-        }
-        Ok(Self {
-            address_v4,
-            address_v6,
-            connection_id: cid,
-            stateless_reset_token: token.into(),
-        })
-    }
+	fn read<R: Buf>(r: &mut R) -> Result<Self, Error> {
+		let ip_v4 = r.get::<Ipv4Addr>()?;
+		let port_v4 = r.get::<u16>()?;
+		let ip_v6 = r.get::<Ipv6Addr>()?;
+		let port_v6 = r.get::<u16>()?;
+		let cid_len = r.get::<u8>()?;
+		if r.remaining() < cid_len as usize || cid_len > MAX_CID_SIZE as u8 {
+			return Err(Error::Malformed);
+		}
+		let mut stage = [0; MAX_CID_SIZE];
+		r.copy_to_slice(&mut stage[0..cid_len as usize]);
+		let cid = ConnectionId::new(&stage[0..cid_len as usize]);
+		if r.remaining() < 16 {
+			return Err(Error::Malformed);
+		}
+		let mut token = [0; RESET_TOKEN_SIZE];
+		r.copy_to_slice(&mut token);
+		let address_v4 = if ip_v4.is_unspecified() && port_v4 == 0 {
+			None
+		} else {
+			Some(SocketAddrV4::new(ip_v4, port_v4))
+		};
+		let address_v6 = if ip_v6.is_unspecified() && port_v6 == 0 {
+			None
+		} else {
+			Some(SocketAddrV6::new(ip_v6, port_v6, 0, 0))
+		};
+		if address_v4.is_none() && address_v6.is_none() {
+			return Err(Error::IllegalValue);
+		}
+		Ok(Self {
+			address_v4,
+			address_v6,
+			connection_id: cid,
+			stateless_reset_token: token.into(),
+		})
+	}
 }
 
 /// Errors encountered while decoding `TransportParameters`
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Error)]
 pub enum Error {
-    /// Parameters that are semantically invalid
-    #[error("parameter had illegal value")]
-    IllegalValue,
-    /// Catch-all error for problems while decoding transport parameters
-    #[error("parameters were malformed")]
-    Malformed,
+	/// Parameters that are semantically invalid
+	#[error("parameter had illegal value")]
+	IllegalValue,
+	/// Catch-all error for problems while decoding transport parameters
+	#[error("parameters were malformed")]
+	Malformed,
 }
 
 impl From<Error> for TransportError {
-    fn from(e: Error) -> Self {
-        match e {
-            Error::IllegalValue => Self::TRANSPORT_PARAMETER_ERROR("illegal value"),
-            Error::Malformed => Self::TRANSPORT_PARAMETER_ERROR("malformed"),
-        }
-    }
+	fn from(e: Error) -> Self {
+		match e {
+			Error::IllegalValue => Self::TRANSPORT_PARAMETER_ERROR("illegal value"),
+			Error::Malformed => Self::TRANSPORT_PARAMETER_ERROR("malformed"),
+		}
+	}
 }
 
 impl From<UnexpectedEnd> for Error {
-    fn from(_: UnexpectedEnd) -> Self {
-        Self::Malformed
-    }
+	fn from(_: UnexpectedEnd) -> Self {
+		Self::Malformed
+	}
 }
 
 impl TransportParameters {
-    /// Encode `TransportParameters` into buffer
-    pub fn write<W: BufMut>(&self, w: &mut W) {
-        let ids = match &self.write_order {
-            Some(order) => order,
-            None => &std::array::from_fn(|i| i as u8),
-        };
+	/// Encode `TransportParameters` into buffer
+	pub fn write<W: BufMut>(&self, w: &mut W) {
+		let ids = match &self.write_order {
+			Some(order) => order,
+			None => &std::array::from_fn(|i| i as u8),
+		};
 
-        for idx in ids {
-            let id = TransportParameterId::SUPPORTED[*idx as usize];
-            match id {
-                TransportParameterId::ReservedTransportParameter => {
-                    if let Some(param) = self.grease_transport_parameter {
-                        param.write(w);
-                    }
-                }
-                TransportParameterId::StatelessResetToken => {
-                    if let Some(x) = self.stateless_reset_token {
-                        w.write_var(id as u64);
-                        w.write_var(16);
-                        w.put_slice(&x);
-                    }
-                }
-                TransportParameterId::DisableActiveMigration => {
-                    if self.disable_active_migration {
-                        w.write_var(id as u64);
-                        w.write_var(0);
-                    }
-                }
-                TransportParameterId::MaxDatagramFrameSize => {
-                    if let Some(x) = self.max_datagram_frame_size {
-                        w.write_var(id as u64);
-                        w.write_var(x.size() as u64);
-                        w.write(x);
-                    }
-                }
-                TransportParameterId::PreferredAddress => {
-                    if let Some(x) = self.preferred_address {
-                        w.write_var(id as u64);
-                        w.write_var(x.wire_size() as u64);
-                        x.write(w);
-                    }
-                }
-                TransportParameterId::OriginalDestinationConnectionId => {
-                    if let Some(cid) = self.original_dst_cid {
-                        w.write_var(id as u64);
-                        w.write_var(cid.len() as u64);
-                        w.put_slice(&cid);
-                    }
-                }
-                TransportParameterId::InitialSourceConnectionId => {
-                    if let Some(cid) = self.initial_src_cid {
-                        w.write_var(id as u64);
-                        w.write_var(cid.len() as u64);
-                        w.put_slice(&cid);
-                    }
-                }
-                TransportParameterId::RetrySourceConnectionId => {
-                    if let Some(cid) = self.retry_src_cid {
-                        w.write_var(id as u64);
-                        w.write_var(cid.len() as u64);
-                        w.put_slice(&cid);
-                    }
-                }
-                TransportParameterId::GreaseQuicBit => {
-                    if self.grease_quic_bit {
-                        w.write_var(id as u64);
-                        w.write_var(0);
-                    }
-                }
-                TransportParameterId::MinAckDelayDraft07 => {
-                    if let Some(x) = self.min_ack_delay {
-                        w.write_var(id as u64);
-                        w.write_var(x.size() as u64);
-                        w.write(x);
-                    }
-                }
-                TransportParameterId::ResetStreamAt => {
-                    if self.reset_stream_at {
-                        w.write_var(id as u64);
-                        w.write_var(0);
-                    }
-                }
-                id => {
-                    macro_rules! write_params {
+		for idx in ids {
+			let id = TransportParameterId::SUPPORTED[*idx as usize];
+			match id {
+				TransportParameterId::ReservedTransportParameter => {
+					if let Some(param) = self.grease_transport_parameter {
+						param.write(w);
+					}
+				}
+				TransportParameterId::StatelessResetToken => {
+					if let Some(x) = self.stateless_reset_token {
+						w.write_var(id as u64);
+						w.write_var(16);
+						w.put_slice(&x);
+					}
+				}
+				TransportParameterId::DisableActiveMigration => {
+					if self.disable_active_migration {
+						w.write_var(id as u64);
+						w.write_var(0);
+					}
+				}
+				TransportParameterId::MaxDatagramFrameSize => {
+					if let Some(x) = self.max_datagram_frame_size {
+						w.write_var(id as u64);
+						w.write_var(x.size() as u64);
+						w.write(x);
+					}
+				}
+				TransportParameterId::PreferredAddress => {
+					if let Some(x) = self.preferred_address {
+						w.write_var(id as u64);
+						w.write_var(x.wire_size() as u64);
+						x.write(w);
+					}
+				}
+				TransportParameterId::OriginalDestinationConnectionId => {
+					if let Some(cid) = self.original_dst_cid {
+						w.write_var(id as u64);
+						w.write_var(cid.len() as u64);
+						w.put_slice(&cid);
+					}
+				}
+				TransportParameterId::InitialSourceConnectionId => {
+					if let Some(cid) = self.initial_src_cid {
+						w.write_var(id as u64);
+						w.write_var(cid.len() as u64);
+						w.put_slice(&cid);
+					}
+				}
+				TransportParameterId::RetrySourceConnectionId => {
+					if let Some(cid) = self.retry_src_cid {
+						w.write_var(id as u64);
+						w.write_var(cid.len() as u64);
+						w.put_slice(&cid);
+					}
+				}
+				TransportParameterId::GreaseQuicBit => {
+					if self.grease_quic_bit {
+						w.write_var(id as u64);
+						w.write_var(0);
+					}
+				}
+				TransportParameterId::MinAckDelayDraft07 => {
+					if let Some(x) = self.min_ack_delay {
+						w.write_var(id as u64);
+						w.write_var(x.size() as u64);
+						w.write(x);
+					}
+				}
+				TransportParameterId::ResetStreamAt => {
+					if self.reset_stream_at {
+						w.write_var(id as u64);
+						w.write_var(0);
+					}
+				}
+				id => {
+					macro_rules! write_params {
                         {$($(#[$doc:meta])* $name:ident ($id:ident) = $default:expr,)*} => {
                             match id {
                                 $(TransportParameterId::$id => {
@@ -410,19 +387,19 @@ impl TransportParameters {
                             }
                         }
                     }
-                    apply_params!(write_params);
-                }
-            }
-        }
-    }
+					apply_params!(write_params);
+				}
+			}
+		}
+	}
 
-    /// Decode `TransportParameters` from buffer
-    pub fn read<R: Buf>(side: Side, r: &mut R) -> Result<Self, Error> {
-        // Initialize to protocol-specified defaults
-        let mut params = Self::default();
+	/// Decode `TransportParameters` from buffer
+	pub fn read<R: Buf>(side: Side, r: &mut R) -> Result<Self, Error> {
+		// Initialize to protocol-specified defaults
+		let mut params = Self::default();
 
-        // State to check for duplicate transport parameters.
-        macro_rules! param_state {
+		// State to check for duplicate transport parameters.
+		macro_rules! param_state {
             {$($(#[$doc:meta])* $name:ident ($id:ident) = $default:expr,)*} => {{
                 struct ParamState {
                     $($name: bool,)*
@@ -433,79 +410,75 @@ impl TransportParameters {
                 }
             }}
         }
-        let mut got = apply_params!(param_state);
+		let mut got = apply_params!(param_state);
 
-        while r.has_remaining() {
-            let id = r.get_var()?;
-            let len = r.get_var()?;
-            if (r.remaining() as u64) < len {
-                return Err(Error::Malformed);
-            }
-            let len = len as usize;
-            let Ok(id) = TransportParameterId::try_from(id) else {
-                // unknown transport parameters are ignored
-                r.advance(len);
-                continue;
-            };
+		while r.has_remaining() {
+			let id = r.get_var()?;
+			let len = r.get_var()?;
+			if (r.remaining() as u64) < len {
+				return Err(Error::Malformed);
+			}
+			let len = len as usize;
+			let Ok(id) = TransportParameterId::try_from(id) else {
+				// unknown transport parameters are ignored
+				r.advance(len);
+				continue;
+			};
 
-            let remaining_before = r.remaining();
+			let remaining_before = r.remaining();
 
-            match id {
-                TransportParameterId::OriginalDestinationConnectionId => {
-                    decode_cid(len, &mut params.original_dst_cid, r)?
-                }
-                TransportParameterId::StatelessResetToken => {
-                    if len != 16 || params.stateless_reset_token.is_some() {
-                        return Err(Error::Malformed);
-                    }
-                    let mut tok = [0; RESET_TOKEN_SIZE];
-                    r.copy_to_slice(&mut tok);
-                    params.stateless_reset_token = Some(tok.into());
-                }
-                TransportParameterId::DisableActiveMigration => {
-                    if len != 0 || params.disable_active_migration {
-                        return Err(Error::Malformed);
-                    }
-                    params.disable_active_migration = true;
-                }
-                TransportParameterId::PreferredAddress => {
-                    if params.preferred_address.is_some() {
-                        return Err(Error::Malformed);
-                    }
-                    params.preferred_address = Some(PreferredAddress::read(&mut r.take(len))?);
-                }
-                TransportParameterId::InitialSourceConnectionId => {
-                    decode_cid(len, &mut params.initial_src_cid, r)?
-                }
-                TransportParameterId::RetrySourceConnectionId => {
-                    decode_cid(len, &mut params.retry_src_cid, r)?
-                }
-                TransportParameterId::MaxDatagramFrameSize => {
-                    if len > 8 || params.max_datagram_frame_size.is_some() {
-                        return Err(Error::Malformed);
-                    }
-                    params.max_datagram_frame_size = Some(r.get()?);
-                }
-                TransportParameterId::GreaseQuicBit => {
-                    if len != 0 || params.grease_quic_bit {
-                        return Err(Error::Malformed);
-                    }
-                    params.grease_quic_bit = true;
-                }
-                TransportParameterId::MinAckDelayDraft07 => {
-                    if params.min_ack_delay.is_some() {
-                        return Err(Error::Malformed);
-                    }
-                    params.min_ack_delay = Some(r.get()?);
-                }
-                TransportParameterId::ResetStreamAt => {
-                    if len != 0 || params.reset_stream_at {
-                        return Err(Error::Malformed);
-                    }
-                    params.reset_stream_at = true;
-                }
-                _ => {
-                    macro_rules! parse {
+			match id {
+				TransportParameterId::OriginalDestinationConnectionId => {
+					decode_cid(len, &mut params.original_dst_cid, r)?
+				}
+				TransportParameterId::StatelessResetToken => {
+					if len != 16 || params.stateless_reset_token.is_some() {
+						return Err(Error::Malformed);
+					}
+					let mut tok = [0; RESET_TOKEN_SIZE];
+					r.copy_to_slice(&mut tok);
+					params.stateless_reset_token = Some(tok.into());
+				}
+				TransportParameterId::DisableActiveMigration => {
+					if len != 0 || params.disable_active_migration {
+						return Err(Error::Malformed);
+					}
+					params.disable_active_migration = true;
+				}
+				TransportParameterId::PreferredAddress => {
+					if params.preferred_address.is_some() {
+						return Err(Error::Malformed);
+					}
+					params.preferred_address = Some(PreferredAddress::read(&mut r.take(len))?);
+				}
+				TransportParameterId::InitialSourceConnectionId => decode_cid(len, &mut params.initial_src_cid, r)?,
+				TransportParameterId::RetrySourceConnectionId => decode_cid(len, &mut params.retry_src_cid, r)?,
+				TransportParameterId::MaxDatagramFrameSize => {
+					if len > 8 || params.max_datagram_frame_size.is_some() {
+						return Err(Error::Malformed);
+					}
+					params.max_datagram_frame_size = Some(r.get()?);
+				}
+				TransportParameterId::GreaseQuicBit => {
+					if len != 0 || params.grease_quic_bit {
+						return Err(Error::Malformed);
+					}
+					params.grease_quic_bit = true;
+				}
+				TransportParameterId::MinAckDelayDraft07 => {
+					if params.min_ack_delay.is_some() {
+						return Err(Error::Malformed);
+					}
+					params.min_ack_delay = Some(r.get()?);
+				}
+				TransportParameterId::ResetStreamAt => {
+					if len != 0 || params.reset_stream_at {
+						return Err(Error::Malformed);
+					}
+					params.reset_stream_at = true;
+				}
+				_ => {
+					macro_rules! parse {
                         {$($(#[$doc:meta])* $name:ident ($id:ident) = $default:expr,)*} => {
                             match id {
                                 $(TransportParameterId::$id => {
@@ -518,19 +491,19 @@ impl TransportParameters {
                             }
                         }
                     }
-                    apply_params!(parse);
-                }
-            }
+					apply_params!(parse);
+				}
+			}
 
-            if remaining_before - r.remaining() != len {
-                return Err(Error::Malformed);
-            }
-        }
+			if remaining_before - r.remaining() != len {
+				return Err(Error::Malformed);
+			}
+		}
 
-        // Semantic validation
+		// Semantic validation
 
-        // https://www.rfc-editor.org/rfc/rfc9000.html#section-18.2-4.26.1
-        if params.ack_delay_exponent.0 > 20
+		// https://www.rfc-editor.org/rfc/rfc9000.html#section-18.2-4.26.1
+		if params.ack_delay_exponent.0 > 20
             // https://www.rfc-editor.org/rfc/rfc9000.html#section-18.2-4.28.1
             || params.max_ack_delay.0 >= 1 << 14
             // https://www.rfc-editor.org/rfc/rfc9000.html#section-18.2-6.2.1
@@ -554,12 +527,12 @@ impl TransportParameters {
             // https://www.rfc-editor.org/rfc/rfc9000.html#section-18.2-4.38.1
             || params
                 .preferred_address.is_some_and(|x| x.connection_id.is_empty())
-        {
-            return Err(Error::IllegalValue);
-        }
+		{
+			return Err(Error::IllegalValue);
+		}
 
-        Ok(params)
-    }
+		Ok(params)
+	}
 }
 
 /// A reserved transport parameter.
@@ -572,484 +545,449 @@ impl TransportParameters {
 /// See spec: <https://www.rfc-editor.org/rfc/rfc9000.html#section-18.1>
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub(crate) struct ReservedTransportParameter {
-    /// The reserved identifier of the transport parameter
-    id: VarInt,
+	/// The reserved identifier of the transport parameter
+	id: VarInt,
 
-    /// Buffer to store the parameter payload
-    payload: [u8; Self::MAX_PAYLOAD_LEN],
+	/// Buffer to store the parameter payload
+	payload: [u8; Self::MAX_PAYLOAD_LEN],
 
-    /// The number of bytes to include in the wire format from the `payload` buffer
-    payload_len: usize,
+	/// The number of bytes to include in the wire format from the `payload` buffer
+	payload_len: usize,
 }
 
 impl ReservedTransportParameter {
-    /// Generates a transport parameter with a random payload and a reserved ID.
-    ///
-    /// The implementation is inspired by quic-go and quiche:
-    /// 1. <https://github.com/quic-go/quic-go/blob/3e0a67b2476e1819752f04d75968de042b197b56/internal/wire/transport_parameters.go#L338-L344>
-    /// 2. <https://github.com/google/quiche/blob/cb1090b20c40e2f0815107857324e99acf6ec567/quiche/quic/core/crypto/transport_parameters.cc#L843-L860>
-    fn random(rng: &mut impl Rng) -> Self {
-        let id = Self::generate_reserved_id(rng);
+	/// Generates a transport parameter with a random payload and a reserved ID.
+	///
+	/// The implementation is inspired by quic-go and quiche:
+	/// 1. <https://github.com/quic-go/quic-go/blob/3e0a67b2476e1819752f04d75968de042b197b56/internal/wire/transport_parameters.go#L338-L344>
+	/// 2. <https://github.com/google/quiche/blob/cb1090b20c40e2f0815107857324e99acf6ec567/quiche/quic/core/crypto/transport_parameters.cc#L843-L860>
+	fn random(rng: &mut impl Rng) -> Self {
+		let id = Self::generate_reserved_id(rng);
 
-        let payload_len = rng.random_range(0..Self::MAX_PAYLOAD_LEN);
+		let payload_len = rng.random_range(0..Self::MAX_PAYLOAD_LEN);
 
-        let payload = {
-            let mut slice = [0u8; Self::MAX_PAYLOAD_LEN];
-            rng.fill_bytes(&mut slice[..payload_len]);
-            slice
-        };
+		let payload = {
+			let mut slice = [0u8; Self::MAX_PAYLOAD_LEN];
+			rng.fill_bytes(&mut slice[..payload_len]);
+			slice
+		};
 
-        Self {
-            id,
-            payload,
-            payload_len,
-        }
-    }
+		Self {
+			id,
+			payload,
+			payload_len,
+		}
+	}
 
-    fn write(&self, w: &mut impl BufMut) {
-        w.write_var(self.id.0);
-        w.write_var(self.payload_len as u64);
-        w.put_slice(&self.payload[..self.payload_len]);
-    }
+	fn write(&self, w: &mut impl BufMut) {
+		w.write_var(self.id.0);
+		w.write_var(self.payload_len as u64);
+		w.put_slice(&self.payload[..self.payload_len]);
+	}
 
-    /// Generates a random reserved identifier of the form `31 * N + 27`, as required by RFC 9000.
-    /// Reserved transport parameter identifiers are used to test compliance with the requirement
-    /// that unknown transport parameters must be ignored by peers.
-    /// See: <https://www.rfc-editor.org/rfc/rfc9000.html#section-18.1> and <https://www.rfc-editor.org/rfc/rfc9000.html#section-22.3>
-    fn generate_reserved_id(rng: &mut impl Rng) -> VarInt {
-        let id = {
-            let rand = rng.random_range(0u64..(1 << 62) - 27);
-            let n = rand / 31;
-            31 * n + 27
-        };
-        debug_assert!(
-            id % 31 == 27,
-            "generated id does not have the form of 31 * N + 27"
-        );
-        VarInt::from_u64(id).expect(
-            "generated id does fit into range of allowed transport parameter IDs: [0; 2^62)",
-        )
-    }
+	/// Generates a random reserved identifier of the form `31 * N + 27`, as required by RFC 9000.
+	/// Reserved transport parameter identifiers are used to test compliance with the requirement
+	/// that unknown transport parameters must be ignored by peers.
+	/// See: <https://www.rfc-editor.org/rfc/rfc9000.html#section-18.1> and <https://www.rfc-editor.org/rfc/rfc9000.html#section-22.3>
+	fn generate_reserved_id(rng: &mut impl Rng) -> VarInt {
+		let id = {
+			let rand = rng.random_range(0u64..(1 << 62) - 27);
+			let n = rand / 31;
+			31 * n + 27
+		};
+		debug_assert!(id % 31 == 27, "generated id does not have the form of 31 * N + 27");
+		VarInt::from_u64(id).expect("generated id does fit into range of allowed transport parameter IDs: [0; 2^62)")
+	}
 
-    /// The maximum length of the payload to include as the parameter payload.
-    /// This value is not a specification-imposed limit but is chosen to match
-    /// the limit used by other implementations of QUIC, e.g., quic-go and quiche.
-    const MAX_PAYLOAD_LEN: usize = 16;
+	/// The maximum length of the payload to include as the parameter payload.
+	/// This value is not a specification-imposed limit but is chosen to match
+	/// the limit used by other implementations of QUIC, e.g., quic-go and quiche.
+	const MAX_PAYLOAD_LEN: usize = 16;
 }
 
 #[repr(u64)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TransportParameterId {
-    // https://www.rfc-editor.org/rfc/rfc9000.html#iana-tp-table
-    OriginalDestinationConnectionId = 0x00,
-    MaxIdleTimeout = 0x01,
-    StatelessResetToken = 0x02,
-    MaxUdpPayloadSize = 0x03,
-    InitialMaxData = 0x04,
-    InitialMaxStreamDataBidiLocal = 0x05,
-    InitialMaxStreamDataBidiRemote = 0x06,
-    InitialMaxStreamDataUni = 0x07,
-    InitialMaxStreamsBidi = 0x08,
-    InitialMaxStreamsUni = 0x09,
-    AckDelayExponent = 0x0A,
-    MaxAckDelay = 0x0B,
-    DisableActiveMigration = 0x0C,
-    PreferredAddress = 0x0D,
-    ActiveConnectionIdLimit = 0x0E,
-    InitialSourceConnectionId = 0x0F,
-    RetrySourceConnectionId = 0x10,
+	// https://www.rfc-editor.org/rfc/rfc9000.html#iana-tp-table
+	OriginalDestinationConnectionId = 0x00,
+	MaxIdleTimeout = 0x01,
+	StatelessResetToken = 0x02,
+	MaxUdpPayloadSize = 0x03,
+	InitialMaxData = 0x04,
+	InitialMaxStreamDataBidiLocal = 0x05,
+	InitialMaxStreamDataBidiRemote = 0x06,
+	InitialMaxStreamDataUni = 0x07,
+	InitialMaxStreamsBidi = 0x08,
+	InitialMaxStreamsUni = 0x09,
+	AckDelayExponent = 0x0A,
+	MaxAckDelay = 0x0B,
+	DisableActiveMigration = 0x0C,
+	PreferredAddress = 0x0D,
+	ActiveConnectionIdLimit = 0x0E,
+	InitialSourceConnectionId = 0x0F,
+	RetrySourceConnectionId = 0x10,
 
-    // https://datatracker.ietf.org/doc/html/draft-ietf-quic-reliable-stream-reset#section-3
-    ResetStreamAt = 0x1D,
+	// https://datatracker.ietf.org/doc/html/draft-ietf-quic-reliable-stream-reset#section-3
+	ResetStreamAt = 0x1D,
 
-    // Smallest possible ID of reserved transport parameter https://datatracker.ietf.org/doc/html/rfc9000#section-22.3
-    ReservedTransportParameter = 0x1B,
+	// Smallest possible ID of reserved transport parameter https://datatracker.ietf.org/doc/html/rfc9000#section-22.3
+	ReservedTransportParameter = 0x1B,
 
-    // https://www.rfc-editor.org/rfc/rfc9221.html#section-3
-    MaxDatagramFrameSize = 0x20,
+	// https://www.rfc-editor.org/rfc/rfc9221.html#section-3
+	MaxDatagramFrameSize = 0x20,
 
-    // https://www.rfc-editor.org/rfc/rfc9287.html#section-3
-    GreaseQuicBit = 0x2AB2,
+	// https://www.rfc-editor.org/rfc/rfc9287.html#section-3
+	GreaseQuicBit = 0x2AB2,
 
-    // https://datatracker.ietf.org/doc/html/draft-ietf-quic-ack-frequency#section-10.1
-    MinAckDelayDraft07 = 0xFF04DE1B,
+	// https://datatracker.ietf.org/doc/html/draft-ietf-quic-ack-frequency#section-10.1
+	MinAckDelayDraft07 = 0xFF04DE1B,
 }
 
 impl TransportParameterId {
-    /// Array with all supported transport parameter IDs
-    const SUPPORTED: [Self; 22] = [
-        Self::MaxIdleTimeout,
-        Self::MaxUdpPayloadSize,
-        Self::InitialMaxData,
-        Self::InitialMaxStreamDataBidiLocal,
-        Self::InitialMaxStreamDataBidiRemote,
-        Self::InitialMaxStreamDataUni,
-        Self::InitialMaxStreamsBidi,
-        Self::InitialMaxStreamsUni,
-        Self::AckDelayExponent,
-        Self::MaxAckDelay,
-        Self::ActiveConnectionIdLimit,
-        Self::ReservedTransportParameter,
-        Self::StatelessResetToken,
-        Self::DisableActiveMigration,
-        Self::MaxDatagramFrameSize,
-        Self::PreferredAddress,
-        Self::OriginalDestinationConnectionId,
-        Self::InitialSourceConnectionId,
-        Self::RetrySourceConnectionId,
-        Self::GreaseQuicBit,
-        Self::MinAckDelayDraft07,
-        Self::ResetStreamAt,
-    ];
+	/// Array with all supported transport parameter IDs
+	const SUPPORTED: [Self; 22] = [
+		Self::MaxIdleTimeout,
+		Self::MaxUdpPayloadSize,
+		Self::InitialMaxData,
+		Self::InitialMaxStreamDataBidiLocal,
+		Self::InitialMaxStreamDataBidiRemote,
+		Self::InitialMaxStreamDataUni,
+		Self::InitialMaxStreamsBidi,
+		Self::InitialMaxStreamsUni,
+		Self::AckDelayExponent,
+		Self::MaxAckDelay,
+		Self::ActiveConnectionIdLimit,
+		Self::ReservedTransportParameter,
+		Self::StatelessResetToken,
+		Self::DisableActiveMigration,
+		Self::MaxDatagramFrameSize,
+		Self::PreferredAddress,
+		Self::OriginalDestinationConnectionId,
+		Self::InitialSourceConnectionId,
+		Self::RetrySourceConnectionId,
+		Self::GreaseQuicBit,
+		Self::MinAckDelayDraft07,
+		Self::ResetStreamAt,
+	];
 }
 
 impl PartialEq<u64> for TransportParameterId {
-    fn eq(&self, other: &u64) -> bool {
-        *other == (*self as u64)
-    }
+	fn eq(&self, other: &u64) -> bool {
+		*other == (*self as u64)
+	}
 }
 
 impl TryFrom<u64> for TransportParameterId {
-    type Error = ();
+	type Error = ();
 
-    fn try_from(value: u64) -> Result<Self, Self::Error> {
-        let param = match value {
-            id if Self::MaxIdleTimeout == id => Self::MaxIdleTimeout,
-            id if Self::MaxUdpPayloadSize == id => Self::MaxUdpPayloadSize,
-            id if Self::InitialMaxData == id => Self::InitialMaxData,
-            id if Self::InitialMaxStreamDataBidiLocal == id => Self::InitialMaxStreamDataBidiLocal,
-            id if Self::InitialMaxStreamDataBidiRemote == id => {
-                Self::InitialMaxStreamDataBidiRemote
-            }
-            id if Self::InitialMaxStreamDataUni == id => Self::InitialMaxStreamDataUni,
-            id if Self::InitialMaxStreamsBidi == id => Self::InitialMaxStreamsBidi,
-            id if Self::InitialMaxStreamsUni == id => Self::InitialMaxStreamsUni,
-            id if Self::AckDelayExponent == id => Self::AckDelayExponent,
-            id if Self::MaxAckDelay == id => Self::MaxAckDelay,
-            id if Self::ActiveConnectionIdLimit == id => Self::ActiveConnectionIdLimit,
-            id if Self::ReservedTransportParameter == id => Self::ReservedTransportParameter,
-            id if Self::StatelessResetToken == id => Self::StatelessResetToken,
-            id if Self::DisableActiveMigration == id => Self::DisableActiveMigration,
-            id if Self::MaxDatagramFrameSize == id => Self::MaxDatagramFrameSize,
-            id if Self::PreferredAddress == id => Self::PreferredAddress,
-            id if Self::OriginalDestinationConnectionId == id => {
-                Self::OriginalDestinationConnectionId
-            }
-            id if Self::InitialSourceConnectionId == id => Self::InitialSourceConnectionId,
-            id if Self::RetrySourceConnectionId == id => Self::RetrySourceConnectionId,
-            id if Self::GreaseQuicBit == id => Self::GreaseQuicBit,
-            id if Self::MinAckDelayDraft07 == id => Self::MinAckDelayDraft07,
-            id if Self::ResetStreamAt == id => Self::ResetStreamAt,
-            _ => return Err(()),
-        };
-        Ok(param)
-    }
+	fn try_from(value: u64) -> Result<Self, Self::Error> {
+		let param = match value {
+			id if Self::MaxIdleTimeout == id => Self::MaxIdleTimeout,
+			id if Self::MaxUdpPayloadSize == id => Self::MaxUdpPayloadSize,
+			id if Self::InitialMaxData == id => Self::InitialMaxData,
+			id if Self::InitialMaxStreamDataBidiLocal == id => Self::InitialMaxStreamDataBidiLocal,
+			id if Self::InitialMaxStreamDataBidiRemote == id => Self::InitialMaxStreamDataBidiRemote,
+			id if Self::InitialMaxStreamDataUni == id => Self::InitialMaxStreamDataUni,
+			id if Self::InitialMaxStreamsBidi == id => Self::InitialMaxStreamsBidi,
+			id if Self::InitialMaxStreamsUni == id => Self::InitialMaxStreamsUni,
+			id if Self::AckDelayExponent == id => Self::AckDelayExponent,
+			id if Self::MaxAckDelay == id => Self::MaxAckDelay,
+			id if Self::ActiveConnectionIdLimit == id => Self::ActiveConnectionIdLimit,
+			id if Self::ReservedTransportParameter == id => Self::ReservedTransportParameter,
+			id if Self::StatelessResetToken == id => Self::StatelessResetToken,
+			id if Self::DisableActiveMigration == id => Self::DisableActiveMigration,
+			id if Self::MaxDatagramFrameSize == id => Self::MaxDatagramFrameSize,
+			id if Self::PreferredAddress == id => Self::PreferredAddress,
+			id if Self::OriginalDestinationConnectionId == id => Self::OriginalDestinationConnectionId,
+			id if Self::InitialSourceConnectionId == id => Self::InitialSourceConnectionId,
+			id if Self::RetrySourceConnectionId == id => Self::RetrySourceConnectionId,
+			id if Self::GreaseQuicBit == id => Self::GreaseQuicBit,
+			id if Self::MinAckDelayDraft07 == id => Self::MinAckDelayDraft07,
+			id if Self::ResetStreamAt == id => Self::ResetStreamAt,
+			_ => return Err(()),
+		};
+		Ok(param)
+	}
 }
 
 fn decode_cid(len: usize, value: &mut Option<ConnectionId>, r: &mut impl Buf) -> Result<(), Error> {
-    if len > MAX_CID_SIZE || value.is_some() || r.remaining() < len {
-        return Err(Error::Malformed);
-    }
+	if len > MAX_CID_SIZE || value.is_some() || r.remaining() < len {
+		return Err(Error::Malformed);
+	}
 
-    *value = Some(ConnectionId::from_buf(r, len));
-    Ok(())
+	*value = Some(ConnectionId::from_buf(r, len));
+	Ok(())
 }
 
 #[cfg(test)]
 mod test {
-    use std::convert::Infallible;
+	use std::convert::Infallible;
 
-    use rand::TryRng;
+	use rand::TryRng;
 
-    use super::*;
+	use super::*;
 
-    #[test]
-    fn coding() {
-        let mut buf = Vec::new();
-        let params = TransportParameters {
-            initial_src_cid: Some(ConnectionId::new(&[])),
-            original_dst_cid: Some(ConnectionId::new(&[])),
-            initial_max_streams_bidi: 16u32.into(),
-            initial_max_streams_uni: 16u32.into(),
-            ack_delay_exponent: 2u32.into(),
-            max_udp_payload_size: 1200u32.into(),
-            preferred_address: Some(PreferredAddress {
-                address_v4: Some(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 42)),
-                address_v6: Some(SocketAddrV6::new(Ipv6Addr::LOCALHOST, 24, 0, 0)),
-                connection_id: ConnectionId::new(&[0x42]),
-                stateless_reset_token: [0xab; RESET_TOKEN_SIZE].into(),
-            }),
-            grease_quic_bit: true,
-            min_ack_delay: Some(2_000u32.into()),
-            reset_stream_at: true,
-            ..TransportParameters::default()
-        };
-        params.write(&mut buf);
-        assert_eq!(
-            TransportParameters::read(Side::Client, &mut buf.as_slice()).unwrap(),
-            params
-        );
-    }
+	#[test]
+	fn coding() {
+		let mut buf = Vec::new();
+		let params = TransportParameters {
+			initial_src_cid: Some(ConnectionId::new(&[])),
+			original_dst_cid: Some(ConnectionId::new(&[])),
+			initial_max_streams_bidi: 16u32.into(),
+			initial_max_streams_uni: 16u32.into(),
+			ack_delay_exponent: 2u32.into(),
+			max_udp_payload_size: 1200u32.into(),
+			preferred_address: Some(PreferredAddress {
+				address_v4: Some(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 42)),
+				address_v6: Some(SocketAddrV6::new(Ipv6Addr::LOCALHOST, 24, 0, 0)),
+				connection_id: ConnectionId::new(&[0x42]),
+				stateless_reset_token: [0xab; RESET_TOKEN_SIZE].into(),
+			}),
+			grease_quic_bit: true,
+			min_ack_delay: Some(2_000u32.into()),
+			reset_stream_at: true,
+			..TransportParameters::default()
+		};
+		params.write(&mut buf);
+		assert_eq!(
+			TransportParameters::read(Side::Client, &mut buf.as_slice()).unwrap(),
+			params
+		);
+	}
 
-    #[test]
-    fn reserved_transport_parameter_generate_reserved_id() {
-        let mut rngs = [
-            StepRng(0),
-            StepRng(1),
-            StepRng(27),
-            StepRng(31),
-            StepRng(u32::MAX as u64),
-            StepRng(u32::MAX as u64 - 1),
-            StepRng(u32::MAX as u64 + 1),
-            StepRng(u32::MAX as u64 - 27),
-            StepRng(u32::MAX as u64 + 27),
-            StepRng(u32::MAX as u64 - 31),
-            StepRng(u32::MAX as u64 + 31),
-            StepRng(u64::MAX),
-            StepRng(u64::MAX - 1),
-            StepRng(u64::MAX - 27),
-            StepRng(u64::MAX - 31),
-            StepRng(1 << 62),
-            StepRng((1 << 62) - 1),
-            StepRng((1 << 62) + 1),
-            StepRng((1 << 62) - 27),
-            StepRng((1 << 62) + 27),
-            StepRng((1 << 62) - 31),
-            StepRng((1 << 62) + 31),
-        ];
-        for rng in &mut rngs {
-            let id = ReservedTransportParameter::generate_reserved_id(rng);
-            assert!(id.0 % 31 == 27)
-        }
-    }
+	#[test]
+	fn reserved_transport_parameter_generate_reserved_id() {
+		let mut rngs = [
+			StepRng(0),
+			StepRng(1),
+			StepRng(27),
+			StepRng(31),
+			StepRng(u32::MAX as u64),
+			StepRng(u32::MAX as u64 - 1),
+			StepRng(u32::MAX as u64 + 1),
+			StepRng(u32::MAX as u64 - 27),
+			StepRng(u32::MAX as u64 + 27),
+			StepRng(u32::MAX as u64 - 31),
+			StepRng(u32::MAX as u64 + 31),
+			StepRng(u64::MAX),
+			StepRng(u64::MAX - 1),
+			StepRng(u64::MAX - 27),
+			StepRng(u64::MAX - 31),
+			StepRng(1 << 62),
+			StepRng((1 << 62) - 1),
+			StepRng((1 << 62) + 1),
+			StepRng((1 << 62) - 27),
+			StepRng((1 << 62) + 27),
+			StepRng((1 << 62) - 31),
+			StepRng((1 << 62) + 31),
+		];
+		for rng in &mut rngs {
+			let id = ReservedTransportParameter::generate_reserved_id(rng);
+			assert!(id.0 % 31 == 27)
+		}
+	}
 
-    struct StepRng(u64);
+	struct StepRng(u64);
 
-    impl TryRng for StepRng {
-        type Error = Infallible;
+	impl TryRng for StepRng {
+		type Error = Infallible;
 
-        #[inline]
-        fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
-            Ok(self.next_u64() as u32)
-        }
+		#[inline]
+		fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+			Ok(self.next_u64() as u32)
+		}
 
-        #[inline]
-        fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
-            let res = self.0;
-            self.0 = self.0.wrapping_add(1);
-            Ok(res)
-        }
+		#[inline]
+		fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+			let res = self.0;
+			self.0 = self.0.wrapping_add(1);
+			Ok(res)
+		}
 
-        fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
-            let mut left = dst;
-            while left.len() >= 8 {
-                let (l, r) = left.split_at_mut(8);
-                left = r;
-                l.copy_from_slice(&self.next_u64().to_le_bytes());
-            }
-            let n = left.len();
-            if n > 0 {
-                left.copy_from_slice(&self.next_u32().to_le_bytes()[..n]);
-            }
+		fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+			let mut left = dst;
+			while left.len() >= 8 {
+				let (l, r) = left.split_at_mut(8);
+				left = r;
+				l.copy_from_slice(&self.next_u64().to_le_bytes());
+			}
+			let n = left.len();
+			if n > 0 {
+				left.copy_from_slice(&self.next_u32().to_le_bytes()[..n]);
+			}
 
-            Ok(())
-        }
-    }
+			Ok(())
+		}
+	}
 
-    #[test]
-    fn reserved_transport_parameter_ignored_when_read() {
-        let mut buf = Vec::new();
-        let reserved_parameter = ReservedTransportParameter::random(&mut rand::rng());
-        assert!(reserved_parameter.payload_len < ReservedTransportParameter::MAX_PAYLOAD_LEN);
-        assert!(reserved_parameter.id.0 % 31 == 27);
+	#[test]
+	fn reserved_transport_parameter_ignored_when_read() {
+		let mut buf = Vec::new();
+		let reserved_parameter = ReservedTransportParameter::random(&mut rand::rng());
+		assert!(reserved_parameter.payload_len < ReservedTransportParameter::MAX_PAYLOAD_LEN);
+		assert!(reserved_parameter.id.0 % 31 == 27);
 
-        reserved_parameter.write(&mut buf);
-        assert!(!buf.is_empty());
-        let read_params = TransportParameters::read(Side::Server, &mut buf.as_slice()).unwrap();
-        assert_eq!(read_params, TransportParameters::default());
-    }
+		reserved_parameter.write(&mut buf);
+		assert!(!buf.is_empty());
+		let read_params = TransportParameters::read(Side::Server, &mut buf.as_slice()).unwrap();
+		assert_eq!(read_params, TransportParameters::default());
+	}
 
-    #[test]
-    fn read_semantic_validation() {
-        #[expect(
-            clippy::type_complexity,
-            reason = "a one-off test table; an alias would only move the type"
-        )]
-        let illegal_params_builders: Vec<Box<dyn FnMut(&mut TransportParameters)>> = vec![
-            Box::new(|t| {
-                // This min_ack_delay is bigger than max_ack_delay!
-                let min_ack_delay = t.max_ack_delay.0 * 1_000 + 1;
-                t.min_ack_delay = Some(VarInt::from_u64(min_ack_delay).unwrap())
-            }),
-            Box::new(|t| {
-                // Preferred address can only be sent by senders (and we are reading the transport
-                // params as a client)
-                t.preferred_address = Some(PreferredAddress {
-                    address_v4: Some(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 42)),
-                    address_v6: None,
-                    connection_id: ConnectionId::new(&[]),
-                    stateless_reset_token: [0xab; RESET_TOKEN_SIZE].into(),
-                })
-            }),
-        ];
+	#[test]
+	fn read_semantic_validation() {
+		#[expect(
+			clippy::type_complexity,
+			reason = "a one-off test table; an alias would only move the type"
+		)]
+		let illegal_params_builders: Vec<Box<dyn FnMut(&mut TransportParameters)>> = vec![
+			Box::new(|t| {
+				// This min_ack_delay is bigger than max_ack_delay!
+				let min_ack_delay = t.max_ack_delay.0 * 1_000 + 1;
+				t.min_ack_delay = Some(VarInt::from_u64(min_ack_delay).unwrap())
+			}),
+			Box::new(|t| {
+				// Preferred address can only be sent by senders (and we are reading the transport
+				// params as a client)
+				t.preferred_address = Some(PreferredAddress {
+					address_v4: Some(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 42)),
+					address_v6: None,
+					connection_id: ConnectionId::new(&[]),
+					stateless_reset_token: [0xab; RESET_TOKEN_SIZE].into(),
+				})
+			}),
+		];
 
-        for mut builder in illegal_params_builders {
-            let mut buf = Vec::new();
-            let mut params = TransportParameters::default();
-            builder(&mut params);
-            params.write(&mut buf);
+		for mut builder in illegal_params_builders {
+			let mut buf = Vec::new();
+			let mut params = TransportParameters::default();
+			builder(&mut params);
+			params.write(&mut buf);
 
-            assert_eq!(
-                TransportParameters::read(Side::Server, &mut buf.as_slice()),
-                Err(Error::IllegalValue)
-            );
-        }
-    }
+			assert_eq!(
+				TransportParameters::read(Side::Server, &mut buf.as_slice()),
+				Err(Error::IllegalValue)
+			);
+		}
+	}
 
-    #[test]
-    fn read_length_mismatch() {
-        // `max_datagram_frame_size` claims three bytes of value but encodes a one-byte `VarInt`,
-        // so a whole `disable_active_migration` parameter fits inside its declared length.
-        let mut buf = Vec::new();
-        buf.write_var(TransportParameterId::MaxDatagramFrameSize as u64);
-        buf.write_var(3);
-        buf.write(VarInt::from_u32(0));
-        buf.write_var(TransportParameterId::DisableActiveMigration as u64);
-        buf.write_var(0);
-        assert_eq!(
-            TransportParameters::read(Side::Server, &mut buf.as_slice()),
-            Err(Error::Malformed)
-        );
-    }
+	#[test]
+	fn read_length_mismatch() {
+		// `max_datagram_frame_size` claims three bytes of value but encodes a one-byte `VarInt`,
+		// so a whole `disable_active_migration` parameter fits inside its declared length.
+		let mut buf = Vec::new();
+		buf.write_var(TransportParameterId::MaxDatagramFrameSize as u64);
+		buf.write_var(3);
+		buf.write(VarInt::from_u32(0));
+		buf.write_var(TransportParameterId::DisableActiveMigration as u64);
+		buf.write_var(0);
+		assert_eq!(
+			TransportParameters::read(Side::Server, &mut buf.as_slice()),
+			Err(Error::Malformed)
+		);
+	}
 
-    #[test]
-    fn read_nonminimal_integer() {
-        // RFC 9000 section 16 lets a VarInt use any length, so a one-byte value in two bytes is
-        // valid, but repeating the parameter is not.
-        let mut buf = Vec::new();
-        buf.write_var(TransportParameterId::InitialMaxData as u64);
-        buf.write_var(2);
-        buf.extend_from_slice(&[0x40, 0x07]);
-        let params = TransportParameters::read(Side::Server, &mut buf.as_slice()).unwrap();
-        assert_eq!(params.initial_max_data, VarInt::from_u32(7));
+	#[test]
+	fn read_nonminimal_integer() {
+		// RFC 9000 section 16 lets a VarInt use any length, so a one-byte value in two bytes is
+		// valid, but repeating the parameter is not.
+		let mut buf = Vec::new();
+		buf.write_var(TransportParameterId::InitialMaxData as u64);
+		buf.write_var(2);
+		buf.extend_from_slice(&[0x40, 0x07]);
+		let params = TransportParameters::read(Side::Server, &mut buf.as_slice()).unwrap();
+		assert_eq!(params.initial_max_data, VarInt::from_u32(7));
 
-        let twice = [buf.as_slice(), buf.as_slice()].concat();
-        assert_eq!(
-            TransportParameters::read(Side::Server, &mut twice.as_slice()),
-            Err(Error::Malformed)
-        );
-    }
+		let twice = [buf.as_slice(), buf.as_slice()].concat();
+		assert_eq!(
+			TransportParameters::read(Side::Server, &mut twice.as_slice()),
+			Err(Error::Malformed)
+		);
+	}
 
-    #[test]
-    fn read_min_ack_delay_length_mismatch() {
-        // `min_ack_delay` claims no value at all, so its `VarInt` starts on the parameter that
-        // follows it.
-        let mut buf = Vec::new();
-        buf.write_var(TransportParameterId::MinAckDelayDraft07 as u64);
-        buf.write_var(0);
-        buf.write_var(TransportParameterId::InitialMaxData as u64);
-        buf.write_var(1);
-        buf.write(VarInt::from_u32(7));
-        assert_eq!(
-            TransportParameters::read(Side::Server, &mut buf.as_slice()),
-            Err(Error::Malformed)
-        );
-    }
+	#[test]
+	fn read_min_ack_delay_length_mismatch() {
+		// `min_ack_delay` claims no value at all, so its `VarInt` starts on the parameter that
+		// follows it.
+		let mut buf = Vec::new();
+		buf.write_var(TransportParameterId::MinAckDelayDraft07 as u64);
+		buf.write_var(0);
+		buf.write_var(TransportParameterId::InitialMaxData as u64);
+		buf.write_var(1);
+		buf.write(VarInt::from_u32(7));
+		assert_eq!(
+			TransportParameters::read(Side::Server, &mut buf.as_slice()),
+			Err(Error::Malformed)
+		);
+	}
 
-    #[test]
-    fn read_preferred_address_length_mismatch() {
-        // `preferred_address` has a fixed size for a given connection ID length, so bytes past
-        // that size are read as a parameter of their own.
-        let address = PreferredAddress {
-            address_v4: Some(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 42)),
-            address_v6: None,
-            connection_id: ConnectionId::new(&[0x42]),
-            stateless_reset_token: [0xab; RESET_TOKEN_SIZE].into(),
-        };
-        let mut value = Vec::new();
-        address.write(&mut value);
-        value.write_var(TransportParameterId::DisableActiveMigration as u64);
-        value.write_var(0);
-        let mut buf = Vec::new();
-        buf.write_var(TransportParameterId::PreferredAddress as u64);
-        buf.write_var(value.len() as u64);
-        buf.extend_from_slice(&value);
-        assert_eq!(
-            TransportParameters::read(Side::Client, &mut buf.as_slice()),
-            Err(Error::Malformed)
-        );
-    }
+	#[test]
+	fn read_preferred_address_length_mismatch() {
+		// `preferred_address` has a fixed size for a given connection ID length, so bytes past
+		// that size are read as a parameter of their own.
+		let address = PreferredAddress {
+			address_v4: Some(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 42)),
+			address_v6: None,
+			connection_id: ConnectionId::new(&[0x42]),
+			stateless_reset_token: [0xab; RESET_TOKEN_SIZE].into(),
+		};
+		let mut value = Vec::new();
+		address.write(&mut value);
+		value.write_var(TransportParameterId::DisableActiveMigration as u64);
+		value.write_var(0);
+		let mut buf = Vec::new();
+		buf.write_var(TransportParameterId::PreferredAddress as u64);
+		buf.write_var(value.len() as u64);
+		buf.extend_from_slice(&value);
+		assert_eq!(
+			TransportParameters::read(Side::Client, &mut buf.as_slice()),
+			Err(Error::Malformed)
+		);
+	}
 
-    #[test]
-    fn read_duplicate_grease_quic_bit_and_min_ack_delay() {
-        let cases = [
-            TransportParameters {
-                grease_quic_bit: true,
-                ..TransportParameters::default()
-            },
-            TransportParameters {
-                min_ack_delay: Some(2_000u32.into()),
-                ..TransportParameters::default()
-            },
-            TransportParameters {
-                reset_stream_at: true,
-                ..TransportParameters::default()
-            },
-        ];
-        for params in cases {
-            let mut once = Vec::new();
-            params.write(&mut once);
-            assert_eq!(
-                TransportParameters::read(Side::Client, &mut once.as_slice()).unwrap(),
-                params
-            );
+	#[test]
+	fn read_duplicate_grease_quic_bit_and_min_ack_delay() {
+		let cases = [
+			TransportParameters {
+				grease_quic_bit: true,
+				..TransportParameters::default()
+			},
+			TransportParameters {
+				min_ack_delay: Some(2_000u32.into()),
+				..TransportParameters::default()
+			},
+			TransportParameters {
+				reset_stream_at: true,
+				..TransportParameters::default()
+			},
+		];
+		for params in cases {
+			let mut once = Vec::new();
+			params.write(&mut once);
+			assert_eq!(
+				TransportParameters::read(Side::Client, &mut once.as_slice()).unwrap(),
+				params
+			);
 
-            let mut twice = Vec::new();
-            params.write(&mut twice);
-            params.write(&mut twice);
-            assert_eq!(
-                TransportParameters::read(Side::Client, &mut twice.as_slice()),
-                Err(Error::Malformed)
-            );
-        }
-    }
+			let mut twice = Vec::new();
+			params.write(&mut twice);
+			params.write(&mut twice);
+			assert_eq!(
+				TransportParameters::read(Side::Client, &mut twice.as_slice()),
+				Err(Error::Malformed)
+			);
+		}
+	}
 
-    #[test]
-    fn resumption_params_validation() {
-        let high_limit = TransportParameters {
-            initial_max_streams_uni: 32u32.into(),
-            ..TransportParameters::default()
-        };
-        let low_limit = TransportParameters {
-            initial_max_streams_uni: 16u32.into(),
-            ..TransportParameters::default()
-        };
-        high_limit.validate_resumption_from(&low_limit).unwrap();
-        low_limit.validate_resumption_from(&high_limit).unwrap_err();
-    }
-
-    /// A non-empty `reset_stream_at` is a TRANSPORT_PARAMETER_ERROR.
-    #[test]
-    fn read_reset_stream_at_with_value() {
-        let mut buf = Vec::new();
-        buf.write_var(TransportParameterId::ResetStreamAt as u64);
-        buf.write_var(1);
-        buf.write_var(0);
-        assert_eq!(
-            TransportParameters::read(Side::Client, &mut buf.as_slice()),
-            Err(Error::Malformed)
-        );
-    }
-
-    /// A server that accepts 0-RTT must keep RESET_STREAM_AT enabled.
-    #[test]
-    fn resumption_keeps_reset_stream_at() {
-        let enabled = TransportParameters {
-            reset_stream_at: true,
-            ..TransportParameters::default()
-        };
-        let disabled = TransportParameters::default();
-        enabled.validate_resumption_from(&disabled).unwrap();
-        disabled.validate_resumption_from(&enabled).unwrap_err();
-    }
+	/// A non-empty `reset_stream_at` is a TRANSPORT_PARAMETER_ERROR.
+	#[test]
+	fn read_reset_stream_at_with_value() {
+		let mut buf = Vec::new();
+		buf.write_var(TransportParameterId::ResetStreamAt as u64);
+		buf.write_var(1);
+		buf.write_var(0);
+		assert_eq!(
+			TransportParameters::read(Side::Client, &mut buf.as_slice()),
+			Err(Error::Malformed)
+		);
+	}
 }

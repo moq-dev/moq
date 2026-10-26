@@ -120,7 +120,7 @@ mod tests {
 		use crate::lite::test_transport::ScriptedSession;
 		for version in [
 			crate::Version::Lite(Version::Lite07),
-			crate::Version::Ietf(crate::ietf::Version::Draft19),
+			crate::Version::Ietf(crate::ietf::Version::Draft18),
 		] {
 			let mut session = ScriptedSession::new(Vec::new()).without_credit();
 			let mut cx = Context::from_waker(std::task::Waker::noop());

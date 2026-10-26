@@ -17,6 +17,8 @@ const PARAM_COST: u64 = 0x4;
 const PARAM_HOP: u64 = 0x5;
 /// Setup Parameter id for the sender's implementation, as `name/version` product tokens.
 const PARAM_IMPLEMENTATION: u64 = 0x6;
+/// Setup Parameter id for the client's connection credential (client-only, lite-07+).
+const PARAM_TOKEN: u64 = 0x7;
 /// Setup Parameter id offering the `ietf` extension (draft-lcurley-moq-ietf): "IETF" in ASCII.
 const PARAM_IETF: u64 = 0x4945_5446;
 
@@ -168,9 +170,9 @@ pub struct Setup {
 	/// The request path, for transports that carry no request URI (native QUIC,
 	/// qmux over TCP/TLS, unix sockets), with `?` and the URI query appended when
 	/// there is one. Sent only by the client; a server never sends one and a relay
-	/// never forwards it. `None` on URI-carrying bindings, where it would be a
-	/// protocol violation. On an in-band binding an empty path selects the root, like `None`;
-	/// a URI binding forbids even an empty Path parameter.
+	/// never forwards it. `None` when the transport URI carries the target, where it would
+	/// be a protocol violation, even empty. Otherwise an empty path selects the root, like
+	/// `None`.
 	pub path: Option<String>,
 	/// The single direction the client intends to use, or `None` for a bidirectional
 	/// session. `None` is sent as the absence of the parameter, which is also how a
@@ -188,6 +190,10 @@ pub struct Setup {
 	/// applies). `None` when the endpoint has no meaningful identity (a
 	/// leaf that never forwards); a wire value of 0 decodes as `None`.
 	pub hop: Option<crate::Hop>,
+	/// The connection credential (lite-07+), which the empty-token Auth Stream names.
+	/// Sent only by the client. The parameter carries no Token Type, so it is always
+	/// [`Token::OUT_OF_BAND`](crate::setup::Token::OUT_OF_BAND).
+	pub token: Option<crate::setup::Token>,
 	/// Whether this endpoint offers the `ietf` extension (lite-07+). Negotiated only when
 	/// both endpoints offer it.
 	pub ietf: bool,
@@ -230,6 +236,16 @@ impl Message for Setup {
 		}
 		if let Some(implementation) = &self.implementation {
 			params.set_bytes(PARAM_IMPLEMENTATION, implementation.as_bytes().to_vec());
+		}
+		if let Some(token) = &self.token {
+			if !version.has_auth() {
+				return Err(EncodeError::Version);
+			}
+			// An empty value is no credential, and the untyped parameter cannot carry another type.
+			if token.kind != crate::setup::Token::OUT_OF_BAND || token.value.is_empty() {
+				return Err(EncodeError::Unsupported);
+			}
+			params.set_bytes(PARAM_TOKEN, token.value.clone());
 		}
 		if self.ietf {
 			// The framing it changes is unpublished, so a published version cannot offer it.
@@ -281,7 +297,15 @@ impl Message for ReceivedSetup {
 			.get_varint(PARAM_HOP, version)?
 			.and_then(|id| crate::Hop::new(id).ok());
 		let implementation = crate::setup::decode_implementation(params.get_bytes(PARAM_IMPLEMENTATION))?;
-		// An older version does not know the parameter, so it ignores it like any other.
+		// An older version does not know these parameters, so it ignores them like any other.
+		let token = match params.get_bytes(PARAM_TOKEN) {
+			Some([]) if version.has_auth() => return Err(DecodeError::InvalidValue),
+			Some(value) if version.has_auth() => Some(crate::setup::Token {
+				kind: crate::setup::Token::OUT_OF_BAND,
+				value: value.to_vec(),
+			}),
+			_ => None,
+		};
 		let ietf = match params.get_bytes(PARAM_IETF) {
 			Some(value) if version.has_ietf() => match value.is_empty() {
 				true => true,
@@ -298,6 +322,7 @@ impl Message for ReceivedSetup {
 				role,
 				cost,
 				hop,
+				token,
 				ietf,
 				implementation,
 			},
@@ -319,7 +344,7 @@ pub(crate) struct PeerSetup(kio::Shared<PeerSetupState>);
 
 struct PeerSetupState {
 	client: bool,
-	binding: crate::transport::Binding,
+	address: crate::transport::Address,
 	/// Whether our own SETUP offers the `ietf` extension.
 	ietf: bool,
 	seen: bool,
@@ -329,10 +354,10 @@ struct PeerSetupState {
 }
 
 impl PeerSetup {
-	pub fn new(client: bool, binding: crate::transport::Binding) -> Self {
+	pub fn new(client: bool, address: crate::transport::Address) -> Self {
 		Self(kio::Shared::new(PeerSetupState {
 			client,
-			binding,
+			address,
 			ietf: false,
 			seen: false,
 			setup: None,
@@ -348,8 +373,8 @@ impl PeerSetup {
 
 	pub(super) fn receive(&self, received: ReceivedSetup) -> Result<(), crate::Error> {
 		let mut state = self.0.lock();
-		if ((state.client || state.binding == crate::transport::Binding::Uri) && received.setup.path.is_some())
-			|| (state.client && received.role_present)
+		if ((state.client || state.address == crate::transport::Address::Uri) && received.setup.path.is_some())
+			|| (state.client && (received.role_present || received.setup.token.is_some()))
 		{
 			return Err(crate::Error::ProtocolViolation);
 		}
@@ -578,6 +603,72 @@ mod tests {
 		valued.extend([1, 7]);
 		valued[0] += 1;
 		assert!(Setup::decode_slice(&valued, Version::Lite07).is_err());
+	}
+
+	/// The connection credential rides lite-07+, which an older version ignores like any
+	/// unknown parameter, and only an untyped, non-empty token can be sent.
+	#[test]
+	fn token_is_lite07_only() {
+		let token = crate::setup::Token {
+			kind: crate::setup::Token::OUT_OF_BAND,
+			value: b"jwt".to_vec(),
+		};
+		let msg = Setup {
+			token: Some(token.clone()),
+			..Default::default()
+		};
+		let buf = msg.encode_bytes(Version::Lite07).unwrap();
+		// Length, one parameter, its id, then the token's length and bytes.
+		assert_eq!(&buf[..], [0x06, 0x01, 0x07, 0x03, b'j', b'w', b't']);
+		assert_eq!(Setup::decode_slice(&buf, Version::Lite07).unwrap().0, msg);
+		assert!(matches!(msg.encode_bytes(Version::Lite06), Err(EncodeError::Version)));
+		assert_eq!(Setup::decode_slice(&buf, Version::Lite06).unwrap().0, Setup::default());
+
+		for unsendable in [
+			crate::setup::Token {
+				// Any registered type but out-of-band, which moq-lite cannot carry.
+				kind: 0x1,
+				..token.clone()
+			},
+			crate::setup::Token {
+				value: Vec::new(),
+				..token
+			},
+		] {
+			let msg = Setup {
+				token: Some(unsendable),
+				..Default::default()
+			};
+			assert!(matches!(
+				msg.encode_bytes(Version::Lite07),
+				Err(EncodeError::Unsupported)
+			));
+		}
+
+		// An empty value carries no credential, so it is refused rather than read as none.
+		assert!(Setup::decode_slice(&[0x03, 0x01, 0x07, 0x00], Version::Lite07).is_err());
+	}
+
+	/// Only the client presents a connection credential.
+	#[test]
+	fn a_server_token_is_a_protocol_violation() {
+		let setup = Setup {
+			token: Some(crate::setup::Token {
+				kind: crate::setup::Token::OUT_OF_BAND,
+				value: b"jwt".to_vec(),
+			}),
+			..Default::default()
+		};
+		let buf = setup.encode_bytes(Version::Lite07).unwrap();
+		let received = |buf: &[u8]| ReceivedSetup::decode_slice(buf, Version::Lite07).unwrap().0;
+
+		let client = PeerSetup::new(true, crate::transport::Address::Setup);
+		assert!(matches!(
+			client.receive(received(&buf)),
+			Err(crate::Error::ProtocolViolation)
+		));
+		let server = PeerSetup::new(false, crate::transport::Address::Setup);
+		server.receive(received(&buf)).unwrap();
 	}
 
 	/// Never emit a SETUP our own receiver would refuse.

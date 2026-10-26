@@ -333,7 +333,8 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 	/// Fill a frame's payload from the stream, returning `Pending` once it would block.
 	///
 	/// The payload reaches the frame as it arrives, but keeps its receive credit until the
-	/// frame is full, so incomplete frames stay bounded by the receive window.
+	/// segment it lands in seals, so an incomplete frame holds at most one segment of the
+	/// receive window however large it is.
 	///
 	/// `Ready(Ok(()))` means the frame is full and the caller should commit it; an error
 	/// means the caller should abort it. Either way the frame is untouched otherwise, so
@@ -368,12 +369,19 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 			};
 
 			// One chunk per lease: a lease may hold the transport's lock, so the frame is
-			// written, and its consumers woken, only once the lease is gone.
-			let chunk = lease.copy_to_bytes(lease.chunk().len().min(frame.remaining()));
-			let complete = chunk.len() == frame.remaining();
+			// written, and its consumers woken, only once the lease is gone. A chunk holding
+			// the rest of the frame is taken whole, so a frame delivered in one piece keeps
+			// its allocation; any other stops where the segment being written seals.
+			let remaining = frame.remaining();
+			let take = match lease.chunk().len() >= remaining {
+				true => remaining,
+				false => lease.chunk().len().min(frame.unsealed()),
+			};
+			let chunk = lease.copy_to_bytes(take);
+			let complete = chunk.len() == remaining;
 			let ended = lease.is_fin() && !lease.has_remaining();
-			if complete {
-				// Every byte of the frame is in hand, so its credit returns.
+			if complete || chunk.len() == frame.unsealed() {
+				// Every byte of the segment is in hand, so its credit returns.
 				lease.release();
 			} else {
 				drop(lease);
@@ -592,7 +600,7 @@ mod tests {
 		let mut lite = stop_log(crate::lite::Version::Lite05);
 		lite.abort(&Error::Old);
 
-		let mut ietf = stop_log(crate::ietf::Version::Draft20);
+		let mut ietf = stop_log(crate::ietf::Version::Draft22);
 		ietf.abort(&Error::Old);
 
 		assert_eq!(lite.stream.get_ref().stops, vec![StreamError::Old.to_code()]);
@@ -773,7 +781,7 @@ mod tests {
 		use crate::{Version, ietf, lite, setup};
 		refuses_frame::<lite::Setup, _>(&[0], lite::Version::Lite05, false);
 		refuses_frame::<lite::Goaway, _>(&[0], lite::Version::Lite05, false);
-		refuses_frame::<ietf::GoAway, _>(&[0, 0], ietf::Version::Draft20, false);
+		refuses_frame::<ietf::GoAway, _>(&[0, 0], ietf::Version::Draft22, false);
 		for version in [
 			Version::Lite(lite::Version::Lite01),
 			Version::Lite(lite::Version::Lite02),
@@ -945,5 +953,103 @@ mod tests {
 
 		// Two budgets' worth, and the boundary is owed nothing by the time it arrives.
 		assert_eq!(wakes.count(), 2, "the burst was withheld past its budget");
+	}
+
+	/// A leasing stream that keeps the credit of every byte read until a release, the way
+	/// a QUIC connection window does, counting what is held and what came back.
+	#[derive(Default)]
+	struct Credited {
+		chunks: VecDeque<Bytes>,
+		held: usize,
+		released: usize,
+	}
+
+	struct CreditedLease<'a>(&'a mut Credited);
+
+	impl RecvStream for Credited {
+		type Error = crate::lite::test_transport::SinkError;
+		type Lease<'a> = CreditedLease<'a>;
+
+		fn poll_lease(&mut self, _: &mut Context<'_>, want: usize) -> Poll<Result<CreditedLease<'_>, Self::Error>> {
+			match self.chunks.iter().map(Bytes::len).sum::<usize>() >= want {
+				true => Poll::Ready(Ok(CreditedLease(self))),
+				false => Poll::Pending,
+			}
+		}
+
+		fn set_priority(&mut self, _: i64) {}
+
+		fn stop(&mut self, _: u32) {}
+	}
+
+	impl Buf for CreditedLease<'_> {
+		fn remaining(&self) -> usize {
+			self.0.chunks.iter().map(Bytes::len).sum()
+		}
+
+		fn chunk(&self) -> &[u8] {
+			self.0.chunks.front().map_or(&[], |chunk| &chunk[..])
+		}
+
+		fn advance(&mut self, n: usize) {
+			let front = self.0.chunks.front_mut().expect("advanced past the lease");
+			front.advance(n);
+			if front.is_empty() {
+				self.0.chunks.pop_front();
+			}
+			self.0.held += n;
+		}
+	}
+
+	impl Lease for CreditedLease<'_> {
+		fn chunks(&self) -> impl Iterator<Item = &[u8]> {
+			self.0.chunks.iter().map(|chunk| &chunk[..])
+		}
+
+		fn is_fin(&self) -> bool {
+			false
+		}
+
+		fn release(self) {
+			self.0.released += std::mem::take(&mut self.0.held);
+		}
+	}
+
+	/// A frame returns its receive credit as each segment seals, so however large it is,
+	/// it never holds more than one segment of the window, even when a chunk straddles
+	/// the boundary.
+	#[test]
+	fn a_frame_returns_credit_per_segment() {
+		use crate::frame::SEGMENT;
+		const SIZE: usize = 2 * SEGMENT + SEGMENT / 2;
+		const CHUNK: usize = 100_000;
+
+		let (mut frame, mut payload, waiter, _wakes) = parked_frame(SIZE);
+		let data = Bytes::from((0..SIZE).map(|i| (i % 251) as u8).collect::<Vec<_>>());
+		let mut reader = Reader::new(Credited::default(), crate::lite::Version::Lite05);
+		let mut cx = Context::from_waker(std::task::Waker::noop());
+
+		let mut sent = 0;
+		let done = loop {
+			let next = (sent + CHUNK).min(SIZE);
+			reader.stream.chunks.push_back(data.slice(sent..next));
+			sent = next;
+			let res = reader.poll_read_frame(&mut cx, &mut frame);
+			let stream = &reader.stream;
+			if res.is_ready() {
+				break res;
+			}
+			assert_eq!(stream.released, sent / SEGMENT * SEGMENT, "credit returned off a seal");
+			assert!(stream.held < SEGMENT, "{} bytes held past a segment", stream.held);
+		};
+		assert!(matches!(done, Poll::Ready(Ok(()))));
+		assert_eq!(reader.stream.released, SIZE);
+
+		let _group = frame.finish().unwrap();
+		let mut read = Vec::new();
+		while let Poll::Ready(Ok(Some(chunk))) = payload.poll_read_chunk(&waiter) {
+			read.extend_from_slice(&chunk);
+		}
+		assert_eq!(read, data);
 	}
 }

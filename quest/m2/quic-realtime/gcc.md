@@ -24,9 +24,12 @@ fork.
   window and `ControllerMetrics::{pacing_rate, bandwidth_estimate}`, keeping
   its congestion-window pushback as the inflight bound.
 - Keep the BSD license and PATENTS file with the vendored code.
+- Implement `Controller::probes` and report `probe_inflight` so moq-quic's
+  native probing still raises the estimate (decided 2026-10-25, maintainer;
+  see the [epic](/quest/m2/quic-realtime/README.md)). Measure that a stopped
+  rung recovers under it.
 - Unit tests drive the controller with mocked time, not wall clock.
 
 ## Required
 
-- [Portable controller trait](/quest/m1/congestion/trait.md) - followers land in `moq-congestion` on its trait
 - [Receive-ts spike](/quest/m2/quic-realtime/receive-ts.md) - the per-packet receive instants and the shared presets

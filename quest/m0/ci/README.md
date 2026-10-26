@@ -53,15 +53,18 @@ Decisions (maintainer, 2026-10-13):
 - Self-hosted CI is dropped: hosted runners plus the R2 caches replace the
   spare-desktop runner, its cache server, and the cache release it waited on.
   Reopened 2026-10-19, conditionally, to compare runners once the pipeline
-  was optimized. Decided 2026-10-22 (maintainer): the queue runner is the
-  persistent `nix/runner` VM (no host mounts or tailnet, firewalled to public
-  egress), in use since 2026-10-20. Over 32 one-pass entries it took a median
-  5.5 minutes per merged PR (p90 11.9, at most 24.2) against 21 minutes on a
-  hosted runner, with no per-minute bill. Blacksmith is not pursued.
-  Open (found 2026-10-23): the runner deployed on that host is a
-  systemd-nspawn container (`container@moq-ci`) with `/dev/kvm` and a host
-  cache directory bound in, not the VM this decision and `nix/runner/README.md`
-  describe. Confirm which is intended before changing either.
+  was optimized. Decided 2026-10-22 (maintainer): the queue runs on a
+  persistent self-hosted runner, in use since 2026-10-20. Over 32 one-pass
+  entries it took a median 5.5 minutes per merged PR (p90 11.9, at most 24.2)
+  against 21 minutes on a hosted runner, with no per-minute bill. Blacksmith
+  is not pursued.
+- Decided 2026-10-25 (maintainer), superseding the 2026-10-22 choice of the
+  `nix/runner` VM: no VM. The queue runner is the deployed systemd-nspawn
+  container `container@moq-ci`, and new queue runners go into it. Reason: the
+  CI host should run mostly sandboxed through kernel primitives (namespaces,
+  cgroups and slices, seccomp), which the container already uses, so a VM is
+  not needed for isolation. The `nix/runner` VM module is not the deployment
+  target.
 
 Decided 2026-10-23 (maintainer), to speed up the serial queue: structural
 changes first (concurrent entries, parallel modules, one test build), then a
@@ -81,7 +84,27 @@ feature permutations and release-profile builds. Expensive and optional checks
 run nightly on `main` and are required on `release`. Faster runners come last,
 chosen from measurements of the optimized pipeline. Each CI pass costs twice
 per merged PR today (PR and queue), at 13 minutes median and 26 minutes p90 of
-wall time per PR run.
+wall time per PR run. Superseded in part 2026-10-24: the PR gate checks
+feature shapes for the crates a branch changes; Nightly keeps the full matrix.
+
+Decided 2026-10-25 (maintainer): across moq's many CI and release builds
+(targets, features, FFI languages, Nix packages), each crate configuration
+compiles once and is reused through the cache, and each run builds and tests
+only what its diff can affect, measured in runner CPU time. Wall clock for its
+own sake and replacing cargo are non-goals. mbx already caches each compilation,
+so the work is making builds identical enough to hit it (flags in
+`.cargo/config.toml`, cargo-hakari), and auditing the package selection `just ci`
+already does. Nix builds run sandboxed and cannot reach R2; decided 2026-10-26
+from kixelated/rust2's
+[Nix build benchmark](https://github.com/kixelated/rust2/pull/63), they move to
+crate2nix, whose per-crate derivations `nix.moq.dev` caches.
+
+Decided 2026-10-25 (maintainer), from a profile of moq-net: monomorphized
+generics dominate its build (53% of the library's CPU), and its test target
+costs 3x the library. A "thin generics" profile shrinks them: generic entry
+points delegate to non-generic bodies, and BTreeMap instantiations are shared.
+kixelated/rust2's driver lints the rule later. Making IETF support a cargo
+feature was considered and not planned: the churn outweighs the build saving.
 
 Measure each change against a current baseline and record the result in its PR.
 The historical samples locate candidates; they are not controlled benchmarks.
@@ -90,10 +113,16 @@ The historical samples locate candidates; they are not controlled benchmarks.
 
 - [Require the release gate](/quest/m0/ci/release-gates.md) - condition: the next cut carries `release-gate.yml`; then release PRs require it
 - [Build queue entries concurrently](/quest/m0/ci/queue-concurrency.md) - the queue builds two or more entries at once instead of one
-- [Check the bindings in separate lanes](/quest/m0/ci/ffi-lane.md) - py, kt, swift, go, carla, and cpp check concurrently instead of in one serial lane
 - [Measure nightly compiler levers](/quest/m0/ci/nightly-levers.md) - the parallel frontend and Cranelift, adopted only if the numbers beat their risks
 - [Bump to the manifest fix](/quest/m0/ci/mbx-bump.md) - condition: an mbx release contains jdx/mr-boxington#798; then bump the Rust cache's pin
 - [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) - measure the hosted Nightly jobs' hits, restore time, and expiry once the bump lands
-- [mbx on a full disk](/quest/m0/ci/mbx-low-disk.md) - gc never evicts a live build's trees, and the Dart check names the real cause
 - [Verify the Nix cache](/quest/m0/ci/nix-cache-verify.md) - confirm CI and releases use `nix.moq.dev` and retire Cachix
-- [First shared FFI release](/quest/m0/ci/nightly-ffi-reuse.md) - condition: the first `moq-ffi-v*` tag that runs `Release FFI`, and a `Shipping sizes` run; verify the wrappers and size keys
+- [Build Nix packages with crate2nix](/quest/m0/ci/crate2nix.md) - one derivation per crate cached in nix.moq.dev, with `Cargo.nix` regenerated by CI so contributors never need Nix
+- [Unify dependency features](/quest/m0/ci/hakari.md) - a cargo-hakari workspace-hack so every job compiles each dependency alike and mbx hits across jobs
+- [Replay full-run failures against the selected gate](/quest/m0/ci/select-audit.md) - every dependency edge `just ci` misses is found and fixed with a test
+- [First shared FFI release](/quest/m0/ci/nightly-ffi-reuse.md) - condition: the backport merges and the next `moq-ffi-v*` tag runs `Release FFI`; verify the wrappers
+- [Loom tests compile](/quest/m0/ci/loom-build.md) - `just rs loom` builds on main and a `--cfg loom` break fails its PR
+- [just check without user namespaces](/quest/m0/ci/check-without-userns.md) - a host that refuses `unshare` reports the flake module as not run instead of cancelling other lanes
+- [Fewer BTreeMap instantiations](/quest/m0/ci/btree-keys.md) - moq-net shares BTreeMap key and value types, kept only if its CPU time drops
+- [Measure moving unit tests out](/quest/m0/ci/test-layout.md) - report what moq-net would save by not compiling its library twice for unit tests
+- [Turn off axum's tower-log](/quest/m0/ci/tower-log.md) - tracing stops expanding its `log` feature in every crate, measured on the moq-net edit

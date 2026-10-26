@@ -33,7 +33,7 @@ const WIRES: Wire[] = [
 	{ name: "ietf-14", protocol: "", version: Ietf.Version.DRAFT_14, declares: false },
 	{ name: "ietf-16", protocol: Ietf.ALPN.DRAFT_16, declares: false },
 	{ name: "ietf-17", protocol: Ietf.ALPN.DRAFT_17, declares: true },
-	{ name: "ietf-20", protocol: Ietf.ALPN.DRAFT_20, declares: true },
+	{ name: "ietf-20", protocol: Ietf.ALPN.DRAFT_22, declares: true },
 ];
 
 /** Serve one group of `timestamps` on a track with `timescale`, and read it back over `wire`. */
@@ -45,8 +45,9 @@ async function roundTrip(wire: Wire, timescale: Timescale | undefined, timestamp
 		accept({ transport: pair.server, url, version: wire.version, publish: origin.consume() }),
 	]);
 
-	const broadcast = origin.createBroadcast(Path.from("test"));
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(Path.from("test"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	// Every request is answered, including the TRACK lookup lite-05+ makes before subscribing.
 	const serving = (async () => {
 		for (;;) {
@@ -104,7 +105,7 @@ test("a forwarded untimed track stays untimed", async () => {
 	// The publisher's hop (lite-04) can't declare a timeline, and the forwarding node must
 	// not claim one on its moq-transport hop either.
 	const upstream = createMockTransportPair(Lite.ALPN_04);
-	const downstream = createMockTransportPair(Ietf.ALPN.DRAFT_20);
+	const downstream = createMockTransportPair(Ietf.ALPN.DRAFT_22);
 	const source = new OriginProducer();
 	const relay = new OriginProducer();
 	const [publisher, ingest, serve, subscriber] = await Promise.all([
@@ -114,8 +115,9 @@ test("a forwarded untimed track stays untimed", async () => {
 		connect({ url, transport: downstream.client }),
 	]);
 
-	const broadcast = source.createBroadcast(Path.from("test"));
-	broadcast.announce();
+	const broadcastPublication = source.createBroadcast(Path.from("test"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	const serving = (async () => {
 		for (;;) {
 			const request = await wireOf(broadcast).requested();
@@ -189,8 +191,9 @@ for (const wire of WIRES.filter((wire) => wire.name === "lite-06" || wire.name =
 			accept({ transport: pair.server, url, publish: origin.consume() }),
 		]);
 
-		const broadcast = origin.createBroadcast(Path.from("test"));
-		broadcast.announce();
+		const broadcastPublication = origin.createBroadcast(Path.from("test"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
 		const producer = broadcast.createTrack("video", {});
 		const subscriber = wireOf(client).consume(Path.from("test")).track("video").subscribe();
 

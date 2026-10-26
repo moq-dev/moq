@@ -79,7 +79,7 @@ FINISH_ONLY=0
 # except the clients the harness reads a grant from, which offer $AUTH_VERSION alone. Any other
 # entry pins every client in its pass to that version, and `ietf` expands to IETF_VERSIONS.
 VERSIONS="auto"
-IETF_VERSIONS="moq-transport-14,moq-transport-16,moq-transport-18,moq-transport-20,moq-transport-22"
+IETF_VERSIONS="moq-transport-14,moq-transport-16,moq-transport-18,moq-transport-22"
 
 # Cargo profile for the relay/cli/moq-c builds. Debug compiles faster, which is
 # what an interop test wants; the workload (320x240@30) is trivial either way.
@@ -368,12 +368,12 @@ publisher_codecs() {
 # decode's timestamps, which fails a misapplied pre-skip. Every publisher's tone starts at
 # timestamp zero except the browser's, which stamps its file from its own page clock. The native-JS
 # subscriber hands WebCodecs raw Opus without the OpusHead, as the player does, which keeps the
-# pre-skip for the player to trim, and its libav fallback stamps milliseconds. AAC waits on the
-# fMP4 importer applying the edit list that carries ffmpeg's 1024 priming samples
-# (quest/m1/fmp4-edit-lists.md).
+# pre-skip for the player to trim, and its libav fallback stamps milliseconds. GStreamer's AAC is
+# skipped for its decoder: `faad`, which decodebin picks, drops the first frame's output and stamps
+# the rest a frame early, so it reads the priming 1024 samples early whatever the timestamps say.
 # shellcheck disable=SC2329  # reached from run_cell, which 'harness_spawn' invokes
 phase_checked() {
-    [[ "$1" != js* && "$2" != js-native-* && "$3" == opus ]]
+    [[ "$1" != js* && "$2" != js-native-* && ("$2" != gst || "$3" == opus) ]]
 }
 
 # Record a case for the CI report: `record <outcome> case=C [field=value...]` (see
@@ -893,6 +893,17 @@ token_url() {
     printf '%s/?jwt=%s' "$URL" "$token"
 }
 
+# Set `connect` to moq-cli's arguments for <url>, moving a `?jwt=` token to
+# `--connect-token` so it rides SETUP where the version carries one. The binding clients keep it
+# in the URL, which covers the query form.
+# shellcheck disable=SC2329  # invoked from the indirectly invoked publisher and subscriber
+rust_connect() {
+    case "$1" in
+        *'?jwt='*) connect=(--connect "${1%%\?jwt=*}" --connect-token "${1#*\?jwt=}") ;;
+        *) connect=(--connect "$1") ;;
+    esac
+}
+
 # The pattern a cell's token grants its publisher, or its subscribers, on <broadcast>. The `auto`
 # pass mints patterns no prefix could carry, so AUTH must deliver them as minted. moq-transport's
 # AUTH extension (draft-17 on) carries prefixes alone and refuses a narrower grant, closing the
@@ -1013,15 +1024,17 @@ run_publisher() {
             # A finished import stays up for its linger (a released CLI: its max-age);
             # `stop_publisher` allows 10 s to close. The wire-compat FETCH lanes keep the
             # video-only Annex-B input.
+            local connect
+            rust_connect "$url"
             if [[ "$AUDIO" -eq 1 ]]; then
                 # The max-age caps every reader's max delay, so it covers the longest, the native
                 # JS audio readers' 5 s. Each 1 s fragment lands as one burst, so with a 1 s
                 # max-age the oldest group a joining reader is served goes stale as soon as the
                 # next group lands, cutting it mid-read and failing the gap check.
-                ffmpeg_fmp4 "$tone" "$(publisher_codecs rust)" | RUST_LOG="$CLI_LOG" "$MOQ" --connect "$url" --connect-version "$(cell_version rust)" \
+                ffmpeg_fmp4 "$tone" "$(publisher_codecs rust)" | RUST_LOG="$CLI_LOG" "$MOQ" "${connect[@]}" --connect-version "$(cell_version rust)" \
                     --broadcast "$broadcast" import --max-age 5s fmp4
             else
-                ffmpeg_h264 | RUST_LOG="$CLI_LOG" "$MOQ" --connect "$url" --connect-version "$(cell_version rust)" \
+                ffmpeg_h264 | RUST_LOG="$CLI_LOG" "$MOQ" "${connect[@]}" --connect-version "$(cell_version rust)" \
                     --broadcast "$broadcast" import --max-age 1s avc3
             fi
             ;;
@@ -1308,13 +1321,14 @@ PYCODE
             fi
             # The CLI has no PCM output, so moq-audio decodes the audio in a client of its own,
             # alongside the CLI so the cell stays within one timeout.
-            local n audio_pid="" audio_status=0
+            local n connect audio_pid="" audio_status=0
+            rust_connect "$url"
             if [[ "$AUDIO" -eq 1 ]]; then
                 timeout -k 3 "$TIMEOUT" "$TARGET_BASE/$PROFILE/examples/interop-audio" \
                     "$url" "$broadcast" "$audio_out" "$AUDIO_MS" "$(cell_version rust)" &
                 audio_pid=$!
             fi
-            n=$(RUST_LOG="$CLI_LOG" timeout -k 3 "$TIMEOUT" "${INTEROP_SUB_MOQ:-$MOQ}" --connect "$url" \
+            n=$(RUST_LOG="$CLI_LOG" timeout -k 3 "$TIMEOUT" "${INTEROP_SUB_MOQ:-$MOQ}" "${connect[@]}" \
                 --connect-version "$(cell_version rust)" --broadcast "$broadcast" export fmp4 | head -c 1 | wc -c | tr -d ' ' || true)
             [[ -z "$audio_pid" ]] || wait "$audio_pid" || audio_status=$?
             [[ "${n:-0}" -ge 1 && "$audio_status" -eq 0 ]]
