@@ -246,6 +246,9 @@ export default class MoqPublish extends HTMLElement {
 
 		Announce.run(this.signals, this.#announcing, {
 			mode: this.controls.announce,
+			selected: this.signals.computed(
+				(effect) => effect.get(this.#enabled) && !!effect.get(this.controls.source),
+			),
 			camera: this.signals.computed((effect) => effect.get(this.controls.source) === "camera"),
 			video: { enabled: this.#videoEnabled, source: this.#videoSource, settled: this.video.settled },
 			audio: { enabled: this.#audioEnabled, source: this.#audioSource, settled: this.audio.settled },
