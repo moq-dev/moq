@@ -56,7 +56,6 @@ use crate::quic::driver::{
 pub struct RecvStream {
 	conn: ConnectionRef,
 	stream: StreamId,
-	is_0rtt: bool,
 	all_data_read: bool,
 	reset: Option<VarInt>,
 	/// The code a drop before the end stops with
@@ -64,11 +63,10 @@ pub struct RecvStream {
 }
 
 impl RecvStream {
-	pub(crate) fn new(conn: ConnectionRef, stream: StreamId, is_0rtt: bool) -> Self {
+	pub(crate) fn new(conn: ConnectionRef, stream: StreamId) -> Self {
 		Self {
 			conn,
 			stream,
-			is_0rtt,
 			all_data_read: false,
 			reset: None,
 			drop_stop: VarInt::from_u32(0),
@@ -119,9 +117,6 @@ impl RecvStream {
 	/// Do not mix with the plain reads on one stream, which skip the leased bytes.
 	pub fn poll_lease(&mut self, cx: &mut Context<'_>, want: usize) -> Poll<Result<Lease<'_>, ReadError>> {
 		let mut conn = self.conn.state.lock();
-		if self.is_0rtt {
-			conn.check_0rtt().map_err(|()| ReadError::ZeroRttRejected)?;
-		}
 		let err = match conn.inner.recv_stream(self.stream).lease(want) {
 			Ok(transmit) => {
 				if transmit.should_transmit() {
@@ -251,9 +246,6 @@ impl RecvStream {
 	/// attempts to operate on a stream will yield `ClosedStream` errors.
 	pub fn stop(&mut self, error_code: VarInt) -> Result<(), ClosedStream> {
 		let mut conn = self.conn.state.lock();
-		if self.is_0rtt && conn.check_0rtt().is_err() {
-			return Ok(());
-		}
 		conn.inner.recv_stream(self.stream).stop(error_code)?;
 		conn.wake();
 		self.all_data_read = true;
@@ -261,20 +253,6 @@ impl RecvStream {
 		// operation, so `drop` doesn't have to
 		conn.blocked_readers.remove(&self.stream);
 		Ok(())
-	}
-
-	/// Check if this stream predates completion of the handshake on an incoming connection.
-	///
-	/// True only if the stream was accepted before the handshake completed, which is only possible
-	/// if you successfully called [`Connecting::into_0rtt`](crate::quic::driver::Connecting::into_0rtt) and the
-	/// client chose to send 0-RTT data.
-	///
-	/// Under those conditions, depending on cryptographic layer configuration, 0-RTT application
-	/// data may be a replay attack. To guard against this, applications should not execute
-	/// non-idempotent operations until
-	/// [`Connection::authenticated`](crate::quic::driver::Connection::authenticated) succeeds.
-	pub fn is_0rtt(&self) -> bool {
-		self.is_0rtt
 	}
 
 	/// Get the identity of this stream
@@ -299,9 +277,6 @@ impl RecvStream {
 	pub async fn received_reset(&mut self) -> Result<Option<VarInt>, ResetError> {
 		poll_fn(|cx| {
 			let mut conn = self.conn.state.lock();
-			if self.is_0rtt && conn.check_0rtt().is_err() {
-				return Poll::Ready(Err(ResetError::ZeroRttRejected));
-			}
 
 			if let Some(code) = self.reset {
 				return Poll::Ready(Ok(Some(code)));
@@ -349,9 +324,6 @@ impl RecvStream {
 		}
 
 		let mut conn = self.conn.state.lock();
-		if self.is_0rtt {
-			conn.check_0rtt().map_err(|()| ReadError::ZeroRttRejected)?;
-		}
 
 		// If we stored an error during a previous call, return it now. This can happen if a
 		// `read_fn` both wants to return data and also returns an error in its final stream status.
@@ -565,7 +537,7 @@ impl Drop for RecvStream {
 		// clean up any previously registered wakers
 		conn.blocked_readers.remove(&self.stream);
 
-		if conn.error.is_some() || (self.is_0rtt && conn.check_0rtt().is_err()) {
+		if conn.error.is_some() {
 			return;
 		}
 
@@ -590,14 +562,6 @@ pub enum ReadError {
 	/// The stream has already been stopped, finished, or reset
 	#[error("closed stream")]
 	ClosedStream,
-	/// This was a 0-RTT stream and the server rejected it
-	///
-	/// Can only occur on clients for 0-RTT streams, which can be opened using
-	/// [`Connecting::into_0rtt()`].
-	///
-	/// [`Connecting::into_0rtt()`]: crate::quic::driver::Connecting::into_0rtt()
-	#[error("0-RTT rejected")]
-	ZeroRttRejected,
 	/// The connection window was stuck and this stream was discarded to free it
 	///
 	/// See [`RecvStream::poll_lease`]. The peer hears of it once the stream is stopped, so call
@@ -621,7 +585,6 @@ impl From<ResetError> for ReadError {
 	fn from(e: ResetError) -> Self {
 		match e {
 			ResetError::ConnectionLost(e) => Self::ConnectionLost(e),
-			ResetError::ZeroRttRejected => Self::ZeroRttRejected,
 		}
 	}
 }
@@ -630,7 +593,7 @@ impl From<ReadError> for io::Error {
 	fn from(x: ReadError) -> Self {
 		use ReadError::*;
 		let kind = match x {
-			Reset { .. } | ZeroRttRejected | Evicted => io::ErrorKind::ConnectionReset,
+			Reset { .. } | Evicted => io::ErrorKind::ConnectionReset,
 			ConnectionLost(_) | ClosedStream => io::ErrorKind::NotConnected,
 			TooLarge => io::ErrorKind::InvalidInput,
 		};
@@ -645,21 +608,12 @@ pub enum ResetError {
 	/// The connection was lost
 	#[error("connection lost")]
 	ConnectionLost(#[from] ConnectionError),
-	/// This was a 0-RTT stream and the server rejected it
-	///
-	/// Can only occur on clients for 0-RTT streams, which can be opened using
-	/// [`Connecting::into_0rtt()`].
-	///
-	/// [`Connecting::into_0rtt()`]: crate::quic::driver::Connecting::into_0rtt()
-	#[error("0-RTT rejected")]
-	ZeroRttRejected,
 }
 
 impl From<ResetError> for io::Error {
 	fn from(x: ResetError) -> Self {
 		use ResetError::*;
 		let kind = match x {
-			ZeroRttRejected => io::ErrorKind::ConnectionReset,
 			ConnectionLost(_) => io::ErrorKind::NotConnected,
 		};
 		Self::new(kind, x)

@@ -112,14 +112,6 @@ impl crypto::Session for Session {
 		None
 	}
 
-	fn early_crypto(&self) -> Option<(Box<dyn HeaderKey>, Box<dyn PacketKey>)> {
-		None
-	}
-
-	fn early_data_accepted(&self) -> Option<bool> {
-		None
-	}
-
 	fn is_handshaking(&self) -> bool {
 		self.received < MESSAGES
 	}

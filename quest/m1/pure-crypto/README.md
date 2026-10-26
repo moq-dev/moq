@@ -38,3 +38,4 @@ picks a random one, and jsonwebtoken 11 already takes a custom
 - [ACME on graviola](/quest/m1/pure-crypto/acme-upstream.md) - graviola builds turn ACME back on once rustls-acme gains a provider hook or instant-acme 0.9 is released
 - [rustls-graviola's QUIC keys](/quest/m1/pure-crypto/graviola-quic.md) - a rustls-graviola release ships QUIC keys, and moq-quic's adapter is deleted
 - [The next graviola release](/quest/m1/pure-crypto/graviola-release.md) - moq pins a graviola with ECDSA key generation and faster ChaCha20-Poly1305, drops RustCrypto's `p256`, and re-measures the ChaCha20 gap
+- [graviola's own CPU check](/quest/m1/pure-crypto/graviola-cpu-check.md) - waiting on ctz/graviola#227; the relay then calls graviola's check instead of mirroring its list
