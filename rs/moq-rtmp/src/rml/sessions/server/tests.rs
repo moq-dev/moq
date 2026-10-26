@@ -339,6 +339,7 @@ fn connect_request_reports_fourcc_list() {
 				Amf0Value::StrictArray(vec![
 					Amf0Value::Utf8String("hvc1".to_string()),
 					Amf0Value::Utf8String("Opus".to_string()),
+					Amf0Value::Utf8String("hvc1".to_string()),
 				]),
 			),
 		])),
@@ -359,8 +360,8 @@ fn connect_request_reports_fourcc_list() {
 			..
 		} => {
 			assert_eq!(*caps_ex, 2);
-			assert_eq!(video_fourccs.fourccs, vec![*b"hvc1", *b"Opus"]);
-			assert_eq!(audio_fourccs.fourccs, vec![*b"hvc1", *b"Opus"]);
+			assert_eq!(video_fourccs.fourccs, vec![*b"Opus", *b"hvc1"]);
+			assert_eq!(audio_fourccs.fourccs, vec![*b"Opus", *b"hvc1"]);
 		}
 		_ => panic!("First event was not as expected: {:?}", events[0]),
 	}

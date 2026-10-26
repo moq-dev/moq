@@ -195,7 +195,7 @@ mod tests {
 			}
 			if matches!(type_id, 17 | 20) {
 				data.extend(
-					crate::rml::amf0::serialize(&[
+					crate::rml::amf0::serialize(&vec![
 						Amf0Value::Utf8String("connect".into()),
 						Amf0Value::Number(1.0),
 						Amf0Value::Null,
