@@ -99,6 +99,7 @@ catalog linger (#5305).
 ## Required
 
 - [PAT changes](/quest/m1/ts-reliability/pat-lifecycle.md) - a revised PAT never leaves a broadcast meaning another program
+- [TS workflow passes](/quest/m1/ts-reliability/validation-green.md) - the scheduled TS lanes pass on main again, with no lane loosened
 
 ## Related
 

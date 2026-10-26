@@ -80,7 +80,3 @@ redesigning (maintainer, 2026-10-23); nest whatever it lands in
 
 The Impact bullet says how to migrate in moq-quic, moq-tokio, moq-uring, and qmux; update
 moq-tokio's `quic::Config` resolution and moq-relay's limits.
-
-## Required
-
-- [Trim](/quest/m1/quic-api/trim.md) - removes the duplicate limit setters first
