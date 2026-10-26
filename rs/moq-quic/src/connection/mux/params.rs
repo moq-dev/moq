@@ -1,11 +1,10 @@
 //! QMux transport parameters, carried in QX_TRANSPORT_PARAMETERS instead of a TLS extension
 //!
 //! The standard parameters are QUIC v1's and decode through [`TransportParameters`]. QMux adds
-//! a pass over every parameter that rejects the QUIC v1 ones it prohibits and any duplicate,
-//! and extracts its own `max_record_size` and `application_protocols`, which the shared codec
-//! would skip as unknown.
-
-use std::collections::HashSet;
+//! a pass over every parameter that rejects the QUIC v1 ones it prohibits and extracts its own
+//! `max_record_size` and `application_protocols`, which the shared codec would skip as unknown.
+//! A repeat of either overwrites the earlier value; the shared codec refuses a repeated QUIC v1
+//! parameter.
 
 use bytes::{Buf, BufMut, Bytes};
 
@@ -105,7 +104,6 @@ impl Params {
 	pub(super) fn decode(side: Side, version: Version, blob: Bytes) -> Result<Self, TransportError> {
 		let mut max_record_size = VarInt::from_u64(DEFAULT_MAX_RECORD_SIZE).unwrap();
 		let mut protocols = None;
-		let mut seen = HashSet::new();
 		let mut scan = &blob[..];
 		while scan.has_remaining() {
 			let id = crate::coding::BufExt::get_var(&mut scan).map_err(|_| err("truncated parameter id"))?;
@@ -119,9 +117,6 @@ impl Params {
 
 			if is_forbidden(id) {
 				return Err(err("prohibited QUIC v1 transport parameter"));
-			}
-			if !seen.insert(id) {
-				return Err(err("duplicate transport parameter"));
 			}
 			match id {
 				// Draft-00 has no records, so its peer's value would only shrink our frames
@@ -208,11 +203,11 @@ mod tests {
 	}
 
 	#[test]
-	fn rejects_duplicates_the_shared_codec_skips() {
+	fn repeated_qmux_parameter_last_wins() {
 		let mut buf = Vec::new();
-		write_param(&mut buf, 0x1234, 7);
-		write_param(&mut buf, 0x1234, 7);
-		assert!(decode(buf).is_err());
+		write_param(&mut buf, MAX_RECORD_SIZE, 20_000);
+		write_param(&mut buf, MAX_RECORD_SIZE, 30_000);
+		assert_eq!(decode(buf).unwrap().max_record_size, VarInt::from_u32(30_000));
 	}
 
 	#[test]

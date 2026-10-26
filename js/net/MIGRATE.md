@@ -4,6 +4,24 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Publication handles own announcement control
+
+`Origin.Producer.createBroadcast(path)` and `Origin.Prepared.publish()` return an `Origin.Publication`.
+Keep that handle for `announce(route)`, `unannounce()`, and `route`; fill tracks through its readonly `broadcast` producer.
+`Broadcast.Producer` no longer exposes announcement methods or route metadata, including standalone producers and `prepared.broadcast` before admission.
+Closing `publication.broadcast` still retracts and ends the broadcast. Keeping only that fill handle leaves the broadcast and its announcement live; releasing a publication reference does not retract it.
+
+```ts
+const publication = origin.createBroadcast(path);
+const broadcast = publication.broadcast;
+broadcast.createTrack("data");
+publication.announce({ epoch: Epoch.mint() });
+```
+
+### `Varint.sizeLeadingOnes` is gone
+
+Take the length of `Varint.encodeLeadingOnes(v)`.
+
 ### Published names refuse navigation segments
 
 Broadcast creation and route publication now refuse literal `.` and `..` segments, including segments in the producer's root.
@@ -20,15 +38,9 @@ Path normalization, relative references, and subscription paths retain their sem
 Drop the `await`. Every caller reads the same value: the old shared cursor let one caller take an update and leave another waiting forever.
 To wait for each newer one, keep a reader and follow its stream: `const reader = producer.subscribe();`, then `await reader.largest()`.
 
-### Stage a requested track before subscribers see it (#6111)
-
-`Track.Request.stage(info)` returns a `Track.Staged` whose `producer` writes while subscribers waiting on the request stay pending; `commit()` publishes it with everything written so far and returns the `Producer`.
-Disposing a `Staged` uncommitted (`using`, or `[Symbol.dispose]()`) rejects the request. `accept(info)` is unchanged and equals `stage(info).commit()`.
-
 ### A frameless group is not a successor (#6111)
 
 A group followed by a frameless one is judged stale against the next group that has a frame, where the frameless group used to count.
-`Track.Producer.dropGroups(start, end, error)` marks groups `[start, end)` the peer said it skipped; a reader holding one of them rejects with `error`.
 
 ### Priorities are signed (#6142)
 
@@ -47,9 +59,9 @@ Treat a rejected group read as the loss of that group and keep reading the track
 ### A claim answers by publishing (#5678)
 
 `Origin.Producer.dynamic(prefix)` takes no route: an application claim has no epoch, cost, or hops.
-Answer each `Origin.Request` with `using prepared = request.prepare(epoch)` (a fresh `Epoch.mint()` per output run), fill `prepared.broadcast`, then `prepared.publish()`, which announces the broadcast at the exact path under that epoch and returns its producer.
-Only `publish` announces it: `prepared.broadcast.announce()` throws.
-`Prepared.reject(err)` is replaced by idempotent `close()` and `[Symbol.dispose]()`; either refuses the unpublished answer as `Unroutable` and closes its broadcast. Closing that broadcast also refuses the request. `using` handles normal scope exit and exceptions; after `publish()`, disposal leaves the returned producer live.
+Answer each `Origin.Request` with `using prepared = request.prepare(epoch)` (a fresh `Epoch.mint()` per output run), fill `prepared.broadcast`, then `prepared.publish()`, which announces the broadcast at the exact path under that epoch and returns its publication handle.
+Only `publish` announces it: `prepared.broadcast` has no announcement methods.
+`Prepared.reject(err)` is replaced by idempotent `close()` and `[Symbol.dispose]()`; either refuses the unpublished answer as `Unroutable` and closes its broadcast. Closing that broadcast also refuses the request. `using` handles normal scope exit and exceptions; after `publish()`, disposal leaves the returned publication and its fill producer live.
 Use `request.reject(err)` to refuse before preparing. A retained, unclosed `Prepared` keeps its request pending; garbage collection provides no prompt cleanup guarantee.
 Construct a `Prepared` only with `request.prepare()`. Its constructor and the `Request.publisher`, `publishPrepared`, and `rejectPrepared` completion hooks are no longer public.
 `Dynamic.update` is no longer part of the public API, and `Request` has no `accept` (#6496): only the built-in sessions answer with a broadcast they already hold.
@@ -212,7 +224,7 @@ Call `close()` with no argument.
 
 ### Origins hold broadcasts (#2705, #3225)
 
-`connection.publish(path, broadcast)` is `origin.createBroadcast(path)` then `broadcast.announce()`.
+`connection.publish(path, broadcast)` is `origin.createBroadcast(path)` then `publication.announce()` on the returned handle.
 `connection.announced(prefix)` is `origin.announced(scope)`, yielding `{ prefix, kind, route }`.
 `ignoreSelf` is gone: reflected announces are always dropped.
 

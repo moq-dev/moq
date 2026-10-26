@@ -102,8 +102,7 @@ impl<'a> Streams<'a> {
 	/// The number of remotely initiated open streams of a certain directionality.
 	///
 	/// Includes remotely initiated streams, which have not been accepted via [`accept`](Self::accept).
-	/// These streams count against the respective concurrency limit reported by
-	/// [`Connection::max_concurrent_streams`](super::Connection::max_concurrent_streams).
+	/// These streams count against the configured concurrency limit.
 	pub fn remote_open_streams(&self, dir: Dir) -> u64 {
 		// total opened - total closed = total opened - ( total permitted - total permitted unclosed )
 		self.state.next_remote[dir as usize]
@@ -119,24 +118,9 @@ pub struct RecvStream<'a> {
 }
 
 impl RecvStream<'_> {
-	/// Read from the given recv stream
-	///
-	/// `max_length` limits the maximum size of the returned `Bytes` value; passing `usize::MAX`
-	/// will yield the best performance. `ordered` will make sure the returned chunk's offset will
-	/// have an offset exactly equal to the previously returned offset plus the previously returned
-	/// bytes' length.
-	///
-	/// Yields `Ok(None)` if the stream was finished. Otherwise, yields a segment of data and its
-	/// offset in the stream. If `ordered` is `false`, segments may be received in any order, and
-	/// the `Chunk`'s `offset` field can be used to determine ordering in the caller.
-	///
-	/// While most applications will prefer to consume stream data in order, unordered reads can
-	/// improve performance when packet loss occurs and data cannot be retransmitted before the flow
-	/// control window is filled. On any given stream, you can switch from ordered to unordered
-	/// reads, but ordered reads on streams that have seen previous unordered reads will return
-	/// `ReadError::IllegalOrderedRead`.
-	pub fn read(&mut self, ordered: bool) -> Result<Chunks<'_>, ReadableError> {
-		Chunks::new(self.id, ordered, self.state, self.pending)
+	/// Read the stream's next contiguous bytes without copying.
+	pub fn read(&mut self) -> Result<Chunks<'_>, ReadableError> {
+		Chunks::new(self.id, self.state, self.pending)
 	}
 
 	/// Stop accepting data on the given receive stream
@@ -545,21 +529,8 @@ impl SendGroups<'_> {
 	/// Open a send group at `priority`
 	pub fn open(&mut self, priority: i64) -> SendGroup {
 		SendGroup {
-			index: self.state.pending.open_group(priority, None),
+			index: self.state.pending.open_group(priority),
 			tag: self.state.tag,
-		}
-	}
-
-	/// Open a send group at `priority` in `domain`
-	///
-	/// # Panics
-	/// - when `domain` was opened on another connection
-	#[cfg(test)]
-	pub(crate) fn open_in(&mut self, priority: i64, domain: &SendDomain) -> SendGroup {
-		let tag = self.state.tag;
-		SendGroup {
-			index: self.state.pending.open_group(priority, Some(domain.index(tag))),
-			tag,
 		}
 	}
 
@@ -587,25 +558,6 @@ impl SendGroups<'_> {
 	/// - when `group` was opened on another connection
 	pub fn priority(&self, group: &SendGroup) -> i64 {
 		self.state.pending.group_priority(group.index(self.state.tag))
-	}
-
-	/// Open a domain, which gets an equal share of bytes with every other domain
-	#[cfg(test)]
-	pub(crate) fn open_domain(&mut self) -> SendDomain {
-		SendDomain {
-			index: self.state.pending.open_domain(),
-			tag: self.state.tag,
-		}
-	}
-
-	/// Release a domain; its groups keep their share until they are released
-	///
-	/// # Panics
-	/// - when `domain` was opened on another connection
-	#[cfg(test)]
-	pub(crate) fn close_domain(&mut self, domain: SendDomain) {
-		let index = domain.index(self.state.tag);
-		self.state.pending.close_domain(index);
 	}
 }
 
@@ -692,25 +644,6 @@ pub struct SendGroup {
 impl SendGroup {
 	fn index(&self, tag: ConnectionTag) -> usize {
 		assert_eq!(self.tag, tag, "send group used on another connection");
-		self.index
-	}
-}
-
-/// A domain of send groups, from [`SendGroups::open_domain`]
-///
-/// Release it with [`SendGroups::close_domain`] on the connection that opened it.
-#[cfg(test)]
-#[derive(Debug, PartialEq, Eq)]
-#[must_use = "a domain lives until it is closed"]
-pub(crate) struct SendDomain {
-	index: usize,
-	tag: ConnectionTag,
-}
-
-#[cfg(test)]
-impl SendDomain {
-	fn index(&self, tag: ConnectionTag) -> usize {
-		assert_eq!(self.tag, tag, "send domain used on another connection");
 		self.index
 	}
 }

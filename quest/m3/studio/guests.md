@@ -26,10 +26,6 @@ remove a participant from the scene.
   inside the studio was considered and dropped, because it brings NAT
   traversal and TURN for no capability the relay lacks.
 
-## Required
-
-- [The studio app](/quest/m3/studio/app.md) - the MoQ broadcast source guests reuse
-
 ## Related
 
 - [Hang contribution references](/quest/m2/contribution-ref.md) - a composed broadcast naming each guest feed

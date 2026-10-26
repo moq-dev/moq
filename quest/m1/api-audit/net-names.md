@@ -13,8 +13,7 @@ Decided 2026-10-23 (API audit follow-up, maintainer):
 - **Demand says `wanted`.** `group::Demand` drops
   `is_used`/`used`/`unused`/`poll_used`/`poll_unused` for `track::Demand`'s
   `wanted()` snapshot plus `wanted_changed()` (and its poll).
-  `broadcast::Demand` is deleted instead
-  ([net-exports](/quest/m1/api-audit/net-exports.md)).
+  `broadcast::Demand` is already deleted.
 - **Allocator.** `Session::bandwidth()` returns the send allocator beside
   `send_bandwidth()`/`recv_bandwidth()` estimates: rename it `allocator()`, and
   `Client::with_bandwidth` `with_allocator`.

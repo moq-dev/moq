@@ -423,18 +423,8 @@ async fn announced_route_keeps_static_cost_on_reannounce() {
 
 #[test]
 fn epoch_helpers_mint_parse_and_refuse() {
-	assert_eq!(
-		moq_epoch_time_ms("ffffffff-ffff-7fff-bfff-ffffffffffff".into()).unwrap(),
-		(1_u64 << 48) - 1
-	);
 	let epoch = moq_mint_epoch();
 	let parsed: moq_net::Epoch = epoch.parse().unwrap();
-	let unix_ms = parsed
-		.time()
-		.unwrap()
-		.saturating_duration_since(moq_clock::Wall::UNIX_EPOCH)
-		.as_millis();
-	assert_eq!(u128::from(moq_epoch_time_ms(epoch.clone()).unwrap()), unix_ms);
 	assert!(moq_mint_epoch() > epoch, "a later mint orders newer");
 
 	// The text the route carries round-trips, and anything but a UUIDv7 is refused.
@@ -448,10 +438,6 @@ fn epoch_helpers_mint_parse_and_refuse() {
 
 	let uuid_v4 = "6ba7b810-9dad-41d1-80b4-00c04fd430c8".to_string();
 	for bad in [uuid_v4, epoch.to_uppercase(), String::new()] {
-		assert!(matches!(
-			moq_epoch_time_ms(bad.clone()),
-			Err(MoqError::InvalidEpoch { .. })
-		));
 		let route = MoqAnnounceRoute {
 			epoch: Some(bad),
 			..Default::default()
@@ -1846,9 +1832,17 @@ async fn track_request_demand_survives_accept() {
 	demand.until_wanted().await.unwrap();
 	consumer.cancel();
 	demand.until_unwanted().await.unwrap();
+	// Released unfinished, the track aborts, and its watcher keeps the cause.
 	drop(track);
 	broadcast.close().unwrap();
-	assert!(matches!(demand.until_wanted().await, Err(MoqError::Closed)));
+	let Err(err) = demand.until_wanted().await else {
+		panic!("the watcher outlived its track");
+	};
+	assert_protocol(
+		&err,
+		crate::error::MoqErrorScope::Stream,
+		crate::error::MoqProtocolKind::Unroutable,
+	);
 }
 
 #[tokio::test]
@@ -4147,6 +4141,250 @@ async fn finish_serves_finished_tracks_until_close() {
 	broadcast.close().unwrap();
 	await_unannounced(&announced).await;
 	assert!(matches!(catalog.finish(), Err(MoqError::Closed)));
+}
+
+/// One raw and one media handle on `broadcast`, each with a subscriber reading it.
+async fn children(
+	broadcast: &MoqBroadcastProducer,
+) -> (
+	Arc<MoqTrackProducer>,
+	Arc<MoqMediaTrackProducer>,
+	[Arc<MoqTrackConsumer>; 2],
+) {
+	let consumer = broadcast.consume().unwrap();
+	let raw = broadcast.publish_track("raw".into(), Some(timed_info())).unwrap();
+	let media = MoqMediaTrackProducer::audio(
+		broadcast,
+		MoqMediaTarget::Named {
+			name: Some("media".into()),
+		},
+		audio_init(MoqAudioFormat::Opus, opus_head()),
+	)
+	.unwrap();
+	let readers = [
+		consumer.subscribe_track("raw".into(), None).await.unwrap(),
+		consumer.subscribe_track("media".into(), None).await.unwrap(),
+	];
+	(raw, media, readers)
+}
+
+/// Each reader ends with `Unroutable`, the cause of a publisher leaving.
+async fn assert_left<const N: usize>(readers: [Arc<MoqTrackConsumer>; N]) {
+	for reader in readers {
+		let read = tokio::time::timeout(TIMEOUT, reader.read_frame()).await;
+		let Err(err) = read.expect("the track carried on") else {
+			panic!("the track ended without a cause");
+		};
+		assert_protocol(
+			&err,
+			crate::error::MoqErrorScope::Stream,
+			crate::error::MoqProtocolKind::Unroutable,
+		);
+	}
+}
+
+/// Closing a broadcast ends every track handle still open on it the way a publisher leaving
+/// does, and the handles refuse later calls.
+#[tokio::test(start_paused = true)]
+async fn closing_a_broadcast_ends_its_open_tracks() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let (raw, media, readers) = children(&broadcast).await;
+	broadcast.close().unwrap();
+	assert_left(readers).await;
+
+	let frame = MoqFrame {
+		payload: b"late".to_vec(),
+		timestamp_us: Some(0),
+	};
+	assert!(matches!(raw.write_frame(frame.clone()), Err(MoqError::Closed)));
+	assert!(matches!(raw.finish(), Err(MoqError::Closed)));
+	assert!(matches!(media.write_frame(frame), Err(MoqError::Closed)));
+	assert!(matches!(media.finish(), Err(MoqError::Closed)));
+}
+
+/// A track handle released without a finish, as a garbage collector does, ends its track as a
+/// publisher leaving rather than a cause-less drop.
+#[tokio::test(start_paused = true)]
+async fn dropping_an_unfinished_track_handle_ends_it() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let (raw, media, readers) = children(&broadcast).await;
+	drop((raw, media));
+	assert_left(readers).await;
+	broadcast.close().unwrap();
+}
+
+/// A track finished before its broadcast closes ends cleanly, even once its handle is released.
+#[tokio::test(start_paused = true)]
+async fn finishing_before_close_ends_tracks_cleanly() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let (raw, media, readers) = children(&broadcast).await;
+	raw.finish().unwrap();
+	media.finish().unwrap();
+	drop(raw);
+	broadcast.close().unwrap();
+	for reader in readers {
+		let read = tokio::time::timeout(TIMEOUT, reader.read_frame()).await;
+		assert!(read.expect("the track carried on").unwrap().is_none());
+	}
+}
+
+/// One writer of each data kind on `broadcast`, each with a subscriber reading its track.
+async fn data_children(
+	broadcast: &MoqBroadcastProducer,
+) -> (
+	(
+		Arc<MoqJsonSnapshotProducer>,
+		Arc<MoqJsonStreamProducer>,
+		Arc<MoqJsonWindowProducer>,
+		Arc<MoqFlateSnapshotProducer>,
+		Arc<MoqFlateStreamProducer>,
+	),
+	[Arc<MoqTrackConsumer>; 5],
+) {
+	let consumer = broadcast.consume().unwrap();
+	let flate = || MoqFlateConfig {
+		compression: false,
+		mime: None,
+	};
+	let track = |name: &str| broadcast.publish_track(name.into(), None).unwrap();
+	let writers = (
+		MoqJsonSnapshotProducer::new(
+			broadcast,
+			&track("json-snapshot"),
+			MoqJsonSnapshotConfig {
+				deltas: true,
+				compression: false,
+			},
+		)
+		.unwrap(),
+		MoqJsonStreamProducer::new(
+			broadcast,
+			&track("json-stream"),
+			MoqJsonStreamConfig { compression: false },
+		)
+		.unwrap(),
+		MoqJsonWindowProducer::new(
+			&track("json-window"),
+			MoqJsonWindowConfig {
+				compression: false,
+				checkpoint_records: None,
+			},
+		)
+		.unwrap(),
+		MoqFlateSnapshotProducer::new(broadcast, &track("flate-snapshot"), flate()).unwrap(),
+		MoqFlateStreamProducer::new(broadcast, &track("flate-stream"), flate()).unwrap(),
+	);
+	let readers = [
+		consumer.subscribe_track("json-snapshot".into(), None).await.unwrap(),
+		consumer.subscribe_track("json-stream".into(), None).await.unwrap(),
+		consumer.subscribe_track("json-window".into(), None).await.unwrap(),
+		consumer.subscribe_track("flate-snapshot".into(), None).await.unwrap(),
+		consumer.subscribe_track("flate-stream".into(), None).await.unwrap(),
+	];
+	(writers, readers)
+}
+
+/// Closing a broadcast ends its data tracks the way it ends media ones, and their writers
+/// refuse later calls.
+#[tokio::test(start_paused = true)]
+async fn closing_a_broadcast_ends_its_open_data_tracks() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let ((json_snapshot, json_stream, json_window, flate_snapshot, flate_stream), readers) =
+		data_children(&broadcast).await;
+	broadcast.close().unwrap();
+	assert_left(readers).await;
+
+	assert!(matches!(json_snapshot.update("1".into(), None), Err(MoqError::Closed)));
+	assert!(matches!(json_stream.append("1".into(), None), Err(MoqError::Closed)));
+	assert!(matches!(json_window.push("1".into(), None), Err(MoqError::Closed)));
+	assert!(matches!(flate_snapshot.update(vec![1], None), Err(MoqError::Closed)));
+	assert!(matches!(flate_stream.append(vec![1], None), Err(MoqError::Closed)));
+}
+
+/// A data writer released without a finish ends its track as a publisher leaving.
+#[tokio::test(start_paused = true)]
+async fn dropping_an_unfinished_data_writer_ends_it() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let (writers, readers) = data_children(&broadcast).await;
+	drop(writers);
+	assert_left(readers).await;
+	broadcast.close().unwrap();
+}
+
+/// A track handle goes to one writer: while one is built from it, another is refused, and a
+/// construction that fails hands the handle back.
+#[tokio::test(start_paused = true)]
+async fn a_track_is_adopted_by_one_writer() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("json".into(), None).unwrap();
+	let config = || MoqJsonSnapshotConfig {
+		deltas: false,
+		compression: false,
+	};
+	let failed = track.adopt::<MoqJsonSnapshotProducer>(|_| {
+		assert!(matches!(
+			MoqJsonSnapshotProducer::new(&broadcast, &track, config()),
+			Err(MoqError::Closed)
+		));
+		Err(MoqError::JsonTrack {
+			reason: "refused".into(),
+		})
+	});
+	assert!(matches!(failed, Err(MoqError::JsonTrack { .. })));
+	let writer = MoqJsonSnapshotProducer::new(&broadcast, &track, config()).unwrap();
+	assert!(matches!(
+		MoqJsonSnapshotProducer::new(&broadcast, &track, config()),
+		Err(MoqError::Closed)
+	));
+	drop(writer);
+	broadcast.close().unwrap();
+}
+
+/// A media finish that fails ends the track with that failure, rather than dropping it without a
+/// cause.
+#[tokio::test(start_paused = true)]
+async fn a_failed_finish_ends_the_track_with_its_cause() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let consumer = broadcast.consume().unwrap();
+	let stream = MoqMediaTrackStreamProducer::video(
+		&broadcast,
+		MoqMediaTarget::Named {
+			name: Some("video".into()),
+		},
+		video_init(MoqVideoFormat::Avc3, h264_init()),
+	)
+	.unwrap();
+	let reader = consumer.subscribe_track("video".into(), None).await.unwrap();
+
+	// A delta slice with no keyframe before it, held by the splitter until the finish flushes it.
+	stream.write(vec![0, 0, 0, 1, 0x61, 0xe0, 0x12, 0x34]).unwrap();
+	assert!(matches!(stream.finish(), Err(MoqError::Codec { .. })));
+
+	let read = tokio::time::timeout(TIMEOUT, reader.read_frame()).await;
+	let Err(err) = read.expect("the track carried on") else {
+		panic!("the track ended without a cause");
+	};
+	assert_protocol(
+		&err,
+		crate::error::MoqErrorScope::Stream,
+		crate::error::MoqProtocolKind::Internal,
+	);
+	broadcast.close().unwrap();
+}
+
+/// A request accepted after its broadcast closed is refused, and its subscriber sees the
+/// publisher leave.
+#[tokio::test(start_paused = true)]
+async fn accepting_a_request_after_close_is_refused() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let dynamic = broadcast.dynamic().unwrap();
+	let consumer = broadcast.consume().unwrap();
+	let subscribe = tokio::spawn(async move { consumer.subscribe_track("late".into(), None).await });
+	let request = dynamic.requested_track().await.unwrap();
+	broadcast.close().unwrap();
+	assert!(matches!(request.accept(None), Err(MoqError::Closed)));
+	let reader = subscribe.await.unwrap().unwrap();
+	assert_left([reader]).await;
 }
 
 #[tokio::test]
@@ -7342,7 +7580,8 @@ async fn memory_shutdown_pair() -> (Arc<MoqSession>, Arc<MoqSession>) {
 	};
 	let accept = async {
 		let (session, driver) = moq_net::Server::new()
-			.with_origin(b.inner.clone())
+			.with_publisher(&b.inner)
+			.with_subscriber(b.inner.clone())
 			.with_versions(version.into())
 			.accept(moq_clock::Instant::now(), server)
 			.await

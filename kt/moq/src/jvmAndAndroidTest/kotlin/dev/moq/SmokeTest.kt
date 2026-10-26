@@ -40,7 +40,6 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.milliseconds
-import kotlin.time.Instant
 
 @Serializable
 private data class Status(val state: String)
@@ -583,7 +582,6 @@ class SmokeTest {
             val announced = origin.consume().announced(AnnounceConfig())
             origin.createBroadcast("epoch").use { broadcast ->
                 val first = mintEpoch()
-                assertEquals(Instant.fromEpochMilliseconds(1_700_000_000_000), epochTime("018bcfe5-6800-7000-8000-000000000000"))
                 broadcast.announce(AnnounceRoute(epoch = first))
                 val start = assertIs<AnnounceEventStart>(announced.nextRoute())
                 assertEquals(first, start.announce.route.epoch)
@@ -593,7 +591,7 @@ class SmokeTest {
                 val restart = assertIs<AnnounceEventRestart>(announced.nextRoute())
                 assertEquals(second, restart.announce.route.epoch)
 
-                assertFailsWith<MoqException> { epochTime("not-an-epoch") }
+                assertFailsWith<MoqException> { broadcast.announce(AnnounceRoute(epoch = "not-an-epoch")) }
             }
         }
     }

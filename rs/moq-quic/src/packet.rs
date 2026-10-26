@@ -13,7 +13,7 @@ use crate::{
 ///
 /// Due to packet number encryption, it is impossible to fully decode a header
 /// (which includes a variable-length packet number) without crypto context.
-/// The crypto context (represented by the `Crypto` type in Quinn) is usually
+/// The crypto context is usually
 /// part of the `Connection`, or can be derived from the destination CID for
 /// Initial packets.
 ///
@@ -28,7 +28,6 @@ pub struct PartialDecode {
 	buf: io::Cursor<BytesMut>,
 }
 
-#[expect(clippy::len_without_is_empty, reason = "a partially decoded packet is never empty")]
 impl PartialDecode {
 	/// Begin decoding a QUIC packet from `bytes`, returning any trailing data not part of that packet
 	pub fn new(
@@ -882,27 +881,6 @@ pub enum SpaceId {
 impl SpaceId {
 	pub(crate) fn iter() -> impl Iterator<Item = Self> {
 		[Self::Initial, Self::Handshake, Self::Data].iter().cloned()
-	}
-}
-
-impl From<SpaceId> for moq_congestion::SpaceId {
-	fn from(space: SpaceId) -> Self {
-		match space {
-			SpaceId::Initial => Self::Initial,
-			SpaceId::Handshake => Self::Handshake,
-			SpaceId::Data => Self::Data,
-		}
-	}
-}
-
-#[cfg(test)]
-impl From<moq_congestion::SpaceId> for SpaceId {
-	fn from(space: moq_congestion::SpaceId) -> Self {
-		match space {
-			moq_congestion::SpaceId::Initial => Self::Initial,
-			moq_congestion::SpaceId::Handshake => Self::Handshake,
-			moq_congestion::SpaceId::Data => Self::Data,
-		}
 	}
 }
 

@@ -331,8 +331,9 @@ test("a resumed fork shares an on-demand track request", async () => {
 test("a lagging same-epoch replica resumes from one publisher's bytes exactly once", async () => {
 	const { clock, installed } = manual();
 	const publisher = new Producer();
-	const original = publisher.createBroadcast(path);
-	original.announce({ epoch: EPOCH });
+	const originalPublication = publisher.createBroadcast(path);
+	const original = originalPublication.broadcast;
+	originalPublication.announce({ epoch: EPOCH });
 	const source = original.createTrack("seq");
 	const origin = new Producer();
 
@@ -1022,7 +1023,7 @@ for (const fails of [true, false]) {
 		expect(tb.producer.demand().wanted.peek()).not.toBeUndefined();
 
 		const cut = new StreamError(StreamCode(70), { message: "cut" });
-		tb.producer.dropGroups(0, 1, cut);
+		hooks.dropTrackGroups(tb.producer, 0, 1, cut);
 		await expect(read).rejects.toBe(cut);
 
 		sub.close();
@@ -1052,9 +1053,9 @@ test("a resumed reader reports what its serving copy gives up, once, and never s
 	ta.write(0);
 	expect(recvDisposition(sub)).toBe(0);
 	// A route failing is no verdict: another route may still deliver the group.
-	ta.producer.dropGroups(1, 2, new StreamError(StreamCode.SessionClosed));
+	hooks.dropTrackGroups(ta.producer, 1, 2, new StreamError(StreamCode.SessionClosed));
 	expect(recvDisposition(sub)).toBe("idle");
-	ta.producer.dropGroups(2, 4, new StreamError(StreamCode(70), { message: "cut" }));
+	hooks.dropTrackGroups(ta.producer, 2, 4, new StreamError(StreamCode(70), { message: "cut" }));
 	expect(recvDisposition(sub)).toEqual([2, 4, 70]);
 	expect(recvDisposition(sub)).toBe("idle");
 	// Re-created under a run already reported dropped.
@@ -1109,7 +1110,7 @@ test("a drop waits while a copy the serving one replaced may still deliver it", 
 		front.serve(b.consume());
 		await settle();
 		// Only the new route gave groups 1 and 2 up; the old one is not yet bounded.
-		tb.producer.dropGroups(1, 3, new StreamError(StreamCode(70), { message: "cut" }));
+		hooks.dropTrackGroups(tb.producer, 1, 3, new StreamError(StreamCode(70), { message: "cut" }));
 		expect(recvDisposition(sub)).toBe("idle");
 		ta.write(1);
 		expect(recvDisposition(sub)).toBe(1);
@@ -1147,7 +1148,7 @@ test("a drop a replaced route held back is no verdict on the route serving next"
 	front.serve(b.consume());
 	await settle();
 	// Held back: the copy b replaced may still deliver group 1.
-	tb.producer.dropGroups(1, 2, new StreamError(StreamCode(70), { message: "cut" }));
+	hooks.dropTrackGroups(tb.producer, 1, 2, new StreamError(StreamCode(70), { message: "cut" }));
 	expect(recvDisposition(sub)).toBe("idle");
 	front.serve(c.consume());
 	await settle();
@@ -1175,7 +1176,7 @@ test("a front serving another front reports the inner serving route's drop", asy
 	const sub = outer.consumer.track("seq").subscribe();
 	ta.write(0);
 	expect(recvDisposition(sub)).toBe(0);
-	ta.producer.dropGroups(1, 3, new StreamError(StreamCode(70), { message: "cut" }));
+	hooks.dropTrackGroups(ta.producer, 1, 3, new StreamError(StreamCode(70), { message: "cut" }));
 	expect(recvDisposition(sub)).toEqual([1, 3, 70]);
 	expect(recvDisposition(sub)).toBe("idle");
 	// Re-created under a run already reported dropped.
@@ -1959,7 +1960,7 @@ test.each(["lands", "dropped", "expired"])(
 			expect(drain(sub)).toEqual([]);
 			expect(ta.producer.demand().wanted.peek()).toBeDefined();
 
-			if (outcome === "dropped") ta.producer.dropGroups(1, 2, new NotFound("group"));
+			if (outcome === "dropped") hooks.dropTrackGroups(ta.producer, 1, 2, new NotFound("group"));
 			if (outcome === "expired") await clock.advance(Nano.fromMilli(SECOND));
 			if (outcome !== "lands") {
 				// The groups drained above are released once their close settles.

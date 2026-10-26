@@ -22,11 +22,11 @@ use criterion::{
 	measurement::{Measurement, ValueFormatter, WallTime},
 };
 use moq_clock::Instant;
-use moq_congestion::{Controller, ControllerFactory, ControllerMetrics};
+use moq_congestion::{Ack, Ce, Controller, ControllerFactory, ControllerMetrics, Init, Loss, Packet, Sent};
 use moq_quic::{
 	ClientConfig, Connection, ConnectionHandle, ConnectionId, ConnectionIdGenerator, DatagramEvent, Endpoint,
 	EndpointConfig, Event, LeaseError, RandomConnectionIdGenerator, ReadError, ServerConfig, StreamEvent, StreamId,
-	TransportConfig, VarInt, coding::Codec, fuzz::Plaintext,
+	TransportConfig, VarInt, fuzz::Plaintext,
 };
 
 /// The most datagrams one `poll_transmit` may batch, as a GSO-capable socket would take.
@@ -226,7 +226,7 @@ fn drain(conn: &mut Connection, id: StreamId, sink: Sink, received: &mut Receive
 		return;
 	}
 	// A stream already stopped, finished, or reset is gone.
-	let Ok(mut chunks) = stream.read(true) else {
+	let Ok(mut chunks) = stream.read() else {
 		return;
 	};
 	loop {
@@ -665,22 +665,24 @@ struct Unlimited {
 }
 
 impl Controller for Unlimited {
-	fn on_congestion_event(
-		&mut self,
-		_now: Instant,
-		_sent: Instant,
-		_is_persistent_congestion: bool,
-		_is_ecn: bool,
-		_lost_bytes: u64,
-		_largest_lost: u64,
-		_space: moq_congestion::SpaceId,
-	) {
+	fn on_sent(&mut self, _sent: Sent) -> Packet {
+		Packet::default()
 	}
+
+	fn on_ack(&mut self, _ack: Ack<'_>) {}
+
+	fn on_loss(&mut self, _loss: Loss<'_>) {}
+
+	fn on_ce(&mut self, _ce: Ce) {}
 
 	fn on_mtu_update(&mut self, _new_mtu: u16) {}
 
 	fn window(&self) -> u64 {
 		WINDOW
+	}
+
+	fn pace(&mut self, _now: Instant, _bytes: u64) -> Option<Instant> {
+		None
 	}
 
 	fn metrics(&self) -> ControllerMetrics {
@@ -698,17 +700,13 @@ impl Controller for Unlimited {
 		Box::new(*self)
 	}
 
-	fn initial_window(&self) -> u64 {
-		WINDOW
-	}
-
 	fn into_any(self: Box<Self>) -> Box<dyn Any> {
 		self
 	}
 }
 
 impl ControllerFactory for Unlimited {
-	fn build(self: Arc<Self>, _now: Instant, _current_mtu: u16) -> Box<dyn Controller> {
+	fn build(self: Arc<Self>, _init: Init) -> Box<dyn Controller> {
 		Box::new(*self)
 	}
 }
