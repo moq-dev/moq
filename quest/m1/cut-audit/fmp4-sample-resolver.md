@@ -22,7 +22,9 @@ only the output amplification does not close this parser allocation gap.
 [kixelated/mp4-atom#248](https://github.com/kixelated/mp4-atom/pull/248)
 proposes refusing nonempty field-less runs on decode and encode. An alternative is a counted representation of identical
 entries, preserving valid files while breaking the `Trun.entries` API.
-Review that compatibility choice before releasing. Do not add another
+The refusal proposal's CI breaks the existing AV1, BBB, and ESDS fixtures
+(380 pass, three fail), so the recommendation is the counted representation,
+not dropping those valid inputs. Review the API shape before releasing. Do not add another
 sample-count cap or duplicate the atom parser in moq-mux.
 
 After adopting the release, run the fMP4 tests and interleaved container
