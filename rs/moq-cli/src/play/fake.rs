@@ -85,6 +85,10 @@ impl Output for Recorder {
 	fn send(&self, event: Event) {
 		self.state.lock().unwrap().events.push(event);
 	}
+
+	async fn render(&self) -> moq_video::Output {
+		moq_video::Output::Cpu
+	}
 }
 
 impl Speaker for Recorder {

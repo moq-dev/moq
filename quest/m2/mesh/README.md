@@ -29,8 +29,8 @@ Decided 2026-10-25 with the maintainer (planning interview):
   discovery. No ICE, STUN, or hole punching; the [P2P](/quest/m2/p2p/README.md)
   line is separate.
 - An endpoint ID is a persistent Ed25519 device key, iroh-style. It is not the
-  [routing identity](/quest/m1/cluster-routing/stamp.md), which each
-  session's receiver stamps.
+  [routing identity](/quest/m1/cluster-routing/routes.md), which each
+  process declares fresh.
 - Addressing is announcement: each node publishes under `mesh/<id>/...`, and
   reaching an ID is subscribing there. There is no separate directory.
 - The token is the binding: enrollment proves the device key, then the

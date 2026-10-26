@@ -18,6 +18,9 @@ pub(super) trait Output: Clone + Send + Sync + 'static {
 
 	/// Tell the window something changed. Dropped if the window is gone.
 	fn send(&self, event: Event);
+
+	/// What to decode video as for the window's renderer, once its device is open.
+	fn render(&self) -> impl Future<Output = moq_video::Output> + Send;
 }
 
 /// An open speaker, closed once it and every sink from it are dropped.

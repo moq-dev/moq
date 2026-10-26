@@ -686,10 +686,11 @@ impl Controller for Unlimited {
 	}
 
 	fn metrics(&self) -> ControllerMetrics {
-		let mut metrics = ControllerMetrics::default();
-		metrics.congestion_window = WINDOW;
-		metrics.probe_inflight = self.probe.then_some(WINDOW);
-		metrics
+		ControllerMetrics {
+			congestion_window: WINDOW,
+			probe_inflight: self.probe.then_some(WINDOW),
+			..Default::default()
+		}
 	}
 
 	fn probes(&self) -> bool {

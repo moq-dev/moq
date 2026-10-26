@@ -100,6 +100,18 @@ with Opus stereo audio, under the `--broadcast` path. Timestamps come from the
 studio's own clock, so a source that stalls repeats its last picture instead of
 holding up the stream.
 
-Video is only encoded while someone watches it. Each frame is read back from
-the GPU to the CPU for the encoder, which the Output panel counts; frames the
-encoder cannot keep up with are dropped there rather than delaying the stream.
+Video is only encoded while someone watches it. A hardware encoder that reads
+the GPU (NVENC on Linux, VideoToolbox on macOS, Media Foundation on Windows)
+takes each frame there when it can read the GPU the studio draws on. When it
+cannot, such as NVENC while the studio draws on a laptop's integrated GPU, the
+studio passes over it for an encoder that reads each frame back to the CPU
+(the opt-in `vaapi` or `openh264` features), which the Output panel counts.
+Frames the encoder cannot keep up with are dropped rather than delaying the
+stream.
+
+Sources make the opposite trip. A frame already on the GPU is drawn where it
+lies: PipeWire camera and VA-API decode DMA-BUFs on Linux, given a Vulkan
+driver that imports them, and NV12 capture and VideoToolbox decode surfaces on
+macOS. Every other source, every source on Windows or on a GPU that cannot
+import, and every still image delivers its frames from the CPU, which the
+compositor uploads.

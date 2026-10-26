@@ -88,7 +88,7 @@ bun install --frozen-lockfile
 
 cd "$HERE"
 # The in-memory paths share Chromium installation and artifact retention with this lane.
-for benchmark in frames drift; do
+for benchmark in frames drift ledger; do
     bun micro.ts --bench "$benchmark" --rounds 1 --out "$HARNESS_RUN/$benchmark.json" \
         current="$WORKSPACE" aa="$WORKSPACE"
 done
