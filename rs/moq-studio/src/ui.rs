@@ -519,12 +519,19 @@ impl Panels {
 			ui.label("Drawn");
 			ui.label(format!("{} frames", count(&stats.rendered)));
 			ui.end_row();
-			ui.label("Read back to the CPU");
+			ui.label("Handed to the encoder");
 			ui.label(format!(
 				"{} frames, last {}",
-				count(&stats.read_back),
-				millis(&stats.readback_us)
+				count(&stats.copied),
+				millis(&stats.copy_us)
 			));
+			ui.end_row();
+			ui.label("Read back to the CPU");
+			ui.label(if stats.zero_copy.load(Ordering::Relaxed) {
+				"none; the encoder reads the GPU".to_string()
+			} else {
+				format!("{} frames", count(&stats.read_back))
+			});
 			ui.end_row();
 			ui.label("Dropped");
 			ui.label(format!("{} frames", count(&stats.dropped)));
