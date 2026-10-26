@@ -12,32 +12,47 @@ moq-net edit, and a lockfile bump, before and after.
 ## Plan
 
 Decided with the maintainer on 2026-10-26, from kixelated/rust2's
-[Nix build benchmark](https://github.com/kixelated/rust2/pull/63). That benchmark
-measured billions of instructions across a clean build, a second package, an edit
-and a lockfile bump:
+[Nix build benchmark](https://github.com/kixelated/rust2/pull/63), in billions of
+instructions. Each scenario builds moq-relay, except the second package (moq-cli
+after moq-relay); the total sums the four.
 
-| | crane | crane with mbx | crate2nix | cargo with mbx |
-| --- | ---: | ---: | ---: | ---: |
-| total | 14,756 | 9,894 | 12,461 | 9,692 |
-| edit | 1,365 | 1,351 | 1,008 | 1,276 |
-| lockfile bump | 3,681 | 1,123 | 672 | 1,113 |
+| | crane | crane with mbx | crate2nix | crate2nix, 1 codegen unit | cargo with mbx |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| clean | 3,681 | 3,377 | 4,736 | 3,695 | 3,378 |
+| second package | 5,926 | 3,945 | 5,951 | 4,902 | 3,924 |
+| moq-net edit | 1,365 | 1,351 | 1,008 | 753 | 1,276 |
+| lockfile bump | 3,681 | 1,123 | 672 | 496 | 1,113 |
+| total | 14,756 | 9,894 | 12,461 | 9,846 | 9,692 |
 
-On the builds CI repeats, crate2nix was cheapest, and it caches through the Nix store
-with no builder configuration. crane with mbx needs `extra-sandbox-paths` and a
-persistent store on every builder.
+Neither crate2nix column matches moq's `[profile.release]`, which every other
+column builds with: `codegen-units = 1` and fat LTO. buildRustCrate reads no Cargo
+profile. The benchmark gave it 16 codegen units, and the separate run used
+buildRustCrate's default of 1; neither ran LTO, which every crane and cargo build
+pays at the final link, edits and bumps included. The 29% cold-build penalty
+vanishes at one codegen unit, so it came from that mismatch.
 
+crate2nix was still cheapest on the edits and lockfile bumps CI repeats, and it
+caches through the Nix store with no builder configuration. crane with mbx needs
+`extra-sandbox-paths` and a persistent store on every builder.
+
+- **Match the release profile first.** crate2nix's builds match `[profile.release]`
+  before any comparison: one codegen unit, fat LTO on the final link, stripped
+  symbols, the per-package overrides, and cargo's opt-level 0 for build scripts and
+  proc macros where buildRustCrate uses 3. The before and after numbers come from
+  those matched builds; LTO will raise crate2nix's edit and bump costs above the
+  table's.
 - **Explore first.** Prototype crate2nix on moq-relay and moq-cli before switching
-  every package, and keep crane until the numbers hold on moq's own CI.
+  every package, and keep crane until the matched numbers hold on moq's own CI.
 - **No Nix required.** The generated `Cargo.nix` is committed so Nix users build
-  without generating it. CI regenerates it and fails when it is stale. Prefer
-  regenerating it automatically, for example a CI job that commits the update on a
-  Renovate or lockfile PR, so a contributor without Nix never has to.
-- **Cold build.** crate2nix builds build scripts and proc macros at opt-level 3,
-  where cargo uses 0, which makes a clean build 29% dearer. Match cargo.
+  without generating it. Any change to a manifest, the lockfile, or a crate's
+  targets can make it stale, so CI regenerates it on every PR and fails when it
+  differs. A bot commits the regenerated file to the PR's branch whenever it can
+  push there, Renovate's included; for a fork that blocks maintainer edits, the
+  failure carries the update as a patch to `git apply`. The PR's manifests are
+  untrusted, so generation runs without write access, and the job that pushes
+  takes only `Cargo.nix` from it.
 - **Flags.** Move moq-relay's `-C force-frame-pointers=yes` into
   `.cargo/config.toml` so Nix and cargo builds use the same flags; measure aarch64.
-- **Also measure** `codegen-units = 1` for the release profile, which cut crate2nix's
-  builds 20% to 45% in the benchmark.
 - Replaces the crane layering quest, which only improved the second-package case:
   with crane, a lockfile bump still rebuilds every dependency.
 

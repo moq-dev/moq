@@ -91,13 +91,12 @@ Decided 2026-10-25 (maintainer): across moq's many CI and release builds
 compiles once and is reused through the cache, and each run builds and tests
 only what its diff can affect, measured in runner CPU time. Wall clock for its
 own sake and replacing cargo are non-goals. mbx already caches each compilation,
-so the work is making builds identical enough to hit it (one crane dependency
-layer, flags in `.cargo/config.toml`, cargo-hakari), and auditing the package
-selection `just ci` already does. Nix builds run sandboxed and cannot reach R2:
-kixelated/rust2's
-[Nix build benchmark](https://github.com/kixelated/rust2/blob/main/quest/m1/bench-nix.md)
-decides between crane with mbx, crate2nix, and cargo with mbx after the crane
-fixes land.
+so the work is making builds identical enough to hit it (flags in
+`.cargo/config.toml`, cargo-hakari), and auditing the package selection `just ci`
+already does. Nix builds run sandboxed and cannot reach R2; decided 2026-10-26
+from kixelated/rust2's
+[Nix build benchmark](https://github.com/kixelated/rust2/pull/63), they move to
+crate2nix, whose per-crate derivations `nix.moq.dev` caches.
 
 Decided 2026-10-25 (maintainer), from a profile of moq-net: monomorphized
 generics dominate its build (53% of the library's CPU), and its test target
