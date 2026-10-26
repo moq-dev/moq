@@ -191,6 +191,12 @@ impl Snapshot {
 	pub fn finish(mut self) -> crate::Result<()> {
 		Ok(self.inner.finish()?)
 	}
+
+	/// Abort the track with `err`, which consumers see in place of a clean end, and retire its
+	/// catalog entry.
+	pub fn abort(self, err: moq_net::Error) -> crate::Result<()> {
+		Ok(self.inner.abort(err)?)
+	}
 }
 
 /// Publishes an append-log binary track, advertised in the catalog for as long as this handle lives.
@@ -279,6 +285,12 @@ impl Stream {
 	/// dropping the handle without finishing retires the entry too.
 	pub fn finish(mut self) -> crate::Result<()> {
 		Ok(self.inner.finish()?)
+	}
+
+	/// Abort the track with `err`, which consumers see in place of a clean end, and retire its
+	/// catalog entry.
+	pub fn abort(self, err: moq_net::Error) -> crate::Result<()> {
+		Ok(self.inner.abort(err)?)
 	}
 }
 

@@ -1157,11 +1157,6 @@ impl Producer {
 		self
 	}
 
-	/// The group's header, as it was created.
-	pub fn info(&self) -> Info {
-		self.handle.info
-	}
-
 	/// The parent track's timescale, or `None` when it declared no timeline.
 	pub fn timescale(&self) -> Option<Timescale> {
 		self.handle.track.timescale
@@ -4607,13 +4602,6 @@ mod test {
 		assert!(pool.used() <= before);
 	}
 
-	/// A writer names the group it fills.
-	#[test]
-	fn info_names_the_group() {
-		let producer = Info { sequence: 7 }.produce();
-		assert_eq!(producer.info(), Info { sequence: 7 });
-	}
-
 	/// An open frame still reads its group: which one it is, how many frames it holds,
 	/// and whether anyone reads it. Finishing the frame hands the same writer back.
 	#[test]
@@ -4625,7 +4613,7 @@ mod test {
 
 		let mut frame = producer.create_frame(sized(1)).unwrap();
 		let group = frame.group();
-		assert_eq!(group.info().sequence, 3);
+		assert_eq!(group.sequence, 3);
 		assert_eq!(group.frame_count(), 2, "the open frame counts");
 		assert!(group.demand().is_used());
 		assert!(group.poll_closed(&kio::Waiter::noop()).is_pending());
