@@ -3098,57 +3098,100 @@ test("draft-22: an absolute subscribe is no join", async () => {
  * StartGroup=1 fill for the head already published. The two must meet exactly, so the head
  * arrives once, on the fetch stream, and the subscription picks up at the next object.
  */
-test("draft-22: a fill serves the current group's head on a fetch stream", async () => {
+test.each(["nextObject", "unfiltered"] as const)(
+	"draft-22: a %s fill serves the current group head once",
+	async (kind) => {
+		const fx = fixture();
+		const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+
+		writeGroup(track, 1);
+		const group = track.appendGroup();
+		for (let i = 0; i < 2; i++) {
+			group.writeFrame({ payload: new TextEncoder().encode(`1.${i}`), timestamp: Timestamp.now() });
+		}
+
+		const { client, ok } = await runSubscribe(
+			fx,
+			new Subscribe({
+				requestId: 7n,
+				trackNamespace: Path.from("test"),
+				trackName: "video",
+				subscriberPriority: 0,
+				filter: { kind },
+				fill: { filter: { kind: "relative", groups: 1n }, rangeFilters: false },
+			}),
+		);
+
+		try {
+			// A fill-requesting subscriber sizes its backfill against this.
+			expect(ok.largest).toEqual({ groupId: 1n, objectId: 1n });
+
+			const fill = await nextUni(fx.uni);
+			if (!fill) throw new Error("no fetch stream for the requested fill");
+			expect(await readFill(fill)).toEqual({
+				requestId: 7n,
+				objects: [
+					{ group: 1, id: 0, payload: "1.0" },
+					{ group: 1, id: 1, payload: "1.1" },
+				],
+				reset: undefined,
+			});
+
+			// Everything past the snapshot belongs to the subscription, not the fill.
+			group.writeFrame({ payload: new TextEncoder().encode("1.2"), timestamp: Timestamp.now() });
+			group.close();
+
+			const live = await nextUni(fx.uni);
+			if (!live) throw new Error("the subscription never served the live tail");
+			expect(await readGroup(live)).toEqual({
+				sequence: 1,
+				firstObject: false,
+				endOfGroup: true,
+				objects: [{ id: 2, payload: "1.2" }],
+			});
+		} finally {
+			fx.close();
+			client.close();
+		}
+	},
+);
+
+test("draft-22: a fill never rewinds an absolute live join", async () => {
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
-
-	const group = track.appendGroup();
-	for (let i = 0; i < 2; i++) {
-		group.writeFrame({ payload: new TextEncoder().encode(`0.${i}`), timestamp: Timestamp.now() });
-	}
-
-	const { client, ok } = await runSubscribe(
+	writeGroup(track, 2);
+	const { client } = await runSubscribe(
 		fx,
 		new Subscribe({
 			requestId: 7n,
 			trackNamespace: Path.from("test"),
 			trackName: "video",
 			subscriberPriority: 0,
-			filter: { kind: "nextObject" },
+			filter: { kind: "absolute", startGroup: 1n, startObject: 0n },
 			fill: { filter: { kind: "relative", groups: 1n }, rangeFilters: false },
 		}),
 	);
-
 	try {
-		// A fill-requesting subscriber sizes its backfill against this.
-		expect(ok.largest).toEqual({ groupId: 0n, objectId: 1n });
-
 		const fill = await nextUni(fx.uni);
-		if (!fill) throw new Error("no fetch stream for the requested fill");
-		expect(await readFill(fill)).toEqual({
-			requestId: 7n,
-			objects: [
-				{ group: 0, id: 0, payload: "0.0" },
-				{ group: 0, id: 1, payload: "0.1" },
-			],
-			reset: undefined,
-		});
-
-		// Everything past the snapshot belongs to the subscription, not the fill.
-		group.writeFrame({ payload: new TextEncoder().encode("0.2"), timestamp: Timestamp.now() });
+		if (!fill) throw new Error("missing fill before the live join");
+		expect((await readFill(fill)).objects).toEqual([
+			{ group: 0, id: 0, payload: "0.0" },
+			{ group: 0, id: 1, payload: "0.1" },
+		]);
+		const group = track.appendGroup();
+		group.writeFrame({ payload: new TextEncoder().encode("1.0"), timestamp: Timestamp.now() });
 		group.close();
-
 		const live = await nextUni(fx.uni);
-		if (!live) throw new Error("the subscription never served the live tail");
+		if (!live) throw new Error("missing live group after the fill");
 		expect(await readGroup(live)).toEqual({
-			sequence: 0,
-			firstObject: false,
+			sequence: 1,
+			firstObject: true,
 			endOfGroup: true,
-			objects: [{ id: 2, payload: "0.2" }],
+			objects: [{ id: 0, payload: "1.0" }],
 		});
 	} finally {
-		fx.close();
 		client.close();
+		fx.close();
 	}
 });
 
