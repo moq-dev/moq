@@ -610,7 +610,8 @@ mod tests {
 		let clock = manual();
 		refused_before_setup(
 			|_| {
-				clock.advance(Duration::from_secs(3001));
+				// Expire the grant before the client's independent SETUP deadline.
+				clock.advance(Duration::from_secs(2));
 			},
 			SessionError::Expired,
 		)
@@ -620,7 +621,8 @@ mod tests {
 	/// Admit a session, apply `change` to its grant before protocol setup, and check
 	/// that setup refuses it as a failure.
 	async fn refused_before_setup(change: impl FnOnce(&mut moq_auth::Grant), expected: SessionError) {
-		let (producer, consumer) = lease::Producer::new(grant("a/**", 3000));
+		let initial = grant("a/**", 1);
+		let (producer, consumer) = lease::Producer::new(initial.clone());
 		let registry = moq_net::stats::Registry::new(Default::default());
 		let stats = registry.tier(moq_net::stats::Tier::default()).session("room");
 		let lease = super::super::Lease::new("/room", consumer).with_stats(stats.clone());
@@ -642,7 +644,7 @@ mod tests {
 				.accept_request(now, server)
 				.await
 				.unwrap();
-			let mut changed = grant("a/**", 3000);
+			let mut changed = initial;
 			change(&mut changed);
 			producer.update(changed);
 			let error = lease
@@ -654,13 +656,19 @@ mod tests {
 		};
 		let ((session, driver), ()) = tokio::join!(connecting, refusing);
 		let error = driver.await.unwrap();
-		assert_eq!(error.session(), Some(&expected));
+		assert_eq!(error.session(), Some(&expected), "{error:?}");
 		drop(session);
 		drop(stats);
 		let presence = registry.snapshot().sessions()[0].1;
 		assert_eq!(presence.sessions_ended, 1);
+		let failure = if expected == SessionError::Expired {
+			moq_net::stats::Failure::Expired
+		} else {
+			moq_net::stats::Failure::Application
+		};
 		assert_eq!(
-			presence.sessions_failed.application, 1,
+			presence.sessions_failed.count(failure),
+			1,
 			"an admitted session refused before SETUP is a failure"
 		);
 	}
