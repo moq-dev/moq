@@ -777,7 +777,8 @@ export class Publisher {
 					? fillRange(msg.fill, msg.filter, edge.largest, order)
 					: undefined;
 			const requested = subscribeRange(msg, edge, version);
-			const range = afterFill(requested, fill, edge);
+			// A copy, since an update moves the cursor in place and must not move the bounds too.
+			const range = { ...afterFill(requested, fill, edge) };
 			// What the subscriber asked for, which only a narrowing changes: the fill's split
 			// moves the cursor alone, so it never gives up a stream still in range.
 			const bounds = new Signal(requested);
@@ -946,11 +947,14 @@ export class Publisher {
 							: undefined;
 					if (params.subscriptionFilter !== undefined || selected) {
 						// An update's unfiltered range explicitly lowers the floor to zero;
-						// an initial unfiltered subscription still joins the live group.
+						// an initial unfiltered subscription still joins the live group. A
+						// fill-only update keeps the range it already has.
 						const requested: ServeRange =
-							msg.filter.kind === "unfiltered"
-								? { start: { group: 0n, object: 0n } }
-								: filterRange(msg.filter, snapshot);
+							params.subscriptionFilter === undefined
+								? bounds.peek()
+								: msg.filter.kind === "unfiltered"
+									? { start: { group: 0n, object: 0n } }
+									: filterRange(msg.filter, snapshot);
 						const tail = afterFill(requested, selected, snapshot);
 						range.start = tail.start;
 						range.end = tail.end;
