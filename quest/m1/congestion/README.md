@@ -38,6 +38,5 @@ moq commit access to noq's BBR3 or an external crate:
 - [noq adopts moq-congestion](/quest/m2/noq-congestion.md) - the external consumer, after the m1 cut publishes the crate
 - [Realtime uplink congestion control](/quest/m2/quic-realtime/README.md) - GCC, SCReAM, and the BBR3 delay bound
 - [BBR media study](/quest/m2/quic-bbr-study.md) - BBR3 behavior changes measured against media traffic
-- [Skip ProbeRTT after a near-floor RTT](/quest/m1/bbr-probe-rtt-skip.md) - BBR3 behavior change for app-limited media
 - [L4S on the backbone](/quest/m3/quic-ecn.md) - an ECT(1) codepoint choice and a scalable CE response
 - [Careful resume on reconnect](/quest/m3/quic-careful-resume.md) - seeding a controller from a previous connection

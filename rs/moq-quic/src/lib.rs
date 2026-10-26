@@ -1,11 +1,10 @@
 //! Low-level protocol logic for the QUIC protocol
 //!
-//! moq-quic contains a fully deterministic implementation of QUIC protocol logic. It contains
-//! no networking code and does not get any relevant timestamps from the operating system. Most
-//! users can use the Tokio driver in `moq_tokio::quic::driver` instead.
+//! moq-quic has no networking code: the caller supplies transport timestamps, and address
+//! validation reads the ambient `moq-clock` wall time. Most applications use the Tokio driver
+//! in `moq_tokio::quic::driver` instead.
 //!
-//! The moq-quic API might be of interest if you want to use it from a C or C++ project
-//! through C bindings or if you want to use a different event loop than the one tokio provides.
+//! Use `moq_tokio::quic::driver` for Tokio, or drive this state machine from another runtime.
 //!
 //! The most important types are `Endpoint`, which conceptually represents the protocol state for
 //! a single socket and mostly manages configuration and dispatches incoming datagrams to the
@@ -22,7 +21,7 @@ use std::{
 };
 
 mod cid_queue;
-pub mod coding;
+mod coding;
 mod constant_time;
 mod entropy;
 // Not part of the public API: compiled only for the crate's own tests, the benches, and
@@ -39,7 +38,7 @@ mod varint;
 pub use varint::{VarInt, VarIntBoundsExceeded};
 
 mod bloom_token_log;
-pub use bloom_token_log::BloomTokenLog;
+use bloom_token_log::BloomTokenLog;
 
 mod connection;
 pub use crate::connection::{
@@ -63,7 +62,7 @@ mod limits;
 pub use config::QlogConfig;
 pub use config::{
 	AckFrequencyConfig, ClientConfig, ConfigError, EndpointConfig, IdleTimeout, MtuDiscoveryConfig, ServerConfig,
-	StdSystemTime, TimeSource, TransportConfig, ValidationTokenConfig,
+	TransportConfig, ValidationTokenConfig,
 };
 pub use limits::{Limits, LimitsError};
 
@@ -79,10 +78,7 @@ pub use crate::endpoint::{
 };
 
 mod packet;
-pub use packet::{
-	ConnectionIdParser, FixedLengthConnectionIdParser, LongType, PacketDecodeError, PartialDecode, ProtectedHeader,
-	ProtectedInitialHeader, SpaceId,
-};
+pub use packet::SpaceId;
 
 mod shared;
 pub use crate::shared::{ConnectionEvent, ConnectionId, EcnCodepoint, EndpointEvent};
@@ -93,16 +89,16 @@ pub use crate::transport_error::{Code as TransportErrorCode, Error as TransportE
 use moq_congestion as congestion;
 
 mod cid_generator;
-pub use crate::cid_generator::{
-	ConnectionIdGenerator, HashedConnectionIdGenerator, InvalidCid, RandomConnectionIdGenerator,
-};
+pub use crate::cid_generator::{ConnectionIdGenerator, InvalidCid, RandomConnectionIdGenerator};
 
 mod token;
+#[cfg(test)]
+use token::NoneTokenStore;
 use token::ResetToken;
-pub use token::{NoneTokenLog, NoneTokenStore, TokenLog, TokenReuseError, TokenStore};
+use token::{TokenLog, TokenReuseError, TokenStore};
 
 mod token_memory_cache;
-pub use token_memory_cache::TokenMemoryCache;
+use token_memory_cache::TokenMemoryCache;
 
 // Deal with time
 // MoQ's clock, so a caller-driven clock (a test's or the simulator's) reaches the state machine.

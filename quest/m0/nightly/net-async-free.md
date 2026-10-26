@@ -16,3 +16,7 @@ the `async` feature, so async-only code can't leak into the sync build.
   dev-dependencies. For tests, move every test target that needs those
   dev-dependencies into its own test crate, so the lane's nextest builds
   moq-net without `async`.
+
+## Related
+
+- [Generated async wrappers](/quest/m1/poll-first/async-feature.md) - reshapes the `async` feature this lane keeps out

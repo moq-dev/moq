@@ -1,11 +1,10 @@
 import { afterEach, beforeEach, expect, jest, test } from "bun:test";
 import { Milli } from "@moq/clock";
 import { Signal } from "@moq/signals";
-import type { Producer as BroadcastProducer } from "../broadcast.ts";
 import { SessionCode, SessionError } from "../error.ts";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair } from "../mock.ts";
-import { Producer as OriginProducer } from "../origin.ts";
+import { Producer as OriginProducer, type Table } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Stream } from "../stream.ts";
 import * as Time from "../time.ts";
@@ -14,9 +13,10 @@ import { type AcceptProps, accept as acceptSession } from "./index.ts";
 import { Connection, resetShared } from "./pool.ts";
 import { Reload } from "./reload.ts";
 
-function publish(origin: { createBroadcast(path: Path.Valid): BroadcastProducer }, path: Path.Valid) {
-	const broadcast = origin.createBroadcast(path);
-	broadcast.announce();
+function publish(origin: Pick<Table, "createBroadcast">, path: Path.Valid) {
+	const broadcastPublication = origin.createBroadcast(path);
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	return broadcast;
 }
 

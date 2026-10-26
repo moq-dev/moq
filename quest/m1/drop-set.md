@@ -225,6 +225,17 @@ unchanged.
   then delete moq-archive's fake empty group at `fin - 1`
   (`rs/moq-archive/src/consumer/track.rs`).
 
+### CPU per drop (2026-10-24 pre-cut audit)
+
+Besides memory, run fragmentation costs CPU today, new on main: every
+SUBSCRIBE_DROP bumps `drops_revision`, and each reader's `DropCursor::next`
+rescans the overlapping runs (`rs/moq-net/src/model/track.rs` about lines
+5574-5609), so N fragmented runs and R downstream readers cost O(R*N) per
+6-byte DROP. JS `insertDrop` (`js/net/src/internal.ts:136`) copies the whole
+run array once for the track and once per sink (`track.ts:914`). The
+replacement keeps the per-cursor walk incremental in both languages, with a
+benchmark swept over runs and readers.
+
 ## Required
 
 - [A widened max age re-offers cached groups](/quest/m1/resolved-demand.md) - the re-offer path this extends to reported groups
