@@ -2139,6 +2139,7 @@ mod tests {
 			end: None,
 			wanted: None,
 			bounded: false,
+			updated: false,
 		})
 	}
 
@@ -2171,6 +2172,24 @@ mod tests {
 		drop(fetching);
 		fetches.poll(&sub, start, &kio::Waiter::noop());
 		assert!(fetches.held.is_empty(), "released once abandoned");
+	}
+
+	/// A lite-07 publisher that FINs with no SUBSCRIBE_START served nothing, which covers the
+	/// ranges the SUBSCRIBE asked for but not ones an update it may not have read changed.
+	#[moq_clock::test]
+	async fn a_startless_fin_covers_only_the_subscribed_ranges() {
+		let tail = kio::Producer::new(Tail::default());
+		let Sub::Active(mut active) = feed_sub(&tail).await else {
+			unreachable!("feed_sub is active")
+		};
+		active.ranges = vec![lite::Range::span(Some(0), 0, Some(1), None)];
+		assert_eq!(active.covered(), Some(Vec::new()));
+
+		active.updated = true;
+		assert_eq!(active.covered(), None, "the update may be unread");
+
+		active.served = Some(0);
+		assert_eq!(active.covered(), Some(std::iter::once(0..2).collect()));
 	}
 
 	/// QUIC does not order streams, so group 2's header can reach the relay before group 1's.
@@ -2254,6 +2273,7 @@ mod tests {
 				end: None,
 				wanted: None,
 				bounded: false,
+				updated: false,
 			});
 			if update {
 				h.serve
@@ -2715,6 +2735,7 @@ mod tests {
 			end: Some(lite::SubscribeEnd { group: 10 }),
 			wanted: None,
 			bounded: false,
+			updated: false,
 		};
 		assert_eq!(
 			sub.owed(None),
@@ -5959,6 +5980,9 @@ struct SubStream {
 	/// Whether this stream ever asked for bounded ranges alone, which a lite-07 publisher
 	/// FINs without SUBSCRIBE_END once it covers them.
 	bounded: bool,
+	/// Whether an update changed the ranges since the SUBSCRIBE, which a publisher may
+	/// FIN before reading.
+	updated: bool,
 }
 
 impl SubStream {
@@ -5984,11 +6008,13 @@ impl SubStream {
 	/// SUBSCRIBE_START resolved delivery, up to its end. Groups below SUBSCRIBE_START were
 	/// accounted for when it arrived.
 	///
-	/// Empty without a SUBSCRIBE_START, since the publisher then served no group, and `None`
-	/// when a range is open: the publisher covered what it asked before an update widened it.
+	/// Without a SUBSCRIBE_START the publisher served no group, which covers the ranges the
+	/// SUBSCRIBE asked for, so it is empty unless an update changed them since. `None` when
+	/// a range is open, or the ranges changed with nothing served: the publisher covered
+	/// what it asked before an update it may not have read.
 	fn covered(&self) -> Option<Vec<std::ops::Range<u64>>> {
 		let Some(served) = self.served else {
-			return Some(Vec::new());
+			return (!self.updated).then(Vec::new);
 		};
 		self.ranges
 			.iter()
@@ -6417,6 +6443,7 @@ impl TrackServe {
 							}
 						}
 						active.start = subscription.start();
+						active.updated |= active.ranges != ranges;
 						active.ranges = ranges;
 						if supports_update {
 							// The floor follows the requested start, in both directions:
@@ -6710,6 +6737,7 @@ impl Establish {
 			end: None,
 			wanted: None,
 			bounded: bounded(&self.ranges),
+			updated: false,
 		}
 	}
 }

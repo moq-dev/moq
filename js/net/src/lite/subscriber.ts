@@ -140,6 +140,8 @@ interface SubscribeEntry {
 	// Whether the stream ever asked for a bounded range, which a lite-07 publisher FINs without
 	// SUBSCRIBE_END once it covers it.
 	bounded: boolean;
+	// Whether an update widened the range, which that FIN may answer without having read.
+	widened: boolean;
 	// The TRACK stream that answered (lite-05+), held open as interest in the track until
 	// the SUBSCRIBE has its first response, so the publisher's demand never lapses between
 	// the two.
@@ -939,8 +941,10 @@ export class Subscriber {
 			// instead, so the track ends with that error rather than a clean tail.
 			const responses = hasTrackStream(this.version) ? this.runResponses(stream, entry) : stream.reader.closed;
 			let tailSettled = false;
+			// Set when the publisher ended the subscription short of the demand.
+			let short: Error | undefined;
 			const closed = responses.then(async () => {
-				await this.#settleTail(entry);
+				if (!(await this.#settleTail(entry))) short = new Error("subscription ended before covering its range");
 				tailSettled = true;
 			});
 			// A reset that lands after the race below settled is moot; the race observes one before.
@@ -972,7 +976,9 @@ export class Subscriber {
 				break;
 			}
 
-			producer.close();
+			// A publisher that covered the range before reading an update widening it sent
+			// fewer groups than the track has, so it fails rather than ending clean.
+			producer.close(short);
 			// A settled lite07 tail acknowledges completion with FIN, without cancelling
 			// the publisher's already-finished receive half.
 			if (tailSettled && waitsForSubscriberFin(this.version)) stream.writer.close();
@@ -1051,6 +1057,7 @@ export class Subscriber {
 			}),
 			requested: msg.startGroup,
 			bounded: msg.endGroup !== undefined,
+			widened: false,
 			held: state.track,
 		};
 		this.#subscribes.set(id, entry);
@@ -1447,7 +1454,10 @@ export class Subscriber {
 	// Received headers and SUBSCRIBE_DROP account for the range. An unaccounted
 	// sequence, such as a lost datagram, still waits out the grace. Streams whose
 	// headers arrived keep reading until their own FIN or reset.
-	#settleTail(entry: SubscribeEntry): Promise<void> {
+	//
+	// Resolves false when a lite-07 publisher's FIN without SUBSCRIBE_END left a widened
+	// demand uncovered: it covered the bounded range it read, before the update.
+	async #settleTail(entry: SubscribeEntry): Promise<boolean> {
 		const { tail, track } = entry;
 
 		const complete = () => {
@@ -1471,7 +1481,9 @@ export class Subscriber {
 			return tail.covers(start, end);
 		};
 
-		return tail.settle(complete, track.closed);
+		await tail.settle(complete, track.closed);
+		const short = entry.end === undefined && hasRanges(this.version) && entry.widened;
+		return !short || track.closed.peek() !== undefined || complete();
 	}
 
 	/**
@@ -1561,6 +1573,10 @@ export class Subscriber {
 			}
 			if (refresh !== undefined) sentWanted = refresh;
 			entry.bounded ||= update.endGroup !== undefined;
+			const sent = groupBounds(lastSent.groups);
+			entry.widened ||=
+				bounds.start < sent.start ||
+				(sent.end !== undefined && (bounds.end === undefined || bounds.end > sent.end));
 			lastSent = { ...current };
 			console.debug(`subscribe update: id=${id} broadcast=${broadcast} track=${track.name}`);
 		}

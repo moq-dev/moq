@@ -17,6 +17,7 @@ import {
 } from "../error.ts";
 import { HopSchema, isAnonymous, MAX_HOPS, Route, UNKNOWN_HOP } from "../hop.ts";
 import { hooks } from "../internal.ts";
+import { GRACE } from "../ledger.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import type { Producer } from "../track.ts";
@@ -2023,6 +2024,51 @@ test("a lite-07 publisher FIN ends a covered bounded subscription", async () => 
 		track.close();
 		broadcast.close();
 		subscriber.close();
+	}
+});
+
+// The FIN may answer the bounded range before the publisher read an update that widened it,
+// so the track fails rather than ending clean short of the demand.
+test("a lite-07 FIN short of a widened range fails the track", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened, closes } = fakeSession();
+	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const broadcast = subscriber.consume(Path.from("room"));
+	const track = broadcast.track("video").subscribe({ groups: { start: { included: 0 }, end: { excluded: 1 } } });
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version);
+		const stream = await opened(1);
+		await stream.reading;
+		track.update({ groups: { start: { included: 0 } } });
+		await drainReactions();
+
+		const chunks: Uint8Array[] = [];
+		const writer = new Writer(
+			new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
+			version,
+		);
+		await encodeSubscribeResponse(writer, { start: new SubscribeStart(0) }, version);
+		await encodeSubscribeResponse(
+			writer,
+			{ drop: new SubscribeDrop({ start: 0, end: 0, error: StreamCode.NotFound }) },
+			version,
+		);
+		for (const chunk of chunks) stream.inbound.enqueue(chunk);
+		stream.inbound.close();
+		await drainReactions();
+		expect(track.closed.peek()).toBeUndefined();
+
+		await clock.advance(Nano.fromMilli(GRACE));
+		expect(await track.closed).toBeInstanceOf(Error);
+		expect(closes).toEqual([]);
+	} finally {
+		track.close();
+		broadcast.close();
+		subscriber.close();
+		installed.close();
 	}
 });
 
