@@ -4795,6 +4795,103 @@ test("draft-22: narrowing gives up an excluded group's open stream", async () =>
 	}
 });
 
+test("draft-22: widening with a fill keeps the open live group", async () => {
+	const fx = fixture();
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	writeGroup(track, 1);
+	const open = track.appendGroup();
+	open.writeFrame({ payload: new TextEncoder().encode("1.0"), timestamp: Timestamp.now() });
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({ requestId: 0n, trackNamespace: Path.from("test"), trackName: "video", subscriberPriority: 0 }),
+	);
+	try {
+		const live = await nextUni(fx.uni);
+		if (!live) throw new Error("missing initial open group");
+		const reading = readGroup(live);
+		const parameters = new Parameters();
+		parameters.subscriptionFilter = { kind: "absolute", startGroup: 0n, startObject: 0n };
+		parameters.fillParameters = Filter.encodeFill(
+			{ filter: { kind: "unfiltered" }, groupOrder: "ascending", rangeFilters: false },
+			fx.version,
+		);
+		await client.writer.u53(SubscribeUpdate.id);
+		await new SubscribeUpdate({ requestId: 2n, parameters }).encode(client.writer, fx.version);
+		expect(await client.reader.u53()).toBe(RequestOk.id);
+		await RequestOk.decode(client.reader, fx.version);
+		const fill = await nextUni(fx.uni);
+		if (!fill) throw new Error("missing update fill");
+		expect((await readFill(fill, "ascending")).objects).toEqual([
+			{ group: 0, id: 0, payload: "0.0" },
+			{ group: 1, id: 0, payload: "1.0" },
+		]);
+		open.writeFrame({ payload: new TextEncoder().encode("1.1"), timestamp: Timestamp.now() });
+		open.close();
+		// The live stream still owns the rest of its group, so nothing else repeats it.
+		expect((await reading).objects).toEqual([
+			{ id: 0, payload: "1.0" },
+			{ id: 1, payload: "1.1" },
+		]);
+		expect(await nextUni(fx.uni)).toBeUndefined();
+	} finally {
+		open.close();
+		client.close();
+		track.close();
+		fx.close();
+	}
+});
+
+test("draft-22: widening with a fill resumes a group a narrowing gave up", async () => {
+	const fx = fixture();
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	writeGroup(track, 1);
+	const open = track.appendGroup();
+	open.writeFrame({ payload: new TextEncoder().encode("1.0"), timestamp: Timestamp.now() });
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({ requestId: 0n, trackNamespace: Path.from("test"), trackName: "video", subscriberPriority: 0 }),
+	);
+	try {
+		const live = await nextUni(fx.uni);
+		if (!live) throw new Error("missing initial open group");
+		const reading = readGroup(live).then(() => undefined, error);
+		for (const [requestId, startGroup] of [
+			[2n, 4n],
+			[4n, 0n],
+		] as const) {
+			const parameters = new Parameters();
+			parameters.subscriptionFilter = { kind: "absolute", startGroup, startObject: 0n };
+			if (startGroup === 0n)
+				parameters.fillParameters = Filter.encodeFill(
+					{ filter: { kind: "unfiltered" }, groupOrder: "ascending", rangeFilters: false },
+					fx.version,
+				);
+			await client.writer.u53(SubscribeUpdate.id);
+			await new SubscribeUpdate({ requestId, parameters }).encode(client.writer, fx.version);
+			expect(await client.reader.u53()).toBe(RequestOk.id);
+			await RequestOk.decode(client.reader, fx.version);
+		}
+		expect((await reading)?.message).toContain("range update");
+		open.writeFrame({ payload: new TextEncoder().encode("1.1"), timestamp: Timestamp.now() });
+		open.close();
+		const served: string[] = [];
+		for (let i = 0; i < 2; i++) {
+			const stream = await nextUni(fx.uni);
+			if (!stream) throw new Error("missing stream after widening");
+			const reader = new Reader(stream, undefined, V20);
+			if ((await reader.peekU62()) === BigInt(FetchHeader.type))
+				served.push(...(await readFill(reader, "ascending")).objects.map(({ payload }) => payload));
+			else served.push(...(await readGroup(reader)).objects.map(({ payload }) => payload));
+		}
+		expect(served.sort()).toEqual(["0.0", "1.0", "1.1"]);
+	} finally {
+		open.close();
+		client.close();
+		track.close();
+		fx.close();
+	}
+});
+
 test("subscriber max age and REQUEST_UPDATE preserve omitted preferences", async () => {
 	const fx = fixture(Version.DRAFT_18);
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });

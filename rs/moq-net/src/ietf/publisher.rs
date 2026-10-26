@@ -5088,6 +5088,7 @@ impl TrackServe {
 	fn update_range(&mut self, update: &super::request_stream::Update) -> Result<Option<SubscriptionFill>, Error> {
 		let cache = self.track.consume();
 		let edge = live_edge(&cache);
+		let previous = self.requested;
 		if let Some(filter) = update.filter {
 			self.filter = filter;
 			// Unfiltered on an update widens back to zero. A fresh live join here
@@ -5114,18 +5115,25 @@ impl TrackServe {
 				max_delay: self.track.subscription().max_delay,
 				..Default::default()
 			};
-			self.tail = range
-				.end
-				.is_none_or(|end| {
+			// A live stream already handed out under an open-ended slice of this group still
+			// carries its rest, which a narrowing would have retired; a second one would repeat it.
+			let slice = previous.slice(next.group);
+			let streaming = self.track.handed_out(next.group)
+				&& previous.start.is_none_or(|start| start.group <= next.group)
+				&& previous.end.is_none_or(|end| end.group >= next.group)
+				&& slice.skip <= next.object
+				&& slice.until.is_none();
+			self.tail = (!streaming
+				&& range.end.is_none_or(|end| {
 					end.group > next.group
 						|| (end.group == next.group && end.object.is_none_or(|object| object >= next.object))
+				}))
+			.then(|| {
+				Box::new(FillTail {
+					start: next,
+					fetch: cache.fetch_group(next.group, options).into_inner(),
 				})
-				.then(|| {
-					Box::new(FillTail {
-						start: next,
-						fetch: cache.fetch_group(next.group, options).into_inner(),
-					})
-				});
+			});
 			// The tail has its own cursor: fetched groups are not live arrival entries.
 			range.start = Some(Location {
 				group: next.group.saturating_add(1),
@@ -5342,16 +5350,7 @@ impl TrackServe {
 					let sequence = group.sequence;
 					tracing::debug!(subscribe = %self.request_id, track = %self.track.name(), sequence, "serving group");
 
-					let slice = GroupSlice {
-						skip: match self.range.start {
-							Some(start) if start.group == sequence => start.object,
-							_ => 0,
-						},
-						until: match self.range.end {
-							Some(end) if end.group == sequence => end.object.map(|object| object.saturating_add(1)),
-							_ => None,
-						},
-					};
+					let slice = self.range.slice(sequence);
 					if slice.until.is_some_and(|until| until <= slice.skip) {
 						continue;
 					}
@@ -5848,14 +5847,24 @@ impl GroupServe {
 		self
 	}
 
-	/// A narrowed filter gives back an excluded group's stream without ending its siblings.
+	/// A narrowed filter gives back a stream still writing objects it now excludes, whole
+	/// group or within it, without ending its siblings. A stream whose FIN is already sent
+	/// keeps the objects it delivered.
 	fn poll_excluded(&self, waiter: &kio::Waiter) -> bool {
+		if matches!(self.state, GroupState::Closed { .. }) {
+			return false;
+		}
 		self.bounds.as_ref().is_some_and(|bounds| {
 			matches!(
 				bounds.poll(waiter, |range| {
 					let sequence = self.msg.group_id;
+					let slice = range.slice(sequence);
 					if range.start.is_some_and(|start| sequence < start.group)
 						|| range.end.is_some_and(|end| sequence > end.group)
+						|| slice.skip > self.slice.skip
+						|| slice
+							.until
+							.is_some_and(|until| self.slice.until.is_none_or(|ours| until < ours))
 					{
 						Poll::Ready(())
 					} else {
@@ -10198,66 +10207,161 @@ mod serve_tests {
 		}
 	}
 
-	/// Narrowing an open subscription retires a group excluded by the new range.
+	/// Narrowing an open subscription retires a group the new range excludes, whole or in
+	/// part, before it forwards an object outside that range.
 	#[moq_clock::test]
 	async fn narrowing_retires_an_open_live_group() {
-		let version = Version::Draft22;
-		let h = serve(version);
-		let mut group = h.track.create_group(group::Info { sequence: 1 }).unwrap();
-		group.write_frame(timestamp(), b"before-update".as_slice()).unwrap();
-		moq_clock::sim::yield_now().await;
-		let mut request = ScriptedSession::new(Vec::new());
-		request.log = h.log.clone();
-		let stream = Stream::open(&mut crate::driver::Transport::new(request.clone()), version)
-			.await
-			.unwrap();
-		let mut serving = std::pin::pin!(
-			h.publisher
-				.clone()
-				.run_subscribe_stream(stream, subscribe(Filter::Unfiltered, None))
-		);
-		serve_until(serving.as_mut(), "the current group is open", || {
-			occurrences(&h.log, b"before-update") == 1
-		})
-		.await;
-		let update = ietf::SubscribeUpdate {
-			request_id: RequestId(2),
-			subscription_request_id: None,
-			start_location: Location { group: 0, object: 0 },
-			end_group: 0,
-			subscriber_priority: None,
-			forward: None,
-			filter: Some(Filter::Absolute {
-				start: Location { group: 4, object: 0 },
-				end: None,
-			}),
-			authorization_token: None,
-			new_group: None,
-			max_age: None,
-			fill: None,
-		};
-		let mut bytes = Vec::new();
-		let mut encoder = Encoder::new(&mut bytes, version.into());
-		encoder.varint(ietf::SubscribeUpdate::ID).unwrap();
-		update.encode(&mut encoder, version).unwrap();
-		request.push(&bytes);
-		serve_until(serving.as_mut(), "the narrowing is accepted", || {
-			Wire::read(&h.log, version).sent(ietf::RequestOk::ID).is_some()
-		})
-		.await;
-		group.write_frame(timestamp(), b"after-update".as_slice()).unwrap();
-		group.finish().unwrap();
-		let mut wanted = h.track.create_group(group::Info { sequence: 4 }).unwrap();
-		wanted.write_frame(timestamp(), b"wanted".as_slice()).unwrap();
-		wanted.finish().unwrap();
-		h.track.finish().unwrap();
-		serving.await.unwrap();
-		assert_eq!(
-			occurrences(&h.log, b"after-update"),
-			0,
-			"the excluded group stops forwarding"
-		);
-		assert_eq!(occurrences(&h.log, b"wanted"), 1, "the subscription remains live");
+		let narrowed = [
+			// The whole group falls below the new start.
+			(Location { group: 4, object: 0 }, None, true),
+			// The new end stops inside the open group.
+			(
+				Location { group: 0, object: 0 },
+				Some(EndLocation {
+					group: 1,
+					object: Some(0),
+				}),
+				false,
+			),
+			// The new start moves past the open group's next object.
+			(Location { group: 1, object: 2 }, None, true),
+		];
+		for (start, end, wanted) in narrowed {
+			let version = Version::Draft22;
+			let h = serve(version);
+			let mut group = h.track.create_group(group::Info { sequence: 1 }).unwrap();
+			group.write_frame(timestamp(), b"before-update".as_slice()).unwrap();
+			moq_clock::sim::yield_now().await;
+			let mut request = ScriptedSession::new(Vec::new());
+			request.log = h.log.clone();
+			let stream = Stream::open(&mut crate::driver::Transport::new(request.clone()), version)
+				.await
+				.unwrap();
+			let mut serving = std::pin::pin!(
+				h.publisher
+					.clone()
+					.run_subscribe_stream(stream, subscribe(Filter::Unfiltered, None))
+			);
+			serve_until(serving.as_mut(), "the current group is open", || {
+				occurrences(&h.log, b"before-update") == 1
+			})
+			.await;
+			let update = ietf::SubscribeUpdate {
+				request_id: RequestId(2),
+				subscription_request_id: None,
+				start_location: Location { group: 0, object: 0 },
+				end_group: 0,
+				subscriber_priority: None,
+				forward: None,
+				filter: Some(Filter::Absolute { start, end }),
+				authorization_token: None,
+				new_group: None,
+				max_age: None,
+				fill: None,
+			};
+			let mut bytes = Vec::new();
+			let mut encoder = Encoder::new(&mut bytes, version.into());
+			encoder.varint(ietf::SubscribeUpdate::ID).unwrap();
+			update.encode(&mut encoder, version).unwrap();
+			request.push(&bytes);
+			serve_until(serving.as_mut(), "the narrowing is accepted", || {
+				Wire::read(&h.log, version).sent(ietf::RequestOk::ID).is_some()
+			})
+			.await;
+			group.write_frame(timestamp(), b"after-update".as_slice()).unwrap();
+			group.finish().unwrap();
+			let mut later = h.track.create_group(group::Info { sequence: 4 }).unwrap();
+			later.write_frame(timestamp(), b"wanted".as_slice()).unwrap();
+			later.finish().unwrap();
+			h.track.finish().unwrap();
+			serving.await.unwrap();
+			assert_eq!(
+				occurrences(&h.log, b"after-update"),
+				0,
+				"an object outside {start:?}..{end:?} is not forwarded"
+			);
+			assert_eq!(
+				occurrences(&h.log, b"wanted"),
+				usize::from(wanted),
+				"the subscription remains live"
+			);
+		}
+	}
+
+	/// Widening with a fill hands the rest of the current group to exactly one stream: the
+	/// live stream still open, or a fill tail once a narrowing retired it.
+	#[moq_clock::test]
+	async fn widening_with_a_fill_streams_the_current_group_once() {
+		for retired in [false, true] {
+			let version = Version::Draft22;
+			let h = serve(version);
+			let mut history = h.track.create_group(group::Info { sequence: 0 }).unwrap();
+			history.write_frame(timestamp(), b"history".as_slice()).unwrap();
+			history.finish().unwrap();
+			let mut group = h.track.create_group(group::Info { sequence: 1 }).unwrap();
+			group.write_frame(timestamp(), b"before-update".as_slice()).unwrap();
+			moq_clock::sim::yield_now().await;
+			let mut request = ScriptedSession::new(Vec::new());
+			request.log = h.log.clone();
+			let stream = Stream::open(&mut crate::driver::Transport::new(request.clone()), version)
+				.await
+				.unwrap();
+			let mut serving = std::pin::pin!(
+				h.publisher
+					.clone()
+					.run_subscribe_stream(stream, subscribe(Filter::Unfiltered, None))
+			);
+			serve_until(serving.as_mut(), "the current group is open", || {
+				occurrences(&h.log, b"before-update") == 1
+			})
+			.await;
+			let mut updates = vec![(Location { group: 0, object: 0 }, true)];
+			if retired {
+				updates.insert(0, (Location { group: 4, object: 0 }, false));
+			}
+			for (answered, (start, fill)) in updates.into_iter().enumerate() {
+				let update = ietf::SubscribeUpdate {
+					request_id: RequestId(2 + 2 * answered as u64),
+					subscription_request_id: None,
+					start_location: Location { group: 0, object: 0 },
+					end_group: 0,
+					subscriber_priority: None,
+					forward: None,
+					filter: Some(Filter::Absolute { start, end: None }),
+					authorization_token: None,
+					new_group: None,
+					max_age: None,
+					fill: fill.then_some(ietf::Fill {
+						group_order: None,
+						filter: None,
+						range_filters: false,
+					}),
+				};
+				let mut bytes = Vec::new();
+				let mut encoder = Encoder::new(&mut bytes, version.into());
+				encoder.varint(ietf::SubscribeUpdate::ID).unwrap();
+				update.encode(&mut encoder, version).unwrap();
+				request.push(&bytes);
+				serve_until(serving.as_mut(), "the update is accepted", || {
+					let wire = Wire::read(&h.log, version);
+					wire.messages
+						.iter()
+						.filter(|(id, _)| *id == ietf::RequestOk::ID)
+						.count() > answered
+				})
+				.await;
+			}
+			group.write_frame(timestamp(), b"after-update".as_slice()).unwrap();
+			group.finish().unwrap();
+			h.track.finish().unwrap();
+			serving.await.unwrap();
+			assert_eq!(occurrences(&h.log, b"history"), 1, "the fill carries the history");
+			assert_eq!(
+				occurrences(&h.log, b"after-update"),
+				1,
+				"one stream carries the rest of the current group (retired: {retired})"
+			);
+		}
 	}
 
 	/// An independent historical fill never expands the subscription's live bounds.
@@ -18355,6 +18459,20 @@ impl ServeRange {
 			&& end.group == largest.group
 			&& end.object.is_none_or(|object| object >= largest.object))
 		.then_some(next)
+	}
+
+	/// The objects of group `sequence` this range selects; interior groups are served whole.
+	fn slice(&self, sequence: u64) -> GroupSlice {
+		GroupSlice {
+			skip: match self.start {
+				Some(start) if start.group == sequence => start.object,
+				_ => 0,
+			},
+			until: match self.end {
+				Some(end) if end.group == sequence => end.object.map(|object| object.saturating_add(1)),
+				_ => None,
+			},
+		}
 	}
 
 	/// Bound `subscription` to the whole groups this range touches: a model subscription

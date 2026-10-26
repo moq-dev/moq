@@ -2043,6 +2043,7 @@ export class Subscriber {
 		hooks.forgetPastBudget = (subscriber, delivered) => subscriber.#forgetPastBudget(delivered);
 		hooks.tryRecvDatagram = (subscriber) => subscriber.#tryDatagram();
 		hooks.deliveredRuns = (subscriber) => subscriber.#delivered.runs;
+		hooks.handedOut = (subscriber, sequence) => subscriber.#delivered.has(sequence);
 		hooks.datagramChanged = (subscriber, fn) => {
 			if (subscriber.#resume) return subscriber.#groupChanged(fn);
 			const state = subscriber.#state;

@@ -426,6 +426,8 @@ export const hooks: {
 	spent: (subscriber: Subscriber, start: number, end: number | undefined, delivered: Delivered) => boolean;
 	/** How many runs of handed-out groups a subscriber remembers: one per gap, plus the floor. Tests only. */
 	deliveredRuns: (subscriber: Subscriber) => number;
+	/** Whether the subscriber already handed out group `sequence`, or no longer expects it. */
+	handedOut: (subscriber: Subscriber, sequence: number) => boolean;
 	/** Forget the gaps in another reader's `delivered` below each group past this subscriber's budget. */
 	forgetPastBudget: (subscriber: Subscriber, delivered: Delivered) => void;
 	/** Whether this subscriber's budget gives up on `sequence`, judged by its successor; see {@link expireGroup}. */
@@ -585,6 +587,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	deliveredRuns: () => {
+		throw new Error("track.ts not loaded");
+	},
+	handedOut: () => {
 		throw new Error("track.ts not loaded");
 	},
 	datagramChanged: () => {

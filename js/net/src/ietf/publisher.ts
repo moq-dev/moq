@@ -251,7 +251,7 @@ interface RunGroup {
 
 	/** The objects of this group the subscription's filter selects. */
 	slice: GroupSlice;
-	/** The live range, whose narrowing may give this stream up. */
+	/** The requested range, whose narrowing may give this stream up. */
 	bounds: Getter<ServeRange>;
 
 	/** Settles when the subscriber leaves, dropping a group still queued for a stream slot. */
@@ -776,8 +776,11 @@ export class Publisher {
 				msg.fill && msg.forward && Filter.isDraft22(version)
 					? fillRange(msg.fill, msg.filter, edge.largest, order)
 					: undefined;
-			const range = afterFill(subscribeRange(msg, edge, version), fill, edge);
-			const bounds = new Signal(range);
+			const requested = subscribeRange(msg, edge, version);
+			const range = afterFill(requested, fill, edge);
+			// What the subscriber asked for, which only a narrowing changes: the fill's split
+			// moves the cursor alone, so it never gives up a stream still in range.
+			const bounds = new Signal(requested);
 
 			// The wire request tells an upstream what we need; the cursor is what actually
 			// trims this subscriber, since the producer fans every cached group out to every
@@ -896,6 +899,27 @@ export class Publisher {
 			};
 			if (fill && cache)
 				startFill(answer?.requestId ?? published?.answer?.requestId ?? msg.requestId, fill, cache);
+
+			// Every group started, until its stream finishes or resets, and the data streams
+			// opened for PUBLISH_DONE to report.
+			const groups = new Set<Promise<void>>();
+			const serveGroup = (group: group.Consumer, slice: GroupSlice) => {
+				const task = this.#runGroup({
+					track,
+					requestId: msg.requestId,
+					group,
+					timescale,
+					publisherPriority,
+					ranking: ranked,
+					slice,
+					bounds,
+					unsubscribed,
+					streams,
+				});
+				groups.add(task);
+				void task.finally(() => groups.delete(task));
+			};
+
 			const updates = (async () => {
 				for (;;) {
 					const framed = await request.next();
@@ -924,11 +948,32 @@ export class Publisher {
 								? { start: { group: 0n, object: 0n } }
 								: filterRange(msg.filter, snapshot);
 						const tail = afterFill(requested, selected, snapshot);
+						const previous = bounds.peek();
 						range.start = tail.start;
 						range.end = tail.end;
-						bounds.set({ ...range }, true);
+						bounds.set(requested, true);
 						track.update({ ...track.subscription.peek(), groups: rangeGroups(range) });
 						track.withRange(rangeGroups(range));
+						// The fill took the current group's head. The cursor never hands a group out
+						// twice, so one whose stream no longer carries the rest resumes from the cache.
+						const next = tail !== requested ? tail.start : undefined;
+						const at = Number(next?.group);
+						if (next && hooks.handedOut(track, at)) {
+							const prior = groupSlice(previous, at);
+							const streaming =
+								(!previous.start || previous.start.group <= next.group) &&
+								(!previous.end || previous.end.group >= next.group) &&
+								prior.skip <= Number(next.object) &&
+								prior.until === undefined;
+							const slice = groupSlice(range, at);
+							const group =
+								!streaming &&
+								(!range.end || range.end.group >= next.group) &&
+								(slice.until === undefined || slice.until > slice.skip)
+									? hooks.cachedGroup(track, at)
+									: undefined;
+							if (group) serveGroup(group, slice);
+						}
 					}
 					if (params.groupOrder !== undefined)
 						track.update({ ...track.subscription.peek(), order: msg.groupOrder });
@@ -965,30 +1010,12 @@ export class Publisher {
 				() => unsubscribe(),
 			);
 
-			// Every group started, until its stream finishes or resets, and the data streams
-			// opened for PUBLISH_DONE to report.
-			const groups = new Set<Promise<void>>();
-
 			// Serve groups until the track ends or the requester cancels.
 			const serving = (async () => {
 				for (;;) {
 					const group = await servingGroup(track);
 					if (!group) return;
-
-					const task = this.#runGroup({
-						track,
-						requestId: msg.requestId,
-						group,
-						timescale,
-						publisherPriority,
-						ranking: ranked,
-						slice: groupSlice(range, group.sequence),
-						bounds,
-						unsubscribed,
-						streams,
-					});
-					groups.add(task);
-					void task.finally(() => groups.delete(task));
+					serveGroup(group, groupSlice(range, group.sequence));
 				}
 			})();
 
