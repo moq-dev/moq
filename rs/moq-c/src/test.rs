@@ -3223,9 +3223,10 @@ fn dynamic_track_request_publishes_media() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// A raw track request already delivered stays acceptable after its broadcast handle is closed.
+/// A raw track request accepted after its broadcast closed is refused, and its subscriber sees the
+/// publisher leave instead of a track that outlives the broadcast.
 #[test]
-fn track_request_accepts_after_the_broadcast_closes() {
+fn track_request_accepted_after_the_broadcast_closes_is_refused() {
 	let origin = id(moq_origin_create());
 	let broadcast = publish_broadcast(origin, b"dynamic-closed");
 	let request_cb = Callback::new();
@@ -3237,10 +3238,11 @@ fn track_request_accepts_after_the_broadcast_closes() {
 
 	let request = id(request_cb.recv());
 	assert_eq!(moq_publish_close(broadcast), 0);
-	let track = id(unsafe { moq_track_request_accept(request, std::ptr::null()) });
-	assert_eq!(moq_publish_track_finish(track), 0);
-	// The subscription ends with the finished track, before its callback's channel is freed.
-	assert_eq!(frame_cb.recv_terminal(), 0);
+	assert_eq!(
+		unsafe { moq_track_request_accept(request, std::ptr::null()) },
+		MOQ_ERROR_BROADCAST_NOT_FOUND
+	);
+	assert!(frame_cb.recv_terminal() < 0, "the subscription ended cleanly");
 	assert_eq!(request_cb.recv_terminal(), 0);
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_origin_close(origin), 0);
@@ -4669,6 +4671,60 @@ fn a_stalled_encode_does_not_block_unrelated_calls() {
 	assert_eq!(moq_encode_video_finish(stalled), 0);
 	assert_eq!(moq_encode_video_finish(other), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// Closing a broadcast whose encoder is mid-encode waits for that encode without holding the
+/// global lock, so unrelated calls go on meanwhile.
+#[test]
+fn closing_a_broadcast_does_not_block_unrelated_calls_behind_its_encoder() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"video-close-stall-test");
+
+	let input = moq_video_encoder_input {
+		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
+		width: 320,
+		height: 240,
+		framerate: moq_video_frame_rate {
+			numerator: 30,
+			denominator: 1,
+		},
+	};
+	let output = moq_video_encoder_output {
+		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
+		bitrate: 0,
+		gop: 0,
+		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
+		encoder: std::ptr::null(),
+		encoder_len: 0,
+	};
+	let stalled = id(unsafe { moq_encode_video(broadcast, &input, &output, 0) });
+
+	// Hold the lock an encode takes for the duration of its codec call.
+	let handle = State::lock().video.producer(Id::try_from(stalled).unwrap()).unwrap();
+	let held = handle.lock();
+	let closing = std::thread::spawn(move || moq_publish_close(broadcast));
+
+	// Once the close released the broadcast, unrelated calls must not wait on the encoder. On
+	// its own thread so a regression fails this assertion rather than hanging the test.
+	let (tx, rx) = mpsc::channel();
+	let unrelated = std::thread::spawn(move || {
+		let broadcast = Id::try_from(broadcast).unwrap();
+		while State::lock().publish.catalog_snapshot(broadcast).is_ok() {
+			std::thread::yield_now();
+		}
+		let _ = tx.send(moq_origin_create());
+	});
+	let created = rx
+		.recv_timeout(TIMEOUT)
+		.expect("an unrelated call was waiting on the closing encoder");
+	assert!(created > 0, "creating an origin failed while a close was waiting");
+	unrelated.join().unwrap();
+
+	drop(held);
+	assert_eq!(closing.join().unwrap(), 0);
+	assert!(moq_encode_video_finish(stalled) < 0, "the close released the encoder");
+	assert_eq!(moq_origin_close(id(created)), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 

@@ -873,7 +873,7 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 			expect(await sub.servedSequence()).toBe(0);
 			expect("start" in (await decodeSubscribeResponse(sub.client.reader, version))).toBe(true);
 
-			sub.track.dropGroups(1, 3, new StreamError(StreamCode(70), { message: "cut" }));
+			hooks.dropTrackGroups(sub.track, 1, 3, new StreamError(StreamCode(70), { message: "cut" }));
 			const resp = await decodeSubscribeResponse(sub.client.reader, version);
 			if (!("drop" in resp)) throw new Error("expected SUBSCRIBE_DROP");
 			expect([resp.drop.start, resp.drop.end, resp.drop.error]).toEqual([
@@ -1193,7 +1193,7 @@ for (const skipped of ["failed", "stale"] as const) {
 			const group = sub.track.createGroup(5);
 			group.writeFrame(textFrame("old", Timestamp.fromMillis(5)));
 			group.close(skipped === "failed" ? new Error("cut") : undefined);
-			if (skipped === "failed") sub.track.dropGroups(7, 8, new Error("cut"));
+			if (skipped === "failed") hooks.dropTrackGroups(sub.track, 7, 8, new Error("cut"));
 			sub.serve(6);
 			const response = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
 			if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");

@@ -34,5 +34,4 @@ A CI `cargo check` for wasm32 keeps them building.
 
 ## Required
 
-- [The studio app](/quest/m3/studio/app.md) - the app the page builds to wasm
 - [A runtime trait replaces web-async](/quest/m2/runtime-trait.md) - spawn and time on the browser instead of tokio's runtime

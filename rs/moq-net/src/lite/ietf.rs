@@ -1201,7 +1201,7 @@ mod hop_tests {
 
 			// The upstream group is still open.
 			let frame = next(&mut received).await.unwrap();
-			assert_eq!(&frame.payload[..], b"a");
+			assert_eq!(&frame.payload.contiguous(0)[..], b"a");
 			assert_eq!(frame.timestamp, negotiated.then(|| ts(0)));
 			match negotiated {
 				true => {
@@ -1236,7 +1236,7 @@ mod hop_tests {
 			group.finish().unwrap();
 
 			let frame = next(&mut received).await.unwrap();
-			assert_eq!(&frame.payload[..], b"b");
+			assert_eq!(&frame.payload.contiguous(0)[..], b"b");
 			assert!(next(&mut received).await.is_none());
 			let info = moq_clock::timeout(TIMEOUT, copy.info()).await.unwrap().unwrap();
 			assert_eq!(
@@ -1398,12 +1398,18 @@ mod hop_tests {
 		group.write_frame(ts(5), b"key".to_vec()).unwrap();
 		let mut received = recv(&mut subscriber).await;
 		let frame = next(&mut received).await.unwrap();
-		assert_eq!((frame.timestamp, &frame.payload[..]), (Some(ts(5)), &b"key"[..]));
+		assert_eq!(
+			(frame.timestamp, &frame.payload.contiguous(0)[..]),
+			(Some(ts(5)), &b"key"[..])
+		);
 		assert!(frame.fields.is_none() && received.wire().is_none());
 		group.write_frame(ts(6), b"delta".to_vec()).unwrap();
 		group.finish().unwrap();
 		let frame = next(&mut received).await.unwrap();
-		assert_eq!((frame.timestamp, &frame.payload[..]), (Some(ts(6)), &b"delta"[..]));
+		assert_eq!(
+			(frame.timestamp, &frame.payload.contiguous(0)[..]),
+			(Some(ts(6)), &b"delta"[..])
+		);
 		assert!(frame.fields.is_none());
 		assert!(next(&mut received).await.is_none());
 		assert!(received.end_object().is_none());
@@ -1480,7 +1486,7 @@ mod hop_tests {
 			assert_eq!(received.sequence, 1);
 			let frame = next(&mut received).await.unwrap();
 			assert_eq!(frame.timestamp, negotiated.then(|| ts(50)), "{offer:?}");
-			assert_eq!(&frame.payload[..], b"frame");
+			assert_eq!(&frame.payload.contiguous(0)[..], b"frame");
 			assert!(next(&mut received).await.is_none());
 			track.insert_datagram(2, ts(25), b"datagram".to_vec()).unwrap();
 			let datagram = moq_clock::timeout(TIMEOUT, kio::wait(|waiter| subscriber.poll_recv_wire_datagram(waiter)))
@@ -1517,7 +1523,7 @@ mod hop_tests {
 		for (millis, n) in [(5, 1), (6, 2)] {
 			let frame = next(&mut received).await.unwrap();
 			assert_eq!(
-				(frame.timestamp, &frame.payload[..]),
+				(frame.timestamp, &frame.payload.contiguous(0)[..]),
 				(Some(ts(millis)), &payload(n)[..])
 			);
 			assert!(frame.fields.is_none());

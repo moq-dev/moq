@@ -2790,7 +2790,7 @@ impl Publisher {
 	/// Write a whole fetch object's length and payload, after its header.
 	async fn write_fetch_payload(
 		stream: &mut Writer<Ranked<crate::transport::boxed::SendStream>, Version>,
-		payload: bytes::Bytes,
+		payload: crate::frame::Payload,
 		version: Version,
 	) -> Result<(), Error> {
 		stream.varint(payload.len() as u64).await?;
@@ -5512,7 +5512,7 @@ enum GroupState {
 	Serve {
 		writer: Writer<crate::transport::boxed::SendStream, Version>,
 		frame: Option<frame::Consumer>,
-		chunk: Option<bytes::Bytes>,
+		chunk: Option<crate::frame::Payload>,
 		batch: Box<arrayvec::ArrayVec<frame::Object, 8>>,
 		batch_pos: usize,
 	},
@@ -5690,7 +5690,7 @@ impl GroupServe {
 											.as_ref()
 											.map_or(self.group.index() - 1, |fields| fields.id);
 										if id >= self.slice.skip {
-											*chunk = Some(next);
+											*chunk = Some(next.into());
 										}
 									}
 									Poll::Ready(Ok(None)) => *frame = None,

@@ -339,9 +339,27 @@ async fn bufferbloat_is_not_a_stuck_window() {
 	assert!(stats.down.throttled > 0, "the bottleneck held the sender back: {stats}");
 }
 
-/// A frame larger than the whole window, which can never complete: the stuck window
-/// evicts it like any other, so its reader learns the group was evicted and is not
-/// fetched again.
+/// A frame many windows long still completes, since its credit returns as each storage
+/// segment seals: the window only has to fit one segment, so nothing is evicted.
+#[tokio::test]
+async fn lite_frame_of_many_windows_completes() {
+	// Room for one of moq-net's 1 MiB storage segments and its framing.
+	const SEGMENTED: usize = 4 << 20;
+	let setup = setup("moq-lite-06", transport(SEGMENTED as u64)).await;
+	let (track, mut sub) = setup.subscribe("file", 0).await;
+
+	let payload = Bytes::from((0..4 * SEGMENTED).map(|i| (i % 251) as u8).collect::<Vec<_>>());
+	let mut group = track.append_group().unwrap();
+	group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+	group.finish().unwrap();
+
+	assert!(next_frame(&mut sub).await == payload, "the frame arrived corrupted");
+	assert_eq!(setup.conn.stats().credit.evicted, 0);
+}
+
+/// A frame within one storage segment but larger than the whole window, which can never
+/// complete: the stuck window evicts it like any other, so its reader learns the group
+/// was evicted and is not fetched again.
 #[tokio::test]
 async fn lite_frame_past_the_window_gives_way() {
 	let setup = setup("moq-lite-06", transport(WINDOW as u64)).await;
