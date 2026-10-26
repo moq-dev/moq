@@ -31,5 +31,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [AMF0 exact reads](/quest/m1/rtmp-amf0-exact-reads.md) - the truncated-string fix in the same decoder
 - [RTMP sessions follow one strict path](/quest/m1/cut-audit/rtmp-session-strict.md) - the session layer above this decoder

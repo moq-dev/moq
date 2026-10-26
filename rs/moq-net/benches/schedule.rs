@@ -14,8 +14,8 @@
 //!
 //! `fanout` sweeps subscriptions against groups in flight per subscription, timing one frame,
 //! so a scheduling cost that grows with the table rather than the touched path is a slope.
-//! `datagram` sweeps send groups and queued datagrams per group against one datagram sent
-//! and one evicted, for the same reason.
+//! `datagram` sweeps send groups and queued datagrams per group against one
+//! datagram sent and one evicted, for the same reason.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
