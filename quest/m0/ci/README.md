@@ -99,6 +99,13 @@ kixelated/rust2's
 decides between crane with mbx, crate2nix, and cargo with mbx after the crane
 fixes land.
 
+Decided 2026-10-25 (maintainer), from a profile of moq-net: monomorphized
+generics dominate its build (53% of the library's CPU), and its test target
+costs 3x the library. A "thin generics" profile shrinks them: generic entry
+points delegate to non-generic bodies, and BTreeMap instantiations are shared.
+kixelated/rust2's driver lints the rule later. Making IETF support a cargo
+feature was considered and not planned: the churn outweighs the build saving.
+
 Measure each change against a current baseline and record the result in its PR.
 The historical samples locate candidates; they are not controlled benchmarks.
 
@@ -115,3 +122,6 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [Audit CI's package selection](/quest/m0/ci/select-audit.md) - how often the queue runs everything, and whether each rule that forces it is needed
 - [First shared FFI release](/quest/m0/ci/nightly-ffi-reuse.md) - condition: the backport merges and the next `moq-ffi-v*` tag runs `Release FFI`; verify the wrappers
 - [Loom tests compile](/quest/m0/ci/loom-build.md) - `just rs loom` builds on main and a `--cfg loom` break fails its PR
+- [Thin generic test executors](/quest/m0/ci/thin-executors.md) - `moq_clock::sim::run` and the tokio test executor compile once instead of once per test
+- [Fewer BTreeMap instantiations](/quest/m0/ci/btree-keys.md) - moq-net shares BTreeMap key and value types, kept only if its CPU time drops
+- [Measure moving unit tests out](/quest/m0/ci/test-layout.md) - report what moq-net would save by not compiling its library twice for unit tests
