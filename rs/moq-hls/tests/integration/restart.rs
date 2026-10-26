@@ -4,24 +4,32 @@
 use std::time::Duration;
 
 use axum::http::StatusCode;
+use moq_hls::export::segments;
 
 use crate::support::*;
 
 const OLD: u8 = 1;
 const NEW: u8 = 2;
 
-/// The old run finishes after takeover, while its recording still needs the last open GOP.
-#[tokio::test(start_paused = true)]
-async fn takeover_lite06() {
-	takeover("moq-lite-06").await;
+/// What the replaced run's recording holds when the new instance takes over.
+#[derive(Clone, Copy, Debug)]
+enum Case {
+	/// A cached segment returned while the cursor's live SUBSCRIBE was still unanswered.
+	/// Without an epoch nothing says which instance answers it, so it is refused and the
+	/// recording loses the old run's last uncached GOP.
+	Unanswered,
+	/// As [`Self::Unanswered`], while the replacement's own group of the same number is
+	/// still open, which the old cursor once waited on forever.
+	UnansweredUnfinished,
+	/// The live subscription was answered before the takeover, so it stays on the old run
+	/// and drains every segment of its own.
+	Answered,
+	/// As [`Self::Unanswered`], with the old run finished just before the new instance
+	/// announces.
+	FinishedFirst,
 }
 
-#[tokio::test(start_paused = true)]
-async fn takeover_lite07() {
-	takeover("moq-lite-07-wip").await;
-}
-
-async fn takeover(version: &str) {
+async fn takeover(version: &str, case: Case) {
 	let pair = Pair::new(version.parse().unwrap(), Default::default()).await;
 	let mut old = Publisher::new(&pair.publisher, "live", Default::default());
 	let server = pair.server();
@@ -50,6 +58,12 @@ async fn takeover(version: &str) {
 		first.media.as_deref().expect("first segment media"),
 		&[OLD; 8]
 	));
+	match case {
+		// Paused, the clock only moves once every task is idle, so the feed has its answer.
+		Case::Answered => moq_clock::sleep(Duration::from_millis(500)).await,
+		Case::FinishedFirst => old.finish(),
+		Case::Unanswered | Case::UnansweredUnfinished => {}
+	}
 
 	// The new instance numbers its groups and segments from zero again.
 	let route = moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
@@ -86,19 +100,77 @@ async fn takeover(version: &str) {
 		assert_old(&app, &uri.replace("/seg/run-1.", "/seg/run-2.")).await;
 	}
 
-	// The old run ends while the new one carries on past the old run's last group.
-	old.finish();
-	new.write(13, 21, NEW);
+	// The old run ends, while the new one carries on past the old run's last group unless it
+	// leaves that group open.
+	if !matches!(case, Case::FinishedFirst) {
+		old.finish();
+	}
+	if !matches!(case, Case::UnansweredUnfinished) {
+		new.write(13, 21, NEW);
+	}
 	drop(old);
 
-	// The old recording drains every segment of its own, its final GOP included, and nothing else.
+	// The old recording reads only its own segments, and either completes or fails at the GOP
+	// it lost.
+	let (read, end) = drain_old(&mut cursor).await;
+	match case {
+		Case::Answered => {
+			end.unwrap_or_else(|err| panic!("{case:?}: {err}"));
+			assert_eq!(read, [1, 2, 3], "{case:?}");
+			let playlist = rendition.media_playlist(None).expect("finished").expect("listed");
+			assert!(playlist.ends_with("#EXT-X-ENDLIST\n"), "{case:?}: {playlist}");
+		}
+		Case::Unanswered | Case::UnansweredUnfinished | Case::FinishedFirst => {
+			assert!(
+				matches!(end, Err(moq_hls::Error::SegmentUnavailable { segment: 3 })),
+				"{case:?}: {end:?}"
+			);
+			assert_eq!(read, [1, 2], "{case:?}");
+		}
+	}
+
+	for uri in &old_segments {
+		assert_old(&app, uri).await;
+	}
+	drop(new);
+}
+
+#[tokio::test(start_paused = true)]
+async fn unanswered_lite06() {
+	takeover("moq-lite-06", Case::Unanswered).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn unanswered_lite07() {
+	takeover("moq-lite-07-wip", Case::Unanswered).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn unanswered_unfinished() {
+	takeover("moq-lite-07-wip", Case::UnansweredUnfinished).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn answered() {
+	takeover("moq-lite-07-wip", Case::Answered).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn finished_first() {
+	takeover("moq-lite-07-wip", Case::FinishedFirst).await;
+}
+
+/// Read `cursor` until it ends, asserting each segment carries only the old run's media.
+async fn drain_old(cursor: &mut segments::Consumer) -> (Vec<u64>, moq_hls::Result<()>) {
 	let mut read = Vec::new();
 	loop {
 		let next = moq_clock::timeout(TIMEOUT, cursor.next())
 			.await
-			.expect("the replaced run's cursor never ended");
-		let Some(segment) = next.expect("the replaced run finished cleanly") else {
-			break;
+			.expect("the replaced run's cursor stalled");
+		let segment = match next {
+			Ok(Some(segment)) => segment,
+			Ok(None) => return (read, Ok(())),
+			Err(err) => return (read, Err(err)),
 		};
 		let media = segment.media.as_deref().expect("segment media");
 		assert!(
@@ -108,15 +180,6 @@ async fn takeover(version: &str) {
 		);
 		read.push(segment.segment);
 	}
-	assert_eq!(read, [1, 2, 3]);
-	let playlist = rendition.media_playlist(None).expect("finished").expect("listed");
-	assert!(playlist.ends_with("#EXT-X-ENDLIST\n"), "{playlist}");
-
-	for uri in &old_segments {
-		assert_old(&app, uri).await;
-	}
-	assert_eq!(get(&app, &new_segment).await.status(), StatusCode::OK);
-	drop(new);
 }
 
 /// `uri` answers the old run's bytes or nothing at all.

@@ -1885,16 +1885,16 @@ struct TracksRecv {
 	gate: crate::auth::Gate,
 	/// The gate let the listing through, and this hop synced its readers.
 	admitted: bool,
-	/// Until the request is out, the source must still be the selected instance: a TRACKS
-	/// request without an epoch would list its replacement.
-	validity: crate::model::broadcast::RequestValidity,
+	/// Until the peer answers, the source must still be the selected instance: a TRACKS
+	/// request without an epoch lists whichever instance won the path when it arrived.
+	unanswered: Option<crate::model::broadcast::RequestValidity>,
 }
 
 impl TracksRecv {
 	/// Apply the peer's events until it ends the listing, or the error that ends it.
 	fn poll(&mut self, source: &SourceServe, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		if self.stream.is_none() {
-			self.validity.check(waiter)?;
+		if let Some(validity) = &self.unanswered {
+			validity.check(waiter)?;
 		}
 		ready!(self.gate.poll_ready(waiter));
 		if self.gate.poll_denied(waiter).is_ready() {
@@ -1923,7 +1923,9 @@ impl TracksRecv {
 		ready!(stream.writer.poll_flush(&mut cx))?;
 		loop {
 			ready!(self.budget.poll_yield(waiter));
-			let Some(event) = ready!(stream.reader.poll_decode_maybe::<lite::TracksEvent>(&mut cx))? else {
+			let event = ready!(stream.reader.poll_decode_maybe::<lite::TracksEvent>(&mut cx))?;
+			self.unanswered = None;
+			let Some(event) = event else {
 				return Poll::Ready(Ok(()));
 			};
 			match event {
@@ -2007,7 +2009,7 @@ impl SourceServe {
 							crate::auth::Direction::Subscribe,
 						),
 						admitted: false,
-						validity: self.dynamic.validity().start(),
+						unanswered: Some(self.dynamic.validity().start()),
 					});
 				}
 				Some(_) if self.lister.poll_unused(waiter).is_ready() => {
@@ -2138,6 +2140,7 @@ mod tests {
 			served: None,
 			end: None,
 			wanted: None,
+			unanswered: None,
 		})
 	}
 
@@ -2252,6 +2255,7 @@ mod tests {
 				served: None,
 				end: None,
 				wanted: None,
+				unanswered: None,
 			});
 			if update {
 				h.serve
@@ -2712,6 +2716,7 @@ mod tests {
 			served: None,
 			end: Some(lite::SubscribeEnd { group: 10 }),
 			wanted: None,
+			unanswered: None,
 		};
 		assert_eq!(
 			sub.owed(None),
@@ -4055,6 +4060,30 @@ mod tests {
 		assert!(kio::Task::poll(&mut serve, &kio::Waiter::noop()).is_ready());
 		assert!(matches!(tracks.next().now_or_never(), Some(Err(Error::Unroutable))));
 		assert_eq!(session.log.bi_opens(), 0);
+	}
+
+	/// An instance retired while its listing is on the wire but unanswered lists nothing:
+	/// the peer may list the replacement that won the path.
+	#[moq_clock::test]
+	async fn an_unanswered_listing_of_a_retired_instance_is_refused() {
+		let open = kio::Producer::new(true);
+		let session = SinkSession::gated_bi(open.consume());
+		let selected = kio::Producer::new(());
+		let validity = crate::model::broadcast::RequestValidity::Route(selected.consume());
+		let (mut serve, consumer, _route) = listed_source(session.clone(), crate::auth::Link::new(false), validity);
+		let mut tracks = consumer.tracks().unwrap();
+
+		assert!(kio::Task::poll(&mut serve, &kio::Waiter::noop()).is_pending());
+		assert_eq!(session.log.bi_opens(), 1);
+		assert!(matches!(
+			tracks.next().now_or_never(),
+			Some(Ok(Some(crate::broadcast::TracksEvent::Synced)))
+		));
+
+		drop(selected);
+		let _ = kio::Task::poll(&mut serve, &kio::Waiter::noop());
+		assert!(matches!(tracks.next().now_or_never(), Some(Err(Error::Unroutable))));
+		assert_eq!(session.log.resets(), vec![crate::StreamError::Unroutable.to_code()]);
 	}
 
 	/// A listing outside the session's scope is refused before it reaches the wire.
@@ -5946,6 +5975,10 @@ struct SubStream {
 	end: Option<lite::SubscribeEnd>,
 	/// The refresh join's wanted group, restated in every SUBSCRIBE_UPDATE.
 	wanted: Option<u64>,
+	/// Until the publisher's first response, what the source must still hold: a SUBSCRIBE
+	/// without an epoch resolves whichever instance wins the path when it arrives, so one
+	/// still unanswered once the source is replaced may be answered by the replacement.
+	unanswered: Option<crate::model::broadcast::RequestValidity>,
 }
 
 impl SubStream {
@@ -6626,7 +6659,7 @@ impl Establish {
 						self.state = EstablishState::WaitOk { stream };
 						continue;
 					}
-					return Poll::Ready(Ok(self.activate(stream)));
+					return Poll::Ready(Ok(self.activate(stream, false)));
 				}
 				EstablishState::WaitOk { stream } => {
 					if let Poll::Ready(err) = self.closed.poll_closed(&mut cx) {
@@ -6640,7 +6673,7 @@ impl Establish {
 					else {
 						unreachable!()
 					};
-					return Poll::Ready(Ok(self.activate(stream)));
+					return Poll::Ready(Ok(self.activate(stream, true)));
 				}
 			}
 		}
@@ -6654,8 +6687,10 @@ impl Establish {
 		}
 	}
 
-	fn activate(&self, stream: Stream<Transport, Version>) -> SubStream {
+	/// The live subscription, `answered` once the publisher's first response arrived.
+	fn activate(&self, stream: Stream<Transport, Version>, answered: bool) -> SubStream {
 		SubStream {
+			unanswered: (!answered).then(|| self.validity.clone()),
 			stream,
 			id: self.id,
 			max_delay: wire_max_delay(self.subscription.max_delay),
@@ -7479,6 +7514,7 @@ impl ServeLoop {
 						// subscription now. A query still held once that subscription ends
 						// stays local: nothing reopens the TRACK for it.
 						self.held = None;
+						active.unanswered = None;
 						match res {
 							Ok(Some(msg)) => {
 								match &msg {
@@ -7598,6 +7634,16 @@ impl ServeLoop {
 								return Poll::Ready(ServeEnd::GiveBack(err));
 							}
 						}
+					}
+
+					// A SUBSCRIBE still unanswered once its source is replaced may have resolved
+					// the replacement: refuse it. An answer already read above wins.
+					if let Sub::Active(active) = &self.sub
+						&& let Some(validity) = &active.unanswered
+						&& let Err(err) = validity.check(waiter)
+					{
+						tracing::debug!(broadcast = %serve.subscriber.log_path(&serve.path), track = %serve.name, "unanswered subscribe refused: instance replaced");
+						return Poll::Ready(ServeEnd::GiveBack(err));
 					}
 
 					// (5) The session died: hand the track back for another route, with

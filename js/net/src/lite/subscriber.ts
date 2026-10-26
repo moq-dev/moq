@@ -140,6 +140,9 @@ interface SubscribeEntry {
 	// the SUBSCRIBE has its first response, so the publisher's demand never lapses between
 	// the two.
 	held?: Stream;
+	// Called at the SUBSCRIBE's first response (lite-05+). Until then a SUBSCRIBE without an
+	// epoch may be answered by whichever instance won the path, so its retirement refuses it.
+	answered?: () => void;
 }
 
 /** Subscribe to the peer and own its receive-side protocol tasks.
@@ -689,8 +692,8 @@ export class Subscriber {
 	// fails, our grant stops covering the broadcast, or nobody lists the broadcast any more.
 	// Returns without answering when setup was cut short, for the caller to look again.
 	async #listTracks(broadcast: Path.Valid, consumed: Consumed, lister: Lister): Promise<void> {
-		// Until the request is out, the consumed instance must still be the selected one: a TRACKS
-		// request without an epoch would list its replacement.
+		// Until the peer answers, the consumed instance must still be the selected one: a TRACKS
+		// request without an epoch lists whichever instance won the path when it arrived.
 		const valid = consumed.valid;
 		if (valid?.aborted) {
 			lister.abort(error(valid.reason));
@@ -748,10 +751,12 @@ export class Subscriber {
 			await stream.writer.u53(StreamId.Tracks);
 			await new TracksMessage(broadcast, consumed.epoch).encode(stream.writer, this.version);
 			let synced = false;
+			let unanswered = cut;
 			for (;;) {
 				const pause = listingBudget.poll();
 				if (pause !== undefined) await untilAborted(pause, stop);
-				const event = await untilAborted(decodeTracksEventMaybe(stream.reader, this.version), stop);
+				const event = await untilAborted(decodeTracksEventMaybe(stream.reader, this.version), unanswered);
+				unanswered = stop;
 				if (!event) {
 					// The peer's broadcast ended, whether or not its retraction has arrived: end the
 					// listing and let go of what it listed. FIN our half too, so the stream is done.
@@ -921,8 +926,10 @@ export class Subscriber {
 			return;
 		}
 
-		valid?.removeEventListener("abort", retire);
 		const { stream, entry } = opened;
+		// Older drafts already waited for SUBSCRIBE_OK.
+		if (hasTrackStream(this.version)) entry.answered = () => valid?.removeEventListener("abort", retire);
+		else valid?.removeEventListener("abort", retire);
 		const producer = entry.track;
 		try {
 			// Watch for subscription changes and send SUBSCRIBE_UPDATE. Lite01/Lite02
@@ -980,6 +987,7 @@ export class Subscriber {
 			console.warn(`subscribe error: id=${id} broadcast=${broadcast} track=${request.name} error=${reason(e)}`);
 			stream.abort(e);
 		} finally {
+			valid?.removeEventListener("abort", retire);
 			entry.held?.close();
 			this.#subscribes.delete(id);
 		}
@@ -1394,6 +1402,8 @@ export class Subscriber {
 			// The publisher answered, so its demand stands on the subscription from here.
 			entry.held?.close();
 			entry.held = undefined;
+			entry.answered?.();
+			entry.answered = undefined;
 			if (!resp) {
 				if (entry.end === undefined && entry.track.closed.peek() === undefined)
 					throw new ProtocolViolation("subscribe stream ended without SUBSCRIBE_END");
