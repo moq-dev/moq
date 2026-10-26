@@ -124,6 +124,5 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [First shared FFI release](/quest/m0/ci/nightly-ffi-reuse.md) - condition: the backport merges and the next `moq-ffi-v*` tag runs `Release FFI`; verify the wrappers
 - [Loom tests compile](/quest/m0/ci/loom-build.md) - `just rs loom` builds on main and a `--cfg loom` break fails its PR
 - [just check without user namespaces](/quest/m0/ci/check-without-userns.md) - a host that refuses `unshare` reports the flake module as not run instead of cancelling other lanes
-- [Thin generic test executors](/quest/m0/ci/thin-executors.md) - `moq_clock::sim::run` and the tokio test executor compile once instead of once per test
 - [Fewer BTreeMap instantiations](/quest/m0/ci/btree-keys.md) - moq-net shares BTreeMap key and value types, kept only if its CPU time drops
 - [Measure moving unit tests out](/quest/m0/ci/test-layout.md) - report what moq-net would save by not compiling its library twice for unit tests
