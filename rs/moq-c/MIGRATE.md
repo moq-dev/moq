@@ -8,6 +8,10 @@ How to update your code for each breaking change, newest first.
 
 `moq_session_bandwidth` is `moq_session_allocator`, `moq_bandwidth_reserve` is `moq_allocator_reserve`, and `moq_bandwidth_close` is `moq_allocator_close`, matching `moq_net::bandwidth::Allocator`. `moq_reservation_grant` is `moq_reservation_rate`, matching `moq_net::bandwidth::Reservation::rate()`. Signatures are unchanged. The receive estimate keeps its names (`moq_session_recv_bandwidth`, `moq_bandwidth_consumer_*`).
 
+### Decoders deliver reads
+
+`moq_decode_audio` and `moq_decode_video` call back with a read id per decoded frame, gap, or encoder end instead of a frame id. Replace `moq_decode_audio_frame` / `moq_decode_video_frame` with `moq_decode_audio_read` / `moq_decode_video_read`, which fill a `moq_audio_read` / `moq_video_read`: check `kind` (`MOQ_DECODE_READ_FRAME`, `MOQ_DECODE_READ_GAP`, `MOQ_DECODE_READ_END`) and take the frame from its `frame` field, the lost span from `gap`, or `end_us`. Free every id with `moq_decode_audio_read_free` / `moq_decode_video_read_free` where you called the `_frame_free` functions. Skip gap and end reads to keep the old behavior, or restart playback there, since what follows does not continue what came before.
+
 ### Sessions report a lifecycle snapshot
 
 `moq_session_connect` and `moq_session_request_accept` take a `moq_state_callback` instead of a `moq_status_callback`: `void on_state(void *user_data, const moq_connection_state *state)`.

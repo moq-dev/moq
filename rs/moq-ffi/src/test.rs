@@ -731,7 +731,15 @@ async fn audio_raw_publish_from_many_threads() {
 	let closer = audio.clone();
 	std::thread::spawn(move || closer.finish()).join().unwrap().unwrap();
 	let mut pcm = Vec::new();
-	while let Some(frame) = tokio::time::timeout(TIMEOUT, decoder.next()).await.unwrap().unwrap() {
+	while let Some(read) = tokio::time::timeout(TIMEOUT, decoder.next()).await.unwrap().unwrap() {
+		let frame = match read {
+			MoqAudioRead::Frame { frame } => frame,
+			MoqAudioRead::End { end_us } => {
+				assert_eq!(end_us, 250_000 + 8 * 20_000, "the finish ends after the last frame");
+				continue;
+			}
+			MoqAudioRead::Gap { .. } => panic!("nothing was lost"),
+		};
 		assert_eq!(frame.timestamp_us, 250_000 + pcm.len() as u64 / 2 * 1_000_000 / 48_000);
 		pcm.extend(frame.data.as_chunks::<4>().0.iter().map(|s| f32::from_le_bytes(*s)));
 	}
@@ -867,12 +875,14 @@ async fn raw_audio_decode_delay() {
 			.unwrap();
 	}
 	for read in [fixed_read, estimated_read] {
-		let frame = tokio::time::timeout(TIMEOUT, read)
+		let read = tokio::time::timeout(TIMEOUT, read)
 			.await
 			.expect("timed out waiting for decoded audio")
 			.unwrap()
-			.unwrap()
-			.expect("expected a decoded frame");
+			.unwrap();
+		let Some(MoqAudioRead::Frame { frame }) = read else {
+			panic!("expected a decoded frame");
+		};
 		let pcm: Vec<f32> = frame
 			.data
 			.as_chunks::<4>()
@@ -891,6 +901,95 @@ async fn raw_audio_decode_delay() {
 	assert_ne!(estimated.delay(), initial, "the estimate updates as frames are read");
 
 	audio.finish().unwrap();
+	broadcast.close().unwrap();
+}
+
+/// Each encoder the publisher stops, by a reanchor or a finish, reaches the caller as an
+/// end in microseconds rather than vanishing between frames.
+#[cfg(feature = "audio")]
+#[tokio::test]
+async fn raw_audio_decode_reports_encoder_ends() {
+	use crate::audio::*;
+
+	const FRAME_SAMPLES: usize = 960;
+	const FRAME_US: u64 = 20_000;
+	const RESUMED_US: u64 = 1_000_000;
+
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let consumer = broadcast.consume().unwrap();
+	let catalogs = MoqMediaCatalogConsumer::subscribe(&consumer).await.unwrap();
+	let audio = MoqAudioProducer::new(
+		&MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
+		MoqAudioProducerOptions {
+			input: MoqAudioEncoderInput {
+				format: MoqAudioSampleFormat::F32,
+				sample_rate: 48_000,
+				channels: 1,
+			},
+			output: MoqAudioEncoderOutput {
+				codec: MoqAudioCodec::opus(),
+				sample_rate: None,
+				channels: None,
+				bitrate: None,
+				frame_duration: Some(Duration::from_micros(FRAME_US)),
+			},
+			track: Some("microphone".into()),
+			bandwidth: None,
+		},
+	)
+	.unwrap();
+	let snapshot = catalogs.next().await.unwrap().unwrap();
+	let decoder = MoqAudioConsumer::subscribe(
+		&consumer,
+		"microphone".into(),
+		snapshot.audio["microphone"].clone(),
+		MoqAudioDecoderOutput {
+			// Reading starts only after finish, so keep every group.
+			max_delay: Some(Duration::from_secs(30)),
+			..audio_output()
+		},
+	)
+	.await
+	.unwrap();
+
+	for (i, timestamp_us) in [0, FRAME_US, RESUMED_US, RESUMED_US + FRAME_US].into_iter().enumerate() {
+		if timestamp_us == RESUMED_US {
+			audio.reanchor().unwrap();
+		}
+		audio
+			.write(MoqAudioFrame {
+				timestamp_us,
+				data: audio_tone(i * FRAME_SAMPLES, FRAME_SAMPLES, 1),
+			})
+			.unwrap();
+	}
+	audio.finish().unwrap();
+
+	let mut ends = Vec::new();
+	let mut frames = Vec::new();
+	while let Some(read) = tokio::time::timeout(TIMEOUT, decoder.next()).await.unwrap().unwrap() {
+		match read {
+			MoqAudioRead::Frame { frame } => frames.push((ends.len(), frame.timestamp_us)),
+			MoqAudioRead::Gap { .. } => panic!("nothing was lost"),
+			MoqAudioRead::End { end_us } => ends.push(end_us),
+		}
+	}
+	// The reanchor drops whatever the first encoder's lookahead still held, while the
+	// finish drains the second one completely.
+	assert_eq!(ends.len(), 2, "{ends:?}");
+	assert!(ends[0] > 0 && ends[0] <= 2 * FRAME_US, "{ends:?}");
+	assert_eq!(ends[1], RESUMED_US + 2 * FRAME_US);
+	assert!(
+		frames.iter().any(|&(epoch, _)| epoch == 1),
+		"the reanchored encoder decodes after the first end: {frames:?}"
+	);
+	for (epoch, timestamp_us) in frames {
+		if epoch == 0 {
+			assert!(timestamp_us < ends[0], "{timestamp_us} past the first end");
+		} else {
+			assert!(timestamp_us >= RESUMED_US, "{timestamp_us} before the reanchor");
+		}
+	}
 	broadcast.close().unwrap();
 }
 
@@ -3747,11 +3846,14 @@ async fn video_decode_frame_ownership() {
 	}
 
 	let next = async |decoder: &MoqVideoConsumer| {
-		tokio::time::timeout(TIMEOUT, decoder.next())
+		let read = tokio::time::timeout(TIMEOUT, decoder.next())
 			.await
 			.expect("timed out")
-			.unwrap()
-			.expect("expected a frame")
+			.unwrap();
+		match read {
+			Some(MoqVideoRead::Frame { frame }) => frame,
+			_ => panic!("expected a frame"),
+		}
 	};
 	let frame = next(&portable).await;
 	let retained = match &retaining {

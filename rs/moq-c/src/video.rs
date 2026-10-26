@@ -18,9 +18,10 @@ use std::time::Duration;
 
 use tokio::sync::oneshot;
 
+use crate::decode::Read;
 use crate::ffi::OnStatus;
 use crate::task::Task;
-use crate::{Error, Id, NonZeroSlab, Shared, State, ffi};
+use crate::{Error, Id, NonZeroSlab, Shared, State, ffi, moq_decode_gap, moq_decode_read_kind};
 
 // ---- C-visible types ----
 
@@ -168,9 +169,9 @@ pub struct moq_video_decoder_output {
 /// height/2` each), no row padding, BT.601 limited range; RGBA is tightly
 /// packed `width * height * 4` bytes, no row padding.
 ///
-/// The frame id owns the decoded picture, and the pixels are produced from it
-/// on the first [`moq_decode_video_frame`] call for that id. `data` stays valid
-/// until the same id is released with [`moq_decode_video_frame_free`].
+/// The read id owns the decoded picture, and the pixels are produced from it
+/// on the first [`moq_decode_video_read`] call for that id. `data` stays valid
+/// until the same id is released with [`moq_decode_video_read_free`].
 ///
 /// The publish side has its own [`moq_video_encoder_frame`], which carries no
 /// dimensions because the encoder already fixed them.
@@ -188,15 +189,32 @@ pub struct moq_video_frame {
 	pub data_size: usize,
 }
 
+/// One read from [`moq_decode_video`]: a decoded picture, or a break between them.
+/// `kind` says which field is filled; the others are zeroed.
+#[repr(C)]
+pub struct moq_video_read {
+	/// Which kind of read this is.
+	pub kind: moq_decode_read_kind,
+	/// The decoded picture, for [moq_decode_read_kind::MOQ_DECODE_READ_FRAME].
+	pub frame: moq_video_frame,
+	/// The lost span, for [moq_decode_read_kind::MOQ_DECODE_READ_GAP]. Every picture from
+	/// before the loss precedes it, and what follows does not continue what came before.
+	pub gap: moq_decode_gap,
+	/// Where the stopped encoder's media stops in microseconds, for
+	/// [moq_decode_read_kind::MOQ_DECODE_READ_END]. The stopped encoder's last pictures
+	/// precede it; what follows comes from a fresh encoder.
+	pub end_us: u64,
+}
+
 // ---- State extension (used internally by lib.rs) ----
 
-/// Raw-video state: encoders being published, plus decoder tasks and their
-/// buffered decoded frames.
+/// Raw-video state: encoders being published, plus decoder tasks and the
+/// reads they delivered.
 #[derive(Default)]
 pub struct Video {
 	producers: NonZeroSlab<Shared<VideoEncoder>>,
 	consumer_tasks: NonZeroSlab<Task>,
-	frames: NonZeroSlab<Arc<VideoFrame>>,
+	reads: NonZeroSlab<Read<Arc<VideoFrame>>>,
 }
 
 /// Wait out an encode-thread round trip from a C entry point.
@@ -332,7 +350,7 @@ impl crate::publish::Abort for Shared<VideoEncoder> {
 }
 
 /// A delivered frame: the decoded picture, retained until its id is freed, and
-/// the packed pixels [`moq_decode_video_frame`] produces from it on first use.
+/// the packed pixels [`moq_decode_video_read`] produces from it on first use.
 ///
 /// Converting on first use rather than at delivery keeps the work off the
 /// delivery task and skips it for a frame the caller frees unread. The pixels
@@ -581,7 +599,7 @@ impl Video {
 		self.producers.remove(id).ok_or(Error::MediaNotFound)
 	}
 
-	/// Decode a rendition and deliver frame handles to the callback.
+	/// Decode a rendition and deliver read handles to the callback.
 	pub fn consume(
 		&mut self,
 		rendition: crate::consume::Rendition<hang::catalog::VideoConfig>,
@@ -619,25 +637,24 @@ impl Video {
 		output: DecoderOutput,
 	) -> Result<(), Error> {
 		loop {
-			// `biased` so a pending close always wins over a ready frame.
-			let frame = tokio::select! {
+			// `biased` so a pending close always wins over a ready read.
+			let read = tokio::select! {
 				biased;
 				_ = &mut close => return Ok(()),
 				read = consumer.read() => match read? {
-					Some(moq_video::decode::Read::Frame(frame)) => frame,
-					// The C ABI hands over pictures only.
-					Some(moq_video::decode::Read::Gap { .. } | moq_video::decode::Read::End { .. }) => continue,
+					Some(moq_video::decode::Read::Frame(frame)) => Read::Frame(Arc::new(VideoFrame {
+						frame,
+						output,
+						pixels: OnceLock::new(),
+					})),
+					Some(moq_video::decode::Read::Gap { timestamp, duration }) => Read::gap(timestamp, duration)?,
+					Some(moq_video::decode::Read::End { end }) => Read::end(end)?,
 					None => return Ok(()),
 				},
 			};
 
-			let frame = Arc::new(VideoFrame {
-				frame,
-				output,
-				pixels: OnceLock::new(),
-			});
-			let frame_id = State::lock().video.frames.insert(frame)?;
-			callback.call(Ok(frame_id));
+			let read_id = State::lock().video.reads.insert(read)?;
+			callback.call(Ok(read_id));
 		}
 	}
 
@@ -646,15 +663,15 @@ impl Video {
 		self.consumer_tasks.close(id, Error::TrackNotFound)
 	}
 
-	/// Resolve a frame handle, so the caller can convert it with the global lock
-	/// released.
-	fn frame(&self, id: Id) -> Result<Arc<VideoFrame>, Error> {
-		self.frames.get(id).cloned().ok_or(Error::FrameNotFound)
+	/// Resolve a read handle, so the caller can convert its frame with the global
+	/// lock released.
+	fn read(&self, id: Id) -> Result<Read<Arc<VideoFrame>>, Error> {
+		self.reads.get(id).cloned().ok_or(Error::FrameNotFound)
 	}
 
-	/// Release a decoded frame handle.
-	pub fn frame_free(&mut self, id: Id) -> Result<(), Error> {
-		self.frames.remove(id).ok_or(Error::FrameNotFound)?;
+	/// Release a delivered read handle.
+	pub fn read_free(&mut self, id: Id) -> Result<(), Error> {
+		self.reads.remove(id).ok_or(Error::FrameNotFound)?;
 		Ok(())
 	}
 }
@@ -936,28 +953,29 @@ pub extern "C" fn moq_encode_video_finish(producer: u32) -> i32 {
 ///
 /// An unknown `output->format` or an invalid `output->width`/`height` fails
 /// here, before subscribing. Each frame is produced in the requested layout by
-/// [`moq_decode_video_frame`], which fails for that frame rather than deliver
+/// [`moq_decode_video_read`], which fails for that frame rather than deliver
 /// another layout.
 ///
 /// Returns a non-zero handle on success or a negative error code.
 ///
-/// `on_frame` is called with a positive frame id per decoded frame, then exactly
-/// once more with a terminal code: `0` (closed cleanly) or a negative error.
-/// After the terminal (`<= 0`) callback, `on_frame` is never called again and
-/// `user_data` is never touched again, so release `user_data` there. The terminal
-/// callback fires even after [`moq_decode_video_cancel`].
+/// `on_read` is called with a positive read id per decoded frame, gap, or encoder
+/// end (see [`moq_decode_video_read`]), then exactly once more with a terminal
+/// code: `0` (closed cleanly) or a negative error. After the terminal (`<= 0`)
+/// callback, `on_read` is never called again and `user_data` is never touched
+/// again, so release `user_data` there. The terminal callback fires even after
+/// [`moq_decode_video_cancel`].
 ///
 /// Starts at the newest cached group so reopening live playback skips the backlog.
 ///
 /// # Safety
 /// - `output` must point to a valid [`moq_video_decoder_output`].
-/// - `user_data` must stay valid until the terminal (`<= 0`) `on_frame` callback.
+/// - `user_data` must stay valid until the terminal (`<= 0`) `on_read` callback.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_decode_video(
 	catalog: u32,
 	index: u32,
 	output: *const moq_video_decoder_output,
-	on_frame: crate::moq_status_callback,
+	on_read: crate::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
@@ -980,24 +998,24 @@ pub unsafe extern "C" fn moq_decode_video(
 		// delivery loop still enforces it, since other backends ignore it.
 		options.decoder.scale_hint = size;
 		let output = DecoderOutput { format, size };
-		let on_frame = unsafe { OnStatus::new(user_data, on_frame)? };
+		let on_read = unsafe { OnStatus::new(user_data, on_read)? };
 
 		let mut state = State::lock();
 		let rendition = state.consume.rendition(catalog, index as usize)?;
 
 		let State { video, .. } = &mut *state;
-		video.consume(rendition, options, output, on_frame)
+		video.consume(rendition, options, output, on_read)
 	})
 }
 
 /// Stop a video (raw) consumer's background task.
 ///
 /// Returns immediately: zero on success, or a negative code if already closed.
-/// Does NOT free `user_data`; the on-frame callback still fires once more with a
+/// Does NOT free `user_data`; the on-read callback still fires once more with a
 /// terminal `0` (or a negative error), which is where `user_data` should be
-/// released. Frame ids already delivered are likewise not freed: each stays
+/// released. Read ids already delivered are likewise not freed: each stays
 /// readable after the terminal callback until released with
-/// [`moq_decode_video_frame_free`].
+/// [`moq_decode_video_read_free`].
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_decode_video_cancel(consumer: u32) -> i32 {
 	ffi::enter(move || {
@@ -1006,51 +1024,71 @@ pub extern "C" fn moq_decode_video_cancel(consumer: u32) -> i32 {
 	})
 }
 
-/// Write a delivered frame's pixels and metadata into `dst`.
+/// Write a delivered read into `dst`: its kind, and the frame's pixels, the gap,
+/// or the end it carries.
 ///
-/// The first call for an `id` converts the decoded picture to the layout and
-/// size [`moq_decode_video`] asked for; later calls return the same pixels. A
+/// The first call for a frame's `id` converts the decoded picture to the layout
+/// and size [`moq_decode_video`] asked for; later calls return the same pixels. A
 /// conversion failure returns a negative code for this frame only, leaving the
 /// id to be freed as usual. Safe to call from any thread, including inside the
-/// frame callback.
+/// read callback.
 ///
-/// The written `dst->data` pointer remains valid until the same `id` is released
-/// with [`moq_decode_video_frame_free`].
+/// The written `dst->frame.data` pointer remains valid until the same `id` is
+/// released with [`moq_decode_video_read_free`].
 ///
 /// # Safety
-/// - `dst` must point to a writable [`moq_video_frame`].
+/// - `dst` must point to a writable [`moq_video_read`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_decode_video_frame(id: u32, dst: *mut moq_video_frame) -> i32 {
+pub unsafe extern "C" fn moq_decode_video_read(id: u32, dst: *mut moq_video_read) -> i32 {
 	ffi::enter(move || {
 		let id = ffi::parse_id(id)?;
 		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
-		let frame = State::lock().video.frame(id)?;
-		let pixels = frame.pixels()?;
-		*dst = moq_video_frame {
-			// The decoded Timestamp is bounded by a QUIC varint, so its microseconds fit.
-			timestamp_us: frame.frame.timestamp.as_micros() as u64,
-			width: pixels.width,
-			height: pixels.height,
-			// The slab keeps its `Arc` until the id is freed, and the pixels are
-			// never replaced once set, so the pointer outlives this call.
-			data: pixels.data.as_ptr(),
-			data_size: pixels.data.len(),
+		let read = State::lock().video.read(id)?;
+		let (kind, gap, end_us) = read.info();
+		let frame = match &read {
+			Read::Frame(frame) => {
+				let pixels = frame.pixels()?;
+				moq_video_frame {
+					// The decoded Timestamp is bounded by a QUIC varint, so its microseconds fit.
+					timestamp_us: frame.frame.timestamp.as_micros() as u64,
+					width: pixels.width,
+					height: pixels.height,
+					// The slab keeps its `Arc` until the id is freed, and the pixels are
+					// never replaced once set, so the pointer outlives this call.
+					data: pixels.data.as_ptr(),
+					data_size: pixels.data.len(),
+				}
+			}
+			_ => moq_video_frame {
+				timestamp_us: 0,
+				width: 0,
+				height: 0,
+				data: std::ptr::null(),
+				data_size: 0,
+			},
+		};
+		*dst = moq_video_read {
+			kind,
+			frame,
+			gap,
+			end_us,
 		};
 		Ok(())
 	})
 }
 
-/// Free a frame previously delivered through the consume callback, releasing
-/// its decoded picture back to the decoder. Required for every delivered frame
-/// id; closing the parent consumer is not enough, and a decoder whose frames
-/// are all held stalls until some are freed.
+/// Free a read previously delivered through the decode callback, releasing a
+/// frame's decoded picture back to the decoder. Required for every delivered read
+/// id; closing the parent consumer is not enough, and a decoder whose frames are
+/// all held stalls until some are freed.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_decode_video_frame_free(id: u32) -> i32 {
+pub extern "C" fn moq_decode_video_read_free(id: u32) -> i32 {
 	ffi::enter(move || {
 		let id = ffi::parse_id(id)?;
-		State::lock().video.frame_free(id)
+		State::lock().video.read_free(id)
 	})
 }
+
 #[cfg(test)]
 mod tests {
 	use super::*;

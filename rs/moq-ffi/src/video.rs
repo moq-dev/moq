@@ -924,21 +924,65 @@ impl MoqVideoDecodedFrame {
 	}
 }
 
+/// One item of a [`MoqVideoConsumer`] read, in delivery order: a decoded picture, or a
+/// break between them.
+///
+/// Mirrors `moq_video::decode::Read`, the same shape as
+/// [`MoqAudioRead`](crate::audio::MoqAudioRead), so a player handles loss and ends alike
+/// for every media type.
+#[derive(uniffi::Enum)]
+pub enum MoqVideoRead {
+	/// A decoded picture.
+	Frame {
+		/// The decoded frame, holding a decoder buffer until it is released.
+		frame: Arc<MoqVideoDecodedFrame>,
+	},
+	/// Media after what was already read was lost: a group was skipped or never arrived.
+	/// Every picture from before the loss precedes it, and what follows does not continue
+	/// what came before.
+	Gap {
+		/// The furthest presentation point already read, in microseconds.
+		timestamp_us: u64,
+		/// An upper bound on how long until the next picture resumes.
+		duration: std::time::Duration,
+	},
+	/// The publisher stopped its encoder: it paused, switched source, or finished.
+	///
+	/// The stopped encoder's last pictures precede it; what follows comes from a fresh
+	/// encoder.
+	End {
+		/// Where the stopped encoder's media stops, in microseconds.
+		end_us: u64,
+	},
+}
+
+impl TryFrom<moq_video::decode::Read> for MoqVideoRead {
+	type Error = MoqError;
+
+	fn try_from(read: moq_video::decode::Read) -> Result<Self, MoqError> {
+		use crate::consumer::timestamp_us;
+		Ok(match read {
+			moq_video::decode::Read::Frame(frame) => Self::Frame {
+				frame: Arc::new(MoqVideoDecodedFrame { frame }),
+			},
+			moq_video::decode::Read::Gap { timestamp, duration } => Self::Gap {
+				timestamp_us: timestamp_us(timestamp)?,
+				duration: crate::ffi::duration(duration.into()),
+			},
+			moq_video::decode::Read::End { end } => Self::End {
+				end_us: timestamp_us(end)?,
+			},
+		})
+	}
+}
+
 struct VideoConsumerInner {
 	consumer: moq_video::decode::Consumer,
 }
 
 impl VideoConsumerInner {
-	async fn next(&mut self) -> Result<Option<Arc<MoqVideoDecodedFrame>>, MoqError> {
-		loop {
-			match self.consumer.read().await? {
-				Some(moq_video::decode::Read::Frame(frame)) => {
-					return Ok(Some(Arc::new(MoqVideoDecodedFrame { frame })));
-				}
-				Some(moq_video::decode::Read::Gap { .. } | moq_video::decode::Read::End { .. }) => {}
-				None => return Ok(None),
-			}
-		}
+	async fn next(&mut self) -> Result<Option<MoqVideoRead>, MoqError> {
+		self.consumer.read().await?.map(MoqVideoRead::try_from).transpose()
 	}
 }
 
@@ -950,8 +994,8 @@ pub struct MoqVideoConsumer {
 
 #[uniffi::export]
 impl MoqVideoConsumer {
-	/// The next decoded frame, or `None` once the track ends.
-	pub async fn next(&self) -> Result<Option<Arc<MoqVideoDecodedFrame>>, MoqError> {
+	/// The next decoded frame, gap, or encoder end, or `None` once the track ends.
+	pub async fn next(&self) -> Result<Option<MoqVideoRead>, MoqError> {
 		self.task.run(|mut state| async move { state.next().await }).await
 	}
 

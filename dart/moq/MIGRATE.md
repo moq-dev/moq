@@ -12,6 +12,10 @@ How to update your code for each breaking change, newest first.
 
 `Bandwidth` is `Allocator`, `bandwidth()` is `allocator()`, and `Reservation.grant()` is `rate()`. The producers' `bandwidth` option keeps its name.
 
+### Decoders read gaps and ends
+
+`audio.Consumer.next()` and `video.Consumer.next()` return a `Read` instead of a frame. Take `read.frame` from a `ReadFrame` where you used the frame; `ReadGap` marks lost media and `ReadEnd` where the publisher stopped its encoder, and what follows either does not continue what came before.
+
 ### Durations are `Duration` fields
 
 The records carry durations as `Duration` fields instead of `*Us` microsecond integers, so the duration extension getters are gone: read `backoff.initial`, `stats.rtt`, `grant.expires`, `info.maxAge`, `fill.maxDelay()`, and `consumer.delay()` directly.

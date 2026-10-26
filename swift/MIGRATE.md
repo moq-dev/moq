@@ -12,6 +12,10 @@ How to update your code for each breaking change, newest first.
 
 `Bandwidth` is `Allocator`, `Session.bandwidth()` is `allocator()`, and `Reservation.grant()` is `rate()`. `Bandwidth.Consumer`, returned by `recvBandwidth()`, is the top-level `BandwidthConsumer`. The producers' `bandwidth:` parameter keeps its name.
 
+### Decoders read gaps and ends
+
+`Audio.Consumer` and `Video.Consumer` yield `Audio.Read` / `Video.Read` instead of frames. Match `case .frame(let frame)` where you used each element as a frame; `.gap(timestampUs:duration:)` marks lost media and `.end(endUs:)` where the publisher stopped its encoder, and what follows either does not continue what came before.
+
 ### Durations are `TimeInterval`
 
 Every duration is a `TimeInterval` in seconds instead of a `UInt64` `...Us` field, and drops the suffix: `Client(timeout:race:resolutionDelay:)`, `Backoff(initial:max:timeout:)`, `QuicConfig(idleTimeout:keepAlive:)`, `WebSocketConfig(delay:)`, `ConnectionStats.rtt`, `Grant.expires`, `TrackInfo.maxAge`, `Subscription.maxDelay`, `Fill.maxDelay`, `Audio.Consumer.delay`, and the decoder outputs' `maxDelay` and `delay`.
