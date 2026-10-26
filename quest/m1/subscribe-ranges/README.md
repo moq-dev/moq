@@ -95,6 +95,7 @@ every sequence delivered or dropped.
 
 ## Required
 
+- [Relative starts hold through a relay](/quest/m1/subscribe-ranges/relative-relay.md) - `Relative(n)..` through a lite-07 relay reads the newest groups, as over one session
 - [Fetch as a range](/quest/m1/subscribe-ranges/fetch-range.md) - `fetch_group` becomes a one-range subscription that ends once its range is accounted for
 - [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - the lite-07 wire, Rust publisher and subscriber, and the draft
 - [moq-transport ranges](/quest/m1/subscribe-ranges/ietf.md) - range FETCH upstream per missing run, and non-blocking FETCH served downstream
@@ -103,4 +104,4 @@ every sequence delivered or dropped.
 ## Related
 
 - [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - bounds upstream waiting independently of content age
-- [Timestamp spike](/quest/m1/time-addressing/spike.md) - the cut reworks `Absolute(group)` ends and sequence-range drops onto times
+- [Rust groups by start](/quest/m1/time-addressing/model.md) - the cut reworks `Absolute(group)` ends and sequence-range drops onto times

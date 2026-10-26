@@ -10,6 +10,13 @@ live group.
 
 ## Plan
 
+The time-addressing spike measured the cost today
+([moq-dev/moq@ebdfd55](https://github.com/moq-dev/moq/commit/ebdfd55fc606db8f2c990b937392b81291ab4715)):
+a moq-transport-18 subscriber reading four groups 2000 IDs apart opened
+6,001 FETCH streams, direct or through a relay, against 4 for contiguous IDs,
+60,001 at 20,000-tick spacing, and did not finish in five minutes at 90 kHz.
+The subscriber's own fills take the same per-run FETCH as a relay's.
+
 This absorbs the relay half of fetch-span (#4558) and builds on fetch-fill's
 checks (#4544). Receiving a multi-group FETCH stream means several groups on
 one stream. Absent sequences between the FETCH's groups become drops, and a

@@ -19,4 +19,4 @@ Public API: none expected. Wire: none.
 
 ## Related
 
-- [Timestamp spike](/quest/m1/time-addressing/spike.md) - the cut removes the sequence half of this fix; a re-created track then only keeps its PTS moving forward
+- [Rust groups by start](/quest/m1/time-addressing/model.md) - the cut removes the sequence half of this fix; a re-created track then only keeps its PTS moving forward

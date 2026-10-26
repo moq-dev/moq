@@ -103,7 +103,8 @@ timestamp bound in [#6168](https://github.com/moq-dev/moq/pull/6168).
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - lite-07 carries the route layer: ROUTE per origin node and path-less ANNOUNCE, with the hop list gone
 - [Drop set](/quest/m1/drop-set.md) - lite-07's SUBSCRIBE_DROP carries `Max Age`, so a widening re-offers groups reported dropped
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - SUBSCRIBE carries ranges and an order and lite FETCH is gone, in Rust and JS
-- [Spike: timestamps replace group sequence numbers](/quest/m1/time-addressing/spike.md) - decides the lite-07 wire without group sequence numbers and adds the implementation quests here
+- [Lite-07 by start](/quest/m1/time-addressing/lite07.md) - lite-07 carries group starts, previous-start links, GROUP_END, and time bounds instead of sequence numbers
+- [@moq/net by start](/quest/m1/time-addressing/js.md) - JS speaks the same lite-07 wire
 - [Announcement takeover](/quest/m1/announce-takeover.md) - ANNOUNCE_TAKEOVER preserves a proven instance under a new independent route
 
 ## Related
