@@ -14,7 +14,7 @@
 
 use std::ptr::NonNull;
 
-use objc2_core_foundation::CFRetained;
+use objc2_core_foundation::{CFDictionary, CFRetained};
 use objc2_core_video::{
 	CVMetalTexture, CVMetalTextureCache, CVMetalTextureGetTexture, CVPixelBuffer, CVPixelBufferGetHeightOfPlane,
 	CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidthOfPlane, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
@@ -45,7 +45,9 @@ fn err(message: impl std::fmt::Display) -> Error {
 /// So the wrapper rides along in the texture's drop callback, which wgpu invokes
 /// once it no longer references the texture (after the submissions using it
 /// retire).
-struct Keepalive(#[expect(dead_code, reason = "held for its release, never read")] CFRetained<CVMetalTexture>);
+pub(super) struct Keepalive(
+	#[expect(dead_code, reason = "held for its release, never read")] pub(super) CFRetained<CVMetalTexture>,
+);
 
 // SAFETY: CoreVideo objects are CoreFoundation types whose retain/release are
 // thread-safe. Nothing here dereferences the wrapper after construction; it is
@@ -80,6 +82,40 @@ pub(super) fn supports(device: &wgpu::Device) -> bool {
 	unsafe { device.as_hal::<wgpu::hal::api::Metal>() }.is_some()
 }
 
+/// A `CVMetalTextureCache` on `device`'s `MTLDevice`, making every texture
+/// with `textures` as its attributes.
+///
+/// Errors when the device is not a Metal one.
+pub(super) fn texture_cache(
+	device: &wgpu::Device,
+	textures: Option<&CFDictionary>,
+) -> Result<CFRetained<CVMetalTextureCache>, Error> {
+	// SAFETY: the handle is only read to create the cache, and it is dropped
+	// before this returns, so nothing outlives the guard.
+	let metal =
+		unsafe { device.as_hal::<wgpu::hal::api::Metal>() }.ok_or_else(|| err("wgpu device is not a Metal device"))?;
+
+	let mut ptr: *mut CVMetalTextureCache = std::ptr::null_mut();
+	// SAFETY: `textures` is a CFDictionary of CoreVideo texture attributes, and
+	// `ptr` is a valid out-pointer for the duration.
+	let status = unsafe {
+		CVMetalTextureCache::create(
+			None,
+			None,
+			metal.raw_device(),
+			textures,
+			NonNull::new(&mut ptr).expect("stack pointer is non-null"),
+		)
+	};
+	drop(metal);
+
+	NonNull::new(ptr)
+		.filter(|_| status == 0)
+		// SAFETY: CVMetalTextureCacheCreate returns a +1 reference.
+		.map(|ptr| unsafe { CFRetained::from_raw(ptr) })
+		.ok_or_else(|| err(format!("CVMetalTextureCacheCreate failed: {status}")))
+}
+
 /// A `CVMetalTextureCache` bound to the renderer's Metal device.
 ///
 /// Held across frames on purpose: the cache is what recycles the per-IOSurface
@@ -101,32 +137,9 @@ impl Import {
 	/// Errors when the device is not a Metal one, for which
 	/// [`output`](super::output) picks `Output::Cpu`.
 	pub fn new(device: &wgpu::Device) -> Result<Self, Error> {
-		// SAFETY: the handle is only read to create the cache, and it is
-		// dropped before this returns, so nothing outlives the guard.
-		let metal = unsafe { device.as_hal::<wgpu::hal::api::Metal>() }
-			.ok_or_else(|| err("wgpu device is not a Metal device"))?;
-
-		let mut ptr: *mut CVMetalTextureCache = std::ptr::null_mut();
-		// SAFETY: no attribute dictionaries are passed (so there are no generics
-		// to get wrong), and `ptr` is a valid out-pointer for the duration.
-		let status = unsafe {
-			CVMetalTextureCache::create(
-				None,
-				None,
-				metal.raw_device(),
-				None,
-				NonNull::new(&mut ptr).expect("stack pointer is non-null"),
-			)
-		};
-		drop(metal);
-
-		let cache = NonNull::new(ptr)
-			.filter(|_| status == 0)
-			// SAFETY: CVMetalTextureCacheCreate returns a +1 reference.
-			.map(|ptr| unsafe { CFRetained::from_raw(ptr) })
-			.ok_or_else(|| err(format!("CVMetalTextureCacheCreate failed: {status}")))?;
-
-		Ok(Self { cache })
+		Ok(Self {
+			cache: texture_cache(device, None)?,
+		})
 	}
 
 	/// Alias each plane of `buffer` as a texture.

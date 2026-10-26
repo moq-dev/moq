@@ -4,7 +4,7 @@ use tracing::{debug, trace, trace_span};
 
 use super::{Connection, SentFrames, spaces::SentPacket};
 use crate::{
-	ConnectionId, Instant, TransportError, TransportErrorCode,
+	ConnectionId, Instant, TransportError, TransportErrorCode, congestion,
 	connection::ConnectionSide,
 	frame::{self, Close, FrameStruct},
 	packet::{FIXED_BIT, Header, InitialHeader, LongType, PacketNumber, PartialEncode, SpaceId},
@@ -210,12 +210,22 @@ impl PacketBuilder {
 			false => 0,
 		};
 
+		// Every packet counted in flight goes through the controller, which also paces it.
+		let congestion = (size != 0).then(|| {
+			conn.path.congestion.on_sent(congestion::Sent {
+				now,
+				bytes: size,
+				in_flight: conn.path.in_flight.bytes + u64::from(size),
+			})
+		});
+
 		let packet = SentPacket {
 			path_generation: conn.path.generation(),
 			largest_acked: sent.largest_acked,
 			time_sent: now,
 			size,
 			ack_eliciting,
+			congestion,
 			retransmits: sent.retransmits,
 			stream_frames: sent.stream_frames,
 			bandwidth_probe: sent.bandwidth_probe,
@@ -234,12 +244,8 @@ impl PacketBuilder {
 					conn.reset_idle_timeout(now, space_id);
 				}
 				conn.permit_idle_reset = false;
-				conn.path
-					.congestion
-					.on_packet_sent(now, size, exact_number, space_id.into());
 			}
 			conn.set_loss_detection_timer(now);
-			conn.path.pacing.on_transmit(size);
 			conn.bandwidth_probe.on_transmit(size);
 			if sent.bandwidth_probe {
 				conn.stats.path.sent_bandwidth_probes += 1;

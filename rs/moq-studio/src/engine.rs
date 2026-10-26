@@ -5,7 +5,7 @@
 //! - **program** draws preview and program once per canvas frame and hands the
 //!   program to the encoder, stamped with the program clock.
 //! - **audio** reads the program bus on the same clock and publishes it.
-//! - **encode** reads the program back from the GPU and encodes it.
+//! - **encode** waits for each program copy and encodes it.
 //! - **source-***: one per running source, since a capture stream may not
 //!   leave the thread that opened it.
 //! - The UI runs on the main thread and edits [`State`] under its lock.
@@ -19,10 +19,11 @@ use anyhow::Context;
 use bytes::Bytes;
 use moq_clock::Instant;
 use moq_scene::source::{self, Driver, Sources};
-use moq_scene::{Collection, Compositor, Pending, Readback, wgpu};
+use moq_scene::{Collection, Compositor, wgpu};
+use moq_video::render::export::{Exporter, Pending, Route};
 
 /// The GPU everything shares: sources upload to it, the compositor draws on
-/// it, the window presents from it, and the encoder reads back from it.
+/// it, the window presents from it, and the encoder reads the program from it.
 #[derive(Clone)]
 pub struct Gpu {
 	pub instance: wgpu::Instance,
@@ -41,15 +42,13 @@ impl Gpu {
 			})
 			.await
 			.context("no GPU adapter")?;
-		// Lets a hardware-decoded or captured DMA-BUF reach the compositor
-		// without a copy, where the driver can import one.
-		let features = adapter.features() & wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF;
-		let (device, queue) = adapter
-			.request_device(&wgpu::DeviceDescriptor {
-				label: Some("moq-studio"),
-				required_features: features,
-				..Default::default()
-			})
+		// Lets a hardware-decoded or captured frame reach the compositor, and the
+		// program reach the encoder, without a copy where the driver allows.
+		let descriptor = wgpu::DeviceDescriptor {
+			label: Some("moq-studio"),
+			..Default::default()
+		};
+		let (device, queue) = moq_video::render::request_device(&adapter, &descriptor)
 			.await
 			.context("cannot open the GPU")?;
 		Ok(Self {
@@ -126,11 +125,17 @@ pub fn load(path: &Path) -> anyhow::Result<Collection> {
 pub struct Stats {
 	/// Canvas frames drawn.
 	pub rendered: AtomicU64,
-	/// Program frames copied back to the CPU for the encoder.
+	/// Program frames handed to the encoder.
+	pub copied: AtomicU64,
+	/// Microseconds the last one waited on the GPU, and on a readback converted
+	/// pixels.
+	pub copy_us: AtomicU64,
+	/// Whether the encoder reads the program on the GPU, rather than each frame
+	/// being read back to the CPU.
+	pub zero_copy: AtomicBool,
+	/// Program frames read back to the CPU for the encoder.
 	pub read_back: AtomicU64,
-	/// Microseconds the last readback waited on the GPU and converted pixels.
-	pub readback_us: AtomicU64,
-	/// Program frames not encoded because the encoder still held every buffer.
+	/// Program frames not encoded because the encoder still held every copy.
 	pub dropped: AtomicU64,
 	/// Program frames encoded.
 	pub encoded: AtomicU64,
@@ -168,7 +173,6 @@ impl Drop for Output {
 
 /// The running studio.
 pub struct Engine {
-	pub gpu: Gpu,
 	pub state: Mutex<State>,
 	pub stats: Stats,
 	pub bus: moq_audio::bus::Bus,
@@ -213,7 +217,7 @@ impl Engine {
 
 		let (output, origin, publish) = match connect {
 			Some((client, url)) => {
-				let (output, publish) = publish(client, url, subscribe, broadcast, canvas).await?;
+				let (output, publish) = publish(&gpu, client, url, subscribe, broadcast, canvas).await?;
 				(Some(output), None, Some(publish))
 			}
 			None => (None, Some(subscribe), None),
@@ -228,7 +232,6 @@ impl Engine {
 				stale: true,
 				unsaved: false,
 			}),
-			gpu,
 			stats: Stats::default(),
 			bus,
 			output,
@@ -240,16 +243,19 @@ impl Engine {
 				video,
 				audio,
 				config,
+				exporter,
 				clock,
 			}) => {
-				// One more than the readback pool, for a pause behind a full pool.
-				let (frames, pending) = mpsc::sync_channel(Readback::DEPTH + 1);
+				let zero_copy = exporter.route() == Route::Gpu;
+				engine.stats.zero_copy.store(zero_copy, Ordering::Relaxed);
+				// One more than the exporter's pool, for a pause behind a full pool.
+				let (frames, pending) = mpsc::sync_channel(Exporter::DEPTH + 1);
 				tokio::spawn(watch(video.demand(), engine.clone()));
 				let encoder = engine.clone();
 				std::thread::Builder::new()
 					.name("encode".into())
-					.spawn(move || encode(&encoder, pending, video, config))?;
-				(Some(frames), Some(audio), Some(clock))
+					.spawn(move || encode(&encoder, pending, video, config, zero_copy))?;
+				(Some((frames, exporter)), Some(audio), Some(clock))
 			}
 			None => (None, None, None),
 		};
@@ -276,11 +282,15 @@ impl Engine {
 	/// Draw a canvas frame per tick of the program clock, and hand the program
 	/// to the encoder while anyone watches, stamped `epoch` past `start`.
 	///
-	/// Drawing outlives the encoder: a failed output stops reading the program
-	/// back, and the preview and program keep moving.
-	async fn run_program(&self, start: Instant, epoch: Duration, mut frames: Option<mpsc::SyncSender<Video>>) {
+	/// Drawing outlives the encoder: a failed output stops copying the program,
+	/// and the preview and program keep moving.
+	async fn run_program(
+		&self,
+		start: Instant,
+		epoch: Duration,
+		mut video: Option<(mpsc::SyncSender<Video>, Exporter)>,
+	) {
 		let canvas = self.state.lock().unwrap().collection.canvas;
-		let mut readback = Readback::new(&self.gpu.device, &self.gpu.queue, canvas);
 		let period = Duration::from_secs(1) / canvas.framerate;
 		let mut clock = moq_clock::interval_at(start, period);
 		clock.set_missed_tick_behavior(moq_clock::MissedTickBehavior::Skip);
@@ -304,29 +314,35 @@ impl Engine {
 			};
 			self.stats.rendered.fetch_add(1, Ordering::Relaxed);
 
-			let Some(sender) = &frames else { continue };
+			let Some((sender, exporter)) = &mut video else { continue };
 			let was = std::mem::replace(&mut watched, self.stats.watched.load(Ordering::Relaxed));
 			if !watched {
 				// Behind every frame already sent, so the break lands after them.
 				// A send fails only once the encoder stopped, having reported why.
 				if was && sender.send(Video::Pause).is_err() {
-					frames = None;
+					video = None;
 				}
 				continue;
 			}
 			let Ok(timestamp) = moq_net::Timestamp::try_from(epoch + tick.saturating_duration_since(start)) else {
 				continue;
 			};
-			match readback.copy(&program, timestamp) {
+			match exporter.copy(&program, timestamp) {
 				// The pool bounds the frames in flight, so this waits only behind
 				// a pause the encoder has not reached yet.
-				Some(pending) => {
+				Ok(Some(pending)) => {
 					if sender.send(Video::Frame(pending)).is_err() {
-						frames = None;
+						video = None;
 					}
 				}
-				None => {
+				Ok(None) => {
 					self.stats.dropped.fetch_add(1, Ordering::Relaxed);
+				}
+				// The canvas and the exporter share a size and format, so this is
+				// the GPU failing: the video stops, and the canvas keeps drawing.
+				Err(err) => {
+					let _ = sender.send(Video::Failed(err));
+					video = None;
 				}
 			}
 		}
@@ -377,6 +393,7 @@ impl Engine {
 struct Publish {
 	video: moq_video::encode::Producer,
 	config: moq_video::encode::Config,
+	exporter: Exporter,
 	audio: moq_audio::encode::Producer,
 	/// The catalog's clock, which the codec producers write timestamps
 	/// against verbatim.
@@ -386,6 +403,7 @@ struct Publish {
 /// Announce the program broadcast and connect to the relay, which also
 /// carries `subscribe`'s broadcast sources.
 async fn publish(
+	gpu: &Gpu,
 	client: moq_tokio::Client,
 	url: url::Url,
 	subscribe: moq_net::origin::Producer,
@@ -398,10 +416,13 @@ async fn publish(
 	let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default())?;
 	let clock = catalog.clock();
 
-	let config = moq_video::encode::Config::new(canvas.width, canvas.height, canvas.framerate());
+	let mut config = moq_video::encode::Config::new(canvas.width, canvas.height, canvas.framerate());
 	// Opens a throwaway encoder now, so a machine that cannot encode the
-	// canvas fails at startup rather than when the first viewer arrives.
-	let rendition = config.probe().await.context("cannot encode the canvas")?;
+	// canvas fails at startup rather than when the first viewer arrives. It
+	// also settles whether that encoder reads the program on the GPU.
+	let (exporter, rendition) = Exporter::new(&gpu.device, &gpu.queue, &mut config)
+		.await
+		.context("cannot encode the canvas")?;
 	let reserved = catalog
 		.reserve()
 		.with_timeline_hint(config.gop.duration(config.framerate));
@@ -432,14 +453,15 @@ async fn publish(
 		Publish {
 			video,
 			config,
+			exporter,
 			audio,
 			clock,
 		},
 	))
 }
 
-/// Track whether anyone watches the video, so the program is only read back
-/// and encoded while someone does.
+/// Track whether anyone watches the video, so the program is only copied and
+/// encoded while someone does.
 async fn watch(mut demand: moq_net::track::Demand, engine: Arc<Engine>) {
 	loop {
 		match demand.wanted_changed().await {
@@ -455,13 +477,15 @@ async fn watch(mut demand: moq_net::track::Demand, engine: Arc<Engine>) {
 
 /// What the program clock hands the encoder.
 enum Video {
-	/// A program frame on its way back from the GPU.
+	/// A copy of the program on its way to the encoder.
 	Frame(Pending),
 	/// The last viewer left, so frames stop until one returns.
 	Pause,
+	/// The program could not be copied, so the video stops.
+	Failed(moq_video::Error),
 }
 
-/// Read back and encode program frames until the program clock stops.
+/// Encode program frames until the program clock stops.
 ///
 /// A failure aborts the video track, so viewers see that it failed rather
 /// than a track that went away unfinished.
@@ -470,8 +494,9 @@ fn encode(
 	video: mpsc::Receiver<Video>,
 	mut producer: moq_video::encode::Producer,
 	config: moq_video::encode::Config,
+	zero_copy: bool,
 ) {
-	let result = encode_frames(&engine.stats, video, &mut producer, &config).and_then(|()| {
+	let result = encode_frames(&engine.stats, video, &mut producer, &config, zero_copy).and_then(|()| {
 		producer.finish()?;
 		Ok(())
 	});
@@ -486,6 +511,7 @@ fn encode_frames(
 	video: mpsc::Receiver<Video>,
 	producer: &mut moq_video::encode::Producer,
 	config: &moq_video::encode::Config,
+	zero_copy: bool,
 ) -> anyhow::Result<()> {
 	let mut encoder: Option<moq_video::encode::Encoder> = None;
 	let mut paused = false;
@@ -500,13 +526,17 @@ fn encode_frames(
 				paused = true;
 				continue;
 			}
+			Video::Failed(err) => return Err(err).context("copying the program"),
 		};
 		let start = Instant::now();
-		let frame = pending.wait().context("readback")?;
+		let frame = pending.wait().context("copying the program")?;
 		stats
-			.readback_us
+			.copy_us
 			.store(start.elapsed().as_micros() as u64, Ordering::Relaxed);
-		stats.read_back.fetch_add(1, Ordering::Relaxed);
+		stats.copied.fetch_add(1, Ordering::Relaxed);
+		if !zero_copy {
+			stats.read_back.fetch_add(1, Ordering::Relaxed);
+		}
 
 		let encoder = match &mut encoder {
 			Some(encoder) => encoder,
@@ -600,7 +630,7 @@ mod tests {
 		let gpu = Gpu::new().await.expect("a GPU");
 		let path = dir.path().join("show.toml");
 		let connect = Some((client, fixture.url.clone()));
-		let _engine = Engine::start(gpu, path, collection, connect, "studio")
+		let engine = Engine::start(gpu, path, collection, connect, "studio")
 			.await
 			.expect("the studio starts");
 
@@ -642,6 +672,17 @@ mod tests {
 		})
 		.await
 		.expect("the composed picture arrives");
+
+		// The program reaches the encoder as a GPU surface when the encoder
+		// reads one, and is read back frame by frame only when it does not.
+		let stats = &engine.stats;
+		assert!(stats.copied.load(Ordering::Relaxed) > 0);
+		let read_back = stats.read_back.load(Ordering::Relaxed);
+		if stats.zero_copy.load(Ordering::Relaxed) {
+			assert_eq!(read_back, 0, "a zero-copy program was read back");
+		} else {
+			assert!(read_back > 0, "the program was neither exported nor read back");
+		}
 
 		let (audio, config) = catalog.audio.enabled().next().expect("an audio rendition");
 		let mut options = moq_audio::decode::Options::new();

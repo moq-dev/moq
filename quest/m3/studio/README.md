@@ -60,15 +60,17 @@ OBS multistream, and the hosted version is product work outside this
 repository.
 
 Added 2026-10-25 (maintainer): the studio's
-[GPU encode](/quest/m1/studio-gpu/encode.md) and
-source import quests are in m1 so
+GPU encode and source import quests are in m1 so
 moq-video's GPU encode and import API changes, mainly encoders taking a GPU
 surface and zero-copy texture import, land before the cut.
 
 ## Required
 
-- [Zero-copy program encode](/quest/m1/studio-gpu/encode.md) - the program reaches the encoder as a GPU surface instead of a CPU readback
 - [Studio on macOS and Windows](/quest/m3/studio/app.md) - the studio runs on macOS and Windows, not only Linux
+- [Autosave](/quest/m3/studio/autosave.md) - every edit is written to the scene file, with no save step or quit prompt
+- [Scene editing](/quest/m3/studio/scene-editing.md) - rename and reorder scenes, and resize the canvas while live through a new rendition
+- [Broadcast sources play in sync](/quest/m3/studio/broadcast-sync.md) - subscribed broadcasts and guests play audio and video on the publisher's timestamps, with `moq play`'s delay
+- [Wayland display and window sources](/quest/m3/studio/wayland-sources.md) - portal-picked sources that reopen without the picker
 - [Destinations](/quest/m3/studio/destinations.md) - RTMP, RTMPS, and WHIP push with per-destination codecs and shared encoders, on a UI-free egress library a hosted service can reuse
 - [Multiple canvases](/quest/m3/studio/multi-canvas.md) - landscape and portrait canvases composite at once from shared sources
 - [Guests](/quest/m3/studio/guests.md) - remote guests and phone cameras join through a moq-room link or QR code and appear as sources

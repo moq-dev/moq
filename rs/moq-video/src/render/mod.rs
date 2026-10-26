@@ -34,16 +34,24 @@
 // `PixelBuffer` is deliberately not a doc link: the variant is Apple-only, so a
 // link to it fails the `-D warnings` rustdoc build on every other platform.
 //!
-//! Linux callers must request
-//! [`wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF`] when creating the device
-//! to enable that import. A CPU frame is uploaded as planes. Any other GPU
-//! surface, and any import that fails, is an error rather than a download, so
-//! a frame's path is settled where it is produced: decode or capture with
-//! [`output`] of the device to receive only frames that draw here.
+//! Linux callers open the device with [`request_device`], which enables
+//! [`wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF`] for that import. A CPU
+//! frame is uploaded as planes. Any other GPU surface, and any import that
+//! fails, is an error rather than a download, so a frame's path is settled
+//! where it is produced: decode or capture with [`output`] of the device to
+//! receive only frames that draw here.
+//!
+//! ## Export
+//!
+//! [`export`] runs the other way, handing a texture you drew to an encoder as a
+//! [`Frame`](crate::Frame): on the GPU when the encoder reads this platform's
+//! GPU surface, read back to the CPU when it does not.
 //!
 //! Enabled by the non-default `render` feature, which is what pulls in `wgpu`.
 
 mod color;
+mod device;
+pub mod export;
 mod renderer;
 mod source;
 
@@ -56,6 +64,7 @@ mod dmabuf;
 #[cfg(apple)]
 mod metal;
 
+pub use device::request_device;
 pub use renderer::{Config, Renderer};
 
 /// The `wgpu` this renderer was built against, re-exported so you name the exact

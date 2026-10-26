@@ -4,7 +4,6 @@ use tracing::trace;
 
 use super::{
 	mtud::MtuDiscovery,
-	pacing::Pacer,
 	spaces::{PacketSpace, SentPacket},
 };
 use crate::{Duration, Instant, TIMER_GRANULARITY, TransportConfig, congestion, packet::SpaceId};
@@ -21,7 +20,6 @@ pub(super) struct PathData {
 	/// Congestion controller state
 	pub(super) congestion: Box<dyn congestion::Controller>,
 	/// Pacing state
-	pub(super) pacing: Pacer,
 	pub(super) challenge: Option<u64>,
 	pub(super) challenge_pending: bool,
 	/// Whether we're certain the peer can both send and receive on this address
@@ -54,6 +52,16 @@ pub(super) struct PathData {
 	generation: u64,
 }
 
+/// Builds the configured congestion controller for a path starting now.
+fn build_congestion(now: Instant, config: &TransportConfig) -> Box<dyn congestion::Controller> {
+	config.congestion_controller_factory.clone().build(congestion::Init {
+		now,
+		mtu: config.get_initial_mtu(),
+		rtt: config.initial_rtt,
+		max_pacing_rate: config.max_outgoing_bytes_per_second,
+	})
+}
+
 impl PathData {
 	pub(super) fn new(
 		remote: SocketAddr,
@@ -63,22 +71,11 @@ impl PathData {
 		now: Instant,
 		config: &TransportConfig,
 	) -> Self {
-		let congestion = config
-			.congestion_controller_factory
-			.clone()
-			.build(now, config.get_initial_mtu());
 		Self {
 			remote,
 			rtt: RttEstimator::new(config.initial_rtt),
 			sending_ecn: true,
-			pacing: Pacer::new(
-				config.initial_rtt,
-				congestion.initial_window(),
-				config.get_initial_mtu(),
-				config.max_outgoing_bytes_per_second,
-				now,
-			),
-			congestion,
+			congestion: build_congestion(now, config),
 			challenge: None,
 			challenge_pending: false,
 			validated: false,
@@ -104,21 +101,12 @@ impl PathData {
 		}
 	}
 
-	pub(super) fn from_previous(remote: SocketAddr, prev: &Self, generation: u64, now: Instant) -> Self {
-		let congestion = prev.congestion.clone_box();
-		let smoothed_rtt = prev.rtt.get();
+	pub(super) fn from_previous(remote: SocketAddr, prev: &Self, generation: u64) -> Self {
 		Self {
 			remote,
 			rtt: prev.rtt,
-			pacing: Pacer::new(
-				smoothed_rtt,
-				congestion.window(),
-				prev.current_mtu(),
-				prev.pacing.max_bytes_per_second(),
-				now,
-			),
 			sending_ecn: true,
-			congestion,
+			congestion: prev.congestion.clone_box(),
 			challenge: None,
 			challenge_pending: false,
 			validated: false,
@@ -140,18 +128,8 @@ impl PathData {
 	#[cfg(test)]
 	pub(super) fn reset(&mut self, now: Instant, config: &TransportConfig) {
 		self.rtt = RttEstimator::new(config.initial_rtt);
-		self.congestion = config
-			.congestion_controller_factory
-			.clone()
-			.build(now, config.get_initial_mtu());
+		self.congestion = build_congestion(now, config);
 		self.mtud.reset(config.get_initial_mtu(), config.min_mtu);
-		self.pacing = Pacer::new(
-			self.rtt.get(),
-			self.congestion.initial_window(),
-			self.current_mtu(),
-			config.max_outgoing_bytes_per_second,
-			now,
-		);
 	}
 
 	/// Indicates whether we're a server that hasn't validated the peer's address and hasn't
@@ -450,51 +428,5 @@ impl InFlight {
 	fn remove(&mut self, packet: &SentPacket) {
 		self.bytes -= u64::from(packet.size);
 		self.ack_eliciting -= u64::from(packet.ack_eliciting);
-	}
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	#[test]
-	fn reset_refreshes_pacer_budget() {
-		let now = Instant::now();
-		let config = TransportConfig::default();
-		let remote = "203.0.113.1:4433".parse().unwrap();
-		let mut path = PathData::new(remote, true, None, 0, now, &config);
-		let mtu = path.current_mtu();
-		let metrics = path.congestion.metrics();
-
-		for _ in 0..1000 {
-			if path
-				.pacing
-				.delay(path.rtt.get(), mtu.into(), mtu, now, &metrics)
-				.is_some()
-			{
-				break;
-			}
-			path.pacing.on_transmit(mtu);
-		}
-		assert!(
-			path.pacing
-				.delay(path.rtt.get(), mtu.into(), mtu, now, &metrics)
-				.is_some()
-		);
-
-		path.reset(now, &config);
-
-		// `reset` rebuilds the controller, so take a fresh snapshot of its metrics.
-		let metrics = path.congestion.metrics();
-		assert_eq!(
-			path.pacing.delay(
-				path.rtt.get(),
-				path.current_mtu().into(),
-				path.current_mtu(),
-				now,
-				&metrics
-			),
-			None
-		);
 	}
 }

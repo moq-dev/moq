@@ -8,11 +8,16 @@ is verified to launch and list devices on its platform.
 
 ## Plan
 
-- The Flatpak builds with `--features capture,pipewire`. Inside the sandbox
-  the camera portal is the only way to a camera, and its PipeWire DMA-BUFs
-  are what the compositor imports without a copy. `moq-scene` and
-  `moq-studio` keep `pipewire` off by default because it links libpipewire
-  at build time.
+Decided 2026-10-26 (maintainer): as for the `moq` binary in
+[Ship capture and playback](/quest/m2/cli-packaging.md), moq-studio's defaults
+skip any feature that is expensive to build or relies on a system library,
+and a `release` feature turns on every backend its platform can load without
+one (`capture`, `openh264`, `vaapi`, `nvidia`, and the platform frameworks).
+Every artifact builds with `release`. `pipewire` stays out of `release`
+because it links libpipewire at load time, but the Flatpak bundles
+libpipewire, so it adds `pipewire` itself: inside the sandbox the camera
+portal is the only way to a camera, and its PipeWire DMA-BUFs are what the
+compositor imports without a copy.
 
 ## Required
 
