@@ -4468,6 +4468,13 @@ test("draft-22: a range update replaces the live subscription bounds", async () 
 			{ sequence: 2, objects: [{ id: 1, payload: "2.1" }] },
 			{ sequence: 3, objects: [{ id: 0, payload: "3.0" }] },
 		]);
+		expect(await client.reader.u53()).toBe(PublishDone.id);
+		const done = await PublishDone.decode(client.reader, fx.version);
+		expect(done.statusCode).toBe(TRACK_ENDED_STATUS);
+		expect(done.streamCount).toBe(3n);
+		const end = await nextUni(fx.uni);
+		if (!end) throw new Error("missing exact track end after updated bounds");
+		expect(await readEndOfTrack(end)).toBe(5);
 	} finally {
 		client.close();
 		track.close();
@@ -4568,20 +4575,80 @@ test("draft-22: cancellation releases a fill parked on flow control", async () =
 	const parked = Promise.withResolvers<void>();
 	let reset = false;
 	const stalled = new WritableStream<Uint8Array>({
-		start(controller) { controller.signal.addEventListener("abort", () => { reset = true; }); },
-		write() { parked.resolve(); return new Promise<void>(() => {}); },
+		start(controller) {
+			controller.signal.addEventListener("abort", () => {
+				reset = true;
+			});
+		},
+		write() {
+			parked.resolve();
+			return new Promise<void>(() => {});
+		},
 	});
 	spyOn(fx.pair.server, "createUnidirectionalStream").mockImplementationOnce(async () => stalled);
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	writeGroup(track, 1);
-	const { client } = await runSubscribe(fx, new Subscribe({ requestId: 0n, trackNamespace: Path.from("test"), trackName: "video", subscriberPriority: 0, filter: { kind: "absolute", startGroup: 10n, startObject: 0n }, fill: { filter: { kind: "unfiltered" }, rangeFilters: false } }));
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 0n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "absolute", startGroup: 10n, startObject: 0n },
+			fill: { filter: { kind: "unfiltered" }, rangeFilters: false },
+		}),
+	);
 	try {
 		await parked.promise;
 		client.close();
 		while (track.subscription.peek() !== undefined) await track.subscription.changed();
 		expect(reset).toBe(true);
 	} finally {
-		client.close(); track.close(); fx.close();
+		client.close();
+		track.close();
+		fx.close();
+	}
+});
+
+test("draft-22: narrowing gives up an excluded group's open stream", async () => {
+	const fx = fixture();
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const open = track.appendGroup();
+	open.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.now() });
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({ requestId: 0n, trackNamespace: Path.from("test"), trackName: "video", subscriberPriority: 0 }),
+	);
+	try {
+		const stream = await nextUni(fx.uni);
+		if (!stream) throw new Error("missing initial open group");
+		const [data, observed] = stream.tee();
+		const reading = readGroup(data).then(() => undefined, error);
+		const reader = new Reader(observed, undefined, V20);
+		const header = await GroupMessage.decode(reader, V20);
+		expect((await reader.decode((body) => Frame.decode(body, header.flags, Timescale.MILLI))).payload).toEqual(
+			new Uint8Array([1]),
+		);
+		reader.stop(new Error("observation complete"));
+		const parameters = new Parameters();
+		parameters.subscriptionFilter = { kind: "absolute", startGroup: 1n, startObject: 0n };
+		await client.writer.u53(SubscribeUpdate.id);
+		await new SubscribeUpdate({ requestId: 2n, parameters }).encode(client.writer, fx.version);
+		expect(await client.reader.u53()).toBe(RequestOk.id);
+		await RequestOk.decode(client.reader, fx.version);
+		expect((await reading)?.message).toContain("range update");
+		// The publisher remains usable; only this subscription stopped its old group.
+		open.writeFrame({ payload: new Uint8Array([2]), timestamp: Timestamp.now() });
+		writeGroup(track, 1);
+		const next = await nextUni(fx.uni);
+		if (!next) throw new Error("missing group after narrowed range");
+		expect((await readGroup(next)).sequence).toBe(1);
+	} finally {
+		open.close();
+		client.close();
+		track.close();
+		fx.close();
 	}
 });
 

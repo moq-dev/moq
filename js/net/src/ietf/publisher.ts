@@ -251,6 +251,8 @@ interface RunGroup {
 
 	/** The objects of this group the subscription's filter selects. */
 	slice: GroupSlice;
+	/** The live range, whose narrowing may give this stream up. */
+	bounds: Getter<ServeRange>;
 
 	/** Settles when the subscriber leaves, dropping a group still queued for a stream slot. */
 	unsubscribed: Promise<void>;
@@ -266,7 +268,7 @@ type StreamCount = { opened: number; terminalSent?: boolean };
 interface Published {
 	streams: StreamCount;
 	unlisted: Once<Unlisted>;
-	answer: boolean;
+	answer?: { requestId: bigint };
 }
 
 /** How a listed track left the listing: it finished, or it left unfinished. */
@@ -770,8 +772,12 @@ export class Publisher {
 			// the draft's current-group join (Next Object plus a StartGroup=1 fill) cover the
 			// group with no gap and no overlap.
 			const edge = liveEdge(track);
-			const range = subscribeRange(msg, edge, version);
-			const rangeUpdated = new Signal(false);
+			const fill =
+				msg.fill && msg.forward && Filter.isDraft22(version)
+					? fillRange(msg.fill, msg.filter, edge.largest, order)
+					: undefined;
+			const range = afterFill(subscribeRange(msg, edge, version), fill, edge);
+			const bounds = new Signal(range);
 
 			// The wire request tells an upstream what we need; the cursor is what actually
 			// trims this subscriber, since the producer fans every cached group out to every
@@ -791,10 +797,6 @@ export class Publisher {
 			// subscription's cursor. Forked from this subscriber rather than resolved through
 			// the broadcast again: a dynamic serve is one request per peer subscription, so
 			// asking the broadcast would mint a second producer nobody has accepted.
-			const fill =
-				msg.fill && msg.forward && Filter.isDraft22(version)
-					? fillRange(msg.fill, msg.filter, edge.largest, order)
-					: undefined;
 			cache =
 				fill && fill.kind !== "empty"
 					? track.fork({ priority, order, maxDelay: Milli(Varint.MAX_U53) })
@@ -892,7 +894,8 @@ export class Publisher {
 					streams,
 				});
 			};
-			if (fill && cache) startFill(answer?.requestId ?? msg.requestId, fill, cache);
+			if (fill && cache)
+				startFill(answer?.requestId ?? published?.answer?.requestId ?? msg.requestId, fill, cache);
 			const updates = (async () => {
 				for (;;) {
 					const framed = await request.next();
@@ -909,16 +912,21 @@ export class Publisher {
 					if (params.fillParameters) await filling;
 					const snapshot = liveEdge(track);
 					this.#applyPublished(msg, params);
-					if (params.subscriptionFilter !== undefined) {
+					const selected =
+						msg.fill && Filter.isDraft22(version)
+							? fillRange(msg.fill, msg.filter, snapshot.largest, msg.groupOrder)
+							: undefined;
+					if (params.subscriptionFilter !== undefined || selected) {
 						// An update's unfiltered range explicitly lowers the floor to zero;
 						// an initial unfiltered subscription still joins the live group.
-						const selected: ServeRange =
-							params.subscriptionFilter.kind === "unfiltered"
+						const requested: ServeRange =
+							msg.filter.kind === "unfiltered"
 								? { start: { group: 0n, object: 0n } }
-								: filterRange(params.subscriptionFilter, snapshot);
-						range.start = selected.start;
-						range.end = selected.end;
-						rangeUpdated.set(true);
+								: filterRange(msg.filter, snapshot);
+						const tail = afterFill(requested, selected, snapshot);
+						range.start = tail.start;
+						range.end = tail.end;
+						bounds.set({ ...range }, true);
 						track.update({ ...track.subscription.peek(), groups: rangeGroups(range) });
 						track.withRange(rangeGroups(range));
 					}
@@ -930,10 +938,6 @@ export class Publisher {
 					const parameters = new Parameters();
 					if (snapshot.largest)
 						parameters.largest = { groupId: snapshot.largest.group, objectId: snapshot.largest.object };
-					const selected =
-						msg.fill && Filter.isDraft22(version)
-							? fillRange(msg.fill, msg.filter, snapshot.largest, msg.groupOrder)
-							: undefined;
 					const source =
 						selected && selected.kind !== "empty"
 							? track.fork({
@@ -968,7 +972,7 @@ export class Publisher {
 			// Serve groups until the track ends or the requester cancels.
 			const serving = (async () => {
 				for (;;) {
-					const group = await servingGroup(track, rangeUpdated);
+					const group = await servingGroup(track);
 					if (!group) return;
 
 					const task = this.#runGroup({
@@ -979,6 +983,7 @@ export class Publisher {
 						publisherPriority,
 						ranking: ranked,
 						slice: groupSlice(range, group.sequence),
+						bounds,
 						unsubscribed,
 						streams,
 					});
@@ -1131,8 +1136,27 @@ export class Publisher {
 	 * Runs a group and sends its frames using ObjectStream (Subgroup delivery mode).
 	 */
 	async #runGroup(options: RunGroup) {
-		const { requestId, track, group, timescale, publisherPriority, ranking, slice, unsubscribed, streams } =
+		const { requestId, track, group, timescale, publisherPriority, ranking, slice, bounds, unsubscribed, streams } =
 			options;
+		const excluded = Promise.withResolvers<void>();
+		let rangeError: Error | undefined;
+		const narrowed = () => {
+			const range = bounds.peek();
+			const at = BigInt(group.sequence);
+			const next = groupSlice(range, group.sequence);
+			if (
+				(range.start && at < range.start.group) ||
+				(range.end && at > range.end.group) ||
+				next.skip > slice.skip ||
+				(next.until !== undefined && (slice.until === undefined || next.until < slice.until))
+			) {
+				rangeError = new Error("group excluded by range update");
+				group.close(rangeError);
+				excluded.resolve();
+			}
+		};
+		const changed = bounds.subscribe(narrowed);
+		narrowed();
 		try {
 			// One stream per group is faster than a peer at its limit can retire them, so this
 			// is the one path that doesn't wait for a slot: the transport would serve the opens
@@ -1150,7 +1174,7 @@ export class Publisher {
 				stream = await Writer.tryOpen(this.#quic, {
 					version: this.#session.version,
 					sendOrder: ranking.rank(group.sequence, slice.skip),
-					cancel: race([unsubscribed, abandoned]),
+					cancel: race([unsubscribed, abandoned, excluded.promise]),
 					waitUntilAvailable: false,
 				});
 			} finally {
@@ -1200,8 +1224,9 @@ export class Publisher {
 			};
 			// Writing the group stops for the pause too; the drain below answers it without a reset.
 			const send = async (op: () => Promise<unknown>) => {
-				await race([write(op), cancelled]);
+				await race([write(op), cancelled, excluded.promise]);
 				if (left) throw new Error("unsubscribed while serving the group");
+				if (rangeError) throw rangeError;
 			};
 
 			try {
@@ -1222,8 +1247,14 @@ export class Publisher {
 
 					// Reading from the filter's start drops the objects below it: they are outside
 					// the requested range, so skipping them is not a gap.
-					const read = await race([group.readFrameSequence({ from: slice.skip }), stream.closed, cancelled]);
+					const read = await race([
+						group.readFrameSequence({ from: slice.skip }),
+						stream.closed,
+						cancelled,
+						excluded.promise,
+					]);
 					if (left) throw new Error("unsubscribed while serving the group");
+					if (rangeError) throw rangeError;
 					if (!read) break;
 					next = read.sequence + 1;
 					if (slice.until !== undefined && read.sequence >= slice.until) break;
@@ -1259,6 +1290,7 @@ export class Publisher {
 				const delivered = await race([
 					write(() => stream.closed).then(() => true),
 					unsubscribed.then(() => false),
+					excluded.promise.then(() => false),
 				]);
 				// Only a stream that closed cleanly delivered the marker: one reset after its FIN
 				// may not have, which leaves the standalone fallback in place, as in Rust.
@@ -1274,6 +1306,7 @@ export class Publisher {
 			// A failed open has no stream to reset, but still ends only this group.
 			group.close(error(err));
 		} finally {
+			changed();
 			group.close();
 		}
 	}
@@ -1419,7 +1452,7 @@ export class Publisher {
 			} finally {
 				snapshot.close();
 			}
-			sequences.sort((a, b) => fill.order === "ascending" ? a - b : b - a);
+			sequences.sort((a, b) => (fill.order === "ascending" ? a - b : b - a));
 			let previous: number | undefined;
 			for (const sequence of sequences) {
 				const group = hooks.cachedGroup(cache, sequence);
@@ -1483,23 +1516,29 @@ export class Publisher {
 			if (slice.until !== undefined && next >= slice.until) break;
 
 			// Reading from the fill's start drops everything below it; see the same read in #runGroup.
-			const frame = await untilAborted(race([group.readFrameSequence({ from: slice.skip }), stream.closed]), cancelled);
+			const frame = await untilAborted(
+				race([group.readFrameSequence({ from: slice.skip }), stream.closed]),
+				cancelled,
+			);
 			if (!frame) break;
 			next = frame.sequence + 1;
 			if (slice.until !== undefined && frame.sequence >= slice.until) break;
 
 			const obj = new FetchFrame({ payload: frame.payload, timestamp: frame.timestamp });
-			await untilAborted(obj.encode(
-				stream,
-				{
-					group: group.sequence,
-					object: frame.sequence,
-					first: previous === undefined,
-					previousGroup: first ? previous : undefined,
-				},
-				timescale,
-				this.#session.version,
-			), cancelled);
+			await untilAborted(
+				obj.encode(
+					stream,
+					{
+						group: group.sequence,
+						object: frame.sequence,
+						first: previous === undefined,
+						previousGroup: first ? previous : undefined,
+					},
+					timescale,
+					this.#session.version,
+				),
+				cancelled,
+			);
 			first = false;
 			previous = group.sequence;
 		}
@@ -2800,7 +2839,7 @@ export class Publisher {
 			hold.signal.removeEventListener("abort", cancelled);
 			stop();
 			// Once sent, the PUBLISH survives cancellation of its listing.
-			const state: Published = { streams: { opened: 0 }, unlisted, answer: false };
+			const state: Published = { streams: { opened: 0 }, unlisted };
 			const answer = await untilAborted(request.next(), hold.signal);
 			publishing = false;
 			if (!answer) throw new ProtocolViolation("PUBLISH ended without an answer");
@@ -2911,8 +2950,9 @@ export class Publisher {
 				if (!next) return request.ended;
 				if (next.type !== 0x02) throw new ProtocolViolation("expected PUBLISH REQUEST_UPDATE");
 				let update: Parameters;
+				let updateId: bigint;
 				try {
-					({ params: update } = await this.#subscriptionUpdate(next));
+					({ params: update, requestId: updateId } = await this.#subscriptionUpdate(next));
 				} catch (err) {
 					if (!(err instanceof MalformedAuthToken)) throw malformed(err, "REQUEST_UPDATE");
 					await refuseUpdate(request.writer, version, "subscribe", {
@@ -2936,7 +2976,7 @@ export class Publisher {
 				}
 				this.#applyPublished(subscription, update);
 				forward = update.forward === true;
-				state.answer = forward;
+				state.answer = forward ? { requestId: updateId } : undefined;
 				if (!forward) {
 					await Message.write(request.writer, RequestOk.id, new RequestOk({}), version);
 				}
@@ -3111,14 +3151,14 @@ interface ServeRange {
 }
 
 /** Read within a fixed filter, ending at its cap once the track itself finishes. */
-async function servingGroup(track: TrackSubscriber, updated: Getter<boolean>): Promise<group.Consumer | undefined> {
+async function servingGroup(track: TrackSubscriber): Promise<group.Consumer | undefined> {
 	for (;;) {
 		const recv = hooks.tryRecvGroup(track, false);
 		if (recv.kind === "group") return recv.group;
 		if (recv.kind === "error") throw recv.error;
-		// A local reader holds this boundary for a possible cap raise; a fixed wire
-		// filter cannot widen, so excluded groups cannot delay PUBLISH_DONE.
-		if (recv.kind === "done" || (recv.kind === "boundary" && !updated.peek())) return undefined;
+		// A boundary only follows the source's real end. Its cached excluded groups
+		// cannot delay PUBLISH_DONE; while the source is live the cursor reports idle.
+		if (recv.kind === "done" || recv.kind === "boundary") return undefined;
 		if (recv.kind === "drop") continue;
 		await new Promise<void>((resolve) => {
 			const dispose = hooks.groupChanged(track, () => {
@@ -3231,6 +3271,18 @@ function groupSlice(range: ServeRange, sequence: number): GroupSlice {
 		skip: range.start?.group === at ? Number(range.start.object) : 0,
 		until: range.end?.group === at && range.end.object !== undefined ? Number(range.end.object) + 1 : undefined,
 	};
+}
+
+/** A fill covering the whole requested prefix owns it; the live cursor starts after its snapshot. */
+function afterFill(range: ServeRange, fill: FillServe | undefined, edge: LiveEdge): ServeRange {
+	if (fill?.kind !== "range" || !edge.largest || !edge.next) return range;
+	const start = range.start ?? { group: 0n, object: 0n };
+	const coversStart =
+		fill.start.group < start.group || (fill.start.group === start.group && fill.start.object <= start.object);
+	const coversEnd =
+		fill.end.group === edge.largest.group &&
+		(fill.end.object === undefined || fill.end.object >= edge.largest.object);
+	return coversStart && coversEnd ? { ...range, start: edge.next } : range;
 }
 
 /**
