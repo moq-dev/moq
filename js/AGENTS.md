@@ -36,6 +36,7 @@ Plain custom elements on `@moq/signals`, no framework. Attributes are the public
 
 # Conventions
 
+- Only browser performance counts. Node and bun benchmarks are proxies; accept a small regression that shows on one runtime only.
 - ESM only. Match the import style of the file you're editing.
 - Document every export and add a `@module` block to each entrypoint; JSR builds docs from them. Deprecated exports are marked `@internal` or dropped from the entrypoint, never annotated "use X".
 - `bun` for everything. Biome formats and lints (repo-root `biome.jsonc`). Tests are `*.test.ts` under `bun test`.

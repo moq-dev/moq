@@ -89,7 +89,7 @@ const AUDIO_BUDGET = 5000;
 /** The subscription field holding the latency budget, which the checkout renamed from `maxAge`. */
 function budgetField(): "maxAge" | "maxDelay" {
 	// The checkout refuses the old name, which a throwaway local track shows without a session.
-	const broadcast = new Moq.Origin.Producer().createBroadcast(Moq.Path.from("probe"));
+	const broadcast = new Moq.Broadcast.Producer();
 	try {
 		broadcast
 			.createTrack("probe")
@@ -287,9 +287,11 @@ if (command === "sign") {
 } else if (command === "publish") {
 	install();
 	const origin = new Moq.Origin.Producer();
-	const broadcast = origin.createBroadcast(Moq.Path.from(args[1]));
+	const publication = origin.createBroadcast(Moq.Path.from(args[1]));
+	// Released packages return the fill producer directly; current ones return its publication.
+	const broadcast = ("broadcast" in publication ? publication.broadcast : publication) as Moq.Broadcast.Producer;
 	const track = broadcast.createTrack("data", { timescale: Moq.Time.Timescale.MICRO });
-	broadcast.announce();
+	publication.announce();
 	const connection = await connect({
 		url: new URL(args[0]),
 		publish: origin.consume(),
