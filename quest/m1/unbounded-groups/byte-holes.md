@@ -12,6 +12,14 @@ next unpublished lite version after lite-07. The frame cap
 
 See the [epic](/quest/m1/unbounded-groups/README.md) for the decisions.
 
+- Segments are `frame::SEGMENT` (1 MiB) long, so segment `i` always holds
+  bytes from `i * SEGMENT`, and a completed chain is `frame::Payload::Chain`.
+  Only a frame past one segment written in pieces chains. One written whole
+  (`write_frame`, or a single write or transport chunk carrying all of it)
+  stays one `Bytes` at any size, so evicting part of it needs it split into
+  segment slices, whose memory frees only once every slice drops, or copied
+  into segments.
+
 - `Position` gains a byte offset within the frame. A lite range end can
   carry it, and so can a group stream header, beside `frame_start`. A
   stream that starts mid-frame still states the frame's full size. Older

@@ -411,20 +411,6 @@ impl Header {
 		matches!(*self, Self::Short { .. })
 	}
 
-	pub(crate) fn is_1rtt(&self) -> bool {
-		self.is_short()
-	}
-
-	pub(crate) fn is_0rtt(&self) -> bool {
-		matches!(
-			*self,
-			Self::Long {
-				ty: LongType::ZeroRtt,
-				..
-			}
-		)
-	}
-
 	pub(crate) fn dst_cid(&self) -> ConnectionId {
 		use Header::*;
 		match *self {
@@ -874,7 +860,7 @@ pub enum SpaceId {
 	Initial = 0,
 	/// Packets protected with handshake keys, used to complete the handshake
 	Handshake = 1,
-	/// Application data space, used for 0-RTT and post-handshake/1-RTT packets
+	/// Application data space
 	Data = 2,
 }
 

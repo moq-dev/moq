@@ -3616,3 +3616,157 @@ for (const abort of [false, true]) {
 		producer.close();
 	});
 }
+
+// A widened budget re-offers the cached groups the reader skipped as stale, and never one it
+// already handed out.
+test("a widened maxDelay re-offers what it skipped as stale", () => {
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
+	const subscriber = producer.subscribe({ maxDelay: Milli(1500) });
+	stampGroup(producer, 0, 0);
+	expect(drainGroups(subscriber)).toEqual([0]);
+	for (const [sequence, ms] of [
+		[1, 1000],
+		[2, 2000],
+		[3, 3000],
+		[4, 6000],
+	]) {
+		stampGroup(producer, sequence, ms);
+	}
+	// Groups 1 and 2 reach 2s and 3s, at least 1.5s behind the 6s edge.
+	expect(drainGroups(subscriber)).toEqual([3, 4]);
+
+	subscriber.update({ maxDelay: Milli(10_000) });
+	expect(drainGroups(subscriber)).toEqual([1, 2]);
+	expect(drainGroups(subscriber)).toEqual([]);
+	producer.close();
+});
+
+// A read already parked when the budget widens wakes for the re-offer.
+test("a widened maxDelay wakes a parked read", async () => {
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
+	const subscriber = producer.subscribe({ maxDelay: Milli(1500) });
+	stampGroup(producer, 0, 0);
+	expect(drainGroups(subscriber)).toEqual([0]);
+	for (const [sequence, ms] of [
+		[1, 1000],
+		[2, 2000],
+		[3, 6000],
+	]) {
+		stampGroup(producer, sequence, ms);
+	}
+	// Group 1 reaches 2s, 4s behind the 6s edge.
+	expect(drainGroups(subscriber)).toEqual([2, 3]);
+
+	const parked = subscriber.recvGroup();
+	subscriber.update({ maxDelay: Milli(10_000) });
+	expect((await parked)?.sequence).toBe(1);
+	producer.close();
+});
+
+// A skip whose group the cache evicted can never be offered again, so it stops holding the
+// delivered gaps above it.
+test("an evicted stale skip lets the delivered gaps fold", () => {
+	const time = manualTime(1_000);
+	try {
+		const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Milli(30_000) });
+		const subscriber = producer.subscribe({ maxDelay: Milli(10) });
+		stampGroup(producer, 0, 0);
+		expect(drainGroups(subscriber)).toEqual([0]);
+		// Group 1 reaches 5ms, past the 10ms budget behind the 30ms edge.
+		stampGroup(producer, 1, 1);
+		stampGroup(producer, 2, 5);
+		stampGroup(producer, 3, 30);
+		expect(drainGroups(subscriber)).toEqual([2, 3]);
+
+		// Past the cache window, so the next write evicts group 1.
+		time.set(1_000 + 2 * CACHE_WINDOW_MS);
+		let most = 0;
+		for (let sequence = 4; sequence < 300; sequence++) {
+			// Every third group never arrives.
+			if (sequence % 3 === 1) continue;
+			stampGroup(producer, sequence, sequence + 30);
+			expect(drainGroups(subscriber)).toEqual([sequence]);
+			most = Math.max(most, hooks.deliveredRuns(subscriber));
+		}
+		expect(most).toBeLessThan(10);
+	} finally {
+		time.installed.close();
+	}
+});
+
+// A re-offer never hands out a group below a floor raised in the same update.
+test("a widened maxDelay re-offers nothing below a raised floor", () => {
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
+	const subscriber = producer.subscribe({ maxDelay: Milli(1500) });
+	stampGroup(producer, 0, 0);
+	expect(drainGroups(subscriber)).toEqual([0]);
+	for (const [sequence, ms] of [
+		[1, 1000],
+		[2, 2000],
+		[3, 3000],
+		[4, 6000],
+	]) {
+		stampGroup(producer, sequence, ms);
+	}
+	expect(drainGroups(subscriber)).toEqual([3, 4]);
+
+	subscriber.update({ maxDelay: Milli(10_000), groups: { start: { included: 2 } } });
+	expect(drainGroups(subscriber)).toEqual([2]);
+	producer.close();
+});
+
+// A stale skip a drop-reading cursor has not reported yet is withdrawn when a widening re-offers
+// its group, so the reader never gets both the group and its drop.
+test("a widened maxDelay withdraws an unreported stale drop", () => {
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
+	const subscriber = producer.subscribe({ maxDelay: Milli(1500) });
+	expect(hooks.tryDrop(subscriber)).toBeUndefined();
+	stampGroup(producer, 0, 0);
+	expect(drainGroups(subscriber)).toEqual([0]);
+	for (const [sequence, ms] of [
+		[1, 1000],
+		[2, 2000],
+		[3, 6000],
+	]) {
+		stampGroup(producer, sequence, ms);
+	}
+	// Group 1 reaches 2s, 4s behind the 6s edge.
+	expect(drainGroups(subscriber)).toEqual([2, 3]);
+
+	subscriber.update({ maxDelay: Milli(10_000) });
+	expect(drainGroups(subscriber)).toEqual([1]);
+	expect(hooks.tryDrop(subscriber)).toBeUndefined();
+	producer.close();
+});
+
+// A widening that covers only the newer of two skipped groups hands it out without folding the
+// older one into the delivered floor: a further widening still re-offers it.
+test("a partial maxDelay widening keeps the older skip owed", () => {
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
+	const subscriber = producer.subscribe({ maxDelay: Milli(1500) });
+	stampGroup(producer, 0, 0);
+	expect(drainGroups(subscriber)).toEqual([0]);
+	for (const [sequence, ms] of [
+		[1, 1000],
+		[2, 2000],
+		[3, 4000],
+	]) {
+		stampGroup(producer, sequence, ms);
+	}
+	expect(drainGroups(subscriber)).toEqual([2, 3]);
+	for (const [sequence, ms] of [
+		[4, 5000],
+		[5, 6000],
+		[6, 9000],
+	]) {
+		stampGroup(producer, sequence, ms);
+	}
+	expect(drainGroups(subscriber)).toEqual([5, 6]);
+
+	// Group 4 reaches 6s, 3s behind the 9s edge; group 1 reaches 2s, 7s behind.
+	subscriber.update({ maxDelay: Milli(4000) });
+	expect(drainGroups(subscriber)).toEqual([4]);
+	subscriber.update({ maxDelay: Milli(10_000) });
+	expect(drainGroups(subscriber)).toEqual([1]);
+	producer.close();
+});

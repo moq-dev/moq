@@ -34,7 +34,7 @@ pub mod hidden;
 mod location;
 pub(crate) mod max_age;
 pub mod message;
-mod namespace;
+pub(crate) mod namespace;
 pub(crate) mod object;
 pub mod peer;
 mod priority;
