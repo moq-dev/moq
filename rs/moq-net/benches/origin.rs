@@ -14,18 +14,29 @@
 //! session's grant, and a narrowing wakes each one. The baseline is a session
 //! that never narrows.
 //!
+//! A withdrawal wave is swept over the broadcasts it withdraws and the cursors
+//! polling through it, and a route churning beneath an unchanged winner over the
+//! table and its cursors.
+//!
 //! An equal-cost pool is swept the same way, over its members and the paths it
 //! already serves, and over those paths and the cursors watching the pool.
+//!
+//! One-frame groups through a front with a single route are swept over readers and the
+//! groups each holds open, which is what a reader records per group it hands out.
 //!
 //! A route swap on one front is swept over its tracks and the copies each track
 //! still holds from earlier routes, and a front retiring over the fronts around it.
 //! Readers draining a swapped track are swept over their count, the groups every
 //! route delivered, and the routes each reader still holds a copy of.
 //!
-//! Run with `cargo bench -p moq-net --bench origin`.
+//! Peer claims land through the hidden `fuzz` module, as a session lands them.
+//!
+//! Run with `cargo bench -p moq-net --features fuzz --bench origin`.
 
-// Custom timings measure the real time the work took, not the ambient clock.
-#![allow(clippy::disallowed_methods)]
+#![expect(
+	clippy::disallowed_methods,
+	reason = "custom timings measure the real time the work took, not the ambient clock"
+)]
 
 #[path = "../tests/integration/support/mod.rs"]
 mod support;
@@ -60,7 +71,7 @@ struct Fanout {
 	producer: origin::Producer,
 	consumer: origin::Consumer,
 	driver: origin::Driver,
-	_publishers: Vec<broadcast::Producer>,
+	_publishers: Vec<origin::Publication>,
 	subscribers: Vec<announce::Consumer>,
 }
 
@@ -156,7 +167,9 @@ fn bench_withdraw(c: &mut Criterion) {
 						.poll(moq_net::time::Instant::now(), &kio::Waiter::noop())
 						.unwrap();
 					let routes: Vec<_> = (0..publishers)
-						.map(|i| producer.dynamic_route(format!("room/{i}"), peer_route(9, 1)).unwrap())
+						.map(|i| {
+							moq_net::fuzz::dynamic_route(&producer, format!("room/{i}"), peer_route(9, 1)).unwrap()
+						})
 						.collect();
 					let mut cursors: Vec<_> = (0..subscribers).map(|_| producer.consume().announced()).collect();
 					for cursor in &mut cursors {
@@ -176,6 +189,103 @@ fn bench_withdraw(c: &mut Criterion) {
 				BatchSize::LargeInput,
 			);
 		});
+	}
+	group.finish();
+}
+
+/// Two peers carry the same `broadcasts` of one publisher, and both withdraw them
+/// a broadcast at a time, every cursor polled after each withdrawal as a session's
+/// task would be. The first peer's withdrawals queue held updates; the second's, in
+/// the opposite order, make each ready behind the held rest. A poll that walks what
+/// it holds back shows up as a slope over broadcasts, multiplied by the cursors.
+fn bench_withdraw_wave(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/withdraw_wave");
+	group.sample_size(10);
+	let epoch: Epoch = "01900000-0000-7000-8000-000000000001".parse().unwrap();
+	// One epoch, so the winner moving between the peers is an update, which is held.
+	let route = |chain: &[u64]| {
+		let mut hops = Hops::new();
+		for &hop in chain {
+			hops.push(Hop::new(hop).unwrap()).unwrap();
+		}
+		origin::Route::default().with_epoch(epoch.clone()).with_hops(hops)
+	};
+	for broadcasts in [1_000, 10_000] {
+		for subscribers in [1, 20, 100] {
+			let id = BenchmarkId::from_parameter(format!("{broadcasts}b_{subscribers}s"));
+			group.throughput(Throughput::Elements((2 * broadcasts * subscribers) as u64));
+			group.bench_function(id, |b| {
+				b.iter_batched(
+					|| {
+						let (producer, mut driver) = origin::Producer::new(origin::Config::default());
+						// The holds read the driver's last clock reading, which stays put below.
+						driver
+							.poll(moq_net::time::Instant::now(), &kio::Waiter::noop())
+							.unwrap();
+						let near: Vec<_> = (0..broadcasts)
+							.map(|i| {
+								moq_net::fuzz::dynamic_route(&producer, format!("room/{i}"), route(&[9, 2])).unwrap()
+							})
+							.collect();
+						let far: Vec<_> = (0..broadcasts)
+							.map(|i| {
+								moq_net::fuzz::dynamic_route(&producer, format!("room/{i}"), route(&[9, 3, 4])).unwrap()
+							})
+							.collect();
+						let mut cursors: Vec<_> = (0..subscribers).map(|_| producer.consume().announced()).collect();
+						for cursor in &mut cursors {
+							while cursor.try_next().is_some() {}
+						}
+						(producer, driver, near, far, cursors)
+					},
+					|(producer, driver, near, far, mut cursors)| {
+						for route in near {
+							drop(route);
+							for cursor in &mut cursors {
+								assert!(cursor.try_next().is_none(), "the update is held");
+							}
+						}
+						for route in far.into_iter().rev() {
+							drop(route);
+							for cursor in &mut cursors {
+								cursor.try_next().expect("retract delivered");
+							}
+						}
+						(producer, driver, cursors)
+					},
+					BatchSize::LargeInput,
+				);
+			});
+		}
+	}
+	group.finish();
+}
+
+/// A route that never wins arriving at one broadcast's prefix and leaving again,
+/// with `broadcasts` in the table and `subscribers` cursors watching. Each change
+/// revisits every cursor presenting the prefix and finds its winner unchanged,
+/// so a cost per cursor shows up as a slope over subscribers, and one per route
+/// in the table as a slope over broadcasts.
+fn bench_route_churn(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/route_churn");
+	for broadcasts in [1_000, 10_000] {
+		for subscribers in [1, 20, 100] {
+			let id = BenchmarkId::from_parameter(format!("{broadcasts}b_{subscribers}s"));
+			group.bench_function(id, |b| {
+				let (producer, _driver) = origin::Producer::new(origin::Config::default());
+				let _routes: Vec<_> = (0..broadcasts)
+					.map(|i| moq_net::fuzz::dynamic_route(&producer, format!("room/{i}"), peer_route(1, 1)).unwrap())
+					.collect();
+				let mut cursors: Vec<_> = (0..subscribers).map(|_| producer.consume().announced()).collect();
+				for cursor in &mut cursors {
+					while cursor.try_next().is_some() {}
+				}
+				b.iter(|| drop(moq_net::fuzz::dynamic_route(&producer, "room/0", peer_route(2, 5)).unwrap()));
+				for cursor in &mut cursors {
+					assert!(cursor.try_next().is_none(), "the winner is unchanged");
+				}
+			});
+		}
 	}
 	group.finish();
 }
@@ -295,9 +405,7 @@ fn bench_announce_duplicate(c: &mut Criterion) {
 			// the entries are distinct routes rather than one re-priced in place.
 			let _routes: Vec<_> = (1..=duplicates)
 				.map(|peer| {
-					producer
-						.dynamic_route(PATH, peer_route(peer as u64, INCUMBENT_COST))
-						.unwrap()
+					moq_net::fuzz::dynamic_route(&producer, PATH, peer_route(peer as u64, INCUMBENT_COST)).unwrap()
 				})
 				.collect();
 			let mut cursors: Vec<announce::Consumer> = (0..subscribers)
@@ -308,9 +416,12 @@ fn bench_announce_duplicate(c: &mut Criterion) {
 			}
 
 			b.iter(|| {
-				let handle = producer
-					.dynamic_route(PATH, peer_route(duplicates as u64 + 1, INCUMBENT_COST - 1))
-					.unwrap();
+				let handle = moq_net::fuzz::dynamic_route(
+					&producer,
+					PATH,
+					peer_route(duplicates as u64 + 1, INCUMBENT_COST - 1),
+				)
+				.unwrap();
 				for cursor in &mut cursors {
 					cursor.next().now_or_never().flatten().expect("announce delivered");
 				}
@@ -339,20 +450,18 @@ fn bench_reprice_duplicate(c: &mut Criterion) {
 				let (producer, _driver) = origin::Producer::new(config);
 				let _routes: Vec<_> = (1..=duplicates)
 					.map(|peer| {
-						producer
+						let scoped = producer
 							.scope(
 								"",
 								&Patterns::from(Pattern::subtree(&format!("{PATH}/p{}", (peer - 1) % 2)).unwrap()),
 							)
-							.unwrap()
-							.dynamic_route(PATH, peer_route(peer as u64, incumbent_cost))
-							.unwrap()
+							.unwrap();
+						moq_net::fuzz::dynamic_route(&scoped, PATH, peer_route(peer as u64, incumbent_cost)).unwrap()
 					})
 					.collect();
 				let challenger = duplicates as u64 + 1;
-				let route = producer
-					.dynamic_route(PATH, peer_route(challenger, incumbent_cost + 1))
-					.unwrap();
+				let route =
+					moq_net::fuzz::dynamic_route(&producer, PATH, peer_route(challenger, incumbent_cost + 1)).unwrap();
 				let mut cursors: Vec<announce::Consumer> = (0..subscribers)
 					.map(|peer| {
 						producer
@@ -371,7 +480,7 @@ fn bench_reprice_duplicate(c: &mut Criterion) {
 				}
 				b.iter(|| {
 					for cost in [incumbent_cost - 1, incumbent_cost + 1] {
-						route.update_route(peer_route(challenger, cost)).unwrap();
+						moq_net::fuzz::update_route(&route, peer_route(challenger, cost)).unwrap();
 						for cursor in &mut cursors {
 							// The winner switches between epochless routes, which is another instance.
 							let event = cursor.next().now_or_never().flatten().expect("winner changed");
@@ -413,7 +522,7 @@ fn bench_announce_fronts(c: &mut Criterion) {
 			let (producer, mut driver) = origin::Producer::new(origin::Config::default());
 			let consumer = producer.consume();
 			// Served but never answered: every request under it parks a front.
-			let _served = producer.dynamic_route("room", origin::Route::default()).unwrap();
+			let _served = producer.dynamic("room").unwrap();
 			let _requests: Vec<_> = (0..fronts)
 				.map(|i| consumer.request_broadcast(format!("room/{i}"), None))
 				.collect();
@@ -453,11 +562,7 @@ fn bench_serve_idle(c: &mut Criterion) {
 			let (producer, _driver) = origin::Producer::new(origin::Config::default());
 			// One route per announced path, exactly as a session lands a peer's.
 			let dynamics: Vec<_> = (0..routes)
-				.map(|i| {
-					producer
-						.dynamic_route(format!(".stats/p{}/node/edge{i}", i % 8), origin::Route::default())
-						.unwrap()
-				})
+				.map(|i| producer.dynamic(format!(".stats/p{}/node/edge{i}", i % 8)).unwrap())
 				.collect();
 			b.iter(|| {
 				// A fresh waiter per sweep, so every poll pays a real registration: a
@@ -612,8 +717,9 @@ fn bench_unroutable_churn(c: &mut Criterion) {
 					group.bench_function(id, |b| {
 						let (producer, mut driver) = origin::Producer::new(origin::Config::default());
 						let consumer = producer.consume();
-						let server = producer.dynamic_route("room", origin::Route::default()).unwrap();
-						let unrelated = producer.dynamic_route("other", origin::Route::default()).unwrap();
+						let server = moq_net::fuzz::dynamic_route(&producer, "room", origin::Route::default()).unwrap();
+						let unrelated =
+							moq_net::fuzz::dynamic_route(&producer, "other", origin::Route::default()).unwrap();
 						let mut waiting = Waiting::new(
 							(0..requesters)
 								.map(|i| {
@@ -645,7 +751,7 @@ fn bench_unroutable_churn(c: &mut Criterion) {
 						b.iter(|| {
 							for _ in 0..changes {
 								cost = 3 - cost;
-								changed.update_route(origin::Route::default().with_cost(cost)).unwrap();
+								moq_net::fuzz::update_route(changed, origin::Route::default().with_cost(cost)).unwrap();
 								assert!(covering || !waiting.is_woken(), "unrelated churn wakes no request");
 								waiting.drain();
 								driver.poll(now, &waiter).unwrap();
@@ -737,7 +843,7 @@ fn pool(members: usize, paths: usize, cursors: usize) -> Pool {
 	let consumer = producer.consume();
 	let cursors = (0..cursors).map(|_| consumer.announced()).collect();
 	let members: Vec<_> = (0..members)
-		.map(|i| producer.dynamic_route("pool", pool_route(POOL_HOP + i as u64)).unwrap())
+		.map(|i| moq_net::fuzz::dynamic_route(&producer, "pool", pool_route(POOL_HOP + i as u64)).unwrap())
 		.collect();
 	let waiter = kio::Waiter::noop();
 
@@ -749,7 +855,7 @@ fn pool(members: usize, paths: usize, cursors: usize) -> Pool {
 	for member in &members {
 		while let Poll::Ready(request) = member.poll_requested_broadcast(&waiter) {
 			let broadcast = broadcast::Info::new().produce();
-			request.unwrap().accept(&broadcast);
+			moq_net::fuzz::accept(request.unwrap(), &broadcast);
 			producers.push(broadcast);
 		}
 	}
@@ -796,7 +902,7 @@ fn bench_pool_churn(c: &mut Criterion) {
 				let waiter = kio::Waiter::noop();
 				let hop = POOL_HOP + members as u64;
 				b.iter(|| {
-					let joined = pool.producer.dynamic_route("pool", pool_route(hop)).unwrap();
+					let joined = moq_net::fuzz::dynamic_route(&pool.producer, "pool", pool_route(hop)).unwrap();
 					pool.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
 					drop(joined);
 					pool.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
@@ -824,7 +930,7 @@ fn bench_pool_cursors(c: &mut Criterion) {
 				let waiter = kio::Waiter::noop();
 				let hop = POOL_HOP + members as u64;
 				b.iter(|| {
-					let joined = pool.producer.dynamic_route("pool", pool_route(hop)).unwrap();
+					let joined = moq_net::fuzz::dynamic_route(&pool.producer, "pool", pool_route(hop)).unwrap();
 					pool.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
 					drop(joined);
 					pool.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
@@ -915,7 +1021,7 @@ struct Watching {
 	pair: MockPair,
 	tracks: Vec<track::Producer>,
 	subscriptions: Vec<track::Subscriber>,
-	_broadcasts: Vec<broadcast::Producer>,
+	_broadcasts: Vec<origin::Publication>,
 	_origins: [origin::Producer; 2],
 }
 
@@ -1113,6 +1219,65 @@ fn bench_relay(c: &mut Criterion) {
 	group.finish();
 }
 
+/// `(readers, open)` shapes for [`bench_passthrough`]: readers of one track, and the
+/// groups each holds open at once.
+const PASSTHROUGH: [(usize, usize); 4] = [(1, 1), (1, 64), (100, 1), (100, 64)];
+
+/// One-frame groups read through a front that only ever had one route, so each handed-out
+/// group's per-reader record (kept for a later route to back it) is a visible share of the
+/// cost. Each reader holds `open` groups at once, the live count that record tracks.
+fn bench_passthrough(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/passthrough");
+	for (readers, open) in PASSTHROUGH {
+		group.throughput(Throughput::Elements((readers * open) as u64));
+		group.bench_function(BenchmarkId::from_parameter(format!("{readers}r_{open}g")), |b| {
+			let runtime = tokio::runtime::Builder::new_current_thread()
+				.enable_all()
+				.build()
+				.unwrap();
+			let (producer, driver) = origin::Producer::new(origin::Config::default());
+			runtime.spawn(moq_net::time::run(driver));
+			let broadcast = producer.publish("room/live", origin::Route::default()).unwrap();
+			let source = broadcast.create_track("0", timed()).unwrap();
+			let mut subscriptions = runtime.block_on(async {
+				let resolved = producer.consume().request_broadcast("room/live", None).await.unwrap();
+				let track = resolved.track("0").unwrap();
+				let mut subscriptions = Vec::with_capacity(readers);
+				for _ in 0..readers {
+					subscriptions.push(track.subscribe(None).await.unwrap());
+				}
+				subscriptions
+			});
+			let mut held: Vec<Vec<moq_net::group::Consumer>> = (0..readers).map(|_| Vec::with_capacity(open)).collect();
+
+			b.iter_custom(|iterations| {
+				runtime.block_on(async {
+					let started = std::time::Instant::now();
+					for _ in 0..iterations {
+						// Received as each is written: a reader behind the live edge skips ahead.
+						for _ in 0..open {
+							let mut group = source.append_group().unwrap();
+							group.write_frame(Timestamp::ZERO, b"frame".as_ref()).unwrap();
+							group.finish().unwrap();
+							for (subscription, held) in subscriptions.iter_mut().zip(&mut held) {
+								held.push(subscription.recv_group().await.unwrap().expect("group"));
+							}
+						}
+						for held in &mut held {
+							for group in held.iter_mut() {
+								group.read_frame().await.unwrap().expect("frame");
+							}
+							held.clear();
+						}
+					}
+					started.elapsed()
+				})
+			});
+		});
+	}
+	group.finish();
+}
+
 /// Re-poll stalled groups through a front, including their subscription budget.
 /// Sweep tracks and readers separately to expose unrelated table scans.
 fn bench_parked(c: &mut Criterion) {
@@ -1172,7 +1337,7 @@ const COPY_WAIT: Duration = Duration::from_secs(5);
 
 /// One generation at [`COPY_PATH`], held so its copies stay subscribed.
 struct Generation {
-	broadcast: broadcast::Producer,
+	broadcast: origin::Publication,
 	tracks: Vec<track::Producer>,
 }
 
@@ -1335,7 +1500,7 @@ const RESUME_OVERLAP: [(usize, usize, usize); 17] = [
 /// groups, each replacement in reverse arrival order.
 struct ResumeOverlap {
 	_producer: origin::Producer,
-	_generations: Vec<(broadcast::Producer, track::Producer)>,
+	_generations: Vec<(origin::Publication, track::Producer)>,
 	readers: Vec<ResumeReader>,
 }
 
@@ -1411,12 +1576,12 @@ async fn resume_overlap(shape: ResumeShape, ordered: bool) -> ResumeOverlap {
 	let subscription = track::Subscription::default().with_max_delay(Duration::from_secs(3600));
 	let mut subscribers = Vec::with_capacity(readers);
 	for _ in 0..readers {
-		let mut subscriber = moq_clock::timeout(COPY_WAIT, track.subscribe(subscription.clone()))
+		let subscriber = moq_clock::timeout(COPY_WAIT, track.subscribe(subscription.clone()))
 			.await
 			.expect("track did not splice")
 			.expect("subscribe failed");
 		// Held back until the drain, so every route's copy is kept for its unread groups.
-		subscriber.set_groups(..0);
+		let subscriber = subscriber.with_range(..0);
 		subscribers.push(subscriber);
 	}
 	let waiter = kio::Waiter::noop();
@@ -1441,11 +1606,9 @@ async fn resume_overlap(shape: ResumeShape, ordered: bool) -> ResumeOverlap {
 			);
 		}
 	}
-	for subscriber in &mut subscribers {
-		subscriber.set_groups(..);
-	}
 	let readers = subscribers
 		.into_iter()
+		.map(|subscriber| subscriber.with_range(..))
 		.map(|subscriber| match ordered {
 			true => ResumeReader::Sequence(subscriber.ordered()),
 			false => ResumeReader::Arrival(subscriber),
@@ -1509,6 +1672,8 @@ criterion_group!(
 	bench_announce,
 	bench_pending_churn,
 	bench_withdraw,
+	bench_withdraw_wave,
+	bench_route_churn,
 	bench_announce_mounted,
 	bench_announce_fleet,
 	bench_announce_duplicate,
@@ -1525,6 +1690,7 @@ criterion_group!(
 	bench_narrow_delivery,
 	bench_narrow,
 	bench_relay,
+	bench_passthrough,
 	bench_parked,
 	bench_copy_walk,
 	bench_resume_overlap

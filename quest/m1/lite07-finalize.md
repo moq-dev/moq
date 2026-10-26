@@ -34,11 +34,18 @@ not the later federation/P2P integrations. Decided 2026-10-13: routes now
 owns the tier/partition correctness tests, so they run before the cut. Peer
 grants and metadata-only subscriptions do not gate it: neither is clustering
 stability. Both are additive and, per the freeze policy, target whichever lite
-wip is current when they land.
+wip is current when they land. Decided 2026-10-25: no routing identity proof
+gates the cut; every session's receiver, a direct peer included, stamps its
+identity instead, and the key and its proof belong to Peer grants. Decided
+the same day (maintainer): no cross-path recognition, so the CDN and direct
+copies of an origin are separate identities and nothing in lite-07 carries a
+stamp between sessions. Simpler: one identity regime.
 
 Decided 2026-10-08: Restart and AUTH join Required, since both change the
-lite-07 wire. Decided 2026-10-17: compressed tracks join too, so lite-07
-ships with them. SUBSCRIBE_OK carrying live media time was dropped: no reader
+lite-07 wire. Compressed tracks joined on 2026-10-17 and landed
+([#5928](https://github.com/moq-dev/moq/pull/5928),
+[#6228](https://github.com/moq-dev/moq/pull/6228),
+[#6230](https://github.com/moq-dev/moq/pull/6230)). SUBSCRIBE_OK carrying live media time was dropped: no reader
 was named, and `set_live` covers it.
 
 The cut:
@@ -60,20 +67,16 @@ The cut:
   names that rejection, not only the cap.
 
 Decided 2026-10-20 (maintainer): [Drop set](/quest/m1/drop-set.md) joins
-Required, because it adds `Max Age` to lite-07's SUBSCRIBE_DROP. Only
-[Token in band](/quest/m1/auth/token-in-band.md) gates the cut from the auth
-line, because it is that line's lite-07 wire work; the rest is API work that
-does not block the rename.
+Required, because it adds `Max Age` to lite-07's SUBSCRIBE_DROP. Nothing
+else from the auth line gates the cut: its lite-07 wire work, the SETUP Token
+parameter, has landed, and the rest is API work that does not block the rename.
 
-Decided 2026-10-17: the archive line's discovery request joins Required, so
-lite-07 ships what the archive and the IETF SUBSCRIBE_TRACKS mapping need.
-On 2026-10-19 TRACKS, a per-broadcast track listing, replaced SUBSCRIBE_ALL
-and kept that slot.
+The archive line's TRACKS request (a per-broadcast track listing that
+replaced SUBSCRIBE_ALL) landed in [#6158](https://github.com/moq-dev/moq/pull/6158)
+and [#6167](https://github.com/moq-dev/moq/pull/6167), and the padding stream
+type for the m2 browser [padding probes](/quest/m2/probe/padding.md) landed in
+[#6233](https://github.com/moq-dev/moq/pull/6233).
 The `Time(pts)` range end rides in Subscribe ranges, already Required.
-
-Decided 2026-10-20: the padding stream type joins Required, so the m2
-browser [padding probes](/quest/m2/probe/padding.md) can use lite-07 without
-a new version.
 
 Rust's lite-07 varints already carry the full 64 bits the draft specifies,
 so no codec work waits on the cut.
@@ -92,13 +95,10 @@ timestamp bound in [#6168](https://github.com/moq-dev/moq/pull/6168).
 
 ## Required
 
-- [Token in band](/quest/m1/auth/token-in-band.md) - lite-07 carries the Auth Stream and UNAUTHORIZED (0x3B)
-- [Identity proof](/quest/m1/cluster-routing/identity.md) - lite-07 carries the routing key and its per-session proof
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - lite-07 carries the route layer: ROUTE per origin node and path-less ANNOUNCE, with the hop list gone
 - [Drop set](/quest/m1/drop-set.md) - lite-07's SUBSCRIBE_DROP carries `Max Age`, so a widening re-offers groups reported dropped
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - SUBSCRIBE carries ranges and an order and lite FETCH is gone, in Rust and JS
 - [Announcement takeover](/quest/m1/announce-takeover.md) - ANNOUNCE_TAKEOVER preserves a proven instance under a new independent route
-- [Listing end reason](/quest/m1/listing-end-reason.md) - lite-07's TRACKS_FINISH says a listed track finished, so an IETF answerer can end it with TRACK_ENDED
 
 ## Related
 

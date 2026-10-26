@@ -1,10 +1,11 @@
+import Foundation
 import MoqFFI
 
 /// Native audio encoding, publication, and decoding.
 public enum Audio {
     /// The PCM layout (format, sample rate, channels) written to a `Producer`.
     public typealias EncoderInput = AudioEncoderInput
-    /// The codec side: codec, track name, rate, channels, bitrate, frame duration, and preset.
+    /// The codec side: codec, rate, channels, bitrate, and frame duration.
     public typealias EncoderOutput = AudioEncoderOutput
     /// The PCM layout a `Consumer` delivers, how stale a group may get, and its playout delay.
     public typealias DecoderOutput = AudioDecoderOutput
@@ -16,8 +17,6 @@ public enum Audio {
     public typealias EncoderFinish = MoqAudioEncoderFinish
     /// Selects the audio encoder codec. Build one with `Codec.opus()` or `Codec.aac()`.
     public typealias Codec = AudioCodec
-    /// How the encoder trades latency for compression; `nil` is `.balanced`.
-    public typealias Preset = MoqAudioPreset
     /// The PCM sample layout written to a `Producer` or delivered by a `Consumer`.
     public typealias SampleFormat = AudioSampleFormat
 
@@ -31,9 +30,13 @@ public enum Audio {
             catalog: Media.CatalogProducer,
             input: EncoderInput,
             output: EncoderOutput,
+            track: String? = nil,
             bandwidth: Bandwidth? = nil
         ) throws {
-            ffi = try MoqAudioProducer(catalog: catalog.ffi, input: input, output: output, bandwidth: bandwidth?.ffi)
+            ffi = try MoqAudioProducer(
+                catalog: catalog.ffi,
+                options: MoqAudioProducerOptions(
+                    input: input, output: output, track: track, bandwidth: bandwidth?.ffi))
         }
 
         /// A watch-only handle to whether the audio track has subscribers.
@@ -94,9 +97,9 @@ public enum Audio {
             try await ffi.next()
         }
 
-        /// The playout delay to hold ahead of the playhead, in microseconds: the fixed
-        /// `DecoderOutput.delayUs`, or the estimate from every frame read so far.
-        public var delayUs: UInt64 { ffi.delayUs() }
+        /// The playout delay to hold ahead of the playhead: the fixed `DecoderOutput.delay`,
+        /// or the estimate from every frame read so far.
+        public var delay: TimeInterval { ffi.delay() }
 
         /// Cancel all current and future reads.
         public func cancel() {
@@ -115,7 +118,7 @@ public enum Audio {
     public final class Encoder: Sendable {
         let ffi: MoqAudioEncoder
 
-        /// Open a codec-only encoder; `output.track` is ignored.
+        /// Open a codec-only encoder.
         public init(output: EncoderOutput) throws { ffi = try MoqAudioEncoder(output: output) }
 
         /// Samples per channel each `encode` call takes.

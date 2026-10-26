@@ -1,7 +1,7 @@
 //! The union of every subscriber's ranges, kept current per change rather than refolded.
 //!
-//! Absolute ranges become signed boundaries over positions, +1 where one starts and -1
-//! where it ends, so a position is covered while the running sum stays above zero. A treap
+//! Absolute ranges become signed boundaries over groups, +1 where one starts and -1
+//! where it ends, so a group is covered while the running sum stays above zero. A treap
 //! keeps each subtree's sum and lowest running sum, so a change touches two boundaries and
 //! asks one range-minimum question, whatever else the audience holds. Ranges anchored to
 //! the latest group or to a time can't be placed on that line and are counted by value
@@ -11,7 +11,7 @@ use std::cell::OnceCell;
 use std::collections::BTreeMap;
 use std::hash::{BuildHasher, RandomState};
 
-use super::super::{Anchor, Position, Range};
+use super::super::{Anchor, Range};
 use super::{add, remove};
 
 /// Every subscriber's ranges, counted so that one change costs O(log n).
@@ -32,7 +32,7 @@ pub(super) struct Ranges {
 enum Shape {
 	Empty,
 	Oldest,
-	Absolute(Position, Option<Position>),
+	Absolute(u64, Option<u64>),
 	Relative(u64),
 	Mixed,
 }
@@ -146,7 +146,7 @@ impl Ranges {
 	}
 }
 
-/// Signed boundary counts over positions: the coverage of the absolute ranges.
+/// Signed boundary counts over groups: the coverage of the absolute ranges.
 #[derive(Default)]
 struct Coverage {
 	root: Link,
@@ -156,7 +156,7 @@ struct Coverage {
 type Link = Option<Box<Node>>;
 
 struct Node {
-	key: Position,
+	key: u64,
 	/// Ranges starting here, minus ranges ending here. Never zero.
 	delta: i64,
 	priority: u64,
@@ -170,14 +170,14 @@ struct Node {
 
 impl Coverage {
 	/// Count `delta` more ranges over `start..end`, open when `end` is `None`.
-	fn add(&mut self, start: Position, end: Option<Position>, delta: i64) {
+	fn add(&mut self, start: u64, end: Option<u64>, delta: i64) {
 		self.shift(start, delta);
 		if let Some(end) = end {
 			self.shift(end, -delta);
 		}
 	}
 
-	fn shift(&mut self, key: Position, delta: i64) {
+	fn shift(&mut self, key: u64, delta: i64) {
 		let (below, rest) = split(self.root.take(), &key, false);
 		let (at, above) = split(rest, &key, true);
 		let delta = at.map_or(0, |node| node.delta) + delta;
@@ -185,8 +185,8 @@ impl Coverage {
 		self.root = merge(merge(below, at), above);
 	}
 
-	/// The fewest ranges covering any position in `start..end`.
-	fn min(&mut self, start: Position, end: Option<Position>) -> i64 {
+	/// The fewest ranges covering any group in `start..end`.
+	fn min(&mut self, start: u64, end: Option<u64>) -> i64 {
 		let (through, rest) = split(self.root.take(), &start, true);
 		let (inside, above) = match end {
 			Some(end) => split(rest, &end, false),
@@ -199,14 +199,14 @@ impl Coverage {
 	}
 
 	/// The covered spans in order, the last one open while an open range remains.
-	fn runs(&self) -> Vec<(Position, Option<Position>)> {
+	fn runs(&self) -> Vec<(u64, Option<u64>)> {
 		let mut runs = Vec::new();
 		walk(&self.root, 0, &mut runs);
 		runs
 	}
 
 	/// Where the open span starts, if an open range remains.
-	fn tail(&self) -> Option<Position> {
+	fn tail(&self) -> Option<u64> {
 		if sum(&self.root) <= 0 {
 			return None;
 		}
@@ -218,7 +218,7 @@ impl Coverage {
 }
 
 impl Node {
-	fn new(key: Position, delta: i64, priority: u64) -> Box<Self> {
+	fn new(key: u64, delta: i64, priority: u64) -> Box<Self> {
 		Box::new(Self {
 			key,
 			delta,
@@ -246,7 +246,7 @@ fn low(link: &Link) -> i64 {
 }
 
 /// Split into the keys below `key` (through it when `inclusive`) and the rest.
-fn split(link: Link, key: &Position, inclusive: bool) -> (Link, Link) {
+fn split(link: Link, key: &u64, inclusive: bool) -> (Link, Link) {
 	let Some(mut node) = link else {
 		return (None, None);
 	};
@@ -281,7 +281,7 @@ fn merge(left: Link, right: Link) -> Link {
 	}
 }
 
-fn first(link: &Link) -> Option<Position> {
+fn first(link: &Link) -> Option<u64> {
 	let mut node = link.as_ref()?;
 	while let Some(left) = &node.left {
 		node = left;
@@ -290,7 +290,7 @@ fn first(link: &Link) -> Option<Position> {
 }
 
 /// The first key above `after`.
-fn successor(mut link: &Link, after: &Position) -> Option<Position> {
+fn successor(mut link: &Link, after: &u64) -> Option<u64> {
 	let mut found = None;
 	while let Some(node) = link {
 		if node.key > *after {
@@ -307,7 +307,7 @@ fn successor(mut link: &Link, after: &Position) -> Option<Position> {
 ///
 /// A subtree entered covered whose running sum never reaches zero holds no boundary of the
 /// union, so it is skipped whole: the walk visits O(log n) nodes per span it returns.
-fn walk(link: &Link, offset: i64, runs: &mut Vec<(Position, Option<Position>)>) {
+fn walk(link: &Link, offset: i64, runs: &mut Vec<(u64, Option<u64>)>) {
 	let Some(node) = link else {
 		return;
 	};
@@ -326,7 +326,7 @@ fn walk(link: &Link, offset: i64, runs: &mut Vec<(Position, Option<Position>)>) 
 }
 
 /// The last key where the running sum, starting at `offset`, is zero.
-fn last_zero(link: &Link, offset: i64) -> Option<Position> {
+fn last_zero(link: &Link, offset: i64) -> Option<u64> {
 	let node = link.as_ref()?;
 	if offset.saturating_add(node.low) > 0 {
 		return None;
@@ -355,10 +355,7 @@ mod tests {
 		let anchor = |rng: &mut rand::rngs::StdRng| match rng.random_range(0..6) {
 			0 => Anchor::Relative(rng.random_range(0..4)),
 			1 => Anchor::Relative(u64::MAX),
-			_ => Anchor::Absolute(Position {
-				group: rng.random_range(0..12),
-				frame: rng.random_range(0..3),
-			}),
+			_ => Anchor::Absolute(rng.random_range(0..12)),
 		};
 		let mut ranges = Ranges::default();
 		let mut held: Vec<Range> = Vec::new();

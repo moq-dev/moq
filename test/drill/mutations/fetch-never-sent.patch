@@ -10,9 +10,7 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
 index 55006c5f7..93f2f9677 100644
 --- a/rs/moq-net/src/lite/subscriber.rs
 +++ b/rs/moq-net/src/lite/subscriber.rs
-@@ -6368,7 +6368,12 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
- 
- 			match &mut self.state {
+@@ -7701,2 +7701,7 @@ impl kio::Task for FetchServeRun {
  				FetchRunState::Open { request } => {
  					ready!(self.gate.poll_ready(waiter));
 +					// MUTATION: never send the FETCH, so nothing ever answers it.
@@ -20,6 +18,3 @@ index 55006c5f7..93f2f9677 100644
 +						return Poll::Pending;
 +					}
 +
- 					let mut stream = match ready!(Stream::poll_open(
- 						&mut self.session,
- 						self.serve.subscriber.version,

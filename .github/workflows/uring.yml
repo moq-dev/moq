@@ -15,11 +15,11 @@ concurrency:
 jobs:
   uring:
     name: io_uring
-    # This image provides a 6.12+ kernel; MOQ_STRICT fails the tests if that changes.
+    # This image provides a 6.12+ kernel; CI_STRICT fails the tests if that changes.
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
     env:
-      MOQ_STRICT: 1
+      CI_STRICT: 1
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -35,6 +35,9 @@ jobs:
           access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
           secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
 
+      - name: Add a second IPv6 loopback address
+        # moq-uring's local address test reaches a wildcard socket on it.
+        run: sudo ip -6 addr add fd6d:6f71::2/128 dev lo nodad
       - name: io_uring
         run: nix develop --command just rs uring-changed "$CI_BASE"
         env:

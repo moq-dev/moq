@@ -244,6 +244,7 @@ impl Decode<Version> for Cost {
 
 impl Encode<Version> for AnnounceBroadcast<'_> {
 	fn encode(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
+		w.control = Some(crate::stats::Control::Announce);
 		if version.has_announce_id() {
 			// Lite06+: outer type discriminator, then a size-prefixed body (like the
 			// subscribe stream). The body varies by type.
@@ -332,6 +333,7 @@ impl Encode<Version> for AnnounceBroadcast<'_> {
 
 impl Decode<Version> for AnnounceBroadcast<'_> {
 	fn decode(buf: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+		buf.control = Some(crate::stats::Control::Announce);
 		if version.has_announce_id() {
 			// Lite06+: outer type, then a size-prefixed body decoded within its bounds.
 			let typ = buf.varint()?;
@@ -443,11 +445,11 @@ fn encode_hops(w: &mut Encoder<'_>, version: Version, hops: &Hops) -> Result<(),
 pub struct AnnounceRequest<'a> {
 	// Request tracks with this prefix.
 	pub prefix: Path<'a>,
-	// Lite04/05 only: if non-zero, the publisher SHOULD skip announces whose hop IDs
+	// Lite04/05 only: unless unknown, the publisher SHOULD skip announces whose hop IDs
 	// contain this value. Not on the wire elsewhere, so the value set here is ignored
-	// when encoding for another version and decodes as zero; lite-06 carries the
+	// when encoding for another version and decodes as unknown; lite-06 carries the
 	// identity session-wide in the SETUP Hop parameter instead.
-	pub exclude_hop: u64,
+	pub exclude_hop: Hop,
 	// Lite07+: also announce routes with a `.`-prefixed segment below the prefix.
 	// Not on the wire earlier, so the value set here is ignored when encoding for an
 	// older version and decodes as false.
@@ -455,11 +457,12 @@ pub struct AnnounceRequest<'a> {
 }
 
 impl Message for AnnounceRequest<'_> {
+	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::Announce);
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let prefix = Path::decode(r, version)?;
 		let exclude_hop = match version.has_exclude_hop() {
-			true => r.varint()?,
-			false => 0,
+			true => Hop::decode(r, version)?,
+			false => Hop::UNKNOWN,
 		};
 		let hidden = match version.has_hidden() {
 			true => r.bool()?,
@@ -475,7 +478,7 @@ impl Message for AnnounceRequest<'_> {
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		self.prefix.encode(w, version)?;
 		if version.has_exclude_hop() {
-			w.varint(self.exclude_hop)?;
+			self.exclude_hop.encode(w, version)?;
 		}
 		if version.has_hidden() {
 			w.bool(self.hidden);
@@ -499,6 +502,7 @@ enum AnnounceStatus {
 
 impl Decode<Version> for AnnounceStatus {
 	fn decode(r: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+		r.control = Some(crate::stats::Control::Announce);
 		let status = r.u8()?;
 		status.try_into().map_err(|_| DecodeError::InvalidValue)
 	}
@@ -506,6 +510,7 @@ impl Decode<Version> for AnnounceStatus {
 
 impl Encode<Version> for AnnounceStatus {
 	fn encode(&self, w: &mut Encoder<'_>, _: Version) -> Result<(), EncodeError> {
+		w.control = Some(crate::stats::Control::Announce);
 		w.u8(*self as u8);
 		Ok(())
 	}
@@ -520,11 +525,14 @@ pub struct AnnounceInit<'a> {
 	pub suffixes: Vec<Path<'a>>,
 }
 
-impl Message for AnnounceInit<'_> {
-	// Published lite01/02 carry the whole initial set in one message.
-	const MAX_SIZE: usize = 64 * 1024 * 1024;
+impl AnnounceInit<'_> {
+	/// Decode one size-prefixed ANNOUNCE_INIT, refusing one that lists more than `budget`
+	/// suffixes before decoding any, so the set grows no larger than what may be announced.
+	pub(crate) fn decode_within(r: &mut Decoder<'_>, version: Version, budget: usize) -> Result<Self, DecodeError> {
+		super::message::decode_with(r, |body| Self::decode_suffixes(body, version, budget))
+	}
 
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+	fn decode_suffixes(r: &mut Decoder<'_>, version: Version, budget: usize) -> Result<Self, DecodeError> {
 		match version {
 			Version::Lite01 | Version::Lite02 => {}
 			_ => {
@@ -533,15 +541,30 @@ impl Message for AnnounceInit<'_> {
 		}
 
 		let count = r.varint()?;
+		if count > budget as u64 {
+			return Err(DecodeError::TooMany);
+		}
+		// Each suffix takes at least its length byte, so the body bounds the count too.
+		if count > r.remaining() as u64 {
+			return Err(DecodeError::Short);
+		}
 
-		// Don't allocate more than 1024 elements upfront
-		let mut paths = Vec::with_capacity(count.min(1024) as usize);
-
+		let mut paths = Vec::with_capacity(count as usize);
 		for _ in 0..count {
 			paths.push(Path::decode(r, version)?);
 		}
 
 		Ok(Self { suffixes: paths })
+	}
+}
+
+impl Message for AnnounceInit<'_> {
+	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::Announce);
+	// Published lite01/02 carry the whole initial set in one message.
+	const MAX_SIZE: usize = 64 * 1024 * 1024;
+
+	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+		Self::decode_suffixes(r, version, usize::MAX)
 	}
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
@@ -575,6 +598,7 @@ pub struct AnnounceOk {
 }
 
 impl Message for AnnounceOk {
+	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::Announce);
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_announce_ok() {
 			return Err(DecodeError::Version);
@@ -602,6 +626,31 @@ impl Message for AnnounceOk {
 mod tests {
 	use super::*;
 	use bytes::Buf;
+
+	/// A legacy initial set is held to the announce budget before any suffix decodes, so
+	/// a body of one-byte suffixes cannot become a list many times its size.
+	#[test]
+	fn announce_init_is_bounded_by_the_budget() {
+		let version = Version::Lite02;
+		let mut wire = Vec::new();
+		AnnounceInit {
+			suffixes: vec![Path::new("a"), Path::new(""), Path::new("b")],
+		}
+		.encode(&mut Encoder::new(&mut wire, version.into()), version)
+		.unwrap();
+		let decode =
+			|wire: &[u8], budget| AnnounceInit::decode_within(&mut Decoder::new(wire, version.into()), version, budget);
+
+		assert_eq!(decode(&wire, 3).unwrap().suffixes.len(), 3);
+		assert!(matches!(decode(&wire, 2), Err(DecodeError::TooMany)));
+
+		// A count the body cannot hold is malformed whatever the budget, before any allocation.
+		let mut wire = Vec::new();
+		let mut w = Encoder::new(&mut wire, version.into());
+		w.varint(8).unwrap();
+		w.varint(u32::MAX.into()).unwrap();
+		assert!(matches!(decode(&wire, usize::MAX), Err(DecodeError::InvalidValue)));
+	}
 
 	#[test]
 	fn synced_replaces_only_lite07s_count() {
@@ -1013,7 +1062,7 @@ mod tests {
 		for hidden in [false, true] {
 			let msg = AnnounceRequest {
 				prefix: Path::new("room/"),
-				exclude_hop: 0,
+				exclude_hop: Hop::UNKNOWN,
 				hidden,
 			};
 			assert_eq!(request_round_trip(&msg, Version::Lite07).hidden, hidden);
@@ -1043,10 +1092,10 @@ mod tests {
 	fn announce_request_carries_exclude_hop_on_lite05() {
 		let msg = AnnounceRequest {
 			prefix: Path::new("room/"),
-			exclude_hop: 42,
+			exclude_hop: Hop::new(42).unwrap(),
 			hidden: false,
 		};
-		assert_eq!(request_round_trip(&msg, Version::Lite05).exclude_hop, 42);
+		assert_eq!(request_round_trip(&msg, Version::Lite05).exclude_hop.id(), 42);
 	}
 
 	// Lite06 dropped the field: the receiver's reflected-announce check catches the same
@@ -1055,10 +1104,10 @@ mod tests {
 	fn announce_request_drops_exclude_hop_on_lite06() {
 		let msg = AnnounceRequest {
 			prefix: Path::new("room/"),
-			exclude_hop: 42,
+			exclude_hop: Hop::new(42).unwrap(),
 			hidden: false,
 		};
-		assert_eq!(request_round_trip(&msg, Version::Lite06).exclude_hop, 0);
+		assert_eq!(request_round_trip(&msg, Version::Lite06).exclude_hop, Hop::UNKNOWN);
 
 		// And it costs nothing on the wire: the body is just the prefix.
 		let mut with = Vec::new();

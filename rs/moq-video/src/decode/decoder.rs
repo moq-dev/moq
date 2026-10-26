@@ -372,7 +372,10 @@ fn is_supported_vp9(vp9: &VP9) -> bool {
 
 #[cfg(test)]
 mod tests {
-	#![cfg_attr(not(feature = "openh264"), allow(dead_code, unused_imports))]
+	#![cfg_attr(
+		not(feature = "openh264"),
+		allow(dead_code, unused_imports, reason = "only the `openh264` feature uses it")
+	)]
 
 	use moq_net::Timestamp;
 
@@ -465,7 +468,7 @@ mod tests {
 	fn h264_software_encoder(size: crate::Size) -> Encoder {
 		Encoder::new(&EncodeConfig {
 			kind: EncodeKind::Software,
-			..EncodeConfig::new(size.width, size.height, crate::Rate::new(30, 1).unwrap())
+			..EncodeConfig::new(size.width, size.height, crate::FrameRate::new(30, 1).unwrap())
 		})
 		.expect("openh264 encoder")
 	}
@@ -608,9 +611,10 @@ mod tests {
 
 		let (origin, driver) = moq_net::origin::Producer::new(Default::default());
 		tokio::spawn(moq_net::time::run(driver));
-		let mut source = origin.publish("test", Default::default()).unwrap();
+		let source = origin.publish("test", Default::default()).unwrap();
 		let mut source_catalog =
-			moq_mux::catalog::Producer::new(&mut source, moq_mux::catalog::Config::default()).unwrap();
+			moq_mux::catalog::Producer::new(&mut source.broadcast().clone(), moq_mux::catalog::Config::default())
+				.unwrap();
 		let track = source
 			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
@@ -724,7 +728,7 @@ mod tests {
 			let mut encoder = Encoder::new(&EncodeConfig {
 				kind: EncodeKind::Software,
 				color: Some(color),
-				..EncodeConfig::new(size.width, size.height, crate::Rate::new(30, 1).unwrap())
+				..EncodeConfig::new(size.width, size.height, crate::FrameRate::new(30, 1).unwrap())
 			})
 			.unwrap();
 			encoder.cut().unwrap();
@@ -992,7 +996,7 @@ mod tests {
 
 		let encoder = Encoder::new(&EncodeConfig {
 			kind: EncodeKind::Named("videotoolbox".into()),
-			..EncodeConfig::new(160, 120, crate::Rate::new(30, 1).unwrap())
+			..EncodeConfig::new(160, 120, crate::FrameRate::new(30, 1).unwrap())
 		});
 		let Ok(mut encoder) = encoder else {
 			eprintln!("skipping: no VideoToolbox H.264 hardware encoder available");
@@ -1021,7 +1025,7 @@ mod tests {
 		let encoder = Encoder::new(&EncodeConfig {
 			kind: EncodeKind::Named("videotoolbox".into()),
 			codec: crate::encode::Codec::H265,
-			..EncodeConfig::new(320, 240, crate::Rate::new(30, 1).unwrap())
+			..EncodeConfig::new(320, 240, crate::FrameRate::new(30, 1).unwrap())
 		});
 		let Ok(encoder) = encoder else {
 			eprintln!("skipping: no VideoToolbox H.265 hardware encoder available");
@@ -1208,7 +1212,7 @@ mod tests {
 
 		let encoder = Encoder::new(&EncodeConfig {
 			kind: EncodeKind::Named("mediafoundation".into()),
-			..EncodeConfig::new(size.width, size.height, crate::Rate::new(30, 1).unwrap())
+			..EncodeConfig::new(size.width, size.height, crate::FrameRate::new(30, 1).unwrap())
 		});
 		let Ok(mut encoder) = encoder else {
 			eprintln!("skipping: no Media Foundation H.264 hardware encoder available");
@@ -1293,7 +1297,7 @@ mod tests {
 
 		let encoder = Encoder::new(&EncodeConfig {
 			kind: EncodeKind::Named("mediafoundation".into()),
-			..EncodeConfig::new(target.width, target.height, crate::Rate::new(30, 1).unwrap())
+			..EncodeConfig::new(target.width, target.height, crate::FrameRate::new(30, 1).unwrap())
 		});
 		let Ok(mut encoder) = encoder else {
 			eprintln!("skipping: no Media Foundation H.264 hardware encoder available");
@@ -1322,7 +1326,7 @@ mod tests {
 		let encoder = Encoder::new(&EncodeConfig {
 			kind: EncodeKind::Named("mediafoundation".into()),
 			codec: crate::encode::Codec::H265,
-			..EncodeConfig::new(320, 240, crate::Rate::new(30, 1).unwrap())
+			..EncodeConfig::new(320, 240, crate::FrameRate::new(30, 1).unwrap())
 		});
 		let Ok(encoder) = encoder else {
 			eprintln!("skipping: no Media Foundation H.265 hardware encoder available");

@@ -107,8 +107,9 @@ async function handover(kind: "lite" | "ietf"): Promise<void> {
 
 	const consume = new OriginProducer();
 	const publish = new OriginProducer();
-	const broadcast = publish.createBroadcast(Path.from("room"));
-	broadcast.announce();
+	const broadcastPublication = publish.createBroadcast(Path.from("room"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 
 	const served: TrackProducer[] = [];
 	let armVideo = true;
@@ -244,7 +245,7 @@ test("ietf: requests open on the draining session until the replacement wins", a
 });
 
 test("announcing and subscribing after GOAWAY still open streams, on the adapter too", async () => {
-	for (const version of [IetfVersion.DRAFT_14, IetfVersion.DRAFT_16, IetfVersion.DRAFT_19]) {
+	for (const version of [IetfVersion.DRAFT_14, IetfVersion.DRAFT_16, IetfVersion.DRAFT_18]) {
 		const goaway = new Once<Drain>();
 		goaway.set({ uri: "" });
 		let opened = false;
@@ -293,7 +294,8 @@ test("announcing and subscribing after GOAWAY still open streams, on the adapter
  */
 async function routeDeath(kind: "lite" | "ietf", after: boolean): Promise<void> {
 	const clock = new Manual();
-	using _clock = { [Symbol.dispose]: clock.install() };
+	const installed = clock.install();
+	using _clock = { [Symbol.dispose]: () => installed.close() };
 	const protocol = kind === "lite" ? ALPN_06 : ALPN.DRAFT_17;
 	const pair = createMockTransportPair(protocol);
 	const inject = kind === "ietf" ? captureFirstUni(pair.server) : undefined;
@@ -301,8 +303,9 @@ async function routeDeath(kind: "lite" | "ietf", after: boolean): Promise<void> 
 
 	const consume = new OriginProducer();
 	const publish = new OriginProducer();
-	const broadcast = publish.createBroadcast(Path.from("room"));
-	broadcast.announce();
+	const broadcastPublication = publish.createBroadcast(Path.from("room"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 
 	const served: TrackProducer[] = [];
 	const serving = (async () => {

@@ -4,8 +4,11 @@ export const PROFILE = "moq-e2ee-00";
 /** HKDF info prefix for opaque broadcast paths. */
 export const PATH_LABEL = "moq-e2ee-00 path";
 
-/** HKDF info prefix for physical names. */
-export const NAME_LABEL = "moq-e2ee-00 name";
+/** HKDF info prefix for the HMAC-SHA-256 key that derives physical name nonces. */
+export const NAME_MAC_LABEL = "moq-e2ee-00 name-mac";
+
+/** HKDF info prefix for the AES-128-GCM key that seals physical names. */
+export const NAME_KEY_LABEL = "moq-e2ee-00 name-key";
 
 /** HKDF info prefix for AEAD keys. */
 export const KEY_LABEL = "moq-e2ee-00 key";
@@ -16,8 +19,17 @@ export const TAG_LEN = 16;
 /** Derived AEAD key length in bytes. */
 export const KEY_LEN = 16;
 
-/** Physical name and opaque path material length in bytes. */
-export const NAME_LEN = 16;
+/** Opaque path material length in bytes. */
+export const PATH_LEN = 16;
+
+/** HMAC-SHA-256 name key length in bytes. */
+export const NAME_MAC_LEN = 32;
+
+/** Leading HMAC bytes a physical name uses as its AES-GCM nonce. */
+export const NAME_NONCE_LEN = 12;
+
+/** Padded semantic names are a multiple of this many bytes. */
+export const NAME_BLOCK = 16;
 
 /** Broadcast secret length in bytes. */
 export const SECRET_LEN = 32;

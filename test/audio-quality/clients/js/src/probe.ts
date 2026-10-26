@@ -128,7 +128,6 @@ export function probe(watch: MoqWatch, capture = false): Probe {
 			stalled: audio.out.stalled.peek(),
 			delay: sync.out.delay.peek(),
 			rtt: watch.player.in.probe.peek()?.rtt,
-			networkJitter: sync.out.jitter.peek(),
 			jitter: audio.source.out.config.peek()?.jitter,
 			renditionDelay: audio.source.out.config.peek()?.delay,
 			outputLatency: context ? context.outputLatency * 1000 : undefined,
@@ -175,7 +174,6 @@ export function probe(watch: MoqWatch, capture = false): Probe {
 			// One rendition is published per broadcast here, so the first is the one playing.
 			const config = Object.values(catalog.audio?.renditions ?? {})[0];
 			return {
-				crossOriginIsolated: globalThis.crossOriginIsolated === true,
 				transport: watch.connection.transport.peek(),
 				codec: config?.codec,
 				rate: config?.sampleRate,

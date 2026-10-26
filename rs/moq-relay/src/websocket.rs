@@ -12,10 +12,12 @@ use axum::{
 	response::Response,
 };
 
-use crate::{web::MtlsPeer, web::WebState, web::landing_response};
+use crate::{web::MtlsPeer, web::ServerName, web::WebState, web::landing_response};
 
-// One axum extractor per fact the upgrade needs; there is no struct to fold them into.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+	clippy::too_many_arguments,
+	reason = "one axum extractor per fact the upgrade needs; there is no struct to fold them into"
+)]
 // The `Err` is axum's own `ErrorResponse`, so there is nothing here to box.
 #[expect(clippy::result_large_err, reason = "the error type is axum's, not ours")]
 pub(crate) async fn serve_ws(
@@ -23,11 +25,13 @@ pub(crate) async fn serve_ws(
 	OriginalUri(uri): OriginalUri,
 	headers: HeaderMap,
 	mtls: Option<Extension<MtlsPeer>>,
-	ConnectInfo(remote): ConnectInfo<crate::listener::Peer>,
+	server_name: Option<Extension<ServerName>>,
+	ConnectInfo(remote): ConnectInfo<std::net::SocketAddr>,
 	socket_stats: Option<Extension<crate::web::SocketStats>>,
 	admission: Option<Extension<crate::listener::Admission>>,
 	Extension(versions): Extension<moq_net::Versions>,
 	Extension(extensions): Extension<moq_net::setup::Extensions>,
+	Extension(crate::web::Implementation(implementation)): Extension<crate::web::Implementation>,
 	State(state): State<Arc<WebState>>,
 ) -> axum::response::Result<Response> {
 	// If this isn't a WebSocket upgrade (e.g. a plain browser visit), serve
@@ -43,7 +47,9 @@ pub(crate) async fn serve_ws(
 		.or_else(|| state.shutdown.activity.enter())
 		.ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
 	let alpns = versions.alpns();
-	let ws = negotiate_subprotocol(ws, &alpns)?;
+	// The socket buffers a message whole before qmux sees it, so it reads no more than a record.
+	let max = moq_tokio::websocket::max_message_size();
+	let ws = negotiate_subprotocol(ws.max_message_size(max).max_frame_size(max), &alpns)?;
 
 	let host = uri
 		.authority()
@@ -55,15 +61,20 @@ pub(crate) async fn serve_ws(
 		uri.path_and_query().map_or("/", |value| value.as_str())
 	))
 	.map_err(|_| StatusCode::BAD_REQUEST)?;
-	let server = moq_net::Server::new()
+	let mut server = moq_net::Server::new()
 		.with_versions(versions)
 		.with_extensions(extensions);
+	if let Some(implementation) = implementation {
+		server = server.with_implementation(implementation);
+	}
 	let mut options = moq_tokio::websocket::Options::new(url, server, active);
-	options.link.remote = Some(remote.0);
+	options.link.remote = Some(remote);
 	options.link.alpn = ws.selected_protocol().and_then(|p| p.to_str().ok()).map(str::to_owned);
+	options.link.server_name = server_name.map(|Extension(ServerName(name))| name);
 	options.identity = mtls.map(|Extension(MtlsPeer(identity))| identity);
 	options.socket_stats = socket_stats.map(|Extension(stats)| stats.0);
-	options.timeout = state.timeout;
+	// The listener reads `None` as no deadline; `Options` reads it as the default.
+	options.timeout = Some(state.timeout.unwrap_or_default());
 
 	Ok(ws.on_upgrade(async move |socket| {
 		// Axum hides its Tungstenite socket to avoid exposing its dependency version.
@@ -125,7 +136,7 @@ const QMUX_VERSIONS: &[qmux::Version] = &[qmux::Version::QMux01, qmux::Version::
 
 /// moq-transport-18 and newer require qmux-01, so we never pair them with qmux-00.
 /// Mirrors `js/net`'s `connect.ts` and moq-tokio's `websocket_subprotocols`.
-const QMUX01_ONLY_ALPNS: &[&str] = &["moqt-18", "moqt-19", "moqt-20", "moqt-21", "moqt-22"];
+const QMUX01_ONLY_ALPNS: &[&str] = &["moqt-18", "moqt-22"];
 
 /// Subprotocols to advertise on the WebSocket upgrade.
 ///
@@ -136,10 +147,10 @@ const QMUX01_ONLY_ALPNS: &[&str] = &["moqt-18", "moqt-19", "moqt-20", "moqt-21",
 /// resolve a moq version from it, and the relay silently downgrades clients to
 /// Lite02 via SETUP-based negotiation.
 ///
-/// `qmux-00.moqt-{18,19,20,21,22}` is excluded: moq-transport-18 and newer require
+/// `qmux-00.moqt-{18,22}` is excluded: moq-transport-18 and newer require
 /// qmux-01, so those pairs are illegal.
 fn supported_subprotocols(alpns: &[&str]) -> Vec<String> {
-	let mut out = Vec::with_capacity(QMUX_VERSIONS.len() * alpns.len() + qmux::ALPNS.len());
+	let mut out = Vec::with_capacity(QMUX_VERSIONS.len() * alpns.len() + qmux::Version::ALL.len());
 	for &alpn in alpns {
 		for &version in QMUX_VERSIONS {
 			if version == qmux::Version::QMux00 && QMUX01_ONLY_ALPNS.contains(&alpn) {
@@ -148,8 +159,8 @@ fn supported_subprotocols(alpns: &[&str]) -> Vec<String> {
 			out.push(format!("{}{alpn}", version.prefix()));
 		}
 	}
-	for &alpn in qmux::ALPNS {
-		out.push(alpn.to_string());
+	for version in qmux::Version::ALL {
+		out.push(version.alpn().to_string());
 	}
 	out
 }
@@ -253,7 +264,11 @@ fn tungstenite_text_to_axum(text: tungstenite::Utf8Bytes) -> axum::extract::ws::
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests {
 	use super::*;
 	use axum::{Router, extract::WebSocketUpgrade, routing::any};
@@ -367,20 +382,12 @@ mod tests {
 	#[test]
 	fn supported_subprotocols_lists_full_matrix() {
 		// Guard the literals: they must stay the IETF draft-18-and-newer ALPNs
-		// (wire 0xff000012 through 0xff000016).
-		assert_eq!(
-			QMUX01_ONLY_ALPNS
-				.iter()
-				.map(|&a| moq_net::Version::from_alpn(a).map(|v| v.code()))
-				.collect::<Vec<_>>(),
-			vec![
-				Some(0xff000012),
-				Some(0xff000013),
-				Some(0xff000014),
-				Some(0xff000015),
-				Some(0xff000016)
-			]
-		);
+		// (wire 0xff000012 and 0xff000016).
+		let drafts: Vec<_> = [0xff000012, 0xff000016]
+			.into_iter()
+			.map(|code| moq_net::Version::from_code(code).unwrap().alpn())
+			.collect();
+		assert_eq!(QMUX01_ONLY_ALPNS, drafts);
 
 		let list = supported_subprotocols(moq_net::ALPNS);
 
@@ -390,7 +397,7 @@ mod tests {
 		assert_eq!(list.first().map(String::as_str), Some(expected_first.as_str()));
 
 		// Every moq ALPN must appear under every qmux wire version, except the
-		// illegal `qmux-00.moqt-{18,19,20,21,22}` pairs (moq-transport-18 and newer need qmux-01).
+		// illegal `qmux-00.moqt-{18,22}` pairs (moq-transport-18 and newer need qmux-01).
 		for &version in QMUX_VERSIONS {
 			for &alpn in moq_net::ALPNS {
 				let entry = format!("{}{alpn}", version.prefix());
@@ -409,7 +416,8 @@ mod tests {
 			.iter()
 			.rposition(|s| s.contains('.'))
 			.expect("no versioned entries");
-		for &bare in qmux::ALPNS {
+		for version in qmux::Version::ALL {
+			let bare = version.alpn();
 			let bare_idx = list
 				.iter()
 				.position(|s| s == bare)
@@ -428,7 +436,7 @@ mod tests {
 		assert!(list.contains(&"qmux-01.moqt-16".to_string()));
 		assert!(list.contains(&"qmux-00.moqt-16".to_string()));
 		assert!(list.iter().all(|entry| !entry.contains("moq-lite")));
-		assert!(list.iter().all(|entry| !entry.contains("moqt-19")));
+		assert!(list.iter().all(|entry| !entry.contains("moqt-22")));
 	}
 
 	#[test]
@@ -779,7 +787,7 @@ mod tests {
 			activity.enter().unwrap(),
 		);
 		options.link.alpn = Some(alpn.clone());
-		options.timeout = None;
+		options.timeout = Some(Duration::ZERO);
 		let server = tokio::spawn(moq_tokio::websocket::accept(
 			Pipe::new(server_incoming, server_to_client, frozen.clone()),
 			options,

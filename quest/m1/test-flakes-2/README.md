@@ -21,7 +21,8 @@ Rules every child keeps:
   slow, fix that.
 - A paused clock auto-advances while the runtime idles, so it can fire a
   timer before a real socket delivers. Where real sockets fight the paused
-  clock, make the timers mockable or move the test off real sockets.
+  clock, drive the timers with a `moq_clock::Manual` clock or the sim (every
+  crate's timers run on `moq-clock`), or move the test off real sockets.
 - A mocked clock still flakes when the code jitters its timers with `rand`
   (the draft-16 cancel race was a retry sweep jittered past a fixed settle
   budget). Wait out the jitter's whole window, not a count of small steps.
@@ -39,12 +40,10 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [Union renewal](/quest/m1/test-flakes-2/auth-union-renewal.md) - the JS subscriber never leaves a torn REQUEST_UPDATE on the stream
-- [One process](/quest/m1/test-flakes-2/one-process.md) - no test writes process-wide env or unwraps the crypto provider install
 - [Media resource instrumentation](/quest/m1/test-flakes-2/resource-instrumentation.md) - the media test stops seeing a playing player report nothing to release
-- [Media tone windows](/quest/m1/test-flakes-2/media-tone-windows.md) - the existing audio-tone agreement survives build load, fixed at its cause
-- [Interop cpp to js budget](/quest/m1/test-flakes-2/interop-cpp-js.md) - the cpp -> js cell finishes inside its 30 s budget, fixed at its cause
-
-## Related
-
-- [Controlled time](/quest/m1/time/README.md) - the systemic fix these rules ask for: every crate on a controlled clock
+- [moq-cli relay tests under load](/quest/m1/test-flakes-2/cli-relay-load.md) - the fetch and announced tests wait on events, not timing
+- [FFI publisher audio gaps](/quest/m1/test-flakes-2/ffi-audio-gap.md) - interop tone checks stop finding gaps from FFI publishers
+- [moq-uring allocations under load](/quest/m1/test-flakes-2/uring-alloc-load.md) - the steady-state send test and MEMLOCK users pass in a parallel check
+- [IETF22 fallback](/quest/m1/test-flakes-2/ietf22-fallback.md) - an IETF22 browser viewer follows a fallback within the media lane's bound, keeping its session and its audio
+- [Echo report test on mocked time](/quest/m1/test-flakes-2/export-echo-time.md) - the moq-cli echo report test stops taking 35 s of wall time
+- [Stuck-window eviction test on macOS](/quest/m1/test-flakes-2/stuck-window-evicts.md) - the evicted writer reliably sees its stop on macOS, fixed at the race

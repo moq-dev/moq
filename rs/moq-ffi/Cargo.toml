@@ -36,8 +36,9 @@ openh264 = ["moq-video?/openh264"]
 # qlog trace capture (`MoqQuicConfig::qlog`). Off by default: it compiles the qlog
 # machinery in and is only wanted for debugging; `moq_qlog_supported` reports it.
 qlog = ["moq-tokio/qlog"]
-# Test-only control of the runtime clock, for the Python suite (`just py test`). Released
-# builds leave it off, so they never carry the `moq_ffi_test_clock_*` symbols.
+# Test-only hooks for the host suites: control of the runtime clock (`just py test`) and a
+# count of moq's heap (the Dart leak tests). Released builds leave it off, so they never
+# carry the `moq_ffi_test_*` symbols or the counting allocator.
 testing = ["moq-clock/manual"]
 
 [dependencies]
@@ -93,6 +94,8 @@ web-transport-wasm = { workspace = true }
 [dev-dependencies]
 # One non-codec test blocks on a future; the main dep is `video`-only.
 pollster = { workspace = true }
+# Runs the key log tests with `SSLKEYLOGFILE` set or unset, in a child process.
+test-env = { path = "../test-env" }
 tokio = { workspace = true, features = ["test-util"] }
 web-transport-trait = { workspace = true }
 
@@ -104,3 +107,6 @@ moq-video = { path = "../moq-video", features = ["openh264"] }
 [target.'cfg(unix)'.dev-dependencies]
 # Process CPU time for the benchmark's baselines.
 libc = { workspace = true }
+
+[lints]
+workspace = true

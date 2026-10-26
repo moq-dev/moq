@@ -15,7 +15,7 @@ import {
 } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
 import { errors } from "../internal";
-import { type Baseline, Estimator } from "../jitter";
+import { Estimator, type Order } from "../order";
 import type { AudioFrame, Capture, Format } from "./capture";
 import { Gain } from "./gain";
 import { Resampler } from "./resampler";
@@ -108,10 +108,6 @@ export type EncoderProps = Inputs<EncoderInput> & {
 	// User tuning knobs. Seed a value or wire a Signal; also live-editable via the matching field.
 	volume?: number | Signal<number>;
 
-	// How long a volume change ramps for, so a mute is silent once it passes. Defaults to 50 ms; 0
-	// steps at once.
-	fade?: Milli | Signal<Milli>;
-
 	// Codec selection plus encoder settings. Defaults to "opus".
 	codec?: Codec | Signal<Codec>;
 
@@ -155,10 +151,8 @@ export class Encoder {
 	/** The wired inputs, read-only. */
 	readonly in: Readonlys<EncoderInput>;
 
-	/** Linear gain applied before encoding, where 1 is unity. Each change ramps over {@link fade}. */
+	/** Linear gain applied before encoding, where 1 is unity. Each change ramps over 50 ms, so a mute is silent once it passes. */
 	volume: Signal<number>;
-	/** How long a volume change ramps for, whatever its size. 0 steps at once; a negative or non-finite fade refuses the rendition. */
-	fade: Signal<Milli>;
 	/** The live-editable codec selection plus its encoder settings. */
 	codec: Signal<Codec>;
 	/**
@@ -209,11 +203,7 @@ export class Encoder {
 	// marker and are dropped.
 	#floor: Micro | undefined;
 
-	// The last valid fade, which the read loop ramps with. #runConfig refuses the rendition on an
-	// invalid one, so a bad value never reaches the gain.
-	#fade: Milli = FADE;
-
-	// The last valid group duration, validated by #runConfig the same way as #fade.
+	// The last valid group duration, which #runConfig validates.
 	#groupDuration = Micro(20_000);
 
 	// How many resolution runs threw for their current inputs (e.g. invalid codec settings), so no
@@ -233,7 +223,7 @@ export class Encoder {
 	#seen?: { capture?: Capture; source?: unknown; format?: Format };
 	#signals = new Effect();
 	#estimator = new Estimator();
-	// The estimator's jitter and delay, republished whenever either rises.
+	// The estimator's delay, republished whenever it rises.
 	#estimate = new Signal<Estimator["estimate"]>({});
 	// What this rendition advertised on each broadcast, keyed by the broadcast or, with none, the
 	// encoder. A broadcast keeps a rendition's track when it re-registers, so returning to one
@@ -260,7 +250,6 @@ export class Encoder {
 			bandwidth: getter(props?.bandwidth),
 		};
 		this.volume = Signal.from(props?.volume ?? 1);
-		this.fade = Signal.from(props?.fade ?? FADE);
 		this.codec = Signal.from<Codec>(props?.codec ?? "opus");
 		this.groupDuration = Signal.from(props?.groupDuration ?? Milli(20));
 
@@ -327,7 +316,7 @@ export class Encoder {
 
 				// Every rendition shares the captured frame, so gain returns a copy rather than
 				// scaling in place; muting one rendition must not silence the rest.
-				gain.set(this.volume.peek(), this.#fade);
+				gain.set(this.volume.peek(), FADE);
 				const frame = gain.apply(next.value, format.sampleRate);
 
 				// The config rebuilds when the channel count moves, so skip anything that arrives
@@ -405,7 +394,7 @@ export class Encoder {
 			const resolved = effect.get(this.#config);
 			if (!enabled || !format || fatal || !resolved) return;
 
-			this.#encode(broadcast.baseline, format, effect);
+			this.#encode(broadcast.order, format, effect);
 		});
 
 		// Each subscription gets its own producer. Losing demand ends the epoch, as stopping the
@@ -465,11 +454,6 @@ export class Encoder {
 	// Gated on `enabled` the same way the video encoder is: a disabled rendition stops resolving a
 	// config, and a sample source keeps its format while muted rather than tearing down.
 	#runConfig(effect: Effect): void {
-		const fade = effect.get(this.fade);
-		if (!Number.isFinite(fade) || fade < 0)
-			throw new Error(`audio fade must be a finite, non-negative number of ms: ${fade}`);
-		this.#fade = fade;
-
 		const groupDuration = effect.get(this.groupDuration);
 		if (!Number.isFinite(groupDuration) || groupDuration < 0)
 			throw new Error(`audio group duration must be a finite, non-negative number of ms: ${groupDuration}`);
@@ -612,10 +596,12 @@ export class Encoder {
 
 	// Encode captured audio frames into whichever track producer is live. The broadcast owns the
 	// track's lifetime, so this never closes it; a fatal encoder error aborts only the live track.
-	#encode(baseline: Baseline, format: Format, effect: Effect): void {
+	#encode(order: Order, format: Format, effect: Effect): void {
 		// The parent owns the config subscription before the async codec scope is opened.
 		const resolved = this.#config.peek();
 		if (!resolved) return;
+		// A stopped rendition stops holding the others' delay back.
+		effect.cleanup(() => order.leave(this.#estimator));
 		effect.spawn(async () => {
 			// We're using an async polyfill temporarily for Safari support.
 			await Util.Libav.polyfill();
@@ -664,7 +650,7 @@ export class Encoder {
 						const keyframe = live.start === undefined || timestamp - live.start >= this.#groupDuration;
 						if (keyframe) live.start = timestamp;
 						live.producer.encode(frame, timestamp, keyframe);
-						if (this.#estimator.flush(frame.timestamp, baseline)) {
+						if (this.#estimator.write(frame.timestamp, order)) {
 							this.#estimate.set({ ...this.#estimator.estimate });
 						}
 					},

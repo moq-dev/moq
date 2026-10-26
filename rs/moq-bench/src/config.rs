@@ -29,16 +29,16 @@ pub struct Config {
 
 	/// Spread connection and subscription startup over this duration to avoid a thundering herd.
 	#[usage(long, env = "MOQ_BENCH_STARTUP", default = "10s", setting = "startup")]
-	pub(crate) startup: crate::duration::Duration,
+	pub(crate) startup: moq_tokio::cli::Duration,
 
 	/// Stop the benchmark after this duration. Runs until interrupted if unset.
 	#[usage(long, env = "MOQ_BENCH_DURATION", setting = "duration")]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub(crate) duration: Option<crate::duration::Duration>,
+	pub(crate) duration: Option<moq_tokio::cli::Duration>,
 
 	/// How often to log throughput stats.
 	#[usage(long, env = "MOQ_BENCH_REPORT", default = "1s", setting = "report")]
-	pub(crate) report: crate::duration::Duration,
+	pub(crate) report: moq_tokio::cli::Duration,
 
 	/// Number of connections (A) to establish. Rolled once for the whole run.
 	#[usage(long, env = "MOQ_BENCH_CONNECTIONS", default = "1", setting = "connections")]
@@ -77,7 +77,7 @@ pub struct Config {
 	/// viewer would see. `0` keeps only the live edge: any group still in flight when
 	/// the next one starts is skipped, so short groups measure skip timing instead.
 	#[usage(long, env = "MOQ_BENCH_MAX_DELAY", default = "2s", setting = "max_delay")]
-	pub(crate) max_delay: crate::duration::Duration,
+	pub(crate) max_delay: moq_tokio::cli::Duration,
 
 	/// Write machine-readable stats to this file: one JSON line of cumulative
 	/// counters per report interval. Truncates on start.
@@ -137,7 +137,8 @@ impl Default for Config {
 }
 
 impl Config {
-	/// Parse from CLI args, optionally merging a TOML file, then init the logger.
+	/// Parse from CLI args, optionally merging a TOML file, refuse any `MOQ_*`
+	/// variable moq-bench does not read, then init the logger.
 	pub fn load() -> anyhow::Result<Self> {
 		let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
 		// `#[usage(completion)]` installs the `__complete_word__` interception in the
@@ -149,6 +150,7 @@ impl Config {
 			std::process::exit(0);
 		}
 		let config = Self::parse_and_merge(args)?;
+		moq_tokio::cli::check_env(&[Self::spec()], &[])?;
 		config.log.init()?;
 		tracing::trace!(?config, "final config");
 		Ok(config)
@@ -276,11 +278,11 @@ impl Config {
 	}
 
 	pub fn startup(&self) -> Duration {
-		self.startup.into_std()
+		self.startup.into()
 	}
 
 	pub fn report(&self) -> Duration {
-		self.report.into_std()
+		self.report.into()
 	}
 
 	pub fn connections(&self) -> Range {
@@ -308,7 +310,7 @@ impl Config {
 	}
 
 	pub fn max_delay(&self) -> Duration {
-		self.max_delay.into_std()
+		self.max_delay.into()
 	}
 
 	/// Whether this configuration expects subscribers to receive media.
@@ -322,7 +324,10 @@ impl Config {
 	}
 }
 
-#[allow(dead_code)]
+#[allow(
+	dead_code,
+	reason = "declares the settings for the usage registry; nothing reads the fields"
+)]
 #[derive(usage_rs::Config)]
 struct Settings {
 	#[usage(env = "MOQ_BENCH_NAME", cli("--name"))]
@@ -566,13 +571,14 @@ url = "https://example.com"
 
 	#[test]
 	fn env_overrides_toml_and_cli_overrides_env() {
+		if !test_env::Env::default().set("MOQ_BENCH_NAME", "from-env").isolate() {
+			return;
+		}
 		let dir = std::env::temp_dir().join("moq-bench-provenance");
 		std::fs::create_dir_all(&dir).unwrap();
 		let path = dir.join("bench.toml");
 		std::fs::write(&path, "name = \"from-file\"\nconnections = 100\n").unwrap();
 
-		let prev = std::env::var_os("MOQ_BENCH_NAME");
-		unsafe { std::env::set_var("MOQ_BENCH_NAME", "from-env") };
 		let config = Config::parse_and_merge([
 			std::ffi::OsString::from("moq-bench"),
 			std::ffi::OsString::from("--file"),
@@ -592,10 +598,6 @@ url = "https://example.com"
 		.unwrap();
 		assert_eq!(config.name(), "from-cli");
 		assert!(config.source("name").unwrap().contains("--name"));
-		match prev {
-			Some(value) => unsafe { std::env::set_var("MOQ_BENCH_NAME", value) },
-			None => unsafe { std::env::remove_var("MOQ_BENCH_NAME") },
-		}
 	}
 
 	/// `[client]` in the file is the serde name; the registry key is `connect.*`.

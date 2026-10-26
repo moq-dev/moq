@@ -50,6 +50,7 @@ import { type Capabilities, missing, probe, type Role } from "./src/capabilities
 import {
 	type CaptureState,
 	FAULTS,
+	KEYFRAME_INTERVAL_MS,
 	LONG_FRAMES,
 	type LongFrame,
 	leakedPlayerStarted,
@@ -62,7 +63,17 @@ import * as Pattern from "./src/pattern";
 import { resumeSkew } from "./src/resume";
 
 /** Cases beyond the mandatory capability probe, publisher readiness, and cold start. */
-const CASES = ["capture-denial", "pause", "disable", "rejoin", "detach", "republish", "late-join", "rename"] as const;
+const CASES = [
+	"capture-denial",
+	"pause",
+	"disable",
+	"rejoin",
+	"detach",
+	"republish",
+	"replacement",
+	"late-join",
+	"rename",
+] as const;
 type Case = (typeof CASES)[number];
 
 const { values } = parseArgs({
@@ -114,6 +125,21 @@ const WINDOW_MS = 4000;
 /** How long a state change (pause, unsubscribe, republish) has to take effect. */
 const SETTLE_MS = 6000;
 
+/** The replacement case's fixed player delay, so the switch bound below can count it. */
+const REPLACEMENT_DELAY_MS = 50;
+
+/**
+ * How long a following player may take to present a replacement or fallback once the new route is
+ * ready or the old one withdrawn. Routing: the relay holds a route change for its update hold
+ * (moq-net's `origin::DEFAULT_UPDATE_HOLD`; the JS origin holds none), and the announcement plus
+ * the catalog and track subscriptions take five loopback round trips, each charged at QUIC's 1 ms
+ * timer granularity. Presentation: a keyframe interval of codec cadence, one frame to decode, and
+ * the player's delay. Observation: one page sample and one driver poll.
+ */
+const SWITCH_MS = Math.ceil(
+	300 + 5 + KEYFRAME_INTERVAL_MS + 1000 / Pattern.FPS + REPLACEMENT_DELAY_MS + SAMPLE_MS + POLL_INTERVAL_MS,
+);
+
 /** Fraction of a window's samples that must be readable, carry a tone, and be in sync. */
 const AGREEMENT = 0.9;
 
@@ -134,6 +160,12 @@ const MIN_RATE = 0.5;
  * step off some of the time. Two steps is not boundary noise.
  */
 const MAX_SKEW_STEPS = 1;
+
+/** Whether a sample plays the picture's own tone: audible, and within the tolerated skew of the frame it shows. */
+const playsInSync = (s: Sample) =>
+	s.frameId !== undefined &&
+	s.toneStep !== undefined &&
+	Math.abs(Pattern.stepSkew(s.toneStep, Pattern.expectedStep(s.frameId))) <= MAX_SKEW_STEPS;
 
 const percentile = (values: number[], p: number) => {
 	if (values.length === 0) return Number.NaN;
@@ -611,13 +643,15 @@ type SubscriberProps = {
 	trace?: boolean;
 	/** The player's `delay` attribute, when not its adaptive default. */
 	delay?: string;
+	/** Pin the reader independently of the epoch-aware publishers. */
+	versions?: string;
 };
 
 /** Open a subscriber page and wait for the player to start sampling. Never reloads. */
 async function subscriber(
 	broadcast: string,
 	label: string,
-	{ muted = false, trace = true, delay }: SubscriberProps = {},
+	{ muted = false, trace = true, delay, versions }: SubscriberProps = {},
 ): Promise<[Page, BrowserErrors]> {
 	// visible="always" because the window is never frontmost in a headless run, and the default
 	// policy would stop downloading video and leave the canvas black.
@@ -630,6 +664,7 @@ async function subscriber(
 		muted: String(muted),
 	};
 	if (delay !== undefined) params.delay = delay;
+	if (versions !== undefined) params.versions = versions;
 	const [page, errors] = await open(
 		await browserFor("player"),
 		pageUrl(server.origin, "subscribe", params),
@@ -976,21 +1011,14 @@ try {
 	if (wants("detach")) {
 		console.error("=== detach and reattach ===");
 		const busy = await readPlayerState(player);
-		console.error(`  resources before detach: ${JSON.stringify(busy.resources)}`);
 		// Its own assertion name, not "resource baseline": the leaked-session control expects that one
 		// to fail, so sharing it would let broken instrumentation satisfy the control without the
 		// leaking detach ever running.
-		try {
-			check(
-				busy.resources.transports + busy.resources.sockets > 0 && busy.resources.audioContexts > 0,
-				"resource instrumentation",
-				() => `the player holds nothing to release before detach: ${JSON.stringify(busy)}`,
-			);
-		} catch (err) {
-			const end = Date.now();
-			await explainStalls(player, { start: end - WINDOW_MS, end }, "resource instrumentation", undefined);
-			throw err;
-		}
+		check(
+			busy.resources.transports + busy.resources.sockets > 0 && busy.resources.audioContexts > 0,
+			"resource instrumentation",
+			() => `the player holds nothing to release while playing: ${JSON.stringify(busy.resources)}`,
+		);
 
 		if (values.leak) {
 			await command(player, "startLeak");
@@ -1013,6 +1041,115 @@ try {
 		await command(player, "reattach");
 		await waitForLive(publisher, publisherErrors, player, playerErrors, "reattach reaches live", true);
 		await measurePlayback(player, playerErrors, "after reattach");
+	}
+
+	// These publishers overlap: neither a successful new picture nor fallback
+	// can be explained by the incumbent timing out or closing its session.
+	if (wants("replacement")) {
+		const sourceBrowser = await browserFor("publisher");
+		for (const version of ["moq-lite-07-wip", "moq-lite-06", "moq-transport-22"]) {
+			console.error(`=== live replacement and fallback: ${version} ===`);
+			const name = `replacement-${version}-${process.pid}.hang`;
+			const [old, oldErrors] = await open(
+				sourceBrowser,
+				pageUrl(server.origin, "fixture", {
+					url: relay,
+					broadcast: name,
+					versions: "moq-lite-07-wip",
+					generation: "0",
+				}),
+				`old-${version}`,
+			);
+			let next: Page | undefined;
+			let viewer: Page | undefined;
+			try {
+				await gesture(old);
+				await waitForFixture(old, oldErrors, {
+					deadline: Date.now() + timeoutMs,
+					assertion: "incumbent ready",
+					description: "the incumbent catalog and clock",
+					predicate: (s) => s.ready && s.frameId > 0,
+				});
+				const [watch, watchErrors] = await subscriber(name, `replacement-${version}`, {
+					versions: version,
+					delay: `${REPLACEMENT_DELAY_MS}ms`,
+				});
+				viewer = watch;
+				await gesture(watch);
+				const first = await waitForState(watch, watchErrors, {
+					deadline: Date.now() + timeoutMs,
+					assertion: "incumbent plays",
+					description: "the incumbent's marked pixels",
+					predicate: (s) => s.generation === 0 && !s.audioStalled,
+				});
+				check(
+					version === "moq-lite-06" ? first.broadcastEpoch === undefined : first.broadcastEpoch !== undefined,
+					"negotiated epoch identity",
+					() => JSON.stringify(first),
+				);
+				const before = await readFixtureState(old);
+				const [replacement, replacementErrors] = await open(
+					sourceBrowser,
+					pageUrl(server.origin, "fixture", {
+						url: relay,
+						broadcast: name,
+						versions: "moq-lite-07-wip",
+						generation: "1",
+					}),
+					`new-${version}`,
+				);
+				next = replacement;
+				await gesture(replacement);
+				const { readyAt: ready } = await waitForFixture(replacement, replacementErrors, {
+					deadline: Date.now() + timeoutMs,
+					assertion: "replacement ready",
+					description: "the replacement catalog and clock",
+					predicate: (s) => s.ready && s.frameId > 0,
+				});
+				// The page shares the host clock, so timing from its own readiness skips the driver's poll lag.
+				if (ready === undefined) throw new Error("a ready fixture reports when it became ready");
+				const switched = await waitForState(watch, watchErrors, {
+					deadline: ready + SWITCH_MS,
+					assertion: "live replacement plays",
+					description: `the new run's picture and synchronized tone within ${SWITCH_MS}ms while its incumbent stays open`,
+					predicate: (s) => s.generation === 1 && !s.audioStalled && playsInSync(s),
+				});
+				const replacementMs = Date.now() - ready;
+				if (version !== "moq-lite-06")
+					check(switched.broadcastEpoch !== first.broadcastEpoch, "replacement has a fresh epoch", () =>
+						JSON.stringify(switched),
+					);
+				const during = await collect(watch, watchErrors, WINDOW_MS);
+				check(
+					during.every((s) => s.frameId === undefined || s.generation === 1),
+					"old run never splices",
+					() => JSON.stringify(during.filter((s) => s.frameId !== undefined && s.generation !== 1)),
+				);
+				await measurePlayback(watch, watchErrors, `replacement ${version}`);
+				const held = await readFixtureState(old);
+				check(held.ready && held.frameId > before.frameId, "incumbent stays live", () => JSON.stringify(held));
+				const withdrawn = Date.now();
+				await command(replacement, "stop");
+				const back = await waitForState(watch, watchErrors, {
+					deadline: withdrawn + SWITCH_MS,
+					assertion: "live incumbent fallback plays",
+					description: `the still-live older run's picture and synchronized tone within ${SWITCH_MS}ms of the newest withdrawing`,
+					predicate: (s) => s.generation === 0 && !s.audioStalled && playsInSync(s),
+				});
+				const fallbackMs = Date.now() - withdrawn;
+				check(back.broadcastEpoch === first.broadcastEpoch, "fallback keeps incumbent identity", () =>
+					JSON.stringify(back),
+				);
+				await measurePlayback(watch, watchErrors, `fallback ${version}`);
+				console.error(
+					`  ${version}: replacement ${replacementMs}ms, fallback ${fallbackMs}ms, bound ${SWITCH_MS}ms`,
+				);
+			} finally {
+				await viewer?.context().close();
+				await next?.context().close();
+				await old.context().close();
+			}
+		}
 	}
 
 	// ── publisher stop and same-path republish ───────────────────────────────

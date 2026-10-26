@@ -1,6 +1,4 @@
 //! Echo a tokio QUIC peer through the io_uring worker while ablating UDP features.
-// Benchmarks measure themselves on the host clock.
-#![allow(clippy::disallowed_methods)]
 
 use criterion::{criterion_group, criterion_main};
 
@@ -9,6 +7,10 @@ use criterion::{criterion_group, criterion_main};
 mod support;
 
 #[cfg(target_os = "linux")]
+#[expect(
+	clippy::disallowed_methods,
+	reason = "benchmarks measure themselves on the host clock"
+)]
 mod linux {
 	use std::net::UdpSocket;
 	use std::time::Instant;

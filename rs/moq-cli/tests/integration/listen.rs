@@ -1,4 +1,4 @@
-//! Listening imports and exports count accepted sessions and drain them on SIGTERM.
+//! Listening imports and exports drain accepted sessions on SIGTERM.
 #![cfg(unix)]
 
 use std::{process::Stdio, time::Duration};
@@ -120,7 +120,7 @@ async fn drains(stage: &str) {
 	let (connection, _origin) = connects(&listening, stage).await;
 	let draining = connection.draining().unwrap();
 	listening.signal();
-	let goaway = tokio::time::timeout(TIMEOUT, draining.recv())
+	let goaway = tokio::time::timeout(TIMEOUT, moq_net::kio::wait(|waiter| draining.poll(waiter)))
 		.await
 		.expect("no GOAWAY after SIGTERM")
 		.expect("CLI closed the session without GOAWAY");
@@ -178,7 +178,10 @@ async fn an_export_stage_ending_during_drain_waits_for_every_session() {
 	let draining = publisher.draining().unwrap();
 	let signalled = std::time::Instant::now();
 	listening.signal();
-	tokio::time::timeout(TIMEOUT, draining.recv()).await.unwrap().unwrap();
+	tokio::time::timeout(TIMEOUT, moq_net::kio::wait(|waiter| draining.poll(waiter)))
+		.await
+		.unwrap()
+		.unwrap();
 	publisher.closed().await.unwrap();
 	tokio::time::timeout(TIMEOUT, legacy.closed())
 		.await
@@ -186,59 +189,4 @@ async fn an_export_stage_ending_during_drain_waits_for_every_session() {
 		.expect_err("legacy peer was force-closed");
 	listening.stopped().await;
 	assert!(signalled.elapsed() >= window, "stage completion cut the drain short");
-}
-
-#[tokio::test]
-async fn accepted_sessions_are_published_in_stats() {
-	let listening = listen("import", &["--stats-enabled", "--stats-prefix", "stats"]).await;
-	let (connection, origin) = connects(&listening, "import").await;
-	let _announced = origin.announced();
-	let stats = tokio::time::timeout(TIMEOUT, async {
-		origin.routed("stats/node").await.unwrap();
-		origin.request_broadcast("stats/node", None).await.unwrap()
-	})
-	.await
-	.expect("stats broadcast was not announced");
-	let mut track = stats
-		.track("sessions.json")
-		.unwrap()
-		.subscribe(None)
-		.await
-		.unwrap()
-		.ordered();
-	session_counts(&mut track, (1, 0)).await;
-	let (second, _origin) = connects(&listening, "import").await;
-	session_counts(&mut track, (2, 0)).await;
-	second.close().await.unwrap();
-	session_counts(&mut track, (2, 1)).await;
-
-	let draining = connection.draining().unwrap();
-	listening.signal();
-	draining.recv().await.unwrap();
-	connection.closed().await.unwrap();
-	listening.stopped().await;
-}
-
-async fn session_counts(track: &mut moq_net::track::Ordered, expected: (u64, u64)) {
-	tokio::time::timeout(TIMEOUT, async {
-		while let Some(mut group) = track.next_group().await.unwrap() {
-			while let Some(frame) = group.read_frame().await.unwrap() {
-				let sessions: std::collections::BTreeMap<String, moq_net::stats::Presence> =
-					serde_json::from_slice(&frame.payload).unwrap();
-				let actual = sessions.values().fold((0, 0), |(started, ended), session| {
-					(started + session.sessions_started, ended + session.sessions_ended)
-				});
-				assert!(
-					actual.0 <= expected.0 && actual.1 <= expected.1,
-					"session count exceeded {expected:?}: {actual:?}"
-				);
-				if actual == expected {
-					return;
-				}
-			}
-		}
-		panic!("stats ended before reporting {expected:?}");
-	})
-	.await
-	.expect("accepted session counts were not published");
 }

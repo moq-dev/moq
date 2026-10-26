@@ -13,6 +13,7 @@
 use bytes::Bytes;
 
 mod consumer;
+mod declared;
 mod decode;
 mod group;
 mod producer;
@@ -32,7 +33,7 @@ pub mod ts;
 pub use consumer::Consumer;
 pub use group::GroupConsumer;
 pub use producer::Producer;
-pub(crate) use source::ExportSource;
+pub(crate) use source::{ExportSource, Resume};
 
 /// The media role that determines how a container represents frame durations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

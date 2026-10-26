@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Manual, Nano, Second } from "@moq/clock";
+import { type Installed, Manual, Nano, Second } from "@moq/clock";
 import * as Ietf from "../ietf/index.ts";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair, type MockTransport } from "../mock.ts";
@@ -50,22 +50,23 @@ function holdFin(transport: MockTransport) {
 	};
 }
 
-for (const protocol of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_19]) {
+for (const protocol of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18]) {
 	for (const outcome of ["acknowledged", "timeout"] as const)
 		test(`graceful close withdrawal ${outcome} over ${protocol}`, async () => {
 			const pair = createMockTransportPair(protocol);
 			const fin = holdFin(pair.server);
 			const source = new Producer();
 			const destination = new Producer();
-			const broadcast = source.createBroadcast(Path.from("room"));
-			broadcast.announce();
+			const broadcastPublication = source.createBroadcast(Path.from("room"));
+			const broadcast = broadcastPublication.broadcast;
+			broadcastPublication.announce();
 			const url = new URL("https://localhost/test");
 			const [client, server] = await Promise.all([
 				connect({ url, transport: pair.client, consume: destination }),
 				accept({ url, transport: pair.server, publish: source.consume() }),
 			]);
 			const announced = destination.announced();
-			let restore: (() => void) | undefined;
+			let installed: Installed | undefined;
 			try {
 				expect((await announced.next())?.kind).toBe("start");
 				fin.enable();
@@ -75,7 +76,7 @@ for (const protocol of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_19]) {
 				});
 				// Only the close's own deadline is armed on the manual clock.
 				const clock = new Manual();
-				if (outcome === "timeout") restore = clock.install();
+				if (outcome === "timeout") installed = clock.install();
 				const closing = server.close();
 				await fin.reached;
 				expect(closed).toBe(false);
@@ -92,7 +93,7 @@ for (const protocol of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_19]) {
 				await pair.server.closed;
 				expect(closed).toBe(true);
 			} finally {
-				restore?.();
+				installed?.close();
 				fin.release();
 				client.abort();
 				server.abort();

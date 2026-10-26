@@ -1,79 +1,56 @@
-# [M] Nightly benchmark regression report
+# [S] Calibrate the paired nightly benchmarks
 
 ## Goal
 
-Each Nightly run on `main` compares every measured Rust Criterion benchmark
-against the previous nightly's commit, built and run on the same runner, and
-publishes the comparison to the git.moq.dev nightly report beside the
-[regression table](https://git.moq.dev/bench/). A regression past a loose threshold
-fails the job, so the existing Alert workflow posts it to Discord.
-
-Benchmarks never run in the merge queue or on PRs. Rust Criterion targets
-only: browser benchmarks stay under `just bench-browser` (see
-`bench/README.md`), and relay load stays local under `just bench BASE`.
+The paired Rust Criterion comparison each Nightly runs (see
+[Paired comparison](/bench/README.md#paired-comparison)) fails only on real
+regressions: its threshold, confirmation budget, and round count come from A/A
+runs on the hosted ARM runners, and a deliberately slowed bench fails the job.
 
 ## Plan
 
-Decided 2026-10-20 (maintainer): benchmarks go into the git.moq.dev report
-each night, not the merge queue, because the queue runs only what gates a
-merge, and main PRs skip cloud CI since #6038. This drops the per-PR sticky
-comment design and its `workflow_run` follow-up.
+Waits on maintainer-dispatched Nightly runs on `main` after the paired mode
+lands; agents never dispatch Nightly.
 
-Decided 2026-10-22 (maintainer): the paired run stays on the hosted ARM
-runners. Moved from m2 to m1 so the m1 [performance audit](/quest/m1/audit-perf.md)
-reads paired flags instead of raw history. Rejected hosts:
+- A/A: dispatch Nightly on `main` with `bench-base` set to the run's own
+  commit, at least twice. Read each paired group's `paired.json` (the
+  `bench-rust*` artifacts, or `bench/paired.json` on the site): the spread of
+  screen deltas sets the screen threshold, and any confirmed regression in an
+  A/A run means the rounds or threshold are too loose.
+- Slowed bench: dispatch with `bench-base` on a branch commit that speeds up
+  one cheap bench (so tonight's `main` reads as slower), and check the job fails
+  with that case alone.
+- Tune `THRESHOLD_PCT`, `CONFIRMATIONS` (`bench/compare.py`) and the round count
+  (`BENCH_RUNTIME_ROUNDS`, default three) from what the runs show, and
+  update the README's numbers. Bimodal series (about 50% up and back across
+  nights) are the expected false positives; three alternating rounds pass one
+  only when all three land on the slow mode.
+- Check the paired legs' durations against their hour; the base build relies
+  on the mbx cache for the previous night's artifacts, and a cold one roughly
+  doubles each leg's build time.
 
-- The merge queue runner (`nixos-moq-ci`) is an nspawn container on a
-  desktop with `CPUWeight=10`, a floating 8-core quota, and the `powersave`
-  governor beside unrelated GUI, simulation, and agent load. A benchmark
-  there is the first workload starved, and nightly's benchmark jobs would
-  serialize on the one queue runner and hold merges for hours.
-- moq.pro's two load nodes are shared 4-vCore, 8 GB OVH VPSes with measured
-  steal, and moq.pro decided they run nothing but the load generator.
-- A dedicated bare-metal bench host would be the most stable but costs money
-  and adds a persistent exec surface for a public repository. Revisit it only
-  if A/A runs show the hosted noise floor hides regressions worth catching.
+- Decide whether `bench/run.sh` pins glibc's malloc thresholds for every
+  Criterion target, as [moq-dev/moq#6727](https://github.com/moq-dev/moq/pull/6727)
+  did for `ts_schedule`: some small paired deltas may be the same heap mode flip.
 
-The paired run removes runner-to-runner variance; what remains is noise
-within one VM, which alternating rounds and A/A-derived thresholds handle.
-The first three nights of hosted history (2026-10-20 to 22, 95-129 commits
-apart) put the median night-to-night swing at about 4%, with 13% of Rust
-series moving more than 10%, many up about 50% and back the next night.
-Those nights mix code changes with noise, so they bound it rather than
-measure it; the A/A run measures it.
+Decided 2026-10-23 (maintainer), when the paired mode landed:
 
-Rust Criterion only (decided 2026-10-22): `bench-ffi` stays history-only,
-since its JVM and Dart rows are the noisiest (Kotlin about 18% a night),
-and JS on bun only stands in for the browser.
+- The gate fails Nightly from day one rather than reporting only until A/A
+  runs: Nightly already alerts for unrelated legs, so a false paired alarm adds
+  no new channel, and this quest tunes it.
+- Start at a 10% threshold, 20 confirmations per group, and 3 rounds; 10%
+  matches the trend table's floor, and three-round sign agreement filters
+  bimodal cases.
+- `rust-shared` splits out of `rust-bench`, restarting the `rust/shared/*`
+  trend history (three nights lost), since `rust-bench` paired would exceed
+  its hour unsplit.
+- A target the base cannot build or run fails the gate rather than passing
+  uncompared; it clears by itself the next night.
 
-Researched 2026-09: CodSpeed's instruction counting skips every
-`iter_custom` bench (all of `moq-uring`, plus `moq-net` origin and track) and
-can't see syscall time. Bencher compares against history recorded on other
-VMs, so its thresholds fire on runner noise.
-
-- Paired comparison: build the previous nightly's commit beside `main` on the
-  same runner, run the selected targets for both, and compare saved
-  Criterion baselines. Only that paired comparison fails the job; the
-  cross-run history stays informational on the regression table.
-- Extend `bench/run.sh` and `sh/gh/nightly.sh` (`just gh nightly rust-bench`,
-  `rust-extra`, and `rust-uring`) with the paired mode instead of writing a second runner, and publish its
-  table through `just gh benchmark-report` into the report. `nightly.sh`
-  exits on a failure before it publishes today; publish first, so the table
-  exists when the regression alert fires.
-- The nightly jobs measure in Criterion's quick mode for runtime; the paired
-  run needs enough samples for its threshold. Weigh a full run of the
-  compared targets against the nightly's time budget.
-- Decided 2026-10-16: moq-quic's Criterion targets (#5812) are included.
-  They time thread CPU rather than wall time, which already cut most host
-  noise; on a shared hybrid-core host, identical builds still swing about 5%
-  on small cases and 20-130% on large-working-set ones, so the noise floor
-  must come from A/A runs on the CI runner itself, never from a laptop.
-- The `moq-uring` socket benches skip loudly when the runner's kernel is too
-  old.
-- Validate with an A/A run (the same commit twice) and a deliberately slowed
-  bench before trusting the signal.
-- Document the report and local reproduction in `bench/README.md`.
+Rejected hosts (decided 2026-10-22, maintainer): the merge queue runner, the
+moq.pro load nodes, and a dedicated bare-metal host; revisit the last only if
+A/A runs show the hosted noise floor hides regressions worth catching.
 
 ## Related
 
-- [Benchmark reporting](/bench/README.md) - the existing `bench/run.sh` retains repeated paired rounds
+- [Benchmark reporting](/bench/README.md) - the paired comparison and the trend table

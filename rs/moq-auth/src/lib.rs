@@ -18,7 +18,6 @@
 
 #![warn(missing_docs)]
 
-mod access;
 mod algorithm;
 mod claims;
 mod error;
@@ -37,11 +36,11 @@ pub mod refusal;
 pub use refusal::Refusal;
 #[cfg(feature = "serve")]
 pub mod serve;
+pub mod tier;
 
 #[cfg(feature = "client")]
 mod client;
 
-pub use access::*;
 pub use algorithm::*;
 pub use claims::*;
 #[cfg(feature = "client")]

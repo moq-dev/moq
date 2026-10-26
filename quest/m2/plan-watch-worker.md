@@ -36,11 +36,10 @@ Settled constraints either way:
 
 - `AudioContext` and the render worklet stay on main. The worklet's ring
   endpoint is handed to the worker so decoded PCM never transits main, and
-  the playhead reaches `Sync` the same way. With `SharedArrayBuffer` that is
-  the shared ring. Without it, main creates a `MessageChannel` and transfers
-  one port to the worker and the other to the worklet (over `node.port`); PCM
-  and playhead state then flow worker to worklet and back on that channel.
-  This keeps the non-isolated path immune to main-thread jank without
+  the playhead reaches `Sync` the same way. Main creates a `MessageChannel`
+  and transfers one port to the worker and the other to the worklet (over
+  `node.port`); PCM and playhead state then flow worker to worklet and back on
+  that channel. This keeps playback immune to main-thread jank without
   COOP/COEP. A transferred `ReadableStream` is not an alternative: it is
   postMessage underneath, and the worklet would still drain it into its ring.
 - `Sync` lives in the worker. Main-thread readers (captions, UI) observe it

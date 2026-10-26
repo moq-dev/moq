@@ -16,8 +16,7 @@ use object_store::{ObjectStore, ObjectStoreExt, PutMode, PutPayload};
 use super::Shared;
 use super::ordered::{Item, Ordered};
 use super::resume::Stored;
-use crate::layout::{self, End, Entry, Object};
-use crate::segment::Frame;
+use crate::layout::{self, End, Entry, Frame, Object};
 use crate::{Error, Info, Result};
 
 /// Record each run of the track `name` reported through `queue`, until the queue closes with the
@@ -163,7 +162,7 @@ impl<S: ObjectStore> Track<S> {
 		let config = &shared.config;
 		let range = match self.next {
 			Some(next) => Range {
-				start: Anchor::Absolute(next),
+				start: Anchor::Absolute(next.group),
 				end: None,
 			},
 			None => Range::oldest(),
@@ -236,7 +235,7 @@ impl<S: ObjectStore> Track<S> {
 					self.push(sequence, 0, frame, true, now)?;
 					self.next = Some(Position::group(sequence + 1));
 				}
-				Event::Next(Some((sequence, Item::Group(mut group)))) => {
+				Event::Next(Some((sequence, Item::Group(group)))) => {
 					// A resumed group continues after its stored frames. The clamp also starts a
 					// group whose head is held elsewhere at its first frame, rather than lagging
 					// behind it.
@@ -244,7 +243,7 @@ impl<S: ObjectStore> Track<S> {
 						.next
 						.filter(|next| next.group == sequence)
 						.map_or(0, |next| next.frame);
-					group.set_frames(stored..);
+					let group = Box::new(group.with_range(stored..));
 					self.next = Some(Position {
 						group: sequence,
 						frame: group.index(),

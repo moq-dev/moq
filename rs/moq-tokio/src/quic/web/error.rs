@@ -254,9 +254,6 @@ impl From<crate::quic::driver::ReadError> for ReadError {
 			crate::quic::driver::ReadError::Evicted => ReadError::Evicted,
 			crate::quic::driver::ReadError::TooLarge => ReadError::TooLarge,
 			crate::quic::driver::ReadError::ZeroRttRejected => unreachable!("0-RTT not supported"),
-			crate::quic::driver::ReadError::IllegalOrderedRead => {
-				unreachable!("WebTransport streams are only read in order")
-			}
 		}
 	}
 }

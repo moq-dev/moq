@@ -18,6 +18,7 @@ pub struct Writer<S: crate::transport::poll::SendStream, V> {
 	/// How much of `buffer` has already hit the stream.
 	flushed: usize,
 	version: V,
+	stats: crate::stats::Session,
 }
 
 impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
@@ -28,7 +29,13 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 			buffer: Default::default(),
 			flushed: 0,
 			version,
+			stats: Default::default(),
 		}
+	}
+
+	pub(crate) fn with_stats(mut self, stats: &crate::stats::Session) -> Self {
+		self.stats = stats.clone();
+		self
 	}
 
 	/// Encode the given message into the write buffer, to be sent by
@@ -60,6 +67,9 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 			// Drop the partial encode: flushing it would corrupt the stream.
 			self.buffer.truncate(start);
 			return Err(err.into());
+		}
+		if let Some(class) = w.control {
+			self.stats.control(class, self.buffer.len() - start, false);
 		}
 		Ok(())
 	}
@@ -227,15 +237,33 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 			buffer: std::mem::take(&mut self.buffer),
 			flushed: self.flushed,
 			version,
+			stats: self.stats.clone(),
 		}
 	}
 }
 
 impl<S: crate::transport::poll::SendStream> Writer<S, ietf::Version> {
-	/// Encode an IETF `Message` to the stream, writing `[type_id][size][body]`.
+	/// Encode `msg` into the write buffer as `[id][size][body]`, to be sent by
+	/// [`Self::poll_flush`]. The type and body go in together or not at all, so a failed encode
+	/// never leaves a bare type for the next write to complete. `id` is explicit for the drafts
+	/// that send one body under several types.
+	pub fn buffer_message<T: Encode<ietf::Version>>(&mut self, id: u64, msg: &T) -> Result<(), Error> {
+		let start = self.buffer.len();
+		self.buffer_varint(id)?;
+		// The body is buffered on its own so control stats count it without its type selector.
+		let version = self.version;
+		if let Err(err) = self.buffer_with(|w| msg.encode(w, version)) {
+			self.buffer.truncate(start);
+			return Err(err);
+		}
+		Ok(())
+	}
+
+	/// Encode an IETF `Message` to the stream as `[type_id][size][body]`, with the same
+	/// all-or-nothing buffering as [`Self::buffer_message`] and cancellation rules as [`Self::encode`].
 	pub async fn encode_message<T: ietf::Message>(&mut self, msg: &T) -> Result<(), Error> {
-		self.buffer_varint(T::ID)?;
-		self.encode(msg).await
+		self.buffer_message(T::ID, msg)?;
+		std::future::poll_fn(|cx| self.poll_flush(cx)).await
 	}
 }
 
@@ -304,7 +332,7 @@ mod tests {
 				Error::Stream(crate::StreamError::Unknown(0x4)),
 			),
 			(
-				crate::Version::Ietf(crate::ietf::Version::Draft20),
+				crate::Version::Ietf(crate::ietf::Version::Draft22),
 				Error::Stream(crate::StreamError::GoingAway),
 			),
 			(
@@ -346,8 +374,9 @@ mod tests {
 	#[derive(Debug)]
 	struct Poison;
 
-	impl Encode<crate::lite::Version> for Poison {
-		fn encode(&self, w: &mut Encoder<'_>, _: crate::lite::Version) -> Result<(), EncodeError> {
+	impl<V> Encode<V> for Poison {
+		fn encode(&self, w: &mut Encoder<'_>, _: V) -> Result<(), EncodeError> {
+			w.control = Some(crate::stats::Control::Probe);
 			w.slice(b"junk");
 			Err(EncodeError::BoundsExceeded)
 		}
@@ -367,6 +396,82 @@ mod tests {
 		let mut cx = std::task::Context::from_waker(Waker::noop());
 		assert!(writer.poll_flush(&mut cx).is_ready());
 		assert_eq!(*log.writes.lock().unwrap(), vec![5, 7], "the partial encode leaked");
+
+		// A control message's type goes with its body: a bare type would make the next
+		// message, or a FIN, a torn one.
+		let mut writer = Writer::new(SinkSend::new(Log::default()), crate::ietf::Version::Draft17);
+		writer.buffer_varint(5).unwrap();
+		writer.buffer_message(0x2, &Poison).unwrap_err();
+		writer.buffer_varint(7).unwrap();
+
+		let log = writer.stream.as_ref().unwrap().log.clone();
+		assert!(writer.poll_flush(&mut cx).is_ready());
+		assert_eq!(*log.writes.lock().unwrap(), vec![5, 7], "the message type leaked");
+	}
+
+	#[test]
+	fn control_body_counts_successful_encodes_once_before_transport_delivery() {
+		use crate::{
+			lite,
+			stats::{Bytes, Control, Registry, Tier},
+		};
+		let stats = Registry::new(Default::default());
+		let session = stats.tier(Tier::new("internal")).session("");
+		let gate = kio::Producer::new(false);
+		let mut writer =
+			Writer::new(SinkSend::gated(Log::default(), gate.consume()), lite::Version::Lite07).with_stats(&session);
+		writer.buffer(&lite::ControlType::Probe).unwrap();
+		let msg = lite::Probe {
+			bitrate: Some(1_000_000),
+			rtt: Some(12),
+		};
+		let size = msg.encode_bytes(lite::Version::Lite07).unwrap().len() as u64;
+		writer.buffer(&msg).unwrap();
+		writer.buffer(&Poison).unwrap_err();
+		assert!(writer.poll_flush(&mut Context::from_waker(Waker::noop())).is_pending());
+		assert!(writer.poll_flush(&mut Context::from_waker(Waker::noop())).is_pending());
+		assert_eq!(
+			stats.snapshot().control(),
+			vec![(Tier::new("internal"), Control::Probe, Bytes { tx: size, rx: 0 })]
+		);
+		writer
+			.buffer(&lite::Track {
+				broadcast: "test".into(),
+				epoch: None,
+				track: "video".into(),
+			})
+			.unwrap();
+		let track_info = || {
+			stats
+				.snapshot()
+				.control()
+				.into_iter()
+				.find(|(_, class, _)| *class == Control::TrackInfo)
+				.unwrap()
+				.2
+				.tx
+		};
+		let before = track_info();
+		let properties = lite::ietf::TrackProperties::default();
+		writer.buffer(&properties).unwrap();
+		assert_eq!(
+			track_info() - before,
+			properties.encode_bytes(lite::Version::Lite07).unwrap().len() as u64,
+			"negotiated track-property extensions are control bodies too"
+		);
+
+		writer
+			.buffer(&lite::SubscribeStart {
+				group: 3,
+				largest: None,
+			})
+			.unwrap();
+		writer.buffer(&lite::AnnounceBroadcast::Synced).unwrap();
+		assert_eq!(
+			stats.snapshot().control().len(),
+			4,
+			"classes do not collapse into the same counter"
+		);
 	}
 
 	/// A flush interrupted mid-message resumes where it left off, so an

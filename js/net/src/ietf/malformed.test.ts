@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { offered } from "../connection/extensions.ts";
 import { exchangeSetup } from "../connection/handshake.ts";
-import { ProtocolViolation, SessionCode } from "../error.ts";
+import { ProtocolViolation, SessionCode, StreamCode, StreamError } from "../error.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -20,7 +20,7 @@ import { ALPN, type IetfVersion, Version } from "./version.ts";
 
 const DRAFTS = [
 	[Version.DRAFT_18, ALPN.DRAFT_18],
-	[Version.DRAFT_21, ALPN.DRAFT_21],
+	[Version.DRAFT_22, ALPN.DRAFT_22],
 ] as const;
 
 /** A leading-ones varint, enough for the lengths below. */
@@ -57,8 +57,9 @@ async function serving(version: IetfVersion, alpn: string) {
 	const pair = createMockTransportPair(alpn);
 	const control = await Stream.open(pair.server, { version });
 	const origin = new OriginProducer();
-	const broadcast = origin.createBroadcast(Path.from("room"));
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(Path.from("room"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const connection = new Connection({
 		url: new URL("https://example.com"),
@@ -212,6 +213,22 @@ for (const [version, alpn] of DRAFTS) {
 			expect(await stream.reader.u53()).toBe(SubscribeOk.id);
 			await stream.writer.write(frame(0x7e, []));
 			expect(await closeCode(pair.client)).toBe(SessionCode.ProtocolViolation);
+		} finally {
+			logged.mockRestore();
+			close();
+		}
+	});
+
+	// A relay cancels an object stream it no longer serves, such as an old route's after a replacement.
+	test(`a peer reset object stream keeps ${alpn} and logs no error`, async () => {
+		const logged = spyOn(console, "error");
+		const { pair, close } = await serving(version, alpn);
+		try {
+			const uni = new Writer(await pair.client.createUnidirectionalStream(), version);
+			await uni.write(new Uint8Array([0x10]));
+			uni.reset(new StreamError(StreamCode.Cancel, { message: "cancel" }));
+			expect(await closeCode(pair.client)).toBeUndefined();
+			expect(logged).not.toHaveBeenCalled();
 		} finally {
 			logged.mockRestore();
 			close();

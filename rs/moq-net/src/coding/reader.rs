@@ -26,6 +26,7 @@ pub struct Reader<S: RecvStream, V> {
 	want: usize,
 	/// A contiguous copy of a message that spans transport chunks, empty between decodes.
 	scratch: Vec<u8>,
+	stats: crate::stats::Session,
 }
 
 /// How much payload may pile up behind a parked consumer before
@@ -49,7 +50,18 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 			version,
 			want: 0,
 			scratch: Vec::new(),
+			stats: Default::default(),
 		}
+	}
+
+	pub(crate) fn with_stats(mut self, stats: &crate::stats::Session) -> Self {
+		self.stats = stats.clone();
+		self
+	}
+
+	/// Where control messages read here are counted.
+	pub(crate) fn stats(&self) -> &crate::stats::Session {
+		&self.stats
 	}
 
 	/// Poll the stream for a lease of at least `want` bytes.
@@ -68,6 +80,19 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 		consume: bool,
 		decode: impl Fn(&mut Decoder<'_>) -> Result<T, DecodeError>,
 	) -> Poll<Result<T, Error>>
+	where
+		V: Into<Form> + Copy,
+	{
+		self.poll_with_sized(cx, consume, decode).map_ok(|(value, _)| value)
+	}
+
+	/// [`Self::poll_with`], also returning how many bytes the value took.
+	fn poll_with_sized<T>(
+		&mut self,
+		cx: &mut Context<'_>,
+		consume: bool,
+		decode: impl Fn(&mut Decoder<'_>) -> Result<T, DecodeError>,
+	) -> Poll<Result<(T, usize), Error>>
 	where
 		V: Into<Form> + Copy,
 	{
@@ -101,15 +126,21 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 				let need = match decode(&mut r) {
 					Ok(value) => {
 						let used = buf.len() - r.remaining();
+						let control = r.control.map(|class| (class, used - r.uncounted));
 						self.want = 0;
 						if self.scratch.capacity() > SCRATCH_KEEP {
 							self.scratch = Vec::new();
 						}
 						if consume {
+							// Counted only once the bytes are released, so a peek or a retry
+							// after a short read never counts the same message twice.
+							if let Some((class, size)) = control {
+								self.stats.control(class, size, true);
+							}
 							lease.advance(used);
 							lease.release();
 						}
-						return Poll::Ready(Ok(value));
+						return Poll::Ready(Ok((value, used)));
 					}
 					// A short read inside a complete body is malformed, but reports what it
 					// needed from the body, so always ask for at least one byte more.
@@ -162,12 +193,46 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 		self.poll_with(cx, true, |r| T::decode(r, version))
 	}
 
+	/// [`Self::poll_decode`] with `decode` in place of the type's own decoder, for a
+	/// message whose bounds come from the session.
+	pub(crate) fn poll_decode_with<T: Debug>(
+		&mut self,
+		cx: &mut Context<'_>,
+		decode: impl Fn(&mut Decoder<'_>) -> Result<T, DecodeError>,
+	) -> Poll<Result<T, Error>>
+	where
+		V: Into<Form> + Copy,
+	{
+		self.poll_with(cx, true, decode)
+	}
+
 	/// Decode the next message from the stream.
 	pub async fn decode<T: Decode<V> + Debug>(&mut self) -> Result<T, Error>
 	where
 		V: Into<Form> + Copy,
 	{
 		std::future::poll_fn(|cx| self.poll_decode(cx)).await
+	}
+
+	/// [`Self::poll_decode`], also returning the bytes it consumed, for a handshake to
+	/// count once the session's stats are known.
+	pub(crate) fn poll_decode_sized<T: Decode<V> + Debug>(
+		&mut self,
+		cx: &mut Context<'_>,
+	) -> Poll<Result<(T, usize), Error>>
+	where
+		V: Into<Form> + Copy,
+	{
+		let version = self.version;
+		self.poll_with_sized(cx, true, |r| T::decode(r, version))
+	}
+
+	/// [`Self::decode`], also returning the bytes it consumed.
+	pub(crate) async fn decode_sized<T: Decode<V> + Debug>(&mut self) -> Result<(T, usize), Error>
+	where
+		V: Into<Form> + Copy,
+	{
+		std::future::poll_fn(|cx| self.poll_decode_sized(cx)).await
 	}
 
 	/// Poll for the next message unless the stream is closed cleanly first.
@@ -268,7 +333,8 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 	/// Fill a frame's payload from the stream, returning `Pending` once it would block.
 	///
 	/// The payload reaches the frame as it arrives, but keeps its receive credit until the
-	/// frame is full, so incomplete frames stay bounded by the receive window.
+	/// segment it lands in seals, so an incomplete frame holds at most one segment of the
+	/// receive window however large it is.
 	///
 	/// `Ready(Ok(()))` means the frame is full and the caller should commit it; an error
 	/// means the caller should abort it. Either way the frame is untouched otherwise, so
@@ -303,12 +369,19 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 			};
 
 			// One chunk per lease: a lease may hold the transport's lock, so the frame is
-			// written, and its consumers woken, only once the lease is gone.
-			let chunk = lease.copy_to_bytes(lease.chunk().len().min(frame.remaining()));
-			let complete = chunk.len() == frame.remaining();
+			// written, and its consumers woken, only once the lease is gone. A chunk holding
+			// the rest of the frame is taken whole, so a frame delivered in one piece keeps
+			// its allocation; any other stops where the segment being written seals.
+			let remaining = frame.remaining();
+			let take = match lease.chunk().len() >= remaining {
+				true => remaining,
+				false => lease.chunk().len().min(frame.unsealed()),
+			};
+			let chunk = lease.copy_to_bytes(take);
+			let complete = chunk.len() == remaining;
 			let ended = lease.is_fin() && !lease.has_remaining();
-			if complete {
-				// Every byte of the frame is in hand, so its credit returns.
+			if complete || chunk.len() == frame.unsealed() {
+				// Every byte of the segment is in hand, so its credit returns.
 				lease.release();
 			} else {
 				drop(lease);
@@ -346,23 +419,6 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 		let bytes = lease.copy_to_bytes(size);
 		lease.release();
 		Poll::Ready(Ok(bytes))
-	}
-
-	/// Poll to discard `remaining` bytes, counting it down as they arrive. Each byte is
-	/// released as it is skipped, so a peer cannot make a skipped payload cost credit.
-	pub(crate) fn poll_skip(&mut self, cx: &mut Context<'_>, remaining: &mut usize) -> Poll<Result<(), Error>> {
-		self.want = 0;
-		while *remaining > 0 {
-			let mut lease = ready!(self.poll_lease(cx, 1))?;
-			if !lease.has_remaining() {
-				return Poll::Ready(Err(DecodeError::Short.into()));
-			}
-			let skipped = lease.remaining().min(*remaining);
-			lease.advance(skipped);
-			lease.release();
-			*remaining -= skipped;
-		}
-		Poll::Ready(Ok(()))
 	}
 
 	/// Read exactly the given number of bytes from the stream.
@@ -405,6 +461,7 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 			version,
 			want: self.want,
 			scratch: self.scratch,
+			stats: self.stats,
 		}
 	}
 }
@@ -441,6 +498,75 @@ mod tests {
 		Reader::new(Buffered::new(StopLog::default()), version)
 	}
 
+	/// A control message counts once, when it is consumed: never on a peek, a retry after
+	/// a short read, or a failed decode, and in full when it spans chunks.
+	#[test]
+	fn control_counts_consumed_messages_once() {
+		use crate::{
+			lite,
+			stats::{Bytes, Control, Registry, Tier},
+		};
+		let registry = Registry::new(Default::default());
+		let session = registry.tier(Tier::default()).session("");
+		let version = lite::Version::Lite07;
+		let msg = lite::Probe {
+			bitrate: Some(123),
+			rtt: Some(4),
+		};
+		let bytes: &'static [u8] = msg.encode_bytes(version).unwrap().to_vec().leak();
+		let size = bytes.len() as u64;
+		let (head, tail) = bytes.split_at(2);
+		let counted = || registry.snapshot().control();
+		let probes = |n: u64| vec![(Tier::default(), Control::Probe, Bytes { tx: 0, rx: size * n })];
+
+		let mut reader = queue(&[bytes, head], version).with_stats(&session);
+		let mut cx = Context::from_waker(std::task::Waker::noop());
+		assert!(matches!(
+			reader.poll_decode_peek_maybe::<lite::Probe>(&mut cx),
+			Poll::Ready(Ok(Some(_)))
+		));
+		assert!(counted().is_empty());
+		assert!(matches!(reader.poll_decode::<lite::Probe>(&mut cx), Poll::Ready(Ok(_))));
+		assert_eq!(counted(), probes(1));
+
+		// The second probe arrives in two chunks, so the reader parks and retries.
+		assert!(reader.poll_decode::<lite::Probe>(&mut cx).is_pending());
+		assert!(reader.poll_decode::<lite::Probe>(&mut cx).is_pending());
+		assert_eq!(counted(), probes(1));
+		reader.stream.get_mut().chunks.push_back(tail);
+		assert!(matches!(reader.poll_decode::<lite::Probe>(&mut cx), Poll::Ready(Ok(_))));
+		assert_eq!(counted(), probes(2));
+
+		// A wrapped message counts its type too, as the sender's one encode does.
+		let reply = lite::AuthReply::Error(lite::AuthError {
+			code: 1,
+			reason: "no".into(),
+		});
+		let reply: &'static [u8] = reply.encode_bytes(version).unwrap().to_vec().leak();
+		reader.stream.get_mut().chunks.push_back(reply);
+		assert!(matches!(
+			reader.poll_decode::<lite::AuthReply>(&mut cx),
+			Poll::Ready(Ok(_))
+		));
+		let auth = (
+			Tier::default(),
+			Control::Auth,
+			Bytes {
+				tx: 0,
+				rx: reply.len() as u64,
+			},
+		);
+		assert_eq!(counted(), [vec![auth.clone()], probes(2)].concat());
+
+		// A body cut short inside its declared size is malformed, and never counted.
+		reader.stream.get_mut().chunks.push_back(&[1, 0x80]);
+		assert!(matches!(
+			reader.poll_decode::<lite::Probe>(&mut cx),
+			Poll::Ready(Err(_))
+		));
+		assert_eq!(counted(), [vec![auth], probes(2)].concat());
+	}
+
 	/// STOP_SENDING refuses a stream, so it must carry a stream code. Reusing the session
 	/// table here would have the peer decode it against the wrong registry: `Cancel` would
 	/// arrive as INTERNAL_ERROR, and `Unauthorized` as DELIVERY_TIMEOUT.
@@ -474,7 +600,7 @@ mod tests {
 		let mut lite = stop_log(crate::lite::Version::Lite05);
 		lite.abort(&Error::Old);
 
-		let mut ietf = stop_log(crate::ietf::Version::Draft20);
+		let mut ietf = stop_log(crate::ietf::Version::Draft22);
 		ietf.abort(&Error::Old);
 
 		assert_eq!(lite.stream.get_ref().stops, vec![StreamError::Old.to_code()]);
@@ -574,24 +700,6 @@ mod tests {
 		}
 	}
 
-	/// A skipped payload is discarded across reads, leaving what follows it, and a skip
-	/// waiting on more has counted down what it already discarded.
-	#[test]
-	fn skip_discards_across_reads() {
-		let mut reader = queue(&[b"abc", b"defg", b"hi"], crate::lite::Version::Lite05);
-		let mut cx = Context::from_waker(std::task::Waker::noop());
-
-		let mut remaining = 6;
-		assert!(matches!(reader.poll_skip(&mut cx, &mut remaining), Poll::Ready(Ok(()))));
-		assert_eq!(&reader.read_exact(3).now_or_never().unwrap().unwrap()[..], b"ghi");
-
-		let mut reader = queue(&[b"ab", b"cd"], crate::lite::Version::Lite05);
-		let mut remaining = 5;
-		assert!(reader.poll_skip(&mut cx, &mut remaining).is_pending());
-		assert_eq!(remaining, 1);
-		assert_eq!(leased(&mut reader), 0, "nothing skipped is kept");
-	}
-
 	/// A message cut across chunks decodes from a copy, waiting for exactly what its
 	/// prefix declared, and consumes only itself.
 	#[test]
@@ -673,7 +781,7 @@ mod tests {
 		use crate::{Version, ietf, lite, setup};
 		refuses_frame::<lite::Setup, _>(&[0], lite::Version::Lite05, false);
 		refuses_frame::<lite::Goaway, _>(&[0], lite::Version::Lite05, false);
-		refuses_frame::<ietf::GoAway, _>(&[0, 0], ietf::Version::Draft20, false);
+		refuses_frame::<ietf::GoAway, _>(&[0, 0], ietf::Version::Draft22, false);
 		for version in [
 			Version::Lite(lite::Version::Lite01),
 			Version::Lite(lite::Version::Lite02),
@@ -845,5 +953,103 @@ mod tests {
 
 		// Two budgets' worth, and the boundary is owed nothing by the time it arrives.
 		assert_eq!(wakes.count(), 2, "the burst was withheld past its budget");
+	}
+
+	/// A leasing stream that keeps the credit of every byte read until a release, the way
+	/// a QUIC connection window does, counting what is held and what came back.
+	#[derive(Default)]
+	struct Credited {
+		chunks: VecDeque<Bytes>,
+		held: usize,
+		released: usize,
+	}
+
+	struct CreditedLease<'a>(&'a mut Credited);
+
+	impl RecvStream for Credited {
+		type Error = crate::lite::test_transport::SinkError;
+		type Lease<'a> = CreditedLease<'a>;
+
+		fn poll_lease(&mut self, _: &mut Context<'_>, want: usize) -> Poll<Result<CreditedLease<'_>, Self::Error>> {
+			match self.chunks.iter().map(Bytes::len).sum::<usize>() >= want {
+				true => Poll::Ready(Ok(CreditedLease(self))),
+				false => Poll::Pending,
+			}
+		}
+
+		fn set_priority(&mut self, _: i64) {}
+
+		fn stop(&mut self, _: u32) {}
+	}
+
+	impl Buf for CreditedLease<'_> {
+		fn remaining(&self) -> usize {
+			self.0.chunks.iter().map(Bytes::len).sum()
+		}
+
+		fn chunk(&self) -> &[u8] {
+			self.0.chunks.front().map_or(&[], |chunk| &chunk[..])
+		}
+
+		fn advance(&mut self, n: usize) {
+			let front = self.0.chunks.front_mut().expect("advanced past the lease");
+			front.advance(n);
+			if front.is_empty() {
+				self.0.chunks.pop_front();
+			}
+			self.0.held += n;
+		}
+	}
+
+	impl Lease for CreditedLease<'_> {
+		fn chunks(&self) -> impl Iterator<Item = &[u8]> {
+			self.0.chunks.iter().map(|chunk| &chunk[..])
+		}
+
+		fn is_fin(&self) -> bool {
+			false
+		}
+
+		fn release(self) {
+			self.0.released += std::mem::take(&mut self.0.held);
+		}
+	}
+
+	/// A frame returns its receive credit as each segment seals, so however large it is,
+	/// it never holds more than one segment of the window, even when a chunk straddles
+	/// the boundary.
+	#[test]
+	fn a_frame_returns_credit_per_segment() {
+		use crate::frame::SEGMENT;
+		const SIZE: usize = 2 * SEGMENT + SEGMENT / 2;
+		const CHUNK: usize = 100_000;
+
+		let (mut frame, mut payload, waiter, _wakes) = parked_frame(SIZE);
+		let data = Bytes::from((0..SIZE).map(|i| (i % 251) as u8).collect::<Vec<_>>());
+		let mut reader = Reader::new(Credited::default(), crate::lite::Version::Lite05);
+		let mut cx = Context::from_waker(std::task::Waker::noop());
+
+		let mut sent = 0;
+		let done = loop {
+			let next = (sent + CHUNK).min(SIZE);
+			reader.stream.chunks.push_back(data.slice(sent..next));
+			sent = next;
+			let res = reader.poll_read_frame(&mut cx, &mut frame);
+			let stream = &reader.stream;
+			if res.is_ready() {
+				break res;
+			}
+			assert_eq!(stream.released, sent / SEGMENT * SEGMENT, "credit returned off a seal");
+			assert!(stream.held < SEGMENT, "{} bytes held past a segment", stream.held);
+		};
+		assert!(matches!(done, Poll::Ready(Ok(()))));
+		assert_eq!(reader.stream.released, SIZE);
+
+		let _group = frame.finish().unwrap();
+		let mut read = Vec::new();
+		while let Poll::Ready(Ok(Some(chunk))) = payload.poll_read_chunk(&waiter) {
+			read.extend_from_slice(&chunk);
+		}
+		assert_eq!(read, data);
 	}
 }

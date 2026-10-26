@@ -1,8 +1,10 @@
 // An open Track Stream is interest in the track: the subscriber keeps it open until its
 // SUBSCRIBE is answered, and the publisher keeps the track wanted until the subscriber closes it.
+
 import { describe, expect, test } from "bun:test";
 import { Milli } from "@moq/clock";
 import { randomHop } from "../hop.ts";
+import { Version as IetfVersion } from "../ietf/version.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -116,8 +118,9 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 			const pair = createMockTransportPair(ALPN_05);
 			const origin = new OriginProducer();
 			const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
-			const broadcast = origin.createBroadcast(Path.from("room"));
-			broadcast.announce();
+			const broadcastPublication = origin.createBroadcast(Path.from("room"));
+			const broadcast = broadcastPublication.broadcast;
+			broadcastPublication.announce();
 			const demand = broadcast.demand();
 			const serving = (async () => {
 				for (;;) {
@@ -153,8 +156,9 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 			const pair = createMockTransportPair(ALPN_05);
 			const origin = new OriginProducer();
 			const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
-			const broadcast = origin.createBroadcast(Path.from("room"));
-			broadcast.announce();
+			const broadcastPublication = origin.createBroadcast(Path.from("room"));
+			const broadcast = broadcastPublication.broadcast;
+			broadcastPublication.announce();
 			const demand = broadcast.demand();
 			const serving = (async () => {
 				for (;;) {
@@ -199,8 +203,9 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		const pair = createMockTransportPair(ALPN_05);
 		const origin = new OriginProducer();
 		const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
-		const broadcast = origin.createBroadcast(Path.from("room"));
-		broadcast.announce();
+		const broadcastPublication = origin.createBroadcast(Path.from("room"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
 		const demand = broadcast.demand();
 		let requests = 0;
 		const serving = (async () => {
@@ -241,8 +246,9 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		const pair = createMockTransportPair(ALPN_05);
 		const origin = new OriginProducer();
 		const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
-		const broadcast = origin.createBroadcast(Path.from("room"));
-		broadcast.announce();
+		const broadcastPublication = origin.createBroadcast(Path.from("room"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
 		const demand = broadcast.demand();
 		let requests = 0;
 		const serving = (async () => {
@@ -300,8 +306,9 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 			const pair = createMockTransportPair(ALPN_05);
 			const origin = new OriginProducer();
 			const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
-			const broadcast = origin.createBroadcast(Path.from("room"));
-			broadcast.announce();
+			const broadcastPublication = origin.createBroadcast(Path.from("room"));
+			const broadcast = broadcastPublication.broadcast;
+			broadcastPublication.announce();
 			const demand = broadcast.demand();
 			// Answered by hand, after every requester left.
 			const requested = wireOf(broadcast).requested();
@@ -332,8 +339,9 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		const pair = createMockTransportPair(ALPN_05);
 		const origin = new OriginProducer();
 		const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
-		const broadcast = origin.createBroadcast(Path.from("room"));
-		broadcast.announce();
+		const broadcastPublication = origin.createBroadcast(Path.from("room"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
 		const demand = broadcast.demand();
 		const requested = wireOf(broadcast).requested();
 
@@ -355,8 +363,9 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		const pair = createMockTransportPair(ALPN_05);
 		const origin = new OriginProducer();
 		const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
-		const broadcast = origin.createBroadcast(Path.from("room"));
-		broadcast.announce();
+		const broadcastPublication = origin.createBroadcast(Path.from("room"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
 		const demand = broadcast.demand();
 		// Answered by hand, after the first TRACK stream has left.
 		const requested = wireOf(broadcast).requested();
@@ -390,13 +399,14 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		const pair = createMockTransportPair(ALPN_05);
 		const origin = new OriginProducer();
 		const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
-		const broadcast = origin.createBroadcast(Path.from("room"));
-		broadcast.announce();
+		const broadcastPublication = origin.createBroadcast(Path.from("room"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
 		const serving = (async () => {
 			for (;;) {
 				const request = await wireOf(broadcast).requested();
 				if (!request) return;
-				request.accept({ timescale: Timescale.MICRO, unchecked: true });
+				request.accept({ timescale: Timescale.MICRO, ietf: IetfVersion.DRAFT_22 });
 			}
 		})();
 

@@ -47,6 +47,9 @@ test("the fallback decodes AAC without a native AudioDecoder", async () => {
 		description: audioSpecificConfig(SAMPLE_RATE, 2),
 	};
 	expect((await AudioDecoder.isConfigSupported(config)).supported).toBe(true);
+	for (const codec of ["mp4a.40.02", "mp4a.40.5", "mp4a.40.05", "mp4a.40.29", "mp4a.67"]) {
+		expect((await AudioDecoder.isConfigSupported({ ...config, codec })).supported).toBe(true);
+	}
 
 	const planes: Float32Array[][] = [[], []];
 	let failure: Error | undefined;
@@ -114,7 +117,7 @@ test("the polyfill deinterleaves every channel to f32-planar", async () => {
 		}
 
 		const tail = new Float32Array(2);
-		audio.copyTo(tail, { planeIndex: 1, format: "f32-planar", frameOffset: 1 });
+		audio.copyTo(tail, { planeIndex: 1, format: "f32-planar", frameOffset: 1, frameCount: 2 });
 		expect(Array.from(tail)).toEqual([1, 2].map((frame) => data[frame * 2 + 1] / scale));
 		// A view smaller than the copy is refused, even with room in the buffer behind it.
 		const backing = new Float32Array(8);

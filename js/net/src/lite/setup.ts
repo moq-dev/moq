@@ -5,15 +5,15 @@
  * @module
  */
 
-import { type Hop, HopSchema } from "../hop.ts";
+import { type Hop, HopSchema, wireHop } from "../hop.ts";
 import { encodeVarint, Reader, type Writer } from "../stream.ts";
 import { decodeUtf8 } from "../util/utf8.ts";
 import * as Message from "./message.ts";
-import { hasSetupStream, type Version } from "./version.ts";
+import { hasAuth, hasSetupStream, type Version } from "./version.ts";
 
 const clientParameters = new WeakSet<Setup>();
 
-/** Whether the peer's SETUP carried Path or Role; raw presence matters even when an unknown Role decodes as Both. */
+/** Whether the peer's SETUP carried Path, Role, or Token; raw presence matters even when an unknown Role decodes as Both. */
 export function hasClientParameters(setup: Setup): boolean {
 	return clientParameters.has(setup);
 }
@@ -26,6 +26,10 @@ const PARAM_PATH = 0x2n;
 const PARAM_ROLE = 0x3n;
 /** Setup Parameter id for the endpoint's Hop ID. */
 const PARAM_HOP = 0x5n;
+/** Setup Parameter id for the endpoint's implementation name and version. */
+const PARAM_IMPLEMENTATION = 0x6n;
+/** Setup Parameter id for the client's connection credential (client-only, lite-07+). */
+const PARAM_TOKEN = 0x7n;
 
 /** Cap on the number of parameters in a bag, matching the Rust decoder. */
 const MAX_PARAMS = 64;
@@ -182,6 +186,10 @@ export interface SetupProps {
 	role?: Role;
 	/** See {@link Setup.hop}. Omitted by default. */
 	hop?: Hop;
+	/** See {@link Setup.token}. Omitted by default. */
+	token?: Uint8Array;
+	/** See {@link Setup.implementation}. Omitted by default. */
+	implementation?: string;
 }
 
 /**
@@ -219,11 +227,25 @@ export class Setup {
 	 */
 	hop?: Hop;
 
-	constructor({ probe, path, role, hop }: SetupProps = {}) {
+	/**
+	 * The connection credential (lite-07+), which the empty-token Auth Stream names. Sent
+	 * only by the client. Never empty: an empty value is no credential.
+	 */
+	token?: Uint8Array;
+
+	/**
+	 * This endpoint's implementation and version, such as `moq-net-js/0.4.2`. Opaque and
+	 * peer-controlled, so only for logs and rollout counts. `undefined` or empty sends nothing.
+	 */
+	implementation?: string;
+
+	constructor({ probe, path, role, hop, token, implementation }: SetupProps = {}) {
 		this.probe = probe ?? ProbeLevel.None;
 		this.path = path;
 		this.role = role ?? Role.Both;
 		this.hop = hop;
+		this.token = token;
+		this.implementation = implementation;
 	}
 
 	static #guard(version: Version) {
@@ -246,7 +268,15 @@ export class Setup {
 			params.setVarint(PARAM_ROLE, this.role, version);
 		}
 		if (this.hop !== undefined && this.hop !== 0n) {
-			params.setVarint(PARAM_HOP, this.hop, version);
+			params.setVarint(PARAM_HOP, wireHop(this.hop, version), version);
+		}
+		if (this.implementation) {
+			params.setBytes(PARAM_IMPLEMENTATION, new TextEncoder().encode(this.implementation));
+		}
+		if (this.token !== undefined) {
+			if (!hasAuth(version)) throw new Error("setup token not supported for this version");
+			if (this.token.byteLength === 0) throw new Error("setup token cannot be empty");
+			params.setBytes(PARAM_TOKEN, this.token);
 		}
 		await params.encode(w);
 	}
@@ -269,8 +299,15 @@ export class Setup {
 		const hopRaw = await params.getVarint(PARAM_HOP, version);
 		const hop = hopRaw === undefined || hopRaw === 0n ? undefined : HopSchema.parse(hopRaw);
 
-		const setup = new Setup({ probe, path, role, hop });
-		if (pathBytes !== undefined || roleCode !== undefined) clientParameters.add(setup);
+		// An older version does not know the token parameter, so it ignores it like any other.
+		const token = hasAuth(version) ? params.getBytes(PARAM_TOKEN) : undefined;
+		if (token?.byteLength === 0) throw new Error("setup token cannot be empty");
+
+		const implementationBytes = params.getBytes(PARAM_IMPLEMENTATION);
+		const implementation = implementationBytes === undefined ? undefined : decodeUtf8(implementationBytes);
+
+		const setup = new Setup({ probe, path, role, hop, token, implementation });
+		if (pathBytes !== undefined || roleCode !== undefined || token !== undefined) clientParameters.add(setup);
 		return setup;
 	}
 

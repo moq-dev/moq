@@ -246,8 +246,8 @@ std::string Configure(obs_data_t *, moq::ClientConfig &config)
 {
 	if (!g_settings_ok)
 		config.bind = "not an address";
-	config.backoff.initial_us = 10'000;
-	config.backoff.max_us = 50'000;
+	config.backoff.initial = std::chrono::milliseconds(10);
+	config.backoff.max = std::chrono::milliseconds(50);
 	return g_settings_error;
 }
 } // namespace MoQSettings
@@ -402,6 +402,23 @@ struct MoQOutputStatsTest {
 		std::lock_guard<std::mutex> lock(output.mutex);
 		output.live = false;
 	}
+	// A fast first connect and drop can coalesce before the UI observes Connected.
+	static bool ObserveCoalescedFirstConnect(MoQOutput &output)
+	{
+		std::lock_guard<std::recursive_mutex> signal_lock(output.signal_mutex);
+		auto current = output.attempt;
+		if (!current || !current->session)
+			return false;
+		current->pending.reset();
+		current->connected = false;
+		output.connect_time_ms = 0;
+		auto state = current->session->state();
+		state.phase = moq::ConnectionPhase::kDisconnected;
+		state.version.reset();
+		output.OnState(current, std::move(state));
+		return current->connected && !current->live && output.GetConnectTime() > 0;
+	}
+
 	// Whether every audio and video track holds a reservation.
 	static bool Reserved(MoQOutput &output)
 	{
@@ -444,6 +461,8 @@ int main()
 		CHECK(first.has_value());
 		CHECK(first == output.GetEpoch());
 		CHECK(WaitFor([&] { return output.IsLiveSession() && relay.Accepted() == 1; }));
+		// The plugin names itself ahead of the C++ package, so a relay can tell it apart.
+		CHECK(relay.Advertised("moq-obs/dev moq-cpp/"));
 		relay.DropSessions();
 		CHECK(WaitFor([&] { return output.GetReconnectCount() == 1 && output.IsLiveSession(); }));
 		CHECK(MoQOutputStatsTest::Epoch(output) == first);
@@ -458,6 +477,17 @@ int main()
 		output.Stop();
 	}
 	printf("each start announces a fresh epoch, reconnect preserves it: ok\n");
+
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		MoQOutput output(nullptr, OUTPUT);
+		CHECK(output.Start());
+		CHECK(WaitFor([&] { return output.IsLiveSession(); }));
+		CHECK(MoQOutputStatsTest::ObserveCoalescedFirstConnect(output));
+		output.Stop();
+	}
+	printf("a coalesced first connection is remembered while offline: ok\n");
 
 	for (int retirement = 0; retirement < 3; ++retirement) {
 		TestRelay relay;

@@ -51,7 +51,6 @@ use std::time::Duration;
 
 use hang::catalog::{Archive, Timeline};
 use hang::timeline::{Position, Record, RecordExt};
-use moq_json::window::Checkpoint;
 
 use moq_net::{Timescale, Timestamp};
 
@@ -434,6 +433,8 @@ impl Iterator for Segmenter {
 /// Records must be pushed in sequence order, starting at the window's next index.
 pub struct Producer {
 	sink: moq_json::window::Producer<Record>,
+	/// The window's track, kept to abort it with the cause of a failure.
+	track: moq_net::track::Producer,
 }
 
 impl Producer {
@@ -449,25 +450,20 @@ impl Producer {
 	/// Publish onto `track`, starting at record zero.
 	pub fn new(track: moq_net::track::Producer) -> Self {
 		Self {
-			sink: moq_json::window::Producer::new(track, Self::config()),
+			sink: moq_json::window::Producer::new(track.clone(), Self::config()),
+			track,
 		}
 	}
 
-	/// Publish onto `track`, continuing `checkpoint`, such as a window recovered from storage.
-	///
-	/// The track's first group restates the checkpoint, and the next record is sequence
-	/// `checkpoint.range.end`. Fails when a checkpoint record is not the sequence at its index or the
-	/// checkpoint is malformed.
-	pub fn resume(track: moq_net::track::Producer, checkpoint: &Checkpoint<Record>) -> crate::Result<Self> {
-		let sink = moq_json::window::Producer::resume(track, Self::config(), checkpoint).map_err(json)?;
-		// The encoder accepted the checkpoint, so the records fit before `range.end`.
-		let start = checkpoint.range.end - checkpoint.records.len() as u64;
-		for (index, record) in (start..).zip(&checkpoint.records) {
-			if record.sequence != index {
-				return Err(crate::Error::TimelineCheckpoint(index));
-			}
-		}
-		Ok(Self { sink })
+	/// Abort the timeline track with `err`, so its readers see a failure rather than an end.
+	fn abort(self, err: &crate::Error) {
+		// A cause outside moq-net has no wire code, so readers get a generic failure.
+		let reason = match err {
+			crate::Error::Moq(err) => err.clone(),
+			_ => moq_net::StreamError::Internal.into(),
+		};
+		// A track that already closed keeps its first reason.
+		let _ = self.track.abort(reason);
 	}
 
 	fn config() -> moq_json::window::ProducerConfig {
@@ -502,14 +498,6 @@ impl Producer {
 		self.sink
 			.pop(moq_net::Timed::from(count).at(moq_net::Timestamp::now()))
 			.map_err(json)
-	}
-
-	/// Close the track's open group, so every push and pop so far sits in a complete group.
-	///
-	/// A recorder stores those groups before committing the next record. The next edit opens a
-	/// new group restating the window.
-	pub fn flush(&mut self) -> crate::Result<()> {
-		self.sink.cut().map_err(json)
 	}
 
 	/// Finish the timeline track.
@@ -555,9 +543,10 @@ impl Live {
 				continue;
 			};
 			if let Err(err) = output.push(&record) {
-				tracing::warn!(%err, "timeline publish failed; dropping the timeline track");
-				let _ = output.finish();
-				self.output = None;
+				tracing::warn!(%err, "timeline publish failed; aborting the timeline track");
+				if let Some(output) = self.output.take() {
+					output.abort(&err);
+				}
 			}
 		}
 		if let Some(duration) = self.segmenter.declared_duration()
@@ -580,7 +569,8 @@ type OnDeclare = Box<dyn FnOnce(u64) + Send>;
 
 struct Registry {
 	/// Each enrolled track's timeline, by track name. Kept after its recorder drops, so a finished
-	/// span stays discoverable and a re-enrolled track continues its numbering.
+	/// span stays discoverable and a re-enrolled track continues its numbering, until
+	/// [`Timelines::retire`] says the name is done.
 	tracks: BTreeMap<String, (String, Arc<Mutex<Live>>)>,
 	finished: bool,
 }
@@ -598,9 +588,6 @@ pub struct Timelines {
 impl Timelines {
 	/// Timelines for tracks of `broadcast`.
 	pub fn new(broadcast: &moq_net::broadcast::Producer) -> Self {
-		// The contents are `Send + Sync` natively; on wasm moq-net's handles are `Rc`-backed, so
-		// clippy sees a pointlessly atomic `Arc`. One type for both targets is worth it.
-		#[allow(clippy::arc_with_non_send_sync)]
 		let registry = Arc::new(Mutex::new(Registry {
 			tracks: BTreeMap::new(),
 			finished: false,
@@ -644,7 +631,6 @@ impl Timelines {
 
 		let timeline = hang::timeline::default_name(name);
 		let track = self.broadcast.create_track(timeline.as_str(), Producer::info())?;
-		#[allow(clippy::arc_with_non_send_sync)]
 		let live = Arc::new(Mutex::new(Live {
 			segmenter: Segmenter::new(config),
 			on_declare: None,
@@ -672,6 +658,34 @@ impl Timelines {
 			})
 			.collect();
 		section
+	}
+
+	/// Finish the timeline of `name`, whose recorder dropped and whose owner never enrolls the
+	/// name again, and forget it, so a producer minting a name per track holds only its live ones.
+	///
+	/// Readers already on the timeline track read it to its end. Nothing happens for a name never
+	/// enrolled; a name whose recorder is still alive errors.
+	pub(crate) fn retire(&self, name: &str) -> crate::Result<()> {
+		let mut registry = self.registry.lock().unwrap();
+		let Some((_, live)) = registry.tracks.get(name) else {
+			return Ok(());
+		};
+		let mut live = live.lock().unwrap();
+		if live.recording {
+			return Err(moq_net::Error::Duplicate.into());
+		}
+		// The catalog stops advertising the timeline, so a last declaration must not add it back.
+		live.on_declare = None;
+		live.finish();
+		drop(live);
+		registry.tracks.remove(name);
+		Ok(())
+	}
+
+	/// How many timelines are held, live or kept for a re-enrollment.
+	#[cfg(test)]
+	pub(crate) fn len(&self) -> usize {
+		self.registry.lock().unwrap().tracks.len()
 	}
 
 	/// Close every open record now, publishing any declaration it fixes.
@@ -721,10 +735,12 @@ impl Recorder {
 	pub fn frame(&mut self, position: Position, pts: Timestamp, keyframe: bool) {
 		let mut live = self.live.lock().unwrap();
 		if let Err(err) = live.segmenter.frame(position, pts, keyframe) {
-			tracing::warn!(%err, "timeline report rejected; dropping the timeline track");
+			tracing::warn!(%err, "timeline report rejected; aborting the timeline track");
 			live.segmenter.close();
-			// Dropped without a finish, so subscribers see the timeline fail rather than end.
-			live.output = None;
+			// Subscribers see the timeline fail rather than end.
+			if let Some(output) = live.output.take() {
+				output.abort(&err);
+			}
 		}
 		live.publish();
 	}
@@ -1422,7 +1438,19 @@ mod test {
 			match consumer.next().await {
 				Ok(Some(_)) => continue,
 				Ok(None) => panic!("the timeline ended cleanly despite omitting a frame"),
-				Err(_) => break,
+				// Aborted with the failure, not left to read as a producer that went away.
+				Err(err) => {
+					assert!(
+						matches!(
+							err,
+							crate::Error::Json(moq_json::Error::Net(moq_net::Error::Stream(
+								moq_net::StreamError::Internal
+							)))
+						),
+						"{err:?}"
+					);
+					break;
+				}
 			}
 		}
 	}
@@ -1480,50 +1508,6 @@ mod test {
 		assert!(matches!(
 			timelines.track("video0", Config::default()),
 			Err(crate::Error::Moq(moq_net::Error::Closed))
-		));
-	}
-
-	#[tokio::test]
-	async fn a_resumed_producer_continues_the_checkpoint() {
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let track = broadcast.create_track("video0.timeline.z", Producer::info()).unwrap();
-		let checkpoint = Checkpoint {
-			range: 1..3,
-			records: vec![
-				Record::new(1, 1_000, 1_000, at(1), at(2)),
-				Record::new(2, 2_000, 1_000, at(2), at(3)),
-			],
-		};
-		let mut producer = Producer::resume(track, &checkpoint).unwrap();
-		assert!(matches!(
-			producer.push(&Record::new(4, 3_000, 1_000, at(3), at(4))),
-			Err(crate::Error::TimelineSequence { expected: 3, actual: 4 })
-		));
-		producer.push(&Record::new(3, 3_000, 1_000, at(3), at(4))).unwrap();
-		producer.finish().unwrap();
-
-		let mut section = Archive::new();
-		section
-			.timelines
-			.insert("video0".to_string(), Timeline::new("video0.timeline.z", 4_000));
-		let entries = read(&broadcast, &section, "video0").await;
-		assert_eq!(
-			entries.iter().map(|entry| entry.sequence).collect::<Vec<_>>(),
-			vec![1, 2, 3]
-		);
-	}
-
-	#[test]
-	fn a_checkpoint_record_must_be_the_sequence_at_its_index() {
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let track = broadcast.create_track("video0.timeline.z", Producer::info()).unwrap();
-		let checkpoint = Checkpoint {
-			range: 0..1,
-			records: vec![Record::new(5, 0, 1_000, at(0), at(1))],
-		};
-		assert!(matches!(
-			Producer::resume(track, &checkpoint),
-			Err(crate::Error::TimelineCheckpoint(0))
 		));
 	}
 

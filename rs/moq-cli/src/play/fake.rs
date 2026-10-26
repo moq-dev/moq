@@ -34,11 +34,17 @@ pub(super) struct Recorder {
 #[derive(Default)]
 struct State {
 	played: Vec<Played>,
+	speakers: usize,
 	sinks: usize,
 	events: Vec<Event>,
 }
 
 impl Recorder {
+	/// How many times playback opened the speaker.
+	pub fn speakers(&self) -> usize {
+		self.state.lock().unwrap().speakers
+	}
+
 	/// Present the newest due frame, just as the window does on a redraw.
 	pub fn present(&self, media: &super::media::Media<Self>) -> Option<hang::moq_net::Timestamp> {
 		let mut video = media.video.lock().unwrap();
@@ -72,6 +78,7 @@ impl Output for Recorder {
 	type Speaker = Self;
 
 	async fn speaker(&self) -> anyhow::Result<Self> {
+		self.state.lock().unwrap().speakers += 1;
 		Ok(self.clone())
 	}
 

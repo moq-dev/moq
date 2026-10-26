@@ -35,18 +35,7 @@ function parseVersions(value: string | null): string[] | undefined {
 	return versions?.length ? versions : undefined;
 }
 
-const OBSERVED = [
-	"url",
-	"versions",
-	"name",
-	"muted",
-	"invisible",
-	"source",
-	"preview",
-	"backend",
-	"announce",
-	"linger",
-] as const;
+const OBSERVED = ["url", "versions", "name", "muted", "invisible", "source", "preview", "backend", "announce"] as const;
 type Observed = (typeof OBSERVED)[number];
 
 /** The built-in capture sources selectable via the `source` attribute. */
@@ -55,12 +44,13 @@ export type SourceType = "camera" | "screen" | "file";
 /**
  * When to announce the broadcast. Nobody can see or subscribe to it until it is announced.
  *
- * `always` announces immediately, `never` never announces, and `source` waits until media is
- * actually being captured. A camera source waits for every enabled track, so a refused microphone
+ * `always` announces immediately, and `source` waits until media is actually being captured. A camera source waits for every enabled track, so a refused microphone
  * cannot advertise a partial broadcast. `source` also waits until every captured track's config
  * resolves or fails, so a subscriber's first catalog lists every rendition. Defaults to `source`.
+ * To keep a broadcast out of discovery, give it a hidden name with a `.`-prefixed path segment
+ * instead; it is still subscribable by name.
  */
-export type AnnounceMode = "always" | "source" | "never";
+export type AnnounceMode = "always" | "source";
 
 /**
  * Parse a boolean attribute: absent uses `defaultValue`, bare presence is true, and an explicit
@@ -82,11 +72,16 @@ function parseSource(value: string | null): SourceType | undefined {
 	return undefined;
 }
 
-function parseAnnounce(value: string | null): AnnounceMode {
+// Unlike the others, an invalid announce refuses (undefined) instead of falling back: a fallback
+// would publish a broadcast the page configured differently, such as a removed `never`.
+function parseAnnounce(value: string | null): AnnounceMode | undefined {
 	if (value === null) return "source";
-	if (value === "source" || value === "always" || value === "never") return value;
-	console.warn(`moq-publish: invalid announce="${value}", expected "source", "always", or "never"`);
-	return "source";
+	if (value === "source" || value === "always") return value;
+	return undefined;
+}
+
+function invalidAnnounce(value: unknown): Error {
+	return new Error(`moq-publish: invalid announce="${value}", expected "source" or "always"`);
 }
 
 function parsePreview(value: string | null): Preview.Mode {
@@ -97,8 +92,9 @@ function parsePreview(value: string | null): Preview.Mode {
 }
 
 function parseBackend(value: string | null): Preview.Backend {
-	if (value === null) return "auto";
-	if (value === "auto" || value === "webgpu" || value === "2d") return value;
+	const trimmed = value?.trim();
+	if (!trimmed) return "auto";
+	if (trimmed === "auto" || trimmed === "webgpu" || trimmed === "2d") return trimmed;
 	console.warn(`moq-publish: invalid backend="${value}", expected "auto", "webgpu", or "2d"`);
 	return "auto";
 }
@@ -125,10 +121,9 @@ export default class MoqPublish extends HTMLElement {
 		preview: new Signal<Preview.Mode>("source"),
 		// Which graphics API draws a <canvas> preview.
 		backend: new Signal<Preview.Backend>("auto"),
-		// When to advertise the broadcast: always, never, or only once a source is live.
-		announce: new Signal<AnnounceMode>("source"),
-		// Whether advertising stopping finishes the broadcast, serving its tail until stale.
-		linger: new Signal(false),
+		// When to advertise the broadcast: always, or only once a source is live. Undefined while the
+		// `announce` attribute is invalid, which never announces.
+		announce: new Signal<AnnounceMode | undefined>("source"),
 	};
 
 	/**
@@ -232,7 +227,6 @@ export default class MoqPublish extends HTMLElement {
 			origin: this.connection.origin,
 			enabled: this.#enabled,
 			announce: this.#announcing,
-			linger: this.controls.linger,
 			name: this.#name,
 			display: this.#capture.out.display,
 			flip: this.#flip,
@@ -294,7 +288,8 @@ export default class MoqPublish extends HTMLElement {
 				// A canvas that lost its GPU never hands out another context, so swap in a fresh copy.
 				// The observer above picks it up and this effect builds a renderer for it.
 				effect.run((inner) => {
-					if (inner.get(renderer.out.error) === "surface-lost") preview.replaceWith(preview.cloneNode());
+					if (inner.get(renderer.out.error)?.name === "InvalidStateError")
+						preview.replaceWith(preview.cloneNode());
 				});
 				return;
 			}
@@ -358,9 +353,9 @@ export default class MoqPublish extends HTMLElement {
 		} else if (name === "source") {
 			this.controls.source.set(parseSource(newValue));
 		} else if (name === "announce") {
-			this.controls.announce.set(parseAnnounce(newValue));
-		} else if (name === "linger") {
-			this.controls.linger.set(parseBoolean(newValue, false));
+			const mode = parseAnnounce(newValue);
+			this.controls.announce.set(mode);
+			if (mode === undefined) throw invalidAnnounce(newValue);
 		} else if (name === "muted") {
 			this.controls.muted.set(parseBoolean(newValue, false));
 		} else if (name === "invisible") {
@@ -534,22 +529,14 @@ export default class MoqPublish extends HTMLElement {
 		this.controls.backend.set(value);
 	}
 
-	/** When to announce the broadcast, mirrored by the `announce` attribute. */
-	get announce(): AnnounceMode {
+	/** When to announce the broadcast, mirrored by the `announce` attribute; undefined while that attribute is invalid. */
+	get announce(): AnnounceMode | undefined {
 		return this.controls.announce.peek();
 	}
 
 	set announce(value: AnnounceMode) {
+		if (value !== "source" && value !== "always") throw invalidAnnounce(value);
 		this.controls.announce.set(value);
-	}
-
-	/** Whether advertising stopping finishes the broadcast, keeping it up while its media is fresh. */
-	get linger(): boolean {
-		return this.controls.linger.peek();
-	}
-
-	set linger(value: boolean) {
-		this.controls.linger.set(value);
 	}
 }
 

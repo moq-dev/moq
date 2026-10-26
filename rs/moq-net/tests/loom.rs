@@ -12,12 +12,10 @@
 //! runnable), so "the test terminates" is itself the assertion. Anything else is
 //! asserted directly.
 //!
-//! Know the boundary before trusting a pass: only kio's primitives are swapped for
-//! loom's (see `kio/src/sync.rs`). moq-net's bare `std::sync::atomic` counters and
-//! `std::sync::Mutex`es, like the ones in `model/cache.rs`, still execute under
-//! loom (its threads are cooperative) but loom does not permute around them. So
-//! these models cover the kio handoff every handle is built on, not every
-//! critical section moq-net owns.
+//! The model mutexes and kio's primitives use Loom's locks, so a contending thread
+//! yields to its scheduler. Reference counts that need weak pointers and moq-net's
+//! bare atomic counters still use std: these models cover the locking and wakeup
+//! handoffs, not every possible reordering of the cache's counters.
 //!
 //! Unlike kio's own models, these are bounded (see [`model`]): each one composes
 //! dozens of kio operations, so an exhaustive search grows exponentially with every
@@ -45,6 +43,12 @@ const PREEMPTION_BOUND: usize = 3;
 /// number of operations on a path rather than exponential.
 fn model<F: Fn() + Sync + Send + 'static>(f: F) {
 	let mut builder = loom::model::Builder::new();
+	// The origin models include setup and teardown in each execution. Their finite
+	// paths exceed Loom's default 1,000 branches; this raises the execution budget,
+	// not the number of schedules or preemptions explored.
+	if std::env::var_os("LOOM_MAX_BRANCHES").is_none() {
+		builder.max_branches = 10_000;
+	}
 	builder.preemption_bound.get_or_insert(PREEMPTION_BOUND);
 	builder.check(f);
 }
@@ -94,7 +98,7 @@ fn back_to_back_groups_arrive_in_order() {
 		let consumer = broadcast.consume();
 		let track = broadcast.create_track("video", None).expect("create track");
 		let from_start = moq_net::track::Subscription::default()
-			.with_groups(0..)
+			.with_range(0..)
 			.with_max_delay(std::time::Duration::MAX);
 		let subscribing = consumer.track("video").expect("track").subscribe(from_start);
 
@@ -199,50 +203,6 @@ fn subscriber_wakes_parked_demand() {
 
 		drop(subscriber.join().unwrap());
 		drop(track);
-	});
-}
-
-/// A publisher parked on `broadcast::Demand::used` while one reader hands over to the
-/// next: the last reader leaves and a new one arrives straight from the track producer,
-/// which never touches the broadcast's own state. Whatever the publisher's poll saw, it
-/// must be woken for the newcomer.
-#[test]
-fn broadcast_demand_sees_a_reader_return() {
-	model(|| {
-		let broadcast = broadcast::Info::new().produce();
-		let consumer = broadcast.consume();
-		let video = broadcast.create_track("video", None).expect("create track");
-		let demand = broadcast.demand();
-		let first = consumer.track("video").expect("track").subscribe(None);
-
-		let reader = thread::spawn(move || {
-			drop(first);
-			let next = video.subscribe(None);
-			// Returned, so neither the reader nor the track goes before the join.
-			(video, next)
-		});
-
-		block_on(demand.used()).expect("the returning reader was missed");
-		drop(reader.join().unwrap());
-	});
-}
-
-/// A publisher parked on `broadcast::Demand::unused` while a reader comes and goes
-/// straight through the track producer: its leaving must wake the publisher.
-#[test]
-fn broadcast_demand_sees_a_reader_leave() {
-	model(|| {
-		let broadcast = broadcast::Info::new().produce();
-		let video = broadcast.create_track("video", None).expect("create track");
-		let demand = broadcast.demand();
-
-		let reader = thread::spawn(move || {
-			drop(video.subscribe(None));
-			video
-		});
-
-		block_on(demand.unused()).expect("the reader leaving was missed");
-		drop(reader.join().unwrap());
 	});
 }
 
@@ -462,11 +422,11 @@ fn a_fetch_never_joins_a_withdrawn_attempt() {
 		let consumer = track.consume();
 
 		let first = consumer.fetch_group(5, None);
-		let request = block_on(dynamic.requested_group()).expect("requested");
+		let request = block_on(dynamic.requested_fill()).expect("requested");
 
 		let leaver = thread::spawn(move || {
 			drop(first);
-			request.demand().is_used().then_some(request)
+			request.is_used().then_some(request)
 		});
 		let mut retry = consumer.fetch_group(5, None);
 		let request = match leaver.join().unwrap() {
@@ -476,10 +436,10 @@ fn a_fetch_never_joins_a_withdrawn_attempt() {
 				if let std::task::Poll::Ready(Err(err)) = polled {
 					panic!("the retry joined a withdrawn attempt: {err}");
 				}
-				block_on(dynamic.requested_group()).expect("the retry queued a fresh request")
+				block_on(dynamic.requested_fill()).expect("the retry queued a fresh request")
 			}
 		};
-		request.accept(None).expect("accept").finish().expect("finish");
+		request.accept(5, None).expect("accept").finish().expect("finish");
 		block_on(retry).expect("the retry resolves");
 	});
 }
@@ -594,11 +554,65 @@ fn an_aborted_parked_group_releases_a_finished_track() {
 		let track = broadcast.create_track("parked", timed()).unwrap();
 		let mut group = track.append_group().unwrap();
 		group.finish().unwrap();
-		let mut subscriber = track.subscribe(moq_net::track::Subscription::default().with_groups(0..));
-		subscriber.set_groups(..0);
+		let mut subscriber = track.subscribe(moq_net::track::Subscription::default().with_range(0..));
+		subscriber = subscriber.with_range(..0);
 		track.finish().unwrap();
 		let aborting = thread::spawn(move || group.abort(Error::Old).unwrap());
 		assert!(block_on(subscriber.recv_group()).unwrap().is_none());
 		aborting.join().unwrap();
 	});
+}
+
+/// An arrival takes the track write lock; revealing an already cached group only takes
+/// its read lock. Either path must observe a registered expiry read or leave the
+/// successor visible when that read judges it. The landing hint uses Loom atomics.
+fn landing_wakes_a_parked_expiry(reveal: bool) {
+	model(move || {
+		let broadcast = broadcast::Info::new().produce();
+		let track = broadcast.create_track("video", timed()).unwrap();
+		let mut head = track.append_group().unwrap();
+		head.write_frame(Timestamp::ZERO, Bytes::from_static(b"head")).unwrap();
+		let mut subscriber = track.subscribe(
+			moq_net::track::Subscription::default()
+				.with_range(0..)
+				.with_max_delay(std::time::Duration::from_millis(500)),
+		);
+		let mut held = block_on(subscriber.recv_group()).unwrap().unwrap();
+		assert!(block_on(held.read_frame()).unwrap().is_some());
+
+		let landing = if reveal {
+			let landing = track.append_group().unwrap();
+			let mut edge = track.append_group().unwrap();
+			edge.write_frame(Timestamp::from_millis(2000).unwrap(), Bytes::from_static(b"edge"))
+				.unwrap();
+			edge.finish().unwrap();
+			Some(landing)
+		} else {
+			let mut successor = track.append_group().unwrap();
+			successor
+				.write_frame(Timestamp::from_millis(1000).unwrap(), Bytes::from_static(b"successor"))
+				.unwrap();
+			successor.finish().unwrap();
+			None
+		};
+		let publisher = thread::spawn(move || {
+			let mut landing = landing.unwrap_or_else(|| track.append_group().unwrap());
+			let at = Timestamp::from_millis(if reveal { 1000 } else { 2000 }).unwrap();
+			landing.write_frame(at, Bytes::from_static(b"landing")).unwrap();
+			landing.finish().unwrap();
+			(track, landing)
+		});
+		assert!(matches!(block_on(held.read_frame()), Err(Error::Old)));
+		drop(publisher.join().unwrap());
+	});
+}
+
+#[test]
+fn a_group_arrival_landing_wakes_parked_expiry() {
+	landing_wakes_a_parked_expiry(false);
+}
+
+#[test]
+fn a_group_reveal_landing_wakes_parked_expiry() {
+	landing_wakes_a_parked_expiry(true);
 }

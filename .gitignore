@@ -14,7 +14,9 @@
 /.claude/tmp/
 /.claude/worktrees/
 
-# Per-worktree scratch output, such as benchmark logs and agent notes.
+# Per-checkout scratch output, such as benchmark logs and agent notes.
+/.tmp/
+# The old name, so a worktree's leftover scratch is never committed by accident.
 /.scratch/
 
 # IDE
@@ -43,6 +45,7 @@ node_modules
 
 # Except these test fixtures, which are committed.
 !rs/moq-mux/src/container/fmp4/test_data/*.mp4
+!rs/moq-audio/src/decode/test_data/*.mp4
 
 # Cloudflare Wrangler
 .wrangler/

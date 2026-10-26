@@ -152,6 +152,10 @@ pub enum Error {
 	#[error("invalid stats label: {0}")]
 	InvalidLabel(moq_pattern::InvalidPattern),
 
+	/// A stats tier is not `/`-joined segments of ASCII letters, digits, `.`, `_`, and `-`.
+	#[error("invalid stats tier {0:?}: use segments of ASCII letters, digits, '.', '_', and '-' joined by '/'")]
+	InvalidTier(String),
+
 	/// The auth server refused the session.
 	#[error(transparent)]
 	Refused(#[from] crate::Refusal),

@@ -8,7 +8,7 @@
 //! datagram, and a QUIC close whose CONNECTION_CLOSE is the last thing a
 //! one-shot client ever sends.
 //!
-//! Unsupported local kernels skip loudly; MOQ_STRICT makes CI refuse them.
+//! Unsupported local kernels skip loudly; CI_STRICT makes CI refuse them.
 
 #![cfg(all(target_os = "linux", feature = "quic"))]
 
@@ -27,7 +27,7 @@ const CLOSE_REASON: &str = "done";
 fn worker() -> Option<Worker> {
 	match Worker::new(Config::default()) {
 		Ok(worker) => Some(worker),
-		Err(Error::Unsupported(reason)) if std::env::var_os("MOQ_STRICT").is_none() => {
+		Err(Error::Unsupported(reason)) if std::env::var_os("CI_STRICT").is_none() => {
 			eprintln!("skipping io_uring teardown test: {reason}");
 			None
 		}
@@ -58,12 +58,7 @@ fn a_send_staged_on_the_way_out_still_goes() {
 		.block_on(async {
 			let mut tx = sock.acquire().await.expect("acquire");
 			tx.extend_from_slice(b"bye");
-			tx.send(udp::Transmit {
-				to: peer_addr,
-				segment: 3,
-				ecn: None,
-			})
-			.expect("send");
+			tx.send(udp::Transmit::new(peer_addr, 3)).expect("send");
 		})
 		.expect("worker");
 	drop(sock);

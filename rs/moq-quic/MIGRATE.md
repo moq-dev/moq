@@ -4,6 +4,25 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### QUIC APIs follow their consumers
+
+`RecvStream::read()` and `Chunks::next(max)` always return ordered bytes.
+Drop the ordering flag and `Chunk::offset`; track bytes consumed if an application needs its own offset.
+`ReadableError::IllegalOrderedRead` is gone.
+Use `Connection::set_limits` with `Limits` instead of individual stream-count and window setters.
+Use inherent `VarInt::encode` instead of the removed public `coding::Codec` trait.
+
+Packet parsers and headers, `HashedConnectionIdGenerator`, `BloomTokenLog`, `TokenMemoryCache`, token policy traits, `ClientConfig::token_store`, and `ValidationTokenConfig::log` are internal.
+Use `Endpoint` to parse incoming datagrams, `RandomConnectionIdGenerator` or a consumer's `ConnectionIdGenerator`, and the default token policy.
+`TimeSource`, `StdSystemTime`, and `ServerConfig::time_source` are gone; address validation uses `moq_clock::wall()`, including an installed simulated clock.
+Unused `Connection::local_ip`, `min_rtt`, `has_pending_retransmits`, `ping`, `force_key_update`, `path_changed`, and `max_concurrent_streams` accessors are no longer public.
+`Endpoint::set_server_config`, `incoming_buffer_bytes`, and `Incoming::orig_dst_cid` are also internal or removed; configure the endpoint at construction.
+Use `Connection::stats` for RTT metrics and receive metadata for local addresses.
+
+### `mux` is an internal integration surface
+
+The `mux` module is hidden from public API documentation; use the `qmux` crate for reliable-transport sessions. It remains public only so qmux can share the stream state machine.
+
 Each entry is a change from `quinn-proto`.
 
 ### `StreamEvent::Acked` (#5817)

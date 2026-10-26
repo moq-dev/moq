@@ -3,11 +3,14 @@
 //! Implement these traits for a transport, or wrap a backend at the application
 //! boundary. `moq-tokio`, `moq-wasm`, and `moq-uring` provide their own adapters, and
 //! [`memory`] links two peers in one process.
-//! The async helpers only drive the required poll methods. Thread-local transports
-//! stay supported; [`poll::Boxable`] adds native thread bounds for boxed drivers.
+//! The async helpers only drive the required poll methods. Sessions take a
+//! [`poll::Boxable`] transport, which adds native thread bounds; wrap a thread-local
+//! transport in a type that checks the thread on use (`moq-uring` has one).
 
 use std::time::Duration;
 
+#[cfg(feature = "async")]
+pub(crate) mod boxed;
 pub mod memory;
 
 /// A trait that is Send on native targets and empty on WASM.
@@ -38,13 +41,13 @@ impl<T> MaybeSend for T {}
 #[cfg(target_family = "wasm")]
 impl<T> MaybeSync for T {}
 
-/// Where the transport carries the request target.
+/// Where a session's request target travels.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Binding {
-	/// The request target is carried by the transport URI.
+pub enum Address {
+	/// The transport's own request URI carries it (WebTransport, qmux over WebSocket).
 	Uri,
-	/// The request target is carried by the MoQ SETUP.
-	InBand,
+	/// The MoQ SETUP carries it, because the transport has no request URI.
+	Setup,
 }
 
 /// One connection's cumulative wire counters, which its transport updates as it sends and receives.
@@ -177,13 +180,14 @@ impl Stats for StatsUnavailable {}
 ///
 /// A session keeps each unit it is still assembling leased, and a unit larger than the
 /// window can never complete, so the window has to fit the largest one with its framing:
-/// a legacy announcement set, past any frame payload.
+/// a legacy announcement set, past any frame segment. A frame returns its credit a
+/// segment at a time, so its size never matters here.
 pub const MIN_RECEIVE_WINDOW: u64 = {
 	// A type and a size prefix, each a varint of at most 8 bytes.
 	const PREFIXES: u64 = 16;
 	let message = <crate::lite::AnnounceInit<'static> as crate::lite::Message>::MAX_SIZE as u64 + PREFIXES;
-	let frame = crate::group::MAX_CACHE_BYTES;
-	if message > frame { message } else { frame }
+	let segment = crate::frame::SEGMENT as u64;
+	if message > segment { message } else { segment }
 };
 
 /// The typed transport condition when no application code was received.
@@ -239,12 +243,10 @@ pub mod poll {
 	/// operations release retained resources; shared resources must not be held
 	/// across a wait. Implementations register the supplied waker before Pending.
 	pub trait Session: Clone + 'static {
-		/// The outgoing stream type. Only the poll half is required, so a `!Send`
-		/// session can hang `!Send` streams off it.
+		/// The outgoing stream type.
 		type SendStream: SendStream;
 
-		/// The incoming stream type. Only the poll half is required, so a `!Send`
-		/// session can hang `!Send` streams off it.
+		/// The incoming stream type.
 		type RecvStream: RecvStream;
 
 		/// The error type for every operation on this session.
@@ -271,6 +273,18 @@ pub mod poll {
 			cx: &mut Context<'_>,
 			options: SendOptions<'_, <Self::SendStream as SendStream>::Group>,
 		) -> Poll<Result<BiStreams<Self>, Self::Error>>;
+
+		/// Open a request stream without waiting for stream credit.
+		///
+		/// `None` refuses the request before opening a stream. `Pending` means the stream
+		/// already has credit but its transport header is waiting for send capacity.
+		/// Native QUIC and qmux implement this admission check. Iroh retains its waiting
+		/// open behavior, and browser-backed sessions retain their browser's behavior.
+		fn poll_open_request(
+			&mut self,
+			cx: &mut Context<'_>,
+			options: SendOptions<'_, <Self::SendStream as SendStream>::Group>,
+		) -> Poll<Result<Option<BiStreams<Self>>, Self::Error>>;
 
 		/// Open a send group at `priority`, or `None` when the transport orders streams by
 		/// their own priority alone.
@@ -320,7 +334,7 @@ pub mod poll {
 		fn protocol(&self) -> Option<&str>;
 
 		/// Return where this transport carries the request target.
-		fn binding(&self) -> super::Binding;
+		fn address(&self) -> super::Address;
 
 		/// Close the connection immediately with a code and reason.
 		///
@@ -450,14 +464,16 @@ pub mod poll {
 		/// A pending [`SendStream::closed`].
 		SendClosed, SendStream, poll_closed, Result<(), S::Error>);
 
-	/// A transport whose session, streams, and errors can be captured by the
-	/// boxed drivers (`Send` boxes on native): what the moq-transport path
-	/// requires until it too becomes named machines. Implemented automatically.
+	/// A transport that the async client and server can box:
+	/// the session, its streams, send groups, and errors are thread-safe on native.
+	/// Implemented automatically.
+	///
+	/// Boxing is what compiles the session code once per binary rather than once per
+	/// transport.
 	pub trait Boxable:
 		Session<
-			SendStream: MaybeSend + SendStream<Group: MaybeSend + MaybeSync>,
-			RecvStream: MaybeSend,
-			Error: MaybeSend,
+			SendStream: MaybeSend + MaybeSync + SendStream<Group: MaybeSend + MaybeSync>,
+			RecvStream: MaybeSend + MaybeSync,
 		> + MaybeSend
 		+ MaybeSync
 	{
@@ -465,9 +481,8 @@ pub mod poll {
 
 	impl<S> Boxable for S where
 		S: Session<
-				SendStream: MaybeSend + SendStream<Group: MaybeSend + MaybeSync>,
-				RecvStream: MaybeSend,
-				Error: MaybeSend,
+				SendStream: MaybeSend + MaybeSync + SendStream<Group: MaybeSend + MaybeSync>,
+				RecvStream: MaybeSend + MaybeSync,
 			> + MaybeSend
 			+ MaybeSync
 	{

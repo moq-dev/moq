@@ -244,7 +244,7 @@ async fn run(config: &Config) -> Result<()> {
 
 	// Create the broadcast on the publish origin and announce its path.
 	let broadcast_path = format!("{game_prefix}/{name}");
-	let mut broadcast = publish_origin
+	let broadcast = publish_origin
 		.create_broadcast(&broadcast_path)
 		.context("failed to create broadcast")?;
 	let epoch = moq_net::Epoch::mint();
@@ -270,15 +270,16 @@ async fn run(config: &Config) -> Result<()> {
 		.connect(url);
 
 	// Set up catalog and encoders.
-	let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default())?;
-	let video_encoder = video::VideoEncoder::spawn(broadcast.clone(), catalog.clone()).await;
+	let catalog =
+		moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), moq_mux::catalog::Config::default())?;
+	let video_encoder = video::VideoEncoder::spawn(broadcast.broadcast().clone(), catalog.clone()).await;
 
-	let audio_encoder = audio::AudioEncoder::new(broadcast.clone(), catalog.clone(), 44100)?;
+	let audio_encoder = audio::AudioEncoder::new(broadcast.broadcast().clone(), catalog.clone(), 44100)?;
 
 	let video_track = video_encoder.demand.clone();
 	let audio_track = audio_encoder.demand();
 
-	let status_publisher = status::StatusPublisher::new(&mut broadcast)?;
+	let status_publisher = status::StatusPublisher::new(&mut broadcast.broadcast().clone())?;
 
 	let session = Arc::new(Session {
 		video_encoder,
@@ -426,8 +427,10 @@ fn run_emulator(
 		// Wait for next frame.
 		let now = Instant::now();
 		if now < next_frame {
-			// The emulator thread runs outside any runtime, so it blocks on the host clock.
-			#[allow(clippy::disallowed_methods)]
+			#[expect(
+				clippy::disallowed_methods,
+				reason = "the emulator thread runs outside any runtime, so it blocks on the host clock"
+			)]
 			std::thread::sleep(next_frame - now);
 		}
 		next_frame += frame_duration;
@@ -480,10 +483,7 @@ async fn main() -> Result<()> {
 	let config = Config::parse();
 	config.log.init()?;
 	config.check_deprecated()?;
-	// A 160x144 frame is below every hardware encoder's minimum, so OpenH264 is the only one.
-	if !cfg!(feature = "openh264") {
-		anyhow::bail!("built without the `openh264` feature: cargo install moq-boy --features openh264");
-	}
+	moq_tokio::cli::check_env(&[Config::spec()], &[])?;
 
 	#[cfg(feature = "jemalloc")]
 	let jemalloc = moq_tokio::jemalloc::run();

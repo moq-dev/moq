@@ -5,7 +5,7 @@
 //! over a [`super::mock::MockSession`] pair and spawns both protocol drivers, giving tests
 //! two live sessions ready for pub/sub without any real QUIC or network I/O.
 
-#![allow(dead_code)]
+#![allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
 
 use std::sync::{
 	Arc,
@@ -103,6 +103,10 @@ pub struct MockConnectOptions {
 	pub client_discovers_all: bool,
 	/// Pause the receiving driver while its transport keeps delivering data.
 	pub server_gate: Option<kio::Consumer<bool>>,
+	/// What the client advertises as its implementation, when not the default.
+	pub client_implementation: Option<String>,
+	/// What the server advertises as its implementation, when not the default.
+	pub server_implementation: Option<String>,
 }
 
 impl MockConnectOptions {
@@ -125,6 +129,8 @@ impl MockConnectOptions {
 			server_polls: None,
 			client_discovers_all: true,
 			server_gate: None,
+			client_implementation: None,
+			server_implementation: None,
 		}
 	}
 }
@@ -167,6 +173,9 @@ pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 	if let Some(cost) = opts.cost {
 		client = client.with_cost(cost);
 	}
+	if let Some(implementation) = opts.client_implementation {
+		client = client.with_implementation(implementation);
+	}
 	if let Some(publish) = &opts.client_publish {
 		client = client.with_publisher(publish);
 	}
@@ -191,6 +200,9 @@ pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 	}
 	if let Some(limits) = opts.server_limits {
 		server = server.with_limits(limits);
+	}
+	if let Some(implementation) = opts.server_implementation {
+		server = server.with_implementation(implementation);
 	}
 
 	// Run both handshakes concurrently and spawn each side's driver
@@ -240,8 +252,8 @@ pub async fn peer_with_latency(
 	b: &origin::Producer,
 	latency: std::time::Duration,
 ) -> MockPair {
-	let a = a.clone().peer();
-	let b = b.clone().peer();
+	let a = a.clone().with_link(moq_net::origin::Link::Peer);
+	let b = b.clone().with_link(moq_net::origin::Link::Peer);
 	let mut options = MockConnectOptions::new(version);
 	options.client_publish = Some(a.consume().with_hidden(true));
 	options.client_subscribe = Some(a);

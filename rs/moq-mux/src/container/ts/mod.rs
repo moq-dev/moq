@@ -25,17 +25,19 @@
 
 mod adts;
 mod damage;
+mod demux;
 mod export;
 mod follower;
 mod health;
 mod import;
-mod lane;
 mod mux_rate;
+mod passthrough;
 mod programs;
 mod psi;
 mod release;
 mod schedule;
 mod si;
+mod unclaimed;
 
 // The `mpegts` catalog section (per-track PID + descriptors plus verbatim carriage
 // of undecoded elementary streams) and the `Catalog` capability, re-exported flat so
@@ -50,7 +52,6 @@ pub use passthrough::Passthrough;
 pub use programs::Programs;
 pub use release::Release;
 
-pub mod passthrough;
 pub mod stats;
 
 #[cfg(test)]
@@ -71,3 +72,7 @@ mod pes_packet_test;
 mod recovery_test;
 #[cfg(test)]
 mod release_test;
+#[cfg(test)]
+mod revision_test;
+#[cfg(test)]
+mod routes_test;

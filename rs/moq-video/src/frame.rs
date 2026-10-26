@@ -154,10 +154,13 @@ impl DmaBufPlane {
 #[cfg(all(target_os = "linux", feature = "dmabuf"))]
 pub struct DmaBufExport {
 	fd: OwnedFd,
-	// The producer's lease, held so its buffer outlives the descriptor. Only the
-	// renderer ever reads it back out, through `into_parts`, so without that feature
-	// the field is pure keepalive rather than dead.
-	#[cfg_attr(not(feature = "render"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "render"),
+		allow(
+			dead_code,
+			reason = "the producer's lease, held so its buffer outlives the descriptor. Only the renderer ever reads it back out, through `into_parts`, so without that feature the field is pure keepalive rather than dead"
+		)
+	)]
 	inner: Arc<dyn DmaBufFrame>,
 }
 
@@ -281,7 +284,11 @@ impl DmaBuf {
 	///
 	/// Clones share the descriptor and guard; exports duplicate the FD as needed.
 	/// External buffers refuse CPU download, including linear allocations.
-	pub fn new<T: Send + Sync + 'static>(fd: OwnedFd, layout: DmaBufLayout, owner: T) -> Result<Self, Error> {
+	#[cfg_attr(
+		not(test),
+		allow(dead_code, reason = "only tests build one until an external producer needs it")
+	)]
+	pub(crate) fn new<T: Send + Sync + 'static>(fd: OwnedFd, layout: DmaBufLayout, owner: T) -> Result<Self, Error> {
 		Self::adopt(layout, Arc::new(ExternalDmaBuf { fd, _owner: owner }))
 	}
 
@@ -363,24 +370,24 @@ impl DmaBuf {
 /// The format, tiling, and plane layout of an external DMA-BUF.
 #[cfg(all(target_os = "linux", feature = "dmabuf"))]
 #[derive(Clone, Debug)]
-#[non_exhaustive]
-pub struct DmaBufLayout {
+pub(crate) struct DmaBufLayout {
 	/// DRM fourcc describing the pixel format.
-	pub format: DrmFormat,
+	pub(crate) format: DrmFormat,
 	/// DRM modifier describing memory tiling; defaults to linear.
-	pub modifier: u64,
+	pub(crate) modifier: u64,
 	/// Visible image dimensions.
-	pub size: Size,
+	pub(crate) size: Size,
 	/// Plane offsets and row strides, in format order.
-	pub planes: Vec<DmaBufPlane>,
+	pub(crate) planes: Vec<DmaBufPlane>,
 	/// Color space of YUV samples, when the producer knows it.
-	pub color: Option<Color>,
+	pub(crate) color: Option<Color>,
 }
 
 #[cfg(all(target_os = "linux", feature = "dmabuf"))]
 impl DmaBufLayout {
 	/// Describe linear planes and set optional tiling and color fields afterward.
-	pub fn new(format: DrmFormat, size: Size, planes: Vec<DmaBufPlane>) -> Self {
+	#[cfg(test)]
+	pub(crate) fn new(format: DrmFormat, size: Size, planes: Vec<DmaBufPlane>) -> Self {
 		Self {
 			format,
 			modifier: 0,
@@ -616,7 +623,10 @@ impl Surface {
 					Surface::I420(buffer.inner.download_i420()?.resize(size)?)
 				}
 			},
-			#[allow(unreachable_patterns)]
+			#[allow(
+				unreachable_patterns,
+				reason = "the other surfaces exist only on some platforms and features"
+			)]
 			other => Surface::I420(other.to_i420()?.into_owned().resize(size)?),
 		};
 		resized.label(implied);
@@ -633,7 +643,10 @@ impl Surface {
 	pub fn into_i420(self) -> Result<I420, Error> {
 		match self {
 			Surface::I420(i420) => Ok(i420),
-			#[allow(unreachable_patterns)]
+			#[allow(
+				unreachable_patterns,
+				reason = "the other surfaces exist only on some platforms and features"
+			)]
 			other => Ok(other.to_i420()?.into_owned()),
 		}
 	}
@@ -871,10 +884,9 @@ impl I420 {
 
 	/// Convert BGRA to I420 in [`Color::infer`]'s color space for this size.
 	/// `stride` is the source row pitch in bytes (>= `width * 4`), so a padded
-	/// surface maps directly. Used by the screen-capture paths: Windows Desktop
-	/// Duplication (BGRA staging texture) and Linux PipeWire (BGRx/BGRA
-	/// shared-memory buffers).
-	#[cfg(any(target_os = "windows", all(target_os = "linux", feature = "pipewire")))]
+	/// surface maps directly. Used by PipeWire capture's BGRx/BGRA shared-memory
+	/// buffers.
+	#[cfg(all(target_os = "linux", feature = "pipewire"))]
 	pub(crate) fn from_bgra(bgra: &[u8], stride: u32, size: Size) -> Result<Self, Error> {
 		use yuv::bgra_to_yuv420;
 
@@ -893,7 +905,10 @@ impl I420 {
 	/// strides, which a decoder may pad wider than the visible width. Used by the
 	/// software H.264 decode backend, whose `DecodedYUV` exposes strided planes.
 	/// Width and height must be even (4:2:0 chroma).
-	#[cfg_attr(not(feature = "openh264"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "openh264"),
+		allow(dead_code, reason = "only the `openh264` feature uses it")
+	)]
 	pub(crate) fn from_planes(
 		y: &[u8],
 		u: &[u8],
@@ -2052,7 +2067,7 @@ pub mod d3d11 {
 	use std::sync::{LazyLock, Mutex};
 
 	use windows::Win32::Foundation::{HMODULE, RECT};
-	use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
+	use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_UNKNOWN};
 	use windows::Win32::Graphics::Direct3D10::ID3D10Multithread;
 	use windows::Win32::Graphics::Direct3D11::{
 		D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_BIND_VIDEO_ENCODER, D3D11_BOX,
@@ -2071,6 +2086,7 @@ pub mod d3d11 {
 	};
 	use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT, DXGI_RATIONAL, DXGI_SAMPLE_DESC};
 	use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12};
+	use windows::Win32::Graphics::Dxgi::IDXGIAdapter;
 	use windows::Win32::Media::MediaFoundation::{IMFDXGIBuffer, IMFSample};
 	use windows::core::Interface;
 
@@ -2082,16 +2098,22 @@ pub mod d3d11 {
 		Error::Codec(anyhow::anyhow!("{ctx}: {e}"))
 	}
 
-	/// Create a hardware Direct3D11 device, multithread-protected (Media
-	/// Foundation's internal threads or WGC and our capture thread
-	/// both touch it). The shared low-level constructor behind the Media
-	/// Foundation device manager and Windows.Graphics.Capture.
-	pub(crate) fn create_device() -> Result<ID3D11Device, Error> {
+	/// Create a hardware Direct3D11 device on `adapter`, or the default one,
+	/// multithread-protected (Media Foundation's internal threads or WGC and our
+	/// capture thread both touch it). The shared low-level constructor behind the
+	/// Media Foundation device manager, Windows.Graphics.Capture, and the render
+	/// export.
+	pub(crate) fn create_device(adapter: Option<&IDXGIAdapter>) -> Result<ID3D11Device, Error> {
+		// A named adapter picks the driver itself.
+		let driver = match adapter {
+			Some(_) => D3D_DRIVER_TYPE_UNKNOWN,
+			None => D3D_DRIVER_TYPE_HARDWARE,
+		};
 		let mut device: Option<ID3D11Device> = None;
 		unsafe {
 			D3D11CreateDevice(
-				None,
-				D3D_DRIVER_TYPE_HARDWARE,
+				adapter,
+				driver,
 				HMODULE::default(),
 				D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
 				None,
@@ -2186,8 +2208,9 @@ pub mod d3d11 {
 			})
 		}
 
-		/// Convert a recycled WGC BGRA surface to an owned, even-sized NV12 texture.
-		#[cfg(feature = "capture")]
+		/// Convert a BGRA surface someone else recycles (a WGC frame, an exported
+		/// render target) to an owned, even-sized NV12 texture.
+		#[cfg(any(feature = "capture", feature = "render"))]
 		pub(crate) fn capture(device: &ID3D11Device, source: &ID3D11Texture2D, size: Size) -> Result<Self, Error> {
 			let plan = Plan::capture(size)?;
 			let mut desc = D3D11_TEXTURE2D_DESC::default();
@@ -2758,7 +2781,7 @@ pub mod d3d11 {
 		#[test]
 		#[ignore = "requires a Windows GPU with BGRA-to-NV12 video processing"]
 		fn wgc_conversion_crops_odd_edges_and_preserves_color() {
-			let device = create_device().expect("D3D11 hardware device");
+			let device = create_device(None).expect("D3D11 hardware device");
 			for size in [Size::new(641, 481), Size::new(1281, 721)] {
 				let mut pixels = Vec::with_capacity(size.pixels() as usize * 4);
 				for y in 0..size.height {
@@ -2814,8 +2837,13 @@ pub mod d3d11 {
 
 		#[test]
 		#[ignore = "Windows GPU workload; reports submission and batch completion, not capture latency"]
+		#[expect(
+			clippy::disallowed_methods,
+			clippy::disallowed_types,
+			reason = "the workload measures itself on the host clock"
+		)]
 		fn wgc_conversion_workload() {
-			let device = create_device().expect("D3D11 hardware device");
+			let device = create_device(None).expect("D3D11 hardware device");
 			for size in [Size::new(640, 480), Size::new(1280, 720), Size::new(1920, 1080)] {
 				let pixels = [0, 0, 255, 255].repeat(size.pixels() as usize);
 				let source = upload_bgra(&device, size, &pixels);
@@ -3256,7 +3284,7 @@ mod tests {
 	#[test]
 	#[ignore = "D3D11 GPU reproducer; VideoProcessorBlt can hang on affected drivers"]
 	fn d3d11_resize_defaults_to_the_gpu() {
-		let Ok(device) = super::d3d11::create_device() else {
+		let Ok(device) = super::d3d11::create_device(None) else {
 			eprintln!("skipping: no Direct3D11 hardware device");
 			return;
 		};
@@ -3283,7 +3311,7 @@ mod tests {
 	#[cfg(target_os = "windows")]
 	#[test]
 	fn d3d11_resize_can_force_the_cpu() {
-		let Ok(device) = super::d3d11::create_device() else {
+		let Ok(device) = super::d3d11::create_device(None) else {
 			eprintln!("skipping: no Direct3D11 hardware device");
 			return;
 		};
@@ -3309,7 +3337,7 @@ mod tests {
 	#[test]
 	#[ignore = "explicit D3D11 GPU probe; VideoProcessorBlt can hang on affected drivers"]
 	fn d3d11_resize_matches_cpu() {
-		let Ok(device) = super::d3d11::create_device() else {
+		let Ok(device) = super::d3d11::create_device(None) else {
 			eprintln!("skipping: no Direct3D11 hardware device");
 			return;
 		};

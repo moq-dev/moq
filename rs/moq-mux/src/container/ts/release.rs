@@ -159,7 +159,7 @@ impl Release {
 				let arrival = Arrival {
 					arrived: arrived.max(self.subscribed),
 					read: moq_clock::now(),
-					decode: frame.timestamp,
+					decode: frame.timestamp.into(),
 					restart: track.markers(),
 					skip: track.skips(),
 					cut: track.cuts(),

@@ -168,7 +168,7 @@ async fn handle_viewer_commands(
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use std::time::Duration;
 
@@ -184,7 +184,7 @@ mod tests {
 	}
 
 	/// Publish a viewer with a live command track.
-	fn viewer(origin: &moq_net::origin::Producer) -> (moq_net::broadcast::Producer, moq_net::track::Producer) {
+	fn viewer(origin: &moq_net::origin::Producer) -> (moq_net::origin::Publication, moq_net::track::Producer) {
 		let broadcast = origin.create_broadcast("alice").unwrap();
 		let track = broadcast
 			.create_track(

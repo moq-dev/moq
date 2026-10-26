@@ -1,4 +1,4 @@
-//! The `AUTHORIZATION TOKEN` Setup Option (draft-ietf-moq-transport-21 section 9.1.4) and
+//! The `AUTHORIZATION TOKEN` Setup Option (draft-ietf-moq-transport-22 section 9.1.4) and
 //! Message Parameter.
 //!
 //! The value is the Token structure of section 8.9: an Alias Type, then fields that
@@ -7,6 +7,8 @@
 
 #[cfg(feature = "async")]
 use crate::coding::Stream;
+#[cfg(feature = "async")]
+use crate::driver::Transport;
 
 use crate::{
 	DecodeError, Error, SessionError,
@@ -37,7 +39,6 @@ pub fn from_setup(params: &Parameters, version: Version) -> Result<Option<Token>
 }
 
 /// Present `token` in our SETUP, by value.
-#[cfg_attr(not(test), expect(dead_code))]
 pub fn into_setup(params: &mut Parameters, token: &Token, version: Version) -> Result<(), EncodeError> {
 	params.set_bytes(ParameterBytes::AuthorizationToken, encode(token, version)?);
 	Ok(())
@@ -108,8 +109,8 @@ pub(super) fn reason(err: &DecodeError) -> &'static str {
 /// Section 8.9 rejects the message rather than the session. Every request starts with its
 /// Request ID, so it is read from the undecoded `body`.
 #[cfg(feature = "async")]
-pub(super) async fn reject<S: crate::transport::poll::Session>(
-	mut stream: Stream<S, Version>,
+pub(super) async fn reject(
+	mut stream: Stream<Transport, Version>,
 	kind: request::Kind,
 	body: super::Body,
 	err: DecodeError,
@@ -211,15 +212,12 @@ mod tests {
 		));
 	}
 
-	const VERSIONS: [Version; 9] = [
+	const VERSIONS: [Version; 6] = [
 		Version::Draft14,
 		Version::Draft15,
 		Version::Draft16,
 		Version::Draft17,
 		Version::Draft18,
-		Version::Draft19,
-		Version::Draft20,
-		Version::Draft21,
 		Version::Draft22,
 	];
 

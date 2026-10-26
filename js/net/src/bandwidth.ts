@@ -8,6 +8,7 @@
  * @module
  */
 import { Effect, type Getter, Signal } from "@moq/signals";
+import { hooks } from "./internal.ts";
 import type { Demand } from "./track.ts";
 
 /**
@@ -189,7 +190,7 @@ export class Allocator implements Handle {
 	 * reservation that had followed it down would have already handed that room
 	 * to somebody else.
 	 *
-	 * Priority comes from the track (higher served first). A tier is filled to
+	 * Priority comes from the track's `Info.priority` (higher served first). A tier is filled to
 	 * its reservations before the next one sees a bit; within a tier the split is
 	 * max-min fair.
 	 *
@@ -211,7 +212,7 @@ export class Allocator implements Handle {
 			entries.push({
 				id,
 				demand: track,
-				priority: track.priority,
+				priority: hooks.demandPriority(track),
 				max,
 				grant,
 			});

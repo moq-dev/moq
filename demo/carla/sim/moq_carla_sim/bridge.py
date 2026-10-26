@@ -373,8 +373,6 @@ class BridgeStream:
             self._origin_us = frame.timestamp_us
         timestamp = timedelta(microseconds=max(0, frame.timestamp_us - self._origin_us))
         track.write_frame(frame.payload, timestamp)
-        # Live encoder output: records the handoff for the catalog's jitter.
-        track.flush(timestamp)
         self.published[frame.rendition] += 1
 
     async def watch_demand(self, on_demand: Callable[[bool], None] | None = None) -> None:

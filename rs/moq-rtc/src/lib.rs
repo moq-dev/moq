@@ -25,12 +25,7 @@
 //! (resolving the broadcast name from a verified token), skip the routers and
 //! call [`whip::accept`] (ingest) / [`whep::accept`] (egress) from your own
 //! handler. Return the [`Response::answer`] in your HTTP response, then run
-//! [`Response::run`] to drive the media session for its lifetime. Clone
-//! [`Response::wire`] before running it to sample the peer's cumulative UDP
-//! payload bytes, including ICE, DTLS, RTP, RTCP, and retransmissions. Client
-//! dials return the same [`wire::Source`]; its counters remain readable after
-//! the session ends. [`wire::Source::stats`] can back an embedder's wire-source
-//! registry without retaining the session or its socket. The routers and
+//! [`Response::run`] to drive the media session for its lifetime. The routers and
 //! the `axum` re-export sit behind the default `server` feature, so such an
 //! embedder can drop them with `default-features = false`.
 //!
@@ -45,7 +40,6 @@
 
 pub mod client;
 pub mod server;
-pub mod wire;
 
 // Implementation detail modules: these carry the WebRTC/str0m plumbing (str0m
 // `Rtc`, `Mid`/`Pt`, tokio channels, raw packet buffers) and are deliberately
@@ -59,9 +53,8 @@ mod sdp;
 mod session;
 
 /// Re-export of the HTTP router stack, so consumers can merge the [`axum::Router`]
-/// returned by [`Server::publish_router`] / [`Server::subscribe_router`] (and by
-/// [`whip::router`] / [`whep::router`]) into their own app without adding their own
-/// axum dependency (and risking a version mismatch). A major axum bump is therefore
+/// returned by [`Server::publish_router`] / [`Server::subscribe_router`] into their
+/// own app without adding their own axum dependency (and risking a version mismatch). A major axum bump is therefore
 /// a breaking change for this crate. Only with the `server` feature.
 #[cfg(feature = "server")]
 pub use axum;
@@ -77,7 +70,7 @@ pub use error::*;
 pub use server::{Response, Server, whep, whip};
 
 #[cfg(all(test, feature = "server"))]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use std::time::Duration;
 
@@ -99,6 +92,219 @@ mod tests {
 
 	const TIMEOUT: Duration = Duration::from_secs(10);
 	const OPUS_PACKET: &[u8] = &[0xfc, 0xff, 0xfe];
+	const OLD_PACKET: &[u8] = &[0xfc, 0x01, 0x02];
+	const NEW_PACKET: &[u8] = &[0xfc, 0x99, 0x99];
+
+	/// Serve `app` on a loopback port.
+	async fn serve(app: Router) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+			.await
+			.expect("bind HTTP listener");
+		let address = listener.local_addr().expect("HTTP listener address");
+		let http = tokio::spawn(async move { axum::serve(listener, app).await.expect("serve HTTP") });
+		(address, http)
+	}
+
+	/// Subscribe to the first Opus rendition in `broadcast`'s catalog.
+	async fn opus_output(broadcast: &moq_net::broadcast::Consumer) -> Track {
+		let catalog_track = broadcast
+			.track(hang::Catalog::DEFAULT_NAME)
+			.expect("output catalog track")
+			.subscribe(hang::Catalog::default_subscription())
+			.await
+			.expect("subscribe to output catalog");
+		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(catalog_track);
+		let catalog = tokio::time::timeout(TIMEOUT, catalogs.next())
+			.await
+			.expect("output catalog timed out")
+			.expect("read output catalog")
+			.expect("output catalog ended");
+		let (track_name, config) = catalog.audio.renditions.iter().next().expect("output Opus rendition");
+		let track = broadcast
+			.track(track_name)
+			.expect("output Opus track")
+			.subscribe(None)
+			.await
+			.expect("subscribe to output Opus track");
+		Track::opus(track, config).expect("output Opus container")
+	}
+
+	async fn next_payload(track: &mut Track) -> Vec<u8> {
+		let frame = tokio::time::timeout(TIMEOUT, track.next())
+			.await
+			.expect("output Opus packet timed out")
+			.expect("read output Opus packet")
+			.expect("output Opus track ended");
+		frame.payload.to_vec()
+	}
+
+	fn push(bridge: &mut dyn Bridge, timestamp_us: u64, payload: &'static [u8]) {
+		bridge
+			.push(Frame {
+				timestamp_us,
+				payload: Bytes::from_static(payload),
+			})
+			.expect("publish source packet");
+	}
+
+	/// Publish an Opus instance of `source` under `epoch`, keeping its catalog so the test can
+	/// kill the instance.
+	fn publish_opus(
+		origin: &moq_net::origin::Producer,
+		epoch: moq_net::Epoch,
+	) -> (Box<dyn Bridge>, moq_mux::catalog::Producer) {
+		let broadcast = origin.create_broadcast("source").expect("create source broadcast");
+		broadcast
+			.announce(moq_net::origin::Route::default().with_epoch(epoch))
+			.expect("announce source broadcast");
+		let catalog =
+			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), moq_mux::catalog::Config::default())
+				.expect("create source catalog");
+		let bridge = crate::codec::opus::Bridge::new(broadcast.broadcast().clone(), catalog.clone(), 48_000, 2)
+			.expect("create Opus bridge");
+		(Box::new(bridge), catalog)
+	}
+
+	/// Publish a replacement instance of `source`, returning once the origin serves it.
+	async fn take_over(origin: &moq_net::origin::Producer) -> (Box<dyn Bridge>, moq_mux::catalog::Producer) {
+		let epoch = moq_net::Epoch::mint();
+		let mut instances = moq_mux::follow::Instances::new(&origin.consume(), "source", Some(&epoch)).unwrap();
+		let (mut new, catalog) = publish_opus(origin, epoch);
+		push(&mut *new, 20_000, NEW_PACKET);
+		let started = tokio::time::timeout(TIMEOUT, instances.next())
+			.await
+			.expect("the replacement never took over")
+			.unwrap();
+		assert!(matches!(started, moq_mux::follow::Event::Start(_)));
+		(new, catalog)
+	}
+
+	/// Kill an instance the way a dropped publisher session does.
+	fn kill(bridge: Box<dyn Bridge>, catalog: moq_mux::catalog::Producer) {
+		let err = moq_net::Error::Transport("connection lost".into());
+		bridge.abort(err.clone());
+		catalog.abort(err);
+	}
+
+	/// A WHEP viewer stays on the instance its session resolved: a publisher taking over the
+	/// path never reaches it, so the session never resets its timestamps or codec state, and it
+	/// fails once that instance's route dies.
+	#[tokio::test]
+	async fn a_whep_viewer_stays_on_its_instance_until_the_route_dies() {
+		let origin = moq_tokio::origin::spawn();
+		let (mut old, old_catalog) = publish_opus(&origin, moq_net::Epoch::mint());
+		push(&mut *old, 20_000, OPUS_PACKET);
+
+		let server = Server::new(server::Config::default());
+		let whep_origin = origin.consume();
+		let (sessions_tx, mut sessions) = tokio::sync::mpsc::channel(1);
+		let app = Router::new().route(
+			"/whep/source",
+			axum::routing::post(move |offer: String| {
+				let server = server.clone();
+				let origin = whep_origin.clone();
+				let sessions = sessions_tx.clone();
+				async move {
+					let response = server::whep::accept(&server, &origin, "source", &offer).await.unwrap();
+					let answer = response.answer.clone();
+					sessions.send(tokio::spawn(response.run())).await.unwrap();
+					answer
+				}
+			}),
+		);
+		let (address, http) = serve(app).await;
+
+		let output_origin = moq_tokio::origin::spawn();
+		let output = output_origin
+			.create_broadcast("output")
+			.expect("create output broadcast");
+		let output_consumer = output.consume();
+		let client = Client::new(client::Config::default());
+		let url = format!("http://{address}/whep/source").parse().expect("WHEP URL");
+		let fill = output.broadcast().clone();
+		let viewer = tokio::spawn(async move { client.subscribe(url, fill).await });
+		let session = tokio::time::timeout(TIMEOUT, sessions.recv())
+			.await
+			.expect("WHEP negotiation timed out")
+			.unwrap();
+		let mut played = opus_output(&output_consumer).await;
+		assert_eq!(next_payload(&mut played).await, OPUS_PACKET);
+
+		let _new = take_over(&origin).await;
+		push(&mut *old, 40_000, OLD_PACKET);
+		assert_eq!(
+			next_payload(&mut played).await,
+			OLD_PACKET,
+			"the viewer left its instance"
+		);
+
+		kill(old, old_catalog);
+		let ended = tokio::time::timeout(TIMEOUT, session)
+			.await
+			.expect("the session outlived its route")
+			.unwrap();
+		assert!(ended.is_err(), "the session ended cleanly");
+		viewer.abort();
+		http.abort();
+	}
+
+	/// A WHIP push stays on the instance it resolved the same way, and
+	/// [`Client::publish`] fails once that instance's route dies.
+	#[tokio::test]
+	async fn a_whip_push_stays_on_its_instance_until_the_route_dies() {
+		let origin = moq_tokio::origin::spawn();
+		let (mut old, old_catalog) = publish_opus(&origin, moq_net::Epoch::mint());
+		push(&mut *old, 20_000, OPUS_PACKET);
+
+		let server = Server::new(server::Config::default());
+		let ingest_origin = moq_tokio::origin::spawn();
+		let whip_origin = ingest_origin.clone();
+		let app = Router::new().route(
+			"/whip/ingested",
+			axum::routing::post(move |offer: String| {
+				let server = server.clone();
+				let origin = whip_origin.clone();
+				async move {
+					let response = server::whip::accept(&server, &origin, "ingested", &offer)
+						.await
+						.unwrap();
+					let answer = response.answer.clone();
+					tokio::spawn(response.run());
+					answer
+				}
+			}),
+		);
+		let (address, http) = serve(app).await;
+
+		let client = Client::new(client::Config::default());
+		let url = format!("http://{address}/whip/ingested").parse().expect("WHIP URL");
+		let source = origin.consume();
+		let pushed = tokio::spawn(async move { client.publish(url, source, "source").await });
+		let ingested = ingest_origin.consume();
+		tokio::time::timeout(TIMEOUT, ingested.routed("ingested"))
+			.await
+			.expect("WHIP negotiation timed out")
+			.expect("the ingest origin closed");
+		let ingested = ingested.request_broadcast("ingested", None).await.unwrap();
+		let mut played = opus_output(&ingested).await;
+		assert_eq!(next_payload(&mut played).await, OPUS_PACKET);
+
+		let _new = take_over(&origin).await;
+		push(&mut *old, 40_000, OLD_PACKET);
+		assert_eq!(
+			next_payload(&mut played).await,
+			OLD_PACKET,
+			"the push left its instance"
+		);
+
+		kill(old, old_catalog);
+		let pushed = tokio::time::timeout(TIMEOUT, pushed)
+			.await
+			.expect("the push outlived its route")
+			.unwrap();
+		assert!(pushed.is_err(), "the push ended cleanly");
+		http.abort();
+	}
 
 	#[tokio::test]
 	#[tracing_test::traced_test]
@@ -106,15 +312,17 @@ mod tests {
 		let source_origin = moq_tokio::origin::spawn();
 		let source_consumer = source_origin.consume();
 		let mut announcements = source_consumer.announced();
-		let mut source = source_origin
+		let source = source_origin
 			.create_broadcast("source")
 			.expect("create source broadcast");
 		source
 			.announce(moq_net::origin::Route::default())
 			.expect("announce source broadcast");
-		let catalog = moq_mux::catalog::Producer::new(&mut source, moq_mux::catalog::Config::default())
-			.expect("create source catalog");
-		let mut opus = crate::codec::opus::Bridge::new(source, catalog, 48_000, 2).expect("create Opus bridge");
+		let catalog =
+			moq_mux::catalog::Producer::new(&mut source.broadcast().clone(), moq_mux::catalog::Config::default())
+				.expect("create source catalog");
+		let mut opus = crate::codec::opus::Bridge::new(source.broadcast().clone(), catalog, 48_000, 2)
+			.expect("create Opus bridge");
 		Bridge::push(
 			&mut opus,
 			Frame {
@@ -152,9 +360,8 @@ mod tests {
 							.unwrap();
 						let answer = response.answer.clone();
 						let id = response.resource_id.clone();
-						let wire = response.wire.clone();
 						let task = tokio::spawn(response.run());
-						sources.send((id, wire, task)).await.unwrap();
+						sources.send((id, task)).await.unwrap();
 						answer
 					}
 				}),
@@ -171,28 +378,28 @@ mod tests {
 							.unwrap();
 						let answer = response.answer.clone();
 						let id = response.resource_id.clone();
-						let wire = response.wire.clone();
 						let task = tokio::spawn(response.run());
-						sources.send((id, wire, task)).await.unwrap();
+						sources.send((id, task)).await.unwrap();
 						answer
 					}
 				}),
 			);
-		let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-			.await
-			.expect("bind HTTP listener");
-		let address = listener.local_addr().expect("HTTP listener address");
-		let http = tokio::spawn(async move { axum::serve(listener, app).await.expect("serve HTTP") });
+		let (address, http) = serve(app).await;
 
 		let client = Client::new(client::Config::default());
 		// Credentials in the dialed URLs must never reach the client's connect logs.
 		let whip = format!("http://user:pass@{address}/whip/ingested?jwt=secret")
 			.parse()
 			.expect("WHIP URL");
-		let whip_wire = tokio::time::timeout(TIMEOUT, client.publish(whip, source_consumer, "source"))
+		// Each client call resolves once its session ends, so the test drives them aside.
+		let whip_client = tokio::spawn({
+			let client = client.clone();
+			async move { client.publish(whip, source_consumer, "source").await }
+		});
+		let (whip_id, whip_task) = tokio::time::timeout(TIMEOUT, sources_rx.recv())
 			.await
 			.expect("WHIP negotiation timed out")
-			.expect("WHIP negotiation failed");
+			.unwrap();
 
 		let output_origin = moq_tokio::origin::spawn();
 		let output = output_origin
@@ -202,57 +409,20 @@ mod tests {
 		let whep = format!("http://user:pass@{address}/whep/ingested?jwt=secret")
 			.parse()
 			.expect("WHEP URL");
-		let whep_wire = tokio::time::timeout(TIMEOUT, client.subscribe(whep, output))
+		let fill = output.broadcast().clone();
+		let whep_client = tokio::spawn(async move { client.subscribe(whep, fill).await });
+		let (whep_id, whep_task) = tokio::time::timeout(TIMEOUT, sources_rx.recv())
 			.await
 			.expect("WHEP negotiation timed out")
-			.expect("WHEP negotiation failed");
+			.unwrap();
+
+		let mut opus = opus_output(&output_consumer).await;
+		assert_eq!(next_payload(&mut opus).await, OPUS_PACKET);
 
 		assert!(logs_contain("whip client connected"));
 		assert!(logs_contain("whep client connected"));
 		for secret in ["jwt", "secret", "user:pass"] {
 			assert!(!logs_contain(secret), "client logs leaked {secret}");
-		}
-
-		let catalog_track = output_consumer
-			.track(hang::Catalog::DEFAULT_NAME)
-			.expect("output catalog track")
-			.subscribe(hang::Catalog::default_subscription())
-			.await
-			.expect("subscribe to output catalog");
-		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(catalog_track);
-		let catalog = tokio::time::timeout(TIMEOUT, catalogs.next())
-			.await
-			.expect("output catalog timed out")
-			.expect("read output catalog")
-			.expect("output catalog ended");
-		let (track_name, config) = catalog.audio.renditions.iter().next().expect("output Opus rendition");
-		let track = output_consumer
-			.track(track_name)
-			.expect("output Opus track")
-			.subscribe(None)
-			.await
-			.expect("subscribe to output Opus track");
-		let mut opus = Track::opus(track, config).expect("output Opus container");
-		let frame = tokio::time::timeout(TIMEOUT, opus.next())
-			.await
-			.expect("output Opus packet timed out")
-			.expect("read output Opus packet")
-			.expect("output Opus track ended");
-		assert_eq!(frame.payload.as_ref(), OPUS_PACKET);
-		let (whip_id, whip_server_wire, whip_task) = sources_rx.recv().await.unwrap();
-		let (whep_id, whep_server_wire, whep_task) = sources_rx.recv().await.unwrap();
-		for source in [&whip_wire, &whep_wire, &whip_server_wire, &whep_server_wire] {
-			let stats = source.stats();
-			assert!(
-				stats.tx > OPUS_PACKET.len() as u64,
-				"includes outgoing ICE/DTLS/RTP/RTCP: {stats:?}"
-			);
-			assert!(
-				stats.rx > OPUS_PACKET.len() as u64,
-				"includes incoming ICE/DTLS/RTP/RTCP: {stats:?}"
-			);
-			assert!(source.stats().tx >= stats.tx);
-			assert!(source.stats().rx >= stats.rx);
 		}
 		assert!(server.terminate(&whep_id));
 		assert!(server.terminate(&whip_id));
@@ -261,31 +431,22 @@ mod tests {
 			.unwrap()
 			.unwrap()
 			.unwrap();
-		// The DELETE ended the ingest cleanly, so it serves the finished broadcast until its
-		// media is stale; a newer publish at the path ends that linger at once.
+		// The DELETE ended the ingest cleanly, so it serves the finished broadcast for the
+		// linger; dropping the session, as an interrupt does, ends that at once.
 		let ingested = server_origin
 			.consume()
 			.request_broadcast("ingested", None)
 			.await
 			.unwrap();
 		assert!(!ingested.is_closed(), "the finished ingest lingers");
-		let _replacement = server_origin
-			.publish(
-				"ingested",
-				moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()),
-			)
-			.unwrap();
-		tokio::time::timeout(TIMEOUT, whip_task)
-			.await
-			.unwrap()
-			.unwrap()
-			.unwrap();
-		let final_whip = whip_server_wire.stats();
-		let final_whep = whep_server_wire.stats();
+		whip_task.abort();
+		let stopped = tokio::time::timeout(TIMEOUT, whip_task).await.unwrap();
+		assert!(stopped.unwrap_err().is_cancelled());
+		assert!(ingested.is_closed(), "the interrupt closes the finished ingest");
 		assert!(!server.terminate(&whip_id));
 		assert!(!server.terminate(&whep_id));
-		assert_eq!(whip_server_wire.stats(), final_whip);
-		assert_eq!(whep_server_wire.stats(), final_whep);
+		whip_client.abort();
+		whep_client.abort();
 		http.abort();
 		http.await.unwrap_err();
 	}

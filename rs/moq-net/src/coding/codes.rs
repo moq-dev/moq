@@ -13,7 +13,7 @@ use crate::{Error, StreamError, ietf, lite};
 ///
 /// Encoding and decoding live on one trait so a peer cannot be told a code from one table
 /// and read against another: implement both halves or neither.
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub trait StreamCodes {
 	/// The code to reset a stream, or send STOP_SENDING, with.
 	fn encode_stream_code(&self, err: &StreamError) -> u32;
@@ -111,7 +111,7 @@ mod tests {
 	#[test]
 	fn the_version_picks_the_registry() {
 		let lite = crate::Version::Lite(lite::Version::Lite05);
-		let ietf = crate::Version::Ietf(ietf::Version::Draft20);
+		let ietf = crate::Version::Ietf(ietf::Version::Draft22);
 
 		assert_eq!(lite.encode_stream_code(&StreamError::Old), StreamError::Old.to_code());
 		assert_eq!(ietf.encode_stream_code(&StreamError::Old), ietf::error::INTERNAL_ERROR);
@@ -120,7 +120,7 @@ mod tests {
 		assert_eq!(lite.encode_stream_code(&StreamError::Cancel), ietf::error::CANCELLED);
 		assert_eq!(ietf.encode_stream_code(&StreamError::Cancel), ietf::error::CANCELLED);
 
-		// GOING_AWAY is moq-lite's 0x4 and draft-20's, but draft-17 gives 0x4 to
+		// GOING_AWAY is moq-lite's 0x4 and draft-22's, but draft-17 gives 0x4 to
 		// UNKNOWN_OBJECT_STATUS, so it is not sent there and not read back there.
 		let draft17 = crate::Version::Ietf(ietf::Version::Draft17);
 		assert_eq!(lite.decode_stream_code(0x4), StreamError::GoingAway);
@@ -206,7 +206,7 @@ mod tests {
 			}
 		}
 
-		let version = ietf::Version::Draft20;
+		let version = ietf::Version::Draft22;
 
 		// 0x0 ends a session cleanly, but fails a stream.
 		assert!(matches!(

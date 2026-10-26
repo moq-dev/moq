@@ -53,7 +53,7 @@ fn bufferbloat(bits_per_second: u64) -> moq_shaper::Profile {
 /// A server publishing broadcast `room`, and a client subscribed to its origin over a
 /// connection with the given transport settings.
 struct Setup {
-	broadcast: moq_net::broadcast::Producer,
+	broadcast: moq_net::origin::Publication,
 	remote: moq_net::broadcast::Consumer,
 	/// The client's connection, for its credit stats.
 	conn: driver::Connection,
@@ -109,7 +109,7 @@ async fn setup_through(
 	let dial = shaper.as_ref().map_or(server_addr, |shaper| shaper.addr());
 	tokio::spawn(async move {
 		let request = server.accept().await.expect("accept");
-		let (session, _driver) = request.with_publisher(&publisher).ok().await.expect("session");
+		let session = request.with_publisher(&publisher).ok().await.expect("session");
 		let _ = session.closed().await;
 	});
 
@@ -131,7 +131,7 @@ async fn setup_through(
 
 	let subscriber = moq_tokio::origin::spawn();
 	let session =
-		moq_tokio::transport::Session::new(web::Session::raw(conn.clone()), moq_net::transport::Binding::InBand);
+		moq_tokio::transport::Session::new(web::Session::raw(conn.clone()), moq_net::transport::Address::Setup);
 	let (client, driver) = moq_net::Client::new()
 		.with_versions(version.into())
 		.with_subscriber(subscriber.clone())
@@ -284,7 +284,7 @@ async fn the_less_urgent_partial_frame_gives_way(version: &str, profile: Option<
 	assert_eq!(setup.conn.stats().credit.evicted, 1, "{version}");
 	let session = moq_tokio::transport::Session::new(
 		web::Session::raw(setup.conn.clone()),
-		moq_net::transport::Binding::InBand,
+		moq_net::transport::Address::Setup,
 	);
 	assert_eq!(
 		moq_net::transport::Stats::streams_evicted(&moq_net::transport::poll::Session::stats(&session)),
@@ -339,9 +339,27 @@ async fn bufferbloat_is_not_a_stuck_window() {
 	assert!(stats.down.throttled > 0, "the bottleneck held the sender back: {stats}");
 }
 
-/// A frame larger than the whole window, which can never complete: the stuck window
-/// evicts it like any other, so its reader learns the group was evicted and is not
-/// fetched again.
+/// A frame many windows long still completes, since its credit returns as each storage
+/// segment seals: the window only has to fit one segment, so nothing is evicted.
+#[tokio::test]
+async fn lite_frame_of_many_windows_completes() {
+	// Room for one of moq-net's 1 MiB storage segments and its framing.
+	const SEGMENTED: usize = 4 << 20;
+	let setup = setup("moq-lite-06", transport(SEGMENTED as u64)).await;
+	let (track, mut sub) = setup.subscribe("file", 0).await;
+
+	let payload = Bytes::from((0..4 * SEGMENTED).map(|i| (i % 251) as u8).collect::<Vec<_>>());
+	let mut group = track.append_group().unwrap();
+	group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+	group.finish().unwrap();
+
+	assert!(next_frame(&mut sub).await == payload, "the frame arrived corrupted");
+	assert_eq!(setup.conn.stats().credit.evicted, 0);
+}
+
+/// A frame within one storage segment but larger than the whole window, which can never
+/// complete: the stuck window evicts it like any other, so its reader learns the group
+/// was evicted and is not fetched again.
 #[tokio::test]
 async fn lite_frame_past_the_window_gives_way() {
 	let setup = setup("moq-lite-06", transport(WINDOW as u64)).await;
@@ -382,7 +400,7 @@ async fn lite_frame_past_the_window_gives_way() {
 /// A subscriber served on the raw driver with a connection window of [`WINDOW`], and a
 /// publisher dialing it whose connection can also send raw streams.
 struct Reversed {
-	broadcast: moq_net::broadcast::Producer,
+	broadcast: moq_net::origin::Publication,
 	remote: moq_net::broadcast::Consumer,
 	/// The publisher's connection, for streams no session would send.
 	conn: driver::Connection,
@@ -432,7 +450,7 @@ async fn reversed(version: &str) -> Reversed {
 	broadcast.announce(Default::default()).expect("announce");
 	let subscriber = moq_tokio::origin::spawn();
 	let session = |conn: driver::Connection| {
-		moq_tokio::transport::Session::new(web::Session::raw(conn), moq_net::transport::Binding::InBand)
+		moq_tokio::transport::Session::new(web::Session::raw(conn), moq_net::transport::Address::Setup)
 	};
 	// A moq-lite client's driver sends its half of the handshake, so it runs meanwhile.
 	let client_session = tokio::spawn({
@@ -490,10 +508,12 @@ impl Reversed {
 					false => conn.open_uni(Default::default()).await.map(|send| (send, None)),
 				}
 				.expect("open");
-				if send.write_all(&bytes).await.is_ok() {
-					std::future::pending::<()>().await;
+				// The credit an eviction frees can reach the writer before the stop does, letting
+				// the whole write queue, so only the stop itself proves the stream was stopped.
+				let _ = send.write_all(&bytes).await;
+				if let Ok(Some(_)) = send.stopped().await {
+					let _ = tx.send(());
 				}
-				let _ = tx.send(());
 			});
 		}
 		for _ in 0..stopped {
@@ -647,7 +667,7 @@ async fn javascript_partial_frame_gives_way(version: &str) {
 		.with_subscriber(origin.clone())
 		.accept(
 			moq_net::time::Instant::now(),
-			moq_tokio::transport::Session::new(session, moq_net::transport::Binding::Uri),
+			moq_tokio::transport::Session::new(session, moq_net::transport::Address::Uri),
 		)
 		.await
 		.expect("server handshake");

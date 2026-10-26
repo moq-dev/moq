@@ -101,8 +101,11 @@ export function asIetf(version: StreamVersion): IetfVersion | undefined {
 	return isLite(version) ? undefined : version;
 }
 
-// Every draft newer than these counts leading ones, so a new version falls forward.
-function isLeadingOnes(version: StreamVersion): boolean {
+/**
+ * Whether `version` writes leading-ones varints, which carry the full u64; older versions use QUIC's, which stop at 2^62-1.
+ * Every draft newer than these counts leading ones, so a new version falls forward.
+ */
+export function isLeadingOnes(version: StreamVersion): boolean {
 	switch (version) {
 		case Version.DRAFT_14:
 		case Version.DRAFT_15:
@@ -278,7 +281,7 @@ export class Reader {
 	#buffer: Uint8Array;
 	#chunks: Uint8Array[] = [];
 	#chunked = 0; // bytes across #chunks
-	#stream?: ReadableStream<Uint8Array>; // if undefined, the buffer is consumed then EOF
+	// Undefined once the stream finishes, or without a stream: the buffer is consumed then EOF.
 	#reader?: ReadableStreamDefaultReader<Uint8Array>;
 	#closed?: Promise<void>;
 	// The decode that last ran short and how far, so a retry can wait for those bytes.
@@ -294,8 +297,7 @@ export class Reader {
 		version: StreamVersion,
 	) {
 		this.#buffer = buffer ?? new Uint8Array();
-		this.#stream = stream;
-		this.#reader = this.#stream?.getReader();
+		this.#reader = stream?.getReader();
 		this.version = version;
 	}
 
@@ -314,11 +316,9 @@ export class Reader {
 
 		if (result.done) {
 			// The transport already finished the stream. Drop the reader so a later stop
-			// neither builds a cancel error nor sends a reset the peer will ignore.
-			if (this.#reader === reader) {
-				this.#reader = undefined;
-				reader.releaseLock();
-			}
+			// neither builds a cancel error nor sends a reset the peer will ignore. Dropped,
+			// not released: releasing a closed stream's lock builds a TypeError per stream.
+			if (this.#reader === reader) this.#reader = undefined;
 			return false;
 		}
 

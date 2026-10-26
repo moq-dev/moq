@@ -15,9 +15,9 @@
  * ```ts
  * const credential = new Credential({ context, kid, secret });
  * const generation = credential.produce();
- * const broadcast = origin.createBroadcast(await credential.path("meeting.hang"));
- * const video = await new Broadcast.Producer(broadcast, generation).createTrack("video", { timescale });
- * broadcast.announce({ epoch: generation.epoch });
+ * const publication = origin.createBroadcast(await credential.path("meeting.hang"));
+ * const video = await new Broadcast.Producer(publication.broadcast, generation).createTrack("video", { timescale });
+ * publication.announce({ epoch: generation.epoch });
  *
  * const group = video.appendGroup();
  * await group.writeFrame(timestamp, frame);
@@ -36,8 +36,8 @@ export { Credential } from "./credential.ts";
 export * as Datagram from "./datagram.ts";
 export type { Name } from "./derive.ts";
 export { type Code, Failure } from "./failure.ts";
-/** Producing generations mint an epoch; consuming generations bind a discovered one. */
-export * as Generation from "./generation.ts";
+/** Producing generations mint an epoch; consuming generations bind a discovered one. Types only: a {@link Credential} makes them. */
+export type * as Generation from "./generation.ts";
 /** Grouped-frame producer and consumer for one group identity. */
 export * as Group from "./group.ts";
 export { MAX_DATAGRAM_PLAINTEXT, MAX_GROUPED_PLAINTEXT, SECRET_LEN } from "./limits.ts";

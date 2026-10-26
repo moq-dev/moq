@@ -33,7 +33,7 @@ from relay egress to native publisher ingest. Both ends are ours.
   at each recv, and when the offset jumps between batches, drop that batch's
   kernel stamps for the userspace instant, so a clock step never reads as
   queue growth or drain. The basis must stay constant (section 6.1).
-- Sender: `congestion::Controller` sees each acknowledged packet's send
+- Sender: `moq_congestion::Controller` sees each acknowledged packet's send
   instant and peer receive instant, so every candidate reads the same input.
 - Receive times measure delay variation, not absolute one-way delay: the
   receiver's basis is never communicated (section 6.1). State clock offset

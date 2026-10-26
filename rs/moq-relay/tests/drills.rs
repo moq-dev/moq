@@ -25,7 +25,11 @@
 //! drill fails when its recovery behavior is removed, and the loom/fuzz cases
 //! covering the primitives underneath.
 #![cfg(all(feature = "quic", feature = "websocket"))]
-#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#![expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 
 use std::time::Duration;
 
@@ -315,8 +319,8 @@ fn quic() -> moq_tokio::quic::Config {
 	// busy runner has to stall eight times over before a live session is mistaken
 	// for a dead one.
 	let mut quic = moq_tokio::quic::Config::default();
-	quic.idle_timeout = Some(Duration::from_secs(2));
-	quic.keep_alive = Some(Duration::from_millis(250));
+	quic.idle_timeout = Some((Duration::from_secs(2)).into());
+	quic.keep_alive = Some((Duration::from_millis(250)).into());
 	quic
 }
 
@@ -337,9 +341,9 @@ fn dial() -> moq_tokio::connect::Config {
 
 	// Fast enough to keep a relay bounce or a link flap inside the drill's
 	// budget, paced enough that the loop is still a backoff.
-	config.backoff.initial = Some(Duration::from_millis(50));
-	config.backoff.max = Some(Duration::from_millis(200));
-	config.backoff.timeout = Some(Duration::from_secs(5));
+	config.backoff.initial = Some((Duration::from_millis(50)).into());
+	config.backoff.max = Some((Duration::from_millis(200)).into());
+	config.backoff.timeout = Some((Duration::from_secs(5)).into());
 	config
 }
 
@@ -1011,9 +1015,9 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 	config.connect = dial();
 	// Retry forever: a give-up after a slow impaired handshake would look exactly
 	// like the never-redialed regression, and a stall still fails the drill.
-	config.connect.backoff.timeout = Some(Duration::ZERO);
+	config.connect.backoff.timeout = Some((Duration::ZERO).into());
 	if link == PeerLink::Transport {
-		config.connect.version = vec!["moq-transport-19".parse().expect("parse version")];
+		config.connect.version = vec!["moq-transport-22".parse().expect("parse version")];
 	}
 	config.cluster.connect = vec![moq_relay::cluster::Peer::new(peer_url.to_string())];
 	let edge = RelayHost::start(config).await;
@@ -1462,7 +1466,7 @@ async fn subscriber_max_age_skips_bufferbloat(version: &str) {
 		loop {
 			if track
 				.subscription()
-				.is_some_and(|subscription| subscription.max_delay == Duration::from_millis(100))
+				.is_some_and(|subscription| subscription.max_delay == Some(Duration::from_millis(100)))
 			{
 				break;
 			}

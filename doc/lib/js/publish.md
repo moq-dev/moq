@@ -33,8 +33,7 @@ WebCodecs, writes the catalog, and publishes a hang broadcast.
 | `muted`, `invisible` | Disable audio or video capture. |
 | `preview` | What the nested element shows: the raw `source` (default), a decoded copy of the `encoded` stream to see what viewers get, or `none`. |
 | `backend` | How a `<canvas>` preview is drawn; see [@moq/video](/lib/js/video). `auto` (default), `webgpu`, or `2d`. |
-| `announce` | When to advertise: once the `source` is live (default), `always`, or `never`. Nobody can see or subscribe to the broadcast until it is announced. |
-| `linger` | Finish the broadcast cleanly when advertising stops, such as a `source` that ends, instead of unannouncing it at once. It stays up while its media is fresh so viewers drain the tail, and the next announce publishes a new broadcast. Removing the element ends it at once. Off by default. |
+| `announce` | When to advertise: once the `source` is live (default), or `always`. Nobody can see or subscribe to the broadcast until it is announced. To keep it out of discovery, use a hidden name with a `.`-prefixed segment; it is still subscribable by name. |
 
 Every attribute is also a reactive property. The
 [README](https://www.npmjs.com/package/@moq/publish) lists types and defaults.

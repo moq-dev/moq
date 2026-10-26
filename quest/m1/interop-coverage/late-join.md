@@ -4,7 +4,7 @@
 
 On the IETF matrix (`just test interop --versions ietf`), a
 subscriber that joins mid-group receives the current group from object 0
-(a joining FETCH before draft 20, a fill from draft 20) and a standalone
+(a joining FETCH before draft 22, a fill from draft 22) and a standalone
 FETCH of a past group returns exactly its objects, for Rust and JS
 publishers and subscribers.
 

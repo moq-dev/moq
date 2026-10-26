@@ -17,7 +17,7 @@ pub enum ParameterVarInt {
 	/// Removed in draft-17; only used in draft-14/15/16.
 	MaxRequestId = 2,
 	MaxAuthTokenCacheSize = 4,
-	/// MAX_REQUEST_UPDATES, added in draft-19.
+	/// MAX_REQUEST_UPDATES, added in draft-22.
 	MaxRequestUpdates = super::request_update::OPTION,
 	/// HOP_ID, from the MoQ Cluster extension.
 	HopId = super::cluster::HOP_ID,
@@ -93,10 +93,10 @@ impl Decode<Version> for Parameters {
 			i += 1;
 
 			// Unknown SETUP options may repeat, including GREASE; their values still
-			// have to be well-formed Key-Value-Pairs (draft-21 section 9.1).
+			// have to be well-formed Key-Value-Pairs (draft-22 section 9.1).
 			if kind % 2 == 0 {
 				let kind = match ParameterVarInt::from(kind) {
-					// Undefined before draft 19, so there an unknown option that may repeat.
+					// Undefined before draft 22, so there an unknown option that may repeat.
 					ParameterVarInt::MaxRequestUpdates if !super::request_update::supported(version) => {
 						ParameterVarInt::Unknown(kind)
 					}
@@ -503,7 +503,7 @@ pub(crate) fn skip_unlisted(r: &mut Decoder<'_>, version: Version, key: u64) -> 
 /// ```
 macro_rules! encode_params {
 	($w:expr, $version:expr, $($key:expr => $val:expr),* $(,)?) => {{
-		#[allow(unused)]
+		#[allow(unused, reason = "a compile-time key order check")]
 		const _: () = {
 			let _keys: &[u64] = &[$($key),*];
 			let mut _i = 1;
@@ -515,14 +515,14 @@ macro_rules! encode_params {
 
 		let _version: $crate::ietf::Version = $version;
 
-		#[allow(unused_mut)]
+		#[allow(unused_mut, reason = "a call with no parameters never counts one")]
 		let mut _count: usize = 0;
 		$(_count += if $crate::ietf::Param::param_present(&$val) { 1 } else { 0 };)*
 		$w.varint(_count as u64)?;
 
-		#[allow(unused_mut, unused_assignments)]
+		#[allow(unused_mut, unused_assignments, reason = "a call with no parameters never tracks a key")]
 		let mut _prev_key: u64 = 0;
-		#[allow(unused_mut, unused_assignments)]
+		#[allow(unused_mut, unused_assignments, reason = "a call with no parameters never tracks a key")]
 		let mut _first: bool = true;
 		$(
 			if $crate::ietf::Param::param_present(&$val) {
@@ -560,11 +560,11 @@ macro_rules! encode_params {
 ///     0x20 => subscriber_priority: Option<u8>,
 /// );
 /// // forward: Option<bool> and subscriber_priority: Option<u8> are now in scope
-/// let subscriber_priority = subscriber_priority.unwrap_or(super::priority::ABSENT_WIRE);
+/// let subscriber_priority = subscriber_priority.unwrap_or(super::priority::DEFAULT_WIRE);
 /// ```
 macro_rules! decode_params {
 	($r:expr, $version:expr, $($key:expr => $name:ident: $ty:ty $(where $gate:expr)?),* $(,)?) => {
-		#[allow(unused)]
+		#[allow(unused, reason = "a compile-time key order check")]
 		const _: () = {
 			let _keys: &[u64] = &[$($key),*];
 			let mut _i = 1;
@@ -575,7 +575,7 @@ macro_rules! decode_params {
 		};
 
 		// Use internal Option wrapper for duplicate detection, then shadow with Default.
-		$(#[allow(unused_mut, non_snake_case)] let mut $name: Option<$ty> = None;)*
+		$(#[allow(unused_mut, non_snake_case, reason = "names come from the call site, and an absent parameter is never assigned")] let mut $name: Option<$ty> = None;)*
 
 		{
 			let _version: $crate::ietf::Version = $version;
@@ -584,7 +584,7 @@ macro_rules! decode_params {
 				return Err($crate::coding::DecodeError::TooMany);
 			}
 
-			#[allow(unused_mut, unused_assignments)]
+			#[allow(unused_mut, unused_assignments, reason = "a call with no parameters never tracks a key")]
 			let mut _prev_key: u64 = 0;
 			for _i in 0.._count {
 				let _wire = $r.varint()?;
@@ -617,7 +617,7 @@ macro_rules! decode_params {
 		}
 
 		// Shadow with unwrap_or_default: Option<T> defaults to None, T defaults to T::default()
-		$(#[allow(unused_variables)] let $name: $ty = $name.unwrap_or_default();)*
+		$(#[allow(unused_variables, reason = "a caller may decode a parameter it never reads")] let $name: $ty = $name.unwrap_or_default();)*
 	};
 }
 
@@ -626,18 +626,18 @@ mod tests {
 	use super::super::Filter;
 	use super::*;
 
-	/// Before draft 19, 0x08 is an unknown SETUP option, so a peer may repeat it.
+	/// On draft 18, 0x08 is an unknown SETUP option, so a peer may repeat it.
 	#[test]
-	fn max_request_updates_is_unknown_before_draft_19() {
+	fn max_request_updates_is_unknown_on_draft_18() {
 		// Draft 18: no count prefix, delta-encoded types, so the repeat is a delta of 0.
 		let block = [0x08, 0x01, 0x00, 0x02];
 		let mut r = Decoder::new(&block, Version::Draft18.into());
 		let params = Parameters::decode(&mut r, Version::Draft18).expect("a repeated unknown option is legal");
 		assert_eq!(params.get_varint(ParameterVarInt::MaxRequestUpdates), None);
 
-		let mut r = Decoder::new(&block, Version::Draft19.into());
+		let mut r = Decoder::new(&block, Version::Draft22.into());
 		assert!(matches!(
-			Parameters::decode(&mut r, Version::Draft19),
+			Parameters::decode(&mut r, Version::Draft22),
 			Err(DecodeError::Duplicate)
 		));
 	}
@@ -650,9 +650,6 @@ mod tests {
 			Version::Draft16,
 			Version::Draft17,
 			Version::Draft18,
-			Version::Draft19,
-			Version::Draft20,
-			Version::Draft21,
 			Version::Draft22,
 		] {
 			for kind in [0x20, 0x21, 0x9d, 0x11c] {
@@ -684,7 +681,7 @@ mod tests {
 
 	#[test]
 	fn setup_rejects_repeated_known_options() {
-		for version in [Version::Draft18, Version::Draft21, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft22] {
 			for bytes in [&[4, 1, 0, 2][..], &[7, 1, b'a', 0, 1, b'b'][..]] {
 				assert!(matches!(
 					Parameters::decode_slice(bytes, version),
@@ -696,21 +693,14 @@ mod tests {
 
 	#[test]
 	fn setup_repeated_unknown_options_still_require_complete_values() {
-		for version in [Version::Draft18, Version::Draft21, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft22] {
 			assert!(Parameters::decode_slice(&[0x21, 1, b'a', 0, 2, b'b'], version).is_err());
 		}
 	}
 
 	#[test]
 	fn group_order_parameter_rejects_values_outside_one_and_two() {
-		for version in [
-			Version::Draft17,
-			Version::Draft18,
-			Version::Draft19,
-			Version::Draft20,
-			Version::Draft21,
-			Version::Draft22,
-		] {
+		for version in [Version::Draft17, Version::Draft18, Version::Draft22] {
 			for value in [0u8, 3, 255] {
 				let bytes = [value];
 				let mut r = Decoder::new(&bytes, version.into());
@@ -873,7 +863,6 @@ mod tests {
 			(Version::Draft16, &[0x01, 0x20, 0x40, 0xff][..]),
 			(Version::Draft17, &[0x01, 0x20, 0xff][..]),
 			(Version::Draft18, &[0x01, 0x20, 0xff][..]),
-			(Version::Draft19, &[0x01, 0x20, 0xff][..]),
 		] {
 			let mut buf = Vec::new();
 			encode_params!(&mut Encoder::new(&mut buf, version.into()), version, 0x20 => u8::MAX);
@@ -953,8 +942,7 @@ mod tests {
 			(Version::Draft16, &[0x01, 0x09, 0x04, 0x40, 0xff, 0x40, 0x80][..]),
 			(Version::Draft17, &[0x01, 0x09, 0x80, 0xff, 0x80, 0x80][..]),
 			(Version::Draft18, &[0x01, 0x09, 0x80, 0xff, 0x80, 0x80][..]),
-			(Version::Draft19, &[0x01, 0x09, 0x80, 0xff, 0x80, 0x80][..]),
-			(Version::Draft20, &[0x01, 0x09, 0x80, 0xff, 0x80, 0x80][..]),
+			(Version::Draft22, &[0x01, 0x09, 0x80, 0xff, 0x80, 0x80][..]),
 		] {
 			let mut buf = Vec::new();
 			encode_params!(&mut Encoder::new(&mut buf, version.into()), version, 0x09 => location.clone());
@@ -1272,7 +1260,7 @@ mod tests {
 				value: vec![0xAA],
 			})
 		};
-		for version in [Version::Draft15, Version::Draft16, Version::Draft17, Version::Draft20] {
+		for version in [Version::Draft15, Version::Draft16, Version::Draft17, Version::Draft22] {
 			let mut buf = Vec::new();
 			let mut w = Encoder::new(&mut buf, version.into());
 			w.varint(2).unwrap();

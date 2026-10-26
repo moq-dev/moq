@@ -287,9 +287,9 @@ pub struct Producer<E: CatalogExt = ()> {
 	/// Connection allocator passthrough tracks claim their peak-hold bitrate on.
 	/// See [`Config::with_bandwidth`].
 	bandwidth: moq_net::bandwidth::Allocator,
-	/// The minimum flush lateness across this catalog's renditions, which each rendition's
-	/// advertised `delay` is measured against.
-	baseline: super::estimate::Baseline,
+	/// The write order across this catalog's renditions, which each rendition's advertised
+	/// `delay` is measured against.
+	order: super::estimate::Order,
 	/// What each media track minted under this catalog has written. See [`stats`](Self::stats).
 	sent: Arc<crate::stats::Registry<crate::stats::Sent>>,
 }
@@ -304,7 +304,7 @@ impl<E: CatalogExt> Clone for Producer<E> {
 			cutting: self.cutting.clone(),
 			max_age: self.max_age,
 			bandwidth: self.bandwidth.clone(),
-			baseline: self.baseline.clone(),
+			order: self.order.clone(),
 			sent: self.sent.clone(),
 		}
 	}
@@ -443,13 +443,8 @@ impl<E: CatalogExt> Producer<E> {
 		let hangz = moq_json::snapshot::Producer::new(hangz_track, json_config);
 
 		let timeline = crate::timeline::Timelines::new(broadcast);
-		#[allow(clippy::arc_with_non_send_sync)]
 		let catalog_timeline = Arc::new(Mutex::new(CatalogTimeline::default()));
 
-		// The contents are `Send + Sync` natively; on wasm moq-net's handles are
-		// `Rc`-backed, so clippy sees a pointlessly atomic `Arc`. Keeping one type for
-		// both targets is worth the unused atomics on the single-threaded one.
-		#[allow(clippy::arc_with_non_send_sync)]
 		Ok(Self {
 			outputs: Outputs {
 				hang,
@@ -472,7 +467,7 @@ impl<E: CatalogExt> Producer<E> {
 			cutting: config.timeline,
 			max_age: config.max_age,
 			bandwidth: config.bandwidth,
-			baseline: Default::default(),
+			order: Default::default(),
 			sent: Default::default(),
 		})
 	}
@@ -573,6 +568,11 @@ impl<E: CatalogExt> Producer<E> {
 		take(&self.current).clock
 	}
 
+	/// The config `name` holds in `C`'s section, cloned without copying the rest of the catalog.
+	pub(super) fn config<C: super::RenditionConfig<E>>(&self, name: &str) -> Option<C> {
+		C::get_mut(&mut take(&self.current).catalog, name).cloned()
+	}
+
 	/// Anchor a timebase on its first timestamp `pts`, which happened at `wall` (or arrived now),
 	/// returning the timebase's offset.
 	///
@@ -583,7 +583,7 @@ impl<E: CatalogExt> Producer<E> {
 		&mut self,
 		timebase: &std::sync::OnceLock<super::Offset>,
 		pts: moq_net::Timestamp,
-		wall: Option<std::time::SystemTime>,
+		wall: Option<moq_clock::Wall>,
 	) -> crate::Result<super::Offset> {
 		let mut guard = self.modify()?;
 		// Another clone of the timebase may have anchored first; the lock orders them. A placement
@@ -864,7 +864,7 @@ impl<E: CatalogExt> Producer<E> {
 
 	/// A fresh estimator whose `delay` is measured against this catalog's other renditions.
 	pub(crate) fn estimator(&self) -> super::Estimator {
-		super::Estimator::with_broadcast(self.baseline.clone())
+		super::Estimator::with_order(self.order.clone())
 	}
 
 	/// The allocator passthrough tracks claim on. fMP4 writes groups by hand, so it reads this itself.
@@ -956,6 +956,21 @@ impl<E: CatalogExt> Producer<E> {
 		Ok(recorder)
 	}
 
+	/// Retire `track`'s timeline once its producer dropped, for an owner that never enrolls the
+	/// name again: the timeline track finishes and leaves the root `archive` entry.
+	pub(crate) fn retire(&mut self, track: &str) -> crate::Result<()> {
+		self.timeline.retire(track)?;
+		let advertised = take(&self.current)
+			.catalog
+			.archive
+			.as_ref()
+			.is_some_and(|archive| archive.timelines.contains_key(track));
+		if advertised && let Some(archive) = self.modify()?.archive.as_mut() {
+			archive.timelines.remove(track);
+		}
+		Ok(())
+	}
+
 	/// The broadcast's [`Timelines`](crate::timeline::Timelines): each enrolled track's index.
 	///
 	/// A track's timeline is created (and advertised in the catalog's root `archive` entry) when
@@ -974,10 +989,9 @@ impl<E: CatalogExt> Producer<E> {
 	/// `config` is a [`json::Config`](crate::json::Config) for the `json` section, or an
 	/// application's own entry embedding a [`JsonConfig`](hang::catalog::JsonConfig) (see
 	/// [`IntoRendition`](super::IntoRendition)). The producer sets its `mode`, encodes the track
-	/// with its `compression`, and fills an absent `bitrate` from what it writes. The
-	/// [`deltas`](crate::json::Config::deltas) switch on `json::Config` configures the snapshot
-	/// encoder; it is not written into the catalog entry. The config is `'static` so that switch
-	/// can be read off the builder. With deltas, create `track` with a
+	/// with its `compression`, and fills an absent `bitrate` from what it writes. `options`
+	/// configures the encoder and is not written into the catalog entry. With
+	/// [`deltas`](crate::json::Options::deltas), create `track` with a
 	/// [`refresh`](moq_net::track::Info::refresh) ratio and drive
 	/// [`Snapshot::refresh`](crate::json::Snapshot::refresh), so joiners get a fresh group.
 	///
@@ -987,10 +1001,11 @@ impl<E: CatalogExt> Producer<E> {
 	pub fn json_snapshot<T: serde::Serialize>(
 		&self,
 		track: moq_net::track::Producer,
-		config: impl super::IntoRendition<E, hang::catalog::JsonConfig> + 'static,
-	) -> crate::Result<crate::json::Snapshot<T, E>> {
+		config: impl super::IntoRendition<E, hang::catalog::JsonConfig>,
+		options: crate::json::Options,
+	) -> crate::Result<crate::json::Snapshot<T>> {
 		let rendition = self.data_entry(track.name())?;
-		crate::json::Snapshot::new(track, rendition, config)
+		crate::json::Snapshot::new(track, rendition, config.into_rendition(), options)
 	}
 
 	/// Publish `track` as an append-log JSON track, advertising it in the catalog.
@@ -1001,7 +1016,7 @@ impl<E: CatalogExt> Producer<E> {
 		&self,
 		track: moq_net::track::Producer,
 		config: impl super::IntoRendition<E, hang::catalog::JsonConfig>,
-	) -> crate::Result<crate::json::Stream<T, E>> {
+	) -> crate::Result<crate::json::Stream<T>> {
 		let rendition = self.data_entry(track.name())?;
 		crate::json::Stream::new(track, rendition, config.into_rendition())
 	}
@@ -1015,7 +1030,7 @@ impl<E: CatalogExt> Producer<E> {
 		&self,
 		track: moq_net::track::Producer,
 		config: impl super::IntoRendition<E, hang::catalog::BinaryConfig>,
-	) -> crate::Result<crate::binary::Snapshot<E>> {
+	) -> crate::Result<crate::binary::Snapshot> {
 		let rendition = self.data_entry(track.name())?;
 		crate::binary::Snapshot::new(track, rendition, config.into_rendition())
 	}
@@ -1028,7 +1043,7 @@ impl<E: CatalogExt> Producer<E> {
 		&self,
 		track: moq_net::track::Producer,
 		config: impl super::IntoRendition<E, hang::catalog::BinaryConfig>,
-	) -> crate::Result<crate::binary::Stream<E>> {
+	) -> crate::Result<crate::binary::Stream> {
 		let rendition = self.data_entry(track.name())?;
 		crate::binary::Stream::new(track, rendition, config.into_rendition())
 	}
@@ -1442,6 +1457,7 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 mod test {
 	use std::collections::BTreeMap;
 
+	use std::str::FromStr;
 	use std::task::Poll;
 
 	use bytes::Bytes;
@@ -1455,7 +1471,7 @@ mod test {
 			let (origin, driver) = moq_net::origin::Producer::new(Default::default());
 			let driver = tokio::spawn(moq_net::time::run(driver));
 			let mut broadcast = match path {
-				Some(path) => origin.create_broadcast(path).unwrap(),
+				Some(path) => origin.create_broadcast(path).unwrap().broadcast().clone(),
 				None => moq_net::broadcast::Info::new().produce(),
 			};
 			let mut producer = Producer::new(&mut broadcast, Config::default()).unwrap();
@@ -1861,7 +1877,6 @@ mod test {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let config = Config::default().with_catalog(Catalog::<Extra>::default());
 		let mut catalog = Producer::<Extra>::new(&mut broadcast, config).unwrap();
-		let mut track = catalog.outputs.hang.consume();
 
 		let mut guard = catalog.modify().unwrap();
 		guard
@@ -1875,7 +1890,10 @@ mod test {
 		// The caller got the error, so the tracks stay usable once the catalog fits again.
 		catalog.modify().unwrap().remove_section("big").unwrap();
 		catalog.finish().unwrap();
-		assert!(matches!(track.poll_largest(&kio::Waiter::noop()), Poll::Ready(Some(position)) if position.group == 0));
+		assert_eq!(
+			catalog.outputs.hang_track.largest(),
+			Some(moq_net::track::Position::group(0))
+		);
 	}
 
 	/// Every consumer refuses an ID naming both a video and an audio rendition, so the producer
@@ -1884,7 +1902,6 @@ mod test {
 	fn a_cross_kind_duplicate_id_is_refused() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
-		let mut track = catalog.outputs.hang.consume();
 
 		let result = catalog.mutate(|catalog| {
 			catalog.video.renditions.insert(
@@ -1901,7 +1918,7 @@ mod test {
 			Err(crate::Error::Hang(hang::Error::DuplicateRendition(id))) if id == "main"
 		));
 		assert!(
-			matches!(track.poll_largest(&kio::Waiter::noop()), Poll::Pending),
+			catalog.outputs.hang_track.largest().is_none(),
 			"the refused catalog reached the wire"
 		);
 	}
@@ -1910,7 +1927,6 @@ mod test {
 	fn commit_publishes_once() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
-		let mut track = catalog.outputs.hang.consume();
 
 		let mut guard = catalog.modify().unwrap();
 		guard
@@ -1921,7 +1937,10 @@ mod test {
 
 		// The drop that follows `commit` must not publish a second snapshot.
 		catalog.finish().unwrap();
-		assert!(matches!(track.poll_largest(&kio::Waiter::noop()), Poll::Ready(Some(position)) if position.group == 0));
+		assert_eq!(
+			catalog.outputs.hang_track.largest(),
+			Some(moq_net::track::Position::group(0))
+		);
 	}
 
 	#[test]
@@ -1932,6 +1951,35 @@ mod test {
 		// Something else already took the name the timeline track wants.
 		let _taken = broadcast.create_track("video0.timeline.z", None).unwrap();
 		assert!(catalog.enroll("video0", None).is_err());
+	}
+
+	/// A retired track's timeline ends for the readers already on it and leaves the archive, while
+	/// one still recording is refused.
+	#[test]
+	fn retiring_a_track_ends_its_timeline() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+		let recorder = catalog
+			.enroll("video0", Some(std::time::Duration::from_secs(4)))
+			.unwrap();
+		let waiter = kio::Waiter::noop();
+		let mut subscribing = broadcast
+			.consume()
+			.track("video0.timeline.z")
+			.unwrap()
+			.subscribe(None)
+			.into_inner();
+		let std::task::Poll::Ready(Ok(mut reader)) = kio::Task::poll(&mut subscribing, &waiter) else {
+			panic!("the timeline track is live");
+		};
+		assert!(catalog.retire("video0").is_err(), "its recorder is still alive");
+
+		drop(recorder);
+		catalog.retire("video0").unwrap();
+		let archive = catalog.snapshot().archive.unwrap();
+		assert_eq!(archive.timelines.keys().collect::<Vec<_>>(), vec!["catalog.json"]);
+		assert_eq!(catalog.timeline().len(), 1);
+		assert!(matches!(reader.poll_finished(&waiter), std::task::Poll::Ready(Ok(_))));
 	}
 
 	#[test]
@@ -2055,17 +2103,17 @@ mod test {
 
 	#[test]
 	fn sibling_broadcasts_share_a_clock_and_capture_time() {
-		use std::time::{Duration, SystemTime};
+		use std::time::Duration;
 
 		let captured = moq_clock::now();
-		let wall = SystemTime::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS + 60_000);
+		let wall = moq_clock::Wall::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS + 60_000);
 		let clock = crate::Clock::at(captured, wall).unwrap();
 		let (origin, _driver) = moq_net::origin::Producer::new(Default::default());
-		let mut front = origin.create_broadcast("robot/front.hang").unwrap();
-		let mut rear = origin.create_broadcast("robot/rear.hang").unwrap();
+		let front = origin.create_broadcast("robot/front.hang").unwrap();
+		let rear = origin.create_broadcast("robot/rear.hang").unwrap();
 		let catalogs = [
-			Producer::new(&mut front, Config::default().with_clock(clock)).unwrap(),
-			Producer::new(&mut rear, Config::default().with_clock(clock)).unwrap(),
+			Producer::new(&mut front.broadcast().clone(), Config::default().with_clock(clock)).unwrap(),
+			Producer::new(&mut rear.broadcast().clone(), Config::default().with_clock(clock)).unwrap(),
 		];
 		let mut broadcasts = [front, rear];
 		for (catalog, broadcast) in catalogs.iter().zip(&mut broadcasts) {
@@ -2113,11 +2161,11 @@ mod test {
 	/// landing at the clock's reading on arrival, and the advertised mapping never moves.
 	#[moq_clock::test]
 	async fn with_clock_shifts_the_first_importer() {
-		use std::time::{Duration, SystemTime};
+		use std::time::Duration;
 
 		moq_clock::sleep(Duration::from_secs(5)).await;
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let wall = SystemTime::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS + 60_000);
+		let wall = moq_clock::Wall::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS + 60_000);
 		let start = moq_clock::now() - Duration::from_secs(5);
 		let config = Config::default().with_clock(crate::Clock::at(start, wall).expect("a representable wall"));
 		let catalog = Producer::new(&mut broadcast, config).unwrap();
@@ -2139,7 +2187,7 @@ mod test {
 	/// verbatim; its clones share that, while another timebase offsets onto the placed clock.
 	#[test]
 	fn the_first_input_places_the_clock() {
-		use std::time::{Duration, SystemTime};
+		use std::time::Duration;
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
@@ -2153,11 +2201,9 @@ mod test {
 		);
 		let clock = catalog.clock();
 		assert_eq!(catalog.snapshot().clock, clock.wall(), "the anchor is advertised");
-		let drift = clock
-			.wall_clock(first)
-			.unwrap()
-			.duration_since(SystemTime::now())
-			.unwrap_or_else(|err| err.duration());
+		let actual = clock.wall_clock(first).unwrap();
+		let now = moq_clock::wall();
+		let drift = actual.max(now).saturating_duration_since(actual.min(now));
 		assert!(drift < Duration::from_secs(1), "the first timestamp is live on arrival");
 
 		// Its clones keep the offset, whatever they see first.
@@ -2225,9 +2271,9 @@ mod test {
 	/// or one already fixed alike, so two importers of one stream publish identical timestamps.
 	#[test]
 	fn a_placed_input_lands_where_it_says() {
-		use std::time::{Duration, SystemTime};
+		use std::time::Duration;
 
-		let wall = SystemTime::now() - Duration::from_secs(2);
+		let wall = moq_clock::Wall::now() - Duration::from_secs(2);
 		let pts = moq_net::Timestamp::from_micros(100_000_000).unwrap();
 		let later = moq_net::Timestamp::from_micros(101_000_000).unwrap();
 
@@ -2261,9 +2307,9 @@ mod test {
 	/// the placed clock.
 	#[test]
 	fn a_placement_alone_publishes_nothing() {
-		use std::time::{Duration, SystemTime};
+		use std::time::Duration;
 
-		let wall = SystemTime::now() - Duration::from_secs(2);
+		let wall = moq_clock::Wall::now() - Duration::from_secs(2);
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
 		catalog.timebase().place(moq_net::Timestamp::ZERO, wall).unwrap();
@@ -2285,11 +2331,11 @@ mod test {
 	/// Fake this thread's host now a day past the moq epoch, returning a root `clock` an hour
 	/// before it in `scale` units.
 	fn an_hour_ago(scale: moq_net::Timescale) -> hang::catalog::Clock {
-		use std::time::{Duration, SystemTime};
+		use std::time::Duration;
 
 		let now = Duration::from_secs(86_400);
 		crate::clock::fake_host_wall(
-			SystemTime::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS) + now,
+			moq_clock::Wall::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS) + now,
 		);
 		let zero = moq_net::Timestamp::from_secs(now.as_secs() - 3600).unwrap();
 		hang::catalog::Clock::new(zero.convert(scale).unwrap()).unwrap()
@@ -2330,7 +2376,7 @@ mod test {
 	/// never replaced by a fresh clock; one that disagrees with `with_clock` is refused.
 	#[test]
 	fn a_seeded_root_clock_is_adopted() {
-		use std::time::{Duration, SystemTime};
+		use std::time::Duration;
 
 		let input = an_hour_ago(moq_net::Timescale::MICRO);
 		let mut seed = Catalog::<()>::default();
@@ -2342,12 +2388,12 @@ mod test {
 
 		// The same mapping from `with_clock` agrees in any units, without reading the host's wall
 		// clock, which may be unset.
-		let zero = SystemTime::UNIX_EPOCH
+		let zero = moq_clock::Wall::UNIX_EPOCH
 			+ Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS)
 			+ Duration::from_micros(input.wall.as_micros() as u64);
 		let fixed = crate::Clock::at(moq_clock::now(), zero).unwrap();
 		seed.clock = Some(an_hour_ago(moq_net::Timescale::MILLI));
-		crate::clock::fake_host_wall(SystemTime::UNIX_EPOCH + Duration::from_secs(86_400));
+		crate::clock::fake_host_wall(moq_clock::Wall::UNIX_EPOCH + Duration::from_secs(86_400));
 		let config = Config::default().with_catalog(seed.clone()).with_clock(fixed);
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut catalog = Producer::new(&mut broadcast, config).unwrap();
@@ -2424,14 +2470,14 @@ mod test {
 	/// wall time is refused, whether it would place the clock or offset onto it.
 	#[test]
 	fn an_unset_host_clock_publishes_without_a_wall() {
-		use std::time::{Duration, SystemTime};
+		use std::time::Duration;
 
-		crate::clock::fake_host_wall(SystemTime::UNIX_EPOCH + Duration::from_secs(86_400));
+		crate::clock::fake_host_wall(moq_clock::Wall::UNIX_EPOCH + Duration::from_secs(86_400));
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
 		assert_eq!(catalog.snapshot().clock, None);
 
-		let wall = SystemTime::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS);
+		let wall = moq_clock::Wall::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS);
 		let pts = moq_net::Timestamp::from_micros(1_000_000).unwrap();
 		assert!(matches!(
 			catalog.timebase().place(pts, wall),
@@ -3098,11 +3144,7 @@ mod test {
 
 	/// How many catalogs have gone out on the wire.
 	fn sent(catalog: &Producer) -> Option<u64> {
-		let mut track = catalog.outputs.hang_track.consume();
-		match track.poll_largest(&kio::Waiter::noop()) {
-			Poll::Ready(Some(position)) => Some(position.group),
-			Poll::Ready(None) | Poll::Pending => None,
-		}
+		catalog.outputs.hang_track.largest().map(|position| position.group)
 	}
 
 	/// The catalog a viewer joining now receives.

@@ -771,7 +771,7 @@ fn instance_id(fullname: &str) -> Option<&str> {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 
@@ -1344,14 +1344,14 @@ mod tests {
 	///
 	/// Ignored because it multicasts on the host network; nightly runs it with
 	/// `just rs multicast`. A host where no interface can announce skips, unless
-	/// MOQ_STRICT makes that a failure.
+	/// CI_STRICT makes that a failure.
 	#[tokio::test]
 	#[ignore = "needs multicast on the host network; run by just rs multicast"]
 	async fn apps_partition_discovery() {
 		let shared = unique_app();
 		let mut same_a = match discovery(shared.clone(), Some(KEY_A), "same-a").await {
 			Ok(discovery) => discovery,
-			Err(err) if no_multicast(&err) && std::env::var_os("MOQ_STRICT").is_none() => {
+			Err(err) if no_multicast(&err) && std::env::var_os("CI_STRICT").is_none() => {
 				eprintln!("skipping: {err}");
 				return;
 			}

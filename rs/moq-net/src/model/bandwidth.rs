@@ -54,8 +54,8 @@ impl Rate {
 
 	/// This rate scaled by `factor`, saturating at both ends.
 	///
-	/// For the fractional arithmetic rate control does (a ramp allowance, a hysteresis
-	/// band) without spreading `as` casts across the callers.
+	/// For fractional arithmetic, such as halving a rate, without spreading `as`
+	/// casts across the callers.
 	pub fn scaled(self, factor: f64) -> Self {
 		let scaled = self.0 as f64 * factor.max(0.0);
 		if scaled >= u64::MAX as f64 {
@@ -74,7 +74,6 @@ impl Rate {
 #[derive(Default)]
 struct State {
 	bitrate: Option<Rate>,
-	abort: Option<Error>,
 }
 
 /// Produces bandwidth estimates, notifying consumers when the value changes.
@@ -93,7 +92,7 @@ impl Producer {
 
 	/// Set the current bandwidth estimate, or `None` while the backend has none.
 	pub fn set(&self, bitrate: Option<Rate>) -> Result<()> {
-		let mut state = self.modify()?;
+		let mut state = self.state.write().map_err(|_| Error::Dropped)?;
 		if state.bitrate != bitrate {
 			state.bitrate = bitrate;
 		}
@@ -109,24 +108,9 @@ impl Producer {
 	}
 
 	/// A handle that mints consumers without being one, so holding it is not demand.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn weak(&self) -> Weak {
 		Weak(self.state.weak())
-	}
-
-	/// Close the producer with an error, notifying all consumers.
-	pub fn abort(&self, err: Error) -> Result<()> {
-		let mut state = self.modify()?;
-		state.abort = Some(err);
-		state.close();
-		Ok(())
-	}
-
-	/// Block until the channel is closed, returning the cause.
-	#[cfg(feature = "async")]
-	pub async fn closed(&self) -> Error {
-		self.state.closed().await;
-		self.close_error()
 	}
 
 	/// Block until there are no active consumers.
@@ -137,7 +121,7 @@ impl Producer {
 
 	/// Poll until there are no active consumers. Errors if the channel closes first.
 	pub fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
-		self.state.poll_unused(waiter).map_err(|_| self.close_error())
+		self.state.poll_unused(waiter).map_err(|_| Error::Dropped)
 	}
 
 	/// Whether at least one active consumer exists right now.
@@ -153,18 +137,7 @@ impl Producer {
 
 	/// Poll until at least one active consumer exists. Errors if the channel closes first.
 	pub fn poll_used(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
-		self.state.poll_used(waiter).map_err(|_| self.close_error())
-	}
-
-	fn modify(&self) -> Result<kio::Mut<'_, State>> {
-		self.state
-			.write()
-			.map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
-	}
-
-	/// The close error, once the channel is closed.
-	fn close_error(&self) -> Error {
-		self.state.read().abort.clone().unwrap_or(Error::Dropped)
+		self.state.poll_used(waiter).map_err(|_| Error::Dropped)
 	}
 }
 
@@ -176,12 +149,12 @@ impl Default for Producer {
 
 /// Mints [`Consumer`]s on demand without counting as one, nor keeping the channel open.
 #[derive(Clone)]
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub struct Weak(kio::ProducerWeak<State>);
 
 impl Weak {
 	/// A new consumer, which reports the closure once the producer is gone.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn consume(&self) -> Consumer {
 		Consumer {
 			inner: Inner::Whole(self.0.consume()),
@@ -231,7 +204,6 @@ impl Allocator {
 
 	/// The same registry dividing `estimate` instead, or nothing when it is `None`.
 	#[cfg(feature = "async")]
-	// private: capability gap
 	// Sessions follow their allocator's target; a custom session has no public way to yet.
 	pub(crate) fn with_estimate(&self, estimate: Option<Consumer>) -> Self {
 		Self {
@@ -258,7 +230,6 @@ impl Allocator {
 
 	/// Follow the probe target, for the session that probes on the reservations' behalf.
 	#[cfg(any(feature = "async", test))]
-	// private: capability gap
 	// Sessions follow their allocator's target; a custom session has no public way to yet.
 	pub(crate) fn target(&self) -> Target {
 		Target {
@@ -485,7 +456,6 @@ struct Entry {
 
 /// An [`Allocator`]'s probe target, followed by the session that probes for it.
 #[cfg(any(feature = "async", test))]
-// private: capability gap
 // Sessions follow their allocator's target; a custom session has no public way to yet.
 pub(crate) struct Target {
 	/// `None` once every allocator is gone.
@@ -498,7 +468,6 @@ impl Target {
 	/// The target once it differs from the last one returned, arming `waiter` otherwise.
 	///
 	/// Zero once every allocator is gone, since nothing is left reserving.
-	// private: capability gap
 	// Sessions follow their allocator's target; a custom session has no public way to yet.
 	pub(crate) fn poll_changed(&mut self, waiter: &kio::Waiter) -> Poll<Rate> {
 		let Some(registry) = &self.registry else {
@@ -721,7 +690,7 @@ impl Consumer {
 				// terminal. Collapsing this into `Ok(None)` would be indistinguishable
 				// from a live-but-unavailable estimate, and since a closed channel is
 				// always immediately ready, a `select!` over it would spin forever.
-				Poll::Ready(Err(state)) => return Poll::Ready(Err(state.abort.clone().unwrap_or(Error::Dropped))),
+				Poll::Ready(Err(_)) => return Poll::Ready(Err(Error::Dropped)),
 				Poll::Pending => return Poll::Pending,
 			},
 			// A share recomputes its slice on every wakeup, so it filters the
@@ -1043,7 +1012,7 @@ mod tests {
 		estimate.set(None).unwrap();
 		assert_eq!(share.changed().await.unwrap(), None);
 
-		estimate.abort(Error::Cancel).unwrap();
+		drop(estimate);
 		assert!(share.changed().await.is_err());
 		assert!(share.changed().await.is_err());
 	}
@@ -1135,6 +1104,41 @@ mod tests {
 		assert_eq!(large_reserved.peek(), Some(bps(5_000_000)));
 	}
 
+	/// Collected-language callers can relinquish a ceiling before their retained
+	/// handle is finalized, without ending the track or waiting for its subscribers.
+	#[test]
+	fn zero_ceiling_releases_share_and_probe_target() {
+		let estimate = Producer::new();
+		let allocator = Allocator::new(estimate.consume());
+		estimate.set(Some(bps(3_000_000))).unwrap();
+		let mut target = allocator.target();
+		let waiter = kio::Waiter::noop();
+
+		let (_encoder_broadcast, encoder) = track(VIDEO);
+		let _encoder_sub = encoder.subscribe(None);
+		let retired = allocator.reserve(&encoder.demand(), bps(4_000_000));
+		let replacement = allocator.reserve(&encoder.demand(), bps(4_000_000));
+		let (_sibling_broadcast, sibling) = track(VIDEO);
+		let _sibling_sub = sibling.subscribe(None);
+		let sibling = allocator.reserve(&sibling.demand(), bps(4_000_000));
+		assert_eq!(sibling.peek(), Some(bps(1_000_000)));
+		assert_eq!(target.poll_changed(&waiter), Poll::Ready(bps(12_000_000)));
+
+		retired.update(Rate::ZERO);
+		assert_eq!(retired.peek(), Some(Rate::ZERO));
+		assert_eq!(replacement.peek(), Some(bps(1_500_000)));
+		assert_eq!(sibling.peek(), Some(bps(1_500_000)));
+		assert_eq!(target.poll_changed(&waiter), Poll::Ready(bps(8_000_000)));
+		retired.update(Rate::ZERO);
+		assert!(target.poll_changed(&waiter).is_pending());
+
+		// The registration remains usable, so an encoder may resume in place.
+		retired.update(bps(4_000_000));
+		assert_eq!(sibling.peek(), Some(bps(1_000_000)));
+		assert_eq!(target.poll_changed(&waiter), Poll::Ready(bps(12_000_000)));
+		assert!(encoder.demand().is_used());
+	}
+
 	/// A reader parked on `changed` has to be woken by its own reservation moving, not
 	/// just by the estimate or a sibling: the encoder is sitting in a `select!` on it.
 	#[moq_clock::test]
@@ -1194,7 +1198,7 @@ mod tests {
 		assert_eq!(consumer.changed().await.unwrap(), None);
 
 		// Gone for good.
-		producer.abort(Error::Cancel).unwrap();
+		drop(producer);
 		assert!(consumer.changed().await.is_err());
 		// And it stays terminal rather than flapping back to a value.
 		assert!(consumer.changed().await.is_err());

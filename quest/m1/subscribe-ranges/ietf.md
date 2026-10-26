@@ -1,56 +1,42 @@
-# [M] moq-transport ranges
+# [M] moq-transport range updates
 
 ## Goal
 
-A relay fills past-range misses from a moq-transport upstream with one
-standalone FETCH per run of locally missing groups, never including the
-upstream's live group, so a sparse track costs a handful of requests. It
-serves a downstream IETF FETCH from the model's ranges without blocking on the
-live group.
+A relay carries a downstream range change to its moq-transport upstream in the
+subscription update that already carries the aggregate priority, widening
+included, and resolves a `Time(pts)` end before it goes upstream.
 
 ## Plan
 
-This absorbs the relay half of fetch-span (#4558) and builds on fetch-fill's
-checks (#4544). Receiving a multi-group FETCH stream means several groups on
-one stream. Absent sequences between the FETCH's groups become drops, and a
-group already cached is discarded as a duplicate. Cap a downstream FETCH at
-the Largest Object, as the moq-transport drafts require. A relay with only
-fetch demand learns the upstream's Largest from TRACK_STATUS without a
-SUBSCRIBE, since #4974.
+Range fills already go upstream as one FETCH per run of missing groups, and
+our publisher serves multi-group FETCHes ending at the Largest Object's group.
+That group is never cut at the Largest Object (maintainer, 2026-10-25,
+departing from draft-22 section 9.11): the cache cannot know an open group's
+real Largest Object, so the answer waits for it to finish rather than handing a
+downstream cache a truncated group as complete. What remains is the
+subscription side.
 
-Serving downstream lifts the one-group refusal ("FETCH spanning several
-groups not supported") in `run_fetch_stream`
-(`rs/moq-net/src/ietf/publisher.rs`) for every draft, including draft-20's
-`FetchType::Filtered`. Capping at the Largest Object also lifts the draft-20
-refusal of a filter bounded by it ("FETCH relative to Largest Object not
-supported"): no filter, a relative start, or an absolute start with no end.
-A multi-group FETCH keeps its one queue entry and moves with priority updates
-(decided 2026-10-13).
-
-The same FETCH-end path sets End of Track only when the read hits FIN, so a
-bounded FETCH that ends exactly at the track's last object reports
-`end_of_track: false` (found while landing #4971; it predates it). Set it only
-when the track has finished and the FETCH reaches its final object, never from
-a live track's Largest Object, and test both cases.
-
-Upstream range changes ride the subscription update that already carries the
-aggregate priority (`write_update` in `ietf/subscriber.rs`). Narrowing is
-allowed from draft-15 on. Widening is a bug today: on draft-20 and later, a
-subscriber from a future group puts its absolute start in the SUBSCRIBE filter,
-and a live subscriber merged in after it never gets the current group. Draft-20
-lets an update lower the start with FILL_PARAMETERS for what it missed, which
-opens a second fill stream on the subscription. Draft 14 forbids widening, and
-15 to 19 have no fill. `rs/moq-net/tests/integration/subscribe_ranges.rs`
-leaves draft-20+ out for that reason; add it back once the update carries the
-widened filter.
+Upstream range changes ride `write_update` in `ietf/subscriber.rs`.
+Narrowing is allowed from draft-15 on. Widening is a bug today: on draft-22
+and later, a subscriber from a future group puts its absolute start in the
+SUBSCRIBE filter, and a live subscriber merged in after it never gets the
+current group. Draft-22 lets an update lower the start with FILL_PARAMETERS
+for what it missed, which opens a second fill stream on the subscription.
+Draft 14 forbids widening, and 15 to 18 have no fill.
+`rs/moq-net/tests/integration/subscribe_ranges.rs` leaves draft-22 out for
+that reason; add it back once the update carries the widened filter. Our
+publisher still resets a subscription fill spanning several groups
+(`FillServe::Unsupported` in `ietf/publisher.rs`); serve it from the cache as
+a multi-group FETCH is served.
 
 moq-transport has no time filter, so a downstream `Time(pts)` end is
 resolved against the relay's cache before it goes upstream as a group range,
 or refused when the cache cannot resolve it.
 
-## Required
-
-- [Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md) - the range requests this answers
+A relay's fetch-only copy refuses a draft-22 FETCH relative to the Largest
+Object with Unsupported, since it does not store the Largest that
+TRACK_STATUS reports. Record it on the copy so those filters resolve there
+too.
 
 ## Related
 

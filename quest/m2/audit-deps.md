@@ -10,7 +10,7 @@ replacement.
 
 Recurs once per major release (decided 2026-10-19). The PR that finishes
 this run also adds the next one with the same file name at the end of the next
-milestone's `Required` (m0 to m1, m1 to m2, m2 to m3). The successor keeps the Goal
+milestone's `Required` (m0 to m1, m1 to m2). The successor keeps the Goal
 and this paragraph; the rest of its Plan is rewritten with what this run
 learned: baselines, results, and what to check first. A successor placed in m2
 also lists the [release cut](/quest/m2/release/cut.md) under `Required`, so it
@@ -42,8 +42,8 @@ Dependabot misses three kinds of update, so list them by hand:
   `just js workers` walk every tracked `bun.lock`.
 
 Deliberately uncovered: `dart/moq` (see the comment in
-`.github/dependabot.yml`), `bench/ffi-gen/Cargo.lock` (a one-off BoltFFI
-comparison), and `nix/uniffi-dart-Cargo.lock` (pinned with the generator).
+`.github/dependabot.yml`) and `nix/uniffi-dart-Cargo.lock` (pinned with the
+generator).
 The uniffi `>=0.33` ignore blocks nothing until 0.33 ships; keep it, since it
 ties uniffi to the Go generator.
 
@@ -132,6 +132,10 @@ deep-equal pair, and duplicated WebVTT stamps and `jwt=` lookups.
 near copies), which is duplication rather than a dependency question.
 The m1 run came a day after m0's and did not re-review it; check code
 added since.
+- When TypeScript 7.1 is stable, delete `TransportStats` in
+  `js/net/src/connection/stats.ts` and type `getStats()` as the DOM's
+  `WebTransportConnectionStats` (from
+  [moq-dev/moq#6625](https://github.com/moq-dev/moq/pull/6625)).
 
 ## Required
 

@@ -21,27 +21,41 @@ import type * as track from "./track.ts";
  *
  * `added`: a track the broadcast lists, with its fixed properties. `synced`: every track
  * listed when the listing began, and still listed, was reported; sent once, and later events
- * are live. `removed`: a track an earlier `added` reported is no longer listed, though a
- * handler may still serve its name on request.
+ * are live. `removed`: a track an earlier `added` reported is no longer listed, unfinished: its
+ * producer aborted, or the answer that listed it withdrew it; a handler may still serve its name
+ * on request. `finished`: a track an earlier `added` reported is no longer listed because it
+ * finished.
  *
  * @public
  */
 export type TracksEvent =
 	| { kind: "added"; name: string; info: track.Info }
 	| { kind: "synced" }
-	| { kind: "removed"; name: string };
+	| { kind: "removed"; name: string }
+	| { kind: "finished"; name: string };
+
+/** Whether `own` closed cleanly, so its track leaves the listing as finished. */
+function finished(own: track.Producer): boolean {
+	return own.closed.peek() === null;
+}
 
 /** One listed track and who lists it. */
 interface Entry {
 	info: track.Info;
 	/** The producer whose track lists it, so a stale unlist never removes a later track of the name. */
-	own?: object;
+	own?: track.Producer;
 	/** Whether the lister's answer lists it. */
 	answered: boolean;
 }
 
-/** A change a reader has yet to read. `readd` is a removal of a name it saw, then the name listed again. */
-type Pending = { kind: "add"; info: track.Info } | { kind: "remove" } | { kind: "readd"; info: track.Info };
+/**
+ * A change a reader has yet to read. `readd` is a removal of a name it saw, then the name listed
+ * again. A removal carries whether the track finished.
+ */
+type Pending =
+	| { kind: "add"; info: track.Info }
+	| { kind: "remove"; finished: boolean }
+	| { kind: "readd"; finished: boolean; info: track.Info };
 
 /** One reader's pending changes, keyed by name in the order they happened. */
 class Queue {
@@ -62,15 +76,16 @@ class Queue {
 
 	add(name: string, info: track.Info) {
 		// A name is listed once at a time, so only its removal can be pending.
-		if (this.pending.get(name)?.kind === "remove") this.pending.set(name, { kind: "readd", info });
+		const pending = this.pending.get(name);
+		if (pending?.kind === "remove") this.pending.set(name, { kind: "readd", finished: pending.finished, info });
 		else this.pending.set(name, { kind: "add", info });
 		this.wake();
 	}
 
-	remove(name: string) {
+	remove(name: string, finished: boolean) {
 		// Never read: the two cancel. Otherwise the removal replaces a pending re-add in place.
 		if (this.pending.get(name)?.kind === "add") this.pending.delete(name);
-		else this.pending.set(name, { kind: "remove" });
+		else this.pending.set(name, { kind: "remove", finished });
 		this.wake();
 	}
 
@@ -104,8 +119,14 @@ class Queue {
 	}
 
 	next(): TracksEvent | undefined {
-		if (this.end !== undefined) {
-			if (this.end) throw this.end;
+		if (this.end) throw this.end;
+		if (this.end === null) {
+			// A clean end still reports each track that left before it, and how; an add the
+			// reader never read is dropped.
+			for (const [name, pending] of this.pending) {
+				this.pending.delete(name);
+				if (pending.kind !== "add") return { kind: pending.finished ? "finished" : "removed", name };
+			}
 			return undefined;
 		}
 		if (!this.synced && this.bound !== undefined && (this.bound === 0 || this.pending.size === 0)) {
@@ -122,11 +143,11 @@ class Queue {
 				return { kind: "added", name, info: pending.info };
 			case "remove":
 				this.pending.delete(name);
-				return { kind: "removed", name };
+				return { kind: pending.finished ? "finished" : "removed", name };
 			case "readd":
 				// Setting an existing key keeps its place, so the add is read next.
 				this.pending.set(name, { kind: "add", info: pending.info });
-				return { kind: "removed", name };
+				return { kind: pending.finished ? "finished" : "removed", name };
 		}
 	}
 }
@@ -184,9 +205,10 @@ export class Listing {
 		for (const queue of this.#readers) queue.add(name, entry.info);
 	}
 
-	#remove(name: string) {
+	/** Unlist `name`, telling readers whether it `finished`. */
+	#remove(name: string, finished: boolean) {
 		if (!this.#live.delete(name)) return;
-		for (const queue of this.#readers) queue.remove(name);
+		for (const queue of this.#readers) queue.remove(name, finished);
 	}
 
 	/**
@@ -213,8 +235,9 @@ export class Listing {
 		return queue;
 	}
 
-	/** A reader left. A replaced or ended one already did. */
+	/** A reader left, so it reads nothing more. A replaced or ended one already did. */
 	release(queue: Queue, owner?: object) {
+		queue.pending.clear();
 		if (queue.detached) return;
 		queue.finish(null);
 		this.#readers.delete(queue);
@@ -223,14 +246,14 @@ export class Listing {
 	}
 
 	/** List a track `own` created. */
-	listOwn(name: string, own: object, info: track.Info) {
+	listOwn(name: string, own: track.Producer, info: track.Info) {
 		const entry = this.#live.get(name);
 		if (!entry) {
 			this.#insert(name, { info, own, answered: false });
 		} else if (entry.own && !entry.answered) {
 			// The earlier track of the name has not unlisted yet, but it left the table for this
-			// one: readers see it go and the new one arrive.
-			this.#remove(name);
+			// one: readers see it go, as it ended, and the new one arrive.
+			this.#remove(name, finished(entry.own));
 			this.#insert(name, { info, own, answered: false });
 		} else {
 			// Listed already by the answer, and it never stopped being listed: only the owner moves.
@@ -238,12 +261,12 @@ export class Listing {
 		}
 	}
 
-	/** Unlist a track `own` created, unless a later one took its name. */
-	unlistOwn(name: string, own: object) {
+	/** Unlist a track `own` created, as it ended, unless a later one took its name. */
+	unlistOwn(name: string, own: track.Producer) {
 		const entry = this.#live.get(name);
 		if (entry?.own !== own) return;
 		entry.own = undefined;
-		if (!entry.answered) this.#remove(name);
+		if (!entry.answered) this.#remove(name, finished(own));
 	}
 
 	/** Lister support; see {@link Lister}. */
@@ -269,11 +292,11 @@ export class Listing {
 		else this.#insert(name, { info, answered: true });
 	}
 
-	answerRemove(name: string) {
+	answerRemove(name: string, finished: boolean) {
 		const entry = this.#live.get(name);
 		if (!entry?.answered) throw new Error(`track not listed: ${name}`);
 		entry.answered = false;
-		if (!entry.own) this.#remove(name);
+		if (!entry.own) this.#remove(name, finished);
 	}
 
 	answerSynced() {
@@ -291,9 +314,21 @@ export class Listing {
 
 	#unanswer() {
 		for (const [name, entry] of [...this.#live]) {
-			if (entry.answered) this.answerRemove(name);
+			if (entry.answered) this.answerRemove(name, false);
 		}
 		this.#answered = false;
+	}
+
+	/**
+	 * The broadcast ended: so does every listing of it, first unlisting each of its producer's tracks
+	 * that finished. A handler's answer of the same name does not keep it live, since the producer's
+	 * track is what served it.
+	 */
+	close() {
+		for (const [name, entry] of [...this.#live]) {
+			if (entry.own && finished(entry.own)) this.#remove(name, true);
+		}
+		this.detach(null);
 	}
 
 	/** End every reader with `end` and detach them. */
@@ -320,7 +355,8 @@ export function listTracks(listing: Listing, owner?: object): Tracks {
  * The tracks a broadcast lists, from its consumer's `tracks()`.
  *
  * Reports every track listed when it was created, then `synced`, then each change as it
- * happens, until the broadcast ends. Listing a broadcast never requests a track: subscribe to
+ * happens, until the broadcast ends: a clean end comes after each track that left before it, and
+ * a track still listed then ends unfinished. Listing a broadcast never requests a track: subscribe to
  * each listed one through the consumer's `track(name)`.
  *
  * @public
@@ -370,7 +406,6 @@ export class Tracks {
 	}
 }
 
-// pending: /quest/m1/public-model/answer.md
 /**
  * Answers a broadcast's listings for a handler that knows the tracks it would serve, as a
  * session lists its peer's. A broadcast has at most one.
@@ -383,6 +418,7 @@ export class Lister {
 	#listing: Listing;
 	#closed = false;
 
+	/** @internal */
 	constructor(listing: Listing) {
 		listing.attach();
 		this.#listing = listing;
@@ -403,9 +439,14 @@ export class Lister {
 		this.#listing.answerAdd(name, info);
 	}
 
-	/** Stop listing a track. Throws if this answer does not list it. */
+	/** Stop listing a track that left unfinished, reported as `removed`. Throws if this answer does not list it. */
 	remove(name: string): void {
-		this.#listing.answerRemove(name);
+		this.#listing.answerRemove(name, false);
+	}
+
+	/** Stop listing a track that finished, reported as `finished`. Throws if this answer does not list it. */
+	finish(name: string): void {
+		this.#listing.answerRemove(name, true);
 	}
 
 	/** The answer holds everything this hop knows now; later changes are live. */
@@ -419,7 +460,7 @@ export class Lister {
 	}
 
 	/** End every current reader as if the broadcast ended, and withdraw the answer. A later reader asks again. */
-	finish(): void {
+	end(): void {
 		this.#listing.detach(null);
 		this.#listing.answerClear();
 	}

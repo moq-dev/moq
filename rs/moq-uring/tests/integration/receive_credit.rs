@@ -8,7 +8,7 @@
 //! JavaScript arm serves WebTransport to a Bun publisher; it needs Bun and runs in the
 //! interop workflow.
 //!
-//! Unsupported local kernels skip loudly; MOQ_STRICT makes CI refuse them.
+//! Unsupported local kernels skip loudly; CI_STRICT makes CI refuse them.
 
 #![cfg(all(target_os = "linux", feature = "quic"))]
 
@@ -29,7 +29,7 @@ const WINDOW: usize = 256 * 1024;
 fn worker() -> Option<Worker> {
 	match Worker::new(Config::default()) {
 		Ok(worker) => Some(worker),
-		Err(Error::Unsupported(reason)) if std::env::var_os("MOQ_STRICT").is_none() => {
+		Err(Error::Unsupported(reason)) if std::env::var_os("CI_STRICT").is_none() => {
 			eprintln!("skipping io_uring receive credit test: {reason}");
 			None
 		}
@@ -120,12 +120,15 @@ fn partial_frame_gives_way() {
 			.expect("quic accept");
 		let (session, driver) = moq_net::Server::new()
 			.with_publisher(&pub_origin)
-			.accept_lite(
+			.accept(
 				moq_net::time::Instant::now(),
-				moq_uring::transport::Session::new(quic::web::Session::raw(conn), moq_net::transport::Binding::InBand),
+				moq_uring::transport::Local::new(moq_uring::transport::Session::new(
+					quic::web::Session::raw(conn),
+					moq_net::transport::Address::Setup,
+				)),
 			)
 			.await
-			.expect("accept_lite");
+			.expect("accept");
 		let _ = server_handle.run(driver).await;
 		session.closed().await;
 	});
@@ -136,15 +139,15 @@ fn partial_frame_gives_way() {
 			let conn = quic::client::connect(client_sock, &dial).await.expect("quic connect");
 			let (session, driver) = moq_net::Client::new()
 				.with_subscriber(sub.clone())
-				.connect_lite(
+				.connect(
 					moq_net::time::Instant::now(),
-					moq_uring::transport::Session::new(
+					moq_uring::transport::Local::new(moq_uring::transport::Session::new(
 						quic::web::Session::raw(conn),
-						moq_net::transport::Binding::InBand,
-					),
+						moq_net::transport::Address::Setup,
+					)),
 				)
 				.await
-				.expect("connect_lite");
+				.expect("connect");
 			let task_handle = handle.clone();
 			handle.spawn(async move {
 				let _ = task_handle.run(driver).await;
@@ -292,9 +295,12 @@ fn javascript_partial_frame_gives_way() {
 				.expect("respond");
 			let (session, driver) = moq_net::Server::new()
 				.with_subscriber(sub.clone())
-				.accept_lite(
+				.accept(
 					moq_net::time::Instant::now(),
-					moq_uring::transport::Session::new(session, moq_net::transport::Binding::Uri),
+					moq_uring::transport::Local::new(moq_uring::transport::Session::new(
+						session,
+						moq_net::transport::Address::Uri,
+					)),
 				)
 				.await
 				.expect("accept");

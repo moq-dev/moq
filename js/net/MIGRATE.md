@@ -4,15 +4,43 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Stage a requested track before subscribers see it (#6111)
+### Publication handles own announcement control
 
-`Track.Request.stage(info)` returns a `Track.Staged` whose `producer` writes while subscribers waiting on the request stay pending; `commit()` publishes it with everything written so far and returns the `Producer`.
-Disposing a `Staged` uncommitted (`using`, or `[Symbol.dispose]()`) rejects the request. `accept(info)` is unchanged and equals `stage(info).commit()`.
+`Origin.Producer.createBroadcast(path)` and `Origin.Prepared.publish()` return an `Origin.Publication`.
+Keep that handle for `announce(route)`, `unannounce()`, and `route`; fill tracks through its readonly `broadcast` producer.
+`Broadcast.Producer` no longer exposes announcement methods or route metadata, including standalone producers and `prepared.broadcast` before admission.
+Closing `publication.broadcast` still retracts and ends the broadcast. Keeping only that fill handle leaves the broadcast and its announcement live; releasing a publication reference does not retract it.
+
+```ts
+const publication = origin.createBroadcast(path);
+const broadcast = publication.broadcast;
+broadcast.createTrack("data");
+publication.announce({ epoch: Epoch.mint() });
+```
+
+### `Varint.sizeLeadingOnes` is gone
+
+Take the length of `Varint.encodeLeadingOnes(v)`.
+
+### Published names refuse navigation segments
+
+Broadcast creation and route publication now refuse literal `.` and `..` segments, including segments in the producer's root.
+Resolve relative references before publishing, or rename broadcasts that used these segments.
+Path normalization, relative references, and subscription paths retain their semantics.
+
+### A listing says whether a removed track finished (#6399)
+
+`Broadcast.TracksEvent` gains `{ kind: "finished", name }`: the track left the listing because it finished. `{ kind: "removed", name }` now means it left unfinished. Handle both where you matched `"removed"`.
+
+### `Track.Producer.largest()` is a getter
+
+`Track.Producer.largest()` returns the track's largest location synchronously, `undefined` before any, instead of a promise for the next newer one.
+Drop the `await`. Every caller reads the same value: the old shared cursor let one caller take an update and leave another waiting forever.
+To wait for each newer one, keep a reader and follow its stream: `const reader = producer.subscribe();`, then `await reader.largest()`.
 
 ### A frameless group is not a successor (#6111)
 
 A group followed by a frameless one is judged stale against the next group that has a frame, where the frameless group used to count.
-`Track.Producer.dropGroups(start, end, error)` marks groups `[start, end)` the peer said it skipped; a reader holding one of them rejects with `error`.
 
 ### Priorities are signed (#6142)
 
@@ -31,10 +59,12 @@ Treat a rejected group read as the loss of that group and keep reading the track
 ### A claim answers by publishing (#5678)
 
 `Origin.Producer.dynamic(prefix)` takes no route: an application claim has no epoch, cost, or hops.
-Answer each `Origin.Request` with `request.prepare(epoch)` (a fresh `Epoch.mint()` per output run), fill `prepared.broadcast`, then `prepared.publish()`, which announces the broadcast at the exact path under that epoch and returns its producer.
-Only `publish` announces it: `prepared.broadcast.announce()` throws.
-Call `prepared.reject(err)` to refuse instead; JS has no destructor, so an abandoned `Prepared` holds its request open.
-`Dynamic.update` and `Request.accept` are no longer part of the public API, and `accept` throws on a request from `dynamic`.
+Answer each `Origin.Request` with `using prepared = request.prepare(epoch)` (a fresh `Epoch.mint()` per output run), fill `prepared.broadcast`, then `prepared.publish()`, which announces the broadcast at the exact path under that epoch and returns its publication handle.
+Only `publish` announces it: `prepared.broadcast` has no announcement methods.
+`Prepared.reject(err)` is replaced by idempotent `close()` and `[Symbol.dispose]()`; either refuses the unpublished answer as `Unroutable` and closes its broadcast. Closing that broadcast also refuses the request. `using` handles normal scope exit and exceptions; after `publish()`, disposal leaves the returned publication and its fill producer live.
+Use `request.reject(err)` to refuse before preparing. A retained, unclosed `Prepared` keeps its request pending; garbage collection provides no prompt cleanup guarantee.
+Construct a `Prepared` only with `request.prepare()`. Its constructor and the `Request.publisher`, `publishPrepared`, and `rejectPrepared` completion hooks are no longer public.
+`Dynamic.update` is no longer part of the public API, and `Request` has no `accept` (#6496): only the built-in sessions answer with a broadcast they already hold.
 Close the claim and claim again to change it, and close an answer's producer to end that output.
 
 ### `largest()` reports within a reader's `setGroups` bounds
@@ -42,7 +72,7 @@ Close the claim and claim again to change it, and close an answer's producer to 
 `Track.Subscriber.largest()` and `Track.Ordered.largest()` report the track's largest only while it is within the bounds set with `setGroups` or `withGroups`, where they used to ignore the bounds.
 A largest past the cap or below the floor reports nothing; the cache never stands in for it.
 A cap moved below the largest stays pending. Moving the bounds wakes a pending read, which reports the largest once it is within them and newer than the last report.
-Unbounded readers and `Track.Producer.largest()` are unchanged.
+Unbounded readers are unchanged.
 To read the track's edge from a capped reader, lift the cap with `setGroups({})` first.
 
 ### Lite-07 accounts for groups with `SUBSCRIBE_DROP`
@@ -194,7 +224,7 @@ Call `close()` with no argument.
 
 ### Origins hold broadcasts (#2705, #3225)
 
-`connection.publish(path, broadcast)` is `origin.createBroadcast(path)` then `broadcast.announce()`.
+`connection.publish(path, broadcast)` is `origin.createBroadcast(path)` then `publication.announce()` on the returned handle.
 `connection.announced(prefix)` is `origin.announced(scope)`, yielding `{ prefix, kind, route }`.
 `ignoreSelf` is gone: reflected announces are always dropped.
 

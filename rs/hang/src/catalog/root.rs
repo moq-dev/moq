@@ -2,6 +2,7 @@
 use crate::Result;
 use crate::catalog::{Audio, Binary, Json, PRIORITY, Text, Video};
 use serde::de::DeserializeOwned;
+use std::str::FromStr;
 
 /// Maximum number of video, audio, and text renditions accepted in one catalog update.
 pub const MAX_RENDITIONS: usize = 64;
@@ -335,6 +336,18 @@ impl<E> Catalog<E> {
 	}
 }
 
+impl<E: DeserializeOwned + Default> FromStr for Catalog<E> {
+	type Err = crate::Error;
+
+	/// Parse a catalog from a string.
+	///
+	/// Fails with [`Error::UnsupportedVersion`](crate::Error::UnsupportedVersion) if the catalog
+	/// needs a newer moq-hang draft than this crate reads.
+	fn from_str(s: &str) -> Result<Self> {
+		Self::from_slice(s.as_bytes())
+	}
+}
+
 impl<E: DeserializeOwned + Default> Catalog<E> {
 	/// Subscribe to catalog updates on a broadcast.
 	pub async fn subscribe(broadcast: &moq_net::broadcast::Consumer) -> Result<super::Consumer<E>> {
@@ -343,15 +356,6 @@ impl<E: DeserializeOwned + Default> Catalog<E> {
 			.subscribe(Catalog::default_subscription())
 			.await?;
 		Ok(super::Consumer::new(track))
-	}
-
-	/// Parse a catalog from a string.
-	///
-	/// Fails with [`Error::UnsupportedVersion`](crate::Error::UnsupportedVersion) if the catalog
-	/// needs a newer moq-hang draft than this crate reads.
-	#[allow(clippy::should_implement_trait)]
-	pub fn from_str(s: &str) -> Result<Self> {
-		Self::from_slice(s.as_bytes())
 	}
 
 	/// Parse a catalog from a slice of bytes.
@@ -379,7 +383,7 @@ impl<E: DeserializeOwned + Default> Catalog<E> {
 	///
 	/// Fails with [`Error::UnsupportedVersion`](crate::Error::UnsupportedVersion) if the catalog
 	/// needs a newer moq-hang draft than this crate reads.
-	pub fn from_value(value: serde_json::Value) -> Result<Self> {
+	pub(crate) fn from_value(value: serde_json::Value) -> Result<Self> {
 		check_version(value.get("version").and_then(serde_json::Value::as_u64))?;
 		Ok(serde_json::from_value(value)?)
 	}
@@ -692,10 +696,12 @@ mod test {
 				color: None,
 				projection: None,
 				stereo: None,
+				interlaced: false,
 				bitrate: None,
 				enabled: true,
 				preference: 0,
 				framerate: None,
+				reorder: None,
 				optimize_for_latency: None,
 				container: Container::Legacy,
 				warmup: None,
@@ -1090,7 +1096,7 @@ mod test {
 		assert_eq!(archive.timescale, 1000);
 
 		// Archive PTS 2000 (ms) lands 2s after the wall epoch, whatever the track timescale.
-		let expected = std::time::UNIX_EPOCH
+		let expected = moq_clock::Wall::UNIX_EPOCH
 			+ std::time::Duration::from_millis(crate::catalog::MOQ_EPOCH_UNIX_MILLIS + 1_751_846_402_000);
 		assert_eq!(
 			clock

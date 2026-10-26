@@ -15,10 +15,8 @@ categories = ["multimedia", "filesystem"]
 [dependencies]
 bytes = { workspace = true }
 futures = { workspace = true }
-hang = { workspace = true }
 kio = { workspace = true }
 moq-clock = { workspace = true }
-moq-json = { workspace = true }
 moq-net = { workspace = true }
 object_store = { workspace = true }
 percent-encoding = { workspace = true }
@@ -26,7 +24,6 @@ quick_cache = "0.7"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["macros", "sync", "time"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
@@ -37,8 +34,11 @@ object_store = { workspace = true, features = ["fs", "aws"] }
 s3s = "0.17"
 s3s-fs = "0.17"
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["macros", "net", "rt", "test-util"] }
+tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "test-util", "time"] }
 
 [[bench]]
 name = "producer"
 harness = false
+
+[lints]
+workspace = true

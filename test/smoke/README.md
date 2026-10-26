@@ -12,6 +12,7 @@ This suite installs the published moq packages and checks that they exchange med
 | --- | --- | --- |
 | Packages | `just smoke`, `just full` | Published clients through a local `moq-relay`. `smoke` is Rust only. `full` is the cross-language matrix. |
 | Public relays | `just relays` | Rust publisher and subscriber through every relay in the [moq-interop-runner](https://github.com/englishm/moq-interop-runner) registry. CI publishes with Rust and the browser (`js-web`) and subscribes with Rust, `js-web`, and `js-bun`. On those relays `js-web` and `js-bun` run only on WebTransport (`@moq/web-transport` has no raw QUIC mode); a client that does not belong is omitted. WebSocket is its own column for the relays in `WEBSOCKET_KEYS` (`moq-dev-rs`): each of their `http(s)` endpoints also runs as `ws(s)`, and every other relay keeps that fallback off. A relay that refuses anonymous root broadcasts is dialed on the path `publish_path` names (`stitcher-moq` publishes under `/moq-test`). That run is what the [results page](https://moq-dev.github.io/moq/relays/) shows. Only `--required` relays fail the run; the default is moq-dev's `cdn.moq.dev`, including its WebSocket endpoint. |
+| Upstream Docker runner | `just runner-build`, `just runner UPSTREAM OUTPUT` | Every published registry client against this checkout's relay, and the moq-dev clients against published Docker relays. Uses unpinned upstream HEAD and its HTML report. Local-build-only adapters appear as not run. Any failed pair or setup step fails the run, after the report is written. CI publishes it to [interop-runner/](https://git.moq.dev/interop-runner/). |
 | Cloudflare | `just cloudflare` | Relays built from the default branches of [cloudflare/moq-rs](https://github.com/cloudflare/moq-rs) and moq-dev/moq, driven by a Cloudflare client over WebTransport and raw QUIC. |
 | moxygen | `just moxygen` | Meta's [`moxygen`](https://github.com/facebookexperimental/moxygen) interop client through the latest moq-dev relay. Needs Linux Docker. |
 | Tokens | `just token`, `just token-full` | `moq auth` and npm [`@moq/auth`](https://www.npmjs.com/package/@moq/auth) mint and verify each other's JWTs, and each verifier rejects a tampered token. |
@@ -22,7 +23,7 @@ CI runs the matrix nightly and on pull requests that touch `test/smoke/`: [`.git
 
 ## Clients
 
-`moq-relay` and `moq` come from `PATH` or from `RELAY_BIN` and `MOQ_BIN`. Every other client installs from its registry on each run.
+`moq-relay` and `moq` come from `PATH` or from `RELAY_BIN` and `CLI_BIN`. Every other client installs from its registry on each run.
 
 | Client | Role | Install |
 | --- | --- | --- |
@@ -52,7 +53,7 @@ just token
 just check    # shfmt, shellcheck, actionlint, freshness
 ```
 
-`just nix-channel` is a run, not an install. It builds `github:moq-dev/moq#moq-relay` and `#moq` with `nix build --refresh --no-link`, then runs `smoke.sh` with `RELAY_BIN` and `MOQ_BIN` pointed at those outputs. Nothing is left on `PATH`, so a later `just full` does not see those binaries. The Docker images work the same way: point `RELAY_BIN` and `MOQ_BIN` at the wrappers in [`clients/docker`](clients/docker). Those wrappers are not an install.
+`just nix-channel` is a run, not an install. It builds `github:moq-dev/moq#moq-relay` and `#moq` with `nix build --refresh --no-link`, then runs `smoke.sh` with `RELAY_BIN` and `CLI_BIN` pointed at those outputs. Nothing is left on `PATH`, so a later `just full` does not see those binaries. The Docker images work the same way: point `RELAY_BIN` and `CLI_BIN` at the wrappers in [`clients/docker`](clients/docker). Those wrappers are not an install.
 
 `just check` lints the harness. Run the lane you changed.
 

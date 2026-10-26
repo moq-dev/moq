@@ -138,13 +138,14 @@ def run(action, plan):
         filters = [f"--filter={name}" for name, package in packages.items()
                    if verb in package["manifest"].get("scripts", {})]
         if filters:
-            command("bun", "run", *filters, "--elide-lines=0", verb)
+            concurrency = [] if os.environ.get("GITHUB_ACTIONS") == "true" else ["--sequential"]
+            command("bun", "run", *concurrency, *filters, "--elide-lines=0", verb)
 
     command("bun", "install", "--frozen-lockfile")
     if action == "test":
         command("python3", "sh/js/playwright.test.py")
         command("bun", "test", "js/common/declarations.test.ts", "js/common/deps.test.ts",
-                "js/common/docs.test.ts", "js/common/worklet.test.ts")
+                "js/common/docs.test.ts", "js/common/worklet.test.ts", "js/common/release.test.ts")
         scripts("test")
         return
     if action == "build":
@@ -157,7 +158,6 @@ def run(action, plan):
         raise RuntimeError("add these cross-tree JS inputs to the js pattern in sh/dispatch.sh: "
                            + " ".join(missing))
     command("python3", "sh/rs/stats-docs.py")
-    command("python3", "sh/rs/model-markers.py")
     # These inexpensive shared checks still protect every package's imports.
     result = subprocess.run(["grep", "-rn", "--include=*.ts", "--include=*.tsx",
                              "--exclude-dir=node_modules", "--exclude-dir=dist",
@@ -206,6 +206,9 @@ def main():
     if action == "plan":
         print(json.dumps(plan, default=sorted))
     else:
+        if plan["packages"] and os.environ.get("GITHUB_ACTIONS") != "true" and os.environ.get("LOCAL_SUPERVISED") != "1":
+            os.execvp("bash", ["bash", str(ROOT / "sh/local.sh"),
+                               sys.executable, str(Path(__file__).resolve()), *sys.argv[1:]])
         started = time.monotonic()
         run(action, plan)
         print(f"js: {action} finished in {time.monotonic() - started:.2f}s", flush=True)

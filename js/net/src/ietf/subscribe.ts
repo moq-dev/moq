@@ -7,7 +7,7 @@ import * as Filter from "./filter.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
 import { type MessageLocation, MSG_PARAM_FORWARD, MSG_PARAM_SUBSCRIBER_PRIORITY, Parameters } from "./parameters.ts";
-import { ABSENT_WIRE } from "./priority.ts";
+import { DEFAULT_WIRE } from "./priority.ts";
 import * as Properties from "./properties.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
@@ -51,11 +51,11 @@ function decodeGroupOrder(value: number): Order {
  * The filter this implementation joins a live track with.
  *
  * moq-lite joins at the start of the current group, which is a decodable point, and
- * draft-20's relative form is the first that can name it without knowing Largest Object.
+ * draft-22's relative form is the first that can name it without knowing Largest Object.
  * Earlier drafts request unfiltered delivery because this client does not send joining FETCH.
  */
 export function joinFilter(version: IetfVersion): Filter.Filter {
-	return Filter.isDraft20(version) ? { kind: "relative", groups: 1n } : { kind: "unfiltered" };
+	return Filter.isDraft22(version) ? { kind: "relative", groups: 1n } : { kind: "unfiltered" };
 }
 
 export class Subscribe {
@@ -74,13 +74,13 @@ export class Subscribe {
 	/** Which Objects the subscription delivers, resolved by the publisher against the live edge. */
 	filter: Filter.Filter;
 
-	/** The draft-20 backfill requested alongside it, or `undefined` for none. */
+	/** The draft-22 backfill requested alongside it, or `undefined` for none. */
 	fill?: Filter.Fill;
 
 	/** Whether the subscriber wants Track Properties on the response (INCLUDE_PROPERTIES). */
 	propertiesWanted: boolean;
 
-	/** Whether Objects are forwarded (FORWARD). We only serve forwarding subscriptions. */
+	/** Whether Objects are forwarded (FORWARD); a paused subscription forwards none until resumed. */
 	forward: boolean;
 
 	/** Whether the request carried a Range Filter, which we refuse. Never encoded. */
@@ -164,10 +164,10 @@ export class Subscribe {
 			params.forward = this.forward;
 			params.subscriptionFilter = this.filter;
 
-			// FILL_PARAMETERS and INCLUDE_PROPERTIES arrived in draft-20. An older peer reads
+			// FILL_PARAMETERS and INCLUDE_PROPERTIES are draft-22 only. An older peer reads
 			// either as an unknown parameter, which is a protocol violation, so they are
 			// dropped rather than downgraded.
-			if (Filter.isDraft20(version)) {
+			if (Filter.isDraft22(version)) {
 				if (this.fill) {
 					params.fillParameters = Filter.encodeFill(this.fill, version);
 				}
@@ -221,19 +221,19 @@ export class Subscribe {
 		}
 		// v15+: fields are in parameters
 		const params = await Parameters.decode(r, version, "subscribe");
-		const subscriberPriority = params.subscriberPriority ?? ABSENT_WIRE;
+		const subscriberPriority = params.subscriberPriority ?? DEFAULT_WIRE;
 		const groupOrder = decodeGroupOrder(params.groupOrder ?? GroupOrder.Descending);
 
-		// FILL_PARAMETERS and INCLUDE_PROPERTIES are draft-20 additions, and the Range
-		// Filters draft-19 ones. An unknown message parameter is a protocol violation, so
+		// FILL_PARAMETERS, INCLUDE_PROPERTIES, and the Range Filters are draft-22
+		// additions. An unknown message parameter is a protocol violation, so
 		// they stay rejected on the drafts that predate them rather than being quietly
 		// tolerated.
-		const draft20 = Filter.isDraft20(version);
-		if ((params.fillParameters !== undefined || params.includeProperties !== undefined) && !draft20) {
-			throw new Error("FILL_PARAMETERS and INCLUDE_PROPERTIES need draft-20");
+		const draft22 = Filter.isDraft22(version);
+		if ((params.fillParameters !== undefined || params.includeProperties !== undefined) && !draft22) {
+			throw new Error("FILL_PARAMETERS and INCLUDE_PROPERTIES need draft-22");
 		}
 		if (params.rangeFilters && !Filter.hasRangeFilters(version)) {
-			throw new Error("Range Filters need draft-19");
+			throw new Error("Range Filters need draft-22");
 		}
 		if (params.trackPropertyFilter) {
 			throw new Error("TRACK_PROPERTY_FILTER is not allowed on SUBSCRIBE");
@@ -460,7 +460,7 @@ export class SubscribeUpdate {
 				await w.u62(0n); // start_group
 				await w.u62(0n); // start_object
 				await w.u62(0n); // end_group
-				await w.u8(this.parameters.subscriberPriority ?? ABSENT_WIRE);
+				await w.u8(this.parameters.subscriberPriority ?? DEFAULT_WIRE);
 				await w.bool(this.parameters.forward ?? true);
 				await this.parameters.encode(w, version, [MSG_PARAM_SUBSCRIBER_PRIORITY, MSG_PARAM_FORWARD]);
 			} else {

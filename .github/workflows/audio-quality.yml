@@ -2,7 +2,7 @@ name: Audio quality
 
 # Grades the recorded-trace replays of test/audio-quality against their exact
 # budgets, nightly on main and on every release PR that can move them. They
-# replay the player's container consumer and rings on a simulated clock, so
+# replay the player's container consumer and ring on a simulated clock, so
 # they are deterministic and take seconds, unlike the browser rows, which stay
 # in nightly.yml.
 on:
@@ -34,7 +34,7 @@ jobs:
         shell: bash -leo pipefail {0}
         env:
           # Somewhere upload-artifact can reach; the harness default is under $TMPDIR.
-          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
 
       # The harness keeps a failing run's directory: every row's samples and summary.
       - name: Keep the failing run

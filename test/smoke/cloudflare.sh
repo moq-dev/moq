@@ -21,7 +21,7 @@ TMP=$(mktemp -d)
 RELAY_PID=""
 PUB_PID=""
 CLOUDFLARE_RELAY="${CLOUDFLARE_RELAY_BIN:-}"
-MOQ_RELAY="${MOQ_RELAY_BIN:-}"
+MOQ_RELAY="${RELAY_BIN:-}"
 CLIENT="${CLOUDFLARE_CLIENT_BIN:-}"
 
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -261,7 +261,6 @@ for transport in webtransport quic; do
         webtransport) url="$HTTPS_URL" ;;
         quic) url="$MOQT_URL" ;;
     esac
-    # moq-dev's IETF adapter currently forwards subgroup streams, not datagrams.
     # A moderate cadence avoids conflating lossy live-edge turnover with protocol
     # interoperability while still validating sustained multi-group delivery.
     run_round moq-dev "$transport" "$url" subgroup 65536 32 25

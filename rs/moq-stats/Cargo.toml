@@ -24,6 +24,7 @@ moq-json = { workspace = true }
 moq-net = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_with = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 web-async = { workspace = true }
@@ -46,3 +47,6 @@ harness = false
 name = "producer_tick"
 harness = false
 required-features = ["bench"]
+
+[lints]
+workspace = true

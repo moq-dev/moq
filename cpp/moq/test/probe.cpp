@@ -5,7 +5,9 @@
 #include <moq/moq.hpp>
 
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
+#include <cstring>
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
@@ -96,9 +98,70 @@ Coroutine read_one(std::shared_ptr<moq::TrackConsumer> consumer, std::optional<m
 }
 #endif
 
+// Exercise the installed audio publisher and consumer rather than only generated signatures.
+void audio_roundtrip() {
+    auto broadcast = ok(moq::BroadcastProducer::init(), "audio broadcast");
+    auto receiver = ok(broadcast->consume(), "audio receiver");
+    auto catalogs = ok(moq::MediaCatalogConsumer::subscribe(receiver).get(), "audio catalog consumer");
+    auto catalog = ok(moq::MediaCatalogProducer::init(broadcast), "audio catalog producer");
+    moq::AudioEncoderInput input{moq::AudioSampleFormat::kF32, 48000, 2};
+    moq::AudioEncoderOutput output{};
+    output.codec = moq::AudioCodec::opus();
+    output.frame_duration = std::chrono::milliseconds(20);
+    auto audio = ok(moq::AudioProducer::init(catalog, {input, output, "tone", nullptr}), "audio producer");
+    auto snapshot = ok(catalogs->next().get(), "audio catalog");
+    CHECK(snapshot.has_value());
+    moq::AudioDecoderOutput decoded{};
+    decoded.format = moq::AudioSampleFormat::kF32;
+    // The track's whole retention: reading starts only after finish, and the budget ages
+    // groups by wall clock, so a stalled host would otherwise skip the start.
+    decoded.max_delay = std::chrono::seconds(30);
+    auto consumer = ok(moq::AudioConsumer::subscribe(receiver, "tone", snapshot->audio.at("tone"), decoded).get(), "audio consumer");
+    for (size_t packet = 0; packet < 8; packet++) {
+        std::vector<uint8_t> data(960 * 2 * sizeof(float));
+        for (size_t sample = 0; sample < 960; sample++) {
+            for (size_t channel = 0; channel < 2; channel++) {
+                float value = 0.4f * std::sin(2.0 * 3.141592653589793 * (channel == 0 ? 400.0 : 1000.0) *
+                                           (packet * 960 + sample) / 48000.0);
+                std::memcpy(data.data() + (sample * 2 + channel) * sizeof(float), &value, sizeof(value));
+            }
+        }
+        ok(audio->write({250000 + packet * 20000, data}), "write audio");
+    }
+    ok(audio->finish(), "finish audio");
+    size_t frames = 0;
+    double real[2][2] = {}, imag[2][2] = {};
+    for (;;) {
+        auto next = ok(consumer->next().get(), "decoded audio");
+        if (!next) break;
+        CHECK(next->timestamp_us == 250000 + frames * 1000000 / 48000);
+        CHECK(next->data.size() % (2 * sizeof(float)) == 0);
+        for (size_t sample = 0; sample < next->data.size() / (2 * sizeof(float)); sample++) {
+            for (size_t channel = 0; channel < 2; channel++) {
+                float value;
+                std::memcpy(&value, next->data.data() + (sample * 2 + channel) * sizeof(float), sizeof(value));
+                for (size_t tone = 0; tone < 2; tone++) {
+                    double phase = 2.0 * 3.141592653589793 * (tone == 0 ? 400.0 : 1000.0) * (frames + sample) / 48000.0;
+                    real[channel][tone] += value * std::cos(phase);
+                    imag[channel][tone] += value * std::sin(phase);
+                }
+            }
+        }
+        frames += next->data.size() / (2 * sizeof(float));
+    }
+    CHECK(frames == 8 * 960);
+    for (size_t channel = 0; channel < 2; channel++) {
+        auto power = [&](size_t tone) { return real[channel][tone] * real[channel][tone] + imag[channel][tone] * imag[channel][tone]; };
+        CHECK(power(channel) > power(1 - channel));
+    }
+    CHECK(!audio->write({0, std::vector<uint8_t>(8)}));
+    ok(broadcast->close(), "close audio broadcast");
+}
+
 } // namespace
 
 int main() {
+    audio_roundtrip();
     auto timebase_owner = ok(moq::BroadcastProducer::init(), "timebase owner");
     auto timebase_other = ok(moq::BroadcastProducer::init(), "timebase other");
     auto timebase = ok(moq::MediaTimebase::init(timebase_owner), "timebase");
@@ -109,17 +172,14 @@ int main() {
     CHECK(!moq::MediaTimebase::init(timebase_owner));
     ok(timebase_other->close(), "close timebase other");
 
-    // A finished broadcast lingers for its longest max age; closing the handle ends the wait early.
+    // A finished catalog leaves the broadcast up, still serving its finished tracks, until it closes.
     auto finished = ok(moq::BroadcastProducer::init(), "finished broadcast");
-    moq::TrackInfo aged;
-    aged.max_age_us = 3600000000;
-    ok(ok(finished->publish_track("status", aged), "publish aged track")->finish(), "finish aged track");
-    auto finish = ok(finished->finish(), "broadcast finish");
-    CHECK(finish->linger_us() == 3600000000);
-    CHECK(!finished->publish_track("events", {}));
-    auto lingering = finish->wait();
-    finish->close();
-    ok(lingering.get(), "finish wait");
+    auto finished_catalog = ok(moq::MediaCatalogProducer::init(finished), "finished catalog");
+    ok(ok(finished->publish_track("status", {}), "publish track")->finish(), "finish track");
+    ok(finished_catalog->finish(), "catalog finish");
+    ok(finished->consume(), "consume a finished broadcast");
+    ok(finished->close(), "close finished broadcast");
+    CHECK(!finished_catalog->finish());
 
     // A synchronous error is a returned value, not an exception.
     auto unbound = ok(moq::Server::init({}), "server init");
@@ -130,13 +190,6 @@ int main() {
           "not listening; call listen() first");
     // It prints the message Rust's Display gives.
     CHECK(fingerprints.error().to_string() == "bind: not listening; call listen() first");
-
-    // An epoch's time keeps every 48-bit millisecond, past where system_clock's nanoseconds wrap.
-    CHECK(ok(moq::epoch_time("018bcfe5-6800-7000-8000-000000000000"), "epoch_time").time_since_epoch() ==
-          std::chrono::milliseconds(1700000000000));
-    CHECK(ok(moq::epoch_time("ffffffff-ffff-7000-8000-000000000000"), "epoch_time").time_since_epoch() ==
-          std::chrono::milliseconds(0xffffffffffff));
-    CHECK(!moq::epoch_time("not-an-epoch"));
 
     // Publisher: a server whose origin serves one broadcast with one track.
     auto origin = moq::OriginProducer::init({});
@@ -157,11 +210,15 @@ int main() {
     // thread blocks on one at a time.
     moq::ClientConfig client_config;
     client_config.tls.insecure = true;
+    client_config.implementation = moq::IMPLEMENTATION;
     auto client = ok(moq::Client::init(client_config), "client init");
     auto accepting = server->accept();
     auto connecting = client->connect("https://" + addr);
     auto request = ok(accepting.get(), "accept");
     CHECK(request != nullptr);
+    // The package names itself ahead of moq-ffi, so a server can tell bindings apart.
+    auto implementation = request->peer_implementation();
+    CHECK(implementation && implementation->rfind("moq-cpp/", 0) == 0);
     auto served = ok(request->accept(nullptr, nullptr).get(), "request accept");
     auto session = ok(connecting.get(), "connect");
 

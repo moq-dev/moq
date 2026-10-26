@@ -7,7 +7,7 @@ import { Effect, type Getter, getter, type Inputs, type Readonlys, Signal } from
 import { rotateVideoDimensions } from "@moq/video";
 import { CatalogProducer } from "./catalog";
 import { errors } from "./internal";
-import { Baseline } from "./jitter";
+import { Order } from "./order";
 import { type Kind, Rendition } from "./rendition";
 
 // The refresh ratio video tracks advertise: a joiner forces a keyframe once a group's deltas
@@ -30,14 +30,8 @@ export type BroadcastInput = {
 	// see or subscribe to it. The flip rather than a gate on creating it: tracks can be
 	// populated while this is false, then announced once ready. The catalog is served from the
 	// first announce, so its first snapshot is the one current at announce time.
-	// Turning it off unannounces the broadcast, unless `linger` finishes it.
+	// Turning it off unannounces the broadcast.
 	announce: Getter<boolean>;
-
-	// Whether turning `announce` off after an announce finishes the broadcast cleanly instead of
-	// unannouncing it. Defaults to false. A finished broadcast stays announced while its media is
-	// fresh, so a viewer still catching up drains the tail, then closes, and announcing again
-	// publishes a new broadcast that replaces it at once. Read when announcing stops.
-	linger: Getter<boolean>;
 
 	// The broadcast name.
 	name: Getter<Moq.Path.Valid>;
@@ -90,6 +84,8 @@ export class Broadcast {
 	 */
 	readonly catalog = new CatalogProducer();
 
+	readonly #net = new Signal<Moq.Broadcast.Producer | undefined>(undefined);
+
 	/**
 	 * The underlying network broadcast, recreated when the name, enabled state, or maxAge changes,
 	 * and is `undefined` in between. It lives in the origin rather than any session, so it spans
@@ -98,13 +94,13 @@ export class Broadcast {
 	 * Names under a rendition's ID (`video/1`) are reserved for that rendition's replacement tracks.
 	 * Reacquire it via an effect, since a rename swaps in a fresh producer.
 	 */
-	readonly net = new Signal<Moq.Broadcast.Producer | undefined>(undefined);
+	readonly net: Getter<Moq.Broadcast.Producer | undefined> = this.#net;
 
 	/**
-	 * @internal The recent minimum flush lateness across every rendition, which each encoder
-	 * measures its catalog `delay` against. Per broadcast, so a swapped one starts fresh.
+	 * @internal The highest timestamp each rendition has written, which each encoder measures its
+	 * catalog `delay` against. Per broadcast, so a swapped one starts fresh.
 	 */
-	readonly baseline = new Baseline();
+	readonly order = new Order();
 
 	// The registered renditions keyed by full track name. A plain object so deep-equality detects a
 	// key add/remove; the Rendition values compare by identity, which is stable.
@@ -133,12 +129,6 @@ export class Broadcast {
 	// The identity of each track name in the latest catalog fold, recorded when the catalog is first served.
 	#listed = new Map<string, Identity>();
 
-	// The last network broadcast if it ended cleanly, serving its tail until its media is stale,
-	// with the identity it was published under.
-	#finished:
-		| { finish: Moq.Broadcast.Finish; origin: Moq.Origin.Table; name: Moq.Path.Valid; maxAge: Milli | undefined }
-		| undefined;
-
 	#signals = new Effect();
 
 	constructor(props?: Inputs<BroadcastInput>) {
@@ -146,7 +136,6 @@ export class Broadcast {
 			origin: getter(props?.origin),
 			enabled: getter(props?.enabled ?? true),
 			announce: getter(props?.announce ?? true),
-			linger: getter(props?.linger ?? false),
 			name: getter(props?.name ?? Moq.Path.empty()),
 			display: getter(props?.display),
 			flip: getter(props?.flip ?? false),
@@ -341,27 +330,6 @@ export class Broadcast {
 
 	#run(effect: Effect) {
 		const values = effect.getAll([this.in.enabled, this.in.origin]);
-
-		// A finished broadcast keeps its path until its linger ends. Announcing again replaces it,
-		// and anything else that reruns this (disabling, a new origin or name) ends it at once. The
-		// identity is compared, not just watched, since it may change in the same tick it finished.
-		const finished = this.#finished;
-		if (finished && finished.finish.closed.peek() === undefined) {
-			if (
-				values &&
-				!effect.get(this.in.announce) &&
-				values[1] === finished.origin &&
-				effect.get(this.in.name) === finished.name &&
-				effect.get(this.in.maxAge) === finished.maxAge
-			) {
-				effect.get(finished.finish.closed);
-				effect.cleanup(() => finished.finish.close());
-				return;
-			}
-			finished.finish.close();
-		}
-		this.#finished = undefined;
-
 		if (!values) return;
 		const [_enabled, origin] = values;
 
@@ -375,25 +343,17 @@ export class Broadcast {
 
 		// Creating into the origin outlives any single session: a reconnect re-announces the
 		// broadcast and new subscriptions land on the same producer.
-		const broadcast = origin.createBroadcast(name);
-		// Set once announcing stops after serving with `linger`, which ends this broadcast cleanly.
-		const ended = new Signal(false);
-		effect.get(ended);
-		effect.cleanup(() => {
-			if (!ended.peek()) return broadcast.close();
-			// Cleanups run last-in first-out, so every track already closed cleanly.
-			const finish = broadcast.finish();
-			this.#finished = { finish, origin, name, maxAge };
-			void finish.wait();
-		});
+		const broadcastPublication = origin.createBroadcast(name);
+		const broadcast = broadcastPublication.broadcast;
+		effect.cleanup(() => broadcast.close());
 		// One publisher instance per broadcast, kept across unannounce and announce, so a
 		// restart is a new broadcast rather than a resume into the old one.
 		const epoch = Moq.Epoch.mint();
 
 		// Expose it before serving so an application reacting to `net` can insert its own tracks.
-		this.net.set(broadcast);
+		this.#net.set(broadcast);
 		effect.cleanup(() => {
-			if (this.net.peek() === broadcast) this.net.set(undefined);
+			if (this.#net.peek() === broadcast) this.#net.set(undefined);
 		});
 
 		// Each track lives as long as the broadcast: a track name always means the same content,
@@ -414,9 +374,7 @@ export class Broadcast {
 		let serving = false;
 		effect.run((inner) => {
 			if (!inner.get(this.in.announce)) {
-				// Before the first announce there is nothing to finish.
-				if (serving && this.in.linger.peek()) ended.set(true);
-				else broadcast.unannounce();
+				broadcastPublication.unannounce();
 				return;
 			}
 
@@ -445,7 +403,7 @@ export class Broadcast {
 				}
 			}
 
-			broadcast.announce({ epoch });
+			broadcastPublication.announce({ epoch });
 		});
 
 		// Static tracks fan out to every subscriber. Keep the encoder-facing handle demand-gated
@@ -504,7 +462,6 @@ export class Broadcast {
 	/** Stop and release everything this holds. */
 	close() {
 		this.#signals.close();
-		this.#finished?.finish.close();
 	}
 }
 

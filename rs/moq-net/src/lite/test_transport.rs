@@ -23,6 +23,8 @@ use crate::transport::poll;
 #[derive(Debug, Clone, Default)]
 pub struct SinkError {
 	code: u32,
+	/// The peer reset this one stream with this code, rather than failing the session.
+	stream: Option<u32>,
 }
 
 impl std::fmt::Display for SinkError {
@@ -35,7 +37,14 @@ impl std::error::Error for SinkError {}
 
 impl crate::transport::Error for SinkError {
 	fn session_error(&self) -> Option<(u32, String)> {
-		Some((self.code, "closed".to_string()))
+		match self.stream {
+			Some(_) => None,
+			None => Some((self.code, "closed".to_string())),
+		}
+	}
+
+	fn stream_error(&self) -> Option<u32> {
+		self.stream
 	}
 }
 
@@ -62,6 +71,7 @@ pub struct Log {
 	/// How long the trail and the stops were at the first session close.
 	closed_at: Arc<Mutex<Option<(usize, usize)>>>,
 	bi_opens: Arc<AtomicUsize>,
+	pub request_attempts: Arc<AtomicUsize>,
 	priorities: Arc<Mutex<Vec<u8>>>,
 	/// Hands each send group its id.
 	group_ids: Arc<AtomicUsize>,
@@ -94,6 +104,7 @@ impl Log {
 			})
 			.map(|closed| SinkError {
 				code: closed.expect("closed"),
+				stream: None,
 			})
 	}
 
@@ -519,6 +530,17 @@ impl poll::Session for DeadStreamSession {
 		)))
 	}
 
+	fn poll_open_request(
+		&mut self,
+		cx: &mut std::task::Context<'_>,
+		options: crate::transport::poll::SendOptions<
+			'_,
+			<Self::SendStream as crate::transport::poll::SendStream>::Group,
+		>,
+	) -> std::task::Poll<Result<Option<crate::transport::poll::BiStreams<Self>>, Self::Error>> {
+		self.poll_open_bi(cx, options).map_ok(Some)
+	}
+
 	fn poll_open_uni(
 		&mut self,
 		_cx: &mut Context<'_>,
@@ -548,8 +570,8 @@ impl poll::Session for DeadStreamSession {
 		0
 	}
 
-	fn binding(&self) -> crate::transport::Binding {
-		crate::transport::Binding::InBand
+	fn address(&self) -> crate::transport::Address {
+		crate::transport::Address::Setup
 	}
 	fn protocol(&self) -> Option<&str> {
 		None
@@ -580,6 +602,9 @@ pub struct SinkSession {
 	/// Set by [`Self::accepted_bi`]. `None` parks `accept_bi` forever, which is what
 	/// every session that only ever opens its own streams expects.
 	accept_gate: Option<kio::Consumer<bool>>,
+	/// Set by [`Self::with_open_bi_gate`] to withhold bidi stream credit.
+	bi_open_gate: Option<kio::Consumer<bool>>,
+	bi_open_park: kio::Park,
 	/// Set by [`Self::gated_uni`] to hold unidirectional stream writes.
 	uni_gate: Option<kio::Consumer<bool>>,
 	/// Set by [`Self::gated_open_uni`] to withhold unidirectional stream credit.
@@ -702,6 +727,12 @@ impl SinkSession {
 		self.uni_open_gate = Some(gate);
 		self
 	}
+
+	/// Also hold bidi stream opens until `gate` grants stream credit.
+	pub fn with_open_bi_gate(mut self, gate: kio::Consumer<bool>) -> Self {
+		self.bi_open_gate = Some(gate);
+		self
+	}
 }
 
 impl poll::Session for SinkSession {
@@ -724,17 +755,35 @@ impl poll::Session for SinkSession {
 
 	fn poll_open_bi(
 		&mut self,
-		_cx: &mut Context<'_>,
+		cx: &mut Context<'_>,
 		options: poll::SendOptions<'_, SinkGroup>,
 	) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
 		let Some(gate) = self.bi_gate.clone() else {
 			return Poll::Pending;
 		};
+		if let Some(credit) = &self.bi_open_gate {
+			let waiter = self.bi_open_park.hold(cx);
+			match credit.poll(waiter, |open| (**open).then_some(()).map_or(Poll::Pending, Poll::Ready)) {
+				Poll::Ready(Ok(())) => {}
+				Poll::Ready(Err(_)) | Poll::Pending => return Poll::Pending,
+			}
+		}
 		self.log.bi_opens.fetch_add(1, Ordering::Relaxed);
 
 		let mut send = SinkSend::gated(self.log.clone(), gate).opened(options);
 		send.prefix = self.bi_prefix;
 		Poll::Ready(Ok((send, PendingRecv)))
+	}
+
+	fn poll_open_request(
+		&mut self,
+		cx: &mut std::task::Context<'_>,
+		options: crate::transport::poll::SendOptions<
+			'_,
+			<Self::SendStream as crate::transport::poll::SendStream>::Group,
+		>,
+	) -> std::task::Poll<Result<Option<crate::transport::poll::BiStreams<Self>>, Self::Error>> {
+		self.poll_open_bi(cx, options).map_ok(Some)
 	}
 
 	fn poll_open_uni(
@@ -778,8 +827,8 @@ impl poll::Session for SinkSession {
 		self.datagram_size
 	}
 
-	fn binding(&self) -> crate::transport::Binding {
-		crate::transport::Binding::InBand
+	fn address(&self) -> crate::transport::Address {
+		crate::transport::Address::Setup
 	}
 	fn protocol(&self) -> Option<&str> {
 		self.protocol
@@ -854,7 +903,10 @@ pub struct Script {
 #[derive(Clone, Copy, Debug)]
 pub enum Close {
 	Fin,
+	/// Fail the read as a session close would.
 	Reset,
+	/// Reset just this stream with a code, as a peer that gave up on one stream would.
+	ResetStream(u32),
 }
 
 impl poll::Chunks for Script {
@@ -873,6 +925,10 @@ impl poll::Chunks for Script {
 			true => match *self.close.lock().unwrap() {
 				Some(Close::Fin) => Poll::Ready(Ok(None)),
 				Some(Close::Reset) => Poll::Ready(Err(SinkError::default())),
+				Some(Close::ResetStream(code)) => Poll::Ready(Err(SinkError {
+					stream: Some(code),
+					..Default::default()
+				})),
 				None => self.log.poll_closed(self.park.hold(cx)).map(Err),
 			},
 			false => Poll::Ready(Ok(Some(chunk))),
@@ -901,8 +957,9 @@ pub struct ScriptedSession {
 	/// across every stream.
 	queue: Option<Arc<Mutex<std::collections::VecDeque<Vec<u8>>>>>,
 	/// Set by [`Self::gated_open`]: parks `poll_open_bi` until the gate opens, standing in
-	/// for a peer that has granted no more concurrent streams.
+	/// for a transport header blocked on send capacity.
 	open_gate: Option<kio::Consumer<bool>>,
+	credit: kio::Producer<bool>,
 	/// Keeps the gate registration alive between `poll_open_bi` calls.
 	park: kio::Park,
 	/// Scripts the peer pushes at us on unidirectional streams, popped by `accept_uni`
@@ -911,12 +968,23 @@ pub struct ScriptedSession {
 	incoming_bidis: Arc<Mutex<std::collections::VecDeque<Vec<u8>>>>,
 	/// Set by [`Self::with_unacked_fin`].
 	unacked_fin: bool,
+	/// Set by [`Self::with_unacked_uni_fins`]; shared, so every clone counts down one budget.
+	unacked_unis: Arc<AtomicUsize>,
 	datagram_size: usize,
 	/// Set by [`Self::with_groups`].
 	groups: bool,
 }
 
 impl ScriptedSession {
+	pub fn without_credit(self) -> Self {
+		*self.credit.write().ok().expect("credit is live") = false;
+		self
+	}
+
+	pub fn grant_credit(&self) {
+		*self.credit.write().ok().expect("credit is live") = true;
+	}
+
 	pub fn with_stats(mut self, stats: SinkStats) -> Self {
 		self.stats = stats;
 		self
@@ -935,10 +1003,12 @@ impl ScriptedSession {
 			script: Arc::new(Mutex::new(script)),
 			queue: None,
 			open_gate: None,
+			credit: kio::Producer::new(true),
 			park: kio::Park::default(),
 			incoming_unis: Arc::new(Mutex::new(std::collections::VecDeque::new())),
 			incoming_bidis: Arc::new(Mutex::new(std::collections::VecDeque::new())),
 			unacked_fin: false,
+			unacked_unis: Default::default(),
 			datagram_size: 0,
 			groups: false,
 		}
@@ -953,6 +1023,13 @@ impl ScriptedSession {
 	/// Never acknowledge an opened stream's FIN, like a peer that stopped reading.
 	pub fn with_unacked_fin(mut self) -> Self {
 		self.unacked_fin = true;
+		self
+	}
+
+	/// Never acknowledge the FIN of the next `count` unidirectional streams opened, like a
+	/// peer stalled on those alone.
+	pub fn with_unacked_uni_fins(self, count: usize) -> Self {
+		self.unacked_unis.store(count, Ordering::Relaxed);
 		self
 	}
 
@@ -1023,7 +1100,7 @@ impl ScriptedSession {
 	}
 
 	/// Answer each stream from `scripts`, but only once the gate opens: a peer that
-	/// replies normally and is simply out of stream credit until then.
+	/// replies normally after its transport header gets send capacity.
 	pub fn gated_open(scripts: Vec<Vec<u8>>, gate: kio::Consumer<bool>) -> Self {
 		Self {
 			open_gate: Some(gate),
@@ -1069,6 +1146,15 @@ impl poll::Session for ScriptedSession {
 		cx: &mut Context<'_>,
 		options: poll::SendOptions<'_, SinkGroup>,
 	) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
+		let credit = self.credit.consume();
+		if credit
+			.poll(self.park.hold(cx), |credit| {
+				if **credit { Poll::Ready(()) } else { Poll::Pending }
+			})
+			.is_pending()
+		{
+			return Poll::Pending;
+		}
 		if let Some(gate) = self.open_gate.clone() {
 			let waiter = self.park.hold(cx);
 			// A closed gate reads as open: the test dropped the producer, so nothing is
@@ -1099,12 +1185,32 @@ impl poll::Session for ScriptedSession {
 		)))
 	}
 
+	fn poll_open_request(
+		&mut self,
+		cx: &mut std::task::Context<'_>,
+		options: crate::transport::poll::SendOptions<
+			'_,
+			<Self::SendStream as crate::transport::poll::SendStream>::Group,
+		>,
+	) -> std::task::Poll<Result<Option<crate::transport::poll::BiStreams<Self>>, Self::Error>> {
+		self.log.request_attempts.fetch_add(1, Ordering::Relaxed);
+		if !*self.credit.read() {
+			return Poll::Ready(Ok(None));
+		}
+		self.poll_open_bi(cx, options).map_ok(Some)
+	}
+
 	fn poll_open_uni(
 		&mut self,
 		_cx: &mut Context<'_>,
 		options: poll::SendOptions<'_, SinkGroup>,
 	) -> Poll<Result<Self::SendStream, Self::Error>> {
-		Poll::Ready(Ok(SinkSend::new(self.log.clone()).opened(options)))
+		let mut send = SinkSend::new(self.log.clone());
+		send.unacked_fin = self
+			.unacked_unis
+			.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| count.checked_sub(1))
+			.is_ok();
+		Poll::Ready(Ok(send.opened(options)))
 	}
 
 	fn send_group(&mut self, priority: i64) -> Option<SinkGroup> {
@@ -1128,8 +1234,8 @@ impl poll::Session for ScriptedSession {
 		self.datagram_size
 	}
 
-	fn binding(&self) -> crate::transport::Binding {
-		crate::transport::Binding::InBand
+	fn address(&self) -> crate::transport::Address {
+		crate::transport::Address::Setup
 	}
 	fn protocol(&self) -> Option<&str> {
 		None

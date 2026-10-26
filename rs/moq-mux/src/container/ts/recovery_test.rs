@@ -328,6 +328,25 @@ fn splice(a: Vec<u8>, b: Vec<u8>, declare: bool) -> Clip {
 			_ => out.push(*packet),
 		}
 	}
+	if declare {
+		// Receive an AU boundary ahead of the discontinuity. The preceding
+		// unbounded video PES is now provably complete; the delimiter's own
+		// unfinished AU is discarded when the clock breaks.
+		let pid = payload(&a_packets[from]).0;
+		let cc = out
+			.iter()
+			.rev()
+			.find(|packet| payload(packet).0 == pid && packet[3] & 0x10 != 0)
+			.unwrap()[3]
+			.wrapping_add(1)
+			& 15;
+		let pes = [0, 0, 1, 0xe0, 0, 8, 0x80, 0, 0, 0, 0, 1, 9, 0xf0];
+		let mut packet = [0xff; 188];
+		packet[..6].copy_from_slice(&[0x47, 0x40 | (pid >> 8) as u8, pid as u8, 0x30 | cc, 169, 0]);
+		packet[174..].copy_from_slice(&pes);
+		out.push(packet);
+	}
+
 	let mut counters = std::collections::HashMap::new();
 	for packet in &out {
 		if packet[3] & 0x10 != 0 {
@@ -1250,13 +1269,13 @@ fn segments<'a>(ts: &[u8], video: &'a Ledger, pids: (u16, u16)) -> Result<Vec<Se
 		.collect())
 }
 
-/// Where an arm leaves its evidence, kept when it fails or `MOQ_TEST_KEEP` is set: under
-/// `$MOQ_TEST_RUNS/ts-recovery/`, by test name.
+/// Where an arm leaves its evidence, kept when it fails or `HARNESS_KEEP` is set: under
+/// `$HARNESS_RUNS/ts-recovery/`, by test name.
 struct Evidence(Option<std::path::PathBuf>);
 
 impl Evidence {
 	fn save(run: &Run) -> Self {
-		let Some(root) = std::env::var_os("MOQ_TEST_RUNS") else {
+		let Some(root) = std::env::var_os("HARNESS_RUNS") else {
 			return Self(None);
 		};
 		// libtest names each test's thread after it; a test run on the main thread has its process.
@@ -1277,7 +1296,7 @@ impl Drop for Evidence {
 	fn drop(&mut self) {
 		if let Some(dir) = &self.0
 			&& !std::thread::panicking()
-			&& std::env::var_os("MOQ_TEST_KEEP").is_none()
+			&& std::env::var_os("HARNESS_KEEP").is_none()
 		{
 			let _ = std::fs::remove_dir_all(dir);
 		}
@@ -1667,11 +1686,16 @@ async fn a_congested_path_sheds_what_it_made_late() {
 		"the queue made pictures late"
 	);
 	let lags = lags(&run);
+	// A group's leading pictures decode just before its keyframe is presented, so they leave
+	// later than the rest: compare the least lag of a whole group at each end.
+	let group = 12;
+	let (first, last) = (
+		lags[..group].iter().min().unwrap(),
+		lags[lags.len() - group..].iter().min().unwrap(),
+	);
 	assert!(
-		lags.last().unwrap().abs_diff(lags[0]) <= FRAME,
-		"the latency recovers: {:?} at first, {:?} at last",
-		lags[0],
-		lags.last().unwrap()
+		last.abs_diff(*first) <= FRAME,
+		"the latency recovers: {first:?} at first, {last:?} at last"
 	);
 }
 

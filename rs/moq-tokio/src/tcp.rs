@@ -30,7 +30,7 @@ const WIRE_VERSION: qmux::Version = qmux::Version::QMux01;
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
 pub struct Config {
-	/// Bind a qmux TCP listener on this address, plaintext unless [`Self::tls`].
+	/// Bind a qmux TCP listener on this address, plaintext unless `--listen-tcp-tls` is set.
 	#[usage(
 		long = "listen-tcp-bind",
 		name = "listen-tcp-bind",
@@ -220,10 +220,10 @@ async fn connect_addrs(
 	crate::failover::race(candidates, failover_delay, |addr| {
 		let protocols: Vec<String> = protocols.iter().map(|&p| p.to_owned()).collect();
 		async move {
-			qmux::tcp::Config::new(WIRE_VERSION)
-				.protocols(protocols.iter().map(String::as_str))
-				.session_config(crate::qmux_config())
-				.connect(addr)
+			let mut config = crate::qmux_config();
+			config.version = WIRE_VERSION;
+			config.protocol = qmux::Protocol::Negotiate(protocols);
+			qmux::tcp::connect(addr, config)
 				.await
 				.map_err(|err| Error::Connect(crate::error::message(err)))
 		}
@@ -312,14 +312,14 @@ impl Listener {
 	) -> impl Future<Output = Result<(qmux::Session, net::SocketAddr)>> + use<> {
 		let (stream, addr) = self.accept_socket().await;
 		tracing::debug!(%addr, "accepted TCP connection");
-		let config = qmux::tcp::Config::new(WIRE_VERSION)
-			.protocols(self.protocols.iter().map(String::as_str))
-			.session_config(crate::qmux_config());
+		let mut config = crate::qmux_config();
+		config.version = WIRE_VERSION;
+		config.protocol = qmux::Protocol::Negotiate(self.protocols.clone());
 		let tls = self.tls.clone();
 		async move {
 			let session = match tls {
 				Some(tls) => tls.accept(stream).await,
-				None => config.accept(stream).await,
+				None => qmux::tcp::accept(stream, config).await,
 			}
 			.map_err(|err| Error::Accept(crate::error::message(err)))?;
 			Ok((session, addr))
@@ -345,7 +345,7 @@ impl Listener {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 	use moq_net::transport::poll::Session as _;
@@ -406,15 +406,12 @@ mod tests {
 			assert_eq!(request.transport(), crate::Transport::Tcp);
 			assert_eq!(request.path(), "/room");
 			assert_eq!(request.query(), Some("jwt=credential"));
-			let (session, _driver) = request.ok().await.unwrap();
+			let session = request.ok().await.unwrap();
 			(server, session)
 		});
 
 		let dial = |insecure: bool| {
-			let mut config = crate::connect::Config {
-				once: Some(true),
-				..Default::default()
-			};
+			let mut config = crate::connect::Config::default();
 			config.tls.insecure = Some(insecure);
 			config
 				.init(Default::default())

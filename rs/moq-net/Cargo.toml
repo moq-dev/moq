@@ -43,22 +43,27 @@ serde = { workspace = true }
 slab = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+url = { workspace = true }
 uuid = { workspace = true, features = ["js"] }
+
+# Model-layer locks must yield to Loom whenever kio does. This is compiled only
+# by `just rs loom`, never in production builds.
+[target.'cfg(loom)'.dependencies]
+loom = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
 futures = { workspace = true }
 # The tests' executor, with simulated time.
 moq-clock = { path = "../moq-clock", features = ["sim"] }
+moq-json = { path = "../moq-json" }
+# The integration tests that land peer claims through the hidden `fuzz` module run in the
+# default merge gate.
+moq-net = { path = ".", features = ["fuzz"] }
 serde_json = { workspace = true }
 # The benches run on tokio. test-util (tokio::time::pause/advance) is test-only and
 # is NOT supported on wasm, so it must not leak into the normal dependency feature set.
 tokio = { workspace = true, features = ["rt", "test-util", "time"] }
-
-# Model checks for the kio-backed model layer (tests/loom.rs). `cfg(loom)` is only
-# set by `just rs loom`, and the whole test file compiles away without it.
-[target.'cfg(loom)'.dev-dependencies]
-loom = { workspace = true }
 
 # wasm model-layer tests (tests/wasm.rs). getrandom's wasm backend is enabled
 # only here (dev), so it isn't forced on downstream consumers. They select
@@ -72,9 +77,6 @@ wasm-bindgen-test = "=0.3.79"
 [target.'cfg(unix)'.dev-dependencies]
 libc = { workspace = true }
 
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
-
 # Writes the generated fuzzer corpus to disk. Needs the `fuzz` feature, so a default
 # `--all-targets` build skips it rather than failing to find the module.
 [[example]]
@@ -82,10 +84,11 @@ name = "fuzz-seeds"
 path = "examples/fuzz-seeds.rs"
 required-features = ["fuzz"]
 
+# Lands peer claims through the hidden `fuzz` module, as a session does.
 [[bench]]
 name = "origin"
 harness = false
-required-features = ["async"]
+required-features = ["fuzz"]
 
 # Reaches the crate-private session view of an origin through the hidden `fuzz` module.
 [[bench]]
@@ -146,7 +149,7 @@ harness = false
 [[bench]]
 name = "tail"
 harness = false
-required-features = ["async"]
+required-features = ["fuzz"]
 
 [[bench]]
 name = "priority"
@@ -167,7 +170,7 @@ required-features = ["fuzz"]
 [[bench]]
 name = "session"
 harness = false
-required-features = ["async"]
+required-features = ["fuzz"]
 
 [[bench]]
 name = "admission"
@@ -204,3 +207,6 @@ required-features = ["async"]
 name = "memory"
 harness = false
 required-features = ["async"]
+
+[lints]
+workspace = true

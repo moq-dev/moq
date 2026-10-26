@@ -1,5 +1,3 @@
-#![cfg_attr(test, allow(clippy::disallowed_methods))]
-
 //! # moq-net: Media over QUIC networking layer
 //!
 //! `moq-net` is the networking layer for Media over QUIC: real-time pub/sub with built-in
@@ -67,7 +65,7 @@
 //!
 //! [`origin::Producer::new`] also returns a producer and driver. Its driver runs
 //! route changes, serving, linger, teardown, and the origin's cache expiration.
-//! Standalone caches expose [`cache::Pool::gc`]. Frame read/write methods
+//! Standalone caches expose [`cache::Pool::poll`]. Frame read/write methods
 //! clear their expiration timestamp for the next cleanup pass. Datagrams use a bounded
 //! FIFO; model read/write APIs take no time argument, though a frame write stamps
 //! its arrival from the ambient clock ([`frame::Frame::arrived`]).
@@ -77,12 +75,14 @@
 //! instant.
 
 #![warn(missing_docs)]
-// The browser transport is `!Send`, so on wasm the shared state behind these `Arc`s is
-// too and clippy suggests `Rc`. The same code is genuinely cross-thread on native, so
-// `Arc` stays and the lint is unactionable here.
-#![cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
 
+// Sessions hand out the auth, GOAWAY, and SETUP handles, so without `async` they are
+// unobtainable and stay private to the model and wire code that still uses them.
+#[cfg(feature = "async")]
 pub mod auth;
+#[cfg(not(feature = "async"))]
+#[allow(dead_code, unused_imports, reason = "async-only")]
+mod auth;
 #[cfg(feature = "async")]
 mod client;
 mod coding;
@@ -92,7 +92,11 @@ mod discovery;
 mod driver;
 mod epoch;
 mod error;
+#[cfg(feature = "async")]
 pub mod goaway;
+#[cfg(not(feature = "async"))]
+#[allow(dead_code, unused_imports, reason = "async-only")]
+mod goaway;
 // Not part of the public API: compiled only for the crate's own tests and for the
 // `fuzz/` harness.
 #[cfg(all(feature = "async", any(test, feature = "fuzz")))]
@@ -107,7 +111,12 @@ pub mod path;
 mod priority;
 #[cfg(feature = "async")]
 mod recv;
+#[cfg(feature = "async")]
 pub mod setup;
+#[cfg(not(feature = "async"))]
+#[allow(dead_code, unused_imports, reason = "async-only")]
+mod setup;
+mod sync;
 #[cfg(feature = "async")]
 mod tail;
 #[cfg(all(test, feature = "async"))]
@@ -130,8 +139,6 @@ pub use coding::{BoundsExceeded, DecodeError, EncodeError, varint};
 pub use driver::Driver;
 pub use epoch::{Epoch, InvalidEpoch};
 pub use error::*;
-/// The session direction a client advertises in its SETUP (moq-lite-05+).
-pub use lite::Role;
 pub use model::*;
 pub use path::{AsPath, InvalidPattern, Path, PathOwned, Pattern, Patterns};
 #[cfg(feature = "async")]
@@ -139,6 +146,12 @@ pub use server::Server;
 #[cfg(feature = "async")]
 pub use session::Session;
 pub use version::*;
+
+/// This crate's product token, `moq-net-rs/<version>`, which SETUP advertises by default.
+///
+/// A wrapper prepends its own token, space-separated, outermost first:
+/// `format!("moq-ffi/{v} {}", moq_net::IMPLEMENTATION)`.
+pub const IMPLEMENTATION: &str = concat!("moq-net-rs/", env!("CARGO_PKG_VERSION"));
 
 // Re-export the bytes crate
 pub use bytes;

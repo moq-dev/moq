@@ -26,7 +26,7 @@ pub fn claims(room: impl moq_net::AsPath, identity: impl moq_net::AsPath) -> Res
 mod tests {
 	use super::*;
 
-	fn patterns(texts: &[&str]) -> moq_auth::Access {
+	fn patterns(texts: &[&str]) -> moq_auth::Patterns {
 		texts.iter().map(|text| text.parse().unwrap()).collect()
 	}
 

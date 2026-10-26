@@ -66,6 +66,9 @@ impl std::fmt::Display for Transport {
 /// plain boxed flavor suffices.
 type OpBox<T> = futures::future::BoxFuture<'static, T>;
 
+/// A stream op that hands the stream back with its result, or `None` if interrupted.
+type StreamOp<S, T, E> = OpBox<(S, Option<Result<T, E>>)>;
+
 /// Adapts one of this crate's async backends (qmux, iroh, quic) to the poll interface
 /// moq-net requires.
 ///
@@ -106,11 +109,12 @@ type OpBox<T> = futures::future::BoxFuture<'static, T>;
 ///   cancellation while later writes reclaim the stream.
 pub struct Session<S: web_transport_trait::Session> {
 	session: S,
-	binding: moq_net::transport::Binding,
+	address: moq_net::transport::Address,
 	accept_uni: OpSlot<Result<S::RecvStream, S::Error>>,
 	accept_bi: OpSlot<BiResult<S>>,
 	open_uni: OpSlot<Result<S::SendStream, S::Error>>,
 	open_bi: OpSlot<BiResult<S>>,
+	request_bi: OpSlot<RequestResult<S>>,
 	recv_datagram: OpSlot<Result<Bytes, S::Error>>,
 	closed: OpSlot<S::Error>,
 }
@@ -121,6 +125,15 @@ type BiResult<S> = Result<
 		<S as web_transport_trait::Session>::SendStream,
 		<S as web_transport_trait::Session>::RecvStream,
 	),
+	<S as web_transport_trait::Session>::Error,
+>;
+
+/// A request's stream pair, or a refusal before consuming stream credit.
+type RequestResult<S> = Result<
+	Option<(
+		<S as web_transport_trait::Session>::SendStream,
+		<S as web_transport_trait::Session>::RecvStream,
+	)>,
 	<S as web_transport_trait::Session>::Error,
 >;
 
@@ -142,14 +155,15 @@ fn poll_op<T>(slot: &mut OpSlot<T>, cx: &mut Context<'_>, start: impl FnOnce() -
 
 impl<S: web_transport_trait::Session> Session<S> {
 	/// Wrap an async-interface transport session.
-	pub fn new(session: S, binding: moq_net::transport::Binding) -> Self {
+	pub fn new(session: S, address: moq_net::transport::Address) -> Self {
 		Self {
 			session,
-			binding,
+			address,
 			accept_uni: OpSlot::default(),
 			accept_bi: OpSlot::default(),
 			open_uni: OpSlot::default(),
 			open_bi: OpSlot::default(),
+			request_bi: OpSlot::default(),
 			recv_datagram: OpSlot::default(),
 			closed: OpSlot::default(),
 		}
@@ -160,7 +174,7 @@ impl<S: web_transport_trait::Session> Session<S> {
 // owns its own progress under the poll contract.
 impl<S: web_transport_trait::Session> Clone for Session<S> {
 	fn clone(&self) -> Self {
-		Self::new(self.session.clone(), self.binding)
+		Self::new(self.session.clone(), self.address)
 	}
 }
 
@@ -286,13 +300,12 @@ enum SendState<S: GroupedSend + 'static> {
 	/// retrying caller supplied the same bytes. A `None` result means the write
 	/// was interrupted by a reset (see [`SendStream::interrupt`]).
 	Writing {
-		#[allow(clippy::type_complexity)]
-		fut: OpBox<(S, Option<Result<(), S::Error>>)>,
+		fut: StreamOp<S, (), S::Error>,
 		chunk: Bytes,
 	},
 	/// The closed() acknowledgement watch; a `None` result means it was
 	/// interrupted by a late reset or priority change (see [`SendStream::interrupt`]).
-	Closing(#[allow(clippy::type_complexity)] OpBox<(S, Option<Result<(), S::Error>>)>),
+	Closing(StreamOp<S, (), S::Error>),
 }
 
 impl<S: GroupedSend + 'static> SendStream<S> {
@@ -668,7 +681,7 @@ enum RecvState<S: web_transport_trait::RecvStream + 'static> {
 	Idle(S),
 	/// A read in flight; a `None` result means it was interrupted by a stop
 	/// (see [`RecvStream::interrupt`]).
-	Reading(#[allow(clippy::type_complexity)] OpBox<(S, Option<Result<Option<Bytes>, S::Error>>)>),
+	Reading(StreamOp<S, Option<Bytes>, S::Error>),
 }
 
 impl<S: web_transport_trait::RecvStream + 'static> RecvStream<S> {
@@ -883,6 +896,9 @@ impl<S: web_transport_trait::RecvStream + 'static> Drop for RecvStream<S> {
 
 #[cfg(feature = "quic")]
 impl Grouped for crate::quic::web::Session {
+	fn open_request(&self) -> impl std::future::Future<Output = RequestResult<Self>> + Send {
+		Self::open_request(self)
+	}
 	// Leased in the QUIC stack, so the receive window bounds what an incomplete message holds.
 	type Recv = crate::quic::web::RecvStream;
 
@@ -892,6 +908,10 @@ impl Grouped for crate::quic::web::Session {
 
 	fn wire(&self) -> Option<moq_net::transport::Wire> {
 		Some(crate::quic::driver::Connection::wire(self))
+	}
+
+	fn probe(&self) -> Option<moq_net::transport::Probe> {
+		crate::quic::driver::Connection::probe(self)
 	}
 
 	fn streams_evicted(&self) -> Option<u64> {
@@ -955,7 +975,7 @@ impl GroupedSend for web_transport_iroh::SendStream {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use std::sync::{
 		Arc, Mutex,
@@ -1522,11 +1542,11 @@ mod tests {
 		assert_eq!(fake.writes.lock().unwrap().as_slice(), b"hello");
 		assert_eq!(fake.priorities.lock().unwrap().as_slice(), &[7]);
 		assert_eq!(fake.resets.lock().unwrap().as_slice(), &[0x33]);
-		for binding in [moq_net::transport::Binding::Uri, moq_net::transport::Binding::InBand] {
-			let session = Session::new(FakeSession, binding);
+		for address in [moq_net::transport::Address::Uri, moq_net::transport::Address::Setup] {
+			let session = Session::new(FakeSession, address);
 			let mut cloned = session.clone();
-			assert_eq!(poll::Session::binding(&session), binding);
-			assert_eq!(poll::Session::binding(&cloned), binding);
+			assert_eq!(poll::Session::address(&session), address);
+			assert_eq!(poll::Session::address(&cloned), address);
 			assert!(poll::Session::poll_accept_uni(&mut cloned, &mut cx).is_pending());
 		}
 	}

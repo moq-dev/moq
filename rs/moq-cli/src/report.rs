@@ -1,5 +1,5 @@
-//! Media reports: the stats track `import --stats` names in its catalog, the feedback
-//! `export --echo` publishes where a catalog solicits it, and the `export stats` and
+//! Media reports: the track `import --report` names in its catalog's `stats` section, the feedback
+//! `export --echo` publishes where a catalog solicits it, and the `export report` and
 //! `export echo` sinks that print them.
 //!
 //! Each report is one snapshot track and its compressed `.z` sibling, written about once a
@@ -265,7 +265,7 @@ pub struct EchoTarget {
 struct Feedback {
 	path: moq_net::PathOwned,
 	// Held for the route: dropping it retracts the announcement.
-	_broadcast: moq_net::broadcast::Producer,
+	_broadcast: moq_net::origin::Publication,
 	tracks: Pair<hang::echo::Snapshot<ts::stats::Report>>,
 }
 
@@ -354,8 +354,8 @@ impl Echo {
 	}
 
 	fn publish(&self, path: &moq_net::PathOwned) -> anyhow::Result<Feedback> {
-		let mut broadcast = self.target.origin.create_broadcast(path)?;
-		let tracks = Pair::create(&mut broadcast, hang::echo::TRACK)?;
+		let broadcast = self.target.origin.create_broadcast(path)?;
+		let tracks = Pair::create(&mut broadcast.broadcast().clone(), hang::echo::TRACK)?;
 		// A fresh instance, so a reader sees a replaced feedback broadcast as a restart.
 		broadcast.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))?;
 		Ok(Feedback {
@@ -415,9 +415,9 @@ async fn snapshot(
 	}
 }
 
-/// `export stats`: write the broadcast's stats snapshots to stdout as JSON lines, following the
+/// `export report`: write the broadcast's media reports to stdout as JSON lines, following the
 /// track its catalog's `stats` section names, until the catalog and that track have both ended.
-pub async fn print_stats(origin: moq_net::origin::Consumer, path: String) -> anyhow::Result<()> {
+pub async fn print_report(origin: moq_net::origin::Consumer, path: String) -> anyhow::Result<()> {
 	let mut stdout = tokio::io::stdout();
 	origin
 		.routed(&path)
@@ -603,7 +603,7 @@ async fn read_echo(
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 	use tokio::io::{AsyncBufReadExt, BufReader};

@@ -7,6 +7,7 @@ import * as Epoch from "../epoch.ts";
 import { error, ProtocolViolation, SessionCode, SessionError, StreamCode, unauthorized } from "../error.ts";
 import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "../group.ts";
 import { type Hop, HopSchema } from "../hop.ts";
+import { hooks } from "../internal.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -16,12 +17,13 @@ import type { Producer as TrackProducer } from "../track.ts";
 import { wireOf } from "../wire.ts";
 import { ControlStreamAdapter, NativeSession, type Session } from "./adapter.ts";
 import type * as Cluster from "./cluster.ts";
+import { ObjectDatagram } from "./datagram.ts";
 import { toRequestCode } from "./error.ts";
 import { Fetch, FetchHeader } from "./fetch.ts";
 import { Frame, Group as GroupMessage } from "./object.ts";
 import { Parameters } from "./parameters.ts";
 import { toWire } from "./priority.ts";
-import { PublishDone } from "./publish.ts";
+import { PublishDone, PublishDoneStatus } from "./publish.ts";
 import {
 	PublishNamespace,
 	PublishNamespaceCancel,
@@ -43,12 +45,13 @@ import { TRACK_STATUS_ERROR_14, TrackStatusOk, TrackStatusRequest } from "./trac
 import { ALPN, type IetfVersion, Version } from "./version.ts";
 
 function publish(origin: OriginProducer, path: Path.Valid) {
-	const broadcast = origin.createBroadcast(path);
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(path);
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	return broadcast;
 }
 
-const VERSION = Version.DRAFT_19;
+const VERSION = Version.DRAFT_18;
 
 /** A session that negotiated MoQ Cluster alone. */
 const CLUSTER = { cluster: true, epoch: false };
@@ -59,7 +62,8 @@ const STREAM_WAIT = 1000;
 /** A manual clock, installed until disposed. */
 function manual(): Manual & Disposable {
 	const clock = new Manual();
-	return Object.assign(clock, { [Symbol.dispose]: clock.install() });
+	const installed = clock.install();
+	return Object.assign(clock, { [Symbol.dispose]: () => installed.close() });
 }
 
 /**
@@ -147,7 +151,7 @@ async function declinePublishNamespace(stream: Stream, retryInterval = 1n): Prom
 		await stream.writer.u53(RequestError.id);
 		await new RequestError({
 			requestId: undefined,
-			// UNINTERESTED, draft-19 section 15.11.2.
+			// UNINTERESTED, draft-22 section 16.11.2.
 			errorCode: 0x20,
 			reasonPhrase: "no",
 			retryInterval,
@@ -206,9 +210,6 @@ const IETF_VERSIONS = [
 	Version.DRAFT_16,
 	Version.DRAFT_17,
 	Version.DRAFT_18,
-	Version.DRAFT_19,
-	Version.DRAFT_20,
-	Version.DRAFT_21,
 	Version.DRAFT_22,
 ] as const;
 
@@ -235,6 +236,11 @@ function requestStream(version: IetfVersion) {
 		wire: () => new Reader(undefined, Uint8Array.from(written), version),
 		send: (bytes: Uint8Array) => input.enqueue(bytes),
 		cancel: () => input.error(new Error("request cancelled")),
+		/**
+		 * End the request as `version` cancels one: by FIN through draft 18, which is what the
+		 * adapter turns UNSUBSCRIBE into on drafts 14 to 16, and by a reset after.
+		 */
+		withdraw: () => (version <= Version.DRAFT_18 ? input.close() : input.error(new Error("request cancelled"))),
 	};
 }
 
@@ -278,8 +284,8 @@ test("TRACK_STATUS is answered on every draft without subscribing", async () => 
 			const subscribed = spyOn(track, "subscribe");
 
 			const { stream, wire } = requestStream(version);
-			// Only draft-20 can carry the opt-out.
-			await pub.runTrackStatusRequest(trackStatus("room", wanted || version < Version.DRAFT_20), stream);
+			// Only draft-22 can carry the opt-out.
+			await pub.runTrackStatusRequest(trackStatus("room", wanted || version < Version.DRAFT_22), stream);
 			expect(subscribed).not.toHaveBeenCalled();
 
 			const r = wire();
@@ -293,7 +299,7 @@ test("TRACK_STATUS is answered on every draft without subscribing", async () => 
 			const expected =
 				version === Version.DRAFT_14 || version === Version.DRAFT_15
 					? { groupOrder: GroupOrder.Descending }
-					: version < Version.DRAFT_18 || (!wanted && version >= Version.DRAFT_20)
+					: version < Version.DRAFT_18 || (!wanted && version >= Version.DRAFT_22)
 						? {}
 						: {
 								timescale: Timescale.MILLI,
@@ -356,7 +362,7 @@ test("TRACK_STATUS outside the grant is refused on every draft", async () => {
 // Nothing answers a SUBSCRIBE while its broadcast resolves, yet the request stream is still
 // read: a second GOAWAY then closes the session at once, not once an answer goes out.
 test("a second GOAWAY on an unanswered SUBSCRIBE closes the session", async () => {
-	for (const version of [Version.DRAFT_18, Version.DRAFT_21]) {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_22]) {
 		const pair = createMockTransportPair(ALPNS[version]);
 		const session = new NativeSession(pair.server, version, true);
 		const { pub, origin } = publisher(pair.server, { session });
@@ -428,7 +434,7 @@ test("a cancelled TRACK_STATUS releases its demand on every draft", async () => 
 		expect(early.written).toEqual([]);
 		// Withdrawn, so a late answer is closed rather than served.
 		const answer = new BroadcastProducer().consume();
-		pending?.accept(answer);
+		hooks.acceptRequest(pending, answer);
 		expect(answer.closed.peek()).toBeNull();
 
 		// The broadcast resolves, but its track is never answered.
@@ -438,7 +444,7 @@ test("a cancelled TRACK_STATUS releases its demand on every draft", async () => 
 		if (!request) throw new Error("no request for room/late");
 		const served = new BroadcastProducer();
 		const trackRequest = wireOf(served).requested();
-		request.accept(served);
+		hooks.acceptRequest(request, served);
 		expect((await trackRequest)?.name).toBe("video");
 		expect(served.demand().used.peek()).toBe(true);
 		late.cancel();
@@ -452,10 +458,110 @@ test("a cancelled TRACK_STATUS releases its demand on every draft", async () => 
 	}
 });
 
+// The requester leaving while a SUBSCRIBE's setup waits on a producer that never answers is
+// owed nothing, and gives back the origin demand or the track it asked for at once.
+test("a SUBSCRIBE withdrawn during setup releases its demand on every draft", async () => {
+	const subscribe = (namespace: string) =>
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from(namespace),
+			trackName: "video",
+			subscriberPriority: 0,
+		});
+	for (const version of IETF_VERSIONS) {
+		const pair = createMockTransportPair(ALPNS[version]);
+		const session = new NativeSession(pair.server, version, true);
+		const { pub, origin } = publisher(pair.server, { session });
+		const requests = origin.dynamicRoute(Path.from("room")).requested();
+
+		// The broadcast is still resolving: its handler never answers.
+		const early = requestStream(version);
+		const resolving = pub.runSubscribe(subscribe("room/early"), early.stream);
+		const pending = (await requests.next()).value;
+		expect(pending?.path).toBe(Path.from("room/early"));
+		early.withdraw();
+		await resolving;
+		expect(early.written).toEqual([]);
+		// Withdrawn, so a late answer is closed rather than served.
+		const answer = new BroadcastProducer().consume();
+		if (pending) hooks.acceptRequest(pending, answer);
+		expect(answer.closed.peek()).toBeNull();
+
+		// The broadcast resolves, but its track is never answered.
+		const late = requestStream(version);
+		const subscribing = pub.runSubscribe(subscribe("room/late"), late.stream);
+		const request = (await requests.next()).value;
+		if (!request) throw new Error("no request for room/late");
+		const served = new BroadcastProducer();
+		const trackRequest = wireOf(served).requested();
+		hooks.acceptRequest(request, served);
+		expect((await trackRequest)?.name).toBe("video");
+		expect(served.demand().used.peek()).toBe(true);
+		late.withdraw();
+		await subscribing;
+		expect(late.written).toEqual([]);
+		await served.demand().unused();
+
+		await requests.return?.();
+		served.close();
+		origin.close();
+	}
+});
+
+// A resume subscribes again as a new SUBSCRIBE does, so the requester leaving while the
+// resumed track is never answered ends the request at once too.
+test("a SUBSCRIBE withdrawn while resuming releases its demand", async () => {
+	for (const version of IETF_VERSIONS.filter((version) => version > Version.DRAFT_16)) {
+		const fx = fixture(version);
+		const client = await Stream.open(fx.pair.client, { version });
+		const server = await Stream.accept(fx.pair.server, version);
+		if (!server) throw new Error("publisher never accepted the subscribe stream");
+		const first = (async () => {
+			const request = await wireOf(fx.broadcast).requested();
+			if (!request) throw new Error("no track was requested");
+			return request.accept({ timescale: Timescale.MILLI });
+		})();
+		const serving = fx.pub.runSubscribe(
+			new Subscribe({
+				requestId: 0n,
+				trackNamespace: Path.from("test"),
+				trackName: "video",
+				subscriberPriority: 128,
+				forward: false,
+			}),
+			server,
+		);
+		try {
+			expect(await client.reader.u53()).toBe(SubscribeOk.id);
+			await SubscribeOk.decode(client.reader, version);
+			const track = await first;
+			while (track.subscription.peek() !== undefined) await track.subscription.changed();
+			// Gone, so the resume asks for the track again, and nothing answers.
+			track.close();
+			const second = wireOf(fx.broadcast).requested();
+			const parameters = new Parameters();
+			parameters.forward = true;
+			await client.writer.u53(SubscribeUpdate.id);
+			await new SubscribeUpdate({ requestId: 2n, parameters }).encode(client.writer, version);
+			const resumed = await second;
+			if (!resumed) throw new Error("the resume asked for nothing");
+			expect(resumed.demand().wanted.peek()).not.toBeUndefined();
+
+			if (version <= Version.DRAFT_18) client.writer.close();
+			else client.reader.stop(new Error("cancel"));
+			await serving;
+			expect(resumed.demand().wanted.peek()).toBeUndefined();
+		} finally {
+			client.close();
+			fx.close();
+		}
+	}
+});
+
 // Legal requests we don't serve are refused NOT_SUPPORTED one at a time.
-test("FETCH and a non-forwarding SUBSCRIBE get NOT_SUPPORTED", async () => {
+test("FETCH gets NOT_SUPPORTED", async () => {
 	const refusal = async (version: IetfVersion, run: (pub: Publisher, stream: Stream) => Promise<void>) => {
-		const pair = createMockTransportPair(ALPN.DRAFT_19);
+		const pair = createMockTransportPair(ALPN.DRAFT_18);
 		const session = new NativeSession(pair.server, version, true);
 		const { pub, origin } = publisher(pair.server, { session });
 		const written: Uint8Array[] = [];
@@ -474,46 +580,23 @@ test("FETCH and a non-forwarding SUBSCRIBE get NOT_SUPPORTED", async () => {
 		return written.flatMap((chunk) => Array.from(chunk));
 	};
 
-	for (const version of [Version.DRAFT_14, Version.DRAFT_16, Version.DRAFT_20] as const) {
+	for (const version of [Version.DRAFT_14, Version.DRAFT_16, Version.DRAFT_22] as const) {
 		const fetch = await refusal(version, (pub, stream) => pub.runFetch(new Fetch({ requestId: 7n }), stream));
 		// FETCH_ERROR on draft-14, REQUEST_ERROR after; the code follows the Length and any Request ID.
 		expect(fetch[0]).toBe(version === Version.DRAFT_14 ? 0x19 : 0x05);
 		expect(fetch[version <= Version.DRAFT_16 ? 4 : 3]).toBe(0x3);
-
-		const paused = await refusal(version, (pub, stream) =>
-			pub.runSubscribe(
-				new Subscribe({
-					requestId: 7n,
-					trackNamespace: Path.from("test"),
-					trackName: "video",
-					subscriberPriority: 0,
-					forward: false,
-				}),
-				stream,
-			),
-		);
-		expect(paused[0]).toBe(0x05);
-		expect(paused[version <= Version.DRAFT_16 ? 4 : 3]).toBe(0x3);
 	}
 });
 
 test("Range Filters over MAX_FILTER_RANGES zero get INVALID_FILTER", async () => {
-	for (const version of [Version.DRAFT_19, Version.DRAFT_21, Version.DRAFT_22]) {
+	for (const version of [Version.DRAFT_22]) {
 		const pair = createMockTransportPair(ALPNS[version]);
 		const { pub, origin } = publisher(pair.server, { session: new NativeSession(pair.server, version, true) });
 		for (const fetch of [false, true]) {
 			const request = requestStream(version);
 			try {
 				const name = [1, 4, ...new TextEncoder().encode("test"), 5, ...new TextEncoder().encode("video")];
-				const fields = [
-					7,
-					...(fetch && version === Version.DRAFT_19 ? [1] : []),
-					...name,
-					...(fetch && version === Version.DRAFT_19 ? [0, 0, 0, 0] : []),
-					1,
-					0x25,
-					0,
-				];
+				const fields = [7, ...name, 1, 0x25, 0];
 				const encoded = new Reader(undefined, Uint8Array.from([0, fields.length, ...fields]), version);
 				if (fetch) await pub.runFetch(await Fetch.decode(encoded, version), request.stream);
 				else await pub.runSubscribe(await Subscribe.decode(encoded, version), request.stream);
@@ -530,7 +613,7 @@ test("Range Filters over MAX_FILTER_RANGES zero get INVALID_FILTER", async () =>
 });
 
 test("RENDEZVOUS_TIMEOUT has a zero cap with TIMEOUT for a requested wait", async () => {
-	for (const version of [Version.DRAFT_18, Version.DRAFT_21, Version.DRAFT_22]) {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_22]) {
 		// A wait applies only to a missing publisher; a missing track on a live one does not exist.
 		for (const [namespace, trackName, live] of [
 			["missing", "video", false],
@@ -575,12 +658,17 @@ test("RENDEZVOUS_TIMEOUT has a zero cap with TIMEOUT for a requested wait", asyn
 });
 
 test("reserved namespace requests get DOES_NOT_EXIST while other dot namespaces are served", async () => {
-	for (const version of [Version.DRAFT_21, Version.DRAFT_22]) {
+	for (const version of [Version.DRAFT_22]) {
 		for (const path of [".", "./child", ".session", ".session/extension", ".application", ".sessionish"]) {
 			const pair = createMockTransportPair(ALPNS[version]);
 			const { pub, origin } = publisher(pair.server, { session: new NativeSession(pair.server, version, true) });
-			const broadcast = publish(origin, Path.from(path));
-			const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+			// Navigation segments cannot be published. A covering application
+			// route still proves these reserved requests are refused before lookup.
+			const navigation = path.split("/")[0] === ".";
+			const claim = navigation ? origin.dynamic(Path.empty()) : undefined;
+			const requested = claim?.requested().next();
+			const broadcast = navigation ? undefined : publish(origin, Path.from(path));
+			const track = broadcast?.createTrack("video", { timescale: Timescale.MILLI });
 			const request = requestStream(version);
 			try {
 				await pub.runTrackStatusRequest(trackStatus(path), request.stream);
@@ -594,9 +682,11 @@ test("reserved namespace requests get DOES_NOT_EXIST while other dot namespaces 
 				}
 			} finally {
 				request.cancel();
-				track.close();
-				broadcast.close();
+				track?.close();
+				broadcast?.close();
+				claim?.close();
 				origin.close();
+				if (requested) expect((await requested).done).toBe(true);
 			}
 		}
 	}
@@ -648,7 +738,7 @@ test("a request token does not widen the grant", async () => {
 // The header is part of the group's lifetime too. If it blocks on flow control, advancing
 // the live edge must reset the stream without waiting for that write to finish.
 test("a blocked group header is reset when the group expires", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 
 	let started!: () => void;
 	const headerStarted = new Promise<void>((resolve) => {
@@ -735,8 +825,8 @@ test("a blocked group header is reset when the group expires", async () => {
 // does not end the wait: PUBLISH_DONE waits on the stream, so the budget still judges it.
 test("a group stream whose FIN never completes is reset when the group expires", async () => {
 	const clock = new Manual();
-	const restore = clock.install();
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const installed = clock.install();
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 
 	let closing!: () => void;
 	const closeStarted = new Promise<void>((resolve) => {
@@ -791,8 +881,7 @@ test("a group stream whose FIN never completes is reset when the group expires",
 
 		write(0);
 		await closeStarted;
-		// The newest group is never stale, however long its FIN takes. Kept inside the cache's
-		// idle window: a group evicted once superseded is no longer judged.
+		// The newest group is never stale, however long its FIN takes.
 		await clock.advance(Nano.fromMilli(Milli(budget * 2)));
 		expect(reset).toBe(false);
 
@@ -808,7 +897,94 @@ test("a group stream whose FIN never completes is reset when the group expires",
 		client.close();
 		broadcast.close();
 		origin.close();
-		restore();
+		installed.close();
+	}
+});
+
+// Under a budget past the cache window, the cache evicts a stalled group and its successor
+// before the budget convicts the group. The verdict still waits only for the successor's
+// arrival plus the budget, not for whichever newer group the cache holds, and PUBLISH_DONE
+// follows the reset.
+test("a group stream whose FIN never completes is reset after the cache evicts it", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
+
+	let closing!: () => void;
+	const closeStarted = new Promise<void>((resolve) => {
+		closing = resolve;
+	});
+	let reset = false;
+	let resetting!: () => void;
+	const streamReset = new Promise<void>((resolve) => {
+		resetting = resolve;
+	});
+	const stalled = new WritableStream<Uint8Array>({
+		start(controller) {
+			controller.signal.addEventListener("abort", () => {
+				reset = true;
+				resetting();
+			});
+		},
+		close() {
+			closing();
+			return new Promise<void>(() => {});
+		},
+	});
+	spyOn(pair.server, "createUnidirectionalStream").mockImplementationOnce(async () => stalled);
+
+	// Twice the cache's idle window.
+	const budget = Milli(60_000);
+	const { pub, origin } = publisher(pair.server);
+	const broadcast = publish(origin, Path.from("test"));
+	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: budget });
+	const client = await Stream.open(pair.client, { version: VERSION });
+	const server = await Stream.accept(pair.server, VERSION);
+	if (!server) throw new Error("publisher never accepted the subscribe stream");
+
+	try {
+		const running = pub.runSubscribe(
+			new Subscribe({
+				requestId: 0n,
+				trackNamespace: Path.from("test"),
+				trackName: "video",
+				subscriberPriority: 0,
+			}),
+			server,
+		);
+		expect(await client.reader.u53()).toBe(SubscribeOk.id);
+		await SubscribeOk.decode(client.reader, VERSION);
+
+		// Frozen timestamps, so only the wall clock since group 1 arrived convicts group 0.
+		const write = (sequence: number) => {
+			const group = new GroupProducer(sequence);
+			group.writeFrame({ payload: new TextEncoder().encode("frame"), timestamp: Timestamp.fromMillis(0) });
+			group.close();
+			track.writeGroup(group);
+		};
+
+		write(0);
+		await closeStarted;
+		write(1);
+		// A later group, so a verdict that forgot group 1 would wait for this one's deadline.
+		const later = Milli(10_000);
+		await clock.advance(Nano.fromMilli(later));
+		write(2);
+		track.close();
+
+		await clock.advance(Nano.fromMilli(Milli(budget - later - 1)));
+		expect(reset).toBe(false);
+		await clock.advance(Nano.fromMilli(Milli(1)));
+		await streamReset;
+
+		await running;
+		expect(await client.reader.u53()).toBe(PublishDone.id);
+		await PublishDone.decode(client.reader, VERSION);
+	} finally {
+		client.close();
+		broadcast.close();
+		origin.close();
+		installed.close();
 	}
 });
 
@@ -819,7 +995,7 @@ test("a group that goes stale while its stream opens writes nothing", async () =
 	const unhandled: unknown[] = [];
 	const onUnhandled = (reason: unknown) => unhandled.push(reason);
 
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	let requested!: () => void;
 	const opening = new Promise<void>((resolve) => {
 		requested = resolve;
@@ -899,7 +1075,7 @@ test("a group that goes stale while its stream opens writes nothing", async () =
  * namespace unadvertised until something unrelated changed.
  */
 test("a broadcast published mid-advertisement is still announced", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const { pub, origin } = publisher(pair.server);
 
 	publish(origin, Path.from("first"));
@@ -931,7 +1107,7 @@ test("a broadcast published mid-advertisement is still announced", async () => {
  * be offered again for the life of the session.
  */
 test("a declined advertisement is retried on the next change", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const { pub, origin } = publisher(pair.server);
 
 	publish(origin, Path.from("first"));
@@ -965,7 +1141,7 @@ test("a declined advertisement is retried on the next change", async () => {
 test("closing a solicited legacy advertisement's token makes it again without it", async () => {
 	// No retry timer can stand in for the wake.
 	jest.useFakeTimers();
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const session = new NativeSession(pair.server, Version.DRAFT_15, true);
 	const tokens = new Tokens();
 	const { pub, origin } = publisher(pair.server, { requiresSolicitation: true, session, auth: tokens });
@@ -1004,7 +1180,7 @@ test("closing a solicited legacy advertisement's token makes it again without it
  * as their own suffixes. Matches the Lite publisher and Rust.
  */
 test("a subscription below an advertised route hears it as the empty suffix", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const { pub, origin } = publisher(pair.server, { requiresSolicitation: true });
 	publish(origin, Path.from("dash"));
 
@@ -1037,7 +1213,7 @@ test("a subscription below an advertised route hears it as the empty suffix", as
  * `room/video`, so a subscription there must not hear it as the empty suffix.
  */
 test("a subscription outside a covering route's claim does not hear it", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const { pub, origin } = publisher(pair.server, { requiresSolicitation: true });
 	const chat = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from("room/chat"))]));
 	const dynamic = chat.dynamicRoute(Path.from("room"));
@@ -1068,7 +1244,7 @@ test("a subscription outside a covering route's claim does not hear it", async (
  * same prefix from a subscription at `room/video`.
  */
 test("a subscription hears the best covering route its claim allows", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const { pub, origin } = publisher(pair.server, { requiresSolicitation: true });
 	const scoped = (path: string) =>
 		origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from(path))]));
@@ -1102,7 +1278,7 @@ test("a subscription hears the best covering route its claim allows", async () =
  * only `tenant/chat` must not hide a broader one from a subscription at `video`.
  */
 test("a subscription hears a broader covering route when the narrowest cannot serve it", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const origin = new OriginProducer();
 	const tenant = origin.scope(Path.from("tenant"), new Path.Patterns([Path.Pattern.all()]));
 	const pub = new Publisher({
@@ -1141,7 +1317,7 @@ test("a subscription hears a broader covering route when the narrowest cannot se
  * subscription at `room/chat`.
  */
 test("a covering route's claim is compared relative to the served root", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const origin = new OriginProducer();
 	const tenant = origin.scope(Path.from("tenant"), new Path.Patterns([Path.Pattern.all()]));
 	const pub = new Publisher({
@@ -1178,7 +1354,7 @@ test("a covering route's claim is compared relative to the served root", async (
  */
 test("a refusal that forbids retrying is not retried", async () => {
 	using clock = manual();
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const { pub, origin } = publisher(pair.server);
 	publish(origin, Path.from("lonely"));
 
@@ -1202,7 +1378,7 @@ test("a refusal that forbids retrying is not retried", async () => {
  * the replacement for the life of the session.
  */
 test("republishing a path clears a refusal without unannouncing first", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const { pub, origin } = publisher(pair.server);
 
 	publish(origin, Path.from("recycled"));
@@ -1232,7 +1408,7 @@ test("republishing a path clears a refusal without unannouncing first", async ()
  * delivers.
  */
 test("a new epoch at the same path clears a refusal", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const { pub, origin } = publisher(pair.server);
 
 	const broadcast = origin.createBroadcast(Path.from("restarted"));
@@ -1263,7 +1439,7 @@ test("a new epoch at the same path clears a refusal", async () => {
  * by rebuilding the watched entry on re-announce.
  */
 test("re-announcing a path clears a refusal that forbade retrying", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const { pub, origin } = publisher(pair.server);
 
 	const first = publish(origin, Path.from("recycled"));
@@ -1294,7 +1470,7 @@ test("re-announcing a path clears a refusal that forbade retrying", async () => 
  * origin forever, waking on an unrelated publish to fail against a dead transport.
  */
 test("closing the session ends the unsolicited announce loop", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const { pub, origin } = publisher(pair.server);
 
 	publish(origin, Path.from("first"));
@@ -1331,7 +1507,7 @@ test("an advertisement carries our hop id once the peer declared one", async () 
 	const self: Hop = HopSchema.parse(7n);
 
 	for (const peer of [HopSchema.parse(9n), undefined]) {
-		const pair = createMockTransportPair(ALPN.DRAFT_19);
+		const pair = createMockTransportPair(ALPN.DRAFT_18);
 		const { pub, origin } = publisher(pair.server, { cluster: { self, peer } });
 		publish(origin, Path.from("mine"));
 		void pub.runPublishNamespaces();
@@ -1366,7 +1542,7 @@ const EPOCH = { cluster: false, epoch: true };
  */
 test("an advertisement carries its epoch only once negotiated", async () => {
 	for (const negotiated of [true, false]) {
-		const pair = createMockTransportPair(ALPN.DRAFT_19);
+		const pair = createMockTransportPair(ALPN.DRAFT_18);
 		const { pub, origin } = publisher(pair.server, { epoch: negotiated });
 		const epoch = Epoch.mint();
 		origin.createBroadcast(Path.from("mine")).announce({ epoch });
@@ -1392,7 +1568,7 @@ test("an advertisement carries its epoch only once negotiated", async () => {
 test.each([true, false])(
 	"an epoch change advertises the new epoch before withdrawing the old (negotiated: %p)",
 	async (negotiated) => {
-		const pair = createMockTransportPair(ALPN.DRAFT_19);
+		const pair = createMockTransportPair(ALPN.DRAFT_18);
 		const { pub, origin } = publisher(pair.server, { epoch: negotiated });
 		const streams = accepted(pair.client);
 		try {
@@ -1430,7 +1606,7 @@ test.each([true, false])(
 
 /** On a SUBSCRIBE_NAMESPACE stream, another epoch is one NAMESPACE and no NAMESPACE_DONE. */
 test("a solicited namespace takes another epoch as one NAMESPACE and no NAMESPACE_DONE", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const { pub, origin } = publisher(pair.server, { requiresSolicitation: true, epoch: true });
 	try {
 		const broadcast = origin.createBroadcast(Path.from("mine"));
@@ -1465,12 +1641,13 @@ test("a solicited namespace takes another epoch as one NAMESPACE and no NAMESPAC
 
 /** A request that names an instance is served by that one alone, or refused as gone. */
 test("a request pinned to another epoch is refused DOES_NOT_EXIST", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const session = new NativeSession(pair.server, VERSION, true);
 	const { pub, origin } = publisher(pair.server, { session, epoch: true });
 	const epoch = Epoch.mint();
-	const broadcast = origin.createBroadcast(Path.from("room"));
-	broadcast.announce({ epoch });
+	const broadcastPublication = origin.createBroadcast(Path.from("room"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce({ epoch });
 	broadcast.createTrack("video");
 	origin.createBroadcast(Path.from("epochless")).announce();
 
@@ -1525,7 +1702,7 @@ test("a request pinned to another epoch is refused DOES_NOT_EXIST", async () => 
 
 /** Only a session that negotiated MoQ Epoch may name an instance. */
 test("EPOCH on a request without MoQ Epoch is a protocol violation", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const { pub, origin } = publisher(pair.server);
 	const epoch = Epoch.mint();
 	const trackNamespace = Path.from("room");
@@ -1630,7 +1807,7 @@ function clustered(requiresSolicitation = false, auth?: Tokens) {
 	jest.useFakeTimers();
 	const self: Hop = HopSchema.parse(7n);
 	const peer: Hop = HopSchema.parse(9n);
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const { pub, origin } = publisher(pair.server, { cluster: { self, peer }, requiresSolicitation, auth });
 	const streams = accepted(pair.client);
 	const close = () => {
@@ -2171,8 +2348,9 @@ test("closing a route's token makes its request again without it", async () => {
 test("a republish withdraws the PUBLISH_NAMESPACE and advertises again", async () => {
 	const { pub, origin, streams, close } = clustered();
 	try {
-		const broadcast = origin.createBroadcast(Path.from("mine"));
-		broadcast.announce({ hops: [VIA], cost: 4n });
+		const broadcastPublication = origin.createBroadcast(Path.from("mine"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce({ hops: [VIA], cost: 4n });
 		void pub.runPublishNamespaces();
 
 		const old = await take(streams);
@@ -2192,8 +2370,9 @@ test("a republish withdraws the PUBLISH_NAMESPACE and advertises again", async (
 test("a republish withdraws the solicited NAMESPACE and sends it again", async () => {
 	const { pair, pub, origin, close } = clustered(true);
 	try {
-		const broadcast = origin.createBroadcast(Path.from("mine"));
-		broadcast.announce({ hops: [VIA], cost: 4n });
+		const broadcastPublication = origin.createBroadcast(Path.from("mine"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce({ hops: [VIA], cost: 4n });
 
 		const subscription = await Stream.open(pair.client, { version: VERSION });
 		const stream = await Stream.accept(pair.server, VERSION);
@@ -2404,7 +2583,7 @@ test.each([
 ])("%s sends nothing", async (_, peer) => {
 	using clock = manual();
 	const self: Hop = HopSchema.parse(7n);
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const { pub, origin } = publisher(pair.server, { cluster: { self, peer } });
 	const broadcast = origin.createBroadcast(Path.from("mine"));
 	broadcast.announce({ cost: 4n });
@@ -2430,7 +2609,6 @@ test("subscription completion sends PUBLISH_DONE on every supported draft", asyn
 		Version.DRAFT_16,
 		Version.DRAFT_17,
 		Version.DRAFT_18,
-		Version.DRAFT_19,
 	] as const;
 
 	for (const version of versions) {
@@ -2441,7 +2619,7 @@ test("subscription completion sends PUBLISH_DONE on every supported draft", asyn
 			[unauthorized("test"), 0x1],
 			[new SessionError(SessionCode.Expired), 0x1],
 		] as const) {
-			const pair = createMockTransportPair(ALPN.DRAFT_19);
+			const pair = createMockTransportPair(ALPN.DRAFT_18);
 			const session = new NativeSession(pair.server, version, true);
 			const path = Path.from("test");
 			const { pub, origin } = publisher(pair.server, { session });
@@ -2572,7 +2750,7 @@ test("drafts 14 to 16 refuse a namespace update without ending the subscription"
 			ask.writer.close();
 		} else {
 			await peer.writer.u53(UnsubscribeNamespace.id);
-			await new UnsubscribeNamespace({ requestId: 0n }).encode(peer.writer, version);
+			await new UnsubscribeNamespace({ prefix: asked.namespace, requestId: 0n }).encode(peer.writer, version);
 		}
 		await running;
 		origin.close();
@@ -2580,8 +2758,8 @@ test("drafts 14 to 16 refuse a namespace update without ending the subscription"
 	}
 });
 
-/** Draft-20 is the only version whose Location Filters and fills the publisher acts on. */
-const V20 = Version.DRAFT_20;
+/** Draft-22 is the only version whose Location Filters and fills the publisher acts on. */
+const V20 = Version.DRAFT_22;
 
 /** The PUBLISH_DONE status for a subscription the track itself ended. */
 const TRACK_ENDED_STATUS = 0x2;
@@ -2621,20 +2799,20 @@ const ALPNS: Record<IetfVersion, string> = {
 	[Version.DRAFT_16]: ALPN.DRAFT_16,
 	[Version.DRAFT_17]: ALPN.DRAFT_17,
 	[Version.DRAFT_18]: ALPN.DRAFT_18,
-	[Version.DRAFT_19]: ALPN.DRAFT_19,
-	[Version.DRAFT_20]: ALPN.DRAFT_20,
-	[Version.DRAFT_21]: ALPN.DRAFT_21,
 	[Version.DRAFT_22]: ALPN.DRAFT_22,
 };
 
 /**
- * A publisher serving one broadcast over `version` (draft-20 unless a test says otherwise),
+ * A publisher serving one broadcast over `version` (draft-22 unless a test says otherwise),
  * with the subscribe stream already open.
  *
  * The uni reader is taken up front: a group stream opened before the test asks for one still
  * queues, but taking the reader late races the publisher rather than the test.
  */
-function fixture(version: IetfVersion = V20): {
+function fixture(
+	version: IetfVersion = V20,
+	grant?: Signal<Grant | undefined>,
+): {
 	pair: ReturnType<typeof createMockTransportPair>;
 	pub: Publisher;
 	broadcast: BroadcastProducer;
@@ -2644,7 +2822,7 @@ function fixture(version: IetfVersion = V20): {
 } {
 	const pair = createMockTransportPair(ALPNS[version]);
 	const session = new NativeSession(pair.server, version, false);
-	const { pub, origin } = publisher(pair.server, { session });
+	const { pub, origin } = publisher(pair.server, { session, grant });
 	const broadcast = publish(origin, Path.from("test"));
 	const uni = pair.client.incomingUnidirectionalStreams.getReader() as ReadableStreamDefaultReader<
 		ReadableStream<Uint8Array>
@@ -2795,7 +2973,7 @@ async function readFill(stream: ReadableStream<Uint8Array>): Promise<ServedFill>
  * id, or the subscriber would read a silently renumbered group, and a capped tail does not
  * claim END_OF_GROUP, or the subscriber would think the group ended at the cap.
  */
-test("draft-20: an absolute filter trims the range it serves", async () => {
+test("draft-22: an absolute filter trims the range it serves", async () => {
 	using clock = manual();
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
@@ -2850,8 +3028,41 @@ test("draft-20: an absolute filter trims the range it serves", async () => {
 	}
 });
 
+test.each([Version.DRAFT_22])("IETF %s: datagrams honor the absolute object range", async (version) => {
+	using _clock = manual();
+	const fx = fixture(version);
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "absolute", startGroup: 0n, startObject: 1n, endGroup: 1n, endObject: 0n },
+		}),
+	);
+	const reader = fx.pair.client.datagrams.readable.getReader();
+	try {
+		// Datagrams go out in arrival order, so the in-range one arrives last: receiving it
+		// first proves both out-of-range ones ahead of it were dropped.
+		for (const sequence of [0, 2, 1])
+			track.insertDatagram(sequence, Timestamp.fromMillis(sequence), new Uint8Array([sequence]));
+		const next = await reader.read();
+		if (next.done) throw new Error("the in-range datagram was never sent");
+		const datagram = await ObjectDatagram.decode(next.value, version);
+		expect(datagram.trackAlias).toBe(7n);
+		expect(datagram.groupId).toBe(1);
+		expect(datagram.objectId ?? 0).toBe(0);
+	} finally {
+		await reader.cancel();
+		client.close();
+		fx.close();
+	}
+});
+
 /** An absolute filter has a fixed start, so its SUBSCRIBE is no join even over the refresh ratio. */
-test("draft-20: an absolute subscribe is no join", async () => {
+test("draft-22: an absolute subscribe is no join", async () => {
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, refresh: 0 });
 	writeGroup(track, 3);
@@ -2880,7 +3091,7 @@ test("draft-20: an absolute subscribe is no join", async () => {
  * StartGroup=1 fill for the head already published. The two must meet exactly, so the head
  * arrives once, on the fetch stream, and the subscription picks up at the next object.
  */
-test("draft-20: a fill serves the current group's head on a fetch stream", async () => {
+test("draft-22: a fill serves the current group's head on a fetch stream", async () => {
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
@@ -2938,7 +3149,7 @@ test("draft-20: a fill serves the current group's head on a fetch stream", async
  * A group that outgrows its cache is aborted. A Next Object subscriber joining that group
  * sees the abort rather than a live tail served off a trimmed head.
  */
-test("draft-20: an open group that outgrew its cache aborts instead of serving a tail", async () => {
+test("draft-22: an open group that outgrew its cache aborts instead of serving a tail", async () => {
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
@@ -2978,7 +3189,7 @@ test("draft-20: an open group that outgrew its cache aborts instead of serving a
  * Nothing rejects it on the wire, so the serving loop has to recognize the empty range and
  * end the stream, rather than waiting on a start object the range itself excludes.
  */
-test("draft-20: a backwards range within one group serves nothing and ends the stream", async () => {
+test("draft-22: a backwards range within one group serves nothing and ends the stream", async () => {
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
@@ -3014,7 +3225,7 @@ test("draft-20: a backwards range within one group serves nothing and ends the s
  * A fill is a promise once requested, so the stream still opens and is reset right after the
  * FETCH_HEADER, which is the draft's fill-failure signal.
  */
-test("draft-20: a fill spanning several groups resets its stream", async () => {
+test("draft-22: a fill spanning several groups resets its stream", async () => {
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	for (let i = 0; i < 3; i++) writeGroup(track, 2);
@@ -3045,7 +3256,7 @@ test("draft-20: a fill spanning several groups resets its stream", async () => {
 });
 
 /** A fill against a track with nothing published has an empty range: no stream is owed. */
-test("draft-20: an empty track opens no fill stream", async () => {
+test("draft-22: an empty track opens no fill stream", async () => {
 	using clock = manual();
 	const fx = fixture();
 	fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
@@ -3107,7 +3318,7 @@ async function subscribeOkLargest(version: IetfVersion): Promise<SubscribeOk["la
 
 /**
  * What LARGEST_OBJECT names has to match where the subscription actually starts. Below
- * draft-20 the filter is ignored and the whole group is served, and the only way to ask for a
+ * draft-22 the filter is ignored and the whole group is served, and the only way to ask for a
  * head we skipped is a joining FETCH, which we answer with an empty stream. Advertising the
  * mid-group edge there promises a backfill nothing can deliver, so the Location drops to the
  * start of the group.
@@ -3117,21 +3328,20 @@ test.each([
 	["draft-16", Version.DRAFT_16],
 	["draft-17", Version.DRAFT_17],
 	["draft-18", Version.DRAFT_18],
-	["draft-19", Version.DRAFT_19],
 ] as const)("%s: LARGEST_OBJECT is the start of the group it serves", async (_draft, version) => {
 	expect(await subscribeOkLargest(version)).toEqual({ groupId: 5n, objectId: 0n });
 });
 
-/** Draft-20 serves a skipped head with a FILL, so it advertises the true live edge. */
-test("draft-20: LARGEST_OBJECT is the live edge", async () => {
-	expect(await subscribeOkLargest(Version.DRAFT_20)).toEqual({ groupId: 5n, objectId: 3n });
+/** Draft-22 serves a skipped head with a FILL, so it advertises the true live edge. */
+test("draft-22: LARGEST_OBJECT is the live edge", async () => {
+	expect(await subscribeOkLargest(Version.DRAFT_22)).toEqual({ groupId: 5n, objectId: 3n });
 });
 
 /**
  * INCLUDE_PROPERTIES=0 opts the response out of Track Properties, which also opts the track
  * out of timestamps: with no declared Timescale there are no units to read one in.
  */
-test("draft-20: an opt-out peer gets no track properties", async () => {
+test("draft-22: an opt-out peer gets no track properties", async () => {
 	for (const propertiesWanted of [true, false]) {
 		const fx = fixture();
 		const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
@@ -3242,7 +3452,7 @@ test("drafts 14-16 send no Timestamp without TIMESCALE", async () => {
 	}
 });
 
-test.each([false, true])("draft-20: exact terminal 5/5 survives group FIN=%s", async (finished) => {
+test.each([false, true])("draft-22: exact terminal 5/5 survives group FIN=%s", async (finished) => {
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video");
 	const { client } = await runSubscribe(
@@ -3302,7 +3512,7 @@ test.each([false, true])("draft-20: exact terminal 5/5 survives group FIN=%s", a
 });
 
 /** An inline END_OF_TRACK on a stream reset after its FIN may never arrive, so it is resent. */
-test("draft-20: an inline terminal reset after its FIN falls back to a standalone marker", async () => {
+test("draft-22: an inline terminal reset after its FIN falls back to a standalone marker", async () => {
 	const opened: Writer[] = [];
 	const tryOpen = Writer.tryOpen.bind(Writer);
 	const spy = spyOn(Writer, "tryOpen").mockImplementation(async (...args) => {
@@ -3332,16 +3542,21 @@ test("draft-20: an inline terminal reset after its FIN falls back to a standalon
 		const header = await GroupMessage.decode(reader, V20);
 		for (let i = 0; i < 5; i++) await reader.decode((c) => Frame.decode(c, header.flags, undefined));
 
-		// The group stream's close fails from here on, like a reset after its FIN.
+		// The group stream's close fails once it FINs, like a reset after its FIN.
 		const closed = Object.getOwnPropertyDescriptor(Writer.prototype, "closed")?.get;
 		if (!closed) throw new Error("Writer.closed is not a getter");
+		const stream = opened[0];
+		const fin = stream.close.bind(stream);
 		let reset = false;
-		Object.defineProperty(opened[0], "closed", {
+		stream.close = () => {
+			reset = true;
+			fin();
+		};
+		Object.defineProperty(stream, "closed", {
 			get(this: Writer) {
 				return reset ? Promise.reject(new Error("reset after FIN")) : closed.call(this);
 			},
 		});
-		reset = true;
 
 		track.finishAt({ group: 5, frame: 5 });
 		group.close();
@@ -3367,12 +3582,11 @@ test("draft-20: an inline terminal reset after its FIN falls back to a standalon
 });
 
 /**
- * A bounded filter does not end the subscription (draft-20 removed that), so the publisher
- * keeps serving until the track does. Groups published above the end are dropped rather
- * than held: parking them would leave the serving loop waiting for a cap that never rises,
- * and PUBLISH_DONE would never go out.
+ * A bounded filter does not end the subscription (draft-22 has none), so the publisher
+ * keeps serving until the track does. Groups held above the end cannot delay PUBLISH_DONE
+ * once the track finishes: the filter is fixed, so its terminal boundary ends serving.
  */
-test("draft-20: a clean close past a bounded filter's end still sends PUBLISH_DONE", async () => {
+test("draft-22: a clean close past a bounded filter's end still sends PUBLISH_DONE", async () => {
 	using clock = manual();
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
@@ -3420,7 +3634,7 @@ test("draft-20: a clean close past a bounded filter's end still sends PUBLISH_DO
  * it: watching only the fetch stream would pin the group and its cache subscription for the
  * life of the track.
  */
-test("draft-20: the subscriber leaving ends a fill still reading its group", async () => {
+test("draft-22: the subscriber leaving ends a fill still reading its group", async () => {
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
@@ -3485,7 +3699,7 @@ test("draft-20: the subscriber leaving ends a fill still reading its group", asy
  * fill's cache would mint a second producer nobody has accepted, so the fill has to read the
  * one already serving the subscription.
  */
-test("draft-20: a fill works on a dynamically requested track", async () => {
+test("draft-22: a fill works on a dynamically requested track", async () => {
 	const fx = fixture();
 
 	// Answer the request the subscription raises, the way an application serving on demand
@@ -3581,7 +3795,7 @@ for (const synchronous of [true, false]) {
 
 // PUBLISH_DONE MUST wait until every stream the subscription will open is closed, so its
 // Stream Count is final. A group still queued for a stream slot when the track ends is one.
-test("draft-20: PUBLISH_DONE waits for a queued group and counts every stream", async () => {
+test("draft-22: PUBLISH_DONE waits for a queued group and counts every stream", async () => {
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
@@ -3646,7 +3860,7 @@ test.each([
 	["draft-16", Version.DRAFT_16],
 	["draft-18", Version.DRAFT_18],
 ] as const)("a non-SOLICIT %s SUBSCRIBE_NAMESPACE carries NAMESPACE then NAMESPACE_DONE", async (_, version) => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const session = new NativeSession(pair.server, version, true);
 	const { pub, origin } = publisher(pair.server, { requiresSolicitation: false, session });
 	const early = publish(origin, Path.from("early-cam"));
@@ -3681,12 +3895,12 @@ test.each([
 	}
 });
 
-for (const version of [Version.DRAFT_15, Version.DRAFT_19] as const) {
+for (const version of [Version.DRAFT_15, Version.DRAFT_18] as const) {
 	for (const declared of [false, true]) {
 		for (const solicited of [false, true]) {
 			for (const optIn of [false, true]) {
 				test(`hidden negotiation: ${version}, declared=${declared}, solicited=${solicited}, optIn=${optIn}`, async () => {
-					const pair = createMockTransportPair(ALPN.DRAFT_19);
+					const pair = createMockTransportPair(ALPN.DRAFT_18);
 					const origin = new OriginProducer();
 					// Authorization heads must not replace the request's empty visibility prefix.
 					const scope = new Path.Patterns([
@@ -3748,8 +3962,8 @@ for (const version of [Version.DRAFT_15, Version.DRAFT_19] as const) {
 	}
 }
 
-test("requester FIN keeps a draft-19 subscription serving; STOP_SENDING cancels it", async () => {
-	const fx = fixture(Version.DRAFT_19);
+test("requester FIN keeps a draft-22 subscription serving; STOP_SENDING cancels it", async () => {
+	const fx = fixture(Version.DRAFT_22);
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const client = await Stream.open(fx.pair.client, { version: fx.version });
 	const server = await Stream.accept(fx.pair.server, fx.version);
@@ -3815,7 +4029,7 @@ for (const version of [Version.DRAFT_17, Version.DRAFT_18] as const) {
 }
 
 test("REQUEST_UPDATE applies priority and preserves it when omitted", async () => {
-	const fx = fixture(Version.DRAFT_19);
+	const fx = fixture(Version.DRAFT_18);
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const { client } = await runSubscribe(
 		fx,
@@ -3847,7 +4061,7 @@ test("REQUEST_UPDATE applies priority and preserves it when omitted", async () =
 });
 
 test("REQUEST_UPDATE accepts delivery timeouts without changing the subscription", async () => {
-	const fx = fixture(Version.DRAFT_19);
+	const fx = fixture(Version.DRAFT_18);
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const { client } = await runSubscribe(
 		fx,
@@ -3872,7 +4086,7 @@ test("REQUEST_UPDATE accepts delivery timeouts without changing the subscription
 });
 
 test("TRACK_PROPERTY_FILTER on a subscription update closes with PROTOCOL_VIOLATION", async () => {
-	const fx = fixture(Version.DRAFT_19);
+	const fx = fixture(Version.DRAFT_18);
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const client = await Stream.open(fx.pair.client, { version: fx.version });
 	const server = await Stream.accept(fx.pair.server, fx.version);
@@ -3907,7 +4121,7 @@ test("TRACK_PROPERTY_FILTER on a subscription update closes with PROTOCOL_VIOLAT
 });
 
 test("unsupported REQUEST_UPDATE is refused and ends with UPDATE_FAILED", async () => {
-	const fx = fixture(Version.DRAFT_19);
+	const fx = fixture(Version.DRAFT_18);
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const { client } = await runSubscribe(
 		fx,
@@ -3919,7 +4133,8 @@ test("unsupported REQUEST_UPDATE is refused and ends with UPDATE_FAILED", async 
 		}),
 	);
 	try {
-		await client.writer.write(new Uint8Array([0x02, 0, 4, 2, 1, 0x10, 0]));
+		// NEW_GROUP_REQUEST (0x32), on a track without DYNAMIC_GROUPS.
+		await client.writer.write(new Uint8Array([0x02, 0, 4, 2, 1, 0x32, 0]));
 		expect(await client.reader.u53()).toBe(RequestError.id);
 		const refusal = await RequestError.decode(client.reader, fx.version);
 		expect(refusal.errorCode).toBe(0x03);
@@ -3933,11 +4148,152 @@ test("unsupported REQUEST_UPDATE is refused and ends with UPDATE_FAILED", async 
 	}
 });
 
+// FORWARD=0 drops the subscription, and its upstream demand, while the request stays; FORWARD=1
+// subscribes again as a new SUBSCRIBE would, at the live edge.
+test("a SUBSCRIBE pauses without demand and resumes as a new subscriber", async () => {
+	for (const startPaused of [false, true]) {
+		const fx = fixture(V20);
+		const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+		const write = (text: string) => {
+			const group = track.appendGroup();
+			group.writeFrame({ payload: new TextEncoder().encode(text), timestamp: Timestamp.now() });
+			group.close();
+		};
+		const { client } = await runSubscribe(
+			fx,
+			new Subscribe({
+				requestId: 0n,
+				trackNamespace: Path.from("test"),
+				trackName: "video",
+				subscriberPriority: 128,
+				filter: { kind: "nextObject" },
+				forward: !startPaused,
+			}),
+		);
+		const forward = async (requestId: bigint, on: boolean) => {
+			const parameters = new Parameters();
+			parameters.forward = on;
+			await client.writer.u53(SubscribeUpdate.id);
+			await new SubscribeUpdate({ requestId, parameters }).encode(client.writer, V20);
+			expect(await client.reader.u53()).toBe(RequestOk.id);
+			return RequestOk.decode(client.reader, V20);
+		};
+		try {
+			write("before");
+			if (!startPaused) {
+				const before = await nextUni(fx.uni);
+				if (!before) throw new Error("the subscription served nothing");
+				expect((await readGroup(before)).objects).toEqual([{ id: 0, payload: "before" }]);
+				await forward(2n, false);
+			}
+			while (track.subscription.peek() !== undefined) await track.subscription.changed();
+			write("paused");
+
+			const resumed = await forward(4n, true);
+			expect(resumed.parameters.largest).toEqual({ groupId: 1n, objectId: 0n });
+			write("after");
+			for (;;) {
+				const stream = await nextUni(fx.uni);
+				if (!stream) throw new Error("the resumed subscription served nothing");
+				const group = await readGroup(stream);
+				const payloads = group.objects.map((object) => object.payload);
+				expect(payloads).not.toContain("paused");
+				expect(payloads).not.toContain("before");
+				if (group.sequence === 2) {
+					expect(group.objects).toEqual([{ id: 0, payload: "after" }]);
+					break;
+				}
+			}
+		} finally {
+			client.close();
+			track.close();
+			fx.close();
+		}
+	}
+});
+
+test("a paused SUBSCRIBE ends once its grant is revoked", async () => {
+	const grant = new Signal<Grant | undefined>(undefined);
+	const fx = fixture(V20, grant);
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 0n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 128,
+			filter: { kind: "nextObject" },
+			forward: false,
+		}),
+	);
+	try {
+		grant.set({ publish: new Path.Patterns([]), subscribe: new Path.Patterns([]) });
+		expect(await client.reader.u53()).toBe(PublishDone.id);
+		expect((await PublishDone.decode(client.reader, V20)).statusCode).toBe(PublishDoneStatus.UNAUTHORIZED);
+	} finally {
+		client.close();
+		track.close();
+		fx.close();
+	}
+});
+
+// The track has no max age, so only the pause itself can release a write parked on flow control.
+test("a pause resets a group stream parked on flow control", async () => {
+	const fx = fixture(V20);
+	let writing!: () => void;
+	const parked = new Promise<void>((resolve) => {
+		writing = resolve;
+	});
+	let reset = false;
+	const stalled = new WritableStream<Uint8Array>({
+		start(controller) {
+			controller.signal.addEventListener("abort", () => {
+				reset = true;
+			});
+		},
+		write() {
+			writing();
+			return new Promise<void>(() => {});
+		},
+	});
+	spyOn(fx.pair.server, "createUnidirectionalStream").mockImplementationOnce(async () => stalled);
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 0n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 128,
+			filter: { kind: "nextObject" },
+		}),
+	);
+	try {
+		track.appendGroup().writeFrame({ payload: new TextEncoder().encode("parked"), timestamp: Timestamp.now() });
+		await parked;
+		const parameters = new Parameters();
+		parameters.forward = false;
+		await client.writer.u53(SubscribeUpdate.id);
+		await new SubscribeUpdate({ requestId: 2n, parameters }).encode(client.writer, V20);
+		expect(await client.reader.u53()).toBe(RequestOk.id);
+		expect(reset).toBe(true);
+	} finally {
+		client.close();
+		track.close();
+		fx.close();
+	}
+});
+
 test("namespace subscription survives requester FIN and stops on STOP_SENDING", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
-	const { pub, origin } = publisher(pair.server, { requiresSolicitation: true });
-	const client = await Stream.open(pair.client, { version: VERSION });
-	const server = await Stream.accept(pair.server, VERSION);
+	const version = Version.DRAFT_22;
+	const pair = createMockTransportPair(ALPN.DRAFT_22);
+	const { pub, origin } = publisher(pair.server, {
+		session: new NativeSession(pair.server, version, false),
+		requiresSolicitation: true,
+	});
+	const client = await Stream.open(pair.client, { version: version });
+	const server = await Stream.accept(pair.server, version);
 	if (!server) throw new Error("missing namespace request stream");
 	const running = pub.runSubscribeNamespace(
 		new SubscribeNamespace({ requestId: 0n, namespace: Path.from("") }),
@@ -3945,12 +4301,12 @@ test("namespace subscription survives requester FIN and stops on STOP_SENDING", 
 	);
 	try {
 		expect(await client.reader.u53()).toBe(RequestOk.id);
-		await RequestOk.decode(client.reader, VERSION);
+		await RequestOk.decode(client.reader, version);
 		client.writer.close();
 		await client.writer.closed;
 		const broadcast = publish(origin, Path.from("after-fin"));
 		expect(await client.reader.u53()).toBe(SubscribeNamespaceEntry.id);
-		expect((await SubscribeNamespaceEntry.decode(client.reader, VERSION)).suffix).toBe(Path.from("after-fin"));
+		expect((await SubscribeNamespaceEntry.decode(client.reader, version)).suffix).toBe(Path.from("after-fin"));
 		client.reader.stop(new Error("cancel"));
 		await running;
 		broadcast.close();
@@ -3961,7 +4317,7 @@ test("namespace subscription survives requester FIN and stops on STOP_SENDING", 
 });
 
 test("namespace updates move the prefix after acknowledgement", async () => {
-	for (const version of [Version.DRAFT_18, Version.DRAFT_21, Version.DRAFT_22]) {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_22]) {
 		const pair = createMockTransportPair(ALPNS[version]);
 		const { pub, origin } = publisher(pair.server, {
 			session: new NativeSession(pair.server, version, false),
@@ -3990,7 +4346,7 @@ test("namespace updates move the prefix after acknowledgement", async () => {
 			await RequestOk.decode(client.reader, version);
 			expect(await client.reader.u53()).toBe(SubscribeNamespaceEntry.id);
 			expect((await SubscribeNamespaceEntry.decode(client.reader, version)).suffix).toBe(Path.from("second"));
-			if (version >= Version.DRAFT_21) {
+			if (version >= Version.DRAFT_22) {
 				await client.writer.write(Uint8Array.from([0x02, 0, 6, 4, 1, 0x34, 1, 1, 46]));
 				expect(await client.reader.u53()).toBe(RequestError.id);
 				expect((await RequestError.decode(client.reader, version)).errorCode).toBe(0x10);
@@ -4009,7 +4365,7 @@ test("namespace updates move the prefix after acknowledgement", async () => {
 /** MoQ Active Count: the REQUEST_OK counts the NAMESPACEs sent ahead of any change. */
 test("a counted answer names the NAMESPACEs that follow it", async () => {
 	for (const activeCount of [true, false]) {
-		const pair = createMockTransportPair(ALPN.DRAFT_19);
+		const pair = createMockTransportPair(ALPN.DRAFT_18);
 		const { pub, origin } = publisher(pair.server, { requiresSolicitation: true, activeCount });
 		publish(origin, Path.from("a"));
 		publish(origin, Path.from("b"));
@@ -4038,7 +4394,7 @@ test("a counted answer names the NAMESPACEs that follow it", async () => {
 test.each([0, Number.MAX_SAFE_INTEGER + 2])(
 	"an ACTIVE_COUNT of %p answering a PUBLISH_NAMESPACE closes the session",
 	async (count) => {
-		const pair = createMockTransportPair(ALPN.DRAFT_19);
+		const pair = createMockTransportPair(ALPN.DRAFT_18);
 		const { pub, origin } = publisher(pair.server, { activeCount: true });
 		const warn = spyOn(console, "warn").mockImplementation(() => void 0);
 		onTestFinished(() => warn.mockRestore());
@@ -4063,7 +4419,7 @@ test.each([0, Number.MAX_SAFE_INTEGER + 2])(
 );
 
 test("subscriber max age and REQUEST_UPDATE preserve omitted preferences", async () => {
-	const fx = fixture(Version.DRAFT_19);
+	const fx = fixture(Version.DRAFT_18);
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const { client } = await runSubscribe(
 		fx,

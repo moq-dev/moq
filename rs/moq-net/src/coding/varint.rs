@@ -15,7 +15,7 @@ use crate::{Version, ietf, lite};
 pub struct BoundsExceeded;
 
 /// The largest value the QUIC form can carry: `2^62 - 1`.
-pub const MAX_QUIC: u64 = (1 << 62) - 1;
+pub(crate) const MAX_QUIC: u64 = (1 << 62) - 1;
 
 /// How a protocol version lays out a varint on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,7 +168,7 @@ fn write_leading_ones(value: u64, out: &mut Vec<u8>) {
 /// Decode a varint in `form` from the front of `buf`, returning it and the rest of `buf`.
 #[cfg_attr(target_arch = "wasm32", inline)]
 #[cfg_attr(not(target_arch = "wasm32"), inline(always))]
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(super) fn read(buf: &[u8], form: Form) -> Result<(u64, &[u8]), DecodeError> {
 	match form {
 		Form::Quic => read_quic(buf),
@@ -200,7 +200,7 @@ fn read_quic(buf: &[u8]) -> Result<(u64, &[u8]), DecodeError> {
 
 #[cfg_attr(target_arch = "wasm32", inline)]
 #[cfg_attr(not(target_arch = "wasm32"), inline(always))]
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 fn read_leading_ones(buf: &[u8], seven: bool) -> Result<(u64, &[u8]), DecodeError> {
 	let Some((&first, rest)) = buf.split_first() else {
 		return Err(DecodeError::Short);
@@ -265,7 +265,7 @@ pub fn decode_quic<R: bytes::Buf>(r: &mut R) -> Result<u64, DecodeError> {
 
 /// Encode `value` as a QUIC varint (two-bit length tag).
 ///
-/// Fails with [`EncodeError::BoundsExceeded`] past [`MAX_QUIC`], writing nothing.
+/// Fails with [`EncodeError::BoundsExceeded`] past `2^62 - 1`, writing nothing.
 pub fn encode_quic<W: bytes::BufMut>(value: u64, w: &mut W) -> Result<(), EncodeError> {
 	let len = size(value, Form::Quic)?;
 	if w.remaining_mut() < len {
@@ -288,13 +288,13 @@ pub fn encode_quic<W: bytes::BufMut>(value: u64, w: &mut W) -> Result<(), Encode
 /// Map a signed value onto the unsigned range: `(n << 1) ^ (n >> 63)`.
 ///
 /// Small magnitudes stay small (-1 -> 1, 1 -> 2, -2 -> 3, ...), and all of `i64` fits.
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(crate) const fn zigzag(signed: i64) -> u64 {
 	((signed << 1) ^ (signed >> 63)) as u64
 }
 
 /// The inverse of [`zigzag`].
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(crate) const fn unzigzag(value: u64) -> i64 {
 	((value >> 1) as i64) ^ -((value & 1) as i64)
 }

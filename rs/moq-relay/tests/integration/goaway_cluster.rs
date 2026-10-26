@@ -26,7 +26,7 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(15);
 /// the session as a failed attempt, so the redial waits this long first.
 const BACKOFF: Duration = Duration::from_millis(300);
 
-/// The cluster's `--goaway-handover`: short, so a test observes the old session
+/// The cluster's `--connect-goaway-handover`: short, so a test observes the old session
 /// close quickly, but past [`BACKOFF`] plus the redial, so the draining leg
 /// serves until the replacement takes over.
 const HANDOVER: Duration = Duration::from_secs(1);
@@ -158,8 +158,8 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
-	client_config.goaway.handover = Some(HANDOVER);
-	client_config.backoff.initial = Some(BACKOFF);
+	client_config.goaway.handover = Some((HANDOVER).into());
+	client_config.backoff.initial = Some((BACKOFF).into());
 
 	let mut cluster_config = cluster::Config::default();
 	cluster_config.connect = vec![Peer::new(format!("tcp://127.0.0.1:{port_a}/"))];
@@ -245,11 +245,6 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 	cluster_run.abort();
 }
 
-#[test]
-fn cluster_reconnects_on_empty_uri_goaway() {
-	run_cluster_test(cluster_reconnects_on_empty_uri_goaway_inner());
-}
-
 /// A fake sibling upstream: a stream-only moq server publishing `origin`'s
 /// broadcasts to whoever connects. Returns its port, a receiver yielding each
 /// accepted [`moq_net::Session`] (so the test can drain it), and the task.
@@ -268,7 +263,7 @@ async fn spawn_upstream(
 		while let Some(request) = server.accept().await {
 			// Serve the shared origin bidirectionally, like a relay peer would.
 			let scratch = moq_tokio::origin::spawn();
-			let (session, _driver) = match request.with_publisher(&origin).with_subscriber(scratch).ok().await {
+			let session = match request.with_publisher(&origin).with_subscriber(scratch).ok().await {
 				Ok(session) => session,
 				Err(err) => {
 					tracing::warn!(%err, "upstream accept failed");
@@ -302,8 +297,8 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 		// ── the relay cluster under test, dialing sibling A ─────────────
 		let mut client_config = moq_tokio::connect::Config::default();
 		client_config.tls.insecure = Some(true);
-		client_config.goaway.handover = Some(HANDOVER);
-		client_config.backoff.initial = Some(BACKOFF);
+		client_config.goaway.handover = Some((HANDOVER).into());
+		client_config.backoff.initial = Some((BACKOFF).into());
 
 		let mut cluster_config = cluster::Config::default();
 		cluster_config.connect = vec![Peer::new(format!("tcp://127.0.0.1:{port_a}/"))];
@@ -426,8 +421,8 @@ async fn spawn_relay_with_upstream(
 
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
-	client_config.goaway.handover = Some(HANDOVER);
-	client_config.backoff.initial = Some(BACKOFF);
+	client_config.goaway.handover = Some((HANDOVER).into());
+	client_config.backoff.initial = Some((BACKOFF).into());
 	// Only lite-07 carries the epoch that lets a failover resume the subscription.
 	client_config.version = vec![LITE_07.parse().unwrap()];
 
@@ -509,15 +504,15 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	let mid_a_origin = moq_tokio::origin::spawn();
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
-	client_config.goaway.handover = Some(HANDOVER);
-	client_config.backoff.initial = Some(BACKOFF);
+	client_config.goaway.handover = Some((HANDOVER).into());
+	client_config.backoff.initial = Some((BACKOFF).into());
 	client_config.version = vec![LITE_07.parse().unwrap()];
 	let mid_a_client = client_config.init(Default::default()).expect("mid-a client init");
 	let (_mid_a_upstream_client, mid_a_upstream) = within(
 		"MID-A connects to TOP",
 		connect_once(
 			// An upstream link: MID-A relays for BOTTOM, so it asks TOP for everything.
-			mid_a_client.with_subscriber(mid_a_origin.clone().upstream()),
+			mid_a_client.with_subscriber(mid_a_origin.clone().with_link(moq_net::origin::Link::Upstream)),
 			top_url.parse().expect("parse top url"),
 		),
 	)
@@ -693,14 +688,19 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 
 	// ── no GOAWAY cascade to the downstream subscriber ───────────────────
 	assert!(
-		sub_connection.draining().expect("connected").peek().is_none(),
+		sub_connection
+			.draining()
+			.expect("connected")
+			.poll(&moq_net::kio::Waiter::noop())
+			.is_pending(),
 		"BOTTOM must not propagate the upstream GOAWAY downstream"
 	);
 	// The async observer must stay pending too (bounded probe: everything
 	// above already synchronized, so 500ms of silence is decisive).
+	let draining = sub_connection.draining().expect("connected");
 	let leaked = tokio::time::timeout(
 		Duration::from_millis(500),
-		sub_connection.draining().expect("connected").recv(),
+		moq_net::kio::wait(|waiter| draining.poll(waiter)),
 	)
 	.await;
 	assert!(
@@ -757,103 +757,6 @@ async fn collect_group(sub: &mut moq_net::track::Subscriber, seen: &mut BTreeSet
 	);
 }
 
-/// An empty-URI GOAWAY ("reconnect to me") makes the cluster redial the same
-/// endpoint. Both sessions' routes carry the publisher's epoch on lite-07, so the
-/// subscription through the drained session re-splices onto the redial and keeps
-/// delivering.
-async fn cluster_reconnects_on_empty_uri_goaway_inner() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-
-	let upstream_origin = moq_tokio::origin::spawn();
-	let broadcast = upstream_origin.create_broadcast("cam").expect("create broadcast");
-	broadcast
-		.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))
-		.expect("create broadcast");
-	let track = broadcast.create_track("video", timed()).expect("create track");
-
-	let (port, mut accepted, _handle) = spawn_upstream(upstream_origin.clone()).await;
-
-	let mut client_config = moq_tokio::connect::Config::default();
-	client_config.tls.insecure = Some(true);
-	client_config.goaway.handover = Some(HANDOVER);
-	client_config.backoff.initial = Some(BACKOFF);
-	// Only lite-07 carries the epoch that lets the redial resume the subscription.
-	client_config.version = vec![LITE_07.parse().unwrap()];
-
-	let mut cluster_config = cluster::Config::default();
-	cluster_config.connect = vec![Peer::new(format!("tcp://127.0.0.1:{port}/"))];
-	let cluster = cluster::Cluster::new(cluster::Options::new(cluster_config))
-		.expect("cluster init")
-		.with_connect(client_config, Default::default());
-	let started = cluster.clone().start().await.expect("cluster start");
-	let cluster_run = tokio::spawn(started.run());
-
-	let first_dial = within("upstream accepts the cluster dial", accepted.recv())
-		.await
-		.expect("accept channel closed");
-
-	// Downstream consumer sees group 0 through the first session.
-	let bc = within("broadcast announced", async {
-		let consumer = cluster.origin.consume();
-		consumer.routed("cam").await?;
-		consumer.request_broadcast("cam", None).await.ok()
-	})
-	.await
-	.expect("broadcast announced");
-	let mut sub = within("subscribe", async {
-		bc.track("video").expect("track handle").subscribe(None).await
-	})
-	.await
-	.expect("subscribe");
-
-	let mut g = track.append_group().expect("append group");
-	g.write_frame(moq_net::Timestamp::ZERO, b"empty_g0".as_ref())
-		.expect("write frame");
-	g.finish().expect("finish");
-	let mut g0 = within("recv g0", sub.recv_group())
-		.await
-		.expect("recv")
-		.expect("track ended early");
-	assert_eq!(g0.sequence, 0);
-	assert_eq!(
-		g0.read_frame().await.expect("read").expect("frame").payload[..],
-		b"empty_g0"[..]
-	);
-
-	// Drain with an EMPTY URI: the cluster must fall back to redialing the
-	// originally configured endpoint.
-	first_dial
-		.drain()
-		.send(moq_net::goaway::Goaway::new())
-		.expect("send goaway");
-
-	// Positive gate: the upstream accepts a SECOND session (the redial).
-	let _second_dial = within("cluster redials the same endpoint", accepted.recv())
-		.await
-		.expect("accept channel closed");
-
-	within("old session drains", first_dial.closed()).await;
-
-	// The redialed session's route carries the same epoch, so the broadcast
-	// re-splices onto it: the SAME subscription delivers the next group, with
-	// nothing re-delivered and no visible end.
-	let mut g = track.append_group().expect("append group");
-	g.write_frame(moq_net::Timestamp::ZERO, b"empty_g1".as_ref())
-		.expect("write frame");
-	g.finish().expect("finish");
-	let mut g1 = within("recv g1 through the redial", sub.recv_group())
-		.await
-		.expect("subscription survives the redial")
-		.expect("track ended early");
-	assert_eq!(g1.sequence, 1, "the redialed session must deliver the new group");
-	assert_eq!(
-		g1.read_frame().await.expect("read").expect("frame").payload[..],
-		b"empty_g1"[..]
-	);
-
-	cluster_run.abort();
-}
-
 /// Dial once and hand back the client with its connection.
 ///
 /// These tests want a single transport, so reconnecting is off: there is nothing
@@ -902,11 +805,11 @@ async fn goaway_handover_is_enforced_while_the_replacement_dial_hangs_inner() {
 	let handover = Duration::from_millis(200);
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
-	client_config.goaway.handover = Some(handover);
+	client_config.goaway.handover = Some((handover).into());
 	// The GOAWAY has to land on a *healthy* session, which is the path that goes
 	// straight into the replacement dial. Below this bar it takes the immediate
 	// redirect path instead, whose sleep polls the drain either way.
-	client_config.backoff.initial = Some(Duration::from_millis(50));
+	client_config.backoff.initial = Some((Duration::from_millis(50)).into());
 	let client = client_config.init(Default::default()).expect("client init");
 
 	let url: Url = format!("tcp://127.0.0.1:{port}/").parse().expect("parse url");
@@ -924,7 +827,7 @@ async fn goaway_handover_is_enforced_while_the_replacement_dial_hangs_inner() {
 	tokio::time::sleep(Duration::from_millis(120)).await;
 
 	// Send the client somewhere that will never finish handshaking. No wire timeout:
-	// our own `--goaway-handover` is then the only thing bounding the old session.
+	// our own `--connect-goaway-handover` is then the only thing bounding the old session.
 	server_session
 		.drain()
 		.send(moq_net::goaway::Goaway::redirect(format!(

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { Manual, Milli, Nano } from "@moq/clock";
+import { type Installed, Manual, Milli, Nano } from "@moq/clock";
 import { Once } from "@moq/signals";
 import { accept, connect } from "./connection/index.ts";
 import * as Ietf from "./ietf/index.ts";
@@ -26,8 +26,9 @@ async function session(protocol: string) {
 		connect({ url, transport: pair.client }),
 		accept({ transport: pair.server, url, publish: origin.consume() }),
 	]);
-	const broadcast = origin.createBroadcast(Path.from("test"));
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(Path.from("test"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const remote = wireOf(client).consume(Path.from("test"));
 	const reader = remote.track("video").subscribe({ maxDelay: MAX_DELAY }).ordered();
@@ -82,7 +83,7 @@ test.each([Lite.ALPN_05, Lite.ALPN_06])(
 // moq-transport carries the end in an END_OF_TRACK object, so it survives a track that
 // declared an end past the groups it produced, and the Stream Count lets the subscriber stop
 // waiting for streams at once.
-test.each([Ietf.ALPN.DRAFT_16, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_20])(
+test.each([Ietf.ALPN.DRAFT_16, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])(
 	"%s: END_OF_TRACK carries the declared end",
 	async (alpn) => {
 		const { video, reader, close } = await session(alpn);
@@ -110,13 +111,13 @@ test.each([Ietf.ALPN.DRAFT_16, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_20])(
 describe("Tail", () => {
 	const GRACE = Milli(1000);
 
-	let restore: (() => void) | undefined;
-	afterEach(() => restore?.());
+	let installed: Installed | undefined;
+	afterEach(() => installed?.close());
 
 	// A tail on a manual clock, with `at(ms)` moving the clock to an absolute time.
 	function tail(grace = GRACE) {
 		const clock = new Manual();
-		restore = clock.install();
+		installed = clock.install();
 		const at = (ms: number) => clock.jump(Nano(Nano.fromMilli(Milli(ms)) - clock.now()));
 		return { at, clock, tail: new Tail({ grace: () => grace }) };
 	}

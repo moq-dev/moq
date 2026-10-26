@@ -1,14 +1,14 @@
 import type * as Epoch from "../epoch.ts";
 import type * as Path from "../path.ts";
-import type { Reader, Writer } from "../stream.ts";
-import { hasRangeFilters, isDraft20 } from "./filter.ts";
+import { type Reader, Writer } from "../stream.ts";
+import { hasRangeFilters, isDraft22 } from "./filter.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
 import { Parameters } from "./parameters.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 /**
- * The header that begins a fetch stream (draft-20 section 11.4.4), naming the request it
+ * The header that begins a fetch stream (draft-22 section 11.4), naming the request it
  * answers. Written by the publisher when serving a subscription's fill.
  */
 export class FetchHeader {
@@ -22,9 +22,14 @@ export class FetchHeader {
 		this.requestId = requestId;
 	}
 
-	/** Write the header, which the stream type must already precede. */
-	async encode(w: Writer, _version: IetfVersion): Promise<void> {
-		await w.u62(this.requestId);
+	/** Write the stream type and the header in one write, like a subgroup header. */
+	async encode(w: Writer, version: IetfVersion): Promise<void> {
+		await w.write(
+			await Writer.collect(version, async (h) => {
+				await h.u53(FetchHeader.type);
+				await h.u62(this.requestId);
+			}),
+		);
 	}
 
 	/** Read the header, with the stream type already consumed. */
@@ -84,8 +89,8 @@ export class Fetch {
 		}
 
 		let trackNamespace: Path.Valid | undefined;
-		if (isDraft20(version)) {
-			// Draft-20 names the track up front and moves the range into LOCATION_FILTER.
+		if (isDraft22(version)) {
+			// Draft-22 names the track up front and moves the range into LOCATION_FILTER.
 			trackNamespace = (await Namespace.decodeTrack(r)).namespace;
 		} else {
 			const fetchType = await r.u53();
@@ -106,7 +111,7 @@ export class Fetch {
 
 		const params = await Parameters.decode(r, version, "fetch");
 		if (params.rangeFilters && !hasRangeFilters(version)) {
-			throw new Error("Range Filters need draft-19");
+			throw new Error("Range Filters need draft-22");
 		}
 		if (params.trackPropertyFilter) {
 			throw new Error("TRACK_PROPERTY_FILTER is not allowed on FETCH");

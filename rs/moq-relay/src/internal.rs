@@ -91,6 +91,7 @@ pub struct Internal {
 	health: moq_tokio::accept::Health,
 	listeners: Vec<moq_tokio::accept::Health>,
 	uring: Vec<UringWorker>,
+	#[cfg(any(feature = "stun", test))]
 	stun: Option<crate::stun::Counters>,
 	shutdown: Option<crate::shutdown::Observer>,
 	listener: Option<net::TcpListener>,
@@ -105,6 +106,7 @@ struct InternalState {
 	sessions: crate::session::Registry,
 	listeners: Vec<moq_tokio::accept::Health>,
 	uring: Vec<UringWorker>,
+	#[cfg(any(feature = "stun", test))]
 	stun: Option<crate::stun::Counters>,
 	shutdown: Option<crate::shutdown::Observer>,
 }
@@ -133,6 +135,7 @@ impl Internal {
 			health,
 			listeners,
 			uring: Vec::new(),
+			#[cfg(any(feature = "stun", test))]
 			stun: None,
 			shutdown: None,
 			listener: None,
@@ -140,6 +143,7 @@ impl Internal {
 		}
 	}
 
+	#[cfg(feature = "stun")]
 	pub(crate) fn with_stun(mut self, counters: Option<crate::stun::Counters>) -> Self {
 		self.stun = counters;
 		self
@@ -259,6 +263,7 @@ impl Internal {
 				sessions: self.sessions.clone(),
 				listeners: self.listeners.clone(),
 				uring: self.uring.clone(),
+				#[cfg(any(feature = "stun", test))]
 				stun: self.stun.clone(),
 				shutdown: self.shutdown.clone(),
 			})
@@ -334,6 +339,7 @@ async fn serve_health() -> Response {
 /// counts (`open - closed`).
 async fn serve_metrics(State(state): State<InternalState>) -> Response {
 	let mut body = render_metrics(&state.stats.snapshot(), &state.listeners, &state.uring);
+	#[cfg(any(feature = "stun", test))]
 	if let Some(stun) = &state.stun {
 		stun.render(&mut body);
 	}
@@ -383,6 +389,25 @@ async fn revalidate_sessions(RawQuery(query): RawQuery, State(state): State<Inte
 	}
 }
 
+/// A Prometheus label value, escaped per the text exposition format so no value
+/// can end its label or line early.
+pub(crate) struct Label<'a>(pub(crate) &'a str);
+
+impl std::fmt::Display for Label<'_> {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		use std::fmt::Write as _;
+		for c in self.0.chars() {
+			match c {
+				'\\' => f.write_str("\\\\")?,
+				'"' => f.write_str("\\\"")?,
+				'\n' => f.write_str("\\n")?,
+				c => f.write_char(c)?,
+			}
+		}
+		Ok(())
+	}
+}
+
 /// Render a [`moq_net::stats::Snapshot`] as Prometheus text exposition (v0.0.4).
 ///
 /// Hand-formatted rather than pulling in a metrics registry crate: the atomics
@@ -408,8 +433,8 @@ fn render_metrics(
 			let _ = writeln!(
 				out,
 				"{name}{{tier=\"{}\",role=\"{}\"}} {}",
-				tier.as_str(),
-				role.as_str(),
+				Label(tier.as_str()),
+				Label(role.as_str()),
 				field(totals)
 			);
 		}
@@ -500,6 +525,51 @@ fn render_metrics(
 		|c| c.broadcasts_ended,
 	);
 
+	for (name, help, field) in [
+		(
+			"moq_relay_wire_tx_bytes_total",
+			"Transport bytes sent, including framing and retransmissions, excluding IP, UDP, and TCP headers.",
+			(|p: &moq_net::stats::Presence| p.wire_tx) as fn(&moq_net::stats::Presence) -> u64,
+		),
+		(
+			"moq_relay_wire_rx_bytes_total",
+			"Transport bytes received, including framing, excluding IP, UDP, and TCP headers.",
+			(|p: &moq_net::stats::Presence| p.wire_rx) as fn(&moq_net::stats::Presence) -> u64,
+		),
+	] {
+		let _ = writeln!(out, "# HELP {name} {help}");
+		let _ = writeln!(out, "# TYPE {name} counter");
+		for (tier, presence) in snap.sessions() {
+			let _ = writeln!(out, "{name}{{tier=\"{}\"}} {}", Label(tier.as_str()), field(&presence));
+		}
+	}
+
+	let control = snap.control();
+	for (name, help, field) in [
+		(
+			"moq_relay_control_tx_bytes_total",
+			"Control-message bytes encoded for sending, including codec prefixes; excludes transport overhead.",
+			(|b: &moq_net::stats::Bytes| b.tx) as fn(&moq_net::stats::Bytes) -> u64,
+		),
+		(
+			"moq_relay_control_rx_bytes_total",
+			"Control-message bytes decoded, including codec prefixes; excludes transport overhead.",
+			(|b: &moq_net::stats::Bytes| b.rx) as fn(&moq_net::stats::Bytes) -> u64,
+		),
+	] {
+		let _ = writeln!(out, "# HELP {name} {help}");
+		let _ = writeln!(out, "# TYPE {name} counter");
+		for (tier, class, bytes) in &control {
+			let _ = writeln!(
+				out,
+				"{name}{{tier=\"{}\",class=\"{}\"}} {}",
+				Label(tier.as_str()),
+				Label(class.as_str()),
+				field(bytes)
+			);
+		}
+	}
+
 	let _ = writeln!(
 		out,
 		"# HELP moq_relay_requests_total Admitted request/response exchanges."
@@ -509,7 +579,7 @@ fn render_metrics(
 		let _ = writeln!(
 			out,
 			"moq_relay_requests_total{{tier=\"{}\"}} {}",
-			tier.as_str(),
+			Label(tier.as_str()),
 			presence.requests
 		);
 	}
@@ -521,7 +591,7 @@ fn render_metrics(
 		let _ = writeln!(
 			out,
 			"moq_relay_sessions_opened_total{{tier=\"{}\"}} {}",
-			tier.as_str(),
+			Label(tier.as_str()),
 			sessions.sessions_started
 		);
 	}
@@ -534,7 +604,7 @@ fn render_metrics(
 		let _ = writeln!(
 			out,
 			"moq_relay_sessions_closed_total{{tier=\"{}\"}} {}",
-			tier.as_str(),
+			Label(tier.as_str()),
 			sessions.sessions_ended
 		);
 	}
@@ -549,8 +619,8 @@ fn render_metrics(
 			let _ = writeln!(
 				out,
 				"moq_relay_sessions_failed_total{{tier=\"{}\",kind=\"{}\"}} {}",
-				tier.as_str(),
-				kind.as_str(),
+				Label(tier.as_str()),
+				Label(kind.as_str()),
 				presence.sessions_failed.count(kind)
 			);
 		}
@@ -581,7 +651,7 @@ fn render_drain(out: &mut String, tally: crate::shutdown::Tally) {
 /// zero so a rate over it is defined from the first scrape. A refused session
 /// never reaches the traffic counters above.
 fn render_refusals(out: &mut String, refusals: &crate::refusals::Refusals) {
-	use crate::refusals::Refusal;
+	use crate::refusals::RefusalKind;
 	use std::fmt::Write as _;
 
 	let _ = writeln!(
@@ -590,11 +660,11 @@ fn render_refusals(out: &mut String, refusals: &crate::refusals::Refusals) {
 	);
 	let _ = writeln!(out, "# TYPE moq_relay_sessions_refused_total counter");
 	let counts = refusals.snapshot();
-	for &refusal in Refusal::ALL {
+	for &refusal in RefusalKind::ALL {
 		let _ = writeln!(
 			out,
 			"moq_relay_sessions_refused_total{{reason=\"{}\"}} {}",
-			refusal.as_str(),
+			Label(refusal.as_str()),
 			counts.count(refusal)
 		);
 	}
@@ -636,8 +706,8 @@ fn render_accepts(out: &mut String, listeners: &[moq_tokio::accept::Health]) {
 			let _ = writeln!(
 				out,
 				"moq_relay_accept_failures_total{{listener=\"{}\",class=\"{}\"}} {}",
-				health.listener(),
-				failure.as_str(),
+				Label(health.listener()),
+				Label(failure.as_str()),
 				health.failures(failure)
 			);
 		}
@@ -652,7 +722,7 @@ fn render_accepts(out: &mut String, listeners: &[moq_tokio::accept::Health]) {
 		let _ = writeln!(
 			out,
 			"moq_relay_accept_stalled_seconds{{listener=\"{}\"}} {}",
-			health.listener(),
+			Label(health.listener()),
 			health.stalled().unwrap_or_default().as_secs_f64()
 		);
 	}
@@ -819,7 +889,7 @@ fn render_uring(out: &mut String, workers: &[UringWorker]) {
 fn render_uring(_out: &mut String, _workers: &[UringWorker]) {}
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 
@@ -1102,6 +1172,7 @@ mod tests {
 			sessions: crate::session::Registry::new(),
 			listeners: Vec::new(),
 			uring: Vec::new(),
+			#[cfg(any(feature = "stun", test))]
 			stun: None,
 			shutdown: None,
 		};
@@ -1121,6 +1192,7 @@ mod tests {
 			sessions: crate::session::Registry::new(),
 			listeners: Vec::new(),
 			uring: Vec::new(),
+			#[cfg(any(feature = "stun", test))]
 			stun: None,
 			shutdown: None,
 		};
@@ -1133,10 +1205,10 @@ mod tests {
 	/// defined before the first refusal.
 	#[test]
 	fn refusal_metrics_list_every_reason_from_zero() {
-		use crate::refusals::{Refusal, Refusals};
+		use crate::refusals::{RefusalKind, Refusals};
 
 		let refusals = Refusals::default();
-		refusals.record(Refusal::Unavailable);
+		refusals.record(RefusalKind::Unavailable);
 		let mut body = String::new();
 		render_refusals(&mut body, &refusals);
 
@@ -1144,14 +1216,33 @@ mod tests {
 			body.contains("# TYPE moq_relay_sessions_refused_total counter"),
 			"type header:\n{body}"
 		);
-		for &refusal in Refusal::ALL {
-			let expected = u64::from(refusal == Refusal::Unavailable);
+		for &refusal in RefusalKind::ALL {
+			let expected = u64::from(refusal == RefusalKind::Unavailable);
 			let row = format!(
 				"moq_relay_sessions_refused_total{{reason=\"{}\"}} {expected}",
 				refusal.as_str()
 			);
 			assert!(body.contains(&row), "missing {row}:\n{body}");
 		}
+	}
+
+	/// A label value carrying a quote, backslash, or newline stays inside its label, so
+	/// it can neither break the exposition nor forge another series.
+	#[test]
+	fn label_values_are_escaped() {
+		let stats = moq_net::stats::Registry::new(Default::default());
+		let tier = "a\\b\"} 9\nmoq_relay_requests_total{tier=\"x";
+		drop(stats.tier(moq_net::stats::Tier::new(tier)).request("root"));
+		let body = render_metrics(&stats.snapshot(), &[], &[]);
+		assert!(
+			body.contains(r#"moq_relay_requests_total{tier="a\\b\"} 9\nmoq_relay_requests_total{tier=\"x"} 1"#),
+			"{body}"
+		);
+		assert!(
+			body.lines()
+				.all(|line| !line.starts_with("moq_relay_requests_total{tier=\"x")),
+			"{body}"
+		);
 	}
 
 	#[test]
@@ -1170,6 +1261,32 @@ mod tests {
 			body.contains("moq_relay_sessions_closed_total{tier=\"http\"} 0"),
 			"{body}"
 		);
+	}
+
+	#[test]
+	fn wire_metrics_include_internal_sessions_and_keep_final_totals() {
+		let registry = moq_net::stats::Registry::new(Default::default());
+		for tier in ["internal", "edge"] {
+			let session = registry.tier(moq_net::stats::Tier::new(tier)).session("");
+			let source = moq_net::transport::Wire::new();
+			let guard = session.wire(source.clone());
+			source.set_sent_bytes(123);
+			source.set_received_bytes(456);
+			let check = || {
+				let body = render_metrics(&registry.snapshot(), &[], &[]);
+				for (direction, value) in [("tx", 123), ("rx", 456)] {
+					let metric = format!("moq_relay_wire_{direction}_bytes_total");
+					assert!(body.contains(&format!("# TYPE {metric} counter")), "{body}");
+					assert!(body.contains(&format!("{metric}{{tier=\"{tier}\"}} {value}")), "{body}");
+				}
+			};
+			check();
+			check();
+			drop(guard);
+			drop(session);
+			registry.report(&mut Default::default());
+			check();
+		}
 	}
 
 	#[tokio::test]

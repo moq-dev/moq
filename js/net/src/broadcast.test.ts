@@ -1,12 +1,10 @@
 import { expect, setSystemTime, test } from "bun:test";
-import { Manual, Milli, Nano } from "@moq/clock";
+import { Milli } from "@moq/clock";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
-import { GroupTooLarge, NotFound, TimestampMismatch } from "./error.ts";
+import { GroupTooLarge, NotFound } from "./error.ts";
 import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "./group.ts";
-import { TrackSequences } from "./internal.ts";
+import { hooks } from "./internal.ts";
 import { textFrame } from "./mock.ts";
-import { Producer as OriginProducer } from "./origin.ts";
-import * as Path from "./path.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import type { Request as TrackRequest } from "./track.ts";
 import { unwanted } from "./util/demand.ts";
@@ -65,7 +63,7 @@ test("a staged track resolves its subscribers at commit, with what was written",
 	const request = await pendingRequest(consumer);
 	if (!request) throw new Error("expected request");
 
-	const staged = request.stage({ timescale: Timescale.MILLI });
+	const staged = hooks.stageRequest(request, { timescale: Timescale.MILLI });
 	staged.producer.writeFrame(textFrame("hello"));
 	const pending = Symbol("pending");
 	expect(await Promise.race([track.info(), Promise.resolve(pending)])).toBe(pending);
@@ -75,57 +73,9 @@ test("a staged track resolves its subscribers at commit, with what was written",
 	expect(await reader.readString()).toBe("hello");
 });
 
-test("disposing an uncommitted staged track rejects the request", async () => {
-	const consumer = new TestConsumer();
-	const info = consumer.track("video").info();
-	const request = await pendingRequest(consumer);
-	if (!request) throw new Error("expected request");
-
-	{
-		using staged = request.stage({ timescale: Timescale.MILLI });
-		staged.producer.writeFrame(textFrame("hello"));
-	}
-	await expect(info).rejects.toThrow();
-});
-
-test("a disposed staged track refuses a later commit", async () => {
-	const consumer = new TestConsumer();
-	const info = consumer.track("video").info();
-	const request = await pendingRequest(consumer);
-	if (!request) throw new Error("expected request");
-
-	const staged = request.stage({ timescale: Timescale.MILLI });
-	staged[Symbol.dispose]();
-	expect(() => staged.commit()).toThrow("staged track already committed or dropped");
-	await expect(info).rejects.toThrow("staged track dropped");
-});
-
-// A replacement continues the name's timeline, so its groups can't start before the highest one an
-// earlier producer checked, while a new broadcast starts over.
-test("a replacement producer refuses a rewind past its predecessor", () => {
-	const broadcast = new BroadcastProducer();
-	const first = broadcast.createTrack("media", { timescale: Timescale.MILLI });
-	first.appendGroup().writeFrame(textFrame("a", Timestamp.fromMillis(1000)));
-	first.close();
-
-	const second = broadcast.createTrack("media", { timescale: Timescale.MILLI });
-	const group = new GroupProducer(1);
-	second.writeGroup(group);
-	expect(() => group.writeFrame(textFrame("b", Timestamp.fromMillis(500)))).toThrow(TimestampMismatch);
-	group.writeFrame(textFrame("b", Timestamp.fromMillis(1000)));
-
-	const next = new BroadcastProducer();
-	const track = next.createTrack("media", { timescale: Timescale.MILLI });
-	track.appendGroup().writeFrame(textFrame("c", Timestamp.fromMillis(500)));
-
-	second.close();
-	broadcast.close();
-	next.close();
-});
-
-// A name keeps one sequence namespace across producer replacements. The application owns where a
-// replacement starts: an append that would reuse an earlier producer's sequence throws.
-test("a replacement producer refuses to append a sequence the name already wrote", async () => {
+// A broadcast keeps nothing of a name once its track is gone: a replacement numbers and times its
+// groups from scratch, and the application owns keeping them past its predecessor's.
+test("a replacement producer starts over", async () => {
 	const broadcast = new BroadcastProducer();
 
 	// Pull before subscribing: a broadcast nobody serves on demand answers NotFound instead.
@@ -133,39 +83,29 @@ test("a replacement producer refuses to append a sequence the name already wrote
 	const firstSubscriber = broadcast.track("media").subscribe();
 	const firstRequest = await firstPull;
 	if (!firstRequest) throw new Error("expected first request");
-	const firstProducer = firstRequest.accept({ timescale: Timescale.MILLI });
-	expect(firstProducer.appendGroup().sequence).toBe(0);
-	expect(firstProducer.appendDatagram(Timestamp.fromMillis(0), new Uint8Array())).toBe(1);
-	firstProducer.writeGroup(new GroupProducer(8));
-	firstProducer.insertDatagram(12, Timestamp.fromMillis(0), new Uint8Array());
+	const first = firstRequest.accept({ timescale: Timescale.MILLI });
+	const group = new GroupProducer(8);
+	first.writeGroup(group);
+	group.writeFrame(textFrame("a", Timestamp.fromMillis(1000)));
+	group.close();
 	firstSubscriber.close();
-	firstProducer.close();
+	first.close();
 
 	const secondSubscriber = broadcast.track("media").subscribe();
 	const secondRequest = await wireOf(broadcast).requested();
 	if (!secondRequest) throw new Error("expected second request");
-	const secondProducer = secondRequest.accept({ timescale: Timescale.MILLI });
-	expect(() => secondProducer.appendGroup()).toThrow("duplicate sequence");
-	expect(() => secondProducer.appendDatagram(Timestamp.fromMillis(0), new Uint8Array())).toThrow(
-		"duplicate sequence",
-	);
-
-	// An explicit first write picks the start, and appends continue from there.
-	secondProducer.writeGroup(new GroupProducer(13));
-	expect(secondProducer.appendGroup().sequence).toBe(14);
-
-	const nextGeneration = new BroadcastProducer();
-	const nextPull = wireOf(nextGeneration).requested();
-	const nextSubscriber = nextGeneration.track("media").subscribe();
-	const nextRequest = await nextPull;
-	if (!nextRequest) throw new Error("expected next-generation request");
-	expect(nextRequest.accept({ timescale: Timescale.MILLI }).appendGroup().sequence).toBe(0);
-
+	const second = secondRequest.accept({ timescale: Timescale.MILLI });
+	const appended = second.appendGroup();
+	expect(appended.sequence).toBe(0);
+	appended.writeFrame(textFrame("b", Timestamp.fromMillis(500)));
 	secondSubscriber.close();
-	secondProducer.close();
-	nextSubscriber.close();
+	second.close();
+
+	broadcast.removeTrack("media");
+	const third = broadcast.createTrack("media", { timescale: Timescale.MILLI });
+	third.finishAt({ group: 0, frame: 0 });
+	third.close();
 	broadcast.close();
-	nextGeneration.close();
 });
 
 test("createTrack answers a queued request", async () => {
@@ -220,69 +160,6 @@ test("createTrack does not take over a request a handler already pulled", async 
 	// The handler holds it, so the name stays duplicate until it answers, as in Rust.
 	expect(() => broadcast.createTrack("media")).toThrow("duplicate track");
 	request.reject();
-	broadcast.close();
-});
-
-test("created and requested tracks share a name's sequences", async () => {
-	const broadcast = new BroadcastProducer();
-	const first = broadcast.createTrack("media", { timescale: Timescale.MILLI });
-	expect(first.appendGroup().sequence).toBe(0);
-	first.writeGroup(new GroupProducer(8));
-	first.insertDatagram(12, Timestamp.fromMillis(0), new Uint8Array());
-	first.close();
-
-	// A replacement refuses to append past nothing, since that would reuse every explicit write.
-	const second = broadcast.createTrack("media", { timescale: Timescale.MILLI });
-	expect(() => second.appendGroup()).toThrow("duplicate sequence");
-	second.writeGroup(new GroupProducer(13));
-	second.close();
-
-	// An on-demand producer checks the same namespace, and so does a later created track.
-	broadcast.removeTrack("media");
-	const pulled = wireOf(broadcast).requested();
-	const subscriber = broadcast.track("media").subscribe();
-	const request = await pulled;
-	if (!request) throw new Error("expected request");
-	const requested = request.accept({ timescale: Timescale.MILLI });
-	expect(() => requested.appendDatagram(Timestamp.fromMillis(0), new Uint8Array())).toThrow("duplicate sequence");
-	requested.insertDatagram(14, Timestamp.fromMillis(0), new Uint8Array());
-	subscriber.close();
-	requested.close();
-
-	const later = broadcast.createTrack("media", { timescale: Timescale.MILLI });
-	expect(() => later.appendGroup()).toThrow("duplicate sequence");
-	later.close();
-
-	// Only a new broadcast starts over.
-	const next = new BroadcastProducer();
-	expect(next.createTrack("media", { timescale: Timescale.MILLI }).appendGroup().sequence).toBe(0);
-	broadcast.close();
-	next.close();
-});
-
-test("names that never wrote leave nothing behind", () => {
-	const sequences = new TrackSequences();
-	sequences.get("written").next = 1;
-	const held = sequences.get("held");
-	held.holders = 1;
-
-	// A peer asking for arbitrary names cannot grow the map: unused names are swept as it grows.
-	for (let i = 0; i < 1000; i++) sequences.get(`unused-${i}`);
-	expect(sequences.size).toBeLessThan(64);
-
-	// Written and held names survive every sweep.
-	expect(sequences.get("written").next).toBe(1);
-	expect(sequences.get("held")).toBe(held);
-});
-
-test("a written name refuses to reuse its sequences after many other names", () => {
-	const broadcast = new BroadcastProducer();
-	const written = broadcast.createTrack("written");
-	written.appendGroup().close();
-	written.close();
-	for (let i = 0; i < 1000; i++) broadcast.createTrack(`unused-${i}`).close();
-
-	expect(() => broadcast.createTrack("written").appendGroup()).toThrow("duplicate sequence");
 	broadcast.close();
 });
 
@@ -897,119 +774,4 @@ test("removeTrack stops counting the removed track's demand at once", async () =
 	subscriber.close();
 	video.close();
 	broadcast.close();
-});
-
-// A track holding one finished group, with the given max-age in seconds.
-function finishedTrack(broadcast: BroadcastProducer, name: string, maxAge?: number) {
-	const track = broadcast.createTrack(name, {
-		timescale: Timescale.MILLI,
-		maxAge: maxAge === undefined ? undefined : Milli(maxAge * 1_000),
-	});
-	const group = track.appendGroup();
-	group.writeFrame(textFrame(name, Timestamp.fromMillis(0)));
-	group.close();
-	return track;
-}
-
-// A finished broadcast keeps serving its finished tracks, so a late subscriber still gets the media,
-// and closes once the longest max-age passes. A live track, an aborted one, and a track without a
-// max-age add nothing to the wait.
-test("finish serves finished tracks until stale", async () => {
-	const clock = new Manual();
-	const restore = clock.install();
-	const origin = new OriginProducer();
-	try {
-		const broadcast = origin.createBroadcast(Path.from("finish"));
-		const consumer = broadcast.consume();
-		const live = finishedTrack(broadcast, "live", 60);
-		const aborted = finishedTrack(broadcast, "aborted", 60);
-		aborted.close(new Error("gone"));
-		for (const [name, age] of [
-			["video", 2],
-			["audio", 5],
-			["catalog", undefined],
-		] as const) {
-			finishedTrack(broadcast, name, age).close();
-		}
-		broadcast.announce();
-
-		const finish = broadcast.finish();
-		expect(finish.linger).toBe(Milli(5_000));
-		let done = false;
-		const wait = finish.wait().then(() => {
-			done = true;
-		});
-
-		await clock.advance(Nano.fromMilli(Milli(4_000)));
-		const late = consumer.track("audio").subscribe().ordered();
-		expect(await late.readString()).toBe("audio");
-		expect(done).toBe(false);
-		expect(broadcast.route).toBeDefined();
-
-		await clock.advance(Nano.fromMilli(Milli(1_000)));
-		await wait;
-		expect(Number(clock.now())).toBe(Nano.fromMilli(Milli(5_000)));
-		expect(consumer.closed.peek()).toBeNull();
-		expect(broadcast.route).toBeUndefined();
-		expect(() => consumer.track("audio").subscribe()).toThrow("broadcast is closed");
-		late.close();
-		live.close();
-	} finally {
-		origin.close();
-		restore();
-	}
-});
-
-// The linger is the local retention window, so the cache window caps a longer max-age.
-test("finish caps the linger at the cache window", () => {
-	const broadcast = new BroadcastProducer();
-	finishedTrack(broadcast, "video", 600).close();
-	expect(broadcast.finish().linger).toBe(Milli(30_000));
-	broadcast.close();
-});
-
-// Closing the handle, the interrupt, closes the broadcast at once.
-test("closing a finish closes the broadcast early", () => {
-	const broadcast = new BroadcastProducer();
-	finishedTrack(broadcast, "video", 30).close();
-	const finish = broadcast.finish();
-	expect(finish.closed.peek()).toBeUndefined();
-	finish.close();
-	expect(broadcast.closed.peek()).toBeNull();
-	finish.close();
-});
-
-// The linger is fixed at finish, so the broadcast refuses any change that could outlast it.
-test("a finished broadcast refuses changes", () => {
-	const origin = new OriginProducer();
-	const broadcast = origin.createBroadcast(Path.from("finish"));
-	finishedTrack(broadcast, "video", 30).close();
-	broadcast.announce();
-	const finish = broadcast.finish();
-	expect(() => broadcast.createTrack("audio")).toThrow("broadcast is finished");
-	expect(() => broadcast.removeTrack("video")).toThrow("broadcast is finished");
-	expect(() => broadcast.announce()).toThrow("broadcast is finished");
-	expect(() => broadcast.unannounce()).toThrow("broadcast is finished");
-	expect(() => broadcast.finish()).toThrow("broadcast is finished");
-	expect(broadcast.route).toBeDefined();
-	finish.close();
-	origin.close();
-});
-
-// A close elsewhere ends the linger early.
-test("closing the broadcast elsewhere ends the linger", async () => {
-	const clock = new Manual();
-	const restore = clock.install();
-	try {
-		const broadcast = new BroadcastProducer();
-		finishedTrack(broadcast, "video", 30).close();
-		const finish = broadcast.finish();
-		const wait = finish.wait();
-		await clock.advance(Nano.fromMilli(Milli(1_000)));
-		broadcast.close();
-		await wait;
-		expect(Number(clock.now())).toBe(Nano.fromMilli(Milli(1_000)));
-	} finally {
-		restore();
-	}
 });

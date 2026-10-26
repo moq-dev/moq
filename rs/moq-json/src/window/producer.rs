@@ -7,7 +7,7 @@ use moq_net::Timed;
 use serde::Serialize;
 use serde_json::Value;
 
-use super::{Checkpoint, Encoded, Encoder, ProducerConfig};
+use super::{Encoded, Encoder, ProducerConfig};
 use crate::Result;
 use crate::refresh::Refresh;
 
@@ -38,10 +38,6 @@ impl<T> Clone for Producer<T> {
 impl<T> Producer<T> {
 	/// Create a producer that publishes to the given track.
 	pub fn new(track: moq_net::track::Producer, config: ProducerConfig) -> Self {
-		Self::with_encoder(track, Encoder::new(config))
-	}
-
-	fn with_encoder(track: moq_net::track::Producer, encoder: Encoder<T>) -> Self {
 		Self {
 			inner: Arc::new(Mutex::new(Inner {
 				refresh: Refresh::new(&track),
@@ -50,7 +46,7 @@ impl<T> Producer<T> {
 					group: None,
 					largest: None,
 				},
-				encoder,
+				encoder: Encoder::new(config),
 				at: None,
 				finished: false,
 			})),
@@ -95,8 +91,8 @@ impl<T> Producer<T> {
 	///
 	/// A join wants one once the open group's ops outweigh the track's
 	/// [`refresh`](moq_net::track::Info::refresh) ratio times its header (see
-	/// [`Demand::wanted`](moq_net::track::Demand::wanted)), so that joiner reads the window without
-	/// downloading them. The header carries the newest timestamp written. Nothing happens before
+	/// [`Demand::wanted`](moq_net::track::Demand::wanted)). It is a soft trigger: that joiner still
+	/// reads the cached group, then the new one. The header carries the newest timestamp written. Nothing happens before
 	/// the first edit, or on a track without a ratio.
 	///
 	/// The producer has no runtime of its own, so the owner drives this: loop on it, or select on it
@@ -118,17 +114,18 @@ impl<T> Producer<T> {
 	pub fn finish(&mut self) -> Result<()> {
 		self.inner.lock().unwrap().finish()
 	}
+
+	/// Abort the track with the given error, which consumers see in place of a clean end.
+	///
+	/// Consumes the handle, since nothing can be published afterwards. Clones sharing the track see
+	/// it closed: their next edit fails with [`moq_net::Error::Closed`].
+	pub fn abort(self, err: moq_net::Error) -> Result<()> {
+		self.inner.lock().unwrap().abort(err);
+		Ok(())
+	}
 }
 
 impl<T: Serialize> Producer<T> {
-	/// Create a producer continuing `checkpoint` on the given track.
-	///
-	/// The first edit opens a group restating the checkpoint, so a reader that already holds those
-	/// records sees only what follows. Fails like [`Encoder::resume`].
-	pub fn resume(track: moq_net::track::Producer, config: ProducerConfig, checkpoint: &Checkpoint<T>) -> Result<Self> {
-		Ok(Self::with_encoder(track, Encoder::resume(config, checkpoint)?))
-	}
-
 	/// Append a record at its timestamp, or untimed when absent.
 	pub fn push<'a>(&mut self, value: impl Into<Timed<&'a T>>) -> Result<()>
 	where
@@ -204,6 +201,16 @@ impl<T> Inner<T> {
 		}
 		self.finished = true;
 		self.track.finish()
+	}
+
+	fn abort(&mut self, err: moq_net::Error) {
+		self.finished = true;
+		// The group first: aborting the track leaves an already-pulled group consumer independent.
+		if let Some(group) = self.track.group.take() {
+			let _ = group.abort(err.clone());
+		}
+		// Idempotent: a track that is already closed keeps its first reason.
+		let _ = self.track.inner.clone().abort(err);
 	}
 
 	fn ensure_open(&self) -> Result<()> {

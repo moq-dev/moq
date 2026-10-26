@@ -1,18 +1,18 @@
 package dev.moq
 
 /**
- * A connected MoQ session with publish/subscribe conveniences.
+ * A MoQ session with publish/subscribe conveniences.
  *
  * Build one with [Moq.connect]. The underlying [session] always exposes a
  * publisher and a subscriber (wired from the origins in its [ClientConfig], or
  * auto-created), so you can [createBroadcast] and collect [announced] updates
  * without touching the raw [Client] handle.
  *
- * Call [shutdown] to drain finished tracks before disconnecting. [AutoCloseable]
+ * Call [shutdown], then await [Session.closed] to drain finished tracks before disconnecting. [AutoCloseable]
  * disposal through `use { ... }` or [close] cancels immediately.
  */
 class Moq internal constructor(
-    /** The established session. Use it for [Session.closed]/[Session.shutdown]. */
+    /** The connecting or connected session. Use it for [Session.closed]/[Session.shutdown]. */
     val session: Session,
     private val client: Client,
 ) : AutoCloseable {
@@ -52,14 +52,6 @@ class Moq internal constructor(
     suspend fun requestBroadcast(path: String): BroadcastConsumer = session.consume().requestBroadcast(path)
 
     /**
-     * How many times this session has connected: 1 for the connect that built it, one more on
-     * each reconnect. A server-accepted session stays at 1.
-     *
-     * Pair it with [Session.status] to log each reconnect by number.
-     */
-    fun connects(): ULong = session.connects()
-
-    /**
      * The session's bandwidth allocator.
      *
      * Every call returns a handle to the same registry. [Bandwidth.reserve] a
@@ -77,17 +69,25 @@ class Moq internal constructor(
     fun auth(): Auth = session.auth()
 
     /**
-     * Drain finished tracks within one second, throwing on failure.
+     * The credentials every dial presents ([ClientConfig.tokens]), to replace while running.
+     *
+     * [Tokens.set] replaces them, such as before the current ones expire: the next dial presents
+     * them, and a live session with in-band AUTH presents them at once, withdrawing each
+     * replaced token once its replacements are answered, even when one is refused. After an
+     * authorization refusal the client redials only if they changed. An empty token throws
+     * `MoqException.Config`.
+     */
+    fun tokens(): Tokens = client.tokens()
+
+    /**
+     * Request a draining close now; await `session.closed()` for its result, then [close]
+     * to release the client.
      * Explicit `moq-lite-07-wip` waits for the peer to receive finished tails; older
      * Lite versions, including the default lite-06, wait only for transport ACKs.
      * IETF also waits for transport ACKs.
      */
-    suspend fun shutdown() {
-        try {
-            session.shutdown()
-        } finally {
-            client.cancel()
-        }
+    fun shutdown() {
+        session.shutdown()
     }
 
     /** Cancel immediately and release the client. */
@@ -98,7 +98,7 @@ class Moq internal constructor(
 
     companion object {
         /**
-         * Connect to a relay at [url] and return the live [Moq] connection.
+         * Connect to a relay at [url] and return a connecting [Moq] connection.
          *
          * [config] carries the TLS trust, bind address, protocol versions, QUIC and
          * WebSocket tuning, reconnect pacing, and origins; every field has a default.
@@ -110,7 +110,7 @@ class Moq internal constructor(
          * two directions.
          */
         suspend fun connect(url: String, config: ClientConfig = ClientConfig()): Moq {
-            val client = Client(config)
+            val client = Client(config.copy(implementation = implementation(config.implementation)))
             try {
                 return Moq(client.connect(url), client)
             } catch (e: Throwable) {

@@ -13,11 +13,12 @@ import { Subscribe, SubscribeOk } from "./subscribe.ts";
 import { Subscriber } from "./subscriber.ts";
 import { ALPN, Version } from "./version.ts";
 
-const VERSION = Version.DRAFT_19;
+const VERSION = Version.DRAFT_18;
 const ALIAS = 9n;
 const TRACK_ENDED = 0x2;
 const INTERNAL_ERROR = 0x0;
 const UNAUTHORIZED = 0x1;
+const SUBSCRIPTION_ENDED = 0x3;
 
 // A plain subgroup stream: no extensions, no subgroup id, end of group on FIN.
 const FLAGS: GroupFlags = {
@@ -53,7 +54,7 @@ function groupStream(subscriber: Subscriber, groupId: number, flags = FLAGS) {
 
 /** A subscriber with one track subscribed and answered; the test plays the publisher. */
 async function subscribed(largest?: number) {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const session = new NativeSession(pair.server, VERSION, true);
 	const subscriber = new Subscriber({ session });
 	const reader = subscriber
@@ -133,7 +134,8 @@ test("a group read across PUBLISH_DONE is delivered whole", async () => {
 
 test("a Stream Count of 0 is a hint, so a late stream within the grace is still delivered", async () => {
 	const clock = new Manual();
-	using _clock = { [Symbol.dispose]: clock.install() };
+	const installed = clock.install();
+	using _clock = { [Symbol.dispose]: () => installed.close() };
 	const { subscriber, reader, done } = await subscribed();
 	await done(TRACK_ENDED, 0n);
 
@@ -159,6 +161,21 @@ test("a PUBLISH_DONE with an error status aborts the track", async () => {
 	const { reader, done } = await subscribed();
 	await done(INTERNAL_ERROR, 0n);
 	expect(await reader.closed).toBeInstanceOf(Error);
+});
+
+// SUBSCRIPTION_ENDED ends only the subscription: a later one continues the track past these
+// groups, so the copy delivers what was in flight and then fails rather than declare an end.
+test("a SUBSCRIPTION_ENDED PUBLISH_DONE drains, then aborts the track", async () => {
+	const { subscriber, reader, done } = await subscribed();
+	const group = groupStream(subscriber, 0);
+	group.write(object("0.0"));
+	group.finish();
+	await group.handled;
+	await done(SUBSCRIPTION_ENDED, 1n);
+
+	expect(await readAll(await reader.recvGroup())).toEqual(["0.0"]);
+	expect(await reader.closed).toBeInstanceOf(Error);
+	expect(reader.end()).toBeUndefined();
 });
 
 test("an UNAUTHORIZED PUBLISH_DONE reads as the revocation a moq-lite peer sends", async () => {

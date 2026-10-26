@@ -50,8 +50,9 @@ window.checkTransport = async () => {
 	const publishing = new Moq.Origin.Producer();
 	const consuming = new Moq.Origin.Producer();
 	const path = Moq.Path.from("peer/data");
-	const broadcast = publishing.createBroadcast(path);
-	broadcast.announce();
+	const broadcastPublication = publishing.createBroadcast(path);
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	const track = broadcast.createTrack("data", { timescale: Moq.Time.Timescale.MILLI });
 	let client: Awaited<ReturnType<typeof Moq.Connection.connect>> | undefined;
 	let server: Awaited<ReturnType<typeof Moq.Connection.accept>> | undefined;

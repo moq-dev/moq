@@ -50,8 +50,15 @@ pub struct Report {
 #[serde(default, rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct Snapshot {
-	/// One row per elementary stream PID the importer carries, ordered by PID. A PID the
-	/// importer drops (an undecoded stream without the `mpegts` catalog section) has none.
+	/// One row per PID, ordered by PID: each elementary stream the PMT lists, carried or
+	/// refused, and each PID no table claims that the importer dropped packets on. A dropped
+	/// PID's row names no track, is [`Class::Data`], and counts its packets in
+	/// [`Stream::refused`]. A PID keeps one row for its life: a PMT that claims it, releases it,
+	/// or claims it again moves the row with its counters, and while dropped it names no track.
+	/// Packets before every listed PMT has arrived, or lapsed past 0.5 s, are acquisition and
+	/// not counted; so are null packets. An import of one program from a multiplex that lists
+	/// others counts no PID no table claims, since another program's PMT may. An SI PID has a
+	/// `.si` row only once it counts [`Stream::unplaced`] sections.
 	// Keys read from strings: a flattened section loses JSON's integer-key parsing.
 	#[serde_as(as = "BTreeMap<serde_with::DisplayFromStr, _>")]
 	#[serde(skip_serializing_if = "BTreeMap::is_empty")]
@@ -123,8 +130,8 @@ impl Snapshot {
 #[non_exhaustive]
 pub struct Stream {
 	/// The current or most recent MoQ track suffix for this PID (`.avc3`, `.mp2`, `.ts`, ...),
-	/// or empty for MPEG-1/2 video, which is read for its clock and not published. At export,
-	/// the suffix an import of the output would give the PID.
+	/// or empty for a PID that publishes no track: one dropped, or MPEG-1/2 video refused and
+	/// read only for its clock. At export, the suffix an import of the output would give the PID.
 	#[serde(skip_serializing_if = "String::is_empty")]
 	pub track: String,
 	/// How this PID was classified. See [`Class`].
@@ -160,17 +167,21 @@ pub struct Stream {
 	/// Damaged packets, PES, or access units refused whole on this PID. Export stays zero.
 	#[serde(skip_serializing_if = "is_zero")]
 	pub damaged: u64,
-	/// Whole PES or sections dropped because the program clock could not place
+	/// Whole PES or sections, SI included, dropped because the program clock could not place
 	/// them: before the first PCR, after the last with no interval to extrapolate from, or
 	/// before the broadcast clock's zero. Any PES lands before that zero while its stream is
 	/// still behind a wrap the import's first PTS already crossed. Export stays zero.
 	#[serde(skip_serializing_if = "is_zero")]
 	pub unplaced: u64,
-	/// Times this PID's stream was refused rather than carried altered: an undecoded stream
-	/// in a program with no PCR to place it by, or a private PES stream with a clock field only
-	/// the PTS and DTS of are rebased (ESCR, a `pack_header_field`, a TREF), PES-level scrambling,
-	/// an unbounded non-video PES, or a header export refuses. Its track ends and leaves the
-	/// catalog. Export stays zero.
+	/// What this PID lost to a route the import does not carry. Once for each time its stream
+	/// was refused: a listed stream the import cannot carry (an ambiguous 0x86 without a CUEI
+	/// registration, an Opus configuration it cannot map, any undecoded stream without the
+	/// `mpegts` catalog section or in a program with no PCR to place it by), or a whole-PES
+	/// stream with a clock field only the PTS and DTS of are rebased (ESCR, a
+	/// `pack_header_field`, a TREF), PES-level scrambling, an unbounded non-video PES, or a
+	/// header export refuses, whose track ends and leaves the catalog. Once for each
+	/// TS-scrambled packet on a carried stream, which the raw lane could carry. And once for
+	/// each packet on a PID no table claims ([`Snapshot::streams`]). Export stays zero.
 	#[serde(skip_serializing_if = "is_zero")]
 	pub refused: u64,
 	/// This PID's share of [`Snapshot::continuity_count_error`].
@@ -214,10 +225,10 @@ impl Stream {
 pub enum Class {
 	/// Continuous audio.
 	Audio = 1,
-	/// Continuous video, including MPEG-1/2 video read only for its clock.
+	/// Continuous video, including MPEG-1/2 video carried whole or read only for its clock.
 	Video = 2,
-	/// Undecoded or sparse data (SCTE-35, ID3, private sections, private PES), or a PCR PID
-	/// that carries no elementary stream. A quiet second is not a stall. A class a later
+	/// Undecoded or sparse data (SCTE-35, ID3, private sections, private PES), a PCR PID that
+	/// carries no elementary stream, or a dropped PID. A quiet second is not a stall. A class a later
 	/// version adds reads as data. It must stay last for `#[serde(other)]`; the explicit
 	/// discriminants keep every variant's `as` value.
 	#[default]
@@ -291,15 +302,6 @@ pub struct Release {
 	/// MPEG-TS system clock may be (ISO/IEC 13818-1 2.4.2.1), which the output cannot follow.
 	#[serde(skip_serializing_if = "is_zero")]
 	pub out_of_tolerance: u64,
-	/// Groups that `--sync` began behind the end of the group before them on their PID, the
-	/// lane too narrow to absorb that group: a leg missing the earlier group's tail places
-	/// them elsewhere, so the legs differ until the lane catches up.
-	#[serde(skip_serializing_if = "is_zero")]
-	pub overruns: u64,
-	/// Packets that `--sync` dropped for reaching their slot after it went out, leaving
-	/// stuffing there.
-	#[serde(skip_serializing_if = "is_zero")]
-	pub late: u64,
 }
 
 impl Release {
@@ -313,8 +315,6 @@ impl Release {
 			offset: jitter.offset().map(millis),
 			drift: jitter.drift().map(|drift| drift * 1e6),
 			out_of_tolerance: jitter.out_of_tolerance(),
-			overruns: 0,
-			late: 0,
 		}
 	}
 }
