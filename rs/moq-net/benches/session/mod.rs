@@ -503,7 +503,7 @@ impl<B: Backend> Cluster<B> {
 		options.transport.stream_buffer = self.window;
 		// Draft 22, the one IETF version here, keeps its SETUP stream open beside the groups.
 		options.transport.max_concurrent_uni_streams =
-			self.credit.map(|credit| credit + usize::from(self.version.is_ietf()));
+			self.credit.map(|credit| credit + usize::from(!self.version.is_lite()));
 		// Hidden included, as the dash's `.stats/` scope sees its subtree.
 		options.server_publish = Some(B::origin(&self.relays[relay]).consume().with_hidden(true));
 		options.client_subscribe = Some(origin.clone());

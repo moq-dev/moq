@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import timedelta
+from importlib import metadata
 
 from moq_ffi import (
     MoqBackoff,
@@ -30,6 +31,15 @@ from moq_ffi import (
 )
 
 _MICROSECOND = timedelta(microseconds=1)
+
+
+def _implementation() -> str:
+    """This package's product token, which its sessions advertise ahead of moq-ffi's."""
+    try:
+        return f"moq-py/{metadata.version('moq-rs')}"
+    except metadata.PackageNotFoundError:
+        # Imported from a source tree rather than an installed distribution.
+        return "moq-py/dev"
 
 
 def _to_us(value: timedelta, name: str) -> int:

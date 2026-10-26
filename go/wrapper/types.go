@@ -1,8 +1,6 @@
 package moq
 
 import (
-	"time"
-
 	ffi "moq.dev/moq-ffi/moq"
 )
 
@@ -204,16 +202,6 @@ func LogLevel(level string) error {
 // viewers see a restart as a new broadcast instead of a stalled one.
 func MintEpoch() string {
 	return ffi.MoqMintEpoch()
-}
-
-// EpochTime is the wall-clock time an epoch encodes, to the millisecond. It
-// returns ErrInvalidEpoch unless epoch is a lowercase hyphenated UUIDv7.
-func EpochTime(epoch string) (time.Time, error) {
-	ms, err := ffi.MoqEpochTimeMs(epoch)
-	if err != nil {
-		return time.Time{}, err
-	}
-	return time.UnixMilli(int64(ms)), nil
 }
 
 // Protocol registries and recognized kinds carried by ProtocolError.
