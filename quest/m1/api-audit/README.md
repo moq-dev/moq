@@ -80,6 +80,7 @@ Rejected in planning:
 - [One lifecycle vocabulary](/quest/m1/api-audit/lifecycle.md) - finish, abort, closed, and close mean one thing on every handle, and Rust and JS observers fire alike
 - [moq-net names say one thing](/quest/m1/api-audit/net-names.md) - demand says `wanted`, colliding stats and transport names are renamed, and Rust and JS info lookups mirror
 - [Request handlers are named requests](/quest/m1/api-audit/requests.md) - `dynamic()` and `Dynamic` become `requests()` and `Requests` at every layer
+- [One meaning for Credential](/quest/m1/api-audit/dial-credential.md) - the internal dial type gets its own name in JS and moq-tokio, and the `Presented` alias goes
 
 ## Related
 

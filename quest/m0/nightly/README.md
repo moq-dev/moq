@@ -37,3 +37,4 @@ Public API: none. Wire: none.
 - [Feature shapes per crate](/quest/m0/nightly/hls-poll-closed-gate.md) - moq-hls `Broadcaster::poll_closed` is gated on `server`, and the gate checks each crate's feature shapes in isolation
 - [moq-relay tests build without default features](/quest/m0/nightly/relay-tests-features.md) - the integration tests gate their websocket and unix-socket fields on the features that define them
 - [qmux builds clean for iOS](/quest/m0/nightly/qmux-ios-dead-code.md) - `TcpStats` is gated to the platforms that implement it, so the iOS simulator build has no dead code
+- [Probe against Cubic](/quest/m0/nightly/competing-cubic.md) - the `competing_cubic` probe test stops resending a stream after its reset

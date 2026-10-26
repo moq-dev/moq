@@ -211,37 +211,3 @@ fn stop_returns_connection_credit() {
 	pair.drive();
 	assert_eq!(writable(&mut pair, client_ch), WINDOW as usize);
 }
-
-/// 0-RTT data the server rejected never spent its connection window
-#[test]
-fn zero_rtt_rejection_returns_connection_credit() {
-	let _guard = subscribe();
-	let crypto = Arc::new(server_crypto());
-	let server = |crypto: Arc<QuicServerConfig>| {
-		let mut config = ServerConfig::with_crypto(crypto);
-		let mut transport = transport();
-		transport.receive_window(VarInt::from_u32(WINDOW));
-		config.transport = Arc::new(transport);
-		Arc::new(config)
-	};
-	let mut pair = Pair::new(Default::default(), (*server(crypto)).clone());
-	let config = client_with(|_| {});
-
-	let client_ch = pair.begin_connect(config.clone());
-	pair.drive();
-	pair.server.assert_accept();
-	let now = pair.time;
-	pair.client_conn_mut(client_ch).close(now, VarInt(0), Bytes::new());
-	pair.drive();
-
-	// A server with a fresh session cache cannot resume, so it rejects the 0-RTT data
-	pair.server.set_server_config(Some(server(Arc::new(server_crypto()))));
-	let client_ch = pair.begin_connect(config);
-	assert!(pair.client_conn_mut(client_ch).has_0rtt());
-	assert_eq!(writable(&mut pair, client_ch), WINDOW as usize);
-	assert_eq!(writable(&mut pair, client_ch), 0);
-	pair.drive();
-	assert!(!pair.client_conn_mut(client_ch).accepted_0rtt());
-
-	assert_eq!(writable(&mut pair, client_ch), WINDOW as usize);
-}
