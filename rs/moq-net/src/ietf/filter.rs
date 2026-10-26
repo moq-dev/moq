@@ -509,6 +509,11 @@ impl Fill {
 
 impl Param for Fill {
 	fn param_encode(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
+		if self.group_order == Some(super::GroupOrder::Any)
+			&& !matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16)
+		{
+			return Err(EncodeError::Unsupported);
+		}
 		let mut buf = Vec::new();
 		let mut inner = Encoder::new(&mut buf, w.form());
 
@@ -607,6 +612,18 @@ mod fill_tests {
 
 	#[test]
 	fn fill_rejects_invalid_group_order() {
+		for version in [Version::Draft17, Version::Draft18, Version::Draft22] {
+			let fill = Fill {
+				group_order: Some(super::super::GroupOrder::Any),
+				filter: None,
+				range_filters: false,
+			};
+			let mut bytes = Vec::new();
+			assert!(matches!(
+				fill.param_encode(&mut Encoder::new(&mut bytes, version.into()), version),
+				Err(EncodeError::Unsupported)
+			));
+		}
 		let version = Version::Draft22;
 		for value in [0, 3, 255] {
 			let bytes = [3, 1, 0x22, value];

@@ -261,6 +261,40 @@ async fn range_fixture_history(version: &str, relay: bool, history: u64) -> Rang
 	}
 }
 
+/// Mixed fixed and live ranges retain history for both live and finished cached sources.
+#[moq_clock::test]
+async fn initial_mixed_ranges_keep_the_absolute_history() {
+	for version in ["moq-transport-17", "moq-transport-22"] {
+		for relay in [false, true] {
+			for finished in [false, true] {
+				let fixture = range_fixture_version(version, relay).await;
+				if finished {
+					let mut warm = subscribe(
+						&fixture.remote,
+						Subscription::default()
+							.with_ranges([Range::live()])
+							.with_max_delay(None),
+					)
+					.await;
+					assert_eq!(next(&mut warm).await, Some(5));
+					fixture.track.finish().unwrap();
+					assert_eq!(next(&mut warm).await, None);
+				}
+				let subscription = Subscription::default()
+					.with_ranges([Range::groups(1..3), Range::live()])
+					.with_max_delay(None);
+				let mut reader = subscribe(&fixture.remote, subscription).await;
+				let mut got = Vec::new();
+				for _ in 0..3 {
+					got.push(next(&mut reader).await.expect("a mixed range group is missing"));
+				}
+				got.sort_unstable();
+				assert_eq!(got, [1, 2, 5], "{version} relay={relay} finished={finished}");
+			}
+		}
+	}
+}
+
 /// A widening fill crosses cached groups without replacing them or losing the groups
 /// after them. A later narrowing reaches the publisher and can be widened again.
 #[moq_clock::test]
