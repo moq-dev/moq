@@ -10,10 +10,9 @@ publish = false
 
 # Used by the shared transport harness outside this package's source tree.
 [package.metadata.cargo-shear]
-ignored = ["bytes", "tokio"]
+ignored = ["tokio"]
 
 [dev-dependencies]
-bytes = { workspace = true }
 futures = { workspace = true }
 moq-clock = { path = "../moq-clock", default-features = false, features = ["sim"] }
 moq-json = { path = "../moq-json" }

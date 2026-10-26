@@ -6,7 +6,7 @@ if [[ "${GITHUB_ACTIONS:-}" != true && "${LOCAL_SUPERVISED:-}" != 1 ]]; then
 fi
 
 # Even the full matrix must keep this library build free of dev-dependencies.
-if [[ $# != 0 && ! ( $# == 1 && $1 == --all ) ]]; then
+if [[ $# != 0 && ! ($# == 1 && $1 == --all) ]]; then
     echo 'usage: just rs net-features [--all]' >&2
     exit 2
 fi

@@ -172,7 +172,7 @@ impl<'a> Decoder<'a> {
 	}
 
 	/// How many bytes have been read.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn position(&self) -> usize {
 		self.len - self.buf.len()
 	}

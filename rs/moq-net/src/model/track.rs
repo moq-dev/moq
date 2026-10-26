@@ -3074,7 +3074,7 @@ impl Producer {
 
 	/// Let this received copy's readers resolve relative and time anchors, for a wire that
 	/// reports the live edge and media time and asks for every group the budget allows.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn anchored(&self) {
 		if let Ok(mut state) = self.modify() {
 			state.anchored = true;
@@ -9916,8 +9916,8 @@ mod test {
 				.unwrap(),
 		];
 		for group in &mut held {
-			assert!(group.read_frame().now_or_never().unwrap().unwrap().is_some());
-			assert!(group.read_frame().now_or_never().unwrap().unwrap().is_none());
+			assert!(matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(Some(_)))));
+			assert!(matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(None))));
 		}
 		assert_eq!(expired(&mut held), [false; 2], "the newest group");
 
@@ -9974,8 +9974,8 @@ mod test {
 				.unwrap(),
 		];
 		for group in &mut held {
-			assert!(group.read_frame().now_or_never().unwrap().unwrap().is_some());
-			assert!(group.read_frame().now_or_never().unwrap().unwrap().is_none());
+			assert!(matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(Some(_)))));
+			assert!(matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(None))));
 		}
 
 		let failed = producer.append_group().unwrap();
@@ -10011,8 +10011,8 @@ mod test {
 
 		append_at(&mut producer, 0);
 		let mut held = subscriber.assert_group();
-		assert!(held.read_frame().now_or_never().unwrap().unwrap().is_some());
-		assert!(held.read_frame().now_or_never().unwrap().unwrap().is_none());
+		assert!(matches!(held.poll_read_frame(&waiter), Poll::Ready(Ok(Some(_)))));
+		assert!(matches!(held.poll_read_frame(&waiter), Poll::Ready(Ok(None))));
 
 		pool.step(Duration::from_secs(1));
 		append_at(&mut producer, 0); // the successor

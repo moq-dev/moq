@@ -5531,7 +5531,6 @@ dependencies = [
 name = "moq-net-tests"
 version = "0.0.0"
 dependencies = [
- "bytes",
  "futures",
  "moq-clock",
  "moq-json",
