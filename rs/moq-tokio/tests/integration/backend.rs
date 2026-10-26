@@ -806,9 +806,9 @@ async fn quic_client_close_reaches_server() {
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn quic_client_close_drains_finished_track() {
-	// Small, since the debug build logging every packet is slow and the drain has
-	// one second. Queued right before the close, it is still unacknowledged then.
-	let payload: Vec<u8> = (0..1024).map(|i| i as u8).collect();
+	// Several congestion windows, so the token must cover data still in flight
+	// after the reconnect task has stopped.
+	let payload: Vec<u8> = (0..64 * 1024).map(|i| i as u8).collect();
 
 	let quic = moq_tokio::quic::Config::default();
 	let mut server_config = moq_tokio::listen::Config::default();
