@@ -59,8 +59,9 @@ pub struct Config {
 	pub publish: Option<origin::Consumer>,
 	pub subscribe: Option<origin::Producer>,
 
-	/// The fresh per-session identity used when the peer declares none.
-	/// A peer negotiating the MoQ Cluster extension declares its own, which wins.
+	/// The origin (hop) id to assign the peer when it declares none itself. See
+	/// `Client::with_peer_hop`; a peer that negotiates the MoQ Cluster extension
+	/// declares its own, which wins.
 	pub peer_hop: Option<Hop>,
 
 	/// What crossing this link costs. Declared in our SETUP (see

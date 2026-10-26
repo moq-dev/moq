@@ -173,7 +173,8 @@ pub struct Config {
 	/// `origin::{Consumer, Producer}::with_stats` before calling [`start`].
 	pub subscribe: Option<origin::Producer>,
 
-	/// The receiver-assigned identity, shared by both session halves.
+	/// The origin (hop) id assigned to the peer, used whenever the peer doesn't
+	/// declare one itself. See `Client::with_peer_hop`.
 	pub peer_hop: Option<Hop>,
 
 	/// The version of the protocol to use.
@@ -217,10 +218,6 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 		limits,
 	} = config;
 
-	let peer_hop = match version.stamps_origin() {
-		true => Some(peer_hop.unwrap_or_else(Hop::random)),
-		false => peer_hop,
-	};
 	let recv_bw = bandwidth::Producer::new();
 
 	let recv_bw_consumer = match version {

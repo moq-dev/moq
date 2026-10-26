@@ -209,36 +209,3 @@ async fn dialed_anonymous_session_does_not_echo_or_route_subscribe_back() {
 		"the subscribe was routed back to the edge that sent it"
 	);
 }
-
-/// A declaration cannot merge the identities of independently connected publishers.
-#[moq_clock::test]
-async fn lite07_sessions_cannot_claim_another_origins_stamp() {
-	let version = "moq-lite-07-wip".parse().unwrap();
-	let relay = produce(1);
-	let first = produce(7);
-	let second = produce(7);
-	let _first_link = support::harness::peer(version, &first, &relay).await;
-	let _second_link = support::harness::peer(version, &second, &relay).await;
-	let _first = first.dynamic("first").unwrap();
-	let _second = second.dynamic("second").unwrap();
-	let first_stamp = learned_hop(&relay, "first").await;
-	let second_stamp = learned_hop(&relay, "second").await;
-	assert_ne!(first_stamp, second_stamp);
-	assert_ne!(first_stamp, Hop::new(7).unwrap());
-	assert_ne!(second_stamp, Hop::new(7).unwrap());
-
-	let forged = produce(first_stamp.id());
-	let _forged_link = support::harness::peer(version, &forged, &relay).await;
-	let _forged = forged.dynamic("forged").unwrap();
-	let forged_stamp = learned_hop(&relay, "forged").await;
-	assert_ne!(forged_stamp, first_stamp);
-	assert_ne!(forged_stamp, second_stamp);
-	assert_eq!(learned_hop(&relay, "first").await, first_stamp);
-	assert_eq!(learned_hop(&relay, "second").await, second_stamp);
-
-	let route = relay.consume().routed("forged").await.unwrap();
-	assert_eq!(
-		route.hops.iter().copied().collect::<Vec<_>>(),
-		[forged_stamp, first_stamp]
-	);
-}

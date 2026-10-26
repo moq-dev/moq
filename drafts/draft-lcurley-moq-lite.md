@@ -419,7 +419,7 @@ The publisher replies with a single ANNOUNCE_OK message followed by announcement
 - ANNOUNCE_RESTART: another publisher instance now serves a previously started advertisement.
 - SYNCED: the initial set is complete.
 
-ANNOUNCE_OK carries metadata that applies to every announcement on the stream: the publisher's declared loop hint, `Hop ID` (the implicit trailing entry of every announcement's path) (see [ANNOUNCE_OK](#announce-ok)).
+ANNOUNCE_OK carries metadata that applies to every announcement on the stream: the publisher's own `Hop ID` (the implicit trailing entry of every announcement's path) (see [ANNOUNCE_OK](#announce-ok)).
 The publisher MUST send [SYNCED](#synced) exactly once, after the initial set.
 The subscriber MAY batch announcements until SYNCED; subsequent announcements are live updates.
 The initial set is relative to this hop: a relay answers with what it holds without waiting for upstreams.
@@ -466,13 +466,9 @@ This is the only loop defense moq-lite requires, and it catches loops of any len
 A conforming sender never sends one (see below), so a receiver MAY instead close the session with a protocol violation; discarding is what keeps a mesh working when one member does not conform.
 A Hop ID of 0 means unknown and never matches anything; withholding an ID trades loop detection for privacy.
 A Hop ID spans 64 bits; a relay sends 0 in place of one that a peer's [Variable-Length Integer](#varint) cannot carry.
-Each receiver, including a direct peer, MUST assign a fresh non-zero routing identity to each session, independent of any identity the peer declares.
-An announcement with an empty resolved Hop ID list originates on that session: the receiver MUST prepend its assigned identity before appending the declared loop hint.
-A non-empty list already names a forwarded origin and MUST retain that first entry.
-The assigned identity is forwarded with the path; it does not identify another session, even one reaching the same publisher.
-Declared Hop IDs are only loop and split-horizon hints, never the identity of a session's own claims.
+A receiver MAY assign an identity of its own to a peer that declared 0, as local selection state for filtering that session; it MUST NOT forward that identity as a Hop ID.
 
-A publisher MUST NOT advertise a route learned on the subscriber's session, or a path whose entries contain the Hop ID the subscriber declared in its SETUP (see [Hop Parameter](#hop-parameter)).
+A publisher MUST NOT advertise a path whose entries contain the Hop ID the subscriber declared in its SETUP (see [Hop Parameter](#hop-parameter)).
 The receiver can only discard it, and acting on it would form a loop, so sending one is never useful.
 Of the paths that remain a publisher SHOULD advertise the best, and nothing when every known path contains that Hop ID.
 Selection is per subscriber, so a subscriber that the serving path flows through still receives the best standby path, which is what lets it fail over if its own copy dies.
@@ -989,11 +985,10 @@ Both endpoints send it and the two values need not match: the parameter prices t
 A declared cost is an assertion, not an instruction: a receiver MAY charge a locally configured value instead, so a peer cannot reprice its neighbours by declaring itself cheap.
 
 ### Hop Parameter {#hop-parameter}
-The Hop Parameter declares the sender's loop hint, used for split-horizon filtering (see [Routing](#routing)).
-It does not assign the sender's routing identity.
+The Hop Parameter declares the sender's Hop ID: the identity that names it in the paths of announcements it forwards.
 The Parameter Value is a variable-length integer; a value of 0 carries no identity and is equivalent to omitting the parameter.
 
-Declaring it at setup gives the receiver the peer's loop hint before any other stream arrives, so route selection applies the same exclusion to the peer's subscriptions as to its announcements (see [Routing](#routing)), even on a session that never opens an Announce Stream.
+Declaring it at setup gives the receiver the peer's identity before any other stream arrives, so route selection applies the same exclusion to the peer's subscriptions as to its announcements (see [Routing](#routing)), even on a session that never opens an Announce Stream.
 Either endpoint MAY send it; a subscriber-only endpoint with no identity MAY omit it, but a publisher SHOULD have a Hop ID regardless (see [ANNOUNCE_OK](#announce-ok)).
 A relay MUST NOT forward it.
 
@@ -1050,11 +1045,11 @@ ANNOUNCE_OK Message {
 ~~~
 
 **Hop ID**:
-The publisher's declared loop hint, not its receiver-assigned routing identity.
+The publisher's own Hop ID.
 This is treated as the implicit trailing entry of every ANNOUNCE_START, ANNOUNCE_UPDATE, and ANNOUNCE_RESTART Hop ID list on this stream; those messages MUST NOT repeat this value as the last entry of their `Hop ID` list.
 The value 0 is reserved to mean "unknown": either no Hop ID was assigned (e.g. when bridging from an older protocol version) or the endpoint deliberately withholds it to obscure the underlying routing.
 A publisher that assigns a Hop ID MUST choose a non-zero value, and SHOULD assign itself one (a fresh random value per session suffices), so downstream receivers can detect loops through it.
-Receivers reconstruct a forwarded path as `Hop IDs ++ [ANNOUNCE_OK.Hop ID]` and a locally originated path as `[assigned identity, ANNOUNCE_OK.Hop ID]` (see [Routing](#routing)).
+Receivers reconstruct the full path as `Hop IDs ++ [ANNOUNCE_OK.Hop ID]`.
 
 ## SYNCED {#synced}
 The initial set on a discovery stream has been delivered.
@@ -1124,14 +1119,13 @@ An empty list indicates either that the announcement originated locally on the p
 A receiver MUST close the session with a PROTOCOL_VIOLATION if the Hop Count does not match the number of subsequent Hop ID entries.
 
 **Hop ID**:
-The origin's routing identity followed by declared loop hints, ordered from origin to the upstream of the responding publisher.
-A path received over an older protocol retains that protocol's identity semantics.
-The responding publisher's own Hop ID is NOT included in the resolved list; it is carried once in ANNOUNCE_OK, so the total path length is the resolved list's length plus 1 (`Hop Count + Hop Keep + 1`), or 2 for an empty list after the receiver stamps its origin.
+A unique identifier for each relay in the path from the origin publisher, ordered from origin to the upstream of the responding publisher.
+The responding publisher's own Hop ID is NOT included in the resolved list; it is carried once in ANNOUNCE_OK, so the total path length is the resolved list's length plus 1 (`Hop Count + Hop Keep + 1`).
 When forwarding an announcement received from an upstream peer, a relay MUST append the upstream peer's ANNOUNCE_OK `Hop ID` to the resolved list, since that ID is no longer implicit downstream.
 A Hop ID value of 0 means the hop is unknown: either it was never assigned or a relay deliberately withholds it (see [Routing](#routing)).
 A received 0 is forwarded unchanged.
 When bridging an announcement from an upstream that sent no hop list, a relay writes 0 for that hop.
-For a locally originated announcement the relay MUST forward the assigned identity before that loop hint, as specified in [Routing](#routing).
+An identity a receiver assigned that upstream is local selection state and MUST NOT be forwarded as a Hop ID.
 
 A receiver MUST close the session with a PROTOCOL_VIOLATION if a non-zero Hop ID appears twice in the resolved list.
 Duplicate values of 0 are not a violation, since 0 identifies nothing and any number of hops may be unknown.
@@ -1822,8 +1816,6 @@ The `Message Length` describes the payload size on the wire.
 
 ## moq-lite-07
 
-- Receivers stamp each session's locally originated announcements with a fresh routing identity and forward it. Declared Hop IDs remain loop hints; lite-06 and earlier retain their published semantics.
-
 - Added the SETUP `Implementation` parameter (0x6): the sender's software as `name/version` product tokens. Earlier versions with a Setup Stream ignore it as an unknown parameter.
 
 - Hop IDs span 64 bits; a relay sends 0 in place of one an earlier version's varint cannot carry.
@@ -2071,7 +2063,7 @@ A token presented on an Auth Stream is as sensitive as one in the request URI, a
 GOAWAY carries an optional New Session URI that asks the peer to reconnect elsewhere. A malicious or compromised peer could use this to redirect a client to an attacker-controlled server. A recipient MUST validate the URI against local policy (scheme, authority, and port) before reconnecting, and MUST NOT reconnect if validation fails (see [GOAWAY](#goaway)). Migrated subscriptions carry no implicit trust from the prior session; the new session is authenticated independently.
 
 ## Routing Metadata and Privacy
-Hop IDs (see [ANNOUNCE_OK](#announce-ok) and [ANNOUNCE_START](#announce-start)) expose the relay path of a broadcast, which may reveal internal topology. A relay that does not wish to disclose its position MAY use the reserved value 0 ("unknown") instead of a stable identifier, at the cost of losing loop detection through itself (see [Routing](#routing)). A receiver-assigned origin stamp remains visible even when the publisher withholds its loop hint; it correlates claims on that session, not across connections. The Hop ID announcement filter (see [Hop Parameter](#hop-parameter)) exists for loop avoidance, not access control: a subscriber cannot verify that a publisher honored it, so it MUST NOT be relied upon to hide a broadcast from a peer that declared its Hop ID.
+Hop IDs (see [ANNOUNCE_OK](#announce-ok) and [ANNOUNCE_START](#announce-start)) expose the relay path of a broadcast, which may reveal internal topology. A relay that does not wish to disclose its position MAY use the reserved value 0 ("unknown") instead of a stable identifier, at the cost of losing loop detection through itself (see [Routing](#routing)). The Hop ID announcement filter (see [Hop Parameter](#hop-parameter)) exists for loop avoidance, not access control: a subscriber cannot verify that a publisher honored it, so it MUST NOT be relied upon to hide a broadcast from a peer that declared its Hop ID.
 
 ## Resource Exhaustion
 A peer can open many streams (subscriptions, announcements, fetches), request large announce prefixes, or advertise broad routes. Implementations SHOULD bound the number of concurrent subscriptions, announce matches, and cached groups; an endpoint whose peer goes past its bound on subscriptions or announcements SHOULD close the session with TOO_MANY_REQUESTS, and SHOULD rely on QUIC flow control and stream limits to backpressure a misbehaving peer (see [ANNOUNCE_REQUEST](#announce-request)). Expiration (see [Expiration](#expiration)) bounds how long stale groups consume memory and flow control. A broad route invites a request for any covered path, each of which may start work: an advertiser SHOULD bound the work it starts, withdrawing its route before it runs out, and every refusal is terminal, so a flood of requests costs the mesh one round trip each rather than a search (see [Resolution](#resolution)).

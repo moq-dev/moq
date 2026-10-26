@@ -1666,6 +1666,14 @@ impl Request {
 		self
 	}
 
+	/// Assign the identity this peer's routes are attributed to; see
+	/// [`moq_net::server::Handshake::with_peer_hop`]. Derive it from [`Self::peer_identity`],
+	/// never from something coarser.
+	pub fn with_peer_hop(mut self, hop: moq_net::Hop) -> Self {
+		*self.handshake = (*self.handshake).with_peer_hop(hop);
+		self
+	}
+
 	/// Attach a per-connection [`moq_net::stats::Session`] context to this session.
 	pub fn with_stats(mut self, stats: moq_net::stats::Session) -> Self {
 		*self.handshake = (*self.handshake).with_stats(stats);

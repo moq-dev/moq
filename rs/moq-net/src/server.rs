@@ -514,7 +514,9 @@ pub struct Handshake {
 	origin: Option<crate::Hop>,
 	token: Option<setup::Token>,
 	peer_implementation: Option<String>,
-	/// Fresh receiver-assigned identity, shared by both halves of this session.
+	/// The identity this session's routes are attributed to for split horizon when the
+	/// peer declares none on the wire; it never enters a hop chain. Fresh per request unless the caller overrides it
+	/// ([`Handshake::with_peer_hop`]).
 	assigned_hop: crate::Hop,
 	/// The session's auth handle, available before [`Handshake::ok`] so the caller can
 	/// take the peer's token requests before any arrive.
@@ -865,6 +867,23 @@ impl Handshake {
 	/// Subscribe to the connected client. Overrides any value from the [`Server`] builder.
 	pub fn with_subscriber(mut self, subscribe: origin::Producer) -> Self {
 		self.inner_mut().server.subscribe = Some(subscribe);
+		self
+	}
+
+	/// Assign the identity this peer's routes are attributed to, overriding the fresh
+	/// per-session default.
+	///
+	/// Only for a peer whose identity the server has actually established, such as one
+	/// authenticated by mTLS or a token ([`crate::Client::with_peer_hop`] is the
+	/// dialing-side equivalent). An identity the peer declares on the wire still wins.
+	///
+	/// Two sessions given the same origin are treated as one endpoint: routes learned
+	/// from either are kept off both, and content arriving on either is interchangeable
+	/// with the other's. That is the point when they really are one peer reconnecting or
+	/// running redundant links, and a bug otherwise. Derive it from the authenticated
+	/// identity, never from something coarser like the remote address.
+	pub fn with_peer_hop(mut self, hop: crate::Hop) -> Self {
+		self.assigned_hop = hop;
 		self
 	}
 

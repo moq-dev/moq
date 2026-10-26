@@ -183,12 +183,7 @@ struct Worker {
 impl Worker {
 	fn new(hop: u64) -> Self {
 		let origin = produce_origin(hop);
-		// Fixed forwarded identities keep the spread deterministic across sessions,
-		// whose own claims receive fresh random stamps on lite-07.
-		let mut hops = moq_net::Hops::new();
-		hops.push(Hop::new(1000 + hop).unwrap()).unwrap();
-		let route = origin::Route::default().with_hops(hops);
-		let claim = Rc::new(moq_net::fuzz::dynamic_route(&origin, "pool", route).unwrap());
+		let claim = Rc::new(moq_net::fuzz::dynamic_route(&origin, "pool", origin::Route::default()).unwrap());
 		let outputs = Rc::new(RefCell::new(Vec::new()));
 		let (handler, served) = (claim.clone(), outputs.clone());
 		drop(moq_clock::sim::spawn(async move {
@@ -209,7 +204,7 @@ impl Worker {
 }
 
 /// Workers `10` and `11` claim `pool` behind `U -> D`. Worker `12` joining moves
-/// `pool/job-7` from `10` to itself while `11` keeps winning `pool` itself and
+/// `pool/job-2` from `10` to itself while `11` keeps winning `pool` itself and
 /// `pool/job-0`, and `10` keeps `pool/job-1` (pinned by the spread hash). `D` restarts
 /// `pool`, and the next subscribes reach the right workers.
 async fn prefix_pool(version: &str) {
@@ -218,10 +213,9 @@ async fn prefix_pool(version: &str) {
 	let downstream = produce_origin(3);
 	let _down = link(version, &upstream, &downstream).await;
 	let workers: Vec<Worker> = [10, 11, 12].into_iter().map(Worker::new).collect();
-	let ingress = upstream.clone().with_link(origin::Link::Peer);
 	let mut links = Vec::new();
 	for worker in &workers[..2] {
-		links.push(link(version, &worker.origin, &ingress).await);
+		links.push(link(version, &worker.origin, &upstream).await);
 	}
 	settle().await;
 
@@ -232,16 +226,16 @@ async fn prefix_pool(version: &str) {
 	}
 
 	let mut held = Vec::new();
-	for (path, worker) in [("pool/job-0", "11"), ("pool/job-1", "10"), ("pool/job-7", "10")] {
+	for (path, worker) in [("pool/job-0", "11"), ("pool/job-1", "10"), ("pool/job-2", "10")] {
 		let (broadcast, mut subscription) = subscribe(&downstream, path).await;
 		assert_eq!(read(&mut subscription).await, worker, "{version}: {path}");
 		held.push((broadcast, subscription));
 	}
 
-	links.push(link(version, &workers[2].origin, &ingress).await);
+	links.push(link(version, &workers[2].origin, &upstream).await);
 	expect_restart(version, &mut announced, "pool").await;
 
-	for (path, worker) in [("pool/job-0", "11"), ("pool/job-1", "10"), ("pool/job-7", "12")] {
+	for (path, worker) in [("pool/job-0", "11"), ("pool/job-1", "10"), ("pool/job-2", "12")] {
 		let (_broadcast, mut subscription) = subscribe(&downstream, path).await;
 		assert_eq!(read(&mut subscription).await, worker, "{version}: {path}");
 	}

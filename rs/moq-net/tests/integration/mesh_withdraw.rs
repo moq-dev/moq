@@ -638,9 +638,7 @@ async fn hop_limit_bounds_receive_and_send() {
 		let version = name.parse().unwrap();
 		let source = produce_origin(1);
 		let mut config = origin::Config::new(Hop::new(2).unwrap());
-		// Lite07 retains both the assigned origin and the declared loop hint.
-		let direct_hops = if name == "moq-lite-07-wip" { 2 } else { 1 };
-		config.max_hops = origin::HopLimit::new(direct_hops + 1).unwrap();
+		config.max_hops = origin::HopLimit::new(2).unwrap();
 		config.pool = cache::Pool::unbounded();
 		let (relay, driver) = origin::Producer::new(config);
 		support::harness::spawn(driver);
@@ -656,8 +654,8 @@ async fn hop_limit_bounds_receive_and_send() {
 					.unwrap(),
 			)
 		};
-		let _long = source.publish("long", route(direct_hops as u64 + 1)).unwrap();
-		let _boundary = source.publish("boundary", route(direct_hops as u64)).unwrap();
+		let _long = source.publish("long", route(2)).unwrap();
+		let _boundary = source.publish("boundary", route(1)).unwrap();
 		let short = source.publish("short", route(0)).unwrap();
 		moq_clock::sim::idle().await;
 		let received = drain(&mut received);
@@ -682,7 +680,7 @@ async fn hop_limit_bounds_receive_and_send() {
 			assert!(drain(&mut sent).is_empty(), "{name}: forwarded over-limit replacement");
 			continue;
 		}
-		short.announce(route(direct_hops as u64)).unwrap();
+		short.announce(route(1)).unwrap();
 		moq_clock::sim::idle().await;
 		let ended = drain(&mut sent);
 		assert_eq!(

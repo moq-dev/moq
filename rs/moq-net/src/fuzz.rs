@@ -304,8 +304,8 @@ pub async fn fill_groups(track: &track::Consumer, groups: std::ops::Range<u64>) 
 }
 
 /// `origin` as a session connected to `peer` serves it, for the viewers bench.
-pub fn excluding(origin: crate::origin::Consumer, peer: crate::Hop, session: crate::Hop) -> crate::origin::Consumer {
-	origin.excluding(peer).excluding_session(session)
+pub fn excluding(origin: crate::origin::Consumer, peer: crate::Hop) -> crate::origin::Consumer {
+	origin.excluding(peer)
 }
 
 /// Land a claim with a peer's wire route, as a session does, for the origin bench.

@@ -19,6 +19,7 @@ pub struct Client {
 	url: Option<url::Url>,
 	setup_token: Option<setup::Token>,
 	cost: Option<u64>,
+	peer_hop: Option<crate::Hop>,
 	limits: crate::session::Limits,
 	extensions: setup::Extensions,
 	auth: Option<crate::auth::Handle>,
@@ -219,6 +220,36 @@ impl Client {
 		self
 	}
 
+	/// Assign the identity this peer's routes are attributed to, overriding the fresh
+	/// per-dial default.
+	///
+	/// A dialed session whose peer declares no hop gets a random one for that
+	/// connection, the same way an accepted session does. That keeps a route
+	/// learned from the peer off the session that learned it, and keeps a
+	/// SUBSCRIBE that arrives on it from being routed back to it. An identity the
+	/// peer declares on the wire still wins.
+	///
+	/// Pass an id only for a peer whose identity the caller has actually
+	/// established. Two dials given the same hop are treated as one endpoint:
+	/// routes learned from either are kept off both, and content arriving on
+	/// either is interchangeable with the other's. That is the point when they
+	/// really are one peer reconnecting or running redundant links, and a bug
+	/// otherwise. Derive it from the authenticated identity, never from something
+	/// coarser like the remote address.
+	pub fn with_peer_hop(mut self, hop: crate::Hop) -> Self {
+		self.peer_hop = Some(hop);
+		self
+	}
+
+	/// The hop this connection attributes the peer to when the peer declares none.
+	///
+	/// A caller-supplied id is stable across dials of this client. Otherwise each
+	/// connection gets a fresh one, matching the per-session default an accepted
+	/// session already has.
+	fn assigned_hop(&self) -> crate::Hop {
+		self.peer_hop.unwrap_or_else(crate::Hop::random)
+	}
+
 	/// The new session's side of its auth handle: the one from [`with_auth`](Self::with_auth),
 	/// or one of its own. `requests` for moq-transport, where a request carries a token.
 	fn link(&self, supported: bool, requests: bool) -> Result<crate::auth::Link, Error> {
@@ -235,9 +266,10 @@ impl Client {
 	/// subscribe (ingress) producer are attributed by the model through the
 	/// stats context; one shared context, so presence and viewer counts are
 	/// never double-attributed across the two halves. `peer_hop` is the identity
-	/// this connection assigns the peer, so subscriptions never resolve back through
-	/// that session. Older protocols prefer a declared identity; lite07 filters
-	/// the assigned session and the declared loop hint independently.
+	/// this connection attributes the peer to when the peer declares none, so
+	/// subscriptions from the peer resolve to a source whose route excludes it.
+	/// A declared identity still wins inside each publisher; announce filtering
+	/// is per-protocol and handled there too.
 	fn origins(&self, peer_hop: crate::Hop) -> (Option<origin::Consumer>, Option<origin::Producer>) {
 		if self.publish.is_none() && self.subscribe.is_none() {
 			tracing::warn!("not publishing or consuming anything");
@@ -331,7 +363,7 @@ impl Client {
 
 	async fn connect_boxed(&self, now: Instant, mut session: Transport) -> Result<(Session, crate::Driver), Error> {
 		let runtime = Deadlines::new(now);
-		let peer_hop = crate::Hop::random();
+		let peer_hop = self.assigned_hop();
 		let (publish, subscribe) = self.origins(peer_hop);
 
 		// If ALPN was used to negotiate the version, use the appropriate encoding.
