@@ -24,7 +24,7 @@ import { type AnnounceBroadcast, AnnounceInit, AnnounceOk, encodeAnnounceBroadca
 import { Group } from "./group.ts";
 import { Probe } from "./probe.ts";
 import { StreamId } from "./stream.ts";
-import { encodeSubscribeResponse, SubscribeEnd, SubscribeStart } from "./subscribe.ts";
+import { encodeSubscribeResponse, SubscribeEnd, type SubscribeResponse, SubscribeStart } from "./subscribe.ts";
 import { SUBSCRIBE_SETUP_TIMEOUT_MS, Subscriber } from "./subscriber.ts";
 import { Track, TrackInfo } from "./track.ts";
 import { Version } from "./version.ts";
@@ -1514,7 +1514,8 @@ test("a listing of an epochless handle retired while its token waits never reach
 	subscriber.close();
 });
 
-// Announce PUBLISHER_A's epochless `pool` on stream 0, and return how to replace it with PUBLISHER_B's.
+// Announce PUBLISHER_A's epochless `pool` on stream 0, and return how to withdraw it and how to
+// announce PUBLISHER_B's in its place.
 async function epochlessPool(version: Version, streams: FakeStream[], announced: { next(): Promise<unknown> }) {
 	const send = async (encode: (writer: Writer) => Promise<void>) => {
 		const writer = new Writer(
@@ -1531,7 +1532,7 @@ async function epochlessPool(version: Version, streams: FakeStream[], announced:
 		encodeAnnounceBroadcast(writer, { status: "active", suffix: path, hops: [PUBLISHER_A] }, version),
 	);
 	await announced.next();
-	return async () => {
+	const withdraw = async () => {
 		await send((writer) =>
 			encodeAnnounceBroadcast(
 				writer,
@@ -1540,49 +1541,68 @@ async function epochlessPool(version: Version, streams: FakeStream[], announced:
 			),
 		);
 		await announced.next();
+	};
+	const announce = async () => {
 		await send((writer) =>
 			encodeAnnounceBroadcast(writer, { status: "active", suffix: path, hops: [PUBLISHER_B] }, version),
 		);
 		await announced.next();
 	};
+	return { withdraw, replace: () => withdraw().then(announce) };
+}
+
+// Write the subscribe responses to the subscriber, FINishing the stream when asked.
+async function respond(stream: FakeStream, version: Version, responses: SubscribeResponse[], fin = false) {
+	const chunks: Uint8Array[] = [];
+	const writer = new Writer(
+		new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
+		version,
+	);
+	for (const response of responses) await encodeSubscribeResponse(writer, response, version);
+	for (const chunk of chunks) stream.inbound.enqueue(chunk);
+	if (fin) stream.inbound.close();
 }
 
 // A SUBSCRIBE without an epoch resolves whichever instance won the path when it arrived, so one
-// unanswered when its instance is replaced is refused. One answered first stays on its instance.
+// unanswered when another instance takes the path is refused, a withdrawal followed by a new
+// announcement included. One answered first stays on its instance, and a withdrawal alone leaves
+// it to its answer, so a track that finished as its broadcast ended still arrives.
 test.each([
-	["unanswered on lite-05 is refused", Version.DRAFT_05, false],
-	["unanswered on lite-06 is refused", Version.DRAFT_06, false],
-	["unanswered on lite-07 is refused", Version.DRAFT_07, false],
-	["answered on lite-07 stays", Version.DRAFT_07, true],
-] as const)("an epochless SUBSCRIBE %s at a takeover", async (_, version, answered) => {
+	["unanswered on lite-05 is refused", Version.DRAFT_05, "replaced"],
+	["unanswered on lite-06 is refused", Version.DRAFT_06, "replaced"],
+	["unanswered on lite-07 is refused", Version.DRAFT_07, "replaced"],
+	["answered on lite-07 stays", Version.DRAFT_07, "answered"],
+	["unanswered on lite-05 finishes", Version.DRAFT_05, "withdrawn"],
+	["unanswered on lite-06 finishes", Version.DRAFT_06, "withdrawn"],
+	["unanswered on lite-07 finishes", Version.DRAFT_07, "withdrawn"],
+] as const)("an epochless SUBSCRIBE %s at a takeover or withdrawal", async (_, version, outcome) => {
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
 	const announced = subscriber.announced();
 	try {
 		await opened(0);
-		const replace = await epochlessPool(version, streams, announced);
+		const pool = await epochlessPool(version, streams, announced);
 		const held = subscriber.consume(Path.from("pool/job"));
 		const track = held.track("video").subscribe();
 		await answerTrackInfo(await opened(1), version);
 		const subscribe = await opened(2);
 		await subscribe.reading;
-		if (answered) {
-			const chunks: Uint8Array[] = [];
-			const writer = new Writer(
-				new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
-				version,
-			);
-			await encodeSubscribeResponse(writer, { start: new SubscribeStart(0) }, version);
-			for (const chunk of chunks) subscribe.inbound.enqueue(chunk);
-			await drainReactions();
-		}
 
-		await replace();
-		if (answered) {
+		if (outcome === "answered") {
+			await respond(subscribe, version, [{ start: new SubscribeStart(0) }]);
+			await drainReactions();
+			await pool.replace();
 			await drainReactions();
 			expect(track.closed.peek()).toBeUndefined();
+		} else if (outcome === "withdrawn") {
+			await pool.withdraw();
+			await drainReactions();
+			expect(track.closed.peek()).toBeUndefined();
+			await respond(subscribe, version, [{ start: new SubscribeStart(0) }, { end: new SubscribeEnd(0) }], true);
+			expect(await track.closed).toBeNull();
 		} else {
+			await pool.replace();
 			const err = await track.closed;
 			expect(err).toBeInstanceOf(StreamError);
 			expect((err as StreamError).code).toBe(StreamCode.Unroutable);
@@ -1597,14 +1617,15 @@ test.each([
 	}
 });
 
-// A TRACKS request without an epoch lists whichever instance won the path when it arrived.
-test("a listing of an epochless handle retired before its answer is refused", async () => {
+// A TRACKS request without an epoch lists whichever instance won the path when it arrived, so
+// another instance taking the path refuses one still unanswered.
+test("a listing of an epochless handle replaced before its answer is refused", async () => {
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
 	const announced = subscriber.announced();
 	await opened(0);
-	const replace = await epochlessPool(version, streams, announced);
+	const pool = await epochlessPool(version, streams, announced);
 	const held = subscriber.consume(Path.from("pool/job"));
 	const tracks = held.tracks();
 	expect(await tracks.next()).toEqual({ kind: "synced" });
@@ -1612,7 +1633,7 @@ test("a listing of an epochless handle retired before its answer is refused", as
 	const listing = await opened(1);
 	await listing.reading;
 
-	await replace();
+	await pool.replace();
 	const err = await event;
 	expect(err).toBeInstanceOf(StreamError);
 	expect((err as StreamError).code).toBe(StreamCode.Unroutable);

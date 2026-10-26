@@ -103,17 +103,6 @@ async fn setup_with_gate(version: &str, gate: Option<kio::Consumer<bool>>) -> Se
 	}
 }
 
-/// Open a group the caller holds unfinished, so the publisher answers the SUBSCRIBE: the
-/// withdrawal a close starts with refuses an unanswered SUBSCRIBE without an epoch, which
-/// would leave nothing to drain.
-async fn answer(track: &moq_net::track::Producer) -> moq_net::group::Producer {
-	let mut group = track.append_group().unwrap();
-	group.write_frame(Timestamp::ZERO, b"live".as_slice()).unwrap();
-	// Paused, the clock only moves once every task is idle, so the answer has landed.
-	moq_clock::sleep(Duration::from_millis(100)).await;
-	group
-}
-
 /// TRACK_INFO creates demand before any SUBSCRIBE, so demand alone cannot gate a drain test.
 #[moq_clock::test]
 async fn track_info_interest_precedes_a_subscription() {
@@ -192,8 +181,9 @@ async fn ietf_close_gives_up_on_a_live_track() {
 }
 
 async fn close_gives_up_on_a_live_track_for(version: &str) {
-	let Setup { pair, track, .. } = setup(version).await;
-	let _live = answer(&track).await;
+	let Setup {
+		pair, track: _track, ..
+	} = setup(version).await;
 
 	let started = moq_clock::now();
 	let res = moq_clock::timeout(TIMEOUT, pair.client.close())
@@ -215,8 +205,9 @@ async fn ietf_abort_cuts_a_drain_short() {
 }
 
 async fn abort_cuts_a_drain_short_for(version: &str) {
-	let Setup { pair, track, .. } = setup(version).await;
-	let _live = answer(&track).await;
+	let Setup {
+		pair, track: _track, ..
+	} = setup(version).await;
 
 	let other = pair.client.clone();
 	let started = moq_clock::now();

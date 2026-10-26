@@ -1885,16 +1885,19 @@ struct TracksRecv {
 	gate: crate::auth::Gate,
 	/// The gate let the listing through, and this hop synced its readers.
 	admitted: bool,
-	/// Until the peer answers, the source must still be the selected instance: a TRACKS
-	/// request without an epoch lists whichever instance won the path when it arrived.
+	/// Until the peer answers, what the source must still hold: the selected instance
+	/// until the request is out, then no replacement, since a TRACKS request without an
+	/// epoch lists whichever instance won the path when it arrived.
 	unanswered: Option<crate::model::broadcast::RequestValidity>,
 }
 
 impl TracksRecv {
 	/// Apply the peer's events until it ends the listing, or the error that ends it.
 	fn poll(&mut self, source: &SourceServe, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		if let Some(validity) = &self.unanswered {
-			validity.check(waiter)?;
+		match (&self.unanswered, &self.stream) {
+			(Some(validity), None) => validity.check(waiter)?,
+			(Some(validity), Some(_)) => validity.check_unanswered(waiter)?,
+			(None, _) => {}
 		}
 		ready!(self.gate.poll_ready(waiter));
 		if self.gate.poll_denied(waiter).is_ready() {
@@ -3464,64 +3467,97 @@ mod tests {
 		}
 	}
 
-	/// A SUBSCRIBE_START that is only read after the source was replaced may be the
-	/// replacement's answer, so the retirement refuses the subscription instead.
-	#[moq_clock::test]
-	async fn an_answer_read_after_the_retirement_is_refused() {
-		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
-			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
-			let subscriber = Subscriber::new(SubscriberConfig {
-				runtime: crate::time::sim(),
-				session: crate::driver::Transport::new(session.clone()),
-				origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
-				recv_bandwidth: None,
-				version,
-				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
-				peer_hop: None,
-				cost: None,
-				going_away: Default::default(),
-				auth: crate::auth::Link::new(false),
-			});
-			let selected = kio::Producer::new(());
-			let serve = TrackServe {
-				validity: crate::model::broadcast::RequestValidity::Route(selected.consume()),
-				route: None,
-				subscriber,
-				path: Path::new("room").to_owned(),
-				epoch: None,
-				name: "video".to_string(),
-			};
-			let broadcast = crate::broadcast::Info::new().produce();
-			let request = broadcast.reserve_track("video").unwrap();
-			let serving = ServeLoop::new(&serve, request, crate::track::Info::timed());
-			let mut reader = broadcast
-				.consume()
-				.track("video")
-				.unwrap()
-				.subscribe(None)
-				.await
-				.unwrap();
-			let gate = serve.gate();
-			let mut running = TrackServeRun {
-				serve,
-				state: TrackRunState::Serve(serving),
-				gate,
-			};
-			assert!(kio::Task::poll(&mut running, &kio::Waiter::noop()).is_pending());
-
-			let mut start = Vec::new();
-			lite::SubscribeResponse::Start(lite::SubscribeStart {
-				group: 0,
-				largest: None,
-			})
-			.encode(&mut crate::coding::Encoder::new(&mut start, version.into()), version)
+	/// Answer a SUBSCRIBE without an epoch with a finished, empty track, but only read the
+	/// answer after `retire` changed its source's selection, then return what the reader got.
+	async fn answer_after(
+		version: Version,
+		retire: impl FnOnce(&mut crate::model::TestSelection),
+	) -> Option<Result<Option<u64>, Error>> {
+		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::sim(),
+			session: crate::driver::Transport::new(session.clone()),
+			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			recv_bandwidth: None,
+			version,
+			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
+			peer_hop: None,
+			cost: None,
+			going_away: Default::default(),
+			auth: crate::auth::Link::new(false),
+		});
+		let mut selection = crate::model::TestSelection::new();
+		let serve = TrackServe {
+			validity: selection.validity(),
+			route: None,
+			subscriber,
+			path: Path::new("room").to_owned(),
+			epoch: None,
+			name: "video".to_string(),
+		};
+		let broadcast = crate::broadcast::Info::new().produce();
+		let request = broadcast.reserve_track("video").unwrap();
+		let serving = ServeLoop::new(&serve, request, crate::track::Info::timed());
+		let mut reader = broadcast
+			.consume()
+			.track("video")
+			.unwrap()
+			.subscribe(None)
+			.await
 			.unwrap();
-			session.push(&start);
-			drop(selected);
-			let _ = kio::Task::poll(&mut running, &kio::Waiter::noop());
+		let gate = serve.gate();
+		let mut running = TrackServeRun {
+			serve,
+			state: TrackRunState::Serve(serving),
+			gate,
+		};
+		assert!(kio::Task::poll(&mut running, &kio::Waiter::noop()).is_pending());
 
-			let res = reader.recv_group().now_or_never().map(|res| res.map(|_| ()));
+		let mut answer = Vec::new();
+		let mut encoder = crate::coding::Encoder::new(&mut answer, version.into());
+		lite::SubscribeResponse::Start(lite::SubscribeStart {
+			group: 0,
+			largest: None,
+		})
+		.encode(&mut encoder, version)
+		.unwrap();
+		lite::SubscribeResponse::End(lite::SubscribeEnd { group: 0 })
+			.encode(&mut encoder, version)
+			.unwrap();
+		session.push(&answer);
+		retire(&mut selection);
+		let _ = kio::Task::poll(&mut running, &kio::Waiter::noop());
+
+		reader
+			.recv_group()
+			.now_or_never()
+			.map(|res| res.map(|group| group.map(|group| group.sequence)))
+	}
+
+	/// An answer read only after another instance took the path may be that instance's,
+	/// so the replacement refuses the subscription instead, as does a withdrawal followed
+	/// by a new announcement.
+	#[moq_clock::test]
+	async fn an_answer_read_after_a_replacement_is_refused() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			let res = answer_after(version, |selection| selection.replace()).await;
 			assert!(matches!(res, Some(Err(Error::Unroutable))), "{version:?}: {res:?}");
+			let res = answer_after(version, |selection| {
+				selection.withdraw();
+				selection.replace();
+			})
+			.await;
+			assert!(matches!(res, Some(Err(Error::Unroutable))), "{version:?}: {res:?}");
+		}
+	}
+
+	/// A withdrawal alone leaves the SUBSCRIBE to its answer: the publisher concludes a
+	/// subscription in flight, so a track that finished as its broadcast ended arrives whole.
+	#[moq_clock::test]
+	async fn an_answer_read_after_a_withdrawal_is_kept() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			let res = answer_after(version, |selection| selection.withdraw()).await;
+			assert!(matches!(res, Some(Ok(None))), "{version:?}: {res:?}");
 		}
 	}
 
@@ -4123,15 +4159,15 @@ mod tests {
 		assert_eq!(session.log.bi_opens(), 0);
 	}
 
-	/// An instance retired while its listing is on the wire but unanswered lists nothing:
-	/// the peer may list the replacement that won the path.
+	/// A listing on the wire but unanswered when another instance takes the path lists
+	/// nothing: the peer may list that instance.
 	#[moq_clock::test]
-	async fn an_unanswered_listing_of_a_retired_instance_is_refused() {
+	async fn an_unanswered_listing_of_a_replaced_instance_is_refused() {
 		let open = kio::Producer::new(true);
 		let session = SinkSession::gated_bi(open.consume());
-		let selected = kio::Producer::new(());
-		let validity = crate::model::broadcast::RequestValidity::Route(selected.consume());
-		let (mut serve, consumer, _route) = listed_source(session.clone(), crate::auth::Link::new(false), validity);
+		let mut selection = crate::model::TestSelection::new();
+		let (mut serve, consumer, _route) =
+			listed_source(session.clone(), crate::auth::Link::new(false), selection.validity());
 		let mut tracks = consumer.tracks().unwrap();
 
 		assert!(kio::Task::poll(&mut serve, &kio::Waiter::noop()).is_pending());
@@ -4141,7 +4177,7 @@ mod tests {
 			Some(Ok(Some(crate::broadcast::TracksEvent::Synced)))
 		));
 
-		drop(selected);
+		selection.replace();
 		let _ = kio::Task::poll(&mut serve, &kio::Waiter::noop());
 		assert!(matches!(tracks.next().now_or_never(), Some(Err(Error::Unroutable))));
 		assert_eq!(session.log.resets(), vec![crate::StreamError::Unroutable.to_code()]);
@@ -6038,7 +6074,7 @@ struct SubStream {
 	wanted: Option<u64>,
 	/// Until the publisher's first response, what the source must still hold: a SUBSCRIBE
 	/// without an epoch resolves whichever instance wins the path when it arrives, so one
-	/// still unanswered once the source is replaced may be answered by the replacement.
+	/// still unanswered once another instance takes the path may be answered by it.
 	unanswered: Option<crate::model::broadcast::RequestValidity>,
 }
 
@@ -7461,13 +7497,14 @@ impl ServeLoop {
 				ServeMode::Select => {
 					let mut cx = waiter.context();
 
-					// A SUBSCRIBE still unanswered once its source is replaced may have resolved
-					// the replacement: refuse it. Checked before reading the stream, so an answer
-					// that only arrived alongside the replacement cannot claim it, and before the
-					// flush, so an update parked on flow control cannot hold the refusal back.
+					// A SUBSCRIBE still unanswered once another instance takes the path may have
+					// resolved it: refuse it. A withdrawal alone leaves it to its answer. Checked
+					// before reading the stream, so an answer that only arrived alongside the
+					// replacement cannot claim it, and before the flush, so an update parked on
+					// flow control cannot hold the refusal back.
 					if let Sub::Active(active) = &self.sub
 						&& let Some(validity) = &active.unanswered
-						&& let Err(err) = validity.check(waiter)
+						&& let Err(err) = validity.check_unanswered(waiter)
 					{
 						tracing::debug!(broadcast = %serve.subscriber.log_path(&serve.path), track = %serve.name, "unanswered subscribe refused: instance replaced");
 						return Poll::Ready(ServeEnd::GiveBack(err));

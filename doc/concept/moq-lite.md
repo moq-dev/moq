@@ -120,8 +120,9 @@ authorization and hidden names work exactly as without one.
   stay on the old instance until dropped or none of its routes remain, which
   ends them with an error, while new requests get the new one, so a player
   follows the restart by requesting the path again. Without an epoch, a request
-  still unanswered at the restart ends the same way, since the replacement may
-  be the one answering it.
+  still unanswered when another instance takes the path, even after a
+  withdrawal, ends the same way, since that instance may be the one answering
+  it. A withdrawal alone leaves it to its answer.
   Held handles can still read their old cached content while a subscription
   on the old instance stays open, but cannot open new epochless requests once
   the restart is delivered. Request the path again for
