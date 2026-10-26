@@ -12,7 +12,7 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 use std::task::{Poll, ready};
 
 use arrayvec::ArrayVec;
-use bytes::Bytes;
+use bytes::{Buf, Bytes, BytesMut};
 
 use crate::group::{self, GroupState};
 use crate::time::Instant;
@@ -40,8 +40,10 @@ pub struct Info {
 /// A completed frame: an optional timestamp, its full, contiguous payload, and when it
 /// arrived.
 ///
-/// This is the stored form of every finished frame in a group. The payload is a
-/// single [`Bytes`], so a consumer gets it with one zero-copy slice.
+/// Reading a frame whole is a zero-copy slice of what its group stores, except for a
+/// frame larger than a storage segment that arrived in pieces: the group keeps that as
+/// separate segments, so a whole read copies them into one buffer. Streaming it through
+/// [`Consumer::poll_read_chunk`] hands out each segment without a copy.
 #[derive(Clone, Debug)]
 pub struct Frame {
 	/// Presentation timestamp, at the parent track's timescale, or `None` when untimed.
@@ -73,11 +75,184 @@ impl Frame {
 	}
 }
 
+/// Bytes in each sealed segment of a frame larger than one.
+///
+/// A frame within one segment is stored as a single buffer. A larger one that arrives in
+/// pieces is a chain of segments of exactly this size, the last shorter, so segment `i`
+/// always holds the frame's bytes from `i * SEGMENT`. Receiving it allocates at most one
+/// segment ahead of what arrived, and returns each segment's receive credit as it seals,
+/// so a connection window only has to fit a segment rather than a frame.
+///
+/// Sized from `benches/frame.rs`: smaller segments cost allocations per byte, and larger
+/// ones a bigger allocation and credit held ahead of the bytes. Most media frames fit in
+/// one, so a whole read of them never copies.
+pub(crate) const SEGMENT: usize = 1024 * 1024;
+
+/// A completed frame's payload as its group stores it: one buffer, or the sealed
+/// segments of a frame larger than [`SEGMENT`] written in pieces.
+///
+/// A view, like [`Bytes`]: reading it as a [`Buf`] moves this copy past bytes, never the
+/// stored one.
+#[derive(Clone, Debug)]
+pub(crate) enum Payload {
+	Whole(Bytes),
+	Chain(Chain),
+}
+
+/// A frame's sealed segments, read from `start`.
+#[derive(Clone, Debug)]
+pub(crate) struct Chain {
+	// Each [`SEGMENT`] long but the last, and never empty.
+	segments: Arc<[Bytes]>,
+	// The frame offset this view starts at.
+	start: usize,
+}
+
+impl Chain {
+	/// The bytes from `start` to the end.
+	pub fn len(&self) -> usize {
+		self.end() - self.start
+	}
+
+	/// The whole chain copied into one buffer.
+	#[cold]
+	#[inline(never)]
+	pub fn concat(self) -> Bytes {
+		Payload::Chain(self).contiguous(0)
+	}
+
+	/// The frame's length, past which nothing is stored.
+	fn end(&self) -> usize {
+		let last = self.segments.last().map_or(0, Bytes::len);
+		self.segments.len().saturating_sub(1) * SEGMENT + last
+	}
+
+	/// The stored bytes from frame offset `at` to the end of its segment, zero-copy.
+	fn segment_at(&self, at: usize) -> Bytes {
+		let index = at / SEGMENT;
+		match self.segments.get(index) {
+			Some(segment) => segment.slice(at - index * SEGMENT..),
+			None => Bytes::new(),
+		}
+	}
+}
+
+// A chain costs a cached frame nothing over the one buffer it holds otherwise.
+const _: () = assert!(size_of::<Payload>() == size_of::<Bytes>());
+
+impl Default for Payload {
+	fn default() -> Self {
+		Self::Whole(Bytes::new())
+	}
+}
+
+impl From<Bytes> for Payload {
+	fn from(bytes: Bytes) -> Self {
+		Self::Whole(bytes)
+	}
+}
+
+impl Payload {
+	pub fn len(&self) -> usize {
+		match self {
+			Self::Whole(bytes) => bytes.len(),
+			Self::Chain(chain) => chain.len(),
+		}
+	}
+
+	#[cfg(feature = "async")]
+	pub fn is_empty(&self) -> bool {
+		self.len() == 0
+	}
+
+	/// The bytes from `offset` to the end of the segment holding it, zero-copy.
+	pub fn chunk_at(&self, offset: usize) -> Bytes {
+		match self {
+			Self::Whole(bytes) => bytes.slice(offset..),
+			Self::Chain(chain) => chain.segment_at(chain.start + offset),
+		}
+	}
+
+	/// The bytes from `offset` on in one buffer, copied only when they span segments.
+	pub fn contiguous(&self, offset: usize) -> Bytes {
+		let len = self.len();
+		let first = self.chunk_at(offset);
+		if offset + first.len() >= len {
+			return first;
+		}
+		let mut out = BytesMut::with_capacity(len - offset);
+		let mut at = offset;
+		while at < len {
+			let chunk = self.chunk_at(at);
+			at += chunk.len();
+			out.extend_from_slice(&chunk);
+		}
+		out.freeze()
+	}
+}
+
+impl Buf for Payload {
+	fn remaining(&self) -> usize {
+		self.len()
+	}
+
+	fn chunk(&self) -> &[u8] {
+		match self {
+			Self::Whole(bytes) => bytes,
+			Self::Chain(chain) => {
+				let index = chain.start / SEGMENT;
+				chain
+					.segments
+					.get(index)
+					.map_or(&[], |segment| &segment[chain.start - index * SEGMENT..])
+			}
+		}
+	}
+
+	fn advance(&mut self, cnt: usize) {
+		assert!(cnt <= self.len(), "advance past the end of a payload");
+		match self {
+			Self::Whole(bytes) => bytes.advance(cnt),
+			Self::Chain(chain) => chain.start += cnt,
+		}
+	}
+
+	// Zero-copy within a segment, which is what a transport taking `chunk()` asks for.
+	fn copy_to_bytes(&mut self, len: usize) -> Bytes {
+		let chunk = self.chunk_at(0);
+		let out = match len <= chunk.len() {
+			true => chunk.slice(..len),
+			false => self.contiguous(0).slice(..len),
+		};
+		self.advance(len);
+		out
+	}
+}
+
+/// A completed frame as its group stores it.
+#[derive(Clone, Debug)]
+pub(crate) struct Cached {
+	pub timestamp: Option<Timestamp>,
+	pub payload: Payload,
+	// When the frame's last byte landed in this node's cache; see [`Frame::arrived`].
+	pub arrived: Instant,
+}
+
+impl From<Frame> for Cached {
+	fn from(frame: Frame) -> Self {
+		Self {
+			timestamp: frame.timestamp,
+			payload: Payload::Whole(frame.payload),
+			arrived: frame.arrived,
+		}
+	}
+}
+
 /// A frame with the relay metadata its group keeps beside it, read only by wire egress.
 #[cfg(feature = "async")]
 #[derive(Clone, Debug)]
 pub(crate) struct Object {
-	pub frame: Frame,
+	pub frame: Cached,
 	pub fields: Option<Arc<super::object::Fields>>,
 	/// The inflated size of a compressed frame read in its stored form (see
 	/// [`group::Consumer::compressed`]), whose `payload` is then the DEFLATE slice.
@@ -86,7 +261,7 @@ pub(crate) struct Object {
 
 #[cfg(feature = "async")]
 impl std::ops::Deref for Object {
-	type Target = Frame;
+	type Target = Cached;
 	fn deref(&self) -> &Self::Target {
 		&self.frame
 	}
@@ -198,10 +373,11 @@ impl<const N: usize> Buffer<N> {
 ///
 /// A writer declares each frame's size before sending it, and allocating that size up
 /// front saves a reallocation and copy per doubling as the payload arrives. A peer's
-/// declaration costs it nothing, though, so without a bound it could commit up to
-/// [`group::MAX_CACHE_BYTES`] per stream without sending a byte. A frame whose declared
-/// size fits what remains is allocated up front; past that, its buffer grows with the
-/// bytes received. Each frame returns its share once it completes or aborts.
+/// declaration costs it nothing, though, so without a bound it could commit a
+/// [`SEGMENT`] per stream for a single byte. A frame reserves what one segment of it
+/// takes, and while that fits what remains each segment is allocated whole; past that,
+/// it grows with the bytes received. Each frame returns its share once it completes or
+/// aborts.
 ///
 /// Every broadcast, track, and group minted from an [`crate::origin::Producer`] handle shares
 /// its budget. The built-in sessions each ingest through a handle with its own.
@@ -263,10 +439,11 @@ impl Drop for Reservation {
 /// [`Producer`] and any streaming [`Consumer`]s.
 ///
 /// A whole-frame [`Bytes`] write is stored directly. Chunked writes are copied into a
-/// heap [`Segment`], either sized to the declared frame up front or grown as bytes
-/// arrive (see [`Budget`]). The producer writes through the raw pointer (sole writer,
-/// guaranteed by the frame owning the group's only writer); `written` provides
-/// happens-before for cross-thread reads.
+/// heap [`Segment`], or a chain of them for a frame larger than [`SEGMENT`], each either
+/// allocated at its full length by its first byte or grown as bytes arrive (see
+/// [`Budget`]). The producer writes through the raw pointer (sole writer, guaranteed by
+/// the frame owning the group's only writer); `written` provides happens-before for
+/// cross-thread reads.
 #[derive(Clone)]
 pub(super) struct FrameBuf(Arc<FrameBufInner>);
 
@@ -283,6 +460,42 @@ enum FrameStorage {
 	// Replaced by a larger copy whenever a write outgrows it. A reader clones the current
 	// segment under the lock, so a slice it already handed out keeps the old one alive.
 	Growing(Mutex<Arc<Segment>>),
+	// A frame larger than one segment.
+	Chain(Mutex<Segments>),
+}
+
+/// A frame larger than one [`SEGMENT`], as it streams in.
+#[derive(Default)]
+struct Segments {
+	// Every full segment so far, in order.
+	sealed: Vec<Bytes>,
+	// The segment being written, allocated by its first byte and grown like
+	// [`FrameStorage::Growing`].
+	open: Option<Arc<Segment>>,
+}
+
+impl Segments {
+	/// Copy `src` in at frame offset `offset`, sealing each segment it fills.
+	fn append(&mut self, mut offset: usize, mut src: &[u8], size: usize, grow: bool) {
+		while !src.is_empty() {
+			let base = offset - offset % SEGMENT;
+			let len = (size - base).min(SEGMENT);
+			let within = offset - base;
+			let take = src.len().min(len - within);
+			let open = self
+				.open
+				.get_or_insert_with(|| Arc::new(Segment::new(if grow { 0 } else { len })));
+			Segment::reserve(open, within, within + take, len);
+			// Safety: sole writer, within the segment's length, past every byte handed out.
+			unsafe { open.write(within, &src[..take]) };
+			if within + take == len {
+				let segment = self.open.take().expect("written above");
+				self.sealed.push(Bytes::from_owner(Filled { segment, len }));
+			}
+			offset += take;
+			src = &src[take..];
+		}
+	}
 }
 
 /// An owned, zero-initialized heap allocation that chunked writes are copied into.
@@ -322,6 +535,25 @@ impl Segment {
 	unsafe fn write(&self, offset: usize, src: &[u8]) {
 		debug_assert!(offset + src.len() <= self.capacity);
 		unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), self.data.add(offset), src.len()) };
+	}
+
+	/// Replace `current` with a larger copy of its first `filled` bytes if it holds fewer
+	/// than `needed` of the `len` it grows to.
+	///
+	/// Doubling keeps the copies linear in `len`, and the cap makes the last copy exactly
+	/// `len`, so it seals without another.
+	fn reserve(current: &mut Arc<Segment>, filled: usize, needed: usize, len: usize) {
+		if current.capacity >= needed {
+			return;
+		}
+		let next = Segment::new(needed.max(current.capacity * 2).min(len));
+		let filled = Filled {
+			segment: current.clone(),
+			len: filled,
+		};
+		// Safety: `next` is new, so nothing reads it yet.
+		unsafe { next.write(0, filled.as_ref()) };
+		*current = Arc::new(next);
 	}
 }
 
@@ -402,9 +634,11 @@ impl FrameBuf {
 			return;
 		}
 		let prev = self.written(Ordering::Relaxed);
+		let size = self.size();
 		let storage = self.0.storage.get_or_init(|| match self.0.grow {
+			_ if size > SEGMENT => FrameStorage::Chain(Mutex::default()),
 			true => FrameStorage::Growing(Mutex::new(Arc::new(Segment::new(0)))),
-			false => FrameStorage::Fixed(Arc::new(Segment::new(self.size()))),
+			false => FrameStorage::Fixed(Arc::new(Segment::new(size))),
 		});
 		// Safety (every write below): sole writer; the caller bounds-checked `src` against
 		// the remaining size, and consumers only read `[..written]`.
@@ -415,47 +649,62 @@ impl FrameBuf {
 			FrameStorage::Fixed(segment) => unsafe { segment.write(prev, src) },
 			FrameStorage::Growing(current) => {
 				let mut current = current.lock().unwrap_or_else(PoisonError::into_inner);
-				let needed = prev + src.len();
-				if current.capacity < needed {
-					// Doubling keeps the copies linear in the frame size, and the cap makes
-					// the last segment exactly the frame, so it freezes without a copy.
-					let next = Segment::new(needed.max(current.capacity * 2).min(self.size()));
-					let filled = Filled {
-						segment: current.clone(),
-						len: prev,
-					};
-					unsafe { next.write(0, filled.as_ref()) };
-					*current = Arc::new(next);
-				}
+				Segment::reserve(&mut current, prev, prev + src.len(), size);
 				unsafe { current.write(prev, src) };
+			}
+			FrameStorage::Chain(segments) => {
+				let mut segments = segments.lock().unwrap_or_else(PoisonError::into_inner);
+				segments.append(prev, src, size, self.0.grow);
 			}
 		}
 		// Safety: sole writer, and the caller bounds-checked `src` against the size.
 		unsafe { self.store_written(prev + src.len()) };
 	}
 
-	/// Freeze the buffer into the completed payload.
-	///
-	/// Returns the shared [`Bytes`] directly for a whole-frame write (zero-copy), or
-	/// wraps the mutable allocation otherwise.
-	fn freeze(&self) -> Bytes {
-		self.slice(0, self.size())
+	/// Freeze the written frame into the completed payload, without a copy.
+	fn freeze(&self) -> Payload {
+		match self.0.storage.get() {
+			Some(FrameStorage::Chain(segments)) => {
+				let segments = segments.lock().unwrap_or_else(PoisonError::into_inner);
+				debug_assert!(segments.open.is_none(), "froze a frame mid-segment");
+				Payload::Chain(Chain {
+					segments: segments.sealed.as_slice().into(),
+					start: 0,
+				})
+			}
+			_ => Payload::Whole(self.slice(0, self.size())),
+		}
 	}
 
-	/// A zero-copy slice of the written region `[start..end]`.
+	/// A zero-copy slice of the written region from `start` to `end`, or to the end of
+	/// `start`'s segment if that comes first.
 	///
 	/// `end` must not exceed a `written` value already loaded with `Acquire`, which is
 	/// also what makes the segment read here at least as new as those bytes.
 	fn slice(&self, start: usize, end: usize) -> Bytes {
-		let segment = match self.0.storage.get() {
+		if start >= end {
+			return Bytes::new();
+		}
+		let (segment, base) = match self.0.storage.get() {
 			Some(FrameStorage::Shared(bytes)) => return bytes.slice(start..end),
-			Some(FrameStorage::Fixed(segment)) => segment.clone(),
-			Some(FrameStorage::Growing(current)) => current.lock().unwrap_or_else(PoisonError::into_inner).clone(),
+			Some(FrameStorage::Fixed(segment)) => (segment.clone(), 0),
+			Some(FrameStorage::Growing(current)) => (current.lock().unwrap_or_else(PoisonError::into_inner).clone(), 0),
+			Some(FrameStorage::Chain(segments)) => {
+				let segments = segments.lock().unwrap_or_else(PoisonError::into_inner);
+				let index = start / SEGMENT;
+				let base = index * SEGMENT;
+				if let Some(sealed) = segments.sealed.get(index) {
+					return sealed.slice(start - base..end.min(base + SEGMENT) - base);
+				}
+				let open = segments.open.clone().expect("written bytes are sealed or open");
+				(open, base)
+			}
 			// Nothing written, so the range is empty.
 			None => return Bytes::new(),
 		};
-		debug_assert!(end <= segment.capacity);
-		Bytes::from_owner(Filled { segment, len: end }).slice(start..)
+		let len = end.min(base + SEGMENT) - base;
+		debug_assert!(len <= segment.capacity);
+		Bytes::from_owner(Filled { segment, len }).slice(start - base..)
 	}
 
 	/// Heap bytes the buffer currently holds for the payload.
@@ -465,6 +714,11 @@ impl FrameBuf {
 			Some(FrameStorage::Shared(bytes)) => bytes.len(),
 			Some(FrameStorage::Fixed(segment)) => segment.capacity,
 			Some(FrameStorage::Growing(current)) => current.lock().unwrap_or_else(PoisonError::into_inner).capacity,
+			Some(FrameStorage::Chain(segments)) => {
+				let segments = segments.lock().unwrap_or_else(PoisonError::into_inner);
+				let sealed: usize = segments.sealed.iter().map(Bytes::len).sum();
+				sealed + segments.open.as_ref().map_or(0, |open| open.capacity)
+			}
 			None => 0,
 		}
 	}
@@ -482,8 +736,10 @@ impl FrameBuf {
 /// the group, since an unfinished frame leaves the group's stream broken.
 ///
 /// A single whole-frame [`write`](Self::write) keeps the caller's allocation
-/// (zero-copy); chunked writes copy into one buffer sized to the declared frame, or
-/// grown as bytes arrive once the declared sizes in flight pass the origin's budget.
+/// (zero-copy). Chunked writes copy into one buffer, or a chain of fixed-size segments
+/// for a large frame, each allocated whole by its first byte, or grown as bytes arrive
+/// once the frames in flight pass the origin's budget. Nothing is allocated past the
+/// segment being written, whatever size was declared.
 pub struct Producer {
 	group: Option<group::Producer>,
 	buf: FrameBuf,
@@ -544,6 +800,15 @@ impl Producer {
 		self.buf.size() - self.buf.written(Ordering::Acquire)
 	}
 
+	/// Bytes still needed to seal the segment being written, which for a frame within one
+	/// segment is the rest of the frame.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn unsealed(&self) -> usize {
+		let written = self.buf.written(Ordering::Acquire);
+		let end = (written / SEGMENT + 1).saturating_mul(SEGMENT).min(self.buf.size());
+		end - written
+	}
+
 	/// Write a chunk of data to the frame, waking its readers.
 	///
 	/// Returns [`Error::WrongSize`] if the chunk would exceed the remaining bytes.
@@ -602,7 +867,12 @@ impl Producer {
 		}
 		let payload = self.buf.freeze();
 		let mut group = self.group.take().expect("frame owns its group");
-		let committed = group.frame_commit(Frame::new(self.info.timestamp, payload));
+		let committed = group.frame_commit(Cached {
+			timestamp: self.info.timestamp,
+			payload,
+			// Stamped by the commit, once readable.
+			arrived: Instant::ZERO,
+		});
 		self.done = true;
 		committed?;
 		Ok(group)
@@ -636,7 +906,7 @@ impl Drop for Producer {
 		};
 		if !group.is_aborted() && !self.cancel_on_drop {
 			tracing::warn!(
-				group = group.info().sequence,
+				group = group.sequence,
 				"frame::Producer dropped before writing all bytes"
 			);
 		}
@@ -652,7 +922,7 @@ impl Drop for Producer {
 /// tail (streamed).
 #[derive(Clone)]
 pub(super) enum Source {
-	Complete(Bytes),
+	Complete(Payload),
 	Partial(FrameBuf),
 }
 
@@ -836,7 +1106,7 @@ impl Consumer {
 
 	fn size(&self) -> usize {
 		match &self.source {
-			Source::Complete(bytes) => bytes.len(),
+			Source::Complete(payload) => payload.len(),
 			Source::Partial(_) => self.info.size as usize,
 		}
 	}
@@ -884,12 +1154,12 @@ impl Consumer {
 			return Poll::Ready(Err(Error::Old));
 		}
 		let buf = match &self.source {
-			Source::Complete(bytes) => {
-				if self.read_idx >= bytes.len() {
+			Source::Complete(payload) => {
+				if self.read_idx >= payload.len() {
 					return Poll::Ready(Ok(None));
 				}
-				let out = bytes.slice(self.read_idx..);
-				self.read_idx = bytes.len();
+				let out = payload.chunk_at(self.read_idx);
+				self.read_idx += out.len();
 				self.stats.bytes(out.len() as u64);
 				return Poll::Ready(Ok(Some(out)));
 			}
@@ -901,7 +1171,7 @@ impl Consumer {
 			let written = buf.written(Ordering::Acquire);
 			if written > self.read_idx {
 				let out = buf.slice(self.read_idx, written);
-				self.read_idx = written;
+				self.read_idx += out.len();
 				self.stats.bytes(out.len() as u64);
 				return Poll::Ready(Ok(Some(out)));
 			}
@@ -942,9 +1212,9 @@ impl Consumer {
 			return Poll::Ready(Err(Error::Old));
 		}
 		let buf = match &self.source {
-			Source::Complete(bytes) => {
-				let out = bytes.slice(self.read_idx..);
-				self.read_idx = bytes.len();
+			Source::Complete(payload) => {
+				let out = payload.contiguous(self.read_idx);
+				self.read_idx = payload.len();
 				self.stats.bytes(out.len() as u64);
 				return Poll::Ready(Ok(out));
 			}
@@ -967,7 +1237,7 @@ impl Consumer {
 				Poll::Pending
 			}
 		})?);
-		let out = buf.slice(read_idx, size);
+		let out = buf.freeze().contiguous(read_idx);
 		self.read_idx = size;
 		self.stats.bytes(out.len() as u64);
 		Poll::Ready(Ok(out))
@@ -1018,7 +1288,7 @@ mod tests {
 
 		assert_eq!(early, &b"abc"[..]);
 		assert_eq!(buf.slice(3, 7), &b"defg"[..]);
-		assert_eq!(buf.freeze(), &b"abcdefghij"[..]);
+		assert_eq!(buf.freeze().contiguous(0), &b"abcdefghij"[..]);
 	}
 
 	/// A reader on another thread slicing while the writer reallocates only ever sees
@@ -1048,7 +1318,71 @@ mod tests {
 			buf.append(chunk);
 		}
 		reader.join().unwrap();
-		assert_eq!(buf.freeze(), payload);
+		assert_eq!(buf.freeze().contiguous(0), payload);
+	}
+
+	/// A frame larger than a segment allocates only the segment being written, whatever it
+	/// declared, and seals each at the same fixed boundary. Reads never cross one, and a
+	/// whole read copies the chain into one buffer.
+	#[test]
+	fn chain_allocates_a_segment_at_a_time() {
+		const SIZE: usize = 2 * SEGMENT + 100;
+		// Straddles every segment boundary.
+		const CHUNK: usize = 300_000;
+		let payload: Vec<u8> = (0..SIZE).map(|i| (i % 251) as u8).collect();
+
+		for grow in [false, true] {
+			let buf = FrameBuf::with_growth(SIZE, grow);
+			let mut read = 0;
+			for chunk in payload.chunks(CHUNK) {
+				buf.append(chunk);
+				let written = buf.written(Ordering::Acquire);
+				let ahead = written.next_multiple_of(SEGMENT).min(SIZE);
+				assert!(
+					buf.allocated() <= ahead,
+					"grow={grow}: {} past {written}",
+					buf.allocated()
+				);
+
+				while read < written {
+					let slice = buf.slice(read, written);
+					assert_eq!(slice, payload[read..read + slice.len()]);
+					assert!(
+						read / SEGMENT == (read + slice.len() - 1) / SEGMENT,
+						"a read crossed a segment"
+					);
+					read += slice.len();
+				}
+			}
+
+			let Payload::Chain(chain) = buf.freeze() else {
+				panic!("grow={grow}: a frame past one segment is a chain");
+			};
+			let lens: Vec<usize> = chain.segments.iter().map(Bytes::len).collect();
+			assert_eq!(lens, [SEGMENT, SEGMENT, 100]);
+			assert_eq!(buf.freeze().contiguous(0), payload);
+			assert_eq!(buf.freeze().contiguous(SEGMENT + 1), payload[SEGMENT + 1..]);
+		}
+	}
+
+	/// A chain read as a [`Buf`] hands out each segment without a copy and advances only
+	/// its own view.
+	#[test]
+	fn chain_reads_as_a_buf() {
+		let first = Bytes::from(vec![1u8; SEGMENT]);
+		let stored = Payload::Chain(Chain {
+			segments: Arc::from([first.clone(), Bytes::from_static(b"tail")]),
+			start: 0,
+		});
+
+		let mut view = stored.clone();
+		assert_eq!(view.chunk().len(), SEGMENT);
+		let head = view.copy_to_bytes(SEGMENT - 1);
+		assert_eq!(head.as_ptr(), first.as_ptr(), "a read within a segment copied");
+		assert_eq!(view.copy_to_bytes(3), &[1, b't', b'a'][..], "a read across segments");
+		assert_eq!(view.chunk(), b"il");
+		assert_eq!(view.remaining(), 2);
+		assert_eq!(stored.len(), SEGMENT + 4, "the stored payload never moved");
 	}
 
 	/// A reservation holds its bytes until it drops, and a request larger than what

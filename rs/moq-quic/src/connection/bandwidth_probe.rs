@@ -9,12 +9,11 @@
 //! original. It is never retransmitted, and a reset stream's data is never sent again, so a
 //! probe never sends past a group's expiry.
 
-use std::ops::Bound;
+use std::{ops::Bound, time::Duration};
 
-use super::{Connection, SentPacket, StreamsState, pacing::Pacer, sent_packets::SentPackets};
+use super::{Connection, SentPacket, StreamsState, sent_packets::SentPackets};
 use crate::{
 	Instant, TransportConfig,
-	congestion::ControllerMetrics,
 	frame::{self, FrameStruct},
 	packet::SpaceId,
 };
@@ -25,7 +24,7 @@ pub(super) struct BandwidthProbe {
 	target: u64,
 	/// Holds everything sent while probing to `target`, which the controller's probing gain
 	/// alone may reach past
-	pacing: Pacer,
+	pacing: Bucket,
 	/// The packet number to resume taking in-flight data from, so the duplicates spread over the
 	/// whole flight, oldest first
 	cursor: u64,
@@ -50,11 +49,15 @@ pub(super) enum Ready {
 
 impl BandwidthProbe {
 	pub(super) fn new(config: &TransportConfig, now: Instant) -> Self {
-		let mtu = config.get_initial_mtu();
+		let mtu = u64::from(config.get_initial_mtu());
 		Self {
 			target: 0,
-			// Paced at an explicit rate, which resizes the bucket on first use
-			pacing: Pacer::new(config.initial_rtt, mtu.into(), mtu, None, now),
+			// One packet of credit, resized to the target on first use
+			pacing: Bucket {
+				capacity: mtu,
+				tokens: mtu,
+				prev: now,
+			},
 			cursor: 0,
 			floor: 0,
 		}
@@ -91,9 +94,8 @@ impl BandwidthProbe {
 }
 
 impl Connection {
-	/// Whether a packet of `bytes` resending in-flight data may go now, given the controller's
-	/// `metrics` snapshot
-	pub(super) fn bandwidth_probe_ready(&mut self, now: Instant, metrics: &ControllerMetrics, bytes: u64) -> Ready {
+	/// Whether a packet of `bytes` resending in-flight data may go now
+	pub(super) fn bandwidth_probe_ready(&mut self, now: Instant, bytes: u64) -> Ready {
 		let target = self.bandwidth_probe.target;
 		if target == 0
 			|| !self.state.is_established()
@@ -102,6 +104,7 @@ impl Connection {
 		{
 			return Ready::Idle;
 		}
+		let metrics = self.path.congestion.metrics();
 		let Some(inflight) = metrics.probe_inflight else {
 			return Ready::Idle;
 		};
@@ -115,7 +118,7 @@ impl Connection {
 			return Ready::Blocked(None);
 		}
 		let mtu = self.path.current_mtu();
-		match self.bandwidth_probe.pacing.delay_at_rate(target, bytes, mtu, now) {
+		match self.bandwidth_probe.pacing.delay(target, bytes, mtu, now) {
 			Some(at) => Ready::Blocked(Some(at)),
 			None => Ready::Send,
 		}
@@ -155,6 +158,61 @@ impl Connection {
 			.filter(|(_, packet)| packet.bandwidth_probe)
 			.flat_map(|(_, packet)| packet.stream_frames.iter().map(|frame| (packet.time_sent, frame.id)))
 	}
+}
+
+/// A token bucket refilled at the probe's target
+///
+/// Mirrors the rate path of `moq-congestion`'s pacer, which a controller owns and so cannot pace
+/// to a target of the transport's.
+struct Bucket {
+	/// The most credit held, sized to the rate so bursts stay short
+	capacity: u64,
+	/// Bytes that may be sent now
+	tokens: u64,
+	/// When `tokens` was last refilled
+	prev: Instant,
+}
+
+impl Bucket {
+	fn on_transmit(&mut self, size: u16) {
+		self.tokens = self.tokens.saturating_sub(size.into());
+	}
+
+	/// When `bytes` may be sent at `rate` bytes per second: `None` for now
+	fn delay(&mut self, rate: u64, bytes: u64, mtu: u16, now: Instant) -> Option<Instant> {
+		let rate = rate.max(1);
+		let capacity = burst_capacity(rate, mtu);
+		if capacity != self.capacity {
+			self.capacity = capacity;
+			self.tokens = self.tokens.min(capacity);
+		}
+
+		let elapsed = now.saturating_duration_since(self.prev);
+		let earned = u64::try_from(u128::from(rate) * elapsed.as_nanos() / 1_000_000_000).unwrap_or(u64::MAX);
+		// Time too short to earn a whole byte carries over, so a slow rate polled often still
+		// accumulates credit
+		if earned > 0 {
+			self.tokens = self.tokens.saturating_add(earned).min(self.capacity);
+			self.prev = now;
+		}
+
+		// A packet larger than the whole bucket still leaves once the bucket is full
+		let needed = Ord::min(bytes, self.capacity);
+		if self.tokens >= needed {
+			return None;
+		}
+		// Rounded up, so the wait earns the whole shortfall rather than re-arming at `now`
+		let nanos = (u128::from(needed - self.tokens) * 1_000_000_000).div_ceil(u128::from(rate));
+		Some(now + Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX)))
+	}
+}
+
+/// The credit a bucket refilled at `rate` holds: 2ms of it, kept between 10 and 256 packets
+/// while that is no more than 10ms of it, and never under one packet
+fn burst_capacity(rate: u64, mtu: u16) -> u64 {
+	let mtu = u64::from(mtu);
+	let bytes_in = |ms: u128| (u128::from(rate) * ms / 1000) as u64;
+	Ord::min(Ord::max(bytes_in(10), mtu), bytes_in(2).clamp(10 * mtu, 256 * mtu))
 }
 
 /// In-flight packets from `floor` on holding STREAM data sent once, from `cursor` on and then

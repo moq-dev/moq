@@ -11,7 +11,7 @@ use std::sync::Arc;
 use moq_mux::binary::Config;
 
 use crate::error::MoqError;
-use crate::producer::{MoqBroadcastProducer, MoqTrackProducer};
+use crate::producer::{Child, MoqBroadcastProducer, MoqTrackProducer};
 
 /// Options for an opaque data track, in either mode (the mode is fixed by the constructor).
 #[derive(Clone, uniffi::Record)]
@@ -36,9 +36,28 @@ impl From<MoqFlateConfig> for Config {
 }
 
 /// Publishes opaque payloads that consumers see as a single latest value.
+///
+/// Released before its finish, or still open when its broadcast closes, it ends its track with
+/// `Unroutable`, which readers take as the publisher leaving.
 #[derive(uniffi::Object)]
 pub struct MoqFlateSnapshotProducer {
 	inner: std::sync::Mutex<Option<moq_mux::binary::Snapshot>>,
+}
+
+impl Child for MoqFlateSnapshotProducer {
+	fn abort(&self, err: moq_net::Error) {
+		let _guard = crate::ffi::enter();
+		let producer = self.inner.lock().unwrap().take();
+		if let Some(producer) = producer {
+			let _ = producer.abort(err);
+		}
+	}
+}
+
+impl Drop for MoqFlateSnapshotProducer {
+	fn drop(&mut self) {
+		self.abort(moq_net::Error::Unroutable);
+	}
 }
 
 #[uniffi::export]
@@ -58,11 +77,12 @@ impl MoqFlateSnapshotProducer {
 	) -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let config = Config::from(config);
-		let producer =
-			track.adopt(|track| broadcast.with_state(|state| Ok(state.catalog.binary_snapshot(track, config)?)))?;
-		Ok(Arc::new(Self {
-			inner: std::sync::Mutex::new(Some(producer)),
-		}))
+		track.adopt(|track| {
+			let producer = broadcast.with_state(|state| Ok(state.catalog.binary_snapshot(track, config)?))?;
+			Ok(Self {
+				inner: std::sync::Mutex::new(Some(producer)),
+			})
+		})
 	}
 
 	/// Publish a new payload, superseding the last.
@@ -88,9 +108,28 @@ impl MoqFlateSnapshotProducer {
 }
 
 /// Publishes an ordered log of opaque payloads, one per append.
+///
+/// Released before its finish, or still open when its broadcast closes, it ends its track with
+/// `Unroutable`, which readers take as the publisher leaving.
 #[derive(uniffi::Object)]
 pub struct MoqFlateStreamProducer {
 	inner: std::sync::Mutex<Option<moq_mux::binary::Stream>>,
+}
+
+impl Child for MoqFlateStreamProducer {
+	fn abort(&self, err: moq_net::Error) {
+		let _guard = crate::ffi::enter();
+		let producer = self.inner.lock().unwrap().take();
+		if let Some(producer) = producer {
+			let _ = producer.abort(err);
+		}
+	}
+}
+
+impl Drop for MoqFlateStreamProducer {
+	fn drop(&mut self) {
+		self.abort(moq_net::Error::Unroutable);
+	}
 }
 
 #[uniffi::export]
@@ -110,11 +149,12 @@ impl MoqFlateStreamProducer {
 	) -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let config = Config::from(config);
-		let producer =
-			track.adopt(|track| broadcast.with_state(|state| Ok(state.catalog.binary_stream(track, config)?)))?;
-		Ok(Arc::new(Self {
-			inner: std::sync::Mutex::new(Some(producer)),
-		}))
+		track.adopt(|track| {
+			let producer = broadcast.with_state(|state| Ok(state.catalog.binary_stream(track, config)?))?;
+			Ok(Self {
+				inner: std::sync::Mutex::new(Some(producer)),
+			})
+		})
 	}
 
 	/// Append one payload to the log.
