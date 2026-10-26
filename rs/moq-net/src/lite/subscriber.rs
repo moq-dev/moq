@@ -4677,12 +4677,19 @@ mod tests {
 				track: false,
 			};
 			assert!(serving.poll(&h.serve, &kio::Waiter::noop()).is_pending());
-			assert!(matches!(serving.mode, ServeMode::Tail { .. }), "{updated}: waits out the grace");
+			assert!(
+				matches!(serving.mode, ServeMode::Tail { .. }),
+				"{updated}: waits out the grace"
+			);
 
 			moq_clock::sleep(Duration::from_secs(120)).await;
 			let _ = serving.poll(&h.serve, &kio::Waiter::noop());
 			assert_eq!(serving.covered.is_some(), !updated, "{updated}");
-			assert_eq!(matches!(serving.sub, Sub::None), !updated, "{updated}: subscribes again");
+			assert_eq!(
+				matches!(serving.sub, Sub::None),
+				!updated,
+				"{updated}: subscribes again"
+			);
 		}
 	}
 
