@@ -104,7 +104,7 @@ impl QlogSink {
 			let event = PacketLost {
 				header: Some(PacketHeader {
 					packet_number: Some(pn),
-					packet_type: packet_type(space, false),
+					packet_type: packet_type(space),
 					length: Some(info.size),
 					..Default::default()
 				}),
@@ -125,7 +125,6 @@ impl QlogSink {
 		pn: u64,
 		len: usize,
 		space: SpaceId,
-		is_0rtt: bool,
 		now: Instant,
 		orig_rem_cid: ConnectionId,
 	) {
@@ -138,7 +137,7 @@ impl QlogSink {
 			let event = PacketSent {
 				header: PacketHeader {
 					packet_number: Some(pn),
-					packet_type: packet_type(space, is_0rtt),
+					packet_type: packet_type(space),
 					length: Some(len as u16),
 					..Default::default()
 				},
@@ -149,14 +148,7 @@ impl QlogSink {
 		}
 	}
 
-	pub(super) fn emit_packet_received(
-		&self,
-		pn: u64,
-		space: SpaceId,
-		is_0rtt: bool,
-		now: Instant,
-		orig_rem_cid: ConnectionId,
-	) {
+	pub(super) fn emit_packet_received(&self, pn: u64, space: SpaceId, now: Instant, orig_rem_cid: ConnectionId) {
 		#[cfg(feature = "qlog")]
 		{
 			let Some(stream) = self.stream.as_ref() else {
@@ -166,7 +158,7 @@ impl QlogSink {
 			let event = PacketReceived {
 				header: PacketHeader {
 					packet_number: Some(pn),
-					packet_type: packet_type(space, is_0rtt),
+					packet_type: packet_type(space),
 					..Default::default()
 				},
 				..Default::default()
@@ -185,11 +177,10 @@ impl From<Option<QlogStream>> for QlogSink {
 }
 
 #[cfg(feature = "qlog")]
-fn packet_type(space: SpaceId, is_0rtt: bool) -> PacketType {
+fn packet_type(space: SpaceId) -> PacketType {
 	match space {
 		SpaceId::Initial => PacketType::Initial,
 		SpaceId::Handshake => PacketType::Handshake,
-		SpaceId::Data if is_0rtt => PacketType::ZeroRtt,
 		SpaceId::Data => PacketType::OneRtt,
 	}
 }

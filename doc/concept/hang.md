@@ -20,9 +20,7 @@ payloads follow [moq-e2ee](/draft/moq-e2ee). See [Encryption](#encryption).
 
 `catalog.json` is a JSON track listing the renditions of each media kind and
 the decoder config for each. It updates live as tracks come and go, and a
-compressed twin (`catalog.json.z`) is published alongside it. Catalog readers refuse an
-update with more than 64 video, audio, and text renditions combined, before
-opening media subscriptions. The refusal covers the whole update.
+compressed twin (`catalog.json.z`) is published alongside it.
 
 ```json
 {

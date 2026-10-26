@@ -91,6 +91,7 @@ impl Addr {
 	}
 
 	/// The same peer and addresses, requested at `url`.
+	#[cfg(feature = "_transport")]
 	pub(crate) fn with_url(&self, url: Url) -> Self {
 		Self {
 			url,

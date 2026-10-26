@@ -551,8 +551,9 @@ impl Surface {
 	/// labelled with that: scaling across 576 lines would otherwise change the
 	/// guess without changing the samples.
 	pub fn resize(&self, size: Size, config: &crate::resize::Config) -> Result<Surface, Error> {
+		let output = config.output.resolve(self);
 		// Counts as a use on builds where every GPU arm is compiled out.
-		let _ = config;
+		let _ = output;
 		size.validate("resize to")?;
 
 		let implied = self
@@ -561,9 +562,7 @@ impl Surface {
 		let mut resized = match self {
 			Surface::I420(i420) => Surface::I420(i420.resize(size)?),
 			#[cfg(apple)]
-			Surface::PixelBuffer(pixels) if config.output == crate::Output::Cpu => {
-				Surface::I420(pixels.download_i420()?.resize(size)?)
-			}
+			Surface::PixelBuffer(pixels) if output == crate::Output::Cpu => Surface::I420(pixels.download_i420()?.resize(size)?),
 			#[cfg(apple)]
 			Surface::PixelBuffer(pixels) => match pixels.resize(size.width, size.height) {
 				Ok(scaled) => Surface::PixelBuffer(scaled),
@@ -576,7 +575,7 @@ impl Surface {
 				}
 			},
 			#[cfg(all(target_os = "linux", feature = "nvidia"))]
-			Surface::Cuda(cuda) if config.output == crate::Output::Cpu => Surface::I420(cuda.download_i420()?.resize(size)?),
+			Surface::Cuda(cuda) if output == crate::Output::Cpu => Surface::I420(cuda.download_i420()?.resize(size)?),
 			#[cfg(all(target_os = "linux", feature = "nvidia"))]
 			Surface::Cuda(cuda) => match cuda.resize(size) {
 				Ok(scaled) => Surface::Cuda(scaled),
@@ -595,9 +594,7 @@ impl Surface {
 				));
 			}
 			#[cfg(target_os = "windows")]
-			Surface::Texture(texture) if config.output == crate::Output::Cpu => {
-				Surface::I420(texture.download_i420()?.resize(size)?)
-			}
+			Surface::Texture(texture) if output == crate::Output::Cpu => Surface::I420(texture.download_i420()?.resize(size)?),
 			#[cfg(target_os = "windows")]
 			Surface::Texture(texture) => match texture.resize(size.width, size.height) {
 				Ok(scaled) => Surface::Texture(scaled),
@@ -615,7 +612,7 @@ impl Surface {
 			// encoder to import. If VA-API is missing or refuses the buffer,
 			// download and resize on the CPU.
 			#[cfg(all(target_os = "linux", feature = "vaapi"))]
-			Surface::DmaBuf(buffer) if config.output == crate::Output::Native => match vaapi::resize(buffer, size) {
+			Surface::DmaBuf(buffer) if output == crate::Output::Native => match vaapi::resize(buffer, size) {
 				Ok(scaled) => Surface::DmaBuf(scaled),
 				Err(err) => {
 					static WARN_ONCE: std::sync::Once = std::sync::Once::new();

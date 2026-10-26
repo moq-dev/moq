@@ -2,10 +2,7 @@
 
 ## Goal
 
-Condition: [moq-dev/moq#6278](https://github.com/moq-dev/moq/pull/6278) has
-merged, so `Range::live()` starts at the live edge on a warm relay copy too.
-
-Then the readers that wait for the largest group and raise their floor to
+The readers that wait for the largest group and raise their floor to
 start near it (moq-audio, moq-video, `moq play`, and both moq-room and
 `@moq/room` chat) subscribe with a relative range instead, with no change in
 what they play: `Range::live()` for a start at the newest group, and a
@@ -14,6 +11,9 @@ which keeps its one-group lookback so the preceding intra-refresh group still
 decodes.
 
 ## Plan
+
+Since [moq-dev/moq#6278](https://github.com/moq-dev/moq/pull/6278),
+`Range::live()` starts at the live edge on a warm relay copy too.
 
 Inventory with `rg 'largest\(|poll_largest' rs/ js/` first, since Rust chat
 polls rather than awaits; keep any caller that needs the position itself

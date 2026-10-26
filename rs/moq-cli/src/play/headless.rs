@@ -37,6 +37,11 @@ impl Output for Headless {
 	fn send(&self, event: Event) {
 		let _ = self.events.send(event);
 	}
+
+	/// Never asked: headless playback decodes no video.
+	async fn render(&self) -> moq_video::Output {
+		moq_video::Output::Cpu
+	}
 }
 
 pub(crate) async fn run(

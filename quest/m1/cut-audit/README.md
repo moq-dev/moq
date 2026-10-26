@@ -56,9 +56,7 @@ leaving JS-only redesigns of `js/net` to [rs2ts](/quest/m2/rs2ts/README.md).
 
 - [AMF0 decoding costs no more than the bytes a peer sent](/quest/m1/cut-audit/rtmp-amf0-budget.md) - one RTMP message can no longer allocate ~56x its size before auth
 - [Counted field-less `trun` entries](/quest/m1/cut-audit/fmp4-sample-resolver.md) - a moof of field-less runs cannot materialize millions of sample entries
-- [A malformed avc1 codec string is refused](/quest/m1/cut-audit/avc1-codec-panic.md) - no catalog reader panics on a non-ASCII profile
 - [A compressed announce path never outgrows its literal form](/quest/m1/cut-audit/announce-path-bytes.md) - lite-07 announce compression cannot build multi-MiB paths
-- [Removing a media element releases its devices](/quest/m1/cut-audit/element-teardown.md) - camera, mic, screen share, and GPU are released on removal
 - [A route too large to re-encode is skipped](/quest/m1/cut-audit/announce-reencode.md) - one oversized route never resets a downstream announce stream
 - [Audio buffers are sized by data a publisher sent](/quest/m1/cut-audit/audio-catalog-alloc.md) - a hostile audio catalog cannot make viewers allocate gigabytes
 - [A reserved group survives a route returning](/quest/m1/cut-audit/reserved-route-return.md) - a route flip A to B to A no longer panics a peeked reader
@@ -74,7 +72,6 @@ leaving JS-only redesigns of `js/net` to [rs2ts](/quest/m2/rs2ts/README.md).
 - [RTMP sessions follow one strict path](/quest/m1/cut-audit/rtmp-session-strict.md) - idle sockets, repeated requests, rewinds, and stalled servers are handled
 - [The export jitter buffer admits only frames due within its window](/quest/m1/cut-audit/jitter-admission.md) - a fast track is backpressured, not buffered without bound
 - [Peer-driven receive loops yield on a per-message budget](/quest/m1/cut-audit/peer-loop-budget.md) - small-message floods cannot monopolize a session driver
-- [The JS gap ledger costs O(log n)](/quest/m1/cut-audit/js-ledger.md) - sparse arrivals no longer cost quadratic main-thread CPU
 - [Removing a stale front is O(1)](/quest/m1/cut-audit/weak-cache-remove.md) - a restart wave is linear under the origin lock
 - [One bad rendition never leaves the player with nothing](/quest/m1/cut-audit/watch-source-robust.md) - malformed audio and conflicting video filters degrade gracefully
 - [@moq/flate stops inflating at its budget](/quest/m1/cut-audit/flate-budget.md) - unless the compression migration deletes it first

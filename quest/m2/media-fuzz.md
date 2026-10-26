@@ -14,7 +14,7 @@ have no fuzz targets; only `rs/moq-net/fuzz` and `rs/moq-quic/fuzz` exist,
 and [wire fuzz coverage](/quest/m2/wire-fuzz-coverage.md) puts media
 importers out of scope. The audit's
 [zero-size sample](https://github.com/moq-dev/moq/pull/6864) and
-[avc1 panic](/quest/m1/cut-audit/avc1-codec-panic.md) findings are the kind
+malformed avc1 codec-string findings are the kind
 `cargo fuzz` finds in minutes; they are reachable through RTMP, SRT, HLS,
 and fMP4 ingest and through catalog subscription. Include RTMP's AMF0
 decoder too, after [its budget fix](/quest/m1/cut-audit/rtmp-amf0-budget.md).
