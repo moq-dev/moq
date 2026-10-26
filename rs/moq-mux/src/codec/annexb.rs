@@ -1044,7 +1044,9 @@ mod tests {
 
 		for nal in [VPS, SPS, SPS_PYRAMID, PPS] {
 			let mut sets = ParameterSets::new();
-			InBandCodec::H265.insert_parameter_set(&mut sets, &Bytes::from_static(nal)).unwrap();
+			InBandCodec::H265
+				.insert_parameter_set(&mut sets, &Bytes::from_static(nal))
+				.unwrap();
 			assert_eq!(sets.keys().collect::<Vec<_>>(), [&0]);
 		}
 

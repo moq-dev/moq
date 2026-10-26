@@ -20,8 +20,8 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use crate::codec::annexb::{InBandCodec, ParameterSets};
 use scuffle_h265::{NALUnitType, SpsNALUnit};
-pub(crate) use sps::id as sps_id;
 use sps::Sps;
+pub(crate) use sps::id as sps_id;
 
 /// Wrap one hvc1 (length-prefixed NALU) access unit as a single
 /// [`Frame`](crate::container::Frame), with the keyframe flag set when it

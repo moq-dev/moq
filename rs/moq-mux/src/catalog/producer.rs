@@ -1322,7 +1322,7 @@ fn to_msf<E: CatalogExt>(catalog: &Catalog<E>, base: &moq_net::Path) -> moq_msf:
 /// the same identity replaces the earlier one.
 fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) -> moq_msf::Catalog<E> {
 	let mut tracks = Vec::new();
-	let mut reference = |id: &str, config: &dyn Reference| {
+	let reference = |id: &str, config: &dyn Reference| {
 		let name = config.track(id);
 		if let Some(epoch) = config.epoch() {
 			// MSF has nowhere to name an instance, so its readers take whichever resolves first.

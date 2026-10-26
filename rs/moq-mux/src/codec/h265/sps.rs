@@ -271,7 +271,10 @@ mod tests {
 		for nal in [fixtures::SPS, fixtures::SPS_PYRAMID, SPS_SUB_LAYERS] {
 			let full = SpsNALUnit::parse(&mut &nal[..]).unwrap().rbsp;
 			let rbsp = h264_parser::nal::ebsp_to_rbsp(&nal[2..]);
-			assert_eq!(id(&mut BitReader::new(&rbsp)).unwrap(), full.sps_seq_parameter_set_id as u32);
+			assert_eq!(
+				id(&mut BitReader::new(&rbsp)).unwrap(),
+				full.sps_seq_parameter_set_id as u32
+			);
 		}
 		let rbsp = h264_parser::nal::ebsp_to_rbsp(&SPS_SUB_LAYER_PROFILE_AND_LEVEL[2..]);
 		assert_eq!(id(&mut BitReader::new(&rbsp)).unwrap(), 0);

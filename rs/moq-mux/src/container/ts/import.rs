@@ -8724,7 +8724,10 @@ pub(super) mod test {
 		let snapshot = catalog.snapshot();
 		assert!(snapshot.audio.renditions.is_empty());
 		let name = snapshot.video.renditions.keys().next().unwrap().clone();
-		assert_eq!(read_track(&consumer, &name, crate::container::Kind::Video).await.len(), 1);
+		assert_eq!(
+			read_track(&consumer, &name, crate::container::Kind::Video).await.len(),
+			1
+		);
 	}
 
 	#[tokio::test(start_paused = true)]
