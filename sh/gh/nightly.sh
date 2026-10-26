@@ -118,9 +118,10 @@ case "$1" in
     rust-extra)
         # The allocation/window/play-buffer tables keep their stdout in the run;
         # only Criterion estimates enter the trend report.
-        criterion extra --no-fail-fast -p moq-e2ee -p moq-json -p moq-archive -p moq-cli -p moq-mux \
+        criterion extra --no-fail-fast -p moq-e2ee -p moq-json -p moq-archive -p moq-cli -p moq-mux -p moq-audio \
             --bench protect --bench codec --bench table --bench allocations --bench window \
-            --bench producer --bench play_buffer --bench jitter --bench decode_clock --bench ts_programs --bench ts_video
+            --bench producer --bench play_buffer --bench jitter --bench decode_clock --bench ts_programs --bench ts_video \
+            --bench bus
         ;;
     rust-uring)
         # One run per target makes an unsupported/skipped ring fail report

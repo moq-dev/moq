@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -39,11 +40,14 @@ func TestSessionAuthReadsTheGrant(t *testing.T) {
 	defer server.Close()
 
 	accepted := make(chan *moq.Session, 1)
+	implementation := make(chan *string, 1)
 	go func() {
 		req, err := server.Accept(ctx)
 		if err != nil || req == nil {
 			return
 		}
+		// The wrapper names itself ahead of moq-ffi, so a server can tell bindings apart.
+		implementation <- req.PeerImplementation()
 		session, err := req.Accept(ctx, nil, nil)
 		if err != nil {
 			return
@@ -60,6 +64,15 @@ func TestSessionAuthReadsTheGrant(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.Close()
+
+	select {
+	case got := <-implementation:
+		if got == nil || !strings.HasPrefix(*got, "moq-go/") {
+			t.Fatalf("peer implementation = %v, want a moq-go/ prefix", got)
+		}
+	case <-ctx.Done():
+		t.Fatal("no request")
+	}
 
 	everything := moq.Grant{Publish: []string{"**"}, Subscribe: []string{"**"}}
 	auth := client.Session().Auth()

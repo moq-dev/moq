@@ -36,6 +36,14 @@ release epic in m2. Each keeps its Goal and recurrence paragraph and requires
 the new `/quest/m1/README.md`, and the cut also requires both reviews. Only
 `/quest-delete` ends the recurrence.
 
+From the 2026-10-25 pre-cut run:
+
+- Write the moq-cli and moq-gst `MIGRATE.md` entries from the Impact section of
+  [moq-dev/moq#6522](https://github.com/moq-dev/moq/pull/6522); that rename list exists nowhere else.
+- Raise each wrapper's moq-ffi version floor (for example Kotlin's
+  `MOQ_FFI_RANGE`) to the release that ships the `implementation` field from
+  [moq-dev/moq#6775](https://github.com/moq-dev/moq/pull/6775).
+
 ## Required
 
 - [Breaking release readiness](/quest/m1/README.md) - code, protocol and package proofs

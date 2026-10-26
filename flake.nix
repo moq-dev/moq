@@ -32,7 +32,7 @@
     # The quest CLI, which also serves the quest guide and skills the stubs in
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
-      url = "github:kixelated/quest/42c49e898fdfafaf805a28302a7a11013ebb9316";
+      url = "github:kixelated/quest/ed657ba9362a941b3be9bbea55120a3c5a90374c";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
     };
@@ -634,6 +634,15 @@
           # finds a shim there too. That is the only way mbx reaches a build
           # that spawns Cargo itself, which release-plz does.
           shellHook = ''
+            # `nix develop` points TMPDIR at a fresh nix-shell.* dir that it
+            # never removes. Drop it and keep the caller's TMPDIR, as nix-direnv
+            # does, so nothing piles up there.
+            if [[ ''${NIX_BUILD_TOP-} == */nix-shell.* && -d $NIX_BUILD_TOP ]]; then
+              rm -rf "$NIX_BUILD_TOP"
+              export TMPDIR=''${NIX_BUILD_TOP%/*}
+              unset NIX_BUILD_TOP TMP TEMP TEMPDIR
+            fi
+
             status=$(mbx setup --status 2>/dev/null || true)
             shim=$(printf '%s\n' "$status" | sed -n '1s/.*: //p')
             if [ -x "$shim" ]; then

@@ -404,7 +404,8 @@ async fn uring_workers_drain_on_the_trigger() {
 	let arriving = tokio::spawn(connect(client, url));
 	let pending = admissions.next().await.expect("pending admission");
 	trigger.start();
-	let goaway = tokio::time::timeout(TIMEOUT, established.draining().expect("connected").recv())
+	let draining = established.draining().expect("connected");
+	let goaway = tokio::time::timeout(TIMEOUT, moq_net::kio::wait(|waiter| draining.poll(waiter)))
 		.await
 		.expect("no GOAWAY after the trigger")
 		.expect("session closed without a GOAWAY");
@@ -417,10 +418,14 @@ async fn uring_workers_drain_on_the_trigger() {
 	let (_arrival_lease, arrival_consumer) = moq_auth::lease::Producer::new(moq_auth::Grant::new(all(), all()));
 	pending.grant(arrival_consumer);
 	let arrival = arriving.await.expect("arrival task");
-	let goaway = tokio::time::timeout(Duration::from_secs(1), arrival.draining().expect("connected").recv())
-		.await
-		.expect("an arrival mid-drain was not sent a GOAWAY")
-		.expect("arrival closed without a GOAWAY");
+	let draining = arrival.draining().expect("connected");
+	let goaway = tokio::time::timeout(
+		Duration::from_secs(1),
+		moq_net::kio::wait(|waiter| draining.poll(waiter)),
+	)
+	.await
+	.expect("an arrival mid-drain was not sent a GOAWAY")
+	.expect("arrival closed without a GOAWAY");
 	assert_eq!(goaway.uri(), "", "expected a reconnect-to-me GOAWAY");
 	tokio::time::timeout(TIMEOUT, arrival.closed())
 		.await

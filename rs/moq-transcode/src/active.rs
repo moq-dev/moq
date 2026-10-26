@@ -2,8 +2,8 @@
 //!
 //! Nothing is encoded until a consumer asks for a rung, so a transcoder that is
 //! publishing a catalog and a transcoder that is saturating a GPU look identical
-//! from the outside. Broadcast demand ([`moq_net::broadcast::Demand`]) closes
-//! half the gap: it says *someone* is watching. This module closes the other
+//! from the outside. Track demand ([`moq_net::track::Demand`]) closes half the
+//! gap: it says *someone* is watching. This module closes the other
 //! half by naming *which* renditions are being produced, and counting what each
 //! one produced, which is what a caller pricing or admitting the work needs.
 //!

@@ -31,6 +31,8 @@ openh264 = ["moq-video/openh264"]
 # Intel/AMD VAAPI hardware codecs (Linux); its bindgen needs libclang.
 vaapi = ["moq-video/vaapi"]
 # PipeWire cameras, drawn without a copy, and audio through the sound server.
+# Wayland screens and windows are not reachable yet: display and window sources
+# capture X11 only.
 pipewire = ["capture", "moq-scene/pipewire"]
 
 [dependencies]

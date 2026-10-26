@@ -206,50 +206,6 @@ fn subscriber_wakes_parked_demand() {
 	});
 }
 
-/// A publisher parked on `broadcast::Demand::used` while one reader hands over to the
-/// next: the last reader leaves and a new one arrives straight from the track producer,
-/// which never touches the broadcast's own state. Whatever the publisher's poll saw, it
-/// must be woken for the newcomer.
-#[test]
-fn broadcast_demand_sees_a_reader_return() {
-	model(|| {
-		let broadcast = broadcast::Info::new().produce();
-		let consumer = broadcast.consume();
-		let video = broadcast.create_track("video", None).expect("create track");
-		let demand = broadcast.demand();
-		let first = consumer.track("video").expect("track").subscribe(None);
-
-		let reader = thread::spawn(move || {
-			drop(first);
-			let next = video.subscribe(None);
-			// Returned, so neither the reader nor the track goes before the join.
-			(video, next)
-		});
-
-		block_on(demand.used()).expect("the returning reader was missed");
-		drop(reader.join().unwrap());
-	});
-}
-
-/// A publisher parked on `broadcast::Demand::unused` while a reader comes and goes
-/// straight through the track producer: its leaving must wake the publisher.
-#[test]
-fn broadcast_demand_sees_a_reader_leave() {
-	model(|| {
-		let broadcast = broadcast::Info::new().produce();
-		let video = broadcast.create_track("video", None).expect("create track");
-		let demand = broadcast.demand();
-
-		let reader = thread::spawn(move || {
-			drop(video.subscribe(None));
-			video
-		});
-
-		block_on(demand.unused()).expect("the reader leaving was missed");
-		drop(reader.join().unwrap());
-	});
-}
-
 /// A reader taking and dropping a track around the front's demand poll. The front must
 /// see it go: one that missed the edge keeps its source subscribed for nobody, which
 /// shows up here as a deadlock waiting for the source to go unread.
@@ -618,7 +574,7 @@ fn landing_wakes_a_parked_expiry(reveal: bool) {
 		head.write_frame(Timestamp::ZERO, Bytes::from_static(b"head")).unwrap();
 		let mut subscriber = track.subscribe(
 			moq_net::track::Subscription::default()
-				.with_groups(0..)
+				.with_range(0..)
 				.with_max_delay(std::time::Duration::from_millis(500)),
 		);
 		let mut held = block_on(subscriber.recv_group()).unwrap().unwrap();

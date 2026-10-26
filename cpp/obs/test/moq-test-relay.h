@@ -12,6 +12,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -134,6 +135,14 @@ public:
 		return accepted;
 	}
 
+	// Whether a session the relay accepted advertised an implementation starting with `prefix`.
+	bool Advertised(const std::string &prefix)
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		return std::any_of(implementations.begin(), implementations.end(),
+				   [&](const std::string &value) { return value.rfind(prefix, 0) == 0; });
+	}
+
 	std::shared_ptr<moq::OriginProducer> origin;
 
 private:
@@ -143,11 +152,13 @@ private:
 			auto request = server->accept().get();
 			if (!request || !*request)
 				return;
+			const auto implementation = (*request)->peer_implementation();
 			auto session = (*request)->accept(nullptr, nullptr).get();
 			if (!session)
 				continue;
 			std::lock_guard<std::mutex> lock(mutex);
 			sessions.push_back(*session);
+			implementations.push_back(implementation.value_or(""));
 			accepted++;
 		}
 	}
@@ -196,6 +207,7 @@ private:
 
 	std::mutex mutex;
 	std::vector<std::shared_ptr<moq::Session>> sessions;
+	std::vector<std::string> implementations;
 	size_t accepted = 0;
 	std::thread sessions_thread;
 

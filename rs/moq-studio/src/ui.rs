@@ -353,6 +353,10 @@ impl Panels {
 					.filter(|(_, source)| source.has_video())
 					.map(|(name, _)| name)
 					.collect();
+				// A pick whose source was removed or reloaded away would add a dangling item.
+				if self.new_item.as_ref().is_some_and(|name| !pictures.contains(&name)) {
+					self.new_item = None;
+				}
 				egui::ComboBox::from_id_salt("new item")
 					.selected_text(self.new_item.as_deref().unwrap_or("Pick a source"))
 					.show_ui(ui, |ui| {
