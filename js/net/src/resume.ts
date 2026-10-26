@@ -313,7 +313,7 @@ class Reader implements ResumeSource {
 	/** The logical track ended cleanly: the reader drains what its copies hold and follows no route. */
 	#ended = false;
 	/** The serving copy's largest when the track ended, kept once that copy goes. */
-	#last?: { largest?: track.Position; ended: true };
+	#last?: { largest?: track.Position; object?: track.Position; ended: true };
 	/** The first end any copy declared: the logical track's, whichever copy serves. */
 	#declared?: track.Position;
 	/** The subscriber's record of groups handed out, as the last read passed it. */
@@ -797,7 +797,11 @@ class Reader implements ResumeSource {
 		if (serving) this.#boundAtEnd(serving);
 		if (this.#letGo(this.#delivered) || this.#closed) return false;
 		this.#ended = true;
-		this.#last = { largest: serving && hooks.peekLargest(serving.sub).largest, ended: true };
+		this.#last = {
+			largest: serving && hooks.peekLargest(serving.sub).largest,
+			object: serving && hooks.objectLargest(serving.sub),
+			ended: true,
+		};
 		this.#shell.close();
 		this.route.leave(this);
 		this.#letGo(this.#delivered);
@@ -1103,6 +1107,12 @@ class Reader implements ResumeSource {
 		this.sync();
 		const serving = this.#serving();
 		return serving && hooks.bufferedLargest(serving.sub);
+	}
+
+	objectLargest(): track.Position | undefined {
+		this.sync();
+		const serving = this.#serving();
+		return serving ? hooks.objectLargest(serving.sub) : this.#last?.object;
 	}
 
 	peekLargest(): { largest?: track.Position; ended: boolean } {

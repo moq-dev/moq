@@ -4613,6 +4613,106 @@ test("draft-22: an update fills its snapshot under its own request ID", async ()
 	}
 });
 
+test("draft-22: an empty newer group is not an object in Largest or a relative fill", async () => {
+	const fx = fixture();
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	writeGroup(track, 2);
+	const empty = track.appendGroup();
+	const { client, ok } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 0n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "absolute", startGroup: 2n, startObject: 0n },
+			fill: { filter: { kind: "relative", groups: 1n }, rangeFilters: false },
+		}),
+	);
+	try {
+		expect(ok.largest).toEqual({ groupId: 0n, objectId: 1n });
+		expect(track.largest()).toEqual({ group: 1, frame: 0 });
+		const stream = await nextUni(fx.uni);
+		if (!stream) throw new Error("missing relative fill");
+		const served = await readFill(stream);
+		expect(served.reset).toBeUndefined();
+		expect(served.objects).toEqual([0, 1].map((id) => ({ group: 0, id, payload: `0.${id}` })));
+	} finally {
+		client.close();
+		empty.close();
+		track.close();
+		fx.close();
+	}
+});
+
+test("draft-22: reported Largest survives absent headers, older cache entries, and eviction", async () => {
+	using clock = manual();
+	const fx = fixture();
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	hooks.reportedLargest(track, { group: 4, frame: 3 });
+	const { client, ok } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 0n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "absolute", startGroup: 6n, startObject: 0n },
+		}),
+	);
+	try {
+		expect(ok.largest).toEqual({ groupId: 4n, objectId: 3n });
+		writeGroup(track, 2);
+		const empty = track.appendGroup();
+		await clock.advance(Nano.fromMilli(Milli(60_000)));
+		expect(hooks.cachedLargest(track)).toBeUndefined();
+		const parameters = new Parameters();
+		parameters.subscriptionFilter = { kind: "absolute", startGroup: 6n, startObject: 0n };
+		await client.writer.u53(SubscribeUpdate.id);
+		await new SubscribeUpdate({ requestId: 2n, parameters }).encode(client.writer, fx.version);
+		expect(await client.reader.u53()).toBe(RequestOk.id);
+		expect((await RequestOk.decode(client.reader, fx.version)).parameters.largest).toEqual({
+			groupId: 4n,
+			objectId: 3n,
+		});
+		empty.close();
+	} finally {
+		client.close();
+		track.close();
+		fx.close();
+	}
+});
+
+test("draft-22: Next Object on an empty group still delivers its first object", async () => {
+	const fx = fixture();
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const group = track.appendGroup();
+	const { client, ok } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 0n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "nextObject" },
+			fill: { filter: { kind: "relative", groups: 1n }, rangeFilters: false },
+		}),
+	);
+	try {
+		expect(ok.largest).toBeUndefined();
+		group.writeFrame({ payload: new TextEncoder().encode("first"), timestamp: Timestamp.now() });
+		group.close();
+		const stream = await nextUni(fx.uni);
+		if (!stream) throw new Error("missing first published object");
+		expect((await readGroup(stream)).objects).toEqual([{ id: 0, payload: "first" }]);
+	} finally {
+		client.close();
+		group.close();
+		track.close();
+		fx.close();
+	}
+});
+
 test("draft-22: cancellation releases a fill parked on flow control", async () => {
 	const fx = fixture();
 	const parked = Promise.withResolvers<void>();
