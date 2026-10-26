@@ -19,8 +19,8 @@ before that resolver runs. A 16 KB moof of 1000 such runs materializes
 4.1 million entries even when the first sample will be refused. Removing
 only the output amplification does not close this parser allocation gap.
 
-The proposed upstream change refuses nonempty field-less runs on decode
-and encode. An alternative is a counted representation of identical
+[kixelated/mp4-atom#248](https://github.com/kixelated/mp4-atom/pull/248)
+proposes refusing nonempty field-less runs on decode and encode. An alternative is a counted representation of identical
 entries, preserving valid files while breaking the `Trun.entries` API.
 Review that compatibility choice before releasing. Do not add another
 sample-count cap or duplicate the atom parser in moq-mux.
