@@ -65,6 +65,7 @@ interop *args:
         ietf_compression_fallback_interop \
         ietf_datagram_interop \
         ietf_track_status_interop \
+        ietf_range_updates_interop \
         padding_interop \
         tracks_interop \
         varint_interop \
