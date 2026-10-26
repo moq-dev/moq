@@ -153,11 +153,8 @@ typedef Reservation = MoqReservation;
 /// A snapshot of transport connection statistics.
 typedef ConnectionStats = MoqConnectionStats;
 
-/// A session's authorization: the grant its peer gave it, and more tokens to present.
-typedef Auth = MoqAuth;
-
-/// One token presented with [Auth.add]; cancel it to withdraw the token.
-typedef AuthToken = MoqAuthToken;
+/// Follows the grant a session's peer gave it; cancel it to release a pending wait.
+typedef GrantConsumer = MoqGrantConsumer;
 
 /// What the peer lets this side do: publish and subscribe patterns, and an expiry.
 typedef Grant = MoqGrant;

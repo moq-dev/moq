@@ -28,7 +28,7 @@ reconnecting, on a session that carries in-band authorization: a
 `moq-transport` draft-17 or later version pinned under Advanced settings, with
 a relay that negotiates the MoQ Auth extension. The default protocol does not
 yet, so there the dock reports the new token as refused and it applies on the
-next Go Live.
+next reconnect or Go Live.
 
 By default the dock tunes the encoder for low latency on this stream only:
 no B-frames or lookahead on the encoders that support turning them off. This

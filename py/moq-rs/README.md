@@ -159,7 +159,8 @@ client = moq.Client(
   - `.stats() → ConnectionStats`. Snapshot RTT, bandwidth estimates, and byte/packet counters.
   - `.state()` and `await .state_changed(after)`. Read one lifecycle snapshot and wait with its revision; first-dial failures and reconnects share the same session.
   - `.bandwidth() → Bandwidth`. Divide the send estimate between encoders and app-owned tracks.
-  - `.auth() → Auth`. On `moq-lite-07-wip` and on moq-transport draft-17+ with the MoQ Auth extension, `.grant()` reads the peer's `Grant` and `await .add(token) → AuthToken` presents a fresh token without reconnecting.
+  - `.grants() → GrantConsumer`. On `moq-lite-07-wip` and on moq-transport draft-17+ with the MoQ Auth extension, `.grant()` reads the peer's `Grant` and `async for grant in session.grants()` follows it.
+  - `.tokens() → Tokens | None`. A client session's credentials: `.set([...])` replaces them without reconnecting and `await .answered()` raises the relay's refusal.
 
 ### Publishing
 

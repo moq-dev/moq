@@ -7905,7 +7905,9 @@ async fn auth_reads_the_peer_grant_on(version: &str) {
 	// The live session was dialed without a credential, so this one rides AUTH.
 	let tokens = client.tokens().unwrap();
 	tokens.set(vec!["extra".into()]).unwrap();
-	let err = answered(&client).await.expect_err("the default acceptor refuses a token");
+	let err = answered(&client)
+		.await
+		.expect_err("the default acceptor refuses a token");
 	assert!(matches!(err, MoqError::Unsupported), "refusal: {err:?}");
 	assert_eq!(
 		client.grants().grant(),

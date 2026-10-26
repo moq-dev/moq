@@ -128,18 +128,20 @@ final class SmokeTests: XCTestCase {
         defer { watchdog.cancel() }
 
         let everything = Grant(publish: ["**"], subscribe: ["**"], expires: nil)
-        for auth in [session.auth(), peer.auth()] {
-            var grant = auth.grant()
-            while grant != everything {
-                grant = try await auth.grantChanged()
+        for side in [session, peer] {
+            for try await grant in side.grants() where grant == everything {
+                break
             }
         }
+        XCTAssertNil(peer.tokens(), "an accepted session presents no tokens")
 
+        guard let tokens = session.tokens() else { return XCTFail("a client session has tokens") }
+        try tokens.set(["extra"])
         do {
-            _ = try await session.auth().add(token: "extra")
+            try await tokens.answered()
             XCTFail("the default acceptor refuses a token")
         } catch MoqError.Unsupported {}
-        XCTAssertEqual(session.auth().grant(), everything)
+        XCTAssertEqual(session.grants().grant(), everything)
 
         peer.cancel(code: 0)
         session.cancel(code: 0)

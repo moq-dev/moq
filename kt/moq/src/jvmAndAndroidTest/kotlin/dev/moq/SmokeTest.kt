@@ -690,13 +690,15 @@ class SmokeTest {
             )
             moq.use {
                 val everything = Grant(publish = listOf("**"), subscribe = listOf("**"), expires = null)
-                assertEquals(everything, moq.auth().grants().first { it != null })
+                assertEquals(everything, moq.grants().updates().first { it != null })
                 val session = accepted.await()
-                assertEquals(everything, session.auth().grants().first { it != null })
+                assertEquals(everything, session.grants().updates().first { it != null })
                 assertNull(everything.expires)
+                assertNull(session.tokens(), "an accepted session presents no tokens")
 
-                assertFailsWith<MoqException.Unsupported> { moq.auth().add("extra") }
-                assertEquals(everything, moq.auth().grant())
+                moq.tokens().set(listOf("extra"))
+                assertFailsWith<MoqException.Unsupported> { moq.tokens().answered() }
+                assertEquals(everything, moq.grants().grant())
                 session.cancel(0u)
             }
         }

@@ -159,10 +159,17 @@ async fn an_unchanged_refused_credential_is_terminal() {
 	})
 	.await
 	.expect("the refusal never ended the connection");
-	let unauthorized =
-		|err: &moq_tokio::Error| matches!(err, moq_tokio::Error::MoqNet(moq_net::Error::Session(moq_net::SessionError::Unauthorized)));
+	let unauthorized = |err: &moq_tokio::Error| {
+		matches!(
+			err,
+			moq_tokio::Error::MoqNet(moq_net::Error::Session(moq_net::SessionError::Unauthorized))
+		)
+	};
 	assert!(unauthorized(&err), "{err:?}");
 	// The refusal is the answer to the tokens that dial presented.
-	let answer = tokens.answered().await.expect_err("the refused credential was answered");
+	let answer = tokens
+		.answered()
+		.await
+		.expect_err("the refused credential was answered");
 	assert!(unauthorized(&answer), "{answer:?}");
 }

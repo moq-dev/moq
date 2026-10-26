@@ -87,8 +87,8 @@ impl Holder {
 		// credential in it; every lite version with a SETUP token answers it on AUTH. A
 		// moq-transport client waits for SERVER_SETUP, and an older lite version's
 		// credential rides the URL, which the dial itself answers.
-		state.unconfirmed = version
-			.is_some_and(|version| matches!(version, moq_net::Version::Lite(_)) && version.has_setup_token());
+		state.unconfirmed =
+			version.is_some_and(|version| matches!(version, moq_net::Version::Lite(_)) && version.has_setup_token());
 		state.answer();
 	}
 }
@@ -439,7 +439,9 @@ mod tests {
 		assert!(
 			matches!(
 				answer,
-				Err(crate::Error::MoqNet(moq_net::Error::Session(moq_net::SessionError::Unauthorized)))
+				Err(crate::Error::MoqNet(moq_net::Error::Session(
+					moq_net::SessionError::Unauthorized
+				)))
 			),
 			"{answer:?}"
 		);
