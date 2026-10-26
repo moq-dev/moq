@@ -99,7 +99,7 @@ catalog linger (#5305).
 ## Required
 
 - [PAT changes](/quest/m1/ts-reliability/pat-lifecycle.md) - a revised PAT never leaves a broadcast meaning another program
-- [Cut arrival](/quest/m1/ts-reliability/cut-arrival.md) - frames held through a dead source's silence drop as late instead of ending a stitching export
+- [Cut arrival](/quest/m1/ts-reliability/cut-arrival.md) - frames held through a dead source's silence longer than the delay drop as late instead of ending a stitching export
 - [TS workflow passes](/quest/m1/ts-reliability/validation-green.md) - the scheduled TS lanes pass on main again, with no lane loosened
 - [Export SI order](/quest/m1/ts-reliability/export-si-order.md) - a TS export sends SI after its PMT and a PCR interval, so a hop keeps first emissions
 

@@ -4,9 +4,10 @@
 
 When a hard-killed source's tracks go unroutable after a silence longer than
 the delay, a stitching `export ts --follow` drops the video frames held
-through the silence as late and switches to the remaining instance. It never
-ends on a missed decode deadline. No flush of held frames carries an arrival
-from before a silence into the scheduler.
+through the silence as late and switches to the remaining instance. Frames a
+loss releases never reach `missed()`; a genuine multiplex-rate miss stays
+fatal. No loss-triggered flush of held frames carries an arrival from before a
+silence into the scheduler; end of track keeps its own (see Plan).
 
 ## Plan
 
