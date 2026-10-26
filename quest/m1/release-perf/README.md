@@ -7,9 +7,9 @@ Before the next release cut, every benchmark where `main` is slower than
 is fixed. Cost that pays for a feature `main` deliberately added is accepted,
 and the reason is written here.
 
-This epic's own work: once every child has landed, re-run the cases the
-2026-10-25 run left open (below) against `release`, and confirm the relay
-fanout load. The full run and the browser frame path need no repeat; the
+This epic's own work: once every child has landed, confirm the sparse rows
+and the relay fanout load against `release` (see the 2026-10-25 decisions).
+The browser frame path needs no repeat; the
 [performance audit](/quest/m2/audit-perf.md) now pairs every later cut with
 `release`.
 
@@ -207,9 +207,19 @@ at load 25, and the 2026-10-21 run measured 12% less, so it needs a quiet
 re-run. Browser frames: lite rows 1.09 to 1.14x and IETF 0.95x, the same as
 `main` at the 2026-10-23 decision (1.13x lite).
 
-Open: the sparse read slope from
-[dynamic range requests](https://github.com/moq-dev/moq/pull/6171), owned by
-the child below, and the fanout re-run.
+Decided 2026-10-25 (maintainer), in
+[moq-dev/moq#6784](https://github.com/moq-dev/moq/pull/6784):
+
+- The sparse read slope from
+  [dynamic range requests](https://github.com/moq-dev/moq/pull/6171) is the
+  child below, and it blocks the cut.
+- The TS schedule's growth is left to the
+  [performance audit](/quest/m2/audit-perf.md); it does not block the cut.
+- Once the child lands, re-run the relay fanout pairing on a quiet host,
+  recording `/proc/loadavg`, with
+  `BENCH_ARTIFACTS=<scratch> just bench origin/release` (it also re-checks
+  the sparse rows). Fix it if the relay
+  CPU still rises with consistent sign; otherwise this epic is done.
 
 ## Required
 
