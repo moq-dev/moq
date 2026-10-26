@@ -110,12 +110,24 @@ test("watch mute and volume are independent in either attribute or property orde
 					const unmuted = { volume: watch.volume, muted: watch.muted };
 					watch.volume = 0;
 					await settle();
-					const zero = { volume: watch.volume, muted: watch.muted };
+					const zero = {
+						volume: watch.volume,
+						muted: watch.muted,
+						enabled: watch.emitter.out.enabled.peek(),
+					};
 					watch.muted = true;
 					await settle();
 					watch.muted = false;
 					await settle();
-					results.push({ mode, volumeFirst, muted, unmuted, zero, zeroAfterUnmute: watch.volume });
+					results.push({
+						mode,
+						volumeFirst,
+						muted,
+						unmuted,
+						zero,
+						zeroAfterUnmute: watch.volume,
+						zeroEnabledAfterUnmute: watch.emitter.out.enabled.peek(),
+					});
 					watch.remove();
 					watch.signals.close();
 				}
@@ -130,8 +142,9 @@ test("watch mute and volume are independent in either attribute or property orde
 				emitterMuted: true,
 			});
 			expect(result.unmuted).toEqual({ volume: 0.8, muted: false });
-			expect(result.zero).toEqual({ volume: 0, muted: false });
+			expect(result.zero).toEqual({ volume: 0, muted: false, enabled: false });
 			expect(result.zeroAfterUnmute).toBe(0);
+			expect(result.zeroEnabledAfterUnmute).toBe(false);
 		}
 	} finally {
 		await browser.close();
@@ -179,7 +192,7 @@ test("the real gain node uses mute without changing the selected volume", async 
 		expect(results[1].level).toBeCloseTo(0.8);
 		expect(results[1].sample).toBeCloseTo(0.8);
 		expect(results[1].enabled).toBe(true);
-		expect(results[2]).toEqual({ level: 0, sample: 0, enabled: true });
+		expect(results[2]).toEqual({ level: 0, sample: 0, enabled: false });
 	} finally {
 		await browser.close();
 		await server.close();

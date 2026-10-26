@@ -21,7 +21,7 @@ export async function gain(watch: MoqWatch): Promise<{ level: number; sample: nu
 			}),
 		},
 	} as unknown as Audio.Decoder;
-	const emitter = new Audio.Emitter({ source, ...watch.controls.audio });
+	const emitter = new Audio.Emitter({ source, ...watch.emitter.in });
 	try {
 		for (let i = 0; i < 5; i++) await new Promise<void>((resolve) => queueMicrotask(resolve));
 		constant.start();

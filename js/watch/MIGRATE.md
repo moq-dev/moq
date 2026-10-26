@@ -11,7 +11,7 @@ Muting no longer writes zero to the `volume` property or attribute, and unmuting
 Setting `volume = 0` no longer sets `muted = true`, and setting a positive volume no longer clears mute.
 Set `el.muted` explicitly to change mute state; read it instead of `el.volume === 0` to identify mute.
 For audible state, check both: `!el.muted && el.volume > 0`.
-Use `muted = true` to stop audio downloads; volume zero only silences output.
+Audio downloads still stop at zero volume, independently of the mute control.
 Programmatic level changes preserve mute; the UI slider still explicitly unmutes when moved above zero.
 
 ### Player inputs and `<moq-watch>` controls nest by media kind

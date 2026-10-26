@@ -9,7 +9,7 @@
 import { Milli } from "@moq/clock";
 import type * as Catalog from "@moq/hang/catalog";
 import * as Moq from "@moq/net";
-import { Effect, Signal } from "@moq/signals";
+import { Derived, Effect, Signal } from "@moq/signals";
 import type * as Audio from "./audio";
 import { type Broadcast, CATALOG_FORMATS, type CatalogFormat } from "./broadcast";
 import { formatDuration, parseDuration } from "./duration";
@@ -236,6 +236,14 @@ export default class MoqWatch extends HTMLElement {
 				...this.controls.video,
 				canvas: this.signals.computed((effect) =>
 					effect.get(this.#enabled) ? effect.get(this.#canvas) : undefined,
+				),
+			},
+			audio: {
+				...this.controls.audio,
+				// A zero level stops downloads without rewriting the user's mute control.
+				muted: new Derived(
+					[this.controls.audio.muted, this.controls.audio.volume],
+					(muted, volume) => muted || volume === 0,
 				),
 			},
 			text: { ...this.controls.text, container: this.#captionsOverlay },
