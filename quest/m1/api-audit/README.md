@@ -56,9 +56,6 @@ audit skips them:
 - `setup::Extensions::{auth, solicit, epoch}` and the relay's
   `[listen|connect.extensions]` TOML, as interop knobs documented as
   affecting moq-transport only.
-- `setup::Token` and `server::Handshake::token`:
-  [token in band](/quest/m1/auth/token-in-band.md) gives lite-07 a SETUP
-  token, which makes them shared.
 
 Rejected in planning:
 

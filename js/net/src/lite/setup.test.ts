@@ -204,3 +204,26 @@ test("SETUP decode refuses an oversized length before reading the body", async (
 		"too large",
 	);
 });
+
+const PARAM_TOKEN = 0x7;
+
+test("SETUP token round-trips on lite-07 only", async () => {
+	const msg = new Setup({ token: new TextEncoder().encode("jwt") });
+	const wire = await bytes((w) => msg.encode(w, Version.DRAFT_07), Version.DRAFT_07);
+	// Length, one parameter, its id, then the token's length and bytes.
+	expect([...wire]).toEqual([0x06, 0x01, PARAM_TOKEN, 0x03, 0x6a, 0x77, 0x74]);
+	const got = await Setup.decode(new Reader(undefined, wire, Version.DRAFT_07), Version.DRAFT_07);
+	expect(new TextDecoder().decode(got.token)).toBe("jwt");
+
+	await expect(bytes((w) => msg.encode(w, Version.DRAFT_06), Version.DRAFT_06)).rejects.toThrow();
+	// An older version ignores the parameter like any unknown one.
+	const older = await Setup.decode(new Reader(undefined, wire, Version.DRAFT_06), Version.DRAFT_06);
+	expect(older.token).toBeUndefined();
+});
+
+test("SETUP refuses an empty token", async () => {
+	const empty = new Setup({ token: new Uint8Array() });
+	await expect(bytes((w) => empty.encode(w, Version.DRAFT_07), Version.DRAFT_07)).rejects.toThrow();
+	const wire = new Uint8Array([0x03, 0x01, PARAM_TOKEN, 0x00]);
+	await expect(Setup.decode(new Reader(undefined, wire, Version.DRAFT_07), Version.DRAFT_07)).rejects.toThrow();
+});
