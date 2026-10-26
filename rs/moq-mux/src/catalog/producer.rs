@@ -1,4 +1,5 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::hash_map::Entry;
+use std::collections::{BTreeMap, HashMap};
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -1317,11 +1318,11 @@ fn to_msf<E: CatalogExt>(catalog: &Catalog<E>, base: &moq_net::Path) -> moq_msf:
 ///
 /// MSF names a track by its absolute namespace and wire name. An unresolvable reference, one
 /// a reader would take as the catalog itself ([`names_catalog`](crate::catalog::msf::names_catalog)),
-/// or a duplicate identity is refused instead of advertising the track on the catalog's broadcast.
+/// is refused instead of advertising the track on the catalog's broadcast. A later rendition with
+/// the same identity replaces the earlier one.
 fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) -> moq_msf::Catalog<E> {
 	let mut tracks = Vec::new();
-	let mut names = BTreeSet::new();
-	let mut reference = |id: &str, config: &dyn Reference| {
+	let reference = |id: &str, config: &dyn Reference| {
 		let name = config.track(id);
 		if let Some(epoch) = config.epoch() {
 			// MSF has nowhere to name an instance, so its readers take whichever resolves first.
@@ -1344,15 +1345,6 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 				}
 			}
 		};
-		if !names.insert((namespace.clone(), name.to_string())) {
-			tracing::error!(
-				rendition = id,
-				track = name,
-				?namespace,
-				"refusing duplicate MSF track identity"
-			);
-			return None;
-		}
 		Some((name.to_string(), namespace))
 	};
 
@@ -1450,7 +1442,19 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 		track.delay = config.delay;
 		tracks.push(track);
 	}
-	moq_msf::Catalog::with_ext(tracks, E::default())
+
+	let mut index = HashMap::new();
+	let mut unique: Vec<moq_msf::Track> = Vec::with_capacity(tracks.len());
+	for track in tracks {
+		match index.entry((track.namespace.clone(), track.name.clone())) {
+			Entry::Occupied(entry) => unique[*entry.get()] = track,
+			Entry::Vacant(entry) => {
+				entry.insert(unique.len());
+				unique.push(track);
+			}
+		}
+	}
+	moq_msf::Catalog::with_ext(unique, E::default())
 }
 
 #[cfg(test)]
@@ -1690,8 +1694,10 @@ mod test {
 		}
 	}
 
+	/// MSF names a track by namespace and name, but a reader keys renditions by name alone, so
+	/// the later of two same-named tracks wins there.
 	#[test]
-	fn msf_names_are_unique_per_namespace_but_ambiguous_hang_ids_are_refused() {
+	fn msf_names_are_unique_per_namespace_and_the_last_wins_a_hang_id() {
 		let base = moq_net::Path::new("room/catalog");
 		let mut catalog = hang::Catalog::<()>::default();
 		for (id, broadcast) in [("left", "./left"), ("right", "./right")] {
@@ -1704,10 +1710,29 @@ mod test {
 		assert_eq!(msf.tracks.len(), 2);
 		assert_eq!(msf.tracks[0].namespace.as_deref(), Some("room/left"));
 		assert_eq!(msf.tracks[1].namespace.as_deref(), Some("room/right"));
-		assert!(matches!(
-			crate::catalog::msf::from_msf(&msf, &base),
-			Err(crate::Error::Msf(crate::catalog::msf::Error::DuplicateTrackName(_)))
-		));
+		let restored = crate::catalog::msf::from_msf(&msf, &base).unwrap();
+		assert_eq!(restored.video.renditions.len(), 1);
+		assert_eq!(
+			base.try_resolve(restored.video.renditions["video"].broadcast.as_ref().unwrap()),
+			Some("room/right".into())
+		);
+	}
+
+	/// Two renditions naming one track in one broadcast advertise it once, as the later one.
+	#[test]
+	fn msf_repeated_identity_keeps_the_last() {
+		let mut catalog = hang::Catalog::<()>::default();
+		for (id, width) in [("a", 640), ("b", 1280)] {
+			let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
+			config.container = Container::Loc;
+			config.track = Some("video".into());
+			config.coded_width = Some(width);
+			catalog.video.renditions.insert(id.into(), config);
+		}
+		let msf = to_msf_media::<()>(&catalog, &moq_net::Path::empty());
+		assert_eq!(msf.tracks.len(), 1);
+		assert_eq!(msf.tracks[0].name, "video");
+		assert_eq!(msf.tracks[0].width, Some(1280));
 	}
 
 	#[test]

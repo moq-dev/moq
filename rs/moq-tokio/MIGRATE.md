@@ -8,6 +8,13 @@ How to update your code for each breaking change, newest first.
 
 `Connection::bandwidth()` is `Connection::allocator()`, mirroring `moq_net::Session::allocator()`.
 
+### QUIC connections wait for the handshake
+
+Await `quic::driver::Connecting` instead of calling `into_0rtt()`.
+`Connection::authenticated()` and `RecvStream::is_0rtt()` are gone because every connection handle already completed its handshake.
+Remove `ZeroRttRejected` match arms from `ReadError`, `WriteError`, `ResetError`, and `StoppedError`.
+TLS session tickets still enable resumed 1-RTT connections; application data always waits for the handshake.
+
 ### QUIC driver APIs follow their consumers
 
 `quic::driver::RecvStream::read_chunk(max)` reads ordered bytes and has no ordering flag or `Chunk::offset`.

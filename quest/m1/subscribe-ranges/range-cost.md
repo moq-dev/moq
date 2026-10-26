@@ -17,6 +17,8 @@ can multiply the CPU a relay spends on every group of a track.
 - Measure first: extend `rs/moq-net/benches/track.rs` with ranges × subscribers.
 - Prefer merging overlapping or adjacent ranges at decode, and a lookup that
   touches only the ranges around a group.
+- Include `track::Subscriber::covered`, which the lite-07 publisher runs on
+  each idle wake of a bounded subscription and walks every range.
 - Shares code with [Linear fill path](/quest/m1/subscribe-ranges/fill-linear.md).
 
 Public API: none expected. Wire: none expected.

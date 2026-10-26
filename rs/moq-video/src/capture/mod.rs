@@ -13,7 +13,7 @@
 
 use std::sync::Arc;
 
-use crate::{Error, Frame, FrameRate};
+use crate::{Error, Frame, FrameRate, Output};
 
 mod channel;
 use channel::FrameChannel;
@@ -267,6 +267,9 @@ pub struct Config {
 	/// Draw the mouse cursor into captured frames. Screen/window/app sources
 	/// only; ignored by cameras. Defaults to `true`.
 	pub cursor: bool,
+	/// Where captured pixels live. Defaults to [`Output::Native`]: whatever the
+	/// platform captures into, a GPU surface or CPU pixels.
+	pub output: Output,
 }
 
 impl Default for Config {
@@ -277,6 +280,7 @@ impl Default for Config {
 			height: None,
 			framerate: None,
 			cursor: true,
+			output: Output::Native,
 		}
 	}
 }
@@ -296,6 +300,8 @@ pub struct Stream {
 	framerate: Option<FrameRate>,
 	color: Option<crate::Color>,
 	label: String,
+	/// [`Config::output`], applied to each frame as it is read.
+	output: Output,
 	/// First frame captured during [`open`] (some backends learn their geometry
 	/// only from a frame); returned by the first [`read`](Self::read).
 	pending: Option<Frame>,
@@ -323,6 +329,7 @@ impl Stream {
 			framerate,
 			color,
 			label,
+			output: Output::Native,
 			pending,
 			_backend: backend,
 		}
@@ -338,10 +345,15 @@ impl Stream {
 	/// Dropping this future cancels only the pending read. Dropping the stream
 	/// releases the capture source.
 	pub async fn read(&mut self) -> Result<Option<Frame>, Error> {
-		if let Some(frame) = self.pending.take() {
-			return Ok(Some(frame));
-		}
-		self.chan.recv().await
+		let frame = match self.pending.take() {
+			Some(frame) => frame,
+			None => match self.chan.recv().await? {
+				Some(frame) => frame,
+				None => return Ok(None),
+			},
+		};
+		let surface = self.output.convert(frame.surface)?;
+		Ok(Some(Frame::new(surface, frame.timestamp)))
 	}
 
 	/// Width of the captured frames in pixels.
@@ -417,6 +429,12 @@ impl Synthetic {
 
 /// Open the capture source described by `config`.
 pub async fn open(config: &Config) -> Result<Stream, Error> {
+	let mut stream = open_source(config).await?;
+	stream.output = config.output;
+	Ok(stream)
+}
+
+async fn open_source(config: &Config) -> Result<Stream, Error> {
 	match &config.source {
 		Source::Camera(device) => {
 			let _ = device;

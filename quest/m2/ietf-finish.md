@@ -31,6 +31,6 @@ every reader's acknowledgement, so judge each cell from its reader's log.
 Public API: none. Wire: none expected; any fix that changes framing updates
 its draft.
 
-## Related
+## Required
 
-- [Join after a quick finish](/quest/m2/ietf-join-after-finish.md) - the pre-draft-22 half of this
+- [Join after a quick finish](/quest/m2/ietf-join-after-finish.md) - the pre-draft-22 half of this, without which drafts 14 to 18 cannot pass

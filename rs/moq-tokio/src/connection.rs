@@ -212,6 +212,7 @@ impl Backoff {
 
 	/// Refuse a zero healthy threshold, which would count every session as healthy and
 	/// reset the timeout forever under a peer that drops each one on sight.
+	#[cfg(feature = "_transport")]
 	pub(crate) fn validate(&self) -> crate::Result<()> {
 		if self.healthy().is_zero() {
 			return Err(Error::BackoffHealthy);
@@ -622,7 +623,7 @@ struct Shared {
 	send_bw: BandwidthProducer,
 	recv_bw: BandwidthProducer,
 	closed: CloseGuard,
-	/// The auth handle every session is built on, ended with the loop.
+	/// The auth handle every session is built on, ended after the loop and any close drain.
 	auth: moq_net::auth::Handle,
 }
 
@@ -942,7 +943,15 @@ pub struct Connection {
 /// last one drops.
 struct Task {
 	handle: AbortOnDrop,
+	/// A graceful close retains the loop's resources while its sessions drain.
+	running: std::sync::Weak<Running>,
 	closed: CloseGuard,
+}
+
+/// Resources owned by the loop, retained by a graceful close until its sessions drain.
+struct Running {
+	shared: Shared,
+	tokens: tokens::Holder,
 }
 
 /// Serializes [`Connection::abort`] and [`Connection::close`] against the loop publishing a fresh session.
@@ -983,11 +992,17 @@ impl Connection {
 			auth: auth.clone(),
 		};
 
+		let running = std::sync::Arc::new(Running {
+			shared,
+			tokens: tokens::Holder::new(auth.clone(), client.tokens().consume()),
+		});
+		let task_running = std::sync::Arc::downgrade(&running);
 		let task = tokio::spawn(async move {
+			let shared = &running.shared;
 			let reconnect = client.reconnect;
 			// Isolated inside `shared`, so a panic still records a terminal error
 			// instead of closing the channels as if the caller had stopped it.
-			let res = crate::panic::isolate(Self::run(&shared, client, addrs))
+			let res = crate::panic::isolate(Self::run(shared, client, addrs, &running.tokens))
 				.await
 				.unwrap_or(Err(Error::Panic));
 			if let Err(err) = res {
@@ -999,11 +1014,12 @@ impl Connection {
 				}
 				shared.end(Some(err));
 			}
-			// Dropping the producers here closes the channels, signaling consumers.
+			// A graceful close may retain these producers until its sessions finish draining.
 		});
 		Self {
 			task: std::sync::Arc::new(Task {
 				handle: AbortOnDrop::new(task),
+				running: task_running,
 				closed,
 			}),
 			state,
@@ -1042,6 +1058,7 @@ impl Connection {
 
 	/// Stop the loop for every clone, closing the live session (and any predecessor
 	/// still finishing after a GOAWAY) after draining its queued data.
+	/// Tokens stay presented until both sessions finish draining.
 	///
 	/// See [`moq_net::Session::close`]: explicit lite-07-wip waits for the subscriber
 	/// to receive finished tracks' tails; older Lite versions and IETF wait only for
@@ -1050,6 +1067,9 @@ impl Connection {
 	/// [`Client::close`], which closes the transport without waiting. Returns `Ok`
 	/// when nothing was live, and a session's error if it did not drain.
 	pub async fn close(self) -> crate::Result<()> {
+		// Abort stops redials, but the sessions still need their token grants until
+		// the drain completes. Dropping this owner also ends auth if close is cancelled.
+		let running = self.task.running.upgrade();
 		// Refuse redials and take the sessions under one lock: see [`CloseGuard`].
 		let (session, predecessor) = {
 			let mut closed = self.task.closed.lock().unwrap();
@@ -1079,10 +1099,11 @@ impl Connection {
 			}
 		};
 		let (session, predecessor) = tokio::join!(session, predecessor);
+		drop(running);
 		Ok(session.and(predecessor)?)
 	}
 
-	async fn run(shared: &Shared, client: Client, addrs: Addrs) -> crate::Result<()> {
+	async fn run(shared: &Shared, client: Client, addrs: Addrs, held: &tokens::Holder) -> crate::Result<()> {
 		let backoff = client.backoff.clone();
 		let goaway = client.goaway.resolve();
 		let pacing = Pacing::new(&backoff);
@@ -1094,8 +1115,6 @@ impl Connection {
 		let mut addrs = addrs;
 		// An old session kept alive after a GOAWAY so its in-flight groups finish.
 		let mut draining: Option<Draining> = None;
-		// The configured tokens beside each dial's connection credential, held until this loop ends.
-		let held = tokens::Holder::new(shared.auth.clone(), client.tokens().consume());
 		// The current run of migrations, to tell a redirect loop from a healthy handover.
 		let mut redirects = Redirects::default();
 
@@ -1111,7 +1130,7 @@ impl Connection {
 
 			// Read once per dial, so a refusal is judged against what this dial presented.
 			let tokens = client.tokens().snapshot();
-			match Self::dial_any(shared, &client, &addrs, &mut draining, &tokens, &held).await {
+			match Self::dial_any(shared, &client, &addrs, &mut draining, &tokens, held).await {
 				Ok((addr, dialed)) => {
 					let url = addr.url().clone();
 					tracing::info!(peer = %Endpoint(&url), transport = %dialed.transport, "connected");

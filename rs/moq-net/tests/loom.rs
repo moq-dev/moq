@@ -488,19 +488,27 @@ fn a_refused_answer_is_never_announced() {
 			.expect("requested")
 			.prepare(moq_net::Epoch::mint())
 			.expect("prepare");
-		let answer = prepared.broadcast().clone();
+		// Keep a refused answer alive so dropping it cannot hide a stray announcement.
+		let _answer = prepared.broadcast().clone();
+		let announced = |consumer: &origin::Consumer| {
+			let mut route = std::pin::pin!(consumer.routed("room/alice"));
+			matches!(
+				kio::Waiter::noop().poll_future(route.as_mut()),
+				std::task::Poll::Ready(Some(_))
+			)
+		};
 
-		let watch = answer.clone();
+		let watch = producer.consume();
 		let releaser = thread::spawn(move || {
 			drop(claim);
-			watch.route().is_some()
+			announced(&watch)
 		});
 		let published = prepared.publish();
 		let seen = releaser.join().unwrap();
 
 		assert_eq!(
 			published.is_ok(),
-			answer.route().is_some(),
+			announced(&producer.consume()),
 			"the route outlived its answer"
 		);
 		assert!(!seen || published.is_ok(), "a refused answer was announced");

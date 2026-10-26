@@ -2,7 +2,7 @@ use tracing::{debug, trace};
 
 use crate::Instant;
 use crate::connection::spaces::PacketSpace;
-use crate::crypto::{HeaderKey, KeyPair, PacketKey};
+use crate::crypto::{KeyPair, PacketKey};
 use crate::packet::{Packet, PartialDecode, SpaceId};
 use crate::token::ResetToken;
 use crate::{RESET_TOKEN_SIZE, TransportError};
@@ -11,17 +11,13 @@ use crate::{RESET_TOKEN_SIZE, TransportError};
 pub(super) fn unprotect_header(
 	partial_decode: PartialDecode,
 	spaces: &[PacketSpace; 3],
-	zero_rtt_crypto: Option<&ZeroRttCrypto>,
 	stateless_reset_token: Option<ResetToken>,
 ) -> Option<UnprotectHeaderResult> {
-	let header_crypto = if partial_decode.is_0rtt() {
-		if let Some(crypto) = zero_rtt_crypto {
-			Some(&*crypto.header)
-		} else {
-			debug!("dropping unexpected 0-RTT packet");
-			return None;
-		}
-	} else if let Some(space) = partial_decode.space() {
+	if partial_decode.is_0rtt() {
+		trace!("discarding early data");
+		return None;
+	}
+	let header_crypto = if let Some(space) = partial_decode.space() {
 		if let Some(crypto) = &spaces[space].crypto {
 			Some(&*crypto.header.remote)
 		} else {
@@ -69,7 +65,6 @@ pub(super) struct UnprotectHeaderResult {
 pub(super) fn decrypt_packet_body(
 	packet: &mut Packet,
 	spaces: &[PacketSpace; 3],
-	zero_rtt_crypto: Option<&ZeroRttCrypto>,
 	conn_key_phase: bool,
 	prev_crypto: Option<&PrevCrypto>,
 	next_crypto: Option<&KeyPair<Box<dyn PacketKey>>>,
@@ -84,9 +79,7 @@ pub(super) fn decrypt_packet_body(
 	let packet_key_phase = packet.header.key_phase();
 
 	let mut crypto_update = false;
-	let crypto = if packet.header.is_0rtt() {
-		&zero_rtt_crypto.unwrap().packet
-	} else if packet_key_phase == conn_key_phase || space != SpaceId::Data {
+	let crypto = if packet_key_phase == conn_key_phase || space != SpaceId::Data {
 		&spaces[space].crypto.as_ref().unwrap().packet.remote
 	} else if let Some(prev) = prev_crypto.filter(|&crypto| crypto.end_packet.is_none_or(|(pn, _)| number < pn)) {
 		&prev.crypto.remote
@@ -154,9 +147,4 @@ pub(super) struct PrevCrypto {
 	pub(super) end_packet: Option<(u64, Instant)>,
 	/// Whether the following key phase is from a remotely initiated update that we haven't acked
 	pub(super) update_unacked: bool,
-}
-
-pub(super) struct ZeroRttCrypto {
-	pub(super) header: Box<dyn HeaderKey>,
-	pub(super) packet: Box<dyn PacketKey>,
 }
