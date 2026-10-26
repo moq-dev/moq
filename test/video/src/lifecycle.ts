@@ -19,6 +19,8 @@ function lifecycle() {
 	document.body.append(publisher, watcher);
 	let tracks: MediaStreamTrack[] = [];
 	let context: AudioContext | undefined;
+	// The first source holder, which must survive a disconnect so its selections persist.
+	let source: unknown;
 	return {
 		state() {
 			const stream = preview.srcObject as MediaStream | null;
@@ -27,12 +29,13 @@ function lifecycle() {
 				tracks = [...stream.getTracks(), ...(audio && "track" in audio ? [audio.track] : [])];
 			}
 			context ??= publisher.audio.capture?.out.root.peek()?.context as AudioContext | undefined;
+			source ??= publisher.sources.video.peek();
 			return {
 				tracks: tracks.map((track) => track.readyState),
 				context: context?.state,
 				preview: preview.srcObject !== null,
 				devices: window.moqGpu.devices,
-				sources: !!publisher.sources.video.peek() || !!publisher.sources.audio.peek(),
+				retained: source !== undefined && publisher.sources.video.peek() === source,
 			};
 		},
 		move() {

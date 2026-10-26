@@ -377,7 +377,9 @@ export default class MoqPublish extends HTMLElement {
 		});
 		effect.set(this.#orientation, 0, 0);
 
-		if (!effect.get(this.#enabled) || !source) return;
+		// Sources stay alive while disconnected so device and file selections survive a reconnect;
+		// the gated enabled signals already release their capture.
+		if (!source) return;
 
 		if (source === "camera") {
 			const video = new Source.Camera({ enabled: this.#videoEnabled });

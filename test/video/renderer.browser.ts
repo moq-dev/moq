@@ -329,13 +329,18 @@ test("disconnect releases capture, preview, audio context, and the watch GPU, an
 				state.context === "closed" &&
 				state.devices === 0 &&
 				!state.preview &&
-				!state.sources
+				state.retained
 			);
 		});
 		await page.evaluate(() => window.lifecycle.reconnect());
 		await page.waitForFunction(() => {
 			const state = window.lifecycle.state();
-			return state.tracks.length === 2 && state.tracks.every((track) => track === "live") && state.devices === 1;
+			return (
+				state.tracks.length === 2 &&
+				state.tracks.every((track) => track === "live") &&
+				state.devices === 1 &&
+				state.retained
+			);
 		});
 	} finally {
 		await page.evaluate(() => window.lifecycle?.close());
