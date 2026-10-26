@@ -4167,7 +4167,9 @@ impl TrackRun {
 		match (self.start, &self.served) {
 			(Some(start), Some(served)) => self.track.covered(start, served),
 			// Before SUBSCRIBE_START the subscriber owes itself nothing (see
-			// `SubStream::owed`), so only a range given up whole is covered.
+			// `SubStream::owed`), so only a range given up whole is covered. Datagrams
+			// resolve no start, and a FIN would overtake them, so a range they served
+			// keeps the subscription open.
 			(None, _) => {
 				let skipped: RangeSet<u64> = self.skipped.iter().map(|(range, _)| range.clone()).collect();
 				self.track.covered(self.floor, &skipped)
