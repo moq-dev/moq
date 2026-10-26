@@ -177,9 +177,9 @@ async fn run(shared: Arc<Shared>, tokens: kio::Consumer<Set>, mut generation: u6
 				Err(_) => std::future::pending().await,
 			}
 		};
-		let answered = std::future::poll_fn(|cx| {
+		let answered = kio::wait(|waiter| {
 			let mut state = shared.state.lock().unwrap();
-			let answered = state.held.poll_answers(cx);
+			let answered = state.held.poll_answers(waiter);
 			if answered.is_ready() {
 				state.answer();
 			}
@@ -215,12 +215,14 @@ struct Held {
 
 enum Presented {
 	Waiting(Opening),
-	/// Accepted, held to keep it presented. Taken only for the requests that name it on
+	/// Accepted, held to keep it presented, and watched so it answers by its grant on the
+	/// live session rather than its first. Taken only for the requests that name it on
 	/// moq-transport without AUTH, where this session sends it nowhere but a later
 	/// session with AUTH presents it.
 	Granted(
 		#[allow(dead_code, reason = "held to keep the token presented")] auth::Auth,
 		auth::Answer,
+		auth::Watch,
 	),
 	/// Refused or unsupported. Not presented again unless a change removes and re-adds it.
 	Refused(moq_net::Error),
@@ -261,22 +263,38 @@ impl Held {
 		for (_, answer) in &self.tokens {
 			match answer {
 				Presented::Refused(err) => return Some(Err(err.clone().into())),
-				Presented::Granted(_, auth::Answer::Requests) => return Some(Err(moq_net::Error::Unsupported.into())),
-				Presented::Granted(_, auth::Answer::Granted) => {}
+				Presented::Granted(_, auth::Answer::Requests, _) => {
+					return Some(Err(moq_net::Error::Unsupported.into()));
+				}
+				// A new session has yet to grant it again.
+				Presented::Granted(_, auth::Answer::Granted, grant) if grant.peek().is_none() => waiting = true,
+				Presented::Granted(_, auth::Answer::Granted, _) => {}
 				Presented::Waiting(_) => waiting = true,
 			}
 		}
 		(!waiting).then_some(Ok(()))
 	}
 
-	/// Resolve when another token has its answer.
-	fn poll_answers(&mut self, cx: &mut std::task::Context<'_>) -> Poll<()> {
+	/// Resolve when another token has its answer, or a granted one's grant moved.
+	fn poll_answers(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		let mut answered = false;
 		let mut unsupported = false;
 		for (_, answer) in &mut self.tokens {
-			let Presented::Waiting(opening) = answer else { continue };
-			let Poll::Ready(result) = opening.as_mut().poll(cx) else {
-				continue;
+			let result = match answer {
+				Presented::Waiting(opening) => match waiter.poll_future(opening.as_mut()) {
+					Poll::Ready(result) => result,
+					Poll::Pending => continue,
+				},
+				Presented::Granted(_, _, grant) => match grant.poll_changed(waiter) {
+					Poll::Ready(Ok(_)) => {
+						answered = true;
+						continue;
+					}
+					// Revoked, or ended for good.
+					Poll::Ready(Err(err)) => Err(err),
+					Poll::Pending => continue,
+				},
+				Presented::Refused(_) => continue,
 			};
 			answered = true;
 			*answer = match result {
@@ -287,7 +305,8 @@ impl Held {
 					if answer == auth::Answer::Requests {
 						unsupported = true;
 					}
-					Presented::Granted(auth, answer)
+					let grant = auth.grant();
+					Presented::Granted(auth, answer, grant)
 				}
 				Err(moq_net::Error::Unsupported) => {
 					unsupported = true;
@@ -543,6 +562,48 @@ mod tests {
 		);
 	}
 
+	/// A token a set keeps answers by its standing on the live session, so one revoked
+	/// since its grant refuses the next set instead of passing on its first grant.
+	#[tokio::test(start_paused = true)]
+	async fn a_kept_token_answers_by_its_current_grant() {
+		let mut pair = pair_on("moq-lite-07-wip").await;
+		let (tokens, _holder) = holder(&pair, "moqt://relay.example.com/", &["connection", "a", "b"]);
+		let mut a = None;
+		let mut _b = None;
+		for _ in 0..2 {
+			let request = next_token(&mut pair).await;
+			// Only `a` widens the grant, so its revocation shows in the union.
+			match request.token().as_ref() == b"a" {
+				true => a = Some(request.accept(auth::Grant::all())),
+				false => _b = Some(request.accept(auth::Grant::default())),
+			}
+		}
+		moq_clock::timeout(std::time::Duration::from_secs(5), tokens.answered())
+			.await
+			.expect("never answered")
+			.expect("refused");
+
+		let mut union = pair.auth.grant();
+		a.unwrap().revoke(moq_net::SessionError::Unauthorized, "revoked");
+		moq_clock::timeout(std::time::Duration::from_secs(5), union.changed())
+			.await
+			.expect("the revocation never arrived")
+			.expect("the handle ended");
+		tokens.set(vec!["connection".parse().unwrap(), "a".parse().unwrap()]);
+		let answer = moq_clock::timeout(std::time::Duration::from_secs(5), tokens.answered())
+			.await
+			.expect("the revocation was never answered");
+		assert!(
+			matches!(
+				answer,
+				Err(crate::Error::MoqNet(moq_net::Error::Session(
+					moq_net::SessionError::Unauthorized
+				)))
+			),
+			"{answer:?}"
+		);
+	}
+
 	/// A refusal that may pass presents the connection credential again, which answers
 	/// nothing until the retry is answered.
 	#[tokio::test(start_paused = true)]
@@ -576,14 +637,14 @@ mod tests {
 		held.update(&pair.auth, vec!["a".parse().unwrap(), "b".parse().unwrap()]);
 		moq_clock::timeout(
 			std::time::Duration::from_secs(5),
-			std::future::poll_fn(|cx| held.poll_answers(cx)),
+			kio::wait(|waiter| held.poll_answers(waiter)),
 		)
 		.await
 		.expect("no answer");
 		assert!(
 			held.tokens
 				.iter()
-				.all(|(_, answer)| matches!(answer, Presented::Granted(_, auth::Answer::Requests)))
+				.all(|(_, answer)| matches!(answer, Presented::Granted(_, auth::Answer::Requests, _)))
 		);
 		assert!(held.unsupported);
 	}
