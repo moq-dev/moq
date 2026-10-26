@@ -23,7 +23,6 @@ test each platform's path on that platform's CI.
 
 ## Required
 
-- [Zero-copy program encode](/quest/m1/studio-gpu/encode.md) - the program reaches the encoder as a GPU surface instead of a CPU readback
 - [Zero-copy source import](/quest/m1/studio-gpu/import.md) - captured and decoded frames reach the compositor as GPU textures, with uploads counted
 
 ## Related

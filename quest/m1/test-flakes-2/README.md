@@ -46,3 +46,4 @@ Public API: none. Wire: none.
 - [moq-uring allocations under load](/quest/m1/test-flakes-2/uring-alloc-load.md) - the steady-state send test and MEMLOCK users pass in a parallel check
 - [IETF22 fallback](/quest/m1/test-flakes-2/ietf22-fallback.md) - an IETF22 browser viewer follows a fallback within the media lane's bound, keeping its session and its audio
 - [Echo report test on mocked time](/quest/m1/test-flakes-2/export-echo-time.md) - the moq-cli echo report test stops taking 35 s of wall time
+- [Stuck-window eviction test on macOS](/quest/m1/test-flakes-2/stuck-window-evicts.md) - the evicted writer reliably sees its stop on macOS, fixed at the race
