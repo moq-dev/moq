@@ -1124,7 +1124,7 @@ impl Connection {
 					let url = addr.url().clone();
 					tracing::info!(peer = %Endpoint(&url), transport = %dialed.transport, "connected");
 					shared.connected(&dialed.session, dialed.transport);
-					held.live(Some(dialed.session.version()));
+					held.live(Some(&dialed.session));
 					let session = dialed.session;
 
 					let connected = moq_clock::now();

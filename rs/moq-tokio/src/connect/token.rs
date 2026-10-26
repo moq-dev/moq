@@ -192,6 +192,13 @@ impl Credential {
 		}
 	}
 
+	/// Whether `tokens` still include the connection credential, which then answers for itself.
+	pub fn among(&self, tokens: &[Token]) -> bool {
+		self.connection
+			.as_deref()
+			.is_some_and(|connection| tokens.iter().any(|token| token.as_str() == connection))
+	}
+
 	/// The tokens to hold on their own AUTH streams, each once.
 	pub fn extra(&self, tokens: &[Token]) -> Vec<Token> {
 		let mut extra: Vec<Token> = Vec::new();

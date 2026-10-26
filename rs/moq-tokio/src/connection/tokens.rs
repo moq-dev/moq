@@ -2,7 +2,7 @@
 //! connection credential, and the peer's answer to them.
 
 use std::sync::{Arc, Mutex};
-use std::task::Poll;
+use std::task::{Poll, ready};
 
 use bytes::Bytes;
 use futures::FutureExt;
@@ -23,7 +23,8 @@ pub(super) struct Holder {
 
 struct Shared {
 	state: Mutex<Holding>,
-	dialed: tokio::sync::Notify,
+	/// A dial or a session going live changed what to wait on.
+	rearm: tokio::sync::Notify,
 }
 
 struct Holding {
@@ -37,9 +38,10 @@ struct Holding {
 	credential: Option<Credential>,
 	/// Whether a session is live.
 	live: bool,
-	/// Whether the live session is serving before its peer answered the connection
-	/// credential, so only the grant that answer brings shows it was accepted.
-	unconfirmed: bool,
+	/// The live session's own connection credential, watched until its peer answers it.
+	connection: Option<auth::Watch>,
+	/// The peer's answer to the live session's connection credential, once it has one.
+	confirmed: Option<crate::Result<()>>,
 	held: Held,
 }
 
@@ -55,10 +57,11 @@ impl Holder {
 				generation: set.generation,
 				credential: None,
 				live: false,
-				unconfirmed: false,
+				connection: None,
+				confirmed: None,
 				held: Held::default(),
 			}),
-			dialed: tokio::sync::Notify::new(),
+			rearm: tokio::sync::Notify::new(),
 		});
 		let task = tokio::spawn(run(shared.clone(), consumer, set.generation));
 		Self {
@@ -76,20 +79,32 @@ impl Holder {
 		state.held.unsupported = false;
 		state.update();
 		drop(state);
-		self.shared.dialed.notify_one();
+		self.shared.rearm.notify_one();
 	}
 
-	/// The live session's version, or `None` once it ended.
-	pub fn live(&self, version: Option<moq_net::Version>) {
+	/// The live session, or `None` once it ended.
+	pub fn live(&self, session: Option<&moq_net::Session>) {
 		let mut state = self.shared.state.lock().unwrap();
-		state.live = version.is_some();
-		// A moq-lite client serves from its SETUP on, before the peer has checked the
-		// credential in it; every lite version with a SETUP token answers it on AUTH. A
-		// moq-transport client waits for SERVER_SETUP, and an older lite version's
-		// credential rides the URL, which the dial itself answers.
-		state.unconfirmed =
-			version.is_some_and(|version| matches!(version, moq_net::Version::Lite(_)) && version.has_setup_token());
+		state.live = session.is_some();
+		state.connection = None;
+		state.confirmed = None;
+		match session.map(moq_net::Session::credential) {
+			None => {}
+			// A version without AUTH answers the credential in its handshake.
+			Some(None) => state.confirmed = Some(Ok(())),
+			// A moq-lite client serves from its SETUP on, before the peer has checked the
+			// credential in it, so only the credential's own answer shows it was accepted.
+			Some(Some(credential)) => {
+				let watch = credential.grant();
+				match watch.peek() {
+					Some(_) => state.confirmed = Some(Ok(())),
+					None => state.connection = Some(watch),
+				}
+			}
+		}
 		state.answer();
+		drop(state);
+		self.shared.rearm.notify_one();
 	}
 }
 
@@ -103,15 +118,53 @@ impl Holding {
 
 	/// Record the peer's answer to the current tokens, once it has one.
 	fn answer(&self) {
-		let accepted = self.live && (!self.unconfirmed || self.auth.grant().peek().is_some());
+		// The connection credential answers for itself only while the tokens still name it.
+		let named = self
+			.credential
+			.as_ref()
+			.is_some_and(|credential| credential.among(&self.current));
+		let accepted = self.live
+			&& match &self.confirmed {
+				_ if !named => true,
+				Some(Ok(())) => true,
+				Some(Err(err)) => return self.tokens.answer(self.generation, Err(err.clone())),
+				None => false,
+			};
 		if let Some(answer) = self.held.answer(accepted) {
 			self.tokens.answer(self.generation, answer);
 		}
 	}
+
+	/// Resolve once the peer answered the live session's connection credential.
+	fn poll_confirmed(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		let Some(connection) = &mut self.connection else {
+			return Poll::Pending;
+		};
+		let confirmed = match ready!(connection.poll_changed(waiter)) {
+			Ok(Some(_)) => Ok(()),
+			// Only a grant changes an unanswered credential's watch.
+			Ok(None) => return Poll::Ready(()),
+			// The peer accepted the moq-transport SETUP that carried it, and declined AUTH.
+			Err(moq_net::Error::Unsupported) => Ok(()),
+			Err(err) => {
+				let err = crate::Error::from(err);
+				// A session ending for a reason the next dial may overcome leaves the answer
+				// to that session.
+				if !err.is_terminal() {
+					self.connection = None;
+					return Poll::Ready(());
+				}
+				Err(err)
+			}
+		};
+		self.connection = None;
+		self.confirmed = Some(confirmed);
+		self.answer();
+		Poll::Ready(())
+	}
 }
 
 async fn run(shared: Arc<Shared>, tokens: kio::Consumer<Set>, mut generation: u64) {
-	let mut grant = shared.state.lock().unwrap().auth.grant();
 	loop {
 		let changed = async {
 			let wait = tokens.wait(|set| match set.generation != generation {
@@ -132,6 +185,7 @@ async fn run(shared: Arc<Shared>, tokens: kio::Consumer<Set>, mut generation: u6
 			}
 			answered
 		});
+		let confirmed = kio::wait(|waiter| shared.state.lock().unwrap().poll_confirmed(waiter));
 		tokio::select! {
 			biased;
 			(latest, next) = changed => {
@@ -141,15 +195,9 @@ async fn run(shared: Arc<Shared>, tokens: kio::Consumer<Set>, mut generation: u6
 				state.generation = next;
 				state.update();
 			}
-			// A dial added tokens to wait on.
-			_ = shared.dialed.notified() => {}
+			_ = shared.rearm.notified() => {}
 			_ = answered => {}
-			// The peer answered the connection credential.
-			changed = grant.changed() => match changed {
-				Ok(_) => shared.state.lock().unwrap().answer(),
-				// The connection ended, which answers the tokens itself.
-				Err(_) => std::future::pending().await,
-			},
+			_ = confirmed => {}
 		}
 	}
 }
@@ -278,7 +326,7 @@ mod tests {
 	use super::*;
 
 	struct Pair {
-		_client: moq_net::Session,
+		client: moq_net::Session,
 		auth: auth::Handle,
 		requests: tokio::sync::mpsc::UnboundedReceiver<auth::Request>,
 		_tasks: Vec<AbortOnDrop<moq_net::Error>>,
@@ -286,6 +334,12 @@ mod tests {
 	}
 
 	async fn pair_on(version: &str) -> Pair {
+		pair_answering(version, true).await
+	}
+
+	/// A pair whose server accepts the connection credential itself when `credential`, or
+	/// otherwise hands it to the test like every other token.
+	async fn pair_answering(version: &str, credential: bool) -> Pair {
 		let versions = moq_net::Versions::from(version.parse::<moq_net::Version>().unwrap());
 		let config = || {
 			let mut config = qmux::Config::new(qmux::Version::QMux01);
@@ -323,7 +377,7 @@ mod tests {
 				let _session = session;
 				let mut initial = Vec::new();
 				while let Some(request) = requests.next().await {
-					if request.token().is_empty() {
+					if credential && request.token().is_empty() {
 						initial.push(request.accept(auth::Grant::default()));
 					} else if sender.send(request).is_err() {
 						break;
@@ -338,7 +392,7 @@ mod tests {
 		};
 		let ((client, client_task), (requests, server_task, acceptor)) = tokio::join!(client, server);
 		Pair {
-			_client: client,
+			client,
 			auth: handle,
 			requests,
 			_tasks: vec![client_task, server_task],
@@ -354,7 +408,7 @@ mod tests {
 		let credential = Credential::new(&url.parse().unwrap(), &versions, &tokens.snapshot());
 		let holder = Holder::new(pair.auth.clone(), tokens.clone());
 		holder.dialed(&credential);
-		holder.live(Some(*versions.iter().next().unwrap()));
+		holder.live(Some(&pair.client));
 		(tokens, holder)
 	}
 
@@ -448,6 +502,69 @@ mod tests {
 		moq_clock::timeout(std::time::Duration::from_secs(5), old.closed())
 			.await
 			.expect("the replaced token outlived its refused replacement");
+	}
+
+	/// An extra token granted first is no answer to the connection credential, and a refused
+	/// connection credential is the answer even while its session stays open.
+	#[tokio::test(start_paused = true)]
+	async fn the_connection_credential_answers_for_itself() {
+		let mut pair = pair_answering("moq-lite-07-wip", false).await;
+		let (tokens, _holder) = holder(&pair, "moqt://relay.example.com/", &["connection", "a"]);
+		let mut credential = None;
+		let mut extra = None;
+		for _ in 0..2 {
+			let request = next_token(&mut pair).await;
+			match request.token().is_empty() {
+				true => credential = Some(request),
+				false => extra = Some(request),
+			}
+		}
+		let _extra = extra.unwrap().accept(auth::Grant::all());
+		let pending = moq_clock::timeout(std::time::Duration::from_secs(1), tokens.answered()).await;
+		assert!(
+			pending.is_err(),
+			"answered before the connection credential was: {pending:?}"
+		);
+
+		credential
+			.unwrap()
+			.reject(moq_net::SessionError::Unauthorized, "expired");
+		let answer = moq_clock::timeout(std::time::Duration::from_secs(5), tokens.answered())
+			.await
+			.expect("the refusal was never answered");
+		assert!(
+			matches!(
+				answer,
+				Err(crate::Error::MoqNet(moq_net::Error::Session(
+					moq_net::SessionError::Unauthorized
+				)))
+			),
+			"{answer:?}"
+		);
+	}
+
+	/// A refusal that may pass presents the connection credential again, which answers
+	/// nothing until the retry is answered.
+	#[tokio::test(start_paused = true)]
+	async fn a_transient_refusal_of_the_connection_credential_waits_for_its_retry() {
+		let mut pair = pair_answering("moq-lite-07-wip", false).await;
+		let (tokens, _holder) = holder(&pair, "moqt://relay.example.com/", &["connection"]);
+		next_token(&mut pair)
+			.await
+			.reject(moq_net::SessionError::Internal, "busy");
+		let retry = next_token(&mut pair).await;
+		assert!(
+			retry.token().is_empty(),
+			"presented something other than the credential"
+		);
+		let pending = moq_clock::timeout(std::time::Duration::from_secs(1), tokens.answered()).await;
+		assert!(pending.is_err(), "answered before the retry was: {pending:?}");
+
+		let _credential = retry.accept(auth::Grant::all());
+		moq_clock::timeout(std::time::Duration::from_secs(5), tokens.answered())
+			.await
+			.expect("the retry was never answered")
+			.expect("the retry was refused");
 	}
 
 	/// Without AUTH a configured token rides nothing on this session, which logs that once,

@@ -23,6 +23,8 @@ pub(crate) struct SessionStart {
 	pub goaway: crate::goaway::Handle,
 	/// The session's AUTH tokens and grants, stored on the public [`crate::Session`].
 	pub auth: crate::auth::Link,
+	/// The connection credential presented on `auth`, stored on the public [`crate::Session`].
+	pub credential: Option<crate::auth::Auth>,
 	/// The implementation the peer's SETUP advertised, stored on the public [`crate::Session`].
 	pub peer_implementation: crate::setup::PeerImplementation,
 }
@@ -360,7 +362,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 			tokens: kio::Tasks::new(),
 			violation: Default::default(),
 			started: false,
-			_setup: setup_token,
+			_setup: setup_token.clone(),
 		},
 		setup: version
 			.has_setup_stream()
@@ -379,6 +381,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 		driver,
 		goaway: goaway_handle,
 		auth,
+		credential: setup_token,
 		peer_implementation,
 	})
 }

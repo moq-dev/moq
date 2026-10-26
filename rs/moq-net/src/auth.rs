@@ -1223,7 +1223,9 @@ impl Link {
 				if slot.withdrawn {
 					continue;
 				}
-				let answer = match requests {
+				// The session's own credential is never named by a request, and the peer's
+				// SETUP already accepted the one it carried.
+				let answer = match requests && !slot.setup {
 					true => Ok(()),
 					false => Err(Error::Unsupported),
 				};
@@ -2702,6 +2704,20 @@ mod tests {
 			Poll::Ready(Ok(Answer::Requests))
 		));
 		assert_eq!(handle.token(&auth).as_deref(), Some(b"jwt".as_slice()));
+	}
+
+	/// The moq-transport SETUP that carried the session's own credential already accepted
+	/// it, so a peer that turns out not to speak AUTH ends it rather than leaving it unanswered.
+	#[cfg(feature = "async")]
+	#[test]
+	fn an_unsupported_peer_ends_the_session_credential() {
+		use futures::FutureExt;
+
+		let handle = Link::ietf(true);
+		let credential = handle.present(Bytes::new(), true).unwrap();
+		handle.unsupported();
+		assert!(matches!(credential.closed().now_or_never(), Some(Error::Unsupported)));
+		assert_eq!(credential.grant().peek(), None);
 	}
 
 	/// Only the handle that issued an auth carries it: a route naming another session's

@@ -171,6 +171,7 @@ pub struct Session {
 	bandwidth: bandwidth::Allocator,
 	goaway: Arc<goaway::Handle>,
 	auth: auth::Handle,
+	credential: Option<auth::Auth>,
 }
 
 impl Session {
@@ -372,6 +373,17 @@ impl Session {
 	pub fn auth(&self) -> auth::Handle {
 		self.auth.clone()
 	}
+
+	/// The connection credential this side presents on AUTH, or `None` when this session offers no AUTH.
+	///
+	/// Its [`grant`](auth::Auth::grant) becomes the peer's answer, and [`closed`](auth::Auth::closed)
+	/// resolves with its refusal, or with the session's end if that comes first. A refusal that
+	/// may pass is presented again rather than ending it. On moq-transport it ends as
+	/// [`Error::Unsupported`] once the peer's SETUP declines AUTH, that SETUP having accepted the
+	/// credential it carried.
+	pub fn credential(&self) -> Option<auth::Auth> {
+		self.credential.clone()
+	}
 }
 
 /// The handles a protocol driver shares with its [`Session`].
@@ -379,6 +391,8 @@ pub(super) struct Handles {
 	pub stats: crate::stats::Session,
 	pub goaway: goaway::Handle,
 	pub auth: auth::Link,
+	/// The connection credential the driver presented on `auth`, when its version has AUTH.
+	pub credential: Option<auth::Auth>,
 	/// Where the driver publishes [`Estimate`] changes, for a protocol that reports
 	/// them to the peer (moq-lite PROBE). Sampled only while a consumer exists.
 	pub estimate: Option<kio::Producer<Estimate>>,
@@ -400,6 +414,7 @@ impl Session {
 		let Handles {
 			goaway,
 			auth,
+			credential,
 			estimate,
 			stats: context,
 			bandwidth,
@@ -468,6 +483,7 @@ impl Session {
 			bandwidth,
 			goaway,
 			auth: auth.handle().clone(),
+			credential,
 		};
 		let driver = crate::Driver::new(
 			runtime.clone(),

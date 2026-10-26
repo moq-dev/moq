@@ -209,7 +209,8 @@ own Auth stream and learns what it may publish and subscribe to: a union of
 to a prefix. Right after setup both sides present the credential the connection
 already carried (the URL token, a client certificate, or nothing), so a
 publisher learns before anyone subscribes whether its broadcasts can reach the
-peer. More tokens can be added without reconnecting; the session's scope is the
+peer. Rust's `Session::credential()` reports that credential's own answer, apart
+from the union. More tokens can be added without reconnecting; the session's scope is the
 union of every open token's grant. A request outside the known union waits
 while a non-empty token already presented is unanswered, then proceeds or
 fails against the settled union; a covered request does not wait. Each wait
