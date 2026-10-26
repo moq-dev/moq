@@ -200,13 +200,20 @@ const gap: Read = { kind: "gap", timestamp: Micro(0), duration: Micro(0) };
 
 // `reads` stands in for the container consumer, unless `live`, which reads what tests publish into
 // `producer` through real consumers instead.
-async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: readonly number[] = [], live = false) {
+async function guardedPlayback(
+	kind: "legacy" | "cmaf",
+	reads: Read[],
+	hold: readonly number[] = [],
+	live = false,
+	buffer = 0,
+) {
 	// Load the optional container before the fixture drains only reactive microtasks.
 	if (kind === "cmaf") await import("@moq/hang/cmaf");
 	const originalDecoder = Object.getOwnPropertyDescriptor(globalThis, "VideoDecoder");
 	const originalChunk = Object.getOwnPropertyDescriptor(globalThis, "EncodedVideoChunk");
 	const submitted: number[] = [];
 	const outputs: number[] = [];
+	const pictures: Picture[] = [];
 	const owed = new Set(hold);
 	const pending: Array<() => void> = [];
 	let resets = 0;
@@ -245,7 +252,9 @@ async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: rea
 			submitted.push(chunk.timestamp);
 			const emit = () => {
 				outputs.push(chunk.timestamp);
-				void this.callbacks.output(new Picture(chunk.timestamp) as unknown as VideoFrame);
+				const picture = new Picture(chunk.timestamp);
+				pictures.push(picture);
+				void this.callbacks.output(picture as unknown as VideoFrame);
 			};
 			if (owed.delete(chunk.timestamp)) {
 				pending.push(emit);
@@ -301,8 +310,8 @@ async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: rea
 		mediaProducer.close();
 	};
 	const source = new Source({ broadcast, supported: async () => true });
-	const delay = new Signal<Delay>("instant");
-	const sync = new Sync({ delay });
+	const delay = new Signal<Delay>(buffer ? Milli(100) : "instant");
+	const sync = new Sync({ delay, buffer: Milli(buffer) });
 	const enabled = new Signal(true);
 	// Published before the decoder subscribes, since a broadcast with no request handler refuses
 	// an unknown track.
@@ -330,6 +339,7 @@ async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: rea
 		track,
 		submitted,
 		outputs,
+		pictures,
 		sync,
 		get resets() {
 			return resets;
@@ -356,7 +366,7 @@ async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: rea
 		republishMedia(path?: string): Moq.Track.Producer | undefined {
 			media.peek().close();
 			mediaProducer = path
-				? new Moq.Origin.Producer().createBroadcast(Moq.Path.from(path))
+				? new Moq.Origin.Producer().createBroadcast(Moq.Path.from(path)).broadcast
 				: new Moq.Broadcast.Producer();
 			const track = live
 				? mediaProducer.createTrack("video", { timescale: Moq.Time.Timescale.MILLI })
@@ -1001,3 +1011,177 @@ it("a video track read from another path does not inherit the outgoing delay", a
 		clock.installed.close();
 	}
 });
+
+// The first picture is useful before the startup floor, but elapsed wall time is not buffered media.
+it("buffered video holds its poster until its own span reaches the floor", async () => {
+	const clock = manualAt(0);
+	const playback = await guardedPlayback("legacy", [], [], true, 1000);
+	const group = new Moq.Group.Producer(0);
+	if (!playback.track) throw new Error("missing video track");
+	playback.track.writeGroup(group);
+	try {
+		group.writeFrame(legacyFrame(Micro(0)));
+		group.writeFrame(legacyFrame(Micro(40_000)));
+		await microtasks();
+		expect(playback.decoder.out.frame.peek()?.timestamp).toBe(0);
+		await clock.advance(500);
+		expect(playback.decoder.out.frame.peek()?.timestamp).toBe(0);
+		group.writeFrame(legacyFrame(Micro(100_000)));
+		await microtasks();
+		await clock.advance(40);
+		expect(playback.decoder.out.frame.peek()?.timestamp).toBe(40_000);
+	} finally {
+		group.close();
+		playback.close();
+		await microtasks();
+		clock.installed.close();
+	}
+});
+
+it("bounds startup decoding while another track is missing and releases it on close", async () => {
+	const clock = manualAt(0);
+	const playback = await guardedPlayback("legacy", [], [], true, 1000);
+	const remove = playback.sync.register(new Signal(Milli(100)), new Signal(null));
+	if (!playback.track) throw new Error("missing video track");
+	const group = playback.track.appendGroup();
+	try {
+		for (let i = 0; i < 20; i++) group.writeFrame(legacyFrame(Micro(i * 40_000)));
+		await microtasks();
+		await clock.advance(1000);
+		expect(playback.submitted).toEqual([0, 40_000, 80_000, 120_000]);
+		expect(playback.decoder.out.frame.peek()?.timestamp).toBe(0);
+		playback.close();
+		await microtasks();
+		expect(playback.pictures.every((frame) => frame.closed)).toBe(true);
+	} finally {
+		remove();
+		group.close();
+		playback.close();
+		await microtasks();
+		clock.installed.close();
+	}
+});
+
+// Resuming only once the held floor has played out would leave no decoded lookahead.
+it("resumes decoding the moment shared startup releases", async () => {
+	const clock = manualAt(0);
+	const playback = await guardedPlayback("legacy", [], [], true, 1000);
+	const audio = new Signal<{ start: Milli; end: Milli } | null>(null);
+	const remove = playback.sync.register(new Signal(Milli(100)), audio);
+	if (!playback.track) throw new Error("missing video track");
+	const group = playback.track.appendGroup();
+	try {
+		for (let i = 0; i < 8; i++) group.writeFrame(legacyFrame(Micro(i * 40_000)));
+		await microtasks();
+		await clock.advance(0);
+		expect(playback.submitted).toEqual([0, 40_000, 80_000, 120_000]);
+		audio.set({ start: Milli(0), end: Milli(100) });
+		await microtasks();
+		await clock.advance(0);
+		expect(playback.submitted).toHaveLength(8);
+	} finally {
+		remove();
+		group.close();
+		playback.close();
+		await microtasks();
+		clock.installed.close();
+	}
+});
+
+it("refills the video floor after a discontinuity instead of waiting on the previous poster timestamp", async () => {
+	const clock = manualAt(0);
+	const reads: Read[] = [
+		sample(0, 0),
+		sample(0, 100_000),
+		marker(0, 100_000),
+		sample(1, 1_000_000),
+		sample(1, 1_100_000),
+	];
+	const playback = await guardedPlayback("legacy", reads, [], false, 1000);
+	try {
+		await clock.advance(100);
+		await microtasks();
+		await clock.advance(100);
+		await microtasks();
+		expect(playback.decoder.out.frame.peek()?.timestamp).toBeGreaterThanOrEqual(1_000_000);
+	} finally {
+		playback.close();
+		await microtasks();
+		clock.installed.close();
+	}
+});
+
+it("continues filling when the shared floor rises while video waits on audio", async () => {
+	const clock = manualAt(0);
+	const playback = await guardedPlayback("legacy", [], [], true, 1000);
+	const audio = new Signal<{ start: Milli; end: Milli } | null>(null);
+	const remove = playback.sync.register(new Signal(Milli(100)), audio);
+	if (!playback.track) throw new Error("missing video track");
+	const group = playback.track.appendGroup();
+	try {
+		for (let i = 0; i < 7; i++) group.writeFrame(legacyFrame(Micro(i * 40_000)));
+		await microtasks();
+		await clock.advance(0);
+		expect(playback.submitted).toEqual([0, 40_000, 80_000, 120_000]);
+		playback.delay.set(Milli(200));
+		audio.set({ start: Milli(0), end: Milli(200) });
+		await microtasks();
+		await clock.advance(240);
+		expect(playback.decoder.out.frame.peek()?.timestamp).toBeGreaterThanOrEqual(200_000);
+	} finally {
+		remove();
+		group.close();
+		playback.close();
+		await microtasks();
+		clock.installed.close();
+	}
+});
+
+it("keeps feeding a decoder that has not output its first picture yet", async () => {
+	const clock = manualAt(0);
+	const playback = await guardedPlayback("legacy", [], [0, 40_000, 80_000, 120_000], true, 1000);
+	if (!playback.track) throw new Error("missing video track");
+	const group = playback.track.appendGroup();
+	try {
+		for (let i = 0; i < 5; i++) group.writeFrame(legacyFrame(Micro(i * 40_000)));
+		await microtasks();
+		await clock.advance(160);
+		expect(playback.decoder.out.frame.peek()?.timestamp).toBe(160_000);
+	} finally {
+		group.close();
+		playback.close();
+		await microtasks();
+		clock.installed.close();
+	}
+});
+
+for (const kind of ["legacy", "cmaf"] as const) {
+	it(`cancels a ${kind} startup wait on disable and can enable a fresh decoder`, async () => {
+		const clock = manualAt(0);
+		const playback = await guardedPlayback(kind, [sample(0, 0), sample(0, 100_000)], [0, 100_000], false, 1000);
+		const other = new Signal<{ start: Milli; end: Milli } | null>(null);
+		const remove = playback.sync.register(new Signal(Milli(100)), other);
+		try {
+			playback.release();
+			await microtasks();
+			expect(playback.sync.playing.peek()).toBe(false);
+			expect(playback.decoder.out.frame.peek()?.timestamp).toBe(0);
+			playback.enabled.set(false);
+			await microtasks();
+			expect(playback.pictures.every((frame) => frame.closed)).toBe(true);
+			const codecs = playback.codecs;
+			playback.enabled.set(true);
+			await microtasks();
+			expect(playback.codecs).toBe(codecs + 1);
+			// A late output from the cancelled codec must not replace the retained poster.
+			playback.emit(900_000, 0);
+			await microtasks();
+			expect(playback.decoder.out.frame.peek()?.timestamp).toBe(0);
+		} finally {
+			remove();
+			playback.close();
+			await microtasks();
+			clock.installed.close();
+		}
+	});
+}

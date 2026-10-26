@@ -7,6 +7,7 @@ use mpeg2ts::ts::Pid;
 
 use super::demux::{Demux, Packet};
 use super::import::SectionReassembler;
+use super::unclaimed::Unclaimed;
 use super::{Ext, Import, catalog::SI_PIDS, psi, stats};
 use crate::catalog;
 
@@ -21,7 +22,11 @@ use crate::catalog;
 /// lists. A program a later PAT adds is not published; removing a started one ends the import.
 ///
 /// The multiplex is parsed once: framing, continuity, the PAT and the SI sections are shared,
-/// and each program reads only the packets on the PIDs its PAT entry and PMT claim.
+/// and each program reads only the packets on the PIDs its PAT entry and PMT claim. A packet on a
+/// PID no program reads, the PAT's PMT PIDs, the SI PIDs and the null PID aside, is counted once
+/// for the multiplex (see [`stats::Snapshot::streams`]). Counting waits until every program the
+/// PAT lists has started, or 0.5 s of program clock has passed without its PMT (TR 101 290's
+/// `PMT_error_2`), since until then a PID may be a program's still to come.
 pub struct Programs {
 	origin: moq_net::origin::Producer,
 	name: moq_net::PathOwned,
@@ -41,7 +46,18 @@ pub struct Programs {
 	readers: Vec<Vec<usize>>,
 	/// The programs the current [`decode`](Self::decode) call routed a packet to.
 	touched: Vec<usize>,
+	/// Every PMT PID the latest PAT lists, which the PAT claims whether or not a program reads it.
+	pmt_pids: HashSet<u16>,
+	/// The programs the PAT lists that no PMT has started, holding back the unclaimed count.
+	holdouts: HashSet<u16>,
+	/// The first program's clock past which every holdout's PMT has lapsed, once it has a clock.
+	deadline: Option<u64>,
+	/// The packets on PIDs no program reads.
+	unclaimed: Unclaimed,
 }
+
+/// `PMT_error_2`: a PMT recurs at least every 0.5 s of program clock.
+const PMT_LIMIT: u64 = super::passthrough::PCR_HZ / 2;
 
 /// The programs waiting for their PMT on one PID.
 #[derive(Default)]
@@ -57,8 +73,8 @@ struct Waiting {
 struct Program {
 	/// The PAT's program number.
 	number: u16,
-	/// Keeps the origin-created broadcast alive; the importer's clone doesn't.
-	broadcast: moq_net::broadcast::Producer,
+	/// Owns announcement control while the importer holds a fill clone.
+	broadcast: moq_net::origin::Publication,
 	import: Import<Ext>,
 	catalog: catalog::Producer<Ext>,
 	/// The route and catalog track until the catalog first names a servable track: announced any
@@ -104,6 +120,10 @@ impl Programs {
 			programs: Vec::new(),
 			readers: vec![Vec::new(); 1 << 13],
 			touched: Vec::new(),
+			pmt_pids: HashSet::new(),
+			holdouts: HashSet::new(),
+			deadline: None,
+			unclaimed: Unclaimed::default(),
 		}
 	}
 
@@ -118,6 +138,10 @@ impl Programs {
 	fn decode_with(&mut self, demux: &mut Demux, data: &[u8]) -> anyhow::Result<()> {
 		demux.push(data);
 		while let Some(packet) = demux.next() {
+			// The holdouts have no clock of their own until their PMT names one.
+			if self.deadline.is_none() && !self.holdouts.is_empty() {
+				self.deadline = self.now().map(|now| now + PMT_LIMIT);
+			}
 			if let Some(pat) = &packet.pat {
 				self.wait(pat);
 			} else if !self.waiting.is_empty() {
@@ -128,7 +152,10 @@ impl Programs {
 			let readers = match everyone {
 				true => None,
 				false => match self.readers[usize::from(packet.pid)].as_slice() {
-					[] => continue,
+					[] => {
+						self.unclaimed(&packet);
+						continue;
+					}
 					readers => Some(readers),
 				},
 			};
@@ -191,6 +218,7 @@ impl Programs {
 			for (&number, &pid) in &listed {
 				self.waiting.entry(pid).or_default().programs.insert(number);
 			}
+			self.holdouts = listed.keys().copied().collect();
 		} else {
 			let mut moved = Vec::new();
 			self.waiting.retain(|pid, waiting| {
@@ -207,8 +235,41 @@ impl Programs {
 			for (number, pid) in moved {
 				self.waiting.entry(pid).or_default().programs.insert(number);
 			}
+			// A program the PAT adds holds the count back afresh.
+			self.holdouts.retain(|number| listed.contains_key(number));
+			let started: HashSet<u16> = self.programs.iter().map(|program| program.number).collect();
+			for &number in listed.keys() {
+				if !started.contains(&number) && self.holdouts.insert(number) {
+					self.deadline = None;
+				}
+			}
 		}
+		self.pmt_pids = listed.values().copied().collect();
 		self.pat = Some(pat.clone());
+	}
+
+	/// The first program's clock, which times the holdouts' lapse.
+	fn now(&self) -> Option<u64> {
+		self.programs.first().and_then(|program| program.import.now())
+	}
+
+	/// Count a packet on a PID no program reads, unless the PAT claims it or a holdout's PMT may
+	/// still claim it.
+	fn unclaimed(&mut self, packet: &Packet) {
+		// A packet flagged corrupt may carry another PID's number.
+		if packet.pkt[1] & 0x80 != 0 || Unclaimed::fixed(packet.pid, true) || self.pmt_pids.contains(&packet.pid) {
+			return;
+		}
+		let acquired = match self.holdouts.is_empty() {
+			true => self.pat.is_some(),
+			false => self
+				.deadline
+				.zip(self.now())
+				.is_some_and(|(deadline, now)| now > deadline),
+		};
+		if acquired {
+			self.unclaimed.packet(packet.pid);
+		}
 	}
 
 	/// Read a packet on a waiting PMT PID, and start each program whose PMT it completes with a
@@ -279,9 +340,10 @@ impl Programs {
 	/// Create the broadcast of program `number`, its importer seeded with the PAT and carrying
 	/// on the PMT `sections` began on `pmt_pid`.
 	fn start(&mut self, number: u16, pmt_pid: u16, sections: SectionReassembler) -> anyhow::Result<()> {
+		self.holdouts.remove(&number);
 		let pat = self.pat.as_ref().expect("a program waits on its PAT");
 		let name = program_broadcast(self.name.as_str(), number);
-		let mut broadcast = self
+		let broadcast = self
 			.origin
 			.create_broadcast(&name)
 			.with_context(|| format!("failed to create broadcast {name}"))?;
@@ -291,9 +353,9 @@ impl Programs {
 			.config
 			.clone()
 			.with_catalog(catalog::hang::Catalog::<Ext>::default());
-		let catalog = catalog::Producer::new(&mut broadcast, config)?;
+		let catalog = catalog::Producer::new(&mut broadcast.broadcast().clone(), config)?;
 		let pmt_pid = Pid::new(pmt_pid).expect("a packet's PID fits 13 bits");
-		let mut import = Import::new(broadcast.clone(), catalog.reserve())
+		let mut import = Import::new(broadcast.broadcast().clone(), catalog.reserve())
 			.with_program(number)
 			.with_pmt(pmt_pid, sections);
 		import.handle_pat(pat)?;
@@ -334,7 +396,8 @@ impl Programs {
 	/// The multiplex is graded once. Programs sharing a PMT PID read the same PMT sections, so
 	/// a dropped section counts once however many read it, and programs sharing a PCR PID
 	/// count its faults once too. PMT sections dropped before any program read their PID are
-	/// counted here.
+	/// counted here, and so are the packets on PIDs no program reads, in the row of the program
+	/// that reads the PID whenever one does.
 	pub fn stats(&self) -> stats::Snapshot {
 		let mut stats = stats::Snapshot::default();
 		let mut crc_errors = BTreeMap::<u16, u64>::new();
@@ -347,6 +410,9 @@ impl Programs {
 			}
 			errors.max(program.import.errors());
 		}
+		self.unclaimed.report(&mut stats.streams, |pid| {
+			Unclaimed::fixed(pid, true) || self.pmt_pids.contains(&pid) || !self.readers[usize::from(pid)].is_empty()
+		});
 		stats.crc_error = crc_errors.values().chain(self.crc_errors.values()).sum::<u64>() + self.demux.pat_crc_error();
 		errors.report(&mut stats);
 		stats
@@ -368,7 +434,11 @@ impl Programs {
 			program.catalog.finish()?;
 		}
 		anyhow::ensure!(announced, "input ended before any program declared a track");
-		Ok(self.programs.iter().map(|program| program.broadcast.clone()).collect())
+		Ok(self
+			.programs
+			.iter()
+			.map(|program| program.broadcast.broadcast().clone())
+			.collect())
 	}
 
 	/// Abort every program's catalog and media tracks with `err`. Consumes the importer.

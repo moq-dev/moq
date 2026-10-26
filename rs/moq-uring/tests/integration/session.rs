@@ -20,7 +20,7 @@ use moq_uring::{Config, Error, Worker, quic, udp};
 fn worker() -> Option<Worker> {
 	match Worker::new(Config::default()) {
 		Ok(worker) => Some(worker),
-		Err(Error::Unsupported(reason)) if std::env::var_os("MOQ_STRICT").is_none() => {
+		Err(Error::Unsupported(reason)) if std::env::var_os("CI_STRICT").is_none() => {
 			eprintln!("skipping io_uring session test: {reason}");
 			None
 		}
@@ -97,7 +97,7 @@ fn lite_session_over_the_worker() {
 				moq_net::time::Instant::now(),
 				moq_uring::transport::Local::new(moq_uring::transport::Session::new(
 					quic::web::Session::raw(conn),
-					moq_net::transport::Binding::InBand,
+					moq_net::transport::Address::Setup,
 				)),
 			)
 			.await
@@ -123,7 +123,7 @@ fn lite_session_over_the_worker() {
 					moq_net::time::Instant::now(),
 					moq_uring::transport::Local::new(moq_uring::transport::Session::new(
 						quic::web::Session::raw(conn),
-						moq_net::transport::Binding::InBand,
+						moq_net::transport::Address::Setup,
 					)),
 				)
 				.await
@@ -235,7 +235,7 @@ fn two_lite_sessions_share_the_server_socket() {
 						moq_net::time::Instant::now(),
 						moq_uring::transport::Local::new(moq_uring::transport::Session::new(
 							quic::web::Session::raw(conn),
-							moq_net::transport::Binding::InBand,
+							moq_net::transport::Address::Setup,
 						)),
 					)
 					.await
@@ -264,7 +264,7 @@ fn two_lite_sessions_share_the_server_socket() {
 						moq_net::time::Instant::now(),
 						moq_uring::transport::Local::new(moq_uring::transport::Session::new(
 							quic::web::Session::raw(conn),
-							moq_net::transport::Binding::InBand,
+							moq_net::transport::Address::Setup,
 						)),
 					)
 					.await

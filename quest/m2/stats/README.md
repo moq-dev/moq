@@ -105,7 +105,7 @@ reports; no encoder acts on them here.
 
 Decided 2026-10-05 (moq.pro audit): the client health model and preflight
 media checks moq.pro planned against the pre-#4510 `.stats` broadcast are
-generic, so they join this line as [client health](/quest/m2/stats/health.md)
+generic, so they join this line as [client health](/doc/concept/stats.md#health)
 and [preflight](/quest/m2/stats/preflight.md). moq.pro keeps the per-project
 connection view and the dashboard flow.
 
@@ -115,10 +115,9 @@ connection view and the dashboard flow.
   gateways publish stats and feedback, as the CLI remuxes do
 - [Browser reporters](/quest/m2/stats/js.md) - `<moq-publish>` publishes
   stats and `<moq-watch>` publishes feedback
-- [Client health](/quest/m2/stats/health.md) - two snapshots become a
-  health sample and a verdict that names its observer, in Rust and JS
 - [Preflight](/quest/m2/stats/preflight.md) - a bounded test run over a
   broadcast reports which media layer is broken and why
+- [Client health in use](/quest/m2/stats/health-consumers.md) - a per-connection media counter, consumers of the grade, and re-measured limits
 
 ## Related
 

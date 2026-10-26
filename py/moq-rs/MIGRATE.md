@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Audio frame duration is optional
+
+`audio.EncoderOutput.frame_duration` defaults to `None` for the codec's own frame. Pass `None` where you passed `timedelta(0)`.
+`FetchGroupOptions.max_delay` is a `timedelta` instead of `max_delay_us` microseconds, and `Track.info()` no longer raises.
+
 ### Connection state
 
 Client entry returns a connecting native session. Replace `Session.status()`, `connects()`, and both `failure()` polls with `state()` and `await state_changed(state.revision)`. The `ConnectionState` fields include `phase`, `connects`, `failure`, and `version`; `ConnectionPhase` replaces `ConnectionStatus`. Wait for `CONNECTED` when work requires an established transport, or await `closed()` for the terminal result.
@@ -40,10 +45,11 @@ If you adopted the release line's async `drain()`, call `session.shutdown()` and
 
 Audio and video init records no longer carry a track name. Pass that name on the media producer's named target instead; init records describe only the codec and media.
 
-### Broadcast `finish` no longer closes
+### Broadcast `finish` is removed
 
-`BroadcastProducer.finish()` was a deprecated alias for `close()`; it no longer ends the broadcast at once.
+`BroadcastProducer.finish()`, a deprecated alias for `close()`, is removed.
 Call `BroadcastProducer.close()` where you called `finish()`.
+To end the content first, call `moq.media.CatalogProducer.finish()`; the broadcast stays up until `close()`.
 
 ### JSON snapshot `delta_ratio` is `deltas`
 
@@ -83,7 +89,7 @@ Clamp timestamps you build from unbounded input to `2^61 - 1`.
 
 ### Finished tracks stay until the broadcast ends (#6157)
 
-A finished track now stays listed, with its catalog rendition and demand, until its broadcast closes or the new `BroadcastProducer.finish()` lets go.
+A finished track now stays listed, with its catalog rendition and demand, until its broadcast closes.
 Publish a replacement under a new name, and expect a finished track's demand watch to end with the broadcast.
 
 ### A claim answers by publishing (#5678)

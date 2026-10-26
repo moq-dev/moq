@@ -22,6 +22,7 @@ mod clock;
 pub(crate) mod datagram;
 mod delivered;
 mod expiry;
+mod skipped;
 // The DEFLATE codec behind compressed tracks.
 mod flate;
 pub(crate) mod object;
@@ -39,7 +40,6 @@ use requests::Requests;
 use weak_cache::{WeakCache, WeakEntry};
 
 pub use bytes::*;
-pub(crate) use subscription::Cap;
 // Datagram stays flat at the crate root (a small track-adjacent wire type),
 // not under a role module.
 pub use datagram::*;
@@ -50,8 +50,8 @@ pub use timed::Timed;
 pub mod origin {
 	pub use super::follow::AnnouncedBroadcast;
 	pub use super::origin_impl::{
-		Config, Consumer, Cost, Driver, Dynamic, HopLimit, Link, Preference, Prepared, Producer, Request, Requesting,
-		Route, Routing, Source,
+		Config, Consumer, Cost, Driver, Dynamic, HopLimit, Link, Preference, Prepared, Producer, Publication, Request,
+		Requesting, Route, Routing, Source,
 	};
 }
 

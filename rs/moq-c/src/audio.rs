@@ -146,10 +146,18 @@ pub struct moq_audio_frame {
 pub(crate) struct AudioEncoder {
 	producer: moq_audio::encode::Producer,
 	reservation: Option<Arc<moq_net::bandwidth::Reservation>>,
-	finished: crate::publish::Finished,
+	children: crate::publish::Children,
 }
 
 type AudioProducer = Shared<AudioEncoder>;
+
+impl crate::publish::Abort for AudioProducer {
+	fn abort(self, err: moq_net::Error) {
+		if let Some(encoder) = self.take() {
+			encoder.producer.abort(err);
+		}
+	}
+}
 
 #[derive(Default)]
 /// The audio encoder, decoder, and decoded frame handle tables.
@@ -170,11 +178,14 @@ impl Audio {
 	) -> Result<Id, Error> {
 		let producer = moq_audio::encode::Producer::new(target.producer, target.catalog.clone(), input, &options)?;
 		let reservation = reserve.then(|| Arc::new(options.bandwidth.reserve(&producer.demand(), producer.bitrate())));
-		self.producers.insert(Shared::new(AudioEncoder {
+		let encoder = Shared::new(AudioEncoder {
 			producer,
 			reservation,
-			finished: target.finished.clone(),
-		}))
+			children: target.children.clone(),
+		});
+		target
+			.children
+			.insert(&mut self.producers, encoder, crate::publish::Child::Audio)
 	}
 
 	pub(crate) fn reservation(&self, id: Id) -> Result<Option<Arc<moq_net::bandwidth::Reservation>>, Error> {
@@ -345,17 +356,16 @@ pub unsafe extern "C" fn moq_encode_audio(
 		let codec = codec_str
 			.parse()
 			.map_err(|_| Error::UnknownFormat(codec_str.to_string()))?;
-		options.settings = moq_audio::encode::Settings::from_input(codec, &encoder_input);
+		options.config = moq_audio::encode::Config::from_input(codec, &encoder_input);
 		if let Some(sample_rate) = zeroable(raw_output.sample_rate) {
-			options.settings.sample_rate = sample_rate;
+			options.config.sample_rate = sample_rate;
 		}
 		if let Some(channels) = zeroable(raw_output.channels) {
-			options.settings.layout = moq_audio::Layout::from_channels(channels)?;
+			options.config.layout = moq_audio::Layout::from_channels(channels)?;
 		}
-		options.settings.bitrate =
-			zeroable(raw_output.bitrate).map(|bps| moq_net::bandwidth::Rate::from_bps(bps.into()));
+		options.config.bitrate = zeroable(raw_output.bitrate).map(|bps| moq_net::bandwidth::Rate::from_bps(bps.into()));
 		if let Some(micros) = zeroable(raw_output.frame_duration_us) {
-			options.settings.frame_duration = Duration::from_micros(micros.into());
+			options.config.frame_duration = Duration::from_micros(micros.into());
 		}
 
 		let bandwidth = ffi::parse_id_optional(bandwidth)?;
@@ -446,22 +456,34 @@ pub unsafe extern "C" fn moq_encode_audio_frame(producer: u32, frame: *const moq
 
 /// Flush any pending samples and finalize an audio producer.
 ///
-/// The broadcast keeps the finished track, catalog rendition included, until it closes or its
-/// `moq_publish_finish` linger ends, so a late subscriber can still drain it.
+/// The broadcast keeps the finished track, catalog rendition included, until it closes, so a
+/// late subscriber can still drain it.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_encode_audio_finish(producer: u32) -> i32 {
 	ffi::enter(move || {
-		let producer = ffi::parse_id(producer)?;
-		// The id is dropped first, so nothing new queues behind the flush; whatever
-		// is mid-encode still finishes before this takes the producer.
-		let producer = State::lock().audio.remove(producer)?;
-		let AudioEncoder {
-			mut producer, finished, ..
-		} = producer.take().ok_or(Error::MediaNotFound)?;
-		producer.finish()?;
-		// The broadcast keeps the finished track, so its finish still holds it.
-		finished.keep(producer);
-		Ok(())
+		let id = ffi::parse_id(producer)?;
+		// The id stays until the flush ends, so a racing moq_publish_close waits it out
+		// instead of missing a track that still publishes. A call queued behind the flush
+		// finds the encoder gone.
+		let shared = State::lock().audio.producer(id)?;
+		let finished: Result<(), Error> = (|| {
+			let mut guard = shared.lock();
+			let AudioEncoder {
+				mut producer, children, ..
+			} = guard.take().ok_or(Error::MediaNotFound)?;
+			if let Err(err) = producer.finish() {
+				// Readers see the failure rather than `Dropped`, as a failed video drain does.
+				children.forget(crate::publish::Child::Audio(id));
+				producer.abort(moq_net::Error::Transport(err.to_string()));
+				return Err(err.into());
+			}
+			// The broadcast keeps the finished track, so its finish still holds it.
+			children.keep(crate::publish::Child::Audio(id), producer);
+			Ok(())
+		})();
+		// A racing close may have released the id already.
+		let _ = State::lock().audio.remove(id);
+		finished
 	})
 }
 

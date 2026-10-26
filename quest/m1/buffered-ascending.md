@@ -11,7 +11,7 @@ sorted. Live playback (`buffer` of zero) stays newest-first.
 
 Not here: the protocol's `Group Order` (landed in
 [moq-dev/moq#5385](https://github.com/moq-dev/moq/pull/5385)), the buffered
-video poster ([Buffered video poster](/quest/m1/buffered-video-poster.md)), and
+video poster (landed in [moq-dev/moq#6609](https://github.com/moq-dev/moq/pull/6609)), and
 ordering for the Python or FFI audio consumers.
 
 ## Plan
@@ -72,12 +72,21 @@ Implementation:
   every reply decodes from its first frame, plain and barge-in, with no
   overflow.
 
+### Runtime mode switch (2026-10-24 pre-cut audit)
+
+Changing `buffer` at runtime does not switch the audio ring's mode:
+`js/watch/src/audio/decoder.ts:293` captures `sync.out.buffered` once when it
+builds the worklet, and `#order()` (`:679`) peeks it once per attempt, so
+going from live to buffered after playback started leaves `Backpressure`
+and the worklet `Init` live (future-dated TTS audio is shed), and the
+reverse leaves a live player in play-through. Key the ring and `Order` on
+`sync.out.buffered`: rebuild the ring, or post a mode message plus a reset.
+
 ## Required
 
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - an ascending request is served newest-first until lite-07 negotiates by default
 
 ## Related
 
-- [Buffered video poster](/quest/m1/buffered-video-poster.md) - buffered startup paints the first video frame and holds video until the shared floor
 - [Container reads drop backfill](/quest/m1/read-backfill.md) - the JS consumer stops delivering groups below its cursor
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - owns the wire's `Group Order` and the ordered cursor's floor

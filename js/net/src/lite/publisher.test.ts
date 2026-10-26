@@ -12,8 +12,10 @@ import { createMockTransportPair, textFrame } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { sendOrder } from "../priority.ts";
+import { Front } from "../resume.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
+import { Subscriber as TrackSubscriber } from "../track.ts";
 import { type AnnounceBroadcast, AnnounceOk, AnnounceRequest, decodeAnnounceBroadcast } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
 import { Fetch } from "./fetch.ts";
@@ -31,8 +33,9 @@ import { Track as TrackMessage } from "./track.ts";
 import { ALPN_05, ALPN_06, ALPN_07_WIP, Version } from "./version.ts";
 
 function publish(origin: OriginProducer, path: Path.Valid) {
-	const broadcast = origin.createBroadcast(path);
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(path);
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	return broadcast;
 }
 
@@ -104,8 +107,9 @@ test.each([
 	const pair = createMockTransportPair(ALPN_05);
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
-	const broadcast = origin.createBroadcast(Path.from("cam"));
-	broadcast.announce({ cost: 7n });
+	const broadcastPublication = origin.createBroadcast(Path.from("cam"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce({ cost: 7n });
 
 	const written: Uint8Array[] = [];
 	const stream = new Stream({
@@ -123,7 +127,7 @@ test.each([
 	const initial = written.length;
 	expect(initial).toBeGreaterThan(0);
 
-	broadcast.announce({ cost: 9n });
+	broadcastPublication.announce({ cost: 9n });
 	await settle();
 	expect(written.length > initial).toBe(sent);
 
@@ -594,7 +598,7 @@ const IDLE_MS = 500;
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 function lastGroups(ranges: ReturnType<typeof spyOn>) {
-	return ranges.mock.calls.at(-1)?.[1];
+	return ranges.mock.calls.at(-1)?.[0];
 }
 
 // Wraps a writable so its writes park until `release()`, giving a test a window inside
@@ -647,6 +651,9 @@ async function servedSubscription(
 		// Frame payloads written into every served group. Frame bounds need draft-06.
 		frames?: string[];
 		version?: Version;
+		// Answer the subscription with a front's broadcast, as an application forwarding a
+		// routed one does, so the track reads through the front's serving route.
+		routed?: boolean;
 	} = {},
 ) {
 	const version = options.version ?? Version.DRAFT_05;
@@ -655,7 +662,20 @@ async function servedSubscription(
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
 
-	const broadcast = publish(origin, Path.from("test"));
+	let broadcast: BroadcastProducer;
+	let routed: { front: Front; dynamic: { close(): void } } | undefined;
+	if (options.routed) {
+		broadcast = new BroadcastProducer();
+		const front = new Front();
+		front.serve(broadcast.consume());
+		const dynamic = origin.dynamicRoute(Path.from("test"));
+		void (async () => {
+			for await (const request of dynamic.requested()) hooks.acceptRequest(request, front.consumer);
+		})();
+		routed = { front, dynamic };
+	} else {
+		broadcast = publish(origin, Path.from("test"));
+	}
 	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: options.maxAge });
 
 	const client = await Stream.open(pair.client, { version: version });
@@ -766,6 +786,8 @@ async function servedSubscription(
 			await opened.cancel();
 			publisher.close();
 			client.close();
+			routed?.dynamic.close();
+			routed?.front.consumer.close();
 		},
 	};
 }
@@ -843,6 +865,26 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 			expect([resp.drop.start, resp.drop.end, resp.drop.error]).toEqual([
 				1,
 				1,
+				version === Version.DRAFT_07 ? 70 : 0,
+			]);
+		} finally {
+			await sub.close();
+		}
+	});
+
+	test(`lite ${version}: a routed track forwards its serving route's drop`, async () => {
+		const sub = await servedSubscription({ version, startGroup: 0, routed: true });
+		try {
+			sub.serve(0);
+			expect(await sub.servedSequence()).toBe(0);
+			expect("start" in (await decodeSubscribeResponse(sub.client.reader, version))).toBe(true);
+
+			hooks.dropTrackGroups(sub.track, 1, 3, new StreamError(StreamCode(70), { message: "cut" }));
+			const resp = await decodeSubscribeResponse(sub.client.reader, version);
+			if (!("drop" in resp)) throw new Error("expected SUBSCRIBE_DROP");
+			expect([resp.drop.start, resp.drop.end, resp.drop.error]).toEqual([
+				1,
+				2,
 				version === Version.DRAFT_07 ? 70 : 0,
 			]);
 		} finally {
@@ -1159,7 +1201,7 @@ for (const skipped of ["failed", "stale"] as const) {
 			group.writeFrame(textFrame("old", Timestamp.fromMillis(5)));
 			sub.track.writeGroup(group);
 			group.close(skipped === "failed" ? new Error("cut") : undefined);
-			if (skipped === "failed") sub.track.dropGroups(7, 8, new Error("cut"));
+			if (skipped === "failed") hooks.dropTrackGroups(sub.track, 7, 8, new Error("cut"));
 			sub.serve(6);
 			const response = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
 			if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
@@ -1227,7 +1269,7 @@ test("lite draft-06: an omitted group start still serves a group below the first
 // to the next pop rather than reaching backward into this one.
 test("lite draft-05: a group popped before a cap update is still served", async () => {
 	const sub = await servedSubscription({ startGroup: 1, gated: true });
-	const ranges = spyOn(hooks, "replaceGroups");
+	const ranges = spyOn(TrackSubscriber.prototype, "withRange");
 	try {
 		sub.serve(1);
 		await sub.parked;
@@ -1255,7 +1297,7 @@ test("lite draft-05: a group popped before a cap update is still served", async 
 // poll order.
 test("lite draft-06: a queued floor update applies before the next group pop", async () => {
 	const sub = await servedSubscription({ version: Version.DRAFT_06, startGroup: 0, gated: true });
-	const ranges = spyOn(hooks, "replaceGroups");
+	const ranges = spyOn(TrackSubscriber.prototype, "withRange");
 	try {
 		sub.serve(0);
 		await sub.parked;
@@ -1281,7 +1323,7 @@ test("lite draft-06: a queued floor update applies before the next group pop", a
 });
 
 // SUBSCRIBE_START pins the floor to the first served group. A later update can still
-// widen it: public setGroups would keep the pin, so serving uses replaceGroups.
+// widen it, serving the cached groups below the old floor.
 test("lite draft-06: a widening update lowers the serving floor", async () => {
 	const sub = await servedSubscription({ version: Version.DRAFT_06, startGroup: 10 });
 	try {
@@ -1309,7 +1351,7 @@ test("lite draft-06: a queued frame floor applies before the next group pop", as
 		frames: ["a", "b", "c"],
 		gated: true,
 	});
-	const ranges = spyOn(hooks, "replaceGroups");
+	const ranges = spyOn(TrackSubscriber.prototype, "withRange");
 	try {
 		sub.serve(0);
 		await sub.parked;
@@ -1400,7 +1442,7 @@ test("lite draft-06: a burst of updates coalesces before the next group pop", as
 		sub.serve(0);
 		await sub.parked;
 		sub.serve(1);
-		const ranges = spyOn(hooks, "replaceGroups");
+		const ranges = spyOn(TrackSubscriber.prototype, "withRange");
 
 		try {
 			// Two updates land back to back, the second superseding the first.
@@ -1419,7 +1461,8 @@ test("lite draft-06: a burst of updates coalesces before the next group pop", as
 			// Group 1 is popped under the latest state, with no application of the older one.
 			expect(await sub.servedGroup()).toEqual({ sequence: 1, frameStart: 0, payloads: ["a"] });
 			expect(ranges).toHaveBeenCalledTimes(1);
-			expect(lastGroups(ranges)).toEqual({ start: undefined, end: { included: 1 } });
+			// Draft-06 encodes a floor of group 0 as no floor, which assigns 0.
+			expect(lastGroups(ranges)).toEqual({ start: { included: 0 }, end: { included: 1 } });
 		} finally {
 			ranges.mockRestore();
 		}
@@ -1437,11 +1480,13 @@ test("lite draft-06: a newer update wins before a buffered group backlog drains"
 		gated: true,
 	});
 	let second!: Promise<void>;
-	const replaceGroups = hooks.replaceGroups;
-	const ranges = spyOn(hooks, "replaceGroups").mockImplementation((subscriber, groups) => {
-		if (groups.start === undefined)
-			second ??= replayUpdate({ priority: 0, endGroup: 1 }).encode(sub.client.writer, Version.DRAFT_06);
-		return replaceGroups(subscriber, groups);
+	const withRange = TrackSubscriber.prototype.withRange;
+	const ranges = spyOn(TrackSubscriber.prototype, "withRange").mockImplementation(function (
+		this: TrackSubscriber,
+		groups,
+	) {
+		second ??= replayUpdate({ priority: 0, endGroup: 1 }).encode(sub.client.writer, Version.DRAFT_06);
+		return withRange.call(this, groups);
 	});
 
 	try {
@@ -1473,7 +1518,7 @@ test("lite draft-06: a newer update wins before a buffered group backlog drains"
 // The full update remains atomic to observers, while the local range cursor stays serialized.
 test("lite draft-06: scheduling updates apply while SUBSCRIBE_START is blocked", async () => {
 	const sub = await servedSubscription({ version: Version.DRAFT_06, startGroup: 0, gated: true });
-	const ranges = spyOn(hooks, "replaceGroups");
+	const ranges = spyOn(TrackSubscriber.prototype, "withRange");
 	try {
 		sub.serve(0);
 		await sub.parked;
@@ -1493,7 +1538,7 @@ test("lite draft-06: scheduling updates apply while SUBSCRIBE_START is blocked",
 		sub.release();
 		expect(await sub.servedSequence()).toBe(0);
 		while (ranges.mock.calls.length === 0) await flush();
-		expect(lastGroups(ranges)).toEqual({ start: undefined, end: { included: 5 } });
+		expect(lastGroups(ranges)).toEqual({ start: { included: 0 }, end: { included: 5 } });
 	} finally {
 		ranges.mockRestore();
 		sub.release();
@@ -2400,8 +2445,9 @@ test("lite draft-06: announces wait for the setup grant", async () => {
 		answered = resolve;
 	});
 	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomHop(), origin.consume(), { grant, ready });
-	const broadcast = origin.createBroadcast(Path.from("foo/bar"));
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(Path.from("foo/bar"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 
 	const written: Uint8Array[] = [];
 	const stream = new Stream({
@@ -2499,7 +2545,7 @@ test("lite draft-06: a grant that shrinks while a TRACK resolves refuses it", as
 		const request = await requests.next();
 		if (request.done) throw new Error("the handler never saw the request");
 		grant.set(grantOf("other"));
-		request.value.accept(produced);
+		hooks.acceptRequest(request.value, produced);
 		await serving;
 
 		expect(unauthorizedResets(resets)).toContain("unauthorized: live/cam");
@@ -2555,7 +2601,7 @@ test("lite draft-06: a grant that shrinks while TRACK_INFO is blocked resets it"
 		const serving = publisher.runTrackInfo(new TrackMessage(Path.from("live/cam"), "video"), stream);
 		const request = await requests.next();
 		if (request.done) throw new Error("the handler never saw the request");
-		request.value.accept(produced);
+		hooks.acceptRequest(request.value, produced);
 		await writing;
 
 		grant.set(grantOf("other"));
@@ -2604,7 +2650,7 @@ test("lite draft-06: a grant that shrinks while the broadcast resolves resets th
 		if (request.done) throw new Error("the handler never saw the request");
 		grant.set(grantOf("other"));
 		await Promise.resolve();
-		request.value.accept(produced);
+		hooks.acceptRequest(request.value, produced);
 		await serving;
 
 		expect(unauthorizedResets(resets)).toContain("unauthorized: live/cam");

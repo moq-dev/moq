@@ -20,8 +20,9 @@ const version = (0xff000000 + input.draft) as IetfVersion;
 
 const pair = createMockTransportPair();
 const origin = new OriginProducer();
-const broadcast = origin.createBroadcast(Path.from("room"));
-broadcast.announce();
+const broadcastPublication = origin.createBroadcast(Path.from("room"));
+const broadcast = broadcastPublication.broadcast;
+broadcastPublication.announce();
 const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: Milli(5000), priority: 2 });
 const group = new GroupProducer(4);
 group.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.fromMillis(0) });

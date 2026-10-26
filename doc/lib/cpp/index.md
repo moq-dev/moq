@@ -98,6 +98,11 @@ if (auto catalog = ok(catalogs->next().get())) {   // std::nullopt once the cata
 }
 ```
 
+A session advertises its implementation in SETUP, which a relay's auth service sees.
+The config is generated, so nothing names this package for you: set
+`ClientConfig::implementation` (and `ServerConfig::implementation`) to `moq::IMPLEMENTATION`,
+after any product tokens of your own, and moq-ffi appends its own.
+
 Call `available()` again to wait for the next publisher instance at that path, such as a
 restarted publisher, and drop what was read from the previous one then: its tracks end
 when its session does.
@@ -109,7 +114,7 @@ Share `moq::MediaTimebase::init(broadcast)` through `ContainerInit` when several
 use one source timeline; omitting it keeps an independent offset. A timebase belongs to
 its broadcast and does not keep it open. `MediaContainerProducer` takes chunks split
 anywhere, so a raw byte stream needs no other importer.
-`moq::ContainerFormat::kFmp4` splits each fragment into one frame per sample; `kCmaf` republishes it whole.
+`moq::ContainerFormat::kFmp4` splits each fragment into one frame per sample.
 
 ```cpp
 // Publish encoded frames, or raw pixels with the codec inside the binding.
@@ -207,6 +212,8 @@ Obtain a dynamic track request’s `demand()` before accepting it to watch subsc
 
 On `moq-lite-07-wip` (opt in with `ClientConfig::versions`) and on moq-transport draft-17+ with the [MoQ Auth extension](/draft/moq-auth), `session->auth()->grant()` is the `Grant` the relay sent back, empty until it answers and while a client session reconnects; `grant_changed()` waits for the next one. `add(token)` presents a fresh token without reconnecting and resolves to an `AuthToken` whose grant joins the union until `cancel()`; it is presented again on every reconnect. A refusal resolves to an `Error` carrying the relay's code.
 
+Set `ClientConfig::tokens` instead of putting the credential in the URL. The first is the connection credential, sent in SETUP and, while an offered version can't carry it there (lite before 07), as the URL's `?jwt=`; each other token widens the grant over AUTH. `client->tokens()->set(...)` replaces them before they expire: the next dial presents them, a live AUTH session at once, and after an authorization refusal the client redials only if they changed. A `?jwt=` already in the URL stays the connection credential, which is how to reach a relay older than this release.
+
 ## Stats
 
 `session->stats()` reports the transport counters, each a `std::optional` that is empty when the transport does not report it, plus the negotiated protocol in `version`. Connect returns a connecting session. Read `session->state()` and wait with `state_changed(state.revision)` to observe its first-dial failures and reconnects; independent watchers keep their own revisions.
@@ -218,12 +225,13 @@ Application delivery requires explicitly selecting `moq-lite-07-wip` on both
 peers; older Lite versions (including default lite-06) and IETF wait only for
 transport ACKs. Finish or abort live tracks first.
 
-To end a broadcast cleanly, finish every track, then call `broadcast->finish()`.
-The returned `moq::BroadcastFinish` keeps the broadcast announced and serving the
-finished tracks for `linger_us()`, their longest max age, so a subscriber still
-catching up can drain them. `finish->wait()` resolves once the linger passes, and
-`finish->close()` closes the broadcast at once, resolving the wait.
-`broadcast->close()` stays the abrupt end.
+To end a broadcast cleanly, finish every track, then call `catalog->finish()` on
+its `moq::MediaCatalogProducer` to finish the catalog, which ends the content.
+The broadcast stays announced and keeps serving the finished tracks, so a
+subscriber still catching up can drain them, until `broadcast->close()` takes it
+offline. How long to keep it up is yours to decide. A track still open at the
+close, or released without a finish, ends with `Unroutable`, which readers take
+as the publisher leaving.
 
 `moq::shutdown()` stops the `moq-ffi` runtime workers, then the executor.
 Pending calls resolve `Cancelled`, and every object stays safe to drop. Call

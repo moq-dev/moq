@@ -10,7 +10,7 @@ import type { Sample, Workload } from "./fixture.ts";
 
 const { values } = parseArgs({ options: { relays: { type: "string" }, timeout: { type: "string", default: "30" } } });
 const timeout = Number(values.timeout) * 1000;
-const run = process.env.MOQ_TEST_RUN;
+const run = process.env.HARNESS_RUN_DIR;
 if (!values.relays || !run || !Number.isFinite(timeout) || timeout <= 0)
 	throw new Error("baseline needs harness relays, retained run directory and positive timeout");
 const here = dirname(new URL(import.meta.url).pathname);
@@ -18,9 +18,9 @@ const root = join(here, "../../..");
 const dist = join(root, "test/wasm/dist");
 const wasm = join(root, "js/wasm/dist");
 const output = join(run, "backend.json");
-const smoke = process.env.MOQ_WASM_BASELINE_SMOKE === "1";
+const smoke = process.env.WASM_BASELINE_SMOKE === "1";
 // moq-ffi over ubrn's wasm2 player, built by uniffi/build.sh; see README.md.
-const uniffi = process.env.MOQ_WASM_UNIFFI === "1";
+const uniffi = process.env.WASM_UNIFFI === "1";
 const generated = join(root, "test/wasm/uniffi/dist");
 const relays = (await Bun.file(values.relays).json()) as RelayFixture[];
 if (!relays.length) throw new Error("no relay fixtures");

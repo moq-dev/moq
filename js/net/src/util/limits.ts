@@ -1,19 +1,18 @@
 import { Session, SessionCode } from "../error.ts";
 
 /**
- * How many live requests a peer may hold on one session, mirroring moq-net's `session::Limits`.
- * Subscriptions and FETCHes have no cap: each holds a bidi stream, so stream credit bounds them.
+ * How many live requests a peer may hold on one session, as moq-net's `session::Limits`.
+ * Subscriptions, FETCHes, and listing PUBLISHes have no cap: each holds a bidi stream, so stream
+ * credit bounds them.
  * @internal
  */
 export interface Limits {
 	/** Broadcasts (moq-lite) or namespaces (moq-transport) the peer may have announced to us. */
 	announces: number;
-	/** Subscriptions and listing PUBLISHes a moq-transport peer may hold before listed tracks are skipped. */
-	requests: number;
 }
 
 /** The default limits, matching moq-net's. @internal */
-export const LIMITS: Readonly<Limits> = Object.freeze({ announces: 100_000, requests: 20_000 });
+export const LIMITS: Readonly<Limits> = Object.freeze({ announces: 100_000 });
 
 /** A session's count of live peer requests, which closes the session past its cap. @internal */
 export class Slots {
@@ -41,11 +40,6 @@ export class Slots {
 		if (this.#live >= this.#max) return false;
 		this.#live += 1;
 		return true;
-	}
-
-	/** Count one entry something else already bounds, past the cap too, so `tryAcquire` sees it. */
-	hold() {
-		this.#live += 1;
 	}
 
 	/** Give back `count` slots. */

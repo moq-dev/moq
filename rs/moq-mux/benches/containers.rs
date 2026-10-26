@@ -34,13 +34,11 @@ struct Fixture {
 	_published: Box<dyn std::any::Any>,
 	_origin: moq_net::origin::Producer,
 	driver: tokio::task::JoinHandle<moq_net::Error>,
-	requests: tokio::task::JoinHandle<()>,
 }
 
 impl Drop for Fixture {
 	fn drop(&mut self) {
 		self.driver.abort();
-		self.requests.abort();
 	}
 }
 
@@ -56,9 +54,10 @@ async fn prepare(video: Video, payload: &Bytes) -> (moq_mux::Source, impl Stream
 		frames,
 		frames_per_group,
 	} = video;
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let consumer = broadcast.consume();
-	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let (origin, driver) = moq_net::origin::Producer::new(Default::default());
+	let driver = tokio::spawn(moq_net::time::run(driver));
+	let broadcast = origin.create_broadcast("bench").unwrap();
+	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
 	let mut publishers = Vec::new();
 	for index in 0..tracks {
 		let track = broadcast
@@ -85,14 +84,7 @@ async fn prepare(video: Video, payload: &Bytes) -> (moq_mux::Source, impl Stream
 		publishers.push(publisher);
 	}
 	catalog.finish().unwrap();
-	let (origin, driver) = moq_net::origin::Producer::new(Default::default());
-	let driver = tokio::spawn(moq_net::time::run(driver));
-	let dynamic = origin.dynamic_route("", Default::default()).unwrap();
-	let requests = tokio::spawn(async move {
-		while let Ok(request) = dynamic.requested_broadcast().await {
-			request.accept(consumer.clone());
-		}
-	});
+	broadcast.announce(Default::default()).unwrap();
 	let resolved = origin.consume().request_broadcast("bench", None).await.unwrap();
 	let source = moq_mux::Source::new(origin.consume(), resolved);
 	let stream = source.catalog::<()>(CatalogFormat::Hang).await.unwrap();
@@ -100,7 +92,6 @@ async fn prepare(video: Video, payload: &Bytes) -> (moq_mux::Source, impl Stream
 		_published: Box::new((broadcast, catalog, publishers)),
 		_origin: origin,
 		driver,
-		requests,
 	};
 	(source, stream, fixture)
 }

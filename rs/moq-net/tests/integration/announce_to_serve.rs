@@ -78,7 +78,7 @@ fn outcome(result: &Result<moq_net::broadcast::Consumer, String>) -> String {
 /// group's frames and then how the subscription ended. Read continuously, as a
 /// real subscriber would, so the subscription is driven the whole time.
 async fn read(broadcast: &moq_net::broadcast::Consumer, name: &str) -> mpsc::UnboundedReceiver<String> {
-	let subscription = moq_net::track::Subscription::default().with_groups(0..);
+	let subscription = moq_net::track::Subscription::default().with_range(0..);
 	let mut sub = broadcast
 		.track(name)
 		.unwrap()
@@ -242,9 +242,6 @@ async fn remote_ietf_consumer_sees_what_a_local_one_does() {
 		"moq-transport-16",
 		"moq-transport-17",
 		"moq-transport-18",
-		"moq-transport-19",
-		"moq-transport-20",
-		"moq-transport-21",
 		"moq-transport-22",
 	] {
 		assert_eq!(lifecycle(Observer::Remote(version)).await, EXPECTED, "{version}");

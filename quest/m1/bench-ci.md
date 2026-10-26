@@ -21,13 +21,17 @@ lands; agents never dispatch Nightly.
   one cheap bench (so tonight's `main` reads as slower), and check the job fails
   with that case alone.
 - Tune `THRESHOLD_PCT`, `CONFIRMATIONS` (`bench/compare.py`) and the round count
-  (`MOQ_BENCH_RUNTIME_ROUNDS`, default three) from what the runs show, and
+  (`BENCH_RUNTIME_ROUNDS`, default three) from what the runs show, and
   update the README's numbers. Bimodal series (about 50% up and back across
   nights) are the expected false positives; three alternating rounds pass one
   only when all three land on the slow mode.
 - Check the paired legs' durations against their hour; the base build relies
   on the mbx cache for the previous night's artifacts, and a cold one roughly
   doubles each leg's build time.
+
+- Decide whether `bench/run.sh` pins glibc's malloc thresholds for every
+  Criterion target, as [moq-dev/moq#6727](https://github.com/moq-dev/moq/pull/6727)
+  did for `ts_schedule`: some small paired deltas may be the same heap mode flip.
 
 Decided 2026-10-23 (maintainer), when the paired mode landed:
 

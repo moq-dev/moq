@@ -588,11 +588,12 @@ fn build_acme_config(
 	root: &[PathBuf],
 ) -> anyhow::Result<Arc<rustls::ServerConfig>> {
 	let mut tls = moq_tokio::tls::Listen::default();
-	tls.resolver = Some(resolver);
 	tls.root = root.to_vec();
 
 	let alpn = vec![b"h2".to_vec(), b"http/1.1".to_vec(), b"acme-tls/1".to_vec()];
-	tls.server_config(alpn).context("failed to build https TLS config")
+	moq_tokio::tls::Serve::resolver(resolver, &tls)?
+		.config(alpn)
+		.context("failed to build https TLS config")
 }
 
 fn https_watch_paths(cert: &[PathBuf], key: &[PathBuf], root: &[PathBuf]) -> Vec<PathBuf> {
@@ -2351,10 +2352,10 @@ mod tests {
 				let (ca, cert, key) = make_certs(&certs);
 				let mut config = crate::Config::default();
 				config.listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
-				config.listen.timeout = Some(std::time::Duration::ZERO);
+				config.listen.timeout = Some((std::time::Duration::ZERO).into());
 				config.web.ws = true;
 				config.auth.public = vec![moq_auth::Pattern::all()];
-				config.drain_timeout = DRAIN_WINDOW;
+				config.drain_timeout = Some((DRAIN_WINDOW).into());
 				if tls {
 					config.web.https.listen = Some("127.0.0.1:0".parse().unwrap());
 					config.web.https.cert = vec![cert];
@@ -2478,7 +2479,10 @@ mod tests {
 						}
 						None => socket_step(upgrade_while_draining(web.stream, true)).await,
 					};
-					let goaway = socket_step(session.draining().recv()).await.unwrap();
+					let draining = session.draining();
+					let goaway = socket_step(moq_net::kio::wait(|waiter| draining.poll(waiter)))
+						.await
+						.unwrap();
 					assert_eq!(goaway.uri(), "");
 					session.abort(moq_net::Error::Cancel);
 					socket_step(web.running).await.unwrap().unwrap();
@@ -2582,7 +2586,9 @@ mod tests {
 			web.trigger.start();
 			let session = socket_step(upgrade_while_draining(web.stream, false)).await;
 			drop(pending);
-			assert_eq!(socket_step(session.draining().recv()).await.unwrap().uri(), "");
+			let draining = session.draining();
+			let goaway = socket_step(moq_net::kio::wait(|waiter| draining.poll(waiter))).await;
+			assert_eq!(goaway.unwrap().uri(), "");
 			session.abort(moq_net::Error::Cancel);
 			socket_step(web.running).await.unwrap().unwrap();
 		}

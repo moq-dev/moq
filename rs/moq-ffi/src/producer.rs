@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use moq_mux::catalog::hang::Extra;
 
-use crate::consumer::{MoqBroadcastConsumer, MoqGroupConsumer, MoqSubscription, MoqTrackConsumer};
+use crate::consumer::{MoqBroadcastConsumer, MoqGroupConsumer, MoqOrder, MoqSubscription, MoqTrackConsumer};
 use crate::demand::MoqTrackDemand;
 use crate::error::MoqError;
 use crate::ffi::{Background, Task};
@@ -20,11 +20,11 @@ pub struct MoqTrackInfo {
 	/// Higher is more urgent; the default 0 is the midpoint.
 	#[uniffi(default = 0)]
 	pub priority: i8,
-	/// Maximum age of a non-latest group before the publisher evicts it, in
-	/// microseconds. Null imposes no publisher age limit. This is the publisher-side half of
-	/// [`MoqSubscription::max_delay_us`](crate::consumer::MoqSubscription::max_delay_us).
+	/// Maximum age of a non-latest group before the publisher evicts it. Null imposes no
+	/// publisher age limit. This is the publisher-side half of
+	/// [`MoqSubscription::max_delay`](crate::consumer::MoqSubscription::max_delay).
 	#[uniffi(default = None)]
-	pub max_age_us: Option<u64>,
+	pub max_age: Option<std::time::Duration>,
 	/// How many times its first frame a group's later bytes may grow before a joining
 	/// subscriber asks for a new group, or null to never ask. See
 	/// [`MoqTrackDemand::wanted`](crate::demand::MoqTrackDemand::wanted).
@@ -46,8 +46,8 @@ impl TryFrom<MoqTrackInfo> for moq_net::track::Info {
 		let mut out = moq_net::track::Info::default()
 			.with_priority(info.priority)
 			.with_refresh(info.refresh);
-		if let Some(us) = info.max_age_us {
-			out = out.with_max_age(std::time::Duration::from_micros(us));
+		if let Some(max_age) = info.max_age {
+			out = out.with_max_age(max_age);
 		}
 		if let Some(ticks) = info.timescale {
 			let scale = moq_net::Timescale::new(ticks).map_err(|_| MoqError::Codec {
@@ -65,24 +65,15 @@ fn raw_track_info(info: Option<MoqTrackInfo>) -> Result<moq_net::track::Info, Mo
 		.map(|info| info.unwrap_or_default())
 }
 
-impl TryFrom<&moq_net::track::Info> for MoqTrackInfo {
-	type Error = MoqError;
-
-	fn try_from(info: &moq_net::track::Info) -> Result<Self, MoqError> {
-		let max_age_us = info
-			.max_age
-			.map(|age| u64::try_from(age.as_micros()))
-			.transpose()
-			.map_err(|_| MoqError::Codec {
-				reason: "track max_age duration overflow".into(),
-			})?;
-		Ok(Self {
+impl From<&moq_net::track::Info> for MoqTrackInfo {
+	fn from(info: &moq_net::track::Info) -> Self {
+		Self {
 			priority: info.priority,
-			max_age_us,
+			max_age: info.max_age.map(crate::ffi::duration),
 			refresh: info.refresh,
 			timescale: info.timescale.map(|timescale| timescale.as_u64()),
 			compress: info.compress,
-		})
+		}
 	}
 }
 
@@ -90,52 +81,130 @@ impl TryFrom<&moq_net::track::Info> for MoqTrackInfo {
 
 pub(crate) struct BroadcastProducer {
 	pub(crate) broadcast: moq_net::broadcast::Producer,
+	pub(crate) publication: Option<moq_net::origin::Publication>,
 	// Carries the untyped `Extra` extension so callers can attach application catalog
 	// sections by name (the only extension shape that crosses the FFI boundary).
 	pub(crate) catalog: moq_mux::catalog::Producer<Extra>,
 	// Core timebases own catalog outputs, so the broadcast holds them and binding handles stay weak.
 	pub(crate) timebases: std::collections::HashMap<usize, moq_mux::catalog::Timebase<Extra>>,
 	pub(crate) driver: Background,
-	pub(crate) finished: Finished,
+	pub(crate) children: Children,
+	/// Set by [`MoqMediaCatalogProducer::finish`](crate::media::MoqMediaCatalogProducer::finish): the
+	/// catalog is final, so a close leaves it alone.
+	pub(crate) ended: bool,
 }
 
 impl Drop for BroadcastProducer {
 	fn drop(&mut self) {
-		self.finished.release();
+		self.children.release();
 	}
 }
 
-/// The finished importers a broadcast keeps, or `None` once it ended.
-type Keeping = Option<Vec<Box<dyn kio::MaybeSend>>>;
+/// `Send + Sync` natively, where any thread may close a broadcast; nothing on single-threaded wasm.
+#[cfg(not(target_family = "wasm"))]
+pub(crate) trait Shared: Send + Sync {}
+#[cfg(not(target_family = "wasm"))]
+impl<T: Send + Sync + ?Sized> Shared for T {}
+#[cfg(target_family = "wasm")]
+pub(crate) trait Shared {}
+#[cfg(target_family = "wasm")]
+impl<T: ?Sized> Shared for T {}
 
-/// Finished producers a broadcast keeps until it ends.
+/// A handle publishing tracks on a broadcast, which its broadcast ends on close.
+pub(crate) trait Child: Shared {
+	/// End whatever this handle still publishes with `err`, so later calls fail with `Closed`.
+	///
+	/// A track that already finished ends cleanly instead.
+	fn abort(&self, err: moq_net::Error);
+}
+
+/// What a broadcast holds of its children.
+enum Family {
+	Open {
+		/// Handles that may still publish, ended on close.
+		open: Vec<std::sync::Weak<dyn Child>>,
+		/// Finished producers, kept so a late subscriber still finds their tracks.
+		kept: Vec<Box<dyn kio::MaybeSend>>,
+	},
+	/// The broadcast handle was dropped without a close: each child ends on its own.
+	Released,
+	/// The broadcast closed: its children ended and new ones are refused.
+	Closed,
+}
+
+/// The track-publishing handles of one broadcast.
 ///
-/// A track unlists once its last producer drops, and a finish holds only listed tracks. An
-/// importer lets go of its producer when it finishes, and a binding may release a raw track's
-/// handle whenever its garbage collector runs, so the broadcast keeps them here instead, and
-/// [`MoqBroadcastProducer::finish`] still holds the track.
+/// A child that drops without finishing aborts itself, so a garbage-collected binding never
+/// leaves a track to drop without a cause, and closing the broadcast aborts every child still
+/// open. A finished track stops being served once its last producer drops, and an importer lets
+/// go of its producer when it finishes, so the broadcast keeps finished producers here instead:
+/// a subscriber arriving after the end still finds the track until the broadcast closes.
 #[derive(Clone)]
-pub(crate) struct Finished(Arc<std::sync::Mutex<Keeping>>);
+pub(crate) struct Children(Arc<std::sync::Mutex<Family>>);
 
-impl Default for Finished {
+impl Default for Children {
 	fn default() -> Self {
-		Self(Arc::new(std::sync::Mutex::new(Some(Vec::new()))))
+		Self(Arc::new(std::sync::Mutex::new(Family::Open {
+			open: Vec::new(),
+			kept: Vec::new(),
+		})))
 	}
 }
 
-impl Finished {
+impl Children {
+	/// Register a new child so a close ends it. Once the broadcast closed, the child is aborted
+	/// and refused with `Closed`.
+	pub(crate) fn adopt<T: Child + 'static>(&self, child: Arc<T>) -> Result<Arc<T>, MoqError> {
+		let mut family = self.0.lock().unwrap();
+		match &mut *family {
+			Family::Open { open, .. } => {
+				open.retain(|child| child.strong_count() > 0);
+				let weak: std::sync::Weak<dyn Child> = Arc::downgrade(&child) as _;
+				open.push(weak);
+				Ok(child)
+			}
+			Family::Released => Ok(child),
+			Family::Closed => {
+				drop(family);
+				child.abort(moq_net::Error::Unroutable);
+				Err(MoqError::Closed)
+			}
+		}
+	}
+
+	/// Whether the broadcast closed, ending its children.
+	fn is_closed(&self) -> bool {
+		matches!(*self.0.lock().unwrap(), Family::Closed)
+	}
+
 	/// Keep a finished producer until the broadcast ends, or drop it now if it already has.
 	pub(crate) fn keep(&self, producer: impl kio::MaybeSend + 'static) {
 		let producer: Box<dyn kio::MaybeSend> = Box::new(producer);
-		let mut kept = self.0.lock().unwrap();
-		if let Some(kept) = kept.as_mut() {
+		if let Family::Open { kept, .. } = &mut *self.0.lock().unwrap() {
 			kept.push(producer);
 		}
 	}
 
-	/// Stop keeping, handing back what was kept so the caller decides when it drops.
-	fn release(&self) -> Vec<Box<dyn kio::MaybeSend>> {
-		self.0.lock().unwrap().take().unwrap_or_default()
+	/// End every open child with `Unroutable`, then let go of the finished ones.
+	fn close(&self) {
+		let family = std::mem::replace(&mut *self.0.lock().unwrap(), Family::Closed);
+		if let Family::Open { open, kept } = family {
+			// Outside the lock: a child's own finish keeps into it while holding the child's lock.
+			for child in open.iter().filter_map(std::sync::Weak::upgrade) {
+				child.abort(moq_net::Error::Unroutable);
+			}
+			drop(kept);
+		}
+	}
+
+	/// Let go of the finished producers, leaving open children to end on their own.
+	fn release(&self) {
+		let mut family = self.0.lock().unwrap();
+		if matches!(*family, Family::Open { .. }) {
+			let released = std::mem::replace(&mut *family, Family::Released);
+			drop(family);
+			drop(released);
+		}
 	}
 }
 
@@ -167,7 +236,7 @@ impl MoqTrackDynamic {
 
 struct DynamicProducer {
 	inner: moq_net::broadcast::Dynamic,
-	finished: Finished,
+	children: Children,
 }
 
 struct TrackDynamicProducer {
@@ -180,14 +249,14 @@ impl DynamicProducer {
 		// accepts it (raw, at a chosen timescale) or publishes media onto it (importer accepts).
 		// The subscriber's subscribe stays pending until then.
 		let request = self.inner.requested_track().await?;
-		Ok(Arc::new(MoqTrackRequest::new(request, self.finished.clone())))
+		Ok(Arc::new(MoqTrackRequest::new(request, self.children.clone())))
 	}
 }
 
 impl TrackDynamicProducer {
-	async fn requested_group(&mut self) -> Result<Arc<MoqGroupRequest>, MoqError> {
-		let request = self.inner.requested_group().await?;
-		Ok(Arc::new(MoqGroupRequest::new(request)))
+	async fn requested_fill(&mut self) -> Result<Arc<MoqFill>, MoqError> {
+		let fill = self.inner.requested_fill().await?;
+		Ok(Arc::new(MoqFill { inner: Arc::new(fill) }))
 	}
 }
 
@@ -204,12 +273,27 @@ impl MoqBroadcastProducer {
 		Ok(Self {
 			state: std::sync::Mutex::new(Some(BroadcastProducer {
 				broadcast,
+				publication: None,
 				catalog,
 				timebases: Default::default(),
 				driver,
-				finished: Default::default(),
+				children: Default::default(),
+				ended: false,
 			})),
 		})
+	}
+
+	/// Retain the native publication capability alongside the binding's fill handle.
+	pub(crate) fn from_publication(
+		publication: moq_net::origin::Publication,
+		driver: Background,
+	) -> Result<Self, MoqError> {
+		let result = Self::from_inner(publication.broadcast().clone(), driver)?;
+		result.with_state(|state| {
+			state.publication = Some(publication);
+			Ok(())
+		})?;
+		Ok(result)
 	}
 
 	#[cfg(test)]
@@ -257,7 +341,7 @@ impl MoqBroadcastProducer {
 			Ok(Arc::new(MoqBroadcastDynamic {
 				task: Task::new(DynamicProducer {
 					inner: state.broadcast.dynamic(),
-					finished: state.finished.clone(),
+					children: state.children.clone(),
 				})
 				.supervised(state.driver.clone()),
 			}))
@@ -286,7 +370,7 @@ impl MoqBroadcastProducer {
 		let _guard = crate::ffi::enter();
 		let route: moq_net::origin::Route = route.try_into()?;
 		self.with_state(|state| {
-			state.broadcast.announce(route)?;
+			state.publication.as_ref().ok_or(MoqError::Closed)?.announce(route)?;
 			Ok(())
 		})
 	}
@@ -299,7 +383,9 @@ impl MoqBroadcastProducer {
 	pub fn unannounce(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		self.with_state(|state| {
-			state.broadcast.unannounce();
+			if let Some(publication) = &state.publication {
+				publication.unannounce();
+			}
 			Ok(())
 		})
 	}
@@ -316,17 +402,15 @@ impl MoqBroadcastProducer {
 			// Clone the broadcast handle (shared Arc internally) to get &mut access.
 			let broadcast = state.broadcast.clone();
 			let producer = broadcast.create_track(name, Some(info))?;
-			Ok(Arc::new(MoqTrackProducer {
-				inner: std::sync::Mutex::new(Some(producer)),
-				finished: std::sync::Mutex::new(Some(state.finished.clone())),
-			}))
+			MoqTrackProducer::child(producer, &state.children)
 		})
 	}
 
 	/// End the broadcast for good: retract it, serve no new tracks, and finalize the catalog.
 	///
-	/// Tracks already subscribed carry on to their own end. Every later call on this
-	/// producer fails with `Closed`; closing again is a no-op.
+	/// Every track handle still open on it ends with `Unroutable`, the way a reader sees a
+	/// publisher leave, and its later calls fail with `Closed`. Finish a track first to end it
+	/// cleanly. Every later call on this producer fails with `Closed`; closing again is a no-op.
 	pub fn close(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		// Hold the lock through shutdown so a concurrent close() returns only once it is done.
@@ -334,102 +418,16 @@ impl MoqBroadcastProducer {
 		let Some(mut state) = guard.take() else {
 			return Ok(());
 		};
-		// Close the broadcast first so it ends even if finalizing the catalog fails.
+		// The children first, so none outlives the broadcast it publishes on, and the broadcast
+		// before the catalog so it ends even if finalizing the catalog fails.
+		state.children.close();
 		state.broadcast.close();
-		let result = state.catalog.finish().map_err(Into::into);
+		let result = match state.ended {
+			true => Ok(()),
+			false => state.catalog.finish().map_err(Into::into),
+		};
 		state.driver.check()?;
 		result
-	}
-
-	/// End the broadcast cleanly, keeping it servable until its media goes stale.
-	///
-	/// Finish every track first: the returned handle holds the tracks finished by now and keeps
-	/// the broadcast announced, so a subscriber still catching up can drain them. A track still
-	/// live is not held and adds nothing to the linger. Await [`MoqBroadcastFinish::wait`], or keep
-	/// the handle for [`MoqBroadcastFinish::linger_us`] on your own clock and then close it.
-	///
-	/// Every later call on this producer fails with `Closed`, as after [`close`](Self::close).
-	pub fn finish(&self) -> Result<Arc<MoqBroadcastFinish>, MoqError> {
-		let _guard = crate::ffi::enter();
-		let mut state = self.state.lock().unwrap().take().ok_or(MoqError::Closed)?;
-		// Finished before the broadcast is, so the catalog lingers with the media. On failure the
-		// producer is gone, so close the broadcast rather than leave a dynamic handle holding it.
-		let ready = state.catalog.finish().map_err(MoqError::from);
-		if let Err(err) = ready.and_then(|()| state.driver.check()) {
-			state.broadcast.close();
-			return Err(err);
-		}
-		let broadcast = state.broadcast.clone();
-		// Released only once the finish holds their tracks.
-		let finished = state.finished.release();
-		let finish = state.broadcast.clone().finish();
-		drop(finished);
-		Ok(Arc::new(MoqBroadcastFinish {
-			linger: finish.linger(),
-			until: moq_clock::now().checked_add(finish.linger()),
-			broadcast,
-			finish: std::sync::Mutex::new(Some(finish)),
-		}))
-	}
-}
-
-/// A cleanly ended broadcast, still announced and serving its finished tracks.
-///
-/// Returned by [`MoqBroadcastProducer::finish`]. Closing or dropping it closes the broadcast,
-/// which is how an interrupt ends the linger early. A garbage-collected language (Kotlin, Go,
-/// Dart) drops it only when the collector reclaims it, possibly long after the last reference
-/// goes, so wait on or close it rather than leave it for the collector.
-#[derive(uniffi::Object)]
-pub struct MoqBroadcastFinish {
-	linger: std::time::Duration,
-	// The linger counts from the finish, as a C caller's own clock would, not from the first
-	// poll of a wait; `None` when it overflows the clock.
-	until: Option<moq_clock::Instant>,
-	// Closes the broadcast from any thread, ending a wait that took `finish`.
-	broadcast: moq_net::broadcast::Producer,
-	// Taken by `wait` or `close`.
-	finish: std::sync::Mutex<Option<moq_net::broadcast::Finish>>,
-}
-
-#[uniffi::export]
-impl MoqBroadcastFinish {
-	/// How long to keep the broadcast, in microseconds: the longest max age of the held tracks.
-	///
-	/// Tracks still live at the finish, and tracks without a max age, add nothing.
-	pub fn linger_us(&self) -> u64 {
-		u64::try_from(self.linger.as_micros()).unwrap_or(u64::MAX)
-	}
-
-	/// Keep the broadcast up for its linger, or until [`close`](Self::close), then close it.
-	///
-	/// Cancelling the wait closes the broadcast at once. Errors with `Closed` once another wait
-	/// or a close took the handle.
-	pub async fn wait(&self) -> Result<(), MoqError> {
-		let finish = self.finish.lock().unwrap().take().ok_or(MoqError::Closed)?;
-		let until = self.until;
-		crate::ffi::detached(async move {
-			let closed = kio::wait(|waiter| finish.poll_closed(waiter));
-			match until {
-				Some(until) => {
-					tokio::select! {
-						_ = moq_clock::sleep_until(until) => {}
-						_ = closed => {}
-					}
-				}
-				None => closed.await,
-			}
-			// Dropping the finish is what closes the broadcast.
-			drop(finish);
-			Ok::<_, MoqError>(())
-		})
-		.await
-	}
-
-	/// Close the broadcast now, ending the linger and any wait. Closing again is a no-op.
-	pub fn close(&self) {
-		let _guard = crate::ffi::enter();
-		self.broadcast.close();
-		drop(self.finish.lock().unwrap().take());
 	}
 }
 
@@ -464,17 +462,17 @@ impl MoqBroadcastDynamic {
 
 #[uniffi::export]
 impl MoqTrackDynamic {
-	/// Wait for the next fetch of an uncached group.
+	/// Wait for the next run of groups readers miss: a fetch of an uncached group, or
+	/// history a subscription reads that the cache no longer holds.
 	///
-	/// Accept the returned request to produce the group, or abort it with an
-	/// application error. Cached groups are served without reaching this method.
-	pub async fn requested_group(&self) -> Result<Arc<MoqGroupRequest>, MoqError> {
+	/// Cached groups are served without reaching this method.
+	pub async fn requested_fill(&self) -> Result<Arc<MoqFill>, MoqError> {
 		self.task
-			.run(|mut state| async move { state.requested_group().await })
+			.run(|mut state| async move { state.requested_fill().await })
 			.await
 	}
 
-	/// Cancel all current and future `requested_group()` calls.
+	/// Cancel all current and future `requested_fill()` calls.
 	///
 	/// Terminal: the dynamic track is released here, not when the handle is, so any pending
 	/// fetch is rejected.
@@ -483,55 +481,102 @@ impl MoqTrackDynamic {
 	}
 }
 
-/// An uncached group requested by a fetch consumer.
+/// A run of groups readers miss, mirroring [`moq_net::track::Fill`].
+///
+/// Call [`accept`](Self::accept) for each group you have and [`drop_groups`](Self::drop_groups)
+/// for the rest; [`next`](Self::next) names what is still owed, in the fill's order. Releasing
+/// it names whatever is left as dropped while a reader still wants it; once nobody does, it is
+/// withdrawn, so stop serving it when [`unused`](Self::unused) resolves. Stop serving a single
+/// group when [`unwanted`](Self::unwanted) resolves for it, and move on to the next.
 #[derive(uniffi::Object)]
-pub struct MoqGroupRequest {
-	sequence: u64,
-	priority: i8,
-	inner: std::sync::Mutex<Option<moq_net::group::Request>>,
-}
-
-impl MoqGroupRequest {
-	fn new(request: moq_net::group::Request) -> Self {
-		Self {
-			sequence: request.sequence(),
-			priority: request.priority(),
-			inner: std::sync::Mutex::new(Some(request)),
-		}
-	}
-
-	fn take(&self) -> Result<moq_net::group::Request, MoqError> {
-		self.inner.lock().unwrap().take().ok_or(MoqError::Closed)
-	}
+pub struct MoqFill {
+	inner: Arc<moq_net::track::Fill>,
 }
 
 #[uniffi::export]
-impl MoqGroupRequest {
-	/// The requested group sequence within the track.
-	pub fn sequence(&self) -> u64 {
-		self.sequence
+impl MoqFill {
+	/// The first group to fill.
+	pub fn start_group(&self) -> u64 {
+		self.inner.start().group
 	}
 
-	/// The consumer's delivery priority for this fetch.
+	/// The frame within the first group to start from.
+	pub fn start_frame(&self) -> u64 {
+		self.inner.start().frame
+	}
+
+	/// The exclusive end group.
+	pub fn end_group(&self) -> u64 {
+		self.inner.end()
+	}
+
+	/// The most urgent delivery priority among the readers waiting on it.
 	pub fn priority(&self) -> i8 {
-		self.priority
+		self.inner.priority()
 	}
 
-	/// Accept the request and return a producer for filling the fetched group.
-	pub fn accept(&self) -> Result<Arc<MoqGroupProducer>, MoqError> {
+	/// The most tolerant age budget among the readers waiting on it, or null for the
+	/// publisher's max age alone.
+	pub fn max_delay(&self) -> Option<std::time::Duration> {
+		self.inner.max_delay().map(crate::ffi::duration)
+	}
+
+	/// Which end to fill first.
+	pub fn order(&self) -> MoqOrder {
+		self.inner.order().into()
+	}
+
+	/// The next group still owed in the fill's order, or null once every group is answered.
+	pub fn next(&self) -> Option<u64> {
+		self.inner.next()
+	}
+
+	/// Insert group `sequence` and return a producer for filling it. The first group starts
+	/// at [`start_frame`](Self::start_frame), so its frames keep their indices.
+	pub fn accept(&self, sequence: u64) -> Result<Arc<MoqGroupProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
-		let group = self.take()?.accept(None)?;
+		let group = self.inner.accept(sequence, None)?;
 		Ok(Arc::new(MoqGroupProducer {
 			sequence: group.sequence,
 			inner: std::sync::Mutex::new(Some(group)),
 		}))
 	}
 
-	/// Reject the fetch with an application error code.
-	pub fn abort(&self, error_code: u16) -> Result<(), MoqError> {
+	/// Name groups `start` up to the exclusive `end` as never to be delivered.
+	pub fn drop_groups(&self, start: u64, end: u64) {
 		let _guard = crate::ffi::enter();
-		self.take()?.reject(moq_net::Error::App(error_code));
-		Ok(())
+		self.inner.drop_groups(start..end);
+	}
+
+	/// Whether a reader still waits on this fill.
+	pub fn is_used(&self) -> bool {
+		self.inner.is_used()
+	}
+
+	/// Wait until no reader waits on this fill.
+	pub async fn unused(&self) -> Result<(), MoqError> {
+		let fill = self.inner.clone();
+		crate::ffi::detached(async move {
+			fill.unused().await;
+			Ok::<_, MoqError>(())
+		})
+		.await
+	}
+
+	/// Whether a reader still waits for group `sequence` from this fill: false once every
+	/// reader took it or narrowed past it, or nobody waits on the fill.
+	pub fn is_wanted(&self, sequence: u64) -> bool {
+		self.inner.is_wanted(sequence)
+	}
+
+	/// Wait until no reader waits for group `sequence` from this fill, so stop serving it.
+	pub async fn unwanted(&self, sequence: u64) -> Result<(), MoqError> {
+		let fill = self.inner.clone();
+		crate::ffi::detached(async move {
+			fill.unwanted(sequence).await;
+			Ok::<_, MoqError>(())
+		})
+		.await
 	}
 }
 
@@ -545,14 +590,14 @@ impl MoqGroupRequest {
 #[derive(uniffi::Object)]
 pub struct MoqTrackRequest {
 	inner: std::sync::Mutex<Option<moq_net::track::Request>>,
-	finished: Finished,
+	children: Children,
 }
 
 impl MoqTrackRequest {
-	pub(crate) fn new(request: moq_net::track::Request, finished: Finished) -> Self {
+	pub(crate) fn new(request: moq_net::track::Request, children: Children) -> Self {
 		Self {
 			inner: std::sync::Mutex::new(Some(request)),
-			finished,
+			children,
 		}
 	}
 
@@ -592,16 +637,15 @@ impl MoqTrackRequest {
 
 	/// Accept the request as a raw track, fixing its [`MoqTrackInfo`] (timescale, etc.).
 	///
+	/// Once the broadcast closed, the track ends with `Unroutable` and this fails with `Closed`.
+	///
 	/// For media use [`crate::media::MoqMediaTrackProducer::audio`] instead, which lets
 	/// the importer pick the timescale.
 	pub fn accept(&self, info: Option<MoqTrackInfo>) -> Result<Arc<MoqTrackProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let info = raw_track_info(info)?;
 		let request = self.take()?;
-		Ok(Arc::new(MoqTrackProducer {
-			inner: std::sync::Mutex::new(Some(request.accept(Some(info)))),
-			finished: std::sync::Mutex::new(Some(self.finished.clone())),
-		}))
+		MoqTrackProducer::child(request.accept(Some(info)), &self.children)
 	}
 
 	/// Reject the request with an application error code, failing the waiting subscriber.
@@ -616,14 +660,47 @@ impl MoqTrackRequest {
 // ---- Track Producer ----
 
 /// A track to which groups, frames, or datagrams can be published.
+///
+/// Released before its finish, or still open when its broadcast closes, it ends its track with
+/// `Unroutable`, which readers take as the publisher leaving.
 #[derive(uniffi::Object)]
 pub struct MoqTrackProducer {
 	inner: std::sync::Mutex<Option<moq_net::track::Producer>>,
 	// Taken by the first finish, so repeating it keeps the track only once.
-	finished: std::sync::Mutex<Option<Finished>>,
+	keep: std::sync::Mutex<Option<Children>>,
+}
+
+impl Child for MoqTrackProducer {
+	fn abort(&self, err: moq_net::Error) {
+		let _guard = crate::ffi::enter();
+		// A finished track ends at its declared end, as when its handle drops.
+		let track = self.inner.lock().unwrap().take();
+		if let Some(track) = track.filter(|track| track.end().is_none()) {
+			let _ = track.abort(err);
+		}
+	}
+}
+
+impl Drop for MoqTrackProducer {
+	fn drop(&mut self) {
+		let _guard = crate::ffi::enter();
+		// A finished track lives on in its broadcast, and may still take groups below its end.
+		let track = self.inner.get_mut().unwrap().take();
+		if let Some(track) = track.filter(|track| track.end().is_none()) {
+			let _ = track.abort(moq_net::Error::Unroutable);
+		}
+	}
 }
 
 impl MoqTrackProducer {
+	/// Wrap `track` as a child of the broadcast `children` belongs to.
+	fn child(track: moq_net::track::Producer, children: &Children) -> Result<Arc<Self>, MoqError> {
+		children.adopt(Arc::new(Self {
+			inner: std::sync::Mutex::new(Some(track)),
+			keep: std::sync::Mutex::new(Some(children.clone())),
+		}))
+	}
+
 	pub(crate) fn track_demand(&self) -> Result<moq_net::track::Demand, MoqError> {
 		let guard = self.inner.lock().unwrap();
 		let track = guard.as_ref().ok_or(MoqError::Closed)?;
@@ -631,16 +708,33 @@ impl MoqTrackProducer {
 	}
 
 	/// Hand the track to a typed writer that `f` builds (a JSON producer, say), closing this
-	/// handle once `f` succeeds so the writer is the track's only producer. On failure the
-	/// handle stays open.
-	pub(crate) fn adopt<R>(
+	/// handle once `f` succeeds so the writer is the track's only producer. The writer takes this
+	/// handle's place among its broadcast's children. On failure the handle stays open.
+	pub(crate) fn adopt<T: Child + 'static>(
 		&self,
-		f: impl FnOnce(moq_net::track::Producer) -> Result<R, MoqError>,
-	) -> Result<R, MoqError> {
-		let mut guard = self.inner.lock().unwrap();
-		let out = f(guard.as_ref().ok_or(MoqError::Closed)?.clone())?;
-		guard.take();
-		Ok(out)
+		f: impl FnOnce(moq_net::track::Producer) -> Result<T, MoqError>,
+	) -> Result<Arc<T>, MoqError> {
+		// Taken for the whole construction, so a racing adopt finds the handle closed. `f` runs
+		// outside the lock: it may take the broadcast's, which a close holds while it takes this one.
+		let track = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
+		let writer = match f(track.clone()) {
+			Ok(writer) => Arc::new(writer),
+			Err(err) => {
+				*self.inner.lock().unwrap() = Some(track);
+				// A close during `f` found nothing to end, so the restored track ends here.
+				let children = self.keep.lock().unwrap().clone();
+				if children.is_some_and(|children| children.is_closed()) {
+					Child::abort(self, moq_net::Error::Unroutable);
+				}
+				return Err(err);
+			}
+		};
+		// A finished track has no family left to join, and ends at its declared end.
+		let children = self.keep.lock().unwrap().clone();
+		match children {
+			Some(children) => children.adopt(writer),
+			None => Ok(writer),
+		}
 	}
 }
 
@@ -744,7 +838,7 @@ impl MoqTrackProducer {
 	///
 	/// [`finish_at`](Self::finish_at) declares the boundary ahead of time, so this keeps
 	/// that boundary. The handle remains so a later [`abort`](Self::abort) can still run, and
-	/// the broadcast keeps the finished track until it ends, so its finish still holds it.
+	/// the broadcast keeps the finished track until it closes.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
@@ -752,8 +846,8 @@ impl MoqTrackProducer {
 		if track.end().is_none() {
 			track.finish()?;
 		}
-		if let Some(finished) = self.finished.lock().unwrap().take() {
-			finished.keep(track.clone());
+		if let Some(children) = self.keep.lock().unwrap().take() {
+			children.keep(track.clone());
 		}
 		Ok(())
 	}
@@ -867,33 +961,47 @@ mod metadata_tests {
 			track.finish().unwrap();
 		}
 		let state = broadcast.state.lock().unwrap();
-		let finished = &state.as_ref().unwrap().finished;
-		let kept = finished.0.lock().unwrap().as_ref().map(Vec::len);
+		let kept = match &*state.as_ref().unwrap().children.0.lock().unwrap() {
+			Family::Open { kept, .. } => kept.len(),
+			_ => unreachable!("the broadcast is still open"),
+		};
 		drop(state);
-		assert_eq!(kept, Some(1));
+		assert_eq!(kept, 1);
 	}
 
 	#[test]
 	fn untimed_info_round_trips_through_the_binding() {
 		let original = moq_net::track::Info::default();
-		let info = MoqTrackInfo::try_from(&original).unwrap();
+		let info = MoqTrackInfo::from(&original);
 		assert_eq!(moq_net::track::Info::try_from(info).unwrap().timescale, None);
 		assert_eq!(raw_track_info(None).unwrap().timescale, None);
 	}
 
 	#[test]
 	fn optional_retention_survives_binding_conversion() {
-		for max_age_us in [None, Some(0), Some(30_000_000)] {
+		for max_age in [
+			None,
+			Some(std::time::Duration::ZERO),
+			Some(std::time::Duration::from_secs(30)),
+		] {
 			let info = MoqTrackInfo {
 				priority: 0,
-				max_age_us,
+				max_age,
 				refresh: None,
 				timescale: None,
 				compress: false,
 			};
 			let model = moq_net::track::Info::try_from(info).unwrap();
-			assert_eq!(model.max_age, max_age_us.map(std::time::Duration::from_micros));
-			assert_eq!(MoqTrackInfo::try_from(&model).unwrap().max_age_us, max_age_us);
+			assert_eq!(model.max_age, max_age);
+			assert_eq!(MoqTrackInfo::from(&model).max_age, max_age);
 		}
+	}
+
+	/// C and C++ abort on a duration past `i64::MAX` nanoseconds, so a peer's longer age saturates.
+	#[test]
+	fn oversized_retention_saturates_for_the_bindings() {
+		let model = moq_net::track::Info::default().with_max_age(std::time::Duration::MAX);
+		let max_age = MoqTrackInfo::from(&model).max_age.unwrap();
+		assert_eq!(max_age, std::time::Duration::from_nanos(i64::MAX as u64));
 	}
 }

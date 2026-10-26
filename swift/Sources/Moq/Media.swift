@@ -91,6 +91,12 @@ public enum Media {
         public func setSection(name: String, json: String) throws { try ffi.setSection(name: name, json: json) }
         /// Remove an application catalog section if present.
         public func removeSection(name: String) throws { try ffi.removeSection(name: name) }
+        /// Finish the catalog, which ends the broadcast's content.
+        ///
+        /// Finish every track first. The broadcast stays announced and keeps serving its finished
+        /// tracks to late subscribers until its `close()` takes it offline; how long to keep it up
+        /// is yours to decide.
+        public func finish() throws { try ffi.finish() }
     }
 
     /// Read side of a broadcast's catalog. Iterating yields catalog updates as the
@@ -180,7 +186,7 @@ public enum Media {
         ///
         /// Pair it with ``Moq/TrackConsumer/recvGroup()`` to read media in arrival order: frame
         /// timestamps are container media time, not the transport's. Which groups arrive, and how
-        /// long a stalled one stays readable, is the subscription's `maxDelayUs`. Takes over
+        /// long a stalled one stays readable, is the subscription's `maxDelay`. Takes over
         /// `group`, whose handle is closed afterward; throws if it has already read a frame.
         public convenience init(group: Moq.GroupConsumer, container: Container) throws {
             self.init(try MoqMediaGroupConsumer(group: group.ffi, container: container))

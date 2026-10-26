@@ -93,6 +93,8 @@ pub struct EgressSource {
 	/// The latest catalog snapshot, followed for the session's life so each pump serves the
 	/// best enabled rendition. Its sender drops when the catalog ends.
 	catalog: watch::Receiver<Catalog>,
+	/// Why the catalog stopped, until the session takes it.
+	catalog_end: Option<tokio::task::JoinHandle<Result<()>>>,
 	writes_tx: mpsc::Sender<WriteRequest>,
 	writes_rx: Option<mpsc::Receiver<WriteRequest>>,
 }
@@ -111,12 +113,13 @@ impl EgressSource {
 		let mut consumer = source.catalog::<()>(moq_mux::catalog::CatalogFormat::Hang).await?;
 		let catalog = consumer.next().await?.ok_or(Error::CatalogClosed)?;
 		let (catalog_tx, catalog) = watch::channel(catalog);
-		tokio::spawn(follow_catalog(consumer, catalog_tx));
+		let catalog_end = tokio::spawn(follow_catalog(consumer, catalog_tx));
 
 		let (tx, rx) = mpsc::channel(64);
 		Ok(Self {
 			source,
 			catalog,
+			catalog_end: Some(catalog_end),
 			writes_tx: tx,
 			writes_rx: Some(rx),
 		})
@@ -126,6 +129,12 @@ impl EgressSource {
 	/// awaits on this to forward frames into str0m.
 	pub fn take_writes(&mut self) -> mpsc::Receiver<WriteRequest> {
 		self.writes_rx.take().expect("EgressSource writes_rx already taken")
+	}
+
+	/// One-shot extractor for why the catalog stopped. A failure, such as the source's route
+	/// dying, ends the session, since nothing more will flow.
+	pub(crate) fn take_catalog_end(&mut self) -> tokio::task::JoinHandle<Result<()>> {
+		self.catalog_end.take().expect("EgressSource catalog_end already taken")
 	}
 
 	/// Spawn a pump task for a newly added (sendonly) media line.
@@ -184,21 +193,22 @@ impl EgressSource {
 	}
 }
 
-/// Publish each catalog snapshot until the catalog ends or every pump is gone.
-async fn follow_catalog(mut consumer: moq_mux::catalog::Consumer<()>, tx: watch::Sender<Catalog>) {
+/// Publish each catalog snapshot until the catalog ends or every pump is gone, failing with the
+/// catalog's failure.
+async fn follow_catalog(mut consumer: moq_mux::catalog::Consumer<()>, tx: watch::Sender<Catalog>) -> Result<()> {
 	loop {
 		tokio::select! {
 			next = consumer.next() => match next {
 				Ok(Some(catalog)) => {
 					tx.send_replace(catalog);
 				}
-				Ok(None) => return,
+				Ok(None) => return Ok(()),
 				Err(err) => {
 					tracing::warn!(%err, "egress catalog failed");
-					return;
+					return Err(err.into());
 				}
 			},
-			_ = tx.closed() => return,
+			_ = tx.closed() => return Ok(()),
 		}
 	}
 }
@@ -636,6 +646,7 @@ mod tests {
 		let egress = EgressSource {
 			source,
 			catalog: watch::channel(catalog).1,
+			catalog_end: None,
 			writes_tx,
 			writes_rx: Some(writes_rx),
 		};
@@ -889,9 +900,11 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_moved_rendition_follows_its_new_track() {
 		let origin = produce_origin();
-		let mut live = origin.publish("live", Default::default()).unwrap();
-		let mut other = origin.publish("other", Default::default()).unwrap();
-		let mut catalog = moq_mux::catalog::Producer::new(&mut live, moq_mux::catalog::Config::default()).unwrap();
+		let live = origin.publish("live", Default::default()).unwrap();
+		let other = origin.publish("other", Default::default()).unwrap();
+		let mut catalog =
+			moq_mux::catalog::Producer::new(&mut live.broadcast().clone(), moq_mux::catalog::Config::default())
+				.unwrap();
 		let track = |broadcast: &mut moq_net::broadcast::Producer, name: &str| {
 			let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
 			moq_mux::container::Producer::new(
@@ -899,9 +912,9 @@ mod tests {
 				moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
 			)
 		};
-		let mut a = track(&mut live, "a");
-		let mut b = track(&mut live, "b");
-		let mut sibling = track(&mut other, "a");
+		let mut a = track(&mut live.broadcast().clone(), "a");
+		let mut b = track(&mut live.broadcast().clone(), "b");
+		let mut sibling = track(&mut other.broadcast().clone(), "a");
 		let point = |catalog: &mut moq_mux::catalog::Producer, track: &str, broadcast: Option<&str>| {
 			let mut config = VideoConfig::new(VideoCodec::VP8);
 			config.container = hang::catalog::Container::Legacy;

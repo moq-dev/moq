@@ -4,6 +4,14 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Durations are `java.time.Duration`
+
+The records carry durations as `java.time.Duration` fields instead of `*Us` microsecond integers, so the duration extension properties are gone: read `backoff.initial`, `stats.rtt`, `grant.expires`, `info.maxAge`, `fill.maxDelay()`, and `consumer.delay()` directly.
+Convert with `toKotlinDuration()` and `toJavaDuration()` where you want `kotlin.time.Duration`.
+`AudioEncoderOutput.frameDuration` is nullable: pass null where you passed `frameDurationUs = 0u` for the codec's own frame.
+`Subscription.maxDelay` has no default: pass `java.time.Duration.ZERO` for the old one.
+`TrackConsumer.info()` no longer throws.
+
 ### Connection state
 
 `Moq.connect` returns a connecting native session. Replace `status()`, `connects()`, and failure polls with `session.state()` and `session.stateChanged(state.revision)`. `ConnectionState` carries `phase`, `connects`, `failure`, and `version`; `ConnectionPhase` replaces `ConnectionStatus`.
@@ -40,10 +48,11 @@ If you adopted the release line's async `drain()`, call `shutdown()` and then aw
 
 Audio and video init records no longer carry a track name. Pass that name on the media producer's named target instead; init records describe only the codec and media.
 
-### Broadcast `finish` no longer closes
+### Broadcast `finish` is removed
 
-`BroadcastProducer.finish()` was a deprecated alias for `end()`; it no longer ends the broadcast at once.
+`BroadcastProducer.finish()`, a deprecated alias for `end()`, is removed.
 Call `BroadcastProducer.end()` where you called `finish()`.
+To end the content first, call `CatalogProducer.finish()`; the broadcast stays up until `end()`.
 
 ### JSON snapshot `deltaRatio` is `deltas`
 
@@ -83,7 +92,7 @@ Clamp timestamps you build from unbounded input to `2^61 - 1`.
 
 ### Finished tracks stay until the broadcast ends (#6157)
 
-A finished track now stays listed, with its catalog rendition and demand, until its broadcast ends or the new `BroadcastProducer.finish()` lets go.
+A finished track now stays listed, with its catalog rendition and demand, until its broadcast ends.
 Publish a replacement under a new name, and expect a finished track's demand watch to end with the broadcast.
 
 ### A claim answers by publishing (#5678)

@@ -140,10 +140,6 @@ impl Relay {
 		// Every TLS listener serves the ACME certificate, so install it before any is built.
 		#[cfg(feature = "acme")]
 		let acme = config.acme.init(&config.listen.tls, &config.web.https)?;
-		#[cfg(feature = "acme")]
-		if let Some(acme) = &acme {
-			config.listen.tls.resolver = Some(acme.resolver());
-		}
 		let resolved_config = config.clone();
 		let drain_timeout = config.drain_timeout();
 		// The name this relay reports in every auth request: the stats node label,
@@ -203,7 +199,17 @@ impl Relay {
 
 		// Workers and the stream server split one relay across listeners, so they share
 		// one loaded identity. A lone server loads its own, only if a listener needs it.
-		let served = config.runtime.workers().map(|_| config.listen.tls.load()).transpose()?;
+		#[cfg(feature = "acme")]
+		let resolved = acme
+			.as_ref()
+			.map(|acme| moq_tokio::tls::Serve::resolver(acme.resolver(), &config.listen.tls))
+			.transpose()?;
+		#[cfg(not(feature = "acme"))]
+		let resolved = None;
+		let served = match resolved {
+			Some(served) => Some(served),
+			None => config.runtime.workers().map(|_| config.listen.tls.load()).transpose()?,
+		};
 		let mut listen = config.listen.clone();
 		if served.is_some() {
 			listen.tls = Default::default();
@@ -862,10 +868,10 @@ async fn serve_listening(
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	#[cfg(feature = "stun")]
 	#[tokio::test]
+	#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 	async fn stun_listener_runs_with_the_relay_and_stops_with_it() {
 		use stun_types::message::{BINDING, Message, MessageWriteVec};
 		use stun_types::prelude::*;
@@ -914,7 +920,11 @@ mod tests {
 	/// exits at once rather than starting the drain again.
 	#[cfg(unix)]
 	#[tokio::test(start_paused = true)]
-	#[expect(clippy::disallowed_types, reason = "tests read the host clock directly")]
+	#[expect(
+		clippy::disallowed_methods,
+		clippy::disallowed_types,
+		reason = "tests read the host clock directly"
+	)]
 	async fn a_signal_after_an_early_trigger_exits_at_once() {
 		let _signals = crate::shutdown::SIGNALS.lock().await;
 		// Either arm is ready, so an unbiased wait would pass some runs.

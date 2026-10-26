@@ -5,6 +5,7 @@
 
 #include <moq/moq.hpp>
 
+#include <chrono>
 #include <cstring>
 #include <memory>
 #include <optional>
@@ -17,14 +18,15 @@ namespace {
 // Opus codes natively at 48 kHz, so OBS resamples its mix to it.
 constexpr uint32_t SAMPLE_RATE = 48000;
 
-std::optional<moq::AudioPreset> ParsePreset(const char *name)
+// The preset picks the Opus packet duration: low latency halves
+// the packetization delay at twice the packet rate. Quality matches balanced,
+// since libopus already runs at full complexity and longer packets only add delay.
+std::optional<std::chrono::milliseconds> ParsePreset(const char *name)
 {
 	if (strcmp(name, "low_latency") == 0)
-		return moq::AudioPreset::kLowLatency;
-	if (strcmp(name, "balanced") == 0)
-		return moq::AudioPreset::kBalanced;
-	if (strcmp(name, "quality") == 0)
-		return moq::AudioPreset::kQuality;
+		return std::chrono::milliseconds(10);
+	if (strcmp(name, "balanced") == 0 || strcmp(name, "quality") == 0)
+		return std::chrono::milliseconds(20);
 	return std::nullopt;
 }
 
@@ -51,8 +53,8 @@ struct MoQAudioEncoder {
 void *Create(obs_data_t *settings, obs_encoder_t *encoder)
 {
 	const char *preset_name = obs_data_get_string(settings, "preset");
-	const auto preset = ParsePreset(preset_name);
-	if (!preset) {
+	const auto frame_duration = ParsePreset(preset_name);
+	if (!frame_duration) {
 		LOG_ERROR("Unknown MoQ audio preset: %s", preset_name);
 		return nullptr;
 	}
@@ -66,7 +68,7 @@ void *Create(obs_data_t *settings, obs_encoder_t *encoder)
 	output.sample_rate = SAMPLE_RATE;
 	output.channels = channels;
 	output.bitrate = Bitrate(settings);
-	output.preset = *preset;
+	output.frame_duration = *frame_duration;
 
 	auto codec = moq::AudioEncoder::init(output);
 	if (!codec) {

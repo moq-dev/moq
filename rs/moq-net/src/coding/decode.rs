@@ -71,21 +71,9 @@ pub enum DecodeError {
 		max: usize,
 	},
 
-	/// The stream ended where a payload was required.
-	#[error("expected data")]
-	ExpectedData,
-
 	/// A parameter or field appeared more than once.
 	#[error("duplicate")]
 	Duplicate,
-
-	/// A required parameter or field was absent.
-	#[error("missing")]
-	Missing,
-
-	/// The value is well-formed but this implementation does not handle it.
-	#[error("unsupported")]
-	Unsupported,
 
 	/// Bytes remained after the value was fully decoded.
 	#[error("trailing bytes")]
@@ -276,10 +264,21 @@ impl<'a> Decoder<'a> {
 		self.slice(len).inspect_err(|_| self.buf = start)
 	}
 
+	/// Read a varint length, then that many bytes of UTF-8, borrowed from the buffer.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub fn str(&mut self) -> Result<&'a str, DecodeError> {
+		let bytes = self.bytes()?;
+		match std::str::from_utf8(bytes) {
+			Ok(s) => Ok(s),
+			// The error carries an owned copy, so only invalid input pays for one.
+			Err(_) => Err(String::from_utf8(bytes.to_vec()).unwrap_err().into()),
+		}
+	}
+
 	/// Read a varint length, then that many bytes of UTF-8.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn string(&mut self) -> Result<String, DecodeError> {
-		Ok(String::from_utf8(self.bytes()?.to_vec())?)
+		Ok(self.str()?.to_owned())
 	}
 }
 

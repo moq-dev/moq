@@ -610,7 +610,7 @@ mod tests {
 	#[test]
 	fn track_properties_round_trip() {
 		let properties = crate::model::object::TrackProperties {
-			version: Draft::Draft19,
+			version: Draft::Draft18,
 			values: vec![
 				Property {
 					id: IMMUTABLE,
@@ -954,14 +954,14 @@ mod tests {
 		assert!(wire.properties.heap() < (COUNT * size_of::<Property>()) as u64 / 10);
 	}
 
-	/// Drafts 18 and 19 serialize a block alike, so only the track's draft says whether 0x06
-	/// is SUBGROUP_DELIVERY_TIMEOUT: a draft-18 one is dropped on its way to draft-19.
+	/// Drafts 18 and 22 serialize a block alike, so only the track's draft says whether 0x06
+	/// is SUBGROUP_DELIVERY_TIMEOUT: a draft-18 one is dropped on its way to draft-22.
 	#[test]
 	fn a_block_means_what_its_tracks_draft_says() {
-		for (version, kept) in [(Draft::Draft18, false), (Draft::Draft19, true)] {
+		for (version, kept) in [(Draft::Draft18, false), (Draft::Draft22, true)] {
 			let decoded = decode_properties(&[0x06, 42], from(version, None), true).unwrap();
 			let written =
-				crate::ietf::object::write(&decoded.properties, Some(version), None, Draft::Draft19, None).unwrap();
+				crate::ietf::object::write(&decoded.properties, Some(version), None, Draft::Draft22, None).unwrap();
 			assert_eq!(!written.is_empty(), kept, "{version}");
 		}
 	}
@@ -1201,7 +1201,7 @@ mod hop_tests {
 
 			// The upstream group is still open.
 			let frame = next(&mut received).await.unwrap();
-			assert_eq!(&frame.payload[..], b"a");
+			assert_eq!(&frame.payload.contiguous(0)[..], b"a");
 			assert_eq!(frame.timestamp, negotiated.then(|| ts(0)));
 			match negotiated {
 				true => {
@@ -1236,7 +1236,7 @@ mod hop_tests {
 			group.finish().unwrap();
 
 			let frame = next(&mut received).await.unwrap();
-			assert_eq!(&frame.payload[..], b"b");
+			assert_eq!(&frame.payload.contiguous(0)[..], b"b");
 			assert!(next(&mut received).await.is_none());
 			let info = moq_clock::timeout(TIMEOUT, copy.query()).await.unwrap().unwrap();
 			assert_eq!(
@@ -1263,61 +1263,6 @@ mod hop_tests {
 				}
 			}
 		}
-	}
-
-	/// A subscription capped at a group's last frame stops there: its Group State promises
-	/// no END_OF_GROUP, so the END_OF_GROUP record past the cap is not sent either.
-	#[moq_clock::test]
-	async fn a_capped_stream_carries_no_end_record() {
-		let upstream = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
-		let broadcast = upstream.publish("room", crate::origin::Route::default()).unwrap();
-		let mut info = track::Info::timed().with_timescale(Timescale::MILLI);
-		info.properties = draft22(Vec::new());
-		let track = broadcast.create_track("video", info).unwrap();
-		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
-		group
-			.set_wire(group::Wire {
-				sparse: false,
-				first_object: true,
-				first_id: 0,
-				extensions: false,
-				has_end: true,
-				fetchable: true,
-				last: None,
-			})
-			.unwrap();
-		for (index, payload) in [b"a", b"b"].into_iter().enumerate() {
-			let fields = crate::model::object::Fields {
-				id: index as u64,
-				properties: Properties::default(),
-			};
-			group = write(group, index as u64, Some(fields), payload);
-		}
-		group.mark_gap(2, None).unwrap();
-		group
-			.set_end_object(crate::model::object::Fields {
-				id: 2,
-				properties: Properties::default(),
-			})
-			.unwrap();
-		group.finish().unwrap();
-
-		let (downstream, _sessions) = test_hop(&upstream, "room", [true, true]).await;
-		let broadcast = moq_clock::timeout(TIMEOUT, downstream.consume().request_broadcast("room", None))
-			.await
-			.expect("no broadcast")
-			.unwrap();
-		let capped = track::Subscription::default().with_end(track::Position::after(0, 1));
-		let mut subscriber = moq_clock::timeout(TIMEOUT, broadcast.track("video").unwrap().subscribe(capped))
-			.await
-			.expect("no subscription")
-			.unwrap();
-		let mut received = recv(&mut subscriber).await;
-		assert_eq!(&next(&mut received).await.unwrap().payload[..], b"a");
-		assert_eq!(&next(&mut received).await.unwrap().payload[..], b"b");
-		assert!(next(&mut received).await.is_none());
-		assert!(!received.wire().expect("relay state").has_end);
-		assert!(received.end_object().is_none(), "an END_OF_GROUP past the cap");
 	}
 
 	/// Subscribe across a negotiated hop to a timed track a draft-22 publisher published
@@ -1453,12 +1398,18 @@ mod hop_tests {
 		group.write_frame(ts(5), b"key".to_vec()).unwrap();
 		let mut received = recv(&mut subscriber).await;
 		let frame = next(&mut received).await.unwrap();
-		assert_eq!((frame.timestamp, &frame.payload[..]), (Some(ts(5)), &b"key"[..]));
+		assert_eq!(
+			(frame.timestamp, &frame.payload.contiguous(0)[..]),
+			(Some(ts(5)), &b"key"[..])
+		);
 		assert!(frame.fields.is_none() && received.wire().is_none());
 		group.write_frame(ts(6), b"delta".to_vec()).unwrap();
 		group.finish().unwrap();
 		let frame = next(&mut received).await.unwrap();
-		assert_eq!((frame.timestamp, &frame.payload[..]), (Some(ts(6)), &b"delta"[..]));
+		assert_eq!(
+			(frame.timestamp, &frame.payload.contiguous(0)[..]),
+			(Some(ts(6)), &b"delta"[..])
+		);
 		assert!(frame.fields.is_none());
 		assert!(next(&mut received).await.is_none());
 		assert!(received.end_object().is_none());
@@ -1521,13 +1472,11 @@ mod hop_tests {
 				.unwrap();
 			assert_eq!(next(&mut fetched).await.unwrap().timestamp, negotiated.then(|| ts(100)));
 			assert!(next(&mut fetched).await.is_none());
-			let mut subscriber = moq_clock::timeout(
-				TIMEOUT,
-				copy.subscribe(track::Subscription::default().with_start(track::Position::group(1))),
-			)
-			.await
-			.unwrap()
-			.unwrap();
+			let mut subscriber =
+				moq_clock::timeout(TIMEOUT, copy.subscribe(track::Subscription::default().with_start(1)))
+					.await
+					.unwrap()
+					.unwrap();
 			// A peer may have stamped arrival times. The second group's rewind must not
 			// acquire native moq-lite checks merely because it crossed a relay hop.
 			let mut group = track.create_group(1u64.into()).unwrap();
@@ -1537,7 +1486,7 @@ mod hop_tests {
 			assert_eq!(received.sequence, 1);
 			let frame = next(&mut received).await.unwrap();
 			assert_eq!(frame.timestamp, negotiated.then(|| ts(50)), "{offer:?}");
-			assert_eq!(&frame.payload[..], b"frame");
+			assert_eq!(&frame.payload.contiguous(0)[..], b"frame");
 			assert!(next(&mut received).await.is_none());
 			track.insert_datagram(2, ts(25), b"datagram".to_vec()).unwrap();
 			let datagram = moq_clock::timeout(TIMEOUT, kio::wait(|waiter| subscriber.poll_recv_wire_datagram(waiter)))
@@ -1574,7 +1523,7 @@ mod hop_tests {
 		for (millis, n) in [(5, 1), (6, 2)] {
 			let frame = next(&mut received).await.unwrap();
 			assert_eq!(
-				(frame.timestamp, &frame.payload[..]),
+				(frame.timestamp, &frame.payload.contiguous(0)[..]),
 				(Some(ts(millis)), &payload(n)[..])
 			);
 			assert!(frame.fields.is_none());

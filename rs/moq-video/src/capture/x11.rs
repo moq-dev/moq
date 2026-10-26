@@ -184,7 +184,7 @@ struct Capture {
 	shm: Option<SharedMemory>,
 	rgb: Vec<u8>,
 	observed: Observed,
-	framerate: crate::Rate,
+	framerate: crate::FrameRate,
 	interval: Duration,
 	next: Instant,
 	name: String,
@@ -291,7 +291,7 @@ impl Capture {
 		let format = PixelFormat::new(connection.setup(), depth, visual)?;
 		let shm = SharedMemory::open(connection.clone(), format.required_len(width, height)?)?;
 		tracing::debug!(source = %name, shared_memory = shm.is_some(), "X11 capture opened");
-		let framerate = config.framerate.unwrap_or(crate::Rate::integer(DEFAULT_FRAMERATE));
+		let framerate = config.framerate.unwrap_or(crate::FrameRate::integer(DEFAULT_FRAMERATE));
 		let interval = Duration::from_secs_f64(1.0 / framerate.as_f64());
 		let cursor = config.cursor
 			&& connection

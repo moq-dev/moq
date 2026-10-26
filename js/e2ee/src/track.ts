@@ -130,7 +130,8 @@ export class Producer {
  * Subscriber for one physical track.
  *
  * Grouped authentication failure ends the track and rejects pending reads with {@link Failure}
- * `authentication`. A bad datagram is an `authentication` {@link Event} until that key is exhausted.
+ * `authentication`. A datagram that fails to open is dropped as an `identity`, `oversize`, or
+ * `authentication` {@link Event} until that key is exhausted.
  */
 export class Consumer {
 	/** The physical track name. */
@@ -179,7 +180,7 @@ export class Consumer {
 	/**
 	 * Receive the next datagram event, or `undefined` once the track ends.
 	 *
-	 * A bad datagram (a forged tag, or a sequence or size no publisher could seal) and a
+	 * A datagram that fails to open (a sequence out of range, a bad size, or a forged tag) and a
 	 * duplicate are events, not track-ending errors. Rejects with {@link Failure}
 	 * `authentication` only if a grouped frame already failed, `exhausted` from opening, or a
 	 * net error.
@@ -215,10 +216,10 @@ export class Consumer {
 			// A grouped failure during the open still ends this read.
 			this.#reader.terminal.check();
 			// A bad datagram is not grouped failure: the track, its demand, and any parked grouped
-			// read stay up. No publisher seals a sequence or payload size out of range, so one is
-			// as bad as a forged tag. `exhausted` is this key's own limit.
-			const bad = err instanceof Failure && ["authentication", "identity", "oversize"].includes(err.code);
-			if (bad) return { kind: "authentication", sequence };
+			// read stay up. `exhausted` is this key's own limit.
+			if (!(err instanceof Failure)) throw err;
+			const kind = err.code;
+			if (kind === "authentication" || kind === "identity" || kind === "oversize") return { kind, sequence };
 			throw err;
 		}
 		this.#reader.terminal.check();

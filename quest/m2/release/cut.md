@@ -30,11 +30,20 @@ describes. This epic's remaining publication and adoption quests move to m0,
 the rest of m2 moves to m1, and every link to a moved path is rewritten. That
 PR also removes this path from every `Required`, which releases the audits
 waiting on it. It then re-creates this quest, the [API shape
-review](/quest/m2/release/api-review.md), and the [feature
-review](/quest/m2/release/feature-review.md) at the same paths under a fresh
+review](/quest/m2/release/api-review.md), the [feature
+review](/quest/m2/release/feature-review.md), and the [Cargo feature
+review](/quest/m2/release/feature-flags.md) at the same paths under a fresh
 release epic in m2. Each keeps its Goal and recurrence paragraph and requires
-the new `/quest/m1/README.md`, and the cut also requires both reviews. Only
+the new `/quest/m1/README.md`, and the cut also requires all three reviews. Only
 `/quest-delete` ends the recurrence.
+
+From the 2026-10-25 pre-cut run:
+
+- Write the moq-cli and moq-gst `MIGRATE.md` entries from the Impact section of
+  [moq-dev/moq#6522](https://github.com/moq-dev/moq/pull/6522); that rename list exists nowhere else.
+- Raise each wrapper's moq-ffi version floor (for example Kotlin's
+  `MOQ_FFI_RANGE`) to the release that ships the `implementation` field from
+  [moq-dev/moq#6775](https://github.com/moq-dev/moq/pull/6775).
 
 ## Required
 
@@ -42,4 +51,5 @@ the new `/quest/m1/README.md`, and the cut also requires both reviews. Only
 - [Migration audit](/quest/m2/release/migrate-audit.md) - every break on the cut PR has its MIGRATE.md entry
 - [API shape review](/quest/m2/release/api-review.md) - every new or changed public API was reviewed for a better shape, and approved changes landed
 - [Feature review](/quest/m2/release/feature-review.md) - every major work line since the last release was judged end to end, and its follow-ups landed
+- [Cargo feature review](/quest/m2/release/feature-flags.md) - every Cargo feature was judged against the feature rules, and approved changes landed
 - [Claim new npm names](/quest/m2/release/npm-first-publish.md) - trusted publishing can publish every new `@moq/*` package

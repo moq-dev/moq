@@ -69,6 +69,17 @@ class Moq internal constructor(
     fun auth(): Auth = session.auth()
 
     /**
+     * The credentials every dial presents ([ClientConfig.tokens]), to replace while running.
+     *
+     * [Tokens.set] replaces them, such as before the current ones expire: the next dial presents
+     * them, and a live session with in-band AUTH presents them at once, withdrawing each
+     * replaced token once its replacements are answered, even when one is refused. After an
+     * authorization refusal the client redials only if they changed. An empty token throws
+     * `MoqException.Config`.
+     */
+    fun tokens(): Tokens = client.tokens()
+
+    /**
      * Request a draining close now; await `session.closed()` for its result, then [close]
      * to release the client.
      * Explicit `moq-lite-07-wip` waits for the peer to receive finished tails; older
@@ -99,7 +110,7 @@ class Moq internal constructor(
          * two directions.
          */
         suspend fun connect(url: String, config: ClientConfig = ClientConfig()): Moq {
-            val client = Client(config)
+            val client = Client(config.copy(implementation = implementation(config.implementation)))
             try {
                 return Moq(client.connect(url), client)
             } catch (e: Throwable) {

@@ -42,16 +42,16 @@ class Runtime(unittest.TestCase):
     def test_profile_rejects_invalid_selection_before_building(self):
         root = Path(__file__).resolve().parent.parent
         for environment, diagnostic in [
-            ({'MOQ_BENCH_PROFILE_RUNTIME': 'tokio-shared'}, 'profile runtime'),
-            ({'MOQ_BENCH_PROFILE_WORKERS': '0'}, 'profile workers'),
-            ({'MOQ_BENCH_PROFILE_WORKERS': '1 257'}, 'profile workers'),
-            ({'MOQ_BENCH_PROFILE_WORKERS': '1 nope'}, 'profile workers'),
-            ({'MOQ_BENCH_PROFILE_WORKERS': '01'}, 'profile workers'),
-            ({'MOQ_BENCH_PROFILE_WORKERS': '999999999999999999999999'}, 'profile workers'),
+            ({'BENCH_PROFILE_RUNTIME': 'tokio-shared'}, 'profile runtime'),
+            ({'BENCH_PROFILE_WORKERS': '0'}, 'profile workers'),
+            ({'BENCH_PROFILE_WORKERS': '1 257'}, 'profile workers'),
+            ({'BENCH_PROFILE_WORKERS': '1 nope'}, 'profile workers'),
+            ({'BENCH_PROFILE_WORKERS': '01'}, 'profile workers'),
+            ({'BENCH_PROFILE_WORKERS': '999999999999999999999999'}, 'profile workers'),
         ]:
             with self.subTest(environment=environment):
                 result = subprocess.run(['bash', str(root / 'bench/run.sh'), '--profile'],
-                                        env=dict(os.environ, MOQ_BENCH_PROFILE='cpu', **environment),
+                                        env=dict(os.environ, BENCH_PROFILE_MODES='cpu', **environment),
                                         capture_output=True, text=True)
                 self.assertEqual(result.returncode, 1, result.stdout)
                 self.assertIn(diagnostic, result.stderr)
@@ -105,9 +105,9 @@ check.chmod(0o755)
             cargo.chmod(0o755)
             artifacts = Path(directory) / 'evidence'
             environment.update(PATH=str(commands) + os.pathsep + os.environ['PATH'],
-                               MOQ_BENCH_ARTIFACTS=str(artifacts), MOQ_BENCH_PROFILE='cpu',
-                               MOQ_BENCH_PROFILE_WORKLOAD='fixture', MOQ_BENCH_PROFILE_WORKERS='2',
-                               MOQ_BENCH_PROFILE_RUNTIME='io-uring-workers', MOQ_BENCH_BASE='HEAD',
+                               BENCH_ARTIFACTS=str(artifacts), BENCH_PROFILE_MODES='cpu',
+                               BENCH_PROFILE_WORKLOAD='fixture', BENCH_PROFILE_WORKERS='2',
+                               BENCH_PROFILE_RUNTIME='io-uring-workers', BENCH_BASE='HEAD',
                                CARGO_TARGET_DIR=str(Path(directory) / 'target'))
             result = subprocess.run(['bash', 'bench/run.sh', '--profile'], cwd=checkout,
                                     env=environment, capture_output=True, text=True)

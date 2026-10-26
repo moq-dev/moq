@@ -14,7 +14,7 @@ use super::producer::Reserved;
 use super::{Input, Options, Producer};
 use crate::capture;
 use crate::resample::{Remix, Resampler};
-use crate::{Error, Format, Frame, Layout as PcmLayout};
+use crate::{Error, Format, Frame, Layout as PcmLayout, Level};
 
 /// Backoff bounds for reopening a capture source. The quick first retry covers
 /// a USB device re-enumerating; the ceiling keeps a missing device from spinning.
@@ -37,47 +37,6 @@ pub enum Status {
 	Failed,
 	/// The MoQ track ended, so the driver has stopped.
 	Ended,
-}
-
-/// The post-processing level of the most recently captured buffer.
-///
-/// Zero while the input is closed. Read it with [`Control::level`] at
-/// whatever rate the meter draws at.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Level {
-	rms: f32,
-	peak: f32,
-}
-
-impl Level {
-	/// Root mean square amplitude on a linear `0.0..=1.0` scale.
-	pub fn rms(&self) -> f32 {
-		self.rms
-	}
-
-	/// Peak absolute amplitude on a linear `0.0..=1.0` scale.
-	pub fn peak(&self) -> f32 {
-		self.peak
-	}
-
-	fn measure(samples: &[f32]) -> Self {
-		if samples.is_empty() {
-			return Self::default();
-		}
-
-		let mut squares = 0.0f64;
-		let mut peak = 0.0f32;
-		for &sample in samples {
-			let sample = sample.clamp(-1.0, 1.0);
-			squares += f64::from(sample) * f64::from(sample);
-			peak = peak.max(sample.abs());
-		}
-
-		Self {
-			rms: (squares / samples.len() as f64).sqrt() as f32,
-			peak,
-		}
-	}
 }
 
 /// A snapshot of a capture-backed publication's lifecycle.
@@ -1502,7 +1461,7 @@ mod tests {
 		let mut options = Capture::default();
 		options.capture.source = capture::Source::Microphone(Some("first".into()));
 		options.encode.track = Some("audio".into());
-		options.encode.settings.layout = PcmLayout::from_channels(channels).unwrap();
+		options.encode.config.layout = PcmLayout::from_channels(channels).unwrap();
 		let (control, driver) = Control::build(broadcast, catalog.clone(), options, Supervisor::exact()).unwrap();
 		let subscription = consumer.track("audio").unwrap().subscribe(None).await.unwrap();
 		(control, driver, source(opens, false), subscription, catalog)

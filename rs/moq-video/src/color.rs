@@ -54,14 +54,8 @@ pub enum Matrix {
 	Bt2020,
 }
 
-/// The numeric range of the samples.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Range {
-	/// Studio swing: 8-bit luma spans 16..235 and chroma 16..240.
-	Limited,
-	/// Full swing: every 8-bit code is used.
-	Full,
-}
+/// The numeric range of the samples, the same type the catalog's colour carries.
+pub use hang::catalog::Range;
 
 /// The chromaticities of the RGB primaries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -211,7 +205,7 @@ impl Color {
 	/// applied on the way through. The offsets put chroma at 128 and, for limited
 	/// range, luma at 16; the scales fit the range (219/224 of 255 for limited,
 	/// all of it for full).
-	#[cfg(any(test, all(target_os = "linux", feature = "nvidia")))]
+	#[cfg(any(test, all(target_os = "linux", feature = "nvidia"), all(apple, feature = "render")))]
 	pub(crate) fn coefficients(self) -> Coefficients {
 		let (kr, kb) = self.matrix.weights();
 		let kg = 1.0 - kr - kb;
@@ -260,7 +254,7 @@ impl Matrix {
 
 /// The weights of one RGB to Y'CbCr conversion: each output sample is
 /// `[r, g, b, offset]` dotted with `(R, G, B, 1)`, all on the 0..255 scale.
-#[cfg(any(test, all(target_os = "linux", feature = "nvidia")))]
+#[cfg(any(test, all(target_os = "linux", feature = "nvidia"), all(apple, feature = "render")))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Coefficients {
 	pub y: [f32; 4],
@@ -268,7 +262,7 @@ pub(crate) struct Coefficients {
 	pub v: [f32; 4],
 }
 
-#[cfg(any(test, all(target_os = "linux", feature = "nvidia")))]
+#[cfg(any(test, all(target_os = "linux", feature = "nvidia"), all(apple, feature = "render")))]
 impl Coefficients {
 	/// One pixel through the matrix, rounded and clamped the way the kernels do
 	/// it. The CPU reference for a GPU conversion, and what the tests compare

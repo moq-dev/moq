@@ -28,8 +28,9 @@ fn to_tuple(namespace: &Path) -> Vec<String> {
 	parts
 }
 
-fn from_tuple(parts: &[String]) -> Path<'static> {
-	let mut path = String::new();
+fn from_tuple(parts: &[&str]) -> Path<'static> {
+	// Sized for the common case of no escapes, so building it rarely grows.
+	let mut path = String::with_capacity(parts.iter().map(|part| part.len() + 1).sum());
 	for (i, part) in parts.iter().enumerate() {
 		if i > 0 {
 			path.push('/');
@@ -67,7 +68,7 @@ const MAX_BYTES: usize = 4096;
 
 /// Decode a namespace tuple, along with the sum of its field lengths.
 ///
-/// Every limit here closes the session as a PROTOCOL_VIOLATION (draft-21 section 8.7):
+/// Every limit here closes the session as a PROTOCOL_VIOLATION (draft-22 section 8.7):
 /// more than 32 fields, an empty field, or more than 4096 bytes.
 fn decode_fields(r: &mut Decoder<'_>) -> Result<(Path<'static>, usize), DecodeError> {
 	let count = r.varint()?;
@@ -80,11 +81,12 @@ fn decode_fields(r: &mut Decoder<'_>) -> Result<(Path<'static>, usize), DecodeEr
 		return Err(DecodeError::BoundsExceeded);
 	}
 
-	let count = count as usize;
-	let mut parts = Vec::with_capacity(count);
+	// Borrow each field from the wire, so only the joined path allocates.
+	let mut parts = [""; Path::MAX_PARTS];
+	let parts = &mut parts[..count as usize];
 	let mut size = 0;
-	for _ in 0..count {
-		let part = r.string()?;
+	for part in parts.iter_mut() {
+		*part = r.str()?;
 		if part.is_empty() {
 			return Err(DecodeError::InvalidValue);
 		}
@@ -92,10 +94,9 @@ fn decode_fields(r: &mut Decoder<'_>) -> Result<(Path<'static>, usize), DecodeEr
 		if size > MAX_BYTES {
 			return Err(DecodeError::BoundsExceeded);
 		}
-		parts.push(part);
 	}
 
-	Ok((from_tuple(&parts), size))
+	Ok((from_tuple(parts), size))
 }
 
 /// Decode a Track Namespace.
@@ -122,8 +123,6 @@ pub(super) fn refusal(namespace: &Path, version: super::Version) -> Option<super
 			| super::Version::Draft16
 			| super::Version::Draft17
 			| super::Version::Draft18
-			| super::Version::Draft19
-			| super::Version::Draft20
 	) {
 		return None;
 	}
@@ -160,12 +159,13 @@ mod tests {
 			(vec![".application"], false),
 			(vec![".sessionish"], false),
 		] {
-			let parts: Vec<_> = fields.iter().map(|field| (*field).to_owned()).collect();
-			let path = from_tuple(&parts);
-			for version in [super::super::Version::Draft21, super::super::Version::Draft22] {
-				assert_eq!(refusal(&path, version).is_some(), reserved, "{version}: {fields:?}");
-			}
-			assert!(refusal(&path, super::super::Version::Draft20).is_none());
+			let path = from_tuple(&fields);
+			assert_eq!(
+				refusal(&path, super::super::Version::Draft22).is_some(),
+				reserved,
+				"{fields:?}"
+			);
+			assert!(refusal(&path, super::super::Version::Draft18).is_none());
 		}
 	}
 	use crate::coding::Form;
@@ -260,7 +260,7 @@ mod tests {
 		assert_eq!(encode_path(&decoded), tuple);
 	}
 
-	/// Draft-21 section 8.7: every field holds a byte, and a namespace or a whole Full Track
+	/// Draft-22 section 8.7: every field holds a byte, and a namespace or a whole Full Track
 	/// Name holds at most 4096.
 	#[test]
 	fn names_are_bounded() {

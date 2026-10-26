@@ -53,9 +53,8 @@ enum Importer {
 		import: Box<ts::Import<ts::Ext>>,
 		// Finished at a clean end, so the finished broadcast keeps serving the catalog.
 		catalog: Box<moq_mux::catalog::Producer<ts::Ext>>,
-		// A clone of the importer's producer, so an end can finish or close the broadcast
-		// even though the importer owns it.
-		broadcast: moq_net::broadcast::Producer,
+		// Controls publication while the importer fills it, including finish or close at EOF.
+		broadcast: moq_net::origin::Publication,
 	},
 	/// Each program's broadcast is created once the first PAT names it, and announced once its PMT
 	/// declares its tracks.
@@ -83,10 +82,10 @@ impl Publisher {
 			Some(Program::All) => Importer::All(Box::new(ts::Programs::new(origin.clone(), path, config))),
 			Some(Program::One(_)) | None => {
 				let route = moq_net::origin::Route::default().with_epoch(epoch.insert(moq_net::Epoch::mint()).clone());
-				let mut broadcast = origin.publish(path, route)?;
+				let broadcast = origin.publish(path, route)?;
 				let config = config.with_catalog(moq_mux::catalog::hang::Catalog::<ts::Ext>::default());
-				let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
-				let mut import = ts::Import::new(broadcast.clone(), catalog.reserve());
+				let catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config)?;
+				let mut import = ts::Import::new(broadcast.broadcast().clone(), catalog.reserve());
 				if let Some(Program::One(program)) = program {
 					import = import.with_program(program);
 				}
@@ -145,7 +144,7 @@ impl Publisher {
 			} => {
 				import.finish().map_err(moq_mux::Error::from)?;
 				catalog.finish()?;
-				vec![broadcast.clone()]
+				vec![broadcast.broadcast().clone()]
 			}
 			Importer::All(programs) => programs.finish().map_err(moq_mux::Error::from)?,
 		};
@@ -178,7 +177,7 @@ const MIN_DELAY: Duration = Duration::from_secs(1);
 pub(crate) struct Options {
 	/// The muxer's delay, at least [`MIN_DELAY`] ([`Subscriber::new`]).
 	pub latency: Duration,
-	/// How long a return or stitched replacement has to supply its first catalog.
+	/// How long to wait for the broadcast to come back once it ends.
 	pub follow: Duration,
 	/// Follow another instance replacing the broadcast, as a full program switch.
 	pub stitch: bool,
@@ -224,7 +223,7 @@ impl Subscriber {
 		let catalog = source.catalog::<ts::Ext>(moq_mux::catalog::CatalogFormat::Hang).await?;
 		let export = ts::Export::new(source, catalog).with_delay(options.latency.max(MIN_DELAY));
 		let follower = ts::Follower::new(export)?
-			.with_linger(options.follow)
+			.with_follow(options.follow)
 			.with_stitch(options.stitch);
 		Ok(Some(Self { follower }))
 	}

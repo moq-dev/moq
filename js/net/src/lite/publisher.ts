@@ -20,6 +20,7 @@ import { type Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { nextChange } from "../util/change.ts";
+import { untilGivenUp } from "../util/given_up.ts";
 import { nextTask } from "../util/yield.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
 import { AnnounceInit, AnnounceOk, type AnnounceRequest, encodeAnnounceBroadcast } from "./announce.ts";
@@ -177,7 +178,7 @@ type FrameBounds = {
  * The frames of `sequence` a subscription asked for, as a start index and an inclusive end.
  *
  * The frame bounds qualify the start and end group only; every other group is served whole.
- * Which groups are served at all is the subscriber's read cursor (`replaceGroups`),
+ * Which groups are served at all is the subscriber's read cursor (`withRange`),
  * applied when a group is popped rather than re-checked here.
  *
  * The serving loop calls this synchronously after the pop, before any SUBSCRIBE_UPDATE can
@@ -380,10 +381,10 @@ function carriesMaxDelay(version: Version): boolean {
 }
 
 /**
- * Position a subscription's read cursor for the wire serving it.
+ * The floor of a subscription's read cursor for the wire serving it.
  *
- * On lite-06 there is nothing to do: the cursor is floored at the group the subscription
- * named (or 0), and its max delay decides what above the floor is worth delivering.
+ * On lite-06 it is the group the subscription named (or 0), and its max delay decides what
+ * above the floor is worth delivering.
  *
  * Pre-06 wires are the exception: their drafts define an absent `Group Start` as the
  * latest group, so say so explicitly rather than letting the budget reach back. Lite-03/04/05
@@ -391,11 +392,10 @@ function carriesMaxDelay(version: Version): boolean {
  * an unbounded budget so nothing is dropped under them (see {@link servingMaxDelay}), which
  * must not read as a request to replay the whole cache on join.
  */
-function positionCursor(track: track.Subscriber, version: Version, startGroup: number | undefined) {
-	if (resolvesStart(version) || startGroup !== undefined) return;
-
-	const latest = hooks.latestSequence(track);
-	if (latest !== undefined) hooks.replaceGroups(track, { start: { included: latest } });
+function cursorFloor(version: Version, startGroup: number | undefined, latest: number | undefined): number {
+	if (startGroup !== undefined) return startGroup;
+	if (resolvesStart(version)) return 0;
+	return latest ?? 0;
 }
 
 /**
@@ -848,7 +848,7 @@ export class Publisher {
 		}
 
 		const endGroup = exclusiveGroupEnd(msg.endGroup);
-		const track = wireOf(front).subscribe(msg.track, {
+		const track = front.track(msg.track).subscribe({
 			priority: msg.priority,
 			order: msg.order,
 			maxDelay: Milli(servingMaxDelay(this.version, msg.maxDelay)),
@@ -858,8 +858,11 @@ export class Publisher {
 			},
 		});
 		serving(track);
-		positionCursor(track, this.version, msg.startGroup);
-		hooks.replaceGroups(track, { end: endGroup === undefined ? undefined : { excluded: endGroup } });
+		const floor = cursorFloor(this.version, msg.startGroup, hooks.latestSequence(track));
+		track.withRange({
+			start: { included: floor },
+			end: endGroup === undefined ? undefined : { excluded: endGroup },
+		});
 
 		// The best-effort datagram loop, started once serving begins. It parks when the
 		// track finishes (recvDatagram returns undefined), so #runTrack alone ends the
@@ -958,6 +961,7 @@ export class Publisher {
 				publisher,
 				compress,
 				served,
+				floor,
 				bounds,
 			});
 
@@ -1063,9 +1067,7 @@ export class Publisher {
 					hold.abort();
 				}
 				// A group that has not arrived yet holds this FETCH's slot until the requester leaves.
-				const fetchGroup = wireOf(front).fetchGroup;
-				if (!fetchGroup) throw new Error("fetch group is not supported by the serving route's version");
-				group = await fetchGroup(msg.track, msg.group, {
+				group = await front.track(msg.track).fetchGroup(msg.group, {
 					priority: msg.priority,
 					maxDelay: msg.maxDelay,
 					signal: left.signal,
@@ -1122,10 +1124,25 @@ export class Publisher {
 			publisher: number;
 			compress: boolean;
 			served: Run[] | undefined;
+			// The read cursor's floor; see {@link cursorFloor}.
+			floor: number;
 			bounds: FrameBounds;
 		},
 	): Promise<boolean> {
 		const { sub, broadcast, stamp, publisher, compress, served, bounds } = serving;
+		// The read cursor's floor, assigned with the cap in {@link bounds} on every move.
+		let floor = serving.floor;
+		const moveCursor = () =>
+			track.withRange({
+				start: { included: floor },
+				end: bounds.endGroup === undefined ? undefined : { included: bounds.endGroup },
+			});
+		// Raise the floor to `start`, keeping any higher floor already set.
+		const raiseFloor = (start: number) => {
+			if (start <= floor) return;
+			floor = start;
+			moveCursor();
+		};
 		// Lite-05+ resolves the range on the subscribe stream: SUBSCRIBE_START once the
 		// first group is known, SUBSCRIBE_END when the track finishes.
 		const emitRange = hasTrackStream(this.version);
@@ -1193,6 +1210,9 @@ export class Publisher {
 			for (;;) {
 				if (startSequence !== undefined && skipped.length > 0) {
 					for (const range of skipped) {
+						// What was given up below the start is never named, so a wider budget may serve it.
+						if (range.start < startSequence)
+							hooks.unreport(track, range.start, Math.min(range.end, startSequence));
 						if (!(await drop(Math.max(range.start, startSequence), range.end, range.error))) return false;
 					}
 					skipped.length = 0;
@@ -1221,33 +1241,33 @@ export class Publisher {
 						case "update": {
 							const update = control.update;
 							console.debug(`subscribe update: broadcast=${broadcast} track=${track.name}`);
-							// `positionCursor` pins an unfloored pre-06 SUBSCRIBE to the latest
+							// `cursorFloor` pins an unfloored pre-06 SUBSCRIBE to the latest
 							// group, so an update that drops a named floor re-pins there too. On
 							// an empty track the next group is the latest, whatever its sequence.
+							// Lite-06 encodes an absent start as no floor, so it drops back to 0:
+							// the cursor only rises on its own, and a finished group below the old
+							// floor (a quiet catalog) is never served otherwise.
 							const requested = bounds.startGroup;
 							const start =
 								update.startGroup === undefined &&
 								requested !== undefined &&
 								!resolvesStart(this.version)
 									? (hooks.latestSequence(track) ?? 0)
-									: update.startGroup;
-							hooks.replaceGroups(track, {
-								start: start === undefined ? undefined : { included: start },
-								end: update.endGroup === undefined ? undefined : { included: update.endGroup },
-							});
-							// Lite-06 encodes an absent start as no floor, so it drops back to 0.
-							const floor = start ?? (resolvesStart(this.version) ? 0 : undefined);
-							// Before SUBSCRIBE_START nothing is owed yet; the start accounts for it.
-							if (floor !== undefined && startSequence !== undefined) {
-								// A lowered floor owes the groups it newly asks for, so the end sweep covers them.
-								// A raised one sends no early drop: the subscriber already stops owing below
-								// its floor, and a later update may lower it again to reopen those groups.
-								startSequence = Math.min(startSequence, floor);
+									: (update.startGroup ?? (resolvesStart(this.version) ? 0 : undefined));
+							if (start !== undefined) {
+								floor = start;
+								// Before SUBSCRIBE_START nothing is owed yet; the start accounts for it.
+								// A lowered floor owes the groups it newly asks for, so the end sweep
+								// covers them. A raised one sends no early drop: the subscriber already
+								// stops owing below its floor, and a later update may lower it again to
+								// reopen those groups.
+								if (startSequence !== undefined) startSequence = Math.min(startSequence, start);
 							}
 							bounds.startGroup = update.startGroup;
 							bounds.startFrame = update.startFrame;
 							bounds.endGroup = update.endGroup;
 							bounds.endFrame = update.endFrame;
+							moveCursor();
 							// A microtask is too short: decoding one framed update crosses several
 							// awaits, each of which can requeue behind the serving continuation. A
 							// task boundary lets the decoder finish whatever the transport already
@@ -1293,10 +1313,7 @@ export class Publisher {
 							) {
 								startSent = true;
 								startSequence = bounds.startGroup;
-								hooks.replaceGroups(track, {
-									start: { included: bounds.startGroup },
-									end: bounds.endGroup === undefined ? undefined : { included: bounds.endGroup },
-								});
+								raiseFloor(bounds.startGroup);
 								const start = new SubscribeStart(bounds.startGroup, largest);
 								if (
 									!(await controls.response(encodeSubscribeResponse(stream, { start }, this.version)))
@@ -1375,12 +1392,7 @@ export class Publisher {
 					// A pre-06 subscribe that named no group is the exception: an absent
 					// Group Start is the latest group, and this sequence becomes the floor.
 					// Lite-06 encodes a floor of group 0 as 0, so an omitted start is not pinned.
-					if (bounds.startGroup === undefined && !resolvesStart(this.version)) {
-						hooks.replaceGroups(track, {
-							start: { included: startSequence },
-							end: bounds.endGroup === undefined ? undefined : { included: bounds.endGroup },
-						});
-					}
+					if (bounds.startGroup === undefined && !resolvesStart(this.version)) raiseFloor(startSequence);
 					if (
 						!(await controls.response(
 							encodeSubscribeResponse(
@@ -1664,16 +1676,15 @@ export class Publisher {
 		// as `startFrame`. Skipping the head here is the only thing keeping those numbers
 		// honest; a group that ends before we reach it can't be served at all.
 		for (let i = 0; i < startFrame; i++) {
-			const skipped = await race([hooks.readGroupFrame(group, undefined, compress), stream.closed]);
+			const skipped = await race([hooks.readGroupFrame(group, compress), stream.closed]);
 			if (!skipped) {
 				throw new Error(`fetch group ended at frame ${i}, before the requested start ${startFrame}`);
 			}
-			skipped.complete();
 		}
 
 		let prevTs = 0n;
 		for (let index = startFrame; endFrame === undefined || index <= endFrame; index++) {
-			const read = await race([hooks.readGroupFrame(group, undefined, compress), stream.closed]);
+			const read = await race([hooks.readGroupFrame(group, compress), stream.closed]);
 			if (!read) break;
 			const frame = read.frame;
 
@@ -1686,7 +1697,6 @@ export class Publisher {
 			if (read.inflated !== undefined) await stream.u53(read.inflated);
 			await stream.u53(frame.payload.byteLength);
 			if (frame.payload.length > 0) await stream.write(frame.payload);
-			read.complete();
 		}
 	}
 
@@ -1710,11 +1720,9 @@ export class Publisher {
 			// once the open settles. tryOpen owns resetting a slot that arrives too late.
 			const opened = Promise.withResolvers<void>();
 			let failure: Error | undefined;
-			const abandoned = hooks
-				.guardGroup(group, () => opened.promise)
-				.catch((err: unknown) => {
-					failure = error(err);
-				});
+			const abandoned = untilGivenUp(group, () => opened.promise).then((stop) => {
+				failure = stop;
+			});
 			let stream: Writer | undefined;
 			try {
 				stream = await Writer.tryOpen(this.#quic, {
@@ -1749,6 +1757,12 @@ export class Publisher {
 		// This model holds whole groups, so frame `startFrame` is always reachable unless
 		// the group ends first. Declaring it up front keeps the stream self-describing.
 		const msg = new GroupMessage({ subscribe: sub, sequence: group.sequence, frameStart: startFrame });
+		// The subscription's budget, or an eviction of what is left to read, may give up on the
+		// group mid-write, which abandons the stream. A group already given up never starts the write.
+		const write = async (op: () => Promise<unknown>) => {
+			const stop = await untilGivenUp(group, op);
+			if (stop) throw stop;
+		};
 		// Everything past this point runs inside the cleanup scope, so a failure never leaves
 		// a finished group's stream being ranked.
 		try {
@@ -1756,7 +1770,7 @@ export class Publisher {
 			// follows it too rather than keeping a stale rank until it finishes.
 			priority.add(stream, group.sequence, startFrame);
 
-			await hooks.guardGroup(group, async () => {
+			await write(async () => {
 				await stream.u53(0); // stream type
 				await msg.encode(stream, this.version);
 			});
@@ -1767,7 +1781,7 @@ export class Publisher {
 			let reached = startFrame === 0;
 
 			for (;;) {
-				const read = await race([hooks.readGroupFrame(group, undefined, compress), stream.closed]);
+				const read = await race([hooks.readGroupFrame(group, compress), stream.closed]);
 				if (!read) {
 					// The group ended before the frame the subscriber asked to start
 					// at, so this publisher can't serve the range at all. FINning here
@@ -1777,29 +1791,24 @@ export class Publisher {
 					break;
 				}
 
-				try {
-					// A group that ends exactly at the start is a valid, empty range.
-					if (read.sequence + 1 >= startFrame) reached = true;
-					// Frames below the requested start were excluded, and the receiver
-					// numbers what it gets from `startFrame`.
-					if (read.sequence < startFrame) continue;
-					if (endFrame !== undefined && read.sequence > endFrame) break;
+				// A group that ends exactly at the start is a valid, empty range.
+				if (read.sequence + 1 >= startFrame) reached = true;
+				// Frames below the requested start were excluded, and the receiver
+				// numbers what it gets from `startFrame`.
+				if (read.sequence < startFrame) continue;
+				if (endFrame !== undefined && read.sequence > endFrame) break;
 
-					if (stamp !== undefined) {
-						// Convert each frame to the track's wire timescale.
-						const ts = BigInt(wireTime(read.frame.timestamp, stamp));
-						await hooks.guardGroup(group, () => stream.u62(zigzag(ts - prevTs)));
-						prevTs = ts;
-					}
-
-					const inflated = read.inflated;
-					if (inflated !== undefined) await hooks.guardGroup(group, () => stream.u53(inflated));
-					await hooks.guardGroup(group, () => stream.u53(read.frame.payload.byteLength));
-					if (read.frame.payload.length > 0)
-						await hooks.guardGroup(group, () => stream.write(read.frame.payload));
-				} finally {
-					read.complete();
+				if (stamp !== undefined) {
+					// Convert each frame to the track's wire timescale.
+					const ts = BigInt(wireTime(read.frame.timestamp, stamp));
+					await write(() => stream.u62(zigzag(ts - prevTs)));
+					prevTs = ts;
 				}
+
+				const inflated = read.inflated;
+				if (inflated !== undefined) await write(() => stream.u53(inflated));
+				await write(() => stream.u53(read.frame.payload.byteLength));
+				if (read.frame.payload.length > 0) await write(() => stream.write(read.frame.payload));
 			}
 
 			stream.close();
@@ -1807,7 +1816,7 @@ export class Publisher {
 			// A stream that fails after its FIN may have lost its header, so report it for a DROP.
 			// Its bytes still hold the connection until acknowledged, so a group gone stale
 			// meanwhile is reset like one still serving, as the Rust `GroupServe` does.
-			await hooks.guardGroup(group, () => stream.closed);
+			await write(() => stream.closed);
 			return undefined;
 		} catch (err: unknown) {
 			const e = error(err);

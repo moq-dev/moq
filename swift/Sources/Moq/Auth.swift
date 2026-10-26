@@ -1,7 +1,7 @@
 import MoqFFI
 
 /// What the peer lets this side do, in this side's own paths: the broadcast
-/// patterns it may publish and subscribe to, and `expiresUs` until it lapses.
+/// patterns it may publish and subscribe to, and `expires` until it lapses.
 /// An empty pattern list grants nothing in that direction; `**` grants everything.
 public typealias Grant = MoqFFI.MoqGrant
 
@@ -21,7 +21,8 @@ public final class Auth: Sendable {
 
     /// Suspend until the grant differs from the one last reported, or held when this
     /// handle was made, returning it.
-    /// Throws once nothing will change it again, because the session ended.
+    /// Throws once nothing will change it again: a client's connection or a server's
+    /// session ended. A reconnect is not an end.
     public func grantChanged() async throws -> Grant? { try await ffi.grantChanged() }
 
     /// Present another token, returning once the peer accepts it.
@@ -44,7 +45,8 @@ public final class AuthToken: Sendable {
     /// This token's own grant, or `nil` after it ended.
     public func grant() -> Grant? { ffi.grant() }
 
-    /// Suspend until the token ends, throwing the peer's revocation or the session's close.
+    /// Suspend until the token ends, throwing the peer's revocation or the end of a client's
+    /// connection or a server's session. A reconnect does not end it.
     public func closed() async throws { try await ffi.closed() }
 
     /// Withdraw the token, removing its grant from the union.

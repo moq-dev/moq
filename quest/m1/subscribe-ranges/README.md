@@ -34,19 +34,19 @@ relay bounds a sparse FETCH only if the model can request ranges:
   publisher delivers what it has and fills the rest as upstream answers.
 - **Model.** `Subscription` gains `ranges` beside its `order`, mirroring the wire;
   `request_groups` as a separate API was rejected. A publisher's
-  `track::Dynamic` receives range requests for misses, replacing per-group
-  `requested_group`, and `fetch_group` becomes a one-range subscription or is
-  removed. This breaks published moq-net APIs.
+  `track::Dynamic` receives a `track::Fill` per run of misses (landed), and
+  `fetch_group` becomes a one-range subscription or is removed. This breaks published moq-net APIs.
 - **moq-transport.** Some deployments use non-contiguous group numbers, so a
   relay never probes upstream one group at a time. Upstream, each run of
   locally missing groups becomes one standalone range FETCH, capped below the
   upstream's live group (which arrives via SUBSCRIBE), so it never blocks.
   moq-transport caps a FETCH at the Largest Object, so it can return the live
   group's existing prefix but never wait for its future objects. Downstream,
-  an IETF FETCH is served from the model's ranges, capped at the Largest
-  Object.
+  an IETF FETCH is served from the model's ranges, ending at the Largest
+  Object's group, which it reads whole even while open (maintainer,
+  2026-10-25): the cache cannot know an open group's real Largest Object.
 - **Relative ends** (maintainer, 2026-10-11, superseding the 10-07 `Live`
-  flag and closing #5085). Each range end is `Absolute(group, frame)` or
+  flag and closing #5085). Each range end is `Absolute(group)` or
   `Relative(n)`, naming the group n before the latest; either end may be
   relative, and an omitted end is live. An offset past the track's start
   clamps to group 0. Before any group exists, relative ends resolve when the
@@ -83,9 +83,10 @@ relay bounds a sparse FETCH only if the model can request ranges:
   its group starts, so a time end settles across a sequence that arrived only
   as a datagram, and a stream copy of that group arriving later is read even
   if it starts past the end.
-- Ranges are frame-precise (`Position`), not whole groups. The IETF joining
-  FETCH for a mid-group SUBSCRIBE's uncached prefix stays, because today's
-  bridge relies on it (maintainer, 09-29).
+- Ranges are whole groups: a range always starts at a group's first frame
+  (maintainer, on [moq-dev/moq#6465](https://github.com/moq-dev/moq/pull/6465)). The IETF joining FETCH for the
+  live group's uncached prefix stays, because today's bridge relies on it
+  (maintainer, 09-29).
 - The relay half of fetch-span moves here; #4558 landed only the no-handler
   skip.
 
@@ -93,14 +94,39 @@ This line owns the end-to-end test: a relay with a sparse cache answers a
 wide past range plus live in both orders, over lite-07 and moq-transport, with
 every sequence delivered or dropped.
 
+### Delete the old start bookkeeping (2026-10-24 pre-cut audit)
+
+Lite `TrackRun`'s fixes cluster on where a subscription starts and what it
+is owed or dropped (e713c30991, 36f82ac450, 35fa44f6bf, e1b5d2741f,
+f235fcfcbd, df0bd5c36f, 342445f251, 06765f4c1a, 4927167904, f52848d634,
+0513c07369, 5ad3652871). That state spans about eight fields (`floor`,
+`cap`, `start`, `first`, `skipped`, `served`, `start_frame`, `end_frame`),
+plus `cursor_floor` and a pre-06 re-pin branch, encoding three wire
+generations of "start". When ranges land:
+
+- Move what each cursor is owed and what was dropped into the model, so
+  `TrackRun` only translates it into SUBSCRIBE_START/DROP/END per version;
+  delete `skipped`, `served`, `first`, and the pre-06 branches rather than
+  layering lite-07 ranges on top.
+- On lite-07 a stream or a DROP accounts for every sequence except one sent
+  only as a datagram, which can be lost unseen
+  (`a_lost_datagram_delays_the_end` in `tests/integration/track_tail.rs`).
+  So the subscriber's end is "owed range covered and no stream active",
+  except that a hole a datagram may have left still settles within a bounded
+  grace; only reliable accounting of datagram sequences could remove that.
+  Keep `Settle`'s full grace for lite-05/06 and moq-transport behind one
+  version predicate.
+- Lite-07 is unpublished, so sending a fresh START per update can remove the
+  `requested == start` gate (`lite/subscriber.rs` about line 7366).
+
 ## Required
 
-- [Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md) - `Dynamic` fills misses by range, replacing `requested_group`
+- [Linear fill path](/quest/m1/subscribe-ranges/fill-linear.md) - filling stays flat as range count and span grow
 - [Fetch as a range](/quest/m1/subscribe-ranges/fetch-range.md) - `fetch_group` becomes a one-range subscription that ends once its range is accounted for
 - [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - the lite-07 wire, Rust publisher and subscriber, and the draft
-- [moq-transport ranges](/quest/m1/subscribe-ranges/ietf.md) - range FETCH upstream per missing run, and non-blocking FETCH served downstream
+- [moq-transport range updates](/quest/m1/subscribe-ranges/ietf.md) - widening and narrowing upstream ranges, and `Time` ends
 - [JS ranges](/quest/m1/subscribe-ranges/js.md) - `@moq/net` model and lite-07 parity
-- [Bounded tails](/quest/m1/subscribe-ranges/bounded-tail.md) - a copy cut at a request's mid-group end accepts the rest of its group instead of rejecting it as `Duplicate`
+- [Range count cost](/quest/m1/subscribe-ranges/range-cost.md) - a subscription's range count cannot multiply per-group cost
 
 ## Related
 

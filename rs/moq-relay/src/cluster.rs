@@ -727,10 +727,11 @@ pub struct Config {
 	/// carried on each broadcast for loop detection and shortest-path routing.
 	///
 	/// Unset (the default) picks a fresh random id on every start. Set it to give
-	/// a node a stable identity across restarts. Must be non-zero and below 2^62
-	/// (the wire varint limit); an out-of-range value errors at startup. Keep it
-	/// below 2^53 for compatibility with older `@moq/lite` JS clients, which
-	/// decode hop ids as a `u53` and reject anything larger.
+	/// a node a stable identity across restarts. Must be non-zero; 0 errors at
+	/// startup. Keep it below 2^53 for compatibility with older `@moq/lite` JS
+	/// clients, which decode hop ids as a `u53` and reject anything larger. A
+	/// moq-lite-06 or older link carries an id at or above 2^62 as 0, losing loop
+	/// detection through this relay on that link.
 	#[usage(
 		name = "cluster-id",
 		long = "cluster-id",
@@ -824,7 +825,8 @@ pub struct Config {
 	pub token: Option<PathBuf>,
 
 	/// Billing tier label that cluster-peer (relay-to-relay) traffic records
-	/// stats under. Defaults to the unprefixed tier.
+	/// stats under: `/`-joined segments of ASCII letters, digits, `.`, `_`, and `-`.
+	/// Defaults to the unprefixed tier.
 	#[usage(
 		name = "cluster-tier",
 		long = "cluster-tier",
@@ -1209,9 +1211,9 @@ impl Cluster {
 	/// spawned here, so the origin serves sessions whether or not
 	/// [`start`](Self::start) (the mesh half) is ever called.
 	///
-	/// Errors if `config.id` is set but invalid: it must be non-zero and below
-	/// 2^62 (the wire varint limit). An unset id picks a fresh random origin.
-	/// Errors too if the `peer.quic` receive window does not fit a QUIC varint.
+	/// Errors if `config.id` is set to 0. An unset id picks a fresh random origin.
+	/// Errors too if the `peer.quic` receive window does not fit a QUIC varint, or
+	/// `config.tier` is not a valid stats tier.
 	pub fn new(options: Options) -> anyhow::Result<Self> {
 		let Options {
 			config,
@@ -1220,11 +1222,7 @@ impl Cluster {
 			peer,
 		} = options;
 		let id = match config.id {
-			Some(0) => anyhow::bail!("--cluster-id must be non-zero"),
-			Some(id) if id >= 1 << 62 => {
-				anyhow::bail!("--cluster-id must be below 2^62 (wire varint limit), got {id}")
-			}
-			Some(id) => Hop::new(id).expect("cluster id already validated"),
+			Some(id) => Hop::new(id).context("--cluster-id must be non-zero")?,
 			None => Hop::random(),
 		};
 		let deprecated = config.deprecated();
@@ -1233,6 +1231,9 @@ impl Cluster {
 		// matching the `--cluster-api-url` validation, instead of silently
 		// keeping the first entry when dials spawn.
 		parse_peer_list(config.connect.clone(), None).context("invalid --cluster-connect peer list")?;
+		if let Some(tier) = &config.tier {
+			moq_auth::tier::validate(tier).context("invalid --cluster-tier")?;
+		}
 		peer.quic.validate()?;
 		let critical = crate::critical::Critical::default();
 		let mut origin_config = origin::Config::new(id);
@@ -2049,10 +2050,10 @@ impl Cluster {
 		// through backoff and eventually gives up instead of migrating forever.
 		// Downstream sessions never see a GOAWAY of their own.
 		//
-		// Forced on regardless of `--client-reconnect`: that flag is about the
-		// relay's own upstream dial, and a cluster peer link that stopped following
-		// GOAWAY would break rolling handoff, redialing the drained URL after the
-		// old session finally closed instead of migrating to the replacement.
+		// Forced on, whatever the template client says: a cluster peer link that
+		// stopped following GOAWAY would break rolling handoff, redialing the drained
+		// URL after the old session finally closed instead of migrating to the
+		// replacement.
 		//
 		// A GOAWAY naming no URI is a relay draining to restart. A peer URL names
 		// that one node, so a redial would only reach the draining process again
@@ -2090,8 +2091,7 @@ impl Cluster {
 			let mut bind = connect.resolve().bind;
 			bind.set_port(0);
 			connect.bind = Some(bind);
-			connect.backoff.timeout = Some(std::time::Duration::ZERO);
-			connect.once = Some(false);
+			connect.backoff.timeout = Some((std::time::Duration::ZERO).into());
 			connect.version = connect
 				.versions()
 				.iter()
@@ -2558,6 +2558,13 @@ mod tests {
 		})
 		.expect("cluster");
 		assert_eq!(cluster.cluster_tier(), Tier::new("region/sjc"));
+
+		let quoted = new_cluster(Config {
+			tier: Some("region\"".to_string()),
+			..Default::default()
+		});
+		let err = quoted.err().expect("a tier a metrics label would escape is refused");
+		assert!(format!("{err:#}").contains("--cluster-tier"), "{err:#}");
 	}
 
 	/// Stand-in dial task: never makes progress, exposes an AbortHandle.
@@ -3018,16 +3025,18 @@ mod tests {
 		task.abort();
 	}
 
-	/// A valid `cluster.id` is used verbatim as the relay's Hop ID, giving the
-	/// node a stable identity across restarts.
+	/// A valid `cluster.id`, anywhere in the 64-bit range, is used verbatim as the
+	/// relay's Hop ID, giving the node a stable identity across restarts.
 	#[tokio::test]
 	async fn cluster_id_sets_origin() {
-		let cluster = new_cluster(Config {
-			id: Some(42),
-			..Default::default()
-		})
-		.expect("valid id");
-		assert_eq!(cluster.origin.hop().id(), 42);
+		for id in [42, u64::MAX] {
+			let cluster = new_cluster(Config {
+				id: Some(id),
+				..Default::default()
+			})
+			.expect("valid id");
+			assert_eq!(cluster.origin.hop().id(), id);
+		}
 	}
 
 	/// Cache settings land on the one origin serving and stats share. A handle
@@ -3035,8 +3044,10 @@ mod tests {
 	#[tokio::test]
 	async fn constructed_origin_keeps_cache_and_handles() {
 		let duration = Duration::from_secs(5);
-		let mut cache = crate::cache::Config::default();
-		cache.duration = Some(duration);
+		let cache = crate::cache::Config {
+			duration: Some(duration.into()),
+			..Default::default()
+		};
 		let cache = cache.init().expect("cache");
 		let pool = cache.pool.clone();
 
@@ -3086,19 +3097,17 @@ mod tests {
 			.expect("stats present");
 	}
 
-	/// A reserved (0) or out-of-range (>= 2^62) `cluster.id` is rejected rather
-	/// than producing an unencodable hop id.
+	/// The reserved `cluster.id` 0 is rejected, since it cannot be excluded for loop
+	/// detection.
 	#[test]
-	fn cluster_id_out_of_range_errors() {
-		for bad in [0, 1u64 << 62] {
-			let err = new_cluster(Config {
-				id: Some(bad),
-				..Default::default()
-			})
-			.err()
-			.expect("should error");
-			assert!(format!("{err}").contains("--cluster-id"), "got: {err}");
-		}
+	fn cluster_id_zero_errors() {
+		let err = new_cluster(Config {
+			id: Some(0),
+			..Default::default()
+		})
+		.err()
+		.expect("should error");
+		assert!(format!("{err}").contains("--cluster-id"), "got: {err}");
 	}
 
 	#[tokio::test]
@@ -3508,8 +3517,7 @@ mod tests {
 			}
 		});
 
-		let mut connect = moq_tokio::connect::Config::default();
-		connect.once = Some(true);
+		let connect = moq_tokio::connect::Config::default();
 		let fingerprint = fingerprint
 			.with_connect(connect, Default::default())
 			.with_advertise(LanAdvertise::new(port).with_fingerprint(fp.clone()));
@@ -3654,7 +3662,7 @@ mod tests {
 			..Default::default()
 		};
 		let mut quic = moq_tokio::quic::Config::default();
-		quic.idle_timeout = Some(IDLE);
+		quic.idle_timeout = Some((IDLE).into());
 		let cluster = new_cluster(config).expect("cluster").with_connect(connect, quic);
 		let started = cluster.clone().start().await.expect("start");
 		let running = tokio::spawn(started.run());
@@ -3695,7 +3703,7 @@ mod tests {
 			..Default::default()
 		};
 		let mut quic = moq_tokio::quic::Config::default();
-		quic.idle_timeout = Some(IDLE);
+		quic.idle_timeout = Some((IDLE).into());
 		let runtime = tokio::runtime::Builder::new_multi_thread()
 			.worker_threads(1)
 			.enable_all()
@@ -3773,7 +3781,7 @@ mod tests {
 		const IDLE: std::time::Duration = std::time::Duration::from_secs(300);
 		let _ = moq_tokio::crypto::install_default();
 		let mut quic = moq_tokio::quic::Config::default();
-		quic.idle_timeout = Some(IDLE);
+		quic.idle_timeout = Some((IDLE).into());
 
 		let node = new_cluster(Config::default()).expect("node cluster");
 		let mut listen = moq_tokio::listen::Config::default();

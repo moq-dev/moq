@@ -7,6 +7,7 @@ import { Manual } from "@moq/clock";
 import { Once } from "@moq/signals";
 import { announcedView } from "../src/announced.test-util";
 import * as Announce from "../src/announced.ts";
+import { AuthSession } from "../src/auth_session.ts";
 import { Producer as BroadcastProducer } from "../src/broadcast.ts";
 import type { Established } from "../src/connection/established.ts";
 import { forwardAnnounced } from "../src/connection/forward.ts";
@@ -32,7 +33,12 @@ class FakeSession {
 	die!: () => void;
 
 	constructor() {
-		registerWire(this, { consume: () => new BroadcastProducer().consume(), goaway: new Once() });
+		registerWire(this, {
+			consume: () => new BroadcastProducer().consume(),
+			goaway: new Once(),
+			exclusive: false,
+			auth: new AuthSession({ peerGrant: { publish: new Path.Patterns(), subscribe: new Path.Patterns() } }),
+		});
 		this.closed = new Promise((resolve) => {
 			this.die = () => resolve(null);
 		});

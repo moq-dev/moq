@@ -240,23 +240,40 @@ impl Message for SubscribeNamespaceError<'_> {
 	}
 }
 
-/// UnsubscribeNamespace message (0x14): v14/v15 only (v16 uses stream close)
+/// UnsubscribeNamespace message (0x14): v14/v15 only (v16 uses stream close).
+/// v14 names the prefix it subscribed, v15 the request.
 #[derive(Clone, Debug)]
-pub struct UnsubscribeNamespace {
+pub struct UnsubscribeNamespace<'a> {
+	/// v14: the Track Namespace Prefix of the SUBSCRIBE_NAMESPACE it cancels.
+	pub prefix: Path<'a>,
+	/// v15: the Request ID of the SUBSCRIBE_NAMESPACE it cancels.
 	pub request_id: RequestId,
 }
 
-impl Message for UnsubscribeNamespace {
+impl Message for UnsubscribeNamespace<'_> {
 	const ID: u64 = 0x14;
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
-		self.request_id.encode(w, version)?;
+		match version {
+			Version::Draft14 => encode_namespace(w, &self.prefix)?,
+			Version::Draft15 => self.request_id.encode(w, version)?,
+			_ => return Err(EncodeError::Version),
+		}
 		Ok(())
 	}
 
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		let request_id = RequestId::decode(r, version)?;
-		Ok(Self { request_id })
+		match version {
+			Version::Draft14 => Ok(Self {
+				prefix: decode_namespace(r)?,
+				request_id: RequestId(0),
+			}),
+			Version::Draft15 => Ok(Self {
+				prefix: Path::default(),
+				request_id: RequestId::decode(r, version)?,
+			}),
+			_ => Err(DecodeError::Version),
+		}
 	}
 }
 
@@ -370,6 +387,29 @@ mod tests {
 		Ok((decoded, buf.is_empty()))
 	}
 
+	/// Draft-14 names the prefix it cancels and draft-15 the request; later drafts close the
+	/// stream instead.
+	#[test]
+	fn unsubscribe_namespace_names_the_prefix_then_the_request() {
+		let msg = UnsubscribeNamespace {
+			prefix: Path::new("cam/front"),
+			request_id: RequestId(6),
+		};
+		let mut v14 = bytes::Bytes::from(body(&msg, Version::Draft14));
+		let named = crate::coding::decode_buf(&mut v14, Version::Draft14, UnsubscribeNamespace::decode_msg).unwrap();
+		assert_eq!(named.prefix.as_str(), "cam/front");
+
+		let mut v15 = bytes::Bytes::from(body(&msg, Version::Draft15));
+		let numbered = crate::coding::decode_buf(&mut v15, Version::Draft15, UnsubscribeNamespace::decode_msg).unwrap();
+		assert_eq!(numbered.request_id, RequestId(6));
+
+		let mut buf = Vec::new();
+		assert!(
+			msg.encode_msg(&mut Encoder::new(&mut buf, Version::Draft16.into()), Version::Draft16)
+				.is_err()
+		);
+	}
+
 	fn clustered(hops: &[u64], cost: u64) -> Option<AdvertParams> {
 		Some(AdvertParams {
 			cluster: Some(cluster::Advert {
@@ -384,7 +424,7 @@ mod tests {
 	/// the base one has no such field at all.
 	#[test]
 	fn cluster_namespace_round_trips() {
-		let version = Version::Draft19;
+		let version = Version::Draft18;
 		let msg = Namespace {
 			suffix: Path::new("alice.hang"),
 			params: clustered(&[7, 9], 5),
@@ -413,7 +453,7 @@ mod tests {
 	/// ROUTE_COST is optional and absent means 0, so a free path sends nothing.
 	#[test]
 	fn cluster_namespace_omits_zero_cost() {
-		let version = Version::Draft19;
+		let version = Version::Draft18;
 		let free = Namespace {
 			suffix: Path::new("a"),
 			params: clustered(&[7], 0),
@@ -505,7 +545,7 @@ mod tests {
 	/// A negotiated session that omits HOP_PATH is a protocol violation.
 	#[test]
 	fn cluster_namespace_requires_hop_path() {
-		let version = Version::Draft19;
+		let version = Version::Draft18;
 		let mut buf = Vec::new();
 		encode_namespace(&mut Encoder::new(&mut buf, version.into()), &Path::new("a")).unwrap();
 		// Number of Parameters = 0.
@@ -522,7 +562,7 @@ mod tests {
 	/// so a receiver that sees them there rejects the message.
 	#[test]
 	fn cluster_params_rejected_when_not_negotiated() {
-		let version = Version::Draft19;
+		let version = Version::Draft18;
 		let msg = super::super::PublishNamespace {
 			request_id: RequestId(1),
 			track_namespace: Path::new("a"),

@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
 use moq_net::transport::poll::{RecvStream as _, SendOptions, SendStream as _, Session as _};
-use moq_quic::coding::Codec;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use tokio::sync::watch;
 
@@ -251,6 +250,26 @@ async fn request_credit_is_refused_without_parking_an_open() {
 	));
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_request_before_the_handshake_waits_for_credit() {
+	let (client, server) = tokio::io::duplex(PIPE);
+	// Started like a WebSocket client, without waiting for the server's parameters.
+	let mut client = Session::new(Stream::new(client), Side::Client, config(Version::QMux02)).unwrap();
+	let mut opening = std::pin::pin!(std::future::poll_fn(
+		|cx| client.poll_open_request(cx, Default::default())
+	));
+	assert!(
+		futures_poll_once(&mut opening).await.is_none(),
+		"no credit is known before the handshake"
+	);
+
+	let _server = Session::accept(Stream::new(server), config(Version::QMux02))
+		.await
+		.unwrap();
+	let opened = opening.await.expect("request after the handshake");
+	assert!(opened.is_some(), "the server's initial credit admits the request");
+}
+
 /// Poll `future` once, after letting every other task run.
 async fn futures_poll_once<F: std::future::Future + Unpin>(future: &mut F) -> Option<F::Output> {
 	moq_clock::sleep(Duration::from_millis(10)).await;
@@ -293,7 +312,7 @@ async fn websocket_keep_alive_needs_room_for_a_pong() {
 		let (socket, _peer) = tokio::io::duplex(PIPE);
 		let ws = WebSocketStream::from_raw_socket(socket, Role::Client, None).await;
 		let keep_alive = KeepAlive::new(Duration::from_secs(interval), Duration::from_secs(timeout));
-		let result = WsTransport::new(ws, Binding::Uri).with_keep_alive(keep_alive);
+		let result = WsTransport::new(ws, Address::Uri).with_keep_alive(keep_alive);
 		assert!(
 			matches!(result, Err(Error::InvalidConfig(_))),
 			"{interval}s / {timeout}s"
@@ -333,10 +352,10 @@ async fn websocket_keep_alive_runs_during_continuous_output() {
 	let mut config = config(Version::QMux02);
 	config.rtt_interval = None;
 	config.idle_timeout = None;
-	let a = WsTransport::new(a, Binding::Uri)
+	let a = WsTransport::new(a, Address::Uri)
 		.with_keep_alive(KeepAlive::new(Duration::from_millis(10), Duration::from_millis(500)))
 		.unwrap();
-	let b = WsTransport::new(b, Binding::Uri);
+	let b = WsTransport::new(b, Address::Uri);
 	let mut sender = Session::new(a, Side::Client, config.clone()).unwrap();
 	let _receiver = Session::new(b, Side::Server, config).unwrap();
 	while sender.max_datagram_size() == 0 {

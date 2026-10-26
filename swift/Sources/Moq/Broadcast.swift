@@ -95,46 +95,10 @@ public final class BroadcastProducer: Sendable {
 
     /// End the broadcast for good: retract it and serve no new tracks.
     ///
-    /// Tracks already subscribed carry on to their own end. Closing again is a no-op.
+    /// Tracks still open on it end with `Unroutable`, which readers take as the publisher
+    /// leaving, and their later calls throw `MoqError.Closed`; finish a track first to end it
+    /// cleanly. Closing again is a no-op.
     public func close() throws {
         try ffi.close()
-    }
-
-    /// End the broadcast cleanly, keeping it servable until its media goes stale.
-    ///
-    /// Finish every track first: the returned handle holds the tracks finished by now and
-    /// keeps the broadcast announced, so a subscriber still catching up can drain them. A
-    /// track still live is not held. Every later call on this producer throws, as after
-    /// `close()`.
-    public func finish() throws -> BroadcastFinish {
-        BroadcastFinish(try ffi.finish())
-    }
-}
-
-/// A cleanly ended broadcast, still announced and serving its finished tracks.
-///
-/// Closing it, or cancelling the task in `wait()`, closes the broadcast at once.
-public final class BroadcastFinish: Sendable {
-    let ffi: MoqBroadcastFinish
-
-    init(_ ffi: MoqBroadcastFinish) {
-        self.ffi = ffi
-    }
-
-    /// How long to keep the broadcast, in microseconds: the longest max age of the held tracks.
-    public var lingerUs: UInt64 { ffi.lingerUs() }
-
-    /// Keep the broadcast up for its linger, or until `close()`, then close it.
-    public func wait() async throws {
-        try await withTaskCancellationHandler {
-            try await ffi.wait()
-        } onCancel: {
-            ffi.close()
-        }
-    }
-
-    /// Close the broadcast now, ending the linger and any wait. Closing again is a no-op.
-    public func close() {
-        ffi.close()
     }
 }

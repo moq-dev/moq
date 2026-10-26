@@ -57,15 +57,18 @@ Rejected:
 
 The broadcast wrappers merged in [#5876](https://github.com/moq-dev/moq/pull/5876) with `reserve_track`, which still serves declared names; [rust-publish](/quest/m2/e2ee/rust-publish.md) needs nothing more (maintainer, 2026-10-19).
 
+Before `@moq/e2ee` is first published, add its entrypoints to the API
+Extractor declaration checks, which analyze only published packages since
+[moq-dev/moq#6794](https://github.com/moq-dev/moq/pull/6794).
+
 ## Required
 
-- [Reversible physical names](/quest/m2/e2ee/reversible-names.md) - both
-  cores and the shared vectors derive physical names by the draft's
-  HMAC-nonce AES-128-GCM construction, and a producing generation recovers the
-  semantic name of any name issued under it
 - [Undeclared track names](/quest/m2/e2ee/undeclared-names.md) - an encrypted
   broadcast's `dynamic()` serves names nobody created or reserved, under
   semantic names, in Rust
+- [JS undeclared track names](/quest/m2/e2ee/js-undeclared-names.md) -
+  `@moq/net` exposes a broadcast request handler and `@moq/e2ee` serves
+  undeclared names through it
 - [Rust protected publisher seams](/quest/m2/e2ee/rust-publish.md) - Rust
   publishers emit encrypted catalogs and no plaintext semantic catalog in
   E2EE mode, through the moq-net traits
@@ -76,8 +79,6 @@ The broadcast wrappers merged in [#5876](https://github.com/moq-dev/moq/pull/587
 - [Encrypted native CLI](/quest/m2/e2ee/cli.md) - the native CLI publishes and
   plays encrypted media without exposing credentials through process metadata
   or logs
-- [Typed codes for dropped datagrams](/quest/m2/e2ee/datagram-drop-codes.md) -
-  a malformed datagram is dropped with its draft code, not `authentication`
 - [Cross-language encrypted proof](/quest/m2/e2ee/interop.md) - browser
   TypeScript and native Rust exchange encrypted media both ways, with relays
   forwarding and metering blind

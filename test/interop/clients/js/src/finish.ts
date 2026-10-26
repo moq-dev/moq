@@ -1,11 +1,14 @@
 // Finite media fixture and finish observations for the existing browser client.
-import { Instant, Micro, Milli, Nano, now } from "@moq/clock";
+import { Micro, Milli, Nano, sleep } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Moq from "@moq/net";
 import { CatalogProducer } from "@moq/publish";
 import { Effect } from "@moq/signals";
 import { readFinish } from "../../js-native/finish";
+
+/** How long the publisher keeps its finished broadcast up for the late readers. */
+const LINGER = Milli(10_000);
 
 interface State {
 	ready: boolean;
@@ -67,7 +70,8 @@ export function finish(
 			state.result = await readFinish(origin, path, frames, Milli(timeout));
 			return;
 		}
-		const broadcast = origin.createBroadcast(Moq.Path.from(path));
+		const broadcastPublication = origin.createBroadcast(Moq.Path.from(path));
+		const broadcast = broadcastPublication.broadcast;
 		const config: Catalog.VideoConfig = {
 			codec: "avc1.42001e",
 			codedWidth: Catalog.u53(320),
@@ -129,22 +133,20 @@ export function finish(
 			serving,
 		);
 		serving.close();
-		broadcast.announce();
-		const started = now();
-		const finishing = broadcast.finish();
-		const linger = Nano.fromMilli(finishing.linger);
-		if (linger <= 0) throw new Error("finished media has no linger");
-		state.lingerUs = finishing.linger * 1000;
+		broadcastPublication.announce();
+		// Keep the finished broadcast up for the late readers, then take it offline.
+		state.lingerUs = LINGER * 1000;
 		state.ready = true;
-		await finishing.wait();
-		if (Instant.durationSince(now(), started) < linger) throw new Error("finish wait ended before its linger");
-		const health = origin.createBroadcast(Moq.Path.from(`${path}.health`));
+		await sleep(Nano.fromMilli(LINGER));
+		broadcast.close();
+		const healthPublication = origin.createBroadcast(Moq.Path.from(`${path}.health`));
+		const health = healthPublication.broadcast;
 		const healthTrack = health.createTrack("live");
 		const group = healthTrack.appendGroup();
 		group.writeFrame({ payload: new TextEncoder().encode("session-alive") });
 		group.close();
 		healthTrack.close();
-		health.announce();
+		healthPublication.announce();
 		state.ended = true;
 		await ack;
 		health.close();

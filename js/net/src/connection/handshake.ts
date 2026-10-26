@@ -24,7 +24,7 @@ export async function exchangeSetup(
 	transport: WebTransport,
 	version: Ietf.IetfVersion,
 	implementation: string,
-	{ client, extensions }: { client: boolean; extensions: Extensions.Offered },
+	{ client, extensions, token }: { client: boolean; extensions: Extensions.Offered; token?: Uint8Array },
 ): Promise<{
 	control: Stream;
 	early: Reader[];
@@ -43,6 +43,8 @@ export async function exchangeSetup(
 	Ietf.hiddenIntoSetup(params);
 	Ietf.maxAgeIntoSetup(params);
 	Ietf.activeCountIntoSetup(params, version);
+	// Only a client presents a connection credential.
+	if (client && token) Ietf.tokenIntoSetup(params, { kind: Ietf.TOKEN_OUT_OF_BAND, value: token }, version);
 
 	// One id per session, like the moq-lite connection: nothing in this process forwards
 	// between sessions, so there is nothing for a shared id to detect.
@@ -144,7 +146,7 @@ async function receiveSetup(
 	await reader.u53(); // the SETUP type, peeked above
 	const setup = await Ietf.Setup.decode(reader, version);
 
-	// A server sends neither PATH nor AUTHORITY (draft-21 sections 9.1.1 and 9.1.2).
+	// A server sends neither PATH nor AUTHORITY (draft-22 sections 9.1.1 and 9.1.2).
 	if (client && setup.parameters.getBytes(Ietf.SetupOption.Path) !== undefined) {
 		throw new ProtocolViolation("server SETUP carries PATH", { code: SessionCode.InvalidPath });
 	}
@@ -152,7 +154,7 @@ async function receiveSetup(
 		throw new ProtocolViolation("server SETUP carries AUTHORITY", { code: SessionCode.InvalidAuthority });
 	}
 	// Nothing here uses the peer's token, but one that cannot be decoded still closes the
-	// session (draft-21 section 8.9).
+	// session (draft-22 section 8.9).
 	Ietf.tokenFromSetup(setup.parameters, version);
 
 	return {

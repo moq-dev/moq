@@ -32,7 +32,7 @@
     # The quest CLI, which also serves the quest guide and skills the stubs in
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
-      url = "github:kixelated/quest/cbd939adf5043f083e24e0302d40f7618c09f427";
+      url = "github:kixelated/quest/ed657ba9362a941b3be9bbea55120a3c5a90374c";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
     };
@@ -285,7 +285,7 @@
         ];
 
         # Linters / formatters used by `just check` and `just fix`, which
-        # skip a module whose tools aren't on $PATH. CI sets MOQ_STRICT=1,
+        # skip a module whose tools aren't on $PATH. CI sets CI_STRICT=1,
         # which turns that skip into an error (see the tools map in
         # sh/dispatch.sh), so this list and that one have to stay in step.
         lintDeps = with pkgs; [
@@ -375,10 +375,11 @@
           # The upstream repository ignores Cargo.lock so cargo installs test
           # the unlocked resolver. Nix still consumes committed lock data.
           cargoLock.lockFile = ./nix/uniffi-dart-Cargo.lock;
-          # Carry record converter and per-operation cancellation fixes at the source.
+          # Carry record converter, per-operation cancellation, and negative duration fixes at the source.
           patches = [
             ./nix/uniffi-dart-record-error.patch
             ./nix/uniffi-dart-cancellation.patch
+            ./nix/uniffi-dart-duration-negative.patch
           ];
           postPatch = ''
             cp ${./nix/uniffi-dart-Cargo.lock} Cargo.lock
@@ -390,7 +391,7 @@
 
         # uniffi-bindgen-cpp renders rs/moq-ffi for cpp/moq's CMake build. Not in
         # nixpkgs, so build it from source; without it `just check` skips the
-        # cpp module, which MOQ_STRICT turns into a failure in CI.
+        # cpp module, which CI_STRICT turns into a failure in CI.
         #
         # Like uniffi-bindgen-go, the tag pairs the generator's version with the
         # uniffi release it reads, so it moves with the `uniffi` dependency in
@@ -408,16 +409,16 @@
         # Move back upstream once one tags both.
         uniffi-bindgen-cpp = pkgs.rustPlatform.buildRustPackage rec {
           pname = "uniffi-bindgen-cpp";
-          version = "0.11.0-kixelated.6+v0.32.2";
+          version = "0.11.0-kixelated.7+v0.32.2";
 
           src = pkgs.fetchFromGitHub {
             owner = "kixelated";
             repo = "uniffi-bindgen-cpp";
             rev = "v${version}";
-            hash = "sha256-r0O/iAad2Z82KhG+6AOvqESAktaR7THQQVoR2CyP+ok=";
+            hash = "sha256-nErLn2hQus5omIaFheJWy06wKQS9HiKNtksxaJm9Z8k=";
           };
 
-          cargoHash = "sha256-0YWQF8eSUsemU0Y3jgZh7Kgtno/58zBAxPYpcBwPRuk=";
+          cargoHash = "sha256-fz7fn6D12zmFFSVSdySDfNRtQe+n4KCB9bXAsuvq/QY=";
 
           # The workspace's other member is the fixture crate, which pulls the
           # uniffi examples in from git; build only the generator.
@@ -633,6 +634,15 @@
           # finds a shim there too. That is the only way mbx reaches a build
           # that spawns Cargo itself, which release-plz does.
           shellHook = ''
+            # `nix develop` points TMPDIR at a fresh nix-shell.* dir that it
+            # never removes. Drop it and keep the caller's TMPDIR, as nix-direnv
+            # does, so nothing piles up there.
+            if [[ ''${NIX_BUILD_TOP-} == */nix-shell.* && -d $NIX_BUILD_TOP ]]; then
+              rm -rf "$NIX_BUILD_TOP"
+              export TMPDIR=''${NIX_BUILD_TOP%/*}
+              unset NIX_BUILD_TOP TMP TEMP TEMPDIR
+            fi
+
             status=$(mbx setup --status 2>/dev/null || true)
             shim=$(printf '%s\n' "$status" | sed -n '1s/.*: //p')
             if [ -x "$shim" ]; then
@@ -643,7 +653,7 @@
           env = {
             # What sh/dispatch.sh checks before a scoped `just check` or `just
             # fix`. IN_NIX_SHELL would also pass inside another project's shell.
-            MOQ_DEV_SHELL = "1";
+            IN_MOQ_DEV_SHELL = "1";
 
             PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers}";
             PLAYWRIGHT_VERSION = pkgs.playwright-driver.version;

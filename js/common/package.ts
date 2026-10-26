@@ -3,10 +3,11 @@
 // Split from release.ts to allow building packages without publishing
 
 import { copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { publint } from "publint";
 import { formatMessage } from "publint/utils";
-import { problems } from "./declarations.ts";
+import { checkReports } from "./api.ts";
+import { problems, type Source } from "./declarations.ts";
 import { undocumented } from "./docs.ts";
 
 console.log("✍️  Rewriting package.json...");
@@ -144,13 +145,22 @@ if (messages.length > 0) {
 	process.exit(1);
 }
 
-console.log("🔍 Checking declaration imports...");
+console.log("🔍 Checking declaration names...");
 const declarations = new Map<string, string>();
+const sources = new Map<string, Source>();
 for (const rel of new Bun.Glob("**/*.d.ts").scanSync("dist")) {
 	const file = resolve("dist", rel);
 	declarations.set(file, readFileSync(file, "utf8"));
+
+	// A declaration copied rather than emitted has no map, and no source to compare against.
+	const map = `${file}.map`;
+	if (!existsSync(map)) continue;
+	const [source] = JSON.parse(readFileSync(map, "utf8")).sources as string[];
+	if (!source) continue;
+	const path = resolve(dirname(map), source);
+	sources.set(file, { path, text: readFileSync(path, "utf8") });
 }
-const unresolved = problems(resolve("dist"), declarations);
+const unresolved = problems(resolve("dist"), declarations, sources);
 if (unresolved.length > 0) {
 	for (const problem of unresolved) console.error(problem);
 	process.exit(1);
@@ -168,6 +178,9 @@ if (published) {
 		for (const problem of missing) console.error(`  dist/${problem}`);
 		process.exit(1);
 	}
+
+	console.log("🔍 Checking API reports...");
+	checkReports(".");
 }
 
 console.log("📦 Package built successfully in dist/");

@@ -159,11 +159,12 @@ impl Subscriber {
 			// The newest window is known only once the feed is live: a relay copy still waiting
 			// on its source reports nothing yet, so wait rather than replay its backlog. The
 			// wait ends with the track.
-			if let Some(largest) = ready!(track.poll_largest(waiter)) {
-				track.set_groups(largest.group..);
+			let largest = ready!(track.poll_largest(waiter));
+			let mut track = *pending.take().expect("positioning holds the track");
+			if let Some(largest) = largest {
+				track = track.with_range(largest.group..);
 			}
-			let track = pending.take().expect("positioning holds the track");
-			self.state = State::Reading(Box::new(moq_json::window::Consumer::new(*track, Default::default())));
+			self.state = State::Reading(Box::new(moq_json::window::Consumer::new(track, Default::default())));
 		}
 		let State::Reading(consumer) = &mut self.state else {
 			unreachable!("positioned above");

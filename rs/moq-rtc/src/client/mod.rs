@@ -66,14 +66,16 @@ impl Client {
 	}
 
 	/// `client subscribe`: pull a remote WHEP feed and publish it as
-	/// `broadcast` on the local origin. Returns once the session is
-	/// running in the background.
+	/// `broadcast` on the local origin, until the session ends.
 	pub async fn subscribe(&self, url: Url, broadcast: moq_net::broadcast::Producer) -> crate::Result<()> {
 		whep::dial(self, url, broadcast).await
 	}
 
 	/// `client publish`: pull the broadcast at `path` from `origin` and push it to a
-	/// remote WHIP endpoint.
+	/// remote WHIP endpoint, until the session ends.
+	///
+	/// It stays on the publisher instance it resolved, and fails once that instance's
+	/// route dies.
 	///
 	/// Taking the origin plus path (rather than a resolved [`moq_net::broadcast::Consumer`])
 	/// lets the egress resolve a rendition whose catalog `broadcast` field references a
@@ -105,7 +107,7 @@ mod tests {
 			.parse()
 			.expect("WHEP URL");
 		let err = Client::new(Config::default())
-			.subscribe(url, broadcast)
+			.subscribe(url, broadcast.broadcast().clone())
 			.await
 			.expect_err("dial a closed port");
 

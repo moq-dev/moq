@@ -75,7 +75,6 @@ export interface OriginProducer {
 /** The protocol-facing operations behind an origin consumer. */
 export interface OriginConsumer {
 	routes(path: Path.Valid): boolean;
-	readonly broadcasts: Getter<ReadonlyMap<Path.Valid, broadcast.Consumer> | undefined>;
 	readonly advertised: Getter<Advertisements | undefined>;
 	/** The announced local broadcast at `path`, when it is the route peers are offered there.
 	 * A request naming an `epoch` only matches a route serving it. */
@@ -118,6 +117,18 @@ export interface Established {
 	consume(path: Path.Valid): broadcast.Consumer;
 	/** Settles with the peer's GOAWAY; the session keeps serving until it closes. */
 	readonly goaway: GetPromise<Drain>;
+	/**
+	 * Whether the peer refuses an announce request overlapping one it still holds, so
+	 * discovery never holds two where one covers the other.
+	 */
+	readonly exclusive: boolean;
+	// private: plumbing
+	/**
+	 * This session's side of its auth handle.
+	 *
+	 * @internal
+	 */
+	readonly auth: import("./auth_session.ts").AuthSession;
 }
 
 /** A produced broadcast's view, which always fetches from its own cache. */

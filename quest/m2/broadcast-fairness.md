@@ -35,7 +35,7 @@ Direction carried over from 2026-09-19, not re-confirmed:
 - A tenant-keyed domain (one bucket per customer, however many broadcasts they
   run) needs the tenant identity from the auth line and refines the same tier.
 - moq-quic had the fair tier: send domains sharing bytes by deficit round
-  robin, with groups inside them. [quic-api trim](/quest/m1/quic-api/trim.md)
+  robin, with groups inside them. [the API trim](https://github.com/moq-dev/moq/pull/6809)
   deletes it while nothing uses it (maintainer, 2026-10-23); restore it from
   that PR's history with this quest's consumer.
   Exposing them gives `transport::poll::Session::send_group` a domain, a
@@ -86,7 +86,7 @@ good plan here". Open questions it left:
 - Subscriber aggregate forwarding: under a fair schedule the downstream max
   should stop being forwarded upstream at its source, not just be ignored by
   the next fair hop.
-- Transports without send domains (WebSocket, iroh, today's qmux) and
+- Transports without send domains (iroh, the browser backend) and
   moq-transport sessions: refuse, or degrade to strict.
 - A cheaper capability probe than opening and dropping a domain.
 

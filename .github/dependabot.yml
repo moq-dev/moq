@@ -47,6 +47,14 @@ updates:
         patterns:
           - "*"
 
+  # The Dockerfile's builder image is pinned by digest; this keeps it current.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+
   - package-ecosystem: "cargo"
     directory: "/"
     schedule:

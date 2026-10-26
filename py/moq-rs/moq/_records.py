@@ -1,10 +1,10 @@
-"""Root records the wrapper owns, so durations read as ``timedelta``.
+"""Root records the wrapper owns, as frozen dataclasses with Python defaults.
 
-moq-ffi spells every duration as integer microseconds, because not every target
-language has a duration type. Python does, so these mirror the generated records
-with ``timedelta`` fields and convert at the boundary. ``ClientTls`` carries no
-duration but lives here with the rest of the client config, so a bare string
-passed for a list is refused instead of splitting into characters.
+moq-ffi spells media timestamps as integer microseconds, so ``Frame`` and
+``Datagram`` convert them to ``timedelta`` at the boundary. Durations already
+cross as ``timedelta``. ``ClientTls`` lives here with the rest of the client
+config, so a bare string passed for a list is refused instead of splitting into
+characters.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import timedelta
+from importlib import metadata
 
 from moq_ffi import (
     MoqBackoff,
@@ -30,6 +31,15 @@ from moq_ffi import (
 )
 
 _MICROSECOND = timedelta(microseconds=1)
+
+
+def _implementation() -> str:
+    """This package's product token, which its sessions advertise ahead of moq-ffi's."""
+    try:
+        return f"moq-py/{metadata.version('moq-rs')}"
+    except metadata.PackageNotFoundError:
+        # Imported from a source tree rather than an installed distribution.
+        return "moq-py/dev"
 
 
 def _to_us(value: timedelta, name: str) -> int:
@@ -100,22 +110,22 @@ class Subscription:
     """Subscriber-side delivery preferences, mirroring moq-net's ``track::Subscription``.
 
     ``priority`` is in ``-128..=127``, higher first, and defaults to 0, the midpoint.
-    ``max_delay`` is how far a non-latest group may fall behind before it is skipped,
-    ``None`` for moq-net's default of zero, which skips at once; it caps every range.
-    ``ranges`` are the spans of the track to deliver, ``None`` for everything ``max_delay``
-    still allows. ``order`` is which pending group the publisher sends first, ``None`` for
-    newest first.
+    ``max_delay`` is how far a non-latest group may fall behind before it is skipped;
+    zero skips at once, ``None`` leaves the publisher's max age alone to bound it, and it
+    caps every range. ``ranges`` are the spans of the track to
+    deliver, ``None`` for everything ``max_delay`` still allows. ``order`` is which pending
+    group the publisher sends first, ``None`` for newest first.
     """
 
     priority: int = 0
-    max_delay: timedelta | None = None
+    max_delay: timedelta | None = timedelta(0)
     ranges: Sequence[MoqRange] | None = None
     order: MoqOrder | None = None
 
     def _ffi(self) -> MoqSubscription:
         return MoqSubscription(
             priority=self.priority,
-            max_delay_us=_opt_us(self.max_delay, "max_delay"),
+            max_delay=self.max_delay,
             ranges=None if self.ranges is None else list(self.ranges),
             order=self.order,
         )
@@ -148,7 +158,7 @@ class TrackInfo:
     def _ffi(self) -> MoqTrackInfo:
         return MoqTrackInfo(
             priority=self.priority,
-            max_age_us=_opt_us(self.max_age, "max_age"),
+            max_age=self.max_age,
             refresh=self.refresh,
             timescale=self.timescale,
             compress=self.compress,
@@ -158,7 +168,7 @@ class TrackInfo:
     def _from_ffi(info: MoqTrackInfo) -> TrackInfo:
         return TrackInfo(
             priority=info.priority,
-            max_age=None if info.max_age_us is None else _from_us(info.max_age_us),
+            max_age=info.max_age,
             refresh=info.refresh,
             timescale=info.timescale,
             compress=info.compress,
@@ -186,10 +196,10 @@ class Backoff:
 
     def _ffi(self) -> MoqBackoff:
         return MoqBackoff(
-            initial_us=_opt_us(self.initial, "initial"),
+            initial=self.initial,
             multiplier=self.multiplier,
-            max_us=_opt_us(self.max, "max"),
-            timeout_us=_opt_us(self.timeout, "timeout"),
+            max=self.max,
+            timeout=self.timeout,
         )
 
 
@@ -253,8 +263,8 @@ class QuicConfig:
     def _ffi(self) -> MoqQuicConfig:
         return MoqQuicConfig(
             max_streams=self.max_streams,
-            idle_timeout_us=_opt_us(self.idle_timeout, "idle_timeout"),
-            keep_alive_us=_opt_us(self.keep_alive, "keep_alive"),
+            idle_timeout=self.idle_timeout,
+            keep_alive=self.keep_alive,
             gso=self.gso,
             mtu_discovery=self.mtu_discovery,
             congestion_control=self.congestion_control,
@@ -276,7 +286,7 @@ class WebSocketConfig:
     delay: timedelta | None = None
 
     def _ffi(self) -> MoqWebSocketConfig:
-        return MoqWebSocketConfig(enabled=self.enabled, delay_us=_opt_us(self.delay, "delay"))
+        return MoqWebSocketConfig(enabled=self.enabled, delay=self.delay)
 
 
 @dataclass(frozen=True)
@@ -297,7 +307,7 @@ class ConnectionStats:
     @staticmethod
     def _from_ffi(stats: MoqConnectionStats) -> ConnectionStats:
         return ConnectionStats(
-            rtt=None if stats.rtt_us is None else _from_us(stats.rtt_us),
+            rtt=stats.rtt,
             estimated_send_rate_bps=stats.estimated_send_rate_bps,
             bytes_sent=stats.bytes_sent,
             bytes_received=stats.bytes_received,
@@ -330,5 +340,5 @@ class Grant:
         return Grant(
             publish=tuple(grant.publish),
             subscribe=tuple(grant.subscribe),
-            expires=_opt_from_us(grant.expires_us),
+            expires=grant.expires,
         )

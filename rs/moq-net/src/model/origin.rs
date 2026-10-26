@@ -19,13 +19,13 @@ use super::{
 };
 use crate::{
 	AsPath, Epoch, Error, InvalidPattern, Path, PathOwned, Pattern, Patterns,
-	coding::{BoundsExceeded, Decode, DecodeError, Decoder, Encode, EncodeError, Encoder},
+	coding::{BoundsExceeded, Decode, DecodeError, Decoder, Encode, EncodeError, Encoder, Form, varint},
 	path::Segment,
 	time::{Deadlines, Instant},
 	util::{Keepalive, SendCell, TaskSet, Tasks, TasksWeak},
 };
 
-/// One relay's identity in a broadcast's hop chain: a 62-bit varint on the wire.
+/// One relay's identity in a broadcast's hop chain: any 64-bit id.
 ///
 /// Names a *hop*, not an [`origin::Producer`](Producer): a relay's routing table is the
 /// origin, and this is the id it stamps into a route's hop chain as an announcement
@@ -36,7 +36,6 @@ use crate::{
 /// on the wire, names nobody, and marks the chain anonymous for route selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Hop {
-	/// 62-bit identifier, so it fits a varint on every wire version.
 	id: u64,
 }
 
@@ -51,11 +50,11 @@ impl Hop {
 
 	/// Build a hop from a stable id.
 	///
-	/// The id must be non-zero and fit in the 62-bit QUIC varint range. Wire
-	/// decode accepts remote id 0 ([`Self::UNKNOWN`]), but a local hop should
-	/// not use it because it cannot be excluded for loop detection.
+	/// The id must be non-zero. Wire decode accepts remote id 0
+	/// ([`Self::UNKNOWN`]), but a local hop should not use it because it cannot be
+	/// excluded for loop detection.
 	pub fn new(id: u64) -> Result<Self, InvalidHop> {
-		if id == 0 || id >= 1u64 << 62 {
+		if id == 0 {
 			return Err(InvalidHop::Range);
 		}
 		Ok(Self { id })
@@ -66,7 +65,7 @@ impl Hop {
 	///
 	/// Older `@moq/lite` clients decode the exclude hop as a JavaScript number
 	/// and reject values above 2^53-1. Keep generated IDs in that range while
-	/// [`Self::new`] accepts the full 62-bit wire range for explicit IDs.
+	/// [`Self::new`] accepts any non-zero 64-bit id.
 	pub fn random() -> Self {
 		let mut rng = rand::rng();
 		let id = rng.random_range(1..(1u64 << 53));
@@ -79,12 +78,20 @@ impl Hop {
 	}
 
 	/// Build a hop from an id read off the wire, where 0 is legal.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn from_wire(id: u64) -> Result<Self, DecodeError> {
-		if id >= 1u64 << 62 {
-			return Err(DecodeError::InvalidValue);
+	pub(crate) const fn from_wire(id: u64) -> Self {
+		Self { id }
+	}
+
+	/// The id this hop carries on a wire whose varints use `form`.
+	///
+	/// A QUIC varint stops at 2^62 - 1, so a larger id travels as [`Self::UNKNOWN`]:
+	/// the route still reaches the peer, losing loop detection through this hop on
+	/// that link only.
+	pub(crate) fn wire_id(self, form: Form) -> u64 {
+		match form {
+			Form::Quic if self.id > varint::MAX_QUIC => Self::UNKNOWN.id,
+			_ => self.id,
 		}
-		Ok(Self { id })
 	}
 }
 
@@ -201,14 +208,13 @@ impl fmt::Display for Hop {
 
 impl<V> Encode<V> for Hop {
 	fn encode(&self, w: &mut Encoder<'_>, _: V) -> Result<(), EncodeError> {
-		w.varint(self.id)?;
-		Ok(())
+		w.varint(self.wire_id(w.form()))
 	}
 }
 
 impl<V> Decode<V> for Hop {
 	fn decode(r: &mut Decoder<'_>, _: V) -> Result<Self, DecodeError> {
-		Self::from_wire(r.varint()?)
+		Ok(Self::from_wire(r.varint()?))
 	}
 }
 
@@ -259,8 +265,8 @@ pub struct Hops(Vec<Hop>);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum InvalidHop {
-	/// The id is zero or outside the 62-bit wire range, so it cannot identify a local
-	/// hop. Only [`Hop::new`] returns this; a chain never holds one.
+	/// The id is zero, so it cannot identify a local hop. Only [`Hop::new`] returns
+	/// this; a chain may still hold the reserved [`Hop::UNKNOWN`].
 	Range,
 
 	/// The list is already at its hop-count cap, which a real path never reaches and a
@@ -276,7 +282,7 @@ pub enum InvalidHop {
 impl fmt::Display for InvalidHop {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
-			Self::Range => write!(f, "local hop id must be non-zero and below 2^62"),
+			Self::Range => write!(f, "local hop id must be non-zero"),
 			Self::TooMany => write!(f, "too many hops (max {MAX_HOPS})"),
 			Self::Duplicate => write!(f, "hop already in the chain"),
 		}
@@ -465,7 +471,7 @@ impl From<i8> for Preference {
 /// The path a route took through the mesh and what using it costs.
 ///
 /// The metadata half of an advertisement: [`Producer::dynamic`] pairs it with
-/// the prefix it covers, [`broadcast::Producer::announce`] with the
+/// the prefix it covers, [`Publication::announce`] with the
 /// broadcast's exact path, and [`Consumer::announced`] yields both. A route
 /// claims capability, not inventory: it says paths under its prefix are
 /// servable, never that any specific broadcast exists. The common convention is
@@ -497,16 +503,16 @@ pub struct Route {
 	pub cost: Cost,
 
 	/// The credential the request advertising this route carries, from
-	/// [`auth::Handle`](crate::auth::Handle)'s `add`, or `None` for the session's scope.
+	/// `auth::Handle::add`, or `None` for the session's scope.
 	///
-	/// Only a session the auth was presented on carries it, as the token on its
+	/// Only a session built on the handle that issued it carries it, as the token on its
 	/// moq-transport PUBLISH_NAMESPACE: any other session, the inline NAMESPACE answering a
 	/// solicited SUBSCRIBE_NAMESPACE from draft 16 on (drafts 14 and 15 answer with a
 	/// PUBLISH_NAMESPACE, which carries it), and moq-lite (which rides the session's scope)
 	/// advertise the route unnamed. Swapping it is an update that renews the request with
-	/// REQUEST_UPDATE from draft 16, or ends and makes it again before. After a
-	/// reconnect, add the token on the new session and name that. Local, like
-	/// [`Self::source`]: a relay never forwards it.
+	/// REQUEST_UPDATE from draft 16, or ends and makes it again before. A handle passed to
+	/// `Client::with_auth` presents it on every session it backs, so the route keeps it
+	/// across a reconnect. Local, like [`Self::source`]: a relay never forwards it.
 	pub auth: Option<crate::auth::Auth>,
 
 	/// The announcing session's declared or assigned identity.
@@ -2123,16 +2129,17 @@ impl Producer {
 		}
 	}
 
-	/// Create a broadcast at `path`, fed through the returned producer.
+	/// Create an unannounced publication at `path` and its broadcast fill surface.
 	///
-	/// This is how local content enters an origin. The returned
-	/// [`broadcast::Producer`] is a source. Announce it with a [`Route::epoch`]
+	/// This is how local content enters an origin. The returned [`Publication`]
+	/// controls its advertisement; [`Publication::broadcast`] borrows the fill producer.
+	/// Announce it with a [`Route::epoch`]
 	/// ([`Epoch::mint`](crate::Epoch::mint) per run, or a replica's shared one) so a
 	/// restart replaces it rather than resuming into different content, and so
 	/// routes with that epoch resume across each other. Without one it never
 	/// resumes elsewhere.
 	///
-	/// The broadcast exists for nobody until [`broadcast::Producer::announce`]:
+	/// The broadcast exists for nobody until [`Publication::announce`]:
 	/// until then no announce cursor lists it and a request for its path fails
 	/// with [`Error::Unroutable`], for a consumer of this origin exactly as for a
 	/// peer. Announce once the tracks a subscriber needs first exist. To serve
@@ -2154,10 +2161,12 @@ impl Producer {
 	/// pattern can spell (`*` or `**`), [`Error::NavigationSegment`] for a literal `.` or `..`,
 	/// or [`Error::Closed`] once the origin's
 	/// [`Driver`] has been dropped.
-	pub fn create_broadcast(&self, path: impl AsPath) -> Result<broadcast::Producer, Error> {
+	pub fn create_broadcast(&self, path: impl AsPath) -> Result<Publication, Error> {
 		let full = self.root.join(path.as_path()).to_owned();
 		let (broadcast, announcer) = self.create_withheld(full)?;
-		Ok(broadcast.with_announcer(announcer))
+		Ok(Publication {
+			broadcast: broadcast.with_announcer(announcer),
+		})
 	}
 
 	/// A new broadcast at `full` with its announcer withheld, so it cannot announce
@@ -2220,7 +2229,7 @@ impl Producer {
 	}
 
 	/// Create and advertise a broadcast in one call.
-	pub fn publish(&self, path: impl AsPath, route: Route) -> Result<broadcast::Producer, Error> {
+	pub fn publish(&self, path: impl AsPath, route: Route) -> Result<Publication, Error> {
 		let broadcast = self.create_broadcast(path)?;
 		broadcast.announce(route)?;
 		Ok(broadcast)
@@ -2231,8 +2240,13 @@ impl Producer {
 	/// is *not* entered into the route table. Sessions answer
 	/// [`Dynamic`] requests with one of these; the requester already holds
 	/// the request's result channel, so the table never needs to resolve it.
+	/// The source takes new tracks only while `validity` holds.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn create_source(&self, path: impl AsPath) -> broadcast::Producer {
+	pub(crate) fn create_source(
+		&self,
+		path: impl AsPath,
+		validity: crate::model::broadcast::RequestValidity,
+	) -> broadcast::Producer {
 		let path = path.as_path();
 		let full = self.root.join(&path).to_owned();
 		let ingress = self.stats.ingress(&full);
@@ -2245,6 +2259,7 @@ impl Producer {
 		}
 		.produce()
 		.with_stats(ingress)
+		.with_validity(validity)
 	}
 
 	/// Advertise a route without serving it: a claim that paths under `prefix`
@@ -2253,7 +2268,7 @@ impl Producer {
 	/// A request under an advertise-only route resolves [`Error::Unroutable`]
 	/// unless an announced broadcast or a served route ([`Self::dynamic`]) covers
 	/// the path too. Tests use it to shape the route table; everything else
-	/// advertises through a broadcast ([`broadcast::Producer::announce`]) or a
+	/// advertises through a broadcast ([`Publication::announce`]) or a
 	/// [`Dynamic`] handler, which serve what they claim.
 	#[cfg(test)]
 	pub(crate) fn announce(&self, prefix: impl AsPath, route: Route) -> Result<AnnounceProducer, Error> {
@@ -2341,7 +2356,7 @@ impl Producer {
 	/// splices into a copy of the last. This is how a service answers a whole
 	/// subtree without publishing each path ahead of time; a publisher that
 	/// knows its broadcasts advertises each one's exact path with
-	/// [`broadcast::Producer::announce`] instead, so subscribers can enumerate
+	/// [`Publication::announce`] instead, so subscribers can enumerate
 	/// them.
 	///
 	/// The prefix must overlap this producer's pattern scope. Individual requests
@@ -2351,8 +2366,8 @@ impl Producer {
 	}
 
 	/// Land a peer's claim with its wire route metadata.
-	#[doc(hidden)]
-	pub fn dynamic_route(&self, prefix: impl AsPath, route: Route) -> Result<Dynamic, Error> {
+	#[cfg(any(feature = "async", test))]
+	pub(crate) fn dynamic_route(&self, prefix: impl AsPath, route: Route) -> Result<Dynamic, Error> {
 		self.dynamic_inner(prefix, route, false)
 	}
 
@@ -2479,7 +2494,7 @@ impl Producer {
 	}
 
 	/// Returns the root that is automatically stripped from all paths.
-	pub fn root(&self) -> &Path<'_> {
+	pub fn root(&self) -> &PathOwned {
 		&self.root
 	}
 
@@ -2489,7 +2504,7 @@ impl Producer {
 	}
 
 	/// Converts a relative path to an absolute path.
-	pub fn absolute(&self, path: impl AsPath) -> Path<'_> {
+	pub fn absolute(&self, path: impl AsPath) -> PathOwned {
 		self.root.join(path)
 	}
 }
@@ -2555,7 +2570,6 @@ impl Announcing {
 		}
 
 		let mut entries = Vec::with_capacity(self.prefixes.len());
-		let mut superseded = Vec::new();
 		for (prefix, claim) in &self.prefixes {
 			shared.reannounced(prefix, &route.hops);
 			let id = shared.next_route;
@@ -2582,14 +2596,9 @@ impl Announcing {
 				reach: reach(&self.scope, claim),
 			});
 			shared.sync_route(prefix, claim);
-			superseded.extend(shared.routes.superseded(prefix));
 			entries.push((prefix.clone(), id));
 		}
 		drop(shared);
-		// Outside the table lock, which never nests a broadcast's.
-		for broadcast in superseded {
-			broadcast.supersede();
-		}
 
 		// Ingress announce guard: held while the route is advertised.
 		let guard = serving
@@ -2611,9 +2620,50 @@ struct Serving {
 	advertised: bool,
 }
 
+/// An origin-owned broadcast publication, with a fill surface and its announcement capability.
+///
+/// Clones share one broadcast and route. Closing the fill broadcast retracts the
+/// route for every clone. Dropping the last fill handle does the same; a cloned
+/// fill handle retains the publication even after the last `Publication` handle
+/// drops. Use [`Self::unannounce`] to withdraw earlier.
+#[derive(Clone)]
+pub struct Publication {
+	broadcast: broadcast::Producer,
+}
+
+impl Publication {
+	/// The broadcast to fill, without announcement control.
+	pub fn broadcast(&self) -> &broadcast::Producer {
+		&self.broadcast
+	}
+
+	/// Advertise this publication's path or replace its route.
+	pub fn announce(&self, route: Route) -> Result<(), Error> {
+		self.broadcast.announce(route)
+	}
+
+	/// Withdraw this publication while keeping its filled tracks alive.
+	pub fn unannounce(&self) {
+		self.broadcast.unannounce();
+	}
+
+	/// The route this publication currently advertises, if any.
+	pub fn route(&self) -> Option<Route> {
+		self.broadcast.route()
+	}
+}
+
+impl std::ops::Deref for Publication {
+	type Target = broadcast::Producer;
+
+	fn deref(&self) -> &Self::Target {
+		&self.broadcast
+	}
+}
+
 /// The table entry a broadcast owns: its exact path, advertised and withdrawn
-/// through [`broadcast::Producer::announce`] and
-/// [`broadcast::Producer::unannounce`], and removed when the broadcast ends.
+/// through [`Publication::announce`] and
+/// [`Publication::unannounce`], and removed when the broadcast ends.
 ///
 /// Handed to the broadcast by [`Producer::create_broadcast`], so a standalone
 /// broadcast has none and cannot announce.
@@ -2654,11 +2704,6 @@ impl Announcer {
 	pub(super) fn route(&self) -> Option<Route> {
 		self.entry.route()
 	}
-
-	/// Whether a live route at the broadcast's path carries a newer epoch.
-	pub(super) fn superseded(&self) -> bool {
-		self.entry.superseded()
-	}
 }
 
 /// The write half of an advertisement: a live claim that paths under a
@@ -2683,6 +2728,7 @@ impl AnnounceProducer {
 	/// The prefix is fixed at announce time and a [`Route`] cannot name one: to
 	/// move an advertisement, drop this and announce again. Fails with
 	/// [`Error::Closed`] once the origin's [`Driver`] has been dropped.
+	#[cfg(any(feature = "async", test))]
 	pub fn update(&self, route: Route) -> Result<(), Error> {
 		self.update_if(route, || true).map(|_| ())
 	}
@@ -2708,8 +2754,6 @@ impl AnnounceProducer {
 		// The requests an epoch change released, refused once the table lock is gone: the
 		// refusal wakes their fronts, which read the table.
 		let mut released = Vec::new();
-		// The broadcasts a newer epoch now replaces, told outside the table lock too.
-		let mut superseded = Vec::new();
 		for (prefix, id) in &self.entries {
 			shared.reannounced(prefix, &route.hops);
 			let stale = shared.withdrawn_through(prefix, &route.hops);
@@ -2743,16 +2787,12 @@ impl AnnounceProducer {
 			}
 			shared.sync_route(prefix, &claim);
 			shared.prune_withdrawn(prefix);
-			superseded.extend(shared.routes.superseded(prefix));
 		}
 		drop(shared);
 		for producer in released {
 			if let Ok(mut request) = producer.write() {
 				request.resolved.get_or_insert(Err(Error::Unroutable));
 			}
-		}
-		for broadcast in superseded {
-			broadcast.supersede();
 		}
 		Ok(true)
 	}
@@ -2772,22 +2812,10 @@ impl AnnounceProducer {
 		})
 	}
 
-	/// Whether a live route at any of the entries' prefixes carries a newer epoch than theirs.
-	fn superseded(&self) -> bool {
-		let shared = self.shared.lock();
-		self.entries.iter().any(|(prefix, id)| {
-			shared
-				.routes
-				.entry(prefix, *id)
-				.and_then(|entry| entry.epoch.as_ref())
-				.is_some_and(|epoch| shared.routes.newest_epoch(prefix).is_some_and(|newest| epoch < newest))
-		})
-	}
-
 	/// Hide the entries from everyone, local and remote alike: cursors see a
 	/// retraction and requests stop resolving through them. The entries stay,
 	/// so announcing again restores the same route. What
-	/// [`broadcast::Producer::unannounce`] does.
+	/// [`Publication::unannounce`] does.
 	fn withdraw(&self) {
 		let mut shared = self.shared.lock();
 		for (prefix, id) in &self.entries {
@@ -3277,6 +3305,17 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 		front.retain_routes(|route| table.routes.covers(&path.as_path(), route));
 		let instance = resolved.as_ref().map(|resolved| &resolved.instance);
 		let best = pick(&table, &path.as_path(), horizon, front, instance);
+		// Under the table's lock, which a request reads it under too: a request that
+		// sees another winner from here on mints its own front rather than join this one.
+		if resolved.is_none()
+			&& let Some(entry) = best
+			&& let Ok(mut pending) = request.write()
+		{
+			let selected = entry.instance();
+			if pending.selected != selected {
+				pending.selected = selected;
+			}
+		}
 		// Only a received route carries a hop chain: a local one needs no discovery.
 		let received = best.is_some_and(|entry| !entry.hops.is_empty());
 		let best = best.map(|entry| Candidate {
@@ -3683,12 +3722,8 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 					Err(_closed) => Err(Error::Unroutable),
 				}));
 			}
-			if let Some(id) = front.serving()
-				&& let Some(source) = sources.get(&id)
-				&& source.poll_closed(waiter).is_ready()
-			{
-				return Poll::Ready(Step::SourceClosed(id));
-			}
+			// The listing first: a source ends its listing before it closes, so this forwards
+			// the tracks it finished last before its close detaches it.
 			match &mut listing {
 				None => {
 					if front.serving().is_some() && matches!(lister.poll_used(waiter), Poll::Ready(Ok(()))) {
@@ -3708,6 +3743,12 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 						return Poll::Ready(Step::Listed(result));
 					}
 				}
+			}
+			if let Some(id) = front.serving()
+				&& let Some(source) = sources.get(&id)
+				&& source.poll_closed(waiter).is_ready()
+			{
+				return Poll::Ready(Step::SourceClosed(id));
 			}
 			while let Poll::Ready(Ok(name)) = ready.poll_pop(waiter) {
 				let Some(io) = tracks.get_mut(&name) else { continue };
@@ -4651,26 +4692,6 @@ impl RouteTable {
 		nodes.into_iter().flat_map(|node| node.entries.iter())
 	}
 
-	/// The newest epoch a live route at `prefix` carries.
-	fn newest_epoch(&self, prefix: &Path) -> Option<&Epoch> {
-		self.at(prefix)
-			.filter(|entry| entry.live())
-			.filter_map(|entry| entry.epoch.as_ref())
-			.max()
-	}
-
-	/// The broadcasts published exactly at `prefix` under an epoch older than the newest one
-	/// advertised there. See [`broadcast::Finish::poll_closed`].
-	fn superseded(&self, prefix: &Path) -> Vec<broadcast::Consumer> {
-		let Some(newest) = self.newest_epoch(prefix) else {
-			return Vec::new();
-		};
-		self.at(prefix)
-			.filter(|entry| entry.epoch.as_ref().is_some_and(|epoch| epoch < newest))
-			.filter_map(|entry| entry.source.clone())
-			.collect()
-	}
-
 	/// Add a route at its prefix, creating the nodes down to it.
 	fn insert(&mut self, entry: RouteEntry) {
 		let node = self.root.reach(entry.prefix.parts(), Below::NONE);
@@ -5290,11 +5311,15 @@ struct PendingBroadcast {
 
 /// A front's verdict, which its requesters wait on: the instance it resolved, or the
 /// error that ended it unresolved. A request joins the front only while that instance
-/// still wins. Each requester holds the front's broadcast from the moment it joins, so
-/// this carries no handle that would keep the front held.
-#[derive(Default)]
+/// still wins, or before then, while the one it selected does. Each requester holds the
+/// front's broadcast from the moment it joins, so this carries no handle that would keep
+/// the front held.
 struct PendingFront {
 	resolved: Option<Result<Instance, Error>>,
+	/// The instance the front resolves on unless the table moves first: the winner it
+	/// was minted for, then each one it selects. Written under the table's lock, so a
+	/// request never joins a front that picked an instance the request saw beaten.
+	selected: Instance,
 }
 
 /// What a front resolved: the instance its first source serves, and the route that
@@ -5443,8 +5468,8 @@ impl Dynamic {
 	/// The prefix is fixed at announce time: to move a route, drop this and call
 	/// [`Producer::dynamic`] again. Fails with [`Error::Closed`] once the origin's
 	/// [`Driver`] has been dropped.
-	#[doc(hidden)]
-	pub fn update_route(&self, route: Route) -> Result<(), Error> {
+	#[cfg(any(feature = "async", test))]
+	pub(crate) fn update_route(&self, route: Route) -> Result<(), Error> {
 		self.announcement.update(route)
 	}
 
@@ -5584,6 +5609,14 @@ impl ServeState {
 /// [`Consumer::request_broadcast`]; [`prepare`](Self::prepare) then [`Prepared::publish`]
 /// resolves it with a new exact-path broadcast, and [`reject`](Self::reject) resolves it
 /// with an error. Dropping the request without either rejects it.
+///
+/// Only the built-in sessions answer with a broadcast they already hold:
+///
+/// ```compile_fail,E0624
+/// fn answer(request: moq_net::origin::Request, broadcast: moq_net::broadcast::Consumer) {
+///     request.accept(broadcast);
+/// }
+/// ```
 pub struct Request {
 	// Absolute path that was requested.
 	path: PathOwned,
@@ -5603,7 +5636,7 @@ pub struct Request {
 
 impl Request {
 	/// The absolute path that was requested.
-	pub fn path(&self) -> &Path<'_> {
+	pub fn path(&self) -> &PathOwned {
 		&self.path
 	}
 
@@ -5620,16 +5653,8 @@ impl Request {
 	}
 
 	/// Resolve a session-forwarded claim with its peer's already-routed broadcast.
-	///
-	/// # Panics
-	///
-	/// On a request from [`Producer::dynamic`], which answers only through [`Self::prepare`].
-	#[doc(hidden)]
-	pub fn accept(self, broadcast: impl Consume<broadcast::Consumer>) {
-		assert!(
-			self.publisher.is_none(),
-			"an application claim answers through prepare and publish"
-		);
+	#[cfg(any(feature = "async", test))]
+	pub(crate) fn accept(self, broadcast: impl Consume<broadcast::Consumer>) {
 		let broadcast = broadcast.consume();
 		let _ = ServeState::resolve(&self.home, &self.path, &self.producer, Ok(broadcast));
 		// `self.producer` drops here, closing the channel; the value is still observable.
@@ -5654,9 +5679,7 @@ pub struct Prepared {
 }
 
 impl Prepared {
-	/// The unannounced broadcast to fill before publishing. Its own
-	/// [`announce`](broadcast::Producer::announce) fails with [`Error::Closed`]: only
-	/// [`Self::publish`] announces it.
+	/// The unannounced fill surface; only [`Self::publish`] can announce the answer.
 	pub fn broadcast(&self) -> &broadcast::Producer {
 		&self.broadcast
 	}
@@ -5666,7 +5689,7 @@ impl Prepared {
 	/// Fails with [`Error::Unroutable`], announcing nothing, once the request was
 	/// released or its claim retracted, or with [`Error::Closed`] once the broadcast
 	/// closed. A failed answer can never announce.
-	pub fn publish(self) -> Result<broadcast::Producer, Error> {
+	pub fn publish(self) -> Result<Publication, Error> {
 		let Self {
 			request,
 			broadcast,
@@ -5689,7 +5712,7 @@ impl Prepared {
 		if let Ok(mut pending) = request.producer.write() {
 			pending.resolved.get_or_insert(resolved);
 		}
-		Ok(broadcast)
+		Ok(Publication { broadcast })
 	}
 }
 
@@ -5893,8 +5916,7 @@ impl kio::Task for Routing {
 /// Derive a read view from a handle.
 ///
 /// Lets APIs accept either a producer or a consumer (e.g.
-/// `Client::with_publisher`,
-/// [`Request::accept`]). The blanket `&T` impl means you can
+/// `Client::with_publisher`). The blanket `&T` impl means you can
 /// pass by value (`foo(x)`) to hand off ownership, or by reference (`foo(&x)`)
 /// to keep it, without spelling out `.consume()`.
 pub trait Consume<T> {
@@ -6151,8 +6173,8 @@ impl Consumer {
 	/// relative to this consumer's root; its patterns only filter visibility.
 	/// Routes with a segment starting with `.` below the literal head of those
 	/// patterns are hidden unless [`with_hidden`](Self::with_hidden) opted in.
-	/// The stream also watches its scope: a moq-lite client session fed by this
-	/// origin asks its peer about the scope while any stream watches it.
+	/// The stream also watches its scope: a client session fed by this origin asks
+	/// its peer about the scope while any stream watches it.
 	/// Drop the returned [`AnnounceConsumer`] to unregister.
 	pub fn announced(&self) -> AnnounceConsumer {
 		let state = kio::Producer::<OriginConsumerState>::default();
@@ -6443,7 +6465,7 @@ impl Consumer {
 	///
 	/// The returned future fails with [`Error::Unroutable`] at once when no
 	/// announced route covers the path, including a broadcast created on this
-	/// origin but not announced. A moq-lite client session only discovers what this
+	/// origin but not announced. A client session only discovers what this
 	/// origin's readers watch, so a path no [`Self::announced`],
 	/// [`Self::routed_broadcast`], or [`Self::announced_broadcast`] watches is
 	/// unroutable on it. A broadcast resolved through a discovered route keeps its
@@ -6506,13 +6528,18 @@ impl Consumer {
 		// resolves (or already resolved) the request channel with its verdict, so
 		// repeat requests share one upstream subscription. A front resolved on
 		// another instance stays only for the subscriptions already on it, so a new
-		// request mints a fresh front for the winner rather than join the old one.
+		// request mints a fresh front for the winner rather than join the old one. So
+		// does a front still resolving one the table has since beaten: it may already
+		// hold that instance's source, and hand this request an instance it saw lose.
 		let key = (absolute.clone(), horizon);
 		if let Some(front) = state.fronts.get(&key) {
-			let current = match &front.request.read().resolved {
-				None => true,
-				Some(Ok(resolved)) => *resolved == best,
-				Some(Err(_)) => false,
+			let current = {
+				let pending = front.request.read();
+				match &pending.resolved {
+					None => pending.selected == best,
+					Some(Ok(resolved)) => *resolved == best,
+					Some(Err(_)) => false,
+				}
 			};
 			// Held from here on, so the front cannot retire under this requester. A
 			// retiring front closes atomically with this mint: found closed, it is
@@ -6544,7 +6571,10 @@ impl Consumer {
 			// A front reads its routes' copies, so it writes no frames of its own.
 			frames: Default::default(),
 		});
-		let request = kio::Producer::<PendingFront>::default();
+		let request = kio::Producer::new(PendingFront {
+			resolved: None,
+			selected: best,
+		});
 		let consumer = request.consume();
 		// The front starts held by this request; see [`Front::new`].
 		let held = broadcast.consume();
@@ -6584,7 +6614,7 @@ impl Consumer {
 	}
 
 	/// Returns the prefix that is automatically stripped from all paths.
-	pub fn root(&self) -> &Path<'_> {
+	pub fn root(&self) -> &PathOwned {
 		&self.root
 	}
 
@@ -6594,7 +6624,7 @@ impl Consumer {
 	}
 
 	/// Converts a relative path to an absolute path.
-	pub fn absolute(&self, path: impl AsPath) -> Path<'_> {
+	pub fn absolute(&self, path: impl AsPath) -> PathOwned {
 		self.root.join(path)
 	}
 }
@@ -6912,7 +6942,8 @@ impl AnnounceConsumer {
 	}
 
 	/// Whether this consumer has synced; see [`Self::poll_synced`].
-	pub fn is_synced(&self) -> bool {
+	#[cfg(test)]
+	pub(crate) fn is_synced(&self) -> bool {
 		let state = self.state.read();
 		state.is_closed() || state.synced()
 	}
@@ -6939,12 +6970,6 @@ impl AnnounceConsumer {
 				false => Poll::Pending,
 			})
 			.map(|_| ())
-	}
-
-	/// Wait until this consumer has synced; see [`Self::poll_synced`].
-	#[cfg(feature = "async")]
-	pub async fn synced(&self) {
-		kio::wait(|waiter| self.poll_synced(waiter)).await
 	}
 
 	// The wire sender uses this only to bound its initial replay.
@@ -6995,12 +7020,12 @@ impl AnnounceConsumer {
 	}
 
 	/// Returns the root that is automatically stripped from emitted prefixes.
-	pub fn root(&self) -> &Path<'_> {
+	pub fn root(&self) -> &PathOwned {
 		&self.root
 	}
 
 	/// Converts an emitted prefix back to one rooted at the origin.
-	pub fn absolute(&self, prefix: impl AsPath) -> Path<'_> {
+	pub fn absolute(&self, prefix: impl AsPath) -> PathOwned {
 		self.root.join(prefix)
 	}
 }
@@ -8153,7 +8178,7 @@ mod tests {
 	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn an_auth_swap_is_an_update() {
-		let handle = crate::auth::Handle::ietf(false);
+		let handle = crate::auth::Link::ietf(false);
 		let first = handle.present(bytes::Bytes::from_static(b"first"), false).unwrap();
 		let second = handle.present(bytes::Bytes::from_static(b"second"), false).unwrap();
 		let producer = origin(1).produce();
@@ -8780,6 +8805,33 @@ mod tests {
 		assert_eq!(listed(&mut tracks).await, "end");
 	}
 
+	/// A source closing right after its tracks finished, held or not, ends the front's
+	/// listing after those finishes, never ahead of them.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn a_front_forwards_the_finishes_before_its_source_closed() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let source = producer.publish("room/alice", Route::default()).unwrap();
+		let dropped = source.create_track("dropped", None).unwrap();
+		let held = source.create_track("held", None).unwrap();
+		let _live = source.create_track("live", None).unwrap();
+
+		let front = consumer.request_broadcast("room/alice", None).await.unwrap();
+		let mut tracks = front.tracks().unwrap();
+		for event in ["+dropped", "+held", "+live", "synced"] {
+			assert_eq!(listed(&mut tracks).await, event);
+		}
+
+		dropped.finish().unwrap();
+		drop(dropped);
+		held.finish().unwrap();
+		source.close();
+		for event in ["~dropped", "~held", "end"] {
+			assert_eq!(listed(&mut tracks).await, event);
+		}
+	}
+
 	/// A source's handler ending its listing while the source stays, as a session does on
 	/// its peer's FIN before any retraction, ends the front's listing too.
 	#[moq_clock::test]
@@ -9276,7 +9328,11 @@ mod tests {
 			path,
 			horizon: Horizon::default(),
 			watch,
-			request: kio::Producer::default(),
+			// Nothing joins this front, and its first selection overwrites the instance.
+			request: kio::Producer::new(PendingFront {
+				resolved: None,
+				selected: Instance::Route(0),
+			}),
 			joined: Arc::default(),
 			timers: consumer.timers.clone(),
 		};
@@ -9453,7 +9509,7 @@ mod tests {
 		let fetched = Arc::new(crate::sync::Mutex::new(Vec::<crate::group::Producer>::new()));
 		let serving = fetched.clone();
 		let _fetching = moq_clock::sim::spawn(async move {
-			while let Ok(request) = fetches.requested_group().await {
+			while let Ok(request) = fetches.requested_fill_group().await {
 				let mut group = request.accept(crate::track::Info::timed()).unwrap();
 				for frame in [b"a", b"b", b"c"] {
 					group.write_frame(crate::Timestamp::ZERO, frame.as_ref()).unwrap();
@@ -10570,6 +10626,54 @@ mod tests {
 		assert_eq!(pending.await.unwrap().info().epoch.as_ref(), Some(&epoch));
 	}
 
+	/// Announcement control follows the origin role while fill clones retain publication lifetime.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn publication_clones_share_control_and_fill_retention() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let mut events = consumer.announced();
+		let publication = producer.create_broadcast("room/alice").unwrap();
+		let fill = publication.broadcast().clone();
+		let control = publication.clone();
+		publication.announce(Route::default().with_epoch(epoch())).unwrap();
+		events.expect_next_active("room/alice").await;
+		control.unannounce();
+		events.expect_next_ended("room/alice").await;
+		assert!(publication.route().is_none());
+		publication.announce(Route::default().with_epoch(epoch())).unwrap();
+		events.expect_next_active("room/alice").await;
+		drop(control);
+		drop(publication);
+		events.assert_next_wait();
+		consumer.request_broadcast("room/alice", None).await.unwrap();
+		drop(fill);
+		events.expect_next_ended("room/alice").await;
+	}
+
+	/// A withdrawn stale publication cannot remove a replacement instance's route.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn stale_publication_control_cannot_withdraw_a_replacement() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let old = producer
+			.publish("room/alice", Route::default().with_epoch(epoch()))
+			.unwrap();
+		let replacement_epoch: crate::Epoch = "01900000-0000-7000-8000-000000000002".parse().unwrap();
+		let replacement = producer
+			.publish("room/alice", Route::default().with_epoch(replacement_epoch.clone()))
+			.unwrap();
+		old.unannounce();
+		old.close();
+		assert_eq!(replacement.route().unwrap().epoch, Some(replacement_epoch.clone()));
+		let resolved = consumer
+			.request_broadcast("room/alice", replacement_epoch.clone())
+			.await
+			.unwrap();
+		assert_eq!(resolved.info().epoch.as_ref(), Some(&replacement_epoch));
+	}
+
 	/// A refused answer keeps its announcer withheld, so a clone cannot announce it later.
 	#[moq_clock::test]
 	#[cfg(feature = "async")]
@@ -10653,16 +10757,6 @@ mod tests {
 		assert_eq!(pinned.expect("resolves").info().epoch.as_ref(), Some(&epoch));
 		let stale = consumer.request_broadcast("room/alice", crate::Epoch::mint());
 		assert!(matches!(stale.await, Err(Error::Unroutable)));
-	}
-
-	#[moq_clock::test]
-	#[cfg(feature = "async")]
-	#[should_panic(expected = "prepare and publish")]
-	async fn an_application_claim_cannot_accept_an_arbitrary_broadcast() {
-		let producer = origin(1).produce();
-		let claim = producer.dynamic("room").unwrap();
-		let _pending = producer.consume().request_broadcast("room/alice", None);
-		queued(&claim).await.accept(broadcast::Info::new().produce());
 	}
 
 	/// A refusal from the longest prefix is the answer: neither a costlier advertiser of
@@ -11476,99 +11570,6 @@ mod tests {
 		assert!(!replaced.is_clone(&resolved), "rejoined the first instance's front");
 	}
 
-	/// A newer epoch at the path ends a finished broadcast's linger at once, so the finished
-	/// instance neither stands next to its replacement nor returns when the replacement ends.
-	#[moq_clock::test]
-	#[cfg(feature = "async")]
-	async fn a_newer_epoch_ends_the_linger() {
-		let producer = origin(1).produce();
-		let old = producer
-			.publish("room/alice", Route::default().with_epoch(crate::Epoch::mint()))
-			.unwrap();
-		let track = old
-			.create_track("video", track::Info::timed().with_max_age(Duration::from_secs(30)))
-			.unwrap();
-		track.finish().unwrap();
-		let watch = old.consume();
-		let start = moq_clock::now();
-		let wait = moq_clock::sim::spawn(old.finish().wait());
-
-		moq_clock::sleep(Duration::from_secs(1)).await;
-		assert!(!watch.is_closed());
-		let _new = producer
-			.publish("room/alice", Route::default().with_epoch(crate::Epoch::mint()))
-			.unwrap();
-		wait.await.unwrap();
-		assert_eq!(moq_clock::now() - start, Duration::from_secs(1));
-		assert!(watch.is_closed());
-	}
-
-	/// Only a newer epoch ends a linger: an older instance arriving late, or one at
-	/// another path, leaves it to run out.
-	#[moq_clock::test]
-	#[cfg(feature = "async")]
-	async fn an_older_epoch_leaves_the_linger() {
-		let producer = origin(1).produce();
-		let (older, newer) = (crate::Epoch::mint(), crate::Epoch::mint());
-		let finished = producer
-			.publish("room/alice", Route::default().with_epoch(newer))
-			.unwrap();
-		let track = finished
-			.create_track("video", track::Info::timed().with_max_age(Duration::from_secs(5)))
-			.unwrap();
-		track.finish().unwrap();
-		let start = moq_clock::now();
-		let wait = moq_clock::sim::spawn(finished.finish().wait());
-
-		let _late = producer
-			.publish("room/alice", Route::default().with_epoch(older))
-			.unwrap();
-		let _elsewhere = producer
-			.publish("room/bob", Route::default().with_epoch(crate::Epoch::mint()))
-			.unwrap();
-		wait.await.unwrap();
-		assert_eq!(moq_clock::now() - start, Duration::from_secs(5));
-	}
-
-	/// Supersession is decided when the broadcast finishes: a newer epoch that came and went
-	/// while it was live leaves its linger, and one still live cuts it at once.
-	#[moq_clock::test]
-	#[cfg(feature = "async")]
-	async fn a_live_newer_epoch_at_finish_ends_the_linger() {
-		let producer = origin(1).produce();
-		let (older, newer) = (crate::Epoch::mint(), crate::Epoch::mint());
-		let publish = |epoch: &crate::Epoch| {
-			let broadcast = producer
-				.publish("room/alice", Route::default().with_epoch(epoch.clone()))
-				.unwrap();
-			let track = broadcast
-				.create_track("video", track::Info::timed().with_max_age(Duration::from_secs(5)))
-				.unwrap();
-			track.finish().unwrap();
-			(broadcast, track)
-		};
-
-		let (restored, _track) = publish(&older);
-		drop(publish(&newer));
-		let start = moq_clock::now();
-		restored.finish().wait().await;
-		assert_eq!(
-			moq_clock::now() - start,
-			Duration::from_secs(5),
-			"the withdrawn epoch left it"
-		);
-
-		let (cut, _track) = publish(&older);
-		let _live = publish(&newer);
-		let start = moq_clock::now();
-		cut.finish().wait().await;
-		assert_eq!(
-			moq_clock::now() - start,
-			Duration::ZERO,
-			"the live epoch ends it at once"
-		);
-	}
-
 	/// Announce cursors follow the newest epoch over a cheaper one, and deliver a
 	/// change of epoch as a restart: a different broadcast.
 	#[moq_clock::test]
@@ -11738,13 +11739,13 @@ mod tests {
 		let mut handler = replacement.dynamic();
 		queued(&standby).await.accept(&replacement);
 		let request = handler.requested_track().await.unwrap();
-		assert_eq!(request.subscription().unwrap().start(), Some(track::Position::group(5)));
+		assert_eq!(request.subscription().unwrap().start(), Some(5));
 		let track = request.accept(crate::track::Info::timed());
 		let mut preferences = rig.subscription.subscription();
 		preferences.priority = 7;
 		rig.subscription.update(preferences).unwrap();
 		settle(|| track.subscription().is_some_and(|sub| sub.priority == 7)).await;
-		assert_eq!(track.subscription().unwrap().start(), Some(track::Position::group(5)));
+		assert_eq!(track.subscription().unwrap().start(), Some(5));
 	}
 
 	/// A route updated in place to a new first hop still serves the same broadcast:
@@ -12032,6 +12033,59 @@ mod tests {
 		// The path is free again for a fresh broadcast.
 		let _third = producer.publish("room/alice", Route::default()).unwrap();
 		assert!(consumer.get_broadcast("room/alice").is_some());
+	}
+
+	/// A front still resolving an instance that another has since beaten takes no new
+	/// requester: it may already hold the beaten instance's source, and would hand it to a
+	/// request that saw it lose, which no later announcement corrects.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn a_request_skips_a_front_resolving_a_beaten_instance() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let server = producer
+			.dynamic_route("room", Route::default().with_hops(hops(&[10])))
+			.unwrap();
+
+		// The front selected the covering route and waits on its answer.
+		let pending = consumer.request_broadcast("room/alice", None);
+		let _request = queued(&server).await;
+
+		// The exact path beats the covering route before the front resolves.
+		let _winner = producer.publish("room/alice", Route::default()).unwrap();
+		let again = consumer.request_broadcast("room/alice", None).await.expect("resolves");
+		let first = pending.await.expect("the first front moves to the winner");
+		assert!(!again.is_clone(&first), "joined a front resolving the beaten route");
+	}
+
+	/// A front that moved to the new winner before resolving takes requesters for it, so
+	/// they share it rather than each minting a front on the winner.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn a_request_joins_a_front_resolving_the_winner() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let covering = producer
+			.dynamic_route("room", Route::default().with_hops(hops(&[10])))
+			.unwrap();
+		let pending = consumer.request_broadcast("room/alice", None);
+		let _beaten = queued(&covering).await;
+
+		// The exact path wins, and the front asks it in turn.
+		let exact = producer
+			.dynamic_route("room/alice", Route::default().with_hops(hops(&[10])))
+			.unwrap();
+		let request = queued(&exact).await;
+		let again = consumer.request_broadcast("room/alice", None);
+
+		let upstream = broadcast::Info::new().produce();
+		request.accept(&upstream);
+		let first = pending.await.expect("resolves");
+		let again = again.await.expect("resolves");
+		assert!(
+			again.is_clone(&first),
+			"a request skipped the front resolving its winner"
+		);
 	}
 
 	/// The publisher finishes a track, then its broadcast. A subscription already in

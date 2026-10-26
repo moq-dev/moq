@@ -14,7 +14,7 @@ categories = ["multimedia", "multimedia::audio", "multimedia::encoding"]
 
 [features]
 # On by default: what costs the build nothing beyond cargo, which here is `aac`
-# (pure Rust). Off by default: the device features, because on Linux cpal links
+# and `bus` (pure Rust). Off by default: the device features, because on Linux cpal links
 # libasound at build time, the one system build dependency in this crate. macOS
 # and Windows would pay nothing, but a default is one setting for every host.
 # The features exist so a consumer can pick what it wants, not to hide code from
@@ -23,13 +23,16 @@ categories = ["multimedia", "multimedia::audio", "multimedia::encoding"]
 # `just rs macos`. Workspace consumers opt in at the root manifest
 # (`default-features = false`) per crate, which keeps cpal out of the language
 # bindings.
-default = ["aac"]
+default = ["aac", "bus"]
 # AAC-LC decode via symphonia. Pure Rust, so it costs no toolchain: the trade
 # this crate already refused for Opus. Only a subscriber to an ingest-sourced
 # broadcast needs it (RTMP, SRT/TS, fmp4, and gstreamer all publish AAC, while
 # this crate encodes in software is Opus or PCM), so a publish-only build can
 # drop it and the two crates it pulls.
 aac = ["dep:symphonia-codec-aac", "dep:symphonia-core"]
+# The program mixing bus. Pure Rust: it resamples and de-jitters each source
+# through the same `fixed-resample` ring the playback mixer uses.
+bus = ["dep:fixed-resample"]
 # Device capture. Microphones go through cpal (pure-Rust: CoreAudio / WASAPI /
 # ALSA); macOS system audio goes through ScreenCaptureKit, which is where Apple
 # puts it. On Linux cpal links libasound, the one system build dependency in
@@ -54,7 +57,7 @@ capture = [
 # Device playback. Mixes any number of `playback::Sink`s into one cpal output
 # stream (CoreAudio / WASAPI / ALSA). Same libasound build dependency on Linux
 # as `capture`.
-playback = ["dep:cpal", "dep:fixed-resample", "dep:tokio", "dep:tracing"]
+playback = ["dep:cpal", "dep:fixed-resample", "dep:kio", "dep:tokio", "dep:tracing"]
 # Reach devices through the Linux sound server rather than its ALSA plugin, for
 # the server's own device names and routing. These customize cpal only when
 # `capture` or `playback` activates it, so a host flag alone pulls no audio I/O.
@@ -137,10 +140,16 @@ objc2-foundation = { workspace = true, optional = true }
 objc2-screen-capture-kit = { workspace = true, features = ["SCStream", "SCShareableContent"], optional = true }
 
 [dev-dependencies]
+criterion = { workspace = true }
 # Reads the jitter conformance corpus at doc/concept/audio-jitter/.
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
+
+[[bench]]
+name = "bus"
+harness = false
+required-features = ["bus"]
 
 [lints]
 workspace = true

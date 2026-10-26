@@ -3,8 +3,8 @@ use crate::origin;
 use crate::time::{Deadlines, Instant};
 use crate::transport::poll::Session as _;
 use crate::{
-	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_19, ALPN_20, ALPN_21, ALPN_22, ALPN_LITE, ALPN_LITE_03,
-	ALPN_LITE_04, ALPN_LITE_05, ALPN_LITE_06, ALPN_LITE_07_WIP, Consume, Error, NEGOTIATED, Session, Version, Versions,
+	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_22, ALPN_LITE, ALPN_LITE_03, ALPN_LITE_04, ALPN_LITE_05,
+	ALPN_LITE_06, ALPN_LITE_07_WIP, Consume, Error, NEGOTIATED, Session, Version, Versions,
 	coding::{self, Decode, Encode, Stream},
 	ietf, lite, setup, stats,
 };
@@ -16,12 +16,13 @@ pub struct Client {
 	subscribe: Option<origin::Producer>,
 	stats: stats::Session,
 	versions: Versions,
-	setup_path: Option<String>,
-	setup_authority: Option<String>,
+	url: Option<url::Url>,
+	setup_token: Option<setup::Token>,
 	cost: Option<u64>,
 	peer_hop: Option<crate::Hop>,
 	limits: crate::session::Limits,
 	extensions: setup::Extensions,
+	auth: Option<crate::auth::Handle>,
 	bandwidth: Option<crate::bandwidth::Allocator>,
 	implementation: Option<String>,
 }
@@ -94,25 +95,89 @@ impl Client {
 		self
 	}
 
-	/// Set the request path to advertise in SETUP (moq-lite-05 and newer, and
-	/// every moq-transport draft we speak).
+	/// Name the URL each session is dialed at, so the server learns the request target.
 	///
-	/// Only for transports that carry no request URI of their own (native QUIC, qmux
-	/// over TCP/TLS, unix sockets), so the server learns which path the client wants.
-	/// Append `?` and the URI query when there is one: that is how a credential in the
-	/// query (`?jwt=`) reaches the server.
-	/// Bindings that already carry a URI (WebTransport, qmux over WebSocket) convey
-	/// the path there and MUST NOT send this; a server is entitled to treat it as a
-	/// protocol violation. An empty path is equivalent to omitting it. Ignored by
-	/// versions with no in-band request path (lite 01-04).
-	pub fn with_path(mut self, path: impl Into<String>) -> Self {
-		self.setup_path = Some(path.into());
+	/// A transport whose request URI already reaches the server
+	/// ([`Address::Uri`](crate::transport::Address::Uri)) sends nothing more. Otherwise
+	/// SETUP carries the path and query (moq-lite-05 and newer, every moq-transport
+	/// draft), which is how a credential in the query (`?jwt=`) arrives, and for
+	/// `moqt://` the authority (moq-transport only). A `unix://` URL names its target in
+	/// its `?path=` query, since its path is the socket file.
+	pub fn with_url(mut self, url: url::Url) -> Self {
+		self.url = Some(url);
 		self
 	}
 
-	/// Set the URI authority to advertise in SETUP (moq-transport only)
-	pub fn with_authority(mut self, authority: impl Into<String>) -> Self {
-		self.setup_authority = Some(authority.into());
+	/// The request target our SETUP carries: the dialed URL's path, plus `?` and the
+	/// query when there is one (draft-ietf-moq-transport-22, section 9.1.2).
+	///
+	/// `None` on a transport that carries its own request URI, where a SETUP path is a
+	/// protocol violation, and when the target is empty, which means the server's
+	/// default path: a peer on published lite-05 rejects an empty value outright.
+	fn setup_path(&self, address: crate::transport::Address) -> Option<String> {
+		let url = self
+			.url
+			.as_ref()
+			.filter(|_| address == crate::transport::Address::Setup)?;
+
+		let target = match url.scheme() {
+			// One form-encoded value, so a target with its own `?query` arrives percent-encoded.
+			"unix" => url.query_pairs().find(|(k, _)| k == "path")?.1.into_owned(),
+			// A trailing `?` parses as an empty query, which is not a query: appending it
+			// would spell one target two ways.
+			_ => match url.query().filter(|query| !query.is_empty()) {
+				Some(query) => format!("{}?{}", url.path(), query),
+				None => url.path().to_owned(),
+			},
+		};
+
+		(!target.is_empty()).then_some(target)
+	}
+
+	/// The URI authority our SETUP carries, which a raw-QUIC `moqt://` client must send
+	/// (draft-ietf-moq-transport-22, 9.1.1).
+	///
+	/// Built from the host and port so URL userinfo never goes on the wire. `None` for
+	/// every other scheme, on a transport that carries its own request URI, and when the
+	/// URL has no host.
+	fn setup_authority(&self, address: crate::transport::Address) -> Option<String> {
+		let url = self
+			.url
+			.as_ref()
+			.filter(|_| address == crate::transport::Address::Setup)?;
+		if url.scheme() != "moqt" {
+			return None;
+		}
+
+		let host = url.host_str().filter(|host| !host.is_empty())?;
+		Some(match url.port() {
+			Some(port) => format!("{host}:{port}"),
+			None => host.to_owned(),
+		})
+	}
+
+	/// Present `token` as the connection credential in SETUP, on versions that carry one
+	/// (moq-lite-07+ and every moq-transport draft we speak). The session's empty-token
+	/// AUTH stream then answers with its grant.
+	///
+	/// Other versions send nothing, so a caller that may negotiate one also puts the
+	/// token in the URL query. moq-lite carries no Token Type, so only
+	/// [`Token::OUT_OF_BAND`](setup::Token::OUT_OF_BAND) reaches it; another type fails
+	/// the handshake.
+	pub fn with_token(mut self, token: setup::Token) -> Self {
+		self.setup_token = Some(token);
+		self
+	}
+
+	/// Build every session on `auth`, so each presents the tokens it holds and a route
+	/// naming one of its [`Auth`](crate::auth::Auth)s keeps it across a reconnect. Omit to
+	/// give each session a handle of its own, which ends with it.
+	///
+	/// The handle backs one active session at a time, plus the ones draining after a
+	/// GOAWAY: connecting another while one is still active fails with
+	/// [`Error::Duplicate`].
+	pub fn with_auth(mut self, auth: crate::auth::Handle) -> Self {
+		self.auth = Some(auth);
 		self
 	}
 
@@ -185,6 +250,16 @@ impl Client {
 		self.peer_hop.unwrap_or_else(crate::Hop::random)
 	}
 
+	/// The new session's side of its auth handle: the one from [`with_auth`](Self::with_auth),
+	/// or one of its own. `requests` for moq-transport, where a request carries a token.
+	fn link(&self, supported: bool, requests: bool) -> Result<crate::auth::Link, Error> {
+		match &self.auth {
+			Some(handle) => crate::auth::Link::attach(handle, supported, requests),
+			None if requests => Ok(crate::auth::Link::ietf(supported)),
+			None => Ok(crate::auth::Link::new(supported)),
+		}
+	}
+
 	/// The origin pair a session attaches, tagged and filtered.
 	///
 	/// Reads through the publish (egress) consumer and writes through the
@@ -227,11 +302,13 @@ impl Client {
 		let our_setup = if version.has_setup_stream() {
 			lite::Setup {
 				probe: lite::ProbeLevel::detect(&session),
-				path: self.setup_path.clone(),
+				path: self.setup_path(session.address()),
 				role: lite::Role::from_origins(self.publish.is_some(), self.subscribe.is_some()),
 				cost: self.cost,
 				// Filled by `lite::start` from the attached origin handles.
 				hop: None,
+				// Older versions carry the credential in the URL query instead.
+				token: self.setup_token.clone().filter(|_| version.has_auth()),
 				ietf: self.extensions.ietf && version.has_ietf(),
 				implementation: self.implementation(),
 			}
@@ -252,7 +329,7 @@ impl Client {
 			version,
 			our_setup,
 			peer_setup: None,
-			auth: crate::auth::Handle::new(version.has_auth()),
+			auth: self.link(version.has_auth(), false)?,
 		})?;
 
 		Ok(Session::new(
@@ -292,12 +369,9 @@ impl Client {
 		// If ALPN was used to negotiate the version, use the appropriate encoding.
 		// Default to IETF 14 if no ALPN was used and we'll negotiate the version later.
 		let (encoding, supported) = match session.protocol() {
-			Some(alpn @ (ALPN_22 | ALPN_21 | ALPN_20 | ALPN_19 | ALPN_18 | ALPN_17)) => {
+			Some(alpn @ (ALPN_22 | ALPN_18 | ALPN_17)) => {
 				let draft = match alpn {
 					ALPN_22 => ietf::Version::Draft22,
-					ALPN_21 => ietf::Version::Draft21,
-					ALPN_20 => ietf::Version::Draft20,
-					ALPN_19 => ietf::Version::Draft19,
 					ALPN_18 => ietf::Version::Draft18,
 					_ => ietf::Version::Draft17,
 				};
@@ -308,7 +382,7 @@ impl Client {
 				// We advertise the request path in our SETUP for URL-less transports.
 				// The peer's SETUP decides whether AUTH is negotiated. A handle that does not
 				// offer it keeps the option out of our SETUP and presents no credential.
-				let auth = crate::auth::Handle::ietf(self.extensions.auth);
+				let auth = self.link(self.extensions.auth, true)?;
 				let peer_implementation = setup::PeerImplementation::default();
 				let (protocol, goaway) = ietf::start(ietf::Config {
 					runtime: runtime.clone(),
@@ -323,8 +397,9 @@ impl Client {
 					peer_hop: Some(peer_hop),
 					cost: self.cost,
 					version: draft,
-					path: self.setup_path.clone(),
-					authority: self.setup_authority.clone(),
+					path: self.setup_path(session.address()),
+					authority: self.setup_authority(session.address()),
+					token: self.setup_token.clone(),
 					peer_setup_stream: None,
 					peer_declared: None,
 					auth: auth.clone(),
@@ -415,11 +490,14 @@ impl Client {
 			parameters.set_bytes(ietf::ParameterBytes::Implementation, implementation.into_bytes());
 		}
 		// Advertise the request path in-band (draft 14-16), same as the lite-05 SETUP.
-		if let Some(path) = &self.setup_path {
-			parameters.set_bytes(ietf::ParameterBytes::Path, path.clone().into_bytes());
+		if let Some(path) = self.setup_path(session.address()) {
+			parameters.set_bytes(ietf::ParameterBytes::Path, path.into_bytes());
 		}
-		if let Some(authority) = &self.setup_authority {
-			parameters.set_bytes(ietf::ParameterBytes::Authority, authority.clone().into_bytes());
+		if let Some(authority) = self.setup_authority(session.address()) {
+			parameters.set_bytes(ietf::ParameterBytes::Authority, authority.into_bytes());
+		}
+		if let Some(token) = &self.setup_token {
+			ietf::token::into_setup(&mut parameters, token, ietf_encoding)?;
 		}
 		if self.extensions.solicit {
 			ietf::solicit::into_setup(&mut parameters, ietf_encoding);
@@ -464,7 +542,7 @@ impl Client {
 					our_setup: lite::Setup::default(),
 					peer_setup: None,
 					// Negotiated over the bidi SETUP: lite 01/02, which carry no AUTH.
-					auth: crate::auth::Handle::new(v.has_auth()),
+					auth: self.link(v.has_auth(), false)?,
 				})?;
 
 				(
@@ -497,7 +575,7 @@ impl Client {
 
 				let stream = stream.with_version(v);
 				// Draft 14-16 carry no AUTH, but the session is still limited through this handle.
-				let auth = crate::auth::Handle::ietf(false);
+				let auth = self.link(false, true)?;
 				// Draft 14-16: the path rode in the bidi SETUP above, not the uni one.
 				let (protocol, goaway) = ietf::start(ietf::Config {
 					runtime: runtime.clone(),
@@ -514,6 +592,7 @@ impl Client {
 					version: v,
 					path: None,
 					authority: None,
+					token: None,
 					peer_setup_stream: None,
 					peer_declared: Some(peer_declared),
 					auth: auth.clone(),
@@ -599,6 +678,7 @@ mod tests {
 
 	#[derive(Default)]
 	struct FakeSessionState {
+		panic_on_poll: std::sync::atomic::AtomicBool,
 		protocol: Option<&'static str>,
 		control_stream: Mutex<Option<(FakeSendStream, FakeRecvStream)>>,
 		close_events: kio::Shared<Vec<(u32, String)>>,
@@ -622,6 +702,7 @@ mod tests {
 				data: VecDeque::from(server_control_bytes),
 			});
 			let state = FakeSessionState {
+				panic_on_poll: Default::default(),
 				protocol,
 				control_stream: Mutex::new(Some((send, recv))),
 				close_events: kio::Shared::default(),
@@ -728,8 +809,8 @@ mod tests {
 			1200
 		}
 
-		fn binding(&self) -> crate::transport::Binding {
-			crate::transport::Binding::InBand
+		fn address(&self) -> crate::transport::Address {
+			crate::transport::Address::Setup
 		}
 		fn protocol(&self) -> Option<&str> {
 			self.state.protocol
@@ -740,6 +821,13 @@ mod tests {
 		}
 
 		fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Self::Error> {
+			assert!(
+				!self
+					.state
+					.panic_on_poll
+					.swap(false, std::sync::atomic::Ordering::Relaxed),
+				"injected driver poll panic"
+			);
 			let _ = std::task::ready!(self.state.close_events.poll(self.park.hold(cx), any_close));
 			Poll::Ready(FakeError)
 		}
@@ -922,7 +1010,11 @@ mod tests {
 	/// The client SETUP on the bidi control stream (the pre-draft-17 framing) carries the
 	/// AUTHORITY next to the PATH.
 	#[moq_clock::test]
-	async fn draft14_setup_carries_the_authority() {
+	async fn draft14_setup_carries_the_authority_and_token() {
+		let token = setup::Token {
+			kind: setup::Token::OUT_OF_BAND,
+			value: b"connection-credential".to_vec(),
+		};
 		let fake = FakeSession::new(Some(ALPN_LITE), mock_server_setup(Version::Lite(lite::Version::Lite01)));
 		let client = Client::new()
 			.with_versions(
@@ -932,8 +1024,8 @@ mod tests {
 				]
 				.into(),
 			)
-			.with_path("/anon")
-			.with_authority("relay.example.com:4443");
+			.with_url("moqt://relay.example.com:4443/anon".parse().unwrap())
+			.with_token(token.clone());
 
 		let (_session, driver) = client.connect(moq_clock::now(), fake.clone()).await.unwrap();
 		moq_clock::sim::spawn(crate::time::run(driver));
@@ -949,6 +1041,84 @@ mod tests {
 			parameters.get_bytes(ietf::ParameterBytes::Path),
 			Some(b"/anon".as_ref())
 		);
+		assert_eq!(
+			ietf::token::from_setup(&parameters, ietf::Version::Draft14).unwrap(),
+			Some(token)
+		);
+	}
+
+	fn dialed(url: &str) -> Client {
+		Client::new().with_url(url.parse().unwrap())
+	}
+
+	#[test]
+	fn setup_path_is_the_request_target() {
+		// An empty path and an absent one both mean the server's default, so we send
+		// neither. A peer on published lite-05 rejects an empty value outright.
+		let cases = [
+			("unix:///run/moq.sock?path=/room", Some("/room")),
+			// The whole resource path is one form-encoded value, so a `?query` inside it
+			// arrives percent-encoded and comes back out whole.
+			("unix:///run/moq.sock?path=/room%3Fjwt%3Dabc", Some("/room?jwt=abc")),
+			("unix:///run/moq.sock?path=", None),
+			("unix:///run/moq.sock", None),
+			("tcp://localhost:4443/room?jwt=abc", Some("/room?jwt=abc")),
+			("tcp://localhost:4443", None),
+			("moqt://relay.example.com/anon?jwt=abc", Some("/anon?jwt=abc")),
+			("moql://relay.example.com/anon", Some("/anon")),
+			("moqt://relay.example.com", None),
+			(
+				"iroh://k5lnrlndqpqcgh4d5nhbnbnhcyrgvw6ttxwrsvsu4nlt6foorxaa/",
+				Some("/"),
+			),
+			// The fragment is processed by the client and never sent (draft-22 6.1.1).
+			("moqt://relay.example.com/anon?jwt=abc#pos:12", Some("/anon?jwt=abc")),
+			// A trailing `?` is an empty query, not a query.
+			("moqt://relay.example.com/anon?", Some("/anon")),
+			("moqt://relay.example.com?", None),
+		];
+
+		for (url, want) in cases {
+			let client = dialed(url);
+			assert_eq!(
+				client.setup_path(crate::transport::Address::Setup).as_deref(),
+				want,
+				"{url}"
+			);
+			// The transport's own request URI carries the target: a SETUP path is a violation.
+			assert_eq!(client.setup_path(crate::transport::Address::Uri), None, "{url}");
+		}
+		assert_eq!(Client::new().setup_path(crate::transport::Address::Setup), None);
+	}
+
+	#[test]
+	fn setup_authority_is_only_for_moqt() {
+		let cases = [
+			("moqt://relay.example.com/anon?jwt=abc", Some("relay.example.com")),
+			("moqt://relay.example.com:4443/anon", Some("relay.example.com:4443")),
+			("moqt://[::1]:4443", Some("[::1]:4443")),
+			// Userinfo is a credential, and never goes on the wire.
+			(
+				"moqt://user:pass@relay.example.com:4443",
+				Some("relay.example.com:4443"),
+			),
+			// A hostless URL has no authority to send.
+			("moqt:///anon", None),
+			// Only the draft's `moqt://` scheme is required to send it.
+			("moql://relay.example.com", None),
+			("tcp://relay.example.com:4443", None),
+			("iroh://k5lnrlndqpqcgh4d5nhbnbnhcyrgvw6ttxwrsvsu4nlt6foorxaa", None),
+		];
+
+		for (url, want) in cases {
+			let client = dialed(url);
+			assert_eq!(
+				client.setup_authority(crate::transport::Address::Setup).as_deref(),
+				want,
+				"{url}"
+			);
+			assert_eq!(client.setup_authority(crate::transport::Address::Uri), None, "{url}");
+		}
 	}
 
 	#[moq_clock::test]
@@ -1049,19 +1219,80 @@ mod tests {
 		assert_eq!(failed, Failures::default());
 	}
 
+	/// A task that closes the transport itself, as a protocol violation on one request does,
+	/// is the session's reason even when the transport reports only a local close, and it
+	/// wins over whatever closes it after.
+	#[test]
+	fn a_task_close_is_the_sessions_reason() {
+		use crate::stats::{Failure, Registry, Tier};
+		use crate::transport::poll::Session as _;
+		let registry = Registry::new(Default::default());
+		let client = Client::new()
+			.with_versions(Version::Lite(lite::Version::Lite04).into())
+			.with_stats(registry.tier(Tier::default()).session("root"));
+		let runtime = crate::time::Deadlines::new(crate::time::Instant::now());
+		let mut task = Transport::new(FakeSession::new(Some(ALPN_LITE_04), Vec::new()));
+		let (session, mut driver) =
+			futures::executor::block_on(client.connect_boxed(runtime.now(), task.clone())).unwrap();
+		task.close(SessionError::ProtocolViolation.to_code(), "malformed");
+		session.abort(Error::App(7));
+		let _ = driver.poll(runtime.now(), &kio::Waiter::noop());
+		let _ = driver.poll(runtime.now(), &kio::Waiter::noop());
+		let err = futures::executor::block_on(session.closed());
+		assert!(
+			matches!(err, Error::Session(SessionError::ProtocolViolation)),
+			"{err:?}"
+		);
+		drop((client, session, driver));
+		let failed = registry.snapshot().sessions()[0].1.sessions_failed;
+		assert_eq!(failed.count(Failure::Application), 1, "{failed:?}");
+	}
+
 	// Dropping the driver instead of running it tears the session
 	// down: the machine was the only transport holder, and `closed()` resolves
 	// rather than parking forever on a machine nobody polls.
 	#[test]
 	fn dropped_driver_resolves_closed() {
+		for polled in [false, true] {
+			let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
+			let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
+			let runtime = crate::time::Deadlines::new(crate::time::Instant::now());
+			let (session, mut driver) = futures::executor::block_on(client.connect(runtime.now(), fake)).unwrap();
+			if polled {
+				assert!(driver.poll(runtime.now(), &kio::Waiter::noop()).is_ok());
+			}
+			drop(driver);
+			assert!(matches!(futures::executor::block_on(session.closed()), Error::Cancel));
+		}
+	}
+
+	#[test]
+	fn driver_panic_is_published_before_the_executor_drops_it() {
 		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
 		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
-
 		let runtime = crate::time::Deadlines::new(crate::time::Instant::now());
-		let (session, driver) = futures::executor::block_on(client.connect(runtime.now(), fake.clone())).unwrap();
-
-		drop(driver);
-		assert!(matches!(futures::executor::block_on(session.closed()), Error::Cancel));
+		let (session, mut driver) = futures::executor::block_on(client.connect(runtime.now(), fake.clone())).unwrap();
+		fake.state
+			.panic_on_poll
+			.store(true, std::sync::atomic::Ordering::Relaxed);
+		let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+			let _ = driver.poll(runtime.now(), &kio::Waiter::noop());
+		}));
+		assert!(panic.is_err(), "the owner must still receive the panic");
+		assert!(matches!(
+			futures::FutureExt::now_or_never(session.closed()),
+			Some(Error::Transport(message)) if message == "session driver panicked"
+		));
+		// Even a caller that catches the panic cannot resume the damaged session.
+		assert!(matches!(
+			driver.poll(runtime.now(), &kio::Waiter::noop()),
+			Err(Error::Transport(_))
+		));
+		drop(driver); // outside unwinding, as an executor's catch_unwind drops a failed future
+		assert!(matches!(
+			futures::executor::block_on(session.closed()),
+			Error::Transport(_)
+		));
 	}
 
 	// `stats()` reads the machine's latest sample and primes the sampler, so a
@@ -1132,9 +1363,14 @@ mod tests {
 
 		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
 		let (session, driver) = client.connect(moq_clock::now(), fake.clone()).await.unwrap();
+		let mut bandwidth = session.send_bandwidth().expect("backend reports an estimate");
+		assert_eq!(
+			bandwidth.peek(),
+			Some(crate::bandwidth::Rate::from_bps(1_000_000)),
+			"the estimate is readable before the sampler first runs"
+		);
 		moq_clock::sim::spawn(crate::time::run(driver));
 
-		let mut bandwidth = session.send_bandwidth().expect("backend reports an estimate");
 		assert_eq!(
 			bandwidth.changed().await.unwrap(),
 			Some(crate::bandwidth::Rate::from_bps(1_000_000))
