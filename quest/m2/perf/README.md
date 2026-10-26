@@ -72,10 +72,10 @@ as the [Stream transports](/quest/m2/perf/stream/README.md) epic, ranked
 second, and the io_uring TCP line moves in from m3. io_uring pays far more
 for TCP than for UDP, so it no longer waits on fleet demand.
 
-Decided 2026-10-22 from the io_uring audit: `just bench BASE` and
-`just bench-profile` run only tokio, so an io_uring quest measures with
-`just bench-runtime` at both revisions on the same host and worker count,
-and profiles through [Profile the io_uring workers](/quest/m2/perf/uring-profile.md).
+Decided 2026-10-22 from the io_uring audit: `just bench BASE` runs only
+tokio, so an io_uring quest measures with `just bench-runtime` at both
+revisions on the same host and worker count, and profiles with
+`just bench-profile MODES WORKLOAD WORKERS io-uring-workers [BASE]`.
 
 ## Required
 
@@ -83,7 +83,6 @@ and profiles through [Profile the io_uring workers](/quest/m2/perf/uring-profile
 - [Stream transports](/quest/m2/perf/stream/README.md) - qmux drives its own WebSocket and TCP sockets in one task, measured end to end, then serves them from the io_uring workers
 - [Relay allocations](/quest/m2/perf/relay-allocs.md) - fewer allocations per delivered frame, starting with per-stream session clones
 - [QUIC lock contention](/quest/m2/perf/quic-lock-contention.md) - a measured verdict on the tokio driver's connection-wide mutex and per-packet endpoint-to-connection hop, with levers built only on evidence
-- [Profile the io_uring workers](/quest/m2/perf/uring-profile.md) - `just bench-profile` profiles `io-uring-workers` too, so ring quests stop working around a tokio-only recipe
 - [Run to quiescence](/quest/m2/perf/uring-quiescence.md) - a received packet's reply is staged in the same turn, under a pass and train budget that keeps the fairness rule
 - [Ingest batch](/quest/m2/perf/ingest-batch.md) - relay ingest pays one lock, wake, and clock read per burst of whole frames instead of per frame
 - [Shard by default](/quest/m2/perf/shard-default.md) - a saturating shard sweep decides whether an unset `runtime.workers` runs one worker per core on Linux

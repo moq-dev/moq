@@ -56,7 +56,3 @@ shape, on Linux with the io_uring workers at both base and current, using
 `just bench-runtime` at each revision with the same worker count. The existing
 starvation test keeps its meaning with a budget of 1 and gains a sibling
 proving the budget bound.
-
-## Required
-
-- [Profile the io_uring workers](/quest/m2/perf/uring-profile.md) - the profile that attributes the turns
