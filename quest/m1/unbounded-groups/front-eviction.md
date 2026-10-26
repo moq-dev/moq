@@ -101,6 +101,3 @@ Public API: removes `MAX_GROUP_FRAMES`, and `MAX_CACHE_BYTES` stops capping
 groups. A reader that used to see `GroupTooLarge` now refills or sees
 `Evicted`. Wire: none; it uses the frame-precise ranges.
 
-## Required
-
-- [Segmented frames](/quest/m1/unbounded-groups/segmented-frames.md) - frame storage the cache can account for without whole-frame preallocation
