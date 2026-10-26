@@ -551,6 +551,15 @@ class Reader implements ResumeSource {
 		return holding;
 	}
 
+	cachedGroup(sequence: number): GroupConsumer | undefined {
+		for (let index = this.#copies.length - 1; index >= 0; index--) {
+			const copy = this.#copies[index];
+			const group = hooks.cachedGroup(copy.sub, sequence);
+			if (group) return this.#handOut(copy, group);
+		}
+		return undefined;
+	}
+
 	/**
 	 * `copy` handed out `sequence`. The serving copy's first group bounds the copies it replaced
 	 * just below it: what they hold under it may be groups the new route never has, and what
