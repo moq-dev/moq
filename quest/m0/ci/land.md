@@ -66,11 +66,12 @@ Decided 2026-10-26 (maintainer):
   enqueue order.
 - The push credential is moq-bot, added to the main ruleset's bypass list.
   Its key (`APP_ID`/`APP_CLIENT_ID`, `APP_PRIVATE_KEY`) moves from repository
-  secrets into an Environment limited to `main` and release tags. That way a
-  workflow on a same-repo PR branch can no longer read a key that can push to
-  `main`. The release workflows and `dependabot.yml` that use it reference
-  the Environment. Only the hosted land job reads it, never the job that runs
-  PR code.
+  secrets into an Environment limited to `main`, `release`, and release tags.
+  That way a workflow on a same-repo PR branch can no longer read a key that
+  can push to `main`. The release workflows (some run on pushes to
+  `release`), `dependabot.yml`, and `smoke-toolchain.yml` that use it
+  reference the Environment. Only the hosted land job reads it, never the job
+  that runs PR code.
 
 Work in this repository, once [the bump](/quest/m0/ci/land-bump.md) lands:
 
