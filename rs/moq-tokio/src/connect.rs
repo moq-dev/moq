@@ -8,6 +8,10 @@ use crate::connection::Goaway;
 use std::net;
 use url::Url;
 
+mod token;
+pub(crate) use token::{Credential, Set};
+pub use token::{EmptyToken, Token, Tokens};
+
 /// Maximum time for one dial, unless overridden by `--connect-timeout`.
 pub(crate) const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -84,6 +88,14 @@ impl Addr {
 	/// The fixed addresses, or `None` when dialing resolves the URL normally.
 	pub fn addresses(&self) -> Option<&[net::SocketAddr]> {
 		self.resolved.as_deref()
+	}
+
+	/// The same peer and addresses, requested at `url`.
+	pub(crate) fn with_url(&self, url: Url) -> Self {
+		Self {
+			url,
+			resolved: self.resolved.clone(),
+		}
 	}
 }
 
@@ -497,6 +509,22 @@ pub struct Config {
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[usage(name = "connect", long = "connect", env = "MOQ_CONNECT", setting = "connect.url")]
 	pub url: Option<Url>,
+
+	/// Credentials to present on every dial, kept apart from the URL.
+	///
+	/// The first is the connection credential: it rides SETUP, and the URL query too
+	/// while an offered version can't carry it in SETUP (lite before 07). Each other
+	/// token rides its own AUTH stream, widening the session's grant. A URL that
+	/// already has a `?jwt=` keeps it as the connection credential, and then every
+	/// token rides AUTH. Replace them while running through `Client::tokens`.
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	#[usage(
+		name = "connect-token",
+		long = "connect-token",
+		env = "MOQ_CONNECT_TOKEN",
+		setting = "connect.tokens"
+	)]
+	pub tokens: Vec<Token>,
 
 	/// The released `connect` key, kept so [`deprecated`](Self::deprecated) can name [`url`](Self::url).
 	#[serde(default, skip_serializing)]

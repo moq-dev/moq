@@ -43,8 +43,11 @@ moq <MoQ side> fetch <track> [options]
 ```
 
 The **MoQ side** goes first and attaches the process to the network:
-`--connect <url>` dials a relay (the path is the auth path, `?jwt=`
-carries a token), and `--broadcast <name>` names the broadcast. A process can
+`--connect <url>` dials a relay (the path is the auth path), `--connect-token`
+presents a token (repeat it to present several, see
+[Tokens](/bin/relay/auth#tokens)), and `--broadcast <name>` names the
+broadcast. A `?jwt=` in the URL still works, and is how a token reaches a
+relay that predates `--connect-token`. A process can
 instead host sessions with `--listen`, or both at once, admitting clients the
 way the relay does (see [Authentication](/bin/relay/auth)). Listening imports and
 exports share the relay's shutdown behavior: SIGINT or SIGTERM sends accepted
@@ -74,7 +77,7 @@ ffmpeg -re -i video.mp4 -c copy -f mpegts -pes_payload_size 0 -muxdelay 0 - | \
 moq --connect https://relay.example.com/anon --broadcast my-stream.hang export ts | ffplay -
 
 # With a token
-moq --connect "https://relay.example.com/rooms/1?jwt=$TOKEN" --broadcast alice.hang import ts
+moq --connect https://relay.example.com/rooms/1 --connect-token "$TOKEN" --broadcast alice.hang import ts
 ```
 
 ## Import

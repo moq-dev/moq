@@ -10,6 +10,10 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 `MoqReservation::grant` reports the slice the track would get back while nothing subscribes to it, instead of `None`; it still claims nothing from the other tracks.
 A sender that relied on `None` to hold its rate while unwatched should check the track's demand instead.
 
+### `MoqClientConfig` gains `tokens`
+
+It defaults to empty in every generated binding; a Rust struct literal adds `tokens: vec![]` or ends with `..Default::default()`.
+
 ### Durations are typed
 
 Every duration is a UniFFI `Duration` instead of an integer microsecond field, and drops its `_us` suffix: each language receives its own duration type (`timedelta`, `TimeInterval`, `java.time.Duration`, `time.Duration`, Dart `Duration`, C++ `std::chrono` nanoseconds).
