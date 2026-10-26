@@ -10,6 +10,9 @@ and record the numbers in the PR that closes this:
   and a release pull request's reports `effective read-only`.
 - Nightly's Linux, macOS and Windows jobs hit what the previous Nightly
   wrote.
+- After the mbx 1.28.0 bump, the merge queue reports no new
+  `error[E0463]: can't find crate`, and the next scheduled Nightly's macOS
+  job reports no new oversized-manifest digest.
 - Restore plus build time against the 150-210s Actions restore of the ~6 GB
   store it replaced, from the same commit before and after.
 - Each object expires 30 days after upload, so a crate no Nightly builds in
@@ -48,18 +51,18 @@ Evidence so far, from the platform jobs of scheduled Nightlies
   15 KiB. Reported as
   [jdx/mr-boxington#792](https://github.com/jdx/mr-boxington/issues/792) and
   fixed by [jdx/mr-boxington#798](https://github.com/jdx/mr-boxington/pull/798),
-  which keeps the read bound and caps the writer instead. No release carries
-  it yet; [the bump](/quest/m0/ci/mbx-bump.md) takes it.
+  which keeps the read bound and caps the writer instead. The Rust cache
+  now pins 1.28.0, the first release carrying the fix. It does not repair
+  manifests already oversized on R2: if task identities carry over, the
+  three known digests may still refuse until about 2026-11-22, when the
+  30-day lifecycle deletes them. A refusal for any other digest means the
+  fix did not hold.
 - Windows logs no refusal but still no reuse. Its first build reports 0 hits
   and 1084 of 1091 compilations "not looked up" for want of a matching
   prediction on 2026-10-22, after a 1.25.0 Nightly wrote the day before, and
   1091 of 1098 on 1.26.0. The manifest fix does not explain this. If it
   persists after the bump, find why before timing builds.
 - No release pull request has run with the R2 cache yet.
-
-## Required
-
-- [Bump to the manifest fix](/quest/m0/ci/mbx-bump.md) - condition: an mbx release contains jdx/mr-boxington#798; then bump the pin
 
 ## Related
 
