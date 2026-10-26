@@ -18378,13 +18378,10 @@ fn live_edge(track: &track::Consumer) -> LiveEdge {
 		.reported_object()
 		.map(|(group, object)| Location { group, object });
 	let cached = cached_edge(track);
-	// A group newer than the report proves it stale, even after the cache lost that group's
-	// objects; the edge is then only what the cache can name.
 	match reported.filter(|reported| {
-		cached.latest.is_none_or(|latest| reported.group >= latest)
-			&& cached
-				.largest
-				.is_none_or(|cached| (reported.group, reported.object) > (cached.group, cached.object))
+		cached
+			.largest
+			.is_none_or(|cached| (reported.group, reported.object) > (cached.group, cached.object))
 	}) {
 		Some(largest) => LiveEdge {
 			latest: cached.latest.max(Some(largest.group)),
@@ -18915,25 +18912,33 @@ mod range_tests {
 		);
 	}
 
-	/// A newer group outdates the upstream's last reported Largest Object, even once the
-	/// cache lost that group, so the edge never moves back to the report.
+	/// Anything received past the upstream's last reported Largest Object outdates it, a
+	/// later object of its group or a newer group, even once the cache evicted what arrived,
+	/// so the edge never moves back to the report.
 	#[test]
-	fn a_newer_group_outdates_the_report_after_eviction() {
-		let track = track::Producer::new(
-			std::sync::Arc::new(crate::broadcast::Info::default()),
-			"video",
-			crate::track::Info::timed(),
-		);
-		track.report_object(3, 4);
-		let mut newer = track.create_group(group::Info { sequence: 9 }).unwrap();
-		newer
-			.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"frame".as_slice())
-			.unwrap();
-		newer.abort(Error::Evicted).unwrap();
+	fn received_objects_outdate_the_report_after_eviction() {
+		for (sequence, frames) in [(3, 6), (9, 1)] {
+			let track = track::Producer::new(
+				std::sync::Arc::new(crate::broadcast::Info::default()),
+				"video",
+				crate::track::Info::timed(),
+			);
+			track.report_object(3, 4);
+			let mut newer = track.create_group(group::Info { sequence }).unwrap();
+			for _ in 0..frames {
+				newer
+					.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"frame".as_slice())
+					.unwrap();
+			}
+			newer.abort(Error::Evicted).unwrap();
 
-		let edge = live_edge(&track.consume());
-		assert_eq!(edge.latest, Some(9));
-		assert_eq!(edge.largest, None, "the stale report is not the largest");
+			let edge = live_edge(&track.consume());
+			assert_eq!(edge.latest, Some(sequence));
+			assert_eq!(
+				edge.largest, None,
+				"group {sequence}: the stale report is not the largest"
+			);
+		}
 	}
 
 	/// A relay holding groups of a requested track stages them before committing, so the

@@ -315,8 +315,9 @@ pub(crate) struct TrackState {
 	// creates (see `cache::Track`). Holds the gross-write counter `charge_debt` drains,
 	// and the weak link a frame write follows back here to settle its own debt.
 	cache: Arc<cache::Track>,
-	// The upstream publisher's Largest Object, retained even on a fetch-only copy.
-	object_edge: Option<(u64, u64)>,
+	// The upstream publisher's Largest Object, retained even on a fetch-only copy, with the
+	// track's largest position once it was reported: anything received past that outdates it.
+	object_edge: Option<((u64, u64), Position)>,
 
 	// Cached groups by sequence: the single source of truth for what is cached. The
 	// two orderings below hold bare sequences and validate against this map, so a
@@ -756,6 +757,16 @@ impl Holdings for TrackState {
 }
 
 impl TrackState {
+	/// The upstream publisher's Largest Object, unless a frame or group received since its
+	/// report outdates it, even one the cache has since evicted.
+	fn object_edge(&self) -> Option<(u64, u64)> {
+		let (edge, mark) = self.object_edge?;
+		self.cache
+			.largest()
+			.is_none_or(|largest| largest <= mark)
+			.then_some(edge)
+	}
+
 	/// A consumer joined at the live edge: ask for a group past every sequence written when
 	/// the newest group's bytes after its first frame exceed [`Info::refresh`] times that
 	/// frame.
@@ -3147,8 +3158,10 @@ impl Producer {
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn report_object(&self, group: u64, object: u64) {
 		if let Ok(mut state) = self.modify() {
-			state.object_edge = state.object_edge.max(Some((group, object)));
+			let edge = state.object_edge().max(Some((group, object)));
 			state.cache.advance_largest(Position::group(group));
+			let mark = state.cache.largest().unwrap_or(Position::group(group));
+			state.object_edge = edge.map(|edge| (edge, mark));
 		}
 	}
 
@@ -4289,7 +4302,7 @@ impl Consumer {
 		if let Some(serving) = self.serving() {
 			return serving.reported_object();
 		}
-		self.with_state(|state| state?.read().object_edge)
+		self.with_state(|state| state?.read().object_edge())
 	}
 
 	/// The newest group, when it is already cached: resolved synchronously, without
