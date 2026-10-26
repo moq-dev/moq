@@ -17,7 +17,7 @@ importers out of scope. The audit's
 malformed avc1 codec-string findings are the kind
 `cargo fuzz` finds in minutes; they are reachable through RTMP, SRT, HLS,
 and fMP4 ingest and through catalog subscription. Include RTMP's AMF0
-decoder too, after [its budget fix](/quest/m1/cut-audit/rtmp-amf0-budget.md).
+decoder too; its borrowed receive views should stay allocation-free.
 
 Add a fuzz crate per package, or one shared media target crate, seeded from
 the existing fixtures. Assert a work and allocation bound proportional to

@@ -1,5 +1,3 @@
-#![cfg(feature = "async")]
-
 //! Allocation counting for the announce hot paths: decoding the paths a peer
 //! announces, and revisiting a cursor whose winning route is unchanged.
 //!

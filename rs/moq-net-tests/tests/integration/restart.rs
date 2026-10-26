@@ -1,5 +1,3 @@
-#![cfg(feature = "async")]
-
 //! A replaced broadcast restarts announce consumers across relays, end to end over
 //! real sessions, while the subscriptions already on it stay.
 //!
