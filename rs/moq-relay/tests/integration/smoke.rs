@@ -121,7 +121,10 @@ fn client_version(version: Option<moq_net::Version>) -> moq_tokio::Client {
 	// One-shot: these tests were written against a single dial, and a background
 	// redial would re-register with the relay behind the assertions' back.
 	// Zero head start so the WebSocket path runs immediately.
-	config.websocket.delay = Some((std::time::Duration::ZERO).into());
+	#[cfg(feature = "websocket")]
+	{
+		config.websocket.delay = Some((std::time::Duration::ZERO).into());
+	}
 	// Every relay in this file listens on IPv4 loopback, so bind the same family
 	// rather than egressing a QUIC dial from a dual-stack IPv6 socket.
 	config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
@@ -687,7 +690,7 @@ async fn internal_tcp_round_trip() {
 
 /// Stand up a stream `--server-bind` on a Unix socket and return the socket path
 /// plus an abort handle.
-#[cfg(unix)]
+#[cfg(all(unix, feature = "uds"))]
 async fn spawn_internal_unix_relay() -> (std::path::PathBuf, tokio::task::JoinHandle<()>) {
 	// Keep the path short: macOS caps AF_UNIX paths around 104 bytes, and the
 	// system temp dir is long. /tmp is fine on macOS and Linux. A per-call counter
@@ -711,7 +714,7 @@ async fn spawn_internal_unix_relay() -> (std::path::PathBuf, tokio::task::JoinHa
 /// Connect over `unix://` (qmux on a Unix socket) and confirm a frame
 /// round-trips. Also asserts both sides land on the newest moq-lite version,
 /// which proves the in-band ALPN negotiation populated the protocol.
-#[cfg(unix)]
+#[cfg(all(unix, feature = "uds"))]
 #[tokio::test]
 async fn internal_unix_round_trip() {
 	let (path, handle) = spawn_internal_unix_relay().await;
@@ -876,7 +879,7 @@ async fn internal_tcp_path_reaches_server() {
 /// `unix://<socket>` carries no resource path in its URL (that's the socket), so
 /// the request path rides in the `?path=` query. Same assertion as TCP, across
 /// every version whose SETUP carries a path.
-#[cfg(unix)]
+#[cfg(all(unix, feature = "uds"))]
 #[tokio::test]
 async fn internal_unix_path_reaches_server() {
 	let (path, handle) = spawn_internal_unix_relay().await;

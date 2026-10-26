@@ -212,6 +212,7 @@ impl Backoff {
 
 	/// Refuse a zero healthy threshold, which would count every session as healthy and
 	/// reset the timeout forever under a peer that drops each one on sight.
+	#[cfg(feature = "_transport")]
 	pub(crate) fn validate(&self) -> crate::Result<()> {
 		if self.healthy().is_zero() {
 			return Err(Error::BackoffHealthy);
