@@ -1,4 +1,4 @@
-import { type Credential as Presented, type Handle, Unsupported } from "../auth.ts";
+import { type Handle, type Credential as Presented, Unsupported } from "../auth.ts";
 import type { Established } from "./established.ts";
 
 /** What one dial presents, decided from its URL, the offered versions, and the tokens. @internal */
