@@ -48,27 +48,31 @@ impl Sink {
 	}
 }
 
-/// The configured track names a run ended, plus the names it minted to replace them.
+/// Every configured track name a run has published, and whether it ended.
 ///
 /// A name always means the same content, and a reader that saw a track end (here or at a relay)
 /// never follows the name into a successor. So a run never publishes an ended name again: a pad that
 /// would (a new codec config, a pad requested again, a stream resumed after EOS) publishes under the
-/// first free `<name>/<n>` instead, as js/publish does. Generated names are never reused, so they
-/// are not recorded.
+/// first `<name>/<n>` the run has not used instead, as js/publish does. Generated names are never
+/// reused, so they are not recorded.
 #[derive(Clone, Default)]
-pub(super) struct Names(std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>);
+pub(super) struct Names(std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, bool>>>);
 
 impl Names {
 	/// `name`, unless the run ended it: then the first `name/<n>` the run has not used.
+	///
+	/// A name another pad still publishes is returned as is, so the duplicate fails loudly.
 	fn claim(&self, name: &str) -> String {
-		let mut taken = self.0.lock().unwrap();
-		if !taken.contains(name) {
+		let mut names = self.0.lock().unwrap();
+		if names.get(name) != Some(&true) {
+			names.entry(name.to_owned()).or_insert(false);
 			return name.to_owned();
 		}
 		let mut n = 1u64;
 		loop {
 			let minted = format!("{name}/{n}");
-			if taken.insert(minted.clone()) {
+			if let std::collections::hash_map::Entry::Vacant(entry) = names.entry(minted.clone()) {
+				entry.insert(false);
 				return minted;
 			}
 			n += 1;
@@ -76,7 +80,7 @@ impl Names {
 	}
 
 	fn end(&self, name: String) {
-		self.0.lock().unwrap().insert(name);
+		self.0.lock().unwrap().insert(name, true);
 	}
 }
 
@@ -1461,6 +1465,27 @@ mod tests {
 		assert_eq!(publish(), CapsOutcome::Active("levels".to_string()));
 		assert_eq!(publish(), CapsOutcome::Active("levels/1".to_string()));
 		assert_eq!(publish(), CapsOutcome::Active("levels/2".to_string()));
+	}
+
+	/// A fresh name skips one another pad publishes, rather than colliding with it.
+	#[test]
+	fn a_fresh_name_skips_a_live_one() {
+		gst::init().unwrap();
+		let (broadcast, catalog) = producers();
+		let names = Names::default();
+		let publish = |name| {
+			let mut pad = Pad::new();
+			pad.reserve(&catalog, super::super::wall::Wall::new(&catalog), &names);
+			let outcome = pad.observe_caps(&broadcast, &catalog, producer_options(&opaque_caps(), Some(name)));
+			(pad, outcome)
+		};
+
+		let (mut levels, _) = publish("levels");
+		let (_live, outcome) = publish("levels/1");
+		assert_eq!(outcome, CapsOutcome::Active("levels/1".to_string()));
+		assert!(levels.finalize().unwrap());
+		let (_again, outcome) = publish("levels");
+		assert_eq!(outcome, CapsOutcome::Active("levels/2".to_string()));
 	}
 
 	// AAC carries its config in caps; without codec_data the producer cannot be built.
