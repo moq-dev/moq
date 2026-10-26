@@ -50,8 +50,8 @@ pub struct Client {
 	versions: moq_net::Versions,
 	/// The URL from [`connect.url`](crate::connect::Config::url), dialed by [`Client::publish`] / [`Client::consume`].
 	connect: Option<Url>,
-	/// The credentials every dial presents, shared with each clone.
-	tokens: crate::connect::Tokens,
+	/// The credentials each new connection starts presenting.
+	pub(crate) tokens: Vec<crate::connect::Token>,
 	/// Deadline for one [`Client::connect`], from [`crate::connect::Config::timeout`]. Zero waits forever.
 	#[cfg(feature = "_transport")]
 	timeout: std::time::Duration,
@@ -158,7 +158,7 @@ impl Client {
 			moq,
 			versions,
 			connect: config.url,
-			tokens: crate::connect::Tokens::new(config.tokens),
+			tokens: config.tokens,
 			timeout,
 			reconnect: true,
 			backoff: config.backoff,
@@ -256,13 +256,6 @@ impl Client {
 	pub fn with_peer_hop(mut self, hop: moq_net::Hop) -> Self {
 		self.moq = self.moq.with_peer_hop(hop);
 		self
-	}
-
-	/// The credentials every dial presents, seeded from
-	/// [`connect.tokens`](crate::connect::Config::tokens). Set new ones before the old
-	/// ones expire.
-	pub fn tokens(&self) -> crate::connect::Tokens {
-		self.tokens.clone()
 	}
 
 	/// Override whether this client redials after a session drop.

@@ -1,5 +1,5 @@
 //! The configured tokens a connection holds on its auth handle, beside each dial's
-//! connection credential.
+//! connection credential, and the peer's answer to them.
 
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
@@ -9,13 +9,13 @@ use futures::FutureExt;
 use moq_net::{auth, kio};
 
 use crate::abort::AbortOnDrop;
-use crate::connect::{Credential, Set, Token};
+use crate::connect::{Credential, Set, Token, Tokens};
 
 type Opening = futures::future::BoxFuture<'static, moq_net::Result<(auth::Auth, auth::Answer)>>;
 
 /// Holds every configured token except the latest dial's connection credential on the
-/// connection's auth handle, which presents them on each session it builds, and keeps
-/// them in step with the client's [`crate::connect::Tokens`].
+/// connection's auth handle, which presents them on each session it builds, keeps them
+/// in step with the connection's [`Tokens`], and records the peer's answer there.
 pub(super) struct Holder {
 	shared: Arc<Shared>,
 	_task: AbortOnDrop,
@@ -28,26 +28,39 @@ struct Shared {
 
 struct Holding {
 	auth: auth::Handle,
-	tokens: Vec<Token>,
+	tokens: Tokens,
+	/// The configured tokens this holds, and their generation.
+	current: Vec<Token>,
+	generation: u64,
 	/// `None` until the first dial, so a token that becomes the connection credential is
 	/// never also presented in band.
 	credential: Option<Credential>,
+	/// Whether a session is live.
+	live: bool,
+	/// Whether the live session is serving before its peer answered the connection
+	/// credential, so only the grant that answer brings shows it was accepted.
+	unconfirmed: bool,
 	held: Held,
 }
 
 impl Holder {
-	pub fn new(auth: auth::Handle, tokens: kio::Consumer<Set>) -> Self {
-		let set = (*tokens.read()).clone();
+	pub fn new(auth: auth::Handle, tokens: Tokens) -> Self {
+		let set = tokens.snapshot();
+		let consumer = tokens.consume();
 		let shared = Arc::new(Shared {
 			state: Mutex::new(Holding {
 				auth,
-				tokens: set.tokens,
+				tokens,
+				current: set.tokens,
+				generation: set.generation,
 				credential: None,
+				live: false,
+				unconfirmed: false,
 				held: Held::default(),
 			}),
 			dialed: tokio::sync::Notify::new(),
 		});
-		let task = tokio::spawn(run(shared.clone(), tokens, set.generation));
+		let task = tokio::spawn(run(shared.clone(), consumer, set.generation));
 		Self {
 			shared,
 			_task: AbortOnDrop::new(task),
@@ -65,41 +78,78 @@ impl Holder {
 		drop(state);
 		self.shared.dialed.notify_one();
 	}
+
+	/// The live session's version, or `None` once it ended.
+	pub fn live(&self, version: Option<moq_net::Version>) {
+		let mut state = self.shared.state.lock().unwrap();
+		state.live = version.is_some();
+		// A moq-lite client serves from its SETUP on, before the peer has checked the
+		// credential in it; every lite version with a SETUP token answers it on AUTH. A
+		// moq-transport client waits for SERVER_SETUP, and an older lite version's
+		// credential rides the URL, which the dial itself answers.
+		state.unconfirmed = version
+			.is_some_and(|version| matches!(version, moq_net::Version::Lite(_)) && version.has_setup_token());
+		state.answer();
+	}
 }
 
 impl Holding {
 	fn update(&mut self) {
 		let Some(credential) = &self.credential else { return };
-		let extra = credential.extra(&self.tokens);
+		let extra = credential.extra(&self.current);
 		self.held.update(&self.auth, extra);
+		self.answer();
+	}
+
+	/// Record the peer's answer to the current tokens, once it has one.
+	fn answer(&self) {
+		let accepted = self.live && (!self.unconfirmed || self.auth.grant().peek().is_some());
+		if let Some(answer) = self.held.answer(accepted) {
+			self.tokens.answer(self.generation, answer);
+		}
 	}
 }
 
 async fn run(shared: Arc<Shared>, tokens: kio::Consumer<Set>, mut generation: u64) {
+	let mut grant = shared.state.lock().unwrap().auth.grant();
 	loop {
 		let changed = async {
 			let wait = tokens.wait(|set| match set.generation != generation {
 				true => Poll::Ready((set.tokens.clone(), set.generation)),
 				false => Poll::Pending,
 			});
-			// Every client handle dropped, so the tokens can no longer change.
+			// The connection holds the producer for as long as this runs.
 			match wait.await {
 				Ok(changed) => changed,
 				Err(_) => std::future::pending().await,
 			}
 		};
-		let answered = std::future::poll_fn(|cx| shared.state.lock().unwrap().held.poll_answers(cx));
+		let answered = std::future::poll_fn(|cx| {
+			let mut state = shared.state.lock().unwrap();
+			let answered = state.held.poll_answers(cx);
+			if answered.is_ready() {
+				state.answer();
+			}
+			answered
+		});
 		tokio::select! {
 			biased;
 			(latest, next) = changed => {
 				generation = next;
 				let mut state = shared.state.lock().unwrap();
-				state.tokens = latest;
+				state.current = latest;
+				state.generation = next;
 				state.update();
 			}
 			// A dial added tokens to wait on.
 			_ = shared.dialed.notified() => {}
 			_ = answered => {}
+			// The peer answered the connection credential.
+			changed = grant.changed() => match changed {
+				Ok(_) => shared.state.lock().unwrap().answer(),
+				// The connection ended, which answers the tokens itself.
+				Err(_) => std::future::pending().await,
+			},
 		}
 	}
 }
@@ -117,9 +167,15 @@ struct Held {
 
 enum Presented {
 	Waiting(Opening),
-	Granted(#[allow(dead_code, reason = "held to keep the token presented")] auth::Auth),
+	/// Accepted, held to keep it presented. Taken only for the requests that name it on
+	/// moq-transport without AUTH, where this session sends it nowhere but a later
+	/// session with AUTH presents it.
+	Granted(
+		#[allow(dead_code, reason = "held to keep the token presented")] auth::Auth,
+		auth::Answer,
+	),
 	/// Refused or unsupported. Not presented again unless a change removes and re-adds it.
-	Refused,
+	Refused(moq_net::Error),
 }
 
 impl Held {
@@ -145,9 +201,24 @@ impl Held {
 		self.retiring.extend(
 			old.into_iter()
 				.map(|(_, answer)| answer)
-				.filter(|answer| !matches!(answer, Presented::Refused)),
+				.filter(|answer| !matches!(answer, Presented::Refused(_))),
 		);
 		self.settle();
+	}
+
+	/// The peer's answer to the held tokens: the first refusal, or `Ok` once a session that
+	/// `accepted` its connection credential grants every one. `None` while one still waits.
+	fn answer(&self, accepted: bool) -> Option<crate::Result<()>> {
+		let mut waiting = !accepted;
+		for (_, answer) in &self.tokens {
+			match answer {
+				Presented::Refused(err) => return Some(Err(err.clone().into())),
+				Presented::Granted(_, auth::Answer::Requests) => return Some(Err(moq_net::Error::Unsupported.into())),
+				Presented::Granted(_, auth::Answer::Granted) => {}
+				Presented::Waiting(_) => waiting = true,
+			}
+		}
+		(!waiting).then_some(Ok(()))
 	}
 
 	/// Resolve when another token has its answer.
@@ -168,15 +239,15 @@ impl Held {
 					if answer == auth::Answer::Requests {
 						unsupported = true;
 					}
-					Presented::Granted(auth)
+					Presented::Granted(auth, answer)
 				}
 				Err(moq_net::Error::Unsupported) => {
 					unsupported = true;
-					Presented::Refused
+					Presented::Refused(moq_net::Error::Unsupported)
 				}
 				Err(err) => {
 					tracing::warn!(%err, "a configured token was refused");
-					Presented::Refused
+					Presented::Refused(err)
 				}
 			};
 		}
@@ -277,12 +348,13 @@ mod tests {
 
 	/// A holder for `tokens` on a pair's client, dialed with the credential a lite-07 dial
 	/// to `url` would present.
-	fn holder(pair: &Pair, url: &str, tokens: &[&str]) -> (crate::connect::Tokens, Holder) {
-		let tokens = crate::connect::Tokens::new(tokens.iter().map(|token| token.parse().unwrap()).collect());
+	fn holder(pair: &Pair, url: &str, tokens: &[&str]) -> (Tokens, Holder) {
+		let tokens = Tokens::new(tokens.iter().map(|token| token.parse().unwrap()).collect());
 		let versions = moq_net::Versions::from("moq-lite-07-wip".parse::<moq_net::Version>().unwrap());
 		let credential = Credential::new(&url.parse().unwrap(), &versions, &tokens.snapshot());
-		let holder = Holder::new(pair.auth.clone(), tokens.consume());
+		let holder = Holder::new(pair.auth.clone(), tokens.clone());
 		holder.dialed(&credential);
+		holder.live(Some(*versions.iter().next().unwrap()));
 		(tokens, holder)
 	}
 
@@ -334,7 +406,14 @@ mod tests {
 		let early = moq_clock::timeout(std::time::Duration::from_secs(1), old.closed()).await;
 		assert!(early.is_err(), "withdrawn before its replacement was answered");
 
+		let pending = moq_clock::timeout(std::time::Duration::from_secs(1), tokens.answered()).await;
+		assert!(pending.is_err(), "answered before the replacement was");
+
 		let new = request.accept(auth::Grant::all());
+		moq_clock::timeout(std::time::Duration::from_secs(5), tokens.answered())
+			.await
+			.expect("the replacement was never answered")
+			.expect("the replacement was refused");
 		moq_clock::timeout(std::time::Duration::from_secs(5), old.closed())
 			.await
 			.expect("the replaced token was never withdrawn");
@@ -354,6 +433,16 @@ mod tests {
 		let request = next_token(&mut pair).await;
 		assert_eq!(request.token().as_ref(), b"new");
 		request.reject(moq_net::SessionError::Unauthorized, "expired");
+		let answer = moq_clock::timeout(std::time::Duration::from_secs(5), tokens.answered())
+			.await
+			.expect("the refusal was never answered");
+		assert!(
+			matches!(
+				answer,
+				Err(crate::Error::MoqNet(moq_net::Error::Session(moq_net::SessionError::Unauthorized)))
+			),
+			"{answer:?}"
+		);
 		moq_clock::timeout(std::time::Duration::from_secs(5), old.closed())
 			.await
 			.expect("the replaced token outlived its refused replacement");
@@ -375,7 +464,7 @@ mod tests {
 		assert!(
 			held.tokens
 				.iter()
-				.all(|(_, answer)| matches!(answer, Presented::Granted(_)))
+				.all(|(_, answer)| matches!(answer, Presented::Granted(_, auth::Answer::Requests)))
 		);
 		assert!(held.unsupported);
 	}

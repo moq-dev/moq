@@ -1,5 +1,7 @@
 //! The credentials a client presents, kept out of logs and replaceable while it runs.
 
+use std::task::Poll;
+
 use moq_net::kio;
 use url::Url;
 
@@ -54,11 +56,11 @@ impl From<Token> for String {
 #[non_exhaustive]
 pub struct EmptyToken;
 
-/// The tokens a client presents, which every dial reads afresh.
+/// The tokens a [`Connection`](crate::Connection) presents, which every dial reads afresh.
 ///
-/// Clones share one set, as do the [`crate::Client`] clones it came from. Replacing it
-/// reaches the next dial and, on a live session with AUTH, presents the new tokens at
-/// once, withdrawing the ones they replace only after every new one has its answer.
+/// Clones share one set. Replacing it reaches the next dial and, on a live session with
+/// AUTH, presents the new tokens at once, withdrawing the ones they replace only after
+/// every new one has its answer. [`answered`](Self::answered) reports that answer.
 #[derive(Clone)]
 pub struct Tokens(kio::Producer<Set>);
 
@@ -67,11 +69,18 @@ pub struct Tokens(kio::Producer<Set>);
 pub(crate) struct Set {
 	pub tokens: Vec<Token>,
 	pub generation: u64,
+	/// The peer's answer to this generation, once it has one.
+	answer: Option<crate::Result<()>>,
+	/// Why no session will answer again, once the connection ended.
+	ended: Option<crate::Error>,
 }
 
 impl Tokens {
 	pub(crate) fn new(tokens: Vec<Token>) -> Self {
-		Self(kio::Producer::new(Set { tokens, generation: 0 }))
+		Self(kio::Producer::new(Set {
+			tokens,
+			..Default::default()
+		}))
 	}
 
 	/// Replace every token. The first is the connection credential, unless the dial URL
@@ -82,7 +91,36 @@ impl Tokens {
 		if set.tokens != tokens {
 			set.tokens = tokens;
 			set.generation += 1;
+			set.answer = None;
 		}
+	}
+
+	/// Poll for the peer's answer to the tokens set last; see [`answered`](Self::answered).
+	pub fn poll_answered(&self, waiter: &kio::Waiter) -> Poll<crate::Result<()>> {
+		let answer = |set: &Set| set.answer.clone().or_else(|| set.ended.clone().map(Err));
+		match self.0.poll_ref(waiter, |set| match answer(set) {
+			Some(answer) => Poll::Ready(answer),
+			None => Poll::Pending,
+		}) {
+			Poll::Ready(Ok(answer)) => Poll::Ready(answer),
+			// Never closed: this handle is a producer.
+			Poll::Ready(Err(set)) => Poll::Ready(answer(&set).unwrap_or(Err(moq_net::Error::Closed.into()))),
+			Poll::Pending => Poll::Pending,
+		}
+	}
+
+	/// Wait for the peer's answer to the tokens set last: `Ok` once a live session holds
+	/// every one, in band or as the connection credential it dialed with.
+	///
+	/// While offline it waits for the next session. A later [`set`](Self::set) moves the
+	/// wait on to its tokens.
+	///
+	/// # Errors
+	///
+	/// The peer's refusal of a token, [`moq_net::Error::Unsupported`] when the live session
+	/// cannot carry an in-band token, or the connection's end, such as a refused dial.
+	pub async fn answered(&self) -> crate::Result<()> {
+		kio::wait(|waiter| self.poll_answered(waiter)).await
 	}
 
 	pub(crate) fn snapshot(&self) -> Set {
@@ -91,6 +129,22 @@ impl Tokens {
 
 	pub(crate) fn consume(&self) -> kio::Consumer<Set> {
 		self.0.consume()
+	}
+
+	/// Record the peer's answer to `generation`, unless the tokens changed since.
+	pub(crate) fn answer(&self, generation: u64, answer: crate::Result<()>) {
+		let Ok(mut set) = self.0.write() else { return };
+		if set.generation == generation && set.answer.is_none() {
+			set.answer = Some(answer);
+		}
+	}
+
+	/// No session will answer again, because the connection ended with `err`.
+	pub(crate) fn end(&self, err: crate::Error) {
+		let Ok(mut set) = self.0.write() else { return };
+		if set.ended.is_none() {
+			set.ended = Some(err);
+		}
 	}
 }
 
@@ -212,6 +266,7 @@ mod tests {
 		Set {
 			tokens: tokens.iter().map(|token| token.parse().unwrap()).collect(),
 			generation: 3,
+			..Default::default()
 		}
 	}
 

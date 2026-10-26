@@ -129,13 +129,15 @@ async fn a_refused_credential_redials_with_its_replacement() {
 	let connection = client.connect(url);
 	assert_eq!(next(&mut server).await.token.as_deref(), Some("old"));
 
-	client.tokens().set(vec!["new".parse().unwrap()]);
+	let tokens = connection.tokens();
+	tokens.set(vec!["new".parse().unwrap()]);
 	server.release.notify_one();
 	assert_eq!(next(&mut server).await.token.as_deref(), Some("new"));
-	let _connection = tokio::time::timeout(Duration::from_secs(10), connection.established())
+	tokio::time::timeout(Duration::from_secs(10), tokens.answered())
 		.await
-		.expect("the replacement never connected")
+		.expect("the replacement was never answered")
 		.expect("the replacement was refused");
+	assert!(connection.connected());
 }
 
 /// Without a new credential, a refusal ends the connection rather than retrying it.
@@ -145,6 +147,7 @@ async fn an_unchanged_refused_credential_is_terminal() {
 	let client = client("moq-lite-07-wip", &["old"]);
 	let url: url::Url = format!("moqt://localhost:{}/", server.port).parse().unwrap();
 	let connection = client.connect(url);
+	let tokens = connection.tokens();
 	assert_eq!(next(&mut server).await.token.as_deref(), Some("old"));
 	server.release.notify_one();
 	// A lite client is live before the server's answer, so the refusal may close it after.
@@ -156,11 +159,10 @@ async fn an_unchanged_refused_credential_is_terminal() {
 	})
 	.await
 	.expect("the refusal never ended the connection");
-	assert!(
-		matches!(
-			err,
-			moq_tokio::Error::MoqNet(moq_net::Error::Session(moq_net::SessionError::Unauthorized))
-		),
-		"{err:?}"
-	);
+	let unauthorized =
+		|err: &moq_tokio::Error| matches!(err, moq_tokio::Error::MoqNet(moq_net::Error::Session(moq_net::SessionError::Unauthorized)));
+	assert!(unauthorized(&err), "{err:?}");
+	// The refusal is the answer to the tokens that dial presented.
+	let answer = tokens.answered().await.expect_err("the refused credential was answered");
+	assert!(unauthorized(&answer), "{answer:?}");
 }
