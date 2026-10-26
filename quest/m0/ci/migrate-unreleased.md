@@ -25,8 +25,9 @@ edits only duplicated it.
 - Find where the habit comes from (an `AGENTS.md`, a skill, or copying), and
   correct that source in the same PR. Any rule change is reviewed like one.
 - Keep the content of the existing Unreleased sections until the next
-  breaking cut consumes it. The [release cut](/quest/m2/release/cut.md) folds
-  each into its version section and deletes it, so no curated note is lost.
+  breaking cut consumes it. The cut's [migration
+  audit](/quest/m2/release/migrate-audit.md) starts each version section from
+  those entries, so no curated note is lost.
 - A check that refuses an Unreleased heading on `main` is optional, only if
   the source cannot be corrected.
 

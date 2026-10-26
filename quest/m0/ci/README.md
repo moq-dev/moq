@@ -3,9 +3,9 @@
 ## Goal
 
 Pull requests are validated locally with `just ci` and get their cloud verdict
-from the merge queue without waiting behind the hosted runner limits, and
-every job spends its minutes on the work its diff selected rather
-than on setup, cold caches, or repeated builds. Concurrent local agents share
+from the [batched gate](/quest/m0/ci/land.md) without waiting behind the
+hosted runner limits, and every job spends its minutes on the work its diff
+selected rather than on setup, cold caches, or repeated builds. Concurrent local agents share
 expensive-command capacity, and retained tests earn their cost through useful
 regression signal. Valuable checks stay gated or move to an appropriate queue
 or nightly run; measured low-value redundancy may be retired.

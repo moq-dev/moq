@@ -57,7 +57,9 @@ Decided 2026-10-26 (maintainer):
   on the head it tested, to that PR's commit, then fast-forwards `main` to
   the tip in one push. GitHub marks a PR merged once its head is on the base,
   so the PRs show as merged, `main` stays linear, and the landed tree is
-  exactly the tested one. A conflict outside `quest/` ejects that PR.
+  exactly the tested one. A conflict outside `quest/` ejects that PR. The
+  engine quest decides whether a fork branch that blocks maintainer edits is
+  refused at enqueue or lands another way.
 - Batches take every queued PR, with no size constant. On failure the gate
   tests the first half. A passing prefix lands at once and the rest
   continues. A PR that fails alone is ejected with a comment linking the
