@@ -91,6 +91,16 @@ test("closing a consumer ends its own parked reads", async () => {
 	producer.finish();
 });
 
+test("a released consumer ignores a later abort", async () => {
+	const { producer, consumer } = pair(0);
+	const reading = consumer.readFrame();
+	consumer.close();
+	producer.abort(new Error("upstream"));
+	expect(await reading).toBeUndefined();
+	expect(await consumer.readFrame()).toBeUndefined();
+	expect(await consumer.closed).toBeNull();
+});
+
 test("a group caps its frame count and aborts on the next write", async () => {
 	const { producer, consumer } = pair(0);
 

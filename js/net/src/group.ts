@@ -992,6 +992,8 @@ export class Consumer {
 				return read;
 			}
 
+			// A released shared handle ends here, whatever the group does next for its other readers.
+			if (this.#released && !this.#owned) return;
 			const closed = this.#state.closed.peek();
 			if (closed instanceof Error) {
 				if (await this.#resume(closed)) continue;
@@ -1005,8 +1007,6 @@ export class Consumer {
 				return;
 			}
 
-			// A released shared handle ends here; the group itself stays open for others.
-			if (this.#released) return;
 			// Nothing buffered and the group is still open: this wait is the stall the
 			// drift budget bounds, and the only place it applies.
 			if (this.#expire()) continue;
