@@ -3464,6 +3464,67 @@ mod tests {
 		}
 	}
 
+	/// A SUBSCRIBE_START that is only read after the source was replaced may be the
+	/// replacement's answer, so the retirement refuses the subscription instead.
+	#[moq_clock::test]
+	async fn an_answer_read_after_the_retirement_is_refused() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
+			let subscriber = Subscriber::new(SubscriberConfig {
+				runtime: crate::time::sim(),
+				session: crate::driver::Transport::new(session.clone()),
+				origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				recv_bandwidth: None,
+				version,
+				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
+				peer_hop: None,
+				cost: None,
+				going_away: Default::default(),
+				auth: crate::auth::Link::new(false),
+			});
+			let selected = kio::Producer::new(());
+			let serve = TrackServe {
+				validity: crate::model::broadcast::RequestValidity::Route(selected.consume()),
+				route: None,
+				subscriber,
+				path: Path::new("room").to_owned(),
+				epoch: None,
+				name: "video".to_string(),
+			};
+			let broadcast = crate::broadcast::Info::new().produce();
+			let request = broadcast.reserve_track("video").unwrap();
+			let serving = ServeLoop::new(&serve, request, crate::track::Info::timed());
+			let mut reader = broadcast
+				.consume()
+				.track("video")
+				.unwrap()
+				.subscribe(None)
+				.await
+				.unwrap();
+			let gate = serve.gate();
+			let mut running = TrackServeRun {
+				serve,
+				state: TrackRunState::Serve(serving),
+				gate,
+			};
+			assert!(kio::Task::poll(&mut running, &kio::Waiter::noop()).is_pending());
+
+			let mut start = Vec::new();
+			lite::SubscribeResponse::Start(lite::SubscribeStart {
+				group: 0,
+				largest: None,
+			})
+			.encode(&mut crate::coding::Encoder::new(&mut start, version.into()), version)
+			.unwrap();
+			session.push(&start);
+			drop(selected);
+			let _ = kio::Task::poll(&mut running, &kio::Waiter::noop());
+
+			let res = reader.recv_group().now_or_never().map(|res| res.map(|_| ()));
+			assert!(matches!(res, Some(Err(Error::Unroutable))), "{version:?}: {res:?}");
+		}
+	}
+
 	/// Lite-07's SUBSCRIBE_START says where the track is, so a reader knows its largest
 	/// frame before any group arrives. The FIN with no SUBSCRIBE_END then aborts the track,
 	/// and the stream ends with it.
@@ -7400,6 +7461,18 @@ impl ServeLoop {
 				ServeMode::Select => {
 					let mut cx = waiter.context();
 
+					// A SUBSCRIBE still unanswered once its source is replaced may have resolved
+					// the replacement: refuse it. Checked before reading the stream, so an answer
+					// that only arrived alongside the replacement cannot claim it, and before the
+					// flush, so an update parked on flow control cannot hold the refusal back.
+					if let Sub::Active(active) = &self.sub
+						&& let Some(validity) = &active.unanswered
+						&& let Err(err) = validity.check(waiter)
+					{
+						tracing::debug!(broadcast = %serve.subscriber.log_path(&serve.path), track = %serve.name, "unanswered subscribe refused: instance replaced");
+						return Poll::Ready(ServeEnd::GiveBack(err));
+					}
+
 					// Deliver any buffered SUBSCRIBE_UPDATE before selecting, so the
 					// demand that produced it is on the wire.
 					if let Sub::Active(active) = &mut self.sub {
@@ -7631,16 +7704,6 @@ impl ServeLoop {
 								return Poll::Ready(ServeEnd::GiveBack(err));
 							}
 						}
-					}
-
-					// A SUBSCRIBE still unanswered once its source is replaced may have resolved
-					// the replacement: refuse it. An answer already read above wins.
-					if let Sub::Active(active) = &self.sub
-						&& let Some(validity) = &active.unanswered
-						&& let Err(err) = validity.check(waiter)
-					{
-						tracing::debug!(broadcast = %serve.subscriber.log_path(&serve.path), track = %serve.name, "unanswered subscribe refused: instance replaced");
-						return Poll::Ready(ServeEnd::GiveBack(err));
 					}
 
 					// (5) The session died: hand the track back for another route, with
