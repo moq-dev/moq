@@ -37,6 +37,7 @@ mod psi;
 mod release;
 mod schedule;
 mod si;
+mod unclaimed;
 
 // The `mpegts` catalog section (per-track PID + descriptors plus verbatim carriage
 // of undecoded elementary streams) and the `Catalog` capability, re-exported flat so
@@ -73,3 +74,5 @@ mod recovery_test;
 mod release_test;
 #[cfg(test)]
 mod revision_test;
+#[cfg(test)]
+mod routes_test;

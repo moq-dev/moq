@@ -90,7 +90,7 @@ fn parse_bool<R: Read>(bytes: &mut R) -> Result<Amf0Value, Amf0DeserializationEr
 fn parse_string<R: Read>(bytes: &mut R) -> Result<Amf0Value, Amf0DeserializationError> {
 	let length = bytes.read_u16::<BigEndian>()?;
 	let mut buffer: Vec<u8> = vec![0_u8; length as usize];
-	bytes.read(&mut buffer)?;
+	bytes.read_exact(&mut buffer)?;
 
 	let value = String::from_utf8(buffer)?;
 	Ok(Amf0Value::Utf8String(value))
@@ -158,7 +158,7 @@ fn parse_object_property<R: Read>(
 	}
 
 	let mut label_buffer = vec![0; label_length as usize];
-	bytes.read(&mut label_buffer)?;
+	bytes.read_exact(&mut label_buffer)?;
 
 	let label = String::from_utf8(label_buffer)?;
 
@@ -174,11 +174,12 @@ fn parse_object_property<R: Read>(
 #[cfg(test)]
 mod tests {
 	use super::super::Amf0Value;
+	use super::super::errors::Amf0DeserializationError;
 	use super::super::markers;
 	use super::deserialize;
 	use byteorder::{BigEndian, WriteBytesExt};
 	use std::collections::HashMap;
-	use std::io::Cursor;
+	use std::io::{Cursor, Read};
 
 	#[test]
 	fn can_deserialize_strict_array() {
@@ -332,5 +333,40 @@ mod tests {
 
 		let expected = vec![Amf0Value::Undefined];
 		assert_eq!(result, expected);
+	}
+
+	fn assert_eof(result: Result<Vec<Amf0Value>, Amf0DeserializationError>) {
+		match result {
+			Err(Amf0DeserializationError::BufferReadError(err)) => {
+				assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof)
+			}
+			other => panic!("expected UnexpectedEof, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn truncated_string_errors() {
+		let mut vector = vec![markers::STRING_MARKER];
+		vector.write_u16::<BigEndian>(16).unwrap();
+		vector.push(b'a');
+
+		assert_eof(deserialize(&mut Cursor::new(vector)));
+	}
+
+	#[test]
+	fn truncated_property_name_errors() {
+		// The name declares one byte more than the rest of the input holds.
+		let mut name = vec![markers::OBJECT_MARKER];
+		name.write_u16::<BigEndian>(17).unwrap();
+		name.extend("test".as_bytes());
+
+		let mut rest = vec![markers::NUMBER_MARKER];
+		rest.write_f64::<BigEndian>(1.0).unwrap();
+		rest.write_u16::<BigEndian>(markers::UTF_8_EMPTY_MARKER).unwrap();
+		rest.push(markers::OBJECT_END_MARKER);
+
+		// A chained reader returns a short read at the boundary, so a single `read`
+		// would pad the name with NULs and still find a value after it.
+		assert_eof(deserialize(&mut name.as_slice().chain(rest.as_slice())));
 	}
 }
