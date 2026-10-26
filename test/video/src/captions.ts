@@ -11,7 +11,8 @@ import { Source } from "../../../js/watch/src/text/source";
 /** Caption selection controls exercised by the browser harness. */
 export function captions() {
 	const origin = new Origin.Producer();
-	const producer = origin.createBroadcast(Path.from("captions"));
+	const producerPublication = origin.createBroadcast(Path.from("captions"));
+	const producer = producerPublication.broadcast;
 	const textCatalog: NonNullable<Catalog.Root["text"]> = { renditions: {} };
 	const catalog: Catalog.Root = { text: textCatalog };
 	for (const [name, text] of [
@@ -24,7 +25,7 @@ export function captions() {
 		group.writeFrame({ payload: Legacy.encodeFrame(new TextEncoder().encode(text), Micro(1_000_000)) });
 		group.finish();
 	}
-	producer.announce();
+	producerPublication.announce();
 	const broadcast = new Broadcast({ origin, name: Path.from("captions"), catalogFormat: "manual", catalog });
 	const target = new Signal<string | undefined>(undefined);
 	const source = new Source({ broadcast, target });

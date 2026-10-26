@@ -223,8 +223,9 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 		const pair = createMockTransportPair(alpn);
 		const fin = holdFins(pair.server, "uni");
 		const origin = new Producer();
-		const broadcast = origin.createBroadcast(Path.from("room"));
-		broadcast.announce();
+		const broadcastPublication = origin.createBroadcast(Path.from("room"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
 		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 		const url = new URL("https://localhost/test");
 		const [client, server] = await Promise.all([
@@ -274,8 +275,9 @@ async function servedRawSubscription() {
 	const version = Version.DRAFT_07;
 	const pair = createMockTransportPair(ALPN_07_WIP);
 	const origin = new Producer();
-	const broadcast = origin.createBroadcast(Path.from("room"));
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(Path.from("room"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const server = new Connection({
 		url: new URL("https://relay.example/"),
@@ -383,8 +385,9 @@ test("close waits for a served FETCH to be acknowledged", async () => {
 	const pair = createMockTransportPair(ALPN_05);
 	const fin = holdFins(pair.server, "incoming-bidi");
 	const origin = new Producer();
-	const broadcast = origin.createBroadcast(Path.from("room"));
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(Path.from("room"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const group = producer.appendGroup();
 	group.writeFrame(textFrame("last"));
@@ -435,8 +438,9 @@ test("close waits for a request served while withdrawals are in flight", async (
 	const fin = holdFins(pair.server, "incoming-bidi");
 	const source = new Producer();
 	const destination = new Producer();
-	const broadcast = source.createBroadcast(Path.from("room"));
-	broadcast.announce();
+	const broadcastPublication = source.createBroadcast(Path.from("room"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const group = producer.appendGroup();
 	group.writeFrame(textFrame("last"));

@@ -43,9 +43,10 @@ const connection = await Moq.Connection.connect({
 });
 try {
 	if (role === "publish") {
-		const broadcast = origin.createBroadcast(Moq.Path.from(path));
+		const broadcastPublication = origin.createBroadcast(Moq.Path.from(path));
+		const broadcast = broadcastPublication.broadcast;
 		const track = broadcast.createTrack("tail", { compress, ...(status ? { priority: 2 } : {}) });
-		broadcast.announce();
+		broadcastPublication.announce();
 		const lines = createInterface({ input: process.stdin });
 		const commands = lines[Symbol.asyncIterator]();
 		if (!status) {

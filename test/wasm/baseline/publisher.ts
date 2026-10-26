@@ -8,10 +8,11 @@ async function prepare(config: Workload): Promise<void> {
 	const fixtures = Array.from({ length: config.frames }, (_, frame) => payload(config.size, frame));
 	for (let index = 0; index < config.publishers; index++) {
 		const origin = new Moq.Origin.Producer();
-		const broadcast = origin.createBroadcast(Moq.Path.from(`${config.id}/${index}`));
+		const broadcastPublication = origin.createBroadcast(Moq.Path.from(`${config.id}/${index}`));
+		const broadcast = broadcastPublication.broadcast;
 		const track = broadcast.createTrack("data", { timescale: Moq.Time.Timescale.MILLI });
 		const demand = track.demand().wanted;
-		broadcast.announce();
+		broadcastPublication.announce();
 		const connection = await Moq.Connection.connect({
 			url: new URL(config.url),
 			publish: origin.consume(),

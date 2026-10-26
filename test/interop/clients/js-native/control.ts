@@ -78,10 +78,11 @@ if (mode === "status") {
 } else {
 	assert(legacy, "request credit only exists on drafts 14 and 16");
 	const origin = new Moq.Origin.Producer();
-	const broadcast = origin.createBroadcast(Moq.Path.from("control"));
+	const broadcastPublication = origin.createBroadcast(Moq.Path.from("control"));
+	const broadcast = broadcastPublication.broadcast;
 	const first = broadcast.createTrack("first");
 	const second = broadcast.createTrack("second");
-	broadcast.announce();
+	broadcastPublication.announce();
 	const connection = new Connection({
 		url,
 		quic,

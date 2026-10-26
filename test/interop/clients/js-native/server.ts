@@ -22,17 +22,19 @@ const legacy = version === Ietf.Version.DRAFT_14 || version === Ietf.Version.DRA
 const alpns = version === Ietf.Version.DRAFT_14 ? ["moql", "moq-00"] : [`moqt-${Number(version) - 0xff000000}`];
 const extensions = Extensions.offered();
 const origin = new Moq.Origin.Producer();
-const broadcast = origin.createBroadcast(Moq.Path.from("handover"));
+const broadcastPublication = origin.createBroadcast(Moq.Path.from("handover"));
+const broadcast = broadcastPublication.broadcast;
 const firstTrack = broadcast.createTrack("first");
 const secondTrack = broadcast.createTrack("second");
 const video = broadcast.createTrack("video");
-broadcast.announce({ epoch: Moq.Epoch.mint() });
-const marker = origin.createBroadcast(Moq.Path.from("replacement"));
+broadcastPublication.announce({ epoch: Moq.Epoch.mint() });
+const markerPublication = origin.createBroadcast(Moq.Path.from("replacement"));
+const marker = markerPublication.broadcast;
 const ready = marker.createTrack("ready");
 const markerGroup = ready.appendGroup();
 markerGroup.writeFrame({ payload: new Uint8Array([42]) });
 markerGroup.finish();
-marker.announce();
+markerPublication.announce();
 
 type Socket = {
 	protocol: string;

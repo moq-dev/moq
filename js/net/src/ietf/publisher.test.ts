@@ -45,8 +45,9 @@ import { TRACK_STATUS_ERROR_14, TrackStatusOk, TrackStatusRequest } from "./trac
 import { ALPN, type IetfVersion, Version } from "./version.ts";
 
 function publish(origin: OriginProducer, path: Path.Valid) {
-	const broadcast = origin.createBroadcast(path);
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(path);
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	return broadcast;
 }
 
@@ -1649,8 +1650,9 @@ test("a request pinned to another epoch is refused DOES_NOT_EXIST", async () => 
 	const session = new NativeSession(pair.server, VERSION, true);
 	const { pub, origin } = publisher(pair.server, { session, epoch: true });
 	const epoch = Epoch.mint();
-	const broadcast = origin.createBroadcast(Path.from("room"));
-	broadcast.announce({ epoch });
+	const broadcastPublication = origin.createBroadcast(Path.from("room"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce({ epoch });
 	broadcast.createTrack("video");
 	origin.createBroadcast(Path.from("epochless")).announce();
 
@@ -2351,8 +2353,9 @@ test("closing a route's token makes its request again without it", async () => {
 test("a republish withdraws the PUBLISH_NAMESPACE and advertises again", async () => {
 	const { pub, origin, streams, close } = clustered();
 	try {
-		const broadcast = origin.createBroadcast(Path.from("mine"));
-		broadcast.announce({ hops: [VIA], cost: 4n });
+		const broadcastPublication = origin.createBroadcast(Path.from("mine"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce({ hops: [VIA], cost: 4n });
 		void pub.runPublishNamespaces();
 
 		const old = await take(streams);
@@ -2372,8 +2375,9 @@ test("a republish withdraws the PUBLISH_NAMESPACE and advertises again", async (
 test("a republish withdraws the solicited NAMESPACE and sends it again", async () => {
 	const { pair, pub, origin, close } = clustered(true);
 	try {
-		const broadcast = origin.createBroadcast(Path.from("mine"));
-		broadcast.announce({ hops: [VIA], cost: 4n });
+		const broadcastPublication = origin.createBroadcast(Path.from("mine"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce({ hops: [VIA], cost: 4n });
 
 		const subscription = await Stream.open(pair.client, { version: VERSION });
 		const stream = await Stream.accept(pair.server, VERSION);

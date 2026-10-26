@@ -8,7 +8,8 @@ import { Player } from "@moq/watch";
 async function poster(audio: boolean, buffered: boolean) {
 	const origin = new Origin.Producer();
 	const name = Path.from("poster");
-	const producer = origin.createBroadcast(name);
+	const producerPublication = origin.createBroadcast(name);
+	const producer = producerPublication.broadcast;
 	const track = producer.createTrack("video");
 	const group = track.appendGroup();
 	const audioTrack = audio ? producer.createTrack("audio") : undefined;
@@ -37,7 +38,7 @@ async function poster(audio: boolean, buffered: boolean) {
 			},
 		}),
 	};
-	producer.announce();
+	producerPublication.announce();
 	const canvas = document.createElement("canvas");
 	document.body.append(canvas);
 	const player = new Player({

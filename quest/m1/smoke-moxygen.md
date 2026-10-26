@@ -32,7 +32,3 @@ Reported upstream as
 acknowledged 2026-10-16; check it and the Smoke job. The fix is a registered default
 (Largest Object or Next Group Start) for drafts that lack LargestGroup.
 Do not accept 0xFA in moq-relay.
-
-## Related
-
-- [moq-transport passthrough](/quest/m1/ietf-extension/README.md) - broader object forwarding and moq-test conformance

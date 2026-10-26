@@ -366,7 +366,7 @@ async function guardedPlayback(
 		republishMedia(path?: string): Moq.Track.Producer | undefined {
 			media.peek().close();
 			mediaProducer = path
-				? new Moq.Origin.Producer().createBroadcast(Moq.Path.from(path))
+				? new Moq.Origin.Producer().createBroadcast(Moq.Path.from(path)).broadcast
 				: new Moq.Broadcast.Producer();
 			const track = live
 				? mediaProducer.createTrack("video", { timescale: Moq.Time.Timescale.MILLI })

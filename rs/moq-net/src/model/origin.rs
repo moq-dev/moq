@@ -2494,7 +2494,7 @@ impl Producer {
 	}
 
 	/// Returns the root that is automatically stripped from all paths.
-	pub fn root(&self) -> &Path<'_> {
+	pub fn root(&self) -> &PathOwned {
 		&self.root
 	}
 
@@ -2504,7 +2504,7 @@ impl Producer {
 	}
 
 	/// Converts a relative path to an absolute path.
-	pub fn absolute(&self, path: impl AsPath) -> Path<'_> {
+	pub fn absolute(&self, path: impl AsPath) -> PathOwned {
 		self.root.join(path)
 	}
 }
@@ -5636,7 +5636,7 @@ pub struct Request {
 
 impl Request {
 	/// The absolute path that was requested.
-	pub fn path(&self) -> &Path<'_> {
+	pub fn path(&self) -> &PathOwned {
 		&self.path
 	}
 
@@ -6614,7 +6614,7 @@ impl Consumer {
 	}
 
 	/// Returns the prefix that is automatically stripped from all paths.
-	pub fn root(&self) -> &Path<'_> {
+	pub fn root(&self) -> &PathOwned {
 		&self.root
 	}
 
@@ -6624,7 +6624,7 @@ impl Consumer {
 	}
 
 	/// Converts a relative path to an absolute path.
-	pub fn absolute(&self, path: impl AsPath) -> Path<'_> {
+	pub fn absolute(&self, path: impl AsPath) -> PathOwned {
 		self.root.join(path)
 	}
 }
@@ -7020,12 +7020,12 @@ impl AnnounceConsumer {
 	}
 
 	/// Returns the root that is automatically stripped from emitted prefixes.
-	pub fn root(&self) -> &Path<'_> {
+	pub fn root(&self) -> &PathOwned {
 		&self.root
 	}
 
 	/// Converts an emitted prefix back to one rooted at the origin.
-	pub fn absolute(&self, prefix: impl AsPath) -> Path<'_> {
+	pub fn absolute(&self, prefix: impl AsPath) -> PathOwned {
 		self.root.join(prefix)
 	}
 }

@@ -85,8 +85,9 @@ async function backlog(protocol: string, order: Order, update?: Order) {
 	const origin = new OriginProducer();
 	const { client, server, transport } = await session(protocol, origin);
 
-	const broadcast = origin.createBroadcast(Path.from("test"));
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(Path.from("test"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const groups = [0, 1, 2].map(() => writeGroup(video));
 
@@ -138,8 +139,9 @@ test.each(["ascending", "descending"] as const)("ietf serves GROUP_ORDER %s", as
 	const origin = new OriginProducer();
 	const { client, server, transport } = await session(Ietf.ALPN.DRAFT_17, origin);
 
-	const broadcast = origin.createBroadcast(Path.from("test"));
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(Path.from("test"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
 	const remote = wireOf(client).consume(Path.from("test"));
@@ -202,8 +204,9 @@ test("ietf keeps a closing group stream ranked until it settles", async () => {
 	const { client, server, transport } = await session(Ietf.ALPN.DRAFT_17, origin);
 	const fins = holdFins(transport);
 
-	const broadcast = origin.createBroadcast(Path.from("test"));
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(Path.from("test"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
 	const remote = wireOf(client).consume(Path.from("test"));
@@ -242,8 +245,9 @@ test("a shared track aggregates descending and serves each subscriber in its own
 		session(Lite.ALPN_07_WIP, origin),
 	]);
 
-	const broadcast = origin.createBroadcast(Path.from("test"));
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(Path.from("test"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
 	const ascendingRemote = wireOf(ascending.client).consume(Path.from("test"));

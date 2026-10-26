@@ -11,7 +11,7 @@ from . import audio as audio
 from . import flate as flate
 from . import json as json
 from . import video as video
-from .client import Client, CongestionControl, connect, qlog_supported, versions
+from .client import Client, CongestionControl, Tokens, connect, qlog_supported, versions
 from .epoch import mint_epoch
 from .errors import is_auth, is_shutdown, protocol_error
 from .log import log_level
@@ -132,6 +132,7 @@ __all__ = [
     "Server",
     "Session",
     "Subscription",
+    "Tokens",
     "TrackConsumer",
     "TrackDemand",
     "TrackDynamic",

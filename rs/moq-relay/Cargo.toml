@@ -109,10 +109,13 @@ sd-notify = { workspace = true }
 criterion = { workspace = true }
 # An HTTP/2 client, so the admission bench can hold many requests on one connection.
 h2 = { workspace = true }
+kio = { path = "../kio" }
 moq-auth = { path = "../moq-auth", features = ["client", "serve"] }
 # Clocks only the test moves, wall time included, so a grant's life is exact.
 moq-clock = { path = "../moq-clock", features = ["manual", "sim"] }
 moq-congestion = { path = "../moq-congestion" }
+# The shared session bench fills FETCH runs through the hidden `fuzz` module.
+moq-net = { path = "../moq-net", features = ["fuzz"] }
 moq-shaper = { path = "../moq-shaper", features = ["test"] }
 qmux = { workspace = true, features = ["tcp"] }
 rcgen = { workspace = true, features = ["pem", "ring", "x509-parser"] }
@@ -147,6 +150,11 @@ harness = false
 [[bench]]
 name = "http_auth"
 harness = false
+
+[[bench]]
+name = "session"
+harness = false
+required-features = ["test-support"]
 
 [lints]
 workspace = true

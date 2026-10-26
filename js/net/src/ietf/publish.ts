@@ -216,7 +216,10 @@ export const PublishDoneStatus = {
 	UPDATE_FAILED: 0x8,
 } as const;
 
-/** Whether a PUBLISH_DONE status ends the track cleanly rather than aborting it. */
+/**
+ * Whether a PUBLISH_DONE status ends the subscription cleanly, so its data streams in flight still
+ * drain, rather than aborting it. Only TRACK_ENDED also ends the track.
+ */
 export function publishDoneClean(statusCode: number, version: IetfVersion): boolean {
 	if (statusCode === PublishDoneStatus.TRACK_ENDED) return true;
 	if (statusCode !== PublishDoneStatus.SUBSCRIPTION_ENDED) return false;

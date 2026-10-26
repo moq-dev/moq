@@ -17,8 +17,9 @@ import { Timescale, Timestamp } from "../src/time.ts";
 
 async function measure(protocol: string, groups: number, viewers: number) {
 	const origin = new Origin();
-	const broadcast = origin.createBroadcast(Path.from("bench"));
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(Path.from("bench"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	const track = broadcast.createTrack("data", { maxAge: Milli(60_000), timescale: Timescale.MICRO });
 	const pair = createMockTransportPair(protocol === "lite" ? ALPN_05 : ALPN.DRAFT_22);
 	const version = protocol === "lite" ? LiteVersion.DRAFT_05 : IetfVersion.DRAFT_22;

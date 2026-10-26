@@ -502,6 +502,11 @@ bench-latency:
 bench-ts-schedule *args:
     bash sh/local.sh cargo bench --locked -p moq-mux --bench ts_schedule -- "$@"
 
+# Ingest an MPTS across program count, bitrate and stray PIDs, the strays against null packets that skip the accounting.
+[positional-arguments]
+bench-ts-programs *args:
+    cargo bench --locked -p moq-mux --bench ts_programs -- "$@"
+
 # Sweep container export tracks and queued frames independently.
 [positional-arguments]
 bench-export *args:

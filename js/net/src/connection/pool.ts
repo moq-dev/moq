@@ -73,6 +73,12 @@ export interface ConnectionProps {
 	delay?: ReloadDelay;
 
 	/**
+	 * Credentials to present, kept apart from the URL; see {@link ConnectProps.tokens}. Pass a
+	 * `Signal` to replace them before they expire. Implies a private loop.
+	 */
+	tokens?: readonly string[] | Signal<readonly string[]>;
+
+	/**
 	 * Maximum time for each connection attempt, the dial and the MoQ handshake (default:
 	 * 30000ms; `0` waits forever). An attempt that outlives it is retried like any other
 	 * failure. The same bound as the `timeout` option of {@link Connection.connect}.
@@ -113,7 +119,7 @@ export interface ConnectionProps {
  * session finishes its groups, and the handle and its origin carry across. A redirect the
  * {@link ConnectionProps.goaway} policy refuses stops the loop like an auth rejection does.
  *
- * Options the pool cannot honor (transport options, delay, timeout, goaway, a pinned
+ * Options the pool cannot honor (transport options, delay, timeout, goaway, tokens, a pinned
  * certificate, caller-owned origins) use a private loop. An explicit `share: true`
  * refuses them. A supplied transport cannot reconnect at all; pass it to {@link Connection.connect}
  * instead.
@@ -311,6 +317,7 @@ export class Connection {
 				delay: props.delay,
 				timeout: props.timeout,
 				goaway: props.goaway,
+				tokens: props.tokens,
 			});
 			signals.cleanup(() => loop.close());
 
@@ -450,6 +457,9 @@ function refuse(props?: ConnectionProps): void {
 	if (props.delay !== undefined) {
 		throw new Error("delay cannot be shared; pass share: false");
 	}
+	if (props.tokens !== undefined) {
+		throw new Error("tokens cannot be shared; pass share: false");
+	}
 	if (props.timeout !== undefined) {
 		throw new Error("timeout cannot be shared; pass share: false");
 	}
@@ -464,6 +474,7 @@ function requiresPrivate(props: ConnectionProps): boolean {
 		props.webtransport !== undefined ||
 		props.websocket !== undefined ||
 		props.delay !== undefined ||
+		props.tokens !== undefined ||
 		props.timeout !== undefined ||
 		props.goaway !== undefined ||
 		props.publish !== undefined ||

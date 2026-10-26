@@ -17,6 +17,7 @@ pub struct Client {
 	stats: stats::Session,
 	versions: Versions,
 	url: Option<url::Url>,
+	setup_token: Option<setup::Token>,
 	cost: Option<u64>,
 	peer_hop: Option<crate::Hop>,
 	limits: crate::session::Limits,
@@ -153,6 +154,19 @@ impl Client {
 			Some(port) => format!("{host}:{port}"),
 			None => host.to_owned(),
 		})
+	}
+
+	/// Present `token` as the connection credential in SETUP, on versions that carry one
+	/// (moq-lite-07+ and every moq-transport draft we speak). The session's empty-token
+	/// AUTH stream then answers with its grant.
+	///
+	/// Other versions send nothing, so a caller that may negotiate one also puts the
+	/// token in the URL query. moq-lite carries no Token Type, so only
+	/// [`Token::OUT_OF_BAND`](setup::Token::OUT_OF_BAND) reaches it; another type fails
+	/// the handshake.
+	pub fn with_token(mut self, token: setup::Token) -> Self {
+		self.setup_token = Some(token);
+		self
 	}
 
 	/// Build every session on `auth`, so each presents the tokens it holds and a route
@@ -293,6 +307,8 @@ impl Client {
 				cost: self.cost,
 				// Filled by `lite::start` from the attached origin handles.
 				hop: None,
+				// Older versions carry the credential in the URL query instead.
+				token: self.setup_token.clone().filter(|_| version.has_auth()),
 				ietf: self.extensions.ietf && version.has_ietf(),
 				implementation: self.implementation(),
 			}
@@ -383,6 +399,7 @@ impl Client {
 					version: draft,
 					path: self.setup_path(session.address()),
 					authority: self.setup_authority(session.address()),
+					token: self.setup_token.clone(),
 					peer_setup_stream: None,
 					peer_declared: None,
 					auth: auth.clone(),
@@ -479,6 +496,9 @@ impl Client {
 		if let Some(authority) = self.setup_authority(session.address()) {
 			parameters.set_bytes(ietf::ParameterBytes::Authority, authority.into_bytes());
 		}
+		if let Some(token) = &self.setup_token {
+			ietf::token::into_setup(&mut parameters, token, ietf_encoding)?;
+		}
 		if self.extensions.solicit {
 			ietf::solicit::into_setup(&mut parameters, ietf_encoding);
 		}
@@ -572,6 +592,7 @@ impl Client {
 					version: v,
 					path: None,
 					authority: None,
+					token: None,
 					peer_setup_stream: None,
 					peer_declared: Some(peer_declared),
 					auth: auth.clone(),
@@ -989,7 +1010,11 @@ mod tests {
 	/// The client SETUP on the bidi control stream (the pre-draft-17 framing) carries the
 	/// AUTHORITY next to the PATH.
 	#[moq_clock::test]
-	async fn draft14_setup_carries_the_authority() {
+	async fn draft14_setup_carries_the_authority_and_token() {
+		let token = setup::Token {
+			kind: setup::Token::OUT_OF_BAND,
+			value: b"connection-credential".to_vec(),
+		};
 		let fake = FakeSession::new(Some(ALPN_LITE), mock_server_setup(Version::Lite(lite::Version::Lite01)));
 		let client = Client::new()
 			.with_versions(
@@ -999,7 +1024,8 @@ mod tests {
 				]
 				.into(),
 			)
-			.with_url("moqt://relay.example.com:4443/anon".parse().unwrap());
+			.with_url("moqt://relay.example.com:4443/anon".parse().unwrap())
+			.with_token(token.clone());
 
 		let (_session, driver) = client.connect(moq_clock::now(), fake.clone()).await.unwrap();
 		moq_clock::sim::spawn(crate::time::run(driver));
@@ -1014,6 +1040,10 @@ mod tests {
 		assert_eq!(
 			parameters.get_bytes(ietf::ParameterBytes::Path),
 			Some(b"/anon".as_ref())
+		);
+		assert_eq!(
+			ietf::token::from_setup(&parameters, ietf::Version::Draft14).unwrap(),
+			Some(token)
 		);
 	}
 

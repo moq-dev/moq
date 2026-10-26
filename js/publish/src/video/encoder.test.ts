@@ -1085,11 +1085,13 @@ test("a failed video encoder disables only its rendition and recovers on a fresh
 	let siblingSubscriber: Moq.Track.Subscriber | undefined;
 	let catalogSubscriber: Moq.Track.Subscriber | undefined;
 	let recovered: Moq.Track.Subscriber | undefined;
+	let announced: Moq.Origin.Requesting | undefined;
 	try {
 		await encoder.out.catalog.changed();
 		const net = broadcast.net.peek();
 		if (!net) throw new Error("expected network broadcast");
-		const epoch = net.route?.epoch;
+		announced = broadcast.in.origin.peek()?.request(broadcast.in.name.peek(), { announced: true });
+		const epoch = announced?.active.peek()?.epoch;
 		const sibling = broadcast.video("video/sd");
 		sibling.config.set({ codec: "avc1.640028", container: { kind: "legacy" } });
 		await flush();
@@ -1114,7 +1116,7 @@ test("a failed video encoder disables only its rendition and recovers on a fresh
 		expect((await catalog.latest())?.value.video?.renditions["video/hd"]?.enabled).toBe(false);
 		expect(encoder.out.active.peek()).toBe(false);
 		expect(broadcast.net.peek()).toBe(net);
-		expect(net.route?.epoch).toBe(epoch);
+		expect(announced?.active.peek()?.epoch).toBe(epoch);
 		expect(siblingTrack.closed.peek()).toBeUndefined();
 		expect(siblingTrack.appendGroup().sequence).toBe(1);
 		const instances = FakeVideoEncoder.instances.length;
@@ -1158,7 +1160,7 @@ test("a failed video encoder disables only its rendition and recovers on a fresh
 		expect(encoder.out.active.peek()).toBe(true);
 		expect(recovered.closed.peek()).toBeUndefined();
 		expect(broadcast.net.peek()).toBe(net);
-		expect(net.route?.epoch).toBe(epoch);
+		expect(announced?.active.peek()?.epoch).toBe(epoch);
 		expect(siblingTrack.appendGroup().sequence).toBe(2);
 	} finally {
 		subscriber?.close();
@@ -1167,6 +1169,7 @@ test("a failed video encoder disables only its rendition and recovers on a fresh
 		recovered?.close();
 		encoder.close();
 		bandwidth.close();
+		announced?.close();
 		broadcast.close();
 	}
 });

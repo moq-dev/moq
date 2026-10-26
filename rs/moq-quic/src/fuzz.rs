@@ -22,11 +22,12 @@ use bytes::{Bytes, BytesMut};
 use rand::{Rng, SeedableRng, rngs::StdRng};
 
 use crate::{
-	ConnectionId, DEFAULT_SUPPORTED_VERSIONS, Dir, FixedLengthConnectionIdParser, MAX_CID_SIZE, PartialDecode,
-	RESET_TOKEN_SIZE, SendStream, Side, StreamId, Streams, VarInt,
+	ConnectionId, DEFAULT_SUPPORTED_VERSIONS, Dir, MAX_CID_SIZE, RESET_TOKEN_SIZE, SendStream, Side, StreamId, Streams,
+	VarInt,
 	coding::BufMutExt,
 	connection::{Retransmits, State, StreamsState},
 	frame::{self, Frame},
+	packet::{FixedLengthConnectionIdParser, PartialDecode},
 	transport_parameters::{PreferredAddress, TransportParameters},
 };
 

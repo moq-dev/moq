@@ -19,6 +19,7 @@ const ALIAS = 9n;
 const TRACK_ENDED = 0x2;
 const INTERNAL_ERROR = 0x0;
 const UNAUTHORIZED = 0x1;
+const SUBSCRIPTION_ENDED = 0x3;
 
 // A plain subgroup stream: no extensions, no subgroup id, end of group on FIN.
 const FLAGS: GroupFlags = {
@@ -161,6 +162,21 @@ test("a PUBLISH_DONE with an error status aborts the track", async () => {
 	const { reader, done } = await subscribed();
 	await done(INTERNAL_ERROR, 0n);
 	expect(await reader.closed).toBeInstanceOf(Error);
+});
+
+// SUBSCRIPTION_ENDED ends only the subscription: a later one continues the track past these
+// groups, so the copy delivers what was in flight and then fails rather than declare an end.
+test("a SUBSCRIPTION_ENDED PUBLISH_DONE drains, then aborts the track", async () => {
+	const { subscriber, reader, done } = await subscribed();
+	const group = groupStream(subscriber, 0);
+	group.write(object("0.0"));
+	group.finish();
+	await group.handled;
+	await done(SUBSCRIPTION_ENDED, 1n);
+
+	expect(await readAll(await reader.recvGroup())).toEqual(["0.0"]);
+	expect(await reader.closed).toBeInstanceOf(Error);
+	expect(reader.end()).toBeUndefined();
 });
 
 test("an UNAUTHORIZED PUBLISH_DONE reads as the revocation a moq-lite peer sends", async () => {

@@ -147,9 +147,9 @@ for (const pinned of [false, true]) {
 			const reader = origin.consume();
 			const options = pinned ? { epoch } : {};
 			const publishers = Array.from({ length: routeCount }, (_, index) => {
-				const source = origin.createBroadcast(Path.from(`room/${index}`));
-				source.announce({ epoch });
-				return source;
+				const sourcePublication = origin.createBroadcast(Path.from(`room/${index}`));
+				sourcePublication.announce({ epoch });
+				return sourcePublication;
 			});
 			const background = publishers.map((_, index) => reader.request(Path.from(`room/${index}`), options));
 			const requests = Array.from({ length: readerCount }, () => reader.request(Path.from("room/0"), options));
@@ -417,8 +417,9 @@ for (const routeCount of routeCounts) {
 	for (const observerCount of observerCounts) {
 		const origin = new Producer();
 		const routes = Array.from({ length: routeCount }, (_, index) => {
-			const broadcast = origin.createBroadcast(Path.from(`z/${index}`));
-			broadcast.announce();
+			const broadcastPublication = origin.createBroadcast(Path.from(`z/${index}`));
+			const broadcast = broadcastPublication.broadcast;
+			broadcastPublication.announce();
 			return broadcast;
 		});
 		const senders = Array.from({ length: observerCount }, () => {
@@ -442,8 +443,9 @@ for (const routeCount of routeCounts) {
 		await Promise.all(senders.map((sender) => sender.entered.promise));
 		const start = performance.now();
 		for (let index = 0; index < updates; index++) {
-			const broadcast = origin.createBroadcast(Path.from(`a/${index}`));
-			broadcast.announce();
+			const broadcastPublication = origin.createBroadcast(Path.from(`a/${index}`));
+			const broadcast = broadcastPublication.broadcast;
+			broadcastPublication.announce();
 			await new Promise<void>((resolve) => setImmediate(resolve));
 			broadcast.close();
 			await new Promise<void>((resolve) => setImmediate(resolve));

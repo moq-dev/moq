@@ -32,10 +32,11 @@ if (!address || !version || !certificate || !Number.isInteger(window) || window 
 }
 
 const origin = new Moq.Origin.Producer();
-const broadcast = origin.createBroadcast(Moq.Path.from("room"));
+const broadcastPublication = origin.createBroadcast(Moq.Path.from("room"));
+const broadcast = broadcastPublication.broadcast;
 const low = broadcast.createTrack("low");
 const high = broadcast.createTrack("high");
-broadcast.announce();
+broadcastPublication.announce();
 
 const session = await Moq.Connection.connect({
 	url: new URL(address),

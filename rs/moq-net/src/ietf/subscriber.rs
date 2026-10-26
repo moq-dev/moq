@@ -3779,10 +3779,11 @@ impl Subscriber {
 					End::Done(res) => {
 						// Only TRACK_ENDED ends a listing entry quietly; a clean end of another
 						// kind, such as SUBSCRIPTION_ENDED, leaves the track's fate unknown.
-						ended = Some(match &res {
+						let end = match &res {
 							Ok(done) => tracks::listing_end(done, self.version),
 							Err(err) => Err(err.clone()),
-						});
+						};
+						ended = Some(end.clone());
 						match res.map(|done| done.stream_count) {
 							Ok(count) => {
 								tracing::debug!(broadcast = %self.origin.absolute(broadcast_path), track = %track_name, "subscribe complete");
@@ -3819,12 +3820,21 @@ impl Subscriber {
 										fill.end();
 									}
 								}
-								// A no-op once an END_OF_TRACK declared the end, whose readers wait
-								// for a missing group only as long as the grace.
-								let _ = track.finish();
-								// Only TRACK_ENDED ends the track: after SUBSCRIPTION_ENDED a
-								// later reader subscribes afresh.
-								finished = matches!(ended, Some(Ok(())));
+								// Only TRACK_ENDED ends the track. Any other status ends just this
+								// subscription, so the copy fails rather than declare an end the
+								// track may run past: a later reader subscribes afresh to the same
+								// name, and its groups continue.
+								match end {
+									// A no-op once an END_OF_TRACK declared the end, whose readers
+									// wait for a missing group only as long as the grace.
+									Ok(()) => {
+										let _ = track.finish();
+										finished = true;
+									}
+									Err(err) => {
+										let _ = track.clone().abort(err);
+									}
+								}
 							}
 							Err(err) => {
 								tracing::debug!(%err, "subscribe ended with error");
@@ -16756,7 +16766,9 @@ mod joining_fetch_tests {
 	}
 
 	/// SUBSCRIPTION_ENDED ends only our subscription, not the track, so the copy is released
-	/// for a later reader to subscribe afresh rather than lingering as if the track ended.
+	/// for a later reader to subscribe afresh rather than lingering as if the track ended. Its
+	/// reader sees an error, not a clean end: the fresh copy's groups continue past this one's,
+	/// so an end here would be one the track runs past.
 	#[moq_clock::test]
 	async fn a_subscription_ended_copy_does_not_linger() {
 		for version in JOINING_DRAFTS {
@@ -16773,12 +16785,14 @@ mod joining_fetch_tests {
 				version,
 			));
 			let mut run = JoinRun::start(version, None, ok, Vec::new()).await;
-			let _subscriber = (&mut run._hold.2).await.expect("subscribed");
+			let mut subscriber = (&mut run._hold.2).await.expect("subscribed");
 			while !run.subscriber.state.lock().subscribes.is_empty() {
 				settle().await;
 			}
 			settle().await;
 			assert!(run.serving.is_finished(), "{version}: the copy is released");
+			let end = subscriber.recv_group().await.map(|group| group.is_some());
+			assert!(end.is_err(), "{version}: the copy ended cleanly: {end:?}");
 		}
 	}
 
