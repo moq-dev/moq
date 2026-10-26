@@ -2346,7 +2346,7 @@ impl Produced {
 		let Some(timestamp) = timestamp else {
 			return;
 		};
-		let at = u64::try_from(Duration::from(timestamp).as_nanos())
+		let at = u64::try_from(timestamp.as_nanos())
 			.unwrap_or(u64::MAX)
 			.saturating_add(1);
 		if self.first.load(Ordering::Relaxed) == 0 {
