@@ -74,7 +74,6 @@ leaving JS-only redesigns of `js/net` to [rs2ts](/quest/m2/rs2ts/README.md).
 - [RTMP sessions follow one strict path](/quest/m1/cut-audit/rtmp-session-strict.md) - idle sockets, repeated requests, rewinds, and stalled servers are handled
 - [The export jitter buffer admits only frames due within its window](/quest/m1/cut-audit/jitter-admission.md) - a fast track is backpressured, not buffered without bound
 - [Peer-driven receive loops yield on a per-message budget](/quest/m1/cut-audit/peer-loop-budget.md) - small-message floods cannot monopolize a session driver
-- [The JS gap ledger costs O(log n)](/quest/m1/cut-audit/js-ledger.md) - sparse arrivals no longer cost quadratic main-thread CPU
 - [Removing a stale front is O(1)](/quest/m1/cut-audit/weak-cache-remove.md) - a restart wave is linear under the origin lock
 - [One bad rendition never leaves the player with nothing](/quest/m1/cut-audit/watch-source-robust.md) - malformed audio and conflicting video filters degrade gracefully
 - [@moq/flate stops inflating at its budget](/quest/m1/cut-audit/flate-budget.md) - unless the compression migration deletes it first
