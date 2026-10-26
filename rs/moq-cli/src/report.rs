@@ -704,3 +704,8 @@ mod tests {
 		assert!(line.contains(r#""n":1"#), "{line}");
 	}
 }
+
+#[cfg(test)]
+#[path = "report/echo_test.rs"]
+#[expect(clippy::disallowed_methods, reason = "tests control the clock directly")]
+mod echo_test;
