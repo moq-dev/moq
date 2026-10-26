@@ -438,6 +438,11 @@ HEVC_LEVELS = {
 # H.265 Table A.9 CpbNalFactor for Main, Main 10 and Main Still Picture (profile_idc 1-3).
 HEVC_NAL_FACTOR = 1100
 
+# H.262 Tables 8-13 and 8-14: level (the low nibble of profile_and_level_indication) ->
+# (Rmax bit/s, VBV_max bits), the same for every profile that has the level.
+MPEG2_LEVELS = {10: (4_000_000, 475_136), 8: (15_000_000, 1_835_008), 6: (60_000_000, 7_340_032), 4: (80_000_000, 9_781_248)}
+MPEG2_LEVEL_NAMES = {10: "Low", 8: "Main", 6: "High-1440", 4: "High"}
+
 # H.222.0 2.4.2.3: ADTS (Rx, BSn) by channels, the LFE not counted.
 ADTS_BUFFERS = ((2, 2_000_000, 3584), (8, 5_529_600, 8976), (12, 8_294_400, 12804), (48, 33_177_600, 51216))
 # channel_configuration -> full-bandwidth channels (5.1 and 7.1 drop the LFE).
@@ -464,6 +469,7 @@ MPEG_AUDIO_KBPS = {
 }
 # stream_type -> model, for the types identified by stream_type alone.
 STREAM_KINDS = {
+    0x02: "mpeg2-video",
     0x1B: "avc",
     0x24: "hevc",
     0x0F: "adts",
@@ -558,6 +564,7 @@ def read_programs(ts_path: str) -> list[tuple[int, list[Stream]]]:
             names = {d["#name"] for d in descriptors}
             names |= {f"registration:{d['format_identifier']}" for d in descriptors if "format_identifier" in d}
             names |= {"hrd_management_valid" for d in descriptors if d.get("hrd_management_valid") is True}
+            names |= {"leak_invalid" for d in descriptors if d["#name"] == "STD_descriptor" and d.get("leak_valid") is False}
             names |= {"temporal_poc_clock" for d in descriptors
                       if d.get("fixed_frame_rate") is True and d.get("temporal_poc") is True}
             names |= {
@@ -664,6 +671,54 @@ def _hrd(sps: dict[str, str], prefix: str, value: str) -> tuple[float, float] | 
     rate = (rates[-1] + 1) << (6 + int(sps[f"{value}bit_rate_scale"]))
     size = (sizes[-1] + 1) << (4 + int(sps[f"{value}cpb_size_scale"]))
     return rate, size
+
+
+def mpeg2_params(es: bytes, descriptors: set[str]) -> Params:
+    """H.222.0 2.4.2.3 buffers for H.262 video from its first sequence header and extension.
+
+    Graded by the leak method, which H.222.0 applies unless an STD_descriptor clears leak_valid
+    and the pictures code a vbv_delay other than 0xFFFF; that vbv_delay method is refused.
+    Rbx is Rmax at Low and Main level, and min(1.05 Res, Rmax) at High-1440 and High.
+    """
+    head = es.find(b"\x00\x00\x01\xb3")
+    ext = es.find(b"\x00\x00\x01\xb5", head)
+    picture = es.find(b"\x00\x00\x01\x00", head)
+    if head < 0 or ext < 0 or len(es) < ext + 9 or es[ext + 4] >> 4 != 1:
+        raise Refused("no sequence header and sequence extension, which an H.262 stream starts with")
+    if picture < 0 or len(es) < picture + 8:
+        raise Refused("no picture header after the sequence header")
+    # vbv_delay: 16 bits after the 10-bit temporal_reference and 3-bit picture_coding_type. H.262
+    # codes it 0xFFFF in every picture of a sequence or in none, so the first decides.
+    vbv_delay = (es[picture + 5] & 0x07) << 13 | es[picture + 6] << 5 | es[picture + 7] >> 3
+    if "leak_invalid" in descriptors and vbv_delay != 0xFFFF:
+        raise Refused("an STD_descriptor selects the vbv_delay method, which this model does not implement")
+    # vbv_buffer_size_value: 10 bits after bit_rate_value and its marker; the extension's 8 bits
+    # follow its bit_rate_extension and marker.
+    vbv_low = (es[head + 10] & 0x1F) << 5 | es[head + 11] >> 3
+    vbv_high = es[ext + 8]
+    # profile_and_level_indication follows the 4-bit extension_start_code_identifier.
+    indication = (es[ext + 4] & 0x0F) << 4 | es[ext + 5] >> 4
+    level = indication & 0x0F
+    if indication & 0x80 or level not in MPEG2_LEVELS:
+        raise Refused(f"H.262 profile_and_level_indication {indication:#04x} has no Table 8-13 entry")
+    rmax, vbv_max = MPEG2_LEVELS[level]
+    vbv = (vbv_high << 10 | vbv_low) * 16 * 1024
+    if not vbv:
+        raise Refused("H.262 vbv_buffer_size 0 sizes no EB")
+    # bit_rate_value's 18 bits after frame_rate_code, and the extension's 12-bit
+    # bit_rate_extension above them, in units of 400 bit/s.
+    bit_rate = es[head + 8] << 10 | es[head + 9] << 2 | es[head + 10] >> 6
+    bit_rate |= ((es[ext + 6] & 0x1F) << 7 | es[ext + 7] >> 1) << 18
+    rbx = rmax if level in (10, 8) else min(1.05 * bit_rate * 400, rmax)
+    overhead = (0.004 + 1 / 750) * max(rmax, 2_000_000)
+    return Params(
+        label=f"H.262 {MPEG2_LEVEL_NAMES[level]} level, vbv {vbv / 1e3:.0f} kbit",
+        # Rx = 1.2 * Rmax; MBS = BSmux + BSoh + VBV_max - vbv_buffer_size; EBS = vbv_buffer_size.
+        rx=1.2 * rmax,
+        mb=(overhead + vbv_max - vbv) / 8,
+        eb=vbv / 8,
+        rbx=rbx,
+    )
 
 
 def avc_params(sps: dict[str, str]) -> Params:
@@ -839,7 +894,7 @@ def stream_kind(stream: Stream) -> str | None:
         return "opus"
     if kind == 0x06 and tags & {"DVB_enhanced_AC3_descriptor", "enhanced_AC3_descriptor"}:
         return "eac3-dvb"
-    if kind in (0x01, 0x02, 0x10, 0x11, 0x1C, 0x20, 0x21, 0x42, 0xD1, 0xEA):
+    if kind in (0x01, 0x10, 0x11, 0x1C, 0x20, 0x21, 0x42, 0xD1, 0xEA):
         raise Refused(f"stream_type 0x{kind:02X} is audio/video this model has no parameters for")
     return None
 
@@ -849,6 +904,8 @@ def stream_params(kind: str, stream: Stream) -> tuple[Params, object]:
     es = stream.es
     if kind == "avc":
         return avc_params(stream.sps), None
+    if kind == "mpeg2-video":
+        return mpeg2_params(bytes(es), stream.descriptors), None
     if kind == "hevc":
         return hevc_params(stream.sps), None
     if kind == "teletext":
@@ -883,9 +940,16 @@ def stream_params(kind: str, stream: Stream) -> tuple[Params, object]:
 
 # NAL unit types that open a new access unit when they follow the last VCL NAL unit
 # of the previous one (H.264 7.4.1.2.3, H.265 7.4.2.4.4), and the VCL types.
-AU_OPENERS = {"avc": {6, 7, 8, 9, 14, 15, 16, 17, 18}, "hevc": {32, 33, 34, 35, 39, 41, 42, 43, 44, *range(48, 56)}}
-VCL = {"avc": set(range(1, 6)), "hevc": set(range(0, 32))}
-DELIMITER = {"avc": 9, "hevc": 35}
+# H.262 6.2.1 has no NAL units: a picture opens at its sequence, GOP or picture header after
+# the last slice of the one before, keyed by the start code value.
+AU_OPENERS = {
+    "avc": {6, 7, 8, 9, 14, 15, 16, 17, 18},
+    "hevc": {32, 33, 34, 35, 39, 41, 42, 43, 44, *range(48, 56)},
+    "mpeg2-video": {0xB3, 0xB8, 0x00},
+}
+VCL = {"avc": set(range(1, 6)), "hevc": set(range(0, 32)), "mpeg2-video": set(range(0x01, 0xB0))}
+# H.262 has no access unit delimiter, and needs none: its picture header is one.
+DELIMITER = {"avc": 9, "hevc": 35, "mpeg2-video": 0x00}
 
 
 def proportional_video_clock(stream: Stream, kind: str, count: int) -> list[tuple[int, Fraction, bool, tuple[int, Fraction] | None]]:
@@ -1016,7 +1080,7 @@ def video_units(stream: Stream, kind: str) -> list[AccessUnit]:
     after_vcl = True  # the first opener starts the first whole access unit
     pos = es.find(b"\x00\x00\x01")
     while 0 <= pos < len(es) - 3:
-        nal = (es[pos + 3] >> 1) & 0x3F if kind == "hevc" else es[pos + 3] & 0x1F
+        nal = {"hevc": (es[pos + 3] >> 1) & 0x3F, "mpeg2-video": es[pos + 3]}.get(kind, es[pos + 3] & 0x1F)
         delimited |= nal == DELIMITER[kind]
         if nal in AU_OPENERS[kind] and after_vcl:
             # The zero_byte ahead of the start code belongs to this NAL unit (H.264 B.1.1,

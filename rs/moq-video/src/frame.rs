@@ -881,10 +881,9 @@ impl I420 {
 
 	/// Convert BGRA to I420 in [`Color::infer`]'s color space for this size.
 	/// `stride` is the source row pitch in bytes (>= `width * 4`), so a padded
-	/// surface maps directly. Used by the screen-capture paths: Windows Desktop
-	/// Duplication (BGRA staging texture) and Linux PipeWire (BGRx/BGRA
-	/// shared-memory buffers).
-	#[cfg(any(target_os = "windows", all(target_os = "linux", feature = "pipewire")))]
+	/// surface maps directly. Used by PipeWire capture's BGRx/BGRA shared-memory
+	/// buffers.
+	#[cfg(all(target_os = "linux", feature = "pipewire"))]
 	pub(crate) fn from_bgra(bgra: &[u8], stride: u32, size: Size) -> Result<Self, Error> {
 		use yuv::bgra_to_yuv420;
 

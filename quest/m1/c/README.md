@@ -22,10 +22,10 @@ Decided:
   `moq_work_run`, the C form of `moq::set_executor`. Streams are repeated calls.
   This removes the trampolines and lock-order rules libmoq's single callback
   thread forced on hosts like OBS.
-- Errors, records, and names mirror the C++ package: calls return `moq_error *`
+- Errors and records mirror the C++ package: calls return `MoqError *`
   (NULL on success) with `moq_error_message()`, results come through
-  out-params, records are owned structs with `moq_<type>_free`, and names are
-  the uniffi names in snake case.
+  out-params, and records are owned structs with `moq_<type>_free`. Names
+  follow GLib: CamelCase types and snake_case functions.
 - The header is C11: errors and data enums are a `tag` plus an anonymous union
   (`err->protocol`). Infallible calls return their value directly, optional
   scalars are `{has_value, value}`, each async function has its own callback
@@ -65,7 +65,7 @@ requests internally and keeps its ABI.
 
 ## Required
 
-- [One C name per moq-ffi item](/quest/m1/c/name-clash.md) - rust2's C generator derives collision-free names, so `MoqAudioEncoder::finish` and `MoqAudioEncoderFinish` stop sharing `moq_audio_encoder_finish`
+- [One C name per moq-ffi item](/quest/m1/c/name-clash.md) - rust2's C generator names types in CamelCase and functions in snake_case, so the record `MoqAudioEncoderFinish` and the method `moq_audio_encoder_finish` never share a name
 - [moq-c package](/quest/m1/c/package.md) - the generated header ships as `moq-c` 0.8.0 with `moq::c`, pkg-config, and a release workflow
 - [C consumers](/quest/m1/c/consumers.md) - the C interop client and `doc/lib/c` samples move onto the generated API
 - [Async failure contract](/quest/m1/c/async-failure-contract.md) - a generated async call that fails early fires no callback, and one that started always delivers its terminal callback
