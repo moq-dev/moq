@@ -25,6 +25,7 @@ default-members = [
     "rs/moq-loc",
     "rs/moq-msf",
     "rs/moq-net",
+    "rs/moq-net-tests",
     "rs/moq-mux",
     "rs/moq-native",
     "rs/moq-nvenc",
