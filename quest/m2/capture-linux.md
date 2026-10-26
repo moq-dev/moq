@@ -22,9 +22,10 @@ unimplemented, because xdg-desktop-portal owns source selection:
 - **Display selection stays picker-driven.** On Wayland a bare `--display`
   goes to the portal and a non-X11 id is refused. Since #5089 a `Selection` replays
   its restore token across reopens within one process, but the token is never
-  exposed, so a new `moq` run always shows the picker. Either the token becomes
-  persistable (API plus CLI) so a previously-approved source is reused without
-  the picker, or this stays a documented limitation answered by the X11 path.
+  exposed, so a new `moq` run always shows the picker. Decided 2026-10-26
+  (maintainer): the token becomes persistable (API plus CLI), so a
+  previously-approved source is reused without the picker.
+  [Wayland studio sources](/quest/m3/studio/wayland-sources.md) consume it.
 - **System audio** needs a PipeWire monitor node.
   `moq_audio::capture::Source::System` exists but is macOS-only and returns
   `Unsupported` elsewhere. This is independent of the screencast portal.
