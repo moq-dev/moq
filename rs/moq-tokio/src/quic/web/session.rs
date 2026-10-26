@@ -554,8 +554,7 @@ impl Session {
 	///
 	/// There is no HTTP/3 exchange, so [`Self::request`] and [`Self::response`] both
 	/// return `None`. [`Self::protocol`] reports the ALPN negotiated by the QUIC
-	/// handshake, read from `conn` on demand — a connection that is still handshaking
-	/// (from `into_0rtt`, say) is fine, it just has no ALPN to report until it is done.
+	/// handshake, when one was negotiated.
 	pub fn raw(conn: crate::quic::driver::Connection) -> Self {
 		Self {
 			conn,
