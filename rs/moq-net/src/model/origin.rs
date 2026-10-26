@@ -5653,7 +5653,7 @@ impl Request {
 	}
 
 	/// Resolve a session-forwarded claim with its peer's already-routed broadcast.
-	#[cfg(any(feature = "async", test))]
+	#[cfg(feature = "async")]
 	pub(crate) fn accept(self, broadcast: impl Consume<broadcast::Consumer>) {
 		let broadcast = broadcast.consume();
 		let _ = ServeState::resolve(&self.home, &self.path, &self.producer, Ok(broadcast));

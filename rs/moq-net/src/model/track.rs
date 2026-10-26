@@ -19023,6 +19023,7 @@ mod test {
 	}
 
 	/// How many runs of skipped groups `subscriber` holds.
+	#[cfg(feature = "async")]
 	fn skipped_runs(subscriber: &Subscriber) -> usize {
 		let Inner::Plain(cursor) = &subscriber.inner else {
 			unreachable!()
