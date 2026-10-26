@@ -633,93 +633,6 @@ async fn wait_closed(conn: &crate::quic::driver::Connection) -> crate::quic::dri
 	timeout(Duration::from_secs(5), conn.closed()).await.unwrap()
 }
 
-#[tokio::test]
-async fn zero_rtt() {
-	let _guard = subscribe();
-	let endpoint = endpoint();
-
-	const MSG0: &[u8] = b"zero";
-	const MSG1: &[u8] = b"one";
-	let endpoint2 = endpoint.clone();
-	let accept_connection = move |expect_0rtt| {
-		let endpoint2 = endpoint2.clone();
-		async move {
-			let incoming = endpoint2.accept().await.unwrap().accept().unwrap();
-			let connection = incoming.into_0rtt().unwrap_or_else(|_| unreachable!());
-			let c = connection.clone();
-			tokio::spawn(async move {
-				while let Ok(mut x) = c.accept_uni().await {
-					assert_eq!(x.is_0rtt(), expect_0rtt);
-					let msg = x.read_to_end(usize::MAX).await.unwrap();
-					assert_eq!(msg, MSG0);
-				}
-			});
-			info!("sending 0.5-RTT");
-			let mut s = connection.open_uni(Default::default()).await.expect("open_uni");
-			s.write_all(MSG0).await.expect("write");
-			s.finish().unwrap();
-			connection.authenticated().await.expect("connected");
-			info!("sending 1-RTT");
-			let mut s = connection.open_uni(Default::default()).await.expect("open_uni");
-			s.write_all(MSG1).await.expect("write");
-			// The peer might close the connection before ACKing
-			let _ = s.finish();
-		}
-	};
-
-	tokio::spawn(accept_connection(false));
-
-	let connection = endpoint
-		.connect(endpoint.local_addr().unwrap(), "localhost")
-		.unwrap()
-		.into_0rtt()
-		.expect_err("0-RTT succeeded without keys")
-		.await
-		.expect("connect");
-
-	{
-		let mut stream = connection.accept_uni().await.expect("incoming streams");
-		let msg = stream.read_to_end(usize::MAX).await.expect("read_to_end");
-		assert_eq!(msg, MSG0);
-		// Read a 1-RTT message to ensure the handshake completes fully, allowing the server's
-		// NewSessionTicket frame to be received.
-		let mut stream = connection.accept_uni().await.expect("incoming streams");
-		let msg = stream.read_to_end(usize::MAX).await.expect("read_to_end");
-		assert_eq!(msg, MSG1);
-		drop(connection);
-	}
-
-	info!("initial connection complete");
-
-	let connection = endpoint
-		.connect(endpoint.local_addr().unwrap(), "localhost")
-		.unwrap()
-		.into_0rtt()
-		.unwrap_or_else(|_| panic!("missing 0-RTT keys"));
-
-	// Send something before the handshake can make progress, thereby forcing 0-RTT
-	let mut stream_0rtt = connection.open_uni(Default::default()).await.expect("0-RTT open uni");
-	info!("sending 0-RTT");
-	stream_0rtt.write_all(MSG0).await.expect("0-RTT write");
-	stream_0rtt.finish().unwrap();
-
-	tokio::spawn(accept_connection(true));
-
-	// Receive 0.5-RTT
-	let mut stream = connection.accept_uni().await.expect("incoming streams");
-	let msg = stream.read_to_end(usize::MAX).await.expect("read_to_end");
-	assert_eq!(msg, MSG0);
-	connection.authenticated().await.expect("connected");
-
-	// Ensure 0-RTT was accepted
-	stream_0rtt.stopped().await.expect("0-RTT stopped");
-
-	// Allow the connection to close
-	drop((stream_0rtt, stream, connection));
-
-	endpoint.wait_idle().await;
-}
-
 #[test]
 #[cfg_attr(
 	any(target_os = "solaris", target_os = "illumos"),
@@ -2237,8 +2150,7 @@ async fn unreachable_sends_are_loss_once_established() {
 	}
 }
 
-/// A handshake that fails on an unreachable peer still drains out of its endpoint while the
-/// application holds the connection, here a server's 0.5-RTT handle.
+/// A handshake that fails on an unreachable peer drains while the application holds its future.
 #[tokio::test(start_paused = true)]
 async fn unreachable_handshake_drains_while_held() {
 	let _guard = subscribe();
@@ -2262,19 +2174,18 @@ async fn unreachable_handshake_drains_while_held() {
 
 	let connecting = client.connect(server.local_addr().unwrap(), "localhost").unwrap();
 	let incoming = server.accept().await.unwrap();
-	let conn = incoming.accept().unwrap().into_0rtt().unwrap();
+	let connecting_server = incoming.accept().unwrap();
 	// Stop the client retrying, which would only start new handshakes.
 	client.close(0u32.into(), b"done");
 	drop(connecting);
 
-	let crate::quic::driver::ConnectionError::TransportError(err) = conn.closed().await else {
+	let crate::quic::driver::ConnectionError::TransportError(err) = connecting_server.await.unwrap_err() else {
 		panic!("expected a transport error");
 	};
 	assert_eq!(err.code, moq_quic::TransportErrorCode::NO_VIABLE_PATH);
 	timeout(Duration::from_secs(60), server.wait_idle())
 		.await
 		.expect("the failed connection never drained out of the endpoint");
-	drop(conn);
 }
 
 /// Whether [`UnreachableSocket`] is refusing sends, and a signal once it has refused one.

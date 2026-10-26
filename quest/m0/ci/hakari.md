@@ -31,7 +31,7 @@ feature set in another job is a miss, however warm the cache.
 - Unifying features means some packages build features they don't use. Measure
   whether that costs more CPU than the cache hits save; target, profile, and
   `RUSTFLAGS` differences still split keys, and Nix's flags are unified in
-  [crane-layers](/quest/m0/ci/crane-layers.md).
+  [crate2nix](/quest/m0/ci/crate2nix.md).
 - Start from the hit report in [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md),
   which lists the compilations that miss only because their features or flags
   differ.

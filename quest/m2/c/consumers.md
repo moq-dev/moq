@@ -17,4 +17,4 @@ build. Nothing in the repository calls the hand-written ABI any more.
 
 ## Required
 
-- [moq-c package](/quest/m1/c/package.md) - the package these consumers link
+- [moq-c package](/quest/m2/c/package.md) - the package these consumers link

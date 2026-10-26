@@ -18,12 +18,9 @@ AudioSpecificConfig and decodes the frames as raw, and
 `rs/moq-mux/src/container/ts/export.rs:3823` treats them as raw and adds
 ADTS headers. Whichever form a publisher sends, half the consumers break.
 
-Decision for the maintainer, with a recommendation:
-
-1. **ADTS (recommended).** Matches WebCodecs, the browser path most viewers
-   use. moq-audio parses ADTS headers and TS export passes the frames
-   through.
-2. Raw access units. JS and moqsrc must synthesize a description.
+Decided 2026-10-25 (maintainer): ADTS, matching WebCodecs, the browser
+path most viewers use. moq-audio parses ADTS headers and TS export passes
+the frames through.
 
 State the choice in `drafts/draft-lcurley-moq-hang.md` and add a test per
 consumer with a description-less fixture. Check which first-party
