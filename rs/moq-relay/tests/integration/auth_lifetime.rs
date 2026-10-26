@@ -179,6 +179,12 @@ async fn spawn_relay_with(
 
 	let mut config = moq_tokio::listen::Config::default();
 	config.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
+	// Opt in to lite-07 beside the defaults, so a client pinned to it can reach the AUTH stream.
+	config.version = moq_net::Versions::all()
+		.iter()
+		.copied()
+		.chain(["moq-lite-07-wip".parse().unwrap()])
+		.collect();
 	let server = config.init(Default::default()).expect("server init");
 	let mut server = server.listen().await.expect("listen");
 	let port = server.tcp_local_addr().expect("TCP listener is configured").port();
@@ -483,6 +489,74 @@ async fn forwards_the_setup_token() {
 			assert!(connect.remote.is_some_and(|addr| addr.ip().is_loopback()));
 			assert_eq!(connect.alpn.as_deref(), Some("qmux-01.moqt-16"));
 		}
+		relay.abort();
+	}
+}
+
+/// A configured token is the connection credential: on lite-07 it reaches the auth server
+/// as the SETUP token with nothing in the query, and on lite-06, which has no SETUP token,
+/// in the query as a `?jwt=`.
+#[tokio::test]
+async fn a_configured_token_is_the_connection_credential() {
+	let token = moq_auth::Token {
+		kind: moq_auth::Token::OUT_OF_BAND,
+		value: b"credential".to_vec(),
+	};
+	for (versions, setup, query) in [
+		(vec!["moq-lite-07-wip"], Some(token.clone()), None),
+		(vec!["moq-lite-06"], None, Some("jwt=credential")),
+	] {
+		let script = Script::new(grant(Duration::from_secs(3600)));
+		// Over SETUP, anonymous admission fails, so an established session proves the token
+		// was used. The scripted server cannot check a query token, so that case only asserts
+		// what it was sent.
+		if let Some(token) = &setup {
+			script.on_connect(Answer::Token(grant(Duration::from_secs(3600)), token.clone()));
+		}
+		let (port, relay) = spawn_relay(build_auth(script.spawn().await)).await;
+
+		let mut config = moq_tokio::connect::Config::default();
+		config.version = versions.iter().map(|version| version.parse().unwrap()).collect();
+		config.tokens = vec!["credential".parse().unwrap()];
+		let client = config.init(Default::default()).unwrap();
+		let url: url::Url = format!("tcp://127.0.0.1:{port}/room").parse().unwrap();
+		let session = tokio::time::timeout(
+			TIMEOUT,
+			client
+				.with_reconnect(false)
+				.with_subscriber(moq_tokio::origin::spawn())
+				.connect(url)
+				.established(),
+		)
+		.await
+		.expect("connect timeout")
+		.expect("the configured token was refused");
+		if setup.is_some() {
+			// Lite-07 answers the SETUP token over AUTH, so its grant proves admission.
+			let mut grant = session.auth().grant();
+			tokio::time::timeout(TIMEOUT, async {
+				while grant.peek().is_none() {
+					grant.changed().await.expect("the relay refused the configured token");
+				}
+			})
+			.await
+			.expect("grant timeout");
+		} else {
+			// Lite-06 has no AUTH answer and a client is live before admission, so give a
+			// refusal time to land.
+			assert!(
+				tokio::time::timeout(Duration::from_millis(500), session.closed())
+					.await
+					.is_err(),
+				"{versions:?}: the relay refused the configured token"
+			);
+		}
+
+		let seen = script.seen.lock().unwrap().clone();
+		let connect = seen.iter().find(|r| r.event == Event::Connect).expect("a connect");
+		assert_eq!(connect.token, setup, "{versions:?}");
+		assert_eq!(connect.query.as_deref(), query, "{versions:?}");
+		session.abort(moq_net::Error::Cancel);
 		relay.abort();
 	}
 }

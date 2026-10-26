@@ -52,4 +52,3 @@ coverage on `main` at `3ab6cbf81d`.
 
 - [Runner client bump](/quest/m2/release/runner-client-bump.md) - after the cut publishes #5083, the runner's Rust client stops stamping every object
 - [Interop audit](/quest/m2/audit-interop.md) - classifies the red cells these cases produce
-- [moq-transport passthrough](/quest/m1/ietf-extension/README.md) - Moxygen's moq-test conformance through moq-relay

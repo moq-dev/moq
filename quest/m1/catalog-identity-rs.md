@@ -50,17 +50,16 @@ minting a name where the identity changes and updating in place otherwise:
   when the codec string differs.
 - `moq-video` reopening onto another camera mode or backend
   (`source_resize_updates_the_published_rendition` asserts the rewrite).
-- `moq-c` re-declaring a config under the same name, and `moq-gst` reusing an
-  explicit pad name after caps renegotiation. [No reused track
-  names](/quest/m1/name-reuse.md) continues a re-created track past its
-  predecessor's groups; that continuation applies only when the decoder
-  identity is unchanged, and an identity change mints a new name here.
+- `moq-c` re-declaring a config under the same name.
 - TS AAC/MP2/AC-3 and FLV legacy audio fix the config from the first header
   and silently ignore a later change; refuse or mint instead. A PMT that
   changes a PID's stream type or descriptors already opens a new track.
 - `moq-audio`/`moq-ffi` `set_bitrate` should update the catalog's bitrate.
 
-FLV, fMP4, MKV, HLS import, and `moq-transcode` rungs already comply; keep
+FLV, fMP4, MKV, HLS import, `moq-transcode` rungs, and the `moq-gst` sink
+(since [moq-dev/moq#6780](https://github.com/moq-dev/moq/pull/6780), which
+keeps the live producer for caps that build the same importer and mints
+`<name>/<n>` otherwise) already comply; keep
 their tests. Update the tests that assert in-place identity rewrites
 (`tracks.rs`, `moq-video`, `moq-gst`, `moq-c`); a same-name resize, such as
 the transcode fixture's, is now allowed.
@@ -79,7 +78,5 @@ The branch checkpoint `origin/quest/m1/catalog-identity-rs` predates the
 decision rather than resuming it as is.
 
 ## Related
-
-- [No reused track names](/quest/m1/name-reuse.md) - continues a re-created track's groups when its identity is unchanged
 
 - [Broadcast archives](/quest/m1/archive/README.md) - an archived catalog describes every stored group by the identity contract

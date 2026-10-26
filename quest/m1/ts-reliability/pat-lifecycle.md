@@ -13,7 +13,9 @@ What the code does today:
 
 - A PAT naming another PMT PID for the program adds a reassembler but never
   drops the old one, and `program.pmtPid` keeps the first.
-- `Programs` ignores a program a later PAT adds, without a warning.
+- `Programs` ignores a program a later PAT adds, without a warning. Its
+  PIDs hold back the unclaimed-PID count for 0.5 s of program clock, then
+  count as unclaimed in `ts::stats`, since no program reads them.
 - Under `--program all`, the shared parser hands a later PAT that removes one
   program to every program's `Import`; the removed program's `handle_pat`
   errors, `Programs::decode` propagates it, and the whole multiplex ingest

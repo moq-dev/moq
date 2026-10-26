@@ -57,9 +57,6 @@ audit skips them:
 - `setup::Extensions::{auth, solicit, epoch}` and the relay's
   `[listen|connect.extensions]` TOML, as interop knobs documented as
   affecting moq-transport only.
-- `setup::Token` and `server::Handshake::token`:
-  [token in band](/quest/m1/auth/token-in-band.md) gives lite-07 a SETUP
-  token, which makes them shared.
 
 Rejected in planning:
 
@@ -78,10 +75,10 @@ Rejected in planning:
 ## Required
 
 - [Two broadcast resolutions](/quest/m1/api-audit/resolve.md) - Rust, JS, and the bindings resolve a broadcast with `request(path, epoch)` or `follow(path, epoch)`, and every racy two-step caller is gone
-- [JS origin publications](/quest/m1/api-audit/js-publication.md) - `@moq/net` origins hand out a `Publication` that announces, so `Prepared` and standalone broadcasts lose methods that always throw
 - [Binding publications](/quest/m1/api-audit/binding-publication.md) - moq-ffi, the C ABI, and every wrapper hand out a publication handle that announces, replacing the private adapters
 - [Bindings read gaps and ends](/quest/m1/api-audit/decode-read-bindings.md) - moq-ffi and every wrapper surface `Gap` and `End` instead of discarding them
 - [Session-only items stay private](/quest/m1/api-audit/model-private.md) - model items only the built-in sessions use are private
+- [Encoded consumers read gaps and ends](/quest/m1/api-audit/encoded-read-bindings.md) - moq-ffi, moq-c, and every wrapper read encoded media with the tagged-record shape the decoded consumers use
 - [One lifecycle vocabulary](/quest/m1/api-audit/lifecycle.md) - finish, abort, closed, and close mean one thing on every handle, and Rust and JS observers fire alike
 - [moq-net names say one thing](/quest/m1/api-audit/net-names.md) - demand says `wanted`, colliding stats and transport names are renamed, and Rust and JS info lookups mirror
 - [Request handlers are named requests](/quest/m1/api-audit/requests.md) - `dynamic()` and `Dynamic` become `requests()` and `Requests` at every layer

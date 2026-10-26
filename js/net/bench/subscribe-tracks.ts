@@ -16,8 +16,9 @@ for (const broadcasts of [1, 16, 128]) {
 	for (const subscribers of [1, 4, 16]) {
 		const origin = new Producer();
 		const sources = Array.from({ length: broadcasts }, (_, i) => {
-			const source = origin.createBroadcast(Path.from(`room/${i}`));
-			source.announce();
+			const sourcePublication = origin.createBroadcast(Path.from(`room/${i}`));
+			const source = sourcePublication.broadcast;
+			sourcePublication.announce();
 			source.createTrack("initial");
 			return source;
 		});
