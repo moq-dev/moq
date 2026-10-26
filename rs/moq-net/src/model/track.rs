@@ -2975,7 +2975,8 @@ impl Producer {
 	/// with it and their writers fail. A reader following the track's routes resumes from
 	/// another one where this copy stopped. Use [`Self::finish`] or [`Self::finish_at`]
 	/// when the end is known.
-	pub fn close(self) -> Result<()> {
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn close(self) -> Result<()> {
 		let mut state = self.modify()?;
 		state.sealed = true;
 		let open = state.tear_down(Error::Stream(StreamError::Session(SessionError::Cancel)));
@@ -3017,7 +3018,7 @@ impl Producer {
 	/// boundary it falls just before (a peer may name only the boundary first). Any other
 	/// second end is [`Error::ProtocolViolation`].
 	///
-	/// On a [received](Self::received) copy, groups below the end may still be in flight:
+	/// On a copy a session received, groups below the end may still be in flight:
 	/// readers wait for a missing one until a grace passes, the subscription's max delay
 	/// or one second without one, before ending at the boundary.
 	pub fn finish_at(&mut self, end: Position) -> Result<()> {
@@ -3051,7 +3052,7 @@ impl Producer {
 	/// still promised. Pass `None` to clear it, for demand at the live edge:
 	/// its floor is unknown until the feed declares one.
 	///
-	/// Resolves a start left pending by [`Request::request_start`].
+	/// Resolves a start a subscriber session left pending.
 	pub fn start_at(&mut self, sequence: impl Into<Option<u64>>) -> Result<()> {
 		self.modify()?.set_start(sequence.into(), false);
 		Ok(())
@@ -3063,7 +3064,8 @@ impl Producer {
 	/// Its readers' relative and time anchors, other than [`Range::live`](crate::track::Range::live)
 	/// and [`Range::oldest`](crate::track::Range::oldest), fail with [`Error::Unsupported`]
 	/// unless its session's wire lets it resolve them, since it holds only part of the track.
-	pub fn received(&self) {
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn received(&self) {
 		if let Ok(mut state) = self.modify() {
 			state.received = true;
 		}
@@ -7424,7 +7426,7 @@ impl Ordered {
 /// request resolve only at [`Self::commit`], with everything written by then. Dropping it
 /// uncommitted rejects the request with [`Error::Dropped`].
 #[must_use = "a staged track is rejected unless committed"]
-pub struct Staged {
+pub(crate) struct Staged {
 	// Taken only by `commit`.
 	producer: Option<Producer>,
 	// The request's fetch claim, held until the track is published like an unanswered
@@ -7434,7 +7436,7 @@ pub struct Staged {
 
 impl Staged {
 	/// Publish the track: every waiting subscriber resolves now, with what was written.
-	pub fn commit(mut self) -> Producer {
+	pub(crate) fn commit(mut self) -> Producer {
 		let producer = self.producer.take().expect("taken only by commit");
 		if let Ok(mut state) = producer.state.write() {
 			state.staged = false;
@@ -7472,8 +7474,7 @@ impl Drop for Staged {
 /// Yielded by [`poll_requested_track`](crate::broadcast::Dynamic::poll_requested_track),
 /// or created up front with [`broadcast::Producer::reserve_track`](crate::broadcast::Producer::reserve_track).
 /// Subscribers block until the request is
-/// resolved: call [`accept`](Self::accept) to serve it with a [`Producer`] (or
-/// [`stage`](Self::stage) to write content before they see it), or
+/// resolved: call [`accept`](Self::accept) to serve it with a [`Producer`], or
 /// [`reject`](Self::reject) to fail them. Dropping it without either rejects with
 /// [`Error::Dropped`].
 ///
@@ -7559,7 +7560,8 @@ impl Request {
 	/// as they arrive, but a relay serving the track waits for the resolved start before
 	/// declaring its own. Applied atomically with [`Self::accept`], before any reader can
 	/// see the track.
-	pub fn request_start(mut self, floor: impl Into<Option<u64>>) -> Self {
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn request_start(mut self, floor: impl Into<Option<u64>>) -> Self {
 		self.requested_start = Some(floor.into());
 		self
 	}
@@ -7641,8 +7643,6 @@ impl Request {
 	/// (`None` for the defaults). If the track was already aborted, the returned
 	/// [`Producer`] is inert: writes fail with the abort error, as if it had been
 	/// aborted immediately after accepting.
-	///
-	/// The same as [`Self::stage`] followed by [`Staged::commit`].
 	pub fn accept(self, info: impl Into<Option<Info>>) -> Producer {
 		self.stage(info).commit()
 	}
@@ -7653,7 +7653,7 @@ impl Request {
 	/// For a relay that already holds groups of the track: write them, then
 	/// [`Staged::commit`]. Dropping the [`Staged`] uncommitted rejects the request with
 	/// [`Error::Dropped`].
-	pub fn stage(self, info: impl Into<Option<Info>>) -> Staged {
+	pub(crate) fn stage(self, info: impl Into<Option<Info>>) -> Staged {
 		let info = info.into().unwrap_or_default();
 		// A closed state means the track was aborted under us. Mirror `reject` and
 		// tolerate it: the Producer we hand back simply can't write.

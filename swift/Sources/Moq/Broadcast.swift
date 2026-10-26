@@ -95,7 +95,9 @@ public final class BroadcastProducer: Sendable {
 
     /// End the broadcast for good: retract it and serve no new tracks.
     ///
-    /// Tracks already subscribed carry on to their own end. Closing again is a no-op.
+    /// Tracks still open on it end with `Unroutable`, which readers take as the publisher
+    /// leaving, and their later calls throw `MoqError.Closed`; finish a track first to end it
+    /// cleanly. Closing again is a no-op.
     public func close() throws {
         try ffi.close()
     }
