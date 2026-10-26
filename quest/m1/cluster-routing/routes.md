@@ -136,10 +136,13 @@ The handoff contract below, decided 2026-10-16, settles claim freshness:
   message already in flight on a live session, which delivers the retraction
   next (`collected_incarnation_returns_only_while_its_retraction_is_in_flight`).
   `cluster.id` stops naming a routing identity.
-- Decided 2026-10-14: a connection's own declared identity stays bare. An
-  identity a connection forwards for another origin is subject-qualified:
+- Decided 2026-10-14: every identity a connection sends is subject-qualified:
   filed under `hash(subject, id)` when the connection's publish grant is
-  scoped, and bare when it is unscoped (publish `**` at the root). The hash
+  scoped, and bare when it is unscoped (publish `**` at the root). Its own
+  identity is no exception (2026-10-26): the bare exemption relied on the
+  dropped proof, so an unproven own identity could otherwise claim a
+  victim's. Extend the fixture below to a forger declaring the victim's id as
+  its own, and drop the reference model's `proved` exemption. The hash
   has its own domain, so it cannot collide with a key-derived identity, and is
   collision-resistant at the identity width, since the forwarder picks `id`
   and could otherwise grind another subject's key. The relay that files it

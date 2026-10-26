@@ -47,13 +47,13 @@ Decided with the maintainer, 2026-10-13:
   two identities a third relay cannot recognize as one. Keep administrative
   identity separate; `cluster.id` is removed. Switching between paths
   resumes only across a matching explicit epoch.
-- A connection's own declared identity stays bare everywhere. Identities a
-  connection forwards on behalf of others are filed under
-  `hash(subject, id)`, keyed by the grant's credential subject, when its
-  publish grant is scoped, and stay bare when it is unscoped. The key is
+- Every identity a connection sends, its own and those it forwards, is filed
+  under `hash(subject, id)`, keyed by the grant's credential subject, when
+  its publish grant is scoped, and stays bare when it is unscoped. The key is
   deterministic, so two uplinks of one subject share it across token refresh,
   and a forger only damages routes inside its own scope. (Decided 2026-10-14;
-  subject decided 2026-10-15.)
+  subject decided 2026-10-15; own identities included 2026-10-26, since they
+  are no longer proven.)
 - Matching explicit epochs authorize resume. Epochless changes retain
   Restart and fresh resolution; neither node identity nor a healthy
   alternate grants permission to splice content.
