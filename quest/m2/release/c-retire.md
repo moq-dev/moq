@@ -15,7 +15,9 @@ served it are deleted once the generated `moq-c` publishes. The generated
   generated package is the first `moq-c` users install.
 - `rs/moq-c/native-libs/` serves the generated package too, and
   `cpp/moq/cmake/moq-ffi.cmake` serves both C++ and C. Move them to a neutral
-  home shared by both packages before deleting the crate.
+  home shared by both packages before deleting the crate, update every
+  reader of either path (`rg 'moq-c/native-libs|moq-ffi\.cmake'`), and check
+  that the installed C and C++ CMake configs still link the native libraries.
 - The code-free `rs/libmoq` stub left under the old name is
   [Retire the libmoq stub](/quest/m2/release/libmoq-retire.md)'s, separately.
 
