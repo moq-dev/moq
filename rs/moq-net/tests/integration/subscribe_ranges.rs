@@ -627,3 +627,73 @@ async fn draft22_cold_widening_finishes_every_filled_group() {
 		}
 	}
 }
+
+/// A pending refusal is local to the new reader even before it is awaited.
+#[moq_clock::test]
+async fn unresolved_time_reader_never_changes_sibling_demand() {
+	for version in ["moq-transport-17", "moq-transport-18", "moq-transport-22"] {
+		for relay in [false, true] {
+			let mut fixture = range_fixture_version(version, relay).await;
+			let mut healthy = subscribe(&fixture.remote, Subscription::default()).await;
+			assert_eq!(next(&mut healthy).await, Some(5));
+			healthy.update(Subscription::default().with_range(4..8)).unwrap();
+			moq_clock::timeout(
+				TIMEOUT,
+				kio::wait(|waiter| {
+					assert!(healthy.poll_recv_group(waiter).is_pending());
+					loop {
+						if fixture
+							.track
+							.subscription()
+							.is_some_and(|s| s.ranges == [Range::groups(4..8)])
+						{
+							return std::task::Poll::Ready(());
+						}
+						if fixture.track.poll_subscription_changed(waiter).is_pending() {
+							return std::task::Poll::Pending;
+						}
+					}
+				}),
+			)
+			.await
+			.unwrap();
+
+			let track = fixture.remote.track("quiet").unwrap();
+			// Pin the public track instance through a query before creating the pending reader.
+			let query = track.query();
+			let track = query.track();
+
+			let mut refused = Some(track.subscribe(Subscription::default().with_ranges([Range {
+				start: moq_net::track::Anchor::Absolute(0),
+				end: Some(moq_net::track::Anchor::Time(Timestamp::from_millis(10000).unwrap())),
+			}])));
+			for sequence in 6..8 {
+				if sequence == 7 {
+					assert!(matches!(
+						refused.take().unwrap().await,
+						Err(moq_net::Error::Unsupported)
+					));
+				}
+				let mut group = fixture.track.create_group(moq_net::group::Info { sequence }).unwrap();
+				group
+					.write_frame(
+						Timestamp::from_millis(sequence * 1000).unwrap(),
+						sequence.to_be_bytes().as_slice(),
+					)
+					.unwrap();
+				group.finish().unwrap();
+				let mut got = moq_clock::timeout(TIMEOUT, healthy.recv_group())
+					.await
+					.unwrap()
+					.unwrap_or_else(|err| panic!("{version} relay={relay}: pending refusal aborted sibling: {err:?}"))
+					.unwrap();
+				assert_eq!(got.sequence, sequence);
+				assert_eq!(
+					got.read_frame().await.unwrap().unwrap().payload,
+					sequence.to_be_bytes().as_slice()
+				);
+				assert!(got.read_frame().await.unwrap().is_none());
+			}
+		}
+	}
+}
