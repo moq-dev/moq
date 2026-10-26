@@ -1182,8 +1182,9 @@ int main()
 			auto active = conn->audio;
 			CHECK(active != nullptr);
 			obs_source_audio audio = {};
-			moq::expected<std::optional<moq::AudioFrame>> misaligned(moq::AudioFrame{1, {0, 0, 0}});
-			CHECK(!moq_source_on_audio_frame(ctx, conn, active, misaligned, audio));
+			moq::expected<std::optional<moq::AudioRead>> misaligned(
+				moq::AudioRead::kFrame{moq::AudioFrame{1, {0, 0, 0}}});
+			CHECK(!moq_source_on_audio_read(ctx, conn, active, misaligned, audio));
 			CHECK(!conn->audio);
 		}
 		destroySource(source);

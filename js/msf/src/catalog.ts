@@ -1,3 +1,4 @@
+import * as Json from "@moq/json";
 import type * as Moq from "@moq/net";
 import * as z from "@zod/mini";
 
@@ -150,58 +151,52 @@ export function encode(catalog: Catalog): Uint8Array {
 
 /** Parse and validate a catalog from its JSON wire representation. Throws if invalid. */
 export function decode(raw: Uint8Array): Catalog {
-	const str = new TextDecoder().decode(raw);
-	try {
-		const root = JSON.parse(str);
-		const wire = WireCatalogSchema.parse(root);
+	const root = new Json.Stream.Decoder().decode(raw);
+	const wire = WireCatalogSchema.parse(root);
 
-		// Every root member MSF itself does not define belongs to the extension, kept verbatim.
-		// Null prototype for the same reason as `encode`, and so a `__proto__` member of an
-		// untrusted catalog cannot become an inherited property of this map.
-		const ext: Record<string, unknown> = Object.create(null);
-		for (const [name, value] of Object.entries(root as Record<string, unknown>)) {
-			if (!RESERVED_ROOT.includes(name)) ext[name] = value;
-		}
-
-		// id -> init data entry, built once so resolution is linear in the number
-		// of tracks rather than tracks x entries. A repeated id is refused: readers
-		// that kept different entries would disagree on a track's init bytes.
-		const byId = new Map<string, z.infer<typeof InitDataSchema>>();
-		for (const entry of wire.initDataList ?? []) {
-			if (byId.has(entry.id)) throw new Error(`MSF catalog has duplicate initData id "${entry.id}"`);
-			byId.set(entry.id, entry);
-		}
-
-		const tracks = (wire.tracks ?? []).map(({ initRef, ...track }) => {
-			track.isLive ??= false;
-
-			// Resolve draft-01 initRef into inline initData so callers never see the
-			// indirection. Inline initData (draft-00) is kept as-is, but a catalog that
-			// carries both forms must not disagree. Every refusal mirrors `moq-msf`, so a
-			// malformed reference never looks like a track without init data.
-			if (initRef !== undefined) {
-				const entry = byId.get(initRef);
-				if (entry === undefined) {
-					throw new Error(`MSF track "${track.name}" references missing initData "${initRef}"`);
-				}
-				if (entry.type !== "inline") {
-					throw new Error(
-						`MSF track "${track.name}" references initData "${initRef}" with unsupported type "${entry.type}"`,
-					);
-				}
-				if (track.initData !== undefined && track.initData !== entry.data) {
-					throw new Error(`MSF track "${track.name}" carries conflicting initData and initRef "${initRef}"`);
-				}
-				track.initData = entry.data;
-			}
-			return track;
-		});
-
-		return Object.keys(ext).length > 0 ? { tracks, ext } : { tracks };
-	} catch (error) {
-		console.warn("invalid MSF catalog", str);
-		throw error;
+	// Every root member MSF itself does not define belongs to the extension, kept verbatim.
+	// Null prototype for the same reason as `encode`, and so a `__proto__` member of an
+	// untrusted catalog cannot become an inherited property of this map.
+	const ext: Record<string, unknown> = Object.create(null);
+	for (const [name, value] of Object.entries(root as Record<string, unknown>)) {
+		if (!RESERVED_ROOT.includes(name)) ext[name] = value;
 	}
+
+	// id -> init data entry, built once so resolution is linear in the number
+	// of tracks rather than tracks x entries. A repeated id is refused: readers
+	// that kept different entries would disagree on a track's init bytes.
+	const byId = new Map<string, z.infer<typeof InitDataSchema>>();
+	for (const entry of wire.initDataList ?? []) {
+		if (byId.has(entry.id)) throw new Error(`MSF catalog has duplicate initData id "${entry.id}"`);
+		byId.set(entry.id, entry);
+	}
+
+	const tracks = (wire.tracks ?? []).map(({ initRef, ...track }) => {
+		track.isLive ??= false;
+
+		// Resolve draft-01 initRef into inline initData so callers never see the
+		// indirection. Inline initData (draft-00) is kept as-is, but a catalog that
+		// carries both forms must not disagree. Every refusal mirrors `moq-msf`, so a
+		// malformed reference never looks like a track without init data.
+		if (initRef !== undefined) {
+			const entry = byId.get(initRef);
+			if (entry === undefined) {
+				throw new Error(`MSF track "${track.name}" references missing initData "${initRef}"`);
+			}
+			if (entry.type !== "inline") {
+				throw new Error(
+					`MSF track "${track.name}" references initData "${initRef}" with unsupported type "${entry.type}"`,
+				);
+			}
+			if (track.initData !== undefined && track.initData !== entry.data) {
+				throw new Error(`MSF track "${track.name}" carries conflicting initData and initRef "${initRef}"`);
+			}
+			track.initData = entry.data;
+		}
+		return track;
+	});
+
+	return Object.keys(ext).length > 0 ? { tracks, ext } : { tracks };
 }
 
 /** Read and decode the next catalog frame from a track, or undefined if the track ended. */

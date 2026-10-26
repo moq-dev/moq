@@ -2825,18 +2825,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
 
 [[package]]
-name = "fixed-resample"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4d1870ecdc0221202c6fb0c8205a6a38878231f13fc9d389c1d9f2b9d2906bd3"
-dependencies = [
- "audioadapter",
- "audioadapter-buffers",
- "ringbuf",
- "rubato",
-]
-
-[[package]]
 name = "flagset"
 version = "0.4.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5041,7 +5029,6 @@ dependencies = [
  "cpal",
  "criterion",
  "dispatch2",
- "fixed-resample",
  "hang",
  "kio 0.6.2",
  "moq-clock",
@@ -5394,6 +5381,7 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
+ "tracing-test",
  "url",
 ]
 
@@ -5504,8 +5492,6 @@ dependencies = [
  "libc",
  "loom",
  "moq-clock",
- "moq-json",
- "moq-net",
  "moq-pattern 0.1.2",
  "num_enum",
  "rand 0.10.3",
@@ -5527,6 +5513,18 @@ version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
  "moq-net",
+]
+
+[[package]]
+name = "moq-net-tests"
+version = "0.0.0"
+dependencies = [
+ "futures",
+ "moq-clock",
+ "moq-json",
+ "moq-net",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

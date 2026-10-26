@@ -3074,7 +3074,7 @@ impl Producer {
 
 	/// Let this received copy's readers resolve relative and time anchors, for a wire that
 	/// reports the live edge and media time and asks for every group the budget allows.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn anchored(&self) {
 		if let Ok(mut state) = self.modify() {
 			state.anchored = true;
@@ -7105,6 +7105,26 @@ impl Subscriber {
 		}
 	}
 
+	/// Whether `accounted` holds every group from `from` on that this subscriber's ranges
+	/// and [`Self::with_range`] bounds name, once every range has a resolved end: `false`
+	/// while one stays open, counts back from a group not seen yet, or ends at a time not
+	/// settled yet.
+	///
+	/// A publisher that accounts for each group it serves or drops learns from it that a
+	/// bounded subscription has nothing more to deliver.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn covered(&mut self, from: u64, accounted: &rangemap::RangeSet<u64>) -> bool {
+		let bounds = self.bounds();
+		let from = from.max(bounds.start);
+		match &mut self.inner {
+			Inner::Plain(cursor) => {
+				cursor.sync();
+				cursor.filter.window.covered_by(from, bounds.end, accounted)
+			}
+			Inner::Resume(resume, _) => resume.covered(from, bounds.end, accounted),
+		}
+	}
+
 	/// This subscriber's own ranges, by index, as resolved here: `None` for one empty or
 	/// still waiting, and for every range of a front's reader.
 	pub(super) fn resolved_ranges(&mut self) -> Vec<Option<Resolved>> {
@@ -9916,8 +9936,8 @@ mod test {
 				.unwrap(),
 		];
 		for group in &mut held {
-			assert!(group.read_frame().now_or_never().unwrap().unwrap().is_some());
-			assert!(group.read_frame().now_or_never().unwrap().unwrap().is_none());
+			assert!(matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(Some(_)))));
+			assert!(matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(None))));
 		}
 		assert_eq!(expired(&mut held), [false; 2], "the newest group");
 
@@ -9974,8 +9994,8 @@ mod test {
 				.unwrap(),
 		];
 		for group in &mut held {
-			assert!(group.read_frame().now_or_never().unwrap().unwrap().is_some());
-			assert!(group.read_frame().now_or_never().unwrap().unwrap().is_none());
+			assert!(matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(Some(_)))));
+			assert!(matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(None))));
 		}
 
 		let failed = producer.append_group().unwrap();
@@ -10011,8 +10031,8 @@ mod test {
 
 		append_at(&mut producer, 0);
 		let mut held = subscriber.assert_group();
-		assert!(held.read_frame().now_or_never().unwrap().unwrap().is_some());
-		assert!(held.read_frame().now_or_never().unwrap().unwrap().is_none());
+		assert!(matches!(held.poll_read_frame(&waiter), Poll::Ready(Ok(Some(_)))));
+		assert!(matches!(held.poll_read_frame(&waiter), Poll::Ready(Ok(None))));
 
 		pool.step(Duration::from_secs(1));
 		append_at(&mut producer, 0); // the successor
@@ -19023,6 +19043,7 @@ mod test {
 	}
 
 	/// How many runs of skipped groups `subscriber` holds.
+	#[cfg(feature = "async")]
 	fn skipped_runs(subscriber: &Subscriber) -> usize {
 		let Inner::Plain(cursor) = &subscriber.inner else {
 			unreachable!()

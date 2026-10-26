@@ -108,3 +108,10 @@ studio passes over it for an encoder that reads each frame back to the CPU
 (the opt-in `vaapi` or `openh264` features), which the Output panel counts.
 Frames the encoder cannot keep up with are dropped rather than delaying the
 stream.
+
+Sources make the opposite trip. A frame already on the GPU is drawn where it
+lies: PipeWire camera and VA-API decode DMA-BUFs on Linux, given a Vulkan
+driver that imports them, and NV12 capture and VideoToolbox decode surfaces on
+macOS. Every other source, every source on Windows or on a GPU that cannot
+import, and every still image delivers its frames from the CPU, which the
+compositor uploads.

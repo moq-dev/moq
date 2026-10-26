@@ -121,9 +121,7 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [Unify dependency features](/quest/m0/ci/hakari.md) - a cargo-hakari workspace-hack so every job compiles each dependency alike and mbx hits across jobs
 - [Replay full-run failures against the selected gate](/quest/m0/ci/select-audit.md) - every dependency edge `just ci` misses is found and fixed with a test
 - [First shared FFI release](/quest/m0/ci/nightly-ffi-reuse.md) - condition: the backport merges and the next `moq-ffi-v*` tag runs `Release FFI`; verify the wrappers
-- [Loom tests compile](/quest/m0/ci/loom-build.md) - `just rs loom` builds on main and a `--cfg loom` break fails its PR
 - [just check without user namespaces](/quest/m0/ci/check-without-userns.md) - a host that refuses `unshare` reports the flake module as not run instead of cancelling other lanes
-- [Thin generic test executors](/quest/m0/ci/thin-executors.md) - `moq_clock::sim::run` and the tokio test executor compile once instead of once per test
 - [Fewer BTreeMap instantiations](/quest/m0/ci/btree-keys.md) - moq-net shares BTreeMap key and value types, kept only if its CPU time drops
 - [Measure moving unit tests out](/quest/m0/ci/test-layout.md) - report what moq-net would save by not compiling its library twice for unit tests
 - [Turn off axum's tower-log](/quest/m0/ci/tower-log.md) - tracing stops expanding its `log` feature in every crate, measured on the moq-net edit

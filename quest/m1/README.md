@@ -106,8 +106,7 @@ cut ships a relay that compiles no C. It follows moq-quic's crypto reshape,
 whose surface its QUIC adapter plugs into.
 
 Added 2026-10-25 (maintainer): the studio's
-GPU encode and
-[source import](/quest/m1/studio-gpu/import.md) quests are in m1 so
+GPU encode and source import quests are in m1 so
 moq-video's GPU encode and import API changes, mainly encoders taking a GPU
 surface and zero-copy texture import, land before the cut.
 
@@ -115,6 +114,7 @@ surface and zero-copy texture import, land before the cut.
 
 - [Resume checked against a model](/quest/m1/resume-model-test.md) - a randomized test checks every resumed reader against a one-track reference model in Rust and JS, and passes before the cut
 - [Address groups by timestamp](/quest/m1/time-addressing/README.md) - group start timestamps replace sequence numbers in the moq-net API and lite-07 wire, while old subscribers, old publishers, and published JS clients keep working
+- [A group ends at its highest PTS](/quest/m1/group-end-pts.md) - a B-frame tail no longer understates a group's end, in Rust and JS
 - [Release audit findings](/quest/m1/release-audit/README.md) - resolve newly identified resource, parser, playback, and interoperability risks before the cut
 - [Pre-cut audit findings](/quest/m1/cut-audit/README.md) - fix the crashes, hostile-input costs, and correctness bugs the 2026-10-24 audit of main found
 - [Cancelled moq-transport requests stop](/quest/m1/ietf-request-cancel.md) - a cancelled request releases its state even when the peer withholds credit
@@ -137,7 +137,6 @@ surface and zero-copy texture import, land before the cut.
 - [More tests under load](/quest/m1/test-flakes-2/README.md) - the second round of load-only failures, one quest per flake, fixed at the cause
 - [Broadcast lifecycle](/quest/m1/broadcast-lifecycle/README.md) - broadcasts are online or offline with no finished state in moq-net, finished-broadcast retention is a fixed moq-mux policy, and each linger timer has one meaning
 - [A smaller, safer API than release](/quest/m1/api-audit/README.md) - every surface added since release has a consumer or is gone, overlapping operations are collapsed, names mirror across Rust, JS, and the bindings, and every break says how to migrate
-- [Studio on the GPU](/quest/m1/studio-gpu/README.md) - moq-video encoders take a GPU surface and its renderer reports zero-copy import, proven through moq-studio on NVENC, VideoToolbox, Media Foundation, DMA-BUF, and Metal
 - [moq-transport 18 and 22 only](/quest/m1/ietf-drop/README.md) - drafts 14-17 and 19-21 are deleted from Rust, JS, tests, interop lanes, and docs, removing the legacy control-stream adapter and its request limit
 - [moq-quic's API improves on quinn's](/quest/m1/quic-api/README.md) - moq-quic and both QUIC drivers ship one mirrored API: `send::`/`recv::` namespaces, one error per direction, consuming terminal operations, plain configs, no quinn baggage
 - [Pure-Rust crypto for moq-relay](/quest/m1/pure-crypto/README.md) - moq-relay's release builds use graviola and RustCrypto and compile no C
@@ -162,7 +161,6 @@ surface and zero-copy texture import, land before the cut.
 - [Calibrate the paired nightly benchmarks](/quest/m1/bench-ci.md) - A/A and deliberately slowed Nightly runs set the paired comparison's threshold, so its regression alerts can be trusted
 - [HLS takeover leak](/quest/m1/hls-takeover-leak.md) - a replaced instance's recording cursor never yields the replacement's media, and ends or fails instead of stalling
 - [HLS and DASH segment conformance](/quest/m1/hls-conformance.md) - nightly ffprobe checks that advertised timing, sync flags, and bytes match the media served
-- [HLS import log redaction](/quest/m1/hls-log-redaction.md) - no HLS import log line carries an unredacted playlist URL
 - [App-limited BBR3 estimate ages](/quest/m1/bbr-app-limited.md) - an app-limited BBR3 estimate falls within seconds after the path drops
 - [Seeded BBR3 in tests](/quest/m1/bbr-test-seed.md) - unseeded `Bbr3Config::default()` tests replay the same randomness
 - [Aborted epoch reads keep their cause](/quest/m1/epoch-abort-cause.md) - an aborted read through an epoch route ends with its own error, not NotFound
