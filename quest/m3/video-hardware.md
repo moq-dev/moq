@@ -21,6 +21,13 @@ by [VA-API external images](/quest/m2/vaapi-vulkan-import.md).
 - **Windows Media Foundation capture**: on-demand open and close, so the
   camera LED is off when nobody is watching, and NV12 delivery from MJPEG and
   YUY2 cameras.
+- **The studio's program on a hardware encoder**: run the ignored
+  `render::export::dx12::tests::exports_an_nv12_texture` (the Platform runner
+  has only WARP, which has no Direct3D11 video device) and
+  `render::export::dx12::tests::media_foundation_encodes_the_export_in_place`
+  on a Windows GPU with a Media Foundation H.264 encoder, and `moq-studio`
+  publishing on that machine and a Mac, confirming the Output panel reports
+  no readback.
 - **A live camera run per platform**: capture needs device permission that a
   headless or agent process cannot grant itself.
 - **OBS follows its grant on a shaped uplink**: stream from a real OBS build
