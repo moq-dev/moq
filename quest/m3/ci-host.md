@@ -70,8 +70,20 @@ Remaining work, once [the host is rented](/quest/m3/ci-host-rented.md):
   with their own work directories and labels, and a deploy recipe.
 - Size `NEXTEST_TEST_THREADS` and the container's CPU and memory to the host
   rather than the home box's 24 threads.
-- Register the runners, point each repository's queue runner variable at
-  them, and compare a day of entry times against the numbers above.
+- Make mbx collection safe for concurrent jobs before the runners share a
+  store. Each moq job runs `mbx gc` before it builds
+  (`.github/actions/rust-cache`), and under disk pressure that sweep can evict
+  generated source trees another job's next build reads. Verify with
+  overlapping jobs under cache pressure. Safe collection need not serialize
+  jobs.
+- Give kixelated/quest and kixelated/rust2 a gate that runs on the rented
+  runner. Their Check workflows hardcode hosted runners (`ubuntu-latest`,
+  `ubuntu-24.04-arm`), and quest's has no `merge_group` trigger, so a runner
+  variable alone leaves them off the host. Route only trusted gate runs
+  (queue or `quest land`) to it, never PR pushes. That is a PR in each of
+  those repositories.
+- Register the runners, point moq's `vars.MOQ_QUEUE_RUNNER` at its runner,
+  and compare a day of entry times against the numbers above.
 - Retire the home `moq-queue` runner and its container definition.
 - Update `infra/README.md` and the CI epic's runner decision.
 
