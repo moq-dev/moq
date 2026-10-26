@@ -67,3 +67,16 @@ test("window headers, records, and ops refuse a repeated key", () => {
 	group.decode(encode('{"offset":0,"records":[]}'));
 	expect(() => group.decode(encode('{"pop":0,"pop":0}'))).toThrow(DuplicateKey);
 });
+
+// A JSON string must encode Unicode scalar values, including object keys.
+test("parse refuses malformed Unicode and accepts scalar-value boundaries", () => {
+	for (const text of ['"\\ud800"', '"\\udfff"', '{"\\ud800":0}', '{"x":["\\udfff"]}', "\ufeff{}"]) {
+		expect(() => parse(encode(text)), text).toThrow();
+	}
+	for (const bytes of [[0x80], [0xc0, 0xaf], [0xed, 0xa0, 0x80], [0xf4, 0x90, 0x80, 0x80], [0xe2, 0x82]]) {
+		expect(() => parse(new Uint8Array([0x22, ...bytes, 0x22]))).toThrow();
+	}
+	for (const text of ['"\\ud800\\udc00"', '"\\udbff\\udfff"', '"\\ufffd"', '{"é":"🌍"}', '"\ufeff"']) {
+		expect(parse(encode(text))).toEqual(JSON.parse(text));
+	}
+});
