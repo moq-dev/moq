@@ -23,9 +23,7 @@ and portable. moq-cli gains a `release` feature that turns on `capture`,
 and every distribution (the release binaries, Nix, Docker, winget, Homebrew)
 builds with it. `doc/bin/cli.md` tells source builders to pass
 `--features release`. This replaces the earlier plan to turn `capture` and
-`play` on by default. Check moq-cli's current defaults (`cluster-lan`, `quic`,
-`websocket`, `nvidia`, `s3`, `gcs`, `azure`) against the same rule and move
-any that fail it into `release`.
+`play` on by default.
 
 The individual sub-features stay, so a self-compiler can still pick a subset.
 `vaapi` and `nvidia` load their driver libraries at runtime (dlopen), so they
