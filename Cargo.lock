@@ -5394,7 +5394,7 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
- "tracing-subscriber",
+ "tracing-test",
  "url",
 ]
 

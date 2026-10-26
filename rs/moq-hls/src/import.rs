@@ -2542,15 +2542,8 @@ mod tests {
 	}
 
 	#[tokio::test]
+	#[tracing_test::traced_test]
 	async fn discovery_logs_redact_playlist_credentials() {
-		let log_path = temp_dir().join("discovery.log");
-		let logs = tracing_subscriber::fmt()
-			.with_ansi(false)
-			.without_time()
-			.with_max_level(tracing::Level::DEBUG)
-			.with_writer(std::fs::File::create(&log_path).unwrap())
-			.finish();
-		let _logging = tracing::subscriber::set_default(logs);
 		let audio = signed(&Url::parse("https://example.com/audio.m3u8").unwrap());
 		let master = format!(
 			"#EXTM3U\n\
@@ -2561,14 +2554,10 @@ mod tests {
 		let hls = discover(&master).await;
 		assert_eq!(hls.audio.as_ref().unwrap().playlist, audio);
 
-		let printed = std::fs::read_to_string(log_path).unwrap();
-		assert!(printed.contains("selected master playlist renditions"), "{printed}");
-		assert!(
-			printed.contains("audio=\"https://example.com/audio.m3u8\""),
-			"{printed}"
-		);
+		assert!(logs_contain("selected master playlist renditions"));
+		assert!(logs_contain("audio=\"https://example.com/audio.m3u8\""));
 		for credential in ["alice", "hunter2", "jwt", "s3cret", "f4ag"] {
-			assert!(!printed.contains(credential), "log leaked {credential}: {printed}");
+			assert!(!logs_contain(credential), "log leaked {credential}");
 		}
 	}
 
