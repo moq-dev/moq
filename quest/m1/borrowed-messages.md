@@ -23,9 +23,10 @@ Decided with the maintainer on 2026-10-25:
   lookup walks `&str` segments; and inline storage makes paths up to 22 bytes free.
 - **m1, before the cut,** because message types are public moq-net API. The break rides
   the same release as lifetime-free `Path`, with one MIGRATE entry per affected crate.
-- **Codec traits:** `Decode` gains the buffer's lifetime
-  (`fn decode(r: &mut Decoder<'a>, ..) -> Result<Self>` for `Self: 'a`), so a message
-  can borrow from the wire. moq-dev/moq#6826's `Decoder::str` is the starting point.
+- **Codec traits:** `Decode` gains the buffer's lifetime as `Decode<'a, V>`:
+  `decode(r: &mut Decoder<'a>, ..)` and `decode_slice(buf: &'a [u8], ..)` return a
+  `Self` that borrows from the wire. moq-dev/moq#6826's `Decoder::str` is the
+  starting point.
 - **Where it pays:**
   - a subscribe to an unknown broadcast or an unroutable request, which costs 3 to
     5 allocations today;
