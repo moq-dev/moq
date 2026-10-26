@@ -31,7 +31,6 @@ the studio counts uploads per source next to its readback stats.
 
 ## Related
 
-- [Zero-copy program encode](/quest/m1/studio-gpu/encode.md) - the other half of keeping the studio's pictures on the GPU
 - [Validate PipeWire DMA-BUFs into the Vulkan renderer](/quest/m2/2819-moq-video-carry-pipewire-dma-bufs-safely-into-the-vulkan.md) - the hardware proof of the Linux import path
 - [Direct3D11 render import](/quest/m2/render-d3d11.md) - the follow-up that brings Windows sources onto the GPU
 - [VAAPI encode and decode](/quest/m2/video-vaapi.md) - decoded DMA-BUF surfaces the renderer imports

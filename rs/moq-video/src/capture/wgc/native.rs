@@ -203,7 +203,7 @@ impl Capture {
 		if size.Width < 2 || size.Height < 2 {
 			return Err(Error::SourceUnavailable("WGC item has no capturable area".into()));
 		}
-		let device = d3d11::create_device()?;
+		let device = d3d11::create_device(None)?;
 		let dxgi: IDXGIDevice = device.cast().map_err(|e| error("query capture DXGI device", e))?;
 		let winrt: IDirect3DDevice = unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi) }
 			.and_then(|device| device.cast())
