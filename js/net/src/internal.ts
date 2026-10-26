@@ -405,6 +405,11 @@ export const hooks: {
 	demandPriority: (demand: Demand) => number;
 	/** Seed a received track from the publisher's reported edge; assigned by `track.ts`. */
 	reportedLargest: (producer: Producer, largest: Position | undefined) => void;
+	/**
+	 * Seed a received track from the publisher's reported group alone, whose frame is unknown,
+	 * so it names no object; assigned by `track.ts`.
+	 */
+	reportedGroup: (producer: Producer, group: number) => void;
 	/** Snapshot the latest group sequence for wire positioning; assigned by `track.ts`. */
 	latestSequence: (subscriber: Subscriber) => number | undefined;
 	/**
@@ -585,6 +590,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	reportedLargest: () => {
+		throw new Error("track.ts not loaded");
+	},
+	reportedGroup: () => {
 		throw new Error("track.ts not loaded");
 	},
 	latestSequence: () => {

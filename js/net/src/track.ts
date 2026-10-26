@@ -777,6 +777,7 @@ export class Producer {
 		};
 		hooks.cachedLargest = (producer) => producer.#cachedLargest();
 		hooks.reportedLargest = (producer, largest) => producer.#advanceObject(largest);
+		hooks.reportedGroup = (producer, group) => producer.#advanceLargest({ group, frame: 0 });
 		objectLargest = (producer) => producer.#objectLargest;
 		cachedHolds = (producer, sequence) => {
 			const entry = producer.#cached.get(sequence);

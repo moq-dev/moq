@@ -4683,6 +4683,39 @@ test("draft-22: reported Largest survives absent headers, older cache entries, a
 	}
 });
 
+test("draft-22: Next Object behind an upstream group report still delivers its first object", async () => {
+	const fx = fixture();
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	// What an IETF SUBSCRIBE_OK leaves on a cold copy: the group, but no frame it can name.
+	hooks.reportedGroup(track, 0);
+	const { client, ok } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 0n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "nextObject" },
+			fill: { filter: { kind: "relative", groups: 1n }, rangeFilters: false },
+		}),
+	);
+	const group = track.appendGroup();
+	try {
+		expect(ok.largest).toBeUndefined();
+		expect(group.sequence).toBe(0);
+		group.writeFrame({ payload: new TextEncoder().encode("first"), timestamp: Timestamp.now() });
+		group.close();
+		const stream = await nextUni(fx.uni);
+		if (!stream) throw new Error("missing first received object");
+		expect((await readGroup(stream)).objects).toEqual([{ id: 0, payload: "first" }]);
+	} finally {
+		client.close();
+		group.close();
+		track.close();
+		fx.close();
+	}
+});
+
 test("draft-22: Next Object on an empty group still delivers its first object", async () => {
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
