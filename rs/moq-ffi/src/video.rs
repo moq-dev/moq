@@ -363,8 +363,9 @@ struct VideoProducer {
 	size: moq_video::Size,
 	/// The manual ceiling [`MoqVideoProducer::set_bitrate`] last applied, which caps
 	/// every grant. Behind the encoder's lock, so the follower never reads an old,
-	/// higher one and retunes over a newer cap.
-	ceiling: moq_net::bandwidth::Rate,
+	/// higher one and retunes over a newer cap. A channel, so a rung above this
+	/// rendition wakes when it moves and when this rendition ends.
+	ceiling: kio::Producer<moq_net::bandwidth::Rate>,
 	/// The track priority this rendition was published at; a higher rung takes one below.
 	priority: i8,
 }
@@ -453,10 +454,11 @@ impl VideoProducer {
 			return block_on(encoder.set_bitrate(bitrate));
 		}
 
+		let ceiling = *self.ceiling.read();
 		let mut config = self.config.clone();
-		config.bitrate = Some(self.ceiling);
+		config.bitrate = Some(ceiling);
 		let mut encoder = block_on(moq_video::encode::Sink::open(&config))?;
-		let retuned = match bitrate < self.ceiling {
+		let retuned = match bitrate < ceiling {
 			true => block_on(encoder.set_bitrate(bitrate)),
 			false => Ok(()),
 		};
@@ -472,8 +474,13 @@ impl VideoProducer {
 
 	fn finish(self, finished: &crate::producer::Finished) -> Result<(), MoqError> {
 		let Self {
-			encoder, mut producer, ..
+			encoder,
+			mut producer,
+			ceiling,
+			..
 		} = self;
+		// Ended before the drain, so a rung above stops counting on this rendition now.
+		drop(ceiling);
 		// Drain the codec into the track before ending it, so the last frames land
 		// in it rather than being dropped with the encoder.
 		let drained = match encoder {
@@ -599,7 +606,10 @@ impl MoqVideoProducer {
 				block_on(encoder.set_bitrate(bitrate))?;
 			}
 			// Under the same lock as the retune, so the follower sees both or neither.
-			producer.ceiling = bitrate;
+			let Ok(mut ceiling) = producer.ceiling.write() else {
+				unreachable!("only dropping the producer closes its ceiling")
+			};
+			*ceiling = bitrate;
 		}
 		if let Some(reservation) = self.reservation.lock().unwrap().as_ref() {
 			reservation.update(bitrate);
@@ -685,8 +695,8 @@ impl MoqVideoProducer {
 				let guard = lower.inner.lock().map_err(|_| panic_error())?;
 				let below = guard.as_ref().ok_or(MoqError::Closed)?;
 				Some((
-					Arc::downgrade(&lower.inner),
-					below.ceiling,
+					below.ceiling.consume(),
+					*below.ceiling.read(),
 					below.priority.saturating_sub(1),
 				))
 			}
@@ -745,7 +755,7 @@ impl MoqVideoProducer {
 			format: input.format,
 			size: config.size(),
 			config,
-			ceiling,
+			ceiling: kio::Producer::new(ceiling),
 			priority,
 		})));
 		let applied = Arc::new(AtomicU64::new(ceiling.as_bps()));
@@ -801,9 +811,9 @@ fn video_ceiling(
 /// What the follow thread reads and retunes.
 struct Followed {
 	inner: Arc<std::sync::Mutex<Option<VideoProducer>>>,
-	/// The next lower rendition, whose ceiling sets this one's band. Weak, so a rung never
-	/// keeps the rendition below it publishing.
-	lower: Option<std::sync::Weak<std::sync::Mutex<Option<VideoProducer>>>>,
+	/// The next lower rendition's ceiling, which sets this one's band. A consumer, so a rung
+	/// never keeps the rendition below it publishing.
+	lower: Option<kio::Consumer<moq_net::bandwidth::Rate>>,
 	consumer: moq_net::bandwidth::Consumer,
 	ceiling: moq_net::bandwidth::Rate,
 	applied: Arc<AtomicU64>,
@@ -852,13 +862,18 @@ fn video_policy(ceiling: moq_net::bandwidth::Rate, lower: Option<moq_net::bandwi
 }
 
 /// The lower rendition's current ceiling, or `None` once it finished or was dropped,
-/// which leaves this one nothing to fall back to, so it never disables.
+/// which leaves this one nothing to fall back to, so it never disables. Arms `waiter`
+/// for either change.
 fn lower_ceiling(
-	lower: &Option<std::sync::Weak<std::sync::Mutex<Option<VideoProducer>>>>,
+	lower: &Option<kio::Consumer<moq_net::bandwidth::Rate>>,
+	waiter: &kio::Waiter,
 ) -> Option<moq_net::bandwidth::Rate> {
-	let lower = lower.as_ref()?.upgrade()?;
-	let guard = lower.lock().ok()?;
-	guard.as_ref().map(|producer| producer.ceiling)
+	let lower = lower.as_ref()?;
+	match lower.poll(waiter, |_| std::task::Poll::<()>::Pending) {
+		std::task::Poll::Pending => Some(*lower.read()),
+		// The closure never completes, so this is the channel closing.
+		std::task::Poll::Ready(_) => None,
+	}
 }
 
 /// Feed each grant through the same policy moq-video uses, and retune the live
@@ -872,31 +887,33 @@ async fn follow_reservation(followed: Followed) {
 		ceiling,
 		applied,
 	} = followed;
-	let mut follower = moq_mux::rate::Follower::new(consumer, video_policy(ceiling, lower_ceiling(&lower)));
+	let noop = kio::Waiter::noop();
+	let mut follower = moq_mux::rate::Follower::new(consumer, video_policy(ceiling, lower_ceiling(&lower, &noop)));
 	loop {
 		// Both ceilings are read on every wake, before the follower filters a grant against
-		// them: `set_bitrate` (here or on the lower rendition) moves a reservation after
-		// moving its ceiling, which wakes this poll. The lower one is read first, so no
-		// two encoder locks are ever held at once.
+		// them. This one's `set_bitrate` moves its reservation after moving its ceiling,
+		// which wakes this poll; the lower one's ceiling wakes it directly, wherever that
+		// rendition reserves. The lower one is read first, so no two encoder locks are
+		// ever held at once.
 		let next = kio::wait(|waiter| {
-			let below = lower_ceiling(&lower);
+			let below = lower_ceiling(&lower, waiter);
 			let guard = inner.lock().unwrap();
 			let Some(producer) = guard.as_ref() else {
 				return std::task::Poll::Ready(None);
 			};
-			follower.set_policy(video_policy(producer.ceiling, below));
+			follower.set_policy(video_policy(*producer.ceiling.read(), below));
 			follower.poll_next(waiter).map(Some)
 		})
 		.await;
 		let Some(Ok(target)) = next else {
 			return;
 		};
-		let below = lower_ceiling(&lower);
+		let below = lower_ceiling(&lower, &noop);
 		let mut guard = inner.lock().unwrap();
 		let Some(producer) = guard.as_mut() else {
 			return;
 		};
-		let policy = video_policy(producer.ceiling, below);
+		let policy = video_policy(*producer.ceiling.read(), below);
 		match retune(&mut follower, policy, target, |target| producer.apply(target)) {
 			Ok(Some(moq_mux::rate::Target::Enabled(bitrate))) => applied.store(bitrate.as_bps(), Ordering::SeqCst),
 			Ok(Some(moq_mux::rate::Target::Disabled)) => applied.store(0, Ordering::SeqCst),
@@ -1633,6 +1650,45 @@ mod rung_tests {
 			},
 		);
 		assert!(matches!(ungranted, Err(MoqError::Video { .. })));
+	}
+
+	/// A rung's follower wakes on its lower rendition's own ceiling, whether that moves or
+	/// ends, so it notices even when the lower rendition reserves nothing it shares.
+	#[tokio::test]
+	async fn a_rung_wakes_when_its_unreserved_lower_moves_or_ends() {
+		struct Flag(AtomicBool);
+		impl std::task::Wake for Flag {
+			fn wake(self: Arc<Self>) {
+				self.0.store(true, Ordering::SeqCst);
+			}
+		}
+
+		let broadcast = crate::producer::MoqBroadcastProducer::new().unwrap();
+		let catalog = crate::media::MoqMediaCatalogProducer::new(broadcast.clone()).unwrap();
+		let low = MoqVideoProducer::new(
+			&catalog,
+			MoqVideoProducerOptions {
+				input: input(),
+				output: output(500_000),
+				track: Some("low".into()),
+				bandwidth: None,
+				lower: None,
+			},
+		)
+		.unwrap();
+		let lower = Some(low.inner.lock().unwrap().as_ref().unwrap().ceiling.consume());
+
+		let flag = Arc::new(Flag(AtomicBool::new(false)));
+		let waiter = kio::Waiter::new(std::task::Waker::from(flag.clone()));
+		assert_eq!(lower_ceiling(&lower, &waiter), Some(Rate::from_kbps(500)));
+
+		low.set_bitrate(400_000).unwrap();
+		assert!(flag.0.swap(false, Ordering::SeqCst), "a moved ceiling wakes the rung");
+		assert_eq!(lower_ceiling(&lower, &waiter), Some(Rate::from_kbps(400)));
+
+		low.finish().unwrap();
+		assert!(flag.0.load(Ordering::SeqCst), "an ended lower rendition wakes the rung");
+		assert_eq!(lower_ceiling(&lower, &waiter), None);
 	}
 
 	/// A disabled rung advertises itself disabled, drops the frames written to it, and

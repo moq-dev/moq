@@ -254,16 +254,19 @@ fn video_policy(ceiling: moq_net::bandwidth::Rate, lower: Option<moq_net::bandwi
 	policy
 }
 
-/// The next lower rendition, whose ceiling sets a rung's band. Weak, so a rung never
-/// keeps the rendition below it publishing.
-type Lower = std::sync::Weak<std::sync::Mutex<Option<VideoEncoder>>>;
-
 /// The lower rendition's current ceiling, or `None` once it finished, which leaves
-/// this one nothing to fall back to, so it never disables.
-fn lower_ceiling(lower: &Option<Lower>) -> Option<moq_net::bandwidth::Rate> {
-	let lower = lower.as_ref()?.upgrade()?;
-	let guard = lower.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-	guard.as_ref().map(|encoder| encoder.ceiling)
+/// this one nothing to fall back to, so it never disables. Arms `waiter` for either
+/// change.
+fn lower_ceiling(
+	lower: &Option<kio::Consumer<moq_net::bandwidth::Rate>>,
+	waiter: &kio::Waiter,
+) -> Option<moq_net::bandwidth::Rate> {
+	let lower = lower.as_ref()?;
+	match lower.poll(waiter, |_| std::task::Poll::<()>::Pending) {
+		std::task::Poll::Pending => Some(*lower.read()),
+		// The closure never completes, so this is the channel closing.
+		std::task::Poll::Ready(_) => None,
+	}
 }
 
 /// Feed each grant through the same policy moq-video uses, and retune the live
@@ -271,35 +274,37 @@ fn lower_ceiling(lower: &Option<Lower>) -> Option<moq_net::bandwidth::Rate> {
 /// [`BitrateUnsupported`](moq_video::Error::BitrateUnsupported).
 async fn follow_reservation(
 	inner: Shared<VideoEncoder>,
-	lower: Option<Lower>,
+	lower: Option<kio::Consumer<moq_net::bandwidth::Rate>>,
 	consumer: moq_net::bandwidth::Consumer,
 	ceiling: moq_net::bandwidth::Rate,
 ) {
-	let mut follower = moq_mux::rate::Follower::new(consumer, video_policy(ceiling, lower_ceiling(&lower)));
+	let noop = kio::Waiter::noop();
+	let mut follower = moq_mux::rate::Follower::new(consumer, video_policy(ceiling, lower_ceiling(&lower, &noop)));
 	loop {
 		// Both ceilings are read on every wake, before the follower filters a grant against
-		// them: `moq_encode_video_bitrate` (here or on the lower rendition) moves a
-		// reservation after moving its ceiling, which wakes this poll. The lower one is
-		// read first, so no two encoder locks are ever held at once.
+		// them. This one's `moq_encode_video_bitrate` moves its reservation after moving its
+		// ceiling, which wakes this poll; the lower one's ceiling wakes it directly, wherever
+		// that rendition reserves. The lower one is read first, so no two encoder locks are
+		// ever held at once.
 		let next = kio::wait(|waiter| {
-			let below = lower_ceiling(&lower);
+			let below = lower_ceiling(&lower, waiter);
 			let guard = inner.lock();
 			let Some(producer) = guard.as_ref() else {
 				return std::task::Poll::Ready(None);
 			};
-			follower.set_policy(video_policy(producer.ceiling, below));
+			follower.set_policy(video_policy(*producer.ceiling.read(), below));
 			follower.poll_next(waiter).map(Some)
 		})
 		.await;
 		let Some(Ok(target)) = next else {
 			return;
 		};
-		let below = lower_ceiling(&lower);
+		let below = lower_ceiling(&lower, &noop);
 		let mut guard = inner.lock();
 		let Some(producer) = guard.as_mut() else {
 			return;
 		};
-		let policy = video_policy(producer.ceiling, below);
+		let policy = video_policy(*producer.ceiling.read(), below);
 		if retune(&mut follower, policy, target, |target| producer.apply(target)).is_err() {
 			return;
 		}
@@ -360,8 +365,9 @@ pub(crate) struct VideoEncoder {
 	config: moq_video::encode::Config,
 	/// The track priority this rendition was published at; a higher rung takes one below.
 	priority: i8,
-	/// The next lower rendition, set when this one is a simulcast rung.
-	lower: Option<Lower>,
+	/// The next lower rendition's ceiling, set when this one is a simulcast rung. A
+	/// consumer, so a rung never keeps the rendition below it publishing.
+	lower: Option<kio::Consumer<moq_net::bandwidth::Rate>>,
 	format: moq_video_pixel_format,
 	/// The encoded resolution, from the publish config. Frames carry only pixels,
 	/// so this is what says how to read them.
@@ -371,8 +377,9 @@ pub(crate) struct VideoEncoder {
 	followed: Option<crate::ffi::Background>,
 	/// The manual ceiling [`moq_encode_video_bitrate`] last applied, which caps every
 	/// grant. Behind the encoder's lock, so the follower never reads an old, higher
-	/// one and retunes over a newer cap.
-	ceiling: moq_net::bandwidth::Rate,
+	/// one and retunes over a newer cap. A channel, so a rung above this rendition
+	/// wakes when it moves and when this rendition ends.
+	pub(crate) ceiling: kio::Producer<moq_net::bandwidth::Rate>,
 	finished: crate::publish::Finished,
 }
 
@@ -511,7 +518,11 @@ impl VideoEncoder {
 		if let Some(encoder) = self.encoder.as_mut() {
 			block_on(encoder.set_bitrate(bitrate))?;
 		}
-		self.ceiling = bitrate;
+		let Ok(mut ceiling) = self.ceiling.write() else {
+			unreachable!("only dropping the encoder closes its ceiling")
+		};
+		*ceiling = bitrate;
+		drop(ceiling);
 		if let Some(reservation) = &self.reservation {
 			reservation.update(bitrate);
 		}
@@ -544,10 +555,11 @@ impl VideoEncoder {
 			return block_on(encoder.set_bitrate(bitrate));
 		}
 
+		let ceiling = *self.ceiling.read();
 		let mut config = self.config.clone();
-		config.bitrate = Some(self.ceiling);
+		config.bitrate = Some(ceiling);
 		let mut encoder = block_on(moq_video::encode::Sink::open(&config))?;
-		let retuned = match bitrate < self.ceiling {
+		let retuned = match bitrate < ceiling {
 			true => block_on(encoder.set_bitrate(bitrate)),
 			false => Ok(()),
 		};
@@ -567,8 +579,11 @@ impl VideoEncoder {
 			mut producer,
 			followed,
 			finished,
+			ceiling,
 			..
 		} = self;
+		// Ended before the drain, so a rung above stops counting on this rendition now.
+		drop(ceiling);
 		// Drain the codec into the track before ending it, so the last frames land
 		// in it rather than being dropped with the encoder.
 		let drained = match encoder {
@@ -610,16 +625,15 @@ impl Video {
 				let lower = self.producer(lower)?;
 				let guard = lower.lock();
 				let below = guard.as_ref().ok_or(Error::MediaNotFound)?;
-				if below.ceiling >= ceiling {
+				let below_ceiling = *below.ceiling.read();
+				if below_ceiling >= ceiling {
 					return Err(Error::InvalidConfig(format!(
 						"the lower rendition's {} bps is not below this one's {} bps",
-						below.ceiling.as_bps(),
+						below_ceiling.as_bps(),
 						ceiling.as_bps()
 					)));
 				}
-				let priority = below.priority.saturating_sub(1);
-				drop(guard);
-				(Some(lower.downgrade()), priority)
+				(Some(below.ceiling.consume()), below.priority.saturating_sub(1))
 			}
 			None => (None, hang::catalog::PRIORITY.video),
 		};
@@ -648,7 +662,7 @@ impl Video {
 			reservation: None,
 			follow: None,
 			followed: None,
-			ceiling,
+			ceiling: kio::Producer::new(ceiling),
 			finished,
 		}))
 	}
@@ -659,9 +673,10 @@ impl Video {
 		let (reservation, ceiling, lower) = {
 			let mut guard = shared.lock();
 			let encoder = guard.as_mut().ok_or(Error::MediaNotFound)?;
-			let reservation = Arc::new(allocator.reserve(&encoder.producer.demand(), encoder.ceiling));
+			let ceiling = *encoder.ceiling.read();
+			let reservation = Arc::new(allocator.reserve(&encoder.producer.demand(), ceiling));
 			encoder.reservation = Some(reservation.clone());
-			(reservation, encoder.ceiling, encoder.lower.clone())
+			(reservation, ceiling, encoder.lower.clone())
 		};
 		let (close, closed) = oneshot::channel();
 		shared.lock().as_mut().ok_or(Error::MediaNotFound)?.follow = Some(close);
@@ -1265,7 +1280,7 @@ mod tests {
 			reservation: None,
 			follow: None,
 			followed: Some(followed),
-			ceiling: moq_net::bandwidth::Rate::from_mbps(1),
+			ceiling: kio::Producer::new(moq_net::bandwidth::Rate::from_mbps(1)),
 			finished: Default::default(),
 		};
 

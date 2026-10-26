@@ -5799,6 +5799,72 @@ fn encode_video_rung_needs_a_grant_and_a_band() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
+/// A rung watches its lower rendition's own ceiling, which wakes it when that moves or
+/// ends, so it notices even when the lower rendition reserves nothing it shares.
+#[test]
+fn encode_video_ceiling_wakes_a_rung_above() {
+	struct Flag(std::sync::atomic::AtomicBool);
+	impl std::task::Wake for Flag {
+		fn wake(self: std::sync::Arc<Self>) {
+			self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+		}
+	}
+
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"rung");
+	let input = moq_video_encoder_input {
+		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
+		width: 320,
+		height: 240,
+		framerate: moq_video_frame_rate {
+			numerator: 30,
+			denominator: 1,
+		},
+	};
+	let output = moq_video_encoder_output {
+		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
+		bitrate: 500_000,
+		gop: 0,
+		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
+		encoder: std::ptr::null(),
+		encoder_len: 0,
+	};
+	// No allocator, so nothing it does moves a reservation a rung would share.
+	let low = id(unsafe { moq_encode_video(broadcast, &input, &output, std::ptr::null()) });
+	let ceiling = State::lock()
+		.video
+		.producer(Id::try_from(low).unwrap())
+		.unwrap()
+		.lock()
+		.as_ref()
+		.unwrap()
+		.ceiling
+		.consume();
+
+	let flag = std::sync::Arc::new(Flag(std::sync::atomic::AtomicBool::new(false)));
+	let waiter = kio::Waiter::new(std::task::Waker::from(flag.clone()));
+	let arm = || ceiling.poll(&waiter, |_| std::task::Poll::<()>::Pending).is_pending();
+	assert!(arm());
+
+	assert_eq!(moq_encode_video_bitrate(low, 400_000), 0);
+	assert!(
+		flag.0.swap(false, std::sync::atomic::Ordering::SeqCst),
+		"a moved ceiling wakes the rung"
+	);
+	assert_eq!(*ceiling.read(), moq_net::bandwidth::Rate::from_bps(400_000));
+	assert!(arm());
+
+	assert_eq!(moq_encode_video_finish(low), 0);
+	assert!(
+		flag.0.load(std::sync::atomic::Ordering::SeqCst),
+		"an ended rendition wakes the rung"
+	);
+	assert!(!arm(), "the ceiling closes with the rendition");
+
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
 /// Listen on an ephemeral loopback port with a generated certificate.
 fn listen(cb: &Callback) -> (u32, String, String) {
 	let bind = "127.0.0.1:0";
