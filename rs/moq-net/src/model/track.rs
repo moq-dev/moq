@@ -7324,12 +7324,6 @@ impl Subscriber {
 		self
 	}
 
-	/// Whether group `sequence` was already handed out, or is below what this reader expects.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub(crate) fn handed_out(&self, sequence: u64) -> bool {
-		self.delivered.contains(sequence)
-	}
-
 	/// [`Self::with_range`] on a reader held in place.
 	pub(crate) fn set_range(&mut self, groups: impl RangeBounds<u64>) {
 		let (start, end) = super::subscription::sequence_bounds(groups);

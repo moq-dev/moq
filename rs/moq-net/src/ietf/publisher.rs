@@ -4969,6 +4969,14 @@ struct FillTail {
 	fetch: track::Fetching,
 }
 
+/// The stream serving a subscription's highest group, as it was opened.
+struct LiveGroup {
+	sequence: u64,
+	slice: GroupSlice,
+	/// Set once a narrowing gave the stream up before its FIN.
+	retired: Arc<AtomicBool>,
+}
+
 /// Serves a track's groups, one machine per group. One at a time waits for stream credit;
 /// the rest wait in the cache, so what a peer withholding credit makes this hold is bounded
 /// by the credit it grants, not by how long it withholds it.
@@ -4988,6 +4996,8 @@ struct TrackServe {
 	/// budget skips whatever went stale.
 	opening: Option<GroupServe>,
 	tail: Option<Box<FillTail>>,
+	/// The stream serving the highest group, where a widening fill's tail resumes.
+	live: Option<LiveGroup>,
 	/// The groups with a stream, serving or awaiting the acknowledgement of their FIN.
 	children: kio::Tasks<GroupServe>,
 	/// The subscriber priority, which every group stream follows while it is open.
@@ -5060,6 +5070,7 @@ impl TrackServe {
 			timescale,
 			opening: None,
 			tail: None,
+			live: None,
 			children: kio::Tasks::new(),
 			priority,
 			ranking,
@@ -5088,7 +5099,6 @@ impl TrackServe {
 	fn update_range(&mut self, update: &super::request_stream::Update) -> Result<Option<SubscriptionFill>, Error> {
 		let cache = self.track.consume();
 		let edge = live_edge(&cache);
-		let previous = self.requested;
 		if let Some(filter) = update.filter {
 			self.filter = filter;
 			// Unfiltered on an update widens back to zero. A fresh live join here
@@ -5115,25 +5125,34 @@ impl TrackServe {
 				max_delay: self.track.subscription().max_delay,
 				..Default::default()
 			};
-			// A live stream already handed out under an open-ended slice of this group still
-			// carries its rest, which a narrowing would have retired; a second one would repeat it.
-			let slice = previous.slice(next.group);
-			let streaming = self.track.handed_out(next.group)
-				&& previous.start.is_none_or(|start| start.group <= next.group)
-				&& previous.end.is_none_or(|end| end.group >= next.group)
-				&& slice.skip <= next.object
-				&& slice.until.is_none();
-			self.tail = (!streaming
-				&& range.end.is_none_or(|end| {
-					end.group > next.group
-						|| (end.group == next.group && end.object.is_none_or(|object| object >= next.object))
-				}))
-			.then(|| {
-				Box::new(FillTail {
-					start: next,
-					fetch: cache.fetch_group(next.group, options).into_inner(),
-				})
+			// A stream still serving this group from the fill's edge keeps what it covers, so
+			// the tail resumes where that stream stops and nothing goes out twice.
+			let live = self.live.as_ref().filter(|live| {
+				live.sequence == next.group
+					&& live.slice.skip <= next.object
+					&& !live.retired.load(Ordering::Relaxed)
+					&& !range.excludes(live.sequence, live.slice)
 			});
+			let start = match live {
+				Some(live) => live.slice.until.map(|until| Location {
+					group: next.group,
+					object: next.object.max(until),
+				}),
+				None => Some(next),
+			};
+			self.tail = start
+				.filter(|start| {
+					range.end.is_none_or(|end| {
+						end.group > start.group
+							|| (end.group == start.group && end.object.is_none_or(|object| object >= start.object))
+					})
+				})
+				.map(|start| {
+					Box::new(FillTail {
+						start,
+						fetch: cache.fetch_group(start.group, options).into_inner(),
+					})
+				});
 			// The tail has its own cursor: fetched groups are not live arrival entries.
 			range.start = Some(Location {
 				group: next.group.saturating_add(1),
@@ -5246,7 +5265,7 @@ impl TrackServe {
 		settle(&mut writer).await
 	}
 
-	fn serve_group(&self, group: group::Consumer, slice: GroupSlice) -> GroupServe {
+	fn serve_group(&mut self, group: group::Consumer, slice: GroupSlice) -> GroupServe {
 		let group = if self.compression { group.compressed() } else { group };
 		let sequence = group.sequence;
 		let wire = group.wire();
@@ -5279,6 +5298,14 @@ impl TrackServe {
 			group: sequence,
 			object: slice.skip,
 		});
+		let retired = Arc::new(AtomicBool::new(false));
+		if self.live.as_ref().is_none_or(|live| sequence >= live.sequence) {
+			self.live = Some(LiveGroup {
+				sequence,
+				slice,
+				retired: retired.clone(),
+			});
+		}
 		GroupServe::new(
 			self.session.clone(),
 			msg,
@@ -5290,7 +5317,7 @@ impl TrackServe {
 		)
 		.counted(self.opened.clone())
 		.terminal(self.terminal.clone())
-		.bounded(self.bounds.consume())
+		.bounded(self.bounds.consume(), retired)
 	}
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
@@ -5761,6 +5788,8 @@ struct GroupServe {
 	prior_object: Option<u64>,
 	slice: GroupSlice,
 	bounds: Option<kio::Consumer<ServeRange>>,
+	/// Set when a narrowing gives this stream up.
+	retired: Arc<AtomicBool>,
 	ended: bool,
 	terminal: Option<Arc<Terminal>>,
 	marked: bool,
@@ -5834,6 +5863,7 @@ impl GroupServe {
 			prior_object: None,
 			slice,
 			bounds: None,
+			retired: Default::default(),
 			ended: false,
 			terminal: None,
 			marked: false,
@@ -5842,8 +5872,9 @@ impl GroupServe {
 		}
 	}
 
-	fn bounded(mut self, bounds: kio::Consumer<ServeRange>) -> Self {
+	fn bounded(mut self, bounds: kio::Consumer<ServeRange>, retired: Arc<AtomicBool>) -> Self {
 		self.bounds = Some(bounds);
+		self.retired = retired;
 		self
 	}
 
@@ -5854,18 +5885,10 @@ impl GroupServe {
 		if matches!(self.state, GroupState::Closed { .. }) {
 			return false;
 		}
-		self.bounds.as_ref().is_some_and(|bounds| {
+		let excluded = self.bounds.as_ref().is_some_and(|bounds| {
 			matches!(
 				bounds.poll(waiter, |range| {
-					let sequence = self.msg.group_id;
-					let slice = range.slice(sequence);
-					if range.start.is_some_and(|start| sequence < start.group)
-						|| range.end.is_some_and(|end| sequence > end.group)
-						|| slice.skip > self.slice.skip
-						|| slice
-							.until
-							.is_some_and(|until| self.slice.until.is_none_or(|ours| until < ours))
-					{
+					if range.excludes(self.msg.group_id, self.slice) {
 						Poll::Ready(())
 					} else {
 						Poll::Pending
@@ -5873,7 +5896,11 @@ impl GroupServe {
 				}),
 				Poll::Ready(Ok(()))
 			)
-		})
+		});
+		if excluded {
+			self.retired.store(true, Ordering::Relaxed);
+		}
+		excluded
 	}
 
 	fn terminal(mut self, terminal: Arc<Terminal>) -> Self {
@@ -10288,11 +10315,29 @@ mod serve_tests {
 		}
 	}
 
-	/// Widening with a fill hands the rest of the current group to exactly one stream: the
-	/// live stream still open, or a fill tail once a narrowing retired it.
+	/// Widening with a fill hands each remaining object of the current group to exactly one
+	/// stream: the live stream for what it still covers, and a fill tail for the rest,
+	/// including all of it once a narrowing retired the live stream.
 	#[moq_clock::test]
 	async fn widening_with_a_fill_streams_the_current_group_once() {
-		for retired in [false, true] {
+		let open = Filter::Unfiltered;
+		// The live stream stops after object 1, which the widening lifts.
+		let capped = Filter::Absolute {
+			start: Location { group: 1, object: 0 },
+			end: Some(EndLocation {
+				group: 1,
+				object: Some(1),
+			}),
+		};
+		let cases = [
+			(open, None),
+			(capped, None),
+			// Retires the whole group.
+			(open, Some(Location { group: 4, object: 0 })),
+			// Retires it within the group, at the fill's edge.
+			(open, Some(Location { group: 1, object: 1 })),
+		];
+		for (filter, narrowing) in cases {
 			let version = Version::Draft22;
 			let h = serve(version);
 			let mut history = h.track.create_group(group::Info { sequence: 0 }).unwrap();
@@ -10309,15 +10354,15 @@ mod serve_tests {
 			let mut serving = std::pin::pin!(
 				h.publisher
 					.clone()
-					.run_subscribe_stream(stream, subscribe(Filter::Unfiltered, None))
+					.run_subscribe_stream(stream, subscribe(filter, None))
 			);
 			serve_until(serving.as_mut(), "the current group is open", || {
 				occurrences(&h.log, b"before-update") == 1
 			})
 			.await;
 			let mut updates = vec![(Location { group: 0, object: 0 }, true)];
-			if retired {
-				updates.insert(0, (Location { group: 4, object: 0 }, false));
+			if let Some(start) = narrowing {
+				updates.insert(0, (start, false));
 			}
 			for (answered, (start, fill)) in updates.into_iter().enumerate() {
 				let update = ietf::SubscribeUpdate {
@@ -10351,16 +10396,20 @@ mod serve_tests {
 				})
 				.await;
 			}
-			group.write_frame(timestamp(), b"after-update".as_slice()).unwrap();
+			for payload in [b"after-1", b"after-2"] {
+				group.write_frame(timestamp(), payload.as_slice()).unwrap();
+			}
 			group.finish().unwrap();
 			h.track.finish().unwrap();
 			serving.await.unwrap();
 			assert_eq!(occurrences(&h.log, b"history"), 1, "the fill carries the history");
-			assert_eq!(
-				occurrences(&h.log, b"after-update"),
-				1,
-				"one stream carries the rest of the current group (retired: {retired})"
-			);
+			for payload in [b"after-1", b"after-2"] {
+				assert_eq!(
+					occurrences(&h.log, payload),
+					1,
+					"one stream carries each later object ({filter:?}, narrowed to {narrowing:?})"
+				);
+			}
 		}
 	}
 
@@ -18459,6 +18508,17 @@ impl ServeRange {
 			&& end.group == largest.group
 			&& end.object.is_none_or(|object| object >= largest.object))
 		.then_some(next)
+	}
+
+	/// Whether this range drops objects a stream serving `slice` of group `sequence` would send.
+	fn excludes(&self, sequence: u64, slice: GroupSlice) -> bool {
+		let ours = self.slice(sequence);
+		self.start.is_some_and(|start| sequence < start.group)
+			|| self.end.is_some_and(|end| sequence > end.group)
+			|| ours.skip > slice.skip
+			|| ours
+				.until
+				.is_some_and(|until| slice.until.is_none_or(|theirs| until < theirs))
 	}
 
 	/// The objects of group `sequence` this range selects; interior groups are served whole.

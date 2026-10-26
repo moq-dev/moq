@@ -4841,7 +4841,58 @@ test("draft-22: widening with a fill keeps the open live group", async () => {
 	}
 });
 
-test("draft-22: widening with a fill resumes a group a narrowing gave up", async () => {
+test("draft-22: widening with a fill resumes after the open live group's end", async () => {
+	const fx = fixture();
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	writeGroup(track, 1);
+	const open = track.appendGroup();
+	open.writeFrame({ payload: new TextEncoder().encode("1.0"), timestamp: Timestamp.now() });
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 0n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "absolute", startGroup: 1n, startObject: 0n, endGroup: 1n, endObject: 1n },
+		}),
+	);
+	try {
+		const live = await nextUni(fx.uni);
+		if (!live) throw new Error("missing initial open group");
+		const reading = readGroup(live);
+		const parameters = new Parameters();
+		parameters.subscriptionFilter = { kind: "absolute", startGroup: 0n, startObject: 0n };
+		parameters.fillParameters = Filter.encodeFill(
+			{ filter: { kind: "unfiltered" }, groupOrder: "ascending", rangeFilters: false },
+			fx.version,
+		);
+		await client.writer.u53(SubscribeUpdate.id);
+		await new SubscribeUpdate({ requestId: 2n, parameters }).encode(client.writer, fx.version);
+		expect(await client.reader.u53()).toBe(RequestOk.id);
+		await RequestOk.decode(client.reader, fx.version);
+		for (const payload of ["1.1", "1.2"])
+			open.writeFrame({ payload: new TextEncoder().encode(payload), timestamp: Timestamp.now() });
+		open.close();
+		// The live stream keeps the objects up to its old end, so the tail starts after them.
+		expect((await reading).objects).toEqual([
+			{ id: 0, payload: "1.0" },
+			{ id: 1, payload: "1.1" },
+		]);
+		expect((await readServed(fx.uni, 2)).sort()).toEqual(["0.0", "1.0", "1.2"]);
+		expect(await nextUni(fx.uni)).toBeUndefined();
+	} finally {
+		open.close();
+		client.close();
+		track.close();
+		fx.close();
+	}
+});
+
+test.each([
+	[4n, 0n],
+	[1n, 1n],
+])("draft-22: widening with a fill resumes a group a narrowing to %p.%p gave up", async (group, object) => {
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	writeGroup(track, 1);
@@ -4855,12 +4906,12 @@ test("draft-22: widening with a fill resumes a group a narrowing gave up", async
 		const live = await nextUni(fx.uni);
 		if (!live) throw new Error("missing initial open group");
 		const reading = readGroup(live).then(() => undefined, error);
-		for (const [requestId, startGroup] of [
-			[2n, 4n],
-			[4n, 0n],
+		for (const [requestId, startGroup, startObject] of [
+			[2n, group, object],
+			[4n, 0n, 0n],
 		] as const) {
 			const parameters = new Parameters();
-			parameters.subscriptionFilter = { kind: "absolute", startGroup, startObject: 0n };
+			parameters.subscriptionFilter = { kind: "absolute", startGroup, startObject };
 			if (startGroup === 0n)
 				parameters.fillParameters = Filter.encodeFill(
 					{ filter: { kind: "unfiltered" }, groupOrder: "ascending", rangeFilters: false },
@@ -4874,16 +4925,7 @@ test("draft-22: widening with a fill resumes a group a narrowing gave up", async
 		expect((await reading)?.message).toContain("range update");
 		open.writeFrame({ payload: new TextEncoder().encode("1.1"), timestamp: Timestamp.now() });
 		open.close();
-		const served: string[] = [];
-		for (let i = 0; i < 2; i++) {
-			const stream = await nextUni(fx.uni);
-			if (!stream) throw new Error("missing stream after widening");
-			const reader = new Reader(stream, undefined, V20);
-			if ((await reader.peekU62()) === BigInt(FetchHeader.type))
-				served.push(...(await readFill(reader, "ascending")).objects.map(({ payload }) => payload));
-			else served.push(...(await readGroup(reader)).objects.map(({ payload }) => payload));
-		}
-		expect(served.sort()).toEqual(["0.0", "1.0", "1.1"]);
+		expect((await readServed(fx.uni, 2)).sort()).toEqual(["0.0", "1.0", "1.1"]);
 	} finally {
 		open.close();
 		client.close();
@@ -4891,6 +4933,23 @@ test("draft-22: widening with a fill resumes a group a narrowing gave up", async
 		fx.close();
 	}
 });
+
+/** The payloads of the next `count` streams, each a fill or a group in whatever order they open. */
+async function readServed(
+	uni: ReadableStreamDefaultReader<ReadableStream<Uint8Array>>,
+	count: number,
+): Promise<string[]> {
+	const served: string[] = [];
+	for (let i = 0; i < count; i++) {
+		const stream = await nextUni(uni);
+		if (!stream) throw new Error("missing stream after widening");
+		const reader = new Reader(stream, undefined, V20);
+		if ((await reader.peekU62()) === BigInt(FetchHeader.type))
+			served.push(...(await readFill(reader, "ascending")).objects.map(({ payload }) => payload));
+		else served.push(...(await readGroup(reader)).objects.map(({ payload }) => payload));
+	}
+	return served;
+}
 
 test("subscriber max age and REQUEST_UPDATE preserve omitted preferences", async () => {
 	const fx = fixture(Version.DRAFT_18);

@@ -249,8 +249,8 @@ interface RunGroup {
 	/** The subscription's ranking, which orders its group streams by priority and GROUP_ORDER. */
 	ranking: Priority;
 
-	/** The objects of this group the subscription's filter selects. */
-	slice: GroupSlice;
+	/** The objects of this group the subscription's filter selects, marked once a narrowing retires them. */
+	live: LiveGroup;
 	/** The requested range, whose narrowing may give this stream up. */
 	bounds: Getter<ServeRange>;
 
@@ -903,7 +903,11 @@ export class Publisher {
 			// Every group started, until its stream finishes or resets, and the data streams
 			// opened for PUBLISH_DONE to report.
 			const groups = new Set<Promise<void>>();
+			// The stream serving the highest group, where a widening fill's tail resumes.
+			let live: LiveGroup | undefined;
 			const serveGroup = (group: group.Consumer, slice: GroupSlice) => {
+				const stream: LiveGroup = { sequence: group.sequence, slice, retired: false };
+				if (!live || group.sequence >= live.sequence) live = stream;
 				const task = this.#runGroup({
 					track,
 					requestId: msg.requestId,
@@ -911,7 +915,7 @@ export class Publisher {
 					timescale,
 					publisherPriority,
 					ranking: ranked,
-					slice,
+					live: stream,
 					bounds,
 					unsubscribed,
 					streams,
@@ -948,26 +952,30 @@ export class Publisher {
 								? { start: { group: 0n, object: 0n } }
 								: filterRange(msg.filter, snapshot);
 						const tail = afterFill(requested, selected, snapshot);
-						const previous = bounds.peek();
 						range.start = tail.start;
 						range.end = tail.end;
 						bounds.set(requested, true);
 						track.update({ ...track.subscription.peek(), groups: rangeGroups(range) });
 						track.withRange(rangeGroups(range));
 						// The fill took the current group's head. The cursor never hands a group out
-						// twice, so one whose stream no longer carries the rest resumes from the cache.
+						// twice, so what its stream no longer carries resumes from the cache.
 						const next = tail !== requested ? tail.start : undefined;
 						const at = Number(next?.group);
 						if (next && hooks.handedOut(track, at)) {
-							const prior = groupSlice(previous, at);
-							const streaming =
-								(!previous.start || previous.start.group <= next.group) &&
-								(!previous.end || previous.end.group >= next.group) &&
-								prior.skip <= Number(next.object) &&
-								prior.until === undefined;
 							const slice = groupSlice(range, at);
+							// A stream still serving this group from the fill's edge keeps what it
+							// covers, so the tail resumes where that stream stops.
+							const streaming =
+								live?.sequence === at &&
+								live.slice.skip <= slice.skip &&
+								!live.retired &&
+								!excludes(requested, at, live.slice)
+									? live
+									: undefined;
+							const resume = streaming ? streaming.slice.until : slice.skip;
+							if (resume !== undefined) slice.skip = Math.max(slice.skip, resume);
 							const group =
-								!streaming &&
+								resume !== undefined &&
 								(!range.end || range.end.group >= next.group) &&
 								(slice.until === undefined || slice.until > slice.skip)
 									? hooks.cachedGroup(track, at)
@@ -1163,20 +1171,16 @@ export class Publisher {
 	 * Runs a group and sends its frames using ObjectStream (Subgroup delivery mode).
 	 */
 	async #runGroup(options: RunGroup) {
-		const { requestId, track, group, timescale, publisherPriority, ranking, slice, bounds, unsubscribed, streams } =
+		const { requestId, track, group, timescale, publisherPriority, ranking, live, bounds, unsubscribed, streams } =
 			options;
+		const { slice } = live;
 		const excluded = Promise.withResolvers<void>();
 		let rangeError: Error | undefined;
+		// Set once the FIN is written, which keeps what the stream delivered.
+		let finished = false;
 		const narrowed = () => {
-			const range = bounds.peek();
-			const at = BigInt(group.sequence);
-			const next = groupSlice(range, group.sequence);
-			if (
-				(range.start && at < range.start.group) ||
-				(range.end && at > range.end.group) ||
-				next.skip > slice.skip ||
-				(next.until !== undefined && (slice.until === undefined || next.until < slice.until))
-			) {
+			if (excludes(bounds.peek(), group.sequence, slice)) {
+				if (!finished) live.retired = true;
 				rangeError = new Error("group excluded by range update");
 				group.close(rangeError);
 				excluded.resolve();
@@ -1307,6 +1311,7 @@ export class Publisher {
 				}
 
 				stream.close();
+				finished = true;
 				// The stream holds every byte it owes, so frames past a range's end failing upstream
 				// can no longer give it up: release the read, leaving the budget.
 				group.close();
@@ -3213,6 +3218,14 @@ interface GroupSlice {
 	until?: number;
 }
 
+/** The stream serving a subscription's highest group, as it was opened. */
+interface LiveGroup {
+	sequence: number;
+	slice: GroupSlice;
+	/** Set once a narrowing gave the stream up before its FIN. */
+	retired: boolean;
+}
+
 /** What a draft-22 fill request resolves to. */
 type FillServe =
 	/** The range is empty, so no fetch stream is opened at all. */
@@ -3301,6 +3314,18 @@ function groupSlice(range: ServeRange, sequence: number): GroupSlice {
 		skip: range.start?.group === at ? Number(range.start.object) : 0,
 		until: range.end?.group === at && range.end.object !== undefined ? Number(range.end.object) + 1 : undefined,
 	};
+}
+
+/** Whether `range` drops objects a stream serving `slice` of group `sequence` would send. */
+function excludes(range: ServeRange, sequence: number, slice: GroupSlice): boolean {
+	const at = BigInt(sequence);
+	const ours = groupSlice(range, sequence);
+	return (
+		(range.start !== undefined && at < range.start.group) ||
+		(range.end !== undefined && at > range.end.group) ||
+		ours.skip > slice.skip ||
+		(ours.until !== undefined && (slice.until === undefined || ours.until < slice.until))
+	);
 }
 
 /** A fill covering the whole requested prefix owns it; the live cursor starts after its snapshot. */
