@@ -6000,12 +6000,9 @@ impl SubStream {
 	}
 }
 
-#[cfg_attr(
-	target_pointer_width = "64",
-	expect(
-		clippy::large_enum_variant,
-		reason = "one per track copy, which holds a live stream while anyone reads it, so boxing it would add an allocation per upstream subscription without saving memory"
-	)
+#[expect(
+	clippy::large_enum_variant,
+	reason = "one per track copy, which holds a live stream while anyone reads it, so boxing it would add an allocation per upstream subscription without saving memory"
 )]
 enum Sub {
 	None,
