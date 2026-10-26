@@ -1,9 +1,9 @@
 # CI selection audit, 2026-10-25
 
 The shared-input rules rarely force every module. Keep the conservative Rust
-lockfile rule until CPU measurements justify a second dependency resolver.
-Fix the missing Cargo-configuration edge now. The CPU-cost and historical
-missed-edge parts of the audit remain open.
+lockfile rule rather than add a second dependency resolver. Fix the missing
+Cargo-configuration edge now. Replaying historical full-run failures for missed
+edges remains open.
 
 ## Observation window and method
 
@@ -83,7 +83,7 @@ the Linux dispatcher to run every module.
   [run 39463885744](https://github.com/moq-dev/moq/actions/runs/39463885744).
   Correct narrowing would require both lock graphs, package versions and sources,
   removed dependencies, target and optional edges, and workspace consumers.
-  Incidence alone does not show that maintaining that resolver pays for itself.
+  That resolver is not worth maintaining for so few attempts.
 - Keep flake inputs scoped to their consumers: Nix checks, browser version pins,
   OBS inputs, and the quest validator. A flake edit is not already a blanket
   Rust-workspace trigger. Workflow edits retain repository-wide workflow and
@@ -96,14 +96,16 @@ the Linux dispatcher to run every module.
   Rust build or tests. The existing platform query already recognized this edge.
   Regression tests cover pre-setup selection, actual dispatch, and crate selection.
 
-## Cost and missed-edge limitations
+## Cost evidence
 
-The requested unit is runner CPU time. The archived dispatcher records elapsed
+The audit asked for runner CPU time. The archived dispatcher records elapsed
 seconds per module, and Cargo timings record build durations. Neither provides
-process CPU consumption or CPU utilization, and a runner's allocated core count
-cannot reconstruct it. Do not label summed lane durations, job duration, or
-core-count times elapsed time as measured CPU time. No CPU savings estimate or
-lockfile optimization is justified by this retrospective alone.
+process CPU consumption, and a runner's allocated core count cannot reconstruct
+it, so this report gives no CPU savings estimate. The maintainer accepted the
+incidence counts and elapsed durations in place of CPU time on 2026-10-26: they
+settle the rule decisions above without a new measurement window.
+
+## Missed edges
 
 Two recent full-run failures illustrate why replay needs to distinguish selector
 bugs from other failures. The [October 25 full gate](https://github.com/moq-dev/moq/actions/runs/40192013303/job/121164806731)
@@ -116,5 +118,6 @@ unification is separately being addressed in
 [moq-dev/moq#6830](https://github.com/moq-dev/moq/pull/6830) and the async-free
 contract in [moq-dev/moq#6851](https://github.com/moq-dev/moq/pull/6851).
 These observations do not substitute for replaying all month's full-run failures
-against the contemporaneous selected gate. That replay and CPU collection remain
-in the quest. No claim of complete missed-edge coverage is made here.
+against the contemporaneous selected gate. That replay remains in
+[its quest](/quest/m0/ci/select-audit.md). No claim of complete missed-edge
+coverage is made here.

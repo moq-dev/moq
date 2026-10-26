@@ -1,28 +1,27 @@
-# [S] Finish the CI selector's CPU and missed-edge audit
+# [S] Replay full-run failures against CI's selected gate
 
 ## Goal
 
-Complete the package-selection audit with measured runner CPU cost and replay
-full-run failures against the selected gate to find missed dependency edges.
-The retrospective and its per-attempt evidence live in
-[the CI selection report](/.github/ci-selection-audit.md).
+Find the dependency edges `just ci`'s selection misses. Replay each change
+whose full run (Nightly or `just gate`) failed where its selected queue run
+passed, and fix every missed edge with a test in `sh/changed.test.py`,
+`sh/dispatch-query.test.py`, `sh/rs/select.test.py`, or their neighbors.
 
 ## Plan
 
-- The September 26 through October 25 audit classified 1,979 queue attempts:
-  62 forced every module, 244 forced the Rust workspace, and 75 had Cargo.lock
-  as their only shared-input trigger. Four historical attempts could not be
-  classified.
-- The audit fixed the missing `.cargo/` edge in Linux dispatch and Rust crate
-  selection, with regression tests. Keep existing shared-input widening until
-  CPU evidence justifies narrowing it.
-- Archived logs contain elapsed durations, not runner CPU consumption. Decide
-  whether to accept the retrospective's explicit measurement limit or collect
-  process CPU measurements over a new observation window. The recommendation
-  is to collect CPU time before adding lockfile-diff dependency resolution.
-- Replay changes whose Nightly or `just gate` failed where the selected gate
-  passed. Separate actual missed edges from checkout-history failures and
-  feature-unification issues already owned by other quests or open PRs.
+- [The CI selection report](/.github/ci-selection-audit.md) covers widening
+  frequency for September 26 through October 25 and its per-attempt evidence.
+  Extend it with the replay, rather than starting a second report.
+- Replay against the selection rules each change's queue run used, read from
+  that head's `sh/dispatch.sh` and `sh/rs/select.sh`.
+- Separate actual missed edges from failures a narrower selection cannot cause,
+  such as checkout-history problems and feature unification already owned by
+  [moq-dev/moq#6830](https://github.com/moq-dev/moq/pull/6830) and
+  [moq-dev/moq#6851](https://github.com/moq-dev/moq/pull/6851).
+- Decided with the maintainer on 2026-10-26: the report's incidence counts and
+  archived elapsed durations stand in for runner CPU time, so no CPU
+  measurement window is needed. Cargo.lock stays a whole-workspace trigger; a
+  lockfile-diff selector would narrow at most 75 attempts a month.
 - kixelated/rust2's
   [MIR test selection](https://github.com/kixelated/rust2/blob/main/quest/m3/test-select.md)
   measures a finer selector against this one.
