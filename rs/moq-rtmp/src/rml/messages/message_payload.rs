@@ -24,7 +24,47 @@ impl fmt::Debug for MessagePayload {
 	}
 }
 
+/// AMF0 fields borrowed from the assembled message.
+pub enum Amf0Message<'a> {
+	Command {
+		name: &'a str,
+		transaction_id: f64,
+		object: crate::rml::amf0::Value<'a>,
+		arguments: crate::rml::amf0::Values<'a>,
+	},
+	Data(crate::rml::amf0::Values<'a>),
+}
+
 impl MessagePayload {
+	/// Validate AMF0 without allocating a tree of values.
+	pub fn amf0(&self) -> Result<Option<Amf0Message<'_>>, MessageDeserializationError> {
+		use crate::rml::amf0::{Value, Values};
+		if !matches!(self.type_id, 15 | 17 | 18 | 20) {
+			return Ok(None);
+		}
+		let mut data = self.data.as_ref();
+		if self.type_id == 17 && data.first() == Some(&0) {
+			data = &data[1..];
+		}
+		let mut values = Values::decode(data)?;
+		if matches!(self.type_id, 15 | 18) {
+			return Ok(Some(Amf0Message::Data(values)));
+		}
+		let Some(Value::Utf8String(name)) = values.next() else {
+			return Err(MessageDeserializationError::InvalidMessageFormat);
+		};
+		let Some(Value::Number(transaction_id)) = values.next() else {
+			return Err(MessageDeserializationError::InvalidMessageFormat);
+		};
+		let object = values.next().ok_or(MessageDeserializationError::InvalidMessageFormat)?;
+		Ok(Some(Amf0Message::Command {
+			name,
+			transaction_id,
+			object,
+			arguments: values,
+		}))
+	}
+
 	/// Creates a new message payload with default values.
 	///
 	/// This is mostly used when all information about a message is not known at creation time
@@ -38,12 +78,8 @@ impl MessagePayload {
 		}
 	}
 
-	/// Deserializes the message data in the specified payload into its corresponding
-	/// `RtmpMessage`.
-	///
-	/// Note that flash clients (like Wowza's test client) lie and mark amf0 data and commands as
-	/// amf3 values.  It is unknown why this happens, but any Amf3 command/data messages that are
-	/// seen are deserialized as amf0.  So far this has not caused any issues.
+	/// Decode control and media messages; sessions read AMF0 through borrowed views.
+	/// Tests may materialize AMF0 to compare outgoing messages to owned fixtures.
 	pub fn to_rtmp_message(&self) -> Result<RtmpMessage, MessageDeserializationError> {
 		match self.type_id {
 			1 => types::set_chunk_size::deserialize(self.data.clone()),
@@ -54,13 +90,17 @@ impl MessagePayload {
 			6 => types::set_peer_bandwidth::deserialize(self.data.clone()),
 			8 => types::audio_data::deserialize(self.data.clone()),
 			9 => types::video_data::deserialize(self.data.clone()),
+			#[cfg(test)]
 			18 => types::amf0_data::deserialize(self.data.clone()),
+			#[cfg(test)]
 			20 => types::amf0_command::deserialize(self.data.clone()),
 
 			// For some reason Flash players (like wowza's test player) send messages
 			// that are flagged as amf3 encoded, but in reality they are amf0 encoded
+			#[cfg(test)]
 			15 => types::amf0_data::deserialize(self.data.clone()),
 
+			#[cfg(test)]
 			17 => {
 				// Fake amf3 commands usually seem to have a 0 in front of the amf0 data.
 				if self.data.len() > 0 && self.data[0] == 0x00 {
@@ -70,6 +110,9 @@ impl MessagePayload {
 					types::amf0_command::deserialize(self.data.clone())
 				}
 			}
+
+			#[cfg(not(test))]
+			15 | 17 | 18 | 20 => Err(MessageDeserializationError::InvalidMessageFormat),
 
 			_ => Ok(RtmpMessage::Unknown {
 				type_id: self.type_id,
@@ -141,6 +184,36 @@ mod tests {
 	use crate::rml::messages::{PeerBandwidthLimitType, UserControlEventType};
 	use crate::rml::time::RtmpTimestamp;
 	use bytes::{BufMut, Bytes, BytesMut};
+
+	#[test]
+	fn all_amf_message_types_borrow_the_payload() {
+		use crate::rml::amf0::allocation::measure;
+		for type_id in [15, 17, 18, 20] {
+			let mut data = Vec::new();
+			if type_id == 17 {
+				data.push(0);
+			}
+			if matches!(type_id, 17 | 20) {
+				data.extend(
+					crate::rml::amf0::serialize(&[
+						Amf0Value::Utf8String("connect".into()),
+						Amf0Value::Number(1.0),
+						Amf0Value::Null,
+					])
+					.unwrap(),
+				);
+			}
+			data.extend(std::iter::repeat_n(5, 65536));
+			let payload = MessagePayload {
+				type_id,
+				data: data.into(),
+				..MessagePayload::new()
+			};
+			let (decoded, peak) = measure(|| payload.amf0().unwrap());
+			assert!(decoded.is_some());
+			assert_eq!(peak, 0, "type {type_id} allocated a value tree");
+		}
+	}
 
 	#[test]
 	fn can_get_payload_from_abort_message() {
