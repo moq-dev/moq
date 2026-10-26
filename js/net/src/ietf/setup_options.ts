@@ -1,7 +1,6 @@
 import { ProtocolViolation } from "../error.ts";
 import type { Reader, Writer } from "../stream.ts";
 import { decodeUtf8 } from "../util/utf8.ts";
-import * as Varint from "../varint.ts";
 import { AUTHORIZATION_TOKEN } from "./token.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
@@ -29,8 +28,6 @@ export const SetupOption = {
 	ActiveCount: 0x40b64n,
 	/** EPOCH, from the MoQ Epoch extension. See `epoch.ts`. */
 	Epoch: 0x40b68n,
-	/** VERSIONS, from moq-lite: the client's whole offer when SETUP negotiates the version. */
-	Versions: 0x40b71n,
 } as const;
 
 // Unknown SETUP options may repeat, including GREASE (draft-22 section 9.1).
@@ -230,46 +227,5 @@ export function implementationFromSetup(params: SetupOptions): string | undefine
 		return decodeUtf8(bytes);
 	} catch (cause) {
 		throw new ProtocolViolation("malformed IMPLEMENTATION", { cause });
-	}
-}
-
-/**
- * Offer `versions`, most preferred first, in the VERSIONS option, laid out like the draft-14
- * version list.
- *
- * @internal
- */
-export function versionsIntoSetup(params: SetupOptions, versions: number[]) {
-	const parts = [Varint.encode(versions.length), ...versions.map((v) => Varint.encode(v))];
-	const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
-	let offset = 0;
-	for (const part of parts) {
-		out.set(part, offset);
-		offset += part.length;
-	}
-	params.setBytes(SetupOption.Versions, out);
-}
-
-/**
- * The client's whole offer from the VERSIONS option, if it sent one. Malformed is a protocol violation.
- *
- * @internal
- */
-export function versionsFromSetup(params: SetupOptions): number[] | undefined {
-	let rest = params.getBytes(SetupOption.Versions);
-	if (rest === undefined) return undefined;
-	try {
-		let count: number;
-		[count, rest] = Varint.decode(rest);
-		const versions: number[] = [];
-		for (let i = 0; i < count; i++) {
-			let version: number;
-			[version, rest] = Varint.decode(rest);
-			versions.push(version);
-		}
-		if (rest.length > 0) throw new Error("trailing bytes");
-		return versions;
-	} catch (cause) {
-		throw new ProtocolViolation("malformed VERSIONS", { cause });
 	}
 }

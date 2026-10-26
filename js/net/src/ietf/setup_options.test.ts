@@ -1,13 +1,6 @@
 import { expect, test } from "bun:test";
 import { ProtocolViolation } from "../error.ts";
-import {
-	implementationFromSetup,
-	implementationIntoSetup,
-	SetupOption,
-	SetupOptions,
-	versionsFromSetup,
-	versionsIntoSetup,
-} from "./setup_options.ts";
+import { implementationFromSetup, implementationIntoSetup, SetupOption, SetupOptions } from "./setup_options.ts";
 
 // Encoder and decoder share these keys, so only a spec table catches a renumbering. The
 // extension keys come from each draft-lcurley-moq-* IANA section; even keys are bare varints.
@@ -27,7 +20,6 @@ test("setup option keys match the registries", () => {
 		Auth: 0x40b70n,
 		ActiveCount: 0x40b64n,
 		Epoch: 0x40b68n,
-		Versions: 0x40b71n,
 	});
 });
 
@@ -44,14 +36,4 @@ test("IMPLEMENTATION is omitted when empty and refused when not UTF-8", () => {
 	const malformed = new SetupOptions();
 	malformed.setBytes(SetupOption.Implementation, new Uint8Array([0xc3, 0x28]));
 	expect(() => implementationFromSetup(malformed)).toThrow(ProtocolViolation);
-});
-
-test("VERSIONS round-trips in order and is refused with bytes left over", () => {
-	const params = new SetupOptions();
-	expect(versionsFromSetup(params)).toBeUndefined();
-	versionsIntoSetup(params, [0xff0dad06, 0xff0dad02, 0xff00000e]);
-	expect(versionsFromSetup(params)).toEqual([0xff0dad06, 0xff0dad02, 0xff00000e]);
-
-	params.setBytes(SetupOption.Versions, new Uint8Array([1, 2, 3]));
-	expect(() => versionsFromSetup(params)).toThrow(ProtocolViolation);
 });

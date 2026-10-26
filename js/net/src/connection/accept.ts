@@ -213,19 +213,17 @@ async function acceptNegotiated(
 
 	const client = await Ietf.ClientSetup.decode(stream.reader, setupVersion);
 
-	// Pick the requested version, or the first from the client's offer that SETUP can negotiate:
+	// Pick the requested version, or the first from the client's list that SETUP can negotiate:
 	// every moq-lite version and moq-transport-14, since later drafts carry no version list.
-	// VERSIONS, when present, is the whole offer.
 	const negotiable = [...Object.values(Lite.Version), Ietf.Version.DRAFT_14] as number[];
-	const offered = Ietf.versionsFromSetup(client.parameters) ?? client.versions;
 	let selectedVersion: number;
 	if (version !== undefined) {
 		selectedVersion = version;
 	} else {
-		const match = offered.find((v) => negotiable.includes(v));
+		const match = client.versions.find((v) => negotiable.includes(v));
 		if (match === undefined) {
 			throw new Error(
-				`no common version found; client offered: ${offered.map((v) => v.toString(16)).join(", ")}`,
+				`no common version found; client offered: ${client.versions.map((v) => v.toString(16)).join(", ")}`,
 			);
 		}
 		selectedVersion = match;

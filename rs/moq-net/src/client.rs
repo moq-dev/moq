@@ -506,26 +506,11 @@ impl Client {
 		ietf::max_age::into_setup(&mut parameters, ietf_encoding);
 		ietf::active_count::into_setup(&mut parameters, ietf_encoding);
 		ietf::flate::into_setup(&mut parameters, ietf_encoding);
-
-		// With no version ALPN, the whole offer goes in VERSIONS, and the version list keeps
-		// what an older server can run on this stream.
-		let mut versions: coding::Versions = supported.clone().into();
-		if matches!(session.protocol(), Some(ALPN_LITE) | None) {
-			parameters.set_bytes(
-				ietf::ParameterBytes::Versions,
-				versions.encode_bytes(ietf_encoding)?.into(),
-			);
-			versions = supported
-				.iter()
-				.copied()
-				.filter(|v| !v.hands_off())
-				.collect::<Vec<_>>()
-				.into();
-		}
+		let parameters = parameters.encode_bytes(ietf_encoding)?;
 
 		let client = setup::Client {
-			versions,
-			parameters: parameters.encode_bytes(ietf_encoding)?,
+			versions: supported.clone().into(),
+			parameters,
 		};
 
 		stream.writer.encode(&client).await?;
@@ -981,27 +966,9 @@ mod tests {
 			setup::Client::decode,
 		)
 		.unwrap();
-		let decode = |versions: &crate::coding::Versions| -> Vec<Version> {
-			versions.iter().map(|v| Version::try_from(*v).unwrap()).collect()
-		};
-		// A server that predates VERSIONS runs any lite version it recognizes on this stream,
-		// so the version list leaves out those that hand off.
+		let advertised: Vec<Version> = setup.versions.iter().map(|v| Version::try_from(*v).unwrap()).collect();
 		assert_eq!(
-			decode(&setup.versions),
-			vec![
-				Version::Lite(lite::Version::Lite02),
-				Version::Lite(lite::Version::Lite01),
-				Version::Ietf(ietf::Version::Draft14),
-			]
-		);
-		let (params, _) = ietf::Parameters::decode_slice(&setup.parameters, ietf::Version::Draft14).unwrap();
-		let (offered, _) = crate::coding::Versions::decode_slice(
-			params.get_bytes(ietf::ParameterBytes::Versions).unwrap(),
-			ietf::Version::Draft14,
-		)
-		.unwrap();
-		assert_eq!(
-			decode(&offered),
+			advertised,
 			vec![
 				Version::Lite(lite::Version::Lite03),
 				Version::Lite(lite::Version::Lite02),

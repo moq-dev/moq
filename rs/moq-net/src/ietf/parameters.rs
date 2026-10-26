@@ -48,8 +48,6 @@ pub enum ParameterBytes {
 	AuthorizationToken = 3,
 	Authority = 5,
 	Implementation = 7,
-	/// VERSIONS, from moq-lite: the client's whole offer when SETUP negotiates the version.
-	Versions = crate::version::VERSIONS,
 	#[num_enum(catch_all)]
 	Unknown(u64),
 }

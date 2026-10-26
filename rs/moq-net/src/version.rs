@@ -7,8 +7,8 @@ use crate::{coding, ietf, lite};
 /// with no subprotocol) can negotiate in the bidi SETUP.
 ///
 /// Ordered by preference, with the client's preference taking priority. Lite03 and newer
-/// hand off (see [`Version::hands_off`]) and are offered only in [`VERSIONS`]. Draft15 and
-/// newer have no version list in SETUP, so they negotiate only by ALPN.
+/// hand off (see [`Version::hands_off`]).
+/// Draft15 and newer have no version list in SETUP, so they negotiate only by ALPN.
 #[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(crate) const NEGOTIATED: [Version; 8] = [
 	Version::Lite(lite::Version::Lite07),
@@ -20,13 +20,6 @@ pub(crate) const NEGOTIATED: [Version; 8] = [
 	Version::Lite(lite::Version::Lite01),
 	Version::Ietf(ietf::Version::Draft14),
 ];
-
-/// The SETUP parameter listing every version in the client's offer, most preferred first.
-///
-/// The version list holds only those that do not hand off, since a server that predates
-/// handing off would run any lite version it recognizes on the SETUP stream. A server that
-/// reads this parameter selects from it instead. Odd, so its value is length-prefixed.
-pub(crate) const VERSIONS: u64 = 0x40B71;
 
 /// ALPN strings for supported versions, most-preferred first. `ALPNS[0]` is the
 /// newest moq-lite ALPN that both sides converge on.
