@@ -31,9 +31,13 @@ Then confirm it, and record the numbers in the PR that closes this:
   38897397428: every workload spent 12-14 minutes building
   `uniffi-bindgen-go`, `uniffi-bindgen-cpp` and `quest` before entering the
   dev shell, because Cachix had no copy.
-- The next `moq-relay-v*` or `moq-cli-v*` tag pushes from all three
-  `release-nix.yml` legs, and `nix run github:moq-dev/moq/<tag>#moq-relay
+- The first `moq-relay-v*` or `moq-cli-v*` tag cut after `release` carries
+  `release-nix.yml` pushes from all three legs, and `nix run github:moq-dev/moq/<tag>#moq-relay
   --accept-flake-config` substitutes on a clean machine.
+  Tags are cut from `release`, which still has `cachix.yml` and `cache.yml`
+  and no `release-nix.yml`, so the 2026-10-23 tags (`moq-relay-v0.17.8`,
+  `moq-cli-v0.14.8`) ran Cachix push and never reached `nix.moq.dev`. The
+  next cut from `main` fixes that; confirm its first tag's run.
 - Both bucket sizes after a month, against the 30-day expiry in
   `infra/nix/lifecycle.json`. A path expires 30 days after its upload even
   while CI still reads it. If a dev-shell push is restored, look for jobs

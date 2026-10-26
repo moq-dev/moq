@@ -5301,6 +5301,27 @@ fn implementation_prefixes_the_library() {
 	assert!(unsafe { crate::parse_client(Some(&config)) }.is_err());
 }
 
+/// Configured tokens reach the dial in order, and an empty one fails it.
+#[test]
+fn tokens_reach_the_dial() {
+	assert!(parsed(&client_config()).connect.tokens.is_empty());
+
+	let mut config = client_config();
+	let tokens = [moq_str("a"), moq_str("b")];
+	config.tokens = tokens.as_ptr();
+	config.tokens_len = tokens.len();
+	let parsed = parsed(&config).connect.tokens;
+	assert_eq!(
+		parsed.iter().map(|token| token.as_str()).collect::<Vec<_>>(),
+		["a", "b"]
+	);
+
+	let empty = [moq_str("a"), moq_str("")];
+	config.tokens = empty.as_ptr();
+	config.tokens_len = empty.len();
+	assert!(unsafe { crate::parse_client(Some(&config)) }.is_err());
+}
+
 /// The whole point of the `has_*` flags: a caller who zeroes the struct and sets
 /// nothing must land on the defaults, not on zero. The backoff and the WebSocket
 /// fallback are the ones with non-zero defaults, so they are what would break.

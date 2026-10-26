@@ -24,7 +24,7 @@ export async function exchangeSetup(
 	transport: WebTransport,
 	version: Ietf.IetfVersion,
 	implementation: string,
-	{ client, extensions }: { client: boolean; extensions: Extensions.Offered },
+	{ client, extensions, token }: { client: boolean; extensions: Extensions.Offered; token?: Uint8Array },
 ): Promise<{
 	control: Stream;
 	early: Reader[];
@@ -43,6 +43,8 @@ export async function exchangeSetup(
 	Ietf.hiddenIntoSetup(params);
 	Ietf.maxAgeIntoSetup(params);
 	Ietf.activeCountIntoSetup(params, version);
+	// Only a client presents a connection credential.
+	if (client && token) Ietf.tokenIntoSetup(params, { kind: Ietf.TOKEN_OUT_OF_BAND, value: token }, version);
 
 	// One id per session, like the moq-lite connection: nothing in this process forwards
 	// between sessions, so there is nothing for a shared id to detect.

@@ -7,7 +7,7 @@ const CODE: VarInt = VarInt(7);
 /// Every chunk a server stream yields, and how it ended
 fn read_all(pair: &mut Pair, ch: ConnectionHandle, s: StreamId) -> (Vec<u8>, ReadError) {
 	let mut recv = pair.server_recv(ch, s);
-	let mut chunks = recv.read(true).unwrap();
+	let mut chunks = recv.read().unwrap();
 	let mut data = Vec::new();
 	let end = loop {
 		match chunks.next(usize::MAX) {
@@ -46,7 +46,7 @@ fn received_reset_reports_the_code_once() {
 	assert_eq!(pair.server_recv(server_ch, s).received_reset(), Ok(Some(CODE)));
 	assert!(pair.server_recv(server_ch, s).received_reset().is_err());
 	assert_eq!(
-		pair.server_recv(server_ch, s).read(true).err(),
+		pair.server_recv(server_ch, s).read().err(),
 		Some(ReadableError::ClosedStream)
 	);
 	assert!(pair.server_recv(server_ch, s).stop(CODE).is_err());
@@ -75,7 +75,7 @@ fn received_reset_on_closed_streams() {
 	assert_eq!(pair.server_recv(server_ch, s).received_reset(), Ok(None));
 	{
 		let mut recv = pair.server_recv(server_ch, s);
-		let mut chunks = recv.read(true).unwrap();
+		let mut chunks = recv.read().unwrap();
 		assert!(chunks.next(usize::MAX).unwrap().is_some());
 		assert_eq!(chunks.next(usize::MAX), Ok(None));
 		let _ = chunks.finalize();
@@ -93,7 +93,7 @@ fn chunks_end_in_reset() {
 	// Part of the stream is read before the reset arrives
 	{
 		let mut recv = pair.server_recv(server_ch, s);
-		let mut chunks = recv.read(true).unwrap();
+		let mut chunks = recv.read().unwrap();
 		assert_eq!(chunks.next(2).unwrap().unwrap().bytes, &b"he"[..]);
 		let _ = chunks.finalize();
 	}
@@ -101,13 +101,13 @@ fn chunks_end_in_reset() {
 	pair.drive();
 
 	let mut recv = pair.server_recv(server_ch, s);
-	let mut chunks = recv.read(true).unwrap();
+	let mut chunks = recv.read().unwrap();
 	assert_eq!(chunks.next(usize::MAX), Err(ReadError::Reset(CODE)));
 	// The end repeats until the chunks are finalized
 	assert_eq!(chunks.next(usize::MAX), Err(ReadError::Reset(CODE)));
 	let _ = chunks.finalize();
 	assert_eq!(
-		pair.server_recv(server_ch, s).read(true).err(),
+		pair.server_recv(server_ch, s).read().err(),
 		Some(ReadableError::ClosedStream)
 	);
 }
@@ -121,13 +121,13 @@ fn chunks_end_in_finished() {
 	pair.drive();
 
 	let mut recv = pair.server_recv(server_ch, s);
-	let mut chunks = recv.read(true).unwrap();
+	let mut chunks = recv.read().unwrap();
 	assert_eq!(chunks.next(usize::MAX).unwrap().unwrap().bytes, &b"hello"[..]);
 	assert_eq!(chunks.next(usize::MAX), Ok(None));
 	assert_eq!(chunks.next(usize::MAX), Ok(None));
 	let _ = chunks.finalize();
 	assert_eq!(
-		pair.server_recv(server_ch, s).read(true).err(),
+		pair.server_recv(server_ch, s).read().err(),
 		Some(ReadableError::ClosedStream)
 	);
 }

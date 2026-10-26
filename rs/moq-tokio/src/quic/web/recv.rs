@@ -70,7 +70,7 @@ impl RecvStream {
 	/// Read a chunk of data from the stream. See [`crate::quic::driver::RecvStream::read_chunk`].
 	pub async fn read_chunk(&mut self, max_length: usize) -> Result<Option<Bytes>, ReadError> {
 		self.inner
-			.read_chunk(max_length, true)
+			.read_chunk(max_length)
 			.await
 			.map(|chunk| chunk.map(|chunk| chunk.bytes))
 			.map_err(|e| self.map_error(e))
