@@ -8,6 +8,7 @@ How to update your code for each breaking change, newest first.
 
 A broadcast that is never announced has no route at the relay, so nobody could subscribe to it.
 Use `announce="always"` or `"source"`, and give a broadcast that should stay unlisted a hidden name with a `.`-prefixed segment, such as `room/.me`: discovery leaves it out, but it is still subscribable by name.
+An element still set to `never`, or any other invalid value, throws and does not announce; `announce` then reads `undefined`.
 
 ### Time units come from `Clock`
 

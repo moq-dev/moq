@@ -356,7 +356,7 @@ type Mode = "none" | "source" | "encoded";
 
 class MoqPublish extends HTMLElement {
     constructor();
-    get announce(): AnnounceMode;
+    get announce(): AnnounceMode | undefined;
     set announce(value: AnnounceMode);
     attributeChangedCallback(name: Observed, oldValue: string | null, newValue: string | null): void;
     audio: Audio_2.Encoder;
@@ -371,7 +371,7 @@ class MoqPublish extends HTMLElement {
         invisible: Signal<boolean>;
         preview: Signal<Preview.Mode>;
         backend: Signal<Preview.Backend>;
-        announce: Signal<AnnounceMode>;
+        announce: Signal<AnnounceMode | undefined>;
     };
     disconnectedCallback(): void;
     get invisible(): boolean;

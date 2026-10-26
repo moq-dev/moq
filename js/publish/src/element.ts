@@ -72,11 +72,16 @@ function parseSource(value: string | null): SourceType | undefined {
 	return undefined;
 }
 
-function parseAnnounce(value: string | null): AnnounceMode {
+// Unlike the others, an invalid announce refuses (undefined) instead of falling back: a fallback
+// would publish a broadcast the page configured differently, such as a removed `never`.
+function parseAnnounce(value: string | null): AnnounceMode | undefined {
 	if (value === null) return "source";
 	if (value === "source" || value === "always") return value;
-	console.warn(`moq-publish: invalid announce="${value}", expected "source" or "always"`);
-	return "source";
+	return undefined;
+}
+
+function invalidAnnounce(value: unknown): Error {
+	return new Error(`moq-publish: invalid announce="${value}", expected "source" or "always"`);
 }
 
 function parsePreview(value: string | null): Preview.Mode {
@@ -116,8 +121,9 @@ export default class MoqPublish extends HTMLElement {
 		preview: new Signal<Preview.Mode>("source"),
 		// Which graphics API draws a <canvas> preview.
 		backend: new Signal<Preview.Backend>("auto"),
-		// When to advertise the broadcast: always, or only once a source is live.
-		announce: new Signal<AnnounceMode>("source"),
+		// When to advertise the broadcast: always, or only once a source is live. Undefined while the
+		// `announce` attribute is invalid, which never announces.
+		announce: new Signal<AnnounceMode | undefined>("source"),
 	};
 
 	/**
@@ -347,7 +353,9 @@ export default class MoqPublish extends HTMLElement {
 		} else if (name === "source") {
 			this.controls.source.set(parseSource(newValue));
 		} else if (name === "announce") {
-			this.controls.announce.set(parseAnnounce(newValue));
+			const mode = parseAnnounce(newValue);
+			this.controls.announce.set(mode);
+			if (mode === undefined) throw invalidAnnounce(newValue);
 		} else if (name === "muted") {
 			this.controls.muted.set(parseBoolean(newValue, false));
 		} else if (name === "invisible") {
@@ -521,12 +529,13 @@ export default class MoqPublish extends HTMLElement {
 		this.controls.backend.set(value);
 	}
 
-	/** When to announce the broadcast, mirrored by the `announce` attribute. */
-	get announce(): AnnounceMode {
+	/** When to announce the broadcast, mirrored by the `announce` attribute; undefined while that attribute is invalid. */
+	get announce(): AnnounceMode | undefined {
 		return this.controls.announce.peek();
 	}
 
 	set announce(value: AnnounceMode) {
+		if (value !== "source" && value !== "always") throw invalidAnnounce(value);
 		this.controls.announce.set(value);
 	}
 }
