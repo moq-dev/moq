@@ -21,11 +21,14 @@ pub enum Output {
 	Native,
 	/// CPU-resident [`I420`](crate::I420), whatever produced it. A hardware
 	/// decode pays a download per picture; a backend that can decode straight
-	/// to system memory does that instead.
+	/// to system memory does that instead. A surface with no download, such as
+	/// a non-NV12 pixel buffer, is an error (see
+	/// [`Surface::into_i420`](crate::Surface::into_i420)).
 	Cpu,
 	/// What `render::Renderer` draws: a GPU surface it imports on this
-	/// platform stays one, and anything else arrives as [`Cpu`](Self::Cpu)
-	/// would. Without the `render` feature that is every frame.
+	/// platform stays one, and anything else is converted as [`Cpu`](Self::Cpu)
+	/// converts it, an error included. Without the `render` feature that is
+	/// every frame.
 	///
 	/// The renderer refuses the GPU surfaces it cannot import, so a source
 	/// feeding one asks for this instead of guessing which backend it will get.
