@@ -50,7 +50,7 @@ pub struct Endpoint {
 	allow_mtud: bool,
 	/// Time at which a stateless reset was most recently sent
 	last_stateless_reset: Option<Instant>,
-	/// Buffered Initial and 0-RTT messages for pending incoming connections
+	/// Buffered Initial messages for pending incoming connections
 	incoming_buffers: Slab<IncomingBuffer>,
 	all_incoming_buffers_total_bytes: u64,
 }
@@ -84,7 +84,8 @@ impl Endpoint {
 	/// Replace the server configuration, affecting new incoming connections only
 	///
 	/// Pending incoming connections retain the configuration active when they first arrived.
-	pub fn set_server_config(&mut self, server_config: Option<Arc<ServerConfig>>) {
+	#[cfg(test)]
+	pub(crate) fn set_server_config(&mut self, server_config: Option<Arc<ServerConfig>>) {
 		self.server_config = server_config;
 	}
 
@@ -141,7 +142,7 @@ impl Endpoint {
 	) -> Option<DatagramEvent> {
 		// Partially decode packet or short-circuit if unable
 		let datagram_len = data.len();
-		let event = match PartialDecode::new(
+		let mut event = match PartialDecode::new(
 			data,
 			&FixedLengthConnectionIdParser::new(self.local_cid_generator.cid_len()),
 			&self.config.supported_versions,
@@ -199,6 +200,21 @@ impl Endpoint {
 				return None;
 			}
 		};
+
+		// Drop leading early packets before routing or buffering, preserving a coalesced
+		// handshake packet after them.
+		while event.first_decode.is_0rtt() {
+			let data = event.remaining.take()?;
+			let (first_decode, remaining) = PartialDecode::new(
+				data,
+				&FixedLengthConnectionIdParser::new(self.local_cid_generator.cid_len()),
+				&self.config.supported_versions,
+				self.config.grease_quic_bit,
+			)
+			.ok()?;
+			event.first_decode = first_decode;
+			event.remaining = remaining;
+		}
 
 		let addresses = FourTuple { remote, local_ip };
 		let dst_cid = event.first_decode.dst_cid();
@@ -808,7 +824,7 @@ impl Endpoint {
 		let payload = TokenPayload::Retry {
 			address: incoming.addresses.remote,
 			orig_dst_cid: incoming.packet.header.dst_cid,
-			issued: server_config.time_source.now(),
+			issued: moq_clock::wall(),
 		};
 		let token = Token::new(payload, &mut self.rng).encode(&*server_config.token_key);
 
@@ -1004,9 +1020,10 @@ impl Endpoint {
 	}
 
 	/// Counter for the number of bytes currently used
-	/// in the buffers for Initial and 0-RTT messages for pending incoming connections
+	/// in the buffers for Initial messages for pending incoming connections
 	/// and accepts that are still being finalized
-	pub fn incoming_buffer_bytes(&self) -> u64 {
+	#[cfg(test)]
+	pub(crate) fn incoming_buffer_bytes(&self) -> u64 {
 		self.all_incoming_buffers_total_bytes
 	}
 
@@ -1065,7 +1082,7 @@ impl fmt::Debug for Endpoint {
 	}
 }
 
-/// Buffered Initial and 0-RTT messages for a pending incoming connection
+/// Buffered Initial messages for a pending incoming connection
 struct IncomingBuffer {
 	server_config: Arc<ServerConfig>,
 	datagrams: Vec<DatagramConnectionEvent>,
@@ -1167,7 +1184,7 @@ impl ConnectionIndex {
 		{
 			return Some(route);
 		}
-		if (datagram.is_initial() || datagram.is_0rtt())
+		if datagram.is_initial()
 			&& let Some(&route) = self.connection_ids_initial.get(&datagram.dst_cid())
 		{
 			return Some(route);
@@ -1257,7 +1274,7 @@ pub struct Incoming {
 impl Incoming {
 	/// The local IP address which was used when the peer established the connection
 	///
-	/// This has the same behavior as [`Connection::local_ip`].
+	/// Returns `None` when the receiving socket did not report a local address.
 	pub fn local_ip(&self) -> Option<IpAddr> {
 		self.addresses.local_ip
 	}
@@ -1284,11 +1301,6 @@ impl Incoming {
 	/// The inverse is not guaranteed.
 	pub fn may_retry(&self) -> bool {
 		self.token.retry_src_cid.is_none()
-	}
-
-	/// The original destination connection ID sent by the client
-	pub fn orig_dst_cid(&self) -> ConnectionId {
-		self.token.orig_dst_cid
 	}
 }
 

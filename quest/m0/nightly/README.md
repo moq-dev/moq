@@ -25,13 +25,17 @@ This README's own work, after the children:
   [audio jitter target](/quest/m1/audio-jitter-target/README.md), the
   macOS `receive_credit` timeout to
   [test flakes](/quest/m1/test-flakes-2/README.md), and the paired bench
-  threshold to [bench CI](/quest/m1/bench-ci.md). The `cli-export`
-  bufferbloat failure is expected to clear with
-  [moq-dev/moq#6656](https://github.com/moq-dev/moq/pull/6656).
+  threshold to [bench CI](/quest/m1/bench-ci.md).
 
 Public API: none. Wire: none.
 
 ## Required
 
-- [Feature shapes in the gate](/quest/m0/nightly/feature-shapes.md) - feature-gated dead code fails the PR that adds it, not the next Nightly
-- [Nightly's base in a shallow checkout](/quest/m0/nightly/shallow-base.md) - `sh/gh/nightly.test.py` passes in Nightly's depth-1 checkout
+- [moq-net compiles in Fuzz and send-depth](/quest/m0/nightly/send-overflow.md) - the ietf publisher future stops overflowing the Send check
+- [The Python sdist builds](/quest/m0/nightly/py-sdist.md) - the sdist carries every workspace crate moq-ffi needs
+- [OBS audio-candidate test](/quest/m0/nightly/obs-audio-candidate.md) - the failed audio candidate check passes under TSan and load, fixed at its reproduced cause
+- [moq-net builds without async](/quest/m0/nightly/net-async-free.md) - the no-default-features lane stops pulling `async` back in
+- [Feature shapes per crate](/quest/m0/nightly/hls-poll-closed-gate.md) - moq-hls `Broadcaster::poll_closed` is gated on `server`, and the gate checks each crate's feature shapes in isolation
+- [moq-relay tests build without default features](/quest/m0/nightly/relay-tests-features.md) - the integration tests gate their websocket and unix-socket fields on the features that define them
+- [qmux builds clean for iOS](/quest/m0/nightly/qmux-ios-dead-code.md) - `TcpStats` is gated to the platforms that implement it, so the iOS simulator build has no dead code
+- [Probe against Cubic](/quest/m0/nightly/competing-cubic.md) - the `competing_cubic` probe test stops resending a stream after its reset

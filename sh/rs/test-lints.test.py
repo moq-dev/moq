@@ -13,7 +13,9 @@ ROOT = Path(__file__).resolve().parents[2]
 
 class TestLints(unittest.TestCase):
     def test_clippy_warning_fails_test_build(self):
-        with tempfile.TemporaryDirectory() as directory:
+        temporary = ROOT / ".tmp"
+        temporary.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=temporary) as directory:
             root = Path(directory)
             (root / "rs").mkdir()
             (root / "sh" / "rs").mkdir(parents=True)
@@ -24,6 +26,7 @@ class TestLints(unittest.TestCase):
             shutil.copy(ROOT / "sh" / "rs" / "nextest.sh", root / "sh" / "rs" / "nextest.sh")
             (root / "Cargo.toml").write_text(
                 '[package]\nname = "test-lint-gate"\nversion = "0.0.0"\nedition = "2024"\n'
+                '\n[workspace]\n'
             )
             (root / "src" / "lib.rs").write_text(
                 'pub fn empty(values: &[u8]) -> bool { values.len() == 0 }\n'

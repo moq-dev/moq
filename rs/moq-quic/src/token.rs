@@ -51,8 +51,8 @@ pub trait TokenLog: Send + Sync {
 	///
 	/// A false positive (returning `Err` for a token which has never been used) is not a security
 	/// vulnerability; it is permissible for a `TokenLog` to always return `Err`. A false positive
-	/// causes the token to be ignored, which may cause the transmission of some 0.5-RTT data to be
-	/// delayed until the handshake completes, if a sufficient amount of 0.5-RTT data it sent.
+	/// causes the token to be ignored, which can delay a large handshake flight until the
+	/// client's address is validated.
 	///
 	/// [2]: https://en.wikipedia.org/wiki/Denial-of-service_attack#Amplification
 	fn check_and_insert(&self, nonce: u128, issued: Wall, lifetime: Duration) -> Result<(), TokenReuseError>;
@@ -62,8 +62,10 @@ pub trait TokenLog: Send + Sync {
 pub struct TokenReuseError;
 
 /// Null implementation of [`TokenLog`], which never accepts tokens
-pub struct NoneTokenLog;
+#[cfg(test)]
+pub(crate) struct NoneTokenLog;
 
+#[cfg(test)]
 impl TokenLog for NoneTokenLog {
 	fn check_and_insert(&self, _: u128, _: Wall, _: Duration) -> Result<(), TokenReuseError> {
 		Err(TokenReuseError)
@@ -85,16 +87,6 @@ pub trait TokenStore: Send + Sync {
 	///
 	/// Called when trying to connect to a server. It is always ok for this to return `None`.
 	fn take(&self, server_name: &str) -> Option<Bytes>;
-}
-
-/// Null implementation of [`TokenStore`], which does not store any tokens
-pub struct NoneTokenStore;
-
-impl TokenStore for NoneTokenStore {
-	fn insert(&self, _: &str, _: Bytes) {}
-	fn take(&self, _: &str) -> Option<Bytes> {
-		None
-	}
 }
 
 /// State in an `Incoming` determined by a token or lack thereof
@@ -149,7 +141,7 @@ impl IncomingToken {
 				}
 				if issued
 					.checked_add(server_config.retry_token_lifetime)
-					.is_none_or(|expires| expires < server_config.time_source.now())
+					.is_none_or(|expires| expires < moq_clock::wall())
 				{
 					return Err(InvalidRetryTokenError);
 				}
@@ -166,7 +158,7 @@ impl IncomingToken {
 				}
 				if issued
 					.checked_add(server_config.validation_token.lifetime)
-					.is_none_or(|expires| expires < server_config.time_source.now())
+					.is_none_or(|expires| expires < moq_clock::wall())
 				{
 					return Ok(unvalidated);
 				}

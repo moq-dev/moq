@@ -1,9 +1,9 @@
 //! Traits and implementations for the QUIC cryptography protocol
 //!
-//! The protocol logic in Quinn is contained in types that abstract over the actual
+//! The protocol logic in moq-quic is contained in types that abstract over the actual
 //! cryptographic protocol used. This module contains the traits used for this
 //! abstraction layer as well as a single implementation of these traits that uses
-//! *ring* and rustls to implement the TLS protocol support.
+//! rustls with ring or aws-lc-rs to implement the TLS protocol support.
 //!
 //! Note that usage of any protocol (version) other than TLS 1.3 does not conform to any
 //! published versions of the specification, and will not be supported in QUIC v1.
@@ -33,18 +33,6 @@ pub trait Session: Send + Sync + 'static {
 
 	/// Get the peer's identity, if available
 	fn peer_identity(&self) -> Option<Box<dyn Any>>;
-
-	/// Get the 0-RTT keys if available (clients only)
-	///
-	/// On the client side, this method can be used to see if 0-RTT key material is available
-	/// to start sending data before the protocol handshake has completed.
-	///
-	/// Returns `None` if the key material is not available. This might happen if you have
-	/// not connected to this server before.
-	fn early_crypto(&self) -> Option<(Box<dyn HeaderKey>, Box<dyn PacketKey>)>;
-
-	/// If the 0-RTT-encrypted data has been accepted by the peer
-	fn early_data_accepted(&self) -> Option<bool>;
 
 	/// Returns `true` until the connection is fully established.
 	fn is_handshaking(&self) -> bool;
@@ -130,6 +118,7 @@ pub trait ServerConfig: Send + Sync {
 	/// Start a server session with this configuration
 	///
 	/// Never called if `initial_keys` rejected `version`.
+	/// Sessions must reject early data; the transport only processes 1-RTT application packets.
 	fn start_session(self: Arc<Self>, version: u32, params: &TransportParameters) -> Box<dyn Session>;
 }
 

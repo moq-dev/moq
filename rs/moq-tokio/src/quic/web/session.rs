@@ -363,8 +363,7 @@ impl Session {
 	/// `options` schedule it.
 	pub fn send_datagram(&self, data: Bytes, options: SendOptions<'_>) -> Result<(), SessionError> {
 		let result = if !self.header_datagram.is_empty() {
-			// Unfortunately, we need to allocate/copy each datagram because of the driver API.
-			// Pls go +1 if you care: https://github.com/quinn-rs/quinn/issues/1724
+			// The driver sends a single contiguous buffer, including the session header.
 			let mut buf = BytesMut::with_capacity(self.header_datagram.len() + data.len());
 
 			// Prepend the datagram with the header indicating the session ID.
@@ -555,8 +554,7 @@ impl Session {
 	///
 	/// There is no HTTP/3 exchange, so [`Self::request`] and [`Self::response`] both
 	/// return `None`. [`Self::protocol`] reports the ALPN negotiated by the QUIC
-	/// handshake, read from `conn` on demand — a connection that is still handshaking
-	/// (from `into_0rtt`, say) is fine, it just has no ALPN to report until it is done.
+	/// handshake, when one was negotiated.
 	pub fn raw(conn: crate::quic::driver::Connection) -> Self {
 		Self {
 			conn,

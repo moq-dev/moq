@@ -13,11 +13,10 @@ Boundaries:
 
 - Only what moq-net can do. Subgroups other than 0, rendezvous, and
   per-request authorization tokens are not exposed, so they are out of
-  scope, and runner cells that need them stay red by design. PUBLISH (push)
-  and outbound forward=0 join coverage now that SUBSCRIBE_TRACKS outbound
-  ([#6280](https://github.com/moq-dev/moq/pull/6280)) and IETF subscribe
-  pause ([#6299](https://github.com/moq-dev/moq/pull/6299)) have landed
-  (decided 2026-10-22, maintainer).
+  scope, and runner cells that need them stay red by design.
+- PUBLISH (push) and outbound forward=0 are out of scope (decided
+  2026-10-25, maintainer, reversing the 2026-10-22 decision): no child
+  quest owned them, and the cases above carry the interop bug history.
 - Media stays hang. No MSF catalog in our runner clients.
 - New cases live in-tree (`test/interop`), not in the runner's spec.
 - Not covered: mid-subscription updates (`Subscription::update` in Rust and
@@ -53,4 +52,3 @@ coverage on `main` at `3ab6cbf81d`.
 
 - [Runner client bump](/quest/m2/release/runner-client-bump.md) - after the cut publishes #5083, the runner's Rust client stops stamping every object
 - [Interop audit](/quest/m2/audit-interop.md) - classifies the red cells these cases produce
-- [moq-transport passthrough](/quest/m1/ietf-extension/README.md) - Moxygen's moq-test conformance through moq-relay

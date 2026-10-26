@@ -27,6 +27,23 @@ nix develop --command cargo bench --locked -p moq-net --features fuzz --bench se
 nix develop --command env SESSION_CPU=1 cargo bench --locked -p moq-net --features fuzz --bench session -- session_delivery_group_cost_cpu
 ```
 
+Run the same session scenarios through relay admission, auth, cluster routing,
+and stats over the in-memory transport:
+
+```bash
+nix develop --command cargo bench --locked -p moq-relay --features test-support --bench session -- relay_session_dash_
+nix develop --command cargo bench --locked -p moq-relay --features test-support --bench session -- relay_session_delivery_group_cost
+```
+
+The relay and model targets share shapes and complete-payload assertions. The
+`relay_` prefix distinguishes results; the model-only idle case needs its server
+session handle and is not registered by the relay target. Relay fixtures enable
+stats and admit all benchmark paths using embedded auth. The dash viewer gets a
+peer grant to discover hidden stats routes on protocols without hidden opt-in. The announcement limit
+uses the existing peer limit so the large broadcast sweeps exercise routing
+rather than ordinary-client admission caps. These settings are benchmark-only.
+The relay target has its own Nightly leg.
+
 The CPU mode requires Unix and measures the benchmark's current thread, including
 its protocol drivers and the flow-control fixture but excluding scheduler
 preemption. Both modes exclude setup and cache-clock advancement. Constrained

@@ -15,7 +15,3 @@ output that falls behind drops its own audio, not the bus's.
 
 Benchmark source count against mix count, including sparse routing. A mix
 must cost only what is routed into it, never a scan of every source.
-
-## Required
-
-- [The studio app](/quest/m3/studio/app.md) - the single program bus this extends

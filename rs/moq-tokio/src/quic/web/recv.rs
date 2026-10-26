@@ -70,7 +70,7 @@ impl RecvStream {
 	/// Read a chunk of data from the stream. See [`crate::quic::driver::RecvStream::read_chunk`].
 	pub async fn read_chunk(&mut self, max_length: usize) -> Result<Option<Bytes>, ReadError> {
 		self.inner
-			.read_chunk(max_length, true)
+			.read_chunk(max_length)
 			.await
 			.map(|chunk| chunk.map(|chunk| chunk.bytes))
 			.map_err(|e| self.map_error(e))
@@ -87,7 +87,7 @@ impl RecvStream {
 	/// Block until the stream has been reset and return the error code. See
 	/// [`crate::quic::driver::RecvStream::received_reset`].
 	///
-	/// Unlike the driver, this returns a SessionError, not a ResetError, because 0-RTT is not supported.
+	/// Returns the stream's reset code or its session error.
 	pub async fn received_reset(&mut self) -> Result<Option<u32>, SessionError> {
 		match self.inner.received_reset().await {
 			Ok(None) => Ok(None),
@@ -96,7 +96,6 @@ impl RecvStream {
 				None => Ok(self.close.decode_stream_code(code)),
 			},
 			Err(crate::quic::driver::ResetError::ConnectionLost(conn_err)) => Err(self.close.map(conn_err.into())),
-			Err(crate::quic::driver::ResetError::ZeroRttRejected) => unreachable!("0-RTT not supported"),
 		}
 	}
 

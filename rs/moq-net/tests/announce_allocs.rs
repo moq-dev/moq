@@ -1,6 +1,7 @@
 #![cfg(feature = "async")]
 
-//! Allocation counting for an announce cursor whose winning route is unchanged.
+//! Allocation counting for the announce hot paths: decoding the paths a peer
+//! announces, and revisiting a cursor whose winning route is unchanged.
 //!
 //! Every route change at a prefix revisits each cursor presenting it, and on a
 //! dense mesh most of those visits find the cursor's winner unchanged: a worse
@@ -11,7 +12,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
-use moq_net::{Hop, Hops, Pattern, Patterns, origin};
+use moq_net::{Hop, Hops, Pattern, Patterns, fuzz::decode_path, origin};
 
 thread_local! {
 	/// Fresh allocations made by *this* thread. Per-thread because the harness may
@@ -95,5 +96,38 @@ fn an_unchanged_winner_allocates_nothing_per_cursor() {
 				"{cursors} cursors rooted at {root:?} allocated more than one"
 			);
 		}
+	}
+}
+
+/// Fresh allocations made while running `f`, including what it returns.
+fn allocs<R>(f: impl FnOnce() -> R) -> usize {
+	let before = ALLOCS.with(Cell::get);
+	let out = f();
+	let allocs = ALLOCS.with(Cell::get) - before;
+	drop(out);
+	allocs
+}
+
+/// A path decodes straight into the one shared buffer it keeps: moq-lite reads it in
+/// place, and a moq-transport tuple joins its fields into one escaped string first.
+#[test]
+fn a_decoded_path_allocates_only_its_buffer() {
+	let long = "1234/private/channel_7/stream-health-1700000000";
+	for path in ["room/alice", long] {
+		let mut wire = vec![path.len() as u8];
+		wire.extend_from_slice(path.as_bytes());
+		assert_eq!(decode_path(&wire, false).as_str(), path);
+		let lite = allocs(|| decode_path(&wire, false));
+		assert!(lite <= 1, "{lite} allocations for a moq-lite {path:?}");
+
+		let parts: Vec<&str> = path.split('/').collect();
+		let mut wire = vec![parts.len() as u8];
+		for part in &parts {
+			wire.push(part.len() as u8);
+			wire.extend_from_slice(part.as_bytes());
+		}
+		assert_eq!(decode_path(&wire, true).as_str(), path);
+		let ietf = allocs(|| decode_path(&wire, true));
+		assert!(ietf <= 2, "{ietf} allocations for a moq-transport {path:?}");
 	}
 }

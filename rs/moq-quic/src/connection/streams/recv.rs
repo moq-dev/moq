@@ -6,7 +6,7 @@ use tracing::debug;
 
 use super::state::get_or_insert_recv;
 use super::{ClosedStream, Leased, Retransmits, ShouldTransmit, StreamId, StreamsState};
-use crate::connection::assembler::{Assembler, Chunk, IllegalOrderedRead};
+use crate::connection::assembler::{Assembler, Chunk};
 use crate::connection::streams::state::StreamRecv;
 use crate::{TransportError, VarInt, frame};
 
@@ -306,7 +306,6 @@ impl Recv {
 /// another read from the stream is done.
 pub struct Chunks<'a> {
 	id: StreamId,
-	ordered: bool,
 	streams: &'a mut StreamsState,
 	pending: &'a mut Retransmits,
 	state: ChunksState,
@@ -316,7 +315,6 @@ pub struct Chunks<'a> {
 impl<'a> Chunks<'a> {
 	pub(super) fn new(
 		id: StreamId,
-		ordered: bool,
 		streams: &'a mut StreamsState,
 		pending: &'a mut Retransmits,
 	) -> Result<Self, ReadableError> {
@@ -329,11 +327,9 @@ impl<'a> Chunks<'a> {
 		if recv.stopped {
 			return Err(ReadableError::ClosedStream);
 		}
-		recv.assembler.ensure_ordering(ordered)?;
 		let recv = entry.remove().unwrap().into_inner(); // initialized above
 		Ok(Self {
 			id,
-			ordered,
 			streams,
 			pending,
 			state: ChunksState::Readable(recv),
@@ -356,7 +352,7 @@ impl<'a> Chunks<'a> {
 			ChunksState::Finalized => panic!("must not call next() after finalize()"),
 		};
 
-		if let Some(chunk) = rs.assembler.read(max_length, self.ordered) {
+		if let Some(chunk) = rs.assembler.read(max_length) {
 			self.read += chunk.bytes.len() as u64;
 			return Ok(Some(chunk));
 		}
@@ -476,18 +472,6 @@ pub enum ReadableError {
 	/// The stream has not been opened or was already stopped, finished, or reset
 	#[error("closed stream")]
 	ClosedStream,
-	/// Attempted an ordered read following an unordered read
-	///
-	/// Performing an unordered read allows discontinuities to arise in the receive buffer of a
-	/// stream which cannot be recovered, making further ordered reads impossible.
-	#[error("ordered read after unordered read")]
-	IllegalOrderedRead,
-}
-
-impl From<IllegalOrderedRead> for ReadableError {
-	fn from(_: IllegalOrderedRead) -> Self {
-		Self::IllegalOrderedRead
-	}
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]

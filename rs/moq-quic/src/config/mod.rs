@@ -16,7 +16,7 @@ use crate::BloomTokenLog;
 use crate::crypto::rustls::{QuicServerConfig, configured_provider};
 use crate::{
 	DEFAULT_SUPPORTED_VERSIONS, Duration, MAX_CID_SIZE, RandomConnectionIdGenerator, TokenLog, TokenMemoryCache,
-	TokenStore, VarInt, VarIntBoundsExceeded, Wall,
+	TokenStore, VarInt, VarIntBoundsExceeded,
 	cid_generator::{ConnectionIdGenerator, HashedConnectionIdGenerator},
 	crypto::{self, HandshakeTokenKey, HmacKey},
 	shared::ConnectionId,
@@ -68,7 +68,7 @@ impl EndpointConfig {
 	/// connections involving that  `Endpoint`. A custom CID generator allows applications to embed
 	/// information in local connection IDs, e.g. to support stateless packet-level load balancers.
 	///
-	/// Defaults to [`HashedConnectionIdGenerator`].
+	/// Defaults to an authenticated connection ID generator.
 	pub fn cid_generator(
 		&mut self,
 		factory: Arc<dyn Fn() -> Box<dyn ConnectionIdGenerator> + Send + Sync>,
@@ -91,7 +91,7 @@ impl EndpointConfig {
 	/// section 21.11 requires that packets for a live connection only ever reach its owner: share
 	/// it across live endpoints only behind one address that routes by connection ID.
 	///
-	/// Also keys a [`HashedConnectionIdGenerator`] from it, since an endpoint drops packets for
+	/// Also keys the default authenticated connection ID generator from it, since an endpoint drops packets for
 	/// connection IDs it can't validate instead of resetting them. Set
 	/// [`cid_generator`](Self::cid_generator) afterwards to use another generator; it must accept
 	/// the predecessor's IDs for the reset to reach them.
@@ -151,7 +151,7 @@ impl EndpointConfig {
 	/// Get the current value of [`max_udp_payload_size`](Self::max_udp_payload_size)
 	//
 	// While most parameters don't need to be readable, this must be exposed to allow higher-level
-	// layers, e.g. the `quinn` crate, to determine how large a receive buffer to allocate to
+	// drivers, such as `moq_tokio::quic::driver`, to determine how large a receive buffer to allocate to
 	// support an externally-defined `EndpointConfig`.
 	//
 	// While `get_` accessors are typically unidiomatic in Rust, we favor concision for setters,
@@ -193,9 +193,9 @@ impl EndpointConfig {
 
 	/// Optional seed to be used internally for random number generation
 	///
-	/// By default, quinn will initialize an endpoint's rng using a platform entropy source.
-	/// However, you can seed the rng yourself through this method (e.g. if you need to run quinn
-	/// deterministically or if you are using quinn in an environment that doesn't have a source of
+	/// By default, moq-quic initializes an endpoint's rng using a platform entropy source.
+	/// However, you can seed the rng yourself through this method (e.g. if you need to run the transport
+	/// deterministically or if you are using the transport in an environment that doesn't have a source of
 	/// entropy available).
 	pub fn rng_seed(&mut self, seed: Option<[u8; 32]>) -> &mut Self {
 		self.rng_seed = seed;
@@ -266,8 +266,6 @@ pub struct ServerConfig {
 	pub(crate) max_incoming: usize,
 	pub(crate) incoming_buffer_size: u64,
 	pub(crate) incoming_buffer_size_total: u64,
-
-	pub(crate) time_source: Arc<dyn TimeSource>,
 }
 
 impl ServerConfig {
@@ -290,8 +288,6 @@ impl ServerConfig {
 			max_incoming: 1 << 16,
 			incoming_buffer_size: 10 << 20,
 			incoming_buffer_size_total: 100 << 20,
-
-			time_source: Arc::new(StdSystemTime),
 		}
 	}
 
@@ -366,11 +362,9 @@ impl ServerConfig {
 	///
 	/// This limit governs packets received after the first packet and before the attempt is either
 	/// registered as an active connection or otherwise disposed of. Packets received in excess of
-	/// this limit are dropped, which may cause 0-RTT or handshake data to have to be retransmitted.
+	/// this limit are dropped, which may require handshake data to be retransmitted.
 	///
-	/// The default value is set to 10 MiB--an amount such that in most situations a client would
-	/// not transmit that much 0-RTT data faster than the server handles the corresponding
-	/// [`Incoming`][crate::Incoming].
+	/// The default value is 10 MiB. Early-data packets are discarded.
 	pub fn incoming_buffer_size(&mut self, incoming_buffer_size: u64) -> &mut Self {
 		self.incoming_buffer_size = incoming_buffer_size;
 		self
@@ -380,23 +374,12 @@ impl ServerConfig {
 	///
 	/// This limit governs packets received after each attempt's first packet and before the attempt
 	/// is either registered as an active connection or otherwise disposed of. Packets received in
-	/// excess of this limit are dropped, which may cause 0-RTT or handshake data to have to be
-	/// retransmitted.
+	/// excess of this limit are dropped, which may require handshake data to be retransmitted.
 	///
 	/// The default value is set to 100 MiB--a generous amount that still prevents memory
 	/// exhaustion in most contexts.
 	pub fn incoming_buffer_size_total(&mut self, incoming_buffer_size_total: u64) -> &mut Self {
 		self.incoming_buffer_size_total = incoming_buffer_size_total;
-		self
-	}
-
-	/// Object to get current [`Wall`]
-	///
-	/// This exists to allow system time to be mocked in tests, or wherever else desired.
-	///
-	/// Defaults to [`StdSystemTime`], which reads the ambient clock's wall time.
-	pub fn time_source(&mut self, time_source: Arc<dyn TimeSource>) -> &mut Self {
-		self.time_source = time_source;
 		self
 	}
 
@@ -491,12 +474,8 @@ impl fmt::Debug for ServerConfig {
 ///   one or more "validation tokens," which the client may store for use in later connections to
 ///   the same server. Validation tokens may be valid for much longer lifetimes than retry token.
 ///
-/// The usage of validation tokens is most impactful in situations where 0-RTT data is also being
-/// used--in particular, in situations where the server sends the client more than three times more
-/// 0.5-RTT data than it has received 0-RTT data. Since the successful completion of a connection
-/// handshake implicitly causes the client's address to be validated, transmission of 0.5-RTT data
-/// is the main situation where a server might be sending application data to an address that could
-/// be validated by token usage earlier than it would become validated without token usage.
+/// Validation tokens let the server validate the client's address before the handshake
+/// completes, avoiding the amplification limit while sending a large handshake flight.
 ///
 /// [1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-8
 /// [2]: https://en.wikipedia.org/wiki/IP_address_spoofing
@@ -530,7 +509,8 @@ impl ValidationTokenConfig {
 	///
 	/// Defaults to [`BloomTokenLog`][crate::BloomTokenLog], suitable for internet applications.
 	/// Set [`NoneTokenLog`][crate::NoneTokenLog] to ignore NEW_TOKEN address validation tokens.
-	pub fn log(&mut self, log: Arc<dyn TokenLog>) -> &mut Self {
+	#[cfg(test)]
+	pub(crate) fn log(&mut self, log: Arc<dyn TokenLog>) -> &mut Self {
 		self.log = log;
 		self
 	}
@@ -626,7 +606,8 @@ impl ClientConfig {
 	/// Set a custom [`TokenStore`]
 	///
 	/// Defaults to [`TokenMemoryCache`], which is suitable for most internet applications.
-	pub fn token_store(&mut self, store: Arc<dyn TokenStore>) -> &mut Self {
+	#[cfg(test)]
+	pub(crate) fn token_store(&mut self, store: Arc<dyn TokenStore>) -> &mut Self {
 		self.token_store = store;
 		self
 	}
@@ -679,24 +660,5 @@ impl From<TryFromIntError> for ConfigError {
 impl From<VarIntBoundsExceeded> for ConfigError {
 	fn from(_: VarIntBoundsExceeded) -> Self {
 		Self::OutOfBounds
-	}
-}
-
-/// Object to get current [`Wall`]
-///
-/// This exists to allow system time to be mocked in tests, or wherever else desired.
-pub trait TimeSource: Send + Sync {
-	/// Get [`Wall::now()`](Wall::now) or the mocked equivalent
-	fn now(&self) -> Wall;
-}
-
-/// Default implementation of [`TimeSource`]
-///
-/// Implements `now` by reading the ambient clock's wall time, [`moq_clock::wall()`].
-pub struct StdSystemTime;
-
-impl TimeSource for StdSystemTime {
-	fn now(&self) -> Wall {
-		moq_clock::wall()
 	}
 }

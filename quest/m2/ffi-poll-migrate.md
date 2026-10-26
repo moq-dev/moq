@@ -77,4 +77,4 @@ get items in call order; sequence and arrival order are unchanged. Wire: none.
 ## Related
 
 - [Foreign poll for hot reads](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-poll-protocol.md) - the generated protocol that follows this, once the fork exists
-- [Runtime trait](/quest/m2/runtime-trait.md) - moq-ffi's remaining tokio use may move behind it
+- [Libraries spawn nothing](/quest/m1/poll-first/no-spawn.md) - moq-ffi spawns only its root at the binding boundary

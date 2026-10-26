@@ -18,8 +18,8 @@ no_fuzz := "--exclude moq-net-fuzz --exclude moq-quic-fuzz"
 default:
     just check
 
-# Default features for the selected packages. The full workspace permutations
-# each cost a separate compile, so `features` covers them nightly. No `cargo
+# Default features for the selected packages. Selection also checks feature
+# extremes; `features` covers the full matrix nightly. No `cargo
 # check` pass: clippy is a superset of it, and the two use different rustc
 # wrappers, so running both compiles the workspace twice.
 #
@@ -99,6 +99,7 @@ windows $BASE="":
 windows-test:
     just rs test --manifest-path rs/moq-auth/Cargo.toml
     just rs test -p hang -p moq-tokio -p moq-sock -p moq-relay
+    just rs test -p moq-video --no-default-features --features render -E 'test(/^render::export::/)'
 
 # Run io_uring tests when the branch affects the relay or its dependencies.
 [positional-arguments]
@@ -141,18 +142,19 @@ macos-test:
     just rs test -p hang -p moq-tokio -p moq-sock
     just rs test -p moq-sock --features fast-apple-datapath
     just rs test -p moq-video --no-default-features -E 'test(encode::backend::videotoolbox::tests)'
+    just rs test -p moq-video --no-default-features --features render -E 'test(/^render::export::/)'
 
 # Compile and lint the capture and playback features, which the default check skips.
 [positional-arguments]
 capture *args:
-    bash sh/local.sh cargo clippy --locked -p moq-video -p moq-audio --all-targets --features moq-video/capture,moq-audio/capture,moq-audio/playback "$@" -- -D warnings
+    bash sh/local.sh cargo clippy --locked -p moq-video -p moq-audio -p moq-scene -p moq-studio --all-targets --features moq-video/capture,moq-audio/capture,moq-audio/playback,moq-scene/capture,moq-studio/capture "$@" -- -D warnings
 
 # The capture and playback tests drive synthetic devices, so they need no hardware.
 
 # Test the capture and playback features, which the default test pass skips.
 [positional-arguments]
 capture-test *args:
-    just rs test -p moq-video -p moq-audio --features moq-video/capture,moq-audio/capture,moq-audio/playback "$@"
+    just rs test -p moq-video -p moq-audio -p moq-scene -p moq-studio --features moq-video/capture,moq-audio/capture,moq-audio/playback,moq-scene/capture,moq-studio/capture "$@"
 
 # Compare SHM and GetImage through production capture on the current X11 display.
 x11-bench:
@@ -226,15 +228,19 @@ relay-minimal:
 c-tests:
     sh/rs/c-tests.sh
 
-# The feature permutations `check` leaves out, nightly. `--all-features` is the
-# only thing that compiles moq-cli's play/capture, the device features, the
-# Linux bindgen codecs, PipeWire, and jemalloc; `--no-default-features` the only
-# thing that compiles the `#[cfg(not(feature = ...))]` arms.
+# Benchmarks and examples stay in Nightly; the gate compiles the same targets
+# it tests, with both extremes exercising feature-gated implementation arms.
 
-# Compile the workspace at the feature extremes.
+# Compile and lint the selected packages at their feature extremes.
+[positional-arguments]
+feature-shapes *args:
+    bash sh/local.sh cargo clippy --locked --tests --no-default-features "$@" -- -D warnings
+    bash sh/local.sh cargo clippy --locked --tests --all-features "$@" -- -D warnings
+
+# Compile the full feature matrix, including isolated combinations and their tests.
 features:
-    just rs net-features
-    just rs quic-features
+    just rs net-features --all
+    just rs quic-features --all
     just rs tokio-features --all
     just rs media-features --all
     bash sh/local.sh cargo check --locked --workspace {{ no_fuzz }} --all-targets --no-default-features
@@ -252,19 +258,28 @@ features:
     bash sh/rs/nextest.sh cargo nextest run --locked --workspace {{ no_fuzz }} --all-targets --all-features
 
 # Compile and test the explicit-time model without async helpers or sessions.
-net-features:
-    bash sh/rs/net-features.sh
+[positional-arguments]
+net-features *args:
+    bash sh/rs/net-features.sh "$@"
 
 # Prove moq-quic leaves moq-clock's dev-only runtime to its consumers, and lints without its default features; a workspace build unifies both back in.
-quic-features:
+[positional-arguments]
+quic-features *args:
     #!/usr/bin/env bash
     set -euo pipefail
+    targets=(--tests)
+    if [[ $# == 1 && $1 == --all ]]; then
+        targets=(--all-targets)
+    elif [[ $# != 0 ]]; then
+        echo 'usage: just rs quic-features [--all]' >&2
+        exit 2
+    fi
     graph=$(cargo tree --locked -p moq-quic -e normal --prefix none)
     if grep -E '^(tokio|web-async) ' <<<"$graph"; then
         echo "moq-quic must not depend on a native runtime" >&2
         exit 1
     fi
-    bash sh/local.sh cargo clippy --locked -p moq-quic --all-targets --no-default-features -- -D warnings
+    bash sh/local.sh cargo clippy --locked -p moq-quic "${targets[@]}" --no-default-features -- -D warnings
 
 # Compile media boundaries (--all isolates every mode) and prove expensive
 # native/render dependencies are absent when their features are excluded.
@@ -344,7 +359,8 @@ cli-export *args:
 quic-stress:
     just rs test -p moq-tokio --lib --run-ignored only -E 'test(/^quic::driver::tests::stress_/)'
 
-# Render CPU frames through wgpu on Mesa's software Vulkan driver, so no GPU is needed.
+# Render CPU frames, composite scenes, and publish a studio program through wgpu on
+# Mesa's software Vulkan driver, so no GPU is needed.
 render-sw:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -354,6 +370,13 @@ render-sw:
     LD_LIBRARY_PATH="$loader/lib" VK_DRIVER_FILES="${icd[0]}" \
         just rs test -p moq-video --features render --lib --run-ignored only \
         -E 'test(/^render::renderer::tests::(the_declared_color_space_beats_the_size_guess|cpu_frames_survive_the_round_trip|config_size_overrides_the_frame_size)$/)'
+    # Mesa's software driver exports no memory, so this covers the readback route.
+    LD_LIBRARY_PATH="$loader/lib" VK_DRIVER_FILES="${icd[0]}" \
+        just rs test -p moq-video --features render,openh264 --lib --run-ignored only -E 'test(/^render::export::(nv12::)?tests::/)'
+    LD_LIBRARY_PATH="$loader/lib" VK_DRIVER_FILES="${icd[0]}" \
+        just rs test -p moq-scene --lib --run-ignored only -E 'test(/^compositor::tests::/)'
+    LD_LIBRARY_PATH="$loader/lib" VK_DRIVER_FILES="${icd[0]}" \
+        just rs test -p moq-studio --features openh264 --run-ignored only -E 'test(=engine::tests::the_program_reaches_a_relay)'
 
 # Run the ignored mDNS tests, which multicast on the host's network interfaces.
 multicast:
@@ -488,6 +511,11 @@ bench-latency:
 [positional-arguments]
 bench-ts-schedule *args:
     bash sh/local.sh cargo bench --locked -p moq-mux --bench ts_schedule -- "$@"
+
+# Ingest an MPTS across program count, bitrate and stray PIDs, the strays against null packets that skip the accounting.
+[positional-arguments]
+bench-ts-programs *args:
+    cargo bench --locked -p moq-mux --bench ts_programs -- "$@"
 
 # Sweep container export tracks and queued frames independently.
 [positional-arguments]

@@ -3,7 +3,7 @@ use std::{
 	fmt,
 	future::Future,
 	io,
-	net::{IpAddr, SocketAddr},
+	net::SocketAddr,
 	pin::Pin,
 	sync::{
 		Arc, OnceLock,
@@ -19,7 +19,7 @@ use thiserror::Error;
 use tokio::sync::{
 	Notify,
 	futures::{Notified, OwnedNotified},
-	mpsc, oneshot, watch,
+	mpsc, oneshot,
 };
 use tracing::{Instrument, Span, debug_span};
 
@@ -34,8 +34,8 @@ use crate::quic::driver::{
 };
 use moq_congestion::Controller;
 use moq_quic::{
-	ConnectionError, ConnectionHandle, ConnectionStats, Dir, EndpointEvent, Side, StreamEvent, StreamId,
-	TransportError, TransportErrorCode,
+	ConnectionError, ConnectionHandle, ConnectionStats, Dir, EndpointEvent, StreamEvent, StreamId, TransportError,
+	TransportErrorCode,
 };
 
 /// In-progress connection attempt future
@@ -97,67 +97,6 @@ impl Connecting {
 		}
 	}
 
-	/// Convert into a 0-RTT or 0.5-RTT connection at the cost of weakened security
-	///
-	/// Returns `Ok` immediately if the local endpoint is able to attempt sending 0/0.5-RTT data.
-	/// If so, the returned [`Connection`] can be used to send application data without waiting for
-	/// the rest of the handshake to complete, at the cost of weakened cryptographic security
-	/// guarantees. The [`Connection::authenticated`] future resolves when the handshake does
-	/// complete, at which point subsequently opened streams and written data will have full
-	/// cryptographic protection.
-	///
-	/// ## Outgoing
-	///
-	/// For outgoing connections, the initial attempt to convert to a [`Connection`] which sends
-	/// 0-RTT data will proceed if the [`crypto::ClientConfig`][crate::quic::driver::crypto::ClientConfig]
-	/// attempts to resume a previous TLS session. However, **the remote endpoint may not actually
-	/// _accept_ the 0-RTT data**--yet still accept the connection attempt in general. This
-	/// possibility is conveyed through `ZeroRttRejected` errors on stream I/O methods, which may
-	/// arise when the handshake completes. If 0-RTT was rejected, the existence of streams opened
-	/// and other application data sent by a client prior to the handshake completing will not be
-	/// conveyed to the remote application. Clients which need to e.g. re-transmit rejected stream
-	/// data must take care to detect `ZeroRttRejected` errors even on finished streams opened
-	/// during 0-RTT, e.g. by awaiting an application-layer response on bidirectional streams, or
-	/// awaiting [`SendStream::stopped`] on unidirectional streams.
-	///
-	/// A server may reject 0-RTT data at its discretion, but accepting 0-RTT data requires the
-	/// relevant resumption state to be stored in the server, which servers may limit or lose for
-	/// various reasons including not persisting resumption state across server restarts.
-	///
-	/// If manually providing a [`crypto::ClientConfig`][crate::quic::driver::crypto::ClientConfig], check your
-	/// implementation's docs for 0-RTT pitfalls.
-	///
-	/// ## Incoming
-	///
-	/// For incoming connections, conversion to 0.5-RTT will always succeed.
-	///
-	/// If manually providing a [`crypto::ServerConfig`][crate::quic::driver::crypto::ServerConfig], check your
-	/// implementation's docs for 0-RTT pitfalls.
-	///
-	/// ## Security
-	///
-	/// On outgoing connections, this enables transmission of 0-RTT data, which is vulnerable to
-	/// replay attacks, and should therefore never invoke non-idempotent operations.
-	///
-	/// On incoming connections, this enables transmission of 0.5-RTT data, which may be sent
-	/// before TLS client authentication has occurred, and should therefore not be used to send
-	/// data for which client authentication is being used.
-	pub fn into_0rtt(mut self) -> Result<Connection, Self> {
-		// This lock borrows `self` and would normally be dropped at the end of this scope, so we'll
-		// have to release it explicitly before returning `self` by value.
-		let conn = (self.conn.as_mut().unwrap()).state.lock("into_0rtt");
-
-		let is_ok = conn.inner.has_0rtt() || conn.inner.side().is_server();
-		drop(conn);
-
-		if is_ok {
-			let conn = self.conn.take().unwrap();
-			Ok(Connection(conn))
-		} else {
-			Err(self)
-		}
-	}
-
 	/// Parameters negotiated during the handshake
 	///
 	/// The dynamic type returned is determined by the configured
@@ -179,7 +118,7 @@ impl Connecting {
 			self.handshake_data_ready = None;
 		}
 		let conn = self.conn.as_ref().unwrap();
-		let inner = conn.state.lock("handshake");
+		let inner = conn.state.lock();
 		inner
 			.inner
 			.crypto_session()
@@ -187,30 +126,12 @@ impl Connecting {
 			.ok_or_else(|| inner.error.clone().expect("spurious handshake data ready notification"))
 	}
 
-	/// The local IP address which was used when the peer established
-	/// the connection
-	///
-	/// This can be different from the address the endpoint is bound to, in case
-	/// the endpoint is bound to a wildcard address like `0.0.0.0` or `::`.
-	///
-	/// This will return `None` for clients, or when the platform does not expose this
-	/// information. See [`moq_sock::udp::RecvMeta::dst_ip`] for a list of
-	/// supported platforms when using [`moq_sock::udp`] for I/O, which is the default.
-	///
-	/// Will panic if called after `poll` has returned `Ready`.
-	pub fn local_ip(&self) -> Option<IpAddr> {
-		let conn = self.conn.as_ref().unwrap();
-		let inner = conn.state.lock("local_ip");
-
-		inner.inner.local_ip()
-	}
-
 	/// The peer's UDP address
 	///
 	/// Will panic if called after `poll` has returned `Ready`.
 	pub fn remote_address(&self) -> SocketAddr {
 		let conn_ref: &ConnectionRef = self.conn.as_ref().expect("used after yielding Ready");
-		conn_ref.state.lock("remote_address").inner.remote_address()
+		conn_ref.state.lock().inner.remote_address()
 	}
 }
 
@@ -219,7 +140,7 @@ impl Future for Connecting {
 	fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
 		Pin::new(&mut self.connected).poll(cx).map(|_| {
 			let conn = self.conn.take().unwrap();
-			let inner = conn.state.lock("connecting");
+			let inner = conn.state.lock();
 			if inner.connected {
 				drop(inner);
 				Ok(Connection(conn))
@@ -253,7 +174,7 @@ struct ConnectionDriver {
 impl ConnectionDriver {
 	fn new(conn: ConnectionRef) -> Self {
 		let span = {
-			let conn = &mut conn.state.lock("poll");
+			let conn = &mut conn.state.lock();
 			debug_span!("drive", id = conn.handle.0)
 		};
 
@@ -265,7 +186,7 @@ impl Future for ConnectionDriver {
 	type Output = Result<(), io::Error>;
 
 	fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-		let conn = &mut *self.conn.state.lock("poll");
+		let conn = &mut *self.conn.state.lock();
 		let _guard = self.span.enter();
 
 		if let Err(e) = conn.process_conn_events(&self.conn.shared, cx) {
@@ -344,7 +265,10 @@ impl Connection {
 	///
 	/// # Panics
 	/// - when `options.group` belongs to another connection
-	pub fn open_uni<'a>(&'a self, options: SendOptions<'a>) -> OpenUni<'a> {
+	pub fn open_uni<'a>(
+		&'a self,
+		options: SendOptions<'a>,
+	) -> impl Future<Output = Result<SendStream, ConnectionError>> + 'a {
 		OpenUni {
 			conn: &self.0,
 			options,
@@ -373,7 +297,10 @@ impl Connection {
 	///
 	/// # Panics
 	/// - when `options.group` belongs to another connection
-	pub fn open_bi<'a>(&'a self, options: SendOptions<'a>) -> OpenBi<'a> {
+	pub fn open_bi<'a>(
+		&'a self,
+		options: SendOptions<'a>,
+	) -> impl Future<Output = Result<(SendStream, RecvStream), ConnectionError>> + 'a {
 		OpenBi {
 			conn: &self.0,
 			options,
@@ -382,19 +309,19 @@ impl Connection {
 	}
 
 	/// Open a request stream using only the credit already granted by the peer.
+	#[cfg(feature = "net")]
 	pub(crate) fn open_request(&self) -> Result<Option<(SendStream, RecvStream)>, ConnectionError> {
-		let mut state = self.0.state.lock("open_request");
+		let mut state = self.0.state.lock();
 		if let Some(err) = &state.error {
 			return Err(err.clone());
 		}
 		let Some(id) = state.inner.streams().open(Dir::Bi, Default::default()) else {
 			return Ok(None);
 		};
-		let is_0rtt = state.inner.side().is_client() && state.inner.is_handshaking();
 		drop(state);
 		Ok(Some((
-			SendStream::new(self.0.clone(), id, is_0rtt),
-			RecvStream::new(self.0.clone(), id, is_0rtt),
+			SendStream::new(self.0.clone(), id),
+			RecvStream::new(self.0.clone(), id),
 		)))
 	}
 
@@ -403,7 +330,7 @@ impl Connection {
 	/// # Cancel safety
 	///
 	/// This method is cancellation safe. If this does not resolve, no streams were consumed.
-	pub fn accept_uni(&self) -> AcceptUni<'_> {
+	pub fn accept_uni(&self) -> impl Future<Output = Result<RecvStream, ConnectionError>> + '_ {
 		AcceptUni {
 			conn: &self.0,
 			notify: self.0.shared.stream_incoming[Dir::Uni as usize].notified(),
@@ -424,7 +351,7 @@ impl Connection {
 	/// # Cancel safety
 	///
 	/// This method is cancellation safe. If this does not resolve, no streams were consumed.
-	pub fn accept_bi(&self) -> AcceptBi<'_> {
+	pub fn accept_bi(&self) -> impl Future<Output = Result<(SendStream, RecvStream), ConnectionError>> + '_ {
 		AcceptBi {
 			conn: &self.0,
 			notify: self.0.shared.stream_incoming[Dir::Bi as usize].notified(),
@@ -436,7 +363,7 @@ impl Connection {
 	/// # Cancel safety
 	///
 	/// This method is cancellation safe. If this does not resolve, no datagrams were consumed.
-	pub fn read_datagram(&self) -> ReadDatagram<'_> {
+	pub fn read_datagram(&self) -> impl Future<Output = Result<Bytes, ConnectionError>> + '_ {
 		ReadDatagram {
 			conn: &self.0,
 			notify: self.0.shared.datagram_received.notified(),
@@ -450,7 +377,7 @@ impl Connection {
 	/// and [`ConnectionError::ApplicationClosed`].
 	pub async fn closed(&self) -> ConnectionError {
 		{
-			let conn = self.0.state.lock("closed");
+			let conn = self.0.state.lock();
 			if let Some(error) = conn.error.as_ref() {
 				return error.clone();
 			}
@@ -462,7 +389,7 @@ impl Connection {
 		.await;
 		self.0
 			.state
-			.lock("closed")
+			.lock()
 			.error
 			.as_ref()
 			.expect("closed without an error")
@@ -478,7 +405,7 @@ impl Connection {
 	///
 	/// Note: when the connection is closed, `connection.close_reason().is_some()` will always be true.
 	pub fn close_reason(&self) -> Option<ConnectionError> {
-		self.0.state.lock("close_reason").error.clone()
+		self.0.state.lock().error.clone()
 	}
 
 	/// Close the connection immediately.
@@ -513,40 +440,8 @@ impl Connection {
 	/// [`Endpoint::wait_idle()`]: crate::quic::driver::Endpoint::wait_idle
 	/// [`close()`]: Connection::close
 	pub fn close(&self, error_code: VarInt, reason: &[u8]) {
-		let conn = &mut *self.0.state.lock("close");
+		let conn = &mut *self.0.state.lock();
 		conn.close(error_code, Bytes::copy_from_slice(reason), &self.0.shared);
-	}
-
-	/// Wait for the handshake to be confirmed.
-	///
-	/// As a server, who must be authenticated by clients,
-	/// this happens when the handshake completes
-	/// upon receiving a TLS Finished message from the client.
-	/// In return, the server send a HANDSHAKE_DONE frame.
-	///
-	/// As a client, this happens when receiving a HANDSHAKE_DONE frame.
-	/// At this point, the server has either accepted our authentication,
-	/// or, if client authentication is not required, accepted our lack of authentication.
-	pub async fn handshake_confirmed(&self) -> Result<(), ConnectionError> {
-		{
-			let conn = self.0.state.lock("handshake_confirmed");
-			if let Some(error) = conn.error.as_ref() {
-				return Err(error.clone());
-			}
-			if conn.handshake_confirmed {
-				return Ok(());
-			}
-			// Construct the future while the lock is held to ensure we can't miss a wakeup if
-			// the `Notify` is signaled immediately after we release the lock. `await` it after
-			// the lock guard is out of scope.
-			self.0.shared.handshake_confirmed.notified()
-		}
-		.await;
-		if let Some(error) = self.0.state.lock("handshake_confirmed").error.as_ref() {
-			Err(error.clone())
-		} else {
-			Ok(())
-		}
 	}
 
 	/// Transmit `data` as an unreliable application datagram, scheduled by `options`
@@ -563,7 +458,7 @@ impl Connection {
 	/// - when `options.group` belongs to another connection
 	pub fn send_datagram(&self, data: Bytes, options: SendOptions<'_>) -> Result<(), SendDatagramError> {
 		let options = send_group::to_quic(options, &self.0.0);
-		let conn = &mut *self.0.state.lock("send_datagram");
+		let conn = &mut *self.0.state.lock();
 		if let Some(x) = &conn.error {
 			return Err(SendDatagramError::ConnectionLost(x.clone()));
 		}
@@ -584,7 +479,7 @@ impl Connection {
 	///
 	/// [`send_datagram()`]: Connection::send_datagram
 	pub fn max_datagram_size(&self) -> Option<usize> {
-		self.0.state.lock("max_datagram_size").inner.datagrams().max_size()
+		self.0.state.lock().inner.datagrams().max_size()
 	}
 
 	/// Bytes available in the outgoing datagram buffer
@@ -592,17 +487,7 @@ impl Connection {
 	/// When greater than zero, calling [`send_datagram()`](Self::send_datagram) with a datagram of
 	/// at most this size is guaranteed not to cause older datagrams to be dropped.
 	pub fn datagram_send_buffer_space(&self) -> usize {
-		self.0
-			.state
-			.lock("datagram_send_buffer_space")
-			.inner
-			.datagrams()
-			.send_buffer_space()
-	}
-
-	/// The side of the connection (client or server)
-	pub fn side(&self) -> Side {
-		self.0.state.lock("side").inner.side()
+		self.0.state.lock().inner.datagrams().send_buffer_space()
 	}
 
 	/// The peer's UDP address
@@ -610,58 +495,30 @@ impl Connection {
 	/// If `ServerConfig::migration` is `true`, clients may change addresses at will, e.g. when
 	/// switching to a cellular internet connection.
 	pub fn remote_address(&self) -> SocketAddr {
-		self.0.state.lock("remote_address").inner.remote_address()
-	}
-
-	/// Watch the peer's UDP address.
-	///
-	/// If `ServerConfig::migration` is `true`, clients may change addresses at will, e.g. when
-	/// switching to a cellular internet connection.
-	pub fn watch_remote_address(&self) -> RemoteAddressWatcher {
-		let receiver = self.0.state.lock("watch_remote_address").remote_address.subscribe();
-
-		RemoteAddressWatcher { receiver }
-	}
-
-	/// The local IP address which was used when the peer established
-	/// the connection
-	///
-	/// This can be different from the address the endpoint is bound to, in case
-	/// the endpoint is bound to a wildcard address like `0.0.0.0` or `::`.
-	///
-	/// This will return `None` for clients, or when the platform does not expose this
-	/// information. See [`moq_sock::udp::RecvMeta::dst_ip`] for a list of
-	/// supported platforms when using [`moq_sock::udp`] for I/O, which is the default.
-	pub fn local_ip(&self) -> Option<IpAddr> {
-		self.0.state.lock("local_ip").inner.local_ip()
+		self.0.state.lock().inner.remote_address()
 	}
 
 	/// Current best estimate of this connection's latency (round-trip-time)
 	pub fn rtt(&self) -> Duration {
-		self.0.state.lock("rtt").inner.rtt()
-	}
-
-	/// Minimum RTT seen on this path, ignoring ack delay
-	pub fn min_rtt(&self) -> Duration {
-		self.0.state.lock("min_rtt").inner.min_rtt()
+		self.0.state.lock().inner.rtt()
 	}
 
 	/// Returns connection statistics
 	pub fn stats(&self) -> ConnectionStats {
-		self.0.state.lock("stats").inner.stats()
+		self.0.state.lock().inner.stats()
 	}
 
 	/// Whether the connection has freed the send stream's state
 	#[cfg(test)]
 	pub(crate) fn send_stream_freed(&self, id: StreamId) -> bool {
-		let mut state = self.0.state.lock("send_stream_freed");
+		let mut state = self.0.state.lock();
 		state.inner.send_stream(id).stopped().is_err()
 	}
 
 	/// How many streams have `SendStream::stopped` waiters registered, to check none leak
 	#[cfg(test)]
 	pub(crate) fn stopped_waiters(&self) -> usize {
-		self.0.state.lock("stopped_waiters").stopped.len()
+		self.0.state.lock().stopped.len()
 	}
 
 	/// The wire counters the driver updates as it sends and receives.
@@ -678,39 +535,7 @@ impl Connection {
 
 	/// Current state of the congestion control algorithm, for debugging purposes
 	pub fn congestion_state(&self) -> Box<dyn Controller> {
-		self.0
-			.state
-			.lock("congestion_state")
-			.inner
-			.congestion_state()
-			.clone_box()
-	}
-
-	/// Succeeds when an incoming connection is proven not to be a replay attack.
-	///
-	/// Only interesting for `Connection`s obtained from [`Connecting::into_0rtt`]. On 1-RTT
-	/// connections, always completes immediately. Contrast
-	/// [`handshake_confirmed`](Self::handshake_confirmed), which waits longer on clients e.g. to
-	/// confirm client authentication.
-	///
-	/// For incoming connections, reads from [`RecvStream`]s are guaranteed not to arise from replay
-	/// attacks after this succeeds, even for streams accepted or read during 0-RTT. For outgoing
-	/// connections, streams opened after this succeeds will never be discarded by the server due to
-	/// 0-RTT rejection.
-	pub async fn authenticated(&self) -> Result<(), ConnectionError> {
-		let notified = {
-			let conn = self.0.state.lock("connected");
-			if let Some(e) = &conn.error {
-				return Err(e.clone());
-			}
-			if conn.connected {
-				return Ok(());
-			}
-			self.0.shared.connected.notified()
-		};
-		notified.await;
-		let conn = self.0.state.lock("connected");
-		conn.error.clone().map_or(Ok(()), Err)
+		self.0.state.lock().inner.congestion_state().clone_box()
 	}
 
 	/// Parameters negotiated during the handshake
@@ -721,12 +546,7 @@ impl Connection {
 	///
 	/// [`Connection::handshake_data()`]: crate::quic::driver::Connecting::handshake_data
 	pub fn handshake_data(&self) -> Option<Box<dyn Any>> {
-		self.0
-			.state
-			.lock("handshake_data")
-			.inner
-			.crypto_session()
-			.handshake_data()
+		self.0.state.lock().inner.crypto_session().handshake_data()
 	}
 
 	/// Cryptographic identity of the peer
@@ -739,12 +559,7 @@ impl Connection {
 	/// database), call this after awaiting [`Connecting`] and use [`close()`][Self::close] to
 	/// reject untrusted peers.
 	pub fn peer_identity(&self) -> Option<Box<dyn Any>> {
-		self.0
-			.state
-			.lock("peer_identity")
-			.inner
-			.crypto_session()
-			.peer_identity()
+		self.0.state.lock().inner.crypto_session().peer_identity()
 	}
 
 	/// A stable identifier for this connection
@@ -755,13 +570,6 @@ impl Connection {
 		self.0.stable_id()
 	}
 
-	/// Update traffic keys spontaneously
-	///
-	/// This primarily exists for testing purposes.
-	pub fn force_key_update(&self) {
-		self.0.state.lock("force_key_update").inner.force_key_update()
-	}
-
 	/// Derive keying material from this connection's TLS session secrets.
 	///
 	/// When both peers call this method with the same `label` and `context`
@@ -770,7 +578,8 @@ impl Connection {
 	/// strong and pseudorandom, and are suitable for use as keying material.
 	///
 	/// See [RFC5705](https://tools.ietf.org/html/rfc5705) for more information.
-	pub fn export_keying_material(
+	#[cfg(test)]
+	pub(super) fn export_keying_material(
 		&self,
 		output: &mut [u8],
 		label: &[u8],
@@ -778,51 +587,15 @@ impl Connection {
 	) -> Result<(), moq_quic::crypto::ExportKeyingMaterialError> {
 		self.0
 			.state
-			.lock("export_keying_material")
+			.lock()
 			.inner
 			.crypto_session()
 			.export_keying_material(output, label, context)
 	}
 
-	/// Modify the number of remotely initiated unidirectional streams that may be concurrently open
-	///
-	/// No streams may be opened by the peer unless fewer than `count` are already open. Large
-	/// `count`s increase both minimum and worst-case memory consumption.
-	pub fn set_max_concurrent_uni_streams(&self, count: VarInt) {
-		let mut conn = self.0.state.lock("set_max_concurrent_uni_streams");
-		conn.inner.set_max_concurrent_streams(Dir::Uni, count);
-		// May need to send MAX_STREAMS to make progress
-		conn.wake();
-	}
-
-	/// See [`moq_quic::TransportConfig::send_window()`]
-	pub fn set_send_window(&self, send_window: u64) {
-		let mut conn = self.0.state.lock("set_send_window");
-		conn.inner.set_send_window(send_window);
-		conn.wake();
-	}
-
-	/// See [`moq_quic::TransportConfig::receive_window()`]
-	pub fn set_receive_window(&self, receive_window: VarInt) {
-		let mut conn = self.0.state.lock("set_receive_window");
-		conn.inner.set_receive_window(receive_window);
-		conn.wake();
-	}
-
-	/// Modify the number of remotely initiated bidirectional streams that may be concurrently open
-	///
-	/// No streams may be opened by the peer unless fewer than `count` are already open. Large
-	/// `count`s increase both minimum and worst-case memory consumption.
-	pub fn set_max_concurrent_bi_streams(&self, count: VarInt) {
-		let mut conn = self.0.state.lock("set_max_concurrent_bi_streams");
-		conn.inner.set_max_concurrent_streams(Dir::Bi, count);
-		// May need to send MAX_STREAMS to make progress
-		conn.wake();
-	}
-
 	/// See [`moq_quic::Connection::set_limits`]
 	pub fn set_limits(&self, limits: moq_quic::Limits) -> Result<(), moq_quic::LimitsError> {
-		let mut conn = self.0.state.lock("set_limits");
+		let mut conn = self.0.state.lock();
 		conn.inner.set_limits(limits)?;
 		// May need to send MAX_DATA or MAX_STREAMS to make progress
 		conn.wake();
@@ -832,7 +605,7 @@ impl Connection {
 
 pin_project! {
 	/// Future produced by [`Connection::open_uni`]
-	pub struct OpenUni<'a> {
+	struct OpenUni<'a> {
 		conn: &'a ConnectionRef,
 		options: SendOptions<'a>,
 		#[pin]
@@ -844,14 +617,14 @@ impl Future for OpenUni<'_> {
 	type Output = Result<SendStream, ConnectionError>;
 	fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
 		let this = self.project();
-		let (conn, id, is_0rtt) = ready!(poll_open(ctx, this.conn, *this.options, this.notify, Dir::Uni))?;
-		Poll::Ready(Ok(SendStream::new(conn, id, is_0rtt)))
+		let (conn, id) = ready!(poll_open(ctx, this.conn, *this.options, this.notify, Dir::Uni))?;
+		Poll::Ready(Ok(SendStream::new(conn, id)))
 	}
 }
 
 pin_project! {
 	/// Future produced by [`Connection::open_bi`]
-	pub struct OpenBi<'a> {
+	struct OpenBi<'a> {
 		conn: &'a ConnectionRef,
 		options: SendOptions<'a>,
 		#[pin]
@@ -863,12 +636,9 @@ impl Future for OpenBi<'_> {
 	type Output = Result<(SendStream, RecvStream), ConnectionError>;
 	fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
 		let this = self.project();
-		let (conn, id, is_0rtt) = ready!(poll_open(ctx, this.conn, *this.options, this.notify, Dir::Bi))?;
+		let (conn, id) = ready!(poll_open(ctx, this.conn, *this.options, this.notify, Dir::Bi))?;
 
-		Poll::Ready(Ok((
-			SendStream::new(conn.clone(), id, is_0rtt),
-			RecvStream::new(conn, id, is_0rtt),
-		)))
+		Poll::Ready(Ok((SendStream::new(conn.clone(), id), RecvStream::new(conn, id))))
 	}
 }
 
@@ -878,15 +648,14 @@ fn poll_open<'a>(
 	options: SendOptions<'_>,
 	mut notify: Pin<&mut Notified<'a>>,
 	dir: Dir,
-) -> Poll<Result<(ConnectionRef, StreamId, bool), ConnectionError>> {
+) -> Poll<Result<(ConnectionRef, StreamId), ConnectionError>> {
 	let options = send_group::to_quic(options, &conn.0);
-	let mut state = conn.state.lock("poll_open");
+	let mut state = conn.state.lock();
 	if let Some(e) = &state.error {
 		return Poll::Ready(Err(e.clone()));
 	} else if let Some(id) = state.inner.streams().open(dir, options) {
-		let is_0rtt = state.inner.side().is_client() && state.inner.is_handshaking();
 		drop(state); // Release the lock so clone can take it
-		return Poll::Ready(Ok((conn.clone(), id, is_0rtt)));
+		return Poll::Ready(Ok((conn.clone(), id)));
 	}
 	loop {
 		match notify.as_mut().poll(ctx) {
@@ -900,7 +669,7 @@ fn poll_open<'a>(
 
 pin_project! {
 	/// Future produced by [`Connection::accept_uni`]
-	pub struct AcceptUni<'a> {
+	struct AcceptUni<'a> {
 		conn: &'a ConnectionRef,
 		#[pin]
 		notify: Notified<'a>,
@@ -912,14 +681,14 @@ impl Future for AcceptUni<'_> {
 
 	fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
 		let this = self.project();
-		let (conn, id, is_0rtt) = ready!(poll_accept(ctx, this.conn, this.notify, Dir::Uni))?;
-		Poll::Ready(Ok(RecvStream::new(conn, id, is_0rtt)))
+		let (conn, id) = ready!(poll_accept(ctx, this.conn, this.notify, Dir::Uni))?;
+		Poll::Ready(Ok(RecvStream::new(conn, id)))
 	}
 }
 
 pin_project! {
 	/// Future produced by [`Connection::accept_bi`]
-	pub struct AcceptBi<'a> {
+	struct AcceptBi<'a> {
 		conn: &'a ConnectionRef,
 		#[pin]
 		notify: Notified<'a>,
@@ -931,11 +700,8 @@ impl Future for AcceptBi<'_> {
 
 	fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
 		let this = self.project();
-		let (conn, id, is_0rtt) = ready!(poll_accept(ctx, this.conn, this.notify, Dir::Bi))?;
-		Poll::Ready(Ok((
-			SendStream::new(conn.clone(), id, is_0rtt),
-			RecvStream::new(conn, id, is_0rtt),
-		)))
+		let (conn, id) = ready!(poll_accept(ctx, this.conn, this.notify, Dir::Bi))?;
+		Poll::Ready(Ok((SendStream::new(conn.clone(), id), RecvStream::new(conn, id))))
 	}
 }
 
@@ -944,15 +710,14 @@ fn poll_accept<'a>(
 	conn: &'a ConnectionRef,
 	mut notify: Pin<&mut Notified<'a>>,
 	dir: Dir,
-) -> Poll<Result<(ConnectionRef, StreamId, bool), ConnectionError>> {
-	let mut state = conn.state.lock("poll_accept");
+) -> Poll<Result<(ConnectionRef, StreamId), ConnectionError>> {
+	let mut state = conn.state.lock();
 	// Check for incoming streams before checking `state.error` so that already-received streams,
 	// which are necessarily finite, can be drained from a closed connection.
 	if let Some(id) = state.inner.streams().accept(dir) {
-		let is_0rtt = state.inner.is_handshaking();
 		state.wake(); // To send additional stream ID credit
 		drop(state); // Release the lock so clone can take it
-		return Poll::Ready(Ok((conn.clone(), id, is_0rtt)));
+		return Poll::Ready(Ok((conn.clone(), id)));
 	} else if let Some(e) = &state.error {
 		return Poll::Ready(Err(e.clone()));
 	}
@@ -968,7 +733,7 @@ fn poll_accept<'a>(
 
 pin_project! {
 	/// Future produced by [`Connection::read_datagram`]
-	pub struct ReadDatagram<'a> {
+	struct ReadDatagram<'a> {
 		conn: &'a ConnectionRef,
 		#[pin]
 		notify: Notified<'a>,
@@ -979,7 +744,7 @@ impl Future for ReadDatagram<'_> {
 	type Output = Result<Bytes, ConnectionError>;
 	fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
 		let mut this = self.project();
-		let mut state = this.conn.state.lock("ReadDatagram::poll");
+		let mut state = this.conn.state.lock();
 		// Check for buffered datagrams before checking `state.error` so that already-received
 		// datagrams, which are necessarily finite, can be drained from a closed connection.
 		if let Some(x) = state.inner.datagrams().recv() {
@@ -995,25 +760,6 @@ impl Future for ReadDatagram<'_> {
 				Poll::Ready(()) => this.notify.set(this.conn.shared.datagram_received.notified()),
 			}
 		}
-	}
-}
-
-/// Watcher produced by [`Connection::watch_remote_address`]
-pub struct RemoteAddressWatcher {
-	receiver: watch::Receiver<SocketAddr>,
-}
-
-impl RemoteAddressWatcher {
-	/// Wait for an address change, mark it as seen and return the address.
-	///
-	/// If multiple migrations occur between calls to `wait` or polls of the resulting future,
-	/// the last observed address will be returned, skipping intermediate updates.
-	pub async fn wait(&mut self) -> Option<SocketAddr> {
-		if self.receiver.changed().await.is_err() {
-			return None;
-		}
-
-		Some(*self.receiver.borrow())
 	}
 }
 
@@ -1039,7 +785,7 @@ impl Drop for ConnectionRef {
 			return;
 		}
 
-		let conn = &mut *self.state.lock("drop");
+		let conn = &mut *self.state.lock();
 
 		if !conn.inner.is_closed() {
 			// If the driver is alive, it's just it and us, so we'd better shut it down. If it's
@@ -1066,7 +812,6 @@ pub(crate) struct ConnectionInner {
 
 #[derive(Debug, Default)]
 pub(crate) struct Shared {
-	handshake_confirmed: Notify,
 	/// Notified when new streams may be locally initiated due to an increase in stream ID flow
 	/// control budget
 	stream_budget_available: [Notify; 2],
@@ -1093,7 +838,6 @@ pub(crate) struct State {
 	handle: ConnectionHandle,
 	on_handshake_data: Option<oneshot::Sender<()>>,
 	connected: bool,
-	handshake_confirmed: bool,
 	timer: Option<moq_clock::Sleep>,
 	timer_deadline: Option<Instant>,
 	conn_events: mpsc::UnboundedReceiver<ConnectionEvent>,
@@ -1107,7 +851,6 @@ pub(crate) struct State {
 	send_buffer: Vec<u8>,
 	/// We buffer a transmit when the underlying I/O would block
 	buffered_transmit: Option<moq_quic::Transmit>,
-	remote_address: watch::Sender<SocketAddr>,
 }
 
 impl State {
@@ -1119,15 +862,12 @@ impl State {
 		on_handshake_data: oneshot::Sender<()>,
 		sender: Pin<Box<dyn UdpSender>>,
 	) -> Self {
-		let remote_address = inner.remote_address();
-
 		Self {
 			inner,
 			driver: None,
 			handle,
 			on_handshake_data: Some(on_handshake_data),
 			connected: false,
-			handshake_confirmed: false,
 			timer: None,
 			timer_deadline: None,
 			conn_events,
@@ -1139,7 +879,6 @@ impl State {
 			sender,
 			send_buffer: Vec::new(),
 			buffered_transmit: None,
-			remote_address: watch::Sender::new(remote_address),
 		}
 	}
 
@@ -1192,7 +931,6 @@ impl State {
 				// TODO: What isn't ideal here yet is that if we don't poll all
 				// datagrams that could be sent we don't go into the `app_limited`
 				// state and CWND continues to grow until we get here the next time.
-				// See https://github.com/quinn-rs/quinn/issues/1126
 				return Ok(true);
 			}
 		}
@@ -1246,18 +984,8 @@ impl State {
 				Connected => {
 					self.connected = true;
 					shared.connected.notify_waiters();
-					if self.inner.side().is_client() && !self.inner.accepted_0rtt() {
-						// Wake up rejected 0-RTT streams so they can fail immediately with
-						// `ZeroRttRejected` errors.
-						wake_all(&mut self.blocked_writers);
-						wake_all(&mut self.blocked_readers);
-						wake_all_notify(&mut self.stopped);
-					}
 				}
-				HandshakeConfirmed => {
-					self.handshake_confirmed = true;
-					shared.handshake_confirmed.notify_waiters();
-				}
+
 				ConnectionLost { reason } => {
 					self.terminate(reason, shared);
 				}
@@ -1281,11 +1009,7 @@ impl State {
 					self.resolve_stopped(id, Some(error_code));
 					wake_stream(id, &mut self.blocked_writers);
 				}
-				PathUpdated => {
-					// Using `send_replace` since `send` does not update the value
-					// when there are no subscribed receivers.
-					let _ = self.remote_address.send_replace(self.inner.remote_address());
-				}
+
 				_ => {}
 			}
 		}
@@ -1350,7 +1074,6 @@ impl State {
 		shared.stream_incoming[Dir::Uni as usize].notify_waiters();
 		shared.stream_incoming[Dir::Bi as usize].notify_waiters();
 		shared.datagram_received.notify_waiters();
-		shared.handshake_confirmed.notify_waiters();
 		wake_all_notify(&mut self.stopped);
 		shared.closed.notify_waiters();
 		shared.connected.notify_waiters();
@@ -1372,14 +1095,6 @@ impl State {
 		if let Some(waiters) = self.stopped.remove(&id) {
 			let _ = waiters.outcome.set(outcome);
 			waiters.notify.notify_waiters();
-		}
-	}
-
-	pub(crate) fn check_0rtt(&self) -> Result<(), ()> {
-		if self.inner.is_handshaking() || self.inner.accepted_0rtt() || self.inner.side().is_server() {
-			Ok(())
-		} else {
-			Err(())
 		}
 	}
 }

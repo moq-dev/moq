@@ -633,93 +633,6 @@ async fn wait_closed(conn: &crate::quic::driver::Connection) -> crate::quic::dri
 	timeout(Duration::from_secs(5), conn.closed()).await.unwrap()
 }
 
-#[tokio::test]
-async fn zero_rtt() {
-	let _guard = subscribe();
-	let endpoint = endpoint();
-
-	const MSG0: &[u8] = b"zero";
-	const MSG1: &[u8] = b"one";
-	let endpoint2 = endpoint.clone();
-	let accept_connection = move |expect_0rtt| {
-		let endpoint2 = endpoint2.clone();
-		async move {
-			let incoming = endpoint2.accept().await.unwrap().accept().unwrap();
-			let connection = incoming.into_0rtt().unwrap_or_else(|_| unreachable!());
-			let c = connection.clone();
-			tokio::spawn(async move {
-				while let Ok(mut x) = c.accept_uni().await {
-					assert_eq!(x.is_0rtt(), expect_0rtt);
-					let msg = x.read_to_end(usize::MAX).await.unwrap();
-					assert_eq!(msg, MSG0);
-				}
-			});
-			info!("sending 0.5-RTT");
-			let mut s = connection.open_uni(Default::default()).await.expect("open_uni");
-			s.write_all(MSG0).await.expect("write");
-			s.finish().unwrap();
-			connection.authenticated().await.expect("connected");
-			info!("sending 1-RTT");
-			let mut s = connection.open_uni(Default::default()).await.expect("open_uni");
-			s.write_all(MSG1).await.expect("write");
-			// The peer might close the connection before ACKing
-			let _ = s.finish();
-		}
-	};
-
-	tokio::spawn(accept_connection(false));
-
-	let connection = endpoint
-		.connect(endpoint.local_addr().unwrap(), "localhost")
-		.unwrap()
-		.into_0rtt()
-		.expect_err("0-RTT succeeded without keys")
-		.await
-		.expect("connect");
-
-	{
-		let mut stream = connection.accept_uni().await.expect("incoming streams");
-		let msg = stream.read_to_end(usize::MAX).await.expect("read_to_end");
-		assert_eq!(msg, MSG0);
-		// Read a 1-RTT message to ensure the handshake completes fully, allowing the server's
-		// NewSessionTicket frame to be received.
-		let mut stream = connection.accept_uni().await.expect("incoming streams");
-		let msg = stream.read_to_end(usize::MAX).await.expect("read_to_end");
-		assert_eq!(msg, MSG1);
-		drop(connection);
-	}
-
-	info!("initial connection complete");
-
-	let connection = endpoint
-		.connect(endpoint.local_addr().unwrap(), "localhost")
-		.unwrap()
-		.into_0rtt()
-		.unwrap_or_else(|_| panic!("missing 0-RTT keys"));
-
-	// Send something before the handshake can make progress, thereby forcing 0-RTT
-	let mut stream_0rtt = connection.open_uni(Default::default()).await.expect("0-RTT open uni");
-	info!("sending 0-RTT");
-	stream_0rtt.write_all(MSG0).await.expect("0-RTT write");
-	stream_0rtt.finish().unwrap();
-
-	tokio::spawn(accept_connection(true));
-
-	// Receive 0.5-RTT
-	let mut stream = connection.accept_uni().await.expect("incoming streams");
-	let msg = stream.read_to_end(usize::MAX).await.expect("read_to_end");
-	assert_eq!(msg, MSG0);
-	connection.authenticated().await.expect("connected");
-
-	// Ensure 0-RTT was accepted
-	stream_0rtt.stopped().await.expect("0-RTT stopped");
-
-	// Allow the connection to close
-	drop((stream_0rtt, stream, connection));
-
-	endpoint.wait_idle().await;
-}
-
 #[test]
 #[cfg_attr(
 	any(target_os = "solaris", target_os = "illumos"),
@@ -863,7 +776,7 @@ fn run_echo(args: EchoArgs) {
 			// Note for anyone modifying the platform support in this test:
 			// If `local_ip` gets available on additional platforms - which
 			// requires modifying this test - please update the list of supported
-			// platforms in the doc comment of `quinn_udp::RecvMeta::dst_ip`.
+			// platforms in the doc comment of `moq_sock::udp::RecvMeta::dst_ip`.
 			if cfg!(target_os = "linux")
 				|| cfg!(target_os = "android")
 				|| cfg!(target_os = "freebsd")
@@ -934,26 +847,8 @@ struct EchoArgs {
 }
 
 async fn echo((mut send, mut recv): (SendStream, RecvStream)) {
-	loop {
-		// These are 32 buffers, for reading approximately 32kB at once
-		#[rustfmt::skip]
-        let mut bufs = [
-            Bytes::new(), Bytes::new(), Bytes::new(), Bytes::new(),
-            Bytes::new(), Bytes::new(), Bytes::new(), Bytes::new(),
-            Bytes::new(), Bytes::new(), Bytes::new(), Bytes::new(),
-            Bytes::new(), Bytes::new(), Bytes::new(), Bytes::new(),
-            Bytes::new(), Bytes::new(), Bytes::new(), Bytes::new(),
-            Bytes::new(), Bytes::new(), Bytes::new(), Bytes::new(),
-            Bytes::new(), Bytes::new(), Bytes::new(), Bytes::new(),
-            Bytes::new(), Bytes::new(), Bytes::new(), Bytes::new(),
-        ];
-
-		match recv.read_chunks(&mut bufs).await.expect("read chunks") {
-			Some(n) => {
-				send.write_all_chunks(&mut bufs[..n]).await.expect("write chunks");
-			}
-			None => break,
-		}
+	while let Some(chunk) = recv.read_chunk(32 << 10).await.expect("read chunk") {
+		send.write_chunk(chunk.bytes).await.expect("write chunk");
 	}
 
 	let _ = send.finish();
@@ -1329,7 +1224,7 @@ async fn split_accept_driver_lost_during_handshake() {
 }
 
 #[tokio::test]
-async fn remote_address_monitoring() {
+async fn remote_address_follows_migration() {
 	let _guard = subscribe();
 
 	let factory = EndpointFactory::new();
@@ -1343,17 +1238,22 @@ async fn remote_address_monitoring() {
 	let server_task = tokio::spawn(async move {
 		let conn = server.accept().await.unwrap().await.unwrap();
 		let old_remote = conn.remote_address();
-		let mut addr_watch = conn.watch_remote_address();
 
 		trigger_migration_clone.notify_one();
 
-		let addr_a = addr_watch.wait().await.unwrap();
+		let mut stream = conn.accept_uni().await.unwrap();
+		assert_eq!(stream.read_to_end(16).await.unwrap(), b"hello");
+		let addr_a = conn.remote_address();
 		assert_eq!(addr_a.port(), 23_001);
 		assert_ne!(old_remote, addr_a);
 
 		trigger_migration_clone.notify_one();
 
-		let addr_b = addr_watch.wait().await.unwrap();
+		for _ in 0..2 {
+			let mut stream = conn.accept_uni().await.unwrap();
+			assert_eq!(stream.read_to_end(16).await.unwrap(), b"hello");
+		}
+		let addr_b = conn.remote_address();
 		assert_eq!(addr_b.port(), 23_003);
 		assert_ne!(addr_a, addr_b);
 	});
@@ -1919,7 +1819,7 @@ async fn dropped_endpoint_cleans_up() {
 
 	let mut endpoint_factory = EndpointFactory::new();
 	let cid_generator = Arc::new(|| -> Box<dyn moq_quic::ConnectionIdGenerator> {
-		Box::<moq_quic::HashedConnectionIdGenerator>::default()
+		Box::<moq_quic::RandomConnectionIdGenerator>::default()
 	});
 	endpoint_factory.endpoint_config.cid_generator(cid_generator.clone());
 	let endpoint = endpoint_factory.endpoint();
@@ -2250,8 +2150,7 @@ async fn unreachable_sends_are_loss_once_established() {
 	}
 }
 
-/// A handshake that fails on an unreachable peer still drains out of its endpoint while the
-/// application holds the connection, here a server's 0.5-RTT handle.
+/// A handshake that fails on an unreachable peer drains while the application holds its future.
 #[tokio::test(start_paused = true)]
 async fn unreachable_handshake_drains_while_held() {
 	let _guard = subscribe();
@@ -2275,19 +2174,18 @@ async fn unreachable_handshake_drains_while_held() {
 
 	let connecting = client.connect(server.local_addr().unwrap(), "localhost").unwrap();
 	let incoming = server.accept().await.unwrap();
-	let conn = incoming.accept().unwrap().into_0rtt().unwrap();
+	let connecting_server = incoming.accept().unwrap();
 	// Stop the client retrying, which would only start new handshakes.
 	client.close(0u32.into(), b"done");
 	drop(connecting);
 
-	let crate::quic::driver::ConnectionError::TransportError(err) = conn.closed().await else {
+	let crate::quic::driver::ConnectionError::TransportError(err) = connecting_server.await.unwrap_err() else {
 		panic!("expected a transport error");
 	};
 	assert_eq!(err.code, moq_quic::TransportErrorCode::NO_VIABLE_PATH);
 	timeout(Duration::from_secs(60), server.wait_idle())
 		.await
 		.expect("the failed connection never drained out of the endpoint");
-	drop(conn);
 }
 
 /// Whether [`UnreachableSocket`] is refusing sends, and a signal once it has refused one.

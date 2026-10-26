@@ -37,6 +37,10 @@ type ClientConfig struct {
 	// spelled like "moq-lite-03". Empty offers every supported version, which
 	// the Versions function lists.
 	Versions []string
+	// Tokens are the credentials every dial presents. The first is the
+	// connection credential, unless the URL carries its own ?jwt=; each other
+	// one widens the session's grant. Replace them with Client.Tokens.
+	Tokens []string
 	// Timeout bounds one connect, dial and handshake together. Zero waits forever.
 	Timeout *time.Duration
 	// Race is the Happy Eyeballs stagger: how long before the next resolved
@@ -162,6 +166,7 @@ func (c ClientConfig) ffi() (ffi.MoqClientConfig, error) {
 	cfg := ffi.MoqClientConfig{
 		Bind:              str(c.Bind),
 		Versions:          c.Versions,
+		Tokens:          c.Tokens,
 		Timeout:         c.Timeout,
 		Race:            c.Race,
 		ResolutionDelay: c.ResolutionDelay,
@@ -319,6 +324,25 @@ func (c *Client) AnnouncedBroadcast(path string) (*AnnouncedBroadcast, error) {
 // for a future announcement.
 func (c *Client) RequestBroadcast(ctx context.Context, path string) (*BroadcastConsumer, error) {
 	return c.consumer.RequestBroadcast(ctx, path)
+}
+
+// Tokens returns the credentials the client presents, to replace while it runs.
+func (c *Client) Tokens() *Tokens {
+	return &Tokens{inner: c.inner.Tokens()}
+}
+
+// Tokens are the credentials a Client presents, replaceable while it runs.
+type Tokens struct {
+	inner *ffi.MoqTokens
+}
+
+// Set replaces the credentials every dial presents, such as before the current
+// ones expire. The next dial presents them, and a live session with in-band
+// AUTH presents them at once, withdrawing each replaced token once its
+// replacements are answered, even when one is refused. After an authorization
+// refusal the client redials only if they changed. An empty token is refused.
+func (t *Tokens) Set(tokens ...string) error {
+	return t.inner.Set(append([]string(nil), tokens...))
 }
 
 // Session returns the underlying session. Hold the client (or session) to keep

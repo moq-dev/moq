@@ -4,6 +4,17 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### QUIC early data is disabled
+
+The shared moq-quic core no longer sends or accepts early data, including with caller-supplied rustls server configs.
+The uring driver already returns established sessions, so no source migration is needed.
+TLS session tickets still enable resumed 1-RTT handshakes.
+
+### QUIC receive chunks are ordered
+
+The underlying `moq_quic::RecvStream::read()` no longer takes an ordering flag, and `Chunk` contains only `bytes`.
+The uring driver's receive API keeps its existing ordered behavior.
+
 ### `udp::Transmit` is built with `Transmit::new` (#6400)
 
 `udp::Transmit` gains `src_ip`, the local address a send leaves from, and is `#[non_exhaustive]`.

@@ -29,7 +29,3 @@ noq.
 - Once iroh ships it, `moq-tokio`'s iroh path (its noq `ControllerFactory`)
   runs the same controllers; bumping that pin is a separate quest if it
   needs code.
-
-## Required
-
-- [Portable controller trait](/quest/m1/congestion/trait.md) - the API noq adapts to

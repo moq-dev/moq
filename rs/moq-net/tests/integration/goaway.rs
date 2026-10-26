@@ -11,6 +11,7 @@ use crate::support;
 use std::time::Duration;
 
 use moq_net::{Hop, Version, goaway::Goaway};
+use support::Draining;
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 use support::mock::create_mock_session_pair;
 
@@ -82,8 +83,11 @@ async fn a_stalled_lite_goaway_is_still_closed_at_the_deadline() {
 
 #[moq_clock::test]
 async fn a_stalled_ietf_goaway_is_still_closed_at_the_deadline() {
-	for name in Version::names().filter(|name| name.starts_with("moq-transport-")) {
-		closes_stalled_goaway(name.parse().unwrap(), true).await;
+	for version in support::every_version()
+		.into_iter()
+		.filter(|version| !version.is_lite())
+	{
+		closes_stalled_goaway(version, true).await;
 	}
 }
 

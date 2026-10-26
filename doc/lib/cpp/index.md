@@ -212,6 +212,8 @@ Obtain a dynamic track request’s `demand()` before accepting it to watch subsc
 
 On `moq-lite-07-wip` (opt in with `ClientConfig::versions`) and on moq-transport draft-17+ with the [MoQ Auth extension](/draft/moq-auth), `session->auth()->grant()` is the `Grant` the relay sent back, empty until it answers and while a client session reconnects; `grant_changed()` waits for the next one. `add(token)` presents a fresh token without reconnecting and resolves to an `AuthToken` whose grant joins the union until `cancel()`; it is presented again on every reconnect. A refusal resolves to an `Error` carrying the relay's code.
 
+Set `ClientConfig::tokens` instead of putting the credential in the URL. The first is the connection credential, sent in SETUP and, while an offered version can't carry it there (lite before 07), as the URL's `?jwt=`; each other token widens the grant over AUTH. `client->tokens()->set(...)` replaces them before they expire: the next dial presents them, a live AUTH session at once, and after an authorization refusal the client redials only if they changed. A `?jwt=` already in the URL stays the connection credential, which is how to reach a relay older than this release.
+
 ## Stats
 
 `session->stats()` reports the transport counters, each a `std::optional` that is empty when the transport does not report it, plus the negotiated protocol in `version`. Connect returns a connecting session. Read `session->state()` and wait with `state_changed(state.revision)` to observe its first-dial failures and reconnects; independent watchers keep their own revisions.
@@ -227,7 +229,9 @@ To end a broadcast cleanly, finish every track, then call `catalog->finish()` on
 its `moq::MediaCatalogProducer` to finish the catalog, which ends the content.
 The broadcast stays announced and keeps serving the finished tracks, so a
 subscriber still catching up can drain them, until `broadcast->close()` takes it
-offline. How long to keep it up is yours to decide.
+offline. How long to keep it up is yours to decide. A track still open at the
+close, or released without a finish, ends with `Unroutable`, which readers take
+as the publisher leaving.
 
 `moq::shutdown()` stops the `moq-ffi` runtime workers, then the executor.
 Pending calls resolve `Cancelled`, and every object stays safe to drop. Call

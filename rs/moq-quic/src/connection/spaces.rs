@@ -12,8 +12,8 @@ use tracing::trace;
 use super::assembler::Assembler;
 use super::sent_packets::SentPackets;
 use crate::{
-	Dir, Duration, Instant, SocketAddr, StreamId, TransportError, cid_queue::CidQueue, connection::StreamsState,
-	crypto::Keys, frame, packet::SpaceId, range_set::ArrayRangeSet, shared::IssuedCid,
+	Dir, Duration, Instant, SocketAddr, StreamId, TransportError, cid_queue::CidQueue, congestion,
+	connection::StreamsState, crypto::Keys, frame, packet::SpaceId, range_set::ArrayRangeSet, shared::IssuedCid,
 };
 
 pub(super) struct PacketSpace {
@@ -295,6 +295,9 @@ pub(super) struct SentPacket {
 	pub(super) size: u16,
 	/// Whether an acknowledgement is expected directly in response to this packet.
 	pub(super) ack_eliciting: bool,
+	/// The congestion controller's state for this packet, if it counts toward congestion control
+	/// and the controller that sent it still runs the path
+	pub(super) congestion: Option<congestion::Packet>,
 	/// The largest packet number acknowledged by this packet
 	pub(super) largest_acked: Option<u64>,
 	/// Data which needs to be retransmitted in case the packet is lost.
@@ -348,7 +351,7 @@ pub(crate) struct Retransmits {
 	/// It is true that a QUIC endpoint will only want to effectively have NEW_TOKEN frames
 	/// enqueued for its current path at a given point in time. Based on that, we could conceivably
 	/// change this from a vector to an `Option<(SocketAddr, usize)>` or just a `usize` or
-	/// something. However, due to the architecture of Quinn, it is considerably simpler to not do
+	/// something. However, due to the transport architecture, it is considerably simpler to not do
 	/// that; consider what such a change would mean for implementing `BitOrAssign` on Self.
 	pub(super) new_tokens: Vec<SocketAddr>,
 }

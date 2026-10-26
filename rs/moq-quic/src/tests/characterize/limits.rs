@@ -18,7 +18,7 @@ fn finish_all(pair: &mut Pair, client_ch: ConnectionHandle, server_ch: Connectio
 	pair.drive();
 	while let Some(s) = pair.server_streams(server_ch).accept(Dir::Uni) {
 		let mut recv = pair.server_recv(server_ch, s);
-		let mut chunks = recv.read(true).unwrap();
+		let mut chunks = recv.read().unwrap();
 		while chunks.next(usize::MAX).unwrap().is_some() {}
 		let _ = chunks.finalize();
 	}
@@ -68,7 +68,7 @@ fn read_buffered(pair: &mut Pair, ch: ConnectionHandle, streams: &mut Vec<Stream
 	let mut total = 0;
 	for &s in streams.iter() {
 		let mut recv = pair.server_recv(ch, s);
-		let Ok(mut chunks) = recv.read(true) else {
+		let Ok(mut chunks) = recv.read() else {
 			continue;
 		};
 		while let Ok(Some(chunk)) = chunks.next(usize::MAX) {
@@ -127,78 +127,6 @@ fn send_window_lowered_and_raised() {
 	// Acknowledged data frees the window again
 	pair.drive();
 	assert_eq!(writable(&mut pair, client_ch, 4000), 3000);
-}
-
-/// A server whose stream windows grew since the ticket the client resumes with
-///
-/// The client opens 0-RTT streams with the remembered, smaller windows, and the larger ones
-/// arrive with the handshake. The server believes it granted the new window and never sends
-/// MAX_STREAM_DATA for it, so the client's streams must adopt it or stall for good.
-fn zero_rtt_window_raise(dir: Dir) {
-	let _guard = subscribe();
-	const OLD: u32 = 1000;
-	const NEW: u32 = 100_000;
-	const LEN: usize = 50_000;
-
-	let crypto = Arc::new(server_crypto());
-	let server = |window: u32| {
-		let mut config = ServerConfig::with_crypto(crypto.clone());
-		let mut transport = transport();
-		transport.stream_receive_window(VarInt::from_u32(window));
-		config.transport = Arc::new(transport);
-		config
-	};
-	let mut pair = Pair::new(Default::default(), server(OLD));
-	let config = client_with(|_| {});
-
-	let client_ch = pair.begin_connect(config.clone());
-	pair.drive();
-	pair.server.assert_accept();
-	let now = pair.time;
-	pair.client_conn_mut(client_ch).close(now, VarInt(0), Bytes::new());
-	pair.drive();
-
-	pair.server.set_server_config(Some(Arc::new(server(NEW))));
-	let client_ch = pair.begin_connect(config);
-	assert!(pair.client_conn_mut(client_ch).has_0rtt());
-	let s = pair.client_streams(client_ch).open(dir, Default::default()).unwrap();
-	let mut written = pair.client_send(client_ch, s).write(&[0; LEN]).unwrap();
-	assert_eq!(written, OLD as usize);
-
-	pair.drive();
-	assert!(pair.client_conn_mut(client_ch).accepted_0rtt());
-	let server_ch = pair.server.assert_accept();
-	assert_eq!(pair.server_streams(server_ch).accept(dir), Some(s));
-
-	// Keep writing and reading until neither side makes progress
-	let mut read = 0;
-	loop {
-		let before = (written, read);
-		if let Ok(n) = pair.client_send(client_ch, s).write(&[0; LEN][written..]) {
-			written += n;
-		}
-		let mut recv = pair.server_recv(server_ch, s);
-		let mut chunks = recv.read(true).unwrap();
-		while let Ok(Some(chunk)) = chunks.next(usize::MAX) {
-			read += chunk.bytes.len();
-		}
-		let _ = chunks.finalize();
-		pair.drive();
-		if (written, read) == before {
-			break;
-		}
-	}
-	assert_eq!(read, LEN);
-}
-
-#[test]
-fn zero_rtt_bidi_window_raise() {
-	zero_rtt_window_raise(Dir::Bi);
-}
-
-#[test]
-fn zero_rtt_uni_window_raise() {
-	zero_rtt_window_raise(Dir::Uni);
 }
 
 /// `set_limits` raises every limit it sets in one call

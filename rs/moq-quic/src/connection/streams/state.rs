@@ -96,20 +96,13 @@ pub(crate) struct StreamsState {
 	/// Maximum number of remotely-initiated streams that may be opened over the lifetime of the
 	/// connection so far, per direction
 	pub(super) max_remote: [u64; 2],
-	/// Value of `max_remote` most recently transmitted to the peer in a `MAX_STREAMS` frame
+	/// Highest `max_remote` sent in transport parameters or a `MAX_STREAMS` frame
 	sent_max_remote: [u64; 2],
-	/// Highest `max_remote` ever sent to the peer, in transport parameters or `MAX_STREAMS`
-	///
-	/// Unlike `sent_max_remote`, a rejected 0-RTT never lowers it, so it stays the limit the
-	/// peer may rely on.
-	announced_max_remote: [u64; 2],
 	/// Number of streams that we've given the peer permission to open and which aren't fully closed
 	pub(super) allocated_remote_count: [u64; 2],
 	/// Size of the desired stream flow control window. May be smaller than `allocated_remote_count`
 	/// due to `set_max_concurrent` calls.
 	max_concurrent_remote_count: [u64; 2],
-	/// Whether `max_concurrent_remote_count` has ever changed
-	flow_control_adjusted: bool,
 	/// Lowest remotely-initiated stream index that haven't actually been opened by the peer
 	pub(super) next_remote: [u64; 2],
 	/// Whether the remote endpoint has opened any streams the application doesn't know about yet,
@@ -210,10 +203,8 @@ impl StreamsState {
 			max: [0, 0],
 			max_remote: [max_remote_bi.into(), max_remote_uni.into()],
 			sent_max_remote: [max_remote_bi.into(), max_remote_uni.into()],
-			announced_max_remote: [max_remote_bi.into(), max_remote_uni.into()],
 			allocated_remote_count: [max_remote_bi.into(), max_remote_uni.into()],
 			max_concurrent_remote_count: [max_remote_bi.into(), max_remote_uni.into()],
-			flow_control_adjusted: false,
 			next_remote: [0, 0],
 			opened: [false, false],
 			next_reported_remote: [0, 0],
@@ -260,33 +251,13 @@ impl StreamsState {
 			(Dir::Uni, params.initial_max_streams_uni),
 		] {
 			let count = count.into();
-			// A 0.5-RTT server holds the connection before a ClientHello that spans several
-			// packets has arrived, so an open can be refused before the limit is known.
+			// A caller can attempt an open before the peer's limit is known.
 			if count > self.max[dir as usize] && mem::take(&mut self.open_refused[dir as usize]) {
 				self.events.push_back(StreamEvent::Available { dir });
 			}
 			self.max[dir as usize] = count;
 		}
 		self.received_max_data(params.initial_max_data);
-
-		// A client's 0-RTT streams opened under the remembered windows, which a server that
-		// accepts 0-RTT may only raise (RFC 9000 7.4.1). No peer stream can exist yet.
-		let side = self.side;
-		let raised: Vec<StreamId> = self
-			.send
-			.iter_mut()
-			.filter(|(id, _)| id.initiator() == side)
-			.filter_map(|(&id, slot)| {
-				let max = match id.dir() {
-					Dir::Bi => params.initial_max_stream_data_bidi_remote,
-					Dir::Uni => params.initial_max_stream_data_uni,
-				};
-				slot.as_mut()?.increase_max_data(max.into()).then_some(id)
-			})
-			.collect();
-		for id in raised {
-			self.send_unblocked(id);
-		}
 	}
 
 	/// Ensure we have space for at least a full flow control window of remotely-initiated streams
@@ -296,39 +267,6 @@ impl StreamsState {
 			self.max_concurrent_remote_count[dir as usize].saturating_sub(self.allocated_remote_count[dir as usize]);
 		self.allocated_remote_count[dir as usize] += new_count;
 		self.max_remote[dir as usize] += new_count;
-	}
-
-	pub(crate) fn zero_rtt_rejected(&mut self) {
-		// Revert to initial state for outgoing streams
-		for dir in Dir::iter() {
-			for i in 0..self.next[dir as usize] {
-				// We don't bother calling `stream_freed` here because we explicitly reset affected
-				// counters below.
-				let id = StreamId::new(self.side, dir, i);
-				if let Some(mut stream) = self.send.remove(&id).unwrap() {
-					self.pending.leave(&mut stream.slot);
-				}
-				if let Dir::Bi = dir {
-					// A rejected stream never received anything, so its lease holds no credit
-					// and it has no rank.
-					self.recv.remove(&id).unwrap();
-					self.unlooked.remove(&id);
-				}
-			}
-			self.next[dir as usize] = 0;
-
-			// If 0-RTT was rejected, any flow control frames we sent were lost.
-			if self.flow_control_adjusted {
-				// Conservative approximation of whatever we sent in transport parameters
-				self.sent_max_remote[dir as usize] = 0;
-			}
-		}
-
-		self.send_streams = 0;
-		self.data_sent = 0;
-		self.buffered_data = 0;
-		self.connection_blocked.clear();
-		self.data_blocked_limit = None;
 	}
 
 	/// Process incoming stream frame
@@ -693,7 +631,6 @@ impl StreamsState {
 			pending.max_stream_id[dir as usize] = false;
 			retransmits.get_or_create().max_stream_id[dir as usize] = true;
 			self.sent_max_remote[dir as usize] = self.max_remote[dir as usize];
-			self.announced_max_remote[dir as usize] = self.max_remote[dir as usize];
 			trace!(value = self.max_remote[dir as usize], "MAX_STREAMS ({:?})", dir);
 			buf.write(match dir {
 				Dir::Uni => frame::FrameType::MAX_STREAMS_UNI,
@@ -948,26 +885,6 @@ impl StreamsState {
 		}
 	}
 
-	pub(crate) fn retransmit_all_for_0rtt(&mut self) {
-		for dir in Dir::iter() {
-			for index in 0..self.next[dir as usize] {
-				let id = StreamId::new(Side::Client, dir, index);
-				let Some(stream) = self.send.get_mut(&id).and_then(|s| s.as_mut()) else {
-					continue;
-				};
-				if stream.pending.is_fully_acked() && !stream.fin_pending {
-					// Stream data can't be acked in 0-RTT, so we must not have sent anything on
-					// this stream
-					continue;
-				}
-				if !stream.is_pending() {
-					self.pending.push(id, &mut stream.slot, stream.priority);
-				}
-				stream.pending.retransmit_all_for_0rtt();
-			}
-		}
-	}
-
 	pub(crate) fn received_max_streams(&mut self, dir: Dir, count: u64) -> Result<(), TransportError> {
 		if count > MAX_STREAM_COUNT {
 			return Err(TransportError::FRAME_ENCODING_ERROR("unrepresentable stream limit"));
@@ -1104,7 +1021,7 @@ impl StreamsState {
 			}
 		} else {
 			// A raised `max_remote` may not be in a `MAX_STREAMS` frame yet
-			let limit = self.announced_max_remote[id.dir() as usize];
+			let limit = self.sent_max_remote[id.dir() as usize];
 			if id.index() >= limit {
 				return Err(TransportError::STREAM_LIMIT_ERROR(""));
 			}
@@ -1121,11 +1038,11 @@ impl StreamsState {
 	}
 
 	pub(crate) fn set_max_concurrent(&mut self, dir: Dir, count: VarInt) {
-		self.flow_control_adjusted = true;
 		self.max_concurrent_remote_count[dir as usize] = count.into();
 		self.ensure_remote_streams(dir);
 	}
 
+	#[cfg(test)]
 	pub(crate) fn max_concurrent(&self, dir: Dir) -> u64 {
 		self.allocated_remote_count[dir as usize]
 	}
@@ -1703,7 +1620,7 @@ mod tests {
 			pending: &mut pending,
 		};
 
-		let mut chunks = recv.read(true).unwrap();
+		let mut chunks = recv.read().unwrap();
 		assert_eq!(chunks.next(MESSAGE_SIZE).unwrap().unwrap().bytes.len(), MESSAGE_SIZE);
 		assert!(chunks.next(0).unwrap().is_none());
 		let should_transmit = chunks.finalize();
@@ -1777,7 +1694,7 @@ mod tests {
 			pending: &mut pending,
 		};
 
-		let mut chunks = recv.read(true).unwrap();
+		let mut chunks = recv.read().unwrap();
 		chunks.next(1024).unwrap();
 		let _ = chunks.finalize();
 		assert_eq!(client.local_max_data - initial_max, 1024);
@@ -1802,7 +1719,7 @@ mod tests {
 			state: &mut client,
 			pending: &mut pending,
 		};
-		let mut chunks = recv.read(true).unwrap();
+		let mut chunks = recv.read().unwrap();
 		assert_eq!(chunks.next(1024).unwrap_err(), crate::ReadError::Reset(0u32.into()));
 		let _ = chunks.finalize();
 		assert_eq!(client.data_recvd, 4096);
@@ -1908,8 +1825,7 @@ mod tests {
 		assert!(!recv.pending.max_data);
 
 		assert!(recv.stop(0u32.into()).is_err());
-		assert_eq!(recv.read(true).err(), Some(ReadableError::ClosedStream));
-		assert_eq!(recv.read(false).err(), Some(ReadableError::ClosedStream));
+		assert_eq!(recv.read().err(), Some(ReadableError::ClosedStream));
 
 		assert_eq!(client.local_max_data - initial_max, 32);
 		assert_eq!(
@@ -1928,37 +1844,6 @@ mod tests {
 		);
 		assert_eq!(client.local_max_data - initial_max, 48);
 		assert!(!client.recv.contains_key(&id));
-	}
-
-	/// An ordered read refused after an unordered one leaves the stream readable.
-	#[test]
-	fn illegal_ordered_read_keeps_stream() {
-		let mut client = make(Side::Client);
-		let id = StreamId::new(Side::Server, Dir::Uni, 0);
-		receive(&mut client, id, 0..4);
-
-		let mut pending = Retransmits::default();
-		let mut recv = RecvStream {
-			id,
-			state: &mut client,
-			pending: &mut pending,
-		};
-		let mut chunks = recv.read(false).unwrap();
-		assert_eq!(chunks.next(usize::MAX).unwrap().unwrap().bytes.len(), 4);
-		let _ = chunks.finalize();
-
-		receive(&mut client, id, 4..8);
-		let mut recv = RecvStream {
-			id,
-			state: &mut client,
-			pending: &mut pending,
-		};
-		assert_eq!(recv.read(true).err(), Some(ReadableError::IllegalOrderedRead));
-
-		let mut chunks = recv.read(false).unwrap();
-		let chunk = chunks.next(usize::MAX).unwrap().unwrap();
-		assert_eq!((chunk.offset, chunk.bytes.len()), (4, 4));
-		let _ = chunks.finalize();
 	}
 
 	#[test]
@@ -2765,7 +2650,7 @@ mod tests {
 			state: &mut client,
 			pending: &mut pending,
 		};
-		let mut chunks = recv.read(true).unwrap();
+		let mut chunks = recv.read().unwrap();
 		assert_eq!(chunks.next(4).unwrap().unwrap().bytes.len(), 4);
 		let _ = chunks.finalize();
 	}
@@ -2794,7 +2679,7 @@ mod tests {
 			state: &mut client,
 			pending: &mut pending,
 		};
-		let mut chunks = recv.read(true).unwrap();
+		let mut chunks = recv.read().unwrap();
 		assert_eq!(chunks.next(4).unwrap().unwrap().bytes.len(), 4);
 		assert!(chunks.next(4).unwrap().is_none());
 		let _ = chunks.finalize();
@@ -2843,7 +2728,7 @@ mod tests {
 				state: &mut client,
 				pending: &mut pending,
 			};
-			let mut chunks = recv.read(true).unwrap();
+			let mut chunks = recv.read().unwrap();
 			let _ = chunks.next(1).unwrap();
 			assert!(chunks.next(1).unwrap().is_none());
 			let _ = chunks.finalize();
@@ -3101,14 +2986,14 @@ mod tests {
 	}
 
 	/// Read everything readable, returning the byte count and how the read stopped
-	fn drain(state: &mut StreamsState, id: StreamId, ordered: bool) -> (u64, crate::ReadError) {
+	fn drain(state: &mut StreamsState, id: StreamId) -> (u64, crate::ReadError) {
 		let mut pending = Retransmits::default();
 		let mut recv = RecvStream {
 			id,
 			state,
 			pending: &mut pending,
 		};
-		let mut chunks = recv.read(ordered).unwrap();
+		let mut chunks = recv.read().unwrap();
 		let mut read = 0;
 		let err = loop {
 			match chunks.next(usize::MAX) {
@@ -3136,7 +3021,7 @@ mod tests {
 		// Data past the Reliable Size is dropped without counting twice
 		receive(&mut client, id, 4..20);
 		assert_eq!(client.data_recvd, 100);
-		assert_eq!(drain(&mut client, id, true), (10, crate::ReadError::Reset(7u32.into())));
+		assert_eq!(drain(&mut client, id), (10, crate::ReadError::Reset(7u32.into())));
 		assert_eq!(client.local_max_data - initial_max, 100);
 	}
 
@@ -3147,27 +3032,9 @@ mod tests {
 		let initial_max = client.local_max_data;
 		let _ = client.received_reset(reset_at(id, 7, 20, Some(10))).unwrap();
 		receive(&mut client, id, 4..20);
-		assert_eq!(drain(&mut client, id, true), (0, crate::ReadError::Blocked));
+		assert_eq!(drain(&mut client, id), (0, crate::ReadError::Blocked));
 		receive(&mut client, id, 0..4);
-		assert_eq!(drain(&mut client, id, true), (10, crate::ReadError::Reset(7u32.into())));
-		assert_eq!(client.local_max_data - initial_max, 20);
-	}
-
-	#[test]
-	fn reset_at_unordered_reads() {
-		let mut client = make(Side::Client);
-		let id = StreamId::new(Side::Server, Dir::Uni, 0);
-		let initial_max = client.local_max_data;
-		receive(&mut client, id, 5..10);
-		receive(&mut client, id, 0..2);
-		assert_eq!(drain(&mut client, id, false), (7, crate::ReadError::Blocked));
-
-		// Only 2..4 of the prefix is still owed, though bytes past it were already read
-		let _ = client.received_reset(reset_at(id, 7, 20, Some(4))).unwrap();
-		assert_eq!(client.local_max_data - initial_max, 18);
-		assert_eq!(drain(&mut client, id, false), (0, crate::ReadError::Blocked));
-		receive(&mut client, id, 2..4);
-		assert_eq!(drain(&mut client, id, false), (2, crate::ReadError::Reset(7u32.into())));
+		assert_eq!(drain(&mut client, id), (10, crate::ReadError::Reset(7u32.into())));
 		assert_eq!(client.local_max_data - initial_max, 20);
 	}
 
@@ -3186,7 +3053,7 @@ mod tests {
 		);
 		assert_eq!(client.local_max_data - initial_max, 16);
 		receive(&mut client, id, 0..20);
-		assert_eq!(drain(&mut client, id, true), (4, crate::ReadError::Reset(7u32.into())));
+		assert_eq!(drain(&mut client, id), (4, crate::ReadError::Reset(7u32.into())));
 		assert_eq!(client.local_max_data - initial_max, 20);
 	}
 
@@ -3199,7 +3066,7 @@ mod tests {
 		receive(&mut client, id, 0..2);
 		let _ = client.received_reset(reset_at(id, 7, 20, Some(10))).unwrap();
 		let _ = client.received_reset(reset_at(id, 7, 20, None)).unwrap();
-		assert_eq!(drain(&mut client, id, true), (0, crate::ReadError::Reset(7u32.into())));
+		assert_eq!(drain(&mut client, id), (0, crate::ReadError::Reset(7u32.into())));
 		assert_eq!(client.local_max_data - initial_max, 20);
 	}
 
@@ -4240,7 +4107,7 @@ mod tests {
 		data(&mut client, id, 0, 10, true);
 		recv(&mut client, &mut pending, id).set_priority(1);
 		let mut stream = recv(&mut client, &mut pending, id);
-		let mut chunks = stream.read(true).unwrap();
+		let mut chunks = stream.read().unwrap();
 		assert_eq!(chunks.next(usize::MAX).unwrap().unwrap().bytes.len(), 10);
 		assert_eq!(chunks.next(usize::MAX), Ok(None));
 		let _ = chunks.finalize();
@@ -4330,7 +4197,7 @@ mod tests {
 		// Debt partly paid by a consume before the window grows back.
 		client.set_receive_window(VarInt::from_u64(window / 2).unwrap());
 		data(&mut client, id, 0, 20, false);
-		assert_eq!(drain(&mut client, id, true).0, 20);
+		assert_eq!(drain(&mut client, id).0, 20);
 		assert_eq!(client.local_max_data, initial);
 		client.set_receive_window(VarInt::from_u64(window).unwrap());
 		assert_eq!(client.local_max_data, initial + 20);
@@ -4484,16 +4351,6 @@ mod tests {
 		crate::SendGroups { state: &mut b }.set_priority(&group, 1);
 	}
 
-	#[test]
-	#[should_panic(expected = "send domain used on another connection")]
-	fn send_domain_from_another_connection() {
-		let mut a = make(Side::Client);
-		let mut b = make(Side::Client);
-		let domain = crate::SendGroups { state: &mut a }.open_domain();
-		let _other = crate::SendGroups { state: &mut b }.open_domain();
-		let _ = crate::SendGroups { state: &mut b }.open_in(0, &domain);
-	}
-
 	/// Ingest and read rounds across many streams, with a plain read or a lease released whole.
 	/// The lease cost must stay flat as the stream count grows.
 	#[test]
@@ -4537,7 +4394,7 @@ mod tests {
 								std::hint::black_box(recv.take(usize::MAX));
 								let _ = recv.release();
 							} else {
-								let mut chunks = recv.read(true).unwrap();
+								let mut chunks = recv.read().unwrap();
 								std::hint::black_box(chunks.next(usize::MAX).unwrap());
 								let _ = chunks.finalize();
 							}
@@ -4626,9 +4483,6 @@ mod tests {
 		);
 		assert!(!buf.is_empty());
 
-		// A rejected 0-RTT resets `sent_max_remote` to force a re-announcement, which must not
-		// shrink the limit frames are checked against
-		client.zero_rtt_rejected();
 		assert_eq!(client.received_max_stream_data(id, 1), Ok(()));
 		assert!(client.received_stop_sending(id, 0u32.into()).is_ok());
 	}
