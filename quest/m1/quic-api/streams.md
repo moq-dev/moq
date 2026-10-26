@@ -18,7 +18,8 @@ Decided 2026-10-23 (maintainer):
 `SendStream` is `send::Stream`, `SendGroup` is `send::Group`, `SendGroups`
 is `send::Groups`, `SendOptions` is `send::Options`, `RecvStream` is
 `recv::Stream`, the driver's `Lease` and moq-quic's `Leased` are
-`recv::Lease`, `StreamId` is `stream::Id`, `StreamEvent` is `stream::Event`.
+`recv::Lease`, and `StreamId` is `stream::Id`. `StreamEvent` keeps its name:
+[waits](/quest/m1/quic-api/waits.md) deletes it.
 `recv::Stream::set_priority` keeps its name, though it ranks eviction rather
 than scheduling (maintainer: "priority" means "more important" both ways).
 `send::Options` loses its generic group parameter; each layer defines its
@@ -28,8 +29,7 @@ own.
 `TooLarge`, `Unsupported` (peer or local datagram support off),
 `Connection(connection::Error)`. `recv::Error` covers
 reads and leases: `Reset(code)`, `Evicted`, `FinishedEarly(n)`, `TooLong`,
-`TooLarge` (a lease past the window), `Connection`. No 0-RTT variant:
-[zero-rtt](/quest/m1/quic-api/zero-rtt.md) deletes it first. Both
+`TooLarge` (a lease past the window), `Connection`. Neither has a 0-RTT variant. Both
 `#[non_exhaustive]`, both convert to `io::Error`. moq-quic mirrors the names
 and adds `Blocked`, plus `Closed` for a stale `stream::Id` (its handles are
 borrowed views by id, so it cannot consume). This replaces `ReadError`,
@@ -85,7 +85,9 @@ keep a `sends: FxHashMap<StreamId, Option<End>>` because `Finished` and
 `copy_to_bytes`, and `debug_assert` around `write`. moq-quic keeps a
 queryable send-stream end (finished and acknowledged, stopped with a code,
 reset) until the id is released, and takes `write(&mut impl Buf)`; both
-consumers' copies go. Per-stream waker tables stay in the drivers.
+consumers' copies go. The per-stream waker tables move into moq-quic in
+[waits](/quest/m1/quic-api/waits.md) (maintainer, 2026-10-25, replacing "stay
+in the drivers").
 
 **Consumers' error plumbing.** moq-tokio's `quic::web` error module rewraps
 `WriteError`, `ReadError`, `ReadExactError`, `ReadToEndError`, and
@@ -93,9 +95,10 @@ consumers' copies go. Per-stream waker tables stay in the drivers.
 for unordered reads, and a four-level match in `session.rs`; collapse it onto
 `send::Error` and `recv::Error`.
 
-**Acked.** Both drivers match `stream::Event::Acked` explicitly instead of
-moq-tokio's `_ => {}` catch-all, so a new event is a compile error. The
-driver's waiter method arrives with [poll_acked](/quest/m2/quic-ack-hook.md).
+**Acked.** Both drivers match `StreamEvent::Acked` explicitly instead of
+moq-tokio's `_ => {}` catch-all, so a new event is a compile error until
+[waits](/quest/m1/quic-api/waits.md) deletes the events. The driver's waiter
+method arrives with [poll_acked](/quest/m2/quic-ack-hook.md).
 
 **moq-uring.** Its driver gets the same names and signatures and passes
 `send::Options` to the open, as moq-tokio's does, instead of applying them
@@ -105,7 +108,3 @@ through setters afterwards. Moved here from
 Update every consumer (`quic::web` in both crates, qmux, the backends,
 moq-relay's tests). `poll_*` forms come in [poll](/quest/m1/quic-api/poll.md). The Impact bullet says how to migrate in moq-quic, moq-tokio, moq-uring, and
 qmux if its public API changes.
-
-## Required
-
-- [Zero-RTT](/quest/m1/quic-api/zero-rtt.md) - removes 0-RTT, so no error carries it

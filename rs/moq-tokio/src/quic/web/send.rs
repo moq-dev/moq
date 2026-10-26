@@ -70,8 +70,6 @@ impl SendStream {
 	/// [`crate::quic::driver::SendStream::stopped`].
 	///
 	/// Unlike the driver, this returns None if the code is not a valid WebTransport error code.
-	/// Also unlike the driver, this returns a SessionError, not a StoppedError, because 0-RTT is not
-	/// supported.
 	pub async fn stopped(&self) -> Result<Option<u32>, SessionError> {
 		match self.stream.stopped().await {
 			Ok(Some(code)) => match self.close.session_gone(code) {
@@ -80,7 +78,6 @@ impl SendStream {
 			},
 			Ok(None) => Ok(None),
 			Err(crate::quic::driver::StoppedError::ConnectionLost(conn_err)) => Err(self.close.map(conn_err.into())),
-			Err(crate::quic::driver::StoppedError::ZeroRttRejected) => unreachable!("0-RTT not supported"),
 		}
 	}
 

@@ -47,7 +47,7 @@ const SC: &[u8] = &[0, 0, 0, 1];
 const SPS: &[u8] = &[0x67, 0x42, 0xc0, 0x1f, 0xde];
 const PPS: &[u8] = &[0x68, 0xce, 0x3c, 0x80];
 // A second, distinct PPS (id 1): broadcast feeds often define more than one.
-const PPS1: &[u8] = &[0x68, 0xce, 0x3c, 0x81];
+const PPS1: &[u8] = &[0x68, 0x4e, 0x3c, 0x80];
 
 // libklvanc public-sample SCTE-35 cue: splice_info_section, table_id 0xFC, 30 bytes.
 const CUE: &[u8] = &[
@@ -102,7 +102,7 @@ async fn drain(consumer: moq_net::broadcast::Consumer) -> BytesMut {
 }
 
 /// `drain` for an exporter built with an explicit catalog extension.
-async fn drain_with<S: crate::catalog::Stream>(exporter: Export<S>) -> BytesMut
+pub(super) async fn drain_with<S: crate::catalog::Stream>(exporter: Export<S>) -> BytesMut
 where
 	S::Ext: tscat::Catalog,
 {
@@ -1077,6 +1077,97 @@ async fn export_trims_leading_pictures_after_a_late_drop() {
 		.collect();
 	assert_eq!(pts, expected, "only the resumed keyframe's leading pictures go");
 	assert_eq!(export.dropped(), 3, "the late picture and the two it orphaned");
+}
+
+/// MPEG-2 video carried whole resumes after a late picture at its next sequence header, not
+/// at the next picture, which references the dropped one.
+#[tokio::test(start_paused = true)]
+async fn export_resumes_whole_mpeg2_video_at_a_sequence_header() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+	)
+	.unwrap();
+	let mut aac = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+	aac.container = Container::Legacy;
+	let track = broadcast
+		.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+		.unwrap();
+	catalog.modify().unwrap().audio.renditions.insert("audio".into(), aac);
+	let mut audio = Producer::new(track, HangContainer::Legacy(Kind::Audio));
+	let track = broadcast
+		.create_track("video.ts", hang::container::track_info(hang::catalog::PRIORITY.video))
+		.unwrap();
+	let mut entry = tscat::Track::new(PLACED_PID);
+	entry.pes_packet = Some(tscat::PesPacket::new(0x02));
+	catalog
+		.modify()
+		.unwrap()
+		.ext
+		.mpegts
+		.tracks
+		.insert("video.ts".into(), entry);
+	let mut video = Producer::new(track, HangContainer::Legacy(Kind::Data));
+	let mut export = open_ts(
+		crate::source::announced(&consumer).await,
+		crate::catalog::CatalogFormat::Hang,
+	)
+	.await
+	.unwrap()
+	.with_delay(Duration::from_millis(500));
+
+	// (arrival, PTS) in milliseconds, and whether a sequence header opens a group. The 120 ms
+	// picture stalls past its deadline; the two pictures after it still reference it.
+	let pictures = [
+		(0, 0, true),
+		(40, 40, false),
+		(80, 80, false),
+		(1000, 120, false),
+		(2000, 2000, false),
+		(2040, 2040, false),
+		(2080, 2080, true),
+		(2120, 2120, false),
+	];
+	let start = tokio::time::Instant::now();
+	let (mut out, mut sample) = (Vec::new(), 0);
+	for (index, (at, pts, sequence)) in pictures.into_iter().enumerate() {
+		// The audio arrives on time throughout, so only the video is late.
+		while sample * AUDIO_US <= at * 1_000 {
+			tokio::time::sleep_until(start + Duration::from_micros(sample * AUDIO_US)).await;
+			out.extend(poll_frames(&mut export));
+			audio
+				.write(Frame {
+					timestamp: Timestamp::from_micros(sample * AUDIO_US).unwrap(),
+					duration: None,
+					payload: Bytes::from(vec![sample as u8; 180]),
+					keyframe: sample.is_multiple_of(AUDIO_GROUP),
+				})
+				.unwrap();
+			sample += 1;
+		}
+		tokio::time::sleep_until(start + Duration::from_millis(at)).await;
+		out.extend(poll_frames(&mut export));
+		let mut payload = if sequence { vec![0, 0, 1, 0xb3] } else { Vec::new() };
+		payload.extend_from_slice(&[0, 0, 1, 0x00, index as u8]);
+		video
+			.write(Frame {
+				timestamp: Timestamp::from_millis(pts).unwrap(),
+				duration: None,
+				keyframe: sequence,
+				payload: Bytes::from(pes_with(0xe0, 0x80, 0x80, &pes_clock(2, pts * 90), 0, &payload)),
+			})
+			.unwrap();
+		out.extend(poll_frames(&mut export));
+	}
+	audio.finish().unwrap();
+	video.finish().unwrap();
+	out.extend(drain_frames(&mut export).await);
+
+	// Each picture's last byte is its index.
+	let sent: Vec<u8> = placed_out(&out).iter().map(|pes| *pes.bytes.last().unwrap()).collect();
+	assert_eq!(sent, [0, 1, 2, 6, 7]);
 }
 
 /// `(PTS, DTS)` of every video PES start, in transport (decode) order. Read raw, so a capture
@@ -3319,15 +3410,19 @@ async fn service_layer_survives_roundtrip() {
 	.await;
 	assert_packet_aligned(&ts);
 
-	// The rebuilt PAT preserves the transport/service identity and PMT PID.
+	// The rebuilt PAT preserves the transport/service identity and PMT PID, and points at the
+	// carried NIT through the network entry.
 	let mut reader = TsPacketReader::new(Cursor::new(ts.as_ref()));
 	let mut checked_pat = false;
 	while let Some(packet) = reader.read_ts_packet().unwrap() {
 		if let Some(TsPayload::Pat(pat)) = packet.payload {
 			assert_eq!(pat.transport_stream_id, 1, "TSID preserved in the rebuilt PAT");
-			assert_eq!(pat.table.len(), 1);
-			assert_eq!(pat.table[0].program_num, 1, "service number preserved");
-			assert_eq!(pat.table[0].program_map_pid.as_u16(), 0x1000, "PMT PID preserved");
+			let table: Vec<_> = pat
+				.table
+				.iter()
+				.map(|entry| (entry.program_num, entry.program_map_pid.as_u16()))
+				.collect();
+			assert_eq!(table, [(0, 0x0010), (1, 0x1000)], "network entry, then the service");
 			checked_pat = true;
 			break;
 		}
@@ -3352,6 +3447,14 @@ async fn service_layer_survives_roundtrip() {
 	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.reserve());
 	import2.decode(&BytesMut::from(ts.as_ref())).unwrap();
 	import2.finish().unwrap();
+	// Its row, if any, is the SI track's, never an unclaimed PID's.
+	if let Some(nit) = import2.stats().streams.get(&0x0010) {
+		assert_eq!(
+			(nit.track.as_str(), nit.refused),
+			(".si", 0),
+			"the network entry names captured SI, not a PID to count: {nit:?}"
+		);
+	}
 
 	let snapshot2 = catalog2.snapshot();
 	let program2 = snapshot2

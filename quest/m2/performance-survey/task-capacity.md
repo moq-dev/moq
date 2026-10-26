@@ -8,8 +8,8 @@ cost for a burst that has already drained.
 ## Plan
 
 [kio::Tasks](/rs/kio/src/task.rs) grows slots and per-slot wakers, retains
-them after completion, and snapshots every allocated wake-bit word each poll
-(lines 270-298, 364-370). Dispatch scans those words again. Work can depend on
+them after completion, and snapshots every allocated wake-bit word in each
+`Tasks::poll`. Dispatch scans those words again. Work can depend on
 historical peak/64 even when only one task remains. The io_uring worker and
 session serving loops are current consumers.
 
@@ -32,6 +32,8 @@ much is historical capacity.
 
 Related: [worker quiescence](/quest/m2/perf/uring-quiescence.md) and
 [relay allocations](/quest/m2/perf/relay-allocs.md) own other costs.
+Worker quiescence also reshapes the `Tasks::poll` snapshot with a pass
+budget; whichever of the two lands second rebases its benchmark on the other.
 
 Follow the [survey's benchmark contract](/quest/m2/performance-survey/README.md):
 measure the baseline before optimizing, retain paired evidence, verify equivalent

@@ -403,6 +403,80 @@ for (const code of [SessionCode.Unauthorized, SessionCode.MalformedAuthToken, Se
 	});
 }
 
+/**
+ * Stub WebTransport for lite-06, which carries the credential in the URL: refuses `refused`
+ * once `release` resolves, and accepts any other credential, recording each dialed jwt.
+ */
+function refusing(refused: string, release: Promise<void>) {
+	const dialed: (string | null)[] = [];
+	const stub = function StubWebTransport(target: string | URL) {
+		const jwt = new URL(target).searchParams.get("jwt");
+		dialed.push(jwt);
+		const pair = createMockTransportPair(Lite.ALPN_06);
+		void accept(pair.server, new URL(target)).then(async () => {
+			if (jwt !== refused) return;
+			await release;
+			pair.server.close({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" });
+		});
+		return pair.client;
+	};
+	return { dialed, stub: stub as unknown as typeof WebTransport };
+}
+
+test("a refused credential replaced since its dial redials with the new one", async () => {
+	const original = globalThis.WebTransport;
+	const { promise: release, resolve } = Promise.withResolvers<void>();
+	const { dialed, stub } = refusing("old", release);
+	globalThis.WebTransport = stub;
+
+	const tokens = new Signal<readonly string[]>(["old"]);
+	const reload = new Reload({
+		url: new URL("https://example.com/"),
+		versions: ["moq-lite-06"],
+		websocket: { enabled: false },
+		tokens,
+		delay: { initial: Milli(1), multiplier: 2, max: Milli(1), timeout: Milli(0) },
+	});
+	try {
+		await waitUntil(() => reload.established.peek() !== undefined);
+		tokens.set(["new"]);
+		resolve();
+		await waitUntil(() => dialed.includes("new"));
+		expect(dialed).toEqual(["old", "new"]);
+		await waitUntil(() => reload.established.peek() !== undefined);
+		expect(reload.error.peek()).toBeUndefined();
+	} finally {
+		reload.close();
+		globalThis.WebTransport = original;
+	}
+});
+
+test("new tokens redial a URL that stopped on refusing the old ones", async () => {
+	const original = globalThis.WebTransport;
+	const { dialed, stub } = refusing("old", Promise.resolve());
+	globalThis.WebTransport = stub;
+
+	const tokens = new Signal<readonly string[]>(["old"]);
+	const reload = new Reload({
+		url: new URL("https://example.com/"),
+		versions: ["moq-lite-06"],
+		websocket: { enabled: false },
+		tokens,
+		delay: { initial: Milli(1), multiplier: 2, max: Milli(1), timeout: Milli(0) },
+	});
+	try {
+		await waitUntil(() => reload.error.peek() !== undefined);
+		expect(dialed).toEqual(["old"]);
+		tokens.set(["new"]);
+		await waitUntil(() => dialed.includes("new"));
+		await waitUntil(() => reload.established.peek() !== undefined);
+		expect(reload.error.peek()).toBeUndefined();
+	} finally {
+		reload.close();
+		globalThis.WebTransport = original;
+	}
+});
+
 test("an unauthorized session close during setup stops retrying", async () => {
 	const original = globalThis.WebTransport;
 	const url = new URL("https://example.com/");

@@ -37,6 +37,5 @@ both `off` and `ect1` need a `moq-quic` change.
 
 ## Required
 
-- [Portable controller trait](/quest/m1/congestion/trait.md) - followers land in `moq-congestion` on its trait
 - [Measure ECN on the backbone](/quest/m2/quic-ecn-measure.md) - the
   provider verdict this quest acts on

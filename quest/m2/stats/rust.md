@@ -47,6 +47,10 @@
 - Decided 2026-10-22 (maintainer): the publisher's solicit option moved here
   from [encoder feedback](/quest/m3/stats-encoder-feedback.md), which keeps
   only the adaptation loop and reuses `--echo-path`.
+- `export --echo` counts no drops in `late`: `Received::report`
+  (`rs/moq-mux/src/stats.rs`) fills only frames, bytes, and arrival while the
+  TS release section holds the drops (from
+  [moq-dev/moq#6654](https://github.com/moq-dev/moq/pull/6654)).
 
 ## Related
 

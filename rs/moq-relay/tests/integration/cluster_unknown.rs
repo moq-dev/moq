@@ -123,7 +123,10 @@ impl Drop for Mesh {
 fn client(version: Option<moq_net::Version>) -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
-	config.websocket.delay = Some((Duration::ZERO).into());
+	#[cfg(feature = "websocket")]
+	{
+		config.websocket.delay = Some((Duration::ZERO).into());
+	}
 	config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
 	config.version.extend(version);
 	config.init(Default::default()).expect("client init")

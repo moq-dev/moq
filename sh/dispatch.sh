@@ -64,7 +64,7 @@ declare -A scope=(
     [workers]='^(infra/|demo/pub/|sh/js/workers\.sh$)'
     [moq_sh]='^infra/moq-sh/'
     # sh/rs/select.sh widens to the whole workspace for inputs every crate shares.
-    [rs]='^(sh/local\.(sh|ts)$|rs/|demo/carla/bridge/|sh/rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|\.config/nextest\.toml$)'
+    [rs]='^(\.cargo/|sh/local\.(sh|ts)$|rs/|demo/carla/bridge/|sh/rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|\.config/nextest\.toml$)'
     [bench]='^bench/'
     # The CARLA demo's simulator worker and launchers. Its player is a JS
     # package and its GPU bridge a Rust crate, so those modules cover them.
@@ -94,7 +94,7 @@ declare -A scope=(
     [obs]='^(cpp/obs/|sh/obs/|flake\.(nix|lock)$)'
     # Rust source is compiled below. Nix reads Cargo metadata, packaging inputs,
     # and its own modules and test helpers; those still gate the full flake.
-    [flake]='(^rs/.*\.(toml|txt|ptx|in)$|^Cargo\.(toml|lock)$|^rust-toolchain\.toml$|^flake\.lock$|^nix/|\.nix$)'
+    [flake]='(^\.cargo/|^rs/.*\.(toml|txt|ptx|in)$|^Cargo\.(toml|lock)$|^rust-toolchain\.toml$|^flake\.lock$|^nix/|\.nix$)'
     # ts.yml's crate filters against the closure test/ts/run.sh builds, which
     # moves only with a manifest, the lockfile, or the harness's packages.
     [ts_paths]='^(rs/.*Cargo\.toml$|Cargo\.(toml|lock)$|test/ts/run\.sh$|\.github/workflows/release-gate\.yml$|sh/gh/ts-paths\.py$)'

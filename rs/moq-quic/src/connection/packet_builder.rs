@@ -4,7 +4,7 @@ use tracing::{debug, trace, trace_span};
 
 use super::{Connection, SentFrames, spaces::SentPacket};
 use crate::{
-	ConnectionId, Instant, TransportError, TransportErrorCode,
+	ConnectionId, Instant, TransportError, TransportErrorCode, congestion,
 	connection::ConnectionSide,
 	frame::{self, Close, FrameStruct},
 	packet::{FIXED_BIT, Header, InitialHeader, LongType, PacketNumber, PartialEncode, SpaceId},
@@ -58,10 +58,9 @@ impl PacketBuilder {
 			let confidentiality_limit = conn.spaces[space_id]
 				.crypto
 				.as_ref()
-				.map_or_else(
-					|| &conn.zero_rtt_crypto.as_ref().unwrap().packet,
-					|keys| &keys.packet.local,
-				)
+				.unwrap()
+				.packet
+				.local
 				.confidentiality_limit();
 			if sent_with_keys.saturating_add(1) == confidentiality_limit {
 				// We still have time to attempt a graceful close
@@ -90,7 +89,7 @@ impl PacketBuilder {
 
 		let number = PacketNumber::new(exact_number, space.largest_acked_packet.unwrap_or(0));
 		let header = match space_id {
-			SpaceId::Data if space.crypto.is_some() => Header::Short {
+			SpaceId::Data => Header::Short {
 				dst_cid,
 				number,
 				spin: if conn.spin_enabled {
@@ -99,13 +98,6 @@ impl PacketBuilder {
 					conn.rng.random()
 				},
 				key_phase: conn.key_phase,
-			},
-			SpaceId::Data => Header::Long {
-				ty: LongType::ZeroRtt,
-				src_cid: conn.handshake_cid,
-				dst_cid,
-				number,
-				version,
 			},
 			SpaceId::Handshake => Header::Long {
 				ty: LongType::Handshake,
@@ -130,14 +122,8 @@ impl PacketBuilder {
 			buffer[partial_encode.start] ^= FIXED_BIT;
 		}
 
-		let (sample_size, tag_len) = if let Some(crypto) = &space.crypto {
-			(crypto.header.local.sample_size(), crypto.packet.local.tag_len())
-		} else if space_id == SpaceId::Data {
-			let zero_rtt = conn.zero_rtt_crypto.as_ref().unwrap();
-			(zero_rtt.header.sample_size(), zero_rtt.packet.tag_len())
-		} else {
-			unreachable!();
-		};
+		let crypto = space.crypto.as_ref().unwrap();
+		let (sample_size, tag_len) = (crypto.header.local.sample_size(), crypto.packet.local.tag_len());
 
 		// Each packet must be large enough for header protection sampling, i.e. the combined
 		// lengths of the encoded packet number and protected payload must be at least 4 bytes
@@ -210,12 +196,22 @@ impl PacketBuilder {
 			false => 0,
 		};
 
+		// Every packet counted in flight goes through the controller, which also paces it.
+		let congestion = (size != 0).then(|| {
+			conn.path.congestion.on_sent(congestion::Sent {
+				now,
+				bytes: size,
+				in_flight: conn.path.in_flight.bytes + u64::from(size),
+			})
+		});
+
 		let packet = SentPacket {
 			path_generation: conn.path.generation(),
 			largest_acked: sent.largest_acked,
 			time_sent: now,
 			size,
 			ack_eliciting,
+			congestion,
 			retransmits: sent.retransmits,
 			stream_frames: sent.stream_frames,
 			bandwidth_probe: sent.bandwidth_probe,
@@ -234,12 +230,8 @@ impl PacketBuilder {
 					conn.reset_idle_timeout(now, space_id);
 				}
 				conn.permit_idle_reset = false;
-				conn.path
-					.congestion
-					.on_packet_sent(now, size, exact_number, space_id.into());
 			}
 			conn.set_loss_detection_timer(now);
-			conn.path.pacing.on_transmit(size);
 			conn.bandwidth_probe.on_transmit(size);
 			if sent.bandwidth_probe {
 				conn.stats.path.sent_bandwidth_probes += 1;
@@ -257,14 +249,8 @@ impl PacketBuilder {
 		}
 
 		let space = &conn.spaces[self.space];
-		let (header_crypto, packet_crypto) = if let Some(crypto) = &space.crypto {
-			(&*crypto.header.local, &*crypto.packet.local)
-		} else if self.space == SpaceId::Data {
-			let zero_rtt = conn.zero_rtt_crypto.as_ref().unwrap();
-			(&*zero_rtt.header, &*zero_rtt.packet)
-		} else {
-			unreachable!("tried to send {:?} packet without keys", self.space);
-		};
+		let crypto = space.crypto.as_ref().unwrap();
+		let (header_crypto, packet_crypto) = (&*crypto.header.local, &*crypto.packet.local);
 
 		debug_assert_eq!(packet_crypto.tag_len(), self.tag_len, "Mismatching crypto tag len");
 
@@ -275,14 +261,9 @@ impl PacketBuilder {
 			.finish(packet_buf, header_crypto, Some((self.exact_number, packet_crypto)));
 
 		let len = buffer.len() - encode_start;
-		conn.config.qlog_sink.emit_packet_sent(
-			self.exact_number,
-			len,
-			self.space,
-			self.space == SpaceId::Data && conn.spaces[SpaceId::Data].crypto.is_none(),
-			now,
-			conn.orig_rem_cid,
-		);
+		conn.config
+			.qlog_sink
+			.emit_packet_sent(self.exact_number, len, self.space, now, conn.orig_rem_cid);
 
 		(len, pad)
 	}

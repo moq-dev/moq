@@ -59,7 +59,7 @@ New from m1:
 
 Proposals from m0 are settled. The moq-video raw-frame publisher and the
 shared `Background` would each have had moq-ffi as their only user once the
-[generated C bindings](/quest/m1/c/README.md) retire moq-c's hand-written
+[generated C bindings](/quest/m2/c/README.md) retire moq-c's hand-written
 copies, so both were dropped. The Go wrapper's missing `bridge.CallHandle` is
 in the generated binding, not the wrapper: see
 [Go cancelled results](/quest/m2/go-cancelled-result.md).
@@ -69,8 +69,8 @@ in the generated binding, not the wrapper: see
 One PR, private and behavior-preserving: moq-mux's `import::Track` and
 `TrackStream` expand their codec arms through one macro each, and nine
 importers lost a deleted method's doc left on `cut`. The H.264 and H.265
-exporters were already planned as [one Annex-B exporter](https://github.com/moq-dev/moq/pull/6575),
-ordered after the rendition rebind, so this run left them alone. Search the
+exporters were left alone for [one shared Annex-B export lifecycle](https://github.com/moq-dev/moq/pull/6575),
+which has since landed. Search the
 quest tree before fixing a duplicate: the 2026-10-22 refactor audit filed
 several.
 

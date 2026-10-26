@@ -23,10 +23,11 @@ backing or assume each slice owns a fresh allocation. Compare continued
 sharing with copying/compaction only where the workload warrants it.
 
 This covers completed reliable groups. Coordinate with
-receive leases ([moq-dev/moq#5878](https://github.com/moq-dev/moq/pull/5878)),
-[browser media copies](/quest/m2/performance-survey/browser-media-copies.md),
-and the [release audit](https://github.com/moq-dev/moq/pull/6311), which owns
-decoded datagrams and incomplete/reordered media storage.
+receive leases ([moq-dev/moq#5878](https://github.com/moq-dev/moq/pull/5878))
+and [browser media copies](/quest/m2/performance-survey/browser-media-copies.md).
+Decoded datagrams are already billed to the cache pool
+([moq-dev/moq#6413](https://github.com/moq-dev/moq/pull/6413)) and the media
+reorder queues are bounded ([moq-dev/moq#6453](https://github.com/moq-dev/moq/pull/6453)).
 
 Follow the [survey benchmark contract](/quest/m2/performance-survey/README.md):
 baseline first, paired evidence, equivalent work and nightly coverage. A

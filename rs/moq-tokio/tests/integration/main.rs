@@ -18,6 +18,7 @@ mod reconnect;
 mod reset_secret;
 mod stream_code;
 mod subscription_end_integrity;
+mod tokens;
 mod unannounce;
 mod worker;
 

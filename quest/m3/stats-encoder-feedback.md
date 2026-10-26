@@ -20,8 +20,9 @@ stall signal to that controller rather than to `rate::Control`; split it
 into its own quest requiring the controller if this is revived. This quest
 covers the encode producers and `moq import --echo-path`, which need no ladder.
 
-- `encode::Options` in `rs/moq-video` and `rs/moq-audio` (the producer
-  options, beside `bandwidth`) gains `echo: Option<echo::Consumer>`.
+- `encode::Capture` in `rs/moq-video` and `encode::Options` in
+  `rs/moq-audio` (the producer options, beside `bandwidth`) gain
+  `echo: Option<echo::Consumer>`.
   - The handle is built from an `origin::Consumer` and the echo path,
     resolved against the publisher's broadcast.
   - It consumes `.echo` announcements under that path, subscribes to the

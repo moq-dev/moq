@@ -22,7 +22,7 @@ use criterion::{
 	measurement::{Measurement, ValueFormatter, WallTime},
 };
 use moq_clock::Instant;
-use moq_congestion::{Controller, ControllerFactory, ControllerMetrics};
+use moq_congestion::{Ack, Ce, Controller, ControllerFactory, ControllerMetrics, Init, Loss, Packet, Sent};
 use moq_quic::{
 	ClientConfig, Connection, ConnectionHandle, ConnectionId, ConnectionIdGenerator, DatagramEvent, Endpoint,
 	EndpointConfig, Event, LeaseError, RandomConnectionIdGenerator, ReadError, ServerConfig, StreamEvent, StreamId,
@@ -665,17 +665,15 @@ struct Unlimited {
 }
 
 impl Controller for Unlimited {
-	fn on_congestion_event(
-		&mut self,
-		_now: Instant,
-		_sent: Instant,
-		_is_persistent_congestion: bool,
-		_is_ecn: bool,
-		_lost_bytes: u64,
-		_largest_lost: u64,
-		_space: moq_congestion::SpaceId,
-	) {
+	fn on_sent(&mut self, _sent: Sent) -> Packet {
+		Packet::default()
 	}
+
+	fn on_ack(&mut self, _ack: Ack<'_>) {}
+
+	fn on_loss(&mut self, _loss: Loss<'_>) {}
+
+	fn on_ce(&mut self, _ce: Ce) {}
 
 	fn on_mtu_update(&mut self, _new_mtu: u16) {}
 
@@ -683,11 +681,16 @@ impl Controller for Unlimited {
 		WINDOW
 	}
 
+	fn pace(&mut self, _now: Instant, _bytes: u64) -> Option<Instant> {
+		None
+	}
+
 	fn metrics(&self) -> ControllerMetrics {
-		let mut metrics = ControllerMetrics::default();
-		metrics.congestion_window = WINDOW;
-		metrics.probe_inflight = self.probe.then_some(WINDOW);
-		metrics
+		ControllerMetrics {
+			congestion_window: WINDOW,
+			probe_inflight: self.probe.then_some(WINDOW),
+			..Default::default()
+		}
 	}
 
 	fn probes(&self) -> bool {
@@ -698,17 +701,13 @@ impl Controller for Unlimited {
 		Box::new(*self)
 	}
 
-	fn initial_window(&self) -> u64 {
-		WINDOW
-	}
-
 	fn into_any(self: Box<Self>) -> Box<dyn Any> {
 		self
 	}
 }
 
 impl ControllerFactory for Unlimited {
-	fn build(self: Arc<Self>, _now: Instant, _current_mtu: u16) -> Box<dyn Controller> {
+	fn build(self: Arc<Self>, _init: Init) -> Box<dyn Controller> {
 		Box::new(*self)
 	}
 }

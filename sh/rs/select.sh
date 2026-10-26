@@ -20,7 +20,7 @@ select_packages() {
         echo ALL
         return
     fi
-    if [[ "$list" == --all ]] || grep -qE '^(sh/local\.(sh|ts)|Cargo\.(toml|lock)|rust-toolchain\.toml|rs/justfile|sh/rs/(select|platform|nextest|(net|tokio|media)-features)\.sh|\.config/nextest\.toml)$' "$list"; then
+    if [[ "$list" == --all ]] || grep -qE '^(\.cargo/.*|sh/local\.(sh|ts)|Cargo\.(toml|lock)|rust-toolchain\.toml|rs/justfile|sh/rs/(select|platform|nextest|(net|tokio|media)-features)\.sh|\.config/nextest\.toml)$' "$list"; then
         echo ALL
         return
     fi
@@ -147,7 +147,7 @@ case "$action" in
         if wants '(moq-wasm|moq-mux|moq-ffi|moq-clock)'; then just rs wasm; fi
         # Device code behind the off-by-default `capture` feature. check-test
         # lints it through the test build, as for the default features.
-        if [[ "$action" != lint ]] && wants '(moq-video|moq-audio)'; then
+        if [[ "$action" != lint ]] && wants '(moq-video|moq-audio|moq-scene|moq-studio)'; then
             if [[ "$action" == check-test ]]; then just rs capture-test; else just rs capture; fi
         fi
         # moq-cli's media tasks are behind `play`; only check-test runs tests.
