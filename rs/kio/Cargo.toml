@@ -17,12 +17,16 @@ categories = ["asynchronous", "concurrency"]
 _sim = []
 
 [dependencies]
+# Frees a log's evicted segments once no read that could reach them is running.
+crossbeam-epoch = "0.9.21"
 smallvec = { version = "1.15", features = ["union"] }
 
 # Loom swaps in its own Arc/Mutex/atomics so it can permute every interleaving.
 # It's a normal (not dev) dependency because `sync.rs` re-exports it from the
 # library itself, but `cfg(loom)` is never set outside `just rs loom`.
 [target.'cfg(loom)'.dependencies]
+# Under `--cfg crossbeam_loom` too, so loom permutes the collector's own atomics.
+crossbeam-epoch = { version = "0.9.21", features = ["loom"] }
 loom = { workspace = true }
 
 [dev-dependencies]

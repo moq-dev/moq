@@ -645,6 +645,21 @@ continues to rank feasible transit routes; report it. This may
 split at start (Rust and draft, then JS), as long as both land in one
 release.
 
+### Mint an epoch for every route (2026-10-24 pre-cut audit)
+
+The epochless instance machinery keeps drawing fixes (35d935f428,
+3655358c2f, c39780f952, 29e74a26b7, a7acf21e2a, ef2511e101, aa0d915867,
+0f4f81f9ed, f0fcbefd66, 4c8ab3ca41, 001482144f, 07127f8f5b), as does front
+splice, park, and linger in `serve_front` (166f9e87bc, 3b4ad5bf02,
+88848954db, 24b9177b6e, 0e1995017d, 732101ed1e, 00d27780dd, 37b49d8042).
+Proposal for this quest to weigh: mint an epoch on the receiving side at
+ingest or local announce when a peer sends none, so `Instance` collapses to
+`Epoch`. That deletes the `Instance::Route(generation)` renewals,
+`restarted_since`, the held-restart Release for epochless routes, and
+Selection retirement, leaving Follow's same-epoch Update/Restart split as
+the only takeover rule. `Route::epoch` stops being optional (a breaking
+API change); no wire change.
+
 ## Required
 
 - [Stamp routing identities](/quest/m1/cluster-routing/stamp.md) - every session's own identity is stamped by its receiver, never self-named

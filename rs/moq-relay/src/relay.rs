@@ -871,6 +871,7 @@ async fn serve_listening(
 mod tests {
 	#[cfg(feature = "stun")]
 	#[tokio::test]
+	#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 	async fn stun_listener_runs_with_the_relay_and_stops_with_it() {
 		use stun_types::message::{BINDING, Message, MessageWriteVec};
 		use stun_types::prelude::*;

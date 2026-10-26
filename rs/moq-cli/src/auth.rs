@@ -406,7 +406,8 @@ pub struct Serve {
 	#[usage(long = "mtls-upstream", hide = true, default_missing = "true", num_args = 0..=1, require_equals = true)]
 	mtls_upstream: Option<bool>,
 
-	/// The tier label stamped on every grant, handed to the relay's stats.
+	/// The tier label stamped on every grant, handed to the relay's stats: `/`-joined
+	/// segments of ASCII letters, digits, `.`, `_`, and `-`.
 	#[usage(long)]
 	tier: Option<String>,
 

@@ -499,6 +499,15 @@ pub struct Bbr3 {
     /// BBR.probe_rtt_min_delay has expired and is due for a refresh with an application idle
     /// period or a transition into ProbeRTT state.
     probe_rtt_expired: bool,
+    /// Whether the transport reported the flow application-limited since BBR.probe_rtt_min_stamp
+    /// last moved, which lets the due ProbeRTT be skipped. A flow that never ran out of data keeps
+    /// entering ProbeRTT, where competing BBR flows converge.
+    probe_rtt_skip_app_limited: bool,
+    /// Whether loss or CE signalled congestion since BBR.probe_rtt_min_stamp last moved, which
+    /// denies a skip. The flow then shares a full queue whose delay only ProbeRTT re-measures:
+    /// beside a loss-based flow, skipping would hold BBR.min_rtt below the queue that flow keeps
+    /// and yield to it. Persistent loss thus never postpones ProbeRTT.
+    probe_rtt_skip_congested: bool,
     /// equivalent to C.delivered_time: The wall clock time when C.delivered was last updated. <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-4.1.1.2.1>
     delivered_time: Option<Instant>,
     /// equivalent to C.first_send_time: If packets are in flight, then this holds the send time of
@@ -613,6 +622,18 @@ pub struct Bbr3 {
 }
 
 impl Bbr3 {
+    /// Whether the controller is in ProbeRTT, for transport tests.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn probing_rtt(&self) -> bool {
+        self.state == BbrState::ProbeRtt
+    }
+
+    /// The windowed minimum RTT the model uses, for transport tests.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn min_rtt(&self) -> Duration {
+        self.min_rtt
+    }
+
     /// equivalent to BBROnInit <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.2.1>
     fn new(config: Arc<Bbr3Config>, current_mtu: u16) -> Self {
         let probe_rng: Pcg32;
@@ -707,6 +728,8 @@ impl Bbr3 {
             probe_rtt_min_delay: Duration::from_secs(u64::MAX),
             probe_rtt_min_stamp: None,
             probe_rtt_expired: false,
+            probe_rtt_skip_app_limited: false,
+            probe_rtt_skip_congested: false,
             delivered_time: None,
             first_send_time: None,
             app_limited: 0,
@@ -1205,6 +1228,17 @@ impl Bbr3 {
     /// unset stamp counts as not yet expired and the first sample starts the interval. Counting it
     /// as expired instead would dip every connection into ProbeRTT on its very first ack, and so
     /// into `min_pipe_cwnd`, since `bw` is still 0.
+    ///
+    /// An application-limited flow without congestion during the interval skips the due ProbeRTT,
+    /// as QUICHE BBRv1's kBBR8 does, which spares media its periodic window cut. Its near-floor
+    /// kBBR7 also requires an application-limited interval, so kBBR8 covers it.
+    /// <https://quiche.googlesource.com/quiche.git/+/59748eb0effcf74602957379bf5a8ce0f5aec770/quic/core/congestion_control/bbr_sender.cc>
+    /// A skip moves only the stamps and keeps the values, so a base RTT that rose meanwhile is not
+    /// followed until congestion or an interval that never ran out of data brings ProbeRTT back.
+    /// BBR.min_rtt_stamp moves too, or BBR.min_rtt could expire into the high sample that opens
+    /// the next ProbeRTT. A lower BBR.min_rtt from before a ProbeRTT that measured a higher RTT
+    /// still expires first, since its filter is two ProbeRTT intervals long. An idle restart keeps
+    /// the draft's free refresh instead, sampling the drained path directly.
     fn update_min_rtt(&mut self, now: Instant) {
         self.probe_rtt_expired = match self.probe_rtt_min_stamp {
             Some(probe_rtt_min_stamp) => {
@@ -1214,12 +1248,21 @@ impl Bbr3 {
             }
             None => false,
         };
+        if self.probe_rtt_expired
+            && !self.idle_restart
+            && self.probe_rtt_skip_app_limited
+            && !self.probe_rtt_skip_congested
+        {
+            self.probe_rtt_expired = false;
+            self.min_rtt_stamp = Some(now);
+            self.refresh_probe_rtt_min_stamp(now);
+        }
         if let Some(rate_sample) = self.rs
             && rate_sample.rtt >= Duration::from_secs(0)
             && (rate_sample.rtt < self.probe_rtt_min_delay || self.probe_rtt_expired)
         {
             self.probe_rtt_min_delay = rate_sample.rtt;
-            self.probe_rtt_min_stamp = Some(now);
+            self.refresh_probe_rtt_min_stamp(now);
         }
 
         let min_rtt_expired;
@@ -1235,6 +1278,13 @@ impl Bbr3 {
             self.min_rtt = self.probe_rtt_min_delay;
             self.min_rtt_stamp = self.probe_rtt_min_stamp;
         }
+    }
+
+    /// Restarts the ProbeRTT interval, which then gathers its own evidence for a skip.
+    fn refresh_probe_rtt_min_stamp(&mut self, now: Instant) {
+        self.probe_rtt_min_stamp = Some(now);
+        self.probe_rtt_skip_app_limited = false;
+        self.probe_rtt_skip_congested = false;
     }
 
     /// equivalent to BBRCheckProbeRTT <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.4.3>
@@ -1379,7 +1429,7 @@ impl Bbr3 {
         if let Some(probe_rtt_done_stamp) = self.probe_rtt_done_stamp
             && now > probe_rtt_done_stamp
         {
-            self.probe_rtt_min_stamp = Some(now);
+            self.refresh_probe_rtt_min_stamp(now);
             self.restore_cwnd();
             self.exit_probe_rtt(now);
         }
@@ -1637,11 +1687,12 @@ impl Bbr3 {
     }
 
     /// Opens the loss round on its first congestion signal, loss or CE, as draft-06's NoteLoss
-    /// does for loss.
+    /// does for loss, and denies a skip of the next ProbeRTT.
     fn start_congestion_round(&mut self) {
         if !self.loss_in_round && !self.ce_in_round {
             self.loss_round_delivered = self.delivered;
         }
+        self.probe_rtt_skip_congested = true;
     }
 
     /// Responds to newly reported CE marks as classic ECN: congestion that the bottleneck
@@ -1862,6 +1913,7 @@ impl Controller for Bbr3 {
             return;
         }
         self.app_limited = Ord::max(self.delivered + in_flight, 1);
+        self.probe_rtt_skip_app_limited = true;
     }
 
     /// equivalent to UpdateRateSample <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-4.1.2.3>
@@ -1924,6 +1976,7 @@ impl Controller for Bbr3 {
                 self.app_limited = 0;
             } else if app_limited {
                 self.app_limited = Ord::max(self.delivered + self.inflight, 1);
+                self.probe_rtt_skip_app_limited = true;
             }
             self.packets.cleanup(self.round_count);
         }
@@ -3331,24 +3384,19 @@ mod test {
     /// `full_bw_now`/`full_bw_reached` are never set; with zero loss the high-loss
     /// escape never fires either. Both STARTUP -> DRAIN triggers are closed.
     ///
-    /// The one state change that still occurs is the scheduled min-RTT refresh:
-    /// with a constant RTT the min-RTT filter expires every `probe_rtt_interval`
-    /// (5s) and `check_probe_rtt` moves STARTUP -> PROBE_RTT. This is orthogonal to
-    /// the app-limited/loss exits A.7 concerns, and because `full_bw_reached` is
-    /// still false, `exit_probe_rtt` routes back to STARTUP (`enter_startup`)
-    /// rather than on to PROBE_BW. So the flow oscillates STARTUP <-> PROBE_RTT and
-    /// never advances past STARTUP, i.e. it stays in STARTUP indefinitely.
+    /// The scheduled min-RTT refresh does not interrupt it either: the transport
+    /// reports the flow application-limited and its constant RTT sits at
+    /// BBR.min_rtt, so every due ProbeRTT is skipped (see `update_min_rtt`).
     ///
     /// Same infinite-buffer simulator as A.1/A.2, but the app is limited to a
     /// small fixed window (`APP_WINDOW`, well below cwnd) from the first packet so
     /// every sample is app-limited, and no packet is ever dropped.
     ///
     /// Runs long enough (`ROUNDS_TO_OBSERVE`, several `probe_rtt_interval`s) to
-    /// cover multiple PROBE_RTT interludes, and asserts that: the flow only ever
-    /// occupies STARTUP or PROBE_RTT (never DRAIN/PROBE_BW), at least one
-    /// PROBE_RTT interlude was exercised and returned to STARTUP, every observed
-    /// sample was application-limited, `full_bw_reached`/`full_bw_now` were never
-    /// set, and `full_bw_count` never reached `MAX_FULL_BW_COUNT`.
+    /// cover multiple due ProbeRTTs, and asserts that: the flow only ever occupies
+    /// STARTUP, every observed sample was application-limited,
+    /// `full_bw_reached`/`full_bw_now` were never set, and `full_bw_count` never
+    /// reached `MAX_FULL_BW_COUNT`.
     #[test]
     fn startup_never_exits_when_app_limited_without_loss() {
         /// packet size in bytes
@@ -3366,8 +3414,7 @@ mod test {
         /// (4*MSS).
         const APP_WINDOW: u64 = 20 * MSS;
         /// rounds to observe before declaring "indefinitely". Each round is ~1 RTT
-        /// (100ms), so this spans ~16s (several `probe_rtt_interval`s of 5s) and
-        /// covers multiple STARTUP <-> PROBE_RTT oscillations.
+        /// (100ms), so this spans ~16s, several `probe_rtt_interval`s of 5s.
         const ROUNDS_TO_OBSERVE: u64 = 160;
 
         // bottleneck serialization time for one MSS-sized packet
@@ -3398,13 +3445,7 @@ mod test {
         let mut pn: u64 = 1;
 
         // Signals gathered over the run; every assertion is checked after the loop.
-        // The set of states ever visited (must stay within {Startup, ProbeRtt}).
-        let mut saw_probe_rtt = false;
-        // A PROBE_RTT interlude was seen and the flow subsequently returned to
-        // STARTUP: proof exit_probe_rtt routed back to STARTUP, not on to
-        // PROBE_BW.
-        let mut returned_to_startup = false;
-        // Set true the moment any forbidden (past-STARTUP) state is entered.
+        // Set the moment any state other than STARTUP is entered.
         let mut advanced_past_startup: Option<BbrState> = None;
         // Whether every ack we processed carried an application-limited sample.
         let mut all_samples_app_limited = true;
@@ -3468,13 +3509,7 @@ mod test {
                 );
                 bbr.on_end_acks(at(now_ns), inflight, true, Some(p.pn), SpaceId::Data);
 
-                // Record the sample's app-limited flag, but only for STARTUP
-                // rounds: PROBE_RTT deliberately clamps cwnd to min_pipe_cwnd
-                // (below APP_WINDOW), so its samples are cwnd-limited by design and
-                // are not part of the app-limited premise.
-                if let Some(rs) = bbr.rs
-                    && bbr.state == BbrState::Startup
-                {
+                if let Some(rs) = bbr.rs {
                     samples_seen += 1;
                     all_samples_app_limited &= rs.is_app_limited;
                 }
@@ -3482,22 +3517,8 @@ mod test {
                 full_bw_now_ever |= bbr.full_bw_now;
                 full_bw_reached_ever |= bbr.full_bw_reached;
 
-                match bbr.state {
-                    BbrState::Startup => {
-                        // Returning to STARTUP after a PROBE_RTT interlude confirms
-                        // exit_probe_rtt routed back here (full_bw_reached false).
-                        if saw_probe_rtt {
-                            returned_to_startup = true;
-                        }
-                    }
-                    BbrState::ProbeRtt => {
-                        saw_probe_rtt = true;
-                    }
-                    // Any of these means STARTUP was actually left for the next
-                    // phase: the failure A.7 guards against.
-                    other => {
-                        advanced_past_startup.get_or_insert(other);
-                    }
+                if bbr.state != BbrState::Startup {
+                    advanced_past_startup.get_or_insert(bbr.state);
                 }
 
                 if advanced_past_startup.is_some() || bbr.round_count >= ROUNDS_TO_OBSERVE {
@@ -3508,8 +3529,6 @@ mod test {
             }
         }
 
-        // Never advanced past STARTUP: only STARTUP and the scheduled PROBE_RTT
-        // min-RTT refresh were ever entered.
         assert!(
             advanced_past_startup.is_none(),
             "BBR left STARTUP for {:?} while application-limited with no loss",
@@ -3520,19 +3539,6 @@ mod test {
             bbr.round_count >= ROUNDS_TO_OBSERVE,
             "simulation ended early ({} rounds) before observing enough rounds",
             bbr.round_count,
-        );
-        // The min-RTT refresh fired and returned to STARTUP (not on to PROBE_BW),
-        // proving STARTUP is genuinely re-entered rather than merely never left
-        // because time stood still.
-        assert!(saw_probe_rtt, "expected a scheduled PROBE_RTT interlude");
-        assert!(
-            returned_to_startup,
-            "PROBE_RTT should route back to STARTUP while full_bw_reached is false"
-        );
-        assert_eq!(
-            bbr.state,
-            BbrState::Startup,
-            "BBR should still be in STARTUP at the end of the run"
         );
         // The premise held: every sample really was application-limited.
         assert!(samples_seen > 0, "no samples were observed");
@@ -6543,7 +6549,9 @@ mod test {
                     true,
                     &rtt_est,
                 );
-                bbr.on_end_acks(at(now_ns), inflight, true, Some(p.pn), SpaceId::Data);
+                // The transport never reports a starved poll, so the due ProbeRTT has no
+                // evidence to skip on.
+                bbr.on_end_acks(at(now_ns), inflight, false, Some(p.pn), SpaceId::Data);
 
                 full_bw_reached_ever |= bbr.full_bw_reached;
 
@@ -7789,6 +7797,84 @@ mod test {
         sim.round(20 * MS, 200, 10 * MS);
         assert!(sim.bbr.rs.unwrap().is_app_limited);
         assert_eq!(sim.bbr.max_bw, 24_000_000.0);
+    }
+
+    /// Sends a packet every millisecond from `from_ns` to `to_ns`, each acknowledged after the
+    /// RTT `rtt_ns(send_ns)`, so the flight never empties. A `starved` flow reports an empty poll
+    /// after each send. Returns how many ACKs entered ProbeRTT.
+    fn pipeline(
+        sim: &mut Sim,
+        from_ns: u64,
+        to_ns: u64,
+        rtt_ns: impl Fn(u64) -> u64,
+        starved: bool,
+    ) -> u64 {
+        let mut acks = VecDeque::new();
+        let mut entries = 0;
+        for now in (from_ns..to_ns).step_by(MS as usize) {
+            while acks.front().is_some_and(|&(_, ack_ns)| ack_ns <= now) {
+                let (pn, ack_ns) = acks.pop_front().unwrap();
+                let before = sim.bbr.state;
+                sim.ack(ack_ns, [pn], false);
+                entries +=
+                    (before != BbrState::ProbeRtt && sim.bbr.state == BbrState::ProbeRtt) as u64;
+            }
+            acks.push_back((sim.pn, now + rtt_ns(now)));
+            sim.send(now, 1);
+            if starved {
+                sim.starve();
+            }
+        }
+        entries
+    }
+
+    /// An application-limited flow skips every due ProbeRTT, even after its RTT rose well past
+    /// BBR.min_rtt, moving only the stamps: BBR.min_rtt keeps the old floor.
+    #[test]
+    fn app_limited_skips_probe_rtt() {
+        let mut sim = probed();
+        assert_eq!(sim.bbr.min_rtt, Duration::from_millis(10));
+        let rtt = |send_ns| {
+            if send_ns < 1000 * MS {
+                10 * MS
+            } else {
+                20 * MS
+            }
+        };
+        assert_eq!(pipeline(&mut sim, 10 * MS, 20_000 * MS, rtt, true), 0);
+        assert_eq!(sim.bbr.min_rtt, Duration::from_millis(10));
+        assert_eq!(sim.bbr.probe_rtt_min_delay, Duration::from_millis(10));
+        assert!(sim.bbr.probe_rtt_min_stamp.unwrap() > sim.at(15_000 * MS));
+        assert!(sim.bbr.min_rtt_stamp.unwrap() > sim.at(15_000 * MS));
+    }
+
+    /// Loss or CE in the interval means the flow shares a full queue, so an application-limited
+    /// flow enters ProbeRTT, and BBR.min_rtt expires into the higher RTT it measured even though
+    /// the next interval skips.
+    #[test]
+    fn congested_interval_enters_probe_rtt() {
+        for ce in [false, true] {
+            let mut sim = probed();
+            sim.send(10 * MS, 1);
+            match ce {
+                true => sim.ack_ce(20 * MS, [sim.pn - 1]),
+                false => sim.lose(20 * MS, sim.pn - 1),
+            }
+            let entries = pipeline(&mut sim, 20 * MS, 12_000 * MS, |_| 20 * MS, true);
+            assert_eq!(entries, 1, "ce={ce}");
+            assert_eq!(sim.bbr.min_rtt, Duration::from_millis(20), "ce={ce}");
+        }
+    }
+
+    /// A flow never application-limited enters ProbeRTT even with every RTT sample at
+    /// BBR.min_rtt, as competing bulk flows rely on.
+    #[test]
+    fn bulk_flow_at_min_rtt_enters_probe_rtt() {
+        let mut sim = probed();
+        assert_eq!(
+            pipeline(&mut sim, 10 * MS, 6000 * MS, |_| 10 * MS, false),
+            1
+        );
     }
 
     /// A scripted `Sim` in PROBE_UP with a 100,000-byte long-term bound, a 10,000-byte BDP, a

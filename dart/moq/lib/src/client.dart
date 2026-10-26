@@ -2,6 +2,7 @@ import 'package:moq_ffi/moq_ffi.dart';
 
 import 'aliases.dart';
 import 'stream.dart';
+import 'version.dart';
 
 /// Scope for discovering announcements.
 final class AnnounceOptions {
@@ -24,7 +25,7 @@ final class AnnounceOptions {
 /// the FFI's [MoqClientConfig].
 ///
 /// Every field is optional; a null keeps the native default. A value the native
-/// side cannot use fails [Moq.connect] with `MoqException.Config`.
+/// side cannot use fails [Moq.connect] with `ConfigMoqException`.
 final class ConnectOptions {
   /// Local socket address to bind, e.g. `0.0.0.0:0`.
   final String? bind;
@@ -32,6 +33,13 @@ final class ConnectOptions {
   /// Protocol versions to offer, most preferred first, e.g. `moq-lite-03`.
   /// Null offers every supported version, which [versions] lists.
   final List<String>? versions;
+
+  /// Credentials every dial presents. The first is the connection credential,
+  /// sent in SETUP and, while an offered version can't carry it there, the
+  /// URL's `?jwt=`; each other one widens the session's grant over in-band
+  /// AUTH. A URL that already carries `?jwt=` keeps it, and then every token
+  /// rides AUTH. Replace them before they expire through [Moq.tokens].
+  final List<String>? tokens;
 
   /// How long one connect may take, dial and handshake together; zero waits forever.
   final Duration? timeout;
@@ -68,6 +76,7 @@ final class ConnectOptions {
   const ConnectOptions({
     this.bind,
     this.versions,
+    this.tokens,
     this.timeout,
     this.race,
     this.resolutionDelay,
@@ -83,6 +92,7 @@ final class ConnectOptions {
   MoqClientConfig get _ffi => MoqClientConfig(
     bind: bind,
     versions: versions ?? const [],
+    tokens: tokens ?? const [],
     timeout: timeout,
     race: race,
     resolutionDelay: resolutionDelay,
@@ -91,6 +101,7 @@ final class ConnectOptions {
     websocket: (websocket ?? const WebSocketConfig())._ffi,
     once: once,
     backoff: backoff ?? MoqBackoff(),
+    implementation: implementation,
     publish: publish,
     consume: consume,
   );
@@ -239,6 +250,17 @@ final class Moq {
   /// token before the current one expires; each added token is presented again
   /// on every reconnect.
   Auth auth() => session.auth();
+
+  /// The credentials every dial presents ([ConnectOptions.tokens]), to
+  /// replace while running.
+  ///
+  /// [Tokens.set_] replaces them, such as before the current ones expire: the
+  /// next dial presents them, and a live session with in-band AUTH presents
+  /// them at once, withdrawing each replaced token once its replacements are
+  /// answered, even when one is refused. After an authorization refusal the
+  /// client redials only if they changed. An empty token throws
+  /// `ConfigMoqException`.
+  Tokens tokens() => _client.tokens();
 
   /// Drain within one second, then stop the client.
   ///

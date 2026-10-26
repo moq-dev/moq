@@ -41,6 +41,20 @@ plugins {
 
 version = providers.gradleProperty("moq.version").get()
 
+// Sessions advertise the wrapper's version in SETUP (see Client.kt), so compile it in
+// from the same property rather than keeping a second copy in source.
+val generateVersion = tasks.register("generateVersion") {
+    val output = layout.buildDirectory.dir("generated/version")
+    val wrapperVersion = version.toString()
+    inputs.property("version", wrapperVersion)
+    outputs.dir(output)
+    doLast {
+        val file = output.get().file("dev/moq/Version.kt").asFile
+        file.parentFile.mkdirs()
+        file.writeText("package dev.moq\n\n/** This wrapper's version. */\ninternal const val VERSION = \"$wrapperVersion\"\n")
+    }
+}
+
 // Compatible-patch range for the bindings: 0.4.3 (the WebSocket fallback
 // setters) or newer, never 0.5.0. Published into the wrapper's POM so consumers
 // float to the newest bindings patch.
@@ -89,6 +103,7 @@ kotlin {
 
         val jvmAndAndroidMain = create("jvmAndAndroidMain") {
             dependsOn(commonMain)
+            kotlin.srcDir(generateVersion)
             dependencies {
                 // api: the wrapper re-exports the FFI types, so consumers get
                 // `uniffi.moq.*` (and the native libs) transitively.

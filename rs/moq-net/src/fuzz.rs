@@ -290,6 +290,13 @@ impl AnnounceWriter {
 	}
 }
 
+/// Fill the `groups` of `track` its cache misses, a run per FETCH, as a publisher answers a
+/// range FETCH, for the session bench. The returned guard keeps the filled groups cached.
+pub async fn fill_groups(track: &track::Consumer, groups: std::ops::Range<u64>) -> crate::Result<impl Sized> {
+	track.query().await?;
+	Ok(track.fill_groups(groups, 0).await)
+}
+
 /// `origin` as a session connected to `peer` serves it, for the viewers bench.
 pub fn excluding(origin: crate::origin::Consumer, peer: crate::Hop) -> crate::origin::Consumer {
 	origin.excluding(peer)
@@ -669,7 +676,7 @@ where
 /// ones, and the two disagree about which byte sequences are even legal.
 ///
 /// The leading-ones form spans the full `u64`, while the QUIC form stops at
-/// [`crate::coding::varint::MAX_QUIC`]; a value always re-encodes in the form it was read in.
+/// `2^62 - 1`; a value always re-encodes in the form it was read in.
 pub fn varint(data: &[u8]) -> bool {
 	let Some((&selector, rest)) = data.split_first() else {
 		return false;

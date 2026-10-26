@@ -500,10 +500,7 @@ export const hooks: {
 		producer: BroadcastProducer,
 		announcer: { announce(route: Route): void; unannounce(): void; route(): Route | undefined },
 	) => void;
-	/** Take a created broadcast's advertisement away, so it cannot announce until attached again. */
-	withholdAnnouncer: (
-		producer: BroadcastProducer,
-	) => { announce(route: Route): void; unannounce(): void; route(): Route | undefined } | undefined;
+
 	/** Call `fn` synchronously when an open broadcast closes, from any handle. */
 	onClosed: (producer: BroadcastProducer, fn: () => void) => Dispose;
 	/** Name a broadcast handle by the path an origin created or resolved it at. */
@@ -683,9 +680,7 @@ export const hooks: {
 	attachAnnouncer: () => {
 		throw new Error("broadcast.ts not loaded");
 	},
-	withholdAnnouncer: () => {
-		throw new Error("broadcast.ts not loaded");
-	},
+
 	onClosed: () => {
 		throw new Error("broadcast.ts not loaded");
 	},

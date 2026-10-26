@@ -5187,6 +5187,45 @@ fn a_null_config_dials_with_the_defaults() {
 	);
 }
 
+/// The caller's product tokens go ahead of the library's, and a malformed list fails the dial.
+#[test]
+fn implementation_prefixes_the_library() {
+	let core = format!("moq-c/{} {}", env!("CARGO_PKG_VERSION"), moq_net::IMPLEMENTATION);
+	assert_eq!(parsed(&client_config()).connect.implementation, Some(core.clone()));
+
+	let mut config = client_config();
+	let prefix = "moq-obs/0.7.0";
+	config.implementation = prefix.as_ptr() as *const c_char;
+	config.implementation_len = prefix.len();
+	assert_eq!(parsed(&config).connect.implementation, Some(format!("{prefix} {core}")));
+
+	let bad = "moq-obs/0.7.0 ";
+	config.implementation = bad.as_ptr() as *const c_char;
+	config.implementation_len = bad.len();
+	assert!(unsafe { crate::parse_client(Some(&config)) }.is_err());
+}
+
+/// Configured tokens reach the dial in order, and an empty one fails it.
+#[test]
+fn tokens_reach_the_dial() {
+	assert!(parsed(&client_config()).connect.tokens.is_empty());
+
+	let mut config = client_config();
+	let tokens = [moq_str("a"), moq_str("b")];
+	config.tokens = tokens.as_ptr();
+	config.tokens_len = tokens.len();
+	let parsed = parsed(&config).connect.tokens;
+	assert_eq!(
+		parsed.iter().map(|token| token.as_str()).collect::<Vec<_>>(),
+		["a", "b"]
+	);
+
+	let empty = [moq_str("a"), moq_str("")];
+	config.tokens = empty.as_ptr();
+	config.tokens_len = empty.len();
+	assert!(unsafe { crate::parse_client(Some(&config)) }.is_err());
+}
+
 /// The whole point of the `has_*` flags: a caller who zeroes the struct and sets
 /// nothing must land on the defaults, not on zero. The backoff and the WebSocket
 /// fallback are the ones with non-zero defaults, so they are what would break.
@@ -5807,6 +5846,19 @@ fn server_accepts_a_session() {
 	let mut query = moq_str("");
 	assert_eq!(unsafe { moq_session_request_query(request, &mut query) }, 0);
 	assert_eq!(borrowed_string(query.data, query.len).as_deref(), Some("jwt=abc"));
+	let mut implementation = moq_str("");
+	assert_eq!(
+		unsafe { moq_session_request_peer_implementation(request, &mut implementation) },
+		0
+	);
+	assert_eq!(
+		borrowed_string(implementation.data, implementation.len),
+		Some(format!(
+			"moq-c/{} {}",
+			env!("CARGO_PKG_VERSION"),
+			moq_net::IMPLEMENTATION
+		))
+	);
 
 	let session_cb = States::new();
 	let session = id(unsafe { moq_session_request_accept(request, served, 0, Some(state_callback), session_cb.ptr) });

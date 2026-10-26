@@ -15,7 +15,7 @@ use crate::{Version, ietf, lite};
 pub struct BoundsExceeded;
 
 /// The largest value the QUIC form can carry: `2^62 - 1`.
-pub const MAX_QUIC: u64 = (1 << 62) - 1;
+pub(crate) const MAX_QUIC: u64 = (1 << 62) - 1;
 
 /// How a protocol version lays out a varint on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -265,7 +265,7 @@ pub fn decode_quic<R: bytes::Buf>(r: &mut R) -> Result<u64, DecodeError> {
 
 /// Encode `value` as a QUIC varint (two-bit length tag).
 ///
-/// Fails with [`EncodeError::BoundsExceeded`] past [`MAX_QUIC`], writing nothing.
+/// Fails with [`EncodeError::BoundsExceeded`] past `2^62 - 1`, writing nothing.
 pub fn encode_quic<W: bytes::BufMut>(value: u64, w: &mut W) -> Result<(), EncodeError> {
 	let len = size(value, Form::Quic)?;
 	if w.remaining_mut() < len {

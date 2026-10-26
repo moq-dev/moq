@@ -147,6 +147,10 @@ and moqtopus and xquic-draft-18 over WebTransport (raw QUIC only).
 
 - [Release cut](/quest/m2/release/cut.md) - waits for the release in flight to ship
 
+From the 2026-10-25 run: the runner's moq-dev-js `announce-subscribe` case times
+out against imquic on both 0.4.4 and the [moq-dev/moq#6769](https://github.com/moq-dev/moq/pull/6769)
+backport, so it predates that fix. Classify it.
+
 ## Related
 
 - [Runner client bump](/quest/m2/release/runner-client-bump.md) - the runner's Rust client moves to the cut and its API

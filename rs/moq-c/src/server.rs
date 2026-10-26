@@ -127,6 +127,17 @@ impl Server {
 		Ok(())
 	}
 
+	pub fn request_peer_implementation(&self, request: Id, dst: &mut moq_string) -> Result<(), Error> {
+		*dst = match self.request(request)?.peer_implementation() {
+			Some(implementation) => borrow(implementation),
+			None => moq_string {
+				data: std::ptr::null(),
+				len: 0,
+			},
+		};
+		Ok(())
+	}
+
 	/// Remove a request from the table, for the call that answers it.
 	pub fn request_take(&mut self, request: Id) -> Result<moq_tokio::server::Request, Error> {
 		self.request.remove(request).ok_or(Error::NotFound)

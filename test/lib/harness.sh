@@ -107,8 +107,8 @@ harness_begin() {
 # Where port reservations live. Shared across worktrees on purpose: the point is
 # that a run in one worktree cannot hand out a port another already took.
 #
-# Nix shells give TMPDIR a private directory, but their sockets still share the
-# host network. Keep claims in /tmp regardless of each shell's scratch root.
+# Shells may set different TMPDIRs, but their sockets still share the host
+# network. Keep claims in /tmp regardless of each shell's scratch root.
 # The user id avoids ownership conflicts with another user's harnesses.
 harness_port_root() {
     local root="${HARNESS_PORT_ROOT:-/tmp}"

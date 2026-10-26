@@ -11,6 +11,11 @@ public final class Client: Sendable {
     ///   - bind: The local UDP address to bind; `nil` binds an ephemeral dual-stack port.
     ///   - versions: Protocol versions to offer, most preferred first (`"moq-lite-03"`);
     ///     empty offers every supported version, which `versions()` lists.
+    ///   - tokens: Credentials every dial presents. The first is the connection credential,
+    ///     sent in SETUP and, while an offered version can't carry it there, the URL's `?jwt=`;
+    ///     each other one widens the session's grant over in-band AUTH. A URL that already
+    ///     carries `?jwt=` keeps it, and then every token rides AUTH. Replace them through
+    ///     `tokens()`.
     ///   - timeout: How long one connect may take, dial and handshake together; 0 waits forever.
     ///   - race: Happy Eyeballs: how long before the next resolved address is also dialed.
     ///   - resolutionDelay: Happy Eyeballs: how long IPv4 waits for the full DNS answer.
@@ -28,6 +33,7 @@ public final class Client: Sendable {
     public init(
         bind: String? = nil,
         versions: [String] = [],
+        tokens: [String] = [],
         timeout: TimeInterval? = nil,
         race: TimeInterval? = nil,
         resolutionDelay: TimeInterval? = nil,
@@ -42,6 +48,7 @@ public final class Client: Sendable {
         ffi = try MoqClient(config: MoqClientConfig(
             bind: bind,
             versions: versions,
+            tokens: tokens,
             timeout: timeout,
             race: race,
             resolutionDelay: resolutionDelay,
@@ -50,6 +57,7 @@ public final class Client: Sendable {
             websocket: websocket,
             once: once,
             backoff: backoff,
+            implementation: implementation,
             publish: publish?.ffi,
             consume: consume?.ffi
         ))
@@ -60,12 +68,36 @@ public final class Client: Sendable {
         Session(try await ffi.connect(url: url))
     }
 
+    /// The credentials every dial presents, to replace while running.
+    public func tokens() -> Tokens {
+        Tokens(ffi.tokens())
+    }
+
     /// Cancel all current and future `connect()` calls.
     public func cancel() {
         ffi.cancel()
     }
 
 
+}
+
+/// The credentials a `Client` presents, replaceable while it runs.
+public final class Tokens: Sendable {
+    let ffi: MoqTokens
+
+    init(_ ffi: MoqTokens) {
+        self.ffi = ffi
+    }
+
+    /// Replace the credentials every dial presents, such as before the current ones expire.
+    ///
+    /// The next dial presents them, and a live session with in-band AUTH presents them at
+    /// once, withdrawing each replaced token once its replacements are answered, even when
+    /// one is refused. After an authorization refusal the client redials only if they changed.
+    /// - Throws: `MoqError.Config` for an empty token.
+    public func set(_ tokens: [String]) throws {
+        try ffi.set(tokens: tokens)
+    }
 }
 
 /// The protocol versions offered by default, most preferred first, spelled the way

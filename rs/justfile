@@ -18,8 +18,8 @@ no_fuzz := "--exclude moq-net-fuzz --exclude moq-quic-fuzz"
 default:
     just check
 
-# Default features for the selected packages. The full workspace permutations
-# each cost a separate compile, so `features` covers them nightly. No `cargo
+# Default features for the selected packages. Selection also checks feature
+# extremes; `features` covers the full matrix nightly. No `cargo
 # check` pass: clippy is a superset of it, and the two use different rustc
 # wrappers, so running both compiles the workspace twice.
 #
@@ -168,7 +168,7 @@ x11-rgb-bench:
 x11-bench-ci:
     #!/usr/bin/env bash
     set -euo pipefail
-    log="${MOQ_X11_BENCH_LOG:-.scratch/x11-capture-benchmark.log}"
+    log="${MOQ_X11_BENCH_LOG:-.tmp/x11-capture-benchmark.log}"
     mkdir -p "$(dirname "$log")"
     {
         git rev-parse HEAD
@@ -228,15 +228,19 @@ relay-minimal:
 c-tests:
     sh/rs/c-tests.sh
 
-# The feature permutations `check` leaves out, nightly. `--all-features` is the
-# only thing that compiles moq-cli's play/capture, the device features, the
-# Linux bindgen codecs, PipeWire, and jemalloc; `--no-default-features` the only
-# thing that compiles the `#[cfg(not(feature = ...))]` arms.
+# Benchmarks and examples stay in Nightly; the gate compiles the same targets
+# it tests, with both extremes exercising feature-gated implementation arms.
 
-# Compile the workspace at the feature extremes.
+# Compile and lint the selected packages at their feature extremes.
+[positional-arguments]
+feature-shapes *args:
+    bash sh/local.sh cargo clippy --locked --tests --no-default-features "$@" -- -D warnings
+    bash sh/local.sh cargo clippy --locked --tests --all-features "$@" -- -D warnings
+
+# Compile the full feature matrix, including isolated combinations and their tests.
 features:
-    just rs net-features
-    just rs quic-features
+    just rs net-features --all
+    just rs quic-features --all
     just rs tokio-features --all
     just rs media-features --all
     bash sh/local.sh cargo check --locked --workspace {{ no_fuzz }} --all-targets --no-default-features
@@ -254,19 +258,28 @@ features:
     bash sh/rs/nextest.sh cargo nextest run --locked --workspace {{ no_fuzz }} --all-targets --all-features
 
 # Compile and test the explicit-time model without async helpers or sessions.
-net-features:
-    bash sh/rs/net-features.sh
+[positional-arguments]
+net-features *args:
+    bash sh/rs/net-features.sh "$@"
 
 # Prove moq-quic leaves moq-clock's dev-only runtime to its consumers, and lints without its default features; a workspace build unifies both back in.
-quic-features:
+[positional-arguments]
+quic-features *args:
     #!/usr/bin/env bash
     set -euo pipefail
+    targets=(--tests)
+    if [[ $# == 1 && $1 == --all ]]; then
+        targets=(--all-targets)
+    elif [[ $# != 0 ]]; then
+        echo 'usage: just rs quic-features [--all]' >&2
+        exit 2
+    fi
     graph=$(cargo tree --locked -p moq-quic -e normal --prefix none)
     if grep -E '^(tokio|web-async) ' <<<"$graph"; then
         echo "moq-quic must not depend on a native runtime" >&2
         exit 1
     fi
-    bash sh/local.sh cargo clippy --locked -p moq-quic --all-targets --no-default-features -- -D warnings
+    bash sh/local.sh cargo clippy --locked -p moq-quic "${targets[@]}" --no-default-features -- -D warnings
 
 # Compile media boundaries (--all isolates every mode) and prove expensive
 # native/render dependencies are absent when their features are excluded.
@@ -312,12 +325,13 @@ doctest *args:
 # `tests/loom.rs`, `LOOM_MAX_PREEMPTIONS`). kio's own unit tests are
 # `cfg(not(loom))`.
 
-# Permutation-test the concurrent handoffs with loom.
+# Permutation-test the concurrent handoffs with loom. `crossbeam_loom` puts the
+# epoch collector that frees `kio::log` segments under loom too.
 [positional-arguments]
 loom *args:
-    RUSTFLAGS="--cfg loom" cargo test --locked --release -p kio --lib loom:: "$@"
-    RUSTFLAGS="--cfg loom" cargo test --locked --release -p moq-net --test loom "$@"
-    RUSTFLAGS="--cfg loom" cargo test --locked --release -p moq-net --test expiry-loom "$@"
+    RUSTFLAGS="--cfg loom --cfg crossbeam_loom" cargo test --locked --release -p kio --lib loom:: "$@"
+    RUSTFLAGS="--cfg loom --cfg crossbeam_loom" cargo test --locked --release -p moq-net --test loom "$@"
+    RUSTFLAGS="--cfg loom --cfg crossbeam_loom" cargo test --locked --release -p moq-net --test expiry-loom "$@"
 
 # Run the moq-quic simulation's random workloads from a fresh seed, printing the settings that replay it, then the bandwidth probe's acceptance suite.
 quic-sim:
@@ -497,6 +511,11 @@ bench-latency:
 [positional-arguments]
 bench-ts-schedule *args:
     bash sh/local.sh cargo bench --locked -p moq-mux --bench ts_schedule -- "$@"
+
+# Ingest an MPTS across program count, bitrate and stray PIDs, the strays against null packets that skip the accounting.
+[positional-arguments]
+bench-ts-programs *args:
+    cargo bench --locked -p moq-mux --bench ts_programs -- "$@"
 
 # Sweep container export tracks and queued frames independently.
 [positional-arguments]
