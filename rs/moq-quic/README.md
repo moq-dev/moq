@@ -44,6 +44,7 @@ Changes on top of the upstream commit, besides the renames:
 - **Pacer rounding**: a wait shorter than a nanosecond rounds up instead of re-arming the pacing timer at the current instant.
 - **Malformed control input**: `RETIRE_CONNECTION_ID` for a sequence that was never issued (`issued` is a count, so `sequence >= issued`) and a repeated `grease_quic_bit` or `min_ack_delay` transport parameter close the connection. RFC 9000 section 7.4 only says SHOULD for a duplicate parameter; this fork refuses it, as it does every other known parameter. A STREAM frame whose FIN sets a final size below data already received closes with `FINAL_SIZE_ERROR`, as RFC 9000 section 4.5 requires, where quinn accepts it and leaves the reader blocked forever. Not offered upstream yet.
 - **`ACK_FREQUENCY` upper bound**: a Requested Max Ack Delay of 2^14 ms or more closes the connection with `PROTOCOL_VIOLATION`, as [draft-ietf-quic-ack-frequency-14](https://www.ietf.org/archive/id/draft-ietf-quic-ack-frequency-14.html#section-4) section 4 requires, mirroring RFC 9000's bound on the `max_ack_delay` transport parameter, and a configured `AckFrequencyConfig::max_ack_delay` is requested just below it. quinn checks only the lower bound; not offered upstream yet.
+- **`ACK_FREQUENCY` reordering**: a receiver counts a missing packet just above Largest Acked minus the Reordering Threshold as unreported, as draft-14 section 6.2's Table 1 does, where quinn's search skipped it, so the second ACK a sender needs to declare that packet lost waited for the Ack-Eliciting Threshold or `max_ack_delay`. `AckFrequencyConfig::reordering_threshold` defaults to the packet threshold of 3, as section 9 recommends, instead of the 2 that drafts 04 to 10 recommended, which elicits the ACK a packet before the sender can declare the loss. quinn `main` has both; not offered upstream yet.
 - **qlog pacing rate** in bits per second, as qlog defines it.
 - **Send-side stream checks**, from [quinn#2918](https://github.com/quinn-rs/quinn/pull/2918) at [`30934486`](https://github.com/quinn-rs/quinn/pull/2918/commits/30934486f75a0436119434d71f36917c955ba5bc) (open upstream), ported by hand with authorship kept: `STOP_SENDING` and `MAX_STREAM_DATA` naming a peer-initiated stream past the advertised limit close with `STREAM_LIMIT_ERROR`, as RFC 9000 section 4.6 requires, where quinn ignores the `STOP_SENDING` for a bidirectional stream. Unlike quinn#2918, the limit is the one last sent in transport parameters or `MAX_STREAMS`, not one raised locally but not yet announced. `received_stop_sending` returns `Result<Option<u64>, TransportError>`, keeping the fork's RESET\_STREAM\_AT Reliable Size. If quinn merges it, recheck against the merged commit and move it to the ported list.
 - moq-dev/noq's congestion-callback regressions, reworked onto quinn's test harness. Controller implementation fixes and unit tests live in `moq-congestion`.
@@ -79,6 +80,24 @@ Changes on top of the upstream commit, besides the renames:
 - **Exact datagram overhead** (`Datagram::max_payload`): `Datagrams::max_size` subtracts the frame type and the length's actual varint size from the path budget and the peer's `max_datagram_frame_size`, instead of `Datagram::SIZE_BOUND`'s worst-case 8-byte length. RFC 9221 section 3 counts the frame type and length in the limit, so a peer advertising 1200 bytes (quicly does) accepts a 1197-byte payload, where reserving 8 bytes allows only 1191. quinn has the same behaviour; not offered upstream yet. A limit too small for even an empty frame, including RFC 9221's 0 for no support, makes `max_size` return `None` instead of accepting an empty payload.
 
 Recheck the BBR3 changes when porting quinn#2481 updates, or if it merges.
+
+### ACK frequency
+
+The extension follows [draft-ietf-quic-ack-frequency-14](https://www.ietf.org/archive/id/draft-ietf-quic-ack-frequency-14.html), with the codepoints draft-07 assigned: the `min_ack_delay` transport parameter (`0xff04de1b`, always advertised as 1 ms), `ACK_FREQUENCY` (`0xaf`), and `IMMEDIATE_ACK` (`0x1f`).
+A Requested Max Ack Delay we send is capped at the greater of the RTT and 25 ms, then raised to the peer's `min_ack_delay` (quicly's is 25 ms), so a larger peer minimum exceeds the cap.
+
+The Ack-Eliciting Threshold counts the packets a receiver may hold without acknowledging them. Section 4: "A receiving endpoint SHOULD send at least one ACK frame after receiving more than this many ack-eliciting packets. \[...] By default, an endpoint sends an ACK frame for every other ack-eliciting packet, as specified in Section 13.2.2 of \[QUIC-TRANSPORT], which corresponds to a value of 1."
+Drafts 01 to 14 agree, and so do both directions here: we send 1 by default, and acknowledge a threshold T after T + 1 packets.
+[Draft-00](https://www.ietf.org/archive/id/draft-ietf-quic-ack-frequency-00.html) section 4 counted the packets that trigger the ACK instead: "A value of 1 will result in an acknowledgement being sent for every ack-eliciting packet received. A value of 0 is invalid."
+Draft-00 also had its own `min_ack_delay` codepoint (`0xff02de1a`), so a draft-00 peer never negotiates the extension with us, but quicly keeps that meaning, as its packet tolerance, under draft-07's codepoints:
+
+- quicly reads our default threshold of 1 as "ACK every packet", doubling its ACK rate over its own default of 2. We send `ACK_FREQUENCY` only when `TransportConfig::ack_frequency_config` is set.
+- We acknowledge a tolerance T from quicly after T + 1 packets, one more than it asks for.
+
+The receiver departs from section 6.2 twice, left for a later change:
+
+- A gap elicits no immediate ACK before an ACK has reported at least Reordering Threshold packets, as at the start of a connection, where Table 1 sends one with no Largest Acked.
+- "The received packet number is less than or equal to Largest Acked - Reordering Threshold", added in draft-12: such a late packet waits like an in-order one, so the sender learns of its spurious retransmission at the next ACK.
 
 ### Advisory triage
 

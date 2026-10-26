@@ -18,10 +18,11 @@ Decided with the maintainer on 2026-10-17:
 `cpp/moq/CMakeLists.txt` runs the `cargo build` for moq-ffi, but only on a
 source build. `cpp/obs/CMakeLists.txt` builds `cpp/moq` in-tree only when
 `MOQ_LOCAL` contains it; otherwise it fetches a published `moq-cpp` archive
-for `MOQ_VERSION` with `FetchContent`. Both that archive and a prebuilt
-`MOQ_FFI_DIR` package carry default features only, so the option requires
-the in-tree source build and fails configuration with `FATAL_ERROR` on the
-fetched archive or `MOQ_FFI_DIR` path instead of silently dropping the
+for `MOQ_VERSION` with `FetchContent`, or uses a local one named by
+`MOQ_ARCHIVE_FILE`. That archive and a prebuilt `MOQ_FFI_DIR` package carry
+default features only, so the option requires the in-tree source build and
+fails configuration with `FATAL_ERROR` on the fetched archive,
+`MOQ_ARCHIVE_FILE`, or `MOQ_FFI_DIR` path instead of silently dropping the
 feature.
 
 Test: a CI configure of `cpp/obs` with the option on and `MOQ_LOCAL`

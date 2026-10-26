@@ -4,8 +4,6 @@ use crate::catalog::{Audio, Binary, Json, PRIORITY, Text, Video};
 use serde::de::DeserializeOwned;
 use std::str::FromStr;
 
-/// Maximum number of video, audio, and text renditions accepted in one catalog update.
-pub const MAX_RENDITIONS: usize = 64;
 use serde::{Deserialize, Serialize};
 
 /// A catalog track, created by a broadcaster to describe the tracks available in a broadcast.
@@ -268,16 +266,9 @@ impl Catalog<()> {
 }
 
 impl<E> Catalog<E> {
-	/// Refuse a catalog with more renditions than a consumer can hold, with an ID naming both
-	/// a video and an audio rendition, or with a projection or audio layout out of range.
+	/// Refuse a catalog with an ID naming both a video and an audio rendition, or with a
+	/// projection or audio layout out of range.
 	pub fn check_renditions(&self) -> Result<()> {
-		let count = self.video.renditions.len() + self.audio.renditions.len() + self.text.renditions.len();
-		if count > MAX_RENDITIONS {
-			return Err(crate::Error::TooManyRenditions {
-				count,
-				max: MAX_RENDITIONS,
-			});
-		}
 		if let Some(id) = self
 			.video
 			.renditions
@@ -435,27 +426,19 @@ mod test {
 
 	use super::*;
 
+	/// The rendition count is the publisher's to choose: a catalog listing many is accepted.
 	#[test]
-	fn too_many_renditions_is_a_typed_refusal() {
+	fn many_renditions_are_accepted() {
 		let mut catalog = Catalog::<()>::default();
-		for i in 0..MAX_RENDITIONS {
+		for i in 0..1000 {
 			catalog
 				.audio
 				.renditions
 				.insert(format!("audio{i}"), AudioConfig::new(Opus, 48_000, 2));
 		}
-		assert!(catalog.check_renditions().is_ok());
-		catalog
-			.audio
-			.renditions
-			.insert("one-more".into(), AudioConfig::new(Opus, 48_000, 2));
-		assert!(matches!(
-			catalog.check_renditions(),
-			Err(crate::Error::TooManyRenditions {
-				count: 65,
-				max: MAX_RENDITIONS
-			})
-		));
+		catalog.check_renditions().unwrap();
+		let decoded = Catalog::<()>::from_str(&catalog.to_json().unwrap()).unwrap();
+		assert_eq!(decoded.audio.renditions.len(), 1000);
 	}
 
 	#[test]

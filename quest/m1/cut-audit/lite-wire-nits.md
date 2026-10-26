@@ -28,14 +28,6 @@ Found by the 2026-10-24 pre-cut audit at 151a529670, all source-inferred.
   64 KiB SETUP bound already limits the count.
 - **Draft text:** the Fetch section mentions an "implicit" Subscribe ID that
   FETCH does not have, and the `(s)`/`(b)` notations are never defined.
-- **Partial groups (decision):** a lite subscription GROUP with
-  `frame_start > 0` is cached as a group tail (`lite/subscriber.rs:1033`) so a
-  front can continue a group across routes, while `rs/moq-net/AGENTS.md`
-  says never to emit or accept partial groups, except for moq-transport
-  passthrough. Recommendation: keep the code, since resume depends on it,
-  and ask the maintainer to add route continuation to that rule's
-  exceptions. Agents never edit `AGENTS.md` unprompted, so leave this under
-  `## Decisions needed` if the maintainer has not answered.
 
 Validate with `just drafts check`.
 

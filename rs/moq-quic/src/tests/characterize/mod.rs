@@ -8,6 +8,7 @@
 use super::*;
 use crate::coding::{BufMutExt, Codec};
 
+mod ack_frequency;
 mod endpoint;
 mod frames;
 mod limits;

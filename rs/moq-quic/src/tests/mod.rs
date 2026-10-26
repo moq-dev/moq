@@ -4521,10 +4521,10 @@ fn ack_frequency_ack_sent_after_reordered_packets_above_threshold() {
 	pair.client_conn_mut(client_ch).ping();
 	pair.drive_client();
 
-	// Send and lose two ack-eliciting packets
+	// Send and lose as many ack-eliciting packets as the default reordering threshold
 	pair.time += Duration::from_millis(5);
 	pair.mtu = 0;
-	for _ in 0..2 {
+	for _ in 0..3 {
 		pair.client_conn_mut(client_ch).ping();
 		pair.drive_client();
 	}

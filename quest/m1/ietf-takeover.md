@@ -20,7 +20,7 @@ Give the new route its own ID and independent lifetime. Only matching served
 instances are adopted, with the shared `Takeover` event. Response identity
 alone never bypasses a requested epoch's matching-announcement requirement.
 
-Negotiate support explicitly across the extension's drafts 17-22; an older
+Negotiate support explicitly on the extension's drafts 18 and 22; an older
 implementation of the epoch extension must not receive an unknown operation.
 Keep epoch and cluster negotiation independent, with unambiguous framing for
 epoch-only and combined sessions. No changes to unnegotiated published drafts.

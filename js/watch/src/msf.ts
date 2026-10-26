@@ -120,10 +120,12 @@ export function toHang(msf: Msf.Catalog, base?: Path.Valid): Catalog.Root {
 	const audioRenditions: Record<string, Catalog.AudioConfig> = Object.create(null);
 	const textRenditions: Record<string, Catalog.TextConfig> = Object.create(null);
 
-	const names = new Set<string>();
 	for (const track of msf.tracks) {
-		if (names.has(track.name)) throw new Error(`MSF track name ${track.name} is ambiguous as a hang rendition ID`);
-		names.add(track.name);
+		// The track name is the rendition ID, so a later track with the name replaces the earlier
+		// one, whatever namespace or role either has.
+		delete videoRenditions[track.name];
+		delete audioRenditions[track.name];
+		delete textRenditions[track.name];
 		let broadcast: Path.Relative | undefined;
 		if (track.namespace !== undefined) {
 			if (base === undefined)

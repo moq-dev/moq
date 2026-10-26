@@ -1,10 +1,9 @@
-# [S] moqsrc plays surround Opus
+# [XS] moqsrc plays surround Opus, under test
 
 ## Goal
 
-`moqsrc` outputs `audio/x-opus` caps that `opusdec` accepts for a 3 to 8
-channel Opus rendition, so surround Opus published through `moqsink` plays
-back through GStreamer.
+A test proves that a 3 to 8 channel Opus rendition published through
+`moqsink` plays back through `moqsrc` and `opusdec` with every channel.
 
 ## Plan
 
@@ -13,17 +12,19 @@ worked, so this is not a regression.
 [moq-dev/moq#4991](https://github.com/moq-dev/moq/pull/4991) fixed publishing
 and named this follow-up.
 
-`rs/moq-gst/src/source/imp.rs` builds the caps from rate and channels, plus
-`codec_data` and `stream-format=ogg` when a description exists. `opusdec`
-ignores `codec_data` and reads `streamheader` or the mapping fields, so with
-more than two channels it assumes family 0 and refuses.
+The caps side landed in
+[moq-dev/moq#6284](https://github.com/moq-dev/moq/pull/6284): `opus_caps` in
+`rs/moq-gst/src/source/imp.rs` parses the catalog's OpusHead with
+`opus::Mapping`, sets `channel-mapping-family`, `stream-count`,
+`coupled-count`, and `channel-mapping`, and sends the OpusHead plus an empty
+OpusTags as the `streamheader`, since `opusdec` reads the head (and its output
+gain) only from a two-buffer `streamheader`. Its unit test,
+`opus_caps_carry_the_stream_layout`, covers only mono and stereo.
 
-Parse the catalog's OpusHead description with the existing `opus::Mapping`
-and set `channel-mapping-family`, `stream-count`, `coupled-count`, and
-`channel-mapping`. This needs no synthesized OpusTags, unlike a
-`streamheader`. Test `opusenc` 5.1 through `moqsink`, a relay, `moqsrc`, and
-`opusdec`, checking six decoded channels. The only moqsrc test rendition
-today is stereo.
+What remains is the end-to-end test: `opusenc` 5.1 through `moqsink`, a
+relay, `moqsrc`, and `opusdec`, checking six decoded channels, plus each
+channel count from 3 to 8 in the caps unit test, since every one maps
+through the same family-1 table.
 
 Public API: none. Wire: none.
 
