@@ -473,14 +473,22 @@ func decodeAudio(ctx context.Context, consumer *moq.BroadcastConsumer, id string
 	frameBytes := 4 * int(rendition.ChannelCount)
 	decoded := 0
 	for decoded*1000 < audioMs*int(rendition.SampleRate) {
-		frame, err := decoder.Next(ctx)
+		read, err := decoder.Next(ctx)
 		if err != nil {
 			return err
 		}
-		if frame == nil {
+		var frame moqaudio.Frame
+		switch read := read.(type) {
+		case moqaudio.ReadFrame:
+			frame = read.Frame
+		// moq-audio reports a hole it saw directly; tone.py checks the timestamps too.
+		case moqaudio.ReadGap:
+			return fmt.Errorf("audio gap after %d samples", decoded)
+		default: // nil, the track's end, or a ReadEnd, the encoder's
 			return errors.New("audio track ended early")
 		}
 		samples := len(frame.Data) / frameBytes
+
 		fmt.Fprintf(log, "%d %d\n", frame.Timestamp.Microseconds(), samples)
 		if _, err := pcm.Write(frame.Data); err != nil {
 			return err

@@ -47,4 +47,3 @@ Public API: none. Wire: none.
 - [IETF22 fallback](/quest/m1/test-flakes-2/ietf22-fallback.md) - an IETF22 browser viewer follows a fallback within the media lane's bound, keeping its session and its audio
 - [Stuck-window eviction test on macOS](/quest/m1/test-flakes-2/stuck-window-evicts.md) - the evicted writer reliably sees its stop on macOS, fixed at the race
 - [Swapped Rust to JS Opus](/quest/m1/test-flakes-2/swapped-js-opus.md) - the `rust-swapped -> js` interop cell stops timing out under load
-- [Interop loads moq-gst](/quest/m1/test-flakes-2/gst-plugin-load.md) - the interop gst cells always find the local plugin

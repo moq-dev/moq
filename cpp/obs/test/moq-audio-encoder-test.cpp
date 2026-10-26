@@ -15,6 +15,7 @@
 #include <cstring>
 #include <optional>
 #include <string>
+#include <variant>
 #include <vector>
 
 #include <obs-module.h>
@@ -270,9 +271,15 @@ void CheckSubscriberDecodes(const char *preset, size_t channels)
 			CHECK(!"decoded audio stalled");
 			break;
 		}
-		auto frame = TestOk(next.get(), "audio next");
-		if (!frame)
+		auto read = TestOk(next.get(), "audio next");
+		if (!read)
 			break;
+		// Raw packets carry no encoder end, and nothing was lost.
+		const auto *variant = std::get_if<moq::AudioRead::kFrame>(&read->get_variant());
+		CHECK(variant != nullptr);
+		if (!variant)
+			break;
+		const auto *frame = &variant->frame;
 		if (!first_decoded_us)
 			first_decoded_us = frame->timestamp_us;
 		const auto *samples = reinterpret_cast<const float *>(frame->data.data());
