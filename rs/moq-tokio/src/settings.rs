@@ -138,6 +138,9 @@ pub struct Connect {
 	#[usage(env = "MOQ_CONNECT", cli("--connect"))]
 	url: Option<String>,
 
+	#[usage(env = "MOQ_CONNECT_TOKEN", cli("--connect-token"), parse = "list_by_comma")]
+	tokens: Option<Vec<String>>,
+
 	#[usage(env = "MOQ_CONNECT_BIND", cli("--connect-bind"))]
 	bind: Option<String>,
 

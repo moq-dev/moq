@@ -174,7 +174,7 @@ impl Leased {
 		self.want = None;
 		self.filled = true;
 		let mut read = Vec::new();
-		while let Some(chunk) = assembler.read(usize::MAX, true) {
+		while let Some(chunk) = assembler.read(usize::MAX) {
 			read.push(chunk.bytes);
 		}
 		let len = self.len;
@@ -355,8 +355,7 @@ impl RecvStream<'_> {
 		if recv.lease.evicted {
 			return Err(LeaseError::Evicted);
 		}
-		// Only an unordered read leaves a stream unorderable, and leases never read so.
-		if recv.stopped || recv.assembler.ensure_ordering(true).is_err() {
+		if recv.stopped {
 			return Err(LeaseError::ClosedStream);
 		}
 		self.state.unlooked.remove(&self.id);

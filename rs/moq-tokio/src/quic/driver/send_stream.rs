@@ -149,7 +149,7 @@ impl SendStream {
 		F: FnOnce(&mut moq_quic::SendStream<'_>) -> Result<R, moq_quic::WriteError>,
 	{
 		use moq_quic::WriteError::*;
-		let mut conn = self.conn.state.lock("SendStream::poll_write");
+		let mut conn = self.conn.state.lock();
 		if self.is_0rtt {
 			conn.check_0rtt().map_err(|()| WriteError::ZeroRttRejected)?;
 		}
@@ -187,7 +187,7 @@ impl SendStream {
 	/// called. This error is harmless and serves only to indicate that the caller may have
 	/// incorrect assumptions about the stream's state.
 	pub fn finish(&mut self) -> Result<(), ClosedStream> {
-		let mut conn = self.conn.state.lock("finish");
+		let mut conn = self.conn.state.lock();
 		match conn.inner.send_stream(self.stream).finish() {
 			Ok(()) => {
 				self.finished = true;
@@ -211,7 +211,7 @@ impl SendStream {
 	/// called. This error is harmless and serves only to indicate that the caller may have
 	/// incorrect assumptions about the stream's state.
 	pub fn reset(&mut self, error_code: VarInt) -> Result<(), ClosedStream> {
-		let mut conn = self.conn.state.lock("SendStream::reset");
+		let mut conn = self.conn.state.lock();
 		if self.is_0rtt && conn.check_0rtt().is_err() {
 			return Ok(());
 		}
@@ -234,7 +234,7 @@ impl SendStream {
 	/// # Panics
 	/// When `offset` is past the data written.
 	pub fn reset_at(&mut self, offset: u64, error_code: VarInt) -> Result<(), ClosedStream> {
-		let mut conn = self.conn.state.lock("SendStream::reset_at");
+		let mut conn = self.conn.state.lock();
 		if self.is_0rtt && conn.check_0rtt().is_err() {
 			return Ok(());
 		}
@@ -255,14 +255,14 @@ impl SendStream {
 	/// transmitted. Using many different priority levels per connection may have a negative
 	/// impact on performance.
 	pub fn set_priority(&self, priority: i64) -> Result<(), ClosedStream> {
-		let mut conn = self.conn.state.lock("SendStream::set_priority");
+		let mut conn = self.conn.state.lock();
 		conn.inner.send_stream(self.stream).set_priority(priority)?;
 		Ok(())
 	}
 
 	/// Get the priority of the send stream
 	pub fn priority(&self) -> Result<i64, ClosedStream> {
-		let mut conn = self.conn.state.lock("SendStream::priority");
+		let mut conn = self.conn.state.lock();
 		conn.inner.send_stream(self.stream).priority()
 	}
 
@@ -273,7 +273,7 @@ impl SendStream {
 	/// - when `group` belongs to another connection
 	pub fn set_group(&self, group: Option<&SendGroup>) -> Result<(), ClosedStream> {
 		let group = group.map(|group| group.id_on(&self.conn.0));
-		let mut conn = self.conn.state.lock("SendStream::set_group");
+		let mut conn = self.conn.state.lock();
 		conn.inner.send_stream(self.stream).set_group(group)
 	}
 
@@ -299,7 +299,7 @@ impl SendStream {
 		// Join the waiters now rather than on the first poll, so a reset in between, which no
 		// stream event reports, still reaches this future.
 		let waiters = {
-			let mut conn = conn.state.lock("SendStream::stopped");
+			let mut conn = conn.state.lock();
 			// A reset settles it: a STOP_SENDING after it is recorded but no longer counts.
 			if let Some(stopped) = self.reset {
 				Err(Ok(stopped))
@@ -322,7 +322,7 @@ impl SendStream {
 				// becomes `!Send`. `Notify::notified` is lifetime-bound to `Notify`, therefore
 				// we need to declare `waiters` outside of the block, and update it inside.
 				{
-					let mut conn = conn.state.lock("SendStream::stopped");
+					let mut conn = conn.state.lock();
 					if let Some(&stopped) = waiters.outcome.get() {
 						return Ok(stopped);
 					}
@@ -397,7 +397,7 @@ impl tokio::io::AsyncWrite for SendStream {
 
 impl Drop for SendStream {
 	fn drop(&mut self) {
-		let mut conn = self.conn.state.lock("SendStream::drop");
+		let mut conn = self.conn.state.lock();
 
 		// clean up any previously registered wakers
 		conn.blocked_writers.remove(&self.stream);

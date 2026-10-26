@@ -191,13 +191,6 @@ int main() {
     // It prints the message Rust's Display gives.
     CHECK(fingerprints.error().to_string() == "bind: not listening; call listen() first");
 
-    // An epoch's time keeps every 48-bit millisecond, past where system_clock's nanoseconds wrap.
-    CHECK(ok(moq::epoch_time("018bcfe5-6800-7000-8000-000000000000"), "epoch_time").time_since_epoch() ==
-          std::chrono::milliseconds(1700000000000));
-    CHECK(ok(moq::epoch_time("ffffffff-ffff-7000-8000-000000000000"), "epoch_time").time_since_epoch() ==
-          std::chrono::milliseconds(0xffffffffffff));
-    CHECK(!moq::epoch_time("not-an-epoch"));
-
     // Publisher: a server whose origin serves one broadcast with one track.
     auto origin = moq::OriginProducer::init({});
     auto broadcast = ok(origin->create_broadcast("probe"), "create_broadcast");

@@ -139,6 +139,12 @@ jobs:
             artifact-path: target/bench/nightly/rust-shared
             benchmark: true
             paired: true
+          - name: Relay session benchmarks
+            recipe: gh nightly rust-relay
+            artifact: bench-rust-relay
+            artifact-path: target/bench/nightly/rust-relay
+            benchmark: true
+            paired: true
           - name: Rust supplemental benchmarks
             recipe: gh nightly rust-extra
             artifact: bench-rust-extra

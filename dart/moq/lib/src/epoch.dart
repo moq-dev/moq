@@ -5,10 +5,3 @@ import 'package:moq_ffi/moq_ffi.dart';
 /// `AnnounceRoute.epoch`, so viewers see a restart as a new broadcast instead of a
 /// stalled one.
 String mintEpoch() => moqMintEpoch();
-
-/// The UTC wall-clock time [epoch] encodes, to the millisecond. Throws unless
-/// it is a lowercase hyphenated UUIDv7.
-DateTime epochTime(String epoch) => DateTime.fromMillisecondsSinceEpoch(
-  moqEpochTimeMs(epoch: epoch),
-  isUtc: true,
-);

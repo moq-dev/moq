@@ -64,6 +64,14 @@ pub unsafe fn parse_client(config: Option<&moq_client_config>) -> Result<Config,
 			.map(|version| moq_net::Version::from_str(version).map_err(Error::InvalidConfig))
 			.collect::<Result<_, _>>()?;
 	}
+	out.connect.tokens = unsafe { ffi::parse_strings(config.tokens, config.tokens_len)? }
+		.into_iter()
+		.map(|token| {
+			token
+				.try_into()
+				.map_err(|err: moq_tokio::connect::EmptyToken| Error::InvalidConfig(err.to_string()))
+		})
+		.collect::<Result<_, _>>()?;
 
 	// Transport
 	if let Some(bind) = unsafe { ffi::parse_str_optional(config.bind, config.bind_len)? } {

@@ -75,11 +75,6 @@ impl Endpoint {
 		Self::new_with_abstract_socket(EndpointConfig::default(), None, wrap_udp_socket(socket.into())?)
 	}
 
-	/// Returns relevant stats from this Endpoint
-	pub fn stats(&self) -> EndpointStats {
-		self.inner.state.lock().unwrap().stats
-	}
-
 	/// Helper to construct an endpoint for use with both incoming and outgoing connections
 	///
 	/// Note that `addr` is the *local* address to bind to, which should usually be a wildcard
@@ -146,10 +141,9 @@ impl Endpoint {
 	/// Get the next incoming connection attempt from a client
 	///
 	/// Yields [`Incoming`]s, or `None` if the endpoint is [`close`](Self::close)d. [`Incoming`]
-	/// can be `await`ed to obtain the final [`Connection`](crate::quic::driver::Connection), or used to e.g.
-	/// filter connection attempts or force address validation, or converted into an intermediate
-	/// `Connecting` future which can be used to e.g. send 0.5-RTT data.
-	pub fn accept(&self) -> Accept<'_> {
+	/// can be `await`ed to obtain the final [`Connection`](crate::quic::driver::Connection), or
+	/// converted into a [`Connecting`] future to send 0.5-RTT data.
+	pub fn accept(&self) -> impl Future<Output = Option<Incoming>> + '_ {
 		Accept {
 			endpoint: self,
 			notify: self.inner.shared.incoming.notified(),
@@ -204,15 +198,7 @@ impl Endpoint {
 		let (ch, conn) = endpoint.inner.connect(Instant::now(), config, addr, server_name)?;
 
 		let sender = endpoint.socket.create_sender();
-		endpoint.stats.outgoing_handshakes += 1;
 		Ok(endpoint.recv_state.connections.insert(ch, conn, sender, false))
-	}
-
-	/// Switch to a new UDP socket
-	///
-	/// See [`Endpoint::rebind_abstract()`] for details.
-	pub fn rebind(&self, socket: std::net::UdpSocket) -> io::Result<()> {
-		self.rebind_abstract(wrap_udp_socket(socket)?)
 	}
 
 	/// Switch to a new UDP socket
@@ -221,7 +207,8 @@ impl Endpoint {
 	/// connections and connections to servers unreachable from the new address will be lost.
 	///
 	/// On error, the old UDP socket is retained.
-	pub fn rebind_abstract(&self, socket: Box<dyn AsyncUdpSocket>) -> io::Result<()> {
+	pub fn rebind(&self, socket: std::net::UdpSocket) -> io::Result<()> {
+		let socket = wrap_udp_socket(socket)?;
 		let addr = socket.local_addr()?;
 		let mut inner = self.inner.state.lock().unwrap();
 		inner.prev_socket = Some(mem::replace(&mut inner.socket, socket));
@@ -241,25 +228,14 @@ impl Endpoint {
 		Ok(())
 	}
 
-	/// Replace the server configuration, affecting new incoming connections only
-	///
-	/// Useful for e.g. refreshing TLS certificates without disrupting existing connections.
-	pub fn set_server_config(&self, server_config: Option<ServerConfig>) {
-		self.inner
-			.state
-			.lock()
-			.unwrap()
-			.inner
-			.set_server_config(server_config.map(Arc::new))
-	}
-
 	/// Get the local `SocketAddr` the underlying socket is bound to
 	pub fn local_addr(&self) -> io::Result<SocketAddr> {
 		self.inner.state.lock().unwrap().socket.local_addr()
 	}
 
 	/// Get the number of connections that are currently open
-	pub fn open_connections(&self) -> usize {
+	#[cfg(test)]
+	pub(super) fn open_connections(&self) -> usize {
 		self.inner.state.lock().unwrap().inner.open_connections()
 	}
 
@@ -283,7 +259,6 @@ impl Endpoint {
 		// hears back before a caller of `wait_all_draining` releases the socket.
 		let mut response_buffer = Vec::new();
 		for incoming in endpoint.recv_state.incoming.drain(..) {
-			endpoint.stats.refused_handshakes += 1;
 			response_buffer.clear();
 			let transmit = endpoint.inner.refuse(incoming, &mut response_buffer);
 			respond(transmit, &response_buffer, &mut endpoint.sender);
@@ -361,20 +336,6 @@ impl Endpoint {
 			.await;
 		}
 	}
-}
-
-/// Statistics on [Endpoint] activity
-#[non_exhaustive]
-#[derive(Debug, Default, Copy, Clone)]
-pub struct EndpointStats {
-	/// Cumulative number of Quic handshakes accepted by this [Endpoint]
-	pub accepted_handshakes: u64,
-	/// Cumulative number of Quic handshakes sent from this [Endpoint]
-	pub outgoing_handshakes: u64,
-	/// Cumulative number of Quic handshakes refused on this [Endpoint]
-	pub refused_handshakes: u64,
-	/// Cumulative number of Quic handshakes ignored on this [Endpoint]
-	pub ignored_handshakes: u64,
 }
 
 /// A future that drives IO on an endpoint
@@ -456,21 +417,14 @@ pub(crate) struct EndpointInner {
 }
 
 impl EndpointInner {
-	pub(crate) fn accept(
-		&self,
-		incoming: moq_quic::Incoming,
-		server_config: Option<Arc<ServerConfig>>,
-	) -> Result<Connecting, ConnectionError> {
+	pub(crate) fn accept(&self, incoming: moq_quic::Incoming) -> Result<Connecting, ConnectionError> {
 		let mut response_buffer = Vec::new();
 
 		// Phase 1: reserve endpoint state for the connection under the lock.
 		let accepting = {
 			let mut state = self.state.lock().unwrap();
 			let now = Instant::now();
-			match state
-				.inner
-				.start_accept(incoming, now, &mut response_buffer, server_config)
-			{
+			match state.inner.start_accept(incoming, now, &mut response_buffer, None) {
 				Ok(accepting) => {
 					state.pending_accepts += 1;
 					accepting
@@ -493,7 +447,6 @@ impl EndpointInner {
 		state.pending_accepts -= 1;
 		let result = match state.inner.finish_accept(accepted, &mut response_buffer) {
 			Ok((handle, conn)) => {
-				state.stats.accepted_handshakes += 1;
 				let sender = state.socket.create_sender();
 				let driver_lost = state.driver_lost;
 				Ok(state.recv_state.connections.insert(handle, conn, sender, driver_lost))
@@ -519,24 +472,18 @@ impl EndpointInner {
 
 	pub(crate) fn refuse(&self, incoming: moq_quic::Incoming) {
 		let mut state = self.state.lock().unwrap();
-		state.stats.refused_handshakes += 1;
 		let mut response_buffer = Vec::new();
 		let transmit = state.inner.refuse(incoming, &mut response_buffer);
 		respond(transmit, &response_buffer, &mut state.sender);
 	}
 
+	#[cfg(test)]
 	pub(crate) fn retry(&self, incoming: moq_quic::Incoming) -> Result<(), moq_quic::RetryError> {
 		let mut state = self.state.lock().unwrap();
 		let mut response_buffer = Vec::new();
 		let transmit = state.inner.retry(incoming, &mut response_buffer)?;
 		respond(transmit, &response_buffer, &mut state.sender);
 		Ok(())
-	}
-
-	pub(crate) fn ignore(&self, incoming: moq_quic::Incoming) {
-		let mut state = self.state.lock().unwrap();
-		state.stats.ignored_handshakes += 1;
-		state.inner.ignore(incoming);
 	}
 }
 
@@ -553,7 +500,6 @@ pub(crate) struct State {
 	ipv6: bool,
 	events: mpsc::UnboundedReceiver<(ConnectionHandle, EndpointEvent)>,
 	driver_lost: bool,
-	stats: EndpointStats,
 	default_client_config: Option<ClientConfig>,
 	/// Connections in the process of being accepted
 	pending_accepts: usize,
@@ -765,7 +711,7 @@ fn ensure_ipv6(x: SocketAddr) -> SocketAddrV6 {
 
 pin_project! {
 	/// Future produced by [`Endpoint::accept`]
-	pub struct Accept<'a> {
+	struct Accept<'a> {
 		endpoint: &'a Endpoint,
 		#[pin]
 		notify: Notified<'a>,
@@ -830,7 +776,6 @@ impl EndpointRef {
 				driver: None,
 				driver_lost: false,
 				recv_state,
-				stats: EndpointStats::default(),
 				default_client_config: None,
 				pending_accepts: 0,
 			}),
