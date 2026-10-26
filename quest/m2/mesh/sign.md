@@ -5,7 +5,7 @@
 A node's persistent Ed25519 endpoint key signs every frame it publishes at the
 authentication level, and subscribers deliver only frames that verify against
 the endpoint ID in the broadcast path, so a relay can proxy without being able
-to forge or splice content. Each broadcast picks its level: identity or
+to forge or splice content undetected. Each broadcast picks its level: identity or
 authentication, with authentication the mesh default. Rust and JS interoperate.
 
 ## Plan
@@ -17,8 +17,11 @@ endpoint ID is the public key in an iroh-style text encoding, persisted with
 
 - Bind each signature to the broadcast path, track, group, and frame index, so
   a relay cannot replay, reorder, or move a frame between tracks.
-- A frame that fails verification ends its group with a typed error; nothing
-  unverified reaches the application.
+- Frames are delivered as their bytes arrive, so a
+  [byte stream](/quest/m2/stream/README.md) flushes partial frames; a frame that
+  fails verification then ends its group with a typed error, which a stream
+  surfaces as a reset (decided 2026-10-25, maintainer). Only the later
+  encryption level verifies before delivering.
 - Identity level carries no signature and trusts the token's path binding.
 - Encryption nests on top later ([mesh keys](/quest/m3/mesh-keys.md)): keep
   room for it without building it.

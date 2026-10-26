@@ -18,8 +18,11 @@ Decided 2026-10-25 with the maintainer (mesh planning interview):
 
 - TCP-level proxying over groups, never IP over datagrams.
 - Each direction is one track. A connection is one group on each; each socket
-  `read()` becomes one frame, which coalesces whatever is buffered with no
+  `read()` becomes one frame, because a frame's length must be known before it
+  is written and a read has one. It coalesces whatever is buffered with no
   added timer (the local socket's own Nagle or `TCP_NODELAY` still applies).
+- The receiver flushes a frame's bytes to its socket as they arrive, never
+  waiting for the whole frame.
   Group finish is a FIN (half-close); a group abort with a code is a reset.
   The implementer measures and records a frame-size cap.
 - Lossless delivery comes from

@@ -24,7 +24,8 @@ direction, a group per connection, a frame per socket read, no fill handler.
 - `moq` CLI: one verb forwards a local TCP listener to a remote stream and one
   serves a stream to a local TCP address; confirm the shape against `--help`
   and update `doc/bin/cli.md`.
-- Tests on controlled time, no sleeps: round-trip bytes, half-close each way,
+- Tests on controlled time, no sleeps: a partial frame reaching the socket
+  before the frame ends, round-trip bytes, half-close each way,
   reset each way, a reader ending `Evicted` surfaced as a reset, and a relay
   restart ending the stream with a typed error.
 
