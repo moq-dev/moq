@@ -47,6 +47,14 @@ Constraints:
 - A wake only schedules. moq-quic wakes under the consumer's lock (the
   tokio driver's `Mutex`, moq-uring's and qmux's `RefCell`), as the drivers
   do today, so a waker that polled inline would re-enter it.
+- A driver stalled on output still hears a local close. `poll_transmit`
+  registers only when nothing is sendable, but qmux's `poll_stalled`
+  parks on its `driver` list while a batch is blocked in `feed`/`flush`, and
+  a local close wakes it to start the bounded close timer. Keep that through
+  a wait that consumes no transmit (a close wait or a non-consuming
+  readiness wait), and test it on paused time: close while output is
+  blocked by a non-reading peer, and the session still shuts down within
+  the close bound.
 - Waits drain before failing: accepted streams, readable data, and received
   datagrams stay available after a close until taken, then the error.
 - Tests in moq-quic count wakes with a counting waiter instead of matching
