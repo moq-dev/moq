@@ -301,6 +301,19 @@ class QueryTests(unittest.TestCase):
         self.assertEqual(sum(call.startswith("nix build ") for call in calls), 1)
 
     @unittest.skipUnless(sys.platform == "linux" and os.uname().machine == "x86_64", "Linux VM checks only")
+    def test_local_flake_check_exiting_77_fails_instead_of_skipping(self):
+        self.stub_ci()
+        self.change("flake.nix")
+        nix = self.bin / "nix"
+        nix.write_text(nix.read_text() + 'case "$*" in "flake check") exit 77 ;; esac\n')
+        self.env.pop("CI_STRICT")
+        result = subprocess.run(["bash", "sh/dispatch.sh", "check", "origin/main"], cwd=self.repo,
+                                env=self.env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertNotIn("(skipped)", result.stderr)
+        self.assertIn("check: check flake failed", result.stderr)
+
+    @unittest.skipUnless(sys.platform == "linux" and os.uname().machine == "x86_64", "Linux VM checks only")
     def test_local_flake_probe_errors_are_failures_without_cancelling_other_modules(self):
         self.stub_ci()
         self.change("flake.nix")

@@ -308,7 +308,12 @@ step() {
                     return 77
                 fi
             fi
-            bash sh/local.sh nix flake check
+            # 77 marks the probe's skip, so the check's own 77 is a failure.
+            bash sh/local.sh nix flake check || {
+                local status=$?
+                [[ -n "${CI_STRICT:-}" ]] || ((status != 77)) || status=1
+                return "$status"
+            }
             ;;
         check:ts_paths) python3 sh/gh/ts-paths.py ;;
         check:markdown)
