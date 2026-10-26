@@ -567,7 +567,7 @@ async fn draft22_cold_widening_finishes_every_filled_group() {
 		let mut fixture = range_fixture_history("moq-transport-22", relay, 0).await;
 		let initial = Subscription::default().with_range(2..).with_max_delay(None);
 		let mut reader = subscribe(&fixture.remote, initial.clone()).await;
-		for start in [0, 2] {
+		for start in [0, 2, 4] {
 			let future = start + 2;
 			reader.update(initial.clone().with_range(future..)).unwrap();
 			moq_clock::timeout(

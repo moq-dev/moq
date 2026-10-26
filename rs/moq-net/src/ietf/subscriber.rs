@@ -762,6 +762,8 @@ struct TrackState {
 	// frames are untimed.
 	timescale: Option<Timescale>,
 	fill_largest: Option<u64>,
+	// The exact sent update's fill floor; a snapshot below it opens no fill stream.
+	fill_start: Option<ietf::Location>,
 
 	// The joining FETCH's own request id, when one was sent.
 	fetch_id: Option<RequestId>,
@@ -771,6 +773,22 @@ struct TrackState {
 }
 
 impl TrackState {
+	fn fill_ok(&mut self, largest: Option<ietf::Location>) {
+		if let Ok(mut fill) = self.fill.write()
+			&& matches!(*fill, Fill::Requested)
+		{
+			self.fill_largest = largest.map(|largest| largest.group);
+			*fill = if largest.is_some_and(|largest| {
+				self.fill_start
+					.is_none_or(|start| (start.group, start.object) <= (largest.group, largest.object))
+			}) {
+				Fill::Serving(self.timescale)
+			} else {
+				Fill::Done
+			};
+		}
+	}
+
 	#[cfg(test)]
 	fn new(producer: track::Producer, broadcast: PathOwned, fill: kio::Producer<Fill>) -> Self {
 		let mut state = Self::pending(producer.name().to_owned(), broadcast, fill);
@@ -788,6 +806,7 @@ impl TrackState {
 			epoch: None,
 			timescale: None,
 			fill_largest: None,
+			fill_start: None,
 			fill,
 			fetch_id: None,
 			tail: Default::default(),
@@ -3625,15 +3644,7 @@ impl Subscriber {
 			if let Some(held) = state.subscribes.get_mut(&request_id) {
 				held.producer = Some(track.clone());
 				held.timescale = timescale;
-				held.fill_largest = largest.map(|largest| largest.group);
-				if let Ok(mut fill) = held.fill.write()
-					&& matches!(*fill, Fill::Requested)
-				{
-					*fill = match largest {
-						Some(_) => Fill::Serving(timescale),
-						None => Fill::Done,
-					};
-				}
+				held.fill_ok(largest);
 			}
 		}
 		self.entry_info(&key, request_id, track.info());
@@ -3720,16 +3731,8 @@ impl Subscriber {
 						updating_track.report_object(largest.group, largest.object);
 					}
 					let mut state = self.state.lock();
-					if let Some(held) = state.subscribes.get_mut(&request_id)
-						&& let Ok(mut fill) = held.fill.write()
-						&& matches!(*fill, Fill::Requested)
-					{
-						held.fill_largest = ok.largest.map(|largest| largest.group);
-						*fill = if ok.largest.is_some() {
-							Fill::Serving(timescale)
-						} else {
-							Fill::Done
-						};
+					if let Some(held) = state.subscribes.get_mut(&request_id) {
+						held.fill_ok(ok.largest);
 					}
 				}
 			));
@@ -4242,6 +4245,10 @@ impl Subscriber {
 			let mut state = self.state.lock();
 			let held = state.subscribes.get_mut(&subscription).ok_or(Error::Cancel)?;
 			*held.fill.write().map_err(|_| Error::Cancel)? = Fill::Requested;
+			held.fill_start = match update.fill.and_then(|fill| fill.filter.or(update.filter)) {
+				Some(Filter::Absolute { start, .. }) => Some(start),
+				_ => None,
+			};
 			let previous = held.fetch_id.replace(request_id);
 			if let Some(previous) = previous {
 				state.fetches.remove(&previous);
