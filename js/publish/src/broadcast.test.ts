@@ -244,12 +244,13 @@ test("a re-announce continues the catalog's group sequence", async () => {
 
 	const net = broadcast.net.peek();
 	if (!net) throw new Error("expected a network producer once connected");
+	const announced = broadcast.in.origin.peek()?.request(broadcast.in.name.peek(), { announced: true });
 	const first = net.track(Broadcast.CATALOG_TRACK).subscribe().ordered();
 	expect((await first.nextGroup())?.sequence).toBe(0);
 
 	announce.set(false);
 	await settle();
-	expect(net.route).toBeUndefined();
+	expect(announced?.active.peek()).toBeUndefined();
 	broadcast.audio("audio").config.set(audioConfig);
 	await settle();
 	announce.set(true);
@@ -263,6 +264,7 @@ test("a re-announce continues the catalog's group sequence", async () => {
 	expect(Object.keys(catalog.audio?.renditions ?? {})).toEqual(["audio"]);
 
 	first.close();
+	announced?.close();
 	broadcast.close();
 });
 
@@ -464,7 +466,8 @@ test("a served decoder identity change moves the rendition to a fresh track name
 
 	const net = broadcast.net.peek();
 	if (!net) throw new Error("expected a network producer once connected");
-	const epoch = net.route?.epoch;
+	const announced = broadcast.in.origin.peek()?.request(broadcast.in.name.peek(), { announced: true });
+	const epoch = announced?.active.peek()?.epoch;
 	const catalog = new Json.Snapshot.Consumer<Catalog.Root>({
 		track: net.track(Broadcast.CATALOG_TRACK).subscribe(),
 	});
@@ -499,7 +502,7 @@ test("a served decoder identity change moves the rendition to a fresh track name
 		expect(track.closed.peek()).toBeNull();
 		expect(video.track.peek()).toBeUndefined();
 		expect(broadcast.net.peek()).toBe(net);
-		expect(net.route?.epoch).toBe(epoch);
+		expect(announced?.active.peek()?.epoch).toBe(epoch);
 
 		const second = net.track("video/1").subscribe();
 		await settle();
@@ -520,6 +523,7 @@ test("a served decoder identity change moves the rendition to a fresh track name
 		second.close();
 	} finally {
 		first.close();
+		announced?.close();
 		broadcast.close();
 	}
 });

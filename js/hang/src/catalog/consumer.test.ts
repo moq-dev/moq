@@ -90,10 +90,11 @@ function referencing(broadcast: string): Root {
 // Watch the catalog of `room/alice`, published through an origin and requested from it.
 async function watchRequested(root: Root) {
 	const origin = new Moq.Origin.Producer();
-	const broadcast = origin.createBroadcast(Moq.Path.from("room/alice"));
+	const broadcastPublication = origin.createBroadcast(Moq.Path.from("room/alice"));
+	const broadcast = broadcastPublication.broadcast;
 	const track = broadcast.createTrack(TRACK, { timescale: Moq.Time.Timescale.MILLI });
 	const producer = new Json.Snapshot.Producer<Root>({ track, deltas: false });
-	broadcast.announce();
+	broadcastPublication.announce();
 	const request = origin.request(Moq.Path.from("room/alice"));
 	const active = request.active.peek();
 	if (!active) throw new Error("request did not resolve");

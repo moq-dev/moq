@@ -6,6 +6,7 @@ Component crates are named `moq-<component>` (`hang` is the exception); infrastr
 
 - `kio`: "easy async" primitives everything else polls through.
 - `moq-tokio`: configures the QUIC backends (`moq-quic`, our quinn fork, and Iroh) and the fallback transports for native binaries, on tokio. `moq-sock` holds the socket plumbing it shares with `moq-uring`, the experimental thread-per-core io\_uring runtime.
+- `moq-quic` is the only QUIC stack we develop; it also powers qmux and WebTransport. Don't add or deepen dependencies on web-transport, noq, or quinn.
 - `moq-cli` builds the `moq` binary and owns the CLI surface for the gateway crates. Binaries never carry a `-cli` suffix.
 
 `moq-net`, `moq-mux`, `moq-relay` (including its layered config), and `moq-ffi` have their own `AGENTS.md`.

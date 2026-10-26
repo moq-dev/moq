@@ -38,7 +38,7 @@ pub struct InvalidCid;
 
 /// Generates purely random connection IDs of a specified length
 ///
-/// Random CIDs can be smaller than those produced by [`HashedConnectionIdGenerator`], but cannot be
+/// Random CIDs can be smaller than the default authenticated CIDs, but cannot be
 /// usefully [`validate`](ConnectionIdGenerator::validate)d unless they name a shard.
 #[derive(Debug, Clone, Copy)]
 pub struct RandomConnectionIdGenerator {
@@ -167,7 +167,7 @@ impl ConnectionIdGenerator for RandomConnectionIdGenerator {
 /// [`validate`](ConnectionIdGenerator::validate)d
 ///
 /// This generator uses a non-cryptographic hash and can therefore still be spoofed, but nonetheless
-/// helps prevents Quinn from responding to non-QUIC packets at very low cost.
+/// helps prevent the endpoint from responding to non-QUIC packets at very low cost.
 pub struct HashedConnectionIdGenerator {
 	key: u64,
 	lifetime: Option<Duration>,
@@ -185,12 +185,6 @@ impl HashedConnectionIdGenerator {
 	/// connection IDs across restarts
 	pub fn from_key(key: u64) -> Self {
 		Self { key, lifetime: None }
-	}
-
-	/// Set the lifetime of CIDs created by this generator
-	pub fn set_lifetime(&mut self, d: Duration) -> &mut Self {
-		self.lifetime = Some(d);
-		self
 	}
 }
 

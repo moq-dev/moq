@@ -18,7 +18,7 @@ fn pair(server_reset_stream_at: bool) -> Pair {
 /// Read a server stream until it ends, returning the bytes and how it ended
 fn read(pair: &mut Pair, ch: ConnectionHandle, s: StreamId) -> (Vec<u8>, Result<(), ReadError>) {
 	let mut recv = pair.server_recv(ch, s);
-	let mut chunks = recv.read(true).unwrap();
+	let mut chunks = recv.read().unwrap();
 	let mut data = Vec::new();
 	let end = loop {
 		match chunks.next(usize::MAX) {
@@ -147,7 +147,7 @@ fn delivers_prefix_before_error() {
 	// Both halves let go of the stream once the prefix and the reset are through
 	assert_eq!(pair.client_streams(client_ch).send_streams(), 0);
 	assert!(matches!(
-		pair.server_recv(server_ch, s).read(true),
+		pair.server_recv(server_ch, s).read(),
 		Err(ReadableError::ClosedStream)
 	));
 }
@@ -253,7 +253,7 @@ fn received_reset_after_prefix() {
 		Ok(None)
 	);
 	let mut recv = pair.server_recv(server_ch, s);
-	let mut chunks = recv.read(true).unwrap();
+	let mut chunks = recv.read().unwrap();
 	assert_matches!(chunks.next(RELIABLE), Ok(Some(chunk)) if chunk.bytes == MSG[..RELIABLE]);
 	let _ = chunks.finalize();
 	assert_matches!(

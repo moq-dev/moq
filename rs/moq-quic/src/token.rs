@@ -62,8 +62,10 @@ pub trait TokenLog: Send + Sync {
 pub struct TokenReuseError;
 
 /// Null implementation of [`TokenLog`], which never accepts tokens
-pub struct NoneTokenLog;
+#[cfg(test)]
+pub(crate) struct NoneTokenLog;
 
+#[cfg(test)]
 impl TokenLog for NoneTokenLog {
 	fn check_and_insert(&self, _: u128, _: Wall, _: Duration) -> Result<(), TokenReuseError> {
 		Err(TokenReuseError)
@@ -88,8 +90,10 @@ pub trait TokenStore: Send + Sync {
 }
 
 /// Null implementation of [`TokenStore`], which does not store any tokens
-pub struct NoneTokenStore;
+#[cfg(test)]
+pub(crate) struct NoneTokenStore;
 
+#[cfg(test)]
 impl TokenStore for NoneTokenStore {
 	fn insert(&self, _: &str, _: Bytes) {}
 	fn take(&self, _: &str) -> Option<Bytes> {
@@ -149,7 +153,7 @@ impl IncomingToken {
 				}
 				if issued
 					.checked_add(server_config.retry_token_lifetime)
-					.is_none_or(|expires| expires < server_config.time_source.now())
+					.is_none_or(|expires| expires < moq_clock::wall())
 				{
 					return Err(InvalidRetryTokenError);
 				}
@@ -166,7 +170,7 @@ impl IncomingToken {
 				}
 				if issued
 					.checked_add(server_config.validation_token.lifetime)
-					.is_none_or(|expires| expires < server_config.time_source.now())
+					.is_none_or(|expires| expires < moq_clock::wall())
 				{
 					return Ok(unvalidated);
 				}
