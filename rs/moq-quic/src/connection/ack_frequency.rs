@@ -220,4 +220,31 @@ mod tests {
 		let delay = state.candidate_max_ack_delay(MAX_ACK_DELAY_LIMIT * 2, &config, &TransportParameters::default());
 		assert_eq!(delay, MAX_ACK_DELAY_LIMIT - Duration::from_micros(1));
 	}
+
+	/// Against quicly's max_ack_delay and min_ack_delay, both 25 ms, the request is never below
+	/// 25 ms, and a longer configured delay is still capped at the RTT
+	#[test]
+	fn peer_min_ack_delay_of_25ms() {
+		let params = TransportParameters {
+			min_ack_delay: Some(25_000u32.into()),
+			max_ack_delay: 25u32.into(),
+			..TransportParameters::default()
+		};
+		let state = AckFrequencyState::new(Duration::from_millis(25));
+		let ms = Duration::from_millis;
+		for (configured, rtt, requested) in [
+			(None, 0, 25),
+			(None, 200, 25),
+			(Some(1), 0, 25),
+			(Some(1), 200, 25),
+			(Some(100), 0, 25),
+			(Some(100), 50, 50),
+			(Some(100), 200, 100),
+		] {
+			let mut config = AckFrequencyConfig::default();
+			config.max_ack_delay(configured.map(ms));
+			let delay = state.candidate_max_ack_delay(ms(rtt), &config, &params);
+			assert_eq!(delay, ms(requested), "configured {configured:?} ms, RTT {rtt} ms");
+		}
+	}
 }

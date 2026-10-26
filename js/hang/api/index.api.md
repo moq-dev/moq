@@ -349,8 +349,6 @@ declare namespace Catalog {
         UnsupportedVersion,
         RootSchema,
         Root,
-        MAX_RENDITIONS,
-        TooManyRenditions,
         DuplicateRendition,
         EscapingBroadcast,
         StatsSchema,
@@ -440,8 +438,6 @@ declare namespace Catalog_2 {
         UnsupportedVersion,
         RootSchema,
         Root,
-        MAX_RENDITIONS,
-        TooManyRenditions,
         DuplicateRendition,
         EscapingBroadcast,
         StatsSchema,
@@ -780,8 +776,6 @@ interface Limits {
     degraded: number;
     unhealthy: number;
 }
-
-const MAX_RENDITIONS = 64;
 
 function mergeBufferedRanges(a: BufferedRanges, b: BufferedRanges): BufferedRanges;
 
@@ -1746,11 +1740,6 @@ declare namespace Timeline {
         Event_2 as Event,
         Consumer_2 as Consumer
     }
-}
-
-class TooManyRenditions extends Error {
-    constructor(count: number);
-    readonly count: number;
 }
 
 const TRACK = "catalog.json";

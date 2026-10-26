@@ -60,16 +60,30 @@ OBS multistream, and the hosted version is product work outside this
 repository.
 
 Added 2026-10-25 (maintainer): the studio's
-[GPU encode](/quest/m1/studio-gpu/encode.md) and
+GPU encode and
 [source import](/quest/m1/studio-gpu/import.md) quests are in m1 so
 moq-video's GPU encode and import API changes, mainly encoders taking a GPU
 surface and zero-copy texture import, land before the cut.
 
 ## Required
 
-- [Zero-copy program encode](/quest/m1/studio-gpu/encode.md) - the program reaches the encoder as a GPU surface instead of a CPU readback
 - [Zero-copy source import](/quest/m1/studio-gpu/import.md) - captured and decoded frames reach the compositor as GPU textures instead of a CPU upload
 - [Studio on macOS and Windows](/quest/m3/studio/app.md) - the studio runs on macOS and Windows, not only Linux
+- [Viewer-side composition](/quest/m3/studio/compose/README.md) - sources as their own tracks plus a layout track, composed by viewers, with a server-composed program as the fallback
+- [Undo and the scene model](/quest/m3/studio/scene-model.md) - undo history, linked and cloned sources, copy and paste, a downstream keyer, and per-item filters
+- [Autosave](/quest/m3/studio/autosave.md) - every edit is written to the scene file, with no save step or quit prompt
+- [Scene editing](/quest/m3/studio/scene-editing.md) - rename and reorder scenes, and resize the canvas while live through a new rendition
+- [Broadcast sources play in sync](/quest/m3/studio/broadcast-sync.md) - subscribed broadcasts and guests play audio and video on the publisher's timestamps, with `moq play`'s delay
+- [Wayland display and window sources](/quest/m3/studio/wayland-sources.md) - portal-picked sources that reopen without the picker
+- [Live encode control](/quest/m3/studio/encode-control.md) - simulcast rungs that follow the bandwidth grant, live bitrate and resolution, keyframes on request
+- [Stream health](/quest/m3/studio/health.md) - per-track delivery, viewer reports, and latency, with causes named
+- [Relay failover](/quest/m3/studio/failover.md) - the same epoch on two relays, so a relay failure does not drop the stream
+- [Instant replay and DVR](/quest/m3/studio/replay.md) - replays and clips from held groups, and viewer scrubbing through the archive
+- [HTML/CSS overlays](/quest/m3/studio/overlays.md) - script-free HTML and CSS graphics through Blitz natively and the DOM in the browser
+- [Animation and transitions](/quest/m3/studio/animation.md) - move, slide, wipe, and stinger transitions, and keyframed item properties
+- [Video effects](/quest/m3/studio/effects.md) - a curated effect set with CSS meanings, and ML effects baked into their source
+- [Snapping and guides](/quest/m3/studio/snapping.md) - preview moves snap to edges, centers, and other items
+- [Guided setup](/quest/m3/studio/guided-setup.md) - first launch detects devices, measures the uplink, and proposes settings
 - [Destinations](/quest/m3/studio/destinations.md) - RTMP, RTMPS, and WHIP push with per-destination codecs and shared encoders, on a UI-free egress library a hosted service can reuse
 - [Multiple canvases](/quest/m3/studio/multi-canvas.md) - landscape and portrait canvases composite at once from shared sources
 - [Guests](/quest/m3/studio/guests.md) - remote guests and phone cameras join through a moq-room link or QR code and appear as sources

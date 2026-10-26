@@ -10,12 +10,14 @@ refused.
 ## Plan
 
 Token claims and HTTP grants carry path patterns only; object roles, including
-bitrate caps, are refused during parsing. The first transport-enforcement quest
-reintroduces optional caps with a type moq-auth owns (or a lower shared units
-crate), converted at the relay boundary so moq-auth never depends on moq-net.
-Its parsers and refusal rules must prevent any transport without enforcement
-from silently discarding a cap. This quest reuses only caps that admission
-actually enforces.
+bitrate caps, are refused during parsing. Decided 2026-10-25 (maintainer):
+this quest reintroduces optional caps with a type moq-auth owns (or a lower
+shared units crate), converted at the relay boundary so moq-auth never depends
+on moq-net. [WebSocket caps](/quest/m2/rate-websocket.md) reuses that type,
+and [the grant](/quest/m2/rate-grant.md) Requires this quest for it. Its
+parsers and refusal rules must prevent any transport without enforcement from
+silently discarding a cap: admission accepts a cap only on a transport that
+enforces it.
 
 Decided in the 2026-10-04 plan: enforce in the QUIC stack, through
 backpressure the peer cannot ignore, rather than metering and closing.

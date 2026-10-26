@@ -270,14 +270,19 @@ impl Config {
 	/// [`probe`](Self::probe), handing back the throwaway encoder so the caller can ask it more
 	/// before dropping it.
 	pub(crate) async fn probe_sink(&self) -> Result<(hang::catalog::VideoConfig, super::Sink), Error> {
-		// A `Sink` rather than an `Encoder`: this runs on whatever executor thread the caller is on,
-		// and the Windows backend's COM apartment has to be opened and closed on one thread.
-		let mut sink = super::Sink::open(self).await?;
-
 		// Mid-gray, since the picture only has to make the encoder emit its parameter sets.
 		let size = self.size();
 		let i420 = crate::I420::new(size, vec![0x80u8; crate::I420::len(size)?])?;
 		let frame = Frame::new(crate::Surface::I420(i420), moq_net::Timestamp::from_micros(0)?);
+		self.probe_frame(frame).await
+	}
+
+	/// [`probe_sink`](Self::probe_sink), encoding `frame` rather than a CPU picture, so the probe
+	/// also proves the encoder reads that kind of surface.
+	pub(crate) async fn probe_frame(&self, frame: Frame) -> Result<(hang::catalog::VideoConfig, super::Sink), Error> {
+		// A `Sink` rather than an `Encoder`: this runs on whatever executor thread the caller is on,
+		// and the Windows backend's COM apartment has to be opened and closed on one thread.
+		let mut sink = super::Sink::open(self).await?;
 
 		// No cut: the first picture out of a fresh encoder is a keyframe on every backend, which
 		// is what carries the parameter sets, and a backend that cannot cut still probes.
@@ -1689,7 +1694,7 @@ mod tests {
 		use super::backend::test_util::{BT601_DESCRIBED, BT709_DESCRIBED, declared_color};
 		use crate::frame::d3d11;
 
-		let device = d3d11::create_device().expect("D3D11 hardware device");
+		let device = d3d11::create_device(None).expect("D3D11 hardware device");
 		for (size, declared) in [
 			(Size::new(640, 480), BT601_DESCRIBED),
 			(Size::new(1280, 720), BT709_DESCRIBED),

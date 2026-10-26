@@ -659,11 +659,12 @@ impl SubscribeDrop {
 	/// The error the dropped groups' readers end with, as `version` reads the code.
 	///
 	/// Before lite-07 the code is the application's, so every drop reads as
-	/// [`StreamError::NotFound`]: the groups are not there to deliver.
+	/// [`StreamError::Old`]: the publisher gave the groups up, and a reader moves on to a
+	/// newer one as it would past a superseded group.
 	pub fn error(&self, version: Version) -> StreamError {
 		match version.has_drop_code() {
 			true => u32::try_from(self.error).map_or(StreamError::Internal, |code| version.decode_stream_code(code)),
-			false => StreamError::NotFound,
+			false => StreamError::Old,
 		}
 	}
 }
