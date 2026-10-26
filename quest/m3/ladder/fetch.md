@@ -12,7 +12,7 @@ Two independent leaks of controller state, both cheap to close once the
 controller owns it.
 
 The FETCH path opens a new encoder per requested group at
-`Rung::bitrate`: `spawn_fetch` and `fetch`
+`Rung::bitrate`: `fetches` and `fetch`
 (`rs/moq-transcode/src/rung.rs`) call `encode`, which sets
 `config.bitrate = Some(self.info.bitrate)`, so a constrained ladder
 still burns full-rate encodes on demand. Make it read the controller's

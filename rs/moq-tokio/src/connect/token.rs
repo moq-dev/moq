@@ -70,6 +70,7 @@ pub(crate) struct Set {
 }
 
 impl Tokens {
+	#[cfg(any(feature = "_transport", test))]
 	pub(crate) fn new(tokens: Vec<Token>) -> Self {
 		Self(kio::Producer::new(Set { tokens, generation: 0 }))
 	}
@@ -99,8 +100,16 @@ impl Tokens {
 pub(crate) struct Credential {
 	/// The URL to dial, carrying the connection credential in its query when an offered
 	/// version has no SETUP token.
+	#[cfg_attr(
+		not(any(feature = "_transport", test)),
+		allow(dead_code, reason = "only a compiled transport dials the URL")
+	)]
 	pub url: Url,
 	/// The token SETUP carries, unless the URL brought its own credential.
+	#[cfg_attr(
+		not(any(feature = "_transport", test)),
+		allow(dead_code, reason = "only a compiled transport sends SETUP")
+	)]
 	pub setup: Option<Token>,
 	/// The credential the connection presents, from the URL or SETUP. Never also
 	/// presented on an AUTH stream.

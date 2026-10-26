@@ -17,7 +17,3 @@ per newcomer, so it scales with subscribers; cover it with a benchmark if it
 reproduces.
 
 Public API: none expected. Wire: none expected.
-
-## Related
-
-- [A widened max age re-offers cached groups](/quest/m1/resolved-demand.md)

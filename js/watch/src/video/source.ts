@@ -194,7 +194,8 @@ function enabledRenditions(renditions: Record<string, Catalog.VideoConfig>): Rec
 /** Keep only the highest preference: a lower one is a fallback for players that can't decode it. */
 function preferredRenditions(renditions: Record<string, Catalog.VideoConfig>): Record<string, Catalog.VideoConfig> {
 	const entries = Object.entries(renditions);
-	const top = Math.max(...entries.map(([, config]) => config.preference ?? 0));
+	// A loop, not `Math.max(...)`: a catalog's rendition count can exceed the argument limit.
+	const top = entries.reduce((top, [, config]) => Math.max(top, config.preference ?? 0), Number.NEGATIVE_INFINITY);
 	return Object.fromEntries(entries.filter(([, config]) => (config.preference ?? 0) === top));
 }
 

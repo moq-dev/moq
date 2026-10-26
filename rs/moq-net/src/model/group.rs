@@ -16,7 +16,7 @@
 //! The stream is closed with [Error] when all writers or readers are dropped.
 use super::flate;
 use crate::cache;
-use crate::frame::{self, Frame, FrameBuf};
+use crate::frame::{self, Cached, FrameBuf, Payload};
 use crate::{Timescale, stats, track};
 use bytes::Bytes;
 use std::collections::VecDeque;
@@ -135,7 +135,7 @@ pub(super) struct Partial {
 /// A completed frame as a group stores it, with what egress needs beside it.
 #[derive(Clone)]
 pub(super) struct Entry {
-	frame: Frame,
+	frame: Cached,
 	// The IETF object fields it arrived with, for a relay to forward.
 	fields: Option<Arc<super::object::Fields>>,
 	// A compressed group's inflated size of the stored slice; zero on a plain group.
@@ -144,7 +144,7 @@ pub(super) struct Entry {
 
 impl Entry {
 	/// A frame without object fields.
-	fn plain(frame: Frame, inflated: u64) -> Self {
+	fn plain(frame: Cached, inflated: u64) -> Self {
 		Self {
 			frame,
 			fields: None,
@@ -444,7 +444,7 @@ struct Inflate {
 	// Local index of the first slice: the copy's inflated length when the read took them.
 	from: usize,
 	// Each slice with its declared inflated size.
-	slices: Vec<(Bytes, u64)>,
+	slices: Vec<(Payload, u64)>,
 }
 
 impl Inflate {
@@ -470,7 +470,7 @@ impl Inflate {
 						bill.add(flate::DECODER_HEAP);
 						flate::Decoder::new()
 					});
-					decoder.frame(slice, size)
+					decoder.frame(&slice.contiguous(0), size)
 				});
 			match frame {
 				Ok(frame) => {
@@ -1261,9 +1261,9 @@ impl Producer {
 			}
 			None => 0,
 		};
-		let frame = Frame {
+		let frame = Cached {
 			timestamp,
-			payload,
+			payload: payload.into(),
 			arrived: super::clock::now(),
 		};
 		let slots = state.push(Entry::plain(frame, inflated));
@@ -1372,7 +1372,7 @@ impl Producer {
 			state.cache += size;
 			state.stamp(frame.timestamp);
 			latest = frame.timestamp;
-			let slots = state.push(Entry::plain(frame, inflated));
+			let slots = state.push(Entry::plain(frame.into(), inflated));
 			now = state.charge.add(size + slots);
 		}
 		state.next_index = next_index;
@@ -1424,7 +1424,8 @@ impl Producer {
 	pub(crate) fn create_object(mut self, frame: frame::Header) -> Result<frame::Producer> {
 		let meter = self.chunk_meter(frame.inflated);
 		let size = frame.info.size as usize;
-		let reserved = self.handle.cache.frames().reserve(size);
+		// Only the segment being written is ever allocated ahead of its bytes.
+		let reserved = self.handle.cache.frames().reserve(size.min(frame::SEGMENT));
 		let buf = match reserved {
 			Some(_) => FrameBuf::new(size),
 			None => FrameBuf::growing(size),
@@ -1565,7 +1566,7 @@ impl Producer {
 	}
 
 	/// Commit the in-flight frame as a completed frame (called by [`frame::Producer::finish`]).
-	pub(super) fn frame_commit(&mut self, frame: Frame) -> Result<()> {
+	pub(super) fn frame_commit(&mut self, frame: Cached) -> Result<()> {
 		let mut state = modify(&self.handle.state)?;
 		// Completing the frame charges whatever it wrote since the last notify, and is a
 		// write access like any chunk, and the only one the payload is guaranteed to get:
@@ -1580,7 +1581,7 @@ impl Producer {
 		if partial.as_ref().is_some_and(|partial| partial.scratch) {
 			let flate = state.flate.as_mut().expect("scratch only opens on a compressed group");
 			inflated = frame.payload.len() as u64;
-			frame.payload = flate.deflate(&frame.payload);
+			frame.payload = flate.deflate(&frame.payload.contiguous(0)).into();
 			flate.inflated += inflated;
 			let size = frame.payload.len() as u64;
 			// The frame already counts against the group's frames.
@@ -2231,10 +2232,16 @@ impl Demand {
 /// consumer that never reads whole frames, or drains through a higher-level buffer,
 /// pays nothing. Inline storage would triple the size of every [`Consumer`], which
 /// moves by value through each layer that hands out a group.
+///
+/// Slots hold the public [`frame::Frame`], with a segmented payload set aside in `chains`,
+/// so a whole read of a small frame moves it out of its slot as it did before segments.
 #[derive(Default)]
 struct Prefetch {
 	// Initialized, not-yet-taken frames are `frames[pos..len]`; the rest are uninitialized.
-	frames: Option<Box<[MaybeUninit<Frame>; Self::CAP]>>,
+	// A slot whose frame is in `chains` holds an empty payload.
+	frames: Option<Box<[MaybeUninit<frame::Frame>; Self::CAP]>>,
+	// Segmented payloads for `frames`, allocated by the first batch that carries one.
+	chains: Option<Box<[Option<frame::Chain>; Self::CAP]>>,
 	// Relay metadata for `frames`, allocated by the first batch that carries any.
 	fields: Option<Box<[Option<Arc<super::object::Fields>>; Self::CAP]>>,
 	// Inflated sizes for `frames`, filled only by a batch of a compressed group's stored slices.
@@ -2251,8 +2258,38 @@ impl Prefetch {
 		self.inflated.as_ref()?.get(self.pos.checked_sub(1)?).copied()
 	}
 
-	/// Take the next buffered frame, or `None` if the batch is drained.
-	fn pop(&mut self) -> Option<Frame> {
+	/// Take the next buffered frame whole, copying a segmented payload into one buffer.
+	// Every small-frame read comes through here, so the chain copy stays out of line:
+	// with it inline, this measured ~30 more instructions a frame on `group_read_frames`.
+	#[inline(always)]
+	fn pop(&mut self) -> Option<frame::Frame> {
+		let mut frame = self.take()?;
+		if self.chains.is_some() {
+			self.join_chain(&mut frame);
+		}
+		Some(frame)
+	}
+
+	#[cold]
+	#[inline(never)]
+	fn join_chain(&mut self, frame: &mut frame::Frame) {
+		if let Some(chain) = self.take_chain() {
+			frame.payload = chain.concat();
+		}
+	}
+
+	/// Take the next buffered frame as stored, keeping a segmented payload in segments.
+	fn pop_cached(&mut self) -> Option<Cached> {
+		let frame = self.take()?;
+		Some(Cached {
+			timestamp: frame.timestamp,
+			payload: self.take_chain().map_or(Payload::Whole(frame.payload), Payload::Chain),
+			arrived: frame.arrived,
+		})
+	}
+
+	#[inline]
+	fn take(&mut self) -> Option<frame::Frame> {
 		if self.pos == self.len {
 			return None;
 		}
@@ -2261,6 +2298,12 @@ impl Prefetch {
 		let frame = unsafe { frames[self.pos].assume_init_read() };
 		self.pos += 1;
 		Some(frame)
+	}
+
+	/// The segmented payload of the frame [`Self::take`] just returned.
+	#[inline]
+	fn take_chain(&mut self) -> Option<frame::Chain> {
+		self.chains.as_mut()?.get_mut(self.pos.checked_sub(1)?)?.take()
 	}
 
 	/// The relay metadata of the frame [`Self::pop`] just returned.
@@ -2285,7 +2328,22 @@ impl Prefetch {
 		let frames = self
 			.frames
 			.get_or_insert_with(|| Box::new([const { MaybeUninit::uninit() }; Self::CAP]));
-		frames[at].write(entry.frame.clone());
+		let payload = match (&entry.frame.payload, &mut self.chains) {
+			(Payload::Whole(bytes), Some(slots)) => {
+				slots[at] = None;
+				bytes.clone()
+			}
+			(Payload::Whole(bytes), None) => bytes.clone(),
+			(Payload::Chain(chain), slots) => {
+				slots.get_or_insert_default()[at] = Some(chain.clone());
+				Bytes::new()
+			}
+		};
+		frames[at].write(frame::Frame {
+			timestamp: entry.frame.timestamp,
+			payload,
+			arrived: entry.frame.arrived,
+		});
 		// Plain frames never allocate the metadata table.
 		match (&entry.fields, &mut self.fields) {
 			(Some(fields), slots) => slots.get_or_insert_default()[at] = Some(fields.clone()),
@@ -2344,8 +2402,13 @@ impl Prefetch {
 		};
 		for i in self.pos..self.len {
 			match job.get(local + i) {
-				// SAFETY: slots in `pos..len` are initialized (written by `fill`, not yet popped).
-				Ok(payload) => unsafe { frames[i].assume_init_mut() }.payload = payload,
+				Ok(payload) => {
+					// SAFETY: slots in `pos..len` are initialized (written by `fill`, not yet popped).
+					unsafe { frames[i].assume_init_mut() }.payload = payload;
+					if let Some(chains) = &mut self.chains {
+						chains[i] = None;
+					}
+				}
 				Err(err) => {
 					for slot in &mut frames[i..self.len] {
 						// SAFETY: as above, and `len` drops below them right after.
@@ -2369,6 +2432,13 @@ impl Prefetch {
 		for slot in &frames[self.pos..self.len] {
 			// SAFETY: slots in `pos..len` are initialized (written by `fill`, not yet popped).
 			bytes += unsafe { slot.assume_init_ref() }.payload.len() as u64;
+		}
+		if let Some(chains) = &self.chains {
+			bytes += chains[self.pos..self.len]
+				.iter()
+				.flatten()
+				.map(|chain| chain.len() as u64)
+				.sum::<u64>();
 		}
 		((self.len - self.pos) as u64, bytes)
 	}
@@ -2851,17 +2921,32 @@ impl Consumer {
 
 	/// Read the next frame (timestamp and payload) all at once, without blocking.
 	pub fn poll_read_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Frame>>> {
+		self.poll_read_as(waiter, Prefetch::pop)
+	}
+
+	/// Read the next frame as stored, so a frame in segments stays in them.
+	#[cfg(feature = "async")]
+	fn poll_read_cached(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Cached>>> {
+		self.poll_read_as(waiter, Prefetch::pop_cached)
+	}
+
+	/// Read the next frame through the prefetch with `take`, which picks its form.
+	fn poll_read_as<T>(
+		&mut self,
+		waiter: &kio::Waiter,
+		take: impl Fn(&mut Prefetch) -> Option<T> + Copy,
+	) -> Poll<Result<Option<T>>> {
 		if self.recover.is_none() {
-			return self.poll_read_frame_once(waiter);
+			return self.poll_read_frame_once(waiter, take);
 		}
-		self.poll_resumed(waiter, Self::poll_read_frame_once)
+		self.poll_resumed(waiter, |this, waiter| this.poll_read_frame_once(waiter, take))
 	}
 
 	/// Read the next frame with its relay metadata, for wire egress.
 	#[cfg(feature = "async")]
 	pub(crate) fn poll_read_object(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Object>>> {
 		// Every frame is served through the cursor's prefetch, which holds its fields.
-		let frame = ready!(self.poll_read_frame(waiter))?;
+		let frame = ready!(self.poll_read_cached(waiter))?;
 		Poll::Ready(Ok(frame.map(|frame| frame::Object {
 			frame,
 			fields: self.cursor.prefetch.take_fields(),
@@ -2869,11 +2954,15 @@ impl Consumer {
 		})))
 	}
 
-	fn poll_read_frame_once(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Frame>>> {
+	fn poll_read_frame_once<T>(
+		&mut self,
+		waiter: &kio::Waiter,
+		take: impl Fn(&mut Prefetch) -> Option<T> + Copy,
+	) -> Poll<Result<Option<T>>> {
 		if self.expired {
 			return Poll::Ready(Err(Error::Old));
 		}
-		let res = self.cursor.poll_read_frame(waiter, &self.stats);
+		let res = self.cursor.poll_read_frame(waiter, &self.stats, take);
 		self.poll_expired_if_blocked(waiter, res)
 	}
 
@@ -3062,7 +3151,7 @@ impl Cursor {
 		// Hand out any frames a prior read_frame prefetched before touching the tail.
 		// Their bytes were already counted at the batch fill, so the frame::Consumer
 		// carries no meter.
-		if let Some(frame) = self.prefetch.pop() {
+		if let Some(frame) = self.prefetch.pop_cached() {
 			self.refresh_if_stale();
 			self.index += 1;
 			let tail = self.index.saturating_add(self.prefetch.buffered().0 as usize)..end;
@@ -3122,7 +3211,7 @@ impl Cursor {
 						fields,
 						inflated: None,
 					};
-					(header, frame::Source::Complete(payload))
+					(header, frame::Source::Complete(payload.into()))
 				}
 			},
 		};
@@ -3138,13 +3227,18 @@ impl Cursor {
 		})))
 	}
 
-	fn poll_read_frame(&mut self, waiter: &kio::Waiter, stats: &stats::Meter) -> Poll<Result<Option<Frame>>> {
+	fn poll_read_frame<T>(
+		&mut self,
+		waiter: &kio::Waiter,
+		stats: &stats::Meter,
+		take: impl Fn(&mut Prefetch) -> Option<T> + Copy,
+	) -> Poll<Result<Option<T>>> {
 		if self.capped() {
 			return Poll::Ready(Ok(None));
 		}
 
 		// Fast path: serve from the prefetched batch without locking or allocating a waker.
-		if let Some(frame) = self.prefetch.pop() {
+		if let Some(frame) = take(&mut self.prefetch) {
 			self.refresh_if_stale();
 			self.index += 1;
 			return Poll::Ready(Ok(Some(frame)));
@@ -3162,7 +3256,7 @@ impl Cursor {
 			let (frames, bytes) = self.prefetch.buffered();
 			stats.frames(frames);
 			stats.bytes(bytes);
-			return Poll::Ready(Ok(self.prefetch.pop().inspect(|_| {
+			return Poll::Ready(Ok(take(&mut self.prefetch).inspect(|_| {
 				self.index += 1;
 			})));
 		}
@@ -3208,7 +3302,7 @@ impl Cursor {
 		stats.frames(frames);
 		stats.bytes(bytes);
 
-		Poll::Ready(Ok(self.prefetch.pop().inspect(|_| {
+		Poll::Ready(Ok(take(&mut self.prefetch).inspect(|_| {
 			self.index += 1;
 		})))
 	}
@@ -3256,6 +3350,7 @@ impl Fetch {
 #[cfg(test)]
 mod test {
 	use super::*;
+	use crate::frame::Frame;
 	use crate::model::test_tracing::count_drop_warnings;
 	use bytes::Bytes;
 	#[cfg(feature = "async")]
@@ -3782,7 +3877,7 @@ mod test {
 		let head = Head {
 			start: 0,
 			first_object: true,
-			entries: vec![Entry::plain(Frame::new(None, Bytes::from_static(b"ab")), 0)],
+			entries: vec![Entry::plain(Frame::new(None, Bytes::from_static(b"ab")).into(), 0)],
 			compressed: false,
 		};
 		adopter.adopt_head(&head);
@@ -3808,9 +3903,9 @@ mod test {
 			start: 0,
 			first_object: true,
 			entries: vec![
-				Entry::plain(Frame::new(None, Bytes::from_static(b"a")), 0),
+				Entry::plain(Frame::new(None, Bytes::from_static(b"a")).into(), 0),
 				Entry {
-					frame: Frame::new(None, Bytes::from_static(b"b")),
+					frame: Frame::new(None, Bytes::from_static(b"b")).into(),
 					fields: fields(1),
 					inflated: 0,
 				},
@@ -3858,7 +3953,10 @@ mod test {
 			let mut whole = tail.consume();
 			let mut read = Vec::new();
 			while let Poll::Ready(Ok(Some(object))) = whole.poll_read_object(&waiter) {
-				read.push((object.frame.payload, object.fields.map(|fields| fields.id)));
+				read.push((
+					object.frame.payload.contiguous(0),
+					object.fields.map(|fields| fields.id),
+				));
 			}
 			assert_eq!(
 				read,
@@ -4695,6 +4793,89 @@ mod test {
 		assert_eq!(third.allocated(), 1024, "the finished frame did not return its share");
 	}
 
+	/// A frame past one segment reserves and allocates a segment rather than its declared
+	/// size, so a peer declaring the largest frame commits no more than a small one.
+	#[test]
+	fn a_large_frame_allocates_one_segment_ahead() {
+		let budget = frame::Budget::new(2 * frame::SEGMENT);
+		let pool = cache::Pool::unbounded();
+		let group = |sequence| {
+			let cache = cache::Track::new(pool.clone(), budget.clone(), kio::Weak::new());
+			Producer::new(Info { sequence }, track::Info::timed(), cache)
+		};
+
+		let frames: Vec<_> = (0..2)
+			.map(|sequence| {
+				let mut frame = group(sequence).create_frame(sized(MAX_CACHE_BYTES)).unwrap();
+				frame.write(Bytes::from_static(b"x")).unwrap();
+				frame
+			})
+			.collect();
+		for frame in &frames {
+			assert_eq!(frame.allocated(), frame::SEGMENT, "reserved other than one segment");
+		}
+	}
+
+	/// A prefetched batch mixing small and segmented frames hands each one out intact,
+	/// whether it is read whole, streamed, or read as stored for the wire.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_batch_mixes_segmented_frames() {
+		let mut group = Info { sequence: 0 }.produce();
+		let payloads: Vec<Bytes> = (0..Prefetch::CAP)
+			.map(|i| match i % 2 {
+				0 => Bytes::from(vec![i as u8; 3]),
+				_ => Bytes::from((0..2 * frame::SEGMENT + 7).map(|b| (b + i) as u8).collect::<Vec<_>>()),
+			})
+			.collect();
+		for payload in &payloads {
+			let mut frame = group
+				.create_frame(frame::Info {
+					size: payload.len() as u64,
+					timestamp: Some(Timestamp::ZERO),
+				})
+				.unwrap();
+			// Written in pieces, so the large ones chain.
+			for piece in payload.chunks(300_000) {
+				frame.write(payload.slice_ref(piece)).unwrap();
+			}
+			group = frame.finish().unwrap();
+		}
+		group.finish().unwrap();
+
+		let mut whole = group.consume();
+		for (i, payload) in payloads.iter().enumerate() {
+			let frame = whole.read_frame().now_or_never().unwrap().unwrap().unwrap();
+			assert_eq!(&frame.payload, payload, "whole frame {i}");
+		}
+
+		// The first read prefetches the batch, so the streamed rest come out of it.
+		let mut mixed = group.consume();
+		mixed.read_frame().now_or_never().unwrap().unwrap().unwrap();
+		for (i, payload) in payloads.iter().enumerate().skip(1) {
+			let mut frame = mixed.next_frame().now_or_never().unwrap().unwrap().unwrap();
+			let first = frame.read_chunk().now_or_never().unwrap().unwrap().unwrap();
+			assert_eq!(
+				first.len(),
+				payload.len().min(frame::SEGMENT),
+				"streamed frame {i} lost its segments"
+			);
+			let rest = frame.read_all().now_or_never().unwrap().unwrap();
+			assert_eq!([first, rest].concat(), payload[..], "streamed frame {i}");
+		}
+
+		let mut objects = group.consume();
+		let waiter = kio::Waiter::noop();
+		for (i, payload) in payloads.iter().enumerate() {
+			let Poll::Ready(Ok(Some(object))) = objects.poll_read_object(&waiter) else {
+				panic!("frame {i} is ready");
+			};
+			let chained = matches!(object.frame.payload, Payload::Chain(_));
+			assert_eq!(chained, payload.len() > frame::SEGMENT, "stored frame {i}");
+			assert_eq!(object.frame.payload.contiguous(0), payload, "stored frame {i}");
+		}
+	}
+
 	/// A repetitive frame DEFLATE shrinks, distinct per index.
 	fn verbose(index: usize) -> Bytes {
 		Bytes::from(format!("{index}:{}", "moq".repeat(300)))
@@ -4783,7 +4964,9 @@ mod test {
 			};
 			let size = object.inflated.expect("a stored slice carries its size");
 			assert_eq!(size, verbose(index).len() as u64);
-			let frame = decoder.frame(&object.frame.payload, size as usize).unwrap();
+			let frame = decoder
+				.frame(&object.frame.payload.contiguous(0), size as usize)
+				.unwrap();
 			assert_eq!(frame, verbose(index), "slice {index}");
 		}
 

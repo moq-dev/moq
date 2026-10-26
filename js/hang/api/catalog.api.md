@@ -400,8 +400,6 @@ export type KnownCompression = "deflate";
 
 export type KnownMode = "snapshot" | "stream";
 
-export const MAX_RENDITIONS = 64;
-
 export type Mode = z_2.infer<typeof ModeSchema>;
 
 export const ModeSchema: z_2.ZodMiniString<string>;
@@ -1128,11 +1126,6 @@ export const TextSchema: z_2.ZodMiniObject<{
         delay: z_2.ZodMiniOptional<z_2.ZodMiniPipe<z_2.core.$ZodBranded<z_2.ZodMiniNumber<number>, "u53", "out">, z_2.ZodMiniTransform<(number & z_2.$brand<"u53">) | undefined, number & z_2.$brand<"u53">>>>;
     }, z_2.core.$strip>>;
 }, z_2.core.$strip>;
-
-export class TooManyRenditions extends Error {
-    constructor(count: number);
-    readonly count: number;
-}
 
 export const TRACK = "catalog.json";
 

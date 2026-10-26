@@ -24,3 +24,7 @@ Decided 2026-10-23 (maintainer interview):
   matches the guides beside it. Nothing generated is committed.
 - JSR keeps publishing its own reference; this does not replace it.
 - Rust is a non-goal: docs.rs covers it.
+- The link resolver (`nameableReference` from
+  [moq-dev/moq#6794](https://github.com/moq-dev/moq/pull/6794)) gets fixtures
+  for a hidden and an exported declaration sharing a name, and for chains of
+  aliases.
