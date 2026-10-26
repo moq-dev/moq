@@ -380,7 +380,16 @@ pub(crate) struct VideoEncoder {
 	/// one and retunes over a newer cap. A channel, so a rung above this rendition
 	/// wakes when it moves and when this rendition ends.
 	pub(crate) ceiling: kio::Producer<moq_net::bandwidth::Rate>,
-	finished: crate::publish::Finished,
+	children: crate::publish::Children,
+}
+
+impl crate::publish::Abort for Shared<VideoEncoder> {
+	fn abort(self, err: moq_net::Error) {
+		// Dropping the follow sender stops the rate follower; the encoder closes with it.
+		if let Some(encoder) = self.take() {
+			encoder.producer.abort(err);
+		}
+	}
 }
 
 /// A delivered frame: the decoded picture, retained until its id is freed, and
@@ -454,16 +463,18 @@ pub struct DecoderOutput {
 fn finalize(
 	mut producer: moq_video::encode::Producer,
 	drained: Result<(), moq_video::Error>,
-	finished: &crate::publish::Finished,
+	children: &crate::publish::Children,
+	child: crate::publish::Child,
 ) -> Result<(), Error> {
 	match drained {
 		Ok(()) => {
 			producer.finish()?;
 			// The broadcast keeps the finished track, so its finish still holds it.
-			finished.keep(producer);
+			children.keep(child, producer);
 			Ok(())
 		}
 		Err(err) => {
+			children.forget(child);
 			producer.abort(moq_net::Error::Transport(err.to_string()));
 			Err(err.into())
 		}
@@ -573,12 +584,13 @@ impl VideoEncoder {
 		retuned
 	}
 
-	fn publish_finish(self) -> Result<(), Error> {
+	/// Drain and finish the encoder behind handle `id`.
+	fn publish_finish(self, id: Id) -> Result<(), Error> {
 		let VideoEncoder {
 			encoder,
 			mut producer,
 			followed,
-			finished,
+			children,
 			ceiling,
 			..
 		} = self;
@@ -590,7 +602,7 @@ impl VideoEncoder {
 			Some(encoder) => block_on(encoder.finish()).and_then(|encoded| producer.publish(&encoded)),
 			None => Ok(()),
 		};
-		finalize(producer, drained, &finished)?;
+		finalize(producer, drained, &children, crate::publish::Child::Video(id))?;
 		// A follower panic only stops rate adaptation, so the track still ends
 		// cleanly before the panic is reported.
 		followed.map_or(Ok(()), |followed| followed.check())
@@ -650,8 +662,7 @@ impl Video {
 		};
 		let track = target.producer.unique_track(suffix, reserved.track_info(priority))?;
 		let producer = moq_video::encode::Producer::with_track(track, reserved, rendition)?;
-		let finished = target.finished.clone();
-		self.producers.insert(Shared::new(VideoEncoder {
+		let encoder = Shared::new(VideoEncoder {
 			encoder: Some(encoder),
 			producer,
 			config: config.clone(),
@@ -663,8 +674,11 @@ impl Video {
 			follow: None,
 			followed: None,
 			ceiling: kio::Producer::new(ceiling),
-			finished,
-		}))
+			children: target.children.clone(),
+		});
+		target
+			.children
+			.insert(&mut self.producers, encoder, crate::publish::Child::Video)
 	}
 
 	/// Reserve the encoder's ceiling against `allocator` and follow the grant.
@@ -1075,11 +1089,18 @@ pub extern "C" fn moq_encode_video_bitrate(producer: u32, bitrate: u64) -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_encode_video_finish(producer: u32) -> i32 {
 	ffi::enter(move || {
-		let producer = ffi::parse_id(producer)?;
-		// The id is dropped first, so nothing new queues behind the drain; whatever
-		// is mid-encode still finishes before this takes the encoder.
-		let producer = State::lock().video.remove(producer)?;
-		producer.take().ok_or(Error::MediaNotFound)?.publish_finish()
+		let id = ffi::parse_id(producer)?;
+		// The id stays until the drain ends, so a racing moq_publish_close waits it out
+		// instead of missing a track that still publishes. A call queued behind the drain
+		// finds the encoder gone.
+		let shared = State::lock().video.producer(id)?;
+		let finished = {
+			let mut guard = shared.lock();
+			guard.take().ok_or(Error::MediaNotFound)?.publish_finish(id)
+		};
+		// A racing close may have released the id already.
+		let _ = State::lock().video.remove(id);
+		finished
 	})
 }
 
@@ -1237,7 +1258,13 @@ mod tests {
 	#[tokio::test]
 	async fn a_successful_drain_ends_the_track_cleanly() {
 		let (producer, mut track) = track_under_test().await;
-		finalize(producer, Ok(()), &Default::default()).unwrap();
+		finalize(
+			producer,
+			Ok(()),
+			&Default::default(),
+			crate::publish::Child::Video(Id::try_from(1u32).unwrap()),
+		)
+		.unwrap();
 		assert!(matches!(track.recv_group().await, Ok(None)), "expected a clean end");
 	}
 
@@ -1248,7 +1275,13 @@ mod tests {
 	async fn a_failed_drain_aborts_the_track() {
 		let (producer, mut track) = track_under_test().await;
 		let err = moq_video::Error::Codec(anyhow::anyhow!("the codec lost the tail"));
-		finalize(producer, Err(err), &Default::default()).unwrap_err();
+		finalize(
+			producer,
+			Err(err),
+			&Default::default(),
+			crate::publish::Child::Video(Id::try_from(1u32).unwrap()),
+		)
+		.unwrap_err();
 
 		let Err(err) = track.recv_group().await else {
 			panic!("expected an abort, not a clean end");
@@ -1281,10 +1314,11 @@ mod tests {
 			follow: None,
 			followed: Some(followed),
 			ceiling: kio::Producer::new(moq_net::bandwidth::Rate::from_mbps(1)),
-			finished: Default::default(),
+			children: Default::default(),
 		};
 
-		let result = tokio::task::spawn_blocking(move || video.publish_finish())
+		let id = Id::try_from(1u32).unwrap();
+		let result = tokio::task::spawn_blocking(move || video.publish_finish(id))
 			.await
 			.unwrap();
 		assert!(matches!(result, Err(Error::Panic)), "{result:?}");

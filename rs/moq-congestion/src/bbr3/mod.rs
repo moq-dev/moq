@@ -1,11 +1,7 @@
 #[cfg(all(test, not(target_family = "wasm")))]
-mod cleanup_bench;
-#[cfg(test)]
-mod cleanup_test;
+mod bench;
 mod max_filter;
-mod packets;
 
-use self::packets::Packets;
 use std::any::Any;
 #[cfg(test)]
 use std::collections::VecDeque;
@@ -14,9 +10,13 @@ use std::sync::Arc;
 use rand::{RngExt, SeedableRng};
 use rand_pcg::Pcg32;
 
-use crate::RttEstimator;
 use crate::bbr3::max_filter::MaxFilter;
-use crate::{BASE_DATAGRAM_SIZE, Controller, ControllerFactory, ControllerMetrics, SpaceId};
+use crate::pacer::{Pacer, Rate};
+use crate::rate::{Sample, Sampler};
+use crate::{
+    Ack, BASE_DATAGRAM_SIZE, Ce, Controller, ControllerFactory, ControllerMetrics, Init, Loss,
+    Lost, Packet, Sent,
+};
 use crate::{Duration, Instant};
 
 /// equivalent to BBR.MaxBwFilterLen <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-2.11>
@@ -24,11 +24,6 @@ const MAX_BW_FILTER_LEN: usize = 2;
 
 /// equivalent to BBR.ExtraAckedFilterLen <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-2.12>
 const EXTRA_ACKED_FILTER_LEN: usize = 10;
-
-/// Safety bound for retaining an unacknowledged packet snapshot. Rounds refer to <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.1>.
-/// The value of 10 rounds is picked because normally after max(kTimeThreshold * max(smoothed_rtt, latest_rtt), kGranularity) <https://datatracker.ietf.org/doc/html/rfc9002#section-6.1.2>
-/// the packet should have been declared lost already; this bounds snapshots left by key-space discard.
-const ROUND_COUNT_WINDOW: u64 = 10;
 
 /// the minimum for the maximum datagram size <https://datatracker.ietf.org/doc/html/rfc9000#section-14>
 const MIN_MAX_DATAGRAM_SIZE: u16 = 1200;
@@ -193,84 +188,6 @@ enum AckPhase {
     ProbeFeedback,
 }
 
-/// Description of a packet for the purposes of analysis through BBR3
-/// all volumes of data use bytes, all rates of data use bytes/sec
-/// equivalent to P <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-4.1.2.1.2>
-#[derive(Debug, Clone, Copy)]
-struct BbrPacket {
-    /// equivalent to P.delivered: C.delivered when the packet was sent from transport connection
-    /// C.
-    delivered: u64,
-    /// equivalent to P.delivered_time: C.delivered_time when the packet was sent.
-    delivered_time: Instant,
-    /// equivalent to P.first_send_time: C.first_send_time when the packet was sent.
-    first_send_time: Instant,
-    /// equivalent to P.send_time: The pacing departure time selected when the packet was scheduled
-    /// to be sent.
-    send_time: Instant,
-    /// equivalent to P.is_app_limited: true if C.app_limited was non-zero when the packet was
-    /// sent, else false.
-    is_app_limited: bool,
-    /// equivalent to P.tx_in_flight: C.inflight immediately after the transmission of packet P.
-    tx_in_flight: u64,
-    /// packet number from the connection, unique only within `space`
-    packet_number: u64,
-    /// packet number space the packet was sent in; each space numbers independently from zero, so
-    /// `packet_number` only identifies a packet together with this
-    space: SpaceId,
-    /// packet size in bytes
-    size: u16,
-    /// equivalent to P.lost: C.lost when the packet was sent
-    lost: u64,
-    /// Acknowledged snapshots remain available for a loss reported in the next ACK batch.
-    acknowledged: bool,
-    /// Marked for retirement at the next ACK batch, preserving late-loss metadata.
-    stale: bool,
-    /// used to mark packets stale if they're far from the current round <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.1>
-    round_count: u64,
-}
-
-/// Description of a per-ack rate sample state that will allow us to determine a short term
-/// evolution of the connection equivalent to RS <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-2.3>
-#[derive(Debug, Clone, Copy)]
-struct BbrRateSample {
-    /// equivalent to RS.delivery_rate: The delivery rate (aka bandwidth) sample obtained from the
-    /// packet that has just been ACKed.
-    delivery_rate: f64,
-    /// equivalent to RS.is_app_limited: The P.is_app_limited from the most recent packet
-    ///    delivered; indicates whether the rate sample is application-limited.
-    is_app_limited: bool,
-    /// equivalent to RS.interval: The length of the sampling interval.
-    interval: Duration,
-    /// equivalent to RS.delivered: The volume of data delivered between the transmission of the
-    /// packet that has just been ACKed and the current time.
-    delivered: u64,
-    /// equivalent to RS.prior_delivered: The P.delivered count from the most recent packet
-    /// delivered.
-    prior_delivered: u64,
-    /// equivalent to RS.send_elapsed: Send time interval calculated from the most recent
-    ///    packet delivered (see the "Send Rate" section above).
-    send_elapsed: Duration,
-    /// equivalent to RS.ack_elapsed: ACK time interval calculated from the most recent
-    ///    packet delivered (see the "ACK Rate" section above).
-    ack_elapsed: Duration,
-    /// equivalent to RS.rtt: The RTT sample calculated based on the most recently-sent packet of
-    /// the packets that have just been ACKed.
-    rtt: Duration,
-    /// equivalent to RS.tx_in_flight: C.inflight at the time of the transmission of the packet
-    /// that has just been ACKed (the most recently sent packet among packets ACKed by the ACK
-    /// that was just received).
-    tx_in_flight: u64,
-    /// equivalent to RS.lost: The volume of data in bytes that was declared lost between the
-    /// transmission and acknowledgment of the packet that has just been ACKed (the most
-    /// recently sent packet among packets ACKed by the ACK that was just received).
-    lost: u64,
-    /// equivalent to RS.last_end_seq
-    last_end_seq: u64,
-    /// represents the last packet that was used in the generation of this rate sample
-    last_packet: BbrPacket,
-}
-
 /// Experimental! Use at your own risk.
 ///
 /// Aims for reduced buffer bloat and improved performance over high bandwidth-delay product
@@ -286,14 +203,15 @@ pub struct Bbr3 {
     /// equivalent to C.InitialCwnd: The initial congestion window set by the transport protocol
     /// implementation for the connection at initialization time.
     initial_cwnd: u64,
-    /// equivalent to C.delivered: The total amount of data delivered so far over the lifetime of
-    /// the transport connection C. This MUST NOT include pure ACK packets. It SHOULD include
-    /// spurious retransmissions that have been acknowledged as delivered.
-    delivered: u64,
+    /// equivalent to the C rate-sampling fields: C.delivered, C.delivered_time,
+    /// C.first_send_time, C.app_limited, and C.lost.
+    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-4.1.1>
+    rate: Sampler,
     /// equivalent to C.inflight: The connection's best estimate of the number of bytes outstanding
     /// in the network. This includes the number of bytes that have been sent and have not been
     /// acknowledged or marked as lost since their last transmission (e.g. "pipe" from RFC6675
-    /// or "bytes_in_flight" from RFC9002). This MUST NOT include pure ACK packets.
+    /// or "bytes_in_flight" from RFC9002). This MUST NOT include pure ACK packets. The transport
+    /// reports it with every send, ACK, and loss.
     inflight: u64,
     /// equivalent to C.is_cwnd_limited: True if the connection has fully utilized C.cwnd at any
     /// point in the last packet-timed round trip. Transport-provided (via `on_cwnd_limited`);
@@ -312,6 +230,8 @@ pub struct Bbr3 {
     /// equivalent to C.pacing_rate: The current pacing rate for a BBR flow, which controls
     /// inter-packet spacing.
     pacing_rate: f64,
+    /// Releases packets at `pacing_rate`, in bursts sized from it.
+    pacer: Pacer,
     /// equivalent to C.send_quantum: The maximum size of a data aggregate scheduled and
     /// transmitted together as a unit, e.g., to amortize per-packet transmission overheads.
     send_quantum: u64,
@@ -508,34 +428,12 @@ pub struct Bbr3 {
     /// beside a loss-based flow, skipping would hold BBR.min_rtt below the queue that flow keeps
     /// and yield to it. Persistent loss thus never postpones ProbeRTT.
     probe_rtt_skip_congested: bool,
-    /// equivalent to C.delivered_time: The wall clock time when C.delivered was last updated. <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-4.1.1.2.1>
-    delivered_time: Option<Instant>,
-    /// equivalent to C.first_send_time: If packets are in flight, then this holds the send time of
-    /// the packet that was most recently marked as delivered. Else, if the connection was
-    /// recently idle, then this holds the send time of most recently sent packet.
-    first_send_time: Option<Instant>,
-    /// equivalent to C.app_limited: marks the application-limited phase, or 0 if the connection is
-    /// not currently application-limited. A byte index into the delivery stream, so a packet sent
-    /// after the marker was taken is recognisable by its `P.delivered` exceeding it.
-    app_limited: u64,
-    /// equivalent to C.lost: the number of bytes that have been lost during the lifetime of this
-    /// connection
-    lost: u64,
-    /// Delivery snapshots indexed by packet number within each independent QUIC space.
-    packets: Packets,
-    /// equivalent to RS: Per-ACK Rate Sample State <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-2.3>
-    rs: Option<BbrRateSample>,
-    /// equivalent to RS.has_data: true once the ACK being processed has delivered a tracked
-    /// packet, so `rs` describes this ACK and is folded into the model when the ACK ends.
-    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-4.1.2.3-2>
-    rs_has_data: bool,
-    /// The last ACK's own rate sample, if it delivered a tracked packet. A CE event is reported
-    /// after its ACK ends, when `rs` may still hold an earlier ACK's sample.
-    ack_rs: Option<BbrRateSample>,
-    /// equivalent to RS.newly_acked, accumulated over the ACK being processed. It is passed to
-    /// the ACK's model steps rather than kept in `rs`, so no later `set_cwnd` counts it again.
-    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-2.3-4>
-    newly_acked: u64,
+    /// equivalent to RS: Per-ACK Rate Sample State, from the last ACK that delivered a packet
+    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-2.3>
+    rs: Option<Sample>,
+    /// The last ACK's own rate sample, if it delivered a packet. A CE event is reported after
+    /// its ACK ends, when `rs` may still hold an earlier ACK's sample.
+    ack_rs: Option<Sample>,
     /// equivalent to BBR.rounds_since_bw_probe: rounds since last bw probe state.
     rounds_since_bw_probe: u64,
     /// equivalent to BBR.bw_probe_wait: random wait time before entering probing state again
@@ -573,11 +471,6 @@ pub struct Bbr3 {
     /// but names no variable for the count. Reset at each loss-round boundary.
     /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.1.3>
     loss_events_in_round: u64,
-    /// `(space, packet number)` of the most recent packet counted into
-    /// `loss_events_in_round`, used to collapse a contiguous run of lost packet numbers into
-    /// the single "discontiguous sequence range" the spec counts. Cleared at each loss-round
-    /// boundary so the first loss of a round always opens a new range.
-    last_lost_packet: Option<(SpaceId, u64)>,
     /// The time when loss was first detected, causing the connection to enter fast recovery. A
     /// congestion event for a packet sent after this time starts a new recovery episode, while
     /// losses of packets sent at or before it belong to the episode already underway.
@@ -635,7 +528,7 @@ impl Bbr3 {
     }
 
     /// equivalent to BBROnInit <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.2.1>
-    fn new(config: Arc<Bbr3Config>, current_mtu: u16) -> Self {
+    fn new(config: Arc<Bbr3Config>, init: Init) -> Self {
         let probe_rng: Pcg32;
         if let Some(probe_seed) = config.probe_rng_seed {
             probe_rng = Pcg32::from_seed(probe_seed);
@@ -643,7 +536,7 @@ impl Bbr3 {
             probe_rng = Pcg32::from_rng(&mut rand::rng());
         }
         let smss = Ord::min(
-            Ord::max(MIN_MAX_DATAGRAM_SIZE, current_mtu) as u64,
+            Ord::max(MIN_MAX_DATAGRAM_SIZE, init.mtu) as u64,
             MAX_DATAGRAM_SIZE,
         );
         let initial_cwnd = config.initial_window;
@@ -670,13 +563,20 @@ impl Bbr3 {
         Self {
             smss,
             initial_cwnd,
-            delivered: 0,
+            rate: Sampler::default(),
             inflight: 0,
             is_cwnd_limited: false,
             cwnd_limited_this_round: false,
             cycle_count: 0,
             cwnd: initial_cwnd,
             pacing_rate,
+            pacer: Pacer::new(
+                init.rtt,
+                initial_cwnd,
+                init.mtu,
+                init.max_pacing_rate,
+                init.now,
+            ),
             send_quantum: 2 * smss, /* we start high, but it will be adjusted in set_send_quantum <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.6.3> */
             pacing_gain: startup_pacing_gain,
             startup_pacing_gain,
@@ -730,15 +630,8 @@ impl Bbr3 {
             probe_rtt_expired: false,
             probe_rtt_skip_app_limited: false,
             probe_rtt_skip_congested: false,
-            delivered_time: None,
-            first_send_time: None,
-            app_limited: 0,
-            lost: 0,
             rs: None,
-            rs_has_data: false,
             ack_rs: None,
-            newly_acked: 0,
-            packets: Default::default(),
             rounds_since_bw_probe: 0,
             bw_probe_wait: Duration::ZERO,
             bw_probe_fill: false,
@@ -750,7 +643,6 @@ impl Bbr3 {
             ack_phase: AckPhase::Init,
             bw_probe_samples: false,
             loss_events_in_round: 0,
-            last_lost_packet: None,
             recovery_start_time: None,
             recovery_start_round: 0,
             in_recovery: false,
@@ -773,9 +665,11 @@ impl Bbr3 {
     }
 
     /// equivalent to BBRUpdateModelAndState <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.2.3>
-    fn update_model_and_state(&mut self, p: BbrPacket, newly_acked: u64, now: Instant) {
+    ///
+    /// `prior_delivered` is P.delivered of the packet the ACK's sample came from.
+    fn update_model_and_state(&mut self, prior_delivered: u64, newly_acked: u64, now: Instant) {
         self.update_latest_delivery_signals();
-        self.update_congestion_signals(p);
+        self.update_congestion_signals(prior_delivered);
         self.update_ack_aggregation(newly_acked, now);
         self.check_full_bw_reached();
         self.check_startup_done();
@@ -798,15 +692,15 @@ impl Bbr3 {
             self.inflight_latest = Ord::max(self.inflight_latest, rate_sample.delivered);
 
             if rate_sample.prior_delivered >= self.loss_round_delivered {
-                self.loss_round_delivered = self.delivered;
+                self.loss_round_delivered = self.rate.delivered();
                 self.loss_round_start = true;
             }
         }
     }
 
     /// equivalent to BBRUpdateCongestionSignals <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.10.3>
-    fn update_congestion_signals(&mut self, p: BbrPacket) {
-        self.update_max_bw(p);
+    fn update_congestion_signals(&mut self, prior_delivered: u64) {
+        self.update_max_bw(prior_delivered);
         if !self.loss_round_start {
             return;
         }
@@ -816,8 +710,8 @@ impl Bbr3 {
     }
 
     /// equivalent to BBRUpdateMaxBw <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.5>
-    fn update_max_bw(&mut self, p: BbrPacket) {
-        self.update_round(p);
+    fn update_max_bw(&mut self, prior_delivered: u64) {
+        self.update_round(prior_delivered);
         if let Some(rate_sample) = self.rs
             && rate_sample.delivery_rate > 0.0
             && (rate_sample.delivery_rate >= self.max_bw || !rate_sample.is_app_limited)
@@ -830,8 +724,8 @@ impl Bbr3 {
     }
 
     /// equivalent to BBRUpdateRound <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.1>
-    fn update_round(&mut self, packet: BbrPacket) {
-        if packet.delivered >= self.next_round_delivered {
+    fn update_round(&mut self, prior_delivered: u64) {
+        if prior_delivered >= self.next_round_delivered {
             self.start_round();
             // Snapshot the just-ended round's cwnd-limited status for this round's decisions, then
             // reset the accumulator for the new round.
@@ -970,7 +864,6 @@ impl Bbr3 {
 
         if self.loss_round_start {
             self.loss_events_in_round = 0;
-            self.last_lost_packet = None;
         }
     }
 
@@ -1323,7 +1216,7 @@ impl Bbr3 {
     fn handle_probe_rtt(&mut self, now: Instant) {
         // Packets sent at the reduced ProbeRTT window do not measure the path's capacity, whether
         // or not inflight fills that window, so this skips the starvation check's cwnd guard.
-        self.app_limited = Ord::max(self.delivered + self.inflight, 1);
+        self.rate.mark_app_limited(self.inflight);
         if self.probe_rtt_done_stamp.is_none() && self.inflight <= self.probe_rtt_cwnd() {
             self.probe_rtt_done_stamp =
                 Some(now.checked_add(self.probe_rtt_duration).unwrap_or(now));
@@ -1407,7 +1300,7 @@ impl Bbr3 {
 
     /// equivalent to BBRHandleRestartFromIdle <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.4.1>
     fn handle_restart_from_idle(&mut self, now: Instant) {
-        if self.inflight == 0 && self.app_limited != 0 {
+        if self.inflight == 0 && self.rate.is_app_limited() {
             self.idle_restart = true;
             self.extra_acked_interval_start = Some(now);
             match self.state {
@@ -1477,7 +1370,7 @@ impl Bbr3 {
         self.update_max_inflight();
         if self.full_bw_reached {
             self.cwnd = Ord::min(self.cwnd + newly_acked, self.max_inflight);
-        } else if self.cwnd < self.max_inflight || self.delivered < self.initial_cwnd {
+        } else if self.cwnd < self.max_inflight || self.rate.delivered() < self.initial_cwnd {
             self.cwnd += newly_acked;
         }
         self.cwnd = Ord::max(self.cwnd, self.min_pipe_cwnd);
@@ -1600,9 +1493,8 @@ impl Bbr3 {
     /// equivalent to BBRInitPacingRate once an RTT is measured, as Linux BBR's
     /// `bbr_init_pacing_rate_from_rtt`. <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.6.2-6>
     ///
-    /// BBR's own first RTT sample stands in for SRTT: the transport updates its estimator only
-    /// after the ACK callbacks, and before that the estimator holds just the configured initial
-    /// RTT. A zero RTT is floored at 1us, as Linux does.
+    /// BBR's own first RTT sample stands in for SRTT, which before an ACK holds just the
+    /// configured initial RTT. A zero RTT is floored at 1us, as Linux does.
     fn init_pacing_rate_from_rtt(&mut self) {
         self.has_seen_rtt = true;
         let rtt = Ord::max(self.min_rtt, Duration::from_micros(1));
@@ -1618,51 +1510,19 @@ impl Bbr3 {
         self.send_quantum = quantum;
     }
 
-    /// equivalent to IsNewestPacket <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-4.1.2.3>
-    ///
-    /// The `P.packet_id > RS.last_acked_packet_id` tie-break only orders two packets of the same
-    /// space, since every space numbers independently from zero.
-    fn is_newest_packet(&self, send_time: Instant, space: SpaceId, end_seq: u64) -> bool {
-        if let Some(first_send_time) = self.first_send_time {
-            if send_time > first_send_time {
-                return true;
-            }
-            if send_time == first_send_time
-                && let Some(rate_sample) = self.rs
-                && rate_sample.last_packet.space == space
-                && end_seq > rate_sample.last_end_seq
-            {
-                return true;
-            }
-        }
-        false
-    }
-
     /// equivalent to BBRHandleLostPacket <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.10.2>
-    fn process_lost_packet(&mut self, p: BbrPacket, now: Instant) {
-        self.enter_recovery(now, p.send_time);
-        self.note_loss(p.space, p.packet_number);
+    fn process_lost_packet(&mut self, lost: &Lost, now: Instant) {
+        self.rate.on_lost(lost.bytes);
+        self.enter_recovery(now, lost.sent);
+        self.note_loss(lost.new_burst);
         if !self.bw_probe_samples {
             return;
         }
         // Loss has no delivery-rate observation. Only its own flight and app-limit labels
         // participate in the congestion check; the ACK sample stays untouched.
-        let mut rate_sample = BbrRateSample {
-            delivery_rate: 0.0,
-            is_app_limited: p.is_app_limited,
-            interval: Duration::ZERO,
-            delivered: 0,
-            prior_delivered: p.delivered,
-            send_elapsed: Duration::ZERO,
-            ack_elapsed: Duration::ZERO,
-            rtt: Duration::ZERO,
-            tx_in_flight: p.tx_in_flight,
-            lost: self.lost.saturating_sub(p.lost),
-            last_end_seq: p.packet_number,
-            last_packet: p,
-        };
+        let mut rate_sample = Sample::lost(lost.packet, self.rate.lost_since(lost.packet));
         if Self::inflight_too_high(rate_sample) {
-            rate_sample.tx_in_flight = Self::inflight_at_loss(rate_sample, p.size as u64);
+            rate_sample.tx_in_flight = Self::inflight_at_loss(rate_sample, lost.bytes.into());
             self.handle_inflight_too_high(now, Some(rate_sample));
         }
     }
@@ -1670,27 +1530,22 @@ impl Bbr3 {
     /// equivalent to BBRNoteLoss <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.10.2>
     ///
     /// `loss_events_in_round` counts discontiguous lost sequence ranges, not lost packets, so a
-    /// contiguous burst of packet numbers is one event. Losses are reported in ascending packet
-    /// number order within a packet number space, so a range ends wherever the next lost packet
-    /// number is not the successor of the previous one.
+    /// run of consecutive lost packets is one event. The transport marks where a run starts, and
+    /// the first loss of a round always opens a new range.
     /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.3.1.3>
-    fn note_loss(&mut self, space: SpaceId, packet_number: u64) {
+    fn note_loss(&mut self, new_burst: bool) {
         self.start_congestion_round();
         self.loss_in_round = true;
-        let continues_range = self
-            .last_lost_packet
-            .is_some_and(|(s, pn)| s == space && packet_number == pn.saturating_add(1));
-        if !continues_range {
+        if new_burst || self.loss_events_in_round == 0 {
             self.loss_events_in_round = self.loss_events_in_round.saturating_add(1);
         }
-        self.last_lost_packet = Some((space, packet_number));
     }
 
     /// Opens the loss round on its first congestion signal, loss or CE, as draft-06's NoteLoss
     /// does for loss, and denies a skip of the next ProbeRTT.
     fn start_congestion_round(&mut self) {
         if !self.loss_in_round && !self.ce_in_round {
-            self.loss_round_delivered = self.delivered;
+            self.loss_round_delivered = self.rate.delivered();
         }
         self.probe_rtt_skip_congested = true;
     }
@@ -1756,13 +1611,13 @@ impl Bbr3 {
         self.rs.is_some_and(Self::inflight_too_high)
     }
 
-    fn inflight_too_high(rate_sample: BbrRateSample) -> bool {
+    fn inflight_too_high(rate_sample: Sample) -> bool {
         rate_sample.lost as f64 > rate_sample.tx_in_flight as f64 * LOSS_THRESH
     }
 
     /// equivalent to BBRInflightAtLoss <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.10.2>
     /// We check at what prefix of packet did losses exceed `loss_thresh`
-    fn inflight_at_loss(rate_sample: BbrRateSample, packet_size: u64) -> u64 {
+    fn inflight_at_loss(rate_sample: Sample, packet_size: u64) -> u64 {
         let inflight_prev = rate_sample.tx_in_flight.saturating_sub(packet_size) as f64;
         let lost_prev = rate_sample.lost.saturating_sub(packet_size) as f64;
         let lost_prefix = (LOSS_THRESH * inflight_prev - lost_prev) / (1.0 - LOSS_THRESH);
@@ -1772,7 +1627,7 @@ impl Bbr3 {
     /// equivalent to BBRHandleInflightTooHigh <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.10.2>
     ///
     /// `rs` is the sample that showed it, if any.
-    fn handle_inflight_too_high(&mut self, now: Instant, rs: Option<BbrRateSample>) {
+    fn handle_inflight_too_high(&mut self, now: Instant, rs: Option<Sample>) {
         self.bw_probe_samples = false;
         if let Some(rate_sample) = rs
             && !rate_sample.is_app_limited
@@ -1834,7 +1689,7 @@ impl Bbr3 {
 
     /// equivalent to BBRStartRound <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.1>
     fn start_round(&mut self) {
-        self.next_round_delivered = self.delivered;
+        self.next_round_delivered = self.rate.delivered();
     }
 
     /// The inflight an application-limited sender may fill with redundant data, so the probe's
@@ -1874,29 +1729,13 @@ impl Controller for Bbr3 {
     /// the packet's delivery snapshot.
     /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.2.2>
     /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-4.1.2.2-4>
-    fn on_packet_sent(&mut self, now: Instant, bytes: u16, packet_number: u64, space: SpaceId) {
-        self.handle_restart_from_idle(now);
-        if self.inflight == 0 {
-            self.first_send_time = Some(now);
-            self.delivered_time = Some(now);
-        }
-        let added_bytes = bytes as u64;
-        self.inflight += added_bytes;
-        self.packets.insert(BbrPacket {
-            delivered: self.delivered,
-            delivered_time: self.delivered_time.unwrap_or(now),
-            first_send_time: self.first_send_time.unwrap_or(now),
-            send_time: now,
-            is_app_limited: self.app_limited != 0,
-            tx_in_flight: self.inflight,
-            packet_number,
-            space,
-            size: bytes,
-            lost: self.lost,
-            acknowledged: false,
-            stale: false,
-            round_count: self.round_count,
-        });
+    fn on_sent(&mut self, sent: Sent) -> Packet {
+        // The restart check reads C.inflight from before this packet.
+        self.inflight = sent.in_flight.saturating_sub(sent.bytes.into());
+        self.handle_restart_from_idle(sent.now);
+        self.inflight = sent.in_flight;
+        self.pacer.on_transmit(sent.bytes);
+        self.rate.on_sent(sent)
     }
 
     /// Feeds C.is_cwnd_limited, which the transport provides.
@@ -1912,149 +1751,63 @@ impl Controller for Bbr3 {
         if in_flight >= self.cwnd {
             return;
         }
-        self.app_limited = Ord::max(self.delivered + in_flight, 1);
+        self.rate.mark_app_limited(in_flight);
         self.probe_rtt_skip_app_limited = true;
     }
 
-    /// equivalent to UpdateRateSample <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-4.1.2.3>
-    ///
-    /// Only records this ACK's newest packet; the model waits for `on_end_acks`, once the ACK's
-    /// delivered bytes, interval, and inflight are all known.
-    fn on_ack(
-        &mut self,
-        now: Instant,
-        sent: Instant,
-        bytes: u64,
-        packet_number: u64,
-        space: SpaceId,
-        _app_limited: bool,
-        _rtt: &RttEstimator,
-    ) {
-        self.check_recovery_done(sent);
-        self.delivered += bytes;
-        self.delivered_time = Some(now);
-        self.newly_acked += bytes;
-        let Some(p) = self.packets.acknowledge(space, packet_number) else {
-            return;
-        };
-        // The first packet of each ACK starts its sample even if older than the last ACK's newest,
-        // so a reordered ACK never inherits the previous ACK's labels.
-        if self.rs_has_data && !self.is_newest_packet(sent, space, packet_number) {
-            return;
-        }
-        self.rs_has_data = true;
-        self.first_send_time = Some(p.send_time);
-        self.rs = Some(BbrRateSample {
-            delivery_rate: 0.0,
-            is_app_limited: p.is_app_limited,
-            interval: Duration::ZERO,
-            delivered: 0,
-            prior_delivered: p.delivered,
-            send_elapsed: p.send_time - p.first_send_time,
-            ack_elapsed: now - p.delivered_time,
-            rtt: now - p.send_time,
-            tx_in_flight: p.tx_in_flight,
-            lost: self.lost.saturating_sub(p.lost),
-            last_end_seq: packet_number,
-            last_packet: p,
-        });
-    }
-
-    /// equivalent to GenerateRateSample, BBRUpdateModelAndState, and BBRUpdateControlParameters
+    /// equivalent to UpdateRateSample, GenerateRateSample, BBRUpdateModelAndState, and
+    /// BBRUpdateControlParameters
     /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.2.3>
-    fn on_end_acks(
-        &mut self,
-        now: Instant,
-        in_flight: u64,
-        app_limited: bool,
-        largest_packet_num_acked: Option<u64>,
-        _space: SpaceId,
-    ) {
-        self.inflight = in_flight;
-        if largest_packet_num_acked.is_some() {
-            if self.app_limited != 0 && self.delivered > self.app_limited {
-                self.app_limited = 0;
-            } else if app_limited {
-                self.app_limited = Ord::max(self.delivered + self.inflight, 1);
-                self.probe_rtt_skip_app_limited = true;
-            }
-            self.packets.cleanup(self.round_count);
+    fn on_ack(&mut self, ack: Ack<'_>) {
+        // equivalent to RS.newly_acked. It is passed to the ACK's model steps rather than kept in
+        // `rs`, so no later `set_cwnd` counts it again.
+        let mut newly_acked = 0;
+        for acked in ack.packets {
+            self.check_recovery_done(acked.sent);
+            newly_acked += u64::from(acked.bytes);
         }
-        let newly_acked = std::mem::take(&mut self.newly_acked);
-        // An ACK that delivered no tracked packet has no sample, and a finished one is never
-        // folded twice.
-        self.ack_rs = None;
-        if !std::mem::take(&mut self.rs_has_data) {
-            return;
+        self.inflight = ack.in_flight;
+        // An ACK that delivered no packet has no sample, and a finished one is never folded
+        // twice.
+        self.ack_rs = self.rate.on_ack(&ack, self.min_rtt);
+        // The sampler marks C.app_limited from the transport's report, which a skip needs
+        if ack.app_limited && self.rate.is_app_limited() {
+            self.probe_rtt_skip_app_limited = true;
         }
-        let Some(mut rs) = self.rs else {
+        let Some(rs) = self.ack_rs else {
             return;
         };
-        rs.interval = Ord::max(rs.send_elapsed, rs.ack_elapsed);
-        rs.delivered = self.delivered.saturating_sub(rs.prior_delivered);
-        // An interval shorter than the min RTT is not a reliable rate, so the sample carries no
-        // bandwidth, but it still advances rounds and the state machine as in the draft's
-        // UpdateOnACK. The min RTT includes this ACK's own sample, as the transport's does in the
-        // draft, so an ACK that lowers the RTT still measures a rate.
-        // <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-4.1.2.4>
-        let reliable = rs.interval >= Ord::min(self.min_rtt, rs.rtt);
-        if reliable && rs.interval != Duration::ZERO {
-            rs.delivery_rate = rs.delivered as f64 / rs.interval.as_secs_f64();
-        }
         self.rs = Some(rs);
-        self.ack_rs = Some(rs);
-        self.update_model_and_state(rs.last_packet, newly_acked, now);
+        self.update_model_and_state(rs.prior_delivered, newly_acked, ack.now);
         self.update_control_parameters(newly_acked);
     }
 
-    /// The draft specifies no ECN response of its own, but CE marks MUST be treated as
-    /// congestion; `handle_ce` responds to them. Persistent congestion collapses the window to the
-    /// minimum, here BBR.MinPipeCwnd.
-    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-3.7>
+    /// equivalent to the per-loss steps, which call BBRHandleLostPacket. Persistent congestion
+    /// collapses the window to the minimum, here BBR.MinPipeCwnd.
+    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.2.4>
     /// <https://datatracker.ietf.org/doc/html/rfc9002#section-7.6.2>
-    fn on_congestion_event(
-        &mut self,
-        now: Instant,
-        sent: Instant,
-        is_persistent_congestion: bool,
-        is_ecn: bool,
-        _lost_bytes: u64,
-        _largest_lost: u64,
-        _space: SpaceId,
-    ) {
-        // Loss is handled per packet in on_packet_lost, so only CE is handled here.
-        if is_ecn {
-            self.handle_ce(now, sent);
+    fn on_loss(&mut self, loss: Loss<'_>) {
+        // C.inflight excludes lost bytes, and the next ACK may come after the next send.
+        self.inflight = loss.in_flight;
+        for lost in loss.packets {
+            self.process_lost_packet(lost, loss.now);
         }
-        if is_persistent_congestion {
+        if loss.persistent {
             self.cwnd = self.min_pipe_cwnd;
         }
     }
 
-    /// equivalent to the per-loss steps, which call BBRHandleLostPacket
-    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.2.4>
-    fn on_packet_lost(
-        &mut self,
-        lost_bytes: u16,
-        packet_number: u64,
-        space: SpaceId,
-        now: Instant,
-    ) {
-        let lost_bytes_64 = lost_bytes as u64;
-        self.lost += lost_bytes_64;
-        // C.inflight excludes lost bytes, and the next ACK may come after the next send. Saturate
-        // because the transport also reports losses of packets this count may not include, such
-        // as padded ones that were not ack-eliciting.
-        self.inflight = self.inflight.saturating_sub(lost_bytes_64);
-        if let Some(packet) = self.packets.remove(space, packet_number) {
-            self.process_lost_packet(packet, now);
-        }
+    /// The draft specifies no ECN response of its own, but CE marks MUST be treated as
+    /// congestion; `handle_ce` responds to them.
+    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-3.7>
+    fn on_ce(&mut self, ce: Ce) {
+        self.handle_ce(ce.now, ce.sent);
     }
 
     /// equivalent to BBRHandleSpuriousLossDetection: <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.11.2>
     ///
     /// CE marks in the episode confirm its congestion, so nothing is undone.
-    fn on_spurious_congestion_event(&mut self) {
+    fn on_spurious_loss(&mut self) {
         if self.ce_in_recovery {
             return;
         }
@@ -2117,13 +1870,28 @@ impl Controller for Bbr3 {
         self.cwnd
     }
 
+    /// Paces at C.pacing_rate. <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.6.2>
+    fn pace(&mut self, now: Instant, bytes: u64) -> Option<Instant> {
+        let rate = Rate {
+            window: self.cwnd,
+            pacing_rate: Some(self.pacing_rate.round() as u64),
+        };
+        // A pacing rate makes the RTT irrelevant; the MTU only sizes the bursts.
+        self.pacer
+            .delay(Duration::ZERO, bytes, self.smss as u16, now, rate)
+    }
+
+    /// equivalent to C.send_quantum <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.6.3>
+    fn burst(&self) -> Option<u64> {
+        Some(self.send_quantum)
+    }
+
     fn metrics(&self) -> ControllerMetrics {
         ControllerMetrics {
             congestion_window: self.window(),
             ssthresh: None,
             pacing_rate: Some(self.pacing_rate.round() as u64),
             bandwidth_estimate: (self.max_bw > 0.0).then_some(self.max_bw.round() as u64),
-            send_quantum: Some(self.send_quantum),
             probe_inflight: self.probe_inflight(),
         }
     }
@@ -2134,10 +1902,6 @@ impl Controller for Bbr3 {
 
     fn clone_box(&self) -> Box<dyn Controller> {
         Box::new(self.clone())
-    }
-
-    fn initial_window(&self) -> u64 {
-        self.initial_cwnd
     }
 
     fn into_any(self: Box<Self>) -> Box<dyn Any> {
@@ -2206,16 +1970,119 @@ impl Default for Bbr3Config {
 }
 
 impl ControllerFactory for Bbr3Config {
-    fn build(self: Arc<Self>, _now: Instant, current_mtu: u16) -> Box<dyn Controller> {
-        Box::new(Bbr3::new(self, current_mtu))
+    fn build(self: Arc<Self>, init: Init) -> Box<dyn Controller> {
+        Box::new(Bbr3::new(self, init))
     }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::Acked;
     use std::cell::Cell;
-    use std::ops::ControlFlow;
+    use std::collections::BTreeMap;
+    use std::ops::{ControlFlow, Deref, DerefMut};
+
+    /// Drives a [`Bbr3`] as a transport does, storing each sent packet's state by packet number,
+    /// so tests name packets by number.
+    #[derive(Debug, Clone)]
+    struct Driver {
+        bbr: Bbr3,
+        /// The packets in flight, by number.
+        sent: BTreeMap<u64, Acked>,
+        /// The packets the ACK being built acknowledges.
+        acked: Vec<Acked>,
+        /// The most recently lost packet number.
+        last_lost: Option<u64>,
+    }
+
+    impl Driver {
+        fn new(config: Arc<Bbr3Config>, mtu: u16) -> Self {
+            let init = Init {
+                now: Instant::now(),
+                mtu,
+                rtt: Duration::from_millis(333),
+                max_pacing_rate: None,
+            };
+            Self {
+                bbr: Bbr3::new(config, init),
+                sent: BTreeMap::new(),
+                acked: Vec::new(),
+                last_lost: None,
+            }
+        }
+
+        /// Send packet `pn`, counting it in flight on top of what BBR last heard.
+        fn send(&mut self, now: Instant, bytes: u16, pn: u64) {
+            let packet = self.bbr.on_sent(Sent {
+                now,
+                bytes,
+                in_flight: self.bbr.inflight + u64::from(bytes),
+            });
+            let acked = Acked {
+                sent: now,
+                bytes,
+                packet,
+            };
+            assert!(self.sent.insert(pn, acked).is_none(), "{pn} sent twice");
+        }
+
+        /// Add packet `pn` to the ACK being built; a number not in flight is ignored.
+        fn ack(&mut self, now: Instant, sent: Instant, bytes: u64, pn: u64) {
+            let _ = now;
+            if let Some(acked) = self.sent.remove(&pn) {
+                self.acked.push(Acked {
+                    sent,
+                    bytes: bytes as u16,
+                    packet: acked.packet,
+                });
+            }
+        }
+
+        /// Deliver the ACK built since the last one.
+        fn end_acks(&mut self, now: Instant, in_flight: u64, app_limited: bool) {
+            let packets = std::mem::take(&mut self.acked);
+            self.bbr.on_ack(Ack {
+                now,
+                packets: &packets,
+                in_flight,
+                app_limited,
+                rtt: Duration::from_millis(10),
+            });
+        }
+
+        /// Declare packet `pn` lost on its own.
+        fn lose(&mut self, bytes: u16, pn: u64, now: Instant) {
+            let acked = self.sent.remove(&pn).expect("lost packet in flight");
+            let lost = Lost {
+                sent: acked.sent,
+                bytes,
+                packet: acked.packet,
+                new_burst: self.last_lost != pn.checked_sub(1),
+            };
+            self.last_lost = Some(pn);
+            self.bbr.on_loss(Loss {
+                now,
+                packets: &[lost],
+                in_flight: self.bbr.inflight.saturating_sub(bytes.into()),
+                persistent: false,
+            });
+        }
+    }
+
+    impl Deref for Driver {
+        type Target = Bbr3;
+
+        fn deref(&self) -> &Bbr3 {
+            &self.bbr
+        }
+    }
+
+    impl DerefMut for Driver {
+        fn deref_mut(&mut self) -> &mut Bbr3 {
+            &mut self.bbr
+        }
+    }
 
     /// PROBE_UP model taken before a (possibly spurious) loss:
     /// (state, bw_shortterm, inflight_shortterm, inflight_longterm).
@@ -2235,7 +2102,7 @@ mod test {
     }
 
     /// Single-bottleneck FIFO link simulator driving the real BBR
-    /// `on_packet_sent`/`on_ack`/`on_end_acks` path against a constant bandwidth
+    /// `on_sent`/`on_ack` path against a constant bandwidth
     /// `bw`, constant propagation `rtt_ns`, and an infinite buffer (no loss).
     /// Packets queue at the bottleneck and are served at `bw`, and are marked CE
     /// past `ce_above_ns` of queueing delay if set. The sender always
@@ -2244,9 +2111,8 @@ mod test {
     /// (A.1/A.3/A.5/A.8/A.9/A.10); tests needing loss, app-limiting, a mid-flight
     /// bandwidth change, idle periods, or ACK aggregation use their own loops.
     struct Sim {
-        bbr: Bbr3,
+        bbr: Driver,
         base: Instant,
-        rtt_est: RttEstimator,
         flight: VecDeque<SimPacket>,
         now_ns: u64,
         next_send_ns: u64,
@@ -2269,9 +2135,8 @@ mod test {
     impl Sim {
         fn new(config: Bbr3Config, mss: u64, bw: f64, rtt_ns: u64) -> Self {
             Self {
-                bbr: Bbr3::new(Arc::new(config), mss as u16),
+                bbr: Driver::new(Arc::new(config), mss as u16),
                 base: Instant::now(),
-                rtt_est: RttEstimator::new(Duration::from_nanos(rtt_ns)),
                 flight: VecDeque::new(),
                 now_ns: 0,
                 next_send_ns: 0,
@@ -2297,8 +2162,7 @@ mod test {
         fn send(&mut self, now_ns: u64, count: u64) {
             for _ in 0..count {
                 let now = self.at(now_ns);
-                self.bbr
-                    .on_packet_sent(now, self.mss as u16, self.pn, SpaceId::Data);
+                self.bbr.send(now, self.mss as u16, self.pn);
                 self.inflight += self.mss;
                 self.flight.push_back(SimPacket {
                     pn: self.pn,
@@ -2311,7 +2175,7 @@ mod test {
         }
 
         /// Deliver one ACK frame at `now_ns` covering `pns`, as the transport does: one `on_ack`
-        /// per packet, then `on_end_acks` with the post-ACK inflight.
+        /// carrying every packet and the post-ACK inflight.
         fn ack(&mut self, now_ns: u64, pns: impl IntoIterator<Item = u64>, app_limited: bool) {
             let now = self.at(now_ns);
             for pn in pns {
@@ -2319,19 +2183,9 @@ mod test {
                 let p = self.flight.remove(i).unwrap();
                 self.inflight -= self.mss;
                 let sent = self.at(p.send_ns);
-                self.bbr.on_ack(
-                    now,
-                    sent,
-                    self.mss,
-                    pn,
-                    SpaceId::Data,
-                    app_limited,
-                    &self.rtt_est,
-                );
+                self.bbr.ack(now, sent, self.mss, pn);
             }
-            // The transport reports the largest packet ever acked; only its presence matters.
-            self.bbr
-                .on_end_acks(now, self.inflight, app_limited, Some(0), SpaceId::Data);
+            self.bbr.end_acks(now, self.inflight, app_limited);
         }
 
         /// Deliver one ACK frame as [`Self::ack`] does, whose ECN counts report new CE marks. The
@@ -2346,15 +2200,10 @@ mod test {
                 .unwrap()
                 .send_ns;
             self.ack(now_ns, pns, false);
-            self.bbr.on_congestion_event(
-                self.at(now_ns),
-                self.at(sent_ns),
-                false,
-                true,
-                0,
-                largest,
-                SpaceId::Data,
-            );
+            self.bbr.bbr.on_ce(Ce {
+                now: self.at(now_ns),
+                sent: self.at(sent_ns),
+            });
         }
 
         /// Send `count` packets at `now_ns` and acknowledge them in one ACK `rtt_ns` later: one
@@ -2382,21 +2231,20 @@ mod test {
             let i = self.flight.iter().position(|p| p.pn == pn).unwrap();
             self.flight.remove(i);
             self.inflight -= self.mss;
-            self.bbr
-                .on_packet_lost(self.mss as u16, pn, SpaceId::Data, self.at(now_ns));
+            self.bbr.lose(self.mss as u16, pn, self.at(now_ns));
         }
 
         /// Drive the send/ack loop for up to `max_iters` steps. On each step the
         /// sender sends if the window allows and a send is due no later than the
         /// next ack, otherwise it processes the next ack. `on_send` runs after each
-        /// send, `on_ack` after each `on_end_acks`; either returning
+        /// send, `on_ack` after each ACK; either returning
         /// `ControlFlow::Break` stops the loop. Panics if the window fills with
         /// nothing in flight, or if `max_iters` elapses without a break.
         fn run(
             &mut self,
             max_iters: u64,
-            mut on_send: impl FnMut(&mut Bbr3) -> ControlFlow<()>,
-            mut on_ack: impl FnMut(&mut Bbr3, u64, u64, u64) -> ControlFlow<()>,
+            mut on_send: impl FnMut(&mut Driver) -> ControlFlow<()>,
+            mut on_ack: impl FnMut(&mut Driver, u64, u64, u64) -> ControlFlow<()>,
         ) {
             for _ in 0..max_iters {
                 let can_send = self.inflight + self.mss <= self.bbr.window();
@@ -2422,11 +2270,10 @@ mod test {
                     self.max_queue_ns = self.max_queue_ns.max(queue_ns);
                     let ce = self.ce_above_ns.is_some_and(|limit| queue_ns > limit);
 
-                    self.bbr.on_packet_sent(
+                    self.bbr.send(
                         self.base + Duration::from_nanos(send_ns),
                         self.mss as u16,
                         self.pn,
-                        SpaceId::Data,
                     );
                     self.inflight += self.mss;
                     self.flight.push_back(SimPacket {
@@ -2449,28 +2296,14 @@ mod test {
                     self.inflight -= self.mss;
                     let now_at = self.base + Duration::from_nanos(self.now_ns);
                     let send_at = self.base + Duration::from_nanos(p.send_ns);
-                    self.bbr.on_ack(
-                        now_at,
-                        send_at,
-                        self.mss,
-                        p.pn,
-                        SpaceId::Data,
-                        false,
-                        &self.rtt_est,
-                    );
-                    self.bbr
-                        .on_end_acks(now_at, self.inflight, false, Some(p.pn), SpaceId::Data);
+                    self.bbr.ack(now_at, send_at, self.mss, p.pn);
+                    self.bbr.end_acks(now_at, self.inflight, false);
                     // Each ACK covers one packet, so a marked one raises the CE count.
                     if p.ce {
-                        self.bbr.on_congestion_event(
-                            now_at,
-                            send_at,
-                            false,
-                            true,
-                            0,
-                            p.pn,
-                            SpaceId::Data,
-                        );
+                        self.bbr.on_ce(Ce {
+                            now: now_at,
+                            sent: send_at,
+                        });
                     }
 
                     if on_ack(&mut self.bbr, self.now_ns, self.inflight, p.pn).is_break() {
@@ -2500,7 +2333,7 @@ mod test {
             pacing_margin_percent: None,
             default_cwnd_gain: None,
         };
-        let mut bbr3 = Bbr3::new(Arc::new(config), 2500);
+        let mut bbr3 = Driver::new(Arc::new(config), 2500);
         bbr3.pick_probe_wait();
         assert_eq!(bbr3.rounds_since_bw_probe, 1);
         assert_eq!(bbr3.bw_probe_wait, Duration::from_millis(2652));
@@ -2514,7 +2347,7 @@ mod test {
 
     /// A.1: Exiting STARTUP on a bandwidth plateau.
     /// equivalent to: <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#name-exiting-startup-on-bandwidt>
-    /// Drives a flow through the real `on_packet_sent`/`on_ack`/`on_end_acks`
+    /// Drives a flow through the real `on_sent`/`on_ack`
     /// path against a single-bottleneck simulator: constant bandwidth `BW`,
     /// constant propagation `RTT`, infinite buffer (no loss). Packets queue and
     /// are served at `BW`, so once the pipe fills the delivery-rate samples
@@ -2616,12 +2449,11 @@ mod test {
         let btl_service_ns: u64 = (MSS as f64 / BW * 1e9).round() as u64;
 
         // Drive the production default configuration.
-        let mut bbr = Bbr3::new(Arc::new(Bbr3Config::default()), MSS as u16);
+        let mut bbr = Driver::new(Arc::new(Bbr3Config::default()), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
         let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
-        let rtt_est = RttEstimator::new(Duration::from_nanos(RTT_NS));
 
         struct InFlight {
             pn: u64,
@@ -2669,7 +2501,7 @@ mod test {
                 let ack_ns = finish + RET_NS;
                 let lost = pn % LOSS_PERIOD == LOSS_PERIOD - 1;
 
-                bbr.on_packet_sent(at(send_ns), MSS as u16, pn, SpaceId::Data);
+                bbr.send(at(send_ns), MSS as u16, pn);
                 inflight += MSS;
                 flight.push_back(InFlight {
                     pn,
@@ -2677,26 +2509,18 @@ mod test {
                     ack_ns,
                     lost,
                 });
-                // Emulate MarkConnectionAppLimited. `on_end_acks` only stamps the marker
+                // Emulate MarkConnectionAppLimited. `on_ack` only stamps the marker
                 // when the caller reports app-limited, so drive it here as a genuinely
                 // app-limited quinn connection would.
-                bbr.app_limited = Ord::max(bbr.delivered + bbr.inflight, 1);
+                bbr.bbr.rate.mark_app_limited(bbr.bbr.inflight);
                 pn += 1;
             } else if let Some(p) = flight.pop_front() {
                 now_ns = now_ns.max(p.ack_ns);
                 inflight -= MSS;
                 if p.lost {
-                    bbr.on_packet_lost(MSS as u16, p.pn, SpaceId::Data, at(now_ns));
+                    bbr.lose(MSS as u16, p.pn, at(now_ns));
                 } else {
-                    bbr.on_ack(
-                        at(now_ns),
-                        at(p.send_ns),
-                        MSS,
-                        p.pn,
-                        SpaceId::Data,
-                        true,
-                        &rtt_est,
-                    );
+                    bbr.ack(at(now_ns), at(p.send_ns), MSS, p.pn);
                     if bbr.state == BbrState::Startup {
                         match bbr.rs.map(|rs| rs.is_app_limited) {
                             Some(true) => {
@@ -2711,9 +2535,9 @@ mod test {
                         }
                     }
                 }
-                // Sample before on_end_acks clears the rate sample's loss fields.
+                // Sample before the ACK replaces the rate sample's loss fields.
                 observed_high_loss |= bbr.is_inflight_too_high();
-                bbr.on_end_acks(at(now_ns), inflight, true, Some(p.pn), SpaceId::Data);
+                bbr.end_acks(at(now_ns), inflight, true);
                 if bbr.state == BbrState::Drain {
                     transition = Some((bbr.full_bw_count, bbr.full_bw_now, bbr.full_bw_reached));
                     break;
@@ -2811,7 +2635,7 @@ mod test {
                 // BBRInflight(1.0), the estimated BDP at unit gain that
                 // check_drain_done compares C.inflight against.
                 if matches!(bbr.state, BbrState::ProbeBw(_)) {
-                    let bdp = bbr.get_inflight(bbr.bw, 1.0);
+                    let bdp = bbr.bbr.get_inflight(bbr.bbr.bw, 1.0);
                     probe_bw_transition = Some((bbr.state, inflight, bdp, bbr.round_count));
                     return ControlFlow::Break(());
                 }
@@ -2884,12 +2708,11 @@ mod test {
         const DRAIN_BW_FACTOR: f64 = 0.8 * DRAIN_PACING_GAIN;
 
         // Drive the production default configuration.
-        let mut bbr = Bbr3::new(Arc::new(Bbr3Config::default()), MSS as u16);
+        let mut bbr = Driver::new(Arc::new(Bbr3Config::default()), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
         let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
-        let rtt_est = RttEstimator::new(Duration::from_nanos(RTT_NS));
 
         struct InFlight {
             pn: u64,
@@ -2934,7 +2757,7 @@ mod test {
                 btl_free_ns = finish;
                 let ack_ns = finish + RET_NS;
 
-                bbr.on_packet_sent(at(send_ns), MSS as u16, pn, SpaceId::Data);
+                bbr.send(at(send_ns), MSS as u16, pn);
                 inflight += MSS;
                 flight.push_back(InFlight {
                     pn,
@@ -2948,16 +2771,8 @@ mod test {
             } else if let Some(p) = flight.pop_front() {
                 now_ns = now_ns.max(p.ack_ns);
                 inflight -= MSS;
-                bbr.on_ack(
-                    at(now_ns),
-                    at(p.send_ns),
-                    MSS,
-                    p.pn,
-                    SpaceId::Data,
-                    false,
-                    &rtt_est,
-                );
-                bbr.on_end_acks(at(now_ns), inflight, false, Some(p.pn), SpaceId::Data);
+                bbr.ack(at(now_ns), at(p.send_ns), MSS, p.pn);
+                bbr.end_acks(at(now_ns), inflight, false);
 
                 // STARTUP -> DRAIN edge: cut the link (over-estimate), record round
                 if bbr.state == BbrState::Drain && drain_start_round.is_none() {
@@ -2982,13 +2797,13 @@ mod test {
 
                 // sample inflight vs BBRInflight(1.0) once per DRAIN round
                 if bbr.state == BbrState::Drain && last_sampled_round != Some(bbr.round_count) {
-                    let bdp = bbr.get_inflight(bbr.bw, 1.0);
+                    let bdp = bbr.bbr.get_inflight(bbr.bbr.bw, 1.0);
                     drain_round_samples.push((bbr.round_count, inflight, bdp));
                     last_sampled_round = Some(bbr.round_count);
                 }
 
                 if matches!(bbr.state, BbrState::ProbeBw(_)) {
-                    let bdp = bbr.get_inflight(bbr.bw, 1.0);
+                    let bdp = bbr.bbr.get_inflight(bbr.bbr.bw, 1.0);
                     probe_bw_transition = Some((bbr.state, inflight, bdp, bbr.round_count));
                     break;
                 }
@@ -3136,7 +2951,7 @@ mod test {
     fn loss_between_acks_preserves_ack_sample() {
         let mut sim = Sim::new(Bbr3Config::default(), 1200, 1_250_000.0, 100 * MS);
         sim.send(0, 10);
-        sim.bbr.app_limited = 1;
+        sim.bbr.rate.app_limited = 1;
         sim.send(MS, 1);
         sim.ack(100 * MS, [0], false);
         let ack = sim.bbr.rs.unwrap();
@@ -3148,12 +2963,13 @@ mod test {
         assert_eq!(after_loss.tx_in_flight, ack.tx_in_flight);
         assert_eq!(after_loss.lost, ack.lost);
         assert_eq!(after_loss.is_app_limited, ack.is_app_limited);
-        assert_eq!(after_loss.last_end_seq, ack.last_end_seq);
+        assert_eq!(after_loss.rtt, ack.rtt);
         sim.ack(102 * MS, [2], false);
         let next_ack = sim.bbr.rs.unwrap();
         assert_eq!(next_ack.tx_in_flight, 3 * sim.mss);
         assert_eq!(next_ack.lost, sim.mss);
-        assert_eq!(next_ack.last_end_seq, 2);
+        // Packet 2, sent at 0, samples the ACK.
+        assert_eq!(next_ack.rtt, Duration::from_millis(102));
     }
 
     /// A.6: Exiting PROBE_UP on loss when application-limited.
@@ -3214,12 +3030,11 @@ mod test {
         let btl_service_ns: u64 = (MSS as f64 / BW * 1e9).round() as u64;
 
         // Drive the production default configuration.
-        let mut bbr = Bbr3::new(Arc::new(Bbr3Config::default()), MSS as u16);
+        let mut bbr = Driver::new(Arc::new(Bbr3Config::default()), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
         let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
-        let rtt_est = RttEstimator::new(Duration::from_nanos(RTT_NS));
 
         struct InFlight {
             pn: u64,
@@ -3273,7 +3088,7 @@ mod test {
                 // free so the flow reaches PROBE_UP exactly as in A.5.
                 let lost = app_limited_phase && pn % LOSS_PERIOD == LOSS_PERIOD - 1;
 
-                bbr.on_packet_sent(at(send_ns), MSS as u16, pn, SpaceId::Data);
+                bbr.send(at(send_ns), MSS as u16, pn);
                 inflight += MSS;
                 flight.push_back(InFlight {
                     pn,
@@ -3285,7 +3100,7 @@ mod test {
                 if app_limited_phase {
                     // Emulate MarkConnectionAppLimited so the next packet is stamped
                     // app-limited at send time. Same shape as A.2.
-                    bbr.app_limited = Ord::max(bbr.delivered + bbr.inflight, 1);
+                    bbr.bbr.rate.mark_app_limited(bbr.bbr.inflight);
                 }
 
                 // pace the next send at BBR's chosen pacing rate
@@ -3297,13 +3112,13 @@ mod test {
                 inflight -= MSS;
                 if p.lost {
                     // Capture the loss-driven PROBE_UP -> PROBE_DOWN edge. The
-                    // transition happens inside on_packet_lost (via
+                    // transition happens inside on_loss (via
                     // handle_inflight_too_high), never on an ack, so any Up->Down
                     // move seen here is attributable to this loss.
                     let before_ilt = bbr.inflight_longterm;
                     let was_up = bbr.state == BbrState::ProbeBw(ProbeBwSubstate::Up);
-                    let lost = bbr.packets.clone().remove(SpaceId::Data, p.pn).unwrap();
-                    bbr.on_packet_lost(MSS as u16, p.pn, SpaceId::Data, at(now_ns));
+                    let lost = bbr.sent[&p.pn].packet;
+                    bbr.lose(MSS as u16, p.pn, at(now_ns));
                     if was_up && bbr.state == BbrState::ProbeBw(ProbeBwSubstate::Down) {
                         let app_lim = lost.is_app_limited;
                         go_down =
@@ -3311,22 +3126,8 @@ mod test {
                         break;
                     }
                 } else {
-                    bbr.on_ack(
-                        at(now_ns),
-                        at(p.send_ns),
-                        MSS,
-                        p.pn,
-                        SpaceId::Data,
-                        app_limited_phase,
-                        &rtt_est,
-                    );
-                    bbr.on_end_acks(
-                        at(now_ns),
-                        inflight,
-                        app_limited_phase,
-                        Some(p.pn),
-                        SpaceId::Data,
-                    );
+                    bbr.ack(at(now_ns), at(p.send_ns), MSS, p.pn);
+                    bbr.end_acks(at(now_ns), inflight, app_limited_phase);
 
                     // Flip to the application-limited, lossy phase the moment
                     // PROBE_BW is entered, so that by the time the cycle reaches
@@ -3421,12 +3222,11 @@ mod test {
         let btl_service_ns: u64 = (MSS as f64 / BW * 1e9).round() as u64;
 
         // Drive the production default configuration.
-        let mut bbr = Bbr3::new(Arc::new(Bbr3Config::default()), MSS as u16);
+        let mut bbr = Driver::new(Arc::new(Bbr3Config::default()), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
         let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
-        let rtt_est = RttEstimator::new(Duration::from_nanos(RTT_NS));
 
         struct InFlight {
             pn: u64,
@@ -3481,9 +3281,9 @@ mod test {
                 // Emulate MarkConnectionAppLimited before the send, so this packet is
                 // stamped app-limited at send time: the app is limited from the very
                 // first packet on. Same shape as A.2/A.6.
-                bbr.app_limited = Ord::max(bbr.delivered + bbr.inflight, 1);
+                bbr.bbr.rate.mark_app_limited(bbr.bbr.inflight);
 
-                bbr.on_packet_sent(at(send_ns), MSS as u16, pn, SpaceId::Data);
+                bbr.send(at(send_ns), MSS as u16, pn);
                 inflight += MSS;
                 flight.push_back(InFlight {
                     pn,
@@ -3498,16 +3298,8 @@ mod test {
             } else if let Some(p) = flight.pop_front() {
                 now_ns = now_ns.max(p.ack_ns);
                 inflight -= MSS;
-                bbr.on_ack(
-                    at(now_ns),
-                    at(p.send_ns),
-                    MSS,
-                    p.pn,
-                    SpaceId::Data,
-                    true,
-                    &rtt_est,
-                );
-                bbr.on_end_acks(at(now_ns), inflight, true, Some(p.pn), SpaceId::Data);
+                bbr.ack(at(now_ns), at(p.send_ns), MSS, p.pn);
+                bbr.end_acks(at(now_ns), inflight, true);
 
                 if let Some(rs) = bbr.rs {
                     samples_seen += 1;
@@ -3587,7 +3379,7 @@ mod test {
     /// `start_probe_bw_cruise` moves PROBE_DOWN -> PROBE_CRUISE.
     ///
     /// `update_probe_bw_cycle_phase` reads `self.inflight`, which the previous
-    /// `on_end_acks` set from the simulator's `inflight` one tick earlier, so the
+    /// `on_ack` set from the simulator's `inflight` one tick earlier, so the
     /// deciding value lags the loop's `inflight` by a single MSS: the same lag
     /// A.3's `check_drain_done` relies on. Because the queue only shrinks, the
     /// post-transition `C.inflight` (slightly smaller still) is likewise <= both
@@ -3643,7 +3435,7 @@ mod test {
                         bbr.pacing_gain,
                         bbr.inflight,
                         bbr.inflight_with_headroom(),
-                        bbr.get_inflight(bbr.max_bw, 1.0),
+                        bbr.bbr.get_inflight(bbr.bbr.max_bw, 1.0),
                     ));
                 }
 
@@ -3654,7 +3446,7 @@ mod test {
                         bbr.pacing_gain,
                         bbr.inflight,
                         bbr.inflight_with_headroom(),
-                        bbr.get_inflight(bbr.max_bw, 1.0),
+                        bbr.bbr.get_inflight(bbr.bbr.max_bw, 1.0),
                     ));
                     return ControlFlow::Break(());
                 }
@@ -3810,7 +3602,7 @@ mod test {
         // BBRInflight(1.0), so BBRIsTimeToCruise is false and PROBE_CRUISE is not an
         // available exit: the state A.9 sets up by decreasing bandwidth 10% on
         // PROBE_DOWN entry so inflight never drops below the threshold.
-        let cruise_threshold = bbr.get_inflight(bbr.max_bw, 1.0);
+        let cruise_threshold = bbr.bbr.get_inflight(bbr.bbr.max_bw, 1.0);
         assert!(
             bbr.inflight > cruise_threshold,
             "C.inflight ({}) should be above the cruise threshold BBRInflight(1.0) ({cruise_threshold})",
@@ -4057,7 +3849,7 @@ mod test {
     /// entry in A.10.
     ///
     /// The difference here is the idle gap. When the application resumes and sends the
-    /// first packet, `on_packet_sent` calls `handle_restart_from_idle`: because
+    /// first packet, `on_sent` calls `handle_restart_from_idle`: because
     /// `C.inflight` was 0 and the connection is application-limited (`C.app_limited != 0`),
     /// it sets `BBR.idle_restart = true`. On the resulting ack, `check_probe_rtt` sees
     /// `probe_rtt_expired` true but refuses to `enter_probe_rtt` because of the
@@ -4084,12 +3876,11 @@ mod test {
 
         let btl_service_ns: u64 = (MSS as f64 / BW * 1e9).round() as u64;
 
-        let mut bbr = Bbr3::new(Arc::new(Bbr3Config::default()), MSS as u16);
+        let mut bbr = Driver::new(Arc::new(Bbr3Config::default()), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
         let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
-        let rtt_est = RttEstimator::new(Duration::from_nanos(RTT_NS));
 
         struct InFlight {
             pn: u64,
@@ -4122,7 +3913,7 @@ mod test {
                 btl_free_ns = finish;
                 let ack_ns = finish + RET_NS;
 
-                bbr.on_packet_sent(at(send_ns), MSS as u16, pn, SpaceId::Data);
+                bbr.send(at(send_ns), MSS as u16, pn);
                 inflight += MSS;
                 flight.push_back(InFlight {
                     pn,
@@ -4136,16 +3927,8 @@ mod test {
             } else if let Some(p) = flight.pop_front() {
                 now_ns = now_ns.max(p.ack_ns);
                 inflight -= MSS;
-                bbr.on_ack(
-                    at(now_ns),
-                    at(p.send_ns),
-                    MSS,
-                    p.pn,
-                    SpaceId::Data,
-                    false,
-                    &rtt_est,
-                );
-                bbr.on_end_acks(at(now_ns), inflight, false, Some(p.pn), SpaceId::Data);
+                bbr.ack(at(now_ns), at(p.send_ns), MSS, p.pn);
+                bbr.end_acks(at(now_ns), inflight, false);
 
                 if bbr.full_bw_reached && matches!(bbr.state, BbrState::ProbeBw(_)) {
                     reached_probe_bw = true;
@@ -4165,16 +3948,8 @@ mod test {
         while let Some(p) = flight.pop_front() {
             now_ns = now_ns.max(p.ack_ns);
             inflight -= MSS;
-            bbr.on_ack(
-                at(now_ns),
-                at(p.send_ns),
-                MSS,
-                p.pn,
-                SpaceId::Data,
-                false,
-                &rtt_est,
-            );
-            bbr.on_end_acks(at(now_ns), inflight, false, Some(p.pn), SpaceId::Data);
+            bbr.ack(at(now_ns), at(p.send_ns), MSS, p.pn);
+            bbr.end_acks(at(now_ns), inflight, false);
         }
         assert_eq!(
             inflight, 0,
@@ -4195,7 +3970,7 @@ mod test {
         // re-probe becomes due. Nothing is in flight, so no BBR callbacks fire; time just
         // advances. With no data to send during the gap, the connection is app-limited.
         now_ns = idle_start_ns + PROBE_RTT_INTERVAL_SEC * 1_000_000_000 + 2 * RTT_NS;
-        bbr.app_limited = Ord::max(bbr.delivered + bbr.inflight, 1);
+        bbr.bbr.rate.mark_app_limited(bbr.bbr.inflight);
         assert!(
             now_ns - idle_start_ns >= PROBE_RTT_INTERVAL_SEC * 1_000_000_000,
             "idle gap must exceed ProbeRTTInterval (5 s)"
@@ -4213,7 +3988,7 @@ mod test {
             btl_free_ns = finish;
             let ack_ns = finish + RET_NS;
 
-            bbr.on_packet_sent(at(send_ns), MSS as u16, pn, SpaceId::Data);
+            bbr.send(at(send_ns), MSS as u16, pn);
             inflight += MSS;
             flight.push_back(InFlight {
                 pn,
@@ -4250,7 +4025,7 @@ mod test {
                 btl_free_ns = finish;
                 let ack_ns = finish + RET_NS;
 
-                bbr.on_packet_sent(at(send_ns), MSS as u16, pn, SpaceId::Data);
+                bbr.send(at(send_ns), MSS as u16, pn);
                 inflight += MSS;
                 flight.push_back(InFlight {
                     pn,
@@ -4264,16 +4039,8 @@ mod test {
             } else if let Some(p) = flight.pop_front() {
                 now_ns = now_ns.max(p.ack_ns);
                 inflight -= MSS;
-                bbr.on_ack(
-                    at(now_ns),
-                    at(p.send_ns),
-                    MSS,
-                    p.pn,
-                    SpaceId::Data,
-                    false,
-                    &rtt_est,
-                );
-                bbr.on_end_acks(at(now_ns), inflight, false, Some(p.pn), SpaceId::Data);
+                bbr.ack(at(now_ns), at(p.send_ns), MSS, p.pn);
+                bbr.end_acks(at(now_ns), inflight, false);
 
                 if p.pn == resume_pn {
                     // Snapshot right after the restarting packet's ack: the re-probe was
@@ -4324,11 +4091,8 @@ mod test {
     /// bottleneck still drains at exactly `BW`, so the *average* delivery rate is unchanged;
     /// only its arrival timing is bursty.
     ///
-    /// Each aggregation burst is fed to BBR exactly as the connection layer would (cf.
-    /// `Connection::on_packet_acked` looping over the newly-acked packets, then a single
-    /// `on_end_acks`): one `on_ack` per packet in the burst, all stamped with the same ack
-    /// instant `now`, followed by one `on_end_acks` carrying the burst's largest packet
-    /// number.
+    /// Each aggregation burst is fed to BBR exactly as the connection layer would: one `on_ack`
+    /// carrying every packet in the burst, stamped with the ack instant `now`.
     ///
     /// This exercises two mechanisms the draft calls for on aggregating paths:
     ///  1. The delivery-rate sampler must not be fooled by the burst. A burst delivers `K*MSS` over
@@ -4366,12 +4130,11 @@ mod test {
         let btl_service_ns: u64 = (MSS as f64 / BW * 1e9).round() as u64;
 
         // Drive the production default configuration.
-        let mut bbr = Bbr3::new(Arc::new(Bbr3Config::default()), MSS as u16);
+        let mut bbr = Driver::new(Arc::new(Bbr3Config::default()), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
         let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
-        let rtt_est = RttEstimator::new(Duration::from_nanos(RTT_NS));
 
         struct InFlight {
             pn: u64,
@@ -4420,7 +4183,7 @@ mod test {
                 // released to the sender together (identical ack_ns == one ACK event).
                 let ack_ns = finish.div_ceil(AGG_NS) * AGG_NS + RET_NS;
 
-                bbr.on_packet_sent(at(send_ns), MSS as u16, pn, SpaceId::Data);
+                bbr.send(at(send_ns), MSS as u16, pn);
                 inflight += MSS;
                 flight.push_back(InFlight {
                     pn,
@@ -4443,22 +4206,12 @@ mod test {
                 now_ns = now_ns.max(burst_ack_ns);
                 max_burst = max_burst.max(burst.len());
 
-                // Feed the burst as the connection layer does: one on_ack per packet (same
-                // ack instant), then a single on_end_acks with the largest pn in the burst.
-                let largest_pn = burst.last().map(|p| p.pn).unwrap();
+                // Feed the burst as the connection layer does: one ACK covering every packet.
                 for p in &burst {
                     inflight -= MSS;
-                    bbr.on_ack(
-                        at(now_ns),
-                        at(p.send_ns),
-                        MSS,
-                        p.pn,
-                        SpaceId::Data,
-                        false,
-                        &rtt_est,
-                    );
+                    bbr.ack(at(now_ns), at(p.send_ns), MSS, p.pn);
                 }
-                bbr.on_end_acks(at(now_ns), inflight, false, Some(largest_pn), SpaceId::Data);
+                bbr.end_acks(at(now_ns), inflight, false);
 
                 if bbr.state == BbrState::Startup {
                     max_extra_acked = max_extra_acked.max(bbr.extra_acked);
@@ -4536,10 +4289,8 @@ mod test {
     ///     one ACK "event" cover a burst. The bottleneck still drains at exactly `BW`, so only ACK
     ///     arrival *timing* is bursty; the average rate is unchanged.
     ///
-    /// Each burst is fed exactly as the connection layer would (cf. `Connection::on_packet_acked`
-    /// looping over the newly-acked packets, then a single `on_end_acks`): one `on_ack` per
-    /// packet, all stamped with the same ack instant, followed by one `on_end_acks` carrying
-    /// the burst's largest packet number.
+    /// Each burst is fed exactly as the connection layer would: one `on_ack` carrying every
+    /// packet in the burst, stamped with the ack instant.
     ///
     /// Once `full_bw_reached` (true throughout PROBE_BW), `BBRUpdateACKAggregation` tracks the
     /// per-round excess in a windowed max filter over the last `BBR.ExtraAckedFilterLen`
@@ -4578,12 +4329,11 @@ mod test {
         let btl_service_ns: u64 = (MSS as f64 / BW * 1e9).round() as u64;
 
         // Drive the production default configuration.
-        let mut bbr = Bbr3::new(Arc::new(Bbr3Config::default()), MSS as u16);
+        let mut bbr = Driver::new(Arc::new(Bbr3Config::default()), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
         let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
-        let rtt_est = RttEstimator::new(Duration::from_nanos(RTT_NS));
 
         struct InFlight {
             pn: u64,
@@ -4651,7 +4401,7 @@ mod test {
                     finish + RET_NS
                 };
 
-                bbr.on_packet_sent(at(send_ns), MSS as u16, pn, SpaceId::Data);
+                bbr.send(at(send_ns), MSS as u16, pn);
                 inflight += MSS;
                 flight.push_back(InFlight {
                     pn,
@@ -4674,22 +4424,12 @@ mod test {
                 }
                 now_ns = now_ns.max(burst_ack_ns);
 
-                // Feed the burst as the connection layer does: one on_ack per packet (same
-                // ack instant), then a single on_end_acks with the largest pn in the burst.
-                let largest_pn = burst.last().map(|p| p.pn).unwrap();
+                // Feed the burst as the connection layer does: one ACK covering every packet.
                 for p in &burst {
                     inflight -= MSS;
-                    bbr.on_ack(
-                        at(now_ns),
-                        at(p.send_ns),
-                        MSS,
-                        p.pn,
-                        SpaceId::Data,
-                        false,
-                        &rtt_est,
-                    );
+                    bbr.ack(at(now_ns), at(p.send_ns), MSS, p.pn);
                 }
-                bbr.on_end_acks(at(now_ns), inflight, false, Some(largest_pn), SpaceId::Data);
+                bbr.end_acks(at(now_ns), inflight, false);
 
                 let in_cruise = bbr.state == BbrState::ProbeBw(ProbeBwSubstate::Cruise);
 
@@ -4895,12 +4635,11 @@ mod test {
             probe_rng_seed: Some(seed),
             ..Bbr3Config::default()
         };
-        let mut bbr = Bbr3::new(Arc::new(config), MSS as u16);
+        let mut bbr = Driver::new(Arc::new(config), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
         let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
-        let rtt_est = RttEstimator::new(Duration::from_nanos(PROP_NS));
 
         struct InFlight {
             pn: u64,
@@ -4978,7 +4717,7 @@ mod test {
                     arrival_ns
                 };
 
-                bbr.on_packet_sent(at(send_ns), MSS as u16, pn, SpaceId::Data);
+                bbr.send(at(send_ns), MSS as u16, pn);
                 inflight += MSS;
                 flight.push_back(InFlight {
                     pn,
@@ -5001,20 +4740,11 @@ mod test {
                 }
                 now_ns = now_ns.max(burst_ack_ns);
 
-                let largest_pn = burst.iter().map(|p| p.pn).max().unwrap();
                 for p in &burst {
                     inflight -= MSS;
-                    bbr.on_ack(
-                        at(now_ns),
-                        at(p.send_ns),
-                        MSS,
-                        p.pn,
-                        SpaceId::Data,
-                        false,
-                        &rtt_est,
-                    );
+                    bbr.ack(at(now_ns), at(p.send_ns), MSS, p.pn);
                 }
-                bbr.on_end_acks(at(now_ns), inflight, false, Some(largest_pn), SpaceId::Data);
+                bbr.end_acks(at(now_ns), inflight, false);
 
                 let in_cruise = bbr.state == BbrState::ProbeBw(ProbeBwSubstate::Cruise);
 
@@ -5187,12 +4917,11 @@ mod test {
             probe_rng_seed: Some(seed),
             ..Bbr3Config::default()
         };
-        let mut bbr = Bbr3::new(Arc::new(config), MSS as u16);
+        let mut bbr = Driver::new(Arc::new(config), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
         let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
-        let rtt_est = RttEstimator::new(Duration::from_nanos(RTT_NS));
 
         struct InFlight {
             pn: u64,
@@ -5259,7 +4988,7 @@ mod test {
                     && matches!(bbr.state, BbrState::ProbeBw(_))
                     && pn % LOSS_PERIOD == LOSS_PERIOD - 1;
 
-                bbr.on_packet_sent(at(send_ns), MSS as u16, pn, SpaceId::Data);
+                bbr.send(at(send_ns), MSS as u16, pn);
                 inflight += MSS;
                 flight.push_back(InFlight {
                     pn,
@@ -5275,18 +5004,10 @@ mod test {
                 now_ns = now_ns.max(p.event_ns);
                 inflight -= MSS;
                 if p.lost {
-                    bbr.on_packet_lost(MSS as u16, p.pn, SpaceId::Data, at(now_ns));
+                    bbr.lose(MSS as u16, p.pn, at(now_ns));
                 } else {
-                    bbr.on_ack(
-                        at(now_ns),
-                        at(p.send_ns),
-                        MSS,
-                        p.pn,
-                        SpaceId::Data,
-                        false,
-                        &rtt_est,
-                    );
-                    bbr.on_end_acks(at(now_ns), inflight, false, Some(p.pn), SpaceId::Data);
+                    bbr.ack(at(now_ns), at(p.send_ns), MSS, p.pn);
+                    bbr.end_acks(at(now_ns), inflight, false);
                 }
 
                 // Turn the seeding loss on once cleanly ramped to BW_LO, off the instant
@@ -5446,12 +5167,11 @@ mod test {
             probe_rng_seed: Some(seed),
             ..Bbr3Config::default()
         };
-        let mut bbr = Bbr3::new(Arc::new(config), MSS as u16);
+        let mut bbr = Driver::new(Arc::new(config), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
         let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
-        let rtt_est = RttEstimator::new(Duration::from_nanos(RTT_NS));
 
         struct InFlight {
             pn: u64,
@@ -5516,7 +5236,7 @@ mod test {
                     finish + RET_NS
                 };
 
-                bbr.on_packet_sent(at(send_ns), MSS as u16, pn, SpaceId::Data);
+                bbr.send(at(send_ns), MSS as u16, pn);
                 inflight += MSS;
                 flight.push_back(InFlight {
                     pn,
@@ -5532,18 +5252,10 @@ mod test {
                 now_ns = now_ns.max(p.event_ns);
                 inflight -= MSS;
                 if p.lost {
-                    bbr.on_packet_lost(MSS as u16, p.pn, SpaceId::Data, at(now_ns));
+                    bbr.lose(MSS as u16, p.pn, at(now_ns));
                 } else {
-                    bbr.on_ack(
-                        at(now_ns),
-                        at(p.send_ns),
-                        MSS,
-                        p.pn,
-                        SpaceId::Data,
-                        false,
-                        &rtt_est,
-                    );
-                    bbr.on_end_acks(at(now_ns), inflight, false, Some(p.pn), SpaceId::Data);
+                    bbr.ack(at(now_ns), at(p.send_ns), MSS, p.pn);
+                    bbr.end_acks(at(now_ns), inflight, false);
                 }
 
                 // Phase 1 -> 2: once settled in PROBE_BW at the high rate (max_bw ~= BW_HI), cut
@@ -5676,12 +5388,11 @@ mod test {
             probe_rng_seed: Some(seed),
             ..Bbr3Config::default()
         };
-        let mut bbr = Bbr3::new(Arc::new(config), MSS as u16);
+        let mut bbr = Driver::new(Arc::new(config), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
         let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
-        let rtt_est = RttEstimator::new(Duration::from_nanos(RTT_NS));
 
         struct InFlight {
             pn: u64,
@@ -5747,7 +5458,7 @@ mod test {
                 // packets are detected, purely after propagation.
                 let event_ns = arrival + RET_NS;
 
-                bbr.on_packet_sent(at(send_ns), MSS as u16, pn, SpaceId::Data);
+                bbr.send(at(send_ns), MSS as u16, pn);
                 inflight += MSS;
                 flight.push_back(InFlight {
                     pn,
@@ -5763,18 +5474,10 @@ mod test {
                 now_ns = now_ns.max(p.event_ns);
                 inflight -= MSS;
                 if p.lost {
-                    bbr.on_packet_lost(MSS as u16, p.pn, SpaceId::Data, at(now_ns));
+                    bbr.lose(MSS as u16, p.pn, at(now_ns));
                 } else {
-                    bbr.on_ack(
-                        at(now_ns),
-                        at(p.send_ns),
-                        MSS,
-                        p.pn,
-                        SpaceId::Data,
-                        false,
-                        &rtt_est,
-                    );
-                    bbr.on_end_acks(at(now_ns), inflight, false, Some(p.pn), SpaceId::Data);
+                    bbr.ack(at(now_ns), at(p.send_ns), MSS, p.pn);
+                    bbr.end_acks(at(now_ns), inflight, false);
                 }
 
                 if !reached_probe_bw && matches!(bbr.state, BbrState::ProbeBw(_)) {
@@ -5846,7 +5549,7 @@ mod test {
     }
 
     /// A.18: Handling spurious Fast Recovery (the loss-undo path).
-    /// Exercises `save_state_upon_loss` (BBRSaveStateUponLoss) and `on_spurious_congestion_event`
+    /// Exercises `save_state_upon_loss` (BBRSaveStateUponLoss) and `on_spurious_loss`
     /// (BBRHandleSpuriousLossDetection):
     /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.11>
     ///
@@ -5857,7 +5560,7 @@ mod test {
     /// `save_state_upon_loss`) and restoring it if the transport later reports the episode
     /// spurious (in QUIC, the original packet's delivery is confirmed by packet number / a
     /// DSACK-equivalent, so the retransmission was spurious). The connection layer signals this
-    /// via `Controller::on_spurious_congestion_event`.
+    /// via `Controller::on_spurious_loss`.
     ///
     /// The reordering is introduced while the flow is in PROBE_UP:
     ///  1. Reach PROBE_UP loss-free, so the short-term model is at its reset sentinels
@@ -5869,7 +5572,7 @@ mod test {
     ///     runs `handle_inflight_too_high`, which clamps `inflight_longterm` to a finite value and
     ///     moves PROBE_UP -> PROBE_DOWN and sets `undo_state` = PROBE_UP. Stop declaring losses the
     ///     instant the state leaves PROBE_UP.
-    ///  3. The transport detects the loss was spurious -> `on_spurious_congestion_event`.
+    ///  3. The transport detects the loss was spurious -> `on_spurious_loss`.
     ///
     /// Asserts:
     ///  - `save_state_upon_loss` captured the pre-loss PROBE_UP model into the undo fields:
@@ -5878,7 +5581,7 @@ mod test {
     ///    PROBE_UP.
     ///  - the spurious Fast Recovery actually moved the flow off PROBE_UP and clamped
     ///    `inflight_longterm` finite.
-    ///  - `on_spurious_congestion_event` restored the saved model:
+    ///  - `on_spurious_loss` restored the saved model:
     ///    `bw_shortterm`/`inflight_shortterm` to `max(current, undo)` (their +inf/u64::MAX
     ///    sentinels) and `inflight_longterm` back to u64::MAX, and restarted the probe through
     ///    PROBE_REFILL.
@@ -5907,12 +5610,11 @@ mod test {
             probe_rng_seed: Some(seed),
             ..Bbr3Config::default()
         };
-        let mut bbr = Bbr3::new(Arc::new(config), MSS as u16);
+        let mut bbr = Driver::new(Arc::new(config), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
         let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
-        let rtt_est = RttEstimator::new(Duration::from_nanos(RTT_NS));
 
         struct InFlight {
             pn: u64,
@@ -5963,7 +5665,7 @@ mod test {
                 btl_free_ns = finish;
                 let ack_ns = finish + RET_NS;
 
-                bbr.on_packet_sent(at(send_ns), MSS as u16, pn, SpaceId::Data);
+                bbr.send(at(send_ns), MSS as u16, pn);
                 inflight += MSS;
                 flight.push_back(InFlight {
                     pn,
@@ -5998,7 +5700,7 @@ mod test {
                 let reordering =
                     pre.is_some() && bbr.state == BbrState::ProbeBw(ProbeBwSubstate::Up);
                 if reordering {
-                    bbr.on_packet_lost(MSS as u16, p.pn, SpaceId::Data, at(now_ns));
+                    bbr.lose(MSS as u16, p.pn, at(now_ns));
 
                     // The moment handle_inflight_too_high moved us off PROBE_UP, record the
                     // episode: the undo snapshot save_state_upon_loss captured when it began,
@@ -6016,16 +5718,8 @@ mod test {
                         ));
                     }
                 } else {
-                    bbr.on_ack(
-                        at(now_ns),
-                        at(p.send_ns),
-                        MSS,
-                        p.pn,
-                        SpaceId::Data,
-                        false,
-                        &rtt_est,
-                    );
-                    bbr.on_end_acks(at(now_ns), inflight, false, Some(p.pn), SpaceId::Data);
+                    bbr.ack(at(now_ns), at(p.send_ns), MSS, p.pn);
+                    bbr.end_acks(at(now_ns), inflight, false);
                 }
             } else {
                 panic!("simulation stalled: window full but nothing in flight");
@@ -6088,13 +5782,13 @@ mod test {
 
         // The transport detects the loss was spurious (original packet delivered; the Fast Recovery
         // should never have happened) and reports it.
-        bbr.on_spurious_congestion_event();
+        bbr.on_spurious_loss();
 
-        // on_spurious_congestion_event restored the saved model and restarted the probe.
+        // on_spurious_loss restored the saved model and restarted the probe.
         assert_eq!(
             bbr.state,
             BbrState::ProbeBw(ProbeBwSubstate::Refill),
-            "on_spurious_congestion_event should restart the probe through PROBE_REFILL"
+            "on_spurious_loss should restart the probe through PROBE_REFILL"
         );
         assert_eq!(
             bbr.inflight_longterm,
@@ -6114,7 +5808,7 @@ mod test {
     }
 
     /// A.19: Handling spurious RTO Recovery (the loss-undo path, RTO variant).
-    /// Exercises `save_state_upon_loss` (BBRSaveStateUponLoss) and `on_spurious_congestion_event`
+    /// Exercises `save_state_upon_loss` (BBRSaveStateUponLoss) and `on_spurious_loss`
     /// (BBRHandleSpuriousLossDetection):
     /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.11>
     ///
@@ -6126,11 +5820,9 @@ mod test {
     /// QUIC the original packet numbers confirm the delivery, a DSACK-equivalent), the episode
     /// is reported spurious and the model must be rolled back.
     ///
-    /// Both recovery kinds reach BBR through the same loss path: the connection layer calls
-    /// `on_packet_lost` per timed-out packet, which runs `process_lost_packet` ->
-    /// `enter_recovery` -> `save_state_upon_loss` on the first. (bbr3's `on_congestion_event` only
-    /// acts on ECN, so a non-ECN RTO / persistent-congestion batch reaches BBR purely as these
-    /// per-packet losses; see the trait note on `on_congestion_event`.) The RTO character here
+    /// Both recovery kinds reach BBR through the same loss path: `on_loss` runs
+    /// `process_lost_packet` per timed-out packet, and `enter_recovery` ->
+    /// `save_state_upon_loss` on the first. The RTO character here
     /// is the *shape* of the loss: a single tail burst with no interleaved deliveries, i.e. a
     /// timeout, not a SACK-driven Fast Recovery.
     ///
@@ -6145,7 +5837,7 @@ mod test {
     ///     PROBE_UP -> PROBE_DOWN, setting `undo_state` = PROBE_UP. Stop the instant the state
     ///     leaves PROBE_UP.
     ///  3. The delayed acknowledgements arrive; the transport detects the RTO was spurious ->
-    ///     `on_spurious_congestion_event`.
+    ///     `on_spurious_loss`.
     ///
     /// Asserts:
     ///  - `save_state_upon_loss` captured the pre-loss PROBE_UP model into the undo fields:
@@ -6154,7 +5846,7 @@ mod test {
     ///    PROBE_UP.
     ///  - the spurious RTO actually moved the flow off PROBE_UP and clamped `inflight_longterm`
     ///    finite.
-    ///  - `on_spurious_congestion_event` restored the saved model:
+    ///  - `on_spurious_loss` restored the saved model:
     ///    `bw_shortterm`/`inflight_shortterm` to `max(current, undo)` (their +inf/u64::MAX
     ///    sentinels) and `inflight_longterm` back to u64::MAX, and restarted the probe through
     ///    PROBE_REFILL.
@@ -6183,12 +5875,11 @@ mod test {
             probe_rng_seed: Some(seed),
             ..Bbr3Config::default()
         };
-        let mut bbr = Bbr3::new(Arc::new(config), MSS as u16);
+        let mut bbr = Driver::new(Arc::new(config), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
         let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
-        let rtt_est = RttEstimator::new(Duration::from_nanos(RTT_NS));
 
         struct InFlight {
             pn: u64,
@@ -6240,7 +5931,7 @@ mod test {
                 btl_free_ns = finish;
                 let ack_ns = finish + RET_NS;
 
-                bbr.on_packet_sent(at(send_ns), MSS as u16, pn, SpaceId::Data);
+                bbr.send(at(send_ns), MSS as u16, pn);
                 inflight += MSS;
                 flight.push_back(InFlight {
                     pn,
@@ -6276,7 +5967,7 @@ mod test {
                 let rto_timeout =
                     pre.is_some() && bbr.state == BbrState::ProbeBw(ProbeBwSubstate::Up);
                 if rto_timeout {
-                    bbr.on_packet_lost(MSS as u16, p.pn, SpaceId::Data, at(now_ns));
+                    bbr.lose(MSS as u16, p.pn, at(now_ns));
 
                     // The moment handle_inflight_too_high moved us off PROBE_UP, record the
                     // episode: the undo snapshot save_state_upon_loss captured when it began,
@@ -6294,16 +5985,8 @@ mod test {
                         ));
                     }
                 } else {
-                    bbr.on_ack(
-                        at(now_ns),
-                        at(p.send_ns),
-                        MSS,
-                        p.pn,
-                        SpaceId::Data,
-                        false,
-                        &rtt_est,
-                    );
-                    bbr.on_end_acks(at(now_ns), inflight, false, Some(p.pn), SpaceId::Data);
+                    bbr.ack(at(now_ns), at(p.send_ns), MSS, p.pn);
+                    bbr.end_acks(at(now_ns), inflight, false);
                 }
             } else {
                 panic!("simulation stalled: window full but nothing in flight");
@@ -6366,13 +6049,13 @@ mod test {
 
         // The delayed acknowledgements arrive: the transport detects the RTO was spurious (original
         // packets delivered; the RTO recovery should never have happened) and reports it.
-        bbr.on_spurious_congestion_event();
+        bbr.on_spurious_loss();
 
-        // on_spurious_congestion_event restored the saved model and restarted the probe.
+        // on_spurious_loss restored the saved model and restarted the probe.
         assert_eq!(
             bbr.state,
             BbrState::ProbeBw(ProbeBwSubstate::Refill),
-            "on_spurious_congestion_event should restart the probe through PROBE_REFILL"
+            "on_spurious_loss should restart the probe through PROBE_REFILL"
         );
         assert_eq!(
             bbr.inflight_longterm,
@@ -6464,12 +6147,11 @@ mod test {
         let btl_service_ns: u64 = (MSS as f64 / BW * 1e9).round() as u64;
 
         // Drive the production default configuration.
-        let mut bbr = Bbr3::new(Arc::new(Bbr3Config::default()), MSS as u16);
+        let mut bbr = Driver::new(Arc::new(Bbr3Config::default()), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
         let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
-        let rtt_est = RttEstimator::new(Duration::from_nanos(RTT_NS));
 
         struct InFlight {
             pn: u64,
@@ -6521,7 +6203,7 @@ mod test {
                 btl_free_ns = finish;
                 let ack_ns = finish + RET_NS;
 
-                bbr.on_packet_sent(at(send_ns), MSS as u16, pn, SpaceId::Data);
+                bbr.send(at(send_ns), MSS as u16, pn);
                 inflight += MSS;
                 flight.push_back(InFlight {
                     pn,
@@ -6531,7 +6213,7 @@ mod test {
 
                 // Emulate MarkConnectionAppLimited so the next packet is stamped
                 // app-limited at send time (same shape as A.7).
-                bbr.app_limited = Ord::max(bbr.delivered + bbr.inflight, 1);
+                bbr.bbr.rate.mark_app_limited(bbr.bbr.inflight);
 
                 // pace the next send at BBR's chosen pacing rate
                 let pacing = bbr.pacing_rate.max(1.0);
@@ -6540,18 +6222,10 @@ mod test {
             } else if let Some(p) = flight.pop_front() {
                 now_ns = now_ns.max(p.ack_ns);
                 inflight -= MSS;
-                bbr.on_ack(
-                    at(now_ns),
-                    at(p.send_ns),
-                    MSS,
-                    p.pn,
-                    SpaceId::Data,
-                    true,
-                    &rtt_est,
-                );
+                bbr.ack(at(now_ns), at(p.send_ns), MSS, p.pn);
                 // The transport never reports a starved poll, so the due ProbeRTT has no
                 // evidence to skip on.
-                bbr.on_end_acks(at(now_ns), inflight, false, Some(p.pn), SpaceId::Data);
+                bbr.end_acks(at(now_ns), inflight, false);
 
                 full_bw_reached_ever |= bbr.full_bw_reached;
 
@@ -6738,12 +6412,11 @@ mod test {
             probe_rng_seed: Some(seed),
             ..Bbr3Config::default()
         };
-        let mut bbr = Bbr3::new(Arc::new(config), MSS as u16);
+        let mut bbr = Driver::new(Arc::new(config), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
         let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
-        let rtt_est = RttEstimator::new(Duration::from_nanos(RTT_NS));
 
         struct InFlight {
             pn: u64,
@@ -6798,7 +6471,7 @@ mod test {
                 btl_free_ns = finish;
                 let ack_ns = finish + RET_NS;
 
-                bbr.on_packet_sent(at(send_ns), MSS as u16, pn, SpaceId::Data);
+                bbr.send(at(send_ns), MSS as u16, pn);
                 inflight += MSS;
                 flight.push_back(InFlight {
                     pn,
@@ -6812,15 +6485,15 @@ mod test {
                 now_ns = now_ns.max(p.ack_ns);
                 inflight -= MSS;
                 if dropping {
-                    // The PROBE_UP -> PROBE_DOWN transition happens inside on_packet_lost (via
+                    // The PROBE_UP -> PROBE_DOWN transition happens inside on_loss (via
                     // handle_inflight_too_high), never on an ack, so any Up->Down move here is
                     // attributable to this loss. inflight_longterm is only touched by the tripping
                     // loss (non-tripping burst losses leave it unchanged), so `before` captured
                     // here is exactly the pre-reduction value.
                     let before = bbr.inflight_longterm;
                     let was_up = bbr.state == BbrState::ProbeBw(ProbeBwSubstate::Up);
-                    let lost = bbr.packets.clone().remove(SpaceId::Data, p.pn).unwrap();
-                    bbr.on_packet_lost(MSS as u16, p.pn, SpaceId::Data, at(now_ns));
+                    let lost = bbr.sent[&p.pn].packet;
+                    bbr.lose(MSS as u16, p.pn, at(now_ns));
                     if was_up && bbr.state != BbrState::ProbeBw(ProbeBwSubstate::Up) {
                         if established.is_none() {
                             // Episode 1: the first loss clamped inflight_longterm finite.
@@ -6832,9 +6505,10 @@ mod test {
                             // = min(bdp, cwnd)) live: set_cwnd does not run inside the loss path,
                             // so bdp/cwnd match what
                             // handle_inflight_too_high used.
-                            let inflight_prev = lost.tx_in_flight.saturating_sub(MSS) as f64;
+                            let inflight_prev =
+                                u64::from(lost.tx_in_flight).saturating_sub(MSS) as f64;
                             let lost_prev =
-                                bbr.lost.saturating_sub(lost.lost).saturating_sub(MSS) as f64;
+                                bbr.rate.lost.saturating_sub(lost.lost).saturating_sub(MSS) as f64;
                             let prefix =
                                 (LOSS_THRESH * inflight_prev - lost_prev) / (1.0 - LOSS_THRESH);
                             let txif = (inflight_prev + prefix) as u64;
@@ -6851,16 +6525,8 @@ mod test {
                         }
                     }
                 } else {
-                    bbr.on_ack(
-                        at(now_ns),
-                        at(p.send_ns),
-                        MSS,
-                        p.pn,
-                        SpaceId::Data,
-                        false,
-                        &rtt_est,
-                    );
-                    bbr.on_end_acks(at(now_ns), inflight, false, Some(p.pn), SpaceId::Data);
+                    bbr.ack(at(now_ns), at(p.send_ns), MSS, p.pn);
+                    bbr.end_acks(at(now_ns), inflight, false);
                 }
             } else {
                 panic!("simulation stalled: window full but nothing in flight");
@@ -6989,12 +6655,11 @@ mod test {
             probe_rng_seed: Some([6; 16]),
             ..Bbr3Config::default()
         };
-        let mut bbr = Bbr3::new(Arc::new(config), MSS as u16);
+        let mut bbr = Driver::new(Arc::new(config), MSS as u16);
         assert_eq!(bbr.state, BbrState::Startup);
 
         let base = Instant::now();
         let at = |off_ns: u64| base + Duration::from_nanos(off_ns);
-        let rtt_est = RttEstimator::new(Duration::from_nanos(RTT_NS));
 
         struct InFlight {
             pn: u64,
@@ -7068,7 +6733,7 @@ mod test {
                 btl_free_ns = finish;
                 let ack_ns = finish + RET_NS;
 
-                bbr.on_packet_sent(at(send_ns), MSS as u16, pn, SpaceId::Data);
+                bbr.send(at(send_ns), MSS as u16, pn);
                 inflight += MSS;
                 flight.push_back(InFlight {
                     pn,
@@ -7079,7 +6744,7 @@ mod test {
                 if app_limited_phase {
                     // Emulate MarkConnectionAppLimited so the next packet is stamped
                     // app-limited at send time. Same shape as A.2/A.6.
-                    bbr.app_limited = Ord::max(bbr.delivered + bbr.inflight, 1);
+                    bbr.bbr.rate.mark_app_limited(bbr.bbr.inflight);
                 }
 
                 // pace the next send at BBR's chosen pacing rate
@@ -7090,27 +6755,13 @@ mod test {
                 now_ns = now_ns.max(p.ack_ns);
                 inflight -= MSS;
 
-                // update_max_bw runs inside on_end_acks, on the sample this ACK completed.
+                // update_max_bw runs inside on_ack, on the sample this ACK completed.
                 // Snapshot max_bw and state around the ACK and read that sample (bbr.rs)
                 // after it: that is exactly what update_max_bw's guard consumed.
                 let state_before = bbr.state;
                 let max_bw_before = bbr.max_bw;
-                bbr.on_ack(
-                    at(now_ns),
-                    at(p.send_ns),
-                    MSS,
-                    p.pn,
-                    SpaceId::Data,
-                    app_limited_phase,
-                    &rtt_est,
-                );
-                bbr.on_end_acks(
-                    at(now_ns),
-                    inflight,
-                    app_limited_phase,
-                    Some(p.pn),
-                    SpaceId::Data,
-                );
+                bbr.ack(at(now_ns), at(p.send_ns), MSS, p.pn);
+                bbr.end_acks(at(now_ns), inflight, app_limited_phase);
                 let max_bw_after = bbr.max_bw;
                 let state_after = bbr.state;
                 let sample = bbr.rs;
@@ -7261,7 +6912,7 @@ mod test {
         sim.bbr.max_bw = 10_000_000.0;
         sim.bbr.cycle_count = MAX_BW_FILTER_LEN as u64 + 1;
         // The application ran dry before packet 0.
-        sim.bbr.app_limited = 1;
+        sim.bbr.rate.app_limited = 1;
 
         sim.send(0, 1);
         sim.ack(10 * MS, [0], false);
@@ -7303,7 +6954,8 @@ mod test {
 
         // Packet 0 delivered 2400 bytes since it was sent, 12ms ago.
         sim.ack(12 * MS, [0], false);
-        assert_eq!(sim.bbr.rs.unwrap().last_packet.packet_number, 0);
+        // Packet 0 was sent before anything was delivered.
+        assert_eq!(sim.bbr.rs.unwrap().prior_delivered, 0);
         assert_eq!(sim.bbr.max_bw, 200_000.0);
     }
 
@@ -7323,7 +6975,8 @@ mod test {
         sim.send(15 * MS, 1);
         sim.ack(15 * MS, [2], false);
         let rs = sim.bbr.rs.unwrap();
-        assert_eq!(rs.last_packet.packet_number, 2);
+        // Packet 2 was sent after two packets were delivered.
+        assert_eq!(rs.prior_delivered, 2 * 1200);
         assert_eq!(rs.delivery_rate, 0.0);
         assert_eq!(sim.bbr.max_bw, 240_000.0);
     }
@@ -7337,9 +6990,9 @@ mod test {
         let round_count = sim.bbr.round_count;
 
         sim.lose(12 * MS, 1);
-        // BBR stops tracking a packet left unacked for more than `ROUND_COUNT_WINDOW` rounds. A
-        // re-fold would pair its bytes with packet 0's interval and double the rate.
-        sim.bbr.packets.remove(SpaceId::Data, 2);
+        // An ACK of only packets without controller state delivers no sample. A re-fold would
+        // pair packet 2's bytes with packet 0's interval and double the rate.
+        sim.bbr.sent.remove(&2);
         sim.ack(15 * MS, [2], false);
         assert_eq!(sim.bbr.round_count, round_count);
         assert_eq!(sim.bbr.max_bw, 120_000.0);
@@ -7413,7 +7066,7 @@ mod test {
         let mut sim = scripted();
         sim.send(0, sim.bbr.cwnd.div_ceil(1200));
         sim.starve();
-        assert_eq!(sim.bbr.app_limited, 0);
+        assert_eq!(sim.bbr.rate.app_limited, 0);
     }
 
     /// Starvation with data in flight marks only packets sent after it, and the limited phase
@@ -7423,18 +7076,18 @@ mod test {
         let mut sim = scripted();
         sim.send(0, 3);
         sim.starve();
-        assert_eq!(sim.bbr.app_limited, 3600);
+        assert_eq!(sim.bbr.rate.app_limited, 3600);
 
         // A backlog then holds the sender back, so the ACKs are not app-limited.
         sim.send(2 * MS, 2);
         sim.ack(10 * MS, [0, 1], false);
         assert!(!sim.bbr.rs.unwrap().is_app_limited);
-        assert_eq!(sim.bbr.app_limited, 3600);
+        assert_eq!(sim.bbr.rate.app_limited, 3600);
 
         // Packet 4 is the batch's newest, so its label is the sample's.
         sim.ack(12 * MS, [2, 3, 4], false);
         assert!(sim.bbr.rs.unwrap().is_app_limited);
-        assert_eq!(sim.bbr.app_limited, 0);
+        assert_eq!(sim.bbr.rate.app_limited, 0);
     }
 
     /// The Startup pacing rate a 12 KB initial window takes from its first measured RTT.
@@ -7492,7 +7145,7 @@ mod test {
         sim.round(0, 100, 10 * MS);
         sim.bbr.full_bw_reached = true;
         sim.bbr.bw_probe_samples = true;
-        sim.bbr.enter_probe_bw(sim.at(10 * MS));
+        sim.bbr.bbr.enter_probe_bw(sim.at(10 * MS));
         sim
     }
 
@@ -7514,14 +7167,16 @@ mod test {
             sim.bbr.bw_probe_fill = false;
             sim.bbr.start_probe_bw_up();
             sim.bbr.bw_probe_wait = wait;
-            sim.bbr.maybe_fill_probe_bw_up(sim.at(at_ms * MS));
+            let at = sim.at(at_ms * MS);
+            sim.bbr.maybe_fill_probe_bw_up(at);
             sim.bbr.probe_inflight()
         };
         let bdp = (sim.bbr.bw * sim.bbr.min_rtt.as_secs_f64() * 1.25) as u64;
         let inflight = Ord::max(bdp, sim.bbr.min_pipe_cwnd);
         assert_eq!(up(&mut sim, 100), Some(inflight));
         assert_eq!(up(&mut sim, 1100), None, "within the wait");
-        sim.bbr.maybe_fill_probe_bw_up(sim.at(2200 * MS));
+        let at = sim.at(2200 * MS);
+        sim.bbr.maybe_fill_probe_bw_up(at);
         assert_eq!(
             sim.bbr.probe_inflight(),
             Some(inflight),
@@ -7642,7 +7297,7 @@ mod test {
         assert!(bbr.bw < bbr.max_bw);
         let bdp = (bbr.bw * bbr.min_rtt.as_secs_f64()).round() as u64;
         assert_eq!(bbr.bdp, bdp);
-        let expected = bbr.quantization_budget(2 * bdp + bbr.extra_acked);
+        let expected = bbr.bbr.quantization_budget(2 * bdp + bbr.bbr.extra_acked);
         assert_eq!(bbr.max_inflight, expected);
         assert_eq!(bbr.target_inflight(), Ord::min(bdp, bbr.cwnd));
     }
@@ -7698,7 +7353,7 @@ mod test {
     fn probe_rtt_protects_its_samples() {
         let mut sim = probing_rtt();
         let newest_limited =
-            |sim: &Sim| sim.bbr.packets.last(SpaceId::Data).unwrap().is_app_limited;
+            |sim: &Sim| sim.bbr.sent.values().last().unwrap().packet.is_app_limited;
 
         // Each 10ms, send 4 packets and acknowledge the previous 4.
         let mut now = 20 * MS;
@@ -7723,7 +7378,7 @@ mod test {
 
         // One more round delivers past the protected interval, then 480 KB/s is a real sample.
         sim.round(now, 4, 10 * MS);
-        assert_eq!(sim.bbr.app_limited, 0);
+        assert_eq!(sim.bbr.rate.app_limited, 0);
         sim.round(now + 10 * MS, 4, 10 * MS);
         assert!(!sim.bbr.rs.unwrap().is_app_limited);
         assert_eq!(sim.bbr.max_bw, 480_000.0);
@@ -7906,7 +7561,7 @@ mod test {
         assert_eq!(sim.bbr.inflight_longterm, bound);
         assert!(sim.bbr.cwnd < 20_000);
 
-        sim.bbr.on_spurious_congestion_event();
+        sim.bbr.on_spurious_loss();
         assert_eq!(sim.bbr.inflight_longterm, 100_000);
         assert_eq!(sim.bbr.cwnd, 20_000);
         assert_eq!(sim.bbr.state, BbrState::ProbeBw(ProbeBwSubstate::Refill));
@@ -7917,7 +7572,7 @@ mod test {
     fn restarted_probe_reacts_to_loss() {
         let mut sim = probing_up();
         sim.lose(15 * MS, 10);
-        sim.bbr.on_spurious_congestion_event();
+        sim.bbr.on_spurious_loss();
         sim.ack(20 * MS, 11..20, false);
         assert_eq!(sim.bbr.state, BbrState::ProbeBw(ProbeBwSubstate::Up));
 
@@ -7942,7 +7597,7 @@ mod test {
         sim.send(16 * MS, 1);
         sim.lose(30 * MS, sim.pn - 1);
 
-        sim.bbr.on_spurious_congestion_event();
+        sim.bbr.on_spurious_loss();
         assert_eq!(sim.bbr.inflight_longterm, bound);
         assert_eq!(sim.bbr.state, BbrState::ProbeBw(ProbeBwSubstate::Down));
     }
@@ -7953,7 +7608,7 @@ mod test {
     fn new_episode_saves_the_cut_window() {
         let mut sim = probing_up();
         sim.ack(14 * MS, [11], false);
-        sim.bbr.start_probe_bw_down(sim.at(14 * MS));
+        sim.bbr.bbr.start_probe_bw_down(sim.at(14 * MS));
         // The probe's feedback is still arriving, so a loss cuts the bound without a state change.
         sim.bbr.bw_probe_samples = true;
         sim.lose(15 * MS, 10);
@@ -7965,7 +7620,7 @@ mod test {
         sim.send(16 * MS, 1);
         sim.lose(17 * MS, sim.pn - 1);
 
-        sim.bbr.on_spurious_congestion_event();
+        sim.bbr.on_spurious_loss();
         assert_eq!(sim.bbr.cwnd, cwnd);
     }
 
@@ -7986,7 +7641,7 @@ mod test {
         assert!(sim.bbr.in_recovery);
         let bound = sim.bbr.probe_rtt_cwnd();
 
-        sim.bbr.on_spurious_congestion_event();
+        sim.bbr.on_spurious_loss();
         assert_eq!(sim.bbr.cwnd, bound);
         let mut now = 30 * MS;
         while sim.bbr.state == BbrState::ProbeRtt {
@@ -8036,7 +7691,7 @@ mod test {
         sim.bbr.probe_rtt_interval = Duration::from_secs(PROBE_RTT_INTERVAL_SEC);
         assert_eq!(sim.bbr.state, BbrState::ProbeRtt);
 
-        sim.bbr.on_spurious_congestion_event();
+        sim.bbr.on_spurious_loss();
         assert_eq!(sim.bbr.state, BbrState::ProbeRtt);
         let mut now = 30 * MS;
         while sim.bbr.state == BbrState::ProbeRtt {
@@ -8049,97 +7704,6 @@ mod test {
 
     /// Packet size for the packet identity tests.
     const PACKET: u16 = 1200;
-
-    /// Packet numbers restart in every space, so an ACK for Handshake packet 0 must sample the
-    /// Handshake packet, not Initial packet 0 sent earlier with a different delivery snapshot.
-    #[test]
-    fn ack_samples_the_packet_from_its_own_space() {
-        let mut bbr = Bbr3::new(Arc::new(Bbr3Config::default()), PACKET);
-        let rtt = RttEstimator::new(Duration::from_millis(100));
-        let t0 = Instant::now();
-        let at = |ms| t0 + Duration::from_millis(ms);
-        let c: &mut dyn Controller = &mut bbr;
-
-        c.on_packet_sent(at(0), PACKET, 0, SpaceId::Initial);
-        c.on_packet_sent(at(1), PACKET, 1, SpaceId::Initial);
-        c.on_ack(
-            at(10),
-            at(0),
-            PACKET as u64,
-            0,
-            SpaceId::Initial,
-            false,
-            &rtt,
-        );
-        c.on_end_acks(at(10), PACKET as u64, false, Some(0), SpaceId::Initial);
-        // Sent after Initial 0 was delivered, so its snapshot counts that delivery.
-        c.on_packet_sent(at(11), PACKET, 0, SpaceId::Handshake);
-        c.on_ack(
-            at(20),
-            at(11),
-            PACKET as u64,
-            0,
-            SpaceId::Handshake,
-            false,
-            &rtt,
-        );
-
-        let rs = bbr.rs.expect("rate sample");
-        assert_eq!(rs.last_packet.send_time, at(11));
-        assert_eq!(rs.prior_delivered, PACKET as u64);
-        assert_eq!(rs.rtt, Duration::from_millis(9));
-    }
-
-    /// Send times, in ms after `t0`, of the packets BBR still tracks across every space.
-    fn tracked_send_ms(bbr: &Bbr3, t0: Instant) -> Vec<u128> {
-        let mut times: Vec<_> = bbr
-            .packets
-            .snapshot()
-            .iter()
-            .map(|p| (p.send_time - t0).as_millis())
-            .collect();
-        times.sort();
-        times
-    }
-
-    /// A loss reported for Handshake packet 0 must remove that packet, not Initial packet 0.
-    #[test]
-    fn loss_removes_the_packet_from_its_own_space() {
-        let mut bbr = Bbr3::new(Arc::new(Bbr3Config::default()), PACKET);
-        let t0 = Instant::now();
-        let at = |ms| t0 + Duration::from_millis(ms);
-        let c: &mut dyn Controller = &mut bbr;
-
-        c.on_packet_sent(at(0), PACKET, 0, SpaceId::Initial);
-        c.on_packet_sent(at(1), PACKET, 1, SpaceId::Initial);
-        c.on_packet_sent(at(2), PACKET, 0, SpaceId::Handshake);
-        c.on_packet_lost(PACKET, 0, SpaceId::Handshake, at(10));
-
-        assert_eq!(
-            tracked_send_ms(&bbr, t0),
-            [0, 1],
-            "only Handshake 0, sent at 2ms, is gone"
-        );
-        assert_eq!(bbr.last_lost_packet, Some((SpaceId::Handshake, 0)));
-    }
-
-    /// A CE mark loses nothing, so the packet an ECN congestion event names stays tracked,
-    /// where it was once removed as lost.
-    #[test]
-    fn ce_keeps_the_marked_packet_tracked() {
-        let mut bbr = Bbr3::new(Arc::new(Bbr3Config::default()), PACKET);
-        let t0 = Instant::now();
-        let at = |ms| t0 + Duration::from_millis(ms);
-        let c: &mut dyn Controller = &mut bbr;
-
-        c.on_packet_sent(at(0), PACKET, 0, SpaceId::Initial);
-        c.on_packet_sent(at(1), PACKET, 1, SpaceId::Initial);
-        c.on_packet_sent(at(2), PACKET, 0, SpaceId::Handshake);
-        c.on_congestion_event(at(10), at(2), false, true, 0, 0, SpaceId::Handshake);
-
-        assert_eq!(tracked_send_ms(&bbr, t0), [0, 1, 2]);
-        assert_eq!(bbr.lost, 0);
-    }
 
     /// Rounds of 1, 2, 4, ..., 128 packets, 20ms apart, each acknowledged 10ms after it is sent,
     /// with every ACK reporting CE marks or none.
@@ -8171,7 +7735,7 @@ mod test {
         assert!(marked.bbr.window() * 2 < control.bbr.window());
         assert!(marked.bbr.pacing_rate * 2.0 < control.bbr.pacing_rate);
         // A mark is not a loss.
-        assert_eq!(marked.bbr.lost, 0);
+        assert_eq!(marked.bbr.rate.lost, 0);
         assert_eq!(marked.bbr.loss_events_in_round, 0);
     }
 
@@ -8184,7 +7748,7 @@ mod test {
         sim.round_ce(10 * MS, 20, 10 * MS);
         assert_eq!(sim.bbr.state, BbrState::Drain);
         assert!(sim.bbr.pacing_rate < pacing);
-        let bdp = sim.bbr.get_inflight(sim.bbr.max_bw, 1.0);
+        let bdp = sim.bbr.bbr.get_inflight(sim.bbr.bbr.max_bw, 1.0);
         assert_eq!(sim.bbr.inflight_longterm, bdp);
     }
 
@@ -8213,8 +7777,7 @@ mod test {
         let mut sim = probing_up();
         sim.ack(20 * MS, 10..20, false);
         let now = sim.at(20 * MS);
-        sim.bbr
-            .on_congestion_event(now, now, false, true, 0, 1000, SpaceId::Data);
+        sim.bbr.on_ce(Ce { now, sent: now });
         assert_eq!(sim.bbr.state, BbrState::ProbeBw(ProbeBwSubstate::Down));
         assert_eq!(sim.bbr.inflight_longterm, 12_000);
     }
@@ -8237,10 +7800,8 @@ mod test {
     fn ce_without_a_sample_keeps_the_bound() {
         let mut sim = probing_up();
         let now = sim.at(20 * MS);
-        sim.bbr
-            .on_end_acks(now, sim.inflight, false, Some(1000), SpaceId::Data);
-        sim.bbr
-            .on_congestion_event(now, now, false, true, 0, 1000, SpaceId::Data);
+        sim.bbr.end_acks(now, sim.inflight, false);
+        sim.bbr.on_ce(Ce { now, sent: now });
         assert_eq!(sim.bbr.state, BbrState::ProbeBw(ProbeBwSubstate::Down));
         assert_eq!(sim.bbr.inflight_longterm, 100_000);
     }
@@ -8258,8 +7819,10 @@ mod test {
         sim.lose(20 * MS, 109);
         assert_eq!(sim.bbr.state, BbrState::ProbeBw(ProbeBwSubstate::Up));
         let now = sim.at(20 * MS);
-        sim.bbr
-            .on_congestion_event(now, sim.at(10 * MS), false, true, 0, 19, SpaceId::Data);
+        sim.bbr.bbr.on_ce(Ce {
+            now,
+            sent: sim.at(10 * MS),
+        });
         assert_eq!(sim.bbr.state, BbrState::ProbeBw(ProbeBwSubstate::Down));
         // Packet 19 was sent with ten packets in flight.
         assert_eq!(sim.bbr.inflight_longterm, 12_000);
@@ -8351,10 +7914,10 @@ mod test {
         sim.lose(15 * MS, first);
         sim.ack_ce(20 * MS, first + 1..sim.pn);
         assert_ne!(sim.bbr.state, BbrState::Startup);
-        assert_eq!(sim.bbr.lost, PACKET as u64);
+        assert_eq!(sim.bbr.rate.lost, PACKET as u64);
         let (window, bound) = (sim.bbr.window(), sim.bbr.inflight_longterm);
 
-        sim.bbr.on_spurious_congestion_event();
+        sim.bbr.on_spurious_loss();
         assert_ne!(sim.bbr.state, BbrState::Startup);
         assert!(sim.bbr.full_bw_reached);
         assert_eq!(sim.bbr.window(), window);
@@ -8367,7 +7930,7 @@ mod test {
 
     /// Runs `sim` until `until_ns`, returning the bytes delivered meanwhile.
     fn run_until(sim: &mut Sim, until_ns: u64) -> u64 {
-        let start = sim.bbr.delivered;
+        let start = sim.bbr.rate.delivered;
         sim.run(
             10_000_000,
             |_| ControlFlow::Continue(()),
@@ -8376,7 +7939,7 @@ mod test {
                 false => ControlFlow::Continue(()),
             },
         );
-        sim.bbr.delivered - start
+        sim.bbr.rate.delivered - start
     }
 
     /// A bottleneck that marks CE above 5ms of queue, a quarter of the RTT, holds a shorter
