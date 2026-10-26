@@ -4,6 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Muting preserves the selected volume
+
+`<moq-watch>` keeps `muted` and `volume` independent, in either attribute or property order.
+Muting no longer writes zero to the `volume` property or attribute, and unmuting keeps the selected level, including zero.
+Setting `volume = 0` no longer sets `muted = true`, and setting a positive volume no longer clears mute.
+Set `el.muted` explicitly to change mute state; read it instead of `el.volume === 0` to identify mute.
+For audible state, check both: `!el.muted && el.volume > 0`.
+Use `muted = true` to stop audio downloads; volume zero only silences output.
+Programmatic level changes preserve mute; the UI slider still explicitly unmutes when moved above zero.
+
 ### Player inputs and `<moq-watch>` controls nest by media kind
 
 Move each per-media input under `video`, `audio`, or `text`, on `new Player({...})`, on `player.in`, and on the element's `controls`:

@@ -207,9 +207,6 @@ export default class MoqWatch extends HTMLElement {
 	// Set when the element is connected to the DOM.
 	#enabled = new Signal(false);
 
-	// Stashed volume to restore on unmute.
-	#unmuteVolume = 0.5;
-
 	/**
 	 * Effects owned by this element; media resources are suspended while disconnected.
 	 *
@@ -252,23 +249,6 @@ export default class MoqWatch extends HTMLElement {
 		this.text = this.player.text;
 		this.textRenderer = this.player.textRenderer;
 		this.sync = this.player.sync;
-
-		// Mute/volume coupling. The element owns the writable volume/muted Signals, so
-		// the policy lives here: muting stashes and zeroes the volume; a zero volume
-		// reports as muted.
-		this.signals.run((effect) => {
-			const muted = effect.get(this.controls.audio.muted);
-			if (muted) {
-				this.#unmuteVolume = this.controls.audio.volume.peek() || 0.5;
-				this.controls.audio.volume.set(0);
-			} else {
-				this.controls.audio.volume.set(this.#unmuteVolume);
-			}
-		});
-		this.signals.run((effect) => {
-			const volume = effect.get(this.controls.audio.volume);
-			this.controls.audio.muted.set(volume === 0);
-		});
 
 		// Watch to see if the canvas element is added or removed.
 		const setCanvas = () => {
@@ -494,7 +474,7 @@ export default class MoqWatch extends HTMLElement {
 		this.controls.paused.set(value);
 	}
 
-	/** The playback volume from 0 to 1, mirrored by the `volume` attribute. */
+	/** The playback level from 0 to 1, preserved while muted and mirrored by the `volume` attribute. */
 	get volume(): number {
 		return this.controls.audio.volume.peek();
 	}
@@ -503,7 +483,7 @@ export default class MoqWatch extends HTMLElement {
 		this.controls.audio.volume.set(value);
 	}
 
-	/** Whether audio is muted, mirrored by the `muted` attribute. */
+	/** Whether audio is muted independently of volume, mirrored by the `muted` attribute. */
 	get muted(): boolean {
 		return this.controls.audio.muted.peek();
 	}

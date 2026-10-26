@@ -12,6 +12,7 @@
 		"open-gop",
 		"capture-channel-count.browser.ts",
 		"buffering",
+		"watch-ui",
 		"publish-ui.browser.ts",
 		"publish-ui",
 		"media.ts",
