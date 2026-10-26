@@ -3202,14 +3202,17 @@ function saturatingSub(a: bigint, b: bigint): bigint {
 /** Snapshot the live edge of a track. */
 function liveEdge(track: TrackSubscriber): LiveEdge {
 	const latest = hooks.latestSequence(track);
-	if (latest === undefined) return {};
-
-	const largest = hooks.peekLargest(track).largest;
-	if (!largest) return { latest: BigInt(latest), next: { group: BigInt(latest), object: 0n } };
+	const largest = hooks.objectLargest(track);
+	if (!largest)
+		return latest === undefined ? {} : { latest: BigInt(latest), next: { group: BigInt(latest), object: 0n } };
 
 	const group = BigInt(largest.group);
 	const object = BigInt(largest.frame);
-	return { latest: BigInt(latest), largest: { group, object }, next: { group, object: object + 1n } };
+	return {
+		latest: latest === undefined ? undefined : BigInt(latest),
+		largest: { group, object },
+		next: { group, object: object + 1n },
+	};
 }
 
 /**

@@ -307,6 +307,8 @@ export interface ResumeSource {
 	finished(): Promise<Position>;
 	/** The serving copy's newest buffered frame, which a wire answer names as its edge. */
 	bufferedLargest(): Position | undefined;
+	/** The serving copy's newest actual object, including metadata retained past cache eviction. */
+	objectLargest(): Position | undefined;
 	/** The serving copy's largest location now, and whether it can still advance. */
 	peekLargest(): { largest?: Position; ended: boolean };
 	/**
@@ -387,8 +389,10 @@ export const hooks: {
 	 * the upstream START that resolves it has yet to arrive; assigned by `track.ts`.
 	 */
 	sourceStart: (subscriber: Subscriber) => number | "pending" | undefined;
-	/** The newest frame buffered for a subscriber, which wire answers name; assigned by `track.ts`. */
+	/** The newest frame still buffered for a subscriber; assigned by `track.ts`. */
 	bufferedLargest: (subscriber: Subscriber) => Position | undefined;
+	/** The newest actual object received or reported upstream, independent of cache retention. */
+	objectLargest: (subscriber: Subscriber) => Position | undefined;
 	/** Call `fn` with a group's frame count now and on every change; assigned by `group.ts`. */
 	groupProgress: (group: GroupProducer, fn: (total: number) => void) => Dispose;
 	/**
@@ -554,6 +558,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	bufferedLargest: () => {
+		throw new Error("track.ts not loaded");
+	},
+	objectLargest: () => {
 		throw new Error("track.ts not loaded");
 	},
 	groupProgress: () => {
