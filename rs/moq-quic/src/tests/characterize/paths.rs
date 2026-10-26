@@ -71,12 +71,6 @@ impl crypto::Session for LimitedSession {
 	fn peer_identity(&self) -> Option<Box<dyn Any>> {
 		self.0.peer_identity()
 	}
-	fn early_crypto(&self) -> Option<(Box<dyn crypto::HeaderKey>, Box<dyn crypto::PacketKey>)> {
-		self.0.early_crypto()
-	}
-	fn early_data_accepted(&self) -> Option<bool> {
-		self.0.early_data_accepted()
-	}
 	fn is_handshaking(&self) -> bool {
 		self.0.is_handshaking()
 	}
@@ -283,42 +277,6 @@ fn version_negotiation_after_invalid_retry() {
 			Some(ConnectionError::VersionMismatch)
 		);
 	}
-}
-
-/// 0-RTT data sent before a Retry is discarded by the server, so the client sends it again
-#[test]
-fn zero_rtt_retransmit_after_retry() {
-	let _guard = subscribe();
-	let mut pair = pair_with(|_| {});
-	pair.server.handle_incoming = Box::new(validate_incoming);
-	// Without a NEW_TOKEN to spend, every connection is retried
-	let mut config = client_with(|_| {});
-	config.token_store(Arc::new(NoneTokenStore));
-
-	let client_ch = pair.begin_connect(config.clone());
-	pair.drive();
-	pair.server.assert_accept();
-	let now = pair.time;
-	pair.client_conn_mut(client_ch).close(now, VarInt(0), Bytes::new());
-	pair.drive();
-
-	let client_ch = pair.begin_connect(config);
-	assert!(pair.client_conn_mut(client_ch).has_0rtt());
-	let s = pair
-		.client_streams(client_ch)
-		.open(Dir::Uni, Default::default())
-		.unwrap();
-	pair.client_send(client_ch, s).write(MSG).unwrap();
-	pair.drive();
-
-	let server_ch = pair.server.assert_accept();
-	assert!(pair.client_conn_mut(client_ch).accepted_0rtt());
-	assert_eq!(pair.client_conn_mut(client_ch).stats().frame_tx.stream, 2);
-	assert_eq!(pair.server_streams(server_ch).accept(Dir::Uni), Some(s));
-	let mut recv = pair.server_recv(server_ch, s);
-	let mut chunks = recv.read().unwrap();
-	assert_eq!(chunks.next(usize::MAX).unwrap().unwrap().bytes, MSG);
-	let _ = chunks.finalize();
 }
 
 /// A packet that arrives from a new address moves the server to it, and when the new address

@@ -34,4 +34,4 @@ A CI `cargo check` for wasm32 keeps them building.
 
 ## Required
 
-- [A runtime trait replaces web-async](/quest/m2/runtime-trait.md) - spawn and time on the browser instead of tokio's runtime
+- [Libraries spawn nothing](/quest/m1/poll-first/no-spawn.md) - web-async gone and the browser clock read directly, with no runtime to spawn on

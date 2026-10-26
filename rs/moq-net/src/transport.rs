@@ -180,13 +180,14 @@ impl Stats for StatsUnavailable {}
 ///
 /// A session keeps each unit it is still assembling leased, and a unit larger than the
 /// window can never complete, so the window has to fit the largest one with its framing:
-/// a legacy announcement set, past any frame payload.
+/// a legacy announcement set, past any frame segment. A frame returns its credit a
+/// segment at a time, so its size never matters here.
 pub const MIN_RECEIVE_WINDOW: u64 = {
 	// A type and a size prefix, each a varint of at most 8 bytes.
 	const PREFIXES: u64 = 16;
 	let message = <crate::lite::AnnounceInit<'static> as crate::lite::Message>::MAX_SIZE as u64 + PREFIXES;
-	let frame = crate::group::MAX_CACHE_BYTES;
-	if message > frame { message } else { frame }
+	let segment = crate::frame::SEGMENT as u64;
+	if message > segment { message } else { segment }
 };
 
 /// The typed transport condition when no application code was received.

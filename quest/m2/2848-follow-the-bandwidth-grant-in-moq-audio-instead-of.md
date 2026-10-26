@@ -42,7 +42,9 @@ grant; `Options::bandwidth` documents that
   `300_000 * channels` (`backend/libopus.rs`, `rs/moq-audio/src/opus.rs`). `Policy::min` defaults to a tenth of
   the ceiling (`rs/moq-mux/src/rate.rs`); for Opus it is the codec floor. A
   grant below it disables the rendition until bandwidth recovers (decided
-  2026-10-04 with the enabled flag); the encoder never errors. Once viewers
+  2026-10-04 with the enabled flag), through the disable and re-enable rule
+  [simulcast rung disable](/quest/m1/simulcast-rung-disable.md) puts beside
+  `Control` rather than a second one; the encoder never errors. Once viewers
   deselect it, its demand and so its grant go away, so recovery evaluates a
   hypothetical share against the current estimate, as the ladder controller
   does. The reservation's ceiling is
@@ -65,3 +67,7 @@ one policy step, holds it on a `None` grant, and ramps back when the grant
 returns; a grant below the Opus floor disables the rendition, and recovered
 bandwidth enables it again even after the last viewer unsubscribed; a PCM Producer
 ignores every grant.
+
+## Required
+
+- [Simulcast rung disable](/quest/m1/simulcast-rung-disable.md) - the shared disable and re-enable rule in `moq_mux::rate` that this quest reuses

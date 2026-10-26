@@ -40,6 +40,7 @@ const GOAWAY_VERSIONS: &[&str] = &[
 	"moq-transport-16",
 	"moq-transport-17",
 	"moq-transport-18",
+	"moq-transport-22",
 ];
 
 /// A full receive window or missing FIN ACK cannot hold a drain beyond its local deadline.
