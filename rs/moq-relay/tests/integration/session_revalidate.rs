@@ -239,7 +239,10 @@ impl Fixture {
 fn client_at(bind: &str) -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
-	config.websocket.delay = Some((Duration::ZERO).into());
+	#[cfg(feature = "websocket")]
+	{
+		config.websocket.delay = Some((Duration::ZERO).into());
+	}
 	config.bind = Some(bind.parse().expect("parse bind"));
 	config
 		.init(Default::default())

@@ -231,11 +231,11 @@ c-tests:
 # Benchmarks and examples stay in Nightly; the gate compiles the same targets
 # it tests, with both extremes exercising feature-gated implementation arms.
 
-# Compile and lint the selected packages at their feature extremes.
+# Isolate selected packages so a dependent cannot enable a feature that hides a warning.
 [positional-arguments]
 feature-shapes *args:
-    bash sh/local.sh cargo clippy --locked --tests --no-default-features "$@" -- -D warnings
-    bash sh/local.sh cargo clippy --locked --tests --all-features "$@" -- -D warnings
+    bash sh/local.sh cargo hack clippy --locked --tests --no-default-features "$@" -- -D warnings
+    bash sh/local.sh cargo hack clippy --locked --tests --all-features "$@" -- -D warnings
 
 # Compile the full feature matrix, including isolated combinations and their tests.
 features:

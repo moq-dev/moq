@@ -6,9 +6,7 @@ import {
 	checkRenditions,
 	checkResolvable,
 	EscapingBroadcast,
-	MAX_RENDITIONS,
 	type Root,
-	TooManyRenditions,
 	UnsupportedVersion,
 	VERSION,
 	watch,
@@ -27,16 +25,8 @@ function catalog(count: number): Root {
 	} as Root;
 }
 
-test("the shared cap accepts 64 renditions and refuses 65 with a typed error", () => {
-	expect(checkRenditions(catalog(MAX_RENDITIONS))).toBeDefined();
-	expect(() => checkRenditions(catalog(MAX_RENDITIONS + 1))).toThrow(TooManyRenditions);
-	expect(() =>
-		checkRenditions({
-			...catalog(MAX_RENDITIONS - 1),
-			video: { renditions: { video: {} } },
-			text: { renditions: { captions: {} } },
-		} as unknown as Root),
-	).toThrow(TooManyRenditions);
+test("the rendition count is the publisher's to choose", () => {
+	expect(Object.keys(checkRenditions(catalog(1000)).audio?.renditions ?? {})).toHaveLength(1000);
 });
 
 test("the shared containment check covers every section carrying a broadcast reference", () => {
@@ -57,13 +47,14 @@ test("the shared containment check covers every section carrying a broadcast ref
 	}
 });
 
-test("watch refuses an oversized catalog update", async () => {
+test("watch yields a catalog with many renditions", async () => {
 	const broadcast = new Moq.Broadcast.Producer();
 	const track = broadcast.createTrack(TRACK, { timescale: Moq.Time.Timescale.MILLI });
 	const producer = new Json.Snapshot.Producer<Root>({ track, deltas: false });
 	const consumer = watch(broadcast.consume())[Symbol.asyncIterator]();
-	producer.update({ value: catalog(MAX_RENDITIONS + 1), at: Moq.Time.Timestamp.now() });
-	await expect(consumer.next()).rejects.toBeInstanceOf(TooManyRenditions);
+	producer.update({ value: catalog(1000), at: Moq.Time.Timestamp.now() });
+	const next = await consumer.next();
+	expect(Object.keys(next.value?.audio?.renditions ?? {})).toHaveLength(1000);
 	producer.finish();
 	broadcast.close();
 });

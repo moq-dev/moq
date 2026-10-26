@@ -2,8 +2,8 @@
 
 ## Goal
 
-moq-mux parses H.264 parameter sets with `h264-reader`, the crate moq-video
-already uses, instead of `h264-parser` plus a hand-written VUI and HRD walker,
+moq-mux parses H.264 parameter sets with `h264-reader`, which moq-video and
+moq-mux's TS video timing (`container/ts/video_timing.rs`) already use, instead of `h264-parser` plus a hand-written VUI and HRD walker,
 and its codec config readers share one maintained bit reader. Catalog output
 is unchanged.
 
