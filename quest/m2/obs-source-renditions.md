@@ -39,11 +39,9 @@ Decided with the maintainer on 2026-10-22:
   to moq-ffi until another binding consumer needs one.
 - Make `epoch` part of rendition identity for both the active and the
   pending track.
-- moq-ffi's `MoqVideo` record drops hang's `preference` today, so OBS
-  cannot rank by it until the required m1 quest adds it to every binding.
-  Decided in review of
-  [moq-dev/moq#6366](https://github.com/moq-dev/moq/pull/6366): that field
-  rides m1's breaking binding cut, and this quest only consumes it.
+- moq-ffi's `MoqVideo` record carries hang's `preference` in every binding
+  since [moq-dev/moq#6410](https://github.com/moq-dev/moq/pull/6410); this
+  quest only consumes it.
 
 Extend `cpp/obs/test/moq-source-test.cpp` with these cases:
 

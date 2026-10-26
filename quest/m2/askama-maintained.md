@@ -17,3 +17,4 @@ its template syntax. Verify binding generation after the upgrade.
 ## Related
 
 - [Dependency audit](/quest/m2/audit-deps.md) - recheck the rest of the dependency graph
+- [Switch to rust2's UniFFI](/quest/m2/uniffi-fork.md) - askama reaches the lock only through `uniffi_bindgen`, which that switch moves to rust2

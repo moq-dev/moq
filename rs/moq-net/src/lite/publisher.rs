@@ -2096,9 +2096,9 @@ impl Request for SubscribeServe {
 					*self = Self::Run(Box::new(run));
 				}
 				Self::Run(run) => {
-					// The live edge reached the boundary; SUBSCRIBE_END was already sent (or
-					// the version predates the track stream). Drain the in-flight group
-					// machines, then FIN.
+					// The live edge reached the boundary, so SUBSCRIBE_END was already sent (or
+					// the version predates the track stream), or a bounded lite-07
+					// subscription is covered. Drain the in-flight group machines, then FIN.
 					if ready!(run.poll_step(writer, waiter))?.is_continue() {
 						return Poll::Ready(Ok(ControlFlow::Continue(())));
 					}
@@ -3580,6 +3580,12 @@ impl Bounds {
 		Ok(bounds)
 	}
 
+	/// Whether a subscription to these ranges over `version` ends once they are covered:
+	/// lite-07 with every range bounded. Earlier versions read a FIN as the track's end.
+	fn ends(&self, version: Version) -> bool {
+		version.has_ranges() && self.ranges.iter().all(|range| range.end.is_some())
+	}
+
 	/// Whether any end is a presentation time, which needs the track's timescale.
 	fn has_time(ranges: &[lite::Range]) -> bool {
 		ranges.iter().any(|range| {
@@ -3814,6 +3820,9 @@ struct TrackRun {
 	// Groups given up before the start resolved, which it must not name, with why.
 	skipped: RangeMap<u64, StreamError>,
 	end_sent: bool,
+	// Lite-07 with every range bounded: the subscription ends once nothing in its ranges is
+	// left to deliver, rather than parking for an update to widen it.
+	bounded: bool,
 	// Lite05+ names every sequence below the end that this subscription never
 	// got with SUBSCRIBE_DROP, so the subscriber settles without waiting out its grace
 	// for a group that will not come. The sequences served, sent as a datagram, or
@@ -3851,8 +3860,10 @@ impl TrackRun {
 		let datagrams = ctx.version.has_datagrams() && ctx.session.max_datagram_size() > 0;
 		// Lite03 and Lite04 declare no end, so neither side could settle on a drop.
 		let served = emit_range.then(RangeSet::new);
+		let bounded = bounds.ends(ctx.version);
 
 		Self {
+			bounded,
 			frames: bounds.frames,
 			refused: None,
 			ctx,
@@ -3880,11 +3891,11 @@ impl TrackRun {
 
 	/// Apply a SUBSCRIBE_UPDATE.
 	///
-	/// `end_group` is a serving cap, not a subscription terminator: groups past the
-	/// cap are held in the producer's cache until the subscriber raises the cap (or
-	/// unsets it), then served in order. Only a peer FIN actually ends the
-	/// subscription. This is what lets relays pause an upstream subscription across
-	/// consumer churn without tearing it down.
+	/// Before lite-07 an end is a serving cap, not a subscription terminator: groups past
+	/// the cap are held in the producer's cache until the subscriber raises the cap (or
+	/// unsets it), then served in order. Only a peer FIN ends the subscription. This is
+	/// what lets relays pause an upstream subscription across consumer churn without
+	/// tearing it down. Lite-07 ends one whose every range is bounded once it is covered.
 	fn update(&mut self, upd: lite::SubscribeUpdate) {
 		// Every update restates the wanted group. Past our largest it is a join, which
 		// repeats the pending ask; at or below it the group already exists.
@@ -3958,6 +3969,7 @@ impl TrackRun {
 		}
 		self.cap = end.map_or(Bound::Unbounded, Bound::Excluded);
 		self.move_cursor();
+		self.bounded = bounds.ends(self.ctx.version);
 		self.frames = bounds.frames;
 	}
 
@@ -3986,7 +3998,7 @@ impl TrackRun {
 	}
 
 	/// Serve one ready group or datagram (`Continue`), or `Break` once the live edge
-	/// reaches the track's boundary. Returning per item lets the caller watch the
+	/// reaches the track's boundary or a bounded lite-07 subscription is covered. Returning per item lets the caller watch the
 	/// requester while work stays ready.
 	fn poll_step(
 		&mut self,
@@ -4139,7 +4151,31 @@ impl TrackRun {
 		if self.poll_forward_drop(writer, waiter)? {
 			return Poll::Ready(Ok(ControlFlow::Continue(())));
 		}
+		// The FIN ends the subscription, not the track, so no SUBSCRIBE_END precedes it.
+		if self.covered() {
+			return Poll::Ready(Ok(ControlFlow::Break(())));
+		}
 		Poll::Pending
+	}
+
+	/// Whether a bounded subscription has nothing left to deliver: every group its ranges
+	/// name was served or dropped, and every stream it opened is done.
+	fn covered(&mut self) -> bool {
+		if !self.bounded || self.opening.is_some() || self.first.is_some() || !self.children.is_empty() {
+			return false;
+		}
+		match (self.start, &self.served) {
+			(Some(start), Some(served)) => self.track.covered(start, served),
+			// Before SUBSCRIBE_START the subscriber owes itself nothing (see
+			// `SubStream::owed`), so only a range given up whole is covered. Datagrams
+			// resolve no start, and a FIN would overtake them, so a range they served
+			// keeps the subscription open.
+			(None, _) => {
+				let skipped: RangeSet<u64> = self.skipped.iter().map(|(range, _)| range.clone()).collect();
+				self.track.covered(self.floor, &skipped)
+			}
+			(Some(_), None) => false,
+		}
 	}
 
 	/// Lite-05+ names a sequence as soon as this cursor gives it up; whether one was taken.

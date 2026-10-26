@@ -3149,9 +3149,20 @@ struct InFlight {
 	routes: super::resume::Producer,
 	// Kept for its readers: the logical track, the query holding its copy, and the copy's
 	// subscription.
-	_accepted: Option<track::Producer>,
+	accepted: Option<track::Producer>,
 	_copy: Option<track::Querying>,
 	_held: Option<kio::Pending<track::Subscribing>>,
+}
+
+impl InFlight {
+	/// Let go once its last reader left. Nobody reads the logical track any more, so it ends
+	/// as a cancel rather than as a producer dropped unfinished.
+	fn release(self) {
+		self.routes.release();
+		if let Some(accepted) = self.accepted {
+			let _ = accepted.abort(Error::Cancel);
+		}
+	}
 }
 
 /// Drives one front until it ends, then holds the tracks it left in flight until
@@ -3172,7 +3183,7 @@ async fn run_front(task: FrontTask, origin: TasksWeak) {
 		for io in std::mem::take(&mut in_flight) {
 			match io.weak.poll_unused(waiter) {
 				Poll::Pending => in_flight.push(io),
-				Poll::Ready(_) => io.routes.release(),
+				Poll::Ready(_) => io.release(),
 			}
 		}
 		match in_flight.is_empty() {
@@ -3687,7 +3698,7 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 							in_flight.push(InFlight {
 								weak,
 								routes,
-								_accepted: accepted,
+								accepted,
 								_copy: copy.map(|(_, _, query)| query),
 								_held: held,
 							});

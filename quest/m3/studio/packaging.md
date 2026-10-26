@@ -15,7 +15,9 @@ and a `release` feature turns on every backend its platform can load without
 one (`capture`, `openh264`, `vaapi`, `nvidia`, and the platform frameworks).
 Every artifact builds with `release`. `pipewire` stays out of `release`
 because it links libpipewire at load time, but the Flatpak bundles
-libpipewire, so it adds `pipewire` itself.
+libpipewire, so it adds `pipewire` itself: inside the sandbox the camera
+portal is the only way to a camera, and its PipeWire DMA-BUFs are what the
+compositor imports without a copy.
 
 ## Required
 

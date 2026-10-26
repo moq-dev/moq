@@ -10,12 +10,13 @@ a request has no connection to meter.
 ## Plan
 
 Token claims and HTTP grants carry path patterns only; object roles, including
-bitrate caps, are refused during parsing. The first transport-enforcement quest
-reintroduces optional caps with a type moq-auth owns (or a lower shared units
-crate), converted at the relay boundary so moq-auth never depends on moq-net.
-Its parsers and refusal rules must prevent any transport without enforcement
-from silently discarding a cap. This quest reuses only caps that admission
-actually enforces.
+bitrate caps, are refused during parsing. Decided 2026-10-25 (maintainer):
+[QUIC caps](/quest/m2/rate-quic.md) reintroduces optional caps with a type
+moq-auth owns (or a lower shared units crate), converted at the relay boundary
+so moq-auth never depends on moq-net, and [the grant](/quest/m2/rate-grant.md)
+Requires it. This quest reuses that type. Its parsers and refusal rules must
+prevent any transport without enforcement from silently discarding a cap, so
+WebSocket admission keeps refusing caps until this wrapper enforces them.
 
 TCP carries the backpressure, but only if the kernel cannot absorb the
 excess:
@@ -43,6 +44,10 @@ excess:
 Tests: a client writing flat out is held to the cap plus the bounded
 buffers; delivery to a capped subscriber never exceeds it; a cap change on a
 live session applies.
+
+## Required
+
+- [QUIC caps](/quest/m2/rate-quic.md) - introduces the moq-auth cap type this reuses
 
 ## Related
 
