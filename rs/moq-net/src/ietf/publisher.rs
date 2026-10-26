@@ -4979,6 +4979,8 @@ struct TrackServe {
 	version: Version,
 	range: ServeRange,
 	requested: ServeRange,
+	/// Active group streams also observe narrowing, even while waiting for another frame.
+	bounds: kio::Producer<ServeRange>,
 	filter: Filter,
 	timescale: Option<Timescale>,
 	/// The one group waiting for stream credit. The cursor hands out no other meanwhile, so
@@ -5053,6 +5055,7 @@ impl TrackServe {
 			version,
 			range,
 			requested: range,
+			bounds: kio::Producer::new(range),
 			filter: Filter::Unfiltered,
 			timescale,
 			opening: None,
@@ -5098,6 +5101,9 @@ impl TrackServe {
 			};
 		}
 		let mut range = self.requested;
+		if let Ok(mut bounds) = self.bounds.write() {
+			*bounds = range;
+		}
 		let mut subscription = self.track.subscription();
 		range.apply(&mut subscription);
 		self.track.update(subscription)?;
@@ -5276,6 +5282,7 @@ impl TrackServe {
 		)
 		.counted(self.opened.clone())
 		.terminal(self.terminal.clone())
+		.bounded(self.bounds.consume())
 	}
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
@@ -5754,6 +5761,7 @@ struct GroupServe {
 	version: Version,
 	prior_object: Option<u64>,
 	slice: GroupSlice,
+	bounds: Option<kio::Consumer<ServeRange>>,
 	ended: bool,
 	terminal: Option<Arc<Terminal>>,
 	marked: bool,
@@ -5826,12 +5834,37 @@ impl GroupServe {
 			version,
 			prior_object: None,
 			slice,
+			bounds: None,
 			ended: false,
 			terminal: None,
 			marked: false,
 			state: GroupState::Open,
 			budget: kio::coop::Budget::new(32),
 		}
+	}
+
+	fn bounded(mut self, bounds: kio::Consumer<ServeRange>) -> Self {
+		self.bounds = Some(bounds);
+		self
+	}
+
+	/// A narrowed filter gives back an excluded group's stream without ending its siblings.
+	fn poll_excluded(&self, waiter: &kio::Waiter) -> bool {
+		self.bounds.as_ref().is_some_and(|bounds| {
+			matches!(
+				bounds.poll(waiter, |range| {
+					let sequence = self.msg.group_id;
+					if range.start.is_some_and(|start| sequence < start.group)
+						|| range.end.is_some_and(|end| sequence > end.group)
+					{
+						Poll::Ready(())
+					} else {
+						Poll::Pending
+					}
+				}),
+				Poll::Ready(Ok(()))
+			)
+		})
 	}
 
 	fn terminal(mut self, terminal: Arc<Terminal>) -> Self {
@@ -5849,6 +5882,10 @@ impl GroupServe {
 	/// Gives up once the group can no longer be sent, so a parked group never spends the
 	/// credit it was waiting for on a reset.
 	fn poll_open(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		if self.poll_excluded(waiter) {
+			self.state = GroupState::Done;
+			return Poll::Ready(Err(Error::Cancel));
+		}
 		if !matches!(self.state, GroupState::Open) {
 			return Poll::Ready(Ok(()));
 		}
@@ -5883,6 +5920,10 @@ impl GroupServe {
 	}
 
 	fn poll_serve(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		if self.poll_excluded(waiter) {
+			self.state = GroupState::Done;
+			return Poll::Ready(Err(Error::Cancel));
+		}
 		let mut cx = waiter.context();
 		// A REQUEST_UPDATE can move the subscriber priority while this stream is open, and
 		// the session's other group streams can move its rank. Serve and Closed, the only
@@ -10155,6 +10196,68 @@ mod serve_tests {
 			}
 			assert!(h.log.resets().is_empty(), "a served fill must not reset");
 		}
+	}
+
+	/// Narrowing an open subscription retires a group excluded by the new range.
+	#[moq_clock::test]
+	async fn narrowing_retires_an_open_live_group() {
+		let version = Version::Draft22;
+		let h = serve(version);
+		let mut group = h.track.create_group(group::Info { sequence: 1 }).unwrap();
+		group.write_frame(timestamp(), b"before-update".as_slice()).unwrap();
+		moq_clock::sim::yield_now().await;
+		let mut request = ScriptedSession::new(Vec::new());
+		request.log = h.log.clone();
+		let stream = Stream::open(&mut crate::driver::Transport::new(request.clone()), version)
+			.await
+			.unwrap();
+		let mut serving = std::pin::pin!(
+			h.publisher
+				.clone()
+				.run_subscribe_stream(stream, subscribe(Filter::Unfiltered, None))
+		);
+		serve_until(serving.as_mut(), "the current group is open", || {
+			occurrences(&h.log, b"before-update") == 1
+		})
+		.await;
+		let update = ietf::SubscribeUpdate {
+			request_id: RequestId(2),
+			subscription_request_id: None,
+			start_location: Location { group: 0, object: 0 },
+			end_group: 0,
+			subscriber_priority: None,
+			forward: None,
+			filter: Some(Filter::Absolute {
+				start: Location { group: 4, object: 0 },
+				end: None,
+			}),
+			authorization_token: None,
+			new_group: None,
+			max_age: None,
+			fill: None,
+		};
+		let mut bytes = Vec::new();
+		let mut encoder = Encoder::new(&mut bytes, version.into());
+		encoder.varint(ietf::SubscribeUpdate::ID).unwrap();
+		update.encode(&mut encoder, version).unwrap();
+		request.push(&bytes);
+		serve_until(serving.as_mut(), "the narrowing is accepted", || {
+			Wire::read(&h.log, version).sent(ietf::RequestOk::ID).is_some()
+		})
+		.await;
+		group.write_frame(timestamp(), b"after-update".as_slice()).unwrap();
+		group.finish().unwrap();
+		let mut wanted = h.track.create_group(group::Info { sequence: 4 }).unwrap();
+		wanted.write_frame(timestamp(), b"wanted".as_slice()).unwrap();
+		wanted.finish().unwrap();
+		h.track.finish().unwrap();
+		serving.await.unwrap();
+		assert_eq!(
+			occurrences(&h.log, b"after-update"),
+			0,
+			"the excluded group stops forwarding"
+		);
+		assert_eq!(occurrences(&h.log, b"wanted"), 1, "the subscription remains live");
 	}
 
 	/// An independent historical fill never expands the subscription's live bounds.
