@@ -1003,7 +1003,6 @@ pub(crate) fn range_updates<B: Backend>(c: &mut Criterion) {
 	group.finish();
 }
 
-
 fn join<B: Backend>(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Item = Shape>) {
 	let rt = runtime();
 	let shapes: Vec<_> = shapes.into_iter().collect();
