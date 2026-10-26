@@ -593,7 +593,7 @@ impl Route {
 	/// True when the chain holds a 0 anywhere, including Lite03 hop-count
 	/// placeholders. An anonymous route ranks below every fully identified one,
 	/// whatever the costs say. An empty chain is a local announcement, not the
-	/// anonymous mark; ingress fills a received empty list with 0 before it
+	/// anonymous mark; session ingress resolves a received empty list before it
 	/// enters the table.
 	pub fn is_anonymous(&self) -> bool {
 		self.hops.iter().any(|hop| *hop == Hop::UNKNOWN)

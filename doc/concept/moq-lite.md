@@ -77,7 +77,8 @@ On opt-in moq-lite 07, the receiver assigns each publishing session its own
 routing identity. Reconnecting, or reaching a publisher directly and through
 a relay, produces different identities. Only a matching explicit publisher
 epoch permits resuming between those paths. Declared hop IDs remain hints
-for detecting loops, not proof that two publishers are the same.
+for detecting loops, not proof that two publishers are the same. A new
+session does not retire handles still served by the old session.
 
 A relay operator can lower the [hop-path cap](/bin/relay/cluster#topology) to
 limit the detours explored after a withdrawal. It drops longer paths while

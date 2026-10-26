@@ -235,10 +235,9 @@ impl Client {
 	/// subscribe (ingress) producer are attributed by the model through the
 	/// stats context; one shared context, so presence and viewer counts are
 	/// never double-attributed across the two halves. `peer_hop` is the identity
-	/// this connection attributes the peer to when the peer declares none, so
-	/// subscriptions from the peer resolve to a source whose route excludes it.
-	/// A declared identity still wins inside each publisher; announce filtering
-	/// is per-protocol and handled there too.
+	/// this connection assigns the peer, so subscriptions never resolve back through
+	/// that session. Older protocols prefer a declared identity; lite07 filters
+	/// the assigned session and the declared loop hint independently.
 	fn origins(&self, peer_hop: crate::Hop) -> (Option<origin::Consumer>, Option<origin::Producer>) {
 		if self.publish.is_none() && self.subscribe.is_none() {
 			tracing::warn!("not publishing or consuming anything");

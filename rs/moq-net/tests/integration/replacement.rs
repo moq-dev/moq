@@ -5,10 +5,10 @@
 //! drain does.
 //!
 //! Without an epoch the re-announced routes are new instances, so announce consumers
-//! get a `Restart`. A handle resolved before the replacement keeps serving new requests
-//! until that `Restart` is deliverable, so its holder can follow the `Restart` instead
-//! of failing `Unroutable`. With an epoch the replacement continues the instance: no
-//! `Restart`, and the old handle keeps working.
+//! get a `Restart`. On lite-07 each session is independent: the old handle keeps serving
+//! while its session does. Older versions identify the peer by its declaration, so the
+//! old handle retires once that `Restart` is deliverable. With an epoch the replacement
+//! continues the instance: no `Restart`, and the old handle keeps working.
 
 use crate::support;
 
@@ -90,10 +90,13 @@ async fn replace(version: &str, epoch: Option<Epoch>) {
 
 	let _first = link(version, &publisher, &viewer).await;
 	let mut announced = viewer.consume().announced();
-	match next_event(&mut announced).await {
-		announce::Event::Start(announce) => assert_eq!(announce.prefix.as_str(), "cam"),
+	let initial = match next_event(&mut announced).await {
+		announce::Event::Start(announce) => {
+			assert_eq!(announce.prefix.as_str(), "cam");
+			announce.route
+		}
 		other => panic!("{version}: expected the broadcast, got {other:?}"),
-	}
+	};
 
 	let old = viewer.consume().request_broadcast("cam", None).await.unwrap();
 	let mut sticky = subscribe(&old, "video").await.unwrap();
@@ -115,6 +118,17 @@ async fn replace(version: &str, epoch: Option<Epoch>) {
 	if epoch.is_some() {
 		// The epoch continues across the replacement: nothing to restart, and the old
 		// handle keeps serving.
+		if version.alpn() == "moq-lite-07-wip" {
+			// The connection has a new stamp, but the epoch still names the same bytes.
+			let announce::Event::Update(update) = next_event(&mut announced).await else {
+				panic!("{version}: the new stamp must update metadata without restarting");
+			};
+			assert_eq!(update.prefix.as_str(), "cam");
+			assert_eq!(update.route.epoch, initial.epoch);
+			assert_eq!(update.route.hops.len(), 2);
+			assert_ne!(update.route.hops.iter().next(), initial.hops.iter().next());
+			assert_eq!(update.route.hops.iter().last(), initial.hops.iter().last());
+		}
 		if let Ok(event) = moq_clock::timeout(PAST_HOLD, announced.next()).await {
 			panic!("{version}: an epoch route restarted on replacement: {event:?}");
 		}
@@ -124,21 +138,35 @@ async fn replace(version: &str, epoch: Option<Epoch>) {
 		return;
 	}
 
-	// Without an epoch the replacement is a restart: once the hold releases it, the old
-	// handle refuses new requests, and the restart is already there to follow.
+	// Without an epoch the replacement is a restart. A fresh session identity cannot
+	// retire the old session's requests, even when both declared the same loop hint.
 	moq_clock::sleep(PAST_HOLD).await;
-	let Err(err) = subscribe(&old, "meta").await else {
-		panic!("{version}: a retired handle served a request");
+	if version.alpn() == "moq-lite-07-wip" {
+		let independent = cam.create_track("independent", timed()).unwrap();
+		let mut later = subscribe(&old, "independent").await.unwrap();
+		write(&independent, "old:0");
+		assert_eq!(read(&mut later).await, "old:0", "{version}");
+	} else {
+		let Err(err) = subscribe(&old, "meta").await else {
+			panic!("{version}: a retired handle served a request");
+		};
+		assert!(matches!(err, Error::Unroutable), "{version}: {err}");
+	}
+	let restart = if version.alpn() == "moq-lite-07-wip" {
+		// Neither independent session's requests poll the replacement's hold, so
+		// the announce reader drives it when it asks for the next event.
+		Some(next_event(&mut announced).await)
+	} else {
+		announced.try_next()
 	};
-	assert!(matches!(err, Error::Unroutable), "{version}: {err}");
-	match announced.try_next() {
+	match restart {
 		Some(announce::Event::Restart(announce)) => assert_eq!(announce.prefix.as_str(), "cam"),
-		other => panic!("{version}: retired before the restart was deliverable, got {other:?}"),
+		other => panic!("{version}: expected the replacement's restart, got {other:?}"),
 	}
 
 	// Following the restart resolves the path afresh, and the new handle serves.
 	let fresh = viewer.consume().request_broadcast("cam", None).await.unwrap();
-	assert!(!fresh.is_clone(&old), "{version}: joined the retired broadcast");
+	assert!(!fresh.is_clone(&old), "{version}: joined the previous broadcast");
 	let mut followed = subscribe(&fresh, "meta").await.unwrap();
 	write(&meta, "meta:0");
 	assert_eq!(read(&mut followed).await, "meta:0", "{version}");
