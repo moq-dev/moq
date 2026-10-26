@@ -18,7 +18,6 @@
 #include <chrono>
 #include <cstdarg>
 #include <cmath>
-#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -119,7 +118,6 @@ struct CandidateFailure {
 	bool failed = false;
 };
 std::mutex g_candidate_mutex;
-std::condition_variable g_candidate_failed;
 CandidateFailure g_candidate;
 } // namespace
 
@@ -147,7 +145,6 @@ void blog(int, const char *format, ...)
 	if (!candidate || strcmp(candidate->kind, kind) != 0)
 		return;
 	g_candidate.failed = true;
-	g_candidate_failed.notify_all();
 }
 
 void *bmalloc(size_t size)
@@ -1235,10 +1232,10 @@ int main()
 			route.epoch = "01900000-0000-7000-8000-000000000002";
 			TestOk(hidden->announce(route), "announce mismatched sibling");
 		}
-		{
-			std::unique_lock<std::mutex> lock(g_candidate_mutex);
-			g_candidate_failed.wait(lock, [&] { return g_candidate.failed; });
-		}
+		CHECK(WaitFor([] {
+			std::lock_guard<std::mutex> lock(g_candidate_mutex);
+			return g_candidate.failed;
+		}));
 		{
 			std::lock_guard<std::mutex> lock(ctx->mutex);
 			auto playing = active.lock();
