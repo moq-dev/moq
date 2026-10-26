@@ -126,3 +126,4 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [Thin generic test executors](/quest/m0/ci/thin-executors.md) - `moq_clock::sim::run` and the tokio test executor compile once instead of once per test
 - [Fewer BTreeMap instantiations](/quest/m0/ci/btree-keys.md) - moq-net shares BTreeMap key and value types, kept only if its CPU time drops
 - [Measure moving unit tests out](/quest/m0/ci/test-layout.md) - report what moq-net would save by not compiling its library twice for unit tests
+- [Turn off axum's tower-log](/quest/m0/ci/tower-log.md) - tracing stops expanding its `log` feature in every crate, measured on the moq-net edit
