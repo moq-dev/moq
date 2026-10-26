@@ -13,9 +13,9 @@ Builds on `moq_video::render::export` from
 [moq-dev/moq#6805](https://github.com/moq-dev/moq/pull/6805); start after it
 merges. That PR's exporter probes each candidate encoder with a frame
 exported from the drawing device, and passes over a Media Foundation encoder
-that sits on a different adapter. Enumerate the MFT with
-`MFT_ENUM_ADAPTER_LUID` set to the texture's adapter so the probe finds one
-that reads it. An explicitly named encoder that still cannot read the device
+that sits on a different adapter. Enumerate with `MFTEnum2` instead of
+`MFTEnumEx`, passing an `IMFAttributes` store whose `MFT_ENUM_ADAPTER_LUID`
+is the texture's adapter, so the probe finds a hardware encoder that reads it. An explicitly named encoder that still cannot read the device
 fails at setup, as it does today.
 
 Decided 2026-10-26 (maintainer): m2, beside Direct3D11 import. It changes no
