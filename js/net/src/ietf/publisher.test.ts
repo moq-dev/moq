@@ -4418,6 +4418,44 @@ test.each([0, Number.MAX_SAFE_INTEGER + 2])(
 	},
 );
 
+test("draft-22: a range update replaces the live subscription bounds", async () => {
+	const fx = fixture();
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 0n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+		}),
+	);
+	try {
+		const parameters = new Parameters();
+		parameters.subscriptionFilter = { kind: "absolute", startGroup: 2n, startObject: 1n, endGroup: 3n, endObject: 0n };
+		await client.writer.u53(SubscribeUpdate.id);
+		await new SubscribeUpdate({ requestId: 2n, parameters }).encode(client.writer, fx.version);
+		expect(await client.reader.u53()).toBe(RequestOk.id);
+		await RequestOk.decode(client.reader, fx.version);
+		for (let i = 0; i < 5; i++) writeGroup(track, 2);
+		track.close();
+		const served: ServedGroup[] = [];
+		for (let i = 0; i < 2; i++) {
+			const stream = await nextUni(fx.uni);
+			if (!stream) throw new Error("missing group from updated range");
+			served.push(await readGroup(stream));
+		}
+		expect(served.sort((a, b) => a.sequence - b.sequence).map(({ sequence, objects }) => ({ sequence, objects }))).toEqual([
+			{ sequence: 2, objects: [{ id: 1, payload: "2.1" }] },
+			{ sequence: 3, objects: [{ id: 0, payload: "3.0" }] },
+		]);
+	} finally {
+		client.close();
+		track.close();
+		fx.close();
+	}
+});
+
 test("subscriber max age and REQUEST_UPDATE preserve omitted preferences", async () => {
 	const fx = fixture(Version.DRAFT_18);
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
