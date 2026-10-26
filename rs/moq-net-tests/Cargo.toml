@@ -1,6 +1,6 @@
 [package]
 name = "moq-net-tests"
-description = "Session integration tests for moq-net."
+description = "moq-net tests that need its hidden fuzz module or JSON consumers."
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 version = "0.0.0"
