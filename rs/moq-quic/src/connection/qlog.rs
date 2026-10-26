@@ -104,7 +104,7 @@ impl QlogSink {
 			let event = PacketLost {
 				header: Some(PacketHeader {
 					packet_number: Some(pn),
-					packet_type: packet_type(space, false),
+					packet_type: packet_type(space),
 					length: Some(info.size),
 					..Default::default()
 				}),
