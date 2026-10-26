@@ -49,15 +49,9 @@ Path normalization, relative references, and subscription paths retain their sem
 Drop the `await`. Every caller reads the same value: the old shared cursor let one caller take an update and leave another waiting forever.
 To wait for each newer one, keep a reader and follow its stream: `const reader = producer.subscribe();`, then `await reader.largest()`.
 
-### Stage a requested track before subscribers see it (#6111)
-
-`Track.Request.stage(info)` returns a `Track.Staged` whose `producer` writes while subscribers waiting on the request stay pending; `commit()` publishes it with everything written so far and returns the `Producer`.
-Disposing a `Staged` uncommitted (`using`, or `[Symbol.dispose]()`) rejects the request. `accept(info)` is unchanged and equals `stage(info).commit()`.
-
 ### A frameless group is not a successor (#6111)
 
 A group followed by a frameless one is judged stale against the next group that has a frame, where the frameless group used to count.
-`Track.Producer.dropGroups(start, end, error)` marks groups `[start, end)` the peer said it skipped; a reader holding one of them rejects with `error`.
 
 ### Priorities are signed (#6142)
 

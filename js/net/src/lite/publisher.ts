@@ -1210,6 +1210,9 @@ export class Publisher {
 			for (;;) {
 				if (startSequence !== undefined && skipped.length > 0) {
 					for (const range of skipped) {
+						// What was given up below the start is never named, so a wider budget may serve it.
+						if (range.start < startSequence)
+							hooks.unreport(track, range.start, Math.min(range.end, startSequence));
 						if (!(await drop(Math.max(range.start, startSequence), range.end, range.error))) return false;
 					}
 					skipped.length = 0;

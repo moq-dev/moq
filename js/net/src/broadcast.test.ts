@@ -3,6 +3,7 @@ import { Milli } from "@moq/clock";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { GroupTooLarge, NotFound } from "./error.ts";
 import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "./group.ts";
+import { hooks } from "./internal.ts";
 import { textFrame } from "./mock.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import type { Request as TrackRequest } from "./track.ts";
@@ -63,7 +64,7 @@ test("a staged track resolves its subscribers at commit, with what was written",
 	const request = await pendingRequest(consumer);
 	if (!request) throw new Error("expected request");
 
-	const staged = request.stage({ timescale: Timescale.MILLI });
+	const staged = hooks.stageRequest(request, { timescale: Timescale.MILLI });
 	staged.producer.writeFrame(textFrame("hello"));
 	const pending = Symbol("pending");
 	expect(await Promise.race([track.info(), Promise.resolve(pending)])).toBe(pending);
@@ -71,31 +72,6 @@ test("a staged track resolves its subscribers at commit, with what was written",
 	staged.commit();
 	expect((await track.info()).timescale).toBe(Timescale.MILLI);
 	expect(await reader.readString()).toBe("hello");
-});
-
-test("disposing an uncommitted staged track rejects the request", async () => {
-	const consumer = new TestConsumer();
-	const info = consumer.track("video").info();
-	const request = await pendingRequest(consumer);
-	if (!request) throw new Error("expected request");
-
-	{
-		using staged = request.stage({ timescale: Timescale.MILLI });
-		staged.producer.writeFrame(textFrame("hello"));
-	}
-	await expect(info).rejects.toThrow();
-});
-
-test("a disposed staged track refuses a later commit", async () => {
-	const consumer = new TestConsumer();
-	const info = consumer.track("video").info();
-	const request = await pendingRequest(consumer);
-	if (!request) throw new Error("expected request");
-
-	const staged = request.stage({ timescale: Timescale.MILLI });
-	staged[Symbol.dispose]();
-	expect(() => staged.commit()).toThrow("staged track already committed or dropped");
-	await expect(info).rejects.toThrow("staged track dropped");
 });
 
 // A broadcast keeps nothing of a name once its track is gone: a replacement numbers and times its

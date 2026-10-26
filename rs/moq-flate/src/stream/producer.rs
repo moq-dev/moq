@@ -72,6 +72,15 @@ impl Producer {
 	pub fn finish(&mut self) -> Result<()> {
 		self.inner.lock().unwrap().finish()
 	}
+
+	/// Abort the track with the given error, which consumers see in place of a clean end.
+	///
+	/// Consumes the handle, since nothing can be appended afterwards. Clones sharing the track see
+	/// it closed: their next [`append`](Self::append) fails.
+	pub fn abort(self, err: moq_net::Error) -> Result<()> {
+		self.inner.lock().unwrap().abort(err);
+		Ok(())
+	}
 }
 
 /// Shared publishing state behind [`Producer`]'s `Arc<Mutex>`.

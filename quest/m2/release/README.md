@@ -30,6 +30,7 @@ production stability proven merely because upstream artifacts published.
 - [Migration audit](/quest/m2/release/migrate-audit.md) - the cut writes a MIGRATE.md entry for every break, stating the net published-to-final change
 - [API shape review](/quest/m2/release/api-review.md) - every new or changed public API reviewed for a better shape before the cut
 - [Feature review](/quest/m2/release/feature-review.md) - every major work line since the last release judged end to end before the cut
+- [Cargo feature review](/quest/m2/release/feature-flags.md) - defaults stay lean and every remaining feature is scoped to the crate that owns it, before the cut
 - [Claim new npm names](/quest/m2/release/npm-first-publish.md) - a maintainer claims `@moq/clock`, `libav`, `video`, and `p2p` on npm and JSR with trusted publishing, before the cut publishes them
 - [Cut and publish](/quest/m2/release/cut.md) - independently executable after m1; release-triggered publication
 - [Published assets](/quest/m2/release/assets-release.md) - npm carries hostable worklets

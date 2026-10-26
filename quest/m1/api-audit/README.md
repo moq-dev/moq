@@ -76,7 +76,6 @@ Rejected in planning:
 - [Two broadcast resolutions](/quest/m1/api-audit/resolve.md) - Rust, JS, and the bindings resolve a broadcast with `request(path, epoch)` or `follow(path, epoch)`, and every racy two-step caller is gone
 - [Binding publications](/quest/m1/api-audit/binding-publication.md) - moq-ffi, the C ABI, and every wrapper hand out a publication handle that announces, replacing the private adapters
 - [Bindings read gaps and ends](/quest/m1/api-audit/decode-read-bindings.md) - moq-ffi and every wrapper surface `Gap` and `End` instead of discarding them
-- [Session-only items stay private](/quest/m1/api-audit/model-private.md) - model items only the built-in sessions use are private
 - [Encoded consumers read gaps and ends](/quest/m1/api-audit/encoded-read-bindings.md) - moq-ffi, moq-c, and every wrapper read encoded media with the tagged-record shape the decoded consumers use
 - [One lifecycle vocabulary in @moq/e2ee](/quest/m1/api-audit/lifecycle.md) - @moq/e2ee ends tracks and groups with finish and abort, as @moq/net does
 - [moq-net names say one thing](/quest/m1/api-audit/net-names.md) - demand says `wanted`, colliding stats and transport names are renamed, and Rust and JS info lookups mirror

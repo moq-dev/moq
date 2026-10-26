@@ -141,7 +141,6 @@ class Producer {
     close(): void;
     get closed(): GetPromise<Error | null>;
     demand(): Demand;
-    dropGroups(start: number, end: number, error: Error): void;
     finish(): void;
     finishAt(end: Position_2): void;
     info(): Promise<Info>;
@@ -178,14 +177,7 @@ class Request_2 {
     readonly name: string;
     get priority(): number;
     reject(err?: Error): void;
-    stage(info?: Partial<Info>): Staged;
     get subscription(): Readonly<Subscription>;
-}
-
-class Staged {
-    [Symbol.dispose](): void;
-    commit(): Producer;
-    readonly producer: Producer;
 }
 
 class Subscriber {
@@ -246,7 +238,6 @@ declare namespace track {
         Subscription,
         Order,
         Request_2 as Request,
-        Staged,
         FetchGroupOptions,
         Consumer_2 as Consumer,
         Demand,

@@ -330,6 +330,17 @@ export interface TrackRequestOptions {
 	pending: Set<Request>;
 }
 
+/**
+ * A requested track written before any subscriber sees it; see `hooks.stageRequest`.
+ * Write through {@link producer}; {@link commit} publishes it with everything written so far.
+ */
+export interface StagedTrack {
+	/** The track's writer. */
+	readonly producer: Producer;
+	/** Resolve every waiting subscriber now. Throws, rejecting the request, if the info is refused. */
+	commit(): Producer;
+}
+
 /** Maximum buffered datagrams per subscriber; mirrors Rust's bounded send buffer. */
 export const MAX_DATAGRAMS = 64;
 
@@ -351,7 +362,8 @@ export const hooks: {
 	/**
 	 * End a wire subscription's copy cleanly without declaring an end, for a session closed
 	 * locally: a dead route, not finished content, so a resumed reader's replacement route
-	 * continues past it. Mirrors the Rust `close` on a `received()` copy; assigned by `track.ts`.
+	 * continues past it. Rust aborts its copy with `Cancel` instead, which its resume also reads
+	 * as a dead route. Assigned by `track.ts`.
 	 */
 	releaseTrack: (producer: Producer) => void;
 	/**
@@ -363,6 +375,13 @@ export const hooks: {
 	demandReleased: (demand: Demand) => GetPromise<Error | null>;
 	/** Whether the producer declared the track's end, released or not. Assigned by `track.ts`. */
 	trackFinished: (producer: Producer) => boolean;
+	/**
+	 * Record that the publisher gave up the groups `[start, end)` with `error`: none will
+	 * arrive, so a reader waiting on one moves past it, a group still arriving in them ends with
+	 * `error`, the declared end does not wait for them, and a relay serving this track forwards
+	 * the drop. Mirrors the Rust `drop_groups`; assigned by `track.ts`.
+	 */
+	dropTrackGroups: (producer: Producer, start: number, end: number, error: Error) => void;
 	/** The producer's largest reported location and its subsequent changes. */
 	producerLargest: (producer: Producer) => Getter<Position | undefined>;
 
@@ -386,6 +405,11 @@ export const hooks: {
 	startTrack: (producer: Producer, served: { start?: number; requested?: number }) => void;
 	/** Mint a track {@link Request}; assigned by `track.ts`. */
 	makeRequest: (options: TrackRequestOptions) => Request;
+	/**
+	 * Take a request's producer without resolving its subscribers, so content written before
+	 * {@link StagedTrack.commit} is there when the first reader looks; assigned by `track.ts`.
+	 */
+	stageRequest: (request: Request, info: Partial<Info>) => StagedTrack;
 	/** The newest frame a producer's cache holds, read without subscribing; assigned by `track.ts`. */
 	cachedLargest: (producer: Producer) => Position | undefined;
 	/** The publisher priority from a demanded track's committed {@link Info}; assigned by `track.ts`. */
@@ -436,6 +460,11 @@ export const hooks: {
 	deliveredRuns: (subscriber: Subscriber) => number;
 	/** Forget the gaps in another reader's `delivered` below each group past this subscriber's budget. */
 	forgetPastBudget: (subscriber: Subscriber, delivered: Delivered) => void;
+	/**
+	 * Take `[start, end)` back out of what a subscriber's wire cursor reported dropped: a drop
+	 * below where SUBSCRIBE_START resolved never goes out, so a wider budget may still serve it.
+	 */
+	unreport: (subscriber: Subscriber, start: number, end: number) => void;
 	/** Whether this subscriber's budget gives up on `sequence`, judged by its successor; see {@link expireGroup}. */
 	staleAt: (subscriber: Subscriber, sequence: number) => Expiry;
 	/** A group the subscriber's track still caches, as a fresh read handle. */
@@ -549,6 +578,9 @@ export const hooks: {
 	trackFinished: () => {
 		throw new Error("track.ts not loaded");
 	},
+	dropTrackGroups: () => {
+		throw new Error("track.ts not loaded");
+	},
 	producerLargest: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -565,6 +597,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	makeRequest: () => {
+		throw new Error("track.ts not loaded");
+	},
+	stageRequest: () => {
 		throw new Error("track.ts not loaded");
 	},
 	cachedLargest: () => {
@@ -601,6 +636,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	forgetPastBudget: () => {
+		throw new Error("track.ts not loaded");
+	},
+	unreport: () => {
 		throw new Error("track.ts not loaded");
 	},
 	tryRecvDatagram: () => {

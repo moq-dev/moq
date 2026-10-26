@@ -632,7 +632,6 @@ class Producer {
     close(): void;
     get closed(): GetPromise<Error | null>;
     demand(): Demand;
-    dropGroups(start: number, end: number, error: Error): void;
     finish(): void;
     finishAt(end: Position_2): void;
     info(): Promise<Info>;
@@ -740,7 +739,6 @@ class Request_2 {
     readonly name: string;
     get priority(): number;
     reject(err?: Error): void;
-    stage(info?: Partial<Info>): Staged;
     get subscription(): Readonly<Subscription>;
 }
 
@@ -827,12 +825,6 @@ export const SessionCode: ((code: number) => SessionCode) & {
 export { Signals }
 
 function size(v: number): number;
-
-class Staged {
-    [Symbol.dispose](): void;
-    commit(): Producer;
-    readonly producer: Producer;
-}
 
 interface Stats {
     bytesLost?: number;
@@ -974,7 +966,6 @@ declare namespace Track {
         Subscription,
         Order,
         Request_2 as Request,
-        Staged,
         FetchGroupOptions,
         Consumer_3 as Consumer,
         Demand,
@@ -995,7 +986,6 @@ declare namespace track {
         Subscription,
         Order,
         Request_2 as Request,
-        Staged,
         FetchGroupOptions,
         Consumer_3 as Consumer,
         Demand,
