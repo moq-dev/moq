@@ -60,14 +60,12 @@ OBS multistream, and the hosted version is product work outside this
 repository.
 
 Added 2026-10-25 (maintainer): the studio's
-GPU encode and
-[source import](/quest/m1/studio-gpu/import.md) quests are in m1 so
+GPU encode and source import quests are in m1 so
 moq-video's GPU encode and import API changes, mainly encoders taking a GPU
 surface and zero-copy texture import, land before the cut.
 
 ## Required
 
-- [Zero-copy source import](/quest/m1/studio-gpu/import.md) - captured and decoded frames reach the compositor as GPU textures instead of a CPU upload
 - [Studio on macOS and Windows](/quest/m3/studio/app.md) - the studio runs on macOS and Windows, not only Linux
 - [Viewer-side composition](/quest/m3/studio/compose/README.md) - sources as their own tracks plus a layout track, composed by viewers, with a server-composed program as the fallback
 - [Undo and the scene model](/quest/m3/studio/scene-model.md) - undo history, linked and cloned sources, copy and paste, a downstream keyer, and per-item filters

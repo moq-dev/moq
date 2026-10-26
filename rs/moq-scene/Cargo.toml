@@ -20,6 +20,11 @@ categories = ["multimedia", "multimedia::video", "rendering"]
 # libasound at build time, and a workspace build would otherwise unify it on for
 # every crate. Without it, those sources report that the build cannot capture.
 capture = ["moq-video/capture", "moq-audio/capture"]
+# PipeWire cameras on Linux, whose DMA-BUFs the compositor imports rather than
+# uploads, and audio devices through the sound server. Off by default like
+# moq-video's `pipewire`: it links libpipewire-0.3 at build time, so a Linux
+# package turns it on where the build host has it.
+pipewire = ["capture", "moq-video/pipewire", "moq-audio/pipewire"]
 
 [dependencies]
 bytemuck = { version = "1", features = ["derive"] }

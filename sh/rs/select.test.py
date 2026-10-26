@@ -74,6 +74,16 @@ class SelectTest(unittest.TestCase):
         calls = self.selected("rs/moq-stats/benches/producer_tick.rs")
         self.assertFalse(any(call.endswith("-features") for call in calls), calls)
 
+    def test_loom_compiles_only_when_its_model_changes(self):
+        for action in ("check", "check-test", "lint"):
+            for path in ("rs/kio/src/lib.rs", "rs/moq-net/tests/loom.rs", "Cargo.lock"):
+                with self.subTest(action=action, path=path):
+                    self.assertIn("rs loom --no-run", self.selected(path, action=action))
+            for path in ("rs/moq-tokio/src/lib.rs", "rs/moq-stats/benches/producer_tick.rs"):
+                with self.subTest(action=action, path=path):
+                    self.assertNotIn("rs loom --no-run", self.selected(path, action=action))
+        self.assertNotIn("rs loom --no-run", self.selected("rs/moq-net/src/lib.rs", action="test"))
+
     def test_device_features_join_the_one_test_build(self):
         for path, features in (("rs/moq-audio/src/lib.rs", DEVICE_FEATURES),
                                ("rs/moq-cli/src/main.rs", "moq-cli/play moq-cli/openh264")):
