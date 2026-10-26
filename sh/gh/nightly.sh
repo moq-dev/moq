@@ -2,7 +2,7 @@
 # Keep benchmark builds together while unrelated Nightly workloads run independently.
 set -euo pipefail
 
-usage='usage: just gh nightly rust-test|rust-bench|rust-shared|rust-extra|rust-uring|js|bindings'
+usage='usage: just gh nightly rust-test|rust-bench|rust-shared|rust-relay|rust-extra|rust-uring|js|bindings'
 if [[ $# != 1 ]]; then
     echo "$usage" >&2
     exit 2
@@ -10,7 +10,7 @@ fi
 # The measured groups write a report for the benchmark site; rust-test and bindings only run.
 case "$1" in
     rust-test | bindings) report= ;;
-    rust-bench | rust-shared | rust-extra | rust-uring) report=rust ;;
+    rust-bench | rust-shared | rust-relay | rust-extra | rust-uring) report=rust ;;
     js) report=js ;;
     *)
         echo "$usage" >&2
@@ -113,6 +113,9 @@ case "$1" in
             --bench catalog --bench ts_schedule --bench export --bench containers --bench matching \
             --bench chunk_interleaving --bench worker_turns \
             --bench streams --bench receive --bench endpoint --bench wire
+        ;;
+    rust-relay)
+        criterion relay -p moq-relay --features test-support --bench session
         ;;
     # Keep added coverage out of the rust-bench and rust-shared legs.
     rust-extra)
