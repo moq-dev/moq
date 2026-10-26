@@ -3306,7 +3306,7 @@ mod test {
 		assert_eq!(drain(&mut sub, false), vec![4, 5]);
 
 		let mut sub = sub.with_range(1..);
-		assert_eq!(drain(&mut sub, false), vec![1, 2, 3], "passed below the floor");
+		assert_eq!(drain(&mut sub, false), vec![3, 2, 1], "passed below the floor");
 		let mut sub = sub.with_range(..);
 		assert_eq!(drain(&mut sub, false), vec![0]);
 		assert_eq!(drain(&mut sub, false), Vec::<u64>::new(), "nothing goes out twice");
