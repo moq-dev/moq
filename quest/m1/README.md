@@ -112,7 +112,6 @@ surface and zero-copy texture import, land before the cut.
 
 ## Required
 
-- [moq-congestion](/quest/m1/congestion/README.md) - one QUIC congestion-control crate with a transport-independent trait, run by `moq-quic` and published for noq
 - [Release audit findings](/quest/m1/release-audit/README.md) - resolve newly identified resource, parser, playback, and interoperability risks before the cut
 - [Pre-cut audit findings](/quest/m1/cut-audit/README.md) - fix the crashes, hostile-input costs, and correctness bugs the 2026-10-24 audit of main found
 - [Cancelled moq-transport requests stop](/quest/m1/ietf-request-cancel.md) - a cancelled request releases its state even when the peer withholds credit
