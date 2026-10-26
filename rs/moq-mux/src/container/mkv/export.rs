@@ -497,7 +497,7 @@ impl<S: Stream> Export<S> {
 					let (frame, arrived) = match track.source.poll_event(waiter)? {
 						Poll::Ready(Some(Event::Frame { frame, arrived })) => (frame, arrived.max(track.subscribed)),
 						// A group that ended or was cut short holds frames no later one can precede.
-						Poll::Ready(Some(Event::GroupEnd | Event::Cut)) => {
+						Poll::Ready(Some(Event::GroupEnd | Event::Cut { .. })) => {
 							if track.declared.is_some() {
 								track.release(name, &mut self.jitter, true)?;
 							}

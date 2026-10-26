@@ -495,7 +495,7 @@ impl<S: Stream> Export<S> {
 						let frame = match track.source.poll_event(waiter)? {
 							Poll::Ready(Some(Event::Frame { frame, .. })) => frame,
 							// A group that ended or was cut short holds frames no later one can precede.
-							Poll::Ready(Some(Event::GroupEnd | Event::Cut)) => {
+							Poll::Ready(Some(Event::GroupEnd | Event::Cut { .. })) => {
 								track.release((kind, index), None, self.shift, true, &mut self.jitter)?;
 								continue;
 							}

@@ -268,7 +268,7 @@ struct Track {
 	/// When the source was subscribed. Nothing it delivers reached the export before then,
 	/// however long the cache held it.
 	subscribed: moq_clock::Instant,
-	/// The latest arrival read from the source, which settles the frames held for their DTS.
+	/// The latest frame arrival or observed loss, which settles frames held for their DTS.
 	latest: moq_clock::Instant,
 	/// The marker count the decode clock runs under.
 	restart: u64,
@@ -479,12 +479,15 @@ impl Track {
 				}
 				// A cut takes a start group it left short now, not with the next group, which may
 				// arrive after that start was due, or with the stream's end.
-				Poll::Ready(Some(Event::Cut)) if !input.waiting_for_header => {
-					self.settle = false;
-					self.release(name, input.jitter, true)?;
-					input.jitter.cut(&name.to_owned(), self.base.2 + self.source.cuts());
+				Poll::Ready(Some(Event::Cut { observed })) => {
+					self.latest = self.latest.max(observed);
+					self.settle = input.waiting_for_header;
+					if !input.waiting_for_header {
+						self.release(name, input.jitter, true)?;
+						input.jitter.cut(&name.to_owned(), self.base.2 + self.source.cuts());
+					}
 				}
-				Poll::Ready(Some(Event::GroupEnd | Event::Cut)) => self.settle = true,
+				Poll::Ready(Some(Event::GroupEnd)) => self.settle = true,
 				Poll::Ready(Some(Event::FrameEnd { .. })) => {}
 				Poll::Ready(None) => {
 					self.finished = true;
@@ -629,8 +632,8 @@ impl Track {
 	/// Queue every held video frame whose DTS is settled or that is overdue
 	/// ([`DecodeClock::settle`]), or all of them when `flush`.
 	///
-	/// A held frame is ready no earlier than the latest frame the source delivered, which
-	/// settled it, so it is judged as arriving then. Frames held through a silence,
+	/// A held frame is ready no earlier than the frame or observed loss that settled it,
+	/// so it is judged as arriving then. Frames held through a silence,
 	/// such as a dead publisher's last frames settled only by its replacement's, are late by the
 	/// silence: the jitter buffer drops them, where their own arrival would queue them behind a
 	/// schedule that has already gone past them. Nothing settles the frames still held when the
