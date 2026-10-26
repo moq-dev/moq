@@ -316,6 +316,8 @@ export interface ResumeSource {
 	largest(seen: Position | undefined): Promise<Position | undefined>;
 	/** An independent subscriber to the serving copy. */
 	fork(options?: Subscription): Subscriber;
+	/** A fresh reader for a group still cached by one of this reader's copies. */
+	cachedGroup(sequence: number): GroupConsumer | undefined;
 	/** Let go of every copy. */
 	close(abort?: Error): void;
 }

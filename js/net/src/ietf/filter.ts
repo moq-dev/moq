@@ -305,10 +305,8 @@ function expectEmpty(rest: Uint8Array): void {
 /**
  * A draft-22 fill: the backfill a subscriber asks for alongside its subscription.
  *
- * The publisher serves one whose range resolves to a single group, straight from the group
- * cache on a fetch stream. That covers the draft's own current-group join (a Next Object
- * subscription plus a `StartGroup=1` fill). Anything wider is refused by resetting the
- * fetch stream, the draft's fill-failure signal.
+ * The publisher serves the retained groups on a fetch stream in the requested order,
+ * capped at the Largest Object snapshot independently of the subscription's live cursor.
  */
 export interface Fill {
 	/** The filled groups' order, or the subscription's order when omitted. */

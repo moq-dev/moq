@@ -2081,6 +2081,7 @@ export class Subscriber {
 			};
 		};
 		hooks.cachedGroup = (subscriber, sequence) => {
+			if (subscriber.#resume) return subscriber.#resume.cachedGroup(sequence);
 			const producer = subscriber.#state.producer;
 			return producer && cachedMirror(producer, sequence);
 		};
