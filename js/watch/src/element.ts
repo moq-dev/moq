@@ -123,11 +123,6 @@ function parseBoolean(value: string | null, defaultValue: boolean): boolean {
 	return normalized !== "false" && normalized !== "0";
 }
 
-// Close everything when this element is garbage collected.
-// This is primarily to avoid a console.warn that we didn't close() before GC.
-// There's no destructor for web components so this is the best we can do.
-const cleanup = new FinalizationRegistry<Effect>((signals) => signals.close());
-
 /** The `<moq-watch>` element: plays a broadcast into a nested <canvas>. */
 export default class MoqWatch extends HTMLElement {
 	static observedAttributes = OBSERVED;
@@ -216,7 +211,7 @@ export default class MoqWatch extends HTMLElement {
 	#unmuteVolume = 0.5;
 
 	/**
-	 * Effects scoped to this element's lifetime, closed on disconnect.
+	 * Effects owned by this element; media resources are suspended while disconnected.
 	 *
 	 * Public because the element is the top of the tree: it's where an application hangs its own
 	 * reactivity. The components underneath keep theirs private, so `close()` is the only handle.
@@ -225,8 +220,6 @@ export default class MoqWatch extends HTMLElement {
 
 	constructor() {
 		super();
-
-		cleanup.register(this, this.signals);
 
 		this.connection = new Moq.Connection({
 			enabled: this.#enabled,
@@ -242,7 +235,12 @@ export default class MoqWatch extends HTMLElement {
 			catalogFormat: this.#catalogFormat,
 			catalog: this.#catalog,
 			...this.controls,
-			video: { ...this.controls.video, canvas: this.#canvas },
+			video: {
+				...this.controls.video,
+				canvas: this.signals.computed((effect) =>
+					effect.get(this.#enabled) ? effect.get(this.#canvas) : undefined,
+				),
+			},
 			text: { ...this.controls.text, container: this.#captionsOverlay },
 		});
 		this.signals.cleanup(() => this.player.close());

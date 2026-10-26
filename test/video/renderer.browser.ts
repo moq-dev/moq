@@ -306,3 +306,58 @@ test("buffered audio keeps its opening while video fills, with a running audio c
 		await page.close();
 	}
 }, 30_000);
+
+test("disconnect releases capture, preview, audio context, and the watch GPU, and reconnect resumes", async () => {
+	const page = await open();
+	try {
+		await page.evaluate(() => window.startLifecycle());
+		await page.locator("body").click();
+		await page.waitForFunction(() => {
+			const state = window.lifecycle.state();
+			return state.tracks.length === 2 && state.context && state.devices === 1;
+		});
+		await page.evaluate(() => window.lifecycle.move());
+		expect(await page.evaluate(() => window.lifecycle.state())).toMatchObject({
+			tracks: ["live", "live"],
+			devices: 1,
+		});
+		await page.evaluate(() => window.lifecycle.detach());
+		await page.waitForFunction(() => {
+			const state = window.lifecycle.state();
+			return (
+				state.tracks.every((track) => track === "ended") &&
+				state.context === "closed" &&
+				state.devices === 0 &&
+				!state.preview &&
+				!state.sources
+			);
+		});
+		await page.evaluate(() => window.lifecycle.reconnect());
+		await page.waitForFunction(() => {
+			const state = window.lifecycle.state();
+			return state.tracks.length === 2 && state.tracks.every((track) => track === "live") && state.devices === 1;
+		});
+	} finally {
+		await page.evaluate(() => window.lifecycle?.close());
+		await page.close();
+	}
+}, 30_000);
+
+test("a paused decoder holds its picture until its broadcast is disabled", async () => {
+	const page = await open();
+	try {
+		await page.evaluate(() => window.startPoster(false, false));
+		await page.evaluate(() => window.poster.push(0));
+		await page.waitForFunction(() => window.poster.state().decoded);
+		await page.evaluate(() => window.poster.paused(true));
+		await page.waitForFunction(() => !window.poster.state().downloading);
+		expect(await page.evaluate(() => window.poster.state().decoded)).toBe(true);
+		await page.evaluate(() => window.poster.enabled(false));
+		await page.waitForFunction(
+			() => !window.poster.state().decoded && window.poster.state().timestamp === undefined,
+		);
+	} finally {
+		await page.evaluate(() => window.poster?.close());
+		await page.close();
+	}
+}, 30_000);
