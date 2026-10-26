@@ -597,12 +597,29 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn an_invalid_label_added_before_protocol_setup_is_refused() {
-		refused_before_setup(|grant| grant.label = Some("project/*".into())).await;
+		let _clock = manual();
+		refused_before_setup(
+			|grant| grant.label = Some("project/*".into()),
+			SessionError::Unauthorized,
+		)
+		.await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_grant_expiring_before_protocol_setup_is_refused_as_expired() {
+		let clock = manual();
+		refused_before_setup(
+			|_| {
+				clock.advance(Duration::from_secs(3001));
+			},
+			SessionError::Expired,
+		)
+		.await;
 	}
 
 	/// Admit a session, apply `change` to its grant before protocol setup, and check
 	/// that setup refuses it as a failure.
-	async fn refused_before_setup(change: fn(&mut moq_auth::Grant)) {
+	async fn refused_before_setup(change: impl FnOnce(&mut moq_auth::Grant), expected: SessionError) {
 		let (producer, consumer) = lease::Producer::new(grant("a/**", 3000));
 		let registry = moq_net::stats::Registry::new(Default::default());
 		let stats = registry.tier(moq_net::stats::Tier::default()).session("room");
@@ -628,14 +645,16 @@ mod tests {
 			let mut changed = grant("a/**", 3000);
 			change(&mut changed);
 			producer.update(changed);
-			assert!(matches!(
-				lease.preparing(request.auth(), request.requests(), request.role()),
-				Err(moq_net::Error::Unauthorized)
-			));
-			request.close(moq_net::Error::Unauthorized);
+			let error = lease
+				.preparing(request.auth(), request.requests(), request.role())
+				.err()
+				.expect("setup must refuse the grant");
+			assert_eq!(SessionError::from(&error), expected);
+			request.close(error);
 		};
 		let ((session, driver), ()) = tokio::join!(connecting, refusing);
-		assert!(driver.await.unwrap().to_string().contains("unauthorized"));
+		let error = driver.await.unwrap();
+		assert_eq!(error.session(), Some(&expected));
 		drop(session);
 		drop(stats);
 		let presence = registry.snapshot().sessions()[0].1;
