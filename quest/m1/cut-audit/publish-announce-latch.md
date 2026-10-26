@@ -25,7 +25,3 @@ guard for the first announce only. Fix the test to clear the source during
 the swap.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [Drop announce="never"](/quest/m1/publish-announce-never.md) - the same attribute's other change before the cut

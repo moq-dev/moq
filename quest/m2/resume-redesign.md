@@ -14,9 +14,9 @@ cost no longer grows with readers times copies.
 From the 2026-10-24 pre-cut audit at 151a529670. Internal only: no public API
 or wire change, so it can ship after the cut. The audit recommended after
 the cut, not before: a rewrite now would discard the large resume test
-corpus right before release. Ask the maintainer whether to move it into m1
-instead, since release still ships the older splice design and nearly all
-of `resume.rs` is new at this cut.
+corpus right before release. Decided 2026-10-25 (maintainer): the
+[model test](/quest/m1/resume-model-test.md) comes first and gates the cut;
+this rewrite moves to m1 only if that test shows design-level bugs.
 
 **Why.** Main replaced release's splice design with per-reader route copies
 in 0382d309f4 (2026-10-04). Since then about 30 of 58 commits to
@@ -46,11 +46,15 @@ paths diverged.
 **Sketch.**
 
 1. Route copies become successive writers into the logical `TrackState`,
-   the only cache. Same-epoch routes carry identical content, so a later
-   writer's duplicate sequence is dropped or kept as the slot's backup. The
-   old writer keeps feeding below the new writer's first group and is
-   released once the logical cache covers that span or the aggregate budget
-   passes, judged once per track by `drifted`, not per reader.
+   the only cache. Every writer is of the instance the subscription started
+   on: a newer [publisher epoch](/doc/concept/moq-lite.md#publisher-epochs)
+   never feeds it (the route rule in `rs/moq-net/AGENTS.md`), so its readers
+   end with an error once their instance's routes are gone. Same-epoch routes
+   carry identical content, so a later writer's duplicate sequence is
+   dropped or kept as the slot's backup. The old writer keeps feeding below
+   the new writer's first group and is released once the logical cache
+   covers that span or the aggregate budget passes, judged once per track by
+   `drifted`, not per reader.
 2. The upstream request is already the union of readers' resume points
    (`Producer::subscription`), so per-reader copy cursors are local overhead.
 3. Readers become plain cursors: delete `Inner::Resume`, `Reader`, `Copy`,

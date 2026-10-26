@@ -28,7 +28,7 @@
 //! The shared [`moq_mux::rate`] policy maps a congestion-control bandwidth
 //! estimate onto the encoder's bitrate, which `publish_capture` drives for you.
 
-mod backend;
+pub(crate) mod backend;
 #[cfg_attr(
 	not(feature = "capture"),
 	allow(

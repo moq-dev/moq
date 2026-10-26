@@ -77,8 +77,9 @@ the reverse (decided 2026-10-20, maintainer):
 - Demand and preference cross the wrapper: an encrypted track's demand is
   its physical track's, and preference updates reach the physical track.
 - Keep the nonce rules the epic specifies: a group producer still owns its
-  frame numbering, and a re-created track name is refused, not dropped (see
-  [rust-publish](/quest/m2/e2ee/rust-publish.md)).
+  frame numbering, and a re-created or re-served track name resumes above
+  its high-water marks (decided 2026-10-25, maintainer, replacing the
+  refusal; see [undeclared names](/quest/m2/e2ee/undeclared-names.md)).
 - Test the wrappers against the questline's pass-through test cases. The
   moq-json round trip through an encrypted track waits for
   [moq-json to take the traits](/quest/m2/net-wrap/json.md).

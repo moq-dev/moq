@@ -101,18 +101,6 @@ lease.release();
 `transport::CloseKind` gained `Evicted`, which `Error::from_transport` maps to `Error::Evicted`.
 `transport::Stats` gained `streams_evicted()`, and `session::Stats` the matching `streams_evicted` field.
 
-### Stage a requested track before subscribers see it (#6111)
-
-`track::Request::stage(info)` returns a `track::Staged` that derefs to the track's `Producer` while subscribers waiting on the request stay pending; `commit()` publishes it with everything written so far and returns the `Producer`.
-A relay that holds groups of a lazily served track writes them before committing, so the first reader (and an IETF `SUBSCRIBE_OK`'s Largest Location) sees them.
-Dropping a `Staged` uncommitted rejects the request with `Error::Dropped`. `accept(info)` is unchanged and equals `stage(info).commit()`.
-
-```rust
-let mut staged = request.stage(info);
-for group in retained { /* staged.create_group(..), write, finish */ }
-let producer = staged.commit();
-```
-
 ### Frame writers own their group (#6111)
 
 `group::Producer::create_frame` now takes the writer by value and returns an owned `frame::Producer` with no lifetime.
@@ -132,13 +120,10 @@ group = frame.finish()?;
 
 A caller that holds the group behind `&mut` can write a whole frame with `write_frame` instead.
 
-### A received track's end waits for groups in flight (#6111)
+### A track's end tolerates a repeat, and skipped groups can be dropped (#6111)
 
-Call `track::Producer::received()` before writing what a peer sends into a track, then declare the peer's end with `finish_at`.
-On a received copy, readers wait at a hole below that end for the subscription's max delay (or one second) in case its group is still in flight; `drop_groups(range, err)` marks groups the peer said it skipped, so readers stop waiting for them and a group still arriving there ends with `err`.
+`track::Producer::drop_groups(range, err)` marks groups the publisher skipped, so readers stop waiting for them and a group still arriving there ends with `err`.
 `finish_at` now accepts a repeat of the same end and a refinement within the last group; any other second end fails with `Error::ProtocolViolation`.
-
-`track::Request::request_start(floor)` leaves an accepted copy's start pending at `floor` until `track::Producer::start_at` resolves it, for a subscriber whose peer reports the start after accepting.
 
 ### A frameless group is not the live edge (#6111)
 
@@ -148,8 +133,7 @@ A group followed by a frameless one is judged against the next group that has a 
 ### Ending a track aborts its open groups (#6111)
 
 Aborting a track (`abort` or `abort_unused`) now aborts its unfinished groups with the same error, so their readers end with it and their writers fail.
-Dropping the last `track::Producer` without a finish aborts them with `Error::Dropped`, and `close` with `Error::Stream(StreamError::Session(SessionError::Cancel))`.
-`track::Producer::close`, `track::Producer::received`, and `group::Producer::info` are now public.
+Dropping the last `track::Producer` without a finish aborts them with `Error::Dropped`.
 
 ### Priorities are signed, with 0 unset (#6142)
 
@@ -187,7 +171,7 @@ Clamp timestamps you build from unbounded input to `(1 << 61) - 1`.
 
 A group the publisher cut, or named in `SUBSCRIBE_DROP`, after a `track::Subscriber` saw it is now handed out, and reading it fails with the publisher's error; before, it was skipped or ended cleanly.
 A group already held fails the same way when the drop lands, even while its stream is still arriving.
-On lite-05 and lite-06 the error is always `Error::Stream(StreamError::NotFound)`.
+On lite-05 and lite-06 the error is always `Error::Stream(StreamError::Old)`.
 Treat a failed group read as the loss of that group and keep reading the track, rather than ending the subscription.
 
 ### A claim answers by publishing (#5678)

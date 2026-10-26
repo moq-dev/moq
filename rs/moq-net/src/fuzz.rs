@@ -290,6 +290,12 @@ impl AnnounceWriter {
 	}
 }
 
+/// Mark `track` as a copy received from a remote publisher, as a subscriber session does, for
+/// the tail bench.
+pub fn received(track: &track::Producer) {
+	track.received();
+}
+
 /// Fill the `groups` of `track` its cache misses, a run per FETCH, as a publisher answers a
 /// range FETCH, for the session bench. The returned guard keeps the filled groups cached.
 pub async fn fill_groups(track: &track::Consumer, groups: std::ops::Range<u64>) -> crate::Result<impl Sized> {
@@ -880,6 +886,18 @@ pub fn decode_varints(data: &[u8], ietf: bool) -> u64 {
 		sum = sum.wrapping_add(r.varint().unwrap());
 	}
 	sum
+}
+
+/// Decode one broadcast path as moq-lite carries it (`ietf == false`), a string, or as
+/// a moq-transport namespace tuple.
+pub fn decode_path(data: &[u8], ietf: bool) -> PathOwned {
+	let r = &mut Decoder::new(data, bench_form(ietf));
+	let path = match ietf {
+		false => Path::decode(r, BENCH_LITE).unwrap(),
+		true => ietf::namespace::decode_namespace(r).unwrap(),
+	};
+	assert!(r.is_empty());
+	path
 }
 
 /// Exercise the [`Path`] invariants against arbitrary text.

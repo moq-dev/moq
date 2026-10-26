@@ -24,3 +24,7 @@ is the model the maintainer asked about. In Rust without stackful coroutines,
 sans-IO is the closest equivalent that removes coloring from the protocol core.
 
 Public API: none; the prototype stays on a branch unless adopted.
+
+## Related
+
+- [moq-quic owns its waits](/quest/m1/quic-api/waits.md) - a sans-IO core that holds kio waiter lists but does no I/O, a middle point between the two styles compared here

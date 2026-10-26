@@ -49,6 +49,11 @@ Prefer poll. New logic is a `poll_*` with an `async` helper, not the other way a
 - Append new variants to the end of a public fieldless enum with implicit discriminants; inserting reorders `as` values.
 - A renamed flag or env var stays as a hidden arg with its original `env`, reported by the section's `deprecated()` into `moq_tokio::cli::Deprecated`; callers must reject startup when the collection is non-empty and name the replacement rather than honor the old spelling. Never advertise the dead name in docs or `--help`.
 
+# Features
+
+- Defaults skip anything expensive to build or needing a system library. Prefer fewer features: each one trims a build but fragments the code and its test matrix, so add one only for a vendor integration or a system dependency.
+- A feature lives in the crate that owns the integration (`s3` in moq-archive). Dependents forward it under the same name rather than enabling their dependencies' features directly.
+
 # Testing
 
 - Tests are inline `#[cfg(test)] mod tests`, except full Client/Server session tests over a crate's shared mock harness, which go in its `tests/integration/` module. Time-dependent async tests call `tokio::time::pause()` first (moq-net uses `#[moq_clock::test]` instead), unless they cross real networking that can't be mocked (sockets, smoke tests); those run on the wall clock and assert lower bounds.
