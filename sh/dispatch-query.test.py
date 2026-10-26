@@ -82,6 +82,16 @@ class QueryTests(unittest.TestCase):
                 (self.repo / path).unlink()
         self.expect(True, base="--all", rust=True)
 
+    def test_cargo_configuration_selects_rust(self):
+        for path in (".cargo/config.toml", ".cargo/config"):
+            with self.subTest(path=path):
+                self.change(path)
+                self.expect(True, rust=True)
+                calls = self.run_ci()
+                self.assertTrue(any(call.startswith("rs lint-changed ") for call in calls), calls)
+                self.assertTrue(any(call.startswith("rs test-changed ") for call in calls), calls)
+                (self.repo / path).unlink()
+
     def test_nixpkgs_updates_check_browser_pins(self):
         # JS selection also builds wasm, which is reflected in the Rust cache query.
         self.change("flake.lock")
@@ -272,7 +282,8 @@ esac
                         next(i for i, call in enumerate(calls) if call.startswith("rs test-changed ")))
 
     def test_flake_checks_follow_nix_inputs_instead_of_rust_source(self):
-        for path, expected in (("rs/moq-net/src/lib.rs", False),
+        for path, expected in ((".cargo/config.toml", True),
+                               ("rs/moq-net/src/lib.rs", False),
                                ("rs/moq-net/Cargo.toml", True),
                                ("rs/moq-c/native-libs/linux.txt", True),
                                ("rs/moq-video/src/frame/nv12_resize.ptx", True),

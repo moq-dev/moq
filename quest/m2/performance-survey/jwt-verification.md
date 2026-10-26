@@ -8,7 +8,7 @@ and avoidable work is reduced without weakening key rotation or validation.
 ## Plan
 
 [Serve::verify](/rs/moq-auth/src/serve.rs) rereads a key or whole key-set
-file for each request, then imports it (lines 249-271). A Key's cached crypto
+file for each request, then imports it. A Key's cached crypto
 material is therefore not shared across these requests. The
 [KeySet lookup](/rs/moq-auth/src/set.rs) is linear, while header parsing also
 occurs in [Key::decode](/rs/moq-auth/src/key.rs). Existing session admission

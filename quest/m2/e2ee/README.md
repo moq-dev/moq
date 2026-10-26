@@ -46,21 +46,25 @@ The Rust and TypeScript cores expose the same surface, and nothing else:
 
 ### Dynamic names
 
-Physical names are reversible (decided with the maintainer on 2026-10-24 in [#6623](https://github.com/moq-dev/moq/pull/6623)). A physical track name is a 12-byte nonce, the first 12 bytes of an HMAC-SHA-256 of the semantic name padded to a multiple of 16 bytes, followed by the AES-128-GCM encryption of that padded name under that nonce, with both keys derived from the generation (the draft's Key Derivation section). It needs only HMAC-SHA-256 and AES-128-GCM, so it runs on aws-lc-rs, graviola, and WebCrypto with no new dependency (maintainer, 2026-10-24, over AES-GCM-SIV, which graviola lacks). A publisher opens a requested name and recomputes its nonce to recover its semantic name, so the e2ee `dynamic()` answers undeclared names through the [moq-net traits](/quest/m2/net-wrap/README.md) unchanged, and a name that does not open is answered as missing with no state kept. Equal names under one generation still share one physical name, so relays dedupe and cache them, and names stay unlinkable across epochs. AEAD keys bind the semantic name. The cost is that a relay learns each name's length rounded up to 16 bytes: every name up to 15 bytes looks alike, and a longer one leaks its length to within 16 bytes (maintainer, 2026-10-24, over power-of-two buckets that leak less but can double a long name). Broadcast paths stay one-way: e2ee wraps no origin, so nothing requests an undeclared protected broadcast.
+Physical names are reversible (decided with the maintainer on 2026-10-24 in [#6623](https://github.com/moq-dev/moq/pull/6623)). A physical track name is a 12-byte nonce, the first 12 bytes of an HMAC-SHA-256 of the semantic name padded to a multiple of 16 bytes, followed by the AES-128-GCM encryption of that padded name under that nonce, with both keys derived from the generation (the draft's Key Derivation section). It needs only HMAC-SHA-256 and AES-128-GCM, so it runs on aws-lc-rs, graviola, and WebCrypto with no new dependency (maintainer, 2026-10-24, over AES-GCM-SIV, which graviola lacks). A publisher opens a requested name and recomputes its nonce to recover its semantic name, so the e2ee `requests()` handler (`dynamic()` until [named requests](/quest/m1/api-audit/requests.md)) answers undeclared names through the [moq-net traits](/quest/m2/net-wrap/README.md) unchanged, and a name that does not open is answered as missing with no state kept. Equal names under one generation still share one physical name, so relays dedupe and cache them, and names stay unlinkable across epochs. AEAD keys bind the semantic name. The cost is that a relay learns each name's length rounded up to 16 bytes: every name up to 15 bytes looks alike, and a longer one leaks its length to within 16 bytes (maintainer, 2026-10-24, over power-of-two buckets that leak less but can double a long name). Broadcast paths stay one-way: e2ee wraps no origin, so nothing requests an undeclared protected broadcast.
 
 Rejected:
 
-- Declared names only (`reserve_track` over an enumerated universe): it cannot serve an open-ended name such as a moq-stats prefix or presence query, so the e2ee `dynamic()` could not mirror moq-net.
+- Declared names only (`reserve_track` over an enumerated universe): it cannot serve an open-ended name such as a moq-stats prefix or presence query, so the e2ee `requests()` could not mirror moq-net.
 - A name-directory track: a directory the publisher writes is the catalog again and still needs every name in advance. One the subscriber writes requires viewers to publish, links each request to a visible subscriber path, and races the subscription it serves.
 - Requests that carry an encrypted semantic name beside a one-way name: it needs a moq-lite and moq-transport field that every relay forwards, and a moq-net `track(name)` signature change that breaks the trait mirror. The relay forwards one coalesced subscriber's field, so a relay-authorized party without the secret could race a bad one and get the name refused for everyone. Its field leaks the same rounded length.
 - One-way names for declared tracks and reversible ones for dynamic tracks: one semantic name would have two physical names, so it would not always mean the same content, and a subscriber cannot know which one the publisher serves.
 
 The broadcast wrappers merged in [#5876](https://github.com/moq-dev/moq/pull/5876) with `reserve_track`, which still serves declared names; [rust-publish](/quest/m2/e2ee/rust-publish.md) needs nothing more (maintainer, 2026-10-19).
 
+Before `@moq/e2ee` is first published, add its entrypoints to the API
+Extractor declaration checks, which analyze only published packages since
+[moq-dev/moq#6794](https://github.com/moq-dev/moq/pull/6794).
+
 ## Required
 
 - [Undeclared track names](/quest/m2/e2ee/undeclared-names.md) - an encrypted
-  broadcast's `dynamic()` serves names nobody created or reserved, under
+  broadcast's `requests()` serves names nobody created or reserved, under
   semantic names, in Rust
 - [JS undeclared track names](/quest/m2/e2ee/js-undeclared-names.md) -
   `@moq/net` exposes a broadcast request handler and `@moq/e2ee` serves
