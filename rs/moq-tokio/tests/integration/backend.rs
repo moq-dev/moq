@@ -1078,7 +1078,6 @@ async fn quic_client_close_keeps_predecessor_handover() {
 		.parse()
 		.unwrap();
 
-	let (subscribed_tx, subscribed_rx) = tokio::sync::oneshot::channel::<()>();
 	let client = std::thread::spawn(move || {
 		let runtime = tokio::runtime::Builder::new_current_thread()
 			.enable_all()
@@ -1107,7 +1106,12 @@ async fn quic_client_close_keeps_predecessor_handover() {
 			while track.subscription().is_none() {
 				track.subscription_changed().await.expect("track closed");
 			}
-			subscribed_tx.send(()).unwrap();
+			// An unfinished group answers the SUBSCRIBE: one without an epoch still unanswered
+			// at the handover is refused, which would leave nothing to drain.
+			let mut group = track.append_group().expect("failed to append group");
+			group
+				.write_frame(moq_tokio::moq_net::Timestamp::ZERO, b"live".as_slice())
+				.expect("failed to write frame");
 
 			// Close while the old session is still inside its handover window.
 			while connection.status().await.expect("connection stopped") != moq_tokio::Status::Migrating {}
@@ -1144,12 +1148,12 @@ async fn quic_client_close_keeps_predecessor_handover() {
 		.await
 		.expect("subscribe timed out")
 		.expect("subscribe failed");
-	// Receiving is what sends the subscription, so read in the background.
-	let _received = tokio::spawn(async move { track.recv_group().await.map(|group| group.is_some()) });
-	tokio::time::timeout(TIMEOUT, subscribed_rx)
+	// Receiving is what sends the subscription.
+	let _group = tokio::time::timeout(TIMEOUT, track.recv_group())
 		.await
-		.expect("the subscription never reached the client")
-		.expect("client thread panicked");
+		.expect("the subscription was never answered")
+		.expect("subscribe failed")
+		.expect("track ended");
 
 	first
 		.drain()
