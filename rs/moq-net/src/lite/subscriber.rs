@@ -34,8 +34,7 @@ pub(super) struct SubscriberConfig {
 	/// Shared slot for the peer's SETUP (lite-05+). Written when the peer's Setup
 	/// stream is read; the probe stream waits on it before opening.
 	pub peer_setup: super::PeerSetup,
-	/// The origin (hop) id assigned to the peer, used whenever the peer doesn't
-	/// declare one itself. See `Client::with_peer_hop`.
+	/// The receiver-assigned identity, shared by both session halves.
 	pub peer_hop: Option<crate::Hop>,
 	/// Local policy for what pulling from this peer costs, overriding whatever it
 	/// declared in its SETUP. `None` charges the peer's declared price.
@@ -60,15 +59,8 @@ pub(super) struct Subscriber {
 	// we also ask the peer to filter them out (AnnounceRequest.exclude_hop) so
 	// they never hit the wire, but this check is what makes it correct.
 	self_origin: crate::Hop,
-	// The origin stored as `Route.via` for broadcasts from versions that don't
-	// carry real hop ids on the wire (Lite01/02/03), and for a peer that reports
-	// 0 in AnnounceOk. Lite03 placeholders stay 0 and count as anonymous.
-	//
-	// This is the peer's assigned identity (`peer_hop`): a fresh id per dialed or
-	// accepted session, so its routes are distinguishable from another session's,
-	// unless the caller pinned a stable one with `with_peer_hop`. Without one it is
-	// `Hop::UNKNOWN` (0), the reserved "no identity" value. The assigned id stays
-	// local and is never written into a hop chain.
+	// The receiver's per-session identity. Lite07 stamps it on locally originated
+	// claims; older versions use it only when the peer declares no identity.
 	session_origin: crate::Hop,
 	subscribes: Lock<HashMap<u64, TrackEntry>>,
 	/// Why this session ended, once it has. A track still waiting on TRACK_INFO is
@@ -116,7 +108,10 @@ impl Subscriber {
 			origin: config.origin.with_own_frames(),
 			recv_bandwidth: config.recv_bandwidth,
 			self_origin,
-			session_origin: config.peer_hop.unwrap_or(crate::Hop::UNKNOWN),
+			session_origin: config.peer_hop.unwrap_or_else(|| match config.version.stamps_origin() {
+				true => crate::Hop::random(),
+				false => crate::Hop::UNKNOWN,
+			}),
 			subscribes: Default::default(),
 			ended: Default::default(),
 			next_id: Default::default(),
@@ -351,11 +346,11 @@ impl Subscriber {
 		route
 	}
 
-	/// The announcing session's declared or assigned identity, for split-horizon.
-	///
-	/// A non-zero AnnounceOk origin is the declared id. Otherwise the caller-assigned
-	/// identity stands in, locally: it is never written into the hop chain.
+	/// The announcing session's identity; a declaration is only a hint on lite07.
 	fn via(&self, responder: Option<crate::Hop>) -> crate::Hop {
+		if self.version.stamps_origin() {
+			return self.session_origin;
+		}
 		responder
 			.filter(|hop| *hop != crate::Hop::UNKNOWN)
 			.unwrap_or(self.session_origin)
@@ -443,6 +438,12 @@ impl Subscriber {
 		mut hops: crate::Hops,
 		responder_origin: Option<crate::Hop>,
 	) -> Option<crate::Hops> {
+		// Only an empty list originates here. A forwarded first entry already names
+		// its origin. Keep the declared trailing hop separately so a reflection still
+		// crosses the origin's loop hint, even though that hint cannot name its claims.
+		if self.version.stamps_origin() && hops.is_empty() {
+			hops.push(self.session_origin).ok()?;
+		}
 		let reflected = match responder_origin {
 			// A chain already naming the sender came back through it. Zero names
 			// nobody and may repeat; every identified sender must be appended once.
@@ -1693,8 +1694,8 @@ impl AnnouncePrefix {
 					if ok.active == 0 && !self.subscriber.version.has_synced() {
 						self.snapshot = None;
 					}
-					// A peer may legally report id 0 (no identity). Keep it: the assigned
-					// identity stays on `via` and is never forwarded as a hop.
+					// Keep the declared loop hint, including 0. The receiver stamps an
+					// empty chain separately on lite07.
 					let origin = ok.origin;
 					let PrefixState::ReadOk { stream } = std::mem::replace(&mut self.state, PrefixState::Open) else {
 						unreachable!()
@@ -5239,6 +5240,108 @@ mod tests {
 			&group.read_frame().await.expect("read frame").expect("frame").payload[..],
 			b"still"
 		);
+	}
+
+	#[moq_clock::test]
+	#[ignore = "requires Bun; run by just test interop"]
+	async fn stamp_interop() {
+		let version = Version::Lite07;
+		let declared = crate::Hop::new(7).unwrap();
+		let mut wire = lite::AnnounceOk {
+			origin: declared,
+			active: 0,
+		}
+		.encode_bytes(version)
+		.unwrap()
+		.to_vec();
+		wire.extend(
+			lite::AnnounceBroadcast::Active {
+				suffix: lite::PathRef::literal(Path::new("room")),
+				epoch: None,
+				hops: lite::HopsRef::literal(crate::Hops::new()),
+				cost: crate::origin::Cost::UNKNOWN,
+			}
+			.encode_bytes(version)
+			.unwrap(),
+		);
+		let answer: Vec<u8> =
+			serde_json::from_slice(&crate::test_interop::bun("stamp.ts", serde_json::json!(wire))).unwrap();
+		let mut decoder = crate::coding::Decoder::new(&answer, version.into());
+		let ok = lite::AnnounceOk::decode(&mut decoder, version).unwrap();
+		let lite::AnnounceBroadcast::Active { hops, .. } =
+			lite::AnnounceBroadcast::decode(&mut decoder, version).unwrap()
+		else {
+			panic!("expected announcement");
+		};
+		let stamped: Vec<_> = hops.literal.iter().copied().collect();
+		assert_eq!(stamped.len(), 2);
+		assert_ne!(stamped[0], declared);
+		assert_ne!(stamped[0], crate::Hop::UNKNOWN);
+		assert_eq!(stamped[1], declared);
+		let (mut subscriber, _) = restart_subscriber(SinkSession::new(Default::default()));
+		subscriber.version = version;
+		let forwarded = subscriber
+			.chain(&Path::new("room").to_owned(), hops.literal, Some(ok.origin))
+			.unwrap();
+		assert_eq!(
+			forwarded.iter().copied().collect::<Vec<_>>(),
+			vec![stamped[0], declared, ok.origin]
+		);
+		subscriber.self_origin = declared;
+		assert!(
+			subscriber
+				.chain(
+					&Path::new("room").to_owned(),
+					forwarded,
+					Some(crate::Hop::new(32).unwrap())
+				)
+				.is_none()
+		);
+	}
+
+	#[moq_clock::test]
+	async fn stamped_origins_keep_transit_loop_hints() {
+		let path = Path::new("room").to_owned();
+		let declared = crate::Hop::new(7).unwrap();
+		let assigned = crate::Hop::new(777).unwrap();
+		let (mut subscriber, _) = restart_subscriber(SinkSession::new(Default::default()));
+		subscriber.version = Version::Lite07;
+		subscriber.session_origin = assigned;
+		let direct = subscriber.chain(&path, crate::Hops::new(), Some(declared)).unwrap();
+		assert_eq!(direct.iter().copied().collect::<Vec<_>>(), vec![assigned, declared]);
+		assert_eq!(subscriber.via(Some(declared)), assigned);
+
+		// The next receiver preserves the stamped origin and appends its neighbor's hint.
+		let relay = crate::Hop::new(8).unwrap();
+		let forwarded = subscriber.chain(&path, direct.clone(), Some(relay)).unwrap();
+		assert_eq!(
+			forwarded.iter().copied().collect::<Vec<_>>(),
+			vec![assigned, declared, relay]
+		);
+		subscriber.self_origin = declared;
+		assert!(
+			subscriber
+				.chain(&path, forwarded, Some(crate::Hop::new(9).unwrap()))
+				.is_none()
+		);
+
+		// The same declaration on another session cannot name the first session's origin.
+		subscriber.self_origin = crate::Hop::new(1).unwrap();
+		subscriber.session_origin = crate::Hop::new(778).unwrap();
+		let other = subscriber.chain(&path, crate::Hops::new(), Some(assigned)).unwrap();
+		assert_eq!(other.iter().next(), Some(&subscriber.session_origin));
+		assert_ne!(other.iter().next(), direct.iter().next());
+
+		// Published drafts retain their original chain and attribution.
+		subscriber.version = Version::Lite06;
+		assert_eq!(
+			subscriber
+				.chain(&path, crate::Hops::new(), Some(declared))
+				.unwrap()
+				.len(),
+			1
+		);
+		assert_eq!(subscriber.via(Some(declared)), declared);
 	}
 
 	/// A peer that declares no identity is marked anonymous (hop 0). The assigned

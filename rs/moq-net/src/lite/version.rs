@@ -31,6 +31,14 @@ pub enum Version {
 // Feature predicates list the old versions explicitly, so a future version falls
 // forward to the newest behavior.
 impl Version {
+	/// Whether receivers stamp the identity of session-originated announcements.
+	pub(crate) fn stamps_origin(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
+		)
+	}
+
 	/// Whether SUBSCRIBE_OK carries the publisher's largest (group, frame), which a
 	/// subscriber takes as where the live feed is. Added in lite-07; an earlier answer
 	/// says nothing about the live edge.

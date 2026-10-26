@@ -40,8 +40,7 @@ pub(super) struct PublisherConfig {
 	pub peer_setup: super::PeerSetup,
 	/// Receive-side GOAWAY signal: recorded when the peer's Goaway stream arrives.
 	pub goaway: crate::goaway::Protocol,
-	/// The origin (hop) id assigned to the peer, used whenever the peer doesn't
-	/// declare one itself. See `Client::with_peer_hop`.
+	/// The receiver-assigned identity, shared by both session halves.
 	pub peer_hop: Option<Hop>,
 	/// Our tokens' grants, which bound what we announce and serve, and the app's
 	/// claim on answering the peer's tokens.
@@ -67,10 +66,9 @@ struct Shared {
 	// peer from a source whose chain excludes them, keeping the data plane on
 	// the same split-horizon rule as the announces we send them.
 	peer_setup: super::PeerSetup,
-	// The identity assigned to the peer (a fresh per-session id, or one the caller
-	// pinned with `with_peer_hop`), standing in wherever the
-	// peer declines to declare one. Backs both the announce filter and the serving
-	// origin, so a peer that names itself nowhere on the wire is still split-horizoned.
+	// The identity assigned to the peer (a fresh per-session id), standing in wherever the
+	// peer declines to declare one on old drafts. Lite07 excludes it independently
+	// of the declared hint for both announces and subscriptions.
 	peer_hop: Option<Hop>,
 	// The excluded origin handle, resolved once: the peer sends exactly one
 	// SETUP, so its declared id never changes for the session.
@@ -154,6 +152,10 @@ impl Shared {
 		let origin = match declared.or(self.peer_hop) {
 			Some(peer) => self.origin.clone().excluding(peer),
 			None => self.origin.clone(),
+		};
+		let origin = match (self.version.stamps_origin(), self.peer_hop) {
+			(true, Some(peer)) => origin.excluding_session(peer),
+			_ => origin,
 		};
 		// A concurrent first resolution may have won the race; either value is
 		// identical, so keep whichever landed.
@@ -953,6 +955,10 @@ impl AnnounceServe {
 		// model uses this exposure to park a reflected copy before it can replace
 		// the source we are currently advertising to that peer.
 		let origin = origin.excluding(exclude_hop);
+		let origin = match (self.shared.version.stamps_origin(), self.shared.peer_hop) {
+			(true, Some(peer)) => origin.excluding_session(peer),
+			_ => origin,
+		};
 		// Lite03 and later carry the hop path, so only routes with room for our hop
 		// under the origin's cap are advertised; Lite01/02 hide the depth entirely.
 		let origin = match self.shared.version {
@@ -7172,8 +7178,8 @@ mod tests {
 
 	/// Lite01/02 send the initial active set as ANNOUNCE_INIT. It must apply the
 	/// same per-peer route selection as the live loop: a broadcast whose only
-	/// route flows through the excluded hop (here the peer's assigned identity,
-	/// `Client::with_peer_hop`) is filtered from the initial set too.
+	/// route flows through the excluded hop (here the peer's assigned identity)
+	/// is filtered from the initial set too.
 	#[moq_clock::test]
 	async fn announce_init_applies_route_selection() {
 		let assigned = crate::Hop::new(777).unwrap();

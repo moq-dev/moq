@@ -927,8 +927,7 @@ pub(super) struct Subscriber {
 	// declares none of its own (see `session_route`). Base moq-transport carries no
 	// hop ids, so a peer only has an identity if it negotiated the MoQ Cluster
 	// extension; otherwise this is the one the session assigned it (a fresh id per
-	// dialed or accepted session, unless the caller pinned one with `with_peer_hop`),
-	// or `Hop::UNKNOWN` (0) when none was assigned.
+	// dialed or accepted session), or `Hop::UNKNOWN` (0) when none was assigned.
 	//
 	// The assigned id stays local: it is never written into a hop chain, so a peer
 	// that withheld an identity is not named on the wire.
@@ -9125,7 +9124,7 @@ mod tests {
 	}
 
 	/// moq-transport carries no hop ids, so a peer's broadcasts are marked
-	/// anonymous (hop 0). An identity assigned via `Client::with_peer_hop` is
+	/// anonymous (hop 0). An identity assigned via the session is
 	/// stored as `via` for split-horizon and never written into the chain.
 	#[moq_clock::test]
 	async fn assigned_peer_hop_attributes_announces() {
@@ -9181,7 +9180,7 @@ mod tests {
 		let mut announced = consumer.announced();
 
 		// The publish direction: an origin handle scoped to the peer, which is what
-		// `Client::with_peer_hop` hands the publisher. Holding its announce stream
+		// the session hands the publisher. Holding its announce stream
 		// is what records that the peer has been offered these paths.
 		let mut publishing = consumer.clone().excluding(peer).announced();
 

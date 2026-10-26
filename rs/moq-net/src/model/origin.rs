@@ -581,8 +581,7 @@ impl Route {
 
 	/// The announcing session's declared or assigned identity, for split-horizon.
 	///
-	/// Not part of the advertised route: an assigned identity is private selection
-	/// state and must not be forwarded.
+	/// Local selection state, independent of the origin identity in the hop chain.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn with_via(mut self, via: Hop) -> Self {
 		self.via = via;
@@ -1410,6 +1409,8 @@ struct Horizon {
 	/// hidden. `Some(UNKNOWN)` marks an anonymous peer: no hop is excluded, but
 	/// local-only broadcasts are not advertised. `None` is a local reader.
 	exclude: Option<Hop>,
+	/// The receiver-assigned session, independent of the declared loop hint.
+	session: Option<Hop>,
 	/// Hide the routes that entered from a cluster peer ([`Consumer::local`]).
 	local: bool,
 	/// Hide the routes learned on an upstream link, because this reader is one
@@ -1426,6 +1427,7 @@ impl Horizon {
 	fn admits(&self, entry: &RouteEntry) -> bool {
 		self.admits_link(entry.link)
 			&& entry.visible_to(self.exclude)
+			&& entry.visible_to(self.session)
 			&& self.max_hops.is_none_or(|max| entry.hops.len() < max.get())
 	}
 
@@ -1448,13 +1450,26 @@ impl Horizon {
 	/// applies here.
 	fn effective(self, routes: &RouteTable, path: &Path) -> Self {
 		let horizon = Self { max_hops: None, ..self };
-		match horizon.exclude {
-			Some(peer) if routes.covering(path).any(|entry| !entry.visible_to(Some(peer))) => horizon,
-			_ => Self {
-				exclude: None,
-				..horizon
-			},
+		if horizon.exclude.is_none() && horizon.session.is_none() {
+			return horizon;
 		}
+		let mut effective = Self {
+			exclude: None,
+			session: None,
+			..horizon
+		};
+		for entry in routes.covering(path) {
+			if !entry.visible_to(horizon.exclude) {
+				effective.exclude = horizon.exclude;
+			}
+			if !entry.visible_to(horizon.session) {
+				effective.session = horizon.session;
+			}
+			if effective.exclude == horizon.exclude && effective.session == horizon.session {
+				break;
+			}
+		}
+		effective
 	}
 }
 
@@ -6064,6 +6079,13 @@ impl Consumer {
 		self
 	}
 
+	/// Keep a session's routes off that session independently of its declared hop.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn excluding_session(mut self, peer: Hop) -> Self {
+		self.horizon.session = Some(peer);
+		self
+	}
+
 	/// A clone whose announcements skip the routes this origin cannot forward: a
 	/// chain already at [`Config::max_hops`] has no room for our hop. Sessions whose
 	/// wire carries the hop path apply this to the routes they advertise.
@@ -8443,6 +8465,42 @@ mod tests {
 		let mut hidden = producer.consume().excluding(assigned).announced();
 		hidden.expect_next_active("local").await;
 		hidden.assert_next_wait();
+	}
+
+	#[moq_clock::test]
+	async fn declared_and_assigned_exclusions_are_independent() {
+		let producer = origin(1).produce();
+		let _own = producer
+			.announce("own", Route::default().with_hops(hops(&[10])).with_via(origin(777)))
+			.unwrap();
+		let _loop = producer
+			.announce("loop", Route::default().with_hops(hops(&[7])))
+			.unwrap();
+		let _other = producer
+			.announce("other", Route::default().with_hops(hops(&[8])))
+			.unwrap();
+		let consumer = producer.consume().excluding(origin(7)).excluding_session(origin(777));
+		let mut announced = consumer.announced();
+		announced.expect_next_active("other").await;
+		announced.assert_next_wait();
+
+		let state = producer.shared.lock();
+		assert_eq!(
+			consumer.horizon.effective(&state.routes, &Path::new("other")).exclude,
+			None
+		);
+		assert_eq!(
+			consumer.horizon.effective(&state.routes, &Path::new("other")).session,
+			None
+		);
+		assert_eq!(
+			consumer.horizon.effective(&state.routes, &Path::new("own")).session,
+			Some(origin(777))
+		);
+		assert_eq!(
+			consumer.horizon.effective(&state.routes, &Path::new("loop")).exclude,
+			Some(origin(7))
+		);
 	}
 
 	#[moq_clock::test]

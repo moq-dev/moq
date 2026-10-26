@@ -24,8 +24,7 @@ the relay and its announce stream is the roster. Tests inject transport
 factories and cover pairing, application selection, and the roster gate.
 
 Identity: decided 2026-10-25 (maintainer), no cross-path recognition. Each
-session's receiver stamps its routing identity, a direct peer included
-([Stamp routing identities](/quest/m1/cluster-routing/stamp.md)), so a
+session's receiver stamps its routing identity, a direct peer included, so a
 publisher reached through the CDN and directly is two origins, and switching
 between them resumes only across a matching explicit epoch. Simpler: one
 identity regime. The route-layer node id differs per session, so it cannot

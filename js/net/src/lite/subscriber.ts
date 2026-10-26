@@ -21,7 +21,7 @@ import {
 	unauthorized,
 } from "../error.ts";
 import * as netGroup from "../group.ts";
-import { Cost, type Hop, MAX_HOPS, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
+import { Cost, type Hop, MAX_HOPS, type Route, randomHop, routesEqual, UNKNOWN_HOP } from "../hop.ts";
 import { groupBounds, hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import { grace } from "../ledger.ts";
 import type { Lister } from "../listing.ts";
@@ -76,6 +76,7 @@ import {
 	hasTrackStream,
 	hasTracks,
 	resolvesStart,
+	stampsOrigin,
 	updateSupported,
 	Version,
 	waitsForSubscriberFin,
@@ -171,6 +172,9 @@ export class Subscriber {
 	// share one FETCH stream and each get an independent mirror; the entry is evicted once the
 	// group closes.
 	#fetches = new Map<string, { group: netGroup.Producer; accepted: Promise<void> }>();
+
+	// One receiver-assigned origin for every locally originated claim on this session.
+	#sessionOrigin = randomHop();
 
 	// The peer's PROBE estimates, written as they arrive (Lite03+ only).
 	#probe?: Signal<ProbeStats>;
@@ -547,7 +551,9 @@ export class Subscriber {
 					hops !== undefined && responderOrigin !== undefined
 						? [...hops, responderOrigin]
 						: [...(hops ?? [])];
-				// A received empty list is the anonymous mark, not a local announcement.
+				// The first receiver names a local claim. The declared trailing hop stays
+				// only as a loop hint; forwarding preserves the stamp at the head.
+				if (stampsOrigin(this.version) && hops?.length === 0) fullHops.unshift(this.#sessionOrigin);
 				if (fullHops.length === 0) fullHops.push(UNKNOWN_HOP);
 				// Appending a withheld AnnounceOk(0) onto a 32-entry list is the same
 				// drop Rust's Hops::push makes: do not expose an overlong chain.

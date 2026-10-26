@@ -3,7 +3,7 @@
 //! broadcast's front, so neither what a viewer costs nor what one leaves behind
 //! may depend on how many came before.
 //!
-//! Each viewer excludes its own hop the way a session serves its peer. That view
+//! Each viewer excludes both its declared loop hint and its assigned session stamp. That view
 //! is crate-private, so this reaches it through the hidden `fuzz` module. Its own
 //! target keeps the counting allocator out of the `origin` bench.
 //!
@@ -110,7 +110,7 @@ impl Room {
 
 	/// Viewer `n` joins and reads the latest group of its broadcast.
 	fn join(&mut self, n: usize) -> moq_net::track::Subscriber {
-		let session = moq_net::fuzz::excluding(self.producer.consume(), Hop::random());
+		let session = moq_net::fuzz::excluding(self.producer.consume(), Hop::random(), Hop::random());
 		let path = format!("room/{}", n % self.broadcasts);
 		let resolved = self.drive(session.request_broadcast(path, None)).unwrap();
 		let mut subscription = self.drive(resolved.track("video").unwrap().subscribe(None)).unwrap();

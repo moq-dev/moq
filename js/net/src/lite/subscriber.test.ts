@@ -149,6 +149,75 @@ const PUBLISHER_B = HopSchema.parse(8n);
 const PUBLISHER_C = HopSchema.parse(9n);
 const PEER = HopSchema.parse(2n);
 
+test("lite-07 stamps a session's own claims and preserves transit hints", async () => {
+	const version = Version.DRAFT_07;
+	const first = announceHarness(version);
+	const second = announceHarness(version);
+	const a = first.subscriber.announced();
+	const b = second.subscriber.announced();
+	try {
+		await first.send((w) => new AnnounceOk(PEER, 0).encode(w, version));
+		await second.send((w) => new AnnounceOk(PEER, 0).encode(w, version));
+		for (const peer of [first, second]) {
+			await peer.send((w) =>
+				encodeAnnounceBroadcast(w, { status: "active", suffix: Path.from("room"), hops: [] }, version),
+			);
+		}
+		const left = (await a.next())?.route.hops;
+		const right = (await b.next())?.route.hops;
+		expect(left).toHaveLength(2);
+		expect(right).toHaveLength(2);
+		expect(left?.[0]).not.toBe(PEER);
+		expect(left?.[0]).not.toBe(right?.[0]);
+		expect(left?.[1]).toBe(PEER);
+		await first.send((w) => encodeAnnounceBroadcast(w, { status: "update", id: 0n, hops: [], cost: 4n }, version));
+		expect((await a.next())?.route.hops).toEqual(left);
+	} finally {
+		a.close();
+		b.close();
+		first.subscriber.close();
+		second.subscriber.close();
+	}
+});
+
+test("a stamped origin returning through its declared loop hint is dropped", async () => {
+	const version = Version.DRAFT_07;
+	const { subscriber, send } = announceHarness(version, PEER);
+	const announced = subscriber.announced();
+	try {
+		await send((w) => new AnnounceOk(PUBLISHER_A, 0).encode(w, version));
+		await send((w) =>
+			encodeAnnounceBroadcast(
+				w,
+				{
+					status: "active",
+					suffix: Path.from("loop"),
+					hops: [PUBLISHER_C, PEER],
+				},
+				version,
+			),
+		);
+		await send((w) =>
+			encodeAnnounceBroadcast(
+				w,
+				{
+					status: "active",
+					suffix: Path.from("safe"),
+					hops: [PUBLISHER_B],
+				},
+				version,
+			),
+		);
+		expect(await announced.next()).toMatchObject({
+			prefix: Path.from("safe"),
+			route: { hops: [PUBLISHER_B, PUBLISHER_A] },
+		});
+	} finally {
+		announced.close();
+		subscriber.close();
+	}
+});
+
 test("an announce consumer closed while its stream opens sends nothing on it", async () => {
 	const opening = Promise.withResolvers<void>();
 	let written = 0;
