@@ -102,7 +102,7 @@ divergences, under one epic; its redesign proposals went to m2.
 
 Changed 2026-10-26 (maintainer): pure-Rust crypto moved to m3 until upstream
 graviola and ACME releases make it cheap, so the cut ships on aws-lc-rs.
-Dropping moq-auth's `rsa` crate, and with it a RUSTSEC ignore, stays in m1.
+Dropping the `rsa` crate from moq-auth's production graph stays in m1.
 
 Added 2026-10-25 (maintainer): the studio's
 GPU encode and
