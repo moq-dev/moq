@@ -693,13 +693,13 @@ export class SubscribeDrop {
 	/**
 	 * The error the dropped groups' readers end with, as `version` reads the code.
 	 *
-	 * Before lite-07 the code is the application's, so every drop reads as NOT_FOUND: the
-	 * groups are not there to deliver.
+	 * Before lite-07 the code is the application's, so every drop reads as OLD: the publisher
+	 * gave the groups up, and a reader moves on to a newer one as it would past a superseded group.
 	 */
 	cause(version: Version): Error {
-		if (!hasDropCode(version)) return new StreamError(StreamCode.NotFound, { message: "dropped" });
+		if (!hasDropCode(version)) return new StreamError(StreamCode.Old);
 		if (this.error > 0xffff_ffff)
-			return new StreamError(StreamCode.Internal, { message: `dropped: ${this.error}` });
+			return new StreamError(StreamCode.Internal, { message: `invalid drop code: ${this.error}` });
 		return fromTransport({ source: "stream", streamErrorCode: this.error });
 	}
 

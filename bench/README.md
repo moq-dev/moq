@@ -347,11 +347,12 @@ Crashes, wrong bytes, missing frames, a window that presents nothing, or an
 unavailable CPU clock fail the run; timing never does. The nightly runs
 `--smoke` and keeps its run directory as the `bench-browser` artifact.
 
-The in-memory frame and retained-history paths also run directly in Chromium:
+The in-memory frame, retained-history, and gap ledger paths also run directly in Chromium:
 
 ```bash
 nix develop --command bun bench/browser/micro.ts --bench frames --out .tmp/frames.json base=/path/to/release current=. aa=.
 nix develop --command bun bench/browser/micro.ts --bench drift --out .tmp/drift.json before=/path/to/main current=. aa=.
+nix develop --command bun bench/browser/micro.ts --bench ledger --out .tmp/ledger.json before=/path/to/main current=. aa=.
 ```
 
 Each variant uses its own workspace source and a persistent page, with one full
@@ -360,8 +361,11 @@ warmup before three alternating measured rounds. `aa` must bundle identically to
 runs the checkout's existing `js/net/bench/frames.ts`; `drift` uses the same fixture
 against every checkout, sweeping retained groups, publishers, and readers. Replay
 and group setup stay outside drift timing; each parked read checks its live
-payload. The browser smoke lane preserves one measured round of both fixtures, and drift
-also runs in the nightly JS benchmark leg. Timing is
+payload. `ledger` uses one fixture against every checkout's internal ledger, sweeping
+ascending, descending, shuffled, and rolling-expiration arrivals over the retained
+gap count. It includes each arrival's expiration and coverage checks.
+The browser smoke lane preserves one measured round of all three fixtures, and drift
+and ledger also run in the nightly JS benchmark leg. Timing is
 observational, with the A/A spread showing the host's noise floor.
 
 ## Pattern and container coverage

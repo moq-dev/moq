@@ -137,9 +137,6 @@ async fn sparse_ranges_reach_the_publisher_on_lite07() {
 			.create_track("quiet", Info::default().with_timescale(moq_net::Timescale::MILLI))
 			.unwrap();
 		broadcast.announce(Default::default()).unwrap();
-		for sequence in 0..=4 {
-			write_group(&track, sequence);
-		}
 
 		let subscriber = produce_origin(2);
 		let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
@@ -170,6 +167,10 @@ async fn sparse_ranges_reach_the_publisher_on_lite07() {
 			_ => assert_eq!(asked.len(), 1, "{version}: one span, got {asked:?}"),
 		}
 
+		// Written once the demand is read: lite-07 ends the subscription once it covers them.
+		for sequence in 0..=4 {
+			write_group(&track, sequence);
+		}
 		track.finish().unwrap();
 		let mut got = read_all(&mut reader).await;
 		got.sort_unstable();
@@ -198,4 +199,80 @@ async fn a_live_subscriber_merged_with_one_ahead_still_gets_the_newest_group() {
 		}
 	}
 	assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// A lite-07 publisher ends a bounded subscription once every group in range is
+/// delivered or dropped, releasing its demand, and the subscriber keeps the copy: the
+/// track does not end, the same range reads again from the cache, and a wider one
+/// subscribes again for the rest, past a group that never existed. Older versions park
+/// instead, since their subscriber reads a FIN as the track's end.
+#[moq_clock::test]
+async fn a_covered_bounded_subscription_ends_on_lite07() {
+	for version in LITE {
+		let publisher = produce_origin(1);
+		let broadcast = publisher.create_broadcast("bcast").unwrap();
+		let track = broadcast
+			.create_track("quiet", Info::default().with_timescale(moq_net::Timescale::MILLI))
+			.unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		for sequence in [0, 1, 2, 4, 5] {
+			write_group(&track, sequence);
+		}
+
+		let subscriber = produce_origin(2);
+		let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
+		options.server_publish = Some(publisher.consume());
+		options.client_subscribe = Some(subscriber.clone());
+		let session = connect_mock(options).await;
+		let consumer = subscriber.consume();
+		moq_clock::timeout(TIMEOUT, consumer.routed("bcast"))
+			.await
+			.expect("announce timeout")
+			.expect("routed");
+		let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
+			.await
+			.expect("resolve timeout")
+			.expect("broadcast resolves");
+
+		let bounded = |range: std::ops::Range<u64>| {
+			Subscription::default()
+				.with_max_delay(Duration::from_secs(60))
+				.with_order(moq_net::track::Order::Ascending)
+				.with_ranges([Range::groups(range)])
+		};
+		let mut reader = subscribe(&remote, bounded(1..3)).await;
+		assert_eq!(next(&mut reader).await, Some(1), "{version}");
+		assert_eq!(next(&mut reader).await, Some(2), "{version}");
+
+		let released = moq_clock::timeout(TIMEOUT, crate::support::unwanted(track.demand())).await;
+		if *version != "moq-lite-07-wip" {
+			assert!(released.is_err(), "{version}: the publisher parks");
+			drop((reader, track, session, subscriber, broadcast, publisher));
+			continue;
+		}
+		released.expect("the covered subscription ends").unwrap();
+		assert!(
+			moq_clock::timeout(TIMEOUT, reader.finished()).await.is_err(),
+			"the track goes on"
+		);
+
+		let mut again = subscribe(&remote, bounded(1..3)).await;
+		assert_eq!(next(&mut again).await, Some(1));
+		assert_eq!(next(&mut again).await, Some(2));
+		assert!(track.subscription().is_none(), "the cache answers the same range");
+
+		let mut wider = subscribe(&remote, bounded(1..6)).await;
+		let mut got = Vec::new();
+		for _ in 0..4 {
+			got.extend(next(&mut wider).await);
+		}
+		assert_eq!(got, [1, 2, 4, 5]);
+		// Group 3 may still arrive on a live track, so it is dropped once the feed gives up
+		// on it, past the arrivals grace.
+		moq_clock::timeout(Duration::from_secs(60), crate::support::unwanted(track.demand()))
+			.await
+			.expect("the wider subscription ends past the missing group")
+			.unwrap();
+		drop((reader, again, wider, track, session, subscriber, broadcast, publisher));
+	}
 }

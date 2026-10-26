@@ -11,6 +11,10 @@ The request-handler functions are renamed to match moq-net's `requests()`; their
 `moq_publish_dynamic`, `moq_publish_track_dynamic`, and `moq_track_request_dynamic` are `moq_publish_requests`, `moq_publish_track_requests`, and `moq_track_request_requests`,
 and `moq_publish_dynamic_cancel` is `moq_publish_requests_cancel`.
 
+### Decoders deliver reads
+
+`moq_decode_audio` and `moq_decode_video` call back with a read id per decoded frame, gap, or encoder end instead of a frame id. Replace `moq_decode_audio_frame` / `moq_decode_video_frame` with `moq_decode_audio_read` / `moq_decode_video_read`, which fill a `moq_audio_read` / `moq_video_read`: check `kind` (`MOQ_DECODE_READ_FRAME`, `MOQ_DECODE_READ_GAP`, `MOQ_DECODE_READ_END`) and take the frame from its `frame` field, the lost span from `gap`, or `end_us`. Free every id with `moq_decode_audio_read_free` / `moq_decode_video_read_free` where you called the `_frame_free` functions. Skip gap and end reads to keep the old behavior, or restart playback there, since what follows does not continue what came before.
+
 ### Sessions report a lifecycle snapshot
 
 `moq_session_connect` and `moq_session_request_accept` take a `moq_state_callback` instead of a `moq_status_callback`: `void on_state(void *user_data, const moq_connection_state *state)`.

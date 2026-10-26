@@ -9,6 +9,10 @@ How to update your code for each breaking change, newest first.
 Rename `dynamic()` on `OriginProducer`, `BroadcastProducer`, `TrackProducer`, and `TrackRequest` to `requests()`.
 Their handles `OriginDynamic`, `BroadcastDynamic`, and `TrackDynamic` are `OriginRequests`, `BroadcastRequests`, and `TrackRequests`; their methods are unchanged.
 
+### Decoders read gaps and ends
+
+`audio.Consumer` yields `audio.Read` (`audio.Frame | audio.Gap | audio.End`) and `video.Consumer` yields `video.Read` (`VideoDecodedFrame | video.Gap | video.End`). Check `isinstance(read, audio.Frame)` (or `VideoDecodedFrame`) where you used each item as a frame; a `Gap` marks lost media and an `End` where the publisher stopped its encoder, and what follows either does not continue what came before.
+
 ### Audio frame duration is optional
 
 `audio.EncoderOutput.frame_duration` defaults to `None` for the codec's own frame. Pass `None` where you passed `timedelta(0)`.

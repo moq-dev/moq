@@ -18,7 +18,10 @@ use std::time::Duration;
 use bytes::Bytes;
 use tokio::sync::oneshot;
 
+use crate::decode::Read;
 use crate::ffi::OnStatus;
+use crate::{moq_decode_gap, moq_decode_read_kind};
+
 use crate::task::Task;
 use crate::{Error, Id, NonZeroSlab, Shared, State, ffi};
 
@@ -127,7 +130,7 @@ pub struct moq_audio_decoder_output {
 /// One audio frame: payload bytes plus a presentation timestamp.
 ///
 /// `data` is owned by the consume slab (see
-/// [`moq_decode_audio_frame_free`]) or borrowed by the publish call
+/// [`moq_decode_audio_read_free`]) or borrowed by the publish call
 /// (the publisher copies before returning).
 #[repr(C)]
 pub struct moq_audio_frame {
@@ -137,6 +140,24 @@ pub struct moq_audio_frame {
 	pub data: *const u8,
 	/// The length in bytes of `data`.
 	pub data_size: usize,
+}
+
+/// One read from [`moq_decode_audio`]: decoded PCM, or a break in it. `kind` says which
+/// field is filled; the others are zeroed.
+#[repr(C)]
+pub struct moq_audio_read {
+	/// Which kind of read this is.
+	pub kind: moq_decode_read_kind,
+	/// The decoded PCM, for [moq_decode_read_kind::MOQ_DECODE_READ_FRAME].
+	pub frame: moq_audio_frame,
+	/// The lost span, for [moq_decode_read_kind::MOQ_DECODE_READ_GAP]. What follows does
+	/// not continue what came before.
+	pub gap: moq_decode_gap,
+	/// Where the stopped encoder's media stops in microseconds, for
+	/// [moq_decode_read_kind::MOQ_DECODE_READ_END]. Frames that follow and start before it
+	/// are the stopped encoder's remaining media; the first at or past it comes from a fresh
+	/// encoder.
+	pub end_us: u64,
 }
 
 // ---- State extensions (used internally by lib.rs) ----
@@ -164,7 +185,7 @@ impl crate::publish::Abort for AudioProducer {
 pub struct Audio {
 	producers: NonZeroSlab<AudioProducer>,
 	consumer_tasks: NonZeroSlab<Task>,
-	frames: NonZeroSlab<moq_audio::Frame>,
+	reads: NonZeroSlab<Read<moq_audio::Frame>>,
 }
 
 impl Audio {
@@ -224,7 +245,7 @@ impl Audio {
 		self.producers.remove(id).ok_or(Error::MediaNotFound)
 	}
 
-	/// Decode a rendition and deliver frame handles to the callback.
+	/// Decode a rendition and deliver read handles to the callback.
 	pub fn consume(
 		&mut self,
 		rendition: crate::consume::Rendition<hang::catalog::AudioConfig>,
@@ -260,14 +281,14 @@ impl Audio {
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
 		loop {
-			// `biased` so a pending close always wins over a ready frame.
-			let frame = tokio::select! {
+			// `biased` so a pending close always wins over a ready read.
+			let read = tokio::select! {
 				biased;
 				_ = &mut close => return Ok(()),
-				frame = consumer.read() => match frame {
-					Ok(Some(moq_audio::decode::Read::Frame(frame))) => frame,
-					// The C ABI hands over PCM only.
-					Ok(Some(moq_audio::decode::Read::Gap { .. } | moq_audio::decode::Read::End { .. })) => continue,
+				read = consumer.read() => match read {
+					Ok(Some(moq_audio::decode::Read::Frame(frame))) => Read::Frame(frame),
+					Ok(Some(moq_audio::decode::Read::Gap { timestamp, duration })) => Read::gap(timestamp, duration)?,
+					Ok(Some(moq_audio::decode::Read::End { end })) => Read::end(end)?,
 					Ok(None) => return Ok(()),
 					// One packet the codec rejected is that packet's problem: the
 					// decoder stays usable, so drop it and keep the subscription rather
@@ -280,9 +301,9 @@ impl Audio {
 				},
 			};
 
-			// Hold the lock only to buffer the frame; release it before the callback.
-			let frame_id = State::lock().audio.frames.insert(frame)?;
-			callback.call(Ok(frame_id));
+			// Hold the lock only to buffer the read; release it before the callback.
+			let read_id = State::lock().audio.reads.insert(read)?;
+			callback.call(Ok(read_id));
 		}
 	}
 
@@ -291,24 +312,38 @@ impl Audio {
 		self.consumer_tasks.close(id, Error::TrackNotFound)
 	}
 
-	/// Borrow a decoded frame and its metadata until its handle is freed.
-	pub fn frame_info(&self, id: Id, dst: &mut moq_audio_frame) -> Result<(), Error> {
-		let frame = self.frames.get(id).ok_or(Error::FrameNotFound)?;
-		*dst = moq_audio_frame {
-			// The C ABI carries plain microseconds, so flatten the scaled
-			// `Timestamp` here at the boundary. Saturating rather than erroring:
-			// this is a getter on a frame we already decoded, and a u64 overflow
-			// needs a timestamp ~580,000 years out.
-			timestamp_us: u64::try_from(frame.timestamp.as_micros()).unwrap_or(u64::MAX),
-			data: frame.data.as_ptr(),
-			data_size: frame.data.len(),
+	/// Borrow a delivered read, and a frame's samples, until its handle is freed.
+	pub fn read_info(&self, id: Id, dst: &mut moq_audio_read) -> Result<(), Error> {
+		let read = self.reads.get(id).ok_or(Error::FrameNotFound)?;
+		let (kind, gap, end_us) = read.info();
+		let frame = match read {
+			Read::Frame(frame) => moq_audio_frame {
+				// The C ABI carries plain microseconds, so flatten the scaled
+				// `Timestamp` here at the boundary. Saturating rather than erroring:
+				// this is a getter on a frame we already decoded, and a u64 overflow
+				// needs a timestamp ~580,000 years out.
+				timestamp_us: u64::try_from(frame.timestamp.as_micros()).unwrap_or(u64::MAX),
+				data: frame.data.as_ptr(),
+				data_size: frame.data.len(),
+			},
+			_ => moq_audio_frame {
+				timestamp_us: 0,
+				data: std::ptr::null(),
+				data_size: 0,
+			},
+		};
+		*dst = moq_audio_read {
+			kind,
+			frame,
+			gap,
+			end_us,
 		};
 		Ok(())
 	}
 
-	/// Release a decoded frame handle.
-	pub fn frame_free(&mut self, id: Id) -> Result<(), Error> {
-		self.frames.remove(id).ok_or(Error::FrameNotFound)?;
+	/// Release a delivered read handle.
+	pub fn read_free(&mut self, id: Id) -> Result<(), Error> {
+		self.reads.remove(id).ok_or(Error::FrameNotFound)?;
 		Ok(())
 	}
 }
@@ -496,11 +531,12 @@ pub extern "C" fn moq_encode_audio_finish(producer: u32) -> i32 {
 ///
 /// Returns a non-zero handle on success or a negative error code.
 ///
-/// `on_frame` is called with a positive frame ID per frame, then exactly once
-/// more with a terminal code: `0` (closed cleanly) or a negative error. After
-/// the terminal (`<= 0`) callback, `on_frame` is never called again and
-/// `user_data` is never touched again, so release `user_data` there. The
-/// terminal callback fires even after [`moq_decode_audio_cancel`].
+/// `on_read` is called with a positive read id per decoded frame, gap, or encoder
+/// end (see [`moq_decode_audio_read`]), then exactly once more with a terminal
+/// code: `0` (closed cleanly) or a negative error. After the terminal (`<= 0`)
+/// callback, `on_read` is never called again and `user_data` is never touched
+/// again, so release `user_data` there. The terminal callback fires even after
+/// [`moq_decode_audio_cancel`].
 ///
 /// Starts at the newest cached group so reopening live playback skips the backlog.
 ///
@@ -509,13 +545,13 @@ pub extern "C" fn moq_encode_audio_finish(producer: u32) -> i32 {
 ///
 /// # Safety
 /// - `output` must point to a valid [`moq_audio_decoder_output`].
-/// - `user_data` must stay valid until the terminal (`<= 0`) `on_frame` callback.
+/// - `user_data` must stay valid until the terminal (`<= 0`) `on_read` callback.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_decode_audio(
 	catalog: u32,
 	index: u32,
 	output: *const moq_audio_decoder_output,
-	on_frame: crate::moq_status_callback,
+	on_read: crate::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
@@ -531,23 +567,23 @@ pub unsafe extern "C" fn moq_decode_audio(
 			.transpose()?;
 		config.max_delay = Duration::from_micros(raw.max_delay_us);
 
-		let on_frame = unsafe { OnStatus::new(user_data, on_frame)? };
+		let on_read = unsafe { OnStatus::new(user_data, on_read)? };
 
 		let mut state = State::lock();
 		let rendition = state.consume.rendition(catalog, index as usize)?;
 
 		let State { audio, .. } = &mut *state;
-		audio.consume(rendition, config, on_frame)
+		audio.consume(rendition, config, on_read)
 	})
 }
 
 /// Stop an audio (raw PCM) consumer's background task.
 ///
 /// Returns immediately: zero on success, or a negative code if already closed.
-/// Does NOT free `user_data`; the on-frame callback still fires once more with a
+/// Does NOT free `user_data`; the on-read callback still fires once more with a
 /// terminal `0` (or a negative error), which is where `user_data` should be
-/// released. Frame IDs already delivered to the callback are likewise not freed;
-/// release each with [`moq_decode_audio_frame_free`].
+/// released. Read ids already delivered to the callback are likewise not freed;
+/// release each with [`moq_decode_audio_read_free`].
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_decode_audio_cancel(consumer: u32) -> i32 {
 	ffi::enter(move || {
@@ -556,29 +592,29 @@ pub extern "C" fn moq_decode_audio_cancel(consumer: u32) -> i32 {
 	})
 }
 
-/// Copy a delivered frame's metadata into `dst`.
+/// Copy a delivered read into `dst`: its kind, and the frame, gap, or end it carries.
 ///
-/// The written `dst->data` pointer remains valid until the same `id`
-/// is released with [`moq_decode_audio_frame_free`].
+/// The written `dst->frame.data` pointer remains valid until the same `id`
+/// is released with [`moq_decode_audio_read_free`].
 ///
 /// # Safety
-/// - `dst` must point to a writable [`moq_audio_frame`].
+/// - `dst` must point to a writable [`moq_audio_read`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_decode_audio_frame(id: u32, dst: *mut moq_audio_frame) -> i32 {
+pub unsafe extern "C" fn moq_decode_audio_read(id: u32, dst: *mut moq_audio_read) -> i32 {
 	ffi::enter(move || {
 		let id = ffi::parse_id(id)?;
 		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
-		State::lock().audio.frame_info(id, dst)
+		State::lock().audio.read_info(id, dst)
 	})
 }
 
-/// Free a frame previously delivered through the consume callback.
-/// Required for every delivered frame ID; closing the parent consumer
+/// Free a read previously delivered through the decode callback.
+/// Required for every delivered read id; closing the parent consumer
 /// is not enough.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_decode_audio_frame_free(id: u32) -> i32 {
+pub extern "C" fn moq_decode_audio_read_free(id: u32) -> i32 {
 	ffi::enter(move || {
 		let id = ffi::parse_id(id)?;
-		State::lock().audio.frame_free(id)
+		State::lock().audio.read_free(id)
 	})
 }

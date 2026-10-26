@@ -18,7 +18,8 @@ Decided 2026-10-23 (maintainer):
 `SendStream` is `send::Stream`, `SendGroup` is `send::Group`, `SendGroups`
 is `send::Groups`, `SendOptions` is `send::Options`, `RecvStream` is
 `recv::Stream`, the driver's `Lease` and moq-quic's `Leased` are
-`recv::Lease`, `StreamId` is `stream::Id`, `StreamEvent` is `stream::Event`.
+`recv::Lease`, and `StreamId` is `stream::Id`. `StreamEvent` keeps its name:
+[waits](/quest/m1/quic-api/waits.md) deletes it.
 `recv::Stream::set_priority` keeps its name, though it ranks eviction rather
 than scheduling (maintainer: "priority" means "more important" both ways).
 `send::Options` loses its generic group parameter; each layer defines its
@@ -84,7 +85,9 @@ keep a `sends: FxHashMap<StreamId, Option<End>>` because `Finished` and
 `copy_to_bytes`, and `debug_assert` around `write`. moq-quic keeps a
 queryable send-stream end (finished and acknowledged, stopped with a code,
 reset) until the id is released, and takes `write(&mut impl Buf)`; both
-consumers' copies go. Per-stream waker tables stay in the drivers.
+consumers' copies go. The per-stream waker tables move into moq-quic in
+[waits](/quest/m1/quic-api/waits.md) (maintainer, 2026-10-25, replacing "stay
+in the drivers").
 
 **Consumers' error plumbing.** moq-tokio's `quic::web` error module rewraps
 `WriteError`, `ReadError`, `ReadExactError`, `ReadToEndError`, and
@@ -92,9 +95,10 @@ consumers' copies go. Per-stream waker tables stay in the drivers.
 for unordered reads, and a four-level match in `session.rs`; collapse it onto
 `send::Error` and `recv::Error`.
 
-**Acked.** Both drivers match `stream::Event::Acked` explicitly instead of
-moq-tokio's `_ => {}` catch-all, so a new event is a compile error. The
-driver's waiter method arrives with [poll_acked](/quest/m2/quic-ack-hook.md).
+**Acked.** Both drivers match `StreamEvent::Acked` explicitly instead of
+moq-tokio's `_ => {}` catch-all, so a new event is a compile error until
+[waits](/quest/m1/quic-api/waits.md) deletes the events. The driver's waiter
+method arrives with [poll_acked](/quest/m2/quic-ack-hook.md).
 
 **moq-uring.** Its driver gets the same names and signatures and passes
 `send::Options` to the open, as moq-tokio's does, instead of applying them

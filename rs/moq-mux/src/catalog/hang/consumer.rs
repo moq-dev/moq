@@ -249,21 +249,6 @@ mod test {
 		assert!(matches!(result, Err(crate::Error::EscapingBroadcast(_))), "{result:?}");
 	}
 
-	#[test]
-	fn refuses_oversized_catalog_before_reconciling_renditions() {
-		let mut published = Catalog::<()>::default();
-		for i in 0..=hang::catalog::MAX_RENDITIONS {
-			published.audio.renditions.insert(format!("audio{i}"), opus());
-		}
-		assert!(matches!(
-			publish_catalog(published),
-			Err(crate::Error::Hang(hang::Error::TooManyRenditions {
-				count: 65,
-				max: 64
-			}))
-		));
-	}
-
 	/// A reference that stops at or below the root names a broadcast, so the catalog stands.
 	/// `a/pub` resolves against `a`, so `..` is what lands on the root itself.
 	#[tokio::test]

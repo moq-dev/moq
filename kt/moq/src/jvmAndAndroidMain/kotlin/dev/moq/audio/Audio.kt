@@ -4,7 +4,7 @@ package dev.moq.audio
 typealias Producer = uniffi.moq.MoqAudioProducer
 /** Encodes PCM without publishing it. */
 typealias Encoder = uniffi.moq.MoqAudioEncoder
-/** Subscribes to a catalog audio rendition and yields decoded PCM; open one with `Consumer.subscribe`. */
+/** Subscribes to a catalog audio rendition and yields each [Read]; open one with `Consumer.subscribe`. */
 typealias Consumer = uniffi.moq.MoqAudioConsumer
 /** The PCM layout written to a [Producer]. */
 typealias EncoderInput = uniffi.moq.MoqAudioEncoderInput
@@ -14,6 +14,15 @@ typealias EncoderOutput = uniffi.moq.MoqAudioEncoderOutput
 typealias DecoderOutput = uniffi.moq.MoqAudioDecoderOutput
 /** PCM samples in the configured layout with their presentation timestamp. */
 typealias Frame = uniffi.moq.MoqAudioFrame
+/** One item a [Consumer] reads, in delivery order: [ReadFrame], [ReadGap], or [ReadEnd]. */
+typealias Read = uniffi.moq.MoqAudioRead
+/** Decoded PCM. */
+typealias ReadFrame = uniffi.moq.MoqAudioRead.Frame
+/** Media after what was already read was lost; what follows does not continue it. */
+typealias ReadGap = uniffi.moq.MoqAudioRead.Gap
+/** The publisher stopped its encoder; frames starting before `endUs` are its remaining media. */
+typealias ReadEnd = uniffi.moq.MoqAudioRead.End
+
 /** One encoded payload from an [Encoder]. */
 typealias Packet = uniffi.moq.MoqAudioPacket
 /** The packets an [Encoder] drains on finish and the padded samples to discard. */

@@ -162,6 +162,7 @@ impl Broadcaster {
 	}
 
 	/// [`closed`](Self::closed), polled: ready once the source broadcast closes.
+	#[cfg(feature = "server")]
 	pub(crate) fn poll_closed(&self, waiter: &kio::Waiter) -> std::task::Poll<()> {
 		self.broadcast.poll_closed(waiter)
 	}
