@@ -46,3 +46,5 @@ Public API: none. Wire: none.
 - [moq-uring allocations under load](/quest/m1/test-flakes-2/uring-alloc-load.md) - the steady-state send test and MEMLOCK users pass in a parallel check
 - [IETF22 fallback](/quest/m1/test-flakes-2/ietf22-fallback.md) - an IETF22 browser viewer follows a fallback within the media lane's bound, keeping its session and its audio
 - [Echo report test on mocked time](/quest/m1/test-flakes-2/export-echo-time.md) - the moq-cli echo report test stops taking 35 s of wall time
+- [Swapped Rust to JS Opus](/quest/m1/test-flakes-2/swapped-js-opus.md) - the `rust-swapped -> js` interop cell stops timing out under load
+- [Interop loads moq-gst](/quest/m1/test-flakes-2/gst-plugin-load.md) - the interop gst cells always find the local plugin

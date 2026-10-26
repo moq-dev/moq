@@ -236,6 +236,15 @@ run array once for the track and once per sink (`track.ts:914`). The
 replacement keeps the per-cursor walk incremental in both languages, with a
 benchmark swept over runs and readers.
 
+### Idle START unreport test
+
+[moq-dev/moq#6717](https://github.com/moq-dev/moq/pull/6717) made the JS lite
+publisher unreport stale skips below an idle SUBSCRIBE_START, so a later
+widening can re-offer them as Rust does, but landed it without a test: the
+case needs an update to arrive between START and the first group. Cover it
+deterministically, through the track hooks rather than wire timing, when the
+drop runs are reworked here.
+
 ## Required
 
 - [A widened max age re-offers cached groups](/quest/m1/resolved-demand.md) - the re-offer path this extends to reported groups
