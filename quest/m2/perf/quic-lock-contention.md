@@ -36,9 +36,18 @@ Levers, only where the profile shows a cost:
 - Dispatch a whole GRO batch per connection in one message, coordinated
   with [the I/O boundary redesign](/quest/m2/quic-io-boundary.md), whose
   "one `handle` call takes a whole GRO batch" is the state-machine half.
-- Stream handles that carry a slab key instead of a `StreamId`, removing the
-  driver's three per-stream `FxHashMap`s and moq-quic's lookups. FxHash is
-  cheap, so this is last and only on evidence.
+- Stream handles that carry a slab key instead of a `StreamId`, removing
+  moq-quic's per-stream lookups (the driver's own maps go with
+  [waits](/quest/m1/quic-api/waits.md)). FxHash is cheap, so this is last
+  and only on evidence.
+
+Direction to weigh (maintainer, 2026-10-25): ideally the connection state
+has no mutex and no `Arc`, owned by one task as moq-uring's is per core.
+Stream handles are what make that hard, since each one reaches into the
+connection. The `&self` receivers in
+[net-poll](/quest/m1/quic-api/net-poll.md) and
+[poll](/quest/m1/quic-api/poll.md) accept a mutex for now without committing
+to one; say whether the profile justifies going further.
 
 A measured no-win is a valid outcome. Report public API and wire impact; the
 staging queue and batch dispatch should need none.
@@ -47,6 +56,7 @@ staging queue and batch dispatch should need none.
 
 - [Native WebTransport](/quest/m1/quic-api/native-web.md) - removes the adapter's per-operation boxing, which would otherwise dominate the profile
 - [Streams](/quest/m1/quic-api/streams.md) - owned writes and lock-free leases
+- [Waits](/quest/m1/quic-api/waits.md) - moves the waiter tables under the lock this profiles
 
 ## Related
 
