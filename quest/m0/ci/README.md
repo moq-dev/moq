@@ -53,15 +53,18 @@ Decisions (maintainer, 2026-10-13):
 - Self-hosted CI is dropped: hosted runners plus the R2 caches replace the
   spare-desktop runner, its cache server, and the cache release it waited on.
   Reopened 2026-10-19, conditionally, to compare runners once the pipeline
-  was optimized. Decided 2026-10-22 (maintainer): the queue runner is the
-  persistent `nix/runner` VM (no host mounts or tailnet, firewalled to public
-  egress), in use since 2026-10-20. Over 32 one-pass entries it took a median
-  5.5 minutes per merged PR (p90 11.9, at most 24.2) against 21 minutes on a
-  hosted runner, with no per-minute bill. Blacksmith is not pursued.
-  Open (found 2026-10-23): the runner deployed on that host is a
-  systemd-nspawn container (`container@moq-ci`) with `/dev/kvm` and a host
-  cache directory bound in, not the VM this decision and `nix/runner/README.md`
-  describe. Confirm which is intended before changing either.
+  was optimized. Decided 2026-10-22 (maintainer): the queue runs on a
+  persistent self-hosted runner, in use since 2026-10-20. Over 32 one-pass
+  entries it took a median 5.5 minutes per merged PR (p90 11.9, at most 24.2)
+  against 21 minutes on a hosted runner, with no per-minute bill. Blacksmith
+  is not pursued.
+- Decided 2026-10-25 (maintainer), superseding the 2026-10-22 choice of the
+  `nix/runner` VM: no VM. The queue runner is the deployed systemd-nspawn
+  container `container@moq-ci`, and new queue runners go into it. Reason: the
+  CI host should run mostly sandboxed through kernel primitives (namespaces,
+  cgroups and slices, seccomp), which the container already uses, so a VM is
+  not needed for isolation. The `nix/runner` VM module is not the deployment
+  target.
 
 Decided 2026-10-23 (maintainer), to speed up the serial queue: structural
 changes first (concurrent entries, parallel modules, one test build), then a
@@ -83,6 +86,19 @@ chosen from measurements of the optimized pipeline. Each CI pass costs twice
 per merged PR today (PR and queue), at 13 minutes median and 26 minutes p90 of
 wall time per PR run.
 
+Decided 2026-10-25 (maintainer): across moq's many CI and release builds
+(targets, features, FFI languages, Nix packages), each crate configuration
+compiles once and is reused through the cache, and each run builds and tests
+only what its diff can affect, measured in runner CPU time. Wall clock for its
+own sake and replacing cargo are non-goals. mbx already caches each compilation,
+so the work is making builds identical enough to hit it (one crane dependency
+layer, flags in `.cargo/config.toml`, cargo-hakari), and auditing the package
+selection `just ci` already does. Nix builds run sandboxed and cannot reach R2:
+kixelated/rust2's
+[Nix build benchmark](https://github.com/kixelated/rust2/blob/main/quest/m1/bench-nix.md)
+decides between crane with mbx, crate2nix, and cargo with mbx after the crane
+fixes land.
+
 Measure each change against a current baseline and record the result in its PR.
 The historical samples locate candidates; they are not controlled benchmarks.
 
@@ -94,4 +110,9 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [Bump to the manifest fix](/quest/m0/ci/mbx-bump.md) - condition: an mbx release contains jdx/mr-boxington#798; then bump the Rust cache's pin
 - [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) - measure the hosted Nightly jobs' hits, restore time, and expiry once the bump lands
 - [Verify the Nix cache](/quest/m0/ci/nix-cache-verify.md) - confirm CI and releases use `nix.moq.dev` and retire Cachix
+- [Share crane's dependency layer](/quest/m0/ci/crane-layers.md) - Nix packages build their dependencies once, and a workspace edit rebuilds none of them
+- [Unify dependency features](/quest/m0/ci/hakari.md) - a cargo-hakari workspace-hack so every job compiles each dependency alike and mbx hits across jobs
+- [Audit CI's package selection](/quest/m0/ci/select-audit.md) - how often the queue runs everything, and whether each rule that forces it is needed
 - [First shared FFI release](/quest/m0/ci/nightly-ffi-reuse.md) - condition: the backport merges and the next `moq-ffi-v*` tag runs `Release FFI`; verify the wrappers
+- [Loom tests compile](/quest/m0/ci/loom-build.md) - `just rs loom` builds on main and a `--cfg loom` break fails its PR
+- [just check without user namespaces](/quest/m0/ci/check-without-userns.md) - a host that refuses `unshare` reports the flake module as not run instead of cancelling other lanes

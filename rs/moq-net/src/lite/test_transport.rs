@@ -570,8 +570,8 @@ impl poll::Session for DeadStreamSession {
 		0
 	}
 
-	fn binding(&self) -> crate::transport::Binding {
-		crate::transport::Binding::InBand
+	fn address(&self) -> crate::transport::Address {
+		crate::transport::Address::Setup
 	}
 	fn protocol(&self) -> Option<&str> {
 		None
@@ -827,8 +827,8 @@ impl poll::Session for SinkSession {
 		self.datagram_size
 	}
 
-	fn binding(&self) -> crate::transport::Binding {
-		crate::transport::Binding::InBand
+	fn address(&self) -> crate::transport::Address {
+		crate::transport::Address::Setup
 	}
 	fn protocol(&self) -> Option<&str> {
 		self.protocol
@@ -1234,8 +1234,8 @@ impl poll::Session for ScriptedSession {
 		self.datagram_size
 	}
 
-	fn binding(&self) -> crate::transport::Binding {
-		crate::transport::Binding::InBand
+	fn address(&self) -> crate::transport::Address {
+		crate::transport::Address::Setup
 	}
 	fn protocol(&self) -> Option<&str> {
 		None

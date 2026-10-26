@@ -1,4 +1,4 @@
-# Nightly passes on main
+# [S] Nightly passes on main
 
 ## Goal
 
@@ -16,7 +16,7 @@ Decided 2026-10-24 (maintainer), from a triage of run
 child per distinct cause, each landing on its own. The PR gate keeps
 skipping benches and examples; a green Nightly catches them within a day.
 
-This README's own work, after the children:
+This README's own work:
 
 - Nightly's multi-step jobs (Features first) keep going past a failed step
   and fail at the end, so one break never hides the steps after it.
@@ -30,8 +30,3 @@ This README's own work, after the children:
   [moq-dev/moq#6656](https://github.com/moq-dev/moq/pull/6656).
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Feature shapes in the gate](/quest/m0/nightly/feature-shapes.md) - feature-gated dead code fails the PR that adds it, not the next Nightly
-- [Nightly's base in a shallow checkout](/quest/m0/nightly/shallow-base.md) - `sh/gh/nightly.test.py` passes in Nightly's depth-1 checkout

@@ -133,20 +133,17 @@ fn stateless_retry() {
 	assert_eq!(pair.server.known_cids(), 0);
 }
 
-#[test]
-fn retry_token_expired() {
+#[moq_clock::test]
+async fn retry_token_expired() {
 	let _guard = subscribe();
 
-	let fake_time = Arc::new(FakeTimeSource::new());
 	let retry_token_lifetime = Duration::from_secs(1);
 
 	let mut pair = Pair::default();
 	pair.server.handle_incoming = Box::new(validate_incoming);
 
 	let mut config = server_config();
-	config
-		.time_source(Arc::clone(&fake_time) as _)
-		.retry_token_lifetime(retry_token_lifetime);
+	config.retry_token_lifetime(retry_token_lifetime);
 	pair.server.set_server_config(Some(Arc::new(config)));
 
 	let client_ch = pair.begin_connect(client_config());
@@ -155,7 +152,7 @@ fn retry_token_expired() {
 	pair.drive_client();
 
 	// to expire retry token
-	fake_time.advance(retry_token_lifetime + Duration::from_millis(1));
+	moq_clock::sleep(retry_token_lifetime + Duration::from_millis(1)).await;
 
 	pair.drive();
 	assert_matches!(
@@ -359,16 +356,12 @@ fn use_same_token_twice() {
 	assert_eq!(pair.server.known_cids(), 0);
 }
 
-#[test]
-fn use_token_expired() {
+#[moq_clock::test]
+async fn use_token_expired() {
 	let _guard = subscribe();
-	let fake_time = Arc::new(FakeTimeSource::new());
 	let lifetime = Duration::from_secs(10000);
 	let mut server_config = server_config();
-	server_config
-		.time_source(Arc::clone(&fake_time) as _)
-		.validation_token
-		.lifetime(lifetime);
+	server_config.validation_token.lifetime(lifetime);
 	let mut pair = Pair::new(Default::default(), server_config);
 	let client_config = client_config();
 	let (client_ch, _server_ch) = pair.connect_with(client_config.clone());
@@ -400,7 +393,7 @@ fn use_token_expired() {
 	assert_eq!(pair.server.known_connections(), 0);
 	assert_eq!(pair.server.known_cids(), 0);
 
-	fake_time.advance(lifetime + Duration::from_secs(1));
+	moq_clock::sleep(lifetime + Duration::from_secs(1)).await;
 
 	pair.server.handle_incoming = Box::new(|incoming| {
 		assert!(!incoming.remote_address_validated());
@@ -418,23 +411,4 @@ fn use_token_expired() {
 	assert_eq!(pair.client.known_cids(), 0);
 	assert_eq!(pair.server.known_connections(), 0);
 	assert_eq!(pair.server.known_cids(), 0);
-}
-
-pub(super) struct FakeTimeSource(Mutex<Wall>);
-
-impl FakeTimeSource {
-	pub(super) fn new() -> Self {
-		Self(Mutex::new(Wall::now()))
-	}
-
-	pub(super) fn advance(&self, dur: Duration) {
-		let mut time = self.0.lock().unwrap();
-		*time = *time + dur;
-	}
-}
-
-impl TimeSource for FakeTimeSource {
-	fn now(&self) -> Wall {
-		*self.0.lock().unwrap()
-	}
 }
