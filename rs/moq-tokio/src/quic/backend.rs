@@ -1237,16 +1237,20 @@ mod tests {
 	/// concrete moq-quic implementation it must map to.
 	#[test]
 	fn congestion_factory_maps_each_family() {
-		let now = moq_clock::Instant::now();
-		let mtu = 1200;
+		let init = moq_congestion::Init {
+			now: moq_clock::Instant::now(),
+			mtu: 1200,
+			rtt: std::time::Duration::from_millis(333),
+			max_pacing_rate: None,
+		};
 
-		let loss = congestion_factory(CongestionControl::Loss).build(now, mtu);
+		let loss = congestion_factory(CongestionControl::Loss).build(init);
 		assert!(loss.into_any().downcast::<moq_congestion::Cubic>().is_ok());
 
-		let delay = congestion_factory(CongestionControl::Delay).build(now, mtu);
+		let delay = congestion_factory(CongestionControl::Delay).build(init);
 		assert!(delay.into_any().downcast::<moq_congestion::Bbr3>().is_ok());
 
-		let none = congestion_factory(CongestionControl::None).build(now, mtu);
+		let none = congestion_factory(CongestionControl::None).build(init);
 		assert!(none.into_any().downcast::<moq_congestion::Unlimited>().is_ok());
 	}
 

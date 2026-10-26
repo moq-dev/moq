@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Level` is at the crate root
+
+`encode::Level` is `moq_audio::Level`, since the program bus's meters report it too.
+
 ### Decoded reads carry gaps and encoder ends (#5687, #6475)
 
 `decode::Consumer::read()` returns `decode::Read` events instead of bare frames, the same shape as `moq_video::decode::Read`: `Frame(frame)`, `Gap { timestamp, duration }` for lost media, and `End { end }` where the publisher stopped its encoder; `None` still means the track is finished.

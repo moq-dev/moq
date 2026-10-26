@@ -219,6 +219,11 @@ Mirror each case in `js/net`.
 Public API: none. Wire: lite-07 SUBSCRIBE_DROP (unpublished) gains `Max Age`
 and the widening and ordering rules above; published versions are
 unchanged.
+- A local producer's declared end must settle over dropped groups, as the
+  doc on `TrackState::drop_groups` already claims (added 2026-10-25): let
+  `reaches(fin)` count a live edge whose gap `edge..fin` is wholly dropped,
+  then delete moq-archive's fake empty group at `fin - 1`
+  (`rs/moq-archive/src/consumer/track.rs`).
 
 ### CPU per drop (2026-10-24 pre-cut audit)
 
