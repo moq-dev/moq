@@ -15,7 +15,7 @@ Compression is not a wrapper: it moves into moq-net as a track flag
 moq-flate, so moq-flate is out of scope.
 
 Non-goals:
-- The runtime seam: [Runtime trait](/quest/m2/runtime-trait.md).
+- A runtime seam: libraries poll and spawn nothing ([Libraries spawn nothing](/quest/m1/poll-first/no-spawn.md)).
 - The transport seam: [Drop web-transport-trait](/quest/m1/drop-web-transport-trait.md).
 
 ## Plan
@@ -79,4 +79,3 @@ above.
 
 - [E2EE](/quest/m2/e2ee/README.md) - the first wrapper, which publishes and consumes through these traits
 - [Compressed tracks](/quest/m1/compress/README.md) - compression moves into moq-net as a track flag, so it is not a wrapper
-- [Runtime trait](/quest/m2/runtime-trait.md) - a separate seam, out of scope here

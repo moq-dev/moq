@@ -82,6 +82,7 @@ Rejected in planning:
 - [moq-net names say one thing](/quest/m1/api-audit/net-names.md) - demand says `wanted`, colliding stats and transport names are renamed, and Rust and JS info lookups mirror
 - [Request handlers are named requests](/quest/m1/api-audit/requests.md) - `dynamic()` and `Dynamic` become `requests()` and `Requests` at every layer
 - [Demand is wanted, everywhere](/quest/m1/api-audit/wanted.md) - every `used`/`unused` pair becomes `wanted()` and `wanted_changed()`, and unused ones go
+- [One meaning for Credential](/quest/m1/api-audit/dial-credential.md) - the internal dial type gets its own name in JS and moq-tokio, and the `Presented` alias goes
 
 ## Related
 
