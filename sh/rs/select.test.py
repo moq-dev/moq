@@ -1,5 +1,6 @@
 """Verify Rust selection and test target boundaries."""
 
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -101,6 +102,60 @@ class SelectTest(unittest.TestCase):
 
 
 class RecipeTest(unittest.TestCase):
+    def test_feature_shapes_isolate_selected_crates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            scratch = Path(directory)
+            for package in ("feature-owner", "feature-consumer"):
+                (scratch / package / "src").mkdir(parents=True)
+            manifest = scratch / "Cargo.toml"
+            manifest.write_text(
+                '[workspace]\nresolver = "2"\nmembers = ["feature-owner", "feature-consumer"]\n'
+            )
+            (scratch / "feature-owner/Cargo.toml").write_text(
+                '[package]\nname = "feature-owner"\nversion = "0.0.0"\nedition = "2024"\n'
+                '[features]\nenabled = []\n'
+            )
+            (scratch / "feature-owner/src/lib.rs").write_text(
+                'fn needs_feature() -> bool { true }\n'
+                '#[cfg(feature = "enabled")]\npub fn enabled() -> bool { needs_feature() }\n'
+            )
+            (scratch / "feature-consumer/Cargo.toml").write_text(
+                '[package]\nname = "feature-consumer"\nversion = "0.0.0"\nedition = "2024"\n'
+                '[dependencies]\nfeature-owner = { path = "../feature-owner", features = ["enabled"] }\n'
+            )
+            (scratch / "feature-consumer/src/lib.rs").write_text(
+                'pub fn enabled() -> bool { feature_owner::enabled() }\n'
+            )
+            env = dict(os.environ, LOCAL_SUPERVISED="1", BASH_ENV=os.devnull,
+                       CARGO_TARGET_DIR=str(scratch / "target"), CARGO_NET_OFFLINE="true",
+                       CARGO_TERM_COLOR="never")
+            subprocess.run(["cargo", "generate-lockfile", "--manifest-path", str(manifest)],
+                           cwd=ROOT, env=env, check=True, capture_output=True, text=True)
+            unified = subprocess.run(
+                ["cargo", "clippy", "--locked", "--tests", "--no-default-features",
+                 "--workspace", "--manifest-path", str(manifest), "--", "-D", "warnings"],
+                cwd=ROOT, env=env, capture_output=True, text=True,
+            )
+            self.assertEqual(unified.returncode, 0, unified.stdout + unified.stderr)
+            metadata = json.loads(subprocess.check_output(
+                ["cargo", "metadata", "--format-version", "1", "--no-deps",
+                 "--manifest-path", str(manifest)], cwd=ROOT, env=env, text=True,
+            ))
+            selected = [arg for package in metadata["workspace_members"] for arg in ("--package", package)]
+            for flags, succeeds in ((["--workspace", "--exclude", "feature-owner"], True), (selected, False)):
+                with self.subTest(flags=flags):
+                    result = subprocess.run(
+                        ["just", "rs", "feature-shapes", "--manifest-path", str(manifest), *flags],
+                        cwd=ROOT, env=env, capture_output=True, text=True,
+                    )
+                    output = result.stdout + result.stderr
+                    if succeeds:
+                        self.assertEqual(result.returncode, 0, output)
+                    else:
+                        self.assertNotEqual(result.returncode, 0, output)
+                        self.assertIn("needs_feature", output)
+                        self.assertIn("dead_code", output)
+
     def test_unexecuted_bench_is_not_compiled(self):
         for source in ("lib.rs", "main.rs"):
             with self.subTest(source=source), tempfile.TemporaryDirectory() as directory:
