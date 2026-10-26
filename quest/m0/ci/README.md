@@ -115,4 +115,3 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [Audit CI's package selection](/quest/m0/ci/select-audit.md) - how often the queue runs everything, and whether each rule that forces it is needed
 - [First shared FFI release](/quest/m0/ci/nightly-ffi-reuse.md) - condition: the backport merges and the next `moq-ffi-v*` tag runs `Release FFI`; verify the wrappers
 - [Loom tests compile](/quest/m0/ci/loom-build.md) - `just rs loom` builds on main and a `--cfg loom` break fails its PR
-- [just check without user namespaces](/quest/m0/ci/check-without-userns.md) - a host that refuses `unshare` reports the flake module as not run instead of cancelling other lanes
