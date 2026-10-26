@@ -265,6 +265,11 @@ impl Convert {
 	/// lag and the input's whole duration, returning false if the ring filled
 	/// first.
 	fn flush(&mut self, ring: &mut HeapProd<f32>) -> bool {
+		// A stream that never started owes no tail, not even the filter's lag.
+		if self.fed == 0 {
+			return true;
+		}
+
 		let owed = (self.fed as u128 * self.output_rate as u128).div_ceil(self.input_rate as u128)
 			+ self.resampler.output_delay() as u128;
 		while (self.emitted as u128) < owed {
