@@ -801,7 +801,7 @@ async fn quic_client_close_reaches_server() {
 }
 
 /// A client that finishes its track and closes before its runtime stops still delivers
-/// the queued group and the track's finish, instead of the close discarding them.
+/// the queued group and the track's finish, retaining its token-only grant through the drain.
 #[cfg(feature = "quic")]
 #[tracing_test::traced_test]
 #[tokio::test]
@@ -814,6 +814,7 @@ async fn quic_client_close_drains_finished_track() {
 	let mut server_config = moq_tokio::listen::Config::default();
 	server_config.bind = Some("127.0.0.1:0".parse().unwrap());
 	server_config.tls.generate = vec!["localhost".into()];
+	server_config.version = vec!["moq-lite-07-wip".parse().unwrap()];
 	let server = server_config.init(quic.clone()).expect("failed to init server");
 	let mut server = server.listen().await.expect("failed to listen");
 	let url: url::Url = format!("moqt://localhost:{}", server.local_addr().unwrap().port())
@@ -822,6 +823,7 @@ async fn quic_client_close_drains_finished_track() {
 
 	// The client gets a runtime of its own, gone as soon as the client returns: nothing
 	// drives its endpoint afterwards, exactly as when a process exits.
+	let (closing, started) = tokio::sync::oneshot::channel();
 	let expected = payload.clone();
 	let client = std::thread::spawn(move || {
 		let runtime = tokio::runtime::Builder::new_current_thread()
@@ -838,6 +840,8 @@ async fn quic_client_close_drains_finished_track() {
 
 			let mut config = moq_tokio::connect::Config::default();
 			config.tls.insecure = Some(true);
+			config.version = vec!["moq-lite-07-wip".parse().unwrap()];
+			config.tokens = vec!["connection".parse().unwrap(), "publish".parse().unwrap()];
 			config.bind = Some("127.0.0.1:0".parse().unwrap());
 			let client = config
 				.init(quic)
@@ -856,23 +860,40 @@ async fn quic_client_close_drains_finished_track() {
 			group.finish().expect("failed to finish group");
 			track.finish().expect("failed to finish track");
 
-			connection.close().await.expect("the close drains");
+			let mut close = Box::pin(connection.close());
+			assert!(futures::FutureExt::now_or_never(close.as_mut()).is_none());
+			closing.send(()).unwrap();
+			close.await.expect("the close drains");
 			client.close().await;
 		});
 	});
 
-	let request = tokio::time::timeout(TIMEOUT, server.accept())
+	let mut request = tokio::time::timeout(TIMEOUT, server.accept())
 		.await
 		.expect("accept timed out")
 		.expect("no incoming connection");
 	let origin = moq_tokio::origin::spawn();
 	let consumer = origin.consume();
 	let mut announcements = consumer.announced();
+	request.auth().authorize(&moq_net::auth::Grant::default());
+	let mut requests = request.requests();
 	let _session = request
 		.with_subscriber(origin)
 		.ok()
 		.await
 		.expect("server handshake failed");
+
+	let grants = tokio::spawn(async move {
+		let mut issued = Vec::new();
+		while let Some(request) = requests.next().await {
+			let grant = if request.token().as_ref() == b"publish" {
+				moq_net::auth::Grant::all()
+			} else {
+				moq_net::auth::Grant::default()
+			};
+			issued.push(request.accept(grant));
+		}
+	});
 
 	tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
@@ -887,6 +908,7 @@ async fn quic_client_close_drains_finished_track() {
 		.expect("subscribe timed out")
 		.expect("subscribe failed");
 
+	started.await.expect("client started closing");
 	let mut group = tokio::time::timeout(TIMEOUT, track.recv_group())
 		.await
 		.expect("recv_group timed out")
@@ -912,6 +934,8 @@ async fn quic_client_close_drains_finished_track() {
 		.await
 		.unwrap()
 		.expect("client thread panicked");
+	grants.abort();
+	let _ = grants.await;
 }
 
 /// A GOAWAY leaves the old session serving its subscriptions after the replacement
