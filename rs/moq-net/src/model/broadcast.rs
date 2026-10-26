@@ -619,6 +619,7 @@ impl RequestValidity {
 	/// instance taking the path refuses it, since without an epoch that instance may be
 	/// the one answering. A withdrawal leaves it to its answer, as moq-lite has the
 	/// publisher conclude in-flight requests.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn check_unanswered(&self, waiter: &kio::Waiter) -> Result<(), crate::Error> {
 		match self {
 			Self::Period(_, answering, selected)
