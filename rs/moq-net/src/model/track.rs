@@ -3158,6 +3158,10 @@ impl Producer {
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn report_object(&self, group: u64, object: u64) {
 		if let Ok(mut state) = self.modify() {
+			// A newer group already received outdates the report on arrival.
+			if state.cache.largest().is_some_and(|largest| largest.group > group) {
+				return;
+			}
 			let edge = state.object_edge().max(Some((group, object)));
 			state.cache.advance_largest(Position::group(group));
 			let mark = state.cache.largest().unwrap_or(Position::group(group));
