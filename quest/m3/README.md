@@ -72,3 +72,4 @@ m4's upstream waits in here and moved m2 work with no consumer.
 - [Safari ships the WebKit 319818 fix](/quest/m3/webkit-319818.md) - the Safari release the gate admits
 - [Safari WebTransport](/quest/m3/safari-webtransport.md) - WebKit browsers return to WebTransport once WebKit 319818 ships fixed
 - [Studio](/quest/m3/studio/README.md) - a native and wasm streaming studio on moq-scene, moq-video, and moq-audio for creators and teams who rely on OBS today
+- [Mesh keys](/quest/m3/mesh-keys.md) - parked: encrypted and HMAC-authenticated mesh broadcasts through a wrapped `.keys` track

@@ -150,6 +150,10 @@ Backend choice does not change the policy that watching tabs never re-serve.
 - Symmetric NATs on both ends fail ICE without TURN. By design the relay
   keeps serving.
 
+Before `@moq/p2p` is first published, add its entrypoints to the API
+Extractor declaration checks, which analyze only published packages since
+[moq-dev/moq#6794](https://github.com/moq-dev/moq/pull/6794).
+
 ## Required
 
 - [Peer grants](/quest/m2/p2p/peer-grant.md) - the relay issues a key-bound, asymmetrically signed grant a browser can verify; HS256 keys issue none
@@ -160,6 +164,7 @@ Backend choice does not change the policy that watching tabs never re-serve.
 - [Peer route policy](/quest/m2/p2p/cost-scopes.md) - application priorities and total cost choose eligible routes, with epoch-aware handover
 - [Watch opts in](/quest/m2/p2p/watch.md) - one attribute turns it on in the demo and the watcher migrates to the best eligible route
 - [Harness](/quest/m2/p2p/harness.md) - the Playwright harness and the numbers behind every mapping decision
+- [Plan P2P identity](/quest/m2/p2p/identity-plan.md) - condition: the maintainer settles the roster key, exploring moq-e2ee signing first
 
 ## Related
 

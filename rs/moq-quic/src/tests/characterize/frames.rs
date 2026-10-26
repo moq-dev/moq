@@ -35,36 +35,84 @@ fn client_answer(frames: Frames) -> Option<TransportErrorCode> {
 	}
 }
 
+/// Early data is discarded without decryption, without losing a coalesced
+/// Initial or a later 1-RTT stream on the same connection.
 #[test]
-fn crypto_in_0rtt() {
-	let _guard = subscribe();
-	let mut pair = pair_with(|_| {});
-	let config = client_with(|_| {});
+fn early_packets_leave_handshake_and_application_data_usable() {
+	use crate::packet::{FixedLengthConnectionIdParser, Header, LongType, PacketNumber, PartialDecode};
+	for leading in [true, false] {
+		let _guard = subscribe();
+		let mut pair = pair_with(|_| {});
+		let config = client_with(|_| {});
+		let client_ch = pair.begin_connect(config.clone());
+		pair.drive_client();
+		let (now, ecn, initial) = pair.server.inbound.pop_front().unwrap();
+		let (decoded, _) = PartialDecode::new(
+			initial.clone(),
+			&FixedLengthConnectionIdParser::new(RandomConnectionIdGenerator::default().cid_len()),
+			&[1],
+			true,
+		)
+		.unwrap();
+		let initial_header = decoded.initial_header().unwrap();
+		let mut early = Vec::new();
+		let encoded = Header::Long {
+			ty: LongType::ZeroRtt,
+			src_cid: initial_header.src_cid,
+			dst_cid: initial_header.dst_cid,
+			number: PacketNumber::U8(0),
+			version: 1,
+		}
+		.encode(&mut early);
+		let keys = config
+			.crypto
+			.clone()
+			.start_session(1, "localhost", &TransportParameters::default())
+			.unwrap()
+			.initial_keys(initial_header.dst_cid, Side::Client);
+		// The ciphertext is deliberately opaque: early-data rejection precedes decryption,
+		// regardless of which ticket or keys the sender used.
+		early.resize(early.len() + 32 + keys.packet.local.tag_len(), 0xff);
+		encoded.finish(&mut early, &*keys.header.local, Some((0, &*keys.packet.local)));
+		let mut datagram = Vec::new();
+		if leading {
+			datagram.extend_from_slice(&early);
+		}
+		datagram.extend_from_slice(&initial);
+		if !leading {
+			datagram.extend_from_slice(&early);
+		}
+		pair.server.inbound.push_front((now, ecn, datagram.as_slice().into()));
+		pair.drive();
+		let server_ch = pair.server.assert_accept();
+		assert_connected(pair.client_conn_mut(client_ch));
+		assert_connected(pair.server_conn_mut(server_ch));
+		assert!(pair.server_streams(server_ch).accept(Dir::Uni).is_none());
 
-	// A first connection leaves the client a ticket for 0-RTT
-	let client_ch = pair.begin_connect(config.clone());
-	pair.drive();
-	pair.server.assert_accept();
-	let now = pair.time;
-	pair.client_conn_mut(client_ch).close(now, VarInt(0), Bytes::new());
-	pair.drive();
-
-	let client_ch = pair.begin_connect(config);
-	assert!(pair.client_conn_mut(client_ch).has_0rtt());
-	pair.drive_client();
-	client_sends(
-		&mut pair,
-		client_ch,
-		SpaceId::Data,
-		Frames::default().var(FrameType::CRYPTO, &[0, 1]).raw(&[0]),
-	);
-	pair.drive();
-
-	let server_ch = pair.server.assert_accept();
-	assert_eq!(
-		lost_code(pair.server_conn_mut(server_ch)),
-		TransportErrorCode::PROTOCOL_VIOLATION
-	);
+		let stream = pair
+			.client_streams(client_ch)
+			.open(Dir::Uni, Default::default())
+			.unwrap();
+		const DATA: &[u8] = b"after early data";
+		client_sends(
+			&mut pair,
+			client_ch,
+			SpaceId::Data,
+			Frames::default().stream(stream.into(), 0, DATA, true),
+		);
+		let (now, ecn, application) = pair.server.inbound.pop_back().unwrap();
+		early.extend_from_slice(&application);
+		pair.server.inbound.push_back((now, ecn, early.as_slice().into()));
+		pair.drive();
+		assert!(lost(pair.client_conn_mut(client_ch)).is_none());
+		assert!(lost(pair.server_conn_mut(server_ch)).is_none());
+		assert_eq!(pair.server_streams(server_ch).accept(Dir::Uni), Some(stream));
+		let mut recv = pair.server_recv(server_ch, stream);
+		let mut chunks = recv.read().unwrap();
+		assert_eq!(chunks.next(usize::MAX).unwrap().unwrap().bytes, DATA);
+		assert!(chunks.next(usize::MAX).unwrap().is_none());
+		let _ = chunks.finalize();
+	}
 }
 
 #[test]
