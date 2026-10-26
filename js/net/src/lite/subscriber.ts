@@ -140,8 +140,9 @@ interface SubscribeEntry {
 	// Whether the stream ever asked for a bounded range, which a lite-07 publisher FINs without
 	// SUBSCRIBE_END once it covers it.
 	bounded: boolean;
-	// Whether an update widened the range, which that FIN may answer without having read.
-	widened: boolean;
+	// The groups the SUBSCRIBE asked for, which that FIN covers unless the demand moved since
+	// in an update the publisher may not have read.
+	asked: { start: number; end?: number };
 	// The TRACK stream that answered (lite-05+), held open as interest in the track until
 	// the SUBSCRIBE has its first response, so the publisher's demand never lapses between
 	// the two.
@@ -1057,7 +1058,7 @@ export class Subscriber {
 			}),
 			requested: msg.startGroup,
 			bounded: msg.endGroup !== undefined,
-			widened: false,
+			asked: groupBounds(request.subscription.groups),
 			held: state.track,
 		};
 		this.#subscribes.set(id, entry);
@@ -1455,8 +1456,8 @@ export class Subscriber {
 	// sequence, such as a lost datagram, still waits out the grace. Streams whose
 	// headers arrived keep reading until their own FIN or reset.
 	//
-	// Resolves false when a lite-07 publisher's FIN without SUBSCRIBE_END left a widened
-	// demand uncovered: it covered the bounded range it read, before the update.
+	// Resolves false when a lite-07 publisher's FIN without SUBSCRIBE_END may have left the
+	// demand uncovered: it covered the bounded range it read, and the demand has moved since.
 	async #settleTail(entry: SubscribeEntry): Promise<boolean> {
 		const { tail, track } = entry;
 
@@ -1482,8 +1483,12 @@ export class Subscriber {
 		};
 
 		await tail.settle(complete, track.closed);
-		const short = entry.end === undefined && hasRanges(this.version) && entry.widened;
-		return !short || track.closed.peek() !== undefined || complete();
+		if (entry.end !== undefined || !hasRanges(this.version) || track.closed.peek() !== undefined) return true;
+		const demand = groupBounds(track.subscription.peek()?.groups);
+		if (demand.start === entry.asked.start && demand.end === entry.asked.end) return true;
+		// Without SUBSCRIBE_START nothing says which ranges the publisher read, so only the
+		// groups that arrived prove the demand covered.
+		return entry.start !== undefined && complete();
 	}
 
 	/**
@@ -1573,10 +1578,6 @@ export class Subscriber {
 			}
 			if (refresh !== undefined) sentWanted = refresh;
 			entry.bounded ||= update.endGroup !== undefined;
-			const sent = groupBounds(lastSent.groups);
-			entry.widened ||=
-				bounds.start < sent.start ||
-				(sent.end !== undefined && (bounds.end === undefined || bounds.end > sent.end));
 			lastSent = { ...current };
 			console.debug(`subscribe update: id=${id} broadcast=${broadcast} track=${track.name}`);
 		}

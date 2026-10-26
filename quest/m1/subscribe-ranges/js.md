@@ -20,8 +20,8 @@ bullets (FETCH max age and epoch). Published versions (lite-03..06) keep FETCH.
 Mirror lite-07 bounded completion in the publisher too: a covered bounded
 subscription FINs without SUBSCRIBE_END. The JS subscriber already accepts that
 FIN, closing the request's track once its tail settles, and failing it when an
-update widened the range before the publisher read it. Reopen that demand on
-the same track instead, as the Rust copy does.
+update moved the range and the groups that arrived leave it uncovered. Reopen
+that demand on the same track instead, as the Rust copy does.
 
 Mirror the Rust names, including `Time(pts)` ends and their refusal on an untimed track.
 Also mirror Rust's optional `Subscription::max_delay`

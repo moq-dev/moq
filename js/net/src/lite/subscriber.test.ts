@@ -2029,7 +2029,11 @@ test("a lite-07 publisher FIN ends a covered bounded subscription", async () => 
 
 // The FIN may answer the bounded range before the publisher read an update that widened it,
 // so the track fails rather than ending clean short of the demand.
-test("a lite-07 FIN short of a widened range fails the track", async () => {
+test.each([
+	["an open widening after SUBSCRIBE_START", { start: { included: 0 } }, true, false],
+	["a bounded widening without SUBSCRIBE_START", { start: { included: 0 }, end: { excluded: 5 } }, false, false],
+	["a widening the publisher stopped reading", { start: { included: 0 }, end: { excluded: 5 } }, false, true],
+] as const)("a lite-07 FIN short of %s fails the track", async (_, groups, start, stopped) => {
 	const clock = new Manual();
 	const installed = clock.install();
 	const version = Version.DRAFT_07;
@@ -2042,7 +2046,16 @@ test("a lite-07 FIN short of a widened range fails the track", async () => {
 		await answerTrackInfo(streams[0], version);
 		const stream = await opened(1);
 		await stream.reading;
-		track.update({ groups: { start: { included: 0 } } });
+		const refused = stopped
+			? stream.stop(
+					Object.assign(new Error("The stream was aborted by the remote server"), {
+						source: "stream",
+						streamErrorCode: StreamCode.Cancel,
+					}),
+				)
+			: undefined;
+		track.update({ groups });
+		await refused;
 		await drainReactions();
 
 		const chunks: Uint8Array[] = [];
@@ -2050,16 +2063,17 @@ test("a lite-07 FIN short of a widened range fails the track", async () => {
 			new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
 			version,
 		);
-		await encodeSubscribeResponse(writer, { start: new SubscribeStart(0) }, version);
-		await encodeSubscribeResponse(
-			writer,
-			{ drop: new SubscribeDrop({ start: 0, end: 0, error: StreamCode.NotFound }) },
-			version,
-		);
+		if (start) {
+			await encodeSubscribeResponse(writer, { start: new SubscribeStart(0) }, version);
+			await encodeSubscribeResponse(
+				writer,
+				{ drop: new SubscribeDrop({ start: 0, end: 0, error: StreamCode.NotFound }) },
+				version,
+			);
+		}
 		for (const chunk of chunks) stream.inbound.enqueue(chunk);
 		stream.inbound.close();
 		await drainReactions();
-		expect(track.closed.peek()).toBeUndefined();
 
 		await clock.advance(Nano.fromMilli(GRACE));
 		expect(await track.closed).toBeInstanceOf(Error);
