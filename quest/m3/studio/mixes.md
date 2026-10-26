@@ -7,7 +7,8 @@ excludes the creator's music, a recording mix keeps it, and a monitor mix
 plays to headphones. Each source routes to any subset of mixes, and each
 output or recording picks a mix. Every source and mix shows a level meter.
 Per-source sync offsets fix cameras that lag their microphones, and a clap
-or flash in front of the camera measures the offset instead of guessing it.
+in front of the camera, seen and heard, measures the offset instead of
+guessing it.
 Each guest hears a mix-minus: the program without their own voice.
 
 ## Plan

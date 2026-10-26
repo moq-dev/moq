@@ -13,5 +13,7 @@ explains itself.
 Twitch Studio did this before it was shut down, and "settings are too
 complicated" is a top OBS complaint. Reuse the probes that already exist
 (the encoder choice `moq_video::render::export` makes at setup, the bandwidth
-grant) rather than a separate benchmark. A probe that fails is reported, not
-hidden.
+grant) rather than a separate benchmark. The grant alone does not measure
+the uplink, so setup runs a short probe publish to the configured relay and
+reads the congestion controller's bandwidth estimate. A probe that fails is
+reported, not hidden.

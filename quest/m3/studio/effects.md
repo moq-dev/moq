@@ -16,7 +16,8 @@ an effect means the same thing as the CSS overlays use. The layout track
 carries effect names and parameters, never shader code, since a shader from
 the network costs every viewer's GPU and can lose the device. An effect the
 browser cannot reproduce, like an ML model, is baked into its source's track
-per the [composition epic](/quest/m3/studio/compose/README.md). Prefer an
+per the [composition epic](/quest/m3/studio/compose/README.md), so ML effects
+apply to a source, never to one scene item. Prefer an
 existing model crate for ML effects over training one.
 
 ## Required

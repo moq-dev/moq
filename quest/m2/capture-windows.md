@@ -20,7 +20,10 @@ including the cursor, move to
 - **Per-app audio** (decided 2026-10-26, maintainer: yes) uses WASAPI process
   loopback (`AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK`) to capture one
   process tree's output, through the same `moq_audio::capture` source as the
-  Linux and macOS halves.
+  Linux and macOS halves. Microsoft documents build 20348 as the floor, though
+  it works from Windows 10 2004 (build 19041) in practice. Activate it at
+  setup and refuse per-app audio with the reason where activation fails,
+  rather than gating on a build number.
 
 WGC does not answer app capture. It captures one monitor or one window per
 item and has no per-process source, so the per-window-composition or

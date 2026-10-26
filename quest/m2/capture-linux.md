@@ -35,8 +35,11 @@ unimplemented, because xdg-desktop-portal owns source selection:
 - **Per-app audio** (decided 2026-10-26, maintainer: yes) captures one
   application's output from its PipeWire stream node, so a creator can stream
   a game without their music. Apps are listed from the nodes present, so only
-  a running app can be chosen. The Windows and macOS halves share the same
-  `moq_audio::capture` source.
+  a running app can be chosen. An app is every stream node with its
+  `application.process.id` (one game may open several), mixed together, and
+  capture follows nodes as the app opens and closes them, matching the
+  Windows process tree and the macOS application. The Windows and macOS halves
+  share the same `moq_audio::capture` source.
 
 ## Related
 

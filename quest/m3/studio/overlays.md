@@ -28,7 +28,10 @@ Decided 2026-10-26 (maintainer):
   the fixture compares boxes and timing, and pixels only loosely.
 
 An overlay is hostile input to every viewer, so it fetches nothing from the
-network: fonts and images travel with the broadcast or are bundled. First check
+network: fonts and images travel with the broadcast or are bundled. The
+browser enforces it rather than trusting the studio: the overlay renders in a
+sandboxed frame with scripts off and a content security policy that loads
+only those carried resources. First check
 whether Blitz can draw into a caller's wgpu texture without a readback, and
 upstream that if it cannot. Arbitrary web pages and JavaScript graphics stay
 [browser sources](/quest/m3/studio/browser-source.md), baked into their own

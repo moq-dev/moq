@@ -12,7 +12,9 @@ Decided 2026-10-26 (maintainer). ScreenCaptureKit already delivers system
 audio here (`Source::System`), and an `SCContentFilter` that includes only one
 application's windows limits the audio to that app. Apps are listed from
 `SCShareableContent`, so only a running app can be chosen. It needs the
-Screen Recording permission, like system audio.
+Screen Recording permission, like system audio. Per-app audio is its own
+source variant naming the application; `Source::System` keeps capturing all
+desktop audio through its display filter.
 
 ## Related
 
