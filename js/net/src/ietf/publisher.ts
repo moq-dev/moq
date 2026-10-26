@@ -3276,7 +3276,9 @@ function groupSlice(range: ServeRange, sequence: number): GroupSlice {
 /** A fill covering the whole requested prefix owns it; the live cursor starts after its snapshot. */
 function afterFill(range: ServeRange, fill: FillServe | undefined, edge: LiveEdge): ServeRange {
 	if (fill?.kind !== "range" || !edge.largest || !edge.next) return range;
-	const start = range.start ?? { group: 0n, object: 0n };
+	const start = range.start ?? { group: edge.latest ?? 0n, object: 0n };
+	if (start.group > edge.next.group || (start.group === edge.next.group && start.object >= edge.next.object))
+		return range;
 	const coversStart =
 		fill.start.group < start.group || (fill.start.group === start.group && fill.start.object <= start.object);
 	const coversEnd =
