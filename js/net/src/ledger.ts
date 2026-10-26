@@ -1,5 +1,9 @@
 import { Instant, Milli, Nano } from "@moq/clock";
-import BTree from "sorted-btree";
+import * as btree from "sorted-btree";
+
+// sorted-btree ships only CommonJS: Node binds its default import to `module.exports`,
+// while Bun and bundlers bind it to the class.
+const BTree = (btree.default as unknown as { default?: typeof btree.default }).default ?? btree.default;
 
 /**
  * How long a subscriber waits for a group stream it cannot account for once the publisher
