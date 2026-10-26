@@ -163,7 +163,10 @@ impl Bus {
 			true,
 			ResamplingChannelConfig {
 				latency_seconds: LATENCY.as_secs_f64(),
-				capacity_seconds: (LATENCY + HEADROOM).as_secs_f64(),
+				// The ring stores output samples, although fixed-resample sizes
+				// its capacity using the input rate.
+				capacity_seconds: (LATENCY + HEADROOM).as_secs_f64() * self.inner.config.sample_rate as f64
+					/ input.sample_rate as f64,
 				// Correct drift against the program clock by trimming or padding
 				// back to the target depth, not by letting the ring run dry or full.
 				underflow_autocorrect_percent_threshold: Some(25.0),
@@ -445,6 +448,24 @@ mod tests {
 		std::iter::repeat_n(value, frames * channels)
 			.flat_map(f32::to_le_bytes)
 			.collect()
+	}
+
+	#[test]
+	fn ring_allocation_follows_the_bus_rate() {
+		let mut baseline = None;
+		for sample_rate in [44_100, 96_000, 4_000_000_000] {
+			let bus = Bus::new(Config::default()).unwrap();
+			let (_, stats) = crate::allocation::measure(|| {
+				bus.channel(input(sample_rate, Layout::SevenPointOne), Strip::default())
+					.unwrap()
+			});
+			let baseline = *baseline.get_or_insert(stats.bytes);
+			assert!(
+				stats.bytes <= baseline,
+				"{sample_rate} Hz allocated {} bytes, baseline {baseline}",
+				stats.bytes
+			);
+		}
 	}
 
 	fn input(sample_rate: u32, layout: Layout) -> Input {

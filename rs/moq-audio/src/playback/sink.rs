@@ -513,7 +513,9 @@ fn channel(input: &Input, rate: u32, bus: Layout) -> (Channel, ResamplingCons<f3
 		true,
 		ResamplingChannelConfig {
 			latency_seconds: latency,
-			capacity_seconds: latency + HEADROOM,
+			// fixed-resample stores output frames but multiplies this by
+			// the input rate. Express the device-sized capacity in its units.
+			capacity_seconds: (latency + HEADROOM) * rate as f64 / input.sample_rate as f64,
 			// Correct drift by resampling rather than by jumping, so a clock
 			// that is slightly off doesn't tick audibly.
 			underflow_autocorrect_percent_threshold: Some(25.0),
@@ -540,6 +542,25 @@ fn channel(input: &Input, rate: u32, bus: Layout) -> (Channel, ResamplingCons<f3
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn ring_allocation_follows_the_device_rate() {
+		let mut baseline = None;
+		for sample_rate in [44_100, 96_000, 4_000_000_000] {
+			let input = Input {
+				sample_rate,
+				layout: Layout::SevenPointOne,
+				..Default::default()
+			};
+			let (_, stats) = crate::allocation::measure(|| channel(&input, 48_000, Layout::Stereo));
+			let baseline = *baseline.get_or_insert(stats.bytes);
+			assert!(
+				stats.bytes <= baseline,
+				"{sample_rate} Hz allocated {} bytes, baseline {baseline}",
+				stats.bytes
+			);
+		}
+	}
 
 	fn sink(input: Input, output_rate: u32) -> (Sink, ResamplingCons<f32>) {
 		sink_into(input, output_rate, Layout::Stereo)
