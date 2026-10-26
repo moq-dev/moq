@@ -26,8 +26,6 @@ Decided in planning (2026-10-20):
   emitter's private volume `GainNode` (`js/watch/src/audio/emitter.ts`), so
   these cases need an observation point after that gain, where samples reach
   the speakers.
-- `js/watch/src/audio/render-worklet.ts` gets a unit test; today only the
-  browser lanes reach it.
 
 Recommendations:
 

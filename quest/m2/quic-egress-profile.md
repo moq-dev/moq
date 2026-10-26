@@ -24,7 +24,7 @@ workers versus io_uring workers, with the existing profiling captures:
   `Bytes`, with no coalescing copy. Count allocations and bytes copied per
   frame above it, split by frame size, so any copy left is located.
 - Bursts: the QUIC connection paces inside `poll_transmit` on both runtimes
-  (#4400; `moq-quic`'s `connection/pacing.rs`), so the only open question
+  (#4400; `moq-congestion`'s pacer), so the only open question
   is whether a released GSO train leaves the NIC as a burst the bottleneck
   cannot absorb. On a netem bottleneck, compare inter-packet gaps and queue
   occupancy for a 64-segment train against the same bytes paced at the
@@ -40,7 +40,7 @@ Then, only where the profile shows a cost:
   with [the I/O boundary redesign](/quest/m2/quic-io-boundary.md), which
   reworks the same transmit buffers.
 - `SCM_TXTIME` stamps, one per train, at the time the pacer would have
-  released it, tested under both `etf` and `fq`. The socket is shared across
+  released it (the next-send time `moq-congestion`'s trait exposes), tested under both `etf` and `fq`. The socket is shared across
   connections per worker, so `SO_MAX_PACING_RATE` cannot express
   per-connection pacing. Measure on a real NIC as well as loopback, since
   `etf` needs hardware offload to be exact.

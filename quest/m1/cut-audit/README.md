@@ -56,7 +56,6 @@ leaving JS-only redesigns of `js/net` to [rs2ts](/quest/m2/rs2ts/README.md).
 
 - [AMF0 decoding costs no more than the bytes a peer sent](/quest/m1/cut-audit/rtmp-amf0-budget.md) - one RTMP message can no longer allocate ~56x its size before auth
 - [One fMP4 sample resolver](/quest/m1/cut-audit/fmp4-sample-resolver.md) - zero-size samples cannot cost gigabytes, and `base_data_offset` input imports or is refused
-- [A malformed avc1 codec string is refused](/quest/m1/cut-audit/avc1-codec-panic.md) - no catalog reader panics on a non-ASCII profile
 - [A compressed announce path never outgrows its literal form](/quest/m1/cut-audit/announce-path-bytes.md) - lite-07 announce compression cannot build multi-MiB paths
 - [Removing a media element releases its devices](/quest/m1/cut-audit/element-teardown.md) - camera, mic, screen share, and GPU are released on removal
 - [A route too large to re-encode is skipped](/quest/m1/cut-audit/announce-reencode.md) - one oversized route never resets a downstream announce stream

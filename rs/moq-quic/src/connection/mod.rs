@@ -3679,6 +3679,13 @@ impl Connection {
 		self.peer_params.min_ack_delay = None;
 	}
 
+	/// Pretends the peer advertised `delay` as its min_ack_delay, as a stack with a coarser timer
+	/// does
+	#[cfg(test)]
+	pub(crate) fn set_peer_min_ack_delay(&mut self, delay: Duration) {
+		self.peer_params.min_ack_delay = Some(VarInt::from_u64(delay.as_micros() as u64).unwrap());
+	}
+
 	/// Send an IMMEDIATE_ACK frame to the remote endpoint
 	///
 	/// According to the spec, this will result in an error if the remote endpoint does not support

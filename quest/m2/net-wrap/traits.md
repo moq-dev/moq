@@ -26,11 +26,13 @@ the methods exactly as moq-net has them today.
     the frame level they stay concrete or buffer whole frames.
     `frame::Producer<'_>` borrows its group, so its associated type is
     generic over that lifetime.
-  - Requests: a broadcast producer's `dynamic` returns its own
-    `broadcast::Dynamic`, whose `requested_track` yields its own
+  - Requests: a broadcast producer's `requests` returns its own
+    `broadcast::Requests` (`dynamic` and `Dynamic` until
+    [named requests](/quest/m1/api-audit/requests.md) renames them before
+    the cut this waits on), whose `requested_track` yields its own
     `track::Request`, so generic code serves undeclared names (as
     [E2EE undeclared names](/quest/m2/e2ee/undeclared-names.md) needs). A track
-    dynamic's `requested_fill` yields its own `track::Fill`, whose
+    `Requests`'s `requested_fill` yields its own `track::Fill`, whose
     `accept` returns its own group producer and whose `drop_groups` names
     the rest dropped.
   - Pending operations: `track::Consumer::subscribe` resolves to the
