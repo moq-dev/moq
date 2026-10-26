@@ -4987,6 +4987,8 @@ struct TrackServe {
 	version: Version,
 	range: ServeRange,
 	requested: ServeRange,
+	/// The live cursor's lowest group, which a fill-only update never lowers.
+	floor: u64,
 	/// Active group streams also observe narrowing, even while waiting for another frame.
 	bounds: kio::Producer<ServeRange>,
 	filter: Filter,
@@ -5065,6 +5067,7 @@ impl TrackServe {
 			version,
 			range,
 			requested: range,
+			floor,
 			bounds: kio::Producer::new(range),
 			filter: Filter::Unfiltered,
 			timescale,
@@ -5159,7 +5162,13 @@ impl TrackServe {
 				object: 0,
 			});
 		}
-		let start = range.start.map_or(0, |start| start.group);
+		let mut start = range.start.map_or(0, |start| start.group);
+		// Below its floor the live cursor already passed every group or never owned it, so
+		// lowering it for a fill-only update would hand those groups out a second time.
+		if update.filter.is_none() {
+			start = start.max(self.floor);
+		}
+		self.floor = start;
 		let end = range.end.map_or(Bound::Unbounded, |end| Bound::Included(end.group));
 		self.track.set_range((Bound::Included(start), end));
 		self.range = range;
@@ -10411,6 +10420,68 @@ mod serve_tests {
 				);
 			}
 		}
+	}
+
+	/// A fill-only update keeps a live join's floor, so a fill short of the live edge does not
+	/// also hand the groups below that floor to the live cursor.
+	#[moq_clock::test]
+	async fn a_fill_only_update_keeps_the_live_join_floor() {
+		let version = Version::Draft22;
+		let h = serve(version);
+		let mut history = h.track.create_group(group::Info { sequence: 0 }).unwrap();
+		history.write_frame(timestamp(), b"history".as_slice()).unwrap();
+		history.finish().unwrap();
+		let mut group = h.track.create_group(group::Info { sequence: 1 }).unwrap();
+		group.write_frame(timestamp(), b"live".as_slice()).unwrap();
+		moq_clock::sim::yield_now().await;
+		let mut request = ScriptedSession::new(Vec::new());
+		request.log = h.log.clone();
+		let stream = Stream::open(&mut crate::driver::Transport::new(request.clone()), version)
+			.await
+			.unwrap();
+		let mut serving = std::pin::pin!(
+			h.publisher
+				.clone()
+				.run_subscribe_stream(stream, subscribe(Filter::Unfiltered, None))
+		);
+		serve_until(serving.as_mut(), "the current group is open", || {
+			occurrences(&h.log, b"live") == 1
+		})
+		.await;
+		let update = ietf::SubscribeUpdate {
+			request_id: RequestId(2),
+			subscription_request_id: None,
+			start_location: Location { group: 0, object: 0 },
+			end_group: 0,
+			subscriber_priority: None,
+			forward: None,
+			filter: None,
+			authorization_token: None,
+			new_group: None,
+			max_age: None,
+			fill: Some(ietf::Fill {
+				group_order: None,
+				filter: Some(Filter::Absolute {
+					start: Location { group: 0, object: 0 },
+					end: Some(EndLocation { group: 0, object: None }),
+				}),
+				range_filters: false,
+			}),
+		};
+		let mut bytes = Vec::new();
+		let mut encoder = Encoder::new(&mut bytes, version.into());
+		encoder.varint(ietf::SubscribeUpdate::ID).unwrap();
+		update.encode(&mut encoder, version).unwrap();
+		request.push(&bytes);
+		serve_until(serving.as_mut(), "the update is accepted", || {
+			Wire::read(&h.log, version).sent(ietf::RequestOk::ID).is_some()
+		})
+		.await;
+		group.finish().unwrap();
+		h.track.finish().unwrap();
+		serving.await.unwrap();
+		assert_eq!(occurrences(&h.log, b"history"), 1, "only the fill carries the history");
+		assert_eq!(occurrences(&h.log, b"live"), 1, "the live group is not repeated");
 	}
 
 	/// An independent historical fill never expands the subscription's live bounds.

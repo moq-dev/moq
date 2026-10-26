@@ -4889,6 +4889,52 @@ test("draft-22: widening with a fill resumes after the open live group's end", a
 	}
 });
 
+test("draft-22: a fill-only update short of the edge keeps the live join's floor", async () => {
+	const fx = fixture();
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	writeGroup(track, 1);
+	const open = track.appendGroup();
+	open.writeFrame({ payload: new TextEncoder().encode("1.0"), timestamp: Timestamp.now() });
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({ requestId: 0n, trackNamespace: Path.from("test"), trackName: "video", subscriberPriority: 0 }),
+	);
+	try {
+		const live = await nextUni(fx.uni);
+		if (!live) throw new Error("missing initial open group");
+		const reading = readGroup(live);
+		const parameters = new Parameters();
+		parameters.fillParameters = Filter.encodeFill(
+			{
+				filter: { kind: "absolute", startGroup: 0n, startObject: 0n, endGroup: 0n },
+				groupOrder: "ascending",
+				rangeFilters: false,
+			},
+			fx.version,
+		);
+		await client.writer.u53(SubscribeUpdate.id);
+		await new SubscribeUpdate({ requestId: 2n, parameters }).encode(client.writer, fx.version);
+		expect(await client.reader.u53()).toBe(RequestOk.id);
+		await RequestOk.decode(client.reader, fx.version);
+		const fill = await nextUni(fx.uni);
+		if (!fill) throw new Error("missing update fill");
+		expect((await readFill(fill, "ascending")).objects).toEqual([{ group: 0, id: 0, payload: "0.0" }]);
+		open.writeFrame({ payload: new TextEncoder().encode("1.1"), timestamp: Timestamp.now() });
+		open.close();
+		expect((await reading).objects).toEqual([
+			{ id: 0, payload: "1.0" },
+			{ id: 1, payload: "1.1" },
+		]);
+		// Only the fill carries group 0; the live cursor never owned it.
+		expect(await nextUni(fx.uni)).toBeUndefined();
+	} finally {
+		open.close();
+		client.close();
+		track.close();
+		fx.close();
+	}
+});
+
 test("draft-22: a fill-only update keeps the subscription's floor", async () => {
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });

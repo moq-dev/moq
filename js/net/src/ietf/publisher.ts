@@ -796,6 +796,8 @@ export class Publisher {
 			});
 			const startGroup = range.start ? Number(range.start.group) : hooks.latestSequence(track);
 			if (startGroup !== undefined) track.withRange({ ...rangeGroups(range), start: { included: startGroup } });
+			// The live cursor's lowest group, which a fill-only update never lowers.
+			let floor = startGroup ?? 0;
 
 			// A fill reads the group cache through its own consumer, independent of the
 			// subscription's cursor. Forked from this subscriber rather than resolved through
@@ -960,7 +962,12 @@ export class Publisher {
 						range.end = tail.end;
 						bounds.set(requested, true);
 						track.update({ ...track.subscription.peek(), groups: rangeGroups(range) });
-						track.withRange(rangeGroups(range));
+						// Below its floor the live cursor already passed every group or never owned it,
+						// so lowering it for a fill-only update would hand those groups out a second time.
+						let start = range.start ? Number(range.start.group) : 0;
+						if (params.subscriptionFilter === undefined) start = Math.max(start, floor);
+						floor = start;
+						track.withRange({ ...rangeGroups(range), start: { included: start } });
 						// The fill took the current group's head. The cursor never hands a group out
 						// twice, so what its stream no longer carries resumes from the cache.
 						const next = tail !== requested ? tail.start : undefined;
