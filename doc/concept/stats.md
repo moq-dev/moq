@@ -369,7 +369,7 @@ stale.
     "inflated": 0,
     "stale": { "bytes": 0, "frames": 0, "groups": 0, "datagrams": 0 },
     "lag": { "50ms": 1040000, "1s": 8576 },
-    "dropped": { "duration": 462.0, "bytes": 1500, "groups": 1 },
+    "dropped": { "bytes": 1500, "frames": 15, "groups": 1, "datagrams": 0 },
     "announced": 1, "announced_closed": 0,
     "broadcasts": 3, "broadcasts_closed": 1,
     "subscriptions": 6, "subscriptions_closed": 2
@@ -389,7 +389,7 @@ stale.
 | `inflated` | Bytes inflated from compressed groups for plain readers, counted once per group however many share the copy, plus received compressed datagrams, which inflate on arrival. Not part of `bytes`, which counts payload as stored or sent. |
 | `stale` | Payload skipped because it aged past a subscriber's latency budget, with the same four fields. Disjoint from the top-level payload counters. |
 | `lag` | Egress only: how far each subscription's peer is behind, weighted by bytes. Every stats interval, the bytes a subscription's track produced since the last are counted in the bucket of its lag then. Keys are each bucket's exclusive upper edge (`50ms`, `100ms`, `250ms`, `500ms`, `1s`, `2s`, `5s`, then `inf`), and an empty bucket is left out. |
-| `dropped` | Egress only: group streams that ended before the peer acknowledged them (a skip, an expiry, or a closed session). `groups` counts those that carried a frame, `bytes` the payload the transport accepted on them, also counted in `bytes`, and `duration` each one's oldest to newest frame timestamp, in fractional milliseconds. |
+| `dropped` | Egress only: content written on group streams that ended before the peer acknowledged them (a skip, an expiry, or a closed session), with the same four fields as `stale`. `groups` counts those that carried a frame, `frames` the frames they carried, and `bytes` the payload the transport accepted on them. A subset of the top-level payload counters, which count it as handed over. `datagrams` stays zero, since a datagram has no acknowledgement to miss. |
 
 A subscription's lag is the newest media its track produced minus the newest
 the peer acknowledged, counting a group stream as acknowledged once its FIN
@@ -488,8 +488,7 @@ nodes or labels takes the largest.
 
 ### Counters
 
-Every counter is cumulative and monotonic, and an unsigned integer except
-`dropped.duration`'s fractional milliseconds. A rate is the
+Every counter is a cumulative, monotonic unsigned integer. A rate is the
 difference between two frames divided by the time between them, and a live
 count is started minus ended. A frame never shows ended above started.
 

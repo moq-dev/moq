@@ -1297,9 +1297,9 @@ impl Producer {
 	}
 
 	/// Record `bytes` of a frame at `timestamp` toward the lag sampler, whether or not
-	/// this group is tagged; see [`crate::stats::Production`].
+	/// this group is tagged; see [`crate::stats::Produced`].
 	pub(super) fn produced(&self, timestamp: Option<Timestamp>, bytes: u64) {
-		self.handle.cache.production().record(timestamp, bytes);
+		self.handle.cache.produced().record(timestamp, bytes);
 	}
 
 	/// Write a whole batch of frames at once, draining `frames`.
@@ -1379,7 +1379,7 @@ impl Producer {
 			state.cache += size;
 			state.stamp(frame.timestamp);
 			latest = frame.timestamp;
-			self.handle.cache.production().record(frame.timestamp, size);
+			self.handle.cache.produced().record(frame.timestamp, size);
 			let slots = state.push(Entry::plain(frame.into(), inflated));
 			now = state.charge.add(size + slots);
 		}
@@ -1448,7 +1448,7 @@ impl Producer {
 		Ok(frame::Producer::new(self, buf, info, reserved).with_meter(meter))
 	}
 
-	/// The meter a streamed frame's chunks bump, with the track's production: none for a
+	/// The meter a streamed frame's chunks bump, with what the track produced: none for a
 	/// plain frame a compressed group compresses on commit, which counts its stored slice
 	/// then, as both count payload as stored.
 	fn chunk_meter(&self, inflated: Option<u64>) -> Option<stats::Meter> {
@@ -1546,7 +1546,7 @@ impl Producer {
 		}
 
 		// Ingress payload: one frame opened; its bytes are counted per chunk as the
-		// producer writes them. Production too: the header places the frame in time, and
+		// producer writes them. What the track produced too: the header places the frame in time, and
 		// its payload weighs only as it arrives.
 		self.stats.frames(1);
 		self.produced(timestamp, 0);

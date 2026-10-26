@@ -5096,7 +5096,7 @@ impl TrackServe {
 						)
 						.counted(self.opened.clone())
 						.terminal(self.terminal.clone())
-						.delivered(self.track.delivery()),
+						.delivered(self.track.deliver()),
 					);
 				}
 				Poll::Ready(Ok(None)) => {
@@ -7062,7 +7062,7 @@ mod group_priority_test {
 				Version::Draft18,
 				GroupSlice::default(),
 			)
-			.delivered(sub.delivery())
+			.delivered(sub.deliver())
 		};
 		let ms = |ms| crate::Timestamp::from_millis(ms).unwrap();
 
@@ -7104,7 +7104,7 @@ mod group_priority_test {
 		let row = report.traffic[0].publisher;
 		assert_eq!(row.dropped.groups, 1);
 		assert_eq!(row.dropped.bytes, payload.len() as u64);
-		assert_eq!(row.dropped.duration, Duration::ZERO);
+		assert_eq!(row.dropped.frames, 1);
 		// 1000ms produced against a 500ms frontier: the [500ms, 1s) bucket.
 		assert_eq!(row.lag.buckets(), &[0, 0, 0, 0, 1002, 0, 0, 0]);
 	}

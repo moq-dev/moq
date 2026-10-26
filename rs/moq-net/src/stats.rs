@@ -73,11 +73,11 @@
 //!   acknowledgement resets it. A paused source produces nothing, so it adds no
 //!   weight. A subscription that closes is weighed once more, at its lag then and its
 //!   stall as of the last call.
-//! * `dropped` (egress only, a [`Dropped`]): media written toward a peer on a group
-//!   stream that was reset or abandoned before its FIN was acknowledged. The duration
-//!   is the span between the group's oldest and newest written frame timestamps:
-//!   nothing inside a group is known to be acknowledged, so the whole written span
-//!   counts.
+//! * `dropped` (egress only, a [`Content`]): content written toward a peer on a group
+//!   stream that was reset or abandoned before its FIN was acknowledged: the frames
+//!   it carried, the payload bytes the transport accepted, and one group. Nothing
+//!   inside a group is known to be acknowledged, so everything written counts. A
+//!   subset of `bytes` / `frames` / `groups`, which count it as handed over.
 //! * `requests` ([`Presence`]): cumulative request/response admissions under the
 //!   label and tier at admission. [`Handle::request`] meters their traffic
 //!   without starting or ending a connected session.
@@ -160,7 +160,6 @@ use std::{
 
 use kio::Lock;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde_with::{DurationMilliSecondsWithFrac, serde_as};
 
 use crate::{AsPath, PathOwned, Pattern, Patterns, Timestamp, time::Instant, util::SendCell};
 
@@ -210,8 +209,9 @@ pub(crate) struct Counters {
 	stale: ContentCounters,
 	// Egress only: byte-weighted frontier lag, recorded by `sample`.
 	lag: HistogramCounters,
-	// Egress only: media written on a group stream that ended unacknowledged.
-	dropped: DroppedCounters,
+	// Egress only: content written on a group stream that ended unacknowledged. A
+	// subset of the top-level payload counters, which count it as handed over.
+	dropped: ContentCounters,
 	// Egress only: the subscriptions `sample` walks, swept of closed ones there and
 	// whenever the list fills.
 	frontiers: Mutex<Vec<Weak<FrontierInner>>>,
@@ -431,73 +431,9 @@ impl HistogramCounters {
 	}
 }
 
-/// Media written toward a peer on group streams that were reset or abandoned
-/// before the peer acknowledged them. The nested shape of [`Traffic::dropped`].
-///
-/// Group granularity counts each group's whole written span, so this over-reports
-/// media that did arrive.
-#[serde_as]
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-#[non_exhaustive]
-pub struct Dropped {
-	/// Cumulative media time: each group's oldest to newest written frame timestamp.
-	/// Fractional milliseconds on the wire.
-	#[serde_as(as = "DurationMilliSecondsWithFrac<f64>")]
-	pub duration: Duration,
-	/// Cumulative payload bytes the transport accepted on those streams.
-	pub bytes: u64,
-	/// Cumulative streams abandoned after writing at least one frame.
-	pub groups: u64,
-}
-
-impl Dropped {
-	/// True when nothing has been dropped.
-	pub fn is_empty(&self) -> bool {
-		self.duration.is_zero() && self.bytes == 0 && self.groups == 0
-	}
-
-	/// Fold another readout into this one, counter by counter, saturating: a merged
-	/// readout may come from a peer.
-	pub(crate) fn add(&mut self, other: Self) {
-		self.duration = self.duration.saturating_add(other.duration);
-		self.bytes = self.bytes.saturating_add(other.bytes);
-		self.groups = self.groups.saturating_add(other.groups);
-	}
-}
-
-/// Atomic backing for one [`Dropped`] readout.
-#[derive(Default, Debug)]
-struct DroppedCounters {
-	nanos: AtomicU64,
-	bytes: AtomicU64,
-	groups: AtomicU64,
-}
-
-impl DroppedCounters {
-	fn record(&self, span: Duration, bytes: u64) {
-		let nanos = u64::try_from(span.as_nanos()).unwrap_or(u64::MAX);
-		// Saturating: the span is the peer's timestamps, and a cumulative counter that
-		// wrapped would read as a reset.
-		let _ = self.nanos.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |total| {
-			Some(total.saturating_add(nanos))
-		});
-		self.bytes.fetch_add(bytes, Ordering::Relaxed);
-		self.groups.fetch_add(1, Ordering::Relaxed);
-	}
-
-	fn snapshot(&self) -> Dropped {
-		Dropped {
-			duration: Duration::from_nanos(self.nanos.load(Ordering::Relaxed)),
-			bytes: self.bytes.load(Ordering::Relaxed),
-			groups: self.groups.load(Ordering::Relaxed),
-		}
-	}
-}
-
 /// Payload-volume counters for content with the same delivery outcome.
 ///
-/// This is the nested shape used by [`Traffic::stale`]. The successfully
+/// This is the nested shape used by [`Traffic::stale`] and [`Traffic::dropped`]. The successfully
 /// delivered equivalents remain as top-level [`Traffic`] fields for wire
 /// compatibility with existing stats consumers.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -521,6 +457,11 @@ impl Content {
 		self.frames += other.frames;
 		self.groups += other.groups;
 		self.datagrams += other.datagrams;
+	}
+
+	/// True when nothing has been counted.
+	fn is_empty(&self) -> bool {
+		*self == Self::default()
 	}
 }
 
@@ -730,9 +671,11 @@ pub struct Traffic {
 	/// the bytes the track produced while it was. Sampled on each
 	/// [`Registry::report`]; see the module docs.
 	pub lag: Histogram,
-	/// Egress only: media written on group streams that were reset or abandoned
-	/// before the peer acknowledged them.
-	pub dropped: Dropped,
+	/// Egress only: content written on group streams that were reset or abandoned
+	/// before the peer acknowledged them. A subset of the top-level payload counters,
+	/// which count it as handed over. A datagram has no acknowledgement to miss, so
+	/// `datagrams` stays zero.
+	pub dropped: Content,
 }
 
 /// One spelling of a counter edge on the wire: absent, or a present integer.
@@ -778,8 +721,8 @@ struct TrafficSer {
 	stale: Content,
 	#[serde(skip_serializing_if = "Histogram::is_empty")]
 	lag: Histogram,
-	#[serde(skip_serializing_if = "Dropped::is_empty")]
-	dropped: Dropped,
+	#[serde(skip_serializing_if = "Content::is_empty")]
+	dropped: Content,
 }
 
 impl From<Traffic> for TrafficSer {
@@ -835,7 +778,7 @@ struct TrafficDe {
 	inflated: u64,
 	stale: Content,
 	lag: Histogram,
-	dropped: Dropped,
+	dropped: Content,
 }
 
 impl From<TrafficDe> for Traffic {
@@ -2282,6 +2225,7 @@ impl Scope {
 			counters,
 			side: self.side,
 			viewer,
+			feed: Feed::default(),
 			frontier,
 		}
 	}
@@ -2322,6 +2266,9 @@ pub(crate) struct Subscription {
 	side: Side,
 	/// `Some((session, path))` on the egress side, to release the viewer refcount.
 	viewer: Option<(Session, PathOwned)>,
+	/// The plain track this subscription reads, weighed against [`Self::frontier`].
+	/// Declared first so it folds into the frontier before the frontier's last sample.
+	feed: Feed,
 	/// The peer's acknowledged frontier on the egress side, empty otherwise.
 	frontier: Frontier,
 }
@@ -2330,6 +2277,19 @@ impl Subscription {
 	/// This subscription's acknowledged frontier, empty (no-op) off the egress side.
 	pub(crate) fn frontier(&self) -> &Frontier {
 		&self.frontier
+	}
+
+	/// Weigh what `produced` produces against this subscription's frontier for as long
+	/// as the guard lives: the plain track it reads. A route-fed track's copies hold
+	/// their own [`Feed`]s instead.
+	pub(crate) fn feed(&mut self, produced: &Arc<Produced>) {
+		self.feed = self.frontier.feed(produced);
+	}
+
+	/// Track one group stream written toward the peer against this subscription's
+	/// frontier. A no-op off the egress side.
+	pub(crate) fn deliver(&self) -> Delivery {
+		self.frontier.deliver()
 	}
 }
 
@@ -2372,7 +2332,7 @@ impl Drop for Announce {
 /// write, whether or not the track is tagged, since its readers may be. An untimed
 /// frame has no place in media time, so it records nothing.
 #[derive(Default, Debug)]
-pub(crate) struct Production {
+pub(crate) struct Produced {
 	// Media-time nanoseconds plus one, so zero means nothing produced yet.
 	first: AtomicU64,
 	newest: AtomicU64,
@@ -2380,7 +2340,7 @@ pub(crate) struct Production {
 	bytes: AtomicU64,
 }
 
-impl Production {
+impl Produced {
 	/// Record `bytes` of a frame at `timestamp`, nothing for an untimed one.
 	pub(crate) fn record(&self, timestamp: Option<Timestamp>, bytes: u64) {
 		let Some(timestamp) = timestamp else {
@@ -2417,7 +2377,7 @@ struct FrontierInner {
 #[derive(Default)]
 struct FrontierState {
 	/// The newest timestamp the peer acknowledged, seeded with the newest frame of the
-	/// first track watched, so a backlog the subscription deliberately starts behind
+	/// first track fed, so a backlog the subscription deliberately starts behind
 	/// never reads as lag. `None` until either exists.
 	acked: Option<Duration>,
 	/// The peer acknowledged a FIN since the last sample.
@@ -2459,10 +2419,10 @@ impl Folded {
 
 /// A track feeding a [`Frontier`], with the produced bytes already sampled.
 struct Source {
-	production: Arc<Production>,
+	produced: Arc<Produced>,
 	sampled: u64,
-	/// The [`Watch`] guards naming it; it leaves with the last one.
-	watches: usize,
+	/// The [`Feed`] guards naming it; it leaves with the last one.
+	feeds: usize,
 }
 
 impl Frontier {
@@ -2488,38 +2448,38 @@ impl Frontier {
 		Self(Some(inner))
 	}
 
-	/// Weigh what `production` produces against this frontier until the returned guard
-	/// drops. The first track watched seeds the frontier with its newest frame.
-	pub(crate) fn watch(&self, production: &Arc<Production>) -> Watch {
+	/// Weigh what `produced` produces against this frontier until the returned guard
+	/// drops. The first track fed seeds the frontier with its newest frame.
+	pub(crate) fn feed(&self, produced: &Arc<Produced>) -> Feed {
 		let Some(inner) = &self.0 else {
-			return Watch::default();
+			return Feed::default();
 		};
 		let mut state = inner.state();
 		match state
 			.sources
 			.iter_mut()
-			.find(|source| Arc::ptr_eq(&source.production, production))
+			.find(|source| Arc::ptr_eq(&source.produced, produced))
 		{
-			Some(source) => source.watches += 1,
+			Some(source) => source.feeds += 1,
 			None => {
 				if state.acked.is_none() {
-					state.acked = Production::load(&production.newest);
+					state.acked = Produced::load(&produced.newest);
 				}
 				state.sources.push(Source {
-					production: production.clone(),
-					sampled: production.bytes.load(Ordering::Acquire),
-					watches: 1,
+					produced: produced.clone(),
+					sampled: produced.bytes.load(Ordering::Acquire),
+					feeds: 1,
 				});
 			}
 		}
-		Watch {
+		Feed {
 			frontier: Arc::downgrade(inner),
-			production: Some(production.clone()),
+			produced: Some(produced.clone()),
 		}
 	}
 
 	/// Start tracking one group stream written toward the peer.
-	pub(crate) fn delivery(&self) -> Delivery {
+	pub(crate) fn deliver(&self) -> Delivery {
 		Delivery {
 			frontier: self.0.clone(),
 			..Default::default()
@@ -2532,28 +2492,28 @@ impl FrontierInner {
 		self.state.lock().unwrap_or_else(PoisonError::into_inner)
 	}
 
-	/// Drop one [`Watch`] on `production`. The last one retires the source, keeping
+	/// Drop one [`Feed`] on `produced`. The last one retires the source, keeping
 	/// what it produced since its last sample at the edge it has now.
-	fn unwatch(&self, production: &Arc<Production>) {
+	fn unfeed(&self, produced: &Arc<Produced>) {
 		let mut state = self.state();
 		let Some(index) = state
 			.sources
 			.iter()
-			.position(|source| Arc::ptr_eq(&source.production, production))
+			.position(|source| Arc::ptr_eq(&source.produced, produced))
 		else {
 			return;
 		};
 		let source = &mut state.sources[index];
-		source.watches -= 1;
-		if source.watches > 0 {
+		source.feeds -= 1;
+		if source.feeds > 0 {
 			return;
 		}
 		let source = state.sources.swap_remove(index);
-		// Acquire pairs with `Production::record`, so the edges cover these bytes.
-		let weight = production.bytes.load(Ordering::Acquire).saturating_sub(source.sampled);
+		// Acquire pairs with `Produced::record`, so the edges cover these bytes.
+		let weight = produced.bytes.load(Ordering::Acquire).saturating_sub(source.sampled);
 		if weight > 0
-			&& let Some(newest) = Production::load(&production.newest)
-			&& let Some(first) = Production::load(&production.first)
+			&& let Some(newest) = Produced::load(&produced.newest)
+			&& let Some(first) = Produced::load(&produced.first)
 		{
 			let item = Folded { weight, newest, first };
 			if state.folded.len() < MAX_FOLDED {
@@ -2576,7 +2536,7 @@ impl FrontierInner {
 		// timestamps, so a publisher whose timestamps step back cannot hide a viewer
 		// that stopped acknowledging.
 		let produced = !folded.is_empty()
-			|| (state.sources.iter()).any(|source| source.production.bytes.load(Ordering::Relaxed) > source.sampled);
+			|| (state.sources.iter()).any(|source| source.produced.bytes.load(Ordering::Relaxed) > source.sampled);
 		if state.moved {
 			state.stalled = Duration::ZERO;
 		}
@@ -2592,7 +2552,7 @@ impl FrontierInner {
 
 		// Opened before anything produced: the earliest frame is where it started.
 		if state.acked.is_none() {
-			let first = (state.sources.iter()).filter_map(|source| Production::load(&source.production.first));
+			let first = (state.sources.iter()).filter_map(|source| Produced::load(&source.produced.first));
 			state.acked = folded.iter().map(|item| item.first).chain(first).min();
 		}
 		// Nothing timed produced yet: whatever lands from here is weighed next time.
@@ -2608,13 +2568,13 @@ impl FrontierInner {
 			weigh(item.newest, item.weight);
 		}
 		for source in &mut state.sources {
-			let production = &source.production;
-			// Acquire pairs with `Production::record`: the edge read below covers these bytes.
-			let bytes = production.bytes.load(Ordering::Acquire);
+			let produced = &source.produced;
+			// Acquire pairs with `Produced::record`: the edge read below covers these bytes.
+			let bytes = produced.bytes.load(Ordering::Acquire);
 			let weight = bytes.saturating_sub(source.sampled);
 			source.sampled = bytes;
 			if weight > 0
-				&& let Some(newest) = Production::load(&production.newest)
+				&& let Some(newest) = Produced::load(&produced.newest)
 			{
 				weigh(newest, weight);
 			}
@@ -2631,21 +2591,21 @@ impl Drop for FrontierInner {
 	}
 }
 
-/// Keeps one track weighed against a [`Frontier`]; see [`Frontier::watch`]. Dropping it
+/// Keeps one track weighed against a [`Frontier`]; see [`Frontier::feed`]. Dropping it
 /// keeps what the track produced so far, at the edge it had, and stops weighing the rest.
 #[derive(Default)]
 #[must_use = "dropping the guard stops weighing the track"]
-pub(crate) struct Watch {
+pub(crate) struct Feed {
 	frontier: Weak<FrontierInner>,
-	production: Option<Arc<Production>>,
+	produced: Option<Arc<Produced>>,
 }
 
-impl Drop for Watch {
+impl Drop for Feed {
 	fn drop(&mut self) {
-		if let Some(production) = self.production.take()
+		if let Some(produced) = self.produced.take()
 			&& let Some(inner) = self.frontier.upgrade()
 		{
-			inner.unwatch(&production);
+			inner.unfeed(&produced);
 		}
 	}
 }
@@ -2659,7 +2619,8 @@ pub(crate) struct Delivery {
 	frontier: Option<Arc<FrontierInner>>,
 	/// Frames the stream carries.
 	frames: u64,
-	oldest: Option<Duration>,
+	/// The newest frame timestamp the stream carries, where an acknowledged FIN moves
+	/// the frontier.
 	newest: Option<Duration>,
 	/// Payload bytes the transport accepted.
 	bytes: u64,
@@ -2673,10 +2634,7 @@ impl Delivery {
 			return;
 		}
 		self.frames += 1;
-		if let Some(at) = timestamp.map(Duration::from) {
-			self.oldest = Some(self.oldest.map_or(at, |oldest| oldest.min(at)));
-			self.newest = self.newest.max(Some(at));
-		}
+		self.newest = self.newest.max(timestamp.map(Duration::from));
 	}
 
 	/// Record `bytes` of payload the transport accepted.
@@ -2713,11 +2671,12 @@ impl Drop for Delivery {
 		if self.frames == 0 {
 			return;
 		}
-		let span = self
-			.newest
-			.zip(self.oldest)
-			.map_or(Duration::ZERO, |(newest, oldest)| newest.saturating_sub(oldest));
-		inner.counters.publisher.dropped.record(span, self.bytes);
+		inner.counters.publisher.dropped.add(Content {
+			bytes: self.bytes,
+			frames: self.frames,
+			groups: 1,
+			datagrams: 0,
+		});
 	}
 }
 
@@ -3948,7 +3907,7 @@ mod lag_tests {
 
 		/// Write a group toward the peer through `sub`'s frontier, every byte accepted.
 		fn write(sub: &track::Subscriber, frames: &[Timestamp]) -> Delivery {
-			let mut delivery = sub.delivery();
+			let mut delivery = sub.deliver();
 			for ts in frames {
 				delivery.frame(Some(*ts));
 				delivery.wrote(100);
@@ -4169,12 +4128,12 @@ mod lag_tests {
 		// session close all drop the serve task).
 		drop(Harness::write(&sub, &frames[..15]));
 		// Nothing written at all is not a dropped group.
-		drop(sub.delivery());
+		drop(sub.deliver());
 
 		let after = h.tick();
 		assert_eq!(after.dropped.groups, 1);
+		assert_eq!(after.dropped.frames, 15);
 		assert_eq!(after.dropped.bytes, 15 * 100);
-		assert_eq!(after.dropped.duration, Duration::from_millis(14 * 33));
 		// The drop itself adds nothing to the histogram beyond the tick's own sample.
 		assert_eq!(after.lag.total() - before.lag.total(), GROUP_BYTES);
 	}
@@ -4184,30 +4143,13 @@ mod lag_tests {
 		let mut h = Harness::new();
 		let sub = h.subscribe();
 		let frames = h.produce();
-		let mut delivery = sub.delivery();
+		let mut delivery = sub.deliver();
 		delivery.frame(Some(frames[0]));
 		delivery.wrote(40);
 		delivery.frame(Some(frames[1]));
 		drop(delivery);
 		let dropped = h.tick().dropped;
 		assert_eq!((dropped.groups, dropped.bytes), (1, 40));
-	}
-
-	/// The peer stamps the frames, so a dropped span can pass what the counter holds:
-	/// the duration saturates rather than wrapping to read as a reset.
-	#[test]
-	fn a_dropped_span_past_the_counter_saturates() {
-		let h = Harness::new();
-		let sub = h.subscribe();
-		let last = Timestamp::from_secs((1 << 61) - 1).unwrap();
-		for _ in 0..2 {
-			let mut delivery = sub.delivery();
-			delivery.frame(Some(Timestamp::ZERO));
-			delivery.wrote(1);
-			delivery.frame(Some(last));
-			delivery.wrote(1);
-		}
-		assert_eq!(h.tick().dropped.duration, Duration::from_nanos(u64::MAX));
 	}
 
 	#[test]
@@ -4401,11 +4343,8 @@ mod lag_tests {
 	fn live_copies_weigh_at_their_own_edges() {
 		let h = Harness::new();
 		let subscription = h.session.egress(PATH).subscribe();
-		let (near, far) = (Arc::new(Production::default()), Arc::new(Production::default()));
-		let _watches = (
-			subscription.frontier().watch(&near),
-			subscription.frontier().watch(&far),
-		);
+		let (near, far) = (Arc::new(Produced::default()), Arc::new(Produced::default()));
+		let _feeds = (subscription.frontier().feed(&near), subscription.frontier().feed(&far));
 		let at = |millis| Some(Timestamp::from_millis(millis).unwrap());
 		near.record(at(0), 10);
 		far.record(at(0), 10);
@@ -4423,10 +4362,10 @@ mod lag_tests {
 		let subscription = h.session.egress(PATH).subscribe();
 		let frontier = subscription.frontier();
 		for _ in 0..1000 {
-			let copy = Arc::new(Production::default());
-			let watch = frontier.watch(&copy);
+			let copy = Arc::new(Produced::default());
+			let feed = frontier.feed(&copy);
 			copy.record(Some(Timestamp::ZERO), 10);
-			drop(watch);
+			drop(feed);
 		}
 		let held = frontier.0.as_ref().expect("egress").state().folded.len();
 		assert!(held <= MAX_FOLDED, "{held} retired copies held");
@@ -4441,13 +4380,13 @@ mod lag_tests {
 		let mut traffic = Traffic::default();
 		traffic.lag.buckets[0] = 7;
 		traffic.lag.buckets[7] = 9;
-		traffic.dropped.duration = Duration::from_micros(1500);
 		traffic.dropped.bytes = 3;
+		traffic.dropped.frames = 2;
 		traffic.dropped.groups = 1;
 		let json = serde_json::to_string(&traffic).unwrap();
 		assert!(json.contains(r#""lag":{"50ms":7,"inf":9}"#), "{json}");
 		assert!(
-			json.contains(r#""dropped":{"duration":1.5,"bytes":3,"groups":1}"#),
+			json.contains(r#""dropped":{"bytes":3,"frames":2,"groups":1,"datagrams":0}"#),
 			"{json}"
 		);
 		assert_eq!(serde_json::from_str::<Traffic>(&json).unwrap(), traffic);
@@ -4455,7 +4394,7 @@ mod lag_tests {
 		let mut sum = traffic;
 		sum.add(traffic);
 		assert_eq!(sum.lag.buckets(), &[14, 0, 0, 0, 0, 0, 0, 18]);
-		assert_eq!(sum.dropped.duration, Duration::from_millis(3));
+		assert_eq!(sum.dropped.bytes, 6);
 	}
 
 	#[test]
@@ -4463,18 +4402,12 @@ mod lag_tests {
 		let lag = Histogram {
 			buckets: [u64::MAX; BUCKETS],
 		};
-		let dropped = Dropped {
-			duration: Duration::MAX,
-			bytes: u64::MAX,
-			groups: u64::MAX,
-		};
 		let mut traffic = Traffic {
 			lag,
-			dropped,
 			..Default::default()
 		};
 		traffic.add(traffic);
-		assert_eq!((traffic.lag, traffic.dropped), (lag, dropped));
+		assert_eq!(traffic.lag, lag);
 		assert_eq!(traffic.lag.total(), u64::MAX);
 	}
 }

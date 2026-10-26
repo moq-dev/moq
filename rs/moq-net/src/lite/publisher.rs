@@ -4335,7 +4335,7 @@ impl TrackRun {
 		debug_assert!(self.opening.is_none(), "one group waits for stream credit at a time");
 		self.opening = Some(
 			GroupServe::new(self.ctx.group_context(), sequence, frame_start, capped, rank, group)
-				.delivered(self.track.delivery()),
+				.delivered(self.track.deliver()),
 		);
 	}
 }
@@ -7150,7 +7150,7 @@ mod serve_group_test {
 				super::Rank::Queue(handle),
 				group,
 			)
-			.delivered(sub.delivery());
+			.delivered(sub.deliver());
 			async move {
 				kio::wait(|waiter| serve.poll_open(&mut ctx.session, ctx.group.as_ref(), waiter))
 					.await
@@ -7195,7 +7195,7 @@ mod serve_group_test {
 		let row = report.traffic[0].publisher;
 		assert_eq!(row.dropped.groups, 1);
 		assert_eq!(row.dropped.bytes, payload.len() as u64);
-		assert_eq!(row.dropped.duration, Duration::ZERO);
+		assert_eq!(row.dropped.frames, 1);
 		// 1000ms produced against a 500ms frontier: the [500ms, 1s) bucket.
 		assert_eq!(row.lag.buckets(), &[0, 0, 0, 0, 1002, 0, 0, 0]);
 	}

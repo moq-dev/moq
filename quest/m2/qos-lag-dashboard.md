@@ -4,7 +4,7 @@
 
 The demo stats dashboard (`demo/web/src/stats.ts`) shows the relay's viewer
 lag and dropped media: percentiles of the egress `lag` histogram over the
-chart window, and `dropped` duration, bytes, and groups as rates, cluster-wide
+chart window, and `dropped` bytes, frames, and groups as rates, cluster-wide
 and per node like the existing counters.
 
 ## Plan
@@ -13,8 +13,8 @@ and per node like the existing counters.
   the prefix tracks (`<path>/prefix.json`); a group's per-path `paths` rows
   leave them out (decided in the 2026-10-06 audit). `lag` is a cumulative byte count per bucket keyed
   by its upper edge (`"50ms"` to `"5s"`, then `"inf"`, empty buckets
-  omitted); `dropped` is `{ duration, bytes, groups }` with the duration in
-  fractional milliseconds. `doc/concept/stats.md` documents them. Diff two
+  omitted); `dropped` has the same four fields as `stale` (`bytes`, `frames`,
+  `groups`, `datagrams`). `doc/concept/stats.md` documents them. Diff two
   samples within one subscription for an interval's distribution, as the
   dashboard already does to turn cumulative bytes into rates, and sum nodes
   bucket by bucket.

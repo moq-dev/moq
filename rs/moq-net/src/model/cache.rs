@@ -718,7 +718,7 @@ pub(super) struct Track {
 	// What the track's groups have produced, for the egress lag sampler. Here because
 	// this account is the one per-track handle every group's frame writes already
 	// follow. Shared so a sampler still reads the last bytes after the track is gone.
-	production: Arc<crate::stats::Production>,
+	produced: Arc<crate::stats::Produced>,
 }
 
 /// The greatest location a track has written or its source reported, followed by the track
@@ -824,7 +824,7 @@ impl Track {
 			wakes: Default::default(),
 			aborts: OnceLock::new(),
 			largest: Default::default(),
-			production: Default::default(),
+			produced: Default::default(),
 		});
 		if let Some(key) = track.pool.register(&track) {
 			let _ = track.sweep.set(key);
@@ -838,8 +838,8 @@ impl Track {
 	}
 
 	/// What this track's groups have produced.
-	pub(super) fn production(&self) -> &Arc<crate::stats::Production> {
-		&self.production
+	pub(super) fn produced(&self) -> &Arc<crate::stats::Produced> {
+		&self.produced
 	}
 
 	/// What this track's frames may allocate up front.

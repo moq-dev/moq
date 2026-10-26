@@ -26,9 +26,9 @@ pending frame and retire everything at or below the acknowledged offset.
 Each acknowledged frame moves the subscription's frontier to that frame's
 timestamp, so the interval samples from the lag histogram read a frontier that
 is at most one frame stale instead of one group. When a stream
-is reset before a frame is acknowledged, `dropped.duration` now grows by the
-span from the newest acknowledged frame to the newest written one, which is
-the exact media the viewer lost.
+is reset before a frame is acknowledged, `dropped` now counts only the frames
+written after the newest acknowledged one, which is the exact media the viewer
+lost.
 
 Add a second byte-weighted cumulative histogram of delivery delay:
 `acked_at - written_at` per frame, where `acked_at` is when the serve task is
@@ -50,7 +50,7 @@ ACK hook without making either resolution a release gate.
 Tests: the frontier tracking frame ends under a peer that acknowledges in
 bursts, with interval samples landing one bucket lower than group-granularity
 tracking of the same run; a reset mid-group attributing only the
-unacknowledged span to `dropped.duration`; delivery delay staying inside one bucket of the true RTT plus the peer's
+unacknowledged frames to `dropped`; delivery delay staying inside one bucket of the true RTT plus the peer's
 `max_ack_delay`; and fallback to group-granularity frontier tracking when the hook is
 unsupported.
 

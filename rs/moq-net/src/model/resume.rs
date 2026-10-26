@@ -417,11 +417,11 @@ struct Copy {
 	/// while one is still read from it.
 	lease: Arc<()>,
 	/// What the track instance the copy subscribed to produces.
-	production: Arc<stats::Production>,
-	/// Weighs [`Self::production`] against the reader's frontier while the copy may still
+	produced: Arc<stats::Produced>,
+	/// Weighs [`Self::produced`] against the reader's frontier while the copy may still
 	/// deliver a new group: from its subscription until [`Self::until`] bounds it. Bound
 	/// to the copy, so one let go stops weighing however it leaves.
-	watch: stats::Watch,
+	feed: stats::Feed,
 }
 
 // Boxed: a subscriber is twice a pending answer, and a copy holds one for its whole life.
@@ -865,7 +865,7 @@ struct Reader {
 	/// Runs the serving copy gave up that the reader has yet to report; see
 	/// [`Reader::poll_drop`].
 	drops: RangeMap<u64, StreamError>,
-	/// The subscription's acknowledged frontier, which each copy's [`Copy::watch`] feeds.
+	/// The subscription's acknowledged frontier, which each copy's [`Copy::feed`] feeds.
 	frontier: stats::Frontier,
 }
 
@@ -1007,7 +1007,7 @@ impl Reader {
 			copy.generation = generation;
 			copy.replaced = false;
 			copy.until = None;
-			copy.watch = self.frontier.watch(&copy.production);
+			copy.feed = self.frontier.feed(&copy.produced);
 			copy.since = None;
 			copy.done = None;
 			copy.datagrams_done = None;
@@ -1029,12 +1029,13 @@ impl Reader {
 		// The wire request carries the floor from the first message: some sessions read
 		// the demand only once.
 		let wire = self.mirrored.clamped(floor, None, &resolved);
-		let (sub, production) = track.subscribe_produced(wire);
+		let sub = track.subscribe(wire);
+		let produced = sub.produced();
 		self.copies.push(Copy {
 			generation,
 			sub: Sub::Pending(sub),
-			watch: self.frontier.watch(&production),
-			production,
+			feed: self.frontier.feed(&produced),
+			produced,
 			track,
 			floor,
 			from: self.mirrored.ranges.clone(),
@@ -1178,7 +1179,7 @@ impl Reader {
 		for copy in &mut self.copies {
 			if copy.replaced && copy.until.is_none() {
 				copy.until = Some(until);
-				copy.watch = stats::Watch::default();
+				copy.feed = stats::Feed::default();
 				copy.since = Some(copy.track.now());
 				copy.update(mirrored);
 			}
@@ -1202,7 +1203,7 @@ impl Reader {
 				// What the copy produces past the bound never reaches this reader. Frames
 				// still written into a group it already handed out go unweighed too: an
 				// approximation that keeps per-group accounting off the frame path.
-				copy.watch = stats::Watch::default();
+				copy.feed = stats::Feed::default();
 				copy.since = Some(copy.track.now());
 				copy.update(&self.mirrored);
 			}
@@ -1705,13 +1706,13 @@ impl Reader {
 		let resolved = self.window().resolved();
 		let floor = Some(lowered.start);
 		let wire = self.mirrored.clamped(floor, Some(lowered.end), &resolved);
-		let (sub, production) = track.subscribe_produced(wire);
+		let sub = track.subscribe(wire);
 		let copy = Copy {
 			generation,
+			produced: sub.produced(),
 			sub: Sub::Pending(sub),
-			production,
 			// Bounded from the start, so never weighed, like any bounded copy.
-			watch: stats::Watch::default(),
+			feed: stats::Feed::default(),
 			floor,
 			from: self.mirrored.ranges.clone(),
 			resolved,

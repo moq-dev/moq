@@ -48,7 +48,7 @@ use std::collections::BTreeMap;
 /// Counter collection, re-exported from [`moq_net::stats`] so stats consumers
 /// can depend on this crate alone.
 pub use moq_net::stats::{
-	Dropped, Failure, Failures, Handle, Histogram, Presence, RefusalKind, Refusals, Registry, Role, Tier, Traffic,
+	Failure, Failures, Handle, Histogram, Presence, RefusalKind, Refusals, Registry, Role, Tier, Traffic,
 };
 
 use moq_net::{AsPath, Epoch, Path, PathOwned};

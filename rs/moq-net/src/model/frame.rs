@@ -749,7 +749,7 @@ pub struct Producer {
 	// A receive handler's cancellation cleanup, carried across polls.
 	cancel_on_drop: bool,
 	// Ingress payload meter, inherited from the parent group. Counts each written
-	// chunk's bytes, and the track's production. Empty (no-op) for an untagged group;
+	// chunk's bytes, and what the track produced. Empty (no-op) for an untagged group;
 	// `None` for a frame its compressed group deflates on commit, which counts both then.
 	stats: Option<stats::Meter>,
 	// The frame's share of the origin's [`Budget`], if it got one, held until it ends.
