@@ -132,10 +132,21 @@ moq auth verify --key public.jwk --in alice.jwt
 moq auth serve --key public.jwk   # or --key-dir /etc/moq/keys/ or --key-set /etc/moq/keys.jwks
 ```
 
-The client dials `https://relay.example.com/rooms/123?jwt=<token>`, with one
-`jwt`: a query carrying two is refused. A
-moq-transport client can instead put the JWT in its SETUP's `AUTHORIZATION
-TOKEN` option with Token Type 0. HMAC, RSA, ECDSA, and EdDSA keys all work. A
+A native client passes it as `--connect-token <token>` (or `MOQ_CONNECT_TOKEN`)
+and dials `https://relay.example.com/rooms/123`. The first token is the
+connection credential, sent in SETUP: moq-lite-07-wip's Token parameter, or
+moq-transport's `AUTHORIZATION TOKEN` option with Token Type 0. While the client
+also offers a version that cannot carry it (moq-lite before 07), it sends the
+same value as `?jwt=`, which `moq auth serve` admits since they match; two
+different values are refused. A URL token can land in server and proxy access
+logs, so to keep it out, offer only versions that carry it in SETUP, such as
+`--connect-version moq-lite-07-wip`; a relay that predates SETUP tokens then
+cannot receive it. Each further token is presented
+[in band](#in-band-renewal) and widens the session's grant. A URL that already
+carries a `?jwt=`, such as a cluster peer's, keeps it as the connection
+credential, and every configured token then rides in band. Dialing
+`?jwt=<token>` directly still works, and reaches relays that predate SETUP
+tokens; a query carrying two `jwt` parameters is refused. HMAC, RSA, ECDSA, and EdDSA keys all work. A
 key can itself be **scoped** at generation (`--root`, `--publish`,
 `--subscribe`), after which it can never sign a broader token.
 
@@ -146,7 +157,10 @@ a client can present another JWT without reconnecting. Present its replacement
 before the current grant expires and keep the returned token handle alive.
 The auth handle a reconnecting connection owns (native `Connection::auth()`,
 JavaScript `connection.auth`) presents its tokens again on every reconnect.
-Older versions refuse in-band tokens.
+A native client can instead replace its configured tokens through
+`Client::tokens()`: the next dial presents them, a live session presents them in
+band and withdraws each old one once its replacement is answered, and a refusal
+redials only once the tokens have changed. Older versions refuse in-band tokens.
 
 Each accepted token adds its publish and subscribe patterns to the session's
 union, within its admitted root and SETUP role. A publish-only connection cannot

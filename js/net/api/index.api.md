@@ -153,6 +153,7 @@ interface ConnectionProps {
     share?: boolean;
     signal?: never;
     timeout?: Milli;
+    tokens?: readonly string[] | Signal<readonly string[]>;
     transport?: never;
     url?: URL | Signal<URL | undefined>;
     versions?: readonly string[] | Signal<readonly string[] | undefined>;
@@ -167,6 +168,7 @@ interface ConnectProps {
     publish?: Consumer_5;
     signal?: AbortSignal;
     timeout?: Milli;
+    tokens?: readonly string[];
     transport?: WebTransport;
     url: URL;
     versions?: readonly string[];
@@ -498,6 +500,7 @@ declare namespace Origin_2 {
         Consumer_5 as Consumer,
         Dynamic,
         Request_3 as Request,
+        Publication,
         Prepared
     }
 }
@@ -543,7 +546,7 @@ class Prepared {
     [Symbol.dispose](): void;
     readonly broadcast: Broadcast.Producer;
     close(): void;
-    publish(): Broadcast.Producer;
+    publish(): Publication;
 }
 
 interface Probe {
@@ -584,20 +587,12 @@ class Producer_2 {
 
 class Producer_3 {
     constructor();
-    announce(route?: Route | {
-        epoch?: Route["epoch"];
-        hops?: Route["hops"];
-        cost?: Route["cost"];
-        auth?: Route["auth"];
-    }): void;
     close(): void;
     get closed(): GetPromise<null>;
     consume(): Consumer_4;
     createTrack(name: string, info?: Partial<Track.Info>): Track.Producer;
     removeTrack(name: string): void;
-    get route(): Route | undefined;
     track(name: string): Track.Consumer;
-    unannounce(): void;
 }
 
 class Producer_4 implements Table {
@@ -606,7 +601,7 @@ class Producer_4 implements Table {
     close(abort?: Error): void;
     get closed(): GetPromise<Error | null>;
     consume(): Consumer_5;
-    createBroadcast(path: Path.Valid): Broadcast.Producer;
+    createBroadcast(path: Path.Valid): Publication;
     get discovery(): Getter<boolean | undefined>;
     dynamic(prefix: Path.Valid): Dynamic;
     request(path: Path.Valid, options?: RequestOptions): Requesting;
@@ -619,6 +614,18 @@ class ProtocolViolation extends Error {
         code?: SessionCode;
     });
     readonly code: SessionCode;
+}
+
+class Publication {
+    announce(route?: Route | {
+        epoch?: Route["epoch"];
+        hops?: Route["hops"];
+        cost?: Route["cost"];
+        auth?: Route["auth"];
+    }): void;
+    readonly broadcast: Broadcast.Producer;
+    get route(): Route | undefined;
+    unannounce(): void;
 }
 
 interface ReadOptions {
@@ -823,7 +830,7 @@ interface Subscription {
 interface Table {
     announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
     readonly closed: GetPromise<Error | null>;
-    createBroadcast(path: Path.Valid): Broadcast.Producer;
+    createBroadcast(path: Path.Valid): Publication;
     readonly discovery: Getter<boolean | undefined>;
     dynamic(prefix: Path.Valid): Dynamic;
     request(path: Path.Valid, options?: RequestOptions): Requesting;

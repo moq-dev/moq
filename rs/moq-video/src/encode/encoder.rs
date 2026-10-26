@@ -146,7 +146,11 @@ impl Applied {
 
 	/// A report that `preset` took effect through `controls`.
 	#[cfg_attr(
-		not(any(feature = "openh264", feature = "nvidia", feature = "vaapi", target_os = "macos")),
+		not(any(
+			feature = "openh264",
+			apple,
+			all(target_os = "linux", any(feature = "nvidia", feature = "vaapi"))
+		)),
 		allow(dead_code, reason = "only the encoder backends report a preset")
 	)]
 	pub(crate) fn new(preset: Preset, controls: impl Into<String>) -> Self {

@@ -462,8 +462,9 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", 
 		const installed = clock.install();
 		const logged = spyOn(console, "debug");
 		const origin = new OriginProducer();
-		const broadcast = origin.createBroadcast(Path.from("room/x"));
-		broadcast.announce();
+		const broadcastPublication = origin.createBroadcast(Path.from("room/x"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
 		const published = broadcast.createTrack("video");
 		published.appendGroup().writeFrame({ payload: new Uint8Array([1]) });
 		const { client, server } = await connect({ serverPublish: origin, protocol });
@@ -529,7 +530,7 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", 
 		try {
 			const unanswered = await requests.next();
 			if (!unanswered) throw new Error("missing token");
-			const track = new OriginProducer().createBroadcast(Path.from("room/x")).createTrack("video");
+			const track = new OriginProducer().createBroadcast(Path.from("room/x")).broadcast.createTrack("video");
 			const reader = track.subscribe();
 			const ready = wireOf(client).auth.ready(Path.from("room/x"), "subscribe", {
 				until: () => abandoned(track.demand()),
@@ -554,8 +555,9 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", 
 	test("a subscribe abandoned while its token waits never reaches the wire", async () => {
 		const logged = spyOn(console, "debug");
 		const origin = new OriginProducer();
-		const broadcast = origin.createBroadcast(Path.from("room/x"));
-		broadcast.announce();
+		const broadcastPublication = origin.createBroadcast(Path.from("room/x"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
 		broadcast.createTrack("video");
 		const { client, server, transport } = await connect({ serverPublish: origin, protocol });
 		const requests = server.auth.requests();
@@ -592,8 +594,9 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", 
 		"a subscribe that regains a reader while its token waits keeps waiting (%d)",
 		async (gap) => {
 			const origin = new OriginProducer();
-			const broadcast = origin.createBroadcast(Path.from("room/x"));
-			broadcast.announce();
+			const broadcastPublication = origin.createBroadcast(Path.from("room/x"));
+			const broadcast = broadcastPublication.broadcast;
+			broadcastPublication.announce();
 			const published = broadcast.createTrack("video");
 			published.appendGroup().writeFrame({ payload: new Uint8Array([7]) });
 			const { client, server } = await connect({ serverPublish: origin, protocol });
@@ -628,8 +631,9 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", 
 
 	test("a session's close is not a revocation of its subscriptions", async () => {
 		const origin = new OriginProducer();
-		const broadcast = origin.createBroadcast(Path.from("room/x"));
-		broadcast.announce();
+		const broadcastPublication = origin.createBroadcast(Path.from("room/x"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
 		broadcast
 			.createTrack("video")
 			.appendGroup()
@@ -1017,8 +1021,9 @@ test("lite-07 ignores a draining session's late refusal while its successor retr
 test("a fetch abandoned while its token waits never reaches the wire", async () => {
 	const logged = spyOn(console, "debug");
 	const origin = new OriginProducer();
-	const broadcast = origin.createBroadcast(Path.from("room/x"));
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(Path.from("room/x"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	broadcast
 		.createTrack("video")
 		.appendGroup()
@@ -1060,8 +1065,9 @@ test("a fetch abandoned while its token waits never reaches the wire", async () 
 // The peer refuses a listing its token has not yet authorized, so the request waits for it.
 test("a listing waits for its token before reaching the wire", async () => {
 	const origin = new OriginProducer();
-	const broadcast = origin.createBroadcast(Path.from("room/x"));
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(Path.from("room/x"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	broadcast.createTrack("video");
 	const { client, server, transport } = await connect({ serverPublish: origin, protocol: Lite.ALPN_07_WIP });
 	const requests = server.auth.requests();
@@ -1097,8 +1103,9 @@ test.each(Array.from({ length: 17 }, (_, gap) => gap))(
 	"a fetch that regains a caller while its token waits keeps waiting (%d)",
 	async (gap) => {
 		const origin = new OriginProducer();
-		const broadcast = origin.createBroadcast(Path.from("room/x"));
-		broadcast.announce();
+		const broadcastPublication = origin.createBroadcast(Path.from("room/x"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
 		broadcast
 			.createTrack("video")
 			.appendGroup()
@@ -1269,13 +1276,15 @@ test.each([
 // moq-transport has no stream code for it, so only moq-lite resets with UNAUTHORIZED.
 test("a revoked grant resets its subscriptions with UNAUTHORIZED", async () => {
 	const clientOrigin = new OriginProducer();
-	const up = clientOrigin.createBroadcast(Path.from("up/y"));
-	up.announce();
+	const upPublication = clientOrigin.createBroadcast(Path.from("up/y"));
+	const up = upPublication.broadcast;
+	upPublication.announce();
 	const upTrack = up.createTrack("video");
 
 	const serverOrigin = new OriginProducer();
-	const down = serverOrigin.createBroadcast(Path.from("room/x"));
-	down.announce();
+	const downPublication = serverOrigin.createBroadcast(Path.from("room/x"));
+	const down = downPublication.broadcast;
+	downPublication.announce();
 	const downTrack = down.createTrack("video");
 
 	const { client, server } = await connect({
