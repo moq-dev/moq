@@ -8,6 +8,13 @@
 //! Neither end allocates, locks, or blocks after construction, so either may
 //! run on an audio callback.
 
+// The bus alone never flushes a ring or reads its depth; playback does, and the
+// tests below cover both in every build.
+#![cfg_attr(
+	not(feature = "playback"),
+	allow(dead_code, reason = "only playback flushes a ring or reads its depth")
+)]
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
