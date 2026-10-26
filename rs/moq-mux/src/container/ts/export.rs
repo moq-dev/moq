@@ -706,6 +706,9 @@ impl Track {
 		if video && frame.keyframe {
 			self.keyframe = Some(frame.timestamp);
 		}
+		// Video, MPEG-1/2 carried whole among it, resumes only at a keyframe, since its other
+		// pictures reference earlier ones.
+		let sync = frame.keyframe || self.kind.class() != super::stats::Class::Video;
 		// Replaying anchors on the first frame, and the tracks arrive together rather than each
 		// sent ahead by its send-ahead: judged as arriving that much earlier, as a live source
 		// sends it, every track's first frames are on the clock whichever anchors it.
@@ -724,7 +727,7 @@ impl Track {
 			restart,
 			skip,
 			cut,
-			sync: frame.keyframe || !video,
+			sync,
 			leading,
 			item: Queued {
 				frame,
