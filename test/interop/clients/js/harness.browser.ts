@@ -207,7 +207,8 @@ test("watch volume controls retain the level through mute and keep zero independ
 		);
 		const state = () =>
 			page.evaluate(() => {
-				const watch = document.querySelector<MoqWatch>("moq-watch")!;
+				const watch = document.querySelector<MoqWatch>("moq-watch");
+				if (!watch) throw new Error("missing watch element");
 				return { volume: watch.volume, muted: watch.muted };
 			});
 		const slider = page.getByRole("slider", { name: "Volume", exact: true });
