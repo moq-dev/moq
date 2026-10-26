@@ -37,6 +37,7 @@ the session grant, refused when the verifier refuses, and ended when the
 grant ends while the response waits on credit. Outgoing requests carry the
 token. Run cross-language interop for the wire change.
 
-Public API: none expected beyond widening what `auth::RequestKind` names.
+Public API: none; `auth::RequestKind`, which gains the two request types, is
+crate-private.
 Wire: the existing AUTHORIZATION TOKEN parameter (0x03), now sent and honored
 on TRACK_STATUS and FETCH.

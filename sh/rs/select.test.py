@@ -44,6 +44,13 @@ class SelectTest(unittest.TestCase):
             self.assertIn(f"rs {recipe}", selected)
         self.assertNotIn("rs capture", selected)
 
+    def test_cargo_configuration_selects_workspace(self):
+        for path in (".cargo/config.toml", ".cargo/config"):
+            for action in ("lint", "test"):
+                with self.subTest(path=path, action=action):
+                    calls = self.selected(path, action=action)
+                    self.assertTrue(any(call.startswith(f"rs {action} --workspace ") for call in calls), calls)
+
     def test_queue_checks_selected_feature_shapes(self):
         for path in ("rs/kio/src/lib.rs", "rs/moq-tokio/src/lib.rs",
                      "rs/moq-video/src/lib.rs", "Cargo.lock", "sh/rs/nextest.sh"):

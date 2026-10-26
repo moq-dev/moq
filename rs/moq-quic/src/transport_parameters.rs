@@ -187,27 +187,6 @@ impl TransportParameters {
 		}
 	}
 
-	/// Check that these parameters are legal when resuming from
-	/// certain cached parameters
-	pub(crate) fn validate_resumption_from(&self, cached: &Self) -> Result<(), TransportError> {
-		if cached.active_connection_id_limit > self.active_connection_id_limit
-			|| cached.initial_max_data > self.initial_max_data
-			|| cached.initial_max_stream_data_bidi_local > self.initial_max_stream_data_bidi_local
-			|| cached.initial_max_stream_data_bidi_remote > self.initial_max_stream_data_bidi_remote
-			|| cached.initial_max_stream_data_uni > self.initial_max_stream_data_uni
-			|| cached.initial_max_streams_bidi > self.initial_max_streams_bidi
-			|| cached.initial_max_streams_uni > self.initial_max_streams_uni
-			|| cached.max_datagram_frame_size > self.max_datagram_frame_size
-			|| cached.grease_quic_bit && !self.grease_quic_bit
-			|| cached.reset_stream_at && !self.reset_stream_at
-		{
-			return Err(TransportError::PROTOCOL_VIOLATION(
-				"0-RTT accepted with incompatible transport parameters",
-			));
-		}
-		Ok(())
-	}
-
 	/// Maximum number of CIDs to issue to this peer
 	///
 	/// Consider both a) the active_connection_id_limit from the other end; and
@@ -999,20 +978,6 @@ mod test {
 		}
 	}
 
-	#[test]
-	fn resumption_params_validation() {
-		let high_limit = TransportParameters {
-			initial_max_streams_uni: 32u32.into(),
-			..TransportParameters::default()
-		};
-		let low_limit = TransportParameters {
-			initial_max_streams_uni: 16u32.into(),
-			..TransportParameters::default()
-		};
-		high_limit.validate_resumption_from(&low_limit).unwrap();
-		low_limit.validate_resumption_from(&high_limit).unwrap_err();
-	}
-
 	/// A non-empty `reset_stream_at` is a TRANSPORT_PARAMETER_ERROR.
 	#[test]
 	fn read_reset_stream_at_with_value() {
@@ -1024,17 +989,5 @@ mod test {
 			TransportParameters::read(Side::Client, &mut buf.as_slice()),
 			Err(Error::Malformed)
 		);
-	}
-
-	/// A server that accepts 0-RTT must keep RESET_STREAM_AT enabled.
-	#[test]
-	fn resumption_keeps_reset_stream_at() {
-		let enabled = TransportParameters {
-			reset_stream_at: true,
-			..TransportParameters::default()
-		};
-		let disabled = TransportParameters::default();
-		enabled.validate_resumption_from(&disabled).unwrap();
-		disabled.validate_resumption_from(&enabled).unwrap_err();
 	}
 }

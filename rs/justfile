@@ -99,6 +99,7 @@ windows $BASE="":
 windows-test:
     just rs test --manifest-path rs/moq-auth/Cargo.toml
     just rs test -p hang -p moq-tokio -p moq-sock -p moq-relay
+    just rs test -p moq-video --no-default-features --features render -E 'test(/^render::export::/)'
 
 # Run io_uring tests when the branch affects the relay or its dependencies.
 [positional-arguments]
@@ -141,6 +142,7 @@ macos-test:
     just rs test -p hang -p moq-tokio -p moq-sock
     just rs test -p moq-sock --features fast-apple-datapath
     just rs test -p moq-video --no-default-features -E 'test(encode::backend::videotoolbox::tests)'
+    just rs test -p moq-video --no-default-features --features render -E 'test(/^render::export::/)'
 
 # Compile and lint the capture and playback features, which the default check skips.
 [positional-arguments]
@@ -368,6 +370,9 @@ render-sw:
     LD_LIBRARY_PATH="$loader/lib" VK_DRIVER_FILES="${icd[0]}" \
         just rs test -p moq-video --features render --lib --run-ignored only \
         -E 'test(/^render::renderer::tests::(the_declared_color_space_beats_the_size_guess|cpu_frames_survive_the_round_trip|config_size_overrides_the_frame_size)$/)'
+    # Mesa's software driver exports no memory, so this covers the readback route.
+    LD_LIBRARY_PATH="$loader/lib" VK_DRIVER_FILES="${icd[0]}" \
+        just rs test -p moq-video --features render,openh264 --lib --run-ignored only -E 'test(/^render::export::(nv12::)?tests::/)'
     LD_LIBRARY_PATH="$loader/lib" VK_DRIVER_FILES="${icd[0]}" \
         just rs test -p moq-scene --lib --run-ignored only -E 'test(/^compositor::tests::/)'
     LD_LIBRARY_PATH="$loader/lib" VK_DRIVER_FILES="${icd[0]}" \
