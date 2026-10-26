@@ -23,4 +23,4 @@ Public API: header documentation and a guaranteed terminal callback. Wire: none.
 
 ## Required
 
-- [moq-c package](/quest/m1/c/package.md) - the generated C API this contract applies to
+- [moq-c package](/quest/m2/c/package.md) - the generated C API this contract applies to

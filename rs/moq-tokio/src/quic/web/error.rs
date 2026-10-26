@@ -210,7 +210,6 @@ impl From<crate::quic::driver::WriteError> for WriteError {
 			}
 			crate::quic::driver::WriteError::ClosedStream => WriteError::ClosedStream,
 			crate::quic::driver::WriteError::ConnectionLost(e) => WriteError::SessionError(e.into()),
-			crate::quic::driver::WriteError::ZeroRttRejected => unreachable!("0-RTT not supported"),
 		}
 	}
 }
@@ -253,7 +252,6 @@ impl From<crate::quic::driver::ReadError> for ReadError {
 			crate::quic::driver::ReadError::ClosedStream => ReadError::ClosedStream,
 			crate::quic::driver::ReadError::Evicted => ReadError::Evicted,
 			crate::quic::driver::ReadError::TooLarge => ReadError::TooLarge,
-			crate::quic::driver::ReadError::ZeroRttRejected => unreachable!("0-RTT not supported"),
 		}
 	}
 }

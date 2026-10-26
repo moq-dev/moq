@@ -119,13 +119,12 @@ Routing is the [cluster routing line](/quest/m1/cluster-routing/README.md)'s:
 every session speaks per-node ROUTEs and path-less ANNOUNCEs, and the
 application priority followed by total cost picks the direct link or relay.
 
-Decided 2026-10-25 (maintainer): no cross-path recognition. Each session's
-receiver stamps its routing identity, a direct peer included, so a publisher
-reached through the CDN and directly is two origins with separate routes,
-and switching between them resumes only across a matching explicit epoch.
-Simpler: one identity regime. A routing node id therefore no longer names a
-roster peer; [Signaling and policy](/quest/m2/p2p/signal.md) owns the open
-question of what key maps announces to roster peers.
+A routing node id is declared by its origin and unverified; recognizing it
+needs the key proof [Peer grants](/quest/m2/p2p/peer-grant.md) owns
+(decided 2026-10-26, maintainer, dropping receiver-stamped per-session
+identities). Switching between a CDN and a direct path resumes only across
+a matching explicit epoch. [Signaling and policy](/quest/m2/p2p/signal.md)
+owns the open question of what key maps announces to roster peers.
 
 Decided 2026-10-13: priority then total cost selects among authorized routes;
 a direct connection does not always win. A watching tab never re-serves what
@@ -149,6 +148,10 @@ Backend choice does not change the policy that watching tabs never re-serve.
   over server-reflexive candidates or not at all.
 - Symmetric NATs on both ends fail ICE without TURN. By design the relay
   keeps serving.
+
+Before `@moq/p2p` is first published, add its entrypoints to the API
+Extractor declaration checks, which analyze only published packages since
+[moq-dev/moq#6794](https://github.com/moq-dev/moq/pull/6794).
 
 ## Required
 
