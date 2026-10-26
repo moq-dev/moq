@@ -104,6 +104,12 @@ Added 2026-10-25 (maintainer): pure-Rust crypto moved up from m2, so the
 cut ships a relay that compiles no C. It follows moq-quic's crypto reshape,
 whose surface its QUIC adapter plugs into.
 
+Added 2026-10-25 (maintainer): the studio's
+[GPU encode](/quest/m1/studio-gpu/encode.md) and
+[source import](/quest/m1/studio-gpu/import.md) quests are in m1 so
+moq-video's GPU encode and import API changes, mainly encoders taking a GPU
+surface and zero-copy texture import, land before the cut.
+
 ## Required
 
 - [moq-congestion](/quest/m1/congestion/README.md) - one QUIC congestion-control crate with a transport-independent trait, run by `moq-quic` and published for noq
@@ -128,6 +134,7 @@ whose surface its QUIC adapter plugs into.
 - [More tests under load](/quest/m1/test-flakes-2/README.md) - the second round of load-only failures, one quest per flake, fixed at the cause
 - [Broadcast lifecycle](/quest/m1/broadcast-lifecycle/README.md) - broadcasts are online or offline with no finished state in moq-net, finished-broadcast retention is a fixed moq-mux policy, and each linger timer has one meaning
 - [A smaller, safer API than release](/quest/m1/api-audit/README.md) - every surface added since release has a consumer or is gone, overlapping operations are collapsed, names mirror across Rust, JS, and the bindings, and every break says how to migrate
+- [Studio on the GPU](/quest/m1/studio-gpu/README.md) - moq-video encoders take a GPU surface and its renderer reports zero-copy import, proven through moq-studio on NVENC, VideoToolbox, Media Foundation, DMA-BUF, and Metal
 - [moq-transport 18 and 22 only](/quest/m1/ietf-drop/README.md) - drafts 14-17 and 19-21 are deleted from Rust, JS, tests, interop lanes, and docs, removing the legacy control-stream adapter and its request limit
 - [moq-quic's API improves on quinn's](/quest/m1/quic-api/README.md) - moq-quic and both QUIC drivers ship one mirrored API: `send::`/`recv::` namespaces, one error per direction, consuming terminal operations, plain configs, no quinn baggage
 - [Pure-Rust crypto for moq-relay](/quest/m1/pure-crypto/README.md) - moq-relay's release builds use graviola and RustCrypto and compile no C
