@@ -457,7 +457,6 @@ impl Registry {
 	}
 
 	/// What the session probes up to.
-	#[cfg(any(feature = "async", test))]
 	fn target(&self) -> Rate {
 		self.target
 			.unwrap_or_else(|| Rate::from_bps(u64::try_from(self.reserved).unwrap_or(u64::MAX)))
@@ -565,9 +564,11 @@ impl Share {
 		allocate(estimate, &wants, self.id)
 	}
 
-	/// Whether a session probes for this share's registry.
+	/// Whether a session probes for this share's registry, toward a target above zero,
+	/// which turns probing off.
 	fn probed(&self) -> bool {
-		self.registry.read().probes > 0
+		let registry = self.registry.read();
+		registry.probes > 0 && registry.target() > Rate::ZERO
 	}
 
 	/// This share's slice and whether a session probes for it, arming `waiter` for
@@ -714,7 +715,8 @@ impl Consumer {
 	/// Whether a session probes the connection for this slice's reservation, so the
 	/// estimate can rise to fund it even while its sender is stopped.
 	///
-	/// Only a session whose transport has a sender probes. Without one the estimate
+	/// Only a session whose transport has a sender probes, and none does while
+	/// [`Allocator::set_target`] turns probing off. Without one the estimate
 	/// stops learning once the connection is app-limited, so a sender that stops for
 	/// lack of bandwidth could never see enough to resume. Always `false` for a whole
 	/// estimate, which no reservation backs. [`poll_changed`](Self::poll_changed)
@@ -1335,6 +1337,17 @@ mod tests {
 		assert!(matches!(grant.poll_changed(&waiter), Poll::Ready(Ok(Some(rate))) if rate == bps(2_000_000)));
 		assert!(grant.probed());
 		assert!(grant.poll_changed(&waiter).is_pending());
+
+		// A zero target turns probing off, though the session still follows it.
+		let (woken, waiter) = Woken::new();
+		assert!(grant.poll_changed(&waiter).is_pending());
+		allocator.set_target(Some(Rate::ZERO));
+		assert!(woken.woken(), "turning probing off must wake the reader");
+		assert!(matches!(grant.poll_changed(&waiter), Poll::Ready(Ok(Some(rate))) if rate == bps(2_000_000)));
+		assert!(!grant.probed());
+		allocator.set_target(None);
+		assert!(matches!(grant.poll_changed(&waiter), Poll::Ready(Ok(Some(rate))) if rate == bps(2_000_000)));
+		assert!(grant.probed());
 
 		drop(target);
 		assert!(matches!(grant.poll_changed(&waiter), Poll::Ready(Ok(Some(rate))) if rate == bps(2_000_000)));

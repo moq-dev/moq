@@ -206,6 +206,23 @@ impl Control {
 		self.probed = probed;
 	}
 
+	/// Follow `policy` from the next [`update`](Self::update), returning whether it changed;
+	/// see [`Follower::set_policy`].
+	fn set_policy(&mut self, policy: Policy) -> bool {
+		if policy == self.policy {
+			return false;
+		}
+		if policy.max == self.policy.max && policy.min == self.policy.min {
+			self.policy = policy;
+		} else {
+			let (enabled, probed) = (self.enabled, self.probed);
+			*self = Control::new(policy);
+			self.enabled = enabled;
+			self.probed = probed;
+		}
+		true
+	}
+
 	/// When to [`update`](Self::update) again with the latest estimate, changed or
 	/// not, to continue a raise or retry a failed change; `None` once the target has
 	/// settled.
@@ -244,6 +261,8 @@ impl Control {
 						.saturating_add(band(boundary).as_bps())
 						.min(self.policy.max.as_bps());
 					if desired.as_bps() < clear {
+						// A retry of a failed resume is no longer due either.
+						self.deadline = None;
 						return None;
 					}
 					// Restart at the boundary and ramp: the estimate was measured while
@@ -304,8 +323,15 @@ impl Control {
 		// Drops keep the deadband either way: sitting a little above a falling
 		// estimate is what it's for. That is also what keeps a grant jittering
 		// around the band boundary from flapping the rendition off and on.
+		//
+		// The deadband only holds a rung on above a boundary that was already holding
+		// it. One whose applied target is under the boundary, because probing just
+		// started or the lower rendition rose, disables at once on a grant below it.
+		let disable = boundary.is_some_and(|boundary| desired < boundary);
+		let under = boundary.is_some_and(|boundary| self.target < boundary);
 		let settling = next > self.target && next == self.policy.max;
-		if next == self.target || (!settling && next.abs_diff(self.target) < band(self.target)) {
+		let suppressed = next == self.target || (!settling && next.abs_diff(self.target) < band(self.target));
+		if suppressed && !(disable && under) {
 			self.deadline = self.raise(desired);
 			return None;
 		}
@@ -316,7 +342,9 @@ impl Control {
 			applied: self.applied,
 			desired,
 		});
-		if boundary.is_some_and(|boundary| next < boundary) {
+		// On `desired` rather than `next`: a ramp still climbing from under the boundary
+		// toward a grant above it is funded, so it stays on.
+		if disable {
 			// Only a new estimate clearing the boundary resumes it, so nothing is due.
 			self.enabled = false;
 			self.deadline = None;
@@ -430,17 +458,9 @@ impl Follower {
 	/// the sender. Either way a disabled sender stays disabled until that grant resumes
 	/// it under the new policy, since nothing told it to start.
 	pub fn set_policy(&mut self, policy: Policy) {
-		if policy == self.control.policy {
-			return;
+		if self.control.set_policy(policy) {
+			self.refeed = true;
 		}
-		if policy.max == self.control.policy.max && policy.min == self.control.policy.min {
-			self.control.policy = policy;
-		} else {
-			let enabled = self.control.enabled;
-			self.control = Control::new(policy);
-			self.control.enabled = enabled;
-		}
-		self.refeed = true;
 	}
 
 	/// Poll for the next target the sender should produce at, or the error that
@@ -1184,6 +1204,65 @@ mod tests {
 		);
 	}
 
+	/// A resume the sender failed, whose grant then falls back under the margin, drops
+	/// its retry: an update at that deadline would change nothing, so a follower woken
+	/// by it would spin.
+	#[test]
+	fn a_failed_resume_under_the_margin_stops_retrying() {
+		let mut rung = rung();
+		let start = moq_clock::now();
+		assert_eq!(rung.update(Some(bps(3_000_000)), start), Some(Target::Disabled));
+		let resumed = start + Duration::from_secs(1);
+		assert_eq!(rung.update(Some(bps(5_000_000)), resumed), Some(on(bps(3_333_333))));
+		rung.failed(resumed);
+		assert_eq!(rung.deadline(), Some(resumed + RETRY));
+
+		assert_eq!(rung.update(Some(bps(3_000_000)), resumed + RETRY / 2), None);
+		assert_eq!(rung.target(), Target::Disabled);
+		assert_eq!(rung.deadline(), None);
+	}
+
+	/// A rung following an unprobed grant under its boundary disables once probing starts,
+	/// though the grant never moves, unless the grant can fund it.
+	#[test]
+	fn a_rung_under_its_boundary_disables_when_probing_starts() {
+		let mut rung = rung();
+		rung.set_probed(false);
+		let start = moq_clock::now();
+		assert_eq!(rung.update(Some(bps(3_000_000)), start), Some(on(bps(3_000_000))));
+
+		let mut funded = rung.clone();
+		rung.set_probed(true);
+		assert_eq!(
+			rung.update(Some(bps(3_000_000)), start + Duration::from_millis(100)),
+			Some(Target::Disabled)
+		);
+
+		// A grant over the boundary funds it, so it ramps up from under it instead.
+		funded.set_probed(true);
+		assert_eq!(
+			funded.update(Some(bps(5_000_000)), start + Duration::from_secs(1)),
+			Some(on(bps(3_750_000)))
+		);
+	}
+
+	/// The same when the lower rendition rises over the applied target.
+	#[test]
+	fn a_rung_under_a_raised_boundary_disables() {
+		let mut rung = rung();
+		let start = moq_clock::now();
+		assert_eq!(rung.update(Some(bps(3_500_000)), start), Some(on(bps(3_500_000))));
+
+		// The boundary moves from 3.33 Mbps to 3.67 Mbps, over the applied target.
+		let mut policy = rung.policy.clone();
+		policy.lower = Some(bps(3_000_000));
+		assert!(rung.set_policy(policy));
+		assert_eq!(
+			rung.update(Some(bps(3_500_000)), start + Duration::from_millis(100)),
+			Some(Target::Disabled)
+		);
+	}
+
 	/// End to end through the allocator: descending priority down the renditions fills
 	/// the lower ones first, so a shrinking estimate disables the top rendition and leaves
 	/// the lower ones at their full share. The top ones come back once the estimate
@@ -1262,5 +1341,202 @@ mod tests {
 		let recovered = update(start + Duration::from_secs(3));
 		assert_eq!(recovered[1], on(bps(1_333_333)));
 		assert_eq!(recovered[2], on(bps(2_666_666)));
+	}
+
+	/// Random walks of grants, probing, policy changes, refused changes, and time,
+	/// replayed through [`Control`] the way [`Follower`] drives it, checking the rung's
+	/// invariants after every wake.
+	mod model {
+		use proptest::prelude::*;
+		use proptest::test_runner::{Config, RngSeed, TestRunner};
+
+		use super::*;
+
+		#[derive(Clone, Debug)]
+		enum Op {
+			Grant(Option<u64>),
+			/// Move the grant by this many per mille, around the deadband and the margins.
+			Jitter(i16),
+			Probed(bool),
+			Lower(Option<u64>),
+			Max(u64),
+			Min(u64),
+			Advance(Duration),
+		}
+
+		fn op() -> impl Strategy<Value = Op> {
+			let rate = || prop_oneof![0..12_000_000u64, 0..2_000u64];
+			prop_oneof![
+				3 => proptest::option::weighted(0.9, rate()).prop_map(Op::Grant),
+				3 => (-80i16..=80).prop_map(Op::Jitter),
+				2 => any::<bool>().prop_map(Op::Probed),
+				2 => proptest::option::weighted(0.8, rate()).prop_map(Op::Lower),
+				1 => (1..10_000_000u64).prop_map(Op::Max),
+				1 => rate().prop_map(Op::Min),
+				4 => prop_oneof![0..400u64, 0..20_000u64].prop_map(|ms| Op::Advance(Duration::from_millis(ms))),
+			]
+		}
+
+		/// What the follower feeds the control, and when.
+		struct Model {
+			control: Control,
+			now: Instant,
+			grant: Option<bandwidth::Rate>,
+			probed: bool,
+		}
+
+		impl Model {
+			fn apply(&mut self, op: Op, fail: bool) {
+				let mut policy = self.control.policy.clone();
+				match op {
+					Op::Grant(grant) => self.set_grant(grant.map(bps), fail),
+					Op::Jitter(per_mille) => {
+						let Some(grant) = self.grant else { return };
+						let moved = i128::from(grant.as_bps()) * (1_000 + i128::from(per_mille)) / 1_000;
+						self.set_grant(Some(bps(moved as u64)), fail);
+					}
+					Op::Probed(probed) => {
+						// The grant reports a flip, and only a flip.
+						if probed != self.probed {
+							self.probed = probed;
+							self.wake(fail);
+						}
+					}
+					Op::Lower(lower) => {
+						policy.lower = lower.map(bps);
+						self.set_policy(policy, fail);
+					}
+					Op::Max(max) => {
+						policy.max = bps(max);
+						self.set_policy(policy, fail);
+					}
+					Op::Min(min) => {
+						policy.min = bps(min);
+						self.set_policy(policy, fail);
+					}
+					Op::Advance(elapsed) => {
+						let end = self.now + elapsed;
+						while let Some(at) = self.control.deadline().filter(|at| *at <= end) {
+							self.now = at;
+							self.wake(fail);
+						}
+						self.now = end;
+					}
+				}
+			}
+
+			fn set_grant(&mut self, grant: Option<bandwidth::Rate>, fail: bool) {
+				// The grant wakes the follower only when it moves.
+				if grant != self.grant {
+					self.grant = grant;
+					self.wake(fail);
+				}
+			}
+
+			fn set_policy(&mut self, policy: Policy, fail: bool) {
+				if self.control.set_policy(policy) {
+					self.wake(fail);
+				}
+			}
+
+			/// One update, as the follower makes on any wake, then the sender refusing what
+			/// it returned when `fail`.
+			fn wake(&mut self, fail: bool) {
+				let before = self.control.clone();
+				self.control.set_probed(self.probed);
+				let change = self.control.update(self.grant, self.now);
+				self.check(&before, change);
+				if fail && change.is_some() {
+					self.control.failed(self.now);
+				}
+				// Anything already due would wake the follower again at once, for nothing.
+				if let Some(at) = self.control.deadline() {
+					assert!(at > self.now, "a deadline at {at:?} is already due at {:?}", self.now);
+				}
+			}
+
+			fn check(&self, before: &Control, change: Option<Target>) {
+				let policy = &self.control.policy;
+				let min = policy.min.min(policy.max);
+				let boundary = policy.boundary();
+				if let Target::Enabled(rate) = self.control.target() {
+					assert!(rate <= policy.max, "{rate:?} over {policy:?}");
+					assert!(rate >= min, "{rate:?} under {policy:?}");
+				}
+
+				if change == Some(Target::Disabled) {
+					let boundary = boundary.expect("a policy without a band disabled the rung");
+					assert!(self.probed, "an unprobed rung disabled");
+					let desired = self
+						.grant
+						.expect("a missing estimate disabled the rung")
+						.clamp(min, policy.max);
+					assert!(desired < boundary, "{desired:?} is not under {boundary:?}");
+					let Target::Enabled(was) = before.target() else {
+						panic!("a disabled rung disabled again")
+					};
+					// Outside the deadband, unless the applied target was already under the boundary.
+					assert!(
+						was < boundary || was.as_bps() - desired.as_bps() >= band(was).as_bps(),
+						"{was:?} to {desired:?} is inside the deadband"
+					);
+				}
+
+				// A missing estimate holds whatever the rung was doing.
+				let Some(estimate) = self.grant else { return };
+				let desired = estimate.clamp(min, policy.max);
+				match self.control.target() {
+					Target::Disabled => {
+						assert!(self.probed, "an unprobed rung stayed disabled");
+						let boundary = boundary.expect("a policy without a band stayed disabled");
+						let clear = (boundary.as_bps() + band(boundary).as_bps()).min(policy.max.as_bps());
+						assert!(
+							desired.as_bps() < clear,
+							"{desired:?} clears {boundary:?} by the margin, yet the rung stayed disabled"
+						);
+					}
+					Target::Enabled(rate) => {
+						if let Some(boundary) = boundary.filter(|boundary| self.probed && desired < *boundary) {
+							assert!(rate >= boundary, "{rate:?} stayed on under {boundary:?} at {desired:?}");
+							assert!(
+								rate.as_bps() - desired.as_bps() < band(rate).as_bps(),
+								"{rate:?} stayed on past the deadband at {desired:?}"
+							);
+						}
+					}
+				}
+			}
+		}
+
+		#[test]
+		fn invariants_hold_on_random_walks() {
+			let mut runner = TestRunner::new(Config {
+				cases: 512,
+				rng_seed: RngSeed::Fixed(6781),
+				failure_persistence: None,
+				..Default::default()
+			});
+			let walk = (
+				1..10_000_000u64,
+				proptest::option::of(0..12_000_000u64),
+				proptest::collection::vec((op(), proptest::bool::weighted(0.1)), 1..200),
+			);
+			runner
+				.run(&walk, |(max, lower, ops)| {
+					let mut policy = Policy::new(bps(max));
+					policy.lower = lower.map(bps);
+					let mut model = Model {
+						control: Control::new(policy),
+						now: moq_clock::now(),
+						grant: None,
+						probed: false,
+					};
+					for (op, fail) in ops {
+						model.apply(op, fail);
+					}
+					Ok(())
+				})
+				.unwrap();
+		}
 	}
 }

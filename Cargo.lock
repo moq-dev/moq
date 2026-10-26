@@ -5028,6 +5028,7 @@ dependencies = [
  "mp4-atom",
  "mpeg2ts",
  "num_enum",
+ "proptest",
  "roxmltree",
  "scuffle-av1",
  "scuffle-h265",
