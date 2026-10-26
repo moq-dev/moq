@@ -100,9 +100,9 @@ crashes and amplification in media and RTMP parsing, lite announce bounds,
 JS track terminal causes, browser element teardown, and smaller Rust/JS
 divergences, under one epic; its redesign proposals went to m2.
 
-Added 2026-10-25 (maintainer): pure-Rust crypto moved up from m2, so the
-cut ships a relay that compiles no C. It follows moq-quic's crypto reshape,
-whose surface its QUIC adapter plugs into.
+Changed 2026-10-26 (maintainer): pure-Rust crypto moved to m3 until upstream
+graviola and ACME releases make it cheap, so the cut ships on aws-lc-rs.
+Dropping moq-auth's `rsa` crate, and with it a RUSTSEC ignore, stays in m1.
 
 Added 2026-10-25 (maintainer): the studio's
 GPU encode and
@@ -135,7 +135,7 @@ surface and zero-copy texture import, land before the cut.
 - [Studio on the GPU](/quest/m1/studio-gpu/README.md) - moq-video encoders take a GPU surface and its renderer reports zero-copy import, proven through moq-studio on NVENC, VideoToolbox, Media Foundation, DMA-BUF, and Metal
 - [moq-transport 18 and 22 only](/quest/m1/ietf-drop/README.md) - drafts 14-17 and 19-21 are deleted from Rust, JS, tests, interop lanes, and docs, removing the legacy control-stream adapter and its request limit
 - [moq-quic's API improves on quinn's](/quest/m1/quic-api/README.md) - moq-quic and both QUIC drivers ship one mirrored API: `send::`/`recv::` namespaces, one error per direction, consuming terminal operations, plain configs, no quinn baggage
-- [Pure-Rust crypto for moq-relay](/quest/m1/pure-crypto/README.md) - moq-relay's release builds use graviola and RustCrypto and compile no C
+- [moq-auth without the rsa crate](/quest/m1/auth-no-rsa.md) - RSA keys are generated and loaded through aws-lc-rs and `pkcs1`, and `deny.toml` drops its Marvin ignore
 - [Drop web-transport-trait](/quest/m1/drop-web-transport-trait.md) - iroh, wasm, and ffi implement moq-net's `transport::poll` traits, and the remaining `web_transport_trait` adapters are deleted
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - browser publishers answer IETF FETCH through the JS ranges request surface
 - [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - native FILL_TIMEOUT bounds upstream waiting on drafts 18 and 22, alongside local content-age enforcement
