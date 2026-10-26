@@ -1,4 +1,4 @@
-# [S] Nightly passes on main
+# Nightly passes on main
 
 ## Goal
 
@@ -16,7 +16,7 @@ Decided 2026-10-24 (maintainer), from a triage of run
 child per distinct cause, each landing on its own. The PR gate keeps
 skipping benches and examples; a green Nightly catches them within a day.
 
-This README's own work:
+This README's own work, after the children:
 
 - Nightly's multi-step jobs (Features first) keep going past a failed step
   and fail at the end, so one break never hides the steps after it.
@@ -30,3 +30,11 @@ This README's own work:
   [moq-dev/moq#6656](https://github.com/moq-dev/moq/pull/6656).
 
 Public API: none. Wire: none.
+
+## Required
+
+- [OBS audio-candidate test](/quest/m0/nightly/obs-audio-candidate.md) - the failed audio candidate check passes under TSan and load, fixed at its reproduced cause
+- [moq-net builds without async](/quest/m0/nightly/net-async-free.md) - the no-default-features lane stops pulling `async` back in
+- [Feature shapes per crate](/quest/m0/nightly/hls-poll-closed-gate.md) - moq-hls `Broadcaster::poll_closed` is gated on `server`, and the gate checks each crate's feature shapes in isolation
+- [moq-relay tests build without default features](/quest/m0/nightly/relay-tests-features.md) - the integration tests gate their websocket and unix-socket fields on the features that define them
+- [qmux builds clean for iOS](/quest/m0/nightly/qmux-ios-dead-code.md) - `TcpStats` is gated to the platforms that implement it, so the iOS simulator build has no dead code

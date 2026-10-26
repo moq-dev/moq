@@ -636,7 +636,7 @@ impl Drop for Producer {
 		};
 		if !group.is_aborted() && !self.cancel_on_drop {
 			tracing::warn!(
-				group = group.info().sequence,
+				group = group.sequence,
 				"frame::Producer dropped before writing all bytes"
 			);
 		}

@@ -616,7 +616,7 @@ If the publisher advertised no Probe capability (e.g., the congestion controller
 Either endpoint can open an Auth Stream (0x7) to present a token and learn what it grants.
 
 The opener sends a single AUTH message and keeps its side open for as long as the token applies.
-Each endpoint SHOULD open one Auth Stream with an empty token right after the session starts, so both learn what the credential the connection already presented (the request URI, a client certificate, or nothing) allows.
+Each endpoint SHOULD open one Auth Stream with an empty token right after the session starts, so both learn what the credential the connection already presented (the [Token](#token-parameter) parameter, the request URI, a client certificate, or nothing) allows.
 The acceptor replies with an AUTH_OK carrying the grant, or an AUTH_ERROR refusing the token.
 The grant MUST join the acceptor's scope before it sends AUTH_OK.
 It MAY send further AUTH_OK messages to replace the grant, such as with a lowered expiry, and MAY send an AUTH_ERROR after an AUTH_OK to revoke it; the latest AUTH_OK is the token's grant.
@@ -929,6 +929,8 @@ The following Setup Parameters are defined:
 |------|----------------|-------------|
 | 0x6  | Implementation | Tokens (s)  |
 |------|----------------|-------------|
+| 0x7  | Token          | Token (b)   |
+|------|----------------|-------------|
 
 ### Probe Parameter {#probe-parameter}
 The Probe Parameter advertises the sender's capability level when acting as a publisher on a [Probe Stream](#probe).
@@ -996,6 +998,17 @@ The Parameter Value is a UTF-8 string of space-separated `name/version` product 
 A receiver that receives an invalid UTF-8 value MUST close the session with a PROTOCOL_VIOLATION.
 
 Either endpoint MAY send it, and MAY omit it to avoid disclosing its software. A receiver MUST NOT authorize on it or change its protocol behavior because of it. A relay MUST NOT forward it.
+
+### Token Parameter {#token-parameter}
+The Token Parameter carries the client's connection credential, such as a JWT, so a server can authorize the session from the SETUP it already reads before serving.
+The Parameter Value is the token's bytes, in a format the endpoints agree on out of band; it MUST NOT be empty, and a receiver MUST close the session with a PROTOCOL_VIOLATION on an empty value.
+
+It is the credential the empty-token [Auth Stream](#auth-stream) refers to, so the client presents any other token on its own Auth Stream rather than here.
+A server SHOULD verify it as it would a credential in the request URI's query.
+A client whose request URI already carries a credential SHOULD NOT also send a different one here, and a server MAY refuse a session that presents two different credentials.
+The URI is fixed before the version is negotiated, so a client that may negotiate a version without this parameter carries the same credential in the query as well.
+
+Only the client sends it; a client that receives one MUST close the session with a PROTOCOL_VIOLATION. A relay MUST NOT forward it.
 
 
 ## ANNOUNCE_REQUEST {#announce-request}
@@ -1854,6 +1867,7 @@ The `Message Length` describes the payload size on the wire.
 - An open Track Stream is interest in the Track until the subscriber closes it, which a subscriber does once its Subscribe Stream has a response. lite-05 and lite-06 implementations do the same.
 
 - Assigned `moq-lite-07-wip` as this draft's protocol identifier until it is finalized as `moq-lite-07`.
+- Added the client-only Token Setup Parameter (0x7), carrying the connection credential in SETUP instead of only the request URI.
 - Switched every variable-length integer, including SETUP parameter values, from QUIC's two-bit length prefix to moq-transport's leading-ones encoding, widening the range to 64 bits.
 - Hid routes with a `.`-prefixed segment below the requested prefix from announce discovery, and added the ANNOUNCE_REQUEST `Hidden` field to opt in.
 - Restored SUBSCRIBE_DROP (type 0x2), replacing Stream Count on SUBSCRIBE_END. Every sequence is accounted for by a Group Stream, a datagram, or a drop; a publisher SHOULD send a drop as soon as it gives a sequence up.

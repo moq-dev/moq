@@ -21,7 +21,3 @@ Decided 2026-10-22: use CEF through `cef-rs`, desktop only.
 - **Process:** CEF runs out of process.
 - **First check:** whether `cef-rs` exposes accelerated offscreen painting.
   If it does not, upstream that before building on it.
-
-## Required
-
-- [The studio app](/quest/m3/studio/app.md) - the compositor and sources this adds a source type to

@@ -11,7 +11,3 @@ from the studio and saved with the scene collection.
 Prefer maintained crates, such as `nnnoiseless` for RNNoise suppression, over
 hand-rolled DSP. Benchmark the chain per source so its cost per added source
 shows up as a slope.
-
-## Required
-
-- [The studio app](/quest/m3/studio/app.md) - the sources and bus the chain sits between

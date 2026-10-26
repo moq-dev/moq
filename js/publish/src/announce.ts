@@ -10,7 +10,8 @@ interface Track {
 }
 
 export interface Props {
-	mode: Getter<AnnounceMode>;
+	// Undefined refuses to announce.
+	mode: Getter<AnnounceMode | undefined>;
 	// A camera captures video and audio as one publication.
 	camera: Getter<boolean | undefined>;
 	video: Track;
