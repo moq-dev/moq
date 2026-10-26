@@ -979,7 +979,7 @@ impl Import {
 			self.video.push(track);
 		}
 
-		let audio_url = self.audio.as_ref().map(|a| a.playlist.to_string());
+		let audio_url = self.audio.as_ref().map(|a| redact(&a.playlist).to_string());
 		info!(
 			video_variants = variants.len(),
 			audio = audio_url.as_deref().unwrap_or("none"),
@@ -2539,6 +2539,37 @@ mod tests {
 
 		let audio = hls.audio.as_ref().expect("separate audio rendition");
 		assert!(audio.select.has_audio() && !audio.select.has_video());
+	}
+
+	#[tokio::test]
+	async fn discovery_logs_redact_playlist_credentials() {
+		let log_path = temp_dir().join("discovery.log");
+		let logs = tracing_subscriber::fmt()
+			.with_ansi(false)
+			.without_time()
+			.with_max_level(tracing::Level::DEBUG)
+			.with_writer(std::fs::File::create(&log_path).unwrap())
+			.finish();
+		let _logging = tracing::subscriber::set_default(logs);
+		let audio = signed(&Url::parse("https://example.com/audio.m3u8").unwrap());
+		let master = format!(
+			"#EXTM3U\n\
+			#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"en\",URI=\"{audio}\"\n\
+			#EXT-X-STREAM-INF:BANDWIDTH=1000000,CODECS=\"avc1.4d401f,mp4a.40.2\",AUDIO=\"aud\"\n\
+			video.m3u8?jwt=s3cret#f4ag\n"
+		);
+		let hls = discover(&master).await;
+		assert_eq!(hls.audio.as_ref().unwrap().playlist, audio);
+
+		let printed = std::fs::read_to_string(log_path).unwrap();
+		assert!(printed.contains("selected master playlist renditions"), "{printed}");
+		assert!(
+			printed.contains("audio=\"https://example.com/audio.m3u8\""),
+			"{printed}"
+		);
+		for credential in ["alice", "hunter2", "jwt", "s3cret", "f4ag"] {
+			assert!(!printed.contains(credential), "log leaked {credential}: {printed}");
+		}
 	}
 
 	/// A master whose variant carries muxed A/V (no separate audio group) publishes
