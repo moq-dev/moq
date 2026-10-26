@@ -184,17 +184,34 @@ impl Spans {
 		}
 	}
 
-	/// The newest group known to start with a keyframe, used to bootstrap an init segment for
-	/// inline-parameter-set codecs.
-	pub fn latest_keyframe_group(&self) -> Option<u64> {
+	/// The keyframe groups to bootstrap an inline-parameter-set codec's init from, in the order
+	/// to try them (see [`bootstrap_groups`]).
+	pub fn keyframe_groups(&self) -> Vec<u64> {
 		let state = self.state.read();
-		state
-			.records
-			.iter()
-			.rev()
-			.find(|record| starts_sync(record))
-			.map(|record| record.start.group)
+		bootstrap_groups(
+			state
+				.records
+				.iter()
+				.rev()
+				.filter(|record| starts_sync(record))
+				.map(|record| record.start..record.end),
+		)
 	}
+}
+
+/// Order keyframe group spans, newest first, for an init bootstrap: the newest group whose span
+/// already reached a later group, which is closed and so read from cache at once, then the
+/// newest group when that one may still be open.
+pub(crate) fn bootstrap_groups(mut spans: impl Iterator<Item = Range<Position>>) -> Vec<u64> {
+	let Some(newest) = spans.next() else {
+		return Vec::new();
+	};
+	let closed = |span: &Range<Position>| span.end.group > span.start.group;
+	if closed(&newest) {
+		return vec![newest.start.group];
+	}
+	let older = spans.find(closed).map(|span| span.start.group);
+	older.into_iter().chain([newest.start.group]).collect()
 }
 
 /// Whether `record` starts at a group start that is a sync point, so a player can begin decoding

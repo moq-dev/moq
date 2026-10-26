@@ -24,8 +24,9 @@ function accept(transport: WebTransport, url: URL, props: Omit<AcceptProps, "tra
 }
 
 function publish(origin: OriginProducer, path: Path.Valid) {
-	const broadcast = origin.createBroadcast(path);
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(path);
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	return broadcast;
 }
 
@@ -662,8 +663,9 @@ for (const [name, teardown] of Object.entries(teardowns)) {
 		await waitUntil(() => handle.origin.peek() !== undefined);
 		const origin = handle.origin.peek();
 		if (!origin) throw new Error("no origin");
-		const broadcast = origin.createBroadcast(Path.from("room"));
-		broadcast.announce();
+		const broadcastPublication = origin.createBroadcast(Path.from("room"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
 		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 		await waitUntil(() => dials.length > 0);
 		const first = dials[0];
@@ -748,8 +750,9 @@ for (const [name, drainEnd] of Object.entries(drainEnds)) {
 		globalThis.WebTransport = stub as unknown as typeof WebTransport;
 
 		const origin = new OriginProducer();
-		const broadcast = origin.createBroadcast(Path.from("room"));
-		broadcast.announce();
+		const broadcastPublication = origin.createBroadcast(Path.from("room"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
 		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 		const reload = new Reload({
 			url: new URL("https://example.com/a"),
@@ -807,8 +810,9 @@ test("a retired GOAWAY predecessor still closes by its handover cap", async () =
 	globalThis.WebTransport = stub as unknown as typeof WebTransport;
 
 	const origin = new OriginProducer();
-	const broadcast = origin.createBroadcast(Path.from("room"));
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(Path.from("room"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const reload = new Reload({
 		url: new URL("https://example.com/"),
@@ -889,8 +893,9 @@ test("closing the loop keeps the tokens until the session drains", async () => {
 	const origin = new OriginProducer();
 	const reload = new Reload({ url, websocket: { enabled: false }, publish: origin.consume() });
 	await reload.auth.add("token");
-	const broadcast = origin.createBroadcast(Path.from("room"));
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(Path.from("room"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const first = dials[0];
 	if (!first) throw new Error("no first dial");

@@ -20,8 +20,16 @@ Ed25519, and HMAC.
 Never hand-roll a primitive; the provider only adapts graviola to jsonwebtoken's
 traits.
 
+jsonwebtoken 11 needs no upstream change: its `CryptoProvider` takes custom
+signer and verifier factories. It has only a process-wide default, so moq-auth
+installs its provider only when none is installed, as the spike does, and an
+embedder's choice wins.
+
+Decided by the maintainer on 2026-10-25: the provider stays private in
+moq-auth, since moq is its only consumer.
+
 Public API: none expected; say so if moq-auth's key types change. Wire: none.
 
 ## Related
 
-- [moq-relay on graviola](/quest/m2/pure-crypto/relay-graviola.md) - the rest of the relay's crypto
+- [moq-relay on graviola](/quest/m1/pure-crypto/relay-graviola.md) - the rest of the relay's crypto
