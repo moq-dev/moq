@@ -423,18 +423,8 @@ async fn announced_route_keeps_static_cost_on_reannounce() {
 
 #[test]
 fn epoch_helpers_mint_parse_and_refuse() {
-	assert_eq!(
-		moq_epoch_time_ms("ffffffff-ffff-7fff-bfff-ffffffffffff".into()).unwrap(),
-		(1_u64 << 48) - 1
-	);
 	let epoch = moq_mint_epoch();
 	let parsed: moq_net::Epoch = epoch.parse().unwrap();
-	let unix_ms = parsed
-		.time()
-		.unwrap()
-		.saturating_duration_since(moq_clock::Wall::UNIX_EPOCH)
-		.as_millis();
-	assert_eq!(u128::from(moq_epoch_time_ms(epoch.clone()).unwrap()), unix_ms);
 	assert!(moq_mint_epoch() > epoch, "a later mint orders newer");
 
 	// The text the route carries round-trips, and anything but a UUIDv7 is refused.
@@ -448,10 +438,6 @@ fn epoch_helpers_mint_parse_and_refuse() {
 
 	let uuid_v4 = "6ba7b810-9dad-41d1-80b4-00c04fd430c8".to_string();
 	for bad in [uuid_v4, epoch.to_uppercase(), String::new()] {
-		assert!(matches!(
-			moq_epoch_time_ms(bad.clone()),
-			Err(MoqError::InvalidEpoch { .. })
-		));
 		let route = MoqAnnounceRoute {
 			epoch: Some(bad),
 			..Default::default()
@@ -7342,7 +7328,8 @@ async fn memory_shutdown_pair() -> (Arc<MoqSession>, Arc<MoqSession>) {
 	};
 	let accept = async {
 		let (session, driver) = moq_net::Server::new()
-			.with_origin(b.inner.clone())
+			.with_publisher(&b.inner)
+			.with_subscriber(b.inner.clone())
 			.with_versions(version.into())
 			.accept(moq_clock::Instant::now(), server)
 			.await

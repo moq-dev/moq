@@ -108,5 +108,4 @@ qmux if its public API changes.
 
 ## Required
 
-- [Trim](/quest/m1/quic-api/trim.md) - removes unordered reads and dead read/write paths first
 - [Zero-RTT](/quest/m1/quic-api/zero-rtt.md) - removes 0-RTT, so no error carries it
