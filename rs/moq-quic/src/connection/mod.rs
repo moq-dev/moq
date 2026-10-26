@@ -62,7 +62,7 @@ mod packet_builder;
 use packet_builder::PacketBuilder;
 
 mod packet_crypto;
-use packet_crypto::{PrevCrypto, ZeroRttCrypto};
+use packet_crypto::PrevCrypto;
 
 mod paths;
 use paths::{PathData, PathResponses};
@@ -73,6 +73,7 @@ mod send_buffer;
 
 mod sent_packets;
 mod spaces;
+#[cfg(any(test, feature = "fuzz"))]
 pub(crate) use spaces::Retransmits;
 use spaces::{PacketNumberFilter, PacketSpace, SendableFrames, SentPacket, ThinRetransmits};
 
@@ -163,10 +164,6 @@ pub struct Connection {
 	prev_path: Option<(ConnectionId, PathData)>,
 	state: State,
 	side: ConnectionSide,
-	/// Whether or not 0-RTT was enabled during the handshake. Does not imply acceptance.
-	zero_rtt_enabled: bool,
-	/// Set if 0-RTT is supported, then cleared when no longer needed.
-	zero_rtt_crypto: Option<ZeroRttCrypto>,
 	key_phase: bool,
 	/// How many packets are in the current key phase. Used only for `Data` space.
 	key_phase_size: u64,
@@ -198,7 +195,6 @@ pub struct Connection {
 	/// These are generated in advance to prevent timing attacks and/or DoS by third-party attackers
 	/// spoofing key updates.
 	next_crypto: Option<KeyPair<Box<dyn PacketKey>>>,
-	accepted_0rtt: bool,
 	/// Whether the idle timer should be reset the next time an ack-eliciting packet is transmitted.
 	permit_idle_reset: bool,
 	/// Negotiated idle timeout
@@ -320,8 +316,6 @@ impl Connection {
 			prev_path: None,
 			state,
 			side: connection_side,
-			zero_rtt_enabled: false,
-			zero_rtt_crypto: None,
 			key_phase: false,
 			// A small initial key phase size ensures peers that don't handle key updates correctly
 			// fail sooner rather than later. It's okay for both peers to do this, as the first one
@@ -343,7 +337,6 @@ impl Connection {
 			highest_space: SpaceId::Initial,
 			prev_crypto: None,
 			next_crypto: None,
-			accepted_0rtt: false,
 			permit_idle_reset: true,
 			idle_timeout: match config.max_idle_timeout {
 				None | Some(VarInt(0)) => None,
@@ -396,7 +389,6 @@ impl Connection {
 		if side.is_client() {
 			// Kick off the connection
 			this.write_crypto();
-			this.init_0rtt();
 		}
 		this
 	}
@@ -662,17 +654,7 @@ impl Connection {
 				buf.len()
 			};
 
-			let tag_len = if let Some(crypto) = &self.spaces[space_id].crypto {
-				crypto.packet.local.tag_len()
-			} else if space_id == SpaceId::Data {
-				self.zero_rtt_crypto
-					.as_ref()
-					.expect("sending packets in the application data space requires known 0-RTT or 1-RTT keys")
-					.packet
-					.tag_len()
-			} else {
-				unreachable!("tried to send {:?} packet without keys", space_id)
-			};
+			let tag_len = self.spaces[space_id].crypto.as_ref().unwrap().packet.local.tag_len();
 			if !coalesce || buf_capacity - buf_end < MIN_PACKET_SPACE + tag_len {
 				// We need to send 1 more datagram and extend the buffer for that.
 
@@ -1187,9 +1169,7 @@ impl Connection {
 
 	/// Indicate what types of frames are ready to send for the given space
 	fn space_can_send(&self, space_id: SpaceId, frame_space_1rtt: usize) -> SendableFrames {
-		if self.spaces[space_id].crypto.is_none()
-			&& (space_id != SpaceId::Data || self.zero_rtt_crypto.is_none() || self.side.is_server())
-		{
+		if self.spaces[space_id].crypto.is_none() {
 			// No keys available for this space
 			return SendableFrames::empty();
 		}
@@ -1321,7 +1301,6 @@ impl Connection {
 						.emit_recovery_metrics(self.pto_count, &mut self.path, now, self.orig_rem_cid);
 				}
 				Timer::KeyDiscard => {
-					self.zero_rtt_crypto = None;
 					self.prev_crypto = None;
 				}
 				Timer::PathValidation => {
@@ -1488,18 +1467,6 @@ impl Connection {
 	/// packets from the peer. All drained connections have been closed.
 	pub fn is_drained(&self) -> bool {
 		self.state.is_drained()
-	}
-
-	/// For clients, if the peer accepted the 0-RTT data packets
-	///
-	/// The value is meaningless until after the handshake completes.
-	pub fn accepted_0rtt(&self) -> bool {
-		self.accepted_0rtt
-	}
-
-	/// Whether 0-RTT is/was possible during the handshake
-	pub fn has_0rtt(&self) -> bool {
-		self.zero_rtt_enabled
 	}
 
 	/// Look up whether we're the client or server of this Connection
@@ -1841,18 +1808,15 @@ impl Connection {
 		}
 	}
 
-	fn set_key_discard_timer(&mut self, now: Instant, space: SpaceId) {
-		let start = if self.zero_rtt_crypto.is_some() {
-			now
-		} else {
-			self.prev_crypto
-				.as_ref()
-				.expect("no previous keys")
-				.end_packet
-				.as_ref()
-				.expect("update not acknowledged yet")
-				.1
-		};
+	fn set_key_discard_timer(&mut self, space: SpaceId) {
+		let start = self
+			.prev_crypto
+			.as_ref()
+			.expect("no previous keys")
+			.end_packet
+			.as_ref()
+			.expect("update not acknowledged yet")
+			.1;
 		self.timers.set(Timer::KeyDiscard, start + self.pto(space) * 3);
 	}
 
@@ -2155,7 +2119,6 @@ impl Connection {
 		ecn: Option<EcnCodepoint>,
 		packet: Option<u64>,
 		spin: bool,
-		is_1rtt: bool,
 	) {
 		self.reset_keep_alive(now);
 		self.reset_idle_timeout(now, space_id);
@@ -2173,15 +2136,9 @@ impl Connection {
 		let Some(packet) = packet else {
 			return;
 		};
-		if self.side.is_server() {
-			if self.spaces[SpaceId::Initial].crypto.is_some() && space_id == SpaceId::Handshake {
-				// A server stops sending and processing Initial packets when it receives its first Handshake packet.
-				self.discard_space(now, SpaceId::Initial);
-			}
-			if self.zero_rtt_crypto.is_some() && is_1rtt {
-				// Discard 0-RTT keys soon after receiving a 1-RTT packet
-				self.set_key_discard_timer(now, space_id)
-			}
+		if self.side.is_server() && self.spaces[SpaceId::Initial].crypto.is_some() && space_id == SpaceId::Handshake {
+			// A server stops sending and processing Initial packets when it receives its first Handshake packet.
+			self.discard_space(now, SpaceId::Initial);
 		}
 		let space = &mut self.spaces[space_id];
 		space.pending_acks.insert_one(packet, now);
@@ -2193,7 +2150,7 @@ impl Connection {
 
 		self.config
 			.qlog_sink
-			.emit_packet_received(packet, space_id, !is_1rtt, now, self.orig_rem_cid);
+			.emit_packet_received(packet, space_id, now, self.orig_rem_cid);
 	}
 
 	fn reset_idle_timeout(&mut self, now: Instant, space: SpaceId) {
@@ -2250,7 +2207,7 @@ impl Connection {
 			_ => unreachable!("first packet must be delivered in Handshake state"),
 		}
 
-		self.on_packet_authenticated(now, SpaceId::Initial, ecn, Some(packet_number), false, false);
+		self.on_packet_authenticated(now, SpaceId::Initial, ecn, Some(packet_number), false);
 
 		self.process_decrypted_packet(now, remote, Some(packet_number), packet.into())?;
 		if let Some(data) = remaining {
@@ -2262,39 +2219,6 @@ impl Connection {
 			.emit_recovery_metrics(self.pto_count, &mut self.path, now, self.orig_rem_cid);
 
 		Ok(())
-	}
-
-	fn init_0rtt(&mut self) {
-		let Some((header, packet)) = self.crypto.early_crypto() else {
-			return;
-		};
-		if self.side.is_client() {
-			match self.crypto.transport_parameters() {
-				Ok(params) => {
-					let params = params.expect("crypto layer didn't supply transport parameters with ticket");
-					// Certain values must not be cached
-					let params = TransportParameters {
-						initial_src_cid: None,
-						original_dst_cid: None,
-						preferred_address: None,
-						retry_src_cid: None,
-						stateless_reset_token: None,
-						min_ack_delay: None,
-						ack_delay_exponent: TransportParameters::default().ack_delay_exponent,
-						max_ack_delay: TransportParameters::default().max_ack_delay,
-						..params
-					};
-					self.set_peer_params(params);
-				}
-				Err(e) => {
-					error!("session ticket has malformed transport parameters: {}", e);
-					return;
-				}
-			}
-		}
-		trace!("0-RTT enabled");
-		self.zero_rtt_enabled = true;
-		self.zero_rtt_crypto = Some(ZeroRttCrypto { header, packet });
 	}
 
 	fn read_crypto(
@@ -2312,9 +2236,8 @@ impl Connection {
 			// flight, but we expect Handshake CRYPTO until the handshake is complete.
 			SpaceId::Handshake
 		};
-		// We can't decrypt Handshake packets when highest_space is Initial, CRYPTO frames in 0-RTT
-		// packets are illegal, and we don't process 1-RTT packets until the handshake is
-		// complete. Therefore, we will never see CRYPTO data from a later-than-expected space.
+		// Handshake keys follow Initial keys, and 1-RTT payloads wait for the handshake,
+		// so CRYPTO data cannot arrive from a later-than-expected space.
 		debug_assert!(space <= expected, "received out-of-order CRYPTO data");
 
 		let end = crypto.offset + crypto.data.len() as u64;
@@ -2402,10 +2325,6 @@ impl Connection {
 		self.spaces[space].crypto = Some(crypto);
 		debug_assert!(space as usize > self.highest_space as usize);
 		self.highest_space = space;
-		if space == SpaceId::Data && self.side.is_client() {
-			// Discard 0-RTT keys because 1-RTT keys are available.
-			self.zero_rtt_crypto = None;
-		}
 	}
 
 	fn discard_space(&mut self, now: Instant, space_id: SpaceId) {
@@ -2461,12 +2380,9 @@ impl Connection {
 		ecn: Option<EcnCodepoint>,
 		partial_decode: PartialDecode,
 	) {
-		if let Some(decoded) = packet_crypto::unprotect_header(
-			partial_decode,
-			&self.spaces,
-			self.zero_rtt_crypto.as_ref(),
-			self.peer_params.stateless_reset_token,
-		) {
+		if let Some(decoded) =
+			packet_crypto::unprotect_header(partial_decode, &self.spaces, self.peer_params.stateless_reset_token)
+		{
 			self.handle_packet(now, remote, ecn, decoded.packet, decoded.stateless_reset);
 		}
 	}
@@ -2611,7 +2527,7 @@ impl Connection {
 				Header::Short { spin, .. } => spin,
 				_ => false,
 			};
-			self.on_packet_authenticated(now, packet.header.space(), ecn, number, spin, packet.header.is_1rtt());
+			self.on_packet_authenticated(now, packet.header.space(), ecn, number, spin);
 		}
 		let result = self.process_decrypted_packet(now, remote, number, packet);
 		// Only a protected packet is the peer's word: anyone on the path can send a Retry or a
@@ -2786,14 +2702,6 @@ impl Connection {
 					data: client_hello,
 				});
 
-				// Retransmit all 0-RTT data
-				let zero_rtt = mem::take(&mut self.spaces[SpaceId::Data].sent_packets);
-				for info in zero_rtt.into_values() {
-					self.remove_in_flight(&info);
-					self.spaces[SpaceId::Data].pending |= info.retransmits;
-				}
-				self.streams.retransmit_all_for_0rtt();
-
 				let token_len = packet.payload.len() - 16;
 				let ConnectionSide::Client { token, .. } = &mut self.side else {
 					unreachable!("we already short-circuited if we're server");
@@ -2839,26 +2747,6 @@ impl Connection {
 						)
 					})?;
 
-					if self.has_0rtt() {
-						if !self.crypto.early_data_accepted().unwrap() {
-							debug_assert!(self.side.is_client());
-							debug!("0-RTT rejected");
-							self.accepted_0rtt = false;
-							self.streams.zero_rtt_rejected();
-
-							// Discard already-queued frames
-							self.spaces[SpaceId::Data].pending = Retransmits::default();
-
-							// Discard 0-RTT packets
-							let sent_packets = mem::take(&mut self.spaces[SpaceId::Data].sent_packets);
-							for packet in sent_packets.into_values() {
-								self.remove_in_flight(&packet);
-							}
-						} else {
-							self.accepted_0rtt = true;
-							params.validate_resumption_from(&self.peer_params)?;
-						}
-					}
 					if let Some(token) = params.stateless_reset_token {
 						self.endpoint_events
 							.push_back(EndpointEventInner::ResetToken(self.path.remote, token));
@@ -2910,16 +2798,12 @@ impl Connection {
 					})?;
 					self.handle_peer_params(params)?;
 					self.issue_first_cids(now);
-					self.init_0rtt();
 				}
 				Ok(())
 			}
 			Header::Long {
 				ty: LongType::ZeroRtt, ..
-			} => {
-				self.process_payload(now, remote, number.unwrap(), packet)?;
-				Ok(())
-			}
+			} => Ok(()),
 			Header::VersionNegotiate { .. } => {
 				// RFC 9000 6.2: discard once any other packet was processed
 				if processed_server_packet {
@@ -3033,14 +2917,7 @@ impl Connection {
 			}
 
 			let _guard = span.as_ref().map(|x| x.enter());
-			// RFC 9000 §12.5: CRYPTO frames cannot be sent in 0-RTT packets. Both
-			// CONNECTION_CLOSE types are permitted there, as 0-RTT belongs to the application
-			// data packet number space; see §12.4 Table 3.
-			if packet.header.is_0rtt() && matches!(frame, Frame::Crypto(_)) {
-				return Err(TransportError::PROTOCOL_VIOLATION("illegal frame type in 0-RTT"));
-			}
 			ack_eliciting |= frame.is_ack_eliciting();
-
 			// Check whether this could be a probing packet
 			match frame {
 				Frame::Padding | Frame::PathChallenge(_) | Frame::PathResponse(_) | Frame::NewConnectionId(_) => {}
@@ -3397,13 +3274,12 @@ impl Connection {
 	) -> SentFrames {
 		let mut sent = SentFrames::default();
 		let space = &mut self.spaces[space_id];
-		let is_0rtt = space_id == SpaceId::Data && space.crypto.is_none();
 		space.pending_acks.maybe_ack_non_eliciting();
 
 		let pre_payload_len = buf.len();
 
 		// HANDSHAKE_DONE
-		if !is_0rtt && mem::replace(&mut space.pending.handshake_done, false) {
+		if mem::replace(&mut space.pending.handshake_done, false) {
 			buf.write(frame::FrameType::HANDSHAKE_DONE);
 			sent.retransmits.get_or_create().handshake_done = true;
 			// This is just a u8 counter and the frame is typically just sent once
@@ -3499,7 +3375,7 @@ impl Connection {
 		}
 
 		// CRYPTO
-		while buf.len() + frame::Crypto::SIZE_BOUND < max_size && !is_0rtt {
+		while buf.len() + frame::Crypto::SIZE_BOUND < max_size {
 			let Some(mut frame) = space.pending.crypto.pop_front() else {
 				break;
 			};
@@ -3676,8 +3552,6 @@ impl Connection {
 	) {
 		debug_assert!(!space.pending_acks.ranges().is_empty());
 
-		// 0-RTT packets must never carry acks (which would have to be of handshake packets)
-		debug_assert!(space.crypto.is_some(), "tried to send ACK in 0-RTT");
 		let ecn = if receiving_ecn { Some(&space.ecn_counters) } else { None };
 
 		let delay_micros = space.pending_acks.ack_delay(now).as_micros() as u64;
@@ -3750,7 +3624,6 @@ impl Connection {
 		let result = packet_crypto::decrypt_packet_body(
 			packet,
 			&self.spaces,
-			self.zero_rtt_crypto.as_ref(),
 			self.key_phase,
 			self.prev_crypto.as_ref(),
 			self.next_crypto.as_ref(),
@@ -3764,13 +3637,13 @@ impl Connection {
 			&& let Some(prev) = self.prev_crypto.as_mut()
 		{
 			prev.end_packet = Some((result.number, now));
-			self.set_key_discard_timer(now, packet.header.space());
+			self.set_key_discard_timer(packet.header.space());
 		}
 
 		if result.incoming_key_update {
 			trace!("key update authenticated");
 			self.update_keys(Some((result.number, now)), true);
-			self.set_key_discard_timer(now, packet.header.space());
+			self.set_key_discard_timer(packet.header.space());
 		}
 
 		Ok(Some(result.number))
@@ -3836,7 +3709,6 @@ impl Connection {
 		let decrypted_header = packet_crypto::unprotect_header(
 			first_decode.clone(),
 			&self.spaces,
-			self.zero_rtt_crypto.as_ref(),
 			self.peer_params.stateless_reset_token,
 		)?;
 
@@ -3844,7 +3716,6 @@ impl Connection {
 		packet_crypto::decrypt_packet_body(
 			&mut packet,
 			&self.spaces,
-			self.zero_rtt_crypto.as_ref(),
 			self.key_phase,
 			self.prev_crypto.as_ref(),
 			self.next_crypto.as_ref(),
@@ -3992,14 +3863,11 @@ impl Connection {
 	}
 
 	fn tag_len_1rtt(&self) -> usize {
-		let key = match self.spaces[SpaceId::Data].crypto.as_ref() {
-			Some(crypto) => Some(&*crypto.packet.local),
-			None => self.zero_rtt_crypto.as_ref().map(|x| &*x.packet),
-		};
-		// If neither Data nor 0-RTT keys are available, make a reasonable tag length guess. As of
-		// this writing, all QUIC cipher suites use 16-byte tags. We could return `None` instead,
-		// but that would needlessly prevent sending datagrams during 0-RTT.
-		key.map_or(16, |x| x.tag_len())
+		// All supported cipher suites use 16-byte tags before negotiation chooses one.
+		self.spaces[SpaceId::Data]
+			.crypto
+			.as_ref()
+			.map_or(16, |keys| keys.packet.local.tag_len())
 	}
 
 	/// Mark the path as validated, and enqueue NEW_TOKEN frames to be sent as appropriate
@@ -4306,14 +4174,14 @@ struct EarlyPacket {
 /// necessarily have smaller headers, and initial packets are only ever the first packet in a
 /// datagram (because we coalesce in ascending packet space order and the only reason to split a
 /// packet is when packet space changes).
-const MIN_PACKET_SPACE: usize = MAX_HANDSHAKE_OR_0RTT_HEADER_SIZE + 32;
+const MIN_PACKET_SPACE: usize = MAX_HANDSHAKE_HEADER_SIZE + 32;
 
-/// Largest amount of space that could be occupied by a Handshake or 0-RTT packet's header
+/// Largest amount of space that could be occupied by a Handshake packet's header
 ///
 /// Excludes packet-type-specific fields such as packet number or Initial token
-// https://www.rfc-editor.org/rfc/rfc9000.html#name-0-rtt: flags + version + dcid len + dcid +
+// https://www.rfc-editor.org/rfc/rfc9000.html#name-handshake-packet: flags + version + dcid len + dcid +
 // scid len + scid + length + pn
-const MAX_HANDSHAKE_OR_0RTT_HEADER_SIZE: usize =
+const MAX_HANDSHAKE_HEADER_SIZE: usize =
 	1 + 4 + 1 + MAX_CID_SIZE + 1 + MAX_CID_SIZE + VarInt::from_u32(u16::MAX as u32).size() + 4;
 
 /// Perform key updates this many packets before the AEAD confidentiality limit.
