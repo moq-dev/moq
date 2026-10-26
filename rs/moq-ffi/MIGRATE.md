@@ -13,6 +13,10 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 `MoqBandwidth` is `MoqAllocator`, and `MoqSession::bandwidth()` is `allocator()`, matching `moq_net::bandwidth::Allocator`. `MoqReservation::grant()` is `rate()`, matching `moq_net::bandwidth::Reservation::rate()`. The `bandwidth` option field on audio and video producers keeps its name.
 
+### `MoqClientConfig` gains `tokens`
+
+It defaults to empty in every generated binding; a Rust struct literal adds `tokens: vec![]` or ends with `..Default::default()`.
+
 ### Durations are typed
 
 Every duration is a UniFFI `Duration` instead of an integer microsecond field, and drops its `_us` suffix: each language receives its own duration type (`timedelta`, `TimeInterval`, `java.time.Duration`, `time.Duration`, Dart `Duration`, C++ `std::chrono` nanoseconds).

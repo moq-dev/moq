@@ -145,8 +145,9 @@ for (const version of drafts) {
 		const installed = clock.install();
 		using _installed = { [Symbol.dispose]: () => installed.close() };
 		const fx = fixture(version);
-		const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
-		broadcast.announce();
+		const broadcastPublication = fx.origin.createBroadcast(Path.from("room/live"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
 		const track = broadcast.createTrack("video");
 		const group = track.appendGroup();
 		group.writeFrame({ payload: new Uint8Array([1]) });
@@ -191,8 +192,9 @@ for (const version of drafts) {
 	for (const finished of [true, false]) {
 		test(`an unlisted track's PUBLISH ends ${finished ? "with TRACK_ENDED" : "in error"} (${version})`, async () => {
 			const fx = fixture(version);
-			const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
-			broadcast.announce();
+			const broadcastPublication = fx.origin.createBroadcast(Path.from("room/live"));
+			const broadcast = broadcastPublication.broadcast;
+			broadcastPublication.announce();
 			const track = broadcast.createTrack("video");
 			const listing = await fx.list();
 			await ok(listing, version);
@@ -212,8 +214,9 @@ for (const version of drafts) {
 		const installed = clock.install();
 		using _installed = { [Symbol.dispose]: () => installed.close() };
 		const fx = fixture(version);
-		const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
-		broadcast.announce();
+		const broadcastPublication = fx.origin.createBroadcast(Path.from("room/live"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
 		const track = broadcast.createTrack("video");
 		const listing = await fx.list();
 		await ok(listing, version);
@@ -247,8 +250,9 @@ for (const version of drafts) {
 		});
 		using _held = { [Symbol.dispose]: () => held.mockRestore() };
 		const fx = fixture(version);
-		const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
-		broadcast.announce();
+		const broadcastPublication = fx.origin.createBroadcast(Path.from("room/live"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
 		const track = broadcast.createTrack("video");
 		const listing = await fx.list();
 		await ok(listing, version);
@@ -275,8 +279,9 @@ for (const version of drafts) {
 				const installed = clock.install();
 				using _installed = { [Symbol.dispose]: () => installed.close() };
 				const fx = fixture(version);
-				const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
-				broadcast.announce();
+				const broadcastPublication = fx.origin.createBroadcast(Path.from("room/live"));
+				const broadcast = broadcastPublication.broadcast;
+				broadcastPublication.announce();
 				const video = broadcast.createTrack("video");
 				broadcast.createTrack("audio");
 				const listing = await fx.list();
@@ -313,8 +318,9 @@ for (const version of drafts) {
 
 	test(`track listing rejects overlapping prefixes (${version})`, async () => {
 		const fx = fixture(version);
-		const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
-		broadcast.announce();
+		const broadcastPublication = fx.origin.createBroadcast(Path.from("room/live"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
 		broadcast.createTrack("video");
 		const listing = await fx.list();
 		await ok(listing, version);
@@ -328,8 +334,9 @@ for (const version of drafts) {
 
 	test(`forwarding listings are skipped or refused according to the draft (${version})`, async () => {
 		const fx = fixture(version);
-		const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
-		broadcast.announce();
+		const broadcastPublication = fx.origin.createBroadcast(Path.from("room/live"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
 		broadcast.createTrack("video");
 		const listing = await fx.list("room", true);
 		if (version === Version.DRAFT_18) {
@@ -348,8 +355,9 @@ for (const version of drafts) {
 test("draft-18 refuses SUBSCRIBE to a PUBLISHed track", async () => {
 	const version = Version.DRAFT_18;
 	const fx = fixture(version);
-	const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
-	broadcast.announce();
+	const broadcastPublication = fx.origin.createBroadcast(Path.from("room/live"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	broadcast.createTrack("video");
 	const listing = await fx.list();
 	await ok(listing, version);
@@ -379,8 +387,9 @@ test("a cancelled listing cannot release its replacement's prefix", async () => 
 	const installed = clock.install();
 	using _installed = { [Symbol.dispose]: () => installed.close() };
 	const fx = fixture(version);
-	const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
-	broadcast.announce();
+	const broadcastPublication = fx.origin.createBroadcast(Path.from("room/live"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	broadcast.createTrack("video");
 	const first = await fx.list();
 	await ok(first, version);
@@ -407,8 +416,9 @@ test("grants hide tracks, revoke PUBLISHes and relist when broadened", async () 
 	const fx = fixture(version, { grant });
 	const listing = await fx.list();
 	await ok(listing, version);
-	const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
-	broadcast.announce();
+	const broadcastPublication = fx.origin.createBroadcast(Path.from("room/live"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	broadcast.createTrack("video");
 	let delivered = false;
 	const offered = fx.offered();
@@ -436,8 +446,9 @@ test("PUBLISH carries listing defaults and honors INCLUDE_PROPERTIES", async () 
 	parameters.includeProperties = false;
 	const listing = await fx.list("room", false, parameters);
 	await ok(listing, version);
-	const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
-	broadcast.announce();
+	const broadcastPublication = fx.origin.createBroadcast(Path.from("room/live"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	broadcast.createTrack("later");
 	const { publish } = await fx.offered();
 	expect(publish.properties).toEqual({});
@@ -452,8 +463,9 @@ test("PUBLISH restates an omitted listing priority as 128", async () => {
 	const fx = fixture(version);
 	const listing = await fx.list("room", false, new Parameters());
 	await ok(listing, version);
-	const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
-	broadcast.announce();
+	const broadcastPublication = fx.origin.createBroadcast(Path.from("room/live"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	broadcast.createTrack("later");
 	const { publish } = await fx.offered();
 	expect(publish.parameters?.subscriberPriority).toBe(128);
@@ -479,8 +491,9 @@ test("an update ends only its listing and frees its prefix", async () => {
 test("session shutdown releases listing tasks while the local origin stays open", async () => {
 	const version = Version.DRAFT_22;
 	const fx = fixture(version);
-	const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
-	broadcast.announce();
+	const broadcastPublication = fx.origin.createBroadcast(Path.from("room/live"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	broadcast.createTrack("video");
 	const listing = await fx.list();
 	await ok(listing, version);
@@ -493,8 +506,9 @@ test("session shutdown releases listing tasks while the local origin stays open"
 for (const version of [Version.DRAFT_22]) {
 	test(`a paused filter applies on resume, but an active pause/filter update is refused atomically (${version})`, async () => {
 		const fx = fixture(version);
-		const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
-		broadcast.announce();
+		const broadcastPublication = fx.origin.createBroadcast(Path.from("room/live"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
 		const track = broadcast.createTrack("video");
 		for (let i = 0; i < 2; i++) {
 			const group = track.appendGroup();
@@ -543,8 +557,9 @@ const CATALOGS = [4, 64, 512];
 
 /** A broadcast under `room` listing `catalog` tracks. */
 function catalogOf(fx: ReturnType<typeof fixture>, catalog: number) {
-	const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
-	broadcast.announce();
+	const broadcastPublication = fx.origin.createBroadcast(Path.from("room/live"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	for (let i = 0; i < catalog; i++) broadcast.createTrack(`t${i}`);
 }
 

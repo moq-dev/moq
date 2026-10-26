@@ -330,8 +330,9 @@ test("a resumed fork shares an on-demand track request", async () => {
 test("a lagging same-epoch replica resumes from one publisher's bytes exactly once", async () => {
 	const { clock, installed } = manual();
 	const publisher = new Producer();
-	const original = publisher.createBroadcast(path);
-	original.announce({ epoch: EPOCH });
+	const originalPublication = publisher.createBroadcast(path);
+	const original = originalPublication.broadcast;
+	originalPublication.announce({ epoch: EPOCH });
 	const source = original.createTrack("seq");
 	const origin = new Producer();
 

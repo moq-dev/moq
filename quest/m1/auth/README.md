@@ -144,9 +144,6 @@ because `main` assigned 0x3A to NOT_FETCHABLE first.
 
 ## Required
 
-- [Token in band](/quest/m1/auth/token-in-band.md) - extra credentials ride
-  AUTH streams: a session starts on the token its SETUP or URL carried and its
-  AUTH streams add the rest
 - [Binding auth polish](/quest/m1/auth/bindings-polish.md) - OBS reconnects with the presented token, Swift grant sequences
 
 ## Related

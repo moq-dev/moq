@@ -948,7 +948,7 @@ async function livePlayback(burst: number) {
 		// Serve the same rendition from another path, as a `broadcast` override does.
 		move(path: string) {
 			media.peek().close();
-			producer = new Moq.Origin.Producer().createBroadcast(Moq.Path.from(path));
+			producer = new Moq.Origin.Producer().createBroadcast(Moq.Path.from(path)).broadcast;
 			track = producer.createTrack("audio", { timescale: Moq.Time.Timescale.MILLI });
 			sequence = 0;
 			media.set(producer.consume());

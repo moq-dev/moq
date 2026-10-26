@@ -31,6 +31,11 @@ pub struct MoqClientConfig {
 	/// Empty offers every supported version; [`moq_versions`] lists them.
 	#[uniffi(default = [])]
 	pub versions: Vec<String>,
+	/// Credentials every dial presents. The first is the connection credential, unless the URL
+	/// carries its own `?jwt=`; each other one widens the session's grant. Replace them through
+	/// [`MoqClient::tokens`].
+	#[uniffi(default = [])]
+	pub tokens: Vec<String>,
 	/// How long one connect may take, dial and handshake together. 0 waits forever.
 	#[uniffi(default = None)]
 	pub timeout: Option<Duration>,
@@ -310,6 +315,20 @@ pub(crate) fn parse_versions(versions: &[String]) -> Result<Vec<moq_net::Version
 		.collect()
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn parse_tokens(tokens: Vec<String>) -> Result<Vec<moq_tokio::connect::Token>, MoqError> {
+	tokens
+		.into_iter()
+		.map(|token| {
+			token
+				.try_into()
+				.map_err(|err: moq_tokio::connect::EmptyToken| MoqError::Config {
+					reason: err.to_string(),
+				})
+		})
+		.collect()
+}
+
 /// Native QUIC/WebTransport client state: the configured endpoint and the wired origins.
 #[cfg(not(target_arch = "wasm32"))]
 struct Client {
@@ -332,6 +351,7 @@ impl Client {
 			connect.bind = Some(bind);
 		}
 		connect.version = parse_versions(&config.versions)?;
+		connect.tokens = parse_tokens(config.tokens)?;
 		connect.timeout = config.timeout.map(Into::into);
 		connect.race = config.race.map(Into::into);
 		connect.resolution_delay = config.resolution_delay.map(Into::into);
@@ -574,6 +594,12 @@ mod tests {
 		};
 		assert!(matches!(MoqClient::new(missing), Err(MoqError::Config { .. })));
 
+		let empty = MoqClientConfig {
+			tokens: vec![String::new()],
+			..Default::default()
+		};
+		assert!(matches!(MoqClient::new(empty), Err(MoqError::Config { .. })));
+
 		for prefix in ["", " app/1", "app/1 ", "app/1  lib/2", "app/1\tlib/2", "app/1\n"] {
 			let implementation = MoqClientConfig {
 				implementation: Some(prefix.into()),
@@ -587,11 +613,19 @@ mod tests {
 	}
 
 	#[test]
+	fn setting_tokens_refuses_an_empty_token() {
+		let tokens = MoqClient::new(MoqClientConfig::default()).unwrap().tokens();
+		tokens.set(vec!["a".into(), "b".into()]).unwrap();
+		assert!(matches!(tokens.set(vec![String::new()]), Err(MoqError::Config { .. })));
+	}
+
+	#[test]
 	fn new_accepts_the_defaults_and_known_versions() {
 		MoqClient::new(MoqClientConfig::default()).unwrap();
 		MoqClient::new(MoqClientConfig {
 			bind: Some("127.0.0.1:0".into()),
 			versions: vec!["moq-lite-03".into()],
+			tokens: vec!["credential".into()],
 			once: true,
 			backoff: MoqBackoff {
 				timeout: Some(Duration::ZERO),
@@ -625,6 +659,8 @@ impl Client {
 		let MoqClientConfig {
 			bind,
 			versions,
+			// Presenting tokens needs the native client's dial and AUTH handling.
+			tokens,
 			timeout,
 			race,
 			resolution_delay,
@@ -644,6 +680,7 @@ impl Client {
 			..tls.clone()
 		};
 		if bind.is_some()
+			|| !tokens.is_empty()
 			|| timeout.is_some()
 			|| race.is_some()
 			|| resolution_delay.is_some()
@@ -745,6 +782,10 @@ fn decode_hex(hex: &str) -> Result<Vec<u8>, MoqError> {
 #[derive(uniffi::Object)]
 pub struct MoqClient {
 	task: Task<Client>,
+	/// Held outside the task, which a connect holds for as long as it dials, so a refresh
+	/// can land mid-dial.
+	#[cfg(not(target_arch = "wasm32"))]
+	tokens: moq_tokio::connect::Tokens,
 }
 
 #[uniffi::export]
@@ -754,8 +795,18 @@ impl MoqClient {
 	pub fn new(config: MoqClientConfig) -> Result<Arc<Self>, MoqError> {
 		let client = Client::new(config)?;
 		Ok(Arc::new(Self {
+			#[cfg(not(target_arch = "wasm32"))]
+			tokens: client.client.tokens(),
 			task: Task::new(client),
 		}))
+	}
+
+	/// The credentials every dial presents, to replace while running.
+	pub fn tokens(&self) -> Arc<MoqTokens> {
+		Arc::new(MoqTokens {
+			#[cfg(not(target_arch = "wasm32"))]
+			inner: self.tokens.clone(),
+		})
 	}
 
 	/// Start a connection without waiting for its first dial to succeed.
@@ -781,6 +832,35 @@ impl MoqClient {
 	/// handle is, so this client can't dial again.
 	pub fn cancel(&self) {
 		self.task.cancel();
+	}
+}
+
+/// The credentials a [`MoqClient`] presents, replaceable while it runs.
+#[derive(uniffi::Object)]
+pub struct MoqTokens {
+	#[cfg(not(target_arch = "wasm32"))]
+	inner: moq_tokio::connect::Tokens,
+}
+
+#[uniffi::export]
+impl MoqTokens {
+	/// Replace the credentials every dial presents, such as before the current ones expire.
+	///
+	/// The next dial presents them, and a live session that supports in-band AUTH presents
+	/// them at once, withdrawing each replaced token once its replacements are answered,
+	/// even when one is refused. After an authorization refusal the client redials only if
+	/// they changed. A browser client has no tokens to replace, so this fails `Unsupported`.
+	pub fn set(&self, tokens: Vec<String>) -> Result<(), MoqError> {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			self.inner.set(parse_tokens(tokens)?);
+			Ok(())
+		}
+		#[cfg(target_arch = "wasm32")]
+		{
+			let _ = tokens;
+			Err(MoqError::Unsupported)
+		}
 	}
 }
 
