@@ -34,5 +34,4 @@ Public API: none. Wire: none.
 ## Required
 
 - [Windows builds moq-relay tests](/quest/m0/nightly/windows-relay-expect.md) - an unfulfilled lint expectation stops failing the Windows build
-- [OBS audio-candidate test](/quest/m0/nightly/obs-audio-candidate.md) - the failed audio candidate check passes under TSan and load, fixed at its reproduced cause
 - [Feature shapes per crate](/quest/m0/nightly/hls-poll-closed-gate.md) - moq-hls `Broadcaster::poll_closed` is gated on `server`, and the gate checks each crate's feature shapes in isolation
