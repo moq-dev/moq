@@ -6,7 +6,10 @@ builds the Moxygen revision and matching Meta dependencies pinned in
 `conformance_test.sh` through this checkout's relay. This is separate from the
 published-package smoke matrix.
 
-Sections 1-7 run on both shared drafts, 16 and 18, through one relay. Each cell
+Sections 1-7 run on both shared drafts, 16 and 18, through one relay, and on
+draft 18 through a two-relay cluster joined by native lite-07. Draft 16 has no
+cluster cell: its TRACK\_STATUS\_OK has no Track Properties block, so the
+cluster's origin cannot learn the track's priority from it. Each cell
 runs 29 upstream SUBSCRIBE cases. A direct-origin control runs the same cases
 once per draft, separating suite or pin failures from relay behavior. FETCH is
 skipped using upstream's `SKIP_FETCH`; section 8 uses PUBLISH and is outside the
@@ -53,16 +56,32 @@ Every other check is upstream's: forwarded object IDs, properties, payloads,
 END\_OF\_GROUP status objects and header bits, and FIRST\_OBJECT. Any other
 priority, a second END\_OF\_TRACK, or one anywhere else still fails.
 
-Measured over six consecutive runs:
+Measured over three consecutive runs, after six earlier runs of the
+direct-origin and one-relay cells:
 
-| Draft | Direct origin | One relay |
-| --- | --- | --- |
-| 16 | 29 pass | 29 pass |
-| 18 | 29 pass | 29 pass |
+| Draft | Direct origin | One relay | Two relays |
+| --- | --- | --- | --- |
+| 16 | 29 pass | 29 pass | not run |
+| 18 | 29 pass | 29 pass | 29 pass |
 
-A two-relay cell is not run yet. The edge needs metadata from TRACK\_STATUS
-before subscribing, and the pinned MoQTestPublisher inherits NOT\_SUPPORTED for
-that request, so every case fails before media. The relay preserves that
-refusal, rather than widening query-only demand into SUBSCRIBE. The
-[passthrough quest](../../quest/m1/ietf-extension/README.md) tracks adding the
-cell back once a pinned publisher answers it.
+## Local Moxygen patches
+
+A cluster's edge asks the origin about a track with TRACK\_STATUS before
+subscribing.
+[`nix/moxygen-track-status.patch`](../../nix/moxygen-track-status.patch) makes
+the pinned MoQTestPublisher answer it with what its SUBSCRIBE\_OK carries,
+instead of NOT\_SUPPORTED, and stops Moxygen writing a GROUP\_ORDER parameter
+in TRACK\_STATUS\_OK, which draft 18 forbids there. Drop it at the next pin
+bump once
+[facebookexperimental/moxygen#264](https://github.com/facebookexperimental/moxygen/pull/264)
+is in the pinned revision.
+
+## Known verifier flake
+
+One early run of the direct draft-18 control failed upstream's "Large scale:
+Many groups and objects" with `Group Mismatch: Actual=1 Expected=0`, without
+any relay. It has not recurred since. The verifier keeps one cursor per
+subscription and expects groups in order, although each group arrives on its
+own stream; its own comment calls that a spurious failure. If it recurs in
+nightly, fix the verifier in the profile patch with per-group cursors rather
+than retrying.
