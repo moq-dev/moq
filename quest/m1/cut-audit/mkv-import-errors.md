@@ -17,8 +17,9 @@ Found by the 2026-10-24 pre-cut audit at 151a529670, source-inferred.
   avcC/hvcC, or a missing AAC CodecPrivate drops the video track and the
   catalog goes out audio-only. Every validation fix has had to extend the
   allowlist by hand ([moq-dev/moq#6532](https://github.com/moq-dev/moq/pull/6532)).
-  Return `Ok` only for an unsupported role or codec, decided where the error
-  is raised, and propagate everything else; delete the allowlist.
+  Return `Ok` only for an unsupported role, decided where the error is
+  raised, and propagate everything else, an unsupported codec included;
+  delete the allowlist.
 - A duplicate `TrackNumber` (`:452`) replaces the earlier track. Refuse it.
 - `cluster_timestamp as i64 + block.timestamp` (`:533`) can overflow (a
   wrap in release builds, misreported as `NegativeBlockTimestamp`), and
@@ -28,12 +29,9 @@ Found by the 2026-10-24 pre-cut audit at 151a529670, source-inferred.
   `(r.read(16)? + 1) as u16`, so a 65536 dimension becomes 0 in the catalog.
   Use `u32`, like the catalog field.
 
-Decision for the maintainer: MKV and FLV (`flv/import.rs` about lines 215,
-302, 359, 431) drop unsupported codecs by design, which contradicts
-`rs/moq-mux/AGENTS.md` ("Reject an unsupported codec ... with a typed
-Error"). Recommendation: keep dropping unsupported codecs in container
-imports (a file with a subtitle or an exotic audio track should still
-import its video) and ask the maintainer to scope that rule to codec
-importers. Leave it under `## Decisions needed` if unanswered.
+Decided 2026-10-25 (maintainer): reject an unsupported codec everywhere, as
+`rs/moq-mux/AGENTS.md` says. MKV and FLV (`flv/import.rs` about lines 215,
+302, 359, 431) stop dropping such tracks and fail the import with a typed
+Error.
 
 Public API: none. Wire: none.

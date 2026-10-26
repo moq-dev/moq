@@ -84,7 +84,8 @@ feature permutations and release-profile builds. Expensive and optional checks
 run nightly on `main` and are required on `release`. Faster runners come last,
 chosen from measurements of the optimized pipeline. Each CI pass costs twice
 per merged PR today (PR and queue), at 13 minutes median and 26 minutes p90 of
-wall time per PR run.
+wall time per PR run. Superseded in part 2026-10-24: the PR gate checks
+feature shapes for the crates a branch changes; Nightly keeps the full matrix.
 
 Decided 2026-10-25 (maintainer): across moq's many CI and release builds
 (targets, features, FFI languages, Nix packages), each crate configuration

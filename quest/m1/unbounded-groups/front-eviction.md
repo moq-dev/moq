@@ -36,13 +36,21 @@ See the [epic](/quest/m1/unbounded-groups/README.md) for the decisions.
   that is protected or being read.
 - A refill writes a run strictly below the base, so it never races
   the tail writer. Coalesce concurrent readers on one hole into a
-  single request, as `PendingFetch` does. Fold today's `Slot.head` tail copy
+  single request, as `FillState` does. Fold today's `Slot.head` tail copy
   into this.
 - A refill asks for exactly the hole: from the reader's missing frame to the
   first frame still cached, over a frame-precise range end. Today's fills
   always run to the group's end (`end_frame: None`), which on a live group
   would duplicate the live edge. If more is evicted while the refill runs,
   the reader hits the next hole and refills again, one RTT per hole.
+- Decided 2026-10-25 (maintainer): the application API stays whole-group,
+  but the transport may start a group at a frame offset as an optimization,
+  and a front-eviction refill is one. The lite draft's rule that a
+  subscriber "MUST send 0 unless it already holds every frame below" forbids
+  this refill, since the relay evicted the frames below the hole, so
+  [transport frame offsets](/quest/m1/transport-frame-offsets.md) amends it
+  first. A relay asked for frame k of a group it holds nothing of widens to
+  frame 0 upstream.
 - Refills are unpaced (decided 2026-10-24, maintainer). Pacing a refill on
   its fastest reader, and shared "trains" of readers that merge into the
   run ahead, were rejected as not worth their complexity. `FillState`
@@ -99,5 +107,8 @@ See the [epic](/quest/m1/unbounded-groups/README.md) for the decisions.
 
 Public API: removes `MAX_GROUP_FRAMES`, and `MAX_CACHE_BYTES` stops capping
 groups. A reader that used to see `GroupTooLarge` now refills or sees
-`Evicted`. Wire: none; it uses the frame-precise ranges.
+`Evicted`. Wire: none beyond the amended frame offset rule.
 
+## Required
+
+- [Transport frame offsets](/quest/m1/transport-frame-offsets.md) - the lite draft lets a refill start at the missing frame without holding the frames below it

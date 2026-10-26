@@ -29,14 +29,21 @@ The design is the [E2EE epic](/quest/m2/e2ee/README.md)'s Dynamic names section.
 - A handler that drops an idle track must be able to serve the name again
   when it is requested later, as with moq-net. moq-net already keeps one
   sequence namespace per name for the broadcast's life and refuses a reused
-  sequence (`replacement_refuses_reused_sequences`). Recommended: the claim
-  keeps the name's high-water marks across every broadcast of the
-  generation, and a re-served name resumes above them instead of being
-  refused. That keeps every `(group, frame)` identity unique without
-  releasing the claim. Say in the PR whether `create_track` adopts the same
-  rule, which today refuses a re-created name.
+  sequence (`replacement_refuses_reused_sequences`). Decided 2026-10-25
+  (maintainer): resume always. The claim keeps the name's high-water marks
+  across every broadcast of the generation, and a re-served or re-created
+  name resumes above them, `create_track` included. This replaces the
+  2026-10-17 refusal, under which `create_track` returns `Error::Reuse` for
+  a name the generation already claimed (`generation.rs` `claim`). Reason:
+  resuming keeps every `(group, frame)` identity unique without releasing the
+  claim, so nonces never repeat, and an on-demand handler can drop an idle
+  track and serve it again. An explicit sequence at or below a high-water
+  mark is still refused. Test a dropped and re-served name and a re-created
+  track resuming above their marks.
 - Listing (maintainer, 2026-10-24): the wrapper's handler offers moq-net's
-  `lister`, taking semantic names and listing their physical names. An
+  `lister`, taking semantic names and listing their physical names.
+  `broadcast::Dynamic::lister` and `Lister` are crate-private since #6470,
+  so this quest exports them as their first consumer. An
   e2ee consumer's listing decrypts them back
   ([moq-e2ee implements the traits](/quest/m2/net-wrap/e2ee.md)), so a
   listed name round-trips.
@@ -47,8 +54,10 @@ The design is the [E2EE epic](/quest/m2/e2ee/README.md)'s Dynamic names section.
   `generation::Producer::open` in Rust (drop its `allow(dead_code)` once
   the handler calls it) and `@internal` `Generation.Producer.open` in JS.
 
-Public API: a request handler on `moq_e2ee::broadcast::Producer`, and
-`track::Request::name()` returns the semantic name. Wire: none.
+Public API: a request handler on `moq_e2ee::broadcast::Producer`,
+`track::Request::name()` returns the semantic name, `create_track` resumes a
+claimed name instead of returning `Error::Reuse`, and moq-net exports the
+broadcast lister. Wire: none.
 
 ## Related
 
