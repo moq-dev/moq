@@ -33,6 +33,15 @@ spike assumed no consumer; teleoperation uplinks are one):
   in `moq-congestion`. The spike's moq-shaper uplink
   presets decide it; the report states the shaper's timing jitter as the
   noise floor of the delay signal.
+- Native probing is required (decided 2026-10-25, maintainer). Every
+  candidate implements `moq_congestion::Controller::probes` and reports
+  `probe_inflight`, so moq-quic's native probing
+  ([moq-dev/moq#6635](https://github.com/moq-dev/moq/pull/6635)) still
+  raises its estimate, and the bake-off measures probing alongside queuing
+  delay. Reason: the [native rung disable](/quest/m1/simulcast-rung-disable.md)
+  only stops a rung on a session with a sender, so a `Realtime` that cannot
+  probe would silently leave moq-cli, OBS, and FFI simulcast publishers with
+  no rung disable or recovery. A candidate that cannot probe does not ship.
 - Naming: add `Realtime` to `moq_tokio::quic::CongestionControl` (`realtime`
   on the CLI and in TOML), which is `non_exhaustive`, so it is additive.
   `Delay` keeps meaning BBR3; reword its doc line to say model-based, since

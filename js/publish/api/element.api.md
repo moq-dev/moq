@@ -192,11 +192,16 @@ class Device<Kind extends "audio" | "video"> {
     constructor(kind: Kind, props?: DeviceProps);
     capture(deviceId: string | undefined): Dispose;
     close(): void;
+    readonly in: Readonlys<DeviceInput>;
     readonly kind: Kind;
     readonly out: Readonlys<DeviceOutput>;
     preferred: Signal<string | undefined>;
     requestPermission(): void;
 }
+
+type DeviceInput = {
+    enabled: Getter<boolean>;
+};
 
 type DeviceOutput = {
     available: Signal<MediaDeviceInfo[] | undefined>;
@@ -206,7 +211,7 @@ type DeviceOutput = {
     permission: Signal<boolean>;
 };
 
-interface DeviceProps {
+interface DeviceProps extends Inputs<DeviceInput> {
     preferred?: string | Signal<string | undefined>;
 }
 
@@ -507,6 +512,7 @@ declare namespace Source_3 {
         CameraInput,
         CameraProps,
         Camera,
+        DeviceInput,
         DeviceProps,
         Device,
         FileInput,

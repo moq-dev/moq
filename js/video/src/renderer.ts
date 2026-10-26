@@ -204,7 +204,13 @@ export class Renderer {
 
 	#runRender(effect: Effect): void {
 		const surface = effect.get(this.#surface);
-		if (!surface) return;
+		if (!surface) {
+			this.#out.frame.update((current) => {
+				current?.close();
+				return undefined;
+			});
+			return;
+		}
 
 		const frame = effect.get(this.in.frame);
 		const presentation = effect.get(this.in.presentation);

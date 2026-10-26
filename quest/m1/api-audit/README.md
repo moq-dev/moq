@@ -35,8 +35,9 @@ Rules every child follows:
   counts only when that quest is in m1.
 - Inherited debt is fixed here only when it is cheap or sits on a surface
   this release breaks anyway. Otherwise it joins the later quest that
-  reshapes it (the ordered track reader joins
-  [foreign poll](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-poll-protocol.md)).
+  reshapes it (the ordered track reader joins rust2's
+  [exporter](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-export.md),
+  which absorbed its foreign poll quest on 2026-10-25).
 - Each child lists its public API and wire impact in its PR, and its Impact
   bullet says how to migrate.
 
@@ -75,11 +76,11 @@ Rejected in planning:
 
 - [Two broadcast resolutions](/quest/m1/api-audit/resolve.md) - Rust, JS, and the bindings resolve a broadcast with `request(path, epoch)` or `follow(path, epoch)`, and every racy two-step caller is gone
 - [Binding publications](/quest/m1/api-audit/binding-publication.md) - moq-ffi, the C ABI, and every wrapper hand out a publication handle that announces, replacing the private adapters
-- [Bindings read gaps and ends](/quest/m1/api-audit/decode-read-bindings.md) - moq-ffi and every wrapper surface `Gap` and `End` instead of discarding them
 - [Encoded consumers read gaps and ends](/quest/m1/api-audit/encoded-read-bindings.md) - moq-ffi, moq-c, and every wrapper read encoded media with the tagged-record shape the decoded consumers use
 - [One lifecycle vocabulary](/quest/m1/api-audit/lifecycle.md) - finish, abort, closed, and close mean one thing on every handle, and Rust and JS observers fire alike
 - [moq-net names say one thing](/quest/m1/api-audit/net-names.md) - demand says `wanted`, colliding stats and transport names are renamed, and Rust and JS info lookups mirror
 - [Request handlers are named requests](/quest/m1/api-audit/requests.md) - `dynamic()` and `Dynamic` become `requests()` and `Requests` at every layer
+- [Demand is wanted, everywhere](/quest/m1/api-audit/wanted.md) - every `used`/`unused` pair becomes `wanted()` and `wanted_changed()`, and unused ones go
 - [One meaning for Credential](/quest/m1/api-audit/dial-credential.md) - the internal dial type gets its own name in JS and moq-tokio, and the `Presented` alias goes
 
 ## Related
