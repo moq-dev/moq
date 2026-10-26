@@ -17,7 +17,7 @@ from moq_ffi import (
     MoqTrackRequest,
 )
 
-from ._records import _opt_from_us, _subscription, _track_info
+from ._records import _subscription, _track_info
 from ._stream import _Stream
 from .types import (
     AnnounceRoute,
@@ -226,7 +226,7 @@ class Fill:
     @property
     def max_delay(self) -> timedelta | None:
         """The most tolerant age budget among its readers, ``None`` for the publisher's max age alone."""
-        return _opt_from_us(self._inner.max_delay_us())
+        return self._inner.max_delay()
 
     @property
     def order(self) -> MoqOrder:
@@ -359,6 +359,8 @@ class BroadcastProducer:
     def close(self) -> None:
         """End the broadcast for good: retract it and serve no new tracks.
 
-        Tracks already subscribed carry on to their own end. Closing again is a no-op.
+        Tracks still open on it end with ``Unroutable``, which readers take as the publisher
+        leaving, and their later calls raise ``moq.Error.Closed``; finish a track first to end it
+        cleanly. Closing again is a no-op.
         """
         self._inner.close()

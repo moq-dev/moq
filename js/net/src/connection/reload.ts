@@ -20,6 +20,11 @@ import type { Established } from "./established.ts";
 import { DISCOVERY_REMOVED } from "./forward.ts";
 import { DEFAULT_HANDOVER, type Drain, dialed, type GoawayProps, handover, pinnedTransport, target } from "./goaway.ts";
 import type { Probe, Stats } from "./stats.ts";
+import { heldOf } from "./tokens.ts";
+
+function sameTokens(a: readonly string[], b: readonly string[]): boolean {
+	return a.length === b.length && a.every((token, i) => token === b[i]);
+}
 
 /**
  * Exponential backoff settings for the reconnect loop.
@@ -30,27 +35,38 @@ import type { Probe, Stats } from "./stats.ts";
  * rejection or a refused GOAWAY redirect stops the current URL sooner. A new URL or a
  * disable/re-enable starts another sequence.
  *
- * A GOAWAY off a session that outlived {@link ReloadDelay.initial} migrates at once, unless it
+ * A GOAWAY off a session that outlived {@link ReloadDelay.healthy} migrates at once, unless it
  * sends the connection back to an endpoint that already redirected it elsewhere and the
- * session lived less than {@link ReloadDelay.max}. Two peers redirecting to each other thus
+ * session lived less than {@link ReloadDelay.max} (or {@link ReloadDelay.healthy} when
+ * uncapped). Two peers redirecting to each other thus
  * wait out this backoff and count against the timeout.
  */
 export type ReloadDelay = {
-	/** The delay before reconnecting (default: 1000ms). */
+	/** The delay before reconnecting (default: 1000ms; zero retries at once). */
 	initial?: Milli;
 
-	/** The multiplier for the delay (default: 2). */
+	/** The multiplier for the delay after each failure (default: 2; below 1 keeps it constant). */
 	multiplier?: number;
 
-	/** The maximum delay (default: 5000ms). */
+	/** The maximum delay (default: 5000ms; zero leaves it uncapped). A cap below `initial` caps the first delay too. */
 	max?: Milli;
 
 	/**
+	 * How long a session must stay up to count as healthy (default: 1000ms; must be positive).
+	 *
+	 * A healthy session's end resets the delay and the timeout. One that ends sooner is a
+	 * failed attempt, so a peer that accepts and then drops every session still escalates the
+	 * delay and exhausts the timeout.
+	 */
+	healthy?: Milli;
+
+	/**
 	 * Maximum total time to spend retrying the current URL before giving up
-	 * (default: 0, unlimited). Resets after each successful connection outside a redirect loop,
-	 * a URL change, or a disable/re-enable. It decides whether another attempt starts and never
-	 * cuts one that is running, so giving up can take up to one attempt longer than the window;
-	 * {@link ConnectProps.timeout} bounds each attempt.
+	 * (default: 0, unlimited). Counts from the first dial, and restarts after a healthy session
+	 * outside a redirect loop, a URL change, or a disable/re-enable. It decides whether another
+	 * attempt starts and never cuts one that is running, so giving up can take up to one attempt
+	 * longer than the window; {@link ConnectProps.timeout} bounds each attempt. A peer that
+	 * restarts, draining each session with a GOAWAY naming no URI, restarts it too.
 	 */
 	timeout?: Milli;
 };
@@ -61,11 +77,17 @@ export type ReloadDelay = {
  * {@link ConnectProps.transport} is excluded: a supplied session is good for exactly one
  * connection, so the reconnect loop has nothing to reuse once that session drops. Call
  * {@link connect} directly when you have a session to hand over. Every attempt advertises
- * the default {@link ConnectProps.implementation}.
+ * the default {@link ConnectProps.implementation} and {@link ConnectProps.extensions}.
  *
  * @internal
  */
-export type ReloadProps = Omit<ConnectProps, "url" | "signal" | "transport" | "implementation"> & {
+export type ReloadProps = Omit<
+	ConnectProps,
+	"url" | "signal" | "transport" | "implementation" | "extensions" | "tokens"
+> & {
+	/** See {@link ConnectProps.tokens}; pass a `Signal` to replace them before they expire. */
+	tokens?: readonly string[] | Signal<readonly string[]>;
+
 	/** A reload owns the abort signal for each connection attempt. */
 	signal?: never;
 
@@ -98,8 +120,47 @@ const DEFAULT_DELAY: Required<ReloadDelay> = {
 	initial: Milli(1000),
 	multiplier: 2,
 	max: Milli(5000),
+	healthy: Milli(1000),
 	timeout: Milli(0),
 };
+
+/**
+ * {@link ReloadDelay} resolved against its defaults, with the same meaning as moq-tokio's
+ * backoff. Throws a RangeError for a value that has none.
+ *
+ * Field by field rather than by spread: a caller building `{ initial: maybeInitial }` from an
+ * optional value passes an explicit undefined, which a spread would take as the answer.
+ */
+function pacing(delay: ReloadDelay) {
+	const initial = Milli(delay.initial ?? DEFAULT_DELAY.initial);
+	const max = Milli(delay.max ?? DEFAULT_DELAY.max);
+	const cap = max > 0 ? max : undefined;
+	const multiplier = delay.multiplier ?? DEFAULT_DELAY.multiplier;
+	if (!Number.isFinite(multiplier)) throw new RangeError(`invalid delay.multiplier: ${multiplier}`);
+	// Zero would count every session as healthy, resetting the retry window forever under a
+	// peer that drops each one on sight.
+	const healthy = Milli(delay.healthy ?? DEFAULT_DELAY.healthy);
+	if (healthy === 0) throw new RangeError("delay.healthy must be positive");
+	const timeout = Milli(delay.timeout ?? DEFAULT_DELAY.timeout);
+	// A multiplier below 1 means no growth, not a delay that shrinks to nothing.
+	const growth = Math.max(multiplier, 1);
+
+	return {
+		initial: cap === undefined ? initial : Milli(Math.min(initial, cap)),
+		healthy,
+		timeout,
+		// How long a session must last to start a new run of redirects. One that outlived the
+		// capped delay already redials no faster than the backoff would allow. Uncapped, the
+		// healthy bar is the only rate the config names.
+		settled: cap ?? healthy,
+		/** The delay after one that waited `delay`. */
+		next(delay: Milli): Milli {
+			const next = Math.min(delay * growth, cap ?? Number.POSITIVE_INFINITY);
+			// Saturates, as Rust's Duration does, rather than overflowing the wait in nanoseconds.
+			return Number.isFinite(next * 1_000_000) ? Milli(next) : delay;
+		},
+	};
+}
 
 /** How often the send-rate estimate is sampled from the live transport. */
 const BANDWIDTH_POLL = Nano.fromMilli(Milli(100));
@@ -119,6 +180,14 @@ export class Reload {
 
 	/** Whether reconnecting is active. */
 	enabled: Signal<boolean>;
+
+	/**
+	 * Credentials every dial presents; see {@link ConnectProps.tokens}. Replacing them reaches
+	 * the next dial and, on a live session with AUTH, presents the new tokens at once,
+	 * withdrawing the replaced ones once every new one has its answer. A session refused as
+	 * unauthorized redials only when these changed since its dial.
+	 */
+	tokens: Signal<readonly string[]>;
 
 	/** Current connection status. */
 	status = new Signal<ReloadStatus>("disconnected");
@@ -259,6 +328,11 @@ export class Reload {
 	// loop is disabled.
 	#givenUpHref: string | undefined;
 
+	// The tokens the latest dial presented, so a refusal can tell whether they changed since.
+	#dialedTokens: readonly string[] = [];
+	// Whether the sequence stopped because the peer refused those tokens.
+	#refused = false;
+
 	// Increased by 1 each time to trigger a reload.
 	#tick = new Signal(0);
 
@@ -274,7 +348,10 @@ export class Reload {
 		if (props && "discovery" in props) throw new TypeError(DISCOVERY_REMOVED);
 		this.url = Signal.from(props?.url);
 		this.enabled = Signal.from(props?.enabled ?? true);
+		this.tokens = Signal.from(props?.tokens ?? []);
 		this.delay = props?.delay ?? {};
+		// Validated here, like the timeout, rather than by every retry.
+		pacing(this.delay);
 		this.goaway = props?.goaway ?? {};
 		this.redirect = this.#redirect;
 		this.versions = normalizeVersions(props);
@@ -354,6 +431,23 @@ export class Reload {
 			effect.interval(() => void sample(), BANDWIDTH_POLL);
 		});
 
+		// The live session holds the current tokens on AUTH; a dial picks them up itself.
+		this.#signals.run((effect) => {
+			const tokens = effect.get(this.tokens);
+			const connection = effect.get(this.established);
+			if (connection) heldOf(connection)?.update(tokens);
+		});
+
+		// New credentials redial a URL that stopped on an auth refusal of the old ones.
+		this.#signals.run((effect) => {
+			const tokens = effect.get(this.tokens);
+			if (!this.#refused || this.#givenUpHref === undefined || sameTokens(tokens, this.#dialedTokens)) return;
+			this.#refused = false;
+			this.#givenUpHref = undefined;
+			this.#error.set(undefined);
+			this.#tick.update((tick) => tick + 1);
+		});
+
 		this.#url = this.#signals.computed((effect) => effect.get(this.url)?.href);
 		// Create a reactive root so cleanup is easier.
 		this.#signals.run(this.#connect.bind(this));
@@ -429,12 +523,17 @@ export class Reload {
 				// straight away, with no backoff.
 				for (;;) {
 					const dialing = this.#redirect.peek() ?? url;
+					// The retry window counts from the first dial of a run, so a dial that hangs
+					// spends it too.
+					this.#deadline ??= this.#window(now());
 
 					this.#dialing = true;
+					this.#dialedTokens = this.tokens.peek();
 					let connection: Established;
 					try {
 						connection = await connect({
 							url: dialing,
+							tokens: this.#dialedTokens,
 							// A redirect names the relay; a fallback URL pinned for the old one does not follow.
 							websocket: this.#redirect.peek() ? { ...this.websocket, url: undefined } : this.websocket,
 							versions: this.versions,
@@ -485,7 +584,7 @@ export class Reload {
 					if (!this.#migrate(connection, at, ended)) return;
 					const after = this.#redirect.peek();
 
-					// Two peers that each outlive the initial delay can still bounce us between
+					// Two peers that each hold a session past the healthy bar can still bounce us between
 					// them forever. Returning to an endpoint that already sent us elsewhere in this
 					// run of migrations escalates the backoff, which never resets mid-loop, so the
 					// retry window still applies. A one-way rolling restart never revisits one, and
@@ -493,8 +592,9 @@ export class Reload {
 					// A session that outlived the capped delay already redials no faster than the
 					// backoff would allow, so it starts a new run: rolling restarts days apart
 					// never add up to a loop.
+					const { settled, healthy } = this.#pacing();
 					const lived = Instant.durationSince(now(), connected);
-					if (lived >= Nano.fromMilli(this.delay?.max ?? DEFAULT_DELAY.max)) this.#redirects.reset();
+					if (lived >= Nano.fromMilli(settled)) this.#redirects.reset();
 					// Only a redirect this GOAWAY named is a move. An empty or ignored one reconnects
 					// in place, even when that reruns the race a WebSocket fallback won.
 					const from = endpoint(at);
@@ -504,11 +604,13 @@ export class Reload {
 						return;
 					}
 
-					// A session that outlived the initial delay was healthy, so its handover is not a
-					// failure. One redirected almost at once still migrates, but through the backoff,
-					// so two peers bouncing us between them escalate to the capped delay.
-					if (lived < Nano.fromMilli(this.#initial())) {
-						this.#retry(effect, connected, new Error("peer redirected immediately"));
+					// A healthy session's handover is not a failure. One redirected sooner still
+					// migrates, but through the backoff, so two peers bouncing us between them
+					// escalate to the capped delay. An empty URI is a peer restarting, which drains
+					// each new session until it goes; every one serves, so that is no failure either.
+					if (lived < Nano.fromMilli(healthy)) {
+						if (ended.uri === "") this.#restart(effect);
+						else this.#retry(effect, connected, new Error("peer redirected immediately"));
 						return;
 					}
 					this.#delay = undefined;
@@ -599,8 +701,41 @@ export class Reload {
 		if (draining) this.#end(draining);
 	}
 
-	#initial(): Milli {
-		return this.delay?.initial ?? DEFAULT_DELAY.initial;
+	// Resolved per use rather than at construction, so an edit to `delay` (including one that
+	// drops a field back to its default) applies to the next retry.
+	#pacing() {
+		return pacing(this.delay ?? {});
+	}
+
+	// When a retry window starting `at` expires.
+	#window(at: Instant): number {
+		const { timeout } = this.#pacing();
+		return timeout > 0 ? Instant.add(at, Nano.fromMilli(timeout)) : Number.POSITIVE_INFINITY;
+	}
+
+	/**
+	 * Wait out the backoff after a restarting peer drained a session short of the healthy bar.
+	 * The delay escalates, so the redials cannot hammer it, but the wait never spends the retry
+	 * window: the window restarts once the wait is over.
+	 */
+	#restart(effect: Effect): void {
+		if (this.established.peek() === undefined) this.status.set("disconnected");
+		const wait = this.#backoff();
+		const tick = this.#tick.peek() + 1;
+		effect.timer(() => {
+			this.#deadline = undefined;
+			this.#tick.update((prev) => Math.max(prev, tick));
+		}, Nano(wait));
+	}
+
+	// The jittered wait before the next attempt, escalating the delay for the one after.
+	// Equal jitter, so a fleet of tabs knocked offline together doesn't reconnect on the same tick.
+	#backoff(): number {
+		const pacing = this.#pacing();
+		this.#delay ??= pacing.initial;
+		const wait = Nano.fromMilli(this.#delay) * (0.5 + Math.random() / 2);
+		this.#delay = pacing.next(this.#delay);
+		return wait;
 	}
 
 	/**
@@ -609,26 +744,17 @@ export class Reload {
 	 * `cause` the error that killed it, if it died with one.
 	 */
 	#retry(effect: Effect, connected: Instant | undefined, cause?: unknown): void {
-		// Resolved per sequence rather than at construction, so an edit to `delay` (including
-		// one that drops a field back to its default) applies to the next retry. Field by
-		// field rather than by spread: a caller building `{ initial: maybeInitial }` from an
-		// optional value passes an explicit undefined, which a spread would take as the
-		// answer, turning the backoff into NaN or the window into forever.
-		const delay = this.delay ?? {};
-		const initial = this.#initial();
-		const multiplier = delay.multiplier ?? DEFAULT_DELAY.multiplier;
-		const max = delay.max ?? DEFAULT_DELAY.max;
-		const timeout = delay.timeout ?? DEFAULT_DELAY.timeout;
-
 		// Report disconnected during the backoff rather than when the retry reruns the
 		// effect, unless a drained predecessor still serves until it retires.
 		if (this.established.peek() === undefined) this.status.set("disconnected");
 
-		// A session that outlived the initial delay was healthy, so clear the backoff and
-		// start a fresh retry window: a one-off drop should reconnect promptly. Anything
-		// shorter is a peer that accepts and immediately severs, which has to keep
-		// escalating or we hammer it forever at the initial delay.
-		if (connected !== undefined && Instant.durationSince(now(), connected) >= Nano.fromMilli(initial)) {
+		// A healthy session's end clears the backoff and starts a fresh retry window: a one-off
+		// drop should reconnect promptly. Anything shorter is a peer that accepts and soon
+		// severs, which has to keep escalating or we hammer it forever at the initial delay.
+		if (
+			connected !== undefined &&
+			Instant.durationSince(now(), connected) >= Nano.fromMilli(this.#pacing().healthy)
+		) {
 			this.#delay = undefined;
 			this.#deadline = undefined;
 		}
@@ -643,38 +769,47 @@ export class Reload {
 		// Only a session close says that. The stream registry gives 2 to DELIVERY_TIMEOUT,
 		// so a stream reset during the SETUP exchange would otherwise suppress reconnect
 		// for good.
+		//
+		// Tokens replaced since that dial are new credentials, so those earn another dial.
 		if (
 			cause instanceof SessionError &&
 			(cause.code === SessionCode.Unauthorized ||
 				cause.code === SessionCode.MalformedAuthToken ||
-				cause.code === SessionCode.Expired)
+				cause.code === SessionCode.Expired) &&
+			sameTokens(this.tokens.peek(), this.#dialedTokens)
 		) {
 			console.warn("session rejected as unauthorized, not retrying");
 			this.#giveUp(cause);
+			this.#refused = true;
 			return;
 		}
 
 		const at = now();
-		this.#delay ??= initial;
-		this.#deadline ??= timeout > 0 ? Instant.add(at, Nano.fromMilli(timeout)) : Number.POSITIVE_INFINITY;
+		// A healthy session's end starts the window here.
+		this.#deadline ??= this.#window(at);
+		const wait = this.#backoff();
 
-		if (at >= this.#deadline) {
-			console.warn("reconnect timed out");
+		// No attempt starts once the window has passed: a wait that reaches the deadline gives up
+		// there instead of dialing.
+		const left = this.#deadline - at;
+		if (wait >= left) {
 			// A graceful close has no error, so report the timeout itself.
-			this.#giveUp(cause === undefined ? new Error("reconnect timed out") : error(cause));
+			const failure = cause === undefined ? new Error("reconnect timed out") : error(cause);
+			const giveUp = () => {
+				console.warn("reconnect timed out");
+				this.#giveUp(failure);
+			};
+			if (left > 0) effect.timer(giveUp, Nano(left));
+			else giveUp();
 			return;
 		}
-
-		// Equal jitter, so a fleet of tabs knocked offline together doesn't reconnect on the same
-		// tick, and never past the deadline the retry window promised.
-		const wait = Math.min(Nano.fromMilli(this.#delay) * (0.5 + Math.random() / 2), this.#deadline - at);
-		this.#delay = Milli(Math.min(this.#delay * multiplier, max));
 
 		const tick = this.#tick.peek() + 1;
 		effect.timer(() => this.#tick.update((prev) => Math.max(prev, tick)), Nano(wait));
 	}
 
 	#giveUp(cause: Error): void {
+		this.#refused = false;
 		this.#error.set(cause);
 		this.#givenUpHref = this.#sequenceHref;
 		this.#resetSequence();

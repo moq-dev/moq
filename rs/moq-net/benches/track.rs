@@ -75,6 +75,11 @@
 //! for the groups outside its ranges, so a widening scans only the span it newly covers,
 //! and a scan of the cache or the audience shows up as a slope.
 //!
+//! `track_budget_widening` widens one reader's budget past the cached groups it skipped as
+//! stale, each between two it handed out, swept over the readers beside it, the groups
+//! cached, and the runs it skipped: a widening costs the runs it re-offers, so a scan of the
+//! cache or the audience shows up as a slope.
+//!
 //! `track_datagram_pressure` appends datagrams across tracks sharing a bounded pool, each
 //! holding a backlog for a reader that never reads, with small plain payloads and with
 //! compressed zeros that inflate far past their wire size: the pool bills both forms, so the
@@ -87,8 +92,8 @@
 //!
 //! `track_fill` has readers miss the same runs below where the feed starts, each asked of the
 //! track's handler as a fill, swept over the readers and the runs: readers share each
-//! fill, so asking, dropping, and settling must cost each reader the same per run, and a
-//! cost that grows with the audience or the runs beyond that shows up as a slope.
+//! fill, so asking, updating, dropping, and settling must cost each reader the same per
+//! run, and a cost that grows with the audience or the runs beyond that shows up as a slope.
 //!
 //! `track_range_filling` has one reader fill disjoint ranges below where the feed starts,
 //! swept over how many ranges and how many groups each spans, the filling counterpart of
@@ -1573,6 +1578,97 @@ fn bench_range_widening(c: &mut Criterion) {
 	bench.finish();
 }
 
+/// One reader holding `runs` cached groups it skipped as stale, each between two it handed
+/// out, in a cache of `cached` groups, beside `readers` idle readers; see
+/// [`bench_budget_widening`].
+struct BudgetWidening {
+	_broadcast: broadcast::Producer,
+	_track: track::Producer,
+	reader: track::Subscriber,
+	_beside: Vec<track::Subscriber>,
+	runs: u64,
+}
+
+impl BudgetWidening {
+	/// A budget shorter than the 100ms between groups, and longer than wall-clock jitter.
+	const NARROW: Duration = Duration::from_millis(50);
+
+	fn new(readers: usize, cached: u64, runs: u64) -> Self {
+		let broadcast = broadcast::Info::default().produce();
+		let track = broadcast.create_track("bench", timed()).unwrap();
+		let narrow = track::Subscription::default().with_max_delay(Self::NARROW);
+		let mut reader = track.subscribe(narrow.clone());
+		let beside = (0..readers).map(|_| track.subscribe(narrow.clone())).collect();
+		let waiter = kio::Waiter::noop();
+		let mut write = |sequences: std::ops::Range<u64>| {
+			for sequence in sequences {
+				let mut group = track.create_group(group::Info { sequence }).unwrap();
+				group
+					.write_frame(
+						Timestamp::from_millis(100 * sequence).unwrap(),
+						Bytes::from_static(b"x"),
+					)
+					.unwrap();
+				group.finish().unwrap();
+			}
+			while let Poll::Ready(Ok(Some(group))) = reader.poll_recv_group(&waiter) {
+				black_box(group);
+			}
+		};
+		write(0..1);
+		// Read three at a time, the first is stale: its successor starts a full budget behind
+		// the third. The reader takes the other two, so each skip is a run of its own.
+		for run in 0..runs {
+			write(3 * run + 1..3 * run + 4);
+		}
+		for sequence in 3 * runs + 1..cached {
+			write(sequence..sequence + 1);
+		}
+		Self {
+			_broadcast: broadcast,
+			_track: track,
+			reader,
+			_beside: beside,
+			runs,
+		}
+	}
+
+	fn widen(&mut self) {
+		let wide = track::Subscription::default().with_max_delay(AGED_BUDGET);
+		self.reader.update(wide).unwrap();
+		let waiter = kio::Waiter::noop();
+		let mut offered = 0;
+		while let Poll::Ready(Ok(Some(group))) = self.reader.poll_recv_group(&waiter) {
+			black_box(group);
+			offered += 1;
+		}
+		assert_eq!(offered, self.runs);
+	}
+}
+
+/// One reader widening its budget past the cached groups it skipped as stale, swept over the
+/// readers beside it, the groups cached, and the runs it skipped. Each re-offered group must
+/// cost the same, so a scan of the cache or the audience shows up as a slope.
+fn bench_budget_widening(c: &mut Criterion) {
+	let mut group = c.benchmark_group("track_budget_widening");
+	group.sample_size(10);
+	for readers in [1usize, 64] {
+		for cached in WIDENING_CACHED {
+			for runs in [1u64, 16, 256].into_iter().filter(|runs| 4 * runs <= cached) {
+				group.throughput(Throughput::Elements(runs));
+				group.bench_function(BenchmarkId::new(format!("{readers}r/{cached}c"), runs), |b| {
+					b.iter_batched_ref(
+						|| BudgetWidening::new(readers, cached, runs),
+						BudgetWidening::widen,
+						BatchSize::PerIteration,
+					);
+				});
+			}
+		}
+	}
+	group.finish();
+}
+
 /// Readers whose range ends at a time no group reaches yet, as groups land behind a missing
 /// sequence; see [`bench_time_end`].
 struct TimeEnd {
@@ -1690,8 +1786,9 @@ impl Fills {
 		}
 	}
 
-	/// Every reader reads what is cached and asks for its misses, the handler drops each
-	/// fill they share, and every reader settles the drops.
+	/// Every reader reads what is cached and asks for its misses, then raises its priority,
+	/// which reaches every fill it waits on. The handler drops each fill they share, and
+	/// every reader settles the drops.
 	fn run(&mut self) {
 		let waiter = kio::Waiter::noop();
 		for reader in &mut self.readers {
@@ -1699,8 +1796,13 @@ impl Fills {
 				black_box(group);
 			}
 		}
+		for reader in &mut self.readers {
+			reader.update(reader.subscription().with_priority(1)).unwrap();
+			assert!(reader.poll_recv_group(&waiter).is_pending());
+		}
 		let mut fills = 0;
 		while let Poll::Ready(Ok(fill)) = self.dynamic.poll_requested_fill(&waiter) {
+			assert_eq!(fill.priority(), 1, "the update reached the fill");
 			fill.drop_groups(fill.start().group..fill.end());
 			fills += 1;
 		}
@@ -1818,6 +1920,7 @@ fn bench_range_filling(c: &mut Criterion) {
 criterion_group!(
 	benches,
 	bench_range_widening,
+	bench_budget_widening,
 	bench_fanout,
 	bench_fanout_frame,
 	bench_fetch_expiry,

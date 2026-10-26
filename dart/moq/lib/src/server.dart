@@ -2,11 +2,12 @@ import 'package:moq_ffi/moq_ffi.dart';
 
 import 'aliases.dart';
 import 'stream.dart';
+import 'version.dart';
 
 /// Everything [Server.listen] can be told.
 ///
 /// A value the native side cannot use fails [Server.listen] with
-/// `MoqException.Config`.
+/// `ConfigMoqException`.
 final class ListenOptions {
   /// Local socket address to listen on, e.g. `127.0.0.1:4443` or `[::]:443`.
   final String bind;
@@ -95,6 +96,7 @@ final class Server {
           maxStreams: options.maxStreams,
           keylog: options.keylog,
         ),
+        implementation: implementation,
         publish: publishOrigin,
         consume: options.consume ?? shared,
       ),

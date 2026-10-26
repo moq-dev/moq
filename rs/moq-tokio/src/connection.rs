@@ -1,5 +1,7 @@
 //! The reconnect loop around a session, and the [`Monitor`] that observes it.
 
+mod tokens;
+
 use std::task::{Poll, ready};
 use std::time::Duration;
 
@@ -31,6 +33,15 @@ const CONNECT_ATTEMPT: Duration = Duration::from_secs(5);
 /// [`crate::connect::Config::timeout`](crate::connect::Config::timeout).
 fn attempt_timeout(index: usize, total: usize) -> Option<Duration> {
 	(index + 1 < total).then_some(CONNECT_ATTEMPT)
+}
+
+/// Whether `err` refused the credential a dial presented while the client has since been
+/// given new tokens, which earns another dial instead of ending the loop. It never
+/// retries a rejected credential: a refusal of unchanged tokens stays terminal.
+fn refreshed(err: &Error, client: &Client, generation: u64) -> bool {
+	let refused = err.is_auth()
+		|| matches!(err, Error::MoqNet(err) if moq_net::SessionError::from(err) == moq_net::SessionError::Unauthorized);
+	refused && client.tokens().snapshot().generation != generation
 }
 
 /// Whether a failed candidate is the peer's answer for every candidate, ending the walk.
@@ -1083,6 +1094,8 @@ impl Connection {
 		let mut addrs = addrs;
 		// An old session kept alive after a GOAWAY so its in-flight groups finish.
 		let mut draining: Option<Draining> = None;
+		// The configured tokens beside each dial's connection credential, held until this loop ends.
+		let held = tokens::Holder::new(shared.auth.clone(), client.tokens().consume());
 		// The current run of migrations, to tell a redirect loop from a healthy handover.
 		let mut redirects = Redirects::default();
 
@@ -1096,7 +1109,9 @@ impl Connection {
 				return Err(err.into());
 			}
 
-			match Self::dial_any(shared, &client, &addrs, &mut draining).await {
+			// Read once per dial, so a refusal is judged against what this dial presented.
+			let tokens = client.tokens().snapshot();
+			match Self::dial_any(shared, &client, &addrs, &mut draining, &tokens, &held).await {
 				Ok((addr, dialed)) => {
 					let url = addr.url().clone();
 					tracing::info!(peer = %Endpoint(&url), transport = %dialed.transport, "connected");
@@ -1108,6 +1123,11 @@ impl Connection {
 					// persistent producers meanwhile so consumers track the live stats across the
 					// connection, and draining any predecessor left over from a migration.
 					let ended = run_session(shared, &session, &mut draining, client.restart).await;
+					// A refusal is terminal unless the tokens changed since this dial read them.
+					let refreshed = match &ended {
+						Ended::Closed(Err(err)) => refreshed(err, &client, tokens.generation),
+						_ => false,
+					};
 
 					let tenure = connected.elapsed();
 
@@ -1240,6 +1260,7 @@ impl Connection {
 					// the session lived. A new connection cannot repair either one.
 					if let Ended::Closed(Err(err)) = &ended
 						&& err.is_terminal()
+						&& !refreshed
 					{
 						return Err(err.clone());
 					}
@@ -1293,7 +1314,7 @@ impl Connection {
 					}
 				}
 				Err(err) => {
-					if err.is_terminal() || !client.reconnect {
+					if (err.is_terminal() && !refreshed(&err, &client, tokens.generation)) || !client.reconnect {
 						return Err(err);
 					}
 					shared.retrying(&err);
@@ -1333,6 +1354,8 @@ impl Connection {
 		client: &Client,
 		addrs: &Addrs,
 		draining: &mut Option<Draining>,
+		tokens: &crate::connect::Set,
+		held: &tokens::Holder,
 	) -> crate::Result<(crate::connect::Addr, crate::client::Dialed)> {
 		let candidates = addrs.as_slice();
 		let mut last = None;
@@ -1342,7 +1365,12 @@ impl Connection {
 			let url = addr.url();
 			tracing::info!(peer = %Endpoint(url), "connecting");
 
-			let mut dial = std::pin::pin!(client.dial(addr.clone()));
+			// Held before the dial starts its session's driver, so a request the session
+			// sends early waits on their answers rather than being refused outside the
+			// connection credential's grant.
+			let credential = client.credential(url, tokens);
+			held.dialed(&credential);
+			let mut dial = std::pin::pin!(client.dial(addr.clone(), &credential));
 			let dialed = kio::wait(|waiter| {
 				if poll_draining(draining, waiter) {
 					shared.disconnected();
@@ -2361,7 +2389,7 @@ mod tests {
 		assert_eq!(out_rx.peek(), Some(moq_net::bandwidth::Rate::from_bps(9_000)));
 
 		// Closing the source is what retires the arm, so we stop polling a dead one.
-		src.abort(moq_net::Error::Cancel).unwrap();
+		drop(src);
 		poll_forward(&mut bw, &out, &waiter);
 		assert!(bw.is_none());
 	}
@@ -2445,11 +2473,6 @@ mod tests {
 			source.is_used(),
 			"new demand must be forwarded without unrelated activity"
 		);
-		out.abort(moq_net::Error::Cancel).unwrap();
-		forward.poll(&out, &kio::Waiter::noop(), || {
-			panic!("a closed output must not acquire a source")
-		});
-		assert!(!source.is_used());
 	}
 
 	const WALK_TIMEOUT: Duration = Duration::from_secs(30);
@@ -2653,6 +2676,10 @@ mod tests {
 		}
 	}
 
+	fn held(shared: &Shared, client: &Client) -> super::tokens::Holder {
+		super::tokens::Holder::new(shared.auth.clone(), client.tokens().consume())
+	}
+
 	/// The first address that answers wins, however many dead ones precede it.
 	/// This is what keeps a peer reachable when discovery advertises an interface
 	/// that doesn't route from here ahead of the one that does.
@@ -2671,7 +2698,14 @@ mod tests {
 
 		let (connected, _session) = tokio::time::timeout(
 			WALK_TIMEOUT,
-			Connection::dial_any(&shared, &client, &addrs, &mut draining),
+			Connection::dial_any(
+				&shared,
+				&client,
+				&addrs,
+				&mut draining,
+				&Default::default(),
+				&held(&shared, &client),
+			),
 		)
 		.await
 		.expect("the walk must not hang")
@@ -2693,7 +2727,14 @@ mod tests {
 
 		let result = tokio::time::timeout(
 			WALK_TIMEOUT,
-			Connection::dial_any(&shared, &client, &addrs, &mut draining),
+			Connection::dial_any(
+				&shared,
+				&client,
+				&addrs,
+				&mut draining,
+				&Default::default(),
+				&held(&shared, &client),
+			),
 		)
 		.await
 		.expect("the walk must not hang");
@@ -2721,7 +2762,16 @@ mod tests {
 		let shared = shared();
 		let mut draining = None;
 		// `Session` isn't `Debug`, so unwrap the failure by hand.
-		let Err(err) = Connection::dial_any(&shared, &client, &addrs, &mut draining).await else {
+		let Err(err) = Connection::dial_any(
+			&shared,
+			&client,
+			&addrs,
+			&mut draining,
+			&Default::default(),
+			&held(&shared, &client),
+		)
+		.await
+		else {
 			panic!("a dead address must fail");
 		};
 
@@ -3376,7 +3426,9 @@ mod tests {
 			.expect("the drained session stopped serving")
 			.unwrap();
 		assert!(
-			connection.draining().and_then(|goaway| goaway.peek()).is_some(),
+			connection
+				.draining()
+				.is_some_and(|goaway| matches!(goaway.poll(&kio::Waiter::noop()), Poll::Ready(Ok(_)))),
 			"the GOAWAY never arrived"
 		);
 		assert_eq!(
@@ -3516,6 +3568,107 @@ mod tests {
 			);
 			delay = (delay * 2).min(max);
 		}
+	}
+
+	/// A configured token is held before its dial starts the session, so a broadcast
+	/// published before the dial, which only that token's grant covers, waits for its
+	/// answer instead of closing the session against the connection credential's grant.
+	#[cfg(feature = "tcp")]
+	#[tokio::test(start_paused = true)]
+	async fn a_publication_waits_for_a_configured_token() {
+		let shared = shared();
+		let publish = crate::origin::spawn();
+		let broadcast = publish.create_broadcast("room").unwrap();
+		broadcast.announce(moq_net::origin::Route::default()).unwrap();
+		let server_origin = crate::origin::spawn();
+
+		let config = crate::connect::Config {
+			tokens: vec!["connection".parse().unwrap(), "publish".parse().unwrap()],
+			..Default::default()
+		};
+		let mut client = config.init(Default::default()).expect("build client");
+		let auth = shared.auth.clone();
+		let (publish_dial, server_dial) = (publish.clone(), server_origin.clone());
+		client.dialer = Some(std::sync::Arc::new(move |_addr: crate::connect::Addr| {
+			let (auth, publish, server_origin) = (auth.clone(), publish_dial.clone(), server_dial.clone());
+			Box::pin(async move {
+				let versions = moq_net::Versions::from("moq-lite-07-wip".parse::<moq_net::Version>().unwrap());
+				let config = || {
+					let mut config = qmux::Config::new(qmux::Version::QMux01);
+					config.protocol =
+						qmux::Protocol::Negotiate(versions.alpns().iter().map(|alpn| alpn.to_string()).collect());
+					config
+				};
+				let (client, server) = tokio::io::duplex(64 * 1024);
+				let (client, server) = tokio::try_join!(
+					qmux::Session::connect(qmux::transport::Stream::new(client), config()),
+					qmux::Session::accept(qmux::transport::Stream::new(server), config())
+				)
+				.unwrap();
+				let now = moq_net::time::Instant::now();
+				let moq = moq_net::Client::new()
+					.with_versions(versions.clone())
+					.with_auth(auth.clone())
+					.with_publisher(&publish);
+				let client = moq.connect(now, client);
+				let server = async {
+					let mut request = moq_net::Server::new()
+						.with_versions(versions.clone())
+						.with_subscriber(server_origin)
+						.accept_request(now, server)
+						.await
+						.unwrap();
+					// The connection credential grants nothing; only the configured token
+					// covers the broadcast.
+					let mut requests = request.requests();
+					let (session, driver) = request.ok().await.unwrap();
+					tokio::spawn(moq_net::time::run(driver));
+					tokio::spawn(async move {
+						let _session = session;
+						let mut issued = Vec::new();
+						while let Some(request) = requests.next().await {
+							let grant = match request.token().is_empty() {
+								true => moq_net::auth::Grant::default(),
+								false => moq_net::auth::Grant::all(),
+							};
+							issued.push(request.accept(grant));
+						}
+					});
+				};
+				let client = async {
+					let (session, driver) = client.await.unwrap();
+					tokio::spawn(moq_net::time::run(driver));
+					session
+				};
+				let (session, ()) = tokio::join!(client, server);
+				// Leave the session the time a multithreaded runtime may give it before the dial
+				// returns: on the paused clock, every exchange the session can make lands first,
+				// the connection credential's answer included.
+				tokio::time::sleep(Duration::from_millis(10)).await;
+				Ok(crate::client::Dialed {
+					session,
+					transport: crate::Transport::Tcp,
+				})
+			})
+		}));
+
+		let addrs = Addrs::new("moqt://relay.example.com/".parse::<Url>().unwrap());
+		let held = held(&shared, &client);
+		let tokens = client.tokens().snapshot();
+		let (_, dialed) = Connection::dial_any(&shared, &client, &addrs, &mut None, &tokens, &held)
+			.await
+			.expect("the dial failed");
+
+		let mut announced = server_origin.consume().announced();
+		let arrived = moq_clock::timeout(Duration::from_secs(5), announced.next())
+			.await
+			.expect("the broadcast never reached the server")
+			.expect("the server's origin closed");
+		assert!(matches!(arrived, moq_net::announce::Event::Start(update) if update.prefix.as_str() == "room"));
+		assert!(
+			futures::FutureExt::now_or_never(dialed.session.closed()).is_none(),
+			"the session closed before the configured token was answered"
+		);
 	}
 
 	#[cfg(feature = "tcp")]

@@ -67,10 +67,9 @@ The cut:
   names that rejection, not only the cap.
 
 Decided 2026-10-20 (maintainer): [Drop set](/quest/m1/drop-set.md) joins
-Required, because it adds `Max Age` to lite-07's SUBSCRIBE_DROP. Only
-[Token in band](/quest/m1/auth/token-in-band.md) gates the cut from the auth
-line, because it is that line's lite-07 wire work; the rest is API work that
-does not block the rename.
+Required, because it adds `Max Age` to lite-07's SUBSCRIBE_DROP. Nothing
+else from the auth line gates the cut: its lite-07 wire work, the SETUP Token
+parameter, has landed, and the rest is API work that does not block the rename.
 
 The archive line's TRACKS request (a per-broadcast track listing that
 replaced SUBSCRIBE_ALL) landed in [#6158](https://github.com/moq-dev/moq/pull/6158)
@@ -99,7 +98,6 @@ timestamp bound in [#6168](https://github.com/moq-dev/moq/pull/6168).
 
 ## Required
 
-- [Token in band](/quest/m1/auth/token-in-band.md) - lite-07 carries the Auth Stream and UNAUTHORIZED (0x3B)
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - lite-07 carries the route layer: ROUTE per origin node and path-less ANNOUNCE, with the hop list gone
 - [Drop set](/quest/m1/drop-set.md) - lite-07's SUBSCRIBE_DROP carries `Max Age`, so a widening re-offers groups reported dropped
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - SUBSCRIBE carries ranges and an order and lite FETCH is gone, in Rust and JS

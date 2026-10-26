@@ -58,6 +58,17 @@ impl Producer {
 	pub fn finish(&mut self) -> Result<()> {
 		self.inner.lock().unwrap().finish()
 	}
+
+	/// Abort the track with the given error, which consumers see in place of any further value.
+	///
+	/// Consumes the handle, since nothing can be published afterwards. Clones sharing the track see
+	/// it closed: their next [`update`](Self::update) fails.
+	pub fn abort(self, err: moq_net::Error) -> Result<()> {
+		// Through a clone, since aborting consumes a handle and the state is shared. Idempotent: a
+		// track that is already closed keeps its first reason.
+		let _ = self.inner.lock().unwrap().track.clone().abort(err);
+		Ok(())
+	}
 }
 
 /// Shared publishing state behind [`Producer`]'s `Arc<Mutex>`.

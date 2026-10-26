@@ -47,14 +47,25 @@ A TS import or export adds sections of its own, which
 cumulative and omitted at zero, and a gauge is omitted until it is measured.
 
 `mpegts` holds `streams`, one row per elementary stream keyed by its PID in
-decimal, and the stream-wide counters. A row has `track` (the track suffix),
+decimal (plus a `.si` row for an SI PID that dropped sections), and the
+stream-wide counters. A row has `track` (the track suffix),
 `class` (`audio`, `video`, or `data`; an unknown class reads as `data`),
 `units` (access units delivered), and `quiet`, a gauge: milliseconds of
 program clock since its last access unit. Its losses are `resyncs`, bytes
 `discarded` scanning for audio sync, `unconfirmed` frames, `damaged` units,
 `unplaced` units the program clock could not place, the times the stream was
 `refused`, and its shares of `continuityCountError`, `transportError`, and
-`ptsError`.
+`ptsError`. A TS-scrambled packet on a carried stream counts as `refused`.
+
+Every PID but the null PID either takes a route or is counted. A listed stream
+the import cannot carry, such as `0x86` without a SCTE-35 registration, gets a
+row with an empty `track` and one `refused`. Once every program's PMT is in, or
+has been missing for 0.5 s of program clock, a PID that no PAT, PMT, or
+captured SI table claims, such as the CAT, conditional access, or ATSC PSIP,
+gets a `data` row with an empty `track` and `refused` counting its packets,
+with one warning when it starts. An import of one `--program` of a
+multi-program stream cannot tell another program's PIDs from these, so it
+counts none of them.
 
 The stream-wide counters count ETSI TR 101 290 checks at that standard's
 fixed limits:

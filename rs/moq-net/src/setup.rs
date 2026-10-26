@@ -79,13 +79,14 @@ pub(crate) fn implementation(value: &str) -> Option<String> {
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Extensions {
-	/// The MoQ Auth extension: tokens presented and granted on their own stream (draft-17+).
+	/// The MoQ Auth extension: tokens presented and granted on their own stream
+	/// (moq-transport draft-17+ only).
 	pub auth: bool,
 	/// The MoQ Solicit extension: the peer answers our SUBSCRIBE_NAMESPACE rather than
-	/// announcing unasked.
+	/// announcing unasked (moq-transport only).
 	pub solicit: bool,
 	/// The MoQ Epoch extension: announcements and requests carry the publisher's
-	/// [`Epoch`](crate::Epoch), as moq-lite 07 does (draft-17+).
+	/// [`Epoch`](crate::Epoch), as moq-lite 07 does (moq-transport draft-17+ only).
 	pub epoch: bool,
 	/// The MoQ IETF extension, off by default: a moq-lite 07 hop between relays carries the
 	/// moq-transport object state a relay preserves, such as Object IDs and properties.
@@ -103,10 +104,11 @@ impl Default for Extensions {
 	}
 }
 
-/// A credential a moq-transport peer presented in its SETUP's `AUTHORIZATION TOKEN` option.
+/// A connection credential presented in SETUP: moq-transport's `AUTHORIZATION TOKEN`
+/// option, or moq-lite-07's Token parameter.
 ///
 /// The transport never reads the bytes; verifying them is the application's job.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Token {
 	/// The wire Token Type, naming how [`value`](Self::value) is encoded.
 	pub kind: u64,
@@ -117,8 +119,13 @@ pub struct Token {
 impl Token {
 	/// Token Type 0: a format the endpoints agreed on out of band, such as a JWT.
 	pub const OUT_OF_BAND: u64 = 0x0;
-	/// Token Type 1: a Common Access Token (draft-ietf-moq-c4m).
-	pub const CAT: u64 = 0x1;
+}
+
+// SETUP and handshakes are logged with `Debug`, so the credential shows only its type and length.
+impl std::fmt::Debug for Token {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "Token(kind={}, <{} bytes>)", self.kind, self.value.len())
+	}
 }
 
 /// Draft-17+ unified SETUP message, with the same encoding for both client and server.

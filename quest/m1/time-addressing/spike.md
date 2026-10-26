@@ -80,9 +80,10 @@ a producer would need per-track memory of its last number.
   proceeds in parallel; the cut reworks its `Absolute(group)` ends and
   sequence-range SUBSCRIBE_DROP onto times. `Relative(n)` can stay, since it
   counts groups rather than naming them.
-- **[Name reuse](/quest/m1/name-reuse.md)** lands as planned. The cut removes
-  its sequence half, leaving a re-created track to keep its PTS moving
-  forward.
+- **Name reuse** landed in
+  [moq-dev/moq#6780](https://github.com/moq-dev/moq/pull/6780). The cut
+  removes its sequence half, leaving a re-created track to keep its PTS
+  moving forward.
 
 The prototype covers the model, the lite-07 codec, and the legacy mapping in
 Rust and JS. Every current role of the sequence needs a replacement or a

@@ -75,7 +75,9 @@ func (b *BroadcastProducer) Consume() (*BroadcastConsumer, error) {
 }
 
 // Close ends the broadcast for good: it retracts and serves no new tracks.
-// Tracks already subscribed carry on to their own end. Closing again is a no-op.
+// Tracks still open on it end with Unroutable, which readers take as the
+// publisher leaving, and their later calls fail with ErrClosed; finish a track
+// first to end it cleanly. Closing again is a no-op.
 func (b *BroadcastProducer) Close() error {
 	return b.inner.Close()
 }
@@ -361,7 +363,7 @@ func (f *Fill) Priority() int8 {
 // MaxDelay is the most tolerant age budget among its readers, or nil for the
 // publisher's max age alone.
 func (f *Fill) MaxDelay() *time.Duration {
-	return optFromMicros(f.inner.MaxDelayUs())
+	return f.inner.MaxDelay()
 }
 
 // Order is which end to fill first.

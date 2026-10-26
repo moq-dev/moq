@@ -42,8 +42,8 @@ Dependabot misses three kinds of update, so list them by hand:
   `just js workers` walk every tracked `bun.lock`.
 
 Deliberately uncovered: `dart/moq` (see the comment in
-`.github/dependabot.yml`), `bench/ffi-gen/Cargo.lock` (a one-off BoltFFI
-comparison), and `nix/uniffi-dart-Cargo.lock` (pinned with the generator).
+`.github/dependabot.yml`) and `nix/uniffi-dart-Cargo.lock` (pinned with the
+generator).
 The uniffi `>=0.33` ignore blocks nothing until 0.33 ships; keep it, since it
 ties uniffi to the Go generator.
 
@@ -133,6 +133,10 @@ deep-equal pair, and duplicated WebVTT stamps and `jwt=` lookups.
 near copies), which is duplication rather than a dependency question.
 The m1 run came a day after m0's and did not re-review it; check code
 added since.
+- When TypeScript 7.1 is stable, delete `TransportStats` in
+  `js/net/src/connection/stats.ts` and type `getStats()` as the DOM's
+  `WebTransportConnectionStats` (from
+  [moq-dev/moq#6625](https://github.com/moq-dev/moq/pull/6625)).
 
 ## Required
 

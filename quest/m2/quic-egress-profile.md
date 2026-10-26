@@ -24,9 +24,7 @@ workers versus io_uring workers, with the existing profiling captures:
   `Bytes`, with no coalescing copy. Count allocations and bytes copied per
   frame above it, split by frame size, so any copy left is located.
 - Bursts: the QUIC connection paces inside `poll_transmit` on both runtimes
-  (#4400; today `moq-quic`'s `connection/pacing.rs`, which
-  [the portable controller trait](/quest/m1/congestion/trait.md) replaces
-  with `moq-congestion`'s pacer), so the only open question
+  (#4400; `moq-congestion`'s pacer), so the only open question
   is whether a released GSO train leaves the NIC as a burst the bottleneck
   cannot absorb. On a netem bottleneck, compare inter-packet gaps and queue
   occupancy for a 64-segment train against the same bytes paced at the

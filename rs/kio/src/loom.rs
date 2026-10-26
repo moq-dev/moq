@@ -375,3 +375,88 @@ fn a_held_wake_never_hides_a_remote_wake() {
 		});
 	}
 }
+
+/// An entry appended under a channel's write guard reaches a reader that checks the
+/// log first and parks on the channel only when nothing is committed, the pairing the
+/// log's docs prescribe. The reader either reads the entry or is woken by its guard.
+#[test]
+fn a_log_append_wakes_a_reader_parked_on_its_channel() {
+	loom::model(|| {
+		let producer = Producer::new(crate::log::Writer::new(0));
+		let consumer = producer.consume();
+		let mut reader = producer.read().reader();
+
+		let writer = thread::spawn(move || {
+			let mut log = producer.write().ok().expect("open");
+			log.push(7u32);
+			log.push(8);
+		});
+
+		let mut index = 0;
+		let mut read = Vec::new();
+		block_on(wait(|waiter| {
+			{
+				let mut log = reader.read();
+				while let Ok(Some(value)) = log.get(index) {
+					read.push(*value);
+					index += 1;
+				}
+			}
+			if index == 2 {
+				return Poll::Ready(());
+			}
+			// Re-checked under the channel's lock, which every append holds.
+			let committed = |log: &Ref<'_, crate::log::Writer<u32>>| match log.end() > index {
+				true => Poll::Ready(()),
+				false => Poll::Pending,
+			};
+			consumer.poll(waiter, committed).map(|_| ())
+		}));
+		let mut log = reader.read();
+		while let Ok(Some(value)) = log.get(index) {
+			read.push(*value);
+			index += 1;
+		}
+		assert_eq!(read, [7, 8], "an append was lost or misread");
+		writer.join().unwrap();
+	});
+}
+
+/// A reader racing front eviction reads each entry correctly or learns it was evicted,
+/// and never touches a segment the collector freed: the free writes every slot, so a
+/// read it isn't ordered after fails the model. The reader keeps a hint into the first
+/// segment from an earlier read, which the eviction may free before its next one.
+///
+/// The collector's own atomics run under loom too (`crossbeam_loom`), which makes the
+/// full search intractable, so this one bounds preemptions like moq-net's models.
+#[test]
+fn a_log_reader_racing_eviction_never_touches_freed_memory() {
+	let mut builder = loom::model::Builder::new();
+	builder.preemption_bound.get_or_insert(3);
+	builder.check(|| {
+		let mut writer = crate::log::Writer::new(0);
+		for i in 0..2u64 {
+			writer.push(i);
+		}
+		let mut reader = writer.reader();
+		assert_eq!(reader.read().get(0), Ok(Some(&0)));
+
+		let racer = thread::spawn(move || {
+			for i in [0, 1] {
+				match reader.read().get(i) {
+					Ok(Some(value)) => assert_eq!(*value, i, "misread entry {i}"),
+					Ok(None) => panic!("entry {i} was committed"),
+					Err(_) => {}
+				}
+			}
+		});
+
+		writer.evict(1);
+		writer.evict(2);
+		// Advance the collector so it may free the segments while the reader runs.
+		for _ in 0..2 {
+			crossbeam_epoch::pin().flush();
+		}
+		racer.join().unwrap();
+	});
+}

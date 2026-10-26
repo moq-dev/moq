@@ -35,7 +35,7 @@ Direction carried over from 2026-09-19, not re-confirmed:
 - A tenant-keyed domain (one bucket per customer, however many broadcasts they
   run) needs the tenant identity from the auth line and refines the same tier.
 - moq-quic had the fair tier: send domains sharing bytes by deficit round
-  robin, with groups inside them. [quic-api trim](/quest/m1/quic-api/trim.md)
+  robin, with groups inside them. [the API trim](https://github.com/moq-dev/moq/pull/6809)
   deletes it while nothing uses it (maintainer, 2026-10-23); restore it from
   that PR's history with this quest's consumer.
   Exposing them gives `transport::poll::Session::send_group` a domain, a

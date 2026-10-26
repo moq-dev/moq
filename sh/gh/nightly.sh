@@ -2,15 +2,15 @@
 # Keep benchmark builds together while unrelated Nightly workloads run independently.
 set -euo pipefail
 
-usage='usage: just gh nightly rust-test|rust-bench|rust-shared|rust-extra|rust-uring|js'
+usage='usage: just gh nightly rust-test|rust-bench|rust-shared|rust-relay|rust-extra|rust-uring|js|bindings'
 if [[ $# != 1 ]]; then
     echo "$usage" >&2
     exit 2
 fi
-# The measured groups write a report for the benchmark site; rust-test only runs.
+# The measured groups write a report for the benchmark site; rust-test and bindings only run.
 case "$1" in
-    rust-test) report= ;;
-    rust-bench | rust-shared | rust-extra | rust-uring) report=rust ;;
+    rust-test | bindings) report= ;;
+    rust-bench | rust-shared | rust-relay | rust-extra | rust-uring) report=rust ;;
     js) report=js ;;
     *)
         echo "$usage" >&2
@@ -78,7 +78,7 @@ case "$1" in
         run just rs test -p moq-bench --release --run-ignored only \
             -E 'test(benchmark_readiness_establishment)' --success-output immediate
         run just rs bench-playback
-        run just rs test --release -p moq-congestion -E 'test(benchmark_ack_cleanup)' \
+        run just rs test --release -p moq-congestion -E 'test(benchmark_per_packet)' \
             --run-ignored only --success-output immediate
         run just rs bench-feed-fetch
         run just rs test -p moq-quic --release -E 'test(benchmark_receive_credit)' --run-ignored only --success-output immediate
@@ -114,13 +114,17 @@ case "$1" in
             --bench chunk_interleaving --bench worker_turns \
             --bench streams --bench receive --bench endpoint --bench wire
         ;;
+    rust-relay)
+        criterion relay -p moq-relay --features test-support --bench session
+        ;;
     # Keep added coverage out of the rust-bench and rust-shared legs.
     rust-extra)
         # The allocation/window/play-buffer tables keep their stdout in the run;
         # only Criterion estimates enter the trend report.
-        criterion extra --no-fail-fast -p moq-e2ee -p moq-json -p moq-archive -p moq-cli -p moq-mux \
+        criterion extra --no-fail-fast -p moq-e2ee -p moq-json -p moq-archive -p moq-cli -p moq-mux -p moq-audio \
             --bench protect --bench codec --bench table --bench allocations --bench window \
-            --bench producer --bench play_buffer --bench jitter --bench decode_clock --bench ts_programs --bench ts_video
+            --bench producer --bench play_buffer --bench jitter --bench decode_clock --bench ts_programs --bench ts_video \
+            --bench bus
         ;;
     rust-uring)
         # One run per target makes an unsupported/skipped ring fail report
@@ -147,6 +151,23 @@ case "$1" in
         javascript jitter just js jitter-bench
         javascript audio-warmup just js audio-warmup-bench
         javascript clock just js clock-bench
+        ;;
+    # The binding benchmark's runners at a token budget, so they keep working at this
+    # commit; rust2's `just bench-ffi` measures them at its pinned moq revision. Swift
+    # runs on macOS in the Platform workflow.
+    bindings)
+        export MOQ_BENCH_SECONDS=0.05
+        MOQ_BENCH_DIR=${BENCH_RESULTS:-$(git rev-parse --show-toplevel)/target/bench/nightly/bindings}
+        export MOQ_BENCH_DIR
+        rm -rf "$MOQ_BENCH_DIR"
+        run just rs test -p moq-ffi --cargo-profile release -E 'test(bench::benchmark_ffi)' --run-ignored only
+        run just go bench -benchtime="${MOQ_BENCH_SECONDS}s"
+        for runner in py kt cpp dart; do
+            run just "$runner" bench
+        done
+        for result in rust-ffi rust-net go python kotlin cpp dart; do
+            if [[ ! -s $MOQ_BENCH_DIR/$result.json ]]; then failed+=("no $MOQ_BENCH_DIR/$result.json"); fi
+        done
         ;;
 esac
 

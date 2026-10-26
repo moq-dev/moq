@@ -15,9 +15,11 @@ Decided 2026-10-25 (maintainer), extending
 
 - Yes/no demand returns `bool`; `track::Demand::wanted() -> Option<u64>`
   keeps its meaning.
-- `broadcast::Demand` is deleted (no production consumer), as
-  [net-exports](/quest/m1/api-audit/net-exports.md) plans. The origin closes a
-  superseded producer explicitly instead of a publisher watching demand.
+- Broadcast demand is deleted: Rust's `broadcast::Demand` went in
+  [#6744](https://github.com/moq-dev/moq/pull/6744), and the `@internal` JS
+  `Broadcast.Demand` (read only by tests and a bench) goes too. The origin
+  closes a superseded producer explicitly instead of a publisher watching
+  demand.
 - `group::Demand` has no production consumer in Rust; delete it rather than
   convert it, unless net-names lands the conversion first. The JS group
   demand stays internal.

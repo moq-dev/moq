@@ -19,7 +19,7 @@ records".
 See the [epic](/quest/m1/unbounded-groups/README.md) for the decisions.
 
 - Storage is the lock-free
-  [append-only log](/quest/m1/unbounded-groups/log.md) (decided 2026-10-24
+  append-only log (`kio::log`) (decided 2026-10-24
   by the maintainer over the group storage benchmark,
   [moq-dev/moq#6627](https://github.com/moq-dev/moq/pull/6627): land the
   end-state storage now rather than a mutex layout swapped later; numbers in
@@ -72,11 +72,12 @@ See the [epic](/quest/m1/unbounded-groups/README.md) for the decisions.
   it were over the `Info::refresh` ratio, on tracks that opt into
   refresh (decided 2026-10-24, maintainer). The origin's `track::Dynamic`
   handler decides whether to serve old content; refresh is the fallback.
-- The live edge is never paced by a reader (decided 2026-10-24,
-  maintainer). A slow reader on a 1:1 track falls behind, loses its front,
-  and refills, at up to twice the upstream bandwidth for that reader.
-  Backpressuring the publisher like TCP was rejected: one reader would stall
-  it.
+- The live edge is paced by its fastest reader (decided 2026-10-25,
+  maintainer, superseding 2026-10-24's "never paced by a reader"):
+  [Fastest-reader pacing](/quest/m1/unbounded-groups/fastest-reader.md)
+  builds it after this quest. Keep the design compatible: a slower reader
+  still falls behind, loses its front, and refills. Pacing by the slowest
+  reader stays rejected: one reader would stall the publisher.
 - Groups are bounded by bytes, not frame count (decided 2026-10-24,
   maintainer). Each frame's storage slot is charged to the pool, so empty
   frames still cost their slot once `MAX_GROUP_FRAMES` goes. Today slots are
@@ -110,6 +111,4 @@ groups. A reader that used to see `GroupTooLarge` now refills or sees
 
 ## Required
 
-- [Segmented frames](/quest/m1/unbounded-groups/segmented-frames.md) - frame storage the cache can account for without whole-frame preallocation
-- [Append-only log](/quest/m1/unbounded-groups/log.md) - `GroupState`'s frames in a lock-free kio log with an advancing base, the tail run this builds on
 - [Transport frame offsets](/quest/m1/transport-frame-offsets.md) - the lite draft lets a refill start at the missing frame without holding the frames below it

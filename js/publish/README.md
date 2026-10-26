@@ -71,7 +71,7 @@ The simplest way to publish a stream:
 | `invisible` | boolean | false    | Disable video capture           |
 | `preview`   | string  | `"source"` | What the preview renders: `"source"`, `"encoded"`, `"none"` |
 | `backend`   | string  | `"auto"` | Graphics API for a `<canvas>` preview: `"auto"`, `"webgpu"`, `"2d"` |
-| `announce`  | string  | `"source"` | When to advertise: `"always"`, `"never"`, `"source"` (once media is captured). A camera source waits for every enabled track, and `"source"` waits until each captured track's config resolves or fails, so the first catalog lists every rendition. The broadcast is created while connected either way. |
+| `announce`  | string  | `"source"` | When to advertise: `"always"` or `"source"` (once media is captured). A camera source waits for every enabled track, and `"source"` waits until each captured track's config resolves or fails, so the first catalog lists every rendition. The broadcast is created while connected either way. To keep it out of discovery, use a hidden name with a `.`-prefixed segment; it is still subscribable by name. |
 
 A nested `<video>` shows the raw capture; a `<canvas>` is drawn by the element.
 Camera and microphone failures are observable through `el.sources.video`

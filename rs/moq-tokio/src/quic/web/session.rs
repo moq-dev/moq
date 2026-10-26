@@ -363,8 +363,7 @@ impl Session {
 	/// `options` schedule it.
 	pub fn send_datagram(&self, data: Bytes, options: SendOptions<'_>) -> Result<(), SessionError> {
 		let result = if !self.header_datagram.is_empty() {
-			// Unfortunately, we need to allocate/copy each datagram because of the driver API.
-			// Pls go +1 if you care: https://github.com/quinn-rs/quinn/issues/1724
+			// The driver sends a single contiguous buffer, including the session header.
 			let mut buf = BytesMut::with_capacity(self.header_datagram.len() + data.len());
 
 			// Prepend the datagram with the header indicating the session ID.
@@ -1212,8 +1211,8 @@ mod tests {
 		let mut transport = crate::quic::driver::TransportConfig::default();
 		transport.max_concurrent_bidi_streams(1_u32.into());
 		let (client, server, _endpoints, _) = gated_pair_with_transport(transport, Default::default()).await;
-		let mut client = crate::transport::Session::new(Session::raw(client), moq_net::transport::Binding::InBand);
-		let mut server = crate::transport::Session::new(Session::raw(server), moq_net::transport::Binding::InBand);
+		let mut client = crate::transport::Session::new(Session::raw(client), moq_net::transport::Address::Setup);
+		let mut server = crate::transport::Session::new(Session::raw(server), moq_net::transport::Address::Setup);
 		let mut cx = Context::from_waker(std::task::Waker::noop());
 		let Poll::Ready(Ok(Some((mut send, mut recv)))) = client.poll_open_request(&mut cx, Default::default()) else {
 			panic!("initial request has credit");
@@ -1247,7 +1246,7 @@ mod tests {
 		let (client, _server, _endpoints, _) = gated_pair_with_transport(server_transport, client_transport).await;
 		let mut web = Session::raw(client.clone());
 		web.header_bi = vec![0x41, 0];
-		let mut session = crate::transport::Session::new(web, moq_net::transport::Binding::InBand);
+		let mut session = crate::transport::Session::new(web, moq_net::transport::Address::Setup);
 		let mut cx = Context::from_waker(std::task::Waker::noop());
 		// The only stream credit is consumed, but the header cannot enter the send window.
 		assert!(session.poll_open_request(&mut cx, Default::default()).is_pending());

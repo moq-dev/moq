@@ -126,7 +126,7 @@ fi
 BASE_TARGET=$TARGET/base
 CURRENT_TARGET=$TARGET/current
 
-ARTIFACTS=${BENCH_ARTIFACTS:-$ROOT/.scratch/bench}
+ARTIFACTS=${BENCH_ARTIFACTS:-$ROOT/.tmp/bench}
 mkdir -p "$ARTIFACTS"
 ARTIFACTS=$(cd "$ARTIFACTS" && pwd -P)
 # Each run copies bench/ and untracked sources, so it must land in neither.
