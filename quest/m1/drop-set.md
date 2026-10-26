@@ -14,9 +14,17 @@ narrower budget is served after a widening, as a cold relay would.
 
 ## Plan
 
-Decided by the maintainer on 2026-10-19, splitting this from
-[A widened max age re-offers cached groups](/quest/m1/resolved-demand.md),
-which keeps drops final for now.
+Decided by the maintainer on 2026-10-19, splitting this from the widened
+max age re-offer
+([moq-dev/moq#6717](https://github.com/moq-dev/moq/pull/6717)), which keeps
+drops final for now. That PR re-offers cached groups a cursor skipped as
+stale, in the subscription's order (newest first unless ascending; `js/net`
+lowest first, since its buffer is ascending), through the
+[moq-dev/moq#5929](https://github.com/moq-dev/moq/pull/5929) owed path. Its
+skipped record (`Skipped` in `rs/moq-net/src/model/skipped.rs`, `#skipped`
+in `js/net/src/track.ts`) keeps a run only while the cache holds one of its
+groups. On 2026-10-25 the maintainer deferred the full pool-billed
+disposition record to this quest.
 
 - **One run-length set per track.** The track state keeps the dropped and
   expired group runs within the subscription range. Each run carries its
@@ -63,21 +71,42 @@ which keeps drops final for now.
   `TrackRun::poll_forward_drop` emits only recorded drops, cuts, or stale
   cached groups. A sequence the relay never cached is not judged until the
   track finishes.
-- **It extends resolved-demand's per-cursor disposition record,** which
-  stays next to the per-track set: a group that arrives leaves the shared
-  set, so only the cursor's record remembers that it reported cached G
-  stale. A reported run now carries its reason and, for a stale one, the
-  budget it was judged under. On lite-07 a reported stale run is no longer
-  final: like a skipped one, it is re-offered when a widening covers it.
+- **Each cursor keeps a disposition record,** next to the per-track set: a
+  group that arrives leaves the shared set, so only the cursor's record
+  remembers that it reported cached G stale. The record is one run-length
+  map per cursor, each run marked delivered, skipped as stale, or reported
+  in SUBSCRIBE_DROP, with its reason and, for a stale run, the budget and
+  range it was judged under. It replaces the skipped record, `Delivered`
+  (`rs/moq-net/src/model/delivered.rs`), whose floor folds stale gaps in
+  with delivered groups, `TrackRun::served` in
+  `rs/moq-net/src/lite/publisher.rs`, and the JS wire cursor's `#reported`.
+  Delivery is recorded, not inferred from the cursor position, since an
+  arrival-order or descending cursor delivers out of sequence order. On
+  lite-07 a reported stale run is no longer final: like a skipped one, it
+  is re-offered when a widening covers it.
+- **The record is bounded by the pool, never by guessing.** Each run is
+  billed to the cache's `Pool` through a `Charge` at a fixed per-run cost
+  and is settled a run at a time, so a cursor's state and CPU track its
+  runs, never their span. The floor only rises over a final prefix: the
+  runs from the floor up to the lowest run that is not final. An unknown
+  hole is never final: a descending cursor can deliver H while a lower G
+  is still unknown. When the pool evicts a run inside the final prefix, it
+  folds into the floor; any other run cannot go without guessing, so the
+  subscription ends with `TooFarBehind` and the subscriber re-subscribes.
 - **A widening re-offers the dropped runs now inside its budget,** through
-  the re-offer path the resolved-demand quest adds, in the subscription's
-  order. Upstream, the relay's own widening asks for them again.
-- **Only a widening reverses a stale verdict,** as resolved-demand
-  decides, local or received alike: no run tracks the group that convicted
-  it, and an abort or eviction of that group leaves the run standing (the
-  open question in resolved-demand). A received run is also reversed by
-  the upstream re-offering its group after a widening, since a later group
-  wins over its drop. Cuts and never-produced runs are unaffected.
+  the same re-offer path as skipped runs, in the subscription's order.
+  Upstream, the relay's own widening asks for them again.
+- **Only a widening reverses a stale verdict,** local or received alike: no
+  run tracks the group that convicted it, and an abort or eviction of that
+  group leaves the run standing. So warm/cold equivalence after an edge
+  loss is not promised: when the newer group that made G stale is aborted
+  or evicted, a cold cursor may serve G while a warm one stays past it.
+  Watching for it would need both groups a verdict depends on (`drifted`
+  uses G's successor and a possibly later presentation edge), and a run
+  skipped at the max age bound would no longer be final. A received run is
+  also reversed by the upstream re-offering its group after a widening,
+  since a later group wins over its drop. Cuts and never-produced runs are
+  unaffected.
 - **A stale drop names its budget.** A SUBSCRIBE_UPDATE has no
   acknowledgement, so after a widening from B1 to B2, an in-flight B1 drop
   and the B2 re-drop look identical, and no guess settles a B2 reader. On
@@ -139,11 +168,10 @@ drop and arrival), and JS run state grows no faster than the JS cache
 itself. The JS byte bound for both is
 [JS unbounded groups](/quest/m1/unbounded-groups/js.md).
 
-The per-cursor record keeps resolved-demand's pool bound and floor rule,
-with "final" narrowed: only a delivered run or a budget-independent drop (a
-cut, a group never produced, an upstream or origin eviction or expiry, or any drop
-reported over lite-05 or lite-06)
-folds into the floor. A stale run reported on lite-07 within reach of the
+Only a final run folds into a cursor's floor: a delivered run, a run
+skipped at the track's max age bound (no widening reaches past it), or a
+budget-independent drop (a cut, a group never produced, an upstream or
+origin eviction or expiry, or any drop reported over lite-05 or lite-06). A stale run reported on lite-07 within reach of the
 max age bound is budget-qualified, so it is treated like an unknown hole:
 the floor never rises over it, and if the pool must evict it or a run above
 it, the cursor fails with `TooFarBehind`. Folding it would forgo the
@@ -244,10 +272,6 @@ widening can re-offer them as Rust does, but landed it without a test: the
 case needs an update to arrive between START and the first group. Cover it
 deterministically, through the track hooks rather than wire timing, when the
 drop runs are reworked here.
-
-## Required
-
-- [A widened max age re-offers cached groups](/quest/m1/resolved-demand.md) - the re-offer path this extends to reported groups
 
 ## Related
 

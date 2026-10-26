@@ -17,7 +17,8 @@ here is what `si.rs` needs to place a section: one forward PCR step of at most
 export-to-import round trip that sees every SI table's first emission.
 
 The first media PES also waits for that PCR, so a reader of our own export
-never sees media it cannot place.
+never sees media it cannot place. The round trip also checks that the first
+PES follows the PCR and is imported.
 
 Not planned (2026-10-25, maintainer): bounding SI aging against a source that
 claims a huge mux rate through valid PCR steps. That needs a program-clock

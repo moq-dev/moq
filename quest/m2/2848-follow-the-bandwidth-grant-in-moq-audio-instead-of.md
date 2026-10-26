@@ -57,11 +57,6 @@ grant; `Options::bandwidth` documents that
   reservation before video sees a bit and audio is squeezed only once the link
   cannot carry audio alone. Worth doing for that tail, not worth blocking on.
 
-- moq-ffi's audio encode takes an options record shaped like the video one
-  ([moq-dev/moq#6781](https://github.com/moq-dev/moq/pull/6781) left
-  `moq_audio_encode_options` out), so bindings pass the bandwidth policy the
-  same way for both. The generated C picks it up from moq-ffi.
-
 Decided 2026-10-08: moved to m2, since that tail is the only gain.
 
 Tests: retain the shared `Control` tests; an Opus Producer whose

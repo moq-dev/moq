@@ -28,8 +28,7 @@ own.
 `TooLarge`, `Unsupported` (peer or local datagram support off),
 `Connection(connection::Error)`. `recv::Error` covers
 reads and leases: `Reset(code)`, `Evicted`, `FinishedEarly(n)`, `TooLong`,
-`TooLarge` (a lease past the window), `Connection`. No 0-RTT variant:
-[zero-rtt](/quest/m1/quic-api/zero-rtt.md) deletes it first. Both
+`TooLarge` (a lease past the window), `Connection`. Neither has a 0-RTT variant. Both
 `#[non_exhaustive]`, both convert to `io::Error`. moq-quic mirrors the names
 and adds `Blocked`, plus `Closed` for a stale `stream::Id` (its handles are
 borrowed views by id, so it cannot consume). This replaces `ReadError`,
@@ -105,7 +104,3 @@ through setters afterwards. Moved here from
 Update every consumer (`quic::web` in both crates, qmux, the backends,
 moq-relay's tests). `poll_*` forms come in [poll](/quest/m1/quic-api/poll.md). The Impact bullet says how to migrate in moq-quic, moq-tokio, moq-uring, and
 qmux if its public API changes.
-
-## Required
-
-- [Zero-RTT](/quest/m1/quic-api/zero-rtt.md) - removes 0-RTT, so no error carries it
