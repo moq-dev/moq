@@ -512,6 +512,48 @@ impl Producer {
 		.await;
 	}
 
+	/// Start every enabled video rendition's init build, then resolve once one of them has its
+	/// init and is [advertised](Rendition::is_advertised), so a manifest lists it, or none is left
+	/// that listings do not refuse: a denied or failed one can never be listed. A build that has
+	/// nothing to read from yet starts on the wake that indexes its media.
+	#[cfg_attr(
+		not(feature = "server"),
+		allow(dead_code, reason = "only the `server` feature uses it")
+	)]
+	pub(crate) async fn video_init(&self) {
+		kio::wait(|waiter| {
+			let poll = self.state.poll_ref(waiter, |current| {
+				let mut video = current
+					.renditions
+					.values()
+					.filter(|rendition| {
+						rendition.kind == Kind::Video
+							&& rendition.is_enabled()
+							&& rendition.poll_refused(waiter).is_pending()
+					})
+					.peekable();
+				if video.peek().is_none()
+					|| video.any(|rendition| {
+						// Rerun on every wake: `poll_refused` registered `waiter` on both timelines,
+						// so the rows a build needs wake this wait to start it.
+						rendition.start_init();
+						rendition.poll_init(waiter).is_ready() && rendition.poll_advertised(waiter).is_ready()
+					}) {
+					Poll::Ready(())
+				} else {
+					Poll::Pending
+				}
+			});
+			match poll {
+				Poll::Ready(Ok(())) => Poll::Ready(()),
+				// A closed catalog adds no rendition, but the existing ones' inits keep arriving,
+				// and the predicate registered `waiter` on each of them.
+				Poll::Ready(Err(_)) | Poll::Pending => Poll::Pending,
+			}
+		})
+		.await
+	}
+
 	/// Enroll a freshly-created rendition in the timeline feed, replaying the recent history
 	/// (and the ended/failed/closed markers) so its window matches its siblings', and start following its
 	/// own timeline.

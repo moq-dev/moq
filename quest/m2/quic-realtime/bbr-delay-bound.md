@@ -20,7 +20,3 @@ against it.
 ## Required
 
 - [Receive-ts spike](/quest/m2/quic-realtime/receive-ts.md) - the per-packet receive instants and the shared presets
-
-## Related
-
-- [Skip ProbeRTT after a near-floor RTT](/quest/m1/bbr-probe-rtt-skip.md) - the ProbeRTT behavior this inherits
