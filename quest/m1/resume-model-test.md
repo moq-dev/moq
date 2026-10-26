@@ -19,6 +19,9 @@ cases, so an oracle comes before any rewrite.
   reader gets every group its range and budget allow, each exactly once, in
   its order, with drops reported per the drop rules. A reported drop is not
   final: a group that arrives later is still served.
+- Include a newer publisher epoch winning the path while an older-epoch
+  subscription is open: that subscription never sees the new instance's
+  groups, and it ends with an error once its own instance has no route.
 - Drive it on a mocked clock with seeded randomness, and shrink a failure to
   a minimal sequence that becomes a regression test. Prefer an existing
   property-testing crate.
