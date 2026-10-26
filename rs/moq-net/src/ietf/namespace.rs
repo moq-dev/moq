@@ -28,8 +28,9 @@ fn to_tuple(namespace: &Path) -> Vec<String> {
 	parts
 }
 
-fn from_tuple(parts: &[String]) -> Path<'static> {
-	let mut path = String::new();
+fn from_tuple(parts: &[&str]) -> Path<'static> {
+	// Sized for the common case of no escapes, so building it rarely grows.
+	let mut path = String::with_capacity(parts.iter().map(|part| part.len() + 1).sum());
 	for (i, part) in parts.iter().enumerate() {
 		if i > 0 {
 			path.push('/');
@@ -80,11 +81,12 @@ fn decode_fields(r: &mut Decoder<'_>) -> Result<(Path<'static>, usize), DecodeEr
 		return Err(DecodeError::BoundsExceeded);
 	}
 
-	let count = count as usize;
-	let mut parts = Vec::with_capacity(count);
+	// Borrow each field from the wire, so only the joined path allocates.
+	let mut parts = [""; Path::MAX_PARTS];
+	let parts = &mut parts[..count as usize];
 	let mut size = 0;
-	for _ in 0..count {
-		let part = r.string()?;
+	for part in parts.iter_mut() {
+		*part = r.str()?;
 		if part.is_empty() {
 			return Err(DecodeError::InvalidValue);
 		}
@@ -92,10 +94,9 @@ fn decode_fields(r: &mut Decoder<'_>) -> Result<(Path<'static>, usize), DecodeEr
 		if size > MAX_BYTES {
 			return Err(DecodeError::BoundsExceeded);
 		}
-		parts.push(part);
 	}
 
-	Ok((from_tuple(&parts), size))
+	Ok((from_tuple(parts), size))
 }
 
 /// Decode a Track Namespace.
@@ -158,8 +159,7 @@ mod tests {
 			(vec![".application"], false),
 			(vec![".sessionish"], false),
 		] {
-			let parts: Vec<_> = fields.iter().map(|field| (*field).to_owned()).collect();
-			let path = from_tuple(&parts);
+			let path = from_tuple(&fields);
 			assert_eq!(
 				refusal(&path, super::super::Version::Draft22).is_some(),
 				reserved,

@@ -343,7 +343,8 @@ export class Broadcast {
 
 		// Creating into the origin outlives any single session: a reconnect re-announces the
 		// broadcast and new subscriptions land on the same producer.
-		const broadcast = origin.createBroadcast(name);
+		const broadcastPublication = origin.createBroadcast(name);
+		const broadcast = broadcastPublication.broadcast;
 		effect.cleanup(() => broadcast.close());
 		// One publisher instance per broadcast, kept across unannounce and announce, so a
 		// restart is a new broadcast rather than a resume into the old one.
@@ -373,7 +374,7 @@ export class Broadcast {
 		let serving = false;
 		effect.run((inner) => {
 			if (!inner.get(this.in.announce)) {
-				broadcast.unannounce();
+				broadcastPublication.unannounce();
 				return;
 			}
 
@@ -402,7 +403,7 @@ export class Broadcast {
 				}
 			}
 
-			broadcast.announce({ epoch });
+			broadcastPublication.announce({ epoch });
 		});
 
 		// Static tracks fan out to every subscriber. Keep the encoder-facing handle demand-gated

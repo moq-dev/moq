@@ -48,8 +48,10 @@ WebSocket stays there until it ends; the next connect races again.
 ## Raw QUIC (native)
 
 Native clients dial the relay directly with the MoQ ALPN, skipping the HTTP/3
-handshake. The URL path and `?jwt=` token travel in the MoQ `SETUP` message
+handshake. The URL path and any `?jwt=` token travel in the MoQ `SETUP` message
 instead of a `CONNECT` request, so the server sees the same thing either way.
+On every transport, a SETUP token (moq-lite-07-wip and moq-transport) can carry
+the credential in place of the query.
 `moq-tokio` dials WebTransport for `https://` URLs; use `moql://` or `moqt://`
 for raw QUIC. A browser cannot dial raw QUIC, so `@moq/net` reaches a `moqt://`
 or `moql://` URL over WebTransport at the same host, port, and path.

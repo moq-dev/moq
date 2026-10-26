@@ -8,4 +8,4 @@ Apps list it as a camera while the studio runs.
 
 ## Required
 
-- [The studio app](/quest/m3/studio/app.md) - the program this exposes
+- [Studio on macOS and Windows](/quest/m3/studio/app.md) - the studio running on Windows

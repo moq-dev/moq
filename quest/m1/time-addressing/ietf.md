@@ -18,11 +18,11 @@ Decided 2026-10-25 (maintainer), from the spike:
   object's PTS rides in TIMESTAMP (0x10), with TIMESCALE (0x08) on the track,
   the MOQ Properties shared with draft-ietf-moq-loc, so it stays LOC
   compatible.
-- GROUP_END maps to a property-free END_OF_GROUP. A status object may not
-  carry properties after draft-14 (`check_status` in
-  `rs/moq-net/src/ietf/object.rs` refuses them as a protocol violation), so
-  the end timestamp needs a negotiated extension to cross moq-transport;
-  without one the end is lost, as the extension rule below allows.
+- GROUP_END maps to END_OF_GROUP. Only draft-14 lets a status object carry
+  properties, so only there does it carry the end in its TIMESTAMP; later
+  drafts refuse them (`check_status` in `rs/moq-net/src/ietf/object.rs`), so
+  their END_OF_GROUP stays bare and the end needs a negotiated extension or
+  is lost, as the extension rule below allows.
 - Rejected: Object ID as a PTS delta, because B-frames run backwards in
   decode order and open-GOP leading frames present before the group's start.
 - The properties are optional on both sides: moq-transport may carry them as
@@ -38,7 +38,3 @@ negotiated extension if one is defined.
 ## Required
 
 - [Rust groups by start](/quest/m1/time-addressing/model.md) - the model whose links and ends these carry
-
-## Related
-
-- [moq-transport passthrough](/quest/m1/ietf-extension/README.md) - the same properties survive a relay

@@ -16,6 +16,9 @@ import 'package:moq_ffi/moq_ffi.dart';
 /// A MoQ client: configure the TLS/bind knobs, then connect to a relay.
 typedef Client = MoqClient;
 
+/// The credentials a [Client] presents, replaceable while it runs.
+typedef Tokens = MoqTokens;
+
 /// A live pub/sub session with a relay, exposing publish and consume origins.
 typedef Session = MoqSession;
 

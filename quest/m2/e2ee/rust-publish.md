@@ -3,8 +3,7 @@
 ## Goal
 
 Rust media and catalog publishers emit no plaintext semantic catalog in E2EE
-mode, and a track name the e2ee producer already carried is refused loudly
-rather than silently left out.
+mode.
 
 The reusable crypto crate remains independent of Hang and codec-specific
 publisher policy.

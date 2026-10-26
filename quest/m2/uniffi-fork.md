@@ -16,7 +16,7 @@ itself.
 Decided with the maintainer on 2026-10-13, after a review of how moq uses
 UniFFI:
 
-- **Base**: UniFFI. [The BoltFFI spike](/bench/ffi-gen/README.md)
+- **Base**: UniFFI. [The BoltFFI spike](https://github.com/kixelated/rust2/blob/main/bench/ffi/README.md#boltffi-comparison)
   recommended it. Decided later in #5838 (2026-10-17, maintainer):
   UniFFI-generated moq-ffi serves the browser too, through ubrn's `wasm2`
   flavour (chosen over BoltFFI and hand-written moq-wasm), so one binding
@@ -60,6 +60,11 @@ which publishes `rust2-uniffi`, `rust2-uniffi-core`, `rust2-uniffi-macros`, and
   rust2 with the others, as [ubrn 0.32](/quest/m2/rs2ts/ubrn-032.md) already
   plans if ubrn has not moved. Include the TypeScript in the regenerated
   bindings diff.
+- Negative durations (2026-10-25, maintainer): the Dart negative-duration
+  patch moq carries goes upstream into the fork's Dart generator, and the Go
+  generator stops panicking on a negative `time.Duration` (the Go wrapper
+  guards it today; delete the guard in the PR that pins a generator with the
+  fix, with a test passing a negative duration through the Go binding).
 - Update the quests that name a `kixelated/uniffi-*` fork
   ([Generated C bindings](/quest/m2/c/README.md)) to point at rust2, then
   archive the three forks.

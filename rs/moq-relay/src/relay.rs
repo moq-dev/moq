@@ -868,10 +868,10 @@ async fn serve_listening(
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	#[cfg(feature = "stun")]
 	#[tokio::test]
+	#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 	async fn stun_listener_runs_with_the_relay_and_stops_with_it() {
 		use stun_types::message::{BINDING, Message, MessageWriteVec};
 		use stun_types::prelude::*;
@@ -920,7 +920,11 @@ mod tests {
 	/// exits at once rather than starting the drain again.
 	#[cfg(unix)]
 	#[tokio::test(start_paused = true)]
-	#[expect(clippy::disallowed_types, reason = "tests read the host clock directly")]
+	#[expect(
+		clippy::disallowed_methods,
+		clippy::disallowed_types,
+		reason = "tests read the host clock directly"
+	)]
 	async fn a_signal_after_an_early_trigger_exits_at_once() {
 		let _signals = crate::shutdown::SIGNALS.lock().await;
 		// Either arm is ready, so an unbiased wait would pass some runs.

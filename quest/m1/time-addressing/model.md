@@ -47,6 +47,10 @@ a producer would need per-track memory of its last number.
   track with an error.
 - **Ranges.** `Absolute(group)` ends and sequence-range drops become times.
   `Relative(n)` stays but counts groups instead of subtracting from an ID.
+- **Name reuse** landed in
+  [moq-dev/moq#6780](https://github.com/moq-dev/moq/pull/6780); the cut
+  removes its sequence half, leaving a re-created track to keep its PTS
+  moving forward.
 - **Old relays** (decided 2026-10-26, maintainer): a released relay fills a
   hole over lite-05/06 with one FETCH per integer ID, so sparse IDs cost it
   one FETCH per tick in the hole. Accepted: "This was a lingering problem.
@@ -72,27 +76,23 @@ it:
 
 ### Spike evidence
 
-The spike published groups at their start ticks (2 s GOPs at 1 kHz: 0, 2000,
-4000, 6000) over lite-03, lite-06, lite-07-wip, moq-transport-14, and
+The spike published groups at their start ticks (2 s GOPs at 1 kHz and at
+90 kHz) over lite-03, lite-06, lite-07-wip, moq-transport-14, and
 moq-transport-18, direct and through a relay, against a contiguous baseline
 (prototype tests in
 [moq-dev/moq@ebdfd55](https://github.com/moq-dev/moq/commit/ebdfd55fc606db8f2c990b937392b81291ab4715)).
 
-- Unaffected: live delivery through `recv_group` and `ordered()`, history
-  with `Range::oldest` and absolute ranges, max-age expiry, and a fetch of a
-  missing ID (prompt `NotFound`). `@moq/net` matched on lite-06 and lite-07.
-- Broken: a warm relay filling a hole opened one FETCH per ID: 6,000 for
-  three groups on lite-06 and lite-07 (3 at stride 1), and 540,000 at 90 kHz
-  spacing. A moq-transport-18 subscriber reading history opened 6,001 (4 at
-  stride 1), and 60,001 at 20,000-tick spacing. A moq-transport-14 relay
-  used one stream but spent about 50 s of CPU at 20,000-tick spacing against
-  1 s at 2,000, the superlinear fill path
-  [fetch as a range](/quest/m1/subscribe-ranges/fetch-range.md) already waits
-  on. Neither moq-transport draft finished in five minutes at 90 kHz.
-  [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) fixes all of
-  these, so it lands first.
-- Broken: `Relative(1)..` on lite-07 resolved by ID arithmetic, delivering
-  `[6000]` and then parking instead of `[4000, 6000]`.
+- Unaffected on `main`: live delivery through `recv_group` and `ordered()`,
+  history with `Range::oldest` and absolute ranges, max-age expiry, a fetch
+  of a missing ID (prompt `NotFound`), and hole fills, which take a constant
+  handful of FETCHes at any spacing since
+  [moq-dev/moq#6724](https://github.com/moq-dev/moq/pull/6724) and
+  [moq-dev/moq#6715](https://github.com/moq-dev/moq/pull/6715). Before them
+  a relay opened one FETCH per ID (540,000 for one 90 kHz hole), which is
+  what released relays still do. `@moq/net` matched on lite-06 and lite-07.
+- Broken: `Relative(1)..` on lite-07, direct or relayed, resolves by ID
+  arithmetic, delivering `[6000]` and then parking instead of
+  `[4000, 6000]`.
 
 Update `doc/concept`, the lite draft's legacy mapping, `MIGRATE.md`, and the
 Rust half of every consumer the API change breaks to compile;
@@ -108,10 +108,9 @@ Wire: no format change; legacy and lite-07-wip group IDs become start ticks.
 
 ## Required
 
-- [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - relays fill holes by range, so a sparse track never costs one request per ID
+- [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - the range ends and drops this rework moves onto times
 - [Lite-05/06 timestamps pass through](/quest/m1/lite-timestamps-through.md) - lite-05/06 tracks stay timed, so their ingest keeps real starts
 
 ## Related
 
 - [Resume checked against a model](/quest/m1/resume-model-test.md) - its reference model is the oracle for resume after the cut
-- [No reused track names](/quest/m1/name-reuse.md) - the cut removes its sequence half, leaving a re-created track to keep its PTS moving forward

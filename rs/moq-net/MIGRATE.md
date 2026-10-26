@@ -4,6 +4,28 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Exports without a consumer are gone
+
+These had no caller outside tests; replace them as follows.
+
+- `broadcast::Demand` and both `broadcast::{Producer, Consumer}::demand()`: watch each track's `track::Demand` instead.
+- `goaway::Consumer::{peek, recv}`: poll it, `goaway.poll(&kio::Waiter::noop())` to peek or `kio::wait(|waiter| goaway.poll(waiter)).await` to wait.
+- `bandwidth::Producer::{abort, closed}`: drop the last producer to close it.
+- `Version::{names, from_alpn, is_ietf}`: use `Versions::all().iter()` or `Version::from_code`, match `alpn()` yourself, and `!is_lite()`.
+- `Server::with_origin(origin)`: call `with_publisher(&origin).with_subscriber(origin)`.
+- `stats::Handle::{parent, tier}`, `stats::Registry::exclude`, `stats::Traffic::{is_announced, total_bytes}`, `stats::Tier::is_default`: read the public fields, such as `announces_started > announces_ended` or `tier.label().is_empty()`.
+- `frame::Consumer::poll_read_all`: use `read_all`, or poll `poll_read_chunk` until the frame ends.
+- `frame::Buffer::{is_full, filled_mut}`: compare `len()` with `capacity()`, and read `filled()`.
+- `Path::next_part`: split `as_str()` on the first `/`.
+- `setup::Token::CAT`: compare `kind` with `1`.
+- `Error::TooManyParameters` and `DecodeError::{ExpectedData, Missing, Unsupported}` were never produced; drop their match arms.
+
+### `Client::with_url` replaces `with_path` and `with_authority`
+
+Pass the URL you dial: `Client::new().with_url(url)` instead of `.with_path(path).with_authority(authority)`.
+The client derives what SETUP carries from it and from the transport's `address()`: the path and query when SETUP carries the target, plus the authority for `moqt://`, and nothing when the transport's own URI does.
+A `unix://` URL names its target in its `?path=` query.
+
 ### `stats::Refusal` is `stats::RefusalKind`, and `time::now` is gone (#6510)
 
 Rename `moq_net::stats::Refusal` to `moq_net::stats::RefusalKind`, so it no longer shares a name with `moq_auth::Refusal`; its variants and `Refusals` are unchanged.
@@ -79,18 +101,6 @@ lease.release();
 `transport::CloseKind` gained `Evicted`, which `Error::from_transport` maps to `Error::Evicted`.
 `transport::Stats` gained `streams_evicted()`, and `session::Stats` the matching `streams_evicted` field.
 
-### Stage a requested track before subscribers see it (#6111)
-
-`track::Request::stage(info)` returns a `track::Staged` that derefs to the track's `Producer` while subscribers waiting on the request stay pending; `commit()` publishes it with everything written so far and returns the `Producer`.
-A relay that holds groups of a lazily served track writes them before committing, so the first reader (and an IETF `SUBSCRIBE_OK`'s Largest Location) sees them.
-Dropping a `Staged` uncommitted rejects the request with `Error::Dropped`. `accept(info)` is unchanged and equals `stage(info).commit()`.
-
-```rust
-let mut staged = request.stage(info);
-for group in retained { /* staged.create_group(..), write, finish */ }
-let producer = staged.commit();
-```
-
 ### Frame writers own their group (#6111)
 
 `group::Producer::create_frame` now takes the writer by value and returns an owned `frame::Producer` with no lifetime.
@@ -110,13 +120,10 @@ group = frame.finish()?;
 
 A caller that holds the group behind `&mut` can write a whole frame with `write_frame` instead.
 
-### A received track's end waits for groups in flight (#6111)
+### A track's end tolerates a repeat, and skipped groups can be dropped (#6111)
 
-Call `track::Producer::received()` before writing what a peer sends into a track, then declare the peer's end with `finish_at`.
-On a received copy, readers wait at a hole below that end for the subscription's max delay (or one second) in case its group is still in flight; `drop_groups(range, err)` marks groups the peer said it skipped, so readers stop waiting for them and a group still arriving there ends with `err`.
+`track::Producer::drop_groups(range, err)` marks groups the publisher skipped, so readers stop waiting for them and a group still arriving there ends with `err`.
 `finish_at` now accepts a repeat of the same end and a refinement within the last group; any other second end fails with `Error::ProtocolViolation`.
-
-`track::Request::request_start(floor)` leaves an accepted copy's start pending at `floor` until `track::Producer::start_at` resolves it, for a subscriber whose peer reports the start after accepting.
 
 ### A frameless group is not the live edge (#6111)
 
@@ -126,8 +133,7 @@ A group followed by a frameless one is judged against the next group that has a 
 ### Ending a track aborts its open groups (#6111)
 
 Aborting a track (`abort` or `abort_unused`) now aborts its unfinished groups with the same error, so their readers end with it and their writers fail.
-Dropping the last `track::Producer` without a finish aborts them with `Error::Dropped`, and `close` with `Error::Stream(StreamError::Session(SessionError::Cancel))`.
-`track::Producer::close`, `track::Producer::received`, and `group::Producer::info` are now public.
+Dropping the last `track::Producer` without a finish aborts them with `Error::Dropped`.
 
 ### Priorities are signed, with 0 unset (#6142)
 
@@ -396,12 +402,12 @@ A `group::Request` is withdrawn once its last `fetch_group` caller leaves, so a 
 
 `moq_net::web_transport_trait` is gone.
 `transport::poll::{Session, SendStream, RecvStream}` carry their own `poll_*` methods, `transport::Error`, and `transport::Stats`, and `Error::from_transport` takes a `transport::Error`.
-A custom transport implements these traits and reports `binding()`: `transport::Binding::Uri` when its handshake carries the request URI, or `InBand` when SETUP carries it.
+A custom transport implements these traits and reports `address()`: `transport::Address::Uri` when its handshake carries the request URI, or `Setup` when SETUP carries it.
 
 ```rust
 impl moq_net::transport::poll::Session for MySession {
-	fn binding(&self) -> moq_net::transport::Binding {
-		moq_net::transport::Binding::Uri
+	fn address(&self) -> moq_net::transport::Address {
+		moq_net::transport::Address::Uri
 	}
 	// poll_accept_bi, poll_open_uni, ...
 }
@@ -467,7 +473,7 @@ A publisher that restarts its group numbering must publish under a new broadcast
 ### No `VarInt`
 
 Varints are plain `u64`s.
-Use `moq_net::varint::decode_quic(buf)` and `moq_net::varint::encode_quic(v, buf)`, which fails past `varint::MAX_QUIC`.
+Use `moq_net::varint::decode_quic(buf)` and `moq_net::varint::encode_quic(v, buf)`, which fails past `2^62 - 1`.
 
 ## 0.2 -> 0.3
 

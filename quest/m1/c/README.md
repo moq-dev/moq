@@ -1,4 +1,4 @@
-# moq-c at parity for the cut
+# [M] moq-c at parity for the cut
 
 ## Goal
 
@@ -29,4 +29,4 @@ Public API: moq-c gains each m1 binding feature. Wire: none.
 
 ## Required
 
-- [Refuse only waiting readers](/quest/m1/c/request-refuse.md) - freeing or aborting a group request refuses its readers instead of dropping the group for everyone
+- [moq-c decode start](/quest/m1/c/decode-start.md) - a moq-c decoder can read a finished track from its start

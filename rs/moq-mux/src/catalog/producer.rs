@@ -1,4 +1,5 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::hash_map::Entry;
+use std::collections::{BTreeMap, HashMap};
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -956,6 +957,21 @@ impl<E: CatalogExt> Producer<E> {
 		Ok(recorder)
 	}
 
+	/// Retire `track`'s timeline once its producer dropped, for an owner that never enrolls the
+	/// name again: the timeline track finishes and leaves the root `archive` entry.
+	pub(crate) fn retire(&mut self, track: &str) -> crate::Result<()> {
+		self.timeline.retire(track)?;
+		let advertised = take(&self.current)
+			.catalog
+			.archive
+			.as_ref()
+			.is_some_and(|archive| archive.timelines.contains_key(track));
+		if advertised && let Some(archive) = self.modify()?.archive.as_mut() {
+			archive.timelines.remove(track);
+		}
+		Ok(())
+	}
+
 	/// The broadcast's [`Timelines`](crate::timeline::Timelines): each enrolled track's index.
 	///
 	/// A track's timeline is created (and advertised in the catalog's root `archive` entry) when
@@ -974,10 +990,9 @@ impl<E: CatalogExt> Producer<E> {
 	/// `config` is a [`json::Config`](crate::json::Config) for the `json` section, or an
 	/// application's own entry embedding a [`JsonConfig`](hang::catalog::JsonConfig) (see
 	/// [`IntoRendition`](super::IntoRendition)). The producer sets its `mode`, encodes the track
-	/// with its `compression`, and fills an absent `bitrate` from what it writes. The
-	/// [`deltas`](crate::json::Config::deltas) switch on `json::Config` configures the snapshot
-	/// encoder; it is not written into the catalog entry. The config is `'static` so that switch
-	/// can be read off the builder. With deltas, create `track` with a
+	/// with its `compression`, and fills an absent `bitrate` from what it writes. `options`
+	/// configures the encoder and is not written into the catalog entry. With
+	/// [`deltas`](crate::json::Options::deltas), create `track` with a
 	/// [`refresh`](moq_net::track::Info::refresh) ratio and drive
 	/// [`Snapshot::refresh`](crate::json::Snapshot::refresh), so joiners get a fresh group.
 	///
@@ -987,10 +1002,11 @@ impl<E: CatalogExt> Producer<E> {
 	pub fn json_snapshot<T: serde::Serialize>(
 		&self,
 		track: moq_net::track::Producer,
-		config: impl super::IntoRendition<E, hang::catalog::JsonConfig> + 'static,
+		config: impl super::IntoRendition<E, hang::catalog::JsonConfig>,
+		options: crate::json::Options,
 	) -> crate::Result<crate::json::Snapshot<T>> {
 		let rendition = self.data_entry(track.name())?;
-		crate::json::Snapshot::new(track, rendition, config)
+		crate::json::Snapshot::new(track, rendition, config.into_rendition(), options)
 	}
 
 	/// Publish `track` as an append-log JSON track, advertising it in the catalog.
@@ -1302,11 +1318,11 @@ fn to_msf<E: CatalogExt>(catalog: &Catalog<E>, base: &moq_net::Path) -> moq_msf:
 ///
 /// MSF names a track by its absolute namespace and wire name. An unresolvable reference, one
 /// a reader would take as the catalog itself ([`names_catalog`](crate::catalog::msf::names_catalog)),
-/// or a duplicate identity is refused instead of advertising the track on the catalog's broadcast.
+/// is refused instead of advertising the track on the catalog's broadcast. A later rendition with
+/// the same identity replaces the earlier one.
 fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) -> moq_msf::Catalog<E> {
 	let mut tracks = Vec::new();
-	let mut names = BTreeSet::new();
-	let mut reference = |id: &str, config: &dyn Reference| {
+	let reference = |id: &str, config: &dyn Reference| {
 		let name = config.track(id);
 		if let Some(epoch) = config.epoch() {
 			// MSF has nowhere to name an instance, so its readers take whichever resolves first.
@@ -1329,15 +1345,6 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 				}
 			}
 		};
-		if !names.insert((namespace.clone(), name.to_string())) {
-			tracing::error!(
-				rendition = id,
-				track = name,
-				?namespace,
-				"refusing duplicate MSF track identity"
-			);
-			return None;
-		}
 		Some((name.to_string(), namespace))
 	};
 
@@ -1435,7 +1442,19 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 		track.delay = config.delay;
 		tracks.push(track);
 	}
-	moq_msf::Catalog::with_ext(tracks, E::default())
+
+	let mut index = HashMap::new();
+	let mut unique: Vec<moq_msf::Track> = Vec::with_capacity(tracks.len());
+	for track in tracks {
+		match index.entry((track.namespace.clone(), track.name.clone())) {
+			Entry::Occupied(entry) => unique[*entry.get()] = track,
+			Entry::Vacant(entry) => {
+				entry.insert(unique.len());
+				unique.push(track);
+			}
+		}
+	}
+	moq_msf::Catalog::with_ext(unique, E::default())
 }
 
 #[cfg(test)]
@@ -1675,8 +1694,10 @@ mod test {
 		}
 	}
 
+	/// MSF names a track by namespace and name, but a reader keys renditions by name alone, so
+	/// the later of two same-named tracks wins there.
 	#[test]
-	fn msf_names_are_unique_per_namespace_but_ambiguous_hang_ids_are_refused() {
+	fn msf_names_are_unique_per_namespace_and_the_last_wins_a_hang_id() {
 		let base = moq_net::Path::new("room/catalog");
 		let mut catalog = hang::Catalog::<()>::default();
 		for (id, broadcast) in [("left", "./left"), ("right", "./right")] {
@@ -1689,10 +1710,29 @@ mod test {
 		assert_eq!(msf.tracks.len(), 2);
 		assert_eq!(msf.tracks[0].namespace.as_deref(), Some("room/left"));
 		assert_eq!(msf.tracks[1].namespace.as_deref(), Some("room/right"));
-		assert!(matches!(
-			crate::catalog::msf::from_msf(&msf, &base),
-			Err(crate::Error::Msf(crate::catalog::msf::Error::DuplicateTrackName(_)))
-		));
+		let restored = crate::catalog::msf::from_msf(&msf, &base).unwrap();
+		assert_eq!(restored.video.renditions.len(), 1);
+		assert_eq!(
+			base.try_resolve(restored.video.renditions["video"].broadcast.as_ref().unwrap()),
+			Some("room/right".into())
+		);
+	}
+
+	/// Two renditions naming one track in one broadcast advertise it once, as the later one.
+	#[test]
+	fn msf_repeated_identity_keeps_the_last() {
+		let mut catalog = hang::Catalog::<()>::default();
+		for (id, width) in [("a", 640), ("b", 1280)] {
+			let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
+			config.container = Container::Loc;
+			config.track = Some("video".into());
+			config.coded_width = Some(width);
+			catalog.video.renditions.insert(id.into(), config);
+		}
+		let msf = to_msf_media::<()>(&catalog, &moq_net::Path::empty());
+		assert_eq!(msf.tracks.len(), 1);
+		assert_eq!(msf.tracks[0].name, "video");
+		assert_eq!(msf.tracks[0].width, Some(1280));
 	}
 
 	#[test]
@@ -1936,6 +1976,35 @@ mod test {
 		// Something else already took the name the timeline track wants.
 		let _taken = broadcast.create_track("video0.timeline.z", None).unwrap();
 		assert!(catalog.enroll("video0", None).is_err());
+	}
+
+	/// A retired track's timeline ends for the readers already on it and leaves the archive, while
+	/// one still recording is refused.
+	#[test]
+	fn retiring_a_track_ends_its_timeline() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+		let recorder = catalog
+			.enroll("video0", Some(std::time::Duration::from_secs(4)))
+			.unwrap();
+		let waiter = kio::Waiter::noop();
+		let mut subscribing = broadcast
+			.consume()
+			.track("video0.timeline.z")
+			.unwrap()
+			.subscribe(None)
+			.into_inner();
+		let std::task::Poll::Ready(Ok(mut reader)) = kio::Task::poll(&mut subscribing, &waiter) else {
+			panic!("the timeline track is live");
+		};
+		assert!(catalog.retire("video0").is_err(), "its recorder is still alive");
+
+		drop(recorder);
+		catalog.retire("video0").unwrap();
+		let archive = catalog.snapshot().archive.unwrap();
+		assert_eq!(archive.timelines.keys().collect::<Vec<_>>(), vec!["catalog.json"]);
+		assert_eq!(catalog.timeline().len(), 1);
+		assert!(matches!(reader.poll_finished(&waiter), std::task::Poll::Ready(Ok(_))));
 	}
 
 	#[test]

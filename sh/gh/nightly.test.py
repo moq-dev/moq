@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class NightlyTest(unittest.TestCase):
-    def run_group(self, group, fail="", **environment):
+    def run_group(self, group, fail="", cwd=ROOT, **environment):
         with tempfile.TemporaryDirectory() as directory:
             scratch = Path(directory)
             calls = scratch / "calls"
@@ -38,31 +38,39 @@ class NightlyTest(unittest.TestCase):
                        BENCH_RESULTS=str(scratch / "results"), NIGHTLY_CALLS=str(calls), NIGHTLY_FAIL=fail, BASH_ENV="/dev/null")
             env.pop("BENCH_BASE", None)
             env.update(environment)
-            result = subprocess.run(["bash", "sh/gh/nightly.sh", group], cwd=ROOT,
+            result = subprocess.run(["bash", ROOT / "sh/gh/nightly.sh", group], cwd=cwd,
                                     env=env, capture_output=True, text=True)
             self.bases = set(Path(f"{calls}.base").read_text().splitlines()) if calls.exists() else set()
             return result, calls.read_text().splitlines() if calls.exists() else []
 
     def test_paired_base_is_the_previous_scheduled_nightly(self):
-        head, parent = (subprocess.run(["git", "rev-parse", revision], cwd=ROOT, capture_output=True, text=True,
-                                       check=True).stdout.strip() for revision in ("HEAD", "HEAD~1"))
-        # This run is the newest scheduled one; the previous run's commit is the base.
-        runs = json.dumps([{"databaseId": 2, "headSha": parent}, {"databaseId": 1, "headSha": head}])
-        result, _ = self.run_group("rust-uring", BENCH_BASE="previous-nightly", GITHUB_RUN_ID="2", NIGHTLY_RUNS=runs)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.bases, {head})
-        # A named revision reaches the runner as its commit.
-        result, _ = self.run_group("rust-uring", BENCH_BASE="HEAD~1")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.bases, {parent})
-        result, calls = self.run_group("rust-uring", BENCH_BASE="previous-nightly", GITHUB_RUN_ID="1",
-                                       NIGHTLY_RUNS=json.dumps([{"databaseId": 1, "headSha": head}]))
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("no previous scheduled Nightly", result.stderr)
-        self.assertEqual(calls, [])
+        # Nightly checks out shallowly, so the test builds the history it resolves against.
+        with tempfile.TemporaryDirectory() as repo:
+            git = ["git", "-C", repo, "-c", "user.name=nightly", "-c", "user.email=nightly@example.com",
+                   "-c", "commit.gpgsign=false"]
+            subprocess.run([*git, "init", "-q"], check=True)
+            for message in ("parent", "head"):
+                subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", message], check=True)
+            head, parent = (subprocess.run([*git, "rev-parse", revision], capture_output=True, text=True,
+                                           check=True).stdout.strip() for revision in ("HEAD", "HEAD~1"))
+            # This run is the newest scheduled one; the previous run's commit is the base.
+            runs = json.dumps([{"databaseId": 2, "headSha": parent}, {"databaseId": 1, "headSha": head}])
+            result, _ = self.run_group("rust-uring", cwd=repo, BENCH_BASE="previous-nightly", GITHUB_RUN_ID="2",
+                                       NIGHTLY_RUNS=runs)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self.bases, {head})
+            # A named revision reaches the runner as its commit.
+            result, _ = self.run_group("rust-uring", cwd=repo, BENCH_BASE="HEAD~1")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self.bases, {parent})
+            result, calls = self.run_group("rust-uring", cwd=repo, BENCH_BASE="previous-nightly",
+                                           GITHUB_RUN_ID="1", NIGHTLY_RUNS=json.dumps([{"databaseId": 1, "headSha": head}]))
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("no previous scheduled Nightly", result.stderr)
+            self.assertEqual(calls, [])
 
     def test_paired_base_applies_only_to_rust_bench_groups(self):
-        for group in ("js", "rust-test"):
+        for group in ("js", "rust-test", "bindings"):
             result, calls = self.run_group(group, BENCH_BASE="HEAD")
             self.assertEqual(result.returncode, 2, group)
             self.assertEqual(calls, [])
@@ -73,6 +81,15 @@ class NightlyTest(unittest.TestCase):
         self.assertIn("just js bench frames", calls)
         self.assertEqual(calls[-1], "just js clock-bench")
         self.assertIn("failed: just js bench reader", result.stderr)
+
+    def test_binding_runner_fails_without_its_report(self):
+        # The stubs write no reports, so every runner fails the group, a crash included.
+        result, calls = self.run_group("bindings", "py bench")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(calls[-1], "just dart bench")
+        self.assertIn("failed: just py bench", result.stderr)
+        for runner in ("rust-ffi", "rust-net", "go", "python", "kotlin", "cpp", "dart"):
+            self.assertIn(f"/{runner}.json", result.stderr)
 
     def test_bench_targets_share_one_invocation(self):
         result, calls = self.run_group("rust-bench")
@@ -102,7 +119,7 @@ class NightlyTest(unittest.TestCase):
     def test_every_cargo_bench_target_runs_nightly(self):
         covered = set()
         workflow = (ROOT / ".github/workflows/nightly.yml").read_text()
-        for group in ("rust-bench", "rust-shared", "rust-extra", "rust-uring"):
+        for group in ("rust-bench", "rust-shared", "rust-relay", "rust-extra", "rust-uring"):
             self.assertIn(f"recipe: gh nightly {group}\n", workflow)
             result, calls = self.run_group(group)
             self.assertEqual(result.returncode, 0, result.stderr)

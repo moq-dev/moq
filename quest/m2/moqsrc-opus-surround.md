@@ -22,8 +22,9 @@ gain) only from a two-buffer `streamheader`. Its unit test,
 `opus_caps_carry_the_stream_layout`, covers only mono and stereo.
 
 What remains is the end-to-end test: `opusenc` 5.1 through `moqsink`, a
-relay, `moqsrc`, and `opusdec`, checking six decoded channels, plus a
-surround case in the caps unit test.
+relay, `moqsrc`, and `opusdec`, checking six decoded channels, plus each
+channel count from 3 to 8 in the caps unit test, since every one maps
+through the same family-1 table.
 
 Public API: none. Wire: none.
 

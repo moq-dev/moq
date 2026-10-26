@@ -57,13 +57,6 @@ class Demand {
     get wanted(): Getter<number | undefined>;
 }
 
-class Demand_2 {
-    get closed(): GetPromise<Error | null>;
-    readonly sequence: number;
-    unused(): Promise<void>;
-    get used(): Getter<boolean>;
-}
-
 interface FetchGroupOptions {
     maxDelay?: Milli;
     priority?: number;
@@ -82,7 +75,6 @@ declare namespace group {
         Frame,
         ReadOptions,
         Info_2 as Info,
-        Demand_2 as Demand,
         Producer_2 as Producer,
         Consumer
     }
@@ -149,7 +141,6 @@ class Producer {
     close(abort?: Error): void;
     get closed(): GetPromise<Error | null>;
     demand(): Demand;
-    dropGroups(start: number, end: number, error: Error): void;
     finishAt(end: Position_2): void;
     info(): Promise<Info>;
     insertDatagram(sequence: number, timestamp: Timestamp | undefined, payload: Uint8Array): void;
@@ -167,7 +158,6 @@ class Producer_2 {
     close(abort?: Error): void;
     get closed(): GetPromise<Error | null>;
     consume(): Consumer;
-    demand(): Demand_2;
     get isClosed(): boolean;
     readonly sequence: number;
     writeFrame(frame: Frame): void;
@@ -185,14 +175,7 @@ class Request_2 {
     readonly name: string;
     get priority(): number;
     reject(err?: Error): void;
-    stage(info?: Partial<Info>): Staged;
     get subscription(): Readonly<Subscription>;
-}
-
-class Staged {
-    [Symbol.dispose](): void;
-    commit(): Producer;
-    readonly producer: Producer;
 }
 
 class Subscriber {
@@ -254,7 +237,6 @@ declare namespace track {
         Subscription,
         Order,
         Request_2 as Request,
-        Staged,
         FetchGroupOptions,
         Consumer_2 as Consumer,
         Demand,
