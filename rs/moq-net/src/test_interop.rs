@@ -106,15 +106,17 @@ fn ietf_range_updates_interop() {
 					range_filters: false,
 				}),
 			));
+		} else {
+			updates.push(update(2, range(10, None), None));
 		}
-		updates.push(update(if draft22 { 4 } else { 2 }, range(6, Some(7)), None));
+		updates.push(update(4, range(6, Some(7)), None));
 		let input = serde_json::json!({
 			"draft": crate::Version::from(version).code() & 0xff,
 			"subscribe": subscribe,
 			"updates": updates,
 		});
 		let served: Served = serde_json::from_slice(&bun("ietf-range-updates.ts", input)).unwrap();
-		assert_eq!(served.responses.len(), if draft22 { 3 } else { 2 });
+		assert_eq!(served.responses.len(), 3);
 		for (index, bytes) in served.responses.iter().enumerate() {
 			let mut r = Decoder::new(bytes, version.into());
 			if index == 0 {
@@ -125,13 +127,17 @@ fn ietf_range_updates_interop() {
 			} else {
 				assert_eq!(r.varint().unwrap(), ietf::RequestOk::ID);
 				let ok = ietf::RequestOk::decode(&mut r, version).unwrap();
-				assert_eq!(ok.request_id, legacy.then_some(RequestId(2)));
+				assert_eq!(ok.request_id, legacy.then_some(RequestId(index as u64 * 2)));
 				assert_eq!(
 					ok.largest,
-					draft22.then_some(Location {
-						group: index as u64 + 2,
-						object: 1
-					})
+					if draft22 {
+						Some(Location {
+							group: index as u64 + 2,
+							object: 1,
+						})
+					} else {
+						(index == 2).then_some(Location { group: 8, object: 1 })
+					}
 				);
 			}
 			assert!(r.is_empty());

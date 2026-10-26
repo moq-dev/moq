@@ -71,14 +71,18 @@ try {
 		await response(RequestOk.id);
 		publishGroup(); // Group 4 follows the filled snapshot, still on the original subscription.
 		for (let i = 0; i < 3; i++) await stream();
+	} else {
+		await client.writer.write(Uint8Array.from(input.updates[0]));
+		await response(RequestOk.id);
+		for (let i = 0; i < 9; i++) publishGroup();
 	}
 	const narrowing = input.updates.at(-1);
 	assert(narrowing);
 	await client.writer.write(Uint8Array.from(narrowing));
 	await response(RequestOk.id);
-	// The narrowed reader must receive both unseen groups, rather than silently joining only
-	// the newest one. Groups before and after its bounds must not occupy either stream.
-	for (let i = input.draft === 22 ? 5 : 0; i < 9; i++) publishGroup();
+	// Legacy drafts must replay both groups skipped below the old floor, rather than silently
+	// joining only the newest cached group. Draft-22 also verifies subsequent live delivery.
+	if (input.draft === 22) for (let i = 5; i < 9; i++) publishGroup();
 	for (let i = 0; i < 2; i++) await stream();
 } finally {
 	client.close();
