@@ -17,7 +17,10 @@ pub use import::*;
 pub use split::*;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+
+use crate::codec::annexb::{InBandCodec, ParameterSets};
 use scuffle_h265::{NALUnitType, SpsNALUnit};
+pub(crate) use sps::id as sps_id;
 use sps::Sps;
 
 /// Wrap one hvc1 (length-prefixed NALU) access unit as a single
@@ -412,9 +415,9 @@ impl Hvc1 {
 		let mut nal_iter = crate::codec::annexb::NalIterator::new(&mut buf);
 
 		let mut out = BytesMut::with_capacity(payload.remaining());
-		let mut frame_vps: Vec<Bytes> = Vec::new();
-		let mut frame_sps: Vec<Bytes> = Vec::new();
-		let mut frame_pps: Vec<Bytes> = Vec::new();
+		let mut frame_vps = ParameterSets::new();
+		let mut frame_sps = ParameterSets::new();
+		let mut frame_pps = ParameterSets::new();
 		let mut emitted_any_slice = false;
 
 		loop {
@@ -439,14 +442,17 @@ impl Hvc1 {
 		// rather than lingering in the hvcC. Per type, so a frame that updates only
 		// one kind keeps the others.
 		let mut changed = false;
+		let frame_vps: Vec<Bytes> = frame_vps.into_values().collect();
 		if !frame_vps.is_empty() && frame_vps != self.vps {
 			self.vps = frame_vps;
 			changed = true;
 		}
+		let frame_sps: Vec<Bytes> = frame_sps.into_values().collect();
 		if !frame_sps.is_empty() && frame_sps != self.sps {
 			self.sps = frame_sps;
 			changed = true;
 		}
+		let frame_pps: Vec<Bytes> = frame_pps.into_values().collect();
 		if !frame_pps.is_empty() && frame_pps != self.pps {
 			self.pps = frame_pps;
 			changed = true;
@@ -471,15 +477,15 @@ impl Hvc1 {
 	}
 }
 
-/// Process one NAL: VPS/SPS/PPS are collected (distinctly) into this frame's
+/// Process one NAL: VPS/SPS/PPS are collected by id into this frame's
 /// sets, everything else is length-prefixed and appended to `out`. Returns true
 /// if the NAL was a slice (i.e. produced sample bytes).
 fn process_nal(
 	nal: &Bytes,
 	out: &mut BytesMut,
-	frame_vps: &mut Vec<Bytes>,
-	frame_sps: &mut Vec<Bytes>,
-	frame_pps: &mut Vec<Bytes>,
+	frame_vps: &mut ParameterSets,
+	frame_sps: &mut ParameterSets,
+	frame_pps: &mut ParameterSets,
 ) -> Result<bool> {
 	if nal.is_empty() {
 		return Ok(false);
@@ -487,15 +493,15 @@ fn process_nal(
 	// HEVC NAL header is 2 bytes; type is bits 1..=6 of byte 0.
 	match NALUnitType::from((nal[0] >> 1) & 0x3f) {
 		NALUnitType::VpsNut => {
-			crate::codec::annexb::push_distinct(frame_vps, nal);
+			InBandCodec::H265.insert_parameter_set(frame_vps, nal)?;
 			Ok(false)
 		}
 		NALUnitType::SpsNut => {
-			crate::codec::annexb::push_distinct(frame_sps, nal);
+			InBandCodec::H265.insert_parameter_set(frame_sps, nal)?;
 			Ok(false)
 		}
 		NALUnitType::PpsNut => {
-			crate::codec::annexb::push_distinct(frame_pps, nal);
+			InBandCodec::H265.insert_parameter_set(frame_pps, nal)?;
 			Ok(false)
 		}
 		_ => {

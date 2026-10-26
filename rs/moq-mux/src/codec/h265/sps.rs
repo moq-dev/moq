@@ -148,18 +148,7 @@ impl SpsHead {
 		let constraint_flags = [(r.read_bits(4)? as u8) << 4, 0, 0, 0, 0, 0];
 		r.skip_bits(44)?; // the other 43 constraint and reserved bits, and general_inbld_flag
 		let level_idc = r.read_u8()?;
-		let sub_layers = usize::from(max_sub_layers_minus1);
-		let mut present = [(false, false); 6];
-		for flags in &mut present[..sub_layers] {
-			*flags = (r.read_flag()?, r.read_flag()?);
-		}
-		if sub_layers > 0 {
-			r.skip_bits(2 * (8 - u32::from(max_sub_layers_minus1)))?; // reserved_zero_2bits
-		}
-		for &(profile, level) in &present[..sub_layers] {
-			// A sub-layer profile is the same 88 bits as the general one; sub_layer_level_idc is 8.
-			r.skip_bits(88 * u32::from(profile) + 8 * u32::from(level))?;
-		}
+		skip_sub_layers(r, max_sub_layers_minus1)?;
 
 		let sps_seq_parameter_set_id = read_ue(r)?;
 		let chroma_format_idc = read_ue(r)?;
@@ -210,6 +199,39 @@ impl SpsHead {
 	}
 }
 
+/// Read `sps_seq_parameter_set_id` from an SPS RBSP (the payload after the NAL header).
+pub(crate) fn id(r: &mut BitReader<'_>) -> h264_parser::Result<u32> {
+	r.skip_bits(4)?; // sps_video_parameter_set_id
+	let max_sub_layers_minus1 = r.read_bits(3)? as u8;
+	r.skip_bits(1)?; // sps_temporal_id_nesting_flag
+	r.skip_bits(96)?; // the general profile's 88 bits and general_level_idc
+	skip_sub_layers(r, max_sub_layers_minus1)?;
+	read_ue(r)
+}
+
+/// Skip the sub-layer half of profile_tier_level (7.3.3), which follows `general_level_idc`.
+fn skip_sub_layers(r: &mut BitReader<'_>, max_sub_layers_minus1: u8) -> h264_parser::Result<()> {
+	// 7.4.3.2.1: at most 7 sub-layers.
+	if max_sub_layers_minus1 > 6 {
+		return Err(h264_parser::Error::MalformedSps(
+			"sps_max_sub_layers_minus1 out of range".into(),
+		));
+	}
+	let sub_layers = usize::from(max_sub_layers_minus1);
+	let mut present = [(false, false); 6];
+	for flags in &mut present[..sub_layers] {
+		*flags = (r.read_flag()?, r.read_flag()?);
+	}
+	if sub_layers > 0 {
+		r.skip_bits(2 * (8 - u32::from(max_sub_layers_minus1)))?; // reserved_zero_2bits
+	}
+	for &(profile, level) in &present[..sub_layers] {
+		// A sub-layer profile is the same 88 bits as the general one; sub_layer_level_idc is 8.
+		r.skip_bits(88 * u32::from(profile) + 8 * u32::from(level))?;
+	}
+	Ok(())
+}
+
 #[cfg(test)]
 mod tests {
 	use super::super::fixtures;
@@ -241,6 +263,18 @@ mod tests {
 			assert_eq!(SpsHead::parse(nal), Some(sps.head));
 		}
 		assert_eq!(SpsHead::parse(SPS_SUB_LAYERS).unwrap().max_sub_layers_minus1, 2);
+	}
+
+	/// The id reader walks the same profile_tier_level, sub-layers included, to the same id.
+	#[test]
+	fn id_matches_the_full_parse() {
+		for nal in [fixtures::SPS, fixtures::SPS_PYRAMID, SPS_SUB_LAYERS] {
+			let full = SpsNALUnit::parse(&mut &nal[..]).unwrap().rbsp;
+			let rbsp = h264_parser::nal::ebsp_to_rbsp(&nal[2..]);
+			assert_eq!(id(&mut BitReader::new(&rbsp)).unwrap(), full.sps_seq_parameter_set_id as u32);
+		}
+		let rbsp = h264_parser::nal::ebsp_to_rbsp(&SPS_SUB_LAYER_PROFILE_AND_LEVEL[2..]);
+		assert_eq!(id(&mut BitReader::new(&rbsp)).unwrap(), 0);
 	}
 
 	/// scuffle_h265 0.2.2 reads that `sub_layer_level_idc` twice and refuses the SPS; the head

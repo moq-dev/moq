@@ -592,10 +592,6 @@ impl<E: catalog::Catalog> Import<E> {
 			return Ok(());
 		}
 		self.claims_changed = true;
-		let mut seen = HashSet::new();
-		if let Some(es) = pmt.streams.iter().find(|es| !seen.insert(es.pid)) {
-			anyhow::bail!("the PMT lists PID {} twice", es.pid.as_u16());
-		}
 		// Which PID speaks for the program clock, so a `discontinuity_indicator` there
 		// can be read as a timebase reset rather than a counter jump.
 		if self.pcr_pid != pmt.pcr_pid {
@@ -8713,10 +8709,28 @@ pub(super) mod test {
 		}
 	}
 
+	/// A PMT listing one PID twice routes it by the later entry, as a newer PMT would.
+	#[tokio::test(start_paused = true)]
+	async fn a_pmt_listing_a_pid_twice_routes_by_the_last_entry() {
+		use crate::container::test_util::{IDR, PPS, SPS};
+		let mut payload = Vec::new();
+		for nal in [SPS, PPS, IDR] {
+			payload.extend([0, 0, 0, 1]);
+			payload.extend(nal);
+		}
+		let mut data = synth_pmt(&[(StreamType::AdtsAac, VIDEO), (StreamType::H264, VIDEO)], false);
+		data.extend(video_pes(VIDEO, 0, 90_000, None, &payload));
+		let (consumer, catalog, _import) = import_all(&data).unwrap();
+		let snapshot = catalog.snapshot();
+		assert!(snapshot.audio.renditions.is_empty());
+		let name = snapshot.video.renditions.keys().next().unwrap().clone();
+		assert_eq!(read_track(&consumer, &name, crate::container::Kind::Video).await.len(), 1);
+	}
+
 	#[tokio::test(start_paused = true)]
 	async fn video_parameter_sets_commit_per_au_instead_of_per_pes() {
 		use crate::container::test_util::{IDR, PPS, SPS};
-		let extra_pps = [0x68, 0xce, 0x3c, 0x81];
+		let extra_pps = [0x68, 0x4e, 0x3c, 0x80];
 		let mut payload = Vec::new();
 		for nal in [SPS, PPS, &extra_pps, IDR, &[0x67, 0x42], &[0x65, 0x80]] {
 			payload.extend([0, 0, 0, 1]);
@@ -10714,27 +10728,6 @@ pub(super) mod test {
 		import.handle_pmt(pmt(Vec::new())).unwrap();
 
 		assert_eq!(import.stats().streams[&PCR_PID].unconfirmed, 1);
-	}
-
-	/// A PMT listing one PID twice is malformed, so it refuses the import rather than pick an
-	/// entry to route by.
-	#[test]
-	fn a_pmt_listing_a_pid_twice_refuses_the_import() {
-		use crate::container::ts::psi::{Es, Pmt};
-		let (_catalog, mut import) = psi_import();
-		let es = |stream_type| Es {
-			stream_type,
-			pid: Pid::new(0x0062).unwrap(),
-			descriptors: Vec::new(),
-		};
-		let pmt = Pmt {
-			program_number: 1,
-			pcr_pid: Some(Pid::new(PCR_PID).unwrap()),
-			program_info: Vec::new(),
-			streams: vec![es(0x06), es(0x15)],
-		};
-		let err = import.handle_pmt(pmt).expect_err("a PID listed twice is refused");
-		assert!(err.to_string().contains("twice"), "{err:#}");
 	}
 
 	/// A source revising its PMT without end holds only its live routes: each revision ends a

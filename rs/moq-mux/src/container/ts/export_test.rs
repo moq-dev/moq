@@ -47,7 +47,7 @@ const SC: &[u8] = &[0, 0, 0, 1];
 const SPS: &[u8] = &[0x67, 0x42, 0xc0, 0x1f, 0xde];
 const PPS: &[u8] = &[0x68, 0xce, 0x3c, 0x80];
 // A second, distinct PPS (id 1): broadcast feeds often define more than one.
-const PPS1: &[u8] = &[0x68, 0xce, 0x3c, 0x81];
+const PPS1: &[u8] = &[0x68, 0x4e, 0x3c, 0x80];
 
 // libklvanc public-sample SCTE-35 cue: splice_info_section, table_id 0xFC, 30 bytes.
 const CUE: &[u8] = &[

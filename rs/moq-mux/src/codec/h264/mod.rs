@@ -20,6 +20,8 @@ pub use split::*;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
+use crate::codec::annexb::{InBandCodec, ParameterSets};
+
 // H.264 NAL unit types (ISO/IEC 14496-10 §7.4.1).
 const NAL_TYPE_SEI: u8 = 6;
 const NAL_TYPE_SPS: u8 = 7;
@@ -708,8 +710,8 @@ impl Avc1 {
 		let mut nal_iter = crate::codec::annexb::NalIterator::new(&mut buf);
 
 		let mut out = BytesMut::with_capacity(payload.remaining());
-		let mut frame_sps: Vec<Bytes> = Vec::new();
-		let mut frame_pps: Vec<Bytes> = Vec::new();
+		let mut frame_sps = ParameterSets::new();
+		let mut frame_pps = ParameterSets::new();
 		let mut emitted_any_slice = false;
 
 		loop {
@@ -734,10 +736,12 @@ impl Avc1 {
 		// rather than lingering in the avcC. Per type, so a frame that updates only
 		// one of SPS/PPS keeps the other.
 		let mut changed = false;
+		let frame_sps: Vec<Bytes> = frame_sps.into_values().collect();
 		if !frame_sps.is_empty() && frame_sps != self.sps {
 			self.sps = frame_sps;
 			changed = true;
 		}
+		let frame_pps: Vec<Bytes> = frame_pps.into_values().collect();
 		if !frame_pps.is_empty() && frame_pps != self.pps {
 			self.pps = frame_pps;
 			changed = true;
@@ -762,25 +766,25 @@ impl Avc1 {
 	}
 }
 
-/// Process one NAL: SPS/PPS are collected (distinctly) into this frame's sets,
+/// Process one NAL: SPS/PPS are collected by id into this frame's sets,
 /// everything else is length-prefixed and appended to `out`. Returns true if the
 /// NAL was a slice (i.e. produced sample bytes).
 fn process_nal(
 	nal: &Bytes,
 	out: &mut BytesMut,
-	frame_sps: &mut Vec<Bytes>,
-	frame_pps: &mut Vec<Bytes>,
+	frame_sps: &mut ParameterSets,
+	frame_pps: &mut ParameterSets,
 ) -> Result<bool> {
 	if nal.is_empty() {
 		return Ok(false);
 	}
 	match nal[0] & 0x1f {
 		NAL_TYPE_SPS => {
-			crate::codec::annexb::push_distinct(frame_sps, nal);
+			InBandCodec::H264.insert_parameter_set(frame_sps, nal)?;
 			Ok(false)
 		}
 		NAL_TYPE_PPS => {
-			crate::codec::annexb::push_distinct(frame_pps, nal);
+			InBandCodec::H264.insert_parameter_set(frame_pps, nal)?;
 			Ok(false)
 		}
 		_ => {
@@ -1028,7 +1032,7 @@ mod tests {
 		// in order, so slices referencing either id stay decodable.
 		let sps = Bytes::from_static(&[0x67, 0x42, 0xc0, 0x1f, 0xde]);
 		let pps0 = Bytes::from_static(&[0x68, 0xce, 0x3c, 0x80]);
-		let pps1 = Bytes::from_static(&[0x68, 0xce, 0x3c, 0x81]);
+		let pps1 = Bytes::from_static(&[0x68, 0x4e, 0x3c, 0x80]);
 
 		let avcc = build_avcc(std::slice::from_ref(&sps), &[pps0.clone(), pps1.clone()]).unwrap();
 		// numOfSequenceParameterSets is the low 5 bits of byte 5.
@@ -1043,7 +1047,7 @@ mod tests {
 		// One keyframe carrying both PPS: the synthesized avcC keeps both, in order.
 		let sps = &[0x67, 0x42, 0xc0, 0x1f, 0xde][..];
 		let pps0 = &[0x68, 0xce, 0x3c, 0x80][..];
-		let pps1 = &[0x68, 0xce, 0x3c, 0x81][..];
+		let pps1 = &[0x68, 0x4e, 0x3c, 0x80][..];
 		let idr = &[0x65, 0x88][..];
 
 		let mut tx = Avc1::new();
@@ -1063,7 +1067,7 @@ mod tests {
 		// and drops the old one rather than accumulating both forever.
 		let sps = &[0x67, 0x42, 0xc0, 0x1f, 0xde][..];
 		let pps0 = &[0x68, 0xce, 0x3c, 0x80][..];
-		let pps1 = &[0x68, 0xce, 0x3c, 0x81][..];
+		let pps1 = &[0x68, 0x4e, 0x3c, 0x80][..];
 		let idr = &[0x65, 0x88][..];
 
 		let mut tx = Avc1::new();
@@ -1077,6 +1081,21 @@ mod tests {
 			vec![sps, pps1],
 			"reinit must drop the superseded PPS"
 		);
+	}
+
+	#[test]
+	fn avc3_repeated_pps_id_keeps_the_last() {
+		// Two PPS defining id 0 in one keyframe: the later replaces the earlier, as in a decoder.
+		let sps = &[0x67, 0x42, 0xc0, 0x1f, 0xde][..];
+		let pps_a = &[0x68, 0xce, 0x3c, 0x80][..];
+		let pps_b = &[0x68, 0xce, 0x38, 0x80][..];
+		let idr = &[0x65, 0x88][..];
+
+		let mut tx = Avc1::new();
+		tx.transform(annexb_frame(&[sps, pps_a, pps_b, idr])).unwrap();
+
+		let (_, params) = avcc_params(tx.avcc().expect("avcC available")).unwrap();
+		assert_eq!(params.iter().map(|p| p.as_ref()).collect::<Vec<_>>(), vec![sps, pps_b]);
 	}
 
 	#[test]
