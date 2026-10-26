@@ -92,8 +92,12 @@ already queued, then `Client::close` sends the QUIC close. Runnable examples:
 [`subscribe.rs`](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/subscribe.rs).
 
 URLs may be `https://` (QUIC or WebTransport, with a WebSocket fallback),
-`moql://`/`moqt://` (raw QUIC), or `iroh://`. A `?jwt=` query carries the
-token. `http://` is for a relay on localhost only: it fetches the certificate
+`moql://`/`moqt://` (raw QUIC), or `iroh://`. Put credentials in
+`connect::Config::tokens` rather than the URL: the first rides SETUP (and
+`?jwt=` while an offered version needs it), each other widens the grant in band,
+and `Client::tokens().set(...)` replaces them before they expire. A `?jwt=`
+already in the URL stays the connection credential, which reaches an older
+relay. `http://` is for a relay on localhost only: it fetches the certificate
 fingerprint unauthenticated, so never send a token over it. QUIC tuning shares
 the relay's settings; see the [relay reference](/bin/relay/config#quic).
 

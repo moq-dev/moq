@@ -15,9 +15,16 @@ quality or performance.
 
 Decided in the 2026-09-30 audit: the Google BBR comparison merged here as
 one study, since both reuse the same media profiles, harness, and baseline.
-On 2026-10-24 the maintainer split ProbeRTT natural-drain credit out to
-[its own quest](/quest/m1/bbr-probe-rtt-skip.md), which ships QUICHE's
-near-floor skip.
+ProbeRTT natural-drain credit is settled: BBR3 skips a due ProbeRTT after an
+interval that was app-limited at least once and saw no loss or CE (QUICHE
+BBRv1's kBBR8, which subsumes its near-floor kBBR7). The maintainer chose
+kBBR8 on 2026-10-25 on the advice of BBR's designer, replacing the
+2026-10-24 kBBR7-only decision. The rejected risk, `min_rtt` ratcheting up
+under a standing queue the flow builds itself, is the known cost; a skip keeps
+the `min_rtt` value rather than taking the queued samples, so it shows up as
+the mirror image: while media stays app-limited and congestion-free, `min_rtt`
+does not follow a base-RTT rise until a lost or CE-marked packet, or an
+interval with no starved poll, brings ProbeRTT back.
 
 ### Harness
 
@@ -88,11 +95,6 @@ to weaken the congestion response or precautionary probe stop. This study
 still decides growth recognition and probe behavior separately; it does not
 adopt either in advance.
 
-## Required
-
-- [Portable controller trait](/quest/m1/congestion/trait.md) - followers land in `moq-congestion` on its trait
-
 ## Related
 
 - [TS validation](/test/ts/README.md) - shaped paths, whole-group shedding, and measured baselines
-- [Skip ProbeRTT after a near-floor RTT](/quest/m1/bbr-probe-rtt-skip.md) - the ProbeRTT natural-drain decision split out of this study

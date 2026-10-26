@@ -7,7 +7,7 @@ import { type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/s
 import type * as Epoch from "./epoch.ts";
 import { NotFound } from "./error.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
-import { Route } from "./hop.ts";
+import type { Route } from "./hop.ts";
 import { hooks } from "./internal.ts";
 import { Lister, Listing, listTracks, type Tracks } from "./listing.ts";
 import * as Path from "./path.ts";
@@ -382,11 +382,7 @@ export class Producer {
 			producer.#announcer = announcer;
 		};
 		hooks.attachAnnouncer = attachAnnouncer;
-		hooks.withholdAnnouncer = (producer) => {
-			const announcer = producer.#announcer;
-			producer.#announcer = undefined;
-			return announcer;
-		};
+
 		hooks.onClosed = (producer, fn) => {
 			const closers = producer.#state.closers;
 			closers.add(fn);
@@ -473,49 +469,7 @@ export class Producer {
 		return trackOf(name, this);
 	}
 
-	/** The route this broadcast is announced with, or undefined while it is not announced. */
-	get route(): Route | undefined {
-		return this.#announcer?.route();
-	}
-
-	/**
-	 * Advertise this broadcast's exact path, or replace the standing advertisement's route.
-	 *
-	 * The route is taken as given, epoch included: a route with another epoch (or none)
-	 * announces a new broadcast, so re-price from the current one,
-	 * `announce({ ...broadcast.route, cost })`, to keep the instance.
-	 *
-	 * Call it once the tracks a subscriber needs first (a catalog) exist. Until then the
-	 * broadcast exists for nobody, on its own origin or at a peer. Retracts on
-	 * {@link unannounce} or {@link close}. Throws if this producer was not created through an
-	 * origin, is a claim answer still being prepared, or if the broadcast is already closed.
-	 */
-	announce(
-		route:
-			| Route
-			| {
-					epoch?: Route["epoch"];
-					hops?: Route["hops"];
-					cost?: Route["cost"];
-					auth?: Route["auth"];
-			  } = Route.default,
-	): void {
-		if (this.#state.closed.peek() !== undefined) {
-			throw new Error("broadcast is closed");
-		}
-		if (!this.#announcer) throw new Error("broadcast is not attached to an origin");
-		this.#announcer.announce(Route.normalize(route));
-	}
-
-	/**
-	 * Retract the advertisement of this broadcast's path, if any, from local consumers and
-	 * peers alike. {@link announce} brings it back.
-	 */
-	unannounce(): void {
-		this.#announcer?.unannounce();
-	}
-
-	/** End the broadcast for good: retract it, serve no new tracks, and refuse a later {@link announce}. Idempotent. */
+	/** End the broadcast for good: retract its route and serve no new tracks. Idempotent. */
 	close(): void {
 		this.#announcer?.unannounce();
 		this.#announcer = undefined;

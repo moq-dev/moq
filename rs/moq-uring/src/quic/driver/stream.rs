@@ -392,7 +392,7 @@ impl RecvStream {
 	fn read(shared: &Shared, id: StreamId, max: usize) -> Read {
 		let mut conn = shared.conn.borrow_mut();
 		let mut recv = conn.recv_stream(id);
-		let mut chunks = match recv.read(true) {
+		let mut chunks = match recv.read() {
 			Ok(chunks) => chunks,
 			// The stream is gone, so everything it held is already ours.
 			Err(_) => return Read::Finished,

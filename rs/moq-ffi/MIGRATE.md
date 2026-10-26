@@ -10,6 +10,10 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 Rename `dynamic()` on `MoqOriginProducer`, `MoqBroadcastProducer`, `MoqTrackProducer`, and `MoqTrackRequest` to `requests()`.
 Their handles `MoqOriginDynamic`, `MoqBroadcastDynamic`, and `MoqTrackDynamic` are `MoqOriginRequests`, `MoqBroadcastRequests`, and `MoqTrackRequests`; their methods are unchanged.
 
+### `MoqClientConfig` gains `tokens`
+
+It defaults to empty in every generated binding; a Rust struct literal adds `tokens: vec![]` or ends with `..Default::default()`.
+
 ### Durations are typed
 
 Every duration is a UniFFI `Duration` instead of an integer microsecond field, and drops its `_us` suffix: each language receives its own duration type (`timedelta`, `TimeInterval`, `java.time.Duration`, `time.Duration`, Dart `Duration`, C++ `std::chrono` nanoseconds).

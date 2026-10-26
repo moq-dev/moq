@@ -45,8 +45,9 @@ async function roundTrip(wire: Wire, timescale: Timescale | undefined, timestamp
 		accept({ transport: pair.server, url, version: wire.version, publish: origin.consume() }),
 	]);
 
-	const broadcast = origin.createBroadcast(Path.from("test"));
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(Path.from("test"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	// Every request is answered, including the TRACK lookup lite-05+ makes before subscribing.
 	const serving = (async () => {
 		for (;;) {
@@ -114,8 +115,9 @@ test("a forwarded untimed track stays untimed", async () => {
 		connect({ url, transport: downstream.client }),
 	]);
 
-	const broadcast = source.createBroadcast(Path.from("test"));
-	broadcast.announce();
+	const broadcastPublication = source.createBroadcast(Path.from("test"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	const serving = (async () => {
 		for (;;) {
 			const request = await wireOf(broadcast).requested();
@@ -189,8 +191,9 @@ for (const wire of WIRES.filter((wire) => wire.name === "lite-06" || wire.name =
 			accept({ transport: pair.server, url, publish: origin.consume() }),
 		]);
 
-		const broadcast = origin.createBroadcast(Path.from("test"));
-		broadcast.announce();
+		const broadcastPublication = origin.createBroadcast(Path.from("test"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
 		const producer = broadcast.createTrack("video", {});
 		const subscriber = wireOf(client).consume(Path.from("test")).track("video").subscribe();
 

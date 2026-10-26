@@ -6,13 +6,14 @@ Component crates are named `moq-<component>` (`hang` is the exception); infrastr
 
 - `kio`: "easy async" primitives everything else polls through.
 - `moq-tokio`: configures the QUIC backends (`moq-quic`, our quinn fork, and Iroh) and the fallback transports for native binaries, on tokio. `moq-sock` holds the socket plumbing it shares with `moq-uring`, the experimental thread-per-core io\_uring runtime.
+- `moq-quic` is the only QUIC stack we develop; it also powers qmux and WebTransport. Don't add or deepen dependencies on web-transport, noq, or quinn.
 - `moq-cli` builds the `moq` binary and owns the CLI surface for the gateway crates. Binaries never carry a `-cli` suffix.
 
 `moq-net`, `moq-mux`, `moq-relay` (including its layered config), and `moq-ffi` have their own `AGENTS.md`.
 
 # Producer / Consumer
 
-Most crates use a split-handle pattern: a `Producer` writes, any number of `Consumer`s read, state is shared via `kio`. Handles are refcounted: clones share state, the last drop closes cleanly, `abort(err)` closes with an error. A parked clone that keeps something alive is a bug in the holder, and a consumer never keeps its producer or parent alive. A track, group, or frame consumer seeing `Error::Dropped` is a bug too: its producer went away unfinished without calling `abort` with a specific error, so find that path and abort with the real cause. Lifecycle watchers like `broadcast::Demand` return `Dropped` after `close()` by design.
+Most crates use a split-handle pattern: a `Producer` writes, any number of `Consumer`s read, state is shared via `kio`. Handles are refcounted: clones share state, the last drop closes cleanly, `abort(err)` closes with an error. A parked clone that keeps something alive is a bug in the holder, and a consumer never keeps its producer or parent alive. A track, group, or frame consumer seeing `Error::Dropped` is a bug too: its producer went away unfinished without calling `abort` with a specific error, so find that path and abort with the real cause. Lifecycle watchers like `track::Demand` return `Dropped` after `close()` by design.
 
 # Async / poll
 
@@ -47,6 +48,11 @@ Prefer poll. New logic is a `poll_*` with an `async` helper, not the other way a
 - Don't add `#[non_exhaustive]` by default. It earns its keep on error enums, enums that will gain variants, and `Config`-style structs with `pub` fields plus a `Default`/constructor. Builders with private fields don't need it.
 - Append new variants to the end of a public fieldless enum with implicit discriminants; inserting reorders `as` values.
 - A renamed flag or env var stays as a hidden arg with its original `env`, reported by the section's `deprecated()` into `moq_tokio::cli::Deprecated`; callers must reject startup when the collection is non-empty and name the replacement rather than honor the old spelling. Never advertise the dead name in docs or `--help`.
+
+# Features
+
+- Defaults skip anything expensive to build or needing a system library. Prefer fewer features: each one trims a build but fragments the code and its test matrix, so add one only for a vendor integration or a system dependency.
+- A feature lives in the crate that owns the integration (`s3` in moq-archive). Dependents forward it under the same name rather than enabling their dependencies' features directly.
 
 # Testing
 

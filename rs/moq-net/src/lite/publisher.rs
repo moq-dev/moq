@@ -2176,7 +2176,7 @@ enum FetchServe {
 		stamp: Option<Stamp>,
 		prev_ts: u64,
 		frame: Option<frame::Consumer>,
-		chunk: Option<bytes::Bytes>,
+		chunk: Option<crate::frame::Payload>,
 		batch: Box<Objects>,
 		batch_pos: usize,
 		/// The `ietf` extension's object records, when negotiated.
@@ -2289,7 +2289,7 @@ impl Request for FetchServe {
 							}
 						} else if let Some(pending) = frame {
 							match ready!(pending.poll_read_chunk(waiter))? {
-								Some(next) => *chunk = Some(next),
+								Some(next) => *chunk = Some(next.into()),
 								None => *frame = None,
 							}
 						} else if *batch_pos < batch.len() {
@@ -4402,7 +4402,7 @@ enum GroupState {
 	Serve {
 		writer: Writer<crate::transport::boxed::SendStream, Version>,
 		frame: Option<frame::Consumer>,
-		chunk: Option<bytes::Bytes>,
+		chunk: Option<crate::frame::Payload>,
 		batch: Box<Objects>,
 		batch_pos: usize,
 		/// The `ietf` extension's object records, when negotiated.
@@ -4619,7 +4619,7 @@ impl GroupServe {
 								}
 							} else if let Some(pending) = frame {
 								match pending.poll_read_chunk(waiter) {
-									Poll::Ready(Ok(Some(next))) => *chunk = Some(next),
+									Poll::Ready(Ok(Some(next))) => *chunk = Some(next.into()),
 									Poll::Ready(Ok(None)) => *frame = None,
 									Poll::Ready(Err(err)) => break 'serve Err(err),
 									Poll::Pending => return Poll::Pending,
@@ -6003,6 +6003,45 @@ mod serve_group_test {
 			}
 		}
 		drops
+	}
+
+	/// A stale group already named in SUBSCRIBE_DROP stays dropped once SUBSCRIBE_UPDATE
+	/// widens the max age past it: the subscriber may have settled it already.
+	#[moq_clock::test]
+	async fn a_reported_stale_drop_survives_a_widened_max_age() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			let mut track = track::Producer::new(
+				Arc::new(broadcast::Info::default()),
+				"test",
+				crate::track::Info::timed(),
+			);
+			let subscriber =
+				track.subscribe(track::Subscription::default().with_max_delay(Duration::from_millis(1500)));
+			let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
+			write_group(&mut track, 0, 0);
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			// Groups 1 and 2 reach 2s and 3s, at least 1.5s behind the 6s edge.
+			for (sequence, millis) in [(1, 1000), (2, 2000), (3, 3000), (4, 6000)] {
+				write_group(&mut track, sequence, millis);
+			}
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			assert_eq!(run.ctx.outcomes.opened.load(Ordering::Relaxed), 3, "{version:?}");
+			assert_eq!(drops(&mut writer, &log, version).await, [(1, 2)], "{version:?}");
+
+			run.update(lite::SubscribeUpdate {
+				wanted_group: None,
+				priority: 0,
+				max_delay: Duration::from_secs(10),
+				ranges: vec![lite::Range::span(None, 0, None, None)],
+				order: Order::Descending,
+			});
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			assert_eq!(
+				run.ctx.outcomes.opened.load(Ordering::Relaxed),
+				3,
+				"{version:?}: no stream for a dropped group"
+			);
+		}
 	}
 
 	/// Lite-05 and later name every sequence below the end that the subscription never

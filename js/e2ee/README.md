@@ -32,11 +32,11 @@ import { Time } from "@moq/net";
 
 const credential = new Credential({ context, kid, secret });
 const generation = credential.produce();
-const broadcast = origin.createBroadcast(await credential.path("meeting.hang"));
-const video = await new Broadcast.Producer(broadcast, generation).createTrack("video", {
+const publication = origin.createBroadcast(await credential.path("meeting.hang"));
+const video = await new Broadcast.Producer(publication.broadcast, generation).createTrack("video", {
 	timescale: Time.Timescale.MILLI,
 });
-broadcast.announce({ epoch: generation.epoch });
+publication.announce({ epoch: generation.epoch });
 
 const group = video.appendGroup();
 await group.writeFrame(Time.Timestamp.now(), frame);

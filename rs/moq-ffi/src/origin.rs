@@ -99,18 +99,6 @@ pub fn moq_mint_epoch() -> String {
 	moq_net::Epoch::mint().to_string()
 }
 
-/// The wall-clock time an epoch encodes, in milliseconds since the Unix epoch.
-///
-/// Errors with `InvalidEpoch` unless the text is a lowercase hyphenated UUIDv7.
-#[uniffi::export]
-pub fn moq_epoch_time_ms(epoch: String) -> Result<u64, MoqError> {
-	let epoch: moq_net::Epoch = epoch.parse()?;
-	// This numeric API retains UUIDv7's full 48-bit range, beyond Wall's year 2554.
-	// Parsing above guarantees these fields are canonical hexadecimal Unix milliseconds.
-	let text = epoch.as_str();
-	Ok(u64::from_str_radix(&text[..8], 16).unwrap() << 16 | u64::from_str_radix(&text[9..13], 16).unwrap())
-}
-
 /// An origin in which broadcasts can be published.
 #[derive(uniffi::Object)]
 pub struct MoqOriginProducer {

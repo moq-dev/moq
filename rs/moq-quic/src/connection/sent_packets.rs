@@ -220,6 +220,7 @@ mod tests {
 			time_sent: Instant::now(),
 			size,
 			ack_eliciting: false,
+			congestion: None,
 			largest_acked: None,
 			retransmits: Default::default(),
 			stream_frames: Default::default(),

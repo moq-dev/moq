@@ -33,8 +33,9 @@ import { Track as TrackMessage } from "./track.ts";
 import { ALPN_05, ALPN_06, ALPN_07_WIP, Version } from "./version.ts";
 
 function publish(origin: OriginProducer, path: Path.Valid) {
-	const broadcast = origin.createBroadcast(path);
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(path);
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	return broadcast;
 }
 
@@ -106,8 +107,9 @@ test.each([
 	const pair = createMockTransportPair(ALPN_05);
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
-	const broadcast = origin.createBroadcast(Path.from("cam"));
-	broadcast.announce({ cost: 7n });
+	const broadcastPublication = origin.createBroadcast(Path.from("cam"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce({ cost: 7n });
 
 	const written: Uint8Array[] = [];
 	const stream = new Stream({
@@ -125,7 +127,7 @@ test.each([
 	const initial = written.length;
 	expect(initial).toBeGreaterThan(0);
 
-	broadcast.announce({ cost: 9n });
+	broadcastPublication.announce({ cost: 9n });
 	await settle();
 	expect(written.length > initial).toBe(sent);
 
@@ -877,7 +879,7 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 			expect(await sub.servedSequence()).toBe(0);
 			expect("start" in (await decodeSubscribeResponse(sub.client.reader, version))).toBe(true);
 
-			sub.track.dropGroups(1, 3, new StreamError(StreamCode(70), { message: "cut" }));
+			hooks.dropTrackGroups(sub.track, 1, 3, new StreamError(StreamCode(70), { message: "cut" }));
 			const resp = await decodeSubscribeResponse(sub.client.reader, version);
 			if (!("drop" in resp)) throw new Error("expected SUBSCRIBE_DROP");
 			expect([resp.drop.start, resp.drop.end, resp.drop.error]).toEqual([
@@ -1199,7 +1201,7 @@ for (const skipped of ["failed", "stale"] as const) {
 			group.writeFrame(textFrame("old", Timestamp.fromMillis(5)));
 			sub.track.writeGroup(group);
 			group.close(skipped === "failed" ? new Error("cut") : undefined);
-			if (skipped === "failed") sub.track.dropGroups(7, 8, new Error("cut"));
+			if (skipped === "failed") hooks.dropTrackGroups(sub.track, 7, 8, new Error("cut"));
 			sub.serve(6);
 			const response = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
 			if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
@@ -2443,8 +2445,9 @@ test("lite draft-06: announces wait for the setup grant", async () => {
 		answered = resolve;
 	});
 	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomHop(), origin.consume(), { grant, ready });
-	const broadcast = origin.createBroadcast(Path.from("foo/bar"));
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(Path.from("foo/bar"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 
 	const written: Uint8Array[] = [];
 	const stream = new Stream({

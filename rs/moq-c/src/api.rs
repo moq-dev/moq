@@ -1245,6 +1245,15 @@ pub struct moq_client_config {
 	pub implementation: *const c_char,
 	/// The length in bytes of `implementation`.
 	pub implementation_len: usize,
+
+	/// Credentials every dial presents, or NULL for none. The first is the connection
+	/// credential, sent in SETUP and, while an offered version can't carry it there (lite
+	/// before 07), as the URL's `?jwt=`; each other token widens the grant over in-band
+	/// AUTH. A `?jwt=` already in the URL stays the connection credential, and then every
+	/// token rides AUTH. An empty token fails the dial.
+	pub tokens: *const moq_string,
+	/// The number of entries in `tokens`.
+	pub tokens_len: usize,
 }
 
 /// The settings [moq_session_connect] dials with when given NULL.
@@ -2200,16 +2209,21 @@ pub extern "C" fn moq_publish_unannounce(broadcast: u32) -> i32 {
 
 /// End a broadcast for good and release its handle.
 ///
-/// The origin retracts the path immediately and serves no new tracks; tracks already
-/// subscribed carry on to their own end. The handle is invalid afterwards, so closing
-/// it again fails like any unknown handle.
+/// The origin retracts the path immediately and serves no new tracks. Every media, raw track,
+/// container, encoder, JSON, and binary handle still open on the broadcast ends with `UNROUTABLE`,
+/// the way a reader sees a publisher leave, and is released; finish a track first to end it
+/// cleanly. The
+/// handles are invalid afterwards, so closing it again fails like any unknown handle, and so
+/// does any later call on a released child.
 ///
 /// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_publish_close(broadcast: u32) -> i32 {
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
-		State::lock().publish.close(broadcast)
+		// Bound first, so the global lock is released before the encoders end.
+		let closing = State::lock().publish_close(broadcast)?;
+		closing.run()
 	})
 }
 
@@ -2355,7 +2369,7 @@ pub extern "C" fn moq_publish_media_seek(media: u32, sequence: u64) -> i32 {
 /// Finish a media track, flushing any buffered frames. No more frames can be written.
 ///
 /// The broadcast keeps the finished track, catalog rendition included, until it closes, so a
-/// late subscriber can still drain it.
+/// late subscriber can still drain it. A failed finish ends the track with its error instead.
 ///
 /// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
@@ -2482,7 +2496,7 @@ pub extern "C" fn moq_publish_container_seek(container: u32, sequence: u64) -> i
 /// Finish every track the container publishes and release the handle.
 ///
 /// The broadcast keeps the finished tracks, catalog renditions included, until it closes, so a
-/// late subscriber can still drain them.
+/// late subscriber can still drain them. A failed finish ends the tracks with its error instead.
 ///
 /// Returns zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
@@ -3043,7 +3057,9 @@ pub unsafe extern "C" fn moq_track_request_requests(
 ///
 /// Consumes the request handle. `info` is as in [moq_publish_track]: NULL for the
 /// microsecond default. Returns a non-zero track handle usable with every
-/// `moq_publish_track_*` function, or a negative code on failure.
+/// `moq_publish_track_*` function, or a negative code on failure. Once the request's
+/// broadcast closed, the track ends with `UNROUTABLE` and the call fails with
+/// `MOQ_ERROR_BROADCAST_NOT_FOUND`.
 ///
 /// # Safety
 /// - `info` must be NULL or a valid pointer to a [moq_track_info] struct.

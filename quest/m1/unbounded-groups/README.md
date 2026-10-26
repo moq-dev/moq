@@ -32,7 +32,10 @@ hole and are unpaced; reader-paced refill "trains" that merge were rejected
 as not worth their complexity. A refill refreshes the frames after it so it
 never evicts what its reader needs next. When nothing serves a hole, the
 reader gets `Evicted` and a joiner falls back to `Info::refresh`. The live
-edge is never paced by readers. Groups are bounded by bytes, with each
+edge is paced by its fastest reader (decided 2026-10-25, superseding
+2026-10-24's "never paced by readers"; see
+[Fastest-reader pacing](/quest/m1/unbounded-groups/fastest-reader.md)), so a
+byte stream over MoQ loses nothing to a reader that keeps up. Groups are bounded by bytes, with each
 frame's slot charged to the pool. Details are in
 [Front eviction](/quest/m1/unbounded-groups/front-eviction.md).
 
@@ -105,8 +108,8 @@ moq-transport, with memory held near the pool size.
 
 ## Required
 
-- [Segmented frames](/quest/m1/unbounded-groups/segmented-frames.md) - large frames store as sealed segments, preallocate at most one, and release receive credit per segment
 - [Front eviction](/quest/m1/unbounded-groups/front-eviction.md) - groups shed whole frames from their front under pressure and refill them in place; the group caps go
+- [Fastest-reader pacing](/quest/m1/unbounded-groups/fastest-reader.md) - every hop buffers at most a window past its fastest reader and pushes back through QUIC flow control
 - [Byte holes](/quest/m1/unbounded-groups/byte-holes.md) - segments inside a frame evict and refill by `(frame, byte)` on the next lite version; the frame cap goes
 - [JS unbounded groups](/quest/m1/unbounded-groups/js.md) - `@moq/net` drops its caps, streams huge frames, and matches front eviction
 - [Log lock profile](/quest/m1/unbounded-groups/log-lock-profile.md) - a lock profile on a perf host confirms the epoch-based `kio::log` cut `GroupState` contention

@@ -353,8 +353,9 @@ function publisher(origin: OriginProducer) {
 
 test("data after a TRACKS request closes the session", async () => {
 	const origin = new OriginProducer();
-	const broadcast = origin.createBroadcast(Path.from("room"));
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(Path.from("room"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	broadcast.createTrack("a");
 	const { list, closing } = publisher(origin);
 	const listing = await list("room");
@@ -368,8 +369,9 @@ test("data after a TRACKS request closes the session", async () => {
 
 test("a publisher lists its broadcast's own tracks, never one served on request", async () => {
 	const origin = new OriginProducer();
-	const broadcast = origin.createBroadcast(Path.from("room"));
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(Path.from("room"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	broadcast.createTrack("a", { priority: 5 });
 	// Served on request: answered when asked, never listed.
 	void wireOf(broadcast)
@@ -390,8 +392,9 @@ test("a publisher lists its broadcast's own tracks, never one served on request"
 
 test("a newer listing of a broadcast on one session replaces the older", async () => {
 	const origin = new OriginProducer();
-	const broadcast = origin.createBroadcast(Path.from("room"));
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(Path.from("room"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	broadcast.createTrack("a");
 	const { list } = publisher(origin);
 	const older = await list("room");
@@ -461,8 +464,9 @@ test("a listing over a session carries each track's info, end to end", async () 
 		connect({ url, transport: pair.client }),
 		accept({ transport: pair.server, url, publish: origin.consume() }),
 	]);
-	const broadcast = origin.createBroadcast(Path.from("room"));
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(Path.from("room"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	broadcast.createTrack("a", {
 		timescale: Timescale.MILLI,
 		maxAge: Milli(3000),
@@ -496,9 +500,10 @@ test("an epoch-pinned front lists its serving route's tracks", async () => {
 		connect({ url, transport: pair.client, consume: clientOrigin }),
 		accept({ transport: pair.server, url, publish: serverOrigin.consume() }),
 	]);
-	const broadcast = serverOrigin.createBroadcast(Path.from("room"));
+	const broadcastPublication = serverOrigin.createBroadcast(Path.from("room"));
+	const broadcast = broadcastPublication.broadcast;
 	broadcast.createTrack("a");
-	broadcast.announce({ epoch: Epoch.parse("01900000-0000-7000-8000-000000000001") });
+	broadcastPublication.announce({ epoch: Epoch.parse("01900000-0000-7000-8000-000000000001") });
 
 	const reader = clientOrigin.consume();
 	const announced = reader.announced();
@@ -551,8 +556,9 @@ test("lite-06 cannot list over a session", async () => {
 		connect({ url, transport: pair.client }),
 		accept({ transport: pair.server, url, publish: origin.consume() }),
 	]);
-	const broadcast = origin.createBroadcast(Path.from("room"));
-	broadcast.announce();
+	const broadcastPublication = origin.createBroadcast(Path.from("room"));
+	const broadcast = broadcastPublication.broadcast;
+	broadcastPublication.announce();
 	const tracks = wireOf(client).consume(Path.from("room")).tracks();
 	expect(await next(tracks)).toMatch(/requires moq-lite-07/);
 	broadcast.close();

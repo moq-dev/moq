@@ -2494,7 +2494,7 @@ impl Producer {
 	}
 
 	/// Returns the root that is automatically stripped from all paths.
-	pub fn root(&self) -> &Path<'_> {
+	pub fn root(&self) -> &PathOwned {
 		&self.root
 	}
 
@@ -2504,7 +2504,7 @@ impl Producer {
 	}
 
 	/// Converts a relative path to an absolute path.
-	pub fn absolute(&self, path: impl AsPath) -> Path<'_> {
+	pub fn absolute(&self, path: impl AsPath) -> PathOwned {
 		self.root.join(path)
 	}
 }
@@ -5636,7 +5636,7 @@ pub struct Request {
 
 impl Request {
 	/// The absolute path that was requested.
-	pub fn path(&self) -> &Path<'_> {
+	pub fn path(&self) -> &PathOwned {
 		&self.path
 	}
 
@@ -6614,7 +6614,7 @@ impl Consumer {
 	}
 
 	/// Returns the prefix that is automatically stripped from all paths.
-	pub fn root(&self) -> &Path<'_> {
+	pub fn root(&self) -> &PathOwned {
 		&self.root
 	}
 
@@ -6624,7 +6624,7 @@ impl Consumer {
 	}
 
 	/// Converts a relative path to an absolute path.
-	pub fn absolute(&self, path: impl AsPath) -> Path<'_> {
+	pub fn absolute(&self, path: impl AsPath) -> PathOwned {
 		self.root.join(path)
 	}
 }
@@ -6942,7 +6942,8 @@ impl AnnounceConsumer {
 	}
 
 	/// Whether this consumer has synced; see [`Self::poll_synced`].
-	pub fn is_synced(&self) -> bool {
+	#[cfg(test)]
+	pub(crate) fn is_synced(&self) -> bool {
 		let state = self.state.read();
 		state.is_closed() || state.synced()
 	}
@@ -6969,12 +6970,6 @@ impl AnnounceConsumer {
 				false => Poll::Pending,
 			})
 			.map(|_| ())
-	}
-
-	/// Wait until this consumer has synced; see [`Self::poll_synced`].
-	#[cfg(feature = "async")]
-	pub async fn synced(&self) {
-		kio::wait(|waiter| self.poll_synced(waiter)).await
 	}
 
 	// The wire sender uses this only to bound its initial replay.
@@ -7025,12 +7020,12 @@ impl AnnounceConsumer {
 	}
 
 	/// Returns the root that is automatically stripped from emitted prefixes.
-	pub fn root(&self) -> &Path<'_> {
+	pub fn root(&self) -> &PathOwned {
 		&self.root
 	}
 
 	/// Converts an emitted prefix back to one rooted at the origin.
-	pub fn absolute(&self, prefix: impl AsPath) -> Path<'_> {
+	pub fn absolute(&self, prefix: impl AsPath) -> PathOwned {
 		self.root.join(prefix)
 	}
 }

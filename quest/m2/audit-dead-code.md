@@ -75,6 +75,14 @@ No public removal landed in this run itself; the items marked removed above
 went in a follow-up PR. Propose any public removals separately with their migration and consumer evidence. The public model and
 performance audits own their API and benchmark decisions.
 
+From the 2026-10-25 run:
+
+- moq-tokio's `RecvBandwidth::poll` still handles a closed output, but `out`
+  can no longer close while that call borrows it
+  ([moq-dev/moq#6744](https://github.com/moq-dev/moq/pull/6744)).
+- Locals and fields still named `dynamic` after the `requests()` rename
+  ([moq-dev/moq#6752](https://github.com/moq-dev/moq/pull/6752)).
+
 ## Required
 
 - [Release cut](/quest/m2/release/cut.md) - the release in flight ships before the next audit starts
