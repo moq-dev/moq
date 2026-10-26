@@ -2288,6 +2288,7 @@ impl Subscription {
 
 	/// Track one group stream written toward the peer against this subscription's
 	/// frontier. A no-op off the egress side.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn deliver(&self) -> Delivery {
 		self.frontier.deliver()
 	}
@@ -2479,6 +2480,7 @@ impl Frontier {
 	}
 
 	/// Start tracking one group stream written toward the peer.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn deliver(&self) -> Delivery {
 		Delivery {
 			frontier: self.0.clone(),
@@ -2615,6 +2617,7 @@ impl Drop for Feed {
 /// the stream counts what it wrote as dropped. Empty (no-op) off the egress side.
 #[derive(Default)]
 #[must_use = "an unacknowledged delivery counts as dropped on drop"]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(crate) struct Delivery {
 	frontier: Option<Arc<FrontierInner>>,
 	/// Frames the stream carries.
@@ -2626,6 +2629,7 @@ pub(crate) struct Delivery {
 	bytes: u64,
 }
 
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 impl Delivery {
 	/// Record one frame written to the stream, at `timestamp` when timed. Its payload
 	/// counts only as the transport accepts it; see [`Self::wrote`].

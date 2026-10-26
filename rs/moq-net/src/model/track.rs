@@ -5228,6 +5228,7 @@ pub struct Subscriber {
 	// The subscription guard: bumps `subscriptions` (and the egress viewer refcount)
 	// while held, closing them on drop, and holds the egress lag frontier with a plain
 	// track's feed into it. Empty (no-op) for an untagged track.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	stats_sub: stats::Subscription,
 	largest: Reported,
 }
@@ -6752,6 +6753,7 @@ impl Subscriber {
 
 	/// Track one group stream written toward the peer against this subscription's
 	/// acknowledged frontier. A no-op for an untagged subscriber.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn deliver(&self) -> stats::Delivery {
 		self.stats_sub.deliver()
 	}
