@@ -48,8 +48,8 @@ with parity with moq-ffi for every m1 binding feature, so it takes this break
 too; it is not frozen. The generated C line moves after the cut and waits for
 rust2.
 
+[moq-dev/moq#6740](https://github.com/moq-dev/moq/pull/6740) already made
+closing a binding broadcast end its tracks; the public handles keep that
+`MoqBroadcastProducer` and `moq_publish_*` close path in every wrapper.
+
 Public API: breaking in moq-ffi, the C ABI, and every wrapper. Wire: none.
-
-## Related
-
-- [Closing a binding broadcast ends its media](/quest/m1/broadcast-lifecycle/ffi-close.md) - reshapes the same `MoqBroadcastProducer` and `moq_publish_*` close path in every wrapper; whichever lands second merges them

@@ -31,8 +31,20 @@ const VERSION: &str = "moq-lite-06";
 /// Frames per group, so per-frame and per-group costs both appear.
 const FRAMES: usize = 4;
 
-const SIZES: [usize; 3] = [64, 16 * 1024, 1024 * 1024];
+const SIZES: [usize; 4] = [64, 16 * 1024, 1024 * 1024, 4 * 1024 * 1024];
 const STREAMS: [usize; 3] = [1, 16, 128];
+
+/// The most payload one round may write across every stream, so the largest frames skip
+/// the widest sweep rather than hold gigabytes.
+const ROUND_BYTES: usize = 512 * 1024 * 1024;
+
+/// Every `(streams, size)` pair to measure.
+fn cases() -> impl Iterator<Item = (usize, usize)> {
+	STREAMS
+		.into_iter()
+		.flat_map(|streams| SIZES.into_iter().map(move |size| (streams, size)))
+		.filter(|(streams, size)| streams * FRAMES * size <= ROUND_BYTES)
+}
 
 struct Counter;
 
@@ -201,22 +213,18 @@ fn allocations() {
 	const ROUNDS: usize = 64;
 
 	let rt = runtime();
-	for streams in STREAMS {
-		for size in SIZES {
-			let mut link = rt.block_on(Link::new(streams, size));
-			ALLOCATIONS.store(0, Ordering::Relaxed);
-			ALLOCATED.store(0, Ordering::Relaxed);
-			COUNTING.store(true, Ordering::Relaxed);
-			rt.block_on(link.measure(ROUNDS as u64));
-			COUNTING.store(false, Ordering::Relaxed);
+	for (streams, size) in cases() {
+		let mut link = rt.block_on(Link::new(streams, size));
+		ALLOCATIONS.store(0, Ordering::Relaxed);
+		ALLOCATED.store(0, Ordering::Relaxed);
+		COUNTING.store(true, Ordering::Relaxed);
+		rt.block_on(link.measure(ROUNDS as u64));
+		COUNTING.store(false, Ordering::Relaxed);
 
-			let frames = (ROUNDS * streams * FRAMES) as f64;
-			let allocations = ALLOCATIONS.load(Ordering::Relaxed) as f64 / frames;
-			let bytes = ALLOCATED.load(Ordering::Relaxed) as f64 / frames;
-			println!(
-				"streams={streams}/size={size}: {allocations:.1} allocations, {bytes:.0} bytes allocated per frame"
-			);
-		}
+		let frames = (ROUNDS * streams * FRAMES) as f64;
+		let allocations = ALLOCATIONS.load(Ordering::Relaxed) as f64 / frames;
+		let bytes = ALLOCATED.load(Ordering::Relaxed) as f64 / frames;
+		println!("streams={streams}/size={size}: {allocations:.1} allocations, {bytes:.0} bytes allocated per frame");
 	}
 }
 
@@ -228,18 +236,16 @@ fn bench(c: &mut Criterion) {
 
 	let rt = runtime();
 	let mut group = c.benchmark_group("memory");
-	for streams in STREAMS {
-		for size in SIZES {
-			group.throughput(Throughput::Bytes((streams * FRAMES * size) as u64));
-			let mut link = None;
-			group.bench_function(
-				BenchmarkId::from_parameter(format!("streams={streams}/size={size}")),
-				|b| {
-					let link = link.get_or_insert_with(|| rt.block_on(Link::new(streams, size)));
-					b.iter_custom(|iters| rt.block_on(link.measure(iters)))
-				},
-			);
-		}
+	for (streams, size) in cases() {
+		group.throughput(Throughput::Bytes((streams * FRAMES * size) as u64));
+		let mut link = None;
+		group.bench_function(
+			BenchmarkId::from_parameter(format!("streams={streams}/size={size}")),
+			|b| {
+				let link = link.get_or_insert_with(|| rt.block_on(Link::new(streams, size)));
+				b.iter_custom(|iters| rt.block_on(link.measure(iters)))
+			},
+		);
 	}
 	group.finish();
 }
