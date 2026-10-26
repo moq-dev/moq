@@ -5492,8 +5492,6 @@ dependencies = [
  "libc",
  "loom",
  "moq-clock",
- "moq-json",
- "moq-net",
  "moq-pattern 0.1.2",
  "num_enum",
  "rand 0.10.3",
@@ -5515,6 +5513,18 @@ version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
  "moq-net",
+]
+
+[[package]]
+name = "moq-net-tests"
+version = "0.0.0"
+dependencies = [
+ "futures",
+ "moq-clock",
+ "moq-json",
+ "moq-net",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

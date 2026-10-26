@@ -1,5 +1,3 @@
-#![cfg(feature = "async")]
-
 //! Moxygen announces one prefix, then serves its sixteen-field test namespaces.
 //!
 //! It answers each namespace without announcing its exact path, as only a session's peer

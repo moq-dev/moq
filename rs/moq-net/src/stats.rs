@@ -1620,7 +1620,7 @@ struct Viewer {
 }
 
 impl Session {
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn control(&self, class: Message, bytes: usize, received: bool) {
 		let Some(inner) = &self.inner else { return };
 		let current = inner.current.lock().unwrap_or_else(PoisonError::into_inner);
