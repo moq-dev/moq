@@ -188,6 +188,10 @@ Accepted, flat per operation:
 - `group_write_frames` (1.67x) and `track_stamp_groups/sparse` (1.48x, down
   from 4.4x) are the per-frame and per-group costs accepted above, as are the
   session join, burst, and delivery families (1.2x to 1.76x).
+  `session_dash_relays` is the same per-track cost: 1.50x instructions at 768
+  tracks over 2 or 3 relays, and 0.63x over 33 relays, so it falls with relay
+  count. The import fixed costs above (`annexb-import`, `cmaf-import` at one
+  frame) and the IETF `/fetch` delivery rows also reappear unchanged.
 - The TS export still grows with track count (1.50x at `1x1` to 2.24x at
   `16x64`). The T-STD schedule scans and sorts every queued unit per PCR slot,
   which the [performance audit](/quest/m2/audit-perf.md) owns.
@@ -198,8 +202,9 @@ the freed 256 KiB buffers between iterations; with
 `GLIBC_TUNABLES=glibc.malloc.mmap_threshold=1048576:glibc.malloc.trim_threshold=1073741824`
 both sides fault 4.6k times and time the same, and the relay runs jemalloc.
 `session_idle` IETF at 1024 sessions, `origin/resume_overlap`,
-`origin/retire`, kio `contended_notify`, and moq-stats `producer/merge` are
-at parity in alternating rounds or instructions.
+`origin/retire`, `origin/reprice_duplicate` (0.55x instructions), kio
+`contended_notify`, and moq-stats `producer/merge` are at parity in
+alternating rounds or instructions.
 
 Relay load: video used 7.8% less relay CPU with the same delivery. Fanout used
 16.4% more, but its paired deltas were -1.5%, +16.4%, and +26.1% (MAD 9.7%)
