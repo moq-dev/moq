@@ -57,6 +57,10 @@ Rejected:
 
 The broadcast wrappers merged in [#5876](https://github.com/moq-dev/moq/pull/5876) with `reserve_track`, which still serves declared names; [rust-publish](/quest/m2/e2ee/rust-publish.md) needs nothing more (maintainer, 2026-10-19).
 
+Before `@moq/e2ee` is first published, add its entrypoints to the API
+Extractor declaration checks, which analyze only published packages since
+[moq-dev/moq#6794](https://github.com/moq-dev/moq/pull/6794).
+
 ## Required
 
 - [Undeclared track names](/quest/m2/e2ee/undeclared-names.md) - an encrypted
