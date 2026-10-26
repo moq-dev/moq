@@ -637,7 +637,7 @@ test("snapshot consumer skips a group the publisher dropped mid-read", async () 
 	expect((await consumer.latest())?.value).toEqual({ v: 0 });
 
 	const next = consumer.latest();
-	track.dropGroups(0, 1, new NetError.Stream(StreamCode.Old));
+	first.close(new NetError.Stream(StreamCode.Old));
 	const second = track.appendGroup();
 	second.writeFrame({ payload: new TextEncoder().encode('{"v":1}'), timestamp: Time.Timestamp.now() });
 	expect((await next)?.value).toEqual({ v: 1 });
