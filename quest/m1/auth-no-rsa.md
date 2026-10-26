@@ -3,9 +3,9 @@
 ## Goal
 
 moq-auth generates and loads RSA keys through aws-lc-rs and the `pkcs1` crate,
-so the workspace graph holds no `rsa` crate and `deny.toml` drops its
-RUSTSEC-2023-0071 (Marvin) ignore. Every algorithm moq-auth accepts today still
-signs and verifies.
+so no production crate's graph holds the `rsa` crate (`cargo tree -e normal,build
+-i rsa` on moq-relay, moq-cli, and moq-room prints nothing). Every algorithm
+moq-auth accepts today still signs and verifies.
 
 ## Plan
 
@@ -13,7 +13,12 @@ Decided by the maintainer on 2026-10-26, when the
 [graviola switch](/quest/m3/pure-crypto/README.md) was deferred: `rsa` is only
 used for key generation (`generate.rs`) and for turning JWK components into a
 PEM (`key.rs`), and signing already runs on aws-lc-rs, but the release should
-carry no advisory ignore for it. moq-auth is `rsa`'s only user.
+not ship the crate. moq-auth is its only production user.
+
+`deny.toml` keeps its RUSTSEC-2023-0071 ignore, reworded as test-only:
+moq-auth's dev-dependencies pin the published `moq-auth` 0.2.1 and `moq-token`
+0.7 as compatibility fixtures (`tests/released_token.rs`), and both depend on
+`rsa`. The ignore goes once those fixtures move to a release without it.
 
 - Generate with aws-lc-rs's RSA key pair (2048 bits, as today), export it as
   PKCS#8, and read the JWK components back with `pkcs1`/`pkcs8`. Never
