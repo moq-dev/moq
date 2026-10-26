@@ -29,6 +29,9 @@ maintainer on 2026-10-24 and 2026-10-25:
   jsonwebtoken 11 takes a custom `CryptoProvider`; the closed draft
   [moq-dev/moq#6861](https://github.com/moq-dev/moq/pull/6861) has a working
   one to start from. moq-auth installs it only when none is installed.
+  moq-auth's key generation and JWK loading, on aws-lc-rs after
+  [auth-no-rsa](/quest/m1/auth-no-rsa.md), move with it, so moq-auth's
+  aws-lc-rs dependency becomes target-gated like the relay's.
 - Accept ChaCha20-Poly1305 on graviola being 1.7-3x slower than aws-lc per
   packet (graviola 0.4.1), and re-measure it on the pinned release. It only
   matters for peers that prefer ChaCha20, which lack AES hardware.
@@ -38,7 +41,8 @@ maintainer on 2026-10-24 and 2026-10-25:
   ([ctz/graviola#222](https://github.com/ctz/graviola/issues/222)).
 - Self-signed keys come from graviola's ECDSA key generation
   ([ctz/graviola#203](https://github.com/ctz/graviola/pull/203), unreleased
-  after 0.4.1), not RustCrypto's `p256`.
+  after 0.4.1) if a release carries it, else RustCrypto's `p256`, which is
+  pure Rust too, so it is no gate.
 
 Open at re-plan: moq-relay's `io-uring` feature serves QUIC through moq-uring,
 which is aws-lc-only.

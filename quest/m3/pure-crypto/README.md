@@ -32,8 +32,9 @@ to m1. Adopting now costs more than it returns:
 
 Each upstream gap is a child condition quest that only checks upstream; moq
 does not contribute code to close them. Once all three are released,
-[moq-relay on graviola](/quest/m3/pure-crypto/relay-graviola.md) is re-planned
-and the moq side shrinks to a provider feature. The draft
+[moq-relay on graviola](/quest/m3/pure-crypto/relay-graviola.md) is re-planned.
+A rustls-acme hook shrinks the moq side to a provider feature; instant-acme
+instead leaves moq-relay owning the renewal loop and TLS-ALPN-01 resolver. The draft
 [moq-dev/moq#6861](https://github.com/moq-dev/moq/pull/6861), JWT on graviola,
 was closed with the deferral.
 
