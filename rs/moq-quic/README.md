@@ -83,7 +83,7 @@ Recheck the BBR3 changes when porting quinn#2481 updates, or if it merges.
 ### ACK frequency
 
 The extension follows [draft-ietf-quic-ack-frequency-14](https://www.ietf.org/archive/id/draft-ietf-quic-ack-frequency-14.html), with the codepoints draft-07 assigned: the `min_ack_delay` transport parameter (`0xff04de1b`, always advertised as 1 ms), `ACK_FREQUENCY` (`0xaf`), and `IMMEDIATE_ACK` (`0x1f`).
-A Requested Max Ack Delay we send is raised to the peer's `min_ack_delay`, as quicly's 25 ms, and capped at the greater of the RTT and 25 ms.
+A Requested Max Ack Delay we send is capped at the greater of the RTT and 25 ms, then raised to the peer's `min_ack_delay` (quicly's is 25 ms), so a larger peer minimum exceeds the cap.
 
 The Ack-Eliciting Threshold counts the packets a receiver may hold without acknowledging them. Section 4: "A receiving endpoint SHOULD send at least one ACK frame after receiving more than this many ack-eliciting packets. \[...] By default, an endpoint sends an ACK frame for every other ack-eliciting packet, as specified in Section 13.2.2 of \[QUIC-TRANSPORT], which corresponds to a value of 1."
 Drafts 01 to 14 agree, and so do both directions here: we send 1 by default, and acknowledge a threshold T after T + 1 packets.
