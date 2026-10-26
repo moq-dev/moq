@@ -4646,6 +4646,46 @@ mod tests {
 		assert_eq!(h.wire().len(), established, "no SUBSCRIBE_UPDATE inverting the range");
 	}
 
+	/// A lite-07 FIN on unchanged bounded ranges covers them even when a group the publisher
+	/// sent, such as a lost datagram, never arrived: subscribing again would replay the rest
+	/// and repeat for as long as it stays undeliverable. Ranges an update changed are asked
+	/// again, since the FIN may predate the update.
+	#[moq_clock::test]
+	async fn a_covered_fin_short_of_a_lost_group_resubscribes_only_after_an_update() {
+		for updated in [false, true] {
+			let h = Harness::new(Version::Lite07);
+			let request = h._broadcast.reserve_track("lossy").unwrap();
+			let mut serving = ServeLoop::new(&h.serve, request, track::Info::default());
+			let track = h._broadcast.consume().track("lossy").unwrap();
+			let _reader = track.subscribe(Subscription::default().with_range(0..2)).await.unwrap();
+			assert!(serving.poll(&h.serve, &kio::Waiter::noop()).is_pending());
+			let Sub::Active(active) = &mut serving.sub else {
+				panic!("the reader opens the upstream")
+			};
+			assert!(active.bounded);
+			active.updated = updated;
+			active.served = Some(0);
+			// Group 0 arrived; group 1 was sent and lost.
+			let Ok(mut tail) = active.tail.write() else {
+				panic!("ledger closed")
+			};
+			tail.account(0..1, h.serve.subscriber.runtime.now());
+			drop(tail);
+			serving.mode = ServeMode::Tail {
+				settle: Settle::new(&h.serve.subscriber.runtime, active.tail.consume()),
+				owed: active.covered(),
+				track: false,
+			};
+			assert!(serving.poll(&h.serve, &kio::Waiter::noop()).is_pending());
+			assert!(matches!(serving.mode, ServeMode::Tail { .. }), "{updated}: waits out the grace");
+
+			moq_clock::sleep(Duration::from_secs(120)).await;
+			let _ = serving.poll(&h.serve, &kio::Waiter::noop());
+			assert_eq!(serving.covered.is_some(), !updated, "{updated}");
+			assert_eq!(matches!(serving.sub, Sub::None), !updated, "{updated}: subscribes again");
+		}
+	}
+
 	/// Concurrent joins over the refresh ratio send one SUBSCRIBE_UPDATE upstream, a new
 	/// group past the largest sends the next, and every update restates the latest.
 	#[moq_clock::test]
@@ -7472,9 +7512,10 @@ impl ServeLoop {
 							if writer.finish().is_ok() {
 								self.closing = Some(writer);
 							}
-							// Settled by the grace instead, the publisher covered other ranges,
-							// asked before an update it never read.
-							self.covered = whole.then_some(active.ranges);
+							// Unchanged ranges are what the publisher covered, even if a datagram
+							// went missing. Changed ones settled by the grace instead may have
+							// been covered before an update it never read.
+							self.covered = (whole || !active.updated).then_some(active.ranges);
 						}
 						// Whatever the covered ranges leave out of the demand is asked again.
 						if let Err(err) = self.begin(serve, self.serving.subscription()) {
