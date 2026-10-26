@@ -97,67 +97,6 @@ impl Connecting {
 		}
 	}
 
-	/// Convert into a 0-RTT or 0.5-RTT connection at the cost of weakened security
-	///
-	/// Returns `Ok` immediately if the local endpoint is able to attempt sending 0/0.5-RTT data.
-	/// If so, the returned [`Connection`] can be used to send application data without waiting for
-	/// the rest of the handshake to complete, at the cost of weakened cryptographic security
-	/// guarantees. The [`Connection::authenticated`] future resolves when the handshake does
-	/// complete, at which point subsequently opened streams and written data will have full
-	/// cryptographic protection.
-	///
-	/// ## Outgoing
-	///
-	/// For outgoing connections, the initial attempt to convert to a [`Connection`] which sends
-	/// 0-RTT data will proceed if the [`crypto::ClientConfig`][crate::quic::driver::crypto::ClientConfig]
-	/// attempts to resume a previous TLS session. However, **the remote endpoint may not actually
-	/// _accept_ the 0-RTT data**--yet still accept the connection attempt in general. This
-	/// possibility is conveyed through `ZeroRttRejected` errors on stream I/O methods, which may
-	/// arise when the handshake completes. If 0-RTT was rejected, the existence of streams opened
-	/// and other application data sent by a client prior to the handshake completing will not be
-	/// conveyed to the remote application. Clients which need to e.g. re-transmit rejected stream
-	/// data must take care to detect `ZeroRttRejected` errors even on finished streams opened
-	/// during 0-RTT, e.g. by awaiting an application-layer response on bidirectional streams, or
-	/// awaiting [`SendStream::stopped`] on unidirectional streams.
-	///
-	/// A server may reject 0-RTT data at its discretion, but accepting 0-RTT data requires the
-	/// relevant resumption state to be stored in the server, which servers may limit or lose for
-	/// various reasons including not persisting resumption state across server restarts.
-	///
-	/// If manually providing a [`crypto::ClientConfig`][crate::quic::driver::crypto::ClientConfig], check your
-	/// implementation's docs for 0-RTT pitfalls.
-	///
-	/// ## Incoming
-	///
-	/// For incoming connections, conversion to 0.5-RTT will always succeed.
-	///
-	/// If manually providing a [`crypto::ServerConfig`][crate::quic::driver::crypto::ServerConfig], check your
-	/// implementation's docs for 0-RTT pitfalls.
-	///
-	/// ## Security
-	///
-	/// On outgoing connections, this enables transmission of 0-RTT data, which is vulnerable to
-	/// replay attacks, and should therefore never invoke non-idempotent operations.
-	///
-	/// On incoming connections, this enables transmission of 0.5-RTT data, which may be sent
-	/// before TLS client authentication has occurred, and should therefore not be used to send
-	/// data for which client authentication is being used.
-	pub fn into_0rtt(mut self) -> Result<Connection, Self> {
-		// This lock borrows `self` and would normally be dropped at the end of this scope, so we'll
-		// have to release it explicitly before returning `self` by value.
-		let conn = (self.conn.as_mut().unwrap()).state.lock();
-
-		let is_ok = conn.inner.has_0rtt() || conn.inner.side().is_server();
-		drop(conn);
-
-		if is_ok {
-			let conn = self.conn.take().unwrap();
-			Ok(Connection(conn))
-		} else {
-			Err(self)
-		}
-	}
-
 	/// Parameters negotiated during the handshake
 	///
 	/// The dynamic type returned is determined by the configured
@@ -379,11 +318,10 @@ impl Connection {
 		let Some(id) = state.inner.streams().open(Dir::Bi, Default::default()) else {
 			return Ok(None);
 		};
-		let is_0rtt = state.inner.side().is_client() && state.inner.is_handshaking();
 		drop(state);
 		Ok(Some((
-			SendStream::new(self.0.clone(), id, is_0rtt),
-			RecvStream::new(self.0.clone(), id, is_0rtt),
+			SendStream::new(self.0.clone(), id),
+			RecvStream::new(self.0.clone(), id),
 		)))
 	}
 
@@ -600,31 +538,6 @@ impl Connection {
 		self.0.state.lock().inner.congestion_state().clone_box()
 	}
 
-	/// Succeeds when an incoming connection is proven not to be a replay attack.
-	///
-	/// Only interesting for `Connection`s obtained from [`Connecting::into_0rtt`]. On 1-RTT
-	/// connections, always completes immediately.
-	///
-	/// For incoming connections, reads from [`RecvStream`]s are guaranteed not to arise from replay
-	/// attacks after this succeeds, even for streams accepted or read during 0-RTT. For outgoing
-	/// connections, streams opened after this succeeds will never be discarded by the server due to
-	/// 0-RTT rejection.
-	pub async fn authenticated(&self) -> Result<(), ConnectionError> {
-		let notified = {
-			let conn = self.0.state.lock();
-			if let Some(e) = &conn.error {
-				return Err(e.clone());
-			}
-			if conn.connected {
-				return Ok(());
-			}
-			self.0.shared.connected.notified()
-		};
-		notified.await;
-		let conn = self.0.state.lock();
-		conn.error.clone().map_or(Ok(()), Err)
-	}
-
 	/// Parameters negotiated during the handshake
 	///
 	/// Guaranteed to return `Some` on fully established connections or after
@@ -704,8 +617,8 @@ impl Future for OpenUni<'_> {
 	type Output = Result<SendStream, ConnectionError>;
 	fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
 		let this = self.project();
-		let (conn, id, is_0rtt) = ready!(poll_open(ctx, this.conn, *this.options, this.notify, Dir::Uni))?;
-		Poll::Ready(Ok(SendStream::new(conn, id, is_0rtt)))
+		let (conn, id) = ready!(poll_open(ctx, this.conn, *this.options, this.notify, Dir::Uni))?;
+		Poll::Ready(Ok(SendStream::new(conn, id)))
 	}
 }
 
@@ -723,12 +636,9 @@ impl Future for OpenBi<'_> {
 	type Output = Result<(SendStream, RecvStream), ConnectionError>;
 	fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
 		let this = self.project();
-		let (conn, id, is_0rtt) = ready!(poll_open(ctx, this.conn, *this.options, this.notify, Dir::Bi))?;
+		let (conn, id) = ready!(poll_open(ctx, this.conn, *this.options, this.notify, Dir::Bi))?;
 
-		Poll::Ready(Ok((
-			SendStream::new(conn.clone(), id, is_0rtt),
-			RecvStream::new(conn, id, is_0rtt),
-		)))
+		Poll::Ready(Ok((SendStream::new(conn.clone(), id), RecvStream::new(conn, id))))
 	}
 }
 
@@ -738,15 +648,14 @@ fn poll_open<'a>(
 	options: SendOptions<'_>,
 	mut notify: Pin<&mut Notified<'a>>,
 	dir: Dir,
-) -> Poll<Result<(ConnectionRef, StreamId, bool), ConnectionError>> {
+) -> Poll<Result<(ConnectionRef, StreamId), ConnectionError>> {
 	let options = send_group::to_quic(options, &conn.0);
 	let mut state = conn.state.lock();
 	if let Some(e) = &state.error {
 		return Poll::Ready(Err(e.clone()));
 	} else if let Some(id) = state.inner.streams().open(dir, options) {
-		let is_0rtt = state.inner.side().is_client() && state.inner.is_handshaking();
 		drop(state); // Release the lock so clone can take it
-		return Poll::Ready(Ok((conn.clone(), id, is_0rtt)));
+		return Poll::Ready(Ok((conn.clone(), id)));
 	}
 	loop {
 		match notify.as_mut().poll(ctx) {
@@ -772,8 +681,8 @@ impl Future for AcceptUni<'_> {
 
 	fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
 		let this = self.project();
-		let (conn, id, is_0rtt) = ready!(poll_accept(ctx, this.conn, this.notify, Dir::Uni))?;
-		Poll::Ready(Ok(RecvStream::new(conn, id, is_0rtt)))
+		let (conn, id) = ready!(poll_accept(ctx, this.conn, this.notify, Dir::Uni))?;
+		Poll::Ready(Ok(RecvStream::new(conn, id)))
 	}
 }
 
@@ -791,11 +700,8 @@ impl Future for AcceptBi<'_> {
 
 	fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
 		let this = self.project();
-		let (conn, id, is_0rtt) = ready!(poll_accept(ctx, this.conn, this.notify, Dir::Bi))?;
-		Poll::Ready(Ok((
-			SendStream::new(conn.clone(), id, is_0rtt),
-			RecvStream::new(conn, id, is_0rtt),
-		)))
+		let (conn, id) = ready!(poll_accept(ctx, this.conn, this.notify, Dir::Bi))?;
+		Poll::Ready(Ok((SendStream::new(conn.clone(), id), RecvStream::new(conn, id))))
 	}
 }
 
@@ -804,15 +710,14 @@ fn poll_accept<'a>(
 	conn: &'a ConnectionRef,
 	mut notify: Pin<&mut Notified<'a>>,
 	dir: Dir,
-) -> Poll<Result<(ConnectionRef, StreamId, bool), ConnectionError>> {
+) -> Poll<Result<(ConnectionRef, StreamId), ConnectionError>> {
 	let mut state = conn.state.lock();
 	// Check for incoming streams before checking `state.error` so that already-received streams,
 	// which are necessarily finite, can be drained from a closed connection.
 	if let Some(id) = state.inner.streams().accept(dir) {
-		let is_0rtt = state.inner.is_handshaking();
 		state.wake(); // To send additional stream ID credit
 		drop(state); // Release the lock so clone can take it
-		return Poll::Ready(Ok((conn.clone(), id, is_0rtt)));
+		return Poll::Ready(Ok((conn.clone(), id)));
 	} else if let Some(e) = &state.error {
 		return Poll::Ready(Err(e.clone()));
 	}
@@ -1079,13 +984,6 @@ impl State {
 				Connected => {
 					self.connected = true;
 					shared.connected.notify_waiters();
-					if self.inner.side().is_client() && !self.inner.accepted_0rtt() {
-						// Wake up rejected 0-RTT streams so they can fail immediately with
-						// `ZeroRttRejected` errors.
-						wake_all(&mut self.blocked_writers);
-						wake_all(&mut self.blocked_readers);
-						wake_all_notify(&mut self.stopped);
-					}
 				}
 
 				ConnectionLost { reason } => {
@@ -1197,14 +1095,6 @@ impl State {
 		if let Some(waiters) = self.stopped.remove(&id) {
 			let _ = waiters.outcome.set(outcome);
 			waiters.notify.notify_waiters();
-		}
-	}
-
-	pub(crate) fn check_0rtt(&self) -> Result<(), ()> {
-		if self.inner.is_handshaking() || self.inner.accepted_0rtt() || self.inner.side().is_server() {
-			Ok(())
-		} else {
-			Err(())
 		}
 	}
 }

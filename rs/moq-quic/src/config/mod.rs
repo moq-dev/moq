@@ -362,11 +362,9 @@ impl ServerConfig {
 	///
 	/// This limit governs packets received after the first packet and before the attempt is either
 	/// registered as an active connection or otherwise disposed of. Packets received in excess of
-	/// this limit are dropped, which may cause 0-RTT or handshake data to have to be retransmitted.
+	/// this limit are dropped, which may require handshake data to be retransmitted.
 	///
-	/// The default value is set to 10 MiB--an amount such that in most situations a client would
-	/// not transmit that much 0-RTT data faster than the server handles the corresponding
-	/// [`Incoming`][crate::Incoming].
+	/// The default value is 10 MiB. Early-data packets are discarded.
 	pub fn incoming_buffer_size(&mut self, incoming_buffer_size: u64) -> &mut Self {
 		self.incoming_buffer_size = incoming_buffer_size;
 		self
@@ -376,8 +374,7 @@ impl ServerConfig {
 	///
 	/// This limit governs packets received after each attempt's first packet and before the attempt
 	/// is either registered as an active connection or otherwise disposed of. Packets received in
-	/// excess of this limit are dropped, which may cause 0-RTT or handshake data to have to be
-	/// retransmitted.
+	/// excess of this limit are dropped, which may require handshake data to be retransmitted.
 	///
 	/// The default value is set to 100 MiB--a generous amount that still prevents memory
 	/// exhaustion in most contexts.
@@ -477,12 +474,8 @@ impl fmt::Debug for ServerConfig {
 ///   one or more "validation tokens," which the client may store for use in later connections to
 ///   the same server. Validation tokens may be valid for much longer lifetimes than retry token.
 ///
-/// The usage of validation tokens is most impactful in situations where 0-RTT data is also being
-/// used--in particular, in situations where the server sends the client more than three times more
-/// 0.5-RTT data than it has received 0-RTT data. Since the successful completion of a connection
-/// handshake implicitly causes the client's address to be validated, transmission of 0.5-RTT data
-/// is the main situation where a server might be sending application data to an address that could
-/// be validated by token usage earlier than it would become validated without token usage.
+/// Validation tokens let the server validate the client's address before the handshake
+/// completes, avoiding the amplification limit while sending a large handshake flight.
 ///
 /// [1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-8
 /// [2]: https://en.wikipedia.org/wiki/IP_address_spoofing

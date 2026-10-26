@@ -24,11 +24,12 @@ in both languages, inherited.
 `js/hang/src/catalog/video.ts:129,146,229`, `audio.ts:110`,
 `container.ts:15`.
 
-Decided 2026-10-25 (maintainer): strict and per rendition. Both languages validate codec strings and
-dimension ranges the same way, refuse zero rates and channel counts, drop
-the legacy array form in Rust's direction (or keep it in both), and skip a
-malformed rendition while keeping the rest of the catalog. Add a shared
-fixture corpus both test suites load, so a future divergence fails CI.
+Decided 2026-10-25 (maintainer): strict and per rendition. Both languages
+validate codec strings and dimension ranges the same way, refuse zero rates
+and channel counts, and skip a malformed rendition while keeping the rest of
+the catalog. Strict means JS drops the legacy `video:[{track,config}]` array
+form, as Rust already refuses it. Add a shared fixture corpus both test
+suites load, so a future divergence fails CI.
 
 Also check the container consumer's skip measurement: Rust measures newest
 content minus the next group's start (`rs/moq-mux/src/container/consumer.rs:576`),

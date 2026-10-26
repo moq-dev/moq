@@ -23,17 +23,15 @@ define that handle before fixing `Peers`. Publishing into the origin reaches
 the relay and its announce stream is the roster. Tests inject transport
 factories and cover pairing, application selection, and the roster gate.
 
-Identity: decided 2026-10-25 (maintainer), no cross-path recognition. Each
-session's receiver stamps its routing identity, a direct peer included
-([Stamp routing identities](/quest/m1/cluster-routing/stamp.md)), so a
-publisher reached through the CDN and directly is two origins, and switching
-between them resumes only across a matching explicit epoch. Simpler: one
-identity regime. The route-layer node id differs per session, so it cannot
-be the roster id. Open, to settle here: what names a
-roster entry (`<id>` below, also the perfect-negotiation tiebreak) and what
-key maps an announce to a roster peer. An announce reaching a client through
-the CDN carries the broadcast path, its epoch, and an identity the
-publisher's relay stamped. Candidates the plans already hold are the
+Identity: the route-layer node id is declared by the origin and unverified
+([routes](/quest/m1/cluster-routing/routes.md)); recognizing it needs the
+key proof [peer grants](/quest/m2/p2p/peer-grant.md) owns, so it cannot be
+trusted as the roster id on its own. Switching between a CDN and a direct
+path resumes only across a matching explicit epoch. Open, to settle here:
+what names a roster entry (`<id>` below, also the perfect-negotiation
+tiebreak) and what key maps an announce to a roster peer. An announce
+reaching a client through the CDN carries the broadcast path, its epoch,
+and the publisher's declared identity. Candidates the plans already hold are the
 presenter key in the roster entry, which the peer grant binds, and the
 grant's publish patterns, which are verified only after connecting. Since
 the application selects peers, it may need no automatic mapping at all.

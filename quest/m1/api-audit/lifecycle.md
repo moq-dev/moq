@@ -33,8 +33,8 @@ handle's writer verbs and observers:
 
 Changes:
 
-- Rust `track::Producer::close()`, crate-private after
-  [session-only items stay private](/quest/m1/api-audit/model-private.md),
+- Rust `track::Producer::close()`, crate-private since
+  [moq-dev/moq#6747](https://github.com/moq-dev/moq/pull/6747),
   folds into `abort` with the clean-close error
   ([moq-dev/moq#6482](https://github.com/moq-dev/moq/pull/6482) makes it
   `Stream(Session(Cancel))`). Readers that drained a closed copy to a clean

@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Early data is removed
+
+Wait for `Event::Connected` before opening streams or sending application data.
+`Connection::has_0rtt`, `accepted_0rtt`, and the `crypto::Session::early_crypto` and `early_data_accepted` hooks are gone.
+Custom crypto sessions no longer implement those hooks.
+Rustls configs disable early data, including caller-supplied configs, while session tickets still resume 1-RTT handshakes.
+
 ### QUIC APIs follow their consumers
 
 `RecvStream::read()` and `Chunks::next(max)` always return ordered bytes.
