@@ -105,7 +105,3 @@ through setters afterwards. Moved here from
 Update every consumer (`quic::web` in both crates, qmux, the backends,
 moq-relay's tests). `poll_*` forms come in [poll](/quest/m1/quic-api/poll.md). The Impact bullet says how to migrate in moq-quic, moq-tokio, moq-uring, and
 qmux if its public API changes.
-
-## Required
-
-- [Zero-RTT](/quest/m1/quic-api/zero-rtt.md) - removes 0-RTT, so no error carries it
