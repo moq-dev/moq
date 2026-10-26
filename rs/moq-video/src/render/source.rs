@@ -1,7 +1,7 @@
 //! Getting a frame's pixels into textures the shader can sample: a zero-copy
-//! import where the platform offers one, a CPU upload everywhere else.
+//! import for a GPU frame, an upload for a CPU one.
 
-use crate::{Color, Error, Frame, Size, Surface};
+use crate::{Color, Error, I420, Output, Size, Surface};
 
 /// How the planes of a [`Source`] are arranged, which picks the fragment shader.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,13 +57,11 @@ struct Planes {
 }
 
 impl Cache {
-	/// Try to alias a GPU frame's memory as textures, no download.
+	/// Alias a GPU frame's memory as textures, no download.
 	///
-	/// `Ok(None)` means this surface has no import path here (it is a CPU frame,
-	/// or the platform's importer is not built), which is a routing decision
-	/// rather than a failure. `Err` means an import that should have worked did
-	/// not, which is what the caller counts strikes against.
-	pub fn import(&mut self, device: &wgpu::Device, surface: &Surface) -> Result<Option<Source>, Error> {
+	/// Errors for a surface this platform has no importer for, naming the
+	/// [`output`] that keeps such frames away from the renderer.
+	pub fn import(&mut self, device: &wgpu::Device, surface: &Surface) -> Result<Source, Error> {
 		match surface {
 			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
 			Surface::DmaBuf(buffer) => super::dmabuf::import(device, buffer),
@@ -73,22 +71,24 @@ impl Cache {
 					Some(metal) => metal,
 					None => self.metal.insert(super::metal::Import::new(device)?),
 				};
-				metal.import(device, buffer).map(Some)
+				metal.import(device, buffer)
 			}
-			_ => {
+			#[allow(
+				unreachable_patterns,
+				reason = "the other surfaces exist only on some platforms and features"
+			)]
+			other => {
 				let _ = device;
-				Ok(None)
+				Err(Error::Unsupported(format!(
+					"the renderer has no importer for {} surfaces; decode or capture with render::output(&device), which delivers them as CPU frames",
+					kind(other)
+				)))
 			}
 		}
 	}
 
-	/// Download the frame if it is not already on the CPU, then upload its
-	/// planes. The path every surface can take, and the one a failed or absent
-	/// import falls back to. It still fails for a GPU surface holding a pixel
-	/// format the crate cannot download, which is the honest answer: those
-	/// pixels are not reachable at all rather than merely expensive.
-	pub fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, frame: &Frame) -> Result<Source, Error> {
-		let i420 = frame.surface.to_i420()?;
+	/// Upload a CPU frame's planes.
+	pub fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, i420: &I420) -> Result<Source, Error> {
 		let size = Size::new(i420.width(), i420.height());
 		size.validate("render source")?;
 
@@ -114,6 +114,60 @@ impl Cache {
 			plane2,
 			keepalive: None,
 		})
+	}
+}
+
+/// The [`Output`] to decode and capture with for a [`Renderer`](super::Renderer) on `device`.
+///
+/// [`Output::Render`] when `device` can import this platform's GPU frames, and
+/// [`Output::Cpu`] when it cannot, such as wgpu's GL backend, a Linux device
+/// opened without [`wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF`], or a
+/// platform with no importer.
+pub fn output(device: &wgpu::Device) -> Output {
+	#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+	let imports = super::dmabuf::supports(device);
+	#[cfg(apple)]
+	let imports = super::metal::supports(device);
+	#[cfg(not(any(apple, all(target_os = "linux", feature = "dmabuf"))))]
+	let imports = {
+		let _ = device;
+		false
+	};
+	if imports { Output::Render } else { Output::Cpu }
+}
+
+/// Whether [`Cache::import`] takes `surface` on a device [`output`] picks
+/// [`Output::Render`] for: what that output keeps on the GPU.
+pub(crate) fn imports(surface: &Surface) -> bool {
+	match surface {
+		#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+		Surface::DmaBuf(buffer) => super::dmabuf::imports(buffer.format()),
+		#[cfg(apple)]
+		Surface::PixelBuffer(buffer) => super::metal::imports(buffer),
+		#[allow(
+			unreachable_patterns,
+			reason = "the other surfaces exist only on some platforms and features"
+		)]
+		_ => false,
+	}
+}
+
+/// A GPU surface's kind, as an error names it.
+fn kind(surface: &Surface) -> &'static str {
+	match surface {
+		#[cfg(target_os = "windows")]
+		Surface::Texture(_) => "Direct3D11",
+		#[cfg(all(target_os = "linux", feature = "nvidia"))]
+		Surface::Cuda(_) => "CUDA",
+		#[cfg(target_os = "linux")]
+		Surface::Vulkan(_) => "external Vulkan",
+		#[cfg(all(target_os = "android", feature = "mediacodec"))]
+		Surface::HardwareBuffer(_) => "Android hardware buffer",
+		#[allow(
+			unreachable_patterns,
+			reason = "the other surfaces exist only on some platforms and features"
+		)]
+		_ => "these",
 	}
 }
 

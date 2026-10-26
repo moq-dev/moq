@@ -22,9 +22,14 @@ Decided with the maintainer on 2026-10-24:
 - `@moq/e2ee` mirrors the Rust handler exactly: it opens each request's
   physical name, claims it, and yields a request whose `name` is semantic.
   A name that does not open is answered as missing and keeps no state. A
-  re-requested name follows the rule undeclared-names settles.
+  re-requested or re-created name resumes above its high-water marks, as in
+  Rust (decided 2026-10-25, maintainer: resume always, replacing the
+  2026-10-17 refusal, so every identity stays unique and a handler can serve
+  a dropped name again).
 - The handler offers the lister, taking semantic names and listing their
-  physical names, as undeclared-names does.
+  physical names, as undeclared-names does. `@moq/net`'s broadcast lister is
+  internal today (tests reach it through `wireOf`), so export it with the
+  handler.
 - Port undeclared-names' tests: a relay-forged name, an older epoch's name,
   and a burst of forged names that leaves no state behind.
 

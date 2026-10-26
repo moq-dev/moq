@@ -145,7 +145,6 @@ because `main` assigned 0x3A to NOT_FETCHABLE first.
 ## Required
 
 - [Expiry before SETUP](/quest/m1/auth/expire-before-setup.md) - a mocked-clock test proves a grant expiring before SETUP closes as Expired
-- [Tokens through a drain](/quest/m1/auth/drain-token.md) - a closing Rust connection keeps a draining publication's token grant
 
 ## Related
 

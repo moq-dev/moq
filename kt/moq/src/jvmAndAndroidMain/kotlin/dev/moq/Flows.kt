@@ -9,16 +9,19 @@ import kotlinx.coroutines.flow.onCompletion
 import uniffi.moq.MoqException
 
 /**
- * Stream of decoded audio frames in the layout declared by the
- * [AudioDecoderOutput] the consumer was created with.
+ * Stream of reads: decoded audio frames in the layout declared by the
+ * [AudioDecoderOutput] the consumer was created with, and the gaps and encoder
+ * ends between them.
  */
-fun dev.moq.audio.Consumer.frames(): Flow<dev.moq.audio.Frame> = pull({ cancel() }) { next() }
+fun dev.moq.audio.Consumer.reads(): Flow<dev.moq.audio.Read> = pull({ cancel() }) { next() }
 
 /**
- * Stream of decoded video frames. Each owns the decoder's surface: close it
- * (or `use` it) when done, since held frames stall the decoder.
+ * Stream of reads: decoded video frames, and the gaps and encoder ends between
+ * them. Each frame owns the decoder's surface: close it (or `use` it) when done,
+ * since held frames stall the decoder.
  */
-fun dev.moq.video.Consumer.frames(): Flow<VideoDecodedFrame> = pull({ cancel() }) { next() }
+fun dev.moq.video.Consumer.reads(): Flow<dev.moq.video.Read> = pull({ cancel() }) { next() }
+
 
 /** Stream of groups in sequence order, skipping forward if the reader falls behind. */
 fun TrackConsumer.groups(): Flow<GroupConsumer> = pull({ cancel() }) { nextGroup() }

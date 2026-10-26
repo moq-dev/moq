@@ -657,8 +657,11 @@ final class SmokeTests: XCTestCase {
         }
 
         let next = try await decoder.next()
-        let frame = try XCTUnwrap(next)
+        guard case .frame(let frame) = try XCTUnwrap(next) else {
+            return XCTFail("expected a decoded frame")
+        }
         decoder.cancel()
+
 
         let planar = try frame.pixels(format: .i420)
         XCTAssertEqual(planar.count, Int(frame.width()) * Int(frame.height()) * 3 / 2)

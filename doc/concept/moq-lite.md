@@ -272,7 +272,7 @@ Each subscription carries the knobs that decide behavior under congestion:
 On moq-lite 05 and later, a publisher explicitly reports groups that will not arrive.
 This lets a finished subscription settle without waiting for missing groups.
 A reader of a reported group, including one still arriving, ends with the publisher's error, such as `OLD` or `NOT_FOUND`.
-On moq-lite 05 and 06 that code is application-specific, so every reported group ends with `NOT_FOUND` there.
+Before moq-lite 07 that code is application-specific, so every reported group ends with `OLD`.
 Datagram delivery stays best effort.
 
 Ranges are both a request and a filter. A subscriber reads only the groups its

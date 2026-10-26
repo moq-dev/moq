@@ -42,11 +42,10 @@ impl Config {
 #[derive(Clone)]
 pub struct Client {
 	pub(crate) moq: moq_net::Client,
-	/// The single resolved set of protocol versions, used to advertise moq ALPNs across
+	/// The single resolved set of protocol versions, used for credentials and moq ALPNs across
 	/// every transport (passed into the QUIC backend's `connect` and used directly for
 	/// raw TCP/UDS qmux and WebSocket). Resolved once in [`Client::new`] so the ALPN list
 	/// can't diverge between transports.
-	#[cfg(feature = "_transport")]
 	versions: moq_net::Versions,
 	/// The URL from [`connect.url`](crate::connect::Config::url), dialed by [`Client::publish`] / [`Client::consume`].
 	connect: Option<Url>,

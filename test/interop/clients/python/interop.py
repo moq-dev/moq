@@ -253,6 +253,11 @@ async def _decode_audio(
     with open(f"{out}.txt", "x") as log, open(f"{out}.pcm", "xb") as pcm:
         log.write(f"{audio.sample_rate} {audio.channel_count}\n")
         async for frame in decoder:
+            # moq-audio reports a hole it saw directly; tone.py checks the timestamps too.
+            if isinstance(frame, moq.audio.Gap):
+                raise RuntimeError(f"audio gap after {decoded} samples")
+            if isinstance(frame, moq.audio.End):
+                raise RuntimeError("audio track ended early")
             samples = len(frame.data) // frame_bytes
             log.write(f"{frame.timestamp // timedelta(microseconds=1)} {samples}\n")
             pcm.write(frame.data)

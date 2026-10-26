@@ -1,4 +1,4 @@
-// The installed C ABI owns every decoded frame until frame_free, independently
+// The installed C ABI owns every decoded read until read_free, independently
 // of its consumer. PCM avoids a lossy-codec tolerance in this boundary test;
 // moq-audio's independent-reference suite covers the codec samples themselves.
 #include <moq.h>
@@ -50,39 +50,45 @@ static void on_catalog(void *data, int32_t id) {
     if (id > 0) CHECK(moq_consume_catalog_free((uint32_t)id) == 0);
 }
 
-static void on_frame(void *data, int32_t id) {
+static void check_frame(Context *c, const moq_audio_frame *frame) {
+    CHECK(frame->timestamp_us == 123000 + c->frames * 1000000 / 48000);
+    size_t bytes = c->format == MOQ_AUDIO_SAMPLE_FORMAT_S16 ? 2 : 4;
+    CHECK(frame->data_size % (bytes * c->channels) == 0);
+    size_t count = frame->data_size / (bytes * c->channels);
+    CHECK(count > 0);
+    for (size_t sample = 0; sample < count * c->channels; sample++) {
+        size_t channel = c->format == MOQ_AUDIO_SAMPLE_FORMAT_F32_PLANAR ? sample / count : sample % c->channels;
+        // Stereo is FL=+1/4, FR=-1/2; the documented mono mix averages them.
+        float expected = c->channels == 1 ? -0.125f : channel == 0 ? 0.25f : -0.5f;
+        if (bytes == 2) {
+            int16_t value;
+            memcpy(&value, frame->data + sample * bytes, bytes);
+            CHECK(value == (c->channels == 1 ? -4096 : channel == 0 ? 8192 : -16384));
+        } else {
+            float value;
+            memcpy(&value, frame->data + sample * bytes, bytes);
+            CHECK(value == expected);
+        }
+    }
+    c->frames += count;
+}
+
+static void on_read(void *data, int32_t id) {
     Context *c = data;
     pthread_mutex_lock(&c->mutex);
     if (id <= 0) {
         CHECK(id == 0);
         c->decode_done = 1;
     } else {
-        moq_audio_frame frame;
-        CHECK(moq_decode_audio_frame((uint32_t)id, NULL) < 0);
-        CHECK(moq_decode_audio_frame((uint32_t)id, &frame) == 0);
-        CHECK(frame.timestamp_us == 123000 + c->frames * 1000000 / 48000);
-        size_t bytes = c->format == MOQ_AUDIO_SAMPLE_FORMAT_S16 ? 2 : 4;
-        CHECK(frame.data_size % (bytes * c->channels) == 0);
-        size_t count = frame.data_size / (bytes * c->channels);
-        CHECK(count > 0);
-        for (size_t sample = 0; sample < count * c->channels; sample++) {
-            size_t channel = c->format == MOQ_AUDIO_SAMPLE_FORMAT_F32_PLANAR ? sample / count : sample % c->channels;
-            // Stereo is FL=+1/4, FR=-1/2; the documented mono mix averages them.
-            float expected = c->channels == 1 ? -0.125f : channel == 0 ? 0.25f : -0.5f;
-            if (bytes == 2) {
-                int16_t value;
-                memcpy(&value, frame.data + sample * bytes, bytes);
-                CHECK(value == (c->channels == 1 ? -4096 : channel == 0 ? 8192 : -16384));
-            } else {
-                float value;
-                memcpy(&value, frame.data + sample * bytes, bytes);
-                CHECK(value == expected);
-            }
-        }
-        c->frames += count;
-        CHECK(moq_decode_audio_frame_free((uint32_t)id) == 0);
-        CHECK(moq_decode_audio_frame((uint32_t)id, &frame) < 0);
-        CHECK(moq_decode_audio_frame_free((uint32_t)id) < 0);
+        moq_audio_read read;
+        CHECK(moq_decode_audio_read((uint32_t)id, NULL) < 0);
+        CHECK(moq_decode_audio_read((uint32_t)id, &read) == 0);
+        // Continuous PCM loses nothing, and a whole last frame needs no end marker.
+        CHECK(read.kind == MOQ_DECODE_READ_FRAME);
+        check_frame(c, &read.frame);
+        CHECK(moq_decode_audio_read_free((uint32_t)id) == 0);
+        CHECK(moq_decode_audio_read((uint32_t)id, &read) < 0);
+        CHECK(moq_decode_audio_read_free((uint32_t)id) < 0);
     }
     pthread_cond_broadcast(&c->changed);
     pthread_mutex_unlock(&c->mutex);
@@ -91,8 +97,8 @@ static void on_frame(void *data, int32_t id) {
 int main(void) {
     Context c = {.mutex = PTHREAD_MUTEX_INITIALIZER, .changed = PTHREAD_COND_INITIALIZER};
     moq_audio_decoder_output invalid = {999, 0, 0, 0};
-    CHECK(moq_decode_audio(INT32_MAX, 0, &invalid, on_frame, &c) == -15);
-    CHECK(moq_decode_audio(INT32_MAX, 0, NULL, on_frame, &c) == -6);
+    CHECK(moq_decode_audio(INT32_MAX, 0, &invalid, on_read, &c) == -15);
+    CHECK(moq_decode_audio(INT32_MAX, 0, NULL, on_read, &c) == -6);
 
     int32_t origin = moq_origin_create();
     CHECK(origin > 0);
@@ -127,7 +133,7 @@ int main(void) {
         for (uint32_t channels = 1; channels <= 2; channels++) {
             c.format = formats[format]; c.channels = channels; c.frames = 0; c.decode_done = 0;
             moq_audio_decoder_output decoded = {c.format, 48000, channels, 30000000};
-            int32_t decoder = moq_decode_audio((uint32_t)c.catalog, 0, &decoded, on_frame, &c);
+            int32_t decoder = moq_decode_audio((uint32_t)c.catalog, 0, &decoded, on_read, &c);
             CHECK(decoder > 0);
             pthread_mutex_lock(&c.mutex);
             wait_until(&c, &c.decode_done);
@@ -145,6 +151,8 @@ int main(void) {
     wait_until(&c, &c.request_done);
     wait_until(&c, &c.catalog_done);
     pthread_mutex_unlock(&c.mutex);
-    fprintf(stderr, "C audio decode layout, remix, timeline and frame ownership passed\n");
+    fprintf(stderr, "C audio decode layout, remix, timeline and read ownership passed\n");
+
+
     return 0;
 }

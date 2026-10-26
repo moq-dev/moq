@@ -2,9 +2,11 @@ package dev.moq
 
 import dev.moq.media.*
 import dev.moq.audio.Consumer as AudioConsumer
+import dev.moq.audio.ReadFrame as AudioReadFrame
 import dev.moq.audio.Producer as AudioProducer
 import dev.moq.audio.ProducerOptions as AudioProducerOptions
 import dev.moq.video.Consumer as VideoConsumer
+import dev.moq.video.ReadFrame as VideoReadFrame
 import dev.moq.video.Producer as VideoProducer
 import dev.moq.video.ProducerOptions as VideoProducerOptions
 import dev.moq.video.FrameRate as VideoFrameRate
@@ -399,9 +401,10 @@ class SmokeTest {
      * by the interop test (`just test interop`).
      */
     @Test
-    fun `video consumer exposes a frames flow like audio does`() {
-        val video: (dev.moq.video.Consumer) -> Flow<VideoDecodedFrame> = dev.moq.video.Consumer::frames
-        val audio: (dev.moq.audio.Consumer) -> Flow<dev.moq.audio.Frame> = dev.moq.audio.Consumer::frames
+    fun `video consumer exposes a reads flow like audio does`() {
+        val video: (dev.moq.video.Consumer) -> Flow<dev.moq.video.Read> = dev.moq.video.Consumer::reads
+        val audio: (dev.moq.audio.Consumer) -> Flow<dev.moq.audio.Read> = dev.moq.audio.Consumer::reads
+
         assertNotNull(video)
         assertNotNull(audio)
     }
@@ -747,8 +750,8 @@ class SmokeTest {
                 for (i in 0 until 2) {
                     audio.write(AudioFrame(timestampUs = i.toULong() * 20_000uL, data = ByteArray(960 * 4)))
                 }
-                assertNotNull(fixed.next())
-                assertNotNull(estimated.next())
+                assertIs<AudioReadFrame>(fixed.next())
+                assertIs<AudioReadFrame>(estimated.next())
 
                 assertEquals(java.time.Duration.ofMillis(80), fixed.delay())
                 assertTrue(estimated.delay() != initial, "the estimate should move as frames are read")
@@ -793,7 +796,8 @@ class SmokeTest {
                     video.write(VideoFrame(timestampUs = i.toULong() * 33_333uL, data = rgba))
                 }
 
-                decoder.next()!!.use { frame ->
+                assertIs<VideoReadFrame>(decoder.next()).frame.use { frame ->
+
                     // The frame outlives its consumer's cancellation.
                     decoder.cancel()
 

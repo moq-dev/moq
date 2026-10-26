@@ -5,6 +5,10 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### Decoders read gaps and ends
+
+`MoqAudioConsumer::next` returns `MoqAudioRead` and `MoqVideoConsumer::next` returns `MoqVideoRead`, mirroring `moq_audio::decode::Read` and `moq_video::decode::Read`, instead of a bare frame. Take the frame from the `Frame { frame }` variant where you used the return value before. `Gap { timestamp_us, duration }` marks lost media and `End { end_us }` where the publisher stopped its encoder; what follows either does not continue what came before, so restart playback there, or skip them to keep the old behavior. `None` still means the track ended.
+
 ### `MoqClientConfig` gains `tokens`
 
 It defaults to empty in every generated binding; a Rust struct literal adds `tokens: vec![]` or ends with `..Default::default()`.

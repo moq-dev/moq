@@ -20,7 +20,7 @@ select_packages() {
         echo ALL
         return
     fi
-    if [[ "$list" == --all ]] || grep -qE '^(sh/local\.(sh|ts)|Cargo\.(toml|lock)|rust-toolchain\.toml|rs/justfile|sh/rs/(select|platform|nextest|(net|tokio|media)-features)\.sh|\.config/nextest\.toml)$' "$list"; then
+    if [[ "$list" == --all ]] || grep -qE '^(\.cargo/.*|sh/local\.(sh|ts)|Cargo\.(toml|lock)|rust-toolchain\.toml|rs/justfile|sh/rs/(select|platform|nextest|(net|tokio|media)-features)\.sh|\.config/nextest\.toml)$' "$list"; then
         echo ALL
         return
     fi
@@ -137,6 +137,7 @@ case "$action" in
         # Workspace feature unification can hide an individual crate's missing
         # gates. Keep the boundary checks isolated and the full matrix nightly.
         just rs feature-shapes "${flags[@]}"
+        if wants '(kio|moq-net)'; then just rs loom --no-run; fi
         if wants moq-net; then just rs net-features; fi
         if wants moq-quic; then just rs quic-features; fi
         if wants moq-tokio; then just rs tokio-features; fi

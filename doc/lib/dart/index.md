@@ -110,9 +110,12 @@ final decoder = await video.Consumer.subscribe(
   catalogVideo: (await renditions.next())!.video['camera']!,
   output: video.DecoderOutput(),
 );
-final frame = (await decoder.next())!;
-print(frame.pixels(format: video.PixelFormat.rgba).length);
-frame.dispose();
+// A read is a frame, a gap where media was lost, or an end where the publisher stopped its encoder.
+final read = await decoder.next();
+if (read is video.ReadFrame) {
+  print(read.frame.pixels(format: video.PixelFormat.rgba).length);
+  read.frame.dispose();
+}
 ```
 
 ```dart
@@ -140,6 +143,7 @@ shows which module holds each.
 - **Names.** Types drop the `Moq` prefix (`Session`, `BroadcastProducer`) as aliases, so the generated names still work. `Container`, `Route`, and the exceptions keep it, since Flutter owns those names. `dynamic` is reserved, so the origin method is `dynamic_`.
 - **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `cut()`: after every frame, or at a segment cadence to align with video.
 - **Timeline breaks.** On a seek or pause, call `discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.
+- **Decoder reads.** `audio.Consumer` and `video.Consumer` return a `Read` in order: a `ReadFrame`, a `ReadGap` where media was lost, or a `ReadEnd` where the publisher stopped its encoder. What follows a gap or an end does not continue what came before.
 - **Decoded frames hold decoder buffers.** `dispose()` each frame from a `video.Consumer` promptly rather than waiting for the garbage collector, or the decoder stalls. `resize` is best effort, so read each frame's `width()` and `height()`.
 - **Closing.** `await moq.close()` drains for up to one second and reports its result. `session.shutdown()` requests the drain synchronously; `await session.closed()` waits for its result. `session.cancel(code: 0)` closes at once. Finish or abort live tracks first. Awaiting cancellation of an announcement, grant, or request subscription releases its pending native read. Announcements and grants also release their consumer; server listeners leave their shared server usable. Application delivery requires explicitly selecting `moq-lite-07-wip` on both peers; older Lite versions (including default lite-06) and IETF wait only for transport ACKs.
 - **Ending cleanly.** When the input ends, finish every track, then call `finish()` on its `CatalogProducer` to finish the catalog, which ends the content. The broadcast stays announced and keeps serving the finished tracks, so a subscriber still catching up can drain them, until `broadcast.close()` takes it offline. How long to keep it up is yours to decide. A track still open at the close, or released without a finish, ends with `Unroutable`, which readers take as the publisher leaving.
