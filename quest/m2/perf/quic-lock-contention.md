@@ -41,13 +41,9 @@ Levers, only where the profile shows a cost:
   [waits](/quest/m1/quic-api/waits.md)). FxHash is cheap, so this is last
   and only on evidence.
 
-Direction to weigh (maintainer, 2026-10-25): ideally the connection state
-has no mutex and no `Arc`, owned by one task as moq-uring's is per core.
-Stream handles are what make that hard, since each one reaches into the
-connection. The `&self` receivers in
-[net-poll](/quest/m1/quic-api/net-poll.md) and
-[poll](/quest/m1/quic-api/poll.md) accept a mutex for now without committing
-to one; say whether the profile justifies going further.
+The maintainer wants the connection state free of runtime borrow checks
+altogether (2026-10-25); [borrow-free state](/quest/m2/perf/quic-borrow-free.md)
+designs that, and this profile is its baseline.
 
 A measured no-win is a valid outcome. Report public API and wire impact; the
 staging queue and batch dispatch should need none.
@@ -60,5 +56,6 @@ staging queue and batch dispatch should need none.
 
 ## Related
 
+- [Borrow-free state](/quest/m2/perf/quic-borrow-free.md) - the lock-free designs this profile is the baseline for
 - [Relay egress profile](/quest/m2/quic-egress-profile.md) - the transmit side of the same path
 - [Relay allocations](/quest/m2/perf/relay-allocs.md) - the allocation profile of the same workload

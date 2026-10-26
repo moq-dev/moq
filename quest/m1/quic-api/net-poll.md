@@ -33,8 +33,8 @@ Decided with the maintainer on 2026-10-25:
 - **A mutex is acceptable for now.** `&self` commits an implementation to
   neither a `Mutex` nor an `Arc`: the tokio driver needs a lock because its
   handles cross threads, while moq-uring serves the same calls from an
-  `Rc<RefCell>` per core. Removing the lock is
-  [QUIC lock contention](/quest/m2/perf/quic-lock-contention.md)'s question.
+  `Rc<RefCell>` per core. Removing either is
+  [borrow-free state](/quest/m2/perf/quic-borrow-free.md)'s question.
 - **Before [native WebTransport](/quest/m1/quic-api/native-web.md)**, so the
   native QUIC impls forward to the drivers' `&self, &kio::Waiter` forms in
   one line, with no `Park` bridge.
