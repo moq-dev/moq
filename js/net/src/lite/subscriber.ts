@@ -986,12 +986,11 @@ export class Subscriber {
 			}
 
 			// A publisher that covered the range before reading an update widening it sent
-			// fewer groups than the track has, so it fails rather than ending clean.
+			// fewer groups than the track has, so it fails rather than ending clean. Otherwise
+			// only a received SUBSCRIBE_END declares the track's end: a range covered or a
+			// subscription nobody wants anymore is a released copy, not finished content.
 			if (short) producer.abort(short);
-			else {
-				producer.finish();
-				producer.close();
-			}
+			else hooks.releaseTrack(producer);
 			// A settled lite07 tail acknowledges completion with FIN, without cancelling
 			// the publisher's already-finished receive half.
 			if (tailSettled && waitsForSubscriberFin(this.version)) stream.writer.close();

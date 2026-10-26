@@ -231,10 +231,8 @@ async function resolveTrackInfo(state: BroadcastState, name: string, hold?: Abor
 	let answered = false;
 	let ended = false;
 	const release = () => {
-		if (lookups.opened && lookups.pending === 0 && producer.demand().wanted.peek() === undefined) {
-			producer.finish();
-			producer.close();
-		}
+		if (lookups.opened && lookups.pending === 0 && producer.demand().wanted.peek() === undefined)
+			hooks.releaseTrack(producer);
 	};
 	info.then(
 		() => {

@@ -1009,8 +1009,8 @@ export class Subscriber {
 				console.info(`subscription no longer authorized: broadcast=${broadcast} track=${request.name}`);
 				producer.abort(refused);
 			} else {
-				producer.finish();
-				producer.close();
+				// Only a received end declares one; a copy nobody wants anymore is released, not finished.
+				hooks.releaseTrack(producer);
 			}
 
 			// Closing settled `done`, so an update still being written finishes and nothing starts
