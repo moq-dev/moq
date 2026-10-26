@@ -20,4 +20,4 @@ probe bytes indefinitely.
 
 ## Related
 
-- [App-limited BBR3 estimate ages](/quest/m1/congestion/app-limited-estimate.md) - the estimate the probe compares against
+- [App-limited BBR3 estimate ages](/quest/m1/bbr-app-limited.md) - the estimate the probe compares against
