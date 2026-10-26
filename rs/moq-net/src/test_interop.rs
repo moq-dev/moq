@@ -24,6 +24,188 @@ pub(crate) fn fin(version: &str, started: bool, clean: bool, responses: Vec<u8>)
 	serde_json::from_slice(&bun("bare-fin.ts", input)).expect("JS publisher returned response bytes")
 }
 
+/// Rust updates keep the JS subscription alive, cover both unseen groups after narrowing,
+/// and fill cached history with the update's ID and the actual group deltas on draft-22.
+#[test]
+#[ignore = "requires Bun; run by just test interop"]
+fn ietf_range_updates_interop() {
+	use crate::coding::Decode;
+	use ietf::{EndLocation, Filter, Location, Message, RequestId};
+	#[derive(serde::Deserialize)]
+	struct Served {
+		responses: Vec<Vec<u8>>,
+		streams: Vec<Vec<u8>>,
+	}
+	for version in [
+		ietf::Version::Draft15,
+		ietf::Version::Draft16,
+		ietf::Version::Draft17,
+		ietf::Version::Draft18,
+		ietf::Version::Draft22,
+	] {
+		let draft22 = Filter::is_draft22(version);
+		let legacy = matches!(version, ietf::Version::Draft15 | ietf::Version::Draft16);
+		let range = |start, end: Option<u64>| Filter::Absolute {
+			start: Location {
+				group: start,
+				object: 0,
+			},
+			end: end.map(|group| EndLocation { group, object: None }),
+		};
+		let mut subscribe = Vec::new();
+		let mut w = Encoder::new(&mut subscribe, version.into());
+		w.varint(ietf::Subscribe::ID).unwrap();
+		ietf::Subscribe {
+			request_id: RequestId(0),
+			track_namespace: crate::Path::new("room"),
+			track_name: "video".into(),
+			subscriber_priority: 127,
+			group_order: ietf::GroupOrder::Ascending,
+			filter: if draft22 { range(4, None) } else { Filter::Unfiltered },
+			fill: None,
+			properties_wanted: false,
+			forward: true,
+			rendezvous: false,
+			range_filters: false,
+			authorization_token: None,
+			new_group: None,
+			max_age: None,
+			epoch: None,
+		}
+		.encode(&mut w, version)
+		.unwrap();
+		let update = |id, filter, fill| {
+			let mut bytes = Vec::new();
+			let mut w = Encoder::new(&mut bytes, version.into());
+			w.varint(ietf::SubscribeUpdate::ID).unwrap();
+			ietf::SubscribeUpdate {
+				request_id: RequestId(id),
+				subscription_request_id: legacy.then_some(RequestId(0)),
+				start_location: Location { group: 0, object: 0 },
+				end_group: 0,
+				subscriber_priority: None,
+				forward: None,
+				filter: Some(filter),
+				authorization_token: None,
+				new_group: None,
+				max_age: None,
+				fill,
+			}
+			.encode(&mut w, version)
+			.unwrap();
+			bytes
+		};
+		let mut updates = Vec::new();
+		if draft22 {
+			updates.push(update(
+				2,
+				range(0, None),
+				Some(ietf::Fill {
+					group_order: Some(ietf::GroupOrder::Ascending),
+					filter: Some(range(0, None)),
+					range_filters: false,
+				}),
+			));
+		}
+		updates.push(update(if draft22 { 4 } else { 2 }, range(6, Some(7)), None));
+		let input = serde_json::json!({
+			"draft": crate::Version::from(version).code() & 0xff,
+			"subscribe": subscribe,
+			"updates": updates,
+		});
+		let served: Served = serde_json::from_slice(&bun("ietf-range-updates.ts", input)).unwrap();
+		assert_eq!(served.responses.len(), if draft22 { 3 } else { 2 });
+		for (index, bytes) in served.responses.iter().enumerate() {
+			let mut r = Decoder::new(bytes, version.into());
+			if index == 0 {
+				assert_eq!(r.varint().unwrap(), ietf::SubscribeOk::ID);
+				let ok = ietf::SubscribeOk::decode(&mut r, version).unwrap();
+				assert_eq!(ok.track_alias, 0);
+				assert_eq!(ok.largest, draft22.then_some(Location { group: 3, object: 1 }));
+			} else {
+				assert_eq!(r.varint().unwrap(), ietf::RequestOk::ID);
+				let ok = ietf::RequestOk::decode(&mut r, version).unwrap();
+				assert_eq!(ok.request_id, legacy.then_some(RequestId(2)));
+				assert_eq!(
+					ok.largest,
+					draft22.then_some(Location {
+						group: index as u64 + 2,
+						object: 1
+					})
+				);
+			}
+			assert!(r.is_empty());
+		}
+		let mut groups = Vec::new();
+		let mut filled = Vec::new();
+		for bytes in &served.streams {
+			let mut r = Decoder::new(bytes, version.into());
+			if r.varint().unwrap() == ietf::FetchHeader::TYPE {
+				assert!(draft22);
+				assert_eq!(
+					ietf::FetchHeader::decode(&mut r, version).unwrap().request_id,
+					RequestId(2)
+				);
+				let mut prior: Option<(u64, u64)> = None;
+				while !r.is_empty() {
+					let ietf::FetchObject::Object { group, object, .. } =
+						ietf::FetchObject::decode(&mut r, version).unwrap()
+					else {
+						panic!("a complete cached fill must contain objects");
+					};
+					let location = match (prior, group) {
+						(None, Some(group)) => (group, object.unwrap()),
+						(Some((prior, _)), Some(delta)) => (prior + delta + 1, object.unwrap()),
+						(Some((group, prior)), None) => (group, prior + object.unwrap_or(1)),
+						_ => panic!("fill omitted its first group"),
+					};
+					let len = r.varint().unwrap() as usize;
+					assert_eq!(r.slice(len).unwrap(), [location.0 as u8, location.1 as u8]);
+					filled.push(location);
+					prior = Some(location);
+				}
+			} else {
+				let mut r = Decoder::new(bytes, version.into());
+				let header = ietf::GroupHeader::decode(&mut r, version).unwrap();
+				assert_eq!(header.track_alias, 0, "updates must retain the subscription alias");
+				assert!(header.flags.has_end, "a complete group must end");
+				let mut objects = Vec::new();
+				while !r.is_empty() {
+					let delta = r.varint().unwrap();
+					let object = objects.last().map_or(delta, |prior| prior + delta + 1);
+					if header.flags.has_extensions {
+						let len = r.varint().unwrap() as usize;
+						r.slice(len).unwrap();
+					}
+					let len = r.varint().unwrap() as usize;
+					assert_eq!(r.slice(len).unwrap(), [header.group_id as u8, object as u8]);
+					objects.push(object);
+				}
+				groups.push((header.group_id, objects));
+			}
+		}
+		groups.sort_unstable();
+		assert_eq!(
+			groups,
+			if draft22 {
+				vec![(3, vec![]), (4, vec![0, 1]), (6, vec![0, 1]), (7, vec![0, 1])]
+			} else {
+				vec![(6, vec![0, 1]), (7, vec![0, 1])]
+			},
+			"{version}"
+		);
+		assert_eq!(
+			filled,
+			if draft22 {
+				(0..4).flat_map(|group| [(group, 0), (group, 1)]).collect::<Vec<_>>()
+			} else {
+				vec![]
+			},
+			"{version}"
+		);
+	}
+}
+
 /// Every varint size boundary in both formats, plus the 2^53 edge of a JS `number`. js/net's own
 /// tests cover leading-ones values past 2^62 - 1, where the QUIC form stops.
 #[test]
