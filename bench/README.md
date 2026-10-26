@@ -365,7 +365,7 @@ payload. `ledger` uses one fixture against every checkout's internal ledger, swe
 ascending, descending, shuffled, and rolling-expiration arrivals over the retained
 gap count. It includes each arrival's expiration and coverage checks.
 The browser smoke lane preserves one measured round of all three fixtures, and drift
-also runs in the nightly JS benchmark leg. Timing is
+and ledger also run in the nightly JS benchmark leg. Timing is
 observational, with the A/A spread showing the host's noise floor.
 
 ## Pattern and container coverage
