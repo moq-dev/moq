@@ -37,10 +37,10 @@ test("group read handles independently replay buffered and future frames", async
 });
 
 test.each(["group", "track"] as const)("%s JSON rejects an empty frame without treating it as EOF", async (kind) => {
-	const group = new GroupProducer(0);
 	const producer = new TrackProducer("json");
-	const reader = kind === "group" ? group.consume() : producer.subscribe().ordered();
-	if (kind === "track") producer.writeGroup(group);
+	const subscriber = kind === "track" ? producer.subscribe().ordered() : undefined;
+	const group = kind === "track" ? producer.createGroup(0) : new GroupProducer(0);
+	const reader = subscriber ?? group.consume();
 	group.writeFrame({ payload: new Uint8Array() });
 	for (const value of [null, false, 0, ""])
 		group.writeFrame({ payload: new TextEncoder().encode(JSON.stringify(value)) });

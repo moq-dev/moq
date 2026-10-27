@@ -12,6 +12,7 @@ import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Stream } from "../stream.ts";
 import { Timescale } from "../time.ts";
+import { closeUnwanted } from "../util/announce.ts";
 import { nextTask } from "../util/yield.ts";
 import { wireOf } from "../wire.ts";
 import type { Established } from "./established.ts";
@@ -1015,7 +1016,9 @@ test("closing an announce consumer during upstream teardown does not append retr
 	const producer = new Producer();
 	const pump = new Effect((effect) => pumpAnnounced(effect, upstream.consume(), producer));
 	const consumer = producer.consume();
-	void consumer.closed.then(() => pump.close());
+	// The same lifecycle as Connection.announced: the last consumer closing closes the producer and its pump.
+	closeUnwanted(producer);
+	void producer.closed.then(() => pump.close());
 	const errors = spyOn(console, "error").mockImplementation(() => {});
 	try {
 		upstream.append({
@@ -1030,6 +1033,7 @@ test("closing an announce consumer during upstream teardown does not append retr
 		await Promise.resolve();
 		consumer.close();
 		await settle();
+		expect(producer.closed.peek()).not.toBeUndefined();
 		expect(errors.mock.calls).toEqual([]);
 	} finally {
 		consumer.close();
