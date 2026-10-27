@@ -360,15 +360,20 @@ function locate(project: ProjectReflection, modules: Map<Reflection, string>, ex
 		seen.add(value);
 		if (value instanceof ReferenceType) {
 			const at = find(value);
-			if (at) value.name = `\0${at.specifier}\0${at.path}\0`;
+			if (at) value.name = `\0${TYPE_AT}${at.specifier}\0${at.path}\0`;
 		}
 		for (const [field, child] of Object.entries(value)) if (field !== "parent") visit(child);
 	};
 	for (const reflection of Object.values(project.reflections)) visit(reflection);
 }
 
-// A reference `locate` named: its import specifier, empty for the standard library, and its path.
-const placeholder = /\0([^\0]*)\0([^\0]*)\0/g;
+// A reference `locate` named: where it is, its import specifier, empty for the standard library,
+// and its path. It is in a type, which `import()` can spell, or at the head of an `extends` or
+// `implements` clause, which needs a name, or there with that name hidden, so it must bind another.
+const placeholder = /\0([thb])([^\0]*)\0([^\0]*)\0/g;
+const TYPE_AT = "t";
+const HERITAGE = "h";
+const BIND = "b";
 
 // The declarations that give a name each meaning TypeScript looks one up by.
 const TYPE = ReflectionKind.Class | ReflectionKind.Interface | ReflectionKind.TypeAlias | ReflectionKind.Enum;
@@ -470,23 +475,43 @@ class Renderer {
 		const specifier = this.#modules.get(module);
 		const body = this.children(module, "").join("\n\n");
 		// A reference elsewhere is imported by the first name of its path, unless that name is
-		// declared here or comes from two places, when it is spelled with `import()` instead.
+		// declared here or comes from two places, when it is spelled with `import()` instead, or
+		// imported under another name where a clause needs one.
 		const sources = new Map<string, Set<string>>();
 		for (const child of module.children ?? []) sources.set(child.name, new Set([specifier ?? ""]));
-		for (const [, from = "", path = ""] of body.matchAll(placeholder)) {
+		for (const [, , from = "", path = ""] of body.matchAll(placeholder)) {
 			const [head = ""] = path.split(".");
 			sources.set(head, (sources.get(head) ?? new Set()).add(from));
 		}
 		const imported = (from: string, head: string) =>
 			from !== specifier && from !== "" && head !== "default" && sources.get(head)?.size === 1;
 		const imports = new Set<string>();
-		const text = body.replace(placeholder, (_, from: string, path: string) => {
-			const [head = ""] = path.split(".");
+		const aliases = new Map<string, string>();
+		const bind = (from: string, head: string) => {
+			const key = `${from}\0${head}`;
+			let alias = aliases.get(key);
+			if (!alias) {
+				const base = head === "default" ? "Default" : head;
+				let i = 1;
+				while (sources.has(`${base}_${i}`)) i++;
+				alias = `${base}_${i}`;
+				sources.set(alias, new Set([from]));
+				aliases.set(key, alias);
+				imports.add(`import { ${head} as ${alias} } from "${from}";`);
+			}
+			return alias;
+		};
+		const text = body.replace(placeholder, (_, at: string, from: string, path: string) => {
+			const [head = "", ...rest] = path.split(".");
+			const named = (name: string) => [name, ...rest].join(".");
+			if (at === BIND) return from ? named(bind(from, head)) : `globalThis.${path}`;
 			// A default export has no name to write, even in its own module.
 			if (from === "" || (from === specifier && head !== "default")) return path;
-			if (!imported(from, head)) return `import("${from}").${path}`;
-			imports.add(`import { ${head} } from "${from}";`);
-			return path;
+			if (imported(from, head)) {
+				imports.add(`import { ${head} } from "${from}";`);
+				return path;
+			}
+			return at === HERITAGE ? named(bind(from, head)) : `import("${from}").${path}`;
 		});
 		const header = [...imports].sort().join("\n");
 		return `# \`${specifier}\`\n\n\`\`\`ts\n${header ? `${header}\n\n` : ""}${text}\n\`\`\`\n`;
@@ -583,12 +608,16 @@ class Renderer {
 			}
 		}
 		return body.map((text) =>
-			text.replace(/(typeof )?\0([^\0]*)\0([^\0]*)\0/g, (found, query = "", from: string, path: string) => {
-				const [head = "", ...rest] = path.split(".");
-				const by = query ? VALUE : rest.length ? NAMESPACE : TYPE;
-				if (!((hiding.get(head) ?? 0) & by) || outer.has(`${from}\0${head}`)) return found;
-				return `${query}${from ? `import("${from}")` : "globalThis"}.${path}`;
-			}),
+			text.replace(
+				/(typeof )?\0([thb])([^\0]*)\0([^\0]*)\0/g,
+				(found, query = "", at: string, from: string, path: string) => {
+					const [head = "", ...rest] = path.split(".");
+					const by = query ? VALUE : rest.length ? NAMESPACE : at === TYPE_AT ? TYPE : TYPE | VALUE;
+					if (!((hiding.get(head) ?? 0) & by) || outer.has(`${from}\0${head}`)) return found;
+					if (at !== TYPE_AT) return `\0${BIND}${from}\0${path}\0`;
+					return `${query}${from ? `import("${from}")` : "globalThis"}.${path}`;
+				},
+			),
 		);
 	}
 
@@ -655,7 +684,8 @@ function alias(name: string, as: string): string {
 }
 
 function clause(keyword: string, types: SomeType[] | undefined, indent: string): string {
-	return types?.length ? ` ${keyword} ${types.map((type) => print(type, indent)).join(", ")}` : "";
+	const head = (text: string) => (text.startsWith(`\0${TYPE_AT}`) ? `\0${HERITAGE}${text.slice(2)}` : text);
+	return types?.length ? ` ${keyword} ${types.map((type) => head(print(type, indent))).join(", ")}` : "";
 }
 
 // An object type spelled out member by member, rather than a function type or an empty `{}`.

@@ -282,10 +282,18 @@ export default class {
 import type { Cost } from "./hop";
 import type Session from "./session";
 `,
+		"dist/shape.d.ts": `/** A shape. */
+export interface Shape {
+	/** Its area. */
+	area: number;
+}
+`,
 		"dist/index.d.ts": `import { Rendition as Base } from "./rendition";
 import Session from "./session";
+import { Shape as Outer } from "./shape";
 export type { Cost } from "./hop";
 export { Rendition } from "./rendition";
+export { Shape } from "./shape";
 export default Session;
 /** Audio. */
 export declare namespace Audio {
@@ -298,16 +306,27 @@ export declare namespace Audio {
 		/** The global one. */
 		file: globalThis.File;
 	}
+	/** An audio shape. */
+	class Shape implements Outer {
+		/** Its area. */
+		area: number;
+	}
 }
 `,
 	});
 	await checkReports(directory);
-	expect(report(directory)).toBe(`export namespace Audio {
+	expect(report(directory)).toBe(`import { Shape as Shape_1 } from "@moq/example";
+
+export namespace Audio {
 	export type Audio = Audio.File[];
 	export interface File {
 		file: globalThis.File;
 	}
 	export type Rendition = import("@moq/example").Rendition<string>;
+	export class Shape implements Shape_1 {
+		constructor();
+		area: number;
+	}
 }
 
 export type Cost = bigint;
@@ -315,6 +334,10 @@ export type Cost = bigint;
 export class Rendition<T> {
 	constructor();
 	value: T;
+}
+
+export interface Shape {
+	area: number;
 }
 
 export default class {

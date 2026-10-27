@@ -2,6 +2,7 @@
 
 ```ts
 import { Audio } from "@moq/hang/catalog";
+import { Format as Format_1 } from "@moq/hang/container";
 import { Micro } from "@moq/clock";
 import { Milli } from "@moq/clock";
 import { Net } from "@moq/hang";
@@ -45,7 +46,7 @@ export interface Frame {
 export namespace Legacy {
 	export { BufferedRange };
 	export { BufferedRanges };
-	export class Format implements import("@moq/hang/container").Format {
+	export class Format implements Format_1 {
 		constructor(config: Audio.AudioConfig | Video.VideoConfig | "audio" | "video" | "data");
 		decode(frame: Uint8Array): Frame[];
 		end(frame: Frame): Micro | undefined;
