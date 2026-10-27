@@ -3,6 +3,9 @@ import { expect, mock, test } from "bun:test";
 // The UI renders into a shadow root, which the test runner has no DOM for.
 mock.module("solid-js/web", () => ({ render: () => () => {} }));
 mock.module("./ui/element.tsx", () => ({ BoyUI: () => null }));
+// Bun cannot load the blob-URL worklet import used by the audio decoder. Mock it here rather than
+// relying on game.test.ts, since that mock only applies when its file happens to run first.
+mock.module("../../watch/src/audio/render-worklet.ts?worklet", () => ({ default: async () => "blob:fake-render" }));
 
 const registry = new Map<string, CustomElementConstructor>();
 globalThis.HTMLElement = class {
