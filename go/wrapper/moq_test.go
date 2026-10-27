@@ -305,8 +305,10 @@ func TestAudioConsumerDelay(t *testing.T) {
 		}
 	}
 	for _, consumer := range []*moqaudio.Consumer{fixed, estimated} {
-		if frame, err := consumer.Next(ctx); err != nil || frame == nil {
-			t.Fatalf("next = %v, %v", frame, err)
+		if read, err := consumer.Next(ctx); err != nil {
+			t.Fatal(err)
+		} else if _, ok := read.(moqaudio.ReadFrame); !ok {
+			t.Fatalf("next = %#v, want a frame", read)
 		}
 	}
 
@@ -472,14 +474,17 @@ func testDecodeVideoFrame(t *testing.T, surface bool) {
 		}
 	}
 
-	frame, err := decoder.Next(ctx)
+	read, err := decoder.Next(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if frame == nil {
-		t.Fatal("expected a frame")
+	decoded, ok := read.(moqvideo.ReadFrame)
+	if !ok {
+		t.Fatalf("next = %#v, want a frame", read)
 	}
+	frame := decoded.Frame
 	defer frame.Close()
+
 	decoder.Cancel()
 
 	if !surface {

@@ -143,7 +143,7 @@ export interface Permissions {
  *
  * - `path` extends the root (root `demo`, path `demo/room`), so the extra `room`
  *   narrows each pattern and drops the ones outside it.
- * - `path` is a parent of the root (root `demo`, path ``), so `demo` is prepended to
+ * - `path` is a parent of the root (root `demo`, empty path), so `demo` is prepended to
  *   each pattern to keep it anchored where the token points.
  *
  * Matching is segment-aware, so a root of `foo` does not cover `foobar`. Slashes at

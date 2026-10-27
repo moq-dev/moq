@@ -27,6 +27,7 @@
 		"@moq/signals": "workspace:*",
 		"async-mutex": "^0.5.0",
 		"pako": "^3.0.2",
+		"sorted-btree": "^2.1.0",
 		"uuid": "^14.0.3"
 	},
 	"peerDependencies": {
@@ -34,6 +35,7 @@
 		"zod": "^4.5.0"
 	},
 	"devDependencies": {
+		"@microsoft/api-extractor": "7.59.4",
 		"@types/bun": "^1.4.3",
 		"@types/node": "^26.6.4",
 		"@typescript/lib-dom": "npm:@types/web@^0.0.358",

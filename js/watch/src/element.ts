@@ -9,7 +9,7 @@
 import { Milli } from "@moq/clock";
 import type * as Catalog from "@moq/hang/catalog";
 import * as Moq from "@moq/net";
-import { Effect, Signal } from "@moq/signals";
+import { Derived, Effect, Signal } from "@moq/signals";
 import type * as Audio from "./audio";
 import { type Broadcast, CATALOG_FORMATS, type CatalogFormat } from "./broadcast";
 import { formatDuration, parseDuration } from "./duration";
@@ -46,6 +46,7 @@ function parseVolume(value: string | null): number {
 	return 0.5;
 }
 
+/** The attributes the element observes. */
 const OBSERVED = [
 	"url",
 	"versions",
@@ -61,7 +62,6 @@ const OBSERVED = [
 	"catalog-format",
 	"captions",
 ] as const;
-type Observed = (typeof OBSERVED)[number];
 
 // Parse the `visible` attribute into a Visible value, falling back to "20%".
 function parseVisible(value: string | null): Video.Visible {
@@ -123,14 +123,10 @@ function parseBoolean(value: string | null, defaultValue: boolean): boolean {
 	return normalized !== "false" && normalized !== "0";
 }
 
-// Close everything when this element is garbage collected.
-// This is primarily to avoid a console.warn that we didn't close() before GC.
-// There's no destructor for web components so this is the best we can do.
-const cleanup = new FinalizationRegistry<Effect>((signals) => signals.close());
-
 /** The `<moq-watch>` element: plays a broadcast into a nested <canvas>. */
 export default class MoqWatch extends HTMLElement {
-	static observedAttributes = OBSERVED;
+	/** The attributes the browser reports changes to. */
+	static observedAttributes: typeof OBSERVED = OBSERVED;
 
 	/**
 	 * The relay connection, shared with every other element on the page pointing at the
@@ -212,11 +208,8 @@ export default class MoqWatch extends HTMLElement {
 	// Set when the element is connected to the DOM.
 	#enabled = new Signal(false);
 
-	// Stashed volume to restore on unmute.
-	#unmuteVolume = 0.5;
-
 	/**
-	 * Effects scoped to this element's lifetime, closed on disconnect.
+	 * Effects owned by this element; media resources are suspended while disconnected.
 	 *
 	 * Public because the element is the top of the tree: it's where an application hangs its own
 	 * reactivity. The components underneath keep theirs private, so `close()` is the only handle.
@@ -225,8 +218,6 @@ export default class MoqWatch extends HTMLElement {
 
 	constructor() {
 		super();
-
-		cleanup.register(this, this.signals);
 
 		this.connection = new Moq.Connection({
 			enabled: this.#enabled,
@@ -242,7 +233,20 @@ export default class MoqWatch extends HTMLElement {
 			catalogFormat: this.#catalogFormat,
 			catalog: this.#catalog,
 			...this.controls,
-			video: { ...this.controls.video, canvas: this.#canvas },
+			video: {
+				...this.controls.video,
+				canvas: this.signals.computed((effect) =>
+					effect.get(this.#enabled) ? effect.get(this.#canvas) : undefined,
+				),
+			},
+			audio: {
+				...this.controls.audio,
+				// A zero level stops downloads without rewriting the user's mute control.
+				muted: new Derived(
+					[this.controls.audio.muted, this.controls.audio.volume],
+					(muted, volume) => muted || volume === 0,
+				),
+			},
 			text: { ...this.controls.text, container: this.#captionsOverlay },
 		});
 		this.signals.cleanup(() => this.player.close());
@@ -254,23 +258,6 @@ export default class MoqWatch extends HTMLElement {
 		this.text = this.player.text;
 		this.textRenderer = this.player.textRenderer;
 		this.sync = this.player.sync;
-
-		// Mute/volume coupling. The element owns the writable volume/muted Signals, so
-		// the policy lives here: muting stashes and zeroes the volume; a zero volume
-		// reports as muted.
-		this.signals.run((effect) => {
-			const muted = effect.get(this.controls.audio.muted);
-			if (muted) {
-				this.#unmuteVolume = this.controls.audio.volume.peek() || 0.5;
-				this.controls.audio.volume.set(0);
-			} else {
-				this.controls.audio.volume.set(this.#unmuteVolume);
-			}
-		});
-		this.signals.run((effect) => {
-			const volume = effect.get(this.controls.audio.volume);
-			this.controls.audio.muted.set(volume === 0);
-		});
 
 		// Watch to see if the canvas element is added or removed.
 		const setCanvas = () => {
@@ -397,6 +384,7 @@ export default class MoqWatch extends HTMLElement {
 
 	// Annoyingly, we have to use these callbacks to figure out when the element is connected to the DOM.
 	// This wouldn't be so bad if there was a destructor for web components to clean up our effects.
+	/** Called by the browser when the element joins a document. */
 	connectedCallback() {
 		this.#enabled.set(true);
 		this.style.display = "block";
@@ -416,12 +404,14 @@ export default class MoqWatch extends HTMLElement {
 		}
 	}
 
+	/** Called by the browser when the element leaves its document. */
 	disconnectedCallback() {
 		// Stop everything but don't actually cleanup just in case we get added back to the DOM.
 		this.#enabled.set(false);
 	}
 
-	attributeChangedCallback(name: Observed, oldValue: string | null, newValue: string | null) {
+	/** Called by the browser when an observed attribute changes. */
+	attributeChangedCallback(name: (typeof OBSERVED)[number], oldValue: string | null, newValue: string | null) {
 		if (oldValue === newValue) {
 			return;
 		}
@@ -496,7 +486,7 @@ export default class MoqWatch extends HTMLElement {
 		this.controls.paused.set(value);
 	}
 
-	/** The playback volume from 0 to 1, mirrored by the `volume` attribute. */
+	/** The playback level from 0 to 1, preserved while muted and mirrored by the `volume` attribute. */
 	get volume(): number {
 		return this.controls.audio.volume.peek();
 	}
@@ -505,7 +495,7 @@ export default class MoqWatch extends HTMLElement {
 		this.controls.audio.volume.set(value);
 	}
 
-	/** Whether audio is muted, mirrored by the `muted` attribute. */
+	/** Whether audio is muted independently of volume, mirrored by the `muted` attribute. */
 	get muted(): boolean {
 		return this.controls.audio.muted.peek();
 	}

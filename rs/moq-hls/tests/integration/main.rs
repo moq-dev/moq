@@ -5,5 +5,6 @@
 
 mod disconnect;
 mod finish;
+mod restart;
 mod server;
 mod support;

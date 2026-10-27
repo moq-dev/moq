@@ -42,14 +42,17 @@ declare namespace Audio_2 {
     export {
         DecoderInput_2 as DecoderInput,
         DecoderProps_2 as DecoderProps,
+        DecoderOutput_2 as DecoderOutput,
         Stats_2 as Stats,
         Decoder_2 as Decoder,
         EmitterInput,
         EmitterProps,
+        EmitterOutput,
         Emitter,
         Target_2 as Target,
         Supported_2 as Supported,
         SourceInput_2 as SourceInput,
+        SourceOutput_2 as SourceOutput,
         Source_2 as Source
     }
 }
@@ -71,7 +74,7 @@ type BroadcastInput = {
 };
 
 type BroadcastOutput = {
-    status: Signal<Status>;
+    status: Signal<"offline" | "loading" | "live" | "error" | "unsupported">;
     active: Signal<Moq.Broadcast.Consumer | undefined>;
     error: Signal<Error | undefined>;
     catalog: Signal<Catalog.Root | undefined>;
@@ -171,13 +174,11 @@ type EmitterProps = Inputs<EmitterInput> & {
     source: Decoder_2;
 };
 
-type Kind = "video" | "audio" | "text";
-
 class MoqWatch extends HTMLElement {
     constructor();
     get announced(): boolean;
     set announced(value: boolean);
-    attributeChangedCallback(name: Observed, oldValue: string | null, newValue: string | null): void;
+    attributeChangedCallback(name: (typeof OBSERVED)[number], oldValue: string | null, newValue: string | null): void;
     audio: Audio_2.Decoder;
     get backend(): Video.Backend;
     set backend(value: Video.Backend);
@@ -218,7 +219,7 @@ class MoqWatch extends HTMLElement {
     set muted(value: boolean);
     get name(): Moq.Path.Valid;
     set name(value: string | Moq.Path.Valid);
-    static observedAttributes: readonly ["url", "versions", "name", "paused", "volume", "muted", "visible", "backend", "announced", "delay", "buffer", "catalog-format", "captions"];
+    static observedAttributes: typeof OBSERVED;
     get paused(): boolean;
     set paused(value: boolean);
     readonly player: Player;
@@ -242,8 +243,6 @@ export default MoqWatch;
 
 const OBSERVED: readonly ["url", "versions", "name", "paused", "volume", "muted", "visible", "backend", "announced", "delay", "buffer", "catalog-format", "captions"];
 
-type Observed = (typeof OBSERVED)[number];
-
 export function parseCatalogFormat(value: string | null): CatalogFormat | undefined;
 
 class Player {
@@ -252,8 +251,8 @@ class Player {
     readonly broadcast: Broadcast;
     close(): void;
     readonly emitter: Audio_2.Emitter;
-    readonly in: Readonlys<Omit<PlayerInput, Kind>> & {
-        readonly [K in Kind]: Readonlys<PlayerInput[K]>;
+    readonly in: Readonlys<Omit<PlayerInput, "video" | "audio" | "text">> & {
+        readonly [K in "video" | "audio" | "text"]: Readonlys<PlayerInput[K]>;
     };
     readonly renderer: Video.Renderer;
     reset(): void;
@@ -291,8 +290,8 @@ type PlayerInput = {
     };
 };
 
-type PlayerProps = Inputs<Omit<PlayerInput, Kind>> & {
-    [K in Kind]?: Inputs<PlayerInput[K]>;
+type PlayerProps = Inputs<Omit<PlayerInput, "video" | "audio" | "text">> & {
+    [K in "video" | "audio" | "text"]?: Inputs<PlayerInput[K]>;
 };
 
 function renderable(config: Catalog.TextConfig): boolean;
@@ -410,8 +409,6 @@ interface Stats_2 {
     underruns: number;
 }
 
-type Status = "offline" | "loading" | "live" | "error" | "unsupported";
-
 type Supported = (config: Catalog.VideoConfig) => Promise<boolean>;
 
 function supported(config: Catalog.VideoConfig): Promise<boolean>;
@@ -462,6 +459,7 @@ declare namespace Text_2 {
         Renderer_2 as Renderer,
         renderable,
         SourceInput_3 as SourceInput,
+        SourceOutput_3 as SourceOutput,
         Source_3 as Source
     }
 }
@@ -472,6 +470,7 @@ declare namespace Video {
         DecoderInput,
         DecoderProps,
         Stats,
+        DecoderOutput,
         Decoder,
         Visible,
         RendererInput,
@@ -480,11 +479,11 @@ declare namespace Video {
         Supported,
         Target,
         SourceInput,
+        SourceOutput,
         Source
     }
 }
 
 type Visible = "never" | "always" | (string & {});
-
 
 ```

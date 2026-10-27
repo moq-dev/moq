@@ -20,11 +20,13 @@
 		"release": "bun ../common/release.ts"
 	},
 	"dependencies": {
+		"@moq/json": "workspace:^",
 		"@moq/net": "workspace:^",
 		"@zod/mini": "^4.6.7",
 		"zod": "^4.6.7"
 	},
 	"devDependencies": {
+		"@microsoft/api-extractor": "7.59.4",
 		"rimraf": "^6.1.3",
 		"typescript": "7.0.2"
 	}

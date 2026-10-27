@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### An idle reservation reads the share it would get
+
+`bandwidth::Reservation::peek` and its `consumer()` report the slice the track would get back while nothing subscribes to it, instead of `None`; it still claims nothing from the other tracks.
+`None` now means only that the connection has no estimate or the reservation is gone.
+A sender that relied on `None` to hold its rate while unwatched should check its track's demand instead.
+
 ### Exports without a consumer are gone
 
 These had no caller outside tests; replace them as follows.

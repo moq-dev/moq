@@ -315,6 +315,9 @@ pub(crate) struct TrackState {
 	// creates (see `cache::Track`). Holds the gross-write counter `charge_debt` drains,
 	// and the weak link a frame write follows back here to settle its own debt.
 	cache: Arc<cache::Track>,
+	// The upstream publisher's Largest Object, retained even on a fetch-only copy, with the
+	// track's largest position once it was reported: anything received past that outdates it.
+	object_edge: Option<((u64, u64), Position)>,
 
 	// Cached groups by sequence: the single source of truth for what is cached. The
 	// two orderings below hold bare sequences and validate against this map, so a
@@ -435,6 +438,8 @@ pub(crate) struct TrackState {
 	// Whether a received copy's wire tells it what relative and time anchors resolve
 	// against, so they resolve here as at the publisher.
 	anchored: bool,
+	// This copy can translate only anchors its cache has already settled.
+	cached_anchors: bool,
 	// Sequences the upstream publisher gave up, with the error each was given up with: an
 	// incoming SUBSCRIBE_DROP or a producer cut. Kept apart from the cache so reclaiming a
 	// slot cannot erase a disposition a relay must forward, and as ranges so a wide DROP
@@ -752,6 +757,16 @@ impl Holdings for TrackState {
 }
 
 impl TrackState {
+	/// The upstream publisher's Largest Object, unless a frame or group received since its
+	/// report outdates it, even one the cache has since evicted.
+	fn object_edge(&self) -> Option<(u64, u64)> {
+		let (edge, mark) = self.object_edge?;
+		self.cache
+			.largest()
+			.is_none_or(|largest| largest <= mark)
+			.then_some(edge)
+	}
+
 	/// A consumer joined at the live edge: ask for a group past every sequence written when
 	/// the newest group's bytes after its first frame exceed [`Info::refresh`] times that
 	/// frame.
@@ -3074,10 +3089,19 @@ impl Producer {
 
 	/// Let this received copy's readers resolve relative and time anchors, for a wire that
 	/// reports the live edge and media time and asks for every group the budget allows.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn anchored(&self) {
 		if let Ok(mut state) = self.modify() {
 			state.anchored = true;
+		}
+	}
+
+	/// Let readers use only anchors this cache can already translate to group bounds.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn anchored_cached(&self) {
+		if let Ok(mut state) = self.modify() {
+			state.anchored = true;
+			state.cached_anchors = true;
 		}
 	}
 
@@ -3128,6 +3152,60 @@ impl Producer {
 		if let Ok(mut state) = self.modify() {
 			state.set_live(largest, start);
 		}
+	}
+
+	/// Record the upstream Object ID separately from the frame ordinal readers count.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn report_object(&self, group: u64, object: u64) {
+		if let Ok(mut state) = self.modify() {
+			// A frame received past the report outdates it on arrival. A frame's ordinal never
+			// exceeds its Object ID, so one past the reported object proves the report stale.
+			if state
+				.cache
+				.largest()
+				.is_some_and(|largest| largest > Position { group, frame: object })
+			{
+				return;
+			}
+			let edge = state.object_edge().max(Some((group, object)));
+			state.cache.advance_largest(Position::group(group));
+			let mark = state.cache.largest().unwrap_or(Position::group(group));
+			state.object_edge = edge.map(|edge| (edge, mark));
+		}
+	}
+
+	/// Resolve cached time anchors before sending a wire that can name only groups.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn resolve_subscription(&self, subscription: &Subscription) -> Result<Subscription> {
+		if !subscription.ranges.iter().any(|range| !range.is_wire()) {
+			return Ok(subscription.clone());
+		}
+		let state = self.state.read();
+		let window = Window::new(&subscription.ranges, state.latest_live(), &*state)?;
+		if !window.is_settled() {
+			return Err(Error::Unsupported);
+		}
+		let resolved = window.resolved();
+		let mut subscription = subscription.clone();
+		for (range, resolved) in subscription.ranges.iter_mut().zip(resolved) {
+			if match range.start {
+				super::subscription::Anchor::Time(_) => true,
+				super::subscription::Anchor::Relative(back) => back != 0 && back != u64::MAX,
+				_ => false,
+			} {
+				range.start = super::subscription::Anchor::Absolute(resolved.ok_or(Error::Unsupported)?.start);
+			}
+			if matches!(
+				range.end,
+				Some(super::subscription::Anchor::Time(_) | super::subscription::Anchor::Relative(_))
+			) {
+				range.end = resolved
+					.ok_or(Error::Unsupported)?
+					.end
+					.map(super::subscription::Anchor::Absolute);
+			}
+		}
+		Ok(subscription)
 	}
 
 	/// The source reported its largest frame, which [`Self::largest`] follows before the
@@ -4216,6 +4294,26 @@ impl Consumer {
 		}
 	}
 
+	/// Refuse a new range before it changes the demand shared by this route's readers.
+	fn refuse_subscription(&self, subscription: &Subscription) -> Result<()> {
+		if let Some(serving) = self.serving() {
+			return serving.refuse_subscription(subscription);
+		}
+		self.with_state(|state| match state {
+			Some(state) => refuse_cached_anchors(&state.read(), subscription),
+			None => Ok(()),
+		})
+	}
+
+	/// The upstream publisher's Largest Object, independently of which groups are cached.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn reported_object(&self) -> Option<(u64, u64)> {
+		if let Some(serving) = self.serving() {
+			return serving.reported_object();
+		}
+		self.with_state(|state| state?.read().object_edge())
+	}
+
 	/// The newest group, when it is already cached: resolved synchronously, without
 	/// counting as a fetch or a delivery. The IETF publisher snapshots its frame count to
 	/// resolve Largest Object; a group that is not immediately available reads as no edge.
@@ -4770,6 +4868,7 @@ impl Subscribing {
 		let info = ready!(self.state.poll(waiter, |state| state.poll_info()))
 			.map_err(|e| e.abort.clone().unwrap_or(Error::Dropped))??;
 		refuse_untimed(&info, &self.subscription.read())?;
+		Consumer::new(self.name.clone(), self.state.weak()).refuse_subscription(&self.subscription.read())?;
 
 		let resume = self.state.read().routes.clone();
 		let inner = match resume {
@@ -4796,6 +4895,9 @@ impl Subscribing {
 	/// Returns [`Error::Closed`] if the track already ended; the update is
 	/// meaningless at that point and can usually be ignored.
 	pub fn update(&mut self, subscription: Subscription) -> Result<()> {
+		if subscription.ranges != self.subscription.read().ranges {
+			Consumer::new(self.name.clone(), self.state.weak()).refuse_subscription(&subscription)?;
+		}
 		self.subscription.update(subscription)
 	}
 }
@@ -6627,6 +6729,7 @@ impl Cursor {
 #[derive(Clone)]
 pub struct Control {
 	subscription: Preferences,
+	track: Consumer,
 	/// A plain cursor's servable window, republished when the ranges are replaced, so a
 	/// group it handed out is judged against them before the cursor next reads. `None`
 	/// for a reader that follows a route, whose copies take them on its next read.
@@ -6686,12 +6789,26 @@ impl Control {
 		if !self.timed && subscription.has_time() {
 			return Err(Error::TimestampMismatch);
 		}
+		if subscription.ranges != self.subscription.read().ranges {
+			self.track.refuse_subscription(&subscription)?;
+		}
 		self.subscription.update(subscription)?;
 		if let Some(republish) = &self.republish {
 			republish.publish(&self.subscription);
 		}
 		Ok(())
 	}
+}
+
+/// A group-only wire refuses an unresolved anchor before changing shared demand.
+fn refuse_cached_anchors(state: &TrackState, subscription: &Subscription) -> Result<()> {
+	if state.cached_anchors && subscription.ranges.iter().any(|range| !range.is_wire()) {
+		let window = Window::new(&subscription.ranges, state.latest_live(), state)?;
+		if !window.is_settled() {
+			return Err(Error::Unsupported);
+		}
+	}
+	Ok(())
 }
 
 /// Refuse `subscription` when it asks an untimed track for a presentation time.
@@ -6739,11 +6856,22 @@ impl Subscriber {
 		}
 	}
 
+	/// Read this subscription's track cache without sharing its cursor.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn consume(&self) -> Consumer {
+		let state = match &self.inner {
+			Inner::Plain(cursor) => cursor.state.weak(),
+			Inner::Resume(_, state) => state.weak(),
+		};
+		Consumer::new(self.name.clone(), state)
+	}
+
 	/// Create a handle for updating this subscriber's delivery preferences.
 	pub fn control(&self) -> Control {
 		let timed = self.info.timescale.is_some();
 		match &self.inner {
 			Inner::Plain(cursor) => Control {
+				track: self.consume(),
 				subscription: cursor.subscription.clone(),
 				republish: Some(Republish {
 					state: cursor.state.weak(),
@@ -6752,6 +6880,7 @@ impl Subscriber {
 				timed,
 			},
 			Inner::Resume(resume, _) => Control {
+				track: self.consume(),
 				subscription: resume.subscription().clone(),
 				republish: None,
 				timed,
@@ -7105,6 +7234,26 @@ impl Subscriber {
 		}
 	}
 
+	/// Whether `accounted` holds every group from `from` on that this subscriber's ranges
+	/// and [`Self::with_range`] bounds name, once every range has a resolved end: `false`
+	/// while one stays open, counts back from a group not seen yet, or ends at a time not
+	/// settled yet.
+	///
+	/// A publisher that accounts for each group it serves or drops learns from it that a
+	/// bounded subscription has nothing more to deliver.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn covered(&mut self, from: u64, accounted: &rangemap::RangeSet<u64>) -> bool {
+		let bounds = self.bounds();
+		let from = from.max(bounds.start);
+		match &mut self.inner {
+			Inner::Plain(cursor) => {
+				cursor.sync();
+				cursor.filter.window.covered_by(from, bounds.end, accounted)
+			}
+			Inner::Resume(resume, _) => resume.covered(from, bounds.end, accounted),
+		}
+	}
+
 	/// This subscriber's own ranges, by index, as resolved here: `None` for one empty or
 	/// still waiting, and for every range of a front's reader.
 	pub(super) fn resolved_ranges(&mut self) -> Vec<Option<Resolved>> {
@@ -7264,6 +7413,9 @@ impl Subscriber {
 			Inner::Plain(cursor) => &cursor.subscription,
 			Inner::Resume(resume, _) => resume.subscription(),
 		};
+		if subscription.ranges != channel.read().ranges {
+			self.consume().refuse_subscription(&subscription)?;
+		}
 		channel.update(subscription)?;
 		if let Inner::Plain(cursor) = &mut self.inner {
 			cursor.sync();
@@ -9916,8 +10068,8 @@ mod test {
 				.unwrap(),
 		];
 		for group in &mut held {
-			assert!(group.read_frame().now_or_never().unwrap().unwrap().is_some());
-			assert!(group.read_frame().now_or_never().unwrap().unwrap().is_none());
+			assert!(matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(Some(_)))));
+			assert!(matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(None))));
 		}
 		assert_eq!(expired(&mut held), [false; 2], "the newest group");
 
@@ -9974,8 +10126,8 @@ mod test {
 				.unwrap(),
 		];
 		for group in &mut held {
-			assert!(group.read_frame().now_or_never().unwrap().unwrap().is_some());
-			assert!(group.read_frame().now_or_never().unwrap().unwrap().is_none());
+			assert!(matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(Some(_)))));
+			assert!(matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(None))));
 		}
 
 		let failed = producer.append_group().unwrap();
@@ -10011,8 +10163,8 @@ mod test {
 
 		append_at(&mut producer, 0);
 		let mut held = subscriber.assert_group();
-		assert!(held.read_frame().now_or_never().unwrap().unwrap().is_some());
-		assert!(held.read_frame().now_or_never().unwrap().unwrap().is_none());
+		assert!(matches!(held.poll_read_frame(&waiter), Poll::Ready(Ok(Some(_)))));
+		assert!(matches!(held.poll_read_frame(&waiter), Poll::Ready(Ok(None))));
 
 		pool.step(Duration::from_secs(1));
 		append_at(&mut producer, 0); // the successor
@@ -19023,6 +19175,7 @@ mod test {
 	}
 
 	/// How many runs of skipped groups `subscriber` holds.
+	#[cfg(feature = "async")]
 	fn skipped_runs(subscriber: &Subscriber) -> usize {
 		let Inner::Plain(cursor) = &subscriber.inner else {
 			unreachable!()

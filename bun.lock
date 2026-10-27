@@ -7,7 +7,6 @@
       "devDependencies": {
         "@babel/parser": "^8.0.7",
         "@biomejs/biome": "^2.5.15",
-        "@microsoft/api-extractor": "7.59.4",
         "concurrently": "^10.0.6",
         "markdown-extensions": "^2.0.0",
         "publint": "^0.3.25",
@@ -121,6 +120,7 @@
         "zod": "^4.6.7",
       },
       "devDependencies": {
+        "@microsoft/api-extractor": "7.59.4",
         "@types/bun": "^1.4.3",
         "@types/node": "^26.6.4",
         "rimraf": "^6.1.3",
@@ -131,6 +131,7 @@
       "name": "@moq/clock",
       "version": "0.1.0",
       "devDependencies": {
+        "@microsoft/api-extractor": "7.59.4",
         "@types/bun": "^1.4.3",
         "rimraf": "^6.1.3",
         "typescript": "7.0.2",
@@ -143,6 +144,7 @@
         "@moq/net": "workspace:^",
       },
       "devDependencies": {
+        "@microsoft/api-extractor": "7.59.4",
         "@moq/clock": "workspace:^",
         "@types/bun": "^1.4.3",
         "rimraf": "^6.1.3",
@@ -158,6 +160,7 @@
         "pako": "^3.0.2",
       },
       "devDependencies": {
+        "@microsoft/api-extractor": "7.59.4",
         "@moq/clock": "workspace:^",
         "@types/bun": "^1.4.3",
         "fflate": "^0.8.2",
@@ -180,6 +183,7 @@
         "zod": "^4.6.7",
       },
       "devDependencies": {
+        "@microsoft/api-extractor": "7.59.4",
         "@types/bun": "^1.4.3",
         "@typescript/lib-dom": "npm:@types/web@^0.0.358",
         "rimraf": "^6.1.3",
@@ -194,6 +198,7 @@
         "@moq/net": "workspace:^",
       },
       "devDependencies": {
+        "@microsoft/api-extractor": "7.59.4",
         "@moq/clock": "workspace:^",
         "@types/bun": "^1.4.3",
         "fast-check": "^4.10.2",
@@ -212,6 +217,7 @@
         "@libav.js/types": "^6.10.9",
       },
       "devDependencies": {
+        "@microsoft/api-extractor": "7.59.4",
         "@types/bun": "^1.4.3",
         "typescript": "7.0.2",
       },
@@ -224,6 +230,7 @@
         "@moq/net": "workspace:^",
       },
       "devDependencies": {
+        "@microsoft/api-extractor": "7.59.4",
         "@types/bun": "^1.4.3",
         "rimraf": "^6.1.3",
         "typescript": "7.0.2",
@@ -242,6 +249,7 @@
         "zod": "^4.6.7",
       },
       "devDependencies": {
+        "@microsoft/api-extractor": "7.59.4",
         "@types/bun": "^1.4.3",
         "esbuild": "^0.28.2",
         "rimraf": "^6.1.3",
@@ -255,11 +263,13 @@
       "name": "@moq/msf",
       "version": "0.3.1",
       "dependencies": {
+        "@moq/json": "workspace:^",
         "@moq/net": "workspace:^",
         "@zod/mini": "^4.6.7",
         "zod": "^4.6.7",
       },
       "devDependencies": {
+        "@microsoft/api-extractor": "7.59.4",
         "rimraf": "^6.1.3",
         "typescript": "7.0.2",
       },
@@ -274,9 +284,11 @@
         "@moq/signals": "workspace:*",
         "async-mutex": "^0.5.0",
         "pako": "^3.0.2",
+        "sorted-btree": "^2.1.0",
         "uuid": "^14.0.3",
       },
       "devDependencies": {
+        "@microsoft/api-extractor": "7.59.4",
         "@types/bun": "^1.4.3",
         "@types/node": "^26.6.4",
         "@typescript/lib-dom": "npm:@types/web@^0.0.358",
@@ -295,6 +307,7 @@
         "@moq/qmux": "workspace:^",
       },
       "devDependencies": {
+        "@microsoft/api-extractor": "7.59.4",
         "@types/bun": "^1.4.3",
         "@typescript/lib-dom": "npm:@types/web@^0.0.358",
         "rimraf": "^6.1.3",
@@ -305,6 +318,7 @@
       "name": "@moq/pattern",
       "version": "0.2.1",
       "devDependencies": {
+        "@microsoft/api-extractor": "7.59.4",
         "@types/bun": "^1.4.3",
         "rimraf": "^6.1.3",
         "typescript": "7.0.2",
@@ -324,6 +338,7 @@
         "mediabunny": "^1.61.6",
       },
       "devDependencies": {
+        "@microsoft/api-extractor": "7.59.4",
         "@types/audioworklet": "^0.0.100",
         "@types/bun": "^1.4.3",
         "@typescript/lib-dom": "npm:@types/web@^0.0.358",
@@ -340,6 +355,7 @@
         "@moq/clock": "workspace:^",
       },
       "devDependencies": {
+        "@microsoft/api-extractor": "7.59.4",
         "@types/bun": "^1.4.3",
         "@typescript/lib-dom": "npm:@types/web@^0.0.358",
         "rimraf": "^6.1.3",
@@ -359,6 +375,7 @@
         "@moq/watch": "workspace:^",
       },
       "devDependencies": {
+        "@microsoft/api-extractor": "7.59.4",
         "@types/audioworklet": "^0.0.100",
         "@types/bun": "^1.4.3",
         "@typescript/lib-dom": "npm:@types/web@^0.0.358",
@@ -374,6 +391,7 @@
         "@moq/clock": "workspace:^",
       },
       "devDependencies": {
+        "@microsoft/api-extractor": "7.59.4",
         "@types/bun": "^1.4.3",
         "@types/react": "^19.3.0",
         "fast-check": "^4.10.2",
@@ -400,6 +418,7 @@
         "@moq/signals": "workspace:^",
       },
       "devDependencies": {
+        "@microsoft/api-extractor": "7.59.4",
         "@types/bun": "^1.4.3",
         "@typescript/lib-dom": "npm:@types/web@^0.0.358",
         "rimraf": "^6.1.3",
@@ -414,6 +433,7 @@
         "@moq/signals": "workspace:^",
       },
       "devDependencies": {
+        "@microsoft/api-extractor": "7.59.4",
         "@types/bun": "^1.4.3",
         "@typescript/lib-dom": "npm:@types/web@^0.0.358",
         "rimraf": "^6.1.3",
@@ -439,6 +459,7 @@
         "media-captions": "0.0.18",
       },
       "devDependencies": {
+        "@microsoft/api-extractor": "7.59.4",
         "@types/audioworklet": "^0.0.100",
         "@types/bun": "^1.4.3",
         "@typescript/lib-dom": "npm:@types/web@^0.0.358",
@@ -1832,6 +1853,8 @@
     "solid-js": ["solid-js@1.9.17", "", { "dependencies": { "csstype": "^3.1.0", "seroval": "~1.6.8", "seroval-plugins": "~1.6.8" } }, "sha512-4GAmLOWPfNV8H9Jfn2LSFTpNEG6jiOKPiwd5lnLGQtehHaX6l3TOLzJqQ7mqwB/3k1Yy3zyumFVopmc/tm34ow=="],
 
     "solid-refresh": ["solid-refresh@0.6.3", "", { "dependencies": { "@babel/generator": "^7.23.6", "@babel/helper-module-imports": "^7.22.15", "@babel/types": "^7.23.6" }, "peerDependencies": { "solid-js": "^1.3" } }, "sha512-F3aPsX6hVw9ttm5LYlth8Q15x6MlI/J3Dn+o3EQyRTtTxidepSTwAYdozt01/YA+7ObcciagGEyXIopGZzQtbA=="],
+
+    "sorted-btree": ["sorted-btree@2.1.0", "", {}, "sha512-AtYXy3lL+5jrATpbymC2bM8anN/3maLkmVCd94MzypnKjokfCid/zeS3rvXedv7W6ffSfqKIGdz3UaJPWRBZ0g=="],
 
     "source-map": ["source-map@0.6.1", "", {}, "sha512-UjgapumWlbMhkBgzT7Ykc5YXUT46F0iKu8SGXq0bcwP5dz/h0Plj6enJqjz1Zbq2l5WaqYnrVbwWOWMyF3F47g=="],
 

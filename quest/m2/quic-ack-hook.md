@@ -70,8 +70,8 @@ lives:
   (which truncates to 0), shrinks the acknowledged prefix. The waiters fail
   anyway; keep the prefix a `poll_acked` reports monotonic.
 - The offset counts bytes on the QUIC stream. The trait method takes a byte
-  offset, like `moq-quic` (decided 2026-10-17 on #5817), and the starvation
-  quest's writer counts the bytes it writes, so neither driver needs a public
+  offset, like `moq-quic` (decided 2026-10-17 on #5817), and the lag
+  histogram's writer counts the bytes it writes, so neither driver needs a public
   `offset()`. A layer that writes its own prefix adds its length: `quic::web`
   already tracks its WebTransport header for `reset_at`.
 
@@ -79,8 +79,11 @@ The moq-tokio and moq-uring adapters implement the trait method over the
 driver's. Leave the browser transport on the default; the browser's `WebTransportSendStream.getStats()` is
 unimplemented in shipping Chrome and its `bytesAcknowledged` is at risk in the
 W3C draft. Decided 2026-10-22 (maintainer): qmux's `poll_acked` reports
-unsupported too, since writing into TCP is not delivery; over qmux the
-histogram stays at group granularity.
+unsupported too, since writing into TCP is not delivery. Decided 2026-10-26
+(maintainer, on [moq-dev/moq#6791](https://github.com/moq-dev/moq/pull/6791)):
+over qmux and the browser transport, the lag histogram, `dropped`, and the
+delivery-delay histogram are absent, never zero; group granularity is
+rejected as a fallback.
 
 Acceptance includes the first two traps, through each driver: a finished
 stream whose bytes were all acknowledged resolves `poll_acked` as delivered,
@@ -93,8 +96,9 @@ offset order, reset by sender, STOP_SENDING by the receiver, and session
 close.
 
 
-Decided in the 2026-09-30 audit: moved to m2 with its only consumer,
-[frame-granularity starvation](/quest/m2/starvation-frames.md).
+Decided in the 2026-09-30 audit: moved to m2 with its consumers, the
+[viewer lag histogram](/quest/m2/qos/lag-histogram.md) and the
+[delivery-delay histogram](/quest/m2/delivery-delay.md).
 
 ## Required
 
@@ -102,8 +106,3 @@ Decided in the 2026-09-30 audit: moved to m2 with its only consumer,
   driver shape `poll_acked` takes
 - [moq-net polls on kio waiters](/quest/m1/quic-api/net-poll.md) - the trait
   shape the moq-net method takes
-
-## Related
-
-- [Starvation at frame granularity](/quest/m2/starvation-frames.md) - the
-  moq-net consumer

@@ -18,10 +18,12 @@ qmux_examples := absolute_path(env("CARGO_TARGET_DIR", source_directory() / ".."
 
 harness_browser_tests := '''
     ./capture-channel-count.browser.ts
+    ./encoded-preview.browser.ts
     ./harness.browser.ts
     ./open-gop.browser.ts
     ./publish-ui.browser.ts
     ./signals-dom.browser.ts
+    ./source-selection.browser.ts
     ./tone.test.ts
     ./src/contract.test.ts
     ./src/resume.test.ts
@@ -42,6 +44,7 @@ default:
 harness:
     ./lib/harness.test.sh
     ./interop/relay-log.test.sh
+    python3 ../rs/moq-gst/smoke.test.py
     python3 interop/report.test.py
     python3 interop/tone.test.py
     cd .. && bun test {{ replace(harness_compat_tests, "\n", " ") }}
@@ -65,6 +68,7 @@ interop *args:
         ietf_compression_fallback_interop \
         ietf_datagram_interop \
         ietf_track_status_interop \
+        ietf_range_updates_interop \
         padding_interop \
         tracks_interop \
         varint_interop \

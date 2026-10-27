@@ -223,7 +223,7 @@ fn bench_unresolved_teardown(c: &mut Criterion) {
 }
 
 /// Tracks interleaving frames on one catalog.
-const ORDERED: [usize; 3] = [1, 16, 256];
+const ORDERED: [usize; 3] = [1, 16, 64];
 
 /// Frames each track writes per iteration.
 const FRAMES: u64 = 100;

@@ -52,8 +52,7 @@ impl MoqBandwidth {
 /// One track's standing claim on a [`MoqBandwidth`].
 ///
 /// [`grant`](Self::grant) is [`moq_net::bandwidth::Reservation::peek`]: `None`
-/// means no estimate or no demand, so hold the current rate, and `Some(0)` is a
-/// real zero grant.
+/// means no estimate, so hold the current rate, and `Some(0)` is a real zero grant.
 #[derive(uniffi::Object)]
 pub struct MoqReservation {
 	inner: moq_net::bandwidth::Reservation,
@@ -74,8 +73,9 @@ impl MoqReservation {
 impl MoqReservation {
 	/// This reservation's slice right now, in bits per second.
 	///
-	/// `None` means no estimate or no demand: hold the current rate. `Some(0)`
-	/// is a real zero grant.
+	/// `None` means no estimate: hold the current rate. `Some(0)` is a real zero
+	/// grant. While nothing subscribes to the track, this is the slice it would get
+	/// back, without claiming it from the others.
 	pub fn grant(&self) -> Option<u64> {
 		let _guard = crate::ffi::enter();
 		self.inner.peek().map(moq_net::bandwidth::Rate::as_bps)

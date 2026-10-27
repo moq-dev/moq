@@ -38,8 +38,9 @@ public final class Bandwidth: Sendable {
 
 /// One track's standing claim on a `Bandwidth`.
 ///
-/// `grant()` is a snapshot: `nil` means no estimate or no demand, so hold the
-/// current rate, and `0` is a real zero grant.
+/// `grant()` is a snapshot: `nil` means no estimate, so hold the current rate,
+/// and `0` is a real zero grant. While nothing subscribes it is the share the
+/// track would get.
 public final class Reservation: Sendable {
     let ffi: MoqReservation
 

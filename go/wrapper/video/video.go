@@ -3,8 +3,10 @@ package video
 
 import (
 	"context"
+	"fmt"
 	"iter"
 	"time"
+
 
 	"moq.dev/moq"
 	ffi "moq.dev/moq-ffi/moq"
@@ -82,6 +84,10 @@ type ProducerOptions struct {
 	Track *string
 	// Bandwidth reserves the track against a session allocator when non-nil.
 	Bandwidth *moq.Bandwidth
+	// Lower is the next rendition down a simulcast ladder: when non-nil, this one
+	// disables while the grant cannot fund it and resumes once it recovers. Needs
+	// Bandwidth and a bitrate above the lower rendition's.
+	Lower *Producer
 }
 
 // NewProducer opens a video track on the catalog's broadcast and registers its rendition.
@@ -91,7 +97,11 @@ func NewProducer(catalog *media.CatalogProducer, options ProducerOptions) (*Prod
 		raw := bridge.Bandwidth(options.Bandwidth)
 		bw = &raw
 	}
-	inner, err := ffi.NewMoqVideoProducer(bridge.CatalogProducer(catalog), ffi.MoqVideoProducerOptions{Input: options.Input, Output: options.Output, Track: options.Track, Bandwidth: bw})
+	var lower **ffi.MoqVideoProducer
+	if options.Lower != nil {
+		lower = &options.Lower.inner
+	}
+	inner, err := ffi.NewMoqVideoProducer(bridge.CatalogProducer(catalog), ffi.MoqVideoProducerOptions{Input: options.Input, Output: options.Output, Track: options.Track, Bandwidth: bw, Lower: lower})
 	if err != nil {
 		return nil, err
 	}
@@ -192,24 +202,66 @@ func Subscribe(ctx context.Context, broadcast *moq.BroadcastConsumer, id string,
 	return &Consumer{inner}, nil
 }
 
-// Next returns the next decoded frame, or (nil, nil) when the track ends.
-// Close each frame when done with it.
-func (d *Consumer) Next(ctx context.Context) (*moq.VideoDecodedFrame, error) {
-	raw, err := bridge.CallHandle(ctx, d.inner.Cancel, func(ctx context.Context) (*ffi.MoqVideoDecodedFrame, error) {
-		raw, err := d.inner.Next(ctx)
-		if err != nil || raw == nil {
-			return nil, err
-		}
-		return *raw, nil
-	})
+// Read is one item a Consumer reads, in delivery order: a ReadFrame, ReadGap, or ReadEnd.
+type Read interface{ read() }
+
+// ReadFrame is a decoded picture. Close its frame when done with it, since held
+// frames hold decoder buffers.
+type ReadFrame struct {
+	Frame *moq.VideoDecodedFrame
+}
+
+// ReadGap is media lost after what was already read: every picture from before the
+// loss precedes it, and what follows does not continue it.
+type ReadGap struct {
+	// Timestamp is the furthest presentation point already read.
+	Timestamp time.Duration
+	// Duration is an upper bound on how long until the next picture resumes.
+	Duration time.Duration
+}
+
+// ReadEnd is where the publisher stopped its encoder: it paused, switched source, or
+// finished. The stopped encoder's last pictures precede it; what follows comes from a
+// fresh encoder.
+type ReadEnd struct {
+	// End is where the stopped encoder's media stops.
+	End time.Duration
+}
+
+func (ReadFrame) read() {}
+func (ReadGap) read()   {}
+func (ReadEnd) read()   {}
+
+// releaseRead destroys the decoded frame a read nobody received holds.
+func releaseRead(raw *ffi.MoqVideoRead) {
+	if raw == nil {
+		return
+	}
+	if read, ok := (*raw).(ffi.MoqVideoReadFrame); ok {
+		read.Frame.Destroy()
+	}
+}
+
+// Next returns the next decoded frame, gap, or encoder end, or (nil, nil) when the
+// track ends. Close each frame when done with it.
+func (d *Consumer) Next(ctx context.Context) (Read, error) {
+	raw, err := bridge.CallRelease(ctx, d.inner.Cancel, d.inner.Next, releaseRead)
 	if err != nil || raw == nil {
 		return nil, err
 	}
-	return bridge.VideoDecodedFrame(raw).(*moq.VideoDecodedFrame), nil
+	switch read := (*raw).(type) {
+	case ffi.MoqVideoReadFrame:
+		return ReadFrame{Frame: bridge.VideoDecodedFrame(read.Frame).(*moq.VideoDecodedFrame)}, nil
+	case ffi.MoqVideoReadGap:
+		return ReadGap{Timestamp: time.Duration(read.TimestampUs) * time.Microsecond, Duration: read.Duration}, nil
+	case ffi.MoqVideoReadEnd:
+		return ReadEnd{End: time.Duration(read.EndUs) * time.Microsecond}, nil
+	}
+	return nil, fmt.Errorf("unknown video read: %T", *raw)
 }
 
-// All ranges over decoded frames until the track ends or the loop breaks.
-func (d *Consumer) All(ctx context.Context) iter.Seq2[*moq.VideoDecodedFrame, error] {
+// All ranges over every read until the track ends or the loop breaks.
+func (d *Consumer) All(ctx context.Context) iter.Seq2[Read, error] {
 	return bridge.Seq(ctx, d.Next)
 }
 

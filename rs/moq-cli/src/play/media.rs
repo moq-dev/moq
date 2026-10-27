@@ -42,8 +42,8 @@ const AUDIO_BUFFER_MIN: Duration = Duration::from_millis(50);
 /// the excess on its own.
 const AUDIO_SLACK: Duration = Duration::from_millis(20);
 
-/// Silence written per slice when padding, so the buffer stays a fixed size.
-const AUDIO_SILENCE: Duration = Duration::from_millis(20);
+/// Maximum sample frames per silence write, independent of the catalog rate.
+const AUDIO_SILENCE: usize = 960;
 
 /// How much longer than the speaker holds to wait for it to drain. A device that
 /// never opens reports its queue as full forever, and a truncated tail beats
@@ -258,7 +258,12 @@ impl<O: Output> Media<O> {
 					// doubles as the staleness budget on the wire.
 					let max_delay = self.args.video_max_delay(&snapshot.audio);
 					let opened = async {
-						let decoder = moq_video::decode::Sink::open(config, &Default::default()).await?;
+						// The window's renderer refuses a GPU surface it cannot import, so
+						// the decoder downloads those instead, all of them on a device
+						// that imports none.
+						let mut decode = moq_video::decode::Config::new();
+						decode.output = self.output.render().await;
+						let decoder = moq_video::decode::Sink::open(config, &decode).await?;
 						let track = rendition.track(hang::catalog::Reference::track(config, name))?;
 						let mut subscriber = track
 							.subscribe(
@@ -515,7 +520,7 @@ async fn play_audio<O: Output>(
 	let stride = channels as usize * size_of::<f32>();
 	let samples = |duration: Duration| (duration.as_secs_f64() * sample_rate as f64).round() as u64;
 	let slack = samples(AUDIO_SLACK);
-	let silence = vec![0u8; samples(AUDIO_SILENCE).max(1) as usize * stride];
+	let mut silence = Vec::new();
 
 	// The longest hole worth playing through, in samples. A hole this player would
 	// rather sit through is one it is already willing to buffer, which is what the
@@ -744,16 +749,22 @@ async fn play_audio<O: Output>(
 			let fit = fit(dry, buffered, target, slack, timing.silence, length as u64);
 			dry = false;
 
-			// Playback drops stay on the live timeline; retrying them would add latency,
-			// and the sink already reports them in its logs.
+			// The packet pays for the channel count; the catalog cannot allocate
+			// a duration's worth of silence before any samples arrive.
+			silence.resize(length.min(AUDIO_SILENCE) * stride, 0);
 			let mut quiet = fit.pad + timing.silence.saturating_sub(fit.skip);
-			while quiet > 0 {
-				let part = (quiet as usize * stride).min(silence.len());
-				sink.write(&silence[..part])?;
-				quiet -= (part / stride) as u64;
+			while quiet > 0 && !silence.is_empty() {
+				let frames = quiet.min((silence.len() / stride) as u64) as usize;
+				let written = sink.write(&silence[..frames * stride])?;
+				// Once full, padding is dropped just like live media. A catalog's
+				// rate must not make us walk seconds of refused input samples.
+				if written.dropped_sample_frames != 0 {
+					break;
+				}
+				quiet -= frames as u64;
 			}
 			let skip = fit.skip.saturating_sub(timing.silence) as usize * stride;
-			sink.write(&frame.data[skip.min(frame.data.len())..])?;
+			let _ = sink.write(&frame.data[skip.min(frame.data.len())..])?;
 
 			// Anchor the playout clock on where the speaker has actually reached, which
 			// is the only half of the pipeline that cannot skip ahead. A move has to
@@ -800,6 +811,31 @@ mod tests {
 	/// Samples per packet.
 	const PACKET: u64 = 960;
 	const PACKET_DURATION: Duration = Duration::from_millis(20);
+
+	#[tokio::test(start_paused = true)]
+	async fn an_unfed_catalog_needs_no_silence_buffer() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let _track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let consumer = moq_audio::decode::Consumer::new(
+			&broadcast.consume(),
+			&AudioConfig::new(AudioCodec::Pcm, 4_000_000_000, 8),
+			"audio",
+			moq_audio::decode::Options::new(),
+		)
+		.await
+		.unwrap();
+		let recorder = Recorder::default();
+		let playback = AudioPlayback {
+			changed: Default::default(),
+			speaker: recorder.clone(),
+			presentation: Arc::new(Mutex::new(Presentation::new(AUDIO_BUFFER_MIN))),
+			latency: AUDIO_BUFFER_MIN,
+			output: recorder,
+		};
+		let _sink = play_audio(consumer, playback, std::future::ready(())).await.unwrap();
+	}
 
 	#[tokio::test]
 	async fn a_quick_audio_resume_preserves_the_old_speaker_tail() {
