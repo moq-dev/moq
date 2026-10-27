@@ -12,27 +12,58 @@ configuration.
 
 ## Plan
 
-Found by the 2026-10-24 pre-cut audit at 151a529670. Source-inferred,
-inherited. Public element API, so it lands before the cut.
+[PR #6904](https://github.com/moq-dev/moq/pull/6904) implements state reflection,
+strict URL/numeric/duration and source/rendering/catalog-mode refusal, invalid
+markup suspension/recovery, and the five readonly watch fields. Reflection does
+not replay setters, preserving selected `File` objects and existing disabled
+connection state. Keep the PR draft for the remaining version-list decision.
 
-- Nothing reflects on publish (`js/publish/src/element.ts:337`, `:483-529`).
-  When the built-in UI unmutes via the property, the `muted` attribute stays,
-  so a later `setAttribute("muted", "")` hits the `oldValue === newValue`
-  early return and the mic stays live.
-- On watch, `captions`, `announced`, and `catalog-format` do not reflect
-  (the UI writes `controls.text.target` in `ui/components/captions.ts:58`),
-  and `parseCatalogFormat` (`watch/src/element.ts:109`) silently ignores an
-  invalid value. Refuse it per root `AGENTS.md` (fail loud: supported or
-  refused), and apply the same rule to every enumerated attribute on both
-  elements.
-- `MoqWatch` exposes `broadcast`, `video`, `audio`, `renderer`, and `sync`
-  as reassignable fields; make them `readonly`.
+The Goal requires invalid property setters to throw, with no exception for
+`versions`. Unsupported version names and duplicate/empty lists currently fail
+through `connection.error`. The shared `normalizeVersions` implementation is
+`@internal` in `js/net/src/connection/connect.ts`; neither it nor the private
+runtime registry is exported by `connection/index.ts`, the public package
+entrypoint, or its `zod` subpath. No existing public validation primitive was
+found. Creating disposable connections for validation or duplicating supported
+version tables would add machinery instead of reusing the shared implementation.
 
-Add reflection effects as watch already does for its other attributes.
+The maintainer must choose:
 
-Decided by the maintainer (2026-10-25): refusing invalid attributes wins
-over `js/AGENTS.md`'s former warn-and-fall-back rule, which now requires
-refusal. Existing fallbacks on both elements are bugs under this quest.
+1. Expose and reuse one shared version-list validation primitive for synchronous
+   element refusal, preserving the Goal (recommended). Its public API placement
+   and shape need selection before implementing it; test unsupported names,
+   duplicate/empty property lists, and snapshotting with the existing defaults.
+2. Explicitly exempt `versions` from synchronous element refusal and retain
+   `connection.error` delegation, revising the Goal and migration description.
 
-Public API: additive reflection; `readonly` fields reject reassignment.
-Wire: none.
+No choice has been made while the maintainer is away. Do not add a cross-package
+API or relax the Goal on that basis. The 2026-10-25 strict-refusal decision remains
+settled for the other attributes.
+
+### Proof at checkpoint
+
+The three initial Chromium regressions failed before fixing. The expanded real
+browser cases cover property/UI/markup reflection, later repeated mute writes,
+File identity, explicit false booleans, existing versions/default cases,
+URL/volume and all source/rendering/catalog modes, invalid durations, observable
+markup errors, multiple-invalid gating, and recovery. Existing mocked callback
+cases moved into browser coverage, preserving their useful cases.
+
+The normal `just dev` publish UI with fake devices and actual `bbb.hang` watch
+surface passed, with screenshots and attribute/error snapshots retained in the
+isolated checkout's `.tmp/`. Full harness passed, including 28 browser-side cases
+and 14 compatibility cases. Browser TypeScript check passed.
+
+Scratch-only integration with exact related PR heads passed: camera retention
+[PR #6894](https://github.com/moq-dev/moq/pull/6894) at
+`83eb3a7a6e99448ff6affc1b6f1c76b864e8e793`, and independent volume/mute
+[PR #6895](https://github.com/moq-dev/moq/pull/6895) at
+`811efb220585ea8f2c71a5947776d5b8400b9efa`. Both attribute/property orders keep
+0.8 while muted, volume edits/unmute/zero reflect without feedback, and an
+announced camera remains selected/announced after both tracks are disabled.
+The first integration run lacked a preview canvas and a button lay outside the
+viewport; its diagnostic is retained, and the corrected normal canvas layout
+passes without changing production code, acceptance, or timeouts.
+
+Related [PR #6751](https://github.com/moq-dev/moq/pull/6751) only changes allocator wiring in the elements and does not
+settle these semantics. No related branch was merged or changed.

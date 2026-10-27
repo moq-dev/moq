@@ -5,3 +5,4 @@
  */
 import "@moq/publish/element";
 import "@moq/publish/ui";
+import "@moq/watch/element";

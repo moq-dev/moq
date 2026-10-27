@@ -69,7 +69,9 @@ nameEl.addEventListener("change", () => {
 // encoded stream ("encoded"). Defaults to off (raw) to avoid the extra encode +
 // decode unless the user wants to inspect codec artifacts.
 const encodedEl = $<HTMLInputElement>("encoded-preview");
-const syncPreview = () => publish.setAttribute("preview", encodedEl.checked ? "encoded" : "source");
+const syncPreview = () => {
+	publish.preview = encodedEl.checked ? "encoded" : "source";
+};
 encodedEl.addEventListener("change", syncPreview);
 syncPreview();
 

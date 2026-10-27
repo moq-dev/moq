@@ -18,13 +18,16 @@ import type { Delay, Sync } from "./sync";
 import type * as Text from "./text";
 import type * as Video from "./video";
 
+function invalidAttribute(name: string, value: unknown, expected: string): Error {
+	return new Error(`moq-watch: invalid ${name}="${value}", expected ${expected}`);
+}
+
 function parseUrl(value: string | null): URL | undefined {
-	if (!value) return undefined;
+	if (value === null) return undefined;
 	try {
 		return new URL(value);
 	} catch {
-		console.warn(`moq-watch: invalid url="${value}", expected an absolute URL`);
-		return undefined;
+		throw invalidAttribute("url", value, "an absolute URL");
 	}
 }
 
@@ -39,11 +42,10 @@ function parseVersions(value: string | null): string[] | undefined {
 }
 
 function parseVolume(value: string | null): number {
-	if (!value?.trim()) return 0.5;
+	if (value === null) return 0.5;
 	const volume = Number(value);
-	if (volume >= 0 && volume <= 1) return volume;
-	console.warn(`moq-watch: invalid volume="${value}", expected a number from 0 to 1`);
-	return 0.5;
+	if (value.trim() && Number.isFinite(volume) && volume >= 0 && volume <= 1) return volume;
+	throw invalidAttribute("volume", value, "a number from 0 to 1");
 }
 
 /** The attributes the element observes. */
@@ -63,53 +65,48 @@ const OBSERVED = [
 	"captions",
 ] as const;
 
-// Parse the `visible` attribute into a Visible value, falling back to "20%".
+// Parse visibility, with the default only when the attribute is absent.
 function parseVisible(value: string | null): Video.Visible {
-	const trimmed = value?.trim();
-	if (!trimmed) return "20%";
+	if (value === null) return "20%";
+	const trimmed = value.trim();
 	if (trimmed === "never" || trimmed === "always") return trimmed;
-	// A CSS length usable as an IntersectionObserver rootMargin (px or %).
-	if (/^-?\d+(\.\d+)?(px|%)$/.test(trimmed)) return trimmed;
-	// Allow a bare number as a px convenience (e.g. visible="200").
+	if (/^-?\d+(\.\d+)?(px|%)$/.test(trimmed)) return trimmed as Video.Visible;
 	if (/^-?\d+(\.\d+)?$/.test(trimmed)) return `${trimmed}px`;
-	console.warn(`moq-watch: invalid visible="${value}", expected "never", "always", or a CSS length like "200px"`);
-	return "20%";
+	throw invalidAttribute("visible", value, '"never", "always", or a CSS length like "200px"');
 }
 
-// Parse the `backend` attribute, falling back to "auto".
+// Parse the graphics backend, with the default only when absent.
 function parseBackend(value: string | null): Video.Backend {
-	const trimmed = value?.trim();
-	if (!trimmed) return "auto";
+	if (value === null) return "auto";
+	const trimmed = value.trim();
 	if (trimmed === "auto" || trimmed === "webgpu" || trimmed === "2d") return trimmed;
-	console.warn(`moq-watch: invalid backend="${value}", expected "auto", "webgpu", or "2d"`);
-	return "auto";
+	throw invalidAttribute("backend", value, '"auto", "webgpu", or "2d"');
 }
 
 // Parse the `delay` attribute: "auto" (adaptive), "instant" (no buffer, no pacing), or a duration.
 function parseDelay(value: string | null): Delay {
-	const trimmed = value?.trim();
-	if (!trimmed || trimmed === "auto") return "auto";
-	if (trimmed === "instant") return "instant";
+	if (value === null) return "auto";
+	const trimmed = value.trim();
+	if (trimmed === "auto" || trimmed === "instant") return trimmed;
 	const parsed = parseDuration(trimmed);
 	if (parsed !== undefined) return parsed;
-	console.warn(`moq-watch: invalid delay="${value}", expected "auto", "instant", or a duration like "300ms"`);
-	return "auto";
+	throw invalidAttribute("delay", value, '"auto", "instant", or a duration like "300ms"');
 }
 
-// Parse the `buffer` attribute: a duration, or none when absent.
+// Parse the `buffer` attribute: a duration, or zero when absent.
 function parseBuffer(value: string | null): Milli {
-	const trimmed = value?.trim();
-	if (!trimmed) return Milli.zero;
-	const parsed = parseDuration(trimmed);
+	if (value === null) return Milli.zero;
+	const parsed = parseDuration(value);
 	if (parsed !== undefined) return parsed;
-	console.warn(`moq-watch: invalid buffer="${value}", expected a duration like "30s"`);
-	return Milli.zero;
+	throw invalidAttribute("buffer", value, 'a duration like "30s"');
 }
 
-/** Parse the element's catalog-format attribute. */
+/** Parse the element's catalog-format attribute, refusing unknown formats. */
 export function parseCatalogFormat(value: string | null): CatalogFormat | undefined {
 	if (value === null) return undefined;
-	return CATALOG_FORMATS.find((format) => format === value);
+	const format = CATALOG_FORMATS.find((format) => format === value);
+	if (format) return format;
+	throw invalidAttribute("catalog-format", value, CATALOG_FORMATS.join(", "));
 }
 
 /**
@@ -137,16 +134,16 @@ export default class MoqWatch extends HTMLElement {
 	/** Headless playback pipeline behind this element. */
 	readonly player: Player;
 	/** The broadcast being watched. */
-	broadcast: Broadcast;
+	readonly broadcast: Broadcast;
 
 	/** Downloads and decodes the video track. `video.source` picks the rendition. */
-	video: Video.Decoder;
+	readonly video: Video.Decoder;
 
 	/** Downloads and decodes the audio track. `audio.source` picks the rendition. */
-	audio: Audio.Decoder;
+	readonly audio: Audio.Decoder;
 
 	/** Paints decoded frames to the nested <canvas>. */
-	renderer: Video.Renderer;
+	readonly renderer: Video.Renderer;
 
 	/** Plays decoded samples through the speakers. */
 	emitter: Audio.Emitter;
@@ -158,7 +155,7 @@ export default class MoqWatch extends HTMLElement {
 	textRenderer: Text.Renderer;
 
 	/** Keeps audio and video playing at the configured delay. */
-	sync: Sync;
+	readonly sync: Sync;
 
 	/**
 	 * The mutable user controls. As the top of the tree, this element owns the
@@ -207,6 +204,9 @@ export default class MoqWatch extends HTMLElement {
 
 	// Set when the element is connected to the DOM.
 	#enabled = new Signal(false);
+	#connected = false;
+	#invalid = new Signal<ReadonlySet<string>>(new Set());
+	#reflecting = false;
 
 	// Stashed volume to restore on unmute.
 	#unmuteVolume = 0.5;
@@ -298,75 +298,31 @@ export default class MoqWatch extends HTMLElement {
 			canvas?.replaceWith(canvas.cloneNode());
 		});
 
-		// Optionally update attributes to match the library state.
-		// This is kind of dangerous because it can create loops.
-		// NOTE: This only runs when the element is connected to the DOM, which is not obvious.
-		// This is because there's no destructor for web components to clean up our effects.
-		this.signals.run((effect) => {
-			const url = effect.get(this.connection.url);
-			if (url) {
-				this.setAttribute("url", url.toString());
-			} else {
-				this.removeAttribute("url");
-			}
-		});
-
-		this.signals.run((effect) => {
-			const versions = effect.get(this.connection.versions);
-			if (versions) {
-				this.setAttribute("versions", versions.join(","));
-			} else {
-				this.removeAttribute("versions");
-			}
-		});
-
-		this.signals.run((effect) => {
-			const name = effect.get(this.#name);
-			this.setAttribute("name", name.toString());
-		});
-
-		this.signals.run((effect) => {
-			const muted = effect.get(this.controls.audio.muted);
-			if (muted) {
-				this.setAttribute("muted", "");
-			} else {
-				this.removeAttribute("muted");
-			}
-		});
-
-		this.signals.run((effect) => {
-			const paused = effect.get(this.controls.paused);
-			if (paused) {
-				this.setAttribute("paused", "");
-			} else {
-				this.removeAttribute("paused");
-			}
-		});
-
-		this.signals.run((effect) => {
-			const volume = effect.get(this.controls.audio.volume);
-			this.setAttribute("volume", volume.toString());
-		});
-
-		this.signals.run((effect) => {
-			const visible = effect.get(this.controls.video.visible);
-			this.setAttribute("visible", visible);
-		});
-
-		this.signals.run((effect) => {
-			this.setAttribute("backend", effect.get(this.controls.video.backend));
-		});
-
-		// Each knob is 1:1 with its attribute, so the echo back through attributeChangedCallback
-		// parses to the value already held and the effect settles.
+		// Reflect state without replaying its setters through attributeChangedCallback.
+		this.signals.run((effect) => this.#reflect(effect, "url", effect.get(this.connection.url)?.toString()));
+		this.signals.run((effect) =>
+			this.#reflect(effect, "versions", effect.get(this.connection.versions)?.join(",")),
+		);
+		this.signals.run((effect) => this.#reflect(effect, "name", effect.get(this.#name).toString()));
+		this.signals.run((effect) =>
+			this.#reflect(effect, "muted", effect.get(this.controls.audio.muted) ? "" : undefined),
+		);
+		this.signals.run((effect) =>
+			this.#reflect(effect, "paused", effect.get(this.controls.paused) ? "" : undefined),
+		);
+		this.signals.run((effect) =>
+			this.#reflect(effect, "volume", effect.get(this.controls.audio.volume).toString()),
+		);
+		this.signals.run((effect) => this.#reflect(effect, "visible", effect.get(this.controls.video.visible)));
+		this.signals.run((effect) => this.#reflect(effect, "backend", effect.get(this.controls.video.backend)));
+		this.signals.run((effect) => this.#reflect(effect, "announced", effect.get(this.#announced) ? "" : "false"));
+		this.signals.run((effect) => this.#reflect(effect, "catalog-format", effect.get(this.#catalogFormat)));
+		this.signals.run((effect) => this.#reflect(effect, "captions", effect.get(this.controls.text.target)));
 		this.signals.run((effect) => {
 			const delay = effect.get(this.controls.delay);
-			this.setAttribute("delay", typeof delay === "number" ? formatDuration(delay) : delay);
+			this.#reflect(effect, "delay", typeof delay === "number" ? formatDuration(delay) : delay);
 		});
-
-		this.signals.run((effect) => {
-			this.setAttribute("buffer", formatDuration(effect.get(this.controls.buffer)));
-		});
+		this.signals.run((effect) => this.#reflect(effect, "buffer", formatDuration(effect.get(this.controls.buffer))));
 
 		// Track the element's rendered size and feed it into the rendition picker,
 		// scaled by devicePixelRatio so high-DPI screens still get sharp renditions.
@@ -398,7 +354,8 @@ export default class MoqWatch extends HTMLElement {
 	// This wouldn't be so bad if there was a destructor for web components to clean up our effects.
 	/** Called by the browser when the element joins a document. */
 	connectedCallback() {
-		this.#enabled.set(true);
+		this.#connected = true;
+		this.#enabled.set(this.#invalid.peek().size === 0);
 		this.style.display = "block";
 		this.style.position = "relative";
 
@@ -419,46 +376,59 @@ export default class MoqWatch extends HTMLElement {
 	/** Called by the browser when the element leaves its document. */
 	disconnectedCallback() {
 		// Stop everything but don't actually cleanup just in case we get added back to the DOM.
+		this.#connected = false;
 		this.#enabled.set(false);
 	}
 
 	/** Called by the browser when an observed attribute changes. */
 	attributeChangedCallback(name: (typeof OBSERVED)[number], oldValue: string | null, newValue: string | null) {
-		if (oldValue === newValue) {
-			return;
+		if (this.#reflecting || oldValue === newValue) return;
+		try {
+			if (name === "url") this.url = parseUrl(newValue);
+			else if (name === "versions") this.versions = parseVersions(newValue);
+			else if (name === "name") this.name = newValue ?? "";
+			else if (name === "paused") this.paused = parseBoolean(newValue, false);
+			else if (name === "volume") this.volume = parseVolume(newValue);
+			else if (name === "muted") this.muted = parseBoolean(newValue, false);
+			else if (name === "visible") this.visible = parseVisible(newValue);
+			else if (name === "backend") this.backend = parseBackend(newValue);
+			else if (name === "announced") this.announced = parseBoolean(newValue, true);
+			else if (name === "delay") this.delay = parseDelay(newValue);
+			else if (name === "buffer") this.buffer = parseBuffer(newValue);
+			else if (name === "catalog-format") this.catalogFormat = parseCatalogFormat(newValue);
+			else if (name === "captions") this.captions = newValue || undefined;
+			else {
+				const exhaustive: never = name;
+				throw new Error(`Invalid attribute: ${exhaustive}`);
+			}
+		} catch (error) {
+			this.#invalid.update((previous) => new Set(previous).add(name));
+			this.#enabled.set(false);
+			throw error;
 		}
+	}
 
-		if (name === "url") {
-			this.connection.url.set(parseUrl(newValue));
-		} else if (name === "versions") {
-			this.connection.versions.set(parseVersions(newValue));
-		} else if (name === "name") {
-			this.#name.set(Moq.Path.from(newValue ?? ""));
-		} else if (name === "paused") {
-			this.controls.paused.set(parseBoolean(newValue, false));
-		} else if (name === "volume") {
-			const volume = parseVolume(newValue);
-			this.controls.audio.volume.set(volume);
-		} else if (name === "muted") {
-			this.controls.audio.muted.set(parseBoolean(newValue, false));
-		} else if (name === "visible") {
-			this.controls.video.visible.set(parseVisible(newValue));
-		} else if (name === "backend") {
-			this.controls.video.backend.set(parseBackend(newValue));
-		} else if (name === "announced") {
-			this.#announced.set(parseBoolean(newValue, true));
-		} else if (name === "delay") {
-			this.controls.delay.set(parseDelay(newValue));
-		} else if (name === "buffer") {
-			this.controls.buffer.set(parseBuffer(newValue));
-		} else if (name === "catalog-format") {
-			this.#catalogFormat.set(parseCatalogFormat(newValue));
-		} else if (name === "captions") {
-			// The selected caption track name; absent or empty turns captions off.
-			this.controls.text.target.set(newValue || undefined);
-		} else {
-			const exhaustive: never = name;
-			throw new Error(`Invalid attribute: ${exhaustive}`);
+	#accept(name: string) {
+		// Ordinary edits must preserve an explicitly disabled connection.
+		if (!this.#invalid.peek().has(name)) return;
+		this.#invalid.update((previous) => {
+			const next = new Set(previous);
+			next.delete(name);
+			return next;
+		});
+		this.#enabled.set(this.#connected && this.#invalid.peek().size === 0);
+	}
+
+	#reflect(effect: Effect, name: (typeof OBSERVED)[number], value: string | undefined) {
+		// Keep refused markup observable until corrected. An echo must never reconfigure a File
+		// source or another control whose serialized value omits some of its state.
+		if (effect.get(this.#invalid).size) return;
+		this.#reflecting = true;
+		try {
+			if (value === undefined) this.removeAttribute(name);
+			else if (this.getAttribute(name) !== value) this.setAttribute(name, value);
+		} finally {
+			this.#reflecting = false;
 		}
 	}
 
@@ -468,7 +438,8 @@ export default class MoqWatch extends HTMLElement {
 	}
 
 	set url(value: string | URL | undefined) {
-		this.connection.url.set(value ? new URL(value) : undefined);
+		this.connection.url.set(parseUrl(value instanceof URL ? value.toString() : (value ?? null)));
+		this.#accept("url");
 	}
 
 	/** The protocol versions to offer, most preferred first, mirrored by the `versions` attribute; undefined offers the defaults. */
@@ -478,6 +449,7 @@ export default class MoqWatch extends HTMLElement {
 
 	set versions(value: readonly string[] | undefined) {
 		this.connection.versions.set(value);
+		this.#accept("versions");
 	}
 
 	/** The broadcast name, mirrored by the `name` attribute. */
@@ -487,6 +459,7 @@ export default class MoqWatch extends HTMLElement {
 
 	set name(value: string | Moq.Path.Valid) {
 		this.#name.set(Moq.Path.from(value));
+		this.#accept("name");
 	}
 
 	/** Whether playback is paused, mirrored by the `paused` attribute. */
@@ -496,6 +469,7 @@ export default class MoqWatch extends HTMLElement {
 
 	set paused(value: boolean) {
 		this.controls.paused.set(value);
+		this.#accept("paused");
 	}
 
 	/** The playback volume from 0 to 1, mirrored by the `volume` attribute. */
@@ -504,7 +478,10 @@ export default class MoqWatch extends HTMLElement {
 	}
 
 	set volume(value: number) {
+		if (!Number.isFinite(value) || value < 0 || value > 1)
+			throw invalidAttribute("volume", value, "a number from 0 to 1");
 		this.controls.audio.volume.set(value);
+		this.#accept("volume");
 	}
 
 	/** Whether audio is muted, mirrored by the `muted` attribute. */
@@ -514,6 +491,7 @@ export default class MoqWatch extends HTMLElement {
 
 	set muted(value: boolean) {
 		this.controls.audio.muted.set(value);
+		this.#accept("muted");
 	}
 
 	/** When to download and render video, mirrored by the `visible` attribute. See {@link Video.Visible}. */
@@ -522,7 +500,8 @@ export default class MoqWatch extends HTMLElement {
 	}
 
 	set visible(value: Video.Visible) {
-		this.controls.video.visible.set(value);
+		this.controls.video.visible.set(parseVisible(value));
+		this.#accept("visible");
 	}
 
 	/** Which graphics API paints the canvas. See {@link Video.Backend}. */
@@ -531,7 +510,8 @@ export default class MoqWatch extends HTMLElement {
 	}
 
 	set backend(value: Video.Backend) {
-		this.controls.video.backend.set(value);
+		this.controls.video.backend.set(parseBackend(value));
+		this.#accept("backend");
 	}
 
 	/** Whether to wait for the broadcast's announcement before subscribing, mirrored by the `announced` attribute. */
@@ -541,6 +521,7 @@ export default class MoqWatch extends HTMLElement {
 
 	set announced(value: boolean) {
 		this.#announced.set(value);
+		this.#accept("announced");
 	}
 
 	/**
@@ -554,7 +535,10 @@ export default class MoqWatch extends HTMLElement {
 	}
 
 	set delay(value: Delay) {
-		this.controls.delay.set(value);
+		if (typeof value !== "number" && value !== "auto" && value !== "instant")
+			throw invalidAttribute("delay", value, '"auto", "instant", or non-negative milliseconds');
+		this.controls.delay.set(parseDelay(typeof value === "number" ? formatDuration(value) : value));
+		this.#accept("delay");
 	}
 
 	/**
@@ -570,7 +554,9 @@ export default class MoqWatch extends HTMLElement {
 	}
 
 	set buffer(value: Milli) {
-		this.controls.buffer.set(value);
+		if (typeof value !== "number") throw invalidAttribute("buffer", value, "non-negative milliseconds");
+		this.controls.buffer.set(parseBuffer(formatDuration(value)));
+		this.#accept("buffer");
 	}
 
 	/**
@@ -587,7 +573,8 @@ export default class MoqWatch extends HTMLElement {
 	}
 
 	set catalogFormat(value: CatalogFormat | undefined) {
-		this.#catalogFormat.set(value);
+		this.#catalogFormat.set(parseCatalogFormat(value ?? null));
+		this.#accept("catalog-format");
 	}
 
 	/**
@@ -613,6 +600,7 @@ export default class MoqWatch extends HTMLElement {
 
 	set captions(value: string | undefined) {
 		this.controls.text.target.set(value || undefined);
+		this.#accept("captions");
 	}
 }
 
