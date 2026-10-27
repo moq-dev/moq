@@ -32,7 +32,7 @@ function parseUrl(value: string | null): URL | undefined {
 }
 
 // Parse the `versions` attribute: a comma-separated list, or the defaults when absent or empty.
-// The connection checks the names and reports an unsupported one on `connection.error`.
+// The setter refuses an unsupported or duplicate name.
 function parseVersions(value: string | null): string[] | undefined {
 	const versions = value
 		?.split(",")
@@ -448,7 +448,7 @@ export default class MoqWatch extends HTMLElement {
 	}
 
 	set versions(value: readonly string[] | undefined) {
-		this.connection.versions.set(value);
+		this.connection.versions.set(value === undefined ? undefined : Moq.Connection.checkVersions(value));
 		this.#accept("versions");
 	}
 

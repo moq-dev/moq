@@ -73,7 +73,6 @@ leaving JS-only redesigns of `js/net` to [rs2ts](/quest/m2/rs2ts/README.md).
 - [Removing a stale front is O(1)](/quest/m1/cut-audit/weak-cache-remove.md) - a restart wave is linear under the origin lock
 - [One bad rendition never leaves the player with nothing](/quest/m1/cut-audit/watch-source-robust.md) - malformed audio and conflicting video filters degrade gracefully
 - [@moq/flate stops inflating at its budget](/quest/m1/cut-audit/flate-budget.md) - unless the compression migration deletes it first
-- [Media element attributes reflect their state](/quest/m1/cut-audit/element-attributes.md) - attributes track property and UI changes before the API ships
 - [Rust and JS accept the same catalogs](/quest/m1/cut-audit/catalog-parity.md) - one strictness, per rendition, with a shared fixture corpus
 - [Lite datagrams obey one size limit](/quest/m1/cut-audit/datagram-size.md) - no datagram one hop accepts is dropped by the next for size
 - [Every relay runtime honors or refuses each listen setting](/quest/m1/cut-audit/uring-listen-config.md) - io_uring stops ignoring preferred addresses

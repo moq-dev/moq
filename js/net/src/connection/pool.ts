@@ -20,6 +20,7 @@ import {
 	type CertificateHash as CertificateHashType,
 	type ConnectProps as ConnectPropsType,
 	certificateHash,
+	checkVersions,
 	connect,
 	normalizeVersions,
 	type WebSocketProps as WebSocketPropsType,
@@ -138,6 +139,9 @@ export class Connection {
 
 	/** Whether this runtime can connect with WebTransport. */
 	static readonly isWebTransportSupported = isWebTransportSupported;
+
+	/** Copy a version list that can be offered, throwing a `TypeError` if it is empty or has an unsupported or duplicate name. */
+	static readonly checkVersions = checkVersions;
 
 	/** Relay URL to connect to; updating it reconnects to that URL. */
 	url: Signal<URL | undefined>;
@@ -419,7 +423,7 @@ export namespace Connection {
 /** The checked copy of `versions` to dial with, or why it cannot be offered. */
 function offered(versions: readonly string[] | undefined): string[] | undefined | TypeError {
 	try {
-		return normalizeVersions({ versions });
+		return versions === undefined ? undefined : checkVersions(versions);
 	} catch (err) {
 		if (err instanceof TypeError) return err;
 		throw err;

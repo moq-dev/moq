@@ -102,6 +102,8 @@ interface CertificateHash {
 
 function certificateHash(cert: string | BufferSource): Promise<Uint8Array<ArrayBuffer>>;
 
+function checkVersions(versions: readonly string[]): string[];
+
 function connect(input: ConnectProps): Promise<Established>;
 
 export class Connection {
@@ -111,6 +113,7 @@ export class Connection {
     readonly auth: Getter<Auth.Handle | undefined>;
     readonly bandwidth: Getter<Handle_2 | undefined>;
     static readonly certificateHash: typeof certificateHash;
+    static readonly checkVersions: typeof checkVersions;
     close(abort?: Error): void;
     get closed(): GetPromise<Error | null>;
     static readonly connect: typeof connect;

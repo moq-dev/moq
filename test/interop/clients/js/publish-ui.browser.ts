@@ -268,3 +268,67 @@ test("version lists keep their defaults and explicit false booleans round-trip",
 		await server.close();
 	}
 }, 30_000);
+
+test("version lists refuse unsupported, duplicate, and empty lists and snapshot valid ones", async () => {
+	const server = await createServer({
+		configFile: false,
+		root: `${import.meta.dir}/publish-ui`,
+		plugins: [worklet()],
+		server: { host: "127.0.0.1", port: 0 },
+	});
+	await server.listen();
+	const browser = await launch();
+	try {
+		const page = await browser.newPage();
+		await page.goto(server.resolvedUrls?.local[0] ?? "");
+		const results = await page.evaluate(async () => {
+			await customElements.whenDefined("moq-watch");
+			const errors: string[] = [];
+			window.addEventListener("error", (event) => {
+				errors.push(event.message);
+				event.preventDefault();
+			});
+			return (["moq-watch", "moq-publish"] as const).map((tag) => {
+				const element = document.createElement(tag);
+				const markup = ["moq-lite-99", "moq-lite-06,moq-lite-06"].map((invalid) => {
+					const count = errors.length;
+					element.setAttribute("versions", invalid);
+					document.body.append(element);
+					const refused =
+						!element.connection.enabled.peek() &&
+						element.getAttribute("versions") === invalid &&
+						errors.length === count + 1;
+					element.removeAttribute("versions");
+					return refused && element.connection.enabled.peek();
+				});
+				const thrown = [[], ["moq-lite-99"], ["moq-lite-06", "moq-lite-06"]].map((invalid) => {
+					try {
+						element.versions = invalid;
+						return false;
+					} catch (error) {
+						return error instanceof TypeError && element.versions === undefined;
+					}
+				});
+				const list = ["moq-lite-06", "moq-transport-14"];
+				element.versions = list;
+				list.push("moq-lite-05");
+				const snapshot = element.versions;
+				const reflected = element.getAttribute("versions");
+				element.remove();
+				element.signals.close();
+				return { tag, markup, thrown, snapshot, reflected };
+			});
+		});
+		for (const result of results)
+			expect(result).toEqual({
+				tag: result.tag,
+				markup: [true, true],
+				thrown: [true, true, true],
+				snapshot: ["moq-lite-06", "moq-transport-14"],
+				reflected: "moq-lite-06,moq-transport-14",
+			});
+	} finally {
+		await browser.close();
+		await server.close();
+	}
+}, 30_000);
