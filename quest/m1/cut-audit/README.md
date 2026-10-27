@@ -59,7 +59,6 @@ leaving JS-only redesigns of `js/net` to [rs2ts](/quest/m2/rs2ts/README.md).
 - [A route too large to re-encode is skipped](/quest/m1/cut-audit/announce-reencode.md) - one oversized route never resets a downstream announce stream
 - [A reserved group survives a route returning](/quest/m1/cut-audit/reserved-route-return.md) - a route flip A to B to A no longer panics a peeked reader
 - [JS tracks end clean only on a deliberate finish](/quest/m1/cut-audit/js-close-cause.md) - local close, violations, and unanswered requests end with errors
-- [A malformed lite message closes the session](/quest/m1/cut-audit/announce-decode-complete.md) - a bad ANNOUNCE body no longer jams its stream
 - [Withdrawing a moq-transport FETCH or TRACK_STATUS ends it](/quest/m1/cut-audit/ietf-withdraw-resolve.md) - withdrawal during resolution releases the request
 - [JS moq-transport sessions close on peer violations](/quest/m1/cut-audit/js-ietf-violations.md) - right close codes, no unhandled rejection, bounded reflected namespaces
 - [A media hole in the player keeps the timeline](/quest/m1/cut-audit/watch-audio-hole.md) - a skipped group re-primes decoders without flushing audio or re-anchoring sync
