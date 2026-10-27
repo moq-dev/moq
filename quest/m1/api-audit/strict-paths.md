@@ -24,4 +24,8 @@ Decided 2026-10-27 (maintainer):
 
 Public API: breaking for moq-net (`path::Invalid` becomes `path::Error`,
 `Relative::new` fails on empty segments), moq-auth, and @moq/auth. Mirror the
-names in JS and the bindings. Wire: none.
+names in JS and the bindings. Wire: none for moq-lite, but the hang catalog
+carries `Relative` in JSON (`broadcast`, `echo.path`), so a catalog spelling one
+with a leading, trailing, or doubled `/` stops parsing. Our publishers never
+emit those forms. @moq/net's `Path.normalizeRelative` and the hang draft's
+`broadcast` field adopt the same rule.

@@ -2,7 +2,7 @@
 
 ## Goal
 
-The moq-mux HLS segmenter holds at most one pending cut, so an input that
+The moq-mux HLS segmenter's pending cuts stay bounded, so an input that
 declares segments faster than it opens groups cannot grow its state.
 
 ## Plan
@@ -15,15 +15,17 @@ come from a declared fMP4 segment, including a `styp` box in network input
 that sends `styp` segments with rising pts and no sync sample never starts a
 group, so the queue grows by one entry per segment.
 
-A group start drops every cut at or before its start, and cuts only arrive at
-or before the latest frame, so only the latest pending cut can ever matter.
-Replace the queue with a single `Option<Timestamp>`, after confirming that
-equivalence with a test of several cuts before one group start.
-The equivalence rests on the production callers' invariant that each `cut(pts)`
-arrives in rising order at or before the latest reported frame, so establish it
-from those callers rather than assume it for arbitrary `cut()` calls. The
-existing `explicit_cuts_override_the_grid` test stays as a regression guard: it
-declares both cuts before any group, so it needs both boundaries.
+A group start drops every cut at or before its start, so of the cuts at or
+before the latest reported frame only the latest can still end a segment.
+Collapse those into one as frames arrive, and queue only the cuts beyond the
+latest frame. A lone `Option<Timestamp>` would assume more than the callers
+promise: both callers in `container/fmp4/import.rs` declare a fragment's cut at
+its earliest pts just before reporting that fragment's frames, so a network
+input holds at most one cut beyond the latest frame, but `cut()` itself accepts
+cuts ahead of any frame. With cuts at 10 and 20 pending, a group at 15 must take the 10
+boundary and keep 20; add a test of that case. The existing
+`explicit_cuts_override_the_grid` test stays as a regression guard: it declares
+both cuts before any group, so it needs both boundaries.
 
 Public API: none. Wire: none.
 
