@@ -105,7 +105,7 @@ const IETF_VERSIONS: &[ietf::Version] = &[
 ];
 
 /// How many types [`lite_wire`] dispatches over.
-const LITE_KINDS: u8 = 22;
+const LITE_KINDS: u8 = 28;
 
 /// How many types [`ietf_wire`] dispatches over.
 const IETF_KINDS: u8 = 44;
@@ -131,8 +131,14 @@ where
 	T: Decode<V> + Encode<V>,
 	V: Copy + Into<Form>,
 {
-	let Ok((decoded, _)) = T::decode_slice(data, version) else {
-		return false;
+	let mut reader = Decoder::new(data, version.into());
+	let decoded = match T::decode(&mut reader, version) {
+		Ok(decoded) => decoded,
+		Err(coding::DecodeError::Short) => {
+			assert!(reader.need() > data.len(), "short read inside a complete body");
+			return false;
+		}
+		Err(_) => return false,
 	};
 
 	let Ok(first) = decoded.encode_bytes(version) else {
@@ -224,6 +230,12 @@ pub fn lite_wire(data: &[u8]) -> bool {
 		19 => datagram(rest, version),
 		20 => roundtrip::<lite::Parameters, _>(rest, version),
 		21 => roundtrip::<lite::ietf::TrackProperties, _>(rest, version),
+		22 => roundtrip::<lite::Tracks<'static>, _>(rest, version),
+		23 => roundtrip::<lite::TracksEvent<'static>, _>(rest, version),
+		24 => roundtrip::<lite::Auth, _>(rest, version),
+		25 => roundtrip::<lite::AuthOk, _>(rest, version),
+		26 => roundtrip::<lite::AuthError, _>(rest, version),
+		27 => roundtrip::<lite::AuthReply, _>(rest, version),
 		_ => unreachable!("kind is taken modulo LITE_KINDS"),
 	}
 }
@@ -1072,6 +1084,17 @@ pub fn seeds() -> Vec<Seed> {
 				}
 			}
 		}
+	}
+
+	// A typed empty TRACKS_SYNCED and AUTH_OK reply need nonuniform envelope bytes.
+	for (kind, body) in [(23, &[4, 0][..]), (27, &[0, 3, 0, 0, 0][..])] {
+		let mut data = vec![(LITE_VERSIONS.len() - 1) as u8, kind];
+		data.extend_from_slice(body);
+		seeds.push(Seed {
+			target: "lite",
+			kind,
+			data,
+		});
 	}
 
 	for version in 0..IETF_VERSIONS.len() as u8 {

@@ -565,7 +565,9 @@ impl SubscriptionCleanup {
 		for (_, entry) in self.0.lock().drain() {
 			let _ = match entry.tail.read().is_ended() {
 				true => entry.producer.finish(),
-				false => entry.producer.close(),
+				false => entry
+					.producer
+					.abort(Error::Stream(crate::StreamError::Session(crate::SessionError::Cancel))),
 			};
 		}
 	}
@@ -1059,10 +1061,10 @@ impl GroupRecv {
 					// The track or group dying cancels the stream; the peer's own close
 					// arrives through the ingest's reads.
 					let res = 'serve: {
-						if let Poll::Ready(err) = track.poll_closed(waiter) {
+						if let Poll::Ready(err) = track.poll_aborted(waiter) {
 							break 'serve Err(err);
 						}
-						if let Poll::Ready(err) = group.handle().poll_closed(waiter) {
+						if let Poll::Ready(err) = group.handle().poll_aborted(waiter) {
 							break 'serve Err(err);
 						}
 						match ingest.poll(&mut self.reader, group, waiter) {
@@ -3023,7 +3025,10 @@ mod tests {
 				}
 				_ => {
 					assert!(matches!(res, Err(Error::ProtocolViolation)), "{version:?}: {res:?}");
-					assert!(matches!(track.closed().now_or_never(), Some(Error::ProtocolViolation)));
+					assert!(matches!(
+						track.closed().now_or_never(),
+						Some(Err(Error::ProtocolViolation))
+					));
 				}
 			}
 		}
@@ -5928,6 +5933,47 @@ mod tests {
 		let mut run = std::pin::pin!(kio::wait(|waiter| prefix.poll(waiter)));
 		assert!(futures::poll!(run.as_mut()).is_pending());
 		assert!(cursor.is_synced());
+	}
+
+	/// A complete body cannot be repaired by bytes from the next announcement.
+	/// Keep the peer stream open: FIN must not be what discovers the malformed body.
+	#[moq_clock::test]
+	async fn malformed_complete_announce_closes_before_more_bytes() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			let mut script = announce_script(version, &[&announce_ok(version, 1)]);
+			script.extend_from_slice(match version {
+				Version::Lite05 => &[1, 1],
+				_ => &[0, 1, 5],
+			});
+			let session = crate::lite::test_transport::ScriptedSession::new(script);
+			let log = session.log.clone();
+			let (mut prefix, _consumer) = root_prefix(version, session);
+			let result = prefix.poll(&kio::Waiter::noop());
+			assert!(
+				matches!(result, Poll::Ready(Err(Error::ProtocolViolation))),
+				"{version:?}: {result:?}"
+			);
+			assert_eq!(log.closes()[0].0, crate::SessionError::ProtocolViolation.to_code());
+		}
+	}
+
+	/// Only an incomplete outer frame waits, then resumes on its missing byte.
+	#[moq_clock::test]
+	async fn an_incomplete_announce_waits_for_its_body() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			let mut script = announce_script(version, &[&announce_ok(version, 1), &announce_start(version, "room")]);
+			let last = script.pop().unwrap();
+			let session = crate::lite::test_transport::ScriptedSession::new(script);
+			let log = session.log.clone();
+			let (mut prefix, consumer) = root_prefix(version, session.clone());
+			let mut cursor = consumer.announced();
+			assert!(prefix.poll(&kio::Waiter::noop()).is_pending());
+			assert!(log.closes().is_empty());
+			session.push(&[last]);
+			assert!(prefix.poll(&kio::Waiter::noop()).is_pending());
+			cursor.assert_next_active("room");
+			assert!(log.closes().is_empty());
+		}
 	}
 
 	#[moq_clock::test]

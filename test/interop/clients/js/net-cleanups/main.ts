@@ -16,13 +16,13 @@ export async function run() {
 	first.close();
 	group.writeFrame({ payload: new TextEncoder().encode("second") });
 	const c = await second.readString();
-	group.close();
+	group.finish();
 	second.close();
 	const json = new Net.Group.Producer(0);
 	const reader = json.consume();
 	json.writeFrame({ payload: new Uint8Array() });
 	json.writeFrame({ payload: new TextEncoder().encode("false") });
-	json.close();
+	json.finish();
 	let malformed = false;
 	try {
 		await reader.readJson();

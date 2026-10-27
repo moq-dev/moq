@@ -69,7 +69,7 @@ pub unsafe fn parse_client(config: Option<&moq_client_config>) -> Result<Config,
 		.map(|token| {
 			token
 				.try_into()
-				.map_err(|err: moq_tokio::connect::EmptyToken| Error::InvalidConfig(err.to_string()))
+				.map_err(|err: moq_net::auth::EmptyToken| Error::InvalidConfig(err.to_string()))
 		})
 		.collect::<Result<_, _>>()?;
 

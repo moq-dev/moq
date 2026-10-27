@@ -31,9 +31,10 @@ try {
 					for (let sequence = 0; sequence < groups; sequence++) {
 						const group = new GroupProducer(sequence);
 						group.writeFrame(textFrame("frame"));
-						group.close();
+						group.finish();
 						track.writeGroup(group);
 					}
+					track.finish();
 					track.close();
 					return { origin, broadcast };
 				});

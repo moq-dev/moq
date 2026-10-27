@@ -21,7 +21,7 @@ export function fanout() {
 				let started = performance.now();
 				for (const group of groups) {
 					for (let index = 0; index < frames; index++) group.writeFrame({ payload });
-					group.close();
+					group.finish();
 				}
 				publish += performance.now() - started;
 				stored = groups.reduce((bytes, group) => bytes + hooks.groupCacheBytes(group), 0);
@@ -44,6 +44,7 @@ export function fanout() {
 				inflated = groups.reduce((bytes, group) => bytes + hooks.groupCacheBytes(group), 0) - stored;
 				if (inflated !== publishers * frames * payload.length)
 					throw new Error("inflated bytes scale with readers");
+				for (const track of tracks) track.finish();
 				for (const track of tracks) track.close();
 			}
 			rows.push({ publishers, readers, phase: "publish", us: (publish * 1000) / rounds, size_bytes: stored });

@@ -107,11 +107,14 @@ export class Producer {
 		this.#writer.closed = true;
 		if (abort) {
 			this.#writer.aborted = abort;
-			this.#inner.close(abort);
+			this.#inner.abort(abort);
 			return;
 		}
 		void this.#writer.pump.run(() => {
-			if (!this.#writer.aborted) this.#inner.close();
+			if (!this.#writer.aborted) {
+				this.#inner.finish();
+				this.#inner.close();
+			}
 		});
 	}
 

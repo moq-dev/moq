@@ -611,6 +611,7 @@ test("a failed encoder stays failed until the capture source changes", async () 
 	} finally {
 		encoder.close();
 		capture.close();
+		track.finish();
 		track.close();
 		await settle();
 		error.mockRestore();

@@ -56,7 +56,7 @@ for (const broadcasts of [1, 16, 128]) {
 				}),
 			);
 			if (sample) samples.push((performance.now() - start) * 1000);
-			track.close(new Error("benchmark finished"));
+			track.abort(new Error("benchmark finished"));
 		}
 		samples.sort((a, b) => a - b);
 		console.log(`${broadcasts},${subscribers},${samples[10].toFixed(2)}`);

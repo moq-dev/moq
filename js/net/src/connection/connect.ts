@@ -145,6 +145,18 @@ function offer(versions?: readonly string[]): Offer {
 	return { alpns: [...alpns], setup, explicit: versions !== undefined, setupToken: names.every(hasSetupToken) };
 }
 
+/** Copy a version list that can be offered, throwing a `TypeError` if it is empty or has an unsupported or duplicate name. */
+export function checkVersions(versions: readonly string[]): string[] {
+	if (versions.length === 0) throw new TypeError("versions must not be empty");
+	const seen = new Set<string>();
+	for (const name of versions) {
+		if (!Object.hasOwn(VERSIONS, name)) throw new TypeError(`unsupported version: ${name}`);
+		if (seen.has(name)) throw new TypeError(`duplicate version: ${name}`);
+		seen.add(name);
+	}
+	return [...versions];
+}
+
 /** Validate and snapshot an ordered version list before acquiring a connection. @internal */
 export function normalizeVersions(props?: {
 	versions?: readonly string[];
@@ -155,16 +167,7 @@ export function normalizeVersions(props?: {
 		throw new TypeError("webtransport.protocols was removed; set versions instead");
 	if (props?.websocket && "protocols" in props.websocket)
 		throw new TypeError("websocket.protocols was removed; set versions instead");
-	const versions = props?.versions;
-	if (versions === undefined) return undefined;
-	if (versions.length === 0) throw new TypeError("versions must not be empty");
-	const seen = new Set<string>();
-	for (const name of versions) {
-		if (!Object.hasOwn(VERSIONS, name)) throw new TypeError(`unsupported version: ${name}`);
-		if (seen.has(name)) throw new TypeError(`duplicate version: ${name}`);
-		seen.add(name);
-	}
-	return [...versions];
+	return props?.versions === undefined ? undefined : checkVersions(props.versions);
 }
 
 /** Options for {@link connect}. */

@@ -23,6 +23,8 @@ pub(crate) struct SessionStart {
 	pub goaway: crate::goaway::Handle,
 	/// The session's AUTH tokens and grants, stored on the public [`crate::Session`].
 	pub auth: crate::auth::Link,
+	/// The connection credential presented on `auth`, stored on the public [`crate::Session`].
+	pub credential: Option<crate::auth::Auth>,
 	/// The implementation the peer's SETUP advertised, stored on the public [`crate::Session`].
 	pub peer_implementation: crate::setup::PeerImplementation,
 }
@@ -278,9 +280,14 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 	// When the caller already read it (a gated server accept), seed the slot so the
 	// Setup stream isn't expected on the wire again.
 	let peer_implementation = crate::setup::PeerImplementation::default();
-	let peer_setup_slot = PeerSetup::new(client, session.address())
+	let mut peer_setup_slot = PeerSetup::new(client, session.address())
 		.offer_ietf(our_setup.ietf)
 		.with_implementation(peer_implementation.clone());
+	// Without AUTH, the server checks a client's credential before its SETUP, which the
+	// client reads only after going live.
+	if client && version.has_setup_stream() && !version.has_auth() {
+		peer_setup_slot = peer_setup_slot.accepting(auth.clone());
+	}
 	// A version without a Setup Stream advertises nothing, so there is nothing to wait for.
 	if !version.has_setup_stream() {
 		peer_implementation.set(None);
@@ -360,7 +367,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 			tokens: kio::Tasks::new(),
 			violation: Default::default(),
 			started: false,
-			_setup: setup_token,
+			_setup: setup_token.clone(),
 		},
 		setup: version
 			.has_setup_stream()
@@ -379,6 +386,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 		driver,
 		goaway: goaway_handle,
 		auth,
+		credential: setup_token,
 		peer_implementation,
 	})
 }

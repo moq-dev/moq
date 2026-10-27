@@ -7,6 +7,7 @@ import { StreamCode, StreamError } from "./error.ts";
 import { Producer as GroupProducer } from "./group.ts";
 import { HopSchema, Route } from "./hop.ts";
 import { hooks, spreadHash } from "./internal.ts";
+import { SessionBroadcast, textFrame } from "./mock.ts";
 import type { Consumer, Table } from "./origin.ts";
 import { Producer } from "./origin.ts";
 import * as Path from "./path.ts";
@@ -242,34 +243,38 @@ test("a republish closes the superseded broadcast", async () => {
 	origin.close();
 });
 
-test("a consumer clone keeps a superseded broadcast alive", async () => {
+test("a superseded broadcast closes, and its subscribers keep reading", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
 	const path = Path.from("room");
 
 	const publication = origin.createBroadcast(path);
 	const first = publication.broadcast;
+	const track = first.createTrack("video", { timescale: Timescale.MILLI });
 	publication.announce();
 	const mine = await routed(consumer, path);
-	expect(mine).toBeDefined();
+	const subscriber = mine?.track("video").subscribe();
+	if (!subscriber) throw new Error("expected a subscriber");
 
 	const replacement = origin.createBroadcast(path);
 	replacement.announce();
-	await settle();
-
-	// The application's clone holds the old broadcast open even though it is unpublished.
-	expect(first.closed.peek()).toBeUndefined();
-	// Holding the fill alive never lets its stale publication displace or retract the replacement.
+	// The origin closes the old producer itself, whoever still holds a handle on it.
+	expect(first.closed.peek()).toBeNull();
+	// Its stale publication never displaces or retracts the replacement.
 	expect(() => publication.announce({ epoch: EPOCH })).toThrow("broadcast is closed");
 	publication.unannounce();
 	const current = await routed(consumer, path);
 	expect(readsFrom(current, replacement.broadcast)).toBe(true);
 	current?.close();
 
-	mine?.close();
-	await settle();
-	expect(first.closed.peek()).not.toBeUndefined();
+	// A track already subscribed is not the broadcast: it keeps serving until it ends.
+	track.writeFrame(textFrame("late"));
+	expect((await subscriber.recvGroup())?.sequence).toBe(0);
 
+	subscriber.close();
+	mine?.close();
+	track.finish();
+	track.close();
 	origin.close();
 });
 
@@ -478,10 +483,10 @@ test("a request resolves once a front answers, and survives its withdrawal", asy
 	expect(request.active.peek()).toBeUndefined();
 
 	// A session answers (simulated): the slot's front resolves the request.
-	const upstream = new BroadcastProducer();
+	const upstream = new SessionBroadcast();
 	const slot = wireOf(origin).requests.peek()?.get(path);
 	expect(slot).toBeDefined();
-	expect(wireOf(origin).answer(path, upstream.consume())).toBeDefined();
+	expect(wireOf(origin).answer(path, upstream)).toBeDefined();
 	expect(request.active.peek()).toBeDefined();
 
 	// A second request for the same path shares the answer, each through a handle of its
@@ -1978,8 +1983,8 @@ test("a broadcast a derived handle released cannot announce again", async () => 
 
 	scoped.close();
 
-	// The application's clone keeps the broadcast open, but the released handle no longer routes it.
-	expect(broadcast.closed.peek()).toBeUndefined();
+	// The released handle closes what it created, whoever still holds a handle on it.
+	expect(broadcast.closed.peek()).toBeNull();
 	expect(() => publication.announce()).toThrow("broadcast is closed");
 	expect((await announcedView(origin)).peek().has(path)).toBe(false);
 
@@ -2426,7 +2431,7 @@ test.each([
 	expect(resolved?.epoch).toBe(from);
 
 	const sticky = resolved?.track("video").subscribe();
-	oldTrack.appendGroup().close();
+	oldTrack.appendGroup().finish();
 	expect((await sticky?.recvGroup())?.sequence).toBe(0);
 
 	// A re-price at the same epoch keeps every handle, and the handler is not asked again.
@@ -2448,7 +2453,7 @@ test.each([
 	expect(pinned.active.peek()?.epoch).toBe(from);
 
 	// The subscription already open stays on the old answer.
-	oldTrack.appendGroup().close();
+	oldTrack.appendGroup().finish();
 	expect((await sticky?.recvGroup())?.sequence).toBe(1);
 
 	// A re-request, local or from a session, asks the handler again and never reads the
@@ -2469,7 +2474,7 @@ test.each([
 	// Existing request handles can still subscribe, but never join the new answer.
 	const retained = held.active.peek()?.track("video").subscribe();
 	expect((await retained?.recvGroup())?.sequence).toBe(1);
-	oldTrack.appendGroup().close();
+	oldTrack.appendGroup().finish();
 	expect((await retained?.recvGroup())?.sequence).toBe(2);
 	expect(held.active.peek()).toBe(resolved);
 
@@ -2525,7 +2530,7 @@ test("an unread resolved request retains its broadcast until its last handle clo
 	const dynamic = origin.dynamicRoute(Path.from("live"), { epoch: EPOCH });
 	const requests = dynamic.requested();
 	const held = origin.consume().request(path);
-	const old = new BroadcastProducer();
+	const old = new SessionBroadcast();
 	hooks.acceptRequest((await requests.next()).value, old);
 	// Change epochs before the active getter or its subscription can clone the answer.
 	dynamic.updateRoute({ epoch: NEWER });
@@ -2536,7 +2541,6 @@ test("an unread resolved request retains its broadcast until its last handle clo
 	expect(held.active.peek()).toBeUndefined();
 	await requests.return?.();
 	dynamic.close();
-	old.close();
 	origin.close();
 });
 

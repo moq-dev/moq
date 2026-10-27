@@ -342,6 +342,7 @@ impl Client {
 				stats: self.stats.clone(),
 				goaway: start.goaway,
 				auth: start.auth,
+				credential: start.credential,
 				estimate: Some(start.estimate),
 				bandwidth: self.bandwidth(),
 				peer_implementation: start.peer_implementation,
@@ -384,7 +385,7 @@ impl Client {
 				// offer it keeps the option out of our SETUP and presents no credential.
 				let auth = self.link(self.extensions.auth, true)?;
 				let peer_implementation = setup::PeerImplementation::default();
-				let (protocol, goaway) = ietf::start(ietf::Config {
+				let (protocol, goaway, credential) = ietf::start(ietf::Config {
 					runtime: runtime.clone(),
 					stats: self.stats.clone(),
 					limits: self.limits,
@@ -420,6 +421,7 @@ impl Client {
 						stats: self.stats.clone(),
 						goaway,
 						auth,
+						credential,
 						estimate: None,
 						bandwidth: self.bandwidth(),
 						peer_implementation,
@@ -533,7 +535,7 @@ impl Client {
 			return self.start_lite(runtime, session, v, peer_hop);
 		}
 
-		let (recv_bw, protocol, goaway, auth, estimate, peer_implementation) = match version {
+		let (recv_bw, protocol, goaway, auth, credential, estimate, peer_implementation) = match version {
 			Version::Lite(v) => {
 				let stream = stream.with_version(v);
 				let start = lite::start(lite::Config {
@@ -559,6 +561,7 @@ impl Client {
 					crate::driver::Protocol::Lite(Box::new(start.driver)),
 					start.goaway,
 					start.auth,
+					start.credential,
 					Some(start.estimate),
 					start.peer_implementation,
 				)
@@ -586,7 +589,7 @@ impl Client {
 				// Draft 14-16 carry no AUTH, but the session is still limited through this handle.
 				let auth = self.link(false, true)?;
 				// Draft 14-16: the path rode in the bidi SETUP above, not the uni one.
-				let (protocol, goaway) = ietf::start(ietf::Config {
+				let (protocol, goaway, credential) = ietf::start(ietf::Config {
 					runtime: runtime.clone(),
 					stats: self.stats.clone(),
 					limits: self.limits,
@@ -616,6 +619,7 @@ impl Client {
 					crate::driver::Protocol::Ietf(protocol),
 					goaway,
 					auth,
+					credential,
 					None,
 					peer_implementation,
 				)
@@ -632,6 +636,7 @@ impl Client {
 				stats: self.stats.clone(),
 				goaway,
 				auth,
+				credential,
 				estimate,
 				bandwidth: self.bandwidth(),
 				peer_implementation,

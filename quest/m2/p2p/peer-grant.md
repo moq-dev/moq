@@ -77,7 +77,3 @@ valid proof onto another session is refused; a refreshed grant replaces
 the old one without dropping the session.
 
 Additive.
-
-## Required
-
-- [In-band auth](/quest/m1/auth/README.md) - relay tokens reach `main` with this line, so the relay owns AUTH and knows the session's paths

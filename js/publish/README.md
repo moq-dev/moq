@@ -73,6 +73,11 @@ The simplest way to publish a stream:
 | `backend`   | string  | `"auto"` | Graphics API for a `<canvas>` preview: `"auto"`, `"webgpu"`, `"2d"` |
 | `announce`  | string  | `"source"` | When to advertise: `"always"` or `"source"` (once media is captured). A camera source waits for every enabled track, and `"source"` waits until each captured track's config resolves or fails, so the first catalog lists every rendition. After its first announcement, a camera stays announced until deselected or disconnected, including mute, hide, device swaps, and capture retries. The broadcast is created while connected either way. To keep it out of discovery, use a hidden name with a `.`-prefixed segment; it is still subscribable by name. |
 
+Property and built-in UI changes reflect into attributes. Invalid URLs, version lists, and
+source/preview/backend/announce modes are refused: their property setters throw, and malformed markup
+reports a browser `error` event and suspends media until corrected or removed. Defaults apply
+when attributes are absent.
+
 A nested `<video>` shows the raw capture; a `<canvas>` is drawn by the element.
 Camera and microphone failures are observable through `el.sources.video`
 and `el.sources.audio`. When those signals hold a `Source.Camera` or

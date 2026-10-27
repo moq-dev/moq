@@ -32,6 +32,7 @@ async function datagrams(count: number, queued: number): Promise<[number, number
 	const deliver = ((performance.now() - started) * 1000) / (count * queued);
 	Bun.gc(true);
 	const retained = process.memoryUsage().heapUsed - before;
+	for (const track of tracks) track.finish();
 	for (const track of tracks) track.close();
 	slow.length = 0;
 	return [deliver, retained];

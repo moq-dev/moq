@@ -762,7 +762,8 @@ for (const [name, teardown] of Object.entries(teardowns)) {
 			fin.hold?.enable();
 			const last = producer.appendGroup();
 			last.writeFrame(textFrame("last"));
-			last.close();
+			last.finish();
+			producer.finish();
 			producer.close();
 			teardown.end(handle, win);
 			await clock.advance(Nano.fromMilli(teardown.linger));
@@ -856,6 +857,7 @@ for (const [name, drainEnd] of Object.entries(drainEnds)) {
 			remote.close();
 			reload.close();
 			for (const dial of dials) (await dial.server).abort();
+			producer.finish();
 			producer.close();
 			broadcast.close();
 			origin.close();
@@ -922,6 +924,7 @@ test("a retired GOAWAY predecessor still closes by its handover cap", async () =
 		remote.close();
 		reload.close();
 		for (const dial of dials) (await dial.server).abort();
+		producer.finish();
 		producer.close();
 		broadcast.close();
 		origin.close();
@@ -982,7 +985,8 @@ test("closing the loop keeps the tokens until the session drains", async () => {
 		fin.hold?.enable();
 		const last = producer.appendGroup();
 		last.writeFrame(textFrame("last"));
-		last.close();
+		last.finish();
+		producer.finish();
 		producer.close();
 		reload.close();
 

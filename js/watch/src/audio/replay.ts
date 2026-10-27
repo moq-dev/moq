@@ -246,7 +246,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 					timestamp: Time.Timestamp.fromMicros(timestamp),
 				});
 				if (ends.get(arrival.group) === next) {
-					group.close();
+					group.finish();
 					groups.delete(arrival.group);
 				}
 				next++;
@@ -287,6 +287,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 		delivery.resolve();
 		abort.abort();
 		consumer.close();
+		track.finish();
 		track.close();
 		await decode;
 		signals.close();

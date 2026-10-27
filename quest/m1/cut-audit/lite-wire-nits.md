@@ -12,7 +12,7 @@ decoding is gone.
 Found by the 2026-10-24 pre-cut audit at 151a529670, all source-inferred.
 
 - **UNAUTHORIZED (0x3B)** is sent on lite-05/06 (`rs/moq-net/src/lite/error.rs:281`,
-  no version gate), as [In-band auth](/quest/m1/auth/README.md) decided
+  no version gate), as the in-band auth plan decided
   ([moq-dev/moq#5004](https://github.com/moq-dev/moq/pull/5004)), but the
   draft's changelog lists it under lite-07 only. Fix the draft.
 - **Implementation (0x6) SETUP parameter** is parsed on lite-05/06

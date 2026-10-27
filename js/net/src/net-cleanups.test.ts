@@ -25,14 +25,14 @@ test("group read handles independently replay buffered and future frames", async
 			first.close();
 			group.writeFrame(payload("c"));
 			expect(await second.readString()).toBe("c");
-			group.close();
+			group.finish();
 			expect(await second.readFrame()).toBeUndefined();
 		} finally {
 			second.close();
 		}
 	} finally {
 		first.close();
-		group.close();
+		group.finish();
 	}
 });
 
@@ -44,7 +44,8 @@ test.each(["group", "track"] as const)("%s JSON rejects an empty frame without t
 	group.writeFrame({ payload: new Uint8Array() });
 	for (const value of [null, false, 0, ""])
 		group.writeFrame({ payload: new TextEncoder().encode(JSON.stringify(value)) });
-	group.close();
+	group.finish();
+	producer.finish();
 	producer.close();
 	try {
 		await expect(reader.readJson()).rejects.toThrow(SyntaxError);
@@ -59,7 +60,7 @@ test("group booleans refuse every shape except one byte of zero or one", async (
 	const group = new GroupProducer(0);
 	const reader = group.consume();
 	for (const bytes of [[], [2], [1, 0], [0], [1]]) group.writeFrame({ payload: new Uint8Array(bytes) });
-	group.close();
+	group.finish();
 	try {
 		for (let i = 0; i < 3; i++) await expect(reader.readBool()).rejects.toThrow("invalid bool frame");
 		expect(await reader.readBool()).toBe(false);

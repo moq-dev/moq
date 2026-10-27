@@ -20,7 +20,7 @@ export async function run(): Promise<void> {
 							for (let sequence = 0; sequence < retained; sequence++) {
 								const group = track.appendGroup();
 								group.writeFrame({ payload });
-								group.close();
+								group.finish();
 							}
 							const subscribers = Array.from({ length: readers }, () =>
 								track.subscribe({ maxDelay: Milli(60_000) }),
@@ -54,6 +54,7 @@ export async function run(): Promise<void> {
 							`${retained},${publishers},${readers},${((elapsed * 1e6) / (iterations * publishers * readers)).toFixed(0)}`,
 						);
 					} finally {
+						for (const track of tracks) track.finish();
 						for (const track of tracks) track.close();
 					}
 				}

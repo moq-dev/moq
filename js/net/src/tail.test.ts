@@ -70,10 +70,11 @@ test.each([Lite.ALPN_05, Lite.ALPN_06])(
 			expect(await reader.finished()).toEqual({ group: 3, frame: 0 });
 
 			video.writeFrame(textFrame("2"));
+			video.finish();
 			video.close();
 			expect(await readAll(reader)).toEqual(["2"]);
 			expect(await reader.closed).toBeNull();
-			expect(reader.end()).toEqual({ group: 3, frame: 0 });
+			expect(await reader.finished()).toEqual({ group: 3, frame: 0 });
 		} finally {
 			close();
 		}
@@ -95,11 +96,12 @@ test.each([Ietf.ALPN.DRAFT_16, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])(
 			video.writeFrame(textFrame("1"));
 			video.writeFrame(textFrame("2"));
 			const ended = performance.now();
+			video.finish();
 			video.close();
 
 			expect(await readAll(reader)).toEqual(["1", "2"]);
 			expect(await reader.closed).toBeNull();
-			expect(reader.end()).toEqual({ group: 4, frame: 0 });
+			expect(await reader.finished()).toEqual({ group: 4, frame: 0 });
 			// Every counted stream arrived, so nothing waited out the grace.
 			expect(performance.now() - ended).toBeLessThan(TAIL_GRACE_MS);
 		} finally {

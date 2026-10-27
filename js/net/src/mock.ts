@@ -4,6 +4,7 @@
  * Creates paired client/server transports connected via TransformStreams.
  */
 
+import { Consumer as BroadcastConsumer } from "./broadcast.ts";
 import type { TransportStats } from "./connection/stats.ts";
 import type { Frame } from "./group.ts";
 import type { SendStream } from "./stream.ts";
@@ -12,6 +13,17 @@ import { Timestamp } from "./time.ts";
 /** A UTF-8 text frame stamped `timestamp` (now by default), for a test writing to a timed track. */
 export function textFrame(text: string, timestamp = Timestamp.now()): Frame {
 	return { payload: new TextEncoder().encode(text), timestamp };
+}
+
+/**
+ * A broadcast as a session hands it out: no producer, so it ends once no handle holds it,
+ * which is how a test sees the origin let go of an answer.
+ */
+export class SessionBroadcast extends BroadcastConsumer {
+	// biome-ignore lint/complexity/noUselessConstructor: widens the protected base constructor to public
+	constructor() {
+		super();
+	}
 }
 
 // High watermark to prevent writes from blocking on backpressure.
