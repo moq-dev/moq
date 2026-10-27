@@ -656,7 +656,6 @@ every route, the 2026-10-24 pre-cut audit's proposal, now decided, so
 ## Required
 
 - [Grant subject](/quest/m1/cluster-routing/grant-subject.md) - the issuer-qualified subject scoped identities are filed under
-- [Route epochs](/quest/m1/cluster-routing/route-epochs.md) - every route has an epoch, so the epochless instance machinery is gone
 
 ## Related
 

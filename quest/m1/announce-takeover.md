@@ -100,10 +100,6 @@ Public API: a `Takeover` event, mirrored across languages and exposed
 bindings, on top of `Request::prepare` and `publish`. Wire: lite-07-wip gains
 ANNOUNCE_TAKEOVER; published versions retain their framing.
 
-## Required
-
-- [Route epochs](/quest/m1/cluster-routing/route-epochs.md) - every route has an epoch, so takeover continues an epoch rather than a route generation
-
 ## Related
 
 - [Claim answer epochs](https://github.com/moq-dev/moq/pull/5678) - `Request::prepare` then `publish` answers a claim at the exact path under a fresh epoch, the operation TAKEOVER continues
