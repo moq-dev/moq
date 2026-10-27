@@ -122,18 +122,17 @@ static void on_frame(void *ud, int32_t frame) {
         done(c, &c->done_frame);
         return;
     }
-    moq_frame f;
-    memset(&f, 0, sizeof(f));
-    int32_t read = moq_consume_frame((uint32_t)frame, &f);
+    moq_media_read item = {0};
+    int32_t read = moq_consume_read((uint32_t)frame, &item);
     pthread_mutex_lock(&c->mu);
     if (read < 0 && c->finish.enabled) c->finish.failed = 1;
-    if (read == 0 && f.payload_size > 0) {
+    if (read == 0 && item.kind == MOQ_DECODE_READ_FRAME && item.frame.payload_size > 0) {
         c->got = 1;
         if (c->finish.enabled && ++c->finish.frames > c->finish.expected) c->finish.failed = 1;
     }
     pthread_cond_broadcast(&c->cv);
     pthread_mutex_unlock(&c->mu);
-    moq_consume_frame_free((uint32_t)frame);
+    moq_consume_read_free((uint32_t)frame);
 }
 
 // Writes each decoded audio frame to its rendition's files for tone.py, until enough has arrived.

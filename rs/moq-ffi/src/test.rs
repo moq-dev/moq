@@ -607,7 +607,7 @@ async fn raw_audio_activity() {
 			data: vec![0; FRAME_SAMPLES * std::mem::size_of::<f32>()],
 		})
 		.unwrap();
-	let first = tokio::time::timeout(TIMEOUT, subscription.next())
+	let first = tokio::time::timeout(TIMEOUT, next_encoded_frame(&subscription))
 		.await
 		.expect("timed out waiting for raw audio frame")
 		.unwrap()
@@ -640,13 +640,13 @@ async fn raw_audio_activity() {
 			data: vec![0; FRAME_SAMPLES * std::mem::size_of::<f32>()],
 		})
 		.unwrap();
-	let mut resumed = tokio::time::timeout(TIMEOUT, subscription.next())
+	let mut resumed = tokio::time::timeout(TIMEOUT, next_encoded_frame(&subscription))
 		.await
 		.expect("timed out waiting for resumed raw audio frame")
 		.unwrap()
 		.expect("expected a resumed raw audio frame");
 	if resumed.timestamp_us == first.timestamp_us {
-		resumed = tokio::time::timeout(TIMEOUT, subscription.next())
+		resumed = tokio::time::timeout(TIMEOUT, next_encoded_frame(&subscription))
 			.await
 			.expect("timed out waiting for re-anchored raw audio frame")
 			.unwrap()
@@ -2887,7 +2887,7 @@ async fn dynamic_track_request_can_publish_media() {
 		})
 		.unwrap();
 
-	let frame = tokio::time::timeout(TIMEOUT, media_consumer.next())
+	let frame = tokio::time::timeout(TIMEOUT, next_encoded_frame(&media_consumer))
 		.await
 		.expect("timed out waiting for media frame")
 		.unwrap()
@@ -3162,7 +3162,7 @@ async fn media_consumers_follow_a_rendition_track_in_a_sibling_broadcast() {
 	.await
 	.expect("timed out subscribing to the rendition")
 	.unwrap();
-	let frame = tokio::time::timeout(TIMEOUT, live.next())
+	let frame = tokio::time::timeout(TIMEOUT, next_encoded_frame(&live))
 		.await
 		.expect("timed out reading the rendition")
 		.unwrap()
@@ -3552,7 +3552,7 @@ async fn local_publish_consume_audio() {
 		})
 		.unwrap();
 
-	let frame = tokio::time::timeout(TIMEOUT, media_consumer.next())
+	let frame = tokio::time::timeout(TIMEOUT, next_encoded_frame(&media_consumer))
 		.await
 		.expect("timed out waiting for frame")
 		.unwrap()
@@ -3623,7 +3623,7 @@ async fn video_publish_consume() {
 		})
 		.unwrap();
 
-	let frame = tokio::time::timeout(TIMEOUT, media_consumer.next())
+	let frame = tokio::time::timeout(TIMEOUT, next_encoded_frame(&media_consumer))
 		.await
 		.expect("timed out")
 		.unwrap()
@@ -3748,7 +3748,7 @@ async fn video_raw_publish_consume() {
 			.unwrap();
 	}
 
-	let frame = tokio::time::timeout(TIMEOUT, media_consumer.next())
+	let frame = tokio::time::timeout(TIMEOUT, next_encoded_frame(&media_consumer))
 		.await
 		.expect("timed out")
 		.unwrap()
@@ -4133,7 +4133,7 @@ async fn multiple_frames_ordering() {
 	}
 
 	for (i, &expected_ts) in timestamps.iter().enumerate() {
-		let frame = tokio::time::timeout(TIMEOUT, media_consumer.next())
+		let frame = tokio::time::timeout(TIMEOUT, next_encoded_frame(&media_consumer))
 			.await
 			.unwrap_or_else(|_| panic!("timed out waiting for frame {i}"))
 			.unwrap()
@@ -5562,7 +5562,7 @@ async fn server_client_roundtrip() {
 		})
 		.unwrap();
 
-	let frame = tokio::time::timeout(TIMEOUT, media_consumer.next())
+	let frame = tokio::time::timeout(TIMEOUT, next_encoded_frame(&media_consumer))
 		.await
 		.expect("timed out waiting for frame")
 		.unwrap()
@@ -5613,7 +5613,7 @@ async fn roundtrip(media: &MoqMediaTrackProducer, track: &MoqMediaTrackConsumer,
 		})
 		.unwrap();
 	loop {
-		let frame = tokio::time::timeout(TIMEOUT, track.next())
+		let frame = tokio::time::timeout(TIMEOUT, next_encoded_frame(track))
 			.await
 			.expect("timed out waiting for a frame")
 			.unwrap()
@@ -8191,4 +8191,15 @@ async fn time_anchors_start_at_the_containing_group() {
 			}
 		})
 	));
+}
+
+// Frame-only controls keep checking payloads independently of the breaks between frames.
+async fn next_encoded_frame(consumer: &MoqMediaTrackConsumer) -> Result<Option<MoqMediaFrame>, MoqError> {
+	loop {
+		match consumer.next().await? {
+			Some(MoqMediaRead::Frame { frame }) => return Ok(Some(frame)),
+			Some(MoqMediaRead::Gap { .. } | MoqMediaRead::End { .. }) => continue,
+			None => return Ok(None),
+		}
+	}
 }

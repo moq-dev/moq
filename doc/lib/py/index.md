@@ -33,6 +33,9 @@ and the JSON producers accept `timestamp=timedelta(...)` (`None` for untimed).
 Whole-frame media writes require caller time; container imports keep their own timeline handling.
 Timed raw/data tracks require caller-supplied timestamps. Use `CatalogProducer.now()` to stamp a locally
 created event on the broadcast clock; reading it fixes that clock for later media producers.
+`media.TrackConsumer` yields `MediaFrame`, `Gap`, or `End`, like the decoded audio and video
+readers. A gap breaks continuity. An encoder end is not stream EOF: following frames before
+its endpoint are the old encoder's drain; the first at or past it starts fresh.
 For arrival-order reads, decode each group from `TrackConsumer.recv_group()` with
 `media.GroupConsumer(group, container)`; frames carry container media time as they land.
 
@@ -56,7 +59,10 @@ async def main():
             catalog = await moq.media.catalog(broadcast)
             id, audio = next(iter(catalog.audio.items()))
             async for frame in await moq.media.TrackConsumer.subscribe(broadcast, id, audio):
-                print(frame.timestamp, len(frame.payload))
+                if isinstance(frame, moq.media.MediaFrame):
+                    print(frame.timestamp, len(frame.payload))
+                else:
+                    print("media break", frame)
 
 asyncio.run(main())
 ```

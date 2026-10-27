@@ -7238,6 +7238,189 @@ class FfiConverterMoqContainerFormat {
   }
 }
 
+abstract class MoqMediaRead {
+  RustBuffer lower();
+  int allocationSize();
+  int write(Uint8List buf);
+}
+
+class FfiConverterMoqMediaRead {
+  static MoqMediaRead lift(RustBuffer buffer) {
+    return FfiConverterMoqMediaRead.read(buffer.asUint8List()).value;
+  }
+
+  static LiftRetVal<MoqMediaRead> read(Uint8List buf) {
+    final index = buf.buffer.asByteData(buf.offsetInBytes).getInt32(0);
+    final subview = Uint8List.view(buf.buffer, buf.offsetInBytes + 4);
+    switch (index) {
+      case 1:
+        final lifted = FrameMoqMediaRead.read(subview);
+        return LiftRetVal<MoqMediaRead>(
+          lifted.value,
+          lifted.bytesRead - subview.offsetInBytes + 4,
+        );
+      case 2:
+        final lifted = GapMoqMediaRead.read(subview);
+        return LiftRetVal<MoqMediaRead>(
+          lifted.value,
+          lifted.bytesRead - subview.offsetInBytes + 4,
+        );
+      case 3:
+        final lifted = EndMoqMediaRead.read(subview);
+        return LiftRetVal<MoqMediaRead>(
+          lifted.value,
+          lifted.bytesRead - subview.offsetInBytes + 4,
+        );
+      default:
+        throw UniffiInternalError(
+          UniffiInternalError.unexpectedEnumCase,
+          "Unable to determine enum variant",
+        );
+    }
+  }
+
+  static RustBuffer lower(MoqMediaRead value) {
+    return value.lower();
+  }
+
+  static int allocationSize(MoqMediaRead value) {
+    return value.allocationSize();
+  }
+
+  static int write(MoqMediaRead value, Uint8List buf) {
+    return value.write(buf) - buf.offsetInBytes;
+  }
+}
+
+class FrameMoqMediaRead extends MoqMediaRead {
+  final MoqMediaFrame frame;
+  FrameMoqMediaRead(MoqMediaFrame this.frame);
+  FrameMoqMediaRead._(MoqMediaFrame this.frame);
+  static LiftRetVal<FrameMoqMediaRead> read(Uint8List buf) {
+    int new_offset = buf.offsetInBytes;
+    final frame_lifted = FfiConverterMoqMediaFrame.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final frame = frame_lifted.value;
+    new_offset += frame_lifted.bytesRead;
+    return LiftRetVal(FrameMoqMediaRead._(frame), new_offset);
+  }
+
+  @override
+  RustBuffer lower() {
+    final buf = Uint8List(allocationSize());
+    write(buf);
+    return toRustBuffer(buf);
+  }
+
+  @override
+  int allocationSize() {
+    return FfiConverterMoqMediaFrame.allocationSize(frame) + 4;
+  }
+
+  @override
+  int write(Uint8List buf) {
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 1);
+    int new_offset = buf.offsetInBytes + 4;
+    new_offset += FfiConverterMoqMediaFrame.write(
+      frame,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    return new_offset;
+  }
+}
+
+class GapMoqMediaRead extends MoqMediaRead {
+  final int timestampUs;
+  final Duration duration;
+  GapMoqMediaRead({
+    required int this.timestampUs,
+    required Duration this.duration,
+  });
+  GapMoqMediaRead._(int this.timestampUs, Duration this.duration);
+  static LiftRetVal<GapMoqMediaRead> read(Uint8List buf) {
+    int new_offset = buf.offsetInBytes;
+    final timestampUs_lifted = FfiConverterUInt64.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final timestampUs = timestampUs_lifted.value;
+    new_offset += timestampUs_lifted.bytesRead;
+    final duration_lifted = FfiConverterDuration.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final duration = duration_lifted.value;
+    new_offset += duration_lifted.bytesRead;
+    return LiftRetVal(GapMoqMediaRead._(timestampUs, duration), new_offset);
+  }
+
+  @override
+  RustBuffer lower() {
+    final buf = Uint8List(allocationSize());
+    write(buf);
+    return toRustBuffer(buf);
+  }
+
+  @override
+  int allocationSize() {
+    return FfiConverterUInt64.allocationSize(timestampUs) +
+        FfiConverterDuration.allocationSize(duration) +
+        4;
+  }
+
+  @override
+  int write(Uint8List buf) {
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 2);
+    int new_offset = buf.offsetInBytes + 4;
+    new_offset += FfiConverterUInt64.write(
+      timestampUs,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    new_offset += FfiConverterDuration.write(
+      duration,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    return new_offset;
+  }
+}
+
+class EndMoqMediaRead extends MoqMediaRead {
+  final int endUs;
+  EndMoqMediaRead(int this.endUs);
+  EndMoqMediaRead._(int this.endUs);
+  static LiftRetVal<EndMoqMediaRead> read(Uint8List buf) {
+    int new_offset = buf.offsetInBytes;
+    final endUs_lifted = FfiConverterUInt64.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final endUs = endUs_lifted.value;
+    new_offset += endUs_lifted.bytesRead;
+    return LiftRetVal(EndMoqMediaRead._(endUs), new_offset);
+  }
+
+  @override
+  RustBuffer lower() {
+    final buf = Uint8List(allocationSize());
+    write(buf);
+    return toRustBuffer(buf);
+  }
+
+  @override
+  int allocationSize() {
+    return FfiConverterUInt64.allocationSize(endUs) + 4;
+  }
+
+  @override
+  int write(Uint8List buf) {
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 3);
+    int new_offset = buf.offsetInBytes + 4;
+    new_offset += FfiConverterUInt64.write(
+      endUs,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    return new_offset;
+  }
+}
+
 abstract class MoqMediaTarget {
   RustBuffer lower();
   int allocationSize();
@@ -11258,7 +11441,7 @@ class FfiConverterMoqMediaTimebase {
 
 abstract class MoqMediaTrackConsumerInterface {
   void cancel();
-  UniffiRustFuture<MoqMediaFrame?> next();
+  UniffiRustFuture<MoqMediaRead?> next();
 }
 
 final _MoqMediaTrackConsumerFinalizer = Finalizer<Pointer<Void>>((ptr) {
@@ -11324,7 +11507,7 @@ class MoqMediaTrackConsumer implements MoqMediaTrackConsumerInterface {
     }, null);
   }
 
-  UniffiRustFuture<MoqMediaFrame?> next() {
+  UniffiRustFuture<MoqMediaRead?> next() {
     return uniffiRustCallAsync(
       () => uniffi_moq_ffi_fn_method_moqmediatrackconsumer_next(
         uniffiClonePointer(),
@@ -11333,7 +11516,7 @@ class MoqMediaTrackConsumer implements MoqMediaTrackConsumerInterface {
       ffi_moq_ffi_rust_future_complete_rust_buffer,
       ffi_moq_ffi_rust_future_cancel_rust_buffer,
       ffi_moq_ffi_rust_future_free_rust_buffer,
-      FfiConverterOptionalMoqMediaFrame.lift,
+      FfiConverterOptionalMoqMediaRead.lift,
       moqExceptionErrorHandler,
     );
   }
@@ -15691,6 +15874,53 @@ class FfiConverterOptionalMoqMediaFrame {
     }
     buf[0] = 1;
     return FfiConverterMoqMediaFrame.write(
+          value,
+          Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
+        ) +
+        1;
+  }
+}
+
+class FfiConverterOptionalMoqMediaRead {
+  static MoqMediaRead? lift(RustBuffer buf) {
+    return FfiConverterOptionalMoqMediaRead.read(buf.asUint8List()).value;
+  }
+
+  static LiftRetVal<MoqMediaRead?> read(Uint8List buf) {
+    if (ByteData.view(buf.buffer, buf.offsetInBytes).getInt8(0) == 0) {
+      return LiftRetVal(null, 1);
+    }
+    final result = FfiConverterMoqMediaRead.read(
+      Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
+    );
+    return LiftRetVal<MoqMediaRead?>(result.value, result.bytesRead + 1);
+  }
+
+  static int allocationSize([MoqMediaRead? value]) {
+    if (value == null) {
+      return 1;
+    }
+    return FfiConverterMoqMediaRead.allocationSize(value) + 1;
+  }
+
+  static RustBuffer lower(MoqMediaRead? value) {
+    if (value == null) {
+      return toRustBuffer(Uint8List.fromList([0]));
+    }
+    final buf = Uint8List(
+      FfiConverterOptionalMoqMediaRead.allocationSize(value),
+    );
+    FfiConverterOptionalMoqMediaRead.write(value, buf);
+    return toRustBuffer(buf);
+  }
+
+  static int write(MoqMediaRead? value, Uint8List buf) {
+    if (value == null) {
+      buf[0] = 0;
+      return 1;
+    }
+    buf[0] = 1;
+    return FfiConverterMoqMediaRead.write(
           value,
           Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
         ) +
@@ -20955,7 +21185,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqmediatrackconsumer_cancel() != 17311) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqmediatrackconsumer_next() != 44214) {
+  if (uniffi_moq_ffi_checksum_method_moqmediatrackconsumer_next() != 52053) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqmediatrackproducer_cut() != 54122) {

@@ -231,6 +231,7 @@ async def test_local_publish_consume_audio():
         media.write_frame(payload, timedelta(microseconds=1_000_000))
 
         async for frame in media_consumer:
+            assert isinstance(frame, moq.media.MediaFrame)
             assert frame.payload == payload
             assert frame.timestamp // timedelta(microseconds=1) == 1_000_000
             break
@@ -267,6 +268,7 @@ async def test_video_publish_consume():
         media.write_frame(keyframe, timedelta(microseconds=0))
 
         async for frame in media_consumer:
+            assert isinstance(frame, moq.media.MediaFrame)
             assert frame.timestamp // timedelta(microseconds=1) == 0
             assert len(frame.payload) > 0
             break
@@ -315,6 +317,7 @@ async def test_multiple_frames_ordering():
 
         for i, expected_ts in enumerate(timestamps):
             async for frame in media_consumer:
+                assert isinstance(frame, moq.media.MediaFrame)
                 assert frame.timestamp // timedelta(microseconds=1) == expected_ts
                 assert frame.payload == f"frame-{i}".encode()
                 break
@@ -726,6 +729,7 @@ async def test_dynamic_track_request_can_publish_media():
     media.write_frame(payload, timedelta(microseconds=20_000))
 
     async for frame in media_consumer:
+        assert isinstance(frame, moq.media.MediaFrame)
         assert frame.payload == payload
         assert frame.timestamp // timedelta(microseconds=1) == 20_000
         break
@@ -930,6 +934,7 @@ async def test_container_consumer_default_latency_and_context_manager():
 
         async with await moq.media.TrackConsumer.subscribe(broadcast_consumer, track_name, audio) as media_consumer:
             async for frame in media_consumer:
+                assert isinstance(frame, moq.media.MediaFrame)
                 assert frame.payload == payload
                 break
 

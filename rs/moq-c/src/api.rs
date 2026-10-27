@@ -485,6 +485,20 @@ pub struct moq_frame {
 	pub keyframe: bool,
 }
 
+/// One encoded media read; `kind` selects the filled field and the others are zeroed.
+#[repr(C)]
+pub struct moq_media_read {
+	/// Frame, gap, or encoder end, as for decoded media.
+	pub kind: crate::moq_decode_read_kind,
+	/// Encoded payload and metadata for a frame read.
+	pub frame: moq_frame,
+	/// Lost media for a gap read; what follows does not continue it.
+	pub gap: crate::moq_decode_gap,
+	/// Where a stopped encoder's media stops, in microseconds. Following frames before
+	/// this point are its remaining media; the first at or past it comes from a fresh encoder.
+	pub end_us: u64,
+}
+
 /// A best-effort raw track datagram delivered via [moq_consume_datagrams].
 #[repr(C)]
 pub struct moq_datagram {
@@ -3695,42 +3709,42 @@ pub unsafe extern "C" fn moq_consume_catalog_section(
 	})
 }
 
-/// Consume a video track from a broadcast, delivering frames in order.
+/// Consume a video track from a broadcast, delivering encoded frames, gaps, and encoder ends in order.
 ///
 /// - `max_delay_us` controls the maximum amount of buffering allowed before skipping a GoP.
-/// - `on_frame` is called with a positive frame ID per frame, then exactly once
+/// - `on_read` is called with a positive read ID per item, then exactly once
 ///   more with a terminal code: `0` (closed cleanly) or a negative error. After
-///   the terminal (`<= 0`) callback, `on_frame` is never called again and
+///   the terminal (`<= 0`) callback, `on_read` is never called again and
 ///   `user_data` is never touched again, so release `user_data` there. The
 ///   terminal callback fires even after [moq_consume_video_cancel].
 ///
 /// Returns a non-zero handle to the track on success, or a negative code on failure.
 ///
 /// # Safety
-/// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_frame` callback.
+/// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_read` callback.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_consume_video(
 	catalog: u32,
 	index: u32,
 	max_delay_us: u64,
-	on_frame: ffi::moq_status_callback,
+	on_read: ffi::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let catalog = ffi::parse_id(catalog)?;
 		let index = index as usize;
 		let max_delay = std::time::Duration::from_micros(max_delay_us);
-		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame)? };
+		let on_read = unsafe { ffi::OnStatus::new(user_data, on_read)? };
 		State::lock()
 			.consume
-			.media::<hang::catalog::VideoConfig>(catalog, index, max_delay, on_frame)
+			.media::<hang::catalog::VideoConfig>(catalog, index, max_delay, on_read)
 	})
 }
 
 /// Stop a video track consumer's background task.
 ///
 /// Returns immediately: zero on success, or a negative code if already closed.
-/// Does NOT free `user_data`; the [moq_consume_video] `on_frame` callback
+/// Does NOT free `user_data`; the [moq_consume_video] `on_read` callback
 /// still fires once more with a terminal `0` (or a negative error), which is
 /// where `user_data` should be released.
 #[unsafe(no_mangle)]
@@ -3741,11 +3755,11 @@ pub extern "C" fn moq_consume_video_cancel(track: u32) -> i32 {
 	})
 }
 
-/// Consume an audio track from a broadcast, emitting the frames in order.
+/// Consume an audio track from a broadcast, delivering encoded frames, gaps, and encoder ends in order.
 ///
-/// `on_frame` is called with a positive frame ID per frame, then exactly once
+/// `on_read` is called with a positive read ID per item, then exactly once
 /// more with a terminal code: `0` (closed cleanly) or a negative error. After
-/// the terminal (`<= 0`) callback, `on_frame` is never called again and
+/// the terminal (`<= 0`) callback, `on_read` is never called again and
 /// `user_data` is never touched again, so release `user_data` there. The
 /// terminal callback fires even after [moq_consume_audio_cancel].
 /// The `max_delay_us` parameter controls how long to wait before skipping frames.
@@ -3753,30 +3767,30 @@ pub extern "C" fn moq_consume_video_cancel(track: u32) -> i32 {
 /// Returns a non-zero handle to the track on success, or a negative code on failure.
 ///
 /// # Safety
-/// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_frame` callback.
+/// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_read` callback.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_consume_audio(
 	catalog: u32,
 	index: u32,
 	max_delay_us: u64,
-	on_frame: ffi::moq_status_callback,
+	on_read: ffi::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let catalog = ffi::parse_id(catalog)?;
 		let index = index as usize;
 		let max_delay = std::time::Duration::from_micros(max_delay_us);
-		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame)? };
+		let on_read = unsafe { ffi::OnStatus::new(user_data, on_read)? };
 		State::lock()
 			.consume
-			.media::<hang::catalog::AudioConfig>(catalog, index, max_delay, on_frame)
+			.media::<hang::catalog::AudioConfig>(catalog, index, max_delay, on_read)
 	})
 }
 
 /// Stop an audio track consumer's background task.
 ///
 /// Returns immediately: zero on success, or a negative code if already closed.
-/// Does NOT free `user_data`; the [moq_consume_audio] `on_frame` callback
+/// Does NOT free `user_data`; the [moq_consume_audio] `on_read` callback
 /// still fires once more with a terminal `0` (or a negative error), which is
 /// where `user_data` should be released.
 #[unsafe(no_mangle)]
@@ -3787,35 +3801,26 @@ pub extern "C" fn moq_consume_audio_cancel(track: u32) -> i32 {
 	})
 }
 
-/// Get a chunk of a frame's payload.
-///
-/// Read the payload of a frame as a single contiguous slice.
-///
-/// Frames are not chunked; the entire payload is delivered through `dst.payload` /
-/// `dst.payload_size` in one call. The pointer is valid until [`moq_consume_frame_free`]
-/// is called for this frame.
-///
-/// Returns a zero on success, or a negative code on failure.
+/// Read an encoded media frame, gap, or encoder end delivered by a media callback.
+/// Payload pointers borrow the read until [`moq_consume_read_free`].
 ///
 /// # Safety
-/// - The caller must ensure that `dst` is a valid pointer to a [moq_frame] struct.
+/// - `dst` must point to a writable [`moq_media_read`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_consume_frame(frame: u32, dst: *mut moq_frame) -> i32 {
+pub unsafe extern "C" fn moq_consume_read(read: u32, dst: *mut moq_media_read) -> i32 {
 	ffi::enter(move || {
-		let frame = ffi::parse_id(frame)?;
+		let read = ffi::parse_id(read)?;
 		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
-		State::lock().consume.frame(frame, dst)
+		State::lock().consume.read(read, dst)
 	})
 }
 
-/// Free a decoded frame delivered via a [moq_consume_video] or [moq_consume_audio] callback.
-///
-/// Returns a zero on success, or a negative code on failure.
+/// Free an encoded media read delivered by [`moq_consume_video`] or [`moq_consume_audio`].
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_consume_frame_free(frame: u32) -> i32 {
+pub extern "C" fn moq_consume_read_free(read: u32) -> i32 {
 	ffi::enter(move || {
-		let frame = ffi::parse_id(frame)?;
-		State::lock().consume.frame_close(frame)
+		let read = ffi::parse_id(read)?;
+		State::lock().consume.read_free(read)
 	})
 }
 
@@ -3895,7 +3900,7 @@ pub unsafe extern "C" fn moq_consume_track_update(track: u32, subscription: *con
 /// Read a raw frame's payload delivered via the [moq_consume_track] callback.
 ///
 /// Fills `dst.payload` / `dst.payload_size`; the pointer is valid until the
-/// frame is released with [moq_consume_frame_free]. `dst.timestamp_us` is the
+/// frame is released with [moq_consume_track_frame_free]. `dst.timestamp_us` is the
 /// frame presentation timestamp in microseconds, when `dst.timestamp_present` says it
 /// has one. `dst.keyframe` is reported as
 /// false because raw tracks do not parse codec metadata.

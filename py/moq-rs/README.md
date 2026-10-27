@@ -40,7 +40,10 @@ async def main():
                 frames = await moq.media.TrackConsumer.subscribe(broadcast, id, audio)
                 async with frames:
                     async for frame in frames:
-                        print(f"Got frame: {len(frame.payload)} bytes, ts={frame.timestamp}")
+                        if isinstance(frame, moq.media.MediaFrame):
+                            print(f"Got frame: {len(frame.payload)} bytes, ts={frame.timestamp}")
+                        else:
+                            print("Media break:", frame)
 
 
 asyncio.run(main())
@@ -202,7 +205,8 @@ client = moq.Client(
   `await media.catalog(broadcast)` reads one snapshot and releases its subscription.
 - `await media.TrackConsumer.subscribe(broadcast, id, rendition, *, subscription=None)`
   decodes live media from a catalog rendition: its ID (catalog key) and its `Video` or `Audio`
-  config. It follows the rendition's `broadcast` and `track` itself.
+  config. It follows the rendition's `broadcast` and `track` itself and yields `MediaFrame`,
+  `Gap`, or `End`. An encoder end is not iterator EOF; media can resume after it.
 - `await media.GroupConsumer.fetch(broadcast, id, rendition, sequence, *, options=None)`
   fetches and decodes exactly one group of a catalog rendition.
 - `media.GroupConsumer(group, container)` decodes a raw group, such as one from
@@ -259,7 +263,7 @@ Every handle whose cleanup is `cancel()` is an async context manager, so exiting
 
 - **`media.Catalog`**. `.audio: dict[str, Audio]`, `.video: dict[str, Video]`, `.display`, `.rotation`, `.flip`.
 - **`Frame`**. `.payload: bytes`, `.timestamp: timedelta | None`. The unit of every write and every raw read; `None` means untimed when publishing or reading.
-- **`media.MediaFrame`**. `.payload: bytes`, `.timestamp: timedelta`, `.keyframe: bool`. Returned by media subscriptions. `keyframe` marks a group start or video keyframe; for audio it is true only at a group start.
+- **`media.MediaFrame`**. `.payload: bytes`, `.timestamp: timedelta`, `.keyframe: bool`. The frame variant of a media read. `keyframe` marks a group start or video keyframe; for audio it is true only at a group start.
 - **`Datagram`**. `.sequence: int`, `.timestamp: timedelta | None`, `.payload: bytes`. Delivered only on datagram-capable transports with lite-05 or newer moq-lite, or moq-transport.
 - **`media.Audio`**. `.codec`, `.sample_rate`, `.channel_count`, `.bitrate`, `.enabled`, `.description`.
 - **`media.Video`**. `.codec`, `.coded: Dimensions`, `.display_aspect`, `.bitrate`, `.enabled`, `.framerate`, `.description`. A false `.enabled` means no frames are coming, so don't select the rendition.

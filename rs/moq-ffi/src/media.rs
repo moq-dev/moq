@@ -1352,7 +1352,51 @@ impl Catalog {
 	}
 }
 
-/// Reads container-decoded frames from a live media track.
+/// One encoded media read: a container-decoded frame, a gap, or an encoder end.
+#[derive(uniffi::Enum)]
+pub enum MoqMediaRead {
+	/// An encoded frame with its container metadata.
+	Frame {
+		/// The encoded payload, timestamp, and keyframe flag.
+		frame: MoqMediaFrame,
+	},
+	/// Media after what was already read was lost; what follows does not continue it.
+	Gap {
+		/// The furthest presentation point already read, in microseconds.
+		timestamp_us: u64,
+		/// An upper bound on how long until the next frame resumes.
+		duration: std::time::Duration,
+	},
+	/// The publisher stopped its encoder: it paused, switched source, or finished.
+	/// Frames starting before `end_us` are its remaining media; the first at or past it
+	/// comes from a fresh encoder.
+	End {
+		/// Where the stopped encoder's media stops, in microseconds.
+		end_us: u64,
+	},
+}
+
+impl TryFrom<moq_mux::container::Read> for MoqMediaRead {
+	type Error = MoqError;
+
+	fn try_from(read: moq_mux::container::Read) -> Result<Self, MoqError> {
+		use crate::consumer::timestamp_us;
+		Ok(match read {
+			moq_mux::container::Read::Frame { frame, .. } => Self::Frame {
+				frame: media_frame(frame)?,
+			},
+			moq_mux::container::Read::Gap { timestamp, duration } => Self::Gap {
+				timestamp_us: timestamp_us(timestamp)?,
+				duration: crate::ffi::duration(duration.into()),
+			},
+			moq_mux::container::Read::End { end, .. } => Self::End {
+				end_us: timestamp_us(end)?,
+			},
+		})
+	}
+}
+
+/// Reads encoded frames and the breaks between them from a live media track.
 #[derive(uniffi::Object)]
 pub struct MoqMediaTrackConsumer {
 	task: Task<Media>,
@@ -1363,15 +1407,94 @@ struct Media {
 }
 
 impl Media {
-	async fn next(&mut self) -> Result<Option<MoqMediaFrame>, MoqError> {
-		loop {
-			match self.inner.read().await? {
-				Some(moq_mux::container::Read::Frame { frame, .. }) => return media_frame(frame).map(Some),
-				// The bindings carry frames only.
-				Some(moq_mux::container::Read::Gap { .. } | moq_mux::container::Read::End { .. }) => continue,
-				None => return Ok(None),
-			}
-		}
+	async fn next(&mut self) -> Result<Option<MoqMediaRead>, MoqError> {
+		self.inner.read().await?.map(MoqMediaRead::try_from).transpose()
+	}
+}
+
+#[cfg(test)]
+mod read_tests {
+	use super::*;
+	use moq_mux::container::Container as _;
+	use std::time::Duration;
+
+	#[tokio::test(start_paused = true)]
+	async fn encoded_media_preserves_breaks() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("encoded", hang::container::track_info(0))
+			.unwrap();
+		let format = || moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio);
+		let reader = Media {
+			inner: moq_mux::container::Consumer::new(
+				track.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::ZERO)),
+				format(),
+			),
+		};
+		let reader = MoqMediaTrackConsumer {
+			task: Task::new(reader),
+		};
+		let timestamp = |us| moq_net::Timestamp::from_micros(us).unwrap();
+		let mut first = track.create_group(0u64.into()).unwrap();
+		format()
+			.write(
+				&mut first,
+				&[moq_mux::container::Frame {
+					timestamp: timestamp(10_000),
+					payload: bytes::Bytes::from_static(b"encoded"),
+					keyframe: true,
+					duration: None,
+				}],
+			)
+			.unwrap();
+		first.finish().unwrap();
+		let Some(MoqMediaRead::Frame { frame }) = reader.next().await.unwrap() else {
+			panic!("expected frame")
+		};
+		assert_eq!(frame.payload, b"encoded");
+		assert_eq!(frame.timestamp_us, 10_000);
+		assert!(frame.keyframe);
+		let mut marker = track.create_group(2u64.into()).unwrap();
+		format()
+			.write(
+				&mut marker,
+				&[moq_mux::container::Frame {
+					timestamp: timestamp(20_000),
+					payload: bytes::Bytes::new(),
+					keyframe: false,
+					duration: None,
+				}],
+			)
+			.unwrap();
+		marker.finish().unwrap();
+		assert!(
+			matches!(reader.next().await.unwrap(), Some(MoqMediaRead::Gap { timestamp_us: 10_000, duration }) if duration == Duration::from_millis(10))
+		);
+		assert!(matches!(
+			reader.next().await.unwrap(),
+			Some(MoqMediaRead::End { end_us: 20_000 })
+		));
+		let mut resumed = track.create_group(3u64.into()).unwrap();
+		format()
+			.write(
+				&mut resumed,
+				&[moq_mux::container::Frame {
+					timestamp: timestamp(20_000),
+					payload: bytes::Bytes::from_static(b"resumed"),
+					keyframe: true,
+					duration: None,
+				}],
+			)
+			.unwrap();
+		resumed.finish().unwrap();
+		let Some(MoqMediaRead::Frame { frame }) = reader.next().await.unwrap() else {
+			panic!("end is not EOF")
+		};
+		assert_eq!(frame.payload, b"resumed");
+		track.finish().unwrap();
+		assert!(reader.next().await.unwrap().is_none());
+		reader.cancel();
+		assert!(matches!(reader.next().await, Err(MoqError::Cancelled)));
 	}
 }
 
@@ -1447,8 +1570,8 @@ impl MoqMediaCatalogConsumer {
 
 #[uniffi::export]
 impl MoqMediaTrackConsumer {
-	/// Get the next frame. Returns `None` when the track ends or is closed.
-	pub async fn next(&self) -> Result<Option<MoqMediaFrame>, MoqError> {
+	/// Get the next encoded frame, gap, or end; `None` once the track ends or is closed.
+	pub async fn next(&self) -> Result<Option<MoqMediaRead>, MoqError> {
 		self.task.run(|mut state| async move { state.next().await }).await
 	}
 

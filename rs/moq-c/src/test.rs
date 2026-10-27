@@ -1187,7 +1187,7 @@ fn raw_loc_video_uses_the_declared_catalog_container() {
 		timestamp_present: false,
 		keyframe: false,
 	};
-	assert_eq!(unsafe { moq_consume_frame(frame_id, &mut frame) }, 0);
+	assert_eq!(unsafe { encoded_frame(frame_id, &mut frame) }, 0);
 	assert_eq!(frame.timestamp_us, timestamp_us);
 	assert!(frame.timestamp_present, "a media frame is always timed");
 	assert!(frame.keyframe);
@@ -1196,7 +1196,7 @@ fn raw_loc_video_uses_the_declared_catalog_container() {
 		payload
 	);
 
-	assert_eq!(moq_consume_frame_free(frame_id), 0);
+	assert_eq!(moq_consume_read_free(frame_id), 0);
 	assert_eq!(moq_consume_video_cancel(consumer), 0);
 	assert_eq!(frame_cb.recv_terminal(), 0);
 	assert_eq!(moq_consume_catalog_free(catalog), 0);
@@ -2321,7 +2321,7 @@ fn close_invalid_or_zero_ids() {
 	assert!(moq_session_close(9999) < 0);
 	assert!(moq_publish_close(9999) < 0);
 	assert!(moq_consume_close(9999) < 0);
-	assert!(moq_consume_frame_free(9999) < 0);
+	assert!(moq_consume_read_free(9999) < 0);
 
 	assert!(moq_origin_close(0) < 0);
 	assert!(moq_session_close(0) < 0);
@@ -2490,8 +2490,8 @@ fn double_close_all_resource_types() {
 	);
 	let frame_id = id(frame_cb.recv());
 
-	assert_eq!(moq_consume_frame_free(frame_id), 0);
-	assert!(moq_consume_frame_free(frame_id) < 0);
+	assert_eq!(moq_consume_read_free(frame_id), 0);
+	assert!(moq_consume_read_free(frame_id) < 0);
 
 	assert_eq!(moq_consume_audio_cancel(track), 0);
 	assert_eq!(frame_cb.recv_terminal(), 0, "audio close delivers terminal 0");
@@ -3593,14 +3593,14 @@ fn local_publish_consume() {
 		timestamp_present: false,
 		keyframe: false,
 	};
-	assert_eq!(unsafe { moq_consume_frame(frame_id, &mut frame) }, 0);
+	assert_eq!(unsafe { encoded_frame(frame_id, &mut frame) }, 0);
 	assert_eq!(frame.payload_size, payload.len());
 	assert_eq!(frame.timestamp_us, timestamp_us);
 
 	let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
 	assert_eq!(received, payload, "frame payload should match");
 
-	assert_eq!(moq_consume_frame_free(frame_id), 0);
+	assert_eq!(moq_consume_read_free(frame_id), 0);
 	assert_eq!(moq_consume_audio_cancel(track), 0);
 	assert_eq!(frame_cb.recv_terminal(), 0, "audio close delivers terminal 0");
 	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
@@ -3756,12 +3756,12 @@ fn consume_audio_follows_a_sibling_broadcast_reference() {
 		timestamp_present: false,
 		keyframe: false,
 	};
-	assert_eq!(unsafe { moq_consume_frame(frame_id, &mut frame) }, 0);
+	assert_eq!(unsafe { encoded_frame(frame_id, &mut frame) }, 0);
 	let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
 	assert_eq!(received, payload, "the sibling broadcast's frame should arrive");
 	assert_eq!(frame.timestamp_us, timestamp_us);
 
-	assert_eq!(moq_consume_frame_free(frame_id), 0);
+	assert_eq!(moq_consume_read_free(frame_id), 0);
 	assert_eq!(moq_consume_audio_cancel(track), 0);
 	assert_eq!(frame_cb.recv_terminal(), 0, "audio close delivers terminal 0");
 	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
@@ -4126,11 +4126,11 @@ fn video_publish_consume() {
 		timestamp_present: false,
 		keyframe: false,
 	};
-	assert_eq!(unsafe { moq_consume_frame(frame_id, &mut frame) }, 0);
+	assert_eq!(unsafe { encoded_frame(frame_id, &mut frame) }, 0);
 	assert_eq!(frame.timestamp_us, 0);
 	assert!(frame.payload_size > 0, "frame should have payload data");
 
-	assert_eq!(moq_consume_frame_free(frame_id), 0);
+	assert_eq!(moq_consume_read_free(frame_id), 0);
 	assert_eq!(moq_consume_video_cancel(track), 0);
 	assert_eq!(frame_cb.recv_terminal(), 0, "video close delivers terminal 0");
 	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
@@ -5108,14 +5108,14 @@ fn multiple_frames_ordering() {
 			timestamp_present: false,
 			keyframe: false,
 		};
-		assert_eq!(unsafe { moq_consume_frame(frame_id, &mut frame) }, 0);
+		assert_eq!(unsafe { encoded_frame(frame_id, &mut frame) }, 0);
 		assert_eq!(frame.timestamp_us, expected_ts, "frame {i} has wrong timestamp");
 
 		let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
 		let expected = format!("frame-{i}");
 		assert_eq!(received, expected.as_bytes(), "frame {i} has wrong payload");
 
-		assert_eq!(moq_consume_frame_free(frame_id), 0);
+		assert_eq!(moq_consume_read_free(frame_id), 0);
 	}
 
 	assert_eq!(moq_consume_audio_cancel(track), 0);
@@ -5185,7 +5185,7 @@ fn catalog_update_on_new_track() {
 #[test]
 fn null_pointer_handling() {
 	assert_eq!(
-		unsafe { moq_consume_frame(9999, std::ptr::null_mut()) },
+		unsafe { encoded_frame(9999, std::ptr::null_mut()) },
 		-6,
 		"null dst should return InvalidPointer (-6)"
 	);
@@ -6569,4 +6569,21 @@ async fn a_background_panic_reaches_the_terminal_callback_and_keeps_another_orig
 	let broadcast = publish_broadcast(origin, b"survivor");
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
+}
+
+// Existing payload controls require a frame, while the tagged-read control covers breaks.
+unsafe fn encoded_frame(id: u32, dst: *mut moq_frame) -> i32 {
+	if dst.is_null() {
+		return unsafe { moq_consume_read(id, std::ptr::null_mut()) };
+	}
+	let mut read = std::mem::MaybeUninit::<moq_media_read>::uninit();
+	let status = unsafe { moq_consume_read(id, read.as_mut_ptr()) };
+	if status == 0 {
+		let read = unsafe { read.assume_init() };
+		assert_eq!(read.kind, moq_decode_read_kind::MOQ_DECODE_READ_FRAME);
+		unsafe {
+			*dst = read.frame;
+		}
+	}
+	status
 }

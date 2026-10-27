@@ -740,6 +740,45 @@ int main()
 	}
 	report("plays video and audio");
 
+	// A tagged gap or encoder end drains reordered pictures, then restarts the codec
+	// without ending or replacing the subscription that can resume after the break.
+	for (bool gap : {true, false}) {
+		TestRelay relay;
+		reset(relay.Url());
+		g_reorder_delay = 2;
+		Publisher publisher(relay, "obs/test", true, false);
+		void *source = createSource();
+		CHECK(publisher.WriteUntil([] { return g_output_frames > 0; }));
+		auto *ctx = static_cast<moq_source *>(source);
+		std::shared_ptr<Track> held;
+		{
+			std::lock_guard<std::mutex> lock(ctx->mutex);
+			const auto &conn = ctx->connection;
+			held = conn->video;
+			CHECK(held != nullptr);
+			const int frames = g_output_frames;
+			const auto *state = static_cast<DecodeState *>(held->video_decoder->codec_ctx->opaque);
+			const auto pending = state->held.size();
+			CHECK(pending > 0);
+			moq::MediaRead read =
+				gap ? moq::MediaRead{moq::MediaRead::kGap{123456, std::chrono::microseconds(78901)}}
+				    : moq::MediaRead{moq::MediaRead::kEnd{202357}};
+			moq_source_on_frame(ctx, conn, held, std::optional<moq::MediaRead>{std::move(read)});
+			CHECK(g_output_frames == frames + static_cast<int>(pending));
+			CHECK(!held->video_decoder->got_keyframe);
+			CHECK(conn->video == held);
+		}
+		const int frames = g_output_frames;
+		CHECK(publisher.WriteUntil([&] { return g_output_frames > frames; }));
+		{
+			std::lock_guard<std::mutex> lock(ctx->mutex);
+			CHECK(ctx->connection->video == held);
+		}
+		held.reset();
+		destroySource(source);
+	}
+	report("media breaks drain pictures and keep the subscription");
+
 	// H.264 with B-frames arrives in decode order. Each picture reaches OBS with its own
 	// presentation timestamp, and the pictures the decoder still holds when the track
 	// ends cleanly are drained rather than dropped.

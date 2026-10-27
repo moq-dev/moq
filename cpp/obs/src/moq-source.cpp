@@ -562,7 +562,7 @@ static void moq_source_read_track(struct moq_source *ctx, const std::shared_ptr<
 				  const std::shared_ptr<Track> &track);
 static void moq_source_on_frame(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
 				const std::shared_ptr<Track> &track,
-				moq::expected<std::optional<moq::MediaFrame>> result);
+				moq::expected<std::optional<moq::MediaRead>> result);
 
 // The track, while it is still the connection's current video or audio track.
 static std::shared_ptr<Track> moq_source_track(const Connection &conn, const std::weak_ptr<Track> &weak)
@@ -619,7 +619,7 @@ static void moq_source_read_track(struct moq_source *ctx, const std::shared_ptr<
 				  const std::shared_ptr<Track> &track)
 {
 	track->call = track->consumer->next().then(
-		ctx->worker.Executor(), moq_source_track_current<moq::expected<std::optional<moq::MediaFrame>>>(
+		ctx->worker.Executor(), moq_source_track_current<moq::expected<std::optional<moq::MediaRead>>>(
 						ctx, conn, track, moq_source_on_frame));
 }
 
@@ -644,9 +644,23 @@ static bool moq_source_output_video(struct moq_source *ctx, const std::shared_pt
 	}
 }
 
+// Drain pictures from the old encoder before either kind of boundary.
+static void moq_source_drain_video(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
+				   const std::shared_ptr<Track> &track)
+{
+	AVCodecContext *codec = track->video_decoder->codec_ctx;
+	int ended = avcodec_send_packet(codec, nullptr);
+	if (ended == AVERROR(EAGAIN)) {
+		moq_source_output_video(ctx, conn, track);
+		ended = avcodec_send_packet(codec, nullptr);
+	}
+	if (ended == 0)
+		moq_source_output_video(ctx, conn, track);
+}
+
 static void moq_source_on_frame(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
 				const std::shared_ptr<Track> &track,
-				moq::expected<std::optional<moq::MediaFrame>> result)
+				moq::expected<std::optional<moq::MediaRead>> result)
 {
 	if (!result) {
 		LOG_ERROR("%s track error: %s", track->kind, result.error().to_string().c_str());
@@ -662,23 +676,26 @@ static void moq_source_on_frame(struct moq_source *ctx, const std::shared_ptr<Co
 		}
 		// The decoder holds reordered pictures back until it learns the stream ended. Like a
 		// packet, the end is refused while pictures are pending, so take them first.
-		AVCodecContext *codec = track->video_decoder->codec_ctx;
-		int ended = avcodec_send_packet(codec, nullptr);
-		if (ended == AVERROR(EAGAIN)) {
-			moq_source_output_video(ctx, conn, track);
-			ended = avcodec_send_packet(codec, nullptr);
-		}
-		if (ended == 0)
-			moq_source_output_video(ctx, conn, track);
+		moq_source_drain_video(ctx, conn, track);
 		moq_source_discard_candidate(conn, track);
 		return;
 	}
-	Sent sent = moq_source_send_packet(*track->video_decoder, **result);
+	const auto *read = std::get_if<moq::MediaRead::kFrame>(&(*result)->get_variant());
+	if (!read) {
+		// Match the native video decoder: drain pictures before a gap or encoder end,
+		// then restart on the next keyframe without ending the subscription.
+		moq_source_drain_video(ctx, conn, track);
+		avcodec_flush_buffers(track->video_decoder->codec_ctx);
+		track->video_decoder->got_keyframe = false;
+		moq_source_read_track(ctx, conn, track);
+		return;
+	}
+	Sent sent = moq_source_send_packet(*track->video_decoder, read->frame);
 	bool drained = true;
 	if (sent == Sent::Full) {
 		// A drain that failed partway left pictures behind; take them so the packet fits.
 		drained = moq_source_output_video(ctx, conn, track);
-		sent = moq_source_send_packet(*track->video_decoder, **result);
+		sent = moq_source_send_packet(*track->video_decoder, read->frame);
 	}
 	const bool decoded = sent == Sent::Accepted && moq_source_output_video(ctx, conn, track) && drained;
 	if (!decoded && track == conn->pending_video) {

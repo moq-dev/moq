@@ -23,6 +23,9 @@ fun dev.moq.audio.Consumer.reads(): Flow<dev.moq.audio.Read> = pull({ cancel() }
 fun dev.moq.video.Consumer.reads(): Flow<dev.moq.video.Read> = pull({ cancel() }) { next() }
 
 
+/** Stream of encoded media frames, gaps, and encoder ends in delivery order. */
+fun dev.moq.media.TrackConsumer.reads(): Flow<dev.moq.media.Read> = pull({ cancel() }) { next() }
+
 /** Stream of groups in sequence order, skipping forward if the reader falls behind. */
 fun TrackConsumer.groups(): Flow<GroupConsumer> = pull({ cancel() }) { nextGroup() }
 

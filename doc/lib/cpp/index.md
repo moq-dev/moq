@@ -108,7 +108,10 @@ Call `available()` again to wait for the next publisher instance at that path, s
 restarted publisher, and drop what was read from the previous one then: its tracks end
 when its session does.
 
-`MediaTrackConsumer` reads in decode order. For arrival-order reads, decode each group
+`MediaTrackConsumer` reads `MediaRead` records in decode order: `kFrame`, `kGap`, or
+`kEnd`, like the audio and video decoders. Match the variant before taking its frame.
+A gap breaks continuity. An encoder end is not stream EOF: following frames before its
+endpoint are the old encoder's drain; the first at or past it starts fresh. For arrival-order reads, decode each group
 from `TrackConsumer::recv_group` with `moq::MediaGroupConsumer::init(group, container)`;
 frames carry container media time as they land.
 Share `moq::MediaTimebase::init(broadcast)` through `ContainerInit` when several imports
@@ -156,8 +159,8 @@ An async call returns `moq::Future<T>`, which delivers a `moq::expected<T>`:
 
 ```cpp
 auto reading = media->next();
-auto continuation = std::move(reading).then(moq::inline_executor, [](moq::expected<std::optional<moq::MediaFrame>> frame) {
-    // Runs on the executor thread: hand the frame off, never block here.
+auto continuation = std::move(reading).then(moq::inline_executor, [](moq::expected<std::optional<moq::MediaRead>> read) {
+    // Runs on the executor thread: match the record and hand it off, never block here.
 });
 ```
 

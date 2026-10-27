@@ -690,13 +690,15 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	frame, err := mediaConsumer.Next(ctx)
+	read, err := mediaConsumer.Next(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if frame == nil {
-		t.Fatal("expected a frame")
+	value, ok := read.(moqmedia.ReadFrame)
+	if !ok {
+		t.Fatalf("expected a media frame, got %T", read)
 	}
+	frame := &value.Frame
 	if string(frame.Payload) != string(payload) || uint64(frame.Timestamp.Microseconds()) != 1_000_000 {
 		t.Fatalf("frame = %+v, want payload=%q ts=1000000", frame, payload)
 	}
@@ -1068,18 +1070,30 @@ func TestDynamicTrackRequestCanPublishAudio(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	frame, err := mediaConsumer.Next(ctx)
+	read, err := mediaConsumer.Next(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if frame == nil {
-		t.Fatal("expected a frame")
+	value, ok := read.(moqmedia.ReadFrame)
+	if !ok {
+		t.Fatalf("expected a media frame, got %T", read)
 	}
+	frame := &value.Frame
 	if string(frame.Payload) != string(payload) || uint64(frame.Timestamp.Microseconds()) != 20_000 {
 		t.Fatalf("frame = %+v, want payload=%q ts=20000", frame, payload)
 	}
 	if err := media.Finish(); err != nil {
 		t.Fatal(err)
+	}
+	end, err := mediaConsumer.Next(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := end.(moqmedia.ReadEnd); !ok {
+		t.Fatalf("expected encoder end, got %T", end)
+	}
+	if next, err := mediaConsumer.Next(ctx); next != nil || err != nil {
+		t.Fatalf("after finish: %v %v", next, err)
 	}
 }
 

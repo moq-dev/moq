@@ -1,4 +1,4 @@
-"""The breaks between decoded frames, shared by :mod:`moq.audio` and :mod:`moq.video`."""
+"""The breaks between decoded frames, shared by encoded and decoded media consumers."""
 
 from __future__ import annotations
 
