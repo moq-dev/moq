@@ -1110,17 +1110,14 @@ pub(super) struct Detached {
 impl Detached {
 	/// The group, while it is neither finished nor aborted.
 	pub(super) fn writing(&self) -> Option<Handle> {
-		let state = self.state.upgrade()?;
-		if state.read().fin.is_some() {
-			return None;
-		}
-		Some(Handle {
-			state,
+		let handle = Handle {
+			state: self.state.upgrade()?,
 			info: self.info,
 			track: self.track.clone(),
 			cache: self.cache.clone(),
 			alive: self.alive.clone(),
-		})
+		};
+		(!handle.is_settled()).then_some(handle)
 	}
 }
 
@@ -2288,6 +2285,12 @@ impl Handle {
 	/// Whether this copy was cut short at the back by its transport request.
 	pub(super) fn back_cut(&self) -> bool {
 		self.state.read().range_end.is_some()
+	}
+
+	/// Whether the writer finished this copy, which a transport bound may end short of the
+	/// group's end.
+	pub(super) fn is_settled(&self) -> bool {
+		self.state.read().fin.is_some()
 	}
 
 	/// Whether the group was finished: it holds every frame it will ever have.

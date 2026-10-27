@@ -1792,7 +1792,7 @@ impl TrackState {
 			.lookup
 			.values()
 			.flat_map(Slot::copies)
-			.filter(|group| !group.is_finished())
+			.filter(|group| !group.is_settled())
 			.cloned()
 			.chain(self.detached.drain(..).filter_map(|copy| copy.writing()))
 			.collect();
@@ -15600,6 +15600,39 @@ mod test {
 			assert!(matches!(fetched.read_frame().now_or_never(), Some(Err(Error::Cancel))));
 			assert!(held.write_frame(Timestamp::ZERO, b"late".as_slice()).is_err());
 		}
+	}
+
+	/// A track abort keeps a finished bounded copy for the reader still draining it, as it
+	/// does a finished whole group.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn a_track_abort_keeps_a_finished_bounded_copy() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let consumer = producer.consume();
+		let fetch = consumer.fetch_range(
+			0,
+			FetchOptions {
+				options: group::Fetch::default(),
+				end: Some(2),
+			},
+		);
+		let mut group = dynamic
+			.requested_fill_group()
+			.await
+			.unwrap()
+			.accept(Info::timed())
+			.unwrap();
+		for _ in 0..2 {
+			group.write_frame(Timestamp::ZERO, b"copy".as_slice()).unwrap();
+		}
+		group.finish().unwrap();
+		let mut fetched = fetch.await.unwrap();
+
+		producer.abort(Error::Cancel).unwrap();
+		assert!(fetched.read_frame().await.unwrap().is_some());
+		assert!(fetched.read_frame().await.unwrap().is_some());
+		assert!(fetched.read_frame().await.unwrap().is_none());
 	}
 
 	/// A copy cut short at the back never answers a whole-group reader. A live group the
