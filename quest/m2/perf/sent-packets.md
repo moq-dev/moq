@@ -100,6 +100,10 @@ Guidance:
   Decided 2026-10-27: accept and document it. Skipped packet numbers and
   today's forgotten tail make the same gaps already, and the error only
   under-declares persistent congestion after 256 unACKed ACK-only packets.
+- `on_ack_received` must skip the RTT sample when the largest acked record
+  is gone. Today it leaves `largest_acked_packet_sent` stale and still
+  samples if another newly acked packet is ack-eliciting, which inflates RTT.
+  The forgotten tail can already trigger this.
 - Correctness tests cover padded ACK-only packets, both ACKed and lost,
   including after a path migration, so congestion feedback and in-flight
   bytes stay exact. The bound test includes a padded, never-ACKed receiver
