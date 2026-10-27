@@ -194,16 +194,22 @@ impl Tokens {
 	}
 
 	fn connect(&self, credential: Option<&super::Auth>) {
-		let connected = match credential {
-			Some(auth) => Connected::Slot {
-				link: auth.presented.link.expect("a session's own credential"),
-				id: auth.presented.id,
-			},
-			None => Connected::Accepted,
-		};
 		let mut state = self.handle.state.lock();
 		state.record();
-		state.configured.as_mut().expect("built by Tokens::new").session = Some(connected);
+		let connected = match credential {
+			Some(auth) => Some(Connected::Slot {
+				link: auth.presented.link.expect("a session's own credential"),
+				id: auth.presented.id,
+			}),
+			// The handle backs one open session at a time: the one just built, unless it ended.
+			None => state
+				.links
+				.iter()
+				.rev()
+				.find(|(_, link)| link.closed.is_none())
+				.map(|(link, _)| Connected::Accepted { link: *link }),
+		};
+		state.configured.as_mut().expect("built by Tokens::new").session = connected;
 	}
 
 	/// Whether the tokens changed since `dial` read them, so a refusal of its credential earns
@@ -239,8 +245,9 @@ pub(super) struct Configured {
 
 /// How the latest dial's session answers its connection credential.
 enum Connected {
-	/// The version has no AUTH, so the handshake that built the session accepted it.
-	Accepted,
+	/// The version has no AUTH, so the peer accepted it with its handshake, or with its
+	/// SETUP when the session [awaits it](super::Link::await_setup).
+	Accepted { link: u64 },
 	/// Its own AUTH stream on that session.
 	Slot { link: u64, id: u64 },
 }
@@ -258,8 +265,12 @@ impl Configured {
 	/// The peer's verdict on the connection credential, `None` while it has none or no
 	/// session is live.
 	fn credential(&self, state: &State) -> Option<Result<()>> {
-		let Connected::Slot { link, id } = self.session.as_ref()? else {
-			return Some(Ok(()));
+		let (link, id) = match self.session.as_ref()? {
+			Connected::Slot { link, id } => (link, id),
+			Connected::Accepted { link } => {
+				let link = state.links.get(link).filter(|link| link.closed.is_none())?;
+				return link.accepted.then_some(Ok(()));
+			}
 		};
 		let link = state.links.get(link).filter(|link| link.closed.is_none())?;
 		let slot = link.slots.get(id)?;
@@ -701,6 +712,40 @@ mod tests {
 		session.link.granted(id(&set, "b"), Grant::all());
 		set.handle().abort(Error::Session(SessionError::Unauthorized));
 		ok(&set);
+	}
+
+	/// A session without AUTH that awaits the server's SETUP, as a moq-lite-05/06 client does.
+	fn dial_awaiting_setup(set: &Tokens) -> Link {
+		set.dial(
+			&"moqt://relay.example.com/".parse().unwrap(),
+			&versions(&["moq-lite-06"]),
+		);
+		let link = Link::attach(&set.handle, false, false).unwrap();
+		link.await_setup();
+		set.connect(None);
+		link
+	}
+
+	/// Without AUTH, the server's SETUP is what accepts the connection credential.
+	#[test]
+	fn a_credential_without_auth_is_accepted_by_the_server_setup() {
+		let set = Tokens::new(tokens(&["connection"]));
+		let link = dial_awaiting_setup(&set);
+		assert!(answered(&set).is_pending(), "accepted before the server's SETUP");
+		link.accepted();
+		ok(&set);
+	}
+
+	/// A server that refuses the credential before its SETUP grants nothing, even though
+	/// the session was live.
+	#[test]
+	fn a_credential_refused_before_the_server_setup_is_no_grant() {
+		let set = Tokens::new(tokens(&["connection"]));
+		let link = dial_awaiting_setup(&set);
+		link.close(Error::Session(SessionError::Unauthorized));
+		assert!(answered(&set).is_pending(), "a refused session accepted the credential");
+		set.handle().abort(Error::Session(SessionError::Unauthorized));
+		refused(&set, SessionError::Unauthorized);
 	}
 
 	/// The connection credential revoked after its grant refuses a later set that keeps it.

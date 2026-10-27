@@ -233,6 +233,9 @@ struct Attached {
 	/// Bumped whenever the union or the scope changes, so the session's per-stream
 	/// gates can skip re-matching paths on every wakeup.
 	epoch: u64,
+	/// Whether the peer has accepted the connection, credential included: at once, unless
+	/// the session [awaits the peer's SETUP](Link::await_setup).
+	accepted: bool,
 }
 
 /// One token as one session presents it.
@@ -302,6 +305,7 @@ impl Attached {
 			issued: BTreeMap::new(),
 			scope: None,
 			epoch: 0,
+			accepted: true,
 		};
 		attached.rescope(limit);
 		attached
@@ -1284,6 +1288,21 @@ impl Link {
 	/// Why the session ended, once it has.
 	fn closed(&self) -> Option<Error> {
 		self.read(|link, _| link.closed.clone())
+	}
+
+	/// The peer accepts the connection credential only with its SETUP, which a moq-lite
+	/// client without AUTH reads after the session is live and the server can still refuse.
+	pub(crate) fn await_setup(&self) {
+		self.with(|link| link.accepted = false);
+	}
+
+	/// The peer's SETUP arrived, so it accepted the connection credential.
+	pub(crate) fn accepted(&self) {
+		self.with_state(|state, link| {
+			attached(&mut state.links, link).accepted = true;
+			// Latch a set this acceptance completed, before a later end can replace its answer.
+			state.record();
+		});
 	}
 
 	/// End the session: fail every pending token here, leaving the handle's tokens for the

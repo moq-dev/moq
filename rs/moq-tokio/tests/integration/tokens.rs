@@ -104,13 +104,14 @@ async fn lite_07_presents_the_token_in_setup() {
 	);
 }
 
-/// lite-05 has no SETUP token, so the credential rides the request target's query.
+/// lite-05 has no SETUP token, so the credential rides the request target's query, and the
+/// server's SETUP accepts it.
 #[tokio::test]
 async fn lite_05_presents_the_token_in_the_url() {
 	let mut server = serve("moq-lite-05", "refused").await;
 	let client = client("moq-lite-05", &["credential"]);
 	let url: url::Url = format!("moqt://localhost:{}/room", server.port).parse().unwrap();
-	let _connection = client.connect(url);
+	let connection = client.connect(url);
 	assert_eq!(
 		next(&mut server).await,
 		Seen {
@@ -118,6 +119,10 @@ async fn lite_05_presents_the_token_in_the_url() {
 			token: None,
 		}
 	);
+	tokio::time::timeout(Duration::from_secs(10), connection.tokens().answered())
+		.await
+		.expect("the credential was never answered")
+		.expect("the credential was refused");
 }
 
 /// A refused credential the client has since replaced is dialed again with the new one.
@@ -143,12 +148,26 @@ async fn a_refused_credential_redials_with_its_replacement() {
 /// Without a new credential, a refusal ends the connection rather than retrying it.
 #[tokio::test]
 async fn an_unchanged_refused_credential_is_terminal() {
-	let mut server = serve("moq-lite-07-wip", "old").await;
-	let client = client("moq-lite-07-wip", &["old"]);
+	refused_credential_is_terminal("moq-lite-07-wip").await;
+}
+
+/// Without AUTH, a refusal after the session went live is still the answer, never a grant.
+#[tokio::test]
+async fn an_unchanged_refused_credential_without_auth_is_terminal() {
+	refused_credential_is_terminal("moq-lite-05").await;
+}
+
+async fn refused_credential_is_terminal(version: &str) {
+	let mut server = serve(version, "old").await;
+	let client = client(version, &["old"]);
 	let url: url::Url = format!("moqt://localhost:{}/", server.port).parse().unwrap();
 	let connection = client.connect(url);
 	let tokens = connection.tokens();
-	assert_eq!(next(&mut server).await.token.as_deref(), Some("old"));
+	let seen = next(&mut server).await;
+	assert!(
+		seen.token.as_deref() == Some("old") || seen.query.as_deref() == Some("jwt=old"),
+		"{seen:?}"
+	);
 	server.release.notify_one();
 	// A lite client is live before the server's answer, so the refusal may close it after.
 	let err = tokio::time::timeout(Duration::from_secs(10), async {
