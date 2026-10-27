@@ -119,18 +119,21 @@ class FfiConverterMoqAudioDecoderOutput {
   }
 }
 
-class MoqAudioEncoderFinish {
+class MoqAudioEncoderFinished {
   final List<MoqAudioPacket> packets;
   final int discardPadding;
-  MoqAudioEncoderFinish({required this.packets, required this.discardPadding});
+  MoqAudioEncoderFinished({
+    required this.packets,
+    required this.discardPadding,
+  });
 }
 
-class FfiConverterMoqAudioEncoderFinish {
-  static MoqAudioEncoderFinish lift(RustBuffer buf) {
-    return FfiConverterMoqAudioEncoderFinish.read(buf.asUint8List()).value;
+class FfiConverterMoqAudioEncoderFinished {
+  static MoqAudioEncoderFinished lift(RustBuffer buf) {
+    return FfiConverterMoqAudioEncoderFinished.read(buf.asUint8List()).value;
   }
 
-  static LiftRetVal<MoqAudioEncoderFinish> read(Uint8List buf) {
+  static LiftRetVal<MoqAudioEncoderFinished> read(Uint8List buf) {
     int new_offset = buf.offsetInBytes;
     final packets_lifted = FfiConverterSequenceMoqAudioPacket.read(
       Uint8List.view(buf.buffer, new_offset),
@@ -143,12 +146,12 @@ class FfiConverterMoqAudioEncoderFinish {
     final discardPadding = discardPadding_lifted.value;
     new_offset += discardPadding_lifted.bytesRead;
     return LiftRetVal(
-      MoqAudioEncoderFinish(packets: packets, discardPadding: discardPadding),
+      MoqAudioEncoderFinished(packets: packets, discardPadding: discardPadding),
       new_offset - buf.offsetInBytes,
     );
   }
 
-  static RustBuffer lower(MoqAudioEncoderFinish value) {
+  static RustBuffer lower(MoqAudioEncoderFinished value) {
     final total_length =
         FfiConverterSequenceMoqAudioPacket.allocationSize(value.packets) +
         FfiConverterUInt64.allocationSize(value.discardPadding) +
@@ -158,7 +161,7 @@ class FfiConverterMoqAudioEncoderFinish {
     return toRustBuffer(buf);
   }
 
-  static int write(MoqAudioEncoderFinish value, Uint8List buf) {
+  static int write(MoqAudioEncoderFinished value, Uint8List buf) {
     int new_offset = buf.offsetInBytes;
     new_offset += FfiConverterSequenceMoqAudioPacket.write(
       value.packets,
@@ -171,7 +174,7 @@ class FfiConverterMoqAudioEncoderFinish {
     return new_offset - buf.offsetInBytes;
   }
 
-  static int allocationSize(MoqAudioEncoderFinish value) {
+  static int allocationSize(MoqAudioEncoderFinished value) {
     return FfiConverterSequenceMoqAudioPacket.allocationSize(value.packets) +
         FfiConverterUInt64.allocationSize(value.discardPadding) +
         0;
@@ -4718,11 +4721,13 @@ class MoqVideoProducerOptions {
   final MoqVideoEncoderOutput output;
   final String? track;
   final MoqBandwidth? bandwidth;
+  final MoqVideoProducer? lower;
   MoqVideoProducerOptions({
     required this.input,
     required this.output,
     this.track = null,
     this.bandwidth = null,
+    this.lower = null,
   });
 }
 
@@ -4753,12 +4758,18 @@ class FfiConverterMoqVideoProducerOptions {
     );
     final bandwidth = bandwidth_lifted.value;
     new_offset += bandwidth_lifted.bytesRead;
+    final lower_lifted = FfiConverterOptionalMoqVideoProducer.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final lower = lower_lifted.value;
+    new_offset += lower_lifted.bytesRead;
     return LiftRetVal(
       MoqVideoProducerOptions(
         input: input,
         output: output,
         track: track,
         bandwidth: bandwidth,
+        lower: lower,
       ),
       new_offset - buf.offsetInBytes,
     );
@@ -4770,6 +4781,7 @@ class FfiConverterMoqVideoProducerOptions {
         FfiConverterMoqVideoEncoderOutput.allocationSize(value.output) +
         FfiConverterOptionalString.allocationSize(value.track) +
         FfiConverterOptionalMoqBandwidth.allocationSize(value.bandwidth) +
+        FfiConverterOptionalMoqVideoProducer.allocationSize(value.lower) +
         0;
     final buf = Uint8List(total_length);
     write(value, buf);
@@ -4794,6 +4806,10 @@ class FfiConverterMoqVideoProducerOptions {
       value.bandwidth,
       Uint8List.view(buf.buffer, new_offset),
     );
+    new_offset += FfiConverterOptionalMoqVideoProducer.write(
+      value.lower,
+      Uint8List.view(buf.buffer, new_offset),
+    );
     return new_offset - buf.offsetInBytes;
   }
 
@@ -4802,6 +4818,7 @@ class FfiConverterMoqVideoProducerOptions {
         FfiConverterMoqVideoEncoderOutput.allocationSize(value.output) +
         FfiConverterOptionalString.allocationSize(value.track) +
         FfiConverterOptionalMoqBandwidth.allocationSize(value.bandwidth) +
+        FfiConverterOptionalMoqVideoProducer.allocationSize(value.lower) +
         0;
   }
 }
@@ -8673,7 +8690,7 @@ class FfiConverterMoqAudioConsumer {
 
 abstract class MoqAudioEncoderInterface {
   MoqAudioPacket encode({required List<double> pcm});
-  MoqAudioEncoderFinish finish({required List<double> pcm});
+  MoqAudioEncoderFinished finish({required List<double> pcm});
   int frameSize();
   void setBitrate({required int bitrate});
   MoqAudioInit trackInit();
@@ -8732,14 +8749,14 @@ class MoqAudioEncoder implements MoqAudioEncoderInterface {
     );
   }
 
-  MoqAudioEncoderFinish finish({required List<double> pcm}) {
+  MoqAudioEncoderFinished finish({required List<double> pcm}) {
     return rustCallWithLifter(
       (status) => uniffi_moq_ffi_fn_method_moqaudioencoder_finish(
         uniffiClonePointer(),
         FfiConverterSequenceDouble32.lower(pcm),
         status,
       ),
-      FfiConverterMoqAudioEncoderFinish.lift,
+      FfiConverterMoqAudioEncoderFinished.lift,
       moqExceptionErrorHandler,
     );
   }
@@ -16180,6 +16197,53 @@ class FfiConverterOptionalMoqVideoHint {
   }
 }
 
+class FfiConverterOptionalMoqVideoProducer {
+  static MoqVideoProducer? lift(RustBuffer buf) {
+    return FfiConverterOptionalMoqVideoProducer.read(buf.asUint8List()).value;
+  }
+
+  static LiftRetVal<MoqVideoProducer?> read(Uint8List buf) {
+    if (ByteData.view(buf.buffer, buf.offsetInBytes).getInt8(0) == 0) {
+      return LiftRetVal(null, 1);
+    }
+    final result = FfiConverterMoqVideoProducer.read(
+      Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
+    );
+    return LiftRetVal<MoqVideoProducer?>(result.value, result.bytesRead + 1);
+  }
+
+  static int allocationSize([MoqVideoProducer? value]) {
+    if (value == null) {
+      return 1;
+    }
+    return FfiConverterMoqVideoProducer.allocationSize(value) + 1;
+  }
+
+  static RustBuffer lower(MoqVideoProducer? value) {
+    if (value == null) {
+      return toRustBuffer(Uint8List.fromList([0]));
+    }
+    final buf = Uint8List(
+      FfiConverterOptionalMoqVideoProducer.allocationSize(value),
+    );
+    FfiConverterOptionalMoqVideoProducer.write(value, buf);
+    return toRustBuffer(buf);
+  }
+
+  static int write(MoqVideoProducer? value, Uint8List buf) {
+    if (value == null) {
+      buf[0] = 0;
+      return 1;
+    }
+    buf[0] = 1;
+    return FfiConverterMoqVideoProducer.write(
+          value,
+          Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
+        ) +
+        1;
+  }
+}
+
 class FfiConverterOptionalMoqVideoRead {
   static MoqVideoRead? lift(RustBuffer buf) {
     return FfiConverterOptionalMoqVideoRead.read(buf.asUint8List()).value;
@@ -20730,7 +20794,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqaudioencoder_encode() != 56589) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqaudioencoder_finish() != 62112) {
+  if (uniffi_moq_ffi_checksum_method_moqaudioencoder_finish() != 24341) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqaudioencoder_frame_size() != 37264) {
@@ -20788,7 +20852,7 @@ void _checkApiChecksums() {
       38021) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqreservation_grant() != 59401) {
+  if (uniffi_moq_ffi_checksum_method_moqreservation_grant() != 10773) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqreservation_update() != 9626) {
@@ -21331,7 +21395,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqvideoproducer_set_bitrate() != 28203) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqvideoproducer_write() != 6141) {
+  if (uniffi_moq_ffi_checksum_method_moqvideoproducer_write() != 17427) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_constructor_moqaudiocodec_aac() != 62161) {
@@ -21439,7 +21503,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_constructor_moqvideoencoder_new() != 22531) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_constructor_moqvideoproducer_new() != 34351) {
+  if (uniffi_moq_ffi_checksum_constructor_moqvideoproducer_new() != 51291) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
 }

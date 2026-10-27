@@ -47,7 +47,7 @@ typedef Frame = MoqAudioFrame;
 typedef Packet = MoqAudioPacket;
 
 /// The packets an [Encoder] drains on finish and the padded samples to discard.
-typedef EncoderFinish = MoqAudioEncoderFinish;
+typedef EncoderFinish = MoqAudioEncoderFinished;
 
 /// The audio codec: `Codec.opus()` or `Codec.aac()`.
 typedef Codec = MoqAudioCodec;

@@ -571,8 +571,12 @@ pub(crate) enum RequestValidity {
 	Unrestricted,
 	Route(kio::Consumer<()>),
 	Selected(std::sync::Arc<crate::model::origin_impl::Selection>),
-	/// One period of a selection, captured by [`Self::start`].
-	Period(kio::Consumer<()>, std::sync::Arc<crate::model::origin_impl::Selection>),
+	/// One period of a selection and its answering lease, captured by [`Self::start`].
+	Period(
+		kio::Consumer<()>,
+		kio::Consumer<()>,
+		std::sync::Arc<crate::model::origin_impl::Selection>,
+	),
 }
 
 impl RequestValidity {
@@ -592,7 +596,7 @@ impl RequestValidity {
 	/// Capture one selection period so a pending request never revives after a replacement.
 	pub(crate) fn start(&self) -> Self {
 		match self {
-			Self::Selected(selected) => Self::Period(selected.current(), selected.clone()),
+			Self::Selected(selected) => Self::Period(selected.current(), selected.answering(), selected.clone()),
 			other => other.clone(),
 		}
 	}
@@ -601,12 +605,29 @@ impl RequestValidity {
 		match self {
 			Self::Route(route) if route.poll_closed(waiter).is_ready() => Err(crate::Error::Unroutable),
 			// A replacement retires the period only once its held `Restart` is released.
-			Self::Period(route, selected)
+			Self::Period(route, _, selected)
 				if route.poll_closed(waiter).is_ready() || selected.poll_retired(waiter).is_ready() =>
 			{
 				Err(crate::Error::Unroutable)
 			}
 			Self::Selected(_) => self.start().check(waiter),
+			_ => Ok(()),
+		}
+	}
+
+	/// [`Self::check`] for a request already sent but not yet answered: only another
+	/// instance taking the path refuses it, since without an epoch that instance may be
+	/// the one answering. A withdrawal leaves it to its answer, as moq-lite has the
+	/// publisher conclude in-flight requests.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn check_unanswered(&self, waiter: &kio::Waiter) -> Result<(), crate::Error> {
+		match self {
+			Self::Period(_, answering, selected)
+				if answering.poll_closed(waiter).is_ready() || selected.poll_retired(waiter).is_ready() =>
+			{
+				Err(crate::Error::Unroutable)
+			}
+			Self::Selected(_) => self.start().check_unanswered(waiter),
 			_ => Ok(()),
 		}
 	}

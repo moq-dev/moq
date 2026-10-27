@@ -145,7 +145,6 @@ because `main` assigned 0x3A to NOT_FETCHABLE first.
 ## Required
 
 - [Binding auth polish](/quest/m1/auth/bindings-polish.md) - OBS reconnects with the presented token, Swift grant sequences
-- [Expiry before SETUP](/quest/m1/auth/expire-before-setup.md) - a mocked-clock test proves a grant expiring before SETUP closes as Expired
 
 ## Related
 

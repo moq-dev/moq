@@ -19,6 +19,9 @@ served it are deleted once the generated `moq-c` publishes. The generated
   home shared by both packages before deleting the crate, update every
   reader of either path (`rg 'moq-c/native-libs|moq-ffi\.cmake'`), and check
   that the installed C and C++ CMake configs still link the native libraries.
+- `AGENTS.md`'s Cross-Package Sync table keeps the hand-written crate beside
+  `c/moq` while it ships. Drop `rs/moq-c` from the `rs/moq-ffi` row and point
+  the `rs/moq-c` C ABI row at the generated `c/moq` header (`<moq/moq.h>`).
 - The code-free `rs/libmoq` stub left under the old name is
   [Retire the libmoq stub](/quest/m2/release/libmoq-retire.md)'s, separately.
 
