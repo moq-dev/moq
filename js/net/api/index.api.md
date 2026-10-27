@@ -23,6 +23,8 @@ interface AcceptProps {
     consume?: Producer_4;
     implementation?: string;
     publish?: Consumer_5;
+    signal?: AbortSignal;
+    timeout?: Milli;
     transport: WebTransport;
     url: URL;
     version?: number;

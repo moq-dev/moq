@@ -74,6 +74,7 @@ import {
 	hasProbeRtt,
 	hasRanges,
 	hasRefresh,
+	hasSetupStream,
 	hasSynced,
 	hasTrackStream,
 	hasTracks,
@@ -126,12 +127,8 @@ interface SubscribeEntry {
 	// the matching track.Subscriber it got from broadcast.Consumer.subscribe.
 	track: track.Producer;
 	compress: boolean;
-	// Per-frame timestamp scale (0 = none). undefined until it's known (from TRACK_INFO
-	// on lite-05+, or implicit defaults on older drafts). A non-zero value means each
-	// frame on the group stream is prefixed with a zigzag-delta timestamp varint that
-	// runGroup must consume to stay in sync; group streams block on it before decoding,
-	// since a group's QUIC stream can race ahead of the subscribe stream.
-	timescale: Signal<number | undefined>;
+	// Per-frame timestamp scale (0 = none), resolved before this entry is registered.
+	timescale: number;
 	// The group streams received, so the subscription can wait for the ones still owed
 	// after the publisher ends it.
 	tail: Tail;
@@ -170,9 +167,8 @@ export class Subscriber {
 	// Shared with the Publisher so reflected announces can be dropped on receipt.
 	readonly hop: Hop;
 
-	// Our subscribed tracks. `timescale` resolves once known (from TRACK_INFO on
-	// lite-05+, or implicit defaults on older drafts); group streams block on it
-	// before decoding any frame, since a group's QUIC stream can race ahead.
+	// Registered only after immutable TRACK_INFO or the older drafts' defaults resolve,
+	// so every incoming group and datagram already knows its timestamp framing.
 	#subscribes = new Map<bigint, SubscribeEntry>();
 	#subscribeNext = 0n;
 
@@ -885,10 +881,6 @@ export class Subscriber {
 		const { epoch, valid, answering } = consumed;
 		const subscription = request.subscription;
 
-		// `timescale` stays undefined until TRACK_INFO (or, on older drafts,
-		// implicit defaults) resolves it; runGroup blocks on it before decoding.
-		const timescale = new Signal<number | undefined>(undefined);
-
 		console.debug(`subscribe start: id=${id} broadcast=${broadcast} track=${request.name}`);
 		const bounds = groupBounds(subscription.groups);
 
@@ -917,7 +909,7 @@ export class Subscriber {
 		valid?.addEventListener("abort", retire);
 		if (valid?.aborted) retire();
 		const deadline = new Deadline();
-		const setup = this.#openSubscribe(state, msg, request, id, timescale, deadline);
+		const setup = this.#openSubscribe(state, msg, request, id, deadline);
 
 		let opened: { stream: Stream; entry: SubscribeEntry };
 		try {
@@ -1045,13 +1037,13 @@ export class Subscriber {
 		msg: Subscribe,
 		request: track.Request,
 		id: bigint,
-		timescale: Signal<number | undefined>,
 		deadline: Deadline,
 	): Promise<{ stream: Stream; entry: SubscribeEntry }> {
 		state.cancel.signal.throwIfAborted();
 		let producer: track.Producer;
 		let drainOk = false;
 		let compress = false;
+		let timescale = 0;
 
 		if (hasTrackStream(this.version)) {
 			// Fetch the immutable properties once via the TRACK stream.
@@ -1068,11 +1060,10 @@ export class Subscriber {
 			state.cancel.signal.throwIfAborted();
 			producer = request.accept(this.#toModelInfo(info));
 			compress = info.compress;
-			timescale.set(info.timescale ?? 0);
+			timescale = info.timescale ?? 0;
 		} else {
 			// Older drafts negotiate nothing per-track: verbatim frames with no timeline.
 			producer = request.accept();
-			timescale.set(0);
 			drainOk = true;
 		}
 		// Lite-06+ resolves where the feed starts only with SUBSCRIBE_START, so a relay serving
@@ -1685,21 +1676,11 @@ export class Subscriber {
 			}
 			producer = track.createGroup(group.sequence);
 
-			// Block until the timescale is known; the group's stream can arrive before
-			// TRACK_INFO (or implicit defaults) resolves it on the subscribe stream.
-			let scale = timescale.peek();
-			while (scale === undefined) {
-				if (hooks.trackReleased(track).peek() !== undefined) {
-					// Subscription ended before the scale resolved; nothing to decode.
-					producer.finish();
-					stream.stop(StreamCode.Cancel);
-					return;
-				}
-				await Signal.race(timescale, hooks.trackReleased(track));
-				scale = timescale.peek();
-			}
-
-			await readFrames(stream, producer, { scale, timed: hasMediaTime(this.version), compress: entry.compress });
+			await readFrames(stream, producer, {
+				scale: timescale,
+				timed: hasMediaTime(this.version),
+				compress: entry.compress,
+			});
 
 			producer.finish();
 			stream.stop(StreamCode.Cancel);
@@ -1764,21 +1745,18 @@ export class Subscriber {
 	}
 
 	// Decode one datagram body and hand it to the matching subscription's producer. Drops the
-	// datagram (best-effort) if the subscription is unknown/closed or its timescale isn't resolved.
+	// datagram (best-effort) if the subscription is unknown or closed.
 	async #routeDatagram(payload: Uint8Array): Promise<void> {
-		// An unknown or unresolved subscription's datagram is dropped below, however it parses.
+		// An unknown subscription's datagram is dropped below, however it parses.
 		const dg = await DatagramMessage.decode(payload, this.version, (id) => ({
-			timed: !!this.#subscribes.get(id)?.timescale.peek(),
+			timed: !!this.#subscribes.get(id)?.timescale,
 			compressed: this.#subscribes.get(id)?.compress ?? false,
 		}));
 
 		const entry = this.#subscribes.get(dg.subscribe);
 		if (!entry) return; // Unknown or already-closed subscription.
 
-		// If the timescale hasn't resolved yet (the datagram raced ahead of TRACK_INFO), drop
-		// rather than guess. Zero means the track carries no timestamps.
-		const scale = entry.timescale.peek();
-		if (scale === undefined) return;
+		const scale = entry.timescale;
 
 		// Dropped where it may be a send time, like a frame's.
 		const timestamp =
@@ -1825,7 +1803,7 @@ export class Subscriber {
 		// input ends the session. Drop the estimates so consumers know they're stale.
 		try {
 			// Lite-05+ gates PROBE on the peer advertising Probe >= Report in its SETUP.
-			if (this.#peerSetup) {
+			if (hasSetupStream(this.version) && this.#peerSetup) {
 				const level = await this.#peerProbeLevel(this.#peerSetup, scope);
 				if (level === undefined || level < ProbeLevel.Report) return;
 			}

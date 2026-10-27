@@ -20,12 +20,14 @@ test("reordered frames keep the highest group PTS in live and later mirrors", ()
 		expect(hooks.groupTimestamp(shared)?.asMillis()).toBe(0);
 		expect(hooks.groupLatest(shared)?.asMillis()).toBe(80);
 		expect(hooks.groupLatest(live)?.asMillis()).toBe(80);
-		// A later mirror only replays the remaining B-frame, but keeps the known high PTS.
+		// A reader left with only the B-frame keeps the high PTS it already read past.
 		shared.tryReadFrame();
 		shared.tryReadFrame();
+		expect(hooks.groupLatest(shared)?.asMillis()).toBe(80);
+		// Reads are per handle, so a later mirror still replays every frame.
 		const later = producer.mirror();
 		expect(hooks.groupLatest(later)?.asMillis()).toBe(80);
-		expect(later.tryReadFrame()?.timestamp?.asMillis()).toBe(40);
+		expect(later.tryReadFrame()?.timestamp?.asMillis()).toBe(0);
 		for (const reader of [shared, live, later]) reader.close();
 		producer.finish();
 	} finally {
