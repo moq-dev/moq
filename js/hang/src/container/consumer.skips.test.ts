@@ -44,6 +44,7 @@ for (const count of [1, 16, 256]) {
 			);
 		} finally {
 			consumer.close();
+			track.finish();
 			track.close();
 			warn.mockRestore();
 		}

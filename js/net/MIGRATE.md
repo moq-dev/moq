@@ -11,6 +11,17 @@ A connection's `bandwidth` allocator is `allocator`, mirroring Rust's `Session::
 `Track.Producer.writeGroup(group)` is `createGroup(sequence)`, which creates the group and returns it like `appendGroup()`: replace `const group = new Group.Producer(n); track.writeGroup(group);` with `const group = track.createGroup(n);`.
 A group can no longer be written before it joins a track, or join more than one track.
 
+### One lifecycle vocabulary ([#6750](https://github.com/moq-dev/moq/pull/6750))
+
+`Group.Producer.close(abort?)` and `Track.Producer.close(abort?)` split by meaning: call `finish()` for a clean end and `abort(err)` for an error. On a group, `finish()` is terminal and an `abort` after it is a no-op. On a track, `finish()` only declares the end, so groups below it stay writable; then call `close()` to release the producer, which aborts with a `Cancel` stream error if no end was declared. Replace `track.close()` with `track.finish(); track.close();`.
+`Track.Producer.closed` and `Track.Demand.closed` settle once the outcome is final: `null` when the declared end is reached with every group below it finished, even while the producer stays open, or the abort error.
+`Group.Consumer.close()` takes no error and releases only that handle; other readers and the producer are unaffected.
+`Announce.Consumer.close()` takes no error and releases only that handle. A hand-made `Announce.Producer` watches its new `wanted` getter, which turns false once the last consumer closes, instead of its `closed`.
+The last `Broadcast.Consumer.close()` no longer closes a produced broadcast; only its producer's `close()` does. Close the producer when you are done with it. A broadcast created on an origin closes when a new `createBroadcast` supersedes it at its path, or when the origin or scope that created it closes, even while a consumer handle holds it. Tracks already subscribed keep serving until they end.
+`Group.Demand.unused()` and `Broadcast.Demand.unused()` reject once the group or broadcast closes, instead of resolving.
+The wire layer's `Lister.ended` is `closed`.
+`Track.Subscriber.end()` and `Track.Ordered.end()` are gone; `await finished()` instead.
+
 ### Publication handles own announcement control
 
 `Origin.Producer.createBroadcast(path)` and `Origin.Prepared.publish()` return an `Origin.Publication`.

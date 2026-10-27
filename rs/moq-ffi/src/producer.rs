@@ -675,7 +675,7 @@ impl Child for MoqTrackProducer {
 		let _guard = crate::ffi::enter();
 		// A finished track ends at its declared end, as when its handle drops.
 		let track = self.inner.lock().unwrap().take();
-		if let Some(track) = track.filter(|track| track.end().is_none()) {
+		if let Some(track) = track.filter(|track| track.finished().is_none()) {
 			let _ = track.abort(err);
 		}
 	}
@@ -686,7 +686,7 @@ impl Drop for MoqTrackProducer {
 		let _guard = crate::ffi::enter();
 		// A finished track lives on in its broadcast, and may still take groups below its end.
 		let track = self.inner.get_mut().unwrap().take();
-		if let Some(track) = track.filter(|track| track.end().is_none()) {
+		if let Some(track) = track.filter(|track| track.finished().is_none()) {
 			let _ = track.abort(moq_net::Error::Unroutable);
 		}
 	}
@@ -843,7 +843,7 @@ impl MoqTrackProducer {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
 		let track = guard.as_mut().ok_or(MoqError::Closed)?;
-		if track.end().is_none() {
+		if track.finished().is_none() {
 			track.finish()?;
 		}
 		if let Some(children) = self.keep.lock().unwrap().take() {

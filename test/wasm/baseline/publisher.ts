@@ -19,6 +19,7 @@ async function prepare(config: Workload): Promise<void> {
 			websocket: { enabled: false },
 		});
 		cleanup.push(() => {
+			track.finish();
 			track.close();
 			broadcast.close();
 			connection.abort();
@@ -32,7 +33,7 @@ async function prepare(config: Workload): Promise<void> {
 				const group = track.createGroup(config.sequence);
 				for (const [frame, bytes] of fixtures.entries())
 					group.writeFrame({ payload: bytes, timestamp: Moq.Time.Timestamp.fromMillis(frame) });
-				group.close();
+				group.finish();
 				// Keep the track and broadcast served until every reader completes. No timing arm or tail-close race.
 			})(),
 		);

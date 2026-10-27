@@ -99,7 +99,7 @@ async function measure(protocol: string, groups: number, viewers: number) {
 				payload: new Uint8Array(32),
 				timestamp: Timestamp.fromMicros(sequence * 2500 + Math.floor((frame * 2500) / 128)),
 			});
-		group.close();
+		group.finish();
 	}
 	let deadline: ReturnType<typeof setTimeout> | undefined;
 	try {
@@ -121,6 +121,7 @@ async function measure(protocol: string, groups: number, viewers: number) {
 		clearInterval(timer);
 		publisher.close();
 		for (const stream of streams) stream.close();
+		track.finish();
 		track.close();
 		broadcast.close();
 		origin.close();

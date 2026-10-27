@@ -142,9 +142,12 @@ export class Demand {
 		return this.#used;
 	}
 
-	/** Wait until all mirror readers leave or the group closes. */
+	/** Wait until all mirror readers leave. Throws once the group closes: its abort error, or a clean-close error. */
 	async unused(): Promise<void> {
-		while (this.#used.peek() && this.#state.closed.peek() === undefined) {
+		for (;;) {
+			const closed = this.#state.closed.peek();
+			if (closed !== undefined) throw closed ?? new Error("group is closed");
+			if (!this.#used.peek()) return;
 			await Signal.race(this.#used, this.#state.closed);
 		}
 	}
@@ -270,7 +273,7 @@ export class Producer {
 
 	/** A read handle for this group. */
 	consume(): Consumer {
-		return makeConsumer(this.#state);
+		return makeConsumer(this.#state, false);
 	}
 
 	/**
@@ -297,7 +300,7 @@ export class Producer {
 		const closed = this.#state.closed.peek();
 		if (closed !== undefined) {
 			dst.closed.set(closed);
-			return makeConsumer(dst);
+			return makeConsumer(dst, true);
 		}
 
 		this.#mirrors ??= new Set();
@@ -313,7 +316,7 @@ export class Producer {
 			dispose();
 		});
 
-		return makeConsumer(dst);
+		return makeConsumer(dst, true);
 	}
 
 	/**
@@ -392,7 +395,7 @@ export class Producer {
 			mirror.frames.set([]);
 			mirror.cacheBytes = 0;
 		}
-		this.close(error);
+		this.abort(error);
 		throw error;
 	}
 
@@ -401,22 +404,34 @@ export class Producer {
 		return this.#state.closed.peek() !== undefined;
 	}
 
-	/** Closes the group, optionally with an error to abort readers. */
-	close(abort?: Error) {
+	/** Marks the group complete: no more frames will be written. Idempotent. */
+	finish() {
+		this.#end(null);
+	}
+
+	/**
+	 * Ends the group with `error`, which readers that have not drained it see. A no-op once the
+	 * group finished or aborted: the outcome is already settled.
+	 */
+	abort(error: Error) {
+		this.#end(error);
+	}
+
+	#end(outcome: Error | null) {
 		if (this.#state.closed.peek() !== undefined) return;
 		this.#state.flate?.finish();
-		this.#state.closed.set(abort ?? null);
+		this.#state.closed.set(outcome);
 
 		if (this.#mirrors) {
 			for (const mirror of this.#mirrors) {
-				if (mirror.closed.peek() === undefined) mirror.closed.set(abort ?? null);
+				if (mirror.closed.peek() === undefined) mirror.closed.set(outcome);
 			}
 			this.#mirrors.clear();
 		}
 	}
 }
 
-let makeConsumer: (state: GroupState) => Consumer;
+let makeConsumer: (state: GroupState, owned: boolean) => Consumer;
 
 // A replacement copy asked for on behalf of one consumer, settled or still out.
 interface Attempt {
@@ -618,9 +633,13 @@ export class Consumer {
 	#expired?: Expired;
 	// Closed by its reader, which ends it whatever is left unread.
 	#released = false;
+	// Whether this consumer alone reads `#state` (a mirror), so releasing it closes that state.
+	// A `consume()` handle shares the producer's state and only lets go of its own view.
+	#owned: boolean;
 
-	private constructor(state: GroupState) {
+	private constructor(state: GroupState, owned: boolean) {
 		this.#state = state;
+		this.#owned = owned;
 		this.sequence = state.sequence;
 	}
 
@@ -668,7 +687,8 @@ export class Consumer {
 	}
 
 	static {
-		makeConsumer = (state) => new Consumer(state);
+		makeConsumer = (state, owned) => new Consumer(state, owned);
+		hooks.releaseGroupReader = (group, abort) => group.#release(abort);
 		hooks.groupTimestamp = (group) => (group.#state.unverified ? undefined : group.#state.timestamp);
 		hooks.groupLatest = (group) => (group.#state.unverified ? undefined : group.#state.latest);
 		hooks.unverifyGroup = (group) => {
@@ -743,7 +763,8 @@ export class Consumer {
 
 	// The next change a parked read waits for.
 	#changed(): GetPromise<unknown> {
-		const changed: Getter<unknown>[] = [this.#state.frames, this.#state.closed];
+		// The verdict too: releasing a shared handle settles only it, and must end a parked read.
+		const changed: Getter<unknown>[] = [this.#state.frames, this.#state.closed, this.#verdict];
 		if (this.#expiry) changed.push(...this.#expiry.changed);
 		if (this.#recover) changed.push(this.#recover.changed);
 		return Signal.race(...changed);
@@ -825,6 +846,7 @@ export class Consumer {
 		// The copy left behind stops teeing into the state this consumer read.
 		if (this.#state.closed.peek() === undefined) this.#state.closed.set(null);
 		this.#state = next;
+		this.#owned = replacement.group.#owned;
 		this.#expiry = replacement.expiry;
 		this.#skip = index;
 		this.#closed?.refresh();
@@ -834,6 +856,8 @@ export class Consumer {
 	// The unread frames. Every look at the buffer goes through here, so readiness, reads and
 	// `done` agree on what is left.
 	#bufferedFrames(): Frame[] {
+		// A released shared handle reads nothing more: the queue it shares belongs to the other readers.
+		if (this.#released && !this.#owned) return [];
 		const frames = this.#state.frames.peek();
 		// A resumed copy repeats the frames an earlier one already delivered.
 		while (this.#state.start < this.#skip && frames.length > 0) {
@@ -864,14 +888,16 @@ export class Consumer {
 		return { sequence, frame, inflated: slice?.inflated };
 	}
 
-	/** True once no further frames can be read: the group has closed and every buffered frame is read. */
+	/** True once no further frames can be read: this handle or the group has closed, and every buffered frame is read. */
 	get done(): boolean {
-		return this.#terminal !== undefined || (this.#bufferedFrames().length === 0 && this.#settled());
+		return (
+			this.#terminal !== undefined || (this.#bufferedFrames().length === 0 && (this.#released || this.#settled()))
+		);
 	}
 
-	/** True once the group has been closed, regardless of whether buffered frames remain unread. Synchronous complement to the {@link closed} promise. */
+	/** True once this handle or the group has been closed, regardless of whether buffered frames remain unread. Synchronous complement to the {@link closed} promise. */
 	get isClosed(): boolean {
-		return this.#terminal !== undefined || this.#settled();
+		return this.#terminal !== undefined || this.#released || this.#settled();
 	}
 
 	// Whether the copy being read ended, for good: a failure recovery may continue is not an end.
@@ -925,7 +951,7 @@ export class Consumer {
 				this.#closed?.refresh();
 				return;
 			}
-			if (this.#expire()) return;
+			if (this.#released || this.#expire()) return;
 			if (this.#recover?.wants(undefined)) {
 				await this.#resume(undefined);
 				continue;
@@ -965,6 +991,8 @@ export class Consumer {
 				return read;
 			}
 
+			// A released shared handle ends here, whatever the group does next for its other readers.
+			if (this.#released && !this.#owned) return;
 			const closed = this.#state.closed.peek();
 			if (closed instanceof Error) {
 				if (await this.#resume(closed)) continue;
@@ -1008,8 +1036,19 @@ export class Consumer {
 		return frame ? frame.payload[0] === 1 : undefined;
 	}
 
-	/** Closes the group, optionally with an error to abort readers. Idempotent. */
-	close(abort?: Error) {
+	/**
+	 * Release this handle, like dropping a Rust consumer. Never changes the group for other
+	 * readers. A track's read handle drains what it buffered and then ends; one from
+	 * {@link Producer.consume} ends at once, since its queue is shared with the producer's other
+	 * readers. Idempotent.
+	 */
+	close(): void {
+		this.#release(undefined);
+	}
+
+	// Release this reader, failing it with `abort` if given. A mirror closes its own state,
+	// which drops its demand; a shared handle ends only its own view.
+	#release(abort: Error | undefined): void {
 		// A copy failure recovery was continuing past ends with the abort instead.
 		if (abort && this.#recover && this.#state.closed.peek() instanceof Error) {
 			this.#terminal ??= abort;
@@ -1020,7 +1059,12 @@ export class Consumer {
 		this.#recover = undefined;
 		// Closing is terminal for this reader, even with frames still unread.
 		this.#released = true;
-		if (this.#state.closed.peek() === undefined) this.#state.closed.set(abort ?? null);
+		if (this.#owned) {
+			if (this.#state.closed.peek() === undefined) this.#state.closed.set(abort ?? null);
+		} else if (this.#state.closed.peek() === undefined) {
+			if (abort) this.#terminal ??= abort;
+			if (this.#verdict.peek() === undefined) this.#verdict.set(this.#terminal ?? null);
+		}
 		this.#closed?.refresh();
 	}
 }

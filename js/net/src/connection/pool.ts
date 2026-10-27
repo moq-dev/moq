@@ -12,6 +12,7 @@ import type * as Auth from "../auth.ts";
 import type { Handle } from "../bandwidth.ts";
 import * as Origin from "../origin.ts";
 import * as Path from "../path.ts";
+import { closeUnwanted } from "../util/announce.ts";
 import { Follow } from "../util/observed.ts";
 import { after } from "../util/timer.ts";
 import { type AcceptProps as AcceptPropsType, accept } from "./accept.ts";
@@ -366,7 +367,8 @@ export class Connection {
 			pumpAnnounced(effect, origin.announced(scope, options), producer);
 		});
 
-		void consumer.closed.then(stop);
+		closeUnwanted(producer);
+		void producer.closed.then(stop);
 
 		return consumer;
 	}

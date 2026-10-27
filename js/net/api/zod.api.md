@@ -18,7 +18,7 @@ type Bound = {
 };
 
 class Consumer {
-    close(abort?: Error): void;
+    close(): void;
     get closed(): GetPromise<Error | null>;
     get done(): boolean;
     get frameCount(): number;
@@ -108,7 +108,6 @@ type Order = "ascending" | "descending";
 class Ordered {
     close(abort?: Error): void;
     get closed(): GetPromise<Error | null>;
-    end(): Position | undefined;
     finished(): Promise<Position>;
     info(): Promise<Info>;
     largest(): Promise<Position | undefined>;
@@ -135,13 +134,15 @@ interface Position {
 
 class Producer {
     constructor(name: string);
+    abort(error: Error): void;
     accept(info?: Partial<Info>): this;
     appendDatagram(timestamp: Timestamp | undefined, payload: Uint8Array): number;
     appendGroup(): Producer_2;
-    close(abort?: Error): void;
+    close(): void;
     get closed(): GetPromise<Error | null>;
     createGroup(sequence: number): Producer_2;
     demand(): Demand;
+    finish(): void;
     finishAt(end: Position): void;
     info(): Promise<Info>;
     insertDatagram(sequence: number, timestamp: Timestamp | undefined, payload: Uint8Array): void;
@@ -155,9 +156,10 @@ class Producer {
 
 class Producer_2 {
     constructor(sequence: number);
-    close(abort?: Error): void;
+    abort(error: Error): void;
     get closed(): GetPromise<Error | null>;
     consume(): Consumer;
+    finish(): void;
     get isClosed(): boolean;
     readonly sequence: number;
     writeFrame(frame: Frame): void;
@@ -181,7 +183,6 @@ class Request_2 {
 class Subscriber {
     close(abort?: Error): void;
     get closed(): GetPromise<Error | null>;
-    end(): Position | undefined;
     finished(): Promise<Position>;
     info(): Promise<Info>;
     largest(): Promise<Position | undefined>;

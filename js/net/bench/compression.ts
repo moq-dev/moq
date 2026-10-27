@@ -22,7 +22,7 @@ for (const publishers of [1, 4, 16]) {
 			let started = performance.now();
 			for (const group of groups) {
 				for (let index = 0; index < frames; index++) group.writeFrame({ payload });
-				group.close();
+				group.finish();
 			}
 			publish += performance.now() - started;
 			stored = groups.reduce((bytes, group) => bytes + hooks.groupCacheBytes(group), 0);
@@ -44,6 +44,7 @@ for (const publishers of [1, 4, 16]) {
 			read += performance.now() - started;
 			inflated = groups.reduce((bytes, group) => bytes + hooks.groupCacheBytes(group), 0) - stored;
 			if (inflated !== publishers * frames * payload.length) throw new Error("inflated bytes scale with readers");
+			for (const track of tracks) track.finish();
 			for (const track of tracks) track.close();
 		}
 		console.log([publishers, readers, "publish", ((publish * 1000) / rounds).toFixed(1), stored].join(","));
@@ -74,6 +75,7 @@ async function datagrams(count: number, queued: number): Promise<[number, number
 	const deliver = ((performance.now() - started) * 1000) / (count * queued);
 	Bun.gc(true);
 	const retained = process.memoryUsage().heapUsed - before;
+	for (const track of tracks) track.finish();
 	for (const track of tracks) track.close();
 	slow.length = 0;
 	return [deliver, retained];

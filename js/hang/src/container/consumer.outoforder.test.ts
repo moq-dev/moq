@@ -34,7 +34,7 @@ function publishFrame(group: Group.Producer, millis: number, tag: number) {
 function publish(track: Track.Producer, sequence: number, millis: number) {
 	const group = track.createGroup(sequence);
 	publishFrame(group, millis, sequence);
-	group.close();
+	group.finish();
 }
 
 /** Every frame the consumer will hand over right now, as [group, payload] pairs. */
@@ -108,13 +108,14 @@ test("a below-cursor group still downloading is not truncated", async () => {
 	// rather than shift the group out, so the second frame still arrives.
 	const pending = nextFrame(consumer);
 	publishFrame(backlog, 1500, 11);
-	backlog.close();
+	backlog.finish();
 
 	const second = await pending;
 	expect(second?.group).toBe(1);
 	expect(second?.frame.payload[0]).toBe(11);
 
-	live.close();
+	live.finish();
+	track.finish();
 	track.close();
 	consumer.close();
 });
@@ -146,6 +147,7 @@ test("delayed older groups survive a floor established by two newer groups", asy
 		await expect(nextFrame(consumer)).rejects.toThrow("below the previous group start");
 	} finally {
 		consumer.close();
+		track.finish();
 		track.close();
 		clock.mockRestore();
 	}

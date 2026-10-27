@@ -25,6 +25,7 @@ function setup(maxDelay = 100) {
 	})();
 	onTestFinished(async () => {
 		consumer.close();
+		track.finish();
 		track.close();
 		try {
 			await reading;
@@ -65,10 +66,10 @@ for (const emptySuccessor of [false, true]) {
 			await flush();
 			if (emptySuccessor) {
 				const empty = track.createGroup(17);
-				empty.close();
+				empty.finish();
 				await flush();
 			}
-			stale.close(new NetError.Stream(StreamCode.Old));
+			stale.abort(new NetError.Stream(StreamCode.Old));
 			await flush();
 			expect(results).toEqual([]);
 
@@ -93,7 +94,7 @@ test("Consumer preserves a declared marker before its first media across a hole"
 	const { track, results, warn } = setup();
 	const marker = track.createGroup(16);
 	write(marker, 0, true);
-	marker.close();
+	marker.finish();
 	await flush();
 	expect(items(results)).toEqual(["end 16@0"]);
 
@@ -111,14 +112,14 @@ test.each([false, true])("Consumer still waits for a gap after media (playhead r
 	const { track, consumer, results, warn } = setup(1000);
 	const first = track.createGroup(16);
 	write(first, 0);
-	first.close();
+	first.finish();
 	await flush();
 	expect(items(results)).toEqual(["16@0"]);
 
 	if (reset) {
 		const marker = track.createGroup(17);
 		write(marker, 0, true);
-		marker.close();
+		marker.finish();
 		await flush();
 		expect(items(results)).toEqual(["16@0", "end 17@0"]);
 	}
@@ -132,7 +133,7 @@ test.each([false, true])("Consumer still waits for a gap after media (playhead r
 	// Supply the missing, timestamp-contiguous bridge and prove the queued frame survives.
 	const bridge = track.createGroup(sequence - 1);
 	write(bridge, 0);
-	bridge.close();
+	bridge.finish();
 	await flush();
 	// The bridge closes the hole, so nothing reads as a gap.
 	expect(items(results)).toEqual(["16@0", ...(reset ? ["end 17@0"] : []), `${sequence - 1}@0`, `${sequence}@50000`]);

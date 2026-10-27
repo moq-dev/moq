@@ -54,7 +54,7 @@ function copy(source: BroadcastProducer) {
 			const group = producer.createGroup(sequence);
 			for (let frame = 0; frame < frames; frame++)
 				group.writeFrame({ payload: enc.encode(`${sequence}.${frame}`) });
-			if (close) group.close();
+			if (close) group.finish();
 			return group;
 		},
 	};
@@ -136,7 +136,7 @@ test("returning to a route reuses its subscription and held group", async () => 
 		held.close();
 	} finally {
 		mirrored.mockRestore();
-		open.close();
+		open.finish();
 		sub.close();
 		front.consumer.close();
 		for (const handle of handles) handle.close();
@@ -175,7 +175,7 @@ test("a returning route resumes where a fresh copy would", async () => {
 		held.close();
 	} finally {
 		mirrored.mockRestore();
-		open.close();
+		open.finish();
 		sub.close();
 		front.consumer.close();
 		for (const handle of handles) handle.close();
@@ -227,7 +227,7 @@ test("a fork continues its open group across a route failure after its parent cl
 		const next = group.readFrame();
 		tb.write(0, 3);
 		front.serve(b.consume());
-		stalled.close(new StreamError(StreamCode.SessionClosed));
+		stalled.abort(new StreamError(StreamCode.SessionClosed));
 		expect(dec.decode((await next)?.payload)).toBe("0.1");
 		expect(dec.decode((await group.readFrame())?.payload)).toBe("0.2");
 		expect(await group.readFrame()).toBeUndefined();
@@ -356,14 +356,14 @@ test("a lagging same-epoch replica resumes from one publisher's bytes exactly on
 							if (lagging && group.sequence === 1 && index === 2) await release.promise;
 							copy.writeFrame(frame);
 						}
-						copy.close();
+						copy.finish();
 					} finally {
 						group.close();
 					}
 				}
 			} catch (err) {
 				if (stopped) return;
-				output.close(err instanceof Error ? err : new Error(String(err)));
+				output.abort(err instanceof Error ? err : new Error(String(err)));
 				broadcast.close();
 				return err;
 			}
@@ -375,7 +375,11 @@ test("a lagging same-epoch replica resumes from one publisher's bytes exactly on
 				stopped = true;
 				input.close();
 				release.resolve();
-				output.close(err);
+				if (err) output.abort(err);
+				else {
+					output.finish();
+					output.close();
+				}
 				broadcast.close();
 			},
 		};
@@ -396,7 +400,7 @@ test("a lagging same-epoch replica resumes from one publisher's bytes exactly on
 		sub = active.track("seq").subscribe({ maxDelay: Milli(60_000) });
 		const first = source.appendGroup();
 		for (let frame = 0; frame < 4; frame++) first.writeFrame({ payload: enc.encode(`0.${frame}`) });
-		first.close();
+		first.finish();
 		const seen: string[] = [];
 		const initial = await sub.recvGroup();
 		if (!initial) throw new Error("expected group 0");
@@ -412,10 +416,10 @@ test("a lagging same-epoch replica resumes from one publisher's bytes exactly on
 		expect(interrupted.sequence).toBe(1);
 		for (let frame = 0; frame < 2; frame++) seen.push(dec.decode((await interrupted.readFrame())?.payload));
 		for (let frame = 2; frame < 4; frame++) open.writeFrame({ payload: enc.encode(`1.${frame}`) });
-		open.close();
+		open.finish();
 		const last = source.appendGroup();
 		for (let frame = 0; frame < 4; frame++) last.writeFrame({ payload: enc.encode(`2.${frame}`) });
-		last.close();
+		last.finish();
 
 		// The standby holds the complete original while the incumbent cannot pass 1.1.
 		for (let sequence = 0; sequence < 3; sequence++) {
@@ -527,7 +531,7 @@ test("a group whose route fails continues from the replacement", async () => {
 	tb.write(0, 2);
 	await swap();
 	// The old route's session goes, failing what it was still delivering.
-	stalled.close(new StreamError(StreamCode.SessionClosed));
+	stalled.abort(new StreamError(StreamCode.SessionClosed));
 	disposeA();
 	expect(dec.decode((await group.readFrame())?.payload)).toBe("0.1");
 	expect(await group.readFrame()).toBeUndefined();
@@ -549,7 +553,7 @@ test("a group no route continues is given up once a newer one supersedes it", as
 	// The new route never had group 0, and its group 1 is past a zero budget's reach for it.
 	tb.write(1);
 	await swap();
-	stalled.close(new StreamError(StreamCode.SessionClosed));
+	stalled.abort(new StreamError(StreamCode.SessionClosed));
 	await expect(group.readFrame()).rejects.toBeInstanceOf(StreamError);
 	expect(drain(sub)).toEqual([1]);
 
@@ -567,7 +571,7 @@ test("a replacement claiming different track properties is refused once the old 
 	expect(sub.closed.peek()).toBeUndefined();
 
 	// The old copy failing with its route is what ends the track.
-	old.close(new StreamError(StreamCode.SessionClosed));
+	old.abort(new StreamError(StreamCode.SessionClosed));
 	await settle();
 	expect(() => sub.tryRecvGroup()).toThrow("changed its properties");
 
@@ -586,7 +590,7 @@ test("waiting for the end of a track whose replacement was refused ends with the
 	finished.catch(() => {});
 
 	// The old copy failing with its route leaves only the refusal.
-	old.close(new StreamError(StreamCode.SessionClosed));
+	old.abort(new StreamError(StreamCode.SessionClosed));
 	await expect(finished).rejects.toThrow("changed its properties");
 
 	sub.close();
@@ -614,10 +618,10 @@ test("a fetched group continued from an empty, already-closed copy releases that
 		const group = await front.consumer.track("fetch").fetchGroup(5);
 		const read = group.readFrame();
 		const whole = b.createTrack("fetch").createGroup(5);
-		whole.close();
+		whole.finish();
 		front.serve(b.consume());
 		await settle();
-		failing.close(new StreamError(StreamCode.SessionClosed));
+		failing.abort(new StreamError(StreamCode.SessionClosed));
 		expect(await read).toBeUndefined();
 		group.close();
 		await settle();
@@ -656,7 +660,7 @@ test("a fetched group failing as it is handed out releases its route once", asyn
 		failing.writeFrame({ payload: enc.encode("5.0") });
 		const fetching = front.consumer.track("fetch").fetchGroup(5);
 		for (let turn = 0; turn < turns; turn++) await Promise.resolve();
-		failing.close(new StreamError(StreamCode.SessionClosed));
+		failing.abort(new StreamError(StreamCode.SessionClosed));
 		await settle();
 
 		// The next route holds the fetched group whole; the old one still feeds the reader a
@@ -665,7 +669,7 @@ test("a fetched group failing as it is handed out releases its route once", asyn
 		const whole = fb.createGroup(5);
 		whole.writeFrame({ payload: enc.encode("5.0") });
 		whole.writeFrame({ payload: enc.encode("5.1") });
-		whole.close();
+		whole.finish();
 		b.createTrack("seq");
 		front.serve(b.consume());
 		const group = await fetching;
@@ -790,7 +794,7 @@ test("a route that goes for good ends the track as its last copy does", async ()
 	ta.write(0);
 	expect(drain(sub)).toEqual([0]);
 
-	ta.producer.close(new StreamError(StreamCode.SessionClosed));
+	ta.producer.abort(new StreamError(StreamCode.SessionClosed));
 	disposeA();
 	await settle();
 	expect(request.active.peek()).toBeUndefined();
@@ -874,7 +878,7 @@ test("a fetched group continues from the next route once its own fails", async (
 
 	tb.write(5, 2);
 	front.serve(b.consume());
-	stalled.close(new StreamError(StreamCode.SessionClosed));
+	stalled.abort(new StreamError(StreamCode.SessionClosed));
 	expect(dec.decode((await group.readFrame())?.payload)).toBe("5.1");
 	expect(await group.readFrame()).toBeUndefined();
 
@@ -896,7 +900,7 @@ test("a replacement spliced before the first copy answers is still checked again
 	await settle();
 	expect((await sub.info()).priority).toBe(1);
 
-	old.close(new StreamError(StreamCode.SessionClosed));
+	old.abort(new StreamError(StreamCode.SessionClosed));
 	await settle();
 	expect(() => sub.tryRecvGroup()).toThrow("changed its properties");
 
@@ -973,7 +977,7 @@ test("a recovery fetch a later route supersedes is abandoned", async () => {
 	// The next route does not have the group yet: recovery fetches it there and waits.
 	front.serve(b.consume());
 	await settle();
-	stalled.close(new StreamError(StreamCode.SessionClosed));
+	stalled.abort(new StreamError(StreamCode.SessionClosed));
 	const read = group.readFrame();
 	await settle();
 	const fetching = tb.producer.demand().wanted.peek() !== undefined;
@@ -1008,7 +1012,7 @@ for (const fails of [true, false]) {
 		const group = sub.tryRecvGroup();
 		if (!group) throw new Error("expected group 0");
 		expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
-		if (fails) stalled.close(new StreamError(StreamCode.SessionClosed));
+		if (fails) stalled.abort(new StreamError(StreamCode.SessionClosed));
 
 		front.serve(b.consume());
 		const read = group.readFrame();
@@ -1146,8 +1150,8 @@ test("a drop a replaced route held back is no verdict on the route serving next"
 	expect(recvDisposition(sub)).toBe("idle");
 	front.serve(c.consume());
 	await settle();
-	ta.producer.close(new StreamError(StreamCode.SessionClosed));
-	tb.producer.close(new StreamError(StreamCode.SessionClosed));
+	ta.producer.abort(new StreamError(StreamCode.SessionClosed));
+	tb.producer.abort(new StreamError(StreamCode.SessionClosed));
 	await settle();
 	expect(recvDisposition(sub)).toBe("idle");
 	tc.write(1);
@@ -1257,7 +1261,7 @@ test("a failed group on a route whose replacement was refused ends with the refu
 
 	front.serve(b.consume());
 	await settle();
-	stalled.close(new StreamError(StreamCode.SessionClosed));
+	stalled.abort(new StreamError(StreamCode.SessionClosed));
 	await expect(group.readFrame()).rejects.toThrow("changed its properties");
 
 	sub.close();
@@ -1303,7 +1307,7 @@ test("a failed group whose replacement cannot fetch ends with the failure, or co
 		front.serve(Unfetchable.of(b.consume()));
 		await settle();
 		const failure = new StreamError(StreamCode.Cancel);
-		stalled.close(failure);
+		stalled.abort(failure);
 		if (held) {
 			expect(dec.decode((await group.readFrame())?.payload)).toBe("0.1");
 			expect(await group.readFrame()).toBeUndefined();
@@ -1326,6 +1330,7 @@ test("draining groups to their end leaves buffered datagrams readable", async ()
 	const sub = front.consumer.track("seq").subscribe();
 	ta.write(0);
 	ta.producer.appendDatagram(undefined, enc.encode("d"));
+	ta.producer.finish();
 	ta.producer.close();
 	expect(drain(sub)).toEqual([0]);
 	expect(await sub.recvGroup()).toBeUndefined();
@@ -1367,7 +1372,7 @@ test("a fetch never reads a replacement refused for its track properties", async
 	const tb = b.createTrack("seq", { priority: 2 });
 	const group = tb.createGroup(0);
 	group.writeFrame({ payload: enc.encode("b") });
-	group.close();
+	group.finish();
 	front.serve(a.consume());
 	await front.consumer.track("seq").info();
 	front.serve(b.consume());
@@ -1389,7 +1394,7 @@ test("the first fetch of a track says what the track is for later routes", async
 		const producer = source.createTrack("seq", { priority });
 		const group = producer.createGroup(0);
 		group.writeFrame({ payload: enc.encode(`${priority}`) });
-		group.close();
+		group.finish();
 	}
 	front.serve(a.consume());
 	(await front.consumer.track("seq").fetchGroup(0)).close();
@@ -1563,7 +1568,7 @@ test.each([
 		// Both routes hold group 1: the old one whole, the serving one failing after a frame.
 		ta.write(1, 2);
 		const failing = tb.write(1, 1, false);
-		const fail = () => failing.close(new StreamError(StreamCode.SessionClosed));
+		const fail = () => failing.abort(new StreamError(StreamCode.SessionClosed));
 		if (early) fail();
 		const group = await next();
 		if (group?.sequence !== 1) throw new Error("expected group 1");
@@ -1610,10 +1615,10 @@ test.each([true, false])(
 		expect(dec.decode((await group.readFrame())?.payload)).toBe("1.0");
 
 		// The old route goes away, and the reader reads on and sees its copy end.
-		ta.producer.close(new StreamError(StreamCode.SessionClosed));
+		ta.producer.abort(new StreamError(StreamCode.SessionClosed));
 		const later = next();
 		await settle();
-		failing.close(new StreamError(StreamCode.SessionClosed));
+		failing.abort(new StreamError(StreamCode.SessionClosed));
 		expect(dec.decode((await group.readFrame())?.payload)).toBe("1.1");
 		expect(await group.readFrame()).toBeUndefined();
 
@@ -1640,7 +1645,7 @@ test("a fetched group that fails on the route still serving waits for the next r
 	expect(dec.decode((await group.readFrame())?.payload)).toBe("5.0");
 
 	// Its route stays current, so its only copy of group 5 is the failed one.
-	failing.close(new StreamError(StreamCode.SessionClosed));
+	failing.abort(new StreamError(StreamCode.SessionClosed));
 	const read = group.readFrame();
 	// Timers still run: recovery does not spin on the failed copy.
 	await settle();
@@ -1666,7 +1671,7 @@ test("a group handed out already failed with its route still continues on the ne
 	const sub = front.consumer.track("seq").subscribe();
 	// The old route fails group 0 before the reader takes it.
 	const failed = ta.write(0, 1, false);
-	failed.close(new StreamError(StreamCode.SessionClosed));
+	failed.abort(new StreamError(StreamCode.SessionClosed));
 	const group = sub.tryRecvGroup();
 	if (!group) throw new Error("expected group 0");
 	expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
@@ -1787,7 +1792,7 @@ test("a fetch waits for the copy being read to say what the track is", async () 
 	const tb = b.createTrack("seq", { priority: 2 });
 	const group = tb.createGroup(0);
 	group.writeFrame({ payload: enc.encode("b") });
-	group.close();
+	group.finish();
 	front.serve(a.consume());
 	const sub = front.consumer.track("seq").subscribe();
 	front.serve(b.consume());
@@ -1893,7 +1898,7 @@ test("the largest follows the serving copy across a swap without moving back, an
 	expect(hooks.peekLargest(sub).largest).toEqual({ group: 3, frame: 0 });
 
 	// The route fails: its copy's stream ends, the logical track's does not.
-	ta.producer.close(new StreamError(StreamCode.SessionClosed));
+	ta.producer.abort(new StreamError(StreamCode.SessionClosed));
 	let settled = false;
 	const next = sub.largest().finally(() => {
 		settled = true;
@@ -1912,6 +1917,7 @@ test("the largest follows the serving copy across a swap without moving back, an
 	// No route replaces this one: the stream ends with its copy.
 	front.conclude();
 	const last = sub.largest();
+	tb.producer.finish();
 	tb.producer.close();
 	expect(await last).toBeUndefined();
 
@@ -2082,7 +2088,7 @@ test.each([true, false])(
 
 		// The old route finishes group 1 only now, and the new route's copy of it fails.
 		ta.write(1, 2);
-		failing.close(new StreamError(StreamCode.SessionClosed));
+		failing.abort(new StreamError(StreamCode.SessionClosed));
 		expect(dec.decode((await group.readFrame())?.payload)).toBe("1.1");
 		expect(await group.readFrame()).toBeUndefined();
 
@@ -2114,7 +2120,7 @@ test.each([true, false])("a replaced copy backs a group before its first arrival
 	front.serve(b.consume());
 	await settle();
 	// Its route fails once replaced: closing cleanly would declare the track ends at group 1.
-	ta.producer.close(new StreamError(StreamCode.SessionClosed));
+	ta.producer.abort(new StreamError(StreamCode.SessionClosed));
 	front.serve(c.consume());
 	await settle();
 
@@ -2127,7 +2133,7 @@ test.each([true, false])("a replaced copy backs a group before its first arrival
 
 	// b's first group lands only now, and c's copy of it fails.
 	tb.write(1, 2);
-	failing.close(new StreamError(StreamCode.SessionClosed));
+	failing.abort(new StreamError(StreamCode.SessionClosed));
 	expect(dec.decode((await group.readFrame())?.payload)).toBe("1.1");
 	expect(await group.readFrame()).toBeUndefined();
 
@@ -2157,6 +2163,7 @@ test("a clean end waits for a group the replaced copy still carries", async () =
 
 		// The new route has only the group already handed out, and ends there.
 		tb.write(2);
+		tb.producer.finish();
 		tb.producer.close();
 		front.serve(b.consume());
 		await settle();
@@ -2279,6 +2286,7 @@ test("the serving copy closing cleanly settles closed and leaves its datagrams r
 	const sub = front.consumer.track("seq").subscribe();
 	ta.write(0);
 	ta.producer.appendDatagram(undefined, enc.encode("d"));
+	ta.producer.finish();
 	ta.producer.close();
 	await settle();
 	expect(sub.closed.peek()).toBeNull();
@@ -2307,14 +2315,14 @@ test("an end a replaced copy declared holds across a swap", async () => {
 	// b serves before its subscription learns the end.
 	front.serve(b.consume());
 	await settle();
-	expect(sub.end()).toEqual({ group: 2, frame: 0 });
+	expect(hooks.subscriberEnd(sub)).toEqual({ group: 2, frame: 0 });
 	expect(await sub.finished()).toEqual({ group: 2, frame: 0 });
 
 	// A copy declaring another end claims different content.
 	tb.producer.finishAt({ group: 3, frame: 0 });
 	await settle();
 	expect(sub.closed.peek()).toBeInstanceOf(Error);
-	expect(sub.end()).toEqual({ group: 2, frame: 0 });
+	expect(hooks.subscriberEnd(sub)).toEqual({ group: 2, frame: 0 });
 	// Refused, the reader holds no copy.
 	expect(ta.producer.demand().wanted.peek()).toBeUndefined();
 	expect(tb.producer.demand().wanted.peek()).toBeUndefined();
@@ -2339,7 +2347,7 @@ test("an end a replaced copy declared holds once the copy is let go in the same 
 	// A datagram read lets go of the replaced copy before its end is reported.
 	ta.producer.finishAt({ group: 2, frame: 0 });
 	expect(hooks.tryRecvDatagram(sub).kind).toBe("idle");
-	expect(sub.end()).toEqual({ group: 2, frame: 0 });
+	expect(hooks.subscriberEnd(sub)).toEqual({ group: 2, frame: 0 });
 
 	tb.producer.finishAt({ group: 3, frame: 0 });
 	await settle();
@@ -2371,7 +2379,7 @@ test("a replaced copy whose session closed locally binds no end", async () => {
 	tb.write(1);
 	await settle();
 	expect(drain(sub)).toEqual([1]);
-	expect(sub.end()).toBeUndefined();
+	expect(hooks.subscriberEnd(sub)).toBeUndefined();
 	expect(sub.closed.peek()).toBeUndefined();
 
 	sub.close();
@@ -2433,7 +2441,7 @@ test("closing with an abort settles a recovery in flight with it", async () => {
 	// The next route does not have the group yet: recovery fetches it there and waits.
 	front.serve(b.consume());
 	await settle();
-	stalled.close(new StreamError(StreamCode.SessionClosed));
+	stalled.abort(new StreamError(StreamCode.SessionClosed));
 	const read = group.readFrame();
 	await settle();
 	const abort = new Error("aborted");
@@ -2465,6 +2473,7 @@ test.each(["lands", "expired"])(
 
 			// The new route has only the group already handed out, and ends there. Nothing reads.
 			tb.write(2);
+			tb.producer.finish();
 			tb.producer.close();
 			front.serve(b.consume());
 			await settle();
@@ -2598,13 +2607,14 @@ test("a clean end keeps the serving copy while a group read from a replaced one 
 
 		// The new route has all of group 1 and ends there.
 		tb.write(1, 2);
+		tb.producer.finish();
 		tb.producer.close();
 		await settle();
 		expect(sub.closed.peek()).toBeNull();
 		expect(dec.decode((await group.readFrame())?.payload)).toBe("1.0");
 
 		// The old route fails: the group continues from the copy that ended.
-		stalled.close(new StreamError(StreamCode.SessionClosed));
+		stalled.abort(new StreamError(StreamCode.SessionClosed));
 		expect(dec.decode((await group.readFrame())?.payload)).toBe("1.1");
 		expect(await group.readFrame()).toBeUndefined();
 		group.close();
@@ -2632,6 +2642,7 @@ test("a retained copy declaring another end after a clean end fails the reads", 
 		// The new route ends at 3, while the old one still owes group 1.
 		tb.write(2);
 		tb.producer.finishAt({ group: 3, frame: 0 });
+		tb.producer.finish();
 		tb.producer.close();
 		front.serve(b.consume());
 		await settle();
@@ -2642,7 +2653,7 @@ test("a retained copy declaring another end after a clean end fails the reads", 
 		// The copy still holding group 1 claims another end: its content is refused.
 		ta.producer.finishAt({ group: 5, frame: 0 });
 		await settle();
-		expect(sub.end()).toEqual({ group: 3, frame: 0 });
+		expect(hooks.subscriberEnd(sub)).toEqual({ group: 3, frame: 0 });
 		await expect(sub.recvGroup()).rejects.toThrow("changed its properties");
 	} finally {
 		sub.close();
@@ -2671,12 +2682,13 @@ test("a clean end keeps the serving copy while a group handed out before the swa
 		front.serve(b.consume());
 		await settle();
 		tb.write(0, 2);
+		tb.producer.finish();
 		tb.producer.close();
 		await settle();
 		expect(sub.closed.peek()).toBeNull();
 
 		// The old route fails: the group continues from the copy that ended.
-		stalled.close(new StreamError(StreamCode.SessionClosed));
+		stalled.abort(new StreamError(StreamCode.SessionClosed));
 		expect(dec.decode((await group.readFrame())?.payload)).toBe("0.1");
 		expect(await group.readFrame()).toBeUndefined();
 		group.close();
@@ -2894,7 +2906,7 @@ for (const fetched of [false, true]) {
 			if (!hostile) return undefined;
 			const copy = new GroupProducer(sequence);
 			copy.writeFrame({ payload: enc.encode(`${sequence}.0`) });
-			setTimeout(() => copy.close(malformed), 0);
+			setTimeout(() => copy.abort(malformed), 0);
 			return copy.consume();
 		});
 		const sub = front.consumer.track("seq").subscribe();
@@ -2905,7 +2917,7 @@ for (const fetched of [false, true]) {
 		asked.length = 0;
 		hostile = true;
 
-		stalled.close(malformed);
+		stalled.abort(malformed);
 		await expect(group.readFrame()).rejects.toBe(malformed);
 		await settle();
 		expect(asked).toEqual([]);
@@ -2933,10 +2945,10 @@ test("a verdict every route repeats moves to the newer route once, then ends the
 
 	front.serve(routeB.route);
 	await settle();
-	stalled.close(malformed);
+	stalled.abort(malformed);
 	const read = group.readFrame();
 	expect(await isPending(read)).toBe(true);
-	repeat.close(malformed);
+	repeat.abort(malformed);
 	await expect(read).rejects.toBe(malformed);
 	await expect(group.readFrame()).rejects.toBe(malformed);
 	expect([routeA.asked, routeB.asked]).toEqual([[], []]);

@@ -46,7 +46,7 @@ test("Consumer waits on a non-sequential hang group because it has no per-frame 
 		payload: encodeLegacyFrame(0 as Micro, new Uint8Array([0x01])),
 		timestamp: Time.Timestamp.now(),
 	});
-	a.close();
+	a.finish();
 
 	// Drain A's frame.
 	const firstFrame = await nextFrame(consumer);

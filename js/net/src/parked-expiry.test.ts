@@ -37,7 +37,7 @@ for (const protocol of protocols) {
 			const write = (sequence: number) => {
 				const group = track.createGroup(sequence);
 				group.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.fromMillis(0) });
-				group.close();
+				group.finish();
 			};
 
 			write(0);
@@ -162,7 +162,7 @@ for (const protocol of protocols) {
 			for (let frame = 0; frame < frames; frame++) {
 				group.writeFrame({ payload: new Uint8Array([frame]), timestamp: Timestamp.fromMillis(0) });
 			}
-			group.close();
+			group.finish();
 		};
 
 		// Two frames, so the second is still unread while the stream's first write waits on credit.

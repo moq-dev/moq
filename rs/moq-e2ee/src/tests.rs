@@ -521,7 +521,7 @@ fn refused_track_is_aborted() {
 	);
 	assert!(matches!(
 		net.poll_closed(&kio::Waiter::noop()),
-		Poll::Ready(moq_net::Error::Cancel)
+		Poll::Ready(Err(moq_net::Error::Cancel))
 	));
 }
 

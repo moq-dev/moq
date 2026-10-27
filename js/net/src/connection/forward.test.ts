@@ -7,6 +7,7 @@ import * as Epoch from "../epoch.ts";
 import { Route } from "../hop.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
+import { closeUnwanted } from "../util/announce.ts";
 import { registerWire, wireOf } from "../wire.ts";
 import type { Established } from "./established.ts";
 import { forwardAnnounced } from "./forward.ts";
@@ -66,7 +67,10 @@ class FakeSession {
 		const stream = new Announce.Producer();
 		this.requests.push({ scope: scope.text, hidden: options?.hidden, stream });
 		if (this.syncedAtOnce) stream.synced();
-		return stream.consume();
+		const consumer = stream.consume();
+		// The last reader leaving cancels the request, as a session's does.
+		closeUnwanted(stream);
+		return consumer;
 	}
 
 	/** The scopes of the announce requests still open. */

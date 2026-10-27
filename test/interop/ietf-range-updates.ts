@@ -34,7 +34,7 @@ const streams: number[][] = [];
 function publishGroup() {
 	const group = track.appendGroup();
 	for (let object = 0; object < 2; object++) group.writeFrame({ payload: new Uint8Array([group.sequence, object]) });
-	group.close();
+	group.finish();
 }
 async function response(expected: number) {
 	const type = await client.reader.u53();

@@ -367,6 +367,7 @@ export class Broadcast {
 		const kinds = new Map<string, Kind>();
 		this.#kinds = kinds;
 		effect.cleanup(() => {
+			for (const { track } of tracks.values()) track.finish();
 			for (const { track } of tracks.values()) track.close();
 			if (this.#kinds === kinds) this.#kinds = new Map();
 		});
@@ -398,7 +399,10 @@ export class Broadcast {
 						maxAge: Milli(Number.MAX_SAFE_INTEGER),
 						priority: Catalog.PRIORITY.catalog,
 					});
-					effect.cleanup(() => track.close());
+					effect.cleanup(() => {
+						track.finish();
+						track.close();
+					});
 					this.catalog.serve(track, effect, { compression });
 				}
 			}
@@ -418,11 +422,12 @@ export class Broadcast {
 
 				let entry = tracks.get(rendition.name);
 				const cause = entry && errors.get(entry.owner)?.peek();
-				if (entry && cause) entry.track.close(cause);
+				if (entry && cause) entry.track.abort(cause);
 				const name = names[rendition.name] ?? rendition.name;
 				if (entry && entry.track.name !== name) {
 					// The catalog moved this rendition to a new name for new media. End the old track
 					// cleanly on its last identity, so its subscribers follow the catalog.
+					entry.track.finish();
 					entry.track.close();
 					entry = undefined;
 				} else if (entry && entry.owner !== rendition && entry.track.closed.peek() !== undefined) {
@@ -449,7 +454,7 @@ export class Broadcast {
 				if (error) {
 					inner.run((failure) => {
 						const cause = failure.get(error);
-						if (cause) served.close(cause);
+						if (cause) served.abort(cause);
 					});
 				}
 				inner.run((demand) => {

@@ -100,7 +100,7 @@ async function measure(t: Arrival[], budget: (target: Milli) => Milli): Promise<
 				const media = Micro.fromMilli(t[next].media as Milli);
 				const group = track.createGroup(next);
 				group.writeFrame({ payload: encode(media), timestamp: Time.Timestamp.fromMicros(media) });
-				group.close();
+				group.finish();
 			}
 
 			// A macrotask boundary, so the group readers have observed everything written above.
@@ -111,6 +111,7 @@ async function measure(t: Arrival[], budget: (target: Milli) => Milli): Promise<
 			subscriber.update({ maxDelay: budget(current) });
 		}
 	} finally {
+		track.finish();
 		track.close();
 		consumer.close();
 		await reader;

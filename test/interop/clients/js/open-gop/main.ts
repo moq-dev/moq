@@ -64,7 +64,7 @@ window.runRecovery = async (packets) => {
 	let group: Moq.Group.Producer | undefined;
 	for (const packet of packets) {
 		if (group?.sequence !== packet.group) {
-			group?.close();
+			group?.finish();
 			group = track.createGroup(packet.group);
 		}
 		const timestamp = Micro(packet.timestamp);
@@ -74,7 +74,8 @@ window.runRecovery = async (packets) => {
 			timestamp: Moq.Time.Timestamp.fromMicros(timestamp),
 		});
 	}
-	group?.close();
+	group?.finish();
+	track.finish();
 	track.close();
 	const media = producer.consume();
 	const config = Catalog.VideoConfigSchema.parse({

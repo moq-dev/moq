@@ -30,8 +30,9 @@ try {
 					for (let sequence = 0; sequence < groups; sequence++) {
 						const group = track.createGroup(sequence);
 						group.writeFrame(textFrame("frame"));
-						group.close();
+						group.finish();
 					}
+					track.finish();
 					track.close();
 					return { origin, broadcast };
 				});
