@@ -63,5 +63,4 @@ Evidence so far, from the platform jobs of scheduled Nightlies
 
 ## Related
 
-- [Require the release gate](/quest/m0/ci/release-gates.md) - the macOS and Windows jobs this cache serves
 - [Verify the Nix cache](/quest/m0/ci/nix-cache-verify.md) - the same R2 and Environment bootstrap for Nix
