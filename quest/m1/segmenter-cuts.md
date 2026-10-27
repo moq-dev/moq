@@ -15,17 +15,22 @@ come from a declared fMP4 segment, including a `styp` box in network input
 that sends `styp` segments with rising pts and no sync sample never starts a
 group, so the queue grows by one entry per segment.
 
-A group start drops every cut at or before its start, so of the cuts at or
-before the latest reported frame only the latest can still end a segment.
-Collapse those into one as frames arrive, and queue only the cuts beyond the
-latest frame. A lone `Option<Timestamp>` would assume more than the callers
-promise: both callers in `container/fmp4/import.rs` declare a fragment's cut at
-its earliest pts just before reporting that fragment's frames, so a network
-input holds at most one cut beyond the latest frame, but `cut()` itself accepts
-cuts ahead of any frame. With cuts at 10 and 20 pending, a group at 15 must take the 10
-boundary and keep 20; add a test of that case. The existing
-`explicit_cuts_override_the_grid` test stays as a regression guard: it declares
-both cuts before any group, so it needs both boundaries.
+No compaction is equivalent to the queue. A group start drops the cuts at or
+before its start, but the only lower bound on the next group start is the
+current one: `container::Producer::write` lets a keyframe dip below the previous
+group's content, and fMP4 validates rising DTS, not PTS. So with cuts at 10 and
+20 and frames reported at both, a group at 15 still needs the 10 boundary, and
+neither a lone `Option<Timestamp>` nor collapsing against the latest frame keeps
+it. Both callers in `container/fmp4/import.rs` declare a fragment's cut at its
+earliest pts just before reporting that fragment's frames.
+
+Open question for the maintainer: which bounded policy drops a boundary when a
+source declares more cuts than groups, given the ceiling already caps segment
+length (for example, keep the earliest and latest pending cuts), or whether a
+reorder window can supply a tighter lower bound. Add a test of the 10, 20, 15
+case. The existing `explicit_cuts_override_the_grid` test stays as a
+regression guard: it declares both cuts before any group, so it needs both
+boundaries.
 
 Public API: none. Wire: none.
 
