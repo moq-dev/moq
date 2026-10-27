@@ -29,19 +29,20 @@ Decided 2026-10-27:
 
 - Spike two designs on one branch, bench both against the `BTreeMap`
   baseline, keep only the winner, and record the table in the PR.
-  - **Split rings.** One ring holds full `SentPacket`s for every packet
-    counted in flight (`size != 0`). That covers every ack-eliciting packet
-    and every padded ACK-only packet, which `finish_and_track` gives
-    `congestion` state and `PathData::remove_in_flight` debits by
-    `path_generation`. This ring is indexed by entry, not packet number:
-    guess `pn - front_pn`, then binary-search. The congestion window plus
-    PTO probes bounds it while the peer is silent. Once the peer ACKs,
-    anything more than 3 below its largest ACK is lost, so tombstones stay
-    near the front. A second ring holds compact records (packet number, send
-    time, largest acked) for zero-size ACK-only packets, which carry no
-    congestion or path state. It is capped at today's 1000 and forgets its
-    oldest, which RFC 9000 allows since those packets carry nothing to
-    retransmit. This drops the `unacked_non_ack_eliciting_tail` bookkeeping.
+  - **Split rings.** One ring holds the ack-eliciting packets. It is indexed
+    by entry, not packet number: guess `pn - front_pn`, then binary-search.
+    While the peer is silent, the congestion window bounds it, plus PTO
+    probes. Probes bypass cwnd but back off up to `2^MAX_BACKOFF_EXPONENT`,
+    and each costs one entry, as in today's `BTreeMap`. Once the peer ACKs,
+    anything more than `packet_threshold` below its largest ACK is lost, so
+    tombstones stay near the front. A second ring holds every ACK-only
+    packet, capped at today's 1000 and forgetting its oldest, which RFC 9000
+    allows since those packets carry nothing to retransmit. It keeps full
+    records, because `pad_to_mtu` pads ACK-only packets without a cwnd gate
+    and `finish_and_track` gives them `congestion` state. Evicting one
+    debits in-flight bytes and congestion state by `path_generation`, as
+    today's forgotten tail does. This drops the
+    `unacked_non_ack_eliciting_tail` bookkeeping.
   - **Chunked slots.** Port #2942 with a `VecDeque` of chunks, so front
     removal is O(1). It is the no-behavior-change reference point.
 - Pick the winner this way. First, it must keep storage bounded by live
@@ -69,9 +70,16 @@ Guidance:
   acknowledged" for persistent congestion, so it walks both rings merged.
   ACK processing and `get` (the largest-acked send time) also span both
   rings. Bandwidth-probe sources are ack-eliciting only.
+- Split rings evict the oldest ACK-only packet anywhere, not only in the
+  tail. The gap that leaves between two lost ack-eliciting packets reads as
+  "an intervening packet was acknowledged" and resets persistent congestion.
+  Decided 2026-10-27: accept and document it. Skipped packet numbers and
+  today's forgotten tail make the same gaps already, and the error only
+  under-declares persistent congestion after 1000 unACKed ACK-only packets.
 - Correctness tests cover padded ACK-only packets, both ACKed and lost,
   including after a path migration, so congestion feedback and in-flight
-  bytes stay exact.
+  bytes stay exact. The bound test includes a padded, never-ACKed receiver
+  and repeated PTOs.
 - Add `rs/moq-quic/benches/sent_packets.rs` with these scenarios:
   - #2942's three: typical connection, unacked non-ack-eliciting tail, and
     PTO probe holes.
