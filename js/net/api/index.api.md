@@ -13,7 +13,7 @@ export namespace Announce {
 		route: Origin.Route;
 	}
 	export class Consumer {
-		[asyncIterator](): AsyncGenerator<Announce.Event, void, undefined>;
+		[Symbol.asyncIterator](): AsyncGenerator<Announce.Event, void, undefined>;
 		close(): void;
 		get closed(): Signals.GetPromise<Error | null>;
 		next(): Promise<Announce.Event | undefined>;
@@ -64,7 +64,7 @@ export namespace Bandwidth {
 		reserve(track: Track.Demand, max: number): Bandwidth.Reservation;
 	}
 	export class Reservation implements Disposable {
-		[dispose](): void;
+		[Symbol.dispose](): void;
 		close(): void;
 		peek(): number | undefined;
 		get rate(): Signals.Getter<number | undefined>;
@@ -94,7 +94,7 @@ export namespace Broadcast {
 		track(name: string): Track.Consumer;
 	}
 	export class Tracks {
-		[asyncIterator](): AsyncGenerator<Broadcast.TracksEvent, void, undefined>;
+		[Symbol.asyncIterator](): AsyncGenerator<Broadcast.TracksEvent, void, undefined>;
 		close(): void;
 		next(): Promise<Broadcast.TracksEvent | undefined>;
 	}
@@ -365,7 +365,7 @@ export namespace Origin {
 	export type Hop = infer<typeof Origin.HopSchema>;
 	export const HopSchema: $ZodBranded<ZodMiniBigInt<bigint>, "Hop", "out">;
 	export class Prepared {
-		[dispose](): void;
+		[Symbol.dispose](): void;
 		readonly broadcast: Broadcast.Producer;
 		close(): void;
 		publish(): Origin.Publication;

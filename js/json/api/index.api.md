@@ -39,7 +39,7 @@ export namespace Snapshot {
 	}
 	export class Consumer<T> {
 		constructor(config: Snapshot.Consumer.Config<T>);
-		[asyncIterator](): AsyncIterator<Timed<T>>;
+		[Symbol.asyncIterator](): AsyncIterator<Timed<T>>;
 		latest(): Promise<Timed<T> | undefined>;
 		next(): Promise<Timed<T> | undefined>;
 	}
@@ -91,7 +91,7 @@ export namespace Stream {
 	}
 	export class Consumer<T> {
 		constructor(config: Stream.Consumer.Config<T>);
-		[asyncIterator](): AsyncIterator<Timed<T>>;
+		[Symbol.asyncIterator](): AsyncIterator<Timed<T>>;
 		next(): Promise<Timed<T> | undefined>;
 	}
 	export class Decoder<T> {
@@ -132,7 +132,7 @@ export namespace Window {
 	}
 	export class Consumer<T> {
 		constructor(config: Window.ConsumerConfig);
-		[asyncIterator](): AsyncIterator<Timed<Window.Event<T>>>;
+		[Symbol.asyncIterator](): AsyncIterator<Timed<Window.Event<T>>>;
 		next(): Promise<Timed<Window.Event<T>> | undefined>;
 		get offset(): number;
 	}

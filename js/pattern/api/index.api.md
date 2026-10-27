@@ -45,7 +45,7 @@ export class Pattern {
 
 export class Patterns implements Iterable<Pattern> {
 	constructor(patterns?: Iterable<Pattern>);
-	[iterator](): Iterator<Pattern>;
+	[Symbol.iterator](): Iterator<Pattern>;
 	contains(pattern: Pattern): boolean;
 	covers(other: Patterns): boolean;
 	equals(other: Patterns): boolean;

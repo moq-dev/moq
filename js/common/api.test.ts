@@ -68,6 +68,8 @@ export declare class Reader<T extends Value = Value> {
 	constructor(source: Value);
 	/** How many were read. */
 	get count(): number;
+	/** Read each, in turn. */
+	[Symbol.asyncIterator](): AsyncIterator<T>;
 }
 declare const _default: Reader;
 export default _default;
@@ -76,6 +78,7 @@ export default _default;
 	await checkReports(directory);
 	expect(report(directory)).toBe(`export class Reader<T extends Value = Value> {
 	constructor(source: Value);
+	[Symbol.asyncIterator](): AsyncIterator<T>;
 	get count(): number;
 	read(options?: {
 		signal?: AbortSignal;
@@ -311,11 +314,16 @@ export declare namespace Audio {
 		/** Its area. */
 		area: number;
 	}
+	/** A name the alias for the outer shape must not take. */
+	interface Shape_1 {
+		/** Another member. */
+		different: string;
+	}
 }
 `,
 	});
 	await checkReports(directory);
-	expect(report(directory)).toBe(`import { Shape as Shape_1 } from "@moq/example";
+	expect(report(directory)).toBe(`import { Shape as Shape_2 } from "@moq/example";
 
 export namespace Audio {
 	export type Audio = Audio.File[];
@@ -323,9 +331,12 @@ export namespace Audio {
 		file: globalThis.File;
 	}
 	export type Rendition = import("@moq/example").Rendition<string>;
-	export class Shape implements Shape_1 {
+	export class Shape implements Shape_2 {
 		constructor();
 		area: number;
+	}
+	export interface Shape_1 {
+		different: string;
 	}
 }
 

@@ -163,6 +163,14 @@ async function reports(dir: string, declarations: string, check: boolean): Promi
 				literal(written) ? written : context.checker.getTypeOfSymbolAtLocation(symbol, declaration),
 			);
 		});
+		// TypeDoc names a member with a computed key by the key's own name, such as `[iterator]` for
+		// `[Symbol.iterator]`, which declares nothing: keep the key as written.
+		const computed = new Map<Reflection, string>();
+		app.converter.on(Converter.EVENT_CREATE_DECLARATION, (context, reflection) => {
+			const declaration = context.getSymbolFromReflection(reflection)?.declarations?.[0];
+			const name = (declaration as { name?: TypeNode & { getText(): string } } | undefined)?.name;
+			if (name?.kind === ts.SyntaxKind.ComputedPropertyName) computed.set(reflection, name.getText());
+		});
 		// A type-only export of a name that is both a value and a type exports the type, but TypeDoc
 		// also converts the value, as an alias of its type: drop that one when the type follows.
 		const values = new Map<TsSymbol, DeclarationReflection>();
@@ -262,6 +270,7 @@ async function reports(dir: string, declarations: string, check: boolean): Promi
 			context.setActiveProgram(undefined);
 		});
 		const project = await app.convert();
+		for (const [reflection, name] of computed) reflection.name = name;
 		if (!project || app.logger.hasErrors()) {
 			throw new Error(`TypeDoc failed on ${manifest.name}`);
 		}
@@ -309,7 +318,13 @@ const ts: {
 	sys: unknown;
 	NodeFlags: { Const: number };
 	SymbolFlags: { Module: number; Value: number };
-	SyntaxKind: { ThisType: number; TypeQuery: number; ImportType: number; TypeAliasDeclaration: number };
+	SyntaxKind: {
+		ThisType: number;
+		TypeQuery: number;
+		ImportType: number;
+		TypeAliasDeclaration: number;
+		ComputedPropertyName: number;
+	};
 	forEachChild<T>(node: TypeNode, visit: (child: TypeNode) => T | undefined): T | undefined;
 } = createRequire(import.meta.resolve("typedoc"))("typescript");
 
@@ -487,13 +502,22 @@ class Renderer {
 			from !== specifier && from !== "" && head !== "default" && sources.get(head)?.size === 1;
 		const imports = new Set<string>();
 		const aliases = new Map<string, string>();
+		// An alias must not be a name any scope here declares, which would hide it.
+		const declared = new Set<string>();
+		const walk = (item: DeclarationReflection) => {
+			for (const child of item.children ?? []) {
+				declared.add(child.name);
+				walk(child);
+			}
+		};
+		walk(module);
 		const bind = (from: string, head: string) => {
 			const key = `${from}\0${head}`;
 			let alias = aliases.get(key);
 			if (!alias) {
 				const base = head === "default" ? "Default" : head;
 				let i = 1;
-				while (sources.has(`${base}_${i}`)) i++;
+				while (sources.has(`${base}_${i}`) || declared.has(`${base}_${i}`)) i++;
 				alias = `${base}_${i}`;
 				sources.set(alias, new Set([from]));
 				aliases.set(key, alias);

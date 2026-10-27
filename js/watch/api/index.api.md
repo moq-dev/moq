@@ -13,7 +13,7 @@ export type Arrival = {
 };
 
 export interface Arrivals {
-	[asyncIterator](): AsyncIterator<Arrival>;
+	[Symbol.asyncIterator](): AsyncIterator<Arrival>;
 	close(): void;
 	next(): Promise<Arrival | undefined>;
 }

@@ -160,7 +160,7 @@ export namespace Health {
 
 export namespace Hls {
 	export class Consumer implements AsyncIterable<Hls.Event> {
-		[asyncIterator](): AsyncIterator<Hls.Event>;
+		[Symbol.asyncIterator](): AsyncIterator<Hls.Event>;
 		close(): void;
 		next(): Promise<Hls.Event | undefined>;
 		static subscribe(broadcast: Net.Broadcast.Consumer, hls: import("@moq/hang/catalog").Hls): Hls.Consumer;

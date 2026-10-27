@@ -34,7 +34,7 @@ export namespace Snapshot {
 	}
 	export class Consumer {
 		constructor(config: Snapshot.Consumer.Config);
-		[asyncIterator](): AsyncIterator<Timed<Uint8Array>>;
+		[Symbol.asyncIterator](): AsyncIterator<Timed<Uint8Array>>;
 		latest(): Promise<Timed<Uint8Array> | undefined>;
 		next(): Promise<Timed<Uint8Array> | undefined>;
 	}
@@ -61,7 +61,7 @@ export namespace Stream {
 	}
 	export class Consumer {
 		constructor(config: Stream.Consumer.Config);
-		[asyncIterator](): AsyncIterator<Timed<Uint8Array>>;
+		[Symbol.asyncIterator](): AsyncIterator<Timed<Uint8Array>>;
 		next(): Promise<Timed<Uint8Array> | undefined>;
 	}
 	export namespace Producer {
