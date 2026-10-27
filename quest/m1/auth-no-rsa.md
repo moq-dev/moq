@@ -12,10 +12,15 @@ moq-auth accepts today still signs and verifies.
 Source is implemented in [PR #6898](https://github.com/moq-dev/moq/pull/6898).
 Keep it draft until the required local gates pass. Remaining:
 
-- Fix the unrelated main failures separately: CARLA rustfmt differences under
-  `demo/carla/bridge`, and `rs/moq-mux/benches/catalog.rs:226` referencing removed
-  `hang::catalog::MAX_RENDITIONS`. No open fix for either was found at checkpoint.
-  Incidental CARLA formatting from the auth-scoped fix was restored.
+- The earlier CARLA formatter failure was an environment artifact, not a main
+  formatter bug: the nested checkout inherited an enclosing `rustfmt.toml`.
+  The unchanged `1f32d8d9d5b5cbea245ed45c20bc4fb5edc25e60` passes
+  `cargo fmt --manifest-path demo/carla/bridge/Cargo.toml --check` in a real
+  isolated checkout outside that parent. No formatter or backend change is needed.
+- Isolated full `just fix` still fails with E0425 at
+  `rs/moq-mux/benches/catalog.rs:226`, which references removed
+  `hang::catalog::MAX_RENDITIONS`. The checkout remains unchanged by the attempt.
+  Keep this unrelated benchmark correction outside the auth PR.
 - Resolve the local flake check's runner-image build restriction:
   `systemd-repart` cannot write `/proc/self/uid_map` (`Operation not permitted`).
   Evaluation alone does not count as a passing flake check.
@@ -50,9 +55,22 @@ package for inverse queries and forward trees independently confirm absence.
 Matching JavaScript imports refuse `oth` instead of dropping it, with both
 migration guides documenting the behavior and removed Rust conversions.
 
-Auth-scoped `just rs fix` passes. Full `just fix` fails at the unrelated benchmark
-reference above. Clean-head `just ci` fails in inherited CARLA rustfmt, cancelling
-other lanes; the independent passing phases do not constitute a passing full
-gate. Separate `nix flake check` fails on the host restriction above. Diagnostics
-are retained in the isolated checkout's `.tmp/`; do not rerun unchanged failures
-to green or fold their fixes into this PR.
+Auth-scoped `just rs fix` passes. The earlier nested clean-head `just ci` failed
+because CARLA inherited the enclosing formatter configuration; it was not a base
+source-format failure. The independent passing phases do not constitute a passing
+full gate. Earlier separate `nix flake check` failed on the host restriction above.
+
+### Isolated validation continuation
+
+The actual quest branch now runs in a real checkout outside the enclosing
+formatter configuration. The previous checkout is clean and detached; all 31
+ignored evidence files were copied with matching SHA256 hashes into the new
+checkout's `.tmp/previous-run/`. No unique work or proof was discarded.
+
+The unchanged original head passes the CARLA formatter check. Full isolated
+`just fix` exits 101 at the benchmark reference above and leaves the checkout
+clean. A clean committed-head `just ci` and any not-reached flake check are run
+from this isolation; their actual terminal results are recorded before handoff.
+Do not bypass shared admission, alter the host, retry unchanged failures to green,
+or fold unrelated fixes into this PR. The auth source and settled API plan remain
+unchanged; no maintainer decision remains.
