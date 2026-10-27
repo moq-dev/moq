@@ -82,4 +82,4 @@ pub(crate) use origin_impl::{InterestChange, Interests};
 pub(crate) use origin_impl::AnnounceProducer;
 
 #[cfg(all(test, feature = "async"))]
-pub(crate) use origin_impl::ProduceTest;
+pub(crate) use origin_impl::{ProduceTest, TestSelection};

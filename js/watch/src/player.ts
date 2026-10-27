@@ -60,16 +60,20 @@ export type PlayerInput = {
 	};
 };
 
-// The inputs nested under a media kind; the rest are flat.
-type Kind = "video" | "audio" | "text";
-
-/** Constructor options for {@link Player}; omitted controls use the element defaults. */
-export type PlayerProps = Inputs<Omit<PlayerInput, Kind>> & { [K in Kind]?: Inputs<PlayerInput[K]> };
+/**
+ * Constructor options for {@link Player}; omitted controls use the element defaults. The inputs of
+ * each media kind nest under its own key.
+ */
+export type PlayerProps = Inputs<Omit<PlayerInput, "video" | "audio" | "text">> & {
+	[K in "video" | "audio" | "text"]?: Inputs<PlayerInput[K]>;
+};
 
 /** Owns the broadcast, synchronized media pipelines, and their download policy. */
 export class Player {
 	/** Inputs wired into the pipeline. Pass signals to change them after construction. */
-	readonly in: Readonlys<Omit<PlayerInput, Kind>> & { readonly [K in Kind]: Readonlys<PlayerInput[K]> };
+	readonly in: Readonlys<Omit<PlayerInput, "video" | "audio" | "text">> & {
+		readonly [K in "video" | "audio" | "text"]: Readonlys<PlayerInput[K]>;
+	};
 	/** Broadcast subscription and effective catalog. */
 	readonly broadcast: Broadcast;
 	/** Shared audio, video, and caption clock. */

@@ -52,6 +52,7 @@ mod segmented_frame;
 mod session_close;
 mod session_panic;
 mod settled_end_survives_abort;
+mod setup_negotiation;
 mod source_errors;
 mod stream_credit;
 mod subscribe_priority;

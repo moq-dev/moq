@@ -45,8 +45,10 @@ histogram and dropped counters across.
 
 Decided (2026-10-08): the egress histogram is its own quest,
 [viewer lag histogram](/quest/m2/qos/lag-histogram.md), since every other
-child reads it. The line's PR, #4133, closed without landing (2026-10-09);
-its code is kept on `wip/4133-lag-histogram`.
+child reads it. The line's PR, #4133, closed without landing (2026-10-09).
+Its port, #6791, closed unmerged on 2026-10-26 to wait for the ACK hook,
+since `lag` and `dropped` are measured per acknowledged frame; its branch is
+the histogram quest's starting point.
 
 Decided (2026-09-28): the line's moq-stats changes break the published
 crate. Client stats left the line (2026-09-29)

@@ -34,4 +34,4 @@ Public API: none. Wire: none.
 - [moq-net compiles in Fuzz and send-depth](/quest/m0/nightly/send-overflow.md) - the ietf publisher future stops overflowing the Send check
 - [OBS audio-candidate test](/quest/m0/nightly/obs-audio-candidate.md) - the failed audio candidate check passes under TSan and load, fixed at its reproduced cause
 - [qmux builds clean for iOS](/quest/m0/nightly/qmux-ios-dead-code.md) - `TcpStats` is gated to the platforms that implement it, so the iOS simulator build has no dead code
-- [Probe against Cubic](/quest/m0/nightly/competing-cubic.md) - the `competing_cubic` probe test stops resending a stream after its reset
+- [Probing beside Cubic](/quest/m0/nightly/competing-cubic.md) - the `competing_cubic` probe test stays within its deadline budget
