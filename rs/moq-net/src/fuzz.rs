@@ -888,6 +888,18 @@ pub fn decode_varints(data: &[u8], ietf: bool) -> u64 {
 	sum
 }
 
+/// Decode one broadcast path as moq-lite carries it (`ietf == false`), a string, or as
+/// a moq-transport namespace tuple.
+pub fn decode_path(data: &[u8], ietf: bool) -> PathOwned {
+	let r = &mut Decoder::new(data, bench_form(ietf));
+	let path = match ietf {
+		false => Path::decode(r, BENCH_LITE).unwrap(),
+		true => ietf::namespace::decode_namespace(r).unwrap(),
+	};
+	assert!(r.is_empty());
+	path
+}
+
 /// Exercise the [`Path`] invariants against arbitrary text.
 ///
 /// The input is UTF-8, split at the first newline into a target path and a base. The
@@ -1440,7 +1452,7 @@ impl RequestValidity {
 	/// Capture the lifetime of one pending request.
 	pub fn start(&self) -> kio::Consumer<()> {
 		match self.0.start() {
-			crate::model::broadcast::RequestValidity::Period(route, _) => route,
+			crate::model::broadcast::RequestValidity::Period(route, ..) => route,
 			_ => unreachable!("a source watch always captures a route lease"),
 		}
 	}

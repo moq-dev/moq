@@ -8,8 +8,8 @@ work on unrelated groups sharing a connection.
 ## Plan
 
 [The QUIC scheduler](/rs/moq-quic/src/connection/streams/schedule.rs)
-linearly searches round-robin VecDeques in `unring_group` and retirement
-(lines 786-821). Priority changes call that path. On shared relay sessions,
+linearly searches round-robin VecDeques in `unring_group` and retirement.
+Priority changes call that path. On shared relay sessions,
 repeated updates or unfavorable retirement order can multiply changed groups
 by unrelated queued groups. Existing dispatch/stream-churn benches do not
 isolate scheduling-group reprioritization and retirement.

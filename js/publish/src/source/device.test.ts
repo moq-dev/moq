@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { Signal } from "@moq/signals";
 import { Device } from "./device";
 import { Microphone } from "./microphone";
 
@@ -24,6 +25,7 @@ function info(deviceId: string, label: string, groupId: string): MediaDeviceInfo
 // Enough of MediaDevices for Device and Microphone, recording what getUserMedia was asked for.
 class FakeMediaDevices extends EventTarget {
 	requests: MediaStreamConstraints[] = [];
+	enumerations = 0;
 	readonly devices: MediaDeviceInfo[];
 	readonly settled: string;
 
@@ -34,6 +36,7 @@ class FakeMediaDevices extends EventTarget {
 	}
 
 	async enumerateDevices(): Promise<MediaDeviceInfo[]> {
+		this.enumerations++;
 		return this.devices;
 	}
 
@@ -131,4 +134,26 @@ test("a capture without a preference stays unpinned", async () => {
 	expect(mic.device.out.requested.peek()).toBeUndefined();
 
 	mic.close();
+});
+
+test("a disabled device ignores device changes and rediscovers when enabled", async () => {
+	using media = install(DESKTOP);
+
+	const enabled = new Signal(true);
+	const device = new Device("audio", { enabled });
+	await settle();
+	const discovered = media.enumerations;
+	expect(discovered).toBeGreaterThan(0);
+
+	enabled.set(false);
+	await settle();
+	media.dispatchEvent(new Event("devicechange"));
+	await settle();
+	expect(media.enumerations).toBe(discovered);
+
+	enabled.set(true);
+	await settle();
+	expect(media.enumerations).toBeGreaterThan(discovered);
+
+	device.close();
 });

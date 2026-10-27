@@ -250,6 +250,32 @@ extern "C" fn state_callback(user_data: *mut c_void, state: *const moq_connectio
 /// FFI state callback for tests that only inspect the immediate return code.
 extern "C" fn ignore_state(_user_data: *mut c_void, _state: *const moq_connection_state) {}
 
+/// Read a delivered video read id, returning the call's code and what it wrote.
+fn video_read(id: u32) -> (i32, moq_video_read) {
+	let mut read = moq_video_read {
+		kind: moq_decode_read_kind::MOQ_DECODE_READ_END,
+		frame: moq_video_frame {
+			timestamp_us: 0,
+			width: 0,
+			height: 0,
+			data: std::ptr::null(),
+			data_size: 0,
+		},
+		gap: moq_decode_gap::default(),
+		end_us: 0,
+	};
+	let code = unsafe { moq_decode_video_read(id, &mut read) };
+	(code, read)
+}
+
+/// Read a delivered video read id that must be a decoded frame.
+fn video_frame(id: u32) -> moq_video_frame {
+	let (code, read) = video_read(id);
+	assert_eq!(code, 0);
+	assert_eq!(read.kind, moq_decode_read_kind::MOQ_DECODE_READ_FRAME);
+	read.frame
+}
+
 /// Build a valid OpusHead init buffer (RFC 7845 §5.1).
 fn opus_head() -> Vec<u8> {
 	let mut head = Vec::with_capacity(19);
@@ -4231,6 +4257,95 @@ fn gray_rgba(width: u32, height: u32) -> Vec<u8> {
 	vec![0x80u8; width as usize * height as usize * 4]
 }
 
+/// A finished encoder reaches a C decoder as an end read in microseconds rather
+/// than vanishing: Opus pads a partial last frame, so the finish publishes where
+/// the source really stopped.
+#[test]
+fn audio_raw_decode_reads_the_encoder_end() {
+	const START_US: u64 = 123_000;
+	const SAMPLES: usize = 860;
+
+	let origin = id(moq_origin_create());
+	let path = b"audio-raw-end-test";
+	let broadcast = publish_broadcast(origin, path);
+	let input = moq_audio_encoder_input {
+		format: moq_audio_sample_format::MOQ_AUDIO_SAMPLE_FORMAT_F32 as u32,
+		sample_rate: 48_000,
+		channels: 1,
+	};
+	let output = moq_audio_encoder_output {
+		codec: c"opus".as_ptr(),
+		codec_len: 4,
+		sample_rate: 0,
+		channels: 0,
+		bitrate: 0,
+		frame_duration_us: 0,
+	};
+	let producer = id(unsafe { moq_encode_audio(broadcast, c"audio".as_ptr(), 5, &input, &output, 0) });
+	let pcm: Vec<u8> = (0..SAMPLES)
+		.flat_map(|i| (i as f32 / SAMPLES as f32).to_le_bytes())
+		.collect();
+	let frame = moq_audio_frame {
+		timestamp_us: START_US,
+		data: pcm.as_ptr(),
+		data_size: pcm.len(),
+	};
+	assert_eq!(unsafe { moq_encode_audio_frame(producer, &frame) }, 0);
+	assert_eq!(moq_encode_audio_finish(producer), 0);
+
+	let consume = request_broadcast(origin, path);
+	let catalog_cb = Callback::new();
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_id = id(catalog_cb.recv());
+	let decoded = moq_audio_decoder_output {
+		format: moq_audio_sample_format::MOQ_AUDIO_SAMPLE_FORMAT_F32 as u32,
+		sample_rate: 0,
+		channels: 0,
+		max_delay_us: 30_000_000,
+	};
+	let read_cb = Callback::new();
+	id(unsafe { moq_decode_audio(catalog_id, 0, &decoded, Some(channel_callback), read_cb.ptr) });
+
+	let mut ends = Vec::new();
+	loop {
+		let code = read_cb.recv();
+		if code <= 0 {
+			assert_eq!(code, 0, "a finished track closes cleanly");
+			break;
+		}
+		let mut read = moq_audio_read {
+			kind: moq_decode_read_kind::MOQ_DECODE_READ_GAP,
+			frame: moq_audio_frame {
+				timestamp_us: 0,
+				data: std::ptr::null(),
+				data_size: 0,
+			},
+			gap: moq_decode_gap::default(),
+			end_us: 0,
+		};
+		assert_eq!(unsafe { moq_decode_audio_read(id(code), &mut read) }, 0);
+		match read.kind {
+			moq_decode_read_kind::MOQ_DECODE_READ_FRAME => {
+				assert!(!read.frame.data.is_null());
+			}
+			moq_decode_read_kind::MOQ_DECODE_READ_END => {
+				assert!(read.frame.data.is_null(), "an end carries no samples");
+				ends.push(read.end_us);
+			}
+			moq_decode_read_kind::MOQ_DECODE_READ_GAP => panic!("nothing was lost"),
+		}
+		assert_eq!(moq_decode_audio_read_free(id(code)), 0);
+	}
+	assert_eq!(ends, [START_US + SAMPLES as u64 * 1_000_000 / 48_000]);
+
+	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
+	assert_eq!(moq_consume_catalog_cancel(catalog_task), 0);
+	assert_eq!(catalog_cb.recv_catalog_terminal(), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
 /// The publish-side mirror of [`video_raw_decode`]: hand raw RGBA to
 /// `moq_encode_video` and read decoded I420 back out of
 /// `moq_decode_video`, so the encode and decode halves meet on the wire.
@@ -4259,7 +4374,7 @@ fn video_raw_publish_consume() {
 		encoder: std::ptr::null(),
 		encoder_len: 0,
 	};
-	let producer = id(unsafe { moq_encode_video(broadcast, &input, &output, 0) });
+	let producer = id(unsafe { moq_encode_video(broadcast, &input, &output, std::ptr::null()) });
 
 	let rgba = gray_rgba(320, 240);
 	let publish = |index: u64| {
@@ -4299,43 +4414,38 @@ fn video_raw_publish_consume() {
 	}
 
 	let frame_id = id(frame_cb.recv());
-	let mut frame = moq_video_frame {
-		timestamp_us: 0,
-		width: 0,
-		height: 0,
-		data: std::ptr::null(),
-		data_size: 0,
-	};
 	// Hold the frame across cancellation: its id owns the decoded picture, so it
 	// stays readable after the terminal callback and until it is freed.
 	assert_eq!(moq_decode_video_cancel(consumer), 0);
 	loop {
 		let code = frame_cb.recv();
 		if code > 0 {
-			assert_eq!(moq_decode_video_frame_free(id(code)), 0);
+			assert_eq!(moq_decode_video_read_free(id(code)), 0);
 		} else {
 			assert_eq!(code, 0, "raw video close delivers terminal 0");
 			break;
 		}
 	}
 
-	assert_eq!(unsafe { moq_decode_video_frame(frame_id, &mut frame) }, 0);
+	let frame = video_frame(frame_id);
 	assert_eq!(frame.width, 320);
 	assert_eq!(frame.height, 240);
 	assert_eq!(frame.data_size, 320 * 240 * 3 / 2, "tightly-packed I420");
 
 	// Pixels are produced once per id, so a second read hands back the same buffer.
-	let first = frame.data;
-	assert_eq!(unsafe { moq_decode_video_frame(frame_id, &mut frame) }, 0);
-	assert_eq!(frame.data, first, "the pixel pointer is stable until the id is freed");
-
-	assert_eq!(moq_decode_video_frame_free(frame_id), 0);
 	assert_eq!(
-		unsafe { moq_decode_video_frame(frame_id, &mut frame) },
+		video_frame(frame_id).data,
+		frame.data,
+		"the pixel pointer is stable until the id is freed"
+	);
+
+	assert_eq!(moq_decode_video_read_free(frame_id), 0);
+	assert_eq!(
+		video_read(frame_id).0,
 		Error::FrameNotFound.code(),
 		"a freed id is released, not left readable"
 	);
-	assert_eq!(moq_decode_video_frame_free(frame_id), Error::FrameNotFound.code());
+	assert_eq!(moq_decode_video_read_free(frame_id), Error::FrameNotFound.code());
 
 	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
 	assert_eq!(moq_consume_catalog_cancel(catalog_task), 0);
@@ -4426,7 +4536,7 @@ fn decode_first_frame(output: &moq_video_decoder_output) -> (u32, u32, usize) {
 		encoder: std::ptr::null(),
 		encoder_len: 0,
 	};
-	let producer = id(unsafe { moq_encode_video(broadcast, &input, &encode_output, 0) });
+	let producer = id(unsafe { moq_encode_video(broadcast, &input, &encode_output, std::ptr::null()) });
 
 	let rgba = gray_rgba(320, 240);
 	let publish = |index: u64| {
@@ -4456,22 +4566,15 @@ fn decode_first_frame(output: &moq_video_decoder_output) -> (u32, u32, usize) {
 	}
 
 	let frame_id = id(frame_cb.recv());
-	let mut frame = moq_video_frame {
-		timestamp_us: 0,
-		width: 0,
-		height: 0,
-		data: std::ptr::null(),
-		data_size: 0,
-	};
-	assert_eq!(unsafe { moq_decode_video_frame(frame_id, &mut frame) }, 0);
+	let frame = video_frame(frame_id);
 	let result = (frame.width, frame.height, frame.data_size);
 
-	assert_eq!(moq_decode_video_frame_free(frame_id), 0);
+	assert_eq!(moq_decode_video_read_free(frame_id), 0);
 	assert_eq!(moq_decode_video_cancel(consumer), 0);
 	loop {
 		let code = frame_cb.recv();
 		if code > 0 {
-			assert_eq!(moq_decode_video_frame_free(id(code)), 0);
+			assert_eq!(moq_decode_video_read_free(id(code)), 0);
 		} else {
 			assert_eq!(code, 0, "raw video close delivers terminal 0");
 			break;
@@ -4544,7 +4647,7 @@ fn video_raw_publish_from_many_threads() {
 		encoder: std::ptr::null(),
 		encoder_len: 0,
 	};
-	let producer = id(unsafe { moq_encode_video(broadcast, &input, &output, 0) });
+	let producer = id(unsafe { moq_encode_video(broadcast, &input, &output, std::ptr::null()) });
 
 	// A fresh caller thread per frame, never the one that published.
 	let rgba = std::sync::Arc::new(gray_rgba(320, 240));
@@ -4616,8 +4719,8 @@ fn a_stalled_encode_does_not_block_unrelated_calls() {
 		encoder: std::ptr::null(),
 		encoder_len: 0,
 	};
-	let stalled = id(unsafe { moq_encode_video(broadcast, &input, &output, 0) });
-	let other = id(unsafe { moq_encode_video(broadcast, &input, &output, 0) });
+	let stalled = id(unsafe { moq_encode_video(broadcast, &input, &output, std::ptr::null()) });
+	let other = id(unsafe { moq_encode_video(broadcast, &input, &output, std::ptr::null()) });
 
 	// Hold the lock a publish takes for the duration of its encode.
 	let handle = State::lock().video.producer(Id::try_from(stalled).unwrap()).unwrap();
@@ -4698,7 +4801,7 @@ fn closing_a_broadcast_does_not_block_unrelated_calls_behind_its_encoder() {
 		encoder: std::ptr::null(),
 		encoder_len: 0,
 	};
-	let stalled = id(unsafe { moq_encode_video(broadcast, &input, &output, 0) });
+	let stalled = id(unsafe { moq_encode_video(broadcast, &input, &output, std::ptr::null()) });
 
 	// Hold the lock an encode takes for the duration of its codec call.
 	let handle = State::lock().video.producer(Id::try_from(stalled).unwrap()).unwrap();
@@ -4752,7 +4855,7 @@ fn video_raw_publish_rejects_frame_size_mismatch() {
 		encoder: std::ptr::null(),
 		encoder_len: 0,
 	};
-	let producer = id(unsafe { moq_encode_video(broadcast, &input, &output, 0) });
+	let producer = id(unsafe { moq_encode_video(broadcast, &input, &output, std::ptr::null()) });
 
 	// A 640x480 buffer against a 320x240 encoder: the frame carries no dimensions
 	// of its own, so this is caught as a wrong-sized picture.
@@ -4794,14 +4897,14 @@ fn video_raw_publish_rejects_invalid_config() {
 		encoder_len: 0,
 	};
 
-	assert!(unsafe { moq_encode_video(broadcast, std::ptr::null(), &valid_output, 0) } < 0);
-	assert!(unsafe { moq_encode_video(broadcast, &valid_input, std::ptr::null(), 0) } < 0);
+	assert!(unsafe { moq_encode_video(broadcast, std::ptr::null(), &valid_output, std::ptr::null()) } < 0);
+	assert!(unsafe { moq_encode_video(broadcast, &valid_input, std::ptr::null(), std::ptr::null()) } < 0);
 
 	let bad_format = moq_video_encoder_input {
 		format: 99,
 		..valid_input
 	};
-	assert!(unsafe { moq_encode_video(broadcast, &bad_format, &valid_output, 0) } < 0);
+	assert!(unsafe { moq_encode_video(broadcast, &bad_format, &valid_output, std::ptr::null()) } < 0);
 
 	let zero_framerate = moq_video_encoder_input {
 		framerate: moq_video_frame_rate {
@@ -4810,7 +4913,7 @@ fn video_raw_publish_rejects_invalid_config() {
 		},
 		..valid_input
 	};
-	assert!(unsafe { moq_encode_video(broadcast, &zero_framerate, &valid_output, 0) } < 0);
+	assert!(unsafe { moq_encode_video(broadcast, &zero_framerate, &valid_output, std::ptr::null()) } < 0);
 	let zero_denominator = moq_video_encoder_input {
 		framerate: moq_video_frame_rate {
 			numerator: 30_000,
@@ -4818,7 +4921,7 @@ fn video_raw_publish_rejects_invalid_config() {
 		},
 		..valid_input
 	};
-	let refused = unsafe { moq_encode_video(broadcast, &zero_denominator, &valid_output, 0) };
+	let refused = unsafe { moq_encode_video(broadcast, &zero_denominator, &valid_output, std::ptr::null()) };
 	assert!(refused < 0 && refused != MOQ_ERROR_PANIC);
 
 	// Regression: dimensions arrive as a raw `u32` pair, and their product used to
@@ -4829,7 +4932,7 @@ fn video_raw_publish_rejects_invalid_config() {
 		height: u32::MAX - 1,
 		..valid_input
 	};
-	let refused = unsafe { moq_encode_video(broadcast, &unrepresentable, &valid_output, 0) };
+	let refused = unsafe { moq_encode_video(broadcast, &unrepresentable, &valid_output, std::ptr::null()) };
 	assert!(refused < 0 && refused != MOQ_ERROR_PANIC, "{refused}");
 
 	// A size no encoder can take, but whose arithmetic is fine, is the backend's
@@ -4844,7 +4947,7 @@ fn video_raw_publish_rejects_invalid_config() {
 		height: 2,
 		..valid_input
 	};
-	let huge = unsafe { moq_encode_video(broadcast, &merely_huge, &valid_output, 0) };
+	let huge = unsafe { moq_encode_video(broadcast, &merely_huge, &valid_output, std::ptr::null()) };
 	if huge > 0 {
 		assert_eq!(moq_encode_video_finish(id(huge)), 0);
 	} else {
@@ -4859,13 +4962,13 @@ fn video_raw_publish_rejects_invalid_config() {
 		codec: 99,
 		..valid_output
 	};
-	assert!(unsafe { moq_encode_video(broadcast, &valid_input, &bad_codec, 0) } < 0);
+	assert!(unsafe { moq_encode_video(broadcast, &valid_input, &bad_codec, std::ptr::null()) } < 0);
 
 	let bad_kind = moq_video_encoder_output {
 		kind: 99,
 		..valid_output
 	};
-	assert!(unsafe { moq_encode_video(broadcast, &valid_input, &bad_kind, 0) } < 0);
+	assert!(unsafe { moq_encode_video(broadcast, &valid_input, &bad_kind, std::ptr::null()) } < 0);
 
 	// Handles for a producer that was never created.
 	assert!(moq_encode_video_cut(0) < 0);
@@ -4931,27 +5034,20 @@ fn video_raw_decode() {
 
 	// First decoded frame: packed I420 at the encoder resolution.
 	let frame_id = id(frame_cb.recv());
-	let mut frame = moq_video_frame {
-		timestamp_us: 0,
-		width: 0,
-		height: 0,
-		data: std::ptr::null(),
-		data_size: 0,
-	};
-	assert_eq!(unsafe { moq_decode_video_frame(frame_id, &mut frame) }, 0);
+	let frame = video_frame(frame_id);
 	assert_eq!(frame.width, 320);
 	assert_eq!(frame.height, 240);
 	assert_eq!(frame.data_size, 320 * 240 * 3 / 2, "tightly-packed I420");
 	assert!(!frame.data.is_null());
 
-	assert_eq!(moq_decode_video_frame_free(frame_id), 0);
+	assert_eq!(moq_decode_video_read_free(frame_id), 0);
 	assert_eq!(moq_decode_video_cancel(consumer), 0);
 
-	// Drain any other decoded frames already queued, then expect the terminal 0.
+	// Drain any other decoded reads already queued, then expect the terminal 0.
 	loop {
 		let code = frame_cb.recv();
 		if code > 0 {
-			assert_eq!(moq_decode_video_frame_free(id(code)), 0);
+			assert_eq!(moq_decode_video_read_free(id(code)), 0);
 		} else {
 			assert_eq!(code, 0, "raw video close delivers terminal 0");
 			break;
@@ -5658,15 +5754,18 @@ fn grant(reservation: u32) -> Option<u64> {
 	present.then_some(bps)
 }
 
-fn wait_grant(reservation: u32) -> u64 {
+/// Wait for `reservation`'s grant to reach `bps`, since a subscription reaches the
+/// allocator asynchronously and an unwatched track already reads a would-be share.
+fn wait_grant(reservation: u32, bps: u64) {
 	let deadline = std::time::Instant::now() + TIMEOUT;
 	loop {
-		if let Some(bps) = grant(reservation) {
-			return bps;
+		let last = grant(reservation);
+		if last == Some(bps) {
+			return;
 		}
 		assert!(
 			std::time::Instant::now() < deadline,
-			"timed out waiting for a reservation grant"
+			"timed out waiting for a {bps} bps grant, last {last:?}"
 		);
 		std::thread::sleep(Duration::from_millis(10));
 	}
@@ -5711,8 +5810,8 @@ fn bandwidth_reservations_split_the_estimate() {
 		.set(Some(moq_net::bandwidth::Rate::from_bps(3_000_000)))
 		.unwrap();
 
-	wait_grant(first);
-	wait_grant(second);
+	wait_grant(first, 1_500_000);
+	wait_grant(second, 1_500_000);
 	let a = grant(first).expect("first grant");
 	let b = grant(second).expect("second grant");
 	assert!(a + b <= 3_000_000, "{a} + {b} oversubscribed");
@@ -5758,10 +5857,10 @@ fn bandwidth_handles_share_the_registry() {
 	let (second_sub, second_cb) = subscribe_named_track(consume, b"b");
 
 	let reserved = id(moq_bandwidth_reserve(first, first_track, 4_000_000));
-	assert_eq!(wait_grant(reserved), 3_000_000);
+	wait_grant(reserved, 3_000_000);
 	let other = id(moq_bandwidth_reserve(second, second_track, 4_000_000));
-	assert_eq!(wait_grant(other), 1_500_000);
-	assert_eq!(grant(reserved), Some(1_500_000));
+	wait_grant(other, 1_500_000);
+	wait_grant(reserved, 1_500_000);
 
 	assert_eq!(moq_reservation_close(reserved), 0);
 	assert_eq!(moq_reservation_close(other), 0);
@@ -5802,14 +5901,21 @@ fn encode_video_bitrate_caps_the_reservation() {
 		encoder: std::ptr::null(),
 		encoder_len: 0,
 	};
-	let producer = id(unsafe { moq_encode_video(broadcast, &input, &output, bandwidth) });
+	let producer = id(unsafe {
+		moq_encode_video(
+			broadcast,
+			&input,
+			&output,
+			&moq_video_encode_options { bandwidth, lower: 0 },
+		)
+	});
 	let reservation = id(moq_encode_video_reservation(producer));
 	let (sub, cb) = subscribe_named_track(consume, b"0.avc3");
 
 	estimate
 		.set(Some(moq_net::bandwidth::Rate::from_bps(4_000_000)))
 		.unwrap();
-	assert_eq!(wait_grant(reservation), 4_000_000);
+	wait_grant(reservation, 4_000_000);
 
 	assert_eq!(moq_encode_video_bitrate(producer, 1_000_000), 0);
 	assert_eq!(grant(reservation), Some(1_000_000));
@@ -5825,6 +5931,109 @@ fn encode_video_bitrate_caps_the_reservation() {
 	assert_eq!(moq_encode_video_finish(producer), 0);
 	assert_eq!(moq_bandwidth_close(bandwidth), 0);
 	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// A simulcast rung needs a bandwidth allocator and a bitrate above its lower rendition's.
+#[test]
+fn encode_video_rung_needs_a_grant_and_a_band() {
+	let (bandwidth, _estimate) = test_allocator();
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"rung");
+
+	let input = moq_video_encoder_input {
+		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
+		width: 320,
+		height: 240,
+		framerate: moq_video_frame_rate {
+			numerator: 30,
+			denominator: 1,
+		},
+	};
+	let output = |bitrate| moq_video_encoder_output {
+		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
+		bitrate,
+		gop: 0,
+		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
+		encoder: std::ptr::null(),
+		encoder_len: 0,
+	};
+	let options = |bandwidth, lower| moq_video_encode_options { bandwidth, lower };
+	let low = id(unsafe { moq_encode_video(broadcast, &input, &output(500_000), &options(bandwidth, 0)) });
+	assert!(unsafe { moq_encode_video(broadcast, &input, &output(2_000_000), &options(0, low)) } < 0);
+	assert!(unsafe { moq_encode_video(broadcast, &input, &output(400_000), &options(bandwidth, low)) } < 0);
+	let high = id(unsafe { moq_encode_video(broadcast, &input, &output(2_000_000), &options(bandwidth, low)) });
+
+	assert_eq!(moq_encode_video_finish(high), 0);
+	assert_eq!(moq_encode_video_finish(low), 0);
+	assert_eq!(moq_bandwidth_close(bandwidth), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// A rung watches its lower rendition's own ceiling, which wakes it when that moves or
+/// ends, so it notices even when the lower rendition reserves nothing it shares.
+#[test]
+fn encode_video_ceiling_wakes_a_rung_above() {
+	struct Flag(std::sync::atomic::AtomicBool);
+	impl std::task::Wake for Flag {
+		fn wake(self: std::sync::Arc<Self>) {
+			self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+		}
+	}
+
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"rung");
+	let input = moq_video_encoder_input {
+		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
+		width: 320,
+		height: 240,
+		framerate: moq_video_frame_rate {
+			numerator: 30,
+			denominator: 1,
+		},
+	};
+	let output = moq_video_encoder_output {
+		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
+		bitrate: 500_000,
+		gop: 0,
+		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
+		encoder: std::ptr::null(),
+		encoder_len: 0,
+	};
+	// No allocator, so nothing it does moves a reservation a rung would share.
+	let low = id(unsafe { moq_encode_video(broadcast, &input, &output, std::ptr::null()) });
+	let ceiling = State::lock()
+		.video
+		.producer(Id::try_from(low).unwrap())
+		.unwrap()
+		.lock()
+		.as_ref()
+		.unwrap()
+		.ceiling
+		.consume();
+
+	let flag = std::sync::Arc::new(Flag(std::sync::atomic::AtomicBool::new(false)));
+	let waiter = kio::Waiter::new(std::task::Waker::from(flag.clone()));
+	let arm = || ceiling.poll(&waiter, |_| std::task::Poll::<()>::Pending).is_pending();
+	assert!(arm());
+
+	assert_eq!(moq_encode_video_bitrate(low, 400_000), 0);
+	assert!(
+		flag.0.swap(false, std::sync::atomic::Ordering::SeqCst),
+		"a moved ceiling wakes the rung"
+	);
+	assert_eq!(*ceiling.read(), moq_net::bandwidth::Rate::from_bps(400_000));
+	assert!(arm());
+
+	assert_eq!(moq_encode_video_finish(low), 0);
+	assert!(
+		flag.0.load(std::sync::atomic::Ordering::SeqCst),
+		"an ended rendition wakes the rung"
+	);
+	assert!(!arm(), "the ceiling closes with the rendition");
+
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }

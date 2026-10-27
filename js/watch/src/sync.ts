@@ -42,7 +42,8 @@ export type SyncInput = {
 	buffer: Getter<Milli>;
 };
 
-type SyncOutput = {
+/** Signals the sync derives. */
+export type SyncOutput = {
 	// Derived: whether the delay is "instant". Numeric and "auto" delays share `false`, so readers
 	// that only care about the mode don't rerun when the number changes.
 	instant: Signal<boolean>;

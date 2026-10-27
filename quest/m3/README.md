@@ -35,7 +35,7 @@ m4's upstream waits in here and moved m2 work with no consumer.
 - [L4S on the backbone](/quest/m3/quic-ecn.md) - an ECT(1) option in `moq-quic`, an `ecn` config knob, and a dualpi2 measurement, if the ECN measurement says marks survive
 - [Careful resume on reconnect](/quest/m3/quic-careful-resume.md) - a Rust redial starts at the previous connection's rate
 - [Cut-through](/quest/m3/cut-through/README.md) - a bufferbloat bench decides whether a relay should forward bytes behind a QUIC stream hole; the build is re-planned if it says go
-- [Middle eviction](/quest/m3/middle-eviction.md) - a group too large to keep whole keeps its head for joiners and its tail for live readers, evicting between; speculative, after the GroupState storage benchmark
+- [Middle eviction](/quest/m3/middle-eviction.md) - a group too large to keep whole keeps its head for joiners and its tail for live readers, evicting between; speculative, after front eviction
 - [Unreal prototype](/quest/m3/unreal.md) - a UE5 module on the C++ package with exceptions disabled, rendering a subscribed broadcast to a texture
 - [vcpkg registry](/quest/m3/cpp-vcpkg.md) - a registry we own serves the prebuilt package to `vcpkg` manifests, once a consumer asks
 - [Conan remote](/quest/m3/cpp-conan.md) - a remote we own serves the same tarball to `conan install`
@@ -47,6 +47,7 @@ m4's upstream waits in here and moved m2 work with no consumer.
 - [moq-transport cluster peers](/quest/m3/ietf-cluster-peers.md) - the cluster draft carries the route layer, so moq-transport relays peer again, once a moq-transport relay operator asks
 - [The moq.pro mesh runs lite-07](/quest/m3/lite07-mesh.md) - the deployment that makes the exemption dead code
 - [Drop the hidden cluster exemption](/quest/m3/hidden-exemption.md) - relays stop forcing hidden broadcasts on cluster peers once every peer opts in on the wire
+- [Pure-Rust crypto for moq-relay](/quest/m3/pure-crypto/README.md) - moq-relay's release builds use graviola and compile no C, once upstream graviola and ACME releases make the switch cheap
 - [Robot teleoperation primitive](/quest/m3/teleop-robot.md) - a `moq-robot` crate for video down and control up, once a robotics consumer appears
 - [Operator arbitration](/quest/m3/teleop-arbitration.md) - one operator holds control at a time
 - [MAVLink bridge](/quest/m3/teleop-mavlink.md) - a `moq-mavlink` gateway
@@ -73,3 +74,5 @@ m4's upstream waits in here and moved m2 work with no consumer.
 - [Safari WebTransport](/quest/m3/safari-webtransport.md) - WebKit browsers return to WebTransport once WebKit 319818 ships fixed
 - [Studio](/quest/m3/studio/README.md) - a native and wasm streaming studio on moq-scene, moq-video, and moq-audio for creators and teams who rely on OBS today
 - [Mesh keys](/quest/m3/mesh-keys.md) - parked: encrypted and HMAC-authenticated mesh broadcasts through a wrapped `.keys` track
+- [A gate host is rented](/quest/m3/ci-host-rented.md) - condition: the maintainer rents a host for the public merge gates
+- [Gate on a rented host](/quest/m3/ci-host.md) - moq, quest, and rust2 gate on one rented box with a warm disk cache instead of the home host

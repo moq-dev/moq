@@ -1068,240 +1068,6 @@ fn high_latency_handshake() {
 	assert!(pair.server_conn_mut(server_ch).using_ecn());
 }
 
-#[test]
-fn zero_rtt_happypath() {
-	let _guard = subscribe();
-	let mut pair = Pair::default();
-	pair.server.handle_incoming = Box::new(validate_incoming);
-	let config = client_config();
-
-	// Establish normal connection
-	let client_ch = pair.begin_connect(config.clone());
-	pair.drive();
-	pair.server.assert_accept();
-	pair.client
-		.connections
-		.get_mut(&client_ch)
-		.unwrap()
-		.close(pair.time, VarInt(0), [][..].into());
-	pair.drive();
-
-	pair.client.addr = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), pair.next_port());
-	info!("resuming session");
-	let client_ch = pair.begin_connect(config);
-	assert!(pair.client_conn_mut(client_ch).has_0rtt());
-	let s = pair
-		.client_streams(client_ch)
-		.open(Dir::Uni, Default::default())
-		.unwrap();
-	const MSG: &[u8] = b"Hello, 0-RTT!";
-	pair.client_send(client_ch, s).write(MSG).unwrap();
-	pair.drive();
-
-	assert_matches!(pair.client_conn_mut(client_ch).poll(), Some(Event::HandshakeDataReady));
-	assert_matches!(pair.client_conn_mut(client_ch).poll(), Some(Event::Connected));
-
-	assert!(pair.client_conn_mut(client_ch).accepted_0rtt());
-	let server_ch = pair.server.assert_accept();
-
-	assert_matches!(pair.server_conn_mut(server_ch).poll(), Some(Event::HandshakeDataReady));
-	assert_matches!(pair.server_conn_mut(server_ch).poll(), Some(Event::HandshakeConfirmed));
-	// We don't currently preserve stream event order wrt. connection events
-	assert_matches!(pair.server_conn_mut(server_ch).poll(), Some(Event::Connected));
-	assert_matches!(
-		pair.server_conn_mut(server_ch).poll(),
-		Some(Event::Stream(StreamEvent::Opened { dir: Dir::Uni }))
-	);
-
-	let mut recv = pair.server_recv(server_ch, s);
-	let mut chunks = recv.read().unwrap();
-	assert_matches!(
-		chunks.next(usize::MAX),
-		Ok(Some(chunk)) if chunk.bytes == MSG
-	);
-	let _ = chunks.finalize();
-	assert_eq!(pair.client_conn_mut(client_ch).stats().path.lost_packets, 0);
-}
-
-#[test]
-fn zero_rtt_rejection() {
-	let _guard = subscribe();
-	let server_config = ServerConfig::with_crypto(Arc::new(server_crypto_with_alpn(vec!["foo".into(), "bar".into()])));
-	let mut pair = Pair::new(Arc::new(EndpointConfig::default()), server_config);
-	let mut client_crypto = Arc::new(client_crypto_with_alpn(vec!["foo".into()]));
-	let client_config = ClientConfig::new(client_crypto.clone());
-
-	// Establish normal connection
-	let client_ch = pair.begin_connect(client_config);
-	pair.drive();
-	let server_ch = pair.server.assert_accept();
-	assert_matches!(pair.server_conn_mut(server_ch).poll(), Some(Event::HandshakeDataReady));
-	assert_matches!(pair.server_conn_mut(server_ch).poll(), Some(Event::HandshakeConfirmed));
-	assert_matches!(pair.server_conn_mut(server_ch).poll(), Some(Event::Connected));
-	assert_matches!(pair.server_conn_mut(server_ch).poll(), None);
-	pair.client
-		.connections
-		.get_mut(&client_ch)
-		.unwrap()
-		.close(pair.time, VarInt(0), [][..].into());
-	pair.drive();
-	assert_matches!(
-		pair.server_conn_mut(server_ch).poll(),
-		Some(Event::ConnectionLost { .. })
-	);
-	assert_matches!(pair.server_conn_mut(server_ch).poll(), None);
-	pair.client.connections.clear();
-	pair.server.connections.clear();
-
-	// We want to have a TLS client config with the existing session cache (so resumption could
-	// happen), but with different ALPN protocols (so that the server must reject it). Reuse
-	// the existing `ClientConfig` and change the ALPN protocols to make that happen.
-	let this = Arc::get_mut(&mut client_crypto).expect("QuicClientConfig is shared");
-	let inner = Arc::get_mut(&mut this.inner).expect("QuicClientConfig.inner is shared");
-	inner.alpn_protocols = vec!["bar".into()];
-
-	// Changing protocols invalidates 0-RTT
-	let client_config = ClientConfig::new(client_crypto);
-	info!("resuming session");
-	let client_ch = pair.begin_connect(client_config);
-	assert!(pair.client_conn_mut(client_ch).has_0rtt());
-	let s = pair
-		.client_streams(client_ch)
-		.open(Dir::Uni, Default::default())
-		.unwrap();
-	const MSG: &[u8] = b"Hello, 0-RTT!";
-	pair.client_conn_mut(client_ch).set_send_window(MSG.len() as u64);
-	pair.client_send(client_ch, s).write(MSG).unwrap();
-	pair.drive();
-	assert!(!pair.client_conn_mut(client_ch).accepted_0rtt());
-	let server_ch = pair.server.assert_accept();
-	assert_matches!(pair.server_conn_mut(server_ch).poll(), Some(Event::HandshakeDataReady));
-	assert_matches!(pair.server_conn_mut(server_ch).poll(), Some(Event::HandshakeConfirmed));
-	assert_matches!(pair.server_conn_mut(server_ch).poll(), Some(Event::Connected));
-	assert_matches!(pair.server_conn_mut(server_ch).poll(), None);
-	let s2 = pair
-		.client_streams(client_ch)
-		.open(Dir::Uni, Default::default())
-		.unwrap();
-	assert_eq!(s, s2);
-
-	// The server discarded its 0-RTT keys, so it never decrypted the STREAM frame and has no
-	// state for `s2`
-	let mut recv = pair.server_recv(server_ch, s2);
-	assert_eq!(recv.read().err(), Some(ReadableError::ClosedStream));
-	assert_eq!(pair.client_conn_mut(client_ch).stats().path.lost_packets, 0);
-
-	// Rejecting early data must release the entire send window for 1-RTT traffic.
-	assert_eq!(pair.client_send(client_ch, s2).write(MSG).unwrap(), MSG.len());
-	pair.client_send(client_ch, s2).finish().unwrap();
-	pair.drive();
-	let mut recv = pair.server_recv(server_ch, s2);
-	let mut chunks = recv.read().unwrap();
-	assert_eq!(chunks.next(usize::MAX).unwrap().unwrap().bytes, MSG);
-	assert_eq!(chunks.next(usize::MAX).unwrap(), None);
-	let _ = chunks.finalize();
-}
-
-fn test_zero_rtt_incoming_limit<F: FnOnce(&mut ServerConfig)>(configure_server: F) {
-	// caller sets the server limit to 4000 bytes
-	// the client writes 8000 bytes
-	const CLIENT_WRITES: usize = 8000;
-	// this gets split across 8 packets
-	// the first packet is stored in the Incoming
-	// the next three are incoming-buffered, bringing the incoming buffer size to 3600 bytes
-	// the last four are dropped due to the buffering limit and must be retransmitted
-	const EXPECTED_DROPPED: u64 = 4;
-
-	let _guard = subscribe();
-
-	let mut transport = TransportConfig::default();
-	// Assume a low-latency connection so pacing doesn't interfere with the test
-	transport.initial_rtt(Duration::from_millis(10));
-	let transport = Arc::new(transport);
-
-	let mut server_config = server_config();
-	configure_server(&mut server_config);
-	let mut pair = Pair::new(Arc::new(EndpointConfig::default()), server_config);
-	let mut config = client_config();
-	config.transport_config(transport);
-
-	// Establish normal connection
-	let client_ch = pair.begin_connect(config.clone());
-	pair.drive();
-	pair.server.assert_accept();
-	pair.client
-		.connections
-		.get_mut(&client_ch)
-		.unwrap()
-		.close(pair.time, VarInt(0), [][..].into());
-	pair.drive();
-
-	pair.client.addr = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), pair.next_port());
-	info!("resuming session");
-	pair.server.handle_incoming = Box::new(|_| IncomingConnectionBehavior::Wait);
-	let client_ch = pair.begin_connect(config);
-	assert!(pair.client_conn_mut(client_ch).has_0rtt());
-	let s = pair
-		.client_streams(client_ch)
-		.open(Dir::Uni, Default::default())
-		.unwrap();
-	pair.client_send(client_ch, s).write(&vec![0; CLIENT_WRITES]).unwrap();
-	pair.drive();
-	let incoming = pair.server.waiting_incoming.pop().unwrap();
-	assert!(pair.server.waiting_incoming.is_empty());
-	let _ = pair.server.try_accept(incoming, pair.time);
-	pair.drive();
-
-	assert_matches!(pair.client_conn_mut(client_ch).poll(), Some(Event::HandshakeDataReady));
-	assert_matches!(pair.client_conn_mut(client_ch).poll(), Some(Event::Connected));
-
-	assert!(pair.client_conn_mut(client_ch).accepted_0rtt());
-	let server_ch = pair.server.assert_accept();
-
-	assert_matches!(pair.server_conn_mut(server_ch).poll(), Some(Event::HandshakeDataReady));
-	assert_matches!(pair.server_conn_mut(server_ch).poll(), Some(Event::HandshakeConfirmed));
-	// We don't currently preserve stream event order wrt. connection events
-	assert_matches!(pair.server_conn_mut(server_ch).poll(), Some(Event::Connected));
-	assert_matches!(
-		pair.server_conn_mut(server_ch).poll(),
-		Some(Event::Stream(StreamEvent::Opened { dir: Dir::Uni }))
-	);
-
-	let mut recv = pair.server_recv(server_ch, s);
-	let mut chunks = recv.read().unwrap();
-	let mut offset = 0;
-	loop {
-		match chunks.next(usize::MAX) {
-			Ok(Some(chunk)) => {
-				offset += chunk.bytes.len();
-			}
-			Err(ReadError::Blocked) => break,
-			Ok(None) => panic!("unexpected stream end"),
-			Err(e) => panic!("{}", e),
-		}
-	}
-	assert_eq!(offset, CLIENT_WRITES);
-	let _ = chunks.finalize();
-	assert_eq!(
-		pair.client_conn_mut(client_ch).stats().path.lost_packets,
-		EXPECTED_DROPPED
-	);
-}
-
-#[test]
-fn zero_rtt_incoming_buffer_size() {
-	test_zero_rtt_incoming_limit(|config| {
-		config.incoming_buffer_size(4000);
-	});
-}
-
-#[test]
-fn zero_rtt_incoming_buffer_size_total() {
-	test_zero_rtt_incoming_limit(|config| {
-		config.incoming_buffer_size_total(4000);
-	});
-}
-
 /// A server that defers accepting an Initial has the handshake idle timeout to do so, not the
 /// shorter idle timeout.
 #[test]
@@ -1555,7 +1321,7 @@ fn alpn_mismatch() {
 }
 
 /// A server accepted before the rest of a multi-packet ClientHello arrives learns the client's
-/// stream limits later, and must announce them to a 0.5-RTT opener that found none.
+/// stream limits later, and must wake a core caller whose earlier open found none.
 #[test]
 fn late_peer_params_make_streams_available() {
 	let _guard = subscribe();
@@ -4755,10 +4521,10 @@ fn ack_frequency_ack_sent_after_reordered_packets_above_threshold() {
 	pair.client_conn_mut(client_ch).ping();
 	pair.drive_client();
 
-	// Send and lose two ack-eliciting packets
+	// Send and lose as many ack-eliciting packets as the default reordering threshold
 	pair.time += Duration::from_millis(5);
 	pair.mtu = 0;
-	for _ in 0..2 {
+	for _ in 0..3 {
 		pair.client_conn_mut(client_ch).ping();
 		pair.drive_client();
 	}
@@ -5082,65 +4848,6 @@ fn min_mtu_does_not_pad_application_data() {
 	assert!(pair.client.outbound[0].1.len() < usize::from(MTU));
 	pair.drive();
 	assert_eq!(pair.server_datagrams(server_ch).recv().unwrap(), message);
-}
-
-#[test]
-fn min_mtu_does_not_pad_zero_rtt_batch_tail() {
-	let _guard = subscribe();
-	const MTU: u16 = 1333;
-	for pad_to_mtu in [false, true] {
-		// Cubic, whose pacer allows the Initial and 0-RTT data in one GSO batch.
-		let mut transport = cubic_transport();
-		transport
-			.initial_rtt(Duration::from_millis(10))
-			.min_mtu(MTU)
-			.mtu_discovery_config(None)
-			.pad_to_mtu(pad_to_mtu);
-		let mut config = client_config();
-		config.transport_config(Arc::new(transport));
-		let mut pair = Pair::default();
-
-		// Establish a session to resume with 0-RTT.
-		let (client_ch, _) = pair.connect_with(config.clone());
-		let now = pair.time;
-		pair.client_conn_mut(client_ch).close(now, VarInt(0), Bytes::new());
-		pair.drive();
-
-		let client_ch = pair.begin_connect(config);
-		assert!(pair.client_conn_mut(client_ch).has_0rtt());
-		let stream = pair
-			.client_streams(client_ch)
-			.open(Dir::Uni, Default::default())
-			.unwrap();
-		let data = vec![42; 3_000];
-		assert_eq!(pair.client_send(client_ch, stream).write(&data), Ok(data.len()));
-		pair.client_send(client_ch, stream).finish().unwrap();
-		pair.client.drive(pair.time, pair.server.addr);
-
-		// The first datagram contains the Initial; the last contains only 0-RTT data.
-		assert_eq!(pair.client_conn_mut(client_ch).stats().udp_tx.ios, 1);
-		assert!(pair.client.outbound.len() > 1);
-		assert_eq!(pair.client.outbound.front().unwrap().0.size, usize::from(MTU));
-		let (transmit, buffer) = pair.client.outbound.back().unwrap();
-		assert_eq!(transmit.size, buffer.len());
-		if pad_to_mtu {
-			assert_eq!(transmit.size, usize::from(MTU));
-		} else {
-			assert!(transmit.size < usize::from(MTU));
-		}
-
-		pair.drive();
-		assert!(pair.client_conn_mut(client_ch).accepted_0rtt());
-		let server_ch = pair.server.assert_accept();
-		let mut recv = pair.server_recv(server_ch, stream);
-		let mut chunks = recv.read().unwrap();
-		let mut received = Vec::new();
-		while let Some(chunk) = chunks.next(usize::MAX).unwrap() {
-			received.extend_from_slice(&chunk.bytes);
-		}
-		let _ = chunks.finalize();
-		assert_eq!(received, data);
-	}
 }
 
 #[test]
@@ -5578,7 +5285,6 @@ fn handshake_confirmation_no_resumption_shortcut() {
 	// Resumed connection
 	info!("resuming session");
 	let ch = pair.begin_connect(config);
-	assert!(pair.client_conn_mut(ch).has_0rtt());
 
 	pair.step();
 	assert_matches!(pair.client_conn_mut(ch).poll(), None);

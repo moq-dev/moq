@@ -53,7 +53,7 @@ The wire messages (`Lite.Subscribe`, `Lite.TrackInfo`, `Ietf.Subscribe`, ...) ho
 
 A group the publisher cut, or named in `SUBSCRIBE_DROP`, after a `Track.Subscriber` saw it is now handed out, and its reads reject with the publisher's `StreamError`; before, it was skipped or ended cleanly.
 A group already held rejects the same way when the drop lands, even while its stream is still arriving.
-On lite-05 and lite-06 the code is always `StreamCode.NotFound`.
+On lite-05 and lite-06 the code is always `StreamCode.Old`.
 Treat a rejected group read as the loss of that group and keep reading the track, rather than ending the subscription.
 
 ### A claim answers by publishing (#5678)

@@ -82,7 +82,7 @@ This README's own work, once the children land:
 
 ## Required
 
-- [Native rung disable](/quest/m1/simulcast-rung-disable.md) - Rust/FFI and OBS publishers stop encoding the top renditions their grant cannot fund, advertise `enabled: false`, and re-enable with hysteresis
+- [Native rung disable](/quest/m1/simulcast-rung-disable.md) - OBS stops sending the top renditions its grant cannot fund, as the Rust/FFI publishers do, and a shaped uplink through moq-ffi proves the resume
 - [Padding probes](/quest/m2/probe/padding.md) - a browser probes with a lowest-priority padding stream on an ALR schedule
 - [JS rung disable](/quest/m2/probe/rung-disable-js.md) - `@moq/publish` applies the native rung rule, recovering through padding
 - [Viewer targets](/quest/m2/probe/viewer-target.md) - a session sends its viewer handles as its PROBE target, probes to the peer's, splits the receive estimate into viewer grants, and advertises `Increase` where a sender exists
@@ -94,4 +94,4 @@ This README's own work, once the children land:
 
 - [A finished PROBE stops reporting](/quest/m2/probe-end-stale.md) - the receive estimate this epic raises reads unknown once its stream ends
 - [BBR media study](/quest/m2/quic-bbr-study.md) - preserving an estimate and discovering spare capacity are separate problems
-- [Realtime uplink congestion control](/quest/m2/quic-realtime/README.md) - a delay-based alternative to BBR3 on native uplinks, with no ProbeBW_UP phase to ride
+- [Realtime uplink congestion control](/quest/m2/quic-realtime/README.md) - a delay-based alternative to BBR3 on native uplinks; it must implement native probing to ship (decided 2026-10-25)

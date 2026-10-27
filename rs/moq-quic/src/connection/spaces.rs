@@ -757,7 +757,7 @@ impl PendingAcks {
 					|| dedup.missing_in_interval(prev_largest_ack_eliciting, packet_number)
 			}
 			_ => {
-				// From acknowledgement frequency draft, section 6.1: send an ACK immediately if
+				// From draft-ietf-quic-ack-frequency-14 section 6.2: send an ACK immediately if
 				// doing so would cause the sender to detect a new packet loss
 				let Some((largest_acked, largest_unacked)) = self.largest_acked.zip(self.largest_ack_eliciting_packet)
 				else {
@@ -767,10 +767,11 @@ impl PendingAcks {
 					return false;
 				}
 				// The largest packet number that could be declared lost without a new ACK being
-				// sent
-				let largest_reported = largest_acked - self.reordering_threshold + 1;
+				// sent. The search excludes its lower bound, so the missing packet just above it
+				// counts.
+				let largest_reported_missing = largest_acked - self.reordering_threshold;
 				let Some(smallest_missing_unreported) =
-					dedup.smallest_missing_in_interval(largest_reported, largest_unacked)
+					dedup.smallest_missing_in_interval(largest_reported_missing, largest_unacked)
 				else {
 					return false;
 				};
@@ -1111,6 +1112,56 @@ mod test {
 		acks.insert_one(2, t3);
 		acks.packet_received(t3, 2, true, &dedup);
 		assert_eq!(acks.ack_delay(t3), Duration::from_millis(5));
+	}
+
+	/// Which of the `received` packets elicit an immediate ACK under a Reordering Threshold of
+	/// `threshold`, when only reordering elicits one, after an ACK of packets `0..acked`
+	fn reordering_acks(threshold: u64, acked: u64, received: &[u64]) -> Vec<bool> {
+		let now = Instant::now();
+		let mut acks = PendingAcks::new();
+		acks.set_ack_frequency_params(&frame::AckFrequency {
+			sequence: crate::VarInt(0),
+			ack_eliciting_threshold: crate::VarInt::MAX,
+			request_max_ack_delay: crate::VarInt(25_000),
+			reordering_threshold: crate::VarInt(threshold),
+		});
+		let mut dedup = Dedup::new();
+		for pn in 0..acked {
+			dedup.insert(pn);
+			acks.insert_one(pn, now);
+			acks.packet_received(now, pn, true, &dedup);
+		}
+		if acked > 0 {
+			acks.acks_sent();
+		}
+		received
+			.iter()
+			.map(|&pn| {
+				dedup.insert(pn);
+				acks.insert_one(pn, now);
+				acks.packet_received(now, pn, true, &dedup);
+				let elicited = acks.can_send();
+				if elicited {
+					acks.acks_sent();
+				}
+				elicited
+			})
+			.collect()
+	}
+
+	/// draft-ietf-quic-ack-frequency-14 section 6.2.1's Tables 1 and 2, shifted past an earlier
+	/// ACK of packets 0 to 10
+	#[test]
+	fn reordering_draft_tables_after_an_ack() {
+		let shift = |pns: &[u64]| pns.iter().map(|pn| pn + 11).collect::<Vec<_>>();
+		assert_eq!(
+			reordering_acks(3, 11, &shift(&[0, 1, 3, 4, 5, 8, 9, 10])),
+			[false, false, false, false, true, false, true, true]
+		);
+		assert_eq!(
+			reordering_acks(5, 11, &shift(&[0, 1, 3, 5, 6, 7, 8, 9])),
+			[false, false, false, false, false, true, false, true]
+		);
 	}
 
 	#[test]

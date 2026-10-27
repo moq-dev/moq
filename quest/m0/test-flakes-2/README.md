@@ -38,21 +38,19 @@ merge runs, one child each.
 
 Decided 2026-10-26 (maintainer): the epic moved from m1 to m0, since every
 flake now fails a whole batch of the [batched merge gate](/quest/m0/ci/land.md)
-rather than one PR. The claimed media resource child stays in
-[m1](/quest/m1/test-flakes-2/README.md) until its PR's claim ends. The queue's
-recurring flakes from 2026-10-23 to 10-26 were already fixed (the moq-rtsp
-stall tests, the moq-gst pinned-instance and sibling-restart tests, the
-moq-mux missing-sequence test, and `js/common/worklet.test.ts`); the one left
-is the IETF datagram range test.
+rather than one PR. The queue's recurring flakes from 2026-10-23 to 10-26
+were already fixed (the moq-rtsp stall tests, the moq-gst pinned-instance and
+sibling-restart tests, the moq-mux missing-sequence test,
+`js/common/worklet.test.ts`, and the IETF datagram range test in
+[moq-dev/moq#6593](https://github.com/moq-dev/moq/pull/6593)).
 
 Public API: none. Wire: none.
 
 ## Required
 
-- [IETF datagram range test](/quest/m0/test-flakes-2/ietf-datagram-range.md) - the `@moq/net` datagram range test stops seeing no objects under load
 - [moq-cli relay tests under load](/quest/m0/test-flakes-2/cli-relay-load.md) - the fetch and announced tests wait on events, not timing
 - [FFI publisher audio gaps](/quest/m0/test-flakes-2/ffi-audio-gap.md) - interop tone checks stop finding gaps from FFI publishers
 - [moq-uring allocations under load](/quest/m0/test-flakes-2/uring-alloc-load.md) - the steady-state send test and MEMLOCK users pass in a parallel check
 - [IETF22 fallback](/quest/m0/test-flakes-2/ietf22-fallback.md) - an IETF22 browser viewer follows a fallback within the media lane's bound, keeping its session and its audio
-- [Echo report test on mocked time](/quest/m0/test-flakes-2/export-echo-time.md) - the moq-cli echo report test stops taking 35 s of wall time
 - [Stuck-window eviction test on macOS](/quest/m0/test-flakes-2/stuck-window-evicts.md) - the evicted writer reliably sees its stop on macOS, fixed at the race
+- [Swapped Rust to JS Opus](/quest/m0/test-flakes-2/swapped-js-opus.md) - the `rust-swapped -> js` interop cell stops timing out under load

@@ -27,6 +27,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [P2P](/quest/m2/p2p/README.md) - application-selected peer sessions use shared priorities, routing, and same-epoch handover
 - [rust2 publishes its UniFFI fork](/quest/m2/rust2-uniffi.md) - waiting on kixelated/rust2 to import UniFFI and moq's generators and publish them
 - [Switch to rust2's UniFFI](/quest/m2/uniffi-fork.md) - moq-ffi and every wrapper build from kixelated/rust2's fork under one pin, and moq's generator code is deleted
+- [Generated C bindings](/quest/m2/c/README.md) - C generated from moq-ffi ships as `moq-c` 0.8.0 and replaces the hand-written crate
 - [Benchmark sources](/quest/m2/bench-sources.md) - every measuring nightly benchmark feeds the regression table, and none is a smoke run
 - [Poll-native async](/quest/m2/ffi-poll-migrate.md) - moq-ffi's pure-kio async exports poll their state directly instead of going through `ffi::Task`
 - [QoS](/quest/m2/qos/README.md) - the relay's egress `lag` histogram and `dropped` counters on the stats totals and prefix tracks
@@ -66,7 +67,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [V4L2 virtual camera](/quest/m2/v4l2-virtual-camera.md) - V4L2 capture runs nightly against the `vivid` virtual driver instead of only on a developer's camera
 - [Probe](/quest/m2/probe/README.md) - a session probes up to the bitrate it wants to send or receive, so a stopped simulcast rendition resumes and a viewer up-switches; the browser pads where native sessions retransmit
 - [Failed groups reach the publisher](/quest/m2/group-failed.md) - Rust and both JS publishers surface a group whose delivery a subscriber's stream gave up on, with one shape
-- [Headless moq-transport groups](/quest/m2/ietf-headless-group.md) - a group whose head no fill or joining FETCH supplies keeps its tail instead of being dropped, and a relay forwards it to moq-transport subscribers
+- [Headless moq-transport groups](/quest/m2/ietf-headless-group.md) - a mid-group stream whose head no fill or joining FETCH supplies is dropped in either arrival order, never kept as a whole group
 - [A finished PROBE stops reporting](/quest/m2/probe-end-stale.md) - the Rust receive estimate reads unknown once its PROBE stream ends
 - [Media stats](/quest/m2/stats/README.md) - publishers announce a stats track in the catalog, viewers answer a soliciting catalog through a per-catalog `.echo` broadcast, and one model turns both into a health verdict and a preflight report
 - [Perf](/quest/m2/perf/README.md) - eliminate measured hot-path costs across moq-uring, kio, and the moq-net model
@@ -83,6 +84,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [Rust-backed @moq/net](/quest/m2/rs2ts/README.md) - measure browser baselines, complete WASM bindings, and adopt Rust behind @moq/net before the later JS-only stage
 - [Front parking](/quest/m2/origin-front-parks.md) - an unroutable request waits on a front instead of re-asking on every route-table move
 - [Route wakes](/quest/m2/route-wakes.md) - a route change wakes only the fronts it can move, so pool churn stops scaling with served paths
+- [Fewer allocations in announce fan-out](/quest/m2/announce-fanout-allocs.md) - a deep path costs no more allocations per subscriber than a shallow one
 - [Keyed prefix polling](/quest/m2/keyed-prefix-polling.md) - `SubscriberDriver` polls only the prefixes a wake concerns, if a bench shows the slope
 - [Route health](/quest/m2/route-health/README.md) - epoch-only active/passive track recovery over metadata-only subscriptions
 - [Wrapper traits over moq-net](/quest/m2/net-wrap/README.md) - moq-net exports producer and consumer traits, and every writer and reader above it takes them, so a wrapper such as e2ee passes through unchanged
@@ -149,9 +151,8 @@ lite-07; bitrate enforcement is not part of this release.
 - [poll_acked on moq-net's send stream](/quest/m2/quic-ack-hook.md) - the
   backend-neutral hook on moq-net's own transport trait that awaits an
   acknowledged stream offset, implemented by the moq-tokio and moq-uring adapters
-- [Starvation at frame granularity](/quest/m2/starvation-frames.md) - the
-  acknowledged frontier moves at every frame boundary through `poll_acked`,
-  with a delivery-delay histogram for jitter
+- [Delivery delay](/quest/m2/delivery-delay.md) - a per-frame
+  delivery-delay histogram from `poll_acked`, so viewer jitter is visible
 - [#3199](/quest/m2/3199-moq-uring-remove-sq-indirection-and-per-enter-ring-fd.md) - moq-uring: remove SQ indirection and per-enter ring fd lookup, if a profile shows the win
 - [#3200](/quest/m2/3200-moq-uring-batch-completion-wakeups-with-min-timeout.md) - moq-uring: batch completion wakeups with MIN_TIMEOUT
 - [Browser media report](/quest/m2/rs2ts-browser-report.md) - compare Rust-backed and handwritten @moq/net through full media workloads, supplementing the pre-adoption comparisons
@@ -172,6 +173,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [#2848](/quest/m2/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md) - the Opus producer follows its bandwidth grant through the settled `moq_mux::rate::Control`
 - [NVENC buffer pool](/quest/m2/nvenc-pool.md) - NVENC reuses input and output buffers instead of allocating per frame, if a benchmark shows it wins
 - [Direct3D11 render import](/quest/m2/render-d3d11.md) - Windows presents without downloading every frame to system memory
+- [Media Foundation encodes on the texture's adapter](/quest/m2/mf-encode-adapter.md) - Windows machines with two GPUs keep the studio's program on the GPU route into a hardware encoder
 - [Intra-refresh GOPs](/quest/m2/intra-refresh/README.md) - video with periodic intra refresh imports and plays back cleanly with one group per sweep and a catalog `warmup`
 - [#2819](/quest/m2/2819-moq-video-carry-pipewire-dma-bufs-safely-into-the-vulkan.md) - moq-video: validate PipeWire DMA-BUFs into the Vulkan renderer on hardware
 - [#3115](/quest/m2/3115-moqsink-the-publication-has-no-generation-so-a-flush.md) - moqsink: a flushing restart after EOS opens a new publication generation
@@ -181,8 +183,9 @@ lite-07; bitrate enforcement is not part of this release.
 - [Keep-alive from the idle timeout](/quest/m2/quic-keep-alive.md) - the keep-alive interval defaults to a fraction of the negotiated idle timeout; an explicit `quic.keep_alive` overrides
 - [Socket close](/quest/m2/quic-socket-close.md) - moq-tokio's QUIC endpoint releases its socket on close, so it drops its wrapper
 - [Windows.Graphics.Capture](/quest/m2/capture-wgc.md) - the WGC display and window backend verified on real Windows hardware
-- [Windows capture parity](/quest/m2/capture-windows.md) - system audio and a settled app-capture policy
-- [Linux capture parity](/quest/m2/capture-linux.md) - Wayland window/system-audio capture with explicit display-selection and app-capture limits
+- [Windows capture parity](/quest/m2/capture-windows.md) - system and per-app audio and a settled app-capture policy
+- [Linux capture parity](/quest/m2/capture-linux.md) - Wayland window/system-audio capture, per-app audio, and explicit display-selection and app-capture limits
+- [Per-app audio on macOS](/quest/m2/capture-app-audio-macos.md) - one application's audio through ScreenCaptureKit
 - [cpal loads libasound at runtime](/quest/m2/cpal-alsa-runtime.md) - condition: a cpal release whose Linux build carries no load-time libasound requirement
 - [Audio capture without ALSA link](/quest/m2/capture-alsa-link.md) - moq-audio capture and playback build on Linux without linking libasound, and capture becomes a default feature
 - [Ship capture and playback](/quest/m2/cli-packaging.md) - a released moq binary can capture and play, which no distribution currently enables
@@ -190,7 +193,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [VAAPI encode and decode](/quest/m2/video-vaapi.md) - H.265 encode and decode, pre-generated bindings, and pooled resize surfaces, including the moq-dev/vaapi release that carries them
 - [GPU capacity and health](/quest/m2/gpu-health.md) - moq-video reports each device's sessions, memory, utilization, and health on NVIDIA, AMD, and Intel alike
 - [A release carries multi-vendor GPU input](/quest/m2/gpu-release.md) - `release` carries the GPU surface validated on AMD and Intel; health follows separately
-- [Runtime trait](/quest/m2/runtime-trait.md) - one runtime trait for spawn and time replaces web-async, with tokio, browser, io_uring, and sim implementations
+- [The remaining library spawns](/quest/m2/spawn-audit.md) - every async spawn left in a library crate becomes a polled `kio::Tasks` child or is listed with why it stays
 - [QUIC on the sim](/quest/m2/quic-sim.md) - MoQ sessions and the relay run over `moq-quic` on the seeded sim, reusing its `Pair` and `Link`
 - [Seeded sim](/quest/m2/sim-seed.md) - sim tests draw every jitter from one seeded generator and replay bit-exact
 
@@ -214,7 +217,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [JS IETF request streams](/quest/m2/js-request-stream.md) - `RequestStream` owns deadlines and cancellation, and TRACK trailing bytes close the session like Rust
 - [moq-transport finish interop](/quest/m2/ietf-finish.md) - the interop `finish` case runs on every even moq-transport draft instead of being skipped
 - [Join after a quick finish](/quest/m2/ietf-join-after-finish.md) - a pre-draft-22 joining FETCH that arrives after its subscription finished is still answered, within a bound the peer already negotiates
-- [JS joining FETCH](/quest/m2/ietf-js-joining-fetch.md) - the JS publisher honors Largest Object before draft 22 and serves the head on a joining FETCH, as the Rust publisher does
+- [JS joining FETCH](/quest/m2/ietf-js-joining-fetch.md) - the JS publisher answers a joining FETCH that arrives after a quick finish, mirroring the Rust bound
 - [ashpd uses maintained D-Bus crates](/quest/m2/ashpd-maintained.md) - wait for a stable zbus 6 port, then remove the portal dependency exceptions
 - [Askama uses a maintained TOML parser](/quest/m2/askama-maintained.md) - wait for a stable parser migration, then remove the generator dependency exception
 - [Dependency and alternatives audit](/quest/m2/audit-deps.md) - dependencies are current, deduplicated, needed, and the best maintained option
@@ -239,3 +242,4 @@ lite-07; bitrate enforcement is not part of this release.
 - [No MOQ_* knobs outside the binaries](/quest/m2/env-knobs.md) - test, bench, and library knobs leave the `MOQ_*` prefix
 - [Clean ALSA playback onset](/quest/m2/audio-alsa-onset.md) - no onset restarts or clicks over PulseAudio
 - [Interop audit](/quest/m2/audit-interop.md) - our interop runner entries match what we ship, and every red interop cell with a moq.dev side is fixed, reported, or noted as down or unsupported
+- [Open-GOP MPEG-2 export](/quest/m2/mpeg2-open-gop-export.md) - a TS export resuming in an open GOP trims the B-pictures that reference the previous one

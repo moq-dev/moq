@@ -54,5 +54,4 @@ Public API: none. Wire: none (refusals reply `_error`).
 
 ## Related
 
-- [AMF0 decoding costs no more than the bytes a peer sent](/quest/m1/cut-audit/rtmp-amf0-budget.md) - the decoder under this session layer
 - [RTMP client errors](/quest/m2/rtmp-client-error.md) - `_error` reporting on the client

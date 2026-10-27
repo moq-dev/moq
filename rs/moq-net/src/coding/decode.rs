@@ -172,7 +172,7 @@ impl<'a> Decoder<'a> {
 	}
 
 	/// How many bytes have been read.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn position(&self) -> usize {
 		self.len - self.buf.len()
 	}
@@ -264,10 +264,21 @@ impl<'a> Decoder<'a> {
 		self.slice(len).inspect_err(|_| self.buf = start)
 	}
 
+	/// Read a varint length, then that many bytes of UTF-8, borrowed from the buffer.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub fn str(&mut self) -> Result<&'a str, DecodeError> {
+		let bytes = self.bytes()?;
+		match std::str::from_utf8(bytes) {
+			Ok(s) => Ok(s),
+			// The error carries an owned copy, so only invalid input pays for one.
+			Err(_) => Err(String::from_utf8(bytes.to_vec()).unwrap_err().into()),
+		}
+	}
+
 	/// Read a varint length, then that many bytes of UTF-8.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn string(&mut self) -> Result<String, DecodeError> {
-		Ok(String::from_utf8(self.bytes()?.to_vec())?)
+		Ok(self.str()?.to_owned())
 	}
 }
 

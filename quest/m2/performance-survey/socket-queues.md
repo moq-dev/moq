@@ -26,8 +26,7 @@ Report useful goodput, latency, CPU, memory and local versus path loss. Check
 both shared and io_uring receive paths. Retain fixed defaults if measurements
 do not justify a new configuration surface; larger queues can worsen delay.
 
-Coordinate with the UDP pool memory quest planned in
-[moq-dev/moq#6350](https://github.com/moq-dev/moq/pull/6350) and
+Coordinate with [io_uring buffer pool memory](/quest/m2/perf/uring-pool-memory.md) and
 [runtime selection](/quest/m2/perf/shard-default.md), sharing fixtures and
 reports without making independent experiments block each other.
 

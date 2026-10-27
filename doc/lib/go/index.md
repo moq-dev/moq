@@ -117,7 +117,7 @@ _ = video.Finish()
 broadcast.Close()    // keep the producer reachable while publishing, then close explicitly
 ```
 
-Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Producer options hold input, codec settings, track naming, and optional session bandwidth ownership; standalone encoders take only codec settings.
+Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Producer options hold input, codec settings, track naming, and optional session bandwidth ownership; standalone encoders take only codec settings. For simulcast, give each rendition the next one down as `Lower`: it stops encoding, advertised as disabled, while its bandwidth grant cannot fund it, and resumes once the grant recovers. A rung only disables while the session probes for bandwidth, which on native transports takes moq-quic with BBR3.
 
 ## Things to know
 
@@ -130,6 +130,7 @@ shows which module holds each.
 - **Bandwidth ownership.** An encoder you manage can reserve a share of the session's bandwidth. Reuse its reservation when the ceiling changes; before abandoning or replacing it, call `Update(0)` to return its share and automatic probe ceiling without waiting for garbage collection. The track can stay subscribed and the reservation can be reused.
 - **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `Cut()`: after every frame, or at a segment cadence to align with video.
 - **Timeline breaks.** On a seek or pause, call `Discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.
+- **Decoder reads.** `audio.Consumer` and `video.Consumer` return a `Read` in order: `ReadFrame`, a `ReadGap` where media was lost, or a `ReadEnd` where the publisher stopped its encoder. What follows a gap or an end does not continue what came before.
 - **Decoded frames hold decoder buffers.** `Close` each `VideoDecodedFrame` promptly, or the decoder stalls. `Resize` is best effort, so read each frame's `Width()` and `Height()`.
 - **Closing.** `client.Close()` drains for up to one second and returns an error on failure. `session.Shutdown()` requests that drain immediately; `session.Closed(ctx)` waits for its result, and `session.Cancel(code)` closes at once. Finish or abort live tracks first. Application delivery requires explicitly selecting `moq-lite-07-wip` on both peers; older Lite versions (including default lite-06) and IETF wait only for transport ACKs.
 - **Ending cleanly.** When the input ends, finish every track, then call `Finish()` on its `media.CatalogProducer` to finish the catalog, which ends the content. The broadcast stays announced and keeps serving the finished tracks, so a subscriber still catching up can drain them, until `broadcast.Close()` takes it offline. How long to keep it up is yours to decide. A track still open at the close, or released without a finish, ends with `Unroutable`, which readers take as the publisher leaving.

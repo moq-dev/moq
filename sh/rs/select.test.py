@@ -1,5 +1,6 @@
 """Verify Rust selection and test target boundaries."""
 
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -43,6 +44,13 @@ class SelectTest(unittest.TestCase):
             self.assertIn(f"rs {recipe}", selected)
         self.assertNotIn("rs capture", selected)
 
+    def test_cargo_configuration_selects_workspace(self):
+        for path in (".cargo/config.toml", ".cargo/config"):
+            for action in ("lint", "test"):
+                with self.subTest(path=path, action=action):
+                    calls = self.selected(path, action=action)
+                    self.assertTrue(any(call.startswith(f"rs {action} --workspace ") for call in calls), calls)
+
     def test_queue_checks_selected_feature_shapes(self):
         for path in ("rs/kio/src/lib.rs", "rs/moq-tokio/src/lib.rs",
                      "rs/moq-video/src/lib.rs", "Cargo.lock", "sh/rs/nextest.sh"):
@@ -66,6 +74,16 @@ class SelectTest(unittest.TestCase):
         calls = self.selected("rs/moq-stats/benches/producer_tick.rs")
         self.assertFalse(any(call.endswith("-features") for call in calls), calls)
 
+    def test_loom_compiles_only_when_its_model_changes(self):
+        for action in ("check", "check-test", "lint"):
+            for path in ("rs/kio/src/lib.rs", "rs/moq-net/tests/loom.rs", "Cargo.lock"):
+                with self.subTest(action=action, path=path):
+                    self.assertIn("rs loom --no-run", self.selected(path, action=action))
+            for path in ("rs/moq-tokio/src/lib.rs", "rs/moq-stats/benches/producer_tick.rs"):
+                with self.subTest(action=action, path=path):
+                    self.assertNotIn("rs loom --no-run", self.selected(path, action=action))
+        self.assertNotIn("rs loom --no-run", self.selected("rs/moq-net/src/lib.rs", action="test"))
+
     def test_device_features_join_the_one_test_build(self):
         for path, features in (("rs/moq-audio/src/lib.rs", DEVICE_FEATURES),
                                ("rs/moq-cli/src/main.rs", "moq-cli/play moq-cli/openh264")):
@@ -80,6 +98,13 @@ class SelectTest(unittest.TestCase):
         # A dependency of the media crates still runs both their device tests.
         calls = self.selected("rs/moq-audio/src/lib.rs", action="test")
         self.assertIn("--package moq-video --package moq-audio", calls[0])
+
+    def test_net_session_tests_follow_the_library(self):
+        for path in ("rs/moq-net/src/lib.rs", "rs/moq-json/src/lib.rs",
+                     "rs/moq-net-tests/tests/integration/main.rs"):
+            with self.subTest(path=path):
+                calls = self.selected(path, action="test")
+                self.assertTrue(any("/rs/moq-net-tests#" in call for call in calls), calls)
 
     def test_demo_crate_follows_its_dependencies(self):
         for path in ("demo/carla/bridge/src/lib.rs", "rs/moq-video/src/lib.rs"):
@@ -101,6 +126,60 @@ class SelectTest(unittest.TestCase):
 
 
 class RecipeTest(unittest.TestCase):
+    def test_feature_shapes_isolate_selected_crates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            scratch = Path(directory)
+            for package in ("feature-owner", "feature-consumer"):
+                (scratch / package / "src").mkdir(parents=True)
+            manifest = scratch / "Cargo.toml"
+            manifest.write_text(
+                '[workspace]\nresolver = "2"\nmembers = ["feature-owner", "feature-consumer"]\n'
+            )
+            (scratch / "feature-owner/Cargo.toml").write_text(
+                '[package]\nname = "feature-owner"\nversion = "0.0.0"\nedition = "2024"\n'
+                '[features]\nenabled = []\n'
+            )
+            (scratch / "feature-owner/src/lib.rs").write_text(
+                'fn needs_feature() -> bool { true }\n'
+                '#[cfg(feature = "enabled")]\npub fn enabled() -> bool { needs_feature() }\n'
+            )
+            (scratch / "feature-consumer/Cargo.toml").write_text(
+                '[package]\nname = "feature-consumer"\nversion = "0.0.0"\nedition = "2024"\n'
+                '[dependencies]\nfeature-owner = { path = "../feature-owner", features = ["enabled"] }\n'
+            )
+            (scratch / "feature-consumer/src/lib.rs").write_text(
+                'pub fn enabled() -> bool { feature_owner::enabled() }\n'
+            )
+            env = dict(os.environ, LOCAL_SUPERVISED="1", BASH_ENV=os.devnull,
+                       CARGO_TARGET_DIR=str(scratch / "target"), CARGO_NET_OFFLINE="true",
+                       CARGO_TERM_COLOR="never")
+            subprocess.run(["cargo", "generate-lockfile", "--manifest-path", str(manifest)],
+                           cwd=ROOT, env=env, check=True, capture_output=True, text=True)
+            unified = subprocess.run(
+                ["cargo", "clippy", "--locked", "--tests", "--no-default-features",
+                 "--workspace", "--manifest-path", str(manifest), "--", "-D", "warnings"],
+                cwd=ROOT, env=env, capture_output=True, text=True,
+            )
+            self.assertEqual(unified.returncode, 0, unified.stdout + unified.stderr)
+            metadata = json.loads(subprocess.check_output(
+                ["cargo", "metadata", "--format-version", "1", "--no-deps",
+                 "--manifest-path", str(manifest)], cwd=ROOT, env=env, text=True,
+            ))
+            selected = [arg for package in metadata["workspace_members"] for arg in ("--package", package)]
+            for flags, succeeds in ((["--workspace", "--exclude", "feature-owner"], True), (selected, False)):
+                with self.subTest(flags=flags):
+                    result = subprocess.run(
+                        ["just", "rs", "feature-shapes", "--manifest-path", str(manifest), *flags],
+                        cwd=ROOT, env=env, capture_output=True, text=True,
+                    )
+                    output = result.stdout + result.stderr
+                    if succeeds:
+                        self.assertEqual(result.returncode, 0, output)
+                    else:
+                        self.assertNotEqual(result.returncode, 0, output)
+                        self.assertIn("needs_feature", output)
+                        self.assertIn("dead_code", output)
+
     def test_unexecuted_bench_is_not_compiled(self):
         for source in ("lib.rs", "main.rs"):
             with self.subTest(source=source), tempfile.TemporaryDirectory() as directory:
@@ -133,7 +212,7 @@ class RecipeTest(unittest.TestCase):
 
 
 class FeatureTest(unittest.TestCase):
-    def trace(self, owner, *args):
+    def trace(self, owner, *args, net_features="", expected_returncode=0):
         with tempfile.TemporaryDirectory() as directory:
             scratch = Path(directory)
             calls = scratch / "calls"
@@ -141,22 +220,28 @@ class FeatureTest(unittest.TestCase):
             cargo.write_text(CARGO_STUB)
             cargo.chmod(0o755)
             env = dict(os.environ, LOCAL_SUPERVISED="1", PATH=f"{scratch}:{os.environ['PATH']}",
-                       FEATURE_CALLS=str(calls), BASH_ENV=os.devnull)
+                       FEATURE_CALLS=str(calls), FEATURE_NET_FEATURES=net_features, BASH_ENV=os.devnull)
             result = subprocess.run(["bash", f"sh/rs/{owner}-features.sh", *args],
                                     cwd=ROOT, env=env, capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(result.returncode, expected_returncode, result.stdout + result.stderr)
             return calls.read_text().splitlines()
 
     def test_net_keeps_model_and_browser_contracts(self):
         boundary = self.trace("net")
         exhaustive = self.trace("net", "--all")
-        self.assertTrue(any(" --tests " in call for call in boundary if call.startswith("clippy ")))
-        self.assertFalse(any(" --all-targets " in call for call in boundary))
-        self.assertTrue(any(" --all-targets " in call for call in exhaustive))
         for calls in (boundary, exhaustive):
+            self.assertTrue(any(" --lib " in call for call in calls if call.startswith("clippy ")))
+            self.assertFalse(any(" --all-targets " in call for call in calls))
             self.assertTrue(any(" --target wasm32-unknown-unknown " in call for call in calls))
             self.assertTrue(any(call.startswith("nextest run ") for call in calls))
             self.assertTrue(any(call.startswith("doc ") for call in calls))
+
+    def test_net_rejects_async_from_test_dependencies(self):
+        for feature in ("async", "default", "fuzz"):
+            with self.subTest(feature=feature):
+                calls = self.trace("net", net_features=f'moq-net feature "{feature}"',
+                                   expected_returncode=1)
+                self.assertTrue(all(call.startswith("tree ") for call in calls), calls)
 
     def test_tokio_keeps_extremes_and_crypto_contracts(self):
         boundary = self.trace("tokio")
@@ -187,6 +272,10 @@ if [[ "$*" == 'check --locked -p moq-tokio --no-default-features --features quic
  exit 1
 fi
 if [[ $1 == tree ]]; then
+ if [[ "$*" == *'-i moq-net'* ]]; then
+  printf '%s\n' "${FEATURE_NET_FEATURES:-}"
+  exit 0
+ fi
  echo 'root v1'
  case "$*" in
   *'--features openh264'*) printf 'openh264 v1\nopenh264-sys2 v1\n' ;;

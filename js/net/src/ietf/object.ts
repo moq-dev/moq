@@ -409,15 +409,16 @@ export interface FetchPosition {
 	object: number;
 	/** Whether this is the stream's first object, which is what carries the absolute ids. */
 	first: boolean;
+	/** The prior emitted group when this object starts a different group. */
+	previousGroup?: number;
 }
 
 /**
  * A moq-transport object inside a fetch stream, which a publisher writes to serve a fill.
  *
- * The first object carries its absolute Group and Object IDs plus the priority; every later
- * one inherits them and increments the Object ID, so only the properties and the payload go
- * on the wire. A fetch object has no status field: a zero payload length is simply an empty
- * object.
+ * The first object carries absolute Group and Object IDs plus the priority. A new group
+ * carries its delta and absolute Object ID; subsequent objects inherit the group and
+ * increment the Object ID. A zero payload length is simply an empty object.
  */
 export class FetchFrame {
 	/** The object payload. */
@@ -441,13 +442,15 @@ export class FetchFrame {
 		version: IetfVersion,
 	): Promise<void> {
 		const stamped = this.timestamp !== undefined && timescale !== undefined;
-		if (position.first) {
+		if (position.first || position.previousGroup !== undefined) {
 			// Include the priority too: "same as the prior object" has no prior to refer to.
 			const properties = stamped ? FETCH_PROPERTIES : 0;
-			await w.u53(FETCH_GROUP_ID | FETCH_OBJECT_ID | FETCH_PRIORITY | properties);
-			await w.u53(position.group);
+			await w.u53(FETCH_GROUP_ID | FETCH_OBJECT_ID | (position.first ? FETCH_PRIORITY : 0) | properties);
+			await w.u53(
+				position.first ? position.group : Math.abs(position.group - (position.previousGroup as number)) - 1,
+			);
 			await w.u53(position.object);
-			await w.u8(0);
+			if (position.first) await w.u8(0);
 		} else {
 			// Same group and priority; the Object ID is the prior one plus one.
 			await w.u53(stamped ? FETCH_PROPERTIES : 0);

@@ -19,6 +19,7 @@ import { u53Schema } from "./catalog";
 
 /** A frame position within a track: frame `frame` of group `group`. */
 export interface Position {
+	/** The group sequence. */
 	group: number;
 	/** Omitted when zero, so a position at a group start reads as just the group. */
 	frame?: number;
@@ -33,9 +34,13 @@ export interface Position {
 export interface Record {
 	/** The record's number, consecutive within its track's timeline. */
 	sequence: number;
+	/** The presentation timestamp of the span's first frame. */
 	pts?: number;
+	/** How long the span plays. */
 	duration?: number;
+	/** The span's first frame. */
 	start: Position;
+	/** The position just past the span's last frame. */
 	end: Position;
 	/** Whether the span starts with a keyframe. Omitted when true (the default). */
 	keyframe?: boolean;

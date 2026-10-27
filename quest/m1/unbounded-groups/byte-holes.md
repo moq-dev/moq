@@ -39,10 +39,15 @@ See the [epic](/quest/m1/unbounded-groups/README.md) for the decisions.
 - Update `drafts/draft-lcurley-moq-lite.md` and run `just drafts check`.
   Also drop the 32 MiB interop cap in `drafts/draft-lcurley-moq-e2ee.md` if
   it no longer follows from a model limit.
+- Rust readers get a chunked payload read, so a frame larger than memory
+  never has to be collected whole. [moq-dev/moq#6628](https://github.com/moq-dev/moq/pull/6628)
+  kept its segments internal; the JS half is in
+  [JS](/quest/m1/unbounded-groups/js.md).
 - Test a frame several times the pool size through a relay chain: a late
   joiner reads it whole, and memory stays near the pool size.
 
-Public API: `Position` gains a byte field, and `MAX_CACHE_BYTES` is removed.
+Public API: `Position` gains a byte field, frames gain a chunked read, and
+`MAX_CACHE_BYTES` is removed.
 Wire: a byte offset on the next lite version's range ends and group header.
 
 ## Required

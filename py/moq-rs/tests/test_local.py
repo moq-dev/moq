@@ -1490,8 +1490,8 @@ async def test_audio_consumer_reports_its_playout_delay():
     # Two 20 ms Opus frames of silence at 48 kHz mono.
     for i in range(2):
         audio.write(moq.audio.Frame(timestamp=timedelta(milliseconds=20 * i), data=bytes(960 * 4)))
-    await asyncio.wait_for(anext(fixed), timeout=5.0)
-    await asyncio.wait_for(anext(estimated), timeout=5.0)
+    assert isinstance(await asyncio.wait_for(anext(fixed), timeout=5.0), moq.audio.Frame)
+    assert isinstance(await asyncio.wait_for(anext(estimated), timeout=5.0), moq.audio.Frame)
 
     assert fixed.delay == timedelta(milliseconds=80)
     assert estimated.delay != initial
@@ -1544,8 +1544,10 @@ async def test_decode_video_frame():
 
     frame = await asyncio.wait_for(anext(decoder), timeout=5.0)
     decoder.cancel()
+    assert isinstance(frame, moq.VideoDecodedFrame)
 
     i420 = frame.pixels(moq.VideoPixelFormat.I420)
+
     assert len(i420) == frame.width() * frame.height() * 3 // 2
 
     packed = frame.pixels(moq.VideoPixelFormat.RGBA)
