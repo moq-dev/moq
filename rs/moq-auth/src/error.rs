@@ -222,8 +222,6 @@ from_message! {
 	jsonwebtoken::errors::Error => Jwt,
 	p256::elliptic_curve::pkcs8::Error => Crypto,
 	p256::elliptic_curve::Error => Crypto,
-	rsa::Error => Crypto,
-	rsa::pkcs1::Error => Crypto,
 	aws_lc_rs::error::Unspecified => Crypto,
 	aws_lc_rs::error::KeyRejected => Crypto,
 }

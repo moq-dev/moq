@@ -26,9 +26,10 @@ moq-clock = { version = "0.11.0", path = "../moq-clock", default-features = fals
 moq-pattern = { workspace = true, features = ["serde"] }
 p256 = "0.14.0"
 p384 = "0.14.0"
+pkcs1 = { workspace = true }
+pkcs8 = { workspace = true }
 rand = { workspace = true, optional = true }
 reqwest = { workspace = true, features = ["rustls", "json"], optional = true }
-rsa = "0.9.10"
 rustls = { version = "0.23", default-features = false, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

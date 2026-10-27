@@ -146,7 +146,7 @@ cannot receive it. Each further token is presented
 carries a `?jwt=`, such as a cluster peer's, keeps it as the connection
 credential, and every configured token then rides in band. Dialing
 `?jwt=<token>` directly still works, and reaches relays that predate SETUP
-tokens; a query carrying two `jwt` parameters is refused. HMAC, RSA, ECDSA, and EdDSA keys all work. A
+tokens; a query carrying two `jwt` parameters is refused. HMAC, RSA, ECDSA, and EdDSA keys all work. Imported private RSA JWKs must include all CRT parameters (`d`, `p`, `q`, `dp`, `dq`, `qi`); multi-prime `oth` is refused. Export a complete two-prime JWK from your provider, or generate one with `moq auth generate --algorithm RS256`. A
 key can itself be **scoped** at generation (`--root`, `--publish`,
 `--subscribe`), after which it can never sign a broader token.
 

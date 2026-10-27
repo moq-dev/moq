@@ -34,3 +34,28 @@ moq-auth's dev-dependencies pin the published `moq-auth` 0.2.1 and `moq-token`
 
 Public API: moq-auth's `From<rsa::Error>` and `From<rsa::pkcs1::Error>`
 conversions go away (breaking). Wire and key formats: unchanged.
+
+## Checkpoint
+
+Source implemented in [PR #6898](https://github.com/moq-dev/moq/pull/6898).
+The settled backend and validation choices above are unchanged. Matching
+JavaScript imports now refuse `oth` rather than dropping it; migration notes
+cover that behavior, complete private CRT parameters, and the two removed
+Rust error conversions. No other conversion API changed.
+
+Before fixing, the new incomplete-private and `oth` tests both failed.
+Afterward, all 229 Rust auth tests and 82 focused JavaScript key/interop tests
+passed. The actual CLI generated, saved, signed, and verified all 12 algorithms
+with owner-only private files, rejected every missing CRT field, and passed
+bidirectional Rust/JavaScript interoperability for all six RSA algorithms.
+Relay, CLI, and room normal/build trees have no `rsa`; Cargo reports no matching
+package for their inverse queries. Published compatibility dev fixtures retain
+it, as planned.
+
+Remaining: the required clean-head `just ci` must pass before ready. Main at
+`3f3fc1927` has unrelated CARLA rustfmt failures under `demo/carla/bridge`;
+the auth-scoped fix passes, and incidental formatting there was restored.
+Full `just fix` also fails in `rs/moq-mux/benches/catalog.rs:226`, which references
+removed `hang::catalog::MAX_RENDITIONS`. No open fix for either was found.
+Keep these fixes separate and keep this PR draft until the required gate clears.
+No maintainer policy decision remains in this quest.

@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Multi-prime RSA JWKs are refused (#6898)
+
+`Key.parse` rejects an RSA JWK containing `oth` instead of discarding it.
+Export a complete two-prime JWK or generate a replacement with `Key.generate`; complete private CRT parameters remain required.
+
 ### Tiers are metric-safe names (#6778)
 
 `GrantSchema` and `RefusalSchema` refuse a `tier` that is not `/`-joined segments of ASCII letters, digits, `.`, `_`, and `-`; the empty tier is the default.
