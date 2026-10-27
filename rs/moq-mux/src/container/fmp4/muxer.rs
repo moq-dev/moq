@@ -12,6 +12,7 @@ use crate::container::source::{VideoTransform, build_video_transform, catalog_di
 
 use super::export::{
 	apply_codec_durations, catalog_timescale_audio, catalog_timescale_video, extract_init, infer_missing_durations,
+	timestamp_gap,
 };
 use super::{Error, Fragmenter, fragment, synthesize_audio_trak, synthesize_video_trak};
 
@@ -333,9 +334,9 @@ impl Muxer {
 		if let Some(end) = end
 			&& let Some(last) = frames.iter_mut().max_by_key(|frame| frame.timestamp.as_micros())
 			&& last.duration.is_none()
-			&& let Ok(end) = end.convert(last.timestamp.scale())
-			&& let Ok(duration) = end.checked_sub(last.timestamp)
-			&& !duration.is_zero()
+			// Quantized at the output scale like the gaps between samples, so any end gap is
+			// whole ticks; one within a tick falls back like a sample with no successor.
+			&& let Ok(Some(duration)) = timestamp_gap(last.timestamp, end, self.timescale)
 		{
 			last.duration = Some(duration);
 		}
@@ -526,6 +527,24 @@ mod tests {
 		};
 		let fragment = opus.fragment(0, &[packet], Some(at(4_000_000))).unwrap();
 		assert_eq!(super::super::sample_durations(&fragment), vec![Some(960)]);
+	}
+
+	/// The end gap is measured at the output timescale, like the gaps between samples: one that
+	/// is no whole number of ticks still times the sample, and so does one finer than the
+	/// sample's own scale.
+	#[test]
+	fn an_end_is_quantized_at_the_output_timescale() {
+		let at = |micros| Timestamp::from_micros(micros).unwrap();
+		let video = [frame(0, true), frame(33_333, false)];
+		let fragment = video_muxer().fragment(0, &video, Some(at(66_666))).unwrap();
+		assert_eq!(super::super::sample_durations(&fragment), vec![Some(1_000), Some(1_000)]);
+
+		let coarse = Frame {
+			timestamp: Timestamp::new(1, moq_net::Timescale::new(1).unwrap()).unwrap(),
+			..frame(0, true)
+		};
+		let fragment = video_muxer().fragment(0, &[coarse], Some(at(1_500_000))).unwrap();
+		assert_eq!(super::super::sample_durations(&fragment), vec![Some(15_000)]);
 	}
 
 	#[test]

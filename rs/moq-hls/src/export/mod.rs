@@ -274,8 +274,10 @@ impl Broadcaster {
 		let mut video = Vec::new();
 		let mut audio = Vec::new();
 		let mut availability_start = None;
-		// A failure left out of the listing, answered if nothing else is left to list.
+		// A failure left out of the listing, answered if no other rendition lists, now or once
+		// its init is built.
 		let mut skipped = None;
+		let mut listable = false;
 		// An enabled rendition whose init is still building, which a later render lists.
 		let mut pending = false;
 		for rendition in self.renditions.snapshot() {
@@ -292,7 +294,10 @@ impl Broadcaster {
 			rendition.start_init();
 			pending |= rendition.init_pending();
 			let representation = match rendition.representation() {
-				Ok(representation) => representation,
+				Ok(representation) => {
+					listable = true;
+					representation
+				}
 				// Its own playlist answers the error, while its siblings stay listed.
 				Err(err) if rendition.failed_alone() => {
 					skipped.get_or_insert(err);
@@ -306,7 +311,7 @@ impl Broadcaster {
 			}
 		}
 
-		if let (true, Some(err)) = (video.is_empty() && audio.is_empty(), skipped) {
+		if let (false, Some(err)) = (listable, skipped) {
 			return Err(err);
 		}
 		let representations = || video.iter().chain(&audio);
@@ -1326,6 +1331,65 @@ mod tests {
 		open.finish().unwrap();
 		let manifest = listed_in_manifest(&broadcaster).await;
 		assert!(manifest.contains("id=\"video/video0\""), "{manifest}");
+	}
+
+	// A failed rendition answers the manifest only when no sibling can list: one whose init is
+	// still building lists later, so until then nothing renders rather than the error.
+	#[tokio::test(start_paused = true)]
+	async fn a_failed_rendition_waits_for_a_sibling_init() {
+		let origin = produce_origin();
+		let broadcast = origin.create_broadcast("live").unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		settle().await;
+		let mut catalog =
+			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
+		catalog
+			.mutate(|catalog| {
+				for name in ["video0", "video1"] {
+					let mut config = if name == "video1" { inline_vp8() } else { video_config() };
+					config.hls = Some(hls(name));
+					catalog.video.renditions.insert(name.into(), config);
+				}
+			})
+			.unwrap();
+		let [(video0_track, mut video0), (_video1_track, mut video1)] = ["video0", "video1"].map(|name| {
+			let track = broadcast
+				.create_track(hang::hls::default_name(name), moq_mux::hls::Producer::info())
+				.unwrap();
+			(track.clone(), moq_mux::hls::Producer::new(track))
+		});
+		for sequence in 0..4 {
+			video0.push(&gop(sequence)).unwrap();
+			video1.push(&gop(sequence)).unwrap();
+		}
+		video1.push(&stop(4, 8_000)).unwrap();
+		// video1's only cached group is still open, so its init build parks on it.
+		let media = broadcast.create_track("video1", timed()).unwrap();
+		let mut open = media.create_group(3u64.into()).unwrap();
+		write_keyframe(&mut open, 3);
+
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		broadcaster.advertised().await;
+		let broken = broadcaster.rendition(Kind::Video, "video0").unwrap();
+		until_listed(&broken, 3).await;
+		cut(video0_track, video0);
+		failed(&broken).await;
+		assert!(broadcaster.manifest(None).unwrap().is_none());
+
+		open.finish().unwrap();
+		let manifest = tokio::time::timeout(Duration::from_secs(5), async {
+			loop {
+				if let Some(manifest) = broadcaster.manifest(None).unwrap() {
+					return manifest;
+				}
+				tokio::time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("video1 is listed once its init is built");
+		assert!(manifest.contains("id=\"video/video1\""), "{manifest}");
+		assert!(!manifest.contains("id=\"video/video0\""), "{manifest}");
+		drop((catalog, video1));
 	}
 
 	// A background build parked on an open group never holds its rendition, so dropping the

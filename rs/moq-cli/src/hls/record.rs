@@ -404,9 +404,11 @@ struct Playlist {
 	target: u64,
 	/// What the file holds: its header and how many entries.
 	written: Option<(Header, usize)>,
-	/// Switches to a reconfigured instance so far, each a discontinuity the rendition's own
-	/// sequence does not count.
-	transitions: u64,
+	/// Added to each entry's source sequence, so a switch to another instance is a discontinuity
+	/// past the last entry whatever that instance's own sequence starts at.
+	offset: u64,
+	/// The next entry comes from another instance.
+	switching: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -422,7 +424,7 @@ struct Entry {
 	segment: u64,
 	duration: Duration,
 	gap: bool,
-	/// The rendition's discontinuity sequence for the segment; the playlist adds its transitions.
+	/// The rendition's discontinuity sequence for the segment; the playlist adds its offset.
 	discontinuity: u64,
 	/// Written on the first entry and after each discontinuity.
 	program_date_time: Option<moq_clock::Wall>,
@@ -440,13 +442,18 @@ impl Playlist {
 		self.version = self.version.max(if entry.gap { VERSION_GAP } else { VERSION });
 		// Every EXTINF, rounded up to whole seconds, must fit the target duration.
 		self.target = self.target.max(entry.duration.as_secs_f64().ceil() as u64).max(1);
-		entry.discontinuity += self.transitions;
+		if std::mem::take(&mut self.switching)
+			&& let Some(last) = self.entries.last()
+		{
+			self.offset = (last.discontinuity + 1).saturating_sub(entry.discontinuity);
+		}
+		entry.discontinuity += self.offset;
 		self.entries.push(entry);
 	}
 
 	/// The next entry comes from a reconfigured instance, under a new init: a discontinuity.
 	fn transition(&mut self) {
-		self.transitions += 1;
+		self.switching = true;
 	}
 
 	async fn flush(&mut self, dir: &Path) -> anyhow::Result<()> {
@@ -1029,6 +1036,25 @@ mod tests {
 		assert_eq!(text.matches("PROGRAM-DATE-TIME").count(), 2, "{text}");
 		// An append continuing the same run restates nothing.
 		assert!(!playlist.render(3).contains("PROGRAM-DATE-TIME"));
+	}
+
+	/// A switch follows the last entry with a discontinuity even when the new instance's own
+	/// sequence starts below the recording's.
+	#[test]
+	fn a_switch_to_a_lower_sequence_is_a_discontinuity() {
+		let mut playlist = Playlist::default();
+		playlist.push(entry(0, 0));
+		playlist.push(entry(1, 2));
+		playlist.transition();
+		playlist.push(entry(2, 0));
+		playlist.push(entry(3, 0));
+		let sequences: Vec<_> = playlist.entries.iter().map(|entry| entry.discontinuity).collect();
+		assert_eq!(sequences, [0, 2, 3, 3]);
+		let text = playlist.render(0);
+		assert!(
+			text.contains("1.m4s\n#EXT-X-DISCONTINUITY\n#EXTINF:2.00000,\n2.m4s\n#EXTINF:"),
+			"{text}"
+		);
 	}
 
 	/// A switch to a reconfigured instance and the rendition's own break are each a
