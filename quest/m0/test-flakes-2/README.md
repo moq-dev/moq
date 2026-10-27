@@ -36,13 +36,21 @@ fixed by [moq-dev/moq#6113](https://github.com/moq-dev/moq/pull/6113).
 Added 2026-10-21 and 2026-10-22 (maintainer): failures from the m0/m1
 merge runs, one child each.
 
+Decided 2026-10-26 (maintainer): the epic moved from m1 to m0, since every
+flake now fails a whole batch of the [batched merge gate](/quest/m0/ci/land.md)
+rather than one PR. The queue's recurring flakes from 2026-10-23 to 10-26
+were already fixed (the moq-rtsp stall tests, the moq-gst pinned-instance and
+sibling-restart tests, the moq-mux missing-sequence test,
+`js/common/worklet.test.ts`, and the IETF datagram range test in
+[moq-dev/moq#6593](https://github.com/moq-dev/moq/pull/6593)).
+
 Public API: none. Wire: none.
 
 ## Required
 
-- [moq-cli relay tests under load](/quest/m1/test-flakes-2/cli-relay-load.md) - the fetch and announced tests wait on events, not timing
-- [FFI publisher audio gaps](/quest/m1/test-flakes-2/ffi-audio-gap.md) - interop tone checks stop finding gaps from FFI publishers
-- [moq-uring allocations under load](/quest/m1/test-flakes-2/uring-alloc-load.md) - the steady-state send test and MEMLOCK users pass in a parallel check
-- [IETF22 fallback](/quest/m1/test-flakes-2/ietf22-fallback.md) - an IETF22 browser viewer follows a fallback within the media lane's bound, keeping its session and its audio
-- [Stuck-window eviction test on macOS](/quest/m1/test-flakes-2/stuck-window-evicts.md) - the evicted writer reliably sees its stop on macOS, fixed at the race
-- [Swapped Rust to JS Opus](/quest/m1/test-flakes-2/swapped-js-opus.md) - the `rust-swapped -> js` interop cell stops timing out under load
+- [moq-cli relay tests under load](/quest/m0/test-flakes-2/cli-relay-load.md) - the fetch and announced tests wait on events, not timing
+- [FFI publisher audio gaps](/quest/m0/test-flakes-2/ffi-audio-gap.md) - interop tone checks stop finding gaps from FFI publishers
+- [moq-uring allocations under load](/quest/m0/test-flakes-2/uring-alloc-load.md) - the steady-state send test and MEMLOCK users pass in a parallel check
+- [IETF22 fallback](/quest/m0/test-flakes-2/ietf22-fallback.md) - an IETF22 browser viewer follows a fallback within the media lane's bound, keeping its session and its audio
+- [Stuck-window eviction test on macOS](/quest/m0/test-flakes-2/stuck-window-evicts.md) - the evicted writer reliably sees its stop on macOS, fixed at the race
+- [Swapped Rust to JS Opus](/quest/m0/test-flakes-2/swapped-js-opus.md) - the `rust-swapped -> js` interop cell stops timing out under load
