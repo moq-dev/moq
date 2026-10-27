@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Element reflection and invalid configuration
+
+Property and built-in UI changes now reflect into attributes. Invalid rendering/catalog modes, URLs, numbers, durations, and version lists throw instead of selecting defaults; remove an attribute to use its default.
+Catch those property setter errors. A browser reports malformed markup through its normal `error` event, and the element suspends media until those invalid attributes are corrected or removed. A valid property assignment also corrects that attribute. An empty, duplicate, or unsupported `versions` list now throws from the setter instead of failing on `el.connection.error`; check a list up front with `Net.Connection.checkVersions`.
+`broadcast`, `video`, `audio`, `renderer`, and `sync` are TypeScript `readonly` fields. Configure the existing components through their inputs and `controls` instead of replacing them; use a headless `Player` for a different pipeline.
+`announced=false` reflects as `announced="false"`; `captions` and `catalog-format` now reflect too.
+
 ### Muting preserves the selected volume
 
 `<moq-watch>` keeps `muted` and `volume` independent, in either attribute or property order.

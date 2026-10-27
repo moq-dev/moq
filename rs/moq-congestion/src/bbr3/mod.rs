@@ -529,12 +529,18 @@ impl Bbr3 {
 
     /// equivalent to BBROnInit <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.2.1>
     fn new(config: Arc<Bbr3Config>, init: Init) -> Self {
-        let probe_rng: Pcg32;
-        if let Some(probe_seed) = config.probe_rng_seed {
-            probe_rng = Pcg32::from_seed(probe_seed);
+        let probe_rng = if let Some(probe_seed) = config.probe_rng_seed {
+            Pcg32::from_seed(probe_seed)
         } else {
-            probe_rng = Pcg32::from_rng(&mut rand::rng());
-        }
+            #[cfg(test)]
+            {
+                Pcg32::from_seed([0; 16])
+            }
+            #[cfg(not(test))]
+            {
+                Pcg32::from_rng(&mut rand::rng())
+            }
+        };
         let smss = Ord::min(
             Ord::max(MIN_MAX_DATAGRAM_SIZE, init.mtu) as u64,
             MAX_DATAGRAM_SIZE,
@@ -2314,6 +2320,19 @@ mod test {
                 }
             }
             panic!("simulation exceeded {max_iters} iterations without reaching the target state");
+        }
+    }
+
+    #[test]
+    fn default_probe_schedule_replays() {
+        let mut first = Driver::new(Arc::new(Bbr3Config::default()), 2500);
+        let mut replay = Driver::new(Arc::new(Bbr3Config::default()), 2500);
+        for _ in 0..8 {
+            first.pick_probe_wait();
+            replay.pick_probe_wait();
+            assert_eq!(first.rounds_since_bw_probe, replay.rounds_since_bw_probe);
+            assert_eq!(first.bw_probe_wait, replay.bw_probe_wait);
+            assert_eq!(first.reno_rounds_bound, replay.reno_rounds_bound);
         }
     }
 
@@ -6647,10 +6666,9 @@ mod test {
         // bottleneck serialization time for one MSS-sized packet
         let btl_service_ns: u64 = (MSS as f64 / BW * 1e9).round() as u64;
 
-        // Production default, but pin the probe RNG: once app-limiting lifts at the
+        // Pin this scenario's probe schedule: once app-limiting lifts at the
         // PROBE_REFILL -> PROBE_UP edge the flow does genuine PROBE_BW cycling, whose
-        // phase timing is RNG-driven, and default() seeds from entropy (cf. sibling
-        // probing tests).
+        // phase timing is RNG-driven (cf. sibling probing tests).
         let config = Bbr3Config {
             probe_rng_seed: Some([6; 16]),
             ..Bbr3Config::default()
