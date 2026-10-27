@@ -361,9 +361,6 @@ export namespace Origin {
 		get discovery(): Signals.Getter<boolean | undefined>;
 		request(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
 	}
-	export type Cost = {
-		zero: bigint;
-	};
 	export type Cost = bigint;
 	export type Hop = infer<typeof Origin.HopSchema>;
 	export const HopSchema: $ZodBranded<ZodMiniBigInt<bigint>, "Hop", "out">;
@@ -423,15 +420,6 @@ export namespace Origin {
 		epoch?: Epoch.Valid;
 		hops: Origin.Hop[];
 	}
-	export type Route = {
-		default: Origin.Route;
-		normalize(route?: Origin.Route | {
-			auth?: Auth.Credential;
-			cost?: Origin.Cost;
-			epoch?: Epoch.Valid;
-			hops?: readonly Origin.Hop[];
-		}): Origin.Route;
-	};
 	export interface Table {
 		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
 		readonly closed: Signals.GetPromise<Error | null>;

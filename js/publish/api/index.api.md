@@ -78,7 +78,7 @@ export namespace Audio {
 		packetlossperc?: number;
 		useinbandfec?: boolean;
 	};
-	export type Rendition = Rendition<Hang.Catalog.Audio.AudioConfig>;
+	export type Rendition = import("@moq/publish").Rendition<Hang.Catalog.Audio.AudioConfig>;
 	export interface SampleSource {
 		channelCount: number;
 		kind: Audio.Kind;
@@ -390,7 +390,7 @@ export namespace Video {
 		frameRate?: number;
 		frames: ReadableStream<VideoFrame>;
 	}
-	export type Rendition = Rendition<Hang.Catalog.Video.VideoConfig>;
+	export type Rendition = import("@moq/publish").Rendition<Hang.Catalog.Video.VideoConfig>;
 	export type Source = Video.StreamTrack | Video.SourceConfig | Video.FrameSource;
 	export interface SourceConfig {
 		scale?: number;

@@ -45,7 +45,7 @@ export interface Frame {
 export namespace Legacy {
 	export { BufferedRange };
 	export { BufferedRanges };
-	export class Format implements Format {
+	export class Format implements import("@moq/hang/container").Format {
 		constructor(config: Audio.AudioConfig | Video.VideoConfig | "audio" | "video" | "data");
 		decode(frame: Uint8Array): Frame[];
 		end(frame: Frame): Micro | undefined;

@@ -218,6 +218,8 @@ export interface Pair<T> {
 	/** Both, in order. */
 	both: [...T[], T];
 }
+/** Pairs of strings, as the compiler writes an inferred type. */
+export declare const strings: import("./index").Pair<string>[];
 `,
 	});
 	await checkReports(directory);
@@ -226,6 +228,8 @@ export interface Pair<T> {
 }
 
 export function all<S extends readonly unknown[]>(values: [...S]): { [K in keyof S]: S[K] | undefined };
+
+export const strings: Pair<string>[];
 `);
 });
 
@@ -235,6 +239,69 @@ test("a deeply nested type is reported in full", async () => {
 	const directory = fixture({ "dist/index.d.ts": `/** A nested value. */\nexport declare const nested: ${type};\n` });
 	await checkReports(directory);
 	expect(report(directory)).toContain(`${"\t".repeat(depth)}a: number;`);
+});
+
+test("a reference is spelled so it resolves where it is written", async () => {
+	const directory = fixture({
+		"dist/hop.d.ts": `/** A cost. */
+export type Cost = bigint;
+/** Costs. */
+export declare const Cost: { zero: bigint };
+`,
+		"dist/rendition.d.ts": `/** A rendition. */
+export declare class Rendition<T> {
+	/** Its value. */
+	value: T;
+}
+`,
+		"dist/session.d.ts": `/** A session. */
+export default class {
+	/** Accept one. */
+	static accept(cost: Cost): Session;
+}
+import type { Cost } from "./hop";
+import type Session from "./session";
+`,
+		"dist/index.d.ts": `import { Rendition as Base } from "./rendition";
+import Session from "./session";
+export type { Cost } from "./hop";
+export { Rendition } from "./rendition";
+export default Session;
+/** Audio. */
+export declare namespace Audio {
+	/** An audio rendition. */
+	type Rendition = Base<string>;
+	/** Audio, which is no namespace to hide this one. */
+	type Audio = File[];
+	/** An audio file. */
+	interface File {
+		/** The global one. */
+		file: globalThis.File;
+	}
+}
+`,
+	});
+	await checkReports(directory);
+	expect(report(directory)).toBe(`export namespace Audio {
+	export type Audio = Audio.File[];
+	export interface File {
+		file: globalThis.File;
+	}
+	export type Rendition = import("@moq/example").Rendition<string>;
+}
+
+export type Cost = bigint;
+
+export class Rendition<T> {
+	constructor();
+	value: T;
+}
+
+export default class {
+	constructor();
+	static accept(cost: Cost): import("@moq/example").default;
+}
+`);
 });
 
 test("a declaration resolves types from declared dependencies only", async () => {

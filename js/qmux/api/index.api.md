@@ -111,7 +111,7 @@ export interface WebSocketStreamOpenEvent {
 
 export default class implements WebTransport {
 	constructor(source: string | URL | WebSocketLike | WebSocketStreamLike, options?: SessionOptions);
-	static accept(socket: WebSocketLike | WebSocketStreamLike, options?: AcceptOptions): default;
+	static accept(socket: WebSocketLike | WebSocketStreamLike, options?: AcceptOptions): import("@moq/qmux").default;
 	close(info?: {
 		closeCode?: number;
 		reason?: string;

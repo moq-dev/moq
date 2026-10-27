@@ -152,18 +152,33 @@ async function reports(dir: string, declarations: string, check: boolean): Promi
 		// TypeDoc keeps no record of whether a variable is `const`, so note it from the declaration.
 		const constants = new Set<Reflection>();
 		app.converter.on(Converter.EVENT_CREATE_DECLARATION, (context, reflection) => {
-			const declaration = context.getSymbolFromReflection(reflection)?.valueDeclaration;
+			const symbol = context.getSymbolFromReflection(reflection);
+			const declaration = symbol?.valueDeclaration;
 			if (!declaration || !reflection.kindOf(ReflectionKind.Variable | ReflectionKind.Property)) return;
 			if (ts.getCombinedNodeFlags(declaration) & ts.NodeFlags.Const) constants.add(reflection);
 			const written = (declaration as { type?: TypeNode }).type;
-			if (written && literal(written)) {
-				reflection.type = context.converter.convertType(context.withScope(reflection), written);
-			}
+			if (!written) return;
+			reflection.type = context.converter.convertType(
+				context.withScope(reflection),
+				literal(written) ? written : context.checker.getTypeOfSymbolAtLocation(symbol, declaration),
+			);
+		});
+		// A type-only export of a name that is both a value and a type exports the type, but TypeDoc
+		// also converts the value, as an alias of its type: drop that one when the type follows.
+		const values = new Map<TsSymbol, DeclarationReflection>();
+		app.converter.on(Converter.EVENT_CREATE_DECLARATION, (context, reflection) => {
+			if (!reflection.kindOf(ReflectionKind.TypeAlias | ReflectionKind.Interface)) return;
+			const symbol = context.getSymbolFromReflection(reflection);
+			if (!symbol || !(symbol.flags & ts.SymbolFlags.Value)) return;
+			const value = values.get(symbol);
+			if (value?.parent === reflection.parent) context.project.removeReflection(value);
+			else if (reflection.kindOf(ReflectionKind.TypeAlias)) values.set(symbol, reflection);
 		});
 		// TypeDoc converts a property's or signature's types from the checker, which restates what the
 		// declaration wrote, such as `[...S]` as `[...S[]]` and `keyof S` as its expansion, so a change
 		// could hide behind the same restatement. The written type is the API, unless it names a value
 		// with `typeof`: that value may be one no entrypoint exports, which the restatement spells out.
+		// TypeDoc also drops the arguments and `typeof` of a written `import()` type.
 		app.converter.on(Converter.EVENT_CREATE_SIGNATURE, (context, signature, declaration) => {
 			if (!declaration || !("parameters" in declaration)) return;
 			const scope = context.withScope(signature);
@@ -285,15 +300,18 @@ const ts: {
 	): { resolvedModule?: { resolvedFileName: string } };
 	sys: unknown;
 	NodeFlags: { Const: number };
-	SymbolFlags: { Module: number };
-	SyntaxKind: { ThisType: number; TypeQuery: number; TypeAliasDeclaration: number };
+	SymbolFlags: { Module: number; Value: number };
+	SyntaxKind: { ThisType: number; TypeQuery: number; ImportType: number; TypeAliasDeclaration: number };
 	forEachChild<T>(node: TypeNode, visit: (child: TypeNode) => T | undefined): T | undefined;
 } = createRequire(import.meta.resolve("typedoc"))("typescript");
 
-// Whether a written type names no value with `typeof`.
+// Whether a written type names no value with `typeof`, and TypeDoc can convert it as written.
 function literal(node: TypeNode): boolean {
-	const query = (at: TypeNode): true | undefined =>
-		at.kind === ts.SyntaxKind.TypeQuery ? true : ts.forEachChild(at, query);
+	const query = (at: TypeNode & { isTypeOf?: boolean; typeArguments?: unknown[] }): true | undefined => {
+		if (at.kind === ts.SyntaxKind.TypeQuery) return true;
+		if (at.kind === ts.SyntaxKind.ImportType && (at.isTypeOf || at.typeArguments)) return true;
+		return ts.forEachChild(at, query);
+	};
 	return !query(node);
 }
 
@@ -340,6 +358,14 @@ function locate(project: ProjectReflection, modules: Map<Reflection, string>, ex
 	};
 	for (const reflection of Object.values(project.reflections)) visit(reflection);
 }
+
+// A reference `locate` named: its import specifier, empty for the standard library, and its path.
+const placeholder = /\0([^\0]*)\0([^\0]*)\0/g;
+
+// The declarations that give a name each meaning TypeScript looks one up by.
+const TYPE = ReflectionKind.Class | ReflectionKind.Interface | ReflectionKind.TypeAlias | ReflectionKind.Enum;
+const NAMESPACE = ReflectionKind.Namespace | ReflectionKind.Module | ReflectionKind.Enum;
+const VALUE = NAMESPACE | ReflectionKind.Class | ReflectionKind.Variable | ReflectionKind.Function;
 
 // Every package the manifest depends on.
 function dependencies(manifest: Manifest): string[] {
@@ -437,7 +463,6 @@ class Renderer {
 		const body = this.children(module, "").join("\n\n");
 		// A reference elsewhere is imported by the first name of its path, unless that name is
 		// declared here or comes from two places, when it is spelled with `import()` instead.
-		const placeholder = /\0([^\0]*)\0([^\0]*)\0/g;
 		const sources = new Map<string, Set<string>>();
 		for (const child of module.children ?? []) sources.set(child.name, new Set([specifier ?? ""]));
 		for (const [, from = "", path = ""] of body.matchAll(placeholder)) {
@@ -449,7 +474,8 @@ class Renderer {
 		const imports = new Set<string>();
 		const text = body.replace(placeholder, (_, from: string, path: string) => {
 			const [head = ""] = path.split(".");
-			if (from === specifier || from === "") return path;
+			// A default export has no name to write, even in its own module.
+			if (from === "" || (from === specifier && head !== "default")) return path;
 			if (!imported(from, head)) return `import("${from}").${path}`;
 			imports.add(`import { ${head} } from "${from}";`);
 			return path;
@@ -493,7 +519,7 @@ class Renderer {
 
 		switch (item.kind) {
 			case ReflectionKind.Namespace:
-				return block(`export namespace ${item.name}`, this.children(item, inner));
+				return block(`export namespace ${item.name}`, this.unshadow(item, this.children(item, inner)));
 			case ReflectionKind.Enum:
 				return block(
 					`export ${item.flags.isConst ? "const " : ""}enum ${item.name}`,
@@ -530,6 +556,32 @@ class Renderer {
 					`${item.getFullName()} is a ${ReflectionKind[item.kind]}, which the report cannot render`,
 				);
 		}
+	}
+
+	// A name a namespace declares hides the same name outside it, from a reference that looks the
+	// name up by a meaning it has: a type, a namespace before a dot, or a value after `typeof`. Such
+	// a reference is spelled from its module instead. Re-exporting the outer declaration hides nothing.
+	private unshadow(namespace: DeclarationReflection, body: string[]): string[] {
+		const hiding = new Map<string, number>();
+		const outer = new Set<string>();
+		for (const child of namespace.children ?? []) {
+			const target = child instanceof ReferenceReflection ? child.tryGetTargetReflectionDeep() : child;
+			if (!target) continue;
+			const module = this.module(target);
+			if (child !== target && target.parent === module && target.name === child.name) {
+				outer.add(`${this.#modules.get(module)}\0${child.name}`);
+			} else {
+				hiding.set(child.name, (hiding.get(child.name) ?? 0) | target.kind);
+			}
+		}
+		return body.map((text) =>
+			text.replace(/(typeof )?\0([^\0]*)\0([^\0]*)\0/g, (found, query = "", from: string, path: string) => {
+				const [head = "", ...rest] = path.split(".");
+				const by = query ? VALUE : rest.length ? NAMESPACE : TYPE;
+				if (!((hiding.get(head) ?? 0) & by) || outer.has(`${from}\0${head}`)) return found;
+				return `${query}${from ? `import("${from}")` : "globalThis"}.${path}`;
+			}),
+		);
 	}
 
 	// A re-export of something this package declares under another name or in another entrypoint.
