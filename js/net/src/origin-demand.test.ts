@@ -12,7 +12,7 @@ import { Publisher as LitePublisher } from "./lite/publisher.ts";
 import { Subscribe as LiteSubscribe } from "./lite/subscribe.ts";
 import { Track } from "./lite/track.ts";
 import { Version as LiteVersion } from "./lite/version.ts";
-import { createMockTransportPair } from "./mock.ts";
+import { createMockTransportPair, SessionBroadcast } from "./mock.ts";
 import { Producer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { readsFrom } from "./resume.test-util";
@@ -170,9 +170,8 @@ test.each([true, false])(
 				local.close();
 			}
 			await settle();
-			const late = new Broadcast();
-			const front = late.consume();
-			hooks.acceptRequest(old, front);
+			const late = new SessionBroadcast();
+			hooks.acceptRequest(old, late);
 			expect(late.closed.peek()).toBeNull();
 			const next = origin.request(path);
 			const fresh = (await requests.next()).value;

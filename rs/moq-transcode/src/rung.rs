@@ -1036,7 +1036,7 @@ mod tests {
 		);
 		source.close();
 		assert!(matches!(running.await, Ok(Ended::Unfinished)));
-		assert!(matches!(observed.closed().await, moq_net::Error::Cancel));
+		assert!(matches!(observed.closed().await, Err(moq_net::Error::Cancel)));
 	}
 
 	/// The track is admitted before the serving future is spawned, so it also owns cleanup

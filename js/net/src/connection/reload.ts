@@ -7,6 +7,7 @@ import { Allocator } from "../bandwidth.ts";
 import { error, reason, SessionCode, SessionError } from "../error.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
+import { closeUnwanted } from "../util/announce.ts";
 import { Follow } from "../util/observed.ts";
 import { wireOf } from "../wire.ts";
 import {
@@ -854,7 +855,8 @@ export class Reload {
 		});
 
 		this.#signals.cleanup(() => pump.close());
-		void consumer.closed.then(() => pump.close());
+		closeUnwanted(producer);
+		void producer.closed.then(() => pump.close());
 
 		return consumer;
 	}

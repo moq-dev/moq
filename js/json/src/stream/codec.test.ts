@@ -158,6 +158,7 @@ test("a rejected record leaves the producer able to retry", () => {
 	const producer = new Producer<Rec>({ track, compression: "deflate" });
 
 	// Closing the track makes every write fail, standing in for any post-appendGroup rejection.
+	track.finish();
 	track.close();
 	expect(() => producer.append({ value: { n: 1 } })).toThrow();
 

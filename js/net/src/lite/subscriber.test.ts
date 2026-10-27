@@ -2128,7 +2128,8 @@ test("a publisher FIN without SUBSCRIBE_END still violates an open subscription"
 });
 
 // A lite-07 publisher FINs a bounded subscription without SUBSCRIBE_END once it covered the range,
-// which ends the subscription cleanly rather than violating the protocol.
+// which ends the subscription cleanly rather than violating the protocol. Covering a range is
+// not ending the track, so no end is declared.
 test("a lite-07 publisher FIN ends a covered bounded subscription", async () => {
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened, closes } = fakeSession();
@@ -2154,6 +2155,7 @@ test("a lite-07 publisher FIN ends a covered bounded subscription", async () => 
 		for (const chunk of chunks) stream.inbound.enqueue(chunk);
 		stream.inbound.close();
 		expect(await track.closed).toBeNull();
+		await expect(track.finished()).rejects.toThrow("track closed before its end was known");
 		await drainReactions();
 		expect(closes).toEqual([]);
 	} finally {

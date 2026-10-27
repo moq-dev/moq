@@ -313,7 +313,7 @@ if (command === "sign") {
 		payload: new TextEncoder().encode("compat-fetch"),
 		timestamp: Moq.Time.Timestamp.fromMicros(1 as TimestampMicros),
 	});
-	group.close();
+	group.finish();
 	await connection.closed;
 } else if (command === "subscribe") {
 	// The flags of the interop subscriber this stands in for.

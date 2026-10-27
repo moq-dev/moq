@@ -25,7 +25,7 @@ for (const groups of [2, 16, 128]) {
 		for (let i = 0; i < groups; i++) {
 			const group = track.appendGroup();
 			group.writeFrame({ payload: new Uint8Array([i % 256]) });
-			group.close();
+			group.finish();
 		}
 		const peers = await Promise.all(
 			Array.from({ length: subscribers }, async () => {

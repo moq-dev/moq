@@ -940,6 +940,7 @@ async function livePlayback(burst: number) {
 		},
 		// Rename the rendition, publishing the rest of the timeline on the new track.
 		rename(name: string, patch: Record<string, unknown> = {}) {
+			track.finish();
 			track.close();
 			track = producer.createTrack(name, { timescale: Moq.Time.Timescale.MILLI });
 			sequence = 0;
@@ -965,7 +966,7 @@ async function livePlayback(burst: number) {
 					for (const timestamp of held) {
 						const group = new Moq.Group.Producer(sequence++);
 						group.writeFrame(legacyFrame(Micro.fromMilli(Milli(timestamp))));
-						group.close();
+						group.finish();
 						track.writeGroup(group);
 					}
 					held = [];

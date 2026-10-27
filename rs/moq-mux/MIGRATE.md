@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### MKV and FLV import refuse malformed tracks and unsupported codecs (#6908)
+
+MKV import fails on a malformed track, a duplicate or zero `TrackNumber`, a zero `TimestampScale`, a block timestamp outside the `u64` timeline, an unsupported codec or subtitle encoding, or input truncated at `finish()`, instead of skipping the track or wrapping the timestamp. Input after `finish()` fails with `mkv::Error::TracksAfterFinish`.
+FLV import fails with `Error::UnknownFormat` on an unsupported legacy or enhanced codec instead of dropping its tags.
+Supply valid metadata and supported codecs, or transcode or remove unsupported media tracks before import. Tracks of an unsupported role (such as MKV buttons) are still skipped.
+
 ### Rate following can disable a simulcast rung
 
 `rate::Follower::next` and `poll_next` return a `rate::Target`, and `rate::Control::update` returns `Option<rate::Target>`: `Target::Enabled(rate)` is the bitrate to encode at, and `Target::Disabled` means stop encoding and advertise the rendition disabled.

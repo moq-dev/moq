@@ -100,12 +100,12 @@ if (mode === "status") {
 		assert.equal((await commands.next()).value, "probe", "missing queued-request barrier");
 		const group = first.appendGroup();
 		group.writeFrame({ payload: new Uint8Array([1]) });
-		group.close();
+		group.finish();
 		const demand = second.demand();
 		while (demand.wanted.peek() === undefined) await demand.wanted.changed();
 		const next = second.appendGroup();
 		next.writeFrame({ payload: new Uint8Array([2]) });
-		next.close();
+		next.finish();
 		assert.equal((await commands.next()).value, "done");
 		console.error("request credit resumed");
 	} finally {

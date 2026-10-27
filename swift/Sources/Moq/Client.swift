@@ -14,8 +14,8 @@ public final class Client: Sendable {
     ///   - tokens: Credentials every dial presents. The first is the connection credential,
     ///     sent in SETUP and, while an offered version can't carry it there, the URL's `?jwt=`;
     ///     each other one widens the session's grant over in-band AUTH. A URL that already
-    ///     carries `?jwt=` keeps it, and then every token rides AUTH. Replace them through
-    ///     `tokens()`.
+    ///     carries `?jwt=` keeps it, and then every token rides AUTH. Replace a session's
+    ///     through `Session.tokens()`.
     ///   - timeout: How long one connect may take, dial and handshake together; 0 waits forever.
     ///   - race: Happy Eyeballs: how long before the next resolved address is also dialed.
     ///   - resolutionDelay: Happy Eyeballs: how long IPv4 waits for the full DNS answer.
@@ -68,36 +68,12 @@ public final class Client: Sendable {
         Session(try await ffi.connect(url: url))
     }
 
-    /// The credentials every dial presents, to replace while running.
-    public func tokens() -> Tokens {
-        Tokens(ffi.tokens())
-    }
-
     /// Cancel all current and future `connect()` calls.
     public func cancel() {
         ffi.cancel()
     }
 
 
-}
-
-/// The credentials a `Client` presents, replaceable while it runs.
-public final class Tokens: Sendable {
-    let ffi: MoqTokens
-
-    init(_ ffi: MoqTokens) {
-        self.ffi = ffi
-    }
-
-    /// Replace the credentials every dial presents, such as before the current ones expire.
-    ///
-    /// The next dial presents them, and a live session with in-band AUTH presents them at
-    /// once, withdrawing each replaced token once its replacements are answered, even when
-    /// one is refused. After an authorization refusal the client redials only if they changed.
-    /// - Throws: `MoqError.Config` for an empty token.
-    public func set(_ tokens: [String]) throws {
-        try ffi.set(tokens: tokens)
-    }
 }
 
 /// The protocol versions offered by default, most preferred first, spelled the way
@@ -170,13 +146,18 @@ public final class Session: Sendable {
         ffi.stats()
     }
 
-    /// The session's authorization: the grant its peer gave it, and more tokens to present.
+    /// Follow the grant the peer gave this session.
     ///
-    /// Each call returns an independent watcher of the grant. A client session's
-    /// handle survives reconnects, presenting each added token again on every new
-    /// connection.
-    public func auth() -> Auth {
-        Auth(ffi.auth())
+    /// Each call returns an independent consumer. A client session's grant follows
+    /// each reconnect, reading `nil` while offline.
+    public func grants() -> GrantConsumer {
+        GrantConsumer(ffi.grants())
+    }
+
+    /// The credentials a native client session presents, to replace while it runs;
+    /// `nil` for a server-accepted session, which presents none.
+    public func tokens() -> Tokens? {
+        ffi.tokens().map(Tokens.init)
     }
 
     /// Hold receive-estimate demand until the returned consumer is released.

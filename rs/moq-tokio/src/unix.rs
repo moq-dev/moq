@@ -349,12 +349,16 @@ impl Listener {
 	///
 	/// As in [`crate::tcp`], the `Option` has no `None` case left to report.
 	pub async fn accept(&self) -> Option<Result<(qmux::Session, PeerCred)>> {
-		Some(self.accept_pending().await.await)
+		Some(self.accept_pending(None).await.await)
 	}
 
 	/// Accept a socket and return its independently driven qmux handshake.
-	pub(crate) async fn accept_pending(&self) -> impl Future<Output = Result<(qmux::Session, PeerCred)>> + use<> {
+	pub(crate) async fn accept_pending(
+		&self,
+		allow: Option<&Allow>,
+	) -> impl Future<Output = Result<(qmux::Session, PeerCred)>> + use<> {
 		let stream = self.accept_socket().await;
+		let allow = allow.cloned();
 		let mut config = crate::qmux_config();
 		config.version = WIRE_VERSION;
 		config.protocol = qmux::Protocol::Negotiate(self.protocols.clone());
@@ -365,6 +369,14 @@ impl Listener {
 				gid: cred.gid(),
 				pid: cred.pid(),
 			};
+			// Qmux negotiates in-band, so enforce credentials before it can read or
+			// write any bytes, rather than after it returns a session.
+			if let Some(allow) = &allow
+				&& !allow.permits(&cred)
+			{
+				tracing::warn!(uid = cred.uid, gid = cred.gid, pid = ?cred.pid, "unix connection rejected by allow list");
+				return Err(io::Error::new(io::ErrorKind::PermissionDenied, "unix peer outside allow list").into());
+			}
 			let session = qmux::uds::accept(stream, config)
 				.await
 				.map_err(|err| Error::Accept(crate::error::message(err)))?;

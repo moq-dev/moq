@@ -366,9 +366,19 @@ export const hooks: {
 	/**
 	 * End a wire subscription's copy cleanly without declaring an end, for a session closed
 	 * locally: a dead route, not finished content, so a resumed reader's replacement route
-	 * continues past it. Mirrors the Rust `close` on a `received()` copy; assigned by `track.ts`.
+	 * continues past it. Rust aborts its copy with `Cancel` instead, which its resume also reads
+	 * as a dead route. Assigned by `track.ts`.
 	 */
 	releaseTrack: (producer: Producer) => void;
+	/**
+	 * Settles once the producer is released (closed or aborted), unlike its public `closed`,
+	 * which also settles on a reached end while the producer keeps serving. Assigned by `track.ts`.
+	 */
+	trackReleased: (producer: Producer) => GetPromise<Error | null>;
+	/** {@link trackReleased} for a demand handle. Assigned by `track.ts`. */
+	demandReleased: (demand: Demand) => GetPromise<Error | null>;
+	/** Whether the producer declared the track's end, released or not. Assigned by `track.ts`. */
+	trackFinished: (producer: Producer) => boolean;
 	/**
 	 * Record that the publisher gave up the groups `[start, end)` with `error`: none will
 	 * arrive, so a reader waiting on one moves past it, a group still arriving in them ends with
@@ -380,6 +390,11 @@ export const hooks: {
 	producerLargest: (producer: Producer) => Getter<Position | undefined>;
 
 	/** Re-evaluate a live-edge join at this subscriber's copy. */
+	/**
+	 * The track's exclusive end as this subscriber's copy knows it now, for a publisher
+	 * forwarding it. Readers await `finished()` instead. Assigned by `track.ts`.
+	 */
+	subscriberEnd: (subscriber: Subscriber) => Position | undefined;
 	joinSubscriber: (subscriber: Subscriber) => void;
 	/** Re-evaluate a live-edge join at a producer. */
 	joinProducer: (producer: Producer) => void;
@@ -518,6 +533,11 @@ export const hooks: {
 	/** Keep a mirror of a group accepted unverified below its track's eviction watermark out of media-time expiry. */
 	unverifyGroup: (group: GroupConsumer) => void;
 	/** Return a group's first timestamp, retained even after its first frame is read. */
+	/**
+	 * Release a group reader, failing it with `abort` if given: a mirror closes its own copy,
+	 * a shared handle ends only itself. Assigned by `group.ts`.
+	 */
+	releaseGroupReader: (group: GroupConsumer, abort?: Error) => void;
 	groupTimestamp: (group: GroupConsumer) => Timestamp | undefined;
 	groupLatest: (group: GroupConsumer) => Timestamp | undefined;
 	/** Return when a group joined its track at this hop, on the installed clock. */
@@ -562,6 +582,15 @@ export const hooks: {
 	releaseTrack: () => {
 		throw new Error("track.ts not loaded");
 	},
+	trackReleased: () => {
+		throw new Error("track.ts not loaded");
+	},
+	demandReleased: () => {
+		throw new Error("track.ts not loaded");
+	},
+	trackFinished: () => {
+		throw new Error("track.ts not loaded");
+	},
 	dropTrackGroups: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -569,6 +598,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	joinProducer: () => {
+		throw new Error("track.ts not loaded");
+	},
+	subscriberEnd: () => {
 		throw new Error("track.ts not loaded");
 	},
 	joinSubscriber: () => {
@@ -707,6 +739,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	arriveGroup: () => {
+		throw new Error("group.ts not loaded");
+	},
+	releaseGroupReader: () => {
 		throw new Error("group.ts not loaded");
 	},
 	groupTimestamp: () => {

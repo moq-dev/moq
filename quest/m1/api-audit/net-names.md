@@ -26,8 +26,7 @@ Decided 2026-10-23 (API audit follow-up, maintainer):
   `session::Stats` reads them from it. `StatsUnavailable` goes; the trait
   method gets a default.
 - **Credential.** `auth::Auth` (JS `Auth.Auth`) is one presented credential:
-  `auth::Credential` in Rust, JS, and the FFI. Update the
-  [auth epic](/quest/m1/auth/README.md), which uses the old name.
+  `auth::Credential` in Rust, JS, and the FFI.
 - **Info.** `track::Consumer::query() -> Pending<Querying>` becomes
   `info() -> Pending<Resolving>`, mirroring JS `Track.Consumer.info()`.
   `Pending` stays generic over the task so poll callers and `track()` keep

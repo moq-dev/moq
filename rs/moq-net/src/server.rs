@@ -210,6 +210,7 @@ impl Server {
 				stats: self.stats.clone(),
 				goaway: start.goaway,
 				auth: start.auth,
+				credential: start.credential,
 				estimate: Some(start.estimate),
 				bandwidth: crate::bandwidth::Allocator::default(),
 				peer_implementation: start.peer_implementation,
@@ -575,7 +576,7 @@ impl PausedIetfModern {
 
 		// The client's SETUP was read at the pause; hand the stream back
 		// for GOAWAY. A server never advertises a path, hence `None`.
-		let (protocol, goaway) = ietf::start(ietf::Config {
+		let (protocol, goaway, credential) = ietf::start(ietf::Config {
 			runtime: runtime.clone(),
 			stats: server.stats.clone(),
 			limits: server.limits,
@@ -611,6 +612,7 @@ impl PausedIetfModern {
 				stats: server.stats.clone(),
 				goaway,
 				auth,
+				credential,
 				estimate: None,
 				bandwidth: crate::bandwidth::Allocator::default(),
 				peer_implementation,
@@ -687,7 +689,7 @@ impl PausedLegacy {
 		};
 		stream.writer.encode(&server_setup).await?;
 
-		let (recv_bw, protocol, goaway, auth, estimate, peer_implementation) = match version {
+		let (recv_bw, protocol, goaway, auth, credential, estimate, peer_implementation) = match version {
 			Version::Lite(v) => {
 				let stream = stream.with_version(v);
 				// Pre-lite-05: no Setup Stream, so nothing to advertise or seed.
@@ -711,6 +713,7 @@ impl PausedLegacy {
 					crate::driver::Protocol::Lite(Box::new(start.driver)),
 					start.goaway,
 					start.auth,
+					start.credential,
 					Some(start.estimate),
 					start.peer_implementation,
 				)
@@ -719,7 +722,7 @@ impl PausedLegacy {
 				let stream = stream.with_version(v);
 				let peer_implementation = setup::PeerImplementation::known(peer_implementation);
 				// Draft 14-16: path came in the bidi SETUP, no uni SETUP to hand back.
-				let (protocol, goaway) = ietf::start(ietf::Config {
+				let (protocol, goaway, credential) = ietf::start(ietf::Config {
 					runtime: runtime.clone(),
 					stats: server.stats.clone(),
 					limits: server.limits,
@@ -749,6 +752,7 @@ impl PausedLegacy {
 					crate::driver::Protocol::Ietf(protocol),
 					goaway,
 					auth,
+					credential,
 					None,
 					peer_implementation,
 				)
@@ -765,6 +769,7 @@ impl PausedLegacy {
 				stats: server.stats.clone(),
 				goaway,
 				auth,
+				credential,
 				estimate,
 				bandwidth: crate::bandwidth::Allocator::default(),
 				peer_implementation,

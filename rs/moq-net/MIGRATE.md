@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### One lifecycle vocabulary ([#6750](https://github.com/moq-dev/moq/pull/6750))
+
+`closed()` on `group::Producer`, `group::Demand`, `track::Producer`, and `track::Demand` now waits for the outcome and returns `Result<()>`: `Ok(())` once the end settles (a finished group; a track whose declared end was reached with every group below it finished), or the abort error. Match on the result where you awaited `()` or treated `Error::Dropped` as a clean end; `poll_closed` returns `Poll<Result<()>>`.
+`group::Producer::abort` after `finish` only releases the cache: readers keep the clean end.
+A session closing locally aborts its copies with `Error::Stream(StreamError::Session(SessionError::Cancel))`, so their readers end with that error instead of a clean end.
+`track::Producer::end()` is `finished()`.
+
 ### An idle reservation reads the share it would get
 
 `bandwidth::Reservation::peek` and its `consumer()` report the slice the track would get back while nothing subscribes to it, instead of `None`; it still claims nothing from the other tracks.

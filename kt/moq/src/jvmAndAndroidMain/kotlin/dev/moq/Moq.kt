@@ -61,12 +61,12 @@ class Moq internal constructor(
     fun bandwidth(): Bandwidth = session.bandwidth()
 
     /**
-     * The session's authorization: the grant its peer gave it, and more tokens to present.
+     * Follow the grant the peer gave this session.
      *
-     * Collect [Auth.grants] to follow the grant, and [Auth.add] a fresh token before the
-     * current one expires; each added token is presented again on every reconnect.
+     * Collect `grants().updates()` for the current grant and each change. Every call returns
+     * an independent consumer.
      */
-    fun auth(): Auth = session.auth()
+    fun grants(): GrantConsumer = session.grants()
 
     /**
      * The credentials every dial presents ([ClientConfig.tokens]), to replace while running.
@@ -74,10 +74,10 @@ class Moq internal constructor(
      * [Tokens.set] replaces them, such as before the current ones expire: the next dial presents
      * them, and a live session with in-band AUTH presents them at once, withdrawing each
      * replaced token once its replacements are answered, even when one is refused. After an
-     * authorization refusal the client redials only if they changed. An empty token throws
-     * `MoqException.Config`.
+     * authorization refusal the session redials only if they changed. An empty token throws
+     * `MoqException.Config`. Suspend on [Tokens.answered] for the relay's verdict.
      */
-    fun tokens(): Tokens = client.tokens()
+    fun tokens(): Tokens = checkNotNull(session.tokens()) { "a client session presents tokens" }
 
     /**
      * Request a draining close now; await `session.closed()` for its result, then [close]

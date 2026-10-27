@@ -18,11 +18,12 @@ export async function run(): Promise<void> {
 			for (const timestamps of [[0], [100], [150, 200, 160]]) {
 				const group = check.appendGroup();
 				for (const ms of timestamps) group.writeFrame({ payload, timestamp: Time.Timestamp.fromMillis(ms) });
-				group.close();
+				group.finish();
 			}
 			if ((await reader.recvGroup())?.sequence !== 1) throw new Error("B-frame tail rewound the drift edge");
 		} finally {
 			reader.close();
+			check.finish();
 			check.close();
 		}
 		console.log("time_mode,retained,publishers,readers,ns_per_frame");
@@ -49,7 +50,7 @@ export async function run(): Promise<void> {
 										payload,
 										timestamp: stamp(sequence * 100, sequence),
 									});
-									group.close();
+									group.finish();
 								}
 								const subscribers = Array.from({ length: readers }, () =>
 									track.subscribe({
@@ -96,6 +97,7 @@ export async function run(): Promise<void> {
 								`${mode},${retained},${publishers},${readers},${((elapsed * 1e6) / (iterations * publishers * readers)).toFixed(0)}`,
 							);
 						} finally {
+							for (const track of tracks) track.finish();
 							for (const track of tracks) track.close();
 						}
 					}

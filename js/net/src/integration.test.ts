@@ -351,7 +351,7 @@ test("integration: lite applies initial and updated group bounds", async () => {
 
 	const broadcast = publish(origin, Path.from("test"));
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
-	for (let sequence = 0; sequence < GROUP_COUNT; sequence++) producer.appendGroup().close();
+	for (let sequence = 0; sequence < GROUP_COUNT; sequence++) producer.appendGroup().finish();
 
 	const remote = wireOf(client).consume(Path.from("test"));
 	const subscriber = remote
@@ -402,7 +402,7 @@ test("integration: lite refuses an empty requested range on open and on update",
 
 	const broadcast = publish(origin, Path.from("test"));
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
-	for (let sequence = 0; sequence < GROUP_COUNT; sequence++) producer.appendGroup().close();
+	for (let sequence = 0; sequence < GROUP_COUNT; sequence++) producer.appendGroup().finish();
 
 	const remote = wireOf(client).consume(Path.from("test"));
 	const video = remote.track("video");
@@ -869,7 +869,7 @@ test("integration: a group reset carries the peer's code to the subscriber", asy
 	expect(await consumer.readString()).toBe("frame");
 
 	// Reset the group stream the way a peer that dropped the group does.
-	group.close(new Reset(2));
+	group.abort(new Reset(2));
 
 	// The subscriber reads the code back off a typed error rather than whichever shape the
 	// transport produced, so nothing has to feature-detect a browser global.
@@ -910,7 +910,7 @@ test("integration: a locally raised group error reaches the peer as its own code
 
 	// The publisher's own cache dropped the rest of the group. Nothing hand-builds a transport
 	// error here, which is the point: the condition is raised the way the library raises it.
-	group.close(new TooFarBehind());
+	group.abort(new TooFarBehind());
 
 	const err = await consumer.readFrame().then(
 		() => undefined,
@@ -1005,11 +1005,11 @@ test("integration: lite draft-07 fetches a cached group", async () => {
 	const group0 = producer.appendGroup();
 	group0.writeFrame({ payload: enc.encode("alpha"), timestamp: Timestamp.fromMillis(10) });
 	group0.writeFrame({ payload: enc.encode("beta"), timestamp: Timestamp.fromMillis(15) });
-	group0.close();
+	group0.finish();
 
 	const group1 = producer.appendGroup();
 	group1.writeFrame({ payload: enc.encode("newer"), timestamp: Timestamp.fromMillis(20) });
-	group1.close();
+	group1.finish();
 
 	// Fetch group 0 without holding a live subscription; the timestamps round-trip.
 	const remote = wireOf(client).consume(Path.from("test"));
@@ -1044,13 +1044,15 @@ test.each(["gap", "end"])("integration: lite fetch rejects coalesced misses at %
 		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 		const group = new GroupProducer(1);
 		producer.writeGroup(group);
-		group.close();
+		group.finish();
 	} else {
 		serving = (async () => {
 			for (;;) {
 				const request = await wireOf(broadcast).requested();
 				if (!request) return;
-				request.accept({ timescale: Timescale.MILLI }).close();
+				const accepted = request.accept({ timescale: Timescale.MILLI });
+				accepted.finish();
+				accepted.close();
 			}
 		})();
 	}
@@ -1104,14 +1106,14 @@ test.each(["frame", "FIN"])("integration: lite fetch waits for the publisher's f
 		await sleep(0);
 		expect(settled).toBe(0);
 		if (answer === "frame") group.writeFrame(textFrame("accepted"));
-		else group.close();
+		else group.finish();
 		const consumers = await Promise.all([a, b]);
 		for (const consumer of consumers) {
 			expect(await consumer.readString()).toBe(answer === "frame" ? "accepted" : undefined);
 			consumer.close();
 		}
 	} finally {
-		group.close();
+		group.finish();
 		broadcast.close();
 		remote.close();
 		client.abort();
@@ -1137,7 +1139,7 @@ test("integration: lite draft-05 coalesces concurrent fetches of one group", asy
 	const group0 = producer.appendGroup();
 	group0.writeFrame({ payload: enc.encode("alpha"), timestamp: Timestamp.fromMillis(10) });
 	group0.writeFrame({ payload: enc.encode("beta"), timestamp: Timestamp.fromMillis(15) });
-	group0.close();
+	group0.finish();
 
 	const remote = wireOf(client).consume(Path.from("test"));
 	const trackConsumer = remote.track("video");
@@ -1194,7 +1196,7 @@ test("integration: lite draft-07 fetches an in-progress group", async () => {
 	expect(dec.decode(second?.payload)).toBe("beta");
 	expect(second?.timestamp?.asMillis()).toBe(15);
 
-	group0.close();
+	group0.finish();
 	expect(await fetched.readFrame()).toBeUndefined();
 
 	broadcast.close();
@@ -1259,7 +1261,7 @@ test("integration: lite draft-07 fetch uses the republished track's timescale", 
 	const firstTrack = first.createTrack("video", { timescale: Timescale.MILLI });
 	const firstGroup = firstTrack.appendGroup();
 	firstGroup.writeFrame({ payload: enc.encode("alpha"), timestamp: Timestamp.fromMillis(10) });
-	firstGroup.close();
+	firstGroup.finish();
 
 	// Prime the publisher's TRACK_INFO cache against the predecessor.
 	const remote = wireOf(client).consume(path);
@@ -1269,7 +1271,7 @@ test("integration: lite draft-07 fetch uses the republished track's timescale", 
 	const secondTrack = second.createTrack("video", { timescale: Timescale.MICRO });
 	const secondGroup = secondTrack.appendGroup();
 	secondGroup.writeFrame({ payload: enc.encode("beta"), timestamp: Timestamp.fromMicros(1234) });
-	secondGroup.close();
+	secondGroup.finish();
 
 	// A millisecond timescale would round this to 1000us.
 	const fetched = await remote.track("video").fetchGroup(0);
@@ -1527,7 +1529,7 @@ test("integration: lite fetch teardown when the reader abandons an open group", 
 	fetched.close();
 	await waitUntil(() => !group.demand().used.peek());
 
-	group.close();
+	group.finish();
 	broadcast.close();
 	remote.close();
 	client.abort();
@@ -1640,7 +1642,7 @@ test("integration: lite coalesced fetch stays until every reader abandons the op
 	f2.close();
 	await waitUntil(() => !group.demand().used.peek());
 
-	group.close();
+	group.finish();
 	broadcast.close();
 	remote.close();
 	client.abort();
@@ -1682,7 +1684,7 @@ test("integration: lite fetch re-armed by a late reader keeps every frame", asyn
 		expect(`${delay}: ${more}`).toBe(`${delay}: more`);
 
 		f2.close();
-		group.close();
+		group.finish();
 	}
 
 	broadcast.close();
@@ -1706,7 +1708,7 @@ test("integration: lite fetch delivers every frame of a finite multi-frame group
 	const group = video.appendGroup();
 	const count = 50;
 	for (let i = 0; i < count; i++) group.writeFrame(textFrame(`f${i}`));
-	group.close(); // finite
+	group.finish(); // finite
 
 	const remote = wireOf(client).consume(Path.from("test"));
 	const fetched = await remote.track("video").fetchGroup(group.sequence);
@@ -2811,7 +2813,11 @@ async function runSessionDeath(
 	client.abort();
 	server.abort();
 	origin.close();
-	return [closed, await withTimeout(groupEnd, Nano.fromMilli(Milli(2000)), "the group never ended"), track.end()];
+	return [
+		closed,
+		await withTimeout(groupEnd, Nano.fromMilli(Milli(2000)), "the group never ended"),
+		hooks.subscriberEnd(track),
+	];
 }
 
 for (const [name, protocol, version] of [
@@ -2865,7 +2871,7 @@ test("integration: lite draft-05 ends a track with the publisher's reset", async
 	expect(await group?.readString()).toBe("head");
 
 	const reset = StreamCode(70);
-	for (const producer of served) producer.close(new StreamError(reset));
+	for (const producer of served) producer.abort(new StreamError(reset));
 	const closed = await withTimeout(
 		Promise.resolve(track.closed),
 		Nano.fromMilli(Milli(2000)),

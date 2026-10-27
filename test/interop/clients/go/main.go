@@ -115,10 +115,11 @@ func dial(ctx context.Context, url string, opts dialOptions, timeout time.Durati
 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	auth := client.Session().Auth()
-	grant := auth.Grant()
+	grants := client.Session().Grants()
+	defer grants.Close()
+	grant := grants.Grant()
 	for grant == nil {
-		if grant, err = auth.GrantChanged(ctx); err != nil {
+		if grant, err = grants.Changed(ctx); err != nil {
 			client.Close()
 			return nil, fmt.Errorf("grant: %w", err)
 		}

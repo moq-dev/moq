@@ -222,8 +222,8 @@ fn bench_unresolved_teardown(c: &mut Criterion) {
 	group.finish();
 }
 
-/// Tracks interleaving frames on one catalog, up to the most renditions it can hold.
-const ORDERED: [usize; 3] = [1, 16, hang::catalog::MAX_RENDITIONS];
+/// Tracks interleaving frames on one catalog.
+const ORDERED: [usize; 3] = [1, 16, 64];
 
 /// Frames each track writes per iteration.
 const FRAMES: u64 = 100;

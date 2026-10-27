@@ -902,12 +902,10 @@ def test_public_api_exports():
     assert client._config.tls.fingerprints == ["abc123"]
 
 
-def test_client_tokens_before_connecting():
-    """Tokens reach the config, and setting them before connecting replaces them there."""
+def test_client_tokens_reach_the_config():
+    """Tokens reach the config every session starts from."""
     client = moq.connect("https://example.com", tokens=["first", "second"])
     assert client._config.tokens == ["first", "second"]
-    client.tokens().set(["fresh"])
-    assert client._config.tokens == ["fresh"]
 
 
 async def test_container_consumer_default_latency_and_context_manager():

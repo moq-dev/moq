@@ -157,10 +157,8 @@ typealias BandwidthConsumer = uniffi.moq.MoqBandwidthConsumer
 typealias Reservation = uniffi.moq.MoqReservation
 /** A snapshot of transport connection statistics. */
 typealias ConnectionStats = uniffi.moq.MoqConnectionStats
-/** A session's authorization: the grant its peer gave it, and more tokens to present. */
-typealias Auth = uniffi.moq.MoqAuth
-/** One token presented with [Auth.add]; cancel it to withdraw the token. */
-typealias AuthToken = uniffi.moq.MoqAuthToken
+/** Follows the grant a session's peer gave it; cancel it to release a pending wait. */
+typealias GrantConsumer = uniffi.moq.MoqGrantConsumer
 /** What the peer lets this side do: publish and subscribe patterns, and an expiry. */
 typealias Grant = uniffi.moq.MoqGrant
 /** A connection lifecycle transition reported by [Session.state]. */

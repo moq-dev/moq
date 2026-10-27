@@ -7974,14 +7974,12 @@ async fn ascending_subscription_reads_a_cached_backlog_oldest_first() {
 
 /// Wait until `session` grants `want`, following its changes.
 async fn await_grant(session: &MoqSession, want: crate::auth::MoqGrant) {
-	// `grant_changed` waits for a grant other than the one its handle last returned, which a
-	// read through `grant` does not move. A fresh handle starts from the grant as it is now,
-	// so it is taken before the read, and the loop follows what `grant_changed` returns.
-	let auth = session.auth();
-	let mut current = auth.grant();
+	// A fresh consumer starts from the grant as it is now, so `changed` follows from there.
+	let grants = session.grants();
+	let mut current = grants.grant();
 	tokio::time::timeout(TIMEOUT, async {
 		while current.as_ref() != Some(&want) {
-			current = auth.grant_changed().await.expect("grant watch ended");
+			current = grants.changed().await.expect("grant watch ended");
 		}
 	})
 	.await
@@ -7995,6 +7993,14 @@ fn grant(publish: &[&str], subscribe: &[&str]) -> crate::auth::MoqGrant {
 		subscribe: patterns(subscribe),
 		expires: None,
 	}
+}
+
+/// The peer's answer to the tokens set last.
+async fn answered(session: &MoqSession) -> Result<(), MoqError> {
+	let tokens = session.tokens().expect("a client session has tokens");
+	tokio::time::timeout(TIMEOUT, tokens.answered())
+		.await
+		.expect("the tokens were never answered")
 }
 
 /// Both sides of a session read the grant their peer gave them, on lite-07 and on moq-transport
@@ -8015,15 +8021,17 @@ async fn auth_reads_the_peer_grant_on(version: &str) {
 	// Each side's origins span the root, so its peer grants it everything.
 	await_grant(&client, grant(&["**"], &["**"])).await;
 	await_grant(&accepted, grant(&["**"], &["**"])).await;
+	assert!(accepted.tokens().is_none(), "an accepted session presents no tokens");
 
-	let err = tokio::time::timeout(TIMEOUT, client.auth().add("extra".into()))
+	// The live session was dialed without a credential, so this one rides AUTH.
+	let tokens = client.tokens().unwrap();
+	tokens.set(vec!["extra".into()]).unwrap();
+	let err = answered(&client)
 		.await
-		.expect("add timed out")
-		.err()
-		.expect("the default acceptor refuses a token");
+		.expect_err("the default acceptor refuses a token");
 	assert!(matches!(err, MoqError::Unsupported), "refusal: {err:?}");
 	assert_eq!(
-		client.auth().grant(),
+		client.grants().grant(),
 		Some(grant(&["**"], &["**"])),
 		"a refusal leaves the union"
 	);
@@ -8034,20 +8042,17 @@ async fn auth_reads_the_peer_grant_on(version: &str) {
 }
 
 /// moq-transport without the Auth extension carries a token only on a request that names it,
-/// which no binding can, so both sides refuse one rather than report a token nothing sends.
+/// which no binding can, so the answer is that the session cannot carry it.
 #[tokio::test]
 async fn auth_refuses_a_token_nothing_carries() {
 	let (server, client, accepted) = tokio::time::timeout(TIMEOUT, session_pair("moq-transport-14"))
 		.await
 		.expect("pair");
+	client.tokens().unwrap().set(vec!["extra".into()]).unwrap();
+	let err = answered(&client).await.expect_err("a token nothing carries is refused");
+	assert!(matches!(err, MoqError::Unsupported), "refusal: {err:?}");
 	for session in [&client, &accepted] {
-		let err = tokio::time::timeout(TIMEOUT, session.auth().add("extra".into()))
-			.await
-			.expect("add timed out")
-			.err()
-			.expect("a token nothing carries is refused");
-		assert!(matches!(err, MoqError::Unsupported), "refusal: {err:?}");
-		assert_eq!(session.auth().grant(), None, "no AUTH, no grant");
+		assert_eq!(session.grants().grant(), None, "no AUTH, no grant");
 	}
 
 	client.cancel(0);
@@ -8055,8 +8060,8 @@ async fn auth_refuses_a_token_nothing_carries() {
 	server.cancel();
 }
 
-/// A token added through a client session joins the union with its own grant, leaves it on
-/// cancel, and a refusal or revocation carries the peer's code.
+/// A replacement token joins the union once answered, leaves it when replaced, and a
+/// refusal carries the peer's code. Each grant consumer follows the changes on its own.
 #[tokio::test]
 async fn auth_tokens_join_and_leave_the_union() {
 	let version: moq_net::Version = "moq-lite-07-wip".parse().unwrap();
@@ -8079,11 +8084,6 @@ async fn auth_tokens_join_and_leave_the_union() {
 			match request.token().as_ref() {
 				b"" => issued.push(request.accept(publish("setup/**"))),
 				b"extra" => issued.push(request.accept(publish("extra/**"))),
-				b"revoked" => request
-					.accept(publish("revoked/**"))
-					.revoke(moq_net::SessionError::Expired, "revoked"),
-				// Dropping the issued grant closes the token without an error.
-				b"closed" => drop(request.accept(publish("closed/**"))),
 				_ => request.reject(moq_net::SessionError::Unauthorized, "unknown token"),
 			}
 		}
@@ -8101,60 +8101,32 @@ async fn auth_tokens_join_and_leave_the_union() {
 		.await
 		.expect("connect timed out")
 		.unwrap();
-	let auth = session.auth();
 	await_grant(&session, grant(&["setup/**"], &[])).await;
-	// A second handle watches on its own and starts from the grant it was made with.
-	let watcher = session.auth();
+	// A second consumer watches on its own and starts from the grant it was made with.
+	let watcher = session.grants();
+	// The session was dialed without a credential, so the empty set is already answered.
+	answered(&session).await.expect("no tokens to refuse");
 
-	let extra = tokio::time::timeout(TIMEOUT, auth.add("extra".into()))
-		.await
-		.expect("add timed out")
-		.unwrap();
-	assert_eq!(extra.grant(), Some(grant(&["extra/**"], &[])));
+	let tokens = session.tokens().unwrap();
+	tokens.set(vec!["extra".into()]).unwrap();
+	answered(&session).await.expect("the extra token was refused");
 	// Patterns are kept sorted.
 	await_grant(&session, grant(&["extra/**", "setup/**"], &[])).await;
-	let seen = tokio::time::timeout(TIMEOUT, watcher.grant_changed())
+	let seen = tokio::time::timeout(TIMEOUT, watcher.changed())
 		.await
-		.expect("the second handle sees the change the first took")
+		.expect("the second consumer sees the change")
 		.unwrap();
 	assert_eq!(seen, Some(grant(&["extra/**", "setup/**"], &[])));
 
-	extra.cancel();
-	await_grant(&session, grant(&["setup/**"], &[])).await;
-	assert!(matches!(extra.closed().await, Err(MoqError::Cancelled)));
-
-	let refused = tokio::time::timeout(TIMEOUT, auth.add("bogus".into()))
-		.await
-		.expect("add timed out")
-		.err()
-		.expect("refused");
+	// A refused replacement still withdraws the token it replaces.
+	tokens.set(vec!["bogus".into()]).unwrap();
+	let refused = answered(&session).await.expect_err("refused");
 	assert_protocol(
 		&refused,
 		crate::error::MoqErrorScope::Session,
 		MoqProtocolKind::Unauthorized,
 	);
-
-	let revoked = tokio::time::timeout(TIMEOUT, auth.add("revoked".into()))
-		.await
-		.expect("add timed out")
-		.unwrap();
-	let closed = tokio::time::timeout(TIMEOUT, revoked.closed())
-		.await
-		.expect("closed timed out")
-		.unwrap_err();
-	assert_protocol(&closed, crate::error::MoqErrorScope::Session, MoqProtocolKind::Expired);
-	assert_eq!(revoked.grant(), None, "an ended token grants nothing");
-	assert_eq!(auth.grant(), Some(grant(&["setup/**"], &[])));
-
-	let closed = tokio::time::timeout(TIMEOUT, auth.add("closed".into()))
-		.await
-		.expect("add timed out")
-		.unwrap();
-	tokio::time::timeout(TIMEOUT, closed.closed())
-		.await
-		.expect("closed timed out")
-		.expect("a clean close is not an error");
-	assert_eq!(auth.grant(), Some(grant(&["setup/**"], &[])));
+	await_grant(&session, grant(&["setup/**"], &[])).await;
 
 	session.cancel(0);
 	tokio::time::timeout(TIMEOUT, serving)

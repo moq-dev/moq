@@ -1101,7 +1101,7 @@ export class Publisher {
 
 			// Draft 14 on has no end location in PUBLISH_DONE: an END_OF_TRACK object is what
 			// tells the subscriber where the track ended.
-			const final = track.end();
+			const final = hooks.subscriberEnd(track);
 			if (ended && !publishError && final !== undefined && !streams.terminalSent) {
 				await this.#runEndOfTrack({
 					requestId: msg.requestId,
@@ -1193,7 +1193,7 @@ export class Publisher {
 			if (excludes(bounds.peek(), group.sequence, slice)) {
 				if (!finished) live.retired = true;
 				rangeError = new Error("group excluded by range update");
-				group.close(rangeError);
+				hooks.releaseGroupReader(group, rangeError);
 				excluded.resolve();
 			}
 		};
@@ -1223,7 +1223,7 @@ export class Publisher {
 				opened.resolve();
 			}
 			if (!stream) {
-				group.close(failure ?? new Error("no stream slot"));
+				hooks.releaseGroupReader(group, failure ?? new Error("no stream slot"));
 				return;
 			}
 			streams.opened += 1;
@@ -1309,7 +1309,7 @@ export class Publisher {
 
 				// The track ends right after this group's last object, so the marker rides this
 				// stream rather than a separate one.
-				const end = track.end();
+				const end = hooks.subscriberEnd(track);
 				const marked = end?.group === group.sequence && end.frame === next;
 				if (marked) {
 					await new Frame({ endOfTrack: true }).encode(
@@ -1347,7 +1347,7 @@ export class Publisher {
 			}
 		} catch (err: unknown) {
 			// A failed open has no stream to reset, but still ends only this group.
-			group.close(error(err));
+			hooks.releaseGroupReader(group, error(err));
 		} finally {
 			changed();
 			group.close();

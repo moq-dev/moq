@@ -194,6 +194,7 @@ test("a closed track is pruned", () => {
 	const first = track(VIDEO);
 	first.subscribe();
 	const firstShare = allocator.reserve(first.demand(), 4_000_000);
+	first.finish();
 	first.close();
 
 	const second = track(VIDEO);

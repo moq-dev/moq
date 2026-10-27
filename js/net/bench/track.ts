@@ -65,7 +65,7 @@ async function measure(
 		const group = new GroupProducer(sequence);
 		producer.writeGroup(group);
 		group.writeFrame({ payload, timestamp: Timestamp.fromMillis(sequence++) });
-		if (close) group.close();
+		if (close) group.finish();
 		return group;
 	};
 
@@ -101,7 +101,7 @@ async function measure(
 	const elapsed = now() - start;
 
 	for (const done of opened) done();
-	for (const group of open) group.close();
+	for (const group of open) group.finish();
 	await Promise.all(reads);
 	// Completion wakes every subscriber independently of producer closure.
 	const ending = subscribers.map((subscriber) => subscriber.recvGroup());
@@ -111,6 +111,7 @@ async function measure(
 		if (group) throw new Error("track did not end at its declared boundary");
 	}
 	const end = (now() - endStart) * 1000;
+	producer.finish();
 	producer.close();
 	// Ending the track releases the newest group too; idle cleanup reclaims the cache.
 	clock += CACHE_WINDOW_MS + CACHE_WINDOW_MS / 8 + 1;

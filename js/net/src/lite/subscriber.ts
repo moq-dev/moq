@@ -32,6 +32,7 @@ import { Tail } from "../tail.ts";
 import * as Time from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
+import { closeUnwanted } from "../util/announce.ts";
 import { Deadline, REQUEST_TIMEOUT_MS, requestOptions } from "../util/deadline.ts";
 import { abandoned, isAbandoned, unwanted } from "../util/demand.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
@@ -271,8 +272,11 @@ export class Subscriber {
 	announced(scope: Path.Pattern = Path.Pattern.all(), options?: announce.Options): announce.Consumer {
 		const announced = new announce.Producer();
 		// The wire speaks announce interest by prefix, and echoes suffixes beneath it.
+		const consumer = announced.consume();
+		// The last reader leaving ends the stream, which cancels the request.
+		closeUnwanted(announced);
 		void this.#runAnnounced(announced, scopeHead(scope), scope, options?.hidden ?? false);
-		return announced.consume();
+		return consumer;
 	}
 
 	async #runAnnounced(
@@ -682,9 +686,9 @@ export class Subscriber {
 	async #runListing(broadcast: Path.Valid, consumed: Consumed, lister: Lister) {
 		try {
 			for (;;) {
-				if (lister.ended.peek() !== undefined || this.#closed.signal.aborted) return;
+				if (lister.closed.peek() !== undefined || this.#closed.signal.aborted) return;
 				if (!lister.used.peek()) {
-					await untilAborted(race([Signal.race(lister.used, lister.ended)]), this.#closed.signal).catch(
+					await untilAborted(race([Signal.race(lister.used, lister.closed)]), this.#closed.signal).catch(
 						() => {},
 					);
 					continue;
@@ -720,8 +724,8 @@ export class Subscriber {
 			?.ready(broadcast, "subscribe", {
 				signal: setup,
 				until: async () => {
-					while (lister.used.peek() && lister.ended.peek() === undefined) {
-						await Signal.race(lister.used, lister.ended);
+					while (lister.used.peek() && lister.closed.peek() === undefined) {
+						await Signal.race(lister.used, lister.closed);
 					}
 				},
 			})
@@ -857,7 +861,7 @@ export class Subscriber {
 			state.revoked = refused;
 			console.debug(`subscribe revoked: id=${id} broadcast=${broadcast} track=${request.name}`);
 			state.cancel.abort(refused);
-			state.producer?.close(refused);
+			state.producer?.abort(refused);
 			state.stream?.abort(refused);
 		});
 		try {
@@ -906,7 +910,7 @@ export class Subscriber {
 		// its TRACK stream so a peer that never answers can't hold one per attempt.
 		const retirer = (signal?: AbortSignal) => () => {
 			state.cancel.abort(signal?.reason);
-			state.producer?.close(error(signal?.reason));
+			state.producer?.abort(error(signal?.reason));
 			state.stream?.abort(error(signal?.reason));
 		};
 		const retire = retirer(valid);
@@ -983,7 +987,7 @@ export class Subscriber {
 			// once; race them into one stable promise so the demand loop doesn't re-subscribe each pass.
 			// Updates stop quietly at the FIN or a failed write, either of which can land before the
 			// responses ahead of it are decoded, so only a refused update is terminal on its own.
-			const terminal: PromiseLike<unknown>[] = [closed, producer.closed];
+			const terminal: PromiseLike<unknown>[] = [closed, hooks.trackReleased(producer)];
 			if (subscriptionUpdates !== undefined) terminal.push(subscriptionUpdates.then(() => closed));
 			const done = race(terminal);
 
@@ -994,14 +998,21 @@ export class Subscriber {
 			const demand = producer.demand();
 			for (;;) {
 				const reason = await race([done, unwanted(demand).then(() => idle)]);
-				if (reason === idle && demand.closed.peek() === undefined && demand.wanted.peek() !== undefined)
+				if (
+					reason === idle &&
+					hooks.demandReleased(demand).peek() === undefined &&
+					demand.wanted.peek() !== undefined
+				)
 					continue;
 				break;
 			}
 
 			// A publisher that covered the range before reading an update widening it sent
-			// fewer groups than the track has, so it fails rather than ending clean.
-			producer.close(short);
+			// fewer groups than the track has, so it fails rather than ending clean. Otherwise
+			// only a received SUBSCRIBE_END declares the track's end: a range covered or a
+			// subscription nobody wants anymore is a released copy, not finished content.
+			if (short) producer.abort(short);
+			else hooks.releaseTrack(producer);
 			// A settled lite07 tail acknowledges completion with FIN, without cancelling
 			// the publisher's already-finished receive half.
 			if (tailSettled && waitsForSubscriberFin(this.version)) stream.writer.close();
@@ -1009,7 +1020,7 @@ export class Subscriber {
 			console.debug(`subscribe close: id=${id} broadcast=${broadcast} track=${request.name}`);
 		} catch (err) {
 			const e = await sessionCause(this.#quic, err);
-			producer.close(e);
+			producer.abort(e);
 			console.warn(`subscribe error: id=${id} broadcast=${broadcast} track=${request.name} error=${reason(e)}`);
 			stream.abort(e);
 		} finally {
@@ -1283,7 +1294,7 @@ export class Subscriber {
 			// Arm after admission, before checking: another unanswered token may still
 			// widen the union while we wait, which is not a revocation of this fetch.
 			const disposeGrant = this.#grant?.subscribe(() => {
-				if (this.#denied(broadcast)) group.close(refused);
+				if (this.#denied(broadcast)) group.abort(refused);
 			});
 			void group.closed.then(() => disposeGrant?.());
 			if (this.#denied(broadcast)) throw refused;
@@ -1310,7 +1321,7 @@ export class Subscriber {
 			hooks.bindGroupCompression(group, accepted.info.compress);
 			void this.#runFetchResponse(accepted.stream, group, accepted.info);
 		} catch (err: unknown) {
-			group.close(error(err));
+			group.abort(error(err));
 			throw err;
 		}
 	}
@@ -1380,7 +1391,10 @@ export class Subscriber {
 			let unused = group
 				.demand()
 				.unused()
-				.then((): typeof idle => idle);
+				.then(
+					(): typeof idle => idle,
+					(): typeof idle => idle,
+				);
 			// A decode consumes its frame whenever it lands, so one outstanding across a re-arm is
 			// kept and awaited again rather than abandoned with its frame.
 			let pending: Promise<WireFrame | undefined> | undefined;
@@ -1396,7 +1410,10 @@ export class Subscriber {
 							unused = group
 								.demand()
 								.unused()
-								.then((): typeof idle => idle);
+								.then(
+									(): typeof idle => idle,
+									(): typeof idle => idle,
+								);
 							continue;
 						}
 						// Abandoned mid-group: the truncated group must never end clean.
@@ -1411,11 +1428,11 @@ export class Subscriber {
 				hooks.writeGroupFrame(group, frame, frame.inflated);
 			}
 
-			group.close();
+			group.finish();
 			stream.close();
 		} catch (err: unknown) {
 			const e = error(err);
-			group.close(e);
+			group.abort(e);
 			stream.abort(e);
 		}
 	}
@@ -1436,7 +1453,7 @@ export class Subscriber {
 			if (!resp) {
 				// A bounded range may have widened since, in an update the publisher never read.
 				const covered = hasRanges(this.version) && entry.bounded;
-				if (entry.end === undefined && !covered && entry.track.closed.peek() === undefined)
+				if (entry.end === undefined && !covered && hooks.trackReleased(entry.track).peek() === undefined)
 					throw new ProtocolViolation("subscribe stream ended without SUBSCRIBE_END");
 				return;
 			}
@@ -1452,7 +1469,7 @@ export class Subscriber {
 				if (entry.end !== undefined) throw new ProtocolViolation("duplicate SUBSCRIBE_END");
 				entry.end = resp.end.group;
 				// A local close can win the race with the response; there is nothing left to end.
-				if (entry.track.closed.peek() !== undefined) continue;
+				if (hooks.trackReleased(entry.track).peek() !== undefined) continue;
 				try {
 					// Lower groups may still be on the wire behind a higher one, so readers hold
 					// at a hole below the end until the tail settles.
@@ -1507,8 +1524,9 @@ export class Subscriber {
 			return tail.covers(start, end);
 		};
 
-		await tail.settle(complete, track.closed);
-		if (entry.end !== undefined || !hasRanges(this.version) || track.closed.peek() !== undefined) return true;
+		const released = hooks.trackReleased(track);
+		await tail.settle(complete, released);
+		if (entry.end !== undefined || !hasRanges(this.version) || released.peek() !== undefined) return true;
 		const demand = groupBounds(track.subscription.peek()?.groups);
 		if (demand.start === entry.asked.start && demand.end === entry.asked.end) return true;
 		// Without SUBSCRIBE_START nothing says which ranges the publisher read, so only the
@@ -1535,7 +1553,7 @@ export class Subscriber {
 		stream: Stream,
 	): Promise<void> {
 		const track = entry.track;
-		const stopped: Promise<null> = race([track.closed, stream.reader.closed]).then(() => null);
+		const stopped: Promise<null> = race([hooks.trackReleased(track), stream.reader.closed]).then(() => null);
 		let lastSent: track.Subscription = {
 			priority: msg.priority,
 			order: msg.order,
@@ -1662,7 +1680,7 @@ export class Subscriber {
 				const violation = new ProtocolViolation(
 					`group ${group.sequence} is at or past the declared end ${entry.end}`,
 				);
-				track.close(violation);
+				track.abort(violation);
 				throw violation;
 			}
 			track.writeGroup(producer);
@@ -1671,29 +1689,29 @@ export class Subscriber {
 			// TRACK_INFO (or implicit defaults) resolves it on the subscribe stream.
 			let scale = timescale.peek();
 			while (scale === undefined) {
-				if (track.closed.peek() !== undefined) {
+				if (hooks.trackReleased(track).peek() !== undefined) {
 					// Subscription ended before the scale resolved; nothing to decode.
-					producer.close();
+					producer.finish();
 					stream.stop(StreamCode.Cancel);
 					return;
 				}
-				await Signal.race(timescale, track.closed);
+				await Signal.race(timescale, hooks.trackReleased(track));
 				scale = timescale.peek();
 			}
 
 			await readFrames(stream, producer, { scale, timed: hasMediaTime(this.version), compress: entry.compress });
 
-			producer.close();
+			producer.finish();
 			stream.stop(StreamCode.Cancel);
 		} catch (err: unknown) {
 			// A violation ends the session, which the connection does once it escapes; anything
 			// else ends only this group.
 			if (err instanceof ProtocolViolation) {
-				producer.close(err);
+				producer.abort(err);
 				throw err;
 			}
 			const e = await sessionCause(this.#quic, err);
-			producer.close(e);
+			producer.abort(e);
 			stream.stop(e);
 		} finally {
 			read();
@@ -1856,7 +1874,7 @@ export class Subscriber {
 		this.#closed.abort(cut);
 
 		for (const { track } of this.#subscribes.values()) {
-			if (err) track.close(err);
+			if (err) track.abort(err);
 			else hooks.releaseTrack(track);
 		}
 
@@ -1864,7 +1882,7 @@ export class Subscriber {
 
 		// This also releases callers still awaiting acceptance.
 		for (const { group } of this.#fetches.values()) {
-			group.close(cut);
+			group.abort(cut);
 		}
 	}
 }
@@ -1890,7 +1908,10 @@ async function untilAbandoned<T>(group: netGroup.Producer, step: Promise<T>): Pr
 				group
 					.demand()
 					.unused()
-					.then((): typeof idle => idle),
+					.then(
+						(): typeof idle => idle,
+						(): typeof idle => idle,
+					),
 			]),
 		);
 		if (value !== idle) return value as T;
@@ -1898,7 +1919,7 @@ async function untilAbandoned<T>(group: netGroup.Producer, step: Promise<T>): Pr
 			// Close here rather than where the error lands, so no fetch coalesces onto the group
 			// in between only to fail with it.
 			const err = new StreamError(StreamCode.Cancel, { message: "cancel" });
-			group.close(err);
+			group.abort(err);
 			throw err;
 		}
 	}
