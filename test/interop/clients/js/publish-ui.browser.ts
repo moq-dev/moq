@@ -288,7 +288,8 @@ test("version lists refuse unsupported, duplicate, and empty lists and snapshot 
 				errors.push(event.message);
 				event.preventDefault();
 			});
-			return (["moq-watch", "moq-publish"] as const).map((tag) => {
+			const results = [];
+			for (const tag of ["moq-watch", "moq-publish"] as const) {
 				const element = document.createElement(tag);
 				const markup = ["moq-lite-99", "moq-lite-06,moq-lite-06"].map((invalid) => {
 					const count = errors.length;
@@ -313,11 +314,14 @@ test("version lists refuse unsupported, duplicate, and empty lists and snapshot 
 				element.versions = list;
 				list.push("moq-lite-05");
 				const snapshot = element.versions;
+				// Reflection runs in an effect once the signal write settles.
+				await new Promise((resolve) => setTimeout(resolve, 0));
 				const reflected = element.getAttribute("versions");
 				element.remove();
 				element.signals.close();
-				return { tag, markup, thrown, snapshot, reflected };
-			});
+				results.push({ tag, markup, thrown, snapshot, reflected });
+			}
+			return results;
 		});
 		for (const result of results)
 			expect(result).toEqual({
