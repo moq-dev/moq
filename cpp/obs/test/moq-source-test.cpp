@@ -740,9 +740,11 @@ int main()
 	}
 	report("plays video and audio");
 
-	// A tagged gap or encoder end drains reordered pictures, then restarts the codec
-	// without ending or replacing the subscription that can resume after the break.
-	for (bool gap : {true, false}) {
+	// Gaps reset references immediately. An encoder end keeps old non-key tail packets
+	// decodable until a fresh frame reaches its endpoint, or until EOF drains the tail.
+	for (int boundary : {0, 1, 2}) {
+		const bool gap = boundary == 0;
+		const bool eof = boundary == 2;
 		TestRelay relay;
 		reset(relay.Url());
 		g_reorder_delay = 2;
@@ -760,24 +762,44 @@ int main()
 			const auto *state = static_cast<DecodeState *>(held->video_decoder->codec_ctx->opaque);
 			const auto pending = state->held.size();
 			CHECK(pending > 0);
-			moq::MediaRead read =
-				gap ? moq::MediaRead{moq::MediaRead::kGap{123456, std::chrono::microseconds(78901)}}
-				    : moq::MediaRead{moq::MediaRead::kEnd{202357}};
-			moq_source_on_frame(ctx, conn, held, std::optional<moq::MediaRead>{std::move(read)});
-			CHECK(g_output_frames == frames + static_cast<int>(pending));
-			CHECK(!held->video_decoder->got_keyframe);
+			const uint64_t end = static_cast<uint64_t>(state->last_pts) + 1'000'000;
+			auto inject = [&](moq::MediaRead read) {
+				moq_source_on_frame(ctx, conn, held, std::optional<moq::MediaRead>{std::move(read)});
+			};
+			if (gap) {
+				inject(moq::MediaRead{moq::MediaRead::kGap{123456, std::chrono::microseconds(78901)}});
+				CHECK(g_output_frames == frames + static_cast<int>(pending));
+				CHECK(!held->video_decoder->got_keyframe);
+			} else {
+				inject(moq::MediaRead{moq::MediaRead::kEnd{end}});
+				CHECK(held->video_decoder->got_keyframe);
+				// Non-key tail packets below the endpoint still depend on the old references.
+				inject(moq::MediaRead{
+					moq::MediaRead::kFrame{moq::MediaFrame{TestH264Keyframe(), end - 1, false}}});
+				CHECK(state->last_pts == static_cast<int64_t>(end - 1));
+				if (eof) {
+					moq_source_on_frame(ctx, conn, held, std::optional<moq::MediaRead>{});
+				} else {
+					inject(moq::MediaRead{moq::MediaRead::kFrame{
+						moq::MediaFrame{TestH264Keyframe(), end, true}}});
+					CHECK(state->last_pts == static_cast<int64_t>(end));
+					CHECK(state->held.size() == 1);
+				}
+				CHECK(g_output_frames == frames + static_cast<int>(pending) + 1);
+				std::lock_guard<std::mutex> output_lock(g_video_mutex);
+				CHECK(std::count(g_video_timestamps.begin(), g_video_timestamps.end(),
+						 (end - 1) * 1000) == 1);
+			}
 			CHECK(conn->video == held);
 		}
-		const int frames = g_output_frames;
-		CHECK(publisher.WriteUntil([&] { return g_output_frames > frames; }));
-		{
-			std::lock_guard<std::mutex> lock(ctx->mutex);
-			CHECK(ctx->connection->video == held);
+		if (gap) {
+			const int frames = g_output_frames;
+			CHECK(publisher.WriteUntil([&] { return g_output_frames > frames; }));
 		}
 		held.reset();
 		destroySource(source);
 	}
-	report("media breaks drain pictures and keep the subscription");
+	report("media breaks preserve decoder tail and subscription ownership");
 
 	// H.264 with B-frames arrives in decode order. Each picture reaches OBS with its own
 	// presentation timestamp, and the pictures the decoder still holds when the track

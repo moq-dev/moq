@@ -85,6 +85,8 @@ struct VideoDecoder {
 	AVPixelFormat current_pix_fmt = AV_PIX_FMT_NONE;
 	SwsContext *sws_ctx = nullptr;
 	bool got_keyframe = false;
+	// End can precede the old encoder's final packets, whose timestamps are below it.
+	std::optional<uint64_t> end_us;
 	uint32_t frames_waiting_for_keyframe = 0;
 	uint32_t consecutive_decode_errors = 0;
 	obs_source_frame frame = {};
@@ -680,13 +682,23 @@ static void moq_source_on_frame(struct moq_source *ctx, const std::shared_ptr<Co
 		moq_source_discard_candidate(conn, track);
 		return;
 	}
-	const auto *read = std::get_if<moq::MediaRead::kFrame>(&(*result)->get_variant());
-	if (!read) {
-		// Match the native video decoder: drain pictures before a gap or encoder end,
-		// then restart on the next keyframe without ending the subscription.
+	auto &decoder = *track->video_decoder;
+	const auto &variant = (*result)->get_variant();
+	if (const auto *end = std::get_if<moq::MediaRead::kEnd>(&variant)) {
+		decoder.end_us = end->end_us;
+		moq_source_read_track(ctx, conn, track);
+		return;
+	}
+	const auto *read = std::get_if<moq::MediaRead::kFrame>(&variant);
+	if (!read || (decoder.end_us && read->frame.timestamp_us >= *decoder.end_us)) {
+		// A gap loses references immediately. An end does so only at the fresh encoder,
+		// after all old tail packets below its endpoint have entered the decoder.
 		moq_source_drain_video(ctx, conn, track);
-		avcodec_flush_buffers(track->video_decoder->codec_ctx);
-		track->video_decoder->got_keyframe = false;
+		avcodec_flush_buffers(decoder.codec_ctx);
+		decoder.got_keyframe = false;
+		decoder.end_us.reset();
+	}
+	if (!read) {
 		moq_source_read_track(ctx, conn, track);
 		return;
 	}
