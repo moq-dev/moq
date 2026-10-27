@@ -1,39 +1,36 @@
-# [S] Measure moving unit tests out of hub crates
+# [L] Measure moving unit tests out of hub crates
 
 ## Goal
 
-A report on what CI CPU time moq would save if hub crates, starting with moq-net,
-stopped compiling their library twice: once as the library and once as the unit
-test target, with test-owned code covering 49.9% of moq-net's `src` lines at
-main 5516a406f4. It estimates the
-saving, from a prototype on moq-net, of `[lib] test = false` plus one
-integration-test crate that reaches private items through a hidden module or a
-feature (moq-net already has a `fuzz` feature for this). It recommends whether to
-restructure, and how.
+Decide from measured CI CPU time whether hub crates, starting with moq-net,
+should move unit tests into external harnesses (`[lib] test = false`) so the
+library stops compiling a second time as the unit-test target. Until that
+evidence exists, moq keeps its inline unit tests.
 
 ## Plan
 
-Decided with the maintainer on 2026-10-25: measure before restructuring. It is
-potentially the largest single win, since every moq-net change in CI compiles
-both targets, but it changes how every test is written.
+Decided with the maintainer on 2026-10-25: measure before restructuring.
 
-- Count how many unit tests use private items, and what a test-only module would
-  have to expose.
-- Measure CPU for a moq-net edit plus its tests, before and after, with mbx warm.
-- Weigh the churn, and say whether moq-net is the only crate worth doing.
+Deprioritized 2026-10-26: a first pass found no evidence of savings and a
+large migration cost, so keep the inline layout. Load-bearing facts, at main
+5516a406f4:
 
-Public API: none, unless the hidden test surface leaks; say so if it does.
+- About half of moq-net's source is test code, and its library harness has
+  about 2.7k tests. moq-mux has a similar share.
+- Roughly 1k of those tests name private items. Moving them needs a
+  test-support surface that does not exist. The `fuzz` feature is not one: it
+  is public and implies `async`, which would break the no-default-feature
+  boundary.
+- A four-case prototype worked mechanically but measured nothing: the shared
+  host was loaded and cache state differed between runs.
+- Interop, bare-FIN, the feed/fetch benchmark, and `sh/rs/net-features.sh`
+  select library tests, so a migration must carry them too.
 
-The [2026-10-26 inventory and prototype](/.github/test-layout-audit.md) records
-42 library inventories, moq-net's 2,719 compiled unit cases, and an exact restored
-four-case external-harness patch. The four private Delivered cases pass both
-ways, but the prototype exposes a type and test getters under the public `fuzz`
-feature and leaves 2,715 unit cases unmigrated. No architecture change is retained.
+Revisit only if a profile, after the thin-generics and BTreeMap work, shows the
+unit-test target's library build is still a large share of a moq-net edit's
+CPU. A credible comparison then needs a settled test-support design (or
+private-state tests kept inline), a prototype that preserves every compiled test
+across feature sets, and identical edit-plus-tests runs with mbx warm on a quiet
+host.
 
-The lexical private-name inventory is a review starting point, not a certified
-private-use count. Remaining: resolve the private/test-support surface and its
-non-async feature boundary, build a complete coverage-preserving prototype, and
-measure identical edit-plus-tests work with mbx warm on a quiet host. No CPU
-saving is estimated from source lines or the four-case probe. Recommend keeping
-the current layout until that evidence exists; moq-mux is also a substantial
-structural candidate, but its CPU opportunity is unmeasured.
+Public API: none, unless the test-support surface leaks; say so if it does.

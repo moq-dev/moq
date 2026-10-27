@@ -122,4 +122,4 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [Replay full-run failures against the selected gate](/quest/m0/ci/select-audit.md) - every dependency edge `just ci` misses is found and fixed with a test
 - [First shared FFI release](/quest/m0/ci/nightly-ffi-reuse.md) - condition: the backport merges and the next `moq-ffi-v*` tag runs `Release FFI`; verify the wrappers
 - [Fewer BTreeMap instantiations](/quest/m0/ci/btree-keys.md) - moq-net shares BTreeMap key and value types, kept only if its CPU time drops
-- [Measure moving unit tests out](/quest/m0/ci/test-layout.md) - report what moq-net would save by not compiling its library twice for unit tests
+- [Measure moving unit tests out](/quest/m0/ci/test-layout.md) - deprioritized: keep inline unit tests unless a profile shows moq-net's second library build is worth a migration
