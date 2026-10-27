@@ -3,9 +3,9 @@
 ## Goal
 
 Pull requests are validated locally with `just ci` and get their cloud verdict
-from the merge queue without waiting behind the hosted runner limits, and
-every job spends its minutes on the work its diff selected rather
-than on setup, cold caches, or repeated builds. Concurrent local agents share
+from the [batched gate](/quest/m0/ci/land.md) without waiting behind the
+hosted runner limits, and every job spends its minutes on the work its diff
+selected rather than on setup, cold caches, or repeated builds. Concurrent local agents share
 expensive-command capacity, and retained tests earn their cost through useful
 regression signal. Valuable checks stay gated or move to an appropriate queue
 or nightly run; measured low-value redundancy may be retired.
@@ -66,6 +66,18 @@ Decisions (maintainer, 2026-10-13):
   not needed for isolation. The `nix/runner` VM module is not the deployment
   target.
 
+Decided 2026-10-26 (maintainer), from 414 queue merges over 2026-10-23 to
+10-26: the queue's latency is serial waiting (98%), not GitHub's overhead
+(about 1 minute per merge), with a median of 18 entries ahead and 12.7% of
+runs failing. GitHub's merge queue cannot test several PRs in one run, so a
+batched gate replaces it on the one self-hosted runner: `quest land`, shared
+through kixelated/quest, lands a tested chain of squash commits by
+fast-forward ([land](/quest/m0/ci/land.md)). This supersedes concurrent queue
+entries on a second runner. Batching gains most when failures are rare, so the
+[flake epic](/quest/m0/test-flakes-2/README.md) moved to m0 and
+`MIGRATE.md` Unreleased sections, a top source of conflicts, stop being
+written per PR.
+
 Decided 2026-10-23 (maintainer), to speed up the serial queue: structural
 changes first (concurrent entries, parallel modules, one test build), then a
 measured nightly-compiler experiment.
@@ -114,14 +126,15 @@ The historical samples locate candidates; they are not controlled benchmarks.
 
 ## Required
 
-- [Require the release gate](/quest/m0/ci/release-gates.md) - condition: the next cut carries `release-gate.yml`; then release PRs require it
-- [Build queue entries concurrently](/quest/m0/ci/queue-concurrency.md) - the queue builds two or more entries at once instead of one
+- [Land main through quest land](/quest/m0/ci/land.md) - one self-hosted runner tests every queued PR as a squash chain and fast-forwards `main` to the longest passing prefix
+- [Bump quest to quest land](/quest/m0/ci/land-bump.md) - condition: kixelated/quest ships `quest land`; then bump the flake input
+- [Feature PRs stop editing MIGRATE.md](/quest/m0/ci/migrate-unreleased.md) - Unreleased sections stop conflicting, and the cut writes each version's section
 - [Measure nightly compiler levers](/quest/m0/ci/nightly-levers.md) - the parallel frontend and Cranelift, adopted only if the numbers beat their risks
-- [Bump to the manifest fix](/quest/m0/ci/mbx-bump.md) - condition: an mbx release contains jdx/mr-boxington#798; then bump the Rust cache's pin
 - [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) - measure the hosted Nightly jobs' hits, restore time, and expiry once the bump lands
 - [Verify the Nix cache](/quest/m0/ci/nix-cache-verify.md) - confirm CI and releases use `nix.moq.dev` and retire Cachix
 - [Unify dependency features](/quest/m0/ci/hakari.md) - a cargo-hakari workspace-hack so every job compiles each dependency alike and mbx hits across jobs
 - [Replay full-run failures against the selected gate](/quest/m0/ci/select-audit.md) - every dependency edge `just ci` misses is found and fixed with a test
 - [First shared FFI release](/quest/m0/ci/nightly-ffi-reuse.md) - condition: the backport merges and the next `moq-ffi-v*` tag runs `Release FFI`; verify the wrappers
 - [Fewer BTreeMap instantiations](/quest/m0/ci/btree-keys.md) - moq-net shares BTreeMap key and value types, kept only if its CPU time drops
-- [Measure moving unit tests out](/quest/m0/ci/test-layout.md) - report what moq-net would save by not compiling its library twice for unit tests
+- [Halve the slowest tests' CPU](/quest/m0/ci/slow-tests.md) - the slowest 1% of tests take under half their 289 CPU-seconds, with coverage kept
+- [Measure moving unit tests out](/quest/m0/ci/test-layout.md) - deprioritized: keep inline unit tests unless a profile shows moq-net's second library build is worth a migration

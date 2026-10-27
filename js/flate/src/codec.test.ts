@@ -1,6 +1,7 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { Group } from "@moq/net";
 import { Deflate, Inflate } from "fflate";
+import { Inflate as PakoInflate } from "pako";
 import { Decoder, Encoder } from "./codec.ts";
 
 const enc = new TextEncoder();
@@ -65,18 +66,63 @@ test("codec rejects garbage", () => {
 	expect(() => decoder.frame(new Uint8Array(64).fill(0xff))).toThrow();
 });
 
-test("the decoder holds its whole window to the group budget", () => {
-	// Each frame fits on its own and deflates to almost nothing; together they inflate past what a
-	// plain group can carry.
-	const half = new Uint8Array(Group.MAX_GROUP_CACHE_BYTES / 2 + 1);
+test("the decoder permits exactly the whole-window budget, then refuses more output", () => {
+	const half = new Uint8Array(Group.MAX_GROUP_CACHE_BYTES / 2);
 	const encoder = new Encoder();
 	const first = encoder.frame(half);
 	const second = encoder.frame(half);
-	expect(second.length).toBeLessThan(64 * 1024);
+	const extra = encoder.frame(new Uint8Array(1));
 
 	const decoder = new Decoder();
 	expect(decoder.frame(first).length).toBe(half.length);
-	expect(() => decoder.frame(second)).toThrow(/decompressed group exceeded/);
+	expect(decoder.frame(new Uint8Array()).length).toBe(0);
+	expect(decoder.frame(second).length).toBe(half.length);
+	expect(() => decoder.frame(extra)).toThrow(/decompressed group exceeded/);
+	expect(() => decoder.frame(extra)).toThrow(/decompressed group exceeded/);
+	expect(() => decoder.frame(new Uint8Array())).toThrow(/decompressed group exceeded/);
+});
+
+test("a bomb stops inflating at the group budget plus one scratch chunk", () => {
+	const payload = new Uint8Array(Group.MAX_GROUP_CACHE_BYTES + 8 * 1024 * 1024);
+	const slice = new Encoder().frame(payload);
+	const push = PakoInflate.prototype.push;
+	let output = 0;
+	let scratch = 0;
+	const pushing = spyOn(PakoInflate.prototype, "push").mockImplementation(function (this: PakoInflate, ...args) {
+		const onData = this.onData;
+		this.onData = (chunk) => {
+			output += chunk.length;
+			scratch = Math.max(scratch, chunk.length);
+			onData.call(this, chunk);
+		};
+		try {
+			return push.apply(this, args);
+		} finally {
+			this.onData = onData;
+		}
+	});
+	try {
+		expect(() => new Decoder().frame(slice)).toThrow(/decompressed group exceeded/);
+		expect(output).toBeGreaterThan(Group.MAX_GROUP_CACHE_BYTES);
+		expect(output).toBeLessThanOrEqual(Group.MAX_GROUP_CACHE_BYTES + scratch);
+		expect(output).toBeLessThan(payload.length);
+	} finally {
+		pushing.mockRestore();
+	}
+});
+
+test("retained frames own tight buffers across later pushes and scratch boundaries", () => {
+	const encoder = new Encoder();
+	const decoder = new Decoder();
+	const frames = [0, 1, 7, 65_535, 65_536, 65_537].map((size, n) => new Uint8Array(size).fill(n));
+	// Even an empty slice can be a view into a larger incoming allocation.
+	frames[0] = new Uint8Array(65_536).subarray(0, 0);
+	const retained = frames.map((frame) => decoder.frame(encoder.frame(frame)));
+	decoder.frame(encoder.frame(new Uint8Array(128 * 1024).fill(0xff)));
+	for (const [n, frame] of retained.entries()) {
+		expect(frame).toEqual(frames[n]);
+		expect(frame.buffer.byteLength).toBe(frame.byteLength);
+	}
 });
 
 test("a frame larger than pako's chunk size round-trips", () => {
