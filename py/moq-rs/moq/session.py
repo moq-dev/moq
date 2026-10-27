@@ -213,8 +213,9 @@ class Allocator:
 class Reservation:
     """One track's standing claim on an :class:`Allocator`.
 
-    :meth:`rate` is a snapshot: ``None`` means no estimate or no demand, so
-    hold the current rate, and ``0`` is a real zero rate.
+    :meth:`rate` is a snapshot: ``None`` means no estimate, so hold the
+    current rate, and ``0`` is a real zero rate. While nothing subscribes it
+    is the share the track would get.
     """
 
     def __init__(self, inner: MoqReservation) -> None:

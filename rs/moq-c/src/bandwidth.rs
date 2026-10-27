@@ -88,8 +88,9 @@ pub extern "C" fn moq_allocator_reserve(allocator: u32, track: u32, max_bps: u64
 
 /// This reservation's slice right now, in bits per second.
 ///
-/// `present` is false when there is no estimate or no demand: hold the current
-/// rate. `present` true and `bps` 0 is a real zero rate.
+/// `present` is false when there is no estimate: hold the current rate. `present`
+/// true and `bps` 0 is a real zero rate. While nothing subscribes to the track,
+/// `bps` is the slice it would get back, without claiming it from the others.
 ///
 /// # Safety
 /// - `bps` and `present` must be valid pointers.

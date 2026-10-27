@@ -59,7 +59,7 @@ pub use config::{Config, Protocol};
 pub use error::Error;
 pub use moq_quic::mux::Version;
 pub use session::{RecvStream, SendGroup, SendStream, Session};
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use socket::TcpStats;
 pub use socket::{SharedSocketStats, SocketStats};
 

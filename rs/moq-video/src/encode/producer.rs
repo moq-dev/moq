@@ -220,6 +220,23 @@ impl Producer {
 		Ok(())
 	}
 
+	/// Advertise whether this rendition is being encoded, as the catalog's
+	/// [`enabled`](hang::catalog::VideoConfig::enabled).
+	///
+	/// Disable it when the encoder stops for lack of bandwidth (a
+	/// [`rate::Target::Disabled`](moq_mux::rate::Target::Disabled)), so viewers select a
+	/// lower rendition instead of waiting for frames, and mark the
+	/// [`discontinuity`](Self::discontinuity) too. The advertised rendition is otherwise
+	/// unchanged, its maximum bitrate included. Enable it again with the keyframe that
+	/// resumes it.
+	pub fn set_enabled(&mut self, enabled: bool) -> Result<(), Error> {
+		match &mut self.codecs {
+			Codecs::H264 { import, .. } => import.set_enabled(enabled)?,
+			Codecs::H265 { import, .. } => import.set_enabled(enabled)?,
+		}
+		Ok(())
+	}
+
 	/// Finalize the track.
 	///
 	/// Borrows rather than consumes, so a later [`abort`](Self::abort) can still
@@ -570,7 +587,7 @@ type RateControl = Option<rate::Follower>;
 /// Cancel-safe: [`Follower::poll_next`](rate::Follower::poll_next) keeps its state in
 /// the follower, so losing this race to a frame drops no target.
 #[cfg(feature = "capture")]
-async fn next_target(rate: &mut RateControl) -> Result<moq_net::bandwidth::Rate, moq_net::Error> {
+async fn next_target(rate: &mut RateControl) -> Result<rate::Target, moq_net::Error> {
 	match rate {
 		Some(follower) => follower.next().await,
 		// Retired: park this arm forever so `select!` ignores it.
@@ -583,17 +600,16 @@ async fn next_target(rate: &mut RateControl) -> Result<moq_net::bandwidth::Rate,
 /// An error means the grant is gone (the session ended for good), so rate control
 /// retires and the encoder holds its current bitrate.
 #[cfg(feature = "capture")]
-async fn apply_target(
-	encoder: &mut Sink,
-	rate: &mut RateControl,
-	target: Result<moq_net::bandwidth::Rate, moq_net::Error>,
-) {
+async fn apply_target(encoder: &mut Sink, rate: &mut RateControl, target: Result<rate::Target, moq_net::Error>) {
 	let Some(follower) = rate.as_mut() else { return };
 
-	let Ok(bitrate) = target else {
+	let Ok(target) = target else {
 		tracing::debug!("bandwidth estimate ended; holding the current encoder bitrate");
 		*rate = None;
 		return;
+	};
+	let rate::Target::Enabled(bitrate) = target else {
+		unreachable!("a capture follows its grant with no lower rendition, so it never disables")
 	};
 
 	match encoder.set_bitrate(bitrate).await {

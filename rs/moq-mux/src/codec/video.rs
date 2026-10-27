@@ -202,6 +202,8 @@ pub(crate) struct Catalog {
 	resolved: Option<hang::catalog::VideoConfig>,
 	/// The static HDR metadata the bitstream carried in band, overlaid onto every config.
 	hdr: crate::codec::color::Hdr,
+	/// Whether the publisher is producing this rendition, overlaid onto every config.
+	enabled: bool,
 }
 
 impl Catalog {
@@ -212,6 +214,21 @@ impl Catalog {
 			last: None,
 			resolved: None,
 			hdr: Default::default(),
+			enabled: true,
+		}
+	}
+
+	/// Advertise whether the publisher is producing this rendition, republishing the last
+	/// config if it changed. Overlaid onto every later config, so a resolution change
+	/// while disabled stays disabled.
+	pub(crate) fn set_enabled(&mut self, track: &mut Track, enabled: bool) -> crate::Result<()> {
+		if self.enabled == enabled {
+			return Ok(());
+		}
+		self.enabled = enabled;
+		match self.resolved.clone() {
+			Some(config) => self.publish(track, config),
+			None => Ok(()),
 		}
 	}
 
@@ -238,6 +255,7 @@ impl Catalog {
 		self.resolved = Some(config.clone());
 		self.hdr.apply(&mut config.color);
 		self.hint.apply(&mut config);
+		config.enabled = self.enabled;
 		if let Some(declared) = self.last.as_ref().and_then(|last| last.reorder) {
 			match config.reorder {
 				Some(reorder) if reorder > declared => {

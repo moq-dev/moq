@@ -87,7 +87,7 @@ test("concurrent tracks split the estimate", () => {
 	allocator.close();
 });
 
-test("an idle track claims nothing", () => {
+test("an idle track claims nothing", async () => {
 	const estimate = new Signal<number | undefined>(2_000_000);
 	const allocator = new Allocator(estimate);
 
@@ -99,10 +99,18 @@ test("an idle track claims nothing", () => {
 	const idle = allocator.reserve(idleTrack.demand(), 4_000_000);
 
 	expect(watched.peek()).toBe(2_000_000);
-	// Not zero: an idle share reports "no opinion" so a sender that is mid-shutdown
-	// holds its rate instead of retuning to the floor on the way out.
-	expect(idle.peek()).toBeUndefined();
+	// What it would get if a viewer joined, so a rendition stopped for lack of
+	// bandwidth can resume after its viewers left.
+	expect(idle.peek()).toBe(1_000_000);
+	expect(idle.rate.peek()).toBe(1_000_000);
 
+	// The idle share keeps following the estimate.
+	const next = idle.rate.changed();
+	estimate.set(4_000_000);
+	expect(await next).toBe(2_000_000);
+	expect(watched.peek()).toBe(4_000_000);
+
+	estimate.set(2_000_000);
 	idleTrack.subscribe();
 	expect(watched.peek()).toBe(1_000_000);
 	expect(idle.peek()).toBe(1_000_000);

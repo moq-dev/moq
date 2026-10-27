@@ -151,8 +151,8 @@ func (a *Allocator) Reserve(demand *TrackDemand, maxBps uint64) *Reservation {
 
 // Reservation is one track's standing claim on an Allocator.
 //
-// Rate is a snapshot: nil means no estimate or no demand, so hold the current
-// rate, and 0 is a real zero rate.
+// Rate is a snapshot: nil means no estimate, so hold the current rate, and 0 is
+// a real zero rate. While nothing subscribes it is the share the track would get.
 // Update(0) relinquishes the allocation while the track stays subscribed; the
 // handle remains usable and a later Update can claim bandwidth again.
 type Reservation struct {

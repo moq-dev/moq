@@ -307,6 +307,8 @@ export interface ResumeSource {
 	finished(): Promise<Position>;
 	/** The serving copy's newest buffered frame, which a wire answer names as its edge. */
 	bufferedLargest(): Position | undefined;
+	/** The serving copy's newest actual object, including metadata retained past cache eviction. */
+	objectLargest(): Position | undefined;
 	/** The serving copy's largest location now, and whether it can still advance. */
 	peekLargest(): { largest?: Position; ended: boolean };
 	/**
@@ -316,6 +318,8 @@ export interface ResumeSource {
 	largest(seen: Position | undefined): Promise<Position | undefined>;
 	/** An independent subscriber to the serving copy. */
 	fork(options?: Subscription): Subscriber;
+	/** A fresh reader for a group still cached by one of this reader's copies. */
+	cachedGroup(sequence: number): GroupConsumer | undefined;
 	/** Let go of every copy. */
 	close(abort?: Error): void;
 }
@@ -401,6 +405,11 @@ export const hooks: {
 	demandPriority: (demand: Demand) => number;
 	/** Seed a received track from the publisher's reported edge; assigned by `track.ts`. */
 	reportedLargest: (producer: Producer, largest: Position | undefined) => void;
+	/**
+	 * Seed a received track from the publisher's reported group alone, whose frame is unknown,
+	 * so it names no object; assigned by `track.ts`.
+	 */
+	reportedGroup: (producer: Producer, group: number) => void;
 	/** Snapshot the latest group sequence for wire positioning; assigned by `track.ts`. */
 	latestSequence: (subscriber: Subscriber) => number | undefined;
 	/**
@@ -408,8 +417,10 @@ export const hooks: {
 	 * the upstream START that resolves it has yet to arrive; assigned by `track.ts`.
 	 */
 	sourceStart: (subscriber: Subscriber) => number | "pending" | undefined;
-	/** The newest frame buffered for a subscriber, which wire answers name; assigned by `track.ts`. */
+	/** The newest frame still buffered for a subscriber; assigned by `track.ts`. */
 	bufferedLargest: (subscriber: Subscriber) => Position | undefined;
+	/** The newest actual object received or reported upstream, independent of cache retention. */
+	objectLargest: (subscriber: Subscriber) => Position | undefined;
 	/** Call `fn` with a group's frame count now and on every change; assigned by `group.ts`. */
 	groupProgress: (group: GroupProducer, fn: (total: number) => void) => Dispose;
 	/**
@@ -443,6 +454,8 @@ export const hooks: {
 	spent: (subscriber: Subscriber, start: number, end: number | undefined, delivered: Delivered) => boolean;
 	/** How many runs of handed-out groups a subscriber remembers: one per gap, plus the floor. Tests only. */
 	deliveredRuns: (subscriber: Subscriber) => number;
+	/** Whether the subscriber already handed out group `sequence`, or no longer expects it. */
+	handedOut: (subscriber: Subscriber, sequence: number) => boolean;
 	/** Forget the gaps in another reader's `delivered` below each group past this subscriber's budget. */
 	forgetPastBudget: (subscriber: Subscriber, delivered: Delivered) => void;
 	/**
@@ -577,6 +590,9 @@ export const hooks: {
 	reportedLargest: () => {
 		throw new Error("track.ts not loaded");
 	},
+	reportedGroup: () => {
+		throw new Error("track.ts not loaded");
+	},
 	latestSequence: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -584,6 +600,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	bufferedLargest: () => {
+		throw new Error("track.ts not loaded");
+	},
+	objectLargest: () => {
 		throw new Error("track.ts not loaded");
 	},
 	groupProgress: () => {
@@ -611,6 +630,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	deliveredRuns: () => {
+		throw new Error("track.ts not loaded");
+	},
+	handedOut: () => {
 		throw new Error("track.ts not loaded");
 	},
 	datagramChanged: () => {
