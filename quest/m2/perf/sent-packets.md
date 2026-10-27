@@ -8,8 +8,11 @@ bounded by design against a peer that never ACKs, with no timer or cap whose
 only job is refusal. A `SentPackets` micro-bench and `just bench` show the
 win. A measured no-win against `BTreeMap` abandons the quest.
 
-Loss detection, RTT sampling, and congestion semantics stay as RFC 9002 says.
-How ACK-only packets are retained may change.
+Loss detection, RTT sampling, and congestion semantics stay as RFC 9002 says,
+except where ACK-only retention changes them. The Plan accepts two deviations
+from evicting ACK-only records. Persistent congestion can be under-declared
+after 256 unACKed ACK-only packets. An RTT sample is skipped when the peer's
+largest ACK names an evicted record.
 
 ## Plan
 
