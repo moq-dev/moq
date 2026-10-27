@@ -230,7 +230,7 @@ export default class MoqPublish extends HTMLElement {
 			broadcast: this.broadcast,
 			capture: this.#capture,
 			enabled: this.#videoEnabled,
-			bandwidth: this.connection.bandwidth,
+			bandwidth: this.connection.allocator,
 		});
 		this.signals.cleanup(() => this.video.close());
 
@@ -238,7 +238,7 @@ export default class MoqPublish extends HTMLElement {
 			broadcast: this.broadcast,
 			enabled: this.#audioEnabled,
 			capture: audioCapture,
-			bandwidth: this.connection.bandwidth,
+			bandwidth: this.connection.allocator,
 		});
 		this.signals.cleanup(() => this.audio.close());
 

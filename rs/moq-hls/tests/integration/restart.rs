@@ -172,7 +172,10 @@ async fn drain_old(cursor: &mut segments::Consumer) -> (Vec<u64>, moq_hls::Resul
 			Ok(None) => return (read, Ok(())),
 			Err(err) => return (read, Err(err)),
 		};
-		let media = segment.media.as_deref().expect("segment media");
+		// The stop the old run ends with is a gap, which carries no media of either run.
+		let Some(media) = segment.media.as_deref() else {
+			continue;
+		};
 		assert!(
 			contains(media, &[OLD; 8]) && !contains(media, &[NEW; 8]),
 			"the replaced run's segment {} carries the new run's media",

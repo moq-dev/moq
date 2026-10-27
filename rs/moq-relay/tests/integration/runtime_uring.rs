@@ -248,14 +248,9 @@ async fn uring_workers_serve_every_configured_version() {
 	let publisher = connect(client.with_publisher(&origin), raw.parse().unwrap()).await;
 	assert_eq!(publisher.version(), Some(version), "publisher version");
 
-	// moq-transport-14 and moq-lite-02 negotiate in the SETUP; 16 has its own
-	// ALPN but still a bidi SETUP; 22 reads its SETUP off a uni stream.
-	for name in [
-		"moq-transport-22",
-		"moq-transport-16",
-		"moq-transport-14",
-		"moq-lite-02",
-	] {
+	// moq-lite-02 negotiates in the SETUP; moq-transport-22 reads its SETUP off a
+	// uni stream.
+	for name in ["moq-transport-22", "moq-lite-02"] {
 		for scheme in ["moql", "https"] {
 			let url: url::Url = format!("{scheme}://127.0.0.1:{port}/versions").parse().unwrap();
 			let (version, client) = pinned(name);
@@ -364,7 +359,7 @@ async fn uring_workers_report_link_facts() {
 /// threads joined and the port free.
 ///
 /// What an arrival is told is left of the window only reaches the wire on
-/// moq-transport-17+, which this test does not dial; `shutdown_signal.rs`
+/// moq-transport, which this test does not dial; `shutdown_signal.rs`
 /// reads it through the shared runtime, whose supervision this path shares.
 #[tokio::test]
 async fn uring_workers_drain_on_the_trigger() {
@@ -886,7 +881,7 @@ async fn uring_forwards_the_setup_token() {
 		tls.alpn_protocols = vec![if webtransport {
 			b"h3".to_vec()
 		} else {
-			b"moqt-16".to_vec()
+			b"moqt-18".to_vec()
 		}];
 		let crypto = driver::crypto::rustls::QuicClientConfig::try_from(tls).unwrap();
 		let conn = client
@@ -900,17 +895,21 @@ async fn uring_forwards_the_setup_token() {
 			.unwrap();
 		let session = if webtransport {
 			let url: url::Url = format!("https://{addr}/room?source=setup").parse().unwrap();
-			let request = web::proto::ConnectRequest::new(url).with_protocol("moqt-16".to_string());
+			let request = web::proto::ConnectRequest::new(url).with_protocol("moqt-18".to_string());
 			web::Session::connect(conn, request).await.unwrap()
 		} else {
 			web::Session::raw(conn)
 		};
-		// Draft-16 CLIENT_SETUP: AUTHORIZATION TOKEN (3), USE_VALUE (3), Token Type 0.
+		// Draft-18 SETUP (0x2F00): AUTHORIZATION TOKEN (3), USE_VALUE (3), Token Type 0.
 		let encoded = [&[0x03, 0x00][..], &token.value].concat();
-		let params = [&[0x01, 0x03, encoded.len() as u8][..], &encoded].concat();
-		let setup = [&[0x20][..], &(params.len() as u16).to_be_bytes(), &params].concat();
-		let (mut send, mut recv) = session.open_bi(Default::default()).await.unwrap();
+		let params = [&[0x03, encoded.len() as u8][..], &encoded].concat();
+		let setup = [&[0xaf, 0x00][..], &(params.len() as u16).to_be_bytes(), &params].concat();
+		let mut send = session.open_uni(Default::default()).await.unwrap();
 		send.write_all(&setup).await.unwrap();
+		let mut recv = tokio::time::timeout(TIMEOUT, session.accept_uni())
+			.await
+			.unwrap()
+			.unwrap();
 		let mut reply = [0u8; 1];
 		assert_eq!(
 			tokio::time::timeout(TIMEOUT, recv.read(&mut reply))
@@ -918,7 +917,7 @@ async fn uring_forwards_the_setup_token() {
 				.unwrap()
 				.unwrap(),
 			Some(1),
-			"SERVER_SETUP"
+			"SETUP"
 		);
 	}
 	deciding.await.unwrap();

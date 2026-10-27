@@ -1,6 +1,5 @@
 /** Sweep failed group sends over independent publishers and subscribers. */
 import { Milli } from "@moq/clock";
-import { Producer as GroupProducer } from "../src/group.ts";
 import { randomHop } from "../src/hop.ts";
 import { Publisher } from "../src/lite/publisher.ts";
 import { decodeSubscribeResponseMaybe, Subscribe } from "../src/lite/subscribe.ts";
@@ -29,10 +28,9 @@ try {
 					broadcastPublication.announce();
 					const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 					for (let sequence = 0; sequence < groups; sequence++) {
-						const group = new GroupProducer(sequence);
+						const group = track.createGroup(sequence);
 						group.writeFrame(textFrame("frame"));
 						group.finish();
-						track.writeGroup(group);
 					}
 					track.finish();
 					track.close();

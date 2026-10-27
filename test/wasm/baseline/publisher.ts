@@ -30,11 +30,10 @@ async function prepare(config: Workload): Promise<void> {
 				while (demand.peek() === undefined && track.closed.peek() === undefined)
 					await Promise.race([demand.changed(), track.closed]);
 				if (track.closed.peek() !== undefined) return;
-				const group = new Moq.Group.Producer(config.sequence);
+				const group = track.createGroup(config.sequence);
 				for (const [frame, bytes] of fixtures.entries())
 					group.writeFrame({ payload: bytes, timestamp: Moq.Time.Timestamp.fromMillis(frame) });
 				group.finish();
-				track.writeGroup(group);
 				// Keep the track and broadcast served until every reader completes. No timing arm or tail-close race.
 			})(),
 		);

@@ -20,6 +20,7 @@ harness_browser_tests := '''
     ./capture-channel-count.browser.ts
     ./encoded-preview.browser.ts
     ./harness.browser.ts
+    ./net-cleanups.browser.ts
     ./open-gop.browser.ts
     ./publish-ui.browser.ts
     ./signals-dom.browser.ts

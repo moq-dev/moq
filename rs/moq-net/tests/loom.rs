@@ -229,13 +229,13 @@ fn a_front_sees_a_reader_come_and_go() {
 		let room = block_on(pending).expect("resolves");
 
 		// A first reader gets the source asked, then leaves.
-		let first = room.track("video").expect("track").query();
+		let first = room.track("video").expect("track").info();
 		driver.poll(now, &noop).unwrap();
 		assert!(demand.wanted().is_some(), "the front never asked the source");
 		drop(first);
 
 		let racing = room.clone();
-		let reader = thread::spawn(move || drop(racing.track("video").expect("track").query()));
+		let reader = thread::spawn(move || drop(racing.track("video").expect("track").info()));
 		driver.poll(now, &noop).unwrap();
 		reader.join().unwrap();
 
@@ -270,17 +270,17 @@ fn a_front_sees_a_reader_return() {
 		let room = block_on(pending).expect("resolves");
 
 		// A first reader comes and goes, which parks the track.
-		let first = room.track("video").expect("track").query();
+		let first = room.track("video").expect("track").info();
 		driver.poll(now, &noop).unwrap();
 		drop(first);
 		driver.poll(now, &noop).unwrap();
 		assert!(demand.wanted().is_none(), "the front kept the source for nobody");
 
-		let leaving = room.track("video").expect("track").query();
+		let leaving = room.track("video").expect("track").info();
 		let racing = room.clone();
 		let reader = thread::spawn(move || {
 			drop(leaving);
-			racing.track("video").expect("track").query()
+			racing.track("video").expect("track").info()
 		});
 		driver.poll(now, &noop).unwrap();
 		let returned = reader.join().unwrap();
@@ -418,7 +418,7 @@ fn a_fetch_never_joins_a_withdrawn_attempt() {
 	model(|| {
 		let broadcast = broadcast::Info::new().produce();
 		let track = broadcast.create_track("video", None).expect("create track");
-		let dynamic = track.dynamic();
+		let dynamic = track.requests();
 		let consumer = track.consume();
 
 		let first = consumer.fetch_group(5, None);
@@ -479,7 +479,7 @@ fn a_request_never_joins_a_retiring_front() {
 fn a_refused_answer_is_never_announced() {
 	model(|| {
 		let (producer, mut driver) = origin::Producer::new(origin::Config::new(Hop::new(1).unwrap()));
-		let claim = producer.dynamic("room").unwrap();
+		let claim = producer.requests("room").unwrap();
 		let pending = producer.consume().request_broadcast("room/alice", None);
 		driver
 			.poll(moq_net::time::Instant::now(), &kio::Waiter::noop())

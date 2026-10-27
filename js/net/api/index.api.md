@@ -23,6 +23,8 @@ interface AcceptProps {
     consume?: Producer_4;
     implementation?: string;
     publish?: Consumer_5;
+    signal?: AbortSignal;
+    timeout?: Milli;
     transport: WebTransport;
     url: URL;
     version?: number;
@@ -57,16 +59,10 @@ declare namespace Auth {
         Handle,
         Unsupported,
         Grant,
-        Auth_2 as Auth
+        Credential_2 as Credential
     }
 }
 export { Auth }
-
-interface Auth_2 {
-    close(): void;
-    readonly closed: PromiseLike<Error | null>;
-    readonly grant: Getter<Grant | undefined>;
-}
 
 declare namespace Bandwidth {
     export {
@@ -109,9 +105,9 @@ function connect(input: ConnectProps): Promise<Established>;
 export class Connection {
     constructor(props?: ConnectionProps);
     static readonly accept: typeof accept;
+    readonly allocator: Getter<Handle_2 | undefined>;
     announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
     readonly auth: Getter<Auth.Handle | undefined>;
-    readonly bandwidth: Getter<Handle_2 | undefined>;
     static readonly certificateHash: typeof certificateHash;
     static readonly checkVersions: typeof checkVersions;
     close(abort?: Error): void;
@@ -245,6 +241,12 @@ const Cost: {
     zero: bigint;
 };
 
+interface Credential_2 {
+    close(): void;
+    readonly closed: PromiseLike<Error | null>;
+    readonly grant: Getter<Grant | undefined>;
+}
+
 interface Datagram {
     payload: Uint8Array;
     sequence: number;
@@ -267,13 +269,6 @@ class Demand {
 
 class Duplicate extends Error {
     constructor(message?: string);
-}
-
-class Dynamic {
-    close(): void;
-    readonly prefix: Path.Valid;
-    requested(): AsyncIterableIterator<Request_3>;
-    get route(): Route;
 }
 
 function empty(): Valid;
@@ -396,7 +391,7 @@ class GroupTooLarge extends Stream {
 class Handle {
     constructor();
     abort(err?: Error): void;
-    add(token: string | Uint8Array): Promise<Auth_2>;
+    add(token: string | Uint8Array): Promise<Credential_2>;
     get grant(): Getter<Grant | undefined>;
 }
 
@@ -431,6 +426,8 @@ function isAnonymous(route: Route): boolean;
 function isWebTransportSupported(): boolean;
 
 function join(path: Valid, other: Valid): Valid;
+
+const MAX_BYTES = 16384;
 
 const MAX_GROUP_CACHE_BYTES: number;
 
@@ -500,7 +497,7 @@ declare namespace Origin_2 {
         Producer_4 as Producer,
         Requesting,
         Consumer_5 as Consumer,
-        Dynamic,
+        Requests,
         Request_3 as Request,
         Publication,
         Prepared
@@ -529,6 +526,7 @@ declare namespace Path {
         Valid,
         Relative,
         MAX_PARTS,
+        MAX_BYTES,
         compareSpecificity,
         InvalidPattern,
         Pattern,
@@ -564,6 +562,7 @@ class Producer {
     appendGroup(): Producer_2;
     close(): void;
     get closed(): GetPromise<Error | null>;
+    createGroup(sequence: number): Producer_2;
     demand(): Demand;
     finish(): void;
     finishAt(end: Position): void;
@@ -575,7 +574,6 @@ class Producer {
     subscribe(options?: Subscription): Subscriber;
     get subscription(): Getter<Subscription | undefined>;
     writeFrame(frame: Frame): void;
-    writeGroup(group: Producer_2): void;
 }
 
 class Producer_2 {
@@ -607,8 +605,8 @@ class Producer_4 implements Table {
     consume(): Consumer_5;
     createBroadcast(path: Path.Valid): Publication;
     get discovery(): Getter<boolean | undefined>;
-    dynamic(prefix: Path.Valid): Dynamic;
     request(path: Path.Valid, options?: RequestOptions): Requesting;
+    requests(prefix: Path.Valid): Requests;
     scope(root: Path.Valid, patterns: Path.Patterns): Producer_4;
 }
 
@@ -685,18 +683,25 @@ interface RequestOptions {
     epoch?: Epoch.Valid;
 }
 
+class Requests {
+    close(): void;
+    readonly prefix: Path.Valid;
+    requested(): AsyncIterableIterator<Request_3>;
+    get route(): Route;
+}
+
 class Reservation implements Disposable {
     [Symbol.dispose](): void;
     close(): void;
-    get grant(): Getter<number | undefined>;
     peek(): number | undefined;
+    get rate(): Getter<number | undefined>;
     update(max: number): void;
 }
 
 function resolve(base: Valid, rel: Relative): Valid;
 
 interface Route {
-    auth?: Auth_2;
+    auth?: Credential_2;
     cost: Cost;
     epoch?: Epoch.Valid;
     hops: Hop[];
@@ -708,7 +713,7 @@ const Route: {
         epoch?: Epoch.Valid;
         hops?: readonly Hop[];
         cost?: Cost;
-        auth?: Auth_2;
+        auth?: Credential_2;
     }): Route;
 };
 
@@ -828,8 +833,8 @@ interface Table {
     readonly closed: GetPromise<Error | null>;
     createBroadcast(path: Path.Valid): Publication;
     readonly discovery: Getter<boolean | undefined>;
-    dynamic(prefix: Path.Valid): Dynamic;
     request(path: Path.Valid, options?: RequestOptions): Requesting;
+    requests(prefix: Path.Valid): Requests;
 }
 
 declare namespace Time {

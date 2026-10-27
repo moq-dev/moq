@@ -2,6 +2,7 @@ import * as z from "@zod/mini";
 import { compareName, compareNumber } from "./compare";
 import { ContainerSchema } from "./container";
 import { hexSchema } from "./hex";
+import { HlsFieldSchema } from "./hls";
 import { u53Schema } from "./integers";
 import { EpochSchema, RelativeBroadcastSchema } from "./path";
 
@@ -89,6 +90,10 @@ const AudioConfigFields = z.object({
 			z.transform((value) => (value === 0 ? undefined : value)),
 		),
 	),
+
+	// This rendition's HLS segment records, when the publisher opted in. Without it the rendition
+	// is not HLS-renderable. A malformed value is absent, so it can never reject the media.
+	hls: HlsFieldSchema,
 });
 
 /**

@@ -74,10 +74,7 @@ impl Filter {
 	/// fields that follow it, and added the parameters that ride alongside it, so this
 	/// gates them too.
 	pub(crate) fn is_draft22(version: Version) -> bool {
-		!matches!(
-			version,
-			Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17 | Version::Draft18
-		)
+		!matches!(version, Version::Draft18)
 	}
 
 	/// The absolute end group, given the start, or an error when the range runs backwards.
@@ -206,20 +203,6 @@ impl Filter {
 	}
 }
 
-/// The inline form, used by draft-14 where the filter is message fields rather than a
-/// parameter. Later drafts go through [`Param`] instead.
-impl Encode<Version> for Filter {
-	fn encode(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
-		self.encode_tag(w, version)
-	}
-}
-
-impl Decode<Version> for Filter {
-	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		Self::decode_tag(r, version)
-	}
-}
-
 impl Param for Filter {
 	/// An unfiltered subscription is the default, so it goes on the wire as an absent
 	/// parameter rather than an empty one.
@@ -228,19 +211,10 @@ impl Param for Filter {
 	}
 
 	fn param_encode(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
-		// Inner varints use the draft-15 leading-ones encoding on the drafts that predate
-		// the switch, matching the other length-prefixed parameters.
-		let sv = match version {
-			Version::Draft14 | Version::Draft15 | Version::Draft16 => Version::Draft15,
-			_ => version,
-		};
-
 		let mut buf = Vec::new();
-		let mut inner = Encoder::new(&mut buf, sv.into());
+		let mut inner = Encoder::new(&mut buf, version.into());
 		match version {
-			Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17 | Version::Draft18 => {
-				self.encode_tag(&mut inner, sv)?
-			}
+			Version::Draft18 => self.encode_tag(&mut inner, version)?,
 			// Draft-22 drops the Length, since the Location Filter Type says which fields follow.
 			_ => return self.encode_typed(w),
 		}
@@ -249,14 +223,13 @@ impl Param for Filter {
 	}
 
 	fn param_decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		let sv = match version {
-			Version::Draft14 | Version::Draft15 | Version::Draft16 => Version::Draft15,
-			Version::Draft17 | Version::Draft18 => version,
+		match version {
+			Version::Draft18 => {}
 			_ => return Self::decode_typed(r),
-		};
+		}
 
-		let mut buf = Decoder::new(r.bytes()?, sv.into());
-		let filter = Self::decode_tag(&mut buf, sv)?;
+		let mut buf = Decoder::new(r.bytes()?, version.into());
+		let filter = Self::decode_tag(&mut buf, version)?;
 		if !buf.is_empty() {
 			return Err(DecodeError::TrailingBytes);
 		}
@@ -509,9 +482,7 @@ impl Fill {
 
 impl Param for Fill {
 	fn param_encode(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
-		if self.group_order == Some(super::GroupOrder::Any)
-			&& !matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16)
-		{
+		if self.group_order == Some(super::GroupOrder::Any) {
 			return Err(EncodeError::Unsupported);
 		}
 		let mut buf = Vec::new();
@@ -612,7 +583,7 @@ mod fill_tests {
 
 	#[test]
 	fn fill_rejects_invalid_group_order() {
-		for version in [Version::Draft17, Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft22] {
 			let fill = Fill {
 				group_order: Some(super::super::GroupOrder::Any),
 				filter: None,

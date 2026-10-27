@@ -120,7 +120,7 @@ async fn track_info_interest_precedes_a_subscription() {
 		consumer.routed("bcast").await.unwrap();
 		let remote = consumer.request_broadcast("bcast", None).await.unwrap();
 		let copy = remote.track("video").unwrap();
-		copy.query().await.expect("TRACK_INFO");
+		copy.info().await.expect("TRACK_INFO");
 		crate::support::wanted(track.demand())
 			.await
 			.expect("TRACK_INFO holds demand");
@@ -229,7 +229,7 @@ async fn abort_cuts_a_drain_short_for(version: &str) {
 
 #[moq_clock::test]
 async fn close_withdraws_announcements_before_closing_the_transport() {
-	for version in ["moq-lite-01", "moq-lite-07-wip", "moq-transport-17", "moq-transport-22"] {
+	for version in ["moq-lite-01", "moq-lite-07-wip", "moq-transport-18", "moq-transport-22"] {
 		let publisher = produce_origin(1);
 		let broadcast = publisher.create_broadcast("bcast").unwrap();
 		broadcast.announce(Default::default()).unwrap();
@@ -250,7 +250,7 @@ async fn close_withdraws_announcements_before_closing_the_transport() {
 
 #[moq_clock::test]
 async fn close_times_out_waiting_for_announcement_acknowledgements() {
-	for version in ["moq-lite-01", "moq-lite-07-wip", "moq-transport-17", "moq-transport-22"] {
+	for version in ["moq-lite-01", "moq-lite-07-wip", "moq-transport-18", "moq-transport-22"] {
 		let publisher = produce_origin(1);
 		let broadcast = publisher.create_broadcast("bcast").unwrap();
 		broadcast.announce(Default::default()).unwrap();
@@ -332,7 +332,7 @@ async fn earlier_lite_peer_close_reads_buffered_tail() {
 
 #[moq_clock::test]
 async fn ietf_peer_close_reads_buffered_tail() {
-	for version in ["moq-transport-14", "moq-transport-17", "moq-transport-22"] {
+	for version in ["moq-transport-18", "moq-transport-22"] {
 		peer_close_reads_buffered_tail(version).await;
 	}
 }
@@ -362,8 +362,7 @@ async fn peer_close_before_receiver_poll_keeps_buffered_tail() {
 		"moq-lite-02",
 		"moq-lite-05",
 		"moq-lite-06",
-		"moq-transport-14",
-		"moq-transport-17",
+		"moq-transport-18",
 	] {
 		let gate = kio::Producer::new(true);
 		let Setup {
@@ -385,7 +384,7 @@ async fn peer_close_before_receiver_poll_keeps_buffered_tail() {
 /// A locally unsupported feature uses only the negotiated session registry.
 #[moq_clock::test]
 async fn unsupported_abort_uses_the_negotiated_session_registry() {
-	for protocol in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-17", "moq-transport-22"] {
+	for protocol in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-18", "moq-transport-22"] {
 		let version: Version = protocol.parse().unwrap();
 		let pair = connect_mock(MockConnectOptions::new(version)).await;
 		pair.client.abort(Error::Unsupported);
@@ -398,7 +397,7 @@ async fn unsupported_abort_uses_the_negotiated_session_registry() {
 /// A Lite-only close code arriving on IETF stays unknown instead of gaining Lite semantics.
 #[moq_clock::test]
 async fn unsupported_close_is_decoded_by_the_negotiated_session_registry() {
-	for protocol in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-17", "moq-transport-22"] {
+	for protocol in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-18", "moq-transport-22"] {
 		let version: Version = protocol.parse().unwrap();
 		let mut pair = connect_mock(MockConnectOptions::new(version)).await;
 		moq_net::transport::poll::Session::close(&mut pair.server_transport, 0x30, "unsupported");
@@ -416,7 +415,7 @@ async fn unsupported_close_is_decoded_by_the_negotiated_session_registry() {
 /// wire, while a code outside it passes through.
 #[moq_clock::test]
 async fn an_unknown_lite_range_abort_is_unspecified_on_every_wire() {
-	for protocol in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-17", "moq-transport-22"] {
+	for protocol in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-18", "moq-transport-22"] {
 		for (unknown, expected) in [(0x31, 0x1), (0x20, 0x20)] {
 			let version: Version = protocol.parse().unwrap();
 			let pair = connect_mock(MockConnectOptions::new(version)).await;
@@ -433,7 +432,9 @@ async fn an_unknown_lite_range_abort_is_unspecified_on_every_wire() {
 async fn ended(version: &str, close: impl FnOnce(&MockPair)) -> (Error, moq_net::stats::Failures) {
 	let registry = moq_net::stats::Registry::new(Default::default());
 	let mut options = MockConnectOptions::new(version.parse().unwrap());
-	options.server_stats = registry.tier(Default::default()).session("room");
+	options.server_stats = registry
+		.tier(Default::default())
+		.session(moq_net::Path::from_static("room"));
 	let pair = connect_mock(options).await;
 	close(&pair);
 	let err = moq_clock::timeout(TIMEOUT, pair.server.closed())
@@ -452,7 +453,7 @@ async fn ended(version: &str, close: impl FnOnce(&MockPair)) -> (Error, moq_net:
 #[moq_clock::test]
 async fn a_session_records_how_it_ended() {
 	use moq_net::stats::Failures;
-	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-16", "moq-transport-22"] {
+	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"] {
 		let (err, failed) = ended(version, |pair| pair.client.abort(Error::Cancel)).await;
 		assert!(matches!(err, Error::Cancel), "{version}: {err:?}");
 		assert_eq!(failed, Failures::default(), "{version}");

@@ -3,7 +3,7 @@
  *
  * @module
  */
-import { Group as NetGroup, type Track as NetTrack, type Time } from "@moq/net";
+import type { Group as NetGroup, Track as NetTrack, Time } from "@moq/net";
 import type { Event } from "./datagram.ts";
 import { checkU53 } from "./derive.ts";
 import { Failure } from "./failure.ts";
@@ -64,8 +64,7 @@ export class Producer {
 		this.#writable();
 		this.#reserve(sequence);
 		this.#next = sequence + 1;
-		const inner = new NetGroup.Producer(sequence);
-		this.#inner.writeGroup(inner);
+		const inner = this.#inner.createGroup(sequence);
 		return Group.Producer.make(inner, this.#writer);
 	}
 

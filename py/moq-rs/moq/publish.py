@@ -6,15 +6,15 @@ from datetime import timedelta
 from typing import TYPE_CHECKING
 
 from moq_ffi import (
-    MoqBroadcastDynamic,
     MoqBroadcastProducer,
+    MoqBroadcastRequests,
     MoqFill,
     MoqGroupProducer,
     MoqOrder,
     MoqTrackDemand,
-    MoqTrackDynamic,
     MoqTrackProducer,
     MoqTrackRequest,
+    MoqTrackRequests,
 )
 
 from ._records import _subscription, _track_info
@@ -105,9 +105,9 @@ class TrackProducer:
         """A watch-only handle to this track's name and whether it has subscribers."""
         return TrackDemand(self._inner.demand())
 
-    def dynamic(self) -> TrackDynamic:
+    def requests(self) -> TrackRequests:
         """Serve fetches for groups that are not currently cached."""
-        return TrackDynamic(self._inner.dynamic())
+        return TrackRequests(self._inner.requests())
 
     def append_group(self) -> GroupProducer:
         """Start a new group; write frames into it, then finish()."""
@@ -181,9 +181,9 @@ class TrackRequest:
         """Watch this track's subscribers, including after accepting it."""
         return TrackDemand(self._inner.demand())
 
-    def dynamic(self) -> TrackDynamic:
+    def requests(self) -> TrackRequests:
         """Create a fetch handler before accepting this requested track."""
-        return TrackDynamic(self._inner.dynamic())
+        return TrackRequests(self._inner.requests())
 
     def abort(self, error_code: int) -> None:
         """Reject the request with an application error code."""
@@ -191,7 +191,7 @@ class TrackRequest:
 
 
 class Fill:
-    """A run of groups readers miss, for a :class:`TrackDynamic` to serve.
+    """A run of groups readers miss, for a :class:`TrackRequests` to serve.
 
     Call :meth:`accept` for each group you have and :meth:`drop_groups` for the rest;
     :meth:`next` names what is still owed, in the fill's order. Dropping the fill names
@@ -268,13 +268,13 @@ class Fill:
         await self._inner.unwanted(sequence)
 
 
-class TrackDynamic(_Stream[Fill]):
+class TrackRequests(_Stream[Fill]):
     """Async source of the fills readers of one track need: runs of groups the cache lacks.
 
     Usable as an async context manager that cancels on exit.
     """
 
-    def __init__(self, inner: MoqTrackDynamic) -> None:
+    def __init__(self, inner: MoqTrackRequests) -> None:
         self._inner = inner
 
     async def _next(self) -> Fill:
@@ -289,14 +289,14 @@ class TrackDynamic(_Stream[Fill]):
         self._inner.cancel()
 
 
-class BroadcastDynamic(_Stream[TrackRequest]):
+class BroadcastRequests(_Stream[TrackRequest]):
     """Async source of tracks requested by subscribers.
 
     Hold this object while subscriptions to unknown tracks should be accepted.
     Usable as an async context manager that cancels on exit.
     """
 
-    def __init__(self, inner: MoqBroadcastDynamic) -> None:
+    def __init__(self, inner: MoqBroadcastRequests) -> None:
         self._inner = inner
 
     async def _next(self) -> TrackRequest:
@@ -329,9 +329,9 @@ class BroadcastProducer:
         self._inner = inner
         return self
 
-    def dynamic(self) -> BroadcastDynamic:
+    def requests(self) -> BroadcastRequests:
         """Accept subscriptions to tracks that are not published yet."""
-        return BroadcastDynamic(self._inner.dynamic())
+        return BroadcastRequests(self._inner.requests())
 
     def announce(self, route: AnnounceRoute | None = None) -> None:
         """Advertise this broadcast's exact path as a route.

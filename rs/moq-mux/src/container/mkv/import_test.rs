@@ -958,8 +958,8 @@ fn unsupported_audio_codec_is_refused() {
 
 /// A rendition must never be advertised when its media producer could not be built.
 ///
-/// Publishing the media producer is fallible (it enrolls the track in the broadcast timeline, minting the
-/// shared `timeline.z` track, which can collide), so publishing the catalog entry first would
+/// Publishing the media producer is fallible (with HLS records enabled it mints the track's record
+/// track, which can collide), so publishing the catalog entry first would
 /// leave consumers a rendition that is announced but has no producer behind it and is therefore
 /// never served.
 #[test]
@@ -974,17 +974,19 @@ fn rendition_is_not_published_when_the_media_track_fails() {
 
 	// Control: the same fixture publishes exactly one rendition when nothing collides, so the
 	// assertion below cannot pass merely because the fixture stopped reaching track import.
-	assert_eq!(run(&data).video.renditions.len(), 1, "fixture must publish a rendition");
+	let control = run(&data);
+	assert_eq!(control.video.renditions.len(), 1, "fixture must publish a rendition");
+	let name = control.video.renditions.keys().next().unwrap().clone();
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	let config = crate::catalog::Config::default().with_hls(crate::hls::Config::default());
+	let catalog = crate::catalog::Producer::new(&mut broadcast, config).unwrap();
 
-	// Squat the catalog's timeline track, so building the media producer (whose enrollment
-	// enrolls the catalog too) fails. The handle must stay alive: the broadcast tracks names weakly, so
-	// dropping it frees the name.
-	let _squat = broadcast
-		.create_track(hang::timeline::default_name(hang::Catalog::DEFAULT_NAME), None)
-		.unwrap();
+	// Squat the rendition's HLS record track, so enrolling it (and with it building its media
+	// producer) fails. The handle must stay alive: the broadcast tracks names weakly, so
+	// dropping it frees the name. Unique names are per broadcast, so the track is named as in
+	// the control.
+	let _squat = broadcast.create_track(hang::hls::default_name(&name), None).unwrap();
 
 	let mut mkv = crate::container::mkv::Import::new(broadcast, catalog.reserve());
 	let buf = bytes::BytesMut::from(&data[..]);

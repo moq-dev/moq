@@ -48,7 +48,7 @@ redesign evidence went into the quests that already own the mechanism:
 [subscribe ranges](/quest/m1/subscribe-ranges/README.md),
 [drop set](/quest/m1/drop-set.md),
 [per-origin routes](/quest/m1/cluster-routing/routes.md),
-[drafts 14-17 removal](/quest/m1/ietf-drop/d14-17.md), and
+drafts 14-17 removal (since landed), and
 [buffered playback](/quest/m1/buffered-ascending.md). The audit recommends
 leaving JS-only redesigns of `js/net` to [rs2ts](/quest/m2/rs2ts/README.md).
 
@@ -59,7 +59,6 @@ leaving JS-only redesigns of `js/net` to [rs2ts](/quest/m2/rs2ts/README.md).
 - [A route too large to re-encode is skipped](/quest/m1/cut-audit/announce-reencode.md) - one oversized route never resets a downstream announce stream
 - [A reserved group survives a route returning](/quest/m1/cut-audit/reserved-route-return.md) - a route flip A to B to A no longer panics a peeked reader
 - [JS tracks end clean only on a deliberate finish](/quest/m1/cut-audit/js-close-cause.md) - local close, violations, and unanswered requests end with errors
-- [A malformed lite message closes the session](/quest/m1/cut-audit/announce-decode-complete.md) - a bad ANNOUNCE body no longer jams its stream
 - [Withdrawing a moq-transport FETCH or TRACK_STATUS ends it](/quest/m1/cut-audit/ietf-withdraw-resolve.md) - withdrawal during resolution releases the request
 - [A media hole in the player keeps the timeline](/quest/m1/cut-audit/watch-audio-hole.md) - a skipped group re-primes decoders without flushing audio or re-anchoring sync
 - [A description-less AAC rendition means one thing](/quest/m1/cut-audit/aac-description-less.md) - every player and exporter agrees on the frame format
@@ -72,7 +71,6 @@ leaving JS-only redesigns of `js/net` to [rs2ts](/quest/m2/rs2ts/README.md).
 - [Every relay runtime honors or refuses each listen setting](/quest/m1/cut-audit/uring-listen-config.md) - io_uring stops ignoring preferred addresses
 - [A route's terminal state is one phase](/quest/m1/cut-audit/route-phase.md) - three resume flags collapse into one check
 - [Lite's version gates, refusals, and draft text agree](/quest/m1/cut-audit/lite-wire-nits.md) - small wire and draft mismatches fixed
-- [Small @moq/net divergences from Rust are fixed](/quest/m1/cut-audit/js-net-cleanups.md) - lite-04 probes, group consumers, accept deadlines, empty JSON
 
 ## Related
 

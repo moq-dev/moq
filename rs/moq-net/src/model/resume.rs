@@ -2198,7 +2198,7 @@ mod test {
 			assert_eq!(read(&mut held), Some(b"first".to_vec()));
 
 			let b = copy();
-			let dynamic = b.dynamic();
+			let dynamic = b.requests();
 			let mut newer = b.create_group(group::Info { sequence: 1 }).unwrap();
 			newer.write_frame(ts(1), b"newer".as_ref()).unwrap();
 			newer.finish().unwrap();
@@ -2672,7 +2672,7 @@ mod test {
 		open.abort(Error::Dropped).unwrap();
 
 		let b = compressed();
-		let dynamic = b.dynamic();
+		let dynamic = b.requests();
 		routes.serve(b.consume());
 		assert!(reading.read_frame().now_or_never().is_none());
 		let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
@@ -2751,7 +2751,7 @@ mod test {
 		drop(a);
 
 		let b = track::Producer::new(broadcast.clone(), "video", info.clone());
-		let dynamic = b.dynamic();
+		let dynamic = b.requests();
 		routes.serve(b.consume());
 		assert!(reading.read_frame().now_or_never().is_none());
 		let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
@@ -2833,7 +2833,7 @@ mod test {
 			}
 
 			let b = copy();
-			let dynamic = b.dynamic();
+			let dynamic = b.requests();
 			routes.serve(b.consume());
 			assert!(reading.read_frame().now_or_never().is_none(), "fails={fails}");
 			let _pending = dynamic.requested_fill().now_or_never().unwrap().unwrap();
@@ -2865,7 +2865,7 @@ mod test {
 		);
 
 		let b = copy();
-		let dynamic = b.dynamic();
+		let dynamic = b.requests();
 		routes.serve(b.consume());
 		b.drop_groups(0..1, StreamError::Old);
 		assert!(fetched.read_frame().now_or_never().is_none());
@@ -2998,7 +2998,7 @@ mod test {
 		);
 
 		let b = copy();
-		let dynamic = b.dynamic();
+		let dynamic = b.requests();
 		routes.serve(b.consume());
 		assert_eq!(read(&mut reading), Some(b"b".to_vec()));
 		assert!(reading.read_frame().now_or_never().is_none());
@@ -3035,7 +3035,7 @@ mod test {
 		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
 
 		let b = copy();
-		let dynamic = b.dynamic();
+		let dynamic = b.requests();
 		routes.serve(b.consume());
 		assert!(reading.read_frame().now_or_never().is_none());
 		let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
@@ -3068,7 +3068,7 @@ mod test {
 		open.abort(Error::Evicted).unwrap();
 
 		let b = copy();
-		let dynamic = b.dynamic();
+		let dynamic = b.requests();
 		routes.serve(b.consume());
 		assert!(fetched.read_frame().now_or_never().is_none());
 		let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
@@ -4985,7 +4985,7 @@ mod test {
 	fn a_pending_fetch_wakes_and_moves_to_the_new_route() {
 		let routes = Producer::new();
 		let a = copy();
-		let dynamic = a.dynamic();
+		let dynamic = a.requests();
 		routes.serve(a.consume());
 		let logical = logical(&routes);
 		let mut fetching = logical.consume().fetch_group(0, None);
@@ -5014,7 +5014,7 @@ mod test {
 		let mut filling = Box::pin(consumer.fill_groups(0..4, 0));
 		assert!(filling.as_mut().now_or_never().is_none(), "no copy serves yet");
 		let a = copy();
-		let dynamic = a.dynamic();
+		let dynamic = a.requests();
 		routes.serve(a.consume());
 		assert!(
 			filling.as_mut().now_or_never().is_none(),
@@ -5037,7 +5037,7 @@ mod test {
 		let mut reading = recv(&mut sub);
 		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
 		let b = copy();
-		let _dynamic = b.dynamic();
+		let _dynamic = b.requests();
 		routes.serve(b.consume());
 		assert!(reading.read_frame().now_or_never().is_none());
 		for sequence in 1..=4 {
@@ -5309,7 +5309,7 @@ mod test {
 	fn a_fetched_group_outlives_its_delivery_giving_up() {
 		let routes = Producer::new();
 		let a = copy();
-		let dynamic = a.dynamic();
+		let dynamic = a.requests();
 		routes.serve(a.consume());
 
 		let mut arriving = a.create_group(group::Info { sequence: 0 }).unwrap();
@@ -5363,7 +5363,7 @@ mod test {
 				let routes = Producer::new();
 				let logical = logical(&routes);
 				let a = copy();
-				let dynamic = a.dynamic();
+				let dynamic = a.requests();
 				routes.serve(a.consume());
 				let mut sub = subscribe(&logical, HOUR);
 				let mut open = a.create_group(group::Info { sequence: 0 }).unwrap();
@@ -5399,7 +5399,7 @@ mod test {
 			let routes = Producer::new();
 			let logical = logical(&routes);
 			let a = copy();
-			let a_requests = a.dynamic();
+			let a_requests = a.requests();
 			routes.serve(a.consume());
 			let mut sub = subscribe(&logical, HOUR);
 			let mut open = a.create_group(group::Info { sequence: 0 }).unwrap();
@@ -5411,7 +5411,7 @@ mod test {
 			assert_eq!(read(&mut reading), Some(b"a".to_vec()));
 
 			let b = copy();
-			let b_requests = b.dynamic();
+			let b_requests = b.requests();
 			routes.serve(b.consume());
 			let mut repeat = b.create_group(group::Info { sequence: 0 }).unwrap();
 			repeat.write_frame(ts(0), b"a".as_ref()).unwrap();
@@ -5450,7 +5450,7 @@ mod test {
 			assert_eq!(read(&mut reading), Some(b"a".to_vec()));
 
 			let b = copy();
-			let dynamic = b.dynamic();
+			let dynamic = b.requests();
 			routes.serve(b.consume());
 			open.abort(Error::Stream(code.clone())).unwrap();
 			assert!(reading.read_frame().now_or_never().is_none(), "{code:?}");
@@ -5507,7 +5507,7 @@ mod test {
 		assert_eq!(read(&mut fetched), Some(b"a".to_vec()));
 
 		let b = copy();
-		let dynamic = b.dynamic();
+		let dynamic = b.requests();
 		routes.serve(b.consume());
 		assert!(fetched.read_frame().now_or_never().is_none());
 		let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
@@ -5814,7 +5814,7 @@ mod test {
 	fn ending_the_front_releases_a_pending_fetch() {
 		let routes = Producer::new();
 		let a = copy();
-		let _dynamic = a.dynamic();
+		let _dynamic = a.requests();
 		routes.serve(a.consume());
 		let logical = logical(&routes);
 		let mut fetching = logical.consume().fetch_group(0, None);

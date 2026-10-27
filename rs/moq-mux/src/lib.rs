@@ -27,10 +27,8 @@
 //!   part of the format (MPEG-TS).
 //! - [`rate`] turns bandwidth grants into stable media bitrate targets shared
 //!   by audio, video, and transcode senders.
-//! - [`timeline`](mod@timeline) publishes the broadcast's segment index: one
-//!   record per aligned segment, mapping a span of content time to the group
-//!   ranges that carry it on each track, so consumers can seek or build
-//!   HLS/DASH playlists without downloading media.
+//! - [`hls`](mod@hls) publishes opt-in HLS segment records per rendition, so an
+//!   edge can build HLS/DASH playlists without downloading media.
 //! - [`follow`] follows a broadcast across the publisher instances that
 //!   serve it, for a reader that restarts on each one.
 //! - [`Linger`] keeps a cleanly ended broadcast up for a fixed time, so a
@@ -43,6 +41,7 @@ pub mod codec;
 pub mod container;
 mod error;
 pub mod follow;
+pub mod hls;
 pub mod import;
 mod jitter;
 pub mod json;
@@ -52,7 +51,6 @@ pub mod rate;
 pub mod select;
 mod source;
 mod stats;
-pub mod timeline;
 
 pub use clock::Clock;
 pub use error::*;

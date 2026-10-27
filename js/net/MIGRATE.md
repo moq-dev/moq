@@ -4,6 +4,28 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Path.from` refuses empty segments ([#6648](https://github.com/moq-dev/moq/pull/6648))
+
+`Path.from` throws on a component with a leading, trailing, or doubled `/` instead of collapsing it, so a path has one spelling, and `Path.decode` refuses one off the wire. A moq-transport namespace field ending in `/`, which escapes to an empty segment, is refused too.
+Pass canonical components: `Path.from("room/cam")` or `Path.from(prefix, "cam")`, where an empty component is the root, rather than ``Path.from(`${prefix}/cam`)`` or `Path.from("room/")`.
+
+### moq-transport drafts 14 through 17 are removed ([#6753](https://github.com/moq-dev/moq/pull/6753))
+
+The `"moq-transport-14"` through `"moq-transport-17"` version names now throw a `TypeError`, and a peer offering only those versions fails the handshake.
+The moql SETUP (no ALPN, or `moql`) negotiates only moq-lite versions.
+Peers must speak moq-transport draft 18 or later, or moq-lite.
+
+### Request handlers are `requests()` ([#6752](https://github.com/moq-dev/moq/pull/6752))
+
+Rename `Origin.Producer.dynamic(prefix)` to `requests(prefix)`, and the `Origin.Dynamic` handle it returns to `Origin.Requests`; its methods are unchanged.
+
+### Names say one thing ([#6751](https://github.com/moq-dev/moq/pull/6751))
+
+`Auth.Auth` is `Auth.Credential`, and `Reservation.grant` is `Reservation.rate`.
+A connection's `bandwidth` allocator is `allocator`, mirroring Rust's `Session::allocator()`.
+`Track.Producer.writeGroup(group)` is `createGroup(sequence)`, which creates the group and returns it like `appendGroup()`: replace `const group = new Group.Producer(n); track.writeGroup(group);` with `const group = track.createGroup(n);`.
+A group can no longer be written before it joins a track, or join more than one track.
+
 ### One lifecycle vocabulary ([#6750](https://github.com/moq-dev/moq/pull/6750))
 
 `Group.Producer.close(abort?)` and `Track.Producer.close(abort?)` split by meaning: call `finish()` for a clean end and `abort(err)` for an error. On a group, `finish()` is terminal and an `abort` after it is a no-op. On a track, `finish()` only declares the end, so groups below it stay writable; then call `close()` to release the producer, which aborts with a `Cancel` stream error if no end was declared. Replace `track.close()` with `track.finish(); track.close();`.
@@ -37,7 +59,7 @@ Take the length of `Varint.encodeLeadingOnes(v)`.
 
 Broadcast creation and route publication now refuse literal `.` and `..` segments, including segments in the producer's root.
 Resolve relative references before publishing, or rename broadcasts that used these segments.
-Path normalization, relative references, and subscription paths retain their semantics.
+Relative references and subscription paths retain their semantics.
 
 ### A listing says whether a removed track finished (#6399)
 

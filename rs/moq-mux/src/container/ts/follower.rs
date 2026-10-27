@@ -87,7 +87,7 @@ pub struct Follower<E: catalog::Catalog = ()> {
 	export: Export<crate::catalog::Consumer<E>>,
 	state: State<E>,
 	instances: Instances,
-	path: moq_net::PathOwned,
+	path: moq_net::Path,
 	serving: Serving,
 	/// Taking the instances on hand when built, which replay the route the export resolved.
 	priming: bool,

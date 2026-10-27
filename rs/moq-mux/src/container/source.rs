@@ -73,7 +73,7 @@ enum SourceState {
 /// be, and the track's name there.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Target {
-	path: moq_net::PathOwned,
+	path: moq_net::Path,
 	epoch: Option<moq_net::Epoch>,
 	track: String,
 }
@@ -790,14 +790,14 @@ mod tests {
 			inline: true,
 		});
 		config.container = Container::Legacy;
-		config.broadcast = broadcast.map(|b| Relative::new(b).into_owned());
+		config.broadcast = broadcast.map(|rel| Relative::new(rel).unwrap());
 		config
 	}
 
 	fn audio(broadcast: Option<&str>) -> AudioConfig {
 		let mut config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
 		config.container = Container::Legacy;
-		config.broadcast = broadcast.map(|b| Relative::new(b).into_owned());
+		config.broadcast = broadcast.map(|rel| Relative::new(rel).unwrap());
 		config
 	}
 

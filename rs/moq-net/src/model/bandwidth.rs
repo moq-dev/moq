@@ -180,7 +180,7 @@ impl Weak {
 /// The reservations also set the session's probe target: the sum of every live
 /// reservation's ceiling, demanded or not, so a sender that stopped for lack of
 /// bandwidth keeps asking the connection for its room. A session probes for its own
-/// allocator, so take it from `Session::bandwidth` (with the `async` feature) rather
+/// allocator, so take it from `Session::allocator` (with the `async` feature) rather
 /// than building one: an allocator from [`new`](Self::new) divides an estimate but
 /// probes for nothing.
 ///
@@ -196,7 +196,7 @@ impl Allocator {
 	///
 	/// For an estimate that is not a session's, such as a test's or another
 	/// reservation's slice. A session's own comes from
-	/// `Session::bandwidth` with the `async` feature.
+	/// `Session::allocator` with the `async` feature.
 	pub fn new(estimate: Consumer) -> Self {
 		Self {
 			estimate,
@@ -298,7 +298,7 @@ impl Allocator {
 	/// released when the track closes either way, since a [`track::Demand`] is a weak
 	/// handle and reserving never keeps a track alive.
 	///
-	/// Read the current slice through [`Reservation::consumer`], which reports `None`
+	/// Read the current slice through [`Reservation::consume`], which reports `None`
 	/// while the connection has no estimate, telling a sender to hold its current rate
 	/// rather than encode at zero. While nothing is subscribed to the track it reports
 	/// the slice the track would get back, without claiming it from the others.
@@ -363,7 +363,7 @@ impl Reservation {
 	///
 	/// Stateless, unlike [`Consumer::poll_changed`], which carries a cursor over what it last
 	/// reported and so needs a handle of its own.
-	pub fn peek(&self) -> Option<Rate> {
+	pub fn rate(&self) -> Option<Rate> {
 		self.share.grant()
 	}
 
@@ -371,7 +371,7 @@ impl Reservation {
 	///
 	/// Cloneable and independent of the reservation: once the reservation is dropped
 	/// these report `None`, the same "hold your rate" a missing estimate reports.
-	pub fn consumer(&self) -> Consumer {
+	pub fn consume(&self) -> Consumer {
 		Consumer {
 			inner: Inner::Share(Box::new(self.share.clone())),
 			last: None,
@@ -388,7 +388,7 @@ impl Reservation {
 	/// picture moved again.
 	///
 	/// Does nothing once every [`Allocator`] is gone, since there is then nothing left
-	/// dividing anything; a reader learns that from its [`consumer`](Self::consumer).
+	/// dividing anything; a reader learns that from its [`consumer`](Self::consume).
 	pub fn update(&self, max: Rate) {
 		let Some(registry) = self.registry.upgrade() else {
 			return;
@@ -906,7 +906,7 @@ mod tests {
 		let (_first_broadcast, first) = track(VIDEO);
 		let _first_sub = first.subscribe(None);
 		let first = allocator.reserve(&first.demand(), bps(4_000_000));
-		let mut first_share = first.consumer();
+		let mut first_share = first.consume();
 
 		estimate.set(Some(bps(2_000_000))).unwrap();
 		// Alone, it gets everything it asked for that the link can carry.
@@ -919,7 +919,7 @@ mod tests {
 		let second_share = allocator.reserve(&second.demand(), bps(4_000_000));
 
 		assert_eq!(first_share.changed().await.unwrap(), Some(bps(1_000_000)));
-		assert_eq!(second_share.peek(), Some(bps(1_000_000)));
+		assert_eq!(second_share.rate(), Some(bps(1_000_000)));
 	}
 
 	/// An unwatched track releases its reservation to the others, since `publish_capture`
@@ -938,14 +938,14 @@ mod tests {
 		let (_idle_broadcast, idle) = track(VIDEO);
 		let idle_share = allocator.reserve(&idle.demand(), bps(4_000_000));
 
-		assert_eq!(watched_share.peek(), Some(bps(2_000_000)));
+		assert_eq!(watched_share.rate(), Some(bps(2_000_000)));
 		// What it would get if a viewer joined: an even split with the watched track.
-		assert_eq!(idle_share.peek(), Some(bps(1_000_000)));
+		assert_eq!(idle_share.rate(), Some(bps(1_000_000)));
 
 		// It joins, and the split happens.
 		let _idle_sub = idle.subscribe(None);
-		assert_eq!(watched_share.peek(), Some(bps(1_000_000)));
-		assert_eq!(idle_share.peek(), Some(bps(1_000_000)));
+		assert_eq!(watched_share.rate(), Some(bps(1_000_000)));
+		assert_eq!(idle_share.rate(), Some(bps(1_000_000)));
 	}
 
 	/// Demand transitions have to wake a parked share, not just change what a later
@@ -960,7 +960,7 @@ mod tests {
 		let (_mine_broadcast, mine) = track(VIDEO);
 		let _mine_sub = mine.subscribe(None);
 		let mine_share_reserved = allocator.reserve(&mine.demand(), bps(4_000_000));
-		let mut mine_share = mine_share_reserved.consumer();
+		let mut mine_share = mine_share_reserved.consume();
 
 		let (_sibling_broadcast, sibling) = track(VIDEO);
 		let sibling_sub = sibling.subscribe(None);
@@ -1020,7 +1020,7 @@ mod tests {
 		let (_broadcast, track) = track(VIDEO);
 		let _sub = track.subscribe(None);
 		let share_reserved = allocator.reserve(&track.demand(), bps(4_000_000));
-		let mut share = share_reserved.consumer();
+		let mut share = share_reserved.consume();
 
 		estimate.set(Some(bps(10_000_000))).unwrap();
 		assert_eq!(share.changed().await.unwrap(), Some(bps(4_000_000)));
@@ -1048,7 +1048,7 @@ mod tests {
 		let (_mine_broadcast, mine) = track(VIDEO);
 		let _mine_sub = mine.subscribe(None);
 		let share_reserved = allocator.reserve(&mine.demand(), bps(4_000_000));
-		let mut share = share_reserved.consumer();
+		let mut share = share_reserved.consume();
 
 		let (_sibling_broadcast, sibling) = track(VIDEO);
 		let sibling_sub = sibling.subscribe(None);
@@ -1073,7 +1073,7 @@ mod tests {
 		let (_broadcast, track) = track(VIDEO);
 		let _sub = track.subscribe(None);
 		let share_reserved = allocator.reserve(&track.demand(), bps(4_000_000));
-		let mut share = share_reserved.consumer();
+		let mut share = share_reserved.consume();
 
 		estimate.set(Some(bps(2_000_000))).unwrap();
 		assert_eq!(share.changed().await.unwrap(), Some(bps(2_000_000)));
@@ -1122,16 +1122,16 @@ mod tests {
 		let (_second_broadcast, second) = track(VIDEO);
 		let _second_sub = second.subscribe(None);
 		let second_reserved = allocator.reserve(&second.demand(), bps(4_000_000));
-		assert_eq!(second_reserved.peek(), Some(bps(1_000_000)));
+		assert_eq!(second_reserved.rate(), Some(bps(1_000_000)));
 
 		// A read handle is not the claim: the reservation outliving it is what keeps the
 		// room, and the reservation going away is what returns it.
-		let mut orphan = first_reserved.consumer();
+		let mut orphan = first_reserved.consume();
 		assert_eq!(orphan.changed().await.unwrap(), Some(bps(1_000_000)));
 
 		drop(first_reserved);
 		assert_eq!(allocator.registry.read().entries.len(), 1);
-		assert_eq!(second_reserved.peek(), Some(bps(2_000_000)));
+		assert_eq!(second_reserved.rate(), Some(bps(2_000_000)));
 
 		// The orphaned reader is woken and told, rather than being left parked on a slice
 		// that will never move again. It reports the same "hold your rate" as a missing
@@ -1158,19 +1158,19 @@ mod tests {
 		let large_reserved = allocator.reserve(&large.demand(), bps(8_000_000));
 
 		// Max-min fair: the small claim is satisfied in full, the rest goes to the other.
-		assert_eq!(small_reserved.peek(), Some(bps(1_000_000)));
-		assert_eq!(large_reserved.peek(), Some(bps(5_000_000)));
+		assert_eq!(small_reserved.rate(), Some(bps(1_000_000)));
+		assert_eq!(large_reserved.rate(), Some(bps(5_000_000)));
 
 		// It reopens at a mode that can use much more, and the split follows without a
 		// second entry appearing.
 		small_reserved.update(bps(4_000_000));
 		assert_eq!(allocator.registry.read().entries.len(), 2);
-		assert_eq!(small_reserved.peek(), Some(bps(3_000_000)));
-		assert_eq!(large_reserved.peek(), Some(bps(3_000_000)));
+		assert_eq!(small_reserved.rate(), Some(bps(3_000_000)));
+		assert_eq!(large_reserved.rate(), Some(bps(3_000_000)));
 
 		// And back down, which has to release the difference rather than hold it.
 		small_reserved.update(bps(1_000_000));
-		assert_eq!(large_reserved.peek(), Some(bps(5_000_000)));
+		assert_eq!(large_reserved.rate(), Some(bps(5_000_000)));
 	}
 
 	/// Collected-language callers can relinquish a ceiling before their retained
@@ -1190,20 +1190,20 @@ mod tests {
 		let (_sibling_broadcast, sibling) = track(VIDEO);
 		let _sibling_sub = sibling.subscribe(None);
 		let sibling = allocator.reserve(&sibling.demand(), bps(4_000_000));
-		assert_eq!(sibling.peek(), Some(bps(1_000_000)));
+		assert_eq!(sibling.rate(), Some(bps(1_000_000)));
 		assert_eq!(target.poll_changed(&waiter), Poll::Ready(bps(12_000_000)));
 
 		retired.update(Rate::ZERO);
-		assert_eq!(retired.peek(), Some(Rate::ZERO));
-		assert_eq!(replacement.peek(), Some(bps(1_500_000)));
-		assert_eq!(sibling.peek(), Some(bps(1_500_000)));
+		assert_eq!(retired.rate(), Some(Rate::ZERO));
+		assert_eq!(replacement.rate(), Some(bps(1_500_000)));
+		assert_eq!(sibling.rate(), Some(bps(1_500_000)));
 		assert_eq!(target.poll_changed(&waiter), Poll::Ready(bps(8_000_000)));
 		retired.update(Rate::ZERO);
 		assert!(target.poll_changed(&waiter).is_pending());
 
 		// The registration remains usable, so an encoder may resume in place.
 		retired.update(bps(4_000_000));
-		assert_eq!(sibling.peek(), Some(bps(1_000_000)));
+		assert_eq!(sibling.rate(), Some(bps(1_000_000)));
 		assert_eq!(target.poll_changed(&waiter), Poll::Ready(bps(12_000_000)));
 		assert!(encoder.demand().is_used());
 	}
@@ -1220,7 +1220,7 @@ mod tests {
 		let (_broadcast, producer) = track(VIDEO);
 		let _sub = producer.subscribe(None);
 		let reserved = allocator.reserve(&producer.demand(), bps(1_000_000));
-		let mut share = reserved.consumer();
+		let mut share = reserved.consume();
 		assert_eq!(share.changed().await.unwrap(), Some(bps(1_000_000)));
 
 		let (woken, waiter) = Woken::new();
@@ -1242,7 +1242,7 @@ mod tests {
 		let (_broadcast, producer) = track(VIDEO);
 		let _sub = producer.subscribe(None);
 		let share_reserved = allocator.reserve(&producer.demand(), bps(4_000_000));
-		let mut share = share_reserved.consumer();
+		let mut share = share_reserved.consume();
 
 		drop(allocator);
 		drop(estimate);
@@ -1326,7 +1326,7 @@ mod tests {
 		let (_broadcast, producer) = track(VIDEO);
 		let _sub = producer.subscribe(None);
 		let reservation = allocator.reserve(&producer.demand(), bps(4_000_000));
-		let mut grant = reservation.consumer();
+		let mut grant = reservation.consume();
 		let (woken, waiter) = Woken::new();
 		assert!(matches!(grant.poll_changed(&waiter), Poll::Ready(Ok(Some(rate))) if rate == bps(2_000_000)));
 		assert!(!grant.probed());

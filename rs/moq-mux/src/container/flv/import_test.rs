@@ -89,8 +89,8 @@ fn synth_flv() -> Vec<u8> {
 
 /// A rendition must never be advertised when its media producer could not be built.
 ///
-/// Publishing the media producer is fallible (it enrolls the track in the broadcast timeline, minting the
-/// shared `timeline.z` track, which can collide), so publishing the catalog entry first would
+/// Publishing the media producer is fallible (with HLS records enabled it mints the track's record
+/// track, which can collide), so publishing the catalog entry first would
 /// leave consumers a rendition that is announced but has no producer behind it and is therefore
 /// never served.
 #[tokio::test(start_paused = true)]
@@ -99,27 +99,25 @@ async fn rendition_is_not_published_when_the_media_track_fails() {
 
 	// Control: the same fixture publishes a video rendition when nothing collides, so the
 	// assertion below cannot pass merely because the fixture stopped reaching track import.
-	{
+	let name = {
 		let mut producer = moq_net::broadcast::Info::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
 		let mut importer = Import::new(producer, catalog.reserve());
 		importer.decode(&bytes::BytesMut::from(data.as_slice())).unwrap();
-		assert_eq!(
-			catalog.snapshot().video.renditions.len(),
-			1,
-			"fixture must publish a rendition"
-		);
-	}
+		let renditions = catalog.snapshot().video.renditions;
+		assert_eq!(renditions.len(), 1, "fixture must publish a rendition");
+		renditions.into_keys().next().unwrap()
+	};
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	let config = crate::catalog::Config::default().with_hls(crate::hls::Config::default());
+	let catalog = crate::catalog::Producer::new(&mut broadcast, config).unwrap();
 
-	// Squat the catalog's timeline track, so enrolling the first rendition (which enrolls the catalog
-	// too, and with it building its media producer) fails. The handle must stay alive: the broadcast tracks names weakly, so
-	// dropping it frees the name.
-	let _squat = broadcast
-		.create_track(hang::timeline::default_name(hang::Catalog::DEFAULT_NAME), None)
-		.unwrap();
+	// Squat the rendition's HLS record track, so enrolling it (and with it building its media
+	// producer) fails. The handle must stay alive: the broadcast tracks names weakly, so
+	// dropping it frees the name. Unique names are per broadcast, so the track is named as in
+	// the control.
+	let _squat = broadcast.create_track(hang::hls::default_name(&name), None).unwrap();
 
 	let mut importer = Import::new(broadcast, catalog.reserve());
 	// A track it cannot build surfaces in the catalog rather than in this result.

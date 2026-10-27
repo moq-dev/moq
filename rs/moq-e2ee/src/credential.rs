@@ -83,9 +83,10 @@ impl Credential {
 	/// # Errors
 	///
 	/// [`Error::Identity`](crate::Error::Identity) if `semantic` exceeds 65535 bytes.
-	pub fn path(&self, semantic: &str) -> Result<moq_net::PathOwned> {
+	pub fn path(&self, semantic: &str) -> Result<moq_net::Path> {
 		let material: [u8; PATH_LEN] = self.expand(&self.path_info(semantic)?);
-		Ok(moq_net::Path::new(&URL_SAFE_NO_PAD.encode(material)).into_owned())
+		// A fixed-length encoding, far under the path limit.
+		Ok(moq_net::Path::new(&URL_SAFE_NO_PAD.encode(material)).expect("a fixed-length path fits"))
 	}
 
 	/// Mint a fresh epoch and a producing generation whose clones share track claims.

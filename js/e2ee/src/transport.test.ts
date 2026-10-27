@@ -52,8 +52,7 @@ async function active(origin: Origin.Producer, path: Path.Valid): Promise<Broadc
 const transports = [
 	["moq-lite-07", "moq-lite-07-wip", true, true],
 	["moq-lite-05", "moq-lite-05", false, false],
-	["moq-transport-16", "moqt-16", false, false],
-	["moq-transport-17", "moqt-17", false, true],
+	["moq-transport-18", "moqt-18", true, true],
 ] as const;
 
 for (const [name, protocol, routed, timed] of transports) {
@@ -112,7 +111,7 @@ for (const [name, protocol, routed, timed] of transports) {
 
 for (const [name, protocol] of [
 	["moq-lite-07", "moq-lite-07-wip"],
-	["moq-transport-17", "moqt-17"],
+	["moq-transport-18", "moqt-18"],
 ] as const)
 	test(`${name}: datagrams roundtrip encrypted`, async () => {
 		const { publisher, subscriber, close } = await session(protocol);

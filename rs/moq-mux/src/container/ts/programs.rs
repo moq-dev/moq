@@ -29,7 +29,7 @@ use crate::catalog;
 /// `PMT_error_2`), since until then a PID may be a program's still to come.
 pub struct Programs {
 	origin: moq_net::origin::Producer,
-	name: moq_net::PathOwned,
+	name: moq_net::Path,
 	config: catalog::Config,
 	demux: Demux,
 	/// The latest whole PAT, from the first that lists a program, which seeds every program.
@@ -108,10 +108,10 @@ impl Program {
 
 impl Programs {
 	/// Split the multiplex into broadcasts named after `name`, each catalog built from `config`.
-	pub fn new(origin: moq_net::origin::Producer, name: impl moq_net::AsPath, config: catalog::Config) -> Self {
+	pub fn new(origin: moq_net::origin::Producer, name: impl Into<moq_net::Path>, config: catalog::Config) -> Self {
 		Self {
 			origin,
-			name: name.as_path().to_owned(),
+			name: name.into(),
 			config,
 			demux: Demux::new(true),
 			pat: None,
@@ -452,12 +452,14 @@ impl Programs {
 
 /// The broadcast one program of `name` publishes on: `event.hang` becomes `event/2.hang`.
 fn program_broadcast(name: &str, program: u16) -> String {
-	match catalog::CatalogFormat::detect(name) {
-		Some(format) => {
-			let stem = &name[..name.len() - format.extension().len()];
-			format!("{stem}/{program}{}", format.extension())
-		}
-		None => format!("{name}/{program}"),
+	let (stem, extension) = match catalog::CatalogFormat::detect(name) {
+		Some(format) => (&name[..name.len() - format.extension().len()], format.extension()),
+		None => (name, ""),
+	};
+	// A final segment that is only the extension (`room/.hang`) leaves the stem's separator behind.
+	match stem.strip_suffix('/').unwrap_or(stem) {
+		"" => format!("{program}{extension}"),
+		stem => format!("{stem}/{program}{extension}"),
 	}
 }
 
@@ -475,7 +477,11 @@ mod test {
 	#[tokio::test(start_paused = true)]
 	async fn internal_program_abort_preserves_the_catalog_error() {
 		let origin = crate::source::produce_origin();
-		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
+		let mut programs = Programs::new(
+			origin,
+			moq_net::Path::from_static("event.hang"),
+			catalog::Config::default(),
+		);
 		programs.decode(&two_programs()).unwrap();
 		let mut consumers: Vec<_> = programs.programs.iter().map(|p| p.catalog.consume().unwrap()).collect();
 		programs.abort(moq_net::Error::Transport("decode failed".into()));
@@ -497,6 +503,9 @@ mod test {
 		assert_eq!(program_broadcast("event.hang", 2), "event/2.hang");
 		assert_eq!(program_broadcast("demo/event.msf", 7), "demo/event/7.msf");
 		assert_eq!(program_broadcast("event", 1), "event/1");
+		assert_eq!(program_broadcast("", 1), "1");
+		assert_eq!(program_broadcast(".hang", 2), "2.hang");
+		assert_eq!(program_broadcast("room/.msf", 2), "room/2.msf");
 	}
 
 	/// The first whole PAT in a buffer, as the parser reads it.
@@ -527,7 +536,11 @@ mod test {
 	#[tokio::test]
 	async fn a_pat_spanning_two_packets_is_read_whole() {
 		let origin = crate::source::produce_origin();
-		let mut programs = Programs::new(origin.clone(), "event.hang", catalog::Config::default());
+		let mut programs = Programs::new(
+			origin.clone(),
+			moq_net::Path::from_static("event.hang"),
+			catalog::Config::default(),
+		);
 		let input = fifty_programs();
 		for chunk in input.chunks(100) {
 			programs.decode(chunk).unwrap();
@@ -551,7 +564,11 @@ mod test {
 	#[test]
 	fn a_corrupt_pat_starts_no_program() {
 		let origin = crate::source::produce_origin();
-		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
+		let mut programs = Programs::new(
+			origin,
+			moq_net::Path::from_static("event.hang"),
+			catalog::Config::default(),
+		);
 		// A null packet after each PAT confirms its sync byte.
 		let mut null = vec![0x47, 0x1f, 0xff, 0x10];
 		null.resize(188, 0xff);
@@ -587,7 +604,11 @@ mod test {
 	#[tokio::test]
 	async fn a_pat_in_two_sections_starts_every_program() {
 		let origin = crate::source::produce_origin();
-		let mut programs = Programs::new(origin.clone(), "event.hang", catalog::Config::default());
+		let mut programs = Programs::new(
+			origin.clone(),
+			moq_net::Path::from_static("event.hang"),
+			catalog::Config::default(),
+		);
 		programs.decode(&two_section_pat()).unwrap();
 		programs.finish().unwrap();
 		assert_eq!(programs.programs.len(), 2);
@@ -600,7 +621,11 @@ mod test {
 	#[tokio::test]
 	async fn only_programs_a_pmt_describes_publish() {
 		let origin = crate::source::produce_origin();
-		let mut programs = Programs::new(origin.clone(), "event.hang", catalog::Config::default());
+		let mut programs = Programs::new(
+			origin.clone(),
+			moq_net::Path::from_static("event.hang"),
+			catalog::Config::default(),
+		);
 		// Pairs of programs share a PMT PID, so 6 waits on the PID that starts 7.
 		let pmt_pid = |program: u16| 0x0100 + program / 2;
 		let mut cc = 0;
@@ -639,7 +664,11 @@ mod test {
 	#[tokio::test]
 	async fn a_later_pat_revises_the_waiting_programs() {
 		let origin = crate::source::produce_origin();
-		let mut programs = Programs::new(origin.clone(), "event.hang", catalog::Config::default());
+		let mut programs = Programs::new(
+			origin.clone(),
+			moq_net::Path::from_static("event.hang"),
+			catalog::Config::default(),
+		);
 		let mut cc = 0;
 		let mut data = psi_packets(0, &mut cc, &[], &pat_section(&[(1, 0x0100), (2, 0x0101)]));
 		let revised = psi::section(0x00, 1, 1, 0, 0, &[0x00, 0x01, 0xe2, 0x00]);
@@ -665,7 +694,11 @@ mod test {
 	#[tokio::test]
 	async fn a_program_starts_on_the_last_pmt_in_its_packet() {
 		let origin = crate::source::produce_origin();
-		let mut programs = Programs::new(origin.clone(), "event.hang", catalog::Config::default());
+		let mut programs = Programs::new(
+			origin.clone(),
+			moq_net::Path::from_static("event.hang"),
+			catalog::Config::default(),
+		);
 		let mut data = psi_packets(0, &mut 0, &[], &pat_section(&[(1, 0x0100)]));
 		let mut sections = pmt_section(1, 0, &[(MP2, 0x0062, &[])]);
 		sections.extend(pmt_section(1, 1, &[(MP2, 0x0061, &[])]));
@@ -681,7 +714,11 @@ mod test {
 	#[tokio::test]
 	async fn a_pmt_spanning_two_packets_starts_its_program() {
 		let origin = crate::source::produce_origin();
-		let mut programs = Programs::new(origin.clone(), "event.hang", catalog::Config::default());
+		let mut programs = Programs::new(
+			origin.clone(),
+			moq_net::Path::from_static("event.hang"),
+			catalog::Config::default(),
+		);
 		let mut data = psi_packets(0, &mut 0, &[], &pat_section(&[(1, 0x0100)]));
 		let mut private = vec![0x80, 200];
 		private.resize(202, 0);
@@ -700,7 +737,11 @@ mod test {
 	#[test]
 	fn a_corrupt_pmt_counts_once_whoever_reads_it() {
 		let origin = crate::source::produce_origin();
-		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
+		let mut programs = Programs::new(
+			origin,
+			moq_net::Path::from_static("event.hang"),
+			catalog::Config::default(),
+		);
 		let mut null = vec![0x47, 0x1f, 0xff, 0x10];
 		null.resize(188, 0xff);
 		let pmt = |program| pmt_section(program, 0, &[(MP2, 0x0060 + program, &[])]);
@@ -717,7 +758,11 @@ mod test {
 		assert_eq!(programs.stats().crc_error, 4);
 
 		let origin = crate::source::produce_origin();
-		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
+		let mut programs = Programs::new(
+			origin,
+			moq_net::Path::from_static("event.hang"),
+			catalog::Config::default(),
+		);
 		let mut cc = 0;
 		let mut data = psi_packets(0, &mut cc, &[], &pat_section(&[(1, 0x0100), (2, 0x0200)]));
 		data.extend(psi_packets(0x0100, &mut 0, &[], &pmt(1)));
@@ -731,7 +776,11 @@ mod test {
 		// The same move landing while the corrupt section is partway in: the program it moved
 		// never saw that section begin, so the scan counts it.
 		let origin = crate::source::produce_origin();
-		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
+		let mut programs = Programs::new(
+			origin,
+			moq_net::Path::from_static("event.hang"),
+			catalog::Config::default(),
+		);
 		let mut cc = 0;
 		let mut data = psi_packets(0, &mut cc, &[], &pat_section(&[(1, 0x0100), (2, 0x0200)]));
 		data.extend(psi_packets(0x0100, &mut 0, &[], &pmt(1)));
@@ -753,7 +802,11 @@ mod test {
 		// After that move, a section start abandons the partial for another split corrupt
 		// section, which the moved program reads from its start, so it alone counts it.
 		let origin = crate::source::produce_origin();
-		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
+		let mut programs = Programs::new(
+			origin,
+			moq_net::Path::from_static("event.hang"),
+			catalog::Config::default(),
+		);
 		let mut cc = 0;
 		let mut data = psi_packets(0, &mut cc, &[], &pat_section(&[(1, 0x0100), (2, 0x0200)]));
 		data.extend(psi_packets(0x0100, &mut 0, &[], &pmt(1)));
@@ -771,7 +824,11 @@ mod test {
 		// A corrupt section begun in the packet that starts a program sharing the PID: the new
 		// program reads that packet, so it alone counts the section.
 		let origin = crate::source::produce_origin();
-		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
+		let mut programs = Programs::new(
+			origin,
+			moq_net::Path::from_static("event.hang"),
+			catalog::Config::default(),
+		);
 		let mut data = psi_packets(0, &mut 0, &[], &pat_section(&[(1, 0x0100), (2, 0x0100)]));
 		let mut sections = pmt(1);
 		sections.extend(corrupt(pmt_section(2, 0, &[(MP2, 0x0071, &private)])));
@@ -783,7 +840,11 @@ mod test {
 		// A waiting program's PMT PID that a started program reads only as media: no program
 		// reassembles PMTs there, so the scan counts the corrupt section.
 		let origin = crate::source::produce_origin();
-		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
+		let mut programs = Programs::new(
+			origin,
+			moq_net::Path::from_static("event.hang"),
+			catalog::Config::default(),
+		);
 		let mut data = psi_packets(0, &mut 0, &[], &pat_section(&[(1, 0x0100), (2, 0x0061)]));
 		data.extend(psi_packets(0x0100, &mut 0, &[], &pmt(1)));
 		data.extend(psi_packets(0x0061, &mut 0, &[], &corrupt(pmt(2))));
@@ -797,7 +858,11 @@ mod test {
 	#[test]
 	fn every_program_mints_its_own_epoch() {
 		let origin = crate::source::produce_origin();
-		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
+		let mut programs = Programs::new(
+			origin,
+			moq_net::Path::from_static("event.hang"),
+			catalog::Config::default(),
+		);
 		programs.decode(&two_section_pat()).unwrap();
 		programs.finish().unwrap();
 		let epochs: Vec<_> = programs
@@ -815,7 +880,11 @@ mod test {
 	#[test]
 	fn a_program_announces_once_it_declares_its_tracks() {
 		let origin = crate::source::produce_origin();
-		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
+		let mut programs = Programs::new(
+			origin,
+			moq_net::Path::from_static("event.hang"),
+			catalog::Config::default(),
+		);
 		let input = two_programs();
 		let mut packets = input.chunks(188);
 		while programs.programs.is_empty() {
@@ -847,7 +916,11 @@ mod test {
 	#[test]
 	fn input_ending_before_a_pat_fails() {
 		let origin = crate::source::produce_origin();
-		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
+		let mut programs = Programs::new(
+			origin,
+			moq_net::Path::from_static("event.hang"),
+			catalog::Config::default(),
+		);
 		let mut null = vec![0x47, 0x1f, 0xff, 0x10];
 		null.resize(188, 0xff);
 		programs.decode(&null).unwrap();
@@ -860,7 +933,11 @@ mod test {
 	#[test]
 	fn input_ending_after_pmts_but_before_media_fails_unannounced() {
 		let origin = crate::source::produce_origin();
-		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
+		let mut programs = Programs::new(
+			origin,
+			moq_net::Path::from_static("event.hang"),
+			catalog::Config::default(),
+		);
 		let input = two_programs();
 		programs.decode(&input[..3 * 188]).unwrap();
 
@@ -881,7 +958,11 @@ mod test {
 	#[test]
 	fn a_partial_pat_does_not_hold_the_multiplex() {
 		let origin = crate::source::produce_origin();
-		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
+		let mut programs = Programs::new(
+			origin,
+			moq_net::Path::from_static("event.hang"),
+			catalog::Config::default(),
+		);
 		programs.decode(&fifty_programs()[..188]).unwrap();
 		let mut null = vec![0x47, 0x1f, 0xff, 0x10];
 		null.resize(188, 0xff);
@@ -897,7 +978,11 @@ mod test {
 	#[test]
 	fn a_corrupt_pat_beside_a_good_one_counts_once() {
 		let origin = crate::source::produce_origin();
-		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
+		let mut programs = Programs::new(
+			origin,
+			moq_net::Path::from_static("event.hang"),
+			catalog::Config::default(),
+		);
 		let mut sections = corrupt(pat_section(&[(1, 0x0100)]));
 		sections.extend(pat_section(&[(1, 0x0100)]));
 		let mut data = psi_packets(0, &mut 0, &[], &sections);
@@ -920,7 +1005,11 @@ mod test {
 			pkt
 		};
 		let origin = crate::source::produce_origin();
-		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
+		let mut programs = Programs::new(
+			origin,
+			moq_net::Path::from_static("event.hang"),
+			catalog::Config::default(),
+		);
 		let pmt = |program: u16| {
 			psi_packets(
 				program << 8,
@@ -944,7 +1033,11 @@ mod test {
 	#[tokio::test]
 	async fn every_program_publishes_its_own_broadcast() {
 		let origin = crate::source::produce_origin();
-		let mut programs = Programs::new(origin.clone(), "event.hang", catalog::Config::default());
+		let mut programs = Programs::new(
+			origin.clone(),
+			moq_net::Path::from_static("event.hang"),
+			catalog::Config::default(),
+		);
 
 		let input = two_programs();
 		let before = moq_clock::wall();

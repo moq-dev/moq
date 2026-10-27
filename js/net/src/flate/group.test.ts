@@ -70,13 +70,12 @@ test("declared plain bytes consume the group budget before any inflation", () =>
 	}
 });
 
-test("empty frames preserve the window and prewritten groups bind without duplicating plain copies", async () => {
-	const group = new Group(0);
+test("empty frames preserve the window", async () => {
+	const track = new Track("compressed").accept({ compress: true });
+	const group = track.createGroup(0);
 	group.writeFrame({ payload });
 	group.writeFrame({ payload: new Uint8Array() });
 	const reader = group.mirror();
-	const track = new Track("compressed").accept({ compress: true });
-	track.writeGroup(group);
 	group.writeFrame({ payload });
 	group.finish();
 	for (const expected of [payload, new Uint8Array(), payload])

@@ -1,7 +1,7 @@
 // Measure warning traffic and catch-up time over the groups a slow consumer skips.
 
 import { Milli } from "@moq/clock";
-import { Group, Time, Track, Varint } from "@moq/net";
+import { Time, Track, Varint } from "@moq/net";
 import { Signal } from "@moq/signals";
 import { Consumer } from "../src/container/consumer.ts";
 import { Format } from "../src/container/legacy.ts";
@@ -15,9 +15,8 @@ for (const count of [1, 16, 256, 1024]) {
 		maxDelay,
 	});
 	const write = (sequence: number) => {
-		const group = new Group.Producer(sequence);
+		const group = track.createGroup(sequence);
 		group.writeFrame({ payload: Varint.encode(sequence * 1000), timestamp: Time.Timestamp.now() });
-		track.writeGroup(group);
 	};
 	const buffered = async (timestamp: number) => {
 		while (consumer.buffered.peek().at(-1)?.end !== timestamp) await consumer.buffered.changed();

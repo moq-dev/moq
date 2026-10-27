@@ -194,6 +194,10 @@ async def _finish_subscribe(client: moq.Client, broadcast: str, frames: int) -> 
                 ) as media:
                     count = 0
                     async for frame in media:
+                        if isinstance(frame, moq.media.Gap):
+                            raise RuntimeError("media gap")
+                        if isinstance(frame, moq.media.End):
+                            continue
                         # Empty payloads carry endpoint metadata, not codec frames.
                         if not frame.payload:
                             continue
@@ -304,6 +308,10 @@ async def subscribe(
         async def drain() -> None:
             nonlocal total
             async for frame in media:
+                if isinstance(frame, moq.media.Gap):
+                    raise RuntimeError("media gap")
+                if isinstance(frame, moq.media.End):
+                    continue
                 total += len(frame.payload)
                 if total > 0:
                     return

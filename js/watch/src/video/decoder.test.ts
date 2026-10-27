@@ -900,10 +900,9 @@ function liveVideo(clock: ReturnType<typeof manualAt>, track: Moq.Track.Producer
 				held.push(frame * FRAME);
 				if (held.length < this.burst) continue;
 				for (const media of held) {
-					const group = new Moq.Group.Producer(sequence++);
+					const group = track.createGroup(sequence++);
 					group.writeFrame(legacyFrame(Micro.fromMilli(Milli(media))));
 					group.finish();
-					track.writeGroup(group);
 				}
 				held = [];
 			}
@@ -1017,9 +1016,8 @@ it("a video track read from another path does not inherit the outgoing delay", a
 it("buffered video holds its poster until its own span reaches the floor", async () => {
 	const clock = manualAt(0);
 	const playback = await guardedPlayback("legacy", [], [], true, 1000);
-	const group = new Moq.Group.Producer(0);
 	if (!playback.track) throw new Error("missing video track");
-	playback.track.writeGroup(group);
+	const group = playback.track.createGroup(0);
 	try {
 		group.writeFrame(legacyFrame(Micro(0)));
 		group.writeFrame(legacyFrame(Micro(40_000)));

@@ -1,8 +1,8 @@
 /** Sweep origin size and subscribers while listing one newly added track. */
 import { StreamCode, StreamError } from "../src/error.ts";
-import { NativeSession } from "../src/ietf/adapter.ts";
 import { Publisher } from "../src/ietf/publisher.ts";
 import { RequestOk } from "../src/ietf/request.ts";
+import { NativeSession } from "../src/ietf/session.ts";
 import { PublishSkipped, SubscribeTracks } from "../src/ietf/subscribe_tracks.ts";
 import { ALPN, Version } from "../src/ietf/version.ts";
 import { createMockTransportPair } from "../src/mock.ts";

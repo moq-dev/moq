@@ -6,7 +6,7 @@ use std::time::Duration;
 use url::Url;
 
 use crate::auth::MoqGrantConsumer;
-use crate::bandwidth::MoqBandwidth;
+use crate::bandwidth::MoqAllocator;
 use crate::error::MoqError;
 use crate::ffi::Task;
 use crate::origin::{MoqOriginConsumer, MoqOriginProducer};
@@ -1061,9 +1061,9 @@ pub struct MoqSession {
 	closed: Task<Inner>,
 	publisher: Arc<MoqOriginProducer>,
 	consumer: Arc<MoqOriginConsumer>,
-	/// One allocator for the session. Every [`bandwidth`](Self::bandwidth) handle
+	/// One allocator for the session. Every [`allocator`](Self::allocator) handle
 	/// clones it, so they share one reservation registry.
-	bandwidth: Arc<MoqBandwidth>,
+	allocator: Arc<MoqAllocator>,
 }
 
 impl MoqSession {
@@ -1092,12 +1092,12 @@ impl MoqSession {
 			// Persistent across reconnects: `None` while disconnected, then a grant
 			// again on the next connection. Reservations survive the gap.
 			#[cfg(not(target_arch = "wasm32"))]
-			Inner::Connection(connection) => connection.bandwidth(),
+			Inner::Connection(connection) => connection.allocator(),
 			#[cfg(not(target_arch = "wasm32"))]
-			Inner::Session(session) => session.bandwidth(),
+			Inner::Session(session) => session.allocator(),
 			// Persistent from before the handshake, so a reservation made while dialing counts.
 			#[cfg(target_arch = "wasm32")]
-			Inner::Dial(dial) => dial.bandwidth(),
+			Inner::Dial(dial) => dial.allocator(),
 		}
 	}
 
@@ -1107,14 +1107,14 @@ impl MoqSession {
 		// is where the remote's broadcasts land (read via its consumer view).
 		let publisher = Arc::new(MoqOriginProducer::from_inner(publish));
 		let consumer = Arc::new(MoqOriginConsumer::from_inner(subscribe));
-		let bandwidth = Arc::new(MoqBandwidth::new(Self::mint_allocator(&inner)));
+		let allocator = Arc::new(MoqAllocator::new(Self::mint_allocator(&inner)));
 		Self {
 			inner: inner.clone(),
 			shutdown: Default::default(),
 			closed: Task::new(inner.clone()),
 			publisher,
 			consumer,
-			bandwidth,
+			allocator,
 		}
 	}
 
@@ -1307,8 +1307,8 @@ impl MoqSession {
 	/// reconnects: the grant is `None` while disconnected and resumes on the
 	/// next connection. An accepted session with no congestion estimate mints
 	/// an unlimited allocator, which reports `None` for every reservation.
-	pub fn bandwidth(&self) -> Arc<MoqBandwidth> {
-		self.bandwidth.clone()
+	pub fn allocator(&self) -> Arc<MoqAllocator> {
+		self.allocator.clone()
 	}
 
 	/// Follow the grant the peer gave this session.

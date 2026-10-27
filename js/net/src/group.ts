@@ -78,7 +78,7 @@ class GroupState {
 	// The first frame's timestamp, retained after reads. Media time only: an untimed group
 	// never has one, so it says nothing about whether a frame was written.
 	timestamp?: Timestamp;
-	// The newest frame's timestamp: where a reader that has taken every frame sits.
+	// The highest frame PTS, including when the decode-order tail presents earlier.
 	latest?: Timestamp;
 	// Accepted below the track's eviction watermark, where nothing proves where it starts,
 	// so this mirror drives no media-time expiry.
@@ -104,7 +104,8 @@ function appendFrame(state: GroupState, frame: Frame) {
 	if (state.closed.peek() !== undefined) throw new Error("group is closed");
 
 	state.timestamp ??= frame.timestamp;
-	state.latest = frame.timestamp;
+	if (frame.timestamp === undefined) state.latest = undefined;
+	else if (state.latest === undefined || state.latest.isBefore(frame.timestamp)) state.latest = frame.timestamp;
 	state.cacheBytes += stored(frame)?.payload.length ?? frame.payload.byteLength;
 	state.frames.mutate((frames) => {
 		frames.push(frame);
@@ -218,6 +219,7 @@ export class Producer {
 		};
 		hooks.writeGroupFrame = (group, frame, inflated) => group.#writeFrame(frame, inflated);
 		hooks.groupCacheBytes = (group) => group.#state.flate?.bytes ?? group.#state.cacheBytes;
+		hooks.groupFrameCount = (group) => group.#state.total.peek();
 		hooks.groupProgress = (group, fn) => {
 			const state = group.#state;
 			fn(state.total.peek());
@@ -236,7 +238,6 @@ export class Producer {
 			group.#admits ??= [];
 			group.#admits.push(admit);
 		};
-		hooks.groupStart = (group) => (group.#state.total.peek() > 0 ? group.#state.timestamp : undefined);
 		hooks.overRefresh = (group, ratio) => {
 			const state = group.#state;
 			const first = state.frames.peek()[0];
@@ -274,7 +275,7 @@ export class Producer {
 
 	/** A read handle for this group. */
 	consume(): Consumer {
-		return makeConsumer(this.#state, false);
+		return this.mirror();
 	}
 
 	/**
@@ -301,7 +302,7 @@ export class Producer {
 		const closed = this.#state.closed.peek();
 		if (closed !== undefined) {
 			dst.closed.set(closed);
-			return makeConsumer(dst, true);
+			return makeConsumer(dst);
 		}
 
 		this.#mirrors ??= new Set();
@@ -317,7 +318,7 @@ export class Producer {
 			dispose();
 		});
 
-		return makeConsumer(dst, true);
+		return makeConsumer(dst);
 	}
 
 	/**
@@ -432,7 +433,7 @@ export class Producer {
 	}
 }
 
-let makeConsumer: (state: GroupState, owned: boolean) => Consumer;
+let makeConsumer: (state: GroupState) => Consumer;
 
 // A replacement copy asked for on behalf of one consumer, settled or still out.
 interface Attempt {
@@ -634,13 +635,9 @@ export class Consumer {
 	#expired?: Expired;
 	// Closed by its reader, which ends it whatever is left unread.
 	#released = false;
-	// Whether this consumer alone reads `#state` (a mirror), so releasing it closes that state.
-	// A `consume()` handle shares the producer's state and only lets go of its own view.
-	#owned: boolean;
 
-	private constructor(state: GroupState, owned: boolean) {
+	private constructor(state: GroupState) {
 		this.#state = state;
-		this.#owned = owned;
 		this.sequence = state.sequence;
 	}
 
@@ -688,7 +685,7 @@ export class Consumer {
 	}
 
 	static {
-		makeConsumer = (state, owned) => new Consumer(state, owned);
+		makeConsumer = (state) => new Consumer(state);
 		hooks.releaseGroupReader = (group, abort) => group.#release(abort);
 		hooks.groupTimestamp = (group) => (group.#state.unverified ? undefined : group.#state.timestamp);
 		hooks.groupLatest = (group) => (group.#state.unverified ? undefined : group.#state.latest);
@@ -764,8 +761,7 @@ export class Consumer {
 
 	// The next change a parked read waits for.
 	#changed(): GetPromise<unknown> {
-		// The verdict too: releasing a shared handle settles only it, and must end a parked read.
-		const changed: Getter<unknown>[] = [this.#state.frames, this.#state.closed, this.#verdict];
+		const changed: Getter<unknown>[] = [this.#state.frames, this.#state.closed];
 		if (this.#expiry) changed.push(...this.#expiry.changed);
 		if (this.#recover) changed.push(this.#recover.changed);
 		return Signal.race(...changed);
@@ -847,7 +843,6 @@ export class Consumer {
 		// The copy left behind stops teeing into the state this consumer read.
 		if (this.#state.closed.peek() === undefined) this.#state.closed.set(null);
 		this.#state = next;
-		this.#owned = replacement.group.#owned;
 		this.#expiry = replacement.expiry;
 		this.#skip = index;
 		this.#closed?.refresh();
@@ -857,8 +852,6 @@ export class Consumer {
 	// The unread frames. Every look at the buffer goes through here, so readiness, reads and
 	// `done` agree on what is left.
 	#bufferedFrames(): Frame[] {
-		// A released shared handle reads nothing more: the queue it shares belongs to the other readers.
-		if (this.#released && !this.#owned) return [];
 		const frames = this.#state.frames.peek();
 		// A resumed copy repeats the frames an earlier one already delivered.
 		while (this.#state.start < this.#skip && frames.length > 0) {
@@ -992,8 +985,6 @@ export class Consumer {
 				return read;
 			}
 
-			// A released shared handle ends here, whatever the group does next for its other readers.
-			if (this.#released && !this.#owned) return;
 			const closed = this.#state.closed.peek();
 			if (closed instanceof Error) {
 				if (await this.#resume(closed)) continue;
@@ -1028,27 +1019,28 @@ export class Consumer {
 	/** Reads the next frame and parses its payload as JSON. */
 	async readJson(): Promise<unknown | undefined> {
 		const frame = await this.readString();
-		return frame ? JSON.parse(frame) : undefined;
+		return frame !== undefined ? JSON.parse(frame) : undefined;
 	}
 
 	/** Reads the next frame and decodes its payload as a one-byte boolean. */
 	async readBool(): Promise<boolean | undefined> {
 		const frame = await this.readFrame();
-		return frame ? frame.payload[0] === 1 : undefined;
+		if (!frame) return undefined;
+		const payload = frame.payload;
+		if (payload.byteLength !== 1 || !(payload[0] === 0 || payload[0] === 1)) throw new Error("invalid bool frame");
+		return payload[0] === 1;
 	}
 
 	/**
 	 * Release this handle, like dropping a Rust consumer. Never changes the group for other
-	 * readers. A track's read handle drains what it buffered and then ends; one from
-	 * {@link Producer.consume} ends at once, since its queue is shared with the producer's other
-	 * readers. Idempotent.
+	 * readers or the producer. It drains what it buffered and then ends. Idempotent.
 	 */
 	close(): void {
 		this.#release(undefined);
 	}
 
-	// Release this reader, failing it with `abort` if given. A mirror closes its own state,
-	// which drops its demand; a shared handle ends only its own view.
+	// Release this reader, failing it with `abort` if given. Every reader owns its mirrored
+	// state, so closing that state drops its demand without touching the producer.
 	#release(abort: Error | undefined): void {
 		// A copy failure recovery was continuing past ends with the abort instead.
 		if (abort && this.#recover && this.#state.closed.peek() instanceof Error) {
@@ -1060,12 +1052,7 @@ export class Consumer {
 		this.#recover = undefined;
 		// Closing is terminal for this reader, even with frames still unread.
 		this.#released = true;
-		if (this.#owned) {
-			if (this.#state.closed.peek() === undefined) this.#state.closed.set(abort ?? null);
-		} else if (this.#state.closed.peek() === undefined) {
-			if (abort) this.#terminal ??= abort;
-			if (this.#verdict.peek() === undefined) this.#verdict.set(this.#terminal ?? null);
-		}
+		if (this.#state.closed.peek() === undefined) this.#state.closed.set(abort ?? null);
 		this.#closed?.refresh();
 	}
 }

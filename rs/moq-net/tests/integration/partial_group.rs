@@ -17,16 +17,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 const BUDGET: Duration = Duration::from_millis(500);
 
 /// IETF peers negotiate the same superseded-group budget as Lite peers.
-const VERSIONS: &[&str] = &[
-	"moq-lite-06",
-	"moq-lite-07-wip",
-	"moq-transport-14",
-	"moq-transport-15",
-	"moq-transport-16",
-	"moq-transport-17",
-	"moq-transport-18",
-	"moq-transport-22",
-];
+const VERSIONS: &[&str] = &["moq-lite-06", "moq-lite-07-wip", "moq-transport-18", "moq-transport-22"];
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));

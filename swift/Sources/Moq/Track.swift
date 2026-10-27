@@ -162,8 +162,8 @@ public final class TrackProducer: Sendable {
     }
 
     /// Serve fetches for groups that are not currently cached.
-    public func dynamic() throws -> TrackDynamic {
-        TrackDynamic(try ffi.dynamic())
+    public func requests() throws -> TrackRequests {
+        TrackRequests(try ffi.requests())
     }
 
     /// Append a new group, returning a producer for its frames.

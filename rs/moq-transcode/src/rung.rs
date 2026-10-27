@@ -182,7 +182,7 @@ enum Ended {
 pub(crate) fn serve(rung: Rung, request: moq_net::track::Request) -> impl Future<Output = Result<(), Error>> {
 	// Grab the group-request handle before accepting: a Request is dynamic from
 	// birth, so a fetch racing the acceptance queues instead of failing.
-	let dynamic = request.dynamic();
+	let dynamic = request.requests();
 	let info = hang::container::track_info(hang::catalog::PRIORITY.video);
 	let mut producer = request.accept(info);
 	let serving = Serving(Some(producer.clone()));
@@ -454,7 +454,7 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 /// dropping it.
 async fn fetches(
 	rung: &Rung,
-	dynamic: moq_net::track::Dynamic,
+	dynamic: moq_net::track::Requests,
 	finishing: &mut tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), Error> {
 	let limit = Arc::new(Semaphore::new(MAX_CONCURRENT_FETCHES));
@@ -961,12 +961,12 @@ mod tests {
 	async fn a_group_nobody_reads_releases_its_fill() {
 		use std::task::Poll;
 		let (rung, source, _retire) = idle_rung();
-		let source_fills = source.create_track("video", None).unwrap().dynamic();
+		let source_fills = source.create_track("video", None).unwrap().requests();
 
 		let output = moq_net::broadcast::Info::default().produce();
 		let timed = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
 		let mut track = output.create_track("video/120p", timed).unwrap();
-		let fills = track.dynamic();
+		let fills = track.requests();
 		let ascending = |groups| {
 			moq_net::track::Subscription::default()
 				.with_max_delay(None)
@@ -1009,7 +1009,7 @@ mod tests {
 	async fn cancelling_an_idle_rung_reports_cancel() {
 		let (rung, _source, _retire) = idle_rung();
 		let output = moq_net::broadcast::Info::default().produce();
-		let mut dynamic = output.dynamic();
+		let mut dynamic = output.requests();
 		let view = output.consume();
 		let subscribing = tokio::spawn(async move { view.track("rung").unwrap().subscribe(None).await.unwrap() });
 		let request = dynamic.requested_track().await.unwrap();
@@ -1045,7 +1045,7 @@ mod tests {
 	async fn an_unpolled_rung_reports_cancel() {
 		let (rung, _source, _retire) = idle_rung();
 		let output = moq_net::broadcast::Info::default().produce();
-		let mut dynamic = output.dynamic();
+		let mut dynamic = output.requests();
 		let view = output.consume();
 		let subscribing = tokio::spawn(async move { view.track("rung").unwrap().subscribe(None).await.unwrap() });
 		let request = dynamic.requested_track().await.unwrap();

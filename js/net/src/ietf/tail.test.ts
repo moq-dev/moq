@@ -7,9 +7,9 @@ import { GRACE } from "../ledger.ts";
 import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
-import { NativeSession } from "./adapter.ts";
 import { type GroupFlags, Group as GroupMessage } from "./object.ts";
 import { PublishDone } from "./publish.ts";
+import { NativeSession } from "./session.ts";
 import { Subscribe, SubscribeOk } from "./subscribe.ts";
 import { Subscriber } from "./subscriber.ts";
 import { ALPN, Version } from "./version.ts";
@@ -66,10 +66,9 @@ async function subscribed(largest?: number) {
 	const peer = await Stream.accept(pair.client, VERSION);
 	if (!peer) throw new Error("the subscriber never opened a subscribe stream");
 	expect(await peer.reader.u53()).toBe(Subscribe.id);
-	const request = await Subscribe.decode(peer.reader, VERSION);
+	await Subscribe.decode(peer.reader, VERSION);
 	await peer.writer.u53(SubscribeOk.id);
 	await new SubscribeOk({
-		requestId: request.requestId,
 		trackAlias: ALIAS,
 		largest: largest === undefined ? undefined : { groupId: BigInt(largest), objectId: 0n },
 	}).encode(peer.writer, VERSION);

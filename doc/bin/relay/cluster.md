@@ -14,12 +14,7 @@ Each broadcast carries the list of relays it passed through. That hop list
 catches loops and picks the shortest route, and every relay breaks ties the
 same way so the cluster converges instead of flapping. Both wire protocols
 carry it: natively on moq-lite, and via the [cluster extension](/draft/moq-cluster)
-on moq-transport 17+.
-
-moq-transport drafts 14 and 15 cannot ask for every broadcast (an empty
-namespace prefix is illegal before draft 16), so a link to a peer without the
-MoQ Solicit extension, such as moxygen, learns only what that peer announces
-unasked. moxygen announces nothing unasked on draft 14.
+on moq-transport.
 
 A track from a moq-transport publisher keeps its Object IDs, object properties,
 and END\_OF\_GROUP status objects across a moq-lite-07 link, since relays
@@ -44,7 +39,7 @@ resuming it; the RTMP, SRT, and WHIP ingests mint one per connection. Epochs
 order by creation time, so a reconnect to a different gateway assumes the two
 gateways' clocks roughly agree. Seamless failover needs a publisher that
 announces an epoch and, on every link the route crosses, moq-lite 07 or
-moq-transport draft 17 or later with the [epoch extension](/draft/moq-epoch). A route
+moq-transport with the [epoch extension](/draft/moq-epoch). A route
 without an epoch, including every route on moq-lite 06 and older or a
 moq-transport link without the extension, keeps its subscriptions until it goes or a track fails
 upstream, and any other route winning it is announced as a restart. Viewers
@@ -100,7 +95,7 @@ max_hops = 6
 ```
 
 The same setting is `--cluster-max-hops` or `MOQ_CLUSTER_MAX_HOPS`. It covers
-moq-lite-03 through moq-lite-07-wip and moq-transport drafts 17 through 22 when
+moq-lite-03 through moq-lite-07-wip and moq-transport drafts 18 through 22 when
 the MoQ Cluster extension is negotiated. A forwarded path counts this relay's
 own hop even when its peer appends it on receipt. Older versions and peers
 without hop paths hide their depth, which this setting cannot bound.

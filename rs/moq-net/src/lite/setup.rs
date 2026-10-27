@@ -62,10 +62,10 @@ impl ProbeLevel {
 	/// both qualify: their RTT comes from the handshake, which has already happened.
 	#[cfg(feature = "async")]
 	pub fn detect(session: &crate::driver::Transport) -> Self {
-		use crate::transport::Stats as _;
+		use crate::transport::Metrics as _;
 		use crate::transport::poll::Session as _;
-		let stats = session.stats();
-		match stats.estimated_send_rate().is_some() || stats.rtt().is_some() {
+		let metrics = session.metrics();
+		match metrics.estimated_send_rate().is_some() || metrics.rtt().is_some() {
 			true => Self::Report,
 			false => Self::None,
 		}
@@ -203,7 +203,7 @@ pub struct Setup {
 }
 
 impl Message for Setup {
-	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::Session);
+	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::Session);
 	const MAX_SIZE: usize = crate::setup::MAX_SETUP_SIZE;
 
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
@@ -267,7 +267,7 @@ pub(super) struct ReceivedSetup {
 }
 
 impl Message for ReceivedSetup {
-	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::Session);
+	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::Session);
 	const MAX_SIZE: usize = Setup::MAX_SIZE;
 
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {

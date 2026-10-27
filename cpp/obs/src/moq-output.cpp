@@ -260,7 +260,7 @@ void MoQOutput::OnConnect(const std::shared_ptr<Attempt> &current, moq::expected
 	current->session = *result;
 	{
 		std::lock_guard<std::mutex> lock(media_mutex);
-		bandwidth = current->session->bandwidth();
+		allocator = current->session->allocator();
 	}
 	{
 		std::lock_guard<std::mutex> lock(mutex);
@@ -399,7 +399,7 @@ void MoQOutput::Reset()
 			track.producer->finish();
 	}
 	audio_tracks.clear();
-	bandwidth.reset();
+	allocator.reset();
 
 	// Close the broadcast so the origin retracts it immediately; Start()
 	// creates a fresh one on restart.
@@ -677,7 +677,7 @@ void MoQOutput::VideoData(struct encoder_packet *packet)
 	// Read before the frame is written, so a retune lands on the encoder's next
 	// frame. obs_encoder_update only flags an active encoder for its own thread.
 	if (track.rate && track.reservation) {
-		if (auto next = track.rate->Update(track.reservation->grant(), MoQRate::Clock::now()))
+		if (auto next = track.rate->Update(track.reservation->rate(), MoQRate::Clock::now()))
 			SetBitrate(encoder, *next);
 	}
 
@@ -698,7 +698,7 @@ void MoQOutput::VideoData(struct encoder_packet *packet)
 // NOTE: Caller must hold media_mutex.
 void MoQOutput::Reserve(Track &track)
 {
-	if (track.reservation || !bandwidth || track.bitrate_bps == 0)
+	if (track.reservation || !allocator || track.bitrate_bps == 0)
 		return;
 	auto demand = track.producer->demand();
 	if (!demand) {
@@ -706,7 +706,7 @@ void MoQOutput::Reserve(Track &track)
 		track.bitrate_bps = 0;
 		return;
 	}
-	track.reservation = bandwidth->reserve(*demand, track.bitrate_bps);
+	track.reservation = allocator->reserve(*demand, track.bitrate_bps);
 }
 
 // NOTE: Caller must hold media_mutex.

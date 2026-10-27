@@ -184,7 +184,7 @@ export class Connection {
 	 * against one registry. Borrowed, not owned: the type has no close, since
 	 * closing it would starve every other handle.
 	 */
-	readonly bandwidth: Getter<Handle | undefined>;
+	readonly allocator: Getter<Handle | undefined>;
 
 	/**
 	 * The origin for the current URL, or undefined while disabled or URL-less.
@@ -221,7 +221,7 @@ export class Connection {
 	readonly #established = new Signal<EstablishedType | undefined>(undefined);
 	readonly #probe = new Signal<Getter<ProbeType | undefined> | undefined>(undefined);
 	readonly #origin = new Signal<Origin.Producer | undefined>(undefined);
-	readonly #bandwidth = new Signal<Handle | undefined>(undefined);
+	readonly #allocator = new Signal<Handle | undefined>(undefined);
 	readonly #auth = new Signal<Auth.Handle | undefined>(undefined);
 	readonly #error = new Signal<Error | undefined>(undefined);
 	#signals: Effect;
@@ -251,7 +251,7 @@ export class Connection {
 		this.error = this.#error;
 		this.probe = new Follow(this.#probe);
 		this.origin = this.#origin;
-		this.bandwidth = this.#bandwidth;
+		this.allocator = this.#allocator;
 		this.auth = this.#auth;
 		this.transport = this.#signals.computed((effect) => effect.get(this.#established)?.transport);
 
@@ -278,7 +278,7 @@ export class Connection {
 			effect.cleanup(lease.release);
 
 			effect.set(this.#origin, lease.origin, undefined);
-			effect.set(this.#bandwidth, lease.connection.bandwidth, undefined);
+			effect.set(this.#allocator, lease.connection.allocator, undefined);
 			effect.set(this.#auth, lease.connection.auth, undefined);
 
 			// Proxy the shared loop's outputs, so this handle reads like its own connection.
@@ -329,7 +329,7 @@ export class Connection {
 			signals.run((effect) => {
 				if (!effect.get(this.enabled) || !effect.get(href)) return;
 				effect.set(this.#origin, origin, undefined);
-				effect.set(this.#bandwidth, loop.bandwidth, undefined);
+				effect.set(this.#allocator, loop.allocator, undefined);
 				effect.set(this.#auth, loop.auth, undefined);
 			});
 			signals.run((effect) => effect.set(this.#status, effect.get(loop.status), "disconnected"));

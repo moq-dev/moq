@@ -83,6 +83,7 @@ async def test_server_client_roundtrip():
                     media.write_frame(payload, timedelta(microseconds=1_000_000))
 
                     async for frame in media_consumer:
+                        assert isinstance(frame, moq.media.MediaFrame)
                         assert frame.payload == payload
                         assert frame.timestamp // timedelta(microseconds=1) == 1_000_000
                         break

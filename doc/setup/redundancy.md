@@ -30,7 +30,7 @@ promise.
 2. Publish the same broadcast name under the same auth path. Each publisher
    keeps its own epoch; `moq` creates one automatically.
 3. Use epoch-capable connections on every hop: moq-lite 07, which is opt-in,
-   or moq-transport draft 17 or later with the [epoch extension](/draft/moq-epoch)
+   or moq-transport with the [epoch extension](/draft/moq-epoch)
    enabled. Keep the publisher hosts' clocks synchronized, since epochs order
    by their UUIDv7 creation time.
 
@@ -40,12 +40,12 @@ relays. Run each command on its publisher host, with its own source URL:
 ```bash
 # Publisher A
 moq --connect https://ingest-a.example.com/anon \
-    --connect-version moq-transport-17 --broadcast event.hang \
+    --connect-version moq-transport-18 --broadcast event.hang \
     import hls https://source-a.example.com/live/index.m3u8
 
 # Publisher B
 moq --connect https://ingest-b.example.com/anon \
-    --connect-version moq-transport-17 --broadcast event.hang \
+    --connect-version moq-transport-18 --broadcast event.hang \
     import hls https://source-b.example.com/live/index.m3u8
 ```
 
@@ -69,7 +69,7 @@ For MPEG-TS output, opt into following replacements:
 
 ```bash
 moq --connect https://edge.example.com/anon \
-    --connect-version moq-transport-17 --broadcast event.hang \
+    --connect-version moq-transport-18 --broadcast event.hang \
     export ts --stitch --follow 10s > event.ts
 ```
 

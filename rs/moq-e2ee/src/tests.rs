@@ -808,7 +808,7 @@ fn grouped_failure_wakes_pending_reads_and_releases_demand() {
 	let mut good = recv_group(&mut pair.consumer);
 	assert_eq!(read_frame(&mut good).plaintext, &b"ok"[..]);
 	let mut forged = recv_group(&mut pair.consumer);
-	assert!(bad_demand.is_used());
+	assert!(bad_demand.wanted());
 
 	// Sibling frame, next group, and datagram reads are already parked. Nothing
 	// further is published.
@@ -840,7 +840,7 @@ fn grouped_failure_wakes_pending_reads_and_releases_demand() {
 		!demand.wanted().is_some(),
 		"track demand stayed live after authentication failure"
 	);
-	assert!(!bad_demand.is_used(), "failed group demand stayed live");
+	assert!(!bad_demand.wanted(), "failed group demand stayed live");
 	assert!(!pair.net.is_closed(), "publisher must stay open");
 
 	assert_eq!(
@@ -850,7 +850,7 @@ fn grouped_failure_wakes_pending_reads_and_releases_demand() {
 		Poll::Ready("authentication".to_string())
 	);
 	assert!(
-		!open_demand.is_used(),
+		!open_demand.wanted(),
 		"sibling group demand stayed live after its woken read"
 	);
 	assert_eq!(

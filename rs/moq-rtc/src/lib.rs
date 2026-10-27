@@ -205,7 +205,9 @@ mod tests {
 				let origin = whep_origin.clone();
 				let sessions = sessions_tx.clone();
 				async move {
-					let response = server::whep::accept(&server, &origin, "source", &offer).await.unwrap();
+					let response = server::whep::accept(&server, &origin, moq_net::Path::from_static("source"), &offer)
+						.await
+						.unwrap();
 					let answer = response.answer.clone();
 					sessions.send(tokio::spawn(response.run())).await.unwrap();
 					answer
@@ -265,9 +267,10 @@ mod tests {
 				let server = server.clone();
 				let origin = whip_origin.clone();
 				async move {
-					let response = server::whip::accept(&server, &origin, "ingested", &offer)
-						.await
-						.unwrap();
+					let response =
+						server::whip::accept(&server, &origin, moq_net::Path::from_static("ingested"), &offer)
+							.await
+							.unwrap();
 					let answer = response.answer.clone();
 					tokio::spawn(response.run());
 					answer
@@ -355,9 +358,10 @@ mod tests {
 					let origin = whip_origin.clone();
 					let sources = whip_sources.clone();
 					async move {
-						let response = server::whip::accept(&server, &origin, "ingested", &offer)
-							.await
-							.unwrap();
+						let response =
+							server::whip::accept(&server, &origin, moq_net::Path::from_static("ingested"), &offer)
+								.await
+								.unwrap();
 						let answer = response.answer.clone();
 						let id = response.resource_id.clone();
 						let task = tokio::spawn(response.run());
@@ -373,9 +377,10 @@ mod tests {
 					let origin = whep_origin.clone();
 					let sources = sources_tx.clone();
 					async move {
-						let response = server::whep::accept(&server, &origin, "ingested", &offer)
-							.await
-							.unwrap();
+						let response =
+							server::whep::accept(&server, &origin, moq_net::Path::from_static("ingested"), &offer)
+								.await
+								.unwrap();
 						let answer = response.answer.clone();
 						let id = response.resource_id.clone();
 						let task = tokio::spawn(response.run());

@@ -83,7 +83,7 @@ type ProducerOptions struct {
 	// Track names the published track; nil derives a name from the codec.
 	Track *string
 	// Bandwidth reserves the track against a session allocator when non-nil.
-	Bandwidth *moq.Bandwidth
+	Bandwidth *moq.Allocator
 	// Lower is the next rendition down a simulcast ladder: when non-nil, this one
 	// disables while the grant cannot fund it and resumes once it recovers. Needs
 	// Bandwidth and a bitrate above the lower rendition's.
@@ -92,9 +92,9 @@ type ProducerOptions struct {
 
 // NewProducer opens a video track on the catalog's broadcast and registers its rendition.
 func NewProducer(catalog *media.CatalogProducer, options ProducerOptions) (*Producer, error) {
-	var bw **ffi.MoqBandwidth
+	var bw **ffi.MoqAllocator
 	if options.Bandwidth != nil {
-		raw := bridge.Bandwidth(options.Bandwidth)
+		raw := bridge.Allocator(options.Bandwidth)
 		bw = &raw
 	}
 	var lower **ffi.MoqVideoProducer

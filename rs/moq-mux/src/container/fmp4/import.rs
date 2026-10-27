@@ -84,7 +84,7 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	segment: u64,
 
 	// The current segment's boundary was declared by the source (rather than inferred from a
-	// keyframe), so each track cuts its timeline where it opens its group for the segment.
+	// keyframe), so each track cuts its HLS segments where it opens its group for the segment.
 	declared: bool,
 	dropped_metadata: u64,
 }
@@ -156,9 +156,10 @@ struct Passthrough<E: crate::catalog::hang::CatalogExt> {
 	/// The latest group's start, which the next group may not start below.
 	start: Option<Timestamp>,
 
-	// Reports this track's fragments into its timeline. Passthrough writes groups by hand (no
-	// `container::Producer`), so the recorder is fed directly rather than through `with_recorder`.
-	recorder: Option<crate::timeline::Recorder>,
+	// Reports this track's groups into its HLS records, when enabled. Passthrough writes groups by
+	// hand (no `container::Producer`), so the recorder is fed directly rather than through
+	// `with_recorder`.
+	recorder: Option<crate::hls::Recorder>,
 
 	// Sequence to use for the next group, set by `Import::seek`.
 	pending_sequence: Option<u64>,
@@ -189,9 +190,6 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		self.publish_estimate()?;
 		if let Some(mut group) = self.group.take() {
 			group.finish()?;
-			if let Some(recorder) = self.recorder.as_mut() {
-				recorder.finish_group(group.sequence);
-			}
 		}
 		Ok(())
 	}
@@ -270,7 +268,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// segmentation out of band (e.g. an HLS import following its playlist).
 	///
 	/// A `styp` atom (a CMAF segment on disk) does this on its own, so an importer reading a
-	/// segmented file needs no help. Each track's timeline then closes a record where that track
+	/// segmented file needs no help. Each track's HLS records then start a segment where that track
 	/// opens its group for the new segment, following the source's segmentation instead of the
 	/// minimum-duration pacing.
 	///
@@ -470,9 +468,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			self.catalog.track_info(kind.priority()).with_timescale(timescale),
 		)?;
 
-		// Enroll every track in the broadcast's timelines: passthrough writes groups by hand
-		// (no `container::Producer`), so the recorder is fed directly at each fragment. The
-		// reservation holds the archive entry back until the whole track set is declared.
+		// Enroll every track for HLS records: passthrough writes groups by hand (no
+		// `container::Producer`), so the recorder is fed directly at each fragment.
 		let recorder = self.catalog.enroll(track.name(), None)?;
 
 		// Whatever the descriptor declared (a bitrate) is authoritative; the rest is filled by
@@ -498,7 +495,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			track,
 			group: None,
 			start: None,
-			recorder: Some(recorder),
+			recorder,
 			pending_sequence: None,
 			estimator: self.catalog.estimator(),
 			claim: crate::catalog::Claim::new(self.catalog.bandwidth()),
@@ -938,7 +935,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// a fragment late and the two tracks stop agreeing on where segments fall.
 		if self.starts_segment(&moof, has_video) {
 			self.segment += 1;
-			// A boundary the source declared is also a timeline boundary; one merely inferred
+			// A boundary the source declared is also an HLS segment boundary; one merely inferred
 			// from a keyframe is not, since the default pacing already sees that group open.
 			self.declared = self.pending_cut;
 			self.pending_cut = false;
@@ -994,7 +991,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			let placement = Placement {
 				offset,
 				new_segment,
-				// A group opening for a declared segment is a boundary on this track's timeline.
+				// A group opening for a declared segment is an HLS segment boundary on this track.
 				declared: new_segment && self.declared,
 			};
 
@@ -1019,7 +1016,7 @@ struct Placement {
 	offset: crate::catalog::Offset,
 	/// The fragment is this track's first in the current segment.
 	new_segment: bool,
-	/// That segment was declared by the source, so it is a timeline boundary too.
+	/// That segment was declared by the source, so it is an HLS segment boundary too.
 	declared: bool,
 }
 
@@ -1255,9 +1252,6 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		let mut group = if start_group {
 			if let Some(mut prev) = self.group.take() {
 				prev.finish()?;
-				if let Some(recorder) = self.recorder.as_mut() {
-					recorder.finish_group(prev.sequence);
-				}
 			}
 			match self.pending_sequence.take() {
 				Some(sequence) => self.track.create_group(moq_net::group::Info { sequence })?,
@@ -1267,10 +1261,10 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			self.group.take().ok_or(Error::NoKeyframe)?
 		};
 
-		let position = hang::timeline::Position::new(group.sequence, group.frame_count() as u64);
+		let sequence = group.sequence;
 
 		if start_group {
-			// A group reopened mid-segment (after a `seek`) is no timeline boundary.
+			// A group reopened mid-segment (after a `seek`) is no segment boundary.
 			if placement.declared
 				&& let Some(recorder) = self.recorder.as_mut()
 			{
@@ -1287,15 +1281,14 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			self.start = Some(timestamp);
 		}
 
-		// Only once published, so a rejected fragment is never indexed. Audio is always
-		// independently decodable; video says whether this fragment really begins on an IDR,
-		// which is what an HLS export reads to bootstrap an init segment.
+		// Audio is always independently decodable; video counts the IDRs it carries.
 		let keyframes = match kind {
 			Kind::Video => run.samples.iter().filter(|sample| sample.sync).count() as u64,
 			Kind::Audio => 0,
 		};
+		// Only once published, so a rejected fragment is never listed.
 		if let Some(recorder) = self.recorder.as_mut() {
-			recorder.frame(position, timestamp, kind == Kind::Audio || keyframes > 0);
+			recorder.frame(sequence, timestamp);
 		}
 
 		self.group = Some(group);
@@ -1374,7 +1367,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				passthrough.track.finish()?;
 				// The importer may be kept around, but its media stops holding the other tracks back.
 				passthrough.estimator.discontinuity();
-				// Dropping the recorder flushes the open record, so the track is advertised.
+				// Dropping the recorder stops the open HLS segment, so the track is advertised.
 				passthrough.recorder = None;
 			});
 		}

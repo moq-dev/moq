@@ -199,7 +199,7 @@ mod tests {
 			rendition: "main".to_string(),
 			segment: Id {
 				generation: generation.map(str::to_string),
-				reference: "ab12cd34".to_string(),
+				tag: "ab12cd34".to_string(),
 				at,
 			},
 		};
@@ -243,7 +243,7 @@ mod tests {
 		assert!(Route::parse("/project/live/@run/video/main/seg/ab12cd34.tx.m4s").is_none());
 		assert!(
 			Route::parse("/project/live/@run/video/main/seg/42.m4s").is_none(),
-			"a segment URL names its reference"
+			"a segment URL names its record track"
 		);
 		assert!(Route::parse("/project/live/@run/video/main/seg/1.ts").is_none());
 	}

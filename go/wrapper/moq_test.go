@@ -46,7 +46,7 @@ func TestDynamicBroadcastRequest(t *testing.T) {
 	defer cancel()
 
 	origin := newOrigin(t)
-	dynamic, err := origin.Dynamic("")
+	dynamic, err := origin.Requests("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -566,7 +566,7 @@ func TestFetchGroupAndServeDynamicMiss(t *testing.T) {
 		t.Fatal("a negative fetch max delay was accepted, want an error")
 	}
 
-	dynamic, err := track.Dynamic()
+	dynamic, err := track.Requests()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -690,13 +690,15 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	frame, err := mediaConsumer.Next(ctx)
+	read, err := mediaConsumer.Next(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if frame == nil {
-		t.Fatal("expected a frame")
+	value, ok := read.(moqmedia.ReadFrame)
+	if !ok {
+		t.Fatalf("expected a media frame, got %T", read)
 	}
+	frame := &value.Frame
 	if string(frame.Payload) != string(payload) || uint64(frame.Timestamp.Microseconds()) != 1_000_000 {
 		t.Fatalf("frame = %+v, want payload=%q ts=1000000", frame, payload)
 	}
@@ -926,7 +928,7 @@ func TestDynamicTrackRequest(t *testing.T) {
 	}
 	defer broadcast.Close()
 
-	dynamic, err := broadcast.Dynamic()
+	dynamic, err := broadcast.Requests()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1002,7 +1004,7 @@ func TestDynamicTrackRequestCanPublishAudio(t *testing.T) {
 	}
 	defer broadcast.Close()
 
-	dynamic, err := broadcast.Dynamic()
+	dynamic, err := broadcast.Requests()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1068,18 +1070,34 @@ func TestDynamicTrackRequestCanPublishAudio(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	frame, err := mediaConsumer.Next(ctx)
+	read, err := mediaConsumer.Next(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if frame == nil {
-		t.Fatal("expected a frame")
+	value, ok := read.(moqmedia.ReadFrame)
+	if !ok {
+		t.Fatalf("expected a media frame, got %T", read)
 	}
+	frame := &value.Frame
 	if string(frame.Payload) != string(payload) || uint64(frame.Timestamp.Microseconds()) != 20_000 {
 		t.Fatalf("frame = %+v, want payload=%q ts=20000", frame, payload)
 	}
+	// The explicit pause marker is an encoder end even while the track stays open.
+	if err := media.Discontinuity(); err != nil {
+		t.Fatal(err)
+	}
 	if err := media.Finish(); err != nil {
 		t.Fatal(err)
+	}
+	end, err := mediaConsumer.Next(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value, ok := end.(moqmedia.ReadEnd); !ok || value.End != 20_000*time.Microsecond {
+		t.Fatalf("expected encoder end, got %T", end)
+	}
+	if next, err := mediaConsumer.Next(ctx); next != nil || err != nil {
+		t.Fatalf("after finish: %v %v", next, err)
 	}
 }
 
@@ -1153,7 +1171,7 @@ func TestConsumerCancelConcurrent(t *testing.T) {
 // that one request rather than the consumer it was made on.
 func TestRequestBroadcastCancelKeepsTheOrigin(t *testing.T) {
 	origin := newOrigin(t)
-	dynamic, err := origin.Dynamic("")
+	dynamic, err := origin.Requests("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1229,7 +1247,7 @@ func TestSubscribeTrackCancelKeepsTheBroadcast(t *testing.T) {
 	}
 	defer broadcast.Close()
 
-	dynamic, err := broadcast.Dynamic()
+	dynamic, err := broadcast.Requests()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1349,7 +1367,7 @@ func TestCancelDoesNotLeakGoroutines(t *testing.T) {
 	}
 	defer broadcast.Close()
 
-	dynamic, err := broadcast.Dynamic()
+	dynamic, err := broadcast.Requests()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1599,7 +1617,7 @@ func TestDynamicServesARequestUnderAPrefix(t *testing.T) {
 	defer cancel()
 
 	origin := newOrigin(t)
-	dynamic, err := origin.Dynamic("live")
+	dynamic, err := origin.Requests("live")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1639,7 +1657,7 @@ func TestClosingAPreparedAnswerRefusesTheRequest(t *testing.T) {
 	defer cancel()
 
 	origin := newOrigin(t)
-	dynamic, err := origin.Dynamic("live")
+	dynamic, err := origin.Requests("live")
 	if err != nil {
 		t.Fatal(err)
 	}

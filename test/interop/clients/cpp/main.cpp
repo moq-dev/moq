@@ -378,12 +378,13 @@ int subscribe(
 
     size_t total = 0, frames = 0;
     while (finish || total == 0) {
-        auto frame = until(media->next(), read_deadline, "next frame");
-        if (!frame) {
-            break;
-        }
-        total += frame->payload.size();
-        if (!frame->payload.empty()) ++frames;
+        auto read = until(media->next(), read_deadline, "next read");
+        if (!read) { break; }
+        if (std::holds_alternative<moq::MediaRead::kGap>(read->get_variant())) fail("media gap");
+        const auto *frame = std::get_if<moq::MediaRead::kFrame>(&read->get_variant());
+        if (!frame) continue; // Encoder ends do not terminate the subscription.
+        total += frame->frame.payload.size();
+        if (!frame->frame.payload.empty()) ++frames;
     }
     if (total == 0) {
         fail("no frame data received");

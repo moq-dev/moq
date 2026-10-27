@@ -43,7 +43,7 @@ public enum Video {
             input: EncoderInput,
             output: EncoderOutput,
             track: String? = nil,
-            bandwidth: Bandwidth? = nil,
+            bandwidth: Allocator? = nil,
             lower: Producer? = nil
         ) throws {
             ffi = try MoqVideoProducer(

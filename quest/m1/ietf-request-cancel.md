@@ -19,17 +19,11 @@ lazy discovery that rewrote these writes. What remains is the awaited first
 encode under send-window pressure: watch for cancellation there and reset the
 partially written request stream.
 
-Decided 2026-10-25 (maintainer): drop support for the older drafts rather
-than handle them here. Drafts 14 and 15 shared one ordered control stream, so
-a partial message could not be abandoned; once
-[Drop moq-transport 14-17](/quest/m1/ietf-drop/d14-17.md) lands, every
-remaining draft gives each request its own stream, and only the reset path
-is needed.
+Drafts 14 and 15 shared one ordered control stream, so a partial message
+could not be abandoned; every remaining draft gives each request its own
+stream, so only the reset path is needed.
 
 Test with a peer that never grants send credit, on drafts 18 and 22.
 
 Public API: none. Wire: none.
 
-## Required
-
-- [Drop moq-transport 14-17](/quest/m1/ietf-drop/d14-17.md) - leaves only per-request streams, so a cancelled request is always a stream reset

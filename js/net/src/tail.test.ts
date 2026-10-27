@@ -84,31 +84,28 @@ test.each([Lite.ALPN_05, Lite.ALPN_06])(
 // moq-transport carries the end in an END_OF_TRACK object, so it survives a track that
 // declared an end past the groups it produced, and the Stream Count lets the subscriber stop
 // waiting for streams at once.
-test.each([Ietf.ALPN.DRAFT_16, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])(
-	"%s: END_OF_TRACK carries the declared end",
-	async (alpn) => {
-		const { video, reader, close } = await session(alpn);
-		try {
-			video.writeFrame(textFrame("0"));
-			expect(await reader.readString()).toBe("0");
+test.each([Ietf.ALPN.DRAFT_22])("%s: END_OF_TRACK carries the declared end", async (alpn) => {
+	const { video, reader, close } = await session(alpn);
+	try {
+		video.writeFrame(textFrame("0"));
+		expect(await reader.readString()).toBe("0");
 
-			video.finishAt({ group: 4, frame: 0 });
-			video.writeFrame(textFrame("1"));
-			video.writeFrame(textFrame("2"));
-			const ended = performance.now();
-			video.finish();
-			video.close();
+		video.finishAt({ group: 4, frame: 0 });
+		video.writeFrame(textFrame("1"));
+		video.writeFrame(textFrame("2"));
+		const ended = performance.now();
+		video.finish();
+		video.close();
 
-			expect(await readAll(reader)).toEqual(["1", "2"]);
-			expect(await reader.closed).toBeNull();
-			expect(await reader.finished()).toEqual({ group: 4, frame: 0 });
-			// Every counted stream arrived, so nothing waited out the grace.
-			expect(performance.now() - ended).toBeLessThan(TAIL_GRACE_MS);
-		} finally {
-			close();
-		}
-	},
-);
+		expect(await readAll(reader)).toEqual(["1", "2"]);
+		expect(await reader.closed).toBeNull();
+		expect(await reader.finished()).toEqual({ group: 4, frame: 0 });
+		// Every counted stream arrived, so nothing waited out the grace.
+		expect(performance.now() - ended).toBeLessThan(TAIL_GRACE_MS);
+	} finally {
+		close();
+	}
+});
 
 describe("Tail", () => {
 	const GRACE = Milli(1000);

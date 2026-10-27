@@ -531,39 +531,39 @@ mod tests {
 
 	#[test]
 	fn session_limits_merge_without_crossing_peer_policy() {
-		if !test_env::Env::without(&[
-			"MOQ_LIMITS_CLIENT_ANNOUNCES",
-			"MOQ_LIMITS_CLIENT_REQUESTS",
-			"MOQ_LIMITS_PEER_ANNOUNCES",
-			"MOQ_LIMITS_PEER_REQUESTS",
-		])
-		.isolate()
-		{
+		if !test_env::Env::without(&["MOQ_LIMITS_CLIENT_ANNOUNCES", "MOQ_LIMITS_PEER_ANNOUNCES"]).isolate() {
 			return;
 		}
 		let dir = tempfile::tempdir().unwrap();
 		let path = dir.path().join("limits.toml");
-		std::fs::write(
-			&path,
-			"[limits.client]\nannounces = 7\nrequests = 8\n[limits.peer]\nannounces = 90\nrequests = 91\n",
-		)
-		.unwrap();
+		std::fs::write(&path, "[limits.client]\nannounces = 7\n[limits.peer]\nannounces = 90\n").unwrap();
 		let config = Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), path.clone().into()]).unwrap();
 		assert_eq!(config.limits.client.resolve().announces, 7);
-		assert_eq!(config.limits.client.resolve().requests, 8);
 		assert_eq!(config.limits.peer.resolve().announces, 90);
-		assert_eq!(config.limits.peer.resolve().requests, 91);
 		let config = Config::parse_and_merge([
 			std::ffi::OsString::from("moq-relay"),
 			path.into(),
 			"--limits-client-announces=0".into(),
-			"--limits-peer-requests=1000".into(),
 		])
 		.unwrap();
 		assert_eq!(config.limits.client.resolve().announces, 0);
-		assert_eq!(config.limits.client.resolve().requests, 8);
 		assert_eq!(config.limits.peer.resolve().announces, 90);
-		assert_eq!(config.limits.peer.resolve().requests, 1000);
+	}
+
+	/// Sizing the removed request window refuses to start rather than run without the
+	/// setting.
+	#[test]
+	fn removed_request_limits_are_refused() {
+		if !test_env::Env::without(&["MOQ_LIMITS_CLIENT_REQUESTS", "MOQ_LIMITS_PEER_REQUESTS"]).isolate() {
+			return;
+		}
+		let error = Config::parse_and_merge(["moq-relay", "--limits-peer-requests=1000"]).unwrap_err();
+		assert!(error.to_string().contains("--limits-peer-requests"), "{error}");
+
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("limits.toml");
+		std::fs::write(&path, "[limits.client]\nrequests = 8\n").unwrap();
+		assert!(Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), path.into()]).is_err());
 	}
 
 	/// `[limits.peer.quic]` mirrors `[quic]`'s keys without touching `[quic]` itself.

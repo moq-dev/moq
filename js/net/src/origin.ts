@@ -335,7 +335,7 @@ function unroutable(): StreamError {
 	return new StreamError(StreamCode.Unroutable, { message: "unroutable" });
 }
 
-/** A served route from {@link Producer.dynamic}: the queue a handler drains. */
+/** A served route from {@link Producer.requests}: the queue a handler drains. */
 class ServeState {
 	readonly root: Path.Valid;
 	/** The prefix the route claims; every served path is at or beneath it. */
@@ -1080,14 +1080,14 @@ export interface Table {
 	/** The available broadcasts under `scope`, as a live stream; see {@link Consumer.announced}. */
 	announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
 
-	/** Advertise a prefix and serve requests under it; see {@link Producer.dynamic}. */
-	dynamic(prefix: Path.Valid): Dynamic;
+	/** Advertise a prefix and serve requests under it; see {@link Producer.requests}. */
+	requests(prefix: Path.Valid): Requests;
 
 	/** Insert a route with protocol metadata. @internal */
-	dynamicRoute(
+	requestsRoute(
 		prefix: Path.Valid,
 		route?: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"]; auth?: Route["auth"] },
-	): Dynamic;
+	): Requests;
 }
 
 /** Options for resolving a broadcast path. */
@@ -1113,7 +1113,7 @@ export interface RequestOptions {
  * Create a broadcast, populate its tracks, then {@link Publication.announce}: an
  * exact-path subscribe before the tracks exist is refused, and nobody can see or reach a
  * broadcast until it announces. To publish broadcasts on demand instead, claim a prefix with
- * {@link dynamic} and answer the requests beneath it.
+ * {@link requests} and answer the requests beneath it.
  *
  * @public
  */
@@ -1284,15 +1284,15 @@ export class Producer implements Table {
 	 * advertises the covering prefix and rejects the rest as they are requested;
 	 * consumers narrow with a {@link Path.Pattern} locally. The advertisement is
 	 * visible to {@link Consumer.announced} and forwarded by sessions for as long as
-	 * the returned {@link Dynamic} lives. A consumer resolving a path under it that
+	 * the returned {@link Requests} lives. A consumer resolving a path under it that
 	 * no announced local broadcast wins is handed to the handle as a {@link Request}.
 	 */
-	dynamic(prefix: Path.Valid): Dynamic {
+	requests(prefix: Path.Valid): Requests {
 		return this.#insertRoute(prefix, Route.default, true, true);
 	}
 
 	/** Insert an originated claim with route metadata that answers through `hooks.acceptRequest`, for tests and benches. @internal */
-	dynamicRoute(
+	requestsRoute(
 		prefix: Path.Valid,
 		route:
 			| Route
@@ -1302,13 +1302,13 @@ export class Producer implements Table {
 					cost?: Route["cost"];
 					auth?: Route["auth"];
 			  } = Route.default,
-	): Dynamic {
+	): Requests {
 		return this.#insertRoute(prefix, Route.normalize(route), true, false);
 	}
 
 	/**
 	 * Land a route a peer announced, served through the returned handle. Same as
-	 * {@link dynamic} but not originated, so a session never announces it back.
+	 * {@link requests} but not originated, so a session never announces it back.
 	 *
 	 * @internal
 	 */
@@ -1322,11 +1322,11 @@ export class Producer implements Table {
 					cost?: Route["cost"];
 					auth?: Route["auth"];
 			  } = Route.default,
-	): Dynamic {
+	): Requests {
 		return this.#insertRoute(prefix, Route.normalize(route), false, false);
 	}
 
-	#insertRoute(prefix: Path.Valid, route: Route, originated: boolean, publishes: boolean): Dynamic {
+	#insertRoute(prefix: Path.Valid, route: Route, originated: boolean, publishes: boolean): Requests {
 		prefix = this.#scope.prefix(prefix);
 		publishPath(prefix);
 		const server = new ServeState(this.#scope.root, prefix, originated);
@@ -1557,7 +1557,7 @@ let makeDynamic: (
 	state: OriginState,
 	retract: Dispose,
 	publisher?: Producer,
-) => Dynamic;
+) => Requests;
 
 let makeRequest: (path: Path.Valid, server: ServeState) => Request;
 let finishRequest: (request: Request, err: Error) => void;
@@ -2189,7 +2189,7 @@ export class Consumer {
 }
 
 /**
- * A served route from {@link Producer.dynamic}: advertises a prefix and answers the
+ * A served route from {@link Producer.requests}: advertises a prefix and answers the
  * requests beneath it.
  *
  * Drop it (or {@link close}) to retract the route and reject anything still waiting
@@ -2197,7 +2197,7 @@ export class Consumer {
  *
  * @public
  */
-export class Dynamic {
+export class Requests {
 	/** The prefix this handle advertises. */
 	readonly prefix: Path.Valid;
 
@@ -2223,7 +2223,7 @@ export class Dynamic {
 
 	static {
 		makeDynamic = (prefix, entry, state, retract, publisher) =>
-			new Dynamic(prefix, entry, state, retract, publisher);
+			new Requests(prefix, entry, state, retract, publisher);
 	}
 
 	/** The route this handle advertises. */
@@ -2306,7 +2306,7 @@ export class Dynamic {
 /**
  * A pending request for a broadcast to be served on demand.
  *
- * Yielded by {@link Dynamic.requested}. {@link prepare} then {@link Prepared.publish}
+ * Yielded by {@link Requests.requested}. {@link prepare} then {@link Prepared.publish}
  * resolves it with a new exact-path broadcast; {@link reject} resolves it with an error.
  * Advancing the iterator or closing it without either rejects the request.
  *

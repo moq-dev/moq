@@ -61,8 +61,8 @@ Set `encode::Config::color` to the first frame's `frame.surface.color()`, and re
 
 ### `encode::Producer` takes a catalog reservation (#5715)
 
-`encode::Producer::new` and `with_track` take a `moq_mux::catalog::Reserved` instead of the `catalog::Producer`, so the caller declares the encoder's GOP as the timeline hint.
-Pass `catalog.reserve().with_timeline_hint(gop)` instead of the catalog.
+`encode::Producer::new` and `with_track` take a `moq_mux::catalog::Reserved` instead of the `catalog::Producer`, so the caller declares the encoder's GOP as the HLS hint.
+Pass `catalog.reserve().with_hls_hint(gop)` instead of the catalog.
 
 ### Capture takes one `encode::Capture`
 
