@@ -79,6 +79,7 @@ test("the decoder permits exactly the whole-window budget, then refuses more out
 	expect(decoder.frame(second).length).toBe(half.length);
 	expect(() => decoder.frame(extra)).toThrow(/decompressed group exceeded/);
 	expect(() => decoder.frame(extra)).toThrow(/decompressed group exceeded/);
+	expect(() => decoder.frame(new Uint8Array())).toThrow(/decompressed group exceeded/);
 });
 
 test("a bomb stops inflating at the group budget plus one scratch chunk", () => {
@@ -114,6 +115,8 @@ test("retained frames own tight buffers across later pushes and scratch boundari
 	const encoder = new Encoder();
 	const decoder = new Decoder();
 	const frames = [0, 1, 7, 65_535, 65_536, 65_537].map((size, n) => new Uint8Array(size).fill(n));
+	// Even an empty slice can be a view into a larger incoming allocation.
+	frames[0] = new Uint8Array(65_536).subarray(0, 0);
 	const retained = frames.map((frame) => decoder.frame(encoder.frame(frame)));
 	decoder.frame(encoder.frame(new Uint8Array(128 * 1024).fill(0xff)));
 	for (const [n, frame] of retained.entries()) {

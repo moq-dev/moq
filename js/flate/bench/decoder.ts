@@ -3,7 +3,7 @@ import { Group, Track } from "@moq/net";
 import { Encoder } from "../src/codec.ts";
 import { Consumer, Producer } from "../src/stream/index.ts";
 
-console.log("case,frames,payload_bytes,retained_bytes,ms");
+console.log("case,frames,payload_bytes,size_bytes,ms");
 for (const frames of [64, 1024]) {
 	for (const bytes of [1, 1024]) {
 		const track = new Track.Producer("retained-bench").accept({});

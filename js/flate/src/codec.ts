@@ -117,8 +117,8 @@ export class Decoder {
 	 * budget.
 	 */
 	frame(slice: Uint8Array): Uint8Array {
-		if (slice.length === 0) return slice;
 		if (this.#tooLarge) throw new Error(`decompressed group exceeded ${Group.MAX_GROUP_CACHE_BYTES} bytes`);
+		if (slice.length === 0) return new Uint8Array();
 
 		this.#chunks = [];
 		this.#total = 0;
