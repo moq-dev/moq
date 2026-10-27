@@ -33,4 +33,4 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [Build queue entries concurrently](/quest/m0/ci/queue-concurrency.md) - the structural baseline
+- [Land main through quest land](/quest/m0/ci/land.md) - the structural baseline, replacing concurrent queue entries

@@ -10,7 +10,7 @@ moq-auth accepts today still signs and verifies.
 ## Plan
 
 Decided by the maintainer on 2026-10-26, when the
-[graviola switch](/quest/m3/pure-crypto/README.md) was deferred: `rsa` is only
+graviola switch was deferred (since superseded by [MoQ on rind](/quest/m2/rind/README.md)): `rsa` is only
 used for key generation (`generate.rs`) and for turning JWK components into a
 PEM (`key.rs`), and signing already runs on aws-lc-rs, but the release should
 not ship the crate. moq-auth is its only production user.
