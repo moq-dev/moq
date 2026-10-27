@@ -4799,7 +4799,7 @@ mod test {
 			handle.poll_aborted(&waiter).is_pending(),
 			"a finish alone frees nothing"
 		);
-		assert!(consumer.read_frame().now_or_never().unwrap().unwrap().is_some());
+		assert!(matches!(consumer.poll_read_frame(&waiter), Poll::Ready(Ok(Some(_)))));
 
 		producer.abort(Error::Cancel).unwrap();
 		assert!(matches!(handle.poll_closed(&waiter), Poll::Ready(Ok(()))));
@@ -4807,7 +4807,7 @@ mod test {
 		assert!(matches!(handle.poll_aborted(&waiter), Poll::Ready(Error::Cancel)));
 		assert!(handle.cut_error().is_none());
 		assert!(!handle.fate().failed());
-		assert!(consumer.read_frame().now_or_never().unwrap().unwrap().is_none());
+		assert!(matches!(consumer.poll_read_frame(&waiter), Poll::Ready(Ok(None))));
 	}
 
 	/// An abort before the finish is the outcome, on every observer.
