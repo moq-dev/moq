@@ -181,6 +181,14 @@ async function reports(dir: string, declarations: string, check: boolean): Promi
 		// TypeDoc also drops the arguments and `typeof` of a written `import()` type.
 		app.converter.on(Converter.EVENT_CREATE_SIGNATURE, (context, signature, declaration) => {
 			if (!declaration || !("parameters" in declaration)) return;
+			// An interface's index signatures include those it inherits, which its `extends` clause
+			// already reports, written in terms of the base's own type parameters.
+			const owner = signature.parent && context.getSymbolFromReflection(signature.parent);
+			const inherited = owner && !owner.declarations?.some((at) => at === declaration.parent);
+			if (signature.kindOf(ReflectionKind.IndexSignature) && inherited) {
+				context.project.removeReflection(signature);
+				return;
+			}
 			const scope = context.withScope(signature);
 			for (const [i, parameter] of (signature.parameters ?? []).entries()) {
 				const written = declaration.parameters[i]?.type;

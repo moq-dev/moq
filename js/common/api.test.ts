@@ -233,6 +233,26 @@ export const strings: Pair<string>[];
 `);
 });
 
+test("an interface reports its own index signatures, not inherited ones", async () => {
+	const directory = fixture({
+		"dist/index.d.ts": `/** A nested list. */
+export interface List extends Array<string | List> {}
+/** Counts by name. */
+export interface Counts {
+	/** One count. */
+	[name: string]: number;
+}
+`,
+	});
+	await checkReports(directory);
+	expect(report(directory)).toBe(`export interface Counts {
+	[name: string]: number;
+}
+
+export interface List extends Array<string | List> {}
+`);
+});
+
 test("a deeply nested type is reported in full", async () => {
 	const depth = 12;
 	const type = `${"{ a: ".repeat(depth)}number${" }".repeat(depth)}`;

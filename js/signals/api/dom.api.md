@@ -3,9 +3,7 @@
 ```ts
 import { Effect } from "@moq/signals";
 
-export interface ArrayElement extends Array<Element> {
-	[n: number]: T;
-}
+export interface ArrayElement extends Array<Element> {}
 
 export type CreateOptions<T extends HTMLElement> = {
 	attributes?: Record<string, string>;

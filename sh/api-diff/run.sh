@@ -204,14 +204,16 @@ rust() {
 
 # Each published `@moq/*` package's committed API reports against reports this
 # checkout's renderer (js/common/api.ts) draws from the base branch's source, so
-# a change to the renderer never reads as a change to the API. The build checks
-# the committed reports against the code on every PR.
+# a change to the renderer never reads as a change to the API. `just check`
+# checks the committed reports against the code on every PR.
 js() {
     git rev-parse --verify --quiet "$base^{commit}" >/dev/null || {
         echo "api-diff: $base does not exist; fetch it or set API_DIFF_BASE" >&2
         exit 1
     }
-    local checkout=$out/js/checkout manifest dir name version file entry surface
+    local manifest dir name version file entry surface
+    # Not local: the trap runs after a failure has unwound this function's locals.
+    checkout=$out/js/checkout
     git worktree add --detach "$checkout" "$base" >&2
     trap 'git worktree remove --force "$checkout"' EXIT
     # Its install scripts build assets, such as @moq/libav, that the declarations do not need.
