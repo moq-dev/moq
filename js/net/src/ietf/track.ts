@@ -43,8 +43,7 @@ export class TrackStatusRequest {
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
 		await w.u62(this.requestId);
-		await Namespace.encode(w, this.trackNamespace);
-		await w.string(this.trackName);
+		await Namespace.encodeTrack(w, this.trackNamespace, this.trackName);
 
 		// Only the opt-out is worth bytes, and a peer before draft-22 would read
 		// INCLUDE_PROPERTIES as unknown, which is a protocol violation.

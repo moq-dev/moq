@@ -11,7 +11,7 @@ use crate::{
 };
 
 use super::Message;
-use super::namespace::encode_namespace;
+use super::namespace::encode_track;
 
 use super::Version;
 
@@ -34,8 +34,7 @@ impl Message for TrackStatus<'_> {
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
-		encode_namespace(w, &self.track_namespace)?;
-		w.string(&self.track_name)?;
+		encode_track(w, &self.track_namespace, &self.track_name)?;
 
 		// Only the opt-out is worth bytes, and an older peer would read the
 		// parameter as unknown, which is a protocol violation.

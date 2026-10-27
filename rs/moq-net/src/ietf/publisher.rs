@@ -3675,11 +3675,7 @@ impl Publisher {
 		path: &crate::Path,
 	) -> Option<(Advert, Option<crate::auth::Credential>)> {
 		let watch = ns.watched.get(suffix)?;
-		let wire_path = match &ns.target {
-			Target::Requests => path,
-			Target::Inline(_) => suffix,
-		};
-		let advert = match ns.permitted(path) && super::namespace::encodable(wire_path) {
+		let advert = match ns.permitted(path) {
 			true => self.select(&watch.route, &ns.peer, ns.epochs),
 			false => Advert::None,
 		};
@@ -4139,7 +4135,6 @@ impl Publisher {
 				let count = initial
 					.iter()
 					.filter(|update| permit.matches(prefix.rejoin(&update.prefix).as_str()))
-					.filter(|update| super::namespace::encodable(&update.prefix))
 					.filter(|update| self.select(&update.route, &peer, declared.epoch).wanted())
 					.count();
 				(initial, Some(count as u64))
@@ -8714,8 +8709,7 @@ mod serve_tests {
 				let encode = |body: &mut Vec<u8>| -> Result<(), crate::coding::EncodeError> {
 					let w = &mut Encoder::new(body, version.into());
 					RequestId(REQUEST_ID).encode(w, version)?;
-					super::super::namespace::encode_namespace(w, &crate::Path::from_static("room"))?;
-					w.string("video")?;
+					super::super::namespace::encode_track(w, &crate::Path::from_static("room"), "video")?;
 					encode_params!(w, version,
 						0x04 => 7u64,
 						super::super::epoch::EPOCH_PARAM => Some(stale.clone()),
@@ -14251,126 +14245,6 @@ mod tests {
 			..Default::default()
 		});
 		slot
-	}
-
-	/// An unencodable namespace cannot poison discovery or its initial active count.
-	#[moq_clock::test]
-	async fn namespaces_skip_oversize_routes_and_keep_siblings_flowing() {
-		for version in [Version::Draft18, Version::Draft22] {
-			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-			let too_long = format!("a{}", "é".repeat(2048));
-			let boundary = "b".repeat(4096);
-			let _oversize = origin
-				.announce(crate::Path::new(&too_long).unwrap(), Default::default())
-				.unwrap();
-			let _boundary = origin
-				.announce(crate::Path::new(&boundary).unwrap(), Default::default())
-				.unwrap();
-			let _sibling = origin.announce("sibling", Default::default()).unwrap();
-			let gate = kio::Producer::new(true);
-			let session = SinkSession::gated_bi(gate.consume());
-			let log = session.log.clone();
-			let setup = peer::PeerSetup::default();
-			setup.set(peer::Peer {
-				solicit: Some(true),
-				active_count: true,
-				..Default::default()
-			});
-			let publisher = Publisher::new(
-				crate::time::sim(),
-				crate::driver::Transport::new(session.clone()),
-				origin.consume(),
-				Control::new(false),
-				None,
-				setup,
-				version,
-			);
-			for attempt in 0..2 {
-				log.writes.lock().unwrap().clear();
-				let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
-					.await
-					.unwrap();
-				let mut run = std::pin::pin!(publisher.clone().run_subscribe_namespace_stream(
-					stream,
-					ietf::SubscribeNamespace {
-						request_id: RequestId(1 + attempt),
-						namespace: crate::Path::empty(),
-						hidden: false,
-					}
-				));
-				assert!(futures::poll!(run.as_mut()).is_pending());
-				let bytes = log.writes.lock().unwrap().clone();
-				let events = namespace_events(&bytes, version);
-				assert_eq!(events.len(), 2, "only encodable namespaces are advertised");
-				assert!(events.contains(&(ietf::Namespace::ID, boundary.clone())));
-				assert!(events.contains(&(ietf::Namespace::ID, "sibling".to_owned())));
-				let mut wire = crate::coding::Decoder::new(&bytes, version.into());
-				assert_eq!(wire.varint().unwrap(), ietf::RequestOk::ID);
-				assert_eq!(ietf::RequestOk::decode(&mut wire, version).unwrap().active, Some(2));
-				let late = origin.announce("late", Default::default()).unwrap();
-				assert!(futures::poll!(run.as_mut()).is_pending());
-				let events = namespace_events(&log.writes.lock().unwrap(), version);
-				assert!(
-					events.contains(&(ietf::Namespace::ID, "late".to_owned())),
-					"later siblings still flow"
-				);
-				drop(late);
-				assert!(futures::poll!(run.as_mut()).is_pending());
-				assert!(
-					namespace_events(&log.writes.lock().unwrap(), version)
-						.contains(&(ietf::NamespaceDone::ID, "late".to_owned()))
-				);
-			}
-		}
-	}
-
-	#[moq_clock::test]
-	async fn unencodable_namespaces_spend_no_advertisement_request_ids() {
-		for version in [Version::Draft18, Version::Draft22] {
-			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-			let _oversize = origin
-				.announce(
-					crate::Path::new(&format!("a{}", "é".repeat(2048))).unwrap(),
-					Default::default(),
-				)
-				.unwrap();
-			let _first = origin.announce("first", Default::default()).unwrap();
-			let _second = origin.announce("second", Default::default()).unwrap();
-			let refusal = publish_namespace_error(version, 0).await;
-			let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![
-				refusal.clone(),
-				refusal.clone(),
-				refusal,
-			]);
-			let log = session.log.clone();
-			let publisher = Publisher::new(
-				crate::time::sim(),
-				crate::driver::Transport::new(session),
-				origin.consume(),
-				Control::new(false),
-				None,
-				declared(Some(false)),
-				version,
-			);
-			let reference = Control::new(false);
-			let expected_ids = [reference.next_request_id(), reference.next_request_id()];
-			let mut run = std::pin::pin!(publisher.clone().run_publish_namespaces());
-			assert!(futures::poll!(run.as_mut()).is_pending());
-			let bytes = log.writes.lock().unwrap().clone();
-			let mut wire = crate::coding::Decoder::new(&bytes, version.into());
-			let mut seen = Vec::new();
-			while !wire.is_empty() {
-				assert_eq!(wire.varint().unwrap(), ietf::PublishNamespace::ID);
-				let message = ietf::PublishNamespace::decode(&mut wire, version).unwrap();
-				seen.push((message.request_id, message.track_namespace));
-			}
-			assert_eq!(seen.len(), 2);
-			assert_eq!([seen[0].0, seen[1].0], expected_ids);
-			assert_eq!(publisher.control.next_request_id(), reference.next_request_id());
-			let mut names: Vec<_> = seen.into_iter().map(|(_, path)| path.as_str().to_owned()).collect();
-			names.sort();
-			assert_eq!(names, ["first", "second"]);
-		}
 	}
 
 	/// An absent max age preserves everything the producer still retains.

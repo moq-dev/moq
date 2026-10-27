@@ -16345,6 +16345,72 @@ mod track_property_tests {
 }
 
 #[cfg(test)]
+mod full_track_name_tests {
+	use super::*;
+	use crate::{model::ProduceTest, transport::memory};
+
+	/// A Full Track Name too long for the wire fails only its own subscription, and the
+	/// session carries the next one.
+	#[moq_clock::test]
+	async fn an_unencodable_track_name_fails_only_its_subscription() {
+		for version in [Version::Draft18, Version::Draft22] {
+			let (session, peer) = memory::pair(memory::Config::default());
+			let (tasks, _task_set) = TaskSet::new();
+			let subscriber = Subscriber::new(
+				crate::time::sim(),
+				crate::driver::Transport::new(session.clone()),
+				crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				Control::new(false),
+				None,
+				peer::PeerSetup::declared(peer::Peer::default()),
+				crate::Hop::new(1).unwrap(),
+				None,
+				version,
+				tasks,
+				Default::default(),
+			);
+			// One byte past 4096 with the 9-byte namespace.
+			let long = "x".repeat(4088);
+			for (name, fits) in [(long.as_str(), false), ("video", true)] {
+				let broadcast = crate::broadcast::Info::default().produce();
+				let mut dynamic = broadcast.requests();
+				let track = broadcast.consume().track(name).unwrap();
+				let mut subscribing = std::pin::pin!(track.subscribe(None));
+				let request = dynamic.requested_track().await.expect("no track requested");
+				let mut subscriber = subscriber.clone();
+				let serving = moq_clock::sim::spawn(async move {
+					subscriber
+						.run_subscribe(Path::from_static("broadcast"), dynamic, None, request)
+						.await;
+				});
+				if fits {
+					// The refused request's stream was reset before its header, which a peer ignores.
+					let id = loop {
+						let mut stream = Stream::accept(&mut crate::driver::Transport::new(peer.clone()), version)
+							.await
+							.unwrap();
+						if let Ok(id) = stream.reader.varint().await {
+							break id;
+						}
+					};
+					assert_eq!(id, ietf::Subscribe::ID, "{version}");
+				} else {
+					let refused = moq_clock::timeout(Duration::from_secs(1), &mut subscribing)
+						.await
+						.expect("the subscription was never refused");
+					assert!(
+						matches!(refused, Err(Error::Encode(crate::coding::EncodeError::BoundsExceeded))),
+						"{version}: {:?}",
+						refused.map(|_| ())
+					);
+				}
+				serving.abort();
+			}
+		}
+	}
+}
+
+#[cfg(test)]
 mod compression_negotiation_tests {
 	use super::*;
 	#[test]

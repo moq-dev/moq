@@ -28,7 +28,8 @@ fn to_tuple(namespace: &Path) -> Vec<String> {
 	parts
 }
 
-// A field ending in `/` escapes to a path with an empty segment, so it is refused.
+// A field ending in `/` escapes to a path with an empty segment, so it is refused, as is a
+// namespace whose separators and escapes push its path past `Path::MAX_BYTES`.
 fn from_tuple(parts: &[&str]) -> Result<Path, Invalid> {
 	// Sized for the common case of no escapes, so building it rarely grows.
 	let mut path = String::with_capacity(parts.iter().map(|part| part.len() + 1).sum());
@@ -48,40 +49,50 @@ fn from_tuple(parts: &[&str]) -> Result<Path, Invalid> {
 	Path::try_from(path)
 }
 
-/// Helper function to encode namespace as tuple of strings
+/// Encode a Track Namespace.
 pub fn encode_namespace(w: &mut Encoder<'_>, namespace: &Path) -> Result<(), EncodeError> {
+	write_fields(w, &fields(namespace)?)
+}
+
+/// Encode a Full Track Name: a Track Namespace, then a Track Name, at most 4096 bytes together.
+pub fn encode_track(w: &mut Encoder<'_>, namespace: &Path, name: &str) -> Result<(), EncodeError> {
 	let parts = fields(namespace)?;
-	w.varint(parts.len() as u64)?;
-	for part in parts {
-		w.string(&part)?;
+	if parts.iter().map(String::len).sum::<usize>() + name.len() > MAX_BYTES {
+		return Err(BoundsExceeded.into());
 	}
-	Ok(())
+	write_fields(w, &parts)?;
+	w.string(name)
 }
 
 fn fields(namespace: &Path) -> Result<Vec<String>, EncodeError> {
 	let parts = to_tuple(namespace);
-	if parts.len() > Path::MAX_PARTS || parts.iter().map(String::len).sum::<usize>() > MAX_BYTES {
+	// The fields drop the path's separators and escapes, so `Path::MAX_BYTES` already bounds
+	// their bytes. A path's depth is unbounded until it reaches a wire.
+	if parts.len() > Path::MAX_PARTS {
 		return Err(BoundsExceeded.into());
 	}
 	Ok(parts)
 }
 
-/// Whether one advertisement fits the namespace representation this wire carries.
-pub(crate) fn encodable(namespace: &Path) -> bool {
-	// Separators and escaping only shrink the wire fields, so ordinary paths need no tuple allocation.
-	if namespace.len() <= MAX_BYTES && namespace.parts().count() <= Path::MAX_PARTS {
-		return true;
+fn write_fields(w: &mut Encoder<'_>, parts: &[String]) -> Result<(), EncodeError> {
+	w.varint(parts.len() as u64)?;
+	for part in parts {
+		w.string(part)?;
 	}
-	fields(namespace).is_ok()
+	Ok(())
 }
 
 /// The most bytes a Track Namespace, or a whole Full Track Name, may hold on the wire.
 const MAX_BYTES: usize = 4096;
 
+// Every path encodes as a namespace.
+const _: () = assert!(Path::MAX_BYTES <= MAX_BYTES);
+
 /// Decode a namespace tuple, along with the sum of its field lengths.
 ///
 /// Every limit here closes the session as a PROTOCOL_VIOLATION (draft-22 section 8.7):
 /// more than 32 fields, an empty field, a field ending in `/`, or more than 4096 bytes.
+/// So does a namespace too long as a [`Path`], which the draft allows but no path can hold.
 fn decode_fields(r: &mut Decoder<'_>) -> Result<(Path, usize), DecodeError> {
 	let count = r.varint()?;
 
@@ -292,29 +303,40 @@ mod tests {
 		}
 	}
 
-	/// Limits count decoded UTF-8 field bytes, not escaped path bytes or separators.
+	/// Separators and escapes count toward a path but not its tuple fields, so every path
+	/// encodes, while a namespace dense with escaped slashes decodes only if its path fits.
 	#[test]
-	fn encoding_uses_the_same_field_bounds_as_decoding() {
-		for (parts, fits) in [
-			(vec!["é".repeat(2048)], true),
-			(vec![format!("{}x", "é".repeat(2048))], false),
-			(vec!["a".repeat(2048), "b".repeat(2048)], true),
-			(vec!["a".repeat(2048), "b".repeat(2049)], false),
-			(vec![format!("{}a", "/".repeat(4095))], true),
-			(vec!["\\".repeat(4097)], false),
-			(vec!["a".to_owned(); Path::MAX_PARTS], true),
-			(vec!["a".to_owned(); Path::MAX_PARTS + 1], false),
-		] {
-			let refs: Vec<_> = parts.iter().map(String::as_str).collect();
-			let path = from_tuple(&refs).unwrap();
-			assert_eq!(encodable(&path), fits);
+	fn path_bound_covers_namespace_fields() {
+		let segments = ["a"; Path::MAX_PARTS - 1].join("/");
+		let deepest = format!("{segments}/{}", "é".repeat(Path::MAX_BYTES / 2 - 31));
+		let deepest = Path::new(&deepest).unwrap();
+		assert_eq!(deepest.len(), Path::MAX_BYTES);
+		assert_eq!(decode_ns(&encode_path(&deepest)), deepest);
+
+		let fits = format!("{}a", "/".repeat(Path::MAX_BYTES / 2 - 1));
+		assert_eq!(decode_ns(&encode_tuple(&[&fits])).len(), Path::MAX_BYTES - 1);
+		let too_long = format!("{}a", "/".repeat(Path::MAX_BYTES / 2));
+		let err = decode_namespace(&mut Decoder::new(&encode_tuple(&[&too_long]), FORM)).unwrap_err();
+		assert!(matches!(err, DecodeError::BoundsExceeded), "{err:?}");
+	}
+
+	/// A Full Track Name counts its namespace's field bytes plus its name, and one too long
+	/// is refused before anything is written.
+	#[test]
+	fn full_track_name_is_bounded_on_encode() {
+		// 4095 path bytes holding 2048 field bytes.
+		let namespace = Path::new(&format!("{}a", r"\/".repeat(Path::MAX_BYTES / 2 - 1))).unwrap();
+		for (len, ok) in [(2048, true), (2049, false)] {
+			let name = "x".repeat(len);
 			let mut bytes = Vec::new();
-			let result = encode_namespace(&mut Encoder::new(&mut bytes, FORM), &path);
-			assert_eq!(result.is_ok(), fits);
-			if fits {
-				assert_eq!(decode_ns(&bytes), path);
-			} else {
-				assert!(bytes.is_empty(), "refuse before emitting namespace fields");
+			let result = encode_track(&mut Encoder::new(&mut bytes, FORM), &namespace, &name);
+			assert_eq!(result.is_ok(), ok, "{len}");
+			match ok {
+				true => assert_eq!(
+					decode_track(&mut Decoder::new(&bytes, FORM)).unwrap(),
+					(namespace.clone(), name)
+				),
+				false => assert!(bytes.is_empty(), "refuse before writing"),
 			}
 		}
 	}

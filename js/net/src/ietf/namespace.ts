@@ -25,10 +25,12 @@ function toTuple(namespace: Path.Valid): string[] {
 /**
  * Convert IETF namespace tuple fields into the escaped moq-net path representation.
  *
- * Throws when a field ends in `/`, which escapes to a path with an empty segment.
+ * Throws when a field ends in `/`, which escapes to a path with an empty segment, or when the
+ * separators and escapes push the path past {@link Path.MAX_BYTES}.
  */
 export function fromTuple(parts: string[]): Path.Valid {
 	const escaped = parts.map((part) => part.replaceAll("\\", "\\\\").replaceAll("/", "\\/")).join("/");
+	if (tooLong(escaped)) throw new ProtocolViolation(`namespace exceeds ${Path.MAX_BYTES} bytes as a path`);
 	try {
 		return Path.from(escaped);
 	} catch (cause) {
@@ -38,36 +40,42 @@ export function fromTuple(parts: string[]): Path.Valid {
 
 /** Encode a moq-net namespace as an IETF namespace tuple. */
 export async function encode(w: Writer, namespace: Path.Valid): Promise<void> {
-	const parts = toTuple(namespace);
-	const error = check(parts);
-	if (error) throw new Error(error);
+	await writeFields(w, fields(namespace));
+}
 
+/** Encode a full track name: a namespace tuple then a track name, bounded together. */
+export async function encodeTrack(w: Writer, namespace: Path.Valid, name: string): Promise<void> {
+	const parts = fields(namespace);
+	let size = utf8.encode(name).length;
+	for (const part of parts) size += utf8.encode(part).length;
+	if (size > MAX_BYTES) throw new Error(`full track name exceeds ${MAX_BYTES} bytes`);
+	await writeFields(w, parts);
+	await w.string(name);
+}
+
+function fields(namespace: Path.Valid): string[] {
+	// The fields drop the path's separators and escapes, so a path within Path.MAX_BYTES fits.
+	if (tooLong(namespace)) throw new Error(`namespace exceeds ${Path.MAX_BYTES} bytes`);
+	const parts = toTuple(namespace);
+	if (parts.length > Path.MAX_PARTS) throw new Error(`namespace exceeds ${Path.MAX_PARTS} parts`);
+	return parts;
+}
+
+async function writeFields(w: Writer, parts: string[]): Promise<void> {
 	await w.u53(parts.length);
 	for (const part of parts) {
 		await w.string(part);
 	}
 }
 
+// A UTF-16 unit is at most 3 UTF-8 bytes, so only a long path needs encoding to measure.
+function tooLong(path: string): boolean {
+	return path.length > Path.MAX_BYTES / 3 && utf8.encode(path).length > Path.MAX_BYTES;
+}
+
 // Every draft caps a namespace, and a namespace plus track name, at 4096 bytes.
 const MAX_BYTES = 4096;
 const utf8 = new TextEncoder();
-
-function check(parts: string[]): string | undefined {
-	if (parts.length > Path.MAX_PARTS) return `namespace exceeds ${Path.MAX_PARTS} parts`;
-	let size = 0;
-	for (const part of parts) {
-		size += utf8.encode(part).length;
-		if (size > MAX_BYTES) return `namespace exceeds ${MAX_BYTES} bytes`;
-	}
-	return undefined;
-}
-
-/** Whether one advertisement fits the namespace representation this wire carries. */
-export function encodable(namespace: Path.Valid): boolean {
-	// A UTF-16 unit costs at most three UTF-8 bytes; removing separators/escapes only shrinks it.
-	if (namespace.length <= MAX_BYTES / 3 && Path.check(namespace) === undefined) return true;
-	return check(toTuple(namespace)) === undefined;
-}
 
 /** Decode an IETF namespace tuple into an escaped moq-net namespace. */
 export async function decode(r: Reader): Promise<Path.Valid> {

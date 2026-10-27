@@ -5,7 +5,7 @@ use crate::{
 	coding::{Decode, DecodeError, Decoder, Encode, EncodeError, Encoder},
 	ietf::{
 		Filter, GroupOrder, Location, Opaque, RequestId,
-		namespace::{decode_track, encode_namespace},
+		namespace::{decode_track, encode_track},
 	},
 };
 
@@ -54,8 +54,7 @@ impl Encode<Version> for FetchType<'_> {
 				end,
 			} => {
 				w.u8(1);
-				encode_namespace(w, namespace)?;
-				w.string(track)?;
+				encode_track(w, namespace, track)?;
 				start.encode(w, version)?;
 				end.encode(w, version)?;
 			}
@@ -171,8 +170,7 @@ impl Message for Fetch<'_> {
 				else {
 					return Err(EncodeError::Version);
 				};
-				encode_namespace(w, namespace)?;
-				w.string(track)?;
+				encode_track(w, namespace, track)?;
 				// INCLUDE_PROPERTIES defaults to 1, so only the opt-out is worth bytes.
 				let include_properties = (!self.properties_wanted).then_some(false);
 				encode_params!(w, version,

@@ -192,32 +192,9 @@ fn fanout() {
 	}
 }
 
-fn namespaces() {
-	for (name, prefix) in [("short", SHORT), ("long", LONG)] {
-		for routes in [1, 64, 1024] {
-			let paths: Vec<_> = (0..routes)
-				.map(|i| Path::new(&format!("{prefix}/{i}")).unwrap())
-				.collect();
-			for peers in [1, 8, 32] {
-				allocs(
-					&format!("namespace/emit/{name}/{routes}r_{peers}p"),
-					16,
-					routes * peers,
-					|| {
-						for _ in 0..peers {
-							black_box(encode_namespaces(&paths));
-						}
-					},
-				);
-			}
-		}
-	}
-}
-
 fn main() {
 	paths();
 	decode();
 	requests();
 	fanout();
-	namespaces();
 }

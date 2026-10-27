@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Paths fit moq-transport's 4096-byte namespace ([#6927](https://github.com/moq-dev/moq/pull/6927))
+
+`Path.MAX_BYTES` is 4096, moq-transport's namespace limit, so every path fits every wire and an origin refuses a longer one. Keep broadcast paths within 4096 bytes.
+A moq-transport namespace whose escaped path would exceed it is refused when decoded, and a SUBSCRIBE or PUBLISH whose namespace and track name exceed 4096 bytes together fails that request instead of being sent.
+
 ### `Path.from` refuses empty segments ([#6648](https://github.com/moq-dev/moq/pull/6648))
 
 `Path.from` throws on a component with a leading, trailing, or doubled `/` instead of collapsing it, so a path has one spelling, and `Path.decode` refuses one off the wire. A moq-transport namespace field ending in `/`, which escapes to an empty segment, is refused too.

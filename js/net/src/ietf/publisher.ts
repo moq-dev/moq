@@ -1631,9 +1631,6 @@ export class Publisher {
 
 				const advertised = this.#advertised.peek();
 				const updated = advertised ? presented(prefix, advertised, carries) : new Map<Path.Valid, Advertised>();
-				for (const key of updated.keys()) {
-					if (!Namespace.encodable(key)) updated.delete(key);
-				}
 				// A fresh pass sends a NAMESPACE for every entry, ahead of any change.
 				if (!answered) {
 					answered = true;
@@ -1793,7 +1790,6 @@ export class Publisher {
 					if (
 						(this.#hidden && hiddenBelow(Path.empty(), covered)) ||
 						!this.#gate.allows(covered) ||
-						!Namespace.encodable(covered) ||
 						candidates.length === 0
 					)
 						continue;
