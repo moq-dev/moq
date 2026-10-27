@@ -873,3 +873,49 @@ fn script_metadata_drops_warn_once() {
 		}
 	});
 }
+
+#[test]
+fn unsupported_codecs_fail_at_the_public_importer_boundary() {
+	let mut cases = vec![(super::TAG_VIDEO, vec![0x12, 0]), (super::TAG_AUDIO, vec![0xb0, 0])];
+	for (tag, packets) in [
+		(super::TAG_VIDEO, &[0, 1, 2, 3, 4][..]),
+		(super::TAG_AUDIO, &[0, 1, 2, 4][..]),
+	] {
+		for packet in packets {
+			cases.push((tag, vec![0x90 | packet, b'n', b'o', b'p', b'e']));
+			// OneTrack enhanced framing carries the same codec after its framing byte.
+			cases.push((tag, vec![0x95, *packet, b'n', b'o', b'p', b'e', 0]));
+		}
+	}
+
+	for (tag, payload) in cases {
+		let mut data = synth_flv();
+		write_tag(&mut data, tag, 0, &payload);
+		for initial in [false, true] {
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+			let init = crate::import::ContainerInit::new(
+				crate::import::ContainerFormat::Flv,
+				if initial {
+					bytes::Bytes::copy_from_slice(&data)
+				} else {
+					bytes::Bytes::new()
+				},
+			);
+			let result = (|| -> crate::Result<()> {
+				let mut import: crate::import::Container =
+					crate::import::Container::new(broadcast, catalog.reserve(), &init)?;
+				if !initial {
+					for chunk in data.chunks(7) {
+						import.decode(chunk)?;
+					}
+				}
+				import.finish()
+			})();
+			assert!(
+				matches!(result, Err(crate::Error::UnknownFormat(_))),
+				"tag {tag}, initial {initial}: {result:?}"
+			);
+		}
+	}
+}

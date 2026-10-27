@@ -8,10 +8,14 @@
 /// `root` is the room prefix, `subscribe` is `**` (everything under the room),
 /// and `publish` is `<identity>/**` so a participant cannot publish at anyone
 /// else's paths. An identity that is empty after normalization or contains `*` is
-/// refused, since a wildcard would let the participant publish as someone else.
-pub fn claims(room: impl moq_net::AsPath, identity: impl moq_net::AsPath) -> Result<moq_auth::Claims, crate::Error> {
-	let room = room.as_path();
-	let identity = identity.as_path();
+/// refused, since a wildcard would let the participant publish as someone else, and
+/// so is a room or identity longer than [`moq_net::Path::MAX_BYTES`].
+pub fn claims(
+	room: impl TryInto<moq_net::Path, Error: Into<moq_net::Error>>,
+	identity: impl TryInto<moq_net::Path, Error: Into<moq_net::Error>>,
+) -> Result<moq_auth::Claims, crate::Error> {
+	let room = room.try_into().map_err(Into::<moq_net::Error>::into)?;
+	let identity = identity.try_into().map_err(Into::<moq_net::Error>::into)?;
 	if identity.is_empty() {
 		return Err(crate::Error::EmptyIdentity);
 	}

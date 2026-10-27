@@ -736,7 +736,7 @@ pub struct moq_section {
 
 /// A route advertisement: hops and a static cost.
 ///
-/// Pair with [moq_publish_announce] or [moq_origin_dynamic]. Zeroed (NULL hops,
+/// Pair with [moq_publish_announce] or [moq_origin_requests]. Zeroed (NULL hops,
 /// hops_len 0, cost 0) is the default route. `hops` is borrowed for the duration
 /// of the call that reads it.
 ///
@@ -1815,7 +1815,7 @@ pub unsafe extern "C" fn moq_origin_create_broadcast(origin: u32, path: *const c
 /// required: a NULL callback is refused before the route is advertised. It is
 /// invoked with a positive request handle for each
 /// pending broadcast, then exactly once more with a terminal code: `0` (stopped
-/// cleanly, including after [moq_origin_dynamic_cancel]) or a negative error.
+/// cleanly, including after [moq_origin_requests_cancel]) or a negative error.
 /// After the terminal (`<= 0`) callback, `user_data` is never touched again.
 ///
 /// Returns a non-zero handle on success, or a negative code on failure.
@@ -1825,7 +1825,7 @@ pub unsafe extern "C" fn moq_origin_create_broadcast(origin: u32, path: *const c
 /// - `on_request` must be non-NULL; a missing callback is refused before the route is advertised.
 /// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_request` callback.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_origin_dynamic(
+pub unsafe extern "C" fn moq_origin_requests(
 	origin: u32,
 	prefix: *const c_char,
 	prefix_len: usize,
@@ -1843,18 +1843,18 @@ pub unsafe extern "C" fn moq_origin_dynamic(
 /// Stop serving and retract the route.
 ///
 /// Returns immediately: zero on success, or a negative code if already closed.
-/// The [moq_origin_dynamic] `on_request` callback still fires once more with a
+/// The [moq_origin_requests] `on_request` callback still fires once more with a
 /// terminal `0` (or a negative error), and that final callback is where
 /// `user_data` should be released.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_origin_dynamic_cancel(dynamic: u32) -> i32 {
+pub extern "C" fn moq_origin_requests_cancel(dynamic: u32) -> i32 {
 	ffi::enter(move || {
 		let dynamic = ffi::parse_id(dynamic)?;
 		State::lock().origin.dynamic_close(dynamic)
 	})
 }
 
-/// The path of a broadcast request delivered to a [moq_origin_dynamic] callback.
+/// The path of a broadcast request delivered to a [moq_origin_requests] callback.
 ///
 /// The destination borrows the request's storage: copy it out before accept,
 /// reject, or [moq_broadcast_request_free].
@@ -2116,7 +2116,7 @@ pub extern "C" fn moq_origin_announced_broadcast_cancel(task: u32) -> i32 {
 /// Resolves against what is announced *now*, where [moq_origin_announced_broadcast] waits
 /// indefinitely: it returns an announced broadcast at once, and fails when none is reachable,
 /// including a broadcast created but not announced. It does NOT wait for a later
-/// announcement. Serve on-demand paths with [moq_origin_dynamic]. A client session only
+/// announcement. Serve on-demand paths with [moq_origin_requests]. A client session only
 /// asks its peer about paths something watches, through [moq_origin_announced] or
 /// [moq_origin_announced_broadcast], so a path nothing watches is unreachable on it.
 ///
@@ -2164,7 +2164,7 @@ pub extern "C" fn moq_origin_request_cancel(task: u32) -> i32 {
 /// Close an origin and clean up its resources.
 ///
 /// The origin keeps running while a broadcast published on it or a
-/// [moq_origin_dynamic] handler lives; close or cancel those to end it.
+/// [moq_origin_requests] handler lives; close or cancel those to end it.
 ///
 /// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
@@ -2945,7 +2945,7 @@ pub unsafe extern "C" fn moq_publish_track_demand(
 /// Without a live handler a subscription to an unknown track name is refused. While one
 /// is live, `on_request` is invoked with a positive request handle for each pending
 /// track, then exactly once more with a terminal code: `0` (the broadcast finished, or
-/// [moq_publish_dynamic_cancel] was called) or a negative error. After the terminal
+/// [moq_publish_requests_cancel] was called) or a negative error. After the terminal
 /// (`<= 0`) callback, `user_data` is never touched again. Answer each request with
 /// [moq_track_request_accept], [moq_track_request_video], [moq_track_request_audio],
 /// or [moq_track_request_abort]; the subscriber waits until you do.
@@ -2956,7 +2956,7 @@ pub unsafe extern "C" fn moq_publish_track_demand(
 /// - `on_request` must be non-NULL.
 /// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_request` callback.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_publish_dynamic(
+pub unsafe extern "C" fn moq_publish_requests(
 	broadcast: u32,
 	on_request: ffi::moq_status_callback,
 	user_data: *mut c_void,
@@ -2973,7 +2973,7 @@ pub unsafe extern "C" fn moq_publish_dynamic(
 /// Without a live handler a fetch that misses the cache fails as not found. While one is
 /// live, `on_group` is invoked with a positive group-request handle for each miss, then
 /// exactly once more with a terminal code: `0` (the track ended, or
-/// [moq_publish_dynamic_cancel] was called) or a negative error. After the terminal
+/// [moq_publish_requests_cancel] was called) or a negative error. After the terminal
 /// (`<= 0`) callback, `user_data` is never touched again. Cached groups never reach the
 /// handler. Answer each request with [moq_group_request_accept] or [moq_group_request_abort].
 /// A request whose group nobody reads any more is withdrawn: answering it then fails as not
@@ -2985,7 +2985,7 @@ pub unsafe extern "C" fn moq_publish_dynamic(
 /// - `on_group` must be non-NULL.
 /// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_group` callback.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_publish_track_dynamic(
+pub unsafe extern "C" fn moq_publish_track_requests(
 	track: u32,
 	on_group: ffi::moq_status_callback,
 	user_data: *mut c_void,
@@ -2997,21 +2997,21 @@ pub unsafe extern "C" fn moq_publish_track_dynamic(
 	})
 }
 
-/// Stop a request handler from [moq_publish_dynamic], [moq_publish_track_dynamic], or
-/// [moq_track_request_dynamic]. Requests not yet delivered are rejected.
+/// Stop a request handler from [moq_publish_requests], [moq_publish_track_requests], or
+/// [moq_track_request_requests]. Requests not yet delivered are rejected.
 ///
 /// Returns immediately: zero on success, or a negative code if already closed. The
 /// handler's callback still fires once more with a terminal `0`, and that final
 /// callback is where `user_data` should be released.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_publish_dynamic_cancel(dynamic: u32) -> i32 {
+pub extern "C" fn moq_publish_requests_cancel(dynamic: u32) -> i32 {
 	ffi::enter(move || {
 		let dynamic = ffi::parse_id(dynamic)?;
 		State::lock().publish.dynamic_close(dynamic)
 	})
 }
 
-/// The name of a track request delivered to a [moq_publish_dynamic] callback.
+/// The name of a track request delivered to a [moq_publish_requests] callback.
 ///
 /// The destination borrows the request's storage: copy it out before accepting,
 /// aborting, or freeing the request.
@@ -3033,7 +3033,7 @@ pub unsafe extern "C" fn moq_track_request_name(request: u32, dst: *mut moq_stri
 ///
 /// A track requested by a fetch has that group pending from birth. Register the
 /// handler here, before [moq_track_request_accept], so the request survives the
-/// transition; the callback contract is that of [moq_publish_track_dynamic].
+/// transition; the callback contract is that of [moq_publish_track_requests].
 ///
 /// Returns a non-zero handle on success, or a negative code on failure.
 ///
@@ -3041,7 +3041,7 @@ pub unsafe extern "C" fn moq_track_request_name(request: u32, dst: *mut moq_stri
 /// - `on_group` must be non-NULL.
 /// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_group` callback.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_track_request_dynamic(
+pub unsafe extern "C" fn moq_track_request_requests(
 	request: u32,
 	on_group: ffi::moq_status_callback,
 	user_data: *mut c_void,

@@ -176,7 +176,7 @@ class SmokeTest {
     fun `origin alias constructs and consumes`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
             origin.consume().use { /* lifecycle smoke */ }
-            origin.dynamic("").use { /* dynamic origin smoke */ }
+            origin.requests("").use { /* dynamic origin smoke */ }
         }
     }
 
@@ -229,7 +229,7 @@ class SmokeTest {
     @Test
     fun `ending a broadcast ends it while a dynamic handle remains`() = runTest {
         BroadcastProducer().use { broadcast ->
-            broadcast.dynamic().use {
+            broadcast.requests().use {
                 val consumer = broadcast.consume()
                 // Releasing the producer alone would leave the dynamic handle holding it open.
                 broadcast.end()
@@ -615,7 +615,7 @@ class SmokeTest {
     @Test
     fun `dynamic serves a request under a prefix`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
-            origin.dynamic("live").use { dynamic ->
+            origin.requests("live").use { dynamic ->
                 val pending = async {
                     origin.consume().requestBroadcast("live/cam")
                 }
@@ -693,13 +693,15 @@ class SmokeTest {
             )
             moq.use {
                 val everything = Grant(publish = listOf("**"), subscribe = listOf("**"), expires = null)
-                assertEquals(everything, moq.auth().grants().first { it != null })
+                assertEquals(everything, moq.grants().updates().first { it != null })
                 val session = accepted.await()
-                assertEquals(everything, session.auth().grants().first { it != null })
+                assertEquals(everything, session.grants().updates().first { it != null })
                 assertNull(everything.expires)
+                assertNull(session.tokens(), "an accepted session presents no tokens")
 
-                assertFailsWith<MoqException.Unsupported> { moq.auth().add("extra") }
-                assertEquals(everything, moq.auth().grant())
+                moq.tokens().set(listOf("extra"))
+                assertFailsWith<MoqException.Unsupported> { moq.tokens().answered() }
+                assertEquals(everything, moq.grants().grant())
                 session.cancel(0u)
             }
         }

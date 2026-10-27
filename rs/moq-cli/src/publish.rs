@@ -445,7 +445,11 @@ impl Publish {
 	/// The programs aren't known until the PAT arrives, so each broadcast is created then and
 	/// announced once its catalog has named a servable track, and [`announce`](Self::announce) has
 	/// nothing to do.
-	pub fn ts_programs(origin: moq_net::origin::Producer, name: String, config: moq_mux::catalog::Config) -> Self {
+	pub fn ts_programs(
+		origin: moq_net::origin::Producer,
+		name: moq_net::Path,
+		config: moq_mux::catalog::Config,
+	) -> Self {
 		Self {
 			source: Source::Stream {
 				decoder: PublishDecoder::TsPrograms(Box::new(ts::Programs::new(origin, name, config))),
@@ -1277,7 +1281,7 @@ pub(crate) mod tests {
 		let input = [&lead[..], &second].concat();
 
 		let _ = moq_tokio::crypto::install_default();
-		for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-14"] {
+		for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-18"] {
 			let fixture = moq_relay::test_relay().await.unwrap();
 			let ready = fixture.relay.ready();
 			tokio::spawn(fixture.relay.run());
@@ -1515,7 +1519,7 @@ pub(crate) mod tests {
 	async fn echo_rides_the_first_catalog() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let echo = hang::catalog::Echo::new("viewers".to_string());
+		let echo = hang::catalog::Echo::new(moq_net::path::Relative::new("viewers").unwrap());
 		let mut publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default())
 			.unwrap()
 			.with_echo(echo.clone())

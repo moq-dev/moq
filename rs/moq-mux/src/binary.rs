@@ -911,7 +911,7 @@ mod test {
 		fn a_broadcast_reference_is_refused() {
 			let (mut broadcast, catalog) = catalog();
 			let mut entry = mavlink(1);
-			entry.config.broadcast = Some(moq_net::path::RelativeOwned::new("source"));
+			entry.config.broadcast = Some(moq_net::path::Relative::new("source").unwrap());
 
 			assert!(matches!(
 				catalog.binary_stream(track(&mut broadcast, "telemetry"), entry),

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use crate::bandwidth::{MoqBandwidth, MoqReservation};
+use crate::bandwidth::{MoqAllocator, MoqReservation};
 use crate::consumer::MoqBroadcastConsumer;
 use crate::demand::MoqTrackDemand;
 use crate::error::MoqError;
@@ -138,7 +138,7 @@ pub struct MoqAudioProducerOptions {
 	pub track: Option<String>,
 	/// Session bandwidth allocator; absent reserves no share.
 	#[uniffi(default = None)]
-	pub bandwidth: Option<Arc<MoqBandwidth>>,
+	pub bandwidth: Option<Arc<MoqAllocator>>,
 }
 
 impl MoqAudioEncoderOutput {
@@ -253,7 +253,7 @@ pub struct MoqAudioPacket {
 
 /// The terminal packets and decoded padding emitted when an audio encoder finishes.
 #[derive(uniffi::Record)]
-pub struct MoqAudioEncoderFinish {
+pub struct MoqAudioEncoderFinished {
 	/// Packets emitted while draining the encoder.
 	pub packets: Vec<MoqAudioPacket>,
 	/// Padded samples to discard from the decoded tail.
@@ -345,10 +345,10 @@ impl MoqAudioEncoder {
 	}
 
 	/// Drain the encoder, optionally padding one final partial frame.
-	pub fn finish(&self, pcm: Vec<f32>) -> Result<MoqAudioEncoderFinish, MoqError> {
+	pub fn finish(&self, pcm: Vec<f32>) -> Result<MoqAudioEncoderFinished, MoqError> {
 		let encoder = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
 		let finish = encoder.finish(&pcm)?;
-		Ok(MoqAudioEncoderFinish {
+		Ok(MoqAudioEncoderFinished {
 			discard_padding: finish.discard_padding() as u64,
 			packets: audio_packets(finish.into_packets()),
 		})
@@ -395,7 +395,7 @@ pub struct MoqAudioProducer {
 	inner: std::sync::Mutex<Option<moq_audio::encode::Producer>>,
 	reservation: std::sync::Mutex<Option<Arc<MoqReservation>>>,
 	/// Held so the reservation's registry outlives extra bandwidth handles.
-	_bandwidth: Option<Arc<MoqBandwidth>>,
+	_bandwidth: Option<Arc<MoqAllocator>>,
 	children: crate::producer::Children,
 }
 
@@ -454,7 +454,7 @@ impl MoqAudioProducer {
 	}
 
 	/// This encoder's bandwidth reservation, if it was published against a
-	/// [`MoqBandwidth`]. Dropping the handle does not release the claim; the
+	/// [`MoqAllocator`]. Dropping the handle does not release the claim; the
 	/// producer holds it until [`finish`](Self::finish).
 	pub fn reservation(&self) -> Option<Arc<MoqReservation>> {
 		self.reservation.lock().unwrap().clone()
@@ -530,7 +530,7 @@ impl MoqAudioProducer {
 				moq_audio::encode::Config::from_input(moq_audio::encode::Codec::Aac, &rated).frame_duration;
 		}
 		if let Some(bandwidth) = &bandwidth {
-			options.bandwidth = bandwidth.allocator().clone();
+			options.bandwidth = bandwidth.inner().clone();
 		}
 
 		let (producer, children) = broadcast.with_state(|state| {

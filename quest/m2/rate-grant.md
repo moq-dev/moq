@@ -42,5 +42,4 @@ rates, on the next unpublished lite version after lite-07 only.
 
 ## Required
 
-- [In-band auth](/quest/m1/auth/README.md) - the AUTH grant this extends
 - [QUIC caps](/quest/m2/rate-quic.md) - reintroduces the moq-auth cap type the grant carries

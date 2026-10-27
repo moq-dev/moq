@@ -114,12 +114,11 @@ surface and zero-copy texture import, land before the cut.
 
 - [Resume checked against a model](/quest/m1/resume-model-test.md) - a randomized test checks every resumed reader against a one-track reference model in Rust and JS, and passes before the cut
 - [Address groups by timestamp](/quest/m1/time-addressing/README.md) - group start timestamps replace sequence numbers in the moq-net API and lite-07 wire, while old subscribers, old publishers, and published JS clients keep working
-- [A group ends at its highest PTS](/quest/m1/group-end-pts.md) - a B-frame tail no longer understates a group's end, in Rust and JS
 - [Release audit findings](/quest/m1/release-audit/README.md) - resolve newly identified resource, parser, playback, and interoperability risks before the cut
 - [Pre-cut audit findings](/quest/m1/cut-audit/README.md) - fix the crashes, hostile-input costs, and correctness bugs the 2026-10-24 audit of main found
 - [Cancelled moq-transport requests stop](/quest/m1/ietf-request-cancel.md) - a cancelled request releases its state even when the peer withholds credit
+- [Datagrams past object 0 never pose as object 0](/quest/m1/datagram-object-drop.md) - a hop or reader that cannot carry an Object ID delivers only object 0 of a moq-transport datagram group
 - [Empty segments refused](/quest/m1/empty-segments.md) - `room//cam` fails loud instead of naming `room/cam`
-- [In-band auth](/quest/m1/auth/README.md) - a session tells its peer what it may publish and subscribe to, unions tokens presented in band, and fails loud on an out-of-scope publish
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - prove shared routing contracts, implement per-origin routes, and connect outbound local clusters
 - [Routing guide](/quest/m1/routing-guide.md) - concepts and practical outbound federation setup
 - [moq-c at parity](/quest/m1/c/README.md) - the hand-written `moq-c` ships at the cut with every m1 binding feature moq-ffi gains
@@ -134,19 +133,17 @@ surface and zero-copy texture import, land before the cut.
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
 - [Moxygen minimal interop](/quest/m1/smoke-moxygen.md) - waiting on Moxygen to send a registered filter type, then the smoke lane stops hiding its failure
 - [Moxygen pin bump](/quest/m1/moxygen-pin-bump.md) - waiting on moxygen#264, then the TRACK_STATUS patch is dropped
-- [More tests under load](/quest/m1/test-flakes-2/README.md) - the second round of load-only failures, one quest per flake, fixed at the cause
 - [Broadcast lifecycle](/quest/m1/broadcast-lifecycle/README.md) - broadcasts are online or offline with no finished state in moq-net, finished-broadcast retention is a fixed moq-mux policy, and each linger timer has one meaning
 - [A smaller, safer API than release](/quest/m1/api-audit/README.md) - every surface added since release has a consumer or is gone, overlapping operations are collapsed, names mirror across Rust, JS, and the bindings, and every break says how to migrate
 - [moq-transport 18 and 22 only](/quest/m1/ietf-drop/README.md) - drafts 14-17 and 19-21 are deleted from Rust, JS, tests, interop lanes, and docs, removing the legacy control-stream adapter and its request limit
 - [moq-quic's API improves on quinn's](/quest/m1/quic-api/README.md) - moq-quic and both QUIC drivers ship one mirrored API: `send::`/`recv::` namespaces, one error per direction, consuming terminal operations, plain configs, no quinn baggage
-- [moq-auth without the rsa crate](/quest/m1/auth-no-rsa.md) - RSA keys are generated and loaded through aws-lc-rs and `pkcs1`, so no production graph holds `rsa`
 - [Drop web-transport-trait](/quest/m1/drop-web-transport-trait.md) - iroh, wasm, and ffi implement moq-net's `transport::poll` traits, and the remaining `web_transport_trait` adapters are deleted
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - browser publishers answer IETF FETCH through the JS ranges request surface
 - [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - native FILL_TIMEOUT bounds upstream waiting on drafts 18 and 22, alongside local content-age enforcement
 - [Rust identity enforcement](/quest/m1/catalog-identity-rs.md) - `moq-mux` refuses a redefined rendition, and every Rust publisher mints a new rendition name for a decoder identity change and updates everything else in place
 - [IETF takeover](/quest/m1/ietf-takeover.md) - carry the shared takeover contract through the negotiated IETF epoch extension
 - [Identity and recovery guide](/quest/m1/identity-guide.md) - explain pinned catalogs, lazy jobs, takeover, restart and version compatibility
-- [Native rung disable](/quest/m1/simulcast-rung-disable.md) - Rust/FFI and OBS publishers stop encoding the top renditions their grant cannot fund and resume them once probing raises the estimate
+- [Native rung disable](/quest/m1/simulcast-rung-disable.md) - OBS stops sending the top renditions its grant cannot fund, as the Rust/FFI publishers do, and a shaped uplink through moq-ffi proves the resume
 - [Audio jitter target](/quest/m1/audio-jitter-target/README.md) - the playout target is default in both languages; a manual browser proof and a native trace replay remain
 - [A/V clock](/quest/m1/av-clock.md) - the audio playhead drives Sync.reference while audio plays, through per-track sync handles
 - [Container reads drop backfill](/quest/m1/read-backfill.md) - the JS container consumer drops groups below its read cursor like Rust
@@ -159,10 +156,8 @@ surface and zero-copy texture import, land before the cut.
 - [Interop coverage](/quest/m1/interop-coverage/README.md) - the riskiest moq-transport features moq-net exposes get cross-implementation tests over drafts 18 and 22
 - [Calibrate the paired nightly benchmarks](/quest/m1/bench-ci.md) - A/A and deliberately slowed Nightly runs set the paired comparison's threshold, so its regression alerts can be trusted
 - [HLS opt-in for gateways](/quest/m1/hls-opt-in-gateways.md) - SRT, RTMP, WebRTC ingest and the bindings can publish HLS records
-- [HLS takeover leak](/quest/m1/hls-takeover-leak.md) - a replaced instance's recording cursor never yields the replacement's media, and ends or fails instead of stalling
 - [HLS and DASH segment conformance](/quest/m1/hls-conformance.md) - nightly ffprobe checks that advertised timing, sync flags, and bytes match the media served
 - [App-limited BBR3 estimate ages](/quest/m1/bbr-app-limited.md) - an app-limited BBR3 estimate falls within seconds after the path drops
-- [Seeded BBR3 in tests](/quest/m1/bbr-test-seed.md) - unseeded `Bbr3Config::default()` tests replay the same randomness
 - [Aborted epoch reads keep their cause](/quest/m1/epoch-abort-cause.md) - an aborted read through an epoch route ends with its own error, not NotFound
 - [Bindings name every session code](/quest/m1/ffi-malformed-auth-kind.md) - MALFORMED_AUTH_TOKEN and its siblings reach moq-ffi, moq-c, and the wrappers
 - [A profiling host](/quest/m1/perf-host.md) - condition: a quiet host with `perf_event_paranoid=-1`, recorded in `bench/README.md`

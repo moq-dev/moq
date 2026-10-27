@@ -26,7 +26,7 @@ type EncoderInput = ffi.MoqAudioEncoderInput
 type Packet = ffi.MoqAudioPacket
 
 // EncoderFinish holds the packets Encoder.Finish drains and the padded samples to discard.
-type EncoderFinish = ffi.MoqAudioEncoderFinish
+type EncoderFinish = ffi.MoqAudioEncoderFinished
 
 // EncoderOutput configures the codec side: codec, rate, channels, bitrate, and frame duration (0 takes the codec's own frame; 10 ms Opus halves the packetization delay).
 type EncoderOutput struct {
@@ -131,7 +131,7 @@ type ProducerOptions struct {
 	// Track names the published track; nil derives a name from the codec.
 	Track *string
 	// Bandwidth reserves the track against a session allocator when non-nil.
-	Bandwidth *moq.Bandwidth
+	Bandwidth *moq.Allocator
 }
 
 // NewProducer opens an audio track on the catalog's broadcast and registers its rendition.
@@ -140,9 +140,9 @@ func NewProducer(catalog *media.CatalogProducer, options ProducerOptions) (*Prod
 	if err != nil {
 		return nil, err
 	}
-	var bw **ffi.MoqBandwidth
+	var bw **ffi.MoqAllocator
 	if options.Bandwidth != nil {
-		raw := bridge.Bandwidth(options.Bandwidth)
+		raw := bridge.Allocator(options.Bandwidth)
 		bw = &raw
 	}
 	inner, err := ffi.NewMoqAudioProducer(bridge.CatalogProducer(catalog), ffi.MoqAudioProducerOptions{Input: options.Input, Output: out, Track: options.Track, Bandwidth: bw})

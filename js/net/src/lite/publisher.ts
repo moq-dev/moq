@@ -1001,7 +1001,7 @@ export class Publisher {
 		let fetched: group.Consumer | undefined;
 		const watch = this.#gate.watch(msg.broadcast, () => {
 			console.debug(`fetch revoked: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group}`);
-			fetched?.close(revoked);
+			if (fetched) hooks.releaseGroupReader(fetched, revoked);
 			stream.abort(revoked);
 		});
 		try {
@@ -1075,7 +1075,7 @@ export class Publisher {
 				serving(group);
 				// Revoked while the group resolved: the watch already reset the stream.
 				if (watch.revoked()) {
-					group.close(unauthorized(msg.broadcast));
+					hooks.releaseGroupReader(group, unauthorized(msg.broadcast));
 					return;
 				}
 				await this.#runFetchGroup(group, stream.writer, {
@@ -1093,7 +1093,7 @@ export class Publisher {
 				console.warn(
 					`fetch error: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group} error=${reason(e)}`,
 				);
-				group?.close(e);
+				if (group) hooks.releaseGroupReader(group, e);
 				stream.abort(e);
 			}
 		} finally {
@@ -1177,7 +1177,7 @@ export class Publisher {
 		// Lite cannot name a frame, so a mid-group end rounds up past its group, whose own
 		// stream FIN says where it stops.
 		const boundary = () => {
-			const end = track.end();
+			const end = hooks.subscriberEnd(track);
 			return end ? finalSequence(end) : (hooks.latestSequence(track) ?? -1) + 1;
 		};
 
@@ -1323,7 +1323,7 @@ export class Publisher {
 							}
 						}
 						// A declared end goes out while lower groups are still being produced.
-						if (!endSent && track.end() !== undefined) {
+						if (!endSent && hooks.subscriberEnd(track) !== undefined) {
 							if (!(await sendEnd())) return false;
 							continue;
 						}
@@ -1736,13 +1736,13 @@ export class Publisher {
 			}
 			if (!stream) {
 				const failed = failure ?? new Error("no stream slot");
-				group.close(failed);
+				hooks.releaseGroupReader(group, failed);
 				return failed;
 			}
 			return stream;
 		} catch (err: unknown) {
 			const failed = error(err);
-			group.close(failed);
+			hooks.releaseGroupReader(group, failed);
 			return failed;
 		}
 	}
@@ -1821,7 +1821,7 @@ export class Publisher {
 		} catch (err: unknown) {
 			const e = error(err);
 			stream.reset(e);
-			group.close(e);
+			hooks.releaseGroupReader(group, e);
 			return e;
 		} finally {
 			priority.remove(stream);

@@ -175,7 +175,7 @@ carries a fresh [publisher epoch](/concept/moq-lite#publisher-epochs) on its
 route, so a restarted node is a new broadcast at the same path: it replaces the
 old one, and no relay serves it groups cached under the old epoch. A reader
 treats each epoch as its own set of counters. The epoch rides moq-lite 07
-announcements, and moq-transport draft 17 and later with the
+announcements, and moq-transport with the
 [epoch extension](/draft/moq-epoch); over anything else a reader sees the same
 change as an end and a start at the path.
 An aggregating reader pins each node's subscription to its epoch, and when one

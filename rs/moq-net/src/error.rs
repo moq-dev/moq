@@ -38,9 +38,8 @@ pub enum SessionError {
 	#[error("key-value formatting error")]
 	KeyValueFormatting,
 
-	/// The peer went past what the session allows: more announcements than its
-	/// `crate::session::Limits`, or on moq-transport drafts 14 to 16, a request ID at or past
-	/// the MAX_REQUEST_ID we advertised or more live requests than the window.
+	/// The peer went past what the session allows, such as more announcements than its
+	/// `crate::session::Limits`.
 	#[error("too many requests")]
 	TooManyRequests,
 
@@ -456,8 +455,8 @@ pub enum Error {
 	#[error(transparent)]
 	Encode(#[from] coding::EncodeError),
 
-	/// The peer went past this session's `crate::session::Limits`: too many announcements, or
-	/// too many requests on moq-transport drafts 14 to 16.
+	/// The peer went past this session's `crate::session::Limits`, such as too many
+	/// announcements.
 	#[error("too many requests")]
 	TooManyRequests,
 
@@ -613,6 +612,13 @@ impl From<SessionError> for Error {
 impl From<StreamError> for Error {
 	fn from(err: StreamError) -> Self {
 		Self::Stream(err)
+	}
+}
+
+/// Lets an entry point taking `impl TryInto<Path, Error: Into<Error>>` accept a `Path` too.
+impl From<std::convert::Infallible> for Error {
+	fn from(never: std::convert::Infallible) -> Self {
+		match never {}
 	}
 }
 

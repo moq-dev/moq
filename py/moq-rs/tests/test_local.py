@@ -105,7 +105,7 @@ def h264_init() -> bytes:
 async def test_fetch_of_a_dropped_group_is_not_found():
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("events")
-    dynamic = track.dynamic()
+    dynamic = track.requests()
     consumer = broadcast.consume()
 
     async def reject():
@@ -464,7 +464,7 @@ def test_string_sequences_refuse_a_bare_string():
 
 
 async def test_fetch_group_and_serve_dynamic_miss():
-    """Fetch a cached group, then serve an uncached sequence through TrackDynamic."""
+    """Fetch a cached group, then serve an uncached sequence through TrackRequests."""
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("events", moq.TrackInfo(timescale=1_000_000))
     consumer = broadcast.consume()
@@ -477,7 +477,7 @@ async def test_fetch_group_and_serve_dynamic_miss():
     assert fetched.sequence == 0
     assert [frame.payload async for frame in fetched] == [b"cached"]
 
-    dynamic = track.dynamic()
+    dynamic = track.requests()
     pending = asyncio.create_task(consumer.fetch_group("events", 7, moq.FetchGroupOptions(priority=11)))
     fill = await asyncio.wait_for(dynamic.requested_fill(), timeout=5.0)
     assert (fill.start_group, fill.start_frame, fill.end_group) == (7, 0, 8)
@@ -642,7 +642,7 @@ async def test_json_producers_report_demand():
 
 async def test_dynamic_track_request():
     broadcast = moq.BroadcastProducer()
-    dynamic = broadcast.dynamic()
+    dynamic = broadcast.requests()
     consumer = broadcast.consume()
 
     # The subscribe stays pending until the request is accepted below; run it concurrently.
@@ -681,7 +681,7 @@ async def test_media_subscribe_refuses_a_non_rendition():
 
 async def test_dynamic_track_request_can_publish_media():
     broadcast = moq.BroadcastProducer()
-    dynamic = broadcast.dynamic()
+    dynamic = broadcast.requests()
     consumer = broadcast.consume()
     catalog_consumer = await moq.media.CatalogConsumer.subscribe(consumer)
 
@@ -735,7 +735,7 @@ async def test_dynamic_track_request_can_publish_media():
 
 async def test_dynamic_broadcast_request():
     origin = moq.OriginProducer(cache_capacity_bytes=4096)
-    dynamic = origin.dynamic("")
+    dynamic = origin.requests("")
     consumer = origin.consume()
 
     request_broadcast = asyncio.create_task(consumer.request_broadcast("dynamic/broadcast"))
@@ -764,7 +764,7 @@ async def test_dynamic_broadcast_request():
 
 async def test_dynamic_broadcast_request_can_reject():
     origin = moq.OriginProducer()
-    dynamic = origin.dynamic("")
+    dynamic = origin.requests("")
     consumer = origin.consume()
 
     request_broadcast = asyncio.create_task(consumer.request_broadcast("missing"))
@@ -902,12 +902,10 @@ def test_public_api_exports():
     assert client._config.tls.fingerprints == ["abc123"]
 
 
-def test_client_tokens_before_connecting():
-    """Tokens reach the config, and setting them before connecting replaces them there."""
+def test_client_tokens_reach_the_config():
+    """Tokens reach the config every session starts from."""
     client = moq.connect("https://example.com", tokens=["first", "second"])
     assert client._config.tokens == ["first", "second"]
-    client.tokens().set(["fresh"])
-    assert client._config.tokens == ["fresh"]
 
 
 async def test_container_consumer_default_latency_and_context_manager():
@@ -1593,7 +1591,7 @@ async def test_announced_pattern_captures():
     consumer = origin.consume()
     announced = consumer.announced("room", filter="*/chat")
 
-    dynamic = origin.dynamic("room")
+    dynamic = origin.requests("room")
     overlap = await next_route(announced)
     assert isinstance(overlap, moq.AnnounceEventStart)
     assert overlap.announce.prefix == "room"
@@ -1614,7 +1612,7 @@ async def test_announced_pattern_captures():
 
 async def test_dynamic_serves_a_request_under_a_prefix():
     origin = moq.OriginProducer()
-    dynamic = origin.dynamic("live")
+    dynamic = origin.requests("live")
     consumer = origin.consume()
 
     pending = asyncio.create_task(consumer.request_broadcast("live/cam"))
@@ -1635,17 +1633,17 @@ async def test_dynamic_and_json_handles_are_async_context_managers():
         assert moq.is_shutdown(excinfo.value)
 
     origin = moq.OriginProducer()
-    async with origin.dynamic("live") as origin_dynamic:
+    async with origin.requests("live") as origin_dynamic:
         pass
     await assert_cancelled(origin_dynamic.requested_broadcast())
 
     broadcast = moq.BroadcastProducer()
-    async with broadcast.dynamic() as broadcast_dynamic:
+    async with broadcast.requests() as broadcast_dynamic:
         pass
     await assert_cancelled(broadcast_dynamic.requested_track())
 
     track = broadcast.publish_track("events")
-    async with track.dynamic() as track_dynamic:
+    async with track.requests() as track_dynamic:
         pass
     await assert_cancelled(track_dynamic.requested_fill())
 

@@ -71,6 +71,7 @@ assert.deepEqual(calls.map(([id]) => id).sort(), [
 	"android",
 	"api-diff",
 	"audio-quality",
+	"c",
 	"cpp",
 	"features",
 	"interop",

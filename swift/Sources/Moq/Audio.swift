@@ -17,7 +17,7 @@ public enum Audio {
     /// One encoded payload from an `Encoder`.
     public typealias Packet = MoqAudioPacket
     /// The packets an `Encoder` drains on finish and the padded samples to discard.
-    public typealias EncoderFinish = MoqAudioEncoderFinish
+    public typealias EncoderFinish = MoqAudioEncoderFinished
     /// Selects the audio encoder codec. Build one with `Codec.opus()` or `Codec.aac()`.
     public typealias Codec = AudioCodec
     /// The PCM sample layout written to a `Producer` or delivered by a `Consumer`.
@@ -34,7 +34,7 @@ public enum Audio {
             input: EncoderInput,
             output: EncoderOutput,
             track: String? = nil,
-            bandwidth: Bandwidth? = nil
+            bandwidth: Allocator? = nil
         ) throws {
             ffi = try MoqAudioProducer(
                 catalog: catalog.ffi,

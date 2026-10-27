@@ -476,7 +476,7 @@ async fn spawn_moq(
 		// Read before the handle moves into the task. This allocator is persistent: it
 		// survives reconnects, granting `None` while down, so it can be wired up before
 		// anything connects, and every session probes for its reservations.
-		bandwidth = reconnect.bandwidth();
+		bandwidth = reconnect.allocator();
 		let closed = reconnect.clone();
 		tasks.spawn(async move { Ok(closed.closed().await?) });
 		connection = Some(reconnect);
@@ -586,7 +586,12 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 						claim("stdin", &mut stdin, &name)?;
 					}
 					let report = import.report;
-					let echo = import.echo_path.clone().map(hang::catalog::Echo::new);
+					let echo = import
+						.echo_path
+						.as_deref()
+						.map(hang::moq_net::path::Relative::new)
+						.transpose()?
+						.map(hang::catalog::Echo::new);
 					if let Some(mut publish) =
 						spawn_import(&origin, import, name, epoch.clone(), bandwidth.clone(), &mut tasks)?
 					{
@@ -746,7 +751,7 @@ fn spawn_import(
 		}) = &import.source
 		{
 			let name = require_broadcast(name, "import ts --program all")?;
-			Publish::ts_programs(origin.clone(), name, config)
+			Publish::ts_programs(origin.clone(), moq_net::Path::new(&name)?, config)
 		} else {
 			let broadcast = origin.create_broadcast(&name).context("failed to create broadcast")?;
 			Publish::from_publication(broadcast, &format, config)?

@@ -97,7 +97,13 @@ async fn accept_offer(
 		return Err(Error::InvalidSdp("expected Content-Type: application/sdp".into()));
 	}
 	let offer = std::str::from_utf8(&body).map_err(|err| Error::InvalidSdp(err.to_string()))?;
-	accept(server, subscriber, path, offer).await
+	accept(
+		server,
+		subscriber,
+		moq_net::Path::new(path).map_err(moq_net::Error::from)?,
+		offer,
+	)
+	.await
 }
 
 #[cfg(feature = "server")]
@@ -132,12 +138,12 @@ async fn delete(State(state): State<RouterState>, Path(path): Path<String>) -> S
 pub async fn accept(
 	server: &Server,
 	subscriber: &moq_net::origin::Consumer,
-	broadcast: impl moq_net::AsPath,
+	broadcast: impl Into<moq_net::Path>,
 	offer: &str,
 ) -> Result<Response> {
 	let offer = sdp::parse_offer(offer)?;
 
-	let source = resolve(subscriber, broadcast.as_path()).await?;
+	let source = resolve(subscriber, broadcast.into()).await?;
 	let codecs = source.catalog_codecs();
 	if codecs.is_empty() {
 		return Err(Error::NoRenditions);
@@ -199,7 +205,7 @@ fn is_sdp(headers: &HeaderMap) -> bool {
 /// Both waits share one bound, or an unannounced broadcast, or an announced-but-catalog-less
 /// one, would park the handler forever. No route by the deadline is
 /// [`moq_net::Error::Unroutable`], so the WHEP client sees a 404 and retries (typical).
-async fn resolve(subscriber: &moq_net::origin::Consumer, path: moq_net::Path<'_>) -> Result<EgressSource> {
+async fn resolve(subscriber: &moq_net::origin::Consumer, path: moq_net::Path) -> Result<EgressSource> {
 	let deadline = moq_clock::now() + CATALOG_TIMEOUT;
 	let broadcast = moq_clock::timeout_at(deadline, subscriber.routed_broadcast(path))
 		.await
@@ -300,7 +306,7 @@ mod tests {
 
 		let (sub_origin, _connection, accept) = lazy_client(pub_origin).await;
 
-		let resolved = super::resolve(&sub_origin.consume(), moq_net::Path::new("cam"))
+		let resolved = super::resolve(&sub_origin.consume(), moq_net::Path::from_static("cam"))
 			.await
 			.expect("the broadcast resolves");
 		assert!(!resolved.catalog_codecs().is_empty());

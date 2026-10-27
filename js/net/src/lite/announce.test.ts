@@ -390,6 +390,17 @@ test("AnnounceHistory rejects a keep longer than the base", () => {
 	expect(() => history.update({ id: 0n, hops: [], hopBase: { distance: 1n, keep: 2 } })).toThrow(ProtocolViolation);
 });
 
+test("AnnounceHistory rejects a resolved path past the byte limit", () => {
+	const history = new AnnounceHistory();
+	history.start({ suffix: Path.from("x".repeat(Path.MAX_BYTES - 2)), hops: [] });
+	// `head/y` is exactly the limit, and one byte more is refused.
+	const { suffix } = history.start({ suffix: Path.from("y"), hops: [], pathBase: { distance: 1n, keep: 1 } });
+	expect(suffix.length).toBe(Path.MAX_BYTES);
+	expect(() => history.start({ suffix: Path.from("yz"), hops: [], pathBase: { distance: 1n, keep: 1 } })).toThrow(
+		ProtocolViolation,
+	);
+});
+
 test("AnnounceHistory rejects a resolved chain that repeats a hop", () => {
 	const history = new AnnounceHistory();
 	history.start({ suffix: Path.from("a"), hops: [hop(1n), hop(2n)] });

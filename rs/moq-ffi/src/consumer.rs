@@ -239,7 +239,10 @@ impl MoqBroadcastConsumer {
 			.watch(async {
 				// Normalize before testing emptiness: this is a caller-supplied string, and one made only
 				// of slashes normalizes to the empty reference, which names this broadcast.
-				let reference = reference.map(moq_net::path::Relative::new);
+				let reference = reference
+					.map(moq_net::path::Relative::new)
+					.transpose()
+					.map_err(moq_net::Error::from)?;
 				let epoch: Option<moq_net::Epoch> = epoch.map(str::parse).transpose()?;
 
 				let Some(origin) = self.origin.clone() else {

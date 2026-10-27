@@ -46,7 +46,7 @@ test("an approved wire break can retain its protocol name, but new drafts still 
 });
 
 test("IETF drafts never enter the released comparison", () => {
-	expect(matrix([OLD, "moq-transport-14"], [OLD, "moq-transport-14", "moq-transport-15"], {}).shared).toEqual([OLD]);
+	expect(matrix([OLD, "moq-transport-18"], [OLD, "moq-transport-14", "moq-transport-18"], {}).shared).toEqual([OLD]);
 });
 
 test("a cell-scoped break skips only its cells and expires with its releases", () => {

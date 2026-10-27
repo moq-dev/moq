@@ -18,7 +18,7 @@ use crate::Error;
 use crate::origin::Route;
 
 use super::origin_impl::Announcer;
-use super::{Requests, WeakCache};
+use super::{RequestQueue, WeakCache};
 
 #[path = "listing.rs"]
 mod listing;
@@ -56,7 +56,7 @@ pub struct Info {
 	///
 	/// Empty (the default) for a standalone broadcast with no origin, which is then its own
 	/// root: any `..` reference escapes.
-	pub path: crate::PathOwned,
+	pub path: crate::Path,
 
 	/// The epoch of the route a [`Consumer`] was resolved through, naming the publisher
 	/// instance it reads.
@@ -75,7 +75,7 @@ impl Default for Info {
 		Self {
 			pool: cache::Pool::new(cache::Config::default().with_expiry(cache::DEFAULT_EXPIRY)),
 			cache_duration: std::time::Duration::MAX,
-			path: crate::PathOwned::default(),
+			path: crate::Path::default(),
 			epoch: None,
 			frames: Default::default(),
 		}
@@ -112,7 +112,7 @@ struct BroadcastState {
 	// and waiting for a dynamic handler to accept or deny them. A request leaves
 	// here once handed out (the handler caches it in `tracks`, so lookups keep
 	// coalescing onto it there).
-	requests: Requests<Arc<str>, track::Request>,
+	requests: RequestQueue<Arc<str>, track::Request>,
 
 	// The tracks the broadcast lists, and the readers listing them; see [`Tracks`].
 	listing: listing::ListingState,
@@ -136,7 +136,7 @@ impl BroadcastState {
 	/// [`track::Info`] that can no longer arrive fail with `err` instead of parking.
 	///
 	/// Covers a reservation nobody accepted and a request still queued for a handler.
-	/// A request a [`Dynamic`] already took is left alone: it may be in flight to a peer
+	/// A request a [`Requests`] already took is left alone: it may be in flight to a peer
 	/// still serving it, and the handler answers or drops it. So is a track that carries
 	/// its info: an end there is that publisher's call, and its cache stays readable.
 	fn reject_unserved(&mut self, err: Error) {
@@ -173,12 +173,12 @@ impl BroadcastState {
 ///
 /// Create tracks up front with [Self::create_track], reserve a name to fill in
 /// later with [Self::reserve_track], or handle on-demand consumer requests via
-/// [Self::dynamic].
+/// [Self::requests].
 ///
 /// # Lifetime
 ///
 /// A broadcast lives until [`Self::close`] or until the last [`Producer`] (or
-/// [`Dynamic`]) drops, whichever comes first; both end it the same way. A publisher
+/// [`Requests`]) drops, whichever comes first; both end it the same way. A publisher
 /// whose input ended cleanly finishes its tracks first: a subscriber still catching up
 /// drains them after the close. Children
 /// do *not* keep it alive: cloning a [`Consumer`] or holding a [`track::Producer`]
@@ -189,7 +189,7 @@ pub struct Producer {
 	// handle (threaded down by [`Self::create_track`] / [`Self::reserve_track`]).
 	info: Arc<Info>,
 
-	// Broadcast liveness, shared with every `Dynamic`. Consumers watch it (read-only)
+	// Broadcast liveness, shared with every `Requests`. Consumers watch it (read-only)
 	// for close; the guard ends the broadcast when the last of those handles drops.
 	alive: Arc<Alive>,
 
@@ -325,7 +325,7 @@ impl Producer {
 		let mut state = self.state.lock();
 
 		// A consumer may have requested this name before it existed (a live
-		// [`Dynamic`] queues such requests). Creating the track fulfills that
+		// [`Requests`] queues such requests). Creating the track fulfills that
 		// request: its consumers resolve against this very producer. Without
 		// this they would be stranded, since the name is taken the moment the
 		// track exists, so no handler could ever serve their queue entry.
@@ -351,7 +351,7 @@ impl Producer {
 	/// [`track::Request::accept`] to set its info and start producing. Use this when
 	/// the producer can't pick the track's properties (e.g. timescale) until it has
 	/// inspected the media, the same shape as a consumer-driven
-	/// [`Dynamic::poll_requested_track`].
+	/// [`Requests::poll_requested_track`].
 	///
 	/// Subscribers wait on the name until it is accepted, so a reservation the producer
 	/// ends up never filling has to be dropped or rejected. Ending the broadcast
@@ -404,8 +404,8 @@ impl Producer {
 	}
 
 	/// Create a dynamic producer that handles on-demand track requests from consumers.
-	pub fn dynamic(&self) -> Dynamic {
-		Dynamic::new(
+	pub fn requests(&self) -> Requests {
+		Requests::new(
 			self.info.clone(),
 			self.alive.clone(),
 			self.state.clone(),
@@ -433,7 +433,7 @@ impl Producer {
 	/// with [`Error::Closed`]. Tracks already handed out carry on and end with their
 	/// own finish or abort. Every later [`Consumer::track`], and every name reserved or
 	/// still queued for a handler, answers [`Error::Unroutable`]: the same answer an
-	/// origin gives for a path nobody publishes. A request a [`Dynamic`] already took is
+	/// origin gives for a path nobody publishes. A request a [`Requests`] already took is
 	/// left for that handler to answer.
 	///
 	/// Dropping the last producer does the same. Closing twice is a no-op.
@@ -470,7 +470,7 @@ impl Producer {
 }
 
 /// Ends the broadcast on [`Producer::close`] or when the last [`Producer`] or
-/// [`Dynamic`] drops, closing the liveness channel every [`Consumer`] watches.
+/// [`Requests`] drops, closing the liveness channel every [`Consumer`] watches.
 ///
 /// A refcount rather than a "am I the last one?" check inside `Drop`: that answer is
 /// a snapshot, and acting on it is exactly what invalidates it.
@@ -571,8 +571,12 @@ pub(crate) enum RequestValidity {
 	Unrestricted,
 	Route(kio::Consumer<()>),
 	Selected(std::sync::Arc<crate::model::origin_impl::Selection>),
-	/// One period of a selection, captured by [`Self::start`].
-	Period(kio::Consumer<()>, std::sync::Arc<crate::model::origin_impl::Selection>),
+	/// One period of a selection and its answering lease, captured by [`Self::start`].
+	Period(
+		kio::Consumer<()>,
+		kio::Consumer<()>,
+		std::sync::Arc<crate::model::origin_impl::Selection>,
+	),
 }
 
 impl RequestValidity {
@@ -582,7 +586,7 @@ impl RequestValidity {
 	}
 
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn for_source(route: &crate::origin::Dynamic, path: &crate::Path) -> Self {
+	pub(crate) fn for_source(route: &crate::origin::Requests, path: &crate::Path) -> Self {
 		route
 			.request_validity(path)
 			.map(|selected| Self::Selected(std::sync::Arc::new(selected)))
@@ -592,7 +596,7 @@ impl RequestValidity {
 	/// Capture one selection period so a pending request never revives after a replacement.
 	pub(crate) fn start(&self) -> Self {
 		match self {
-			Self::Selected(selected) => Self::Period(selected.current(), selected.clone()),
+			Self::Selected(selected) => Self::Period(selected.current(), selected.answering(), selected.clone()),
 			other => other.clone(),
 		}
 	}
@@ -601,12 +605,29 @@ impl RequestValidity {
 		match self {
 			Self::Route(route) if route.poll_closed(waiter).is_ready() => Err(crate::Error::Unroutable),
 			// A replacement retires the period only once its held `Restart` is released.
-			Self::Period(route, selected)
+			Self::Period(route, _, selected)
 				if route.poll_closed(waiter).is_ready() || selected.poll_retired(waiter).is_ready() =>
 			{
 				Err(crate::Error::Unroutable)
 			}
 			Self::Selected(_) => self.start().check(waiter),
+			_ => Ok(()),
+		}
+	}
+
+	/// [`Self::check`] for a request already sent but not yet answered: only another
+	/// instance taking the path refuses it, since without an epoch that instance may be
+	/// the one answering. A withdrawal leaves it to its answer, as moq-lite has the
+	/// publisher conclude in-flight requests.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn check_unanswered(&self, waiter: &kio::Waiter) -> Result<(), crate::Error> {
+		match self {
+			Self::Period(_, answering, selected)
+				if answering.poll_closed(waiter).is_ready() || selected.poll_retired(waiter).is_ready() =>
+			{
+				Err(crate::Error::Unroutable)
+			}
+			Self::Selected(_) => self.start().check_unanswered(waiter),
 			_ => Ok(()),
 		}
 	}
@@ -625,7 +646,7 @@ impl Producer {
 }
 
 /// A session-owned source broadcast, closed on drop even while the session's
-/// serve machines still hold its [`Dynamic`].
+/// serve machines still hold its [`Requests`].
 ///
 /// A peer's retraction and a dead session end the source the same way: a broadcast
 /// carries no end cause past this hop. Shared by the lite and IETF subscribers.
@@ -661,7 +682,7 @@ impl Drop for SourceGuard {
 /// [`track::Request::reject`]s it. Dropped when no longer needed; pending requests
 /// are automatically aborted.
 #[derive(Clone)]
-pub struct Dynamic {
+pub struct Requests {
 	info: Arc<Info>,
 	// Keeps the broadcast alive while a handler exists (mirrors a producer).
 	alive: Arc<Alive>,
@@ -675,7 +696,7 @@ pub struct Dynamic {
 	_handler: Handler,
 }
 
-/// Counts one live [`Dynamic`], rejecting the queued requests when the last one drops.
+/// Counts one live [`Requests`], rejecting the queued requests when the last one drops.
 struct Handler(kio::Shared<BroadcastState>);
 
 impl Handler {
@@ -708,7 +729,7 @@ impl Drop for Handler {
 	}
 }
 
-impl Dynamic {
+impl Requests {
 	fn new(info: Arc<Info>, alive: Arc<Alive>, state: kio::Shared<BroadcastState>, stats: stats::Scope) -> Self {
 		Self {
 			info,
@@ -810,7 +831,7 @@ use futures::FutureExt;
 
 #[cfg(test)]
 #[expect(missing_docs, reason = "test-only assertion helpers")]
-impl Dynamic {
+impl Requests {
 	pub fn assert_request(&mut self) -> track::Request {
 		kio::wait(|waiter| self.poll_requested_track(waiter))
 			.now_or_never()
@@ -871,7 +892,7 @@ impl Consumer {
 	/// references resolve against is where the *reader* found the broadcast, not where its
 	/// producer happened to create it. Free when the two already agree, which is the case
 	/// for a broadcast created at the path an unrooted cursor asks for.
-	pub(super) fn with_path(mut self, path: crate::PathOwned) -> Self {
+	pub(super) fn with_path(mut self, path: crate::Path) -> Self {
 		if self.info.path != path {
 			let mut info = (*self.info).clone();
 			info.path = path;
@@ -900,7 +921,7 @@ impl Consumer {
 	/// Nothing is requested until the handle queries, subscribes, or fetches, each of
 	/// which looks the name up again. Fails with [`Error::Unroutable`] once the broadcast
 	/// has ended, and [`Error::NotFound`] when nothing publishes the track and no
-	/// [`Dynamic`] would serve a request for it.
+	/// [`Requests`] would serve a request for it.
 	pub fn track(&self, name: &str) -> Result<track::Consumer, Error> {
 		let current = {
 			let mut state = self.state.lock();
@@ -926,7 +947,7 @@ impl Consumer {
 		)
 	}
 
-	/// Join the demand of the track serving `name`, requesting it from a [`Dynamic`]
+	/// Join the demand of the track serving `name`, requesting it from a [`Requests`]
 	/// when nothing serves it yet. Registers the subscription before exposing demand.
 	/// Errors as [`Self::track`] does.
 	pub(super) fn resolve_track(
@@ -1108,7 +1129,7 @@ mod test {
 	#[test]
 	fn a_subscription_is_registered_before_its_request_is_visible() {
 		struct Serve {
-			dynamic: std::sync::Mutex<Dynamic>,
+			dynamic: std::sync::Mutex<Requests>,
 			request: std::sync::Mutex<Option<track::Request>>,
 			subscription: std::sync::Mutex<Option<Option<track::Subscription>>>,
 		}
@@ -1128,7 +1149,7 @@ mod test {
 
 		let producer = Info::new().produce();
 		let serve = Arc::new(Serve {
-			dynamic: std::sync::Mutex::new(producer.dynamic()),
+			dynamic: std::sync::Mutex::new(producer.requests()),
 			request: Default::default(),
 			subscription: Default::default(),
 		});
@@ -1347,7 +1368,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn closed() {
 		let mut producer = Info::new().produce();
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 
 		let consumer = producer.consume();
 		consumer.assert_not_closed();
@@ -1402,7 +1423,7 @@ mod test {
 	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn requests() {
-		let mut producer = Info::new().produce().dynamic();
+		let mut producer = Info::new().produce().requests();
 
 		let consumer = producer.consume();
 		let consumer2 = consumer.clone();
@@ -1443,7 +1464,7 @@ mod test {
 	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn stale_producer() {
-		let mut broadcast = Info::new().produce().dynamic();
+		let mut broadcast = Info::new().produce().requests();
 		let consumer = broadcast.consume();
 
 		// Subscribe to a track and serve it.
@@ -1482,7 +1503,7 @@ mod test {
 	fn replacement_starts_over() {
 		let at = |millis| crate::Timestamp::from_millis(millis).unwrap();
 		let producer = Info::new().produce();
-		let mut dynamic = producer.dynamic();
+		let mut dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		let track = consumer.track("media").unwrap().subscribe(None);
@@ -1509,7 +1530,7 @@ mod test {
 	#[test]
 	fn gone_names_are_forgotten() {
 		let producer = Info::new().produce();
-		let mut dynamic = producer.dynamic();
+		let mut dynamic = producer.requests();
 		let consumer = producer.consume();
 		for i in 0..1000 {
 			let track = consumer.track(&format!("requested/{i}")).unwrap().subscribe(None);
@@ -1532,7 +1553,7 @@ mod test {
 	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn requested_unused() {
-		let mut broadcast = Info::new().produce().dynamic();
+		let mut broadcast = Info::new().produce().requests();
 		let bc = broadcast.consume();
 
 		// Subscribe to a track that doesn't exist yet, then serve it.
@@ -1587,7 +1608,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn create_track_fulfills_queued_request() {
 		let producer = Info::new().produce();
-		let mut dynamic = producer.dynamic();
+		let mut dynamic = producer.requests();
 		let bc = dynamic.consume();
 
 		// Queue a request for a track that doesn't exist yet.
@@ -1607,14 +1628,14 @@ mod test {
 		again.assert_is_clone(&track.subscribe(None));
 	}
 
-	// Cloning a `Dynamic` and dropping the clone must not flip the handler
+	// Cloning a `Requests` and dropping the clone must not flip the handler
 	// count to zero. The relay's lite subscriber clones the
 	// dynamic per spawned subscribe; if Clone skipped the increment, the
 	// first finished subscribe would tear down the broadcast and any
 	// follow-up `track` would return `NotFound`.
 	#[test]
 	fn dynamic_clone_keeps_alive() {
-		let broadcast = Info::new().produce().dynamic();
+		let broadcast = Info::new().produce().requests();
 		let consumer = broadcast.consume();
 
 		let clone = broadcast.clone();
@@ -1631,7 +1652,7 @@ mod test {
 	#[test]
 	fn close_unheld_yields_to_holders() {
 		let producer = Info::new().produce();
-		let mut dynamic = producer.dynamic();
+		let mut dynamic = producer.requests();
 		let consumer = producer.consume();
 		let weak = consumer.weak();
 		assert!(producer.is_held());
@@ -1676,7 +1697,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn close_resolves_a_queued_request() {
 		let producer = Info::new().produce();
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = dynamic.consume();
 
 		let pending = subscribe_pending!(consumer, "track1");
@@ -1687,11 +1708,11 @@ mod test {
 	}
 
 	/// A queued request answers the same when the broadcast ends by its last handle
-	/// dropping, even when that handle is the `Dynamic` that would have served it.
+	/// dropping, even when that handle is the `Requests` that would have served it.
 	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn dropping_the_last_handle_resolves_a_queued_request() {
-		let dynamic = Info::new().produce().dynamic();
+		let dynamic = Info::new().produce().requests();
 		let consumer = dynamic.consume();
 
 		let pending = subscribe_pending!(consumer, "track1");
@@ -1710,7 +1731,7 @@ mod test {
 		let producer = Info::new()
 			.produce()
 			.with_validity(RequestValidity::Route(route.consume()));
-		let mut dynamic = producer.dynamic();
+		let mut dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		let pending = subscribe_pending!(consumer, "accepted");
@@ -1733,7 +1754,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn dropping_the_last_handler_resolves_a_queued_request_dropped() {
 		let producer = Info::new().produce();
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = dynamic.consume();
 
 		let pending = subscribe_pending!(consumer, "track1");
@@ -1750,7 +1771,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn close_leaves_a_claimed_request_to_its_handler() {
 		let producer = Info::new().produce();
-		let mut dynamic = producer.dynamic();
+		let mut dynamic = producer.requests();
 		let consumer = dynamic.consume();
 
 		let accepted = subscribe_pending!(consumer, "track1");
@@ -1786,7 +1807,7 @@ mod test {
 		let consumer = producer.consume();
 
 		let request = producer.reserve_track("track1").unwrap();
-		let dynamic = request.dynamic();
+		let dynamic = request.requests();
 		let track = consumer.track("track1").unwrap();
 		let pending_fetch = track.fetch_group(0, None);
 		let fetch = dynamic.requested_fill_group().await.unwrap();

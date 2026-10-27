@@ -111,7 +111,7 @@ async fn a_moved_gateway_tier_retags_its_stats() {
 			.snapshot()
 			.sessions()
 			.into_iter()
-			.find(|(t, _)| *t == stats::Tier::new(tier))
+			.find(|(t, _)| *t == stats::Tier::new(moq_net::Path::from_static(tier)))
 			.map_or(0, |(_, presence)| presence.active())
 	};
 

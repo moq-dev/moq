@@ -110,7 +110,7 @@ async fn busy_viewer_sees_the_estimate_move() {
 /// A transport estimate demanded locally still costs one poll per sampling deadline.
 #[moq_clock::test]
 async fn ietf_stats_refresh_costs_one_driver_poll() {
-	for version in ["moq-transport-16", "moq-transport-22"] {
+	for version in ["moq-transport-22"] {
 		let polls = Arc::new(AtomicUsize::new(0));
 		let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
 		options.stats = STATS;
@@ -175,11 +175,13 @@ async fn probe_follows_consumer_lifetime() {
 /// A stats tick reads the transport's wire counters and adds no sampler timer or session wake.
 #[moq_clock::test]
 async fn wire_collection_never_arms_the_idle_sampler() {
-	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-16", "moq-transport-22"] {
+	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"] {
 		let registry = moq_net::stats::Registry::new(Default::default());
 		let polls = Arc::new(AtomicUsize::new(0));
 		let mut options = MockConnectOptions::new(version.parse().unwrap());
-		options.server_stats = registry.tier(Default::default()).session("room");
+		options.server_stats = registry
+			.tier(Default::default())
+			.session(moq_net::Path::from_static("room"));
 		options.server_polls = Some(polls.clone());
 		let pair = connect_mock(options).await;
 		moq_clock::sleep(Duration::from_secs(1)).await;

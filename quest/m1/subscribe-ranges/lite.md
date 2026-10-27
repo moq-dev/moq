@@ -60,7 +60,7 @@ first.
 moq-transport's relative offsets differ by one. Draft-22's relative filter
 counts back from the next group: `Filter::Relative(0)` is the next group and
 `Relative(1)` the current one, so an open-ended `Relative(n)..` maps to
-`Filter::Relative(n + 1)`, saturating. Drafts 14 to 18 only encode a relative
+`Filter::Relative(n + 1)`, saturating. Draft 18 only encodes a relative
 0 (NEXT_GROUP), so there it is SUBSCRIBE plus a relative joining FETCH n
 groups back, as the live join already does. A range with a bounded end
 resolves both bounds against the Largest Object and goes upstream as an

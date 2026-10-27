@@ -112,45 +112,40 @@ run_suite() {
     fi
 }
 
-# The pinned MoQVersions.h supports drafts 16 and 18; this relay supports both.
+# The pinned MoQVersions.h supports drafts 16 and 18; this relay supports only 18.
 failed=0
-for version in 16 18; do
-    # A draft-16 TRACK_STATUS_OK has no Track Properties, so a cluster's origin
-    # cannot learn the track's priority from it; draft 16 is not a cluster target.
-    topologies=(single)
-    [[ "$version" == 16 ]] || topologies+=(cluster)
-    for topology in "${topologies[@]}"; do
-        label="$topology-$version"
-        start_relay "$label-origin" "$version"
-        ingress="$HARNESS_PORT"
-        ingress_pid="$HARNESS_PID"
-        egress="$ingress"
-        egress_pid=""
-        if [[ "$topology" == cluster ]]; then
-            start_relay "$label-edge" "$version" "$ingress"
-            egress="$HARNESS_PORT"
-            egress_pid="$HARNESS_PID"
-        fi
-        harness_port "$label-publisher"
-        publisher_port="$HARNESS_PORT"
-        harness_spawn "$label-publisher" "$HARNESS_RUN/$label-publisher.log" \
-            "$package/bin/moqtest_server" --port="$HARNESS_PORT" \
-            --cert="$HARNESS_RUN/cert.pem" --key="$HARNESS_RUN/key.pem" \
-            --relay_url="https://127.0.0.1:$ingress/" --versions="$version" --transport=quic --logging=INFO
-        publisher_pid="$HARNESS_PID"
-        namespace_ready
-        # A direct-origin control distinguishes suite/pin failures from relay behavior.
-        if [[ "$topology" == single ]]; then
-            run_suite "reference-$version" "https://127.0.0.1:$publisher_port/test"
-        fi
-        run_suite "$label" "https://127.0.0.1:$egress/"
-        harness_reap "$publisher_pid"
-        [[ -z "$egress_pid" ]] || harness_reap "$egress_pid"
-        harness_reap "$ingress_pid"
-    done
+version=18
+for topology in single cluster; do
+    label="$topology-$version"
+    start_relay "$label-origin" "$version"
+    ingress="$HARNESS_PORT"
+    ingress_pid="$HARNESS_PID"
+    egress="$ingress"
+    egress_pid=""
+    if [[ "$topology" == cluster ]]; then
+        start_relay "$label-edge" "$version" "$ingress"
+        egress="$HARNESS_PORT"
+        egress_pid="$HARNESS_PID"
+    fi
+    harness_port "$label-publisher"
+    publisher_port="$HARNESS_PORT"
+    harness_spawn "$label-publisher" "$HARNESS_RUN/$label-publisher.log" \
+        "$package/bin/moqtest_server" --port="$HARNESS_PORT" \
+        --cert="$HARNESS_RUN/cert.pem" --key="$HARNESS_RUN/key.pem" \
+        --relay_url="https://127.0.0.1:$ingress/" --versions="$version" --transport=quic --logging=INFO
+    publisher_pid="$HARNESS_PID"
+    namespace_ready
+    # A direct-origin control distinguishes suite/pin failures from relay behavior.
+    if [[ "$topology" == single ]]; then
+        run_suite "reference-$version" "https://127.0.0.1:$publisher_port/test"
+    fi
+    run_suite "$label" "https://127.0.0.1:$egress/"
+    harness_reap "$publisher_pid"
+    [[ -z "$egress_pid" ]] || harness_reap "$egress_pid"
+    harness_reap "$ingress_pid"
 done
 if ((failed != 0)); then
     echo "Moxygen conformance failed; see each cell's client and endpoint logs" >&2
     exit 1
 fi
-echo "Moxygen conformance: every draft and topology passed"
+echo "Moxygen conformance: draft 18 passed through every topology"

@@ -5,8 +5,7 @@ use base64::Engine;
 use jsonwebtoken::{DecodingKey, EncodingKey, Header};
 use p256::elliptic_curve::SecretKey;
 use p256::elliptic_curve::pkcs8::EncodePrivateKey;
-use rsa::BigUint;
-use rsa::pkcs1::EncodeRsaPrivateKey;
+use pkcs1::der::Encode;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::str::FromStr;
 use std::sync::OnceLock;
@@ -56,7 +55,11 @@ pub enum KeyMaterial {
 		#[serde(flatten)]
 		public: RsaPublicKey,
 		/// The private parameters, absent for a public key.
-		#[serde(flatten, skip_serializing_if = "Option::is_none")]
+		#[serde(
+			flatten,
+			skip_serializing_if = "Option::is_none",
+			deserialize_with = "deserialize_rsa_private"
+		)]
 		private: Option<RsaPrivateKey>,
 	},
 	/// <https://datatracker.ietf.org/doc/html/rfc7518#section-6.4>
@@ -145,9 +148,52 @@ pub struct RsaPrivateKey {
 	/// The first CRT coefficient.
 	#[serde(serialize_with = "serialize_base64url", deserialize_with = "deserialize_base64url")]
 	pub qi: Vec<u8>,
-	/// Other prime information, for keys with more than two primes.
+	/// Other prime information. Multi-prime RSA is refused on import.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub oth: Option<Vec<RsaAdditionalPrime>>,
+}
+
+// Flattening Option<RsaPrivateKey> otherwise swallows missing-field errors and turns
+// malformed private keys into public keys. Decide whether private material exists first.
+fn deserialize_rsa_private<'de, D>(deserializer: D) -> Result<Option<RsaPrivateKey>, D::Error>
+where
+	D: Deserializer<'de>,
+{
+	let fields = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
+	if fields.contains_key("oth") {
+		return Err(serde::de::Error::custom("multi-prime RSA (oth) is unsupported"));
+	}
+	if ["d", "p", "q", "dp", "dq", "qi"]
+		.iter()
+		.any(|field| fields.contains_key(*field))
+	{
+		serde_json::from_value(serde_json::Value::Object(fields))
+			.map(Some)
+			.map_err(serde::de::Error::custom)
+	} else {
+		Ok(None)
+	}
+}
+
+impl RsaPrivateKey {
+	fn to_der(&self, public: &RsaPublicKey) -> crate::Result<Vec<u8>> {
+		use pkcs1::UintRef;
+		let encode = || -> Result<_, pkcs1::der::Error> {
+			pkcs1::RsaPrivateKey {
+				modulus: UintRef::new(&public.n)?,
+				public_exponent: UintRef::new(&public.e)?,
+				private_exponent: UintRef::new(&self.d)?,
+				prime1: UintRef::new(&self.p)?,
+				prime2: UintRef::new(&self.q)?,
+				exponent1: UintRef::new(&self.dp)?,
+				exponent2: UintRef::new(&self.dq)?,
+				coefficient: UintRef::new(&self.qi)?,
+				other_prime_infos: None,
+			}
+			.to_der()
+		};
+		encode().map_err(|e| crate::Error::Crypto(e.to_string()))
+	}
 }
 
 /// Additional prime information for multi-prime RSA keys.
@@ -233,6 +279,14 @@ impl Jwk {
 			&& secret.len() < MIN_OCT_SECRET_BYTES
 		{
 			return Err(KeyError::SecretTooShort(MIN_OCT_SECRET_BYTES).into());
+		}
+
+		if let KeyMaterial::RSA {
+			private: Some(private), ..
+		} = &self.material
+			&& private.oth.is_some()
+		{
+			return Err(crate::Error::Crypto("multi-prime RSA (oth) is unsupported".into()));
 		}
 
 		Ok(Key {
@@ -535,17 +589,8 @@ impl Key {
 				ref public,
 				ref private,
 			} => {
-				let n = BigUint::from_bytes_be(&public.n);
-				let e = BigUint::from_bytes_be(&public.e);
 				let private = private.as_ref().ok_or(KeyError::MissingPrivateKey)?;
-				let d = BigUint::from_bytes_be(&private.d);
-				let p = BigUint::from_bytes_be(&private.p);
-				let q = BigUint::from_bytes_be(&private.q);
-
-				let rsa = rsa::RsaPrivateKey::from_components(n, e, d, vec![p, q]);
-				let pem = rsa?.to_pkcs1_pem(rsa::pkcs1::LineEnding::LF);
-
-				EncodingKey::from_rsa_pem(pem?.as_bytes())?
+				EncodingKey::from_rsa_der(&private.to_der(public)?)
 			}
 		};
 
@@ -1419,6 +1464,61 @@ mod tests {
 			let token = key.sign(&claims).unwrap();
 			let verified_claims = key.verify(&token).unwrap();
 			assert_eq!(verified_claims.root, claims.root);
+		}
+	}
+
+	#[test]
+	fn private_rsa_requires_complete_components() {
+		let key = Key::generate(Algorithm::RS256, None).unwrap();
+		let original = serde_json::to_value(&key).unwrap();
+		for field in ["d", "p", "q", "dp", "dq", "qi"] {
+			let mut incomplete = original.clone();
+			incomplete.as_object_mut().unwrap().remove(field);
+			// A verify-only import must not silently discard malformed private material.
+			incomplete["key_ops"] = serde_json::json!(["verify"]);
+			let error = serde_json::from_value::<Key>(incomplete).expect_err(field);
+			assert!(error.to_string().contains(field), "{field}: {error}");
+		}
+	}
+
+	#[test]
+	fn private_rsa_rejects_other_primes() {
+		let key = Key::generate(Algorithm::RS256, None).unwrap();
+		let mut jwk = key.export();
+		let KeyMaterial::RSA {
+			private: Some(private), ..
+		} = &mut jwk.material
+		else {
+			unreachable!();
+		};
+		private.oth = Some(vec![]);
+		assert!(
+			jwk.clone()
+				.import()
+				.expect_err("oth must be refused")
+				.to_string()
+				.contains("oth")
+		);
+		let json = serde_json::to_value(jwk).unwrap();
+		assert!(
+			serde_json::from_value::<Key>(json)
+				.expect_err("oth must be refused")
+				.to_string()
+				.contains("oth")
+		);
+	}
+
+	#[test]
+	fn private_rsa_uses_supplied_crt_parameters() {
+		let key = Key::generate(Algorithm::RS256, None).unwrap();
+		for field in ["dp", "dq", "qi"] {
+			let mut json = serde_json::to_value(&key).unwrap();
+			json[field] = serde_json::json!("AQ");
+			let invalid: Key = serde_json::from_value(json).unwrap();
+			assert!(
+				invalid.sign(&create_test_claims()).is_err(),
+				"{field} was silently recomputed"
+			);
 		}
 	}
 

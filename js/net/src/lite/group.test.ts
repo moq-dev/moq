@@ -58,7 +58,7 @@ test("frames split at every byte keep their payloads and timestamps", async () =
 	const chunks = Array.from(bytes, (byte) => new Uint8Array([byte]));
 
 	await readFrames(streamOf(chunks), producer, { scale: SCALE });
-	producer.close();
+	producer.finish();
 
 	let ts = 0;
 	for (const { delta, payload } of frames) {
@@ -74,7 +74,7 @@ test("frames without a timescale carry no timestamp prefix", async () => {
 	const producer = new Producer(0);
 	const consumer = producer.consume();
 	await readFrames(streamOf([encode([{ payload: [7] }, { payload: [8, 9] }])]), producer, { scale: 0 });
-	producer.close();
+	producer.finish();
 
 	expect((await consumer.readFrame())?.payload).toEqual(new Uint8Array([7]));
 	expect((await consumer.readFrame())?.payload).toEqual(new Uint8Array([8, 9]));
@@ -94,6 +94,6 @@ test("stops once the group closes", async () => {
 	// Never ends: only the close can stop the read.
 	const stream = new Reader(new ReadableStream<Uint8Array>(), undefined, VERSION);
 	const done = readFrames(stream, producer, { scale: SCALE });
-	producer.close();
+	producer.finish();
 	await done;
 });

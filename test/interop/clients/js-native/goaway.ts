@@ -1,4 +1,4 @@
-/** Follow a Rust server's GOAWAY redirect: retain the reader where an epoch proves continuity, else re-subscribe. */
+/** Follow a Rust server's GOAWAY redirect, retaining the reader since the epoch proves continuity. */
 import assert from "node:assert/strict";
 import { Milli } from "@moq/clock";
 import * as Moq from "@moq/net";
@@ -9,9 +9,6 @@ console.debug = console.error;
 console.info = console.error;
 const [first, second, version] = process.argv.slice(2);
 assert(first && second && version, "usage: goaway.ts FIRST_URL SECOND_URL VERSION");
-// Drafts 14 and 16 carry no epoch, so nothing proves the replacement serves the same
-// publisher: the held reader ends with the old route and the application requests again.
-const legacy = version === "moq-transport-14" || version === "moq-transport-16";
 const origin = new Moq.Origin.Producer();
 const connection = new Reload({
 	url: new URL(first),
@@ -31,19 +28,9 @@ async function active(request: (typeof requests)[number]) {
 	return broadcast;
 }
 try {
-	let track = (await active(requests[0])).track("video").subscribe({ groups: { start: { included: 0 } } });
+	const track = (await active(requests[0])).track("video").subscribe({ groups: { start: { included: 0 } } });
 	try {
 		for (let sequence = 0; sequence < 3; sequence++) {
-			if (sequence === 2 && legacy) {
-				assert.equal(await track.recvGroup(), undefined, "an epochless route spliced the held reader");
-				track.close();
-				const request = origin.request(Moq.Path.from("handover"), { announced: true });
-				requests.push(request);
-				track = (await active(request)).track("video").subscribe({ groups: { start: { included: 2 } } });
-				await track.info();
-				// The server only writes group 2 after this, and only the replacement remains.
-				process.stdout.write("resubscribed\n");
-			}
 			const group = await track.recvGroup();
 			assert(group, "subscription ended during redirect");
 			try {
@@ -74,20 +61,17 @@ try {
 				}
 				// A direct read from the replacement proves its SUBSCRIBE/data path is ready,
 				// beyond SETUP or namespace discovery, while the original reader stays held.
-				// The legacy re-subscribe proves that itself, with its own SUBSCRIBE.
-				if (!legacy) {
-					replacementProbe = wireOf(replacement)
-						.consume(Moq.Path.from("handover"))
-						.track("video")
-						.subscribe({ groups: { start: { included: 1 } } });
-					const probe = await replacementProbe.recvGroup();
-					assert(probe, "replacement has no group");
-					try {
-						assert.equal(probe.sequence, 1, "replacement served the wrong group");
-						assert.deepEqual((await probe.readFrame())?.payload, new Uint8Array(32).fill(1));
-					} finally {
-						probe.close();
-					}
+				replacementProbe = wireOf(replacement)
+					.consume(Moq.Path.from("handover"))
+					.track("video")
+					.subscribe({ groups: { start: { included: 1 } } });
+				const probe = await replacementProbe.recvGroup();
+				assert(probe, "replacement has no group");
+				try {
+					assert.equal(probe.sequence, 1, "replacement served the wrong group");
+					assert.deepEqual((await probe.readFrame())?.payload, new Uint8Array(32).fill(1));
+				} finally {
+					probe.close();
 				}
 				process.stdout.write("replacement ready\n");
 			}

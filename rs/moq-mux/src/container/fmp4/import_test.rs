@@ -630,12 +630,16 @@ async fn separated_runs_keep_their_samples() {
 	// Offsets count from the moof's first byte, so measure it with every offset present.
 	let mut buf = Vec::new();
 	moof.encode(&mut buf).unwrap();
-	let data = buf.len() as i32 + 8;
+	let padding = mp4_atom::Any::Unknown(mp4_atom::FourCC::new(b"free"), vec![0; 16]);
+	let mut padding_bytes = Vec::new();
+	padding.encode(&mut padding_bytes).unwrap();
+	let data = (buf.len() + padding_bytes.len() + 8) as i32;
 	moof.traf[0].trun[0].data_offset = Some(data + at(0) as i32);
 	moof.traf[0].trun[1].data_offset = Some(data + at(5) as i32);
 	moof.traf[1].trun[0].data_offset = Some(data + at(3) as i32);
 	let mut fragment = Vec::new();
 	moof.encode(&mut fragment).unwrap();
+	fragment.extend_from_slice(&padding_bytes);
 	mp4_atom::Mdat {
 		data: layout.iter().flat_map(|(_, bytes)| bytes.iter().copied()).collect(),
 	}
@@ -665,11 +669,110 @@ async fn separated_runs_keep_their_samples() {
 		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 		let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve()).with_passthrough(passthrough);
 		fmp4.decode(&init).unwrap();
-		fmp4.decode(&fragment).unwrap();
+		for chunk in fragment.chunks(7) {
+			fmp4.decode(chunk).unwrap();
+		}
 		fmp4.finish().unwrap();
 		let [got_video, got_audio] = published(&consumer, &catalog).await;
 		assert_eq!(got_video, video, "video, passthrough {passthrough}");
 		assert_eq!(got_audio, audio, "audio, passthrough {passthrough}");
+	}
+}
+
+/// A sample must own input bytes even when its size comes from a default.
+#[test]
+fn empty_samples_are_refused() {
+	let (init, (video_id, timescale), _) = bbb_init();
+	for explicit in [false, true] {
+		let moof = mp4_atom::Moof {
+			mfhd: mp4_atom::Mfhd { sequence_number: 1 },
+			traf: vec![mp4_atom::Traf {
+				tfhd: mp4_atom::Tfhd {
+					track_id: video_id,
+					default_sample_size: Some(0),
+					default_sample_duration: Some(1),
+					..Default::default()
+				},
+				tfdt: Some(mp4_atom::Tfdt {
+					base_media_decode_time: 0,
+				}),
+				trun: vec![mp4_atom::Trun {
+					data_offset: None,
+					entries: vec![
+						mp4_atom::TrunEntry {
+							size: explicit.then_some(0),
+							..Default::default()
+						};
+						4
+					],
+				}],
+				..Default::default()
+			}],
+		};
+		let mut fragment = Vec::new();
+		moof.encode(&mut fragment).unwrap();
+		mp4_atom::Mdat { data: vec![] }.encode(&mut fragment).unwrap();
+		for passthrough in [false, true] {
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+			let mut import = super::Import::new(broadcast, catalog.reserve()).with_passthrough(passthrough);
+			import.decode(&init).unwrap();
+			assert!(
+				matches!(
+					import.decode(&fragment),
+					Err(crate::Error::Cmaf(super::Error::EmptySample))
+				),
+				"empty import: explicit={explicit}, passthrough={passthrough}"
+			);
+		}
+		assert!(matches!(
+			super::decode(fragment.into(), None, super::Track::new(timescale, super::Kind::Video)),
+			Err(super::Error::EmptySample)
+		));
+	}
+}
+
+/// A file-relative base is explicitly unsupported on both input paths.
+#[test]
+fn absolute_sample_bases_are_refused() {
+	let (init, (video_id, timescale), _) = bbb_init();
+	for base in [0, 1024, u64::MAX] {
+		let moof = mp4_atom::Moof {
+			mfhd: mp4_atom::Mfhd { sequence_number: 1 },
+			traf: vec![mp4_atom::Traf {
+				tfhd: mp4_atom::Tfhd {
+					track_id: video_id,
+					base_data_offset: Some(base),
+					default_sample_size: Some(1),
+					..Default::default()
+				},
+				tfdt: Some(mp4_atom::Tfdt {
+					base_media_decode_time: 0,
+				}),
+				trun: vec![mp4_atom::Trun {
+					entries: vec![Default::default()],
+					..Default::default()
+				}],
+				..Default::default()
+			}],
+		};
+		let mut fragment = Vec::new();
+		moof.encode(&mut fragment).unwrap();
+		mp4_atom::Mdat { data: vec![1] }.encode(&mut fragment).unwrap();
+		for passthrough in [false, true] {
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+			let mut import = super::Import::new(broadcast, catalog.reserve()).with_passthrough(passthrough);
+			import.decode(&init).unwrap();
+			assert!(matches!(
+				import.decode(&fragment),
+				Err(crate::Error::Cmaf(super::Error::UnsupportedBaseDataOffset))
+			));
+		}
+		assert!(matches!(
+			super::decode(fragment.into(), None, super::Track::new(timescale, super::Kind::Video)),
+			Err(super::Error::UnsupportedBaseDataOffset)
+		));
 	}
 }
 

@@ -65,17 +65,22 @@ The simplest way to watch a stream:
 |------------------|----------------------------|---------------|------------------------------------------|
 | `url`            | string                     | required      | Relay server URL                         |
 | `name`           | string                     | required      | Broadcast name/path                      |
-| `versions`       | comma-separated list       | stable versions | Protocol versions to offer, most preferred first, like `moq-transport-14,moq-lite-06` |
+| `versions`       | comma-separated list       | stable versions | Protocol versions to offer, most preferred first, like `moq-transport-18,moq-lite-06` |
 | `paused`         | boolean                    | false         | Pause playback                           |
-| `muted`          | boolean                    | false         | Mute audio                               |
+| `muted`          | boolean                    | false         | Mute audio without changing volume       |
 | `visible`        | never, distance, or always | `20%`         | When to download video (see below)       |
-| `volume`         | number                     | 0.5           | Audio volume (0-1)                       |
+| `volume`         | number                     | 0.5           | Audio level (0-1), independent of mute    |
 | `backend`        | auto, webgpu, 2d           | `auto`        | Graphics API for the canvas. `auto` picks WebGPU where it can render video, else Canvas2D. |
 | `announced`      | boolean                    | true          | Wait for (re)announcement before subscribing. Ignored when the relay does not support broadcast discovery. |
 | `delay`          | `auto`, duration, `instant` | `auto`       | Distance from the live edge. `instant` paints frames as they decode and disables audio. |
 | `buffer`         | duration                   | `0ms`         | Future-dated media held before playback skips ahead. |
 | `captions`       | string                     | off           | Text rendition to render. |
 | `catalog-format` | hang, hangz, msf, manual   | auto-detected | The catalog format; detected from the name suffix unless set. `hangz` (compressed) is opt-in. |
+
+Property and built-in UI changes reflect into attributes. Invalid URLs, numbers, durations,
+version lists, and rendering/catalog modes are refused: their property setters throw, and malformed markup
+reports a browser `error` event and suspends media until corrected or removed. Defaults apply
+when attributes are absent.
 
 The `visible` attribute controls when the video track is downloaded, based on the canvas
 position relative to the viewport:

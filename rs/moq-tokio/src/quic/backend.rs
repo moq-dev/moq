@@ -469,7 +469,7 @@ impl Client {
 		let session = match url.scheme() {
 			"https" => {
 				let mut request = web::proto::ConnectRequest::new(url.clone());
-				for protocol in web_protocols(versions) {
+				for protocol in versions.alpns() {
 					request = request.with_protocol(protocol.to_string());
 				}
 				web::Session::connect(connection, request)
@@ -540,22 +540,6 @@ impl Error {
 			_ => None,
 		}
 	}
-}
-
-/// The WebTransport subprotocols to offer for `versions`.
-///
-/// Draft-14 predates WebTransport subprotocols: `moq-00` is only its QUIC ALPN, and a peer that
-/// accepts it over WebTransport picks draft-14 over a newer draft both support. It rides `moql`
-/// and negotiates in SETUP instead, as `js/net` does.
-fn web_protocols(versions: &moq_net::Versions) -> Vec<&'static str> {
-	let mut protocols = Vec::new();
-	for alpn in versions.alpns() {
-		let protocol = if alpn == "moq-00" { "moql" } else { alpn };
-		if !protocols.contains(&protocol) {
-			protocols.push(protocol);
-		}
-	}
-	protocols
 }
 
 fn map_client_error(err: web::ClientError) -> Error {
@@ -1061,16 +1045,6 @@ impl driver::ConnectionIdGenerator for ServerIdGenerator {
 mod tests {
 	use super::*;
 	use url::Url;
-
-	#[test]
-	fn web_protocols_never_offer_moq_00() {
-		let all = moq_net::Versions::all();
-		assert!(!web_protocols(&all).contains(&"moq-00"));
-		assert_eq!(web_protocols(&all).len(), all.alpns().len() - 1);
-
-		let draft14: moq_net::Version = "moq-transport-14".parse().unwrap();
-		assert_eq!(web_protocols(&draft14.into()), ["moql"]);
-	}
 
 	#[tokio::test]
 	async fn pinned_ipv6_connection() {

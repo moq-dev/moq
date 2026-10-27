@@ -2,7 +2,7 @@
 //! against it, and fill the output catalog with rung + passthrough entries.
 
 use hang::catalog::{AV1, Container, Video, VideoCodec, VideoConfig};
-use moq_net::path::RelativeOwned;
+use moq_net::path::Relative;
 use moq_video::decode::Codec;
 
 use crate::{Error, Ladder};
@@ -355,7 +355,7 @@ pub(crate) fn populate(
 	out: &mut moq_mux::catalog::hang::Catalog,
 	source: &moq_mux::catalog::hang::Catalog,
 	rungs: &[Published],
-	source_rel: Option<&RelativeOwned>,
+	source_rel: Option<&Relative>,
 ) -> Result<(), Error> {
 	out.video = Video::default();
 	out.audio = hang::catalog::Audio::default();
@@ -763,7 +763,7 @@ mod tests {
 		video.insert("low", source(640, 360, None)).unwrap();
 		video.insert("high", source(1920, 1080, None)).unwrap();
 		let mut remote = source(3840, 2160, None);
-		remote.broadcast = Some(RelativeOwned::from("./other".to_string()));
+		remote.broadcast = Some(Relative::new("./other").unwrap());
 		video.insert("remote", remote).unwrap();
 
 		let (name, config) = choose_source(&video, &mut decodes_all()).await.unwrap();
@@ -976,7 +976,7 @@ mod tests {
 		audio.jitter = Some(std::time::Duration::from_millis(20));
 		child.audio.insert("audio", audio.clone()).unwrap();
 
-		let rel = RelativeOwned::from(".".to_string());
+		let rel = Relative::new(".").unwrap();
 		let mut out = moq_mux::catalog::hang::Catalog::<()>::default();
 		populate(&mut out, &child, &[], Some(&rel)).unwrap();
 

@@ -1,4 +1,4 @@
-use crate::{Path, coding::*};
+use crate::{Path, coding::*, path::TooLong};
 
 fn to_tuple(namespace: &Path) -> Vec<String> {
 	let path = namespace.as_str();
@@ -28,7 +28,7 @@ fn to_tuple(namespace: &Path) -> Vec<String> {
 	parts
 }
 
-fn from_tuple(parts: &[&str]) -> Path<'static> {
+fn from_tuple(parts: &[&str]) -> Result<Path, TooLong> {
 	// Sized for the common case of no escapes, so building it rarely grows.
 	let mut path = String::with_capacity(parts.iter().map(|part| part.len() + 1).sum());
 	for (i, part) in parts.iter().enumerate() {
@@ -70,11 +70,11 @@ const MAX_BYTES: usize = 4096;
 ///
 /// Every limit here closes the session as a PROTOCOL_VIOLATION (draft-22 section 8.7):
 /// more than 32 fields, an empty field, or more than 4096 bytes.
-fn decode_fields(r: &mut Decoder<'_>) -> Result<(Path<'static>, usize), DecodeError> {
+fn decode_fields(r: &mut Decoder<'_>) -> Result<(Path, usize), DecodeError> {
 	let count = r.varint()?;
 
 	if count == 0 {
-		return Ok((Path::from(String::new()), 0));
+		return Ok((Path::empty(), 0));
 	}
 
 	if count > Path::MAX_PARTS as u64 {
@@ -96,16 +96,16 @@ fn decode_fields(r: &mut Decoder<'_>) -> Result<(Path<'static>, usize), DecodeEr
 		}
 	}
 
-	Ok((from_tuple(parts), size))
+	Ok((from_tuple(parts)?, size))
 }
 
 /// Decode a Track Namespace.
-pub fn decode_namespace(r: &mut Decoder<'_>) -> Result<Path<'static>, DecodeError> {
+pub fn decode_namespace(r: &mut Decoder<'_>) -> Result<Path, DecodeError> {
 	Ok(decode_fields(r)?.0)
 }
 
 /// Decode a Full Track Name: a Track Namespace, then a Track Name, at most 4096 bytes together.
-pub fn decode_track(r: &mut Decoder<'_>) -> Result<(Path<'static>, String), DecodeError> {
+pub fn decode_track(r: &mut Decoder<'_>) -> Result<(Path, String), DecodeError> {
 	let (namespace, size) = decode_fields(r)?;
 	let name = r.string()?;
 	if size + name.len() > MAX_BYTES {
@@ -116,14 +116,7 @@ pub fn decode_track(r: &mut Decoder<'_>) -> Result<(Path<'static>, String), Deco
 
 /// Session namespaces belong to the transport, and none of our extensions defines one.
 pub(super) fn refusal(namespace: &Path, version: super::Version) -> Option<super::RequestError<'static>> {
-	if matches!(
-		version,
-		super::Version::Draft14
-			| super::Version::Draft15
-			| super::Version::Draft16
-			| super::Version::Draft17
-			| super::Version::Draft18
-	) {
+	if matches!(version, super::Version::Draft18) {
 		return None;
 	}
 	// Reserved literals contain no escapes. Comparing the first escaped field keeps
@@ -132,7 +125,6 @@ pub(super) fn refusal(namespace: &Path, version: super::Version) -> Option<super
 		return None;
 	}
 	Some(super::RequestError {
-		request_id: None,
 		error_code: super::error::request::to_code(
 			&crate::Error::NotFound,
 			super::error::request::Kind::Subscribe,
@@ -159,7 +151,7 @@ mod tests {
 			(vec![".application"], false),
 			(vec![".sessionish"], false),
 		] {
-			let path = from_tuple(&fields);
+			let path = from_tuple(&fields).unwrap();
 			assert_eq!(
 				refusal(&path, super::super::Version::Draft22).is_some(),
 				reserved,
@@ -170,19 +162,19 @@ mod tests {
 	}
 	use crate::coding::Form;
 
-	const FORM: Form = Form::LeadingOnes { seven: false };
+	const FORM: Form = Form::LeadingOnes;
 
 	fn encode_ns(path: &str) -> Vec<u8> {
-		encode_path(&Path::from(path.to_string()))
+		encode_path(&crate::Path::try_from(path.to_string()).unwrap())
 	}
 
-	fn encode_path(path: &Path<'_>) -> Vec<u8> {
+	fn encode_path(path: &Path) -> Vec<u8> {
 		let mut buf = Vec::new();
 		encode_namespace(&mut Encoder::new(&mut buf, FORM), path).unwrap();
 		buf
 	}
 
-	fn decode_ns(bytes: &[u8]) -> Path<'static> {
+	fn decode_ns(bytes: &[u8]) -> Path {
 		decode_namespace(&mut Decoder::new(bytes, FORM)).unwrap()
 	}
 

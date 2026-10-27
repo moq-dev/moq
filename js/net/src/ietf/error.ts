@@ -1,9 +1,9 @@
 /**
  * The moq-transport error code registries, per negotiated draft.
  *
- * A code only means something once you know which draft carried it: the registries grew,
- * moved values, and in draft-15 collapsed five per-message tables into one. Mirrors the
- * Rust `moq_net::ietf::error` module, and the two have to agree value for value.
+ * Draft-22 added INVALID_FILTER and removed INVALID_JOINING_REQUEST_ID; the rest
+ * holds from draft-18 on. Mirrors the Rust `moq_net::ietf::error` module, and the two have
+ * to agree value for value.
  *
  * @module
  */
@@ -11,58 +11,23 @@
 import { type IetfVersion, Version } from "./version.ts";
 
 /**
- * Whether `code` means the same thing in the negotiated draft's stream reset registry as it
- * does in moq-lite's.
+ * Whether `code` means the same thing in the moq-transport stream reset registry as it does
+ * in moq-lite's.
  *
- * The two registries agree on most of what they both assign, but this one grew across the
- * drafts we negotiate and moved a value on the way:
- *
- * | Code | draft-14/15 | draft-16/17 | draft-18+ |
- * |------|-------------|-------------|-----------|
- * | 0x0  | INTERNAL_ERROR | INTERNAL_ERROR | INTERNAL_ERROR |
- * | 0x1  | CANCELLED | CANCELLED | CANCELLED |
- * | 0x2  | DELIVERY_TIMEOUT | DELIVERY_TIMEOUT | DELIVERY_TIMEOUT |
- * | 0x3  | SESSION_CLOSED | SESSION_CLOSED | SESSION_CLOSED |
- * | 0x4  | - | UNKNOWN_OBJECT_STATUS | GOING_AWAY |
- * | 0x5  | - | TOO_FAR_BEHIND (17) | TOO_FAR_BEHIND |
- * | 0x12 | - | MALFORMED_TRACK | MALFORMED_TRACK |
- *
- * So GOING_AWAY sent to a draft-17 peer reads as UNKNOWN_OBJECT_STATUS, and that peer's
- * UNKNOWN_OBJECT_STATUS read as GOING_AWAY would retire a session that is not going
- * anywhere. Anything this says `false` about is sent as, and read as, INTERNAL_ERROR: the
- * codes moq-lite assigns in its own 48-63 range, and the ones the draft assigns that
- * moq-lite has no name for (UNKNOWN_OBJECT_STATUS, EXPIRED_AUTH_TOKEN, EXCESSIVE_LOAD).
+ * The two agree on 0x0-0x5 (INTERNAL_ERROR, CANCELLED, DELIVERY_TIMEOUT, SESSION_CLOSED,
+ * GOING_AWAY, TOO_FAR_BEHIND) and 0x12 (MALFORMED_TRACK). Anything else is sent as, and read
+ * as, INTERNAL_ERROR: the codes moq-lite assigns in its own 48-63 range, and the ones the
+ * draft assigns that moq-lite has no name for (UNKNOWN_OBJECT_STATUS, EXPIRED_AUTH_TOKEN,
+ * EXCESSIVE_LOAD).
  *
  * @internal
  */
-export function sharedStreamCode(code: number, version: IetfVersion): boolean {
-	switch (code) {
-		case 0x0:
-		case 0x1:
-		case 0x2:
-		case 0x3:
-			return true;
-		// Draft-16 and 17 give 0x4 to UNKNOWN_OBJECT_STATUS, which draft-18 moved to 0x6 when
-		// it took 0x4 for GOING_AWAY. Draft-14 and 15 assign it nothing.
-		case 0x4:
-			return version >= Version.DRAFT_18;
-		// TOO_FAR_BEHIND arrived in draft-17.
-		case 0x5:
-			return version >= Version.DRAFT_17;
-		// MALFORMED_TRACK arrived in draft-16.
-		case 0x12:
-			return version >= Version.DRAFT_16;
-		default:
-			return false;
-	}
+export function sharedStreamCode(code: number): boolean {
+	return (code >= 0x0 && code <= 0x5) || code === 0x12;
 }
 
 /**
- * Which request a rejection answers, so draft-14 picks the right registry.
- *
- * Draft-14 gives each error message its own registry and they disagree about 0x4; draft-15
- * folded them all into REQUEST_ERROR with a single registry, so from there on the kind
- * changes nothing.
+ * Which request a rejection answers: some codes are registered for only some requests.
  *
  * @internal
  */
@@ -113,79 +78,26 @@ const UNAUTHORIZED = 0x1;
 const TIMEOUT = 0x2;
 const NOT_SUPPORTED = 0x3;
 
-/** A draining session. Draft-17 and later. */
 const GOING_AWAY = 0x6;
+const MALFORMED_AUTH_TOKEN = 0x4;
+const EXPIRED_AUTH_TOKEN = 0x5;
+const DOES_NOT_EXIST = 0x10;
+const MALFORMED_TRACK = 0x12;
+const UNINTERESTED = 0x20;
 
 /** FETCH-only errors. Draft-22 has no INVALID_JOINING_REQUEST_ID. */
-const INVALID_RANGE_14 = 0x5;
 const INVALID_RANGE = 0x11;
-const INVALID_JOINING_REQUEST_ID_14 = 0x7;
 const INVALID_JOINING_REQUEST_ID = 0x32;
 
-function invalidRange(kind: RequestKind, version: IetfVersion): number | undefined {
-	if (kind !== "fetch") return undefined;
-	return version === Version.DRAFT_14 ? INVALID_RANGE_14 : INVALID_RANGE;
+/** Draft-22 added it. */
+const INVALID_FILTER = 0x36;
+
+function invalidRange(kind: RequestKind): number | undefined {
+	return kind === "fetch" ? INVALID_RANGE : undefined;
 }
 
 function invalidJoiningRequestId(kind: RequestKind, version: IetfVersion): number | undefined {
-	if (kind !== "fetch") return undefined;
-	if (version === Version.DRAFT_14) return INVALID_JOINING_REQUEST_ID_14;
-	return version <= Version.DRAFT_18 ? INVALID_JOINING_REQUEST_ID : undefined;
-}
-
-/** Draft-14 calls it TRACK_DOES_NOT_EXIST; draft-15 renamed it and moved it off 0x4. */
-const DOES_NOT_EXIST_14 = 0x4;
-const DOES_NOT_EXIST = 0x10;
-
-/** Draft-14 assigns UNINTERESTED only to the two requests that offer content. */
-const UNINTERESTED_14 = 0x4;
-const UNINTERESTED = 0x20;
-
-/** Draft-14 assigns MALFORMED_TRACK to FETCH_ERROR only. */
-const MALFORMED_TRACK_14 = 0x9;
-const MALFORMED_TRACK = 0x12;
-
-/** The value for "the thing you asked for is not here", or undefined where none is assigned. */
-function doesNotExist(kind: RequestKind, version: IetfVersion): number | undefined {
-	if (version !== Version.DRAFT_14) return DOES_NOT_EXIST;
-	return kind === "subscribe" || kind === "fetch" || kind === "track_status" ? DOES_NOT_EXIST_14 : undefined;
-}
-
-/** The value for "we do not want this", or undefined where none is assigned. */
-function uninterested(kind: RequestKind, version: IetfVersion): number | undefined {
-	if (version !== Version.DRAFT_14) return UNINTERESTED;
-	return kind === "publish" || kind === "publish_namespace" ? UNINTERESTED_14 : undefined;
-}
-
-/** The value for a track we could not parse, or undefined where none is assigned. */
-function malformedTrack(kind: RequestKind, version: IetfVersion): number | undefined {
-	if (version !== Version.DRAFT_14) return MALFORMED_TRACK;
-	return kind === "fetch" ? MALFORMED_TRACK_14 : undefined;
-}
-
-/** Draft-15 swapped MALFORMED_AUTH_TOKEN and the missing-track code. */
-const MALFORMED_AUTH_TOKEN_14 = 0x10;
-const MALFORMED_AUTH_TOKEN = 0x4;
-
-/** The value for an unusable token, or undefined where none is assigned: draft-14 PUBLISH_ERROR. */
-function malformedAuthToken(kind: RequestKind, version: IetfVersion): number | undefined {
-	if (version !== Version.DRAFT_14) return MALFORMED_AUTH_TOKEN;
-	return kind === "publish" ? undefined : MALFORMED_AUTH_TOKEN_14;
-}
-
-/** Draft-15 moved EXPIRED_AUTH_TOKEN off 0x12, which became MALFORMED_TRACK. */
-const EXPIRED_AUTH_TOKEN_14 = 0x12;
-const EXPIRED_AUTH_TOKEN = 0x5;
-
-/** The value for an expired token, or undefined where none is assigned: draft-14 PUBLISH_ERROR. */
-function expiredAuthToken(kind: RequestKind, version: IetfVersion): number | undefined {
-	if (version !== Version.DRAFT_14) return EXPIRED_AUTH_TOKEN;
-	return kind === "publish" ? undefined : EXPIRED_AUTH_TOKEN_14;
-}
-
-/** The value for a draining session, or undefined before draft-17 registered one. */
-function goingAway(version: IetfVersion): number | undefined {
-	return version >= Version.DRAFT_17 ? GOING_AWAY : undefined;
+	return kind === "fetch" && version <= Version.DRAFT_18 ? INVALID_JOINING_REQUEST_ID : undefined;
 }
 
 /**
@@ -193,45 +105,41 @@ function goingAway(version: IetfVersion): number | undefined {
  *
  * A condition the draft does not register for this request falls back to INTERNAL_ERROR
  * rather than borrowing a number from another draft, which would say something the peer's
- * registry gives a different meaning. The renumbering is the trap: draft-14 SUBSCRIBE_ERROR
- * gives 0x4 to TRACK_DOES_NOT_EXIST and 0x10 to MALFORMED_AUTH_TOKEN, and draft-15 swaps
- * the two.
+ * registry gives a different meaning.
  *
  * @internal
  */
 export function toRequestCode(condition: RequestCondition, kind: RequestKind, version: IetfVersion): number {
 	switch (condition) {
 		case "invalid_filter":
-			return version >= Version.DRAFT_22 ? 0x36 : INTERNAL_ERROR;
+			return version >= Version.DRAFT_22 ? INVALID_FILTER : INTERNAL_ERROR;
 		case "internal":
 			return INTERNAL_ERROR;
 		case "unauthorized":
 			return UNAUTHORIZED;
 		case "expired":
-			return expiredAuthToken(kind, version) ?? INTERNAL_ERROR;
+			return EXPIRED_AUTH_TOKEN;
 		case "timeout":
 			return TIMEOUT;
 		case "not_supported":
 			return NOT_SUPPORTED;
 		case "invalid_range":
-			return invalidRange(kind, version) ?? INTERNAL_ERROR;
+			return invalidRange(kind) ?? INTERNAL_ERROR;
 		case "invalid_joining_request_id":
 			return invalidJoiningRequestId(kind, version) ?? INTERNAL_ERROR;
 		case "does_not_exist":
-			return doesNotExist(kind, version) ?? INTERNAL_ERROR;
+			return DOES_NOT_EXIST;
 		// A subscriber that asked for content cannot act on "we do not want it": what it needs
 		// to know is that we do not have it, which is the same refusal from its side. Only the
 		// requests that offer content say UNINTERESTED.
 		case "uninterested":
-			return kind === "subscribe" || kind === "fetch" || kind === "track_status"
-				? (doesNotExist(kind, version) ?? INTERNAL_ERROR)
-				: (uninterested(kind, version) ?? INTERNAL_ERROR);
+			return kind === "subscribe" || kind === "fetch" || kind === "track_status" ? DOES_NOT_EXIST : UNINTERESTED;
 		case "malformed_track":
-			return malformedTrack(kind, version) ?? INTERNAL_ERROR;
+			return MALFORMED_TRACK;
 		case "malformed_auth_token":
-			return malformedAuthToken(kind, version) ?? INTERNAL_ERROR;
+			return MALFORMED_AUTH_TOKEN;
 		case "going_away":
-			return goingAway(version) ?? INTERNAL_ERROR;
+			return GOING_AWAY;
 	}
 }
 
@@ -253,14 +161,14 @@ export function fromRequestCode(code: number, kind: RequestKind, version: IetfVe
 			return "not_supported";
 	}
 
-	if (code === 0x36 && version >= Version.DRAFT_22) return "invalid_filter";
-	if (code === doesNotExist(kind, version)) return "does_not_exist";
-	if (code === invalidRange(kind, version)) return "invalid_range";
+	if (code === INVALID_FILTER && version >= Version.DRAFT_22) return "invalid_filter";
+	if (code === DOES_NOT_EXIST) return "does_not_exist";
+	if (code === invalidRange(kind)) return "invalid_range";
 	if (code === invalidJoiningRequestId(kind, version)) return "invalid_joining_request_id";
-	if (code === expiredAuthToken(kind, version)) return "expired";
-	if (code === uninterested(kind, version)) return "uninterested";
-	if (code === malformedTrack(kind, version)) return "malformed_track";
-	if (code === goingAway(version)) return "going_away";
+	if (code === EXPIRED_AUTH_TOKEN) return "expired";
+	if (code === UNINTERESTED) return "uninterested";
+	if (code === MALFORMED_TRACK) return "malformed_track";
+	if (code === GOING_AWAY) return "going_away";
 	return undefined;
 }
 

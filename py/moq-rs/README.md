@@ -158,17 +158,18 @@ client = moq.Client(
   - `.publish() → OriginProducer`, `.consume() → OriginConsumer`. The wired origin sides.
   - `.stats() → ConnectionStats`. Snapshot RTT, bandwidth estimates, and byte/packet counters.
   - `.state()` and `await .state_changed(after)`. Read one lifecycle snapshot and wait with its revision; first-dial failures and reconnects share the same session.
-  - `.bandwidth() → Bandwidth`. Divide the send estimate between encoders and app-owned tracks.
-  - `.auth() → Auth`. On `moq-lite-07-wip` and on moq-transport draft-17+ with the MoQ Auth extension, `.grant()` reads the peer's `Grant` and `await .add(token) → AuthToken` presents a fresh token without reconnecting.
+  - `.allocator() → Allocator`. Divide the send estimate between encoders and app-owned tracks.
+  - `.grants() → GrantConsumer`. On `moq-lite-07-wip` and on moq-transport draft-18+ with the MoQ Auth extension, `.grant()` reads the peer's `Grant` and `async for grant in session.grants()` follows it.
+  - `.tokens() → Tokens | None`. A client session's credentials: `.set([...])` replaces them without reconnecting and `await .answered()` raises the relay's refusal.
 
 ### Publishing
 
 - **`BroadcastProducer()`**. Create a broadcast to publish tracks into.
-  - `.dynamic() → BroadcastDynamic`
+  - `.requests() → BroadcastRequests`
   - `moq.video.Producer(media.CatalogProducer(broadcast), input, output, *, track=None, bandwidth=None)`. Encode raw video frames inside the binding.
   - `moq.audio.Producer(media.CatalogProducer(broadcast), input, output, *, track=None, bandwidth=None)`. Encode raw PCM frames. A zero frame duration uses the codec's own frame.
   - `.close()` ends the broadcast for good; a second call is a no-op.
-- **`BroadcastDynamic`**. Async source of tracks requested by subscribers.
+- **`BroadcastRequests`**. Async source of tracks requested by subscribers.
   - `await .requested_track() → TrackRequest`. Call `.accept()` on it for a `TrackProducer`, or `.abort(code)` to reject.
   - Async iterator yielding `TrackRequest`
 - **`TrackProducer` / `GroupProducer`**. Write raw payloads with no codec parsing.
@@ -238,15 +239,15 @@ Omitting time leaves data untimed; choose the track's `timescale` to match.
 - **`GroupConsumer`**. Async iterator of raw `Frame`s.
   - `.read_frame() -> Frame | None` returns a raw frame with optional capture time.
 
-Every handle whose cleanup is `cancel()` is an async context manager, so exiting `async with` releases it: the consumers (`media.CatalogConsumer`, `media.TrackConsumer`, `media.GroupConsumer`, `TrackConsumer`, `audio.Consumer`, `video.Consumer`, `GroupConsumer`, `json.SnapshotConsumer`, `json.StreamConsumer`, `json.WindowConsumer`, `AnnounceConsumer`, `AnnouncedBroadcast`) and the dynamic sources (`OriginDynamic`, `BroadcastDynamic`, `TrackDynamic`).
+Every handle whose cleanup is `cancel()` is an async context manager, so exiting `async with` releases it: the consumers (`media.CatalogConsumer`, `media.TrackConsumer`, `media.GroupConsumer`, `TrackConsumer`, `audio.Consumer`, `video.Consumer`, `GroupConsumer`, `json.SnapshotConsumer`, `json.StreamConsumer`, `json.WindowConsumer`, `AnnounceConsumer`, `AnnouncedBroadcast`) and the dynamic sources (`OriginRequests`, `BroadcastRequests`, `TrackRequests`).
 
 ### Origin (advanced)
 
 - **`OriginProducer(*, cache_capacity_bytes=None)`**. Manage broadcast announcements. Set `cache_capacity_bytes` to bound cached groups under this origin.
   - `.consume() → OriginConsumer`
-  - `.dynamic(prefix) → OriginDynamic`
+  - `.requests(prefix) → OriginRequests`
   - `.create_broadcast(path) → BroadcastProducer`
-- **`OriginDynamic`**. Async source of broadcasts requested by consumers.
+- **`OriginRequests`**. Async source of broadcasts requested by consumers.
   - `await .requested_broadcast() → BroadcastRequest`. Call `.prepare(mint_epoch())`, fill its `.broadcast`, then `.publish()` to serve it under a new epoch, or `.reject(code)` to fail the requester.
   - Async iterator yielding `BroadcastRequest`
 - **`OriginConsumer`**. Discover broadcasts.

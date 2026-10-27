@@ -12,7 +12,7 @@ against any moq-transport relay (including
 implement in an afternoon. The wire spec is
 [draft-lcurley-moq-lite](/draft/moq-lite).
 
-Rust and TypeScript speak moq-lite 01 through 06 and moq-transport drafts 14
+Rust and TypeScript speak moq-lite 01 through 06 and moq-transport drafts 18
 through 22. Clients offer `moq-lite-06` first. moq-lite 07 is still in progress
 (`moq-lite-07-wip`, and only when both sides enable it). It is the version that
 carries [publisher epochs](#publisher-epochs).
@@ -116,10 +116,13 @@ authorization and hidden names work exactly as without one.
   without an epoch keeps its subscriptions until that route goes, and a track
   that fails ends instead of resuming, so request the path again.
 - **Another instance restarts.** A newer epoch, or, without one, another route
-  winning the path, is announced as a restart. Subscriptions already open stay
-  on the old instance until dropped or none of its routes remain, which ends
-  them with an error, while new requests get the new one, so a player follows
-  the restart by requesting the path again.
+  winning the path, is announced as a restart. Subscriptions already answered
+  stay on the old instance until dropped or none of its routes remain, which
+  ends them with an error, while new requests get the new one, so a player
+  follows the restart by requesting the path again. Without an epoch, a request
+  still unanswered when another instance takes the path, even after a
+  withdrawal, ends the same way, since that instance may be the one answering
+  it. A withdrawal alone leaves it to its answer.
   Held handles can still read their old cached content while a subscription
   on the old instance stays open, but cannot open new epochless requests once
   the restart is delivered. Request the path again for
@@ -129,11 +132,11 @@ authorization and hidden names work exactly as without one.
   of the old instance, so a new subscriber never sees its cached groups.
 
 The epoch and the restart message travel on moq-lite 07, which is opt-in.
-moq-transport carries the epoch from draft 17 when both sides offer the [epoch
+moq-transport carries the epoch when both sides offer the [epoch
 extension](/draft/moq-epoch), on by default. A restart onto another epoch is
 advertised before the old one is withdrawn, so the path is never absent, and one
-that gains or loses an epoch is an end then a start. Older moq-lite versions,
-older moq-transport drafts, and a side that declines the extension carry no
+that gains or loses an epoch is an end then a start. Older moq-lite versions
+and a side that declines the extension carry no
 epoch. Without an epoch, any other route winning is a restart, even a reconnect
 over the same path, since nothing says it serves the same bytes. A peer that
 ignores the end and start may keep cached objects of the old run under the same
@@ -155,7 +158,7 @@ compared. A subscription uses the preferred link that has a route and moves to t
 next when that route goes; a publisher pushes the same broadcast to every CDN.
 
 The move resumes without a seam only between routes with the same epoch, which
-needs moq-lite 07, or moq-transport draft 17 or later with the epoch extension,
+needs moq-lite 07, or moq-transport with the epoch extension,
 on both links. A CDN link that carries no epoch makes moving onto it, or back
 off it, a restart, and the player requests the path again. Both links must
 also speak the same protocol and draft: a copy's track info records the
@@ -228,13 +231,12 @@ code and the session stays up. A client that publishes outside its grant closes
 the session with `UNAUTHORIZED`, naming the path. A session whose last
 credential expires closes with `EXPIRED_AUTH_TOKEN` instead: refresh the token
 and reconnect, rather than treating the credential as invalid. moq-transport carries the same
-exchange on draft-17+ through the [MoQ Auth extension](/draft/moq-auth), with
+exchange through the [MoQ Auth extension](/draft/moq-auth), with
 the same patterns. Older versions have no grant; the URL token keeps working
 everywhere. On moq-transport an added token is kept even without the extension,
 so an announcement can name it: it rides that `PUBLISH_NAMESPACE` as its
 authorization token. Naming a fresh token renews the announcement in place with
-`REQUEST_UPDATE` from draft 16, and re-announces it on drafts 14 and 15, so it
-can outlive the token it started with. A token added to a reconnecting
+`REQUEST_UPDATE`, so it can outlive the token it started with. A token added to a reconnecting
 connection's auth handle is presented on every session it makes, so the
 announcement keeps it across a reconnect with no re-add or re-announce; one
 added to a single session's handle ends with that session. moq-lite has no
@@ -288,9 +290,12 @@ evicted after the subscriber saw it cached, but before it read it, is skipped. A
 moq-lite-07 carries range by range and older wire versions as the single span
 covering them. A relative or time anchor resolves on the hop that publishes the
 track, and over moq-lite-07, which carries a relative or time start upstream and
-reports the live edge and media time, so a copy resolves the ends itself. Over an older lite or any moq-transport version, a subscriber gets every
-anchor but the live and default starts refused as unsupported, and an untimed
-track refuses a time anchor. At the live edge, a time end
+reports the live edge and media time, so a copy resolves the ends itself. A Rust
+moq-transport copy accepts anchors its cache can already
+resolve and sends group bounds upstream; it refuses an unknown time end. Older
+moq-lite versions accept absolute anchors but refuse time anchors and relative anchors other
+than the live and default starts. An untimed track refuses a time anchor. At the live
+edge, a time end
 may let one group through before its first frame shows it starts past the end:
 the first group that has yet to start is handed out without waiting for that
 frame, and the next one waits on it. A datagram is judged by its own timestamp.
@@ -314,7 +319,7 @@ across its subscribers.
 A track is timed or untimed: it declares a timescale or none, and a frame that
 doesn't match is refused. No receiver fills in an arrival time, so an untimed
 track is judged by the wall clock alone. Tracks from moq-lite before 05, or from
-moq-transport without a `TIMESCALE` (every track on drafts 14-16), arrive
+moq-transport without a `TIMESCALE`, arrive
 untimed. moq-lite 05 and 06 cannot declare an untimed track, so there its
 frames go out stamped with their send time; the work-in-progress 07 carries it
 untimed.

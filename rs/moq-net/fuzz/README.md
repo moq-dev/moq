@@ -40,12 +40,13 @@ symbol stripping. Prefix direct calls with
 
 Beyond "does not panic":
 
+- A short decode requires more outer input. A field running short inside a complete
+  length-prefixed body is malformed and cannot ask for bytes from the next message.
 - Whatever we encode, we decode back, consuming every byte. The peer's decoder is this
   same code, so emitting something we would reject is a bug on the wire.
 - Encoding is stable: encode, decode, encode again yields identical bytes. Skipped
   where a parameter map reaches the wire, since those encoders walk a `HashMap` and its
-  iteration order differs per instance (moq-lite SETUP, and draft-14/15, which unlike
-  draft-16+ do not sort by key first).
+  iteration order differs per instance (moq-lite SETUP).
 - A lite-07 announce stream our decoder accepts, recompressed by our encoder, resolves
   to the same announcements.
 - Setup Options a client accepts from its server, a server accepts from its client: only
@@ -53,8 +54,9 @@ Beyond "does not panic":
 - `Path::relative` inverts `Path::resolve`, and never produces a reference that walks
   above the root.
 
-A decode that fails is not a finding, and neither is an encode that fails: a value can
-decode at a version that cannot express it again.
+A refused decode is not a finding unless it asks for more bytes despite a complete
+body. An encode failure is legitimate: a value can decode at a version that cannot
+express it again.
 
 ## When something crashes
 

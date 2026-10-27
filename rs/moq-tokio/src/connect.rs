@@ -8,10 +8,6 @@ use crate::connection::Goaway;
 use std::net;
 use url::Url;
 
-mod token;
-pub(crate) use token::{Credential, Set};
-pub use token::{EmptyToken, Token, Tokens};
-
 /// Maximum time for one dial, unless overridden by `--connect-timeout`.
 pub(crate) const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -219,10 +215,6 @@ pub(crate) struct Legacy {
 			"moq-lite-05",
 			"moq-lite-06",
 			"moq-lite-07-wip",
-			"moq-transport-14",
-			"moq-transport-15",
-			"moq-transport-16",
-			"moq-transport-17",
 			"moq-transport-18",
 			"moq-transport-22"
 		),
@@ -517,7 +509,7 @@ pub struct Config {
 	/// while an offered version can't carry it in SETUP (lite before 07). Each other
 	/// token rides its own AUTH stream, widening the session's grant. A URL that
 	/// already has a `?jwt=` keeps it as the connection credential, and then every
-	/// token rides AUTH. Replace them while running through `Client::tokens`.
+	/// token rides AUTH. Replace a connection's through `Connection::tokens`.
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	#[usage(
 		name = "connect-token",
@@ -525,7 +517,7 @@ pub struct Config {
 		env = "MOQ_CONNECT_TOKEN",
 		setting = "connect.tokens"
 	)]
-	pub tokens: Vec<Token>,
+	pub tokens: Vec<moq_net::auth::Token>,
 
 	/// The released `connect` key, kept so [`deprecated`](Self::deprecated) can name [`url`](Self::url).
 	#[serde(default, skip_serializing)]
@@ -624,10 +616,6 @@ pub struct Config {
 			"moq-lite-05",
 			"moq-lite-06",
 			"moq-lite-07-wip",
-			"moq-transport-14",
-			"moq-transport-15",
-			"moq-transport-16",
-			"moq-transport-17",
 			"moq-transport-18",
 			"moq-transport-22"
 		)

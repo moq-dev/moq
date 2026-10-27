@@ -3,7 +3,7 @@
  *
  * @module
  */
-import { Group as NetGroup, type Track as NetTrack, type Time } from "@moq/net";
+import type { Group as NetGroup, Track as NetTrack, Time } from "@moq/net";
 import type { Event } from "./datagram.ts";
 import { checkU53 } from "./derive.ts";
 import { Failure } from "./failure.ts";
@@ -58,8 +58,7 @@ export class Producer {
 		this.#writable();
 		this.#reserve(sequence);
 		this.#next = sequence + 1;
-		const inner = new NetGroup.Producer(sequence);
-		this.#inner.writeGroup(inner);
+		const inner = this.#inner.createGroup(sequence);
 		return Group.Producer.make(inner, this.#writer);
 	}
 
@@ -107,11 +106,14 @@ export class Producer {
 		this.#writer.closed = true;
 		if (abort) {
 			this.#writer.aborted = abort;
-			this.#inner.close(abort);
+			this.#inner.abort(abort);
 			return;
 		}
 		void this.#writer.pump.run(() => {
-			if (!this.#writer.aborted) this.#inner.close();
+			if (!this.#writer.aborted) {
+				this.#inner.finish();
+				this.#inner.close();
+			}
 		});
 	}
 
