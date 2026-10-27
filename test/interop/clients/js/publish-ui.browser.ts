@@ -464,3 +464,46 @@ test("version lists refuse unsupported, duplicate, and empty lists and snapshot 
 		await server.close();
 	}
 }, 30_000);
+
+test("the watch volume slider corrects a refused volume attribute", async () => {
+	const server = await createServer({
+		configFile: false,
+		root: `${import.meta.dir}/publish-ui`,
+		plugins: [worklet()],
+		server: { host: "127.0.0.1", port: 0 },
+	});
+	await server.listen();
+	const browser = await launch();
+	try {
+		const page = await browser.newPage();
+		await page.goto(server.resolvedUrls?.local[0] ?? "");
+		const refused = await page.evaluate(async () => {
+			await customElements.whenDefined("moq-watch-ui");
+			window.addEventListener("error", (event) => event.preventDefault());
+			const ui = document.createElement("moq-watch-ui");
+			const watch = document.createElement("moq-watch");
+			watch.setAttribute("volume", "loud");
+			ui.append(watch);
+			document.body.append(ui);
+			return watch.connection.enabled.peek();
+		});
+		expect(refused).toBe(false);
+		const slider = await page.waitForFunction(() =>
+			document.querySelector("moq-watch-ui")?.shadowRoot?.querySelector<HTMLInputElement>(".volume-track"),
+		);
+		await slider.evaluate((input) => {
+			if (!input) throw new Error("missing volume slider");
+			input.value = "80";
+			input.dispatchEvent(new Event("input"));
+		});
+		await page.waitForFunction(
+			() => document.querySelector("moq-watch")?.getAttribute("volume") === "0.8",
+			undefined,
+			{ timeout: 5000 },
+		);
+		expect(await page.evaluate(() => document.querySelector("moq-watch")?.connection.enabled.peek())).toBe(true);
+	} finally {
+		await browser.close();
+		await server.close();
+	}
+}, 30_000);
