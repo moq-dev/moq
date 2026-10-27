@@ -56,7 +56,7 @@ export class Emitter {
 			paused: getter(props?.paused ?? false),
 		};
 
-		// Only download while playing audible audio. Pausing or muting stops it.
+		// Only download while playing and unmuted. Volume is an independent output level.
 		this.#signals.run((effect) => {
 			const enabled = !effect.get(this.in.paused) && !effect.get(this.in.muted);
 			this.#out.enabled.set(enabled);
@@ -68,7 +68,7 @@ export class Emitter {
 
 			// Seed the level without subscribing: rebuilding the node on a volume change would jump
 			// straight to the new level and skip the fade below.
-			const gain = new GainNode(root.context, { gain: this.in.volume.peek() });
+			const gain = new GainNode(root.context, { gain: this.in.muted.peek() ? 0 : this.in.volume.peek() });
 			root.connect(gain);
 
 			effect.set(this.#gain, gain);
@@ -98,7 +98,7 @@ export class Emitter {
 			});
 
 			// Linear, like the publisher's gain: an exponential ramp can't start from or reach silence.
-			const volume = effect.get(this.in.volume);
+			const volume = effect.get(this.in.muted) ? 0 : effect.get(this.in.volume);
 			gain.gain.linearRampToValueAtTime(volume, gain.context.currentTime + Milli.toSecond(FADE));
 		});
 	}
