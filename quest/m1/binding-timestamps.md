@@ -62,11 +62,12 @@ on the generated C package: the hand-written `moq-c` ships at this cut with
 parity to moq-ffi for every m1 binding feature, so the moq-c half lands
 there, and the generated C line follows after the cut.
 
-Decided 2026-10-27 (maintainer): "untimed as absent" is needed only on the
-read side, and only until the cut, when
+Decided 2026-10-27 (maintainer): producer arguments keep an optional
+timestamp until the cut, so producers may still write untimed frames. Reads
+keep "untimed as absent" until then too. At the cut
 [time addressing](/quest/m1/time-addressing/README.md) makes every track
-timed; [bindings by start](/quest/m1/time-addressing/bindings.md) then drops
-that `Option` for reads.
+timed, and [bindings by start](/quest/m1/time-addressing/bindings.md) drops
+that `Option` from reads only.
 
 Wall and monotonic times stay `moq_clock::Wall` and `moq_clock::Instant`, not
 media timestamps; keep the types distinct.
