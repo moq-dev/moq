@@ -20,6 +20,7 @@
 		"release": "bun ../common/release.ts"
 	},
 	"devDependencies": {
+		"@microsoft/api-extractor": "7.59.4",
 		"@types/bun": "^1.4.3",
 		"rimraf": "^6.1.3",
 		"typescript": "7.0.2"

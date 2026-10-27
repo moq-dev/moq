@@ -1242,7 +1242,7 @@ it("a rejected audio support probe does not leave buffered video waiting on a pe
 	const remove = sync.register(new Signal(Milli(100)), new Signal({ start: Milli(0), end: Milli(100) }));
 	let reject!: (error: Error) => void;
 	const failure = new Error("audio support probe failed");
-	const logged = spyOn(console, "error").mockImplementation(() => {});
+	const logged = spyOn(console, "warn").mockImplementation(() => {});
 	const source = new Source({
 		broadcast: {
 			in: { enabled: new Signal(true) },
@@ -1274,7 +1274,7 @@ it("a rejected audio support probe does not leave buffered video waiting on a pe
 		expect(sync.playing.peek()).toBe(false);
 		reject(failure);
 		await microtasks();
-		expect(logged).toHaveBeenCalledWith("spawn error", failure);
+		expect(source.out.available.peek()).toEqual({});
 		expect(source.pending.peek()).toBe(false);
 		expect(source.out.config.peek()).toBeUndefined();
 		expect(sync.playing.peek()).toBe(true);

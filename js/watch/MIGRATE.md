@@ -11,6 +11,16 @@ Catch those property setter errors. A browser reports malformed markup through i
 `broadcast`, `video`, `audio`, `renderer`, and `sync` are TypeScript `readonly` fields. Configure the existing components through their inputs and `controls` instead of replacing them; use a headless `Player` for a different pipeline.
 `announced=false` reflects as `announced="false"`; `captions` and `catalog-format` now reflect too.
 
+### Muting preserves the selected volume
+
+`<moq-watch>` keeps `muted` and `volume` independent, in either attribute or property order.
+Muting no longer writes zero to the `volume` property or attribute, and unmuting keeps the selected level, including zero.
+Setting `volume = 0` no longer sets `muted = true`, and setting a positive volume no longer clears mute.
+Set `el.muted` explicitly to change mute state; read it instead of `el.volume === 0` to identify mute.
+For audible state, check both: `!el.muted && el.volume > 0`.
+Audio downloads still stop at zero volume, independently of the mute control.
+Programmatic level changes preserve mute; the UI slider still explicitly unmutes when moved above zero.
+
 ### Player inputs and `<moq-watch>` controls nest by media kind
 
 Move each per-media input under `video`, `audio`, or `text`, on `new Player({...})`, on `player.in`, and on the element's `controls`:

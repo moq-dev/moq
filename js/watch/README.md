@@ -67,9 +67,9 @@ The simplest way to watch a stream:
 | `name`           | string                     | required      | Broadcast name/path                      |
 | `versions`       | comma-separated list       | stable versions | Protocol versions to offer, most preferred first, like `moq-transport-14,moq-lite-06` |
 | `paused`         | boolean                    | false         | Pause playback                           |
-| `muted`          | boolean                    | false         | Mute audio                               |
+| `muted`          | boolean                    | false         | Mute audio without changing volume       |
 | `visible`        | never, distance, or always | `20%`         | When to download video (see below)       |
-| `volume`         | number                     | 0.5           | Audio volume (0-1)                       |
+| `volume`         | number                     | 0.5           | Audio level (0-1), independent of mute    |
 | `backend`        | auto, webgpu, 2d           | `auto`        | Graphics API for the canvas. `auto` picks WebGPU where it can render video, else Canvas2D. |
 | `announced`      | boolean                    | true          | Wait for (re)announcement before subscribing. Ignored when the relay does not support broadcast discovery. |
 | `delay`          | `auto`, duration, `instant` | `auto`       | Distance from the live edge. `instant` paints frames as they decode and disables audio. |

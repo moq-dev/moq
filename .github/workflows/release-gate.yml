@@ -32,6 +32,7 @@ jobs:
       android: ${{ steps.filter.outputs.android }}
       api-diff: ${{ steps.filter.outputs.api-diff }}
       audio-quality: ${{ steps.filter.outputs.audio-quality }}
+      c: ${{ steps.filter.outputs.c }}
       cpp: ${{ steps.filter.outputs.cpp }}
       interop: ${{ steps.filter.outputs.interop }}
       moq-sh: ${{ steps.filter.outputs.moq-sh }}
@@ -108,6 +109,14 @@ jobs:
               - "test/lib/**"
               - "test/justfile"
               - ".github/workflows/audio-quality.yml"
+            c:
+              - "c/**"
+              - "rs/moq-ffi/**"
+              - "sh/c/**"
+              - "rs/moq-c/native-libs/**"
+              - "cpp/moq/cmake/moq-ffi.cmake"
+              - "Cargo.lock"
+              - ".github/workflows/c.yml"
             cpp:
               - "cpp/moq/**"
               - "cpp/justfile"
@@ -346,6 +355,12 @@ jobs:
     if: needs.scope.outputs.audio-quality == 'true'
     uses: ./.github/workflows/audio-quality.yml
 
+  c:
+    name: C
+    needs: scope
+    if: needs.scope.outputs.c == 'true'
+    uses: ./.github/workflows/c.yml
+
   cpp:
     name: C++
     needs: scope
@@ -493,6 +508,7 @@ jobs:
       - android
       - api-diff
       - audio-quality
+      - c
       - cpp
       - interop
       - moq-sh

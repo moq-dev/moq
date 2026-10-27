@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `moq_encode_video` takes a `moq_video_encode_options`
+
+`moq_encode_video`'s fourth argument is a `const moq_video_encode_options *` instead of a `uint32_t bandwidth`: pass `NULL` where you passed `0`, or `&(moq_video_encode_options){.bandwidth = bandwidth}`.
+Its `lower` field takes the handle of the next lower rendition's encoder, to disable this one while its bandwidth grant cannot fund it; that needs a `bandwidth` and a bitrate above the lower encoder's.
+`moq_reservation_grant` reports the slice the track would get back while nothing subscribes to it, instead of no grant.
+
 ### Decoders deliver reads
 
 `moq_decode_audio` and `moq_decode_video` call back with a read id per decoded frame, gap, or encoder end instead of a frame id. Replace `moq_decode_audio_frame` / `moq_decode_video_frame` with `moq_decode_audio_read` / `moq_decode_video_read`, which fill a `moq_audio_read` / `moq_video_read`: check `kind` (`MOQ_DECODE_READ_FRAME`, `MOQ_DECODE_READ_GAP`, `MOQ_DECODE_READ_END`) and take the frame from its `frame` field, the lost span from `gap`, or `end_us`. Free every id with `moq_decode_audio_read_free` / `moq_decode_video_read_free` where you called the `_frame_free` functions. Skip gap and end reads to keep the old behavior, or restart playback there, since what follows does not continue what came before.

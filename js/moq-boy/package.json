@@ -34,6 +34,7 @@
 	},
 	"//devDependencies": "These are only needed for local development with workspace packages. They are NOT needed when using the published npm packages.",
 	"devDependencies": {
+		"@microsoft/api-extractor": "7.59.4",
 		"@types/bun": "^1.4.3",
 		"esbuild": "^0.28.2",
 		"rimraf": "^6.1.3",
