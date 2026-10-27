@@ -645,13 +645,25 @@ continues to rank feasible transit routes; report it. This may
 split at start (Rust and draft, then JS), as long as both land in one
 release.
 
-Decided 2026-10-27 (maintainer): two ready quests split out of this one,
-and this quest builds on both. [Grant subject](/quest/m1/cluster-routing/grant-subject.md)
-carries the issuer-qualified subject the scoped keys above are named by, and
-fixes the reference model's `proved` exemption.
-[Route epochs](/quest/m1/cluster-routing/route-epochs.md) mints an epoch for
-every route, the 2026-10-24 pre-cut audit's proposal, now decided, so
-`Instance` collapses to `Epoch` before the route layer lands.
+Decided 2026-10-27 (maintainer): [Grant subject](/quest/m1/cluster-routing/grant-subject.md)
+split out of this quest, and this quest builds on it. It carries the
+issuer-qualified subject the scoped keys above are named by, and fixes the
+reference model's `proved` exemption.
+
+Decided 2026-10-27 (maintainer): this quest deletes the epochless instance
+machinery in `rs/moq-net/src/model/origin.rs`: `Instance::Route(generation)`
+and its renewals, `restarted_since`, the held-restart Release for epochless
+routes, and Selection retirement, leaving Follow's same-epoch
+Update/Restart split as the only takeover rule. Once each origin is its own
+ANNOUNCE and the first hop pins the request to its identity, the first hop's
+route is the instance, so the per-hop renewal has nothing left to protect.
+Keep an epochless change of serving origin a Restart, and keep the routing
+contract's epochless fixtures passing. Minting an epoch for every route
+instead was tried and rejected
+([moq-dev/moq#6948](https://github.com/moq-dev/moq/pull/6948)): each relay
+mints at its own time, so mint order outranks cost, preference, and the
+local-broadcast tie and relays disagree on a pool path's winner, while
+ranking a minted epoch last keeps the renewal it was meant to delete.
 
 ## Required
 
