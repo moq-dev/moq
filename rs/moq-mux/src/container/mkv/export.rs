@@ -391,7 +391,6 @@ impl<S: Stream> Export<S> {
 			}
 		}
 
-		self.jitter.expect(self.tracks.keys().cloned());
 		self.fill(waiter)?;
 
 		// 3. Before the header is emitted: keep pulling until every video
@@ -497,7 +496,7 @@ impl<S: Stream> Export<S> {
 					let (frame, arrived) = match track.source.poll_event(waiter)? {
 						Poll::Ready(Some(Event::Frame { frame, arrived })) => (frame, arrived.max(track.subscribed)),
 						// A group that ended or was cut short holds frames no later one can precede.
-						Poll::Ready(Some(Event::GroupEnd | Event::Cut)) => {
+						Poll::Ready(Some(Event::GroupEnd | Event::Cut { .. })) => {
 							if track.declared.is_some() {
 								track.release(name, &mut self.jitter, true)?;
 							}
@@ -661,6 +660,8 @@ impl<S: Stream> Export<S> {
 			next_track_number += 1;
 		}
 
+		// Tracks change only before the header, so the clock waits on this set from here on.
+		self.jitter.expect(self.tracks.keys().cloned());
 		self.catalog_snapshot = Some(catalog);
 		Ok(())
 	}

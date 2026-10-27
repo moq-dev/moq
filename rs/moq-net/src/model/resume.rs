@@ -699,6 +699,12 @@ impl Subscriber {
 		self.reader().window().runs(from).next().map(|run| *run.start())
 	}
 
+	/// Whether `accounted` holds every group the reader's bounded ranges name from `from`
+	/// up to `cap`; see [`track::Subscriber::covered`].
+	pub(super) fn covered(&self, from: u64, cap: Option<u64>, accounted: &RangeSet<u64>) -> bool {
+		self.reader().window().covered_by(from, cap, accounted)
+	}
+
 	/// Poll for sequences the serving copy gave up that no copy may still deliver; see
 	/// [`track::Subscriber::poll_drop`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]

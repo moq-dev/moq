@@ -3,7 +3,16 @@ import * as Json from "@moq/json";
 import * as Msf from "@moq/msf";
 import type * as Moq from "@moq/net";
 import { Error as NetError, Path, StreamCode } from "@moq/net";
-import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
+import {
+	Effect,
+	type Getter,
+	type GetterType,
+	getter,
+	type Inputs,
+	type Readonlys,
+	readonlys,
+	Signal,
+} from "@moq/signals";
 
 import { toHang } from "./msf";
 
@@ -79,7 +88,7 @@ function filterCatalog(catalog: Catalog.Root, usable: Usable): Catalog.Root {
 }
 
 /**
- * Watch supports the on-the-wire catalog formats from @moq/hang, plus "hangz" (the
+ * Watch supports the on-the-wire catalog formats from `@moq/hang`, plus "hangz" (the
  * DEFLATE-compressed `catalog.json.z` track) and a "manual" mode where the user supplies the
  * catalog directly without fetching. "hangz" is opt-in only: it shares the `.hang` broadcast suffix
  * and is never auto-detected, so set it explicitly via `catalogFormat`.
@@ -87,10 +96,6 @@ function filterCatalog(catalog: Catalog.Root, usable: Usable): Catalog.Root {
 export const CATALOG_FORMATS = [...Catalog.FORMATS, "hangz", "manual"] as const;
 /** A catalog format the watcher can read; see {@link CATALOG_FORMATS}. */
 export type CatalogFormat = (typeof CATALOG_FORMATS)[number];
-
-// "error" means the origin refused the broadcast; `out.error` says why.
-// "unsupported" means its catalog requires a newer player.
-type Status = "offline" | "loading" | "live" | "error" | "unsupported";
 
 /**
  * Signals the component reads. Whoever owns the backing Signal (the caller, or
@@ -123,8 +128,11 @@ export type BroadcastInput = {
 	catalog: Getter<Catalog.Root | undefined>;
 };
 
-type BroadcastOutput = {
-	status: Signal<Status>;
+/** Signals the component derives. */
+export type BroadcastOutput = {
+	// "error" means the origin refused the broadcast; `error` says why.
+	// "unsupported" means its catalog requires a newer player.
+	status: Signal<"offline" | "loading" | "live" | "error" | "unsupported">;
 	active: Signal<Moq.Broadcast.Consumer | undefined>;
 
 	// Why the origin refused the broadcast, while `status` is "error". A refusal is final:
@@ -136,6 +144,8 @@ type BroadcastOutput = {
 	// broadcast appears once that broadcast is announced, so this can change without a new catalog.
 	catalog: Signal<Catalog.Root | undefined>;
 };
+
+type Status = GetterType<BroadcastOutput["status"]>;
 
 /** A catalog source that can wait for announcement before subscribing. */
 export class Broadcast {

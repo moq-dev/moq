@@ -46,6 +46,7 @@ function parseVolume(value: string | null): number {
 	return 0.5;
 }
 
+/** The attributes the element observes. */
 const OBSERVED = [
 	"url",
 	"versions",
@@ -61,7 +62,6 @@ const OBSERVED = [
 	"catalog-format",
 	"captions",
 ] as const;
-type Observed = (typeof OBSERVED)[number];
 
 // Parse the `visible` attribute into a Visible value, falling back to "20%".
 function parseVisible(value: string | null): Video.Visible {
@@ -123,14 +123,10 @@ function parseBoolean(value: string | null, defaultValue: boolean): boolean {
 	return normalized !== "false" && normalized !== "0";
 }
 
-// Close everything when this element is garbage collected.
-// This is primarily to avoid a console.warn that we didn't close() before GC.
-// There's no destructor for web components so this is the best we can do.
-const cleanup = new FinalizationRegistry<Effect>((signals) => signals.close());
-
 /** The `<moq-watch>` element: plays a broadcast into a nested <canvas>. */
 export default class MoqWatch extends HTMLElement {
-	static observedAttributes = OBSERVED;
+	/** The attributes the browser reports changes to. */
+	static observedAttributes: typeof OBSERVED = OBSERVED;
 
 	/**
 	 * The relay connection, shared with every other element on the page pointing at the
@@ -216,7 +212,7 @@ export default class MoqWatch extends HTMLElement {
 	#unmuteVolume = 0.5;
 
 	/**
-	 * Effects scoped to this element's lifetime, closed on disconnect.
+	 * Effects owned by this element; media resources are suspended while disconnected.
 	 *
 	 * Public because the element is the top of the tree: it's where an application hangs its own
 	 * reactivity. The components underneath keep theirs private, so `close()` is the only handle.
@@ -225,8 +221,6 @@ export default class MoqWatch extends HTMLElement {
 
 	constructor() {
 		super();
-
-		cleanup.register(this, this.signals);
 
 		this.connection = new Moq.Connection({
 			enabled: this.#enabled,
@@ -242,7 +236,12 @@ export default class MoqWatch extends HTMLElement {
 			catalogFormat: this.#catalogFormat,
 			catalog: this.#catalog,
 			...this.controls,
-			video: { ...this.controls.video, canvas: this.#canvas },
+			video: {
+				...this.controls.video,
+				canvas: this.signals.computed((effect) =>
+					effect.get(this.#enabled) ? effect.get(this.#canvas) : undefined,
+				),
+			},
 			text: { ...this.controls.text, container: this.#captionsOverlay },
 		});
 		this.signals.cleanup(() => this.player.close());
@@ -397,6 +396,7 @@ export default class MoqWatch extends HTMLElement {
 
 	// Annoyingly, we have to use these callbacks to figure out when the element is connected to the DOM.
 	// This wouldn't be so bad if there was a destructor for web components to clean up our effects.
+	/** Called by the browser when the element joins a document. */
 	connectedCallback() {
 		this.#enabled.set(true);
 		this.style.display = "block";
@@ -416,12 +416,14 @@ export default class MoqWatch extends HTMLElement {
 		}
 	}
 
+	/** Called by the browser when the element leaves its document. */
 	disconnectedCallback() {
 		// Stop everything but don't actually cleanup just in case we get added back to the DOM.
 		this.#enabled.set(false);
 	}
 
-	attributeChangedCallback(name: Observed, oldValue: string | null, newValue: string | null) {
+	/** Called by the browser when an observed attribute changes. */
+	attributeChangedCallback(name: (typeof OBSERVED)[number], oldValue: string | null, newValue: string | null) {
 		if (oldValue === newValue) {
 			return;
 		}

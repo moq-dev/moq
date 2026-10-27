@@ -15,7 +15,7 @@ import { Key, KeySchema, type PublicKey } from "./key.ts";
 /**
  * A JWK Set.
  *
- * See <https://datatracker.ietf.org/doc/html/rfc7517#section-5>.
+ * See {@link https://datatracker.ietf.org/doc/html/rfc7517#section-5 | RFC 7517, section 5}.
  */
 export const KeySetSchema = z.object({
 	/** The keys in the set, in preference order. */

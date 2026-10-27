@@ -146,7 +146,7 @@ impl Release {
 				}
 				let (frame, arrived) = match track.poll_event(waiter) {
 					Poll::Ready(Ok(Some(Event::Frame { frame, arrived }))) => (frame, arrived),
-					Poll::Ready(Ok(Some(Event::GroupEnd | Event::FrameEnd { .. } | Event::Cut))) => continue,
+					Poll::Ready(Ok(Some(Event::GroupEnd | Event::FrameEnd { .. } | Event::Cut { .. }))) => continue,
 					Poll::Ready(Ok(None)) => {
 						self.finished = true;
 						break;

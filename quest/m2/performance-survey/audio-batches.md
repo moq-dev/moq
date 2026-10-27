@@ -8,9 +8,9 @@ same remaining samples, while preserving audio and timestamp behavior.
 ## Plan
 
 [Producer::publish_full_frames](/rs/moq-audio/src/encode/producer.rs)
-front-drains into a new Vec for each packet after appending the entire input
-(lines 379-389). [Resampler::convert](/rs/moq-audio/src/resample.rs) likewise
-front-drains after every chunk (line 291). N chunks in a call can move a
+front-drains into a new Vec for each packet after appending the entire input.
+[Resampler::convert](/rs/moq-audio/src/resample.rs) likewise
+front-drains after every chunk. N chunks in a call can move a
 triangular number of trailing samples. Capture and binding producers use these
 paths; small normal capture periods may hide the cost.
 

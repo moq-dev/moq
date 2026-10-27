@@ -16,6 +16,7 @@ declare namespace Aac {
         SAMPLE_RATES
     }
 }
+export { Aac }
 
 function audioSpecificConfig(sampleRate: number, channelCount: number): Uint8Array;
 
@@ -28,6 +29,7 @@ declare namespace Gesture {
         unlock
     }
 }
+export { Gesture }
 
 declare namespace Hacks {
     export {
@@ -36,6 +38,7 @@ declare namespace Hacks {
         isSafari
     }
 }
+export { Hacks }
 
 declare namespace Hex {
     export {
@@ -43,6 +46,7 @@ declare namespace Hex {
         fromBytes
     }
 }
+export { Hex }
 
 const isChrome: boolean;
 
@@ -55,6 +59,7 @@ declare namespace Libav {
         polyfill
     }
 }
+export { Libav }
 
 function objectType(codec: string): 2 | 5 | 29 | undefined;
 
@@ -70,6 +75,7 @@ declare namespace Opus {
         SAMPLE_RATES_2 as SAMPLE_RATES
     }
 }
+export { Opus }
 
 function packetSamples(packet: Uint8Array): number | undefined;
 
@@ -96,6 +102,5 @@ function toDOps(description: Uint8Array): Uint8Array;
 function unlock(effect: Effect, context: AudioContext): Getter<boolean>;
 
 const WARMUP = 80;
-
 
 ```

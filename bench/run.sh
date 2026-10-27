@@ -70,7 +70,15 @@ case $MODE in
         BASE=
         ;;
     --profile)
-        BASE=
+        BASE=${BENCH_BASE:-}
+        if [[ -n $BASE ]]; then
+            BASE=$(git rev-parse --verify "$BASE^{commit}")
+        fi
+        PROFILE_RUNTIME=${BENCH_PROFILE_RUNTIME:-tokio-workers}
+        if [[ ! $PROFILE_RUNTIME =~ ^(tokio-workers|io-uring-workers)$ ]]; then
+            printf 'profile runtime must be tokio-workers or io-uring-workers, got %q\n' "$PROFILE_RUNTIME" >&2
+            exit 1
+        fi
         PROFILE_MODES=${BENCH_PROFILE_MODES:-}
         PROFILE_WORKLOAD=${BENCH_PROFILE_WORKLOAD:-fanout}
         PROFILE_WORKERS=${BENCH_PROFILE_WORKERS:-1 4 16}
@@ -81,6 +89,12 @@ case $MODE in
         for value in $PROFILE_MODES; do
             if [[ ! $value =~ ^(lock|cpu|heap)$ ]]; then
                 printf 'unknown profile mode %q; expected lock, cpu, or heap\n' "$value" >&2
+                exit 1
+            fi
+        done
+        for value in $PROFILE_WORKERS; do
+            if [[ ! $value =~ ^[1-9][0-9]{0,2}$ ]] || ((value > 256)); then
+                printf 'profile workers must be integers from 1 to 256, got %q\n' "$value" >&2
                 exit 1
             fi
         done
@@ -435,6 +449,11 @@ criterion_cases() {
             CRITERION_ARGS=(--warm-up-time 0.001 --measurement-time 0.001 --sample-size 10 --nresamples 1 --noplot)
             CRITERION_HOME=$discovery run_criterion_target "$checkout" "$manifest" "$target" --save-baseline discovery
         ) >&2 || return 1
+        # A harness = false target without Criterion, such as moq-cli's play_buffer, writes no samples.
+        if [[ -z $(find "$discovery" -name benchmark.json -print -quit 2>/dev/null) ]]; then
+            printf 'Not a Criterion target, skipped: %s %s\n' "$manifest" "$target" >&2
+            continue
+        fi
         python3 "$ROOT/bench/compare.py" --criterion-cases "$discovery" >"$RUN/criterion-listing" || return 1
         while IFS= read -r benchmark; do
             printf '%s\t%s\t%s\n' "$manifest" "$target" "$benchmark"
@@ -681,6 +700,28 @@ generate_certificate() {
     fi
 }
 
+# The runtime matrix and profiling use identical feature selection and support checks.
+build_workers() {
+    local checkout=$1 target=$2 profile=$3 features=moq-relay/io-uring,moq-bench/uring
+    if [[ ${4:-} == heap ]]; then
+        features+=,moq-relay/jemalloc
+    fi
+    printf 'Building worker runtimes: %s (%s)\n' "$checkout" "$profile"
+    (
+        cd "$checkout"
+        CARGO_TARGET_DIR=$target cargo build --locked --profile "$profile" \
+            -p moq-relay -p moq-bench --features "$features"
+    )
+}
+
+check_uring() {
+    printf 'Checking io_uring support...\n'
+    if ! "$1/moq-bench-uring-check"; then
+        printf 'worker benchmarks need Linux 6.12+ with io_uring permitted by the host\n' >&2
+        return 1
+    fi
+}
+
 run_runtime_comparison() {
     if [[ $(uname -s) != Linux ]]; then
         printf 'runtime comparison needs Linux for io_uring and /proc metrics\n' >&2
@@ -688,18 +729,10 @@ run_runtime_comparison() {
     fi
     generate_certificate
 
-    printf 'Building one relay binary with the Tokio and io_uring paths...\n'
-    CARGO_TARGET_DIR=$CURRENT_TARGET cargo build --locked --release \
-        -p moq-relay -p moq-bench \
-        --features moq-relay/io-uring,moq-bench/uring
+    build_workers "$ROOT" "$CURRENT_TARGET" release
     LOAD_BIN=$CURRENT_TARGET/release/moq-bench
     HOST_BIN=$CURRENT_TARGET/release/moq-bench-host
-
-    printf 'Checking io_uring support...\n'
-    if ! "$CURRENT_TARGET/release/moq-bench-uring-check"; then
-        printf 'runtime comparison needs Linux 6.12+ with io_uring permitted by the host\n' >&2
-        return 1
-    fi
+    check_uring "$CURRENT_TARGET/release"
 
     local -a runtimes=(tokio-shared tokio-workers io-uring-workers)
     local round workload offset index runtime
@@ -788,53 +821,65 @@ run_profiles() {
     done
     generate_certificate
 
+    if [[ -n $BASE ]]; then
+        WORKTREE=$RUN/base
+        git worktree add --detach "$WORKTREE" "$BASE" >/dev/null
+        mkdir -p "$RUN/base-context"
+        (cd "$WORKTREE" && python3 "$ROOT/bench/metadata.py" "$RUN/base-context" "$BASE" --profile)
+    fi
+    local label checkout target
+    local -a revisions=(current)
+    if [[ -n $BASE ]]; then revisions=(base current); fi
     for mode in $PROFILE_MODES; do
-        run_profile "$mode"
+        # The current generator and sampler drive both revisions, including old bases
+        # whose own harness cannot select the io_uring runtime.
+        build_workers "$ROOT" "$CURRENT_TARGET/profile" profiling "$mode"
+        LOAD_BIN=$CURRENT_TARGET/profile/profiling/moq-bench
+        HOST_BIN=$CURRENT_TARGET/profile/profiling/moq-bench-host
+        for label in "${revisions[@]}"; do
+            checkout=$ROOT target=$CURRENT_TARGET/profile
+            if [[ $label == base ]]; then
+                checkout=$WORKTREE target=$BASE_TARGET/profile
+                build_workers "$checkout" "$target" profiling "$mode"
+            fi
+            if [[ $PROFILE_RUNTIME == io-uring-workers ]]; then
+                check_uring "$target/profiling"
+            fi
+            run_profile "$mode" "$label" "$target/profiling/moq-relay"
+        done
     done
 }
 
 # Each profiled run follows an unprofiled control on the same binary, so the
 # throughput and CPU difference shows the profiler's overhead.
 run_profile() {
-    local mode=$1
-    local -a features=()
-    # The heap mode reads jemalloc's own profiles; the others keep the default allocator.
-    if [[ $mode == heap ]]; then
-        features=(--features moq-relay/jemalloc)
-    fi
-
-    printf 'Building the relay with the profiling profile and frame pointers...\n'
-    CARGO_TARGET_DIR=$TARGET/profile cargo build --locked --profile profiling -p moq-relay -p moq-bench "${features[@]}"
-    LOAD_BIN=$TARGET/profile/profiling/moq-bench
-    HOST_BIN=$TARGET/profile/profiling/moq-bench-host
-    local relay=$TARGET/profile/profiling/moq-relay
-
+    local mode=$1 label=$2 relay=$3
     local workers control profiled
     case $mode in
         lock)
-            printf '\nLock wait: %s, tokio workers\n' "$PROFILE_WORKLOAD"
+            printf '\nLock wait: %s, %s, %s\n' "$PROFILE_WORKLOAD" "$PROFILE_RUNTIME" "$label"
             printf '%-8s %5s %8s %13s %13s %10s %10s %13s %9s\n' \
                 workers idle switches control-fps profiled-fps control-CPU profiled-CPU mutex-wait-ms wait/CPU
             ;;
         cpu)
-            printf '\nCPU stacks: %s, tokio workers, sampled at 999 Hz\n' "$PROFILE_WORKLOAD"
+            printf '\nCPU stacks: %s, %s, %s, sampled at 999 Hz\n' "$PROFILE_WORKLOAD" "$PROFILE_RUNTIME" "$label"
             printf '%-8s %13s %13s %10s %10s %9s %11s\n' \
                 workers control-fps profiled-fps control-CPU profiled-CPU samples sampled-CPU
             ;;
         heap)
-            printf '\nHeap: %s, tokio workers, jemalloc retained MiB and churn over the steady window\n' "$PROFILE_WORKLOAD"
+            printf '\nHeap: %s, %s, %s, jemalloc retained MiB and churn over the steady window\n' "$PROFILE_WORKLOAD" "$PROFILE_RUNTIME" "$label"
             printf '%-8s %13s %13s %10s %10s %10s %10s %9s %9s %9s %11s %10s\n' \
                 workers control-fps profiled-fps control-CPU profiled-CPU control-RSS profiled-RSS \
                 before steady teardown churn-MiB/s allocs/s
             ;;
     esac
     for workers in $PROFILE_WORKERS; do
-        run_workload "control-$mode-$workers" "$relay" "$PROFILE_WORKLOAD" tokio-workers "$workers"
+        run_workload "$label/control-$mode-$workers" "$relay" "$PROFILE_WORKLOAD" "$PROFILE_RUNTIME" "$workers"
         PROFILE=$mode
-        run_workload "$mode-$workers" "$relay" "$PROFILE_WORKLOAD" tokio-workers "$workers"
+        run_workload "$label/$mode-$workers" "$relay" "$PROFILE_WORKLOAD" "$PROFILE_RUNTIME" "$workers"
         PROFILE=
-        control=$RUN/relay/control-$mode-$workers/$PROFILE_WORKLOAD/summary.json
-        profiled=$RUN/relay/$mode-$workers/$PROFILE_WORKLOAD
+        control=$RUN/relay/$label/control-$mode-$workers/$PROFILE_WORKLOAD/summary.json
+        profiled=$RUN/relay/$label/$mode-$workers/$PROFILE_WORKLOAD
         case $mode in
             lock)
                 jq -r -s '[
@@ -874,10 +919,10 @@ run_profile() {
         esac
     done
     case $mode in
-        lock) printf '\nMutex stacks (flamegraph folded format): %s/relay/lock-*/%s/lock/mutex.folded\n' "$RUN" "$PROFILE_WORKLOAD" ;;
-        cpu) printf '\nCPU stacks (flamegraph folded format): %s/relay/cpu-*/%s/cpu/cpu.folded\n' "$RUN" "$PROFILE_WORKLOAD" ;;
-        heap) printf '\nHeap stacks (flamegraph folded format): %s/relay/heap-*/%s/heap/{churn,retained,teardown}.folded\n' \
-            "$RUN" "$PROFILE_WORKLOAD" ;;
+        lock) printf '\nMutex stacks (flamegraph folded format): %s/relay/%s/lock-*/%s/lock/mutex.folded\n' "$RUN" "$label" "$PROFILE_WORKLOAD" ;;
+        cpu) printf '\nCPU stacks (flamegraph folded format): %s/relay/%s/cpu-*/%s/cpu/cpu.folded\n' "$RUN" "$label" "$PROFILE_WORKLOAD" ;;
+        heap) printf '\nHeap stacks (flamegraph folded format): %s/relay/%s/heap-*/%s/heap/{churn,retained,teardown}.folded\n' \
+            "$RUN" "$label" "$PROFILE_WORKLOAD" ;;
     esac
 }
 

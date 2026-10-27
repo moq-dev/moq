@@ -54,7 +54,7 @@ never delivered answered `Unroutable`. So the leak needs something the export ad
   group unread. Its doc says a resumed subscription "only pulls while it is read".
 - `rs/moq-mux/src/source.rs`: `Source::new` pins the catalog path to the served
   instance; `Binding::poll_broadcast` returns the pin.
-- `rs/moq-net/tests/integration/restart.rs`: `retired_fetch` covers a retired handle
+- `rs/moq-net-tests/tests/integration/restart.rs`: `retired_fetch` covers a retired handle
   whose query is taken after the restart, not one held before it.
 - `rs/moq-net/src/lite/subscriber.rs`: `SubscriptionCleanup` tears subscriptions down in
   `HashMap` order. That explains why the disconnect failure order varies, not this leak.

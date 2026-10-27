@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### The catalog rendition cap is removed
+
+`Catalog.MAX_RENDITIONS` and `Catalog.TooManyRenditions` are gone: `checkRenditions`, `encode`, and `watch` accept any number of renditions.
+Delete `instanceof TooManyRenditions` checks. An application that wants a limit counts the `renditions` of each section itself.
+
 ### Timeline records describe one track
 
 `Timeline.Range` is replaced by `Position { group, frame? }`; a record has inclusive `start` and exclusive `end` positions for its own track instead of a `tracks` map of group ranges.

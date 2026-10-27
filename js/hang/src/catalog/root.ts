@@ -110,21 +110,6 @@ function minVersion(root: Root): number | undefined {
 	return renamed || warmup ? 4 : undefined;
 }
 
-/** Maximum number of video, audio, and text renditions accepted in one catalog update. */
-export const MAX_RENDITIONS = 64;
-
-/** A catalog update announced more media renditions than a reader will retain. */
-export class TooManyRenditions extends Error {
-	/** How many renditions the catalog lists. */
-	readonly count: number;
-
-	constructor(count: number) {
-		super(`catalog has ${count} renditions, over the limit of ${MAX_RENDITIONS}`);
-		this.name = "TooManyRenditions";
-		this.count = count;
-	}
-}
-
 /** A catalog update used one rendition ID for both a video and an audio rendition. */
 export class DuplicateRendition extends Error {
 	/** The rendition ID used for both video and audio. */
@@ -137,13 +122,8 @@ export class DuplicateRendition extends Error {
 	}
 }
 
-/** Refuse an update with too many media renditions, or with an ID naming both a video and an audio rendition. */
+/** Refuse an update with an ID naming both a video and an audio rendition. */
 export function checkRenditions(root: Root): Root {
-	const count =
-		Object.keys(root.video?.renditions ?? {}).length +
-		Object.keys(root.audio?.renditions ?? {}).length +
-		Object.keys(root.text?.renditions ?? {}).length;
-	if (count > MAX_RENDITIONS) throw new TooManyRenditions(count);
 	const audio = root.audio?.renditions ?? {};
 	const duplicate = Object.keys(root.video?.renditions ?? {}).find((id) => Object.hasOwn(audio, id));
 	if (duplicate !== undefined) throw new DuplicateRendition(duplicate);
@@ -154,7 +134,7 @@ export function checkRenditions(root: Root): Root {
  * The catalog as a publisher writes it: refused as every reader refuses it, with the root
  * `version` computed rather than carried, so an edit can't claim less than the catalog uses.
  *
- * Throws {@link TooManyRenditions} or {@link DuplicateRendition}. Mirrors Rust's catalog serializer.
+ * Throws {@link DuplicateRendition}. Mirrors Rust's catalog serializer.
  */
 export function encode(root: Root): Root {
 	checkRenditions(root);
@@ -200,7 +180,7 @@ export function checkResolvable(root: Root, base: Moq.Path.Valid): Root {
 /**
  * Subscribe to a broadcast's catalog and iterate validated root updates.
  *
- * Throws {@link UnsupportedVersion}, {@link TooManyRenditions}, or {@link EscapingBroadcast} on an
+ * Throws {@link UnsupportedVersion}, {@link DuplicateRendition}, or {@link EscapingBroadcast} on an
  * update that fails validation. `broadcast` references are checked against the handle's `path` and
  * yielded unresolved.
  */

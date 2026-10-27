@@ -237,11 +237,6 @@ impl SendBuffer {
 		}
 	}
 
-	pub(super) fn retransmit_all_for_0rtt(&mut self) {
-		debug_assert_eq!(self.offset, self.unacked_len as u64);
-		self.unsent = 0;
-	}
-
 	/// First stream offset unwritten by the application, i.e. the offset that the next write will
 	/// begin at
 	pub(super) fn offset(&self) -> u64 {

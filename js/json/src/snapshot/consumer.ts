@@ -134,6 +134,7 @@ export class Consumer<T> {
 	}
 }
 
+/** Types for {@link Consumer}. */
 export namespace Consumer {
 	/** Snapshot consumer options, including the source track. */
 	export type Config<T> = Pick<CodecConfig<T>, "schema" | "compression"> & {

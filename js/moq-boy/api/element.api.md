@@ -57,13 +57,13 @@ interface GameConfig {
 
 class MoqBoy extends HTMLElement {
     constructor();
-    attributeChangedCallback(name: Observed, _oldValue: string | null, newValue: string | null): void;
+    attributeChangedCallback(name: (typeof OBSERVED)[number], _oldValue: string | null, newValue: string | null): void;
     connectedCallback(): void;
     readonly connection: Moq.Connection;
     disconnectedCallback(): void;
     readonly expanded: Moq.Signals.Signal<string | undefined>;
     readonly games: Moq.Signals.Signal<ReadonlyMap<string, Game>>;
-    static observedAttributes: readonly ["url", "prefix", "prefix-game", "prefix-viewer"];
+    static observedAttributes: typeof OBSERVED;
     readonly origin: Moq.Origin.Producer;
     get prefixGame(): string;
     set prefixGame(value: string);
@@ -77,8 +77,5 @@ class MoqBoy extends HTMLElement {
 export default MoqBoy;
 
 const OBSERVED: readonly ["url", "prefix", "prefix-game", "prefix-viewer"];
-
-type Observed = (typeof OBSERVED)[number];
-
 
 ```

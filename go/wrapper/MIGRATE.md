@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Decoders read gaps and ends
+
+`audio.Consumer.Next` and `video.Consumer.Next` return a `Read` (and `All` ranges over them) instead of a frame pointer. Switch on `ReadFrame` and take its `Frame` where you used the frame; `ReadGap` marks lost media and `ReadEnd` where the publisher stopped its encoder, and what follows either does not continue what came before. A nil `Read` still means the track ended.
+
 ### Durations cross as `time.Duration`
 
 The re-exported records carry `time.Duration` instead of microseconds: `FetchGroupOptions.MaxDelay`, `media.Audio.Jitter`, and the raw `AudioDecoderOutput.{MaxDelay, Delay}`, `AudioEncoderOutput.FrameDuration`, and `VideoDecoderOutput.MaxDelay`, each a `*time.Duration` where it was a `*uint64` `...Us` field.

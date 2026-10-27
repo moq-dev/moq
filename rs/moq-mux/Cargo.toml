@@ -32,6 +32,7 @@ mp4-atom = { version = "0.16.2", features = ["tokio", "bytes", "serde"] }
 mpeg2ts = "0.6.0"
 num_enum = { workspace = true }
 roxmltree = "0.21.1"
+rustc-hash = { workspace = true }
 scuffle-av1 = { version = "0.1.4" }
 scuffle-h265 = { version = "0.2.2" }
 serde = { workspace = true }
@@ -84,6 +85,10 @@ harness = false
 
 [[bench]]
 name = "ts_video"
+harness = false
+
+[[bench]]
+name = "parameter_sets"
 harness = false
 
 [lints]
