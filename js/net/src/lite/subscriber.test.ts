@@ -25,7 +25,13 @@ import { type AnnounceBroadcast, AnnounceInit, AnnounceOk, encodeAnnounceBroadca
 import { Group } from "./group.ts";
 import { Probe } from "./probe.ts";
 import { StreamId } from "./stream.ts";
-import { encodeSubscribeResponse, SubscribeDrop, SubscribeEnd, SubscribeStart } from "./subscribe.ts";
+import {
+	encodeSubscribeResponse,
+	SubscribeDrop,
+	SubscribeEnd,
+	type SubscribeResponse,
+	SubscribeStart,
+} from "./subscribe.ts";
 import { SUBSCRIBE_SETUP_TIMEOUT_MS, Subscriber } from "./subscriber.ts";
 import { Track, TrackInfo } from "./track.ts";
 import { Version } from "./version.ts";
@@ -1509,6 +1515,136 @@ test("a listing of an epochless handle retired while its token waits never reach
 	expect(err).toBeInstanceOf(StreamError);
 	expect((err as StreamError).code).toBe(StreamCode.Unroutable);
 	expect(streams.length).toBe(1);
+	tracks.close();
+	held.close();
+	announced.close();
+	subscriber.close();
+});
+
+// Announce PUBLISHER_A's epochless `pool` on stream 0, and return how to withdraw it and how to
+// announce PUBLISHER_B's in its place.
+async function epochlessPool(version: Version, streams: FakeStream[], announced: { next(): Promise<unknown> }) {
+	const send = async (encode: (writer: Writer) => Promise<void>) => {
+		const writer = new Writer(
+			new WritableStream<Uint8Array>({
+				write: (chunk) => streams[0].inbound.enqueue(new Uint8Array(chunk)),
+			}),
+			version,
+		);
+		await encode(writer);
+	};
+	const path = Path.from("pool");
+	await send((writer) => new AnnounceOk(PEER, 0).encode(writer, version));
+	await send((writer) =>
+		encodeAnnounceBroadcast(writer, { status: "active", suffix: path, hops: [PUBLISHER_A] }, version),
+	);
+	await announced.next();
+	const withdraw = async () => {
+		await send((writer) =>
+			encodeAnnounceBroadcast(
+				writer,
+				version === Version.DRAFT_05 ? { status: "ended", suffix: path } : { status: "endedId", id: 0n },
+				version,
+			),
+		);
+		await announced.next();
+	};
+	const announce = async () => {
+		await send((writer) =>
+			encodeAnnounceBroadcast(writer, { status: "active", suffix: path, hops: [PUBLISHER_B] }, version),
+		);
+		await announced.next();
+	};
+	return { withdraw, replace: () => withdraw().then(announce) };
+}
+
+// Write the subscribe responses to the subscriber, FINishing the stream when asked.
+async function respond(stream: FakeStream, version: Version, responses: SubscribeResponse[], fin = false) {
+	const chunks: Uint8Array[] = [];
+	const writer = new Writer(
+		new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
+		version,
+	);
+	for (const response of responses) await encodeSubscribeResponse(writer, response, version);
+	for (const chunk of chunks) stream.inbound.enqueue(chunk);
+	if (fin) stream.inbound.close();
+}
+
+// A SUBSCRIBE without an epoch resolves whichever instance won the path when it arrived, so one
+// unanswered when another instance takes the path is refused, a withdrawal followed by a new
+// announcement included. One answered first stays on its instance, and a withdrawal alone leaves
+// it to its answer, so a track that finished as its broadcast ended still arrives.
+test.each([
+	["unanswered on lite-05 is refused", Version.DRAFT_05, "replaced"],
+	["unanswered on lite-06 is refused", Version.DRAFT_06, "replaced"],
+	["unanswered on lite-07 is refused", Version.DRAFT_07, "replaced"],
+	["answered on lite-07 stays", Version.DRAFT_07, "answered"],
+	["unanswered on lite-05 finishes", Version.DRAFT_05, "withdrawn"],
+	["unanswered on lite-06 finishes", Version.DRAFT_06, "withdrawn"],
+	["unanswered on lite-07 finishes", Version.DRAFT_07, "withdrawn"],
+] as const)("an epochless SUBSCRIBE %s at a takeover or withdrawal", async (_, version, outcome) => {
+	const warn = spyOn(console, "warn").mockImplementation(() => {});
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const announced = subscriber.announced();
+	try {
+		await opened(0);
+		const pool = await epochlessPool(version, streams, announced);
+		const held = subscriber.consume(Path.from("pool/job"));
+		const track = held.track("video").subscribe();
+		await answerTrackInfo(await opened(1), version);
+		const subscribe = await opened(2);
+		await subscribe.reading;
+
+		if (outcome === "answered") {
+			await respond(subscribe, version, [{ start: new SubscribeStart(0) }]);
+			await drainReactions();
+			await pool.replace();
+			await drainReactions();
+			expect(track.closed.peek()).toBeUndefined();
+		} else if (outcome === "withdrawn") {
+			await pool.withdraw();
+			await drainReactions();
+			expect(track.closed.peek()).toBeUndefined();
+			await respond(subscribe, version, [{ start: new SubscribeStart(0) }, { end: new SubscribeEnd(0) }], true);
+			expect(await track.closed).toBeNull();
+		} else {
+			await pool.replace();
+			const err = await track.closed;
+			expect(err).toBeInstanceOf(StreamError);
+			expect((err as StreamError).code).toBe(StreamCode.Unroutable);
+			await subscribe.aborted;
+		}
+		track.close();
+		held.close();
+	} finally {
+		announced.close();
+		subscriber.close();
+		warn.mockRestore();
+	}
+});
+
+// A TRACKS request without an epoch lists whichever instance won the path when it arrived, so
+// another instance taking the path refuses one still unanswered.
+test("a listing of an epochless handle replaced before its answer is refused", async () => {
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const announced = subscriber.announced();
+	await opened(0);
+	const pool = await epochlessPool(version, streams, announced);
+	const held = subscriber.consume(Path.from("pool/job"));
+	const tracks = held.tracks();
+	expect(await tracks.next()).toEqual({ kind: "synced" });
+	const event = tracks.next().catch((err: unknown) => err);
+	const listing = await opened(1);
+	await listing.reading;
+
+	await pool.replace();
+	const err = await event;
+	expect(err).toBeInstanceOf(StreamError);
+	expect((err as StreamError).code).toBe(StreamCode.Unroutable);
+	await listing.aborted;
 	tracks.close();
 	held.close();
 	announced.close();

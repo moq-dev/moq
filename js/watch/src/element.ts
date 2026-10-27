@@ -46,6 +46,7 @@ function parseVolume(value: string | null): number {
 	return 0.5;
 }
 
+/** The attributes the element observes. */
 const OBSERVED = [
 	"url",
 	"versions",
@@ -61,7 +62,6 @@ const OBSERVED = [
 	"catalog-format",
 	"captions",
 ] as const;
-type Observed = (typeof OBSERVED)[number];
 
 // Parse the `visible` attribute into a Visible value, falling back to "20%".
 function parseVisible(value: string | null): Video.Visible {
@@ -125,7 +125,8 @@ function parseBoolean(value: string | null, defaultValue: boolean): boolean {
 
 /** The `<moq-watch>` element: plays a broadcast into a nested <canvas>. */
 export default class MoqWatch extends HTMLElement {
-	static observedAttributes = OBSERVED;
+	/** The attributes the browser reports changes to. */
+	static observedAttributes: typeof OBSERVED = OBSERVED;
 
 	/**
 	 * The relay connection, shared with every other element on the page pointing at the
@@ -395,6 +396,7 @@ export default class MoqWatch extends HTMLElement {
 
 	// Annoyingly, we have to use these callbacks to figure out when the element is connected to the DOM.
 	// This wouldn't be so bad if there was a destructor for web components to clean up our effects.
+	/** Called by the browser when the element joins a document. */
 	connectedCallback() {
 		this.#enabled.set(true);
 		this.style.display = "block";
@@ -414,12 +416,14 @@ export default class MoqWatch extends HTMLElement {
 		}
 	}
 
+	/** Called by the browser when the element leaves its document. */
 	disconnectedCallback() {
 		// Stop everything but don't actually cleanup just in case we get added back to the DOM.
 		this.#enabled.set(false);
 	}
 
-	attributeChangedCallback(name: Observed, oldValue: string | null, newValue: string | null) {
+	/** Called by the browser when an observed attribute changes. */
+	attributeChangedCallback(name: (typeof OBSERVED)[number], oldValue: string | null, newValue: string | null) {
 		if (oldValue === newValue) {
 			return;
 		}

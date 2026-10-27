@@ -115,7 +115,8 @@ export type EncoderProps = Inputs<EncoderInput> & {
 	groupDuration?: Milli | Signal<Milli>;
 };
 
-type EncoderOutput = {
+/** Signals the encoder derives. */
+export type EncoderOutput = {
 	/** The encoder failure, cleared only by a new capture source or format, or new encoder settings. */
 	error: Signal<Error | undefined>;
 	// The catalog config published for this rendition, `enabled: false` while disabled, or undefined

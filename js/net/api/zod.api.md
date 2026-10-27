@@ -108,9 +108,9 @@ type Order = "ascending" | "descending";
 class Ordered {
     close(abort?: Error): void;
     get closed(): GetPromise<Error | null>;
-    finished(): Promise<Position_2>;
+    finished(): Promise<Position>;
     info(): Promise<Info>;
-    largest(): Promise<Position_2 | undefined>;
+    largest(): Promise<Position | undefined>;
     readonly name: string;
     nextGroup(): Promise<Consumer | undefined>;
     readBool(): Promise<boolean | undefined>;
@@ -127,7 +127,7 @@ class Ordered {
     withRange(groups: Groups): this;
 }
 
-interface Position_2 {
+interface Position {
     frame: number;
     group: number;
 }
@@ -142,10 +142,10 @@ class Producer {
     get closed(): GetPromise<Error | null>;
     demand(): Demand;
     finish(): void;
-    finishAt(end: Position_2): void;
+    finishAt(end: Position): void;
     info(): Promise<Info>;
     insertDatagram(sequence: number, timestamp: Timestamp | undefined, payload: Uint8Array): void;
-    largest(): Position_2 | undefined;
+    largest(): Position | undefined;
     readonly name: string;
     get priority(): number;
     subscribe(options?: Subscription): Subscriber;
@@ -183,9 +183,9 @@ class Request_2 {
 class Subscriber {
     close(abort?: Error): void;
     get closed(): GetPromise<Error | null>;
-    finished(): Promise<Position_2>;
+    finished(): Promise<Position>;
     info(): Promise<Info>;
-    largest(): Promise<Position_2 | undefined>;
+    largest(): Promise<Position | undefined>;
     readonly name: string;
     ordered(): Ordered;
     recvDatagram(): Promise<Datagram | undefined>;
@@ -231,7 +231,7 @@ declare namespace track {
     export {
         infoDefaults,
         Datagram,
-        Position_2 as Position,
+        Position,
         Info,
         Bound,
         Groups,
@@ -246,6 +246,5 @@ declare namespace track {
         Ordered
     }
 }
-
 
 ```

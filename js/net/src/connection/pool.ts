@@ -6,7 +6,8 @@
 
 import { Milli, Nano } from "@moq/clock";
 import { Effect, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
-import * as Announce from "../announced.ts";
+import type * as Announce from "../announce.ts";
+import { Producer as AnnounceProducer } from "../announced.ts";
 import type * as Auth from "../auth.ts";
 import type { Handle } from "../bandwidth.ts";
 import * as Origin from "../origin.ts";
@@ -343,7 +344,7 @@ export class Connection {
 	 * the old relay's origin, then the new one's arrivals stream in.
 	 */
 	announced(scope: Path.Pattern = Path.Pattern.all(), options?: Announce.Options): Announce.Consumer {
-		const producer = new Announce.Producer();
+		const producer = new AnnounceProducer();
 		const consumer = producer.consume();
 
 		// A child of this handle's scope rather than a standalone Effect it merely cleans up

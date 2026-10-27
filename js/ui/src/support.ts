@@ -30,8 +30,8 @@ export interface Report {
  */
 export type Show = "always" | "warning" | "error" | "never";
 
+/** The attributes the element observes. */
 const OBSERVED = ["show", "details"] as const;
-type Observed = (typeof OBSERVED)[number];
 
 /**
  * A banner reporting what this browser supports, with an optional details table.
@@ -46,7 +46,8 @@ export abstract class Support extends HTMLElement {
 
 	#signals?: Effect;
 
-	static observedAttributes = OBSERVED;
+	/** The attributes the browser reports changes to. */
+	static observedAttributes: typeof OBSERVED = OBSERVED;
 
 	constructor() {
 		super();
@@ -59,17 +60,20 @@ export abstract class Support extends HTMLElement {
 	/** Detect what this browser supports, called once on construction. */
 	protected abstract detect(): Promise<Report>;
 
+	/** Called by the browser when the element joins a document. */
 	connectedCallback() {
 		this.#signals = new Effect();
 		this.#signals.run(this.#render.bind(this));
 	}
 
+	/** Called by the browser when the element leaves its document. */
 	disconnectedCallback() {
 		this.#signals?.close();
 		this.#signals = undefined;
 	}
 
-	attributeChangedCallback(name: Observed, _oldValue: string | null, newValue: string | null) {
+	/** Called by the browser when an observed attribute changes. */
+	attributeChangedCallback(name: (typeof OBSERVED)[number], _oldValue: string | null, newValue: string | null) {
 		if (name === "show") {
 			const show = newValue ?? "warning";
 			if (show === "always" || show === "warning" || show === "error" || show === "never") {

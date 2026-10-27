@@ -28,7 +28,8 @@ export type SourceInput = {
 	supported: Getter<Supported | undefined>;
 };
 
-type SourceOutput = {
+/** Signals the source derives. */
+export type SourceOutput = {
 	catalog: Signal<Catalog.Audio | undefined>;
 	available: Signal<Record<string, Catalog.AudioConfig>>;
 	track: Signal<string | undefined>;
