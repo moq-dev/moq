@@ -61,7 +61,6 @@ leaving JS-only redesigns of `js/net` to [rs2ts](/quest/m2/rs2ts/README.md).
 - [JS tracks end clean only on a deliberate finish](/quest/m1/cut-audit/js-close-cause.md) - local close, violations, and unanswered requests end with errors
 - [A malformed lite message closes the session](/quest/m1/cut-audit/announce-decode-complete.md) - a bad ANNOUNCE body no longer jams its stream
 - [Withdrawing a moq-transport FETCH or TRACK_STATUS ends it](/quest/m1/cut-audit/ietf-withdraw-resolve.md) - withdrawal during resolution releases the request
-- [JS moq-transport sessions close on peer violations](/quest/m1/cut-audit/js-ietf-violations.md) - right close codes, no unhandled rejection, bounded reflected namespaces
 - [A media hole in the player keeps the timeline](/quest/m1/cut-audit/watch-audio-hole.md) - a skipped group re-primes decoders without flushing audio or re-anchoring sync
 - [A camera broadcast stays announced across unmute](/quest/m1/cut-audit/publish-announce-latch.md) - viewers do not restart on every device flap
 - [Muted and volume are independent](/quest/m1/cut-audit/watch-volume-mute.md) - `<moq-watch volume="0.8" muted>` starts muted at 0.8

@@ -2344,7 +2344,10 @@ export class Publisher {
 		};
 		void request.ended.then(stop);
 		let refusal: Refusal | undefined;
-		const closed = this.#quic.closed.then(() => "closed" as const);
+		const closed = this.#quic.closed.then(
+			() => "closed" as const,
+			() => "closed" as const,
+		);
 		let updates: Promise<void> | undefined;
 		let writing: Promise<void> | undefined;
 		try {
