@@ -1260,7 +1260,10 @@ export class Producer {
 				this.#evict(entry);
 			}
 		}
+		const evicted = retained.length < this.#cache.length;
 		this.#cache = retained;
+		// An evicted group below the end no longer holds it open, as in Rust.
+		if (evicted) this.#settle();
 
 		// Replace the wakeup with one for the next entry due to age out. Writes settle
 		// retention inline, so this only has to cover the case no write follows. Cheap to

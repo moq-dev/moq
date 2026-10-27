@@ -2812,6 +2812,29 @@ test("a settled end survives a late group and an abort", async () => {
 	expect(await subscriber.recvGroup()).toBeUndefined();
 });
 
+// As in Rust, an evicted group no longer holds the end open.
+test("closed settles once the cache evicts the last open group below the end", async () => {
+	const clock = manualTime(10_000);
+	try {
+		const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
+		const open = producer.appendGroup();
+		open.writeFrame(textFrame("open"));
+		const last = producer.appendGroup();
+		last.writeFrame(textFrame("last"));
+		last.finish();
+		producer.finish();
+		await settle();
+		expect(producer.closed.peek()).toBeUndefined();
+
+		await clock.advance(10_000 + CACHE_WINDOW_MS + CACHE_WINDOW_MS / 8);
+		await settle();
+		expect(open.closed.peek()).toBeInstanceOf(TooFarBehind);
+		expect(producer.closed.peek()).toBeNull();
+	} finally {
+		clock.installed.close();
+	}
+});
+
 test("finish is not terminal: closed settles once the groups below the end finish", async () => {
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
 	const subscriber = producer.subscribe();
