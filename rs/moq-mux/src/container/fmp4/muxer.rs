@@ -537,7 +537,10 @@ mod tests {
 		let at = |micros| Timestamp::from_micros(micros).unwrap();
 		let video = [frame(0, true), frame(33_333, false)];
 		let fragment = video_muxer().fragment(0, &video, Some(at(66_666))).unwrap();
-		assert_eq!(super::super::sample_durations(&fragment), vec![Some(1_000), Some(1_000)]);
+		assert_eq!(
+			super::super::sample_durations(&fragment),
+			vec![Some(1_000), Some(1_000)]
+		);
 
 		let coarse = Frame {
 			timestamp: Timestamp::new(1, moq_net::Timescale::new(1).unwrap()).unwrap(),
