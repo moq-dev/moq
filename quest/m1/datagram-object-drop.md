@@ -6,10 +6,9 @@ A moq-transport datagram group with several objects reaches every surface
 that keeps Object IDs intact, and every surface that cannot carry an Object ID
 delivers only object 0. Today a moq-lite hop without the `ietf` extension
 forwards every object as a plain datagram at the same sequence, and the
-receiver keeps whichever arrives first. If object 0 is lost or reordered,
-object 1 is delivered as the group's only datagram, which is silent
-substitution, not loss. The plain Rust datagram reader also hands out every
-object's payload at one sequence with no way to tell them apart.
+plain Rust datagram reader hands out every object's payload at one sequence
+with no way to tell them apart. If object 0 is lost or arrives late, object 1
+is delivered as the group's datagram, which is silent substitution, not loss.
 
 Out of scope: exposing an Object ID on the public `Datagram` in Rust, JS, or
 the bindings; refusing the track; a dropped-datagram stat; multi-object
@@ -31,7 +30,7 @@ Decided 2026-10-26 (maintainer, importing
   it cannot carry. The rest of the track keeps flowing. Rejected: aborting the
   track with `Unsupported`, which would also cost the lite viewer object 0.
 - Surfaces:
-  - `lite::Publisher::serve_datagram` (`rs/moq-net/src/lite/publisher.rs`),
+  - `Subscription::serve_datagram` (`rs/moq-net/src/lite/publisher.rs`),
     when `ietf` is off: skip a datagram whose `wire.object_id` is past 0, as
     it already skips a status.
   - `track::Subscriber::poll_recv_datagram` (`rs/moq-net/src/model/track.rs`):

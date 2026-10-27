@@ -47,4 +47,4 @@ Decided 2026-10-26 (maintainer, importing
 
 ## Closes
 
-- [#6877](https://github.com/moq-dev/moq/issues/6877) - a redundant ingest pair: let a standby epoch wait behind a live one, and let a follower switch without emptying its delay
+- [#6877](https://github.com/moq-dev/moq/issues/6877) - a redundant ingest pair: a follower switches without emptying its delay (the standby-epoch ask is declined)
