@@ -48,7 +48,3 @@ inline, clearly distinguishing upstream wait time from content age.
 ## Required
 
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - the JS responder this extends
-
-## Related
-
-- [moq-transport range updates](/quest/m1/subscribe-ranges/ietf.md) - upstream range changes

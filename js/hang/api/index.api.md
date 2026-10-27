@@ -349,8 +349,6 @@ declare namespace Catalog {
         UnsupportedVersion,
         RootSchema,
         Root,
-        MAX_RENDITIONS,
-        TooManyRenditions,
         DuplicateRendition,
         EscapingBroadcast,
         StatsSchema,
@@ -367,97 +365,7 @@ declare namespace Catalog {
         Track
     }
 }
-
-declare namespace Catalog_2 {
-    export {
-        Audio_2 as Audio,
-        Video,
-        AudioConfig,
-        AudioConfigSchema,
-        AudioSchema,
-        Color,
-        Projection,
-        VideoConfig,
-        ColorSchema,
-        ProjectionSchema,
-        VideoConfigSchema,
-        VideoSchema,
-        MOQ_EPOCH_UNIX_MILLIS,
-        ARCHIVE_VERSION,
-        ArchiveSchema,
-        Archive,
-        BinaryConfigSchema,
-        BinarySchema,
-        Binary,
-        BinaryConfig,
-        wallClockTime,
-        ClockSchema,
-        Clock,
-        compressionSupported,
-        KnownCompression,
-        CompressionSchema,
-        Compression,
-        containerSupported,
-        UnknownContainerSchema,
-        ContainerSchema,
-        Container_2 as Container,
-        CmafContainer,
-        EchoSchema,
-        Echo_2 as Echo,
-        detectFormat,
-        TRACK,
-        TRACK_COMPRESSED,
-        FORMATS,
-        Format,
-        DEFAULT_FORMAT,
-        hexSchema,
-        Hex,
-        u8,
-        u53,
-        u8Schema,
-        U8,
-        u53Schema,
-        U53,
-        nonzeroU53Schema,
-        JsonConfigSchema,
-        JsonSchema,
-        Json,
-        JsonConfig,
-        modeSupported,
-        KnownMode,
-        ModeSchema,
-        Mode,
-        RelativeBroadcastSchema,
-        RelativeBroadcast,
-        EpochSchema,
-        ReferenceEpoch,
-        PRIORITY,
-        checkRenditions,
-        encode,
-        checkResolvable,
-        watch,
-        VERSION,
-        UnsupportedVersion,
-        RootSchema,
-        Root,
-        MAX_RENDITIONS,
-        TooManyRenditions,
-        DuplicateRendition,
-        EscapingBroadcast,
-        StatsSchema,
-        Stats_2 as Stats,
-        TextFormatSchema,
-        TextRoleSchema,
-        TextConfigSchema,
-        TextSchema,
-        Text_2 as Text,
-        TextConfig,
-        TextRole,
-        track,
-        TrackSchema,
-        Track
-    }
-}
+export { Catalog }
 
 function checkRenditions(root: Root): Root;
 
@@ -536,7 +444,7 @@ class Consumer_2 implements AsyncIterable<Event_2> {
     [Symbol.asyncIterator](): AsyncIterator<Event_2>;
     close(): void;
     next(): Promise<Event_2 | undefined>;
-    static subscribe(broadcast: Net.Broadcast.Consumer, archive: Catalog_2.Archive, track: string): Consumer_2;
+    static subscribe(broadcast: Net.Broadcast.Consumer, archive: Catalog.Archive, track: string): Consumer_2;
 }
 
 interface ConsumerProps {
@@ -562,6 +470,7 @@ declare namespace Container {
         BufferedRanges
     }
 }
+export { Container }
 
 type Container_2 = z.infer<typeof ContainerSchema>;
 
@@ -611,22 +520,9 @@ declare namespace Echo {
         TRACK_2 as TRACK
     }
 }
+export { Echo }
 
 type Echo_2 = z.infer<typeof EchoSchema>;
-
-declare namespace Echo_3 {
-    export {
-        isEcho,
-        ArrivalSchema,
-        Arrival,
-        RenditionSchema,
-        Rendition,
-        SnapshotSchema,
-        Snapshot,
-        SUFFIX,
-        TRACK_2 as TRACK
-    }
-}
 
 const EchoSchema: z.ZodMiniObject<{
     path: z.ZodMiniType<RelativeBroadcast, string, z.core.$ZodTypeInternals<RelativeBroadcast, string>>;
@@ -710,6 +606,7 @@ declare namespace Health {
         Health_2 as Health
     }
 }
+export { Health }
 
 interface Health_2 {
     interval?: number;
@@ -781,8 +678,6 @@ interface Limits {
     unhealthy: number;
 }
 
-const MAX_RENDITIONS = 64;
-
 function mergeBufferedRanges(a: BufferedRanges, b: BufferedRanges): BufferedRanges;
 
 type Mode = z_2.infer<typeof ModeSchema>;
@@ -802,7 +697,7 @@ interface Observer {
     path: Path.Valid;
 }
 
-interface Position_2 {
+interface Position {
     frame?: number;
     group: number;
 }
@@ -841,7 +736,7 @@ const ProjectionSchema: z.ZodMiniUnion<readonly [z.ZodMiniDiscriminatedUnion<[z.
     kind: string;
 }>>]>;
 
-function publisher(sample: Sample<Stats_3.Snapshot>, thresholds?: Thresholds): Health_2;
+function publisher(sample: Sample<Stats.Snapshot>, thresholds?: Thresholds): Health_2;
 
 function ranked(renditions: Record<string, AudioConfig>): [string, AudioConfig][];
 
@@ -885,11 +780,11 @@ interface ReceivedFrame extends Frame {
 
 interface Record_2 {
     duration?: number;
-    end: Position_2;
+    end: Position;
     keyframe?: boolean;
     pts?: number;
     sequence: number;
-    start: Position_2;
+    start: Position;
 }
 
 type ReferenceEpoch = string & {
@@ -1624,19 +1519,9 @@ declare namespace Stats {
         Snapshot_2 as Snapshot
     }
 }
+export { Stats }
 
 type Stats_2 = z.infer<typeof StatsSchema>;
-
-declare namespace Stats_3 {
-    export {
-        TransportSchema,
-        Transport,
-        RenditionSchema_2 as RenditionSchema,
-        Rendition_2 as Rendition,
-        SnapshotSchema_2 as SnapshotSchema,
-        Snapshot_2 as Snapshot
-    }
-}
 
 const StatsSchema: z.ZodMiniObject<{
     track: z.ZodMiniString<string>;
@@ -1739,7 +1624,7 @@ interface Thresholds {
 
 declare namespace Timeline {
     export {
-        Position_2 as Position,
+        Position,
         Record_2 as Record,
         SUFFIX_2 as SUFFIX,
         Entry,
@@ -1747,11 +1632,7 @@ declare namespace Timeline {
         Consumer_2 as Consumer
     }
 }
-
-class TooManyRenditions extends Error {
-    constructor(count: number);
-    readonly count: number;
-}
+export { Timeline }
 
 const TRACK = "catalog.json";
 
@@ -2303,11 +2184,10 @@ const VideoSchema: z.ZodMiniUnion<readonly [z.ZodMiniObject<{
     };
 }[]>>]>;
 
-function viewer(sample: Sample<Echo_3.Snapshot>, thresholds?: Thresholds): Health_2;
+function viewer(sample: Sample<Echo.Snapshot>, thresholds?: Thresholds): Health_2;
 
 function wallClockTime(clock: Clock, pts: number, ptsTimescale: number): Date;
 
 function watch(broadcast: Net.Broadcast.Consumer): AsyncIterable<Root>;
-
 
 ```

@@ -48,33 +48,21 @@ declare namespace Audio_2 {
     export {
         DecoderInput,
         DecoderProps,
+        DecoderOutput,
         Stats,
         Decoder,
         EmitterInput,
         EmitterProps,
+        EmitterOutput,
         Emitter,
         Target,
         Supported,
         SourceInput,
+        SourceOutput,
         Source
     }
 }
-
-declare namespace Audio_3 {
-    export {
-        DecoderInput,
-        DecoderProps,
-        Stats,
-        Decoder,
-        EmitterInput,
-        EmitterProps,
-        Emitter,
-        Target,
-        Supported,
-        SourceInput,
-        Source
-    }
-}
+export { Audio_2 as Audio }
 
 export class Broadcast {
     constructor(props?: Inputs<BroadcastInput>);
@@ -92,8 +80,8 @@ export type BroadcastInput = {
     catalog: Getter<Catalog.Root | undefined>;
 };
 
-type BroadcastOutput = {
-    status: Signal<Status>;
+export type BroadcastOutput = {
+    status: Signal<"offline" | "loading" | "live" | "error" | "unsupported">;
     active: Signal<Net.Broadcast.Consumer | undefined>;
     error: Signal<Error | undefined>;
     catalog: Signal<Catalog.Root | undefined>;
@@ -201,25 +189,23 @@ type EmitterProps = Inputs<EmitterInput> & {
 
 export { Hang }
 
-type Kind = "video" | "audio" | "text";
-
 export { Net }
 
 export class Player {
     constructor(props?: PlayerProps);
-    readonly audio: Audio_3.Decoder;
+    readonly audio: Audio_2.Decoder;
     readonly broadcast: Broadcast;
     close(): void;
-    readonly emitter: Audio_3.Emitter;
-    readonly in: Readonlys<Omit<PlayerInput, Kind>> & {
-        readonly [K in Kind]: Readonlys<PlayerInput[K]>;
+    readonly emitter: Audio_2.Emitter;
+    readonly in: Readonlys<Omit<PlayerInput, "video" | "audio" | "text">> & {
+        readonly [K in "video" | "audio" | "text"]: Readonlys<PlayerInput[K]>;
     };
-    readonly renderer: Video_3.Renderer;
+    readonly renderer: Video.Renderer;
     reset(): void;
     readonly sync: Sync;
-    readonly text: Text_3.Source;
-    readonly textRenderer: Text_3.Renderer;
-    readonly video: Video_3.Decoder;
+    readonly text: Text_2.Source;
+    readonly textRenderer: Text_2.Renderer;
+    readonly video: Video.Decoder;
 }
 
 export type PlayerInput = {
@@ -234,13 +220,13 @@ export type PlayerInput = {
     delay: Getter<Delay>;
     buffer: Getter<Milli>;
     video: {
-        target: Getter<Video_3.Target | undefined>;
+        target: Getter<Video.Target | undefined>;
         canvas: Getter<HTMLCanvasElement | undefined>;
-        visible: Getter<Video_3.Visible>;
-        backend: Getter<Video_3.Backend>;
+        visible: Getter<Video.Visible>;
+        backend: Getter<Video.Backend>;
     };
     audio: {
-        target: Getter<Audio_3.Target | undefined>;
+        target: Getter<Audio_2.Target | undefined>;
         volume: Getter<number>;
         muted: Getter<boolean>;
     };
@@ -250,8 +236,8 @@ export type PlayerInput = {
     };
 };
 
-export type PlayerProps = Inputs<Omit<PlayerInput, Kind>> & {
-    [K in Kind]?: Inputs<PlayerInput[K]>;
+export type PlayerProps = Inputs<Omit<PlayerInput, "video" | "audio" | "text">> & {
+    [K in "video" | "audio" | "text"]?: Inputs<PlayerInput[K]>;
 };
 
 function renderable(config: Catalog.TextConfig): boolean;
@@ -371,8 +357,6 @@ interface Stats_2 {
     frameCount: number;
 }
 
-type Status = "offline" | "loading" | "live" | "error" | "unsupported";
-
 type Supported = (config: Catalog.AudioConfig) => Promise<boolean>;
 
 function supported(config: Catalog.AudioConfig): Promise<boolean>;
@@ -395,7 +379,7 @@ export type SyncInput = {
     buffer: Getter<Milli>;
 };
 
-type SyncOutput = {
+export type SyncOutput = {
     instant: Signal<boolean>;
     reference: Signal<number | undefined>;
     delay: Signal<Milli>;
@@ -423,20 +407,11 @@ declare namespace Text_2 {
         Renderer,
         renderable,
         SourceInput_2 as SourceInput,
+        SourceOutput_2 as SourceOutput,
         Source_2 as Source
     }
 }
-
-declare namespace Text_3 {
-    export {
-        RendererInput,
-        RendererProps,
-        Renderer,
-        renderable,
-        SourceInput_2 as SourceInput,
-        Source_2 as Source
-    }
-}
+export { Text_2 as Text }
 
 declare namespace Video {
     export {
@@ -444,6 +419,7 @@ declare namespace Video {
         DecoderInput_2 as DecoderInput,
         DecoderProps_2 as DecoderProps,
         Stats_2 as Stats,
+        DecoderOutput_2 as DecoderOutput,
         Decoder_2 as Decoder,
         Visible,
         RendererInput_2 as RendererInput,
@@ -452,29 +428,12 @@ declare namespace Video {
         Supported_2 as Supported,
         Target_2 as Target,
         SourceInput_3 as SourceInput,
+        SourceOutput_3 as SourceOutput,
         Source_3 as Source
     }
 }
-
-declare namespace Video_3 {
-    export {
-        Backend,
-        DecoderInput_2 as DecoderInput,
-        DecoderProps_2 as DecoderProps,
-        Stats_2 as Stats,
-        Decoder_2 as Decoder,
-        Visible,
-        RendererInput_2 as RendererInput,
-        RendererProps_2 as RendererProps,
-        Renderer_2 as Renderer,
-        Supported_2 as Supported,
-        Target_2 as Target,
-        SourceInput_3 as SourceInput,
-        Source_3 as Source
-    }
-}
+export { Video }
 
 type Visible = "never" | "always" | (string & {});
-
 
 ```

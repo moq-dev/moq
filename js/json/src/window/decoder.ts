@@ -17,7 +17,7 @@ function index(value: unknown, label: string): number {
 }
 
 /** Options for a {@link Decoder}. */
-export interface ConsumerConfig {
+export interface DecoderConfig {
 	/** Read frames written with `Config.compression` on. Defaults to `false`. */
 	compression?: boolean;
 }
@@ -73,7 +73,7 @@ export class Decoder<T> {
 	#events: Queued<T>[] = [];
 	#nextEvent = 0;
 
-	constructor(config: ConsumerConfig = {}) {
+	constructor(config: DecoderConfig = {}) {
 		this.#compress = config.compression ?? false;
 	}
 

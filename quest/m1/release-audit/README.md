@@ -77,7 +77,9 @@ reordered-frame timestamps and missing EOF output. Each owning quest records
 the reproduction's limits. JS reader and publisher datagram paths now enforce
 subscription bounds, and the OBS source now stamps each decoded picture with its
 own timestamp and drains at clean EOF.
-Go reservation disposal remains an investigation.
+Go reservation disposal was settled by
+[moq-dev/moq#6424](https://github.com/moq-dev/moq/pull/6424): `Update(0)`
+releases a reservation deterministically.
 No platform-wide binding parity, full OBS runtime, fuzzing campaign, or
 network-impairment performance result is implied by these checks.
 
@@ -95,5 +97,4 @@ work, because obs-moq ships on its own schedule.
 - [Transport performance audit](/quest/m2/audit-perf.md) - congestion-control coverage remains outstanding
 - [Binding timestamps](/quest/m1/binding-timestamps.md) - exact timestamps across language APIs
 - [Dependency audit](/quest/m2/audit-deps.md) - existing advisory inventory
-- [Release gates](/quest/m0/ci/release-gates.md) - post-cut ruleset verification
 - [Publish and adopt](/quest/m2/release/README.md) - API/feature review, merge order, candidate checks, publication, and installed-artifact proof

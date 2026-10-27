@@ -271,9 +271,6 @@ impl Consumer {
 	pub(super) fn subscribe(&self, subscription: track::Preferences) -> Subscriber {
 		let mirrored = subscription.read().clone();
 		let window = Window::new(&mirrored.ranges, None, &Unheld).expect("an unheld hop refuses nothing");
-		// An absolute floor holds from the start, as on a plain cursor; a relative one
-		// counts back from an edge, so the reported largest is never below it.
-		let floor = window.floor().unwrap_or(0);
 		let reader = Arc::new_cyclic(|this| {
 			Mutex::new(Reader {
 				this: this.clone(),
@@ -285,7 +282,7 @@ impl Consumer {
 				newest: None,
 				window,
 				datagrams: Datagrams::default(),
-				groups: (floor, None),
+				groups: (0, None),
 				groups_read: false,
 				out: Vec::new(),
 				drops: RangeMap::new(),
@@ -702,6 +699,12 @@ impl Subscriber {
 		self.reader().window().runs(from).next().map(|run| *run.start())
 	}
 
+	/// Whether `accounted` holds every group the reader's bounded ranges name from `from`
+	/// up to `cap`; see [`track::Subscriber::covered`].
+	pub(super) fn covered(&self, from: u64, cap: Option<u64>, accounted: &RangeSet<u64>) -> bool {
+		self.reader().window().covered_by(from, cap, accounted)
+	}
+
 	/// Poll for sequences the serving copy gave up that no copy may still deliver; see
 	/// [`track::Subscriber::poll_drop`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
@@ -746,7 +749,11 @@ impl Subscriber {
 
 	/// The local group filter, as [`track::Subscriber::poll_largest`] reports within it.
 	pub(super) fn bounds(&self) -> track::Bounds {
-		let (start, end) = self.reader().groups;
+		let mut reader = self.reader();
+		reader.sync(&kio::Waiter::noop());
+		let (start, end) = reader.groups;
+		// Requested ranges move independently of the explicit local cursor bounds.
+		let start = start.max(reader.window().floor().unwrap_or(0));
 		track::Bounds { start, end }
 	}
 

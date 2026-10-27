@@ -25,14 +25,16 @@ reachable by an embedder:
   instead of leaking until idle timeout, and `web::Session` counts live
   streams rather than closing on its last clone. Update the `Connection`
   doc that states the opposite.
-- Receive close at the read-ahead cap: `stream.rs` parks once the backlog
-  reaches `READ_AHEAD` before checking `closed()`, so a reset or connection
-  close (idle timeout included) behind 64 KiB of unread data never
-  surfaces. `moq-tokio/src/transport.rs` has the same cap and returns
-  Pending without registering a waker. Fix both: check terminal state
-  before the cap, keeping held credit, and register the closed watcher so
-  a read that drains below the cap wakes it. Test with `poll_closed` and
-  the draining read in separate tasks.
+- Receive close at the read-ahead cap: moq-tokio's adapter
+  (`RecvStream::poll_closed` in `rs/moq-tokio/src/transport.rs`) returns
+  Pending without registering a waker once its read-ahead reaches
+  `READ_AHEAD_CAP` (64 KiB), so a reset or connection close (idle timeout
+  included) behind that much unread data never surfaces. Check terminal
+  state before the cap and register the closed watcher so a read that
+  drains below the cap wakes it. Test with `poll_closed` and the draining
+  read in separate tasks. moq-uring's own `READ_AHEAD` backlog is gone:
+  [moq-dev/moq#5878](https://github.com/moq-dev/moq/pull/5878) replaced it
+  with receive leases, whose `poll_lease` checks `closed()` when blocked.
 
 Use the existing teardown and credit integration tests' shapes; drive time
 with the manual clock for the idle-timeout case.

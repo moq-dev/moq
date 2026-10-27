@@ -400,8 +400,6 @@ export type KnownCompression = "deflate";
 
 export type KnownMode = "snapshot" | "stream";
 
-export const MAX_RENDITIONS = 64;
-
 export type Mode = z_2.infer<typeof ModeSchema>;
 
 export const ModeSchema: z_2.ZodMiniString<string>;
@@ -1129,11 +1127,6 @@ export const TextSchema: z_2.ZodMiniObject<{
     }, z_2.core.$strip>>;
 }, z_2.core.$strip>;
 
-export class TooManyRenditions extends Error {
-    constructor(count: number);
-    readonly count: number;
-}
-
 export const TRACK = "catalog.json";
 
 export type Track = z.infer<typeof TrackSchema>;
@@ -1666,6 +1659,5 @@ export const VideoSchema: z.ZodMiniUnion<readonly [z.ZodMiniObject<{
 export function wallClockTime(clock: Clock, pts: number, ptsTimescale: number): Date;
 
 export function watch(broadcast: Moq.Broadcast.Consumer): AsyncIterable<Root>;
-
 
 ```

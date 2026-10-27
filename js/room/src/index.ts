@@ -18,6 +18,7 @@ export * as Clock from "@moq/clock";
 export * as Chat from "./chat.ts";
 export { Local, type LocalProps } from "./local.ts";
 export {
+	type Consumed,
 	consume,
 	type ExtendedCatalog,
 	type HangCatalog,
@@ -25,8 +26,10 @@ export {
 	type Preview,
 	serve,
 	TRACK,
+	type TrackRef,
 	type User,
 	type UserFields,
+	type UserInput,
 	type UserProps,
 	userFields,
 } from "./metadata.ts";

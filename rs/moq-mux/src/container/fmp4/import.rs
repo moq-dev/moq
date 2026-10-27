@@ -69,7 +69,8 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 
 	// The latest moof header
 	moof: Option<Moof>,
-	moof_size: usize,
+	// Bytes consumed since that moof began, including intervening boxes.
+	moof_span: usize,
 
 	// Bytes carried across calls: a partial atom at the tail of one `decode` waits
 	// here for the rest to arrive on the next call.
@@ -249,7 +250,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			skipped: HashSet::default(),
 			moov: None,
 			moof: None,
-			moof_size: 0,
+			moof_span: 0,
 			broadcast,
 			buffer: BytesMut::new(),
 			pending_cut: false,
@@ -313,6 +314,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	}
 
 	/// Decode a buffer of bytes.
+	///
+	/// Samples must be nonempty and use moof-relative offsets; absolute `base_data_offset`
+	/// addressing is unsupported. With ffmpeg, use `default_base_moof`.
 	pub fn decode(&mut self, data: &[u8]) -> Result<()> {
 		self.buffer.extend_from_slice(data);
 		self.drain()
@@ -345,6 +349,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		let consumed = self.buffer.split_to(position).freeze();
 
 		for (atom, start, size) in parsed {
+			if self.moof.is_some() {
+				self.moof_span = self.moof_span.checked_add(size).ok_or(Error::InvalidDataOffset)?;
+			}
 			match atom {
 				Any::Ftyp(_) => {}
 				Any::Emsg(_) => {
@@ -364,7 +371,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 						return Err(Error::DuplicateMoof.into());
 					}
 					self.moof.replace(moof);
-					self.moof_size = size;
+					self.moof_span = size;
 				}
 				Any::Mdat(mdat) => {
 					let raw = consumed.slice(start..start + size);
@@ -922,7 +929,6 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	fn extract(&mut self, mdat: Mdat, raw: Bytes) -> Result<()> {
 		let has_video = self.tracks.values().any(|t| t.kind == Kind::Video);
 		let moof = self.moof.take().ok_or(Error::NoMoof)?;
-		let moof_size = self.moof_size;
 		let header_size = raw.len() - mdat.data.len();
 		// The mdat payload as a view of the input, so each unwrapped sample is sliced, not copied.
 		let payload = raw.slice(header_size..);
@@ -942,7 +948,12 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			return Err(Error::NoMoov.into());
 		}
 
-		let mut claimed = sample::Claimed::default();
+		// Offsets include any boxes between moof and mdat, across decode calls too.
+		let data_start = self
+			.moof_span
+			.checked_sub(payload.len())
+			.ok_or(Error::InvalidDataOffset)?;
+		let mut resolver = sample::Resolver::new(data_start, payload.len());
 
 		// Loop over all of the traf boxes in the moof.
 		for traf in &moof.traf {
@@ -952,9 +963,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					super::text::Fragment {
 						traf,
 						data: &payload,
-						moof_size,
-						header_size,
-						claimed: &mut claimed,
+						resolver: &mut resolver,
 					},
 					&mut self.timebase,
 				)?;
@@ -971,12 +980,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			// A fragment wholly before the edit or the first sync sample, such as priming samples or
 			// a mid-GOP join. Skipped before the segment is counted as opened, or the next keyframe
 			// would roll a second segment.
-			let Some(run) = track.run(traf, moof_size, header_size, payload.len())? else {
+			let Some(run) = track.run(traf, &mut resolver)? else {
 				continue;
 			};
-			for sample in &run.samples {
-				claimed.take(sample.range.clone())?;
-			}
 
 			// Shift onto the catalog clock. Anchor before releasing the reservation, so the first
 			// snapshot carries the final clock; the moov declared every track, so any track's
@@ -1018,9 +1024,8 @@ struct Placement {
 }
 
 impl<E: crate::catalog::hang::CatalogExt> Fmp4Track<E> {
-	/// Resolve the samples `traf` places in an mdat whose payload is `len` bytes, or `None` when
-	/// the edit list drops every one.
-	fn run(&mut self, traf: &mp4_atom::Traf, moof_size: usize, header_size: usize, len: usize) -> Result<Option<Run>> {
+	/// Apply this track's edit list to the resolved samples, or return `None` if none remain.
+	fn run(&mut self, traf: &mp4_atom::Traf, resolver: &mut sample::Resolver) -> Result<Option<Run>> {
 		let tfdt = traf.tfdt.as_ref().ok_or(Error::MissingTfdt)?;
 		let timescale = self.timescale;
 		let mut dts = tfdt.base_media_decode_time;
@@ -1040,100 +1045,51 @@ impl<E: crate::catalog::hang::CatalogExt> Fmp4Track<E> {
 
 		self.last_decode_time = Some(dts);
 
-		if traf.trun.is_empty() {
-			return Err(Error::MissingTrun.into());
-		}
-
-		let tfhd = &traf.tfhd;
-		let mut offset = tfhd.base_data_offset.unwrap_or_default() as usize;
 		let mut earliest = None;
 		let mut end = None;
-		let total_samples: usize = traf.trun.iter().map(|t| t.entries.len()).sum();
-		let mut samples = Vec::with_capacity(total_samples);
-		let mut index = 0;
+		let mut samples = Vec::new();
 		let mut dropped = false;
+		for resolved in resolver.resolve(traf, self.defaults)? {
+			let sample::Resolved { sample, cts, range } = resolved?;
+			let duration = sample.duration;
 
-		for trun in &traf.trun {
-			if let Some(data_offset) = trun.data_offset {
-				let base_offset = tfhd.base_data_offset.unwrap_or_default() as usize;
-				let data_offset: usize = data_offset.try_into().map_err(|_| Error::InvalidDataOffset)?;
-
-				let relative_offset = data_offset
-					.checked_sub(moof_size)
-					.and_then(|v| v.checked_sub(header_size))
-					.ok_or(Error::InvalidDataOffset)?;
-
-				offset = base_offset
-					.checked_add(relative_offset)
-					.ok_or(Error::InvalidDataOffset)?;
+			// Checked: a negative composition offset must not wrap into a huge u64 PTS.
+			let pts = dts.checked_add_signed(cts as i64).ok_or(Error::PtsOverflow)?;
+			let duration_ts = duration
+				.map(|duration| Timestamp::new(duration as u64, timescale))
+				.transpose()?;
+			if let Some(duration) = duration_ts {
+				self.sample_duration = Some(self.sample_duration.map_or(duration, |min| min.min(duration)));
 			}
 
-			for entry in &trun.entries {
-				let sample = self.defaults.resolve(tfhd, entry);
-				let duration = sample.duration;
+			let presented = self.edit.present(pts)?;
+			if sample.is_sync() {
+				self.orphaned = presented.is_none();
+			}
+			if let Some(presented) = presented.filter(|_| !self.orphaned) {
+				let timestamp = Timestamp::new(presented, timescale)?;
+				let sample_end = match duration_ts.or(self.sample_duration) {
+					Some(duration) => timestamp.checked_add(duration)?,
+					None => timestamp,
+				};
+				end = Some(end.map_or(sample_end, |max: Timestamp| max.max(sample_end)));
+				earliest = Some(earliest.map_or(timestamp, |min: Timestamp| min.min(timestamp)));
 
-				// A non-final sample with no resolvable duration leaves the rest of the
-				// fragment's DTS ambiguous, so reject it rather than collapse timestamps.
-				if duration.is_none() && index + 1 != total_samples {
-					return Err(Error::MissingSampleDuration.into());
-				}
+				samples.push(Sample {
+					dts,
+					pts,
+					timestamp,
+					duration,
+					flags: sample.flags,
+					sync: sample.is_sync(),
+					range,
+				});
+			} else {
+				dropped = true;
+			}
 
-				// Checked: a negative composition offset must not wrap into a huge u64 PTS.
-				let pts = dts
-					.checked_add_signed(entry.cts.unwrap_or_default() as i64)
-					.ok_or(Error::PtsOverflow)?;
-				let duration_ts = duration
-					.map(|duration| Timestamp::new(duration as u64, timescale))
-					.transpose()?;
-				if let Some(duration) = duration_ts {
-					self.sample_duration = Some(self.sample_duration.map_or(duration, |min| min.min(duration)));
-				}
-
-				// Each sample must lie inside the mdat, or the sizes and offsets disagree with the
-				// data and it cannot be addressed safely.
-				let next = offset
-					.checked_add(sample.size as usize)
-					.ok_or(Error::InvalidDataOffset)?;
-				if next > len {
-					return Err(Error::SampleRangeOutOfBounds {
-						start: offset,
-						end: next,
-						len,
-					}
-					.into());
-				}
-
-				let presented = self.edit.present(pts)?;
-				if sample.is_sync() {
-					self.orphaned = presented.is_none();
-				}
-				if let Some(presented) = presented.filter(|_| !self.orphaned) {
-					let timestamp = Timestamp::new(presented, timescale)?;
-					let sample_end = match duration_ts.or(self.sample_duration) {
-						Some(duration) => timestamp.checked_add(duration)?,
-						None => timestamp,
-					};
-					end = Some(end.map_or(sample_end, |max: Timestamp| max.max(sample_end)));
-					earliest = Some(earliest.map_or(timestamp, |min: Timestamp| min.min(timestamp)));
-
-					samples.push(Sample {
-						dts,
-						pts,
-						timestamp,
-						duration,
-						flags: sample.flags,
-						sync: sample.is_sync(),
-						range: offset..next,
-					});
-				} else {
-					dropped = true;
-				}
-
-				if let Some(duration) = duration {
-					dts = dts.checked_add(duration as u64).ok_or(Error::PtsOverflow)?;
-				}
-				offset = next;
-				index += 1;
+			if let Some(duration) = duration {
+				dts = dts.checked_add(duration as u64).ok_or(Error::PtsOverflow)?;
 			}
 		}
 
@@ -1176,10 +1132,8 @@ fn fragment(
 	// Apply structural (flag-presence) changes BEFORE measuring the encoded
 	// size, otherwise the rewritten data_offset values are computed from a
 	// stale size and the resulting fragment misaddresses sample data.
-	// In particular: clearing tfhd.base_data_offset removes 8 bytes per traf,
-	// and ensuring trun.data_offset is Some(...) reserves 4 bytes per trun.
+	// Ensuring trun.data_offset is Some(...) reserves 4 bytes per trun.
 	for traf_mut in &mut adjusted_moof.traf {
-		traf_mut.tfhd.base_data_offset = None;
 		// A zero default/sample duration is "unknown", not "instantaneous": drop it so
 		// the re-emitted fragment carries no bogus zero that a decoder would honor.
 		if traf_mut.tfhd.default_sample_duration == Some(0) {

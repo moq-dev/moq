@@ -34,6 +34,7 @@ declare namespace Chat {
         Subscriber
     }
 }
+export { Chat }
 
 export type Claims = {
     root: string;
@@ -47,7 +48,7 @@ export { Clock }
 
 export function consume(broadcast: Watch.Broadcast): Consumed;
 
-type Consumed = {
+export type Consumed = {
     user: Readonlys<UserInput>;
     preview: Getter<Preview>;
     close: () => void;
@@ -212,7 +213,7 @@ export const TRACK: {
 
 const TRACK_2 = "chat";
 
-type TrackRef = {
+export type TrackRef = {
     track: string;
 };
 
@@ -232,7 +233,7 @@ export type UserFields = {
 
 export function userFields(props?: UserProps): UserFields;
 
-type UserInput = {
+export type UserInput = {
     id: Getter<string | undefined>;
     name: Getter<string | undefined>;
     avatar: Getter<string | undefined>;
@@ -245,6 +246,5 @@ export type UserProps = {
     avatar?: string | Signal<string | undefined>;
     color?: string | Signal<string | undefined>;
 };
-
 
 ```

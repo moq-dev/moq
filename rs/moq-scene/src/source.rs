@@ -50,7 +50,6 @@ pub enum Status {
 
 /// What every source shares.
 #[derive(Clone)]
-#[non_exhaustive]
 pub struct Context {
 	/// The program audio that microphones, system audio, and broadcasts feed.
 	pub bus: Bus,
@@ -58,14 +57,9 @@ pub struct Context {
 	pub origin: moq_net::origin::Consumer,
 	/// What a relative image path is relative to: the scene file's directory.
 	pub dir: PathBuf,
-}
-
-impl Context {
-	/// Sources feeding `bus`, subscribing through `origin`, with images
-	/// relative to `dir`.
-	pub fn new(bus: Bus, origin: moq_net::origin::Consumer, dir: PathBuf) -> Self {
-		Self { bus, origin, dir }
-	}
+	/// What cameras, screens, and broadcasts deliver video as:
+	/// `moq_video::render::output` of the compositor's device.
+	pub output: moq_video::Output,
 }
 
 /// The running sources of a collection.
@@ -234,6 +228,7 @@ impl Driver {
 
 		let mut config = moq_video::capture::Config::default();
 		config.source = video;
+		config.output = self.context.output;
 		let mut stream = moq_video::capture::open(&config).await?;
 		while let Some(frame) = stream.read().await? {
 			self.show(Picture::Frame(frame));
@@ -352,6 +347,7 @@ impl Driver {
 	) -> Result<(), Error> {
 		let mut options = moq_video::decode::Options::new();
 		options.start = moq_video::decode::Start::Latest;
+		options.decoder.output = self.context.output;
 		let mut consumer = moq_video::decode::Consumer::new(broadcast, &config, name, options).await?;
 		while let Some(read) = consumer.read().await? {
 			if let moq_video::decode::Read::Frame(frame) = read {
@@ -466,13 +462,18 @@ fn image(path: &Path) -> Result<Picture, Error> {
 pub(crate) mod test {
 	use super::*;
 
-	/// A context with no relay behind it, so broadcasts stay offline while the
-	/// returned origin lives. Call from a [`tokio::task::LocalSet`].
+	/// A context with no relay or device behind it, so broadcasts stay offline
+	/// while the returned origin lives. Call from a [`tokio::task::LocalSet`].
 	pub(crate) fn context(dir: &Path) -> (Context, moq_net::origin::Producer) {
 		let (origin, driver) = moq_net::origin::Producer::new(Default::default());
 		tokio::task::spawn_local(moq_net::time::run(driver));
-		let bus = Bus::new(Default::default()).unwrap();
-		(Context::new(bus, origin.consume(), dir.to_path_buf()), origin)
+		let context = Context {
+			bus: Bus::new(Default::default()).unwrap(),
+			origin: origin.consume(),
+			dir: dir.to_path_buf(),
+			output: moq_video::Output::Cpu,
+		};
+		(context, origin)
 	}
 
 	/// Run `drivers` on the local task set, and wait until every source in

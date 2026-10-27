@@ -24,7 +24,7 @@ beside the field.
   decide how qmux's I/O path refreshes the `Wire` (for example, after each
   socket write batch) without a syscall per write, in place of the
   qmux record bytes `qmux::Session::wire` counts today, including the relay's
-  `SocketStats` wiring (`rs/moq-relay/src/websocket.rs`).
+  `SocketStats` wiring (`rs/moq-relay/src/web.rs`).
 - Test: a loopback WebSocket session's `sent_bytes` covers at least the
   payload it wrote.
 

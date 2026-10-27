@@ -124,8 +124,14 @@ start_relay() {
                 break
             fi
             if (: <>"/dev/tcp/127.0.0.1/$port") 2>/dev/null && relay_owns_port "$RELAY_PID" "$port"; then
-                RELAY_PORT=$port
-                return 0
+                # Sockets bind before workers spawn. Use the same readiness window
+                # to verify the backend and count rather than accepting a fallback.
+                if [[ $runtime != tokio-workers && $runtime != io-uring-workers ]] ||
+                    python3 "$ROOT/bench/runtime.py" "$RELAY_PID" "$runtime" "$workers" \
+                        "$directory/runtime.json" 2>"$directory/runtime.log"; then
+                    RELAY_PORT=$port
+                    return 0
+                fi
             fi
             sleep 0.1
         done
@@ -139,6 +145,7 @@ start_relay() {
 
     printf 'relay failed to start:\n' >&2
     cat "$log" >&2
+    if [[ -f $directory/runtime.log ]]; then cat "$directory/runtime.log" >&2; fi
     return 1
 }
 

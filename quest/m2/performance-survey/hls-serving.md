@@ -9,7 +9,7 @@ measurements justify sharing, without retaining stale or unauthorized output.
 
 [Rendition::fetch](/rs/moq-hls/src/export/rendition.rs) creates a muxer,
 fetches group ranges, gathers frames and constructs a fragment on each segment
-request (lines 1147-1217). Init construction already has caching; do not count
+request. Init construction already has caching; do not count
 it as missing. Media playlists snapshot/render on each call, and DASH builds
 representations from the same rendition state.
 
@@ -23,8 +23,7 @@ handover, concurrent first requests and authorization differences.
 Shared in-flight work or bounded immutable output caching are candidates only
 after profiling. Keys and ownership must include the actual content instance;
 never let a reused row number cross epochs or cache one viewer's credentials
-in another's playlist. The archive/HLS contract quests and the
-[release audit](/quest/m1/release-audit/README.md) HLS quests retain policy decisions.
+in another's playlist. The archive/HLS contract quests retain policy decisions.
 This takes ownership of the recurring audit's HLS serving coverage item.
 
 Follow the [survey's benchmark contract](/quest/m2/performance-survey/README.md):

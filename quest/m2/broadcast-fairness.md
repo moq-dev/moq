@@ -45,6 +45,7 @@ Direction carried over from 2026-09-19, not re-confirmed:
 - Decided 2026-10-20 (maintainer): the `transport::poll` trait breaks land in
   order, receive leases ([moq-dev/moq#5878](https://github.com/moq-dev/moq/pull/5878)), then
   [native request admission](https://github.com/moq-dev/moq/pull/6409), then the send domain.
+  Both earlier breaks have landed, so the send domain waits on nothing in that order.
 
 Receive ranks, folded in from
 [moq-dev/moq#5878](https://github.com/moq-dev/moq/pull/5878)'s follow-ups by

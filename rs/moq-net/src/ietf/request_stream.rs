@@ -378,9 +378,9 @@ pub(super) struct Update {
 	pub(super) new_group: Option<u64>,
 	/// FORWARD, `None` when unchanged.
 	pub(super) forward: Option<bool>,
-	/// The new Location Filter, which only a paused PUBLISH subscription resuming takes.
+	/// The new Location Filter replacing the subscription's requested range.
 	pub(super) filter: Option<super::Filter>,
-	/// FILL_PARAMETERS (draft-22), which only a paused PUBLISH subscription resuming takes.
+	/// FILL_PARAMETERS (draft-22): the backfill requested with this update.
 	pub(super) fill: Option<super::Fill>,
 }
 

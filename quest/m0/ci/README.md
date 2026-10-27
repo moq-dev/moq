@@ -84,20 +84,23 @@ feature permutations and release-profile builds. Expensive and optional checks
 run nightly on `main` and are required on `release`. Faster runners come last,
 chosen from measurements of the optimized pipeline. Each CI pass costs twice
 per merged PR today (PR and queue), at 13 minutes median and 26 minutes p90 of
-wall time per PR run.
+wall time per PR run. Superseded in part 2026-10-24: the PR gate checks
+feature shapes for the crates a branch changes; Nightly keeps the full matrix.
 
 Decided 2026-10-25 (maintainer): across moq's many CI and release builds
 (targets, features, FFI languages, Nix packages), each crate configuration
 compiles once and is reused through the cache, and each run builds and tests
 only what its diff can affect, measured in runner CPU time. Wall clock for its
 own sake and replacing cargo are non-goals. mbx already caches each compilation,
-so the work is making builds identical enough to hit it (one crane dependency
-layer, flags in `.cargo/config.toml`, cargo-hakari), and auditing the package
-selection `just ci` already does. Nix builds run sandboxed and cannot reach R2:
-kixelated/rust2's
-[Nix build benchmark](https://github.com/kixelated/rust2/blob/main/quest/m1/bench-nix.md)
-decides between crane with mbx, crate2nix, and cargo with mbx after the crane
-fixes land.
+so the work is making builds identical enough to hit it (flags in
+`.cargo/config.toml`, cargo-hakari), and auditing the package selection `just ci`
+already does. Nix builds run sandboxed and cannot reach R2, so they stay on crane
+for packaging only; CI builds with cargo and mbx. Decided 2026-10-26 from
+kixelated/rust2's [Nix build benchmark](https://github.com/kixelated/rust2/pull/63),
+in billions of instructions over a clean build, a second package, the moq-net edit,
+and a lockfile bump: cargo with mbx totals 9,692 and crane 14,756. crate2nix built
+to the release profile totals 14,538: it wins only the lockfile bump (1,255 against
+crane's 3,681) and costs 11-27% more on the rest.
 
 Decided 2026-10-25 (maintainer), from a profile of moq-net: monomorphized
 generics dominate its build (53% of the library's CPU), and its test target
@@ -111,20 +114,13 @@ The historical samples locate candidates; they are not controlled benchmarks.
 
 ## Required
 
-- [Require the release gate](/quest/m0/ci/release-gates.md) - condition: the next cut carries `release-gate.yml`; then release PRs require it
-- [Seed release with API reports](/quest/m0/ci/release-api-seed.md) - the first cut's API diff has a baseline on `release`
 - [Build queue entries concurrently](/quest/m0/ci/queue-concurrency.md) - the queue builds two or more entries at once instead of one
 - [Measure nightly compiler levers](/quest/m0/ci/nightly-levers.md) - the parallel frontend and Cranelift, adopted only if the numbers beat their risks
-- [Bump to the manifest fix](/quest/m0/ci/mbx-bump.md) - condition: an mbx release contains jdx/mr-boxington#798; then bump the Rust cache's pin
 - [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) - measure the hosted Nightly jobs' hits, restore time, and expiry once the bump lands
 - [Verify the Nix cache](/quest/m0/ci/nix-cache-verify.md) - confirm CI and releases use `nix.moq.dev` and retire Cachix
-- [Share crane's dependency layer](/quest/m0/ci/crane-layers.md) - Nix packages build their dependencies once, and a workspace edit rebuilds none of them
 - [Unify dependency features](/quest/m0/ci/hakari.md) - a cargo-hakari workspace-hack so every job compiles each dependency alike and mbx hits across jobs
-- [Audit CI's package selection](/quest/m0/ci/select-audit.md) - how often the queue runs everything, and whether each rule that forces it is needed
+- [Replay full-run failures against the selected gate](/quest/m0/ci/select-audit.md) - every dependency edge `just ci` misses is found and fixed with a test
 - [First shared FFI release](/quest/m0/ci/nightly-ffi-reuse.md) - condition: the backport merges and the next `moq-ffi-v*` tag runs `Release FFI`; verify the wrappers
-- [Loom tests compile](/quest/m0/ci/loom-build.md) - `just rs loom` builds on main and a `--cfg loom` break fails its PR
-- [just check without user namespaces](/quest/m0/ci/check-without-userns.md) - a host that refuses `unshare` reports the flake module as not run instead of cancelling other lanes
-- [Thin generic test executors](/quest/m0/ci/thin-executors.md) - `moq_clock::sim::run` and the tokio test executor compile once instead of once per test
 - [Fewer BTreeMap instantiations](/quest/m0/ci/btree-keys.md) - moq-net shares BTreeMap key and value types, kept only if its CPU time drops
 - [Measure moving unit tests out](/quest/m0/ci/test-layout.md) - report what moq-net would save by not compiling its library twice for unit tests
 - [Halve the slowest tests' CPU](/quest/m0/ci/slow-tests.md) - the slowest 1% of tests take under half their 289 CPU-seconds, with coverage kept

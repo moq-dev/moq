@@ -13,6 +13,7 @@ pub struct Config {
 	///
 	/// [`Output::Native`] scales a GPU surface on its own device, downloading
 	/// and scaling on the CPU only when the device refuses. [`Output::Cpu`]
-	/// downloads first and always scales on the CPU.
+	/// downloads first and always scales on the CPU. [`Output::Render`] is
+	/// `Native` for a surface `render::Renderer` imports and `Cpu` otherwise.
 	pub output: Output,
 }
