@@ -78,7 +78,7 @@ The simplest way to watch a stream:
 | `catalog-format` | hang, hangz, msf, manual   | auto-detected | The catalog format; detected from the name suffix unless set. `hangz` (compressed) is opt-in. |
 
 Property and built-in UI changes reflect into attributes. Invalid URLs, numbers, durations, and
-source/rendering/catalog modes are refused: their property setters throw, and malformed markup
+rendering/catalog modes are refused: their property setters throw, and malformed markup
 reports a browser `error` event and suspends media until corrected or removed. Defaults apply
 when attributes are absent. Protocol version failures remain on `el.connection.error`.
 
