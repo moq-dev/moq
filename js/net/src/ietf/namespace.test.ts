@@ -25,7 +25,7 @@ test("namespace encoding uses decoded UTF-8 field bounds", async () => {
 		[[`${"é".repeat(2048)}x`], false],
 		[["a".repeat(2048), "b".repeat(2048)], true],
 		[["a".repeat(2048), "b".repeat(2049)], false],
-		[["/".repeat(4096)], true],
+		[[`${"/".repeat(4095)}a`], true],
 		[["\\".repeat(4097)], false],
 		[Array(32).fill("a"), true],
 		[Array(33).fill("a"), false],

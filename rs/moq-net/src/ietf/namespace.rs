@@ -300,7 +300,7 @@ mod tests {
 			(vec![format!("{}x", "é".repeat(2048))], false),
 			(vec!["a".repeat(2048), "b".repeat(2048)], true),
 			(vec!["a".repeat(2048), "b".repeat(2049)], false),
-			(vec!["/".repeat(4096)], true),
+			(vec![format!("{}a", "/".repeat(4095))], true),
 			(vec!["\\".repeat(4097)], false),
 			(vec!["a".to_owned(); Path::MAX_PARTS], true),
 			(vec!["a".to_owned(); Path::MAX_PARTS + 1], false),
