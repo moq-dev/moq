@@ -1,15 +1,12 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
 use std::io::Cursor;
 
 use crate::Result;
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Bytes, BytesMut};
 use hang::catalog::{AAC, AudioCodec, AudioConfig, H265, VP9, VideoCodec, VideoConfig};
 use moq_net::Timestamp;
 use mp4_atom::Atom;
-use webm_iterable::WebmIterator;
-use webm_iterable::errors::TagIteratorError;
-use webm_iterable::iterator::AllowableErrors;
 use webm_iterable::matroska_spec::{BlockLacing, Master, MatroskaSpec, SimpleBlock};
 
 use super::Error;
@@ -41,7 +38,7 @@ const DEFAULT_TIMESTAMP_SCALE_NS: u64 = 1_000_000;
 ///
 /// Laced blocks require a positive TrackEntry DefaultDuration to timestamp each frame.
 ///
-/// Unsupported track roles and subtitle encodings are logged and dropped.
+/// Unsupported track roles are skipped; malformed tracks and unsupported codecs fail the import.
 pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	broadcast: moq_net::broadcast::Producer,
 	catalog: crate::catalog::Producer<E>,
@@ -58,11 +55,8 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 
 	/// Accumulated unparsed input.
 	buffer: BytesMut,
-	/// Bytes already dropped from the front of `buffer`, so a tag's offset in it is absolute.
-	consumed: u64,
-	/// Where the latest handled tag starts, as an absolute offset. A drain pass restarts from a
-	/// replay point, so any tag starting at or before it was already handled.
-	handled: Option<u64>,
+	/// Incremental element state; an incomplete master retains its own children across chunks.
+	decoder: ebml_iterable::TagDecoder<MatroskaSpec>,
 	/// Whether the Tracks element has been processed.
 	tracks_seen: bool,
 
@@ -172,8 +166,15 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			timebase: reserved.timebase(),
 			initial_reservation: Some(reserved),
 			buffer: BytesMut::new(),
-			consumed: 0,
-			handled: None,
+			decoder: ebml_iterable::TagDecoder::new(&[
+				MatroskaSpec::Ebml(Master::Start),
+				MatroskaSpec::Info(Master::Start),
+				MatroskaSpec::Tracks(Master::Start),
+				MatroskaSpec::TrackEntry(Master::Start),
+				MatroskaSpec::Audio(Master::Start),
+				MatroskaSpec::Video(Master::Start),
+				MatroskaSpec::BlockGroup(Master::Start),
+			]),
 			tracks_seen: false,
 			timestamp_scale_ns: DEFAULT_TIMESTAMP_SCALE_NS,
 			cluster_timestamp: 0,
@@ -196,81 +197,23 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// scratch). Bytes that cannot yet form a complete top-level tag are retained
 	/// for the next call.
 	pub fn decode(&mut self, data: &[u8]) -> Result<()> {
-		// Move the input into our scratch buffer.
+		if self.decoder.is_finished() && !data.is_empty() {
+			return Err(Error::TracksAfterFinish.into());
+		}
 		self.buffer.extend_from_slice(data);
 
 		self.drain()
 	}
 
-	/// Run the iterator over the buffered bytes, processing every fully-parsed top-level tag.
-	///
-	/// On each call, the iterator restarts from the beginning of the retained buffer, so tags
-	/// already handled are skipped by their absolute offset. After parsing stops (UnexpectedEOF or end of buffer), bytes up to the start
-	/// of the most-recently emitted top-level tag are discarded so memory does not grow
-	/// unboundedly.
+	/// Decode complete elements, leaving incomplete bytes and master state for the next chunk.
 	fn drain(&mut self) -> Result<()> {
-		// Buffer master tags that are bounded and convenient to handle atomically.
-		let buffered = [
-			MatroskaSpec::Ebml(Master::Start),
-			MatroskaSpec::Info(Master::Start),
-			MatroskaSpec::Tracks(Master::Start),
-			MatroskaSpec::TrackEntry(Master::Start),
-			MatroskaSpec::Audio(Master::Start),
-			MatroskaSpec::Video(Master::Start),
-			MatroskaSpec::BlockGroup(Master::Start),
-		];
-
-		if self.buffer.is_empty() {
-			return Ok(());
+		while let Some(tag) = self
+			.decoder
+			.decode(&mut self.buffer)
+			.map_err(|_| Error::MatroskaParse)?
+		{
+			self.handle_tag(tag.tag)?;
 		}
-
-		let snapshot = self.buffer.clone().freeze();
-		let mut cursor = Cursor::new(snapshot.as_ref());
-		let mut iter = WebmIterator::new(&mut cursor, &buffered);
-		// We restart the iterator from the beginning of the retained buffer on every
-		// drain pass. Once data is replayed mid-Segment, ebml-iterable would otherwise
-		// reject Segment children (Cluster, Tracks, etc.) as appearing without their
-		// parent. Allowing hierarchy problems plus skipping tags by offset gives us
-		// idempotent streaming behavior.
-		iter.allow_errors(&[AllowableErrors::HierarchyProblems]);
-		// Don't synthesize Master::End tags when the buffer ends mid-element.
-		iter.emit_master_end_when_eof(false);
-
-		let mut last_offset: usize = 0;
-
-		loop {
-			match iter.next() {
-				Some(Ok(tag)) => {
-					last_offset = iter.last_emitted_tag_offset();
-					// A Master::End reports its master's start, so it is skipped here too.
-					let start = self.consumed + last_offset as u64;
-					if self.handled.is_some_and(|handled| start <= handled) {
-						continue;
-					}
-					self.handled = Some(start);
-					self.handle_tag(tag)?;
-				}
-				Some(Err(TagIteratorError::UnexpectedEOF { .. })) => break,
-				Some(Err(_e)) => {
-					return Err(Error::MatroskaParse.into());
-				}
-				None => {
-					last_offset = snapshot.len();
-					break;
-				}
-			}
-		}
-
-		drop(iter);
-
-		// Retain bytes from the start of the last emitted tag (safe replay point) onward.
-		// At the very least, this lets us reuse partially-read tags as more data arrives.
-		// If we never emitted anything (very first call with too few bytes), keep everything.
-		if last_offset > 0 {
-			self.buffer.advance(last_offset);
-			self.consumed += last_offset as u64;
-		}
-
 		Ok(())
 	}
 
@@ -286,6 +229,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			MatroskaSpec::Info(Master::Full(children)) => {
 				for c in &children {
 					if let MatroskaSpec::TimestampScale(v) = c {
+						if *v == 0 {
+							return Err(Error::ValueOutOfRange("TimestampScale").into());
+						}
 						self.timestamp_scale_ns = *v;
 					}
 				}
@@ -336,23 +282,21 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	}
 
 	fn handle_tracks(&mut self, reserved: &crate::catalog::Reserved<E>, entries: Vec<MatroskaSpec>) -> Result<()> {
+		let mut numbers = HashSet::new();
 		for entry in entries {
-			if let MatroskaSpec::TrackEntry(Master::Full(children)) = entry
-				&& let Err(e) = self.add_track(reserved, children)
-			{
-				if matches!(
-					e,
-					crate::Error::Mkv(Error::InvalidSubtitle(_) | Error::InvalidAspect(_) | Error::ValueOutOfRange(_))
-				) {
-					return Err(e);
-				}
-				tracing::warn!(error = ?e, "skipping MKV track");
+			if let MatroskaSpec::TrackEntry(Master::Full(children)) = entry {
+				self.add_track(reserved, children, &mut numbers)?;
 			}
 		}
 		Ok(())
 	}
 
-	fn add_track(&mut self, reserved: &crate::catalog::Reserved<E>, children: Vec<MatroskaSpec>) -> Result<()> {
+	fn add_track(
+		&mut self,
+		reserved: &crate::catalog::Reserved<E>,
+		children: Vec<MatroskaSpec>,
+		numbers: &mut HashSet<u64>,
+	) -> Result<()> {
 		let mut track_number: Option<u64> = None;
 		let mut track_type: Option<u64> = None;
 		let mut codec_id: Option<String> = None;
@@ -369,7 +313,11 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				MatroskaSpec::DefaultDuration(v) if v > 0 => {
 					default_duration = Some(std::time::Duration::from_nanos(v))
 				}
-				MatroskaSpec::TrackNumber(v) => track_number = Some(v),
+				MatroskaSpec::TrackNumber(v) => {
+					if track_number.replace(v).is_some() {
+						return Err(moq_net::Error::Duplicate.into());
+					}
+				}
 				MatroskaSpec::TrackType(v) => track_type = Some(v),
 				MatroskaSpec::CodecID(v) => codec_id = Some(v),
 				MatroskaSpec::Language(v) => language = Some(v),
@@ -383,6 +331,12 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		}
 
 		let track_number = track_number.ok_or(Error::MissingTrackNumber)?;
+		if track_number == 0 {
+			return Err(Error::ValueOutOfRange("TrackNumber").into());
+		}
+		if !numbers.insert(track_number) {
+			return Err(moq_net::Error::Duplicate.into());
+		}
 		let track_type = track_type.ok_or(Error::MissingTrackType)?;
 		let codec_id = codec_id.ok_or(Error::MissingCodecId)?;
 
@@ -391,10 +345,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			1 => (TrackKind::Video, ".mkv-v"),
 			2 => (TrackKind::Audio, ".mkv-a"),
 			17 if matches!(codec_id.as_str(), "S_TEXT/UTF8" | "S_TEXT/WEBVTT") => (TrackKind::Text, ".mkv-t"),
-			17 => {
-				tracing::warn!(codec_id, "unsupported MKV subtitle encoding, skipping");
-				return Ok(());
-			}
+			17 => return Err(crate::Error::UnknownFormat(format!("MKV subtitle codec {codec_id}"))),
 			other => {
 				tracing::warn!(track_type = other, codec_id, "unsupported MKV track type, skipping");
 				return Ok(());
@@ -530,12 +481,16 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 		// Compute PTS in MKV's native nanosecond units and stamp it on the
 		// timestamp at NANO scale so a passthrough re-emit preserves precision.
-		let block_ticks = (self.cluster_timestamp as i64) + (block.timestamp as i64);
-		if block_ticks < 0 {
-			return Err(Error::NegativeBlockTimestamp.into());
-		}
+		let block_ticks = self
+			.cluster_timestamp
+			.checked_add_signed(i64::from(block.timestamp))
+			.ok_or(if block.timestamp < 0 {
+				Error::NegativeBlockTimestamp
+			} else {
+				Error::TimestampOverflow
+			})?;
 
-		let pts_ns = (block_ticks as u64)
+		let pts_ns = block_ticks
 			.checked_mul(self.timestamp_scale_ns)
 			.ok_or(Error::TimestampOverflow)?;
 		if track.kind == TrackKind::Text {
@@ -635,7 +590,14 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 	/// Finish all tracks, flushing current groups.
 	pub fn finish(&mut self) -> Result<()> {
-		// No input follows, so the buffer that waited for the rest of an element is done.
+		while let Some(tag) = self
+			.decoder
+			.decode_eof(&mut self.buffer)
+			.map_err(|_| Error::MatroskaParse)?
+		{
+			self.handle_tag(tag.tag)?;
+		}
+		// Finished sources can remain owned after EOF; release the last element's allocation.
 		self.buffer = BytesMut::new();
 		// No frame follows to anchor the clock, so publish the declared track set now.
 		self.initial_reservation = None;
@@ -874,7 +836,7 @@ fn build_audio_config(
 	codec_private: Option<&Bytes>,
 	audio_children: Option<&[MatroskaSpec]>,
 ) -> Result<AudioConfig> {
-	// Identify the codec first: unsupported tracks retain their skip behavior even with bad fields.
+	// Reject an unsupported codec before interpreting its codec-specific fields.
 	let mut config = match codec_id {
 		"A_OPUS" => {
 			// The catalog describes the decoder's output: Opus always decodes at 48 kHz, whatever the
@@ -1115,4 +1077,64 @@ fn split_lacing<'a>(block: &'a SimpleBlock<'_>) -> std::result::Result<Vec<&'a [
 	}
 	frames.push(data);
 	Ok(frames)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use webm_iterable::{WebmWriter, WriteOptions};
+
+	#[test]
+	fn completed_live_elements_do_not_accumulate_a_metadata_prefix() {
+		let mut header = Vec::new();
+		{
+			let mut writer = WebmWriter::new(&mut header);
+			writer
+				.write(&MatroskaSpec::Ebml(Master::Full(vec![MatroskaSpec::DocType(
+					"webm".into(),
+				)])))
+				.unwrap();
+			writer
+				.write_advanced(
+					&MatroskaSpec::Segment(Master::Start),
+					WriteOptions::is_unknown_sized_element(),
+				)
+				.unwrap();
+			writer.flush().unwrap();
+		}
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut import = Import::new(broadcast, catalog.reserve());
+		import.decode(&header).unwrap();
+		let mut consumed = header.len();
+		for timestamp in [0, u8::MAX as u64, u16::MAX as u64, u32::MAX as u64] {
+			let mut cluster = Vec::new();
+			{
+				let mut writer = WebmWriter::new(&mut cluster);
+				writer
+					.write_advanced(
+						&MatroskaSpec::Cluster(Master::Start),
+						WriteOptions::is_unknown_sized_element(),
+					)
+					.unwrap();
+				// This fragment is received under the importer's already-open Segment.
+				writer.write_raw(0xe7, &timestamp.to_be_bytes()).unwrap();
+				writer.flush().unwrap();
+			}
+			for byte in &cluster {
+				import.decode(&[*byte]).unwrap();
+				consumed += 1;
+				assert_eq!(import.decoder.position() + import.buffer.len(), consumed);
+			}
+			assert!(import.buffer.is_empty(), "a complete cluster left its prefix buffered");
+			assert_eq!(import.decoder.position(), consumed);
+			assert_eq!(import.cluster_timestamp, timestamp);
+		}
+		import.finish().unwrap();
+		import.finish().unwrap();
+		assert!(matches!(
+			import.decode(&[0]),
+			Err(crate::Error::Mkv(Error::TracksAfterFinish))
+		));
+	}
 }

@@ -1,37 +1,52 @@
-# [S] A malformed MKV track fails the import instead of vanishing
+# [S] Validate malformed container import refusal
 
 ## Goal
 
-The MKV importer fails loud on a malformed track, a duplicate track
-number, or an invalid timestamp, instead of publishing a catalog that
-silently lacks the track or carries collapsed timestamps.
+Complete the required clean-head validation of the MKV/FLV import fixes in
+[moq-dev/moq#6908](https://github.com/moq-dev/moq/pull/6908), then remove this
+quest. Malformed tracks, duplicate numbers and invalid timestamps fail;
+unsupported roles alone may skip. Unsupported codecs fail in MKV and FLV.
+VP9 dimensions preserve the complete 16-bit-plus-one range.
 
 ## Plan
 
-Found by the 2026-10-24 pre-cut audit at 151a529670, source-inferred.
+The source and focused surface are implemented. No API or policy choice is
+open. Keep the unrelated benchmark repair out of this PR.
 
-- `handle_tracks` (`rs/moq-mux/src/container/mkv/import.rs:338`) logs and
-  skips every `add_track` error except an allowlist (`InvalidSubtitle`,
-  `InvalidAspect`, `ValueOutOfRange`). `InvalidColour`
-  ([moq-dev/moq#5846](https://github.com/moq-dev/moq/pull/5846)), a malformed
-  avcC/hvcC, or a missing AAC CodecPrivate drops the video track and the
-  catalog goes out audio-only. Every validation fix has had to extend the
-  allowlist by hand ([moq-dev/moq#6532](https://github.com/moq-dev/moq/pull/6532)).
-  Return `Ok` only for an unsupported role, decided where the error is
-  raised, and propagate everything else, an unsupported codec included;
-  delete the allowlist.
-- A duplicate `TrackNumber` (`:452`) replaces the earlier track. Refuse it.
-- `cluster_timestamp as i64 + block.timestamp` (`:533`) can overflow (a
-  wrap in release builds, misreported as `NegativeBlockTimestamp`), and
-  `TimestampScale = 0` (`:289`) collapses every timestamp to 0. Use
-  `checked_add_signed` and refuse a zero scale.
-- While in moq-mux codecs: `codec/vp9/mod.rs:140` computes
-  `(r.read(16)? + 1) as u16`, so a 65536 dimension becomes 0 in the catalog.
-  Use `u32`, like the catalog field.
+- Run `just fix` and `just ci` on the clean committed head after the base
+  catalog benchmark compiles. At base `83d97bea0a`,
+  `rs/moq-mux/benches/catalog.rs:226` refers to the removed
+  `hang::catalog::MAX_RENDITIONS` (E0425). An untouched-base
+  `cargo check --locked -p moq-mux --bench catalog` reproduces the failure.
+- Run any manifest-selected flake check on a compatible Nix host if this
+  host cannot build the declared target. Do not bypass the selector or
+  avoid the direct dependency to hide the gate.
+- Recheck integration with pending
+  [moq-dev/moq#6750](https://github.com/moq-dev/moq/pull/6750),
+  [moq-dev/moq#6751](https://github.com/moq-dev/moq/pull/6751),
+  [moq-dev/moq#6752](https://github.com/moq-dev/moq/pull/6752) and
+  [moq-dev/moq#6864](https://github.com/moq-dev/moq/pull/6864) when merging
+  their base changes. The inspected patches have no competing importer
+  invariant; 6864 independently edits fMP4 cases in the containers benchmark.
 
-Decided 2026-10-25 (maintainer): reject an unsupported codec everywhere, as
-`rs/moq-mux/AGENTS.md` says. MKV and FLV (`flv/import.rs` about lines 215,
-302, 359, 431) stop dropping such tracks and fail the import with a typed
-Error.
+The initial six refusal reproductions all failed before production changes.
+Seven-byte input also exposed the old replay offset bug: a buffered master
+reported its payload offset, retaining orphan TrackEntry fields that bypassed
+Tracks validation. The importer now owns the already-locked published
+`ebml-iterable` 0.7.1 incremental decoder, with the same buffered master set.
+Completed elements are consumed once, incomplete masters keep their children,
+and EOF validates truncation before releasing the input allocation.
 
-Public API: none. Wire: none.
+Checks cover constructor and chunked error propagation, malformed metadata,
+duplicate/zero track numbers, unsupported roles/codecs, timestamp underflow
+and overflow, truncated EOF, unknown-size live clusters, and VP9 dimensions
+through 65536. A real generated live WebM fixture verifies all six emitted
+Opus frames across one-byte and larger chunks; its provenance is beside it.
+The existing finished-import allocation test remains unchanged. The
+`mkv-chunks` containers benchmark exposes chunk-size parser regressions;
+shared-host observations are descriptive, with no comparative speedup claim.
+
+Public API shape and wire: unchanged. Accepted-input behavior tightens as
+already decided on 2026-10-25: provide valid metadata and supported codecs,
+or transcode/remove unsupported media tracks before import. Unsupported roles
+remain skippable. No new error variant or timestamp range is introduced.
