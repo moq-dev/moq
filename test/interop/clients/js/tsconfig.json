@@ -5,6 +5,8 @@
 	},
 	"include": [
 		"close.ts",
+		"encoded-preview.browser.ts",
+		"encoded-preview",
 		"driver.ts",
 		"harness.ts",
 		"harness.browser.ts",
