@@ -30,11 +30,8 @@ export function fromTuple(parts: string[]): Path.Valid {
 /** Encode a moq-net namespace as an IETF namespace tuple. */
 export async function encode(w: Writer, namespace: Path.Valid): Promise<void> {
 	const parts = toTuple(namespace);
-
-	// The IETF draft limits namespaces to 32 parts.
-	if (parts.length > Path.MAX_PARTS) {
-		throw new Error(`namespace exceeds ${Path.MAX_PARTS} parts`);
-	}
+	const error = check(parts);
+	if (error) throw new Error(error);
 
 	await w.u53(parts.length);
 	for (const part of parts) {
@@ -44,6 +41,24 @@ export async function encode(w: Writer, namespace: Path.Valid): Promise<void> {
 
 // Every draft caps a namespace, and a namespace plus track name, at 4096 bytes.
 const MAX_BYTES = 4096;
+const utf8 = new TextEncoder();
+
+function check(parts: string[]): string | undefined {
+	if (parts.length > Path.MAX_PARTS) return `namespace exceeds ${Path.MAX_PARTS} parts`;
+	let size = 0;
+	for (const part of parts) {
+		size += utf8.encode(part).length;
+		if (size > MAX_BYTES) return `namespace exceeds ${MAX_BYTES} bytes`;
+	}
+	return undefined;
+}
+
+/** Whether one advertisement fits the namespace representation this wire carries. */
+export function encodable(namespace: Path.Valid): boolean {
+	// A UTF-16 unit costs at most three UTF-8 bytes; removing separators/escapes only shrinks it.
+	if (namespace.length <= MAX_BYTES / 3 && Path.check(namespace) === undefined) return true;
+	return check(toTuple(namespace)) === undefined;
+}
 
 /** Decode an IETF namespace tuple into an escaped moq-net namespace. */
 export async function decode(r: Reader): Promise<Path.Valid> {

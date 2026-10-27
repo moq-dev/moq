@@ -194,6 +194,100 @@ function publisher(
 
 const IETF_VERSIONS = [Version.DRAFT_18, Version.DRAFT_22] as const;
 
+test.each(IETF_VERSIONS)("%p: namespaces skip oversize routes and keep siblings flowing", async (version) => {
+	using _clock = manual();
+	const pair = createMockTransportPair(version === Version.DRAFT_18 ? ALPN.DRAFT_18 : ALPN.DRAFT_22);
+	const session = new NativeSession(pair.server, version, true);
+	const { pub, origin } = publisher(pair.server, { session, requiresSolicitation: true, activeCount: true });
+	const boundary = Path.from("b".repeat(4096));
+	const held = [
+		publish(origin, Path.from(`a${"é".repeat(2048)}`)),
+		publish(origin, boundary),
+		publish(origin, Path.from("sibling")),
+	];
+	try {
+		for (let attempt = 0; attempt < 2; attempt++) {
+			const subscription = await Stream.open(pair.client, { version });
+			const accepted = await Stream.accept(pair.server, version);
+			if (!accepted) throw new Error("missing namespace request stream");
+			const running = pub.runSubscribeNamespace(
+				new SubscribeNamespace({ requestId: BigInt(attempt), namespace: Path.empty() }),
+				accepted,
+			);
+			const settled = running.catch(() => {});
+			try {
+				expect(await subscription.reader.u53()).toBe(RequestOk.id);
+				const ok = await RequestOk.decode(subscription.reader, version);
+				const seen = new Set<Path.Valid>();
+				for (let i = 0; i < 2; i++) {
+					expect(await subscription.reader.u53()).toBe(SubscribeNamespaceEntry.id);
+					seen.add((await SubscribeNamespaceEntry.decode(subscription.reader, version)).suffix);
+				}
+				expect(seen).toEqual(new Set([boundary, Path.from("sibling")]));
+				expect(ok.parameters.activeCount).toBe(2);
+				const late = publish(origin, Path.from("late"));
+				expect(await subscription.reader.u53()).toBe(SubscribeNamespaceEntry.id);
+				expect((await SubscribeNamespaceEntry.decode(subscription.reader, version)).suffix).toBe(
+					Path.from("late"),
+				);
+				late.close();
+				expect(await subscription.reader.u53()).toBe(SubscribeNamespaceEntryDone.id);
+				expect((await SubscribeNamespaceEntryDone.decode(subscription.reader, version)).suffix).toBe(
+					Path.from("late"),
+				);
+			} finally {
+				subscription.close();
+				await settled;
+			}
+		}
+	} finally {
+		for (const broadcast of held) broadcast.close();
+		origin.close();
+		pub.close();
+		pair.client.close();
+		pair.server.close();
+	}
+});
+
+test.each(IETF_VERSIONS)("%p: unencodable namespaces spend no advertisement request ids", async (version) => {
+	using _clock = manual();
+	const pair = createMockTransportPair(version === Version.DRAFT_18 ? ALPN.DRAFT_18 : ALPN.DRAFT_22);
+	const session = new NativeSession(pair.server, version, true);
+	const ids = spyOn(session, "nextRequestId");
+	const { pub, origin } = publisher(pair.server, { session });
+	const held = [
+		publish(origin, Path.from(`a${"é".repeat(2048)}`)),
+		publish(origin, Path.from("first")),
+		publish(origin, Path.from("second")),
+	];
+	const peers: Stream[] = [];
+	const running = pub.runPublishNamespaces();
+	const settled = running.catch(() => {});
+	try {
+		const seen = new Set<Path.Valid>();
+		for (let i = 0; i < 2; i++) {
+			const stream = await Stream.accept(pair.client, version);
+			if (!stream) throw new Error("missing advertisement stream");
+			peers.push(stream);
+			expect(await stream.reader.u53()).toBe(PublishNamespace.id);
+			seen.add((await PublishNamespace.decode(stream.reader, version)).trackNamespace);
+			await stream.writer.u53(RequestOk.id);
+			await new RequestOk().encode(stream.writer, version);
+		}
+		expect(seen).toEqual(new Set([Path.from("first"), Path.from("second")]));
+		expect(ids).toHaveBeenCalledTimes(2);
+	} finally {
+		origin.close();
+		for (const stream of peers) stream.close();
+		await settled;
+		for (const broadcast of held) broadcast.close();
+		pub.close();
+		pair.client.close();
+		pair.server.close();
+		ids.mockRestore();
+	}
+});
+
 /** A request stream recording what the publisher writes, with the requester's side under test control. */
 function requestStream(version: IetfVersion) {
 	let input!: ReadableStreamDefaultController<Uint8Array>;

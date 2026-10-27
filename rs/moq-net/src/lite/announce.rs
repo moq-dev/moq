@@ -597,6 +597,29 @@ mod tests {
 	use super::*;
 	use bytes::Buf;
 
+	/// The model's path bound leaves room for every other literal START field.
+	#[test]
+	fn a_maximal_literal_start_fits_the_lite_message() {
+		let path = Path::new(&"é".repeat(Path::MAX_BYTES / 2)).unwrap();
+		let hops = Hops::try_from(
+			(0..crate::origin::HopLimit::default().get())
+				.map(|n| Hop::new((1 << 51) + n as u64).unwrap())
+				.collect::<Vec<_>>(),
+		)
+		.unwrap();
+		let version = Version::Lite07;
+		let message = AnnounceBroadcast::Active {
+			suffix: PathRef::literal(path.clone()),
+			hops: HopsRef::literal(hops),
+			epoch: Some("01900000-0000-7000-8000-000000000001".parse().unwrap()),
+			cost: Cost::MAX,
+		};
+		let encoded = message.encode_bytes(version).unwrap();
+		let (decoded, consumed) = AnnounceBroadcast::decode_slice(&encoded, version).unwrap();
+		assert_eq!(consumed, encoded.len());
+		assert!(matches!(decoded, AnnounceBroadcast::Active { suffix, .. } if suffix.rest == path));
+	}
+
 	/// A legacy initial set is held to the announce budget before any suffix decodes, so
 	/// a body of one-byte suffixes cannot become a list many times its size.
 	#[test]

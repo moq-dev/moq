@@ -452,11 +452,14 @@ pub fn decode_announces(data: &[u8], compress: bool) -> Vec<Announced> {
 	resolved
 }
 
-/// Encode a moq-transport NAMESPACE message for each of `paths`.
+/// Encode the moq-transport NAMESPACE messages this wire can carry from `paths`.
 pub fn encode_namespaces(paths: &[Path]) -> Vec<u8> {
 	let mut data = Vec::new();
 	let w = &mut Encoder::new(&mut data, BENCH_IETF.into());
 	for path in paths {
+		if !ietf::namespace::encodable(path) {
+			continue;
+		}
 		let msg = ietf::Namespace {
 			suffix: path.clone(),
 			params: None,

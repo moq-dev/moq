@@ -49,18 +49,29 @@ fn from_tuple(parts: &[&str]) -> Result<Path, TooLong> {
 
 /// Helper function to encode namespace as tuple of strings
 pub fn encode_namespace(w: &mut Encoder<'_>, namespace: &Path) -> Result<(), EncodeError> {
-	let parts = to_tuple(namespace);
-
-	// The IETF draft limits namespaces to 32 parts.
-	if parts.len() > Path::MAX_PARTS {
-		return Err(BoundsExceeded.into());
-	}
-
+	let parts = fields(namespace)?;
 	w.varint(parts.len() as u64)?;
 	for part in parts {
 		w.string(&part)?;
 	}
 	Ok(())
+}
+
+fn fields(namespace: &Path) -> Result<Vec<String>, EncodeError> {
+	let parts = to_tuple(namespace);
+	if parts.len() > Path::MAX_PARTS || parts.iter().map(String::len).sum::<usize>() > MAX_BYTES {
+		return Err(BoundsExceeded.into());
+	}
+	Ok(parts)
+}
+
+/// Whether one advertisement fits the namespace representation this wire carries.
+pub(crate) fn encodable(namespace: &Path) -> bool {
+	// Separators and escaping only shrink the wire fields, so ordinary paths need no tuple allocation.
+	if namespace.len() <= MAX_BYTES && namespace.parts().count() <= Path::MAX_PARTS {
+		return true;
+	}
+	fields(namespace).is_ok()
 }
 
 /// The most bytes a Track Namespace, or a whole Full Track Name, may hold on the wire.
@@ -269,6 +280,33 @@ mod tests {
 			let mut bytes = encode_tuple(&[&"n".repeat(namespace)]);
 			Encoder::new(&mut bytes, FORM).string(&"x".repeat(name)).unwrap();
 			assert_eq!(decode_track_slice(&bytes).is_ok(), ok, "{namespace} + {name}");
+		}
+	}
+
+	/// Limits count decoded UTF-8 field bytes, not escaped path bytes or separators.
+	#[test]
+	fn encoding_uses_the_same_field_bounds_as_decoding() {
+		for (parts, fits) in [
+			(vec!["é".repeat(2048)], true),
+			(vec![format!("{}x", "é".repeat(2048))], false),
+			(vec!["a".repeat(2048), "b".repeat(2048)], true),
+			(vec!["a".repeat(2048), "b".repeat(2049)], false),
+			(vec!["/".repeat(4096)], true),
+			(vec!["\\".repeat(4097)], false),
+			(vec!["a".to_owned(); Path::MAX_PARTS], true),
+			(vec!["a".to_owned(); Path::MAX_PARTS + 1], false),
+		] {
+			let refs: Vec<_> = parts.iter().map(String::as_str).collect();
+			let path = from_tuple(&refs).unwrap();
+			assert_eq!(encodable(&path), fits);
+			let mut bytes = Vec::new();
+			let result = encode_namespace(&mut Encoder::new(&mut bytes, FORM), &path);
+			assert_eq!(result.is_ok(), fits);
+			if fits {
+				assert_eq!(decode_ns(&bytes), path);
+			} else {
+				assert!(bytes.is_empty(), "refuse before emitting namespace fields");
+			}
 		}
 	}
 }

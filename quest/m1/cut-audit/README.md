@@ -56,7 +56,6 @@ leaving JS-only redesigns of `js/net` to [rs2ts](/quest/m2/rs2ts/README.md).
 
 - [Counted field-less `trun` entries](/quest/m1/cut-audit/fmp4-sample-resolver.md) - a moof of field-less runs cannot materialize millions of sample entries
 - [A compressed announce path never outgrows its literal form](/quest/m1/cut-audit/announce-path-bytes.md) - lite-07 announce compression cannot build multi-MiB paths
-- [A route too large to re-encode is skipped](/quest/m1/cut-audit/announce-reencode.md) - one oversized route never resets a downstream announce stream
 - [A reserved group survives a route returning](/quest/m1/cut-audit/reserved-route-return.md) - a route flip A to B to A no longer panics a peeked reader
 - [JS tracks end clean only on a deliberate finish](/quest/m1/cut-audit/js-close-cause.md) - local close, violations, and unanswered requests end with errors
 - [Withdrawing a moq-transport FETCH or TRACK_STATUS ends it](/quest/m1/cut-audit/ietf-withdraw-resolve.md) - withdrawal during resolution releases the request

@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import * as Epoch from "../epoch.ts";
 import { ProtocolViolation } from "../error.ts";
-import { Cost, HopSchema, UNKNOWN_HOP } from "../hop.ts";
+import { Cost, HopSchema, MAX_HOPS, UNKNOWN_HOP } from "../hop.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import {
@@ -46,6 +46,17 @@ async function roundTrip(msg: AnnounceBroadcast, version: Version): Promise<Anno
 	);
 	return decodeAnnounceBroadcast(reader, version);
 }
+
+test("a maximal literal START fits the lite message", async () => {
+	const message: AnnounceBroadcast = {
+		status: "active",
+		suffix: Path.from("é".repeat(Path.MAX_BYTES / 2)),
+		hops: Array.from({ length: MAX_HOPS }, (_, n) => HopSchema.parse((1n << 51n) + BigInt(n))),
+		epoch: Epoch.parse("01900000-0000-7000-8000-000000000001"),
+		cost: (1n << 62n) - 1n,
+	};
+	expect(await roundTrip(message, Version.DRAFT_07)).toEqual(message);
+});
 
 test("AnnounceBroadcast round-trips on draft-05", async () => {
 	const hops = [HopSchema.parse(7n)];
