@@ -12,11 +12,14 @@ authors can follow it without reading the drafts.
 ## Plan
 
 Decided 2026-10-25 (maintainer): a separate page, not only inline doc
-updates. Write it against the design the spike records. Link it from
+updates. Write it against the design [the model](/quest/m1/time-addressing/model.md)
+and [lite-07](/quest/m1/time-addressing/lite07.md) quests record, including
+that a released relay fills a hole with one FETCH per ID, so a mixed-version
+deployment upgrades its relays together. Link it from
 `doc/concept/moq-lite.md` and from the
 [Identity and recovery guide](/quest/m1/identity-guide.md), which covers
 epochs and restarts.
 
 ## Required
 
-- [Spike](/quest/m1/time-addressing/spike.md) - the design this page describes
+- [Lite-07 by start](/quest/m1/time-addressing/lite07.md) - the wire this page describes

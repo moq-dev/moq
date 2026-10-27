@@ -195,6 +195,55 @@ pub struct MoqAudioFrame {
 	pub data: Vec<u8>,
 }
 
+/// One item of a [`MoqAudioConsumer`] read, in delivery order: decoded PCM, or a break in it.
+///
+/// Mirrors `moq_audio::decode::Read`, the same shape as
+/// [`MoqVideoRead`](crate::video::MoqVideoRead), so a player handles loss and ends alike
+/// for every media type.
+#[derive(uniffi::Enum)]
+pub enum MoqAudioRead {
+	/// Decoded PCM.
+	Frame {
+		/// The decoded samples.
+		frame: MoqAudioFrame,
+	},
+	/// Media after what was already read was lost: a group was skipped or never arrived,
+	/// or a packet's timestamp did not continue the previous one. What follows does not
+	/// continue what came before.
+	Gap {
+		/// The furthest presentation point already read, in microseconds.
+		timestamp_us: u64,
+		/// An upper bound on how long until the next frame resumes.
+		duration: Duration,
+	},
+	/// The publisher stopped its encoder: it paused, switched source, or finished.
+	///
+	/// Frames that follow and start before `end_us` are the stopped encoder's remaining
+	/// media; the first frame at or past it comes from a fresh encoder.
+	End {
+		/// Where the stopped encoder's media stops, in microseconds.
+		end_us: u64,
+	},
+}
+
+impl TryFrom<moq_audio::decode::Read> for MoqAudioRead {
+	type Error = MoqError;
+
+	fn try_from(read: moq_audio::decode::Read) -> Result<Self, MoqError> {
+		use crate::consumer::timestamp_us;
+		Ok(match read {
+			moq_audio::decode::Read::Frame(frame) => Self::Frame { frame: frame.into() },
+			moq_audio::decode::Read::Gap { timestamp, duration } => Self::Gap {
+				timestamp_us: timestamp_us(timestamp)?,
+				duration: crate::ffi::duration(duration.into()),
+			},
+			moq_audio::decode::Read::End { end } => Self::End {
+				end_us: timestamp_us(end)?,
+			},
+		})
+	}
+}
+
 /// One packet emitted by a codec-only audio encoder.
 #[derive(uniffi::Record)]
 pub struct MoqAudioPacket {
@@ -204,7 +253,7 @@ pub struct MoqAudioPacket {
 
 /// The terminal packets and decoded padding emitted when an audio encoder finishes.
 #[derive(uniffi::Record)]
-pub struct MoqAudioEncoderFinish {
+pub struct MoqAudioEncoderFinished {
 	/// Packets emitted while draining the encoder.
 	pub packets: Vec<MoqAudioPacket>,
 	/// Padded samples to discard from the decoded tail.
@@ -296,10 +345,10 @@ impl MoqAudioEncoder {
 	}
 
 	/// Drain the encoder, optionally padding one final partial frame.
-	pub fn finish(&self, pcm: Vec<f32>) -> Result<MoqAudioEncoderFinish, MoqError> {
+	pub fn finish(&self, pcm: Vec<f32>) -> Result<MoqAudioEncoderFinished, MoqError> {
 		let encoder = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
 		let finish = encoder.finish(&pcm)?;
-		Ok(MoqAudioEncoderFinish {
+		Ok(MoqAudioEncoderFinished {
 			discard_padding: finish.discard_padding() as u64,
 			packets: audio_packets(finish.into_packets()),
 		})
@@ -514,16 +563,10 @@ struct ConsumerInner {
 }
 
 impl ConsumerInner {
-	async fn next(&mut self) -> Result<Option<MoqAudioFrame>, MoqError> {
-		loop {
-			let read = self.consumer.read().await;
-			self.delay.store(nanos(self.consumer.delay()), Ordering::Relaxed);
-			match read? {
-				Some(moq_audio::decode::Read::Frame(frame)) => return Ok(Some(frame.into())),
-				Some(moq_audio::decode::Read::Gap { .. } | moq_audio::decode::Read::End { .. }) => {}
-				None => return Ok(None),
-			}
-		}
+	async fn next(&mut self) -> Result<Option<MoqAudioRead>, MoqError> {
+		let read = self.consumer.read().await;
+		self.delay.store(nanos(self.consumer.delay()), Ordering::Relaxed);
+		read?.map(MoqAudioRead::try_from).transpose()
 	}
 }
 
@@ -543,8 +586,8 @@ pub struct MoqAudioConsumer {
 
 #[uniffi::export]
 impl MoqAudioConsumer {
-	/// The next decoded frame, or `None` once the track ends.
-	pub async fn next(&self) -> Result<Option<MoqAudioFrame>, MoqError> {
+	/// The next decoded frame, gap, or encoder end, or `None` once the track ends.
+	pub async fn next(&self) -> Result<Option<MoqAudioRead>, MoqError> {
 		self.task.run(|mut state| async move { state.next().await }).await
 	}
 

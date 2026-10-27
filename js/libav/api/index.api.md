@@ -9,5 +9,4 @@ import type { LibAVWrapper } from '@libav.js/types';
 const LibAV: LibAVWrapper;
 export default LibAV;
 
-
 ```

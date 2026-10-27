@@ -23,7 +23,8 @@ export type EmitterProps = Inputs<EmitterInput> & {
 	source: Decoder;
 };
 
-type EmitterOutput = {
+/** Signals the emitter derives. */
+export type EmitterOutput = {
 	// Whether audio should be downloaded. Wired into the decoder's `enabled` input by the owner.
 	enabled: Signal<boolean>;
 };

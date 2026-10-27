@@ -49,6 +49,9 @@
 //! layout lives on the producer / consumer via [`encode::Input`] /
 //! [`decode::Output`], not on each frame, so callers can't drift between calls.
 
+#[cfg(test)]
+mod allocation;
+
 #[cfg(feature = "aac")]
 mod aac;
 mod activity;
@@ -61,6 +64,8 @@ mod level;
 mod opus;
 mod pcm;
 mod resample;
+#[cfg(any(feature = "bus", feature = "playback"))]
+mod ring;
 
 #[cfg(feature = "aec")]
 pub mod aec;

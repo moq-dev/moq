@@ -12,8 +12,8 @@ archive before the cut.
 
 Decided 2026-10-25 (maintainer): the hand-written crate ships at this cut and
 the [generated C line](/quest/m2/c/README.md) moves after it, waiting on the
-switch to rust2's UniFFI fork. The generated C is not built in CI today and
-needs a generator fix first, so it must not block the release. C users break
+switch to rust2's UniFFI fork. The generated package (`c/moq`) builds in CI,
+but it publishes only after the cut. C users break
 twice (0.6 to 0.7, then to the generated 0.8); that is the accepted cost.
 
 - moq-c is not frozen: it takes the same breaks as moq-ffi and the other

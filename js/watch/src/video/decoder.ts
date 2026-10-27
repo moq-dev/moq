@@ -55,7 +55,8 @@ export interface Stats {
 	bytesReceived: number;
 }
 
-type DecoderOutput = {
+/** Signals the decoder derives. */
+export type DecoderOutput = {
 	/** Fatal decode failure, cleared when another source is selected. */
 	error: Signal<Error | undefined>;
 	// The current frame to render.
@@ -217,9 +218,9 @@ export class Decoder {
 			// Close the active track when disabled (e.g. paused or not visible).
 			// The pending cleanup won't do this because it was already promoted to #active.
 			this.#active.set(undefined);
-			// A paused or hidden player keeps its picture, but with nothing selectable (every rendition
-			// disabled or removed) it shows black rather than a frozen frame.
-			if (enabled && broadcast && !track) {
+			// Pause and visibility keep the picture while the broadcast is active. Disconnecting
+			// the broadcast or removing every rendition releases it.
+			if (!broadcast || !effect.get(broadcast.out.active) || (enabled && !track)) {
 				this.#clearCurrentFrame();
 				this.#out.buffered.set([]);
 			}
@@ -843,6 +844,7 @@ function hardwareAcceleration(config: { interlaced?: boolean }): HardwareAcceler
 	return config.interlaced ? "prefer-software" : undefined;
 }
 
+/** Whether the WebCodecs video decoder can play this config. */
 async function supported(config: Catalog.VideoConfig): Promise<boolean> {
 	if (!Catalog.containerSupported(config.container)) {
 		// `kind` is the literal "unknown" tag; the container the publisher actually named is in `raw`.

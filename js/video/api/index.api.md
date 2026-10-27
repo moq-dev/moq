@@ -48,5 +48,4 @@ export type RendererProps = Inputs<RendererInput>;
 
 export function rotateVideoDimensions(dimensions: Dimensions, rotation?: number): Dimensions;
 
-
 ```

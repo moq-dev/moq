@@ -76,7 +76,8 @@ unsafe impl GlobalAlloc for Counter {
 /// Ticks averaged into one table row, after a warm-up drain.
 const TABLE_TICKS: u32 = 4;
 
-/// Held paths. The last count is sized so its plain snapshot nears the cache cap; `cap%` shows how close.
+/// Held paths. The last count is sized so its one-tier snapshot nears the cache cap; `cap%` shows
+/// how close. Every tier shares the one group's snapshot, so more tiers stop below it.
 const PATHS: [usize; 4] = [100, 1_000, 10_000, 50_000];
 
 const TIERS: [usize; 2] = [1, 4];
@@ -235,6 +236,9 @@ fn bench(c: &mut Criterion) {
 	for &changed in &CHANGED {
 		for &tiers in &TIERS {
 			for &paths in &PATHS {
+				if tiers > 1 && paths == PATHS[PATHS.len() - 1] {
+					continue;
+				}
 				let id = BenchmarkId::from_parameter(format!("{paths}p_{tiers}t_{changed}pct"));
 				group.throughput(Throughput::Elements((paths * tiers) as u64));
 				// Criterion re-enters the closure per sample, so build and print the row

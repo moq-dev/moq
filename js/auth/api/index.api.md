@@ -791,5 +791,4 @@ function verify(key: PublicKey | SymmetricKey, token: string): Promise<Claims>;
 
 function verify_2(set: KeySet, token: string): Promise<Claims>;
 
-
 ```

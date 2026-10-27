@@ -12,8 +12,9 @@ page under `doc/lib/js/` links its reference.
 Decided 2026-10-23 (maintainer interview):
 
 - API Extractor's doc model (`.api.json`), from the shared per-package config
-  that [the checks](/quest/m1/api-extractor-checks.md) finish, is the only
-  source. The reference is TSDoc next to the code, rendered; update the
+  in `js/common/api.ts`, is the only source. That config turns
+  `ae-unresolved-link` off, so links the reference renders may need fixing.
+  The reference is TSDoc next to the code, rendered; update the
   "not the reference" line in `doc/AGENTS.md` to say so.
 - Our own renderer, not api-documenter: a small script turns the doc model
   into VitePress pages styled like the rest of the site.
@@ -27,7 +28,3 @@ Decided 2026-10-23 (maintainer interview):
   [moq-dev/moq#6794](https://github.com/moq-dev/moq/pull/6794)) gets fixtures
   for a hidden and an exported declaration sharing a name, and for chains of
   aliases.
-
-## Required
-
-- [API Extractor checks](/quest/m1/api-extractor-checks.md) - finishes the shared config and makes every exported item documented

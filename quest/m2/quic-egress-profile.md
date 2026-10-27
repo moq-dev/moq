@@ -50,10 +50,6 @@ for tokio, and `just bench-runtime` at both revisions for the ring, since
 `just bench BASE` runs only tokio. The verdict names which levers ship and which qdisc, if any, relay
 hosts need.
 
-## Required
-
-- [Profile the io_uring workers](/quest/m2/perf/uring-profile.md) - the ring half of the profile
-
 ## Related
 
 - [QUIC I/O boundary](/quest/m2/quic-io-boundary.md) - redesigns the transmit buffers the pool lever would feed

@@ -6,7 +6,7 @@
 
 import { Nano } from '@moq/clock';
 
-interface ArrayElement extends Array<Element_2> {
+export interface ArrayElement extends Array<Element_2> {
 }
 
 class Computed<T> implements Getter<T | undefined> {
@@ -52,7 +52,7 @@ class Effect {
     event(target: EventTarget, type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions): void;
     get<T>(signal: Getter<T>): T;
     getAll<S extends readonly Getter<unknown>[]>(signals: [...S]): {
-        [K in keyof S]: Truthy<GetterType<S[K]>>;
+        [K in keyof S]: Exclude<GetterType<S[K]>, false | 0 | "" | null | undefined>;
     } | undefined;
     interval(fn: () => void, period: Nano): void;
     proxy<T>(dst: Setter<T>, src: Getter<T>): void;
@@ -67,8 +67,6 @@ class Effect {
 
 type Element_2 = Node | ArrayElement | (string & {}) | number | boolean | null | undefined;
 export { Element_2 as Element }
-
-type Falsy = false | 0 | "" | null | undefined;
 
 interface Getter<T> {
     changed(): Promise<T>;
@@ -93,8 +91,5 @@ interface Setter<T> {
 type SetterType<S> = S extends Setter<infer T> ? T : never;
 
 type Subscriber<T> = (value: T) => void;
-
-type Truthy<T> = Exclude<T, Falsy>;
-
 
 ```

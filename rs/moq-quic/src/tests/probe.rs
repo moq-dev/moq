@@ -472,7 +472,7 @@ fn expire(pair: &mut Pair, ch: ConnectionHandle, groups: &mut [Group], now: Inst
 		let mut stream = pair.client_send(ch, group.id);
 		let offset = stream.offset();
 		let Ok(false) = stream.acked(offset) else {
-			group.reset = Some(ended);
+			// Completion is not a reset: older probe packets may still be in flight.
 			continue;
 		};
 		stream.reset(VarInt(0)).unwrap();

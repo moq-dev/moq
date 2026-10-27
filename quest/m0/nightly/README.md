@@ -32,7 +32,5 @@ Public API: none. Wire: none.
 ## Required
 
 - [moq-net compiles in Fuzz and send-depth](/quest/m0/nightly/send-overflow.md) - the ietf publisher future stops overflowing the Send check
-- [The Python sdist builds](/quest/m0/nightly/py-sdist.md) - the sdist carries every workspace crate moq-ffi needs
 - [OBS audio-candidate test](/quest/m0/nightly/obs-audio-candidate.md) - the failed audio candidate check passes under TSan and load, fixed at its reproduced cause
-- [moq-net builds without async](/quest/m0/nightly/net-async-free.md) - the no-default-features lane stops pulling `async` back in
-- [Probe against Cubic](/quest/m0/nightly/competing-cubic.md) - the `competing_cubic` probe test stops resending a stream after its reset
+- [Probing beside Cubic](/quest/m0/nightly/competing-cubic.md) - the `competing_cubic` probe test stays within its deadline budget

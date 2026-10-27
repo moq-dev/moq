@@ -42,7 +42,10 @@ adapt. Commands below run from the repository root.
 `just check` selects affected packages and their dependents from the branch
 diff, including local changes. Each language runner prints its selected
 packages when it starts. Pass a base explicitly, such as
-`just check origin/main`, when needed.
+`just check origin/main`, when needed. Independent modules finish even when
+another fails, and any failure keeps the run failing. On `x86_64` Linux, if the
+local Nix builder cannot create user namespaces, `just check` reports the flake
+module as skipped; `just ci` still requires the full flake check.
 [sh/dispatch.sh](https://github.com/moq-dev/moq/blob/main/sh/dispatch.sh)
 contains the module selection, with package selection delegated to the
 language runners.

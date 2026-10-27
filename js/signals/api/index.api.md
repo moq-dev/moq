@@ -47,7 +47,7 @@ export class Effect {
     event(target: EventTarget, type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions): void;
     get<T>(signal: Getter<T>): T;
     getAll<S extends readonly Getter<unknown>[]>(signals: [...S]): {
-        [K in keyof S]: Truthy<GetterType<S[K]>>;
+        [K in keyof S]: Exclude<GetterType<S[K]>, false | 0 | "" | null | undefined>;
     } | undefined;
     interval(fn: () => void, period: Nano): void;
     proxy<T>(dst: Setter<T>, src: Getter<T>): void;
@@ -59,8 +59,6 @@ export class Effect {
     timeout(fn: (effect: Effect) => void, duration: Nano): void;
     timer(fn: () => void, duration: Nano): void;
 }
-
-type Falsy = false | 0 | "" | null | undefined;
 
 export interface GetPromise<T> extends Getter<T | undefined>, PromiseLike<T> {
 }
@@ -111,7 +109,7 @@ export interface Setter<T> {
     update(fn: (prev: T) => T): void;
 }
 
-type SetterType<S> = S extends Setter<infer T> ? T : never;
+export type SetterType<S> = S extends Setter<infer T> ? T : never;
 
 export class Signal<T> implements Getter<T>, Setter<T> {
     readonly [GETTER_BRAND] = true;
@@ -135,9 +133,6 @@ const SIGNAL_BRAND: unique symbol;
 
 export type SignalMap = Record<string, Getter<unknown>>;
 
-type Subscriber<T> = (value: T) => void;
-
-type Truthy<T> = Exclude<T, Falsy>;
-
+export type Subscriber<T> = (value: T) => void;
 
 ```
