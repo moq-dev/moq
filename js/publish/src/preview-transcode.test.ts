@@ -8,7 +8,9 @@ const decoders: Decoder[] = [];
 class Encoder {
 	state: CodecState = "unconfigured";
 	configs: VideoEncoderConfig[] = [];
-	constructor(readonly callbacks: VideoEncoderInit) {
+	readonly callbacks: VideoEncoderInit;
+	constructor(callbacks: VideoEncoderInit) {
+		this.callbacks = callbacks;
 		encoders.push(this);
 	}
 	configure(config: VideoEncoderConfig) {
@@ -27,7 +29,9 @@ class Encoder {
 }
 class Decoder {
 	state: CodecState = "unconfigured";
-	constructor(readonly callbacks: VideoDecoderInit) {
+	readonly callbacks: VideoDecoderInit;
+	constructor(callbacks: VideoDecoderInit) {
+		this.callbacks = callbacks;
 		decoders.push(this);
 	}
 	configure() {
