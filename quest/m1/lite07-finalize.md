@@ -52,12 +52,9 @@ The cut:
 - Every quest under Required has landed.
 - The identifier becomes `moq-lite-07` in `rs/moq-net` and `js/net`, in the
   draft (whose text already names the rename), and at every site spelling
-  the wip ALPN: `rs/moq-tokio/src/connect.rs` and `listen.rs`,
-  `rs/moq-tokio/tests/`, `rs/moq-relay/src/cluster.rs`,
-  `rs/moq-relay/tests/integration/smoke.rs`,
-  `test/interop/bare-fin.ts`, `test/interop/lite-varint.ts`, and
-  `doc/concept/moq-lite.md`; grep for `moq-lite-07-wip` to catch new ones. A wip peer and a final peer refuse each other by ALPN
-  rather than misparse; no compatibility shim.
+  the wip ALPN: grep the repository for `moq-lite-07-wip`. A wip peer and a
+  final peer refuse each other by ALPN rather than misparse; no
+  compatibility shim.
 - The draft's lite-07 changelog matches the wire and `just drafts check`
   passes.
 - SETUP keeps its stronger rule: #4820 put it under the general Message
@@ -75,7 +72,14 @@ replaced SUBSCRIBE_ALL) landed in [#6158](https://github.com/moq-dev/moq/pull/61
 and [#6167](https://github.com/moq-dev/moq/pull/6167), and the padding stream
 type for the m2 browser [padding probes](/quest/m2/probe/padding.md) landed in
 [#6233](https://github.com/moq-dev/moq/pull/6233).
-The `Time(pts)` range end rides in Subscribe ranges, already Required.
+The `Time(pts)` range end rides in the subscribe-ranges children already Required.
+
+Decided 2026-10-27 (maintainer): of [Subscribe ranges](/quest/m1/subscribe-ranges/README.md),
+only the children that change the lite-07 wire gate the cut:
+[Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md),
+[JS ranges](/quest/m1/subscribe-ranges/js.md), and
+[Remove FETCH from lite-07](/quest/m1/subscribe-ranges/lite07-fetch.md). The
+fill path, fetch as a range, and the start bookkeeping change no wire.
 
 Decided 2026-10-25 (maintainer): addressing groups by timestamp gates the
 cut, since it removes group sequence numbers from the lite-07 wire.
@@ -99,7 +103,9 @@ timestamp bound in [#6168](https://github.com/moq-dev/moq/pull/6168).
 
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - lite-07 carries the route layer: ROUTE per origin node and path-less ANNOUNCE, with the hop list gone
 - [Drop set](/quest/m1/drop-set.md) - lite-07's SUBSCRIBE_DROP carries `Max Age`, so a widening re-offers groups reported dropped
-- [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - SUBSCRIBE carries ranges and an order and lite FETCH is gone, in Rust and JS
+- [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - lite-07 SUBSCRIBE carries ranges and an order, and SUBSCRIBE_OK the resolved start
+- [JS ranges](/quest/m1/subscribe-ranges/js.md) - JS speaks lite-07 ranges
+- [Remove FETCH from lite-07](/quest/m1/subscribe-ranges/lite07-fetch.md) - lite FETCH is gone from lite-07, in Rust and JS
 - [Lite-07 by start](/quest/m1/time-addressing/lite07.md) - lite-07 carries group starts, previous-start links, GROUP_END, and time bounds instead of sequence numbers
 - [@moq/net by start](/quest/m1/time-addressing/js.md) - JS speaks the same lite-07 wire
 - [Announcement takeover](/quest/m1/announce-takeover.md) - ANNOUNCE_TAKEOVER preserves a proven instance under a new independent route

@@ -11,7 +11,7 @@ with `hls` records: the edge never skips, splits, or renumbers one.
 ## Plan
 
 [#4280](https://github.com/moq-dev/moq/pull/4280) derives the target from the
-current window's longest segment (`snapshot_as` in
+current window's longest segment (`snapshot_from_window` in
 `rs/moq-hls/src/export/rendition.rs`), so it rises when a long record arrives
 and falls when that record is evicted. Codex flagged it
 ([r4113921580](https://github.com/moq-dev/moq/pull/4280#discussion_r4113921580)).
@@ -36,8 +36,7 @@ non-reference `EXTINF` rule and the split-record handling are already gone.
 
 Replace `target_duration_follows_the_observed_segments` with tests that pin
 the declared target across a window whose segment durations vary, and that
-cover an overrun at the rounding boundary (listed, warned). Fix its stale
-comment ("default 1s minimum"; the minimum is 2s). Hold the target per
+cover an overrun at the rounding boundary (listed, warned). Hold the target per
 playlist URI, not per `Rendition`: `renditions::Producer::sync` replaces the
 `Rendition` on a catalog reconfigure, so test that a reconfigure mid-run
 keeps the original target.

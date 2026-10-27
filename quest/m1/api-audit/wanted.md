@@ -32,7 +32,8 @@ Decided 2026-10-25 (maintainer), extending the `wanted` shape that
 - moq-c's `MOQ_DEMAND_USED/UNUSED` become `WANTED/UNWANTED`; moq-c takes the
   break with every binding.
 
-Fix the stale `is_used()` advice in the Go wrapper README. The Impact note
+Fix the stale `Used`/`Unused` advice in the Go wrapper README
+(`go/wrapper/README.md`, about line 143). The Impact note
 corrects the `rs/moq-json` and `rs/moq-flate` Unreleased advice for the cut.
 
 Public API: breaking renames and deletions in every language. Wire: none.

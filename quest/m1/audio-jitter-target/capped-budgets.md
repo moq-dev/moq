@@ -2,8 +2,9 @@
 
 ## Goal
 
-Seven scheduled nightlies on `main` after the estimator began capping how much
-weight one observation takes show the AAC `bursty` browser rows discarding
+Seven scheduled nightlies on `main` from 2026-10-25 on, after the estimator
+began capping how much weight one observation takes and the player changes
+that followed, show the AAC `bursty` browser rows discarding
 about as much audio a minute as the Opus `bursty` rows, and the Opus
 `near-zero` row holding a 60 ms target with no underrun episodes. `test/audio-quality/budgets.json`
 carries every browser row's ceilings re-measured from them.
@@ -12,8 +13,19 @@ carries every browser row's ceilings re-measured from them.
 
 Waits on the nightlies: check the `audio-quality-run` artifacts of the
 scheduled Nightly runs on `main` (`gh run download <id> -n audio-quality-run`)
-once seven have run since the change merged. Never dispatch the nightly by
-hand. Re-measure by the rule in the budgets note, and drop the note's sentence
+once seven have run. Never dispatch the nightly by hand. The artifacts expire
+after 7 days, so download each run's as it lands rather than waiting for the
+seventh.
+
+Decided 2026-10-27 (maintainer): the count restarts at the 2026-10-25
+nightly, because estimator and player changes landed after the cap
+([moq-dev/moq#6359](https://github.com/moq-dev/moq/pull/6359),
+[moq-dev/moq#6525](https://github.com/moq-dev/moq/pull/6525),
+[moq-dev/moq#6484](https://github.com/moq-dev/moq/pull/6484),
+[moq-dev/moq#6609](https://github.com/moq-dev/moq/pull/6609)), the last on
+2026-10-24. That makes 3 of 7 so far (2026-10-25, 10-26 and 10-27), with the
+seventh due about 2026-10-31. The earlier post-cap runs below no longer
+count toward the seven. Re-measure by the rule in the budgets note, and drop the note's sentence
 that budgets the AAC bursty discards against Opus's as measured. Nightlies
 from before the one-ring removal also carry `-isolated` rows; grade only the
 `-plain` rows, which are the browser rows now.
@@ -30,8 +42,8 @@ failed only the browser Opus `wide` target ceilings: `isolated` p95 was
 series hold their startup target until about 21 s, then settle at 200 to
 220 ms; both matching `.longtasks.json` arrays are empty. The isolated
 row has zero underruns, stalls, and silence; plain has 2.2 underruns a
-minute, 0 stalls, and 0 silence. This supplies one of the seven required
-scheduled runs, not a reason to change the estimator or recalibrate early.
+minute, 0 stalls, and 0 silence. It predates the restarted count, and is
+not a reason to change the estimator or recalibrate early.
 
 The near-zero stall was never the isolated ring. That row is simply the
 matrix's first, and a cold `cargo build` left about 800 MB dirty when it

@@ -2,23 +2,26 @@
 
 ## Goal
 
-A relay fills a lite-07 upstream by subscribing to the missing ranges. Older
-wires and moq-transport carry the anchors they can, and refuse only the rest.
-FETCH stays on lite-07 until [JS ranges](/quest/m1/subscribe-ranges/js.md)
+A relay fills a lite-07 upstream by subscribing to the missing ranges, and
+SUBSCRIBE_OK carries the resolved start. Older wires and moq-transport carry
+the anchors they can, and refuse only the rest. FETCH stays on lite-07 until
+[Remove FETCH from lite-07](/quest/m1/subscribe-ranges/lite07-fetch.md)
 removes it from both implementations.
 
 ## Plan
 
 Decided 2026-10-25 (maintainer, on
 [moq-dev/moq#6807](https://github.com/moq-dev/moq/pull/6807)): FETCH removal
-moves to JS ranges, since JS still requests and serves wire FETCH on lite-07
+moves out of this quest (to its own quest since 2026-10-27), since JS still requests and serves wire FETCH on lite-07
 (`track.Consumer.fetchGroup`), so a Rust-only removal would drop a current
 cross-language capability. This quest keeps FETCH on lite-07 and makes the
 range fill work without it.
 
 Decided 2026-10-22 (maintainer): SUBSCRIBE_OK carries the resolved start for
 a relative range start, so a reader's ordered cursor takes its floor from it
-([Container reads drop backfill](/quest/m1/read-backfill.md)).
+([Container reads drop backfill](/quest/m1/read-backfill.md)). Decided
+2026-10-27 (maintainer): it is part of the Goal, since read-backfill now
+requires this quest for it.
 
 ### Range fill through the subscription
 
@@ -57,12 +60,13 @@ first.
 
 ### moq-transport anchors
 
-moq-transport's relative offsets differ by one. Draft-22's relative filter
-counts back from the next group: `Filter::Relative(0)` is the next group and
-`Relative(1)` the current one, so an open-ended `Relative(n)..` maps to
-`Filter::Relative(n + 1)`, saturating. Draft 18 only encodes a relative
-0 (NEXT_GROUP), so there it is SUBSCRIBE plus a relative joining FETCH n
-groups back, as the live join already does. A range with a bounded end
+Decided 2026-10-27 (maintainer): a bridge never sends a relative anchor to
+moq-transport. It resolves `Relative(n)` to an absolute Group ID, from its
+cache or the live edge, before sending, replacing the planned mapping of
+`Relative(n)..` onto draft-22's `Filter::Relative(n + 1)` and draft 18's
+relative joining FETCH. Reason: both count back by Group ID arithmetic, which
+breaks once [time addressing](/quest/m1/time-addressing/model.md) makes legacy
+Group IDs sparse start ticks. A range with a bounded end
 resolves both bounds against the Largest Object and goes upstream as an
 absolute range. Live keeps today's join (`ietf::subscriber::subscribe_join`).
 Each mapping that makes a wire carry an anchor lifts that wire's
@@ -75,4 +79,4 @@ Update `drafts/draft-lcurley-moq-lite.md` with each wire change here. Run
 ## Related
 
 - [Container reads drop backfill](/quest/m1/read-backfill.md) - floors its ordered cursor on the resolved start
-- [JS ranges](/quest/m1/subscribe-ranges/js.md) - removes FETCH from lite-07 in both implementations once this lands
+- [Remove FETCH from lite-07](/quest/m1/subscribe-ranges/lite07-fetch.md) - removes FETCH from lite-07 in both implementations once this and JS ranges land

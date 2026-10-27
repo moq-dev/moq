@@ -60,7 +60,6 @@ async forms unchanged.
 ## Required
 
 - [Waits](/quest/m1/quic-api/waits.md) - moq-quic's `poll_*` forms these forward to
-- [Streams](/quest/m1/quic-api/streams.md) - the `send::`/`recv::` names and `send::Finished` these signatures use
 
 ## Related
 

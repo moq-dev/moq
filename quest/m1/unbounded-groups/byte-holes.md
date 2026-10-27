@@ -4,13 +4,16 @@
 
 A frame of any size, such as a file delivered as one frame, passes through a
 relay whose pool is smaller than the frame. Sealed segments inside the frame
-are evicted like front frames and refilled by `(frame, byte)` position on the
-next unpublished lite version after lite-07. The frame cap
+are evicted like front frames and refilled by `(frame, byte)` position on
+lite-07. The frame cap
 (`MAX_CACHE_BYTES`) is removed.
 
 ## Plan
 
 See the [epic](/quest/m1/unbounded-groups/README.md) for the decisions.
+Decided 2026-10-27 (maintainer): the byte offset targets lite-07-wip, not the
+next unpublished lite version after lite-07, so this waits only on Front
+eviction and stays in m1.
 
 - Segments are `frame::SEGMENT` (1 MiB) long, so segment `i` always holds
   bytes from `i * SEGMENT`, and a completed chain is `frame::Payload::Chain`.
@@ -42,13 +45,13 @@ See the [epic](/quest/m1/unbounded-groups/README.md) for the decisions.
 - Rust readers get a chunked payload read, so a frame larger than memory
   never has to be collected whole. [moq-dev/moq#6628](https://github.com/moq-dev/moq/pull/6628)
   kept its segments internal; the JS half is in
-  [JS](/quest/m1/unbounded-groups/js.md).
+  [JS byte holes](/quest/m1/unbounded-groups/js-byte-holes.md).
 - Test a frame several times the pool size through a relay chain: a late
   joiner reads it whole, and memory stays near the pool size.
 
 Public API: `Position` gains a byte field, frames gain a chunked read, and
 `MAX_CACHE_BYTES` is removed.
-Wire: a byte offset on the next lite version's range ends and group header.
+Wire: a byte offset on lite-07-wip's range ends and group header.
 
 ## Required
 

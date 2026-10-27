@@ -53,10 +53,15 @@ delivers a group that arrives below the cursor as a late backfill; Rust
   `Sync`) and adjust them; one that wants every group reads an arrival-order
   API instead.
 
+Decided 2026-10-27 (maintainer): this waits only on Lite-07 ranges (the
+resolved start in SUBSCRIBE_OK) and JS ranges, not the whole
+[Subscribe ranges](/quest/m1/subscribe-ranges/README.md) epic.
+
 Public API: no type change; the ordered read changes in Rust and JS (the
 floor comes from reported bounds, and JS drops backfill). Wire: the resolved
 start on lite-07 SUBSCRIBE_OK, through Lite-07 ranges.
 
 ## Required
 
-- [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - the reader's requested ranges set the floor, and every sequence in them arrives or is dropped
+- [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - lite-07 SUBSCRIBE_OK carries the resolved start the Rust floor comes from
+- [JS ranges](/quest/m1/subscribe-ranges/js.md) - the JS reader's requested ranges set its floor
