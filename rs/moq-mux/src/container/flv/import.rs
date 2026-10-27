@@ -592,7 +592,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 	/// Finish a replaced track, clearing its catalog rendition and retiring its HLS records. Its
 	/// replacement takes a fresh name, so a publisher changing its config holds only its live tracks.
-	fn retire<R>(&self, mut track: crate::container::Producer<crate::catalog::hang::Container, R>) -> anyhow::Result<()> {
+	fn retire<R: Clone + Send + 'static>(
+		&self,
+		mut track: crate::container::Producer<crate::catalog::hang::Container, R>,
+	) -> anyhow::Result<()> {
 		track.finish()?;
 		let name = track.name().to_string();
 		drop(track);
