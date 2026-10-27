@@ -13,14 +13,16 @@ VP9 dimensions preserve the complete 16-bit-plus-one range.
 The source and focused surface are implemented. No API or policy choice is
 open. Keep the unrelated benchmark repair out of this PR.
 
-- Run `just fix` and `just ci` on the clean committed head after the base
-  catalog benchmark compiles. At base `83d97bea0a`,
-  `rs/moq-mux/benches/catalog.rs:226` refers to the removed
-  `hang::catalog::MAX_RENDITIONS` (E0425). An untouched-base
-  `cargo check --locked -p moq-mux --bench catalog` reproduces the failure.
-- Run any manifest-selected flake check on a compatible Nix host if this
-  host cannot build the declared target. Do not bypass the selector or
-  avoid the direct dependency to hide the gate.
+- Run strict `just ci` on a compatible Nix builder. The clean-head attempt
+  selects the flake gate and fails building the runner image because
+  `unshare` cannot write `/proc/self/uid_map` on this host. Do not bypass
+  the selector or avoid the direct dependency to hide the gate.
+- The ancillary `just fix` all-target check also reaches an unrelated base
+  error: `rs/moq-mux/benches/catalog.rs:226` refers to the removed
+  `hang::catalog::MAX_RENDITIONS` (E0425). Untouched base `83d97bea0a`
+  reproduces it with `cargo check --locked -p moq-mux --bench catalog`.
+  Changed-source formatting is verified separately. Keep that repair a
+  follow-up; it is not an unresolved importer implementation choice.
 - Recheck integration with pending
   [moq-dev/moq#6750](https://github.com/moq-dev/moq/pull/6750),
   [moq-dev/moq#6751](https://github.com/moq-dev/moq/pull/6751),
