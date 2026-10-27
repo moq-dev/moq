@@ -95,5 +95,4 @@ export interface Specificity {
     readonly wildcards: number;
 }
 
-
 ```

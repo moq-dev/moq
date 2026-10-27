@@ -9,6 +9,7 @@
 import "./gpu.ts";
 import "./captions.ts";
 import "./poster.ts";
+import "./lifecycle.ts";
 import "@moq/publish/element";
 import "@moq/watch/element";
 import { Signal } from "@moq/signals";

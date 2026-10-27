@@ -778,7 +778,7 @@ impl Fill {
 	}
 
 	/// How many answer runs the fill still holds for its readers.
-	#[cfg(test)]
+	#[cfg(all(test, feature = "async"))]
 	pub(super) fn answers(&self) -> usize {
 		let outcome = self.inner.result.read();
 		outcome.refused.iter().count() + outcome.accepted.iter().count()
@@ -894,7 +894,7 @@ impl Fill {
 	}
 
 	/// The fill's answers, kept open as long as this handle lives.
-	#[cfg(test)]
+	#[cfg(all(test, feature = "async"))]
 	pub(crate) fn joined(&self) -> kio::Producer<Outcome> {
 		self.inner.result.clone()
 	}

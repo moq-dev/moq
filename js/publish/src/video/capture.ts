@@ -13,7 +13,8 @@ export type CaptureInput = {
 	orientation: Getter<number>;
 };
 
-type CaptureOutput = {
+/** Signals the capture derives. */
+export type CaptureOutput = {
 	// The captured frames, replaced whenever the source changes. Subscribe for a stream of your own,
 	// starting with a copy of the current picture; each reader owns the frames it receives and must
 	// close them.

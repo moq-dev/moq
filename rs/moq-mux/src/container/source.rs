@@ -438,7 +438,7 @@ impl ExportSource {
 		loop {
 			match ready!(self.poll_event(waiter))? {
 				Some(Event::Frame { frame, .. }) => return Poll::Ready(Ok(Some(frame))),
-				Some(Event::GroupEnd | Event::FrameEnd { .. } | Event::Cut) => continue,
+				Some(Event::GroupEnd | Event::FrameEnd { .. } | Event::Cut { .. }) => continue,
 				None => return Poll::Ready(Ok(None)),
 			}
 		}
@@ -610,10 +610,10 @@ impl ExportSource {
 						return Poll::Ready(Ok(Some(Event::GroupEnd)));
 					}
 					// The skip is counted with the gap the next group reads.
-					Some(Item::Cut) => {
+					Some(Item::Cut { observed }) => {
 						self.finish_ends();
 						self.cuts += u64::from(std::mem::take(&mut self.open));
-						return Poll::Ready(Ok(Some(Event::Cut)));
+						return Poll::Ready(Ok(Some(Event::Cut { observed })));
 					}
 					None => {
 						self.finish_ends();

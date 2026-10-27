@@ -54,7 +54,9 @@ export type Preview = {
 	typing?: boolean;
 };
 
-type TrackRef = {
+/** Points a `hang` catalog section at a track. */
+export type TrackRef = {
+	/** The track name. */
 	track: string;
 };
 
@@ -170,7 +172,8 @@ function serveSnapshot<T>(
 	});
 }
 
-type Consumed = {
+/** The signals {@link consume} reads, and how to stop reading them. */
+export type Consumed = {
 	user: Readonlys<UserInput>;
 	preview: Getter<Preview>;
 	close: () => void;

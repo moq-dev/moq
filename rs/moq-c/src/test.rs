@@ -250,6 +250,32 @@ extern "C" fn state_callback(user_data: *mut c_void, state: *const moq_connectio
 /// FFI state callback for tests that only inspect the immediate return code.
 extern "C" fn ignore_state(_user_data: *mut c_void, _state: *const moq_connection_state) {}
 
+/// Read a delivered video read id, returning the call's code and what it wrote.
+fn video_read(id: u32) -> (i32, moq_video_read) {
+	let mut read = moq_video_read {
+		kind: moq_decode_read_kind::MOQ_DECODE_READ_END,
+		frame: moq_video_frame {
+			timestamp_us: 0,
+			width: 0,
+			height: 0,
+			data: std::ptr::null(),
+			data_size: 0,
+		},
+		gap: moq_decode_gap::default(),
+		end_us: 0,
+	};
+	let code = unsafe { moq_decode_video_read(id, &mut read) };
+	(code, read)
+}
+
+/// Read a delivered video read id that must be a decoded frame.
+fn video_frame(id: u32) -> moq_video_frame {
+	let (code, read) = video_read(id);
+	assert_eq!(code, 0);
+	assert_eq!(read.kind, moq_decode_read_kind::MOQ_DECODE_READ_FRAME);
+	read.frame
+}
+
 /// Build a valid OpusHead init buffer (RFC 7845 §5.1).
 fn opus_head() -> Vec<u8> {
 	let mut head = Vec::with_capacity(19);
@@ -4231,6 +4257,95 @@ fn gray_rgba(width: u32, height: u32) -> Vec<u8> {
 	vec![0x80u8; width as usize * height as usize * 4]
 }
 
+/// A finished encoder reaches a C decoder as an end read in microseconds rather
+/// than vanishing: Opus pads a partial last frame, so the finish publishes where
+/// the source really stopped.
+#[test]
+fn audio_raw_decode_reads_the_encoder_end() {
+	const START_US: u64 = 123_000;
+	const SAMPLES: usize = 860;
+
+	let origin = id(moq_origin_create());
+	let path = b"audio-raw-end-test";
+	let broadcast = publish_broadcast(origin, path);
+	let input = moq_audio_encoder_input {
+		format: moq_audio_sample_format::MOQ_AUDIO_SAMPLE_FORMAT_F32 as u32,
+		sample_rate: 48_000,
+		channels: 1,
+	};
+	let output = moq_audio_encoder_output {
+		codec: c"opus".as_ptr(),
+		codec_len: 4,
+		sample_rate: 0,
+		channels: 0,
+		bitrate: 0,
+		frame_duration_us: 0,
+	};
+	let producer = id(unsafe { moq_encode_audio(broadcast, c"audio".as_ptr(), 5, &input, &output, 0) });
+	let pcm: Vec<u8> = (0..SAMPLES)
+		.flat_map(|i| (i as f32 / SAMPLES as f32).to_le_bytes())
+		.collect();
+	let frame = moq_audio_frame {
+		timestamp_us: START_US,
+		data: pcm.as_ptr(),
+		data_size: pcm.len(),
+	};
+	assert_eq!(unsafe { moq_encode_audio_frame(producer, &frame) }, 0);
+	assert_eq!(moq_encode_audio_finish(producer), 0);
+
+	let consume = request_broadcast(origin, path);
+	let catalog_cb = Callback::new();
+	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
+	let catalog_id = id(catalog_cb.recv());
+	let decoded = moq_audio_decoder_output {
+		format: moq_audio_sample_format::MOQ_AUDIO_SAMPLE_FORMAT_F32 as u32,
+		sample_rate: 0,
+		channels: 0,
+		max_delay_us: 30_000_000,
+	};
+	let read_cb = Callback::new();
+	id(unsafe { moq_decode_audio(catalog_id, 0, &decoded, Some(channel_callback), read_cb.ptr) });
+
+	let mut ends = Vec::new();
+	loop {
+		let code = read_cb.recv();
+		if code <= 0 {
+			assert_eq!(code, 0, "a finished track closes cleanly");
+			break;
+		}
+		let mut read = moq_audio_read {
+			kind: moq_decode_read_kind::MOQ_DECODE_READ_GAP,
+			frame: moq_audio_frame {
+				timestamp_us: 0,
+				data: std::ptr::null(),
+				data_size: 0,
+			},
+			gap: moq_decode_gap::default(),
+			end_us: 0,
+		};
+		assert_eq!(unsafe { moq_decode_audio_read(id(code), &mut read) }, 0);
+		match read.kind {
+			moq_decode_read_kind::MOQ_DECODE_READ_FRAME => {
+				assert!(!read.frame.data.is_null());
+			}
+			moq_decode_read_kind::MOQ_DECODE_READ_END => {
+				assert!(read.frame.data.is_null(), "an end carries no samples");
+				ends.push(read.end_us);
+			}
+			moq_decode_read_kind::MOQ_DECODE_READ_GAP => panic!("nothing was lost"),
+		}
+		assert_eq!(moq_decode_audio_read_free(id(code)), 0);
+	}
+	assert_eq!(ends, [START_US + SAMPLES as u64 * 1_000_000 / 48_000]);
+
+	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
+	assert_eq!(moq_consume_catalog_cancel(catalog_task), 0);
+	assert_eq!(catalog_cb.recv_catalog_terminal(), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
 /// The publish-side mirror of [`video_raw_decode`]: hand raw RGBA to
 /// `moq_encode_video` and read decoded I420 back out of
 /// `moq_decode_video`, so the encode and decode halves meet on the wire.
@@ -4299,43 +4414,38 @@ fn video_raw_publish_consume() {
 	}
 
 	let frame_id = id(frame_cb.recv());
-	let mut frame = moq_video_frame {
-		timestamp_us: 0,
-		width: 0,
-		height: 0,
-		data: std::ptr::null(),
-		data_size: 0,
-	};
 	// Hold the frame across cancellation: its id owns the decoded picture, so it
 	// stays readable after the terminal callback and until it is freed.
 	assert_eq!(moq_decode_video_cancel(consumer), 0);
 	loop {
 		let code = frame_cb.recv();
 		if code > 0 {
-			assert_eq!(moq_decode_video_frame_free(id(code)), 0);
+			assert_eq!(moq_decode_video_read_free(id(code)), 0);
 		} else {
 			assert_eq!(code, 0, "raw video close delivers terminal 0");
 			break;
 		}
 	}
 
-	assert_eq!(unsafe { moq_decode_video_frame(frame_id, &mut frame) }, 0);
+	let frame = video_frame(frame_id);
 	assert_eq!(frame.width, 320);
 	assert_eq!(frame.height, 240);
 	assert_eq!(frame.data_size, 320 * 240 * 3 / 2, "tightly-packed I420");
 
 	// Pixels are produced once per id, so a second read hands back the same buffer.
-	let first = frame.data;
-	assert_eq!(unsafe { moq_decode_video_frame(frame_id, &mut frame) }, 0);
-	assert_eq!(frame.data, first, "the pixel pointer is stable until the id is freed");
-
-	assert_eq!(moq_decode_video_frame_free(frame_id), 0);
 	assert_eq!(
-		unsafe { moq_decode_video_frame(frame_id, &mut frame) },
+		video_frame(frame_id).data,
+		frame.data,
+		"the pixel pointer is stable until the id is freed"
+	);
+
+	assert_eq!(moq_decode_video_read_free(frame_id), 0);
+	assert_eq!(
+		video_read(frame_id).0,
 		Error::FrameNotFound.code(),
 		"a freed id is released, not left readable"
 	);
-	assert_eq!(moq_decode_video_frame_free(frame_id), Error::FrameNotFound.code());
+	assert_eq!(moq_decode_video_read_free(frame_id), Error::FrameNotFound.code());
 
 	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
 	assert_eq!(moq_consume_catalog_cancel(catalog_task), 0);
@@ -4456,22 +4566,15 @@ fn decode_first_frame(output: &moq_video_decoder_output) -> (u32, u32, usize) {
 	}
 
 	let frame_id = id(frame_cb.recv());
-	let mut frame = moq_video_frame {
-		timestamp_us: 0,
-		width: 0,
-		height: 0,
-		data: std::ptr::null(),
-		data_size: 0,
-	};
-	assert_eq!(unsafe { moq_decode_video_frame(frame_id, &mut frame) }, 0);
+	let frame = video_frame(frame_id);
 	let result = (frame.width, frame.height, frame.data_size);
 
-	assert_eq!(moq_decode_video_frame_free(frame_id), 0);
+	assert_eq!(moq_decode_video_read_free(frame_id), 0);
 	assert_eq!(moq_decode_video_cancel(consumer), 0);
 	loop {
 		let code = frame_cb.recv();
 		if code > 0 {
-			assert_eq!(moq_decode_video_frame_free(id(code)), 0);
+			assert_eq!(moq_decode_video_read_free(id(code)), 0);
 		} else {
 			assert_eq!(code, 0, "raw video close delivers terminal 0");
 			break;
@@ -4931,27 +5034,20 @@ fn video_raw_decode() {
 
 	// First decoded frame: packed I420 at the encoder resolution.
 	let frame_id = id(frame_cb.recv());
-	let mut frame = moq_video_frame {
-		timestamp_us: 0,
-		width: 0,
-		height: 0,
-		data: std::ptr::null(),
-		data_size: 0,
-	};
-	assert_eq!(unsafe { moq_decode_video_frame(frame_id, &mut frame) }, 0);
+	let frame = video_frame(frame_id);
 	assert_eq!(frame.width, 320);
 	assert_eq!(frame.height, 240);
 	assert_eq!(frame.data_size, 320 * 240 * 3 / 2, "tightly-packed I420");
 	assert!(!frame.data.is_null());
 
-	assert_eq!(moq_decode_video_frame_free(frame_id), 0);
+	assert_eq!(moq_decode_video_read_free(frame_id), 0);
 	assert_eq!(moq_decode_video_cancel(consumer), 0);
 
-	// Drain any other decoded frames already queued, then expect the terminal 0.
+	// Drain any other decoded reads already queued, then expect the terminal 0.
 	loop {
 		let code = frame_cb.recv();
 		if code > 0 {
-			assert_eq!(moq_decode_video_frame_free(id(code)), 0);
+			assert_eq!(moq_decode_video_read_free(id(code)), 0);
 		} else {
 			assert_eq!(code, 0, "raw video close delivers terminal 0");
 			break;

@@ -46,5 +46,4 @@ export interface Sample {
     timestamp: number;
 }
 
-
 ```

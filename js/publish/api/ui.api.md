@@ -11,5 +11,4 @@ class MoqPublishUi extends HTMLElement {
 }
 export default MoqPublishUi;
 
-
 ```

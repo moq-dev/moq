@@ -139,5 +139,4 @@ export const Wall: ((unixMillis: number) => Wall) & {
 
 export function wall(): Wall;
 
-
 ```

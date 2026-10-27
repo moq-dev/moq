@@ -1,5 +1,5 @@
 import type { Getter } from "@moq/signals";
-import type * as announce from "../announced.ts";
+import type * as announce from "../announce.ts";
 import type * as Auth from "../auth.ts";
 import type * as Path from "../path.ts";
 import type { Probe, Stats } from "./stats.ts";

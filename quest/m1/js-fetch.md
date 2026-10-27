@@ -22,7 +22,7 @@ forms must receive the protocol's explicit refusal rather than hang.
 Datagrams are never fetchable (#4982): Rust answers an IETF FETCH that
 reaches a datagram with DOES_NOT_EXIST; match it. Decided 2026-10-08: JS adds
 no `NotFetchable` code, since nothing would send it. Only lite-07 has the
-code, and lite-07 drops FETCH for [ranges](/quest/m1/subscribe-ranges/lite.md);
+code, and lite-07 drops FETCH for [ranges](/quest/m1/subscribe-ranges/js.md);
 lite-05 and lite-06 answer `NotFound`.
 
 The JS publisher already answers the TRACK_STATUS a native fetch-only request

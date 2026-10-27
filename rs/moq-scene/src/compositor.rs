@@ -709,7 +709,8 @@ mod tests {
 		async fn new(collection: Collection) -> Self {
 			let (device, queue) = gpu().await;
 			let dir = tempfile::tempdir().unwrap();
-			let (context, origin) = context(dir.path());
+			let (mut context, origin) = context(dir.path());
+			context.output = moq_video::render::output(&device);
 			let mut sources = Sources::new(context);
 			let drivers = sources.sync(&collection);
 			start(&sources, drivers).await;

@@ -38,12 +38,14 @@ the questions decided below and landed only the `track_range_filling` benchmark.
   read has to request it instead of letting `Lagged` reach the caller.
   `fill::Ask` already carries a start frame, so the miss judge can count a
   headless slot as a hole for a bounded window.
-- **Wire publishers keep parking.** The lite subscriber reads an upstream FIN
-  as the track's end, because "bounded downstream demand alone never FINs; the
-  publisher parks" (`lite/subscriber.rs`). Once `recv_group` ends a bounded
-  read, the lite and IETF publishers keep parking on a bounded downstream
-  SUBSCRIBE rather than FIN it, or a peer on a published version reads the
-  range's end as the track's.
+- **Wire publishers keep parking, except on lite-07.** The lite subscriber
+  reads an upstream FIN as the track's end on a published version. Once
+  `recv_group` ends a bounded read, the IETF publisher and lite publishers
+  before lite-07 keep parking on a bounded downstream SUBSCRIBE rather than FIN
+  it, or a peer reads the range's end as the track's. A lite-07 publisher FINs
+  a covered bounded subscription without SUBSCRIBE_END, which ends only the
+  subscription (maintainer, 2026-10-25, on
+  [moq-dev/moq#6807](https://github.com/moq-dev/moq/pull/6807)).
 - **Route recovery keeps a frame start.** `resume::Recover` fetches the rest of
   a group from frame N on the new route (`group::Fetch::frame_start`), which a
   whole-group range cannot say, so a crate-private fetch stays for it.

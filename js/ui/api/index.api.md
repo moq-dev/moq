@@ -29,8 +29,6 @@ export type Level = "full" | "partial" | "none";
 
 const OBSERVED: readonly ["show", "details"];
 
-type Observed = (typeof OBSERVED)[number];
-
 interface Report_2 {
     rows: [group: string, feature: string, status: Status][];
     summary: Level;
@@ -48,16 +46,15 @@ export type Status = boolean | Level | {
 
 export abstract class Support extends HTMLElement {
     constructor();
-    attributeChangedCallback(name: Observed, _oldValue: string | null, newValue: string | null): void;
+    attributeChangedCallback(name: (typeof OBSERVED)[number], _oldValue: string | null, newValue: string | null): void;
     connectedCallback(): void;
     get details(): boolean;
     set details(details: boolean);
     protected abstract detect(): Promise<Report_2>;
     disconnectedCallback(): void;
-    static observedAttributes: readonly ["show", "details"];
+    static observedAttributes: typeof OBSERVED;
     get show(): Show;
     set show(show: Show);
 }
-
 
 ```

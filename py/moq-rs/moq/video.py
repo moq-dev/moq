@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import timedelta
+from typing import Union
 
 from moq_ffi import (
     MoqVideoConsumer,
@@ -13,9 +14,11 @@ from moq_ffi import (
     MoqVideoPacket,
     MoqVideoProducer,
     MoqVideoProducerOptions,
+    MoqVideoRead,
 )
 from moq_ffi import MoqVideoFrameRate as FrameRate
 
+from ._read import End, Gap, _end, _gap
 from ._records import _from_us, _to_us
 from ._stream import _Stream
 from .media import CatalogProducer, Dimensions, Video
@@ -29,6 +32,10 @@ from .types import VideoEncoderKind as EncoderKind
 from .types import VideoEncoderOutput as EncoderOutput
 from .types import VideoGop as Gop
 from .types import VideoPixelFormat as PixelFormat
+
+# A Union rather than `|`: the generated frame class does not support `|` with other types.
+Read = Union[VideoDecodedFrame, Gap, End]
+"""One item a :class:`Consumer` reads, in delivery order: a decoded picture, or a break between them."""
 
 
 @dataclass(frozen=True)
@@ -142,8 +149,9 @@ class Producer:
         self._inner.finish()
 
 
-class Consumer(_Stream[VideoDecodedFrame]):
-    """Async iterator of decoded frames. Construct with :meth:`subscribe`.
+class Consumer(_Stream[Read]):
+    """Async iterator of decoded frames, and the :class:`Gap` and :class:`End` breaks
+    between them. Construct with :meth:`subscribe`.
 
     Each frame owns its decoded picture until it is garbage collected;
     ``frame.pixels(format)`` converts it to tightly packed CPU pixels.
@@ -161,8 +169,17 @@ class Consumer(_Stream[VideoDecodedFrame]):
     def __init__(self, inner: MoqVideoConsumer) -> None:
         self._inner = inner
 
-    async def _next(self) -> VideoDecodedFrame | None:
-        return await self._inner.next()
+    async def _next(self) -> Read | None:
+        value = await self._inner.next()
+        if value is None:
+            return None
+        if isinstance(value, MoqVideoRead.FRAME):
+            return value.frame
+        if isinstance(value, MoqVideoRead.GAP):
+            return _gap(value.timestamp_us, value.duration)
+        if isinstance(value, MoqVideoRead.END):
+            return _end(value.end_us)
+        raise TypeError(f"unknown video read: {value!r}")
 
     def cancel(self) -> None:
         """Cancel the subscription and stop delivering video frames."""
@@ -204,10 +221,13 @@ __all__ = [
     "EncoderInput",
     "EncoderKind",
     "EncoderOutput",
+    "End",
     "Frame",
+    "Gap",
     "Gop",
     "Packet",
     "PixelFormat",
     "Producer",
+    "Read",
     "FrameRate",
 ]

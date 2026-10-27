@@ -55,5 +55,4 @@ const SIGNAL_BRAND: unique symbol;
 
 type Subscriber<T> = (value: T) => void;
 
-
 ```

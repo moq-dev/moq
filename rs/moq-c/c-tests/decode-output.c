@@ -36,6 +36,9 @@ _Static_assert(offsetof(moq_video_decoder_output, format) == 8, "format moved");
 _Static_assert(offsetof(moq_video_decoder_output, width) == 12, "width moved");
 _Static_assert(offsetof(moq_video_decoder_output, height) == 16, "height moved");
 _Static_assert(sizeof(moq_video_decoder_output) == 24, "decoder output size changed");
+_Static_assert(MOQ_DECODE_READ_FRAME == 0, "frame read discriminant moved");
+_Static_assert(MOQ_DECODE_READ_GAP == 1, "gap read discriminant moved");
+_Static_assert(MOQ_DECODE_READ_END == 2, "end read discriminant moved");
 
 // Numeric codes from rs/moq-c/src/error.rs. They are the contract a C caller
 // matches on; if they drift, this fixture fails and the header is stale.
@@ -133,18 +136,19 @@ static void on_catalog(void *ud, int32_t catalog) {
     if (catalog > 0) moq_consume_catalog_free((uint32_t)catalog);
 }
 
-static void on_frame(void *ud, int32_t frame_id) {
+static void on_read(void *ud, int32_t read_id) {
     ctx_t *c = (ctx_t *)ud;
-    if (frame_id <= 0) {
+    if (read_id <= 0) {
         pthread_mutex_lock(&c->mu);
         c->done_frame = 1;
         pthread_cond_broadcast(&c->cv);
         pthread_mutex_unlock(&c->mu);
         return;
     }
-    moq_video_frame frame;
-    memset(&frame, 0, sizeof(frame));
-    if (moq_decode_video_frame((uint32_t)frame_id, &frame) == 0) {
+    moq_video_read read;
+    memset(&read, 0, sizeof(read));
+    if (moq_decode_video_read((uint32_t)read_id, &read) == 0 && read.kind == MOQ_DECODE_READ_FRAME) {
+        moq_video_frame frame = read.frame;
         pthread_mutex_lock(&c->mu);
         if (!c->got_frame) {
             if (frame.width != c->want_width || frame.height != c->want_height ||
@@ -158,7 +162,7 @@ static void on_frame(void *ud, int32_t frame_id) {
         pthread_cond_broadcast(&c->cv);
         pthread_mutex_unlock(&c->mu);
     }
-    moq_decode_video_frame_free((uint32_t)frame_id);
+    moq_decode_video_read_free((uint32_t)read_id);
 }
 
 static void wait_for(pthread_mutex_t *mu, pthread_cond_t *cv, const int *flag, double timeout_s) {
@@ -196,7 +200,8 @@ static void decode_once(ctx_t *c, int32_t catalog, const moq_video_decoder_outpu
     c->done_frame = 0;
     pthread_mutex_unlock(&c->mu);
 
-    int32_t consumer = moq_decode_video((uint32_t)catalog, 0, output, on_frame, c);
+    int32_t consumer = moq_decode_video((uint32_t)catalog, 0, output, on_read, c);
+
     if (consumer <= 0) fail("error: moq_decode_video failed: %d (%s)\n", consumer, moq_error());
 
     // Keep feeding the encoder so the subscriber has live frames whatever

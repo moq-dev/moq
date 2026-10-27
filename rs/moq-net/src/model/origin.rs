@@ -2095,7 +2095,7 @@ impl Producer {
 	}
 
 	// Sessions enforce the policy configured once on the origin.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn max_hops(&self) -> HopLimit {
 		self.max_hops
 	}
@@ -5664,7 +5664,7 @@ impl Request {
 	}
 
 	/// Resolve a session-forwarded claim with its peer's already-routed broadcast.
-	#[cfg(any(feature = "async", test))]
+	#[cfg(feature = "async")]
 	pub(crate) fn accept(self, broadcast: impl Consume<broadcast::Consumer>) {
 		let broadcast = broadcast.consume();
 		let _ = ServeState::resolve(&self.home, &self.path, &self.producer, Ok(broadcast));
@@ -6078,7 +6078,7 @@ impl Consumer {
 	/// A clone whose announcements skip the routes this origin cannot forward: a
 	/// chain already at [`Config::max_hops`] has no room for our hop. Sessions whose
 	/// wire carries the hop path apply this to the routes they advertise.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn forwardable(mut self) -> Self {
 		self.horizon.max_hops = Some(self.max_hops);
 		self

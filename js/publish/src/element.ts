@@ -35,8 +35,8 @@ function parseVersions(value: string | null): string[] | undefined {
 	return versions?.length ? versions : undefined;
 }
 
+/** The attributes the element observes. */
 const OBSERVED = ["url", "versions", "name", "muted", "invisible", "source", "preview", "backend", "announce"] as const;
-type Observed = (typeof OBSERVED)[number];
 
 /** The built-in capture sources selectable via the `source` attribute. */
 export type SourceType = "camera" | "screen" | "file";
@@ -99,14 +99,10 @@ function parseBackend(value: string | null): Preview.Backend {
 	return "auto";
 }
 
-// Close everything when this element is garbage collected.
-// This is primarily to avoid a console.warn that we didn't close() before GC.
-// There's no destructor for web components so this is the best we can do.
-const cleanup = new FinalizationRegistry<Effect>((signals) => signals.close());
-
 /** The `<moq-publish>` element: captures a source and publishes it as a broadcast. */
 export default class MoqPublish extends HTMLElement {
-	static observedAttributes = OBSERVED;
+	/** The attributes the browser reports changes to. */
+	static observedAttributes: typeof OBSERVED = OBSERVED;
 
 	/**
 	 * The mutable user controls. As the top of the tree, this element owns the writable Signals
@@ -170,7 +166,7 @@ export default class MoqPublish extends HTMLElement {
 	// The preview element, either a <video> (raw source via srcObject) or a <canvas> (rendered frames).
 	#preview = new Signal<HTMLVideoElement | HTMLCanvasElement | undefined>(undefined);
 
-	// The inverse of the `muted` and `invisible` signals.
+	// The connected tracks allowed by `muted` and `invisible`.
 	#videoEnabled: Signal<boolean>;
 	#audioEnabled: Signal<boolean>;
 	#eitherEnabled: Signal<boolean>;
@@ -182,7 +178,7 @@ export default class MoqPublish extends HTMLElement {
 	#announcing = new Signal(false);
 
 	/**
-	 * Effects scoped to this element's lifetime, closed on disconnect.
+	 * Effects owned by this element; media resources are suspended while disconnected.
 	 *
 	 * Public because the element is the top of the tree: it's where an application hangs its own
 	 * reactivity. The components underneath keep theirs private, so `close()` is the only handle.
@@ -192,25 +188,24 @@ export default class MoqPublish extends HTMLElement {
 	constructor() {
 		super();
 
-		cleanup.register(this, this.signals);
-
 		this.connection = new Moq.Connection({
 			enabled: this.#enabled,
 		});
 		this.signals.cleanup(() => this.connection.close());
 
-		// The inverse of the `muted` and `invisible` signals.
+		// The connected tracks allowed by `muted` and `invisible`.
 		// TODO make this.signals.computed to simplify the code.
 		this.#videoEnabled = new Signal(false);
 		this.#audioEnabled = new Signal(false);
 		this.#eitherEnabled = new Signal(false);
 
 		this.signals.run((effect) => {
+			const enabled = effect.get(this.#enabled);
 			const muted = effect.get(this.controls.muted);
 			const invisible = effect.get(this.controls.invisible);
-			this.#videoEnabled.set(!invisible);
-			this.#audioEnabled.set(!muted);
-			this.#eitherEnabled.set(!muted || !invisible);
+			this.#videoEnabled.set(enabled && !invisible);
+			this.#audioEnabled.set(enabled && !muted);
+			this.#eitherEnabled.set(enabled && (!muted || !invisible));
 		});
 
 		this.#capture = new Video.Capture({ source: this.#videoSource, orientation: this.#orientation });
@@ -267,6 +262,7 @@ export default class MoqPublish extends HTMLElement {
 		setPreview();
 
 		this.signals.run((effect) => {
+			if (!effect.get(this.#enabled)) return;
 			const preview = effect.get(this.#preview);
 			if (!preview) return;
 
@@ -333,15 +329,18 @@ export default class MoqPublish extends HTMLElement {
 		this.signals.run(this.#runSource.bind(this));
 	}
 
+	/** Called by the browser when the element joins a document. */
 	connectedCallback() {
 		this.#enabled.set(true);
 	}
 
+	/** Called by the browser when the element leaves its document. */
 	disconnectedCallback() {
 		this.#enabled.set(false);
 	}
 
-	attributeChangedCallback(name: Observed, oldValue: string | null, newValue: string | null) {
+	/** Called by the browser when an observed attribute changes. */
+	attributeChangedCallback(name: (typeof OBSERVED)[number], oldValue: string | null, newValue: string | null) {
 		if (oldValue === newValue) return;
 
 		if (name === "url") {
@@ -382,11 +381,13 @@ export default class MoqPublish extends HTMLElement {
 		});
 		effect.set(this.#orientation, 0, 0);
 
+		// Sources stay alive while disconnected so device and file selections survive a reconnect;
+		// the connection-gated enabled signals release their capture and device discovery.
 		if (!source) return;
 
 		if (source === "camera") {
-			const video = new Source.Camera({ enabled: this.#videoEnabled });
-			const audio = new Source.Microphone({ enabled: this.#audioEnabled });
+			const video = new Source.Camera({ enabled: this.#videoEnabled, device: { enabled: this.#enabled } });
+			const audio = new Source.Microphone({ enabled: this.#audioEnabled, device: { enabled: this.#enabled } });
 
 			effect.set(this.#sources.video, video);
 			effect.set(this.#sources.audio, audio);

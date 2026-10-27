@@ -98,6 +98,7 @@ declare namespace Snapshot {
         Producer
     }
 }
+export { Snapshot }
 
 declare namespace Stream {
     export {
@@ -107,6 +108,6 @@ declare namespace Stream {
         Producer_2 as Producer
     }
 }
-
+export { Stream }
 
 ```
