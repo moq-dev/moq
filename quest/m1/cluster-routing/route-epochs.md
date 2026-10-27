@@ -33,3 +33,26 @@ Most of it lives in `rs/moq-net/src/model/origin.rs`.
 
 Public API: `Route::epoch` stops being optional (breaking), and the Impact
 bullet says how to migrate. Wire: none.
+
+Open (2026-10-27, implementation): a minted epoch cannot stand in for a
+declared one under today's best-route-per-prefix advertisement. Minting at
+table insert and treating it as an epoch fails 18 `moq-net` lib tests. Each
+node mints at its own time, so "newest epoch wins" lets mint order outrank
+cost, preference, and the local-broadcast tie, and nodes disagree on a pool
+path's winner (`equal_cost_pool_spreads_paths`,
+`route_changes_preserve_each_cursors_visible_winner`,
+`local_broadcast_wins_a_tie_with_a_hopless_route`), contradicting
+`pool_ties_agree_only_on_a_path_and_identity_hash`. Ranking a minted epoch
+last keeps the spread, but then a pool path's winner differs from the
+prefix winner whose epoch is advertised. Forwarding that epoch makes a
+downstream pinned request refuse the path, or resume across a worker change.
+Keeping it local makes a downstream relay's own mint resume across the same
+change unless the prefix restarts first, which is the renewal and held
+Release this quest deletes. Every check that today asks "has an epoch"
+would ask "was it declared", so nothing collapses. Under
+[Routes and announces](/quest/m1/cluster-routing/routes.md), each origin is
+its own ANNOUNCE and the first hop pins the request to its identity, so an
+epochless instance is the first hop's route and the per-hop renewal has
+nothing left to protect. Decide whether to fold this into routes and
+unblock [announcement takeover](/quest/m1/announce-takeover.md), which does
+not need minting.
