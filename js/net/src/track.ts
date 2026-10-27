@@ -533,7 +533,7 @@ class TrackState {
 	update: Signal<Subscription | undefined>;
 	/** Resolved once the producer commits the immutable properties. */
 	info = new Signal<Info | undefined>(undefined);
-	/** Greatest real frame reported by the publisher, including a wire answer. */
+	/** Newest group head, datagram, frame, or location reported by the publisher. */
 	largest = new Signal<Position | undefined>(undefined);
 	// Set once {@link largest} can no longer advance while the track stays open.
 	largestEnded = new Signal(false);
@@ -611,6 +611,8 @@ let reofferSequences: (producer: Producer, sink: TrackState, sequences: readonly
 // Whether a group may still land on the producer's live feed; assigned in its static block.
 let mayLand: (producer: Producer, land: Land) => boolean;
 let sourceStart: (producer: Producer) => number | "pending" | undefined;
+// Actual object metadata outlives cached payloads, unlike empty group heads in model largest.
+let objectLargest: (producer: Producer) => Position | undefined;
 
 // The sequence-order cursor lives inside `Subscriber` (it shares the group buffer and the
 // drift anchor with the arrival cursor), so `Ordered` reaches it through this bridge,
@@ -750,6 +752,8 @@ export class Producer {
 	// The largest group's content may still grow: it has not closed cleanly, and it is not a
 	// datagram. An aborted one stays open, since it can be recreated.
 	#largestOpen = false;
+	// Only real objects or upstream metadata advance this, never the head of an empty group.
+	#objectLargest?: Position;
 
 	// A wire subscription declared the end ahead of the group streams below it, which QUIC
 	// may deliver in any order: readers wait for a hole below it to fill, or for the track
@@ -786,7 +790,9 @@ export class Producer {
 			for (const state of [producer.#state, ...producer.#sinks]) state.startChanged.update((rev) => rev + 1);
 		};
 		hooks.cachedLargest = (producer) => producer.#cachedLargest();
-		hooks.reportedLargest = (producer, largest) => producer.#advanceLargest(largest);
+		hooks.reportedLargest = (producer, largest) => producer.#advanceObject(largest);
+		hooks.reportedGroup = (producer, group) => producer.#advanceLargest({ group, frame: 0 });
+		objectLargest = (producer) => producer.#objectLargest;
 		cachedHolds = (producer, sequence) => {
 			const entry = producer.#cached.get(sequence);
 			return entry !== undefined && !(entry.group.closed.peek() instanceof Error);
@@ -1205,6 +1211,11 @@ export class Producer {
 		for (const sink of this.#sinks) sink.largest.set(largest);
 	}
 
+	#advanceObject(largest: Position | undefined): void {
+		if (largest && (!this.#objectLargest || after(largest, this.#objectLargest))) this.#objectLargest = largest;
+		this.#advanceLargest(largest);
+	}
+
 	/** The track's largest location: its newest group or datagram at the newest frame, or undefined before any. */
 	largest(): Position | undefined {
 		return this.#state.largest.peek();
@@ -1313,7 +1324,7 @@ export class Producer {
 		for (const sink of this.#sinks) this.#mirror(entry, sink);
 		// Follow the group's frames as they land, past the head `#advance` already named.
 		const stop = hooks.groupProgress(group, (total) => {
-			if (total > 0) this.#advanceLargest({ group: group.sequence, frame: total - 1 });
+			if (total > 0) this.#advanceObject({ group: group.sequence, frame: total - 1 });
 		});
 		void group.closed.then((closed) => {
 			stop();
@@ -1441,6 +1452,7 @@ export class Producer {
 	#publishDatagram(datagram: Datagram, slice?: Stored): void {
 		this.#settle();
 		const { sequence, timestamp } = datagram;
+		this.#advanceObject({ group: sequence, frame: 0 });
 		this.#advance(sequence, false);
 		this.#arrive(sequence);
 		this.#finishLargest(sequence);
@@ -2126,6 +2138,7 @@ export class Subscriber {
 		};
 		hooks.tryRecvDatagram = (subscriber) => subscriber.#tryDatagram();
 		hooks.deliveredRuns = (subscriber) => subscriber.#delivered.runs;
+		hooks.handedOut = (subscriber, sequence) => subscriber.#delivered.has(sequence);
 		hooks.datagramChanged = (subscriber, fn) => {
 			if (subscriber.#resume) return subscriber.#groupChanged(fn);
 			const state = subscriber.#state;
@@ -2175,6 +2188,7 @@ export class Subscriber {
 			};
 		};
 		hooks.cachedGroup = (subscriber, sequence) => {
+			if (subscriber.#resume) return subscriber.#resume.cachedGroup(sequence);
 			const producer = subscriber.#state.producer;
 			return producer && cachedMirror(producer, sequence);
 		};
@@ -2210,6 +2224,11 @@ export class Subscriber {
 		hooks.latestSequence = (subscriber) =>
 			subscriber.#resume ? subscriber.#resume.latest() : subscriber.#state.latest;
 		hooks.bufferedLargest = (subscriber) => subscriber.#bufferedLargest();
+		hooks.objectLargest = (subscriber) => {
+			if (subscriber.#resume) return subscriber.#resume.objectLargest();
+			const producer = subscriber.#state.producer;
+			return producer && objectLargest(producer);
+		};
 		hooks.peekLargest = (subscriber) => {
 			if (subscriber.#resume) return subscriber.#resume.peekLargest();
 			const state = subscriber.#state;

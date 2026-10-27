@@ -508,7 +508,7 @@ test("session shutdown releases listing tasks while the local origin stays open"
 });
 
 for (const version of [Version.DRAFT_22]) {
-	test(`a paused filter applies on resume, but an active pause/filter update is refused atomically (${version})`, async () => {
+	test(`a filter applied while paused or while pausing is preserved on resume (${version})`, async () => {
 		const fx = fixture(version);
 		const broadcastPublication = fx.origin.createBroadcast(Path.from("room/live"));
 		const broadcast = broadcastPublication.broadcast;
@@ -544,14 +544,19 @@ for (const version of [Version.DRAFT_22]) {
 		expect((await Group.decode(reader, version)).groupId).toBe(2);
 		await reader.readAll();
 
-		// The bundled pause never receives REQUEST_OK or leaves a paused publication.
+		// An active pause applies the same filter atomically before its acknowledgement.
 		await filter(6n, 3n);
-		expect(await stream.reader.u53()).toBe(RequestError.id);
-		expect((await RequestError.decode(stream.reader, version)).errorCode).toBe(0x03);
-		expect(await stream.reader.u53()).toBe(PublishDone.id);
-		const done = await PublishDone.decode(stream.reader, version);
-		expect(done.statusCode).toBe(PublishDoneStatus.UPDATE_FAILED);
-		expect(done.streamCount).toBe(1n);
+		await ok(stream, version);
+		while (track.subscription.peek() !== undefined) await track.subscription.changed();
+		const paused = track.appendGroup();
+		paused.writeFrame({ payload: new Uint8Array([3]) });
+		paused.finish();
+		await update(stream, version, 8n, true);
+		const resumed = (await uni.read()).value;
+		if (!resumed) throw new Error("missing group selected while paused");
+		const resumedReader = new Reader(resumed, undefined, version);
+		expect((await Group.decode(resumedReader, version)).groupId).toBe(3);
+		await resumedReader.readAll();
 		uni.releaseLock();
 	});
 }

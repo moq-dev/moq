@@ -1313,8 +1313,9 @@ export class Subscriber {
 		state.subscription = subscription;
 		if (ok.largest) {
 			// Object IDs can start past zero or skip, while readers see frame ordinals, so only
-			// the group carries over: its first frame is the edge a reader can count on.
-			hooks.reportedLargest(producer, { group: Number(ok.largest.groupId), frame: 0 });
+			// the group carries over: its first frame is the edge a reader can count on. It names
+			// no object, so a Next Object join served onward still starts at the group's first.
+			hooks.reportedGroup(producer, Number(ok.largest.groupId));
 		}
 		// The live join starts at the publisher's edge, whatever floor the demand asked for.
 		// With no Largest it skips nothing, so every group is owed: a lower one's stream may
