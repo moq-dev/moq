@@ -204,12 +204,12 @@ class Tokens:
         self._inner.set(_strs(tokens, "tokens"))
 
     async def answered(self) -> None:
-        """Wait for the peer's answer to the tokens set last.
+        """Wait for the peer's first verdict on the tokens the last ``set`` newly presented.
 
-        Returns once a live session holds every one, in band or as the connection
-        credential it dialed with; while offline it waits for the next session. Raises
-        the peer's refusal carrying its code, ``moq.Error.Unsupported`` when the live
-        session cannot carry an in-band token, or the session's close reason."""
+        Returns once each is granted, in band or as a later dial's connection credential.
+        A token the set kept counts only once refused, and nothing is re-checked after the
+        answer. Raises the peer's refusal carrying its code, ``moq.Error.Unsupported`` when
+        the session cannot carry an in-band token, or the connection's close reason."""
         await self._inner.answered()
 
 

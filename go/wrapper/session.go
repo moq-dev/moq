@@ -129,12 +129,13 @@ func (t *Tokens) Set(tokens ...string) error {
 	return t.inner.Set(append([]string(nil), tokens...))
 }
 
-// Answered blocks until the peer answers the tokens set last: nil once a live
-// session holds every one, in band or as the connection credential it dialed
-// with. While offline it waits for the next session. It returns the peer's
-// refusal as a ProtocolError carrying its code, an error for which
-// errors.Is(err, ErrUnsupported) holds when the live session cannot carry an
-// in-band token, or the session's close reason.
+// Answered blocks until the peer's first verdict on the tokens the last Set
+// newly presented: nil once each is granted, in band or as a later dial's
+// connection credential. A token the set kept counts only once refused, and
+// nothing is re-checked after the answer. It returns the peer's refusal as a
+// ProtocolError carrying its code, an error for which
+// errors.Is(err, ErrUnsupported) holds when the session cannot carry an
+// in-band token, or the connection's close reason.
 func (t *Tokens) Answered(ctx context.Context) error {
 	return bridge.CallErr(ctx, nil, t.inner.Answered)
 }

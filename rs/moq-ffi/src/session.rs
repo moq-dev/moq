@@ -316,13 +316,13 @@ pub(crate) fn parse_versions(versions: &[String]) -> Result<Vec<moq_net::Version
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn parse_tokens(tokens: Vec<String>) -> Result<Vec<moq_tokio::connect::Token>, MoqError> {
+fn parse_tokens(tokens: Vec<String>) -> Result<Vec<moq_net::auth::Token>, MoqError> {
 	tokens
 		.into_iter()
 		.map(|token| {
 			token
 				.try_into()
-				.map_err(|err: moq_tokio::connect::EmptyToken| MoqError::Config {
+				.map_err(|err: moq_net::auth::EmptyToken| MoqError::Config {
 					reason: err.to_string(),
 				})
 		})
@@ -830,7 +830,7 @@ impl MoqClient {
 #[derive(uniffi::Object)]
 pub struct MoqTokens {
 	#[cfg(not(target_arch = "wasm32"))]
-	inner: moq_tokio::connect::Tokens,
+	inner: moq_net::auth::Tokens,
 }
 
 #[uniffi::export]
@@ -855,18 +855,18 @@ impl MoqTokens {
 		}
 	}
 
-	/// Wait for the peer's answer to the tokens set last: `Ok` once a live session holds
-	/// every one, in band or as the connection credential it dialed with.
+	/// Wait for the peer's first verdict on the tokens the last [`set`](Self::set) newly
+	/// presented: `Ok` once each is granted, in band or as a later dial's connection credential.
 	///
-	/// While offline it waits for the next session, and a later [`set`](Self::set) moves the
-	/// wait on to its tokens. The peer's refusal is a [`MoqError::Protocol`] carrying its
-	/// code, [`MoqError::Unsupported`] when the live session cannot carry an in-band token,
-	/// and the session's end, such as a refused dial, is its close reason.
+	/// A token the set kept counts only once refused, and nothing is re-checked after the
+	/// answer. The peer's refusal is a [`MoqError::Protocol`] carrying its code,
+	/// [`MoqError::Unsupported`] when the session cannot carry an in-band token, and the
+	/// connection's end, such as a refused dial, is its close reason.
 	pub async fn answered(&self) -> Result<(), MoqError> {
 		#[cfg(not(target_arch = "wasm32"))]
 		{
 			let tokens = self.inner.clone();
-			crate::ffi::detached(async move { tokens.answered().await.map_err(map_closed_error) }).await
+			crate::ffi::detached(async move { tokens.answered().await.map_err(MoqError::from) }).await
 		}
 		#[cfg(target_arch = "wasm32")]
 		{

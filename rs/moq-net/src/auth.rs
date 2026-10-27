@@ -45,6 +45,10 @@ use bytes::Bytes;
 
 use crate::{Error, Patterns, Result, SessionError, time::Instant};
 
+mod tokens;
+
+pub use tokens::{Dial, EmptyToken, Token, Tokens};
+
 /// Classify malformed AUTH messages separately from transport and local failures.
 pub(crate) fn protocol_error(err: Error) -> Error {
 	match err {
@@ -178,7 +182,7 @@ pub(crate) struct State {
 	closed: Option<Error>,
 	next_id: u64,
 	/// Every token the application added that it has not withdrawn.
-	tokens: BTreeMap<u64, Token>,
+	tokens: BTreeMap<u64, Entry>,
 	next_link: u64,
 	/// Every session built on this handle that has not dropped, oldest first.
 	links: BTreeMap<u64, Attached>,
@@ -188,10 +192,12 @@ pub(crate) struct State {
 	limit: Option<Grant>,
 	next_issue: u64,
 	acceptor: Acceptor,
+	/// The tokens a [`Tokens`] presents on this handle's sessions, when it was built by one.
+	configured: Option<tokens::Configured>,
 }
 
 /// A token the application added, presented on every session of its handle.
-struct Token {
+struct Entry {
 	value: Bytes,
 	/// The first verdict any session's peer gave: how it accepted the token, or why it ended.
 	answered: Option<Result<Answer>>,
@@ -425,6 +431,10 @@ impl State {
 				if let Some(token) = self.tokens.get_mut(&id) {
 					token.answered.get_or_insert(Ok(answer));
 				}
+				if answer == Answer::Requests {
+					self.unsupported(id);
+				}
+				self.settle();
 			}
 			Err(err) => self.end_token(id, err),
 		}
@@ -442,6 +452,44 @@ impl State {
 		token.ended = Some(err.clone());
 		for link in self.links.values_mut() {
 			link.end(id, &err);
+		}
+		if self.closed.is_none() && self.configured(id) {
+			match err {
+				Error::Unsupported => self.unsupported(id),
+				err => tracing::warn!(%err, "a configured token was refused"),
+			}
+		}
+		self.settle();
+	}
+
+	/// Register a token and offer it to every open session.
+	fn present(&mut self, token: Bytes) -> u64 {
+		let id = self.next_id;
+		self.next_id += 1;
+		self.tokens.insert(
+			id,
+			Entry {
+				value: token.clone(),
+				answered: None,
+				ended: None,
+			},
+		);
+		let answers: Vec<_> = self
+			.links
+			.values_mut()
+			.filter_map(|link| link.offer(id, &token))
+			.collect();
+		for answer in answers {
+			self.answer(id, answer.map(|()| Answer::Requests));
+		}
+		id
+	}
+
+	/// Stop presenting token `id` on every session.
+	fn withdraw(&mut self, id: u64) {
+		self.tokens.remove(&id);
+		for link in self.links.values_mut() {
+			link.withdraw(id);
 		}
 	}
 
@@ -562,24 +610,7 @@ impl Handle {
 		if state.bound && !state.links.values().any(Attached::active) {
 			return Err(Error::GoingAway);
 		}
-		let id = state.next_id;
-		state.next_id += 1;
-		state.tokens.insert(
-			id,
-			Token {
-				value: token.clone(),
-				answered: None,
-				ended: None,
-			},
-		);
-		let answers: Vec<_> = state
-			.links
-			.values_mut()
-			.filter_map(|link| link.offer(id, &token))
-			.collect();
-		for answer in answers {
-			state.answer(id, answer.map(|()| Answer::Requests));
-		}
+		let id = state.present(token);
 		Ok(Auth {
 			presented: std::sync::Arc::new(Presented {
 				state: self.state.clone(),
@@ -717,6 +748,8 @@ impl Drop for Detach {
 	fn drop(&mut self) {
 		let queue = {
 			let mut state = self.state.lock();
+			// The link's credential may hold the answer a token set still waits on.
+			state.record();
 			state.links.remove(&self.id);
 			// Dropped without closing, such as a driver dropped mid-session.
 			match state.bound {
@@ -1223,9 +1256,7 @@ impl Link {
 				if slot.withdrawn {
 					continue;
 				}
-				// The session's own credential is never named by a request, and the peer's
-				// SETUP already accepted the one it carried.
-				let answer = match requests && !slot.setup {
+				let answer = match requests {
 					true => Ok(()),
 					false => Err(Error::Unsupported),
 				};
@@ -1254,10 +1285,12 @@ impl Link {
 	/// next session. A handle the session created for itself ends with it.
 	pub(crate) fn close(&self, err: Error) {
 		let queue = self.with_state(|state, link| {
-			let link = attached(&mut state.links, link);
-			if link.closed.is_some() {
+			if state.links[&link].closed.is_some() {
 				return None;
 			}
+			// The session's credential may hold the answer a token set still waits on.
+			state.record();
+			let link = attached(&mut state.links, link);
 			link.closed = Some(err.clone());
 			link.opening.clear();
 			for slot in link.slots.values_mut() {
@@ -1387,12 +1420,7 @@ impl Drop for Presented {
 					link.withdraw(self.id);
 				}
 			}
-			None => {
-				state.tokens.remove(&self.id);
-				for link in state.links.values_mut() {
-					link.withdraw(self.id);
-				}
-			}
+			None => state.withdraw(self.id),
 		}
 	}
 }
@@ -2704,20 +2732,6 @@ mod tests {
 			Poll::Ready(Ok(Answer::Requests))
 		));
 		assert_eq!(handle.token(&auth).as_deref(), Some(b"jwt".as_slice()));
-	}
-
-	/// The moq-transport SETUP that carried the session's own credential already accepted
-	/// it, so a peer that turns out not to speak AUTH ends it rather than leaving it unanswered.
-	#[cfg(feature = "async")]
-	#[test]
-	fn an_unsupported_peer_ends_the_session_credential() {
-		use futures::FutureExt;
-
-		let handle = Link::ietf(true);
-		let credential = handle.present(Bytes::new(), true).unwrap();
-		handle.unsupported();
-		assert!(matches!(credential.closed().now_or_never(), Some(Error::Unsupported)));
-		assert_eq!(credential.grant().peek(), None);
 	}
 
 	/// Only the handle that issued an auth carries it: a route naming another session's

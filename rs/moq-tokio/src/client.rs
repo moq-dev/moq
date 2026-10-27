@@ -46,11 +46,11 @@ pub struct Client {
 	/// every transport (passed into the QUIC backend's `connect` and used directly for
 	/// raw TCP/UDS qmux and WebSocket). Resolved once in [`Client::new`] so the ALPN list
 	/// can't diverge between transports.
-	versions: moq_net::Versions,
+	pub(crate) versions: moq_net::Versions,
 	/// The URL from [`connect.url`](crate::connect::Config::url), dialed by [`Client::publish`] / [`Client::consume`].
 	connect: Option<Url>,
 	/// The credentials each new connection starts presenting.
-	pub(crate) tokens: Vec<crate::connect::Token>,
+	pub(crate) tokens: Vec<moq_net::auth::Token>,
 	/// Deadline for one [`Client::connect`], from [`crate::connect::Config::timeout`]. Zero waits forever.
 	#[cfg(feature = "_transport")]
 	timeout: std::time::Duration,
@@ -363,10 +363,6 @@ impl Client {
 	}
 
 	/// What a dial to `url` presents of `tokens`, given the versions this client offers.
-	pub(crate) fn credential(&self, url: &Url, tokens: &crate::connect::Set) -> crate::connect::Credential {
-		crate::connect::Credential::new(url, &self.versions, tokens)
-	}
-
 	/// Dial the given URL and complete the MoQ handshake.
 	///
 	/// Errors if no transport feature is compiled in.
@@ -380,14 +376,14 @@ impl Client {
 	pub(crate) async fn dial(
 		&self,
 		_addr: crate::connect::Addr,
-		_credential: &crate::connect::Credential,
+		_presented: &moq_net::auth::Dial,
 	) -> crate::Result<Dialed> {
 		Err(Error::NoBackend(
 			"no backend compiled; enable quic, iroh, websocket, tcp, or uds feature",
 		))
 	}
 
-	/// Dial the given URL and complete the MoQ handshake, presenting `credential`.
+	/// Dial the given URL and complete the MoQ handshake, presenting what `presented` decided.
 	///
 	/// The scheme picks the transport, and `https://` races QUIC against the
 	/// WebSocket fallback so a blocked UDP path still connects. The session's
@@ -403,20 +399,17 @@ impl Client {
 	pub(crate) async fn dial(
 		&self,
 		addr: crate::connect::Addr,
-		credential: &crate::connect::Credential,
+		presented: &moq_net::auth::Dial,
 	) -> crate::Result<Dialed> {
-		let addr = addr.with_url(credential.url.clone());
+		let addr = addr.with_url(presented.url.clone());
 		#[cfg(test)]
 		if let Some(dialer) = &self.dialer {
 			return dialer(addr).await;
 		}
-		let client = match &credential.setup {
+		let client = match &presented.token {
 			Some(token) => {
 				let mut client = self.clone();
-				client.moq = client.moq.with_token(moq_net::setup::Token {
-					kind: moq_net::setup::Token::OUT_OF_BAND,
-					value: token.as_str().as_bytes().to_vec(),
-				});
+				client.moq = client.moq.with_token(token.clone());
 				std::borrow::Cow::Owned(client)
 			}
 			None => std::borrow::Cow::Borrowed(self),
@@ -923,7 +916,7 @@ mod tests {
 	#[test]
 	fn test_connect_tokens() {
 		let config = Cli::config_from(["test", "--connect-token", "first", "--connect-token", "second"]);
-		let tokens: Vec<&str> = config.tokens.iter().map(crate::connect::Token::as_str).collect();
+		let tokens: Vec<&str> = config.tokens.iter().map(moq_net::auth::Token::as_str).collect();
 		assert_eq!(tokens, ["first", "second"]);
 
 		let config: crate::connect::Config = toml::from_str(r#"tokens = ["first"]"#).unwrap();
@@ -1410,8 +1403,8 @@ mod tests {
 
 		// `dial` rather than `connect`: this is about one attempt's deadline, and
 		// `connect` now hands back a reconnect loop that would redial past it.
-		let credential = client.credential(&url, &Default::default());
-		let mut attempt = Box::pin(client.dial(url.into(), &credential));
+		let presented = moq_net::auth::Tokens::new(Vec::new()).dial(&url, &client.versions);
+		let mut attempt = Box::pin(client.dial(url.into(), &presented));
 		let _silent = tokio::select! {
 			res = &mut attempt => match res {
 				Err(err) => panic!("connect failed before the silent peer accepted it: {err}"),

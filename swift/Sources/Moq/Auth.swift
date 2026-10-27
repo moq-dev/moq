@@ -84,13 +84,14 @@ public final class Tokens: Sendable {
         try ffi.set(tokens: tokens)
     }
 
-    /// Suspend until the peer answers the tokens set last: return once a live session
-    /// holds every one, in band or as the connection credential it dialed with.
+    /// Suspend until the peer's first verdict on the tokens the last `set` newly presented:
+    /// return once each is granted, in band or as a later dial's connection credential.
     ///
-    /// While offline it waits for the next session. Throws the peer's refusal as
-    /// `MoqError.Protocol` carrying its code, `MoqError.Unsupported` when the live session
-    /// cannot carry an in-band token, or the session's close reason. The native wait ends
-    /// with that answer, not with the calling task.
+    /// A token the set kept counts only once refused, and nothing is re-checked after the
+    /// answer. Throws the peer's refusal as `MoqError.Protocol` carrying its code,
+    /// `MoqError.Unsupported` when the session cannot carry an in-band token, or the
+    /// connection's close reason. The native wait ends with that answer, not with the
+    /// calling task.
     public func answered() async throws {
         try await ffi.answered()
     }

@@ -375,14 +375,8 @@ impl Session {
 	}
 
 	/// The connection credential this side presents on AUTH, or `None` when this session offers no AUTH.
-	///
-	/// Its [`grant`](auth::Auth::grant) becomes the peer's answer, and [`closed`](auth::Auth::closed)
-	/// resolves with its refusal, or with the session's end if that comes first. A refusal that
-	/// may pass is presented again rather than ending it. On moq-transport it ends as
-	/// [`Error::Unsupported`] once the peer's SETUP declines AUTH, that SETUP having accepted the
-	/// credential it carried.
-	pub fn credential(&self) -> Option<auth::Auth> {
-		self.credential.clone()
+	pub(crate) fn credential(&self) -> Option<&auth::Auth> {
+		self.credential.as_ref()
 	}
 }
 

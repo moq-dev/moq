@@ -8,10 +8,6 @@ use crate::connection::Goaway;
 use std::net;
 use url::Url;
 
-mod token;
-pub(crate) use token::{Credential, Set};
-pub use token::{EmptyToken, Token, Tokens};
-
 /// Maximum time for one dial, unless overridden by `--connect-timeout`.
 pub(crate) const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -525,7 +521,7 @@ pub struct Config {
 		env = "MOQ_CONNECT_TOKEN",
 		setting = "connect.tokens"
 	)]
-	pub tokens: Vec<Token>,
+	pub tokens: Vec<moq_net::auth::Token>,
 
 	/// The released `connect` key, kept so [`deprecated`](Self::deprecated) can name [`url`](Self::url).
 	#[serde(default, skip_serializing)]
