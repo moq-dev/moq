@@ -58,9 +58,10 @@ Decided 2026-10-26 (maintainer):
   on the head it tested, to that PR's commit, then fast-forwards `main` to
   the tip in one push. GitHub marks a PR merged once its head is on the base,
   so the PRs show as merged, `main` stays linear, and the landed tree is
-  exactly the tested one. A conflict outside `quest/` ejects that PR. The
-  engine quest decides whether a fork branch that blocks maintainer edits is
-  refused at enqueue or lands another way.
+  exactly the tested one. A conflict outside `quest/` ejects that PR, and so
+  does a fork branch that blocks maintainer edits, whose head the engine
+  cannot move: it is ejected as `no_maintainer_edits`
+  ([kixelated/quest#229](https://github.com/kixelated/quest/pull/229)).
 - Batches take every queued PR, with no size constant. On failure the gate
   tests the first half. A passing prefix lands at once and the rest
   continues. A PR that fails alone is ejected with a comment linking the
@@ -103,4 +104,4 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [Bump quest to `quest land`](/quest/m0/ci/land-bump.md) - condition: kixelated/quest ships `quest land`; then bump the flake input
+- [Bump quest to `quest land`](/quest/m0/ci/land-bump.md) - kixelated/quest shipped `quest land` in kixelated/quest#229; bump the flake input

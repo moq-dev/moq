@@ -75,9 +75,16 @@ moq --connect https://edge.example.com/anon \
 
 `--stitch` follows a replacement as a program switch: its catalog supplies a
 new PMT and every PID flags the discontinuity. Starting a backup can cause
-this switch too. `--follow 10s` bounds waiting for a publisher after an end;
-choose that window for your application. It does not make the switch hitless. Without `--stitch`, the TS export stays on the
-old instance while it is up, then fails on a replacement. Other stdout export
+this switch too. The old instance keeps feeding output until the replacement's
+clock and first media are usable, bounded by `--follow`; its buffered tail then
+drains before the new program. A replacement usable within `--follow` adds no
+gap to the output. One that is not, such as on a link too slow to carry both
+instances at once, starts after a gap once the old tail runs out. The epochs'
+timestamps are not aligned, so this is still a marked program discontinuity,
+not hitless failover.
+`--follow 10s` also bounds waiting for a publisher after an end; choose that
+window for your application. Without `--stitch`, the TS export stays on the old
+instance while it is up, then fails on a replacement. Other stdout export
 formats end with their broadcast; they do not follow a replacement. TS
 passthrough also cannot stitch. See [CLI retention and latency](/bin/cli#retention-and-latency).
 

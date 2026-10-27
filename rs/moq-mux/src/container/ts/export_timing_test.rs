@@ -1141,3 +1141,43 @@ async fn declared_legs_author_the_same_dts() {
 		}
 	}
 }
+
+/// A warm replacement joins mid-GOP with tracks arriving at different leads.
+#[tokio::test(start_paused = true)]
+async fn a_stitch_keeps_slots_continuous_across_different_track_leads() {
+	for lag in [0, LONG_LAG, -LONG_LAG] {
+		let mut old = Live::new(1.0, lag).await;
+		let mut new = Live::new(1.0, lag).await;
+		let mut leg = old.join(Duration::ZERO).await;
+		for tick in 0..20 * GOP {
+			old.run(tick + 1, &mut [&mut leg], |_| false).await;
+			new.run(tick + 1, &mut [], |tick| (JOIN + 1..5 * GOP).contains(&tick))
+				.await;
+			if tick == JOIN {
+				let catalog = new.source.catalog::<()>(Default::default()).await.unwrap();
+				leg.export
+					.followed(&new.source.broadcast(), catalog, Duration::from_secs(10))
+					.unwrap();
+			}
+		}
+		assert_eq!(leg.export.discontinuity(), 1, "replacement lag={lag}");
+		let (index, gap) = leg
+			.out
+			.windows(2)
+			.enumerate()
+			.map(|(index, pair)| (index, pair[1].0.duration_since(pair[0].0)))
+			.max_by_key(|(_, gap)| *gap)
+			.unwrap();
+		eprintln!(
+			"GAP lag={lag}, now={:?}->{:?}, stamp={:?}->{:?}",
+			leg.out[index].0,
+			leg.out[index + 1].0,
+			leg.out[index].1.timestamp,
+			leg.out[index + 1].1.timestamp
+		);
+		assert!(
+			gap <= PCR_INTERVAL + Duration::from_micros(VIDEO_US),
+			"lag={lag}: output gap={gap:?}"
+		);
+	}
+}
