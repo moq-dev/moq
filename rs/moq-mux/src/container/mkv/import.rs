@@ -57,6 +57,8 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	buffer: BytesMut,
 	/// Incremental element state; an incomplete master retains its own children across chunks.
 	decoder: ebml_iterable::TagDecoder<MatroskaSpec>,
+	/// Whether `finish()` ended the input, even if it failed before the decoder drained.
+	finished: bool,
 	/// Whether the Tracks element has been processed.
 	tracks_seen: bool,
 
@@ -175,6 +177,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				MatroskaSpec::Video(Master::Start),
 				MatroskaSpec::BlockGroup(Master::Start),
 			]),
+			finished: false,
 			tracks_seen: false,
 			timestamp_scale_ns: DEFAULT_TIMESTAMP_SCALE_NS,
 			cluster_timestamp: 0,
@@ -197,7 +200,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// scratch). Bytes that cannot yet form a complete top-level tag are retained
 	/// for the next call.
 	pub fn decode(&mut self, data: &[u8]) -> Result<()> {
-		if self.decoder.is_finished() && !data.is_empty() {
+		if self.finished && !data.is_empty() {
 			return Err(Error::TracksAfterFinish.into());
 		}
 		self.buffer.extend_from_slice(data);
@@ -590,6 +593,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 	/// Finish all tracks, flushing current groups.
 	pub fn finish(&mut self) -> Result<()> {
+		self.finished = true;
 		while let Some(tag) = self
 			.decoder
 			.decode_eof(&mut self.buffer)
@@ -1132,6 +1136,48 @@ mod tests {
 		}
 		import.finish().unwrap();
 		import.finish().unwrap();
+		assert!(matches!(
+			import.decode(&[0]),
+			Err(crate::Error::Mkv(Error::TracksAfterFinish))
+		));
+	}
+
+	#[test]
+	fn input_after_a_failed_finish_is_refused() {
+		// Unknown-size Tracks closes only at EOF, queueing Segment's end behind the refused track.
+		let mut data = Vec::new();
+		{
+			let mut writer = WebmWriter::new(&mut data);
+			writer
+				.write(&MatroskaSpec::Ebml(Master::Full(vec![MatroskaSpec::DocType(
+					"webm".into(),
+				)])))
+				.unwrap();
+			for master in [
+				MatroskaSpec::Segment(Master::Start),
+				MatroskaSpec::Tracks(Master::Start),
+			] {
+				writer
+					.write_advanced(&master, WriteOptions::is_unknown_sized_element())
+					.unwrap();
+			}
+			writer
+				.write(&MatroskaSpec::TrackEntry(Master::Full(vec![
+					MatroskaSpec::TrackNumber(0),
+					MatroskaSpec::TrackType(2),
+					MatroskaSpec::CodecID("A_OPUS".into()),
+				])))
+				.unwrap();
+			writer.flush().unwrap();
+		}
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut import = Import::new(broadcast, catalog.reserve());
+		import.decode(&data).unwrap();
+		assert!(matches!(
+			import.finish(),
+			Err(crate::Error::Mkv(Error::ValueOutOfRange("TrackNumber")))
+		));
 		assert!(matches!(
 			import.decode(&[0]),
 			Err(crate::Error::Mkv(Error::TracksAfterFinish))
