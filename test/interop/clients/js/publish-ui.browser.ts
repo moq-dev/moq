@@ -47,8 +47,15 @@ test("the publish controls start idle and drive source, mute, and visibility", a
 		expect(await state(page)).toEqual({ source: "camera", muted: true, invisible: true });
 		expect(await page.locator("moq-publish").getAttribute("muted")).toBe("");
 		await page.getByRole("button", { name: "Unmute microphone", exact: true }).click();
-		await page.waitForFunction(() => !document.querySelector("moq-publish")!.hasAttribute("muted"));
-		await page.evaluate(() => document.querySelector("moq-publish")!.setAttribute("muted", ""));
+		await page.waitForFunction(() => {
+			const publish = document.querySelector("moq-publish");
+			return publish !== null && !publish.hasAttribute("muted");
+		});
+		await page.evaluate(() => {
+			const publish = document.querySelector("moq-publish");
+			if (!publish) throw new Error("missing publish element");
+			publish.setAttribute("muted", "");
+		});
 		expect((await state(page)).muted).toBe(true);
 
 		await source("Off").click();
@@ -80,7 +87,8 @@ test("watch property and UI state reflects without resetting a selected publish 
 			watch.controls.text.target.set("french");
 			watch.announced = false;
 			watch.catalogFormat = "manual";
-			const publish = document.querySelector("moq-publish")!;
+			const publish = document.querySelector("moq-publish");
+			if (!publish) throw new Error("missing publish element");
 			// Keep the selected File itself, rather than echoing "file" through the source setter.
 			const file = new File([], "selected.webm", { type: "video/webm" });
 			publish.source = file;
@@ -93,8 +101,10 @@ test("watch property and UI state reflects without resetting a selected publish 
 		);
 		expect(
 			await page.evaluate(() => {
-				const watch = document.querySelector("moq-watch")!;
-				const publish = document.querySelector("moq-publish")!;
+				const watch = document.querySelector("moq-watch");
+				if (!watch) throw new Error("missing watch element");
+				const publish = document.querySelector("moq-publish");
+				if (!publish) throw new Error("missing publish element");
 				return {
 					enabled: watch.connection.enabled.peek(),
 					announced: watch.getAttribute("announced"),
@@ -187,7 +197,7 @@ test("invalid attributes and properties refuse, retain bad markup, and recover",
 					!element.connection.enabled.peek() &&
 					element.getAttribute(attribute) === invalid &&
 					errors.length === count + 1 &&
-					errors.at(-1)!.includes(attribute);
+					(errors.at(-1)?.includes(attribute) ?? false);
 				let threw = false;
 				try {
 					Reflect.set(element, property, invalid);
