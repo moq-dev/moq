@@ -535,8 +535,8 @@ struct Slot {
 	arrived: crate::time::Instant,
 
 	// A fetched copy of a live `group` that the feed started past the frames a fetch
-	// asked for. It runs to the end of the group too, so it is served in the live
-	// group's place while it lasts; `group` stays the slot, still written by the feed,
+	// asked for. One that runs to the end of the group is served in the live group's
+	// place while it lasts; `group` stays the slot, still written by the feed,
 	// so an abandoned fetch leaves the group servable rather than gone. Boxed: rare.
 	head: Option<Box<group::Handle>>,
 
@@ -572,9 +572,9 @@ impl Slot {
 	}
 
 	/// Why the publisher gave up this live-feed group readers were shown, once nothing
-	/// serves it: a reader is handed the group to see that error, never a missing group.
+	/// serves its end: a reader is handed the group to see that error, never a missing group.
 	fn cut(&self) -> Option<&Error> {
-		match self.visible && self.is_aborted() && !self.retired.load(Ordering::Relaxed) {
+		match self.visible && !self.serves_end() && !self.retired.load(Ordering::Relaxed) {
 			true => self.group.cut_error(),
 			false => None,
 		}
@@ -637,13 +637,10 @@ impl Slot {
 				.cache_accessed_tick(scan.gc.then_some(scan.now))
 				.is_some_and(|tick| scan.now.saturating_sub(tick) > scan.max_ticks)
 		};
-		// No copy of a cut serves, so it ages as the live group it was: a reader behind
-		// still gets it for as long as it would have got that group.
-		if self.cut().is_some() {
-			return idle(&self.group);
-		}
+		// No copy of a cut serves its end, so it ages as the live group it was: a reader
+		// behind still gets it for as long as it would have got that group.
+		let mut expired = self.cut().is_none() || idle(&self.group);
 		// Not `all`, which stops at the first live copy and leaves the rest undated.
-		let mut expired = true;
 		for group in self.copies().filter(|group| !group.is_aborted()) {
 			expired &= idle(group);
 		}
@@ -1017,7 +1014,7 @@ impl TrackState {
 			if *sequence >= min_sequence
 				&& let Some(slot) = self.lookup.get(sequence)
 				&& slot.stamp == *stamp
-				&& (!slot.is_aborted() || slot.cut().is_some())
+				&& slot.is_read()
 			{
 				return Poll::Ready(Ok(Some((slot.serving().clone(), self.offset + i))));
 			}
@@ -1145,7 +1142,7 @@ impl TrackState {
 					.range(run)
 					.map(|(_, slot)| slot)
 					.take_while(|slot| super::subscription::before_end(slot.group.sequence, end_sequence))
-					.find(|slot| !slot.is_aborted() || slot.cut().is_some())
+					.find(|slot| slot.serves_end() || slot.cut().is_some())
 					.map(Slot::serving)
 			});
 
@@ -1303,7 +1300,7 @@ impl TrackState {
 	fn holds(&self, sequence: u64, stamp: u32) -> bool {
 		self.lookup
 			.get(&sequence)
-			.is_some_and(|slot| slot.stamp == stamp && !slot.is_aborted())
+			.is_some_and(|slot| slot.stamp == stamp && slot.serves_end())
 	}
 
 	/// The furthest presentation time the group at `sequence` could still reach: where
@@ -2171,7 +2168,7 @@ impl TrackState {
 	/// and pending while it still may land.
 	fn landing(&self, sequence: u64) -> Poll<Option<group::Consumer>> {
 		if let Some(slot) = self.lookup.get(&sequence)
-			&& !slot.is_aborted()
+			&& slot.serves_end()
 		{
 			return Poll::Ready(Some(slot.serving().consume()));
 		}
@@ -2665,7 +2662,17 @@ impl TrackState {
 		}
 		let content = self.content_for_copy(sequence)?;
 
-		if !self.lookup.get(&sequence).is_some_and(Slot::is_live) {
+		// A copy cut short at the back never displaces a fetched one that reaches the end,
+		// which whole-group readers still take. The fill hands it to its own fetch instead.
+		let kept = frames.end.is_some()
+			&& self.lookup.get(&sequence).is_some_and(|slot| match slot.is_live() {
+				true => slot
+					.head
+					.as_deref()
+					.is_some_and(|head| !head.is_aborted() && !head.back_cut()),
+				false => slot.serves_end(),
+			});
+		if !kept && !self.lookup.get(&sequence).is_some_and(Slot::is_live) {
 			self.uncache(sequence);
 		}
 
@@ -2687,6 +2694,7 @@ impl TrackState {
 		self.charge_debt();
 		let protected = self.protects(sequence);
 		match self.lookup.get_mut(&sequence).filter(|slot| slot.is_live()) {
+			_ if kept => {}
 			Some(slot) => {
 				// Joins the slot's standing: demoted already unless it is the live edge.
 				if !protected {
@@ -4464,16 +4472,15 @@ impl Consumer {
 				.lookup
 				.range(..sequence)
 				.rev()
-				.map(|(_, slot)| slot.serving())
-				.find(|group| !group.is_aborted())
-				.map(|group| group.consume())
+				.find(|(_, slot)| slot.serves_end())
+				.map(|(_, slot)| slot.serving().consume())
 		})
 	}
 
 	/// A cached group by sequence, under the same terms as [`Self::peek_latest`]. Unlike a
 	/// fetch, a peek does not refresh the group's cache standing, so it never keeps a
-	/// group alive over one a subscriber actually read; an aborted (evicted) group is a
-	/// miss.
+	/// group alive over one a subscriber actually read; an aborted (evicted) group, or a
+	/// copy cut short at the back, is a miss.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn peek_group(&self, sequence: u64) -> Option<group::Consumer> {
 		if let Some(serving) = self.serving() {
@@ -4481,11 +4488,8 @@ impl Consumer {
 		}
 		self.with_state(|state| {
 			let state = state?.read();
-			let group = state.lookup.get(&sequence)?.serving();
-			if group.is_aborted() {
-				return None;
-			}
-			Some(group.consume())
+			let slot = state.lookup.get(&sequence).filter(|slot| slot.serves_end())?;
+			Some(slot.serving().consume())
 		})
 	}
 
@@ -5402,15 +5406,12 @@ impl kio::Task for Fetching {
 
 		// Track side: the cached group, the abort error, or past-final. The outer
 		// error is the channel closing without any of those.
-		let cached = |waiter: &kio::Waiter| match state.poll(waiter, |state| {
-			state.poll_fetch_cached(
-				sequence,
-				group::Bounds {
-					start: frame_start,
-					end: self.frame_end,
-				},
-			)
-		}) {
+		let frames = group::Bounds {
+			start: frame_start,
+			end: self.frame_end,
+		};
+		let cached = |waiter: &kio::Waiter| match state.poll(waiter, |state| state.poll_fetch_cached(sequence, frames))
+		{
 			Poll::Ready(Ok(res)) => Poll::Ready(res.map(resolve)),
 			Poll::Ready(Err(closed)) => Poll::Ready(Err(closed.abort.clone().unwrap_or(Error::Dropped))),
 			Poll::Pending => Poll::Pending,
@@ -5443,21 +5444,27 @@ impl kio::Task for Fetching {
 
 		// An answered fill fails a joined fetch the cache cannot cover. The channel
 		// closing without an answer means its handlers went away.
-		let (err, asked) = match result
+		let (err, asked, partial) = match result
 			.outcome()
 			.poll(waiter, |outcome| match outcome.refused(sequence) {
-				Some((err, asked)) => Poll::Ready((err.clone(), asked)),
-				None if outcome.is_accepted(sequence) => Poll::Ready((Error::NotFound, None)),
+				Some((err, asked)) => Poll::Ready((err.clone(), asked, None)),
+				None if outcome.is_accepted(sequence) => {
+					Poll::Ready((Error::NotFound, None, outcome.partial(sequence, frames)))
+				}
 				None => Poll::Pending,
 			}) {
 			Poll::Ready(Ok(res)) => res,
-			Poll::Ready(Err(_closed)) => (Error::NotFound, None),
+			Poll::Ready(Err(_closed)) => (Error::NotFound, None, None),
 			Poll::Pending => return Poll::Pending,
 		};
 		// An accept caches the group before it answers the channel, which may land
 		// between the track check above and this one: look again before failing.
 		if let Poll::Ready(res) = cached(waiter) {
 			return Poll::Ready(res);
+		}
+		// A later copy displaced the one accepted for this fetch from the cache.
+		if let Some(group) = partial.as_ref().and_then(group::Handle::try_consume) {
+			return Poll::Ready(Ok(resolve(group)));
 		}
 		// Joined after a tighter budget went on the wire, which judged the group too old
 		// for that budget, not ours: ask again with ours. Terminates, since the new
@@ -7283,7 +7290,7 @@ impl Subscriber {
 						&& state
 							.lookup
 							.get(sequence)
-							.is_some_and(|slot| slot.stamp == *stamp && (!slot.is_aborted() || slot.cut().is_some()))
+							.is_some_and(|slot| slot.stamp == *stamp && slot.is_read())
 				}) || owed())
 	}
 
@@ -15434,6 +15441,133 @@ mod test {
 		live.abort(Error::Cancel).unwrap();
 		// The backfill remains cache-owned after the live copy failed.
 		assert!(!producer.state.read().lookup[&0].is_aborted());
+	}
+
+	/// A bounded fill that a later, disjoint one displaces from the cache still answers the
+	/// fetch that asked for it.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn a_displaced_bounded_fill_still_answers_its_fetch() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let consumer = producer.consume();
+		let mut live = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		live.start_at(200).unwrap();
+		live.write_frame(Timestamp::ZERO, b"live".as_slice()).unwrap();
+		let range = |start, end| FetchOptions {
+			options: group::Fetch {
+				frame_start: start,
+				..Default::default()
+			},
+			end: Some(end),
+		};
+		let fill = async |frames: std::ops::Range<u64>| {
+			let fill = dynamic.requested_fill_group().await.unwrap();
+			assert_eq!((fill.frame_start(), fill.frame_end()), (frames.start, Some(frames.end)));
+			let mut group = fill.accept(Info::timed()).unwrap();
+			for _ in frames {
+				group.write_frame(Timestamp::ZERO, b"tail".as_slice()).unwrap();
+			}
+			group.finish().unwrap();
+		};
+		let later = consumer.fetch_range(0, range(4, 10));
+		fill(4..10).await;
+		let earlier = consumer.fetch_range(0, range(0, 3));
+		fill(0..3).await;
+		assert_eq!(earlier.await.unwrap().index(), 0);
+		assert_eq!(later.await.unwrap().index(), 4);
+	}
+
+	/// A copy cut short at the back never displaces a fetched one that reaches the group's
+	/// end, so whole-group readers keep it, and it still answers its own fetch.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn a_bounded_fill_never_displaces_a_whole_tail() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let consumer = producer.consume();
+		let mut live = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		live.start_at(200).unwrap();
+		live.write_frame(Timestamp::ZERO, b"live".as_slice()).unwrap();
+		let fill = async |start: u64, end: Option<u64>| {
+			let fill = dynamic.requested_fill_group().await.unwrap();
+			assert_eq!((fill.frame_start(), fill.frame_end()), (start, end));
+			let mut group = fill.accept(Info::timed()).unwrap();
+			group.write_frame(Timestamp::ZERO, b"tail".as_slice()).unwrap();
+			group
+		};
+		let tail = consumer.fetch_group(
+			0,
+			group::Fetch {
+				frame_start: 5,
+				..Default::default()
+			},
+		);
+		let _tail = fill(5, None).await;
+		let head = consumer.fetch_range(
+			0,
+			FetchOptions {
+				options: group::Fetch::default(),
+				end: Some(1),
+			},
+		);
+		fill(0, Some(1)).await.finish().unwrap();
+		assert_eq!(head.await.unwrap().index(), 0);
+		assert_eq!(tail.await.unwrap().index(), 5);
+		let mut sub = producer.subscribe(None);
+		assert_eq!(sub.assert_group().with_range(0..).index(), 5);
+	}
+
+	/// A copy cut short at the back never answers a whole-group reader. A live group the
+	/// publisher cut is still handed out as that cut, and one it cancelled stays a hole,
+	/// whatever bounded copy of it remains.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn a_back_cut_copy_never_answers_a_whole_group_reader() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let consumer = producer.consume();
+		let bounded = async |sequence: u64| {
+			let fetch = consumer.fetch_range(
+				sequence,
+				FetchOptions {
+					options: group::Fetch::default(),
+					end: Some(1),
+				},
+			);
+			let mut group = dynamic
+				.requested_fill_group()
+				.await
+				.unwrap()
+				.accept(Info::timed())
+				.unwrap();
+			group.write_frame(Timestamp::ZERO, b"head".as_slice()).unwrap();
+			group.finish().unwrap();
+			fetch.await.unwrap();
+		};
+		let mut arrival = producer.subscribe(replay());
+		let mut ordered = producer.subscribe(replay()).ordered();
+		for (sequence, err) in [(0, Error::App(5)), (1, Error::Cancel)] {
+			let mut live = producer.create_group(group::Info { sequence }).unwrap();
+			live.start_at(200).unwrap();
+			live.write_frame(Timestamp::ZERO, b"live".as_slice()).unwrap();
+			bounded(sequence).await;
+			live.abort(err).unwrap();
+		}
+		// Fetched only, so it reaches the ordered reader alone.
+		bounded(2).await;
+
+		let cut = arrival.assert_group();
+		assert_eq!(cut.sequence, 0);
+		assert!(matches!(cut.with_range(200..).read_frame().await, Err(Error::App(5))));
+		arrival.assert_no_group();
+		let cut = ordered.next_group().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(cut.sequence, 0);
+		assert!(matches!(cut.with_range(200..).read_frame().await, Err(Error::App(5))));
+		assert!(
+			ordered.next_group().now_or_never().is_none(),
+			"neither the cancelled group nor a copy ending short of its group is read"
+		);
 	}
 
 	/// Queued ranges widen before dispatch; a taken cap does not promise an unseen suffix.

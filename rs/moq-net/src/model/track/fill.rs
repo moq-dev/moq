@@ -183,6 +183,9 @@ pub(crate) struct Outcome {
 	// Accepted or refused, kept as answers arrive so a fill answered group by group costs
 	// the runs each answer touches, not every answer before it.
 	resolved: RangeSet<u64>,
+	// Each accepted copy short of the whole group, which a later copy may displace from the
+	// cache before a reader takes it. A whole copy covers every other, so none displaces it.
+	partial: BTreeMap<u64, group::Handle>,
 }
 
 impl Outcome {
@@ -193,6 +196,11 @@ impl Outcome {
 
 	pub(super) fn is_accepted(&self, sequence: u64) -> bool {
 		self.accepted.contains(&sequence)
+	}
+
+	/// The partial copy accepted for `sequence`, if it still holds `frames`.
+	pub(super) fn partial(&self, sequence: u64, frames: group::Bounds) -> Option<group::Handle> {
+		self.partial.get(&sequence).filter(|copy| copy.covers(frames)).cloned()
 	}
 
 	/// The sequences of `span` accepted, lowest first.
@@ -1020,6 +1028,11 @@ impl Inner {
 			TrackState::modify(&self.state).and_then(|mut state| state.insert_group_request(sequence, frames, info));
 		if let Ok(mut outcome) = self.result.write() {
 			outcome.accept(sequence..end);
+			if let Ok(group) = &res
+				&& (frames.start > 0 || frames.end.is_some())
+			{
+				outcome.partial.insert(sequence, group.handle());
+			}
 		}
 		uncover(&self.fills, self.id, sequence..end);
 		res

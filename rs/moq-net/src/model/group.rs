@@ -1406,7 +1406,9 @@ impl Producer {
 			arrived: super::clock::now(),
 		};
 		let mut entry = Entry::plain(frame, inflated);
-		state.canonicalize(state.next_index, &mut entry)?;
+		if let Err(err) = state.canonicalize(state.next_index, &mut entry) {
+			return Err(self.abort_conflict(state, err));
+		}
 		state.cache += size;
 		if let Some(flate) = &mut state.flate {
 			flate.inflated += inflated;
@@ -1448,7 +1450,8 @@ impl Producer {
 	/// the batch with [`frame::Buffer::push`].
 	///
 	/// The batch is validated before anything is written, so a rejected frame leaves
-	/// both the group and the buffer exactly as they were, ready to retry or redirect.
+	/// both the group and the buffer exactly as they were, ready to retry or redirect,
+	/// unless it fails the group: too large, or held differently by another copy.
 	pub fn write_frames<const N: usize>(&mut self, frames: &mut frame::Buffer<N>) -> Result<()> {
 		for frame in frames.filled() {
 			on_track(frame.timestamp, self.handle.track.timescale)?;
@@ -1519,7 +1522,9 @@ impl Producer {
 				},
 				inflated,
 			);
-			state.canonicalize(state.next_index + index, &mut entry)?;
+			if let Err(err) = state.canonicalize(state.next_index + index, &mut entry) {
+				return Err(self.abort_conflict(state, err));
+			}
 			prepared.push(entry);
 		}
 		frames.drain().for_each(drop);
@@ -1857,6 +1862,13 @@ impl Producer {
 	fn abort_too_large(&self, state: kio::Mut<'_, GroupState>) -> Error {
 		self.handle.commit_abort(state, Error::GroupTooLarge);
 		Error::GroupTooLarge
+	}
+
+	/// Fail the group with a whole frame that another copy of it holds differently. A
+	/// compressed group already took the frame into its history, which no reader gets.
+	fn abort_conflict(&self, state: kio::Mut<'_, GroupState>, err: Error) -> Error {
+		self.handle.commit_abort(state, err.clone());
+		err
 	}
 
 	/// Block until the group's outcome is final: `Ok` once finished, or the abort error,
@@ -5733,6 +5745,36 @@ mod test {
 		let mut consumer = group.consume().with_range(1..);
 		assert!(matches!(read_plain(&mut consumer), Err(Error::Lagged)));
 		assert!(matches!(read_plain(&mut consumer), Err(Error::Lagged)));
+	}
+
+	/// A frame another copy of the group holds differently is refused after compressing it,
+	/// so the refusal fails the group: its later frames would decompress against history no
+	/// reader gets. Written whole or in a batch.
+	#[test]
+	fn a_refused_compressed_write_fails_the_group() {
+		let cache = cache::Track::new(cache::Pool::unbounded(), Default::default(), kio::Weak::new());
+		let info = track::Info::default().with_compress(true);
+		let mut first = Producer::new(Info::from(0u64), info.clone(), cache.clone());
+		first.write_frame(None, verbose(0)).unwrap();
+		let content = first.handle.activate_content().unwrap().unwrap();
+		let copy = || {
+			let copy = Producer::new(Info::from(0u64), info.clone(), cache.clone());
+			copy.handle.share_content(content.clone());
+			copy
+		};
+
+		let mut whole = copy();
+		assert!(matches!(
+			whole.write_frame(None, verbose(10)),
+			Err(Error::ProtocolViolation)
+		));
+		assert!(whole.handle.is_aborted());
+
+		let mut batch = copy();
+		let mut frames = frame::Buffer::<1>::new();
+		frames.push(Frame::new(None, verbose(10))).unwrap();
+		assert!(matches!(batch.write_frames(&mut frames), Err(Error::ProtocolViolation)));
+		assert!(batch.handle.is_aborted());
 	}
 
 	/// A received slice that inflates to other than its declared size fails the read.
