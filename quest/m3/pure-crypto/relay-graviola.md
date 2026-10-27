@@ -29,9 +29,9 @@ maintainer on 2026-10-24 and 2026-10-25:
   jsonwebtoken 11 takes a custom `CryptoProvider`; the closed draft
   [moq-dev/moq#6861](https://github.com/moq-dev/moq/pull/6861) has a working
   one to start from. moq-auth installs it only when none is installed.
-  moq-auth's key generation and JWK loading, on aws-lc-rs after
-  [auth-no-rsa](/quest/m1/auth-no-rsa.md), move with it, so moq-auth's
-  aws-lc-rs dependency becomes target-gated like the relay's.
+  moq-auth's key generation and JWK loading, on aws-lc-rs since
+  [moq-dev/moq#6898](https://github.com/moq-dev/moq/pull/6898), move with it,
+  so moq-auth's aws-lc-rs dependency becomes target-gated like the relay's.
 - Accept ChaCha20-Poly1305 on graviola being 1.7-3x slower than aws-lc per
   packet (graviola 0.4.1), and re-measure it on the pinned release. It only
   matters for peers that prefer ChaCha20, which lack AES hardware.
