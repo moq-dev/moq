@@ -20,8 +20,9 @@ upstream graviola and ACME releases made it cheap. rind owns those gaps
 instead, so every crate drops C, not just the relay.
 
 - rind lives at kixelated/rind, a GitHub fork of ctz/graviola with moq's repo
-  setup. Its own quests live in its `quest/` tree, seeded by
-  [the bootstrap](/quest/m2/rind/bootstrap.md), which carries rind's plan.
+  setup. Its own quests live in its `quest/` tree; its
+  [MoQ coverage epic](https://github.com/kixelated/rind/blob/main/quest/m1/moq/README.md)
+  carries rind's plan.
 - MoQ uses rind's own API plus its adapter crates (`rind-rustls`,
   `rind-jsonwebtoken`, ...), never a ring facade through `[patch.crates-io]`,
   so a published crate built with `cargo install` also compiles no C.
@@ -52,7 +53,6 @@ The epic's own work, once every child has merged:
 
 ## Required
 
-- [Bootstrap rind](/quest/m2/rind/bootstrap.md) - kixelated/rind exists as a graviola fork with moq's repo setup and its own quests for MoQ coverage
 - [rind covers MoQ](/quest/m2/rind/covered.md) - waiting on a rind release with every primitive, adapter, and armv7 MoQ needs
 - [Drop iroh](/quest/m2/rind/drop-iroh.md) - moq-tokio, moq-relay, and moq-cli lose the `iroh` feature and web-transport-iroh
 - [Transport on rind](/quest/m2/rind/transport.md) - moq-quic, moq-tokio, moq-uring, moq-rtmp, and qmux take rind, and the `aws-lc-rs`/`ring` features go
