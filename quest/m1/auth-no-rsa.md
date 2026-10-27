@@ -9,53 +9,50 @@ moq-auth accepts today still signs and verifies.
 
 ## Plan
 
-Decided by the maintainer on 2026-10-26, when the
-[graviola switch](/quest/m3/pure-crypto/README.md) was deferred: `rsa` is only
-used for key generation (`generate.rs`) and for turning JWK components into a
-PEM (`key.rs`), and signing already runs on aws-lc-rs, but the release should
-not ship the crate. moq-auth is its only production user.
+Source is implemented in [PR #6898](https://github.com/moq-dev/moq/pull/6898).
+Keep it draft until the required local gates pass. Remaining:
 
-`deny.toml` keeps its RUSTSEC-2023-0071 ignore, reworded as test-only:
-moq-auth's dev-dependencies pin the published `moq-auth` 0.2.1 and `moq-token`
-0.7 as compatibility fixtures (`tests/released_token.rs`), and both depend on
-`rsa`. The ignore goes once those fixtures move to a release without it.
+- Fix the unrelated main failures separately: CARLA rustfmt differences under
+  `demo/carla/bridge`, and `rs/moq-mux/benches/catalog.rs:226` referencing removed
+  `hang::catalog::MAX_RENDITIONS`. No open fix for either was found at checkpoint.
+  Incidental CARLA formatting from the auth-scoped fix was restored.
+- Resolve the local flake check's runner-image build restriction:
+  `systemd-repart` cannot write `/proc/self/uid_map` (`Operation not permitted`).
+  Evaluation alone does not count as a passing flake check.
+- Resume the prescribed `just fix` and clean committed-head `just ci` after
+  those prerequisites clear, then finish ready/review. Preserve the auth scope.
 
-- Generate with aws-lc-rs's RSA key pair (2048 bits, as today), export it as
-  PKCS#8, and read the JWK components back with `pkcs1`/`pkcs8`. Never
-  hand-roll bignum math.
-- Load a private RSA JWK by encoding all eight components with `pkcs1` and
-  handing jsonwebtoken the DER.
-- Refuse a private RSA JWK that lacks any of `p`, `q`, `dp`, `dq`, or `qi`
-  with a clear error (maintainer, 2026-10-26). RFC 7518 section 6.3.2 already
-  requires all of them once `p` is present, and WebCrypto and moq-auth's own
-  generator always emit them. Today `rsa` recomputes the CRT values, so this
-  is a behavior change to note in the PR. Multi-prime (`oth`) keys stay
-  unsupported, refused rather than ignored.
+The maintainer's 2026-10-26 decisions remain settled: generate 2048-bit RSA with
+aws-lc-rs, read its PKCS#8 components with `pkcs8`/`pkcs1`, and encode all eight
+supplied components directly as PKCS#1 DER for jsonwebtoken. Require complete
+private CRT parameters, refuse multi-prime `oth`, and remove only the two
+`From<rsa::Error>` / `From<rsa::pkcs1::Error>` conversions. Wire and key formats
+stay unchanged. The [graviola switch](/quest/m3/pure-crypto/README.md) is deferred.
+No maintainer policy decision remains.
 
-Public API: moq-auth's `From<rsa::Error>` and `From<rsa::pkcs1::Error>`
-conversions go away (breaking). Wire and key formats: unchanged.
+`deny.toml` retains the advisory exception only for published `moq-auth` 0.2.1
+and `moq-token` 0.7 compatibility dev fixtures. Remove it when those fixtures
+move to releases without `rsa`.
 
-## Checkpoint
+### Proof at checkpoint
 
-Source implemented in [PR #6898](https://github.com/moq-dev/moq/pull/6898).
-The settled backend and validation choices above are unchanged. Matching
-JavaScript imports now refuse `oth` rather than dropping it; migration notes
-cover that behavior, complete private CRT parameters, and the two removed
-Rust error conversions. No other conversion API changed.
+Before fixing, both incomplete-private and `oth` tests failed. Afterward all
+229 focused Rust auth tests and 82 JavaScript key/interop tests passed, including
+corrupted CRT values. Independent selected phases on the source commit passed
+10,501 Rust tests (111 configured skips), JavaScript checks/builds, and 4,976
+JavaScript tests. Markdown, TOML, quest validation, and GitHub tooling tests pass.
 
-Before fixing, the new incomplete-private and `oth` tests both failed.
-Afterward, all 229 Rust auth tests and 82 focused JavaScript key/interop tests
-passed. The actual CLI generated, saved, signed, and verified all 12 algorithms
-with owner-only private files, rejected every missing CRT field, and passed
+The actual CLI generated, saved, signed, and verified all 12 algorithms with
+owner-only private files, rejected each missing CRT field, and passed
 bidirectional Rust/JavaScript interoperability for all six RSA algorithms.
 Relay, CLI, and room normal/build trees have no `rsa`; Cargo reports no matching
-package for their inverse queries. Published compatibility dev fixtures retain
-it, as planned.
+package for inverse queries and forward trees independently confirm absence.
+Matching JavaScript imports refuse `oth` instead of dropping it, with both
+migration guides documenting the behavior and removed Rust conversions.
 
-Remaining: the required clean-head `just ci` must pass before ready. Main at
-`3f3fc1927` has unrelated CARLA rustfmt failures under `demo/carla/bridge`;
-the auth-scoped fix passes, and incidental formatting there was restored.
-Full `just fix` also fails in `rs/moq-mux/benches/catalog.rs:226`, which references
-removed `hang::catalog::MAX_RENDITIONS`. No open fix for either was found.
-Keep these fixes separate and keep this PR draft until the required gate clears.
-No maintainer policy decision remains in this quest.
+Auth-scoped `just rs fix` passes. Full `just fix` fails at the unrelated benchmark
+reference above. Clean-head `just ci` fails in inherited CARLA rustfmt, cancelling
+other lanes; the independent passing phases do not constitute a passing full
+gate. Separate `nix flake check` fails on the host restriction above. Diagnostics
+are retained in the isolated checkout's `.tmp/`; do not rerun unchanged failures
+to green or fold their fixes into this PR.
