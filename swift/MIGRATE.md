@@ -4,10 +4,6 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### `Credential` ([#6751](https://github.com/moq-dev/moq/pull/6751))
-
-`AuthToken` is `Credential`; `Auth.add(token:)` returns it.
-
 ### `Allocator` ([#6751](https://github.com/moq-dev/moq/pull/6751))
 
 `Bandwidth` is `Allocator`, `Session.bandwidth()` is `allocator()`, and `Reservation.grant()` is `rate()`. `Bandwidth.Consumer`, returned by `recvBandwidth()`, is the top-level `BandwidthConsumer`. The producers' `bandwidth:` parameter keeps its name.

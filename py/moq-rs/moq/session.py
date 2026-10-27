@@ -2,8 +2,19 @@
 
 from __future__ import annotations
 
-from moq_ffi import MoqAllocator, MoqAuth, MoqBandwidthConsumer, MoqCredential, MoqReservation, MoqSession
+from collections.abc import Sequence
 
+from moq_ffi import (
+    MoqAllocator,
+    MoqBandwidthConsumer,
+    MoqGrantConsumer,
+    MoqReservation,
+    MoqSession,
+    MoqTokens,
+)
+
+from ._records import _strs
+from .errors import is_shutdown
 from .origin import OriginConsumer, OriginProducer
 from .publish import TrackDemand
 from .types import ConnectionState, ConnectionStats, Grant
@@ -91,13 +102,19 @@ class Session:
         Individual fields are ``None`` when the transport backend doesn't report them."""
         return ConnectionStats._from_ffi(self._inner.stats())
 
-    def auth(self) -> Auth:
-        """The session's authorization: the grant its peer gave it, and more tokens to present.
+    def grants(self) -> GrantConsumer:
+        """Follow the grant the peer gave this session.
 
-        Each call returns an independent watcher of the grant. A client session's
-        handle survives reconnects, presenting each added token again on every new
-        connection."""
-        return Auth(self._inner.auth())
+        Each call returns an independent consumer. A client session's grant follows
+        each reconnect, reading ``None`` while offline."""
+        return GrantConsumer(self._inner.grants())
+
+    def tokens(self) -> Tokens | None:
+        """The credentials a native client session presents, to replace while it runs.
+
+        ``None`` for a server-accepted session, which presents none."""
+        inner = self._inner.tokens()
+        return None if inner is None else Tokens(inner)
 
     def recv_bandwidth(self) -> BandwidthConsumer | None:
         """Hold an owned receive-estimate consumer; releasing the last one stops PROBE."""
@@ -115,61 +132,85 @@ class Session:
         return Allocator(self._inner.allocator())
 
 
-class Auth:
-    """A session's authorization, returned by :meth:`Session.auth`.
+class GrantConsumer:
+    """Follows the grant a session's peer gave it, returned by :meth:`Session.grants`.
 
     AUTH is only on ``moq-lite-07-wip`` and on moq-transport sessions that negotiate
-    the MoQ Auth extension; elsewhere the grant stays ``None``::
+    the MoQ Auth extension; elsewhere the grant stays ``None``. Iterate it for the
+    current grant and then each change, until the session ends::
 
-        auth = session.auth()
-        print(auth.grant())
-        token = await auth.add(fresh_jwt)
+        async for grant in session.grants():
+            print(grant)
     """
 
-    def __init__(self, inner: MoqAuth) -> None:
+    def __init__(self, inner: MoqGrantConsumer) -> None:
         self._inner = inner
+        self._started = False
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        self.cancel()
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> Grant | None:
+        if not self._started:
+            self._started = True
+            return self.grant()
+        try:
+            return await self.changed()
+        except Exception as err:
+            if is_shutdown(err):
+                raise StopAsyncIteration from None
+            raise
 
     def grant(self) -> Grant | None:
-        """The union of every token's grant, or ``None`` until the peer first answers one.
+        """The grant now, or ``None`` until the peer first answers a token.
 
         A client session reads ``None`` while it reconnects."""
         return Grant._from_ffi(self._inner.grant())
 
-    async def grant_changed(self) -> Grant | None:
-        """Wait for the grant to differ from the one last reported, or held when this
-        handle was made, returning it.
+    async def changed(self) -> Grant | None:
+        """Wait for the grant to differ from the one this last returned, or held when
+        it was made, returning it.
 
         Raises once nothing will change it again: a client's connection or a server's
-        session ended. A reconnect is not an end."""
-        return Grant._from_ffi(await self._inner.grant_changed())
-
-    async def add(self, token: str) -> Credential:
-        """Present another token, returning once the peer accepts it.
-
-        Its grant joins the union until :meth:`Credential.cancel`. The peer's refusal
-        raises ``moq.Error`` carrying its code; a session that cannot carry another
-        token raises ``moq.Error.Unsupported``."""
-        return Credential(await self._inner.add(token))
-
-
-class Credential:
-    """One token presented with :meth:`Auth.add`, withdrawn by :meth:`cancel`."""
-
-    def __init__(self, inner: MoqCredential) -> None:
-        self._inner = inner
-
-    def grant(self) -> Grant | None:
-        """This token's own grant, or ``None`` after it ended."""
-        return Grant._from_ffi(self._inner.grant())
-
-    async def closed(self) -> None:
-        """Wait for the token to end, raising the peer's revocation or the end of a client's
-        connection or a server's session. A reconnect does not end it."""
-        await self._inner.closed()
+        session ended, or :meth:`cancel`. A reconnect is not an end."""
+        return Grant._from_ffi(await self._inner.changed())
 
     def cancel(self) -> None:
-        """Withdraw the token, removing its grant from the union."""
+        """Cancel all current and future :meth:`changed` calls."""
         self._inner.cancel()
+
+
+class Tokens:
+    """The credentials a native client session presents, returned by :meth:`Session.tokens`."""
+
+    def __init__(self, inner: MoqTokens) -> None:
+        self._inner = inner
+
+    def set(self, tokens: Sequence[str]) -> None:
+        """Replace the credentials every dial presents, such as before the current ones expire.
+
+        The first is the connection credential, unless the URL carries its own ``?jwt=``;
+        each other one widens the grant over in-band AUTH. The next dial presents them,
+        and a live session with in-band AUTH presents them at once, withdrawing each
+        replaced token once its replacements are answered, even when one is refused.
+        After an authorization refusal the session redials only if they changed.
+        """
+        self._inner.set(_strs(tokens, "tokens"))
+
+    async def answered(self) -> None:
+        """Wait for the peer's first verdict on the tokens the last ``set`` newly presented.
+
+        Returns once each is granted, in band or as a later dial's connection credential.
+        A token the set kept counts only once refused, and nothing is re-checked after the
+        answer. Raises the peer's refusal carrying its code, ``moq.Error.Unsupported`` when
+        the session cannot carry an in-band token, or the connection's close reason."""
+        await self._inner.answered()
 
 
 class BandwidthConsumer:

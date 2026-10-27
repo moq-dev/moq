@@ -188,6 +188,11 @@ bool MoQOutput::Start()
 	moq::ClientConfig config;
 	config.publish = next_origin;
 	config.implementation = MoQImplementation();
+	// Not on the URL: a URL's ?jwt= overrides the client's tokens, so every reconnect
+	// would dial it instead of the one PresentToken() set last.
+	if (const char *token = obs_service_get_connect_info(service, OBS_SERVICE_CONNECT_INFO_BEARER_TOKEN);
+	    token && *token)
+		config.tokens = {token};
 	OBSDataAutoRelease service_settings = obs_service_get_settings(service);
 	std::string invalid = MoQSettings::Configure(service_settings, config);
 	std::shared_ptr<moq::Client> client;
@@ -528,31 +533,36 @@ bool MoQOutput::PresentToken(const std::string &token)
 	std::lock_guard<std::recursive_mutex> signal_lock(signal_mutex);
 	if (!attempt || !attempt->session)
 		return false;
+	// Only a server-accepted session has no tokens.
+	std::shared_ptr<moq::Tokens> tokens = attempt->session->tokens();
+	if (!tokens)
+		return false;
+
+	auto refused = [this](const std::string &reason) {
+		LOG_WARNING("MoQ relay refused the new publish token: %s", reason.c_str());
+		std::lock_guard<std::mutex> lock(mutex);
+		token_refusal = reason;
+	};
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		token_refusal.clear();
 	}
+	if (auto set = tokens->set({token}); !set) {
+		attempt->presenting.reset();
+		refused(set.error().to_string());
+		return true;
+	}
 
-	// Replacing `presenting` cancels a presentation still in flight, which the
-	// newer token supersedes.
-	attempt->presenting = attempt->session->auth()->add(token).then(
-		worker.Executor(), Current<moq::expected<std::shared_ptr<moq::Credential>>>(
-					   attempt, [this](const std::shared_ptr<Attempt> &current, auto result) {
-						   if (!result) {
-							   const std::string reason = result.error().to_string();
-							   LOG_WARNING("MoQ relay refused the new publish token: %s",
-								       reason.c_str());
-							   std::lock_guard<std::mutex> lock(mutex);
-							   token_refusal = reason;
-							   return;
-						   }
-						   // The old token's grant leaves the union only after the new one joined.
-						   if (current->token)
-							   current->token->cancel();
-						   current->token = *result;
-						   LOG_INFO("MoQ relay accepted the new publish token: %s",
-							    MoQRedactUrl(current->url).c_str());
-					   }));
+	// Replacing `presenting` drops the wait on a token this one replaced.
+	attempt->presenting = tokens->answered().then(
+		worker.Executor(),
+		Current<moq::expected<void>>(attempt, [refused](const std::shared_ptr<Attempt> &current, auto result) {
+			if (!result) {
+				refused(result.error().to_string());
+				return;
+			}
+			LOG_INFO("MoQ relay accepted the new publish token: %s", MoQRedactUrl(current->url).c_str());
+		}));
 	return true;
 }
 

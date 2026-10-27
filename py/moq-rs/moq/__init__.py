@@ -11,7 +11,7 @@ from . import audio as audio
 from . import flate as flate
 from . import json as json
 from . import video as video
-from .client import Client, CongestionControl, Tokens, connect, qlog_supported, versions
+from .client import Client, CongestionControl, connect, qlog_supported, versions
 from .epoch import mint_epoch
 from .errors import is_auth, is_shutdown, protocol_error
 from .log import log_level
@@ -41,7 +41,7 @@ from .publish import (
     TrackRequest,
 )
 from .server import Request, Server, Transport
-from .session import Allocator, Auth, BandwidthConsumer, Credential, Reservation, Session
+from .session import Allocator, BandwidthConsumer, GrantConsumer, Reservation, Session, Tokens
 from .subscribe import (
     BroadcastConsumer,
     GroupConsumer,
@@ -95,7 +95,6 @@ __all__ = [
     "AudioCodec",
     "AudioEncoderInput",
     "AudioSampleFormat",
-    "Auth",
     "Backoff",
     "BandwidthConsumer",
     "BroadcastConsumer",
@@ -109,7 +108,6 @@ __all__ = [
     "ConnectionStats",
     "ConnectionPhase",
     "ConnectionState",
-    "Credential",
     "Datagram",
     "Error",
     "ErrorScope",
@@ -120,6 +118,7 @@ __all__ = [
     "FetchGroupOptions",
     "Fill",
     "Grant",
+    "GrantConsumer",
     "GroupConsumer",
     "GroupProducer",
     "OriginConsumer",

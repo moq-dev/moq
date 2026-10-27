@@ -50,8 +50,8 @@ pub(crate) struct Dial {
 	bandwidth: moq_net::bandwidth::Allocator,
 	/// The session's receive estimate, forwarded while a consumer holds it.
 	recv: moq_net::bandwidth::Weak,
-	/// Persistent from before the handshake, so a token added while dialing waits for the
-	/// session; ended with the dial.
+	/// Persistent from before the handshake, so a grant consumer taken while dialing follows
+	/// the session; ended with the dial.
 	auth: moq_net::auth::Handle,
 }
 

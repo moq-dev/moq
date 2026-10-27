@@ -5,10 +5,6 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
-### `MoqCredential` ([#6751](https://github.com/moq-dev/moq/pull/6751))
-
-`MoqAuthToken` is `MoqCredential`, the core API's name for one presented credential.
-
 ### `MoqAllocator` ([#6751](https://github.com/moq-dev/moq/pull/6751))
 
 `MoqBandwidth` is `MoqAllocator`, and `MoqSession::bandwidth()` is `allocator()`, matching `moq_net::bandwidth::Allocator`. `MoqReservation::grant()` is `rate()`, matching `moq_net::bandwidth::Reservation::rate()`. The `bandwidth` option field on audio and video producers keeps its name.

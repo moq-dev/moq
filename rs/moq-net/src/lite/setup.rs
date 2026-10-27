@@ -351,6 +351,8 @@ struct PeerSetupState {
 	setup: Option<Setup>,
 	/// Where the peer's advertised implementation is published for the session handle.
 	implementation: crate::setup::PeerImplementation,
+	/// The session's auth link to tell once the peer's SETUP accepts the connection.
+	accept: Option<crate::auth::Link>,
 }
 
 impl PeerSetup {
@@ -362,7 +364,15 @@ impl PeerSetup {
 			seen: false,
 			setup: None,
 			implementation: Default::default(),
+			accept: None,
 		}))
+	}
+
+	/// Tell `link` once the peer's SETUP arrives that it accepted the connection credential.
+	pub fn accepting(self, link: crate::auth::Link) -> Self {
+		link.await_setup();
+		self.0.lock().accept = Some(link);
+		self
 	}
 
 	/// Publish the peer's advertised implementation to `slot` once its SETUP arrives.
@@ -381,6 +391,11 @@ impl PeerSetup {
 		state.seen = true;
 		state.implementation.set(received.setup.implementation.clone());
 		state.setup = Some(received.setup);
+		let accept = state.accept.take();
+		drop(state);
+		if let Some(link) = accept {
+			link.accepted();
+		}
 		Ok(())
 	}
 

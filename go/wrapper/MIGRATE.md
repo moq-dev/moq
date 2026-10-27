@@ -4,10 +4,6 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### `Credential` ([#6751](https://github.com/moq-dev/moq/pull/6751))
-
-`AuthToken` is `Credential`; `Auth.Add` returns it.
-
 ### `Allocator` ([#6751](https://github.com/moq-dev/moq/pull/6751))
 
 `Bandwidth` is `Allocator`, `Session.Bandwidth()` is `Session.Allocator()`, and `Reservation.Grant()` is `Reservation.Rate()`. The `Bandwidth` field of `ProducerOptions` keeps its name and takes a `*moq.Allocator`.

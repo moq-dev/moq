@@ -157,10 +157,12 @@ a client can present another JWT without reconnecting. Present its replacement
 before the current grant expires and keep the returned token handle alive.
 The auth handle a reconnecting connection owns (native `Connection::auth()`,
 JavaScript `connection.auth`) presents its tokens again on every reconnect.
-A native client can instead replace its configured tokens through
-`Client::tokens()`: the next dial presents them, a live session presents them in
-band and withdraws each old one once its replacement is answered, and a refusal
-redials only once the tokens have changed. Older versions refuse in-band tokens.
+A native client can instead replace its configured tokens through its
+connection's tokens (`Connection::tokens()`, `session.tokens()` in the
+bindings): the next dial presents them, a live session presents them in band and
+withdraws each old one once its replacement is answered, `answered()` reports
+the relay's verdict, and a refusal redials only once the tokens have changed.
+Older versions refuse in-band tokens.
 
 Each accepted token adds its publish and subscribe patterns to the session's
 union, within its admitted root and SETUP role. A publish-only connection cannot
