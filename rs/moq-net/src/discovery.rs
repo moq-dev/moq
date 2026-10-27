@@ -15,7 +15,7 @@ use std::{
 };
 
 use crate::{
-	Path, PathOwned,
+	Path,
 	model::{InterestChange, Interests, Snapshot},
 	origin,
 	time::{Deadline, Deadlines, Instant},
@@ -29,9 +29,9 @@ pub(crate) const LINGER: Duration = Duration::from_secs(2);
 pub(crate) enum Change {
 	/// Ask the peer about the prefix, holding the snapshot until the request's
 	/// initial set is in.
-	Open(PathOwned, Snapshot),
+	Open(Path, Snapshot),
 	/// Stop asking about the prefix: end its request, retracting what it reported.
-	Close(PathOwned),
+	Close(Path),
 }
 
 /// The announce requests a session keeps open, as a covering set of what is wanted.
@@ -52,14 +52,14 @@ pub(crate) struct Discovery {
 	/// Decided but not yet handed to the session, in order.
 	changes: VecDeque<Change>,
 	/// How many wants name each prefix: overlapping scopes can name one twice.
-	wanted: HashMap<PathOwned, usize>,
+	wanted: HashMap<Path, usize>,
 	/// How many wanted prefixes sit at or beneath each prefix, so a request learns in a
 	/// walk up its path whether anything beneath it is still wanted.
-	beneath: HashMap<PathOwned, usize>,
+	beneath: HashMap<Path, usize>,
 	/// The requests the session holds open, by prefix.
-	requests: HashMap<PathOwned, Request>,
+	requests: HashMap<Path, Request>,
 	/// The requests nothing beneath wants any more, by when they close.
-	lingering: BTreeSet<(Instant, PathOwned)>,
+	lingering: BTreeSet<(Instant, Path)>,
 	/// Fires for the first of `lingering`.
 	timer: Deadline,
 }
@@ -69,7 +69,7 @@ struct Request {
 	/// When it closes, while nothing at or beneath its prefix is wanted.
 	linger: Option<Instant>,
 	/// Narrower requests nothing wants any more, kept open until this one goes.
-	held: HashSet<PathOwned>,
+	held: HashSet<Path>,
 }
 
 impl Discovery {
@@ -146,7 +146,7 @@ impl Discovery {
 	}
 
 	/// The request at `prefix` ended on its own: the peer finished it.
-	pub fn ended(&mut self, prefix: &PathOwned) {
+	pub fn ended(&mut self, prefix: &Path) {
 		if let Some(request) = self.requests.remove(prefix) {
 			self.forget(prefix, request);
 		}
@@ -209,7 +209,7 @@ impl Discovery {
 
 	/// A new request at `prefix` replaces every request open beneath it, wanted or
 	/// lingering, which closes first.
-	fn replace_beneath(&mut self, prefix: &PathOwned) -> Request {
+	fn replace_beneath(&mut self, prefix: &Path) -> Request {
 		let beneath: Vec<_> = self
 			.requests
 			.keys()
@@ -228,7 +228,7 @@ impl Discovery {
 
 	/// A new request at `prefix` holds the narrower ones still lingering beneath it, as it
 	/// would had they been released after it opened, so none closes before it has synced.
-	fn hold_lingering(&mut self, prefix: &PathOwned) -> Request {
+	fn hold_lingering(&mut self, prefix: &Path) -> Request {
 		let mut request = Request::default();
 		let beneath: Vec<_> = self
 			.lingering
@@ -248,7 +248,7 @@ impl Discovery {
 	}
 
 	/// Keep the request at `prefix` open: something beneath it is wanted again.
-	fn stay(&mut self, prefix: &PathOwned) {
+	fn stay(&mut self, prefix: &Path) {
 		let Some(request) = self.requests.get_mut(prefix) else {
 			return;
 		};
@@ -260,7 +260,7 @@ impl Discovery {
 
 	/// Settle a request nothing beneath it wants any more. A broader open request that
 	/// is still wanted holds it until that one goes; otherwise it lingers out.
-	fn release(&mut self, prefix: PathOwned) {
+	fn release(&mut self, prefix: Path) {
 		for above in covering(&prefix).into_iter().skip(1) {
 			if !self.beneath.contains_key(&above) {
 				continue;
@@ -283,7 +283,7 @@ impl Discovery {
 	}
 
 	/// Close a request that lingered out.
-	fn expire(&mut self, prefix: PathOwned) {
+	fn expire(&mut self, prefix: Path) {
 		let Some(request) = self.requests.remove(&prefix) else {
 			return;
 		};
@@ -292,9 +292,9 @@ impl Discovery {
 	}
 
 	/// What a request that went held now settles on its own, unless it is wanted again.
-	fn forget(&mut self, prefix: &PathOwned, request: Request) {
+	fn forget(&mut self, prefix: &Path, request: Request) {
 		if let Some(at) = request.linger {
-			self.lingering.remove(&(at, prefix.to_owned()));
+			self.lingering.remove(&(at, prefix.clone()));
 		}
 		for held in request.held {
 			if self.requests.contains_key(&held) && !self.beneath.contains_key(&held) {
@@ -305,10 +305,6 @@ impl Discovery {
 }
 
 /// `path` and every prefix above it, up to the root, narrowest first.
-fn covering(path: &Path) -> Vec<PathOwned> {
-	(0..=path.parts().count())
-		.rev()
-		.filter_map(|n| path.head(n))
-		.map(|head| head.to_owned())
-		.collect()
+fn covering(path: &Path) -> Vec<Path> {
+	(0..=path.parts().count()).rev().filter_map(|n| path.head(n)).collect()
 }

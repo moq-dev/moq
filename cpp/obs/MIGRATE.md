@@ -4,7 +4,7 @@ How to update your OBS setup for each breaking change, newest first.
 
 ## Unreleased
 
-### Broadcast names with an empty segment are refused (#6648)
+### Broadcast names with an empty segment are refused ([#6648](https://github.com/moq-dev/moq/pull/6648))
 
 A broadcast name with a leading, trailing, or doubled `/` fails to publish or play instead of being collapsed. Use the canonical name, such as `room/cam`.
 

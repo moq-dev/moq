@@ -26,9 +26,9 @@ fn is_legacy_version(version: Version) -> bool {
 /// Options field when it split SUBSCRIBE_TRACKS (0x51) off into its own message
 /// type (#1542). Draft-14 through draft-17 use [`SubscribeNamespaceLegacy`].
 #[derive(Clone, Debug)]
-pub struct SubscribeNamespace<'a> {
+pub struct SubscribeNamespace {
 	pub request_id: RequestId,
-	pub namespace: Path<'a>,
+	pub namespace: Path,
 	/// MoQ Hidden: also advertise hidden namespaces. Only sent to a peer that declared
 	/// the extension; absent means false.
 	pub hidden: bool,
@@ -48,7 +48,7 @@ fn hidden_from_param(value: Option<u64>) -> Result<bool, DecodeError> {
 	}
 }
 
-impl Message for SubscribeNamespace<'_> {
+impl Message for SubscribeNamespace {
 	const ID: u64 = 0x50;
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
@@ -124,16 +124,16 @@ impl SubscribeOptions {
 /// Required Request ID delta (removed in draft-18 per #1615). Draft-18+ uses
 /// [`SubscribeNamespace`].
 #[derive(Clone, Debug)]
-pub struct SubscribeNamespaceLegacy<'a> {
+pub struct SubscribeNamespaceLegacy {
 	pub request_id: RequestId,
-	pub namespace: Path<'a>,
+	pub namespace: Path,
 	/// Encoded on v16/v17 only; earlier drafts always mean [`SubscribeOptions::Namespace`].
 	pub subscribe_options: SubscribeOptions,
 	/// MoQ Hidden: see [`SubscribeNamespace::hidden`].
 	pub hidden: bool,
 }
 
-impl Message for SubscribeNamespaceLegacy<'_> {
+impl Message for SubscribeNamespaceLegacy {
 	const ID: u64 = 0x11;
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
@@ -243,14 +243,14 @@ impl Message for SubscribeNamespaceError<'_> {
 /// UnsubscribeNamespace message (0x14): v14/v15 only (v16 uses stream close).
 /// v14 names the prefix it subscribed, v15 the request.
 #[derive(Clone, Debug)]
-pub struct UnsubscribeNamespace<'a> {
+pub struct UnsubscribeNamespace {
 	/// v14: the Track Namespace Prefix of the SUBSCRIBE_NAMESPACE it cancels.
-	pub prefix: Path<'a>,
+	pub prefix: Path,
 	/// v15: the Request ID of the SUBSCRIBE_NAMESPACE it cancels.
 	pub request_id: RequestId,
 }
 
-impl Message for UnsubscribeNamespace<'_> {
+impl Message for UnsubscribeNamespace {
 	const ID: u64 = 0x14;
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
@@ -285,15 +285,15 @@ impl Message for UnsubscribeNamespace<'_> {
 /// field for both, so the advertisement can carry its HOP_PATH and ROUTE_COST (see
 /// [`super::cluster`]) and its EPOCH (see [`super::epoch`]).
 #[derive(Clone, Debug)]
-pub struct Namespace<'a> {
-	pub suffix: Path<'a>,
+pub struct Namespace {
+	pub suffix: Path,
 
 	/// The extension parameters. `Some` selects the extended form; `None` the base one.
 	/// An endpoint must not append them on a session that negotiated neither extension.
 	pub params: Option<AdvertParams>,
 }
 
-impl Namespace<'_> {
+impl Namespace {
 	/// Decode the message body, expecting the extended form when the session negotiated
 	/// an extension that defines it. See [`super::PublishNamespace::decode_body`].
 	pub fn decode_body(r: &mut Decoder<'_>, version: Version, negotiated: Negotiated) -> Result<Self, DecodeError> {
@@ -310,7 +310,7 @@ impl Namespace<'_> {
 	}
 }
 
-impl Message for Namespace<'_> {
+impl Message for Namespace {
 	const ID: u64 = 0x08;
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
@@ -329,11 +329,11 @@ impl Message for Namespace<'_> {
 /// NAMESPACE_DONE message (0x0E): v16 only, sent on SUBSCRIBE_NAMESPACE bidi stream
 /// Indicates a namespace suffix matching the subscribed prefix is no longer active.
 #[derive(Clone, Debug)]
-pub struct NamespaceDone<'a> {
-	pub suffix: Path<'a>,
+pub struct NamespaceDone {
+	pub suffix: Path,
 }
 
-impl Message for NamespaceDone<'_> {
+impl Message for NamespaceDone {
 	const ID: u64 = 0x0E;
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, _: Version) -> Result<(), EncodeError> {
@@ -377,11 +377,7 @@ mod tests {
 		epoch: true,
 	};
 
-	fn decode(
-		bytes: Vec<u8>,
-		version: Version,
-		negotiated: Negotiated,
-	) -> Result<(Namespace<'static>, bool), DecodeError> {
+	fn decode(bytes: Vec<u8>, version: Version, negotiated: Negotiated) -> Result<(Namespace, bool), DecodeError> {
 		let mut buf = bytes::Bytes::from(bytes);
 		let decoded = crate::coding::decode_buf(&mut buf, version, |r, v| Namespace::decode_body(r, v, negotiated))?;
 		Ok((decoded, buf.is_empty()))
@@ -392,7 +388,7 @@ mod tests {
 	#[test]
 	fn unsubscribe_namespace_names_the_prefix_then_the_request() {
 		let msg = UnsubscribeNamespace {
-			prefix: Path::new("cam/front").unwrap(),
+			prefix: Path::from_static("cam/front"),
 			request_id: RequestId(6),
 		};
 		let mut v14 = bytes::Bytes::from(body(&msg, Version::Draft14));
@@ -426,7 +422,7 @@ mod tests {
 	fn cluster_namespace_round_trips() {
 		let version = Version::Draft18;
 		let msg = Namespace {
-			suffix: Path::new("alice.hang").unwrap(),
+			suffix: Path::from_static("alice.hang"),
 			params: clustered(&[7, 9], 5),
 		};
 
@@ -439,7 +435,7 @@ mod tests {
 		// The base form is strictly shorter, and reading the extended bytes as base
 		// leaves the parameters behind rather than silently absorbing them.
 		let base = Namespace {
-			suffix: Path::new("alice.hang").unwrap(),
+			suffix: Path::from_static("alice.hang"),
 			params: None,
 		};
 		let base_encoded = body(&base, version);
@@ -455,11 +451,11 @@ mod tests {
 	fn cluster_namespace_omits_zero_cost() {
 		let version = Version::Draft18;
 		let free = Namespace {
-			suffix: Path::new("a").unwrap(),
+			suffix: Path::from_static("a"),
 			params: clustered(&[7], 0),
 		};
 		let priced = Namespace {
-			suffix: Path::new("a").unwrap(),
+			suffix: Path::from_static("a"),
 			params: clustered(&[7], 1),
 		};
 		assert!(body(&free, version).len() < body(&priced, version).len());
@@ -476,7 +472,7 @@ mod tests {
 		let epoch = crate::Epoch::mint();
 		for epoch in [None, Some(epoch)] {
 			let msg = Namespace {
-				suffix: Path::new("a").unwrap(),
+				suffix: Path::from_static("a"),
 				params: Some(AdvertParams {
 					cluster: None,
 					epoch: epoch.clone(),
@@ -495,7 +491,7 @@ mod tests {
 		let mut params = clustered(&[7], 3).unwrap();
 		params.epoch = Some(crate::Epoch::mint());
 		let msg = Namespace {
-			suffix: Path::new("a").unwrap(),
+			suffix: Path::from_static("a"),
 			params: Some(params),
 		};
 		let encoded = body(&msg, version);
@@ -505,7 +501,7 @@ mod tests {
 
 		// Read as the base form, a single block is all that is left over.
 		let mut suffix = Vec::new();
-		encode_namespace(&mut Encoder::new(&mut suffix, version.into()), &Path::new("a").unwrap()).unwrap();
+		encode_namespace(&mut Encoder::new(&mut suffix, version.into()), &Path::from_static("a")).unwrap();
 		let mut block = Vec::new();
 		super::super::publish_namespace::encode_advert_params(
 			&mut Encoder::new(&mut block, version.into()),
@@ -522,7 +518,7 @@ mod tests {
 	fn epoch_refused_unless_negotiated_and_well_formed() {
 		let version = Version::Draft22;
 		let msg = Namespace {
-			suffix: Path::new("a").unwrap(),
+			suffix: Path::from_static("a"),
 			params: Some(AdvertParams {
 				cluster: clustered(&[7], 0).unwrap().cluster,
 				epoch: Some(crate::Epoch::mint()),
@@ -534,7 +530,7 @@ mod tests {
 		));
 
 		let mut buf = Vec::new();
-		encode_namespace(&mut Encoder::new(&mut buf, version.into()), &Path::new("a").unwrap()).unwrap();
+		encode_namespace(&mut Encoder::new(&mut buf, version.into()), &Path::from_static("a")).unwrap();
 		let w = &mut Encoder::new(&mut buf, version.into());
 		w.varint(1).unwrap();
 		w.varint(super::super::epoch::EPOCH_PARAM).unwrap();
@@ -547,7 +543,7 @@ mod tests {
 	fn cluster_namespace_requires_hop_path() {
 		let version = Version::Draft18;
 		let mut buf = Vec::new();
-		encode_namespace(&mut Encoder::new(&mut buf, version.into()), &Path::new("a").unwrap()).unwrap();
+		encode_namespace(&mut Encoder::new(&mut buf, version.into()), &Path::from_static("a")).unwrap();
 		// Number of Parameters = 0.
 		Encoder::new(&mut buf, version.into()).varint(0).unwrap();
 
@@ -565,7 +561,7 @@ mod tests {
 		let version = Version::Draft18;
 		let msg = super::super::PublishNamespace {
 			request_id: RequestId(1),
-			track_namespace: Path::new("a").unwrap(),
+			track_namespace: Path::from_static("a"),
 			params: AdvertParams {
 				cluster: Some(cluster::Advert {
 					hops: hop_path(&[7]),
@@ -666,7 +662,7 @@ mod tests {
 	fn modern_round_trips() {
 		let msg = SubscribeNamespace {
 			request_id: RequestId(4),
-			namespace: Path::new("example/meeting").unwrap(),
+			namespace: Path::from_static("example/meeting"),
 			hidden: false,
 		};
 		let mut buf = bytes::Bytes::from(body(&msg, Version::Draft18));
@@ -682,7 +678,7 @@ mod tests {
 		for hidden in [false, true] {
 			let msg = SubscribeNamespace {
 				request_id: RequestId(4),
-				namespace: Path::new("example").unwrap(),
+				namespace: Path::from_static("example"),
 				hidden,
 			};
 			let mut buf = bytes::Bytes::from(body(&msg, Version::Draft18));
@@ -696,7 +692,7 @@ mod tests {
 			for version in [Version::Draft14, Version::Draft16, Version::Draft17] {
 				let msg = SubscribeNamespaceLegacy {
 					request_id: RequestId(4),
-					namespace: Path::new("example").unwrap(),
+					namespace: Path::from_static("example"),
 					subscribe_options: SubscribeOptions::Namespace,
 					hidden,
 				};
@@ -718,7 +714,7 @@ mod tests {
 			] {
 				let msg = SubscribeNamespaceLegacy {
 					request_id: RequestId(4),
-					namespace: Path::new("example/meeting").unwrap(),
+					namespace: Path::from_static("example/meeting"),
 					subscribe_options: options,
 					hidden: false,
 				};

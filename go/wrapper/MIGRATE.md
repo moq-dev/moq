@@ -4,9 +4,18 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Paths with an empty segment are refused (#6648)
+### Paths with an empty segment are refused ([#6648](https://github.com/moq-dev/moq/pull/6648))
 
 Publishing, serving, or requesting a broadcast at a path with a leading, trailing, or doubled `/` returns an error instead of collapsing it. Pass the canonical path, such as `room/cam`.
+
+### Request handlers are `Requests()` ([#6752](https://github.com/moq-dev/moq/pull/6752))
+
+Rename `Dynamic()` on `OriginProducer`, `BroadcastProducer`, `TrackProducer`, and `TrackRequest` to `Requests()`.
+Their handles `OriginDynamic`, `BroadcastDynamic`, and `TrackDynamic` are `OriginRequests`, `BroadcastRequests`, and `TrackRequests`; their methods are unchanged.
+
+### `Allocator` ([#6751](https://github.com/moq-dev/moq/pull/6751))
+
+`Bandwidth` is `Allocator`, `Session.Bandwidth()` is `Session.Allocator()`, and `Reservation.Grant()` is `Reservation.Rate()`. The `Bandwidth` field of `ProducerOptions` keeps its name and takes a `*moq.Allocator`.
 
 ### Decoders read gaps and ends
 

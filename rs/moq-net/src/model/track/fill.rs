@@ -1,4 +1,4 @@
-//! Fills: the groups readers miss, asked of a [`Dynamic`](super::Dynamic) handler by range.
+//! Fills: the groups readers miss, asked of a [`Requests`](super::Requests) handler by range.
 //!
 //! A miss is a sequence a reader wants that the cache doesn't hold and the live feed will
 //! never deliver. A reader joins the fill already covering it, or queues a new one, and a
@@ -26,7 +26,7 @@ use crate::{Error, Result, StreamError, group};
 /// The fills a track's readers asked for, queued or taken by a handler, under one lock.
 #[derive(Default)]
 pub(in crate::model) struct FillState {
-	// Live `Dynamic` handles: a fill queues only while one can take it.
+	// Live `Requests` handles: a fill queues only while one can take it.
 	handlers: usize,
 	next: u64,
 	// Every fill not yet ended, queued or taken, by id.
@@ -653,7 +653,7 @@ pub(super) fn poll_requested(
 	}
 }
 
-/// A run of groups readers miss, for a [`Dynamic`](super::Dynamic) handler to serve.
+/// A run of groups readers miss, for a [`Requests`](super::Requests) handler to serve.
 ///
 /// It names `start.group` up to the exclusive [`end`](Self::end), the first group from
 /// [`start`](Self::start)'s frame. Its [`priority`](Self::priority),
@@ -881,10 +881,10 @@ impl Fill {
 			.map(drop)
 	}
 
-	/// Poll until the track closes, with its abort error.
+	/// Poll until the track is aborted, with its abort error.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
-		TrackState::poll_closed(&self.inner.state, waiter)
+	pub(crate) fn poll_aborted(&self, waiter: &kio::Waiter) -> Poll<Error> {
+		TrackState::poll_aborted(&self.inner.state, waiter)
 	}
 
 	/// The track the fill serves.

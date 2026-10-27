@@ -72,7 +72,6 @@ pub use server::{Response, Server, whep, whip};
 #[cfg(all(test, feature = "server"))]
 #[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
-	use moq_net::Path;
 	use std::time::Duration;
 
 	/// The next route and whether it is active.
@@ -154,9 +153,7 @@ mod tests {
 		origin: &moq_net::origin::Producer,
 		epoch: moq_net::Epoch,
 	) -> (Box<dyn Bridge>, moq_mux::catalog::Producer) {
-		let broadcast = origin
-			.create_broadcast(moq_net::Path::new("source").unwrap())
-			.expect("create source broadcast");
+		let broadcast = origin.create_broadcast("source").expect("create source broadcast");
 		broadcast
 			.announce(moq_net::origin::Route::default().with_epoch(epoch))
 			.expect("announce source broadcast");
@@ -171,8 +168,7 @@ mod tests {
 	/// Publish a replacement instance of `source`, returning once the origin serves it.
 	async fn take_over(origin: &moq_net::origin::Producer) -> (Box<dyn Bridge>, moq_mux::catalog::Producer) {
 		let epoch = moq_net::Epoch::mint();
-		let mut instances =
-			moq_mux::follow::Instances::new(&origin.consume(), Path::new("source").unwrap(), Some(&epoch)).unwrap();
+		let mut instances = moq_mux::follow::Instances::new(&origin.consume(), "source", Some(&epoch)).unwrap();
 		let (mut new, catalog) = publish_opus(origin, epoch);
 		push(&mut *new, 20_000, NEW_PACKET);
 		let started = tokio::time::timeout(TIMEOUT, instances.next())
@@ -209,7 +205,7 @@ mod tests {
 				let origin = whep_origin.clone();
 				let sessions = sessions_tx.clone();
 				async move {
-					let response = server::whep::accept(&server, &origin, Path::new("source").unwrap(), &offer)
+					let response = server::whep::accept(&server, &origin, moq_net::Path::from_static("source"), &offer)
 						.await
 						.unwrap();
 					let answer = response.answer.clone();
@@ -222,7 +218,7 @@ mod tests {
 
 		let output_origin = moq_tokio::origin::spawn();
 		let output = output_origin
-			.create_broadcast(Path::new("output").unwrap())
+			.create_broadcast("output")
 			.expect("create output broadcast");
 		let output_consumer = output.consume();
 		let client = Client::new(client::Config::default());
@@ -271,9 +267,10 @@ mod tests {
 				let server = server.clone();
 				let origin = whip_origin.clone();
 				async move {
-					let response = server::whip::accept(&server, &origin, Path::new("ingested").unwrap(), &offer)
-						.await
-						.unwrap();
+					let response =
+						server::whip::accept(&server, &origin, moq_net::Path::from_static("ingested"), &offer)
+							.await
+							.unwrap();
 					let answer = response.answer.clone();
 					tokio::spawn(response.run());
 					answer
@@ -285,16 +282,13 @@ mod tests {
 		let client = Client::new(client::Config::default());
 		let url = format!("http://{address}/whip/ingested").parse().expect("WHIP URL");
 		let source = origin.consume();
-		let pushed = tokio::spawn(async move { client.publish(url, source, Path::new("source").unwrap()).await });
+		let pushed = tokio::spawn(async move { client.publish(url, source, "source").await });
 		let ingested = ingest_origin.consume();
-		tokio::time::timeout(TIMEOUT, ingested.routed(Path::new("ingested").unwrap()))
+		tokio::time::timeout(TIMEOUT, ingested.routed("ingested"))
 			.await
 			.expect("WHIP negotiation timed out")
 			.expect("the ingest origin closed");
-		let ingested = ingested
-			.request_broadcast(Path::new("ingested").unwrap(), None)
-			.await
-			.unwrap();
+		let ingested = ingested.request_broadcast("ingested", None).await.unwrap();
 		let mut played = opus_output(&ingested).await;
 		assert_eq!(next_payload(&mut played).await, OPUS_PACKET);
 
@@ -322,7 +316,7 @@ mod tests {
 		let source_consumer = source_origin.consume();
 		let mut announcements = source_consumer.announced();
 		let source = source_origin
-			.create_broadcast(moq_net::Path::new("source").unwrap())
+			.create_broadcast("source")
 			.expect("create source broadcast");
 		source
 			.announce(moq_net::origin::Route::default())
@@ -364,9 +358,10 @@ mod tests {
 					let origin = whip_origin.clone();
 					let sources = whip_sources.clone();
 					async move {
-						let response = server::whip::accept(&server, &origin, Path::new("ingested").unwrap(), &offer)
-							.await
-							.unwrap();
+						let response =
+							server::whip::accept(&server, &origin, moq_net::Path::from_static("ingested"), &offer)
+								.await
+								.unwrap();
 						let answer = response.answer.clone();
 						let id = response.resource_id.clone();
 						let task = tokio::spawn(response.run());
@@ -382,9 +377,10 @@ mod tests {
 					let origin = whep_origin.clone();
 					let sources = sources_tx.clone();
 					async move {
-						let response = server::whep::accept(&server, &origin, Path::new("ingested").unwrap(), &offer)
-							.await
-							.unwrap();
+						let response =
+							server::whep::accept(&server, &origin, moq_net::Path::from_static("ingested"), &offer)
+								.await
+								.unwrap();
 						let answer = response.answer.clone();
 						let id = response.resource_id.clone();
 						let task = tokio::spawn(response.run());
@@ -403,11 +399,7 @@ mod tests {
 		// Each client call resolves once its session ends, so the test drives them aside.
 		let whip_client = tokio::spawn({
 			let client = client.clone();
-			async move {
-				client
-					.publish(whip, source_consumer, Path::new("source").unwrap())
-					.await
-			}
+			async move { client.publish(whip, source_consumer, "source").await }
 		});
 		let (whip_id, whip_task) = tokio::time::timeout(TIMEOUT, sources_rx.recv())
 			.await
@@ -416,7 +408,7 @@ mod tests {
 
 		let output_origin = moq_tokio::origin::spawn();
 		let output = output_origin
-			.create_broadcast(Path::new("output").unwrap())
+			.create_broadcast("output")
 			.expect("create output broadcast");
 		let output_consumer = output.consume();
 		let whep = format!("http://user:pass@{address}/whep/ingested?jwt=secret")
@@ -448,7 +440,7 @@ mod tests {
 		// linger; dropping the session, as an interrupt does, ends that at once.
 		let ingested = server_origin
 			.consume()
-			.request_broadcast(Path::new("ingested").unwrap(), None)
+			.request_broadcast("ingested", None)
 			.await
 			.unwrap();
 		assert!(!ingested.is_closed(), "the finished ingest lingers");

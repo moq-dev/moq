@@ -8,7 +8,7 @@ pub struct SessionInfo {
 }
 
 impl Message for SessionInfo {
-	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::Session);
+	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::Session);
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		match version {
 			Version::Lite01 | Version::Lite02 => {}

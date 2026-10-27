@@ -74,7 +74,7 @@ async fn main() -> anyhow::Result<()> {
 
 	match args[1].as_str() {
 		"publish" => {
-			let broadcast = origin.create_broadcast(moq_net::Path::new(&args[3])?)?;
+			let broadcast = origin.create_broadcast(&args[3])?;
 			let mut track = broadcast.create_track(
 				"tail",
 				moq_net::track::Info::default()
@@ -129,12 +129,12 @@ async fn main() -> anyhow::Result<()> {
 				.connect(url)
 				.established()
 				.await?;
-			let broadcast = consumer.routed_broadcast(moq_net::Path::new(&args[3])?).await?;
+			let broadcast = consumer.routed_broadcast(&args[3]).await?;
 			let remote = broadcast.track("tail")?;
 			if status {
 				// Query before subscribing so draft-18+ must use TRACK_STATUS,
 				// rather than learn metadata from SUBSCRIBE_OK as a side effect.
-				let info = remote.query().await?;
+				let info = remote.info().await?;
 				ensure!(info.timescale.is_none(), "IETF track should be untimed");
 				ensure!(info.priority == 2, "TRACK_STATUS lost publisher priority");
 				eprintln!("track status answered");

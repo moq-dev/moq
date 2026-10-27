@@ -3,7 +3,7 @@
 use std::{sync::Arc, task::Poll, time::Duration};
 
 use crate::transport::poll::Session as _;
-use crate::transport::{Error as _, Stats as _};
+use crate::transport::{Error as _, Metrics as _};
 
 use crate::{Error, SessionError, Version, auth, bandwidth, coding::StreamCodes, goaway};
 
@@ -171,6 +171,7 @@ pub struct Session {
 	bandwidth: bandwidth::Allocator,
 	goaway: Arc<goaway::Handle>,
 	auth: auth::Handle,
+	credential: Option<auth::Credential>,
 }
 
 impl Session {
@@ -220,10 +221,10 @@ impl Session {
 	/// The session probes up to what the reservations add up to, through its
 	/// transport's [`Probe`](crate::transport::Probe) when it has one, so reserve
 	/// here rather than on an allocator of your own. Clones share one registry: a
-	/// [`Client::with_bandwidth`](crate::Client::with_bandwidth) allocator's when the
+	/// [`Client::with_allocator`](crate::Client::with_allocator) allocator's when the
 	/// session was dialed with one, so reservations outlive a reconnect. Reservations
 	/// report `None` when the transport has no estimate.
-	pub fn bandwidth(&self) -> bandwidth::Allocator {
+	pub fn allocator(&self) -> bandwidth::Allocator {
 		self.bandwidth.with_estimate(self.send_bandwidth())
 	}
 
@@ -372,6 +373,11 @@ impl Session {
 	pub fn auth(&self) -> auth::Handle {
 		self.auth.clone()
 	}
+
+	/// The connection credential this side presents on AUTH, or `None` when this session offers no AUTH.
+	pub(crate) fn credential(&self) -> Option<&auth::Credential> {
+		self.credential.as_ref()
+	}
 }
 
 /// The handles a protocol driver shares with its [`Session`].
@@ -379,6 +385,8 @@ pub(super) struct Handles {
 	pub stats: crate::stats::Session,
 	pub goaway: goaway::Handle,
 	pub auth: auth::Link,
+	/// The connection credential the driver presented on `auth`, when its version has AUTH.
+	pub credential: Option<auth::Credential>,
 	/// Where the driver publishes [`Estimate`] changes, for a protocol that reports
 	/// them to the peer (moq-lite PROBE). Sampled only while a consumer exists.
 	pub estimate: Option<kio::Producer<Estimate>>,
@@ -400,6 +408,7 @@ impl Session {
 		let Handles {
 			goaway,
 			auth,
+			credential,
 			estimate,
 			stats: context,
 			bandwidth,
@@ -468,6 +477,7 @@ impl Session {
 			bandwidth,
 			goaway,
 			auth: auth.handle().clone(),
+			credential,
 		};
 		let driver = crate::Driver::new(
 			runtime.clone(),
@@ -808,19 +818,21 @@ impl Supervisor {
 	}
 }
 
-/// A [`Stats`] snapshot of the transport's counters.
+/// A [`Stats`] snapshot of the transport's metrics and wire counters.
 fn snapshot<S: crate::transport::poll::Session>(session: &S) -> Stats {
-	let stats = session.stats();
+	// Metrics first: a transport that polls its byte counts refreshes its wire while reading them.
+	let metrics = session.metrics();
+	let wire = session.wire();
 	Stats {
-		rtt: stats.rtt(),
-		estimated_send_rate: stats.estimated_send_rate().map(bandwidth::Rate::from_bps),
-		bytes_sent: stats.bytes_sent(),
-		bytes_received: stats.bytes_received(),
-		bytes_lost: stats.bytes_lost(),
-		packets_sent: stats.packets_sent(),
-		packets_received: stats.packets_received(),
-		packets_lost: stats.packets_lost(),
-		streams_evicted: stats.streams_evicted(),
+		rtt: metrics.rtt(),
+		estimated_send_rate: metrics.estimated_send_rate().map(bandwidth::Rate::from_bps),
+		bytes_sent: wire.as_ref().map(crate::transport::Wire::sent_bytes),
+		bytes_received: wire.as_ref().map(crate::transport::Wire::received_bytes),
+		bytes_lost: metrics.bytes_lost(),
+		packets_sent: metrics.packets_sent(),
+		packets_received: metrics.packets_received(),
+		packets_lost: metrics.packets_lost(),
+		streams_evicted: metrics.streams_evicted(),
 	}
 }
 

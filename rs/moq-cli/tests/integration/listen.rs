@@ -1,7 +1,6 @@
 //! Listening imports and exports drain accepted sessions on SIGTERM.
 #![cfg(unix)]
 
-use hang::moq_net::Path;
 use std::{process::Stdio, time::Duration};
 
 use hang::moq_net;
@@ -148,7 +147,7 @@ async fn an_export_stage_ending_during_drain_waits_for_every_session() {
 	let listening = listen("export", &["--drain-timeout", "3s"]).await;
 	let _ = moq_tokio::crypto::install_default();
 	let origin = moq_tokio::origin::spawn();
-	let source = origin.create_broadcast(Path::new("demo.hang").unwrap()).unwrap();
+	let source = origin.create_broadcast("demo.hang").unwrap();
 	let catalog = source.create_track("catalog.json", None).unwrap();
 	source.announce(Default::default()).unwrap();
 	let publisher = moq_tokio::connect::Config::default()

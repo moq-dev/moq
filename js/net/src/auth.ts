@@ -8,11 +8,11 @@
  * undefined. There {@link Handle.add} rejects with {@link Unsupported} on moq-lite, and on
  * moq-transport keeps the token, with no grant, for the announcements whose route names it.
  * {@link Handle.grant} is the union of every token this side presented, and {@link Handle.add}
- * presents another without reconnecting, returning its {@link Auth}.
+ * presents another without reconnecting, returning its {@link Credential}.
  *
  * A {@link Handle} passed to `connect` as `auth`, or the one a reconnecting `Connection` owns,
  * outlives its sessions: each presents every token it holds, so a route naming one of its
- * {@link Auth}s keeps it across a reconnect. Only the peer's verdict ends such a token; a
+ * {@link Credential}s keeps it across a reconnect. Only the peer's verdict ends such a token; a
  * session ending leaves it for the next. Mirrors the Rust `moq_net::auth`.
  *
  * @module
@@ -40,9 +40,9 @@ export interface Grant {
 
 /**
  * A token this side presented, which a route can name, on every session of its handle.
- * {@link Auth.close} withdraws it.
+ * {@link Credential.close} withdraws it.
  */
-export interface Auth {
+export interface Credential {
 	/**
 	 * This token's own grant on the live session: undefined until its peer answers, while no
 	 * session is live, and again once it ends.

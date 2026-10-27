@@ -5,7 +5,6 @@
 //! group missing its head.
 
 use crate::support;
-use moq_net::Path;
 
 use std::time::Duration;
 
@@ -40,13 +39,13 @@ async fn an_empty_group_arrives_empty() {
 		let subscriber = produce_origin(2);
 		let _pair = peer(version.parse::<Version>().unwrap(), &publisher, &subscriber).await;
 
-		let broadcast = publisher.create_broadcast(Path::new("room").unwrap()).unwrap();
+		let broadcast = publisher.create_broadcast("room").unwrap();
 		let track = broadcast.create_track("data", timed()).unwrap();
 		broadcast.announce(Default::default()).unwrap();
 
 		let consumer = subscriber.consume();
-		consumer.routed(Path::new("room").unwrap()).await.unwrap();
-		let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast(Path::new("room").unwrap(), None))
+		consumer.routed("room").await.unwrap();
+		let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast("room", None))
 			.await
 			.expect("resolve timeout")
 			.expect("broadcast resolves");

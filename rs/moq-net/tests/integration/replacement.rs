@@ -11,7 +11,6 @@
 //! `Restart`, and the old handle keeps working.
 
 use crate::support;
-use moq_net::Path;
 
 use std::time::Duration;
 
@@ -84,7 +83,7 @@ async fn replace(version: &str, epoch: Option<Epoch>) {
 
 	let mut route = origin::Route::default();
 	route.epoch = epoch.clone();
-	let cam = publisher.publish(Path::new("cam").unwrap(), route).unwrap();
+	let cam = publisher.publish("cam", route).unwrap();
 	let video = cam.create_track("video", timed()).unwrap();
 	let audio = cam.create_track("audio", timed()).unwrap();
 	let meta = cam.create_track("meta", timed()).unwrap();
@@ -96,11 +95,7 @@ async fn replace(version: &str, epoch: Option<Epoch>) {
 		other => panic!("{version}: expected the broadcast, got {other:?}"),
 	}
 
-	let old = viewer
-		.consume()
-		.request_broadcast(Path::new("cam").unwrap(), None)
-		.await
-		.unwrap();
+	let old = viewer.consume().request_broadcast("cam", None).await.unwrap();
 	let mut sticky = subscribe(&old, "video").await.unwrap();
 	write(&video, "video:0");
 	assert_eq!(read(&mut sticky).await, "video:0", "{version}");
@@ -142,11 +137,7 @@ async fn replace(version: &str, epoch: Option<Epoch>) {
 	}
 
 	// Following the restart resolves the path afresh, and the new handle serves.
-	let fresh = viewer
-		.consume()
-		.request_broadcast(Path::new("cam").unwrap(), None)
-		.await
-		.unwrap();
+	let fresh = viewer.consume().request_broadcast("cam", None).await.unwrap();
 	assert!(!fresh.is_clone(&old), "{version}: joined the retired broadcast");
 	let mut followed = subscribe(&fresh, "meta").await.unwrap();
 	write(&meta, "meta:0");
@@ -212,9 +203,7 @@ async fn route_death(version: &str, relayed: bool, wait: Duration) {
 	let relay = produce_origin(2);
 	let viewer = produce_origin(3);
 
-	let cam = publisher
-		.publish(Path::new("cam").unwrap(), origin::Route::default())
-		.unwrap();
+	let cam = publisher.publish("cam", origin::Route::default()).unwrap();
 	let video = cam.create_track("video", timed()).unwrap();
 
 	let upstream = if relayed { &relay } else { &viewer };
@@ -226,11 +215,7 @@ async fn route_death(version: &str, relayed: bool, wait: Duration) {
 	let mut announced = viewer.consume().announced();
 	next_event(&mut announced).await;
 
-	let old = viewer
-		.consume()
-		.request_broadcast(Path::new("cam").unwrap(), None)
-		.await
-		.unwrap();
+	let old = viewer.consume().request_broadcast("cam", None).await.unwrap();
 	let mut sticky = subscribe(&old, "video").await.unwrap();
 	write(&video, "video:0");
 	assert_eq!(read(&mut sticky).await, "video:0", "{version}");
@@ -292,9 +277,7 @@ async fn restart_while_the_old_session_lingers(version: &str, old_hop: u64, new_
 	let viewer = produce_origin(3);
 
 	let old = produce_origin(old_hop);
-	let old_cam = old
-		.publish(Path::new("cam").unwrap(), origin::Route::default())
-		.unwrap();
+	let old_cam = old.publish("cam", origin::Route::default()).unwrap();
 	let _old_video = old_cam.create_track("video", timed()).unwrap();
 	let old_session = link(version, &old, &viewer).await;
 	let mut announced = viewer.consume().announced();
@@ -305,18 +288,12 @@ async fn restart_while_the_old_session_lingers(version: &str, old_hop: u64, new_
 	old_session.server_transport.set_latency(Duration::from_secs(3600));
 
 	let new = produce_origin(new_hop);
-	let new_cam = new
-		.publish(Path::new("cam").unwrap(), origin::Route::default())
-		.unwrap();
+	let new_cam = new.publish("cam", origin::Route::default()).unwrap();
 	let new_video = new_cam.create_track("video", timed()).unwrap();
 	let _new_session = link(version, &new, &viewer).await;
 	moq_clock::sleep(PAST_HOLD).await;
 
-	let cam = viewer
-		.consume()
-		.request_broadcast(Path::new("cam").unwrap(), None)
-		.await
-		.unwrap();
+	let cam = viewer.consume().request_broadcast("cam", None).await.unwrap();
 	let mut video = subscribe(&cam, "video")
 		.await
 		.unwrap_or_else(|err| panic!("{version} ({old_hop} -> {new_hop}): {err}"));

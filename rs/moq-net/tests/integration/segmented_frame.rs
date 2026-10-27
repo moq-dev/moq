@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use moq_net::{Hop, Path, Timestamp, Version, frame, origin, track};
+use moq_net::{Hop, Timestamp, Version, frame, origin, track};
 
 use crate::support::harness::{MockConnectOptions, connect_mock, spawn, subscribed};
 
@@ -30,7 +30,7 @@ async fn a_segmented_frame_crosses_whole() {
 		let version: Version = version.parse().unwrap();
 		let publisher = origin(1);
 		let viewer = origin(2);
-		let broadcast = publisher.create_broadcast(Path::new("room").unwrap()).unwrap();
+		let broadcast = publisher.create_broadcast("room").unwrap();
 		let info = track::Info::default().with_timescale(moq_net::Timescale::MILLI);
 		let track = broadcast.create_track("file", info).unwrap();
 		broadcast.announce(Default::default()).unwrap();
@@ -40,7 +40,7 @@ async fn a_segmented_frame_crosses_whole() {
 		options.client_subscribe = Some(viewer.clone());
 		let _pair = connect_mock(options).await;
 
-		let remote = moq_clock::timeout(TIMEOUT, viewer.consume().routed_broadcast(Path::new("room").unwrap()))
+		let remote = moq_clock::timeout(TIMEOUT, viewer.consume().routed_broadcast("room"))
 			.await
 			.expect("broadcast timeout")
 			.unwrap();

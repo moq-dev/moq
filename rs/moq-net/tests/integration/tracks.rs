@@ -4,7 +4,6 @@
 //! what it holds at once, and the upstream's tracks follow as live adds.
 
 use crate::support;
-use moq_net::Path;
 
 use std::time::Duration;
 
@@ -54,7 +53,7 @@ async fn connect(
 }
 
 async fn resolve(origin: &moq_net::origin::Producer) -> moq_net::broadcast::Consumer {
-	moq_clock::timeout(TIMEOUT, origin.consume().routed_broadcast(Path::new("bcast").unwrap()))
+	moq_clock::timeout(TIMEOUT, origin.consume().routed_broadcast("bcast"))
 		.await
 		.expect("announce timeout")
 		.expect("routed")
@@ -65,7 +64,7 @@ async fn resolve(origin: &moq_net::origin::Producer) -> moq_net::broadcast::Cons
 #[moq_clock::test]
 async fn a_session_lists_its_peers_tracks() {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast(Path::new("bcast").unwrap()).unwrap();
+	let broadcast = publisher.create_broadcast("bcast").unwrap();
 	let a = broadcast.create_track("a", None).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
@@ -95,7 +94,7 @@ async fn a_session_lists_its_peers_tracks() {
 #[moq_clock::test]
 async fn a_listing_carries_track_info() {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast(Path::new("bcast").unwrap()).unwrap();
+	let broadcast = publisher.create_broadcast("bcast").unwrap();
 	let info = moq_net::track::Info::default()
 		.with_timescale(moq_net::Timescale::MILLI)
 		.with_max_age(Duration::from_secs(3))
@@ -128,7 +127,7 @@ async fn a_listing_carries_track_info() {
 #[moq_clock::test]
 async fn a_listed_track_serves_its_cached_group() {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast(Path::new("bcast").unwrap()).unwrap();
+	let broadcast = publisher.create_broadcast("bcast").unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
 	let (subscriber, _pair) = connect(&publisher, 2, lite07()).await;
@@ -161,7 +160,7 @@ async fn a_listed_track_serves_its_cached_group() {
 #[moq_clock::test]
 async fn a_relay_shares_its_upstream_listing() {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast(Path::new("bcast").unwrap()).unwrap();
+	let broadcast = publisher.create_broadcast("bcast").unwrap();
 	let a = broadcast.create_track("a", None).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
@@ -195,7 +194,7 @@ async fn a_relay_shares_its_upstream_listing() {
 #[moq_clock::test]
 async fn lite06_cannot_list() {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast(Path::new("bcast").unwrap()).unwrap();
+	let broadcast = publisher.create_broadcast("bcast").unwrap();
 	let _a = broadcast.create_track("a", None).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
@@ -212,7 +211,7 @@ async fn lite06_cannot_list() {
 #[moq_clock::test]
 async fn a_listing_past_the_announces_cap_is_reset() {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast(Path::new("bcast").unwrap()).unwrap();
+	let broadcast = publisher.create_broadcast("bcast").unwrap();
 	const CAP: usize = 10;
 	let _tracks: Vec<_> = (0..CAP)
 		.map(|i| broadcast.create_track(format!("t{i}"), None).unwrap())

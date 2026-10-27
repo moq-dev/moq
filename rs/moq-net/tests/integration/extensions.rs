@@ -6,7 +6,6 @@
 //! Deterministic: paused time over the mock transport.
 
 use crate::support;
-use moq_net::Path;
 
 use std::time::Duration;
 
@@ -93,7 +92,7 @@ async fn a_side_that_declines_solicit_takes_unsolicited_announces() {
 			}
 			let pair = connect_mock(options).await;
 
-			let broadcast = publisher.create_broadcast(Path::new("room/cam").unwrap()).unwrap();
+			let broadcast = publisher.create_broadcast("room/cam").unwrap();
 			broadcast.announce(Default::default()).unwrap();
 			moq_clock::sleep(SETTLE).await;
 
@@ -208,7 +207,7 @@ async fn an_epoch_crosses_only_when_both_offer_it() {
 				let pair = connect_mock(options).await;
 
 				let epoch = moq_net::Epoch::mint();
-				let broadcast = publisher.create_broadcast(Path::new("room/cam").unwrap()).unwrap();
+				let broadcast = publisher.create_broadcast("room/cam").unwrap();
 				broadcast
 					.announce(origin::Route::default().with_epoch(epoch.clone()))
 					.unwrap();

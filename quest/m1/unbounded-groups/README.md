@@ -99,7 +99,7 @@ Decided 2026-10-16 (maintainer interview):
   draft's 32 MiB interop cap. The
   [m1 compression migration](/quest/m1/compress/migrate.md) deletes the flate packages. There is no new page.
 
-The refill API is the `track::Dynamic` fill (`track::Fill`). A handler serves a range by writing into a
+The refill API is the `track::Requests` fill (`track::Fill`). A handler serves a range by writing into a
 group producer bounded to that range, the same API as a live write, so an
 origin can regenerate data from disk or an archive.
 

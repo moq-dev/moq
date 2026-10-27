@@ -226,9 +226,9 @@ impl<S: Stream> Client<S> {
 		mut self,
 		stream_key: &str,
 		origin: origin::Consumer,
-		path: impl moq_net::AsPath,
+		path: impl Into<moq_net::Path>,
 	) -> Result<()> {
-		let path = path.as_path();
+		let path: moq_net::Path = path.into();
 		let request = self
 			.session
 			.request_publishing(stream_key.to_string(), PublishRequestType::Live)
@@ -313,8 +313,13 @@ impl<S: Stream> Client<S> {
 	/// ends cleanly: the finished broadcast stays up for the [linger](Self::with_linger), and
 	/// the future resolves after that. Dropping the future ends the linger early. A
 	/// connection that drops first closes the broadcast at once.
-	pub async fn pull(mut self, stream_key: &str, origin: &origin::Producer, path: impl moq_net::AsPath) -> Result<()> {
-		let path = path.as_path();
+	pub async fn pull(
+		mut self,
+		stream_key: &str,
+		origin: &origin::Producer,
+		path: impl Into<moq_net::Path>,
+	) -> Result<()> {
+		let path: moq_net::Path = path.into();
 		let request = self
 			.session
 			.request_playback(stream_key.to_string())
@@ -568,10 +573,7 @@ impl Publisher {
 	fn new(origin: &origin::Producer, path: &str, config: moq_mux::catalog::Config) -> anyhow::Result<Self> {
 		let epoch = moq_net::Epoch::mint();
 		let broadcast = origin
-			.publish(
-				&moq_net::Path::new(path)?,
-				moq_net::origin::Route::default().with_epoch(epoch.clone()),
-			)
+			.publish(path, moq_net::origin::Route::default().with_epoch(epoch.clone()))
 			.map_err(|err| anyhow::anyhow!("broadcast '{path}' could not be published: {err}"))?;
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config)?;
 		let handle = broadcast.clone();
@@ -631,7 +633,6 @@ impl Publisher {
 	reason = "tests read the host clock directly"
 )]
 mod tests {
-	use moq_net::Path;
 	use std::time::Duration;
 
 	use super::*;
@@ -699,9 +700,7 @@ mod tests {
 		let mut vframe = vec![0x17, 0x01, 0x00, 0x00, 0x00];
 		vframe.extend_from_slice(&[0, 0, 0, 5, 0x65, 0x88, 0x84, 0x21, 0x00]);
 
-		let broadcast = origin
-			.create_broadcast(moq_net::Path::new("live/cam0").unwrap())
-			.unwrap();
+		let broadcast = origin.create_broadcast("live/cam0").unwrap();
 		broadcast.announce(Default::default()).unwrap();
 		let catalog =
 			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), moq_mux::catalog::Config::default())
@@ -734,10 +733,13 @@ mod tests {
 				match accept_stream(server_io, peer).await.unwrap().unwrap() {
 					Request::Publish(publish) => publish
 						.with_linger(linger)
-						.accept(&ingest, Path::new("live/cam0").unwrap())
+						.accept(&ingest, moq_net::Path::from_static("live/cam0"))
 						.await
 						.unwrap(),
-					Request::Play(play) => play.accept(&served, Path::new("live/cam0").unwrap()).await.unwrap(),
+					Request::Play(play) => play
+						.accept(&served, moq_net::Path::from_static("live/cam0"))
+						.await
+						.unwrap(),
 				}
 			});
 			let exported = upstream.consume();
@@ -745,23 +747,20 @@ mod tests {
 				let client = Client::with_stream(client_io, "live").await.unwrap();
 				match push {
 					true => client
-						.publish("cam0", exported, Path::new("live/cam0").unwrap())
+						.publish("cam0", exported, moq_net::Path::from_static("live/cam0"))
 						.await
 						.unwrap(),
 					false => client
 						.with_linger(linger)
-						.pull("cam0", &pulled, Path::new("live/cam0").unwrap())
+						.pull("cam0", &pulled, moq_net::Path::from_static("live/cam0"))
 						.await
 						.unwrap(),
 				}
 			});
 
 			let consumer = downstream.consume();
-			consumer.routed(Path::new("live/cam0").unwrap()).await.unwrap();
-			let copy = consumer
-				.request_broadcast(Path::new("live/cam0").unwrap(), None)
-				.await
-				.unwrap();
+			consumer.routed("live/cam0").await.unwrap();
+			let copy = consumer.request_broadcast("live/cam0", None).await.unwrap();
 			// The catalog goes out once the keyframe landed, so the copy holds media to linger with.
 			let mut listed = copy.track("catalog.json").unwrap().subscribe(None).await.unwrap();
 			assert!(listed.recv_group().await.unwrap().is_some());
@@ -801,9 +800,7 @@ mod tests {
 			vseq.extend_from_slice(&[0x01, 0x00, 0x04, 0x68, 0xce, 0x3c, 0x80]);
 			let mut vframe = vec![0x17, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, idr.len() as u8];
 			vframe.extend_from_slice(idr);
-			let broadcast = origin
-				.create_broadcast(moq_net::Path::new("live/cam0").unwrap())
-				.unwrap();
+			let broadcast = origin.create_broadcast("live/cam0").unwrap();
 			broadcast
 				.announce(origin::Route::default().with_epoch(epoch.clone()))
 				.unwrap();
@@ -831,21 +828,20 @@ mod tests {
 			else {
 				panic!("expected a publish request");
 			};
-			let _ = publish.accept(&ingest, Path::new("live/cam0").unwrap()).await;
+			let _ = publish.accept(&ingest, moq_net::Path::from_static("live/cam0")).await;
 		});
 		let exported = upstream.consume();
 		let pushed = tokio::spawn(async move {
 			let client = Client::with_stream(client_io, "live").await.unwrap();
-			client.publish("cam0", exported, Path::new("live/cam0").unwrap()).await
+			client
+				.publish("cam0", exported, moq_net::Path::from_static("live/cam0"))
+				.await
 		});
 
 		// Read what reaches the remote back out as FLV.
 		let consumer = downstream.consume();
-		consumer.routed(Path::new("live/cam0").unwrap()).await.unwrap();
-		let copy = consumer
-			.request_broadcast(Path::new("live/cam0").unwrap(), None)
-			.await
-			.unwrap();
+		consumer.routed("live/cam0").await.unwrap();
+		let copy = consumer.request_broadcast("live/cam0", None).await.unwrap();
 		let source = moq_mux::Source::new(consumer, copy);
 		let catalog = source
 			.catalog::<()>(moq_mux::catalog::CatalogFormat::default())
@@ -862,9 +858,7 @@ mod tests {
 		until(OLD_IDR).await;
 
 		let epoch = moq_net::Epoch::mint();
-		let mut instances =
-			moq_mux::follow::Instances::new(&upstream.consume(), Path::new("live/cam0").unwrap(), Some(&epoch))
-				.unwrap();
+		let mut instances = moq_mux::follow::Instances::new(&upstream.consume(), "live/cam0", Some(&epoch)).unwrap();
 		let (_new, _new_catalog) = publish(&upstream, &epoch, NEW_IDR);
 		tokio::time::timeout(Duration::from_secs(5), instances.next())
 			.await
@@ -903,9 +897,7 @@ mod tests {
 		vframe.extend_from_slice(&[0, 0, 0, 5, 0x65, 0x88, 0x84, 0x21, 0x00]);
 
 		let server_origin = moq_tokio::origin::spawn();
-		let broadcast = server_origin
-			.create_broadcast(moq_net::Path::new("live/cam0").unwrap())
-			.unwrap();
+		let broadcast = server_origin.create_broadcast("live/cam0").unwrap();
 		broadcast.announce(Default::default()).unwrap();
 		let catalog =
 			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), moq_mux::catalog::Config::default())
@@ -925,7 +917,9 @@ mod tests {
 			let Request::Play(play) = request else {
 				panic!("expected a play request");
 			};
-			play.accept(&consumer, Path::new("live/cam0").unwrap()).await.unwrap();
+			play.accept(&consumer, moq_net::Path::from_static("live/cam0"))
+				.await
+				.unwrap();
 		});
 
 		// Client: dial, connect(`live`), play(`cam0`), republish into our own origin.
@@ -935,23 +929,17 @@ mod tests {
 		let pull = tokio::spawn(async move {
 			let client = Client::connect(addr, "live").await.unwrap();
 			client
-				.pull("cam0", &pull_origin, Path::new("pulled/cam0").unwrap())
+				.pull("cam0", &pull_origin, moq_net::Path::from_static("pulled/cam0"))
 				.await
 				.unwrap();
 		});
 
 		// The republished broadcast should show up in the client's origin.
-		tokio::time::timeout(
-			Duration::from_secs(5),
-			announced.routed(Path::new("pulled/cam0").unwrap()),
-		)
-		.await
-		.expect("client republish timed out")
-		.expect("broadcast announced in client origin");
-		let broadcast = announced
-			.request_broadcast(Path::new("pulled/cam0").unwrap(), None)
+		tokio::time::timeout(Duration::from_secs(5), announced.routed("pulled/cam0"))
 			.await
-			.unwrap();
+			.expect("client republish timed out")
+			.expect("broadcast announced in client origin");
+		let broadcast = announced.request_broadcast("pulled/cam0", None).await.unwrap();
 
 		// It should carry a hang catalog track (proof the FLV demux produced real
 		// media on the far side): subscribe to it and read one catalog frame.

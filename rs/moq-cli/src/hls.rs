@@ -170,9 +170,7 @@ pub async fn import(target: ImportTarget, args: ImportArgs, epoch: moq_net::Epoc
 		linger,
 		bandwidth,
 	} = target;
-	let producer = origin
-		.create_broadcast(moq_net::Path::new(&name)?)
-		.context("failed to create broadcast")?;
+	let producer = origin.create_broadcast(&name).context("failed to create broadcast")?;
 
 	let config = moq_mux::catalog::Config::default()
 		.with_max_age(max_age)
@@ -262,12 +260,11 @@ fn playlist_url(playlist: &str) -> anyhow::Result<Url> {
 /// `/<name>/master.m3u8` and `/<name>/manifest.mpd`); other broadcasts in the
 /// Origin are not served.
 pub async fn export(origin: moq_net::origin::Consumer, args: ExportArgs, name: String) -> anyhow::Result<()> {
-	let path = moq_net::Path::new(&name).with_context(|| format!("invalid broadcast name `{name}`"))?;
 	let scope = moq_net::Patterns::from(
 		moq_net::Pattern::subtree(&name).with_context(|| format!("invalid broadcast name `{name}`"))?,
 	);
 	let scoped = origin
-		.scope(moq_net::Path::empty(), &scope)
+		.scope("", &scope)
 		.with_context(|| format!("failed to scope origin to broadcast `{name}`"))?;
 
 	let mut config = moq_hls::export::Config::default();
@@ -302,7 +299,7 @@ pub async fn export(origin: moq_net::origin::Consumer, args: ExportArgs, name: S
 		// Wait for a covering route rather than asking on the spot: a recording started beside
 		// its publisher, or over a session that discovers only watched paths, sees no route yet.
 		let broadcast = scoped
-			.routed_broadcast(&path)
+			.routed_broadcast(name.as_str())
 			.await
 			.with_context(|| format!("failed to resolve broadcast `{name}`"))?;
 		let source = moq_mux::Source::new(scoped.clone(), broadcast);
@@ -395,7 +392,7 @@ mod test {
 
 		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
 		tokio::spawn(moq_net::time::run(driver));
-		let producer = origin.create_broadcast(moq_net::Path::new("hls").unwrap())?;
+		let producer = origin.create_broadcast("hls")?;
 		let catalog =
 			moq_mux::catalog::Producer::new(&mut producer.broadcast().clone(), moq_mux::catalog::Config::default())?;
 		let listed = catalog.consume()?;
@@ -526,10 +523,7 @@ mod test {
 		let importing = tokio::spawn(import(target, args, moq_net::Epoch::mint()));
 
 		announced.next().await.expect("announced");
-		let broadcast = consumer
-			.request_broadcast(moq_net::Path::new("hls").unwrap(), None)
-			.await
-			.unwrap();
+		let broadcast = consumer.request_broadcast("hls", None).await.unwrap();
 		let mut catalogs = hang::catalog::Catalog::<()>::subscribe(&broadcast).await.unwrap();
 		let catalog = catalogs.next().await.unwrap().expect("a catalog");
 		let name = catalog.audio.renditions.keys().next().expect("an audio rendition");

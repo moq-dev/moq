@@ -6,7 +6,6 @@
 //! hands the live subscription over at a group boundary. A downstream consumer
 //! of the cluster origin observes contiguous groups and no unannounce.
 
-use moq_net::Path;
 use std::collections::BTreeSet;
 use std::time::Duration;
 
@@ -150,9 +149,7 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
 	let upstream_origin = moq_tokio::origin::spawn();
-	let broadcast = upstream_origin
-		.create_broadcast(Path::new("cam").unwrap())
-		.expect("create broadcast");
+	let broadcast = upstream_origin.create_broadcast("cam").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce");
 	let track = broadcast.create_track("video", timed()).expect("create track");
 
@@ -174,11 +171,9 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 
 	let session_a = within("A accepts", accepted_a.recv()).await.expect("A accepts");
 	let consumer = cluster.origin.consume();
-	within("routed via A", consumer.routed(Path::new("cam").unwrap()))
-		.await
-		.expect("routed");
+	within("routed via A", consumer.routed("cam")).await.expect("routed");
 	let bc = consumer
-		.request_broadcast(Path::new("cam").unwrap(), None)
+		.request_broadcast("cam", None)
 		.await
 		.expect("broadcast resolves");
 	let mut sub = within("subscribe", bc.track("video").expect("track").subscribe(None))
@@ -292,9 +287,7 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 	tokio::time::timeout(TEST_TIMEOUT, async {
 		// ── the shared "live" broadcast both siblings can serve ─────────
 		let upstream_origin = moq_tokio::origin::spawn();
-		let broadcast = upstream_origin
-			.create_broadcast(Path::new("cam").unwrap())
-			.expect("create broadcast");
+		let broadcast = upstream_origin.create_broadcast("cam").expect("create broadcast");
 		broadcast.announce(Default::default()).expect("create broadcast");
 		let track = broadcast.create_track("video", timed()).expect("create track");
 
@@ -322,11 +315,11 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 		// ── downstream consumer on the cluster origin ───────────────────
 		let consumer = cluster.origin.consume();
 		consumer
-			.routed(Path::new("cam").unwrap())
+			.routed("cam")
 			.await
 			.expect("broadcast announced through sibling A");
 		let bc = consumer
-			.request_broadcast(Path::new("cam").unwrap(), None)
+			.request_broadcast("cam", None)
 			.await
 			.expect("broadcast resolves");
 		let mut sub = bc
@@ -490,9 +483,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 
 	// ── TOP: origin server serving the same broadcast to both mids ──────
 	let top_origin = moq_tokio::origin::spawn();
-	let broadcast = top_origin
-		.create_broadcast(Path::new("diamond").unwrap())
-		.expect("create broadcast");
+	let broadcast = top_origin.create_broadcast("diamond").expect("create broadcast");
 	broadcast
 		.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))
 		.expect("create broadcast");
@@ -572,11 +563,8 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 
 	let bc = within("broadcast resolves on the subscriber origin", async {
 		let consumer = sub_origin.consume();
-		consumer.routed(Path::new("diamond").unwrap()).await?;
-		consumer
-			.request_broadcast(Path::new("diamond").unwrap(), None)
-			.await
-			.ok()
+		consumer.routed("diamond").await?;
+		consumer.request_broadcast("diamond", None).await.ok()
 	})
 	.await
 	.expect("broadcast announced");

@@ -101,20 +101,18 @@ impl Config {
 	/// The game broadcast `name` publishes, and the prefix its viewers publish under.
 	///
 	/// Each piece is parsed on its own and joined, so an empty (root) prefix adds no segment.
-	fn paths(&self, name: &str) -> Result<(moq_net::PathOwned, moq_net::PathOwned)> {
+	fn paths(&self, name: &str) -> Result<(moq_net::Path, moq_net::Path)> {
 		let name = moq_net::Path::new(name).context("invalid --name")?;
 		let prefix = moq_net::Path::new(&self.prefix).context("invalid --prefix")?;
 		let game = match &self.prefix_game {
-			Some(game) => moq_net::Path::new(game).context("invalid --prefix-game")?.to_owned(),
-			None => prefix.join(moq_net::Path::new("game").expect("a literal path")),
+			Some(game) => moq_net::Path::new(game).context("invalid --prefix-game")?,
+			None => prefix.join(&moq_net::Path::from_static("game"))?,
 		};
 		let viewer = match &self.prefix_viewer {
-			Some(viewer) => moq_net::Path::new(viewer)
-				.context("invalid --prefix-viewer")?
-				.to_owned(),
-			None => prefix.join(moq_net::Path::new("viewer").expect("a literal path")),
+			Some(viewer) => moq_net::Path::new(viewer).context("invalid --prefix-viewer")?,
+			None => prefix.join(&moq_net::Path::from_static("viewer"))?,
 		};
-		Ok((game.join(&name), viewer.join(&name)))
+		Ok((game.join(&name)?, viewer.join(&name)?))
 	}
 }
 

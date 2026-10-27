@@ -278,10 +278,7 @@ impl Session {
 		// lingers, rather than resuming viewers into the old run's group sequence. Reconnects keep it.
 		let epoch = moq_net::Epoch::mint();
 		gst::info!(CAT, "publishing {} under epoch {epoch}", settings.broadcast);
-		let broadcast = origin.publish(
-			&moq_net::Path::new(&settings.broadcast)?,
-			moq_net::origin::Route::default().with_epoch(epoch),
-		)?;
+		let broadcast = origin.publish(&settings.broadcast, moq_net::origin::Route::default().with_epoch(epoch))?;
 		let catalog =
 			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), moq_mux::catalog::Config::default())?;
 

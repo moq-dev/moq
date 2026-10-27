@@ -101,9 +101,7 @@ pub struct Publisher {
 impl Publisher {
 	/// Announce `path` on `origin` under `route` and publish its catalog.
 	pub fn new(origin: &moq_net::origin::Producer, path: &str, route: moq_net::origin::Route) -> Self {
-		let broadcast = origin
-			.create_broadcast(moq_net::Path::new(path).unwrap())
-			.expect("publish");
+		let broadcast = origin.create_broadcast(path).expect("publish");
 		broadcast.announce(route).expect("announce");
 		// A hinted timeline is advertised before any media, so a recorder can start first.
 		let timeline = moq_mux::timeline::Config::default().with_duration_hint(Duration::from_secs(2));

@@ -373,7 +373,7 @@ impl Refresh {
 					}
 				}
 				Event::Changed(id, Change::Grant(grant)) if self.valid(&grant) => {
-					let fresh = self.admitted.recheck(&grant).expect("valid() rechecked the grant");
+					let fresh = self.admitted.recheck(&grant).expect("checked by valid");
 					let credential = self.credentials.get_mut(&id).expect("observed credential");
 					credential.expires = grant.deadline();
 					if credential.initial {
@@ -477,7 +477,6 @@ fn with_jwt(query: Option<&str>, token: &str) -> String {
 mod tests {
 	use super::*;
 	use futures::FutureExt;
-	use moq_net::Path;
 	use std::time::Duration;
 
 	fn grant(prefix: &str, seconds: u64) -> Grant {
@@ -629,7 +628,7 @@ mod tests {
 		let registry = moq_net::stats::Registry::new(Default::default());
 		let stats = registry
 			.tier(moq_net::stats::Tier::default())
-			.session(Path::new("room").unwrap());
+			.session(moq_net::Path::from_static("room"));
 		let lease = super::super::Lease::new("/room", consumer)
 			.unwrap()
 			.with_stats(stats.clone());
@@ -745,7 +744,7 @@ mod tests {
 			let registry = moq_net::stats::Registry::new(Default::default());
 			let stats = registry
 				.tier(moq_net::stats::Tier::default())
-				.session(Path::new("room").unwrap());
+				.session(moq_net::Path::from_static("room"));
 			let lease = super::super::Lease::new("/room", consumer).unwrap().with_stats(stats);
 			let (client, supervising) = sessions(lease).await;
 			producer.revoke(reason.clone());
@@ -947,7 +946,7 @@ mod tests {
 		moq_net::Session,
 		moq_net::Session,
 		super::super::Lease,
-		moq_net::auth::Auth,
+		moq_net::auth::Credential,
 	) {
 		let (auth, mut admissions) = super::super::Auth::embedded("test");
 		let (owner, consumer) = lease::Producer::new(grant("a/**", 3));
@@ -958,7 +957,7 @@ mod tests {
 		let registry = moq_net::stats::Registry::new(Default::default());
 		let stats = registry
 			.tier(moq_net::stats::Tier::default())
-			.session(moq_net::Path::new("room").unwrap());
+			.session(moq_net::Path::from_static("room"));
 		let (client, session, mut lease) = connect(lease.unwrap().with_stats(stats)).await;
 		let auth = client.auth();
 		let (token, ()) = tokio::join!(

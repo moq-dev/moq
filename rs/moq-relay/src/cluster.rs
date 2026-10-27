@@ -11,7 +11,7 @@ use std::{
 use anyhow::Context;
 use futures::FutureExt as _;
 use moq_net::origin;
-use moq_net::{Hop, stats::Tier};
+use moq_net::{Hop, Path, stats::Tier};
 use reqwest_middleware::ClientWithMiddleware;
 use tokio::task::AbortHandle;
 use tracing::Instrument as _;
@@ -1137,9 +1137,6 @@ pub struct Cluster {
 	/// runtime so `/metrics` sees every refusal on the node.
 	pub(crate) refusals: crate::refusals::Refusals,
 
-	/// Billing tier cluster-peer traffic records under, parsed from `--cluster-tier`.
-	tier: Tier,
-
 	/// Hands out the `conn` id every session logs under, inbound and outbound
 	/// alike, so one id space covers the whole process and an id in the `/nodes`
 	/// view always points at the same session in the logs.
@@ -1230,7 +1227,6 @@ impl Cluster {
 		};
 		let deprecated = config.deprecated();
 		anyhow::ensure!(deprecated.is_empty(), "{deprecated}");
-		let tier = crate::configured_tier(config.tier.clone()).context("invalid --cluster-tier")?;
 		// Reject a repeated static identity with conflicting policy up front,
 		// matching the `--cluster-api-url` validation, instead of silently
 		// keeping the first entry when dials spawn.
@@ -1238,6 +1234,7 @@ impl Cluster {
 		if let Some(tier) = &config.tier {
 			moq_auth::tier::validate(tier).context("invalid --cluster-tier")?;
 		}
+		crate::configured_tier(config.tier.clone()).context("invalid --cluster-tier")?;
 		peer.quic.validate()?;
 		let critical = crate::critical::Critical::default();
 		let mut origin_config = origin::Config::new(id);
@@ -1273,7 +1270,6 @@ impl Cluster {
 			lan_auth: Arc::new(std::sync::OnceLock::new()),
 			nodes,
 			refusals: Default::default(),
-			tier,
 			connection_ids: Arc::default(),
 			critical,
 			origin,
@@ -1443,7 +1439,7 @@ impl Cluster {
 	/// Billing tier cluster-peer traffic records under (`--cluster-tier`).
 	/// An absent or empty label selects the default unprefixed tier.
 	fn cluster_tier(&self) -> Tier {
-		self.tier.clone()
+		crate::configured_tier(self.config.tier.clone()).expect("validated by Cluster::new")
 	}
 
 	/// Returns an [`origin::Producer`] scoped to this session's subscribe permissions.
@@ -1473,7 +1469,8 @@ impl Cluster {
 			(false, false) => self.origin.clone(),
 		};
 		for (at, target) in &token.mounts {
-			origin = match origin.mount(token.root.join(at), target) {
+			let mounted = token.root.join(at).map_err(moq_net::Error::from);
+			origin = match mounted.and_then(|at| origin.mount(at, target)) {
 				Ok(origin) => origin,
 				Err(err) => {
 					tracing::warn!(root = %token.root, %at, %target, %err, "grant mount refused");
@@ -2038,7 +2035,7 @@ impl Cluster {
 		};
 		// The link is one presence across reconnects: each session it dials records how it
 		// ended, and the last one to end decides whether the link failed.
-		let stats = self.stats.tier(self.cluster_tier()).session(moq_net::Path::empty());
+		let stats = self.stats.tier(self.cluster_tier()).session(Path::empty());
 		let mut client = client
 			.with_publisher(origin.consume().with_hidden(true))
 			.with_subscriber(origin)
@@ -2328,7 +2325,6 @@ impl Default for Redial {
 mod tests {
 	use super::*;
 	use crate::Config as RelayConfig;
-	use moq_net::Path;
 
 	#[tokio::test]
 	async fn request_limits_follow_the_admitted_grant() {
@@ -2355,12 +2351,8 @@ mod tests {
 	#[tokio::test]
 	async fn only_a_peer_grant_discovers_hidden_routes() {
 		let cluster = new_cluster(Config::default()).expect("cluster");
-		let _hidden = cluster
-			.origin
-			.publish(Path::new(".stats/node").unwrap(), origin::Route::default());
-		let _visible = cluster
-			.origin
-			.publish(Path::new("room").unwrap(), origin::Route::default());
+		let _hidden = cluster.origin.publish(".stats/node", origin::Route::default());
+		let _visible = cluster.origin.publish("room", origin::Route::default());
 		let mut request = moq_auth::Request::new("test", moq_auth::Transport::Quic, "/");
 		request.tls = Some(moq_auth::Peer {
 			name: "edge0".into(),
@@ -2429,20 +2421,18 @@ mod tests {
 
 		let _worker = cluster
 			.origin
-			.publish(Path::new(".svc/pid/foo").unwrap(), origin::Route::default())
+			.publish(".svc/pid/foo", origin::Route::default())
 			.expect("publish at the fleet path");
 		let subscriber = cluster.subscriber(&token).expect("subscribe grant").consume();
 		let broadcast = subscriber
-			.request_broadcast(Path::new(".svc/foo").unwrap(), None)
+			.request_broadcast(".svc/foo", None)
 			.await
 			.expect("resolves through the mount");
 		assert_eq!(broadcast.info().path.as_str(), ".svc/foo");
 
 		let publisher = cluster.publisher(&token).expect("publish grant");
-		assert!(publisher.create_broadcast(Path::new(".svc/foo").unwrap()).is_err());
-		publisher
-			.create_broadcast(Path::new("cam").unwrap())
-			.expect("publish outside the mount");
+		assert!(publisher.create_broadcast(".svc/foo").is_err());
+		publisher.create_broadcast("cam").expect("publish outside the mount");
 
 		// A mount the origin refuses admits nothing rather than half a grant.
 		grant.mounts.insert(".svc/x".into(), ".other".into());
@@ -2493,7 +2483,7 @@ mod tests {
 		let stats = config.build(cluster.origin.clone()).expect("stats");
 		let cluster = cluster.with_stats(stats);
 
-		let path = moq_net::Path::new(".stats/node/test").unwrap();
+		let path = moq_net::Path::from_static(".stats/node/test");
 		let consumer = cluster.origin.consume();
 		let route = tokio::time::timeout(std::time::Duration::from_secs(5), consumer.routed(&path))
 			.await
@@ -2571,7 +2561,7 @@ mod tests {
 		.expect("cluster");
 		assert_eq!(
 			cluster.cluster_tier(),
-			Tier::new(moq_net::Path::new("region/sjc").unwrap())
+			Tier::new(moq_net::Path::from_static("region/sjc"))
 		);
 
 		let quoted = new_cluster(Config {
@@ -3093,22 +3083,19 @@ mod tests {
 		assert_eq!(cluster.origin.config().cache_duration, duration);
 		assert_eq!(cluster.origin.config().pool.expiry(), Some(duration));
 
-		let broadcast = origin.create_broadcast(Path::new("cam").unwrap()).expect("create");
+		let broadcast = origin.create_broadcast("cam").expect("create");
 		broadcast.announce(Default::default()).expect("announce");
 		let mut track = broadcast.create_track("data", timed()).expect("track");
 		track.write_frame(moq_net::Timestamp::ZERO, b"hello").expect("write");
 		assert!(pool.used() > 0, "writes charge the constructed cache pool");
 
 		let consumer = cluster.origin.consume();
-		tokio::time::timeout(
-			Duration::from_secs(2),
-			consumer.request_broadcast(Path::new("cam").unwrap(), None),
-		)
-		.await
-		.expect("broadcast resolves")
-		.expect("broadcast present");
+		tokio::time::timeout(Duration::from_secs(2), consumer.request_broadcast("cam", None))
+			.await
+			.expect("broadcast resolves")
+			.expect("broadcast present");
 
-		let stats_path = moq_net::Path::new(".stats/node/test").unwrap();
+		let stats_path = moq_net::Path::from_static(".stats/node/test");
 		tokio::time::timeout(Duration::from_secs(5), consumer.routed(&stats_path))
 			.await
 			.expect("stats announced")
@@ -3507,10 +3494,7 @@ mod tests {
 		let node = new_cluster(Config::default()).expect("node cluster");
 		let fingerprint = new_cluster(Config::default()).expect("fingerprint cluster");
 
-		let _from_node = node
-			.origin
-			.create_broadcast(Path::new("from-node").unwrap())
-			.expect("create");
+		let _from_node = node.origin.create_broadcast("from-node").expect("create");
 		_from_node.announce(Default::default()).expect("announce");
 
 		let mut listen = moq_tokio::listen::Config::default();
@@ -3565,10 +3549,7 @@ mod tests {
 		// The dialer marks what the peer forwards: it entered at `node`, not here.
 		assert_eq!(update.route.source(), origin::Source::Peer(node.origin.hop()));
 
-		let _from_fp = fingerprint
-			.origin
-			.create_broadcast(Path::new("from-fingerprint").unwrap())
-			.expect("create");
+		let _from_fp = fingerprint.origin.create_broadcast("from-fingerprint").expect("create");
 		_from_fp.announce(Default::default()).expect("announce");
 		let mut announced = node.origin.consume().announced();
 		loop {
@@ -3852,10 +3833,7 @@ mod tests {
 				let dialer = new_cluster(Config::default())
 					.expect("dialer cluster")
 					.with_connect(Default::default(), quic);
-				let broadcast = dialer
-					.origin
-					.create_broadcast(Path::new("from-dialer").unwrap())
-					.expect("create");
+				let broadcast = dialer.origin.create_broadcast("from-dialer").expect("create");
 				broadcast.announce(Default::default()).expect("announce");
 				tokio::spawn(dialer.clone().supervise_remote(target, String::new()));
 				(dialer, broadcast)
@@ -3905,11 +3883,11 @@ mod tests {
 		let _ingest = cluster
 			.publisher(&client)
 			.expect("client")
-			.publish(Path::new("ingest").unwrap(), Default::default());
+			.publish("ingest", Default::default());
 		let _forwarded = cluster
 			.publisher(&peer)
 			.expect("peer")
-			.publish(Path::new("forwarded").unwrap(), Default::default());
+			.publish("forwarded", Default::default());
 
 		let mut announced = cluster.origin.consume().announced();
 		let forwarded = try_next_announced(&mut announced).expect("forwarded");
@@ -3943,15 +3921,15 @@ mod tests {
 		let _ingest = cluster
 			.publisher(&client)
 			.expect("client")
-			.publish(Path::new("ingest").unwrap(), Default::default());
+			.publish("ingest", Default::default());
 		let _mesh = cluster
 			.publisher(&peer)
 			.expect("peer")
-			.publish(Path::new("mesh").unwrap(), Default::default());
+			.publish("mesh", Default::default());
 		let _core = cluster
 			.publisher(&core)
 			.expect("core")
-			.publish(Path::new("core").unwrap(), Default::default());
+			.publish("core", Default::default());
 
 		let mut everyone = cluster.subscriber(&client).expect("client").consume().announced();
 		let mut prefixes = std::iter::from_fn(|| try_next_announced(&mut everyone))

@@ -1,6 +1,6 @@
 //! The consuming half: typed readers over one published stats broadcast.
 
-use moq_net::{AsPath, broadcast};
+use moq_net::{Path, broadcast};
 
 use crate::{
 	Encoding, GroupFrame, PrefixFrame, PresenceFrame, Result, TotalsFrame, group_track, prefix_track, presence_track,
@@ -62,7 +62,7 @@ impl Consumer {
 
 	/// Subscribe to the presence track for `label`, awaiting the
 	/// subscription handshake.
-	pub async fn presence(&self, label: impl AsPath) -> Result<PresenceConsumer> {
+	pub async fn presence(&self, label: impl Into<Path>) -> Result<PresenceConsumer> {
 		let name = presence_track(label, self.config.encoding);
 		Ok(PresenceConsumer {
 			inner: self.subscribe(&name).await?,
@@ -71,7 +71,7 @@ impl Consumer {
 
 	/// Subscribe to the prefix track for broadcast prefix `path`, awaiting the
 	/// subscription handshake.
-	pub async fn prefix(&self, path: impl AsPath) -> Result<PrefixConsumer> {
+	pub async fn prefix(&self, path: impl Into<Path>) -> Result<PrefixConsumer> {
 		let name = prefix_track(path, self.config.encoding);
 		Ok(PrefixConsumer {
 			inner: self.subscribe(&name).await?,
@@ -82,7 +82,7 @@ impl Consumer {
 	/// The track compresses itself, so [`Config::encoding`] does not apply.
 	/// Fails with [`NotFound`](moq_net::Error::NotFound) unless the group is
 	/// listed.
-	pub async fn group(&self, group: impl AsPath) -> Result<GroupConsumer> {
+	pub async fn group(&self, group: impl Into<Path>) -> Result<GroupConsumer> {
 		let track = self.broadcast.track(&group_track(group))?.subscribe(None).await?;
 		Ok(GroupConsumer {
 			inner: moq_json::snapshot::Consumer::new(track, Default::default()),
@@ -185,7 +185,7 @@ mod tests {
 
 	use std::time::Duration;
 
-	use moq_net::{Consume, PathOwned, Timestamp, announce, origin, track};
+	use moq_net::{Consume, Path, Timestamp, announce, origin, track};
 
 	use crate::{Encoding, Producer, Tier, produce};
 
@@ -196,7 +196,7 @@ mod tests {
 		let producer = Producer::new(
 			produce::Config::new()
 				.with_origin(origin.clone())
-				.with_node(PathOwned::from(moq_net::Path::new("sjc").unwrap())),
+				.with_node(Path::from_static("sjc")),
 		);
 		(producer, origin)
 	}
@@ -232,16 +232,13 @@ mod tests {
 		let egress = feed_origin.consume().with_stats(ctx.clone());
 
 		let mut announced = egress.announced();
-		let source = feed_origin.create_broadcast(moq_net::Path::new(path).unwrap()).unwrap();
+		let source = feed_origin.create_broadcast(path).unwrap();
 		source.announce(origin::Route::default()).unwrap();
 		let track = source.clone().create_track("video", timed()).unwrap();
 
 		let (_, active) = next_update(&mut announced).await.expect("announce");
 		assert!(active);
-		let consumer = egress
-			.request_broadcast(moq_net::Path::new(path).unwrap(), None)
-			.await
-			.expect("resolve");
+		let consumer = egress.request_broadcast(path, None).await.expect("resolve");
 		let sub = consumer.track("video").unwrap().subscribe(None).await.unwrap();
 
 		Feed {
@@ -260,7 +257,7 @@ mod tests {
 		assert!(active);
 		origin
 			.consume()
-			.request_broadcast(moq_net::Path::new(update.prefix.as_str()).unwrap(), None)
+			.request_broadcast(&update.prefix, None)
 			.await
 			.expect("resolve")
 	}
@@ -307,7 +304,7 @@ mod tests {
 
 		// At depth 0 the one group is the empty one, compressed by its track.
 		let mut group = compressed
-			.group(moq_net::Path::new("").unwrap())
+			.group(moq_net::Path::from_static(""))
 			.await
 			.expect("subscribe group");
 		let frame = group.next().await.expect("read").expect("frame");
@@ -317,7 +314,7 @@ mod tests {
 		assert_eq!(tier.labels["acme"].active(), 1);
 
 		// A presence track is produced once requested, so drive a drain.
-		let mut presence = std::pin::pin!(compressed.presence(moq_net::Path::new("acme").unwrap()));
+		let mut presence = std::pin::pin!(compressed.presence(moq_net::Path::from_static("acme")));
 		assert!(futures::poll!(presence.as_mut()).is_pending());
 		drive_tick().await;
 		let mut presence = presence.await.expect("subscribe presence");
@@ -325,7 +322,7 @@ mod tests {
 		assert_eq!(frame.get("").expect("default tier").active(), 1);
 
 		// So is a prefix track.
-		let mut prefix = std::pin::pin!(compressed.prefix(moq_net::Path::new("foo").unwrap()));
+		let mut prefix = std::pin::pin!(compressed.prefix(moq_net::Path::from_static("foo")));
 		assert!(futures::poll!(prefix.as_mut()).is_pending());
 		drive_tick().await;
 		let mut prefix = prefix.await.expect("subscribe prefix");

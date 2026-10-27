@@ -549,12 +549,12 @@ fn render_metrics(
 		(
 			"moq_relay_control_tx_bytes_total",
 			"Control-message bytes encoded for sending, including codec prefixes; excludes transport overhead.",
-			(|b: &moq_net::stats::Bytes| b.tx) as fn(&moq_net::stats::Bytes) -> u64,
+			(|b: &moq_net::stats::Totals| b.tx) as fn(&moq_net::stats::Totals) -> u64,
 		),
 		(
 			"moq_relay_control_rx_bytes_total",
 			"Control-message bytes decoded, including codec prefixes; excludes transport overhead.",
-			(|b: &moq_net::stats::Bytes| b.rx) as fn(&moq_net::stats::Bytes) -> u64,
+			(|b: &moq_net::stats::Totals| b.rx) as fn(&moq_net::stats::Totals) -> u64,
 		),
 	] {
 		let _ = writeln!(out, "# HELP {name} {help}");
@@ -892,7 +892,6 @@ fn render_uring(_out: &mut String, _workers: &[UringWorker]) {}
 #[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
-	use moq_net::Path;
 
 	#[tokio::test]
 	async fn stun_metrics_are_present_only_for_a_configured_listener() {
@@ -1235,8 +1234,8 @@ mod tests {
 		let tier = "a\\b\"} 9\nmoq_relay_requests_total{tier=\"x";
 		drop(
 			stats
-				.tier(moq_net::stats::Tier::new(moq_net::Path::new(tier).unwrap()))
-				.request(moq_net::Path::new("root").unwrap()),
+				.tier(moq_net::stats::Tier::new(moq_net::Path::from_static(tier)))
+				.request(moq_net::Path::from_static("root")),
 		);
 		let body = render_metrics(&stats.snapshot(), &[], &[]);
 		assert!(
@@ -1254,8 +1253,8 @@ mod tests {
 	fn request_metrics_never_open_a_session() {
 		let stats = moq_net::stats::Registry::new(Default::default());
 		let request = stats
-			.tier(moq_net::stats::Tier::new(Path::new("http").unwrap()))
-			.request(Path::new("root").unwrap());
+			.tier(moq_net::stats::Tier::new(moq_net::Path::from_static("http")))
+			.request(moq_net::Path::from_static("root"));
 		drop(request);
 		let body = render_metrics(&stats.snapshot(), &[], &[]);
 		assert!(body.contains("# TYPE moq_relay_requests_total counter"), "{body}");
@@ -1275,7 +1274,7 @@ mod tests {
 		let registry = moq_net::stats::Registry::new(Default::default());
 		for tier in ["internal", "edge"] {
 			let session = registry
-				.tier(moq_net::stats::Tier::new(Path::new(tier).unwrap()))
+				.tier(moq_net::stats::Tier::new(moq_net::Path::from_static(tier)))
 				.session(moq_net::Path::empty());
 			let source = moq_net::transport::Wire::new();
 			let guard = session.wire(source.clone());
@@ -1303,10 +1302,10 @@ mod tests {
 		let stats = moq_net::stats::Registry::new(Default::default());
 		let producer = moq_tokio::origin::spawn().with_stats(
 			stats
-				.tier(moq_net::stats::Tier::new(Path::new("edge").unwrap()))
-				.session(Path::new("root").unwrap()),
+				.tier(moq_net::stats::Tier::new(moq_net::Path::from_static("edge")))
+				.session(moq_net::Path::from_static("root")),
 		);
-		let broadcast = producer.create_broadcast(Path::new("demo/retired").unwrap()).unwrap();
+		let broadcast = producer.create_broadcast("demo/retired").unwrap();
 		broadcast.announce(Default::default()).unwrap();
 
 		let body = render_metrics(&stats.snapshot(), &[], &[]);
@@ -1348,21 +1347,21 @@ mod tests {
 
 		// Default-tier egress: an untagged local publisher writes, a tagged egress
 		// consumer reads it out, so publisher `bytes` advance on the default tier.
-		let default_ctx = stats.tier(Tier::default()).session(Path::new("acme").unwrap());
+		let default_ctx = stats.tier(Tier::default()).session(moq_net::Path::from_static("acme"));
 		let pub_origin = moq_tokio::origin::spawn();
 		let egress = pub_origin.consume().with_stats(default_ctx.clone());
 		let mut announced = egress.announced();
-		let pub_source = pub_origin.create_broadcast(Path::new("demo/x").unwrap()).unwrap();
+		let pub_source = pub_origin.create_broadcast("demo/x").unwrap();
 		pub_source.announce(Default::default()).unwrap();
 		let pub_track = pub_source.create_track("video", timed()).unwrap();
 
 		// Named-tier ingress: a tagged ingress producer writes, so subscriber
 		// `bytes` advance on the regional tier.
 		let regional_ctx = stats
-			.tier(Tier::new(Path::new("region/sjc").unwrap()))
-			.session(Path::new("peer").unwrap());
+			.tier(Tier::new(moq_net::Path::from_static("region/sjc")))
+			.session(moq_net::Path::from_static("peer"));
 		let sub_origin = moq_tokio::origin::spawn().with_stats(regional_ctx.clone());
-		let sub_source = sub_origin.create_broadcast(Path::new("demo/x").unwrap()).unwrap();
+		let sub_source = sub_origin.create_broadcast("demo/x").unwrap();
 		sub_source.announce(Default::default()).unwrap();
 		let sub_track = sub_source.create_track("audio", timed()).unwrap();
 
@@ -1373,10 +1372,7 @@ mod tests {
 		// egress bytes out of the default-tier broadcast.
 		let (update, active) = next_update(&mut announced).await.unwrap();
 		assert!(active);
-		let bc = egress
-			.request_broadcast(moq_net::Path::new(update.prefix.as_str()).unwrap(), None)
-			.await
-			.unwrap();
+		let bc = egress.request_broadcast(update.prefix.clone(), None).await.unwrap();
 		let mut egress_sub = bc.track("video").unwrap().subscribe(None).await.unwrap();
 		{
 			let mut group = pub_track.append_group().unwrap();

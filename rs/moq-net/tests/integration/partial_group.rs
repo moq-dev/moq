@@ -5,7 +5,6 @@
 //! not cache the frames it already has as the whole group.
 
 use crate::support;
-use moq_net::Path;
 
 use std::time::Duration;
 
@@ -43,18 +42,18 @@ async fn round(version: &str) -> Option<Result<Option<usize>, moq_net::Error>> {
 	let downstream = produce_origin(2);
 	let _pair = peer(version.parse::<Version>().unwrap(), &publisher, &downstream).await;
 
-	let broadcast = publisher.create_broadcast(Path::new("room").unwrap()).unwrap();
+	let broadcast = publisher.create_broadcast("room").unwrap();
 	let track = broadcast
 		.create_track("data", Info::default().with_timescale(Timescale::MILLI))
 		.unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
 	let consumer = downstream.consume();
-	moq_clock::timeout(TIMEOUT, consumer.routed(Path::new("room").unwrap()))
+	moq_clock::timeout(TIMEOUT, consumer.routed("room"))
 		.await
 		.expect("announce timeout")
 		.expect("routed");
-	let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast(Path::new("room").unwrap(), None))
+	let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast("room", None))
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");

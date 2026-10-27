@@ -14,7 +14,7 @@ use std::{
 };
 
 use crate::{
-	Error, Hop, Hops, Path, PathOwned,
+	Error, Hop, Hops, Path,
 	coding::{Form, varint},
 };
 
@@ -24,7 +24,7 @@ use super::{HopsRef, PathRef, Version};
 /// (the one excluding ANNOUNCE_OK's Hop ID).
 #[derive(Clone, Debug)]
 struct Entry {
-	suffix: PathOwned,
+	suffix: Path,
 	hops: Hops,
 }
 
@@ -45,13 +45,18 @@ impl Live {
 		self.entries.get(&id).map(Some).ok_or(Error::ProtocolViolation)
 	}
 
-	fn resolve_path(&self, path: PathRef<'_>) -> Result<PathOwned, Error> {
+	fn resolve_path(&self, path: PathRef) -> Result<Path, Error> {
 		let Some(base) = self.base(path.base)? else {
-			return Ok(path.rest.into_owned());
+			return Ok(path.rest);
 		};
 		let keep = usize::try_from(path.keep).map_err(|_| Error::ProtocolViolation)?;
-		let head = base.suffix.head(keep).ok_or(Error::ProtocolViolation)?;
-		let suffix = head.join(&path.rest);
+		let head = head(&base.suffix, keep).ok_or(Error::ProtocolViolation)?;
+		let suffix = match (head.is_empty(), path.rest.is_empty()) {
+			(true, _) => Ok(path.rest),
+			(false, true) => Path::new(head),
+			(false, false) => Path::concat(head, path.rest.as_str()),
+		}
+		.map_err(|_| Error::ProtocolViolation)?;
 		if suffix.parts().count() > Path::MAX_PARTS {
 			return Err(Error::ProtocolViolation);
 		}
@@ -73,6 +78,19 @@ impl Live {
 	}
 }
 
+/// The first `keep` segments of `path`, or `None` if it has fewer.
+fn head(path: &Path, keep: usize) -> Option<&str> {
+	if keep == 0 {
+		return Some("");
+	}
+	let s = path.as_str();
+	let mut ends = s
+		.match_indices('/')
+		.map(|(i, _)| i)
+		.chain((!s.is_empty()).then_some(s.len()));
+	ends.nth(keep - 1).map(|end| &s[..end])
+}
+
 /// Resolves the bases on a received announce stream. Only used on versions with
 /// announce ids; before lite-06 nothing is ever referenced, so nothing is recorded.
 #[derive(Debug, Default)]
@@ -82,7 +100,7 @@ pub(crate) struct AnnounceDecoder {
 
 impl AnnounceDecoder {
 	/// An ANNOUNCE_START: resolve it and assign it the next id.
-	pub fn start(&mut self, suffix: PathRef<'_>, hops: HopsRef) -> Result<(PathOwned, Hops), Error> {
+	pub fn start(&mut self, suffix: PathRef, hops: HopsRef) -> Result<(Path, Hops), Error> {
 		let suffix = self.live.resolve_path(suffix)?;
 		let hops = self.live.resolve_hops(hops)?;
 		let id = self.live.next;
@@ -99,7 +117,7 @@ impl AnnounceDecoder {
 
 	/// An ANNOUNCE_UPDATE: resolve its chain before replacing the old one, which it
 	/// may itself be based on.
-	pub fn update(&mut self, id: u64, hops: HopsRef) -> Result<(PathOwned, Hops), Error> {
+	pub fn update(&mut self, id: u64, hops: HopsRef) -> Result<(Path, Hops), Error> {
 		let hops = self.live.resolve_hops(hops)?;
 		let entry = self.live.entries.get_mut(&id).ok_or(Error::ProtocolViolation)?;
 		entry.hops = hops.clone();
@@ -107,7 +125,7 @@ impl AnnounceDecoder {
 	}
 
 	/// An ANNOUNCE_END: retire the id, returning its suffix.
-	pub fn end(&mut self, id: u64) -> Result<PathOwned, Error> {
+	pub fn end(&mut self, id: u64) -> Result<Path, Error> {
 		let entry = self.live.entries.remove(&id).ok_or(Error::ProtocolViolation)?;
 		Ok(entry.suffix)
 	}
@@ -232,7 +250,7 @@ impl AnnounceEncoder {
 	}
 
 	/// An ANNOUNCE_START: its id (on versions that assign one) and its wire form.
-	pub fn start(&mut self, suffix: PathOwned, hops: Hops) -> (Option<u64>, PathRef<'static>, HopsRef) {
+	pub fn start(&mut self, suffix: Path, hops: Hops) -> (Option<u64>, PathRef, HopsRef) {
 		if !self.version.has_announce_id() {
 			return (None, PathRef::literal(suffix), HopsRef::literal(hops));
 		}
@@ -278,7 +296,7 @@ impl AnnounceEncoder {
 	}
 
 	/// The wire form of `suffix`, sized from its parts so only the winner is built.
-	fn path_ref(&self, suffix: &PathOwned, next: u64) -> PathRef<'static> {
+	fn path_ref(&self, suffix: &Path, next: u64) -> PathRef {
 		let form: Form = self.version.into();
 		let literal = || PathRef::literal(suffix.clone());
 		let Some((keep, id)) = self.heads.longest(suffix.parts()) else {
@@ -287,7 +305,7 @@ impl AnnounceEncoder {
 		// Where the segments after `keep` start, sharing the suffix's buffer.
 		let s = suffix.as_str();
 		let start = s.match_indices('/').nth(keep - 1).map_or(s.len(), |(i, _)| i + 1);
-		let rest = suffix.slice_from(start).to_owned();
+		let rest = suffix.slice_from(start);
 
 		let base = next - id;
 		let keep = keep as u64;
@@ -334,7 +352,7 @@ fn varint_size(value: u64, form: Form) -> usize {
 }
 
 /// The bytes `path` takes on the wire: a varint length, then the string.
-fn string_size(path: &Path<'_>, form: Form) -> usize {
+fn string_size(path: &Path, form: Form) -> usize {
 	let len = path.as_str().len();
 	varint_size(len as u64, form) + len
 }
@@ -350,11 +368,11 @@ mod tests {
 		Hops::try_from(ids.iter().map(|id| Hop::from_wire(*id)).collect::<Vec<_>>()).unwrap()
 	}
 
-	fn path(base: u64, keep: u64, rest: &str) -> PathRef<'static> {
+	fn path(base: u64, keep: u64, rest: &str) -> PathRef {
 		PathRef {
 			base,
 			keep,
-			rest: Path::new(rest).unwrap().to_owned(),
+			rest: Path::new(rest).unwrap(),
 		}
 	}
 
@@ -366,7 +384,7 @@ mod tests {
 		}
 	}
 
-	fn literal(suffix: &str, ids: &[u64]) -> (PathRef<'static>, HopsRef) {
+	fn literal(suffix: &str, ids: &[u64]) -> (PathRef, HopsRef) {
 		(path(0, 0, suffix), chain(0, ids, 0))
 	}
 
@@ -495,10 +513,26 @@ mod tests {
 		));
 	}
 
+	#[test]
+	fn rejects_a_resolved_path_too_long() {
+		let mut decoder = AnnounceDecoder::default();
+		let head = "x".repeat(Path::MAX_BYTES - 2);
+		let (p, h) = literal(&head, &[]);
+		decoder.start(p, h).unwrap();
+
+		// `head/y` is exactly the limit, and one byte more is refused.
+		let (suffix, _) = decoder.start(path(1, 1, "y"), chain(0, &[], 0)).unwrap();
+		assert_eq!(suffix.len(), Path::MAX_BYTES);
+		assert!(matches!(
+			decoder.start(path(1, 1, "yz"), chain(0, &[], 0)),
+			Err(Error::ProtocolViolation)
+		));
+	}
+
 	/// Encode a message with `encoder`, decode it with `decoder`, and check that the
 	/// resolved values match the input.
 	fn start(encoder: &mut AnnounceEncoder, decoder: &mut AnnounceDecoder, suffix: &str, ids: &[u64]) -> (u64, usize) {
-		let (id, wire_path, wire_hops) = encoder.start(Path::new(suffix).unwrap().to_owned(), hops(ids));
+		let (id, wire_path, wire_hops) = encoder.start(Path::new(suffix).unwrap(), hops(ids));
 		let size = wire_path.encode_bytes(VERSION).unwrap().len() + wire_hops.encode_bytes(VERSION).unwrap().len();
 		let (got_path, got_hops) = decoder.start(wire_path, wire_hops).unwrap();
 		assert_eq!(got_path.as_str(), suffix);
@@ -552,7 +586,7 @@ mod tests {
 		// Shares a byte prefix with `a/b/d`, but no second segment.
 		start(&mut encoder, &mut decoder, "a/b-z", &[3]);
 
-		let (_, wire_path, wire_hops) = encoder.start(Path::new("a/b/d").unwrap().to_owned(), hops(&[5, 1u64 << 51]));
+		let (_, wire_path, wire_hops) = encoder.start(Path::from_static("a/b/d"), hops(&[5, 1u64 << 51]));
 		assert_eq!(wire_path, path(2, 2, "d"));
 		assert_eq!(wire_hops, chain(2, &[5], 1));
 	}
@@ -581,7 +615,7 @@ mod tests {
 			let suffix = format!("f{n}");
 			start(&mut encoder, &mut decoder, &suffix, &[1]);
 		}
-		let (_, wire_path, wire_hops) = encoder.start(Path::new("again").unwrap().to_owned(), hops(&[100]));
+		let (_, wire_path, wire_hops) = encoder.start(Path::from_static("again"), hops(&[100]));
 		assert_eq!(wire_hops, HopsRef::literal(hops(&[100])));
 		let (got_path, got_hops) = decoder.start(wire_path, wire_hops).unwrap();
 		assert_eq!(got_path.as_str(), "again");
@@ -593,19 +627,19 @@ mod tests {
 		let mut encoder = AnnounceEncoder::new(VERSION);
 		let mut decoder = AnnounceDecoder::default();
 		start(&mut encoder, &mut decoder, "a", &[1]);
-		let (_, wire_path, wire_hops) = encoder.start(Path::new("b").unwrap().to_owned(), hops(&[2]));
-		assert_eq!(wire_path, PathRef::literal(Path::new("b").unwrap()));
+		let (_, wire_path, wire_hops) = encoder.start(Path::from_static("b"), hops(&[2]));
+		assert_eq!(wire_path, PathRef::literal(Path::from_static("b")));
 		assert_eq!(wire_hops, HopsRef::literal(hops(&[2])));
 	}
 
 	#[test]
 	fn lite06_assigns_ids_without_bases() {
 		let mut encoder = AnnounceEncoder::new(Version::Lite06);
-		let (id, _, _) = encoder.start(Path::new("a/b").unwrap().to_owned(), hops(&[1]));
+		let (id, _, _) = encoder.start(Path::from_static("a/b"), hops(&[1]));
 		assert_eq!(id, Some(0));
-		let (id, wire_path, wire_hops) = encoder.start(Path::new("a/c").unwrap().to_owned(), hops(&[1]));
+		let (id, wire_path, wire_hops) = encoder.start(Path::from_static("a/c"), hops(&[1]));
 		assert_eq!(id, Some(1));
-		assert_eq!(wire_path, PathRef::literal(Path::new("a/c").unwrap()));
+		assert_eq!(wire_path, PathRef::literal(Path::from_static("a/c")));
 		assert_eq!(wire_hops, HopsRef::literal(hops(&[1])));
 		encoder.end(0);
 		assert_eq!(encoder.update(1, hops(&[1])), HopsRef::literal(hops(&[1])));
@@ -619,11 +653,11 @@ mod tests {
 	fn golden() -> Vec<crate::fuzz::Announced> {
 		use crate::fuzz::Announced;
 		vec![
-			Announced::Start(Path::new("room/a/cam").unwrap().to_owned(), hops(&[0x1111, 0x2222])),
-			Announced::Start(Path::new("room/a/mic").unwrap().to_owned(), hops(&[0x3333, 0x2222])),
+			Announced::Start(Path::from_static("room/a/cam"), hops(&[0x1111, 0x2222])),
+			Announced::Start(Path::from_static("room/a/mic"), hops(&[0x3333, 0x2222])),
 			Announced::Update(0, hops(&[0x4444, 0x2222])),
 			Announced::End(1),
-			Announced::Start(Path::new("room/b").unwrap().to_owned(), hops(&[0x5555, 0x2222])),
+			Announced::Start(Path::from_static("room/b"), hops(&[0x5555, 0x2222])),
 		]
 	}
 

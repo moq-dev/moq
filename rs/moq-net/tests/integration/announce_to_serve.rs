@@ -11,7 +11,6 @@
 //! is a virtual sleep.
 
 use crate::support;
-use moq_net::Path;
 
 use std::time::Duration;
 
@@ -62,13 +61,10 @@ fn drain(announced: &mut moq_net::announce::Consumer) -> Vec<String> {
 
 /// How a request for the path answers.
 async fn request(consumer: &origin::Consumer) -> Result<moq_net::broadcast::Consumer, String> {
-	consumer
-		.request_broadcast(Path::new(PATH).unwrap(), None)
-		.await
-		.map_err(|err| match err {
-			Error::Unroutable => "unroutable".to_string(),
-			err => err.to_string(),
-		})
+	consumer.request_broadcast(PATH, None).await.map_err(|err| match err {
+		Error::Unroutable => "unroutable".to_string(),
+		err => err.to_string(),
+	})
 }
 
 fn outcome(result: &Result<moq_net::broadcast::Consumer, String>) -> String {
@@ -148,7 +144,7 @@ async fn lifecycle(observer: Observer) -> Vec<String> {
 	let mut log = Vec::new();
 
 	// Created, not yet announced: nobody can see or reach it.
-	let broadcast = publisher.create_broadcast(Path::new(PATH).unwrap()).unwrap();
+	let broadcast = publisher.create_broadcast(PATH).unwrap();
 	let track = broadcast.create_track("video", timed()).unwrap();
 	moq_clock::sleep(SETTLE).await;
 	log.push(format!(

@@ -17,14 +17,11 @@ import { isWebTransportSupported } from "./browser.ts";
 import type { Established } from "./established.ts";
 import * as Extensions from "./extensions.ts";
 import { DISCOVERY_REMOVED, forwardAnnounced } from "./forward.ts";
-import { exchangeSetup, handsOff, legacyPeerImplementation } from "./handshake.ts";
+import { DEFAULT_TIMEOUT, exchangeSetup, handsOff, legacyPeerImplementation } from "./handshake.ts";
 import { type Credential, credential, fallback, hold } from "./tokens.ts";
 
 // Default head start for WebTransport before attempting the WebSocket fallback.
 const DEFAULT_WEBSOCKET_DELAY_MS = Milli(500);
-
-// Default bound on one connect, the dial and the MoQ handshake; matches the Rust client.
-const DEFAULT_TIMEOUT = Milli(30_000);
 
 // How long the first WebTransport dial may stay unopened before a second one dials alongside
 // it. The same moment as the WebSocket's default head start, so a fresh WebTransport flow
@@ -148,6 +145,18 @@ function offer(versions?: readonly string[]): Offer {
 	return { alpns: [...alpns], setup, explicit: versions !== undefined, setupToken: names.every(hasSetupToken) };
 }
 
+/** Copy a version list that can be offered, throwing a `TypeError` if it is empty or has an unsupported or duplicate name. */
+export function checkVersions(versions: readonly string[]): string[] {
+	if (versions.length === 0) throw new TypeError("versions must not be empty");
+	const seen = new Set<string>();
+	for (const name of versions) {
+		if (!Object.hasOwn(VERSIONS, name)) throw new TypeError(`unsupported version: ${name}`);
+		if (seen.has(name)) throw new TypeError(`duplicate version: ${name}`);
+		seen.add(name);
+	}
+	return [...versions];
+}
+
 /** Validate and snapshot an ordered version list before acquiring a connection. @internal */
 export function normalizeVersions(props?: {
 	versions?: readonly string[];
@@ -158,16 +167,7 @@ export function normalizeVersions(props?: {
 		throw new TypeError("webtransport.protocols was removed; set versions instead");
 	if (props?.websocket && "protocols" in props.websocket)
 		throw new TypeError("websocket.protocols was removed; set versions instead");
-	const versions = props?.versions;
-	if (versions === undefined) return undefined;
-	if (versions.length === 0) throw new TypeError("versions must not be empty");
-	const seen = new Set<string>();
-	for (const name of versions) {
-		if (!Object.hasOwn(VERSIONS, name)) throw new TypeError(`unsupported version: ${name}`);
-		if (seen.has(name)) throw new TypeError(`duplicate version: ${name}`);
-		seen.add(name);
-	}
-	return [...versions];
+	return props?.versions === undefined ? undefined : checkVersions(props.versions);
 }
 
 /** Options for {@link connect}. */
@@ -243,7 +243,7 @@ export interface ConnectProps {
 
 	/**
 	 * Build the session on `auth`, so it presents every token the handle holds and a route
-	 * naming one of its `Auth`s keeps it across a reconnect. Omit to give the session a handle
+	 * naming one of its `Credential`s keeps it across a reconnect. Omit to give the session a handle
 	 * of its own, which ends with it.
 	 *
 	 * The handle backs one active session at a time, plus the ones draining after a GOAWAY or a

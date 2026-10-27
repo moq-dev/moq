@@ -4,7 +4,6 @@
 //! watch, keeps a request open while anything at or beneath it is watched, and lets
 //! it go once nothing has been for a linger. A relay's link still asks for everything.
 
-use moq_net::Path;
 use std::time::Duration;
 
 use moq_net::{Error, Hop, Pattern, Patterns, Version, announce, origin};
@@ -48,7 +47,7 @@ impl Lazy {
 		let broadcasts = ["a/x", "b/y"]
 			.into_iter()
 			.map(|path| {
-				let broadcast = publisher.create_broadcast(Path::new(path).unwrap()).unwrap();
+				let broadcast = publisher.create_broadcast(path).unwrap();
 				broadcast.announce(Default::default()).unwrap();
 				broadcast
 			})
@@ -81,19 +80,14 @@ impl Lazy {
 	fn watch(&self, prefix: &str) -> announce::Consumer {
 		self.subscriber
 			.consume()
-			.scope(Path::new(prefix).unwrap(), &Patterns::from(Pattern::all()))
+			.scope(prefix, &Patterns::from(Pattern::all()))
 			.unwrap()
 			.announced()
 	}
 
 	/// Whether the client's origin routes `path` right now.
 	async fn routes(&self, path: &str) -> bool {
-		match self
-			.subscriber
-			.consume()
-			.request_broadcast(Path::new(path).unwrap(), None)
-			.await
-		{
+		match self.subscriber.consume().request_broadcast(path, None).await {
 			Ok(_) => true,
 			Err(Error::Unroutable) => false,
 			Err(err) => panic!("{path}: {err}"),
@@ -150,7 +144,7 @@ async fn a_new_session_asks_about_existing_watches() {
 	let subscriber = produce_origin(2);
 	let mut watch = subscriber
 		.consume()
-		.scope(Path::new("b").unwrap(), &Patterns::from(Pattern::all()))
+		.scope("b", &Patterns::from(Pattern::all()))
 		.unwrap()
 		.announced();
 	let lazy = Lazy::with("moq-lite-07-wip", subscriber).await;
@@ -264,12 +258,7 @@ async fn a_resolved_broadcast_keeps_its_route() {
 		let lazy = Lazy::new(version).await;
 		let mut watch = lazy.watch("a");
 		synced(&mut watch).await;
-		let broadcast = lazy
-			.subscriber
-			.consume()
-			.request_broadcast(Path::new("a/x").unwrap(), None)
-			.await
-			.unwrap();
+		let broadcast = lazy.subscriber.consume().request_broadcast("a/x", None).await.unwrap();
 		drop(watch);
 
 		moq_clock::sleep(LINGERED).await;
@@ -286,11 +275,11 @@ async fn waiting_on_a_path_asks_about_it() {
 	for version in VERSIONS {
 		let lazy = Lazy::new(version).await;
 		let consumer = lazy.subscriber.consume();
-		moq_clock::timeout(SETTLE, consumer.routed_broadcast(Path::new("a/x").unwrap()))
+		moq_clock::timeout(SETTLE, consumer.routed_broadcast("a/x"))
 			.await
 			.expect("routed in time")
 			.unwrap();
-		let mut followed = consumer.announced_broadcast(Path::new("b/y").unwrap(), None).unwrap();
+		let mut followed = consumer.announced_broadcast("b/y", None).unwrap();
 		moq_clock::timeout(SETTLE, followed.available())
 			.await
 			.expect("announced in time")
@@ -314,11 +303,7 @@ async fn a_relay_link_asks_for_everything() {
 			assert_eq!(lazy.requests(), 1, "{version}");
 			// Read through a plain handle: one taken from an upstream link hides its routes.
 			for path in ["a/x", "b/y"] {
-				relay
-					.consume()
-					.request_broadcast(Path::new(path).unwrap(), None)
-					.await
-					.unwrap();
+				relay.consume().request_broadcast(path, None).await.unwrap();
 			}
 		}
 	}
@@ -329,7 +314,7 @@ async fn a_relay_link_asks_for_everything() {
 async fn a_server_asks_for_everything() {
 	for version in VERSIONS {
 		let publisher = produce_origin(1);
-		let broadcast = publisher.create_broadcast(Path::new("a/x").unwrap()).unwrap();
+		let broadcast = publisher.create_broadcast("a/x").unwrap();
 		broadcast.announce(Default::default()).unwrap();
 		let relay = produce_origin(2);
 		let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
@@ -337,11 +322,7 @@ async fn a_server_asks_for_everything() {
 		options.server_subscribe = Some(relay.clone());
 		let _pair = connect_mock(options).await;
 		moq_clock::sleep(SETTLE).await;
-		relay
-			.consume()
-			.request_broadcast(Path::new("a/x").unwrap(), None)
-			.await
-			.unwrap();
+		relay.consume().request_broadcast("a/x", None).await.unwrap();
 	}
 }
 
@@ -352,7 +333,7 @@ async fn serving_the_peer_asks_nothing() {
 	for version in VERSIONS {
 		let local = produce_origin(2);
 		let remote = produce_origin(1);
-		let broadcast = remote.create_broadcast(Path::new("a/x").unwrap()).unwrap();
+		let broadcast = remote.create_broadcast("a/x").unwrap();
 		broadcast.announce(Default::default()).unwrap();
 
 		let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
@@ -372,7 +353,7 @@ async fn serving_the_peer_asks_nothing() {
 			.count();
 		assert_eq!(requests, 0, "{version}");
 		assert!(matches!(
-			local.consume().request_broadcast(Path::new("a/x").unwrap(), None).await,
+			local.consume().request_broadcast("a/x", None).await,
 			Err(Error::Unroutable)
 		));
 	}
@@ -499,7 +480,7 @@ async fn ietf_waiting_on_a_path_asks_about_it() {
 	for version in IETF {
 		let lazy = Lazy::new(version).await;
 		let consumer = lazy.subscriber.consume();
-		moq_clock::timeout(SETTLE, consumer.routed_broadcast(Path::new("a/x").unwrap()))
+		moq_clock::timeout(SETTLE, consumer.routed_broadcast("a/x"))
 			.await
 			.expect("routed in time")
 			.unwrap();
@@ -514,11 +495,7 @@ async fn ietf_a_relay_link_asks_for_everything() {
 		let relay = produce_origin(2);
 		let _lazy = Lazy::with(version, relay.clone().with_link(moq_net::origin::Link::Peer)).await;
 		for path in ["a/x", "b/y"] {
-			relay
-				.consume()
-				.request_broadcast(Path::new(path).unwrap(), None)
-				.await
-				.unwrap();
+			relay.consume().request_broadcast(path, None).await.unwrap();
 		}
 	}
 }

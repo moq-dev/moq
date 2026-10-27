@@ -4,7 +4,6 @@
 //! viewers ask for it, and keeps serving the cached copy after a reader leaves.
 
 use crate::support;
-use moq_net::Path;
 use moq_net::{Hop, Version, origin, track};
 use std::time::Duration;
 use support::harness::{MockConnectOptions, connect_mock};
@@ -20,9 +19,7 @@ async fn sequential_viewers_share_the_relays_fetched_groups() {
 	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {
 		let version: Version = version.parse().unwrap();
 		let publisher = origin(1);
-		let broadcast = publisher
-			.publish(Path::new("room").unwrap(), Default::default())
-			.unwrap();
+		let broadcast = publisher.publish("room", Default::default()).unwrap();
 		let track = broadcast
 			.create_track(
 				"video",
@@ -41,11 +38,7 @@ async fn sequential_viewers_share_the_relays_fetched_groups() {
 			options.server_publish = Some(relay.consume());
 			options.client_subscribe = Some(viewer.clone());
 			let pair = connect_mock(options).await;
-			let remote = viewer
-				.consume()
-				.routed_broadcast(Path::new("room").unwrap())
-				.await
-				.unwrap();
+			let remote = viewer.consume().routed_broadcast("room").await.unwrap();
 			viewers.push((viewer, pair, remote));
 		}
 		for round in 0..3 {

@@ -22,7 +22,7 @@ use super::Version;
 pub enum FetchType<'a> {
 	/// An inclusive range of a track, through draft-18.
 	Standalone {
-		namespace: Path<'a>,
+		namespace: Path,
 		track: Cow<'a, str>,
 		start: Location,
 		end: Location,
@@ -38,7 +38,7 @@ pub enum FetchType<'a> {
 	/// A track, with the range as a LOCATION_FILTER, from draft-22 on. Unfiltered is
 	/// everything from `{0, 0}` up to Largest Object.
 	Filtered {
-		namespace: Path<'a>,
+		namespace: Path,
 		track: Cow<'a, str>,
 		filter: Filter,
 	},
@@ -702,7 +702,7 @@ mod tests {
 			subscriber_priority: 128,
 			group_order: GroupOrder::Descending,
 			fetch_type: FetchType::Standalone {
-				namespace: Path::new("test").unwrap(),
+				namespace: Path::from_static("test"),
 				track: "video".into(),
 				start: Location { group: 0, object: 0 },
 				end: Location { group: 10, object: 5 },
@@ -727,7 +727,7 @@ mod tests {
 			subscriber_priority: 128,
 			group_order: GroupOrder::Descending,
 			fetch_type: FetchType::Standalone {
-				namespace: Path::new("test").unwrap(),
+				namespace: Path::from_static("test"),
 				track: "video".into(),
 				start: Location { group: 0, object: 0 },
 				end: Location { group: 10, object: 5 },
@@ -770,7 +770,7 @@ mod tests {
 			subscriber_priority: 128,
 			group_order: GroupOrder::Descending,
 			fetch_type: FetchType::Standalone {
-				namespace: Path::new("test").unwrap(),
+				namespace: Path::from_static("test"),
 				track: "video".into(),
 				start: Location { group: 0, object: 0 },
 				end: Location { group: 10, object: 5 },
@@ -795,7 +795,7 @@ mod tests {
 			subscriber_priority: 128,
 			group_order: GroupOrder::Descending,
 			fetch_type: FetchType::Standalone {
-				namespace: Path::new("test").unwrap(),
+				namespace: Path::from_static("test"),
 				track: "video".into(),
 				start: Location { group: 0, object: 0 },
 				end: Location { group: 10, object: 5 },
@@ -874,7 +874,7 @@ mod tests {
 			subscriber_priority: 128,
 			group_order: GroupOrder::Descending,
 			fetch_type: FetchType::Standalone {
-				namespace: Path::new("test").unwrap(),
+				namespace: Path::from_static("test"),
 				track: "video".into(),
 				start: Location { group: 0, object: 0 },
 				end: Location { group: 10, object: 5 },
@@ -967,7 +967,7 @@ mod tests {
 		assert_eq!(
 			fetch.fetch_type,
 			FetchType::Filtered {
-				namespace: Path::new("live").unwrap(),
+				namespace: Path::from_static("live"),
 				track: "video".into(),
 				filter: Filter::Absolute {
 					start: Location { group: 128, object: 0 },
@@ -989,7 +989,7 @@ mod tests {
 			subscriber_priority: 128,
 			group_order: GroupOrder::Descending,
 			fetch_type: FetchType::Filtered {
-				namespace: Path::new("live").unwrap(),
+				namespace: Path::from_static("live"),
 				track: "video".into(),
 				filter: Filter::Unfiltered,
 			},

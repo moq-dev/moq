@@ -1,7 +1,6 @@
 //! `moq import` over a real relay: at stdin EOF the process finishes its tracks and
 //! exits, and a subscriber sees the catalog finish rather than the publisher vanish.
 
-use hang::moq_net::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -93,13 +92,9 @@ async fn import_delivers_the_catalog_finish_at_eof() {
 		panic!("the first announce event is {event:?}, not a start");
 	};
 	assert_eq!(announce.prefix.as_str(), "demo");
-	let broadcast = running(
-		&mut child,
-		"the broadcast",
-		consumer.request_broadcast(Path::new("demo").unwrap(), None),
-	)
-	.await
-	.expect("announced broadcast resolves");
+	let broadcast = running(&mut child, "the broadcast", consumer.request_broadcast("demo", None))
+		.await
+		.expect("announced broadcast resolves");
 	let mut catalogs = hang::catalog::Catalog::<()>::subscribe(&broadcast)
 		.await
 		.expect("subscribe to the catalog");
@@ -172,13 +167,9 @@ async fn a_short_import_drains_its_media_to_a_waiting_subscriber() {
 	running(&mut child, "the announce", announced.next())
 		.await
 		.expect("origin closed");
-	let broadcast = running(
-		&mut child,
-		"the broadcast",
-		consumer.request_broadcast(Path::new("demo").unwrap(), None),
-	)
-	.await
-	.expect("announced broadcast resolves");
+	let broadcast = running(&mut child, "the broadcast", consumer.request_broadcast("demo", None))
+		.await
+		.expect("announced broadcast resolves");
 	let mut catalogs = running(
 		&mut child,
 		"the catalog subscription",

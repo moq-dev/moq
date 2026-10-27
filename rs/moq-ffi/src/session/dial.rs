@@ -50,8 +50,8 @@ pub(crate) struct Dial {
 	bandwidth: moq_net::bandwidth::Allocator,
 	/// The session's receive estimate, forwarded while a consumer holds it.
 	recv: moq_net::bandwidth::Weak,
-	/// Persistent from before the handshake, so a token added while dialing waits for the
-	/// session; ended with the dial.
+	/// Persistent from before the handshake, so a grant consumer taken while dialing follows
+	/// the session; ended with the dial.
 	auth: moq_net::auth::Handle,
 }
 
@@ -67,7 +67,7 @@ impl Dial {
 		let recv = moq_net::bandwidth::Producer::new();
 		let bandwidth = moq_net::bandwidth::Allocator::new(send.consume());
 		let auth = moq_net::auth::Handle::new();
-		let client = client.with_bandwidth(bandwidth.clone()).with_auth(auth.clone());
+		let client = client.with_allocator(bandwidth.clone()).with_auth(auth.clone());
 		let dial = Self {
 			state: state.clone(),
 			bandwidth,
@@ -188,7 +188,7 @@ impl Dial {
 		}
 	}
 
-	pub fn bandwidth(&self) -> moq_net::bandwidth::Allocator {
+	pub fn allocator(&self) -> moq_net::bandwidth::Allocator {
 		self.bandwidth.clone()
 	}
 

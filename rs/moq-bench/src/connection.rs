@@ -126,7 +126,7 @@ pub async fn run(ctx: Connection) {
 	};
 
 	for (relative, path) in paths {
-		let broadcast = match moq_net::Path::new(&path).and_then(|path| publish.create_broadcast(path)) {
+		let broadcast = match publish.create_broadcast(&path) {
 			Ok(broadcast) => broadcast,
 			Err(err) => {
 				tracing::error!(connection, %err, "failed to create broadcast");
@@ -304,10 +304,7 @@ async fn produce(
 fn discover(consume: &moq_net::origin::Producer, name: &str) -> moq_net::origin::Consumer {
 	consume
 		.consume()
-		.scope(
-			moq_net::Path::new(name).expect("a valid bench namespace"),
-			&moq_net::Patterns::from(moq_net::Pattern::all()),
-		)
+		.scope(name, &moq_net::Patterns::from(moq_net::Pattern::all()))
 		.expect("origin must permit the bench namespace")
 }
 
@@ -318,12 +315,11 @@ async fn subscribe_named(
 	max_delay: Duration,
 	stats: Arc<Stats>,
 ) -> anyhow::Result<()> {
-	let path = moq_net::PathOwned::try_from(path)?;
 	consume
-		.routed(&path)
+		.routed(path.as_str())
 		.await
 		.ok_or_else(|| anyhow::anyhow!("target broadcast was never announced: {path}"))?;
-	let broadcast = consume.request_broadcast(&path, None).await?;
+	let broadcast = consume.request_broadcast(path.as_str(), None).await?;
 	drain(broadcast, max_delay, &stats).await
 }
 
@@ -384,7 +380,7 @@ async fn subscribe(
 
 	let mut selected = pool.len() as u64;
 	for path in pool {
-		let Ok(broadcast) = consume.request_broadcast(moq_net::Path::new(&path)?, None).await else {
+		let Ok(broadcast) = consume.request_broadcast(path.as_str(), None).await else {
 			continue;
 		};
 		spawn_drain(&mut tasks, path, broadcast, max_delay, stats.clone());
@@ -406,7 +402,7 @@ async fn subscribe(
 		if own.contains(&path) || !seen.insert(path.clone()) {
 			continue;
 		}
-		let Ok(broadcast) = consume.request_broadcast(moq_net::Path::new(&path)?, None).await else {
+		let Ok(broadcast) = consume.request_broadcast(path.as_str(), None).await else {
 			continue;
 		};
 		selected += 1;
@@ -668,7 +664,6 @@ impl Drop for Gauge<'_> {
 )]
 mod tests {
 	use super::*;
-	use moq_net::Path;
 
 	#[test]
 	fn a_broadcast_is_established_once_and_its_gauge_drops_with_the_producer() {
@@ -980,26 +975,20 @@ mod tests {
 		let origin = moq_tokio::origin::spawn();
 
 		// The relay-internal broadcast: announced, but with no bench data track.
-		let _internal = origin.create_broadcast(Path::new(".stats/node/host").unwrap()).unwrap();
+		let _internal = origin.create_broadcast(".stats/node/host").unwrap();
 		_internal.announce(Default::default()).unwrap();
 
 		// Our own broadcast: in the namespace, but excluded via the `own` set
 		// (paths relative to the namespace, matching the scoped announce consumer).
-		let _previous = origin
-			.create_broadcast(Path::new("bench/previous/0/0").unwrap())
-			.unwrap();
+		let _previous = origin.create_broadcast("bench/previous/0/0").unwrap();
 		_previous.announce(Default::default()).unwrap();
 
-		let _own = origin
-			.create_broadcast(Path::new("bench/current/9/9").unwrap())
-			.unwrap();
+		let _own = origin.create_broadcast("bench/current/9/9").unwrap();
 		_own.announce(Default::default()).unwrap();
 		let own = HashSet::from(["9/9".to_string()]);
 
 		// One legitimate peer under the bench namespace with a single finished group.
-		let peer = origin
-			.create_broadcast(Path::new("bench/current/0/0").unwrap())
-			.unwrap();
+		let peer = origin.create_broadcast("bench/current/0/0").unwrap();
 		peer.announce(Default::default()).unwrap();
 		let track = peer.create_track(TRACK, timed()).unwrap();
 		let mut group = track.append_group().unwrap();
@@ -1031,7 +1020,7 @@ mod tests {
 			stats.clone(),
 		));
 
-		let broadcast = origin.create_broadcast(Path::new("bench/run/chat").unwrap()).unwrap();
+		let broadcast = origin.create_broadcast("bench/run/chat").unwrap();
 		broadcast.announce(Default::default()).unwrap();
 		let track = broadcast.create_track(TRACK, timed()).unwrap();
 		tokio::task::yield_now().await;

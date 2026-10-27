@@ -23,7 +23,7 @@ mod linux {
 	use std::time::Instant;
 
 	use criterion::{BenchmarkId, Criterion, Throughput};
-	use moq_net::{Path, origin};
+	use moq_net::origin;
 	use moq_uring::{Config, Error, Worker, quic, udp};
 
 	use super::support;
@@ -112,9 +112,7 @@ mod linux {
 				});
 			});
 
-			let broadcast = pub_origin
-				.create_broadcast(Path::new("bench").unwrap())
-				.expect("create broadcast");
+			let broadcast = pub_origin.create_broadcast("bench").expect("create broadcast");
 			broadcast.announce(Default::default()).expect("create broadcast");
 			let track = broadcast.create_track("data", timed()).expect("create track");
 
@@ -178,12 +176,9 @@ mod linux {
 					});
 					let bc = {
 						let consumer = sub_origin.consume();
+						consumer.routed("bench").await.expect("broadcast announced");
 						consumer
-							.routed(Path::new("bench").unwrap())
-							.await
-							.expect("broadcast announced");
-						consumer
-							.request_broadcast(Path::new("bench").unwrap(), None)
+							.request_broadcast("bench", None)
 							.await
 							.expect("broadcast resolves")
 					};

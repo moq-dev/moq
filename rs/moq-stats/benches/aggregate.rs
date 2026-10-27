@@ -48,16 +48,14 @@ struct Node {
 
 impl Node {
 	fn new(origin: &origin::Producer, name: &str) -> Self {
-		let source = origin
-			.create_broadcast(moq_net::Path::new(format!(".stats/node/{name}").as_str()).unwrap())
-			.unwrap();
+		let source = origin.create_broadcast(format!(".stats/node/{name}").as_str()).unwrap();
 		let epoch = Epoch::mint();
 		source
 			.announce(origin::Route::default().with_epoch(epoch.clone()))
 			.unwrap();
 		let track = source
 			.create_track(
-				group_track(moq_net::Path::new("acme").unwrap()),
+				group_track(moq_net::Path::from_static("acme")),
 				moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 			)
 			.unwrap();
@@ -120,7 +118,7 @@ async fn measure(live: usize, departed: usize, grace: Duration, state: State) ->
 	let (origin, driver) = origin::Producer::new(origin::Config::default());
 	let driver = tokio::spawn(moq_net::time::run(driver));
 	let agg = aggregate::Consumer::new(origin.consume(), aggregate::Config::new().with_grace(grace));
-	let mut traffic = agg.group(moq_net::Path::new("acme").unwrap());
+	let mut traffic = agg.group(moq_net::Path::from_static("acme"));
 
 	// Every node contributes 1 byte per path, so the total counts nodes seen.
 	let mut total = 0;

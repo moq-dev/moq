@@ -97,7 +97,16 @@ export class Source {
 				for (const [name, config] of Object.entries(renditions)) {
 					// `supported` comes from the consumer, so we cannot assume it ever settles. A rerun
 					// waits for the tasks it spawned, so an unraced probe would hold the next run shut.
-					const isSupported = await effect.race(supported(config));
+					let isSupported = false;
+					try {
+						isSupported = !!(await effect.race(supported(config)));
+					} catch (err) {
+						if (effect.abort.aborted) return;
+						console.warn(
+							`[Source] audio rendition ${name} (${config.codec}) support probe failed; treating as unsupported`,
+							err,
+						);
+					}
 
 					// Torn down: stop probing and publish nothing, since the rerun redoes this.
 					if (effect.abort.aborted) return;

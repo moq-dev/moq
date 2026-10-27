@@ -79,7 +79,6 @@ impl<E: CatalogExt> From<moq_net::track::Subscriber> for Consumer<E> {
 
 #[cfg(test)]
 mod test {
-	use moq_net::Path;
 	use std::task::Poll;
 
 	use super::*;
@@ -120,7 +119,7 @@ mod test {
 
 	fn referencing(rel: &str) -> hang::catalog::AudioConfig {
 		let mut config = opus();
-		config.broadcast = Some(moq_net::path::Relative::new(rel).into_owned());
+		config.broadcast = Some(moq_net::path::Relative::new(rel).unwrap());
 		config
 	}
 
@@ -131,9 +130,7 @@ mod test {
 	/// resolves against.
 	fn publish_catalog(published: Catalog<()>) -> Result<Option<Catalog>> {
 		let origin = crate::source::produce_origin();
-		let broadcast = origin
-			.create_broadcast(Path::new("a/pub").unwrap())
-			.expect("broadcast should create");
+		let broadcast = origin.create_broadcast("a/pub").expect("broadcast should create");
 		let track = broadcast
 			.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
 			.expect("catalog track should create");
@@ -166,10 +163,8 @@ mod test {
 	/// takes when it answers an origin request.
 	async fn publish_catalog_served(published: Catalog<()>) -> Result<Option<Catalog>> {
 		let origin = crate::source::produce_origin();
-		let dynamic = origin.dynamic(moq_net::Path::new("").unwrap()).unwrap();
-		let requesting = origin
-			.consume()
-			.request_broadcast(moq_net::Path::new("a/pub").unwrap(), None);
+		let dynamic = origin.requests("").unwrap();
+		let requesting = origin.consume().request_broadcast("a/pub", None);
 		// The handler hands its route back: dropping it would retract the route and end
 		// the broadcast it just served.
 		let handler = tokio::spawn(async move {
@@ -221,7 +216,7 @@ mod test {
 	fn soliciting(reference: &str) -> Catalog {
 		let (mut catalog, _) = catalog_payload("here");
 		catalog.echo = Some(hang::catalog::Echo::new(
-			moq_net::path::Relative::new(reference).into_owned(),
+			moq_net::path::Relative::new(reference).unwrap(),
 		));
 		catalog
 	}
@@ -332,7 +327,7 @@ mod test {
 		published.audio.renditions.insert("here".to_string(), opus());
 
 		let mut text = hang::catalog::TextConfig::new(hang::catalog::TextFormat::Vtt);
-		text.broadcast = Some(moq_net::path::Relative::new("../../../elsewhere").into_owned());
+		text.broadcast = Some(moq_net::path::Relative::new("../../../elsewhere").unwrap());
 		published.text.renditions.insert("captions".to_string(), text);
 
 		match publish_catalog(published) {
@@ -351,16 +346,16 @@ mod test {
 			let mut published = Catalog::<()>::default();
 			published.audio.renditions.insert("here".to_string(), opus());
 
-			let escaping = moq_net::path::Relative::new("../../../elsewhere").into_owned();
+			let escaping = moq_net::path::Relative::new("../../../elsewhere");
 			match section {
 				"json" => {
 					let mut config = hang::catalog::JsonConfig::new(hang::catalog::Mode::Stream);
-					config.broadcast = Some(escaping);
+					config.broadcast = Some(escaping.unwrap());
 					published.json.tracks.insert("chat".to_string(), config);
 				}
 				_ => {
 					let mut config = hang::catalog::BinaryConfig::new(hang::catalog::Mode::Stream);
-					config.broadcast = Some(escaping);
+					config.broadcast = Some(escaping.unwrap());
 					published.binary.tracks.insert("blobs".to_string(), config);
 				}
 			}

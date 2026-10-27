@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 use moq_net::track::{Info, Range, Subscription};
-use moq_net::{Hop, Path, Timescale, Timestamp, Version, origin, track};
+use moq_net::{Hop, Timescale, Timestamp, Version, origin, track};
 
 use crate::support::harness::{peer, spawn};
 
@@ -55,7 +55,7 @@ impl Chain {
 			}
 			None => links.push(peer(version, &publisher, &viewer).await),
 		}
-		let broadcast = publisher.create_broadcast(Path::new("live").unwrap()).unwrap();
+		let broadcast = publisher.create_broadcast("live").unwrap();
 		let source = broadcast
 			.create_track("video", Info::default().with_timescale(Timescale::MILLI))
 			.unwrap();
@@ -82,11 +82,8 @@ impl Chain {
 	/// Subscribe from the viewer with `budget`, reading from the oldest group still around.
 	async fn subscribe(&self, budget: Duration) -> track::Subscriber {
 		let consumer = self.viewer.consume();
-		consumer.routed(Path::new("live").unwrap()).await.unwrap();
-		let remote = consumer
-			.request_broadcast(Path::new("live").unwrap(), None)
-			.await
-			.unwrap();
+		consumer.routed("live").await.unwrap();
+		let remote = consumer.request_broadcast("live", None).await.unwrap();
 		let subscription = Subscription::default()
 			.with_max_delay(budget)
 			.with_ranges([Range::oldest()]);

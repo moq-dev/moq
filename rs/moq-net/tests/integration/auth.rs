@@ -5,7 +5,6 @@
 //! moq-lite-07-wip and on moq-transport with the MoQ Auth extension.
 
 use crate::support;
-use moq_net::Path;
 
 use std::time::Duration;
 
@@ -170,7 +169,7 @@ async fn moqt_22_renewing_a_cancelled_announce_keeps_the_session() {
 		let mut tokens = serve(pair.requests.take().unwrap(), |_| Some(Grant::all()));
 		let (first, answer) = pair.client.auth().add("first").await.expect("kept for requests");
 		assert_eq!(answer, auth::Answer::Requests);
-		let broadcast = client_origin.create_broadcast(Path::new("room/x").unwrap()).unwrap();
+		let broadcast = client_origin.create_broadcast("room/x").unwrap();
 		broadcast.announce(origin::Route::default().with_auth(first)).unwrap();
 		let (_, first) = tokens.next().await.expect("the announce's token");
 
@@ -201,7 +200,7 @@ async fn moqt_22_a_cancelled_renewal_keeps_the_session() {
 			(token == b"first").then(Grant::all)
 		});
 		let (first, _) = pair.client.auth().add("first").await.expect("kept for requests");
-		let broadcast = client_origin.create_broadcast(Path::new("room/x").unwrap()).unwrap();
+		let broadcast = client_origin.create_broadcast("room/x").unwrap();
 		broadcast.announce(origin::Route::default().with_auth(first)).unwrap();
 		let (_, first) = tokens.next().await.expect("the announce's token");
 
@@ -225,7 +224,7 @@ async fn moqt_22_dropping_the_old_grant_with_its_renewal_keeps_the_announce() {
 		let (mut pair, client_origin, server_origin) = connect_route_auth(MOQT_22).await;
 		let mut requests = pair.requests.take().unwrap();
 		let (first, _) = pair.client.auth().add("first").await.expect("kept for requests");
-		let broadcast = client_origin.create_broadcast(Path::new("room/x").unwrap()).unwrap();
+		let broadcast = client_origin.create_broadcast("room/x").unwrap();
 		broadcast.announce(origin::Route::default().with_auth(first)).unwrap();
 		let first = requests
 			.next()
@@ -280,7 +279,7 @@ async fn moqt_22_a_revoked_route_auth_remakes_its_announce() {
 		let (first, _) = pair.client.auth().add("first").await.expect("granted");
 		let (token, presented) = tokens.next().await.expect("the AUTH stream's token");
 		assert_eq!(token, b"first");
-		let broadcast = client_origin.create_broadcast(Path::new("room/x").unwrap()).unwrap();
+		let broadcast = client_origin.create_broadcast("room/x").unwrap();
 		broadcast.announce(origin::Route::default().with_auth(first)).unwrap();
 		let (token, carried) = tokens.next().await.expect("the announce's token");
 		assert_eq!(token, b"first");
@@ -340,7 +339,7 @@ async fn a_route_auth_survives_a_reconnect(version: &'static str) {
 		let mut first = connect_route_auth_on(version, &client_origin, &server_origin, Some(handle.clone())).await;
 		let mut tokens = serve(first.requests.take().unwrap(), |_| Some(Grant::all()));
 		let (token, _) = handle.add("first").await.expect("kept for requests");
-		let broadcast = client_origin.create_broadcast(Path::new("room/x").unwrap()).unwrap();
+		let broadcast = client_origin.create_broadcast("room/x").unwrap();
 		broadcast.announce(origin::Route::default().with_auth(token)).unwrap();
 		let (token, _first) = tokens.next().await.expect("the announce's token");
 		assert_eq!(token, b"first");
@@ -366,7 +365,7 @@ async fn a_route_auth_renews_its_announce(version: &'static str) {
 		let mut tokens = serve(pair.requests.take().unwrap(), |_| Some(Grant::all()));
 
 		let (first, _) = pair.client.auth().add("first").await.expect("kept for requests");
-		let broadcast = client_origin.create_broadcast(Path::new("room/x").unwrap()).unwrap();
+		let broadcast = client_origin.create_broadcast("room/x").unwrap();
 		broadcast.announce(origin::Route::default().with_auth(first)).unwrap();
 		let (token, _first) = tokens.next().await.expect("the announce's token");
 		assert_eq!(token, b"first");
@@ -585,8 +584,8 @@ async fn both_sides_learn_their_grant_from_scoped_origins(version: &'static str)
 			version: Some(version),
 			client_publish: Some(produce_origin(2)),
 			client_subscribe: Some(produce_origin(3)),
-			server_publish: Some(relay.scope(Path::new("").unwrap(), &patterns(&["room"])).unwrap()),
-			server_subscribe: Some(relay.scope(Path::new("").unwrap(), &patterns(&["room/alice"])).unwrap()),
+			server_publish: Some(relay.scope("", &patterns(&["room"])).unwrap()),
+			server_subscribe: Some(relay.scope("", &patterns(&["room/alice"])).unwrap()),
 			..Default::default()
 		})
 		.await;
@@ -628,18 +627,18 @@ async fn an_out_of_scope_announce_aborts_with_the_path(version: &'static str) {
 		let pair = connect(Options {
 			version: Some(version),
 			client_publish: Some(publisher.clone()),
-			server_subscribe: Some(relay.scope(Path::new("").unwrap(), &patterns(&["baz"])).unwrap()),
+			server_subscribe: Some(relay.scope("", &patterns(&["baz"])).unwrap()),
 			..Default::default()
 		})
 		.await;
 
 		// In scope: served, and nothing aborts.
-		let ok = publisher.create_broadcast(Path::new("baz/ok").unwrap()).unwrap();
+		let ok = publisher.create_broadcast("baz/ok").unwrap();
 		ok.announce(Default::default()).unwrap();
 		wait_announced(&relay.consume(), "baz/ok", true).await;
 		assert_eq!(pair.client_transport.close_reason(), None);
 
-		let bad = publisher.create_broadcast(Path::new("foo/bar").unwrap()).unwrap();
+		let bad = publisher.create_broadcast("foo/bar").unwrap();
 		bad.announce(Default::default()).unwrap();
 		let err = pair.server.closed().await;
 		assert!(
@@ -658,17 +657,13 @@ async fn an_out_of_scope_announce_aborts_with_the_path(version: &'static str) {
 async fn a_broadcast_published_before_the_grant_is_checked(version: &'static str) {
 	within(async {
 		let publisher = produce_origin(2);
-		let early = publisher.create_broadcast(Path::new("foo/bar").unwrap()).unwrap();
+		let early = publisher.create_broadcast("foo/bar").unwrap();
 		early.announce(Default::default()).unwrap();
 
 		let pair = connect(Options {
 			version: Some(version),
 			client_publish: Some(publisher.clone()),
-			server_subscribe: Some(
-				produce_origin(1)
-					.scope(Path::new("").unwrap(), &patterns(&["baz"]))
-					.unwrap(),
-			),
+			server_subscribe: Some(produce_origin(1).scope("", &patterns(&["baz"])).unwrap()),
 			..Default::default()
 		})
 		.await;
@@ -704,7 +699,7 @@ async fn an_unanswered_token_holds_the_check(version: &'static str) {
 		let auth = pair.client.auth();
 		let pending = moq_clock::sim::spawn(async move { auth.add("new").await });
 		let unanswered = requests.next().await.unwrap();
-		let broadcast = publisher.create_broadcast(Path::new("foo/bar").unwrap()).unwrap();
+		let broadcast = publisher.create_broadcast("foo/bar").unwrap();
 		broadcast.announce(Default::default()).unwrap();
 		moq_clock::sleep(Duration::from_secs(1)).await;
 		use futures::FutureExt;
@@ -715,7 +710,7 @@ async fn an_unanswered_token_holds_the_check(version: &'static str) {
 		let _issued = unanswered.accept(grant(&["foo"], &[]));
 		let _token = pending.await.unwrap().unwrap();
 		assert_eq!(granted(&pair.client).await, grant(&["baz", "foo"], &[]));
-		let bad = publisher.create_broadcast(Path::new("still-bad").unwrap()).unwrap();
+		let bad = publisher.create_broadcast("still-bad").unwrap();
 		bad.announce(Default::default()).unwrap();
 		assert!(matches!(
 			pair.server.closed().await,
@@ -746,7 +741,7 @@ async fn a_broadcast_withdrawn_while_its_token_waits_is_not_refused(version: &'s
 		let auth = pair.client.auth();
 		let pending = moq_clock::sim::spawn(async move { auth.add("new").await });
 		let unanswered = requests.next().await.unwrap();
-		let withdrawn = publisher.create_broadcast(Path::new("foo/bar").unwrap()).unwrap();
+		let withdrawn = publisher.create_broadcast("foo/bar").unwrap();
 		withdrawn.announce(Default::default()).unwrap();
 		moq_clock::sleep(Duration::from_secs(1)).await;
 		withdrawn.unannounce();
@@ -755,7 +750,7 @@ async fn a_broadcast_withdrawn_while_its_token_waits_is_not_refused(version: &'s
 		let _token = pending.await.unwrap().unwrap();
 		assert_eq!(granted(&pair.client).await, grant(&["baz", "other"], &[]));
 		// Still enforcing: the next uncovered broadcast is the one named.
-		let bad = publisher.create_broadcast(Path::new("still-bad").unwrap()).unwrap();
+		let bad = publisher.create_broadcast("still-bad").unwrap();
 		bad.announce(Default::default()).unwrap();
 		assert!(matches!(
 			pair.server.closed().await,
@@ -794,9 +789,9 @@ async fn tokens_union_and_withdrawing_one_shrinks_it(version: &'static str) {
 		assert_eq!(t1.grant().peek(), Some(grant(&["b"], &[])));
 		assert_eq!(granted(&pair.client).await, grant(&["a", "b"], &[]));
 
-		let a = publisher.create_broadcast(Path::new("a/x").unwrap()).unwrap();
+		let a = publisher.create_broadcast("a/x").unwrap();
 		a.announce(Default::default()).unwrap();
-		let b = publisher.create_broadcast(Path::new("b/y").unwrap()).unwrap();
+		let b = publisher.create_broadcast("b/y").unwrap();
 		b.announce(Default::default()).unwrap();
 		let served = relay.consume();
 		wait_announced(&served, "a/x", true).await;
@@ -862,7 +857,7 @@ async fn a_revoked_grant_withdraws_and_can_be_restored(version: &'static str) {
 		});
 		let (_, setup) = issued.next().await.unwrap();
 
-		let a = publisher.create_broadcast(Path::new("a/x").unwrap()).unwrap();
+		let a = publisher.create_broadcast("a/x").unwrap();
 		a.announce(Default::default()).unwrap();
 		let served = relay.consume();
 		wait_announced(&served, "a/x", true).await;
@@ -871,7 +866,7 @@ async fn a_revoked_grant_withdraws_and_can_be_restored(version: &'static str) {
 		wait_for(pair.client.auth().grant(), |g| g == &Some(Grant::default())).await;
 		wait_announced(&served, "a/x", false).await;
 		// Still published locally, and the session survives the empty union.
-		assert!(publisher.consume().routed(Path::new("a/x").unwrap()).await.is_some());
+		assert!(publisher.consume().routed("a/x").await.is_some());
 		assert_eq!(pair.client_transport.close_reason(), None);
 
 		let (_again, _) = pair.client.auth().add("again").await.expect("re-authorized");
@@ -1110,7 +1105,7 @@ async fn exact_and_subtree_grants_admit_their_broadcast(version: &'static str) {
 	for scope in ["ch1", "ch1/**"] {
 		within(async {
 			let relay = produce_origin(1);
-			let broadcast = relay.create_broadcast(Path::new("ch1").unwrap()).unwrap();
+			let broadcast = relay.create_broadcast("ch1").unwrap();
 			let track = broadcast.create_track("video", timed()).unwrap();
 			broadcast.announce(Default::default()).unwrap();
 
@@ -1119,7 +1114,7 @@ async fn exact_and_subtree_grants_admit_their_broadcast(version: &'static str) {
 			let pair = connect(Options {
 				version: Some(version),
 				client_subscribe: Some(received.clone()),
-				server_publish: Some(relay.scope(Path::new("").unwrap(), &scope).unwrap()),
+				server_publish: Some(relay.scope("", &scope).unwrap()),
 				..Default::default()
 			})
 			.await;
@@ -1128,11 +1123,7 @@ async fn exact_and_subtree_grants_admit_their_broadcast(version: &'static str) {
 			group
 				.write_frame(moq_net::Timestamp::from_millis(0).unwrap(), b"frame".as_ref())
 				.unwrap();
-			let remote = received
-				.consume()
-				.routed_broadcast(Path::new("ch1").unwrap())
-				.await
-				.unwrap();
+			let remote = received.consume().routed_broadcast("ch1").await.unwrap();
 			let prefs = moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10));
 			let mut sub = remote.track("video").unwrap().subscribe(prefs).await.unwrap();
 			sub.recv_group().await.unwrap().expect("a group");
@@ -1153,7 +1144,7 @@ async fn exact_and_subtree_grants_admit_their_broadcast(version: &'static str) {
 /// version with AUTH has opened its Auth Stream on both sides.
 async fn connect_announced(version: &'static str) -> (Pair, moq_net::origin::Publication) {
 	let client_origin = produce_origin(2);
-	let broadcast = client_origin.create_broadcast(Path::new("room/x").unwrap()).unwrap();
+	let broadcast = client_origin.create_broadcast("room/x").unwrap();
 	broadcast.announce(Default::default()).unwrap();
 	let server_origin = produce_origin(1);
 	let pair = connect(Options {
@@ -1170,7 +1161,7 @@ async fn connect_announced(version: &'static str) -> (Pair, moq_net::origin::Pub
 async fn a_live_subscription_survives_union_renewal(version: &'static str) {
 	within(async {
 		let publisher = produce_origin(1);
-		let broadcast = publisher.create_broadcast(Path::new("room/x").unwrap()).unwrap();
+		let broadcast = publisher.create_broadcast("room/x").unwrap();
 		let published = broadcast.create_track("video", timed()).unwrap();
 		broadcast.announce(Default::default()).unwrap();
 		let received = produce_origin(2);
@@ -1190,11 +1181,7 @@ async fn a_live_subscription_survives_union_renewal(version: &'static str) {
 			requests.next().await.unwrap().accept(grant(&[], &["room"]))
 		});
 		let first = first.unwrap();
-		let remote = received
-			.consume()
-			.routed_broadcast(Path::new("room/x").unwrap())
-			.await
-			.unwrap();
+		let remote = received.consume().routed_broadcast("room/x").await.unwrap();
 		let mut group = published.append_group().unwrap();
 		group
 			.write_frame(moq_net::Timestamp::from_millis(0).unwrap(), b"first".as_ref())
@@ -1235,12 +1222,12 @@ async fn a_revoked_grant_cancels_its_subscriptions(version: &'static str) {
 
 		// The server publishes room/x to the client; the client publishes up/y to the server.
 		let server_origin = produce_origin(1);
-		let down = server_origin.create_broadcast(Path::new("room/x").unwrap()).unwrap();
+		let down = server_origin.create_broadcast("room/x").unwrap();
 		let down_track = down.create_track("video", timed()).unwrap();
 		down.announce(Default::default()).unwrap();
 
 		let client_origin = produce_origin(2);
-		let up = client_origin.create_broadcast(Path::new("up/y").unwrap()).unwrap();
+		let up = client_origin.create_broadcast("up/y").unwrap();
 		let up_track = up.create_track("video", timed()).unwrap();
 		up.announce(Default::default()).unwrap();
 
@@ -1265,19 +1252,11 @@ async fn a_revoked_grant_cancels_its_subscriptions(version: &'static str) {
 		let mut group = up_track.append_group().unwrap();
 		group.write_frame(ts(0), b"up".as_ref()).unwrap();
 
-		let remote = received
-			.consume()
-			.routed_broadcast(Path::new("room/x").unwrap())
-			.await
-			.unwrap();
+		let remote = received.consume().routed_broadcast("room/x").await.unwrap();
 		let mut down_sub = remote.track("video").unwrap().subscribe(prefs()).await.unwrap();
 		down_sub.recv_group().await.unwrap().unwrap();
 
-		let remote = server_origin
-			.consume()
-			.routed_broadcast(Path::new("up/y").unwrap())
-			.await
-			.unwrap();
+		let remote = server_origin.consume().routed_broadcast("up/y").await.unwrap();
 		let mut up_sub = remote.track("video").unwrap().subscribe(prefs()).await.unwrap();
 		up_sub.recv_group().await.unwrap().unwrap();
 
@@ -1451,7 +1430,7 @@ async fn a_wildcard_grant_is_enforced(version: &'static str) {
 		let pair = connect(Options {
 			version: Some(version),
 			client_publish: Some(publisher.clone()),
-			server_subscribe: Some(relay.scope(Path::new("").unwrap(), &scope).unwrap()),
+			server_subscribe: Some(relay.scope("", &scope).unwrap()),
 			..Default::default()
 		})
 		.await;
@@ -1459,16 +1438,14 @@ async fn a_wildcard_grant_is_enforced(version: &'static str) {
 
 		let mut held = Vec::new();
 		for path in ["room/alice/cam", "b.hang", "deep/x/b.hang"] {
-			let broadcast = publisher.create_broadcast(Path::new(path).unwrap()).unwrap();
+			let broadcast = publisher.create_broadcast(path).unwrap();
 			broadcast.announce(Default::default()).unwrap();
 			wait_announced(&relay.consume(), path, true).await;
 			held.push(broadcast);
 		}
 		assert_eq!(pair.client_transport.close_reason(), None);
 
-		let bad = publisher
-			.create_broadcast(Path::new("room/alice/mic").unwrap())
-			.unwrap();
+		let bad = publisher.create_broadcast("room/alice/mic").unwrap();
 		bad.announce(Default::default()).unwrap();
 		assert!(matches!(
 			pair.server.closed().await,
@@ -1489,7 +1466,7 @@ async fn a_wildcard_grant_is_enforced(version: &'static str) {
 async fn nothing_outside_the_grant_reaches_the_peer(version: &'static str) {
 	within(async {
 		let publisher = produce_origin(2);
-		let early = publisher.create_broadcast(Path::new("foo/bar").unwrap()).unwrap();
+		let early = publisher.create_broadcast("foo/bar").unwrap();
 		early.announce(Default::default()).unwrap();
 
 		// The relay accepts anything; only the grant it tells the client is narrow.
@@ -1529,7 +1506,7 @@ async fn a_broadcast_received_from_the_peer_is_not_ours_to_check(version: &'stat
 	within(async {
 		let local = produce_origin(2);
 		let relay = produce_origin(1);
-		let remote = relay.create_broadcast(Path::new("remote/x").unwrap()).unwrap();
+		let remote = relay.create_broadcast("remote/x").unwrap();
 		remote.announce(Default::default()).unwrap();
 
 		let pair = connect(Options {
@@ -1537,7 +1514,7 @@ async fn a_broadcast_received_from_the_peer_is_not_ours_to_check(version: &'stat
 			client_publish: Some(local.clone()),
 			client_subscribe: Some(local.clone()),
 			server_publish: Some(relay.clone()),
-			server_subscribe: Some(relay.scope(Path::new("").unwrap(), &patterns(&["local"])).unwrap()),
+			server_subscribe: Some(relay.scope("", &patterns(&["local"])).unwrap()),
 			..Default::default()
 		})
 		.await;
@@ -1546,7 +1523,7 @@ async fn a_broadcast_received_from_the_peer_is_not_ours_to_check(version: &'stat
 		wait_announced(&local.consume(), "remote/x", true).await;
 
 		// The first broadcast refused is the one we published, not the one we received.
-		let bad = local.create_broadcast(Path::new("bad/x").unwrap()).unwrap();
+		let bad = local.create_broadcast("bad/x").unwrap();
 		bad.announce(Default::default()).unwrap();
 		assert!(matches!(
 			pair.server.closed().await,
@@ -1634,10 +1611,10 @@ async fn a_narrowing_deafens_one_path(version: &'static str) {
 		let prefs = || moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10));
 
 		let relay = produce_origin(1);
-		let audio = relay.create_broadcast(Path::new("room/alice/audio").unwrap()).unwrap();
+		let audio = relay.create_broadcast("room/alice/audio").unwrap();
 		let audio_track = audio.create_track("opus", timed()).unwrap();
 		audio.announce(Default::default()).unwrap();
-		let video = relay.create_broadcast(Path::new("room/alice/video").unwrap()).unwrap();
+		let video = relay.create_broadcast("room/alice/video").unwrap();
 		let video_track = video.create_track("h264", timed()).unwrap();
 		video.announce(Default::default()).unwrap();
 
@@ -1645,7 +1622,7 @@ async fn a_narrowing_deafens_one_path(version: &'static str) {
 		let pair = connect(Options {
 			version: Some(version),
 			client_subscribe: Some(received.clone()),
-			server_publish: Some(relay.scope(Path::new("").unwrap(), &patterns(&["room"])).unwrap()),
+			server_publish: Some(relay.scope("", &patterns(&["room"])).unwrap()),
 			..Default::default()
 		})
 		.await;
@@ -1655,18 +1632,10 @@ async fn a_narrowing_deafens_one_path(version: &'static str) {
 		let mut group = video_track.append_group().unwrap();
 		group.write_frame(ts(0), b"v".as_ref()).unwrap();
 
-		let remote = received
-			.consume()
-			.routed_broadcast(Path::new("room/alice/audio").unwrap())
-			.await
-			.unwrap();
+		let remote = received.consume().routed_broadcast("room/alice/audio").await.unwrap();
 		let mut audio_sub = remote.track("opus").unwrap().subscribe(prefs()).await.unwrap();
 		audio_sub.recv_group().await.unwrap().unwrap();
-		let remote = received
-			.consume()
-			.routed_broadcast(Path::new("room/alice/video").unwrap())
-			.await
-			.unwrap();
+		let remote = received.consume().routed_broadcast("room/alice/video").await.unwrap();
 		let mut video_sub = remote.track("h264").unwrap().subscribe(prefs()).await.unwrap();
 		video_sub.recv_group().await.unwrap().unwrap();
 
@@ -1715,14 +1684,10 @@ async fn a_narrowing_aborts_what_the_peer_published(version: &'static str) {
 		let prefs = || moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10));
 
 		let client_origin = produce_origin(2);
-		let mic = client_origin
-			.create_broadcast(Path::new("room/bob/mic").unwrap())
-			.unwrap();
+		let mic = client_origin.create_broadcast("room/bob/mic").unwrap();
 		let mic_track = mic.create_track("opus", timed()).unwrap();
 		mic.announce(Default::default()).unwrap();
-		let cam = client_origin
-			.create_broadcast(Path::new("room/bob/cam").unwrap())
-			.unwrap();
+		let cam = client_origin.create_broadcast("room/bob/cam").unwrap();
 		let cam_track = cam.create_track("h264", timed()).unwrap();
 		cam.announce(Default::default()).unwrap();
 
@@ -1740,18 +1705,10 @@ async fn a_narrowing_aborts_what_the_peer_published(version: &'static str) {
 		let mut group = cam_track.append_group().unwrap();
 		group.write_frame(ts(0), b"c".as_ref()).unwrap();
 
-		let remote = relay
-			.consume()
-			.routed_broadcast(Path::new("room/bob/mic").unwrap())
-			.await
-			.unwrap();
+		let remote = relay.consume().routed_broadcast("room/bob/mic").await.unwrap();
 		let mut mic_sub = remote.track("opus").unwrap().subscribe(prefs()).await.unwrap();
 		mic_sub.recv_group().await.unwrap().unwrap();
-		let remote = relay
-			.consume()
-			.routed_broadcast(Path::new("room/bob/cam").unwrap())
-			.await
-			.unwrap();
+		let remote = relay.consume().routed_broadcast("room/bob/cam").await.unwrap();
 		let mut cam_sub = remote.track("h264").unwrap().subscribe(prefs()).await.unwrap();
 		cam_sub.recv_group().await.unwrap().unwrap();
 
@@ -1780,7 +1737,7 @@ async fn a_narrowing_resets_a_fetch_in_flight(version: &'static str) {
 		let ts = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
 
 		let relay = produce_origin(1);
-		let broadcast = relay.create_broadcast(Path::new("room/x").unwrap()).unwrap();
+		let broadcast = relay.create_broadcast("room/x").unwrap();
 		let track = broadcast.create_track("video", timed()).unwrap();
 		broadcast.announce(Default::default()).unwrap();
 		// The group stays open, so the fetch is still in flight when the grant narrows.
@@ -1796,11 +1753,7 @@ async fn a_narrowing_resets_a_fetch_in_flight(version: &'static str) {
 		})
 		.await;
 
-		let remote = received
-			.consume()
-			.routed_broadcast(Path::new("room/x").unwrap())
-			.await
-			.unwrap();
+		let remote = received.consume().routed_broadcast("room/x").await.unwrap();
 		let mut fetched = remote.track("video").unwrap().fetch_group(0, None).await.unwrap();
 		let frame = fetched.read_frame().await.unwrap().expect("first frame");
 		assert_eq!(frame.payload.as_ref(), b"first");
@@ -1847,7 +1800,7 @@ async fn a_widening_brings_back_a_deafened_path(version: &'static str) {
 		let prefs = || moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10));
 
 		let relay = produce_origin(1);
-		let audio = relay.create_broadcast(Path::new("room/alice/audio").unwrap()).unwrap();
+		let audio = relay.create_broadcast("room/alice/audio").unwrap();
 		let audio_track = audio.create_track("opus", timed()).unwrap();
 		audio.announce(Default::default()).unwrap();
 
@@ -1855,18 +1808,14 @@ async fn a_widening_brings_back_a_deafened_path(version: &'static str) {
 		let pair = connect(Options {
 			version: Some(version),
 			client_subscribe: Some(received.clone()),
-			server_publish: Some(relay.scope(Path::new("").unwrap(), &patterns(&["room"])).unwrap()),
+			server_publish: Some(relay.scope("", &patterns(&["room"])).unwrap()),
 			..Default::default()
 		})
 		.await;
 
 		let mut group = audio_track.append_group().unwrap();
 		group.write_frame(ts(0), b"a".as_ref()).unwrap();
-		let remote = received
-			.consume()
-			.routed_broadcast(Path::new("room/alice/audio").unwrap())
-			.await
-			.unwrap();
+		let remote = received.consume().routed_broadcast("room/alice/audio").await.unwrap();
 		let mut sub = remote.track("opus").unwrap().subscribe(prefs()).await.unwrap();
 		sub.recv_group().await.unwrap().unwrap();
 
@@ -1878,11 +1827,7 @@ async fn a_widening_brings_back_a_deafened_path(version: &'static str) {
 
 		pair.server.auth().authorize(&grant(&[], &["room"]));
 		wait_announced(&received.consume(), "room/alice/audio", true).await;
-		let remote = received
-			.consume()
-			.routed_broadcast(Path::new("room/alice/audio").unwrap())
-			.await
-			.unwrap();
+		let remote = received.consume().routed_broadcast("room/alice/audio").await.unwrap();
 		let mut sub = remote.track("opus").unwrap().subscribe(prefs()).await.unwrap();
 		let mut group = audio_track.append_group().unwrap();
 		group.write_frame(ts(1), b"a".as_ref()).unwrap();
@@ -1912,9 +1857,7 @@ async fn a_widening_brings_back_what_the_peer_published(version: &'static str) {
 		let prefs = || moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10));
 
 		let client_origin = produce_origin(2);
-		let mic = client_origin
-			.create_broadcast(Path::new("room/bob/mic").unwrap())
-			.unwrap();
+		let mic = client_origin.create_broadcast("room/bob/mic").unwrap();
 		let mic_track = mic.create_track("opus", timed()).unwrap();
 		mic.announce(Default::default()).unwrap();
 
@@ -1933,11 +1876,7 @@ async fn a_widening_brings_back_what_the_peer_published(version: &'static str) {
 
 		pair.server.auth().authorize(&grant(&["room"], &[]));
 		wait_announced(&relay.consume(), "room/bob/mic", true).await;
-		let remote = relay
-			.consume()
-			.routed_broadcast(Path::new("room/bob/mic").unwrap())
-			.await
-			.unwrap();
+		let remote = relay.consume().routed_broadcast("room/bob/mic").await.unwrap();
 		let mut sub = remote.track("opus").unwrap().subscribe(prefs()).await.unwrap();
 		let mut group = mic_track.append_group().unwrap();
 		group.write_frame(ts(0), b"m".as_ref()).unwrap();

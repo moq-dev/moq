@@ -7,7 +7,6 @@
 //! an observable event.
 
 use crate::support;
-use moq_net::Path;
 
 use std::time::Duration;
 
@@ -379,9 +378,7 @@ async fn goaway_keeps_new_subscribes(version: Version) {
 	moq_clock::timeout(TEST_TIMEOUT, async {
 		// Server publishes a broadcast with one live track.
 		let pub_origin = produce_origin(Hop::random());
-		let broadcast = pub_origin
-			.create_broadcast(Path::new("test").unwrap())
-			.expect("create broadcast");
+		let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 		broadcast.announce(moq_net::origin::Route::default()).expect("announce");
 		let track = broadcast.create_track("video", timed()).expect("create track");
 		// A second track with content ready for the subscribe opened after the GOAWAY.
@@ -402,11 +399,8 @@ async fn goaway_keeps_new_subscribes(version: Version) {
 
 		// Subscribe BEFORE the GOAWAY and receive a first group.
 		let sub = sub_origin.consume();
-		sub.routed(Path::new("test").unwrap()).await.expect("route announced");
-		let bc = sub
-			.request_broadcast(Path::new("test").unwrap(), None)
-			.await
-			.expect("broadcast resolves");
+		sub.routed("test").await.expect("route announced");
+		let bc = sub.request_broadcast("test", None).await.expect("broadcast resolves");
 		let mut existing = bc.track("video").unwrap().subscribe(None).await.expect("subscribe");
 
 		let mut group = track.append_group().expect("append group");
@@ -494,9 +488,7 @@ async fn goaway_keeps_new_subscribes_moq_transport_22() {
 async fn goaway_drains_routes(version: Version) {
 	moq_clock::timeout(TEST_TIMEOUT, async {
 		let pub_origin = produce_origin(Hop::random());
-		let broadcast = pub_origin
-			.create_broadcast(Path::new("test").unwrap())
-			.expect("create broadcast");
+		let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 		broadcast.announce(moq_net::origin::Route::default()).expect("announce");
 
 		let sub_origin = produce_origin(Hop::random());
@@ -507,7 +499,7 @@ async fn goaway_drains_routes(version: Version) {
 		let MockPair { client, server, .. } = connect_mock(opts).await;
 
 		let sub = sub_origin.consume();
-		let route = sub.routed(Path::new("test").unwrap()).await.expect("route announced");
+		let route = sub.routed("test").await.expect("route announced");
 		assert_ne!(
 			route.cost,
 			moq_net::origin::Cost::DRAIN,

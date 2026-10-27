@@ -6,7 +6,6 @@
 //! a build without one refuses `runtime.workers` at load.
 #![cfg(all(target_os = "linux", feature = "_quic"))]
 
-use moq_net::Path;
 use std::time::Duration;
 
 use moq_relay::{Config, Relay};
@@ -90,9 +89,7 @@ async fn workers_serve_quic_and_share_one_origin() {
 
 	// ── publisher ───────────────────────────────────────────────────
 	let origin = moq_tokio::origin::spawn();
-	let broadcast = origin
-		.create_broadcast(Path::new("test").unwrap())
-		.expect("create broadcast");
+	let broadcast = origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("create broadcast");
 	let track = broadcast.create_track("video", timed()).expect("create track");
 	let mut group = track.append_group().expect("append group");
@@ -120,7 +117,7 @@ async fn workers_serve_quic_and_share_one_origin() {
 			.expect("origin closed");
 		assert_eq!(update.prefix.as_str(), "test");
 		assert!(active, "expected announce, got retraction");
-		let broadcast = tokio::time::timeout(TIMEOUT, consumer.request_broadcast(Path::new("test").unwrap(), None))
+		let broadcast = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("test", None))
 			.await
 			.unwrap_or_else(|_| panic!("subscriber {index} request timeout"))
 			.expect("announced broadcast resolves");

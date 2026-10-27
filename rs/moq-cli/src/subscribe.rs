@@ -250,7 +250,7 @@ impl SubscribeArgs {
 /// Exports one broadcast from the Origin to stdout in the requested format.
 pub struct Subscribe {
 	origin: moq_net::origin::Consumer,
-	path: moq_net::PathOwned,
+	path: moq_net::Path,
 	source: moq_mux::Source,
 	catalog: CatalogFormat,
 	args: SubscribeArgs,
@@ -281,7 +281,7 @@ impl Subscribe {
 		catalog: CatalogFormat,
 		args: SubscribeArgs,
 	) -> anyhow::Result<Self> {
-		let path = moq_net::Path::new(path)?.to_owned();
+		let path = moq_net::Path::new(path)?;
 		let broadcast = origin
 			.request_broadcast(&path, None)
 			.await

@@ -9,7 +9,6 @@
 
 #![cfg(feature = "_quic")]
 
-use moq_net::Path;
 use std::net::{SocketAddr, TcpListener};
 use std::time::Duration;
 
@@ -263,9 +262,7 @@ async fn embed_and_stop(mut config: Config) {
 		"authorization"
 	);
 
-	let broadcast = origin
-		.create_broadcast(Path::new("test").unwrap())
-		.expect("create broadcast");
+	let broadcast = origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce");
 	let track = broadcast.create_track("video", timed()).expect("create track");
 	let mut group = track.append_group().expect("append group");
@@ -296,7 +293,7 @@ async fn embed_and_stop(mut config: Config) {
 		.expect("origin closed");
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(active, "expected announce, got retraction");
-	let announced = tokio::time::timeout(TIMEOUT, consumer.request_broadcast(Path::new("test").unwrap(), None))
+	let announced = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("test", None))
 		.await
 		.expect("request timeout")
 		.expect("announced broadcast resolves");

@@ -34,7 +34,7 @@ async fn main() -> anyhow::Result<()> {
 	// Without an epoch, JS re-subscribes instead of retaining its reader across the move.
 	let legacy = ["moq-transport-14", "moq-transport-16"].contains(&args[1].as_str());
 	let origin = moq_tokio::origin::spawn();
-	let broadcast = origin.create_broadcast(moq_net::Path::new("handover")?)?;
+	let broadcast = origin.create_broadcast("handover")?;
 	let mut track = broadcast.create_track("video", moq_net::track::Info::default())?;
 	broadcast.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))?;
 	let (mut first, first_url) = endpoint(&origin, version).await?;

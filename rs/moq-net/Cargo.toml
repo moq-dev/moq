@@ -20,7 +20,7 @@ default = ["async"]
 # Runtime-backed helpers and Lite/IETF sessions; explicit-time model drivers stay available.
 async = ["dep:futures", "moq-clock/runtime"]
 
-# Exposes the wire codecs to the `fuzz/` harness and the announce, codec, varint, and frame benches,
+# Exposes the wire codecs to the `fuzz/` harness and the announce, codec, path, varint, and frame benches,
 # and session views of an origin to the viewers bench, through the hidden `fuzz` module. Off by
 # default and hidden from the docs.
 fuzz = ["async"]
@@ -203,6 +203,11 @@ required-features = ["async"]
 name = "memory"
 harness = false
 required-features = ["async"]
+
+[[bench]]
+name = "path"
+harness = false
+required-features = ["fuzz"]
 
 [lints]
 workspace = true

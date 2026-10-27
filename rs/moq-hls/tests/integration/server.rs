@@ -50,17 +50,14 @@ async fn a_cursor_records_a_publisher_without_fetch() {
 		let mut publisher = Publisher::new(&pair.publisher, "live", Default::default());
 
 		let origin = pair.subscriber.consume();
-		moq_clock::timeout(TIMEOUT, origin.routed(moq_net::Path::new("live").unwrap()))
+		moq_clock::timeout(TIMEOUT, origin.routed("live"))
 			.await
 			.expect("announce timed out")
 			.expect("routed");
-		let remote = moq_clock::timeout(
-			TIMEOUT,
-			origin.request_broadcast(moq_net::Path::new("live").unwrap(), None),
-		)
-		.await
-		.expect("request timed out")
-		.expect("remote broadcast");
+		let remote = moq_clock::timeout(TIMEOUT, origin.request_broadcast("live", None))
+			.await
+			.expect("request timed out")
+			.expect("remote broadcast");
 		let broadcaster = Broadcaster::new(moq_mux::Source::new(origin, remote), Default::default());
 		// Recorded as soon as the catalog lists it with its timeline, as a recorder does.
 		let mut renditions = broadcaster.renditions();
@@ -122,15 +119,10 @@ async fn a_disconnected_publisher_on_the_catalog_broadcast_answers_404() {
 	let media = media_uri(&app, "live").await;
 	listed(&app, &media, "seg/656e3d1b.0.m4s").await;
 
-	let remote = moq_clock::timeout(
-		TIMEOUT,
-		pair.subscriber
-			.consume()
-			.request_broadcast(moq_net::Path::new("live").unwrap(), None),
-	)
-	.await
-	.expect("remote resolve timed out")
-	.expect("remote broadcast");
+	let remote = moq_clock::timeout(TIMEOUT, pair.subscriber.consume().request_broadcast("live", None))
+		.await
+		.expect("remote resolve timed out")
+		.expect("remote broadcast");
 	drop(publisher);
 	moq_clock::timeout(TIMEOUT, remote.closed())
 		.await
@@ -144,10 +136,7 @@ async fn a_disconnected_publisher_on_the_catalog_broadcast_answers_404() {
 #[tokio::test(start_paused = true)]
 async fn lookups_ride_the_servers_scope_watch() {
 	let pair = Pair::connect().await;
-	let other = pair
-		.publisher
-		.create_broadcast(moq_net::Path::new("room/other").unwrap())
-		.expect("other");
+	let other = pair.publisher.create_broadcast("room/other").expect("other");
 	other.announce(Default::default()).expect("announce other");
 
 	let server = pair.server();
@@ -159,7 +148,7 @@ async fn lookups_ride_the_servers_scope_watch() {
 	// Nothing watches `room/other` on its own, yet the synced lookup already discovered it.
 	pair.subscriber
 		.consume()
-		.request_broadcast(moq_net::Path::new("room/other").unwrap(), None)
+		.request_broadcast("room/other", None)
 		.await
 		.expect("discovered through the scope watch");
 }
@@ -179,29 +168,20 @@ async fn a_sibling_resolves_through_a_client_session() {
 		"moq-lite-07-wip",
 	] {
 		let pair = Pair::new(version.parse().unwrap(), Default::default()).await;
-		let catalog = pair
-			.publisher
-			.create_broadcast(moq_net::Path::new("room/live").unwrap())
-			.expect("catalog");
+		let catalog = pair.publisher.create_broadcast("room/live").expect("catalog");
 		catalog.announce(Default::default()).expect("announce catalog");
-		let media = pair
-			.publisher
-			.create_broadcast(moq_net::Path::new("room/source").unwrap())
-			.expect("media");
+		let media = pair.publisher.create_broadcast("room/source").expect("media");
 		media.announce(Default::default()).expect("announce media");
 
 		let origin = pair.subscriber.consume();
-		let broadcast = moq_clock::timeout(
-			TIMEOUT,
-			origin.routed_broadcast(moq_net::Path::new("room/live").unwrap()),
-		)
-		.await
-		.expect("catalog resolve timed out")
-		.expect("catalog broadcast");
+		let broadcast = moq_clock::timeout(TIMEOUT, origin.routed_broadcast("room/live"))
+			.await
+			.expect("catalog resolve timed out")
+			.expect("catalog broadcast");
 		let source = moq_mux::Source::new(origin, broadcast);
 		let sibling = moq_clock::timeout(
 			TIMEOUT,
-			source.resolve(Some(&moq_net::path::Relative::new("./source")), None),
+			source.resolve(Some(&moq_net::path::Relative::new("./source").unwrap()), None),
 		)
 		.await
 		.expect("sibling resolve timed out")
@@ -213,24 +193,18 @@ async fn a_sibling_resolves_through_a_client_session() {
 #[tokio::test(start_paused = true)]
 async fn a_disconnected_sibling_publisher_answers_404() {
 	let pair = Pair::connect().await;
-	let catalog_broadcast = pair
-		.publisher
-		.create_broadcast(moq_net::Path::new("room/live").unwrap())
-		.expect("catalog");
+	let catalog_broadcast = pair.publisher.create_broadcast("room/live").expect("catalog");
 	catalog_broadcast
 		.announce(Default::default())
 		.expect("announce catalog");
-	let media_broadcast = pair
-		.publisher
-		.create_broadcast(moq_net::Path::new("room/source").unwrap())
-		.expect("media");
+	let media_broadcast = pair.publisher.create_broadcast("room/source").expect("media");
 	media_broadcast.announce(Default::default()).expect("announce media");
 
 	let catalog =
 		moq_mux::catalog::Producer::new(&mut catalog_broadcast.broadcast().clone(), Default::default()).unwrap();
 	let reserved = catalog.reserve();
 	let mut config = video_config();
-	config.broadcast = Some(moq_net::path::Relative::new("./source").to_owned());
+	config.broadcast = Some(moq_net::path::Relative::new("./source").unwrap());
 	let track = media_broadcast.create_track(TRACK, timed()).unwrap();
 	let mut media = reserved
 		.video(
@@ -249,15 +223,10 @@ async fn a_disconnected_sibling_publisher_answers_404() {
 	listed(&app, &uri, "seg/656e3d1b.0.m4s").await;
 
 	// Waited on rather than requested once: a client only asks about what it watches.
-	let remote_media = moq_clock::timeout(
-		TIMEOUT,
-		pair.subscriber
-			.consume()
-			.routed_broadcast(moq_net::Path::new("room/source").unwrap()),
-	)
-	.await
-	.expect("sibling resolve timed out")
-	.expect("sibling broadcast");
+	let remote_media = moq_clock::timeout(TIMEOUT, pair.subscriber.consume().routed_broadcast("room/source"))
+		.await
+		.expect("sibling resolve timed out")
+		.expect("sibling broadcast");
 	// Only the sibling goes: the catalog keeps listing the rendition, so the request reaches the
 	// media fetch rather than missing the rendition.
 	media_broadcast.close();

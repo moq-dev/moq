@@ -7,7 +7,6 @@
 //! route churn multiplies by the cursors watching. A counting allocator needs
 //! the whole binary to itself, hence a test of its own.
 
-use moq_net::Path;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
@@ -57,30 +56,16 @@ fn peer_route(peer: u64, cost: u64) -> origin::Route {
 /// again, with `cursors` cursors rooted at `root` watching it.
 fn churn_allocs(root: &str, cursors: usize) -> usize {
 	let (producer, _driver) = origin::Producer::new(origin::Config::default());
-	let _winner = producer
-		.publish(moq_net::Path::new("room/a").unwrap(), peer_route(1, 1))
-		.unwrap();
+	let _winner = producer.publish("room/a", peer_route(1, 1)).unwrap();
 	let all = Patterns::from(Pattern::all());
 	let mut cursors: Vec<_> = (0..cursors)
-		.map(|_| {
-			producer
-				.consume()
-				.scope(Path::new(root).unwrap(), &all)
-				.unwrap()
-				.announced()
-		})
+		.map(|_| producer.consume().scope(root, &all).unwrap().announced())
 		.collect();
 	for cursor in &mut cursors {
 		while cursor.try_next().is_some() {}
 	}
 
-	let cycle = || {
-		drop(
-			producer
-				.publish(moq_net::Path::new("room/a").unwrap(), peer_route(2, 5))
-				.unwrap(),
-		)
-	};
+	let cycle = || drop(producer.publish("room/a", peer_route(2, 5)).unwrap());
 	// Reach the steady state first, with every table grown to what it settles at.
 	for _ in 0..4 {
 		cycle();

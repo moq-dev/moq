@@ -1,6 +1,5 @@
 //! Real WebSocket sessions through a Rust relay, with Rust and JavaScript at either end.
 //! The JS arm needs Bun and runs in the interop workflow; the Rust arm runs in normal CI.
-use moq_net::Path;
 use std::{process::Stdio, time::Duration};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
@@ -37,7 +36,7 @@ async fn relay(version: moq_net::Version, javascript: Option<bool>) -> anyhow::R
 		Ok::<_, anyhow::Error>(())
 	});
 	let publisher = moq_tokio::origin::spawn();
-	let broadcast = publisher.create_broadcast(Path::new("age").unwrap())?;
+	let broadcast = publisher.create_broadcast("age")?;
 	let tracks: Vec<_> = AGES
 		.into_iter()
 		.enumerate()
@@ -103,7 +102,7 @@ async fn relay(version: moq_net::Version, javascript: Option<bool>) -> anyhow::R
 				.ok_or_else(|| anyhow::anyhow!("announcements closed"))?,
 			moq_net::announce::Event::Start(_)
 		) {}
-		let front = consumer.request_broadcast(Path::new("age").unwrap(), None).await?;
+		let front = consumer.request_broadcast("age", None).await?;
 		for (i, age) in AGES.into_iter().enumerate() {
 			let track = front.track(&i.to_string())?.subscribe(None).await?;
 			anyhow::ensure!(

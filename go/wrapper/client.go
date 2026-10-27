@@ -39,7 +39,7 @@ type ClientConfig struct {
 	Versions []string
 	// Tokens are the credentials every dial presents. The first is the
 	// connection credential, unless the URL carries its own ?jwt=; each other
-	// one widens the session's grant. Replace them with Client.Tokens.
+	// one widens the session's grant. Replace them with Session.Tokens.
 	Tokens []string
 	// Timeout bounds one connect, dial and handshake together. Zero waits forever.
 	Timeout *time.Duration
@@ -324,25 +324,6 @@ func (c *Client) AnnouncedBroadcast(path string) (*AnnouncedBroadcast, error) {
 // for a future announcement.
 func (c *Client) RequestBroadcast(ctx context.Context, path string) (*BroadcastConsumer, error) {
 	return c.consumer.RequestBroadcast(ctx, path)
-}
-
-// Tokens returns the credentials the client presents, to replace while it runs.
-func (c *Client) Tokens() *Tokens {
-	return &Tokens{inner: c.inner.Tokens()}
-}
-
-// Tokens are the credentials a Client presents, replaceable while it runs.
-type Tokens struct {
-	inner *ffi.MoqTokens
-}
-
-// Set replaces the credentials every dial presents, such as before the current
-// ones expire. The next dial presents them, and a live session with in-band
-// AUTH presents them at once, withdrawing each replaced token once its
-// replacements are answered, even when one is refused. After an authorization
-// refusal the client redials only if they changed. An empty token is refused.
-func (t *Tokens) Set(tokens ...string) error {
-	return t.inner.Set(append([]string(nil), tokens...))
 }
 
 // Session returns the underlying session. Hold the client (or session) to keep

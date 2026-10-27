@@ -116,7 +116,7 @@ struct ConsumeBroadcast {
 async fn resolve(
 	broadcast: moq_net::broadcast::Consumer,
 	origin: Option<crate::origin::Consumer>,
-	reference: Option<moq_net::path::RelativeOwned>,
+	reference: Option<moq_net::path::Relative>,
 ) -> Result<moq_net::broadcast::Consumer, Error> {
 	let Some(reference) = reference.filter(|reference| !reference.is_empty()) else {
 		return Ok(broadcast);
@@ -128,7 +128,7 @@ async fn resolve(
 	// first instance resolved, without the epoch's guarantee.
 	origin
 		.driver
-		.watch(async { Ok(source.resolve(Some(&reference.borrow()), None).await?) })
+		.watch(async { Ok(source.resolve(Some(&reference), None).await?) })
 		.await
 }
 

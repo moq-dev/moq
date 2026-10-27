@@ -55,11 +55,11 @@ pub const DEFAULT_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from
 
 /// Resolve an optional stats tier label. An absent or empty label selects the
 /// default unprefixed tier.
-fn configured_tier(label: Option<String>) -> Result<moq_net::stats::Tier, moq_net::Error> {
-	Ok(match label {
-		Some(label) => moq_net::stats::Tier::new(moq_net::PathOwned::try_from(label)?),
-		None => Default::default(),
-	})
+fn configured_tier(label: Option<String>) -> Result<moq_net::stats::Tier, moq_net::path::Invalid> {
+	match label {
+		Some(label) => Ok(moq_net::stats::Tier::new(moq_net::Path::new(&label)?)),
+		None => Ok(Default::default()),
+	}
 }
 
 pub use config::*;

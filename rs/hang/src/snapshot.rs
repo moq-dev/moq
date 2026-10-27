@@ -200,9 +200,9 @@ mod tests {
 
 	#[test]
 	fn echo_suffix_filters_only_the_broadcast_name() {
-		assert!(echo::is_echo(&moq_net::Path::new("room/alice.echo").unwrap()));
-		assert!(!echo::is_echo(&moq_net::Path::new("room.echo/alice").unwrap()));
-		assert!(!echo::is_echo(&moq_net::Path::new("room/alice.echoes").unwrap()));
+		assert!(echo::is_echo(&moq_net::Path::from_static("room/alice.echo")));
+		assert!(!echo::is_echo(&moq_net::Path::from_static("room.echo/alice")));
+		assert!(!echo::is_echo(&moq_net::Path::from_static("room/alice.echoes")));
 	}
 
 	#[test]

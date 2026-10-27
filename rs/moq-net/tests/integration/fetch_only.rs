@@ -7,7 +7,6 @@
 //! the fetches that report where the track ends.
 
 use crate::support;
-use moq_net::Path;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -31,11 +30,11 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 
 async fn resolve(origin: &moq_net::origin::Producer) -> moq_net::broadcast::Consumer {
 	let consumer = origin.consume();
-	moq_clock::timeout(TIMEOUT, consumer.routed(Path::new("bcast").unwrap()))
+	moq_clock::timeout(TIMEOUT, consumer.routed("bcast"))
 		.await
 		.expect("announce timeout")
 		.expect("routed");
-	moq_clock::timeout(TIMEOUT, consumer.request_broadcast(Path::new("bcast").unwrap(), None))
+	moq_clock::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves")
@@ -43,7 +42,7 @@ async fn resolve(origin: &moq_net::origin::Producer) -> moq_net::broadcast::Cons
 
 /// Publish a finished track of three groups, and flag any subscription it ever gets.
 fn publish_finished(origin: &moq_net::origin::Producer) -> (moq_net::origin::Publication, Arc<AtomicBool>) {
-	let broadcast = origin.create_broadcast(moq_net::Path::new("bcast").unwrap()).unwrap();
+	let broadcast = origin.create_broadcast("bcast").unwrap();
 	let mut track = broadcast.create_track("video", timed()).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 	for sequence in 0..3u64 {
@@ -169,7 +168,7 @@ async fn a_subscribe_after_track_status_keeps_timestamps() {
 	for version in ["moq-transport-18", "moq-transport-22"] {
 		moq_clock::timeout(TIMEOUT, async {
 			let publisher = produce_origin(1);
-			let broadcast = publisher.create_broadcast(Path::new("bcast").unwrap()).unwrap();
+			let broadcast = publisher.create_broadcast("bcast").unwrap();
 			let track = broadcast.create_track("video", timed()).unwrap();
 			broadcast.announce(Default::default()).unwrap();
 
@@ -181,7 +180,7 @@ async fn a_subscribe_after_track_status_keeps_timestamps() {
 
 			let remote = resolve(&client).await;
 			let copy = remote.track("video").unwrap();
-			let info = copy.query().await.expect("TRACK_STATUS resolves the track");
+			let info = copy.info().await.expect("TRACK_STATUS resolves the track");
 			assert!(info.timescale.is_some(), "{version}: the copy is untimed");
 			assert!(track.subscription().is_none(), "{version}: the query subscribed");
 

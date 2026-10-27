@@ -87,15 +87,16 @@ export class Producer<T> {
 		// Close the group with the same error first. A consumer that already pulled it holds its own
 		// handle, which the track's close no longer reaches, so dropping ours would leave a reader
 		// sitting in the group with a generic error instead of the failure that ended the log.
-		this.#group?.close(abort);
+		this.#group?.abort(abort);
 		this.#group = undefined;
-		this.#track.close(abort);
+		this.#track.abort(abort);
 	}
 
 	/** Finish the track, closing the group. */
 	finish(): void {
-		this.#group?.close();
+		this.#group?.finish();
 		this.#group = undefined;
+		this.#track.finish();
 		this.#track.close();
 	}
 }

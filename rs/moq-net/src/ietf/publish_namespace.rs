@@ -43,9 +43,9 @@ pub struct AdvertParams {
 /// PublishNamespace message (0x06)
 /// Sent by the publisher to announce the availability of a namespace.
 #[derive(Clone, Debug)]
-pub struct PublishNamespace<'a> {
+pub struct PublishNamespace {
 	pub request_id: RequestId,
-	pub track_namespace: Path<'a>,
+	pub track_namespace: Path,
 
 	/// The extension parameters, which a session that negotiated none leaves empty.
 	pub params: AdvertParams,
@@ -55,7 +55,7 @@ pub struct PublishNamespace<'a> {
 	pub authorization_token: Option<RequestToken>,
 }
 
-impl PublishNamespace<'_> {
+impl PublishNamespace {
 	/// Decode the message body, expecting the parameters of the extensions the session
 	/// negotiated.
 	///
@@ -92,7 +92,7 @@ impl PublishNamespace<'_> {
 	}
 }
 
-impl Message for PublishNamespace<'_> {
+impl Message for PublishNamespace {
 	const ID: u64 = 0x06;
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
@@ -330,14 +330,14 @@ impl Message for PublishNamespaceError<'_> {
 /// PublishNamespaceDone message (0x09)
 /// v14/v15: uses track_namespace. v16: uses request_id.
 #[derive(Clone, Debug)]
-pub struct PublishNamespaceDone<'a> {
+pub struct PublishNamespaceDone {
 	/// v14/v15: the namespace being unannounced
-	pub track_namespace: Path<'a>,
+	pub track_namespace: Path,
 	/// v16: the request ID of the original PublishNamespace
 	pub request_id: RequestId,
 }
 
-impl Message for PublishNamespaceDone<'_> {
+impl Message for PublishNamespaceDone {
 	const ID: u64 = 0x09;
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
@@ -379,7 +379,7 @@ impl Message for PublishNamespaceDone<'_> {
 #[derive(Clone, Debug)]
 pub struct PublishNamespaceCancel<'a> {
 	/// v14/v15: the namespace being cancelled
-	pub track_namespace: Path<'a>,
+	pub track_namespace: Path,
 	/// v16: the request ID of the original PublishNamespace
 	pub request_id: RequestId,
 	pub error_code: u64,
@@ -451,7 +451,7 @@ mod tests {
 	fn test_announce_round_trip() {
 		let msg = PublishNamespace {
 			request_id: RequestId(1),
-			track_namespace: Path::new("test/broadcast").unwrap(),
+			track_namespace: Path::from_static("test/broadcast"),
 			params: Default::default(),
 			authorization_token: None,
 		};
@@ -480,7 +480,7 @@ mod tests {
 	#[test]
 	fn test_unannounce_v14() {
 		let msg = PublishNamespaceDone {
-			track_namespace: Path::new("old/stream").unwrap(),
+			track_namespace: Path::from_static("old/stream"),
 			request_id: RequestId(0),
 		};
 
@@ -506,7 +506,7 @@ mod tests {
 	#[test]
 	fn test_announce_cancel_v14() {
 		let msg = PublishNamespaceCancel {
-			track_namespace: Path::new("canceled").unwrap(),
+			track_namespace: Path::from_static("canceled"),
 			request_id: RequestId(0),
 			error_code: 1,
 			reason_phrase: "Shutdown".into(),
@@ -541,7 +541,7 @@ mod tests {
 	fn test_publish_namespace_v17_round_trip() {
 		let msg = PublishNamespace {
 			request_id: RequestId(5),
-			track_namespace: Path::new("v17/broadcast").unwrap(),
+			track_namespace: Path::from_static("v17/broadcast"),
 			params: Default::default(),
 			authorization_token: None,
 		};
@@ -557,7 +557,7 @@ mod tests {
 	fn test_publish_namespace_v18_round_trip() {
 		let msg = PublishNamespace {
 			request_id: RequestId(5),
-			track_namespace: Path::new("v18/broadcast").unwrap(),
+			track_namespace: Path::from_static("v18/broadcast"),
 			params: Default::default(),
 			authorization_token: None,
 		};

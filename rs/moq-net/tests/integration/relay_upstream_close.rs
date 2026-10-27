@@ -12,7 +12,6 @@
 //! most of each track when the upstream session ends.
 
 use crate::support;
-use moq_net::Path;
 
 use std::time::Duration;
 
@@ -89,9 +88,7 @@ async fn read(mut sub: moq_net::track::Subscriber) -> Outcome {
 async fn round(name: &str, end: End) -> Vec<Outcome> {
 	let version: Version = name.parse().unwrap();
 	let publisher = produce_origin(1);
-	let broadcast = publisher
-		.create_broadcast(moq_net::Path::new("bcast").unwrap())
-		.unwrap();
+	let broadcast = publisher.create_broadcast("bcast").unwrap();
 	let tracks: Vec<_> = (0..TRACKS)
 		.map(|index| {
 			broadcast
@@ -115,11 +112,11 @@ async fn round(name: &str, end: End) -> Vec<Outcome> {
 	let downstream = connect_mock(options).await;
 
 	let consumer = subscriber.consume();
-	moq_clock::timeout(TIMEOUT, consumer.routed(Path::new("bcast").unwrap()))
+	moq_clock::timeout(TIMEOUT, consumer.routed("bcast"))
 		.await
 		.expect("announce timeout")
 		.expect("routed");
-	let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast(Path::new("bcast").unwrap(), None))
+	let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");

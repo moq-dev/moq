@@ -4,7 +4,7 @@
 //! `alice/camera`, `alice/camera.hang`, and `guest/uuid/screen` are all valid.
 //! A `.hang` suffix on the kind is optional and equivalent.
 
-use moq_net::{AsPath, Path, PathOwned};
+use moq_net::{Path, path::Invalid};
 
 /// The two broadcasts each participant may publish.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -29,7 +29,7 @@ impl Kind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Parsed {
 	/// Path prefix identifying the participant; may be more than one segment.
-	pub identity: PathOwned,
+	pub identity: Path,
 	/// `camera` (camera + mic) or `screen` (screenshare).
 	pub kind: Kind,
 }
@@ -47,39 +47,43 @@ pub fn kind_from_segment(segment: &str) -> Option<Kind> {
 /// Split a room-relative broadcast path into identity and kind.
 ///
 /// Returns `None` when there is no identity, or the last segment is not a kind.
-pub fn parse(path: impl AsPath) -> Option<Parsed> {
-	let path = path.as_path();
-	let (identity, last) = path.as_str().rsplit_once('/')?;
+pub fn parse(path: impl Into<Path>) -> Option<Parsed> {
+	let path: Path = path.into();
+	let mut parts: Vec<&str> = path.parts().collect();
+	let last = parts.pop()?;
+	if parts.is_empty() {
+		return None;
+	}
 	let kind = kind_from_segment(last)?;
-	let identity = Path::new(identity).ok()?.to_owned();
+	let identity = Path::new(&parts.join("/")).expect("a prefix of a path fits");
 	Some(Parsed { identity, kind })
 }
 
-/// The broadcast path a participant publishes for `kind`.
-pub fn broadcast_path(identity: impl AsPath, kind: Kind) -> PathOwned {
-	let segment = PathOwned::try_from(format!("{}.hang", kind.as_str())).expect("a kind is one segment");
-	identity.as_path().join(segment)
+/// The broadcast path a participant publishes for `kind`, failing if it is too long.
+pub fn broadcast_path(identity: impl Into<Path>, kind: Kind) -> Result<Path, Invalid> {
+	let identity: Path = identity.into();
+	identity.join(&Path::new(&format!("{}.hang", kind.as_str()))?)
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
 
-	fn p(s: &str) -> PathOwned {
-		Path::new(s).unwrap().to_owned()
+	fn p(s: &str) -> Path {
+		Path::new(s).unwrap()
 	}
 
 	#[test]
 	fn parse_splits_identity_and_kind() {
 		assert_eq!(
-			parse(Path::new("alice/camera").unwrap()),
+			parse(Path::from_static("alice/camera")),
 			Some(Parsed {
 				identity: p("alice"),
 				kind: Kind::Camera
 			})
 		);
 		assert_eq!(
-			parse(Path::new("alice/screen").unwrap()),
+			parse(Path::from_static("alice/screen")),
 			Some(Parsed {
 				identity: p("alice"),
 				kind: Kind::Screen
@@ -90,11 +94,11 @@ mod tests {
 	#[test]
 	fn parse_accepts_hang_suffix() {
 		assert_eq!(
-			parse(Path::new("alice/camera.hang").unwrap()).map(|p| p.kind),
+			parse(Path::from_static("alice/camera.hang")).map(|p| p.kind),
 			Some(Kind::Camera)
 		);
 		assert_eq!(
-			parse(Path::new("alice/screen.hang").unwrap()).map(|p| p.kind),
+			parse(Path::from_static("alice/screen.hang")).map(|p| p.kind),
 			Some(Kind::Screen)
 		);
 	}
@@ -102,7 +106,7 @@ mod tests {
 	#[test]
 	fn parse_keeps_multi_segment_identity() {
 		assert_eq!(
-			parse(Path::new("guest/uuid/camera").unwrap()),
+			parse(Path::from_static("guest/uuid/camera")),
 			Some(Parsed {
 				identity: p("guest/uuid"),
 				kind: Kind::Camera
@@ -112,17 +116,20 @@ mod tests {
 
 	#[test]
 	fn parse_rejects_unknown() {
-		assert_eq!(parse(Path::new("alice").unwrap()), None);
-		assert_eq!(parse(Path::new("alice/chat").unwrap()), None);
-		assert_eq!(parse(Path::new("camera").unwrap()), None);
+		assert_eq!(parse(Path::from_static("alice")), None);
+		assert_eq!(parse(Path::from_static("alice/chat")), None);
+		assert_eq!(parse(Path::from_static("camera")), None);
 		assert_eq!(parse(Path::empty()), None);
 	}
 
 	#[test]
 	fn broadcast_path_joins_with_hang_suffix() {
-		assert_eq!(broadcast_path(p("alice"), Kind::Camera).as_str(), "alice/camera.hang");
 		assert_eq!(
-			broadcast_path(p("guest/uuid"), Kind::Screen).as_str(),
+			broadcast_path(p("alice"), Kind::Camera).unwrap().as_str(),
+			"alice/camera.hang"
+		);
+		assert_eq!(
+			broadcast_path(p("guest/uuid"), Kind::Screen).unwrap().as_str(),
 			"guest/uuid/screen.hang"
 		);
 	}

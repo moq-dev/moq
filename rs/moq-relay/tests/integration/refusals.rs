@@ -3,7 +3,6 @@
 
 #![cfg(feature = "_quic")]
 
-use moq_net::Path;
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -245,19 +244,14 @@ async fn refused_only_stats_depth_one_has_root_totals_and_shared_embedder_metric
 		1,
 		"native admission counts exactly once"
 	);
-	tokio::time::timeout(TIMEOUT, relay.origin.routed(Path::new(".stats/node/test").unwrap()))
+	tokio::time::timeout(TIMEOUT, relay.origin.routed(".stats/node/test"))
 		.await
 		.unwrap()
 		.unwrap();
-	let broadcast = tokio::time::timeout(
-		TIMEOUT,
-		relay
-			.origin
-			.request_broadcast(Path::new(".stats/node/test").unwrap(), None),
-	)
-	.await
-	.unwrap()
-	.unwrap();
+	let broadcast = tokio::time::timeout(TIMEOUT, relay.origin.request_broadcast(".stats/node/test", None))
+		.await
+		.unwrap()
+		.unwrap();
 	let consumer = moq_stats::Consumer::new(broadcast, Default::default());
 	let mut totals = consumer.totals().await.unwrap();
 	tokio::time::timeout(TIMEOUT, async {
@@ -275,8 +269,8 @@ async fn refused_only_stats_depth_one_has_root_totals_and_shared_embedder_metric
 	.expect("refusal-only root totals");
 	relay
 		.stats
-		.tier(Tier::new(Path::new("gateway").unwrap()))
-		.refuse(Path::new("tenant").unwrap(), RefusalKind::Forbidden);
+		.tier(Tier::new(moq_net::Path::from_static("gateway")))
+		.refuse(moq_net::Path::from_static("tenant"), RefusalKind::Forbidden);
 	assert_eq!(
 		relay.refused("forbidden").await,
 		1,
@@ -307,15 +301,11 @@ async fn peer_zero_close_is_clean_and_application_close_counts_once() {
 	config.stats.enabled = true;
 	config.stats.node = Some("test".into());
 	let relay = start(config).await;
-	tokio::time::timeout(TIMEOUT, relay.origin.routed(Path::new(".stats/node/test").unwrap()))
+	tokio::time::timeout(TIMEOUT, relay.origin.routed(".stats/node/test"))
 		.await
 		.unwrap()
 		.unwrap();
-	let broadcast = relay
-		.origin
-		.request_broadcast(Path::new(".stats/node/test").unwrap(), None)
-		.await
-		.unwrap();
+	let broadcast = relay.origin.request_broadcast(".stats/node/test", None).await.unwrap();
 	let consumer = moq_stats::Consumer::new(broadcast, Default::default());
 	let mut totals = consumer.totals().await.unwrap();
 	for (index, error) in [moq_net::Error::Cancel, moq_net::Error::App(42)]

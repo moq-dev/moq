@@ -29,6 +29,7 @@ import {
 } from "./internal.ts";
 import * as Path from "./path.ts";
 import { Front } from "./resume.ts";
+import { closeUnwanted } from "./util/announce.ts";
 import {
 	type Advertised,
 	type Advertisements,
@@ -334,7 +335,7 @@ function unroutable(): StreamError {
 	return new StreamError(StreamCode.Unroutable, { message: "unroutable" });
 }
 
-/** A served route from {@link Producer.dynamic}: the queue a handler drains. */
+/** A served route from {@link Producer.requests}: the queue a handler drains. */
 class ServeState {
 	readonly root: Path.Valid;
 	/** The prefix the route claims; every served path is at or beneath it. */
@@ -481,6 +482,19 @@ function publishPath(path: Path.Valid): void {
 	}
 }
 
+// A broadcast created through the origin: its producer, and the handle the origin routes.
+interface Created {
+	producer: broadcast.Producer;
+	front: broadcast.Consumer;
+}
+
+// End a created broadcast the origin no longer routes. Consumer handles never end a produced
+// broadcast, so the origin closes its producer; tracks already subscribed keep serving.
+function retire({ producer, front }: Created): void {
+	front.close();
+	producer.close();
+}
+
 /** Reactive backing state shared by origin producers and consumers. */
 class OriginState {
 	// Both tables decouple the application producing into the origin from the
@@ -494,7 +508,7 @@ class OriginState {
 	// newest first. Local and routes stay separate so a session can never announce a
 	// received entry back to a peer, which is what makes an origin shared by both
 	// directions echo-free.
-	created: Map<Path.Valid, broadcast.Consumer> | undefined = new Map();
+	created: Map<Path.Valid, Created> | undefined = new Map();
 	local = new VersionedSignal<Map<Path.Valid, broadcast.Consumer> | undefined>(new Map());
 	advertisedLocal = new VersionedSignal<Map<Path.Valid, Route> | undefined>(new Map());
 	routes = new VersionedSignal<Map<Path.Valid, RouteEntry[]> | undefined>(new Map());
@@ -1066,14 +1080,14 @@ export interface Table {
 	/** The available broadcasts under `scope`, as a live stream; see {@link Consumer.announced}. */
 	announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
 
-	/** Advertise a prefix and serve requests under it; see {@link Producer.dynamic}. */
-	dynamic(prefix: Path.Valid): Dynamic;
+	/** Advertise a prefix and serve requests under it; see {@link Producer.requests}. */
+	requests(prefix: Path.Valid): Requests;
 
 	/** Insert a route with protocol metadata. @internal */
-	dynamicRoute(
+	requestsRoute(
 		prefix: Path.Valid,
 		route?: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"]; auth?: Route["auth"] },
-	): Dynamic;
+	): Requests;
 }
 
 /** Options for resolving a broadcast path. */
@@ -1099,7 +1113,7 @@ export interface RequestOptions {
  * Create a broadcast, populate its tracks, then {@link Publication.announce}: an
  * exact-path subscribe before the tracks exist is refused, and nobody can see or reach a
  * broadcast until it announces. To publish broadcasts on demand instead, claim a prefix with
- * {@link dynamic} and answer the requests beneath it.
+ * {@link requests} and answer the requests beneath it.
  *
  * @public
  */
@@ -1189,8 +1203,8 @@ export class Producer implements Table {
 	 * withdraws it from everyone again.
 	 *
 	 * Close the producer to drop it. Creating a path again supersedes the previous
-	 * broadcast: the origin drops its handle on the old one, which closes it unless the
-	 * application still holds a consumer clone. Announce with a {@link Route.epoch}
+	 * broadcast: the origin retracts and closes the old one, and tracks already subscribed
+	 * keep serving until they end. Announce with a {@link Route.epoch}
 	 * (`Epoch.mint()` per run) so a restart replaces the old broadcast rather than resuming
 	 * into it; at the same epoch, a local broadcast competes on cost and wins ties.
 	 */
@@ -1215,20 +1229,21 @@ export class Producer implements Table {
 		};
 		hooks.attachAnnouncer(producer, announcer);
 
+		const entry = { producer, front };
 		const previous = created.get(path);
-		created.set(path, front);
+		created.set(path, entry);
 		if (previous) {
-			this.#retractExact(path, previous);
-			previous.close();
+			this.#retractExact(path, previous.front);
+			retire(previous);
 		}
 
 		// Drop it when the broadcast closes, unless a recreate already replaced it: a stale
 		// broadcast closing must not unpublish the live one. Clearing `created` also stops a
-		// later announce, since a consumer clone can keep the broadcast open past this close.
+		// later announce.
 		const release = this.#hold(() => {
 			this.#retractExact(path, front);
-			if (this.#state.created?.get(path) === front) this.#state.created.delete(path);
-			front.close();
+			if (this.#state.created?.get(path) === entry) this.#state.created.delete(path);
+			retire(entry);
 		});
 		void front.closed.then(release);
 
@@ -1237,7 +1252,7 @@ export class Producer implements Table {
 
 	#advertiseExact(path: Path.Valid, front: broadcast.Consumer, route: Route): void {
 		if (!this.#state.local.peek()) throw new Error("origin is closed");
-		if (this.#state.created?.get(path) !== front) throw new Error("broadcast is closed");
+		if (this.#state.created?.get(path)?.front !== front) throw new Error("broadcast is closed");
 		// Both maps move together, so every reader sees the broadcast and its route at once.
 		this.#state.local.mutate((broadcasts) => {
 			broadcasts?.set(path, front);
@@ -1269,15 +1284,15 @@ export class Producer implements Table {
 	 * advertises the covering prefix and rejects the rest as they are requested;
 	 * consumers narrow with a {@link Path.Pattern} locally. The advertisement is
 	 * visible to {@link Consumer.announced} and forwarded by sessions for as long as
-	 * the returned {@link Dynamic} lives. A consumer resolving a path under it that
+	 * the returned {@link Requests} lives. A consumer resolving a path under it that
 	 * no announced local broadcast wins is handed to the handle as a {@link Request}.
 	 */
-	dynamic(prefix: Path.Valid): Dynamic {
+	requests(prefix: Path.Valid): Requests {
 		return this.#insertRoute(prefix, Route.default, true, true);
 	}
 
 	/** Insert an originated claim with route metadata that answers through `hooks.acceptRequest`, for tests and benches. @internal */
-	dynamicRoute(
+	requestsRoute(
 		prefix: Path.Valid,
 		route:
 			| Route
@@ -1287,13 +1302,13 @@ export class Producer implements Table {
 					cost?: Route["cost"];
 					auth?: Route["auth"];
 			  } = Route.default,
-	): Dynamic {
+	): Requests {
 		return this.#insertRoute(prefix, Route.normalize(route), true, false);
 	}
 
 	/**
 	 * Land a route a peer announced, served through the returned handle. Same as
-	 * {@link dynamic} but not originated, so a session never announces it back.
+	 * {@link requests} but not originated, so a session never announces it back.
 	 *
 	 * @internal
 	 */
@@ -1307,11 +1322,11 @@ export class Producer implements Table {
 					cost?: Route["cost"];
 					auth?: Route["auth"];
 			  } = Route.default,
-	): Dynamic {
+	): Requests {
 		return this.#insertRoute(prefix, Route.normalize(route), false, false);
 	}
 
-	#insertRoute(prefix: Path.Valid, route: Route, originated: boolean, publishes: boolean): Dynamic {
+	#insertRoute(prefix: Path.Valid, route: Route, originated: boolean, publishes: boolean): Requests {
 		prefix = this.#scope.prefix(prefix);
 		publishPath(prefix);
 		const server = new ServeState(this.#scope.root, prefix, originated);
@@ -1489,9 +1504,7 @@ export class Producer implements Table {
 		if (this.#state.closed.peek() !== undefined) return;
 		this.#state.closed.set(abort ?? null);
 		for (const watch of this.#state.watchers.values()) watch.version.update((n) => n + 1);
-		for (const front of this.#state.created?.values() ?? []) {
-			front.close();
-		}
+		for (const created of this.#state.created?.values() ?? []) retire(created);
 		this.#state.created = undefined;
 		this.#state.local.update(() => undefined);
 		this.#state.advertisedLocal.update(() => undefined);
@@ -1544,7 +1557,7 @@ let makeDynamic: (
 	state: OriginState,
 	retract: Dispose,
 	publisher?: Producer,
-) => Dynamic;
+) => Requests;
 
 let makeRequest: (path: Path.Valid, server: ServeState) => Request;
 let finishRequest: (request: Request, err: Error) => void;
@@ -1957,7 +1970,10 @@ export class Consumer {
 		const patterns = this.#scope.patterns(scope);
 		void producer.closed.then(this.#state.watch([...patterns].map(scopeHead)));
 		void this.#runAnnounced(producer, patterns, options?.hidden ?? false);
-		return producer.consume();
+		const consumer = producer.consume();
+		// The last reader leaving ends the stream and its watch.
+		closeUnwanted(producer);
+		return consumer;
 	}
 
 	/** The routes visible to one announcement watcher. */
@@ -2173,7 +2189,7 @@ export class Consumer {
 }
 
 /**
- * A served route from {@link Producer.dynamic}: advertises a prefix and answers the
+ * A served route from {@link Producer.requests}: advertises a prefix and answers the
  * requests beneath it.
  *
  * Drop it (or {@link close}) to retract the route and reject anything still waiting
@@ -2181,7 +2197,7 @@ export class Consumer {
  *
  * @public
  */
-export class Dynamic {
+export class Requests {
 	/** The prefix this handle advertises. */
 	readonly prefix: Path.Valid;
 
@@ -2207,7 +2223,7 @@ export class Dynamic {
 
 	static {
 		makeDynamic = (prefix, entry, state, retract, publisher) =>
-			new Dynamic(prefix, entry, state, retract, publisher);
+			new Requests(prefix, entry, state, retract, publisher);
 	}
 
 	/** The route this handle advertises. */
@@ -2290,7 +2306,7 @@ export class Dynamic {
 /**
  * A pending request for a broadcast to be served on demand.
  *
- * Yielded by {@link Dynamic.requested}. {@link prepare} then {@link Prepared.publish}
+ * Yielded by {@link Requests.requested}. {@link prepare} then {@link Prepared.publish}
  * resolves it with a new exact-path broadcast; {@link reject} resolves it with an error.
  * Advancing the iterator or closing it without either rejects the request.
  *

@@ -1,6 +1,6 @@
 import { Instant, Milli, Nano, now, sleep } from "@moq/clock";
 import { Effect, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
-import * as Announce from "../announced.ts";
+import type * as Announce from "../announced.ts";
 import { Handle as AuthHandle } from "../auth.ts";
 import { ended } from "../auth_session.ts";
 import { Allocator } from "../bandwidth.ts";
@@ -19,7 +19,7 @@ import {
 import type { Established } from "./established.ts";
 import { DISCOVERY_REMOVED } from "./forward.ts";
 import { DEFAULT_HANDOVER, type Drain, dialed, type GoawayProps, handover, pinnedTransport, target } from "./goaway.ts";
-import type { Probe, Stats } from "./stats.ts";
+import type { Probe } from "./stats.ts";
 import { heldOf } from "./tokens.ts";
 
 function sameTokens(a: readonly string[], b: readonly string[]): boolean {
@@ -221,7 +221,7 @@ export class Reload {
 	 * estimate is `undefined` while disconnected, which tells a sender to hold
 	 * its rate rather than encode at zero.
 	 */
-	readonly bandwidth: Allocator;
+	readonly allocator: Allocator;
 
 	/**
 	 * The auth handle every session of the loop is built on, spanning reconnects.
@@ -405,8 +405,8 @@ export class Reload {
 			effect.set(this.#probeSource, effect.get(this.established)?.probe, undefined);
 		});
 
-		this.bandwidth = new Allocator(this.#estimate);
-		this.#signals.cleanup(() => this.bandwidth.close());
+		this.allocator = new Allocator(this.#estimate);
+		this.#signals.cleanup(() => this.allocator.close());
 
 		// The transport has no event for the send-rate estimate, so sample on our
 		// own schedule and skip a tick while the previous snapshot is outstanding.
@@ -821,50 +821,6 @@ export class Reload {
 		this.#sequenceHref = undefined;
 		this.#redirects.reset();
 		this.#retire();
-	}
-
-	/**
-	 * Subscribe to broadcast announcements matching `scope`, spanning reconnects.
-	 *
-	 * The same {@link Announce.Consumer} stream as {@link Established.announced}, but everything active
-	 * is retracted (an `end` event) whenever the connection drops and re-announced on
-	 * reconnect, so a consumer draining `next()` never clings to a dead route across a reconnect.
-	 */
-	announced(scope: Path.Pattern = Path.Pattern.all(), options?: Announce.Options): Announce.Consumer {
-		// With a consume origin the table already spans reconnects (the forwarder retracts
-		// a dead session's entries), so its stream is the same thing with less machinery.
-		if (this.consume) return this.consume.announced(scope, options);
-
-		const producer = new Announce.Producer();
-		const consumer = producer.consume();
-
-		const pump = new Effect();
-		pump.run((effect) => {
-			const conn = effect.get(this.established);
-			if (!conn) {
-				// The same hold as a consume origin's: behind while enabled with no session.
-				if (effect.get(this.enabled)) producer.behind();
-				else producer.synced();
-				return;
-			}
-
-			// A dropped connection retracts what it announced, so a per-broadcast watcher tears
-			// down instead of clinging to the dead route.
-			pumpAnnounced(effect, conn.announced(scope, options), producer);
-		});
-
-		this.#signals.cleanup(() => pump.close());
-		void consumer.closed.then(() => pump.close());
-
-		return consumer;
-	}
-
-	/**
-	 * Snapshot the live connection's transport counters, or undefined while disconnected.
-	 * See {@link Established.stats}.
-	 */
-	async stats(): Promise<Stats | undefined> {
-		return this.established.peek()?.stats();
 	}
 
 	/** Stop reconnecting, drain and close the current connection, and settle {@link Reload.closed}. Idempotent. */

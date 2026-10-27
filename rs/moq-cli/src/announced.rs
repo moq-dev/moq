@@ -67,7 +67,7 @@ async fn follow(
 	// Scoped to the prefix, so the session only asks the relay for what is followed.
 	let pattern = moq_net::Pattern::subtree(prefix).with_context(|| format!("invalid prefix `{prefix}`"))?;
 	let origin = moq_tokio::origin::spawn()
-		.scope(moq_net::Path::empty(), &moq_net::Patterns::from(pattern))
+		.scope("", &moq_net::Patterns::from(pattern))
 		.with_context(|| format!("failed to scope to `{prefix}`"))?;
 
 	// Subscribe-only: this session reads and never publishes.
@@ -210,9 +210,7 @@ mod tests {
 			let broadcasts = ["demo/a", "demo/b", "other/c"]
 				.into_iter()
 				.map(|path| {
-					let broadcast = origin
-						.create_broadcast(moq_net::Path::new(path).unwrap())
-						.expect("broadcast");
+					let broadcast = origin.create_broadcast(path).expect("broadcast");
 					broadcast.announce(Default::default()).expect("announce");
 					(path, broadcast)
 				})
@@ -231,7 +229,7 @@ mod tests {
 
 			// Every broadcast is on the relay before anything follows it.
 			for (path, _) in &broadcasts {
-				tokio::time::timeout(TIMEOUT, relay.routed_broadcast(moq_net::Path::new(path).unwrap()))
+				tokio::time::timeout(TIMEOUT, relay.routed_broadcast(*path))
 					.await
 					.expect("relay routes the broadcast")
 					.expect("broadcast");

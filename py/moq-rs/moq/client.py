@@ -32,25 +32,6 @@ def qlog_supported() -> bool:
     return moq_qlog_supported()
 
 
-class Tokens:
-    """The credentials a :class:`Client` presents, replaceable while it runs."""
-
-    def __init__(self, client: Client) -> None:
-        self._client = client
-
-    def set(self, tokens: Sequence[str]) -> None:
-        """Replace the credentials every dial presents, such as before the current ones expire.
-
-        The next dial presents them, and a live session with in-band AUTH presents them at
-        once, withdrawing each replaced token once its replacements are answered, even when
-        one is refused. After an authorization refusal the client redials only if they changed.
-        """
-        tokens = _strs(tokens, "tokens")
-        if self._client._inner is not None:
-            self._client._inner.tokens().set(tokens)
-        self._client._config.tokens = tokens
-
-
 class Client:
     """High-level MoQ client with automatic origin wiring.
 
@@ -174,10 +155,6 @@ class Client:
             if self._inner is not None:
                 self._inner.cancel()
                 self._inner = None
-
-    def tokens(self) -> Tokens:
-        """The credentials every dial presents, to replace while running."""
-        return Tokens(self)
 
     def create_broadcast(self, path: str) -> BroadcastProducer:
         """Create an unannounced broadcast at ``path``, invisible until announced. Announce it after populating tracks.

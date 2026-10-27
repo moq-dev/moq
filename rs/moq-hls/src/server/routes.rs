@@ -222,7 +222,6 @@ fn server_error(err: crate::Error) -> Response {
 )]
 mod tests {
 	use super::*;
-	use moq_net::Path;
 
 	/// A millisecond track: the frames written here carry timestamps.
 	fn timed() -> moq_net::track::Info {
@@ -333,9 +332,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn master_answers_404_until_a_rendition_can_start() {
 		let origin = moq_tokio::origin::spawn();
-		let broadcast = origin
-			.create_broadcast(moq_net::Path::new("live").unwrap())
-			.expect("publish");
+		let broadcast = origin.create_broadcast("live").expect("publish");
 		broadcast.announce(run()).expect("announce");
 		let (_catalog, _registration, _track, mut media) =
 			publish_video(&mut broadcast.broadcast().clone(), video_config(), timed());
@@ -352,9 +349,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn the_first_manifest_lists_inline_video() {
 		let origin = moq_tokio::origin::spawn();
-		let broadcast = origin
-			.create_broadcast(moq_net::Path::new("live").unwrap())
-			.expect("publish");
+		let broadcast = origin.create_broadcast("live").expect("publish");
 		broadcast.announce(run()).expect("announce");
 		let inline = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		let (_catalog, _registration, _track, mut media) =
@@ -374,18 +369,14 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_denied_video_never_holds_the_manifest() {
 		let origin = moq_tokio::origin::spawn();
-		let broadcast = origin
-			.create_broadcast(moq_net::Path::new("room/live").unwrap())
-			.unwrap();
+		let broadcast = origin.create_broadcast("room/live").unwrap();
 		broadcast.announce(run()).unwrap();
-		let secret = origin
-			.create_broadcast(moq_net::Path::new("room/secret").unwrap())
-			.unwrap();
+		let secret = origin.create_broadcast("room/secret").unwrap();
 		secret.announce(Default::default()).unwrap();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
 		let reserved = catalog.reserve();
 		let mut config = video_config();
-		config.broadcast = Some(moq_net::path::Relative::new("./secret").to_owned());
+		config.broadcast = Some(moq_net::path::Relative::new("./secret").to_owned().unwrap());
 		let mut video = reserved
 			.video(
 				secret.create_track("video0", timed()).unwrap(),
@@ -411,7 +402,7 @@ mod tests {
 		let restricted = origin
 			.consume()
 			.scope(
-				moq_net::Path::empty(),
+				"",
 				&moq_net::Patterns::from("room/live".parse::<moq_net::Pattern>().unwrap()),
 			)
 			.unwrap();
@@ -432,9 +423,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_restart_lists_the_replacement_under_its_own_urls() {
 		let origin = moq_tokio::origin::spawn();
-		let old = origin
-			.create_broadcast(moq_net::Path::new("live").unwrap())
-			.expect("publish");
+		let old = origin.create_broadcast("live").expect("publish");
 		old.announce(run()).expect("announce");
 		let (old_catalog, _, old_track, mut old_media) =
 			publish_video(&mut old.broadcast().clone(), video_config(), timed());
@@ -447,9 +436,7 @@ mod tests {
 		wait_listed(&app, &old_playlist, "seg/656e3d1b.0.m4s").await;
 
 		let next = moq_net::Epoch::mint();
-		let new = origin
-			.create_broadcast(moq_net::Path::new("live").unwrap())
-			.expect("publish");
+		let new = origin.create_broadcast("live").expect("publish");
 		new.announce(moq_net::origin::Route::default().with_epoch(next.clone()))
 			.expect("announce");
 		let (_new_catalog, _, _new_track, mut new_media) =
@@ -484,9 +471,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_failed_timeline_answers_an_uncacheable_error() {
 		let origin = moq_tokio::origin::spawn();
-		let broadcast = origin
-			.create_broadcast(moq_net::Path::new("live").unwrap())
-			.expect("publish");
+		let broadcast = origin.create_broadcast("live").expect("publish");
 		broadcast.announce(run()).expect("announce");
 		let mut catalog =
 			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
@@ -540,9 +525,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn serves_only_versioned_media_urls() {
 		let origin = moq_tokio::origin::spawn();
-		let broadcast = origin
-			.create_broadcast(moq_net::Path::new("live").unwrap())
-			.expect("publish");
+		let broadcast = origin.create_broadcast("live").expect("publish");
 		broadcast.announce(run()).expect("announce");
 		let (_catalog, _registration, _track, mut media) =
 			publish_video(&mut broadcast.broadcast().clone(), video_config(), timed());
@@ -611,18 +594,16 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn denied_sibling_media_answers_403_without_poisoning_allowed_siblings() {
 		let origin = moq_tokio::origin::spawn();
-		let broadcast = origin
-			.create_broadcast(moq_net::Path::new("room/live").unwrap())
-			.unwrap();
+		let broadcast = origin.create_broadcast("room/live").unwrap();
 		broadcast.announce(run()).unwrap();
-		let source = origin.create_broadcast(Path::new("room/source").unwrap()).unwrap();
+		let source = origin.create_broadcast("room/source").unwrap();
 		source.announce(Default::default()).unwrap();
-		let secret = origin.create_broadcast(Path::new("room/secret").unwrap()).unwrap();
+		let secret = origin.create_broadcast("room/secret").unwrap();
 		secret.announce(Default::default()).unwrap();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
 		let reserved = catalog.reserve();
 		let mut config = video_config();
-		config.broadcast = Some(moq_net::path::Relative::new("./source").to_owned());
+		config.broadcast = Some(moq_net::path::Relative::new("./source").unwrap());
 		let mut allowed = reserved
 			.video(
 				source.create_track("video0", timed()).unwrap(),
@@ -631,7 +612,7 @@ mod tests {
 			)
 			.unwrap();
 		let mut config = video_config();
-		config.broadcast = Some(moq_net::path::Relative::new("./secret").to_owned());
+		config.broadcast = Some(moq_net::path::Relative::new("./secret").unwrap());
 		let mut denied = reserved
 			.video(
 				secret.create_track("video1", timed()).unwrap(),
@@ -647,7 +628,7 @@ mod tests {
 			.into_iter()
 			.map(|path| path.parse::<moq_net::Pattern>().unwrap())
 			.collect();
-		let restricted = origin.consume().scope(moq_net::Path::empty(), &patterns).unwrap();
+		let restricted = origin.consume().scope("", &patterns).unwrap();
 		let server = Server::new(restricted, Default::default());
 		let broadcaster = server.broadcaster("room/live").await.unwrap();
 		broadcaster.ready().await;
@@ -690,7 +671,7 @@ mod tests {
 		// restricted server's export into using them.
 		let broad = moq_mux::Source::new(origin.consume(), broadcast.consume());
 		let referenced = broad
-			.resolve(Some(&moq_net::path::Relative::new("./secret")), None)
+			.resolve(Some(&moq_net::path::Relative::new("./secret").unwrap()), None)
 			.await
 			.unwrap();
 		let mut group = referenced.track("video1").unwrap().fetch_group(0, None).await.unwrap();
@@ -708,7 +689,7 @@ mod tests {
 		let only_catalog = origin
 			.consume()
 			.scope(
-				moq_net::Path::empty(),
+				"",
 				&moq_net::Patterns::from("room/live".parse::<moq_net::Pattern>().unwrap()),
 			)
 			.unwrap();

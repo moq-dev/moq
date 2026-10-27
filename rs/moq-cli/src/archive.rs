@@ -47,7 +47,7 @@ pub struct ImportArgs {
 }
 
 /// One publisher instance being recorded: its path, and its epoch when its route has one.
-type Instance = (moq_net::PathOwned, Option<moq_net::Epoch>);
+type Instance = (moq_net::Path, Option<moq_net::Epoch>);
 
 /// Record every broadcast announced at or under `prefix` into `args.store`, each publisher
 /// instance under `<path>/@<epoch>`, until the announcements end.
@@ -68,7 +68,7 @@ pub async fn export(origin: moq_net::origin::Consumer, prefix: String, args: Exp
 
 	// Announcements leave hidden routes out unless asked, and a prefix naming one asks.
 	let hidden = prefix.split('/').any(|segment| segment.starts_with('.'));
-	let prefix = moq_net::Path::new(&prefix)?.to_owned();
+	let prefix = moq_net::Path::new(&prefix)?;
 	let mut announced = origin.clone().with_hidden(hidden).announced();
 	let mut recordings = tokio::task::JoinSet::new();
 	let mut running = Running::default();
@@ -115,11 +115,11 @@ pub async fn export(origin: moq_net::origin::Consumer, prefix: String, args: Exp
 /// The broadcasts being recorded. Announcements read after another instance took over all
 /// resolve that one, so it is recorded once.
 #[derive(Clone, Default)]
-struct Claims(Arc<std::sync::Mutex<HashMap<moq_net::PathOwned, Vec<moq_net::broadcast::Consumer>>>>);
+struct Claims(Arc<std::sync::Mutex<HashMap<moq_net::Path, Vec<moq_net::broadcast::Consumer>>>>);
 
 impl Claims {
 	/// Claim `broadcast` for recording, or `None` when it is recorded already.
-	fn claim(&self, path: &moq_net::PathOwned, broadcast: &moq_net::broadcast::Consumer) -> Option<Claim> {
+	fn claim(&self, path: &moq_net::Path, broadcast: &moq_net::broadcast::Consumer) -> Option<Claim> {
 		let mut claims = self.0.lock().unwrap();
 		let claimed = claims.entry(path.clone()).or_default();
 		if claimed.iter().any(|other| other.is_clone(broadcast)) {
@@ -137,7 +137,7 @@ impl Claims {
 /// A broadcast being recorded, released on drop.
 struct Claim {
 	claims: Claims,
-	path: moq_net::PathOwned,
+	path: moq_net::Path,
 	broadcast: moq_net::broadcast::Consumer,
 }
 
@@ -252,9 +252,7 @@ pub async fn import(
 	if let Some(refresh) = args.refresh {
 		config = config.with_refresh(refresh.into());
 	}
-	let broadcast = origin
-		.create_broadcast(moq_net::Path::new(&name)?)
-		.context("failed to create broadcast")?;
+	let broadcast = origin.create_broadcast(&name).context("failed to create broadcast")?;
 	let consumer = moq_archive::Consumer::open(store, broadcast.broadcast().clone(), config)
 		.await
 		.with_context(|| format!("no readable recording at {}", args.store))?;
@@ -333,7 +331,7 @@ mod tests {
 		let mut epochs = Vec::new();
 		let mut broadcasts = Vec::new();
 		for path in ["live/a", "live/b", "other"] {
-			let broadcast = origin.create_broadcast(moq_net::Path::new(path).unwrap()).unwrap();
+			let broadcast = origin.create_broadcast(path).unwrap();
 			let track = broadcast.create_track("video", info.clone()).unwrap();
 			let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
 			group.write_frame(Timestamp::from_millis(0).unwrap(), path).unwrap();
@@ -432,11 +430,7 @@ mod tests {
 		})
 		.await
 		.expect("the replay is announced");
-		let broadcast = origin
-			.consume()
-			.request_broadcast(moq_net::Path::new("replay").unwrap(), None)
-			.await
-			.unwrap();
+		let broadcast = origin.consume().request_broadcast("replay", None).await.unwrap();
 		let track = broadcast.track("video").unwrap();
 		let mut group = track.fetch_group(0, None).await.unwrap();
 		let frame = group.read_frame().await.unwrap().unwrap();
@@ -448,15 +442,12 @@ mod tests {
 	#[test]
 	fn a_re_announced_instance_is_recorded() {
 		let mut running = Running::default();
-		let epochless = (moq_net::Path::new("live/a").unwrap().to_owned(), None);
+		let epochless = (moq_net::Path::from_static("live/a"), None);
 		assert!(running.start(&epochless));
 		assert!(running.start(&epochless));
 		assert!(!running.done(&epochless));
 
-		let pinned = (
-			moq_net::Path::new("live/b").unwrap().to_owned(),
-			Some(moq_net::Epoch::mint()),
-		);
+		let pinned = (moq_net::Path::from_static("live/b"), Some(moq_net::Epoch::mint()));
 		assert!(running.start(&pinned));
 		assert!(!running.start(&pinned));
 		assert!(running.done(&pinned));
@@ -469,7 +460,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_resolved_broadcast_is_recorded_once() {
 		let origin = moq_tokio::origin::spawn();
-		let path = moq_net::Path::new("live/a").unwrap().to_owned();
+		let path = moq_net::Path::from_static("live/a");
 		let newest = origin.create_broadcast(&path).unwrap();
 		let older = origin.create_broadcast(&path).unwrap();
 
@@ -488,14 +479,14 @@ mod tests {
 	/// share a key prefix.
 	#[test]
 	fn an_epochless_instance_gets_a_fresh_key() {
-		let instance = (moq_net::Path::new("live/a").unwrap().to_owned(), None);
+		let instance = (moq_net::Path::from_static("live/a"), None);
 		let first = key(&Path::from("rec"), &instance).unwrap();
 		let second = key(&Path::from("rec"), &instance).unwrap();
 		assert_ne!(first, second);
 		assert!(first.as_ref().starts_with("rec/live/a/"), "{first}");
 
 		let epoch = moq_net::Epoch::mint();
-		let pinned = (moq_net::Path::new("live/a").unwrap().to_owned(), Some(epoch.clone()));
+		let pinned = (moq_net::Path::from_static("live/a"), Some(epoch.clone()));
 		assert_eq!(
 			key(&Path::from("rec"), &pinned).unwrap().as_ref(),
 			format!("rec/live/a/@{epoch}")
@@ -509,16 +500,13 @@ mod tests {
 		let epoch = moq_net::Epoch::mint();
 		let victim = key(
 			&Path::from("rec"),
-			&(moq_net::Path::new("live/a").unwrap().to_owned(), Some(epoch.clone())),
+			&(moq_net::Path::from_static("live/a"), Some(epoch.clone())),
 		)
 		.unwrap();
 		let hostile = format!("live/a/@{epoch}");
 		let nested = key(
 			&Path::from("rec"),
-			&(
-				moq_net::Path::new(&hostile).unwrap().to_owned(),
-				Some(moq_net::Epoch::mint()),
-			),
+			&(moq_net::Path::new(&hostile).unwrap(), Some(moq_net::Epoch::mint())),
 		)
 		.unwrap();
 		assert!(nested.prefix_match(&victim).is_none(), "{nested} is under {victim}");
@@ -530,10 +518,7 @@ mod tests {
 		// `%` is escaped too, so an escaped-looking segment keys apart from the `@` one.
 		let literal = key(
 			&Path::from("rec"),
-			&(
-				moq_net::Path::new(&format!("live/a/%40{epoch}")).unwrap().to_owned(),
-				Some(epoch),
-			),
+			&(moq_net::Path::new(&format!("live/a/%40{epoch}")).unwrap(), Some(epoch)),
 		)
 		.unwrap();
 		assert!(literal.as_ref().starts_with("rec/live/a/%2540"), "{literal}");

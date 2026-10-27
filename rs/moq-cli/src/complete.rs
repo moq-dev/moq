@@ -428,9 +428,7 @@ mod tests {
 		let _ = moq_tokio::crypto::install_default();
 
 		let origin = moq_tokio::origin::spawn();
-		let _alpha = origin
-			.create_broadcast(moq_tokio::moq_net::Path::new("alpha").unwrap())
-			.expect("alpha");
+		let _alpha = origin.create_broadcast("alpha").expect("alpha");
 		_alpha.announce(Default::default()).expect("alpha");
 
 		let mut config = moq_tokio::listen::Config::default();

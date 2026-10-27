@@ -9,7 +9,6 @@
 //! releases them newest first to make that race deterministic.
 
 use crate::support;
-use moq_net::Path;
 
 use std::time::Duration;
 
@@ -43,7 +42,7 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 async fn round(version: &str, relay: bool, newest_first: bool) -> Vec<(u64, usize)> {
 	let version: Version = version.parse().unwrap();
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast(Path::new("bcast").unwrap()).unwrap();
+	let broadcast = publisher.create_broadcast("bcast").unwrap();
 	let track = broadcast
 		.create_track(
 			"history",
@@ -73,11 +72,11 @@ async fn round(version: &str, relay: bool, newest_first: bool) -> Vec<(u64, usiz
 	let pair = connect_mock(options).await;
 
 	let consumer = subscriber.consume();
-	moq_clock::timeout(TIMEOUT, consumer.routed(Path::new("bcast").unwrap()))
+	moq_clock::timeout(TIMEOUT, consumer.routed("bcast"))
 		.await
 		.expect("announce timeout")
 		.expect("routed");
-	let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast(Path::new("bcast").unwrap(), None))
+	let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
@@ -203,7 +202,7 @@ async fn a_late_subscriber_receives_the_relays_cached_history() {
 	// Older drafts canonicalize group 0 to the live edge instead of replay.
 	let version: Version = "moq-lite-07-wip".parse().unwrap();
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast(Path::new("bcast").unwrap()).unwrap();
+	let broadcast = publisher.create_broadcast("bcast").unwrap();
 	let track = broadcast
 		.create_track(
 			"history",
@@ -222,11 +221,8 @@ async fn a_late_subscriber_receives_the_relays_cached_history() {
 	options.client_subscribe = Some(first.clone());
 	let first_pair = connect_mock(options).await;
 	let consumer = first.consume();
-	consumer.routed(Path::new("bcast").unwrap()).await.unwrap();
-	let remote = consumer
-		.request_broadcast(Path::new("bcast").unwrap(), None)
-		.await
-		.unwrap();
+	consumer.routed("bcast").await.unwrap();
+	let remote = consumer.request_broadcast("bcast", None).await.unwrap();
 	let subscription = Subscription::default().with_max_delay(FOREVER).with_range(0..);
 	let first_subscription = subscription.clone();
 	let first_reader = moq_clock::sim::spawn(async move {
@@ -263,11 +259,8 @@ async fn a_late_subscriber_receives_the_relays_cached_history() {
 	options.client_subscribe = Some(late.clone());
 	let late_pair = connect_mock(options).await;
 	let consumer = late.consume();
-	consumer.routed(Path::new("bcast").unwrap()).await.unwrap();
-	let remote = consumer
-		.request_broadcast(Path::new("bcast").unwrap(), None)
-		.await
-		.unwrap();
+	consumer.routed("bcast").await.unwrap();
+	let remote = consumer.request_broadcast("bcast", None).await.unwrap();
 	let mut late_sub = remote.track("history").unwrap().subscribe(subscription).await.unwrap();
 	moq_clock::timeout(TIMEOUT, read_history(&mut late_sub))
 		.await

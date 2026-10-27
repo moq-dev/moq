@@ -16,7 +16,7 @@ fn protocol() -> &'static str {
 /// A one-frame broadcast named `test` and the handles that keep it alive.
 fn broadcast(payload: &[u8]) -> (moq_net::origin::Producer, impl Sized) {
 	let origin = crate::origin::spawn();
-	let broadcast = origin.create_broadcast(moq_net::Path::new("test").unwrap()).unwrap();
+	let broadcast = origin.create_broadcast("test").unwrap();
 	broadcast.announce(Default::default()).unwrap();
 	let track = broadcast
 		.create_track(
@@ -64,10 +64,7 @@ async fn transfer(offerer: &Offerer, answerer: &Answerer, payload: &[u8]) {
 			panic!("expected the broadcast to be announced");
 		};
 		assert_eq!(route.prefix.as_str(), "test");
-		let broadcast = consumer
-			.request_broadcast(moq_net::Path::new("test").unwrap(), None)
-			.await
-			.unwrap();
+		let broadcast = consumer.request_broadcast("test", None).await.unwrap();
 		let mut track = broadcast.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = track.recv_group().await.unwrap().unwrap();
 		group.read_frame().await.unwrap().unwrap()

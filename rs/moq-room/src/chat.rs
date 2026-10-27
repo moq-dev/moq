@@ -183,7 +183,6 @@ impl Subscriber {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use moq_net::Path;
 
 	#[tokio::test]
 	async fn expires_idle_history_and_late_readers_only_see_retained_messages() {
@@ -281,7 +280,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_warm_copy_starts_at_the_newest_window() {
 		let publisher = origin(1);
-		let broadcast = publisher.create_broadcast(Path::new("room").unwrap()).unwrap();
+		let broadcast = publisher.create_broadcast("room").unwrap();
 		let track = broadcast.create_track(TRACK, info()).unwrap();
 		broadcast.announce(Default::default()).unwrap();
 		let mut demand = track.demand();
@@ -295,11 +294,8 @@ mod tests {
 		let relay = origin(2);
 		let _link = link(&publisher, &relay).await;
 		let consumer = relay.consume();
-		consumer.routed(Path::new("room").unwrap()).await.unwrap();
-		let remote = consumer
-			.request_broadcast(Path::new("room").unwrap(), None)
-			.await
-			.unwrap();
+		consumer.routed("room").await.unwrap();
+		let remote = consumer.request_broadcast("room", None).await.unwrap();
 
 		// A first reader warms the relay's copy with the first window.
 		{

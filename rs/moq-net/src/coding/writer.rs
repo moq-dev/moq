@@ -282,7 +282,6 @@ impl<S: crate::transport::poll::SendStream, V> Drop for Writer<S, V> {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::Path;
 	use crate::lite::test_transport::{Log, SinkSend};
 	use std::task::Waker;
 
@@ -377,7 +376,7 @@ mod tests {
 
 	impl<V> Encode<V> for Poison {
 		fn encode(&self, w: &mut Encoder<'_>, _: V) -> Result<(), EncodeError> {
-			w.control = Some(crate::stats::Control::Probe);
+			w.control = Some(crate::stats::Message::Probe);
 			w.slice(b"junk");
 			Err(EncodeError::BoundsExceeded)
 		}
@@ -414,12 +413,12 @@ mod tests {
 	fn control_body_counts_successful_encodes_once_before_transport_delivery() {
 		use crate::{
 			lite,
-			stats::{Bytes, Control, Registry, Tier},
+			stats::{Message, Registry, Tier, Totals},
 		};
 		let stats = Registry::new(Default::default());
 		let session = stats
-			.tier(Tier::new(Path::new("internal").unwrap()))
-			.session(Path::new("").unwrap());
+			.tier(Tier::new(crate::Path::from_static("internal")))
+			.session(crate::Path::from_static(""));
 		let gate = kio::Producer::new(false);
 		let mut writer =
 			Writer::new(SinkSend::gated(Log::default(), gate.consume()), lite::Version::Lite07).with_stats(&session);
@@ -436,14 +435,14 @@ mod tests {
 		assert_eq!(
 			stats.snapshot().control(),
 			vec![(
-				Tier::new(Path::new("internal").unwrap()),
-				Control::Probe,
-				Bytes { tx: size, rx: 0 }
+				Tier::new(crate::Path::from_static("internal")),
+				Message::Probe,
+				Totals { tx: size, rx: 0 }
 			)]
 		);
 		writer
 			.buffer(&lite::Track {
-				broadcast: Path::new("test").unwrap(),
+				broadcast: crate::Path::from_static("test"),
 				epoch: None,
 				track: "video".into(),
 			})
@@ -453,7 +452,7 @@ mod tests {
 				.snapshot()
 				.control()
 				.into_iter()
-				.find(|(_, class, _)| *class == Control::TrackInfo)
+				.find(|(_, class, _)| *class == Message::TrackInfo)
 				.unwrap()
 				.2
 				.tx

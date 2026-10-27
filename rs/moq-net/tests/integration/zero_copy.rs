@@ -5,7 +5,6 @@
 //! without a copy on either side.
 
 use crate::support;
-use moq_net::Path;
 
 use std::time::Duration;
 
@@ -54,17 +53,17 @@ async fn frames_cross_without_a_copy() {
 			}
 		);
 
-		let broadcast = publisher.create_broadcast(Path::new("room").unwrap()).unwrap();
+		let broadcast = publisher.create_broadcast("room").unwrap();
 		let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
 		let track = broadcast.create_track("video", info).unwrap();
 		broadcast.announce(Default::default()).unwrap();
 
 		let consumer = subscriber.consume();
-		moq_clock::timeout(TIMEOUT, consumer.routed(Path::new("room").unwrap()))
+		moq_clock::timeout(TIMEOUT, consumer.routed("room"))
 			.await
 			.expect("announce timeout")
 			.unwrap();
-		let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast(Path::new("room").unwrap(), None))
+		let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast("room", None))
 			.await
 			.expect("resolve timeout")
 			.expect("broadcast resolves");

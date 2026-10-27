@@ -140,7 +140,7 @@ impl std::future::Future for Driver {
 	}
 }
 
-pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
+pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle, Option<crate::auth::Credential>), Error> {
 	let Config {
 		runtime,
 		stats,
@@ -202,7 +202,7 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 	// What the peer declared in its SETUP. Seeded now when that stream was already
 	// read (the legacy handshake, or a gated server accept), and filled by the uni
 	// loop otherwise.
-	let peer_setup = peer::PeerSetup::new(extensions).with_implementation(peer_implementation);
+	let mut peer_setup = peer::PeerSetup::new(extensions).with_implementation(peer_implementation);
 	let setup_read = peer_declared.is_some();
 	match peer_declared {
 		Some(declared) => peer_setup.set(declared),
@@ -210,9 +210,13 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 		// settle the slot rather than leave the announce loops waiting on a value
 		// that is never coming.
 		None if !cluster::supported(version) => peer_setup.set(peer::Peer::default()),
+		// A client is live before the server's SETUP, which follows its check of the
+		// credential.
+		None if client => peer_setup = peer_setup.accepting(auth.clone()),
 		None => {}
 	}
 
+	let credential = setup_token.clone();
 	let driver = async move {
 		// Held for the life of the session.
 		let _setup_token = setup_token;
@@ -629,6 +633,7 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 			future: driver,
 		},
 		goaway_handle,
+		credential,
 	))
 }
 
@@ -1489,7 +1494,7 @@ async fn read_goaways<R: crate::transport::poll::RecvStream>(
 		let msg: ietf::GoAway = body.message(version)?;
 		reader
 			.stats()
-			.control(crate::stats::Control::Goaway, body.0.len() + 2, true);
+			.control(crate::stats::Message::Goaway, body.0.len() + 2, true);
 		tracing::info!(message = ?msg, "received GOAWAY");
 
 		// Draft-18 names the first of our own Request IDs it did not process: even for a
@@ -1543,7 +1548,7 @@ async fn enforce_grant(auth: crate::auth::Link, publisher: Publisher, mut sessio
 	let Some(path) = kio::wait(|waiter| check.poll(&auth, &mut announced, waiter)).await else {
 		return Ok(());
 	};
-	tracing::error!(broadcast = %origin.absolute(&path), "publishing outside our grant; closing the session");
+	tracing::error!(broadcast = %crate::path::Rooted(origin.root(), &path), "publishing outside our grant; closing the session");
 	let err = Error::Unauthorized;
 	session.close(
 		super::error::to_session_code(&SessionError::from(&err)),
@@ -1555,7 +1560,6 @@ async fn enforce_grant(auth: crate::auth::Link, publisher: Publisher, mut sessio
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::Path;
 	use crate::model::ProduceTest;
 
 	/// The peer's IMPLEMENTATION option is read alongside what it declared, and one that
@@ -1598,7 +1602,7 @@ mod tests {
 			};
 			// SETUP already owns its stream; subsequent requests have no credit.
 			let _ = scripted.without_credit();
-			let (driver, _goaway) = start(Config {
+			let (driver, _goaway, _) = start(Config {
 				runtime: crate::time::sim(),
 				stats: Default::default(),
 				session,
@@ -1675,7 +1679,7 @@ mod tests {
 							} else {
 								ietf::TrackStatus {
 									request_id: RequestId(id),
-									track_namespace: crate::Path::new("test").unwrap(),
+									track_namespace: crate::Path::from_static("test"),
 									track_name: "video".into(),
 									properties_wanted: true,
 									epoch: None,
@@ -1695,7 +1699,7 @@ mod tests {
 					let session =
 						crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(incoming);
 					let log = session.log.clone();
-					let (driver, _) = start(Config {
+					let (driver, _, _) = start(Config {
 						runtime: crate::time::sim(),
 						stats: Default::default(),
 						session: crate::driver::Transport::new(session.clone()),
@@ -1754,7 +1758,7 @@ mod tests {
 				script.extend(body);
 				let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![script]);
 				let log = session.log.clone();
-				let (driver, _) = start(Config {
+				let (driver, _, _) = start(Config {
 					runtime: crate::time::sim(),
 					stats: Default::default(),
 					session: crate::driver::Transport::new(session.clone()),
@@ -1808,7 +1812,7 @@ mod tests {
 		));
 		let log = session.log.clone();
 		let handle = crate::auth::Handle::new();
-		let (driver, _) = start(Config {
+		let (driver, _, _) = start(Config {
 			runtime: crate::time::sim(),
 			stats: Default::default(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -1864,7 +1868,7 @@ mod tests {
 		));
 		let log = session.log.clone();
 		let handle = crate::auth::Handle::new();
-		let (driver, _) = start(Config {
+		let (driver, _, _) = start(Config {
 			runtime: crate::time::sim(),
 			stats: Default::default(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -1913,7 +1917,7 @@ mod tests {
 				let session =
 					crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(vec![script]);
 				let log = session.log.clone();
-				let (driver, _) = start(Config {
+				let (driver, _, _) = start(Config {
 					runtime: crate::time::sim(),
 					stats: Default::default(),
 					session: crate::driver::Transport::new(session.clone()),
@@ -1991,7 +1995,7 @@ mod tests {
 		writer.varint(ietf::Namespace::ID).await.unwrap();
 		writer
 			.encode(&ietf::Namespace {
-				suffix: crate::Path::new("cam").unwrap(),
+				suffix: crate::Path::from_static("cam"),
 				params: None,
 			})
 			.await
@@ -2020,7 +2024,7 @@ mod tests {
 		let session = crate::lite::test_transport::ScriptedSession::new(namespace_without_hop_path(VERSION).await);
 		let log = session.log.clone();
 
-		let (driver, _goaway) = start(Config {
+		let (driver, _goaway, _) = start(Config {
 			runtime: crate::time::sim(),
 			stats: Default::default(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -2080,7 +2084,7 @@ mod tests {
 			.map(|prefix| crate::Pattern::subtree(prefix).unwrap())
 			.collect();
 		let scoped = origin
-			.scope(Path::new("rootns").unwrap(), &scope)
+			.scope("rootns", &scope)
 			.expect("scope the origin to two prefixes");
 		let _watch = scoped.consume().announced();
 
@@ -2088,7 +2092,7 @@ mod tests {
 		let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
 		let log = session.log.clone();
 
-		let (driver, _goaway) = start(Config {
+		let (driver, _goaway, _) = start(Config {
 			runtime: crate::time::sim(),
 			stats: Default::default(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -2164,10 +2168,7 @@ mod tests {
 	fn watch(origin: &crate::origin::Producer, prefix: &str) -> crate::announce::Consumer {
 		origin
 			.consume()
-			.scope(
-				Path::new(prefix).unwrap(),
-				&crate::Patterns::from(crate::Pattern::all()),
-			)
+			.scope(prefix, &crate::Patterns::from(crate::Pattern::all()))
 			.unwrap()
 			.announced()
 	}
@@ -2208,7 +2209,7 @@ mod tests {
 			_ => None,
 		};
 
-		let (driver, _goaway) = start(Config {
+		let (driver, _goaway, _) = start(Config {
 			runtime: crate::time::sim(),
 			stats: Default::default(),
 			session,
@@ -2463,16 +2464,14 @@ mod tests {
 	/// enough: the question is only whether the bytes went out unasked.
 	async fn announce_occurrences(peer_declared: Option<peer::Peer>) -> usize {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let _cam = origin
-			.announce(Path::new("solo-cam").unwrap(), crate::origin::Route::default())
-			.unwrap();
+		let _cam = origin.announce("solo-cam", crate::origin::Route::default()).unwrap();
 
 		// An open gate: an unsolicited PUBLISH_NAMESPACE can reach the wire.
 		let gate = kio::Producer::new(true);
 		let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
 		let log = session.log.clone();
 
-		let (driver, _goaway) = start(Config {
+		let (driver, _goaway, _) = start(Config {
 			runtime: crate::time::sim(),
 			stats: Default::default(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -2572,16 +2571,14 @@ mod tests {
 
 	fn auth_session(auth: bool) -> AuthSession {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let cam = origin
-			.announce(Path::new("solo-cam").unwrap(), crate::origin::Route::default())
-			.unwrap();
+		let cam = origin.announce("solo-cam", crate::origin::Route::default()).unwrap();
 
 		let gate = kio::Producer::new(true);
 		let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
 		let log = session.log.clone();
 
 		let handle = crate::auth::Link::ietf(true);
-		let (driver, goaway) = start(Config {
+		let (driver, goaway, _) = start(Config {
 			runtime: crate::time::sim(),
 			stats: Default::default(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -2670,7 +2667,7 @@ mod tests {
 
 		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
 		let log = session.log.clone();
-		let (driver, _goaway) = start(Config {
+		let (driver, _goaway, _) = start(Config {
 			runtime: crate::time::sim(),
 			stats: Default::default(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -2770,7 +2767,7 @@ mod tests {
 		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new())
 			.with_incoming_bidis(vec![auth_request(VERSION).await]);
 		let log = session.log.clone();
-		let (driver, _goaway) = start(Config {
+		let (driver, _goaway, _) = start(Config {
 			runtime: crate::time::sim(),
 			stats: Default::default(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -2863,7 +2860,7 @@ mod tests {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let log = session.log.clone();
 
-		let (driver, _goaway) = start(Config {
+		let (driver, _goaway, _) = start(Config {
 			runtime: crate::time::sim(),
 			stats: Default::default(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -2912,7 +2909,7 @@ mod tests {
 		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
 		let log = session.log.clone();
 
-		let (driver, _goaway) = start(Config {
+		let (driver, _goaway, _) = start(Config {
 			runtime: crate::time::sim(),
 			stats: Default::default(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -3130,7 +3127,7 @@ mod tests {
 			max_age: None,
 			new_group: None,
 			request_id: RequestId(1),
-			track_namespace: crate::Path::new("room").unwrap(),
+			track_namespace: crate::Path::from_static("room"),
 			track_name: "video".into(),
 			subscriber_priority: 128,
 			group_order: ietf::GroupOrder::Descending,
@@ -3149,9 +3146,7 @@ mod tests {
 		// Stall before the type, then after it while the body has not arrived.
 		for stalled in [Vec::new(), vec![ietf::Subscribe::ID as u8]] {
 			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-			let broadcast = origin
-				.publish(Path::new("room").unwrap(), crate::origin::Route::default())
-				.unwrap();
+			let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
 			let mut track = broadcast.create_track("video", None).unwrap();
 			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new())
 				.with_incoming_bidis(vec![stalled, subscribe.clone()]);
@@ -3330,7 +3325,7 @@ mod tests {
 				let session =
 					crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(vec![payload]);
 				let log = session.log.clone();
-				let (driver, _goaway) = start(Config {
+				let (driver, _goaway, _) = start(Config {
 					runtime: crate::time::sim(),
 					stats: Default::default(),
 					session: crate::driver::Transport::new(session.clone()),
@@ -3402,7 +3397,7 @@ mod tests {
 				let session =
 					crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(vec![payload]);
 				let log = session.log.clone();
-				let (driver, _goaway) = start(Config {
+				let (driver, _goaway, _) = start(Config {
 					runtime: crate::time::sim(),
 					stats: Default::default(),
 					session: crate::driver::Transport::new(session.clone()),
@@ -3453,7 +3448,7 @@ mod tests {
 		writer
 			.encode(&ietf::PublishNamespace {
 				request_id: RequestId(1),
-				track_namespace: crate::Path::new("room/host").unwrap(),
+				track_namespace: crate::Path::from_static("room/host"),
 				params: Default::default(),
 				authorization_token: None,
 			})
@@ -3464,7 +3459,7 @@ mod tests {
 			writer.varint(ietf::PublishNamespaceDone::ID).await.unwrap();
 			writer
 				.encode(&ietf::PublishNamespaceDone {
-					track_namespace: crate::Path::new("room/host").unwrap(),
+					track_namespace: crate::Path::from_static("room/host"),
 					request_id: RequestId(0),
 				})
 				.await
@@ -3512,7 +3507,7 @@ mod tests {
 			.await
 			.expect("open the control stream");
 
-		let (driver, _goaway) = start(Config {
+		let (driver, _goaway, _) = start(Config {
 			runtime: crate::time::sim(),
 			stats: Default::default(),
 			session,
@@ -3541,7 +3536,7 @@ mod tests {
 
 		let accepted = publish_namespace_ok(RequestId(1)).await;
 		for _ in 0..ANNOUNCE_TURNS {
-			if occurrences(&log, &accepted) > 0 && consumer.get_broadcast(Path::new("room/host").unwrap()).is_none() {
+			if occurrences(&log, &accepted) > 0 && consumer.get_broadcast("room/host").is_none() {
 				break;
 			}
 			moq_clock::sleep(std::time::Duration::from_millis(1)).await;
@@ -3549,7 +3544,7 @@ mod tests {
 
 		assert_eq!(occurrences(&log, &accepted), 1, "the advertisement was not accepted");
 		assert!(
-			consumer.get_broadcast(Path::new("room/host").unwrap()).is_none(),
+			consumer.get_broadcast("room/host").is_none(),
 			"the withdrawal did not reach the request that advertised it"
 		);
 		assert!(!driver.is_finished(), "the repeated withdrawal ended the session");
@@ -3563,7 +3558,7 @@ mod tests {
 			max_age: None,
 			new_group: None,
 			request_id: RequestId(0),
-			track_namespace: crate::Path::new("room").unwrap(),
+			track_namespace: crate::Path::from_static("room"),
 			track_name: "video".into(),
 			subscriber_priority: 128,
 			group_order: ietf::GroupOrder::Descending,
@@ -3643,7 +3638,7 @@ mod tests {
 					_ => None,
 				};
 				let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-				let (driver, _goaway) = start(Config {
+				let (driver, _goaway, _) = start(Config {
 					runtime: crate::time::sim(),
 					stats: Default::default(),
 					session,
@@ -3888,7 +3883,7 @@ mod tests {
 		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new())
 			.with_incoming_unis(vec![setup_stream(VERSION, params, &[])]);
 		let log = session.log.clone();
-		let (driver, _goaway) = start(Config {
+		let (driver, _goaway, _) = start(Config {
 			runtime: crate::time::sim(),
 			stats: Default::default(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -3996,7 +3991,7 @@ mod tests {
 		// The peer FINs each stream after its script, so a message it cuts short is malformed.
 		session.close(crate::lite::test_transport::Close::Fin);
 		let log = session.log.clone();
-		let (driver, _goaway) = start(Config {
+		let (driver, _goaway, _) = start(Config {
 			runtime: crate::time::sim(),
 			stats: Default::default(),
 			session: crate::driver::Transport::new(session.clone()),
@@ -4120,7 +4115,7 @@ mod tests {
 		let mut body = Vec::new();
 		ietf::SubscribeNamespace {
 			request_id: RequestId(request_id),
-			namespace: crate::Path::new("").unwrap(),
+			namespace: crate::Path::from_static(""),
 			hidden: false,
 		}
 		.encode_msg(&mut crate::coding::Encoder::new(&mut body, version.into()), version)

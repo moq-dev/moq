@@ -24,7 +24,6 @@
 //! separate question (it has nothing to await today); this test is only about the
 //! signal the subscriber gets when it could not.
 
-use moq_net::Path;
 use std::time::Duration;
 
 use moq_tokio::moq_net;
@@ -50,9 +49,7 @@ const STALL: Duration = Duration::from_millis(300);
 /// the subscriber read and the error its subscription ended with, if any.
 async fn round(drop_session: bool) -> (usize, Option<moq_net::Error>) {
 	let pub_origin = moq_tokio::origin::spawn();
-	let broadcast = pub_origin
-		.create_broadcast(Path::new("test").unwrap())
-		.expect("create broadcast");
+	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce");
 	let track = broadcast.create_track("video", timed()).expect("create track");
 
@@ -87,9 +84,9 @@ async fn round(drop_session: bool) -> (usize, Option<moq_net::Error>) {
 			.await
 			.expect("client connect");
 
-		consumer.routed(Path::new("test").unwrap()).await.expect("routed");
+		consumer.routed("test").await.expect("routed");
 		let remote = consumer
-			.request_broadcast(Path::new("test").unwrap(), None)
+			.request_broadcast("test", None)
 			.await
 			.expect("broadcast resolves");
 		let mut sub = remote.track("video").unwrap().subscribe(None).await.expect("subscribe");

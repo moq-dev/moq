@@ -107,7 +107,7 @@ instantiating the whole map.
   in clean builds; the crypto provider stays (m0). usage-rs derive output
   scales with config fields and is external code. serde visitors per
   deserializer are inherent to TOML config. moq-rtmp, moq-srt and moq-rtc
-  entry points generic over `impl AsPath` instantiate their async bodies in
+  entry points generic over `impl Into<Path>` instantiate their async bodies in
   the `moq` bin (20,327 lines with drop glue, 1.8%); a non-generic inner
   function would move them, but adds code for little. The catalog JSON diff instantiated
   per crate is [catalog publish once](/quest/m2/catalog-publish-once.md).

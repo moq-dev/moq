@@ -12,7 +12,7 @@ import { Publisher as LitePublisher } from "./lite/publisher.ts";
 import { Subscribe as LiteSubscribe } from "./lite/subscribe.ts";
 import { Track } from "./lite/track.ts";
 import { Version as LiteVersion } from "./lite/version.ts";
-import { createMockTransportPair } from "./mock.ts";
+import { createMockTransportPair, SessionBroadcast } from "./mock.ts";
 import { Producer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { readsFrom } from "./resume.test-util";
@@ -28,7 +28,7 @@ test.each(["lite", "ietf", "fetch", "track"] as const)(
 	async (kind) => {
 		const pair = createMockTransportPair();
 		const origin = new Producer();
-		const dynamic = origin.dynamicRoute(Path.from("room"));
+		const dynamic = origin.requestsRoute(Path.from("room"));
 		const publisher =
 			kind === "ietf"
 				? new IetfPublisher({
@@ -107,7 +107,7 @@ test.each(["lite", "ietf", "fetch", "track"] as const)(
 
 test("last cancellation finishes the internal wait and discards a late consumer", async () => {
 	const origin = new Producer();
-	const dynamic = origin.dynamicRoute(Path.from("room"));
+	const dynamic = origin.requestsRoute(Path.from("room"));
 	const requests = dynamic.requested();
 	const hold = new AbortController();
 	const wait = wireOf(origin.consume()).demand(path, undefined, hold.signal);
@@ -150,7 +150,7 @@ test.each([true, false])(
 	"shared local/remote demand is withdrawn whichever leaves last (local first: %s)",
 	async (localFirst) => {
 		const origin = new Producer();
-		const dynamic = origin.dynamicRoute(Path.from("room"));
+		const dynamic = origin.requestsRoute(Path.from("room"));
 		const requests = dynamic.requested();
 		const hold = new AbortController();
 		const wait = wireOf(origin.consume())
@@ -170,9 +170,8 @@ test.each([true, false])(
 				local.close();
 			}
 			await settle();
-			const late = new Broadcast();
-			const front = late.consume();
-			hooks.acceptRequest(old, front);
+			const late = new SessionBroadcast();
+			hooks.acceptRequest(old, late);
 			expect(late.closed.peek()).toBeNull();
 			const next = origin.request(path);
 			const fresh = (await requests.next()).value;
@@ -195,7 +194,7 @@ test.each([
 ] as const)("cancelling one waiter preserves a second %s requester across %i routes", async (other, routes) => {
 	const origin = new Producer();
 	const prefix = Path.from("room");
-	const dynamics = Array.from({ length: routes }, (_, i) => origin.dynamicRoute(prefix, { cost: BigInt(i) }));
+	const dynamics = Array.from({ length: routes }, (_, i) => origin.requestsRoute(prefix, { cost: BigInt(i) }));
 	const hold = new AbortController();
 	const wire = wireOf(origin.consume());
 	const first = wire.demand(path, undefined, hold.signal).catch(() => undefined);
@@ -224,7 +223,7 @@ test.each([
 
 test("an already cancelled signal never enqueues or subscribes to abort", async () => {
 	const origin = new Producer();
-	const dynamic = origin.dynamicRoute(Path.from("room"));
+	const dynamic = origin.requestsRoute(Path.from("room"));
 	const requests = dynamic.requested();
 	const hold = new AbortController();
 	hold.abort();
@@ -246,7 +245,7 @@ test.each(["accept", "reject", "cancel"] as const)(
 	"%s releases the abort listener without closing a shared producer",
 	async (action) => {
 		const origin = new Producer();
-		const dynamic = origin.dynamicRoute(Path.from("room"));
+		const dynamic = origin.requestsRoute(Path.from("room"));
 		const requests = dynamic.requested();
 		const source = new Broadcast();
 		const keeper = source.consume();
@@ -282,12 +281,12 @@ test.each(["accept", "reject", "cancel"] as const)(
 
 test("a pending local request changing routes withdraws the old route's work", async () => {
 	const origin = new Producer();
-	const first = origin.dynamicRoute(Path.from("room"), { cost: 5n });
+	const first = origin.requestsRoute(Path.from("room"), { cost: 5n });
 	const a = first.requested();
 	const local = origin.request(path);
 	const old = (await a.next()).value;
 	if (!old) throw new Error("expected a pending request");
-	const second = origin.dynamicRoute(Path.from("room"), { cost: 1n });
+	const second = origin.requestsRoute(Path.from("room"), { cost: 1n });
 	const b = second.requested();
 	const fresh = (await b.next()).value;
 	if (!fresh) throw new Error("expected a pending request");
@@ -315,7 +314,7 @@ test("a pending local request changing routes withdraws the old route's work", a
 test("cancelling an old epoch waiter does not decrement a new epoch's demand", async () => {
 	const origin = new Producer();
 	const epoch = Epoch.mint();
-	const dynamic = origin.dynamicRoute(Path.from("room"), { epoch });
+	const dynamic = origin.requestsRoute(Path.from("room"), { epoch });
 	const requests = dynamic.requested();
 	const wire = wireOf(origin.consume());
 	const hold = new AbortController();
@@ -347,8 +346,8 @@ test.each(["answer", "release"] as const)(
 		const origin = new Producer();
 		const epoch = Epoch.mint();
 		const prefix = Path.from("room");
-		const a = origin.dynamicRoute(prefix, { epoch, cost: 1n });
-		const b = origin.dynamicRoute(prefix, { epoch, cost: 5n });
+		const a = origin.requestsRoute(prefix, { epoch, cost: 1n });
+		const b = origin.requestsRoute(prefix, { epoch, cost: 5n });
 		const ar = a.requested();
 		const br = b.requested();
 		const held = origin.request(path);
@@ -356,7 +355,7 @@ test.each(["answer", "release"] as const)(
 		hooks.acceptRequest((await ar.next()).value, source);
 		await settle();
 		// Another instance wins new requests. The old handle stays on its own epoch.
-		const c = origin.dynamicRoute(prefix, { epoch: Epoch.mint(), cost: 0n });
+		const c = origin.requestsRoute(prefix, { epoch: Epoch.mint(), cost: 0n });
 		a.close();
 		await settle();
 		const pending = (await br.next()).value;
@@ -406,8 +405,8 @@ test.each([0, 1])(
 		const sources: Broadcast[] = [];
 		for (let i = 0; i < 2; i++) {
 			const epoch = Epoch.parse(`00000000-0000-7000-8000-00000000000${i + 1}`);
-			const primary = origin.dynamicRoute(prefix, { epoch, cost: 0n });
-			const standby = origin.dynamicRoute(prefix, { epoch, cost: 1n });
+			const primary = origin.requestsRoute(prefix, { epoch, cost: 0n });
+			const standby = origin.requestsRoute(prefix, { epoch, cost: 1n });
 			const ar = primary.requested();
 			const br = standby.requested();
 			const held = origin.request(path);
@@ -417,7 +416,7 @@ test.each([0, 1])(
 			await settle();
 			entries.push({ primary, ar, br, held });
 		}
-		origin.dynamicRoute(prefix, { epoch: Epoch.parse("00000000-0000-7000-8000-000000000003") });
+		origin.requestsRoute(prefix, { epoch: Epoch.parse("00000000-0000-7000-8000-000000000003") });
 		const pending = [];
 		for (const entry of entries) {
 			entry.primary.close();
@@ -458,7 +457,7 @@ test.each([0, 1])(
 test("a normal FETCH request FIN keeps unanswered origin demand alive", async () => {
 	const pair = createMockTransportPair();
 	const origin = new Producer();
-	const dynamic = origin.dynamicRoute(Path.from("room"));
+	const dynamic = origin.requestsRoute(Path.from("room"));
 	const requests = dynamic.requested();
 	const publisher = new LitePublisher(pair.server, LiteVersion.DRAFT_06, randomHop(), origin.consume());
 	let input!: ReadableStreamDefaultController<Uint8Array>;
@@ -499,7 +498,7 @@ test.each(["accept", "reject"] as const)(
 	"cancellation racing %s releases only the cancelled waiter",
 	async (answer) => {
 		const origin = new Producer();
-		const dynamic = origin.dynamicRoute(Path.from("room"));
+		const dynamic = origin.requestsRoute(Path.from("room"));
 		const requests = dynamic.requested();
 		const wire = wireOf(origin.consume());
 		const hold = new AbortController();
@@ -528,7 +527,7 @@ test.each(["accept", "reject"] as const)(
 
 test.each([true, false])("last waiter cancellation and accept in one turn (cancel first: %s)", async (cancelFirst) => {
 	const origin = new Producer();
-	const dynamic = origin.dynamicRoute(Path.from("room"));
+	const dynamic = origin.requestsRoute(Path.from("room"));
 	const requests = dynamic.requested();
 	const wire = wireOf(origin.consume());
 	const hold = new AbortController();
@@ -569,7 +568,7 @@ test.each([true, false])("last waiter cancellation and accept in one turn (cance
 
 test.each([true, false])("local demand survives same-turn cancellation only when rejoined: %s", async (rejoin) => {
 	const origin = new Producer();
-	const dynamic = origin.dynamicRoute(Path.from("room"));
+	const dynamic = origin.requestsRoute(Path.from("room"));
 	const requests = dynamic.requested();
 	const local = origin.request(path);
 	const hold = new AbortController();
@@ -615,7 +614,7 @@ test.each([true, false])("local demand survives same-turn cancellation only when
 
 test("queued cancellation preserves order, replacement identity, and empty-queue wakeup", async () => {
 	const origin = new Producer();
-	const dynamic = origin.dynamicRoute(Path.from("room"));
+	const dynamic = origin.requestsRoute(Path.from("room"));
 	const requests = dynamic.requested();
 	const wire = wireOf(origin.consume());
 	const holds = Array.from({ length: 4 }, () => new AbortController());
@@ -641,7 +640,7 @@ test("queued cancellation preserves order, replacement identity, and empty-queue
 test("reset clears queued work while a handler is suspended and admits the new epoch", async () => {
 	const origin = new Producer();
 	const epoch = Epoch.mint();
-	const dynamic = origin.dynamicRoute(Path.from("room"), { epoch });
+	const dynamic = origin.requestsRoute(Path.from("room"), { epoch });
 	const requests = dynamic.requested();
 	const wire = wireOf(origin.consume());
 	const waits = [path, Path.from("room/obsolete")].map((name) => wire.demand(name, epoch).catch(() => {}));
@@ -665,7 +664,7 @@ test("reset clears queued work while a handler is suspended and admits the new e
 
 test("concurrent handlers consume queued requests once across empty batches", async () => {
 	const origin = new Producer();
-	const dynamic = origin.dynamicRoute(Path.from("room"));
+	const dynamic = origin.requestsRoute(Path.from("room"));
 	const handlers = [dynamic.requested(), dynamic.requested()];
 	const wire = wireOf(origin.consume());
 	const waits: Promise<unknown>[] = [];

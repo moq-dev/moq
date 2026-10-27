@@ -422,7 +422,7 @@ async fn an_mpts_counts_strays_once_both_pmts_are_in() {
 	let origin = crate::source::produce_origin();
 	let mut programs = Programs::new(
 		origin,
-		moq_net::Path::new("event.hang").unwrap(),
+		moq_net::Path::from_static("event.hang"),
 		crate::catalog::Config::default(),
 	);
 	programs.decode(&data).unwrap();
@@ -470,7 +470,7 @@ async fn a_pmt_on_another_programs_pid_claims_nothing() {
 	let origin = crate::source::produce_origin();
 	let mut programs = Programs::new(
 		origin,
-		moq_net::Path::new("event.hang").unwrap(),
+		moq_net::Path::from_static("event.hang"),
 		crate::catalog::Config::default(),
 	);
 	programs.decode(&mux.bytes()).unwrap();
@@ -492,7 +492,7 @@ async fn a_pmt_that_never_arrives_stops_holding_the_count() {
 	let origin = crate::source::produce_origin();
 	let mut programs = Programs::new(
 		origin,
-		moq_net::Path::new("event.hang").unwrap(),
+		moq_net::Path::from_static("event.hang"),
 		crate::catalog::Config::default(),
 	);
 	programs.decode(&mux.bytes()).unwrap();
@@ -533,7 +533,7 @@ async fn a_pid_keeps_one_row_through_its_lifecycle() {
 	let mut one = Imported::new();
 	let mut programs = Programs::new(
 		crate::source::produce_origin(),
-		moq_net::Path::new("event.hang").unwrap(),
+		moq_net::Path::from_static("event.hang"),
 		crate::catalog::Config::default(),
 	);
 	let mut at = 0;

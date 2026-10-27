@@ -74,18 +74,110 @@ impl Sample {
 	}
 }
 
+/// Resolve one fragment's samples against its mdat, sharing byte ownership across tracks.
+pub(crate) struct Resolver {
+	data_start: usize,
+	len: usize,
+	claimed: Claimed,
+}
+
+/// A sample whose byte range and duration have been validated.
+pub(crate) struct Resolved {
+	pub sample: Sample,
+	pub cts: i32,
+	pub range: std::ops::Range<usize>,
+}
+
+impl Resolver {
+	pub fn new(data_start: usize, len: usize) -> Self {
+		Self {
+			data_start,
+			len,
+			claimed: Claimed::default(),
+		}
+	}
+
+	/// Walk samples without allocating from the untrusted sample count.
+	pub fn resolve<'a>(
+		&'a mut self,
+		traf: &'a mp4_atom::Traf,
+		defaults: Defaults,
+	) -> Result<impl Iterator<Item = Result<Resolved, super::Error>> + 'a, super::Error> {
+		if traf.tfhd.base_data_offset.is_some() {
+			return Err(super::Error::UnsupportedBaseDataOffset);
+		}
+		let mut remaining: usize = traf.trun.iter().map(|run| run.entries.len()).sum();
+		if remaining == 0 {
+			return Err(super::Error::MissingTrun);
+		}
+		let mut runs = traf.trun.iter();
+		let mut entries = [].iter();
+		let mut offset = 0usize;
+		Ok(std::iter::from_fn(move || {
+			if remaining == 0 {
+				return None;
+			}
+			let result = (|| {
+				let entry = loop {
+					if let Some(entry) = entries.next() {
+						break entry;
+					}
+					let run = runs.next().ok_or(super::Error::MissingTrun)?;
+					if let Some(start) = run.data_offset {
+						offset = usize::try_from(start)
+							.ok()
+							.and_then(|start| start.checked_sub(self.data_start))
+							.ok_or(super::Error::InvalidDataOffset)?;
+					}
+					entries = run.entries.iter();
+				};
+				let sample = defaults.resolve(&traf.tfhd, entry);
+				if sample.size == 0 {
+					return Err(super::Error::EmptySample);
+				}
+				let end = offset
+					.checked_add(sample.size as usize)
+					.ok_or(super::Error::InvalidDataOffset)?;
+				if end > self.len {
+					return Err(super::Error::SampleRangeOutOfBounds {
+						start: offset,
+						end,
+						len: self.len,
+					});
+				}
+				let range = offset..end;
+				self.claimed.take(range.clone())?;
+				if sample.duration.is_none() && remaining > 1 {
+					return Err(super::Error::MissingSampleDuration);
+				}
+				offset = end;
+				remaining -= 1;
+				Ok(Resolved {
+					sample,
+					cts: entry.cts.unwrap_or_default(),
+					range,
+				})
+			})();
+			if result.is_err() {
+				remaining = 0;
+			}
+			Some(result)
+		}))
+	}
+}
+
 /// The `mdat` bytes a fragment's samples have taken, so no two samples share any.
 ///
 /// Each sample's bytes are copied or published once per sample, so runs that all pointed at one
 /// range would turn a small fragment into output as large as its run count times its `mdat`.
 #[derive(Default)]
-pub(crate) struct Claimed(std::collections::BTreeMap<usize, usize>);
+struct Claimed(std::collections::BTreeMap<usize, usize>);
 
 impl Claimed {
 	/// Take `range` of the `mdat` payload, or fail if an earlier sample holds any of it.
 	pub fn take(&mut self, range: std::ops::Range<usize>) -> Result<(), super::Error> {
 		if range.is_empty() {
-			return Ok(());
+			return Err(super::Error::EmptySample);
 		}
 		// The taken ranges are disjoint, so the last one starting before `range` ends reaches furthest.
 		if let Some((_, &end)) = self.0.range(..range.end).next_back()
@@ -165,18 +257,105 @@ mod tests {
 		assert_eq!(sample.duration, None);
 	}
 
-	/// Adjacent and empty ranges are taken; any shared byte is refused, wherever it falls.
+	/// Adjacent ranges are taken; empty ranges and any shared byte are refused.
 	#[test]
 	fn claimed_ranges_are_disjoint() {
 		let mut claimed = Claimed::default();
 		claimed.take(10..20).unwrap();
 		claimed.take(20..30).unwrap();
 		claimed.take(0..10).unwrap();
-		claimed.take(15..15).unwrap();
+		assert!(claimed.take(15..15).is_err());
 		for overlap in [10..20, 5..11, 29..40, 12..13, 0..40] {
 			assert!(claimed.take(overlap.clone()).is_err(), "{overlap:?}");
 		}
 		claimed.take(30..31).unwrap();
+	}
+
+	fn traf(offsets: &[Option<i32>]) -> mp4_atom::Traf {
+		mp4_atom::Traf {
+			tfhd: mp4_atom::Tfhd {
+				default_sample_size: Some(2),
+				default_sample_duration: Some(1),
+				..Default::default()
+			},
+			trun: offsets
+				.iter()
+				.map(|&data_offset| mp4_atom::Trun {
+					data_offset,
+					entries: vec![Default::default()],
+				})
+				.collect(),
+			..Default::default()
+		}
+	}
+
+	#[test]
+	fn resolves_disjoint_runs_in_decode_order() {
+		let traf = traf(&[Some(104), Some(100), None]);
+		let mut resolver = Resolver::new(100, 6);
+		let ranges: Vec<_> = resolver
+			.resolve(&traf, Defaults::default())
+			.unwrap()
+			.map(|sample| sample.unwrap().range)
+			.collect();
+		assert_eq!(ranges, [4..6, 0..2, 2..4]);
+		// Ownership includes other tracks of the same fragment.
+		let other = traf.clone();
+		assert!(matches!(
+			resolver.resolve(&other, Defaults::default()).unwrap().next().unwrap(),
+			Err(super::super::Error::InvalidDataOffset)
+		));
+	}
+
+	#[test]
+	fn refuses_incorrect_sample_ranges() {
+		use super::super::Error;
+		for offset in [i32::MIN, -1, 99, 105, i32::MAX] {
+			let traf = traf(&[Some(offset)]);
+			let mut resolver = Resolver::new(100, 6);
+			let mut samples = resolver.resolve(&traf, Defaults::default()).unwrap();
+			assert!(samples.next().unwrap().is_err(), "offset {offset}");
+			assert!(samples.next().is_none(), "errors end iteration");
+		}
+		let mut traf = traf(&[None]);
+		for size in [None, Some(0)] {
+			traf.tfhd.default_sample_size = size;
+			let mut resolver = Resolver::new(100, 6);
+			assert!(matches!(
+				resolver.resolve(&traf, Defaults::default()).unwrap().next().unwrap(),
+				Err(Error::EmptySample)
+			));
+		}
+		for base in [0, 100, u64::MAX] {
+			traf.tfhd.base_data_offset = Some(base);
+			let mut resolver = Resolver::new(100, 6);
+			assert!(matches!(
+				resolver.resolve(&traf, Defaults::default()),
+				Err(Error::UnsupportedBaseDataOffset)
+			));
+		}
+	}
+
+	#[test]
+	fn only_the_final_sample_may_lack_a_duration() {
+		use super::super::Error;
+		let mut traf = traf(&[None, None]);
+		traf.trun[1].entries[0].duration = Some(0);
+		// Empty trailing runs don't make the last sample non-final.
+		traf.trun.push(Default::default());
+		let mut resolver = Resolver::new(100, 4);
+		let durations: Vec<_> = resolver
+			.resolve(&traf, Defaults::default())
+			.unwrap()
+			.map(|sample| sample.unwrap().sample.duration)
+			.collect();
+		assert_eq!(durations, [Some(1), None]);
+		traf.trun[0].entries[0].duration = Some(0);
+		let mut resolver = Resolver::new(100, 4);
+		assert!(matches!(
+			resolver.resolve(&traf, Defaults::default()).unwrap().next().unwrap(),
+			Err(Error::MissingSampleDuration)
+		));
 	}
 
 	#[test]

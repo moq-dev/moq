@@ -43,9 +43,9 @@ struct GroupRequest {
 /// What a request handler serves.
 enum Dynamic {
 	/// Track requests on a broadcast, remembered so media can be published onto them.
-	Broadcast(moq_net::broadcast::Dynamic, Id, Children),
+	Broadcast(moq_net::broadcast::Requests, Id, Children),
 	/// Group requests (fetches of uncached groups) on a track.
-	Track(moq_net::track::Dynamic),
+	Track(moq_net::track::Requests),
 }
 
 /// A published broadcast: its producer, its catalog, and the renditions the caller authored by
@@ -201,7 +201,7 @@ impl Abort for Kept<Box<import::Track>> {
 impl Abort for Kept<moq_net::track::Producer> {
 	fn abort(self, err: moq_net::Error) {
 		// A track with a declared end ends there, as when its last producer drops.
-		if self.inner.end().is_none() {
+		if self.inner.finished().is_none() {
 			let _ = self.inner.abort(err);
 		}
 	}
@@ -828,7 +828,7 @@ impl Publish {
 	///
 	/// Without a live handler an unknown track name is refused, as before.
 	pub fn dynamic(&mut self, broadcast: Id, on_request: OnStatus) -> Result<Id, Error> {
-		let dynamic = self.producer(broadcast)?.dynamic();
+		let dynamic = self.producer(broadcast)?.requests();
 		let Broadcast { driver, children, .. } = self.broadcast(broadcast)?;
 		let dynamic = Dynamic::Broadcast(dynamic, broadcast, children.clone());
 		self.spawn_dynamic(dynamic, on_request, driver.clone())
@@ -837,7 +837,7 @@ impl Publish {
 	/// Serve fetches of uncached groups on a raw track, delivering each as a group-request
 	/// handle via `on_group`.
 	pub fn track_dynamic(&mut self, track: Id, on_group: OnStatus) -> Result<Id, Error> {
-		let dynamic = self.tracks.get(track).ok_or(Error::TrackNotFound)?.dynamic();
+		let dynamic = self.tracks.get(track).ok_or(Error::TrackNotFound)?.requests();
 		self.spawn_dynamic(Dynamic::Track(dynamic), on_group, Default::default())
 	}
 
@@ -851,7 +851,7 @@ impl Publish {
 			.get(request)
 			.ok_or(Error::NotFound)?
 			.request
-			.dynamic();
+			.requests();
 		self.spawn_dynamic(Dynamic::Track(dynamic), on_group, Default::default())
 	}
 
@@ -1101,7 +1101,7 @@ impl Publish {
 	pub fn track_finish(&mut self, track: Id) -> Result<(), Error> {
 		let id = track;
 		let track = self.tracks.remove(id).ok_or(Error::TrackNotFound)?;
-		if track.end().is_none() {
+		if track.finished().is_none() {
 			track.finish()?;
 		}
 		track.keep(Child::Track(id));
@@ -1545,10 +1545,8 @@ mod supervision_tests {
 	#[tokio::test(start_paused = true)]
 	async fn admission_must_match_the_broadcast_it_filled() {
 		let origin = moq_tokio::origin::spawn();
-		let claim = origin.dynamic(moq_net::Path::new("room").unwrap()).unwrap();
-		let pending = origin
-			.consume()
-			.request_broadcast(moq_net::Path::new("room/first").unwrap(), None);
+		let claim = origin.requests("room").unwrap();
+		let pending = origin.consume().request_broadcast("room/first", None);
 		let prepared = claim
 			.requested_broadcast()
 			.await
@@ -1577,9 +1575,7 @@ mod supervision_tests {
 		publish.admit(clone, prepared).unwrap();
 		pending.await.unwrap();
 
-		let pending = origin
-			.consume()
-			.request_broadcast(moq_net::Path::new("room/second").unwrap(), None);
+		let pending = origin.consume().request_broadcast("room/second", None);
 		let prepared = claim
 			.requested_broadcast()
 			.await
@@ -1602,12 +1598,7 @@ mod supervision_tests {
 		let (origin, completion, trigger) = crate::ffi::panicking_origin();
 		let mut publish = Publish::default();
 		let broadcast = publish
-			.create_publication((
-				origin
-					.create_broadcast(moq_net::Path::new("retained").unwrap())
-					.unwrap(),
-				completion.clone(),
-			))
+			.create_publication((origin.create_broadcast("retained").unwrap(), completion.clone()))
 			.unwrap();
 		let container = publish
 			.container(
@@ -1632,16 +1623,11 @@ mod supervision_tests {
 		let mut state = State::new();
 		let broadcast = state
 			.publish
-			.create_publication((
-				origin
-					.create_broadcast(moq_net::Path::new("retained").unwrap())
-					.unwrap(),
-				completion.clone(),
-			))
+			.create_publication((origin.create_broadcast("retained").unwrap(), completion.clone()))
 			.unwrap();
 		let producer = &state.publish.broadcast(broadcast).unwrap().producer;
 		// A dynamic handle outlives the consumed broadcast, so only an explicit close ends it.
-		let _dynamic = producer.dynamic();
+		let _dynamic = producer.requests();
 		let consumer = producer.consume();
 		*trigger
 			.write()

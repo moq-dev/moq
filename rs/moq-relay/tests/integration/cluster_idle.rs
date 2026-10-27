@@ -5,7 +5,6 @@
 //! timeout; moq-tokio's `defaults_apply_when_unset` pins the 10s default.
 #![cfg(feature = "quic")]
 
-use moq_net::Path;
 use std::time::{Duration, Instant};
 
 use moq_relay::cluster::{self, Peer};
@@ -52,9 +51,7 @@ async fn spawn_peer() -> (u16, tokio::runtime::Runtime) {
 	let (bound, port) = tokio::sync::oneshot::channel();
 	runtime.spawn(async move {
 		let origin = moq_tokio::origin::spawn();
-		let broadcast = origin
-			.create_broadcast(Path::new("peer").unwrap())
-			.expect("create broadcast");
+		let broadcast = origin.create_broadcast("peer").expect("create broadcast");
 		broadcast.announce(Default::default()).expect("announce");
 
 		let mut config = moq_tokio::listen::Config::default();

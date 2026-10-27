@@ -7,7 +7,7 @@ use crate::support::{
 	harness::{now, spawn},
 	mock::create_mock_session_pair,
 };
-use moq_net::{Path, Session, Version, Versions, origin};
+use moq_net::{Session, Version, Versions, origin};
 
 fn origin() -> origin::Producer {
 	let (origin, driver) = origin::Producer::new(Default::default());
@@ -57,7 +57,7 @@ async fn every_lite_version_negotiates_in_setup() {
 		let version: Version = name.parse().unwrap();
 		let versions: Versions = vec![version, "moq-lite-02".parse().unwrap()].into();
 		let (upstream, downstream) = (origin(), origin());
-		let broadcast = upstream.create_broadcast(Path::new("room").unwrap()).unwrap();
+		let broadcast = upstream.create_broadcast("room").unwrap();
 		broadcast.announce(Default::default()).unwrap();
 
 		let (client, server) = dial(versions.clone(), versions, &upstream, &downstream).await;
@@ -66,11 +66,7 @@ async fn every_lite_version_negotiates_in_setup() {
 			assert_eq!(session.version(), version, "{name}");
 		}
 		// The session runs on the selected version, not on the SETUP stream.
-		downstream
-			.consume()
-			.routed(Path::new("room").unwrap())
-			.await
-			.expect(name);
+		downstream.consume().routed("room").await.expect(name);
 	}
 }
 

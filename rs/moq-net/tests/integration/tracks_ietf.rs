@@ -7,7 +7,6 @@
 //! Deterministic: paused time and a single-threaded runtime over the mock transport.
 
 use crate::support;
-use moq_net::Path;
 
 use std::time::Duration;
 
@@ -65,7 +64,7 @@ async fn connect(publisher: &moq_net::origin::Producer, version: &str) -> (moq_n
 }
 
 async fn resolve(origin: &moq_net::origin::Producer, path: &str) -> moq_net::broadcast::Consumer {
-	moq_clock::timeout(TIMEOUT, origin.consume().routed_broadcast(Path::new(path).unwrap()))
+	moq_clock::timeout(TIMEOUT, origin.consume().routed_broadcast(path))
 		.await
 		.expect("announce timeout")
 		.expect("routed")
@@ -103,7 +102,7 @@ async fn read(sub: &mut moq_net::track::Subscriber) -> Option<(u64, Vec<u8>)> {
 async fn an_ietf_session_lists_its_peers_tracks() {
 	for version in DRAFTS {
 		let publisher = produce_origin(1);
-		let broadcast = publisher.create_broadcast(Path::new("bcast").unwrap()).unwrap();
+		let broadcast = publisher.create_broadcast("bcast").unwrap();
 		let _a = broadcast.create_track("a", None).unwrap();
 		broadcast.announce(Default::default()).unwrap();
 
@@ -125,7 +124,7 @@ async fn an_ietf_session_lists_its_peers_tracks() {
 async fn only_a_listing_sends_subscribe_tracks() {
 	for version in DRAFTS {
 		let publisher = produce_origin(1);
-		let broadcast = publisher.create_broadcast(Path::new("bcast").unwrap()).unwrap();
+		let broadcast = publisher.create_broadcast("bcast").unwrap();
 		let video = broadcast.create_track("video", None).unwrap();
 		broadcast.announce(Default::default()).unwrap();
 
@@ -157,7 +156,7 @@ async fn only_a_listing_sends_subscribe_tracks() {
 #[moq_clock::test]
 async fn a_listing_carries_track_info() {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast(Path::new("bcast").unwrap()).unwrap();
+	let broadcast = publisher.create_broadcast("bcast").unwrap();
 	let info = moq_net::track::Info::default()
 		.with_timescale(moq_net::Timescale::MILLI)
 		.with_priority(9);
@@ -184,7 +183,7 @@ async fn a_listing_carries_track_info() {
 #[moq_clock::test]
 async fn before_draft_18_the_listing_is_refused() {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast(Path::new("bcast").unwrap()).unwrap();
+	let broadcast = publisher.create_broadcast("bcast").unwrap();
 	let a = broadcast.create_track("a", None).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
@@ -218,7 +217,7 @@ async fn before_draft_18_the_listing_is_refused() {
 async fn a_reader_resumes_the_held_publish() {
 	for version in DRAFTS {
 		let publisher = produce_origin(1);
-		let broadcast = publisher.create_broadcast(Path::new("bcast").unwrap()).unwrap();
+		let broadcast = publisher.create_broadcast("bcast").unwrap();
 		let video = broadcast.create_track("video", None).unwrap();
 		broadcast.announce(Default::default()).unwrap();
 
@@ -279,7 +278,7 @@ async fn a_reader_resumes_the_held_publish() {
 async fn a_join_gets_the_current_groups_head() {
 	for version in DRAFTS {
 		let publisher = produce_origin(1);
-		let broadcast = publisher.create_broadcast(Path::new("bcast").unwrap()).unwrap();
+		let broadcast = publisher.create_broadcast("bcast").unwrap();
 		let video = broadcast.create_track("video", None).unwrap();
 		broadcast.announce(Default::default()).unwrap();
 
@@ -329,10 +328,10 @@ async fn a_join_gets_the_current_groups_head() {
 async fn a_nested_listing_reuses_the_broader_one() {
 	for version in DRAFTS {
 		let publisher = produce_origin(1);
-		let outer = publisher.create_broadcast(Path::new("a").unwrap()).unwrap();
+		let outer = publisher.create_broadcast("a").unwrap();
 		let _x = outer.create_track("x", None).unwrap();
 		outer.announce(Default::default()).unwrap();
-		let inner = publisher.create_broadcast(Path::new("a/b").unwrap()).unwrap();
+		let inner = publisher.create_broadcast("a/b").unwrap();
 		let _y = inner.create_track("y", None).unwrap();
 		inner.announce(Default::default()).unwrap();
 
@@ -363,7 +362,7 @@ async fn a_broader_listing_replaces_the_nested_ones() {
 		let mut held = Vec::new();
 		let mut broadcasts = Vec::new();
 		for path in ["a/b", "a/c", "a"] {
-			let broadcast = publisher.create_broadcast(Path::new(path).unwrap()).unwrap();
+			let broadcast = publisher.create_broadcast(path).unwrap();
 			held.push(broadcast.create_track("t", None).unwrap());
 			broadcast.announce(Default::default()).unwrap();
 			broadcasts.push(broadcast);
@@ -397,7 +396,7 @@ async fn a_broader_listing_replaces_the_nested_ones() {
 async fn a_subscribed_track_is_listed_through_its_subscribe() {
 	for version in DRAFTS {
 		let publisher = produce_origin(1);
-		let broadcast = publisher.create_broadcast(Path::new("bcast").unwrap()).unwrap();
+		let broadcast = publisher.create_broadcast("bcast").unwrap();
 		let video = broadcast.create_track("video", None).unwrap();
 		broadcast.announce(Default::default()).unwrap();
 
@@ -433,7 +432,7 @@ async fn a_subscribed_track_is_listed_through_its_subscribe() {
 async fn a_listing_past_the_announces_cap_is_reset() {
 	for version in DRAFTS {
 		let publisher = produce_origin(1);
-		let broadcast = publisher.create_broadcast(Path::new("bcast").unwrap()).unwrap();
+		let broadcast = publisher.create_broadcast("bcast").unwrap();
 		const CAP: usize = 10;
 		let _tracks: Vec<_> = (0..CAP)
 			.map(|i| broadcast.create_track(format!("t{i}"), None).unwrap())
@@ -481,7 +480,7 @@ async fn a_track_leaves_the_listing_as_it_ended() {
 	for finish in [true, false] {
 		for version in DRAFTS {
 			let publisher = produce_origin(1);
-			let broadcast = publisher.create_broadcast(Path::new("bcast").unwrap()).unwrap();
+			let broadcast = publisher.create_broadcast("bcast").unwrap();
 			let a = broadcast.create_track("a", None).unwrap();
 			let _b = broadcast.create_track("b", None).unwrap();
 			broadcast.announce(Default::default()).unwrap();

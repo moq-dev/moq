@@ -7,7 +7,6 @@
 //! seconds between them, so they are ignored here and run nightly as `just rs cli-export`.
 #![cfg(unix)]
 
-use hang::moq_net::Path;
 use std::io::Cursor;
 use std::os::fd::AsRawFd;
 use std::process::Stdio;
@@ -517,7 +516,7 @@ async fn the_same_instance_within_the_follow_continues() {
 	let epoch = moq_net::Epoch::mint();
 	let lite07 = ["--connect-version", LITE_07];
 	let origin = moq_tokio::origin::spawn();
-	let broadcast = origin.create_broadcast(moq_net::Path::new("demo").unwrap()).unwrap();
+	let broadcast = origin.create_broadcast("demo").unwrap();
 	let config = moq_mux::catalog::Config::default()
 		.with_max_age(Some(Duration::from_secs(1)))
 		.with_catalog(moq_mux::catalog::hang::Catalog::<ts::Ext>::default());
@@ -558,11 +557,7 @@ async fn the_same_instance_within_the_follow_continues() {
 	}
 	export.output_past(0).await;
 	assert!(split < LONG.len(), "the capture has a tail after the export joined");
-	let old = relay
-		.origin
-		.request_broadcast(Path::new("demo").unwrap(), None)
-		.await
-		.unwrap();
+	let old = relay.origin.request_broadcast("demo", None).await.unwrap();
 	assert_eq!(old.info().epoch.as_ref(), Some(&epoch));
 	let clock = catalog.snapshot().clock;
 	connection.abort(moq_net::Error::Cancel);
@@ -572,7 +567,7 @@ async fn the_same_instance_within_the_follow_continues() {
 		.expect("the relay observes the lost publication");
 	let mark = output.lock().unwrap().len().next_multiple_of(188);
 	let connection = client.connect(url).established().await.unwrap();
-	let back = tokio::time::timeout(TIMEOUT, relay.origin.routed_broadcast(Path::new("demo").unwrap()))
+	let back = tokio::time::timeout(TIMEOUT, relay.origin.routed_broadcast("demo"))
 		.await
 		.expect("the relay observes the returning publication")
 		.unwrap();
@@ -1042,7 +1037,7 @@ async fn next_epoch(announced: &mut moq_net::announce::Follow) -> moq_net::Epoch
 #[ignore = "real-time process test: just rs cli-export"]
 async fn a_passthrough_export_ends_with_its_redundant_importer() {
 	let relay = relay().await;
-	let mut announced = relay.origin.follow(Path::new("demo").unwrap()).unwrap();
+	let mut announced = relay.origin.follow("demo").unwrap();
 	let (feed, feeding) = redundant_feed();
 	let mut first = redundant_import(&relay, &feed, &["--passthrough"]);
 	let incumbent = next_epoch(&mut announced).await;

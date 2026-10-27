@@ -102,7 +102,7 @@ pub async fn listen_import(
 		linger,
 		bandwidth,
 	} = target;
-	let name = moq_net::PathOwned::try_from(name)?;
+	let name = moq_net::Path::new(&name)?;
 	let mut server = Server::bind(addr, latency).await?;
 	tracing::info!(%addr, %name, "SRT listening (import)");
 	notify_ready();
@@ -146,7 +146,7 @@ pub async fn listen_export(
 	name: String,
 	args: ExportArgs,
 ) -> anyhow::Result<()> {
-	let name = moq_net::PathOwned::try_from(name)?;
+	let name = moq_net::Path::new(&name)?;
 	let mut server = Server::bind(addr, Duration::from(args.endpoint.latency)).await?;
 	let (follow, stitch) = (args.follow.into(), args.stitch);
 	tracing::info!(%addr, %name, "SRT listening (export)");
@@ -194,7 +194,7 @@ pub async fn connect_import(
 		.with_bandwidth(target.bandwidth)
 		.with_program(program)
 		.with_linger(target.linger);
-	client.pull(&target.origin, &name).await.map_err(suggest_program)
+	client.pull(&target.origin, name).await.map_err(suggest_program)
 }
 
 /// Push a broadcast from the Origin to a remote SRT server (export).
@@ -204,7 +204,7 @@ pub async fn connect_export(
 	name: String,
 	args: ExportArgs,
 ) -> anyhow::Result<()> {
-	let name = moq_net::PathOwned::try_from(name)?;
+	let name = moq_net::Path::new(&name)?;
 	let (addr, resource) = parse_url(&url).await?;
 	tracing::info!(url = %RedactedUrl::new(&url), %name, "SRT client pushing");
 	notify_ready();

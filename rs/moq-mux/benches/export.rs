@@ -26,7 +26,7 @@ impl Drop for Fixture {
 async fn prepare(tracks: usize, frames: usize) -> (moq_mux::Source, moq_mux::catalog::Consumer, Fixture) {
 	let (origin, driver) = moq_net::origin::Producer::new(Default::default());
 	let driver = tokio::spawn(moq_net::time::run(driver));
-	let broadcast = origin.create_broadcast(moq_net::Path::new("bench").unwrap()).unwrap();
+	let broadcast = origin.create_broadcast("bench").unwrap();
 	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
 	let stream = moq_mux::catalog::Consumer::from(catalog.consume().unwrap());
 	let mut publishers = Vec::new();
@@ -56,11 +56,7 @@ async fn prepare(tracks: usize, frames: usize) -> (moq_mux::Source, moq_mux::cat
 	}
 	catalog.finish().unwrap();
 	broadcast.announce(Default::default()).unwrap();
-	let resolved = origin
-		.consume()
-		.request_broadcast(moq_net::Path::new("bench").unwrap(), None)
-		.await
-		.unwrap();
+	let resolved = origin.consume().request_broadcast("bench", None).await.unwrap();
 	let source = moq_mux::Source::new(origin.consume(), resolved);
 	let fixture = Fixture {
 		_published: Box::new((broadcast, catalog, publishers)),
@@ -173,7 +169,7 @@ async fn prepare_video(
 ) -> (moq_mux::Source, moq_mux::catalog::Consumer, Fixture) {
 	let (origin, driver) = moq_net::origin::Producer::new(Default::default());
 	let driver = tokio::spawn(moq_net::time::run(driver));
-	let broadcast = origin.create_broadcast(moq_net::Path::new("bench").unwrap()).unwrap();
+	let broadcast = origin.create_broadcast("bench").unwrap();
 	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
 	let stream = moq_mux::catalog::Consumer::from(catalog.consume().unwrap());
 	let track = broadcast
@@ -217,11 +213,7 @@ async fn prepare_video(
 	video.finish().unwrap();
 	catalog.finish().unwrap();
 	broadcast.announce(Default::default()).unwrap();
-	let resolved = origin
-		.consume()
-		.request_broadcast(moq_net::Path::new("bench").unwrap(), None)
-		.await
-		.unwrap();
+	let resolved = origin.consume().request_broadcast("bench", None).await.unwrap();
 	let source = moq_mux::Source::new(origin.consume(), resolved);
 	(
 		source,

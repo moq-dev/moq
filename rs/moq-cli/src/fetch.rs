@@ -66,7 +66,7 @@ async fn fetch(
 	// segment such as `.stats` would keep it out of an unscoped listing.
 	let pattern = moq_net::Pattern::subtree(&broadcast).with_context(|| format!("invalid broadcast `{broadcast}`"))?;
 	let origin = moq_tokio::origin::spawn()
-		.scope(moq_net::Path::empty(), &moq_net::Patterns::from(pattern))
+		.scope("", &moq_net::Patterns::from(pattern))
 		.with_context(|| format!("failed to scope to `{broadcast}`"))?;
 
 	// Subscribe-only: this session reads and never publishes.
@@ -119,7 +119,7 @@ async fn fetch_from<C>(
 		// is still in flight right after connecting.
 		let broadcast = origin
 			.consume()
-			.routed_broadcast(moq_net::Path::new(path)?)
+			.routed_broadcast(path)
 			.await
 			.with_context(|| format!("broadcast `{}` not found", crate::display_name(path)))?;
 		let track = broadcast.track(&args.track)?;
@@ -191,9 +191,7 @@ mod tests {
 	impl Fixture {
 		async fn new() -> Self {
 			let origin = moq_tokio::origin::spawn();
-			let broadcast = origin
-				.create_broadcast(moq_net::Path::new("demo").unwrap())
-				.expect("broadcast");
+			let broadcast = origin.create_broadcast("demo").expect("broadcast");
 			broadcast.announce(Default::default()).expect("announce");
 
 			let data = broadcast.create_track("data", timed()).expect("data track");
@@ -256,7 +254,7 @@ mod tests {
 				.relay
 				.cluster()
 				.origin
-				.create_broadcast(moq_net::Path::new(".hidden").unwrap())
+				.create_broadcast(".hidden")
 				.expect("hidden broadcast");
 			hidden.announce(Default::default()).expect("announce hidden");
 			let secret = hidden.create_track("data", timed()).expect("hidden track");

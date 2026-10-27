@@ -13,7 +13,7 @@ async fn main() -> anyhow::Result<()> {
 	let version: moq_net::Version = args[2].parse().map_err(anyhow::Error::msg)?;
 	let origin = moq_tokio::origin::spawn();
 	let consumer = origin.consume();
-	let broadcast = origin.create_broadcast(moq_net::Path::new("control")?)?;
+	let broadcast = origin.create_broadcast("control")?;
 	let _published = if args[1] == "status" {
 		let track = broadcast.create_track("video", moq_net::track::Info::default().with_priority(2))?;
 		let mut group = track.create_group(moq_net::group::Info { sequence: 4 })?;
@@ -58,7 +58,7 @@ async fn main() -> anyhow::Result<()> {
 	ensure!(session.version() == version, "wrong negotiated version");
 	if args[1] == "credit" {
 		// The JS peer has one usable track slot beyond any namespace discovery.
-		let remote = consumer.routed_broadcast(moq_net::Path::new("control")?).await?;
+		let remote = consumer.routed_broadcast("control").await?;
 		let mut first = remote.track("first")?.subscribe(None).await?;
 		let second = remote.track("second")?;
 		let mut pending = Box::pin(second.subscribe(None));

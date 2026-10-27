@@ -10,7 +10,6 @@
 //! Deterministic: simulated time over the mock transport.
 
 use crate::support;
-use moq_net::Path;
 
 use std::time::Duration;
 
@@ -40,7 +39,7 @@ struct Publisher {
 
 async fn publish(version: Version, relay: &origin::Producer, hop: u64, name: &str) -> Publisher {
 	let origin = produce_origin(hop);
-	let broadcast = origin.create_broadcast(Path::new(name).unwrap()).unwrap();
+	let broadcast = origin.create_broadcast(name).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
 	let mut mock = moq_net::transport::memory::Config::default();
@@ -125,10 +124,10 @@ async fn a_panicking_session_leaves_the_others_serving() {
 			.unwrap_or_else(|_| panic!("{version}: the panicked session never closed"));
 
 		// The other session still serves: a fresh announcement reaches the relay.
-		let later = healthy.origin.create_broadcast(Path::new("later").unwrap()).unwrap();
+		let later = healthy.origin.create_broadcast("later").unwrap();
 		later.announce(Default::default()).unwrap();
 		until(&mut announced, "later", true).await;
-		assert!(relay.consume().routed(Path::new("healthy").unwrap()).await.is_some());
+		assert!(relay.consume().routed("healthy").await.is_some());
 		drop((healthy, broken.client, later));
 	}
 }

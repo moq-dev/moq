@@ -20,7 +20,6 @@
 //! send" step is an idle-advance rather than a race.
 
 use crate::support;
-use moq_net::Path;
 
 use std::time::Duration;
 
@@ -57,7 +56,7 @@ fn expected() -> Vec<Vec<u8>> {
 /// payloads and the error it ended with, if any.
 async fn round(drop_session: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>) {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast(Path::new("bcast").unwrap()).unwrap();
+	let broadcast = publisher.create_broadcast("bcast").unwrap();
 	let track = broadcast.create_track("video", timed()).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
@@ -68,11 +67,11 @@ async fn round(drop_session: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>) {
 	let MockPair { client, server, .. } = connect_mock(options).await;
 
 	let consumer = subscriber.consume();
-	moq_clock::timeout(TIMEOUT, consumer.routed(Path::new("bcast").unwrap()))
+	moq_clock::timeout(TIMEOUT, consumer.routed("bcast"))
 		.await
 		.expect("announce timeout")
 		.expect("routed");
-	let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast(Path::new("bcast").unwrap(), None))
+	let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
@@ -207,7 +206,7 @@ const DEATH: moq_net::SessionError = moq_net::SessionError::App(7);
 /// subscriber's `recv_group` ends with once it drains what arrived.
 async fn killed(version: &str, local: bool) -> (Option<moq_net::Error>, Option<moq_net::Error>) {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast(Path::new("bcast").unwrap()).unwrap();
+	let broadcast = publisher.create_broadcast("bcast").unwrap();
 	let track = broadcast.create_track("video", timed()).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
@@ -218,9 +217,9 @@ async fn killed(version: &str, local: bool) -> (Option<moq_net::Error>, Option<m
 	let MockPair { client, server, .. } = connect_mock(options).await;
 
 	let consumer = subscriber.consume();
-	consumer.routed(Path::new("bcast").unwrap()).await.expect("routed");
+	consumer.routed("bcast").await.expect("routed");
 	let remote = consumer
-		.request_broadcast(Path::new("bcast").unwrap(), None)
+		.request_broadcast("bcast", None)
 		.await
 		.expect("broadcast resolves");
 	// Subscribing resolves only once the publisher serves the track, which it does

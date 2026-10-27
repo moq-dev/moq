@@ -376,6 +376,12 @@ and group setup stay outside drift timing; each parked read checks its live
 payload. `ledger` uses one fixture against every checkout's internal ledger, sweeping
 ascending, descending, shuffled, and rolling-expiration arrivals over the retained
 gap count. It includes each arrival's expiration and coverage checks.
+The drift sweep includes untimed controls and timed groups with decode-order
+B-frames, independently varying publisher and reader counts and retained history.
+Its `time_mode` column is 0 for untimed, 1 for millisecond timestamps, and 2
+for mixed millisecond/microsecond timestamps, which exercise exact cross-scale
+comparison.
+
 The browser smoke lane preserves one measured round of all three fixtures, and drift
 and ledger also run in the nightly JS benchmark leg. Timing is
 observational, with the A/A spread showing the host's noise floor.

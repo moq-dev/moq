@@ -72,7 +72,7 @@ pub async fn listen_export(origin: moq_net::origin::Consumer, name: String, list
 		moq_net::Pattern::subtree(&name).with_context(|| format!("invalid broadcast name `{name}`"))?,
 	);
 	let subscriber = origin
-		.scope(moq_net::Path::empty(), &scope)
+		.scope("", &scope)
 		.with_context(|| format!("failed to scope origin to broadcast `{name}`"))?;
 	let server = moq_rtc::Server::new(server_config(&listen));
 	serve(server.subscribe_router(subscriber), "WHEP", listen).await
@@ -84,7 +84,7 @@ fn scope_producer(origin: &moq_net::origin::Producer, name: &str) -> anyhow::Res
 		moq_net::Pattern::subtree(name).with_context(|| format!("invalid broadcast name `{name}`"))?,
 	);
 	origin
-		.scope(moq_net::Path::empty(), &scope)
+		.scope("", &scope)
 		.with_context(|| format!("failed to scope origin to broadcast `{name}`"))
 }
 
@@ -94,7 +94,7 @@ pub async fn connect_import(target: ImportTarget, url: Url, epoch: moq_net::Epoc
 	let name = &target.name;
 	let producer = target
 		.origin
-		.create_broadcast(moq_net::Path::new(name)?)
+		.create_broadcast(name)
 		.context("failed to create broadcast")?;
 	// The WHEP pull fills the tracks as they arrive; announce up front so viewers
 	// can discover the broadcast while it connects.
@@ -115,7 +115,6 @@ pub async fn connect_import(target: ImportTarget, url: Url, epoch: moq_net::Epoc
 
 /// WHIP client: push a broadcast from the Origin to a remote (export).
 pub async fn connect_export(origin: moq_net::origin::Consumer, url: Url, name: String) -> anyhow::Result<()> {
-	let name = moq_net::PathOwned::try_from(name)?;
 	// Confirm the broadcast is reachable (and wait for it to be announced) before dialing;
 	// the egress re-resolves it (and any referenced sibling broadcast) through the origin.
 	origin

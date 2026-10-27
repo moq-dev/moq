@@ -118,7 +118,7 @@ impl AnnouncedRecord {
 
 struct DynamicEntry {
 	task: Task,
-	inner: Option<moq_net::origin::Dynamic>,
+	inner: Option<moq_net::origin::Requests>,
 }
 
 impl Origin {
@@ -151,7 +151,7 @@ impl Origin {
 		let consumer = origin
 			.producer
 			.consume()
-			.scope(moq_net::Path::empty(), &moq_net::Patterns::from(scope))?
+			.scope("", &moq_net::Patterns::from(scope))?
 			.with_hidden(hidden)
 			.announced();
 		self.announced_task.spawn(
@@ -217,12 +217,7 @@ impl Origin {
 	/// The callback fires a broadcast handle (> 0) for each instance serving the path, until a
 	/// single terminal code (`0` on close, negative on error). Returns a task handle for
 	/// cancellation via [`Self::consume_announced_close`].
-	pub fn consume_announced(
-		&mut self,
-		origin: Id,
-		path: moq_net::PathOwned,
-		on_broadcast: OnStatus,
-	) -> Result<Id, Error> {
+	pub fn consume_announced(&mut self, origin: Id, path: String, on_broadcast: OnStatus) -> Result<Id, Error> {
 		let origin = self.active.get(origin).ok_or(Error::OriginNotFound)?;
 		origin.driver.check()?;
 		let driver = origin.driver.clone();
@@ -241,11 +236,11 @@ impl Origin {
 	async fn run_consume_announced(
 		callback: OnStatus,
 		consumer: Consumer,
-		path: moq_net::PathOwned,
+		path: String,
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
 		// An unreachable path and a closed origin both mean no broadcast can ever arrive here.
-		let mut announced = match consumer.announced_broadcast(&path, None) {
+		let mut announced = match consumer.announced_broadcast(path.as_str(), None) {
 			Ok(announced) => announced,
 			Err(moq_net::Error::Unauthorized) => return Err(Error::BroadcastNotFound),
 			Err(err) => return Err(err.into()),
@@ -281,7 +276,7 @@ impl Origin {
 	/// announced now: the callback fires the broadcast
 	/// handle (> 0) once served, then a terminal `0`; or a single terminal code (`0` on close,
 	/// negative on error) if it can't be served. Returns a task handle for cancellation.
-	pub fn request(&mut self, origin: Id, path: moq_net::PathOwned, on_broadcast: OnStatus) -> Result<Id, Error> {
+	pub fn request(&mut self, origin: Id, path: String, on_broadcast: OnStatus) -> Result<Id, Error> {
 		let origin = self.active.get(origin).ok_or(Error::OriginNotFound)?;
 		origin.driver.check()?;
 		let driver = origin.driver.clone();
@@ -300,11 +295,11 @@ impl Origin {
 	async fn run_request(
 		callback: OnStatus,
 		consumer: Consumer,
-		path: moq_net::PathOwned,
+		path: String,
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
 		// Resolves to an error when no announced route can serve the path.
-		let pending = consumer.request_broadcast(&path, None);
+		let pending = consumer.request_broadcast(path.as_str(), None);
 
 		// `biased` so a pending close always wins over a ready broadcast.
 		let broadcast = tokio::select! {
@@ -326,7 +321,7 @@ impl Origin {
 	/// Create an unannounced broadcast at `path` on an origin.
 	///
 	/// Errors with [`Error::Moq`] if the path is outside the origin's scope.
-	pub fn create_broadcast<P: moq_net::AsPath>(
+	pub fn create_broadcast<P: TryInto<moq_net::Path, Error: Into<moq_net::Error>>>(
 		&self,
 		origin: Id,
 		path: P,
@@ -339,11 +334,11 @@ impl Origin {
 
 	/// Advertise `prefix` and serve requests beneath it, delivering each as a
 	/// broadcast-request handle via `on_request`.
-	pub fn dynamic(&mut self, origin: Id, prefix: moq_net::Path<'_>, on_request: OnStatus) -> Result<Id, Error> {
+	pub fn dynamic(&mut self, origin: Id, prefix: &str, on_request: OnStatus) -> Result<Id, Error> {
 		let origin = self.active.get(origin).ok_or(Error::OriginNotFound)?;
 		origin.driver.check()?;
 		let driver = origin.driver.clone();
-		let result = origin.producer.dynamic(prefix);
+		let result = origin.producer.requests(prefix);
 		origin.driver.check()?;
 		let inner = result?;
 		let (task, close) = Task::new(on_request);
@@ -462,11 +457,7 @@ mod supervision_tests {
 			.unwrap();
 		let mut publish = crate::publish::Publish::default();
 		let broadcast = publish
-			.create_publication(
-				origins
-					.create_broadcast(origin, moq_net::Path::new("retained").unwrap())
-					.unwrap(),
-			)
+			.create_publication(origins.create_broadcast(origin, "retained").unwrap())
 			.unwrap();
 		origins.close(origin).unwrap();
 		*trigger
@@ -480,11 +471,7 @@ mod supervision_tests {
 		));
 		let healthy = origins.create().unwrap();
 		let broadcast = publish
-			.create_publication(
-				origins
-					.create_broadcast(healthy, moq_net::Path::new("healthy").unwrap())
-					.unwrap(),
-			)
+			.create_publication(origins.create_broadcast(healthy, "healthy").unwrap())
 			.unwrap();
 		publish.announce(broadcast, Default::default()).unwrap();
 	}

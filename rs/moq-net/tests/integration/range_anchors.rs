@@ -6,7 +6,6 @@
 //! of resolving it against the part of the track it happens to hold.
 
 use crate::support;
-use moq_net::Path;
 
 use std::time::Duration;
 
@@ -46,7 +45,7 @@ fn millis(ms: u64) -> Timestamp {
 /// over one session on it.
 async fn read(version: Option<&str>, range: Range) -> Result<Vec<u64>, Error> {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast(Path::new("room").unwrap()).unwrap();
+	let broadcast = publisher.create_broadcast("room").unwrap();
 	let track = broadcast
 		.create_track(
 			"data",
@@ -64,21 +63,18 @@ async fn read(version: Option<&str>, range: Range) -> Result<Vec<u64>, Error> {
 	let _pair;
 	let remote = match version {
 		// Through the origin, as a reader of a local route.
-		None => moq_clock::timeout(
-			TIMEOUT,
-			publisher.consume().request_broadcast(Path::new("room").unwrap(), None),
-		)
-		.await
-		.expect("resolve timeout")
-		.expect("broadcast resolves"),
+		None => moq_clock::timeout(TIMEOUT, publisher.consume().request_broadcast("room", None))
+			.await
+			.expect("resolve timeout")
+			.expect("broadcast resolves"),
 		Some(version) => {
 			_pair = peer(version.parse::<Version>().unwrap(), &publisher, &subscriber).await;
 			let consumer = subscriber.consume();
-			moq_clock::timeout(TIMEOUT, consumer.routed(Path::new("room").unwrap()))
+			moq_clock::timeout(TIMEOUT, consumer.routed("room"))
 				.await
 				.expect("announce timeout")
 				.expect("routed");
-			moq_clock::timeout(TIMEOUT, consumer.request_broadcast(Path::new("room").unwrap(), None))
+			moq_clock::timeout(TIMEOUT, consumer.request_broadcast("room", None))
 				.await
 				.expect("resolve timeout")
 				.expect("broadcast resolves")

@@ -8,7 +8,6 @@
 //! translate it into the requested scope rather than end the session.
 
 use crate::support;
-use moq_net::Path;
 
 use std::time::Duration;
 
@@ -55,27 +54,22 @@ async fn covering(version: Option<&str>) -> Vec<String> {
 		Some(version) => {
 			let subscriber = produce_origin(2);
 			let interest = Patterns::from(Pattern::subtree(REQUESTED).unwrap());
-			let scoped = subscriber.scope(Path::new("").unwrap(), &interest).unwrap();
+			let scoped = subscriber.scope("", &interest).unwrap();
 			let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
 			options.server_publish = Some(publisher.consume());
 			options.client_subscribe = Some(scoped);
 			(subscriber.consume(), Some(connect_mock(options).await))
 		}
 	};
-	let mut announced = observer
-		.scope(Path::new(REQUESTED).unwrap(), &everything)
-		.unwrap()
-		.announced();
+	let mut announced = observer.scope(REQUESTED, &everything).unwrap().announced();
 	let mut log = Vec::new();
 
-	let served = publisher.create_broadcast(Path::new(SERVED).unwrap()).unwrap();
+	let served = publisher.create_broadcast(SERVED).unwrap();
 	served.announce(Default::default()).unwrap();
 	moq_clock::sleep(SETTLE).await;
 	log.push(format!("served: {:?}", drain(&mut announced)));
 
-	let below = publisher
-		.create_broadcast(Path::try_from(format!("{REQUESTED}/cam")).unwrap())
-		.unwrap();
+	let below = publisher.create_broadcast(format!("{REQUESTED}/cam")).unwrap();
 	below.announce(Default::default()).unwrap();
 	moq_clock::sleep(SETTLE).await;
 	log.push(format!("below: {:?}", drain(&mut announced)));

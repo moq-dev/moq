@@ -411,8 +411,7 @@ async fn publish(
 	canvas: moq_scene::Canvas,
 ) -> anyhow::Result<(Output, Publish)> {
 	let origin = moq_tokio::origin::spawn();
-	let path = moq_net::Path::new(path).with_context(|| format!("invalid broadcast name `{path}`"))?;
-	let publication = origin.create_broadcast(&path).context("cannot create the broadcast")?;
+	let publication = origin.create_broadcast(path).context("cannot create the broadcast")?;
 	let mut broadcast = publication.broadcast().clone();
 	let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default())?;
 	let clock = catalog.clock();
@@ -635,7 +634,7 @@ mod tests {
 			.await
 			.expect("the studio starts");
 
-		let broadcast = tokio::time::timeout(TIMEOUT, relay.routed_broadcast(moq_net::Path::new("studio").unwrap()))
+		let broadcast = tokio::time::timeout(TIMEOUT, relay.routed_broadcast("studio"))
 			.await
 			.expect("the relay routes the program")
 			.expect("broadcast");

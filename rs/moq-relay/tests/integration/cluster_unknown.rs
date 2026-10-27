@@ -2,7 +2,6 @@
 //! The relay records that publisher as `Hop::UNKNOWN`; reflected cluster paths
 //! must not replace it while propagating around a redundant mesh.
 
-use moq_net::Path;
 use std::time::Duration;
 
 use moq_relay::{Config, Relay};
@@ -151,9 +150,7 @@ impl Drop for Publisher {
 async fn publish_version(port: u16, version: &str) -> Publisher {
 	let url: Url = format!("tcp://127.0.0.1:{port}").parse().expect("parse url");
 	let origin = moq_tokio::origin::spawn();
-	let broadcast = origin
-		.create_broadcast(Path::new(PATH).unwrap())
-		.expect("create broadcast");
+	let broadcast = origin.create_broadcast(PATH).expect("create broadcast");
 	broadcast.announce(Default::default()).expect("create broadcast");
 	let track = broadcast.create_track("video", timed()).expect("create track");
 
@@ -212,12 +209,12 @@ async fn read_first_frame(port: u16) -> Result<Vec<u8>, String> {
 	// Wait for the announcement rather than asking the moment the session connects:
 	// `request_broadcast` answers on the spot, so it would race the announcement that
 	// makes the path routable.
-	tokio::time::timeout(TIMEOUT, consumer.routed(Path::new(PATH).unwrap()))
+	tokio::time::timeout(TIMEOUT, consumer.routed(PATH))
 		.await
 		.map_err(|_| "routed timed out".to_string())?
 		.ok_or_else(|| "origin closed before the broadcast was announced".to_string())?;
 	let broadcast = consumer
-		.request_broadcast(Path::new(PATH).unwrap(), None)
+		.request_broadcast(PATH, None)
 		.await
 		.map_err(|err| format!("broadcast unroutable: {err}"))?;
 

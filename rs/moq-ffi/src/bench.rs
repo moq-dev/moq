@@ -282,7 +282,7 @@ async fn rust_net() {
 		config.pool = moq_net::cache::Pool::new(cache);
 		let (origin, driver) = moq_net::origin::Producer::new(config);
 		let driver = tokio::spawn(moq_net::time::run(driver));
-		let broadcast = origin.create_broadcast(moq_net::Path::new("bench").unwrap()).unwrap();
+		let broadcast = origin.create_broadcast("bench").unwrap();
 		let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MICRO);
 		let tracks: Vec<_> = (0..case.publishers)
 			.map(|p| broadcast.create_track(p.to_string(), Some(info.clone())).unwrap())

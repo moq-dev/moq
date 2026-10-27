@@ -476,7 +476,7 @@ async fn spawn_moq(
 		// Read before the handle moves into the task. This allocator is persistent: it
 		// survives reconnects, granting `None` while down, so it can be wired up before
 		// anything connects, and every session probes for its reservations.
-		bandwidth = reconnect.bandwidth();
+		bandwidth = reconnect.allocator();
 		let closed = reconnect.clone();
 		tasks.spawn(async move { Ok(closed.closed().await?) });
 		connection = Some(reconnect);
@@ -586,7 +586,12 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 						claim("stdin", &mut stdin, &name)?;
 					}
 					let report = import.report;
-					let echo = import.echo_path.clone().map(hang::catalog::Echo::new);
+					let echo = import
+						.echo_path
+						.as_deref()
+						.map(hang::moq_net::path::Relative::new)
+						.transpose()?
+						.map(hang::catalog::Echo::new);
 					if let Some(mut publish) =
 						spawn_import(&origin, import, name, epoch.clone(), bandwidth.clone(), &mut tasks)?
 					{
@@ -744,11 +749,9 @@ fn spawn_import(
 		}) = &import.source
 		{
 			let name = require_broadcast(name, "import ts --program all")?;
-			Publish::ts_programs(origin.clone(), moq_net::PathOwned::try_from(name)?, config)
+			Publish::ts_programs(origin.clone(), moq_net::Path::new(&name)?, config)
 		} else {
-			let broadcast = origin
-				.create_broadcast(moq_net::Path::new(&name)?)
-				.context("failed to create broadcast")?;
+			let broadcast = origin.create_broadcast(&name).context("failed to create broadcast")?;
 			Publish::from_publication(broadcast, &format, config)?
 		}
 		.with_linger(linger);
@@ -805,9 +808,7 @@ fn spawn_import(
 			#[cfg(feature = "capture")]
 			ImportSource::Capture(capture) => {
 				warn_if_missing_format(&name);
-				let broadcast = origin
-					.create_broadcast(moq_net::Path::new(&name)?)
-					.context("failed to create broadcast")?;
+				let broadcast = origin.create_broadcast(&name).context("failed to create broadcast")?;
 				let mut publish = Publish::capture(broadcast, &capture, bandwidth.clone(), max_age)?;
 				publish.announce(epoch)?;
 				local = Some(publish);
@@ -923,7 +924,7 @@ async fn run_stdout(
 	// resolves it, and any sibling broadcast a rendition's `broadcast` field references
 	// (e.g. "./source") through the same origin.
 	consumer
-		.routed(moq_net::Path::new(&name)?)
+		.routed(&name)
 		.await
 		.ok_or_else(|| anyhow::anyhow!("origin closed before broadcast `{name}` was announced"))?;
 
@@ -1167,10 +1168,7 @@ mod tests {
 				let listener = cli.moq.server_config().init_streams().unwrap().listen().await.unwrap();
 				let addr = listener.tcp_local_addr().unwrap();
 				let cluster = moq_relay::cluster::Cluster::new(Default::default()).unwrap();
-				let broadcast = cluster
-					.origin
-					.create_broadcast(moq_net::Path::new("probe").unwrap())
-					.unwrap();
+				let broadcast = cluster.origin.create_broadcast("probe").unwrap();
 				broadcast.announce(Default::default()).unwrap();
 				let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
 				let track = broadcast.create_track("status", info).unwrap();
@@ -1267,11 +1265,7 @@ mod tests {
 					.unwrap();
 				// Media proves the CLI admitted the session, even on a transport that establishes early.
 				let payload = tokio::time::timeout(TIMEOUT, async {
-					let broadcast = listening
-						.consumer
-						.routed_broadcast(moq_net::Path::new("probe").unwrap())
-						.await
-						.unwrap();
+					let broadcast = listening.consumer.routed_broadcast("probe").await.unwrap();
 					let mut track = broadcast
 						.track("status")
 						.unwrap()
@@ -1357,7 +1351,7 @@ mod tests {
 		tokio::spawn(moq_net::time::run(driver));
 		let _relayed = accepting.await.unwrap();
 
-		let broadcast = publisher.create_broadcast(moq_net::Path::new("demo").unwrap()).unwrap();
+		let broadcast = publisher.create_broadcast("demo").unwrap();
 		broadcast.announce(Default::default()).unwrap();
 		let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
 		let track = broadcast.create_track("live", info).unwrap();
@@ -1366,9 +1360,9 @@ mod tests {
 		group.finish().unwrap();
 
 		let reader = relay.consume();
-		reader.routed(moq_net::Path::new("demo").unwrap()).await.unwrap();
+		reader.routed("demo").await.unwrap();
 		let mut live = reader
-			.request_broadcast(moq_net::Path::new("demo").unwrap(), None)
+			.request_broadcast("demo", None)
 			.await
 			.unwrap()
 			.track("live")

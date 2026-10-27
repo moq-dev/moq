@@ -43,7 +43,7 @@ pub use axum;
 pub(crate) async fn resolved(origin: &moq_net::origin::Producer, path: &str) -> moq_mux::Source {
 	let consumer = origin.consume();
 	let broadcast = consumer
-		.request_broadcast(moq_net::Path::new(path).unwrap(), None)
+		.request_broadcast(path, None)
 		.await
 		.expect("the broadcast resolves");
 	moq_mux::Source::new(consumer, broadcast)

@@ -84,7 +84,7 @@ impl Client {
 		&self,
 		url: Url,
 		origin: moq_net::origin::Consumer,
-		path: impl moq_net::AsPath,
+		path: impl TryInto<moq_net::Path, Error: Into<moq_net::Error>>,
 	) -> crate::Result<()> {
 		whip::dial(self, url, origin, path).await
 	}
@@ -93,7 +93,6 @@ impl Client {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use moq_net::Path;
 
 	#[tokio::test]
 	async fn http_error_redacts_url() {
@@ -103,9 +102,7 @@ mod tests {
 		drop(listener);
 
 		let origin = moq_tokio::origin::spawn();
-		let broadcast = origin
-			.create_broadcast(Path::new("test").unwrap())
-			.expect("create broadcast");
+		let broadcast = origin.create_broadcast("test").expect("create broadcast");
 		let url = format!("http://user:pass@{address}/whep/test?jwt=secret")
 			.parse()
 			.expect("WHEP URL");

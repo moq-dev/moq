@@ -2,7 +2,7 @@ use std::task::{Poll, ready};
 
 use super::WeakEntry;
 use super::origin_impl::{Announce, AnnounceConsumer, AnnounceEvent, Consumer, Routing};
-use crate::{Epoch, Error, PathOwned, broadcast};
+use crate::{Epoch, Error, Path, broadcast};
 
 /// The announcements covering one path, as one broadcast coming online, being replaced, and
 /// going offline. Created by [`Consumer::follow`](crate::origin::Consumer::follow).
@@ -15,7 +15,7 @@ use crate::{Epoch, Error, PathOwned, broadcast};
 /// ignored.
 pub struct Follow {
 	announced: AnnounceConsumer,
-	path: PathOwned,
+	path: Path,
 	/// Every route standing over the path.
 	covering: Vec<Standing>,
 	/// How many events the cursor has delivered.
@@ -40,7 +40,7 @@ struct Standing {
 }
 
 impl Follow {
-	pub(super) fn new(announced: AnnounceConsumer, path: PathOwned) -> Self {
+	pub(super) fn new(announced: AnnounceConsumer, path: Path) -> Self {
 		Self {
 			announced,
 			path,
@@ -195,7 +195,7 @@ impl Follow {
 /// [`Consumer::announced_broadcast`](crate::origin::Consumer::announced_broadcast).
 pub struct AnnouncedBroadcast {
 	consumer: Consumer,
-	path: PathOwned,
+	path: Path,
 	/// The only instance handed out, if pinned.
 	epoch: Option<Epoch>,
 	follow: Follow,
@@ -209,7 +209,7 @@ pub struct AnnouncedBroadcast {
 }
 
 impl AnnouncedBroadcast {
-	pub(super) fn new(consumer: Consumer, path: PathOwned, epoch: Option<Epoch>, follow: Follow) -> Self {
+	pub(super) fn new(consumer: Consumer, path: Path, epoch: Option<Epoch>, follow: Follow) -> Self {
 		Self {
 			consumer,
 			path,
@@ -294,7 +294,6 @@ impl AnnouncedBroadcast {
 
 #[cfg(all(test, feature = "async"))]
 mod tests {
-	use crate::Path;
 	use std::time::Duration;
 
 	use super::super::ProduceTest;
@@ -332,21 +331,19 @@ mod tests {
 	#[moq_clock::test]
 	async fn follow_reports_the_route_serving_the_path() {
 		let origin = Hop::new(1).unwrap().produce();
-		let mut follow = origin.consume().follow(Path::new("pool/job").unwrap()).unwrap();
+		let mut follow = origin.consume().follow("pool/job").unwrap();
 		let epoch = Epoch::mint();
 
 		// A prefix above the path covers it.
-		let pool = origin.dynamic_route(Path::new("pool").unwrap(), route(&epoch)).unwrap();
+		let pool = origin.requests_route("pool", route(&epoch)).unwrap();
 		assert_eq!(followed(&mut follow).await, ("start", "pool".into()));
 
 		// A route beneath the path serves another broadcast.
-		let _beneath = origin
-			.publish(Path::new("pool/job/thumbnail").unwrap(), Route::default())
-			.unwrap();
+		let _beneath = origin.publish("pool/job/thumbnail", Route::default()).unwrap();
 		quiet(&mut follow).await;
 
 		// The path itself, from the same instance, takes over without a restart.
-		let exact = origin.publish(Path::new("pool/job").unwrap(), route(&epoch)).unwrap();
+		let exact = origin.publish("pool/job", route(&epoch)).unwrap();
 		assert_eq!(followed(&mut follow).await, ("update", "pool/job".into()));
 
 		// The covering prefix no longer serves the path, so its changes are not seen.
@@ -373,14 +370,10 @@ mod tests {
 	#[moq_clock::test]
 	async fn follow_starts_on_the_serving_route_when_joining_late() {
 		let origin = Hop::new(1).unwrap().produce();
-		let _pool = origin
-			.dynamic_route(Path::new("pool").unwrap(), Route::default())
-			.unwrap();
-		let _exact = origin
-			.publish(Path::new("pool/job").unwrap(), Route::default())
-			.unwrap();
+		let _pool = origin.requests_route("pool", Route::default()).unwrap();
+		let _exact = origin.publish("pool/job", Route::default()).unwrap();
 
-		let mut follow = origin.consume().follow(Path::new("pool/job").unwrap()).unwrap();
+		let mut follow = origin.consume().follow("pool/job").unwrap();
 		assert_eq!(followed(&mut follow).await, ("start", "pool/job".into()));
 		quiet(&mut follow).await;
 	}
@@ -391,19 +384,19 @@ mod tests {
 	async fn follow_keeps_a_gap_between_routes_of_one_epoch() {
 		let origin = Hop::new(1).unwrap().produce();
 		let epoch = Epoch::mint();
-		let exact = origin.publish(Path::new("pool/job").unwrap(), route(&epoch)).unwrap();
-		let mut follow = origin.consume().follow(Path::new("pool/job").unwrap()).unwrap();
+		let exact = origin.publish("pool/job", route(&epoch)).unwrap();
+		let mut follow = origin.consume().follow("pool/job").unwrap();
 		assert_eq!(followed(&mut follow).await, ("start", "pool/job".into()));
 
 		// Both land before the follower reads again, and the cursor delivers the prefix's start
 		// ahead of the path's end, but the path went unserved in between.
 		drop(exact);
-		let _pool = origin.dynamic_route(Path::new("pool").unwrap(), route(&epoch)).unwrap();
+		let _pool = origin.requests_route("pool", route(&epoch)).unwrap();
 		assert_eq!(followed(&mut follow).await, ("end", "pool/job".into()));
 		assert_eq!(followed(&mut follow).await, ("start", "pool".into()));
 
 		// A prefix standing while the path's route goes takes over in place.
-		let exact = origin.publish(Path::new("pool/job").unwrap(), route(&epoch)).unwrap();
+		let exact = origin.publish("pool/job", route(&epoch)).unwrap();
 		assert_eq!(followed(&mut follow).await, ("update", "pool/job".into()));
 		drop(exact);
 		assert_eq!(followed(&mut follow).await, ("update", "pool".into()));
@@ -414,14 +407,12 @@ mod tests {
 	#[moq_clock::test]
 	async fn follow_hands_over_to_a_prefix_that_started_before_the_last_change() {
 		let origin = Hop::new(1).unwrap().produce();
-		let exact = origin
-			.publish(Path::new("pool/job").unwrap(), route(&Epoch::mint()))
-			.unwrap();
-		let mut follow = origin.consume().follow(Path::new("pool/job").unwrap()).unwrap();
+		let exact = origin.publish("pool/job", route(&Epoch::mint())).unwrap();
+		let mut follow = origin.consume().follow("pool/job").unwrap();
 		assert_eq!(followed(&mut follow).await, ("start", "pool/job".into()));
 
 		let epoch = Epoch::mint();
-		let _pool = origin.dynamic_route(Path::new("pool").unwrap(), route(&epoch)).unwrap();
+		let _pool = origin.requests_route("pool", route(&epoch)).unwrap();
 		exact.announce(route(&epoch)).unwrap();
 		assert_eq!(followed(&mut follow).await, ("restart", "pool/job".into()));
 
@@ -433,16 +424,12 @@ mod tests {
 	#[moq_clock::test]
 	async fn follow_restarts_onto_a_more_specific_route_without_an_epoch() {
 		let origin = Hop::new(1).unwrap().produce();
-		let mut follow = origin.consume().follow(Path::new("pool/job").unwrap()).unwrap();
+		let mut follow = origin.consume().follow("pool/job").unwrap();
 
-		let _pool = origin
-			.dynamic_route(Path::new("pool").unwrap(), Route::default())
-			.unwrap();
+		let _pool = origin.requests_route("pool", Route::default()).unwrap();
 		assert_eq!(followed(&mut follow).await, ("start", "pool".into()));
 
-		let _exact = origin
-			.publish(Path::new("pool/job").unwrap(), Route::default())
-			.unwrap();
+		let _exact = origin.publish("pool/job", Route::default()).unwrap();
 		assert_eq!(followed(&mut follow).await, ("restart", "pool/job".into()));
 	}
 
@@ -453,15 +440,13 @@ mod tests {
 		let origin = Hop::new(1).unwrap().produce();
 		let chat = Patterns::from("room/*/chat".parse::<Pattern>().unwrap());
 		let _chat = origin
-			.scope(Path::new("").unwrap(), &chat)
+			.scope("", &chat)
 			.unwrap()
-			.dynamic_route(Path::new("room/alice").unwrap(), Route::default())
+			.requests_route("room/alice", Route::default())
 			.unwrap();
-		let mut follow = origin.consume().follow(Path::new("room/alice").unwrap()).unwrap();
+		let mut follow = origin.consume().follow("room/alice").unwrap();
 
-		let first = origin
-			.publish(Path::new("room/alice").unwrap(), Route::default().with_cost(5))
-			.unwrap();
+		let first = origin.publish("room/alice", Route::default().with_cost(5)).unwrap();
 		let event = moq_clock::timeout(Duration::from_secs(1), follow.next())
 			.await
 			.unwrap()
@@ -472,9 +457,7 @@ mod tests {
 		);
 
 		// A republish is another instance of the route that serves the path.
-		let _second = origin
-			.publish(Path::new("room/alice").unwrap(), Route::default().with_cost(5))
-			.unwrap();
+		let _second = origin.publish("room/alice", Route::default().with_cost(5)).unwrap();
 		drop(first);
 		let event = moq_clock::timeout(Duration::from_secs(1), follow.next())
 			.await
@@ -506,7 +489,7 @@ mod tests {
 	}
 
 	/// The next request a dynamic route receives for its path.
-	async fn requested(dynamic: &crate::origin::Dynamic) -> crate::origin::Request {
+	async fn requested(dynamic: &crate::origin::Requests) -> crate::origin::Request {
 		moq_clock::timeout(Duration::from_secs(1), dynamic.requested_broadcast())
 			.await
 			.expect("never asked")
@@ -518,16 +501,13 @@ mod tests {
 	#[moq_clock::test]
 	async fn announced_hands_out_a_held_takeover_once() {
 		let origin = Hop::new(1).unwrap().produce();
-		let dynamic = origin.dynamic(Path::new("live").unwrap()).unwrap();
-		let mut announced = origin
-			.consume()
-			.announced_broadcast(Path::new("live").unwrap(), None)
-			.unwrap();
+		let dynamic = origin.requests("live").unwrap();
+		let mut announced = origin.consume().announced_broadcast("live", None).unwrap();
 
 		// The wait is on the dynamic route's answer when the exact path takes over without an epoch.
 		let (_takeover, _publish) = futures::join!(available(&mut announced), async {
 			let _unanswered = requested(&dynamic).await;
-			origin.publish(Path::new("live").unwrap(), Route::default()).unwrap()
+			origin.publish("live", Route::default()).unwrap()
 		});
 		none(&mut announced).await;
 	}
@@ -537,15 +517,12 @@ mod tests {
 	#[moq_clock::test]
 	async fn announced_hands_out_a_dropped_takeover_again() {
 		let origin = Hop::new(1).unwrap().produce();
-		let dynamic = origin.dynamic(Path::new("live").unwrap()).unwrap();
-		let mut announced = origin
-			.consume()
-			.announced_broadcast(Path::new("live").unwrap(), None)
-			.unwrap();
+		let dynamic = origin.requests("live").unwrap();
+		let mut announced = origin.consume().announced_broadcast("live", None).unwrap();
 
 		let (dropped, _publish) = futures::join!(available(&mut announced), async {
 			let _unanswered = requested(&dynamic).await;
-			origin.publish(Path::new("live").unwrap(), Route::default()).unwrap()
+			origin.publish("live", Route::default()).unwrap()
 		});
 		let front = dropped.weak();
 		drop(dropped);
@@ -560,17 +537,14 @@ mod tests {
 	#[moq_clock::test]
 	async fn announced_hands_out_a_gap_while_resolving_once() {
 		let origin = Hop::new(1).unwrap().produce();
-		let dynamic = origin.dynamic(Path::new("").unwrap()).unwrap();
-		let mut announced = origin
-			.consume()
-			.announced_broadcast(Path::new("live").unwrap(), None)
-			.unwrap();
+		let dynamic = origin.requests("").unwrap();
+		let mut announced = origin.consume().announced_broadcast("live", None).unwrap();
 
 		let (_arrival, _publish) = futures::join!(available(&mut announced), async {
 			let _unanswered = requested(&dynamic).await;
 			drop(dynamic);
 			moq_clock::sleep(super::super::origin_impl::DEFAULT_UPDATE_HOLD * 2).await;
-			origin.publish(Path::new("live").unwrap(), Route::default()).unwrap()
+			origin.publish("live", Route::default()).unwrap()
 		});
 		none(&mut announced).await;
 	}
@@ -582,14 +556,11 @@ mod tests {
 	async fn announced_hands_out_the_instance_again_after_an_end() {
 		let origin = Hop::new(1).unwrap().produce();
 		let epoch = Epoch::mint();
-		let mut announced = origin
-			.consume()
-			.announced_broadcast(Path::new("live").unwrap(), None)
-			.unwrap();
-		let exact = origin.publish(Path::new("live").unwrap(), route(&epoch)).unwrap();
+		let mut announced = origin.consume().announced_broadcast("live", None).unwrap();
+		let exact = origin.publish("live", route(&epoch)).unwrap();
 		let first = available(&mut announced).await;
 
-		let dynamic = origin.dynamic_route(Path::new("").unwrap(), route(&epoch)).unwrap();
+		let dynamic = origin.requests_route("", route(&epoch)).unwrap();
 		exact.unannounce();
 		let served = broadcast::Info::new().produce();
 		let (again, ()) = futures::join!(available(&mut announced), async {
@@ -604,24 +575,16 @@ mod tests {
 	async fn announced_pinned_refuses_another_instance() {
 		let origin = Hop::new(1).unwrap().produce();
 		let epoch = Epoch::mint();
-		let _first = origin.publish(Path::new("live").unwrap(), route(&epoch)).unwrap();
-		let mut announced = origin
-			.consume()
-			.announced_broadcast(Path::new("live").unwrap(), epoch.clone())
-			.unwrap();
+		let _first = origin.publish("live", route(&epoch)).unwrap();
+		let mut announced = origin.consume().announced_broadcast("live", epoch.clone()).unwrap();
 		let pinned = available(&mut announced).await;
 		assert_eq!(pinned.info().epoch.as_ref(), Some(&epoch));
 
-		let _second = origin
-			.publish(Path::new("live").unwrap(), route(&Epoch::mint()))
-			.unwrap();
+		let _second = origin.publish("live", route(&Epoch::mint())).unwrap();
 		none(&mut announced).await;
 
 		// Unpinned, the same takeover is followed.
-		let mut unpinned = origin
-			.consume()
-			.announced_broadcast(Path::new("live").unwrap(), None)
-			.unwrap();
+		let mut unpinned = origin.consume().announced_broadcast("live", None).unwrap();
 		let current = available(&mut unpinned).await;
 		assert_ne!(current.info().epoch.as_ref(), Some(&epoch));
 	}
@@ -632,7 +595,7 @@ mod tests {
 	fn follow_refuses_a_path_no_pattern_can_spell() {
 		let origin = Hop::new(1).unwrap().produce();
 		assert!(matches!(
-			origin.consume().follow(Path::new("camera*main").unwrap()),
+			origin.consume().follow("camera*main"),
 			Err(Error::InvalidPath(_))
 		));
 	}
@@ -642,10 +605,7 @@ mod tests {
 	fn follow_refuses_a_path_outside_the_scope() {
 		let origin = Hop::new(1).unwrap().produce();
 		let scope = Patterns::from(Pattern::subtree("pool/job/cam").unwrap());
-		let scoped = origin.consume().scope(Path::new("").unwrap(), &scope).unwrap();
-		assert!(matches!(
-			scoped.follow(Path::new("pool/job").unwrap()),
-			Err(Error::Unauthorized)
-		));
+		let scoped = origin.consume().scope("", &scope).unwrap();
+		assert!(matches!(scoped.follow("pool/job"), Err(Error::Unauthorized)));
 	}
 }

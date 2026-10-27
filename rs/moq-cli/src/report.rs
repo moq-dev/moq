@@ -263,7 +263,7 @@ pub struct EchoTarget {
 
 /// The feedback broadcast in force: where it is published and its snapshot tracks.
 struct Feedback {
-	path: moq_net::PathOwned,
+	path: moq_net::Path,
 	// Held for the route: dropping it retracts the announcement.
 	_broadcast: moq_net::origin::Publication,
 	tracks: Pair<hang::echo::Snapshot<ts::stats::Report>>,
@@ -334,9 +334,12 @@ impl Echo {
 			if prefix.is_none() {
 				tracing::warn!(path = %echo.path.as_str(), "the catalog solicits feedback above the connection root");
 			}
-			let name = moq_net::PathOwned::try_from(format!("{}{}", self.target.name.0, hang::echo::SUFFIX))
-				.expect("an echo name is one segment");
-			Some(prefix?.join(name))
+			let prefix = prefix?;
+			let name = format!("{}{}", self.target.name.0, hang::echo::SUFFIX);
+			hang::moq_net::Path::new(&name)
+				.and_then(|name| prefix.join(&name))
+				.inspect_err(|err| tracing::warn!(%err, path = %echo.path.as_str(), "the feedback path is too long"))
+				.ok()
 		});
 		if self.feedback.as_ref().map(|feedback| &feedback.path) == target.as_ref() {
 			return;
@@ -355,7 +358,7 @@ impl Echo {
 		}
 	}
 
-	fn publish(&self, path: &moq_net::PathOwned) -> anyhow::Result<Feedback> {
+	fn publish(&self, path: &moq_net::Path) -> anyhow::Result<Feedback> {
 		let broadcast = self.target.origin.create_broadcast(path)?;
 		let tracks = Pair::create(&mut broadcast.broadcast().clone(), hang::echo::TRACK)?;
 		// A fresh instance, so a reader sees a replaced feedback broadcast as a restart.
@@ -420,14 +423,13 @@ async fn snapshot(
 /// `export report`: write the broadcast's media reports to stdout as JSON lines, following the
 /// track its catalog's `stats` section names, until the catalog and that track have both ended.
 pub async fn print_report(origin: moq_net::origin::Consumer, path: String) -> anyhow::Result<()> {
-	let path = moq_net::PathOwned::try_from(path)?;
 	let mut stdout = tokio::io::stdout();
 	origin
 		.routed(&path)
 		.await
 		.ok_or_else(|| anyhow::anyhow!("origin closed before broadcast `{path}` was announced"))?;
 	let broadcast = origin
-		.request_broadcast(&path, None)
+		.request_broadcast(path.as_str(), None)
 		.await
 		.with_context(|| format!("failed to resolve broadcast `{path}`"))?;
 	let source = moq_mux::Source::new(origin, broadcast.clone());
@@ -491,7 +493,7 @@ async fn write_echo(
 ) -> anyhow::Result<()> {
 	// Announcements leave hidden routes out unless asked, and a prefix naming one asks.
 	let hidden = prefix.split('/').any(|segment| segment.starts_with('.'));
-	let prefix = moq_net::Path::new(&prefix)?.to_owned();
+	let prefix = moq_net::Path::new(&prefix)?;
 	let mut announced = origin.clone().with_hidden(hidden).announced();
 	let (lines, mut written) = tokio::sync::mpsc::channel::<String>(LINES);
 	let mut readers = Readers::default();
@@ -530,14 +532,14 @@ async fn write_echo(
 /// The `export echo` reader of each feedback broadcast, live or draining after its `End`.
 #[derive(Default)]
 struct Readers {
-	running: HashMap<moq_net::PathOwned, tokio::task::JoinHandle<()>>,
+	running: HashMap<moq_net::Path, tokio::task::JoinHandle<()>>,
 	/// One timer per `End`, yielding the path and the reader it ended once `DRAIN` passes.
-	drains: tokio::task::JoinSet<(moq_net::PathOwned, tokio::task::Id)>,
+	drains: tokio::task::JoinSet<(moq_net::Path, tokio::task::Id)>,
 }
 
 impl Readers {
 	/// Read `path` with `reader`, replacing any reader still on it.
-	fn start(&mut self, path: moq_net::PathOwned, reader: tokio::task::JoinHandle<()>) {
+	fn start(&mut self, path: moq_net::Path, reader: tokio::task::JoinHandle<()>) {
 		if let Some(previous) = self.running.insert(path, reader) {
 			previous.abort();
 		}
@@ -545,7 +547,7 @@ impl Readers {
 
 	/// Let the reader of `path` drain, not abort it: the final snapshot can still be in flight. It
 	/// stays so a start at the path replaces it, and goes after `DRAIN` even if its track stays open.
-	fn end(&mut self, path: moq_net::PathOwned) {
+	fn end(&mut self, path: moq_net::Path) {
 		let Some(reader) = self.running.get(&path) else {
 			return;
 		};
@@ -576,11 +578,7 @@ impl Readers {
 }
 
 /// Send a line for each feedback snapshot the broadcast at `path` publishes, until it ends.
-async fn read_echo(
-	origin: moq_net::origin::Consumer,
-	path: moq_net::PathOwned,
-	lines: tokio::sync::mpsc::Sender<String>,
-) {
+async fn read_echo(origin: moq_net::origin::Consumer, path: moq_net::Path, lines: tokio::sync::mpsc::Sender<String>) {
 	let read = async {
 		let broadcast = origin.request_broadcast(&path, None).await?;
 		let subscriber = broadcast.track(hang::echo::TRACK)?.subscribe(None).await?;
@@ -648,9 +646,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn an_ended_feedback_reader_stops_after_draining() {
 		let origin = moq_tokio::origin::spawn();
-		let broadcast = origin
-			.create_broadcast(moq_net::Path::new("viewer.echo").unwrap())
-			.unwrap();
+		let broadcast = origin.create_broadcast("viewer.echo").unwrap();
 		let track = broadcast.create_track(hang::echo::TRACK, None).unwrap();
 		let mut feedback = moq_json::snapshot::Producer::<serde_json::Value>::new(track, Default::default());
 		broadcast.announce(Default::default()).unwrap();
@@ -674,7 +670,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_drained_reader_is_forgotten() {
 		let mut readers = Readers::default();
-		let path = moq_net::Path::new("viewer.echo").unwrap().to_owned();
+		let path = moq_net::Path::from_static("viewer.echo");
 
 		readers.start(path.clone(), tokio::spawn(std::future::pending()));
 		readers.end(path.clone());
@@ -694,9 +690,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_hidden_prefix_finds_its_feedback() {
 		let origin = moq_tokio::origin::spawn();
-		let broadcast = origin
-			.create_broadcast(moq_net::Path::new(".viewers/alice.echo").unwrap())
-			.unwrap();
+		let broadcast = origin.create_broadcast(".viewers/alice.echo").unwrap();
 		let track = broadcast.create_track(hang::echo::TRACK, None).unwrap();
 		let mut feedback = moq_json::snapshot::Producer::<serde_json::Value>::new(track, Default::default());
 		broadcast.announce(Default::default()).unwrap();

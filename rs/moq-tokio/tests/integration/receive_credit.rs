@@ -12,7 +12,6 @@
 
 #![cfg(feature = "quic")]
 
-use moq_net::Path;
 use std::{process::Stdio, sync::Arc, time::Duration};
 
 use bytes::Bytes;
@@ -79,9 +78,7 @@ async fn setup_through(
 	let version: moq_net::Version = version.parse().expect("version");
 
 	let publisher = moq_tokio::origin::spawn();
-	let broadcast = publisher
-		.create_broadcast(Path::new("room").unwrap())
-		.expect("broadcast");
+	let broadcast = publisher.create_broadcast("room").expect("broadcast");
 	broadcast.announce(Default::default()).expect("announce");
 
 	let mut config = moq_tokio::listen::Config::default();
@@ -169,11 +166,11 @@ fn rand_seed() -> u64 {
 /// Broadcast `room`, once the peer announces it into `origin`.
 async fn room(origin: &moq_net::origin::Producer) -> moq_net::broadcast::Consumer {
 	let consumer = origin.consume();
-	tokio::time::timeout(TIMEOUT, consumer.routed(Path::new("room").unwrap()))
+	tokio::time::timeout(TIMEOUT, consumer.routed("room"))
 		.await
 		.expect("announce timeout")
 		.expect("routed");
-	tokio::time::timeout(TIMEOUT, consumer.request_broadcast(Path::new("room").unwrap(), None))
+	tokio::time::timeout(TIMEOUT, consumer.request_broadcast("room", None))
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves")
@@ -290,7 +287,7 @@ async fn the_less_urgent_partial_frame_gives_way(version: &str, profile: Option<
 		moq_net::transport::Address::Setup,
 	);
 	assert_eq!(
-		moq_net::transport::Stats::streams_evicted(&moq_net::transport::poll::Session::stats(&session)),
+		moq_net::transport::Metrics::streams_evicted(&moq_net::transport::poll::Session::metrics(&session)),
 		Some(1),
 		"moq-net sees the eviction count, {version}"
 	);
@@ -449,9 +446,7 @@ async fn reversed(version: &str) -> Reversed {
 	);
 
 	let publisher = moq_tokio::origin::spawn();
-	let broadcast = publisher
-		.create_broadcast(Path::new("room").unwrap())
-		.expect("broadcast");
+	let broadcast = publisher.create_broadcast("room").expect("broadcast");
 	broadcast.announce(Default::default()).expect("announce");
 	let subscriber = moq_tokio::origin::spawn();
 	let session = |conn: driver::Connection| {

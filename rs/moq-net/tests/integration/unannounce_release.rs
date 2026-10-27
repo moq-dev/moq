@@ -4,7 +4,6 @@
 //! subscription once its last reader leaves, so the publisher's demand goes unused.
 
 use crate::support;
-use moq_net::Path;
 
 use std::time::Duration;
 
@@ -25,17 +24,12 @@ async fn release(version: Version) {
 	options.client_subscribe = Some(relay.clone());
 	let _pair = connect_mock(options).await;
 
-	let broadcast = publisher
-		.publish(Path::new("a/b").unwrap(), moq_net::origin::Route::default())
-		.unwrap();
+	let broadcast = publisher.publish("a/b", moq_net::origin::Route::default()).unwrap();
 	let track = broadcast.create_track("t", None).unwrap();
 
 	let consumer = relay.consume();
-	consumer.routed(Path::new("a/b").unwrap()).await.expect("routed");
-	let remote = consumer
-		.request_broadcast(Path::new("a/b").unwrap(), None)
-		.await
-		.expect("resolves");
+	consumer.routed("a/b").await.expect("routed");
+	let remote = consumer.request_broadcast("a/b", None).await.expect("resolves");
 	let sub = remote.track("t").unwrap().subscribe(None).await.expect("subscribes");
 	crate::support::wanted(track.demand()).await.unwrap();
 

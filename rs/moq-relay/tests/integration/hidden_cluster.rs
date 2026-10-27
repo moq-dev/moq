@@ -1,7 +1,6 @@
 //! A cluster peer that predates the hidden opt-in still discovers the relay's
 //! `.`-named broadcasts, so a mixed-version mesh keeps its hidden paths.
 
-use moq_net::Path;
 use std::time::Duration;
 
 use moq_relay::cluster::{self, Peer};
@@ -69,10 +68,7 @@ async fn old_peer_keeps_hidden_paths(version: moq_net::Version) {
 		let cluster = cluster::Cluster::new(cluster::Options::new(cluster_config))
 			.expect("cluster init")
 			.with_connect(client_config, Default::default());
-		let node = cluster
-			.origin
-			.create_broadcast(Path::new(".hidden/test").unwrap())
-			.expect("create hidden");
+		let node = cluster.origin.create_broadcast(".hidden/test").expect("create hidden");
 		node.announce(Default::default()).expect("announce hidden");
 		let cluster_run = tokio::spawn(cluster.clone().start().await.expect("cluster start").run());
 

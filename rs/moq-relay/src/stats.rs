@@ -6,7 +6,8 @@
 
 use std::time::Duration;
 
-use moq_net::PathOwned;
+use anyhow::Context;
+use moq_net::Path;
 use moq_net::origin;
 use serde::{Deserialize, Serialize};
 
@@ -122,19 +123,18 @@ impl Config {
 		if !self.enabled {
 			return Ok(moq_stats::Producer::new(moq_stats::produce::Config::new()));
 		}
-		let prefix =
-			PathOwned::try_from(self.prefix.clone()).map_err(|err| anyhow::anyhow!("invalid stats.prefix: {err}"))?;
+		let prefix = Path::new(&self.prefix).context("invalid stats.prefix")?;
 		let interval = self.interval();
 		anyhow::ensure!(interval != Some(Duration::ZERO), "stats.interval must be non-zero");
 		let node = self
 			.node
-			.clone()
-			.map(PathOwned::try_from)
+			.as_deref()
+			.map(Path::new)
 			.transpose()
-			.map_err(|err| anyhow::anyhow!("invalid stats.node: {err}"))?;
+			.context("invalid stats.node")?;
 		let depth = self.depth;
 		let linger = self.linger();
-		tracing::info!(prefix = %prefix, ?interval, node = ?node, depth, ?linger, "stats publishing enabled");
+		tracing::info!(%prefix, ?interval, node = ?node, depth, ?linger, "stats publishing enabled");
 		let mut config = moq_stats::produce::Config::new()
 			.with_origin(origin)
 			.with_prefix(prefix)

@@ -1,4 +1,4 @@
-use crate::{Path, coding::*};
+use crate::{Path, coding::*, path::Invalid};
 
 fn to_tuple(namespace: &Path) -> Vec<String> {
 	let path = namespace.as_str();
@@ -29,7 +29,7 @@ fn to_tuple(namespace: &Path) -> Vec<String> {
 }
 
 // A field ending in `/` escapes to a path with an empty segment, so it is refused.
-fn from_tuple(parts: &[&str]) -> Result<Path<'static>, DecodeError> {
+fn from_tuple(parts: &[&str]) -> Result<Path, Invalid> {
 	// Sized for the common case of no escapes, so building it rarely grows.
 	let mut path = String::with_capacity(parts.iter().map(|part| part.len() + 1).sum());
 	for (i, part) in parts.iter().enumerate() {
@@ -45,7 +45,7 @@ fn from_tuple(parts: &[&str]) -> Result<Path<'static>, DecodeError> {
 		}
 	}
 
-	Path::try_from(path).map_err(|_| DecodeError::InvalidValue)
+	Path::try_from(path)
 }
 
 /// Helper function to encode namespace as tuple of strings
@@ -71,7 +71,7 @@ const MAX_BYTES: usize = 4096;
 ///
 /// Every limit here closes the session as a PROTOCOL_VIOLATION (draft-22 section 8.7):
 /// more than 32 fields, an empty field, a field ending in `/`, or more than 4096 bytes.
-fn decode_fields(r: &mut Decoder<'_>) -> Result<(Path<'static>, usize), DecodeError> {
+fn decode_fields(r: &mut Decoder<'_>) -> Result<(Path, usize), DecodeError> {
 	let count = r.varint()?;
 
 	if count == 0 {
@@ -101,12 +101,12 @@ fn decode_fields(r: &mut Decoder<'_>) -> Result<(Path<'static>, usize), DecodeEr
 }
 
 /// Decode a Track Namespace.
-pub fn decode_namespace(r: &mut Decoder<'_>) -> Result<Path<'static>, DecodeError> {
+pub fn decode_namespace(r: &mut Decoder<'_>) -> Result<Path, DecodeError> {
 	Ok(decode_fields(r)?.0)
 }
 
 /// Decode a Full Track Name: a Track Namespace, then a Track Name, at most 4096 bytes together.
-pub fn decode_track(r: &mut Decoder<'_>) -> Result<(Path<'static>, String), DecodeError> {
+pub fn decode_track(r: &mut Decoder<'_>) -> Result<(Path, String), DecodeError> {
 	let (namespace, size) = decode_fields(r)?;
 	let name = r.string()?;
 	if size + name.len() > MAX_BYTES {
@@ -173,16 +173,16 @@ mod tests {
 	const FORM: Form = Form::LeadingOnes { seven: false };
 
 	fn encode_ns(path: &str) -> Vec<u8> {
-		encode_path(&Path::new(path).unwrap().to_owned())
+		encode_path(&crate::Path::try_from(path.to_string()).unwrap())
 	}
 
-	fn encode_path(path: &Path<'_>) -> Vec<u8> {
+	fn encode_path(path: &Path) -> Vec<u8> {
 		let mut buf = Vec::new();
 		encode_namespace(&mut Encoder::new(&mut buf, FORM), path).unwrap();
 		buf
 	}
 
-	fn decode_ns(bytes: &[u8]) -> Path<'static> {
+	fn decode_ns(bytes: &[u8]) -> Path {
 		decode_namespace(&mut Decoder::new(bytes, FORM)).unwrap()
 	}
 

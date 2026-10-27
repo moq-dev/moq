@@ -125,7 +125,7 @@ struct Media {
 struct Handle {
 	binding: Arc<moq_mux::Binding>,
 	/// The query holding the track instance alive without subscribing to its media.
-	track: Option<moq_net::track::Querying>,
+	track: Option<moq_net::track::Resolving>,
 	/// The bound sibling ended, so only its retained rows drain.
 	ended: bool,
 }
@@ -137,7 +137,7 @@ impl Handle {
 		{
 			// The lookup is lazy: the query installs the instance, and reads pin to it through
 			// the query, since End may refuse any lookup made after this one.
-			self.track = Some(track.query().into_inner());
+			self.track = Some(track.info().into_inner());
 		}
 	}
 }
@@ -1468,7 +1468,6 @@ fn net_errors(err: &moq_mux::Error) -> impl Iterator<Item = &moq_net::Error> {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use moq_net::Path;
 
 	/// Decode the code `local` would send on a moq-lite stream reset.
 	fn over_lite(local: &moq_net::Error) -> moq_net::Error {
@@ -1491,17 +1490,15 @@ mod tests {
 	#[tokio::test]
 	async fn pending_reads_preserve_a_later_authorization_refusal() {
 		let origin = moq_tokio::origin::spawn();
-		let broadcast = origin
-			.create_broadcast(moq_net::Path::new("room/live").unwrap())
-			.unwrap();
-		let dynamic = origin.dynamic(moq_net::Path::new("room/secret").unwrap()).unwrap();
+		let broadcast = origin.create_broadcast("room/live").unwrap();
+		let dynamic = origin.requests("room/secret").unwrap();
 		let source = moq_mux::Source::new(origin.consume(), broadcast.consume());
 		let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
-		config.broadcast = Some(moq_net::path::Relative::new("./secret").to_owned());
+		config.broadcast = Some(moq_net::path::Relative::new("./secret").unwrap());
 		let rendition = Arc::new(Rendition::video("video".into(), &config, &source, Archive::default(), None).unwrap());
 		let request = dynamic.requested_broadcast().await.unwrap();
-		let other = origin.dynamic(moq_net::Path::new("room/hidden").unwrap()).unwrap();
-		config.broadcast = Some(moq_net::path::Relative::new("./hidden").to_owned());
+		let other = origin.requests("room/hidden").unwrap();
+		config.broadcast = Some(moq_net::path::Relative::new("./hidden").unwrap());
 		let resolving = Arc::new(Rendition::video("video".into(), &config, &source, Archive::default(), None).unwrap());
 		let other_request = other.requested_broadcast().await.unwrap();
 		let row = |reference: &str| segments::Row {
@@ -1556,7 +1553,7 @@ mod tests {
 	fn capture_keeps_the_queried_track_when_end_lands_during_the_query() {
 		struct Serve {
 			broadcast: moq_net::broadcast::Producer,
-			dynamic: std::sync::Mutex<moq_net::broadcast::Dynamic>,
+			dynamic: std::sync::Mutex<moq_net::broadcast::Requests>,
 			track: std::sync::Mutex<Option<moq_net::track::Producer>>,
 			// Kept alive here, since a list only holds it weakly.
 			waiter: std::sync::OnceLock<kio::Waiter>,
@@ -1585,7 +1582,7 @@ mod tests {
 
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let serve = Arc::new(Serve {
-			dynamic: std::sync::Mutex::new(broadcast.dynamic()),
+			dynamic: std::sync::Mutex::new(broadcast.requests()),
 			broadcast,
 			track: Default::default(),
 			waiter: Default::default(),
@@ -1658,9 +1655,7 @@ mod tests {
 	#[test]
 	fn a_gone_publisher_is_unservable_and_an_ietf_miss_is_not() {
 		let origin = produce_origin();
-		let producer = origin
-			.create_broadcast(Path::new("live").unwrap())
-			.expect("publish allowed");
+		let producer = origin.create_broadcast("live").expect("publish allowed");
 		let live = producer.consume();
 		let ietf_miss = over_ietf_miss();
 		assert!(
@@ -1685,7 +1680,7 @@ mod tests {
 	async fn a_refusal_wait_wakes_on_a_timeline_failure() {
 		for own in [true, false] {
 			let origin = moq_tokio::origin::spawn();
-			let broadcast = origin.create_broadcast(moq_net::Path::new("live").unwrap()).unwrap();
+			let broadcast = origin.create_broadcast("live").unwrap();
 			let source = moq_mux::Source::new(origin.consume(), broadcast.consume());
 			let config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
 			let rendition =

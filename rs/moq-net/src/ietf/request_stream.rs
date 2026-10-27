@@ -378,9 +378,9 @@ pub(super) struct Update {
 	pub(super) new_group: Option<u64>,
 	/// FORWARD, `None` when unchanged.
 	pub(super) forward: Option<bool>,
-	/// The new Location Filter, which only a paused PUBLISH subscription resuming takes.
+	/// The new Location Filter replacing the subscription's requested range.
 	pub(super) filter: Option<super::Filter>,
-	/// FILL_PARAMETERS (draft-22), which only a paused PUBLISH subscription resuming takes.
+	/// FILL_PARAMETERS (draft-22): the backfill requested with this update.
 	pub(super) fill: Option<super::Fill>,
 }
 
@@ -515,12 +515,12 @@ impl Decode<Version> for Update {
 #[derive(Debug)]
 pub(super) struct NamespaceUpdate<const TRACKS: bool = false> {
 	pub(super) request_id: super::RequestId,
-	pub(super) prefix: Option<crate::PathOwned>,
+	pub(super) prefix: Option<crate::Path>,
 	pub(super) refused: Option<Error>,
 }
 
 #[derive(Debug)]
-struct NamespacePrefix(crate::PathOwned);
+struct NamespacePrefix(crate::Path);
 
 impl super::parameters::Param for NamespacePrefix {
 	fn param_encode(&self, w: &mut crate::coding::Encoder<'_>, _: Version) -> Result<(), crate::coding::EncodeError> {
@@ -566,7 +566,6 @@ impl<const TRACKS: bool> Decode<Version> for NamespaceUpdate<TRACKS> {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::Path;
 
 	#[moq_clock::test]
 	async fn request_messages_keep_goaway_state_across_response_phases() {
@@ -593,9 +592,9 @@ mod tests {
 	#[moq_clock::test]
 	async fn request_stream_messages_count_without_their_type() {
 		use crate::lite::test_transport::ScriptedSession;
-		use crate::stats::{Control, Registry, Tier};
+		use crate::stats::{Message, Registry, Tier};
 		let registry = Registry::new(Default::default());
-		let stats = registry.tier(Tier::default()).session(Path::new("").unwrap());
+		let stats = registry.tier(Tier::default()).session(crate::Path::from_static(""));
 		let version = Version::Draft22;
 		let session = ScriptedSession::new(vec![0x10, 0, 2, 0, 0, 0x07, 0, 0]);
 		let mut stream = with_stats(
@@ -611,8 +610,8 @@ mod tests {
 			let rows = registry.snapshot().control();
 			rows.into_iter().find(|row| row.1 == class).map(|row| row.2.rx)
 		};
-		assert_eq!(rx(Control::Goaway), Some(4));
-		assert_eq!(rx(Control::Other), Some(2));
+		assert_eq!(rx(Message::Goaway), Some(4));
+		assert_eq!(rx(Message::Other), Some(2));
 	}
 
 	#[moq_clock::test]

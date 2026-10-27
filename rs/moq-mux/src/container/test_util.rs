@@ -119,12 +119,8 @@ impl Moving {
 
 	pub(crate) fn new() -> Self {
 		let origin = crate::source::produce_origin();
-		let live = origin
-			.publish(moq_net::Path::new("live").unwrap(), Default::default())
-			.unwrap();
-		let other = origin
-			.publish(moq_net::Path::new("other").unwrap(), Default::default())
-			.unwrap();
+		let live = origin.publish("live", Default::default()).unwrap();
+		let other = origin.publish("other", Default::default()).unwrap();
 		let catalog =
 			crate::catalog::Producer::new(&mut live.broadcast().clone(), crate::catalog::Config::default()).unwrap();
 		let track = |broadcast: &mut moq_net::broadcast::Producer, name: &str| {
@@ -176,7 +172,7 @@ impl Moving {
 		config.description =
 			Some(crate::codec::h264::build_avcc(&[Bytes::from_static(sps)], &[Bytes::from_static(PPS)]).unwrap());
 		config.track = Some(track.to_string());
-		config.broadcast = broadcast.map(|broadcast| moq_net::path::Relative::new(broadcast).into_owned());
+		config.broadcast = broadcast.map(|rel| moq_net::path::Relative::new(rel).unwrap());
 		config
 	}
 }
@@ -553,7 +549,7 @@ impl moq_net::transport::poll::Session for Gated {
 		self.inner.poll_closed(cx)
 	}
 
-	fn stats(&self) -> impl moq_net::transport::Stats {
-		self.inner.stats()
+	fn metrics(&self) -> impl moq_net::transport::Metrics {
+		self.inner.metrics()
 	}
 }

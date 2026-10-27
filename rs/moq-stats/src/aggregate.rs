@@ -15,7 +15,7 @@ use moq_clock::Instant;
 use moq_net::kio::{self, Pending, Waiter};
 use moq_net::stats::{Presence, Traffic};
 use moq_net::track::Subscribing;
-use moq_net::{AsPath, Epoch, PathOwned, broadcast, origin};
+use moq_net::{Epoch, Path, broadcast, origin};
 
 use crate::{
 	Encoding, Group, GroupFrame, Prefix, PrefixFrame, PresenceFrame, Result, Totals, TotalsFrame, Usage, group_track,
@@ -34,7 +34,7 @@ use crate::{
 pub struct Config {
 	/// Top-level path stats are published under (default `.stats`). Must match
 	/// the producer's prefix.
-	pub prefix: PathOwned,
+	pub prefix: Path,
 	/// Which encoding of the totals, presence, and prefix tracks to read.
 	/// [`Encoding::Compressed`] carries the same data for a fraction of the
 	/// bytes. Defaults to [`Encoding::Plain`]. A group's track compresses
@@ -56,7 +56,7 @@ impl Config {
 	}
 
 	/// Override the top-level prefix (default `.stats`). Must match the producer.
-	pub fn with_prefix(mut self, prefix: impl Into<PathOwned>) -> Self {
+	pub fn with_prefix(mut self, prefix: impl Into<Path>) -> Self {
 		self.prefix = prefix.into();
 		self
 	}
@@ -77,7 +77,7 @@ impl Config {
 impl Default for Config {
 	fn default() -> Self {
 		Self {
-			prefix: moq_net::Path::new(".stats").expect("a literal path"),
+			prefix: Path::from_static(".stats"),
 			encoding: Encoding::Plain,
 			// Well above reconnect times; a longer grace only costs memory.
 			grace: Duration::from_secs(600),
@@ -149,7 +149,7 @@ impl Consumer {
 
 	/// A merged reader over group `group`'s track on every node broadcast that
 	/// lists it; see [`Self::totals`].
-	pub fn group(&self, group: impl AsPath) -> GroupConsumer {
+	pub fn group(&self, group: impl Into<Path>) -> GroupConsumer {
 		GroupConsumer {
 			inner: self.merged(group_track(group), Encoding::Plain),
 		}
@@ -157,7 +157,7 @@ impl Consumer {
 
 	/// A merged reader over `label`'s presence track, holding it on every
 	/// node broadcast; see [`Self::totals`].
-	pub fn presence(&self, label: impl AsPath) -> PresenceConsumer {
+	pub fn presence(&self, label: impl Into<Path>) -> PresenceConsumer {
 		PresenceConsumer {
 			inner: self.merged(presence_track(label, self.config.encoding), self.config.encoding),
 		}
@@ -165,7 +165,7 @@ impl Consumer {
 
 	/// A merged reader over broadcast prefix `path`'s track, holding it on
 	/// every node broadcast; see [`Self::totals`].
-	pub fn prefix(&self, path: impl AsPath) -> PrefixConsumer {
+	pub fn prefix(&self, path: impl Into<Path>) -> PrefixConsumer {
 		PrefixConsumer {
 			inner: self.merged(prefix_track(path, self.config.encoding), self.config.encoding),
 		}
@@ -740,7 +740,7 @@ struct Node<S: Shape> {
 	offered: bool,
 	/// The announced path, relative to the announce cursor: what a re-resolve
 	/// after the reader ends requests again.
-	path: PathOwned,
+	path: Path,
 	/// The publisher instance every initial and retry resolution must serve.
 	epoch: Option<Epoch>,
 	/// The last known publisher identity, retained while route metadata vanishes.
@@ -789,15 +789,15 @@ struct Merged<S: Shape> {
 	/// Resolves announced node paths into broadcasts.
 	origin: origin::Consumer,
 	announce: moq_net::announce::Consumer,
-	prefix: PathOwned,
+	prefix: Path,
 	/// Track name subscribed on each node broadcast.
 	name: String,
 	config: moq_json::snapshot::consumer::Config,
 	/// One entry per live or recently departed node broadcast, keyed by
 	/// absolute announced path and route epoch, so each epoch is its own entry.
-	nodes: HashMap<(PathOwned, Option<Epoch>), Node<S>>,
+	nodes: HashMap<(Path, Option<Epoch>), Node<S>>,
 	/// The immediately outgoing identity, including while it remains in grace.
-	last_announced: HashMap<PathOwned, Option<Epoch>>,
+	last_announced: HashMap<Path, Option<Epoch>>,
 	/// How long a departed node waits before folding into `retired`.
 	grace: Duration,
 	/// The summed last frames of every node whose grace elapsed.
@@ -845,8 +845,10 @@ impl<S: Shape> Merged<S> {
 				// new one starts, so its reader resolves afresh.
 				Poll::Ready(Some(moq_net::announce::Event::Restart(update))) => {
 					let mut ended = update.clone();
-					let absolute = self.announce.absolute(&update.prefix).to_owned();
-					ended.route.epoch = self.last_announced.get(&absolute).cloned().flatten();
+					// An announced prefix is a path beneath the root, so rooting it fits.
+					let absolute = self.announce.absolute(&update.prefix).ok();
+					ended.route.epoch =
+						absolute.and_then(|absolute| self.last_announced.get(&absolute).cloned().flatten());
 					changed |= self.apply_announce(ended, false);
 					changed |= self.apply_announce(update, true);
 				}
@@ -895,7 +897,10 @@ impl<S: Shape> Merged<S> {
 	/// leaving, does).
 	fn apply_announce(&mut self, update: moq_net::announce::Announce, active: bool) -> bool {
 		let path = update.prefix;
-		let absolute = self.announce.absolute(&path).to_owned();
+		// An announced prefix is a path beneath the root, so rooting it fits.
+		let Ok(absolute) = self.announce.absolute(&path) else {
+			return false;
+		};
 
 		// Only fold node-category routes; skip sibling categories a producer
 		// may publish under the same prefix. A route names a prefix, and node
@@ -1159,7 +1164,7 @@ fn advance<S: Shape>(
 }
 
 /// Start resolving `path` (relative to the announce cursor) into a broadcast.
-fn resolve<F>(origin: &origin::Consumer, path: &PathOwned, epoch: Option<Epoch>) -> Reader<F> {
+fn resolve<F>(origin: &origin::Consumer, path: &Path, epoch: Option<Epoch>) -> Reader<F> {
 	let pending = origin.request_broadcast(path, epoch);
 	let queued = pending.is_queued();
 	Reader::Resolving { pending, queued }
@@ -1197,7 +1202,7 @@ mod tests {
 
 	use std::time::Duration;
 
-	use moq_net::{PathOwned, Timestamp, announce, broadcast, origin, track};
+	use moq_net::{Path, Timestamp, announce, broadcast, origin, track};
 
 	use moq_net::stats::Tier;
 
@@ -1227,7 +1232,7 @@ mod tests {
 
 	fn traffic(agg: &Consumer) -> TrafficConsumer {
 		TrafficConsumer {
-			inner: agg.group(moq_net::Path::new("acme").unwrap()).inner,
+			inner: agg.group(moq_net::Path::from_static("acme")).inner,
 		}
 	}
 
@@ -1250,7 +1255,7 @@ mod tests {
 
 	fn sessions(agg: &Consumer) -> SessionsConsumer {
 		SessionsConsumer {
-			inner: agg.group(moq_net::Path::new("acme").unwrap()),
+			inner: agg.group(moq_net::Path::from_static("acme")),
 		}
 	}
 
@@ -1287,7 +1292,7 @@ mod tests {
 		Producer::new(
 			produce::Config::new()
 				.with_origin(origin.clone())
-				.with_node(PathOwned::from(moq_net::Path::try_from(node.to_string()).unwrap()))
+				.with_node(Path::try_from(node.to_string()).unwrap())
 				.with_depth(1),
 		)
 	}
@@ -1315,18 +1320,13 @@ mod tests {
 		let egress = feed_origin.consume().with_stats(ctx.clone());
 
 		let mut announced = egress.announced();
-		let source = feed_origin
-			.create_broadcast(moq_net::Path::new(path).unwrap())
-			.expect("create_broadcast");
+		let source = feed_origin.create_broadcast(path).expect("create_broadcast");
 		source.announce(origin::Route::default()).expect("announce");
 		let track = source.create_track("video", timed()).expect("create_track");
 
 		let (_, active) = next_update(&mut announced).await.expect("announce");
 		assert!(active);
-		let consumer = egress
-			.request_broadcast(moq_net::Path::new(path).unwrap(), None)
-			.await
-			.expect("resolve");
+		let consumer = egress.request_broadcast(path, None).await.expect("resolve");
 		let mut sub = consumer.track("video").unwrap().subscribe(None).await.unwrap();
 
 		let mut group = track.append_group().unwrap();
@@ -1394,9 +1394,7 @@ mod tests {
 	impl NodeBroadcast {
 		fn new(origin: &origin::Producer, group: &str, node: &str) -> Self {
 			let path = format!(".stats/node/{node}");
-			let source = origin
-				.create_broadcast(moq_net::Path::new(path.as_str()).unwrap())
-				.expect("create broadcast");
+			let source = origin.create_broadcast(path.as_str()).expect("create broadcast");
 			source.announce(origin::Route::default()).expect("announce");
 			let track = source
 				.create_track(group_track(moq_net::Path::new(group).unwrap()), timed())
@@ -1592,7 +1590,7 @@ mod tests {
 	#[test]
 	fn outgoing_epoch_metadata_migrates_without_choosing_a_grace_entry() {
 		let origin = produce_origin();
-		let path = PathOwned::from(moq_net::Path::new(".stats/node/a").unwrap());
+		let path = Path::from_static(".stats/node/a");
 		let a: Epoch = "01900000-0000-7000-8000-000000000001".parse().unwrap();
 		let b: Epoch = "01900000-0000-7000-8000-000000000002".parse().unwrap();
 		let c: Epoch = "01900000-0000-7000-8000-000000000003".parse().unwrap();
@@ -1714,7 +1712,7 @@ mod tests {
 			.announce(origin::Route::default().with_epoch(epoch_a.clone()))
 			.unwrap();
 		old.publish("acme/room", 100);
-		let name = group_track(moq_net::Path::new("acme").unwrap());
+		let name = group_track(moq_net::Path::from_static("acme"));
 		let mut merged = Merged::<Grouped>::new(origin.consume(), &Config::new(), name.clone(), Encoding::Plain);
 		let initial = futures::executor::block_on(kio::wait(|waiter| {
 			driver.poll(now, waiter).unwrap();
@@ -1733,7 +1731,7 @@ mod tests {
 			.unwrap();
 			assert_eq!(unversioned[""].paths["acme/room"].publisher.bytes, 100);
 			assert!(matches!(
-				merged.nodes[&(PathOwned::from(moq_net::Path::new(".stats/node/a").unwrap()), None)].reader,
+				merged.nodes[&(Path::from_static(".stats/node/a"), None)].reader,
 				Reader::Active(_)
 			));
 		}
@@ -1748,9 +1746,7 @@ mod tests {
 					.announce(origin::Route::default().with_epoch(epoch_b.clone()))
 					.unwrap();
 				new.publish("acme/room", 30);
-				let pending = origin
-					.consume()
-					.request_broadcast(moq_net::Path::new(".stats/node/a").unwrap(), None);
+				let pending = origin.consume().request_broadcast(".stats/node/a", None);
 				let front = futures::executor::block_on(kio::wait(|waiter| {
 					driver.poll(now, waiter).unwrap();
 					pending.poll_ok(waiter)
@@ -1775,10 +1771,7 @@ mod tests {
 				(new, front, warm, driver)
 			});
 			ready.wait();
-			let key = (
-				PathOwned::from(moq_net::Path::new(".stats/node/a").unwrap()),
-				(!drop_epoch).then_some(epoch_a),
-			);
+			let key = (Path::from_static(".stats/node/a"), (!drop_epoch).then_some(epoch_a));
 			let node = merged.nodes.get_mut(&key).unwrap();
 			advance(node, &merged.origin, &merged.config, &name, &Waiter::noop());
 			let paths = node.shape.paths.last.as_ref().unwrap();
@@ -2071,11 +2064,11 @@ mod tests {
 		let _sa = node_a
 			.registry()
 			.tier(Tier::default())
-			.session(moq_net::Path::new("acme").unwrap());
+			.session(moq_net::Path::from_static("acme"));
 		let _sb = node_b
 			.registry()
 			.tier(Tier::default())
-			.session(moq_net::Path::new("acme").unwrap());
+			.session(moq_net::Path::from_static("acme"));
 		drive_tick().await;
 
 		let agg = Consumer::new(origin.consume(), Config::new());
@@ -2104,11 +2097,11 @@ mod tests {
 		let _sa = node_a
 			.registry()
 			.tier(Tier::default())
-			.session(moq_net::Path::new("acme").unwrap());
+			.session(moq_net::Path::from_static("acme"));
 		let sb = node_b
 			.registry()
 			.tier(Tier::default())
-			.session(moq_net::Path::new("acme").unwrap());
+			.session(moq_net::Path::from_static("acme"));
 		drive_tick().await;
 
 		let agg = Consumer::new(origin.consume(), Config::new());
@@ -2198,17 +2191,17 @@ mod tests {
 		let node = Producer::new(
 			produce::Config::new()
 				.with_origin(origin.clone())
-				.with_node(PathOwned::from(moq_net::Path::new("a").unwrap()))
+				.with_node(Path::from_static("a"))
 				.with_depth(1)
 				.with_linger(Duration::ZERO),
 		);
 		let agg = Consumer::new(origin.consume(), Config::new());
-		let mut group = agg.group(moq_net::Path::new("acme").unwrap());
+		let mut group = agg.group(moq_net::Path::from_static("acme"));
 
 		let session = node
 			.registry()
 			.tier(Tier::default())
-			.session(moq_net::Path::new("acme/live").unwrap());
+			.session(moq_net::Path::from_static("acme/live"));
 		drive_tick().await;
 		let mut started = 0;
 		let mut read_until = async |want: u64, active: u64| loop {
@@ -2230,7 +2223,7 @@ mod tests {
 		let _session = node
 			.registry()
 			.tier(Tier::default())
-			.session(moq_net::Path::new("acme/live").unwrap());
+			.session(moq_net::Path::from_static("acme/live"));
 		drive_tick().await;
 		read_until(2, 1).await;
 	}
@@ -2246,7 +2239,7 @@ mod tests {
 	impl TotalsNode {
 		fn new(origin: &origin::Producer, node: &str) -> Self {
 			let source = origin
-				.create_broadcast(moq_net::Path::new(format!(".stats/node/{node}").as_str()).unwrap())
+				.create_broadcast(format!(".stats/node/{node}").as_str())
 				.expect("create broadcast");
 			source.announce(origin::Route::default()).expect("announce");
 			let track = source
@@ -2298,9 +2291,9 @@ mod tests {
 
 	/// A node announced at `.stats/node/a` with no epoch, ready to observe
 	/// frames by hand.
-	fn hand_merged<V: Mergeable>() -> (Merged<Keyed<V>>, (PathOwned, Option<Epoch>)) {
+	fn hand_merged<V: Mergeable>() -> (Merged<Keyed<V>>, (Path, Option<Epoch>)) {
 		let origin = produce_origin();
-		let path = PathOwned::from(moq_net::Path::new(".stats/node/a").unwrap());
+		let path = Path::from_static(".stats/node/a");
 		let mut merged = Merged::<Keyed<V>>::new(origin.consume(), &Config::new(), "p".into(), Encoding::Plain);
 		merged.apply_announce(
 			moq_net::announce::Announce {
@@ -2322,7 +2315,7 @@ mod tests {
 			value.sessions_failed.transport = failed;
 			value
 		};
-		let path = PathOwned::from(moq_net::Path::new(".stats/node/b").unwrap());
+		let path = Path::from_static(".stats/node/b");
 		merged.apply_announce(
 			moq_net::announce::Announce {
 				prefix: path.clone(),
@@ -2648,7 +2641,7 @@ mod tests {
 		drive_tick().await;
 
 		let agg = Consumer::new(origin.consume(), Config::new());
-		let mut presence = agg.presence(moq_net::Path::new("acme").unwrap());
+		let mut presence = agg.presence(moq_net::Path::from_static("acme"));
 		let grew = |before: &Presence, after: &Presence| !after.regressed(before);
 		read_until(&mut presence.inner, grew, |frame| {
 			frame.get("").is_some_and(|p| p.active() == 1)
@@ -2685,7 +2678,7 @@ mod tests {
 		drive_tick().await;
 
 		let agg = Consumer::new(origin.consume(), Config::new());
-		let mut prefix = agg.prefix(moq_net::Path::new("acme").unwrap());
+		let mut prefix = agg.prefix(moq_net::Path::from_static("acme"));
 		let grew = |before: &Prefix, after: &Prefix| !after.regressed(before);
 		let live = |count| {
 			move |frame: &PrefixFrame| {

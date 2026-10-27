@@ -2,7 +2,6 @@
 
 //! A peer granting one uni stream at a time still receives every group, on each protocol.
 
-use moq_net::Path;
 use std::time::Duration;
 
 use moq_net::{Hop, Timestamp, Version, origin, track};
@@ -21,7 +20,7 @@ async fn one_stream_credit_serves_every_backlogged_group() {
 		let version: Version = version.parse().unwrap();
 		let publisher = origin(1);
 		let viewer = origin(2);
-		let broadcast = publisher.create_broadcast(Path::new("live").unwrap()).unwrap();
+		let broadcast = publisher.create_broadcast("live").unwrap();
 		let info = track::Info::default().with_timescale(moq_net::Timescale::MILLI);
 		let tracks: Vec<_> = (0..2)
 			.map(|i| broadcast.create_track(format!("{i}"), info.clone()).unwrap())
@@ -35,11 +34,7 @@ async fn one_stream_credit_serves_every_backlogged_group() {
 		options.client_subscribe = Some(viewer.clone());
 		let _pair = connect_mock(options).await;
 
-		let remote = viewer
-			.consume()
-			.routed_broadcast(Path::new("live").unwrap())
-			.await
-			.unwrap();
+		let remote = viewer.consume().routed_broadcast("live").await.unwrap();
 		let prefs = track::Subscription::default().with_max_delay(Duration::from_secs(30));
 		let mut subscribers = Vec::new();
 		for i in 0..tracks.len() {

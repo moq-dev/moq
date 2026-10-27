@@ -209,9 +209,7 @@ impl Server {
 		// source resolves a rendition's sibling `broadcast` reference through the same origin.
 		// Once the origin has synced, a path with no route is not announced, so answer now
 		// rather than wait out a publisher that has gone.
-		// A name with an empty segment names no broadcast.
-		let path = moq_net::Path::new(name).ok()?;
-		let mut routes = self.inner.origin.follow(&path).ok()?;
+		let mut routes = self.inner.origin.follow(name).ok()?;
 		let routed = kio::wait(|waiter| match routes.poll_next(waiter) {
 			Poll::Ready(Some(moq_net::announce::Event::End(_)) | None) => Poll::Ready(false),
 			Poll::Ready(Some(_)) => Poll::Ready(true),
@@ -221,7 +219,7 @@ impl Server {
 			return None;
 		}
 
-		let mut instances = follow::Instances::new(&self.inner.origin, &path, None)
+		let mut instances = follow::Instances::new(&self.inner.origin, name, None)
 			.map_err(|err| tracing::warn!(%err, %name, "failed to follow broadcast"))
 			.ok()?;
 		// A covering dynamic route may never answer, so the resolution is bounded too.
@@ -310,7 +308,6 @@ async fn run_follow(inner: Weak<Inner>, name: String, followed: Weak<Followed>, 
 
 #[cfg(test)]
 mod tests {
-	use moq_net::Path;
 	/// Build an origin producer, spawning its driver on the ambient runtime.
 	fn produce_origin() -> moq_net::origin::Producer {
 		let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
@@ -422,9 +419,7 @@ mod tests {
 
 	async fn closed_broadcaster() -> Arc<Broadcaster> {
 		let origin = produce_origin();
-		let producer = origin
-			.create_broadcast(Path::new("gone").unwrap())
-			.expect("publish allowed");
+		let producer = origin.create_broadcast("gone").expect("publish allowed");
 		producer.announce(Default::default()).expect("publish allowed");
 		settle().await;
 		let broadcaster = Broadcaster::new(crate::resolved(&origin, "gone").await, Config::default());
@@ -446,9 +441,7 @@ mod tests {
 			.lock()
 			.unwrap()
 			.insert("live".to_string(), Arc::new(Followed::new(stale.clone())));
-		let _producer = origin
-			.create_broadcast(Path::new("live").unwrap())
-			.expect("publish allowed");
+		let _producer = origin.create_broadcast("live").expect("publish allowed");
 		_producer.announce(Default::default()).expect("publish allowed");
 		settle().await;
 
@@ -464,9 +457,7 @@ mod tests {
 	#[tokio::test]
 	async fn dropping_the_server_releases_its_broadcasters() {
 		let origin = produce_origin();
-		let producer = origin
-			.create_broadcast(Path::new("live").unwrap())
-			.expect("publish allowed");
+		let producer = origin.create_broadcast("live").expect("publish allowed");
 		producer.announce(Default::default()).expect("publish allowed");
 		settle().await;
 
@@ -510,16 +501,12 @@ mod tests {
 		let (old_epoch, new_epoch) = (moq_net::Epoch::mint(), moq_net::Epoch::mint());
 		let route = |epoch: &moq_net::Epoch| moq_net::origin::Route::default().with_epoch(epoch.clone());
 
-		let old = origin
-			.publish(Path::new("live").unwrap(), route(&old_epoch))
-			.expect("publish allowed");
+		let old = origin.publish("live", route(&old_epoch)).expect("publish allowed");
 		settle().await;
 		let first = server.broadcaster("live").await.expect("broadcast announced");
 		assert_eq!(first.instance().as_ref(), old_epoch.as_str());
 
-		let new = origin
-			.publish(Path::new("live").unwrap(), route(&new_epoch))
-			.expect("publish allowed");
+		let new = origin.publish("live", route(&new_epoch)).expect("publish allowed");
 		eventually(async || {
 			let current = server.broadcaster("live").await.expect("broadcast announced");
 			current.instance().as_ref() == new_epoch.as_str()
@@ -547,7 +534,7 @@ mod tests {
 		let origin = produce_origin();
 		let server = Server::new(origin.consume(), Config::default());
 		let _old = origin
-			.publish(Path::new("live").unwrap(), moq_net::origin::Route::default())
+			.publish("live", moq_net::origin::Route::default())
 			.expect("publish allowed");
 		settle().await;
 		let open = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());

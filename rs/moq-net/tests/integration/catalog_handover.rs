@@ -12,7 +12,6 @@
 //! no catalog.
 
 use crate::support;
-use moq_net::Path;
 
 use std::time::Duration;
 
@@ -105,7 +104,7 @@ impl Topology {
 		let relay_b = produce_origin(3);
 		let subscriber = produce_origin(4);
 
-		let broadcast = publisher.create_broadcast(Path::new("live").unwrap()).unwrap();
+		let broadcast = publisher.create_broadcast("live").unwrap();
 		let track = broadcast.create_track("catalog.json", timed()).unwrap();
 		broadcast
 			.announce(origin::Route::default().with_epoch(moq_net::Epoch::mint()))
@@ -115,7 +114,7 @@ impl Topology {
 		let p_to_a = link(version, &publisher, &relay_a, None).await;
 		let p_to_b = link(version, &publisher, &relay_b, None).await;
 		let a_to_r = link(version, &relay_a, &subscriber, None).await;
-		subscriber.consume().routed(Path::new("live").unwrap()).await.unwrap();
+		subscriber.consume().routed("live").await.unwrap();
 
 		let mut topology = Self {
 			version,
@@ -168,15 +167,10 @@ impl Topology {
 
 	/// A new reader on `R`: a fresh broadcast request and a floorless subscription.
 	async fn reader(&self) -> Reader {
-		let remote = moq_clock::timeout(
-			READ_TIMEOUT,
-			self.subscriber
-				.consume()
-				.request_broadcast(Path::new("live").unwrap(), None),
-		)
-		.await
-		.expect("request hung")
-		.expect("request refused");
+		let remote = moq_clock::timeout(READ_TIMEOUT, self.subscriber.consume().request_broadcast("live", None))
+			.await
+			.expect("request hung")
+			.expect("request refused");
 		let sub = moq_clock::timeout(READ_TIMEOUT, remote.track("catalog.json").unwrap().subscribe(None))
 			.await
 			.expect("subscribe hung")
@@ -400,7 +394,7 @@ async fn fetch_after_leave(version: &str, pause: Duration) {
 	let remote = topology
 		.subscriber
 		.consume()
-		.request_broadcast(Path::new("live").unwrap(), None)
+		.request_broadcast("live", None)
 		.await
 		.unwrap();
 	let fetch = remote.track("catalog.json").unwrap().fetch_group(0, None);

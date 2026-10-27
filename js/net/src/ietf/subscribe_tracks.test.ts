@@ -151,7 +151,7 @@ for (const version of drafts) {
 		const track = broadcast.createTrack("video");
 		const group = track.appendGroup();
 		group.writeFrame({ payload: new Uint8Array([1]) });
-		group.close();
+		group.finish();
 		const listing = await fx.list();
 		await ok(listing, version);
 		const { stream, publish } = await fx.offered();
@@ -199,6 +199,7 @@ for (const version of drafts) {
 			const listing = await fx.list();
 			await ok(listing, version);
 			const { stream } = await fx.offered();
+			if (finished) track.finish();
 			if (finished) track.close();
 			broadcast.removeTrack("video");
 			expect(await stream.reader.u53()).toBe(PublishDone.id);
@@ -221,6 +222,7 @@ for (const version of drafts) {
 		const listing = await fx.list();
 		await ok(listing, version);
 		const { stream } = await fx.offered(false);
+		track.finish();
 		track.close();
 		broadcast.removeTrack("video");
 		await clock.advance(Nano.zero);
@@ -257,6 +259,7 @@ for (const version of drafts) {
 		const listing = await fx.list();
 		await ok(listing, version);
 		const { stream } = await fx.offered(false);
+		track.finish();
 		track.close();
 		broadcast.removeTrack("video");
 		await clock.advance(Nano.zero);
@@ -292,6 +295,7 @@ for (const version of drafts) {
 					published.set(publish.trackName, stream);
 				}
 				await clock.advance(Nano.zero);
+				video.finish();
 				video.close();
 				if (remove) broadcast.removeTrack("video");
 				broadcast.close();
@@ -504,7 +508,7 @@ test("session shutdown releases listing tasks while the local origin stays open"
 });
 
 for (const version of [Version.DRAFT_22]) {
-	test(`a paused filter applies on resume, but an active pause/filter update is refused atomically (${version})`, async () => {
+	test(`a filter applied while paused or while pausing is preserved on resume (${version})`, async () => {
 		const fx = fixture(version);
 		const broadcastPublication = fx.origin.createBroadcast(Path.from("room/live"));
 		const broadcast = broadcastPublication.broadcast;
@@ -513,7 +517,7 @@ for (const version of [Version.DRAFT_22]) {
 		for (let i = 0; i < 2; i++) {
 			const group = track.appendGroup();
 			group.writeFrame({ payload: new Uint8Array([i]) });
-			group.close();
+			group.finish();
 		}
 		await ok(await fx.list(), version);
 		const { stream } = await fx.offered();
@@ -532,7 +536,7 @@ for (const version of [Version.DRAFT_22]) {
 		await update(stream, version, 4n, true);
 		const fresh = track.appendGroup();
 		fresh.writeFrame({ payload: new Uint8Array([2]) });
-		fresh.close();
+		fresh.finish();
 		const uni = fx.pair.client.incomingUnidirectionalStreams.getReader();
 		const next = await uni.read();
 		if (!next.value) throw new Error("missing filtered group");
@@ -540,14 +544,19 @@ for (const version of [Version.DRAFT_22]) {
 		expect((await Group.decode(reader, version)).groupId).toBe(2);
 		await reader.readAll();
 
-		// The bundled pause never receives REQUEST_OK or leaves a paused publication.
+		// An active pause applies the same filter atomically before its acknowledgement.
 		await filter(6n, 3n);
-		expect(await stream.reader.u53()).toBe(RequestError.id);
-		expect((await RequestError.decode(stream.reader, version)).errorCode).toBe(0x03);
-		expect(await stream.reader.u53()).toBe(PublishDone.id);
-		const done = await PublishDone.decode(stream.reader, version);
-		expect(done.statusCode).toBe(PublishDoneStatus.UPDATE_FAILED);
-		expect(done.streamCount).toBe(1n);
+		await ok(stream, version);
+		while (track.subscription.peek() !== undefined) await track.subscription.changed();
+		const paused = track.appendGroup();
+		paused.writeFrame({ payload: new Uint8Array([3]) });
+		paused.finish();
+		await update(stream, version, 8n, true);
+		const resumed = (await uni.read()).value;
+		if (!resumed) throw new Error("missing group selected while paused");
+		const resumedReader = new Reader(resumed, undefined, version);
+		expect((await Group.decode(resumedReader, version)).groupId).toBe(3);
+		await resumedReader.readAll();
 		uni.releaseLock();
 	});
 }

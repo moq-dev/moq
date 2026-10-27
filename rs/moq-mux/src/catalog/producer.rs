@@ -1459,7 +1459,6 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 
 #[cfg(test)]
 mod test {
-	use moq_net::Path;
 	use std::collections::BTreeMap;
 
 	use std::str::FromStr;
@@ -1476,17 +1475,13 @@ mod test {
 			let (origin, driver) = moq_net::origin::Producer::new(Default::default());
 			let driver = tokio::spawn(moq_net::time::run(driver));
 			let mut broadcast = match path {
-				Some(path) => origin
-					.create_broadcast(moq_net::Path::new(path).unwrap())
-					.unwrap()
-					.broadcast()
-					.clone(),
+				Some(path) => origin.create_broadcast(path).unwrap().broadcast().clone(),
 				None => moq_net::broadcast::Info::new().produce(),
 			};
 			let mut producer = Producer::new(&mut broadcast, Config::default()).unwrap();
 			let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
 			config.container = Container::Loc;
-			config.broadcast = Some("./left".into());
+			config.broadcast = Some(moq_net::path::Relative::new("./left").unwrap());
 			producer
 				.modify()
 				.unwrap()
@@ -1587,7 +1582,7 @@ mod test {
 			"video.timeline.z",
 		] {
 			let track = consumer.track(name).expect("track");
-			let info = track.query().await.expect("info");
+			let info = track.info().await.expect("info");
 			assert_eq!(info.priority, PRIORITY.catalog, "{name} should rank with the catalog");
 		}
 	}
@@ -1647,7 +1642,7 @@ mod test {
 
 	#[test]
 	fn cross_broadcast_renditions_round_trip_through_msf() {
-		let base = moq_net::Path::new("room/catalog").unwrap();
+		let base = moq_net::Path::from_static("room/catalog");
 		let catalog = hang::Catalog::<()>::from_str(r#"{
 			"video": {"renditions": {"view": {"broadcast": "./left", "track": "video", "codec": "vp8", "container": {"kind": "loc"}}}},
 			"audio": {"renditions": {"sound": {"broadcast": "./right", "track": "audio", "codec": "opus", "sampleRate": 48000, "numberOfChannels": 2, "container": {"kind": "loc"}}}},
@@ -1659,25 +1654,25 @@ mod test {
 		let restored = crate::catalog::msf::from_msf(&msf, &base).unwrap();
 		assert_eq!(
 			base.try_resolve(restored.video.renditions["video"].broadcast.as_ref().unwrap()),
-			Some(Path::new("room/left").unwrap())
+			Some(moq_net::Path::from_static("room/left"))
 		);
 		assert_eq!(
 			base.try_resolve(restored.audio.renditions["audio"].broadcast.as_ref().unwrap()),
-			Some(Path::new("room/right").unwrap())
+			Some(moq_net::Path::from_static("room/right"))
 		);
 		assert_eq!(
 			base.try_resolve(restored.text.renditions["text"].broadcast.as_ref().unwrap()),
-			Some(Path::new("captions").unwrap())
+			Some(moq_net::Path::from_static("captions"))
 		);
 	}
 
 	#[test]
 	fn msf_refuses_unresolvable_broadcast_references() {
-		let base = moq_net::Path::new("room/catalog").unwrap();
+		let base = moq_net::Path::from_static("room/catalog");
 		for reference in ["../../left", "../../../left"] {
 			let mut catalog = hang::Catalog::<()>::default();
 			let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
-			config.broadcast = Some(reference.into());
+			config.broadcast = Some(moq_net::path::Relative::new(reference).unwrap());
 			catalog.video.renditions.insert("video".into(), config);
 			assert!(to_msf_media::<()>(&catalog, &base).tracks.is_empty());
 			assert!(to_msf_media::<()>(&catalog, &moq_net::Path::empty()).tracks.is_empty());
@@ -1688,12 +1683,12 @@ mod test {
 	/// reference to such a broadcast is refused rather than read from the catalog's broadcast.
 	#[test]
 	fn msf_refuses_references_readers_would_take_as_the_catalog() {
-		let base = moq_net::Path::new("room/catalog").unwrap();
+		let base = moq_net::Path::from_static("room/catalog");
 		for reference in ["../catalog", "./catalog/room/catalog"] {
 			let mut catalog = hang::Catalog::<()>::default();
 			let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
 			config.container = Container::Loc;
-			config.broadcast = Some(reference.into());
+			config.broadcast = Some(moq_net::path::Relative::new(reference).unwrap());
 			catalog.video.renditions.insert("video".into(), config);
 			assert!(to_msf_media::<()>(&catalog, &base).tracks.is_empty(), "{reference}");
 		}
@@ -1703,12 +1698,12 @@ mod test {
 	/// the later of two same-named tracks wins there.
 	#[test]
 	fn msf_names_are_unique_per_namespace_and_the_last_wins_a_hang_id() {
-		let base = moq_net::Path::new("room/catalog").unwrap();
+		let base = moq_net::Path::from_static("room/catalog");
 		let mut catalog = hang::Catalog::<()>::default();
 		for (id, broadcast) in [("left", "./left"), ("right", "./right")] {
 			let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
 			config.track = Some("video".into());
-			config.broadcast = Some(broadcast.into());
+			config.broadcast = Some(moq_net::path::Relative::new(broadcast).unwrap());
 			catalog.video.renditions.insert(id.into(), config);
 		}
 		let msf = to_msf_media::<()>(&catalog, &base);
@@ -1719,7 +1714,7 @@ mod test {
 		assert_eq!(restored.video.renditions.len(), 1);
 		assert_eq!(
 			base.try_resolve(restored.video.renditions["video"].broadcast.as_ref().unwrap()),
-			Some(Path::new("room/right").unwrap())
+			Some(moq_net::Path::from_static("room/right"))
 		);
 	}
 
@@ -2139,12 +2134,8 @@ mod test {
 		let wall = moq_clock::Wall::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS + 60_000);
 		let clock = crate::Clock::at(captured, wall).unwrap();
 		let (origin, _driver) = moq_net::origin::Producer::new(Default::default());
-		let front = origin
-			.create_broadcast(moq_net::Path::new("robot/front.hang").unwrap())
-			.unwrap();
-		let rear = origin
-			.create_broadcast(moq_net::Path::new("robot/rear.hang").unwrap())
-			.unwrap();
+		let front = origin.create_broadcast("robot/front.hang").unwrap();
+		let rear = origin.create_broadcast("robot/rear.hang").unwrap();
 		let catalogs = [
 			Producer::new(&mut front.broadcast().clone(), Config::default().with_clock(clock)).unwrap(),
 			Producer::new(&mut rear.broadcast().clone(), Config::default().with_clock(clock)).unwrap(),

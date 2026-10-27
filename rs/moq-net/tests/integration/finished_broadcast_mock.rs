@@ -15,7 +15,6 @@
 //! nothing when the broadcast ends.
 
 use crate::support;
-use moq_net::Path;
 
 use std::time::Duration;
 
@@ -40,7 +39,7 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 /// the subscriber read: the frame payloads and the error it ended with, if any.
 async fn round(finish_broadcast: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>) {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast(Path::new("bcast").unwrap()).unwrap();
+	let broadcast = publisher.create_broadcast("bcast").unwrap();
 	let track = broadcast.create_track("video", timed()).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
@@ -51,11 +50,11 @@ async fn round(finish_broadcast: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>)
 	let pair: MockPair = connect_mock(options).await;
 
 	let consumer = subscriber.consume();
-	moq_clock::timeout(TIMEOUT, consumer.routed(Path::new("bcast").unwrap()))
+	moq_clock::timeout(TIMEOUT, consumer.routed("bcast"))
 		.await
 		.expect("announce timeout")
 		.expect("routed");
-	let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast(Path::new("bcast").unwrap(), None))
+	let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");

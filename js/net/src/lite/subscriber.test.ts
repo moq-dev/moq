@@ -806,6 +806,31 @@ test("a violation on a very long path still ends the session", async () => {
 	expect(new TextEncoder().encode(info?.reason ?? "").byteLength).toBeLessThanOrEqual(1024);
 });
 
+test.each([Version.DRAFT_02, Version.DRAFT_06])(
+	"version %p refuses a suffix that only the interest prefix pushes past the path limit",
+	async (version) => {
+		const { subscriber, send, sessionEnded, settle } = announceHarness(version);
+		// Each half fits on the wire alone; the joined path is one byte over.
+		const half = Path.from("x".repeat(Path.MAX_BYTES / 2));
+		const announced = subscriber.announced(Path.Pattern.subtree(half));
+		await settle();
+
+		if (version === Version.DRAFT_02) {
+			await send((w) => new AnnounceInit([half]).encode(w, version));
+		} else {
+			await send((w) => new AnnounceOk(PEER, 0).encode(w, version));
+			const active: AnnounceBroadcast = { status: "active", suffix: half, hops: [PUBLISHER_A] };
+			await send((w) => encodeAnnounceBroadcast(w, active, version));
+		}
+
+		await expect(announced.next()).rejects.toThrow(`path exceeds ${Path.MAX_BYTES} bytes`);
+		expect((await sessionEnded())?.closeCode).toBe(SessionCode.ProtocolViolation);
+
+		announced.close();
+		subscriber.close();
+	},
+);
+
 test("a draft-04 duplicate start is a violation, not an update", async () => {
 	// Pre-lite-05 has no replacement idiom, so a second ANNOUNCE_START for a live path is
 	// the same violation lite-06 treats it as. Only lite-05, where the duplicate *is* the
@@ -2128,7 +2153,8 @@ test("a publisher FIN without SUBSCRIBE_END still violates an open subscription"
 });
 
 // A lite-07 publisher FINs a bounded subscription without SUBSCRIBE_END once it covered the range,
-// which ends the subscription cleanly rather than violating the protocol.
+// which ends the subscription cleanly rather than violating the protocol. Covering a range is
+// not ending the track, so no end is declared.
 test("a lite-07 publisher FIN ends a covered bounded subscription", async () => {
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened, closes } = fakeSession();
@@ -2154,6 +2180,7 @@ test("a lite-07 publisher FIN ends a covered bounded subscription", async () => 
 		for (const chunk of chunks) stream.inbound.enqueue(chunk);
 		stream.inbound.close();
 		expect(await track.closed).toBeNull();
+		await expect(track.finished()).rejects.toThrow("track closed before its end was known");
 		await drainReactions();
 		expect(closes).toEqual([]);
 	} finally {

@@ -856,7 +856,7 @@ mod tests {
 				for _ in 0..2 {
 					let epoch = moq_net::Epoch::mint();
 					let route = moq_net::origin::Route::default().with_epoch(epoch.clone());
-					let broadcast = origin.publish(moq_net::Path::new("camera").unwrap(), route).unwrap();
+					let broadcast = origin.publish("camera", route).unwrap();
 					let mut catalog =
 						moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default())
 							.unwrap();

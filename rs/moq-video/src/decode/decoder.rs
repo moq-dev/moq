@@ -377,7 +377,7 @@ mod tests {
 		allow(dead_code, unused_imports, reason = "only the `openh264` feature uses it")
 	)]
 
-	use moq_net::{Path, Timestamp};
+	use moq_net::Timestamp;
 
 	use super::backend::{self, Codec, probe};
 	use crate::encode::{Config as EncodeConfig, Encoder, Kind as EncodeKind};
@@ -611,9 +611,7 @@ mod tests {
 
 		let (origin, driver) = moq_net::origin::Producer::new(Default::default());
 		tokio::spawn(moq_net::time::run(driver));
-		let source = origin
-			.publish(moq_net::Path::new("test").unwrap(), Default::default())
-			.unwrap();
+		let source = origin.publish("test", Default::default()).unwrap();
 		let mut source_catalog =
 			moq_mux::catalog::Producer::new(&mut source.broadcast().clone(), moq_mux::catalog::Config::default())
 				.unwrap();
@@ -656,11 +654,7 @@ mod tests {
 			.unwrap();
 		producer.finish().unwrap();
 
-		let broadcast = origin
-			.consume()
-			.request_broadcast(Path::new("test").unwrap(), None)
-			.await
-			.unwrap();
+		let broadcast = origin.consume().request_broadcast("test", None).await.unwrap();
 		let catalog = moq_mux::catalog::Consumer::<()>::new(&broadcast, moq_mux::catalog::CatalogFormat::Hang)
 			.await
 			.unwrap();

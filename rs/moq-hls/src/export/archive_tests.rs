@@ -316,7 +316,7 @@ impl Replay {
 	async fn open(store: &Store<Counting>, cache: u64) -> Self {
 		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
 		let driver = tokio::spawn(moq_net::time::run(driver));
-		let broadcast = origin.create_broadcast(moq_net::Path::new("rec").unwrap()).unwrap();
+		let broadcast = origin.create_broadcast("rec").unwrap();
 		let serving = moq_archive::consumer::Config::default().with_cache(cache);
 		let consumer = moq_archive::Consumer::open(store.clone(), broadcast.broadcast().clone(), serving)
 			.await

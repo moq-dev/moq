@@ -2,7 +2,6 @@
 
 //! IETF relays forward their most tolerant subscriber's negotiated age budget.
 
-use moq_net::Path;
 use std::time::Duration;
 
 use moq_net::{Hop, Timestamp, Version, origin, track};
@@ -40,7 +39,7 @@ async fn relay_forwards_the_most_tolerant_subscriber_max_age() {
 		let viewer = origin(3);
 		let _upstream = peer(version, &publisher, &relay).await;
 		let _downstream = peer(version, &relay, &viewer).await;
-		let broadcast = publisher.create_broadcast(Path::new("live").unwrap()).unwrap();
+		let broadcast = publisher.create_broadcast("live").unwrap();
 		let mut source = broadcast
 			.create_track(
 				"catalog",
@@ -52,11 +51,8 @@ async fn relay_forwards_the_most_tolerant_subscriber_max_age() {
 		group.finish().unwrap();
 		broadcast.announce(Default::default()).unwrap();
 		let consumer = viewer.consume();
-		consumer.routed(Path::new("live").unwrap()).await.unwrap();
-		let remote = consumer
-			.request_broadcast(Path::new("live").unwrap(), None)
-			.await
-			.unwrap();
+		consumer.routed("live").await.unwrap();
+		let remote = consumer.request_broadcast("live", None).await.unwrap();
 		let cache = remote.track("catalog").unwrap();
 		let prefs = |millis| track::Subscription::default().with_max_delay(Duration::from_millis(millis));
 		let mut short = cache.subscribe(prefs(250)).await.unwrap();

@@ -12,7 +12,6 @@
 //! including an outage that keeps it until exactly `expires`, on a clock only
 //! the test moves.
 
-use moq_net::Path;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -266,9 +265,7 @@ fn room_url(scheme: &str, port: u16) -> url::Url {
 /// round-trips. Returns both sessions so the caller can watch them close.
 async fn connect_and_round_trip(url: &url::Url) -> (moq_tokio::Connection, moq_tokio::Connection) {
 	let pub_origin = moq_tokio::origin::spawn();
-	let broadcast = pub_origin
-		.create_broadcast(Path::new("test").unwrap())
-		.expect("create broadcast");
+	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("create broadcast");
 	let track = broadcast.create_track("video", timed()).expect("create track");
 	let mut group = track.append_group().expect("append group");
@@ -311,7 +308,7 @@ async fn connect_and_round_trip(url: &url::Url) -> (moq_tokio::Connection, moq_t
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(active, "expected announce, got retraction");
 	let bc = sub_consumer
-		.request_broadcast(Path::new("test").unwrap(), None)
+		.request_broadcast("test", None)
 		.await
 		.expect("announced broadcast resolves");
 
@@ -597,7 +594,7 @@ async fn a_moved_tier_retags_the_live_session() {
 	let (port, relay) = spawn_relay_with(build_auth(script.spawn().await), cluster).await;
 	let url = room_url("tcp", port);
 
-	let moved = stats::Tier::new(Path::new("moved").unwrap());
+	let moved = stats::Tier::new(moq_net::Path::from_static("moved"));
 	let active = |tier: &stats::Tier| {
 		registry
 			.snapshot()
@@ -633,9 +630,7 @@ async fn a_moved_tier_retags_the_live_session() {
 
 	// A publisher whose track stays open across the move, and a subscriber to it.
 	let pub_origin = moq_tokio::origin::spawn();
-	let broadcast = pub_origin
-		.create_broadcast(Path::new("test").unwrap())
-		.expect("create broadcast");
+	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce broadcast");
 	let track = broadcast.create_track("video", timed()).expect("create track");
 	let pub_session = tokio::time::timeout(
@@ -671,7 +666,7 @@ async fn a_moved_tier_retags_the_live_session() {
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(announced, "expected announce, got retraction");
 	let bc = sub_consumer
-		.request_broadcast(Path::new("test").unwrap(), None)
+		.request_broadcast("test", None)
 		.await
 		.expect("announced broadcast resolves");
 	let mut track_sub = bc.track("video").unwrap().subscribe(None).await.expect("subscribe");
@@ -780,9 +775,7 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 		let pub_origin = moq_tokio::origin::spawn();
 		let mut tracks = Vec::new();
 		for path in ["alice/audio", "alice/video"] {
-			let broadcast = pub_origin
-				.create_broadcast(Path::new(path).unwrap())
-				.expect("create broadcast");
+			let broadcast = pub_origin.create_broadcast(path).expect("create broadcast");
 			let track = broadcast.create_track("media", timed()).expect("create track");
 			broadcast.announce(Default::default()).expect("announce broadcast");
 			tracks.push((broadcast, track));
@@ -815,7 +808,7 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 
 		let mut subs = Vec::new();
 		for path in ["alice/audio", "alice/video"] {
-			let broadcast = tokio::time::timeout(TIMEOUT, sub_consumer.routed_broadcast(Path::new(path).unwrap()))
+			let broadcast = tokio::time::timeout(TIMEOUT, sub_consumer.routed_broadcast(path))
 				.await
 				.expect("announcement timeout")
 				.expect("announced broadcast resolves");
@@ -878,13 +871,10 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 
 		// Undeafen: the path is announced again and a new subscription flows.
 		script.on_revalidate(Answer::Grant(grant(Duration::from_secs(3600))));
-		let broadcast = tokio::time::timeout(
-			TIMEOUT,
-			sub_consumer.routed_broadcast(Path::new("alice/audio").unwrap()),
-		)
-		.await
-		.expect("the undeafened path was never announced again")
-		.expect("announced broadcast resolves");
+		let broadcast = tokio::time::timeout(TIMEOUT, sub_consumer.routed_broadcast("alice/audio"))
+			.await
+			.expect("the undeafened path was never announced again")
+			.expect("announced broadcast resolves");
 		let mut audio = broadcast
 			.track("media")
 			.unwrap()
@@ -975,9 +965,7 @@ async fn http_routes_hold_a_lease() {
 
 	// A publisher whose group stays open, so a fetch of it keeps streaming.
 	let pub_origin = moq_tokio::origin::spawn();
-	let broadcast = pub_origin
-		.create_broadcast(Path::new("test").unwrap())
-		.expect("create broadcast");
+	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce");
 	let track = broadcast.create_track("video", timed()).expect("create track");
 	let mut group = track.append_group().expect("append group");
@@ -1326,7 +1314,7 @@ async fn mtls_route_source(mtls_peer: bool) -> moq_net::origin::Source {
 	config.tls.cert = Some(client_cert);
 	config.tls.key = Some(client_key);
 	let peer = moq_tokio::origin::spawn();
-	let _forwarded = peer.create_broadcast(Path::new("forwarded").unwrap()).expect("create");
+	let _forwarded = peer.create_broadcast("forwarded").expect("create");
 	_forwarded.announce(Default::default()).expect("announce");
 	let url: url::Url = format!("moql://127.0.0.1:{}/", addr.port()).parse().unwrap();
 	let _session = tokio::time::timeout(
@@ -1750,10 +1738,10 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 			config.init(Default::default()).unwrap().with_reconnect(false)
 		};
 		let origin = moq_tokio::origin::spawn();
-		let a = origin.create_broadcast(Path::new("a/cam").unwrap()).unwrap();
+		let a = origin.create_broadcast("a/cam").unwrap();
 		let a_track = a.create_track("video", timed()).unwrap();
 		a.announce(Default::default()).unwrap();
-		let b = origin.create_broadcast(Path::new("b/cam").unwrap()).unwrap();
+		let b = origin.create_broadcast("b/cam").unwrap();
 		let b_track = b.create_track("video", timed()).unwrap();
 		b.announce(Default::default()).unwrap();
 		let publisher = tokio::time::timeout(
@@ -1778,7 +1766,7 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 		.await
 		.unwrap()
 		.unwrap();
-		let a_read = tokio::time::timeout(TIMEOUT, read.routed_broadcast(Path::new("a/cam").unwrap()))
+		let a_read = tokio::time::timeout(TIMEOUT, read.routed_broadcast("a/cam"))
 			.await
 			.unwrap()
 			.unwrap();
@@ -1790,7 +1778,7 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 			.await
 			.unwrap()
 			.unwrap();
-		let b_read = tokio::time::timeout(TIMEOUT, read.routed_broadcast(Path::new("b/cam").unwrap()))
+		let b_read = tokio::time::timeout(TIMEOUT, read.routed_broadcast("b/cam"))
 			.await
 			.expect("new prefix not announced")
 			.unwrap();
@@ -1865,13 +1853,13 @@ async fn relay_request_limits_distinguish_clients_and_peers() {
 				.established()
 				.await
 				.unwrap();
-			let first = origin.create_broadcast(Path::new("one").unwrap()).unwrap();
+			let first = origin.create_broadcast("one").unwrap();
 			first.announce(Default::default()).unwrap();
 			tokio::time::timeout(TIMEOUT, next_update(&mut observed))
 				.await
 				.unwrap()
 				.unwrap();
-			let second = origin.create_broadcast(Path::new("two").unwrap()).unwrap();
+			let second = origin.create_broadcast("two").unwrap();
 			second.announce(Default::default()).unwrap();
 			if peer {
 				let (route, active) = tokio::time::timeout(TIMEOUT, next_update(&mut observed))

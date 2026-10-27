@@ -8,7 +8,6 @@
 //! instance's cached groups.
 
 use crate::support;
-use moq_net::Path;
 
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
@@ -104,11 +103,7 @@ async fn read(subscription: &mut track::Subscriber) -> String {
 }
 
 async fn subscribe(origin: &origin::Producer, path: &str) -> (broadcast::Consumer, track::Subscriber) {
-	let broadcast = origin
-		.consume()
-		.request_broadcast(Path::new(path).unwrap(), None)
-		.await
-		.unwrap();
+	let broadcast = origin.consume().request_broadcast(path, None).await.unwrap();
 	let subscription = broadcast.track("video").unwrap().subscribe(None).await.unwrap();
 	(broadcast, subscription)
 }
@@ -124,9 +119,7 @@ async fn relay_chain(version: &str) {
 	let _upstream = link(version, &publisher, &relay).await;
 	let _downstream = link(version, &relay, &viewer).await;
 
-	let old = publisher
-		.publish(Path::new("live").unwrap(), origin::Route::default())
-		.unwrap();
+	let old = publisher.publish("live", origin::Route::default()).unwrap();
 	let old_track = old.create_track("video", timed()).unwrap();
 	let mut announced = viewer.consume().announced();
 	match next_event(&mut announced).await {
@@ -141,9 +134,7 @@ async fn relay_chain(version: &str) {
 	}
 
 	// The publisher restarts without an epoch, its old session still open.
-	let new = publisher
-		.publish(Path::new("live").unwrap(), origin::Route::default())
-		.unwrap();
+	let new = publisher.publish("live", origin::Route::default()).unwrap();
 	let new_track = new.create_track("video", timed()).unwrap();
 	expect_restart(version, &mut announced, "live").await;
 
@@ -183,7 +174,7 @@ relay_chain_tests! {
 /// the hidden `fuzz` module as a session lands it, so its answers carry no exact route.
 struct Worker {
 	origin: origin::Producer,
-	_claim: Rc<origin::Dynamic>,
+	_claim: Rc<origin::Requests>,
 	_outputs: Rc<RefCell<Vec<(broadcast::Producer, track::Producer)>>>,
 }
 
@@ -191,7 +182,7 @@ impl Worker {
 	fn new(hop: u64) -> Self {
 		let origin = produce_origin(hop);
 		let claim = Rc::new(
-			moq_net::fuzz::dynamic_route(&origin, moq_net::Path::new("pool").unwrap(), origin::Route::default())
+			moq_net::fuzz::requests_route(&origin, moq_net::Path::from_static("pool"), origin::Route::default())
 				.unwrap(),
 		);
 		let outputs = Rc::new(RefCell::new(Vec::new()));
@@ -270,7 +261,7 @@ async fn prefix_pool_lite07() {
 /// claim carries an epoch or re-prices, so it lands through the hidden `fuzz` module as
 /// a session lands it.
 struct Claim {
-	dynamic: Rc<origin::Dynamic>,
+	dynamic: Rc<origin::Requests>,
 	outputs: Rc<RefCell<Vec<(broadcast::Producer, track::Producer)>>>,
 }
 
@@ -279,7 +270,7 @@ impl Claim {
 		let mut route = origin::Route::default();
 		route.epoch = epoch;
 		let dynamic =
-			Rc::new(moq_net::fuzz::dynamic_route(origin, moq_net::Path::new("live").unwrap(), route).unwrap());
+			Rc::new(moq_net::fuzz::requests_route(origin, moq_net::Path::from_static("live"), route).unwrap());
 		let outputs = Rc::new(RefCell::new(Vec::new()));
 		let (handler, served) = (dynamic.clone(), outputs.clone());
 		drop(moq_clock::sim::spawn(async move {
@@ -442,11 +433,7 @@ async fn dynamic_epoch_second_route_keeps_winning() {
 			"dropping a shared epoch delivered {event:?}"
 		);
 	}
-	let fresh = origin
-		.consume()
-		.request_broadcast(Path::new("live/cam").unwrap(), None)
-		.await
-		.unwrap();
+	let fresh = origin.consume().request_broadcast("live/cam", None).await.unwrap();
 	assert!(fresh.is_clone(&resolved), "the epoch's broadcast was replaced");
 	assert_eq!((first.answered(), second.answered()), (1, 1));
 	// The same epoch serves the same bytes: group 0 was delivered, so it resumes at 1.
@@ -472,7 +459,7 @@ async fn retired_fetch(version: &str, explicit: bool) {
 	} else {
 		origin::Route::default()
 	};
-	let old = publisher.publish(Path::new("live").unwrap(), old_route).unwrap();
+	let old = publisher.publish("live", old_route).unwrap();
 	let old_track = old.create_track("video", timed()).unwrap();
 	let mut announced = viewer.consume().announced();
 	assert!(matches!(next_event(&mut announced).await, announce::Event::Start(_)));
@@ -481,7 +468,7 @@ async fn retired_fetch(version: &str, explicit: bool) {
 	write(&old_track, "old:0");
 	assert_eq!(read(&mut subscription).await, "old:0");
 
-	let replacement = publisher.publish(Path::new("live").unwrap(), new_route).unwrap();
+	let replacement = publisher.publish("live", new_route).unwrap();
 	let replacement_track = replacement.create_track("video", timed()).unwrap();
 	let _late = replacement
 		.create_track("late", Some(track::Info::default().with_priority(17)))
@@ -500,12 +487,12 @@ async fn retired_fetch(version: &str, explicit: bool) {
 	write(&old_track, "old:1");
 	assert_eq!(read(&mut subscription).await, "old:1");
 	if let Ok(late) = held.track("late")
-		&& let Ok(info) = late.query().await
+		&& let Ok(info) = late.info().await
 	{
 		assert_ne!(info.priority, 17, "{version}: late track resolved replacement");
 	}
 	// A held query keeps reading the retired instance; a bare handle would not.
-	let _reading = track.query();
+	let _reading = track.info();
 	drop(subscription);
 	settle().await;
 	let resumed = track.subscribe(None).await;
@@ -552,9 +539,7 @@ async fn unanswered_takeover(version: &str) {
 	let publisher = produce_origin(1);
 	let viewer = produce_origin(2);
 	let _session = link(version, &publisher, &viewer).await;
-	let old = publisher
-		.publish(Path::new("live").unwrap(), origin::Route::default())
-		.unwrap();
+	let old = publisher.publish("live", origin::Route::default()).unwrap();
 	// Quiet, so the publisher has nothing to answer the SUBSCRIBE with yet.
 	let old_track = old.create_track("video", timed()).unwrap();
 	let mut announced = viewer.consume().announced();
@@ -566,9 +551,7 @@ async fn unanswered_takeover(version: &str) {
 		"{version}: the SUBSCRIBE reached the old instance"
 	);
 
-	let replacement = publisher
-		.publish(Path::new("live").unwrap(), origin::Route::default())
-		.unwrap();
+	let replacement = publisher.publish("live", origin::Route::default()).unwrap();
 	let replacement_track = replacement.create_track("video", timed()).unwrap();
 	write(&replacement_track, "new:0");
 	expect_restart(version, &mut announced, "live").await;
@@ -623,9 +606,7 @@ async fn withdrawal_refuses_new_fetches_but_keeps_open_reads() {
 		let publisher = produce_origin(1);
 		let viewer = produce_origin(2);
 		let _session = link(version, &publisher, &viewer).await;
-		let source = publisher
-			.publish(Path::new("live").unwrap(), origin::Route::default())
-			.unwrap();
+		let source = publisher.publish("live", origin::Route::default()).unwrap();
 		let produced = source.create_track("video", timed()).unwrap();
 		let mut announced = viewer.consume().announced();
 		assert!(matches!(next_event(&mut announced).await, announce::Event::Start(_)));
@@ -661,9 +642,7 @@ async fn a_more_specific_source_cannot_fill_a_held_covering_track() {
 		let track = held.track("video").unwrap();
 		old.write(0, "old:0");
 		assert_eq!(read(&mut subscription).await, "old:0");
-		let replacement = publisher
-			.publish(Path::new("live/job").unwrap(), origin::Route::default())
-			.unwrap();
+		let replacement = publisher.publish("live/job", origin::Route::default()).unwrap();
 		let replacement_track = replacement.create_track("video", timed()).unwrap();
 		write(&replacement_track, "new:0");
 		write(&replacement_track, "new:1");
@@ -680,14 +659,14 @@ async fn a_more_specific_source_cannot_fill_a_held_covering_track() {
 /// A worker claiming `pool` through the public API: each request is prepared under a
 /// fresh epoch and published at its exact path, and `outputs[path]` holds the latest.
 struct Pool {
-	_claim: Rc<origin::Dynamic>,
+	_claim: Rc<origin::Requests>,
 	outputs: Rc<RefCell<std::collections::HashMap<String, (origin::Publication, track::Producer)>>>,
 	answered: Rc<RefCell<usize>>,
 }
 
 impl Pool {
 	fn new(origin: &origin::Producer) -> Self {
-		let claim = Rc::new(origin.dynamic(Path::new("pool").unwrap()).unwrap());
+		let claim = Rc::new(origin.requests("pool").unwrap());
 		let outputs = Rc::new(RefCell::new(std::collections::HashMap::new()));
 		let answered = Rc::new(RefCell::new(0));
 		let (handler, served, count) = (claim.clone(), outputs.clone(), answered.clone());
@@ -723,11 +702,7 @@ impl Pool {
 /// subscription through it is reset once the exact route arrives: the cold-start reset
 /// accepted until announce takeover lands.
 async fn claimed(origin: &origin::Producer, path: &str) -> (broadcast::Consumer, track::Subscriber) {
-	let cold = origin
-		.consume()
-		.request_broadcast(Path::new(path).unwrap(), None)
-		.await
-		.unwrap();
+	let cold = origin.consume().request_broadcast(path, None).await.unwrap();
 	drop(cold.track("video").unwrap().subscribe(None).await);
 	settle().await;
 	subscribe(origin, path).await

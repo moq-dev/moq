@@ -71,7 +71,7 @@ fn is_fatal(err: &anyhow::Error) -> bool {
 async fn run(target: &ImportTarget, client: &moq_rtsp::Client, published: &mut bool) -> anyhow::Result<moq_rtsp::End> {
 	let broadcast = target
 		.origin
-		.create_broadcast(moq_net::Path::new(&target.name)?)
+		.create_broadcast(&target.name)
 		.context("failed to create broadcast")?;
 	let config = moq_mux::catalog::Config::default()
 		.with_max_age(target.max_age)

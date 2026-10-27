@@ -42,13 +42,14 @@ export function volumeSlider(parent: Effect, watch: MoqWatch): HTMLElement {
 
 	parent.event(slider, "input", () => {
 		const value = Number.parseFloat(slider.value) / 100;
-		watch.controls.audio.volume.set(value);
+		// The setters, unlike the controls, also correct a refused attribute.
+		watch.volume = value;
 		// Any non-zero adjustment implies an intent to hear audio.
-		if (value > 0) watch.controls.audio.muted.set(false);
+		if (value > 0) watch.muted = false;
 	});
 
 	parent.event(button, "click", () => {
-		watch.controls.audio.muted.update((m) => !m);
+		watch.muted = !watch.muted;
 	});
 
 	return wrapper;

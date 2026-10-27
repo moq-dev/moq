@@ -362,7 +362,7 @@ impl Audio {
 /// - `name` must point to `name_len` bytes of UTF-8.
 /// - `input` / `output` must point to fully populated structs.
 /// - `output->codec` must point to `output->codec_len` bytes of UTF-8.
-/// - `bandwidth` is a handle from [`crate::moq_session_bandwidth`], or 0 to leave the
+/// - `allocator` is a handle from [`crate::moq_session_allocator`], or 0 to leave the
 ///   configured bitrate unclaimed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_encode_audio(
@@ -371,7 +371,7 @@ pub unsafe extern "C" fn moq_encode_audio(
 	name_len: usize,
 	input: *const moq_audio_encoder_input,
 	output: *const moq_audio_encoder_output,
-	bandwidth: u32,
+	allocator: u32,
 ) -> i32 {
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
@@ -403,13 +403,13 @@ pub unsafe extern "C" fn moq_encode_audio(
 			options.config.frame_duration = Duration::from_micros(micros.into());
 		}
 
-		let bandwidth = ffi::parse_id_optional(bandwidth)?;
+		let allocator = ffi::parse_id_optional(allocator)?;
 		let mut state = State::lock();
-		if let Some(id) = bandwidth {
+		if let Some(id) = allocator {
 			options.bandwidth = state.bandwidth.allocator(id)?;
 		}
 		let State { publish, audio, .. } = &mut *state;
-		audio.publish(publish.target(broadcast)?, encoder_input, options, bandwidth.is_some())
+		audio.publish(publish.target(broadcast)?, encoder_input, options, allocator.is_some())
 	})
 }
 

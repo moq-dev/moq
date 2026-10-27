@@ -32,13 +32,12 @@ struct Args {
 async fn main() -> anyhow::Result<()> {
 	moq_tokio::Log::new(tracing::Level::INFO).init()?;
 	let args = Args::parse();
-	let source_path = moq_net::PathOwned::try_from(args.source).context("invalid source path")?;
-	let output_path = moq_net::PathOwned::try_from(
+	let source_path = moq_net::Path::try_from(args.source)?;
+	let output_path = moq_net::Path::try_from(
 		args.output
 			.clone()
 			.unwrap_or_else(|| format!("{source_path}/transcode.hang")),
-	)
-	.context("invalid output path")?;
+	)?;
 
 	// Publish the derivative through one origin and consume the source through
 	// another, over a single auto-reconnecting session.

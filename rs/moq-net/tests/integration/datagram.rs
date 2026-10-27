@@ -8,7 +8,6 @@
 //! deterministically, so every wait here is on an observable event.
 
 use crate::support;
-use moq_net::Path;
 
 use std::time::Duration;
 
@@ -45,7 +44,7 @@ async fn connect_datagram_track() -> Fixture {
 	let publisher = produce_origin(1);
 	let consumer_origin = produce_origin(2);
 
-	let broadcast = publisher.create_broadcast(Path::new("bench").unwrap()).unwrap();
+	let broadcast = publisher.create_broadcast("bench").unwrap();
 	let producer = broadcast.create_track("datagrams", timed()).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
@@ -56,11 +55,8 @@ async fn connect_datagram_track() -> Fixture {
 	let pair = connect_mock(options).await;
 
 	let consumer = consumer_origin.consume();
-	consumer.routed(Path::new("bench").unwrap()).await.unwrap();
-	let remote = consumer
-		.request_broadcast(Path::new("bench").unwrap(), None)
-		.await
-		.unwrap();
+	consumer.routed("bench").await.unwrap();
+	let remote = consumer.request_broadcast("bench", None).await.unwrap();
 	let subscriber = remote.track("datagrams").unwrap().subscribe(None).await.unwrap();
 	// The subscriber is handed over once TRACK_INFO answers, before its SUBSCRIBE reaches
 	// the publisher, and a datagram only goes to a subscription already there.
@@ -144,7 +140,7 @@ async fn ietf_delivers_datagrams_on(version: &str) {
 	let publisher = produce_origin(1);
 	let consumer_origin = produce_origin(2);
 
-	let broadcast = publisher.create_broadcast(Path::new("bench").unwrap()).unwrap();
+	let broadcast = publisher.create_broadcast("bench").unwrap();
 	let mut producer = broadcast.create_track("datagrams", timed()).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
@@ -154,11 +150,8 @@ async fn ietf_delivers_datagrams_on(version: &str) {
 	let _pair = connect_mock(options).await;
 
 	let consumer = consumer_origin.consume();
-	consumer.routed(Path::new("bench").unwrap()).await.unwrap();
-	let remote = consumer
-		.request_broadcast(Path::new("bench").unwrap(), None)
-		.await
-		.unwrap();
+	consumer.routed("bench").await.unwrap();
+	let remote = consumer.request_broadcast("bench", None).await.unwrap();
 	let mut subscriber = remote.track("datagrams").unwrap().subscribe(None).await.unwrap();
 
 	// A group first, so the subscription's alias is bound before any datagram lands.
@@ -262,17 +255,14 @@ async fn a_fetched_datagram_is_refused_per_version() {
 			_pairs.push(peer(version.parse().unwrap(), &pair[0], &pair[1]).await);
 		}
 
-		let broadcast = nodes[0].create_broadcast(Path::new("room").unwrap()).unwrap();
+		let broadcast = nodes[0].create_broadcast("room").unwrap();
 		let mut producer = broadcast.create_track("datagrams", timed()).unwrap();
 		broadcast.announce(Default::default()).unwrap();
 		let sequence = producer.append_datagram(Timestamp::ZERO, &b"x"[..]).unwrap();
 
 		let consumer = nodes.last().unwrap().consume();
-		consumer.routed(Path::new("room").unwrap()).await.unwrap();
-		let remote = consumer
-			.request_broadcast(Path::new("room").unwrap(), None)
-			.await
-			.unwrap();
+		consumer.routed("room").await.unwrap();
+		let remote = consumer.request_broadcast("room", None).await.unwrap();
 		let err = match remote.track("datagrams").unwrap().fetch_group(sequence, None).await {
 			Ok(_) => panic!("{versions:?}: a datagram was fetched"),
 			Err(err) => err,

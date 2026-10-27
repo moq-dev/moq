@@ -976,7 +976,6 @@ mod tests {
 	use super::Container as ContainerTrait;
 	use super::*;
 	use crate::catalog::hang::Container;
-
 	use std::time::Duration;
 
 	use bytes::Bytes;
@@ -2393,15 +2392,11 @@ mod tests {
 				.with_hops(hops.clone())
 				.with_cost(cost)
 		};
-		let first = origin.create_broadcast(moq_net::Path::new("live").unwrap()).unwrap();
+		let first = origin.create_broadcast("live").unwrap();
 		let info = hang::container::track_info(hang::catalog::PRIORITY.video);
 		let first_track = first.create_track("video", info.clone()).unwrap();
 		first.announce(route(5)).unwrap();
-		let broadcast = origin
-			.consume()
-			.request_broadcast(moq_net::Path::new("live").unwrap(), None)
-			.await
-			.unwrap();
+		let broadcast = origin.consume().request_broadcast("live", None).await.unwrap();
 		let track = broadcast
 			.track("video")
 			.unwrap()
@@ -2430,7 +2425,7 @@ mod tests {
 		// full budget past it.
 		let mut sources = Vec::new();
 		for sequence in 1..=4 {
-			let source = origin.create_broadcast(moq_net::Path::new("live").unwrap()).unwrap();
+			let source = origin.create_broadcast("live").unwrap();
 			let mut track = source.create_track("video", info.clone()).unwrap();
 			source.announce(route(5 - sequence)).unwrap();
 			let mut demand = track.demand();
@@ -2820,8 +2815,8 @@ mod tests {
 		let read = read_past_frames(&mut consumer).await;
 		assert!(matches!(read, Err(crate::Error::UnknownFormat(_))), "{read:?}");
 		assert!(track.demand().wanted().is_none(), "the ended reader still subscribes");
-		assert!(!malformed.demand().is_used(), "the ended reader still holds its group");
-		assert!(!later.demand().is_used(), "the ended reader still holds a later group");
+		assert!(!malformed.demand().wanted(), "the ended reader still holds its group");
+		assert!(!later.demand().wanted(), "the ended reader still holds a later group");
 	}
 
 	/// A malformed object mid-group, found while looking ahead past a blocked group, ends the

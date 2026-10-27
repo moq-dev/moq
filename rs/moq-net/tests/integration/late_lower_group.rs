@@ -8,7 +8,6 @@
 //! spelling of both an omitted floor and group 0; the draft says that 0 is group 0.
 
 use crate::support;
-use moq_net::Path;
 
 use std::time::Duration;
 
@@ -83,7 +82,7 @@ async fn read_all(sub: &mut moq_net::track::Subscriber) -> Vec<(u64, usize)> {
 async fn session(version: &str, relay: bool, start: Option<u64>) -> Vec<(u64, usize)> {
 	let version: Version = version.parse().unwrap();
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast(Path::new("bcast").unwrap()).unwrap();
+	let broadcast = publisher.create_broadcast("bcast").unwrap();
 	let track = broadcast
 		.create_track(
 			"late",
@@ -115,11 +114,11 @@ async fn session(version: &str, relay: bool, start: Option<u64>) -> Vec<(u64, us
 	let pair = connect_mock(options).await;
 
 	let consumer = subscriber.consume();
-	moq_clock::timeout(TIMEOUT, consumer.routed(Path::new("bcast").unwrap()))
+	moq_clock::timeout(TIMEOUT, consumer.routed("bcast"))
 		.await
 		.expect("announce timeout")
 		.expect("routed");
-	let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast(Path::new("bcast").unwrap(), None))
+	let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
@@ -159,7 +158,7 @@ async fn session(version: &str, relay: bool, start: Option<u64>) -> Vec<(u64, us
 
 async fn in_process(start: Option<u64>) -> Vec<(u64, usize)> {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast(Path::new("bcast").unwrap()).unwrap();
+	let broadcast = publisher.create_broadcast("bcast").unwrap();
 	let track = broadcast
 		.create_track(
 			"late",
@@ -212,9 +211,7 @@ async fn an_explicit_floor_receives_a_group_created_below_the_first_served_group
 async fn merged(version: &str) -> (Vec<(u64, usize)>, Vec<(u64, usize)>) {
 	let version: Version = version.parse().unwrap();
 	let publisher = produce_origin(1);
-	let broadcast = publisher
-		.create_broadcast(moq_net::Path::new("bcast").unwrap())
-		.unwrap();
+	let broadcast = publisher.create_broadcast("bcast").unwrap();
 	let track = broadcast
 		.create_track(
 			"late",
@@ -238,17 +235,14 @@ async fn merged(version: &str) -> (Vec<(u64, usize)>, Vec<(u64, usize)>) {
 	let pair = connect_mock(options).await;
 
 	let consumer = subscriber.consume();
-	moq_clock::timeout(TIMEOUT, consumer.routed(moq_net::Path::new("bcast").unwrap()))
+	moq_clock::timeout(TIMEOUT, consumer.routed("bcast"))
 		.await
 		.expect("announce timeout")
 		.expect("routed");
-	let remote = moq_clock::timeout(
-		TIMEOUT,
-		consumer.request_broadcast(moq_net::Path::new("bcast").unwrap(), None),
-	)
-	.await
-	.expect("resolve timeout")
-	.expect("broadcast resolves");
+	let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
+		.await
+		.expect("resolve timeout")
+		.expect("broadcast resolves");
 
 	let subscribe = |range: Range| {
 		let track = remote.track("late").unwrap();

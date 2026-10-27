@@ -13,7 +13,7 @@ import (
 // consume sink for a full-duplex peer.
 //
 // There is no Close: the origin ends once the collector reaches every owner
-// (each producer, published broadcast, and [OriginDynamic]), and its consumers
+// (each producer, published broadcast, and [OriginRequests]), and its consumers
 // then fail with [ErrClosed]. Keep an owner reachable for as long as the origin
 // should live.
 type OriginProducer struct {
@@ -35,18 +35,18 @@ func (o *OriginProducer) Consume() *OriginConsumer {
 	return &OriginConsumer{inner: o.inner.Consume()}
 }
 
-// Dynamic advertises prefix and serves the requests beneath it.
+// Requests advertises prefix and serves the requests beneath it.
 //
 // A route claims prefix and every path beneath it ("" claims every path). A
 // service that only serves some of them rejects the rest as they are requested.
-// Create, Dynamic if tracks are served on demand, populate, then
+// Create, Requests if tracks are served on demand, populate, then
 // [BroadcastProducer.Announce].
-func (o *OriginProducer) Dynamic(prefix string) (*OriginDynamic, error) {
-	inner, err := o.inner.Dynamic(prefix)
+func (o *OriginProducer) Requests(prefix string) (*OriginRequests, error) {
+	inner, err := o.inner.Requests(prefix)
 	if err != nil {
 		return nil, err
 	}
-	return &OriginDynamic{inner: inner}, nil
+	return &OriginRequests{inner: inner}, nil
 }
 
 // CreateBroadcast creates a broadcast at the given path, returning the producer
@@ -64,14 +64,14 @@ func (o *OriginProducer) CreateBroadcast(path string) (*BroadcastProducer, error
 	return &BroadcastProducer{inner: inner}, nil
 }
 
-// OriginDynamic streams requests for paths with no existing exact-path broadcast.
-type OriginDynamic struct {
-	inner *ffi.MoqOriginDynamic
+// OriginRequests streams requests for paths with no existing exact-path broadcast.
+type OriginRequests struct {
+	inner *ffi.MoqOriginRequests
 }
 
 // RequestedBroadcast blocks until a consumer requests a path with no existing
 // exact-path broadcast.
-func (d *OriginDynamic) RequestedBroadcast(ctx context.Context) (*BroadcastRequest, error) {
+func (d *OriginRequests) RequestedBroadcast(ctx context.Context) (*BroadcastRequest, error) {
 	inner, err := bridge.CallHandle(ctx, d.inner.Cancel, d.inner.RequestedBroadcast)
 	if err != nil {
 		return nil, err
@@ -81,12 +81,12 @@ func (d *OriginDynamic) RequestedBroadcast(ctx context.Context) (*BroadcastReque
 
 // All ranges over requested broadcasts until the stream errors or the loop
 // breaks.
-func (d *OriginDynamic) All(ctx context.Context) iter.Seq2[*BroadcastRequest, error] {
+func (d *OriginRequests) All(ctx context.Context) iter.Seq2[*BroadcastRequest, error] {
 	return bridge.Seq(ctx, d.RequestedBroadcast)
 }
 
 // Cancel stops serving requested broadcasts and retracts the route.
-func (d *OriginDynamic) Cancel() {
+func (d *OriginRequests) Cancel() {
 	d.inner.Cancel()
 }
 

@@ -307,7 +307,7 @@ impl Lifecycle {
 			match self.cluster.verify_lan_credential(presented) {
 				Some(true) => {
 					tracing::info!("accepted LAN peer");
-					let lease = self.auth.admit_fixed("/", self.cluster.lan_peer_grant())?;
+					let lease = self.auth.admit_fixed("/", self.cluster.lan_peer_grant());
 					return Ok((self.cluster.scope(lease, &request)?, None));
 				}
 				Some(false) => {

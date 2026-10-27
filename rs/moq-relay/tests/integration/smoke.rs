@@ -7,7 +7,6 @@
 //! "axum-only-advertises-bare-`webtransport`" bug that silently downgraded
 //! relay clients to moq-lite-02.
 
-use moq_net::Path;
 use std::time::Duration;
 
 use moq_relay::{Config, Connection, Relay, auth, cluster, web};
@@ -149,9 +148,7 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 
 	// ── publisher ───────────────────────────────────────────────────
 	let pub_origin = moq_tokio::origin::spawn();
-	let broadcast = pub_origin
-		.create_broadcast(Path::new("test").unwrap())
-		.expect("create broadcast");
+	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("create broadcast");
 	let track = broadcast.create_track("video", timed()).expect("create track");
 	let mut group = track.append_group().expect("append group");
@@ -192,7 +189,7 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
-	let path = moq_net::Path::new(update.prefix.as_str()).unwrap().to_owned();
+	let path = update.prefix.clone();
 	assert!(active, "expected announce, got retraction");
 	// Auth root for `/smoke` is "smoke"; the broadcast "test" announces underneath.
 	assert_eq!(path.as_str(), "test");
@@ -290,9 +287,7 @@ async fn hidden_broadcasts_need_a_lite07_opt_in() {
 	let url: url::Url = format!("ws://127.0.0.1:{port}/hidden").parse().expect("parse url");
 
 	let pub_origin = moq_tokio::origin::spawn();
-	let hidden = pub_origin
-		.create_broadcast(Path::new(".x/y").unwrap())
-		.expect("create hidden");
+	let hidden = pub_origin.create_broadcast(".x/y").expect("create hidden");
 	hidden.announce(Default::default()).expect("announce hidden");
 	let track = hidden.create_track("video", timed()).expect("create track");
 	let mut group = track.append_group().expect("append group");
@@ -324,9 +319,7 @@ async fn hidden_broadcasts_need_a_lite07_opt_in() {
 
 	// Announced after the hidden one, so any client that could see both lists the
 	// hidden one first (the relay drains its table in path order).
-	let visible = pub_origin
-		.create_broadcast(Path::new("visible").unwrap())
-		.expect("create visible");
+	let visible = pub_origin.create_broadcast("visible").expect("create visible");
 	visible.announce(Default::default()).expect("announce visible");
 	assert_eq!(announced_until(&mut opted, "visible").await, ["visible"]);
 
@@ -357,7 +350,7 @@ async fn hidden_broadcasts_need_a_lite07_opt_in() {
 			continue;
 		}
 		let bc = consumer
-			.request_broadcast(Path::new(".x/y").unwrap(), None)
+			.request_broadcast(".x/y", None)
 			.await
 			.expect("hidden broadcast resolves");
 		let mut sub = bc.track("video").unwrap().subscribe(None).await.expect("subscribe");
@@ -495,9 +488,7 @@ async fn relay_websocket_root_path_upgrades() {
 
 	// ── publisher ───────────────────────────────────────────────────
 	let pub_origin = moq_tokio::origin::spawn();
-	let broadcast = pub_origin
-		.create_broadcast(Path::new("test").unwrap())
-		.expect("create broadcast");
+	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("create broadcast");
 	let track = broadcast.create_track("video", timed()).expect("create track");
 	let mut group = track.append_group().expect("append group");
@@ -531,7 +522,7 @@ async fn relay_websocket_root_path_upgrades() {
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
-	let path = moq_net::Path::new(update.prefix.as_str()).unwrap().to_owned();
+	let path = update.prefix.clone();
 	assert!(active, "expected announce, got retraction");
 	assert_eq!(path.as_str(), "test");
 	let bc = sub_consumer
@@ -630,9 +621,7 @@ async fn internal_tcp_round_trip() {
 
 	// ── publisher ───────────────────────────────────────────────────
 	let pub_origin = moq_tokio::origin::spawn();
-	let broadcast = pub_origin
-		.create_broadcast(Path::new("test").unwrap())
-		.expect("create broadcast");
+	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("create broadcast");
 	let track = broadcast.create_track("video", timed()).expect("create track");
 	let mut group = track.append_group().expect("append group");
@@ -671,7 +660,7 @@ async fn internal_tcp_round_trip() {
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
-	let path = moq_net::Path::new(update.prefix.as_str()).unwrap().to_owned();
+	let path = update.prefix.clone();
 	assert!(active, "expected announce, got retraction");
 	assert_eq!(path.as_str(), "test");
 	let bc = sub_consumer
@@ -735,9 +724,7 @@ async fn internal_unix_round_trip() {
 
 	// ── publisher ───────────────────────────────────────────────────
 	let pub_origin = moq_tokio::origin::spawn();
-	let broadcast = pub_origin
-		.create_broadcast(Path::new("test").unwrap())
-		.expect("create broadcast");
+	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("create broadcast");
 	let track = broadcast.create_track("video", timed()).expect("create track");
 	let mut group = track.append_group().expect("append group");
@@ -776,13 +763,10 @@ async fn internal_unix_round_trip() {
 		.expect("origin closed");
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(active, "expected announce, got retraction");
-	let bc = tokio::time::timeout(
-		TIMEOUT,
-		sub_consumer.request_broadcast(Path::new("test").unwrap(), None),
-	)
-	.await
-	.expect("request timeout")
-	.expect("announced broadcast resolves");
+	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast("test", None))
+		.await
+		.expect("request timeout")
+		.expect("announced broadcast resolves");
 
 	let mut track_sub = tokio::time::timeout(TIMEOUT, async { bc.track("video").unwrap().subscribe(None).await })
 		.await
@@ -832,9 +816,7 @@ fn path_versions() -> Vec<moq_net::Version> {
 /// to that root).
 async fn path_round_trip(version: moq_net::Version, pub_url: url::Url, sub_url: url::Url, broadcast: &str) -> String {
 	let pub_origin = moq_tokio::origin::spawn();
-	let bc = pub_origin
-		.create_broadcast(Path::new(broadcast).unwrap())
-		.expect("create broadcast");
+	let bc = pub_origin.create_broadcast(broadcast).expect("create broadcast");
 	bc.announce(Default::default()).expect("create broadcast");
 	let track = bc.create_track("video", timed()).expect("create track");
 	let mut group = track.append_group().expect("append group");
@@ -862,7 +844,7 @@ async fn path_round_trip(version: moq_net::Version, pub_url: url::Url, sub_url: 
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
-	let path = moq_net::Path::new(update.prefix.as_str()).unwrap().to_owned();
+	let path = update.prefix.clone();
 
 	drop(track);
 	drop(bc);

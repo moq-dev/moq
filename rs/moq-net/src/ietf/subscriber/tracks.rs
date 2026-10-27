@@ -22,11 +22,10 @@ use crate::driver::Transport;
 use std::sync::Arc;
 
 use super::*;
-use crate::AsPath as _;
 use crate::ietf::request_stream::{self, Framed, Messages};
 
 /// A listed track, by its namespace and name.
-pub(super) type TrackKey = (PathOwned, Arc<str>);
+pub(super) type TrackKey = (Path, Arc<str>);
 
 /// How a PUBLISH_DONE leaves the listing: only TRACK_ENDED removes the track. Any other
 /// status, INTERNAL_ERROR included, fails the listing, so it asks again rather than hide a
@@ -89,7 +88,7 @@ impl Drop for Entry {
 
 /// A broadcast listed through this session.
 struct Listener {
-	path: PathOwned,
+	path: Path,
 	lister: Arc<broadcast::Lister>,
 	/// Set to the error that fails the listing.
 	failed: kio::Producer<Option<Error>>,
@@ -97,7 +96,7 @@ struct Listener {
 
 /// One SUBSCRIBE_TRACKS, from when it is wanted until the peer has closed it.
 struct Request {
-	prefix: PathOwned,
+	prefix: Path,
 	/// Dropped to cancel it; `None` once cancelled, while it leaves the wire.
 	live: Option<kio::Producer<()>>,
 	/// Closes once it is off the wire, so an overlapping one may go out.
@@ -116,7 +115,7 @@ pub(super) struct Listings {
 /// A SUBSCRIBE_TRACKS for its task to send.
 struct Opening {
 	key: u64,
-	prefix: PathOwned,
+	prefix: Path,
 	/// The overlapping requests that must leave the wire first.
 	blockers: Vec<kio::Consumer<()>>,
 	live: kio::Consumer<()>,
@@ -130,14 +129,14 @@ impl Listings {
 	}
 
 	/// The standing request that covers `namespace`; at most one does.
-	fn covering(&self, namespace: &PathOwned) -> Option<u64> {
+	fn covering(&self, namespace: &Path) -> Option<u64> {
 		self.requests
 			.iter()
 			.find(|(_, request)| request.live.is_some() && namespace.has_prefix(&request.prefix))
 			.map(|(key, _)| *key)
 	}
 
-	fn listers<'a>(&'a self, namespace: &'a PathOwned) -> impl Iterator<Item = &'a broadcast::Lister> + 'a {
+	fn listers<'a>(&'a self, namespace: &'a Path) -> impl Iterator<Item = &'a broadcast::Lister> + 'a {
 		self.listeners
 			.values()
 			.filter(move |listener| &listener.path == namespace)
@@ -146,7 +145,7 @@ impl Listings {
 
 	fn listen(
 		&mut self,
-		path: PathOwned,
+		path: Path,
 		lister: Arc<broadcast::Lister>,
 	) -> (u64, kio::Consumer<Option<Error>>, Option<Opening>) {
 		// What a broader listing already holds is listed at once.
@@ -224,7 +223,7 @@ impl Listings {
 				request.live = None;
 			}
 		}
-		let standing: Vec<PathOwned> = self
+		let standing: Vec<Path> = self
 			.requests
 			.values()
 			.filter(|request| request.live.is_some())
@@ -236,7 +235,7 @@ impl Listings {
 
 	/// Fail every listing the request covering `namespace` serves with `err`, and cancel it:
 	/// they ask again rather than miss a track that may still be live.
-	fn fail(&mut self, namespace: &PathOwned, err: Error) {
+	fn fail(&mut self, namespace: &Path, err: Error) {
 		let Some(key) = self.covering(namespace) else {
 			return;
 		};
@@ -348,7 +347,7 @@ enum Offer {
 impl Subscriber {
 	/// List `path`'s tracks into `lister` until the returned guard drops, through a
 	/// SUBSCRIBE_TRACKS covering it.
-	pub(super) fn listen(&self, path: PathOwned, lister: Arc<broadcast::Lister>) -> Listening {
+	pub(super) fn listen(&self, path: Path, lister: Arc<broadcast::Lister>) -> Listening {
 		let (key, failed, opening) = self.listings.lock().listen(path, lister);
 		if let Some(opening) = opening {
 			let this = self.clone();
@@ -390,7 +389,7 @@ impl Subscriber {
 
 	async fn subscribe_tracks(
 		&self,
-		prefix: &PathOwned,
+		prefix: &Path,
 		blockers: Vec<kio::Consumer<()>>,
 		live: &kio::Consumer<()>,
 	) -> Result<(), Error> {
@@ -433,7 +432,7 @@ impl Subscriber {
 			ietf::SubscribeTracks::ID,
 			&ietf::SubscribeTracks {
 				request_id,
-				prefix: prefix.as_path(),
+				prefix: prefix.clone(),
 				forward: false,
 				subscriber_priority: None,
 				group_order: None,
@@ -445,7 +444,7 @@ impl Subscriber {
 				authorization_token: None,
 			},
 		)?;
-		tracing::debug!(prefix = %self.origin.absolute(prefix), id = %request_id, "subscribe_tracks started");
+		tracing::debug!(prefix = %crate::path::Rooted(self.origin.root(), prefix), id = %request_id, "subscribe_tracks started");
 
 		let mut messages = Messages::new(self.session.clone(), self.control.client());
 		let mut established = false;
@@ -498,7 +497,9 @@ impl Subscriber {
 					let skipped = body
 						.message::<ietf::PublishSkipped>(self.version)
 						.map_err(|err| messages.failed(err.into()))?;
-					let namespace = prefix.join(&skipped.suffix);
+					let namespace = prefix
+						.join(&skipped.suffix)
+						.map_err(|err| messages.failed(err.into()))?;
 					self.skipped(namespace, skipped.track_name.as_ref().into());
 				}
 				_ => return Err(messages.failed(Error::UnexpectedMessage)),
@@ -508,7 +509,7 @@ impl Subscriber {
 		// Cancelled: close our half (FIN on draft-18, RESET_STREAM from draft-22, where a
 		// FIN is not a cancel), then read until the peer closes its own. The PUBLISHes it
 		// made stay ours.
-		tracing::debug!(prefix = %self.origin.absolute(prefix), "subscribe_tracks cancelled");
+		tracing::debug!(prefix = %crate::path::Rooted(self.origin.root(), prefix), "subscribe_tracks cancelled");
 		let Stream { mut writer, mut reader } = stream;
 		match request_stream::fin_cancels(self.version) {
 			true => {
@@ -533,7 +534,7 @@ impl Subscriber {
 	}
 
 	/// A fresh subscription of ours to `name` in `namespace`, and its info once accepted.
-	fn subscribed(&self, namespace: &PathOwned, name: &str) -> Option<(RequestId, Option<track::Info>)> {
+	fn subscribed(&self, namespace: &Path, name: &str) -> Option<(RequestId, Option<track::Info>)> {
 		let state = self.state.lock();
 		let aliases = state.aliases.read();
 		// A paused one is on its way out with the entry it held.
@@ -551,7 +552,7 @@ impl Subscriber {
 
 	/// The peer skipped a listed track: list it through a subscription of ours, opening
 	/// one paused if we have none.
-	fn skipped(&self, namespace: PathOwned, name: Arc<str>) {
+	fn skipped(&self, namespace: Path, name: Arc<str>) {
 		let key = (namespace, name);
 		let mut listings = self.listings.lock();
 		if listings.entries.contains_key(&key) || listings.covering(&key.0).is_none() {
@@ -638,7 +639,7 @@ impl Subscriber {
 					max_age: None,
 					new_group: None,
 					request_id,
-					track_namespace: key.0.as_path(),
+					track_namespace: key.0.clone(),
 					track_name: key.1.as_ref().into(),
 					subscriber_priority: super::super::priority::DEFAULT_WIRE,
 					// No update can change it, so it takes the order a reader gets by default.
@@ -749,7 +750,7 @@ impl Subscriber {
 		mut stream: Stream<Transport, Version>,
 		msg: ietf::Publish<'_>,
 	) -> Result<(), Error> {
-		let key: TrackKey = (msg.track_namespace.to_owned(), msg.track_name.as_ref().into());
+		let key: TrackKey = (msg.track_namespace.clone(), msg.track_name.as_ref().into());
 		let info = accepted_info(&msg.properties, self.version);
 		let flate = self.peer_setup.get().await.flate;
 		let offer = {
@@ -877,7 +878,7 @@ impl Subscriber {
 			}
 			return Ok(());
 		}
-		tracing::debug!(broadcast = %self.origin.absolute(&key.0), track = %key.1, id = %request_id, "holding publish");
+		tracing::debug!(broadcast = %crate::path::Rooted(self.origin.root(), &key.0), track = %key.1, id = %request_id, "holding publish");
 		let upstream = Upstream {
 			stream,
 			messages: Messages::new(self.session.clone(), self.control.client()),
@@ -1278,9 +1279,9 @@ mod tests {
 			Default::default(),
 		);
 		let broadcast = crate::broadcast::Info::default().produce();
-		let lister = Arc::new(broadcast.dynamic().lister().unwrap());
+		let lister = Arc::new(broadcast.requests().lister().unwrap());
 		let tracks = broadcast.consume().tracks().unwrap();
-		let listening = subscriber.listen(Path::new("bcast").unwrap(), lister);
+		let listening = subscriber.listen(crate::Path::from_static("bcast"), lister);
 		Harness {
 			subscriber,
 			peer,
@@ -1364,14 +1365,14 @@ mod tests {
 			kio::Pending<crate::track::Subscribing>,
 			moq_clock::sim::JoinHandle<()>,
 		) {
-			let mut dynamic = self._broadcast.dynamic();
+			let mut dynamic = self._broadcast.requests();
 			let track = self._broadcast.consume().track(name).unwrap();
 			let reader = track.subscribe(None);
 			let request = dynamic.requested_track().await.expect("no track requested");
 			let mut subscriber = self.subscriber.clone();
 			let serving = moq_clock::sim::spawn(async move {
 				subscriber
-					.run_subscribe(Path::new("bcast").unwrap(), dynamic, None, request)
+					.run_subscribe(Path::from_static("bcast"), dynamic, None, request)
 					.await;
 			});
 			(track, reader, serving)
@@ -1563,7 +1564,7 @@ mod tests {
 			let mut h = harness(version);
 			let mut listing = h.establish().await;
 			let skipped = ietf::PublishSkipped {
-				suffix: Path::new("").unwrap(),
+				suffix: Path::from_static(""),
 				track_name: "audio".into(),
 			};
 			write(&mut listing, ietf::PublishSkipped::ID, &skipped).await;
@@ -1608,7 +1609,7 @@ mod tests {
 		let mut h = harness(version);
 		let mut listing = h.establish().await;
 		let skipped = ietf::PublishSkipped {
-			suffix: Path::new("").unwrap(),
+			suffix: Path::from_static(""),
 			track_name: "audio".into(),
 		};
 		write(&mut listing, ietf::PublishSkipped::ID, &skipped).await;

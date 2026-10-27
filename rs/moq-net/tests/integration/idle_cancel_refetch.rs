@@ -4,7 +4,6 @@
 //! fetch of that group still gets every frame (#5348, a release-line regression).
 
 use crate::support;
-use moq_net::Path;
 
 use std::time::Duration;
 
@@ -22,7 +21,7 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 #[moq_clock::test]
 async fn a_group_cut_by_an_idle_cancel_is_refetched_whole() {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast(Path::new("bcast").unwrap()).unwrap();
+	let broadcast = publisher.create_broadcast("bcast").unwrap();
 	let track = broadcast
 		.create_track("audio", moq_net::track::Info::default().with_timescale(None))
 		.unwrap();
@@ -41,11 +40,11 @@ async fn a_group_cut_by_an_idle_cancel_is_refetched_whole() {
 	let _pair = connect_mock(options).await;
 
 	let consumer = client.consume();
-	moq_clock::timeout(TIMEOUT, consumer.routed(Path::new("bcast").unwrap()))
+	moq_clock::timeout(TIMEOUT, consumer.routed("bcast"))
 		.await
 		.unwrap()
 		.unwrap();
-	let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast(Path::new("bcast").unwrap(), None))
+	let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
 		.await
 		.unwrap()
 		.unwrap();

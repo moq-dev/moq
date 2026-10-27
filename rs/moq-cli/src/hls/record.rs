@@ -575,7 +575,7 @@ mod tests {
 	impl Publisher {
 		fn new(names: &[&str]) -> Self {
 			let origin = moq_tokio::origin::spawn();
-			let broadcast = origin.create_broadcast(moq_net::Path::new("live").unwrap()).unwrap();
+			let broadcast = origin.create_broadcast("live").unwrap();
 			// A hinted timeline is advertised before any media, so every rendition is recorded
 			// from its first segment.
 			let hinted = moq_mux::timeline::Config::default().with_duration_hint(Duration::from_secs(2));

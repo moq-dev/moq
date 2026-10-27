@@ -38,7 +38,6 @@ pub fn spawn_config(config: moq_net::origin::Config) -> moq_net::origin::Produce
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use moq_net::Path;
 
 	/// The next route and whether it is active.
 	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
@@ -57,9 +56,7 @@ mod tests {
 		let origin = spawn();
 		let mut announced = origin.consume().announced();
 
-		let broadcast = origin
-			.create_broadcast(Path::new("cam").unwrap())
-			.expect("create broadcast");
+		let broadcast = origin.create_broadcast("cam").expect("create broadcast");
 		broadcast.announce(Default::default()).expect("create broadcast");
 
 		let (update, active) = next_update(&mut announced).await.expect("announce");

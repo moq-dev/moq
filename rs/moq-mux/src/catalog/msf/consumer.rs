@@ -517,7 +517,7 @@ mod test {
 
 	#[test]
 	fn namespace_must_be_expressible_as_a_relative_broadcast() {
-		let base = moq_net::Path::new("room/catalog").unwrap();
+		let base = moq_net::Path::from_static("room/catalog");
 		for (namespace, expected) in [("room/catalog", None), ("", Some(".."))] {
 			let mut track = moq_msf::Track::new("video", moq_msf::Packaging::Loc);
 			track.namespace = Some(namespace.into());

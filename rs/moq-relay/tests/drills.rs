@@ -416,7 +416,7 @@ struct Reader {
 async fn subscribe(origin: &moq_net::origin::Consumer, path: &str) -> Reader {
 	// `routed_broadcast` parks until a route covers the path; `request_broadcast`
 	// would race the announcement and report a live broadcast as unroutable.
-	let broadcast = tokio::time::timeout(TIMEOUT, origin.routed_broadcast(moq_net::Path::new(path).unwrap()))
+	let broadcast = tokio::time::timeout(TIMEOUT, origin.routed_broadcast(path))
 		.await
 		.expect("announcement timed out")
 		.expect("origin closed before announcing");
@@ -453,9 +453,7 @@ async fn cancel_under_backpressure_releases_the_reader(lane: Lane) {
 	let url = path.url.clone();
 
 	let publisher = moq_tokio::origin::spawn();
-	let broadcast = publisher
-		.create_broadcast(moq_net::Path::new("live").unwrap())
-		.expect("create broadcast");
+	let broadcast = publisher.create_broadcast("live").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce broadcast");
 	let mut track = broadcast.create_track(TRACK, timed()).expect("create track");
 	let publish_session = tokio::time::timeout(
@@ -587,9 +585,7 @@ async fn relay_killed_mid_group_aborts_then_resumes(lane: Lane) {
 	let url = path.url.clone();
 
 	let publisher = moq_tokio::origin::spawn();
-	let broadcast = publisher
-		.create_broadcast(moq_net::Path::new("live").unwrap())
-		.expect("create broadcast");
+	let broadcast = publisher.create_broadcast("live").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce broadcast");
 	let mut track = broadcast.create_track(TRACK, timed()).expect("create track");
 	let mut publish_loop = client(&url).publish(publisher.consume()).expect("no connect url");
@@ -712,9 +708,7 @@ async fn interrupted_publisher_republishes_new_content(lane: Lane) {
 	let mut announced = subscribed.announced();
 
 	let first = moq_tokio::origin::spawn();
-	let broadcast = first
-		.create_broadcast(moq_net::Path::new("live").unwrap())
-		.expect("create broadcast");
+	let broadcast = first.create_broadcast("live").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce broadcast");
 	let mut track = broadcast.create_track(TRACK, timed()).expect("create track");
 	let first_session = tokio::time::timeout(
@@ -752,9 +746,7 @@ async fn interrupted_publisher_republishes_new_content(lane: Lane) {
 
 	// Restore: the same name, a new publisher, different content.
 	let second = moq_tokio::origin::spawn();
-	let broadcast = second
-		.create_broadcast(moq_net::Path::new("live").unwrap())
-		.expect("re-create broadcast");
+	let broadcast = second.create_broadcast("live").expect("re-create broadcast");
 	broadcast.announce(Default::default()).expect("announce broadcast");
 	let mut track = broadcast.create_track(TRACK, timed()).expect("re-create track");
 	let second_session = tokio::time::timeout(
@@ -1034,9 +1026,7 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 	let subscribe_path = Path::shaped(lane, &edge, bursty(), seed.wrapping_add(2)).await;
 
 	let publisher = moq_tokio::origin::spawn();
-	let broadcast = publisher
-		.create_broadcast(moq_net::Path::new("live").unwrap())
-		.expect("create broadcast");
+	let broadcast = publisher.create_broadcast("live").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce broadcast");
 	let mut track = broadcast.create_track(TRACK, timed()).expect("create track");
 	let url = publish_path.url.clone();
@@ -1371,7 +1361,7 @@ async fn no_publisher_never_delivers(lane: Lane) {
 	let mut announced = subscribed.announced();
 	let (update, resolved) = tokio::join!(
 		tokio::time::timeout(quiet, next_update(&mut announced)),
-		tokio::time::timeout(quiet, subscribed.routed_broadcast(moq_net::Path::new("live").unwrap())),
+		tokio::time::timeout(quiet, subscribed.routed_broadcast("live")),
 	);
 	if let Ok(update) = update {
 		let path = update.map(|(update, _)| update.prefix.to_string());
@@ -1429,7 +1419,7 @@ async fn subscriber_max_age_skips_bufferbloat(version: &str) {
 	)
 	.await;
 	let publisher = moq_tokio::origin::spawn();
-	let broadcast = publisher.create_broadcast(moq_net::Path::new("live").unwrap()).unwrap();
+	let broadcast = publisher.create_broadcast("live").unwrap();
 	let mut track = broadcast.create_track(TRACK, timed()).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 	let mut dial = dial();
@@ -1457,7 +1447,7 @@ async fn subscriber_max_age_skips_bufferbloat(version: &str) {
 		.await
 		.unwrap();
 	write_group(&mut track, b"warmup");
-	let remote = tokio::time::timeout(TIMEOUT, consumed.routed_broadcast(moq_net::Path::new("live").unwrap()))
+	let remote = tokio::time::timeout(TIMEOUT, consumed.routed_broadcast("live"))
 		.await
 		.unwrap()
 		.unwrap();

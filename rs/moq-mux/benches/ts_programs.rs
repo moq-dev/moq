@@ -4,7 +4,6 @@
 //! describes shows what a program costs before it starts. Stray PIDs no table lists sweep the
 //! unclaimed-PID accounting, against the same packets sent as null stuffing, which skips it.
 
-use moq_net::Path;
 use std::time::Duration;
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
@@ -215,7 +214,7 @@ fn setup() -> (moq_mux::container::ts::Programs, impl Sized) {
 	let (origin, driver) = moq_net::origin::Producer::new(Default::default());
 	let programs = moq_mux::container::ts::Programs::new(
 		origin,
-		Path::new("bench.hang").unwrap(),
+		moq_net::Path::from_static("bench.hang"),
 		moq_mux::catalog::Config::default(),
 	);
 	(programs, driver)

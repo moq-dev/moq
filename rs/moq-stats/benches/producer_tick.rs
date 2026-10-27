@@ -120,7 +120,7 @@ impl Relay {
 			.iter()
 			.map(|path| {
 				origin
-					.publish(moq_net::Path::new(path.as_str()).unwrap(), origin::Route::default())
+					.publish(path.as_str(), origin::Route::default())
 					.expect("publish path")
 			})
 			.collect();
@@ -128,8 +128,8 @@ impl Relay {
 		let mut sessions = Vec::with_capacity(tiers);
 		let tier_labels: Vec<_> = (0..tiers)
 			.map(|tier| {
-				let tier = stats::Tier::new(moq_net::Path::try_from(format!("t{tier}")).unwrap());
-				let session = registry.tier(tier.clone()).session(moq_net::Path::new("root").unwrap());
+				let tier = stats::Tier::new(moq_net::Path::new(&format!("t{tier}")).unwrap());
+				let session = registry.tier(tier.clone()).session(moq_net::Path::from_static("root"));
 				let mut cursor = origin.consume().with_stats(session.clone()).announced();
 				while cursor.next().now_or_never().flatten().is_some() {}
 				cursors.push(cursor);

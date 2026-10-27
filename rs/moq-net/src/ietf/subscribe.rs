@@ -21,7 +21,7 @@ use super::Version;
 #[derive(Clone, Debug)]
 pub struct Subscribe<'a> {
 	pub request_id: RequestId,
-	pub track_namespace: Path<'a>,
+	pub track_namespace: Path,
 	pub track_name: Cow<'a, str>,
 	pub subscriber_priority: u8,
 	pub group_order: GroupOrder,
@@ -433,8 +433,7 @@ pub struct SubscribeUpdate {
 	pub new_group: Option<u64>,
 	/// Subscriber max age in milliseconds (MoQ Timestamp), if negotiated.
 	pub max_age: Option<u64>,
-	/// FILL_PARAMETERS (0x23, draft-22): the backfill a paused PUBLISH subscription takes as
-	/// it resumes (draft-22 section 3.6.2).
+	/// FILL_PARAMETERS (0x23, draft-22): the backfill requested with this update.
 	pub fill: Option<Fill>,
 }
 
@@ -625,7 +624,7 @@ mod tests {
 				let msg = Subscribe {
 					max_age,
 					request_id: RequestId(0),
-					track_namespace: Path::new("live").unwrap(),
+					track_namespace: Path::from_static("live"),
 					track_name: "catalog".into(),
 					subscriber_priority: 128,
 					group_order: GroupOrder::Descending,
@@ -667,7 +666,7 @@ mod tests {
 			new_group: None,
 			max_age: None,
 			request_id: RequestId(1),
-			track_namespace: Path::new("test").unwrap(),
+			track_namespace: Path::from_static("test"),
 			track_name: "video".into(),
 			subscriber_priority: 128,
 			group_order: GroupOrder::Descending,
@@ -696,7 +695,7 @@ mod tests {
 			new_group: None,
 			max_age: None,
 			request_id: RequestId(1),
-			track_namespace: Path::new("test").unwrap(),
+			track_namespace: Path::from_static("test"),
 			track_name: "video".into(),
 			subscriber_priority: 128,
 			group_order: GroupOrder::Descending,
@@ -739,7 +738,7 @@ mod tests {
 				new_group: Some(7),
 				max_age: None,
 				request_id: RequestId(1),
-				track_namespace: Path::new("test").unwrap(),
+				track_namespace: Path::from_static("test"),
 				track_name: "video".into(),
 				subscriber_priority: 128,
 				group_order: GroupOrder::Descending,
@@ -782,7 +781,7 @@ mod tests {
 			if version == Version::Draft17 {
 				w.varint(0)?; // required_request_id_delta
 			}
-			encode_namespace(w, &Path::new("test").unwrap())?;
+			encode_namespace(w, &Path::from_static("test"))?;
 			w.string("video")?;
 			encode_params!(w, version,
 				0x04 => millis,
@@ -849,7 +848,7 @@ mod tests {
 			new_group: None,
 			max_age: None,
 			request_id: RequestId(1),
-			track_namespace: Path::new("test").unwrap(),
+			track_namespace: Path::from_static("test"),
 			track_name: "video".into(),
 			subscriber_priority: 128,
 			group_order: GroupOrder::Descending,
@@ -885,7 +884,7 @@ mod tests {
 			new_group: None,
 			max_age: None,
 			request_id: RequestId(100),
-			track_namespace: Path::new("conference/room123").unwrap(),
+			track_namespace: Path::from_static("conference/room123"),
 			track_name: "audio".into(),
 			subscriber_priority: 255,
 			group_order: GroupOrder::Descending,
@@ -1047,7 +1046,7 @@ mod tests {
 			let mut body = Vec::new();
 			let w = &mut Encoder::new(&mut body, version.into());
 			RequestId(1).encode(w, version)?;
-			encode_namespace(w, &crate::Path::new("broadcast").unwrap())?;
+			encode_namespace(w, &crate::Path::from_static("broadcast"))?;
 			w.string("video")?;
 			encode_params!(w, version,
 				0x02 => 5000u64,
@@ -1075,7 +1074,7 @@ mod tests {
 				new_group: None,
 				max_age: None,
 				request_id: RequestId(1),
-				track_namespace: crate::Path::new("broadcast").unwrap(),
+				track_namespace: crate::Path::from_static("broadcast"),
 				track_name: "video".into(),
 				subscriber_priority: 128,
 				group_order: GroupOrder::Descending,
@@ -1254,7 +1253,7 @@ mod tests {
 			new_group: None,
 			max_age: None,
 			request_id: RequestId(1),
-			track_namespace: Path::new("test").unwrap(),
+			track_namespace: Path::from_static("test"),
 			track_name: "video".into(),
 			subscriber_priority: 128,
 			group_order: GroupOrder::Descending,
@@ -1324,7 +1323,7 @@ mod tests {
 			new_group: None,
 			max_age: None,
 			request_id: RequestId(1),
-			track_namespace: Path::new("test").unwrap(),
+			track_namespace: Path::from_static("test"),
 			track_name: "video".into(),
 			subscriber_priority: 128,
 			group_order: GroupOrder::Descending,
@@ -1650,7 +1649,7 @@ mod tests {
 			new_group: None,
 			max_age: None,
 			request_id: RequestId(1),
-			track_namespace: crate::Path::new("live").unwrap(),
+			track_namespace: crate::Path::from_static("live"),
 			track_name: "video".into(),
 			subscriber_priority: 128,
 			group_order: GroupOrder::Descending,
@@ -1714,7 +1713,7 @@ mod tests {
 				new_group: None,
 				max_age: None,
 				request_id: RequestId(1),
-				track_namespace: crate::Path::new("live").unwrap(),
+				track_namespace: crate::Path::from_static("live"),
 				track_name: "video".into(),
 				subscriber_priority: 128,
 				group_order: GroupOrder::Descending,

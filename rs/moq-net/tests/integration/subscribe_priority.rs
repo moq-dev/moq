@@ -4,7 +4,6 @@
 //! and follows it as they come and go, directly and through a relay.
 
 use crate::support;
-use moq_net::Path;
 
 use std::time::Duration;
 
@@ -58,7 +57,7 @@ async fn priority(track: &moq_net::track::Producer, want: i8) -> Result<(), Stri
 /// publisher sees the priority rise and fall back.
 async fn follows(version: Version, relay: bool) -> Result<(), String> {
 	let publisher = produce_origin(1);
-	let broadcast = publisher.create_broadcast(Path::new("bcast").unwrap()).unwrap();
+	let broadcast = publisher.create_broadcast("bcast").unwrap();
 	let track = broadcast
 		.create_track("video", Info::default().with_timescale(Timescale::MILLI))
 		.unwrap();
@@ -75,11 +74,11 @@ async fn follows(version: Version, relay: bool) -> Result<(), String> {
 	}
 
 	let consumer = subscriber.consume();
-	moq_clock::timeout(TIMEOUT, consumer.routed(Path::new("bcast").unwrap()))
+	moq_clock::timeout(TIMEOUT, consumer.routed("bcast"))
 		.await
 		.expect("announce timeout")
 		.expect("routed");
-	let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast(Path::new("bcast").unwrap(), None))
+	let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");

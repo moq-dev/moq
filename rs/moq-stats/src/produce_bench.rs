@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use moq_clock::Instant;
-use moq_net::{PathOwned, origin, stats::Registry, track};
+use moq_net::{Path, origin, stats::Registry, track};
 
 use super::{Drain, PendingPair, Task};
 
@@ -37,7 +37,7 @@ impl Driver {
 		let task = Task {
 			registry,
 			origin,
-			prefix: PathOwned::try_from(".stats").expect("a literal path"),
+			prefix: Path::from_static(".stats"),
 			node: None,
 			depth,
 			linger: Duration::from_secs(300),
@@ -63,7 +63,7 @@ impl Driver {
 	pub fn hold_presence(&mut self, label: &str) -> track::Subscriber {
 		let stamp = self.drain.stamp(self.now);
 		let node = &mut self.drain.node;
-		let label = moq_net::Path::new(label).expect("a valid bench label").to_owned();
+		let label = Path::new(label).expect("label fits");
 		node.adopt_presence(&self.drain.report, label.clone(), PendingPair::default(), stamp);
 		node.presence[&label].pair.plain.track.subscribe(None)
 	}
@@ -76,7 +76,7 @@ impl Driver {
 		let node = &mut self.drain.node;
 		node.adopt_prefix(
 			&self.drain.report,
-			moq_net::Path::new(path).expect("a valid bench path").to_owned(),
+			Path::new(path).expect("path fits"),
 			PendingPair::default(),
 			tick,
 			stamp,
