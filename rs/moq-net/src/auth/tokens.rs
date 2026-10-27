@@ -686,6 +686,23 @@ mod tests {
 		ok(&set);
 	}
 
+	/// The first verdict is the answer even when nothing polled it before a revocation or
+	/// the connection's end.
+	#[test]
+	fn a_granted_set_keeps_its_answer_when_revoked_before_it_is_read() {
+		let set = Tokens::new(tokens(&["connection", "a"]));
+		let session = dial(&set, true, false);
+		session.grant_credential();
+		session.link.granted(id(&set, "a"), Grant::all());
+		session.refuse(id(&set, "a"), SessionError::Unauthorized);
+		ok(&set);
+
+		set.set(tokens(&["connection", "b"]));
+		session.link.granted(id(&set, "b"), Grant::all());
+		set.handle().abort(Error::Session(SessionError::Unauthorized));
+		ok(&set);
+	}
+
 	/// The connection credential revoked after its grant refuses a later set that keeps it.
 	#[test]
 	fn a_kept_credential_revoked_after_its_grant_refuses_the_next_set() {

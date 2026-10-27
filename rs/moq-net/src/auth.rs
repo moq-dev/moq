@@ -499,6 +499,7 @@ impl State {
 		if self.closed.is_some() {
 			return None;
 		}
+		self.record();
 		self.closed = Some(err.clone());
 		let ids: Vec<u64> = self.tokens.keys().copied().collect();
 		for id in ids {
@@ -998,6 +999,8 @@ impl Link {
 			link.replied = true;
 			link.recompute();
 			state.answer(id, Ok(Answer::Granted));
+			// Latch a set this grant completed, before a later revocation can replace its answer.
+			state.record();
 		});
 	}
 
@@ -1079,6 +1082,8 @@ impl Link {
 	/// leaves it for the next session to present, except on a handle of the session's own.
 	pub(crate) fn ended(&self, id: u64, err: Error) {
 		self.with_state(|state, link_id| {
+			// Latch a set already complete, so this end never replaces its answer.
+			state.record();
 			// A draining session's verdict is stale while an active session still presents the
 			// token: that session's own answer decides, even mid-retry with no grant right now.
 			let superseded = !attached(&mut state.links, link_id).active()
