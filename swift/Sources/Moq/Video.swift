@@ -34,17 +34,23 @@ public enum Video {
         let ffi: MoqVideoProducer
 
         /// Open a video track on the catalog's broadcast and register its rendition.
+        ///
+        /// Pass `lower`, the next rendition down a simulcast ladder, to disable this
+        /// one while the bandwidth grant cannot fund it; it resumes once the grant
+        /// recovers. Needs `bandwidth` and a bitrate above the lower rendition's.
         public init(
             catalog: Media.CatalogProducer,
             input: EncoderInput,
             output: EncoderOutput,
             track: String? = nil,
-            bandwidth: Bandwidth? = nil
+            bandwidth: Bandwidth? = nil,
+            lower: Producer? = nil
         ) throws {
             ffi = try MoqVideoProducer(
                 catalog: catalog.ffi,
                 options: MoqVideoProducerOptions(
-                    input: input, output: output, track: track, bandwidth: bandwidth?.ffi))
+                    input: input, output: output, track: track, bandwidth: bandwidth?.ffi,
+                    lower: lower?.ffi))
         }
 
         /// A watch-only handle to whether the video track has subscribers.

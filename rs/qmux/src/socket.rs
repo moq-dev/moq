@@ -30,10 +30,10 @@ pub trait SocketStats: Send + Sync + 'static {
 /// A shared handle to a transport's statistics.
 pub type SharedSocketStats = Arc<dyn SocketStats>;
 
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use unix::TcpStats;
 
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod unix {
 	use super::*;
 	use std::io;
@@ -226,7 +226,6 @@ mod unix {
 		}
 	}
 
-	#[cfg(any(target_os = "linux", target_os = "macos"))]
 	impl SocketStats for TcpStats {
 		fn rtt(&self) -> Option<Duration> {
 			let (info, len) = sys::tcp_info(self.borrow())?;
@@ -268,10 +267,6 @@ mod unix {
 			}
 		}
 	}
-
-	/// Platforms without a readable TCP info struct report nothing.
-	#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-	impl SocketStats for TcpStats {}
 
 	/// Pin the field offsets against the kernel's struct.
 	///

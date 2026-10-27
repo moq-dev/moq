@@ -48,6 +48,7 @@ webm-iterable = "0.7"
 criterion = { workspace = true }
 futures = { workspace = true }
 moq-clock = { workspace = true, features = ["sim"] }
+proptest = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tracing-test = { workspace = true, features = ["no-env-filter"] }
 

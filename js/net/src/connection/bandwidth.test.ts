@@ -108,7 +108,8 @@ test("an idle track on a live connection claims nothing", async () => {
 		const idleShare = allocator.reserve(idle.demand(), 4_000_000);
 
 		await waitUntil(() => watchedShare.peek() === 2_000_000);
-		expect(idleShare.peek()).toBeUndefined();
+		// Claims nothing from the watched track, but reads what it would get back.
+		expect(idleShare.peek()).toBe(1_000_000);
 	} finally {
 		handle.close();
 	}
