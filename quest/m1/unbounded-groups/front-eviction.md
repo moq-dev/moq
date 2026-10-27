@@ -18,19 +18,16 @@ records".
 
 See the [epic](/quest/m1/unbounded-groups/README.md) for the decisions.
 
-- Storage is the lock-free
-  append-only log (`kio::log`) (decided 2026-10-24
-  by the maintainer over the group storage benchmark,
-  [moq-dev/moq#6627](https://github.com/moq-dev/moq/pull/6627): land the
-  end-state storage now rather than a mutex layout swapped later; numbers in
-  the [kio contention epic](/quest/m2/perf/kio-channel-contention/README.md)).
-  Frames keep absolute indices. The log is the tail run, from a base that
-  only advances: front eviction raises its base. Refilled frames go into
-  sorted runs below the base, behind their own mutex, and never rejoin the
-  log. Readers keep one absolute cursor, read the log lock-free, and search
-  the refill runs only when the cursor falls below the base. Prototyped this
-  way, the log cost 10 to 40% less per reader across cores and about 15 ns
-  more per append.
+- Storage is the lock-free append-only log (`kio::log`), which landed in
+  [moq-dev/moq#6782](https://github.com/moq-dev/moq/pull/6782) (decided
+  2026-10-24 by the maintainer over the group storage benchmark,
+  [moq-dev/moq#6627](https://github.com/moq-dev/moq/pull/6627)). Frames keep
+  absolute indices. The log is the tail run, from a base that only advances:
+  front eviction raises its base through `log::Writer::evict`, which already
+  exists (`rs/kio/src/log.rs`). Refilled frames go into sorted runs below
+  the base, behind their own mutex, and never rejoin the log. Readers keep
+  one absolute cursor, read the log lock-free, and search the refill runs
+  only when the cursor falls below the base.
 - Pool debt evicts whole cold groups first (`pay_debt` in
   `model/track.rs`, as today). Front frames are shed only from a group
   that is protected or being read.

@@ -4,20 +4,20 @@
 
 `@moq/net` matches Rust: `Subscription` carries ranges beside its existing
 `order`, the lite-07 SUBSCRIBE carries them on the wire, and `fetchGroup`
-becomes a one-range subscription or is removed. FETCH is gone from lite-07 in
-both Rust and JS. A JavaScript publisher serves requested ranges that are no
-longer in its live cache.
+becomes a one-range subscription or is removed. A JavaScript publisher serves
+requested ranges that are no longer in its live cache.
 
 ## Plan
 
-Decided 2026-10-25 (maintainer, on
-[moq-dev/moq#6807](https://github.com/moq-dev/moq/pull/6807)): the coordinated
-removal of FETCH from lite-07 lands here, in Rust and JS together, once
-[Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) fills through the
-subscription. Rust stops sending and serving lite-07 FETCH, and
-`drafts/draft-lcurley-moq-lite.md` drops FETCH from lite-07 with its changelog
-bullets (FETCH max age and epoch). Published versions (lite-03..06) keep FETCH.
-Mirror lite-07 bounded completion in the publisher too: a covered bounded
+Decided 2026-10-27 (maintainer): removing FETCH from lite-07 moved to
+[Remove FETCH from lite-07](/quest/m1/subscribe-ranges/lite07-fetch.md), and
+this quest no longer waits on
+[Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md). The rest starts now:
+the ranges model, anchors, `maxDelay: null`, and the on-demand request
+surface. Rust's lite-07 SUBSCRIBE already carries ranges
+([moq-dev/moq#6715](https://github.com/moq-dev/moq/pull/6715)).
+
+Mirror lite-07 bounded completion in the publisher: a covered bounded
 subscription FINs without SUBSCRIBE_END. The JS subscriber already accepts that
 FIN, closing the request's track once its tail settles, and failing it when an
 update moved the range and the groups that arrived leave it uncovered. Reopen
@@ -33,8 +33,10 @@ omitted one means the live edge only.
 Decided in the 2026-10-05 audit: the producer half of
 [JavaScript FETCH](/quest/m1/js-fetch.md) folds in here, so `@moq/net`'s
 on-demand request surface takes range requests from the start instead of the
-per-group `requested_group` shape Rust replaced with `requested_fill`. That quest keeps only
-IETF FETCH dispatch. Resized from [M] to [L] for it.
+per-group `requested_group` shape Rust replaced with `requested_fill`. IETF
+FETCH dispatch onto it is
+[on-demand JavaScript FETCH](/quest/m1/js-fetch-on-demand.md). Resized from
+[M] to [L] for it.
 
 - Expose an owned request handle rather than a storage callback; dropping a
   request refuses it rather than leaving the subscriber waiting. Preserve
@@ -53,6 +55,7 @@ violation, as `lite/subscriber.ts` `runGroup` does. Preserve the per-reader
 group-bound rule for reliable reads, live-edge selection, subscription
 updates, and publisher datagrams.
 
-## Required
+## Related
 
-- [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - the wire this speaks
+- [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - the Rust lite-07 range fill this mirrors
+- [Remove FETCH from lite-07](/quest/m1/subscribe-ranges/lite07-fetch.md) - follows this and Lite-07 ranges

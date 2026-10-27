@@ -12,7 +12,7 @@ use super::token::RequestToken;
 
 use super::Message;
 use super::epoch;
-use super::namespace::{decode_track, encode_namespace};
+use super::namespace::{decode_track, encode_track};
 
 use super::Version;
 
@@ -128,8 +128,7 @@ impl Message for Subscribe<'_> {
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
-		encode_namespace(w, &self.track_namespace)?;
-		w.string(&self.track_name)?;
+		encode_track(w, &self.track_namespace, &self.track_name)?;
 
 		// FILL_PARAMETERS arrived in draft-22. Sending it to an older peer would be an
 		// unknown parameter, which is a protocol violation, so it is dropped instead.
@@ -419,8 +418,7 @@ mod tests {
 			let mut buf = Vec::new();
 			let w = &mut Encoder::new(&mut buf, version.into());
 			RequestId(1).encode(w, version)?;
-			encode_namespace(w, &Path::from_static("test"))?;
-			w.string("video")?;
+			encode_track(w, &Path::from_static("test"), "video")?;
 			encode_params!(w, version,
 				0x04 => millis,
 			);
@@ -605,8 +603,7 @@ mod tests {
 			let mut body = Vec::new();
 			let w = &mut Encoder::new(&mut body, version.into());
 			RequestId(1).encode(w, version)?;
-			encode_namespace(w, &crate::Path::from_static("broadcast"))?;
-			w.string("video")?;
+			encode_track(w, &crate::Path::from_static("broadcast"), "video")?;
 			encode_params!(w, version,
 				0x02 => 5000u64,
 				0x06 => 9000u64,

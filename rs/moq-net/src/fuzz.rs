@@ -192,11 +192,11 @@ fn ietf_paths(data: &[u8], version: ietf::Version) {
 	if let Ok(path) = ietf::namespace::decode_namespace(&mut Decoder::new(data, form)) {
 		assert_strict(&path);
 		let mut encoded = Vec::new();
-		if ietf::namespace::encode_namespace(&mut Encoder::new(&mut encoded, form), &path).is_ok() {
-			let echo = ietf::namespace::decode_namespace(&mut Decoder::new(&encoded, form))
-				.expect("could not decode our own namespace");
-			assert_eq!(echo, path, "namespace did not survive a round trip");
-		}
+		ietf::namespace::encode_namespace(&mut Encoder::new(&mut encoded, form), &path)
+			.expect("could not encode a decoded namespace");
+		let echo = ietf::namespace::decode_namespace(&mut Decoder::new(&encoded, form))
+			.expect("could not decode our own namespace");
+		assert_eq!(echo, path, "namespace did not survive a round trip");
 	}
 	if let Ok((path, _)) = ietf::namespace::decode_track(&mut Decoder::new(data, form)) {
 		assert_strict(&path);

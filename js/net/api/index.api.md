@@ -427,7 +427,7 @@ function isWebTransportSupported(): boolean;
 
 function join(path: Valid, other: Valid): Valid;
 
-const MAX_BYTES = 16384;
+const MAX_BYTES = 4096;
 
 const MAX_GROUP_CACHE_BYTES: number;
 

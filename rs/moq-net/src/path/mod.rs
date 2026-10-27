@@ -129,9 +129,9 @@ impl Path {
 
 	/// Maximum length of a path in bytes.
 	///
-	/// A quarter of the 64 KiB moq-lite message limit, leaving room for every other
-	/// field of a message that carries a path.
-	pub const MAX_BYTES: usize = 16 * 1024;
+	/// Matches the IETF moq-transport limit of 4096 bytes for a namespace. Its tuple fields
+	/// drop the path's separators and escapes, so every path fits both wires.
+	pub const MAX_BYTES: usize = 4096;
 
 	/// Create a new Path by copying a string slice.
 	///

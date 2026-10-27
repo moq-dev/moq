@@ -139,8 +139,7 @@ export class Subscribe {
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
 		await w.u62(this.requestId);
-		await Namespace.encode(w, this.trackNamespace);
-		await w.string(this.trackName);
+		await Namespace.encodeTrack(w, this.trackNamespace, this.trackName);
 
 		const params = new Parameters();
 		params.subscriberPriority = this.subscriberPriority;

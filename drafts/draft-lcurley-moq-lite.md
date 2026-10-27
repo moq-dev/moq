@@ -441,7 +441,7 @@ A second ANNOUNCE_START for an already-advertised route is a protocol violation;
 The subscriber MUST close the session with a PROTOCOL_VIOLATION if it receives an ANNOUNCE_END, ANNOUNCE_UPDATE, or ANNOUNCE_RESTART referencing an Announce ID that was never assigned or already retired, an ANNOUNCE_START for a route that is already advertised, or any announcement before ANNOUNCE_OK.
 When the stream is closed, the subscriber MUST assume that all routes are now unavailable.
 
-A broadcast path has at most 32 segments and at most 16,384 bytes; a receiver MUST close the session with a PROTOCOL_VIOLATION on a longer one, including one resolved by [Compression](#announce-compression).
+A broadcast path has at most 32 segments and at most 4,096 bytes; a receiver MUST close the session with a PROTOCOL_VIOLATION on a longer one, including one resolved by [Compression](#announce-compression).
 A route covers a path when its prefix is a leading run of the path's segments; matching is per path segment, so a prefix never matches half a segment, and equality is byte-by-byte within each segment.
 A publisher answering a request stream presents each of its routes clamped to the intersection with the requested prefix: a route above the request's prefix appears as the request prefix itself (an empty suffix), which is exactly the covered set the subscriber may see.
 There MAY be multiple Announce Streams, potentially containing overlapping prefixes, that get their own ANNOUNCE_OK + announcements.
@@ -1825,7 +1825,7 @@ The `Message Length` describes the payload size on the wire.
 
 ## moq-lite-07
 
-- Limited a broadcast path to 32 segments and 16,384 bytes.
+- Limited a broadcast path to 32 segments and 4,096 bytes.
 
 - A session without a negotiated subprotocol negotiates the version in a draft-14 CLIENT_SETUP and SERVER_SETUP exchange. Implementations apply this to moq-lite-03 through moq-lite-06 too.
 

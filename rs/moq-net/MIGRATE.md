@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Paths fit moq-transport's 4096-byte namespace ([#6927](https://github.com/moq-dev/moq/pull/6927))
+
+`Path::MAX_BYTES` is 4096, moq-transport's namespace limit, so every path fits every wire and building a longer one fails with `path::Invalid::TooLong`. Keep broadcast paths within 4096 bytes.
+A moq-transport namespace whose escaped path would exceed it is refused when decoded, and a SUBSCRIBE, TRACK\_STATUS, FETCH, or PUBLISH whose namespace and track name exceed 4096 bytes together fails that request with `Error::Encode` instead of being sent.
+
 ### Building a `Path` refuses empty segments ([#6648](https://github.com/moq-dev/moq/pull/6648))
 
 `Path::new` and `TryFrom` fail with `path::Invalid::EmptySegment` on a leading, trailing, or doubled `/` instead of collapsing it, so a path has one spelling; the empty path is still the root. Origin entry points report it as `Error::EmptySegment`, and `Path::from_static` panics on it.
@@ -20,7 +25,7 @@ The moql SETUP (no ALPN, or `moql`) now negotiates only moq-lite versions.
 
 ### `Path` and `Relative` have no lifetime
 
-There is one owned `Path` type: a short path is stored inline and a long one shares a reference-counted buffer, so cloning stays cheap. Every path is at most `Path::MAX_BYTES` (16 KiB).
+There is one owned `Path` type: a short path is stored inline and a long one shares a reference-counted buffer, so cloning stays cheap. Every path is at most `Path::MAX_BYTES`.
 
 - `PathOwned`, `Path<'a>`, and `Path<'static>` are all `Path`; `RelativeOwned` and `Relative<'a>` are `Relative`.
 - `Path::{to_owned, into_owned, borrow}` and the `Relative` equivalents are gone: drop the call, or `clone()` a `&Path` you need to keep.

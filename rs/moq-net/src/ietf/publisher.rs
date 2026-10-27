@@ -8709,8 +8709,7 @@ mod serve_tests {
 				let encode = |body: &mut Vec<u8>| -> Result<(), crate::coding::EncodeError> {
 					let w = &mut Encoder::new(body, version.into());
 					RequestId(REQUEST_ID).encode(w, version)?;
-					super::super::namespace::encode_namespace(w, &crate::Path::from_static("room"))?;
-					w.string("video")?;
+					super::super::namespace::encode_track(w, &crate::Path::from_static("room"), "video")?;
 					encode_params!(w, version,
 						0x04 => 7u64,
 						super::super::epoch::EPOCH_PARAM => Some(stale.clone()),

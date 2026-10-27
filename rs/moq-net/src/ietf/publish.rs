@@ -110,7 +110,7 @@ use crate::{
 	coding::{Decode, DecodeError, Decoder, Encode, EncodeError, Encoder},
 	ietf::{
 		Filter, GroupOrder, Location, Properties, RequestId,
-		namespace::{decode_track, encode_namespace},
+		namespace::{decode_track, encode_track},
 	},
 };
 
@@ -213,8 +213,7 @@ impl Message for Publish<'_> {
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		self.request_id.encode(w, version)?;
-		encode_namespace(w, &self.track_namespace)?;
-		w.string(&self.track_name)?;
+		encode_track(w, &self.track_namespace, &self.track_name)?;
 		w.varint(self.track_alias)?;
 
 		// GROUP_ORDER is illegal on PUBLISH on draft-18 (a peer closes the session with
@@ -359,8 +358,7 @@ mod tests {
 		let mut body = Vec::new();
 		let w = &mut Encoder::new(&mut body, version.into());
 		RequestId(1).encode(w, version)?;
-		super::super::namespace::encode_namespace(w, &crate::Path::from_static("broadcast"))?;
-		w.string("video")?;
+		super::super::namespace::encode_track(w, &crate::Path::from_static("broadcast"), "video")?;
 		w.varint(1u64)?; // track alias
 
 		// SUBSCRIBER_PRIORITY then LOCATION_FILTER, delta encoded from 0.
@@ -382,8 +380,7 @@ mod tests {
 		let mut body = Vec::new();
 		let w = &mut Encoder::new(&mut body, version.into());
 		RequestId(1).encode(w, version)?;
-		super::super::namespace::encode_namespace(w, &crate::Path::from_static("broadcast"))?;
-		w.string("video")?;
+		super::super::namespace::encode_track(w, &crate::Path::from_static("broadcast"), "video")?;
 		w.varint(1u64)?;
 		encode_params!(w, version, 0x20 => 128u8);
 		Properties::default().encode(w, version)?;
@@ -408,8 +405,7 @@ mod tests {
 		let mut buf = Vec::new();
 		let w = &mut Encoder::new(&mut buf, version.into());
 		RequestId(1).encode(w, version).unwrap();
-		encode_namespace(w, &Path::from_static("t")).unwrap();
-		w.string("v").unwrap();
+		encode_track(w, &Path::from_static("t"), "v").unwrap();
 		w.varint(1).unwrap();
 		w.varint(1).unwrap();
 		w.varint(key).unwrap();
