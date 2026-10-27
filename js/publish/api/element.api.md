@@ -43,8 +43,8 @@ export default class extends HTMLElement {
 	get preview(): Preview.Mode;
 	set preview(value: Preview.Mode);
 	readonly signals: Signals.Effect;
-	get source(): File | SourceType | undefined;
-	set source(value: File | SourceType | undefined);
+	get source(): SourceType | File | undefined;
+	set source(value: SourceType | File | undefined);
 	readonly sources: Signals.Readonlys<{
 		audio: Signals.Signal<Source.Microphone | Source.Screen | undefined>;
 		file: Signals.Signal<Source.File | undefined>;

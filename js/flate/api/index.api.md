@@ -34,9 +34,9 @@ export namespace Snapshot {
 	}
 	export class Consumer {
 		constructor(config: Snapshot.Consumer.Config);
-		[asyncIterator](): AsyncIterator<Timed<Uint8Array<ArrayBufferLike>>>;
-		latest(): Promise<Timed<Uint8Array<ArrayBufferLike>> | undefined>;
-		next(): Promise<Timed<Uint8Array<ArrayBufferLike>> | undefined>;
+		[asyncIterator](): AsyncIterator<Timed<Uint8Array>>;
+		latest(): Promise<Timed<Uint8Array> | undefined>;
+		next(): Promise<Timed<Uint8Array> | undefined>;
 	}
 	export namespace Producer {
 		export type Config = Snapshot.Config & {
@@ -46,7 +46,7 @@ export namespace Snapshot {
 	export class Producer {
 		constructor(config: Snapshot.Producer.Config);
 		finish(): void;
-		update({ ... }: Timed<Uint8Array<ArrayBufferLike>>): void;
+		update({ ... }: Timed<Uint8Array>): void;
 	}
 }
 
@@ -61,8 +61,8 @@ export namespace Stream {
 	}
 	export class Consumer {
 		constructor(config: Stream.Consumer.Config);
-		[asyncIterator](): AsyncIterator<Timed<Uint8Array<ArrayBufferLike>>>;
-		next(): Promise<Timed<Uint8Array<ArrayBufferLike>> | undefined>;
+		[asyncIterator](): AsyncIterator<Timed<Uint8Array>>;
+		next(): Promise<Timed<Uint8Array> | undefined>;
 	}
 	export namespace Producer {
 		export type Config = Stream.Config & {
@@ -71,7 +71,7 @@ export namespace Stream {
 	}
 	export class Producer {
 		constructor(config: Stream.Producer.Config);
-		append({ ... }: Timed<Uint8Array<ArrayBufferLike>>): void;
+		append({ ... }: Timed<Uint8Array>): void;
 		finish(): void;
 	}
 	export class Rolled extends Error {

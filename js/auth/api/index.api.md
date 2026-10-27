@@ -67,29 +67,29 @@ export const ClaimsSchema: ZodMiniPipe<ZodMiniObject<{
 	sub: ZodMiniOptional<ZodMiniUnknown>;
 	subscribe: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
 }, $strict>, ZodMiniTransform<Omit<{
-	exp?: number;
-	get?: string | string[];
-	iat?: number;
-	nbf?: number;
-	publish?: string[];
-	put?: string | string[];
+	exp?: number | undefined;
+	get?: string | string[] | undefined;
+	iat?: number | undefined;
+	nbf?: number | undefined;
+	publish?: string[] | undefined;
+	put?: string | string[] | undefined;
 	root: string;
-	subscribe?: string[];
+	subscribe?: string[] | undefined;
 }, "get" | "put"> & {
 	publish?: string[];
 	subscribe?: string[];
 }, {
-	exp?: number;
-	get?: string | string[];
-	iat?: number;
+	exp?: number | undefined;
+	get?: string | string[] | undefined;
+	iat?: number | undefined;
 	iss?: unknown;
 	jti?: unknown;
-	nbf?: number;
-	publish?: string[];
-	put?: string | string[];
+	nbf?: number | undefined;
+	publish?: string[] | undefined;
+	put?: string | string[] | undefined;
 	root: string;
 	sub?: unknown;
-	subscribe?: string[];
+	subscribe?: string[] | undefined;
 }>>;
 
 export type Grant = infer<typeof GrantSchema>;
@@ -110,318 +110,10 @@ export const GrantSchema: ZodMiniObject<{
 export { InvalidPattern } from "@moq/pattern";
 
 export const Key: {
-	generate: (algorithm: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512", kid?: string) => Promise<{
-		alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
-		k: string;
-		key_ops: ("decrypt" | "encrypt" | "sign" | "verify")[];
-		kid?: string;
-		kty: "oct";
-		scope?: Omit<{
-			get?: string[];
-			publish?: string[];
-			put?: string[];
-			root: string;
-			subscribe?: string[];
-		}, "put" | "get"> & {
-			publish?: string[];
-			subscribe?: string[];
-		};
-	} | {
-		alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
-		d?: string;
-		dp?: string;
-		dq?: string;
-		e: string;
-		key_ops: ("decrypt" | "encrypt" | "sign" | "verify")[];
-		kid?: string;
-		kty: "RSA";
-		n: string;
-		oth?: undefined;
-		p?: string;
-		q?: string;
-		qi?: string;
-		scope?: Omit<{
-			get?: string[];
-			publish?: string[];
-			put?: string[];
-			root: string;
-			subscribe?: string[];
-		}, "put" | "get"> & {
-			publish?: string[];
-			subscribe?: string[];
-		};
-	} | {
-		alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
-		crv: "P-256" | "P-384";
-		d?: string;
-		key_ops: ("decrypt" | "encrypt" | "sign" | "verify")[];
-		kid?: string;
-		kty: "EC";
-		scope?: Omit<{
-			get?: string[];
-			publish?: string[];
-			put?: string[];
-			root: string;
-			subscribe?: string[];
-		}, "put" | "get"> & {
-			publish?: string[];
-			subscribe?: string[];
-		};
-		x: string;
-		y: string;
-	} | {
-		alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
-		crv: "Ed25519";
-		d?: string;
-		key_ops: ("decrypt" | "encrypt" | "sign" | "verify")[];
-		kid?: string;
-		kty: "OKP";
-		scope?: Omit<{
-			get?: string[];
-			publish?: string[];
-			put?: string[];
-			root: string;
-			subscribe?: string[];
-		}, "put" | "get"> & {
-			publish?: string[];
-			subscribe?: string[];
-		};
-		x: string;
-	}>;
-	parse: (jwk: string) => {
-		alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
-		k: string;
-		key_ops: ("decrypt" | "encrypt" | "sign" | "verify")[];
-		kid?: string;
-		kty: "oct";
-		scope?: Omit<{
-			get?: string[];
-			publish?: string[];
-			put?: string[];
-			root: string;
-			subscribe?: string[];
-		}, "put" | "get"> & {
-			publish?: string[];
-			subscribe?: string[];
-		};
-	} | {
-		alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
-		d?: string;
-		dp?: string;
-		dq?: string;
-		e: string;
-		key_ops: ("decrypt" | "encrypt" | "sign" | "verify")[];
-		kid?: string;
-		kty: "RSA";
-		n: string;
-		oth?: undefined;
-		p?: string;
-		q?: string;
-		qi?: string;
-		scope?: Omit<{
-			get?: string[];
-			publish?: string[];
-			put?: string[];
-			root: string;
-			subscribe?: string[];
-		}, "put" | "get"> & {
-			publish?: string[];
-			subscribe?: string[];
-		};
-	} | {
-		alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
-		crv: "P-256" | "P-384";
-		d?: string;
-		key_ops: ("decrypt" | "encrypt" | "sign" | "verify")[];
-		kid?: string;
-		kty: "EC";
-		scope?: Omit<{
-			get?: string[];
-			publish?: string[];
-			put?: string[];
-			root: string;
-			subscribe?: string[];
-		}, "put" | "get"> & {
-			publish?: string[];
-			subscribe?: string[];
-		};
-		x: string;
-		y: string;
-	} | {
-		alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
-		crv: "Ed25519";
-		d?: string;
-		key_ops: ("decrypt" | "encrypt" | "sign" | "verify")[];
-		kid?: string;
-		kty: "OKP";
-		scope?: Omit<{
-			get?: string[];
-			publish?: string[];
-			put?: string[];
-			root: string;
-			subscribe?: string[];
-		}, "put" | "get"> & {
-			publish?: string[];
-			subscribe?: string[];
-		};
-		x: string;
-	};
-	public: (key: {
-		alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
-		k: string;
-		key_ops: ("decrypt" | "encrypt" | "sign" | "verify")[];
-		kid?: string;
-		kty: "oct";
-		scope?: Omit<{
-			get?: string[];
-			publish?: string[];
-			put?: string[];
-			root: string;
-			subscribe?: string[];
-		}, "put" | "get"> & {
-			publish?: string[];
-			subscribe?: string[];
-		};
-	} | {
-		alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
-		d?: string;
-		dp?: string;
-		dq?: string;
-		e: string;
-		key_ops: ("decrypt" | "encrypt" | "sign" | "verify")[];
-		kid?: string;
-		kty: "RSA";
-		n: string;
-		oth?: undefined;
-		p?: string;
-		q?: string;
-		qi?: string;
-		scope?: Omit<{
-			get?: string[];
-			publish?: string[];
-			put?: string[];
-			root: string;
-			subscribe?: string[];
-		}, "put" | "get"> & {
-			publish?: string[];
-			subscribe?: string[];
-		};
-	} | {
-		alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
-		crv: "P-256" | "P-384";
-		d?: string;
-		key_ops: ("decrypt" | "encrypt" | "sign" | "verify")[];
-		kid?: string;
-		kty: "EC";
-		scope?: Omit<{
-			get?: string[];
-			publish?: string[];
-			put?: string[];
-			root: string;
-			subscribe?: string[];
-		}, "put" | "get"> & {
-			publish?: string[];
-			subscribe?: string[];
-		};
-		x: string;
-		y: string;
-	} | {
-		alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
-		crv: "Ed25519";
-		d?: string;
-		key_ops: ("decrypt" | "encrypt" | "sign" | "verify")[];
-		kid?: string;
-		kty: "OKP";
-		scope?: Omit<{
-			get?: string[];
-			publish?: string[];
-			put?: string[];
-			root: string;
-			subscribe?: string[];
-		}, "put" | "get"> & {
-			publish?: string[];
-			subscribe?: string[];
-		};
-		x: string;
-	}) => PublicKey;
-	sign: (key: {
-		alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
-		k: string;
-		key_ops: ("decrypt" | "encrypt" | "sign" | "verify")[];
-		kid?: string;
-		kty: "oct";
-		scope?: Omit<{
-			get?: string[];
-			publish?: string[];
-			put?: string[];
-			root: string;
-			subscribe?: string[];
-		}, "put" | "get"> & {
-			publish?: string[];
-			subscribe?: string[];
-		};
-	} | {
-		alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
-		d?: string;
-		dp?: string;
-		dq?: string;
-		e: string;
-		key_ops: ("decrypt" | "encrypt" | "sign" | "verify")[];
-		kid?: string;
-		kty: "RSA";
-		n: string;
-		oth?: undefined;
-		p?: string;
-		q?: string;
-		qi?: string;
-		scope?: Omit<{
-			get?: string[];
-			publish?: string[];
-			put?: string[];
-			root: string;
-			subscribe?: string[];
-		}, "put" | "get"> & {
-			publish?: string[];
-			subscribe?: string[];
-		};
-	} | {
-		alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
-		crv: "P-256" | "P-384";
-		d?: string;
-		key_ops: ("decrypt" | "encrypt" | "sign" | "verify")[];
-		kid?: string;
-		kty: "EC";
-		scope?: Omit<{
-			get?: string[];
-			publish?: string[];
-			put?: string[];
-			root: string;
-			subscribe?: string[];
-		}, "put" | "get"> & {
-			publish?: string[];
-			subscribe?: string[];
-		};
-		x: string;
-		y: string;
-	} | {
-		alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
-		crv: "Ed25519";
-		d?: string;
-		key_ops: ("decrypt" | "encrypt" | "sign" | "verify")[];
-		kid?: string;
-		kty: "OKP";
-		scope?: Omit<{
-			get?: string[];
-			publish?: string[];
-			put?: string[];
-			root: string;
-			subscribe?: string[];
-		}, "put" | "get"> & {
-			publish?: string[];
-			subscribe?: string[];
-		};
-		x: string;
-	}, claims: {
+	generate: (algorithm: Algorithm, kid?: string) => Promise<Key>;
+	parse: (jwk: string) => Key;
+	public: (key: Key) => PublicKey;
+	sign: (key: Key, claims: {
 		exp?: number;
 		get?: string | string[];
 		iat?: number;
@@ -434,35 +126,7 @@ export const Key: {
 		sub?: unknown;
 		subscribe?: string[];
 	}) => Promise<string>;
-	verify: (key: {
-		alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
-		k: string;
-		key_ops: ("decrypt" | "encrypt" | "sign" | "verify")[];
-		kid?: string;
-		kty: "oct";
-		scope?: Omit<{
-			get?: string[];
-			publish?: string[];
-			put?: string[];
-			root: string;
-			subscribe?: string[];
-		}, "put" | "get"> & {
-			publish?: string[];
-			subscribe?: string[];
-		};
-	} | PublicKey, token: string) => Promise<Omit<{
-		exp?: number;
-		get?: string | string[];
-		iat?: number;
-		nbf?: number;
-		publish?: string[];
-		put?: string | string[];
-		root: string;
-		subscribe?: string[];
-	}, "put" | "get"> & {
-		publish?: string[];
-		subscribe?: string[];
-	}>;
+	verify: (key: PublicKey | SymmetricKey, token: string) => Promise<Claims>;
 };
 
 export type Key = infer<typeof KeySchema>;
@@ -502,20 +166,20 @@ export const KeySchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 		root: ZodMiniDefault<ZodMiniString<string>>;
 		subscribe: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
 	}, $strict>, ZodMiniTransform<Omit<{
-		get?: string[];
-		publish?: string[];
-		put?: string[];
+		get?: string[] | undefined;
+		publish?: string[] | undefined;
+		put?: string[] | undefined;
 		root: string;
-		subscribe?: string[];
+		subscribe?: string[] | undefined;
 	}, "get" | "put"> & {
 		publish?: string[];
 		subscribe?: string[];
 	}, {
-		get?: string[];
-		publish?: string[];
-		put?: string[];
+		get?: string[] | undefined;
+		publish?: string[] | undefined;
+		put?: string[] | undefined;
 		root: string;
-		subscribe?: string[];
+		subscribe?: string[] | undefined;
 	}>>>;
 }, $strip>, ZodMiniObject<{
 	alg: ZodMiniEnum<{
@@ -556,20 +220,20 @@ export const KeySchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 		root: ZodMiniDefault<ZodMiniString<string>>;
 		subscribe: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
 	}, $strict>, ZodMiniTransform<Omit<{
-		get?: string[];
-		publish?: string[];
-		put?: string[];
+		get?: string[] | undefined;
+		publish?: string[] | undefined;
+		put?: string[] | undefined;
 		root: string;
-		subscribe?: string[];
+		subscribe?: string[] | undefined;
 	}, "get" | "put"> & {
 		publish?: string[];
 		subscribe?: string[];
 	}, {
-		get?: string[];
-		publish?: string[];
-		put?: string[];
+		get?: string[] | undefined;
+		publish?: string[] | undefined;
+		put?: string[] | undefined;
 		root: string;
-		subscribe?: string[];
+		subscribe?: string[] | undefined;
 	}>>>;
 }, $strip>, ZodMiniObject<{
 	alg: ZodMiniEnum<{
@@ -606,20 +270,20 @@ export const KeySchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 		root: ZodMiniDefault<ZodMiniString<string>>;
 		subscribe: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
 	}, $strict>, ZodMiniTransform<Omit<{
-		get?: string[];
-		publish?: string[];
-		put?: string[];
+		get?: string[] | undefined;
+		publish?: string[] | undefined;
+		put?: string[] | undefined;
 		root: string;
-		subscribe?: string[];
+		subscribe?: string[] | undefined;
 	}, "get" | "put"> & {
 		publish?: string[];
 		subscribe?: string[];
 	}, {
-		get?: string[];
-		publish?: string[];
-		put?: string[];
+		get?: string[] | undefined;
+		publish?: string[] | undefined;
+		put?: string[] | undefined;
 		root: string;
-		subscribe?: string[];
+		subscribe?: string[] | undefined;
 	}>>>;
 	x: ZodMiniString<string>;
 	y: ZodMiniString<string>;
@@ -655,422 +319,29 @@ export const KeySchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 		root: ZodMiniDefault<ZodMiniString<string>>;
 		subscribe: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
 	}, $strict>, ZodMiniTransform<Omit<{
-		get?: string[];
-		publish?: string[];
-		put?: string[];
+		get?: string[] | undefined;
+		publish?: string[] | undefined;
+		put?: string[] | undefined;
 		root: string;
-		subscribe?: string[];
+		subscribe?: string[] | undefined;
 	}, "get" | "put"> & {
 		publish?: string[];
 		subscribe?: string[];
 	}, {
-		get?: string[];
-		publish?: string[];
-		put?: string[];
+		get?: string[] | undefined;
+		publish?: string[] | undefined;
+		put?: string[] | undefined;
 		root: string;
-		subscribe?: string[];
+		subscribe?: string[] | undefined;
 	}>>>;
 	x: ZodMiniString<string>;
 }, $strip>], "kty">;
 
 export const KeySet: {
-	find: (set: {
-		keys: ({
-			alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
-			k: string;
-			key_ops: ("decrypt" | "encrypt" | "sign" | "verify")[];
-			kid?: string;
-			kty: "oct";
-			scope?: Omit<{
-				get?: string[];
-				publish?: string[];
-				put?: string[];
-				root: string;
-				subscribe?: string[];
-			}, "put" | "get"> & {
-				publish?: string[];
-				subscribe?: string[];
-			};
-		} | {
-			alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
-			d?: string;
-			dp?: string;
-			dq?: string;
-			e: string;
-			key_ops: ("decrypt" | "encrypt" | "sign" | "verify")[];
-			kid?: string;
-			kty: "RSA";
-			n: string;
-			oth?: undefined;
-			p?: string;
-			q?: string;
-			qi?: string;
-			scope?: Omit<{
-				get?: string[];
-				publish?: string[];
-				put?: string[];
-				root: string;
-				subscribe?: string[];
-			}, "put" | "get"> & {
-				publish?: string[];
-				subscribe?: string[];
-			};
-		} | {
-			alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
-			crv: "P-256" | "P-384";
-			d?: string;
-			key_ops: ("decrypt" | "encrypt" | "sign" | "verify")[];
-			kid?: string;
-			kty: "EC";
-			scope?: Omit<{
-				get?: string[];
-				publish?: string[];
-				put?: string[];
-				root: string;
-				subscribe?: string[];
-			}, "put" | "get"> & {
-				publish?: string[];
-				subscribe?: string[];
-			};
-			x: string;
-			y: string;
-		} | {
-			alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
-			crv: "Ed25519";
-			d?: string;
-			key_ops: ("decrypt" | "encrypt" | "sign" | "verify")[];
-			kid?: string;
-			kty: "OKP";
-			scope?: Omit<{
-				get?: string[];
-				publish?: string[];
-				put?: string[];
-				root: string;
-				subscribe?: string[];
-			}, "put" | "get"> & {
-				publish?: string[];
-				subscribe?: string[];
-			};
-			x: string;
-		})[];
-	}, kid: string) => {
-		alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
-		k: string;
-		key_ops: ("decrypt" | "encrypt" | "sign" | "verify")[];
-		kid?: string;
-		kty: "oct";
-		scope?: Omit<{
-			get?: string[];
-			publish?: string[];
-			put?: string[];
-			root: string;
-			subscribe?: string[];
-		}, "put" | "get"> & {
-			publish?: string[];
-			subscribe?: string[];
-		};
-	} | {
-		alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
-		d?: string;
-		dp?: string;
-		dq?: string;
-		e: string;
-		key_ops: ("decrypt" | "encrypt" | "sign" | "verify")[];
-		kid?: string;
-		kty: "RSA";
-		n: string;
-		oth?: undefined;
-		p?: string;
-		q?: string;
-		qi?: string;
-		scope?: Omit<{
-			get?: string[];
-			publish?: string[];
-			put?: string[];
-			root: string;
-			subscribe?: string[];
-		}, "put" | "get"> & {
-			publish?: string[];
-			subscribe?: string[];
-		};
-	} | {
-		alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
-		crv: "P-256" | "P-384";
-		d?: string;
-		key_ops: ("decrypt" | "encrypt" | "sign" | "verify")[];
-		kid?: string;
-		kty: "EC";
-		scope?: Omit<{
-			get?: string[];
-			publish?: string[];
-			put?: string[];
-			root: string;
-			subscribe?: string[];
-		}, "put" | "get"> & {
-			publish?: string[];
-			subscribe?: string[];
-		};
-		x: string;
-		y: string;
-	} | {
-		alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
-		crv: "Ed25519";
-		d?: string;
-		key_ops: ("decrypt" | "encrypt" | "sign" | "verify")[];
-		kid?: string;
-		kty: "OKP";
-		scope?: Omit<{
-			get?: string[];
-			publish?: string[];
-			put?: string[];
-			root: string;
-			subscribe?: string[];
-		}, "put" | "get"> & {
-			publish?: string[];
-			subscribe?: string[];
-		};
-		x: string;
-	} | undefined;
-	parse: (jwks: string) => {
-		keys: ({
-			alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
-			k: string;
-			key_ops: ("decrypt" | "encrypt" | "sign" | "verify")[];
-			kid?: string;
-			kty: "oct";
-			scope?: Omit<{
-				get?: string[];
-				publish?: string[];
-				put?: string[];
-				root: string;
-				subscribe?: string[];
-			}, "put" | "get"> & {
-				publish?: string[];
-				subscribe?: string[];
-			};
-		} | {
-			alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
-			d?: string;
-			dp?: string;
-			dq?: string;
-			e: string;
-			key_ops: ("decrypt" | "encrypt" | "sign" | "verify")[];
-			kid?: string;
-			kty: "RSA";
-			n: string;
-			oth?: undefined;
-			p?: string;
-			q?: string;
-			qi?: string;
-			scope?: Omit<{
-				get?: string[];
-				publish?: string[];
-				put?: string[];
-				root: string;
-				subscribe?: string[];
-			}, "put" | "get"> & {
-				publish?: string[];
-				subscribe?: string[];
-			};
-		} | {
-			alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
-			crv: "P-256" | "P-384";
-			d?: string;
-			key_ops: ("decrypt" | "encrypt" | "sign" | "verify")[];
-			kid?: string;
-			kty: "EC";
-			scope?: Omit<{
-				get?: string[];
-				publish?: string[];
-				put?: string[];
-				root: string;
-				subscribe?: string[];
-			}, "put" | "get"> & {
-				publish?: string[];
-				subscribe?: string[];
-			};
-			x: string;
-			y: string;
-		} | {
-			alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
-			crv: "Ed25519";
-			d?: string;
-			key_ops: ("decrypt" | "encrypt" | "sign" | "verify")[];
-			kid?: string;
-			kty: "OKP";
-			scope?: Omit<{
-				get?: string[];
-				publish?: string[];
-				put?: string[];
-				root: string;
-				subscribe?: string[];
-			}, "put" | "get"> & {
-				publish?: string[];
-				subscribe?: string[];
-			};
-			x: string;
-		})[];
-	};
-	public: (set: {
-		keys: ({
-			alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
-			k: string;
-			key_ops: ("decrypt" | "encrypt" | "sign" | "verify")[];
-			kid?: string;
-			kty: "oct";
-			scope?: Omit<{
-				get?: string[];
-				publish?: string[];
-				put?: string[];
-				root: string;
-				subscribe?: string[];
-			}, "put" | "get"> & {
-				publish?: string[];
-				subscribe?: string[];
-			};
-		} | {
-			alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
-			d?: string;
-			dp?: string;
-			dq?: string;
-			e: string;
-			key_ops: ("decrypt" | "encrypt" | "sign" | "verify")[];
-			kid?: string;
-			kty: "RSA";
-			n: string;
-			oth?: undefined;
-			p?: string;
-			q?: string;
-			qi?: string;
-			scope?: Omit<{
-				get?: string[];
-				publish?: string[];
-				put?: string[];
-				root: string;
-				subscribe?: string[];
-			}, "put" | "get"> & {
-				publish?: string[];
-				subscribe?: string[];
-			};
-		} | {
-			alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
-			crv: "P-256" | "P-384";
-			d?: string;
-			key_ops: ("decrypt" | "encrypt" | "sign" | "verify")[];
-			kid?: string;
-			kty: "EC";
-			scope?: Omit<{
-				get?: string[];
-				publish?: string[];
-				put?: string[];
-				root: string;
-				subscribe?: string[];
-			}, "put" | "get"> & {
-				publish?: string[];
-				subscribe?: string[];
-			};
-			x: string;
-			y: string;
-		} | {
-			alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
-			crv: "Ed25519";
-			d?: string;
-			key_ops: ("decrypt" | "encrypt" | "sign" | "verify")[];
-			kid?: string;
-			kty: "OKP";
-			scope?: Omit<{
-				get?: string[];
-				publish?: string[];
-				put?: string[];
-				root: string;
-				subscribe?: string[];
-			}, "put" | "get"> & {
-				publish?: string[];
-				subscribe?: string[];
-			};
-			x: string;
-		})[];
-	}) => PublicKeySet;
-	sign: (set: {
-		keys: ({
-			alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
-			k: string;
-			key_ops: ("decrypt" | "encrypt" | "sign" | "verify")[];
-			kid?: string;
-			kty: "oct";
-			scope?: Omit<{
-				get?: string[];
-				publish?: string[];
-				put?: string[];
-				root: string;
-				subscribe?: string[];
-			}, "put" | "get"> & {
-				publish?: string[];
-				subscribe?: string[];
-			};
-		} | {
-			alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
-			d?: string;
-			dp?: string;
-			dq?: string;
-			e: string;
-			key_ops: ("decrypt" | "encrypt" | "sign" | "verify")[];
-			kid?: string;
-			kty: "RSA";
-			n: string;
-			oth?: undefined;
-			p?: string;
-			q?: string;
-			qi?: string;
-			scope?: Omit<{
-				get?: string[];
-				publish?: string[];
-				put?: string[];
-				root: string;
-				subscribe?: string[];
-			}, "put" | "get"> & {
-				publish?: string[];
-				subscribe?: string[];
-			};
-		} | {
-			alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
-			crv: "P-256" | "P-384";
-			d?: string;
-			key_ops: ("decrypt" | "encrypt" | "sign" | "verify")[];
-			kid?: string;
-			kty: "EC";
-			scope?: Omit<{
-				get?: string[];
-				publish?: string[];
-				put?: string[];
-				root: string;
-				subscribe?: string[];
-			}, "put" | "get"> & {
-				publish?: string[];
-				subscribe?: string[];
-			};
-			x: string;
-			y: string;
-		} | {
-			alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
-			crv: "Ed25519";
-			d?: string;
-			key_ops: ("decrypt" | "encrypt" | "sign" | "verify")[];
-			kid?: string;
-			kty: "OKP";
-			scope?: Omit<{
-				get?: string[];
-				publish?: string[];
-				put?: string[];
-				root: string;
-				subscribe?: string[];
-			}, "put" | "get"> & {
-				publish?: string[];
-				subscribe?: string[];
-			};
-			x: string;
-		})[];
-	}, claims: {
+	find: (set: KeySet, kid: string) => Key | undefined;
+	parse: (jwks: string) => KeySet;
+	public: (set: KeySet) => PublicKeySet;
+	sign: (set: KeySet, claims: {
 		exp?: number;
 		get?: string | string[];
 		iat?: number;
@@ -1083,98 +354,7 @@ export const KeySet: {
 		sub?: unknown;
 		subscribe?: string[];
 	}) => Promise<string>;
-	verify: (set: {
-		keys: ({
-			alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
-			k: string;
-			key_ops: ("decrypt" | "encrypt" | "sign" | "verify")[];
-			kid?: string;
-			kty: "oct";
-			scope?: Omit<{
-				get?: string[];
-				publish?: string[];
-				put?: string[];
-				root: string;
-				subscribe?: string[];
-			}, "put" | "get"> & {
-				publish?: string[];
-				subscribe?: string[];
-			};
-		} | {
-			alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
-			d?: string;
-			dp?: string;
-			dq?: string;
-			e: string;
-			key_ops: ("decrypt" | "encrypt" | "sign" | "verify")[];
-			kid?: string;
-			kty: "RSA";
-			n: string;
-			oth?: undefined;
-			p?: string;
-			q?: string;
-			qi?: string;
-			scope?: Omit<{
-				get?: string[];
-				publish?: string[];
-				put?: string[];
-				root: string;
-				subscribe?: string[];
-			}, "put" | "get"> & {
-				publish?: string[];
-				subscribe?: string[];
-			};
-		} | {
-			alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
-			crv: "P-256" | "P-384";
-			d?: string;
-			key_ops: ("decrypt" | "encrypt" | "sign" | "verify")[];
-			kid?: string;
-			kty: "EC";
-			scope?: Omit<{
-				get?: string[];
-				publish?: string[];
-				put?: string[];
-				root: string;
-				subscribe?: string[];
-			}, "put" | "get"> & {
-				publish?: string[];
-				subscribe?: string[];
-			};
-			x: string;
-			y: string;
-		} | {
-			alg: "ES256" | "ES384" | "EdDSA" | "HS256" | "HS384" | "HS512" | "PS256" | "PS384" | "PS512" | "RS256" | "RS384" | "RS512";
-			crv: "Ed25519";
-			d?: string;
-			key_ops: ("decrypt" | "encrypt" | "sign" | "verify")[];
-			kid?: string;
-			kty: "OKP";
-			scope?: Omit<{
-				get?: string[];
-				publish?: string[];
-				put?: string[];
-				root: string;
-				subscribe?: string[];
-			}, "put" | "get"> & {
-				publish?: string[];
-				subscribe?: string[];
-			};
-			x: string;
-		})[];
-	}, token: string) => Promise<Omit<{
-		exp?: number;
-		get?: string | string[];
-		iat?: number;
-		nbf?: number;
-		publish?: string[];
-		put?: string | string[];
-		root: string;
-		subscribe?: string[];
-	}, "put" | "get"> & {
-		publish?: string[];
-		subscribe?: string[];
-	}>;
+	verify: (set: KeySet, token: string) => Promise<Claims>;
 };
 
 export type KeySet = infer<typeof KeySetSchema>;
@@ -1211,20 +391,20 @@ export const KeySetSchema: ZodMiniObject<{
 			root: ZodMiniDefault<ZodMiniString<string>>;
 			subscribe: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
 		}, $strict>, ZodMiniTransform<Omit<{
-			get?: string[];
-			publish?: string[];
-			put?: string[];
+			get?: string[] | undefined;
+			publish?: string[] | undefined;
+			put?: string[] | undefined;
 			root: string;
-			subscribe?: string[];
+			subscribe?: string[] | undefined;
 		}, "get" | "put"> & {
 			publish?: string[];
 			subscribe?: string[];
 		}, {
-			get?: string[];
-			publish?: string[];
-			put?: string[];
+			get?: string[] | undefined;
+			publish?: string[] | undefined;
+			put?: string[] | undefined;
 			root: string;
-			subscribe?: string[];
+			subscribe?: string[] | undefined;
 		}>>>;
 	}, $strip>, ZodMiniObject<{
 		alg: ZodMiniEnum<{
@@ -1265,20 +445,20 @@ export const KeySetSchema: ZodMiniObject<{
 			root: ZodMiniDefault<ZodMiniString<string>>;
 			subscribe: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
 		}, $strict>, ZodMiniTransform<Omit<{
-			get?: string[];
-			publish?: string[];
-			put?: string[];
+			get?: string[] | undefined;
+			publish?: string[] | undefined;
+			put?: string[] | undefined;
 			root: string;
-			subscribe?: string[];
+			subscribe?: string[] | undefined;
 		}, "get" | "put"> & {
 			publish?: string[];
 			subscribe?: string[];
 		}, {
-			get?: string[];
-			publish?: string[];
-			put?: string[];
+			get?: string[] | undefined;
+			publish?: string[] | undefined;
+			put?: string[] | undefined;
 			root: string;
-			subscribe?: string[];
+			subscribe?: string[] | undefined;
 		}>>>;
 	}, $strip>, ZodMiniObject<{
 		alg: ZodMiniEnum<{
@@ -1315,20 +495,20 @@ export const KeySetSchema: ZodMiniObject<{
 			root: ZodMiniDefault<ZodMiniString<string>>;
 			subscribe: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
 		}, $strict>, ZodMiniTransform<Omit<{
-			get?: string[];
-			publish?: string[];
-			put?: string[];
+			get?: string[] | undefined;
+			publish?: string[] | undefined;
+			put?: string[] | undefined;
 			root: string;
-			subscribe?: string[];
+			subscribe?: string[] | undefined;
 		}, "get" | "put"> & {
 			publish?: string[];
 			subscribe?: string[];
 		}, {
-			get?: string[];
-			publish?: string[];
-			put?: string[];
+			get?: string[] | undefined;
+			publish?: string[] | undefined;
+			put?: string[] | undefined;
 			root: string;
-			subscribe?: string[];
+			subscribe?: string[] | undefined;
 		}>>>;
 		x: ZodMiniString<string>;
 		y: ZodMiniString<string>;
@@ -1364,20 +544,20 @@ export const KeySetSchema: ZodMiniObject<{
 			root: ZodMiniDefault<ZodMiniString<string>>;
 			subscribe: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
 		}, $strict>, ZodMiniTransform<Omit<{
-			get?: string[];
-			publish?: string[];
-			put?: string[];
+			get?: string[] | undefined;
+			publish?: string[] | undefined;
+			put?: string[] | undefined;
 			root: string;
-			subscribe?: string[];
+			subscribe?: string[] | undefined;
 		}, "get" | "put"> & {
 			publish?: string[];
 			subscribe?: string[];
 		}, {
-			get?: string[];
-			publish?: string[];
-			put?: string[];
+			get?: string[] | undefined;
+			publish?: string[] | undefined;
+			put?: string[] | undefined;
 			root: string;
-			subscribe?: string[];
+			subscribe?: string[] | undefined;
 		}>>>;
 		x: ZodMiniString<string>;
 	}, $strip>], "kty">>;
@@ -1571,20 +751,20 @@ export const ScopeSchema: ZodMiniPipe<ZodMiniObject<{
 	root: ZodMiniDefault<ZodMiniString<string>>;
 	subscribe: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
 }, $strict>, ZodMiniTransform<Omit<{
-	get?: string[];
-	publish?: string[];
-	put?: string[];
+	get?: string[] | undefined;
+	publish?: string[] | undefined;
+	put?: string[] | undefined;
 	root: string;
-	subscribe?: string[];
+	subscribe?: string[] | undefined;
 }, "get" | "put"> & {
 	publish?: string[];
 	subscribe?: string[];
 }, {
-	get?: string[];
-	publish?: string[];
-	put?: string[];
+	get?: string[] | undefined;
+	publish?: string[] | undefined;
+	put?: string[] | undefined;
 	root: string;
-	subscribe?: string[];
+	subscribe?: string[] | undefined;
 }>>;
 
 export { Segment } from "@moq/pattern";
@@ -1618,44 +798,11 @@ export const TransportSchema: ZodMiniPipe<ZodMiniString<string>, ZodMiniCatch<Zo
 	webtransport: "webtransport";
 }>>>;
 
-export function authorize(claims: Omit<{
-	exp?: number;
-	get?: string | string[];
-	iat?: number;
-	nbf?: number;
-	publish?: string[];
-	put?: string | string[];
-	root: string;
-	subscribe?: string[];
-}, "put" | "get"> & {
-	publish?: string[];
-	subscribe?: string[];
-}, path: string): Permissions;
+export function authorize(claims: Claims, path: string): Permissions;
 
 export { compareSpecificity } from "@moq/pattern";
 
 export function patterns(texts: readonly string[] | undefined): Patterns;
 
-export function scopeAllows(scope: Omit<{
-	get?: string[];
-	publish?: string[];
-	put?: string[];
-	root: string;
-	subscribe?: string[];
-}, "put" | "get"> & {
-	publish?: string[];
-	subscribe?: string[];
-}, claims: Omit<{
-	exp?: number;
-	get?: string | string[];
-	iat?: number;
-	nbf?: number;
-	publish?: string[];
-	put?: string | string[];
-	root: string;
-	subscribe?: string[];
-}, "put" | "get"> & {
-	publish?: string[];
-	subscribe?: string[];
-}): boolean;
+export function scopeAllows(scope: Scope, claims: Claims): boolean;
 ```

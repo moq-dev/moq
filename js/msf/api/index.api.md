@@ -118,84 +118,9 @@ export const TrackSchema: ZodMiniObject<{
 
 export const VERSION: "draft-01";
 
-export function decode(raw: Uint8Array): {
-	ext?: Record<string, unknown>;
-	tracks: {
-		altGroup?: number;
-		bitrate?: number;
-		channelConfig?: string;
-		codec?: string;
-		delay?: number;
-		framerate?: number;
-		height?: number;
-		initData?: string;
-		isLive?: boolean;
-		jitter?: number;
-		label?: string;
-		lang?: string;
-		maxGrpSapStartingType?: number;
-		maxObjSapStartingType?: number;
-		name: string;
-		namespace?: string;
-		packaging: string;
-		renderGroup?: number;
-		role?: string;
-		samplerate?: number;
-		width?: number;
-	}[];
-};
+export function decode(raw: Uint8Array): Catalog;
 
-export function encode(catalog: {
-	ext?: Record<string, unknown>;
-	tracks: {
-		altGroup?: number;
-		bitrate?: number;
-		channelConfig?: string;
-		codec?: string;
-		delay?: number;
-		framerate?: number;
-		height?: number;
-		initData?: string;
-		isLive?: boolean;
-		jitter?: number;
-		label?: string;
-		lang?: string;
-		maxGrpSapStartingType?: number;
-		maxObjSapStartingType?: number;
-		name: string;
-		namespace?: string;
-		packaging: string;
-		renderGroup?: number;
-		role?: string;
-		samplerate?: number;
-		width?: number;
-	}[];
-}): Uint8Array;
+export function encode(catalog: Catalog): Uint8Array;
 
-export function fetch(track: import("@moq/net").Track.Ordered): Promise<{
-	ext?: Record<string, unknown>;
-	tracks: {
-		altGroup?: number;
-		bitrate?: number;
-		channelConfig?: string;
-		codec?: string;
-		delay?: number;
-		framerate?: number;
-		height?: number;
-		initData?: string;
-		isLive?: boolean;
-		jitter?: number;
-		label?: string;
-		lang?: string;
-		maxGrpSapStartingType?: number;
-		maxObjSapStartingType?: number;
-		name: string;
-		namespace?: string;
-		packaging: string;
-		renderGroup?: number;
-		role?: string;
-		samplerate?: number;
-		width?: number;
-	}[];
-} | undefined>;
+export function fetch(track: import("@moq/net").Track.Ordered): Promise<Catalog | undefined>;
 ```

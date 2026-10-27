@@ -156,8 +156,8 @@ export namespace Audio {
 	}, $strip>, ZodMiniTransform<{
 		renditions: {
 			[x: string]: {
-				bitrate?: number & $brand<"u53">;
-				broadcast?: RelativeBroadcast;
+				bitrate?: number & $brand<"u53"> | undefined;
+				broadcast?: RelativeBroadcast | undefined;
 				codec: string;
 				container: {
 					kind: "legacy";
@@ -173,27 +173,27 @@ export namespace Audio {
 						kind: string;
 					};
 				};
-				delay?: number & $brand<"u53">;
-				description?: string;
-				enabled?: boolean;
-				epoch?: ReferenceEpoch;
+				delay?: number & $brand<"u53"> | undefined;
+				description?: string | undefined;
+				enabled?: boolean | undefined;
+				epoch?: ReferenceEpoch | undefined;
 				hls?: {
 					duration: number & $brand<"u53">;
 					track: string;
-				};
-				jitter?: number & $brand<"u53">;
-				label?: string;
-				layout?: string;
+				} | undefined;
+				jitter?: number & $brand<"u53"> | undefined;
+				label?: string | undefined;
+				layout?: string | undefined;
 				numberOfChannels: number & $brand<"u53">;
 				sampleRate: number & $brand<"u53">;
-				track?: string;
-				warmup?: number & $brand<"u53">;
+				track?: string | undefined;
+				warmup?: number & $brand<"u53"> | undefined;
 			};
 		};
 	}, {
 		config: {
-			bitrate?: number & $brand<"u53">;
-			broadcast?: RelativeBroadcast;
+			bitrate?: number & $brand<"u53"> | undefined;
+			broadcast?: RelativeBroadcast | undefined;
 			codec: string;
 			container: {
 				kind: "legacy";
@@ -209,60 +209,27 @@ export namespace Audio {
 					kind: string;
 				};
 			};
-			delay?: number & $brand<"u53">;
-			description?: string;
-			enabled?: boolean;
-			epoch?: ReferenceEpoch;
+			delay?: number & $brand<"u53"> | undefined;
+			description?: string | undefined;
+			enabled?: boolean | undefined;
+			epoch?: ReferenceEpoch | undefined;
 			hls?: {
 				duration: number & $brand<"u53">;
 				track: string;
-			};
-			jitter?: number & $brand<"u53">;
-			label?: string;
-			layout?: string;
+			} | undefined;
+			jitter?: number & $brand<"u53"> | undefined;
+			label?: string | undefined;
+			layout?: string | undefined;
 			numberOfChannels: number & $brand<"u53">;
 			sampleRate: number & $brand<"u53">;
-			track?: string;
-			warmup?: number & $brand<"u53">;
+			track?: string | undefined;
+			warmup?: number & $brand<"u53"> | undefined;
 		};
 		track: {
 			name: string;
 		};
 	}>>]>;
-	export function ranked(renditions: Record<string, Audio.AudioConfig>): [string, {
-		bitrate?: number & $brand<"u53">;
-		broadcast?: RelativeBroadcast;
-		codec: string;
-		container: {
-			kind: "unknown";
-			raw: {
-				[x: string]: unknown;
-				kind: string;
-			};
-		} | {
-			kind: "legacy";
-		} | {
-			init: string;
-			kind: "cmaf";
-		} | {
-			kind: "loc";
-		};
-		delay?: number & $brand<"u53">;
-		description?: string;
-		enabled?: boolean;
-		epoch?: ReferenceEpoch;
-		hls?: {
-			duration: number & $brand<"u53">;
-			track: string;
-		};
-		jitter?: number & $brand<"u53">;
-		label?: string;
-		layout?: string;
-		numberOfChannels: number & $brand<"u53">;
-		sampleRate: number & $brand<"u53">;
-		track?: string;
-		warmup?: number & $brand<"u53">;
-	}][];
+	export function ranked(renditions: Record<string, Audio.AudioConfig>): [string, Audio.AudioConfig][];
 }
 
 export type Audio = Audio.Audio;
@@ -532,8 +499,8 @@ export const RootSchema: ZodMiniObject<{
 	}, $strip>, ZodMiniTransform<{
 		renditions: {
 			[x: string]: {
-				bitrate?: number & $brand<"u53">;
-				broadcast?: RelativeBroadcast;
+				bitrate?: number & $brand<"u53"> | undefined;
+				broadcast?: RelativeBroadcast | undefined;
 				codec: string;
 				container: {
 					kind: "legacy";
@@ -549,27 +516,27 @@ export const RootSchema: ZodMiniObject<{
 						kind: string;
 					};
 				};
-				delay?: number & $brand<"u53">;
-				description?: string;
-				enabled?: boolean;
-				epoch?: ReferenceEpoch;
+				delay?: number & $brand<"u53"> | undefined;
+				description?: string | undefined;
+				enabled?: boolean | undefined;
+				epoch?: ReferenceEpoch | undefined;
 				hls?: {
 					duration: number & $brand<"u53">;
 					track: string;
-				};
-				jitter?: number & $brand<"u53">;
-				label?: string;
-				layout?: string;
+				} | undefined;
+				jitter?: number & $brand<"u53"> | undefined;
+				label?: string | undefined;
+				layout?: string | undefined;
 				numberOfChannels: number & $brand<"u53">;
 				sampleRate: number & $brand<"u53">;
-				track?: string;
-				warmup?: number & $brand<"u53">;
+				track?: string | undefined;
+				warmup?: number & $brand<"u53"> | undefined;
 			};
 		};
 	}, {
 		config: {
-			bitrate?: number & $brand<"u53">;
-			broadcast?: RelativeBroadcast;
+			bitrate?: number & $brand<"u53"> | undefined;
+			broadcast?: RelativeBroadcast | undefined;
 			codec: string;
 			container: {
 				kind: "legacy";
@@ -585,21 +552,21 @@ export const RootSchema: ZodMiniObject<{
 					kind: string;
 				};
 			};
-			delay?: number & $brand<"u53">;
-			description?: string;
-			enabled?: boolean;
-			epoch?: ReferenceEpoch;
+			delay?: number & $brand<"u53"> | undefined;
+			description?: string | undefined;
+			enabled?: boolean | undefined;
+			epoch?: ReferenceEpoch | undefined;
 			hls?: {
 				duration: number & $brand<"u53">;
 				track: string;
-			};
-			jitter?: number & $brand<"u53">;
-			label?: string;
-			layout?: string;
+			} | undefined;
+			jitter?: number & $brand<"u53"> | undefined;
+			label?: string | undefined;
+			layout?: string | undefined;
 			numberOfChannels: number & $brand<"u53">;
 			sampleRate: number & $brand<"u53">;
-			track?: string;
-			warmup?: number & $brand<"u53">;
+			track?: string | undefined;
+			warmup?: number & $brand<"u53"> | undefined;
 		};
 		track: {
 			name: string;
@@ -885,16 +852,16 @@ export const RootSchema: ZodMiniObject<{
 		flip: undefined;
 		renditions: {
 			[k: string]: {
-				bitrate?: number & $brand<"u53">;
-				broadcast?: RelativeBroadcast;
+				bitrate?: number & $brand<"u53"> | undefined;
+				broadcast?: RelativeBroadcast | undefined;
 				codec: string;
-				codedHeight?: number & $brand<"u53">;
-				codedWidth?: number & $brand<"u53">;
+				codedHeight?: number & $brand<"u53"> | undefined;
+				codedWidth?: number & $brand<"u53"> | undefined;
 				color?: {
 					contentLight?: {
 						maxCll: number;
 						maxFall: number;
-					};
+					} | undefined;
 					mastering?: {
 						blue: {
 							x: number;
@@ -914,12 +881,12 @@ export const RootSchema: ZodMiniObject<{
 							x: number;
 							y: number;
 						};
-					};
-					matrix?: number & $brand<"u8">;
-					primaries?: number & $brand<"u8">;
-					range?: "full" | "limited";
-					transfer?: number & $brand<"u8">;
-				};
+					} | undefined;
+					matrix?: number & $brand<"u8"> | undefined;
+					primaries?: number & $brand<"u8"> | undefined;
+					range?: "full" | "limited" | undefined;
+					transfer?: number & $brand<"u8"> | undefined;
+				} | undefined;
 				container: {
 					kind: "legacy";
 				} | {
@@ -934,26 +901,26 @@ export const RootSchema: ZodMiniObject<{
 						kind: string;
 					};
 				};
-				delay?: number & $brand<"u53">;
-				description?: string;
-				displayAspectHeight?: number & $brand<"u53">;
-				displayAspectWidth?: number & $brand<"u53">;
-				enabled?: boolean;
-				epoch?: ReferenceEpoch;
-				framerate?: number;
+				delay?: number & $brand<"u53"> | undefined;
+				description?: string | undefined;
+				displayAspectHeight?: number & $brand<"u53"> | undefined;
+				displayAspectWidth?: number & $brand<"u53"> | undefined;
+				enabled?: boolean | undefined;
+				epoch?: ReferenceEpoch | undefined;
+				framerate?: number | undefined;
 				hls?: {
 					duration: number & $brand<"u53">;
 					track: string;
-				};
-				interlaced?: boolean;
-				jitter?: number & $brand<"u53">;
-				label?: string;
-				optimizeForLatency?: boolean;
-				preference?: number;
+				} | undefined;
+				interlaced?: boolean | undefined;
+				jitter?: number & $brand<"u53"> | undefined;
+				label?: string | undefined;
+				optimizeForLatency?: boolean | undefined;
+				preference?: number | undefined;
 				projection?: {
 					kind: "rectilinear";
 				} | {
-					fov?: number;
+					fov?: number | undefined;
 					kind: "equirectangular";
 				} | {
 					kind: "unknown";
@@ -961,26 +928,26 @@ export const RootSchema: ZodMiniObject<{
 						[x: string]: unknown;
 						kind: string;
 					};
-				};
-				reorder?: number & $brand<"u8">;
-				stereo?: string;
-				track?: string;
-				warmup?: number & $brand<"u53">;
+				} | undefined;
+				reorder?: number & $brand<"u8"> | undefined;
+				stereo?: string | undefined;
+				track?: string | undefined;
+				warmup?: number & $brand<"u53"> | undefined;
 			};
 		};
 		rotation: undefined;
 	}, {
 		config: {
-			bitrate?: number & $brand<"u53">;
-			broadcast?: RelativeBroadcast;
+			bitrate?: number & $brand<"u53"> | undefined;
+			broadcast?: RelativeBroadcast | undefined;
 			codec: string;
-			codedHeight?: number & $brand<"u53">;
-			codedWidth?: number & $brand<"u53">;
+			codedHeight?: number & $brand<"u53"> | undefined;
+			codedWidth?: number & $brand<"u53"> | undefined;
 			color?: {
 				contentLight?: {
 					maxCll: number;
 					maxFall: number;
-				};
+				} | undefined;
 				mastering?: {
 					blue: {
 						x: number;
@@ -1000,12 +967,12 @@ export const RootSchema: ZodMiniObject<{
 						x: number;
 						y: number;
 					};
-				};
-				matrix?: number & $brand<"u8">;
-				primaries?: number & $brand<"u8">;
-				range?: "full" | "limited";
-				transfer?: number & $brand<"u8">;
-			};
+				} | undefined;
+				matrix?: number & $brand<"u8"> | undefined;
+				primaries?: number & $brand<"u8"> | undefined;
+				range?: "full" | "limited" | undefined;
+				transfer?: number & $brand<"u8"> | undefined;
+			} | undefined;
 			container: {
 				kind: "legacy";
 			} | {
@@ -1020,26 +987,26 @@ export const RootSchema: ZodMiniObject<{
 					kind: string;
 				};
 			};
-			delay?: number & $brand<"u53">;
-			description?: string;
-			displayAspectHeight?: number & $brand<"u53">;
-			displayAspectWidth?: number & $brand<"u53">;
-			enabled?: boolean;
-			epoch?: ReferenceEpoch;
-			framerate?: number;
+			delay?: number & $brand<"u53"> | undefined;
+			description?: string | undefined;
+			displayAspectHeight?: number & $brand<"u53"> | undefined;
+			displayAspectWidth?: number & $brand<"u53"> | undefined;
+			enabled?: boolean | undefined;
+			epoch?: ReferenceEpoch | undefined;
+			framerate?: number | undefined;
 			hls?: {
 				duration: number & $brand<"u53">;
 				track: string;
-			};
-			interlaced?: boolean;
-			jitter?: number & $brand<"u53">;
-			label?: string;
-			optimizeForLatency?: boolean;
-			preference?: number;
+			} | undefined;
+			interlaced?: boolean | undefined;
+			jitter?: number & $brand<"u53"> | undefined;
+			label?: string | undefined;
+			optimizeForLatency?: boolean | undefined;
+			preference?: number | undefined;
 			projection?: {
 				kind: "rectilinear";
 			} | {
-				fov?: number;
+				fov?: number | undefined;
 				kind: "equirectangular";
 			} | {
 				kind: "unknown";
@@ -1047,11 +1014,11 @@ export const RootSchema: ZodMiniObject<{
 					[x: string]: unknown;
 					kind: string;
 				};
-			};
-			reorder?: number & $brand<"u8">;
-			stereo?: string;
-			track?: string;
-			warmup?: number & $brand<"u53">;
+			} | undefined;
+			reorder?: number & $brand<"u8"> | undefined;
+			stereo?: string | undefined;
+			track?: string | undefined;
+			warmup?: number & $brand<"u53"> | undefined;
 		};
 		track: {
 			name: string;
@@ -1535,16 +1502,16 @@ export namespace Video {
 		flip: undefined;
 		renditions: {
 			[k: string]: {
-				bitrate?: number & $brand<"u53">;
-				broadcast?: RelativeBroadcast;
+				bitrate?: number & $brand<"u53"> | undefined;
+				broadcast?: RelativeBroadcast | undefined;
 				codec: string;
-				codedHeight?: number & $brand<"u53">;
-				codedWidth?: number & $brand<"u53">;
+				codedHeight?: number & $brand<"u53"> | undefined;
+				codedWidth?: number & $brand<"u53"> | undefined;
 				color?: {
 					contentLight?: {
 						maxCll: number;
 						maxFall: number;
-					};
+					} | undefined;
 					mastering?: {
 						blue: {
 							x: number;
@@ -1564,12 +1531,12 @@ export namespace Video {
 							x: number;
 							y: number;
 						};
-					};
-					matrix?: number & $brand<"u8">;
-					primaries?: number & $brand<"u8">;
-					range?: "full" | "limited";
-					transfer?: number & $brand<"u8">;
-				};
+					} | undefined;
+					matrix?: number & $brand<"u8"> | undefined;
+					primaries?: number & $brand<"u8"> | undefined;
+					range?: "full" | "limited" | undefined;
+					transfer?: number & $brand<"u8"> | undefined;
+				} | undefined;
 				container: {
 					kind: "legacy";
 				} | {
@@ -1584,26 +1551,26 @@ export namespace Video {
 						kind: string;
 					};
 				};
-				delay?: number & $brand<"u53">;
-				description?: string;
-				displayAspectHeight?: number & $brand<"u53">;
-				displayAspectWidth?: number & $brand<"u53">;
-				enabled?: boolean;
-				epoch?: ReferenceEpoch;
-				framerate?: number;
+				delay?: number & $brand<"u53"> | undefined;
+				description?: string | undefined;
+				displayAspectHeight?: number & $brand<"u53"> | undefined;
+				displayAspectWidth?: number & $brand<"u53"> | undefined;
+				enabled?: boolean | undefined;
+				epoch?: ReferenceEpoch | undefined;
+				framerate?: number | undefined;
 				hls?: {
 					duration: number & $brand<"u53">;
 					track: string;
-				};
-				interlaced?: boolean;
-				jitter?: number & $brand<"u53">;
-				label?: string;
-				optimizeForLatency?: boolean;
-				preference?: number;
+				} | undefined;
+				interlaced?: boolean | undefined;
+				jitter?: number & $brand<"u53"> | undefined;
+				label?: string | undefined;
+				optimizeForLatency?: boolean | undefined;
+				preference?: number | undefined;
 				projection?: {
 					kind: "rectilinear";
 				} | {
-					fov?: number;
+					fov?: number | undefined;
 					kind: "equirectangular";
 				} | {
 					kind: "unknown";
@@ -1611,26 +1578,26 @@ export namespace Video {
 						[x: string]: unknown;
 						kind: string;
 					};
-				};
-				reorder?: number & $brand<"u8">;
-				stereo?: string;
-				track?: string;
-				warmup?: number & $brand<"u53">;
+				} | undefined;
+				reorder?: number & $brand<"u8"> | undefined;
+				stereo?: string | undefined;
+				track?: string | undefined;
+				warmup?: number & $brand<"u53"> | undefined;
 			};
 		};
 		rotation: undefined;
 	}, {
 		config: {
-			bitrate?: number & $brand<"u53">;
-			broadcast?: RelativeBroadcast;
+			bitrate?: number & $brand<"u53"> | undefined;
+			broadcast?: RelativeBroadcast | undefined;
 			codec: string;
-			codedHeight?: number & $brand<"u53">;
-			codedWidth?: number & $brand<"u53">;
+			codedHeight?: number & $brand<"u53"> | undefined;
+			codedWidth?: number & $brand<"u53"> | undefined;
 			color?: {
 				contentLight?: {
 					maxCll: number;
 					maxFall: number;
-				};
+				} | undefined;
 				mastering?: {
 					blue: {
 						x: number;
@@ -1650,12 +1617,12 @@ export namespace Video {
 						x: number;
 						y: number;
 					};
-				};
-				matrix?: number & $brand<"u8">;
-				primaries?: number & $brand<"u8">;
-				range?: "full" | "limited";
-				transfer?: number & $brand<"u8">;
-			};
+				} | undefined;
+				matrix?: number & $brand<"u8"> | undefined;
+				primaries?: number & $brand<"u8"> | undefined;
+				range?: "full" | "limited" | undefined;
+				transfer?: number & $brand<"u8"> | undefined;
+			} | undefined;
 			container: {
 				kind: "legacy";
 			} | {
@@ -1670,26 +1637,26 @@ export namespace Video {
 					kind: string;
 				};
 			};
-			delay?: number & $brand<"u53">;
-			description?: string;
-			displayAspectHeight?: number & $brand<"u53">;
-			displayAspectWidth?: number & $brand<"u53">;
-			enabled?: boolean;
-			epoch?: ReferenceEpoch;
-			framerate?: number;
+			delay?: number & $brand<"u53"> | undefined;
+			description?: string | undefined;
+			displayAspectHeight?: number & $brand<"u53"> | undefined;
+			displayAspectWidth?: number & $brand<"u53"> | undefined;
+			enabled?: boolean | undefined;
+			epoch?: ReferenceEpoch | undefined;
+			framerate?: number | undefined;
 			hls?: {
 				duration: number & $brand<"u53">;
 				track: string;
-			};
-			interlaced?: boolean;
-			jitter?: number & $brand<"u53">;
-			label?: string;
-			optimizeForLatency?: boolean;
-			preference?: number;
+			} | undefined;
+			interlaced?: boolean | undefined;
+			jitter?: number & $brand<"u53"> | undefined;
+			label?: string | undefined;
+			optimizeForLatency?: boolean | undefined;
+			preference?: number | undefined;
 			projection?: {
 				kind: "rectilinear";
 			} | {
-				fov?: number;
+				fov?: number | undefined;
 				kind: "equirectangular";
 			} | {
 				kind: "unknown";
@@ -1697,99 +1664,17 @@ export namespace Video {
 					[x: string]: unknown;
 					kind: string;
 				};
-			};
-			reorder?: number & $brand<"u8">;
-			stereo?: string;
-			track?: string;
-			warmup?: number & $brand<"u53">;
+			} | undefined;
+			reorder?: number & $brand<"u8"> | undefined;
+			stereo?: string | undefined;
+			track?: string | undefined;
+			warmup?: number & $brand<"u53"> | undefined;
 		};
 		track: {
 			name: string;
 		};
 	}[]>>]>;
-	export function ranked(renditions: Record<string, Video.VideoConfig>): [string, {
-		bitrate?: number & $brand<"u53">;
-		broadcast?: RelativeBroadcast;
-		codec: string;
-		codedHeight?: number & $brand<"u53">;
-		codedWidth?: number & $brand<"u53">;
-		color?: {
-			contentLight?: {
-				maxCll: number;
-				maxFall: number;
-			};
-			mastering?: {
-				blue: {
-					x: number;
-					y: number;
-				};
-				green: {
-					x: number;
-					y: number;
-				};
-				maxLuminance: number;
-				minLuminance: number;
-				red: {
-					x: number;
-					y: number;
-				};
-				white: {
-					x: number;
-					y: number;
-				};
-			};
-			matrix?: number & $brand<"u8">;
-			primaries?: number & $brand<"u8">;
-			range?: "full" | "limited";
-			transfer?: number & $brand<"u8">;
-		};
-		container: {
-			kind: "unknown";
-			raw: {
-				[x: string]: unknown;
-				kind: string;
-			};
-		} | {
-			kind: "legacy";
-		} | {
-			init: string;
-			kind: "cmaf";
-		} | {
-			kind: "loc";
-		};
-		delay?: number & $brand<"u53">;
-		description?: string;
-		displayAspectHeight?: number & $brand<"u53">;
-		displayAspectWidth?: number & $brand<"u53">;
-		enabled?: boolean;
-		epoch?: ReferenceEpoch;
-		framerate?: number;
-		hls?: {
-			duration: number & $brand<"u53">;
-			track: string;
-		};
-		interlaced?: boolean;
-		jitter?: number & $brand<"u53">;
-		label?: string;
-		optimizeForLatency?: boolean;
-		preference?: number;
-		projection?: {
-			kind: "unknown";
-			raw: {
-				[x: string]: unknown;
-				kind: string;
-			};
-		} | {
-			kind: "rectilinear";
-		} | {
-			fov?: number;
-			kind: "equirectangular";
-		};
-		reorder?: number & $brand<"u8">;
-		stereo?: string;
-		track?: string;
-		warmup?: number & $brand<"u53">;
-	}][];
+	export function ranked(renditions: Record<string, Video.VideoConfig>): [string, Video.VideoConfig][];
 }
 
 export type Video = Video.Video;
@@ -1800,2104 +1685,21 @@ export import VideoConfigSchema = Video.VideoConfigSchema;
 
 export import VideoSchema = Video.VideoSchema;
 
-export function checkRenditions(root: {
-	[key: string]: unknown;
-	audio?: {
-		renditions: {
-			[x: string]: {
-				bitrate?: number & $brand<"u53">;
-				broadcast?: RelativeBroadcast;
-				codec: string;
-				container: {
-					kind: "legacy";
-				} | {
-					init: string;
-					kind: "cmaf";
-				} | {
-					kind: "loc";
-				} | {
-					kind: "unknown";
-					raw: {
-						[x: string]: unknown;
-						kind: string;
-					};
-				};
-				delay?: number & $brand<"u53">;
-				description?: string;
-				enabled?: boolean;
-				epoch?: ReferenceEpoch;
-				hls?: {
-					duration: number & $brand<"u53">;
-					track: string;
-				};
-				jitter?: number & $brand<"u53">;
-				label?: string;
-				layout?: string;
-				numberOfChannels: number & $brand<"u53">;
-				sampleRate: number & $brand<"u53">;
-				track?: string;
-				warmup?: number & $brand<"u53">;
-			};
-		};
-	} | {
-		renditions: ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
-			bitrate: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			broadcast: ZodMiniOptional<ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>>;
-			codec: ZodMiniString<string>;
-			container: ZodMiniDefault<ZodMiniUnion<readonly [ZodMiniDiscriminatedUnion<[ZodMiniObject<{
-				kind: ZodMiniLiteral<"legacy">;
-			}, $strip>, ZodMiniObject<{
-				init: ZodMiniBase64;
-				kind: ZodMiniLiteral<"cmaf">;
-			}, $strip>, ZodMiniObject<{
-				kind: ZodMiniLiteral<"loc">;
-			}, $strip>], "kind">, ZodMiniPipe<ZodMiniObject<{
-				kind: ZodMiniString<string>;
-			}, $loose>, ZodMiniTransform<{
-				kind: "unknown";
-				raw: {
-					[x: string]: unknown;
-					kind: string;
-				};
-			}, {
-				[x: string]: unknown;
-				kind: string;
-			}>>]>>;
-			delay: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			description: ZodMiniOptional<ZodMiniString<string>>;
-			enabled: ZodMiniOptional<ZodMiniBoolean<boolean>>;
-			epoch: ZodMiniOptional<ZodMiniType<ReferenceEpoch, string, $ZodTypeInternals<ReferenceEpoch, string>>>;
-			hls: ZodMiniCatch<ZodMiniOptional<ZodMiniObject<{
-				duration: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
-				track: ZodMiniString<string>;
-			}, $strip>>>;
-			jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			label: ZodMiniOptional<ZodMiniString<string>>;
-			layout: ZodMiniOptional<ZodMiniString<string>>;
-			numberOfChannels: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
-			sampleRate: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
-			track: ZodMiniOptional<ZodMiniString<string>>;
-			warmup: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-		}, $strip>>;
-	};
-	binary?: {
-		tracks: ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
-			bitrate: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			broadcast: ZodMiniOptional<ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>>;
-			compression: ZodMiniOptional<ZodMiniString<string>>;
-			delay: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			epoch: ZodMiniOptional<ZodMiniType<ReferenceEpoch, string, $ZodTypeInternals<ReferenceEpoch, string>>>;
-			jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			mime: ZodMiniOptional<ZodMiniString<string>>;
-			mode: ZodMiniString<string>;
-			track: ZodMiniOptional<ZodMiniString<string>>;
-		}, $loose>>;
-	};
-	clock?: {
-		timescale: number;
-		wall: number & $brand<"u53">;
-	};
-	echo?: {
-		path: RelativeBroadcast;
-	};
-	json?: {
-		tracks: ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
-			bitrate: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			broadcast: ZodMiniOptional<ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>>;
-			compression: ZodMiniOptional<ZodMiniString<string>>;
-			delay: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			epoch: ZodMiniOptional<ZodMiniType<ReferenceEpoch, string, $ZodTypeInternals<ReferenceEpoch, string>>>;
-			jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			mode: ZodMiniString<string>;
-			schema: ZodMiniOptional<ZodMiniString<string>>;
-			track: ZodMiniOptional<ZodMiniString<string>>;
-		}, $loose>>;
-	};
-	stats?: {
-		track: string;
-	};
-	text?: {
-		renditions: ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
-			broadcast: ZodMiniOptional<ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>>;
-			container: ZodMiniDefault<ZodMiniUnion<readonly [ZodMiniDiscriminatedUnion<[ZodMiniObject<{
-				kind: ZodMiniLiteral<"legacy">;
-			}, $strip>, ZodMiniObject<{
-				init: ZodMiniBase64;
-				kind: ZodMiniLiteral<"cmaf">;
-			}, $strip>, ZodMiniObject<{
-				kind: ZodMiniLiteral<"loc">;
-			}, $strip>], "kind">, ZodMiniPipe<ZodMiniObject<{
-				kind: ZodMiniString<string>;
-			}, $loose>, ZodMiniTransform<{
-				kind: "unknown";
-				raw: {
-					[x: string]: unknown;
-					kind: string;
-				};
-			}, {
-				[x: string]: unknown;
-				kind: string;
-			}>>]>>;
-			delay: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			epoch: ZodMiniOptional<ZodMiniType<ReferenceEpoch, string, $ZodTypeInternals<ReferenceEpoch, string>>>;
-			format: ZodMiniString<string>;
-			jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			label: ZodMiniOptional<ZodMiniString<string>>;
-			lang: ZodMiniOptional<ZodMiniString<string>>;
-			role: ZodMiniDefault<ZodMiniString<string>>;
-			track: ZodMiniOptional<ZodMiniString<string>>;
-		}, $strip>>;
-	};
-	version?: number;
-	video?: {
-		display: {
-			height: number & $brand<"u53">;
-			width: number & $brand<"u53">;
-		} | undefined;
-		flip: undefined;
-		renditions: {
-			[k: string]: {
-				bitrate?: number & $brand<"u53">;
-				broadcast?: RelativeBroadcast;
-				codec: string;
-				codedHeight?: number & $brand<"u53">;
-				codedWidth?: number & $brand<"u53">;
-				color?: {
-					contentLight?: {
-						maxCll: number;
-						maxFall: number;
-					};
-					mastering?: {
-						blue: {
-							x: number;
-							y: number;
-						};
-						green: {
-							x: number;
-							y: number;
-						};
-						maxLuminance: number;
-						minLuminance: number;
-						red: {
-							x: number;
-							y: number;
-						};
-						white: {
-							x: number;
-							y: number;
-						};
-					};
-					matrix?: number & $brand<"u8">;
-					primaries?: number & $brand<"u8">;
-					range?: "full" | "limited";
-					transfer?: number & $brand<"u8">;
-				};
-				container: {
-					kind: "legacy";
-				} | {
-					init: string;
-					kind: "cmaf";
-				} | {
-					kind: "loc";
-				} | {
-					kind: "unknown";
-					raw: {
-						[x: string]: unknown;
-						kind: string;
-					};
-				};
-				delay?: number & $brand<"u53">;
-				description?: string;
-				displayAspectHeight?: number & $brand<"u53">;
-				displayAspectWidth?: number & $brand<"u53">;
-				enabled?: boolean;
-				epoch?: ReferenceEpoch;
-				framerate?: number;
-				hls?: {
-					duration: number & $brand<"u53">;
-					track: string;
-				};
-				interlaced?: boolean;
-				jitter?: number & $brand<"u53">;
-				label?: string;
-				optimizeForLatency?: boolean;
-				preference?: number;
-				projection?: {
-					kind: "rectilinear";
-				} | {
-					fov?: number;
-					kind: "equirectangular";
-				} | {
-					kind: "unknown";
-					raw: {
-						[x: string]: unknown;
-						kind: string;
-					};
-				};
-				reorder?: number & $brand<"u8">;
-				stereo?: string;
-				track?: string;
-				warmup?: number & $brand<"u53">;
-			};
-		};
-		rotation: undefined;
-	} | {
-		display?: {
-			height: number & $brand<"u53">;
-			width: number & $brand<"u53">;
-		};
-		flip?: boolean;
-		renditions: ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
-			bitrate: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			broadcast: ZodMiniOptional<ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>>;
-			codec: ZodMiniString<string>;
-			codedHeight: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			codedWidth: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			color: ZodMiniOptional<ZodMiniObject<{
-				contentLight: ZodMiniOptional<ZodMiniObject<{
-					maxCll: ZodMiniNumber<number>;
-					maxFall: ZodMiniNumber<number>;
-				}, $strip>>;
-				mastering: ZodMiniOptional<ZodMiniObject<{
-					blue: ZodMiniObject<{
-						x: ZodMiniNumber<number>;
-						y: ZodMiniNumber<number>;
-					}, $strip>;
-					green: ZodMiniObject<{
-						x: ZodMiniNumber<number>;
-						y: ZodMiniNumber<number>;
-					}, $strip>;
-					maxLuminance: ZodMiniNumber<number>;
-					minLuminance: ZodMiniNumber<number>;
-					red: ZodMiniObject<{
-						x: ZodMiniNumber<number>;
-						y: ZodMiniNumber<number>;
-					}, $strip>;
-					white: ZodMiniObject<{
-						x: ZodMiniNumber<number>;
-						y: ZodMiniNumber<number>;
-					}, $strip>;
-				}, $strip>>;
-				matrix: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u8", "out">>;
-				primaries: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u8", "out">>;
-				range: ZodMiniOptional<ZodMiniEnum<{
-					full: "full";
-					limited: "limited";
-				}>>;
-				transfer: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u8", "out">>;
-			}, $strip>>;
-			container: ZodMiniDefault<ZodMiniUnion<readonly [ZodMiniDiscriminatedUnion<[ZodMiniObject<{
-				kind: ZodMiniLiteral<"legacy">;
-			}, $strip>, ZodMiniObject<{
-				init: ZodMiniBase64;
-				kind: ZodMiniLiteral<"cmaf">;
-			}, $strip>, ZodMiniObject<{
-				kind: ZodMiniLiteral<"loc">;
-			}, $strip>], "kind">, ZodMiniPipe<ZodMiniObject<{
-				kind: ZodMiniString<string>;
-			}, $loose>, ZodMiniTransform<{
-				kind: "unknown";
-				raw: {
-					[x: string]: unknown;
-					kind: string;
-				};
-			}, {
-				[x: string]: unknown;
-				kind: string;
-			}>>]>>;
-			delay: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			description: ZodMiniOptional<ZodMiniString<string>>;
-			displayAspectHeight: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			displayAspectWidth: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			enabled: ZodMiniOptional<ZodMiniBoolean<boolean>>;
-			epoch: ZodMiniOptional<ZodMiniType<ReferenceEpoch, string, $ZodTypeInternals<ReferenceEpoch, string>>>;
-			framerate: ZodMiniOptional<ZodMiniNumber<number>>;
-			hls: ZodMiniCatch<ZodMiniOptional<ZodMiniObject<{
-				duration: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
-				track: ZodMiniString<string>;
-			}, $strip>>>;
-			interlaced: ZodMiniOptional<ZodMiniBoolean<boolean>>;
-			jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			label: ZodMiniOptional<ZodMiniString<string>>;
-			optimizeForLatency: ZodMiniOptional<ZodMiniBoolean<boolean>>;
-			preference: ZodMiniOptional<ZodMiniInt32>;
-			projection: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniDiscriminatedUnion<[ZodMiniObject<{
-				kind: ZodMiniLiteral<"rectilinear">;
-			}, $strip>, ZodMiniObject<{
-				fov: ZodMiniOptional<ZodMiniNumber<number>>;
-				kind: ZodMiniLiteral<"equirectangular">;
-			}, $strip>], "kind">, ZodMiniPipe<ZodMiniObject<{
-				kind: ZodMiniString<string>;
-			}, $loose>, ZodMiniTransform<{
-				kind: "unknown";
-				raw: {
-					[x: string]: unknown;
-					kind: string;
-				};
-			}, {
-				[x: string]: unknown;
-				kind: string;
-			}>>]>>;
-			reorder: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u8", "out">>;
-			stereo: ZodMiniOptional<ZodMiniString<string>>;
-			track: ZodMiniOptional<ZodMiniString<string>>;
-			warmup: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-		}, $strip>>;
-		rotation?: number;
-	};
-}): {
-	[key: string]: unknown;
-	audio?: {
-		renditions: {
-			[x: string]: {
-				bitrate?: number & $brand<"u53">;
-				broadcast?: RelativeBroadcast;
-				codec: string;
-				container: {
-					kind: "legacy";
-				} | {
-					init: string;
-					kind: "cmaf";
-				} | {
-					kind: "loc";
-				} | {
-					kind: "unknown";
-					raw: {
-						[x: string]: unknown;
-						kind: string;
-					};
-				};
-				delay?: number & $brand<"u53">;
-				description?: string;
-				enabled?: boolean;
-				epoch?: ReferenceEpoch;
-				hls?: {
-					duration: number & $brand<"u53">;
-					track: string;
-				};
-				jitter?: number & $brand<"u53">;
-				label?: string;
-				layout?: string;
-				numberOfChannels: number & $brand<"u53">;
-				sampleRate: number & $brand<"u53">;
-				track?: string;
-				warmup?: number & $brand<"u53">;
-			};
-		};
-	} | {
-		renditions: ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
-			bitrate: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			broadcast: ZodMiniOptional<ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>>;
-			codec: ZodMiniString<string>;
-			container: ZodMiniDefault<ZodMiniUnion<readonly [ZodMiniDiscriminatedUnion<[ZodMiniObject<{
-				kind: ZodMiniLiteral<"legacy">;
-			}, $strip>, ZodMiniObject<{
-				init: ZodMiniBase64;
-				kind: ZodMiniLiteral<"cmaf">;
-			}, $strip>, ZodMiniObject<{
-				kind: ZodMiniLiteral<"loc">;
-			}, $strip>], "kind">, ZodMiniPipe<ZodMiniObject<{
-				kind: ZodMiniString<string>;
-			}, $loose>, ZodMiniTransform<{
-				kind: "unknown";
-				raw: {
-					[x: string]: unknown;
-					kind: string;
-				};
-			}, {
-				[x: string]: unknown;
-				kind: string;
-			}>>]>>;
-			delay: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			description: ZodMiniOptional<ZodMiniString<string>>;
-			enabled: ZodMiniOptional<ZodMiniBoolean<boolean>>;
-			epoch: ZodMiniOptional<ZodMiniType<ReferenceEpoch, string, $ZodTypeInternals<ReferenceEpoch, string>>>;
-			hls: ZodMiniCatch<ZodMiniOptional<ZodMiniObject<{
-				duration: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
-				track: ZodMiniString<string>;
-			}, $strip>>>;
-			jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			label: ZodMiniOptional<ZodMiniString<string>>;
-			layout: ZodMiniOptional<ZodMiniString<string>>;
-			numberOfChannels: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
-			sampleRate: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
-			track: ZodMiniOptional<ZodMiniString<string>>;
-			warmup: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-		}, $strip>>;
-	};
-	binary?: {
-		tracks: ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
-			bitrate: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			broadcast: ZodMiniOptional<ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>>;
-			compression: ZodMiniOptional<ZodMiniString<string>>;
-			delay: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			epoch: ZodMiniOptional<ZodMiniType<ReferenceEpoch, string, $ZodTypeInternals<ReferenceEpoch, string>>>;
-			jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			mime: ZodMiniOptional<ZodMiniString<string>>;
-			mode: ZodMiniString<string>;
-			track: ZodMiniOptional<ZodMiniString<string>>;
-		}, $loose>>;
-	};
-	clock?: {
-		timescale: number;
-		wall: number & $brand<"u53">;
-	};
-	echo?: {
-		path: RelativeBroadcast;
-	};
-	json?: {
-		tracks: ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
-			bitrate: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			broadcast: ZodMiniOptional<ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>>;
-			compression: ZodMiniOptional<ZodMiniString<string>>;
-			delay: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			epoch: ZodMiniOptional<ZodMiniType<ReferenceEpoch, string, $ZodTypeInternals<ReferenceEpoch, string>>>;
-			jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			mode: ZodMiniString<string>;
-			schema: ZodMiniOptional<ZodMiniString<string>>;
-			track: ZodMiniOptional<ZodMiniString<string>>;
-		}, $loose>>;
-	};
-	stats?: {
-		track: string;
-	};
-	text?: {
-		renditions: ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
-			broadcast: ZodMiniOptional<ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>>;
-			container: ZodMiniDefault<ZodMiniUnion<readonly [ZodMiniDiscriminatedUnion<[ZodMiniObject<{
-				kind: ZodMiniLiteral<"legacy">;
-			}, $strip>, ZodMiniObject<{
-				init: ZodMiniBase64;
-				kind: ZodMiniLiteral<"cmaf">;
-			}, $strip>, ZodMiniObject<{
-				kind: ZodMiniLiteral<"loc">;
-			}, $strip>], "kind">, ZodMiniPipe<ZodMiniObject<{
-				kind: ZodMiniString<string>;
-			}, $loose>, ZodMiniTransform<{
-				kind: "unknown";
-				raw: {
-					[x: string]: unknown;
-					kind: string;
-				};
-			}, {
-				[x: string]: unknown;
-				kind: string;
-			}>>]>>;
-			delay: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			epoch: ZodMiniOptional<ZodMiniType<ReferenceEpoch, string, $ZodTypeInternals<ReferenceEpoch, string>>>;
-			format: ZodMiniString<string>;
-			jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			label: ZodMiniOptional<ZodMiniString<string>>;
-			lang: ZodMiniOptional<ZodMiniString<string>>;
-			role: ZodMiniDefault<ZodMiniString<string>>;
-			track: ZodMiniOptional<ZodMiniString<string>>;
-		}, $strip>>;
-	};
-	version?: number;
-	video?: {
-		display: {
-			height: number & $brand<"u53">;
-			width: number & $brand<"u53">;
-		} | undefined;
-		flip: undefined;
-		renditions: {
-			[k: string]: {
-				bitrate?: number & $brand<"u53">;
-				broadcast?: RelativeBroadcast;
-				codec: string;
-				codedHeight?: number & $brand<"u53">;
-				codedWidth?: number & $brand<"u53">;
-				color?: {
-					contentLight?: {
-						maxCll: number;
-						maxFall: number;
-					};
-					mastering?: {
-						blue: {
-							x: number;
-							y: number;
-						};
-						green: {
-							x: number;
-							y: number;
-						};
-						maxLuminance: number;
-						minLuminance: number;
-						red: {
-							x: number;
-							y: number;
-						};
-						white: {
-							x: number;
-							y: number;
-						};
-					};
-					matrix?: number & $brand<"u8">;
-					primaries?: number & $brand<"u8">;
-					range?: "full" | "limited";
-					transfer?: number & $brand<"u8">;
-				};
-				container: {
-					kind: "legacy";
-				} | {
-					init: string;
-					kind: "cmaf";
-				} | {
-					kind: "loc";
-				} | {
-					kind: "unknown";
-					raw: {
-						[x: string]: unknown;
-						kind: string;
-					};
-				};
-				delay?: number & $brand<"u53">;
-				description?: string;
-				displayAspectHeight?: number & $brand<"u53">;
-				displayAspectWidth?: number & $brand<"u53">;
-				enabled?: boolean;
-				epoch?: ReferenceEpoch;
-				framerate?: number;
-				hls?: {
-					duration: number & $brand<"u53">;
-					track: string;
-				};
-				interlaced?: boolean;
-				jitter?: number & $brand<"u53">;
-				label?: string;
-				optimizeForLatency?: boolean;
-				preference?: number;
-				projection?: {
-					kind: "rectilinear";
-				} | {
-					fov?: number;
-					kind: "equirectangular";
-				} | {
-					kind: "unknown";
-					raw: {
-						[x: string]: unknown;
-						kind: string;
-					};
-				};
-				reorder?: number & $brand<"u8">;
-				stereo?: string;
-				track?: string;
-				warmup?: number & $brand<"u53">;
-			};
-		};
-		rotation: undefined;
-	} | {
-		display?: {
-			height: number & $brand<"u53">;
-			width: number & $brand<"u53">;
-		};
-		flip?: boolean;
-		renditions: ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
-			bitrate: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			broadcast: ZodMiniOptional<ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>>;
-			codec: ZodMiniString<string>;
-			codedHeight: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			codedWidth: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			color: ZodMiniOptional<ZodMiniObject<{
-				contentLight: ZodMiniOptional<ZodMiniObject<{
-					maxCll: ZodMiniNumber<number>;
-					maxFall: ZodMiniNumber<number>;
-				}, $strip>>;
-				mastering: ZodMiniOptional<ZodMiniObject<{
-					blue: ZodMiniObject<{
-						x: ZodMiniNumber<number>;
-						y: ZodMiniNumber<number>;
-					}, $strip>;
-					green: ZodMiniObject<{
-						x: ZodMiniNumber<number>;
-						y: ZodMiniNumber<number>;
-					}, $strip>;
-					maxLuminance: ZodMiniNumber<number>;
-					minLuminance: ZodMiniNumber<number>;
-					red: ZodMiniObject<{
-						x: ZodMiniNumber<number>;
-						y: ZodMiniNumber<number>;
-					}, $strip>;
-					white: ZodMiniObject<{
-						x: ZodMiniNumber<number>;
-						y: ZodMiniNumber<number>;
-					}, $strip>;
-				}, $strip>>;
-				matrix: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u8", "out">>;
-				primaries: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u8", "out">>;
-				range: ZodMiniOptional<ZodMiniEnum<{
-					full: "full";
-					limited: "limited";
-				}>>;
-				transfer: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u8", "out">>;
-			}, $strip>>;
-			container: ZodMiniDefault<ZodMiniUnion<readonly [ZodMiniDiscriminatedUnion<[ZodMiniObject<{
-				kind: ZodMiniLiteral<"legacy">;
-			}, $strip>, ZodMiniObject<{
-				init: ZodMiniBase64;
-				kind: ZodMiniLiteral<"cmaf">;
-			}, $strip>, ZodMiniObject<{
-				kind: ZodMiniLiteral<"loc">;
-			}, $strip>], "kind">, ZodMiniPipe<ZodMiniObject<{
-				kind: ZodMiniString<string>;
-			}, $loose>, ZodMiniTransform<{
-				kind: "unknown";
-				raw: {
-					[x: string]: unknown;
-					kind: string;
-				};
-			}, {
-				[x: string]: unknown;
-				kind: string;
-			}>>]>>;
-			delay: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			description: ZodMiniOptional<ZodMiniString<string>>;
-			displayAspectHeight: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			displayAspectWidth: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			enabled: ZodMiniOptional<ZodMiniBoolean<boolean>>;
-			epoch: ZodMiniOptional<ZodMiniType<ReferenceEpoch, string, $ZodTypeInternals<ReferenceEpoch, string>>>;
-			framerate: ZodMiniOptional<ZodMiniNumber<number>>;
-			hls: ZodMiniCatch<ZodMiniOptional<ZodMiniObject<{
-				duration: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
-				track: ZodMiniString<string>;
-			}, $strip>>>;
-			interlaced: ZodMiniOptional<ZodMiniBoolean<boolean>>;
-			jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			label: ZodMiniOptional<ZodMiniString<string>>;
-			optimizeForLatency: ZodMiniOptional<ZodMiniBoolean<boolean>>;
-			preference: ZodMiniOptional<ZodMiniInt32>;
-			projection: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniDiscriminatedUnion<[ZodMiniObject<{
-				kind: ZodMiniLiteral<"rectilinear">;
-			}, $strip>, ZodMiniObject<{
-				fov: ZodMiniOptional<ZodMiniNumber<number>>;
-				kind: ZodMiniLiteral<"equirectangular">;
-			}, $strip>], "kind">, ZodMiniPipe<ZodMiniObject<{
-				kind: ZodMiniString<string>;
-			}, $loose>, ZodMiniTransform<{
-				kind: "unknown";
-				raw: {
-					[x: string]: unknown;
-					kind: string;
-				};
-			}, {
-				[x: string]: unknown;
-				kind: string;
-			}>>]>>;
-			reorder: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u8", "out">>;
-			stereo: ZodMiniOptional<ZodMiniString<string>>;
-			track: ZodMiniOptional<ZodMiniString<string>>;
-			warmup: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-		}, $strip>>;
-		rotation?: number;
-	};
-};
+export function checkRenditions(root: Root): Root;
 
-export function checkResolvable(root: {
-	[key: string]: unknown;
-	audio?: {
-		renditions: {
-			[x: string]: {
-				bitrate?: number & $brand<"u53">;
-				broadcast?: RelativeBroadcast;
-				codec: string;
-				container: {
-					kind: "legacy";
-				} | {
-					init: string;
-					kind: "cmaf";
-				} | {
-					kind: "loc";
-				} | {
-					kind: "unknown";
-					raw: {
-						[x: string]: unknown;
-						kind: string;
-					};
-				};
-				delay?: number & $brand<"u53">;
-				description?: string;
-				enabled?: boolean;
-				epoch?: ReferenceEpoch;
-				hls?: {
-					duration: number & $brand<"u53">;
-					track: string;
-				};
-				jitter?: number & $brand<"u53">;
-				label?: string;
-				layout?: string;
-				numberOfChannels: number & $brand<"u53">;
-				sampleRate: number & $brand<"u53">;
-				track?: string;
-				warmup?: number & $brand<"u53">;
-			};
-		};
-	} | {
-		renditions: ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
-			bitrate: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			broadcast: ZodMiniOptional<ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>>;
-			codec: ZodMiniString<string>;
-			container: ZodMiniDefault<ZodMiniUnion<readonly [ZodMiniDiscriminatedUnion<[ZodMiniObject<{
-				kind: ZodMiniLiteral<"legacy">;
-			}, $strip>, ZodMiniObject<{
-				init: ZodMiniBase64;
-				kind: ZodMiniLiteral<"cmaf">;
-			}, $strip>, ZodMiniObject<{
-				kind: ZodMiniLiteral<"loc">;
-			}, $strip>], "kind">, ZodMiniPipe<ZodMiniObject<{
-				kind: ZodMiniString<string>;
-			}, $loose>, ZodMiniTransform<{
-				kind: "unknown";
-				raw: {
-					[x: string]: unknown;
-					kind: string;
-				};
-			}, {
-				[x: string]: unknown;
-				kind: string;
-			}>>]>>;
-			delay: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			description: ZodMiniOptional<ZodMiniString<string>>;
-			enabled: ZodMiniOptional<ZodMiniBoolean<boolean>>;
-			epoch: ZodMiniOptional<ZodMiniType<ReferenceEpoch, string, $ZodTypeInternals<ReferenceEpoch, string>>>;
-			hls: ZodMiniCatch<ZodMiniOptional<ZodMiniObject<{
-				duration: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
-				track: ZodMiniString<string>;
-			}, $strip>>>;
-			jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			label: ZodMiniOptional<ZodMiniString<string>>;
-			layout: ZodMiniOptional<ZodMiniString<string>>;
-			numberOfChannels: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
-			sampleRate: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
-			track: ZodMiniOptional<ZodMiniString<string>>;
-			warmup: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-		}, $strip>>;
-	};
-	binary?: {
-		tracks: ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
-			bitrate: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			broadcast: ZodMiniOptional<ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>>;
-			compression: ZodMiniOptional<ZodMiniString<string>>;
-			delay: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			epoch: ZodMiniOptional<ZodMiniType<ReferenceEpoch, string, $ZodTypeInternals<ReferenceEpoch, string>>>;
-			jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			mime: ZodMiniOptional<ZodMiniString<string>>;
-			mode: ZodMiniString<string>;
-			track: ZodMiniOptional<ZodMiniString<string>>;
-		}, $loose>>;
-	};
-	clock?: {
-		timescale: number;
-		wall: number & $brand<"u53">;
-	};
-	echo?: {
-		path: RelativeBroadcast;
-	};
-	json?: {
-		tracks: ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
-			bitrate: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			broadcast: ZodMiniOptional<ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>>;
-			compression: ZodMiniOptional<ZodMiniString<string>>;
-			delay: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			epoch: ZodMiniOptional<ZodMiniType<ReferenceEpoch, string, $ZodTypeInternals<ReferenceEpoch, string>>>;
-			jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			mode: ZodMiniString<string>;
-			schema: ZodMiniOptional<ZodMiniString<string>>;
-			track: ZodMiniOptional<ZodMiniString<string>>;
-		}, $loose>>;
-	};
-	stats?: {
-		track: string;
-	};
-	text?: {
-		renditions: ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
-			broadcast: ZodMiniOptional<ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>>;
-			container: ZodMiniDefault<ZodMiniUnion<readonly [ZodMiniDiscriminatedUnion<[ZodMiniObject<{
-				kind: ZodMiniLiteral<"legacy">;
-			}, $strip>, ZodMiniObject<{
-				init: ZodMiniBase64;
-				kind: ZodMiniLiteral<"cmaf">;
-			}, $strip>, ZodMiniObject<{
-				kind: ZodMiniLiteral<"loc">;
-			}, $strip>], "kind">, ZodMiniPipe<ZodMiniObject<{
-				kind: ZodMiniString<string>;
-			}, $loose>, ZodMiniTransform<{
-				kind: "unknown";
-				raw: {
-					[x: string]: unknown;
-					kind: string;
-				};
-			}, {
-				[x: string]: unknown;
-				kind: string;
-			}>>]>>;
-			delay: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			epoch: ZodMiniOptional<ZodMiniType<ReferenceEpoch, string, $ZodTypeInternals<ReferenceEpoch, string>>>;
-			format: ZodMiniString<string>;
-			jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			label: ZodMiniOptional<ZodMiniString<string>>;
-			lang: ZodMiniOptional<ZodMiniString<string>>;
-			role: ZodMiniDefault<ZodMiniString<string>>;
-			track: ZodMiniOptional<ZodMiniString<string>>;
-		}, $strip>>;
-	};
-	version?: number;
-	video?: {
-		display: {
-			height: number & $brand<"u53">;
-			width: number & $brand<"u53">;
-		} | undefined;
-		flip: undefined;
-		renditions: {
-			[k: string]: {
-				bitrate?: number & $brand<"u53">;
-				broadcast?: RelativeBroadcast;
-				codec: string;
-				codedHeight?: number & $brand<"u53">;
-				codedWidth?: number & $brand<"u53">;
-				color?: {
-					contentLight?: {
-						maxCll: number;
-						maxFall: number;
-					};
-					mastering?: {
-						blue: {
-							x: number;
-							y: number;
-						};
-						green: {
-							x: number;
-							y: number;
-						};
-						maxLuminance: number;
-						minLuminance: number;
-						red: {
-							x: number;
-							y: number;
-						};
-						white: {
-							x: number;
-							y: number;
-						};
-					};
-					matrix?: number & $brand<"u8">;
-					primaries?: number & $brand<"u8">;
-					range?: "full" | "limited";
-					transfer?: number & $brand<"u8">;
-				};
-				container: {
-					kind: "legacy";
-				} | {
-					init: string;
-					kind: "cmaf";
-				} | {
-					kind: "loc";
-				} | {
-					kind: "unknown";
-					raw: {
-						[x: string]: unknown;
-						kind: string;
-					};
-				};
-				delay?: number & $brand<"u53">;
-				description?: string;
-				displayAspectHeight?: number & $brand<"u53">;
-				displayAspectWidth?: number & $brand<"u53">;
-				enabled?: boolean;
-				epoch?: ReferenceEpoch;
-				framerate?: number;
-				hls?: {
-					duration: number & $brand<"u53">;
-					track: string;
-				};
-				interlaced?: boolean;
-				jitter?: number & $brand<"u53">;
-				label?: string;
-				optimizeForLatency?: boolean;
-				preference?: number;
-				projection?: {
-					kind: "rectilinear";
-				} | {
-					fov?: number;
-					kind: "equirectangular";
-				} | {
-					kind: "unknown";
-					raw: {
-						[x: string]: unknown;
-						kind: string;
-					};
-				};
-				reorder?: number & $brand<"u8">;
-				stereo?: string;
-				track?: string;
-				warmup?: number & $brand<"u53">;
-			};
-		};
-		rotation: undefined;
-	} | {
-		display?: {
-			height: number & $brand<"u53">;
-			width: number & $brand<"u53">;
-		};
-		flip?: boolean;
-		renditions: ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
-			bitrate: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			broadcast: ZodMiniOptional<ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>>;
-			codec: ZodMiniString<string>;
-			codedHeight: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			codedWidth: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			color: ZodMiniOptional<ZodMiniObject<{
-				contentLight: ZodMiniOptional<ZodMiniObject<{
-					maxCll: ZodMiniNumber<number>;
-					maxFall: ZodMiniNumber<number>;
-				}, $strip>>;
-				mastering: ZodMiniOptional<ZodMiniObject<{
-					blue: ZodMiniObject<{
-						x: ZodMiniNumber<number>;
-						y: ZodMiniNumber<number>;
-					}, $strip>;
-					green: ZodMiniObject<{
-						x: ZodMiniNumber<number>;
-						y: ZodMiniNumber<number>;
-					}, $strip>;
-					maxLuminance: ZodMiniNumber<number>;
-					minLuminance: ZodMiniNumber<number>;
-					red: ZodMiniObject<{
-						x: ZodMiniNumber<number>;
-						y: ZodMiniNumber<number>;
-					}, $strip>;
-					white: ZodMiniObject<{
-						x: ZodMiniNumber<number>;
-						y: ZodMiniNumber<number>;
-					}, $strip>;
-				}, $strip>>;
-				matrix: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u8", "out">>;
-				primaries: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u8", "out">>;
-				range: ZodMiniOptional<ZodMiniEnum<{
-					full: "full";
-					limited: "limited";
-				}>>;
-				transfer: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u8", "out">>;
-			}, $strip>>;
-			container: ZodMiniDefault<ZodMiniUnion<readonly [ZodMiniDiscriminatedUnion<[ZodMiniObject<{
-				kind: ZodMiniLiteral<"legacy">;
-			}, $strip>, ZodMiniObject<{
-				init: ZodMiniBase64;
-				kind: ZodMiniLiteral<"cmaf">;
-			}, $strip>, ZodMiniObject<{
-				kind: ZodMiniLiteral<"loc">;
-			}, $strip>], "kind">, ZodMiniPipe<ZodMiniObject<{
-				kind: ZodMiniString<string>;
-			}, $loose>, ZodMiniTransform<{
-				kind: "unknown";
-				raw: {
-					[x: string]: unknown;
-					kind: string;
-				};
-			}, {
-				[x: string]: unknown;
-				kind: string;
-			}>>]>>;
-			delay: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			description: ZodMiniOptional<ZodMiniString<string>>;
-			displayAspectHeight: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			displayAspectWidth: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			enabled: ZodMiniOptional<ZodMiniBoolean<boolean>>;
-			epoch: ZodMiniOptional<ZodMiniType<ReferenceEpoch, string, $ZodTypeInternals<ReferenceEpoch, string>>>;
-			framerate: ZodMiniOptional<ZodMiniNumber<number>>;
-			hls: ZodMiniCatch<ZodMiniOptional<ZodMiniObject<{
-				duration: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
-				track: ZodMiniString<string>;
-			}, $strip>>>;
-			interlaced: ZodMiniOptional<ZodMiniBoolean<boolean>>;
-			jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			label: ZodMiniOptional<ZodMiniString<string>>;
-			optimizeForLatency: ZodMiniOptional<ZodMiniBoolean<boolean>>;
-			preference: ZodMiniOptional<ZodMiniInt32>;
-			projection: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniDiscriminatedUnion<[ZodMiniObject<{
-				kind: ZodMiniLiteral<"rectilinear">;
-			}, $strip>, ZodMiniObject<{
-				fov: ZodMiniOptional<ZodMiniNumber<number>>;
-				kind: ZodMiniLiteral<"equirectangular">;
-			}, $strip>], "kind">, ZodMiniPipe<ZodMiniObject<{
-				kind: ZodMiniString<string>;
-			}, $loose>, ZodMiniTransform<{
-				kind: "unknown";
-				raw: {
-					[x: string]: unknown;
-					kind: string;
-				};
-			}, {
-				[x: string]: unknown;
-				kind: string;
-			}>>]>>;
-			reorder: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u8", "out">>;
-			stereo: ZodMiniOptional<ZodMiniString<string>>;
-			track: ZodMiniOptional<ZodMiniString<string>>;
-			warmup: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-		}, $strip>>;
-		rotation?: number;
-	};
-}, base: Net.Path.Valid): {
-	[key: string]: unknown;
-	audio?: {
-		renditions: {
-			[x: string]: {
-				bitrate?: number & $brand<"u53">;
-				broadcast?: RelativeBroadcast;
-				codec: string;
-				container: {
-					kind: "legacy";
-				} | {
-					init: string;
-					kind: "cmaf";
-				} | {
-					kind: "loc";
-				} | {
-					kind: "unknown";
-					raw: {
-						[x: string]: unknown;
-						kind: string;
-					};
-				};
-				delay?: number & $brand<"u53">;
-				description?: string;
-				enabled?: boolean;
-				epoch?: ReferenceEpoch;
-				hls?: {
-					duration: number & $brand<"u53">;
-					track: string;
-				};
-				jitter?: number & $brand<"u53">;
-				label?: string;
-				layout?: string;
-				numberOfChannels: number & $brand<"u53">;
-				sampleRate: number & $brand<"u53">;
-				track?: string;
-				warmup?: number & $brand<"u53">;
-			};
-		};
-	} | {
-		renditions: ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
-			bitrate: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			broadcast: ZodMiniOptional<ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>>;
-			codec: ZodMiniString<string>;
-			container: ZodMiniDefault<ZodMiniUnion<readonly [ZodMiniDiscriminatedUnion<[ZodMiniObject<{
-				kind: ZodMiniLiteral<"legacy">;
-			}, $strip>, ZodMiniObject<{
-				init: ZodMiniBase64;
-				kind: ZodMiniLiteral<"cmaf">;
-			}, $strip>, ZodMiniObject<{
-				kind: ZodMiniLiteral<"loc">;
-			}, $strip>], "kind">, ZodMiniPipe<ZodMiniObject<{
-				kind: ZodMiniString<string>;
-			}, $loose>, ZodMiniTransform<{
-				kind: "unknown";
-				raw: {
-					[x: string]: unknown;
-					kind: string;
-				};
-			}, {
-				[x: string]: unknown;
-				kind: string;
-			}>>]>>;
-			delay: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			description: ZodMiniOptional<ZodMiniString<string>>;
-			enabled: ZodMiniOptional<ZodMiniBoolean<boolean>>;
-			epoch: ZodMiniOptional<ZodMiniType<ReferenceEpoch, string, $ZodTypeInternals<ReferenceEpoch, string>>>;
-			hls: ZodMiniCatch<ZodMiniOptional<ZodMiniObject<{
-				duration: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
-				track: ZodMiniString<string>;
-			}, $strip>>>;
-			jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			label: ZodMiniOptional<ZodMiniString<string>>;
-			layout: ZodMiniOptional<ZodMiniString<string>>;
-			numberOfChannels: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
-			sampleRate: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
-			track: ZodMiniOptional<ZodMiniString<string>>;
-			warmup: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-		}, $strip>>;
-	};
-	binary?: {
-		tracks: ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
-			bitrate: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			broadcast: ZodMiniOptional<ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>>;
-			compression: ZodMiniOptional<ZodMiniString<string>>;
-			delay: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			epoch: ZodMiniOptional<ZodMiniType<ReferenceEpoch, string, $ZodTypeInternals<ReferenceEpoch, string>>>;
-			jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			mime: ZodMiniOptional<ZodMiniString<string>>;
-			mode: ZodMiniString<string>;
-			track: ZodMiniOptional<ZodMiniString<string>>;
-		}, $loose>>;
-	};
-	clock?: {
-		timescale: number;
-		wall: number & $brand<"u53">;
-	};
-	echo?: {
-		path: RelativeBroadcast;
-	};
-	json?: {
-		tracks: ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
-			bitrate: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			broadcast: ZodMiniOptional<ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>>;
-			compression: ZodMiniOptional<ZodMiniString<string>>;
-			delay: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			epoch: ZodMiniOptional<ZodMiniType<ReferenceEpoch, string, $ZodTypeInternals<ReferenceEpoch, string>>>;
-			jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			mode: ZodMiniString<string>;
-			schema: ZodMiniOptional<ZodMiniString<string>>;
-			track: ZodMiniOptional<ZodMiniString<string>>;
-		}, $loose>>;
-	};
-	stats?: {
-		track: string;
-	};
-	text?: {
-		renditions: ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
-			broadcast: ZodMiniOptional<ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>>;
-			container: ZodMiniDefault<ZodMiniUnion<readonly [ZodMiniDiscriminatedUnion<[ZodMiniObject<{
-				kind: ZodMiniLiteral<"legacy">;
-			}, $strip>, ZodMiniObject<{
-				init: ZodMiniBase64;
-				kind: ZodMiniLiteral<"cmaf">;
-			}, $strip>, ZodMiniObject<{
-				kind: ZodMiniLiteral<"loc">;
-			}, $strip>], "kind">, ZodMiniPipe<ZodMiniObject<{
-				kind: ZodMiniString<string>;
-			}, $loose>, ZodMiniTransform<{
-				kind: "unknown";
-				raw: {
-					[x: string]: unknown;
-					kind: string;
-				};
-			}, {
-				[x: string]: unknown;
-				kind: string;
-			}>>]>>;
-			delay: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			epoch: ZodMiniOptional<ZodMiniType<ReferenceEpoch, string, $ZodTypeInternals<ReferenceEpoch, string>>>;
-			format: ZodMiniString<string>;
-			jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			label: ZodMiniOptional<ZodMiniString<string>>;
-			lang: ZodMiniOptional<ZodMiniString<string>>;
-			role: ZodMiniDefault<ZodMiniString<string>>;
-			track: ZodMiniOptional<ZodMiniString<string>>;
-		}, $strip>>;
-	};
-	version?: number;
-	video?: {
-		display: {
-			height: number & $brand<"u53">;
-			width: number & $brand<"u53">;
-		} | undefined;
-		flip: undefined;
-		renditions: {
-			[k: string]: {
-				bitrate?: number & $brand<"u53">;
-				broadcast?: RelativeBroadcast;
-				codec: string;
-				codedHeight?: number & $brand<"u53">;
-				codedWidth?: number & $brand<"u53">;
-				color?: {
-					contentLight?: {
-						maxCll: number;
-						maxFall: number;
-					};
-					mastering?: {
-						blue: {
-							x: number;
-							y: number;
-						};
-						green: {
-							x: number;
-							y: number;
-						};
-						maxLuminance: number;
-						minLuminance: number;
-						red: {
-							x: number;
-							y: number;
-						};
-						white: {
-							x: number;
-							y: number;
-						};
-					};
-					matrix?: number & $brand<"u8">;
-					primaries?: number & $brand<"u8">;
-					range?: "full" | "limited";
-					transfer?: number & $brand<"u8">;
-				};
-				container: {
-					kind: "legacy";
-				} | {
-					init: string;
-					kind: "cmaf";
-				} | {
-					kind: "loc";
-				} | {
-					kind: "unknown";
-					raw: {
-						[x: string]: unknown;
-						kind: string;
-					};
-				};
-				delay?: number & $brand<"u53">;
-				description?: string;
-				displayAspectHeight?: number & $brand<"u53">;
-				displayAspectWidth?: number & $brand<"u53">;
-				enabled?: boolean;
-				epoch?: ReferenceEpoch;
-				framerate?: number;
-				hls?: {
-					duration: number & $brand<"u53">;
-					track: string;
-				};
-				interlaced?: boolean;
-				jitter?: number & $brand<"u53">;
-				label?: string;
-				optimizeForLatency?: boolean;
-				preference?: number;
-				projection?: {
-					kind: "rectilinear";
-				} | {
-					fov?: number;
-					kind: "equirectangular";
-				} | {
-					kind: "unknown";
-					raw: {
-						[x: string]: unknown;
-						kind: string;
-					};
-				};
-				reorder?: number & $brand<"u8">;
-				stereo?: string;
-				track?: string;
-				warmup?: number & $brand<"u53">;
-			};
-		};
-		rotation: undefined;
-	} | {
-		display?: {
-			height: number & $brand<"u53">;
-			width: number & $brand<"u53">;
-		};
-		flip?: boolean;
-		renditions: ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
-			bitrate: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			broadcast: ZodMiniOptional<ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>>;
-			codec: ZodMiniString<string>;
-			codedHeight: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			codedWidth: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			color: ZodMiniOptional<ZodMiniObject<{
-				contentLight: ZodMiniOptional<ZodMiniObject<{
-					maxCll: ZodMiniNumber<number>;
-					maxFall: ZodMiniNumber<number>;
-				}, $strip>>;
-				mastering: ZodMiniOptional<ZodMiniObject<{
-					blue: ZodMiniObject<{
-						x: ZodMiniNumber<number>;
-						y: ZodMiniNumber<number>;
-					}, $strip>;
-					green: ZodMiniObject<{
-						x: ZodMiniNumber<number>;
-						y: ZodMiniNumber<number>;
-					}, $strip>;
-					maxLuminance: ZodMiniNumber<number>;
-					minLuminance: ZodMiniNumber<number>;
-					red: ZodMiniObject<{
-						x: ZodMiniNumber<number>;
-						y: ZodMiniNumber<number>;
-					}, $strip>;
-					white: ZodMiniObject<{
-						x: ZodMiniNumber<number>;
-						y: ZodMiniNumber<number>;
-					}, $strip>;
-				}, $strip>>;
-				matrix: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u8", "out">>;
-				primaries: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u8", "out">>;
-				range: ZodMiniOptional<ZodMiniEnum<{
-					full: "full";
-					limited: "limited";
-				}>>;
-				transfer: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u8", "out">>;
-			}, $strip>>;
-			container: ZodMiniDefault<ZodMiniUnion<readonly [ZodMiniDiscriminatedUnion<[ZodMiniObject<{
-				kind: ZodMiniLiteral<"legacy">;
-			}, $strip>, ZodMiniObject<{
-				init: ZodMiniBase64;
-				kind: ZodMiniLiteral<"cmaf">;
-			}, $strip>, ZodMiniObject<{
-				kind: ZodMiniLiteral<"loc">;
-			}, $strip>], "kind">, ZodMiniPipe<ZodMiniObject<{
-				kind: ZodMiniString<string>;
-			}, $loose>, ZodMiniTransform<{
-				kind: "unknown";
-				raw: {
-					[x: string]: unknown;
-					kind: string;
-				};
-			}, {
-				[x: string]: unknown;
-				kind: string;
-			}>>]>>;
-			delay: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			description: ZodMiniOptional<ZodMiniString<string>>;
-			displayAspectHeight: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			displayAspectWidth: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			enabled: ZodMiniOptional<ZodMiniBoolean<boolean>>;
-			epoch: ZodMiniOptional<ZodMiniType<ReferenceEpoch, string, $ZodTypeInternals<ReferenceEpoch, string>>>;
-			framerate: ZodMiniOptional<ZodMiniNumber<number>>;
-			hls: ZodMiniCatch<ZodMiniOptional<ZodMiniObject<{
-				duration: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
-				track: ZodMiniString<string>;
-			}, $strip>>>;
-			interlaced: ZodMiniOptional<ZodMiniBoolean<boolean>>;
-			jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			label: ZodMiniOptional<ZodMiniString<string>>;
-			optimizeForLatency: ZodMiniOptional<ZodMiniBoolean<boolean>>;
-			preference: ZodMiniOptional<ZodMiniInt32>;
-			projection: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniDiscriminatedUnion<[ZodMiniObject<{
-				kind: ZodMiniLiteral<"rectilinear">;
-			}, $strip>, ZodMiniObject<{
-				fov: ZodMiniOptional<ZodMiniNumber<number>>;
-				kind: ZodMiniLiteral<"equirectangular">;
-			}, $strip>], "kind">, ZodMiniPipe<ZodMiniObject<{
-				kind: ZodMiniString<string>;
-			}, $loose>, ZodMiniTransform<{
-				kind: "unknown";
-				raw: {
-					[x: string]: unknown;
-					kind: string;
-				};
-			}, {
-				[x: string]: unknown;
-				kind: string;
-			}>>]>>;
-			reorder: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u8", "out">>;
-			stereo: ZodMiniOptional<ZodMiniString<string>>;
-			track: ZodMiniOptional<ZodMiniString<string>>;
-			warmup: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-		}, $strip>>;
-		rotation?: number;
-	};
-};
+export function checkResolvable(root: Root, base: Net.Path.Valid): Root;
 
-export function compressionSupported(compression: string): compression is "deflate";
+export function compressionSupported(compression: Compression): compression is "deflate";
 
-export function containerSupported(container: {
-	kind: "unknown";
-	raw: {
-		[x: string]: unknown;
-		kind: string;
-	};
-} | {
-	kind: "legacy";
-} | {
-	init: string;
-	kind: "cmaf";
-} | {
-	kind: "loc";
-}): boolean;
+export function containerSupported(container: Container): boolean;
 
-export function detectFormat(name: string): "hang" | "msf" | undefined;
+export function detectFormat(name: string): Format | undefined;
 
-export function encode(root: {
-	[key: string]: unknown;
-	audio?: {
-		renditions: {
-			[x: string]: {
-				bitrate?: number & $brand<"u53">;
-				broadcast?: RelativeBroadcast;
-				codec: string;
-				container: {
-					kind: "legacy";
-				} | {
-					init: string;
-					kind: "cmaf";
-				} | {
-					kind: "loc";
-				} | {
-					kind: "unknown";
-					raw: {
-						[x: string]: unknown;
-						kind: string;
-					};
-				};
-				delay?: number & $brand<"u53">;
-				description?: string;
-				enabled?: boolean;
-				epoch?: ReferenceEpoch;
-				hls?: {
-					duration: number & $brand<"u53">;
-					track: string;
-				};
-				jitter?: number & $brand<"u53">;
-				label?: string;
-				layout?: string;
-				numberOfChannels: number & $brand<"u53">;
-				sampleRate: number & $brand<"u53">;
-				track?: string;
-				warmup?: number & $brand<"u53">;
-			};
-		};
-	} | {
-		renditions: ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
-			bitrate: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			broadcast: ZodMiniOptional<ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>>;
-			codec: ZodMiniString<string>;
-			container: ZodMiniDefault<ZodMiniUnion<readonly [ZodMiniDiscriminatedUnion<[ZodMiniObject<{
-				kind: ZodMiniLiteral<"legacy">;
-			}, $strip>, ZodMiniObject<{
-				init: ZodMiniBase64;
-				kind: ZodMiniLiteral<"cmaf">;
-			}, $strip>, ZodMiniObject<{
-				kind: ZodMiniLiteral<"loc">;
-			}, $strip>], "kind">, ZodMiniPipe<ZodMiniObject<{
-				kind: ZodMiniString<string>;
-			}, $loose>, ZodMiniTransform<{
-				kind: "unknown";
-				raw: {
-					[x: string]: unknown;
-					kind: string;
-				};
-			}, {
-				[x: string]: unknown;
-				kind: string;
-			}>>]>>;
-			delay: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			description: ZodMiniOptional<ZodMiniString<string>>;
-			enabled: ZodMiniOptional<ZodMiniBoolean<boolean>>;
-			epoch: ZodMiniOptional<ZodMiniType<ReferenceEpoch, string, $ZodTypeInternals<ReferenceEpoch, string>>>;
-			hls: ZodMiniCatch<ZodMiniOptional<ZodMiniObject<{
-				duration: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
-				track: ZodMiniString<string>;
-			}, $strip>>>;
-			jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			label: ZodMiniOptional<ZodMiniString<string>>;
-			layout: ZodMiniOptional<ZodMiniString<string>>;
-			numberOfChannels: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
-			sampleRate: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
-			track: ZodMiniOptional<ZodMiniString<string>>;
-			warmup: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-		}, $strip>>;
-	};
-	binary?: {
-		tracks: ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
-			bitrate: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			broadcast: ZodMiniOptional<ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>>;
-			compression: ZodMiniOptional<ZodMiniString<string>>;
-			delay: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			epoch: ZodMiniOptional<ZodMiniType<ReferenceEpoch, string, $ZodTypeInternals<ReferenceEpoch, string>>>;
-			jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			mime: ZodMiniOptional<ZodMiniString<string>>;
-			mode: ZodMiniString<string>;
-			track: ZodMiniOptional<ZodMiniString<string>>;
-		}, $loose>>;
-	};
-	clock?: {
-		timescale: number;
-		wall: number & $brand<"u53">;
-	};
-	echo?: {
-		path: RelativeBroadcast;
-	};
-	json?: {
-		tracks: ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
-			bitrate: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			broadcast: ZodMiniOptional<ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>>;
-			compression: ZodMiniOptional<ZodMiniString<string>>;
-			delay: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			epoch: ZodMiniOptional<ZodMiniType<ReferenceEpoch, string, $ZodTypeInternals<ReferenceEpoch, string>>>;
-			jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			mode: ZodMiniString<string>;
-			schema: ZodMiniOptional<ZodMiniString<string>>;
-			track: ZodMiniOptional<ZodMiniString<string>>;
-		}, $loose>>;
-	};
-	stats?: {
-		track: string;
-	};
-	text?: {
-		renditions: ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
-			broadcast: ZodMiniOptional<ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>>;
-			container: ZodMiniDefault<ZodMiniUnion<readonly [ZodMiniDiscriminatedUnion<[ZodMiniObject<{
-				kind: ZodMiniLiteral<"legacy">;
-			}, $strip>, ZodMiniObject<{
-				init: ZodMiniBase64;
-				kind: ZodMiniLiteral<"cmaf">;
-			}, $strip>, ZodMiniObject<{
-				kind: ZodMiniLiteral<"loc">;
-			}, $strip>], "kind">, ZodMiniPipe<ZodMiniObject<{
-				kind: ZodMiniString<string>;
-			}, $loose>, ZodMiniTransform<{
-				kind: "unknown";
-				raw: {
-					[x: string]: unknown;
-					kind: string;
-				};
-			}, {
-				[x: string]: unknown;
-				kind: string;
-			}>>]>>;
-			delay: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			epoch: ZodMiniOptional<ZodMiniType<ReferenceEpoch, string, $ZodTypeInternals<ReferenceEpoch, string>>>;
-			format: ZodMiniString<string>;
-			jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			label: ZodMiniOptional<ZodMiniString<string>>;
-			lang: ZodMiniOptional<ZodMiniString<string>>;
-			role: ZodMiniDefault<ZodMiniString<string>>;
-			track: ZodMiniOptional<ZodMiniString<string>>;
-		}, $strip>>;
-	};
-	version?: number;
-	video?: {
-		display: {
-			height: number & $brand<"u53">;
-			width: number & $brand<"u53">;
-		} | undefined;
-		flip: undefined;
-		renditions: {
-			[k: string]: {
-				bitrate?: number & $brand<"u53">;
-				broadcast?: RelativeBroadcast;
-				codec: string;
-				codedHeight?: number & $brand<"u53">;
-				codedWidth?: number & $brand<"u53">;
-				color?: {
-					contentLight?: {
-						maxCll: number;
-						maxFall: number;
-					};
-					mastering?: {
-						blue: {
-							x: number;
-							y: number;
-						};
-						green: {
-							x: number;
-							y: number;
-						};
-						maxLuminance: number;
-						minLuminance: number;
-						red: {
-							x: number;
-							y: number;
-						};
-						white: {
-							x: number;
-							y: number;
-						};
-					};
-					matrix?: number & $brand<"u8">;
-					primaries?: number & $brand<"u8">;
-					range?: "full" | "limited";
-					transfer?: number & $brand<"u8">;
-				};
-				container: {
-					kind: "legacy";
-				} | {
-					init: string;
-					kind: "cmaf";
-				} | {
-					kind: "loc";
-				} | {
-					kind: "unknown";
-					raw: {
-						[x: string]: unknown;
-						kind: string;
-					};
-				};
-				delay?: number & $brand<"u53">;
-				description?: string;
-				displayAspectHeight?: number & $brand<"u53">;
-				displayAspectWidth?: number & $brand<"u53">;
-				enabled?: boolean;
-				epoch?: ReferenceEpoch;
-				framerate?: number;
-				hls?: {
-					duration: number & $brand<"u53">;
-					track: string;
-				};
-				interlaced?: boolean;
-				jitter?: number & $brand<"u53">;
-				label?: string;
-				optimizeForLatency?: boolean;
-				preference?: number;
-				projection?: {
-					kind: "rectilinear";
-				} | {
-					fov?: number;
-					kind: "equirectangular";
-				} | {
-					kind: "unknown";
-					raw: {
-						[x: string]: unknown;
-						kind: string;
-					};
-				};
-				reorder?: number & $brand<"u8">;
-				stereo?: string;
-				track?: string;
-				warmup?: number & $brand<"u53">;
-			};
-		};
-		rotation: undefined;
-	} | {
-		display?: {
-			height: number & $brand<"u53">;
-			width: number & $brand<"u53">;
-		};
-		flip?: boolean;
-		renditions: ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
-			bitrate: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			broadcast: ZodMiniOptional<ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>>;
-			codec: ZodMiniString<string>;
-			codedHeight: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			codedWidth: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			color: ZodMiniOptional<ZodMiniObject<{
-				contentLight: ZodMiniOptional<ZodMiniObject<{
-					maxCll: ZodMiniNumber<number>;
-					maxFall: ZodMiniNumber<number>;
-				}, $strip>>;
-				mastering: ZodMiniOptional<ZodMiniObject<{
-					blue: ZodMiniObject<{
-						x: ZodMiniNumber<number>;
-						y: ZodMiniNumber<number>;
-					}, $strip>;
-					green: ZodMiniObject<{
-						x: ZodMiniNumber<number>;
-						y: ZodMiniNumber<number>;
-					}, $strip>;
-					maxLuminance: ZodMiniNumber<number>;
-					minLuminance: ZodMiniNumber<number>;
-					red: ZodMiniObject<{
-						x: ZodMiniNumber<number>;
-						y: ZodMiniNumber<number>;
-					}, $strip>;
-					white: ZodMiniObject<{
-						x: ZodMiniNumber<number>;
-						y: ZodMiniNumber<number>;
-					}, $strip>;
-				}, $strip>>;
-				matrix: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u8", "out">>;
-				primaries: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u8", "out">>;
-				range: ZodMiniOptional<ZodMiniEnum<{
-					full: "full";
-					limited: "limited";
-				}>>;
-				transfer: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u8", "out">>;
-			}, $strip>>;
-			container: ZodMiniDefault<ZodMiniUnion<readonly [ZodMiniDiscriminatedUnion<[ZodMiniObject<{
-				kind: ZodMiniLiteral<"legacy">;
-			}, $strip>, ZodMiniObject<{
-				init: ZodMiniBase64;
-				kind: ZodMiniLiteral<"cmaf">;
-			}, $strip>, ZodMiniObject<{
-				kind: ZodMiniLiteral<"loc">;
-			}, $strip>], "kind">, ZodMiniPipe<ZodMiniObject<{
-				kind: ZodMiniString<string>;
-			}, $loose>, ZodMiniTransform<{
-				kind: "unknown";
-				raw: {
-					[x: string]: unknown;
-					kind: string;
-				};
-			}, {
-				[x: string]: unknown;
-				kind: string;
-			}>>]>>;
-			delay: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			description: ZodMiniOptional<ZodMiniString<string>>;
-			displayAspectHeight: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			displayAspectWidth: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			enabled: ZodMiniOptional<ZodMiniBoolean<boolean>>;
-			epoch: ZodMiniOptional<ZodMiniType<ReferenceEpoch, string, $ZodTypeInternals<ReferenceEpoch, string>>>;
-			framerate: ZodMiniOptional<ZodMiniNumber<number>>;
-			hls: ZodMiniCatch<ZodMiniOptional<ZodMiniObject<{
-				duration: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
-				track: ZodMiniString<string>;
-			}, $strip>>>;
-			interlaced: ZodMiniOptional<ZodMiniBoolean<boolean>>;
-			jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			label: ZodMiniOptional<ZodMiniString<string>>;
-			optimizeForLatency: ZodMiniOptional<ZodMiniBoolean<boolean>>;
-			preference: ZodMiniOptional<ZodMiniInt32>;
-			projection: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniDiscriminatedUnion<[ZodMiniObject<{
-				kind: ZodMiniLiteral<"rectilinear">;
-			}, $strip>, ZodMiniObject<{
-				fov: ZodMiniOptional<ZodMiniNumber<number>>;
-				kind: ZodMiniLiteral<"equirectangular">;
-			}, $strip>], "kind">, ZodMiniPipe<ZodMiniObject<{
-				kind: ZodMiniString<string>;
-			}, $loose>, ZodMiniTransform<{
-				kind: "unknown";
-				raw: {
-					[x: string]: unknown;
-					kind: string;
-				};
-			}, {
-				[x: string]: unknown;
-				kind: string;
-			}>>]>>;
-			reorder: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u8", "out">>;
-			stereo: ZodMiniOptional<ZodMiniString<string>>;
-			track: ZodMiniOptional<ZodMiniString<string>>;
-			warmup: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-		}, $strip>>;
-		rotation?: number;
-	};
-}): {
-	[key: string]: unknown;
-	audio?: {
-		renditions: {
-			[x: string]: {
-				bitrate?: number & $brand<"u53">;
-				broadcast?: RelativeBroadcast;
-				codec: string;
-				container: {
-					kind: "legacy";
-				} | {
-					init: string;
-					kind: "cmaf";
-				} | {
-					kind: "loc";
-				} | {
-					kind: "unknown";
-					raw: {
-						[x: string]: unknown;
-						kind: string;
-					};
-				};
-				delay?: number & $brand<"u53">;
-				description?: string;
-				enabled?: boolean;
-				epoch?: ReferenceEpoch;
-				hls?: {
-					duration: number & $brand<"u53">;
-					track: string;
-				};
-				jitter?: number & $brand<"u53">;
-				label?: string;
-				layout?: string;
-				numberOfChannels: number & $brand<"u53">;
-				sampleRate: number & $brand<"u53">;
-				track?: string;
-				warmup?: number & $brand<"u53">;
-			};
-		};
-	} | {
-		renditions: ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
-			bitrate: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			broadcast: ZodMiniOptional<ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>>;
-			codec: ZodMiniString<string>;
-			container: ZodMiniDefault<ZodMiniUnion<readonly [ZodMiniDiscriminatedUnion<[ZodMiniObject<{
-				kind: ZodMiniLiteral<"legacy">;
-			}, $strip>, ZodMiniObject<{
-				init: ZodMiniBase64;
-				kind: ZodMiniLiteral<"cmaf">;
-			}, $strip>, ZodMiniObject<{
-				kind: ZodMiniLiteral<"loc">;
-			}, $strip>], "kind">, ZodMiniPipe<ZodMiniObject<{
-				kind: ZodMiniString<string>;
-			}, $loose>, ZodMiniTransform<{
-				kind: "unknown";
-				raw: {
-					[x: string]: unknown;
-					kind: string;
-				};
-			}, {
-				[x: string]: unknown;
-				kind: string;
-			}>>]>>;
-			delay: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			description: ZodMiniOptional<ZodMiniString<string>>;
-			enabled: ZodMiniOptional<ZodMiniBoolean<boolean>>;
-			epoch: ZodMiniOptional<ZodMiniType<ReferenceEpoch, string, $ZodTypeInternals<ReferenceEpoch, string>>>;
-			hls: ZodMiniCatch<ZodMiniOptional<ZodMiniObject<{
-				duration: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
-				track: ZodMiniString<string>;
-			}, $strip>>>;
-			jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			label: ZodMiniOptional<ZodMiniString<string>>;
-			layout: ZodMiniOptional<ZodMiniString<string>>;
-			numberOfChannels: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
-			sampleRate: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
-			track: ZodMiniOptional<ZodMiniString<string>>;
-			warmup: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-		}, $strip>>;
-	};
-	binary?: {
-		tracks: ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
-			bitrate: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			broadcast: ZodMiniOptional<ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>>;
-			compression: ZodMiniOptional<ZodMiniString<string>>;
-			delay: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			epoch: ZodMiniOptional<ZodMiniType<ReferenceEpoch, string, $ZodTypeInternals<ReferenceEpoch, string>>>;
-			jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			mime: ZodMiniOptional<ZodMiniString<string>>;
-			mode: ZodMiniString<string>;
-			track: ZodMiniOptional<ZodMiniString<string>>;
-		}, $loose>>;
-	};
-	clock?: {
-		timescale: number;
-		wall: number & $brand<"u53">;
-	};
-	echo?: {
-		path: RelativeBroadcast;
-	};
-	json?: {
-		tracks: ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
-			bitrate: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			broadcast: ZodMiniOptional<ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>>;
-			compression: ZodMiniOptional<ZodMiniString<string>>;
-			delay: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			epoch: ZodMiniOptional<ZodMiniType<ReferenceEpoch, string, $ZodTypeInternals<ReferenceEpoch, string>>>;
-			jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			mode: ZodMiniString<string>;
-			schema: ZodMiniOptional<ZodMiniString<string>>;
-			track: ZodMiniOptional<ZodMiniString<string>>;
-		}, $loose>>;
-	};
-	stats?: {
-		track: string;
-	};
-	text?: {
-		renditions: ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
-			broadcast: ZodMiniOptional<ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>>;
-			container: ZodMiniDefault<ZodMiniUnion<readonly [ZodMiniDiscriminatedUnion<[ZodMiniObject<{
-				kind: ZodMiniLiteral<"legacy">;
-			}, $strip>, ZodMiniObject<{
-				init: ZodMiniBase64;
-				kind: ZodMiniLiteral<"cmaf">;
-			}, $strip>, ZodMiniObject<{
-				kind: ZodMiniLiteral<"loc">;
-			}, $strip>], "kind">, ZodMiniPipe<ZodMiniObject<{
-				kind: ZodMiniString<string>;
-			}, $loose>, ZodMiniTransform<{
-				kind: "unknown";
-				raw: {
-					[x: string]: unknown;
-					kind: string;
-				};
-			}, {
-				[x: string]: unknown;
-				kind: string;
-			}>>]>>;
-			delay: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			epoch: ZodMiniOptional<ZodMiniType<ReferenceEpoch, string, $ZodTypeInternals<ReferenceEpoch, string>>>;
-			format: ZodMiniString<string>;
-			jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			label: ZodMiniOptional<ZodMiniString<string>>;
-			lang: ZodMiniOptional<ZodMiniString<string>>;
-			role: ZodMiniDefault<ZodMiniString<string>>;
-			track: ZodMiniOptional<ZodMiniString<string>>;
-		}, $strip>>;
-	};
-	version?: number;
-	video?: {
-		display: {
-			height: number & $brand<"u53">;
-			width: number & $brand<"u53">;
-		} | undefined;
-		flip: undefined;
-		renditions: {
-			[k: string]: {
-				bitrate?: number & $brand<"u53">;
-				broadcast?: RelativeBroadcast;
-				codec: string;
-				codedHeight?: number & $brand<"u53">;
-				codedWidth?: number & $brand<"u53">;
-				color?: {
-					contentLight?: {
-						maxCll: number;
-						maxFall: number;
-					};
-					mastering?: {
-						blue: {
-							x: number;
-							y: number;
-						};
-						green: {
-							x: number;
-							y: number;
-						};
-						maxLuminance: number;
-						minLuminance: number;
-						red: {
-							x: number;
-							y: number;
-						};
-						white: {
-							x: number;
-							y: number;
-						};
-					};
-					matrix?: number & $brand<"u8">;
-					primaries?: number & $brand<"u8">;
-					range?: "full" | "limited";
-					transfer?: number & $brand<"u8">;
-				};
-				container: {
-					kind: "legacy";
-				} | {
-					init: string;
-					kind: "cmaf";
-				} | {
-					kind: "loc";
-				} | {
-					kind: "unknown";
-					raw: {
-						[x: string]: unknown;
-						kind: string;
-					};
-				};
-				delay?: number & $brand<"u53">;
-				description?: string;
-				displayAspectHeight?: number & $brand<"u53">;
-				displayAspectWidth?: number & $brand<"u53">;
-				enabled?: boolean;
-				epoch?: ReferenceEpoch;
-				framerate?: number;
-				hls?: {
-					duration: number & $brand<"u53">;
-					track: string;
-				};
-				interlaced?: boolean;
-				jitter?: number & $brand<"u53">;
-				label?: string;
-				optimizeForLatency?: boolean;
-				preference?: number;
-				projection?: {
-					kind: "rectilinear";
-				} | {
-					fov?: number;
-					kind: "equirectangular";
-				} | {
-					kind: "unknown";
-					raw: {
-						[x: string]: unknown;
-						kind: string;
-					};
-				};
-				reorder?: number & $brand<"u8">;
-				stereo?: string;
-				track?: string;
-				warmup?: number & $brand<"u53">;
-			};
-		};
-		rotation: undefined;
-	} | {
-		display?: {
-			height: number & $brand<"u53">;
-			width: number & $brand<"u53">;
-		};
-		flip?: boolean;
-		renditions: ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
-			bitrate: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			broadcast: ZodMiniOptional<ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>>;
-			codec: ZodMiniString<string>;
-			codedHeight: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			codedWidth: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			color: ZodMiniOptional<ZodMiniObject<{
-				contentLight: ZodMiniOptional<ZodMiniObject<{
-					maxCll: ZodMiniNumber<number>;
-					maxFall: ZodMiniNumber<number>;
-				}, $strip>>;
-				mastering: ZodMiniOptional<ZodMiniObject<{
-					blue: ZodMiniObject<{
-						x: ZodMiniNumber<number>;
-						y: ZodMiniNumber<number>;
-					}, $strip>;
-					green: ZodMiniObject<{
-						x: ZodMiniNumber<number>;
-						y: ZodMiniNumber<number>;
-					}, $strip>;
-					maxLuminance: ZodMiniNumber<number>;
-					minLuminance: ZodMiniNumber<number>;
-					red: ZodMiniObject<{
-						x: ZodMiniNumber<number>;
-						y: ZodMiniNumber<number>;
-					}, $strip>;
-					white: ZodMiniObject<{
-						x: ZodMiniNumber<number>;
-						y: ZodMiniNumber<number>;
-					}, $strip>;
-				}, $strip>>;
-				matrix: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u8", "out">>;
-				primaries: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u8", "out">>;
-				range: ZodMiniOptional<ZodMiniEnum<{
-					full: "full";
-					limited: "limited";
-				}>>;
-				transfer: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u8", "out">>;
-			}, $strip>>;
-			container: ZodMiniDefault<ZodMiniUnion<readonly [ZodMiniDiscriminatedUnion<[ZodMiniObject<{
-				kind: ZodMiniLiteral<"legacy">;
-			}, $strip>, ZodMiniObject<{
-				init: ZodMiniBase64;
-				kind: ZodMiniLiteral<"cmaf">;
-			}, $strip>, ZodMiniObject<{
-				kind: ZodMiniLiteral<"loc">;
-			}, $strip>], "kind">, ZodMiniPipe<ZodMiniObject<{
-				kind: ZodMiniString<string>;
-			}, $loose>, ZodMiniTransform<{
-				kind: "unknown";
-				raw: {
-					[x: string]: unknown;
-					kind: string;
-				};
-			}, {
-				[x: string]: unknown;
-				kind: string;
-			}>>]>>;
-			delay: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			description: ZodMiniOptional<ZodMiniString<string>>;
-			displayAspectHeight: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			displayAspectWidth: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			enabled: ZodMiniOptional<ZodMiniBoolean<boolean>>;
-			epoch: ZodMiniOptional<ZodMiniType<ReferenceEpoch, string, $ZodTypeInternals<ReferenceEpoch, string>>>;
-			framerate: ZodMiniOptional<ZodMiniNumber<number>>;
-			hls: ZodMiniCatch<ZodMiniOptional<ZodMiniObject<{
-				duration: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
-				track: ZodMiniString<string>;
-			}, $strip>>>;
-			interlaced: ZodMiniOptional<ZodMiniBoolean<boolean>>;
-			jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			label: ZodMiniOptional<ZodMiniString<string>>;
-			optimizeForLatency: ZodMiniOptional<ZodMiniBoolean<boolean>>;
-			preference: ZodMiniOptional<ZodMiniInt32>;
-			projection: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniDiscriminatedUnion<[ZodMiniObject<{
-				kind: ZodMiniLiteral<"rectilinear">;
-			}, $strip>, ZodMiniObject<{
-				fov: ZodMiniOptional<ZodMiniNumber<number>>;
-				kind: ZodMiniLiteral<"equirectangular">;
-			}, $strip>], "kind">, ZodMiniPipe<ZodMiniObject<{
-				kind: ZodMiniString<string>;
-			}, $loose>, ZodMiniTransform<{
-				kind: "unknown";
-				raw: {
-					[x: string]: unknown;
-					kind: string;
-				};
-			}, {
-				[x: string]: unknown;
-				kind: string;
-			}>>]>>;
-			reorder: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u8", "out">>;
-			stereo: ZodMiniOptional<ZodMiniString<string>>;
-			track: ZodMiniOptional<ZodMiniString<string>>;
-			warmup: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-		}, $strip>>;
-		rotation?: number;
-	};
-};
+export function encode(root: Root): Root;
 
 export const hexSchema: ZodMiniString<string>;
 
-export function modeSupported(mode: string): mode is KnownMode;
+export function modeSupported(mode: Mode): mode is KnownMode;
 
 export const nonzeroU53Schema: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
 
@@ -3905,363 +1707,15 @@ export function track(id: string, config: {
 	track?: string;
 }): string;
 
-export function u53(value: number): number & $brand<"u53">;
+export function u53(value: number): U53;
 
 export const u53Schema: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
 
-export function u8(value: number): number & $brand<"u8">;
+export function u8(value: number): U8;
 
 export const u8Schema: $ZodBranded<ZodMiniNumber<number>, "u8", "out">;
 
-export function wallClockTime(clock: {
-	timescale: number;
-	wall: number & $brand<"u53">;
-}, pts: number, ptsTimescale: number): Date;
+export function wallClockTime(clock: Clock, pts: number, ptsTimescale: number): Date;
 
-export function watch(broadcast: Net.Broadcast.Consumer): AsyncIterable<{
-	[key: string]: unknown;
-	audio?: {
-		renditions: {
-			[x: string]: {
-				bitrate?: number & $brand<"u53">;
-				broadcast?: RelativeBroadcast;
-				codec: string;
-				container: {
-					kind: "legacy";
-				} | {
-					init: string;
-					kind: "cmaf";
-				} | {
-					kind: "loc";
-				} | {
-					kind: "unknown";
-					raw: {
-						[x: string]: unknown;
-						kind: string;
-					};
-				};
-				delay?: number & $brand<"u53">;
-				description?: string;
-				enabled?: boolean;
-				epoch?: ReferenceEpoch;
-				hls?: {
-					duration: number & $brand<"u53">;
-					track: string;
-				};
-				jitter?: number & $brand<"u53">;
-				label?: string;
-				layout?: string;
-				numberOfChannels: number & $brand<"u53">;
-				sampleRate: number & $brand<"u53">;
-				track?: string;
-				warmup?: number & $brand<"u53">;
-			};
-		};
-	} | {
-		renditions: ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
-			bitrate: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			broadcast: ZodMiniOptional<ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>>;
-			codec: ZodMiniString<string>;
-			container: ZodMiniDefault<ZodMiniUnion<readonly [ZodMiniDiscriminatedUnion<[ZodMiniObject<{
-				kind: ZodMiniLiteral<"legacy">;
-			}, $strip>, ZodMiniObject<{
-				init: ZodMiniBase64;
-				kind: ZodMiniLiteral<"cmaf">;
-			}, $strip>, ZodMiniObject<{
-				kind: ZodMiniLiteral<"loc">;
-			}, $strip>], "kind">, ZodMiniPipe<ZodMiniObject<{
-				kind: ZodMiniString<string>;
-			}, $loose>, ZodMiniTransform<{
-				kind: "unknown";
-				raw: {
-					[x: string]: unknown;
-					kind: string;
-				};
-			}, {
-				[x: string]: unknown;
-				kind: string;
-			}>>]>>;
-			delay: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			description: ZodMiniOptional<ZodMiniString<string>>;
-			enabled: ZodMiniOptional<ZodMiniBoolean<boolean>>;
-			epoch: ZodMiniOptional<ZodMiniType<ReferenceEpoch, string, $ZodTypeInternals<ReferenceEpoch, string>>>;
-			hls: ZodMiniCatch<ZodMiniOptional<ZodMiniObject<{
-				duration: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
-				track: ZodMiniString<string>;
-			}, $strip>>>;
-			jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			label: ZodMiniOptional<ZodMiniString<string>>;
-			layout: ZodMiniOptional<ZodMiniString<string>>;
-			numberOfChannels: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
-			sampleRate: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
-			track: ZodMiniOptional<ZodMiniString<string>>;
-			warmup: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-		}, $strip>>;
-	};
-	binary?: {
-		tracks: ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
-			bitrate: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			broadcast: ZodMiniOptional<ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>>;
-			compression: ZodMiniOptional<ZodMiniString<string>>;
-			delay: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			epoch: ZodMiniOptional<ZodMiniType<ReferenceEpoch, string, $ZodTypeInternals<ReferenceEpoch, string>>>;
-			jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			mime: ZodMiniOptional<ZodMiniString<string>>;
-			mode: ZodMiniString<string>;
-			track: ZodMiniOptional<ZodMiniString<string>>;
-		}, $loose>>;
-	};
-	clock?: {
-		timescale: number;
-		wall: number & $brand<"u53">;
-	};
-	echo?: {
-		path: RelativeBroadcast;
-	};
-	json?: {
-		tracks: ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
-			bitrate: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			broadcast: ZodMiniOptional<ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>>;
-			compression: ZodMiniOptional<ZodMiniString<string>>;
-			delay: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			epoch: ZodMiniOptional<ZodMiniType<ReferenceEpoch, string, $ZodTypeInternals<ReferenceEpoch, string>>>;
-			jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			mode: ZodMiniString<string>;
-			schema: ZodMiniOptional<ZodMiniString<string>>;
-			track: ZodMiniOptional<ZodMiniString<string>>;
-		}, $loose>>;
-	};
-	stats?: {
-		track: string;
-	};
-	text?: {
-		renditions: ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
-			broadcast: ZodMiniOptional<ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>>;
-			container: ZodMiniDefault<ZodMiniUnion<readonly [ZodMiniDiscriminatedUnion<[ZodMiniObject<{
-				kind: ZodMiniLiteral<"legacy">;
-			}, $strip>, ZodMiniObject<{
-				init: ZodMiniBase64;
-				kind: ZodMiniLiteral<"cmaf">;
-			}, $strip>, ZodMiniObject<{
-				kind: ZodMiniLiteral<"loc">;
-			}, $strip>], "kind">, ZodMiniPipe<ZodMiniObject<{
-				kind: ZodMiniString<string>;
-			}, $loose>, ZodMiniTransform<{
-				kind: "unknown";
-				raw: {
-					[x: string]: unknown;
-					kind: string;
-				};
-			}, {
-				[x: string]: unknown;
-				kind: string;
-			}>>]>>;
-			delay: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			epoch: ZodMiniOptional<ZodMiniType<ReferenceEpoch, string, $ZodTypeInternals<ReferenceEpoch, string>>>;
-			format: ZodMiniString<string>;
-			jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			label: ZodMiniOptional<ZodMiniString<string>>;
-			lang: ZodMiniOptional<ZodMiniString<string>>;
-			role: ZodMiniDefault<ZodMiniString<string>>;
-			track: ZodMiniOptional<ZodMiniString<string>>;
-		}, $strip>>;
-	};
-	version?: number;
-	video?: {
-		display: {
-			height: number & $brand<"u53">;
-			width: number & $brand<"u53">;
-		} | undefined;
-		flip: undefined;
-		renditions: {
-			[k: string]: {
-				bitrate?: number & $brand<"u53">;
-				broadcast?: RelativeBroadcast;
-				codec: string;
-				codedHeight?: number & $brand<"u53">;
-				codedWidth?: number & $brand<"u53">;
-				color?: {
-					contentLight?: {
-						maxCll: number;
-						maxFall: number;
-					};
-					mastering?: {
-						blue: {
-							x: number;
-							y: number;
-						};
-						green: {
-							x: number;
-							y: number;
-						};
-						maxLuminance: number;
-						minLuminance: number;
-						red: {
-							x: number;
-							y: number;
-						};
-						white: {
-							x: number;
-							y: number;
-						};
-					};
-					matrix?: number & $brand<"u8">;
-					primaries?: number & $brand<"u8">;
-					range?: "full" | "limited";
-					transfer?: number & $brand<"u8">;
-				};
-				container: {
-					kind: "legacy";
-				} | {
-					init: string;
-					kind: "cmaf";
-				} | {
-					kind: "loc";
-				} | {
-					kind: "unknown";
-					raw: {
-						[x: string]: unknown;
-						kind: string;
-					};
-				};
-				delay?: number & $brand<"u53">;
-				description?: string;
-				displayAspectHeight?: number & $brand<"u53">;
-				displayAspectWidth?: number & $brand<"u53">;
-				enabled?: boolean;
-				epoch?: ReferenceEpoch;
-				framerate?: number;
-				hls?: {
-					duration: number & $brand<"u53">;
-					track: string;
-				};
-				interlaced?: boolean;
-				jitter?: number & $brand<"u53">;
-				label?: string;
-				optimizeForLatency?: boolean;
-				preference?: number;
-				projection?: {
-					kind: "rectilinear";
-				} | {
-					fov?: number;
-					kind: "equirectangular";
-				} | {
-					kind: "unknown";
-					raw: {
-						[x: string]: unknown;
-						kind: string;
-					};
-				};
-				reorder?: number & $brand<"u8">;
-				stereo?: string;
-				track?: string;
-				warmup?: number & $brand<"u53">;
-			};
-		};
-		rotation: undefined;
-	} | {
-		display?: {
-			height: number & $brand<"u53">;
-			width: number & $brand<"u53">;
-		};
-		flip?: boolean;
-		renditions: ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
-			bitrate: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			broadcast: ZodMiniOptional<ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>>;
-			codec: ZodMiniString<string>;
-			codedHeight: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			codedWidth: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			color: ZodMiniOptional<ZodMiniObject<{
-				contentLight: ZodMiniOptional<ZodMiniObject<{
-					maxCll: ZodMiniNumber<number>;
-					maxFall: ZodMiniNumber<number>;
-				}, $strip>>;
-				mastering: ZodMiniOptional<ZodMiniObject<{
-					blue: ZodMiniObject<{
-						x: ZodMiniNumber<number>;
-						y: ZodMiniNumber<number>;
-					}, $strip>;
-					green: ZodMiniObject<{
-						x: ZodMiniNumber<number>;
-						y: ZodMiniNumber<number>;
-					}, $strip>;
-					maxLuminance: ZodMiniNumber<number>;
-					minLuminance: ZodMiniNumber<number>;
-					red: ZodMiniObject<{
-						x: ZodMiniNumber<number>;
-						y: ZodMiniNumber<number>;
-					}, $strip>;
-					white: ZodMiniObject<{
-						x: ZodMiniNumber<number>;
-						y: ZodMiniNumber<number>;
-					}, $strip>;
-				}, $strip>>;
-				matrix: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u8", "out">>;
-				primaries: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u8", "out">>;
-				range: ZodMiniOptional<ZodMiniEnum<{
-					full: "full";
-					limited: "limited";
-				}>>;
-				transfer: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u8", "out">>;
-			}, $strip>>;
-			container: ZodMiniDefault<ZodMiniUnion<readonly [ZodMiniDiscriminatedUnion<[ZodMiniObject<{
-				kind: ZodMiniLiteral<"legacy">;
-			}, $strip>, ZodMiniObject<{
-				init: ZodMiniBase64;
-				kind: ZodMiniLiteral<"cmaf">;
-			}, $strip>, ZodMiniObject<{
-				kind: ZodMiniLiteral<"loc">;
-			}, $strip>], "kind">, ZodMiniPipe<ZodMiniObject<{
-				kind: ZodMiniString<string>;
-			}, $loose>, ZodMiniTransform<{
-				kind: "unknown";
-				raw: {
-					[x: string]: unknown;
-					kind: string;
-				};
-			}, {
-				[x: string]: unknown;
-				kind: string;
-			}>>]>>;
-			delay: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			description: ZodMiniOptional<ZodMiniString<string>>;
-			displayAspectHeight: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			displayAspectWidth: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-			enabled: ZodMiniOptional<ZodMiniBoolean<boolean>>;
-			epoch: ZodMiniOptional<ZodMiniType<ReferenceEpoch, string, $ZodTypeInternals<ReferenceEpoch, string>>>;
-			framerate: ZodMiniOptional<ZodMiniNumber<number>>;
-			hls: ZodMiniCatch<ZodMiniOptional<ZodMiniObject<{
-				duration: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
-				track: ZodMiniString<string>;
-			}, $strip>>>;
-			interlaced: ZodMiniOptional<ZodMiniBoolean<boolean>>;
-			jitter: ZodMiniOptional<ZodMiniPipe<$ZodBranded<ZodMiniNumber<number>, "u53", "out">, ZodMiniTransform<number & $brand<"u53"> | undefined, number & $brand<"u53">>>>;
-			label: ZodMiniOptional<ZodMiniString<string>>;
-			optimizeForLatency: ZodMiniOptional<ZodMiniBoolean<boolean>>;
-			preference: ZodMiniOptional<ZodMiniInt32>;
-			projection: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniDiscriminatedUnion<[ZodMiniObject<{
-				kind: ZodMiniLiteral<"rectilinear">;
-			}, $strip>, ZodMiniObject<{
-				fov: ZodMiniOptional<ZodMiniNumber<number>>;
-				kind: ZodMiniLiteral<"equirectangular">;
-			}, $strip>], "kind">, ZodMiniPipe<ZodMiniObject<{
-				kind: ZodMiniString<string>;
-			}, $loose>, ZodMiniTransform<{
-				kind: "unknown";
-				raw: {
-					[x: string]: unknown;
-					kind: string;
-				};
-			}, {
-				[x: string]: unknown;
-				kind: string;
-			}>>]>>;
-			reorder: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u8", "out">>;
-			stereo: ZodMiniOptional<ZodMiniString<string>>;
-			track: ZodMiniOptional<ZodMiniString<string>>;
-			warmup: ZodMiniOptional<$ZodBranded<ZodMiniNumber<number>, "u53", "out">>;
-		}, $strip>>;
-		rotation?: number;
-	};
-}>;
+export function watch(broadcast: Net.Broadcast.Consumer): AsyncIterable<Root>;
 ```

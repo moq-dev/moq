@@ -24,9 +24,9 @@ export class Datagrams implements WebTransportDatagramDuplexStream {
 	outgoingHighWaterMark: number;
 	outgoingMaxAge: number | null;
 	push(data: Uint8Array): void;
-	readonly readable: ReadableStream<Uint8Array<ArrayBufferLike>>;
+	readonly readable: ReadableStream<Uint8Array>;
 	setMaxDatagramSize(size: number): void;
-	readonly writable: WritableStream<Uint8Array<ArrayBufferLike>>;
+	readonly writable: WritableStream<Uint8Array>;
 }
 
 export interface InstallOptions {
@@ -78,7 +78,7 @@ export interface WebSocketLike {
 	onopen: ((ev: unknown) => void) | null;
 	readonly protocol: string;
 	readonly readyState: number;
-	send(data: string | ArrayBufferLike | ArrayBufferView<ArrayBufferLike>): void;
+	send(data: string | ArrayBufferLike | ArrayBufferView): void;
 	readonly url?: string;
 }
 
@@ -110,8 +110,8 @@ export interface WebSocketStreamOpenEvent {
 }
 
 export default class implements WebTransport {
-	constructor(source: string | WebSocketStreamLike | WebSocketLike | URL, options?: SessionOptions);
-	static accept(socket: WebSocketStreamLike | WebSocketLike, options?: AcceptOptions): default;
+	constructor(source: string | URL | WebSocketLike | WebSocketStreamLike, options?: SessionOptions);
+	static accept(socket: WebSocketLike | WebSocketStreamLike, options?: AcceptOptions): default;
 	close(info?: {
 		closeCode?: number;
 		reason?: string;
@@ -119,13 +119,13 @@ export default class implements WebTransport {
 	readonly closed: Promise<WebTransportCloseInfo>;
 	get congestionControl(): WebTransportCongestionControl;
 	createBidirectionalStream(options?: SendStreamOptions): Promise<WebTransportBidirectionalStream>;
-	createUnidirectionalStream(options?: SendStreamOptions): Promise<WritableStream<Uint8Array<ArrayBufferLike>>>;
+	createUnidirectionalStream(options?: SendStreamOptions): Promise<WritableStream<Uint8Array>>;
 	readonly datagrams: Datagrams;
 	getStats(): Promise<{
 		datagrams: {};
 	}>;
 	readonly incomingBidirectionalStreams: ReadableStream<WebTransportBidirectionalStream>;
-	readonly incomingUnidirectionalStreams: ReadableStream<ReadableStream<Uint8Array<ArrayBufferLike>>>;
+	readonly incomingUnidirectionalStreams: ReadableStream<ReadableStream<Uint8Array>>;
 	get protocol(): string;
 	readonly ready: Promise<void>;
 	get reliability(): "reliable-only";

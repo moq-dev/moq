@@ -32,13 +32,13 @@ export class Game {
 			label: string;
 			ms: number;
 		}[]>;
-		location?: string;
+		location?: string | undefined;
 		stats?: {
 			audio_secs: number;
 			emulation_secs: number;
 			video_secs: number;
 			wall_secs: number;
-		};
+		} | undefined;
 	} | undefined>;
 	readonly sync: Watch.Sync;
 	readonly userMuted: Moq.Signals.Signal<boolean>;

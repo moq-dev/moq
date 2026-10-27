@@ -27,7 +27,7 @@ export type Dispose = () => void;
 export class Effect {
 	constructor(fn?: (effect: Effect) => void);
 	get abort(): AbortSignal;
-	animate(fn: (now: number) => void): void;
+	animate(fn: (now: DOMHighResTimeStamp) => void): void;
 	cleanup(fn: Dispose): void;
 	close(): void;
 	get closed(): Promise<void>;
@@ -43,7 +43,7 @@ export class Effect {
 	event<K extends keyof EventSourceEventMap>(target: EventSource, type: K, listener: (this: EventSource, ev: EventSourceEventMap[K]) => void, options?: boolean | AddEventListenerOptions): void;
 	event(target: EventTarget, type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions): void;
 	get<T>(signal: Getter<T>): T;
-	getAll<S extends readonly Getter<unknown>[]>(signals: [...S[]]): { [K in string | number | symbol]: Exclude<GetterType<S[K]>, false | "" | 0 | null | undefined> } | undefined;
+	getAll<S extends readonly Getter<unknown>[]>(signals: [...S]): { [K in keyof S]: Exclude<GetterType<S[K]>, false | 0 | "" | null | undefined> } | undefined;
 	interval(fn: () => void, period: Nano): void;
 	proxy<T>(dst: Setter<T>, src: Getter<T>): void;
 	race<const T extends readonly unknown[]>(...values: T): Promise<Awaited<T[number]> | undefined>;
@@ -101,7 +101,7 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 	static from<T>(value: T | Signal<T>): Signal<T>;
 	mutate<R>(fn: (value: T) => R, notify?: boolean): R;
 	peek(): T;
-	static race<T extends readonly unknown[]>(...sigs: { [K in string | number | symbol]: Getter<T[K]> }): GetPromise<Awaited<T[number]>>;
+	static race<T extends readonly unknown[]>(...sigs: { [K in keyof T]: Getter<T[K]> }): GetPromise<Awaited<T[number]>>;
 	set(value: T, notify?: boolean): void;
 	subscribe(fn: Subscriber<T>): Dispose;
 	update(fn: (prev: T) => T, notify?: boolean): void;

@@ -1,13 +1,12 @@
 # `@moq/hang/container`
 
 ```ts
-import { $brand } from "@zod/mini";
+import { Audio } from "@moq/hang/catalog";
 import { Micro } from "@moq/clock";
 import { Milli } from "@moq/clock";
 import { Net } from "@moq/hang";
-import { ReferenceEpoch } from "@moq/hang/catalog";
-import { RelativeBroadcast } from "@moq/hang/catalog";
 import { Signals } from "@moq/hang";
+import { Video } from "@moq/hang/catalog";
 
 export interface BufferedRange {
 	end: Milli;
@@ -33,7 +32,7 @@ export interface ConsumerProps {
 export interface Format {
 	decode(payload: Uint8Array, timestamp: Net.Time.Timestamp | undefined): Frame[];
 	end?(frame: Frame): Micro | undefined;
-	readonly kind?: "video" | "audio" | "data";
+	readonly kind?: "audio" | "video" | "data";
 }
 
 export interface Frame {
@@ -47,139 +46,24 @@ export namespace Legacy {
 	export { BufferedRange };
 	export { BufferedRanges };
 	export class Format implements Format {
-		constructor(config: {
-			bitrate?: number & $brand<"u53">;
-			broadcast?: RelativeBroadcast;
-			codec: string;
-			container: {
-				kind: "unknown";
-				raw: {
-					[x: string]: unknown;
-					kind: string;
-				};
-			} | {
-				kind: "legacy";
-			} | {
-				init: string;
-				kind: "cmaf";
-			} | {
-				kind: "loc";
-			};
-			delay?: number & $brand<"u53">;
-			description?: string;
-			enabled?: boolean;
-			epoch?: ReferenceEpoch;
-			hls?: {
-				duration: number & $brand<"u53">;
-				track: string;
-			};
-			jitter?: number & $brand<"u53">;
-			label?: string;
-			layout?: string;
-			numberOfChannels: number & $brand<"u53">;
-			sampleRate: number & $brand<"u53">;
-			track?: string;
-			warmup?: number & $brand<"u53">;
-		} | {
-			bitrate?: number & $brand<"u53">;
-			broadcast?: RelativeBroadcast;
-			codec: string;
-			codedHeight?: number & $brand<"u53">;
-			codedWidth?: number & $brand<"u53">;
-			color?: {
-				contentLight?: {
-					maxCll: number;
-					maxFall: number;
-				};
-				mastering?: {
-					blue: {
-						x: number;
-						y: number;
-					};
-					green: {
-						x: number;
-						y: number;
-					};
-					maxLuminance: number;
-					minLuminance: number;
-					red: {
-						x: number;
-						y: number;
-					};
-					white: {
-						x: number;
-						y: number;
-					};
-				};
-				matrix?: number & $brand<"u8">;
-				primaries?: number & $brand<"u8">;
-				range?: "full" | "limited";
-				transfer?: number & $brand<"u8">;
-			};
-			container: {
-				kind: "unknown";
-				raw: {
-					[x: string]: unknown;
-					kind: string;
-				};
-			} | {
-				kind: "legacy";
-			} | {
-				init: string;
-				kind: "cmaf";
-			} | {
-				kind: "loc";
-			};
-			delay?: number & $brand<"u53">;
-			description?: string;
-			displayAspectHeight?: number & $brand<"u53">;
-			displayAspectWidth?: number & $brand<"u53">;
-			enabled?: boolean;
-			epoch?: ReferenceEpoch;
-			framerate?: number;
-			hls?: {
-				duration: number & $brand<"u53">;
-				track: string;
-			};
-			interlaced?: boolean;
-			jitter?: number & $brand<"u53">;
-			label?: string;
-			optimizeForLatency?: boolean;
-			preference?: number;
-			projection?: {
-				kind: "unknown";
-				raw: {
-					[x: string]: unknown;
-					kind: string;
-				};
-			} | {
-				kind: "rectilinear";
-			} | {
-				fov?: number;
-				kind: "equirectangular";
-			};
-			reorder?: number & $brand<"u8">;
-			stereo?: string;
-			track?: string;
-			warmup?: number & $brand<"u53">;
-		} | "video" | "audio" | "data");
+		constructor(config: Audio.AudioConfig | Video.VideoConfig | "audio" | "video" | "data");
 		decode(frame: Uint8Array): Frame[];
 		end(frame: Frame): Micro | undefined;
 		finishGroup(group: Net.Group.Producer, end?: Micro): void;
-		readonly kind: "video" | "audio" | "data";
+		readonly kind: "audio" | "video" | "data";
 	}
 	export { Frame };
 	export class Producer {
 		constructor(track: Net.Track.Producer, format: Legacy.Format);
 		close(err?: Error): void;
 		discontinuity(end?: Micro): void;
-		encode(data: Uint8Array<ArrayBufferLike> | Legacy.Source, timestamp: Micro, keyframe: boolean): void;
+		encode(data: Uint8Array | Legacy.Source, timestamp: Micro, keyframe: boolean): void;
 	}
 	export interface Source {
 		byteLength: number;
 		copyTo(buffer: Uint8Array): void;
 	}
-	export function encodeFrame(source: Uint8Array<ArrayBufferLike> | Legacy.Source, timestamp: Micro): Uint8Array;
+	export function encodeFrame(source: Uint8Array | Legacy.Source, timestamp: Micro): Uint8Array;
 }
 
 export * as Loc from "@moq/loc";

@@ -128,6 +128,8 @@ export interface AccessInput {
 export declare class Reader {
 	/** Read a value. */
 	read(input: AccessInput, options: Options): string;
+	/** Read a value without waiting. */
+	peek(options: ReadOptions): string;
 }
 `,
 			"dist/reader.d.ts": `export { Reader, type ReadOptions } from "./access";\n`,
@@ -143,6 +145,7 @@ export interface ReadOptions {
 
 export class Reader {
 	constructor();
+	peek(options: ReadOptions): string;
 	read(input: AccessInput, options: ReadOptions): string;
 }
 `);
@@ -203,6 +206,26 @@ export interface Member {
 	audio: import("dep").Audio.Decoder;
 	video: Video.Decoder;
 }
+`);
+});
+
+test("a type is reported as written, not as the checker restates it", async () => {
+	const directory = fixture({
+		"dist/index.d.ts": `/** Reads every value. */
+export declare function all<S extends readonly unknown[]>(values: [...S]): { [K in keyof S]: S[K] | undefined };
+/** A value and its fallback. */
+export interface Pair<T> {
+	/** Both, in order. */
+	both: [...T[], T];
+}
+`,
+	});
+	await checkReports(directory);
+	expect(report(directory)).toBe(`export interface Pair<T> {
+	both: [...T[], T];
+}
+
+export function all<S extends readonly unknown[]>(values: [...S]): { [K in keyof S]: S[K] | undefined };
 `);
 });
 

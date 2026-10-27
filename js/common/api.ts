@@ -4,8 +4,12 @@
 //
 // The declarations are read from a copy outside the repository whose `node_modules` holds only the
 // dependencies its manifest declares, as a consumer's install would, so an undeclared import or a
-// broken declaration fails the build. A workspace dependency resolves to its source, so a package's
+// broken declaration fails the check. A workspace dependency resolves to its source, so a package's
 // report never depends on whether its dependencies are built.
+//
+// `bun js/common/api.ts check <dir>...` checks built packages, as `just check` and `just fix` run it
+// after their builds. A package's own build does not, so a consumer building one from source needs
+// none of this toolchain. TypeDoc comes from moq-doc-api, which pins the TypeScript 6 it needs.
 //
 // `bun js/common/api.ts baseline <checkout> <out>` renders every published package of another
 // checkout, such as the release branch, with this renderer, so `sh/api-diff` compares like with like.
@@ -43,10 +47,10 @@ import {
 } from "typedoc";
 
 /**
- * Compare the built package in `dir` with its committed reports in `api/`, exiting on a
- * difference, or rewrite them when `MOQ_API_REPORT=update`, as `just fix` sets.
+ * Compare the built package in `dir` with its committed reports in `api/`, returning the stale
+ * ones, or rewrite them when `MOQ_API_REPORT=update`, as `just fix` sets.
  */
-export async function checkReports(dir: string) {
+export async function checkReports(dir: string): Promise<string[]> {
 	const folder = join(dir, "api");
 	const current = await reports(resolve(dir), join(resolve(dir), "dist"), true);
 	const committed = existsSync(folder) ? readdirSync(folder).filter((file) => file.endsWith(".api.md")) : [];
@@ -55,18 +59,14 @@ export async function checkReports(dir: string) {
 		return current.get(file) !== (existsSync(path) ? readFileSync(path, "utf8") : undefined);
 	});
 
-	if (process.env.MOQ_API_REPORT === "update") {
-		mkdirSync(folder, { recursive: true });
-		for (const file of stale) {
-			const report = current.get(file);
-			if (report === undefined) rmSync(join(folder, file));
-			else writeFileSync(join(folder, file), report);
-		}
-	} else if (stale.length > 0) {
-		console.error("The public API no longer matches its committed report; run `just fix` and review the diff:");
-		for (const file of stale) console.error(`  api/${file}`);
-		process.exit(1);
+	if (process.env.MOQ_API_REPORT !== "update") return stale.map((file) => join(folder, file));
+	mkdirSync(folder, { recursive: true });
+	for (const file of stale) {
+		const report = current.get(file);
+		if (report === undefined) rmSync(join(folder, file));
+		else writeFileSync(join(folder, file), report);
 	}
+	return [];
 }
 
 interface Manifest {
@@ -153,12 +153,30 @@ async function reports(dir: string, declarations: string, check: boolean): Promi
 		const constants = new Set<Reflection>();
 		app.converter.on(Converter.EVENT_CREATE_DECLARATION, (context, reflection) => {
 			const declaration = context.getSymbolFromReflection(reflection)?.valueDeclaration;
-			if (
-				reflection.kindOf(ReflectionKind.Variable) &&
-				declaration &&
-				ts.getCombinedNodeFlags(declaration) & ts.NodeFlags.Const
-			) {
-				constants.add(reflection);
+			if (!declaration || !reflection.kindOf(ReflectionKind.Variable | ReflectionKind.Property)) return;
+			if (ts.getCombinedNodeFlags(declaration) & ts.NodeFlags.Const) constants.add(reflection);
+			const written = (declaration as { type?: TypeNode }).type;
+			if (written && literal(written)) {
+				reflection.type = context.converter.convertType(context.withScope(reflection), written);
+			}
+		});
+		// TypeDoc converts a property's or signature's types from the checker, which restates what the
+		// declaration wrote, such as `[...S]` as `[...S[]]` and `keyof S` as its expansion, so a change
+		// could hide behind the same restatement. The written type is the API, unless it names a value
+		// with `typeof`: that value may be one no entrypoint exports, which the restatement spells out.
+		app.converter.on(Converter.EVENT_CREATE_SIGNATURE, (context, signature, declaration) => {
+			if (!declaration || !("parameters" in declaration)) return;
+			const scope = context.withScope(signature);
+			for (const [i, parameter] of (signature.parameters ?? []).entries()) {
+				const written = declaration.parameters[i]?.type;
+				if (written && written.kind !== ts.SyntaxKind.ThisType && literal(written)) {
+					parameter.type = context.converter.convertType(scope.withScope(parameter), written);
+				}
+			}
+			const written = declaration.type;
+			const derived = signature.type?.type === "predicate" || signature.kindOf(ReflectionKind.SetSignature);
+			if (written && !derived && written.kind !== ts.SyntaxKind.ThisType && literal(written)) {
+				signature.type = context.converter.convertType(scope, written);
 			}
 		});
 		// Where the declared dependencies export each of their declarations, which names a reference
@@ -170,6 +188,24 @@ async function reports(dir: string, declarations: string, check: boolean): Promi
 			if (!program) return;
 			context.setActiveProgram(program);
 			const checker = program.getTypeChecker();
+			// TypeDoc converts a `@reexport` alias as the declaration it names, so a type written with
+			// the alias's name would resolve to nothing: register the alias for that reflection too.
+			for (const source of program.getSourceFiles()) {
+				if (!own(source.fileName)) continue;
+				for (const statement of source.statements) {
+					const alias = statement as { name?: TypeNode; type?: TypeNode & { typeName?: TypeNode } };
+					const named = alias.type?.typeName;
+					if (statement.kind !== ts.SyntaxKind.TypeAliasDeclaration || !alias.name || !named) continue;
+					const symbol = checker.getSymbolAtLocation(alias.name);
+					if (!symbol || !context.getComment(symbol, ReflectionKind.TypeAlias)?.hasModifier("@reexport"))
+						continue;
+					const type = checker.getTypeAtLocation(named);
+					const target = type.aliasSymbol ?? type.getSymbol();
+					const reflection =
+						target && context.project.getReflectionFromSymbolId(context.createSymbolId(target));
+					if (reflection) context.project.registerSymbolId(reflection, context.createSymbolId(symbol));
+				}
+			}
 			const queue: { symbol: TsSymbol; specifier: string; path: string[] }[] = [];
 			const seen = new Set<TsSymbol>();
 			for (const dependency of dependencies(manifest)) {
@@ -234,6 +270,8 @@ async function reports(dir: string, declarations: string, check: boolean): Promi
 
 type Program = Context["programs"][number];
 type TsSymbol = ReturnType<Context["resolveAliasedSymbol"]>;
+// \`convertType\`'s last overload takes the type and the node it was written as.
+type TypeNode = NonNullable<Parameters<Converter["convertType"]>[2]>;
 
 // The TypeScript TypeDoc compiles with, for its diagnostics, node flags, and module resolution.
 const ts: {
@@ -248,7 +286,16 @@ const ts: {
 	sys: unknown;
 	NodeFlags: { Const: number };
 	SymbolFlags: { Module: number };
+	SyntaxKind: { ThisType: number; TypeQuery: number; TypeAliasDeclaration: number };
+	forEachChild<T>(node: TypeNode, visit: (child: TypeNode) => T | undefined): T | undefined;
 } = createRequire(import.meta.resolve("typedoc"))("typescript");
+
+// Whether a written type names no value with `typeof`.
+function literal(node: TypeNode): boolean {
+	const query = (at: TypeNode): true | undefined =>
+		at.kind === ts.SyntaxKind.TypeQuery ? true : ts.forEachChild(at, query);
+	return !query(node);
+}
 
 // Where a declaration is exported: an entrypoint's import specifier, and its dotted path there.
 interface Location {
@@ -773,11 +820,26 @@ function declare(dir: string, out: string, manifest: Manifest) {
 }
 
 if (import.meta.main) {
-	const [command, checkout, out] = process.argv.slice(2);
-	if (command !== "baseline" || !checkout || !out) {
-		console.error("usage: bun js/common/api.ts baseline <checkout> <out>");
+	const [command, ...args] = process.argv.slice(2);
+	const [checkout, out] = args;
+	if (command === "check" && args.length > 0) {
+		const stale: string[] = [];
+		for (const dir of args) stale.push(...(await checkReports(dir)));
+		if (stale.length > 0) {
+			console.error("The public API no longer matches its committed report; run `just fix` and review the diff:");
+			for (const file of stale) console.error(`  ${file}`);
+			process.exit(1);
+		}
+	} else if (command === "baseline" && checkout && out && args.length === 2) {
+		await baseline(checkout, out);
+	} else {
+		console.error("usage: bun js/common/api.ts check <dir>... | baseline <checkout> <out>");
 		process.exit(2);
 	}
+}
+
+// Render the report of every published package in `checkout` into `out`.
+async function baseline(checkout: string, out: string) {
 	for (const entry of readdirSync(join(checkout, "js"), { withFileTypes: true })) {
 		const dir = resolve(checkout, "js", entry.name);
 		if (!entry.isDirectory() || !existsSync(join(dir, "package.json"))) continue;

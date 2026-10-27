@@ -13,8 +13,8 @@ export interface InitSegment {
 	defaultSampleDuration: number;
 	defaultSampleFlags: number;
 	defaultSampleSize: number;
-	description?: Uint8Array<ArrayBufferLike>;
-	kind: "video" | "audio";
+	description?: Uint8Array;
+	kind: "audio" | "video";
 	timescale: number;
 	trackId: number;
 }

@@ -154,48 +154,8 @@ export namespace Health {
 	}
 	export type Verdict = "unknown" | "healthy" | "degraded" | "unhealthy";
 	export function defaultThresholds(): Health.Thresholds;
-	export function publisher(sample: Health.Sample<{
-		[key: string]: unknown;
-		renditions?: Record<string, {
-			bitrate?: number & $brand<"u53">;
-			bytes?: number & $brand<"u53">;
-			frames?: number & $brand<"u53">;
-			keyframes?: number & $brand<"u53">;
-			skipped?: number & $brand<"u53">;
-		}>;
-		transport?: {
-			age?: number & $brand<"u53">;
-			lostBytes?: number & $brand<"u53">;
-			lostPackets?: number & $brand<"u53">;
-			rate?: number & $brand<"u53">;
-			rtt?: number & $brand<"u53">;
-		};
-	}>, thresholds?: Health.Thresholds): Health.Health;
-	export function viewer(sample: Health.Sample<{
-		[key: string]: unknown;
-		renditions?: Record<string, {
-			arrival?: {
-				timestamp: number & $brand<"u53">;
-				wall: number & $brand<"u53">;
-			};
-			bytes?: number & $brand<"u53">;
-			decoded?: number & $brand<"u53">;
-			errors?: number & $brand<"u53">;
-			frames?: number & $brand<"u53">;
-			late?: number & $brand<"u53">;
-			latency?: number & $brand<"u53">;
-			stalled?: number & $brand<"u53">;
-			stalls?: number & $brand<"u53">;
-			underruns?: number & $brand<"u53">;
-		}>;
-		transport?: {
-			age?: number & $brand<"u53">;
-			lostBytes?: number & $brand<"u53">;
-			lostPackets?: number & $brand<"u53">;
-			rate?: number & $brand<"u53">;
-			rtt?: number & $brand<"u53">;
-		};
-	}>, thresholds?: Health.Thresholds): Health.Health;
+	export function publisher(sample: Health.Sample<Stats.Snapshot>, thresholds?: Health.Thresholds): Health.Health;
+	export function viewer(sample: Health.Sample<Echo.Snapshot>, thresholds?: Health.Thresholds): Health.Health;
 }
 
 export namespace Hls {
@@ -203,10 +163,7 @@ export namespace Hls {
 		[asyncIterator](): AsyncIterator<Hls.Event>;
 		close(): void;
 		next(): Promise<Hls.Event | undefined>;
-		static subscribe(broadcast: Net.Broadcast.Consumer, hls: {
-			duration: number & $brand<"u53">;
-			track: string;
-		}): Hls.Consumer;
+		static subscribe(broadcast: Net.Broadcast.Consumer, hls: import("@moq/hang/catalog").Hls): Hls.Consumer;
 	}
 	export type Entry = Omit<Hls.Record, "pts" | "duration"> & {
 		duration?: Micro;

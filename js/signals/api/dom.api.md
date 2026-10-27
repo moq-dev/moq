@@ -4,7 +4,7 @@
 import { Effect } from "@moq/signals";
 
 export interface ArrayElement extends Array<Element> {
-	[n: number]: Element;
+	[n: number]: T;
 }
 
 export type CreateOptions<T extends HTMLElement> = {
@@ -18,7 +18,7 @@ export type CreateOptions<T extends HTMLElement> = {
 
 export type Element = Node | ArrayElement | string & {} | number | boolean | null | undefined;
 
-export function create<K extends keyof HTMLElementTagNameMap>(tagName: K, options?: CreateOptions<HTMLElementTagNameMap[K] & HTMLElement>, ...children: (string | HTMLElement)[]): HTMLElementTagNameMap[K];
+export function create<K extends keyof HTMLElementTagNameMap>(tagName: K, options?: CreateOptions<HTMLElementTagNameMap[K] & HTMLElement>, ...children: (HTMLElement | string)[]): HTMLElementTagNameMap[K];
 
 export function render(effect: Effect, parent: Node, element: Element | ((effect: Effect) => Element)): void;
 

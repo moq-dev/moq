@@ -1,8 +1,6 @@
 # `@moq/watch`
 
 ```ts
-import { $brand } from "zod/v4/core/core.d.cts";
-
 export type Arrival = {
 	arrival: Clock.Milli;
 	kind: "frame";
@@ -29,40 +27,7 @@ export namespace Audio {
 		readonly out: Signals.Readonlys<Audio.DecoderOutput>;
 		reset(): void;
 		readonly source: Audio.Source;
-		static supported: (config: {
-			bitrate?: number & $brand<"u53">;
-			broadcast?: Hang.Catalog.RelativeBroadcast;
-			codec: string;
-			container: {
-				kind: "unknown";
-				raw: {
-					[key: string]: unknown;
-					kind: string;
-				};
-			} | {
-				kind: "legacy";
-			} | {
-				init: string;
-				kind: "cmaf";
-			} | {
-				kind: "loc";
-			};
-			delay?: number & $brand<"u53">;
-			description?: string;
-			enabled?: boolean;
-			epoch?: Hang.Catalog.ReferenceEpoch;
-			hls?: {
-				duration: number & $brand<"u53">;
-				track: string;
-			};
-			jitter?: number & $brand<"u53">;
-			label?: string;
-			layout?: string;
-			numberOfChannels: number & $brand<"u53">;
-			sampleRate: number & $brand<"u53">;
-			track?: string;
-			warmup?: number & $brand<"u53">;
-		}) => Promise<boolean>;
+		static supported: (config: Hang.Catalog.Audio.AudioConfig) => Promise<boolean>;
 		readonly sync: Sync;
 	}
 	export type DecoderInput = {
@@ -173,23 +138,7 @@ export class Player {
 	readonly broadcast: Broadcast;
 	close(): void;
 	readonly emitter: Audio.Emitter;
-	readonly in: Signals.Readonlys<Omit<PlayerInput, "video" | "audio" | "text">> & {
-		audio: Signals.Readonlys<{
-			muted: Signals.Getter<boolean>;
-			target: Signals.Getter<Audio.Target | undefined>;
-			volume: Signals.Getter<number>;
-		}>;
-		text: Signals.Readonlys<{
-			container: Signals.Getter<HTMLElement | undefined>;
-			target: Signals.Getter<string | undefined>;
-		}>;
-		video: Signals.Readonlys<{
-			backend: Signals.Getter<Video.Backend>;
-			canvas: Signals.Getter<HTMLCanvasElement | undefined>;
-			target: Signals.Getter<Video.Target | undefined>;
-			visible: Signals.Getter<Video.Visible>;
-		}>;
-	};
+	readonly in: Signals.Readonlys<Omit<PlayerInput, "video" | "audio" | "text">> & { readonly [K in "video" | "audio" | "text"]: Signals.Readonlys<PlayerInput[K]> };
 	readonly renderer: Video.Renderer;
 	reset(): void;
 	readonly sync: Sync;
@@ -285,31 +234,7 @@ export namespace Text {
 		config: Signals.Signal<Hang.Catalog.TextConfig | undefined>;
 		track: Signals.Signal<string | undefined>;
 	};
-	export function renderable(config: {
-		broadcast?: Hang.Catalog.RelativeBroadcast;
-		container: {
-			kind: "unknown";
-			raw: {
-				[key: string]: unknown;
-				kind: string;
-			};
-		} | {
-			kind: "legacy";
-		} | {
-			init: string;
-			kind: "cmaf";
-		} | {
-			kind: "loc";
-		};
-		delay?: number & $brand<"u53">;
-		epoch?: Hang.Catalog.ReferenceEpoch;
-		format: string;
-		jitter?: number & $brand<"u53">;
-		label?: string;
-		lang?: string;
-		role: string;
-		track?: string;
-	}): boolean;
+	export function renderable(config: Hang.Catalog.TextConfig): boolean;
 }
 
 export namespace Video {
@@ -320,89 +245,7 @@ export namespace Video {
 		readonly in: Signals.Readonlys<Video.DecoderInput>;
 		readonly out: Signals.Readonlys<Video.DecoderOutput>;
 		readonly source: Video.Source;
-		static supported: (config: {
-			bitrate?: number & $brand<"u53">;
-			broadcast?: Hang.Catalog.RelativeBroadcast;
-			codec: string;
-			codedHeight?: number & $brand<"u53">;
-			codedWidth?: number & $brand<"u53">;
-			color?: {
-				contentLight?: {
-					maxCll: number;
-					maxFall: number;
-				};
-				mastering?: {
-					blue: {
-						x: number;
-						y: number;
-					};
-					green: {
-						x: number;
-						y: number;
-					};
-					maxLuminance: number;
-					minLuminance: number;
-					red: {
-						x: number;
-						y: number;
-					};
-					white: {
-						x: number;
-						y: number;
-					};
-				};
-				matrix?: number & $brand<"u8">;
-				primaries?: number & $brand<"u8">;
-				range?: "limited" | "full";
-				transfer?: number & $brand<"u8">;
-			};
-			container: {
-				kind: "unknown";
-				raw: {
-					[key: string]: unknown;
-					kind: string;
-				};
-			} | {
-				kind: "legacy";
-			} | {
-				init: string;
-				kind: "cmaf";
-			} | {
-				kind: "loc";
-			};
-			delay?: number & $brand<"u53">;
-			description?: string;
-			displayAspectHeight?: number & $brand<"u53">;
-			displayAspectWidth?: number & $brand<"u53">;
-			enabled?: boolean;
-			epoch?: Hang.Catalog.ReferenceEpoch;
-			framerate?: number;
-			hls?: {
-				duration: number & $brand<"u53">;
-				track: string;
-			};
-			interlaced?: boolean;
-			jitter?: number & $brand<"u53">;
-			label?: string;
-			optimizeForLatency?: boolean;
-			preference?: number;
-			projection?: {
-				kind: "unknown";
-				raw: {
-					[key: string]: unknown;
-					kind: string;
-				};
-			} | {
-				kind: "rectilinear";
-			} | {
-				fov?: number;
-				kind: "equirectangular";
-			};
-			reorder?: number & $brand<"u8">;
-			stereo?: string;
-			track?: string;
-			warmup?: number & $brand<"u53">;
-		}) => Promise<boolean>;
+		static supported: (config: Hang.Catalog.Video.VideoConfig) => Promise<boolean>;
 		readonly sync: Sync;
 	}
 	export type DecoderInput = {

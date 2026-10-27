@@ -2,7 +2,6 @@
 
 ```ts
 import { $ZodBranded } from "zod/v4/core";
-import { $brand } from "@zod/mini";
 import { Milli } from "@moq/clock";
 import { ZodMiniBigInt } from "@zod/mini";
 import { infer } from "@zod/mini";
@@ -45,7 +44,7 @@ export namespace Auth {
 	export class Handle {
 		constructor();
 		abort(err?: Error): void;
-		add(token: string | Uint8Array<ArrayBufferLike>): Promise<Auth.Credential>;
+		add(token: string | Uint8Array): Promise<Auth.Credential>;
 		get grant(): Signals.Getter<Auth.Grant | undefined>;
 	}
 	export class Unsupported extends Error {
@@ -75,7 +74,7 @@ export namespace Bandwidth {
 
 export namespace Broadcast {
 	export class Consumer {
-		protected constructor(shared?: undefined);
+		protected constructor(shared?: never);
 		clone(): Broadcast.Consumer;
 		close(): void;
 		get closed(): Signals.GetPromise<null>;
@@ -134,7 +133,7 @@ export namespace Connection {
 	};
 	export interface CertificateHash {
 		algorithm?: "sha-256";
-		value: string | BufferSource;
+		value: BufferSource | string;
 	}
 	export interface ConnectProps {
 		auth?: Auth.Handle;
@@ -183,10 +182,10 @@ export namespace Connection {
 		goaway?: Connection.Goaway;
 		publish?: Origin.Consumer;
 		share?: boolean;
-		signal?: undefined;
+		signal?: never;
 		timeout?: Milli;
 		tokens?: readonly string[] | Signals.Signal<readonly string[]>;
-		transport?: undefined;
+		transport?: never;
 		url?: URL | Signals.Signal<URL | undefined>;
 		versions?: readonly string[] | Signals.Signal<readonly string[] | undefined>;
 		websocket?: Connection.WebSocketProps;
@@ -320,7 +319,7 @@ export namespace Group {
 		readFrameSequence(options?: Group.ReadOptions): Promise<{
 			sequence: number;
 		} & Group.Frame | undefined>;
-		readJson(): Promise<unknown>;
+		readJson(): Promise<unknown | undefined>;
 		readString(): Promise<string | undefined>;
 		readable(): Promise<void>;
 		readonly sequence: number;
@@ -388,10 +387,10 @@ export namespace Origin {
 	}
 	export class Publication {
 		announce(route?: Origin.Route | {
-			auth?: Auth.Credential;
-			cost?: bigint;
-			epoch?: Epoch.Valid;
-			hops?: (bigint & $brand<"Hop">)[];
+			auth?: Origin.Route["auth"];
+			cost?: Origin.Route["cost"];
+			epoch?: Origin.Route["epoch"];
+			hops?: Origin.Route["hops"];
 		}): void;
 		readonly broadcast: Broadcast.Producer;
 		get route(): Origin.Route | undefined;
@@ -420,17 +419,17 @@ export namespace Origin {
 	}
 	export interface Route {
 		auth?: Auth.Credential;
-		cost: bigint;
+		cost: Origin.Cost;
 		epoch?: Epoch.Valid;
-		hops: (bigint & $brand<"Hop">)[];
+		hops: Origin.Hop[];
 	}
 	export type Route = {
 		default: Origin.Route;
 		normalize(route?: Origin.Route | {
 			auth?: Auth.Credential;
-			cost?: bigint;
+			cost?: Origin.Cost;
 			epoch?: Epoch.Valid;
-			hops?: readonly (bigint & $brand<"Hop">)[];
+			hops?: readonly Origin.Hop[];
 		}): Origin.Route;
 	};
 	export interface Table {
@@ -606,7 +605,7 @@ export namespace Track {
 			frame: number;
 			group: number;
 		} & Group.Frame | undefined>;
-		readJson(): Promise<unknown>;
+		readJson(): Promise<unknown | undefined>;
 		readString(): Promise<string | undefined>;
 		recvDatagram(): Promise<Track.Datagram | undefined>;
 		get subscription(): Signals.Getter<Track.Subscription | undefined>;
@@ -676,9 +675,9 @@ export namespace Varint {
 	export const MAX_U30: number;
 	export const MAX_U53: number;
 	export const MAX_U6: number;
-	export function decode(buf: Uint8Array): [number, Uint8Array<ArrayBufferLike>];
-	export function decodeBigInt(buf: Uint8Array): [bigint, Uint8Array<ArrayBufferLike>];
-	export function decodeLeadingOnes(buf: Uint8Array): [bigint, Uint8Array<ArrayBufferLike>];
+	export function decode(buf: Uint8Array): [number, Uint8Array];
+	export function decodeBigInt(buf: Uint8Array): [bigint, Uint8Array];
+	export function decodeLeadingOnes(buf: Uint8Array): [bigint, Uint8Array];
 	export function encode(v: number | bigint): Uint8Array;
 	export function encodeLeadingOnes(v: number | bigint): Uint8Array;
 	export function encodeLeadingOnesTo(dst: ArrayBuffer, v: number | bigint): Uint8Array;

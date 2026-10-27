@@ -1,7 +1,6 @@
 # `@moq/json`
 
 ```ts
-import { $ZodTypeInternals } from "zod/v4/core";
 import { Time } from "@moq/net";
 import { Timed } from "@moq/net";
 import { Track } from "@moq/net";
@@ -31,7 +30,7 @@ export namespace Snapshot {
 		compression?: Compression;
 		deltas?: boolean;
 		initial?: T;
-		schema?: ZodMiniType<T, unknown, $ZodTypeInternals<T, unknown>>;
+		schema?: ZodMiniType<T>;
 	}
 	export namespace Consumer {
 		export type Config<T> = Pick<Snapshot.Config<T>, "schema" | "compression"> & {
@@ -83,7 +82,7 @@ export namespace Snapshot {
 export namespace Stream {
 	export interface Config<T = unknown> {
 		compression?: Compression;
-		schema?: ZodMiniType<T, unknown, $ZodTypeInternals<T, unknown>>;
+		schema?: ZodMiniType<T>;
 	}
 	export namespace Consumer {
 		export type Config<T> = Stream.Config<T> & {

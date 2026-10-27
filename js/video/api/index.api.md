@@ -22,7 +22,7 @@ export type Presentation = {
 };
 
 export class Renderer {
-	constructor(props?: Inputs<RendererInput>);
+	constructor(props?: RendererProps);
 	close(): void;
 	readonly in: Readonlys<RendererInput>;
 	readonly out: Readonlys<RendererOutput>;
