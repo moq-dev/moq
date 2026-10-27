@@ -582,6 +582,31 @@ test("nextGroup returns buffered groups in sequence", async () => {
 	expect((await track.nextGroup())?.sequence).toBe(5);
 });
 
+test.each([false, true])("a reordered tail keeps the group PTS drift verdict (B-frame: %s)", async (reordered) => {
+	const clock = manualTime(0);
+	try {
+		const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
+		const subscriber = producer.subscribe({ maxDelay: Milli(80) });
+		for (const ms of [0, 100]) {
+			const group = producer.appendGroup();
+			group.writeFrame({ payload: new Uint8Array(), timestamp: Timestamp.fromMillis(ms) });
+			group.finish();
+		}
+		const edge = producer.appendGroup();
+		for (const ms of [150, 200])
+			edge.writeFrame({ payload: new Uint8Array(), timestamp: Timestamp.fromMillis(ms) });
+		if (reordered) edge.writeFrame({ payload: new Uint8Array(), timestamp: Timestamp.fromMillis(160) });
+		edge.finish();
+		// Group 0 reaches 100ms and is 100ms behind the highest PTS; group 1 reaches 150ms.
+		expect((await subscriber.recvGroup())?.sequence).toBe(1);
+		subscriber.close();
+		producer.finish();
+		producer.close();
+	} finally {
+		clock.installed.close();
+	}
+});
+
 // A group's age is where its content *ends*, not where it began. A long group whose tail
 // is level with the live edge still owes the reader every frame in it, so judging it by
 // its first timestamp would discard exactly the group being filled.

@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { Manual } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import { FrameTooLarge, GroupTooLarge, StreamCode, StreamError } from "./error.ts";
 import { MAX_GROUP_CACHE_BYTES, MAX_GROUP_FRAMES, Producer } from "./group.ts";
@@ -7,6 +8,47 @@ import { textFrame } from "./mock.ts";
 import { Timestamp } from "./time.ts";
 
 const dec = new TextDecoder();
+
+test("reordered frames keep the highest group PTS in live and later mirrors", () => {
+	const installed = new Manual().install();
+	try {
+		const producer = new Producer(0);
+		const shared = producer.consume();
+		const live = producer.mirror();
+		for (const timestamp of [Timestamp.fromMillis(0), Timestamp.fromMicros(80_000), Timestamp.fromMillis(40)])
+			producer.writeFrame({ payload: new Uint8Array([1]), timestamp });
+		expect(hooks.groupTimestamp(shared)?.asMillis()).toBe(0);
+		expect(hooks.groupLatest(shared)?.asMillis()).toBe(80);
+		expect(hooks.groupLatest(live)?.asMillis()).toBe(80);
+		// A later mirror only replays the remaining B-frame, but keeps the known high PTS.
+		shared.tryReadFrame();
+		shared.tryReadFrame();
+		const later = producer.mirror();
+		expect(hooks.groupLatest(later)?.asMillis()).toBe(80);
+		expect(later.tryReadFrame()?.timestamp?.asMillis()).toBe(40);
+		for (const reader of [shared, live, later]) reader.close();
+		producer.finish();
+	} finally {
+		installed.close();
+	}
+});
+
+test("zero group PTS keeps its scale and untimed groups stay unstamped", () => {
+	const installed = new Manual().install();
+	try {
+		for (const timestamp of [undefined, Timestamp.fromMicros(0)]) {
+			const producer = new Producer(0);
+			const consumer = producer.consume();
+			expect(hooks.groupLatest(consumer)).toBeUndefined();
+			producer.writeFrame({ payload: new Uint8Array(), timestamp });
+			expect(hooks.groupLatest(consumer)).toBe(timestamp);
+			consumer.close();
+			producer.finish();
+		}
+	} finally {
+		installed.close();
+	}
+});
 
 test("used reflects mirror demand and unused resolves when the last reader leaves", async () => {
 	const producer = new Producer(0);

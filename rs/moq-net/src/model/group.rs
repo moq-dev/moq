@@ -69,8 +69,7 @@ impl Info {
 	/// Create a producer for this group on a millisecond track.
 	///
 	/// Test-only: real groups are created via [`track::Producer`], which
-	/// supplies the parent track's [`track::Info`]. This helper exists for in-crate
-	/// tests that don't exercise timestamps.
+	/// supplies the parent track's [`track::Info`].
 	#[cfg(test)]
 	pub(crate) fn produce(self) -> Producer {
 		Producer::new(
@@ -538,7 +537,7 @@ enum Timeline {
 	Empty,
 	/// The track is untimed, so the group has no place in media time.
 	Untimed,
-	/// `start` is the first frame's timestamp, never revised. `latest` is the newest
+	/// `start` is the first frame's timestamp, never revised. `latest` is the highest
 	/// frame's: the group's presentation end so far, which a reader that has taken
 	/// every frame sits at and a drift budget measures it against.
 	Timed { start: Timestamp, latest: Timestamp },
@@ -793,11 +792,14 @@ impl GroupState {
 	}
 
 	/// Record a frame's place in presentation time: the first frame starts the group,
-	/// and each later one extends a timed group's end. Every frame matches its track
+	/// and later frames can extend a timed group's end. Every frame matches its track
 	/// ([`on_track`]), so a group never mixes the two.
 	fn stamp(&mut self, timestamp: Option<Timestamp>) {
 		self.timeline = match (self.timeline, timestamp) {
-			(Timeline::Timed { start, .. }, Some(latest)) => Timeline::Timed { start, latest },
+			(Timeline::Timed { start, latest }, Some(timestamp)) => Timeline::Timed {
+				start,
+				latest: latest.max(timestamp),
+			},
 			(_, Some(start)) => Timeline::Timed { start, latest: start },
 			(_, None) => Timeline::Untimed,
 		};
@@ -1381,7 +1383,7 @@ impl Producer {
 			let size = frame.payload.len() as u64;
 			state.cache += size;
 			state.stamp(frame.timestamp);
-			latest = frame.timestamp;
+			latest = latest.max(frame.timestamp);
 			let slots = state.push(Entry::plain(frame.into(), inflated));
 			now = state.charge.add(size + slots);
 		}
@@ -1797,15 +1799,15 @@ impl Handle {
 		state.offset = head.start;
 		state.cache += payload;
 		let start = entries.iter().find_map(|entry| entry.frame.timestamp);
+		let head_latest = entries.iter().filter_map(|entry| entry.frame.timestamp).max();
 		state.timeline = match (state.timeline, start) {
-			(Timeline::Timed { latest, .. }, Some(start)) => Timeline::Timed { start, latest },
+			(Timeline::Timed { latest, .. }, Some(start)) => Timeline::Timed {
+				start,
+				latest: latest.max(head_latest.unwrap_or(start)),
+			},
 			(Timeline::Empty, Some(start)) => Timeline::Timed {
 				start,
-				latest: entries
-					.iter()
-					.rev()
-					.find_map(|entry| entry.frame.timestamp)
-					.unwrap_or(start),
+				latest: head_latest.unwrap_or(start),
 			},
 			(Timeline::Empty, None) => Timeline::Untimed,
 			(timeline, _) => timeline,
@@ -1820,6 +1822,9 @@ impl Handle {
 		drop(state);
 		self.start(None);
 		self.cache.settle(now);
+		if let Some(latest) = head_latest {
+			self.cache.wakes().presented(latest);
+		}
 	}
 
 	/// One past the index of the last frame written (completed or in-flight), which is
@@ -2036,14 +2041,10 @@ impl Handle {
 		}
 	}
 
-	/// Where the group ends in presentation time: its newest timed frame's timestamp, or
-	/// `None` while no frame has been opened or when the group is untimed.
+	/// Highest PTS among this group's timed frames, or `None` while it is empty or untimed.
 	///
-	/// This is what a drift budget measures an untouched group against. A group is not
-	/// late because it *started* long ago: a two-second group whose tail is level with
-	/// the live edge still has content nobody has read. Only once its newest frame has
-	/// fallen behind is there nothing left worth delivering. Grows as the group does, so
-	/// a group still receiving frames stays fresh and a stalled one ages in place.
+	/// The newest servable group's highest PTS drives presentation-time drift.
+	/// Decode-order B-frames cannot move that edge backwards.
 	pub(super) fn latest(&self) -> Option<Timestamp> {
 		let state = self.state.read();
 		match state.timeline {
@@ -3413,6 +3414,90 @@ mod test {
 	use bytes::Bytes;
 	#[cfg(feature = "async")]
 	use futures::FutureExt;
+
+	#[test]
+	fn reordered_frames_keep_the_highest_group_pts() {
+		for mode in 0..3 {
+			let mut group = Info { sequence: 0 }.produce();
+			let timestamps = [0, 80, 40].map(|ms| Timestamp::from_millis(ms).unwrap());
+			if mode == 1 {
+				let mut frames = frame::Buffer::<3>::new();
+				for timestamp in timestamps {
+					frames.push(Frame::new(timestamp, Bytes::new())).unwrap();
+				}
+				group.write_frames(&mut frames).unwrap();
+			} else {
+				for timestamp in timestamps {
+					if mode == 0 {
+						group.write_frame(timestamp, Bytes::new()).unwrap();
+					} else {
+						let frame = group
+							.create_frame(frame::Info {
+								size: 0,
+								timestamp: Some(timestamp),
+							})
+							.unwrap();
+						group = frame.finish().unwrap();
+					}
+				}
+			}
+			assert_eq!(group.handle.timestamp(), Some(timestamps[0]), "mode {mode}");
+			assert_eq!(group.handle.latest(), Some(timestamps[1]), "mode {mode}");
+			group.finish().unwrap();
+		}
+	}
+
+	#[test]
+	fn adopted_heads_keep_the_highest_pts_beside_the_tail() {
+		let head = Head {
+			start: 0,
+			first_object: true,
+			entries: [0, 80, 40]
+				.into_iter()
+				.map(|ms| Entry::plain(Frame::new(Timestamp::from_millis(ms).unwrap(), Bytes::new()).into(), 0))
+				.collect(),
+			compressed: false,
+		};
+		for tail in [None, Some(20), Some(120)] {
+			let mut group = Info { sequence: 0 }.produce();
+			group.start_at(3).unwrap();
+			if let Some(ms) = tail {
+				group
+					.write_frame(Timestamp::from_millis(ms).unwrap(), Bytes::new())
+					.unwrap();
+			}
+			group.handle.adopt_head(&head);
+			let Timeline::Timed { start, latest } = group.handle.state.read().timeline else {
+				panic!("adopted timestamps are timed")
+			};
+			assert_eq!(start, Timestamp::from_millis(0).unwrap());
+			assert_eq!(
+				latest,
+				Timestamp::from_millis(tail.unwrap_or(0).max(80)).unwrap(),
+				"tail {tail:?}"
+			);
+			group.finish().unwrap();
+		}
+	}
+
+	#[test]
+	fn a_zero_group_pts_keeps_its_track_scale_and_untimed_stays_unstamped() {
+		let mut timed = Producer::new(
+			Info { sequence: 0 },
+			track::Info::default().with_timescale(Timescale::MICRO),
+			Default::default(),
+		);
+		timed
+			.write_frame(Timestamp::from_micros(0).unwrap(), Bytes::new())
+			.unwrap();
+		assert_eq!(timed.handle.latest(), Some(Timestamp::from_micros(0).unwrap()));
+		timed.finish().unwrap();
+		let mut untimed = Info { sequence: 0 }.produce_untimed();
+		assert_eq!(untimed.handle.latest(), None);
+		untimed.write_frame(None, Bytes::new()).unwrap();
+		assert_eq!(untimed.handle.latest(), None);
+		untimed.finish().unwrap();
+	}
 
 	/// Fields sit beside the frames only from the first fielded one, so every read path
 	/// must line them up by index across plain frames and prefetch batches.

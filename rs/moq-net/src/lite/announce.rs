@@ -339,33 +339,36 @@ impl Decode<Version> for AnnounceBroadcast<'_> {
 			let typ = buf.varint()?;
 			let size = decode_size(buf, MAX_MESSAGE_SIZE)?;
 			let mut body = buf.sub(size)?;
-			let msg = match typ {
-				ANNOUNCE_START => Self::Active {
-					suffix: PathRef::decode(&mut body, version)?,
-					epoch: super::epoch::decode_epoch(&mut body, version)?,
-					hops: HopsRef::decode(&mut body, version)?,
-					cost: Cost::decode(&mut body, version)?,
-				},
-				SYNCED if version.has_synced() => Self::Synced,
-				ANNOUNCE_END => Self::EndedId { id: body.varint()? },
-				ANNOUNCE_UPDATE => Self::Update {
-					id: body.varint()?,
-					hops: HopsRef::decode(&mut body, version)?,
-					cost: Cost::decode(&mut body, version)?,
-				},
-				ANNOUNCE_RESTART if version.has_announce_restart() => Self::Restart {
-					id: body.varint()?,
-					epoch: super::epoch::decode_epoch(&mut body, version)?,
-					hops: HopsRef::decode(&mut body, version)?,
-					cost: Cost::decode(&mut body, version)?,
-				},
-				// Unknown types are skipped by length so an earlier Lite06 build
-				// negotiating the same ALPN does not kill the announce stream.
-				_ => {
-					body.rest();
-					Self::Skipped
-				}
-			};
+			let msg = (|| {
+				Ok(match typ {
+					ANNOUNCE_START => Self::Active {
+						suffix: PathRef::decode(&mut body, version)?,
+						epoch: super::epoch::decode_epoch(&mut body, version)?,
+						hops: HopsRef::decode(&mut body, version)?,
+						cost: Cost::decode(&mut body, version)?,
+					},
+					SYNCED if version.has_synced() => Self::Synced,
+					ANNOUNCE_END => Self::EndedId { id: body.varint()? },
+					ANNOUNCE_UPDATE => Self::Update {
+						id: body.varint()?,
+						hops: HopsRef::decode(&mut body, version)?,
+						cost: Cost::decode(&mut body, version)?,
+					},
+					ANNOUNCE_RESTART if version.has_announce_restart() => Self::Restart {
+						id: body.varint()?,
+						epoch: super::epoch::decode_epoch(&mut body, version)?,
+						hops: HopsRef::decode(&mut body, version)?,
+						cost: Cost::decode(&mut body, version)?,
+					},
+					// Unknown types are skipped by length so an earlier Lite06 build
+					// negotiating the same ALPN does not kill the announce stream.
+					_ => {
+						body.rest();
+						Self::Skipped
+					}
+				})
+			})()
+			.map_err(DecodeError::complete)?;
 			if !body.is_empty() {
 				return Err(DecodeError::Long);
 			}
@@ -375,7 +378,7 @@ impl Decode<Version> for AnnounceBroadcast<'_> {
 		// Older versions: a single size-prefixed ANNOUNCE_BROADCAST with an inner status.
 		let size = decode_size(buf, MAX_MESSAGE_SIZE)?;
 		let mut body = buf.sub(size)?;
-		let msg = Self::decode_legacy(&mut body, version)?;
+		let msg = Self::decode_legacy(&mut body, version).map_err(DecodeError::complete)?;
 		if !body.is_empty() {
 			return Err(DecodeError::Long);
 		}

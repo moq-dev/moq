@@ -107,6 +107,7 @@ criterion = "0.8"
 # (`fallback-dynamic-loading`), so nothing links against libcuda at build time.
 cudarc = { version = "0.19", default-features = false, features = ["driver", "fallback-dynamic-loading", "cuda-12020"] }
 dispatch2 = "0.3.1"
+ebml-iterable = "0.7.1"
 flate2 = { version = "1.1", default-features = false }
 futures = "0.3"
 getrandom = { version = "0.4", features = ["wasm_js"] }
@@ -201,6 +202,8 @@ objc2-screen-capture-kit = "0.3.2"
 # local-filesystem stack; `fs` (and cloud backends) are opted in by the caller.
 object_store = { version = "0.14", default-features = false }
 percent-encoding = "2"
+pkcs1 = { version = "0.7.5", features = ["alloc"] }
+pkcs8 = "0.11.0"
 pollster = "1.0"
 # default-features off to skip the fork and timeout machinery; crates opt into what they use.
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }
