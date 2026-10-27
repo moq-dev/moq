@@ -21,11 +21,11 @@ const audioConfig: Catalog.AudioConfig = {
 };
 
 // `<moq-publish>`'s wiring, with each encoder reduced to its rendition and `settled` flag.
-function setup(source: SourceType = "camera") {
+function setup(initial: SourceType = "camera") {
 	const effect = new Effect();
 	const announcing = new Signal(false);
 	const connected = new Signal(true);
-	const selected = new Signal(true);
+	const source = new Signal<SourceType | undefined>(initial);
 	const mode = new Signal<AnnounceMode | undefined>("source");
 	const broadcast = new Broadcast({
 		enabled: connected,
@@ -43,8 +43,7 @@ function setup(source: SourceType = "camera") {
 
 	Announce.run(effect, announcing, {
 		mode,
-		selected: effect.computed((effect) => effect.get(connected) && effect.get(selected)),
-		camera: new Signal(source === "camera"),
+		source: effect.computed((effect) => (effect.get(connected) ? effect.get(source) : undefined)),
 		video,
 		audio,
 	});
@@ -52,7 +51,7 @@ function setup(source: SourceType = "camera") {
 	return {
 		announcing,
 		connected,
-		selected,
+		source,
 		mode,
 		broadcast,
 		video,
@@ -217,29 +216,37 @@ test("capture gaps keep the broadcast epoch and same-identity track sequences", 
 	}
 });
 
-test.each(["selected", "connected"] as const)("clearing %s resets the first-announce guard", async (boundary) => {
-	using env = setup();
-	await start(env);
-	env[boundary].set(false);
-	env.video.source.set(undefined);
-	env.audio.source.set(undefined);
-	env.video.settled.set(false);
-	env.audio.settled.set(false);
-	await settle();
-	expect(env.announcing.peek()).toBe(false);
+const boundaries = {
+	selection: (env: ReturnType<typeof setup>, on: boolean) => env.source.set(on ? "camera" : undefined),
+	connection: (env: ReturnType<typeof setup>, on: boolean) => env.connected.set(on),
+};
 
-	env[boundary].set(true);
-	await settle();
-	expect(env.announcing.peek()).toBe(false);
-	env.video.source.set({});
-	env.video.settled.set(true);
-	await settle();
-	expect(env.announcing.peek()).toBe(false);
-	env.audio.source.set({});
-	env.audio.settled.set(true);
-	await settle();
-	expect(env.announcing.peek()).toBe(true);
-});
+test.each(Object.keys(boundaries) as (keyof typeof boundaries)[])(
+	"clearing the %s resets the first-announce guard",
+	async (boundary) => {
+		using env = setup();
+		await start(env);
+		boundaries[boundary](env, false);
+		env.video.source.set(undefined);
+		env.audio.source.set(undefined);
+		env.video.settled.set(false);
+		env.audio.settled.set(false);
+		await settle();
+		expect(env.announcing.peek()).toBe(false);
+
+		boundaries[boundary](env, true);
+		await settle();
+		expect(env.announcing.peek()).toBe(false);
+		env.video.source.set({});
+		env.video.settled.set(true);
+		await settle();
+		expect(env.announcing.peek()).toBe(false);
+		env.audio.source.set({});
+		env.audio.settled.set(true);
+		await settle();
+		expect(env.announcing.peek()).toBe(true);
+	},
+);
 
 test("an invalid mode stops a latched announcement while always needs no selection", async () => {
 	using env = setup();
@@ -247,7 +254,7 @@ test("an invalid mode stops a latched announcement while always needs no selecti
 	env.mode.set(undefined);
 	await settle();
 	expect(env.announcing.peek()).toBe(false);
-	env.selected.set(false);
+	env.source.set(undefined);
 	env.mode.set("always");
 	await settle();
 	expect(env.announcing.peek()).toBe(true);
@@ -262,4 +269,29 @@ test.each(["screen", "file"] as const)("%s retracts when its captured media ends
 	env.audio.settled.set(false);
 	await settle();
 	expect(env.announcing.peek()).toBe(false);
+});
+
+test.each(["screen", "file"] as const)("switching from %s to camera waits for the camera", async (from) => {
+	using env = setup(from);
+	await start(env);
+
+	// The source picker swaps directly; the camera has captured nothing yet.
+	env.source.set("camera");
+	env.video.source.set(undefined);
+	env.audio.source.set(undefined);
+	env.video.settled.set(false);
+	env.audio.settled.set(false);
+	await settle();
+	expect(env.announcing.peek()).toBe(false);
+
+	// Video alone, such as with a denied microphone, can't advertise a partial camera publication.
+	env.video.source.set({});
+	env.video.settled.set(true);
+	await settle();
+	expect(env.announcing.peek()).toBe(false);
+
+	env.audio.source.set({});
+	env.audio.settled.set(true);
+	await settle();
+	expect(env.announcing.peek()).toBe(true);
 });
