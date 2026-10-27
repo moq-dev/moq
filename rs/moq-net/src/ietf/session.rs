@@ -202,7 +202,7 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle, Option<cr
 	// What the peer declared in its SETUP. Seeded now when that stream was already
 	// read (the legacy handshake, or a gated server accept), and filled by the uni
 	// loop otherwise.
-	let peer_setup = peer::PeerSetup::new(extensions).with_implementation(peer_implementation);
+	let mut peer_setup = peer::PeerSetup::new(extensions).with_implementation(peer_implementation);
 	let setup_read = peer_declared.is_some();
 	match peer_declared {
 		Some(declared) => peer_setup.set(declared),
@@ -210,6 +210,9 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle, Option<cr
 		// settle the slot rather than leave the announce loops waiting on a value
 		// that is never coming.
 		None if !cluster::supported(version) => peer_setup.set(peer::Peer::default()),
+		// A client is live before the server's SETUP, which follows its check of the
+		// credential.
+		None if client => peer_setup = peer_setup.accepting(auth.clone()),
 		None => {}
 	}
 

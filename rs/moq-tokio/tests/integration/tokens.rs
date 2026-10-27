@@ -74,11 +74,17 @@ async fn serve(version: &str, refused: &'static str) -> Server {
 }
 
 fn client(version: &str, tokens: &[&str]) -> moq_tokio::Client {
+	config(version, tokens)
+		.init(Default::default())
+		.expect("failed to init client")
+}
+
+fn config(version: &str, tokens: &[&str]) -> moq_tokio::connect::Config {
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
 	config.version = vec![version.parse().unwrap()];
 	config.tokens = tokens.iter().map(|token| token.parse().unwrap()).collect();
-	config.init(Default::default()).expect("failed to init client")
+	config
 }
 
 async fn next(server: &mut Server) -> Seen {
@@ -148,18 +154,22 @@ async fn a_refused_credential_redials_with_its_replacement() {
 /// Without a new credential, a refusal ends the connection rather than retrying it.
 #[tokio::test]
 async fn an_unchanged_refused_credential_is_terminal() {
-	refused_credential_is_terminal("moq-lite-07-wip").await;
+	refused_credential_is_terminal(config("moq-lite-07-wip", &["old"])).await;
 }
 
 /// Without AUTH, a refusal after the session went live is still the answer, never a grant.
 #[tokio::test]
 async fn an_unchanged_refused_credential_without_auth_is_terminal() {
-	refused_credential_is_terminal("moq-lite-05").await;
+	refused_credential_is_terminal(config("moq-lite-05", &["old"])).await;
+	let mut config = config("moq-transport-22", &["old"]);
+	config.extensions.auth = false;
+	refused_credential_is_terminal(config).await;
 }
 
-async fn refused_credential_is_terminal(version: &str) {
-	let mut server = serve(version, "old").await;
-	let client = client(version, &["old"]);
+async fn refused_credential_is_terminal(config: moq_tokio::connect::Config) {
+	let version = config.version[0].to_string();
+	let mut server = serve(&version, "old").await;
+	let client = config.init(Default::default()).expect("failed to init client");
 	let url: url::Url = format!("moqt://localhost:{}/", server.port).parse().unwrap();
 	let connection = client.connect(url);
 	let tokens = connection.tokens();

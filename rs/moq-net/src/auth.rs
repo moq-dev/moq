@@ -1290,8 +1290,8 @@ impl Link {
 		self.read(|link, _| link.closed.clone())
 	}
 
-	/// The peer accepts the connection credential only with its SETUP, which a moq-lite
-	/// client without AUTH reads after the session is live and the server can still refuse.
+	/// The peer accepts the connection credential only with its SETUP, which this client
+	/// reads after the session is live, while the server can still refuse it.
 	pub(crate) fn await_setup(&self) {
 		self.with(|link| link.accepted = false);
 	}
