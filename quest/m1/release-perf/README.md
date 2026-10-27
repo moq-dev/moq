@@ -216,12 +216,13 @@ Decided 2026-10-25 (maintainer), in
 [moq-dev/moq#6784](https://github.com/moq-dev/moq/pull/6784):
 
 - The sparse read slope from
-  [dynamic range requests](https://github.com/moq-dev/moq/pull/6171) is the
-  child below, and it blocks the cut.
+  [dynamic range requests](https://github.com/moq-dev/moq/pull/6171) blocks
+  the cut; [moq-dev/moq#6921](https://github.com/moq-dev/moq/pull/6921)
+  flattened it.
 - The TS schedule's growth is left to the
   [performance audit](/quest/m2/audit-perf.md); it does not block the cut.
-- Once the child lands, re-run the relay fanout pairing on a quiet host,
-  recording `/proc/loadavg`, with
+- Now that the sparse fix has landed, re-run the relay fanout pairing on a
+  quiet host, recording `/proc/loadavg`, with
   `BENCH_ARTIFACTS=<scratch> just bench origin/release` (it also re-checks
   the sparse rows). Fix it if the relay
   CPU still rises with consistent sign; otherwise this epic is done.

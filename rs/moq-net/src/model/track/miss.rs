@@ -471,6 +471,8 @@ impl Misses {
 					state
 						.lookup
 						.range(run.start.max(changed.start)..run.end.min(changed.end))
+						// An aborted slot is still a hole, so its refusal stands.
+						.filter(|(_, slot)| !slot.is_aborted())
 						.map(|(&sequence, _)| sequence)
 				})
 				.collect();
@@ -865,6 +867,75 @@ mod tests {
 			"the live cached incarnation is no longer refused"
 		);
 		assert!(given_up.is_empty(), "a live recreation is never given up");
+	}
+
+	#[moq_clock::test]
+	async fn an_aborted_live_group_keeps_its_earlier_fill_refusal() {
+		let broadcast = crate::broadcast::Info::default().produce();
+		let mut track = broadcast
+			.create_track("aborted", crate::track::Info::default())
+			.unwrap();
+		let budget = Duration::from_secs(5);
+		let _reader = track.subscribe(Subscription::default().with_max_delay(budget));
+		for sequence in [0, 4] {
+			track
+				.create_group(crate::group::Info { sequence })
+				.unwrap()
+				.finish()
+				.unwrap();
+		}
+		track.start_at(3).unwrap();
+		let mut misses = Misses::default();
+		let mut given_up = Vec::new();
+		let waiter = kio::Waiter::noop();
+		let state = track.state.read();
+		let drift = Drift {
+			budget,
+			bounded: false,
+			edge: state.drift_edge(&Servable::ALL),
+		};
+		let asks = misses.judge(
+			&state,
+			(0, 0, None),
+			|span| [span].into_iter().collect(),
+			&drift,
+			&mut given_up,
+			&waiter,
+		);
+		let fills = state.fills.clone();
+		drop(state);
+		misses.ask(
+			&track.state.consume(),
+			&fills,
+			&asks,
+			&Asking {
+				priority: 0,
+				max_delay: Some(budget),
+				order: Order::Ascending,
+			},
+			&mut given_up,
+		);
+		assert!(misses.refused.contains(&2));
+
+		// The live feed accounts for group 2 but aborts it without a cut, so its slot is
+		// still a hole: the refusal stands and the hole is given up, not asked again.
+		track
+			.create_group(crate::group::Info { sequence: 2 })
+			.unwrap()
+			.abort(Error::Cancel)
+			.unwrap();
+		let state = track.state.read();
+		assert!(state.lookup.get(&2).is_some_and(|slot| slot.is_aborted()));
+		let asks = misses.judge(
+			&state,
+			(0, 0, None),
+			|_| panic!("the edge has not moved"),
+			&drift,
+			&mut given_up,
+			&waiter,
+		);
+		assert!(!asks.contains(&2), "a refused hole is not asked again");
+		assert_eq!(given_up, vec![2..3]);
 	}
 	#[moq_clock::test]
 	async fn unchanged_probes_and_late_arrivals_keep_other_gap_deadlines() {
