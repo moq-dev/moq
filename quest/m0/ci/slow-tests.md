@@ -3,8 +3,10 @@
 ## Goal
 
 moq's slowest 1% of tests (103 tests, 289 of 501 test CPU-seconds in one full run)
-take under half that CPU, with no loss of coverage. Record per-test CPU before and
-after, from one full `cargo nextest` run on the same machine.
+take under half that CPU, with no loss of coverage. Before any change, freeze the
+cohort by test ID from one full `cargo nextest` run and list it in this quest's PR;
+measure that same set after, on the same machine. Per-test CPU is each test process's
+user plus system time, not nextest's wall-clock duration.
 
 ## Plan
 
