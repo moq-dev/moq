@@ -61,10 +61,8 @@ leaving JS-only redesigns of `js/net` to [rs2ts](/quest/m2/rs2ts/README.md).
 - [JS tracks end clean only on a deliberate finish](/quest/m1/cut-audit/js-close-cause.md) - local close, violations, and unanswered requests end with errors
 - [A malformed lite message closes the session](/quest/m1/cut-audit/announce-decode-complete.md) - a bad ANNOUNCE body no longer jams its stream
 - [Withdrawing a moq-transport FETCH or TRACK_STATUS ends it](/quest/m1/cut-audit/ietf-withdraw-resolve.md) - withdrawal during resolution releases the request
-- [JS moq-transport sessions close on peer violations](/quest/m1/cut-audit/js-ietf-violations.md) - right close codes, no unhandled rejection, bounded reflected namespaces
 - [A media hole in the player keeps the timeline](/quest/m1/cut-audit/watch-audio-hole.md) - a skipped group re-primes decoders without flushing audio or re-anchoring sync
 - [A camera broadcast stays announced across unmute](/quest/m1/cut-audit/publish-announce-latch.md) - viewers do not restart on every device flap
-- [Muted and volume are independent](/quest/m1/cut-audit/watch-volume-mute.md) - `<moq-watch volume="0.8" muted>` starts muted at 0.8
 - [A description-less AAC rendition means one thing](/quest/m1/cut-audit/aac-description-less.md) - every player and exporter agrees on the frame format
 - [A malformed MKV track fails the import](/quest/m1/cut-audit/mkv-import-errors.md) - no silently missing tracks or collapsed timestamps
 - [RTMP sessions follow one strict path](/quest/m1/cut-audit/rtmp-session-strict.md) - idle sockets, repeated requests, rewinds, and stalled servers are handled
@@ -80,7 +78,6 @@ leaving JS-only redesigns of `js/net` to [rs2ts](/quest/m2/rs2ts/README.md).
 - [A route's terminal state is one phase](/quest/m1/cut-audit/route-phase.md) - three resume flags collapse into one check
 - [Lite's version gates, refusals, and draft text agree](/quest/m1/cut-audit/lite-wire-nits.md) - small wire and draft mismatches fixed
 - [Small @moq/net divergences from Rust are fixed](/quest/m1/cut-audit/js-net-cleanups.md) - lite-04 probes, group consumers, accept deadlines, empty JSON
-- [Signals and the encoded preview keep their promises](/quest/m1/cut-audit/js-media-cleanups.md) - `Computed.close()` and the encoded preview behave as documented
 
 ## Related
 

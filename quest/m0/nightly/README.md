@@ -24,7 +24,7 @@ This README's own work, after the children:
   there: the audio near-zero p95 row belongs to
   [audio jitter target](/quest/m1/audio-jitter-target/README.md), the
   macOS `receive_credit` timeout to
-  [test flakes](/quest/m1/test-flakes-2/README.md), and the paired bench
+  [test flakes](/quest/m0/test-flakes-2/README.md), and the paired bench
   threshold to [bench CI](/quest/m1/bench-ci.md).
 
 Public API: none. Wire: none.
