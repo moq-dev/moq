@@ -1632,7 +1632,7 @@ mod tests {
 
 	/// Answer the next request through `claim` with one `audio` rendition, under `route`'s epoch.
 	async fn answer(
-		claim: &moq_net::origin::Dynamic,
+		claim: &moq_net::origin::Requests,
 		route: &moq_net::origin::Route,
 	) -> (
 		moq_net::origin::Publication,
@@ -1720,7 +1720,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_refused_broadcast_ends_the_player() {
 		let origin = moq_tokio::origin::spawn();
-		let handler = origin.dynamic("").unwrap();
+		let handler = origin.requests("").unwrap();
 		let recorder = Recorder::default();
 		let player = tokio::spawn(media(&origin, Duration::from_millis(50), recorder.clone()).run());
 		let request = handler.requested_broadcast().await.unwrap();
@@ -1884,7 +1884,7 @@ mod tests {
 		// The broadcast ends while its route stands, so the player goes idle.
 		tokio::time::sleep(Duration::from_secs(60)).await;
 
-		let pool = origin.dynamic("").unwrap();
+		let pool = origin.requests("").unwrap();
 		drop(exact);
 		let (served, served_catalog, mut new) = answer(&pool, &route).await;
 		write(&mut new, 10, NEW).await;
@@ -1921,7 +1921,7 @@ mod tests {
 		}
 
 		exact.unannounce();
-		let pool = origin.dynamic("").unwrap();
+		let pool = origin.requests("").unwrap();
 		let (mirror, mirror_catalog, mut copy) = answer(&pool, &route).await;
 		for index in 50..60 {
 			copy.write(packet(index, NEW)).unwrap();

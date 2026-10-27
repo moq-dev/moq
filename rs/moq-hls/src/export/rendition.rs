@@ -1491,13 +1491,13 @@ mod tests {
 	async fn pending_reads_preserve_a_later_authorization_refusal() {
 		let origin = moq_tokio::origin::spawn();
 		let broadcast = origin.create_broadcast("room/live").unwrap();
-		let dynamic = origin.dynamic("room/secret").unwrap();
+		let dynamic = origin.requests("room/secret").unwrap();
 		let source = moq_mux::Source::new(origin.consume(), broadcast.consume());
 		let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		config.broadcast = Some(moq_net::path::Relative::new("./secret").to_owned());
 		let rendition = Arc::new(Rendition::video("video".into(), &config, &source, Archive::default(), None).unwrap());
 		let request = dynamic.requested_broadcast().await.unwrap();
-		let other = origin.dynamic("room/hidden").unwrap();
+		let other = origin.requests("room/hidden").unwrap();
 		config.broadcast = Some(moq_net::path::Relative::new("./hidden").to_owned());
 		let resolving = Arc::new(Rendition::video("video".into(), &config, &source, Archive::default(), None).unwrap());
 		let other_request = other.requested_broadcast().await.unwrap();
@@ -1553,7 +1553,7 @@ mod tests {
 	fn capture_keeps_the_queried_track_when_end_lands_during_the_query() {
 		struct Serve {
 			broadcast: moq_net::broadcast::Producer,
-			dynamic: std::sync::Mutex<moq_net::broadcast::Dynamic>,
+			dynamic: std::sync::Mutex<moq_net::broadcast::Requests>,
 			track: std::sync::Mutex<Option<moq_net::track::Producer>>,
 			// Kept alive here, since a list only holds it weakly.
 			waiter: std::sync::OnceLock<kio::Waiter>,
@@ -1582,7 +1582,7 @@ mod tests {
 
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let serve = Arc::new(Serve {
-			dynamic: std::sync::Mutex::new(broadcast.dynamic()),
+			dynamic: std::sync::Mutex::new(broadcast.requests()),
 			broadcast,
 			track: Default::default(),
 			waiter: Default::default(),

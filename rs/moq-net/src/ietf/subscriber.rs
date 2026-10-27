@@ -730,7 +730,7 @@ fn largest_group(track: &track::Producer, answer: Option<ietf::Location>) -> Opt
 struct Idle {
 	track: track::Producer,
 	/// Serves its cache misses with a group FETCH, subscribed or not.
-	dynamic: track::Dynamic,
+	dynamic: track::Requests,
 	demand: track::Demand,
 	timescale: Option<Timescale>,
 	/// The publisher ended the track, so a returning subscriber reads the copy as it is.
@@ -827,7 +827,7 @@ struct BroadcastState {
 	// The served route: dropping it (and the serve task's clone) retracts the
 	// route and rejects its queued requests. `None` while the session's limit holds
 	// it back, though the peer still advertises it.
-	dynamic: Option<crate::origin::Dynamic>,
+	dynamic: Option<crate::origin::Requests>,
 
 	// Bumped each time the route attaches, so a serve task outlived by a limit that
 	// took the route away and gave it back ends rather than serve beside the new one.
@@ -2400,7 +2400,7 @@ impl Subscriber {
 		if self.going_away.is_set() {
 			route.cost = crate::origin::Cost::DRAIN;
 		}
-		entry.dynamic = Some(self.origin.dynamic_route(path, route)?);
+		entry.dynamic = Some(self.origin.requests_route(path, route)?);
 		entry.generation += 1;
 		tracing::info!(route = %self.origin.absolute(path), "namespace authorized again");
 		Ok(Some(entry.generation))
@@ -2492,7 +2492,7 @@ impl Subscriber {
 					return Ok(());
 				}
 				// Propagates Error::Unauthorized if the namespace is out of scope.
-				let dynamic = self.origin.dynamic_route(&path, route.clone())?;
+				let dynamic = self.origin.requests_route(&path, route.clone())?;
 
 				entry.insert(BroadcastState {
 					route: route.clone(),
@@ -2673,7 +2673,7 @@ impl Subscriber {
 			let source = crate::model::broadcast::SourceGuard::new(self.origin.create_source(&requested, validity));
 			// The handler exists before the requester sees the source, so a track it asks
 			// for before `run_broadcast` first polls queues instead of failing `NotFound`.
-			let dynamic = source.dynamic();
+			let dynamic = source.requests();
 			request.accept(&*source);
 
 			// The namespace's token closes the source as it is retracted. If it was
@@ -2728,7 +2728,7 @@ impl Subscriber {
 		&self,
 		path: Path<'_>,
 		source: crate::model::broadcast::SourceGuard,
-		mut broadcast: broadcast::Dynamic,
+		mut broadcast: broadcast::Requests,
 		route: Option<kio::Consumer<()>>,
 	) -> Result<(), Error> {
 		let mut subscribes = TaskSet::owned();
@@ -2830,7 +2830,7 @@ impl Subscriber {
 		broadcast_path: Path<'_>,
 		// Held for the subscription's lifetime but never watched: the broadcast ending
 		// is a retraction, which does not disturb a subscription the scope allows.
-		_broadcast: broadcast::Dynamic,
+		_broadcast: broadcast::Requests,
 		// Open while the namespace stays announced and authorized, which its own token may
 		// have done in place of the scope. `None` once retracted.
 		route: Option<kio::Consumer<()>>,
@@ -3372,7 +3372,7 @@ impl Subscriber {
 				let request = request.request_start(start);
 				// Serves cache misses with a group FETCH. Registered before accepting, so a
 				// miss queued meanwhile waits for it rather than failing for want of a handler.
-				let dynamic = request.dynamic();
+				let dynamic = request.requests();
 				let copy = request.stage(info);
 				let track = track::Producer::clone(&copy);
 				staged = Some(copy);
@@ -4343,7 +4343,7 @@ impl Subscriber {
 		};
 
 		tracing::debug!(broadcast = %self.origin.absolute(broadcast_path), track = %track_name, "track status known");
-		let dynamic = request.dynamic();
+		let dynamic = request.requests();
 		// Nothing feeds this copy live: what it caches is fetched, never the live edge. Idle
 		// from the accept, so no reader takes it as live in between.
 		let track = request.idle().stage(accepted_info(&ok.properties, self.version));
@@ -6146,7 +6146,7 @@ mod tests {
 	#[moq_clock::test]
 	async fn session_death_rejects_a_subscribe_still_setting_up() {
 		let broadcast = crate::broadcast::Info::new().produce();
-		let mut dynamic = broadcast.dynamic();
+		let mut dynamic = broadcast.requests();
 		let consumer = broadcast.consume();
 		let mut waiting = std::pin::pin!(consumer.track("video").unwrap().subscribe(None));
 		assert!(poll!(&mut waiting).is_pending());
@@ -7169,7 +7169,7 @@ mod tests {
 		);
 
 		let producer = crate::broadcast::Info::default().produce();
-		let mut dynamic = producer.dynamic();
+		let mut dynamic = producer.requests();
 		let consumer = producer.consume();
 		let track = consumer.track("video").unwrap();
 		let subscription = track.subscribe(None);
@@ -7242,7 +7242,7 @@ mod tests {
 		let (mut subscriber, log, _auth, _tokens, _task_set) = waiting_on_auth(VERSION);
 
 		let producer = crate::broadcast::Info::default().produce();
-		let mut dynamic = producer.dynamic();
+		let mut dynamic = producer.requests();
 		let consumer = producer.consume();
 		let track = consumer.track("video").unwrap();
 		let subscription = track.subscribe(None);
@@ -7281,7 +7281,7 @@ mod tests {
 		let (mut subscriber, log, _auth, _tokens, _task_set) = waiting_on_auth(VERSION);
 
 		let producer = crate::broadcast::Info::default().produce();
-		let mut dynamic = producer.dynamic();
+		let mut dynamic = producer.requests();
 		let consumer = producer.consume();
 		let track = consumer.track("video").unwrap();
 		let subscription = track.subscribe(None);
@@ -7341,7 +7341,7 @@ mod tests {
 		);
 
 		let producer = crate::broadcast::Info::default().produce();
-		let mut dynamic = producer.dynamic();
+		let mut dynamic = producer.requests();
 		let consumer = producer.consume();
 		let track = consumer.track("video").unwrap();
 		let subscription = track.subscribe(None);
@@ -7410,7 +7410,7 @@ mod tests {
 			.with_auth(auth.clone());
 
 			let producer = crate::broadcast::Info::default().produce();
-			let mut dynamic = producer.dynamic();
+			let mut dynamic = producer.requests();
 			let consumer = producer.consume();
 			let track = consumer.track("video").unwrap();
 			let subscription = track.subscribe(None);
@@ -7473,7 +7473,7 @@ mod tests {
 		subscriber.validity = crate::model::broadcast::RequestValidity::token(Some(route.consume()));
 
 		let producer = crate::broadcast::Info::default().produce();
-		let mut dynamic = producer.dynamic();
+		let mut dynamic = producer.requests();
 		let consumer = producer.consume();
 		let track = consumer.track("video").unwrap();
 		let subscription = track.subscribe(None);
@@ -7554,7 +7554,7 @@ mod tests {
 		assert!(gate.poll_denied(&waiter).is_pending());
 
 		let producer = crate::broadcast::Info::default().produce();
-		let mut dynamic = producer.dynamic();
+		let mut dynamic = producer.requests();
 		let consumer = producer.consume();
 		let track = consumer.track("video").unwrap();
 		let mut subscription = Box::pin(track.subscribe(None));
@@ -7586,7 +7586,7 @@ mod tests {
 			}),
 			_ => {
 				let track = request.accept(track::Info::default().with_timescale(None));
-				let dynamic = track.dynamic();
+				let dynamic = track.requests();
 				let mut pending = Box::pin(track.consume().fetch_group(0, None));
 				assert!(futures::poll!(pending.as_mut()).is_pending());
 				let request = dynamic.requested_fill().await.expect("group request");
@@ -7680,6 +7680,10 @@ mod tests {
 	setup_wait_test!(invalid_fetch_open_is_refused, FetchOpen, [Draft22]);
 	setup_wait_test!(invalid_fetch_response_is_refused, FetchResponse, [Draft22]);
 
+	/// The control messages that actually reached the wire, by type id.
+	///
+	/// Decoding the framing rather than scanning for a byte: a type id is one varint among
+	/// many, and a substring match would happily find one inside a length or a payload.
 	fn control_message_types(log: &crate::lite::test_transport::Log, version: Version) -> Vec<u64> {
 		let writes = log.writes.lock().unwrap().clone();
 		let mut buf = Decoder::new(&writes, version.into());
@@ -7786,7 +7790,7 @@ mod tests {
 
 		// A consumer asking for a track is what dispatches a request to the session.
 		let producer = crate::broadcast::Info::default().produce();
-		let mut dynamic = producer.dynamic();
+		let mut dynamic = producer.requests();
 		let consumer = producer.consume();
 		let track = consumer.track("video").unwrap();
 		let subscription = track.subscribe(None);
@@ -7872,7 +7876,7 @@ mod tests {
 		);
 
 		let producer = crate::broadcast::Info::default().produce();
-		let mut dynamic = producer.dynamic();
+		let mut dynamic = producer.requests();
 		let consumer = producer.consume();
 		let track = consumer.track("video").unwrap();
 		let _subscription = track.subscribe(None);
@@ -7938,7 +7942,7 @@ mod tests {
 
 		struct Peer {
 			version: Version,
-			dynamic: Mutex<Option<broadcast::Dynamic>>,
+			dynamic: Mutex<Option<broadcast::Requests>>,
 			park: Mutex<kio::Park>,
 			log: Mutex<Option<crate::lite::test_transport::Log>>,
 		}
@@ -8018,7 +8022,7 @@ mod tests {
 			let resolved = origin.consume().request_broadcast("broadcast", None).await.unwrap();
 			let peer = Arc::new(Peer {
 				version,
-				dynamic: Mutex::new(Some(source.dynamic())),
+				dynamic: Mutex::new(Some(source.requests())),
 				park: Default::default(),
 				log: Default::default(),
 			});
@@ -8068,7 +8072,7 @@ mod tests {
 					);
 
 					let producer = crate::broadcast::Info::default().produce();
-					let mut dynamic = producer.dynamic();
+					let mut dynamic = producer.requests();
 					let consumer = producer.consume();
 					let track = consumer.track("video").unwrap();
 					let mut pending = Box::pin(async {
@@ -8152,7 +8156,7 @@ mod tests {
 			);
 
 			let producer = crate::broadcast::Info::default().produce();
-			let mut dynamic = producer.dynamic();
+			let mut dynamic = producer.requests();
 			let consumer = producer.consume();
 			let track = consumer.track("video").unwrap();
 			// Demand with nobody subscribing learns the track from TRACK_STATUS.
@@ -8922,7 +8926,7 @@ mod tests {
 		let (subscriber, origin) = cluster_subscriber(crate::Hop::new(1).unwrap());
 		let run = |route: &kio::Producer<()>| {
 			let source = crate::model::broadcast::SourceGuard::new(origin.create_source("pool/p", Default::default()));
-			let (holder, dynamic) = (source.consume(), source.dynamic());
+			let (holder, dynamic) = (source.consume(), source.requests());
 			let (this, route) = (subscriber.clone(), route.consume());
 			let task = moq_clock::sim::spawn(async move {
 				this.run_broadcast(crate::Path::new("pool/p"), source, dynamic, Some(route))
@@ -14280,7 +14284,7 @@ mod stitch_tests {
 			for objects in [Vec::new(), group_fetch_objects(SEQUENCE, 0, &[b"a"])] {
 				let empty = objects.is_empty();
 				let mut run = GroupFetchRun::new(version, objects).await;
-				let dynamic = run.track.dynamic();
+				let dynamic = run.track.requests();
 				let consumer = run.track.consume();
 				let mut filling = Box::pin(consumer.fill_groups(SEQUENCE..last + 1, 0));
 				assert!(futures::poll!(filling.as_mut()).is_pending());
@@ -14442,7 +14446,7 @@ mod stitch_tests {
 
 			// The next relay's fill of the same run reads that one stream.
 			let mut run = GroupFetchRun::new(version, decoder.rest().to_vec()).await;
-			let dynamic = run.track.dynamic();
+			let dynamic = run.track.requests();
 			let consumer = run.track.consume();
 			let mut filling = Box::pin(consumer.fill_groups(3..7, 0));
 			assert!(futures::poll!(filling.as_mut()).is_pending());
@@ -14646,7 +14650,7 @@ mod stitch_tests {
 			kio::Producer<GroupFetch>,
 			std::pin::Pin<Box<kio::Pending<track::Fetching>>>,
 		) {
-			let dynamic = self.track.dynamic();
+			let dynamic = self.track.requests();
 			let mut fetch = Box::pin(self.track.consume().fetch_group(SEQUENCE, None));
 			assert!(futures::poll!(fetch.as_mut()).is_pending());
 			let fill = dynamic.requested_fill().await.expect("group request");
@@ -14803,7 +14807,7 @@ mod joining_fetch_tests {
 			);
 
 			let producer = crate::broadcast::Info::default().produce();
-			let mut dynamic = producer.dynamic();
+			let mut dynamic = producer.requests();
 			let consumer = producer.consume();
 			let track = consumer.track("video").unwrap();
 			let subscription = match start {
@@ -14903,7 +14907,7 @@ mod joining_fetch_tests {
 			);
 			let auth = subscriber.auth.clone();
 			let broadcast = crate::broadcast::Info::default().produce();
-			let mut dynamic = broadcast.dynamic();
+			let mut dynamic = broadcast.requests();
 			let consumer = broadcast.consume();
 			let track = consumer.track("video").unwrap();
 			let mut subscribing = Box::pin(track.subscribe(None));
@@ -15278,7 +15282,7 @@ mod joining_fetch_tests {
 			"video",
 			track::Info::default().with_timescale(None),
 		);
-		let dynamic = track.dynamic();
+		let dynamic = track.requests();
 		let consumer = track.consume();
 		let mut fetch = Box::pin(consumer.fetch_group(GROUP, None));
 		assert!(futures::poll!(fetch.as_mut()).is_pending());
@@ -15525,7 +15529,7 @@ mod joining_fetch_tests {
 			"video",
 			track::Info::default().with_timescale(None),
 		);
-		let dynamic = track.dynamic();
+		let dynamic = track.requests();
 		let consumer = track.consume();
 		let mut fetch = std::pin::pin!(consumer.fetch_group(GROUP, None));
 		assert!(futures::poll!(fetch.as_mut()).is_pending());
@@ -15589,7 +15593,7 @@ mod joining_fetch_tests {
 					"video",
 					track::Info::default().with_timescale(None),
 				);
-				let dynamic = track.dynamic();
+				let dynamic = track.requests();
 				let consumer = track.consume();
 				let mut fetch = std::pin::pin!(consumer.fetch_group(
 					GROUP,
@@ -15719,7 +15723,7 @@ mod joining_fetch_tests {
 			"video",
 			track::Info::default().with_timescale(None),
 		);
-		let dynamic = track.dynamic();
+		let dynamic = track.requests();
 		let consumer = track.consume();
 		let mut fetch = std::pin::pin!(consumer.fetch_group(
 			GROUP,
@@ -15840,7 +15844,7 @@ mod new_group_tests {
 			Default::default(),
 		);
 		let broadcast = crate::broadcast::Info::default().produce();
-		let mut dynamic = broadcast.dynamic();
+		let mut dynamic = broadcast.requests();
 		let track = broadcast.consume().track("video").unwrap();
 		let first = track.subscribe(None);
 		let request = dynamic.requested_track().await.expect("no track requested");
@@ -16178,7 +16182,7 @@ mod track_property_tests {
 			Default::default(),
 		);
 		let broadcast = crate::broadcast::Info::default().produce();
-		let mut dynamic = broadcast.dynamic();
+		let mut dynamic = broadcast.requests();
 		let track = broadcast.consume().track("video").unwrap();
 		let subscribing = track.subscribe(None);
 		let request = dynamic.requested_track().await.expect("no track requested");

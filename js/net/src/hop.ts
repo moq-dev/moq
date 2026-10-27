@@ -91,7 +91,7 @@ export const Cost = {
 /**
  * The path a route took through the mesh and what using it costs.
  *
- * The metadata half of an advertisement: an origin `dynamic()` pairs it with the
+ * The metadata half of an advertisement: an origin `requests()` pairs it with the
  * pattern it covers, a broadcast `announce()` with the broadcast's exact path, and
  * an announce event carries it so consumers can read it back.
  */

@@ -27,8 +27,8 @@ public final class TrackRequest: Sendable {
     }
 
     /// Create a fetch handler before accepting this requested track.
-    public func dynamic() throws -> TrackDynamic {
-        TrackDynamic(try ffi.dynamic())
+    public func requests() throws -> TrackRequests {
+        TrackRequests(try ffi.requests())
     }
 
     /// Reject the request with an application error code, failing the subscriber.
@@ -37,7 +37,7 @@ public final class TrackRequest: Sendable {
     }
 }
 
-/// A run of groups readers miss, for a `TrackDynamic` to serve.
+/// A run of groups readers miss, for a `TrackRequests` to serve.
 ///
 /// Accept each group you have and drop the rest; `next()` names what is still owed, in the
 /// fill's order. Releasing the fill names whatever is left as dropped while a reader still
@@ -120,13 +120,13 @@ public final class Fill: Sendable {
 }
 
 /// A stream of the fills readers of one track need: runs of groups the cache lacks.
-public final class TrackDynamic: AsyncSequence, Sendable {
+public final class TrackRequests: AsyncSequence, Sendable {
     /// The fill emitted by this sequence.
     public typealias Element = Fill
 
-    let ffi: MoqTrackDynamic
+    let ffi: MoqTrackRequests
 
-    init(_ ffi: MoqTrackDynamic) {
+    init(_ ffi: MoqTrackRequests) {
         self.ffi = ffi
     }
 
@@ -149,16 +149,16 @@ public final class TrackDynamic: AsyncSequence, Sendable {
 }
 
 /// A stream of track requests from subscribers for tracks that are not published
-/// yet. Iterate directly: `for try await request in dynamic { ... }`. Hold this
+/// yet. Iterate directly: `for try await request in requests { ... }`. Hold this
 /// while such requests should be served; the sequence ends (throwing `Closed`)
 /// when the broadcast closes, and cancelling the consuming task stops serving.
-public final class BroadcastDynamic: AsyncSequence, Sendable {
+public final class BroadcastRequests: AsyncSequence, Sendable {
     /// The track request emitted by this sequence.
     public typealias Element = TrackRequest
 
-    let ffi: MoqBroadcastDynamic
+    let ffi: MoqBroadcastRequests
 
-    init(_ ffi: MoqBroadcastDynamic) {
+    init(_ ffi: MoqBroadcastRequests) {
         self.ffi = ffi
     }
 

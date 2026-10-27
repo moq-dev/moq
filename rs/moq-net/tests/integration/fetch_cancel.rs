@@ -48,7 +48,7 @@ async fn abandoned_fetch_reaches_the_publisher(version: &str, relays: u64, stage
 	}
 
 	let broadcast = nodes[0].create_broadcast("room").unwrap();
-	let mut dynamic = broadcast.dynamic();
+	let mut dynamic = broadcast.requests();
 	broadcast.announce(Default::default()).unwrap();
 	moq_clock::sleep(Duration::from_secs(1)).await;
 
@@ -65,7 +65,7 @@ async fn abandoned_fetch_reaches_the_publisher(version: &str, relays: u64, stage
 		futures::future::Either::Left((request, _)) => request.expect("the track request reaches the publisher"),
 		futures::future::Either::Right(_) => panic!("nothing answered the track"),
 	};
-	let groups = request.dynamic();
+	let groups = request.requests();
 	let _track = request.accept(timed());
 	let request = match futures::future::select(std::pin::pin!(groups.requested_fill()), &mut waiting).await {
 		futures::future::Either::Left((request, _)) => request.expect("the fetch reaches the publisher"),
@@ -175,7 +175,7 @@ async fn a_refetch_within_the_linger_stays_on_the_relay(version: &str) {
 	let _pair = peer(version, &publisher, &relay).await;
 
 	let broadcast = publisher.create_broadcast("room").unwrap();
-	let mut dynamic = broadcast.dynamic();
+	let mut dynamic = broadcast.requests();
 	broadcast.announce(Default::default()).unwrap();
 	moq_clock::sleep(Duration::from_secs(1)).await;
 
@@ -185,7 +185,7 @@ async fn a_refetch_within_the_linger_stays_on_the_relay(version: &str) {
 		futures::future::Either::Left((request, _)) => request.expect("the track request reaches the publisher"),
 		futures::future::Either::Right(_) => panic!("nothing answered the track"),
 	};
-	let groups = request.dynamic();
+	let groups = request.requests();
 	let _track = request.accept(timed());
 	let request = match futures::future::select(std::pin::pin!(groups.requested_fill()), &mut waiting).await {
 		futures::future::Either::Left((request, _)) => request.expect("the fetch reaches the publisher"),

@@ -99,7 +99,7 @@ and track themselves. `NewGroupConsumer`
 decodes a raw group, such as one from `moq.TrackConsumer.RecvGroup` for arrival-order reads.
 Frames and `Flush` use `time.Duration`; `Demand()` owns track names and subscriber waits.
 
-`BroadcastProducer.Dynamic()` accepts subscriber-requested tracks. Call
+`BroadcastProducer.Requests()` accepts subscriber-requested tracks. Call
 `TrackRequest.Accept()` for raw tracks, or pass the request as `media.Requested`
 so the media importer selects the timescale.
 

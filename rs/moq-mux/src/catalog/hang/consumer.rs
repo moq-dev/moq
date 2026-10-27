@@ -163,7 +163,7 @@ mod test {
 	/// takes when it answers an origin request.
 	async fn publish_catalog_served(published: Catalog<()>) -> Result<Option<Catalog>> {
 		let origin = crate::source::produce_origin();
-		let dynamic = origin.dynamic("").unwrap();
+		let dynamic = origin.requests("").unwrap();
 		let requesting = origin.consume().request_broadcast("a/pub", None);
 		// The handler hands its route back: dropping it would retract the route and end
 		// the broadcast it just served.

@@ -44,7 +44,7 @@ typedef OriginConfig = MoqOriginConfig;
 typedef OriginConsumer = MoqOriginConsumer;
 
 /// A served route: advertises a path prefix and yields broadcast requests beneath it.
-typedef OriginDynamic = MoqOriginDynamic;
+typedef OriginRequests = MoqOriginRequests;
 
 /// A requested broadcast not yet accepted: fulfill it with a producer or reject it.
 typedef BroadcastRequest = MoqBroadcastRequest;
@@ -91,7 +91,7 @@ typedef BroadcastProducer = MoqBroadcastProducer;
 typedef BroadcastConsumer = MoqBroadcastConsumer;
 
 /// Receives tracks requested from a dynamically served broadcast.
-typedef BroadcastDynamic = MoqBroadcastDynamic;
+typedef BroadcastRequests = MoqBroadcastRequests;
 
 /// The write side of a raw track: append groups of frames.
 typedef TrackProducer = MoqTrackProducer;
@@ -100,7 +100,7 @@ typedef TrackProducer = MoqTrackProducer;
 typedef TrackRequest = MoqTrackRequest;
 
 /// A stream of the fills readers of one track need: runs of groups the cache lacks.
-typedef TrackDynamic = MoqTrackDynamic;
+typedef TrackRequests = MoqTrackRequests;
 
 /// A watch-only handle to whether a published track has subscribers; holding it keeps nothing open.
 typedef TrackDemand = MoqTrackDemand;

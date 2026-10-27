@@ -475,7 +475,7 @@ mod tests {
 		let _catalog = origin.publish("pub", Default::default()).unwrap();
 		settle().await;
 		let source = resolved(&origin, "pub").await;
-		let dynamic = origin.dynamic("media").unwrap();
+		let dynamic = origin.requests("media").unwrap();
 		let binding = source.bind(Some(&Relative::new("media")), None).unwrap();
 		let request = dynamic.requested_broadcast().await.unwrap();
 

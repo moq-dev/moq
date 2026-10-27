@@ -5262,7 +5262,7 @@ mod tests {
 	async fn a_pending_timeline_subscription_ends_with_the_broadcast() {
 		let test = Timelines::new();
 		// A handler keeps the unpublished timelines' requests waiting rather than refused.
-		let _handler = test.broadcast.dynamic();
+		let _handler = test.broadcast.requests();
 		tokio::time::sleep(Duration::from_secs(60)).await;
 		assert!(!test.rendition("video0").snapshot().finished);
 

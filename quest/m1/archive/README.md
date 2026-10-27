@@ -57,7 +57,7 @@ archive (per-track `.timeline.z` records named by the catalog's root
   every rendition) and size-based cuts. The
   `archive::Producer` records the rest.
 - **Hosts serve archives, relays do not.** `archive::Consumer` serves a stored
-  prefix through `broadcast::Dynamic` and `track::Dynamic`, the archived
+  prefix through `broadcast::Requests` and `track::Requests`, the archived
   catalog included as an ordinary track, and a host publishes it at a path of
   its choosing. Rejected: a moq-relay storage fallback. Also rejected: serving
   the archive as a covering-prefix route under the original path, which

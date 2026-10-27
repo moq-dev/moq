@@ -475,7 +475,7 @@ pub(crate) struct TrackState {
 	subscriptions: kio::Lock<Subscriptions>,
 
 	// The fills readers queued for groups they miss (see [`Fill`]), same reasoning: a miss
-	// queues here and a `Dynamic` drains.
+	// queues here and a `Requests` drains.
 	fills: kio::Shared<FillState>,
 
 	// A front's logical track: read straight from its routes' copies rather than this
@@ -1474,7 +1474,7 @@ impl TrackState {
 
 	/// Resolve a one-shot fetch from the track side: the cached group, or an [`Error`]
 	/// once it can never be served. A missing group is a failure ([`Error::NotFound`]), not an
-	/// end-of-stream. The handler side (a refusal, or no [`Dynamic`] at all) lives
+	/// end-of-stream. The handler side (a refusal, or no [`Requests`] at all) lives
 	/// in the track's fills; [`Fetching`] polls both.
 	fn poll_fetch_cached(&self, sequence: u64, frame_start: u64) -> Poll<Result<group::Consumer>> {
 		// A group aborted between the lookup and the consume (an abandoned fetch cut
@@ -2751,7 +2751,7 @@ pub struct Producer {
 	broadcast: Arc<broadcast::Info>,
 	state: kio::Producer<TrackState>,
 	prev_subscription: Option<Subscription>,
-	// Shared with every clone and every `Dynamic`: its `Drop` is the teardown.
+	// Shared with every clone and every `Requests`: its `Drop` is the teardown.
 	alive: Arc<Alive>,
 	// Ingress stats scope, inherited from a tagged [`broadcast::Producer`]. Bumped as
 	// one subscription on tag and closed when the last producer clone drops. Empty
@@ -3516,11 +3516,11 @@ impl Producer {
 		poll_combined_changed(&subs, bound, &mut self.prev_subscription, waiter).map(Ok)
 	}
 
-	/// Create a [`Dynamic`] handle that serves on-demand fetches of uncached
+	/// Create a [`Requests`] handle that serves on-demand fetches of uncached
 	/// (old) groups. Most producers never need this; a relay creates one to fetch
 	/// past groups from upstream.
-	pub fn dynamic(&self) -> Dynamic {
-		Dynamic::new(self.name.clone(), self.state.clone(), self.alive.clone())
+	pub fn requests(&self) -> Requests {
+		Requests::new(self.name.clone(), self.state.clone(), self.alive.clone())
 	}
 
 	fn modify(&self) -> Result<kio::Mut<'_, TrackState>> {
@@ -3529,15 +3529,15 @@ impl Producer {
 }
 
 /// Serves the groups a track's readers miss, the group-level analogue of
-/// [`broadcast::Dynamic`].
+/// [`broadcast::Requests`].
 ///
 /// Most tracks never serve old content, so this capability lives on a dedicated
 /// handle rather than [`Producer`]: a relay creates one (via
-/// [`Producer::dynamic`] or [`Request::dynamic`]) to pull past groups
+/// [`Producer::requests`] or [`Request::requests`]) to pull past groups
 /// from upstream. While at least one is alive a reader's miss queues a [`Fill`] for it
 /// to serve; with none, the miss is named dropped, and a cache-miss
 /// [`Consumer::fetch_group`] on an accepted track fails fast with [`Error::NotFound`].
-pub struct Dynamic {
+pub struct Requests {
 	name: Arc<str>,
 	// Kept to insert served groups into the cache and observe track abort.
 	state: kio::Producer<TrackState>,
@@ -3548,7 +3548,7 @@ pub struct Dynamic {
 	alive: Arc<Alive>,
 }
 
-impl Dynamic {
+impl Requests {
 	fn new(name: Arc<str>, state: kio::Producer<TrackState>, alive: Arc<Alive>) -> Self {
 		let fills = state.read().fills.clone();
 		fills.lock().add_handler();
@@ -3601,9 +3601,9 @@ impl Dynamic {
 	}
 }
 
-impl Clone for Dynamic {
+impl Clone for Requests {
 	fn clone(&self) -> Self {
-		// Count each live handle (mirrors `broadcast::Dynamic`).
+		// Count each live handle (mirrors `broadcast::Requests`).
 		self.fills.lock().add_handler();
 		Self {
 			name: self.name.clone(),
@@ -3614,9 +3614,9 @@ impl Clone for Dynamic {
 	}
 }
 
-impl Drop for Dynamic {
+impl Drop for Requests {
 	fn drop(&mut self) {
-		// Unlike `broadcast::Dynamic`, dropping the last handle doesn't abort the track:
+		// Unlike `broadcast::Requests`, dropping the last handle doesn't abort the track:
 		// a live `Producer` may still be serving the subscription. It just stops serving
 		// fills: a queued one no handler will ever take closes, so its readers stop
 		// waiting on it, while one already taken stays with its `Fill`.
@@ -3624,7 +3624,7 @@ impl Drop for Dynamic {
 	}
 }
 
-/// Ends the track when the last [`Producer`] or [`Dynamic`] drops.
+/// Ends the track when the last [`Producer`] or [`Requests`] drops.
 ///
 /// A refcount rather than a "am I the last one?" check inside `Drop`: that answer is a
 /// snapshot, and acting on it is exactly what invalidates it. The track state's own
@@ -3637,7 +3637,7 @@ struct Alive {
 	state: kio::Producer<TrackState>,
 
 	// Set when a `Producer` is first minted, so a `Request` nobody accepted (its
-	// `Dynamic` holds this guard too) isn't reported as an abandoned publisher.
+	// `Requests` holds this guard too) isn't reported as an abandoned publisher.
 	published: AtomicBool,
 
 	// Ingress subscription for this track, opened by the tagged producer that claimed
@@ -3897,7 +3897,7 @@ impl super::WeakEntry for TrackWeak {
 
 /// A cloneable, watch-only handle to a track's subscriber demand.
 ///
-/// Obtained from [`Producer::demand`], [`Request::demand`], or [`Dynamic::demand`].
+/// Obtained from [`Producer::demand`], [`Request::demand`], or [`Requests::demand`].
 /// A publisher uses it to learn which group anyone subscribed, querying, or fetching
 /// wants (on-demand capture / encoding) without being able to publish frames or close the
 /// track. A bare [`Consumer`] is not demand. It's a weak handle, so it neither keeps
@@ -4606,12 +4606,12 @@ impl Consumer {
 	/// Fetching a single past group, without holding a live subscription.
 	///
 	/// Returns a [`kio::Pending`] that resolves to the [`group::Consumer`]:
-	/// immediately if the group is cached, otherwise once a [`Dynamic`] serves
+	/// immediately if the group is cached, otherwise once a [`Requests`] serves
 	/// the request (a wire FETCH for a relay). `options` accepts `None`, a [`group::Fetch`],
 	/// or `group::Fetch::default()`.
 	///
 	/// The returned future resolves to [`Error::NotFound`] when the group can never be served
-	/// (past the final sequence, or no [`Dynamic`] on the track), [`Error::NotFetchable`]
+	/// (past the final sequence, or no [`Requests`] on the track), [`Error::NotFetchable`]
 	/// instead when this track sent the sequence as a datagram still buffered, the handler's
 	/// rejection (a relay's upstream miss is [`StreamError::NotFound`](StreamError::NotFound)),
 	/// or the track's abort error if it's already closed. A miss queues a one-group [`Fill`],
@@ -4699,7 +4699,7 @@ impl Consumer {
 	}
 
 	/// Fill the groups of `span` the cache misses and nothing recorded dropped, asking a
-	/// [`Dynamic`] once per run of misses so it fetches each run at once, and resolve once
+	/// [`Requests`] once per run of misses so it fetches each run at once, and resolve once
 	/// every run is answered. The returned guard keeps the fills wanted, so the groups they
 	/// accepted stay cached while the caller reads them. A track with no handler resolves at
 	/// once, and a front's logical track fills through the copy the front assigns it.
@@ -7713,7 +7713,7 @@ pub(crate) struct Staged {
 	producer: Option<Producer>,
 	// The request's fetch claim, held until the track is published like an unanswered
 	// request's: a cache miss meanwhile waits rather than racing its own handler.
-	_dynamic: Dynamic,
+	_dynamic: Requests,
 }
 
 impl Staged {
@@ -7753,7 +7753,7 @@ impl Drop for Staged {
 
 /// A subscriber asked for a track this broadcast doesn't have yet.
 ///
-/// Yielded by [`poll_requested_track`](crate::broadcast::Dynamic::poll_requested_track),
+/// Yielded by [`poll_requested_track`](crate::broadcast::Requests::poll_requested_track),
 /// or created up front with [`broadcast::Producer::reserve_track`](crate::broadcast::Producer::reserve_track).
 /// Subscribers block until the request is
 /// resolved: call [`accept`](Self::accept) to serve it with a [`Producer`], or
@@ -7771,7 +7771,7 @@ pub struct Request {
 	// The previous subscription that was combined, used to detect changes.
 	prev_subscription: Option<Subscription>,
 
-	// Shared with the accepted [`Producer`] and every [`Dynamic`]: its `Drop` is the
+	// Shared with the accepted [`Producer`] and every [`Requests`]: its `Drop` is the
 	// teardown, and it stays inert until a producer is minted.
 	alive: Arc<Alive>,
 
@@ -7779,7 +7779,7 @@ pub struct Request {
 	// birth: a consumer's cache-miss `fetch_group` waits to be served instead of
 	// racing the producer (e.g. a relay) into creating its own handler. Released
 	// when the request is accepted or dropped; by then the relay holds its own.
-	_dynamic: Dynamic,
+	_dynamic: Requests,
 
 	// Ingress stats scope, threaded into the accepted [`Producer`]. Empty (no-op)
 	// unless this request was reserved on a tagged broadcast.
@@ -7804,7 +7804,7 @@ impl Request {
 		let name = name.into();
 		let state = TrackState::spawn(broadcast.clone());
 		let alive = Alive::new(name.clone(), state.clone());
-		let dynamic = Dynamic::new(name.clone(), state.clone(), alive.clone());
+		let dynamic = Requests::new(name.clone(), state.clone(), alive.clone());
 		Self {
 			name,
 			broadcast,
@@ -7873,11 +7873,11 @@ impl Request {
 		Consumer::new(self.name.clone(), self.state.weak().consume_weak())
 	}
 
-	/// Create a [`Dynamic`] handle that serves on-demand fetches of uncached
+	/// Create a [`Requests`] handle that serves on-demand fetches of uncached
 	/// groups, before [`Self::accept`] is even called. A relay creates one to fetch
 	/// past groups from upstream while (or instead of) serving a live subscription.
-	pub fn dynamic(&self) -> Dynamic {
-		Dynamic::new(self.name.clone(), self.state.clone(), self.alive.clone())
+	pub fn requests(&self) -> Requests {
+		Requests::new(self.name.clone(), self.state.clone(), self.alive.clone())
 	}
 
 	/// Watch subscriber demand without keeping the track alive.
@@ -9312,7 +9312,7 @@ mod test {
 	#[cfg(feature = "async")]
 	fn the_last_sequence_misses_with_a_handler() {
 		let producer = track_producer("test", None);
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 		let fetch = consumer.fetch_group(u64::MAX, None).now_or_never();
 		assert!(matches!(fetch, Some(Err(Error::NotFound))));
@@ -12002,7 +12002,7 @@ mod test {
 	#[test]
 	fn cold_fetch_expires_without_waiting_for_the_upstream_group() {
 		let mut producer = track_producer("test", Info::timed());
-		let _dynamic = producer.dynamic();
+		let _dynamic = producer.requests();
 		let mut successor = producer.create_group(group::Info { sequence: 1 }).unwrap();
 		successor
 			.write_frame(Timestamp::from_millis(1000).unwrap(), bytes::Bytes::from_static(b"x"))
@@ -12088,7 +12088,7 @@ mod test {
 	fn a_fetch_only_cache_is_not_live() {
 		let waiter = kio::Waiter::noop();
 		let request = Request::new(Arc::new(broadcast::Info::default()), "test");
-		let dynamic = request.dynamic();
+		let dynamic = request.requests();
 		let consumer = request.consume();
 		let mut pending = consumer.fetch_group(2, None);
 		let Poll::Ready(Ok(req)) = dynamic.poll_requested_fill_group(&waiter) else {
@@ -12126,7 +12126,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn fetched_group_is_not_a_live_drift_edge() {
 		let mut producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 		append_at(&mut producer, 0);
 
@@ -12776,7 +12776,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn abort_ends_an_open_fetched_head() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 		let mut live = producer.create_group(group::Info { sequence: 0 }).unwrap();
 		live.start_at(1).unwrap();
@@ -13365,7 +13365,7 @@ mod test {
 	async fn a_fetched_group_does_not_fill_a_pending_tail() {
 		let mut producer = track_producer("test", None);
 		producer.received();
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 		let mut arrival = producer.subscribe(None);
 		producer.start_at(0).unwrap();
@@ -14840,7 +14840,7 @@ mod test {
 
 		// A cached group resolves immediately and never queues a request. `peek_group`
 		// also returns it synchronously.
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 		assert!(consumer.peek_group(0).is_some());
 		let mut g = consumer.fetch_group(0, None).await.unwrap();
@@ -14855,7 +14855,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn fetch_miss_signals_dynamic() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		// A cache miss isn't in `peek_group`, but a dynamic handler exists, so
@@ -14889,7 +14889,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn fetch_miss_rejects() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		let pending = consumer.fetch_group(5, None);
@@ -14909,7 +14909,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn fetch_miss_drop_rejects() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		let pending = consumer.fetch_group(5, None);
@@ -14929,7 +14929,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn fetch_request_unused_once_every_fetch_leaves() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		let first = consumer.fetch_group(5, None);
@@ -14963,7 +14963,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn fetch_abandoned_while_queued_never_reaches_the_handler() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		drop(consumer.fetch_group(5, None));
@@ -14978,7 +14978,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn fetch_after_the_last_caller_left_is_not_dropped() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		let first = consumer.fetch_group(5, None);
@@ -15008,7 +15008,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn fetch_accept_after_withdrawal_caches_the_group() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		let first = consumer.fetch_group(5, None);
@@ -15053,7 +15053,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn fetch_hit_keeps_the_group_wanted() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		let first = consumer.fetch_group(5, None);
@@ -15084,7 +15084,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn accepted_group_starts_at_the_request() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		let _tail = consumer.fetch_group(
@@ -15117,7 +15117,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn fetch_misses_an_abandoned_group() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		let first = consumer.fetch_group(5, None);
@@ -15144,7 +15144,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn fetch_reject_does_not_poison_retry() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		let pending = consumer.fetch_group(5, None);
@@ -15179,7 +15179,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn fetch_ignores_a_group_that_starts_too_late() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		// The live subscription resumed mid-group, so only the tail is cached.
@@ -15234,7 +15234,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn fetch_fills_the_head_of_a_live_group() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		let mut live = producer.create_group(group::Info { sequence: 0 }).unwrap();
@@ -15279,7 +15279,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn a_refused_end_leaves_every_copy_uncapped() {
 		let mut producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		// The live copy holds frames 0 and 1, the fetched head frames 0 to 2.
@@ -15309,7 +15309,7 @@ mod test {
 	/// A live group with a fetched head: group 0, fed from frame 1, plus a two-frame head.
 	#[cfg(feature = "async")]
 	async fn live_group_with_head(producer: &Producer) -> (group::Producer, group::Producer) {
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		let mut live = producer.create_group(group::Info { sequence: 0 }).unwrap();
@@ -15335,7 +15335,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn a_fetched_head_holds_the_largest_open() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 		let mut reader = consumer.clone();
 		let noop = kio::Waiter::noop();
@@ -15433,7 +15433,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn pressure_evicts_a_headed_slot(abort_live: bool) -> bool {
 		let (producer, _pool) = pooled_producer(10_000);
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		let mut live = producer.create_group(group::Info { sequence: 0 }).unwrap();
@@ -15486,7 +15486,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn fetch_widens_or_asks_afresh() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 		let from = |frame_start| group::Fetch {
 			frame_start,
@@ -15545,7 +15545,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn fetch_coalesces_concurrent() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		// Two fetches for the same uncached group produce ONE handler request,
@@ -15598,7 +15598,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn a_late_looser_fetch_asks_again_after_old() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		let tight = consumer.fetch_group(5, group::Fetch::default().with_max_delay(Duration::from_secs(1)));
@@ -15625,7 +15625,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn fetch_coalesced_reject_fails_all() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		let first = consumer.fetch_group(5, None);
@@ -15655,7 +15655,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn fetch_queued_fails_when_handlers_leave() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		// Queued but never popped: the last handler leaving fails it fast.
@@ -15672,7 +15672,7 @@ mod test {
 	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn fetch_miss_no_dynamic_not_found() {
-		// A track with no `Dynamic` can't serve old content, so a cache miss
+		// A track with no `Requests` can't serve old content, so a cache miss
 		// resolves to NotFound instead of blocking forever.
 		let producer = track_producer("test", Info::timed());
 		let _open = producer.append_group().unwrap(); // seq 0, but we miss on seq 5
@@ -15689,7 +15689,7 @@ mod test {
 
 		// A group at or past the final sequence can never exist, even with a handler,
 		// so it resolves to NotFound.
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 		assert!(matches!(consumer.fetch_group(5, None).await, Err(Error::NotFound)));
 
@@ -15960,7 +15960,7 @@ mod test {
 			..Default::default()
 		};
 		let request = Request::new(Arc::new(broadcast), "test");
-		let dynamic = request.dynamic();
+		let dynamic = request.requests();
 		let consumer = request.consume();
 
 		// Serve a backfill before the track is accepted, then grow it.
@@ -16067,12 +16067,12 @@ mod test {
 		assert!(!Arc::ptr_eq(&a, &b), "each track owns its account");
 	}
 
-	/// A `Dynamic` still serving fetches keeps the track alive, so the publisher
+	/// A `Requests` still serving fetches keeps the track alive, so the publisher
 	/// letting go isn't an abrupt teardown: the handler can still serve the cache.
 	#[test]
 	fn a_dynamic_defers_teardown() {
 		let (mut producer, pool) = pooled_producer(1 << 40);
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		finished_group(&mut producer, 100);
 
 		drop(producer);
@@ -16154,7 +16154,7 @@ mod test {
 			..Default::default()
 		};
 		let request = Request::new(Arc::new(broadcast), "test");
-		let dynamic = request.dynamic();
+		let dynamic = request.requests();
 		let consumer = request.consume();
 
 		// Serve backfill seq 0 before the track is accepted.
@@ -16215,7 +16215,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn refreshed_front_does_not_starve_expiry() {
 		let (producer, _pool) = pooled_producer(1 << 40);
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		producer.create_group(10u64.into()).unwrap().finish().unwrap();
@@ -16495,7 +16495,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn refilled_sequence_stays_out_of_subscriptions() {
 		let (producer, _pool) = pooled_producer(1 << 40);
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		producer.create_group(0u64.into()).unwrap().finish().unwrap();
@@ -16532,7 +16532,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn expired_backfill_behind_refreshed_reclaimed() {
 		let (producer, _pool) = pooled_producer(1 << 40);
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		producer.create_group(5u64.into()).unwrap().finish().unwrap();
@@ -16591,7 +16591,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn refetched_latest_stays_protected() {
 		let (producer, _pool) = pooled_producer(10_000);
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		let straggler = producer.append_group().unwrap(); // seq 0
@@ -16633,7 +16633,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn eviction_allows_refetch() {
 		let (mut producer, _pool) = pooled_producer(10_000);
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 
 		finished_group(&mut producer, 10_000); // seq 0
 		finished_group(&mut producer, 10_000); // seq 1: demotes seq 0
@@ -16702,7 +16702,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn a_lowered_floor_reoffers_live_groups_but_not_fetched_ones() {
 		let (producer, _pool) = pooled_producer(1 << 40);
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 		producer.create_group(5u64.into()).unwrap().finish().unwrap();
 		let mut subscriber = producer.subscribe(replay().with_range(5..));
@@ -16746,7 +16746,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn fetched_backfill_not_subscribed() {
 		let (producer, _pool) = pooled_producer(1 << 40);
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		// The publisher starts at seq 5; earlier groups exist only upstream.
@@ -16782,7 +16782,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn expired_backfill_reclaimed() {
 		let (producer, pool) = pooled_producer(1 << 40);
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		producer.create_group(5u64.into()).unwrap().finish().unwrap();
@@ -16964,7 +16964,7 @@ mod test {
 	#[cfg(feature = "async")]
 	fn request_and_dynamic_share_weak_track_demand() {
 		let request = Request::new(Arc::new(broadcast::Info::default()), "demand");
-		let dynamic = request.dynamic();
+		let dynamic = request.requests();
 		let demand = request.demand();
 		let consumer = request.consume();
 		assert!(!demand.is_used(), "a bare handle is not demand");
@@ -16988,7 +16988,7 @@ mod test {
 	#[test]
 	fn fill_demand_counts_every_joined_caller() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 		let first = consumer.fetch_group(3, None);
 		let second = consumer.fetch_group(3, None);
@@ -17014,7 +17014,7 @@ mod test {
 	#[test]
 	fn accepted_fill_resolves_its_fetch() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 		let mut fetch = consumer.fetch_group(3, None);
 		let waiter = kio::Waiter::noop();
@@ -17033,9 +17033,9 @@ mod test {
 
 	/// A feed declared to start at group 2, with groups 2 and 3 written, read from group 0.
 	#[cfg(feature = "async")]
-	fn started_late() -> (Producer, Dynamic, Subscriber) {
+	fn started_late() -> (Producer, Requests, Subscriber) {
 		let mut producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let subscriber = producer.subscribe(replay().with_range(0..));
 		producer.start_at(2).unwrap();
 		write_group(&producer, 2);
@@ -17103,7 +17103,7 @@ mod test {
 	fn filled_groups_are_read_in_the_readers_order() {
 		for order in [Order::Descending, Order::Ascending] {
 			let mut producer = track_producer("test", Info::timed());
-			let dynamic = producer.dynamic();
+			let dynamic = producer.requests();
 			let mut subscriber = producer.subscribe(replay().with_range(0..).with_order(order));
 			producer.start_at(2).unwrap();
 			write_group(&producer, 2);
@@ -17160,7 +17160,7 @@ mod test {
 	#[cfg(feature = "async")]
 	fn a_late_fresh_group_keeps_its_stretch_of_a_stalled_fill() {
 		let mut producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let mut subscriber = producer.subscribe(replay().with_range(0..));
 		producer.start_at(10).unwrap();
 		write_group(&producer, 10);
@@ -17202,7 +17202,7 @@ mod test {
 	#[cfg(feature = "async")]
 	fn an_aborted_fetched_group_stays_wanted_by_its_replacement_fill() {
 		let mut producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		producer.start_at(10).unwrap();
 		write_group(&producer, 10);
 		let waiter = kio::Waiter::noop();
@@ -17233,7 +17233,7 @@ mod test {
 	#[cfg(feature = "async")]
 	fn a_refused_group_is_asked_again_by_a_later_reader() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		for sequence in 0..5 {
 			write_group(&producer, sequence);
 		}
@@ -17270,7 +17270,7 @@ mod test {
 	#[cfg(feature = "async")]
 	fn a_source_miss_is_asked_again_by_a_later_reader() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		for sequence in 0..5 {
 			write_group(&producer, sequence);
 		}
@@ -17301,7 +17301,7 @@ mod test {
 	#[cfg(feature = "async")]
 	fn a_backfill_cached_before_its_answer_stays_owed() {
 		let mut producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let ascending = |groups| replay().with_range(groups).with_order(Order::Ascending);
 		let mut subscriber = producer.subscribe(ascending(0..));
 		producer.start_at(10).unwrap();
@@ -17329,7 +17329,7 @@ mod test {
 	#[cfg(feature = "async")]
 	fn an_ordered_reader_leaves_a_filled_group_it_takes() {
 		let mut producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let mut subscriber = producer.subscribe(replay().with_range(0..1));
 		producer.start_at(10).unwrap();
 		write_group(&producer, 10);
@@ -17357,7 +17357,7 @@ mod test {
 	#[cfg(feature = "async")]
 	fn a_narrowed_reader_leaves_the_rest_of_its_fill() {
 		let mut producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let ascending = |groups| replay().with_range(groups).with_order(Order::Ascending);
 		let mut subscriber = producer.subscribe(ascending(0..));
 		producer.start_at(10).unwrap();
@@ -17400,7 +17400,7 @@ mod test {
 	#[cfg(feature = "async")]
 	fn a_filled_group_is_wanted_until_taken() {
 		let mut producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let ascending = |groups| replay().with_range(groups).with_order(Order::Ascending);
 		let mut subscriber = producer.subscribe(ascending(0..));
 		producer.start_at(10).unwrap();
@@ -17433,7 +17433,7 @@ mod test {
 	#[cfg(feature = "async")]
 	fn an_accepted_groups_readers_leave_before_its_fill() {
 		let mut producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let ascending = |groups| replay().with_range(groups).with_order(Order::Ascending);
 		let mut subscriber = producer.subscribe(ascending(0..));
 		producer.start_at(10).unwrap();
@@ -17461,7 +17461,7 @@ mod test {
 	#[cfg(feature = "async")]
 	fn a_time_start_before_the_cache_asks_nothing_below_it() {
 		let mut producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let at = |millis| Timestamp::from_millis(millis).unwrap();
 		let since = Range {
 			start: Anchor::Time(at(5)),
@@ -17499,7 +17499,7 @@ mod test {
 	#[cfg(feature = "async")]
 	fn a_wide_fill_forgets_refusals_its_readers_took() {
 		let mut producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let mut subscriber = producer.subscribe(replay().with_range(0..).with_order(Order::Ascending));
 		producer.start_at(100).unwrap();
 		write_group(&producer, 100);
@@ -17523,7 +17523,7 @@ mod test {
 	#[cfg(feature = "async")]
 	fn a_later_reader_asks_afresh_for_what_a_fill_stopped_owing() {
 		let mut producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let ascending = |groups| replay().with_range(groups).with_order(Order::Ascending);
 		let mut narrowed = producer.subscribe(ascending(0..));
 		producer.start_at(10).unwrap();
@@ -17552,7 +17552,7 @@ mod test {
 	#[cfg(feature = "async")]
 	fn a_descending_reader_asks_its_newest_miss_first() {
 		let mut producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let mut subscriber =
 			producer.subscribe(replay().with_ranges([Range::groups(0..2), Range::groups(4..6), Range::groups(8..)]));
 		producer.start_at(8).unwrap();
@@ -17573,7 +17573,7 @@ mod test {
 	#[cfg(feature = "async")]
 	fn a_reader_forgets_misses_behind_its_window() {
 		let mut producer = track_producer("test", Info::timed());
-		let _dynamic = producer.dynamic();
+		let _dynamic = producer.requests();
 		let ascending = |groups| Subscription::default().with_range(groups).with_order(Order::Ascending);
 		let mut subscriber = producer.subscribe(ascending(0..));
 		producer.start_at(0).unwrap();
@@ -17604,7 +17604,7 @@ mod test {
 	#[cfg(feature = "async")]
 	fn a_descending_reader_asks_its_newest_fragment_first() {
 		let mut producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let mut middle = producer.subscribe(replay().with_range(5..6));
 		producer.start_at(8).unwrap();
 		write_group(&producer, 8);
@@ -17711,7 +17711,7 @@ mod test {
 	fn a_wide_fill_its_handler_left_settles_by_run() {
 		const WIDE: u64 = 1 << 40;
 		let mut producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let mut subscriber = producer.subscribe(replay().with_range(0..));
 		producer.start_at(WIDE).unwrap();
 		write_group(&producer, WIDE);
@@ -17734,7 +17734,7 @@ mod test {
 		const WIDE: u64 = 1 << 40;
 		const REFUSED: u64 = 100_000;
 		let mut producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let mut subscriber = producer.subscribe(replay().with_range(0..));
 		producer.start_at(WIDE).unwrap();
 		write_group(&producer, WIDE);
@@ -17756,7 +17756,7 @@ mod test {
 	#[test]
 	fn a_descending_reader_turns_a_queued_fill_newest_first() {
 		let mut producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let mut ascending = producer.subscribe(replay().with_range(0..).with_order(Order::Ascending));
 		let mut descending = producer.subscribe(replay().with_range(0..));
 		producer.start_at(4).unwrap();
@@ -17782,7 +17782,7 @@ mod test {
 	#[cfg(feature = "async")]
 	fn a_reader_update_reaches_its_fill() {
 		let mut producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let mut subscriber = producer.subscribe(replay().with_range(0..).with_order(Order::Ascending));
 		producer.start_at(4).unwrap();
 		write_group(&producer, 4);
@@ -17858,7 +17858,7 @@ mod test {
 	}
 
 	/// Fetch group 3 and drop it through the fill it queues, returning how the fetch ended.
-	fn drop_through_fill(producer: &Producer, dynamic: &Dynamic, drop_all: bool) -> Error {
+	fn drop_through_fill(producer: &Producer, dynamic: &Requests, drop_all: bool) -> Error {
 		let consumer = producer.consume();
 		let mut fetch = consumer.fetch_group(3, None);
 		let waiter = kio::Waiter::noop();
@@ -17891,7 +17891,7 @@ mod test {
 	#[moq_clock::test]
 	async fn dropped_fill_group_fails_its_fetch() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		write_group(&producer, 5);
 		assert!(matches!(drop_through_fill(&producer, &dynamic, true), Error::NotFound));
 		assert!(drops(&producer).is_empty(), "the feed may still deliver 3");
@@ -17905,7 +17905,7 @@ mod test {
 	#[moq_clock::test]
 	async fn fill_dropped_unanswered_names_the_rest_dropped() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		write_group(&producer, 5);
 		moq_clock::sim::advance(Duration::from_secs(60)).await;
 		assert!(matches!(drop_through_fill(&producer, &dynamic, false), Error::Dropped));
@@ -17916,7 +17916,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn fetch_aborts_with_track() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		let mut pending = consumer.fetch_group(3, None);
@@ -18261,7 +18261,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn a_live_range_ignores_a_fetched_group_past_the_newest_group() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 		let mut early = producer.subscribe(replay().with_ranges([Range::live()]));
 		let _fetching = consumer.fetch_group(5, None);
@@ -18747,7 +18747,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn a_filled_span_is_served_a_run_at_a_time() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 		producer
 			.create_group(group::Info { sequence: 2 })
@@ -18798,7 +18798,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn a_span_fill_asks_again_after_another_budget_is_too_old() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		let tight = consumer.fetch_group(5, group::Fetch::default().with_max_delay(Duration::from_secs(1)));
@@ -18823,7 +18823,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn a_drop_spares_a_fetched_head_still_arriving() {
 		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.dynamic();
+		let dynamic = producer.requests();
 		let consumer = producer.consume();
 
 		let mut live = producer.create_group(group::Info { sequence: 0 }).unwrap();

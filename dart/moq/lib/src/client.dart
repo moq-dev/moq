@@ -215,7 +215,7 @@ final class Moq {
 
   /// Create an unannounced broadcast at [path], invisible to everyone until announced.
   ///
-  /// Advertise it with `announce` after populating tracks. Create, `dynamic`
+  /// Advertise it with `announce` after populating tracks. Create, `requests`
   /// if tracks are served on demand, populate, then announce.
   BroadcastProducer createBroadcast(String path) =>
       session.publish().createBroadcast(path: path);

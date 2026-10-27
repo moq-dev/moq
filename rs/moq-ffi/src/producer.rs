@@ -216,36 +216,36 @@ pub struct MoqBroadcastProducer {
 
 /// A handler for requests for tracks in a broadcast.
 #[derive(uniffi::Object)]
-pub struct MoqBroadcastDynamic {
-	task: Task<DynamicProducer>,
+pub struct MoqBroadcastRequests {
+	task: Task<RequestsProducer>,
 }
 
 /// Serves on-demand fetches of uncached groups for one track.
 #[derive(uniffi::Object)]
-pub struct MoqTrackDynamic {
+pub struct MoqTrackRequests {
 	task: Task<TrackDynamicProducer>,
 }
 
-impl MoqTrackDynamic {
-	fn new(inner: moq_net::track::Dynamic) -> Self {
+impl MoqTrackRequests {
+	fn new(inner: moq_net::track::Requests) -> Self {
 		Self {
 			task: Task::new(TrackDynamicProducer { inner }),
 		}
 	}
 }
 
-struct DynamicProducer {
-	inner: moq_net::broadcast::Dynamic,
+struct RequestsProducer {
+	inner: moq_net::broadcast::Requests,
 	children: Children,
 }
 
 struct TrackDynamicProducer {
-	inner: moq_net::track::Dynamic,
+	inner: moq_net::track::Requests,
 }
 
-impl DynamicProducer {
+impl RequestsProducer {
 	async fn requested_track(&mut self) -> Result<Arc<MoqTrackRequest>, MoqError> {
-		// Hand back the un-accepted request, mirroring `moq_net::broadcast::Dynamic`: the caller
+		// Hand back the un-accepted request, mirroring `moq_net::broadcast::Requests`: the caller
 		// accepts it (raw, at a chosen timescale) or publishes media onto it (importer accepts).
 		// The subscriber's subscribe stays pending until then.
 		let request = self.inner.requested_track().await?;
@@ -335,12 +335,12 @@ impl MoqBroadcastProducer {
 	///
 	/// Hold the returned object for as long as missing track requests should be
 	/// accepted. Dropping it makes future subscriptions to unknown tracks fail.
-	pub fn dynamic(&self) -> Result<Arc<MoqBroadcastDynamic>, MoqError> {
+	pub fn requests(&self) -> Result<Arc<MoqBroadcastRequests>, MoqError> {
 		let _guard = crate::ffi::enter();
 		self.with_state(|state| {
-			Ok(Arc::new(MoqBroadcastDynamic {
-				task: Task::new(DynamicProducer {
-					inner: state.broadcast.dynamic(),
+			Ok(Arc::new(MoqBroadcastRequests {
+				task: Task::new(RequestsProducer {
+					inner: state.broadcast.requests(),
 					children: state.children.clone(),
 				})
 				.supervised(state.driver.clone()),
@@ -431,10 +431,10 @@ impl MoqBroadcastProducer {
 	}
 }
 
-// ---- Dynamic Broadcast Producer ----
+// ---- Broadcast Requests ----
 
 #[uniffi::export]
-impl MoqBroadcastDynamic {
+impl MoqBroadcastRequests {
 	/// Wait for the next subscriber-requested track.
 	///
 	/// Returns a [`MoqTrackRequest`]: accept it for raw writes with
@@ -458,10 +458,10 @@ impl MoqBroadcastDynamic {
 	}
 }
 
-// ---- Dynamic Track Producer ----
+// ---- Track Requests ----
 
 #[uniffi::export]
-impl MoqTrackDynamic {
+impl MoqTrackRequests {
 	/// Wait for the next run of groups readers miss: a fetch of an uncached group, or
 	/// history a subscription reads that the cache no longer holds.
 	///
@@ -628,11 +628,11 @@ impl MoqTrackRequest {
 	/// Obtain and retain this handle before `accept()` when the track itself was
 	/// requested by a fetch. This keeps the pending group request serviceable across
 	/// the transition from request to producer.
-	pub fn dynamic(&self) -> Result<Arc<MoqTrackDynamic>, MoqError> {
+	pub fn requests(&self) -> Result<Arc<MoqTrackRequests>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let guard = self.inner.lock().unwrap();
 		let request = guard.as_ref().ok_or(MoqError::Closed)?;
-		Ok(Arc::new(MoqTrackDynamic::new(request.dynamic())))
+		Ok(Arc::new(MoqTrackRequests::new(request.requests())))
 	}
 
 	/// Accept the request as a raw track, fixing its [`MoqTrackInfo`] (timescale, etc.).
@@ -744,11 +744,11 @@ impl MoqTrackProducer {
 	///
 	/// Hold the returned object for as long as cache misses should wait to be
 	/// served. Without a live dynamic handler, a missing group fails with `NotFound`.
-	pub fn dynamic(&self) -> Result<Arc<MoqTrackDynamic>, MoqError> {
+	pub fn requests(&self) -> Result<Arc<MoqTrackRequests>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let guard = self.inner.lock().unwrap();
 		let track = guard.as_ref().ok_or(MoqError::Closed)?;
-		Ok(Arc::new(MoqTrackDynamic::new(track.dynamic())))
+		Ok(Arc::new(MoqTrackRequests::new(track.requests())))
 	}
 
 	/// A watch-only handle to this track's name and whether it has subscribers.

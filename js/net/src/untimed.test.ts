@@ -128,7 +128,7 @@ test("a forwarded untimed track stays untimed", async () => {
 
 	// Serve the downstream session from the upstream one. A JS origin refuses to serve a
 	// broadcast a session delivered, so the forwarding node republishes a copy it produced.
-	const dynamic = relay.dynamicRoute(Path.from("test"));
+	const dynamic = relay.requestsRoute(Path.from("test"));
 	const inputs: BroadcastConsumer[] = [];
 	const forwarding = (async () => {
 		for await (const request of dynamic.requested()) {

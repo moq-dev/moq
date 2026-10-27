@@ -316,16 +316,16 @@ pub fn excluding(origin: crate::origin::Consumer, peer: crate::Hop) -> crate::or
 }
 
 /// Land a claim with a peer's wire route, as a session does, for the origin bench.
-pub fn dynamic_route(
+pub fn requests_route(
 	origin: &crate::origin::Producer,
 	prefix: impl crate::AsPath,
 	route: crate::origin::Route,
-) -> Result<crate::origin::Dynamic, crate::Error> {
-	origin.dynamic_route(prefix, route)
+) -> Result<crate::origin::Requests, crate::Error> {
+	origin.requests_route(prefix, route)
 }
 
 /// Replace a peer claim's route in place, as a session does on a route update.
-pub fn update_route(dynamic: &crate::origin::Dynamic, route: crate::origin::Route) -> Result<(), crate::Error> {
+pub fn update_route(dynamic: &crate::origin::Requests, route: crate::origin::Route) -> Result<(), crate::Error> {
 	dynamic.update_route(route)
 }
 
@@ -1423,7 +1423,7 @@ pub struct RequestValidity(crate::model::broadcast::RequestValidity);
 
 impl RequestValidity {
 	/// Watch which instance this route's peer selects for a path.
-	pub fn new(route: &crate::origin::Dynamic, path: &crate::Path) -> Self {
+	pub fn new(route: &crate::origin::Requests, path: &crate::Path) -> Self {
 		Self(crate::model::broadcast::RequestValidity::for_source(route, path))
 	}
 

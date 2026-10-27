@@ -28,7 +28,7 @@ async fn acquisition(version: &str, carries_epoch: bool) {
 	let publisher = origin(1);
 	let subscriber = origin(2);
 	let broadcast = publisher.create_broadcast("live").unwrap();
-	let mut dynamic = broadcast.dynamic();
+	let mut dynamic = broadcast.requests();
 	broadcast
 		.announce(origin::Route::default().with_epoch(moq_net::Epoch::mint()))
 		.unwrap();

@@ -335,7 +335,7 @@ mod tests {
 		let epoch = Epoch::mint();
 
 		// A prefix above the path covers it.
-		let pool = origin.dynamic_route("pool", route(&epoch)).unwrap();
+		let pool = origin.requests_route("pool", route(&epoch)).unwrap();
 		assert_eq!(followed(&mut follow).await, ("start", "pool".into()));
 
 		// A route beneath the path serves another broadcast.
@@ -370,7 +370,7 @@ mod tests {
 	#[moq_clock::test]
 	async fn follow_starts_on_the_serving_route_when_joining_late() {
 		let origin = Hop::new(1).unwrap().produce();
-		let _pool = origin.dynamic_route("pool", Route::default()).unwrap();
+		let _pool = origin.requests_route("pool", Route::default()).unwrap();
 		let _exact = origin.publish("pool/job", Route::default()).unwrap();
 
 		let mut follow = origin.consume().follow("pool/job").unwrap();
@@ -391,7 +391,7 @@ mod tests {
 		// Both land before the follower reads again, and the cursor delivers the prefix's start
 		// ahead of the path's end, but the path went unserved in between.
 		drop(exact);
-		let _pool = origin.dynamic_route("pool", route(&epoch)).unwrap();
+		let _pool = origin.requests_route("pool", route(&epoch)).unwrap();
 		assert_eq!(followed(&mut follow).await, ("end", "pool/job".into()));
 		assert_eq!(followed(&mut follow).await, ("start", "pool".into()));
 
@@ -412,7 +412,7 @@ mod tests {
 		assert_eq!(followed(&mut follow).await, ("start", "pool/job".into()));
 
 		let epoch = Epoch::mint();
-		let _pool = origin.dynamic_route("pool", route(&epoch)).unwrap();
+		let _pool = origin.requests_route("pool", route(&epoch)).unwrap();
 		exact.announce(route(&epoch)).unwrap();
 		assert_eq!(followed(&mut follow).await, ("restart", "pool/job".into()));
 
@@ -426,7 +426,7 @@ mod tests {
 		let origin = Hop::new(1).unwrap().produce();
 		let mut follow = origin.consume().follow("pool/job").unwrap();
 
-		let _pool = origin.dynamic_route("pool", Route::default()).unwrap();
+		let _pool = origin.requests_route("pool", Route::default()).unwrap();
 		assert_eq!(followed(&mut follow).await, ("start", "pool".into()));
 
 		let _exact = origin.publish("pool/job", Route::default()).unwrap();
@@ -442,7 +442,7 @@ mod tests {
 		let _chat = origin
 			.scope("", &chat)
 			.unwrap()
-			.dynamic_route("room/alice", Route::default())
+			.requests_route("room/alice", Route::default())
 			.unwrap();
 		let mut follow = origin.consume().follow("room/alice").unwrap();
 
@@ -489,7 +489,7 @@ mod tests {
 	}
 
 	/// The next request a dynamic route receives for its path.
-	async fn requested(dynamic: &crate::origin::Dynamic) -> crate::origin::Request {
+	async fn requested(dynamic: &crate::origin::Requests) -> crate::origin::Request {
 		moq_clock::timeout(Duration::from_secs(1), dynamic.requested_broadcast())
 			.await
 			.expect("never asked")
@@ -501,7 +501,7 @@ mod tests {
 	#[moq_clock::test]
 	async fn announced_hands_out_a_held_takeover_once() {
 		let origin = Hop::new(1).unwrap().produce();
-		let dynamic = origin.dynamic("live").unwrap();
+		let dynamic = origin.requests("live").unwrap();
 		let mut announced = origin.consume().announced_broadcast("live", None).unwrap();
 
 		// The wait is on the dynamic route's answer when the exact path takes over without an epoch.
@@ -517,7 +517,7 @@ mod tests {
 	#[moq_clock::test]
 	async fn announced_hands_out_a_dropped_takeover_again() {
 		let origin = Hop::new(1).unwrap().produce();
-		let dynamic = origin.dynamic("live").unwrap();
+		let dynamic = origin.requests("live").unwrap();
 		let mut announced = origin.consume().announced_broadcast("live", None).unwrap();
 
 		let (dropped, _publish) = futures::join!(available(&mut announced), async {
@@ -537,7 +537,7 @@ mod tests {
 	#[moq_clock::test]
 	async fn announced_hands_out_a_gap_while_resolving_once() {
 		let origin = Hop::new(1).unwrap().produce();
-		let dynamic = origin.dynamic("").unwrap();
+		let dynamic = origin.requests("").unwrap();
 		let mut announced = origin.consume().announced_broadcast("live", None).unwrap();
 
 		let (_arrival, _publish) = futures::join!(available(&mut announced), async {
@@ -560,7 +560,7 @@ mod tests {
 		let exact = origin.publish("live", route(&epoch)).unwrap();
 		let first = available(&mut announced).await;
 
-		let dynamic = origin.dynamic_route("", route(&epoch)).unwrap();
+		let dynamic = origin.requests_route("", route(&epoch)).unwrap();
 		exact.unannounce();
 		let served = broadcast::Info::new().produce();
 		let (again, ()) = futures::join!(available(&mut announced), async {

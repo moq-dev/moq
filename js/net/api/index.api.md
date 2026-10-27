@@ -271,13 +271,6 @@ class Duplicate extends Error {
     constructor(message?: string);
 }
 
-class Dynamic {
-    close(): void;
-    readonly prefix: Path.Valid;
-    requested(): AsyncIterableIterator<Request_3>;
-    get route(): Route;
-}
-
 function empty(): Valid;
 
 function encode(path: Valid): Valid;
@@ -502,7 +495,7 @@ declare namespace Origin_2 {
         Producer_4 as Producer,
         Requesting,
         Consumer_5 as Consumer,
-        Dynamic,
+        Requests,
         Request_3 as Request,
         Publication,
         Prepared
@@ -609,8 +602,8 @@ class Producer_4 implements Table {
     consume(): Consumer_5;
     createBroadcast(path: Path.Valid): Publication;
     get discovery(): Getter<boolean | undefined>;
-    dynamic(prefix: Path.Valid): Dynamic;
     request(path: Path.Valid, options?: RequestOptions): Requesting;
+    requests(prefix: Path.Valid): Requests;
     scope(root: Path.Valid, patterns: Path.Patterns): Producer_4;
 }
 
@@ -685,6 +678,13 @@ class Requesting {
 interface RequestOptions {
     announced?: boolean;
     epoch?: Epoch.Valid;
+}
+
+class Requests {
+    close(): void;
+    readonly prefix: Path.Valid;
+    requested(): AsyncIterableIterator<Request_3>;
+    get route(): Route;
 }
 
 class Reservation implements Disposable {
@@ -830,8 +830,8 @@ interface Table {
     readonly closed: GetPromise<Error | null>;
     createBroadcast(path: Path.Valid): Publication;
     readonly discovery: Getter<boolean | undefined>;
-    dynamic(prefix: Path.Valid): Dynamic;
     request(path: Path.Valid, options?: RequestOptions): Requesting;
+    requests(prefix: Path.Valid): Requests;
 }
 
 declare namespace Time {
